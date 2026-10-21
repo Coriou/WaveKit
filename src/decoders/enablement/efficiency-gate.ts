@@ -1,9 +1,11 @@
 import type { DecoderEfficiencyDetail } from "@wavekit/api-types"
 import {
 	channelizerBaseCores,
+	EFFICIENCY_CLEAR_MS,
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MS,
 	EFFICIENCY_RETRY_MAX_MS,
+	EFFICIENCY_SAMPLE_MS,
 	EFFICIENCY_STALE_MS,
 } from "./contract.js"
 import type {
@@ -25,8 +27,23 @@ export interface DropReader {
 	}
 	monoNow(): number
 	sources(): readonly string[]
+	/** True only for positive drop deltas observed at or after `sinceMono`. */
 	droppedSinceMono(id: string, sinceMono: number): boolean
 	droppedWithinMs(id: string, ms: number): boolean
+	/** When the source's current clean run earns its clear window; null while it has none. */
+	cleanAtMono?(id: string): number | null
+	/** Milliseconds since `sinceMono` covered by complete evidence (earned probation time). */
+	coveredSinceMono?(id: string, sinceMono: number): number
+	/** The sample at which `amount` ms of coverage since `sinceMono` completes; null before. */
+	coverageCompleteAtMono?(
+		id: string,
+		sinceMono: number,
+		amount: number,
+	): number | null
+	/** Evidence time of the latest sample; a recorded sample is stamped with it. */
+	lastSampleMono?(): number | null
+	/** True for a positive drop delta observed by a sample within [fromMono, toMono]. */
+	droppedBetweenMono?(id: string, fromMono: number, toMono: number): boolean
 }
 
 export function createEfficiencyGate(
@@ -64,7 +81,8 @@ export function createEfficiencyGate(
 	>()
 	const failures = new Set<string>()
 	let cpu: number | null = null
-	let maxHighCpuAt: number | null = null
+	/** Monotonic times of samples with CPU over the limit, oldest first. */
+	const highCpu: number[] = []
 	let cpuAt: number | null = null
 
 	const currentCpu = (now: number) =>
@@ -100,6 +118,12 @@ export function createEfficiencyGate(
 	// Every running key is first observed in the monotonic clock domain. Only
 	// probation() prunes: an admitted key may not be running yet when admit()
 	// or view() is called with a partial or earlier list.
+	// Placements that completed probation with no evidence against them.
+	const graduated = new Set<string>()
+	const mark = (key: string, mono: number) => {
+		admittedMono.set(key, mono)
+		graduated.delete(key)
+	}
 	const observeRunning = (
 		running: readonly RunningPlacement[],
 		mono: number,
@@ -108,20 +132,70 @@ export function createEfficiencyGate(
 		if (prune) {
 			const present = new Set(running.map(p => p.key))
 			for (const key of admittedMono.keys())
-				if (!present.has(key)) admittedMono.delete(key)
+				if (!present.has(key)) {
+					admittedMono.delete(key)
+					graduated.delete(key)
+				}
 		}
 		for (const placement of running)
-			if (!admittedMono.has(placement.key))
-				admittedMono.set(placement.key, mono)
+			if (!admittedMono.has(placement.key)) mark(placement.key, mono)
 	}
-	const onProbation = (p: RunningPlacement, mono: number) => {
+	/** Drops or CPU over the limit observed in [admitted, until]. */
+	const evidence = (
+		p: RunningPlacement,
+		admitted: number,
+		until = Infinity,
+	): "drops" | "cpu" | null => {
+		let dropped = false
+		try {
+			const reader = deps.drops
+			if (until === Infinity)
+				dropped = reader?.droppedSinceMono(p.sourceId, admitted) ?? false
+			else if (reader?.droppedBetweenMono)
+				dropped = reader.droppedBetweenMono(p.sourceId, admitted, until)
+			else
+				// A reader reporting only its latest drop: a latest drop inside the
+				// window is evidence.
+				dropped =
+					(reader?.droppedSinceMono(p.sourceId, admitted) ?? false) &&
+					!(reader?.droppedSinceMono(p.sourceId, until + 1) ?? false)
+		} catch {
+			/* Unreadable evidence is unknown, not a drop. */
+		}
+		if (dropped) return "drops"
+		return highCpu.some(t => t >= admitted && t <= until) ? "cpu" : null
+	}
+	// Probation is earned: with a coverage reader a placement needs
+	// EFFICIENCY_PROBATION_MS of complete evidence since admission (unknown
+	// intervals do not count), else that much time. Evidence is judged before
+	// graduation over everything observed up to and including the sample that
+	// completes it: a placement with evidence in that window never graduates.
+	const graduationAt = (p: RunningPlacement, mono: number): number | null => {
 		const admitted = admittedMono.get(p.key) ?? NaN
-		return (
-			!Number.isFinite(mono) ||
-			!Number.isFinite(admitted) ||
-			mono - admitted < EFFICIENCY_PROBATION_MS
-		)
+		if (!Number.isFinite(mono) || !Number.isFinite(admitted)) return null
+		const reader = deps.drops
+		if (reader?.coverageCompleteAtMono) {
+			try {
+				const at = reader.coverageCompleteAtMono(
+					p.sourceId,
+					admitted,
+					EFFICIENCY_PROBATION_MS,
+				)
+				return at !== null && Number.isFinite(at) ? at : null
+			} catch {
+				return null
+			}
+		}
+		return mono - admitted >= EFFICIENCY_PROBATION_MS
+			? admitted + EFFICIENCY_PROBATION_MS
+			: null
 	}
+	const graduates = (p: RunningPlacement, mono: number) => {
+		if (graduated.has(p.key)) return true
+		const at = graduationAt(p, mono)
+		return at !== null && evidence(p, admittedMono.get(p.key)!, at) === null
+	}
+	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
 
 	return {
 		record(sample) {
@@ -133,8 +207,20 @@ export function createEfficiencyGate(
 			if (
 				valid(sample.cpuPercent) &&
 				sample.cpuPercent > inputs.cpuGuardPercent
-			)
-				maxHighCpuAt = Math.max(maxHighCpuAt ?? monoNow(), monoNow())
+			) {
+				// CPU evidence carries the evidence time of the sample it came with,
+				// so the sample that completes coverage includes its CPU reading.
+				let mono = NaN
+				try {
+					mono = deps.drops?.lastSampleMono?.() ?? monoNow()
+				} catch {
+					mono = monoNow()
+				}
+				if (Number.isFinite(mono)) {
+					highCpu.push(mono)
+					if (highCpu.length > 1024) highCpu.shift()
+				}
+			}
 			cpuAt = at
 			cpu = valid(sample.cpuPercent) ? sample.cpuPercent : null
 		},
@@ -165,9 +251,29 @@ export function createEfficiencyGate(
 			if (detail === null) {
 				// A key already running keeps its mark; any other admission starts a
 				// fresh probation window.
-				if (!running.some(p => p.key === newcomer.key))
-					admittedMono.set(newcomer.key, mono)
+				if (!running.some(p => p.key === newcomer.key)) mark(newcomer.key, mono)
 				return { admit: true }
+			}
+			// Missing evidence is not a rejection: no backoff is recorded and the
+			// placement is re-evaluated when the source's clean run earns its clear
+			// window (one clear window from now while it has no clean run; the next
+			// sample when the window is earned but the reading is stale).
+			if (detail === "unknown") {
+				let cleanAt: number | null = null
+				try {
+					cleanAt = deps.drops?.cleanAtMono?.(newcomer.sourceId) ?? null
+				} catch {
+					/* Unreadable: the fallback below applies. */
+				}
+				const base = valid(now) ? now : 0
+				return {
+					admit: false,
+					detail,
+					retryAtMs:
+						cleanAt !== null && Number.isFinite(cleanAt)
+							? Math.max(cleanAt, base + EFFICIENCY_SAMPLE_MS)
+							: base + EFFICIENCY_CLEAR_MS,
+				}
 			}
 			const at = (valid(now) ? now : 0) + (retry?.delay ?? EFFICIENCY_RETRY_MS)
 			retries.set(newcomer.key, {
@@ -177,16 +283,21 @@ export function createEfficiencyGate(
 			})
 			return { admit: false, detail, retryAtMs: at }
 		},
-		// Unknown observations fail closed during probation.
+		// Probation suspends only on positive drops observed after admission or on
+		// CPU over the limit; missing evidence closes the gate to newcomers only.
 		probation(running) {
 			const mono = monoNow()
 			observeRunning(running, mono, true)
+			// Graduation is sticky: a later discontinuity that discards coverage
+			// restarts only the placements still on probation.
+			for (const placement of running)
+				if (graduates(placement, mono)) graduated.add(placement.key)
 			const newest = new Map<
 				string,
 				{ placement: RunningPlacement; admitted: number }
 			>()
 			for (const placement of running) {
-				if (!onProbation(placement, mono)) continue
+				if (graduated.has(placement.key)) continue
 				const admitted = admittedMono.get(placement.key)!
 				const previous = newest.get(placement.sourceId)
 				if (!previous || admitted > previous.admitted) {
@@ -195,19 +306,7 @@ export function createEfficiencyGate(
 			}
 			const verdicts: { key: string; detail: "drops" | "cpu" }[] = []
 			for (const { placement, admitted } of newest.values()) {
-				let dropped = true
-				try {
-					dropped =
-						deps.drops?.droppedSinceMono(placement.sourceId, admitted) ?? true
-				} catch {
-					/* Missing evidence fails closed during probation. */
-				}
-				let detail: "drops" | "cpu" | null = null
-				if (dropped) {
-					detail = "drops"
-				} else if (maxHighCpuAt !== null && maxHighCpuAt >= admitted) {
-					detail = "cpu"
-				}
+				const detail = evidence(placement, admitted)
 				if (detail) {
 					failures.add(placement.key)
 					verdicts.push({ key: placement.key, detail })
@@ -230,6 +329,7 @@ export function createEfficiencyGate(
 		},
 		forget(key) {
 			admittedMono.delete(key)
+			graduated.delete(key)
 			retries.delete(key)
 			failures.delete(key)
 		},

@@ -127,7 +127,10 @@ verdict, so its behaviour is unchanged. readsb with `rtlTcpHost` is external and
 
 Adapter hook: `BaseDecoder.reach(): DecoderReach` (`"channel" | "raw" | "centre"`), derived from
 `channelizerSupported()` for the audio and IQ bases, overridden to `"raw"` by readsb and
-`"centre"` by lora-meshtastic. Each placement worker is created with `channelHz` set to its
+`"centre"` by lora-meshtastic. For LoRa the planner input's `centreSlotHz` is the configured
+channel (`frequency ± bw/2`, the source centre with `followCenter`) and `centrePassbandHz` the
+decimated span `bw × oversampling` bounded by the usable window (`fs × 0.8`), so LongFast at
+869.525 MHz (EU) fits a source centred within 835 kHz of it at 2.4 Msps. Each placement worker is created with `channelHz` set to its
 channel, so the adapters' existing `getChannelRequest` produces the channel unchanged (acarsdec
 and dumpvdl2 already honour `channelHz`); multi-channel types get a `channelsHz` option descriptor
 (dsd-fme, multimon-ng, direwolf) for configured channels.
@@ -163,7 +166,26 @@ decision core) and `createEfficiencyMonitor(deps)` (`efficiency-monitor.ts`, the
   `droppedBytesTotal`/`droppedChunksTotal` deltas of every fanout branch on that source
   (`SourceFanoutRouter` → `FanoutManager` branch telemetry, including the channelizer input
   branch), and the CPU meter's `normalisedPercent`. A read that throws or returns non-finite
-  numbers yields `unknown` for that source.
+  numbers yields `unknown` for that source. Evidence is per branch identity: the router keys
+  counters `<branch id>#<instance>` (a re-added id is a new branch) and reports a removal epoch.
+  The monitor keeps the last valid counters per branch across unreadable reads; a branch valid in
+  two reads with non-decreasing counters contributes its positive delta, a branch added since the
+  last read counts its first total, and a decrease, removal or epoch change loses only that
+  comparability (the source is `unknown` for admission). A placement's own channelizer branch
+  therefore never faults its probation. Probation (`droppedSinceMono`) sees only positive drop
+  deltas at or after the admission mark, and is earned: coverage is the set of intervals between
+  consecutive complete reads (every branch valid) at most 1.5 sample periods apart;
+  `coverageCompleteAtMono` names the sample that completes `EFFICIENCY_PROBATION_MS` of it, and
+  the gate graduates a placement (sticky) only when `droppedBetweenMono` and the CPU history show
+  nothing in [admission, that sample]. Evidence time is strictly monotonic: a raw clock that goes
+  back is offset to continue, and any discontinuity discards every source's coverage while drop
+  times stay valid, while the clean window restarts. Unknown evidence closes admission but
+  suspends nobody. CPU evidence is stamped with the evidence time of the sample it arrived with.
+  Known bound: drop and CPU histories keep the latest 1024 samples (about 34 minutes), so
+  evidence that would disqualify a placement can be evicted if probation evaluation stalls that
+  long; in normal operation probation is evaluated every sample.
+  An `unknown` admission records no backoff and returns the source's clear-window time
+  (`cleanAtMono`, or one clear window from now without a clean run) as its retry.
 - `admit(newcomer, running, sample, now): AdmissionDecision` implements requirement 4.1 to 4.4:
   budget sum, CPU limit, drop and clear windows, probation, retry backoff. It is the only place
   that decides; the manager applies.

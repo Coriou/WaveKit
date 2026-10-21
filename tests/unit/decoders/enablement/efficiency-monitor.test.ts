@@ -98,8 +98,10 @@ const setup = () => {
 it("first sample is unknown, second has deltas; NaN cpu is null", () => {
 	const h = setup()
 	expect(h.monitor.sampleNow().sources.get("s")?.droppedBytesDelta).toBeNull()
+	h.advance(2000)
 	expect(h.monitor.sampleNow()).toMatchObject({ cpuPercent: null })
 	h.bytes(100)
+	h.advance(2000)
 	expect(h.monitor.sampleNow().sources.get("s")?.droppedBytesDelta).toBe(100)
 })
 it("stop cancels the interval and restart earns a fresh window", () => {
@@ -316,9 +318,14 @@ it("a drop before a backwards clock cannot poison probation after recovery", () 
 	h.tick(1000000)
 	h.bytes(1)
 	h.tick(1002000)
+	// Evidence time continues across the rollback, so the drop keeps its place.
 	h.tick(0)
-	expect(h.monitor.dropState("s").state).toBe("unknown")
+	expect(h.monitor.dropState("s").state).toBe("dropping")
+	// The rollback sample is not a complete endpoint: the clean run starts one
+	// sample later.
 	h.clean()
+	h.tick()
+	h.tick()
 	expect(h.monitor.dropState("s").state).toBe("ok")
 	expect(h.monitor.droppedWithinMs("s", 0)).toBe(false)
 })
@@ -371,7 +378,217 @@ it.each([-7200000, 7200000])(
 		expect(gate.probation(running, 10000000 + shift + 2000)).toEqual([
 			{ key: "new", detail: "drops" },
 		])
+		// A drop during probation means it never graduates.
 		h.clean()
-		expect(gate.probation(running, 10000000 + shift + 4000)).toEqual([])
+		expect(gate.probation(running, 10000000 + shift + 4000)).toEqual([
+			{ key: "new", detail: "drops" },
+		])
 	},
 )
+
+/** Per-branch counters on a scripted clock, feeding the real gate. */
+const branchSetup = () => {
+	let mono = 0
+	let throws = false
+	let removals = 0
+	const branches = new Map([
+		["raw#1", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
+		["old#2", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
+	])
+	let tick = () => {}
+	const monitor = createEfficiencyMonitor({
+		sources: () => ["s"],
+		branchCounters: () => {
+			if (throws) throw new TypeError("read")
+			return new Map(branches)
+		},
+		topology: () => String(removals),
+		cpu: { normalisedPercent: 10 },
+		now: () => mono,
+		monoNow: () => mono,
+		setInterval(fn) {
+			tick = fn
+			return { cancel() {} }
+		},
+	})
+	const gate = createEfficiencyGate(
+		{ budgetCores: 1.5, cpuGuardPercent: 90 },
+		{ drops: monitor },
+	)
+	monitor.start()
+	const placement: WantedPlacement = {
+		key: "q",
+		decoderId: "q",
+		sourceId: "s",
+		reach: "raw",
+		costCores: 0.1,
+		sampleRateHz: 2_400_000,
+		channelHz: null,
+		origin: "band",
+		primary: true,
+	}
+	return {
+		monitor,
+		gate,
+		branches,
+		running: [{ ...placement, admittedAtMs: 0 }],
+		admit: () => gate.admit(placement, [], mono),
+		throws(value: boolean) {
+			throws = value
+		},
+		remove(key: string) {
+			branches.delete(key)
+			removals++
+		},
+		tickAt(at: number) {
+			mono = at
+			tick()
+		},
+		clockAt(at: number) {
+			mono = at
+		},
+		earn(until = 66_000) {
+			for (let at = 0; at <= until; at += 2000) this.tickAt(at)
+		},
+	}
+}
+
+it("a positive total on a branch added together with a removal condemns the probationer", () => {
+	const f = branchSetup()
+	f.earn()
+	expect(f.admit()).toEqual({ admit: true })
+	f.remove("old#2")
+	f.branches.set("new#3", { droppedBytesTotal: 4096, droppedChunksTotal: 1 })
+	f.tickAt(68_000)
+	expect(f.monitor.droppedSinceMono("s", 66_000)).toBe(true)
+	expect(f.monitor.dropState("s").state).not.toBe("ok")
+	expect(f.gate.probation(f.running, 68_000)).toEqual([
+		{ key: "q", detail: "drops" },
+	])
+})
+
+it("drops counted across an unreadable read condemn the probationer", () => {
+	const f = branchSetup()
+	f.earn()
+	expect(f.admit()).toEqual({ admit: true })
+	f.throws(true)
+	f.branches.set("raw#1", { droppedBytesTotal: 512, droppedChunksTotal: 1 })
+	f.tickAt(68_000)
+	f.throws(false)
+	f.tickAt(70_000)
+	expect(f.monitor.droppedSinceMono("s", 66_000)).toBe(true)
+	expect(f.gate.probation(f.running, 70_000)).toEqual([
+		{ key: "q", detail: "drops" },
+	])
+})
+
+it("probation is not served by unreadable time: a drop after a long gap still condemns", () => {
+	const f = branchSetup()
+	f.earn()
+	expect(f.admit()).toEqual({ admit: true })
+	f.throws(true)
+	for (let at = 68_000; at <= 98_000; at += 2000) f.tickAt(at)
+	f.throws(false)
+	for (let at = 100_000; at <= 104_000; at += 2000) f.tickAt(at)
+	expect(f.gate.probation(f.running, 104_000)).toEqual([])
+	expect(
+		f.gate.view(f.running, [], 104_000).sources[0]?.admitted[0]?.probation,
+	).toBe(true)
+	f.branches.set("raw#1", { droppedBytesTotal: 1, droppedChunksTotal: 0 })
+	f.tickAt(106_000)
+	expect(f.monitor.droppedSinceMono("s", 66_000)).toBe(true)
+	expect(f.gate.probation(f.running, 106_000)).toEqual([
+		{ key: "q", detail: "drops" },
+	])
+	// Graduation needs 30 s of covered evidence since admission.
+	const g = branchSetup()
+	g.earn()
+	g.admit()
+	for (let at = 68_000; at <= 94_000; at += 2000) g.tickAt(at)
+	expect(
+		g.gate.view(g.running, [], 94_000).sources[0]?.admitted[0]?.probation,
+	).toBe(true)
+	g.tickAt(96_000)
+	expect(
+		g.gate.view(g.running, [], 96_000).sources[0]?.admitted[0]?.probation,
+	).toBe(false)
+})
+
+const probationOf = (f: ReturnType<typeof branchSetup>, at: number) =>
+	f.gate.view(f.running, [], at).sources[0]?.admitted[0]?.probation
+
+it("alternating incomplete reads earn no probation coverage (62 s to 122 s)", () => {
+	const f = branchSetup()
+	f.earn(62_000)
+	expect(f.admit()).toEqual({ admit: true })
+	for (let at = 64_000; at <= 122_000; at += 2000) {
+		f.branches.set("raw#1", {
+			droppedBytesTotal: (at / 2000) % 2 === 0 ? NaN : 0,
+			droppedChunksTotal: 0,
+		})
+		f.tickAt(at)
+	}
+	expect(f.monitor.coveredSinceMono("s", 62_000)).toBe(0)
+	expect(f.gate.probation(f.running, 122_000)).toEqual([])
+	expect(probationOf(f, 122_000)).toBe(true)
+})
+
+it("a drop on the sample that completes coverage condemns instead of graduating", () => {
+	const f = branchSetup()
+	f.earn(62_000)
+	expect(f.admit()).toEqual({ admit: true })
+	for (let at = 64_000; at <= 90_000; at += 2000) f.tickAt(at)
+	expect(f.gate.probation(f.running, 90_000)).toEqual([])
+	f.branches.set("raw#1", { droppedBytesTotal: 4096, droppedChunksTotal: 1 })
+	f.tickAt(92_000)
+	expect(f.monitor.coveredSinceMono("s", 62_000)).toBe(30_000)
+	expect(f.gate.probation(f.running, 92_000)).toEqual([
+		{ key: "q", detail: "drops" },
+	])
+	expect(probationOf(f, 92_000)).toBe(true)
+})
+
+it("a clock rollback restarts probation coverage instead of counting it twice", () => {
+	const f = branchSetup()
+	f.earn(62_000)
+	expect(f.admit()).toEqual({ admit: true })
+	for (let at = 64_000; at <= 80_000; at += 2000) f.tickAt(at)
+	expect(f.monitor.coveredSinceMono("s", 62_000)).toBe(18_000)
+	for (let at = 62_000; at <= 74_000; at += 2000) f.tickAt(at)
+	// Raw 62 s reads as evidence time 80 s (a discontinuity); credit resumes
+	// between the complete reads that follow it.
+	expect(f.monitor.coveredSinceMono("s", 62_000)).toBe(10_000)
+	expect(probationOf(f, 74_000)).toBe(true)
+	// Drops seen before the rollback still condemn the current probationer.
+	const g = branchSetup()
+	g.earn(62_000)
+	g.admit()
+	g.branches.set("raw#1", { droppedBytesTotal: 1, droppedChunksTotal: 0 })
+	g.tickAt(64_000)
+	for (let at = 50_000; at <= 54_000; at += 2000) g.tickAt(at)
+	expect(g.gate.probation(g.running, 54_000)).toEqual([
+		{ key: "q", detail: "drops" },
+	])
+})
+
+it("CPU over the limit on the sample that completes coverage condemns", () => {
+	const f = branchSetup()
+	f.earn(62_000)
+	expect(f.admit()).toEqual({ admit: true })
+	for (let at = 64_000; at <= 92_000; at += 2000) f.tickAt(at)
+	expect(f.monitor.coverageCompleteAtMono("s", 62_000, 30_000)).toBe(92_000)
+	// The sample's CPU reading is delivered just after the clock moved on.
+	f.clockAt(92_000.1)
+	f.gate.record({ atMs: 92_000, cpuPercent: 99, sources: new Map() })
+	expect(f.gate.probation(f.running, 92_000)).toEqual([
+		{ key: "q", detail: "cpu" },
+	])
+})
+
+it("a clock rollback closes admission until a fresh clean window", () => {
+	const f = branchSetup()
+	f.earn(62_000)
+	expect(f.monitor.dropState("s").state).toBe("ok")
+	f.clockAt(1000)
+	expect(f.admit()).toMatchObject({ admit: false, detail: "unknown" })
+})

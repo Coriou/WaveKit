@@ -77,6 +77,8 @@ import {
 	type DecoderRateContext,
 } from "./rate-resolver.js"
 import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
+import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
+import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import {
 	normalizeBandOverride,
 	resolveBandRequirements,
@@ -433,6 +435,39 @@ export interface DecoderStartIntent {
 	 * a scanner sweep holds the source (REST routes only, spec § 10.4).
 	 */
 	refuseIfHeld?: boolean
+}
+
+/**
+ * LoRa decodes the capture centre (requirement 3.2, `centre` reach): its
+ * region slot is the configured channel (frequency ± bw/2, the centre itself
+ * with followCenter) and its passband the decimated span bw × oversampling,
+ * bounded by the source's usable window. Unparseable options yield no reach.
+ */
+function loraCentreReach(
+	options: Record<string, unknown>,
+	caps: SourceCaps | null | undefined,
+): { slotHz: { minHz: number; maxHz: number }; passbandHz: number } | null {
+	let parsed: LoraMeshtasticOptions
+	try {
+		parsed = parseLoraMeshtasticOptions(options)
+	} catch {
+		return null
+	}
+	const frequency =
+		options["followCenter"] === true && caps?.centerFreq !== undefined
+			? caps.centerFreq
+			: parsed.frequency
+	const usable =
+		caps?.sampleRate !== undefined
+			? caps.sampleRate * USABLE_WINDOW_FRACTION
+			: Infinity
+	return {
+		slotHz: {
+			minHz: frequency - parsed.bw / 2,
+			maxHz: frequency + parsed.bw / 2,
+		},
+		passbandHz: Math.min(parsed.effectiveTargetRate, usable),
+	}
 }
 
 /**
@@ -934,6 +969,10 @@ export class DecoderManager extends EventEmitter {
 					})
 					const channel =
 						request && !("invalid" in request) ? request : undefined
+					const lora =
+						config.type === "lora-meshtastic"
+							? loraCentreReach(config.options, caps)
+							: null
 					const channelCapable = (
 						CHANNEL_CAPABLE_TYPES as readonly string[]
 					).includes(config.type)
@@ -975,9 +1014,8 @@ export class DecoderManager extends EventEmitter {
 										minHz: ADSB_FREQUENCY_HZ - READSB_REACH_HZ,
 										maxHz: ADSB_FREQUENCY_HZ + READSB_REACH_HZ,
 									}
-								: null,
-						centrePassbandHz:
-							config.type === "lora-meshtastic" ? 125_000 : null,
+								: (lora?.slotHz ?? null),
+						centrePassbandHz: lora?.passbandHz ?? null,
 					}
 				}),
 			sources: (this.sourceManager?.getAllStatus() ?? []).map(

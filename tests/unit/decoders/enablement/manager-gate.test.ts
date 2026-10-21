@@ -18,15 +18,19 @@ import type {
 	EfficiencySample,
 	PlacementPlan,
 	PlacementPlanner,
+	PlannerInput,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
 import {
 	channelizerBaseCores,
+	EFFICIENCY_CLEAR_MS,
 	EFFICIENCY_PROBATION_MS,
-	EFFICIENCY_RETRY_MS,
 	placementKey,
 } from "../../../../src/decoders/enablement/contract.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
+import { planPlacements } from "../../../../src/decoders/enablement/placement.js"
+import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/efficiency-monitor.js"
+import { CATALOGUE_DEFAULT_OPTIONS } from "../../../../src/decoders/enablement/catalogue.js"
 import {
 	createEfficiencyGate,
 	type DropReader,
@@ -1313,8 +1317,9 @@ it("the manager admits, reports and probation-suspends through the real efficien
 		},
 	])
 	const retryAt = Date.parse(view.sources[0]?.blocked[0]?.retryAt ?? "")
-	expect(retryAt).toBeGreaterThanOrEqual(before + EFFICIENCY_RETRY_MS)
-	expect(retryAt).toBeLessThanOrEqual(Date.now() + EFFICIENCY_RETRY_MS)
+	// Unknown evidence is re-evaluated after one clear window, without backoff.
+	expect(retryAt).toBeGreaterThanOrEqual(before + EFFICIENCY_CLEAR_MS)
+	expect(retryAt).toBeLessThanOrEqual(Date.now() + EFFICIENCY_CLEAR_MS)
 	// Drops during probation suspend the newest running placement.
 	drops.state = "ok"
 	drops.droppedSince = true
@@ -1576,4 +1581,155 @@ it("a YAML decoder's cost counts in the budget catalogue decoders are admitted a
 	expect(f.manager.efficiencyView().sources[0]?.coresInUse).toBeCloseTo(
 		base + 0.14,
 	)
+})
+
+it.each([
+	[869_525_000, true],
+	[869_525_000 + 835_000, true],
+	[869_525_000 + 835_001, false],
+])(
+	"catalogue LoRa (EU) is placed on a source centred at %i Hz: %s",
+	(centreHz, fits) => {
+		const f = setup("lora-meshtastic", fakeGate())
+		f.sources.caps.set("rtl", {
+			...iqCaps(2_400_000),
+			centerFreq: centreHz,
+		})
+		void f.manager.createDecoder({
+			id: "lora-meshtastic",
+			type: "lora-meshtastic",
+			enabled: true,
+			options: CATALOGUE_DEFAULT_OPTIONS("EU")["lora-meshtastic"],
+		})
+		const input = (
+			f.manager as unknown as { plannerInput(): PlannerInput }
+		).plannerInput()
+		const lora = input.decoders.find(d => d.id === "lora-meshtastic")
+		// LongFast: 250 kHz slot around 869.525 MHz; the decimated span
+		// (8 × 250 kHz) is bounded by the usable 0.8 × 2.4 MHz window.
+		expect(lora).toMatchObject({
+			reach: "centre",
+			centreSlotHz: { minHz: 869_400_000, maxHz: 869_650_000 },
+			centrePassbandHz: 1_920_000,
+		})
+		const plan = planPlacements(input)
+		expect(
+			plan.wanted.some(
+				placement =>
+					placement.decoderId === "lora-meshtastic" &&
+					placement.reach === "centre",
+			),
+		).toBe(fits)
+		if (fits) expect(plan.unplaced.has("lora-meshtastic")).toBe(false)
+	},
+)
+
+/**
+ * The composed gate: the real monitor polls per-branch counters on the fake
+ * clock and feeds the real gate, as the core wires them. The gate delegates so
+ * the monitor's interval is created after setup() installs the fake timers.
+ */
+function monitoredGate() {
+	const branches = new Map([
+		["raw", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
+	])
+	let real: EfficiencyGate | undefined
+	let stop = () => {}
+	const gate: EfficiencyGate = {
+		record: sample => real!.record(sample),
+		admit: (...args) => real!.admit(...args),
+		probation: (...args) => real!.probation(...args),
+		noteSuspended: (...args) => real!.noteSuspended(...args),
+		forget: key => real!.forget(key),
+		view: (...args) => real!.view(...args),
+	}
+	return {
+		gate,
+		branches,
+		start() {
+			const monitor = createEfficiencyMonitor({
+				sources: () => ["rtl"],
+				branchCounters: () => new Map(branches),
+				topology: () => "fanout",
+				cpu: { normalisedPercent: 10 },
+				now: () => Date.now(),
+				monoNow: () => performance.now(),
+				onSample: sample => real?.record(sample),
+				setInterval: (fn, ms) => {
+					const timer = setInterval(fn, ms)
+					return { cancel: () => clearInterval(timer) }
+				},
+			})
+			real = createEfficiencyGate(
+				{ budgetCores: 10, cpuGuardPercent: 90 },
+				{ drops: monitor },
+			)
+			monitor.start()
+			stop = () => monitor.stop()
+		},
+		stop: () => stop(),
+	}
+}
+
+it("a probationer's own channelizer branch is no drop evidence; a real drop on it is", async () => {
+	const composed = monitoredGate()
+	const f = setup("rate-test", composed.gate)
+	composed.start()
+	try {
+		f.create("rtl433")
+		f.plan([f.place("rtl433", 162_000_000)])
+		// Earn the source's clean window before the placement starts.
+		await vi.advanceTimersByTimeAsync(66_000)
+		await f.manager.startAll()
+		const decoder = f.instances.get("rtl433")!
+		expect(decoder.running).toBe(true)
+		// Its first channel starts the channelizer: a new branch appears.
+		composed.branches.set("channelizer-rtl", {
+			droppedBytesTotal: 0,
+			droppedChunksTotal: 0,
+		})
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(decoder.running).toBe(true)
+		expect(f.manager.getStatus("rtl433")?.efficiency).toBeUndefined()
+		// A real drop on that branch during probation suspends the probationer.
+		composed.branches.set("channelizer-rtl", {
+			droppedBytesTotal: 4096,
+			droppedChunksTotal: 1,
+		})
+		await vi.advanceTimersByTimeAsync(4000)
+		expect(decoder.running).toBe(false)
+		expect(f.manager.getStatus("rtl433")?.efficiency?.detail).toBe("drops")
+	} finally {
+		composed.stop()
+	}
+})
+
+it("a placement blocked while evidence is unknown is admitted once the clean window is earned", async () => {
+	const composed = monitoredGate()
+	const f = setup("rate-test", composed.gate)
+	composed.start()
+	try {
+		// The monitor started at boot; the decoder is planned 1 s later.
+		const boot = Date.now()
+		f.create("rtl433")
+		f.plan([f.place("rtl433", 162_000_000)])
+		await vi.advanceTimersByTimeAsync(1000)
+		await f.manager.startAll()
+		const decoder = f.instances.get("rtl433")!
+		expect(decoder.running).toBe(false)
+		expect(f.manager.getStatus("rtl433")?.efficiency?.detail).toBe("unknown")
+		// Samples at 2 s (no baseline) and 4 s (first clean interval): the
+		// clear window ends 60 s after the clean run began, not after 5 min.
+		const retryAt = Date.parse(
+			f.manager.getStatus("rtl433")?.efficiency?.retryAt ?? "",
+		)
+		expect(retryAt - boot).toBeGreaterThanOrEqual(60_000)
+		expect(retryAt - boot).toBeLessThanOrEqual(66_000)
+		await vi.advanceTimersByTimeAsync(boot + 60_000 - Date.now())
+		expect(decoder.running).toBe(false)
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(decoder.running).toBe(true)
+	} finally {
+		composed.stop()
+	}
 })

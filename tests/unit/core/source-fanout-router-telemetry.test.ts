@@ -10,6 +10,16 @@ import type { EfficiencySample } from "../../../src/decoders/enablement/contract
 import { createEfficiencyMonitor } from "../../../src/decoders/enablement/efficiency-monitor.js"
 import { createEfficiencyGate } from "../../../src/decoders/enablement/efficiency-gate.js"
 
+/** Counters are keyed `<branch id>#<instance>`; tests look a branch up by id. */
+const branch = <T>(
+	totals: ReadonlyMap<string, T> | null | undefined,
+	id: string,
+): T | undefined => {
+	for (const [key, value] of totals ?? [])
+		if (key.slice(0, key.lastIndexOf("#")) === id) return value
+	return undefined
+}
+
 function setup() {
 	const sources = Object.assign(new EventEmitter(), {
 		getAllStatus: () => [
@@ -137,7 +147,7 @@ describe("source branch drop telemetry", () => {
 				const totals = router.branchDropCounters("a")
 				timings.push(performance.now() - start)
 				expect(totals?.size).toBe(64)
-				expect(totals?.get("branch-0")).toEqual(expected)
+				expect(branch(totals, "branch-0")).toEqual(expected)
 			}
 			timings.sort((a, b) => a - b)
 			console.info(
@@ -292,7 +302,7 @@ describe("branch topology evidence", () => {
 	})
 })
 
-it("topology signatures are stable reads and change for same-id replacement and fanout recreation", () => {
+it("topology signatures are stable reads and additions, and change for removal, same-id replacement and fanout recreation", () => {
 	const { router, primary } = setup()
 	try {
 		expect(router.branchTopology("b")).toBeNull()
@@ -300,9 +310,16 @@ it("topology signatures are stable reads and change for same-id replacement and 
 		fanout.addBranch({ id: "one" })
 		const first = router.branchTopology("b")
 		expect(router.branchTopology("b")).toBe(first)
+		// An addition is visible in the counters; only removals change the epoch.
+		fanout.addBranch({ id: "channelizer-b" })
+		expect(router.branchTopology("b")).toBe(first)
+		fanout.removeBranch("channelizer-b")
+		const removed = router.branchTopology("b")
+		expect(removed).not.toBe(first)
+		// Same-id replacement is a removal.
 		fanout.removeBranch("one")
 		fanout.addBranch({ id: "one" })
-		expect(router.branchTopology("b")).not.toBe(first)
+		expect(router.branchTopology("b")).not.toBe(removed)
 		fanout.removeBranch("one")
 		const empty = router.branchTopology("b")
 		router.releaseUnused("b")
@@ -326,16 +343,25 @@ it("per-branch snapshots are copied and preserve invalid entries", () => {
 			id === "bad" ? undefined : original(id),
 		)
 		const first = router.branchDropCounters("a")
-		expect(first?.get("one")).toEqual({
+		expect(branch(first, "one")).toEqual({
 			droppedBytesTotal: 100,
 			droppedChunksTotal: 100,
 		})
-		expect(first?.get("bad")?.droppedBytesTotal).toBeNaN()
-		const value = first?.get("one")
+		expect(branch(first, "bad")?.droppedBytesTotal).toBeNaN()
+		const value = branch(first, "one")
 		if (value) value.droppedBytesTotal = 0
-		expect(router.branchDropCounters("a")?.get("one")?.droppedBytesTotal).toBe(
-			100,
+		expect(
+			branch(router.branchDropCounters("a"), "one")?.droppedBytesTotal,
+		).toBe(100)
+		// A removed and re-added id is a new branch identity.
+		const key = [...(first?.keys() ?? [])].find(k => k.startsWith("one#"))
+		primary.removeBranch("one")
+		primary.addBranch({ id: "one" })
+		const again = [...(router.branchDropCounters("a")?.keys() ?? [])].find(k =>
+			k.startsWith("one#"),
 		)
+		expect(again).toBeDefined()
+		expect(again).not.toBe(key)
 	} finally {
 		router.destroy()
 		primary.destroy()

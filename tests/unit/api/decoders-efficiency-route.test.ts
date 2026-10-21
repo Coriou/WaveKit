@@ -183,7 +183,7 @@ it("the route serves the real efficiency gate's view unchanged", async () => {
 		expect(real.sources[0]?.blocked[0]).toMatchObject({
 			decoderId: "blocked",
 			detail: "unknown",
-			retryAt: "2026-10-21T12:05:00.000Z",
+			retryAt: "2026-10-21T12:01:00.000Z",
 		})
 	} finally {
 		await app.close()

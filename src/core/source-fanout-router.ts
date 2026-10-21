@@ -23,8 +23,17 @@ export class SourceFanoutRouter extends EventEmitter {
 	private readonly fanouts = new Map<string, FanoutManager>()
 	private readonly topology = new Map<
 		FanoutManager,
-		{ changed: boolean; generation: number; listener: () => void }
+		{
+			changed: boolean
+			generation: number
+			removals: number
+			/** Per-id instance number: a re-added id is a different branch. */
+			instances: Map<string, number>
+			listener: (id: string) => void
+			removed: (id: string) => void
+		}
 	>()
+	private branchInstance = 0
 	private topologyGeneration = 0
 	private primarySourceId: string | undefined
 	private readonly connected = (sourceId: string) => {
@@ -99,20 +108,25 @@ export class SourceFanoutRouter extends EventEmitter {
 		return fanout
 	}
 
-	/** Stable across reads; same-id branch replacement advances the generation. */
+	/**
+	 * Removal epoch of the source's fanout: stable across reads and additions;
+	 * a branch removal (including same-id replacement) or a recreated fanout
+	 * changes it. Added branches are visible in the counters themselves.
+	 */
 	branchTopology(sourceId: string): string | null {
 		const fanout =
 			sourceId === this.primarySourceId
 				? this.primary
 				: this.fanouts.get(sourceId)
 		if (!fanout) return null
-		return JSON.stringify([
-			this.topology.get(fanout)?.generation,
-			[...fanout.getBranchIds()].sort(),
-		])
+		return JSON.stringify([this.topology.get(fanout)?.removals])
 	}
 
-	/** Snapshot each branch independently so resets cannot cancel other drops. */
+	/**
+	 * Snapshot each branch independently so resets cannot cancel other drops.
+	 * Keys are `<branch id>#<instance>`: a removed and re-added id is a new
+	 * branch whose counters started at zero.
+	 */
 	branchDropCounters(sourceId: string): ReadonlyMap<
 		string,
 		{
@@ -129,9 +143,10 @@ export class SourceFanoutRouter extends EventEmitter {
 			string,
 			{ droppedBytesTotal: number; droppedChunksTotal: number }
 		>()
+		const instances = this.topology.get(fanout)?.instances
 		for (const id of fanout.getBranchIds()) {
 			const branch = fanout.getBranchTelemetry(id)
-			counters.set(id, {
+			counters.set(`${id}#${instances?.get(id) ?? 0}`, {
 				droppedBytesTotal: branch?.droppedBytesTotal ?? NaN,
 				droppedChunksTotal: branch?.droppedChunksTotal ?? NaN,
 			})
@@ -243,22 +258,32 @@ export class SourceFanoutRouter extends EventEmitter {
 		const state = this.topology.get(fanout)
 		if (!state) return
 		fanout.off("branch-added", state.listener)
-		fanout.off("branch-removed", state.listener)
+		fanout.off("branch-removed", state.removed)
 		this.topology.delete(fanout)
 	}
 
 	private forwardEvents(fanout: FanoutManager): void {
+		const generation = ++this.topologyGeneration
 		const state = {
 			changed: false,
-			generation: ++this.topologyGeneration,
-			listener: () => {
+			generation,
+			removals: generation,
+			instances: new Map<string, number>(),
+			listener: (id: string) => {
 				state.changed = true
 				state.generation = ++this.topologyGeneration
+				state.instances.set(id, ++this.branchInstance)
+			},
+			removed: (id: string) => {
+				state.changed = true
+				state.generation = ++this.topologyGeneration
+				state.removals = state.generation
+				state.instances.delete(id)
 			},
 		}
 		this.topology.set(fanout, state)
 		fanout.on("branch-added", state.listener)
-		fanout.on("branch-removed", state.listener)
+		fanout.on("branch-removed", state.removed)
 		fanout.on("backpressure", this.backpressure)
 		fanout.on("drain", this.drain)
 	}

@@ -222,17 +222,31 @@ then catalogue order; within a decoder, placement order (3.7).
 4.3 A newcomer never evicts a running placement. A placement that does not fit is suspended with
 reason `efficiency-budget` and a detail (`budget`, `cpu`, `drops` or `unknown`), retried in order
 whenever capacity frees and at least every `EFFICIENCY_RETRY_MS` (5 min, doubling to 30 min after
-probation failures).
+probation failures). `unknown` is no rejection and takes no backoff: the placement is re-evaluated
+when its source earns the clear window (`EFFICIENCY_CLEAR_MS` after its clean run began).
 4.4 Probation: for `EFFICIENCY_PROBATION_MS` (30 s) after admission a placement is on probation;
 when drops (4.1 c) or CPU above the limit appear on its source during probation, the newest
-probationer is suspended with `efficiency-budget` (`drops` or `cpu`). Drops or CPU with no
+probationer is suspended with `efficiency-budget` (`drops` or `cpu`). Only positive drop counts
+observed after its admission count: unknown evidence never suspends a probationer. Probation is
+earned: it ends only after `EFFICIENCY_PROBATION_MS` of credited evidence since admission. An
+interval is credited only between two complete reads (every branch valid) on consecutive samples
+at most 1.5 sample periods apart; unreadable or incomplete reads break the chain. Drops are judged
+before graduation, up to and including the sample that completes the coverage: a placement with a
+drop in that window never graduates. A clock discontinuity (time not strictly increasing)
+discards all coverage, so every placement still on probation restarts from zero; drops already
+seen still count. The view keeps showing the placement on probation until it graduates. Drops or CPU with no
 probationer suspend nothing: they close the gate for newcomers, log one warning per minute and
 show in the efficiency view.
 4.5 Declared costs are per (type, reach) in reference cores with their basis (`measurement` or
 `estimate`), plus the channelizer's per-source base and per-channel cost (design, cost table).
 `cpuBudgetCores` defaults to 1.5 on x86-64 hosts and 0.75 on arm64 hosts with at most 4 cores.
-4.6 Safe on unknown: unreadable fanout counters close the gate for that source (`unknown`) and
-the view reports `drops: "unknown"`, never `ok`; a missing CPU reading leaves the decision to the
+4.6 Safe on unknown: unreadable, decreasing or reset fanout counters and removed branches close
+the gate for that source (`unknown`). Drop evidence is per branch: a branch valid in two reads
+whose counters did not decrease contributes its positive delta even across unreadable reads and
+other branches' changes; a branch added since the last read (such as the channelizer's input
+branch) is counted from zero and is no fault; a decrease or removal loses that branch only and
+never erases drops seen on any branch. While unknown, the view
+reports `drops: "unknown"`, never `ok`; a missing CPU reading leaves the decision to the
 budget and drop terms and is reported as `cpu.percent: null`, never as a low value.
 4.7 `GET /api/decoders/efficiency` returns the gate view per source: budget, cores in use,
 CPU percent and limit, drop state and rate, and the ordered admitted and blocked placements.

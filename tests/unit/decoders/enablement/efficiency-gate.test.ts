@@ -261,7 +261,7 @@ it("record ignores source samples and wall-clock ordering for drop admission", (
 	gate.record(sample(0))
 	expect(gate.admit(placement(), [], 0).admit).toBe(true)
 })
-it("missing and throwing readers fail closed for admission and probation", () => {
+it("missing and throwing readers fail closed for admission and never condemn a probationer", () => {
 	for (const drops of [
 		undefined,
 		{
@@ -281,9 +281,10 @@ it("missing and throwing readers fail closed for admission and probation", () =>
 			drops ? { drops } : {},
 		)
 		expectDetail(gate.admit(placement(), [], 0), "unknown")
-		expect(gate.probation([running(placement())], 0)).toEqual([
-			{ key: "p", detail: "drops" },
-		])
+		// Unknown evidence closes admission only; probation needs observed drops.
+		expect(gate.probation([running(placement())], 0)).toEqual(
+			drops ? [{ key: "p", detail: "drops" }] : [],
+		)
 	}
 })
 
@@ -404,4 +405,51 @@ it("admit and view with partial running lists never prune marks", () => {
 	expect(gate.probation([running(old, 0), running(newer, 2000)], 4000)).toEqual(
 		[{ key: "new", detail: "drops" }],
 	)
+})
+
+it("unknown evidence retries when the clean window is earned, without backoff; drops back off", () => {
+	let state: "ok" | "dropping" | "unknown" = "unknown"
+	let cleanAt: number | null = null
+	const gate = createEfficiencyGate(
+		{ budgetCores: 1.5, cpuGuardPercent: 90 },
+		{
+			drops: {
+				sources: () => ["s"],
+				monoNow: () => 0,
+				dropState: () => ({ state, dropBytesPerSecond: null }),
+				droppedSinceMono: () => false,
+				droppedWithinMs: () => false,
+				cleanAtMono: () => cleanAt,
+			},
+		},
+	)
+	// No clean run yet: the earliest possible clear window from now.
+	expect(gate.admit(placement(), [], 1000)).toEqual({
+		admit: false,
+		detail: "unknown",
+		retryAtMs: 61_000,
+	})
+	cleanAt = 64_000
+	for (const now of [2000, 30_000])
+		expect(gate.admit(placement(), [], now)).toEqual({
+			admit: false,
+			detail: "unknown",
+			retryAtMs: 64_000,
+		})
+	// Never sooner than the next sample.
+	expect(gate.admit(placement(), [], 63_000)).toMatchObject({
+		retryAtMs: 65_000,
+	})
+	// No retry hold was recorded: the first read after the window admits.
+	state = "ok"
+	expect(gate.admit(placement(), [], 64_000)).toEqual({ admit: true })
+	// A drop rejection keeps the backoff.
+	state = "dropping"
+	expect(gate.admit(placement("q"), [], 70_000)).toEqual({
+		admit: false,
+		detail: "drops",
+		retryAtMs: 370_000,
+	})
+	state = "ok"
+	expect(gate.admit(placement("q"), [], 100_000).admit).toBe(false)
 })
