@@ -572,3 +572,29 @@ describe("Property-Based Tests", () => {
 		})
 	})
 })
+
+it("a deferred branch counts nothing until its consumer is ready; afterwards every drop counts", () => {
+	const fanout = new FanoutManager(testLogger)
+	const source = createMockSource()
+	fanout.attachSource(source)
+	const branch = fanout.addBranch({
+		id: "late",
+		highWaterMark: 1024,
+		deferred: true,
+	})
+	// The consumer is still starting: a source burst neither fills nor drops.
+	for (let i = 0; i < 16; i++) source.write(Buffer.alloc(512))
+	expect(fanout.getBranchTelemetry("late")).toMatchObject({
+		droppedBytesTotal: 0,
+		droppedChunksTotal: 0,
+		totalBytesWritten: 0,
+	})
+	expect(branch.readableLength).toBe(0)
+	// Ready, but still not reading: overflow now counts as drops.
+	fanout.activateBranch("late")
+	for (let i = 0; i < 16; i++) source.write(Buffer.alloc(512))
+	expect(fanout.getBranchTelemetry("late")?.droppedBytesTotal).toBeGreaterThan(
+		0,
+	)
+	fanout.destroy()
+})

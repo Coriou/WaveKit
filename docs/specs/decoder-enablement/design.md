@@ -184,6 +184,12 @@ decision core) and `createEfficiencyMonitor(deps)` (`efficiency-monitor.ts`, the
   Known bound: drop and CPU histories keep the latest 1024 samples (about 34 minutes), so
   evidence that would disqualify a placement can be evicted if probation evaluation stalls that
   long; in normal operation probation is evaluated every sample.
+- At most one gated placement per source is on probation: an otherwise admissible newcomer waits
+  (detail `unknown`, re-checked every sample without backoff) until the current probationer
+  graduates or is suspended, so probation evidence is always attributable to one newcomer;
+  admission order is unchanged. A placement's raw fanout branch is created deferred and receives
+  data (and counts drops) only once its decoder has started and connected its input; the
+  channelizer's input branch is already added only after `wavekit-chan` reports ready.
   An `unknown` admission records no backoff and returns the source's clear-window time
   (`cleanAtMono`, or one clear window from now without a clean run) as its retry.
 - `admit(newcomer, running, sample, now): AdmissionDecision` implements requirement 4.1 to 4.4:

@@ -120,6 +120,8 @@ export function createEfficiencyGate(
 	// or view() is called with a partial or earlier list.
 	// Placements that completed probation with no evidence against them.
 	const graduated = new Set<string>()
+	/** Placements this gate admitted (YAML and pre-gate runs never are). */
+	const gated = new Set<string>()
 	const mark = (key: string, mono: number) => {
 		admittedMono.set(key, mono)
 		graduated.delete(key)
@@ -135,6 +137,7 @@ export function createEfficiencyGate(
 				if (!present.has(key)) {
 					admittedMono.delete(key)
 					graduated.delete(key)
+					gated.delete(key)
 				}
 		}
 		for (const placement of running)
@@ -248,10 +251,30 @@ export function createEfficiencyGate(
 				total([...running, newcomer]) > inputs.budgetCores
 			)
 				detail = "budget"
+			// Otherwise admissible: one gated probationer per source, so probation
+			// evidence is always attributable to a single newcomer; the next waits
+			// (re-checked every sample, no backoff) until it graduates or is
+			// suspended.
+			if (
+				detail === null &&
+				running.some(
+					p =>
+						p.key !== newcomer.key &&
+						p.sourceId === newcomer.sourceId &&
+						gated.has(p.key) &&
+						onProbation(p, mono),
+				)
+			)
+				return {
+					admit: false,
+					detail: "unknown",
+					retryAtMs: now + EFFICIENCY_SAMPLE_MS,
+				}
 			if (detail === null) {
 				// A key already running keeps its mark; any other admission starts a
 				// fresh probation window.
 				if (!running.some(p => p.key === newcomer.key)) mark(newcomer.key, mono)
+				gated.add(newcomer.key)
 				return { admit: true }
 			}
 			// Missing evidence is not a rejection: no backoff is recorded and the
@@ -330,6 +353,7 @@ export function createEfficiencyGate(
 		forget(key) {
 			admittedMono.delete(key)
 			graduated.delete(key)
+			gated.delete(key)
 			retries.delete(key)
 			failures.delete(key)
 		},

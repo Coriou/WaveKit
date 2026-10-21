@@ -239,6 +239,8 @@ interface DecoderState {
 	removalPending?: boolean
 	admittedAtMs?: number
 	admission?: AdmissionDecision
+	/** Activates the deferred raw branch once the decoder has started. */
+	branchReady?: () => void
 	efficiencyBackoffMs?: number
 	/** Owning scanner job of a probe; null for configured decoders. */
 	scannerJobId: string | null
@@ -3279,12 +3281,26 @@ export class DecoderManager extends EventEmitter {
 		// Track resources before attaching so failed attachment is cleaned up too.
 		state.branchId = branchId
 		state.branchFanout = fanout
+		// The branch receives data only once the decoder is reading: before its
+		// process has spawned and connected stdin, bytes would only fill the
+		// branch and count as drops against the newcomer.
 		const branch = fanout.addBranch({
 			id: branchId,
 			decoderId: config.id,
 			...(sourceId ? { sourceId } : {}),
+			deferred: true,
 		})
 		decoder.attachInput(branch)
+		const activate = () => {
+			if (state.branchReady !== activate) return
+			delete state.branchReady
+			decoder.off("started", activate)
+			if (state.branchFanout === fanout && state.branchId === branchId)
+				fanout.activateBranch(branchId)
+		}
+		state.branchReady = activate
+		if (decoder.getStatus().running) activate()
+		else decoder.on("started", activate)
 
 		this.log.debug(
 			{ decoderId: decoder.id, branchId },
@@ -3769,6 +3785,10 @@ export class DecoderManager extends EventEmitter {
 			this.dropChannel(state, true)
 		const { decoder, branchId, branchFanout, assignedSourceId, inputAttached } =
 			state
+		if (state.branchReady) {
+			decoder.off("started", state.branchReady)
+			delete state.branchReady
+		}
 		try {
 			if (branchId || inputAttached) decoder.detachInput()
 		} finally {

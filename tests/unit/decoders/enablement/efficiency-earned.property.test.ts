@@ -446,10 +446,26 @@ it("probation follows independent lifecycle evidence regardless of wall jumps", 
 				const constantWallGate = makeGate()
 				// Oracle lifecycle table is updated from external events only.
 				// Only probation calls prune; admission and view only add first sightings.
+				// Keys admitted through the gate (legacy first sightings never are).
+				const gatedKeys = new Set<string>()
+				const graduatedAt = (key: string, sourceId: string) => {
+					const start = starts.get(key)
+					if (start === undefined) return false
+					const end = start + EFFICIENCY_PROBATION_MS
+					return (
+						mono >= end &&
+						!drops.some(
+							d => d.source === sourceId && d.at >= start && d.at <= end,
+						)
+					)
+				}
 				const observe = (prune: boolean) => {
 					if (prune)
 						for (const key of starts.keys())
-							if (!active.has(key)) starts.delete(key)
+							if (!active.has(key)) {
+								starts.delete(key)
+								gatedKeys.delete(key)
+							}
 					for (const key of active.keys())
 						if (!starts.has(key)) starts.set(key, mono)
 				}
@@ -506,8 +522,19 @@ it("probation follows independent lifecycle evidence regardless of wall jumps", 
 						case "readmit": {
 							const running = active.has(key)
 							observe(false)
+							// One gated probationer per source: another one still on
+							// probation makes the newcomer wait one sample.
+							const waits = [...active].some(
+								([other, item]) =>
+									other !== key &&
+									item.sourceId === placement.sourceId &&
+									gatedKeys.has(other) &&
+									!graduatedAt(other, item.sourceId),
+							)
 							expect(gate.admit(placement, [...active.values()], wall)).toEqual(
-								{ admit: true },
+								waits
+									? { admit: false, detail: "unknown", retryAtMs: wall + 2000 }
+									: { admit: true },
 							)
 							expect(
 								constantWallGate.admit(
@@ -515,7 +542,17 @@ it("probation follows independent lifecycle evidence regardless of wall jumps", 
 									[...active.values()],
 									1000000000000,
 								),
-							).toEqual({ admit: true })
+							).toEqual(
+								waits
+									? {
+											admit: false,
+											detail: "unknown",
+											retryAtMs: 1000000000000 + 2000,
+										}
+									: { admit: true },
+							)
+							if (waits) break
+							gatedKeys.add(key)
 							// A key already running keeps its start; any other admission starts fresh.
 							if (!running) starts.set(key, mono)
 							active.set(key, placement)
@@ -526,6 +563,7 @@ it("probation follows independent lifecycle evidence regardless of wall jumps", 
 							break
 						case "forget":
 							starts.delete(key)
+							gatedKeys.delete(key)
 							gate.forget(key)
 							constantWallGate.forget(key)
 							break

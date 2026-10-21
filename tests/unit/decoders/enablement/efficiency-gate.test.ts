@@ -94,12 +94,16 @@ describe("efficiency gate", () => {
 	it("admits window A on desktop budget", () => {
 		const gate = setup()
 		const active: RunningPlacement[] = []
+		let t = 0
 		for (const type of ["ais-catcher", "dsd-fme", "multimon-ng"]) {
 			const p = placement(type, placementCostCores(type, "channel"))
-			expect(gate.admit(p, active, 0)).toEqual({ admit: true })
+			expect(gate.admit(p, active, t)).toEqual({ admit: true })
 			active.push(running(p))
+			// One probationer per source: the next is admitted after graduation.
+			t += 30_000
+			gate.record(sample(t))
 		}
-		expect(gate.view(active, [], 0).sources[0]?.coresInUse).toBeCloseTo(0.765)
+		expect(gate.view(active, [], t).sources[0]?.coresInUse).toBeCloseTo(0.765)
 	})
 	it("blocks the four dsd-fme band-plan channels in window C+ with budget", () => {
 		const gate = setup()
@@ -115,6 +119,7 @@ describe("efficiency gate", () => {
 	it("Pi budget 0.75 in window C admits rtl433 and multimon-ng and blocks dsd-fme and LoRa", () => {
 		const gate = setup(0.75)
 		const active: RunningPlacement[] = []
+		let t = 0
 		for (const [type, reach] of [
 			["rtl433", "channel"],
 			["multimon-ng", "channel"],
@@ -122,10 +127,12 @@ describe("efficiency gate", () => {
 			["lora-meshtastic", "raw"],
 		] as const) {
 			const p = placement(type, placementCostCores(type, reach), "s", reach)
-			const decision = gate.admit(p, active, 0)
+			const decision = gate.admit(p, active, t)
 			if (type === "rtl433" || type === "multimon-ng") {
 				expect(decision.admit).toBe(true)
 				active.push(running(p))
+				t += 30_000
+				gate.record(sample(t))
 			} else expectDetail(decision, "budget")
 		}
 	})
@@ -452,4 +459,22 @@ it("unknown evidence retries when the clean window is earned, without backoff; d
 	})
 	state = "ok"
 	expect(gate.admit(placement("q"), [], 100_000).admit).toBe(false)
+})
+
+it("admits one gated probationer per source at a time", () => {
+	const gate = setup()
+	const first = placement("first")
+	expect(gate.admit(first, [], 0)).toEqual({ admit: true })
+	const active = [running(first)]
+	// Another source is independent.
+	expect(gate.admit(placement("other", 0.1, "t"), active, 0).admit).toBe(true)
+	expect(gate.admit(placement("second"), active, 1000)).toEqual({
+		admit: false,
+		detail: "unknown",
+		retryAtMs: 3000,
+	})
+	gate.record(sample(30_000))
+	expect(gate.admit(placement("second"), active, 30_000)).toEqual({
+		admit: true,
+	})
 })

@@ -20,6 +20,11 @@ export interface BranchConfig {
 	highWaterMark?: number // Default: 256KB (262144 bytes)
 	decoderId?: string // Optional decoder ID for telemetry context
 	sourceId?: string // Optional source ID for telemetry context
+	/**
+	 * Created inactive: it receives no data (and counts no drops) until
+	 * activateBranch(), so a consumer that is still starting cannot fill it.
+	 */
+	deferred?: boolean
 }
 
 /**
@@ -75,6 +80,8 @@ export interface FanoutManagerEvents {
 
 interface BranchState {
 	stream: PassThrough
+	/** False while a deferred branch waits for its consumer. */
+	active: boolean
 	highWaterMark: number
 	backpressure: boolean
 	bufferedBytes: number
@@ -174,6 +181,7 @@ export class FanoutManager extends EventEmitter {
 
 		const branchState: BranchState = {
 			stream,
+			active: config.deferred !== true,
 			highWaterMark,
 			backpressure: false,
 			bufferedBytes: 0,
@@ -194,6 +202,14 @@ export class FanoutManager extends EventEmitter {
 		this.log.info({ branchId: config.id, highWaterMark }, "Branch added")
 
 		return stream
+	}
+
+	/** Starts delivering data to a deferred branch; every later drop counts. */
+	activateBranch(id: string): void {
+		const branch = this.branches.get(id)
+		if (!branch || branch.active) return
+		branch.active = true
+		this.log.debug({ branchId: id }, "Branch activated")
 	}
 
 	/**
@@ -250,6 +266,9 @@ export class FanoutManager extends EventEmitter {
 		const chunkLength = chunk.length
 
 		for (const [branchId, branch] of this.branches) {
+			// A deferred branch's consumer is not ready yet: nothing is written
+			// or counted until it is activated.
+			if (!branch.active) continue
 			// ZERO-COPY OPTIMIZATION:
 			// Do NOT use Buffer.from(chunk) which runs a copy.
 			// Node.js buffers are references. PassThrough.write will effectively

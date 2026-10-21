@@ -76,6 +76,9 @@ it("ordered admission stays within the budget and admits every fitting candidate
 			fc.integer({ min: 0, max: 3000 }),
 			fc.array(fc.integer({ min: 0, max: 1000 }), { maxLength: 40 }),
 			(budget, costs) => {
+				// Each admitted placement graduates before the next is considered
+				// (one probationer per source), so only the budget decides.
+				let mono = 0
 				const gate = createEfficiencyGate(
 					{
 						budgetCores: budget / 1000,
@@ -85,9 +88,9 @@ it("ordered admission stays within the budget and admits every fitting candidate
 						drops: {
 							dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
 							sources: () => ["s"],
-							monoNow: () => 0,
-							droppedSinceMono: () => true,
-							droppedWithinMs: () => true,
+							monoNow: () => mono,
+							droppedSinceMono: () => false,
+							droppedWithinMs: () => false,
 						},
 					},
 				)
@@ -103,6 +106,7 @@ it("ordered admission stays within the budget and admits every fitting candidate
 						running.push({ ...p, admittedAtMs: 0 })
 						sum += p.costCores
 						expect(sum + 0.26).toBeLessThanOrEqual(budget / 1000)
+						mono += 30_000
 					}
 				}
 			},

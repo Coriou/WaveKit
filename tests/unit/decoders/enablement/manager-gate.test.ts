@@ -1733,3 +1733,93 @@ it("a placement blocked while evidence is unknown is admitted once the clean win
 		composed.stop()
 	}
 })
+
+it("placements admissible together on one source are admitted one probation at a time", async () => {
+	const composed = monitoredGate()
+	const f = setup("rate-test", composed.gate)
+	composed.start()
+	try {
+		for (const id of ["a", "b", "c"]) f.create(id)
+		f.plan([
+			f.place("a", 162_000_000),
+			f.place("b", 162_025_000),
+			f.place("c", 162_050_000),
+		])
+		// The source earns its clean window, then all three become admissible.
+		await vi.advanceTimersByTimeAsync(66_000)
+		await f.manager.startAll()
+		const running = () =>
+			["a", "b", "c"].filter(id => f.instances.get(id)?.running)
+		expect(running()).toEqual(["a"])
+		expect(f.manager.getStatus("b")?.efficiency?.detail).toBe("unknown")
+		await vi.advanceTimersByTimeAsync(20_000)
+		expect(running()).toEqual(["a"])
+		// a graduates after 30 s of covered evidence; b follows, c still waits.
+		await vi.advanceTimersByTimeAsync(20_000)
+		expect(running()).toEqual(["a", "b"])
+		await vi.advanceTimersByTimeAsync(40_000)
+		expect(running()).toEqual(["a", "b", "c"])
+	} finally {
+		composed.stop()
+	}
+})
+
+it("a raw branch receives and counts nothing until its decoder has started", async () => {
+	const f = setup("rate-test", fakeGate())
+	f.manager.setChannelizer(null)
+	f.yamlDecoder("yaml")
+	void f.manager.createDecoder({
+		id: "yaml",
+		type: "rate-test",
+		enabled: true,
+		options: {},
+	})
+	f.plan([
+		{
+			key: placementKey("yaml", "rtl", "raw", null),
+			decoderId: "yaml",
+			sourceId: "rtl",
+			channelHz: null,
+			reach: "raw",
+			origin: "configured",
+			primary: true,
+			costCores: 0.1,
+			sampleRateHz: 2_400_000,
+		},
+	])
+	const decoder = f.instances.get("yaml")!
+	const ready = deferred()
+	decoder.startGate = ready
+	const starting = f.manager.startAll()
+	await vi.advanceTimersByTimeAsync(0)
+	const state = (
+		f.manager as unknown as {
+			decoders: Map<
+				string,
+				{ branchId: string | null; branchFanout: FanoutManager | null }
+			>
+		}
+	).decoders.get("yaml")!
+	const fanout = state.branchFanout!
+	const source = new PassThrough()
+	fanout.attachSource(source)
+	const burst = () => {
+		for (let i = 0; i < 64; i++) source.write(Buffer.alloc(64 * 1024))
+	}
+	// The process is still starting for 500 ms: the burst is not counted.
+	burst()
+	await vi.advanceTimersByTimeAsync(500)
+	expect(fanout.getBranchTelemetry(state.branchId!)).toMatchObject({
+		droppedBytesTotal: 0,
+		totalBytesWritten: 0,
+	})
+	ready.resolve()
+	await starting
+	expect(decoder.running).toBe(true)
+	// Ready but not reading: overflow now counts as drops.
+	burst()
+	expect(
+		fanout.getBranchTelemetry(state.branchId!)?.droppedBytesTotal,
+	).toBeGreaterThan(0)
+	fanout.detachSource()
+})
