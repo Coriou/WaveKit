@@ -41,11 +41,21 @@ export interface AbsorberFanoutPort {
 	congestedBranchIds(out: Set<string>): void
 	activeBranchIds(out: Set<string>): void
 	on(
-		event: "drain" | "branch-added" | "branch-removed" | "backpressure",
+		event:
+			| "drain"
+			| "writable-drain"
+			| "branch-added"
+			| "branch-removed"
+			| "backpressure",
 		fn: (id: string) => void,
 	): void
 	off(
-		event: "drain" | "branch-added" | "branch-removed" | "backpressure",
+		event:
+			| "drain"
+			| "writable-drain"
+			| "branch-added"
+			| "branch-removed"
+			| "backpressure",
 		fn: (id: string) => void,
 	): void
 }

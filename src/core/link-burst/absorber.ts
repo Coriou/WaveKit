@@ -8,6 +8,10 @@ import {
 } from "./contract.js"
 
 export const ABSORBER_RELEASE_STEP_BLOCKS = 4
+// Ten laggard windows prove sustained recovery rather than one transient drain.
+export const ABSORBER_RECOVERY_MS = 5_000
+// A relapse in the next recovery-length interval needs no second hold.
+export const ABSORBER_REINCLUSION_COOLDOWN_MS = 5_000
 
 export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	const { fanout, recorder, monoNow, frameBytes, log } = deps
@@ -29,8 +33,12 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	const congested = new Set<string>()
 	const excluded = new Set<string>()
 	const since = new Map<string, number>()
+	const recovering = new Map<string, number>()
+	const reincluded = new Map<string, number>()
+	let releaseStarted = false
+	const branchStates = [since, recovering, reincluded]
 	let deadline: ReturnType<typeof setTimeout> | null = null
-	let expired = false
+	let deadlineAt = Infinity
 	const slots = LINK_QUALITY_WINDOW_MS / LINK_QUALITY_SLOT_MS
 	const peaks = new Float64Array(slots)
 	const absorbs = new Float64Array(slots)
@@ -63,7 +71,6 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		if (holdingSince !== null) {
 			durations[index()] = Math.max(durations[index()]!, now - holdingSince)
 			holdingSince = null
-			expired = false
 			if (deadline !== null) clearTimeout(deadline)
 			deadline = null
 		}
@@ -80,24 +87,51 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		)
 		episodeSince = null
 	}
+	function recover(id: string, now: number): void {
+		const start = recovering.get(id)
+		if (
+			excluded.has(id) &&
+			start !== undefined &&
+			now - start >= ABSORBER_RECOVERY_MS
+		) {
+			excluded.delete(id)
+			recovering.delete(id)
+			reincluded.set(id, start + ABSORBER_RECOVERY_MS)
+		}
+	}
 	function gated(now: number): boolean {
 		fanout.activeBranchIds(active)
 		fanout.congestedBranchIds(congested)
-		for (const id of since.keys()) {
-			if (!active.has(id) || !congested.has(id)) {
-				since.delete(id)
+		for (const state of branchStates)
+			for (const id of state.keys()) if (!active.has(id)) state.delete(id)
+		for (const id of excluded) {
+			if (!active.has(id)) {
 				excluded.delete(id)
+				continue
+			}
+			if (congested.has(id)) recovering.delete(id)
+			else {
+				const start = recovering.get(id) ?? now
+				recovering.set(id, start)
+				recover(id, now)
 			}
 		}
+		for (const id of since.keys()) if (!congested.has(id)) since.delete(id)
 		let blocked = false
 		for (const id of congested) {
 			if (!active.has(id)) continue
 			const start = since.get(id) ?? now
 			since.set(id, start)
 			if (
-				expired ||
+				(reincluded.has(id) &&
+					now - reincluded.get(id)! < ABSORBER_REINCLUSION_COOLDOWN_MS) ||
 				now - start >= ABSORBER_LAGGARD_MS ||
-				(holdingSince !== null && now - holdingSince >= ABSORBER_LAGGARD_MS)
+				// The episode deadline bounds the original wait. A sibling that
+				// fills during catch-up gets its own congestion deadline, never
+				// the expired deadline of the consumer we just excluded.
+				(!releaseStarted &&
+					holdingSince !== null &&
+					now - holdingSince >= ABSORBER_LAGGARD_MS)
 			) {
 				if (!excluded.has(id)) {
 					excluded.add(id)
@@ -121,6 +155,7 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 				length >= frameBytes &&
 				!gated(now)
 			) {
+				releaseStarted = true
 				blocks++
 				const size =
 					Math.floor(Math.min(length, ABSORBER_RELEASE_BYTES) / frameBytes) *
@@ -145,7 +180,31 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 			}
 		} finally {
 			releasing = false
+			armDeadline(now)
 		}
+	}
+	function armDeadline(now: number): void {
+		if (holdingSince === null) return
+		let at = Infinity
+		for (const id of congested) {
+			if (!active.has(id) || excluded.has(id)) continue
+			at = Math.min(at, (since.get(id) ?? now) + ABSORBER_LAGGARD_MS)
+		}
+		if (!releaseStarted && Number.isFinite(at))
+			at = Math.min(at, holdingSince + ABSORBER_LAGGARD_MS)
+		if (deadline !== null && deadlineAt === at) return
+		if (deadline !== null) clearTimeout(deadline)
+		deadline = null
+		deadlineAt = at
+		if (!Number.isFinite(at)) return
+		deadline = setTimeout(
+			() => {
+				deadline = null
+				wake()
+			},
+			Math.max(1, at - now),
+		)
+		deadline.unref()
 	}
 	const wake = () => {
 		const now = monoNow()
@@ -155,17 +214,27 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	const backpressure = (id: string) => {
 		const now = monoNow()
 		rotate(now)
+		recover(id, now)
+		recovering.delete(id)
 		if (!since.has(id)) since.set(id, now)
 	}
 	const drain = (id: string) => {
 		since.delete(id)
+		if (excluded.has(id)) recovering.set(id, monoNow())
+		wake()
+	}
+	const removed = (id: string) => {
+		since.delete(id)
 		excluded.delete(id)
+		recovering.delete(id)
+		reincluded.delete(id)
 		wake()
 	}
 	fanout.on("backpressure", backpressure)
 	fanout.on("drain", drain)
+	fanout.on("writable-drain", drain)
 	fanout.on("branch-added", wake)
-	fanout.on("branch-removed", drain)
+	fanout.on("branch-removed", removed)
 	function flush(): void {
 		if (continuation !== null) clearImmediate(continuation)
 		continuation = null
@@ -178,6 +247,8 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		endOverflow(now)
 		since.clear()
 		excluded.clear()
+		recovering.clear()
+		reincluded.clear()
 	}
 	return {
 		configure(capacityBytes) {
@@ -206,31 +277,7 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 			if (accepted > 0) {
 				if (length === 0) {
 					holdingSince = now
-					let wait = ABSORBER_LAGGARD_MS
-					for (const id of congested) {
-						const start = since.get(id)
-						if (active.has(id) && !excluded.has(id) && start !== undefined)
-							wait = Math.min(
-								wait,
-								Math.max(0, start + ABSORBER_LAGGARD_MS - now),
-							)
-					}
-					const onDeadline = () => {
-						deadline = null
-						const at = monoNow()
-						expired =
-							holdingSince !== null && at - holdingSince >= ABSORBER_LAGGARD_MS
-						wake()
-						if (holdingSince !== null && !expired) {
-							deadline = setTimeout(
-								onDeadline,
-								Math.max(1, holdingSince + ABSORBER_LAGGARD_MS - at),
-							)
-							deadline.unref()
-						}
-					}
-					deadline = setTimeout(onDeadline, wait)
-					deadline.unref()
+					releaseStarted = false
 				}
 				const tail = (head + length) % ring.length
 				const first = Math.min(accepted, ring.length - tail)
@@ -287,8 +334,9 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 			disposed = true
 			fanout.off("backpressure", backpressure)
 			fanout.off("drain", drain)
+			fanout.off("writable-drain", drain)
 			fanout.off("branch-added", wake)
-			fanout.off("branch-removed", drain)
+			fanout.off("branch-removed", removed)
 			ring = null
 		},
 	}
