@@ -1,5 +1,6 @@
 import type {
 	DecoderReachKind,
+	DropAttribution,
 	DecoderMode,
 	DecoderModeSource,
 	DecoderStartMode,
@@ -212,6 +213,7 @@ export function placementKey(
 	return `${decoderId}#${reach === "channel" ? channelHz : reach}@${sourceId}`
 }
 export interface SourceDropSample {
+	attribution?: DropAttribution
 	droppedBytesDelta: number | null
 	droppedChunksDelta: number | null
 } // null: unreadable
@@ -225,6 +227,8 @@ export interface EfficiencyInputs {
 	cpuGuardPercent: number
 }
 export interface RunningPlacement {
+	mode?: DecoderMode
+	startMode?: DecoderStartMode
 	key: string
 	sourceId: string
 	reach: DecoderReach
@@ -237,7 +241,7 @@ export type AdmissionDecision =
 	| { admit: false; detail: DecoderEfficiencyDetail; retryAtMs: number }
 export interface ProbationVerdict {
 	key: string
-	detail: "drops" | "cpu"
+	detail: "drops" | "cpu" | "late-drops"
 }
 export interface EfficiencyGate {
 	record(sample: EfficiencySample): void
@@ -260,4 +264,15 @@ export interface EfficiencyGate {
 		}[],
 		now: number,
 	): DecoderEfficiencyView
+}
+
+export const LATE_SHED_WINDOWS = 3
+export const LATE_SHED_HITS = 2
+export const LATE_SHED_COOLDOWN_MS = 30_000
+export interface LateDropWindow {
+	startMono: number
+	endMono: number
+	condemning: boolean
+	/** Positive drops occurred in the window, but only in samples attributed `link` or `unknown`. */
+	linkOrUnknownDrops: boolean
 }

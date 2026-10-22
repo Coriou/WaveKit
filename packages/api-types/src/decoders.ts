@@ -1,3 +1,5 @@
+import type { DropAttribution } from "./resources.js"
+
 export interface DecoderStats {
 	bytesIn: number
 	eventsOut: number
@@ -386,7 +388,12 @@ export type DecoderModeSource =
 	| "legacy-band"
 	| "default"
 export type DecoderReachKind = "channel" | "raw" | "centre"
-export type DecoderEfficiencyDetail = "budget" | "cpu" | "drops" | "unknown"
+export type DecoderEfficiencyDetail =
+	| "budget"
+	| "cpu"
+	| "drops"
+	| "unknown"
+	| "late-drops"
 export interface DecoderPlacementView {
 	sourceId: string
 	channelHz?: number
@@ -411,6 +418,8 @@ export interface DecoderEfficiencyPlacement {
 	retryAt?: string
 }
 export interface DecoderEfficiencySourceView {
+	attribution?: DropAttribution
+	lateDrops?: DecoderLateDropsView
 	sourceId: string
 	coresInUse: number
 	cpu: { percent: number | null; limit: number }
@@ -423,4 +432,13 @@ export interface DecoderEfficiencyView {
 	budgetCores: number
 	cpuGuardPercent: number
 	sources: DecoderEfficiencySourceView[]
+}
+
+export interface DecoderLateDropsView {
+	condemningWindows: number
+	windows: number
+	cooldownUntil: string | null
+	sheddable: number
+	/** Why sustained late drops are not shedding (requirement 5.5); null when not held. */
+	held: "nothing-sheddable" | "link-or-unknown" | null
 }

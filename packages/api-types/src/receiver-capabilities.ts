@@ -26,6 +26,7 @@ export type ReceiverControlUnit =
 	| "index"
 	| "stageRawPair"
 
+// prettier-ignore
 export type ReceiverCommandValidation =
 	| {
 			readonly kind: "integer-range"
@@ -67,6 +68,7 @@ export interface ReceiverControlEvidence {
 	}
 }
 
+// prettier-ignore
 export type ReceiverHeaderEvidence =
 	| {
 			readonly state: "advertised"
@@ -97,6 +99,7 @@ export interface ReceiverSourceDescription {
 }
 
 export interface ReceiverCapabilities {
+	readonly iqDelivery?: ReceiverIqDelivery
 	readonly schemaVersion: 1
 	readonly sourceId: string
 	readonly sourceIncarnation: string
@@ -143,6 +146,7 @@ export const RECEIVER_SAMPLE_RATE_PRESETS_HZ: readonly number[] = Object.freeze(
 )
 
 /** WG6 req 8.1: presets on rtl_tcp sources; not-applicable on other transports. */
+// prettier-ignore
 export type ReceiverSampleRatePresets =
 	| {
 			readonly state: "suggested"
@@ -191,6 +195,7 @@ export const RTL_TUNER_GAIN_TABLES: Readonly<
 })
 
 /** WG7 req 5.1: a gain table suggestion on rtl_tcp items. */
+// prettier-ignore
 export type ReceiverGainTable =
 	| {
 			readonly state: "suggested"
@@ -226,6 +231,7 @@ export type ReceiverCapabilitiesErrorCode =
 	| "INVALID_REQUEST"
 	| "METHOD_NOT_ALLOWED"
 
+// prettier-ignore
 export type ReceiverCapabilitiesError = {
 	readonly error: "ReceiverCapabilitiesError"
 } & (
@@ -258,3 +264,9 @@ export type ReceiverCapabilitiesError = {
 			readonly message: "Receiver capabilities method not allowed"
 	}
 )
+
+export interface ReceiverIqDelivery {
+	readonly advertised: readonly ("raw" | "channels")[] | null
+	readonly configured: "raw" | "channels" | "auto"
+	readonly resolved: "raw"
+}
