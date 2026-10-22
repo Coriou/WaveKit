@@ -529,7 +529,10 @@ it.each(["pending", "below"] as const)(
 					endReason?: "quiet"
 				},
 			): void
-			log: { info: (...args: unknown[]) => void }
+			log: {
+				info: (...args: unknown[]) => void
+				debug: (...args: unknown[]) => void
+			}
 		}
 		const run = vi.fn()
 		const runLive = vi.fn()
@@ -611,7 +614,10 @@ it.each(["passed", "busy"] as const)(
 					endReason?: "quiet"
 				},
 			): void
-			log: { info: (...args: unknown[]) => void }
+			log: {
+				info: (...args: unknown[]) => void
+				debug: (...args: unknown[]) => void
+			}
 			retryAnalog(): void
 		}
 		let finish = () => {}
@@ -768,7 +774,10 @@ it("bounds deferred captures, expires lost IQ, and throttles each refusal reason
 	const internal = h.service as unknown as {
 		deps: ScannerServiceDeps
 		now: () => number
-		log: { info: (...args: unknown[]) => void }
+		log: {
+			info: (...args: unknown[]) => void
+			debug: (...args: unknown[]) => void
+		}
 		analogDeferred: Map<
 			string,
 			{
@@ -824,6 +833,7 @@ it("bounds deferred captures, expires lost IQ, and throttles each refusal reason
 			} as unknown as NonNullable<ScannerServiceDeps["iqCapture"]>,
 		}
 		const log = vi.spyOn(internal.log, "info")
+		const debug = vi.spyOn(internal.log, "debug")
 		for (let i = 0; i < 129; i++)
 			internal.deferAnalog({ ...live, observationId: `bounded-${i}` }, track)
 		expect(internal.analogDeferred.size).toBe(128)
@@ -836,10 +846,35 @@ it("bounds deferred captures, expires lost IQ, and throttles each refusal reason
 				([row]) => (row as { reason: string }).reason === "capacity",
 			),
 		).toHaveLength(1)
+		expect(debug).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				observationId: "bounded",
+				reason: "capacity",
+				total: 2,
+			}),
+			"Analog trial refusal suppressed",
+		)
+		internal.refuseAnalog(
+			{ ...live, observationId: "other-observation" },
+			"capacity",
+		)
+		expect(debug).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				observationId: "other-observation",
+				reason: "capacity",
+				total: 3,
+			}),
+			"Analog trial refusal suppressed",
+		)
+		internal.refuseAnalog({ ...live, observationId: "unsafe\n" }, "capacity")
+		expect(debug).toHaveBeenLastCalledWith(
+			expect.objectContaining({ observationId: null }),
+			"Analog trial refusal suppressed",
+		)
 		now = 60_000
 		internal.refuseAnalog(live, "capacity")
 		expect(log).toHaveBeenLastCalledWith(
-			expect.objectContaining({ reason: "capacity", suppressed: 1 }),
+			expect.objectContaining({ reason: "capacity", suppressed: 3 }),
 			"Analog trial refused",
 		)
 		now = 599_999

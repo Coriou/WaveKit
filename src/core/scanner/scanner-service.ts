@@ -601,11 +601,23 @@ export class ScannerService extends EventEmitter {
 		},
 		reason: string,
 	): void {
+		const safeId = (id: string | null): string | null =>
+			id !== null && /^[a-zA-Z0-9_-]{1,128}$/.test(id) ? id : null
 		const now = this.now()
 		const prior = this.analogRefusals.get(reason)
 		if (prior) prior.total++
 		if (prior && now - prior.at < 60_000) {
 			prior.suppressed++
+			this.log.debug(
+				{
+					sourceId: safeId(live.sourceId),
+					observationId: safeId(live.observationId),
+					discoveryId: safeId(live.discoveryId),
+					reason,
+					total: prior.total,
+				},
+				"Analog trial refusal suppressed",
+			)
 			return
 		}
 		this.analogRefusals.set(reason, {
@@ -613,8 +625,6 @@ export class ScannerService extends EventEmitter {
 			suppressed: 0,
 			total: prior?.total ?? 1,
 		})
-		const safeId = (id: string | null): string | null =>
-			id !== null && /^[a-zA-Z0-9_-]{1,128}$/.test(id) ? id : null
 		this.log.info(
 			{
 				sourceId: safeId(live.sourceId),
