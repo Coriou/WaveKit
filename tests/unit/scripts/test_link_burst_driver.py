@@ -121,6 +121,12 @@ class DriverTests(unittest.TestCase):
         self.assertIn("post-exclusion drain exceeded its bound", failures)
         self.assertIn("implied sibling excess rate is below the assumption", failures)
 
+    def test_host_scenario_reserves_a_cpu_for_the_fake(self):
+        self.assertEqual(driver.cpu_split(6), ("0-4", "5"))
+        self.assertEqual(driver.cpu_split(2), ("0", "1"))
+        with self.assertRaises(driver.InvalidRun):
+            driver.cpu_split(1)
+
     def test_interruption_tears_down(self):
         experiment = self.experiment("upstream")
         with tempfile.TemporaryDirectory() as directory:

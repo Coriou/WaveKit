@@ -6,7 +6,9 @@ Only the API is published, on an ephemeral loopback port. It requires local
 Set `LINK_BURST_IMAGE` to select another locally built core image. The core image
 must include Python 3 for the shim and `stress-ng` for the host scenario. The
 repository runtime includes Python 3 but does not currently install `stress-ng`;
-use a prepared local image for that scenario.
+use a prepared local image for that scenario. The host scenario pins the
+core to all but the last Docker CPU and the fake to the last one, so stress-ng in
+the core cannot starve the fake receiver.
 
 ```sh
 python3 scripts/link-burst/run_acceptance.py --rate 2048000 --scenario lossless --minutes 10 --out output/link-burst/lossless-2048000

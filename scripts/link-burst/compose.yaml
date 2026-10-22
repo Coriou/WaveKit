@@ -3,6 +3,8 @@ services:
     image: python:3.13-slim
     pull_policy: never
     entrypoint: ["python3", "/opt/fake_host_status.py"]
+    # Host runs give the fake its own CPU so core stress cannot starve it.
+    cpuset: "${LINK_BURST_FAKE_CPUS:-}"
     command:
       - --loop
       - --rate
@@ -21,6 +23,7 @@ services:
   core:
     image: "${LINK_BURST_IMAGE:-wavekit:latest}"
     pull_policy: never
+    cpuset: "${LINK_BURST_CORE_CPUS:-}"
     depends_on: [fake]
     environment:
       WAVEKIT_CONFIG_PATH: /app/config

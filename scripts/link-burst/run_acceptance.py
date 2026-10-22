@@ -53,6 +53,14 @@ class InvalidRun(Exception):
     pass
 
 
+def cpu_split(count):
+    """Core CPUs and the fake's reserved CPU for the host scenario."""
+    if count < 2:
+        raise InvalidRun("host scenario needs at least two CPUs")
+    core = "0" if count == 2 else f"0-{count - 2}"
+    return core, str(count - 1)
+
+
 def interrupted(signum, _frame):
     raise InvalidRun("interrupted by " + signal.Signals(signum).name)
 
@@ -310,6 +318,15 @@ class Experiment:
         exit_code = 2
         handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
         try:
+            if self.args.scenario == "host":
+                # Confine stress-ng (run inside core) to the core's CPU set so the
+                # fake receiver is not starved: a loaded core host does not slow
+                # the remote receiver.
+                count = int(subprocess.run(["docker", "info", "--format", "{{.NCPU}}"], text=True,
+                                           capture_output=True, check=True, timeout=30).stdout)
+                core, fake = cpu_split(count)
+                self.env.update(LINK_BURST_CORE_CPUS=core, LINK_BURST_FAKE_CPUS=fake)
+                self.summary.update(coreCpus=core, fakeCpus=fake)
             self.compose("up", "-d", "--no-build", "--pull", "never")
             deadline = time.monotonic() + 120
             while True:

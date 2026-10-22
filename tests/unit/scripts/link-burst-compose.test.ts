@@ -29,6 +29,8 @@ it("isolates the scratch project and validates the slow sink", () => {
 	expect(compose.services.fake.networks).toBeUndefined()
 	expect([...compose.services.api.networks].sort()).toEqual(["default", "edge"])
 	expect(compose.services.fake.ports).toBeUndefined()
+	expect(compose.services.core.cpuset).toBe("${LINK_BURST_CORE_CPUS:-}")
+	expect(compose.services.fake.cpuset).toBe("${LINK_BURST_FAKE_CPUS:-}")
 	expect(compose.services.core.ports).toBeUndefined()
 	expect(compose.services.api.ports).toEqual(["127.0.0.1::3000"])
 	expect(compose.services.api.volumes).toContain(
