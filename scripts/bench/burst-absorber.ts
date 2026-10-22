@@ -5,6 +5,8 @@
  * Active core fractions use the scripted holding/catch-up wall time; Avg fields
  * use the whole stream duration. The CLI measures event-loop p99 against a paced
  * direct-fanout baseline (10 ms histogram resolution); runBench leaves it at 0.
+ * loopMaxAddedMs is the baseline-subtracted histogram max, a paced-step proxy
+ * that includes scheduler noise; maxDrainMs times individual synchronous wakes.
  * Per-chunk costs are medians of five passes after a discarded warmup pass.
  *
  *   pnpm exec esbuild scripts/bench/burst-absorber.ts --bundle \
@@ -16,7 +18,10 @@
 import { EventEmitter } from "node:events"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
 import process from "node:process"
-import { setTimeout as sleep } from "node:timers/promises"
+import {
+	setImmediate as nextTurn,
+	setTimeout as sleep,
+} from "node:timers/promises"
 import { pathToFileURL } from "node:url"
 import pino from "pino"
 import { createBurstAbsorber } from "../../src/core/link-burst/absorber.js"
@@ -35,6 +40,7 @@ export interface BenchResult {
 	holdPeriodMs: number
 	catchupPeriodMs: number
 	maxDrainMs: number
+	loopMaxAddedMs: number
 	loopP99AddedMs: number
 	ringBytes: number
 	ingestedBytes: number
@@ -48,7 +54,8 @@ type BenchOptions = { rate: number; seconds: number }
 function* pass(
 	opts: BenchOptions,
 	directOnly = false,
-): Generator<number, BenchResult, void> {
+	paced = false,
+): Generator<number | (() => boolean), BenchResult, void> {
 	const { rate, seconds } = opts
 	if (
 		!Number.isSafeInteger(rate) ||
@@ -118,7 +125,15 @@ function* pass(
 			if (!directOnly) events.emit("drain", id)
 			maxDrainMs = Math.max(maxDrainMs, performance.now() - start)
 		}
-		const elapsed = performance.now() - start
+		let elapsed = performance.now() - start
+		// Only the synchronous benchmark substitutes wakes for queued continuations.
+		while (!paced && !directOnly && absorber.counters().heldBytes > 0) {
+			const stepStart = performance.now()
+			events.emit("drain", ids[0])
+			const stepMs = performance.now() - stepStart
+			maxDrainMs = Math.max(maxDrainMs, stepMs)
+			elapsed += stepMs
+		}
 		releaseMs += elapsed
 	}
 	while (ingestedBytes < target) {
@@ -133,7 +148,10 @@ function* pass(
 		now =
 			cycle + (phase < 100 || phase >= 1300 ? phase : 700 + (phase - 100) / 2)
 		yield now
-		if (blocked && phase >= 1300) drain()
+		if (blocked && phase >= 1300) {
+			drain()
+			if (paced) yield () => absorber.counters().heldBytes === 0
+		}
 		blocked = phase >= 100 && phase < 1300
 		// Direct fanout baseline uses the same buffers and three branch writes.
 		let start = performance.now()
@@ -159,6 +177,7 @@ function* pass(
 	now = Math.max(now, seconds * 1000)
 	yield now
 	drain()
+	if (paced) yield () => absorber.counters().heldBytes === 0
 	const counters = absorber.counters()
 	absorber.dispose()
 	return {
@@ -174,6 +193,7 @@ function* pass(
 		catchupPeriodMs: activePeriodMs,
 		maxDrainMs,
 		loopP99AddedMs: 0,
+		loopMaxAddedMs: 0,
 		ringBytes: counters.capacityBytes,
 		ingestedBytes,
 		deliveredBytes: branches[0]!,
@@ -201,8 +221,8 @@ export function runBench(opts: BenchOptions): BenchResult {
 	}
 }
 
-async function loopPhase(opts: BenchOptions, directOnly: boolean) {
-	const workload = pass(opts, directOnly)
+export async function loopPhase(opts: BenchOptions, directOnly: boolean) {
+	const workload = pass(opts, directOnly, true)
 	// Allocate and configure before sampling, identically for both phases.
 	let step = workload.next()
 	const histogram = monitorEventLoopDelay({ resolution: 10 })
@@ -212,14 +232,24 @@ async function loopPhase(opts: BenchOptions, directOnly: boolean) {
 	const start = performance.now()
 	try {
 		while (!step.done) {
-			const deadline = start + step.value
-			while (performance.now() < deadline)
-				await sleep(Math.max(1, deadline - performance.now()))
+			if (typeof step.value === "function") {
+				// Yield to the absorber's real setImmediate chain before resuming input
+				// or disposing. Never substitute synchronous drain wakes here.
+				while (!step.value()) await nextTurn()
+			} else {
+				const deadline = start + step.value
+				while (performance.now() < deadline)
+					await sleep(Math.max(1, deadline - performance.now()))
+			}
 			step = workload.next()
 		}
 		// Let the histogram observe the final synchronous drain too.
 		await sleep(20)
-		return { p99Ms: histogram.percentile(99) / 1e6, result: step.value }
+		return {
+			p99Ms: histogram.percentile(99) / 1e6,
+			maxMs: histogram.max / 1e6,
+			result: step.value,
+		}
 	} finally {
 		histogram.disable()
 		workload.return(undefined as never)
@@ -244,6 +274,7 @@ if (
 	const baseline = await loopPhase(opts, true)
 	const workload = await loopPhase(opts, false)
 	result.loopP99AddedMs = Math.max(0, workload.p99Ms - baseline.p99Ms)
+	result.loopMaxAddedMs = Math.max(0, workload.maxMs - baseline.maxMs)
 	result.maxDrainMs = Math.max(result.maxDrainMs, workload.result.maxDrainMs)
 	process.stdout.write(`${JSON.stringify(result)}\n`)
 }
