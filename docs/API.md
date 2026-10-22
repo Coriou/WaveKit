@@ -3528,7 +3528,7 @@ observation before its replay started discards the capture unreplayed.
 
 #### IQ capture on detection (WG11)
 
-Off by default; protected access mode only. A transmission is identified even when
+On by default in protected access mode. A transmission is identified even when
 it ended before a decoder could run: the core keeps up to about 4 s of narrowband IQ
 of it, replays that into the probe decoders off-air, records the result and deletes
 the IQ at once. Config (`scanner.iqCapture`, config only; unknown keys are refused):
@@ -3536,16 +3536,17 @@ the IQ at once. Config (`scanner.iqCapture`, config only; unknown keys are refus
 ```yaml
 scanner:
   iqCapture:
-    enabled: true # default false
+    enabled: true # default true
     maxTotalMb: 256 # 16 to 256 (the cap, 256 MiB)
     maxCaptureMs: 4000 # 500 to 4000, pre-roll included
     preRollMs: 500 # 0 to 2000 (the native ring)
     binaryPath: wavekit-iqcap
 ```
 
-- **Scope.** Absent or `enabled: false`: no process, no file, no change anywhere. In
+- **Scope.** `enabled: false`: no process, no file, no change anywhere. In
   legacy mode the key is not acted on and one info line says so. A missing binary
-  turns capture off with one warn; identify and the scanner work as before.
+  turns capture off with one info log explaining how to build it (`make chan-build`);
+  identify and the scanner work as before.
 - **Capture.** One `wavekit-iqcap` process per IQ source (a second binary of the
   `wavekit-chan` crate, in the image) reads the spectrum engine's CU8 tap (no new
   fanout branch) into a full-rate ring of at most 2 s. The scanner requests a capture
@@ -6533,8 +6534,8 @@ never a failed synchronization, and appear in `proof.unavailable`.
 
 `scanner.iqCapture.allowLegacy` (default false) is reserved: today IQ capture runs
 only in protected access mode, whatever this flag says. It is meant to permit capture
-in legacy mode once capture is turned on by default. Capture remains off by default
-pending live acceptance. Trial, analog and unavailable evidence is currently
+in legacy mode in the future. Capture is on by default in protected mode.
+Trial, analog and unavailable evidence is currently
 in memory; persisted decode evidence can rebuild decoded proofs after restart.
 
 ### Live audio engine and tone (WG12)

@@ -304,10 +304,14 @@ describe("WG11 contract: tuner config and command origin", () => {
 })
 
 describe("WG11 contract: passive cost and IQ capture config", () => {
-	it("parses the shipped scanner config without the new keys", () => {
+	it("enables capture by default without a passive utilization override", () => {
 		const parsed = ScannerConfigSchema.parse({})
 		expect("maxEngineUtilization" in parsed.passive).toBe(false)
-		expect("iqCapture" in parsed).toBe(false)
+		expect(parsed.iqCapture.enabled).toBe(true)
+		expect(
+			ScannerConfigSchema.parse({ iqCapture: { enabled: false } }).iqCapture
+				.enabled,
+		).toBe(false)
 	})
 
 	it("bounds the passive limit and pins the guard constants", () => {
@@ -342,15 +346,14 @@ describe("WG11 contract: passive cost and IQ capture config", () => {
 		expect(decisions).toHaveLength(3)
 	})
 
-	it("fills IQ capture defaults only when the object is present, within the contract bounds", () => {
+	it("fills IQ capture defaults within the contract bounds", () => {
 		const parsed = ScannerConfigSchema.parse({ iqCapture: {} })
 		expect(parsed.iqCapture).toEqual({
-			enabled: false,
+			enabled: true,
 			maxTotalMb: 256,
 			maxCaptureMs: 4000,
 			preRollMs: 500,
 			binaryPath: "wavekit-iqcap",
-			// WG12: filled only when the object is present. Absent iqCapture stays omitted.
 			allowLegacy: false,
 		})
 		for (const bad of [
@@ -369,7 +372,7 @@ describe("WG11 contract: passive cost and IQ capture config", () => {
 		expect(4000).toBe(IQ_CAPTURE_MAX_MS)
 		expect(2000).toBe(IQ_CAPTURE_PREROLL_MAX_MS)
 		const settings: Api.ScannerIqCaptureSettings = parsed.iqCapture!
-		expect(settings.enabled).toBe(false)
+		expect(settings.enabled).toBe(true)
 	})
 })
 

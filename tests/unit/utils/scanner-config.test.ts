@@ -12,7 +12,17 @@ import {
 import type { ScannerSettings } from "../../../src/core/scanner/types.js"
 import { ConfigValidationError } from "../../../src/utils/errors.js"
 
+const IQ_CAPTURE_DEFAULTS = {
+	enabled: true,
+	maxTotalMb: 256,
+	maxCaptureMs: 4000,
+	preRollMs: 500,
+	binaryPath: "wavekit-iqcap",
+	allowLegacy: false,
+}
+
 const SPEC_DEFAULTS: ScannerSettings = {
+	iqCapture: IQ_CAPTURE_DEFAULTS,
 	enabled: true,
 	passive: { enabled: true, offsetProbes: false },
 	cpuBudgetCores: 1,

@@ -196,7 +196,7 @@ The `scanner:` section of `config/default.yaml` holds the defaults. "Runtime" ma
 | `ws.maxMessagesPerSecond`, `spectrumHz`, `spectrumBins`                                           | 10, 10, 512                           | yes     |
 | `ws.spectrumSummaryBins`, `spectrumMaxProfiles`                                                   | 2048, 4                               |         |
 | `ws.spectrumBinsCap` (`auto`, 2048, 4096, 8192; WG8)                                              | absent (= `auto`)                     |         |
-| `iqCapture.enabled`, `maxTotalMb`, `maxCaptureMs`, `preRollMs`, `binaryPath` (WG11, protected)    | absent (off); `false`, 256, 4000, 500 |         |
+| `iqCapture.enabled`, `maxTotalMb`, `maxCaptureMs`, `preRollMs`, `binaryPath` (WG11, protected)    | absent (on); `true`, 256, 4000, 500   |         |
 
 Env overrides: `WAVEKIT_SCANNER__CPU_BUDGET_CORES=0.5`, `WAVEKIT_SCANNER__PASSIVE__ENABLED=false`. Per source: `sources[i].scanner: { role: shared | dedicated, passive: true }`; dedicated receivers never get unsourced decoders. Example PATCH: `{"passive": {"rtl": false}, "maxProbes": {"offset": 0}}`.
 
@@ -244,7 +244,7 @@ Each job counts its hits: one per observation attributed to a discovery, per dis
 
 ## IQ capture on detection (WG11)
 
-Off by default and protected access mode only (`scanner.iqCapture.enabled: true`; in legacy mode it is not started and one info line says so). It exists so a transmission can be identified after it ended, when no decoder was running in time. The flow is fixed: **capture → queue → replay trials → result → discard**.
+On by default in protected access mode (`scanner.iqCapture.enabled: true`; in legacy mode it is not started and one info line says so). It exists so a transmission can be identified after it ended, when no decoder was running in time. The flow is fixed: **capture → queue → replay trials → result → discard**.
 
 1. **Capture.** A native tool (`wavekit-iqcap`, shipped next to `wavekit-chan`) keeps a 2 s full-rate ring of the source's IQ from the spectrum engine's tap. When a track surfaces and its discovery has no confirmed result for this transmission (not decoded yet, or a known protocol not yet confirmed live on it), and it is not a spur or an image, the scanner asks for a capture: the channel shifted and decimated to 48 kHz complex float32, from the pre-roll (500 ms by default) to the track's close or 4 s. At most 6 per source per minute and 2 at once; at most 256 MiB on disk.
 2. **Queue.** A finished capture joins one first-in, first-out replay queue. An identify job near it takes it over instead (at most 2, newest first) and replays it after its live runs.
@@ -402,5 +402,5 @@ an older nearest track cannot hide a newer eligible one. The trial timeout start
 at the transmission start. No signal ends honestly with `ended: "no-signal"`.
 Progress reports settling, holding, trialing, replaying, capturing or watching,
 with the current hold/trial and replay queue depth; see [API details](API.md#scanner-evidence-and-activity-wg12).
-Capture remains off by default pending live acceptance, and runs only in protected
+Capture is on by default, and runs only in protected
 access mode (`scanner.iqCapture.allowLegacy` is reserved for legacy mode later).

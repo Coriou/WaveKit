@@ -1406,7 +1406,7 @@ class Service implements IqCaptureService {
 				if (z.proc === proc) this.reap(id)
 		})
 		proc.once("exit", (failed: boolean, code: string | null) => {
-			if (failed && proc.lastFailure) {
+			if (failed && code !== "ENOENT" && proc.lastFailure) {
 				this.toolFailures++
 				this.lastToolFailure = proc.lastFailure
 				this.log.debug({ ...proc.lastFailure }, "IQ capture tool failed")
@@ -1428,7 +1428,9 @@ class Service implements IqCaptureService {
 
 	private binaryMissing(): void {
 		if (this.st !== "on") return
-		this.log.warn("IQ capture tool not found; capture is off")
+		this.log.info(
+			"IQ capture tool not found; capture is off; build it with make chan-build",
+		)
 		this.turnOff()
 	}
 

@@ -452,6 +452,9 @@ csdr:
 # sourceId.
 #
 # scanner:
+#   # IQ capture defaults on in protected mode; set enabled: false to disable.
+#   iqCapture:
+#     enabled: true
 #   enabled: true
 #   channelTier:                # config only; not exposed or changed by scanner settings PATCH
 #     enabled: false

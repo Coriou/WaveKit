@@ -1481,3 +1481,7 @@ cores omit them).
 5. CLI: `cli/source/data/guards.ts` accepts `link-capacity`, the new reason words and the `decoder-rate` origin; it
    strips the other new fields. Web: label the two reasons and the `decoder-rate` origin; show `mode` as a three-way
    switch once the core ships the producer (a follow-up note announces it).
+
+### IQ capture default on — 2026-10-22
+
+The scanner status `iqCapture` field is now normally present in protected mode; clients should show capture state.

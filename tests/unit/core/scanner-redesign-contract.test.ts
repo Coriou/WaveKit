@@ -70,8 +70,15 @@ import {
 	viewOf,
 } from "../../mocks/scanner/identify-fakes.js"
 
-/** Absent `iqCapture` is omitted, which is the WG11 parsed output. */
-const wg11IqCaptureDefault = undefined
+/** Capture defaults apply even when the key is absent. */
+const iqCaptureDefault = {
+	enabled: true,
+	maxTotalMb: 256,
+	maxCaptureMs: 4000,
+	preRollMs: 500,
+	binaryPath: "wavekit-iqcap",
+	allowLegacy: false,
+}
 
 describe("WG12 scanner redesign contract", () => {
 	let app: FastifyInstance
@@ -259,10 +266,8 @@ describe("WG12 scanner redesign contract", () => {
 			256,
 		)
 	})
-	it("config: absent iqCapture parses to the WG11 output; allowLegacy defaults false", () => {
-		expect(ScannerConfigSchema.parse({}).iqCapture).toEqual(
-			wg11IqCaptureDefault,
-		)
+	it("config: absent iqCapture enables capture; allowLegacy defaults false", () => {
+		expect(ScannerConfigSchema.parse({}).iqCapture).toEqual(iqCaptureDefault)
 		expect(
 			ScannerConfigSchema.parse({ iqCapture: { enabled: true } }).iqCapture
 				?.allowLegacy,

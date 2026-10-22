@@ -671,12 +671,12 @@ export const ScannerConfigSchema = z
 			})
 			.default({}),
 		/**
-		 * WG11 req 6.1: narrowband IQ capture on detection, replayed into identify. Config only,
-		 * protected access mode only; absent means off, so the parsed config is unchanged.
+		 * Narrowband IQ capture on detection, replayed into identify. Enabled by default;
+		 * the runtime requires protected access mode.
 		 */
 		iqCapture: z
 			.object({
-				enabled: z.boolean().default(false),
+				enabled: z.boolean().default(true),
 				/** Total capture storage (IQ_CAPTURE_TOTAL_MAX_BYTES = 256 MiB at most). */
 				maxTotalMb: z.number().int().min(16).max(256).default(256),
 				/** One capture, pre-roll included (IQ_CAPTURE_MAX_MS). */
@@ -685,13 +685,12 @@ export const ScannerConfigSchema = z
 				preRollMs: z.number().int().min(0).max(2000).default(500),
 				binaryPath: z.string().min(1).default("wavekit-iqcap"),
 				/**
-				 * WG12: legacy access mode may capture only when this is true. Default false.
-				 * `enabled` stays false until the capture default flip.
+				 * Legacy access mode may capture only when this is true. Default false.
 				 */
 				allowLegacy: z.boolean().default(false),
 			})
 			.strict()
-			.optional(),
+			.default({}),
 	})
 	.superRefine((value, ctx) => {
 		if (value.hold.preRollMs > value.ringSeconds * 1000) {

@@ -220,7 +220,7 @@ describe("IqCaptureService off states", () => {
 		expect(s.sp.spawn).not.toHaveBeenCalled()
 	})
 
-	it("missing binary: capture off with one warn, the port keeps answering", async () => {
+	it("missing binary: capture off with one info and no tool failures", async () => {
 		const s = await setup({}, { enoent: true })
 		s.svc.attachSource("src", {
 			sampleRateHz: FS,
@@ -231,7 +231,19 @@ describe("IqCaptureService off states", () => {
 		await s.svc.start()
 		await flush()
 		expect(s.svc.state()).toBe("unavailable")
-		expect(s.lines.filter(l => l.level === "warn")).toHaveLength(1)
+		expect(s.lines.filter(l => l.level === "warn")).toHaveLength(0)
+		expect(
+			s.lines.filter(l => logText([l]).includes("tool not found")),
+		).toEqual([
+			{
+				level: "info",
+				args: [
+					"IQ capture tool not found; capture is off; build it with make chan-build",
+				],
+			},
+		])
+		expect(s.svc.counters().toolFailures).toBe(0)
+		expect(s.svc.counters().lastToolFailure).toBeNull()
 		expect(s.svc.capture(req())).toEqual({ refused: "unavailable" })
 		expect(
 			s.svc.near("src", RF, 1000, { observationId: null, limit: 2 }),
