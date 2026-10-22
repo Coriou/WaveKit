@@ -127,6 +127,22 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(driver.InvalidRun):
             driver.cpu_split(1)
 
+    def test_upstream_waits_for_upstream_statistics(self):
+        experiment = self.experiment("upstream")
+        reports = [dict(sourceId=driver.SOURCE, transport="network")]
+        fanout = {"branches": [dict(sourceId=driver.SOURCE, id="decoder-" + driver.SINK),
+                               dict(sourceId=driver.SOURCE, id="decoder-" + driver.SIBLING)]}
+        backpressure = [dict(sourceId=driver.SOURCE, available=False)]
+        experiment.get = Mock(side_effect=lambda path: {
+            "/api/resources/link-quality": reports, "/api/telemetry/fanout": fanout,
+            "/api/resources/backpressure": backpressure}[path])
+        self.assertFalse(experiment.ready())
+        backpressure[0]["available"] = True
+        self.assertTrue(experiment.ready())
+        experiment.args.scenario = "lossless"
+        backpressure[0]["available"] = False
+        self.assertTrue(experiment.ready())
+
     def test_interruption_tears_down(self):
         experiment = self.experiment("upstream")
         with tempfile.TemporaryDirectory() as directory:

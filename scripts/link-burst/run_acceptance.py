@@ -125,9 +125,15 @@ class Experiment:
         # link report and the slow-sink branch so the first sample is complete.
         reports = self.get("/api/resources/link-quality")
         branches = self.get("/api/telemetry/fanout")["branches"]
-        return (any(r.get("sourceId") == SOURCE and r.get("transport") == "network" for r in reports)
-                and any(b.get("sourceId") == SOURCE and SINK in b["id"] for b in branches)
-                and any(b.get("sourceId") == SOURCE and SIBLING in b["id"] for b in branches))
+        ready = (any(r.get("sourceId") == SOURCE and r.get("transport") == "network" for r in reports)
+                 and any(b.get("sourceId") == SOURCE and SINK in b["id"] for b in branches)
+                 and any(b.get("sourceId") == SOURCE and SIBLING in b["id"] for b in branches))
+        if ready and self.args.scenario == "upstream":
+            # The sdr-host poller can take a few seconds (with backoff) to read
+            # the fake's statistics for the first time.
+            upstream = self.get("/api/resources/backpressure")
+            ready = any(b.get("sourceId") == SOURCE and b.get("available") for b in upstream)
+        return ready
 
     def sentinel(self, rate):
         self.compose("exec", "-T", "core", "sh", "-c",
