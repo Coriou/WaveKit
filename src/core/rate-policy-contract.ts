@@ -36,6 +36,11 @@ export interface LinkAdvisoryInput {
 	sampleRateHz: number
 }
 export interface LinkAdvisor {
+	shortfall?(
+		sourceId: string,
+		sampleRateHz: number,
+		frameBytes: number,
+	): boolean | null
 	observe(
 		sourceId: string,
 		receivedBytesPerSecond: number | null,
