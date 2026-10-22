@@ -24,6 +24,15 @@ decoders:
       inputSampleRate: 2048000
       targetSampleRate: 1000000
       extraArgs: [link-burst-slow-sink]
+  # Always-on sibling: unmarked, so the shim runs the real rtl_433 at full speed.
+  - id: link-burst-sibling
+    type: rtl433
+    enabled: true
+    sourceId: link-burst-fake
+    useChannelizer: false
+    options:
+      inputSampleRate: 2048000
+      targetSampleRate: 1000000
 decoderPolicy:
   catalogue: true
   rateRaise: false

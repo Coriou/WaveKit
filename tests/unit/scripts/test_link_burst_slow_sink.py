@@ -92,7 +92,7 @@ class AcceptanceTests(unittest.TestCase):
                 "attribution": {"last": attribution, "counts10m": {key: int(key == attribution) for key in ("none", "link", "consumer", "host", "unknown")}}}],
             "fanout": {"branches": [
                 {"id": run.SINK, "sourceId": run.SOURCE, "droppedBytesTotal": 0, "totalBytesWritten": 1000},
-                {"id": "sibling", "sourceId": run.SOURCE, "droppedBytesTotal": drops, "totalBytesWritten": 1000}]},
+                {"id": "decoder-" + run.SIBLING, "sourceId": run.SOURCE, "droppedBytesTotal": drops, "totalBytesWritten": 1000}]},
             "decoders": [{"id": run.SINK, "restartCount": 0, "running": True,
                 "health": "idle", "pid": 20, "uptime": 100}],
             "efficiency": {"sources": [{"sourceId": run.SOURCE, "admitted": [], "blocked": []}]}}
@@ -142,6 +142,13 @@ class AcceptanceTests(unittest.TestCase):
             "detail": "budget", "probation": False}]
         experiment.record(sample)
         self.assertEqual(experiment.summary["suspensions"], [])
+
+    def test_missing_sibling_invalidates(self):
+        experiment = self.experiment()
+        sample = self.sample()
+        sample["fanout"]["branches"] = sample["fanout"]["branches"][:1]
+        with self.assertRaisesRegex(run.InvalidRun, "sibling"):
+            experiment.record(sample)
 
     def test_missing_histogram_invalidates(self):
         experiment = self.experiment()

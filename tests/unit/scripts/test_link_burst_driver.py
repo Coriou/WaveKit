@@ -89,6 +89,13 @@ class DriverTests(unittest.TestCase):
         experiment.record_consumer({"phase": "consumer", "mono": 702}, absorber, branches)
         self.assertEqual(experiment.summary["consumerSiblingDrops"], 10)
 
+    def test_host_accepts_absorber_overflow_as_exercised_loss(self):
+        experiment = self.experiment("host")
+        experiment.attributions["host"] = 1
+        self.assertIn("host drops were not exercised", experiment.failures())
+        experiment.summary["overflowBytes"] = 100
+        self.assertEqual(experiment.failures(), [])
+
     def test_interruption_tears_down(self):
         experiment = self.experiment("upstream")
         with tempfile.TemporaryDirectory() as directory:

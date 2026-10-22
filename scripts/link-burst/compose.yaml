@@ -27,6 +27,7 @@ services:
       WAVEKIT_SOURCES_0_CAPS__SAMPLE_RATE: "${LINK_BURST_RATE:-2048000}"
       WAVEKIT_SOURCES_0_BURST_ABSORBER__SECONDS: "${LINK_BURST_SECONDS:-2}"
       WAVEKIT_DECODERS_0_OPTIONS__INPUT_SAMPLE_RATE: "${LINK_BURST_RATE:-2048000}"
+      WAVEKIT_DECODERS_1_OPTIONS__INPUT_SAMPLE_RATE: "${LINK_BURST_RATE:-2048000}"
       PATH: /opt/link-burst/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - ./config.yaml:/app/config/default.yaml:ro

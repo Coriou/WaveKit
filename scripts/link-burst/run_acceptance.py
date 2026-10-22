@@ -14,6 +14,7 @@ from urllib.request import ProxyHandler, build_opener
 
 SOURCE = "link-burst-fake"
 SINK = "link-burst-slow-sink"
+SIBLING = "link-burst-sibling"
 INTERVALS = (9, 1, 130, 50, 40, 71, 161)
 ROOT = Path(__file__).resolve().parent
 
@@ -108,7 +109,8 @@ class Experiment:
         reports = self.get("/api/resources/link-quality")
         branches = self.get("/api/telemetry/fanout")["branches"]
         return (any(r.get("sourceId") == SOURCE and r.get("transport") == "network" for r in reports)
-                and any(b.get("sourceId") == SOURCE and SINK in b["id"] for b in branches))
+                and any(b.get("sourceId") == SOURCE and SINK in b["id"] for b in branches)
+                and any(b.get("sourceId") == SOURCE and SIBLING in b["id"] for b in branches))
 
     def sentinel(self, rate):
         self.compose("exec", "-T", "core", "sh", "-c",
@@ -170,6 +172,10 @@ class Experiment:
         if len(sinks) != 1:
             raise InvalidRun("expected exactly one slow-sink fanout branch")
         sink = sinks[0]
+        # Scanner and catalogue branches come and go; the YAML sibling keeps the
+        # consumer checks from passing vacuously.
+        if not any(SIBLING in b["id"] for b in branches):
+            raise InvalidRun("always-on sibling fanout branch is missing")
         self.summary["sinkBranchId"] = sink["id"]
         for branch in branches:
             self.summary["branches"][branch["id"]] = {
@@ -392,7 +398,8 @@ class Experiment:
         if scenario == "upstream" and not self.summary["upstreamDroppedBytes"]:
             failures.append("upstream drops were not exercised")
         expected = {"host": "host", "consumer": "consumer"}.get(scenario)
-        if scenario == "host" and not drops:
+        # Absorber overflow counts as dropped bytes, like branch drops.
+        if scenario == "host" and not (drops or self.summary["overflowBytes"]):
             failures.append("host drops were not exercised")
         if expected and not self.attributions[expected]:
             failures.append("expected attribution was not observed: " + expected)
