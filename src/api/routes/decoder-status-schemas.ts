@@ -24,7 +24,7 @@ export const decoderStatsSchema = {
 /** Optional fields from CLI-COORDINATION requests 2-4. */
 const efficiencyDetail = {
 	type: "string",
-	enum: ["budget", "cpu", "drops", "unknown"],
+	enum: ["budget", "cpu", "drops", "unknown", "late-drops"],
 } as const
 
 export const decoderStatusExtensionProperties = {

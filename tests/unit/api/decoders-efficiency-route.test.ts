@@ -1,4 +1,5 @@
 import Fastify from "fastify"
+import { decoderStatusExtensionProperties } from "../../../src/api/routes/decoder-status-schemas.js"
 import { expect, it } from "vitest"
 import type { DecoderEfficiencyView } from "@wavekit/api-types"
 import {
@@ -185,6 +186,193 @@ it("the route serves the real efficiency gate's view unchanged", async () => {
 			detail: "unknown",
 			retryAt: "2026-10-21T12:01:00.000Z",
 		})
+	} finally {
+		await app.close()
+	}
+})
+
+it("late drop evidence and held reasons survive efficiency serialization", async () => {
+	const enriched: DecoderEfficiencyView = {
+		...view,
+		sources: view.sources.map(source => ({
+			...source,
+			attribution: "consumer",
+			lateDrops: {
+				condemningWindows: 2,
+				windows: 3,
+				cooldownUntil: "2026-10-22T12:00:00.000Z",
+				sheddable: 1,
+				held: "nothing-sheddable",
+			},
+			blocked: source.blocked.map(item => ({ ...item, detail: "late-drops" })),
+		})),
+	}
+	const app = Fastify()
+	await app.register(decoderRoutes, {
+		decoderManager: {
+			efficiencyView: () => enriched,
+		} as unknown as DecoderRoutesOptions["decoderManager"],
+	})
+	try {
+		const response = await app.inject("/api/decoders/efficiency")
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toEqual(enriched)
+	} finally {
+		await app.close()
+	}
+})
+
+async function responseValidator() {
+	const app = Fastify({ ajv: { customOptions: { coerceTypes: false } } })
+	let schema: unknown
+	app.addHook("onRoute", route => {
+		if (route.url === "/api/decoders/efficiency")
+			schema = (
+				route.schema?.response as Record<number, unknown> | undefined
+			)?.[200]
+	})
+	await app.register(decoderRoutes, {
+		decoderManager: {
+			efficiencyView: () => view,
+		} as unknown as DecoderRoutesOptions["decoderManager"],
+	})
+	await app.ready()
+	const validator = Fastify({ ajv: { customOptions: { coerceTypes: false } } })
+	validator.post(
+		"/validate",
+		{ schema: { body: schema as Record<string, unknown> } },
+		async () => ({}),
+	)
+	await app.close()
+	return validator
+}
+
+it.each([
+	{ attribution: "invalid" },
+	{ attribution: null },
+	{
+		lateDrops: {
+			condemningWindows: -1,
+			windows: 3,
+			cooldownUntil: null,
+			sheddable: 0,
+			held: null,
+		},
+	},
+	{
+		lateDrops: {
+			condemningWindows: 2,
+			windows: 3.5,
+			cooldownUntil: null,
+			sheddable: 0,
+			held: null,
+		},
+	},
+	{
+		lateDrops: {
+			condemningWindows: 2,
+			windows: 3,
+			cooldownUntil: 42,
+			sheddable: 0,
+			held: null,
+		},
+	},
+	{
+		lateDrops: {
+			condemningWindows: 2,
+			windows: 3,
+			cooldownUntil: null,
+			sheddable: "one",
+			held: null,
+		},
+	},
+	{
+		lateDrops: {
+			condemningWindows: 2,
+			windows: 3,
+			cooldownUntil: null,
+			sheddable: 0,
+			held: "invalid",
+		},
+	},
+	{
+		lateDrops: {
+			condemningWindows: 2,
+			windows: 3,
+			cooldownUntil: null,
+			sheddable: 0,
+		},
+	},
+	{ blocked: [{ ...placement, detail: "invalid" }] },
+])("efficiency response schema rejects malformed evidence %j", async fields => {
+	const app = await responseValidator()
+	try {
+		const response = await app.inject({
+			method: "POST",
+			url: "/validate",
+			payload: {
+				...view,
+				sources: view.sources.map(source => ({ ...source, ...fields })),
+			},
+		})
+		expect(response.statusCode).toBe(400)
+	} finally {
+		await app.close()
+	}
+})
+
+it.each(["none", "link", "host", "consumer", "unknown"] as const)(
+	"efficiency response schema accepts attribution %s and all held states",
+	async attribution => {
+		const app = await responseValidator()
+		try {
+			for (const held of [null, "nothing-sheddable", "link-or-unknown"]) {
+				const response = await app.inject({
+					method: "POST",
+					url: "/validate",
+					payload: {
+						...view,
+						sources: view.sources.map(source => ({
+							...source,
+							attribution,
+							blocked: [{ ...placement, detail: "late-drops" }],
+							lateDrops: {
+								condemningWindows: 2,
+								windows: 3,
+								cooldownUntil: null,
+								sheddable: 0,
+								held,
+							},
+						})),
+					},
+				})
+				expect(response.statusCode).toBe(200)
+			}
+		} finally {
+			await app.close()
+		}
+	},
+)
+
+it("decoder status efficiency schema accepts late-drops and rejects unknown details", async () => {
+	const app = Fastify()
+	app.post(
+		"/validate",
+		{ schema: { body: decoderStatusExtensionProperties.efficiency } },
+		async () => ({}),
+	)
+	try {
+		for (const [detail, expected] of [
+			["late-drops", 200],
+			["invalid", 400],
+		] as const) {
+			const response = await app.inject({
+				method: "POST",
+				url: "/validate",
+				payload: { detail },
+			})
+			expect(response.statusCode).toBe(expected)
+		}
 	} finally {
 		await app.close()
 	}

@@ -423,7 +423,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			probation: { type: "boolean" },
 			detail: {
 				type: "string",
-				enum: ["budget", "cpu", "drops", "unknown", "configured"],
+				enum: ["budget", "cpu", "drops", "unknown", "late-drops", "configured"],
 			},
 			retryAt: { type: "string" },
 		},
@@ -469,6 +469,30 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 											enum: ["ok", "dropping", "clearing", "unknown"],
 										},
 										dropBytesPerSecond: { type: ["number", "null"] },
+										attribution: {
+											type: "string",
+											enum: ["none", "link", "host", "consumer", "unknown"],
+										},
+										lateDrops: {
+											type: "object",
+											required: [
+												"condemningWindows",
+												"windows",
+												"cooldownUntil",
+												"sheddable",
+												"held",
+											],
+											properties: {
+												condemningWindows: { type: "integer", minimum: 0 },
+												windows: { type: "integer", minimum: 0 },
+												cooldownUntil: { type: ["string", "null"] },
+												sheddable: { type: "integer", minimum: 0 },
+												held: {
+													type: ["string", "null"],
+													enum: ["nothing-sheddable", "link-or-unknown", null],
+												},
+											},
+										},
 										admitted: {
 											type: "array",
 											items: efficiencyPlacementSchema,

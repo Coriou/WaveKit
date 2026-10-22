@@ -107,6 +107,50 @@ export class SourceBackpressureTracker {
 		return this.createUnavailableBackpressure(sourceId)
 	}
 
+	/** Reads cumulative upstream loss without recording a rate sample. */
+	upstreamDroppedTotal(sourceId: string): number | null {
+		try {
+			const status = this.sdrHostPoller?.getStatus(sourceId)
+			if (status?.available !== true || !status.rtlmux) return null
+			const clients = status.rtlmux.clientDetails
+			if (!Array.isArray(clients)) return null
+			if (
+				clients.some(
+					c => !Number.isSafeInteger(c.bytesDropped) || c.bytesDropped < 0,
+				)
+			)
+				return null
+			const endpoint = this.getLocalEndpointForSource(sourceId)
+			const matched = endpoint
+				? clients.find(c => this.addressMatchesEndpoint(c.address, endpoint))
+				: undefined
+			const total =
+				matched?.bytesDropped ??
+				clients.reduce((sum, c) => sum + c.bytesDropped, 0)
+			return Number.isSafeInteger(total) ? total : null
+		} catch {
+			return null
+		}
+	}
+
+	/** Projects the current rate without appending or pruning history. */
+	peekDropRate(sourceId: string): number | null {
+		const total = this.upstreamDroppedTotal(sourceId)
+		if (total === null) return null
+		const now = Date.now()
+		const records =
+			this.sourceStates
+				.get(sourceId)
+				?.history.filter(r => r.timestamp >= now - this.dropWindowMs * 2)
+				.slice(-(MAX_HISTORY_SIZE - 1))
+				.filter(r => r.timestamp >= now - this.dropWindowMs) ?? []
+		const oldest = records[0]
+		if (!oldest || now <= oldest.timestamp) return 0
+		const rate =
+			((total - oldest.bytesDropped) / (now - oldest.timestamp)) * 1000
+		return Number.isFinite(rate) && rate >= 0 ? rate : null
+	}
+
 	/**
 	 * Gets backpressure metrics for all sources.
 	 */
