@@ -4,7 +4,9 @@
  * Samples are mono at 8 kHz (the tone detector decimates). A 500 ms Goertzel
  * block hops by 250 ms. A block votes when its tone is at least 0.65 of the
  * 50–300 Hz band power and at least 3× the next tone. Two consecutive blocks
- * must agree. The result is the qualified tone with the most votes; a tie
+ * must agree, with tone power at least 1% of whole-audio power. At least
+ * 60% of completed blocks must vote for the result. The qualified tone with
+ * the most votes wins; a tie
  * goes to the tone that first won a block, then the earlier table entry.
  */
 
@@ -16,6 +18,10 @@ const MIN_SAMPLES = BLOCK_SAMPLES + HOP_SAMPLES
 const BAND_FRACTION = 0.65
 const NEXT_BEST_RATIO = 3
 const CONSECUTIVE_BLOCKS = 2
+/** A narrow leakage line must not qualify against an almost empty sub-audible band. */
+const RAW_POWER_FRACTION = 0.01
+/** A transient pair of overlapping windows is not a transmission-long tone. */
+const MIN_VOTE_FRACTION = 0.6
 /** Ignore numerical dust so a silent band cannot win on a ratio of zeros. */
 const MIN_POWER = 1e-12
 
@@ -174,7 +180,8 @@ export class CtcssBank {
 	/**
 	 * WG7 streaming per-block result: the table index (into `CTCSS_HZ`) that won the most
 	 * recent analysis block (≥ 0.65 of the band and ≥ 3× the next tone), or -1 when no tone
-	 * won it or no block has run. Does not affect `result()`.
+	 * won it or no block has run. The block also needs 1% of whole-audio power.
+	 * Does not affect `result()`; the latter additionally requires 60% continuity.
 	 */
 	lastBlockToneIndex(): number {
 		return this.lastBlockWinner
@@ -182,7 +189,11 @@ export class CtcssBank {
 
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
-		return selectCtcssTone(this.votes, this.qualified, this.firstBlock)
+		const tone = selectCtcssTone(this.votes, this.qualified, this.firstBlock)
+		if (tone === null) return null
+		const votes =
+			this.votes[CTCSS_HZ.indexOf(tone as (typeof CTCSS_HZ)[number])] ?? 0
+		return votes >= Math.ceil(this.blockIndex * MIN_VOTE_FRACTION) ? tone : null
 	}
 
 	reset(): void {
@@ -264,7 +275,8 @@ export class CtcssBank {
 		const inBand =
 			bandMean > MIN_POWER &&
 			bestPower > MIN_POWER &&
-			bestPower >= BAND_FRACTION * bandMean
+			bestPower >= BAND_FRACTION * bandMean &&
+			bestPower >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
 		const winner = inBand && dominates ? best : -1
 		this.lastBlockWinner = winner
 		if (winner >= 0 && winner === this.lastWinner) this.streak += 1
