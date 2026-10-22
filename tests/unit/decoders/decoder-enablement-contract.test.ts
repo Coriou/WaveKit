@@ -160,6 +160,14 @@ const baseConfig = {
 			spectrumSummaryBins: 2048,
 			spectrumMaxProfiles: 4,
 		},
+		iqCapture: {
+			enabled: true,
+			maxTotalMb: 256,
+			maxCaptureMs: 4000,
+			preRollMs: 500,
+			binaryPath: "wavekit-iqcap",
+			allowLegacy: false,
+		},
 	},
 	station: {},
 	activity: {
