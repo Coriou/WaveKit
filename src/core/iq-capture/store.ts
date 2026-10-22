@@ -188,6 +188,7 @@ export class IqCaptureStore {
 		)
 		this.rate.set(req.sourceId, stamps)
 		if (
+			!privateTrial &&
 			req.reason === "detection" &&
 			stamps.length >= IQ_CAPTURE_PER_SOURCE_PER_MINUTE
 		)
@@ -195,7 +196,8 @@ export class IqCaptureStore {
 		if (this.heldBytes() + this.perCaptureBytes > this.o.capBytes)
 			return this.refuse("full")
 		if (this.entries.has(captureId)) return this.refuse("invalid")
-		if (req.reason === "detection") stamps.push(now)
+		// Private trials are discarded after analysis; bytes and concurrency bound them.
+		if (!privateTrial && req.reason === "detection") stamps.push(now)
 		this.entries.set(captureId, {
 			captureId,
 			privateTrial,

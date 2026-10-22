@@ -78,6 +78,31 @@ describe("IqCaptureStore bounds", () => {
 		expect(store.counters().refused["rate-limited"]).toBe(1)
 	})
 
+	it("private trials neither consume nor obey the detection minute budget", () => {
+		const { store } = makeStore()
+		for (let i = 0; i < 12; i++) {
+			expect(store.admit(req(), id(i), 1, true)).toHaveProperty("captureId")
+			finish(store, id(i))
+			store.discard(id(i), "result")
+			store.released(4800 * 8)
+		}
+		for (let i = 12; i < 18; i++) {
+			expect(store.admit(req(), id(i), 1)).toHaveProperty("captureId")
+			finish(store, id(i))
+		}
+		expect(store.admit(req(), id(18), 1)).toEqual({ refused: "rate-limited" })
+		expect(store.admit(req(), id(19), 1, true)).toHaveProperty("captureId")
+		expect(store.admit(req(), id(20), 1, true)).toHaveProperty("captureId")
+		expect(store.admit(req(), id(21), 1, true)).toEqual({ refused: "busy" })
+	})
+
+	it("private trials still reserve bytes at the cap", () => {
+		const { store } = makeStore(IQ_CAPTURE_MAX_BYTES)
+		expect(store.admit(req(), id(1), 1, true)).toHaveProperty("captureId")
+		finish(store, id(1), IQ_CAPTURE_MAX_BYTES / 8)
+		expect(store.admit(req(), id(2), 1, true)).toEqual({ refused: "full" })
+	})
+
 	it("concurrency: 2 captures being written accepted, the 3rd busy", () => {
 		const { store } = makeStore()
 		expect(store.admit(req(), id(1), 1)).toHaveProperty("captureId")
