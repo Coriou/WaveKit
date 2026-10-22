@@ -22,7 +22,15 @@ aggregates, verdicts and invalid reasons are in `summary.json`.
 The repeating start-to-start intervals are 9, 1, 130, 50, 40, 71 and 161 seconds.
 Lossless stall lengths cycle through 150, 500, 1000 and 1800 ms; overflow and
 upstream lengths cycle through 2500 and 4000 ms. Upstream uses drop mode and its
-private statistics endpoint; other stall scenarios use catch-up mode.
+private statistics endpoint; other stall scenarios use catch-up mode. The upstream
+counter must increase; core overflow is not required. If core branches drop,
+`unknown` attribution must also be observed.
+
+The current link-quality API exposes live absorber totals and the latest monitor
+attribution, without a shared completed-interval identity. Its `at` field is the
+report read time. Overflow attribution cannot be correlated exactly through this
+API: overflow/upstream runs with core overflow are marked invalid pending interval
+evidence, rather than comparing counters against potentially stale attribution.
 
 The marked YAML `rtl433` instance uses the raw fanout path and is gate exempt.
 The shim delegates every unmarked invocation to `/usr/local/bin/rtl_433`. It reads
@@ -47,7 +55,12 @@ Summary latency proxies are the maxima of `peakHeldBytes10m`, `peakHeldMs10m` an
 `laggardExcludeMsMax10m`. The largest occupied chunk bucket gives one chunk's
 milliseconds at twice the configured sample rate. Consumer sibling latency is
 checked against `ABSORBER_LAGGARD_MS` read directly from the source contract plus
-that chunk allowance. Missing reports, histograms, branches or required fields
+that chunk allowance. Sibling drop checks use a baseline at the consumer phase
+transition. In late-shed runs, latency checks start after ten minutes in the
+consumer phase so the rolling maxima exclude the preceding link-only phase;
+shorter runs are invalid. `consumerPeakHeldMs` records the checked maximum.
+Link-only shedding remains a failure. SIGINT and SIGTERM trigger teardown and an
+invalid result. Missing reports, histograms, branches or required fields
 invalidate the experiment. Keep raw samples to inspect attribution windows and
 placement changes beyond the automated checks.
 

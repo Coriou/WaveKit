@@ -4,6 +4,7 @@ services:
     pull_policy: never
     entrypoint: ["python3", "/opt/fake_rtl_tcp.py"]
     command:
+      - --loop
       - --rate
       - "${LINK_BURST_RATE:-2048000}"
       - --duration

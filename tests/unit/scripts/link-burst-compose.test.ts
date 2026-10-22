@@ -17,6 +17,7 @@ it("isolates the scratch project and validates the slow sink", () => {
 		expect(ip).toBe("127.0.0.1")
 	expect(compose.networks.default.internal).toBe(true)
 	expect(Object.keys(compose.services).sort()).toEqual(["core", "fake"])
+	expect(compose.services.fake.command).toContain("--loop")
 	expect(compose.services.fake.ports).toBeUndefined()
 	expect(compose.services.core.ports).toEqual(["127.0.0.1::3000"])
 	expect(compose.services.core.volumes).toContain(
@@ -51,6 +52,7 @@ it("isolates the scratch project and validates the slow sink", () => {
 it.each([
 	["scripts/link-burst/run_acceptance.py", "--help"],
 	["tests/unit/scripts/test_link_burst_slow_sink.py"],
+	["tests/unit/scripts/test_link_burst_driver.py"],
 ])(
 	"runs Python checks: %s",
 	(...args) => {

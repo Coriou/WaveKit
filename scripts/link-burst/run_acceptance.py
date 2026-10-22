@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -45,6 +46,10 @@ class InvalidRun(Exception):
     pass
 
 
+def interrupted(signum, _frame):
+    raise InvalidRun("interrupted by " + signal.Signals(signum).name)
+
+
 class Experiment:
     def __init__(self, args):
         self.args = args
@@ -82,6 +87,10 @@ class Experiment:
         self.interval_failures = set()
         self.admission_groups = {}
         self.previous_sink_uptime = None
+        self.consumer_baseline = None
+        self.consumer_peaks = None
+        self.upstream_baseline = None
+        self.summary["upstreamDroppedBytes"] = 0
 
     def compose(self, *args, check=True):
         return subprocess.run(self.command + list(args), env=self.env, text=True,
@@ -101,7 +110,8 @@ class Experiment:
                   "linkQuality": self.get("/api/resources/link-quality"),
                   "efficiency": self.get("/api/decoders/efficiency"),
                   "fanout": self.get("/api/telemetry/fanout"),
-                  "decoders": self.get("/api/decoders")}
+                  "decoders": self.get("/api/decoders"),
+                  "backpressure": self.get("/api/resources/backpressure")}
         return sample
 
     def record(self, sample):
@@ -120,9 +130,11 @@ class Experiment:
         overflow = absorber["overflowBytesTotal"]
         if overflow < self.last_overflow:
             raise InvalidRun("absorber counter reset")
-        expected = {"overflow": "link", "upstream": "unknown"}.get(self.args.scenario)
-        if overflow > self.last_overflow and expected and report["attribution"]["last"] != expected:
-            self.interval_failures.add("overflow interval was not attributed " + expected)
+        # `at` is the report read time, not a completed monitor interval.
+        # The API exposes no interval counter/attribution pair: never compare
+        # live cumulative overflow with attribution.last from an earlier tick.
+        if overflow > self.last_overflow and self.args.scenario in ("overflow", "upstream"):
+            self.summary["overflowAttributionUnavailable"] = True
         self.last_overflow = overflow
         self.summary["overflowBytes"] = overflow
         histogram = report["histograms"]
@@ -136,6 +148,16 @@ class Experiment:
         self.attributions[attribution or "unknown"] += 1
         self.summary["attributionCounts"] = dict(self.attributions)
         self.summary["attributionWindowCounts"] = report["attribution"]["counts10m"]
+        upstream = next((b for b in sample["backpressure"] if b["sourceId"] == SOURCE), None)
+        if self.args.scenario == "upstream":
+            if upstream is None or not upstream["available"]:
+                raise InvalidRun("upstream statistics are unavailable")
+            total = upstream["bytesDroppedUpstream"]
+            if self.upstream_baseline is None:
+                self.upstream_baseline = total
+            if total < self.upstream_baseline:
+                raise InvalidRun("upstream counter reset")
+            self.summary["upstreamDroppedBytes"] = total - self.upstream_baseline
         branches = [b for b in sample["fanout"]["branches"] if b.get("sourceId") == SOURCE]
         sinks = [b for b in branches if SINK in b["id"]]
         if len(sinks) != 1:
@@ -145,6 +167,7 @@ class Experiment:
         for branch in branches:
             self.summary["branches"][branch["id"]] = {
                 **branch, "dropPercent": branch_percent(branch), "sink": branch["id"] == sink["id"]}
+        self.record_consumer(sample, absorber, branches)
         self.summary["sinkDropPercent"] = branch_percent(sink)
         if self.slow_at is not None and sink["droppedBytesTotal"] > self.sink_baseline:
             self.first_drops = self.first_drops if self.first_drops is not None else now
@@ -198,6 +221,21 @@ class Experiment:
         self.previous = admitted
         return source, sink
 
+    def record_consumer(self, sample, absorber, branches):
+        if sample["phase"] != "consumer":
+            return
+        if self.consumer_baseline is None:
+            self.consumer_baseline = {b["id"]: b["droppedBytesTotal"] for b in branches}
+        self.summary["consumerSiblingDrops"] = max(self.summary.get("consumerSiblingDrops", 0), sum(
+            max(0, b["droppedBytesTotal"] - self.consumer_baseline.get(b["id"], 0))
+            for b in branches if SINK not in b["id"]))
+        # Rolling maxima still contain the deliberately overflowing link phase
+        # until a full ten-minute window has elapsed after the phase transition.
+        if self.slow_at is not None and (self.args.scenario == "consumer" or sample["mono"] - self.slow_at >= 600):
+            peak = max(absorber["peakHeldMs10m"], absorber["laggardExcludeMsMax10m"] or 0)
+            self.consumer_peaks = max(self.consumer_peaks or 0, peak)
+            self.summary["consumerPeakHeldMs"] = self.consumer_peaks
+
     @staticmethod
     def key(placement):
         return json.dumps([placement["decoderId"], placement["sourceId"], placement.get("channelHz")])
@@ -205,6 +243,7 @@ class Experiment:
     def run(self):
         self.args.out.mkdir(parents=True, exist_ok=True)
         exit_code = 2
+        handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
         try:
             self.compose("up", "-d", "--no-build", "--pull", "never")
             deadline = time.monotonic() + 120
@@ -254,6 +293,9 @@ class Experiment:
                         self.sentinel(131072)
                         self.slow_at, self.sink_baseline = now, sink["droppedBytesTotal"]
                         self.phase = "consumer"
+                        self.consumer_baseline = {
+                            b["id"]: b["droppedBytesTotal"] for b in sample["fanout"]["branches"]
+                            if b.get("sourceId") == SOURCE}
                     if self.slow_at is not None and self.first_drops is None:
                         if self.pause_at is None and now - self.slow_at >= 120:
                             self.sentinel(0)
@@ -273,12 +315,17 @@ class Experiment:
         except (InvalidRun, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             self.summary.update(result="invalid", invalidReason=str(exc))
         finally:
+            # A repeated termination request must not interrupt teardown.
+            for sig in handlers:
+                signal.signal(sig, signal.SIG_IGN)
             try:
                 self.compose("down", "--volumes", "--remove-orphans")
             except (OSError, subprocess.SubprocessError) as exc:
                 self.summary.update(result="invalid", invalidReason="teardown failed: " + str(exc))
                 exit_code = 2
             (self.args.out / "summary.json").write_text(json.dumps(self.summary, indent=2) + "\n")
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
         return exit_code
 
     def failures(self):
@@ -291,9 +338,15 @@ class Experiment:
         drops = sum(b["droppedBytesTotal"] for b in branches)
         if scenario == "lossless" and (drops or self.summary["overflowBytes"]):
             failures.append("lossless run dropped bytes")
-        if scenario in ("overflow", "upstream") and not self.summary["overflowBytes"]:
+        if scenario == "overflow" and not self.summary["overflowBytes"]:
             failures.append("overflow was not exercised")
-        expected = {"overflow": "link", "upstream": "unknown", "host": "host", "consumer": "consumer"}.get(scenario)
+        if self.summary.get("overflowAttributionUnavailable"):
+            raise InvalidRun("link-quality API lacks completed interval counters and attribution; overflow attribution cannot be verified")
+        if scenario == "upstream" and drops and not self.attributions["unknown"]:
+            failures.append("upstream with core drops was not attributed unknown")
+        if scenario == "upstream" and not self.summary["upstreamDroppedBytes"]:
+            failures.append("upstream drops were not exercised")
+        expected = {"overflow": "link", "host": "host", "consumer": "consumer"}.get(scenario)
         if scenario == "host" and not drops:
             failures.append("host drops were not exercised")
         if expected and not self.attributions[expected]:
@@ -303,10 +356,12 @@ class Experiment:
         if scenario == "overflow" and self.summary["suspensions"]:
             failures.append("link overflow suspended a placement")
         if scenario in ("consumer", "late-shed"):
-            if any(b["droppedBytesTotal"] for b in siblings):
+            if self.summary.get("consumerSiblingDrops", 0):
                 failures.append("slow sink caused sibling drops")
             bound = self.summary["ABSORBER_LAGGARD_MS"] + self.summary["oneChunkMs"]
-            if max(self.summary["peakHeldMs10m"], self.summary["laggardExcludeMsMax10m"]) > bound:
+            if self.consumer_peaks is None:
+                raise InvalidRun("consumer phase needs a full 10-minute latency window")
+            if self.consumer_peaks > bound:
                 failures.append("sibling latency proxy exceeded laggard plus one chunk")
         if scenario == "late-shed":
             sheds = self.summary["sheds"]

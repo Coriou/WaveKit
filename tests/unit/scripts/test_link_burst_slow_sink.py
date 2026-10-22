@@ -84,7 +84,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def sample(self, drops=0, attribution="none", overflow=0):
         return {
-            "mono": 100,
+            "mono": 100, "phase": "measuring", "backpressure": [],
             "linkQuality": [{"sourceId": run.SOURCE, "transport": "network",
                 "absorber": {"enabled": True, "peakHeldBytes10m": 0, "peakHeldMs10m": 0,
                     "laggardExcludeMsMax10m": None, "overflowBytesTotal": overflow},
@@ -107,11 +107,24 @@ class AcceptanceTests(unittest.TestCase):
     def test_drop_percent(self):
         self.assertEqual(run.branch_percent({"droppedBytesTotal": 25, "totalBytesWritten": 100}), 25)
 
-    def test_each_overflow_must_be_link(self):
+    def test_live_overflow_cannot_use_latest_attribution(self):
         experiment = self.experiment()
         experiment.record(self.sample(attribution="link", overflow=1))
         experiment.record(self.sample(attribution="consumer", overflow=2))
-        self.assertIn("overflow interval was not attributed link", experiment.failures())
+        self.assertEqual(experiment.interval_failures, set())
+        with self.assertRaisesRegex(run.InvalidRun, "completed interval"):
+            experiment.failures()
+
+    def test_upstream_counter_rises_without_core_overflow(self):
+        experiment = self.experiment("upstream")
+        sample = self.sample()
+        sample["backpressure"] = [{"sourceId": run.SOURCE, "available": True,
+                                   "bytesDroppedUpstream": 0}]
+        experiment.record(sample)
+        sample["backpressure"][0]["bytesDroppedUpstream"] = 1000
+        experiment.record(sample)
+        self.assertEqual(experiment.summary["upstreamDroppedBytes"], 1000)
+        self.assertEqual(experiment.failures(), [])
 
     def test_sink_pid_change_invalidates(self):
         experiment = self.experiment()
