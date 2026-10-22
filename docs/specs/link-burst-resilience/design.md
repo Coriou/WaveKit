@@ -216,6 +216,16 @@ function attributeInterval(e: IntervalEvidence): DropAttribution
 ```
 
 Any malformed or non-finite evidence field makes the whole interval `unknown` (fail closed).
+An absent receiver counter is not a failed read: it contributes no upstream loss; a configured
+counter that fails remains invalid. Local sources retain the counter-only efficiency rules.
+For network gaps, ingest byte totals from the arrival before the gap through catch-up replace
+lagging metrics for the full-rate check. A loss waits up to 10 s after the gap arrival for
+99% of nominal bytes to arrive. While waiting it earns no coverage and cannot condemn probation;
+a recovered link loss preserves the clean-window origin. A sustained deficit resolves unknown.
+Recovery episodes carry sequence, completion and failure marks, so a second stall that begins after
+catch-up between polls gets its own deadline. Completion of a later episode cannot erase an
+earlier sustained deficit. A completed episode stops overriding rolling-rate evidence after its
+recovery deadline. The recovery state is fixed-size and reads use the monitor's monotonic clock.
 
 Rules in order: incomplete → `unknown`; no positive delta anywhere → `none`; a strict non-empty
 subset of branches rose and no overflow → `consumer`; upstream delta above 0 → `unknown`; gap,

@@ -33,6 +33,7 @@ describe("link quality", () => {
 			capacitySeconds: 2,
 			recorder: {
 				configure: () => {},
+				recovery: () => null,
 				resetArrival: () => {},
 				observeChunk: () => {},
 				noteHolding: () => {},

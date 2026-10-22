@@ -5,6 +5,7 @@ import {
 	CHUNK_SIZE_BUCKETS,
 	GAP_BUCKETS,
 	LINK_GAP_MS,
+	LINK_RECOVERY_WAIT_MS,
 	LINK_QUALITY_SLOT_MS,
 	LINK_QUALITY_WINDOW_MS,
 } from "./contract.js"
@@ -49,6 +50,16 @@ export function createIngestRecorder(): IngestRecorder {
 	let highWaterCell = -Infinity
 	let first: number | null = null
 	let nominal = 0
+	let totalBytes = 0
+	let sequence = 0
+	let completedSequence = 0
+	let failedSequence = 0
+	let recovery: {
+		start: number
+		arrived: number
+		base: number
+		gap: number
+	} | null = null
 	let burstStart: number | null = null
 	let burstBytes = 0
 	function slot(now: number): number {
@@ -110,13 +121,37 @@ export function createIngestRecorder(): IngestRecorder {
 		seconds[second % 600] = second
 	}
 	return {
+		recovery(now) {
+			if (!recovery || nominal <= 0) return null
+			if (
+				now >= recovery.arrived + LINK_RECOVERY_WAIT_MS &&
+				completedSequence === sequence
+			)
+				return null
+			const expected = (nominal * (now - recovery.start)) / 1000
+			const full = totalBytes - recovery.base >= expected * 0.99
+			if (full) completedSequence = sequence
+			return {
+				sequence,
+				completedSequence,
+				failedSequence,
+				maxGapMs: recovery.gap,
+				shortfall: full
+					? false
+					: now < recovery.arrived + LINK_RECOVERY_WAIT_MS
+						? null
+						: true,
+			}
+		},
 		configure(rate, frame) {
+			recovery = null
 			nominal = rate * frame
 			arrival[0] = NaN
 			burstStart = null
 			burstBytes = 0
 		},
 		resetArrival() {
+			recovery = null
 			arrival[0] = NaN
 			burstStart = null
 			burstBytes = 0
@@ -151,6 +186,22 @@ export function createIngestRecorder(): IngestRecorder {
 				worst[s] = Math.max(worst[s] ?? 0, gap)
 				cellGaps[c] = Math.max(cellGaps[c] ?? 0, gap)
 				if (gap >= LINK_GAP_MS) {
+					if (
+						recovery === null ||
+						now >= recovery.arrived + LINK_RECOVERY_WAIT_MS ||
+						totalBytes - recovery.base >=
+							((nominal * (previous - recovery.start)) / 1000) * 0.99
+					) {
+						if (
+							recovery &&
+							totalBytes - recovery.base >=
+								((nominal * (previous - recovery.start)) / 1000) * 0.99
+						)
+							completedSequence = sequence
+						else if (recovery) failedSequence = sequence
+						sequence++
+						recovery = { start: previous, arrived: now, base: totalBytes, gap }
+					}
 					holding(now)
 					if (burstStart === null) {
 						burstStart = now
@@ -158,6 +209,7 @@ export function createIngestRecorder(): IngestRecorder {
 					}
 				}
 			}
+			totalBytes += bytes
 			if (burstStart !== null) burstBytes += bytes
 			arrival[0] = now
 		},
@@ -178,7 +230,7 @@ export function createIngestRecorder(): IngestRecorder {
 				const stamp = cellStamps[i] ?? -Infinity
 				if (
 					stamp >= Math.floor(from / CELL_MS) &&
-					stamp < Math.ceil(to / CELL_MS)
+					stamp <= Math.floor(to / CELL_MS)
 				) {
 					intervalResult.maxGapMs = Math.max(
 						intervalResult.maxGapMs,

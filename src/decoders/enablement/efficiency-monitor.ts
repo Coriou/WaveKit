@@ -1,9 +1,12 @@
 import { performance } from "node:perf_hooks"
 import type { DropAttribution } from "@wavekit/api-types"
 import { z } from "zod"
-import type {
-	IngestInterval,
-	LoopDelayInterval,
+import {
+	LINK_GAP_MS,
+	LINK_RECOVERY_WAIT_MS,
+	type IngestInterval,
+	type RecoveryEvidence,
+	type LoopDelayInterval,
 } from "../../core/link-burst/contract.js"
 import type { Logger } from "../../utils/logger.js"
 import { attributeInterval } from "./attribution.js"
@@ -38,8 +41,24 @@ const ingestSchema = z.object({
 	catchupBytes: nonNegative,
 	chunks: nonNegative,
 })
+const recoverySchema = z.object({
+	sequence: z.number().int().nonnegative().safe(),
+	completedSequence: z.number().int().nonnegative().safe(),
+	failedSequence: z.number().int().nonnegative().safe(),
+	maxGapMs: nonNegative,
+	shortfall: z.boolean().nullable(),
+})
 const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
 type SourceState = {
+	pending: {
+		sequence: number
+		at: number
+		gap: number
+		loop: number
+		cpu: number
+		upstream: number
+		valid: boolean
+	} | null
 	branchDrops: Map<string, number>
 	rawSamples: number[]
 	upstream: number | null
@@ -86,7 +105,9 @@ export function createEfficiencyMonitor(deps: {
 	) => IngestInterval | null
 	loopDelay?: () => LoopDelayInterval | null
 	shortfall?: (id: string) => boolean | null
-	upstreamDroppedTotal?: (id: string) => number | null
+	upstreamDroppedTotal?: (id: string) => number | null | undefined
+	attributionApplies?: (id: string) => boolean
+	recovery?: (id: string, mono: number) => RecoveryEvidence | null
 	cpuGuardPercent?: number
 	log?: Logger
 	topology?: (id: string) => string | null
@@ -136,6 +157,7 @@ export function createEfficiencyMonitor(deps: {
 	let offset = 0
 	const discontinuity = () => {
 		for (const s of states.values()) {
+			s.pending = null
 			s.rawSamples = []
 			s.windows = []
 			s.openWindow = null
@@ -167,6 +189,7 @@ export function createEfficiencyMonitor(deps: {
 		return raw + offset
 	}
 	const fresh = (): SourceState => ({
+		pending: null,
 		branchDrops: new Map(),
 		rawSamples: [],
 		upstream: null,
@@ -219,7 +242,7 @@ export function createEfficiencyMonitor(deps: {
 			const present = new Set(ids)
 			for (const id of states.keys()) if (!present.has(id)) states.delete(id)
 		}
-		let cpuPercent: number | null = null
+		let sampledCpuPercent: number | null = null
 		const attributionEnabled = [
 			deps.ingest,
 			deps.loopDelay,
@@ -236,11 +259,11 @@ export function createEfficiencyMonitor(deps: {
 			(deps.monoNow === undefined || typeof deps.monoNow === "function") &&
 			typeof deps.cpu === "object" &&
 			deps.cpu !== null
-		let loopDelayMaxMs: number | null = null
+		let sampledLoopDelayMaxMs: number | null = null
 		try {
 			const cpu = deps.cpu.normalisedPercent
 			if (cpu !== null && Number.isFinite(cpu) && cpu >= 0 && cpu <= 100)
-				cpuPercent = cpu
+				sampledCpuPercent = cpu
 			else if (attributionEnabled) commonValid = false
 		} catch {
 			if (attributionEnabled) commonValid = false
@@ -248,7 +271,7 @@ export function createEfficiencyMonitor(deps: {
 		try {
 			if (deps.loopDelay !== undefined) {
 				const parsed = loopSchema.safeParse(deps.loopDelay())
-				if (parsed.success) loopDelayMaxMs = parsed.data.maxMs
+				if (parsed.success) sampledLoopDelayMaxMs = parsed.data.maxMs
 				else commonValid = false
 			}
 		} catch {
@@ -256,6 +279,8 @@ export function createEfficiencyMonitor(deps: {
 		}
 		const sources = new Map<string, SourceDropSample>()
 		for (const id of readable ? new Set(ids) : states.keys()) {
+			let cpuPercent = sampledCpuPercent
+			let loopDelayMaxMs = sampledLoopDelayMaxMs
 			const s = states.get(id) ?? fresh()
 			states.set(id, s)
 			s.branchDrops.clear()
@@ -396,8 +421,23 @@ export function createEfficiencyMonitor(deps: {
 			} catch {
 				evidenceValid = false
 			}
+			const applies = deps.attributionApplies?.(id) ?? true
+			let recovery = null
 			try {
-				if (deps.shortfall !== undefined) {
+				recovery = applies
+					? (deps.recovery?.(id, lastRaw ?? NaN) ?? null)
+					: null
+				if (recovery !== null && !recoverySchema.safeParse(recovery).success) {
+					recovery = null
+					evidenceValid = false
+				}
+			} catch {
+				evidenceValid = false
+			}
+			try {
+				if (recovery !== null) {
+					shortfall = recovery.shortfall
+				} else if (deps.shortfall !== undefined) {
 					const parsed = z.boolean().safeParse(deps.shortfall(id))
 					if (parsed.success) shortfall = parsed.data
 					else evidenceValid = false
@@ -406,56 +446,156 @@ export function createEfficiencyMonitor(deps: {
 				evidenceValid = false
 			}
 			try {
-				const total = deps.upstreamDroppedTotal?.(id) ?? null
+				const total = deps.upstreamDroppedTotal?.(id)
+				if (total === undefined) upstreamDropDelta = 0
 				if (total !== null && validTotal(total)) {
 					if (s.upstream !== null && total >= s.upstream)
 						upstreamDropDelta = total - s.upstream
 					else evidenceValid = false
 					s.upstream = total
 				} else {
-					if (deps.upstreamDroppedTotal !== undefined) evidenceValid = false
+					if (total !== undefined) evidenceValid = false
 					s.upstream = null
 				}
 			} catch {
 				s.upstream = null
 				evidenceValid = false
 			}
-			const attribution = attributeInterval({
-				complete: comparable && evidenceValid,
-				branchDrops: s.branchDrops,
-				absorberOverflow,
-				maxGapMs,
-				loopDelayMaxMs,
-				cpuPercent,
-				cpuGuardPercent:
-					typeof cpuGuardPercent === "number" ? cpuGuardPercent : Number.NaN,
-				shortfall,
-				upstreamDropDelta,
-			})
-			const positive = bytes > 0 || chunks > 0
-			const link = attribution === "link" && positive
-			if (positive) {
+			if (!applies) evidenceValid = true
+			const positiveNow = bytes > 0 || chunks > 0
+			// A completed episode can be followed by another gap between monitor polls.
+			const completedPending =
+				s.pending !== null &&
+				recovery !== null &&
+				recovery.sequence !== s.pending.sequence &&
+				recovery.completedSequence >= s.pending.sequence &&
+				recovery.failedSequence < s.pending.sequence &&
+				comparable &&
+				evidenceValid &&
+				s.pending.valid &&
+				s.pending.upstream === 0 &&
+				upstreamDropDelta === 0 &&
+				s.pending.gap - s.pending.loop >= LINK_GAP_MS
+			if (completedPending) {
+				s.linkDrops.push(s.pending!.at)
+				if (s.linkDrops.length > 32) s.linkDrops.shift()
+				s.pending = null
+			}
+			const consumerNow =
+				applies &&
+				comparable &&
+				evidenceValid &&
+				(absorberOverflow ?? 0) === 0 &&
+				[...s.branchDrops.values()].some(drop => drop > 0) &&
+				[...s.branchDrops.values()].some(drop => drop === 0)
+			if (consumerNow && s.pending) {
+				s.lastDropMono = at
+				s.drops.push(at)
+				if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
+				fault(s, at)
+			}
+			if (
+				recovery &&
+				comparable &&
+				evidenceValid &&
+				positiveNow &&
+				maxGapMs !== null &&
+				loopDelayMaxMs !== null &&
+				maxGapMs - loopDelayMaxMs >= LINK_GAP_MS &&
+				((absorberOverflow ?? 0) > 0 ||
+					(s.branchDrops.size > 0 &&
+						[...s.branchDrops.values()].every(drop => drop > 0))) &&
+				!s.pending
+			)
+				s.pending = {
+					sequence: recovery.sequence,
+					at,
+					gap: maxGapMs,
+					loop: loopDelayMaxMs,
+					cpu: cpuPercent ?? NaN,
+					upstream: 0,
+					valid: comparable && evidenceValid,
+				}
+			const pending = s.pending
+			if (pending) {
+				pending.valid &&=
+					comparable &&
+					evidenceValid &&
+					(recovery === null || recovery.failedSequence < pending.sequence)
+				pending.upstream += upstreamDropDelta ?? 0
+				pending.loop = Math.max(pending.loop, loopDelayMaxMs ?? NaN)
+				pending.cpu = Math.max(pending.cpu, cpuPercent ?? NaN)
+				maxGapMs = pending.gap
+				loopDelayMaxMs = pending.loop
+				cpuPercent = pending.cpu
+				upstreamDropDelta = pending.upstream
+				shortfall = recovery?.shortfall ?? null
+				absorberOverflow = Math.max(absorberOverflow ?? 0, 1)
+				evidenceValid &&= pending.valid
+			}
+			const waiting =
+				pending !== null &&
+				recovery?.shortfall === null &&
+				at - pending.at < LINK_RECOVERY_WAIT_MS
+			const attribution =
+				completedPending && !positiveNow
+					? "link"
+					: consumerNow
+						? "consumer"
+						: !applies
+							? positiveNow
+								? "unknown"
+								: "none"
+							: attributeInterval({
+									complete: comparable && evidenceValid,
+									branchDrops: s.branchDrops,
+									absorberOverflow,
+									maxGapMs,
+									loopDelayMaxMs,
+									cpuPercent,
+									cpuGuardPercent:
+										typeof cpuGuardPercent === "number"
+											? cpuGuardPercent
+											: Number.NaN,
+									shortfall,
+									upstreamDropDelta,
+								})
+			const positive = positiveNow || pending !== null || completedPending
+			const link =
+				(attribution === "link" || (completedPending && !positiveNow)) &&
+				positive
+			if (positive && !waiting) {
 				if (link) {
 					s.linkDrops.push(at)
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
 				} else {
-					s.lastDropMono = at
-					s.drops.push(at)
+					s.lastDropMono = Math.max(
+						s.lastDropMono ?? -Infinity,
+						pending?.at ?? at,
+					)
+					s.drops.push(pending?.at ?? at)
 					if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
 				}
 			}
-			if (comparable && evidenceValid && !link && !s.coverageBlocked) {
+			if (
+				comparable &&
+				evidenceValid &&
+				!link &&
+				!waiting &&
+				!s.coverageBlocked
+			) {
 				const last = s.covered.at(-1)
 				if (last && last.to === s.lastCompleteMono) last.to = at
 				else s.covered.push({ from: s.lastCompleteMono!, to: at })
 				if (s.covered.length > MAX_COVERED_INTERVALS) s.covered.shift()
 			}
-			if (!link) {
+			if (!link && !waiting) {
 				if (comparable && evidenceValid && attribution === "none" && !positive)
 					s.cleanSinceMono ??= at
 				else fault(s, Number.isFinite(at) ? at : null)
 			}
-			s.coverageBlocked = link || !evidenceValid
+			s.coverageBlocked = link || waiting || !evidenceValid
+			if (!waiting) s.pending = null
 			s.latest = attribution
 			if (Number.isFinite(at)) {
 				s.counts.push({ mono: at, code: attribution })
@@ -471,7 +611,7 @@ export function createEfficiencyMonitor(deps: {
 					}
 				const w = s.openWindow
 				if (at > w.startMono) {
-					w.complete &&= comparable && evidenceValid
+					w.complete &&= comparable && evidenceValid && !waiting
 					if (positive) {
 						if (attribution === "host" || attribution === "consumer")
 							w.condemning = true
@@ -550,7 +690,7 @@ export function createEfficiencyMonitor(deps: {
 		} catch {
 			/* Display only. */
 		}
-		return { atMs, cpuPercent, sources }
+		return { atMs, cpuPercent: sampledCpuPercent, sources }
 	}
 	const dropState: DropReader["dropState"] = id => {
 		const at = clock()
@@ -564,6 +704,7 @@ export function createEfficiencyMonitor(deps: {
 			return { state: "unknown", dropBytesPerSecond: null }
 		let state: "ok" | "dropping" | "unknown" = "unknown"
 		if (
+			s.pending === null &&
 			s.cleanSinceMono !== null &&
 			at - s.cleanSinceMono >= EFFICIENCY_CLEAR_MS &&
 			at - s.lastTickMono <= EFFICIENCY_STALE_MS
