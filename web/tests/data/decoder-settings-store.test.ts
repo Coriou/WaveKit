@@ -148,6 +148,26 @@ describe("DecoderSettingsStore", () => {
 		expect(store.get().views["other"]?.revision).toBe(4)
 	})
 
+	it("patches a mode alone and keeps the view's mode", async () => {
+		const updated: DecoderSettingsUpdateResult = {
+			settings: view("ais", 4, { mode: { value: "off", source: "override" } }),
+			revision: 4,
+			changed: [],
+			pendingRestart: false,
+		}
+		const { api, calls } = scripted(call =>
+			call.method === "PATCH" ? json(200, updated) : json(200, view("ais", 3)),
+		)
+		const store = new DecoderSettingsStore(api)
+		await store.loadView("ais")
+		expect(await store.update("ais", { mode: "off" })).toEqual({ ok: true })
+		expect(calls.find(c => c.method === "PATCH")?.body).toEqual({ mode: "off" })
+		expect(store.get().views["ais"]?.mode).toEqual({
+			value: "off",
+			source: "override",
+		})
+	})
+
 	it("maps DECODER_OPTIONS_INVALID issues and not-patchable keys to per-key messages", async () => {
 		const answers = [
 			json(400, {

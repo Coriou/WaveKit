@@ -402,6 +402,11 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 - [ ] Settings with no other owner in this file: language, runtime log level, map labels, audio
   download format. (FFT size, squelch margin, recording, storage, offline area and trails are
   listed under their own sections.)
+- [x] One switch per decoder that says whether it follows the band, runs wherever you tune, or never runs,
+  applied at once. Done in core (decoder enablement 2026-10-21, producer 2b6dffa6: `DecoderInfo.mode` /
+  `modeSource`, settings view `mode: { value, source }`, `PATCH /api/decoders/:id` `mode`). Wired: Settings ›
+  Decoders › Starts, Auto / Always / Off, applied without Apply and with where the mode comes from
+  (`features/settings/decoder-rows.ts`); it replaces Enabled. Older cores keep the Enabled switch.
 - [x] `GET /api/decoders/:id/log?lines=200` (bounded stdout/stderr ring) for "Show log".
   Decoder status itself has landed (health, uptime, version, events out, last output, error).
 - [ ] The sdr-host version on `/api/resources/sdr-hosts` (startup rate and gain are there).

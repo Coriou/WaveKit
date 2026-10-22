@@ -23,6 +23,7 @@ import {
 } from "@wavekit/api-types"
 import type {
 	DecoderInfo,
+	DecoderMode,
 	DecoderLogLine,
 	DecoderOptionDescriptor,
 	DecoderOptionIssue,
@@ -85,15 +86,36 @@ export interface DecoderLifecycle {
 	adjust(list: DecoderInfo[]): DecoderInfo[]
 	setIntent(id: string, intent: "stopped" | "operator"): void
 	restarted(id: string): void
+	/** The settings-store mode (decoder enablement 2.5): applies at once; undefined is the default auto. */
+	setMode(id: string, mode: DecoderMode | undefined): void
 }
 
 export function createDecoderLifecycle(
 	now: () => number = Date.now,
 ): DecoderLifecycle {
 	const intent = new Map<string, { kind: "stopped" | "operator"; at: number }>()
+	const modes = new Map<string, DecoderMode>()
 	return {
 		adjust(list) {
-			return list.map(d => {
+			return list.map(base => {
+				const mode = modes.get(base.id)
+				const d: DecoderInfo = {
+					...base,
+					mode: mode ?? "auto",
+					modeSource: mode ? "settings" : "default",
+				}
+				// Always is a band pin: a band pause does not apply.
+				if (mode === "always" && d.suspended && !intent.has(d.id)) {
+					const pinned: DecoderInfo = {
+						...d,
+						running: true,
+						suspended: false,
+						health: "running",
+						pid: d.pid ?? 4300,
+					}
+					delete pinned.suspension
+					return pinned
+				}
 				const set = intent.get(d.id)
 				if (!set) return d
 				// An explicit start or restart resets restartCount (core's DecoderLastError rule).
@@ -130,6 +152,14 @@ export function createDecoderLifecycle(
 		},
 		restarted(id) {
 			intent.set(id, { kind: "operator", at: now() })
+		},
+		setMode(id, mode) {
+			const was = modes.get(id) ?? "auto"
+			if (mode === undefined) modes.delete(id)
+			else modes.set(id, mode)
+			const next = mode ?? "auto"
+			if (next === "off") intent.set(id, { kind: "stopped", at: now() })
+			else if (was === "off" || next !== was) intent.delete(id)
 		},
 	}
 }
@@ -254,6 +284,7 @@ const DECODER_CONFIG: Readonly<Record<string, Record<string, unknown>>> = {
 }
 
 interface Override {
+	mode?: DecoderMode
 	enabled?: boolean
 	options: Record<string, DecoderSettingValue>
 }
@@ -784,6 +815,13 @@ export function registerSettingsMock(
 		})
 		const documented = new Set(descriptorsOf(d.type).map(o => o.key))
 		return {
+			mode: {
+				value: over?.mode ?? (over?.enabled === false ? "off" : "auto"),
+				source:
+					over?.mode !== undefined || over?.enabled === false
+						? "override"
+						: "default",
+			},
 			decoderId: id,
 			type: d.type,
 			revision: settingsRevision,
@@ -848,7 +886,14 @@ export function registerSettingsMock(
 			const body: unknown = request.body
 			if (
 				!isRecord(body) ||
-				Object.keys(body).some(k => k !== "enabled" && k !== "options") ||
+				Object.keys(body).some(
+					k => k !== "mode" && k !== "enabled" && k !== "options",
+				) ||
+				(Object.hasOwn(body, "mode") &&
+					body["mode"] !== null &&
+					body["mode"] !== "auto" &&
+					body["mode"] !== "always" &&
+					body["mode"] !== "off") ||
 				(Object.hasOwn(body, "enabled") &&
 					body["enabled"] !== null &&
 					typeof body["enabled"] !== "boolean") ||
@@ -856,7 +901,7 @@ export function registerSettingsMock(
 			)
 				return invalid(
 					reply,
-					"Body must be a JSON object with only enabled (boolean or null) and options (object)",
+					"Body must be a JSON object with only mode (auto, always, off or null), enabled (boolean or null) and options (object)",
 				)
 			if (ifMatch !== undefined && ifMatch !== settingsRevision)
 				return settingsError(reply, 412, {
@@ -870,7 +915,7 @@ export function registerSettingsMock(
 					{
 						path: "",
 						code: "invalid-value",
-						message: "body must set enabled or options",
+						message: "body must set mode, enabled or options",
 					},
 				])
 			const descriptors = new Map(descriptorsOf(d.type).map(o => [o.key, o]))
@@ -908,16 +953,30 @@ export function registerSettingsMock(
 				enabled =
 					body["enabled"] === null ? undefined : (body["enabled"] as boolean)
 			if (enabled !== undefined) next.enabled = enabled
+			let mode = previous.mode
+			if (Object.hasOwn(body, "mode"))
+				mode = body["mode"] === null ? undefined : (body["mode"] as DecoderMode)
+			if (mode !== undefined) next.mode = mode
 			for (const [key, value] of Object.entries(options)) {
 				if (value === null) delete next.options[key]
 				else next.options[key] = structuredClone(value) as DecoderSettingValue
 			}
-			if (Object.keys(next.options).length === 0 && next.enabled === undefined)
+			if (
+				Object.keys(next.options).length === 0 &&
+				next.enabled === undefined &&
+				next.mode === undefined
+			)
 				overrides.delete(id)
 			else overrides.set(id, next)
 			settingsRevision += 1
 			const after = view(id)
 			const changed: string[] = []
+			if (before?.mode?.value !== after?.mode?.value) changed.push("mode")
+			// A mode applies now (an off stops, leaving off starts); enabled stays boot-only.
+			if (Object.hasOwn(body, "mode")) {
+				ctx.lifecycle.setMode(id, next.mode)
+				announce(id)
+			}
 			if (before?.enabled.value !== after?.enabled.value)
 				changed.push("enabled")
 			for (const o of descriptorsOf(d.type)) {
@@ -926,7 +985,7 @@ export function registerSettingsMock(
 				const now2 = after?.options.find(x => x.key === o.key)?.value
 				if (!sameValue(was, now2)) changed.push(o.key)
 			}
-			if (changed.some(k => k !== "enabled")) pending.add(id)
+			if (changed.some(k => k !== "enabled" && k !== "mode")) pending.add(id)
 			const settings = view(id)
 			if (!settings) return sendJson(reply, 404, decoderNotFound(id))
 			const result: DecoderSettingsUpdateResult = {

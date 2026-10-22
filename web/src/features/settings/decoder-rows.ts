@@ -1,10 +1,13 @@
 // Decoders in Settings (DESIGN.md "Decoder pages, generated"): one row per configured decoder in the group, and a
 // page per decoder built from its type's option descriptors (GET /api/decoders/types) and its settings view
 // (GET /api/decoders/:id/settings, protected cores only). Patchable keys get a widget by type; the rest are read-only.
-// Every option applies when the decoder next starts, so changes wait for Apply. Pure.
+// Every option applies when the decoder next starts, so changes wait for Apply; the Starts switch (`mode`) applies at once. Pure.
 import type {
 	DecoderEfficiencyDetail,
 	DecoderInfo,
+	DecoderMode,
+	DecoderModeSource,
+	DecoderSettingSource,
 	DecoderOptionDescriptor,
 	DecoderPlacementView,
 	DecoderSettingValue,
@@ -158,6 +161,54 @@ export function efficiencyText(d: DecoderInfo): string | null {
 		: EFFICIENCY[e.detail]
 }
 
+const MODE_OPTIONS: readonly SettingOption[] = [
+	{ value: "auto", label: "Auto" },
+	{ value: "always", label: "Always" },
+	{ value: "off", label: "Off" },
+]
+
+const MODE_MEANS: Readonly<Record<DecoderMode, string>> = {
+	auto: "Runs while its band is in the capture and pauses when you tune away",
+	always:
+		"Runs wherever you tune; only the scanner and the sample rate pause it",
+	off: "Never runs, even after a restart",
+}
+
+/** Where the effective mode comes from, in words; null when it is set here or by default. */
+function modeSourceText(
+	source: DecoderSettingSource | undefined,
+	info: DecoderModeSource | undefined,
+): string | null {
+	if (source === "override" || info === "settings") return null
+	switch (info) {
+		case "legacy-enabled":
+			return "Set by enabled: false in the YAML"
+		case "legacy-band":
+			return "Set by bandSuspension: false in the YAML"
+		case "config":
+			return "Set in the YAML"
+		case "default":
+			return null
+	}
+	return source === "config" ? "Set in the YAML" : null
+}
+
+/** The decoder's mode: the settings view first, then the status; null on a core without modes. */
+export function decoderMode(
+	d: DecoderInfo,
+	view:
+		| { mode?: { value: DecoderMode; source: DecoderSettingSource } }
+		| undefined,
+): { value: DecoderMode; help: string } | null {
+	const value = view?.mode?.value ?? d.mode
+	if (value === undefined) return null
+	const from = modeSourceText(view?.mode?.source, d.modeSource)
+	return {
+		value,
+		help: from ? `${MODE_MEANS[value]} · ${from}` : MODE_MEANS[value],
+	}
+}
+
 const restarts = (name: string): SettingEffect => ({
 	kind: "restart",
 	text: `Restarts ${name}`,
@@ -284,8 +335,14 @@ export function decoderRows(
 		const view = s.decoderViews[d.id]
 		const type = s.decoderTypes[d.type]
 		const effect = restarts(name)
-		const enabled = view?.enabled.value ?? d.desiredRunning ?? d.running
+		const mode = decoderMode(d, view)
+		const enabled =
+			mode !== null
+				? mode.value !== "off"
+				: (view?.enabled.value ?? d.desiredRunning ?? d.running)
 		const canWrite = s.decoderSettings && view !== undefined && !readOnly
+		const yamlLock =
+			"This WaveKit keeps decoder settings in the YAML (open access mode)"
 		rows.push({
 			id: `dec.${d.id}`,
 			group: "decoders",
@@ -301,37 +358,63 @@ export function decoderRows(
 			},
 			value: enabled,
 			text: decoderStatusText(d),
-			effect,
-			...(canWrite
-				? {
-						write: (v: SettingValue) =>
-							a.decoder(d.id, { enabled: v === true }),
-					}
-				: {}),
-		})
-		rows.push({
-			id: `dec.${d.id}.enabled`,
-			group: "decoders",
-			page: d.id,
-			label: "Enabled",
-			help: "Off stops it and keeps it stopped after a restart",
-			keys: words("enabled on off start stop"),
-			widget: { kind: "switch" },
-			value: enabled,
-			text: enabled ? "On" : "Off",
-			...(view ? { def: { value: true, text: "On" } } : {}),
-			effect,
-			...(canWrite
-				? {
-						write: (v: SettingValue) =>
-							a.decoder(d.id, { enabled: v === true }),
-					}
+			...(mode !== null
+				? canWrite
+					? {
+							write: (v: SettingValue) =>
+								a.decoder(d.id, { mode: v === true ? "auto" : "off" }),
+						}
+					: {}
 				: {
-						lock:
-							readOnly ??
-							"This WaveKit keeps decoder settings in the YAML (open access mode)",
+						effect,
+						...(canWrite
+							? {
+									write: (v: SettingValue) =>
+										a.decoder(d.id, { enabled: v === true }),
+								}
+							: {}),
 					}),
 		})
+		// A core with modes: the three-way switch replaces Enabled and applies at once.
+		if (mode !== null)
+			rows.push({
+				id: `dec.${d.id}.mode`,
+				group: "decoders",
+				page: d.id,
+				label: "Starts",
+				help: mode.help,
+				keys: words("starts mode auto always off enabled band pin"),
+				widget: { kind: "seg", options: MODE_OPTIONS },
+				value: mode.value,
+				text: optionText(MODE_OPTIONS, mode.value),
+				def: { value: "auto", text: "Auto" },
+				...(canWrite
+					? {
+							write: (v: SettingValue) =>
+								a.decoder(d.id, { mode: v as DecoderMode }),
+						}
+					: { lock: readOnly ?? yamlLock }),
+			})
+		else
+			rows.push({
+				id: `dec.${d.id}.enabled`,
+				group: "decoders",
+				page: d.id,
+				label: "Enabled",
+				help: "Off stops it and keeps it stopped after a restart",
+				keys: words("enabled on off start stop"),
+				widget: { kind: "switch" },
+				value: enabled,
+				text: enabled ? "On" : "Off",
+				...(view ? { def: { value: true, text: "On" } } : {}),
+				effect,
+				...(canWrite
+					? {
+							write: (v: SettingValue) =>
+								a.decoder(d.id, { enabled: v === true }),
+						}
+					: { lock: readOnly ?? yamlLock }),
+			})
 		const placed = placementsText(d)
 		if (placed !== null)
 			rows.push({

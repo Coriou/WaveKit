@@ -1,8 +1,8 @@
 /**
  * Decoder settings (WG6 option descriptors, WG8 settings store): GET /api/decoders/types, the
  * per-decoder view GET /api/decoders/:id/settings, the JSON merge patch PATCH /api/decoders/:id
- * with the store revision as If-Match (applied when the decoder next starts), the start / stop /
- * restart actions and the raw log.
+ * with the store revision as If-Match (options apply when the decoder next starts, `mode` at once),
+ * the start / stop / restart actions and the raw log.
  *
  * The settings view and the working PATCH are mounted only by a protected core. A legacy core
  * answers the view with the route-not-found 404 (code NOT_FOUND, not DECODER_NOT_FOUND) and the
@@ -63,6 +63,9 @@ const settingValue = z.union([
 ])
 const source = z.enum(["override", "config", "default"])
 const viewSchema = z.object({
+	mode: z
+		.object({ value: z.enum(["auto", "always", "off"]), source })
+		.optional(),
 	decoderId: z.string(),
 	type: z.string(),
 	revision: z.number().int().min(0),
@@ -317,7 +320,11 @@ export class DecoderSettingsStore implements ReadableStore<DecoderSettingsState>
 		id: string,
 		patch: DecoderSettingsUpdate,
 	): Promise<SettingWriteResult> {
-		if (patch.enabled === undefined && patch.options === undefined)
+		if (
+			patch.mode === undefined &&
+			patch.enabled === undefined &&
+			patch.options === undefined
+		)
 			return WRITE_OK
 		const view = this.state.get().views[id]
 		if (!view && this.state.get().available !== false) await this.loadView(id)

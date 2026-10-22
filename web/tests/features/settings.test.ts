@@ -534,6 +534,49 @@ describe("Decoder pages", () => {
 		expect(rows.some(r => r.id === "dec.pocsag-1.charset")).toBe(false)
 	})
 
+	it("shows the three-way Starts switch on a core with modes, applied at once", async () => {
+		const a = actions()
+		const rows = decoderRows(
+			snapshot({
+				decoders: [{ ...POCSAG, mode: "always", modeSource: "legacy-band" }],
+				decoderViews: {
+					"pocsag-1": { ...VIEW, mode: { value: "always", source: "config" } },
+				},
+			}),
+			a,
+		)
+		const starts = byId(rows, "dec.pocsag-1.mode")
+		expect(starts.widget.kind).toBe("seg")
+		expect(starts.value).toBe("always")
+		expect(starts.effect).toBeUndefined()
+		expect(starts.help).toContain("bandSuspension: false")
+		expect(rows.some(r => r.id === "dec.pocsag-1.enabled")).toBe(false)
+		expect(byId(rows, "dec.pocsag-1").effect).toBeUndefined()
+		await starts.write?.("off")
+		await byId(rows, "dec.pocsag-1").write?.(true)
+		expect(a.calls).toEqual([
+			["decoder", "pocsag-1", { mode: "off" }],
+			["decoder", "pocsag-1", { mode: "auto" }],
+		])
+	})
+
+	it("keeps Enabled on a core without modes and locks Starts in open access", () => {
+		const legacy = decoderRows(snapshot(), actions())
+		expect(legacy.some(r => r.id === "dec.pocsag-1.mode")).toBe(false)
+		const open = decoderRows(
+			snapshot({
+				decoderSettings: false,
+				decoderViews: {},
+				decoders: [{ ...POCSAG, mode: "off", modeSource: "config" }],
+			}),
+			actions(),
+		)
+		const starts = byId(open, "dec.pocsag-1.mode")
+		expect(starts.lock).toContain("open access mode")
+		expect(starts.help).toContain("Set in the YAML")
+		expect(byId(open, "dec.pocsag-1").value).toBe(false)
+	})
+
 	it("names keys like people do", () => {
 		expect(humanKey("sampleRate")).toBe("Sample rate")
 		expect(humanKey("frequencies_hz")).toBe("Frequencies Hz")

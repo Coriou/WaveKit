@@ -435,7 +435,8 @@ Condensed + Noto Sans, Tabler-based icons).
     under "More · N". No global advanced mode. *Why:* Home Assistant is retiring exactly
     that switch because it hid unrelated things.
   - *Decoder pages, generated:* each decoder declares its settings; its page shows a
-    header (tool and version, Running / Idle / Stopped / Off), its essentials and More,
+    header (tool and version, Running / Idle / Stopped / Off), Starts (Auto / Always / Off,
+    applied at once; Enabled on an older core), its essentials and More,
     then Status (running for, messages, last message, the last error) with Restart and
     Show log. Station identity is never copied: ADS-B shows "Station location · Roscoff ›",
     APRS "Callsign · Not set ›", Meshtastic "Region · EU 868 ›". Widgets are a fixed set

@@ -33,7 +33,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   descriptors and patch allowlist (`decoder-options.ts`, a snapshot of `src/decoders/options`);
   `GET /api/decoders/:id/settings` and the WG8 merge patch `PATCH /api/decoders/:id` (If-Match,
   `DECODER_OPTIONS_INVALID` issues with core's rule text, `DECODER_OPTION_NOT_PATCHABLE`,
-  `pendingRestart` until a start or restart); `POST /api/decoders/:id/{start,stop,restart}` with
+  `pendingRestart` until a start or restart; `mode` auto / always / off applied at once, with
+  `DecoderInfo.mode` / `modeSource` on every status); `POST /api/decoders/:id/{start,stop,restart}` with
   `DECODER_ALREADY_RUNNING` / `DECODER_NOT_RUNNING`; `GET /api/decoders/:id/log?lines=` (synthetic
   lines); `GET /api/storage` (every area, activity retention, filesystem); `GET /api/config/export`
   (redacted YAML); `GET /api/status` (`version`, `uptime`). Preferences:
