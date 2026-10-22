@@ -1,4 +1,4 @@
-import type { EventEmitter } from "node:events"
+import { EventEmitter } from "node:events"
 import { afterEach, expect, it, vi } from "vitest"
 import fc from "fast-check"
 import { SourceManager } from "../../../src/core/source-manager.js"
@@ -316,4 +316,43 @@ it("blocks a second source from consuming capacity reserved by a reconnect", () 
 	expect(gate.admit(a, [], 0).admit).toBe(true)
 	gate.noteSuspended(a.key, "drops", 0)
 	expect(gate.admit({ ...b, key: "after-suspension" }, [], 0).admit).toBe(true)
+})
+
+// Feature: link-burst-resilience, Property 10: Late shed
+// Validates: Requirements 4.6, 5.1, 5.4
+it("releases permanent source recovery records without losing transient epochs", () => {
+	fc.assert(
+		fc.property(fc.integer({ min: 1, max: 100 }), churn => {
+			const events = new EventEmitter()
+			const monitor = createEfficiencyMonitor({
+				sourceEvents: events,
+				sources: () => ["transient"],
+				branchCounters: () => null,
+				cpu: { normalisedPercent: 0 },
+				now: () => 0,
+				monoNow: () => 0,
+				setInterval: () => ({ cancel() {} }),
+			})
+			monitor.start()
+			events.emit("removed", "transient")
+			const retained = monitor.sourceEpoch!("transient")
+			expect(retained).toBeGreaterThan(0)
+			for (let i = 0; i < churn; i++) {
+				const id = `source-${i}`
+				events.emit("removed", id)
+				const before = monitor.sourceEpoch!(id)
+				expect(before).toBeGreaterThan(retained)
+				events.emit("source-removed", id, new Date())
+				expect(monitor.sourceEpoch!(id)).toBe(0)
+				// Reusing an ID cannot alias an epoch from its previous lifetime.
+				events.emit("disconnected", id)
+				expect(monitor.sourceEpoch!(id)).toBeGreaterThan(before)
+				events.emit("source-removed", id, new Date())
+			}
+			expect(monitor.sourceEpoch!("transient")).toBe(retained)
+			monitor.stop()
+			expect(events.eventNames()).toEqual([])
+		}),
+		{ numRuns: 100 },
+	)
 })

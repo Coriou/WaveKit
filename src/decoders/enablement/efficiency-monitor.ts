@@ -99,12 +99,12 @@ const validTotal = (n: unknown): n is number =>
 export function createEfficiencyMonitor(deps: {
 	sourceEvents?: {
 		on(
-			event: "disconnected" | "removed",
+			event: "disconnected" | "removed" | "source-removed",
 			listener: (id: string) => void,
 		): unknown
 		on(event: "data", listener: (id: string, chunk: Buffer) => void): unknown
 		off(
-			event: "disconnected" | "removed",
+			event: "disconnected" | "removed" | "source-removed",
 			listener: (id: string) => void,
 		): unknown
 		off(event: "data", listener: (id: string, chunk: Buffer) => void): unknown
@@ -205,6 +205,11 @@ export function createEfficiencyMonitor(deps: {
 		string,
 		{ epoch: number; readyAt: number | null }
 	>()
+	let nextSourceEpoch = 0
+	const sourceRemoved = (id: string) => {
+		recoveries.delete(id)
+		states.delete(id)
+	}
 	const resetSource = (s: SourceState) => {
 		s.seen = null
 		s.signature = null
@@ -223,7 +228,7 @@ export function createEfficiencyMonitor(deps: {
 		const s = states.get(id)
 		if (s) resetSource(s)
 		recoveries.set(id, {
-			epoch: (recoveries.get(id)?.epoch ?? 0) + 1,
+			epoch: ++nextSourceEpoch,
 			readyAt: null,
 		})
 	}
@@ -932,6 +937,7 @@ export function createEfficiencyMonitor(deps: {
 			if (!interval) {
 				deps.sourceEvents?.on("disconnected", sourceDown)
 				deps.sourceEvents?.on("removed", sourceDown)
+				deps.sourceEvents?.on("source-removed", sourceRemoved)
 				deps.sourceEvents?.on("data", sourceData)
 			}
 			interval ??= deps.setInterval(() => {
@@ -946,6 +952,7 @@ export function createEfficiencyMonitor(deps: {
 		stop() {
 			deps.sourceEvents?.off("disconnected", sourceDown)
 			deps.sourceEvents?.off("removed", sourceDown)
+			deps.sourceEvents?.off("source-removed", sourceRemoved)
 			deps.sourceEvents?.off("data", sourceData)
 			recoveries.clear()
 			interval?.cancel()
