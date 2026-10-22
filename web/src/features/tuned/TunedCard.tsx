@@ -6,7 +6,7 @@
 // scrolling well; Decode as… is Identify cut to one protocol. Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
 // row says where it is); on a hit it is that signal's card, "Held by the scan". A pinned card keeps its frequency.
 // Identified, the card becomes that signal's card (a banner, what was heard, Save and Open in Scanner) and keeps its
-// name for the session; a transmission on a frequency nothing decodes is identified on its own (auto-identify.ts).
+// name (this session's answer, else what any browser identified there: WG12 nearHz); a transmission on a frequency nothing decodes is identified on its own (auto-identify.ts).
 import { WaveKitIcon } from "@wavekit/brand/react"
 import type { ScannerProtocol } from "@wavekit/api-types"
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
@@ -44,6 +44,7 @@ import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { decodersAt } from "./decoders.ts"
 import {
 	DECODE_AS,
+	discoveryCard,
 	identifiedCard,
 	identifyView,
 	type IdentifiedCard,
@@ -329,6 +330,12 @@ export function TunedCard() {
 	useEffect(() => {
 		tuned.follow(hz === null ? null : { hz, toleranceHz: tolerance })
 	}, [tuned, hz, tolerance])
+	// what any browser identified here before (WG12 nearHz); older cores answer nothing
+	const nearStore = data.nearDiscovery
+	useEffect(() => {
+		nearStore.follow(hz, tolerance)
+	}, [nearStore, hz, tolerance])
+	const near = useStore(nearStore, s => (s.hz === hz ? s.discovery : null))
 	const span = useStore(tuned.span)
 	const items = useStore(tuned.feed, s => s.items)
 	const fresh = span !== null && span.hz === hz
@@ -402,7 +409,14 @@ export function TunedCard() {
 	const live = onIt && status?.running === true && level !== null
 	const present = live ? signalPresent(level) : false
 	const squelchOpen = present === true
-	const known = hz === null ? null : knownAt(id.known, hz, tolerance)
+	const session = hz === null ? null : knownAt(id.known, hz, tolerance)
+	const nearCard = near ? discoveryCard(near) : null
+	// this session's answer first, else the core's proven discovery
+	const known = session
+		? { card: identifiedCard(session.result), at: session.at }
+		: near && nearCard
+			? { card: nearCard, at: near.proof?.at ?? near.lastSeenAt }
+			: null
 	if (autoTried.current !== null && autoTried.current !== hz)
 		autoTried.current = null
 	const autoNow =
@@ -453,7 +467,9 @@ export function TunedCard() {
 		(id.targetHz === null || Math.abs(id.targetHz - hz) <= tolerance)
 	const found = idHere ? idView.found : null
 	// what Identify named here this session: the card keeps that name after the banner is dismissed
-	const named = found ?? (known ? identifiedCard(known.result) : null)
+	const named = found ?? known?.card ?? null
+	// proven but not named ("Digital, not decoded (tried DMR, dPMR)", "Carrier only")
+	const heardBefore = !named && near?.proof ? near.proof.summary : null
 
 	const now = nowView({
 		items: fresh ? items : [],
@@ -482,9 +498,11 @@ export function TunedCard() {
 			? `${here.map(d => d.type).join(", ")} listens here but is not running`
 			: named && known
 				? `Identified as ${named.proto} at ${clockText(known.at)}. ${notLive}`
-				: bandSays
-					? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
-					: "Nothing decodes this frequency. Identify finds out what it is."
+				: heardBefore
+					? `Heard before: ${heardBefore}. ${notLive}`
+					: bandSays
+						? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
+						: "Nothing decodes this frequency. Identify finds out what it is."
 	const proto =
 		now.protocol ??
 		(active[0]

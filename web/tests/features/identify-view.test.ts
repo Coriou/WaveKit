@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type {
+	Discovery,
 	ScanJob,
 	ScannerIdentifyEventData,
 	ScannerIdentifyResult,
@@ -7,6 +8,7 @@ import type {
 } from "@wavekit/api-types"
 import type { IdentifyState } from "../../src/data/index.ts"
 import {
+	discoveryCard,
 	DECODE_AS,
 	decodeAsName,
 	formatWaited,
@@ -631,5 +633,48 @@ describe("identifyView", () => {
 		expect(formatWaited(8_400)).toBe("8 s")
 		expect(formatWaited(125_000)).toBe("2 min 05 s")
 		expect(formatWaited(3_840_000)).toBe("1 h 04 min")
+	})
+})
+
+describe("discoveryCard (WG12 nearHz)", () => {
+	const base = {
+		id: "d1",
+		protocol: "dmr",
+		identity: { kind: "dmr-cc", value: "1" },
+		metadata: {
+			talkgroups: ["2081"],
+			sources: ["2081107"],
+			slots: [1],
+			callsigns: [],
+			capcodes: [],
+			ismModels: [],
+		},
+		proof: {
+			kind: "decoded",
+			protocol: "dmr",
+			transport: "ambient",
+			at: "2026-10-22T10:00:00.000Z",
+			observationId: "o1",
+			tried: [],
+			unavailable: [],
+			encrypted: false,
+			summary: "DMR decoded (CC1, TG 2081)",
+		},
+	} as unknown as Discovery
+
+	it("names a proven discovery like an Identify answer", () => {
+		expect(discoveryCard(base)).toMatchObject({
+			proto: "DMR",
+			sub: "CC 1 · slot 1",
+			big: "TG 2081",
+			line: "From radio 2081107",
+			discoveryId: "d1",
+		})
+	})
+
+	it("names nothing without a protocol or a proof", () => {
+		expect(discoveryCard({ ...base, protocol: "unknown" })).toBeNull()
+		const { proof: _, ...weak } = base
+		expect(discoveryCard(weak as Discovery)).toBeNull()
 	})
 })

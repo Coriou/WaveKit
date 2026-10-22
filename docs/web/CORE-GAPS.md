@@ -190,13 +190,16 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   `live-audio:transmission` and the `analog-transmission` Activity kind (WG1 §3–4).
 - [x] Analog vs digital detected per transmission on shared channels (ROADMAP §5b), so
   "What you hear: Auto" switches per transmission and the event carries the mode.
-  Done in core (WG12: a proof per observation). Not wired yet: Listen's "What you hear: Auto".
+  Done in core (WG12: a proof per observation). Wired: Auto plays decoded voice during a call, the analog
+  audio when a tone is heard live, otherwise follows the channel's latest observation proof
+  (`features/listen/sound.ts` `transmissionKind`).
 - [x] Tone on live status while a transmission is open (Listen offers the tone of the last
   closed transmission). Done: tone squelch (`toneSquelch`, WG7, NFM; Listen offers it), DCS on
   closed transmissions (WG6). Partly: CTCSS (50 standard tones) on each closed
   transmission as `tone.ctcssHz`, stored and searchable as text (WG2 §7); saved frequencies
   store a tone (ctcss, dcs code + polarity); scanner discoveries carry `ctcssHz` (S2, disabled).
-  Done in core (WG12 `LiveAudioStatus.tone`). Not wired yet: Listen still offers the last closed tone.
+  Done in core (WG12 `LiveAudioStatus.tone`). Wired: Listen offers the live tone and shows it in the head
+  while the squelch is open; older cores still get the last closed tone from Activity.
 - [x] DTMF on the tuned analog channel: digits on each closed transmission as `tone.dtmf` (up to
   32 symbols, WG2 §7), one per transmission, rather than a separate `audio:dtmf` event.
 - [ ] The recording id on the event (see Recordings).
@@ -570,7 +573,9 @@ core source, reported against a live core)
   the banner is dismissed). The discovery holds it, but nothing answers "what is known at 446.925 MHz" in one
   call; a lookup by frequency (`GET /api/scanner/discoveries?nearHz=&toleranceHz=`) would let the card name a
   frequency identified before, from any browser.
-  Done in core (WG12 `nearHz` / `toleranceHz`). Not wired yet: the card still keeps it per session.
+  Done in core (WG12 `nearHz` / `toleranceHz`). Wired: the card names the nearest proven discovery
+  (`data/near-discovery-store.ts`), or says its proof summary when it names no protocol; older cores keep
+  the session answer.
 - [ ] An identified digital channel is not decoded afterwards: Identify's probe stops, and no decoder follows
   the frequency, so the card says "No decoder runs on this frequency". A "Decode here" action (start the
   protocol's decoder on that channel, or follow the live-audio channel) would turn an answer into traffic.

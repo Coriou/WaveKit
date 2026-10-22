@@ -1,6 +1,7 @@
 // Identify in the tuned card (docs/web/canvas/Identify.dc.html, Tuned.dc.html; DESIGN.md "Identify in the
 // tuned card"): maps the identify store's state to what the card's "now" block shows. Pure.
 import type {
+	Discovery,
 	ScannerIdentifyMeasurements,
 	ScannerIdentifyResult,
 	ScannerIdentifyTrial,
@@ -110,6 +111,43 @@ export function identifiedCard(
 		banner: result.discoveryId ? `${said} · added to discoveries` : said,
 		measured: measuredLine(result.measurements),
 		discoveryId: result.discoveryId ?? null,
+	}
+}
+
+/**
+ * The card of a frequency identified before, from any browser (WG12 nearHz): the nearest proven discovery.
+ * Null when its proof names no protocol ("Digital, not decoded", "Carrier only").
+ */
+export function discoveryCard(d: Discovery): IdentifiedCard | null {
+	if (d.protocol === "unknown" || !d.proof) return null
+	const md = d.metadata
+	const sub: string[] = []
+	const identity = d.proof.identity ?? d.identity
+	if (identity) sub.push(identityText(identity))
+	if (md.slots.length === 1) sub.push(`slot ${md.slots[0]}`)
+	else if (md.slots.length > 1) sub.push("both slots")
+	const ctcss = d.proof.tone?.ctcssHz ?? md.ctcssHz
+	const dcs = d.proof.tone?.dcs
+	if (ctcss) sub.push(`CTCSS ${ctcss.toFixed(1)} Hz`)
+	else if (dcs)
+		sub.push(`DCS ${dcs.code}${dcs.polarity === "normal" ? "N" : "I"}`)
+	const tg = d.proof.talkgroup ?? md.talkgroups[0]
+	const big =
+		tg !== undefined
+			? `TG ${tg}`
+			: (md.callsigns[0] ??
+				(md.capcodes[0] !== undefined ? `Capcode ${md.capcodes[0]}` : null) ??
+				md.ismModels[0] ??
+				null)
+	const radio = md.sources[0]
+	return {
+		proto: protocolLabel(d.protocol),
+		sub: sub.join(" · "),
+		big,
+		line: radio !== undefined ? `From radio ${radio}` : "",
+		banner: "Identified before",
+		measured: null,
+		discoveryId: d.id,
 	}
 }
 

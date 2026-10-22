@@ -4,7 +4,7 @@ import { useEffect, useState, type CSSProperties } from "react"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
-import { useStore } from "../../data/index.ts"
+import { proofKind, useStore } from "../../data/index.ts"
 import type { IslandContext, IslandSlot } from "../../shell/ShellIsland.tsx"
 import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
@@ -40,6 +40,7 @@ import {
 	deemphOf,
 	deemphPatch,
 	hearHint,
+	liveTone,
 	LOW_CUT_HZ,
 	lowCutSub,
 	noiseReductionSub,
@@ -49,7 +50,9 @@ import {
 	toneSquelchFits,
 	toneSquelchPatch,
 	toneText,
+	transmissionKind,
 	voiceRoute,
+	type TransmissionKind,
 	type AgcChoice,
 	type DeemphChoice,
 	type HearChoice,
@@ -67,6 +70,29 @@ export function useVoiceRoute(): VoiceRoute | null {
 	return voiceRoute(list, voice, hz, tolerance)
 }
 
+/**
+ * Analog or digital for the transmission on the air (What you hear: Auto): a decoded call or a live tone
+ * now, else the channel's last proven transmission (WG12). Null on older cores until a call or tone says.
+ */
+export function useTransmissionKind(
+	route: VoiceRoute | null,
+): TransmissionKind | null {
+	const { data } = useServices()
+	const status = useLiveStatus()
+	const hz = useSettledHz()
+	const { open } = useLevel()
+	const last = useStore(data.nearDiscovery, s =>
+		hz !== null && s.hz === hz ? proofKind(s.lastProof) : null,
+	)
+	return transmissionKind({
+		route,
+		open,
+		tone: status?.tone,
+		last,
+		now: Date.now(),
+	})
+}
+
 /** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
 export function AudioOutput() {
 	const { data, listen } = useServices()
@@ -78,7 +104,8 @@ export function AudioOutput() {
 	const hear = useStore(listen, s => s.hear)
 	const wanted = useStore(listen, s => s.wanted)
 	const route = useVoiceRoute()
-	const digital = playsDigital(hear, route)
+	const kind = useTransmissionKind(route)
+	const digital = playsDigital(hear, route, kind)
 	const voiceRunning = useStore(data.digitalVoice, s => s.status?.running)
 	// analog plays until the decoded voice stream is up; both need live audio running (Listen drives the
 	// squelch meter, and a null source would end listening)
@@ -153,7 +180,9 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	const on = state.wanted
 	const mode = status ? modeSpec(status.config.modulation).label : null
 	const route = useVoiceRoute()
-	const digital = on && playsDigital(state.hear, route) && route !== null
+	const kind = useTransmissionKind(route)
+	const digital = on && playsDigital(state.hear, route, kind) && route !== null
+	const heardTone = on && open ? liveTone(status?.tone) : null
 	// a tone gate set on another channel stays on the core: say so while it holds the audio
 	const gate =
 		status?.config.toneSquelch && status.config.toneSquelch.kind !== "none"
@@ -168,7 +197,14 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 				.join(" · ")
 		: on && gate && status?.toneSquelch?.state === "waiting"
 			? `Waiting for ${toneText(gate)}`
-			: [mode, hz === null ? null : formatMHz(hz)].filter(Boolean).join(" · ")
+			: [
+					mode,
+					hz === null ? null : formatMHz(hz),
+					// the tone of the transmission on the air (WG12)
+					heardTone ? toneText(heardTone) : null,
+				]
+					.filter(Boolean)
+					.join(" · ")
 	const toggle = () => {
 		if (state.phase === "blocked") return listen.resume()
 		void (on ? listen.stop() : listen.start())
@@ -442,7 +478,7 @@ function ToneSquelch({
 	const items = useStore(tuned.feed, s => s.items)
 	const fresh = span !== null && span.hz === hz
 	const config = status.config
-	const tone = offeredTone(config.toneSquelch, fresh ? items : [])
+	const tone = offeredTone(config.toneSquelch, fresh ? items : [], status.tone)
 	if (!tone || !toneSquelchFits(config.modulation)) return null
 	const on = toneGateOn(config)
 	const text = toneText(tone)
@@ -501,6 +537,7 @@ function WhatYouHear({ status }: { status: LiveAudioStatus }) {
 	const { listen } = useServices()
 	const hear = useStore(listen, s => s.hear)
 	const route = useVoiceRoute()
+	const kind = useTransmissionKind(route)
 	const mode = modeSpec(status.config.modulation).label
 	return (
 		<div className="wkf-field">
@@ -514,7 +551,7 @@ function WhatYouHear({ status }: { status: LiveAudioStatus }) {
 			/>
 			<div className="wkf-hear-hint">
 				<span className="wkf-hear-dot" aria-hidden="true" />
-				<span>{hearHint(hear, route, mode)}</span>
+				<span>{hearHint(hear, route, mode, kind)}</span>
 			</div>
 		</div>
 	)

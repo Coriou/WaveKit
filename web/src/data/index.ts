@@ -19,6 +19,7 @@ import { TrailHistoryStore } from "./trail-history-store.ts"
 import { DecoderSettingsStore } from "./decoder-settings-store.ts"
 import { AccessDevicesStore } from "./access-devices-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
+import { NearDiscoveryStore } from "./near-discovery-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
 import { DigitalVoiceStore } from "./digital-voice-store.ts"
 import { PreferencesStore } from "./preferences-store.ts"
@@ -64,6 +65,8 @@ export interface DataLayer {
 	bandplanStack: BandplanStackStore
 	scanPresets: ScanPresetsStore
 	identify: IdentifyStore
+	/** The nearest proven discovery at the tuned frequency (WG12 nearHz); follows what the tuned card shows. */
+	nearDiscovery: NearDiscoveryStore
 	/** Saved frequencies (core operator data; protected mode only). */
 	savedFrequencies: SavedFrequenciesStore
 	/** Scanner status, jobs (sweep, passive, progress) and band plans; discoveries load on first refreshDiscoveries(). */
@@ -193,6 +196,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			if (layer.bandplanStack.get().loaded) void layer.bandplanStack.load()
 		}),
 		identify: new IdentifyStore(api, events, localStorageOrNull()),
+		nearDiscovery: new NearDiscoveryStore(api, events),
 		savedFrequencies,
 		scanner: new ScannerStore(api, events),
 		station: new StationStore(api),
@@ -254,6 +258,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.bandplanStack.dispose()
 			layer.scanPresets.dispose()
 			layer.identify.dispose()
+			layer.nearDiscovery.dispose()
 			layer.savedFrequencies.dispose()
 			layer.scanner.dispose()
 			layer.decoderSettings.dispose()
@@ -372,6 +377,12 @@ export {
 	isIdentifyFinal,
 	knownAt,
 } from "./identify-store.ts"
+export {
+	isProven,
+	NearDiscoveryStore,
+	proofKind,
+} from "./near-discovery-store.ts"
+export type { NearDiscoveryState } from "./near-discovery-store.ts"
 export {
 	SavedFrequenciesStore,
 	applyOps,

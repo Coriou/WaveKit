@@ -19,6 +19,7 @@ import {
 	deemphOf,
 	deemphPatch,
 	hearHint,
+	liveTone,
 	offeredTone,
 	playsDigital,
 	sameTone,
@@ -26,6 +27,7 @@ import {
 	toneSquelchFits,
 	toneSquelchPatch,
 	toneText,
+	transmissionKind,
 	voiceRoute,
 } from "../../src/features/listen/sound.ts"
 
@@ -217,6 +219,66 @@ describe("Listen › What you hear", () => {
 		expect(hearHint("digital", route, "NFM")).toBe(
 			"Digital voice decoder on this channel. Playing decoded voice.",
 		)
+	})
+
+	it("Auto follows the transmission: a call is digital, a live tone is analog, else the last proof", () => {
+		const idle = voiceRoute([dsd()], voice(), 161_150_000, 6250)
+		const now = Date.parse("2026-10-22T10:00:05.000Z")
+		const tone = { ctcssHz: 88.5, dcs: null, at: "2026-10-22T10:00:00.000Z" }
+		const base = { route: idle, open: true, tone, last: null, now }
+		expect(transmissionKind(base)).toBe("analog")
+		expect(transmissionKind({ ...base, open: false })).toBeNull()
+		expect(
+			transmissionKind({ ...base, now: now + 60_000, last: "digital" }),
+		).toBe("digital")
+		expect(transmissionKind({ ...base, tone: undefined, last: "analog" })).toBe(
+			"analog",
+		)
+		expect(
+			transmissionKind({ ...base, tone: { ...tone, ctcssHz: null } }),
+		).toBeNull()
+		const calling = voiceRoute(
+			[dsd()],
+			voice({
+				decoderId: "dsd-fme",
+				callId: "c1",
+				protocol: "dmr",
+				talkgroup: 2081,
+				source: 2081045,
+				slot: 1,
+				encrypted: false,
+				active: true,
+				startedAt: "2026-10-17T17:00:00Z",
+			} as DigitalVoiceStatus["call"]),
+			161_152_000,
+			6250,
+		)
+		expect(transmissionKind({ ...base, route: calling })).toBe("digital")
+
+		expect(playsDigital("auto", idle, "analog")).toBe(false)
+		expect(playsDigital("auto", idle, null)).toBe(true)
+		expect(playsDigital("digital", idle, "analog")).toBe(true)
+		expect(hearHint("auto", idle, "NFM", "analog")).toBe(
+			"This transmission is analog. Playing NFM audio, back to decoded voice when a call comes.",
+		)
+	})
+
+	it("offers the live tone over the Activity rows (WG12), and the rows on older cores", () => {
+		const live = { ctcssHz: 103.5, dcs: null, at: "2026-10-22T10:00:00.000Z" }
+		expect(liveTone(undefined)).toBeUndefined()
+		expect(liveTone({ ...live, ctcssHz: null })).toBeNull()
+		expect(offeredTone(undefined, [], live)).toEqual({
+			kind: "ctcss",
+			frequencyTenthsHz: 1035,
+		})
+		expect(
+			offeredTone(undefined, [], {
+				ctcssHz: null,
+				dcs: { code: "023", polarity: "normal" },
+				at: live.at,
+			}),
+		).toEqual({ kind: "dcs", code: "023", polarity: "normal" })
+		expect(offeredTone(undefined, [], undefined)).toBeNull()
 	})
 
 	it("makes the voice stream reachable from the page", () => {

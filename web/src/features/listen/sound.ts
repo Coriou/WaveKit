@@ -83,6 +83,17 @@ export function sameTone(a: HeardTone | null, b: HeardTone | null): boolean {
 	return false
 }
 
+/** The tone the core hears on the channel now (WG12 `LiveAudioStatus.tone`), or null when none was reported. */
+export function liveTone(
+	tone: LiveAudioStatus["tone"],
+): HeardTone | null | undefined {
+	if (tone === undefined) return undefined
+	if (tone.ctcssHz !== null && tone.ctcssHz > 0)
+		return { kind: "ctcss", frequencyTenthsHz: Math.round(tone.ctcssHz * 10) }
+	if (tone.dcs) return { kind: "dcs", ...tone.dcs }
+	return null
+}
+
 /** The tone of one analog transmission summary (fields `ctcssHz` 88.5, `dcs` "023N"), or null. */
 export function toneOfSummary(s: ActivitySummary): HeardTone | null {
 	if (s.kind !== "analog-transmission") return null
@@ -103,14 +114,18 @@ export function toneOfSummary(s: ActivitySummary): HeardTone | null {
 }
 
 /**
- * The tone the panel offers: the one already on the gate, else the tone of the latest transmission heard
- * on the channel (`items` newest first, already limited to the channel).
+ * The tone the panel offers: the one already on the gate, else the tone the core reports live (the
+ * current or last transmission, WG12), else the tone of the latest transmission heard on the channel
+ * (`items` newest first, already limited to the channel; cores before WG12).
  */
 export function offeredTone(
 	gate: LiveAudioToneSquelch | undefined,
 	items: readonly ActivitySummary[],
+	live?: LiveAudioStatus["tone"],
 ): HeardTone | null {
 	if (gate && gate.kind !== "none") return gate
+	const now = liveTone(live)
+	if (now !== undefined) return now
 	for (const s of items) {
 		if (s.kind !== "analog-transmission") continue
 		// the latest transmission decides: a toneless one means no tone to offer
@@ -202,16 +217,44 @@ function callText(
 	return parts.length > 0 ? parts.join(" · ") : null
 }
 
+export type TransmissionKind = "analog" | "digital"
+
+/** A live tone this recent, with the squelch open, belongs to the transmission on the air. */
+export const LIVE_TONE_MS = 10_000
+
 /**
- * What plays: decoded voice when a voice decoder covers the channel and the choice allows it (Auto or
- * Decoded voice), else the analog audio. Decoded voice with no decoder on the channel plays the analog
- * audio rather than silence, and the hint says why.
+ * Analog or digital, for the transmission on the air (Auto follows it): a decoded call now is digital; a
+ * tone heard now is analog; otherwise the last transmission's proof (`last`, from the channel's latest
+ * observation), or null when nothing says.
+ */
+export function transmissionKind(input: {
+	route: VoiceRoute | null
+	open: boolean
+	tone: LiveAudioStatus["tone"]
+	last: TransmissionKind | null
+	now: number
+}): TransmissionKind | null {
+	if (input.route?.active) return "digital"
+	const tone = input.tone
+	if (input.open && tone && liveTone(tone)) {
+		const at = Date.parse(tone.at)
+		if (Number.isFinite(at) && input.now - at <= LIVE_TONE_MS) return "analog"
+	}
+	return input.last
+}
+
+/**
+ * What plays: decoded voice when a voice decoder covers the channel and the choice allows it, else the
+ * analog audio. Auto plays the analog audio when the transmission is analog (a shared channel). Decoded
+ * voice with no decoder on the channel plays the analog audio rather than silence, and the hint says why.
  */
 export function playsDigital(
 	choice: HearChoice,
 	route: VoiceRoute | null,
+	kind: TransmissionKind | null = null,
 ): boolean {
-	return choice !== "analog" && route !== null
+	if (route === null || choice === "analog") return false
+	return choice === "digital" || kind !== "analog"
 }
 
 /** The line under the choice, as the board words it. */
@@ -219,14 +262,17 @@ export function hearHint(
 	choice: HearChoice,
 	route: VoiceRoute | null,
 	modeLabel: string,
+	kind: TransmissionKind | null = null,
 ): string {
-	if (playsDigital(choice, route) && route) {
+	if (playsDigital(choice, route, kind) && route) {
 		const what = route.protocol ?? "Digital voice"
 		return route.encrypted
 			? `${what} call is encrypted: nothing to play.`
 			: `${what} decoder on this channel. Playing decoded voice.`
 	}
 	if (choice === "analog") return `Playing demodulated ${modeLabel} audio.`
+	if (route)
+		return `This transmission is analog. Playing ${modeLabel} audio, back to ${route.protocol ?? "decoded voice"} when a call comes.`
 	return `No digital voice decoder on this channel. Playing ${modeLabel} audio.`
 }
 

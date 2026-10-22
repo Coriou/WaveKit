@@ -414,6 +414,8 @@ const discoveryQuerySchema = {
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },
 		evidence: { type: "string", enum: ["proven", "weak", "all"] },
+		nearHz: { type: "integer", minimum: 1 },
+		toleranceHz: { type: "integer", minimum: 1, maximum: 1_000_000 },
 	},
 	additionalProperties: false,
 }
@@ -3598,6 +3600,8 @@ export function registerScannerMock(
 		cursor?: string
 		limit?: number
 		evidence?: "proven" | "weak" | "all"
+		nearHz?: number
+		toleranceHz?: number
 	}
 
 	/** WG12: the mock proves what it decoded; the rest is weak activity. */
@@ -3662,6 +3666,9 @@ export function registerScannerMock(
 					.map(x => withProof(x.d))
 					.filter(
 						d =>
+							(f.nearHz === undefined ||
+								Math.abs(d.frequencyHz - f.nearHz) <=
+									(f.toleranceHz ?? 6250)) &&
 							(f.evidence === undefined ||
 								f.evidence === "all" ||
 								d.evidenceLevel === f.evidence) &&
@@ -3685,14 +3692,19 @@ export function registerScannerMock(
 				const byLastSeen = (a: Discovery, b: Discovery) =>
 					text(b.lastSeenAt, a.lastSeenAt) || text(a.id, b.id)
 				const sort = f.sort ?? "lastSeen"
+				const near = f.nearHz
 				items.sort(
-					sort === "frequency"
-						? (a, b) => a.frequencyHz - b.frequencyHz || text(a.id, b.id)
-						: sort === "confidence"
-							? (a, b) =>
-									CONFIDENCE_RANK[b.confidence] -
-										CONFIDENCE_RANK[a.confidence] || byLastSeen(a, b)
-							: byLastSeen,
+					near !== undefined
+						? (a, b) =>
+								Math.abs(a.frequencyHz - near) -
+									Math.abs(b.frequencyHz - near) || text(a.id, b.id)
+						: sort === "frequency"
+							? (a, b) => a.frequencyHz - b.frequencyHz || text(a.id, b.id)
+							: sort === "confidence"
+								? (a, b) =>
+										CONFIDENCE_RANK[b.confidence] -
+											CONFIDENCE_RANK[a.confidence] || byLastSeen(a, b)
+								: byLastSeen,
 				)
 				return {
 					items: items
