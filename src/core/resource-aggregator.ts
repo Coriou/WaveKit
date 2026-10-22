@@ -21,7 +21,9 @@ import type {
 	SourceBackpressure,
 	ResourceAlert,
 	LinkAdvisory,
+	SourceLinkQuality,
 } from "@wavekit/api-types"
+import type { LinkQuality } from "./link-burst/link-quality.js"
 import type { ContainerMonitor } from "./container-monitor.js"
 import type { SdrHostPoller } from "./sdr-host-poller.js"
 import type { SourceBackpressureTracker } from "./source-backpressure-tracker.js"
@@ -40,6 +42,7 @@ const HIGH_CPU_THRESHOLD = 90 // 90%
 // ============================================================================
 
 export interface ResourceAggregatorEvents {
+	"link-quality": (reports: SourceLinkQuality[]) => void
 	snapshot: (snapshot: ResourceSnapshot) => void
 	alert: (alert: ResourceAlert) => void
 }
@@ -64,6 +67,7 @@ export class ResourceAggregator extends EventEmitter {
 	private broadcastTimer: ReturnType<typeof setInterval> | null = null
 	private isRunning: boolean = false
 
+	private readonly linkQuality: Pick<LinkQuality, "all" | "one"> | null
 	private readonly containerMonitor: ContainerMonitor | null
 	private readonly sdrHostPoller: SdrHostPoller | null
 	private readonly backpressureTracker: SourceBackpressureTracker | null
@@ -75,6 +79,7 @@ export class ResourceAggregator extends EventEmitter {
 		logger: Logger,
 		options: ResourceAggregatorOptions = {},
 		components: {
+			linkQuality?: Pick<LinkQuality, "all" | "one"> | null
 			containerMonitor?: ContainerMonitor | null
 			sdrHostPoller?: SdrHostPoller | null
 			backpressureTracker?: SourceBackpressureTracker | null
@@ -86,6 +91,7 @@ export class ResourceAggregator extends EventEmitter {
 			options.broadcastIntervalMs ?? DEFAULT_BROADCAST_INTERVAL_MS
 		this.autoBroadcast = options.autoBroadcast ?? true
 
+		this.linkQuality = components.linkQuality ?? null
 		this.containerMonitor = components.containerMonitor ?? null
 		this.sdrHostPoller = components.sdrHostPoller ?? null
 		this.backpressureTracker = components.backpressureTracker ?? null
@@ -172,6 +178,14 @@ export class ResourceAggregator extends EventEmitter {
 		} satisfies ResourceAlert)
 	}
 
+	getLinkQuality(): SourceLinkQuality[] {
+		return this.linkQuality?.all() ?? []
+	}
+
+	getLinkQualityFor(id: string): SourceLinkQuality | null {
+		return this.linkQuality?.one(id) ?? null
+	}
+
 	/** Gets container resources only. */
 	getContainerResources(): ContainerResources {
 		if (!this.containerMonitor) {
@@ -224,6 +238,7 @@ export class ResourceAggregator extends EventEmitter {
 			try {
 				const snapshot = this.getSnapshot()
 				this.emit("snapshot", snapshot)
+				if (this.linkQuality) this.emit("link-quality", this.getLinkQuality())
 			} catch (error) {
 				this.log.error({ error }, "Failed to broadcast resource snapshot")
 			}
