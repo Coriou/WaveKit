@@ -30,6 +30,7 @@ const valid = (value: unknown): value is number =>
 
 /** Stateful decision core; all time and observations are supplied by the caller. */
 export interface DropReader {
+	sourceEpoch?(id: string): number
 	latestAttribution?(id: string): DropAttribution | null
 	lateWindows?(id: string): readonly LateDropWindow[]
 	linkDropsSince?(id: string, sinceMono: number): boolean
@@ -62,6 +63,21 @@ export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
 	deps: { drops?: DropReader; log?: Logger } = {},
 ): EfficiencyGate {
+	const placementEpochs = new Map<string, { sourceId: string; epoch: number }>()
+	const reconnectRetained = new Set<string>()
+	const refreshReconnects = () => {
+		for (const [key, previous] of placementEpochs) {
+			try {
+				const epoch = deps.drops?.sourceEpoch?.(previous.sourceId)
+				if (valid(epoch) && epoch > previous.epoch) {
+					reconnectRetained.add(key)
+					previous.epoch = epoch
+				}
+			} catch {
+				/* Missing source evidence cannot establish a reconnect. */
+			}
+		}
+	}
 	const admittedMono = new Map<string, number>()
 	const monoNow = () => {
 		try {
@@ -164,10 +180,12 @@ export function createEfficiencyGate(
 		mono: number,
 		prune = false,
 	) => {
+		refreshReconnects()
 		if (prune) {
 			const present = new Set(running.map(p => p.key))
 			for (const key of admittedMono.keys())
-				if (!present.has(key)) {
+				if (!present.has(key) && !reconnectRetained.has(key)) {
+					placementEpochs.delete(key)
 					admittedMono.delete(key)
 					graduated.delete(key)
 					gated.delete(key)
@@ -334,6 +352,8 @@ export function createEfficiencyGate(
 			const mono = monoNow()
 			observeRunning(running, mono)
 			if (!valid(now)) return { admit: false, detail: "unknown", retryAtMs: 0 }
+			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key))
+				return { admit: true }
 			const retry = retries.get(newcomer.key)
 			if (retry?.pending) {
 				retry.at = Math.max(retry.at, now + retry.delay)
@@ -392,6 +412,16 @@ export function createEfficiencyGate(
 				// fresh probation window.
 				if (!running.some(p => p.key === newcomer.key)) mark(newcomer.key, mono)
 				gated.add(newcomer.key)
+				try {
+					const epoch = deps.drops?.sourceEpoch?.(newcomer.sourceId)
+					if (valid(epoch))
+						placementEpochs.set(newcomer.key, {
+							sourceId: newcomer.sourceId,
+							epoch,
+						})
+				} catch {
+					/* Optional lifecycle evidence. */
+				}
 				return { admit: true }
 			}
 			// Missing evidence is not a rejection: no backoff is recorded and the
@@ -517,6 +547,9 @@ export function createEfficiencyGate(
 			return verdicts
 		},
 		noteSuspended(key, detail, now) {
+			reconnectRetained.delete(key)
+			placementEpochs.delete(key)
+			gated.delete(key)
 			const previous = retries.get(key)
 			const delay =
 				failures.delete(key) && previous
@@ -530,6 +563,8 @@ export function createEfficiencyGate(
 			})
 		},
 		forget(key) {
+			reconnectRetained.delete(key)
+			placementEpochs.delete(key)
 			admittedMono.delete(key)
 			graduated.delete(key)
 			gated.delete(key)

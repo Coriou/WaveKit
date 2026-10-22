@@ -1330,6 +1330,7 @@ async function main(): Promise<void> {
 		const advisorRef: { current: ReturnType<typeof createLinkAdvisor> | null } =
 			{ current: null }
 		const monitor = createEfficiencyMonitor({
+			sourceEvents: sourceManager,
 			monoNow: composed.factories.monoNow,
 			attributionApplies: id =>
 				sourceRouting.linkBurst(id)?.transport === "network",
