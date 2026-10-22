@@ -449,6 +449,53 @@ adds optional `version`: the version the SDR host reports in its own
 unavailable, and absent on older cores. A host body that is not a JSON object
 counts as a fetch failure (`available: false`, `fetchError` set).
 
+#### GET /api/resources/link-quality
+
+Returns `SourceLinkQuality[]` for IQ sources with a link-burst handle. Each report has
+`sourceId`, `transport` (`loopback` or `network`), ISO `at`, `absorber`, `arrivals`,
+`attribution`, `upstreamDropBytesPerSecond` and nullable `receiver`.
+
+- `SourceLinkAbsorber`: `enabled`, `capacityBytes`, `capacitySeconds`, `heldBytes`,
+  `peakHeldBytes10m`, `peakHeldMs10m`, nullable `laggardExcludeMsMax10m`,
+  `absorbedBytesTotal`, `overflowBytesTotal`, `overflowChunksTotal`, `flushedBytesTotal`,
+  `absorbedBytes10m`, `overflowBytes10m`, `flushedBytes10m`. Disabled absorbers report
+  `enabled: false` and zeros, with `laggardExcludeMsMax10m: null`.
+- `SourceLinkArrivals`: `windowMs`, nullable `worstStallMs` and `gapP99Ms`,
+  `burstSeconds`, `catchupBytes10m`, `chunks10m`. The reporting window is 600,000 ms.
+- `attribution`: nullable `last` and `counts10m` keyed by `DropAttribution`
+  (`none`, `link`, `host`, `consumer`, `unknown`).
+- `SourceLinkReceiver`: nullable `interfaceKind` (`ethernet`, `wireless`, `other`),
+  `signalDbm`, `undervoltageNow`, `throttled`; no host names or addresses.
+- Optional `histograms` (`SourceLinkHistograms`): `windowMs`, `gapBucketUpperMs`,
+  `gapCounts` (48 buckets), `chunkSizeBucketUpperBytes`, `chunkSizeCounts` (16 buckets),
+  `catchupBucketUpperBytes`, `catchupCounts` (16 buckets). Counts align with upper edges;
+  catch-up counts are per closed burst. Omitted if unavailable.
+- Optional nullable `loopDelay` (`SourceLinkLoopDelay`): nullable `last` containing
+  `maxMs` and `p99Ms`, nullable `maxMs10m` and `p99MaxMs10m`, and `intervals10m`.
+  This is process-wide event-loop delay; reporting does not reset the meter.
+
+#### GET /api/resources/link-quality/:sourceId
+
+Returns one `SourceLinkQuality`, or HTTP 404 with
+`{ error: "NotFound", code: "LINK_QUALITY_NOT_FOUND", message: "No link-quality report for this source" }`.
+The `resources` WebSocket channel emits `resources:link-quality` with the report array
+on the resource broadcast tick when link-quality reporting is present.
+
+Link-burst additions are optional and additive; older cores omit them:
+
+- `LinkAdvisory.burst` (`LinkBurstSummary`): nullable `worstStallMs`,
+  `overflowedBytes10m`, `burstSeconds`.
+- `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
+  (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
+  `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or
+  null). `DecoderEfficiencyDetail` gains `late-drops` for sustained late-drop shedding.
+- `ReceiverCapabilities.iqDelivery` (`ReceiverIqDelivery`): nullable `advertised`
+  array of `raw` / `channels`, `configured` (`raw`, `channels`, `auto`) and
+  `resolved` (`raw`). Configuration defaults to `auto`; `channels` is reserved and
+  rejected until channel delivery is implemented.
+- `SdrHostStatus.iqDelivery`: nullable object with `modes` (`raw` / `channels` array),
+  preserved on resource responses when the SDR host advertises it.
+
 ### Sources
 
 #### GET /api/sources

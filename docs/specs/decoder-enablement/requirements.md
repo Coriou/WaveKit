@@ -222,6 +222,9 @@ at most `cpuBudgetCores`; (b) the normalised host CPU (the meter the scanner's C
 at most `cpuGuardPercent` (90); (c) no fanout branch on the newcomer's source, including the
 channelizer's input branch, dropped a byte in the last `EFFICIENCY_DROP_WINDOW_MS` (10 s), and
 none for `EFFICIENCY_CLEAR_MS` (60 s) after the last drop.
+
+**Amendment ([link-burst-resilience](../link-burst-resilience/requirements.md) 4.4, 4.5):** "dropped a byte" and "the last drop" exclude drops attributed `link`.
+
 4.2 Admission order: operator-pinned, then `always`, then `auto`; within a class, YAML order,
 then catalogue order; within a decoder, placement order (3.7).
 4.3 A newcomer never evicts a running placement. A placement that does not fit is suspended with
@@ -242,6 +245,9 @@ discards all coverage, so every placement still on probation restarts from zero;
 seen still count. The view keeps showing the placement on probation until it graduates. Drops or CPU with no
 probationer suspend nothing: they close the gate for newcomers, log one warning per minute and
 show in the efficiency view.
+
+**Amendment ([link-burst-resilience](../link-burst-resilience/requirements.md) 4.1, 4.2, 5):** probation is judged on drops attributed `consumer`, `host` or `unknown`; a `link` interval neither condemns nor credits. The sentence "Drops or CPU with no probationer suspend nothing" becomes: "Drops or CPU with no probationer close the gate for newcomers, log one warning per minute and show in the efficiency view; sustained `consumer` or `host` drops shed the newest eligible graduated placement (link-burst-resilience 5)."
+
 4.5 Declared costs are per (type, reach) in reference cores with their basis (`measurement` or
 `estimate`), plus the channelizer's per-source base and per-channel cost (design, cost table).
 `cpuBudgetCores` defaults to 1.5 on x86-64 hosts and 0.75 on arm64 hosts with at most 4 cores.
@@ -292,6 +298,9 @@ stays unaccepted until a Pi 4-class host is measured. The C+ clause is open: dro
 after every placement has graduated (0.04 % at 2.048 Msps, 0.07 % at 2.4 Msps with seven
 channels) are accepted for now and deferred to a later design for link- and host-burst
 attribution; the gate is not changed for them.
+
+**Amendment ([link-burst-resilience](../link-burst-resilience/requirements.md) 3 and 5):** the open C+ clause is resolved by link-burst-resilience 3 and 5: late drops are attributed, and sustained `consumer` or `host` late drops shed.
+
 5.5 The per-source engine gains an in-place channel retune; a VFO change then moves a channel
 without closing it or restarting its decoder. Until it lands, a VFO move closes and reopens the
 channel and restarts the placement after `VFO_SETTLE_MS`.
@@ -384,6 +393,9 @@ entry starts one.
 `TunerCommandOrigin` (`decoder-rate`), `ResourceAlert.type` (`link-capacity`). Fastify response
 schemas, the CLI guards and the CLI reason words accept them; Main announces them in
 `docs/CLI-COORDINATION.md`.
+
+**Amendment ([link-burst-resilience](../link-burst-resilience/requirements.md)):** `DecoderEfficiencyDetail` gains `late-drops`.
+
 11.3 The decoder's top-level `suspended`/`suspension` reflect the primary placement; when no
 placement exists the reason precedence is `tuner-scanning`, rate reasons,
 `decoder-unavailable`, `channelizer-unavailable`, `frequency-out-of-band`, `efficiency-budget`.
