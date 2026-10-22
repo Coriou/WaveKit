@@ -202,10 +202,13 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
                     time.sleep(stall_at - now)
                 duration = schedule[stall_index][1]
                 end = stall_at + duration / 1000
-                # Count complete paced blocks whose due times lie inside the stall.
-                first = max(scheduled // BLOCK, math.ceil((stall_at - start) * bytes_per_second / BLOCK))
+                # Count available paced bytes, excluding intervals already dropped.
+                first_at = max(stall_at, drop_until) if stall_mode == "drop" else stall_at
+                first = max(scheduled // BLOCK, math.ceil((first_at - start) * bytes_per_second / BLOCK))
                 last = math.ceil((end - start) * bytes_per_second / BLOCK)
-                withheld = max(0, last - first) * BLOCK
+                first_byte = first * BLOCK
+                last_byte = last * BLOCK if loop else min(last * BLOCK, len(period))
+                withheld = max(0, last_byte - first_byte)
                 event = {"event": "stall", "stall_ms": duration, "mode": stall_mode,
                          "withheld_bytes": withheld}
                 if stall_mode == "drop":

@@ -34,7 +34,8 @@ class Socket:
 
 
 class StallTests(unittest.TestCase):
-    def run_stream(self, mode="catchup", deadline=6.6):
+    def run_stream(self, mode="catchup", deadline=6.6,
+                   schedule="1:150,2:500", period=None, loop=True):
         clock = Clock()
         conn = Socket(clock)
         events = []
@@ -42,8 +43,8 @@ class StallTests(unittest.TestCase):
         with patch.object(fake.time, "monotonic", side_effect=lambda: clock.now), \
                 patch.object(fake.time, "sleep", side_effect=clock.sleep), \
                 patch.object(fake, "emit", side_effect=lambda event: events.append((clock.now, event))):
-            fake.stream(conn, None, 1, bytes(range(256)) * 1024, True, False,
-                        4096000, deadline, 100, fake.parse_stall_schedule("1:150,2:500"),
+            fake.stream(conn, None, 1, period if period is not None else bytes(range(256)) * 1024,
+                        loop, False, 4096000, deadline, 100, fake.parse_stall_schedule(schedule),
                         mode, stats)
         return conn, events, stats
 
@@ -83,6 +84,29 @@ class StallTests(unittest.TestCase):
             handler.do_GET()
             self.assertEqual(json.loads(handler.wfile.getvalue()),
                              {"clients": [{"bytesDropped": 512}], "totalSent": 1024})
+
+    def test_overlapping_drop_stalls_count_union(self):
+        conn, events, stats = self.run_stream(
+            "drop", deadline=2.9, schedule="1:1500,1:500")
+        stalls = [e for _, e in events if e["event"] == "stall"]
+        self.assertEqual([e["withheld_bytes"] for e in stalls], [24 * fake.BLOCK, 0])
+        self.assertEqual([e["dropped_bytes_total"] for e in stalls],
+                         [24 * fake.BLOCK, 24 * fake.BLOCK])
+        self.assertEqual(stats.snapshot()["clients"], [{"bytesDropped": 24 * fake.BLOCK}])
+        self.assertEqual(sum(len(b) for _, b in conn.blocks), 22 * fake.BLOCK)
+
+    def test_finite_replay_stall_accounting_stops_at_eof(self):
+        for remaining in [fake.BLOCK, fake.BLOCK + 42]:
+            for mode in ["catchup", "drop"]:
+                with self.subTest(remaining=remaining, mode=mode):
+                    period = bytes(16 * fake.BLOCK + remaining)
+                    conn, events, stats = self.run_stream(
+                        mode, schedule="1:500", period=period, loop=False)
+                    stalls = [e for _, e in events if e["event"] == "stall"]
+                    self.assertEqual([e["withheld_bytes"] for e in stalls], [remaining])
+                    dropped = remaining if mode == "drop" else 0
+                    self.assertEqual(stats.snapshot()["clients"], [{"bytesDropped": dropped}])
+                    self.assertEqual(sum(len(b) for _, b in conn.blocks), len(period) - dropped)
 
     def test_schedule_validation(self):
         self.assertEqual(fake.parse_stall_schedule(""), [])
