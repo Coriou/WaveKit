@@ -501,3 +501,144 @@ it.each([
 	expect(h.monitor.linkDropsSince("s", 0)).toBe(false)
 	expect(h.monitor.lateWindows("s")).toEqual([])
 })
+
+it("an absent upstream counter permits network coverage and link attribution", () => {
+	const h = setupAttribution({ upstreamDroppedTotal: () => undefined })
+	h.tick(0)
+	h.tick(2000)
+	h.tick(4000)
+	expect(h.monitor.cleanAtMono("s")).not.toBeNull()
+	h.drop()
+	expect(h.tick(6000).sources.get("s")?.attribution).toBe("link")
+})
+
+it("local dongles and loopback sources retain counter-only coverage", () => {
+	const h = setupAttribution({
+		attributionApplies: () => false,
+		upstreamDroppedTotal: () => null,
+		shortfall: () => null,
+		ingest: () => null,
+	})
+	for (let at = 0; at <= 10000; at += 2000) h.tick(at)
+	expect(h.monitor.cleanAtMono("s")).not.toBeNull()
+	expect(h.monitor.coveredSinceMono("s", 2000)).toBe(8000)
+	h.drop()
+	h.tick(12000)
+	expect(h.monitor.droppedSinceMono("s", 12000)).toBe(true)
+})
+
+it("holds a gap loss without credit or condemnation until byte recovery", () => {
+	let shortfall: boolean | null = null
+	const h = setupAttribution({
+		recovery: () => ({
+			sequence: 1,
+			completedSequence: 0,
+			failedSequence: 0,
+			maxGapMs: 5042,
+			shortfall,
+		}),
+	})
+	h.tick(0)
+	h.tick(2000)
+	h.tick(4000)
+	const clean = h.monitor.cleanAtMono("s")
+	const covered = h.monitor.coveredSinceMono("s", 0)
+	h.evidence(5042, 16, true)
+	h.drop()
+	h.tick(6000)
+	expect(h.monitor.droppedSinceMono("s", 0)).toBe(false)
+	expect(h.monitor.coveredSinceMono("s", 0)).toBe(covered)
+	expect(h.monitor.dropState("s").state).toBe("unknown")
+	shortfall = false
+	expect(h.tick(8000).sources.get("s")?.attribution).toBe("link")
+	expect(h.monitor.droppedSinceMono("s", 0)).toBe(false)
+	expect(h.monitor.cleanAtMono("s")).toBe(clean)
+})
+
+it("a sustained shortfall resolves a held loss without link credit", () => {
+	let shortfall: boolean | null = null
+	const h = setupAttribution({
+		recovery: () => ({
+			sequence: 1,
+			completedSequence: 0,
+			failedSequence: 0,
+			maxGapMs: 5042,
+			shortfall,
+		}),
+	})
+	h.tick(0)
+	h.tick(2000)
+	h.evidence(5042, 16, true)
+	h.drop()
+	h.tick(4000)
+	shortfall = true
+	expect(h.tick(6000).sources.get("s")?.attribution).toBe("unknown")
+	expect(h.monitor.droppedSinceMono("s", 0)).toBe(true)
+})
+
+it("a consumer drop during pending recovery is condemned immediately", () => {
+	let shortfall: boolean | null = null
+	const h = setupAttribution({
+		recovery: () => ({
+			sequence: 1,
+			completedSequence: 0,
+			failedSequence: 0,
+			maxGapMs: 5042,
+			shortfall,
+		}),
+	})
+	h.tick(0)
+	h.tick(2000)
+	h.evidence(5042, 16, true)
+	h.drop()
+	h.tick(4000)
+	h.drop(false)
+	expect(h.tick(6000).sources.get("s")?.attribution).toBe("consumer")
+	expect(h.monitor.droppedSinceMono("s", 6000)).toBe(true)
+	expect(h.monitor.cleanAtMono("s")).toBeNull()
+	shortfall = false
+	h.tick(8000)
+	expect(h.monitor.droppedSinceMono("s", 6000)).toBe(true)
+})
+
+it.each([false, true])(
+	"pending loop history stays local to its source, reverse=%s",
+	reverse => {
+		let mono = 0
+		let loop = 0
+		let total = 0
+		const h = setupAttribution({
+			sources: () => (reverse ? ["b", "a"] : ["a", "b"]),
+			monoNow: () => mono,
+			branchCounters: () =>
+				new Map([
+					[
+						"@absorber",
+						{ droppedBytesTotal: total, droppedChunksTotal: total },
+					],
+				]),
+			loopDelay: () => ({ maxMs: loop, p99Ms: loop }),
+			ingest: id => ({
+				maxGapMs: id === "a" ? 5042 : 100,
+				catchupBytes: 0,
+				chunks: 1,
+			}),
+			recovery: id => ({
+				sequence: 1,
+				completedSequence: 0,
+				failedSequence: 0,
+				maxGapMs: id === "a" ? 5042 : 100,
+				shortfall: id === "a" ? null : false,
+			}),
+		})
+		for (mono = 0; mono <= 4000; mono += 2000) h.monitor.sampleNow()
+		mono = 6000
+		loop = 40
+		total++
+		h.monitor.sampleNow()
+		mono = 8000
+		loop = 16
+		total++
+		expect(h.monitor.sampleNow().sources.get("b")?.attribution).toBe("link")
+	},
+)

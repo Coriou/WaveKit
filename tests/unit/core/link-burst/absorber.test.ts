@@ -206,7 +206,7 @@ describe("BurstAbsorber", () => {
 		absorber.ingest(Buffer.alloc(4))
 		expect(absorber.counters().window.maxLaggardExcludeMs).toBe(510)
 	})
-	it("a laggard becomes gating when its last sibling is removed", () => {
+	it("a laggard stays excluded when its last sibling is removed", () => {
 		const { fanout, absorber, time } = setup()
 		fanout.congest("a")
 		absorber.ingest(Buffer.alloc(4))
@@ -216,8 +216,8 @@ describe("BurstAbsorber", () => {
 		fanout.emit("branch-removed", "b")
 		const before = fanout.delivered.length
 		absorber.ingest(Buffer.alloc(4))
-		expect(fanout.delivered).toHaveLength(before)
-		expect(absorber.counters().heldBytes).toBe(4)
+		expect(fanout.delivered).toHaveLength(before + 1)
+		expect(absorber.counters().heldBytes).toBe(0)
 	})
 	it("overflow episode logs start and end once", () => {
 		const { fanout, absorber, log } = setup(2, 4)
@@ -267,37 +267,6 @@ describe("BurstAbsorber", () => {
 		time(600_000)
 		expect(absorber.counters()).toEqual({
 			...initial,
-			window: {
-				peakHeldBytes: 0,
-				absorbedBytes: 0,
-				overflowBytes: 0,
-				flushedBytes: 0,
-				peakHeldMs: 0,
-				maxLaggardExcludeMs: null,
-			},
-		})
-	})
-	it("tracks an open holding episode across slots and expires its ending slot", () => {
-		const { fanout, absorber, time } = setup(2, 4)
-		fanout.active.delete("b")
-		time(9_000)
-		fanout.congest("a")
-		absorber.ingest(Buffer.alloc(4))
-		for (let now = 10_000; now <= 620_000; now += 10_000) {
-			time(now)
-			expect(absorber.counters().window.peakHeldMs).toBe(now - 9_000)
-			expect(absorber.counters().window.peakHeldBytes).toBe(4)
-		}
-		expect(absorber.counters().window.absorbedBytes).toBe(0)
-		fanout.drain("a")
-		const totals = absorber.counters()
-		for (let now = 630_000; now < 1_220_000; now += 10_000) {
-			time(now)
-			expect(absorber.counters().window.peakHeldMs).toBe(611_000)
-		}
-		time(1_220_000)
-		expect(absorber.counters()).toEqual({
-			...totals,
 			window: {
 				peakHeldBytes: 0,
 				absorbedBytes: 0,

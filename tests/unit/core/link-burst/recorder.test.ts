@@ -106,3 +106,60 @@ describe("IngestRecorder", () => {
 		expect(process.memoryUsage().heapUsed - before).toBeLessThan(65536)
 	})
 })
+
+it("each recovered stall gets its own recovery deadline", () => {
+	const r = createIngestRecorder()
+	r.configure(500, 2)
+	r.observeChunk(10, 0)
+	r.observeChunk(1000, 1000)
+	expect(r.recovery(1000)?.shortfall).toBe(false)
+	r.observeChunk(10, 9000)
+	expect(r.recovery(11000)?.shortfall).toBeNull()
+	r.observeChunk(11000, 12000)
+	expect(r.recovery(12000)?.shortfall).toBe(false)
+})
+
+it("a deficit waits through the recovery bound, then remains a shortfall", () => {
+	const r = createIngestRecorder()
+	r.configure(500, 2)
+	r.observeChunk(10, 0)
+	r.observeChunk(10, 5042)
+	expect(r.recovery(15041)?.shortfall).toBeNull()
+	expect(r.recovery(15042)?.shortfall).toBe(true)
+	expect(r.recovery(15043)?.shortfall).toBe(true)
+	r.resetArrival()
+	expect(r.recovery(15043)).toBeNull()
+})
+
+it("retires completed recovery so subsequent sustained-rate evidence is used", () => {
+	const r = createIngestRecorder()
+	r.configure(500, 2)
+	r.observeChunk(10, 0)
+	r.observeChunk(1000, 1000)
+	expect(r.recovery(1000)?.shortfall).toBe(false)
+	expect(r.recovery(11000)).toMatchObject({
+		retired: true,
+		completedSequence: 1,
+		shortfall: null,
+	})
+	expect(r.recovery(11001)).toMatchObject({
+		retired: true,
+		completedSequence: 1,
+		shortfall: null,
+	})
+})
+
+it.each([10999, 11000, 11001])(
+	"latches delivery timing at the recovery deadline: %i",
+	at => {
+		const r = createIngestRecorder()
+		r.configure(500, 2)
+		r.observeChunk(10, 0)
+		r.observeChunk(10, 1000)
+		// No recovery reads between the gap and catch-up.
+		r.observeChunk(20000, at)
+		const result = r.recovery(at)
+		if (at < 11000) expect(result?.failedSequence ?? 0).toBe(0)
+		else expect(result?.failedSequence).toBeGreaterThan(0)
+	},
+)

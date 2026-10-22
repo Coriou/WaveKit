@@ -1331,6 +1331,10 @@ async function main(): Promise<void> {
 			{ current: null }
 		const monitor = createEfficiencyMonitor({
 			monoNow: composed.factories.monoNow,
+			attributionApplies: id =>
+				sourceRouting.linkBurst(id)?.transport === "network",
+			recovery: (id, now) =>
+				sourceRouting.linkBurst(id)?.recorder?.recovery(now) ?? null,
 			ingest: (id, from, to) =>
 				sourceRouting.linkBurst(id)?.recorder?.interval(from, to) ?? null,
 			loopDelay: () => composed.loopMeter.takeInterval(),
@@ -1341,7 +1345,10 @@ async function main(): Promise<void> {
 					frameBytesFor(sourceManager.getCaps(id)?.format ?? "") ?? 0,
 				) ?? null,
 			upstreamDroppedTotal: id =>
-				backpressureTracker?.upstreamDroppedTotal(id) ?? null,
+				config.resources.sdrHostPoller.enabled &&
+				config.sources.find(source => source.id === id)?.sdrHost?.apiUrl
+					? (backpressureTracker?.upstreamDroppedTotal(id) ?? null)
+					: undefined,
 			cpuGuardPercent:
 				config.decoderPolicy?.efficiency?.cpuGuardPercent ??
 				EFFICIENCY_CPU_GUARD_PERCENT,

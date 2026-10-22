@@ -38,6 +38,7 @@ function setup(
 	})
 	const recorder: IngestRecorder = {
 		configure: vi.fn(),
+		recovery: () => null,
 		resetArrival: vi.fn(),
 		observeChunk: vi.fn(),
 		noteHolding: vi.fn(),

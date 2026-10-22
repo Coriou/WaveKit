@@ -9,6 +9,8 @@ export const ABSORBER_LAGGARD_MS = 500 // provisional
 export const LINK_GAP_MS = 80 // provisional
 export const HOST_LOOP_DELAY_MS = 50
 export const CATCHUP_WINDOW_MS = 500
+/** Allow one maximum-capacity backlog to catch up at twice nominal rate. */
+export const LINK_RECOVERY_WAIT_MS = BURST_ABSORBER_MAX_S * 1000
 export const LINK_QUALITY_WINDOW_MS = 600_000
 export const LINK_QUALITY_SLOT_MS = 10_000
 export const LINK_DROPPING_HOLD_MS = 60_000
@@ -71,7 +73,18 @@ export interface IngestHistograms {
 	catchupBucketUpperBytes: readonly number[]
 	catchupCounts: readonly number[]
 }
+export interface RecoveryEvidence {
+	/** Retained episode outcome only; use rolling-rate evidence for current delivery. */
+	retired?: boolean
+	sequence: number
+	completedSequence: number
+	failedSequence: number
+	maxGapMs: number
+	shortfall: boolean | null
+}
 export interface IngestRecorder extends IngestObserver {
+	/** Recovery balance since the arrival before the latest gap; null while catching up. */
+	recovery(nowMono: number): RecoveryEvidence | null
 	configure(sampleRateHz: number, frameBytes: number): void
 	resetArrival(): void
 	interval(fromMono: number, toMono: number): IngestInterval | null
