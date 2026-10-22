@@ -227,7 +227,10 @@ a recovered link loss preserves the clean-window origin. A sustained deficit res
 Recovery episodes carry sequence, completion and failure marks, so a second stall that begins after
 catch-up between polls gets its own deadline. Completion of a later episode cannot erase an
 earlier sustained deficit. A completed episode stops overriding rolling-rate evidence after its
-recovery deadline. The recovery state is fixed-size and reads use the monitor's monotonic clock.
+recovery deadline. Its completion/failure marks remain available to resolve a pending loss at
+its next poll, independently of that rate override. Arrival-time completion must precede the
+deadline; bytes at or after it cannot repair an expired deficit. The recovery state is fixed-size
+and reads use the monitor's monotonic clock.
 
 Rules in order: incomplete → `unknown`; no positive delta anywhere → `none`; a strict non-empty
 subset of branches rose and no overflow → `consumer`; upstream delta above 0 → `unknown`; gap,

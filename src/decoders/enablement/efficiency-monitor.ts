@@ -42,6 +42,7 @@ const ingestSchema = z.object({
 	chunks: nonNegative,
 })
 const recoverySchema = z.object({
+	retired: z.boolean().optional(),
 	sequence: z.number().int().nonnegative().safe(),
 	completedSequence: z.number().int().nonnegative().safe(),
 	failedSequence: z.number().int().nonnegative().safe(),
@@ -435,7 +436,7 @@ export function createEfficiencyMonitor(deps: {
 				evidenceValid = false
 			}
 			try {
-				if (recovery !== null) {
+				if (recovery !== null && recovery.retired !== true) {
 					shortfall = recovery.shortfall
 				} else if (deps.shortfall !== undefined) {
 					const parsed = z.boolean().safeParse(deps.shortfall(id))
@@ -467,7 +468,6 @@ export function createEfficiencyMonitor(deps: {
 			const completedPending =
 				s.pending !== null &&
 				recovery !== null &&
-				recovery.sequence !== s.pending.sequence &&
 				recovery.completedSequence >= s.pending.sequence &&
 				recovery.failedSequence < s.pending.sequence &&
 				comparable &&
@@ -496,6 +496,7 @@ export function createEfficiencyMonitor(deps: {
 			}
 			if (
 				recovery &&
+				recovery.retired !== true &&
 				comparable &&
 				evidenceValid &&
 				positiveNow &&

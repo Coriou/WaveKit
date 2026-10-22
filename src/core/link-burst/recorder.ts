@@ -146,7 +146,14 @@ export function createIngestRecorder(): IngestRecorder {
 				now >= recovery.arrived + LINK_RECOVERY_WAIT_MS &&
 				completedSequence === sequence
 			)
-				return null
+				return {
+					sequence,
+					completedSequence,
+					failedSequence,
+					maxGapMs: recovery.gap,
+					shortfall: null,
+					retired: true,
+				}
 			const expected = (nominal * (now - recovery.start)) / 1000
 			completeRecovery(now)
 			expireRecovery(now)

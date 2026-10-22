@@ -137,8 +137,16 @@ it("retires completed recovery so subsequent sustained-rate evidence is used", (
 	r.observeChunk(10, 0)
 	r.observeChunk(1000, 1000)
 	expect(r.recovery(1000)?.shortfall).toBe(false)
-	expect(r.recovery(11000)).toBeNull()
-	expect(r.recovery(11001)).toBeNull()
+	expect(r.recovery(11000)).toMatchObject({
+		retired: true,
+		completedSequence: 1,
+		shortfall: null,
+	})
+	expect(r.recovery(11001)).toMatchObject({
+		retired: true,
+		completedSequence: 1,
+		shortfall: null,
+	})
 })
 
 it.each([10999, 11000, 11001])(

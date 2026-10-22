@@ -74,6 +74,8 @@ export interface IngestHistograms {
 	catchupCounts: readonly number[]
 }
 export interface RecoveryEvidence {
+	/** Retained episode outcome only; use rolling-rate evidence for current delivery. */
+	retired?: boolean
 	sequence: number
 	completedSequence: number
 	failedSequence: number

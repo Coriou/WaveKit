@@ -243,3 +243,50 @@ it("late catch-up between polls cannot erase an expired deficit", () => {
 	expect(monitor.droppedSinceMono("s", 20000)).toBe(true)
 	expect(monitor.cleanAtMono("s")).toBeNull()
 })
+
+it("timely catch-up survives retirement before the next monitor poll", () => {
+	const recorder = createIngestRecorder()
+	recorder.configure(500, 2)
+	let now = 0
+	let rateShortfall = false
+	const counter = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+	const monitor = createEfficiencyMonitor({
+		sources: () => ["s"],
+		branchCounters: () => new Map([["@absorber", counter]]),
+		topology: () => "fixed",
+		cpu: { normalisedPercent: 10 },
+		now: () => now,
+		monoNow: () => now,
+		ingest: (_id, from, to) => recorder.interval(from, to),
+		loopDelay: () => ({ maxMs: 16, p99Ms: 16 }),
+		shortfall: () => rateShortfall,
+		recovery: (_id, at) => recorder.recovery(at),
+		setInterval: () => ({ cancel() {} }),
+	})
+	for (now = 0; now <= 20000; now += 10) {
+		recorder.observeChunk(10, now)
+		if (now % 2000 === 0) monitor.sampleNow()
+	}
+	for (now = 22000; now <= 24000; now += 2000) monitor.sampleNow()
+	recorder.observeChunk(10, 24500)
+	counter.droppedBytesTotal++
+	for (now = 24510; now <= 34400; now += 10) {
+		recorder.observeChunk(10, now)
+		if (now % 2000 === 0) monitor.sampleNow()
+	}
+	// Timely catch-up just before the 34500 deadline, then smooth input through the next poll.
+	recorder.observeChunk(5000, 34499)
+	for (now = 34509; now < 36000; now += 10) recorder.observeChunk(10, now)
+
+	now = 36000
+	expect(monitor.sampleNow().sources.get("s")?.attribution).toBe("link")
+	expect(monitor.droppedSinceMono("s", 20000)).toBe(false)
+	expect(monitor.cleanAtMono("s")).not.toBeNull()
+	// Retained metadata must not override a subsequent sustained-rate deficit.
+	now = 38000
+	rateShortfall = true
+	counter.droppedBytesTotal++
+	monitor.sampleNow()
+	expect(monitor.latestAttribution("s")).toBe("unknown")
+	expect(monitor.droppedSinceMono("s", 36000)).toBe(true)
+})
