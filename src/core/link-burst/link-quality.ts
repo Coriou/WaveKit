@@ -1,6 +1,7 @@
 import { z } from "zod"
 import type {
 	DropAttribution,
+	LinkAdvisory,
 	LinkBurstSummary,
 	SourceLinkQuality,
 } from "@wavekit/api-types"
@@ -12,6 +13,8 @@ import type {
 } from "./contract.js"
 
 export interface LinkQualityDeps {
+	advisory?: (id: string) => LinkAdvisory | null
+	reportAdvisory?: (id: string, advisory: LinkAdvisory) => void
 	sources: () => readonly string[]
 	handles: (id: string) => LinkBurstHandles | null
 	attribution: (id: string) => {
@@ -25,6 +28,7 @@ export interface LinkQualityDeps {
 	now: () => number
 }
 export interface LinkQuality {
+	recheckAdvisories(): void
 	all(): SourceLinkQuality[]
 	one(sourceId: string): SourceLinkQuality | null
 	burst(sourceId: string): LinkBurstSummary | null
@@ -78,6 +82,7 @@ function optionalNumber(value: unknown): number | null {
 }
 
 export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
+	const levels = new Map<string, LinkAdvisory["level"]>()
 	function one(sourceId: string): SourceLinkQuality | null {
 		const handles = read(() => deps.handles(sourceId))
 		if (!handles) return null
@@ -152,6 +157,19 @@ export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 	}
 	return {
 		one,
+		recheckAdvisories() {
+			for (const id of read(deps.sources) ?? []) {
+				try {
+					if (deps.handles(id)?.transport !== "network") continue
+					const advisory = deps.advisory?.(id)
+					if (!advisory || levels.get(id) === advisory.level) continue
+					levels.set(id, advisory.level)
+					if (advisory.level !== "none") deps.reportAdvisory?.(id, advisory)
+				} catch {
+					/* Skip unavailable evidence for this source. */
+				}
+			}
+		},
 		all: () =>
 			(read(deps.sources) ?? []).flatMap(id => {
 				const report = read(() => one(id))

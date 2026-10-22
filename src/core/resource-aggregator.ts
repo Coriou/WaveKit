@@ -67,7 +67,10 @@ export class ResourceAggregator extends EventEmitter {
 	private broadcastTimer: ReturnType<typeof setInterval> | null = null
 	private isRunning: boolean = false
 
-	private readonly linkQuality: Pick<LinkQuality, "all" | "one"> | null
+	private readonly linkQuality:
+		| (Pick<LinkQuality, "all" | "one"> &
+				Partial<Pick<LinkQuality, "recheckAdvisories">>)
+		| null
 	private readonly containerMonitor: ContainerMonitor | null
 	private readonly sdrHostPoller: SdrHostPoller | null
 	private readonly backpressureTracker: SourceBackpressureTracker | null
@@ -79,7 +82,10 @@ export class ResourceAggregator extends EventEmitter {
 		logger: Logger,
 		options: ResourceAggregatorOptions = {},
 		components: {
-			linkQuality?: Pick<LinkQuality, "all" | "one"> | null
+			linkQuality?:
+				| (Pick<LinkQuality, "all" | "one"> &
+						Partial<Pick<LinkQuality, "recheckAdvisories">>)
+				| null
 			containerMonitor?: ContainerMonitor | null
 			sdrHostPoller?: SdrHostPoller | null
 			backpressureTracker?: SourceBackpressureTracker | null
@@ -238,7 +244,10 @@ export class ResourceAggregator extends EventEmitter {
 			try {
 				const snapshot = this.getSnapshot()
 				this.emit("snapshot", snapshot)
-				if (this.linkQuality) this.emit("link-quality", this.getLinkQuality())
+				if (this.linkQuality) {
+					this.linkQuality.recheckAdvisories?.()
+					this.emit("link-quality", this.getLinkQuality())
+				}
 			} catch (error) {
 				this.log.error({ error }, "Failed to broadcast resource snapshot")
 			}
