@@ -202,3 +202,44 @@ it("a recovered successor cannot excuse an expired sustained deficit", () => {
 	expect(monitor.droppedSinceMono("s", 20000)).toBe(true)
 	expect(monitor.cleanAtMono("s")).toBeNull()
 })
+
+it("late catch-up between polls cannot erase an expired deficit", () => {
+	const recorder = createIngestRecorder()
+	recorder.configure(500, 2)
+	let now = 0
+	const counter = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+	const monitor = createEfficiencyMonitor({
+		sources: () => ["s"],
+		branchCounters: () => new Map([["@absorber", counter]]),
+		topology: () => "fixed",
+		cpu: { normalisedPercent: 10 },
+		now: () => now,
+		monoNow: () => now,
+		ingest: (_id, from, to) => recorder.interval(from, to),
+		loopDelay: () => ({ maxMs: 16, p99Ms: 16 }),
+		shortfall: () => false,
+		recovery: (_id, at) => recorder.recovery(at),
+		setInterval: () => ({ cancel() {} }),
+	})
+	for (now = 0; now <= 20000; now += 10) {
+		recorder.observeChunk(10, now)
+		if (now % 2000 === 0) monitor.sampleNow()
+	}
+	for (now = 22000; now <= 24000; now += 2000) monitor.sampleNow()
+	recorder.observeChunk(10, 24500)
+	counter.droppedBytesTotal++
+	for (now = 24510; now <= 34400; now += 10) {
+		recorder.observeChunk(10, now)
+		if (now % 2000 === 0) monitor.sampleNow()
+	}
+	for (now = 34410; now <= 34990; now += 10) recorder.observeChunk(10, now)
+	// Recovery deadline was 34500. Late catch-up and a successor both occur between polls.
+	recorder.observeChunk(5000, 35000)
+	recorder.observeChunk(100, 35100)
+	for (now = 35110; now <= 36000; now += 10) recorder.observeChunk(10, now)
+	expect(recorder.recovery(36000)?.failedSequence).toBeGreaterThan(0)
+	now = 36000
+	expect(monitor.sampleNow().sources.get("s")?.attribution).toBe("unknown")
+	expect(monitor.droppedSinceMono("s", 20000)).toBe(true)
+	expect(monitor.cleanAtMono("s")).toBeNull()
+})

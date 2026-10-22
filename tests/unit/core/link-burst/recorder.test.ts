@@ -140,3 +140,18 @@ it("retires completed recovery so subsequent sustained-rate evidence is used", (
 	expect(r.recovery(11000)).toBeNull()
 	expect(r.recovery(11001)).toBeNull()
 })
+
+it.each([10999, 11000, 11001])(
+	"latches delivery timing at the recovery deadline: %i",
+	at => {
+		const r = createIngestRecorder()
+		r.configure(500, 2)
+		r.observeChunk(10, 0)
+		r.observeChunk(10, 1000)
+		// No recovery reads between the gap and catch-up.
+		r.observeChunk(20000, at)
+		const result = r.recovery(at)
+		if (at < 11000) expect(result?.failedSequence ?? 0).toBe(0)
+		else expect(result?.failedSequence).toBeGreaterThan(0)
+	},
+)

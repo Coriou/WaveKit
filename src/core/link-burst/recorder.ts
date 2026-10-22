@@ -116,6 +116,25 @@ export function createIngestRecorder(): IngestRecorder {
 		burstStart = null
 		burstBytes = 0
 	}
+	function expireRecovery(now: number): void {
+		if (
+			recovery &&
+			now >= recovery.arrived + LINK_RECOVERY_WAIT_MS &&
+			completedSequence !== sequence
+		)
+			failedSequence = sequence
+	}
+	function completeRecovery(now: number): void {
+		if (
+			recovery &&
+			nominal > 0 &&
+			failedSequence !== sequence &&
+			now < recovery.arrived + LINK_RECOVERY_WAIT_MS &&
+			totalBytes - recovery.base >=
+				((nominal * (now - recovery.start)) / 1000) * 0.99
+		)
+			completedSequence = sequence
+	}
 	function holding(now: number): void {
 		const second = Math.floor(now / 1000)
 		seconds[second % 600] = second
@@ -129,8 +148,11 @@ export function createIngestRecorder(): IngestRecorder {
 			)
 				return null
 			const expected = (nominal * (now - recovery.start)) / 1000
-			const full = totalBytes - recovery.base >= expected * 0.99
-			if (full) completedSequence = sequence
+			completeRecovery(now)
+			expireRecovery(now)
+			const full =
+				failedSequence !== sequence &&
+				totalBytes - recovery.base >= expected * 0.99
 			return {
 				sequence,
 				completedSequence,
@@ -158,6 +180,9 @@ export function createIngestRecorder(): IngestRecorder {
 		},
 		noteHolding: holding,
 		observeChunk(bytes, now) {
+			// Check before adding a late arrival: its bytes cannot repair an expired deficit.
+			if (recovery && now >= recovery.arrived + LINK_RECOVERY_WAIT_MS)
+				expireRecovery(now)
 			close(now)
 			first ??= now
 			const s = slot(now)
@@ -192,13 +217,8 @@ export function createIngestRecorder(): IngestRecorder {
 						totalBytes - recovery.base >=
 							((nominal * (previous - recovery.start)) / 1000) * 0.99
 					) {
-						if (
-							recovery &&
-							totalBytes - recovery.base >=
-								((nominal * (previous - recovery.start)) / 1000) * 0.99
-						)
-							completedSequence = sequence
-						else if (recovery) failedSequence = sequence
+						if (recovery && completedSequence !== sequence)
+							failedSequence = sequence
 						sequence++
 						recovery = { start: previous, arrived: now, base: totalBytes, gap }
 					}
@@ -210,6 +230,8 @@ export function createIngestRecorder(): IngestRecorder {
 				}
 			}
 			totalBytes += bytes
+			completeRecovery(now)
+			expireRecovery(now)
 			if (burstStart !== null) burstBytes += bytes
 			arrival[0] = now
 		},
