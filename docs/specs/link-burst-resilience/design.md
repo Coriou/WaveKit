@@ -228,6 +228,7 @@ otherwise `unknown`.
   last shed time. The absorber's overflow counter enters the existing per-branch counter map
   under the reserved key `@absorber#<instance>` (the router refuses fanout branch ids starting
   with `@`), so overflow is drop evidence under every existing rule.
+  Erratum: the monitor keeps the window ring; the gate keeps the last shed time (cooldown) and the late-since mark (last probationer or shed). Behaviour is unchanged.
 - `SourceDropSample` gains `attribution`. A `link` sample does not set `lastDropMono` and does
   not reset `cleanSinceMono`; it breaks the credited coverage chain as an incomplete read does.
 - `probation()` keeps its shape. For the newest probationer it now condemns only on drops in
