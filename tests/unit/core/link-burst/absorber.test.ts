@@ -1,6 +1,10 @@
-import { describe, it, expect, vi } from "vitest"
+import { describe, it, expect, vi, afterEach } from "vitest"
 import { createLogger } from "../../../../src/utils/logger.js"
-import { createBurstAbsorber } from "../../../../src/core/link-burst/absorber.js"
+import {
+	ABSORBER_RELEASE_STEP_BLOCKS,
+	createBurstAbsorber,
+} from "../../../../src/core/link-burst/absorber.js"
+import { ABSORBER_RELEASE_BYTES } from "../../../../src/core/link-burst/contract.js"
 import { FakeFanout } from "./fake-fanout.js"
 
 export function setup(frameBytes = 2, capacity = 128) {
@@ -26,6 +30,121 @@ export function setup(frameBytes = 2, capacity = 128) {
 }
 
 describe("BurstAbsorber", () => {
+	afterEach(() => {
+		vi.restoreAllMocks()
+		vi.useRealTimers()
+	})
+	it.each([0, 4])(
+		"caps a drain with %i extra bytes at the step boundary",
+		extra => {
+			vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] })
+			const step = ABSORBER_RELEASE_STEP_BLOCKS * ABSORBER_RELEASE_BYTES
+			const { absorber, fanout } = setup(4, step + extra)
+			const stream = Buffer.alloc(step + extra, 73)
+			fanout.congest("a")
+			absorber.ingest(stream)
+			fanout.drain("a")
+			expect(fanout.delivered).toHaveLength(4)
+			expect(absorber.counters().heldBytes).toBe(extra)
+			expect(vi.getTimerCount()).toBe(extra ? 1 : 0)
+			vi.runAllTimers()
+			expect(Buffer.concat(fanout.delivered).equals(stream)).toBe(true)
+			expect(absorber.counters().heldBytes).toBe(0)
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
+	it("releases in ordered steps and keeps one continuation across further triggers", () => {
+		vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] })
+		const step = ABSORBER_RELEASE_STEP_BLOCKS * ABSORBER_RELEASE_BYTES
+		const stream = Buffer.alloc(step * 7, 17)
+		const tail = Buffer.from([1, 2, 3, 4])
+		const { absorber, fanout } = setup(4, stream.length + tail.length)
+		fanout.congest("a")
+		absorber.ingest(stream)
+		fanout.drain("a")
+		expect(fanout.delivered).toHaveLength(4)
+		expect(vi.getTimerCount()).toBe(1)
+		absorber.ingest(tail)
+		expect(fanout.delivered).toHaveLength(8)
+		for (const event of ["drain", "branch-added", "branch-removed"]) {
+			const before = fanout.delivered.length
+			fanout.emit(event, "b")
+			expect(fanout.delivered.length - before).toBe(4)
+			expect(vi.getTimerCount()).toBe(1)
+		}
+		vi.advanceTimersToNextTimer()
+		expect(fanout.delivered).toHaveLength(24)
+		expect(vi.getTimerCount()).toBe(1)
+		vi.runAllTimers()
+		expect(
+			Buffer.concat(fanout.delivered).equals(Buffer.concat([stream, tail])),
+		).toBe(true)
+		expect(absorber.counters().heldBytes).toBe(0)
+		expect(vi.getTimerCount()).toBe(0)
+	})
+	it("pauses a queued continuation when a gating branch becomes congested", () => {
+		vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] })
+		const step = ABSORBER_RELEASE_STEP_BLOCKS * ABSORBER_RELEASE_BYTES
+		const stream = Buffer.concat(
+			Array.from({ length: 13 }, (_, index) =>
+				Buffer.alloc(ABSORBER_RELEASE_BYTES, index),
+			),
+		)
+		const { absorber, fanout } = setup(4, stream.length)
+		const schedule = vi.spyOn(globalThis, "setImmediate")
+		fanout.congest("a")
+		absorber.ingest(stream)
+		fanout.drain("a")
+		expect(
+			Buffer.concat(fanout.delivered).equals(stream.subarray(0, step)),
+		).toBe(true)
+		expect(vi.getTimerCount()).toBe(1)
+		expect(schedule).toHaveBeenCalledTimes(1)
+
+		fanout.congest("b")
+		vi.advanceTimersToNextTimer()
+		expect(
+			Buffer.concat(fanout.delivered).equals(stream.subarray(0, step)),
+		).toBe(true)
+		expect(absorber.counters().heldBytes).toBe(stream.length - step)
+		expect(vi.getTimerCount()).toBe(0)
+		expect(schedule).toHaveBeenCalledTimes(1)
+
+		fanout.drain("b")
+		expect(
+			Buffer.concat(fanout.delivered).equals(stream.subarray(0, step * 2)),
+		).toBe(true)
+		expect(vi.getTimerCount()).toBe(1)
+		vi.runAllTimers()
+		expect(Buffer.concat(fanout.delivered).equals(stream)).toBe(true)
+		expect(absorber.counters().heldBytes).toBe(0)
+		expect(vi.getTimerCount()).toBe(0)
+		expect(fanout.drops.size).toBe(0)
+	})
+	it.each(["flush", "configure", "dispose"] as const)(
+		"%s cancels a pending continuation",
+		action => {
+			vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] })
+			const size = (ABSORBER_RELEASE_STEP_BLOCKS + 1) * ABSORBER_RELEASE_BYTES
+			const { absorber, fanout } = setup(4, size)
+			const schedule = vi.spyOn(globalThis, "setImmediate")
+			const cancel = vi.spyOn(globalThis, "clearImmediate")
+			fanout.congest("a")
+			absorber.ingest(Buffer.alloc(size))
+			fanout.drain("a")
+			expect(vi.getTimerCount()).toBe(1)
+			if (action === "flush") absorber.flush("disconnect")
+			else if (action === "configure") absorber.configure(size)
+			else absorber.dispose()
+			expect(cancel).toHaveBeenCalledWith(schedule.mock.results[0]?.value)
+			expect(vi.getTimerCount()).toBe(0)
+			vi.runAllTimers()
+			if (action === "dispose") schedule.mock.calls[0]?.[0]()
+			expect(fanout.delivered).toHaveLength(4)
+			expect(absorber.counters().flushedBytesTotal).toBe(ABSORBER_RELEASE_BYTES)
+		},
+	)
+
 	it("holding absorber releases once a startup branch drained", () => {
 		const { fanout, absorber } = setup()
 		fanout.congest("a")
@@ -262,11 +381,15 @@ describe("BurstAbsorber", () => {
 			expect(fanout.listenerCount(event)).toBe(0)
 	})
 	it("steady-state pass-through allocates nothing", () => {
-		const { absorber } = setup()
+		const { absorber, fanout } = setup()
+		const schedule = vi.spyOn(globalThis, "setImmediate")
 		const chunk = Buffer.alloc(4)
 		const spy = vi.spyOn(Buffer, "allocUnsafe")
 		for (let i = 0; i < 1000; i++) absorber.ingest(chunk)
 		expect(spy).not.toHaveBeenCalled()
+		expect(schedule).not.toHaveBeenCalled()
+		expect(fanout.delivered).toHaveLength(1000)
+		expect(fanout.delivered.every(value => value === chunk)).toBe(true)
 		spy.mockRestore()
 	})
 })

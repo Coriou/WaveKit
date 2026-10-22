@@ -7,6 +7,8 @@ import {
 	type BurstAbsorberDeps,
 } from "./contract.js"
 
+export const ABSORBER_RELEASE_STEP_BLOCKS = 4
+
 export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	const { fanout, recorder, monoNow, frameBytes, log } = deps
 	let ring: Buffer | null = null
@@ -22,6 +24,7 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	let episodeChunks = 0
 	let disposed = false
 	let releasing = false
+	let continuation: ReturnType<typeof setImmediate> | null = null
 	const active = new Set<string>()
 	const congested = new Set<string>()
 	const excluded = new Set<string>()
@@ -108,10 +111,19 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		return blocked
 	}
 	function release(now: number): void {
-		if (releasing || !ring) return
+		if (disposed || releasing || !ring) return
 		releasing = true
 		try {
-			while (length >= frameBytes && !gated(now)) {
+			// Four 64 KiB blocks = 256 KiB per synchronous step, ≈ 0.16 ms at the
+			// measured ~1.6 GB/s copy and distribute, under the 2 ms loop budget.
+			// One continuation per loop turn still outpaces 2.4 Msps × 4 B = 9.6 MB/s.
+			let blocks = 0
+			while (
+				blocks < ABSORBER_RELEASE_STEP_BLOCKS &&
+				length >= frameBytes &&
+				!gated(now)
+			) {
+				blocks++
 				const size =
 					Math.floor(Math.min(length, ABSORBER_RELEASE_BYTES) / frameBytes) *
 					frameBytes
@@ -126,6 +138,12 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 					endOverflow(now)
 				}
 				fanout.distribute(chunk)
+			}
+			if (length >= frameBytes && !gated(now) && continuation === null) {
+				continuation = setImmediate(() => {
+					continuation = null
+					if (!disposed) wake()
+				})
 			}
 		} finally {
 			releasing = false
@@ -152,6 +170,8 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	fanout.on("branch-added", wake)
 	fanout.on("branch-removed", drain)
 	function flush(): void {
+		if (continuation !== null) clearImmediate(continuation)
+		continuation = null
 		const now = monoNow()
 		rotate(now)
 		flushed += length
