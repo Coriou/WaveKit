@@ -2,9 +2,9 @@
  * Identify: POST /api/scanner/identify (201 ScanJob), then `scanner:identify` progress on the
  * `scanner` channel: waiting-for-signal → trying → identified | candidate | unidentified.
  *
- * "Until a transmission" (Ben, 2026-10-17): the core bounds the wait for a signal (timeoutMs ≤ 120 s), so with
- * the option on each job asks for the longest wait and, when it ends with nothing heard, the store starts the next
- * one, until a transmission is tried, Stop, or an error (docs/web/CORE-GAPS.md asks the core for an open wait).
+ * "Until a transmission" (Ben, 2026-10-17): WG12 cores wait for the next gated transmission themselves
+ * (`waitUntilSignal`, up to 10 min a job); older ones bound the wait (timeoutMs ≤ 120 s). Either way, a job that
+ * ends with nothing heard is followed by the next, until a transmission is tried, Stop, or an error.
  */
 import type {
 	ScanJob,
@@ -79,6 +79,8 @@ const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
 
 /** The core's longest wait for a signal (POST /api/scanner/identify timeoutMs maximum). */
 export const IDENTIFY_MAX_WAIT_MS = 120_000
+/** WG12: the longest open wait for a transmission (`waitMs`, IDENTIFY_WAIT_MAX_MS in the api types). */
+export const IDENTIFY_OPEN_WAIT_MS = 600_000
 /** Before starting the next job of a wait, and before the one retry of a refused start. */
 const NEXT_JOB_DELAY_MS = 500
 const RETRY_DELAY_MS = 2_000
@@ -100,6 +102,8 @@ export function endedWithNothingHeard(
 ): boolean {
 	if (!event || event.state !== "unidentified") return false
 	const r = event.result
+	// WG12: the open wait elapsed with no gated transmission
+	if (r?.ended === "no-signal") return true
 	if (event.trials.length > 0) return false
 	if (!r) return true
 	return (
@@ -141,6 +145,8 @@ export class IdentifyStore extends Store<IdentifyState> {
 	/** What start() was asked, so a wait can start its next job the same way. */
 	private asked: { hz: number; options: IdentifyOptions } | null = null
 	private timer: ReturnType<typeof setTimeout> | null = null
+	/** False once the core refused `waitUntilSignal` (a core before WG12): waits are chained 2 min jobs. */
+	private openWait = true
 
 	constructor(
 		api: ApiClient,
@@ -226,8 +232,12 @@ export class IdentifyStore extends Store<IdentifyState> {
 					: { frequencyHz: hz },
 		}
 		if (options.sourceId !== undefined) body.sourceId = options.sourceId
+		const open = untilSignal && options.timeoutMs === undefined && this.openWait
 		if (options.timeoutMs !== undefined) body.timeoutMs = options.timeoutMs
-		else if (untilSignal) body.timeoutMs = IDENTIFY_MAX_WAIT_MS
+		else if (open) {
+			body.waitUntilSignal = true
+			body.waitMs = IDENTIFY_OPEN_WAIT_MS
+		} else if (untilSignal) body.timeoutMs = IDENTIFY_MAX_WAIT_MS
 		if (options.protocols !== undefined) body.protocols = options.protocols
 		try {
 			const job = await this.api.post<ScanJob>("/api/scanner/identify", body)
@@ -239,6 +249,16 @@ export class IdentifyStore extends Store<IdentifyState> {
 			this.continueIfNothingHeard()
 			return job
 		} catch (error) {
+			if (
+				open &&
+				generation === this.generation &&
+				isApiError(error) &&
+				error.status === 400
+			) {
+				// a core before WG12 refuses the open wait: ask as before, and from now on
+				this.openWait = false
+				return this.launch(hz, options, next)
+			}
 			// the next job of a wait is refused (the last one still closing on the core): try once more
 			if (
 				next &&
@@ -264,7 +284,7 @@ export class IdentifyStore extends Store<IdentifyState> {
 
 	/**
 	 * Forgets the current identify. The job itself runs to its end on the core, except a wait until a
-	 * transmission (up to 2 min), which is cancelled.
+	 * transmission (up to 10 min), which is cancelled.
 	 */
 	reset(): void {
 		const s = this.get()

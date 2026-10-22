@@ -287,7 +287,11 @@ describe("IdentifyStore", () => {
 			identify.setUntilSignal(true)
 			expect(kept.get("wk.identify.untilSignal")).toBe("1")
 			await identify.start(446_925_000)
-			expect(bodies[0]).toMatchObject({ timeoutMs: 120_000 })
+			// WG12: the core waits for the transmission itself
+			expect(bodies[0]).toMatchObject({
+				waitUntilSignal: true,
+				waitMs: 600_000,
+			})
 			const since = identify.get().waitSince
 			expect(since).not.toBeNull()
 			const nothing = {
@@ -329,6 +333,63 @@ describe("IdentifyStore", () => {
 			expect(new IdentifyStore(api, events, storage).get().untilSignal).toBe(
 				true,
 			)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("waits on an older core with 2 min jobs, and follows a WG12 no-signal end", async () => {
+		vi.useFakeTimers()
+		try {
+			const { factory, last } = fakeSockets()
+			const events = new EventsClient({
+				createSocket: factory,
+				url: "ws://x/ws",
+			})
+			events.connect()
+			last().open()
+			const bodies: Record<string, unknown>[] = []
+			const api = new ApiClient({
+				fetch: async (_url, init) => {
+					const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+					bodies.push(body)
+					if (body["waitUntilSignal"] !== undefined)
+						return json(400, { code: "VALIDATION_ERROR", message: "bad" })
+					return json(201, {
+						id: `j_${bodies.length}`,
+						state: "running",
+						createdAt: new Date().toISOString(),
+						identify: { timeoutMs: 120_000, targets: [] },
+					} as unknown as ScanJob)
+				},
+			})
+			const identify = new IdentifyStore(api, events)
+			identify.setUntilSignal(true)
+			await identify.start(446_925_000)
+			expect(bodies).toHaveLength(2)
+			expect(bodies[1]).toMatchObject({ timeoutMs: 120_000 })
+			expect(bodies[1]?.["waitUntilSignal"]).toBeUndefined()
+			expect(identify.get().error).toBeNull()
+			// a no-signal end (as a WG12 core says it) starts the next listen
+			last().receive({
+				type: "scanner:identify",
+				channel: "scanner",
+				data: {
+					jobId: "j_2",
+					targetHz: 446_925_000,
+					state: "unidentified",
+					trials: [],
+					result: {
+						confidence: "activity",
+						metadata: {},
+						ended: "no-signal",
+						measurements: { source: "track", class: "unknown" },
+					},
+				},
+			})
+			await vi.advanceTimersByTimeAsync(600)
+			expect(bodies).toHaveLength(3)
+			expect(bodies[2]?.["waitUntilSignal"]).toBeUndefined()
 		} finally {
 			vi.useRealTimers()
 		}

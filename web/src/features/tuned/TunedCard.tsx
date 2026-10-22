@@ -127,7 +127,7 @@ function IdentifyBlock({
 			{view.untilSignal && (
 				<label
 					className="wkf-id-wait"
-					title="Each listen lasts 2 min at most on the receiver; the next one starts until a transmission comes or you stop."
+					title="The receiver waits for the next transmission and tries it. If none comes, it keeps waiting until you stop."
 				>
 					<span className="wkf-grow">Wait until a transmission</span>
 					<Switch

@@ -724,8 +724,21 @@ export class ScannerStore extends Store<ScannerState> {
 		)
 	}
 
-	cancelJob(id: string): Promise<ScanJob> {
-		return this.jobAction(id, "cancel")
+	/**
+	 * Stops a job. A job that already ended is a success: WG11 cores answer 200 with it unchanged,
+	 * older ones 409 SCANNER_INVALID_TRANSITION, after which the job is read back.
+	 */
+	async cancelJob(id: string): Promise<ScanJob> {
+		try {
+			return await this.jobAction(id, "cancel")
+		} catch (error) {
+			if (!isApiError(error) || error.code !== "SCANNER_INVALID_TRANSITION")
+				throw error
+			const job = await this.api.get<ScanJob>(`/api/scanner/jobs/${encode(id)}`)
+			if (isJobActive(job.state)) throw error
+			this.commit(s => this.withJob(s, job))
+			return job
+		}
 	}
 
 	/** POST /api/scanner/jobs/:id/{pause,resume,cancel}: the job after the transition. */

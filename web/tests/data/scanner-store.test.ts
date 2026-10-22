@@ -702,6 +702,20 @@ describe("ScannerStore actions", () => {
 		expect(store.get().sweep).toBeNull()
 	})
 
+	it("cancel of a job that already ended is a success on an older core too", async () => {
+		const { store } = setup(call => {
+			if (call.url === "/api/scanner/jobs/j1/cancel")
+				return {
+					status: 409,
+					body: { code: "SCANNER_INVALID_TRANSITION", message: "ended" },
+				}
+			if (call.url === "/api/scanner/jobs/j1")
+				return { body: job("j1", { state: "completed" }) }
+			return undefined
+		})
+		expect((await store.cancelJob("j1")).state).toBe("completed")
+	})
+
 	it("previewPlan passes the abort signal", async () => {
 		const { store } = setup(call =>
 			call.url === "/api/scanner/plan" ? { body: { issues: [] } } : undefined,
