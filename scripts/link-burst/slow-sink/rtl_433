@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Scratch rtl_433 substitute; unmarked invocations execute the real decoder."""
+import os
+from pathlib import Path
+import sys
+import time
+
+MARKER = "link-burst-slow-sink"
+DEFAULT_RATE = 131072
+
+
+def should_throttle(argv):
+    return MARKER in argv
+
+
+def read_rate(path):
+    try:
+        value = int(Path(path).read_text().strip())
+        return value if value >= 0 else DEFAULT_RATE
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return DEFAULT_RATE
+
+
+def sink(stdin, sentinel, clock=time.monotonic, sleep=time.sleep):
+    while True:
+        rate = read_rate(sentinel)
+        if rate == 0:
+            sleep(0.25)
+            continue
+        started = clock()
+        block = stdin.read(65536)
+        if not block:
+            return 0
+        if rate is not None:
+            sleep(max(0, len(block) / rate - (clock() - started)))
+
+
+def main():
+    if not should_throttle(sys.argv[1:]):
+        os.execv("/usr/local/bin/rtl_433", ["/usr/local/bin/rtl_433", *sys.argv[1:]])
+    return sink(sys.stdin.buffer, Path("/tmp/link-burst-slow"))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
