@@ -232,11 +232,22 @@ its next poll, independently of that rate override. Arrival-time completion must
 deadline; bytes at or after it cannot repair an expired deficit. The recovery state is fixed-size
 and reads use the monitor's monotonic clock.
 
-Rules in order: incomplete → `unknown`; no positive delta anywhere → `none`; a strict non-empty
-subset of branches rose and no overflow → `consumer`; upstream delta above 0 → `unknown`; gap,
-loop delay and shortfall all known, `maxGapMs − loopDelayMaxMs ≥ LINK_GAP_MS` and no shortfall
-→ `link`; loop delay at least `HOST_LOOP_DELAY_MS` or CPU at or above the guard → `host`;
-otherwise `unknown`.
+Rules are evaluated in this precedence order (superseding the link-before-host order in requirements 3.4–3.5):
+
+| Priority | Evidence                                                                                          | Attribution |
+| -------- | ------------------------------------------------------------------------------------------------- | ----------- |
+| 1        | Incomplete or malformed evidence                                                                  | `unknown`   |
+| 2        | No positive delta anywhere                                                                        | `none`      |
+| 3        | Strict non-empty subset of branches rose, no overflow                                             | `consumer`  |
+| 4        | Upstream delta above 0                                                                            | `unknown`   |
+| 5        | Loop delay ≥ `HOST_LOOP_DELAY_MS` or CPU ≥ guard                                                  | `host`      |
+| 6        | Gap, loop delay and shortfall known; gap − loop delay ≥ `LINK_GAP_MS`; no shortfall               | `link`      |
+| 7        | Complete healthy-host evidence, sole branch dropping, no overflow or qualifying gap, no shortfall | `consumer`  |
+| 8        | Otherwise                                                                                         | `unknown`   |
+
+Host overload makes ingest gaps unreliable link evidence. Missing host evidence retains the
+existing fail-closed rules. Deferred intervals use the loop delay and CPU captured when each
+loss was observed, so recovery cannot turn an originally overloaded interval into `link`.
 
 ### EfficiencyMonitor and EfficiencyGate changes
 

@@ -74,17 +74,17 @@ describe("attributeInterval", () => {
 							expected = "consumer"
 						else if (upstream !== null && upstream > 0) expected = "unknown"
 						else if (
+							(loop !== null && loop >= HOST_LOOP_DELAY_MS) ||
+							(cpu !== null && cpu >= 90)
+						)
+							expected = "host"
+						else if (
 							gap !== null &&
 							loop !== null &&
 							gap - loop >= LINK_GAP_MS &&
 							shortfall === false
 						)
 							expected = "link"
-						else if (
-							(loop !== null && loop >= HOST_LOOP_DELAY_MS) ||
-							(cpu !== null && cpu >= 90)
-						)
-							expected = "host"
 					}
 					expect(attributeInterval(input)).toBe(expected)
 					expect(attributeInterval(input)).toBe(expected)
@@ -120,7 +120,7 @@ describe("attributeInterval", () => {
 				loopDelayMaxMs: HOST_LOOP_DELAY_MS,
 				maxGapMs: LINK_GAP_MS + HOST_LOOP_DELAY_MS,
 			},
-			"link",
+			"host",
 		],
 	] as const)("handles boundary evidence %j as %s", (input, expected) => {
 		expect(attributeInterval(evidence(input))).toBe(expected)
@@ -157,3 +157,49 @@ describe("attributeInterval", () => {
 		expect(attributeInterval(throwing as IntervalEvidence)).toBe("unknown")
 	})
 })
+
+// Feature: link-burst-resilience, Property 7: Host evidence takes precedence over link
+// Validates: Requirements 3.3, 3.4, 3.5
+it("never attributes host evidence to link", () => {
+	fc.assert(
+		fc.property(
+			fc.integer({ min: 0, max: 10000 }),
+			fc.integer({ min: 0, max: 1000 }),
+			fc.boolean(),
+			(gap, excess, useLoop) => {
+				expect(
+					attributeInterval(
+						evidence({
+							maxGapMs: gap,
+							loopDelayMaxMs: useLoop ? HOST_LOOP_DELAY_MS + excess : 0,
+							cpuPercent: useLoop ? 0 : 90 + excess,
+						}),
+					),
+				).not.toBe("link")
+			},
+		),
+		{ numRuns: 100 },
+	)
+})
+
+it.each([
+	[1179648, 216, false, "host"],
+	[2424832, 24, true, "consumer"],
+] as const)(
+	"attributes stressed interval with %i dropped bytes",
+	(bytes, loop, subset, expected) => {
+		expect(
+			attributeInterval(
+				evidence({
+					branchDrops: new Map([
+						["a", bytes],
+						["b", subset ? 0 : bytes],
+					]),
+					maxGapMs: 337,
+					loopDelayMaxMs: loop,
+					cpuPercent: 100,
+				}),
+			),
+		).toBe(expected)
+	},
+)
