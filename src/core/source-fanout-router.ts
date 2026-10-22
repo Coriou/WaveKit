@@ -1,8 +1,18 @@
+import type { Readable } from "node:stream"
 import { EventEmitter } from "node:events"
 import { FanoutManager, type FanoutStatus } from "./fanout-manager.js"
 import type { SourceManager } from "./source-manager.js"
 import { sourceScannerConfig, type SourceConfig } from "../config.js"
 import type { Logger } from "../utils/logger.js"
+
+import { isLoopbackHost } from "./link-advisory.js"
+import {
+	ABSORBER_COUNTER_PREFIX,
+	frameBytesFor,
+	resolveAbsorberSeconds,
+	type LinkBurstFactories,
+	type LinkBurstHandles,
+} from "./link-burst/contract.js"
 
 /** Telemetry shared by a single fanout and the collection of source fanouts. */
 export type FanoutTelemetryProvider = Pick<
@@ -33,10 +43,23 @@ export class SourceFanoutRouter extends EventEmitter {
 			removed: (id: string) => void
 		}
 	>()
+	private readonly bursts = new Map<
+		string,
+		{
+			handles: LinkBurstHandles
+			frame: number
+			rate: number
+			instance: number
+			stream: Readable | null
+			listener: (chunk: Buffer) => void
+		}
+	>()
+	private readonly factories: LinkBurstFactories | undefined
 	private branchInstance = 0
 	private topologyGeneration = 0
 	private primarySourceId: string | undefined
 	private readonly connected = (sourceId: string) => {
+		if (this.bursts.get(sourceId)?.stream) this.unwire(sourceId, "disconnect")
 		this.primarySourceId ??=
 			this.firstShared() ??
 			(this.dedicated.has(sourceId) ? undefined : sourceId)
@@ -44,14 +67,18 @@ export class SourceFanoutRouter extends EventEmitter {
 			this.fanouts.get(sourceId) ??
 			(sourceId === this.primarySourceId ? this.primary : undefined)
 		const stream = this.sources.getStream(sourceId)
-		if (fanout && stream) fanout.attachSource(stream)
+		if (fanout && stream) this.wire(sourceId, fanout, stream)
 	}
 	private readonly disconnected = (sourceId: string) => {
+		this.unwire(sourceId, "disconnect")
 		this.fanouts.get(sourceId)?.detachSource()
 		if (sourceId === this.primarySourceId) this.primary.detachSource()
 	}
 	private readonly removed = (sourceId: string) => {
-		this.disconnected(sourceId)
+		this.unwire(sourceId, "removed")
+		this.fanouts.get(sourceId)?.detachSource()
+		if (sourceId === this.primarySourceId) this.primary.detachSource()
+		this.disposeBurst(sourceId)
 		this.releaseUnused(sourceId)
 	}
 
@@ -62,18 +89,148 @@ export class SourceFanoutRouter extends EventEmitter {
 		private readonly primary: FanoutManager,
 		private readonly logger: Logger,
 		primarySourceId?: string,
-		opts: { dedicated?: ReadonlySet<string> } = {},
+		opts: {
+			dedicated?: ReadonlySet<string>
+			linkBurst?: LinkBurstFactories
+		} = {},
 	) {
 		super()
+		this.factories = opts.linkBurst
 		this.dedicated = opts.dedicated ?? new Set()
 		this.primarySourceId = primarySourceId ?? this.firstShared()
 		this.forwardEvents(primary)
 		sources.on("connected", this.connected)
 		sources.on("disconnected", this.disconnected)
 		sources.on("removed", this.removed)
+		if (this.factories) sources.on("caps-changed", this.capsChanged)
 		for (const status of sources.getAllStatus()) {
 			if (status.connected) this.connected(status.id)
 		}
+	}
+
+	linkBurst(sourceId: string): LinkBurstHandles | null {
+		return this.bursts.get(sourceId)?.handles ?? null
+	}
+
+	private unwire(sourceId: string, reason: "disconnect" | "removed"): void {
+		const state = this.bursts.get(sourceId)
+		if (!state) return
+		state.handles.absorber?.flush(reason)
+		state.handles.recorder?.resetArrival()
+		if (state.stream) state.stream.off("data", state.listener)
+		state.stream = null
+	}
+
+	private disposeBurst(sourceId: string): void {
+		const state = this.bursts.get(sourceId)
+		if (!state) return
+		if (state.stream) state.stream.off("data", state.listener)
+		state.handles.absorber?.dispose()
+		this.bursts.delete(sourceId)
+	}
+
+	private readonly capsChanged = (sourceId: string) => {
+		const state = this.bursts.get(sourceId)
+		const caps = this.sources.getCaps(sourceId)
+		if (
+			!caps ||
+			(state &&
+				state.rate === caps.sampleRate &&
+				state.frame === frameBytesFor(caps.format))
+		)
+			return
+		state?.handles.absorber?.flush("rate")
+		const stream = state
+			? state.stream
+			: this.sources.getStatus(sourceId)?.connected
+				? this.sources.getStream(sourceId)
+				: null
+		const fanout =
+			sourceId === this.primarySourceId
+				? this.primary
+				: this.fanouts.get(sourceId)
+		if (stream && fanout) this.wire(sourceId, fanout, stream, true)
+	}
+
+	private wire(
+		sourceId: string,
+		fanout: FanoutManager,
+		stream: Readable,
+		preserveTransport = false,
+	): void {
+		const factories = this.factories
+		if (!factories) {
+			fanout.attachSource(stream)
+			return
+		}
+		const caps = this.sources.getCaps(sourceId)
+		const config = this.sources.getConfig(sourceId)
+		const frame = caps ? frameBytesFor(caps.format) : null
+		let state = this.bursts.get(sourceId)
+		if (state?.stream) {
+			state.stream.off("data", state.listener)
+			fanout.detachSource()
+		}
+		if (!caps || frame === null || !config) {
+			this.disposeBurst(sourceId)
+			fanout.attachSource(stream)
+			return
+		}
+		const configuredTransport =
+			config.type !== "recording" &&
+			config.host !== undefined &&
+			!isLoopbackHost(config.host)
+				? "network"
+				: "loopback"
+		const transport =
+			preserveTransport && state ? state.handles.transport : configuredTransport
+		const seconds =
+			transport === "network"
+				? resolveAbsorberSeconds(config.burstAbsorber?.seconds, transport)
+				: 0
+		if (!state) {
+			const recorder = factories.createRecorder(sourceId)
+			state = {
+				handles: {
+					transport,
+					capacitySeconds: seconds,
+					recorder,
+					absorber: null,
+				},
+				frame,
+				rate: caps.sampleRate,
+				instance: 0,
+				stream: null,
+				listener: chunk =>
+					recorder.observeChunk(chunk.length, factories.monoNow()),
+			}
+			this.bursts.set(sourceId, state)
+		}
+		if (state.frame !== frame || seconds === 0) {
+			state.handles.absorber?.dispose()
+			state.handles.absorber = null
+		}
+		state.frame = frame
+		state.rate = caps.sampleRate
+		state.handles.transport = transport
+		state.handles.capacitySeconds = seconds
+		state.handles.recorder?.configure(caps.sampleRate, frame)
+		state.stream = stream
+		stream.on("data", state.listener)
+		if (seconds > 0) {
+			if (!state.handles.absorber) {
+				state.handles.absorber = factories.createAbsorber(sourceId, {
+					fanout,
+					recorder: state.handles.recorder,
+					monoNow: factories.monoNow,
+					frameBytes: frame,
+					log: this.logger,
+				})
+				state.instance = ++this.branchInstance
+			}
+			state.handles.absorber.configure(seconds * caps.sampleRate * frame)
+			fanout.attachIngest(stream, state.handles.absorber.ingest)
+		} else fanout.attachSource(stream)
 	}
 
 	/** The default source; never a dedicated scanner source (spec § 10.7). */
@@ -102,7 +259,7 @@ export class SourceFanoutRouter extends EventEmitter {
 			this.forwardEvents(fanout)
 			if (this.sources.getStatus(sourceId)?.connected) {
 				const stream = this.sources.getStream(sourceId)
-				if (stream) fanout.attachSource(stream)
+				if (stream) this.wire(sourceId, fanout, stream)
 			}
 		}
 		return fanout
@@ -132,6 +289,7 @@ export class SourceFanoutRouter extends EventEmitter {
 		{
 			droppedBytesTotal: number
 			droppedChunksTotal: number
+			active: boolean
 		}
 	> | null {
 		const fanout =
@@ -141,7 +299,7 @@ export class SourceFanoutRouter extends EventEmitter {
 		if (!fanout) return null
 		const counters = new Map<
 			string,
-			{ droppedBytesTotal: number; droppedChunksTotal: number }
+			{ droppedBytesTotal: number; droppedChunksTotal: number; active: boolean }
 		>()
 		const instances = this.topology.get(fanout)?.instances
 		for (const id of fanout.getBranchIds()) {
@@ -149,6 +307,16 @@ export class SourceFanoutRouter extends EventEmitter {
 			counters.set(`${id}#${instances?.get(id) ?? 0}`, {
 				droppedBytesTotal: branch?.droppedBytesTotal ?? NaN,
 				droppedChunksTotal: branch?.droppedChunksTotal ?? NaN,
+				active: fanout.isBranchActive(id),
+			})
+		}
+		const burst = this.bursts.get(sourceId)
+		if (burst?.handles.absorber) {
+			const overflow = burst.handles.absorber.counters()
+			counters.set(`${ABSORBER_COUNTER_PREFIX}#${burst.instance}`, {
+				droppedBytesTotal: overflow.overflowBytesTotal,
+				droppedChunksTotal: overflow.overflowChunksTotal,
+				active: true,
 			})
 		}
 		return counters
@@ -197,6 +365,7 @@ export class SourceFanoutRouter extends EventEmitter {
 	releaseUnused(sourceId: string): void {
 		const fanout = this.fanouts.get(sourceId)
 		if (fanout && fanout.getBranchIds().length === 0) {
+			this.disposeBurst(sourceId)
 			this.forgetTopology(fanout)
 			fanout.destroy()
 			fanout.removeAllListeners()
@@ -270,6 +439,11 @@ export class SourceFanoutRouter extends EventEmitter {
 			removals: generation,
 			instances: new Map<string, number>(),
 			listener: (id: string) => {
+				if (id.startsWith("@")) {
+					this.logger.warn("Reserved fanout branch prefix")
+					fanout.removeBranch(id)
+					return
+				}
 				state.changed = true
 				state.generation = ++this.topologyGeneration
 				state.instances.set(id, ++this.branchInstance)
@@ -282,6 +456,9 @@ export class SourceFanoutRouter extends EventEmitter {
 			},
 		}
 		this.topology.set(fanout, state)
+		for (const id of fanout.getBranchIds()) {
+			if (id.startsWith("@")) state.listener(id)
+		}
 		fanout.on("branch-added", state.listener)
 		fanout.on("branch-removed", state.removed)
 		fanout.on("backpressure", this.backpressure)
@@ -292,6 +469,8 @@ export class SourceFanoutRouter extends EventEmitter {
 		this.sources.off("connected", this.connected)
 		this.sources.off("disconnected", this.disconnected)
 		this.sources.off("removed", this.removed)
+		this.sources.off("caps-changed", this.capsChanged)
+		for (const id of this.bursts.keys()) this.disposeBurst(id)
 		this.primary.off("backpressure", this.backpressure)
 		this.primary.off("drain", this.drain)
 		this.forgetTopology(this.primary)
