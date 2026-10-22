@@ -97,6 +97,18 @@ const validTotal = (n: unknown): n is number =>
 
 /** Polling owns evidence; display callbacks cannot acknowledge or alter it. */
 export function createEfficiencyMonitor(deps: {
+	sourceEvents?: {
+		on(
+			event: "disconnected" | "removed" | "source-removed",
+			listener: (id: string) => void,
+		): unknown
+		on(event: "data", listener: (id: string, chunk: Buffer) => void): unknown
+		off(
+			event: "disconnected" | "removed" | "source-removed",
+			listener: (id: string) => void,
+		): unknown
+		off(event: "data", listener: (id: string, chunk: Buffer) => void): unknown
+	}
 	sources: () => readonly string[]
 	branchCounters: (id: string) => ReadonlyMap<string, Counters> | null
 	ingest?: (
@@ -188,6 +200,44 @@ export function createEfficiencyMonitor(deps: {
 		}
 		lastRaw = raw
 		return raw + offset
+	}
+	const recoveries = new Map<
+		string,
+		{ epoch: number; readyAt: number | null }
+	>()
+	let nextSourceEpoch = 0
+	const sourceRemoved = (id: string) => {
+		recoveries.delete(id)
+		states.delete(id)
+	}
+	const resetSource = (s: SourceState) => {
+		s.seen = null
+		s.signature = null
+		s.pending = null
+		s.rawSamples = []
+		s.upstream = null
+		s.covered = []
+		s.windows = []
+		s.openWindow = null
+		s.lastCompleteMono = null
+		s.latest = "unknown"
+		s.cleanSinceMono = null
+		s.rate = null
+	}
+	const sourceDown = (id: string) => {
+		const s = states.get(id)
+		if (s) resetSource(s)
+		recoveries.set(id, {
+			epoch: ++nextSourceEpoch,
+			readyAt: null,
+		})
+	}
+	const sourceData = (id: string, chunk: Buffer) => {
+		const recovery = recoveries.get(id)
+		if (recovery && recovery.readyAt === null && chunk.length > 0) {
+			const at = clock()
+			if (Number.isFinite(at)) recovery.readyAt = at + EFFICIENCY_SAMPLE_MS
+		}
 	}
 	const fresh = (): SourceState => ({
 		pending: null,
@@ -284,6 +334,25 @@ export function createEfficiencyMonitor(deps: {
 			let loopDelayMaxMs = sampledLoopDelayMaxMs
 			const s = states.get(id) ?? fresh()
 			states.set(id, s)
+			const sourceRecovery = recoveries.get(id)
+			if (
+				sourceRecovery &&
+				(sourceRecovery.readyAt === null ||
+					!Number.isFinite(at) ||
+					at <= sourceRecovery.readyAt)
+			) {
+				// Baseline again after delivery settles: reconnect counters and gaps
+				// describe the source transition, never consumer performance.
+				resetSource(s)
+				s.lastTickMono = Number.isFinite(at) ? at : null
+				fault(s, Number.isFinite(at) ? at : null)
+				sources.set(id, {
+					attribution: "unknown",
+					droppedBytesDelta: null,
+					droppedChunksDelta: null,
+				})
+				continue
+			}
 			s.branchDrops.clear()
 			let counters: ReadonlyMap<string, Counters> | null = null
 			let signature: string | null = null
@@ -824,6 +893,7 @@ export function createEfficiencyMonitor(deps: {
 					counts10m[entry.code]++
 			return { last: s.latest, counts10m }
 		},
+		sourceEpoch: id => recoveries.get(id)?.epoch ?? 0,
 		monoNow: clock,
 		lastSampleMono: () => lastMono,
 		droppedBetweenMono,
@@ -864,6 +934,12 @@ export function createEfficiencyMonitor(deps: {
 			)
 		},
 		start() {
+			if (!interval) {
+				deps.sourceEvents?.on("disconnected", sourceDown)
+				deps.sourceEvents?.on("removed", sourceDown)
+				deps.sourceEvents?.on("source-removed", sourceRemoved)
+				deps.sourceEvents?.on("data", sourceData)
+			}
 			interval ??= deps.setInterval(() => {
 				const sample = sampleNow()
 				try {
@@ -874,6 +950,11 @@ export function createEfficiencyMonitor(deps: {
 			}, EFFICIENCY_SAMPLE_MS)
 		},
 		stop() {
+			deps.sourceEvents?.off("disconnected", sourceDown)
+			deps.sourceEvents?.off("removed", sourceDown)
+			deps.sourceEvents?.off("source-removed", sourceRemoved)
+			deps.sourceEvents?.off("data", sourceData)
+			recoveries.clear()
 			interval?.cancel()
 			interval = undefined
 			states.clear()

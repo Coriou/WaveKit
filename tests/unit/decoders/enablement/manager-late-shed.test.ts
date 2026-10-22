@@ -475,68 +475,96 @@ it.each([
 	expect(f.manager.efficiencyView().sources[0]?.blocked[0]?.retryAt).toBeNull()
 })
 
-it("composed monitoring holds link drops and sheds one graduated auto placement for consumer drops", async () => {
-	let f: ReturnType<typeof setup>
-	let gap = 0
-	const monitor = createEfficiencyMonitor({
-		sources: () => ["rtl"],
-		onSample: sample => gate.record(sample),
-		branchCounters: id => f.routing!.branchDropCounters(id),
-		topology: id => f.routing!.branchTopology(id),
-		cpu: { normalisedPercent: 0 },
-		now: Date.now,
-		monoNow: () => performance.now(),
-		setInterval: () => ({ cancel() {} }),
-		ingest: () => ({ maxGapMs: gap, catchupBytes: 0, chunks: 1 }),
-		loopDelay: () => ({ maxMs: 0, p99Ms: 0 }),
-		shortfall: () => false,
-		upstreamDroppedTotal: () => 0,
-	})
-	const gate = createEfficiencyGate(
-		{ budgetCores: 10, cpuGuardPercent: 90 },
-		{ drops: monitor },
-	)
-	f = setup("rate-test", gate, "auto", true)
-	f.create("auto")
-	f.yamlDecoder("yaml")
-	f.create("yaml")
-	f.plan([f.place("auto", 162_000_000), f.place("yaml", 162_025_000)])
-	// Two real fanout branches supply independent counters; no socket is opened.
-	const slow = f.fanout.addBranch({ id: "slow", highWaterMark: 16 })
-	const sibling = f.fanout.addBranch({ id: "sibling", highWaterMark: 16 })
-	const chunk = Buffer.alloc(64)
-	const tick = async (drop: "none" | "link" | "consumer") => {
-		gap = drop === "link" ? 100 : 0
-		if (drop !== "none") {
-			f.sourceStream.write(chunk)
-			if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)
-			f.sourceStream.write(chunk)
-			if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)
-			f.sourceStream.write(chunk)
+it.each([false, true])(
+	"composed monitoring preserves graduation across reconnect=%s and sheds consumer drops",
+	async reconnect => {
+		const events = new EventEmitter()
+		let f: ReturnType<typeof setup>
+		let gap = 0
+		const monitor = createEfficiencyMonitor({
+			sourceEvents: events,
+			sources: () => ["rtl"],
+			onSample: sample => gate.record(sample),
+			branchCounters: id => f.routing!.branchDropCounters(id),
+			topology: id => f.routing!.branchTopology(id),
+			cpu: { normalisedPercent: 0 },
+			now: Date.now,
+			monoNow: () => performance.now(),
+			setInterval: () => ({ cancel() {} }),
+			ingest: () => ({ maxGapMs: gap, catchupBytes: 0, chunks: 1 }),
+			loopDelay: () => ({ maxMs: 0, p99Ms: 0 }),
+			shortfall: () => false,
+			upstreamDroppedTotal: () => 0,
+		})
+		monitor.start()
+		const gate = createEfficiencyGate(
+			{ budgetCores: 10, cpuGuardPercent: 90 },
+			{ drops: monitor },
+		)
+		f = setup("rate-test", gate, "auto", true)
+		f.create("auto")
+		f.yamlDecoder("yaml")
+		f.create("yaml")
+		f.plan([f.place("auto", 162_000_000), f.place("yaml", 162_025_000)])
+		// Two real fanout branches supply independent counters; no socket is opened.
+		const slow = f.fanout.addBranch({ id: "slow", highWaterMark: 16 })
+		const sibling = f.fanout.addBranch({ id: "sibling", highWaterMark: 16 })
+		const chunk = Buffer.alloc(64)
+		const tick = async (drop: "none" | "link" | "consumer") => {
+			gap = drop === "link" ? 100 : 0
+			if (drop !== "none") {
+				f.sourceStream.write(chunk)
+				if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)
+				f.sourceStream.write(chunk)
+				if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)
+				f.sourceStream.write(chunk)
+			}
+			events.emit("data", "rtl", chunk)
+			monitor.sampleNow()
+			if (drop !== "none") {
+				slow.resume()
+				sibling.resume()
+				await vi.advanceTimersByTimeAsync(0)
+				slow.pause()
+				if (drop === "link") sibling.pause()
+			}
+			await vi.advanceTimersByTimeAsync(2000)
 		}
-		monitor.sampleNow()
-		if (drop !== "none") {
-			slow.resume()
-			sibling.resume()
-			await vi.advanceTimersByTimeAsync(0)
-			slow.pause()
-			if (drop === "link") sibling.pause()
+		await tick("none")
+		await tick("none")
+		await f.manager.startAll()
+		for (let i = 0; i < 50; i++) await tick("none")
+		if (reconnect) {
+			expect(f.manager.efficiencyView().sources[0]?.lateDrops?.sheddable).toBe(
+				1,
+			)
+			events.emit("disconnected", "rtl")
+			f.sources.emit("disconnected", "rtl")
+			f.instances.get("auto")!.crash()
+			await tick("consumer")
+			f.sources.emit("connected", "rtl")
+			for (let i = 0; i < 5; i++) await tick("none")
+			expect(f.instances.get("auto")!.starts).toBeGreaterThan(1)
+			expect(f.manager.efficiencyView().sources[0]?.lateDrops?.sheddable).toBe(
+				1,
+			)
+			expect(
+				f.manager
+					.efficiencyView()
+					.sources[0]?.admitted.every(p => !p.probation),
+			).toBe(true)
 		}
-		await vi.advanceTimersByTimeAsync(2000)
-	}
-	await tick("none")
-	await tick("none")
-	await f.manager.startAll()
-	for (let i = 0; i < 34; i++) await tick("none")
-	for (let i = 0; i < 15; i++) await tick("link")
-	expect(monitor.latestAttribution("rtl")).toBe("link")
-	expect([...f.instances.values()].filter(d => d.running)).toHaveLength(2)
-	expect(
-		gate.admit(f.place("next", 162_050_000), [], performance.now()),
-	).toMatchObject({ admit: false, detail: "unknown" })
-	for (let i = 0; i < 20; i++) await tick("consumer")
-	expect(monitor.latestAttribution("rtl")).toBe("consumer")
-	expect(f.instances.get("auto")?.running).toBe(false)
-	expect(f.instances.get("yaml")?.running).toBe(true)
-	expect(f.instances.get("auto")?.stops).toBe(1)
-})
+		for (let i = 0; i < 15; i++) await tick("link")
+		expect(monitor.latestAttribution("rtl")).toBe("link")
+		expect([...f.instances.values()].filter(d => d.running)).toHaveLength(2)
+		expect(
+			gate.admit(f.place("next", 162_050_000), [], performance.now()),
+		).toMatchObject({ admit: false, detail: "unknown" })
+		for (let i = 0; i < 20; i++) await tick("consumer")
+		expect(monitor.latestAttribution("rtl")).toBe("consumer")
+		expect(f.instances.get("auto")?.running).toBe(false)
+		expect(f.instances.get("yaml")?.running).toBe(true)
+		expect(f.instances.get("auto")?.stops).toBe(1)
+		monitor.stop()
+	},
+)
