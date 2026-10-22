@@ -1485,3 +1485,13 @@ cores omit them).
 ### IQ capture default on — 2026-10-22
 
 The scanner status `iqCapture` field is now normally present in protected mode; clients should show capture state.
+
+
+### Configured channel decoders follow the VFO — 2026-10-22
+
+`targetFrequenciesHz` is now present for configured narrowband decoders: it reports
+placement channels, including the settled VFO (or capture centre without a VFO).
+Explicit frequency options retain fixed behavior; YAML decoders remain gate-exempt.
+Parent targets include worker channels; centre-reach decoders report capture centre.
+Raw wideband declared-frequency semantics and the optional DTO remain unchanged.
+The web tuned card needs no change.

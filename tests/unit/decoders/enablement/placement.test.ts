@@ -754,3 +754,73 @@ it.each([
 		expect(plan.wanted.map(p => p.channelHz)).toEqual([162_000_000])
 	},
 )
+
+it("configured VFO uses one source and preserves the exact reach bound", () => {
+	const d = decoder({
+		type: "dsd-fme",
+		origin: "config",
+		configuredChannelsHz: [],
+		channelPlacements: false,
+	})
+	const sources = [source({ id: "other" }), source()]
+	const base = {
+		...input(d, sources),
+		vfo: { sourceId: "s", frequencyHz: 100_940_000 },
+	}
+	expect(planPlacements(base).wanted).toMatchObject([
+		{ sourceId: "s", channelHz: 100_940_000, origin: "vfo" },
+	])
+	expect(
+		planPlacements({
+			...base,
+			vfo: { sourceId: "s", frequencyHz: 100_940_001 },
+		}).wanted,
+	).toEqual([])
+})
+
+it.each([NaN, Infinity, 0, -1])(
+	"configured VFO rejects invalid frequency %s",
+	frequencyHz => {
+		const d = decoder({
+			type: "dsd-fme",
+			origin: "config",
+			configuredChannelsHz: [],
+			channelPlacements: false,
+		})
+		expect(
+			planPlacements({ ...input(d), vfo: { sourceId: "s", frequencyHz } })
+				.wanted,
+		).toEqual([])
+	},
+)
+
+it("an explicit but invalid pin never silently becomes VFO following", () => {
+	const d = decoder({
+		type: "dsd-fme",
+		origin: "config",
+		configuredChannelsHz: [],
+		channelPlacements: false,
+		followVfo: false,
+	})
+	expect(
+		planPlacements({
+			...input(d),
+			vfo: { sourceId: "s", frequencyHz: 100_100_000 },
+		}).wanted,
+	).toMatchObject([{ reach: "raw", channelHz: null, origin: "configured" }])
+})
+
+it("malformed configured VFO intent yields no placement", () => {
+	const d = decoder({
+		type: "dsd-fme",
+		origin: "config",
+		configuredChannelsHz: [],
+		followVfo: "yes" as unknown as boolean,
+	})
+	expect(
+		planPlacements({
+			...input(d),
+			vfo: { sourceId: "s", frequencyHz: 100_100_000 },
+		}).wanted,
+	).toEqual([])
+})

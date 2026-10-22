@@ -143,6 +143,8 @@ export interface PlannerDecoder {
 	configuredSourceId: string | null
 	band: DecoderBandRequirements | undefined // undefined: unknown, never band-suspended
 	configuredChannelsHz: readonly number[]
+	/** False when an explicit frequency option prevents configured VFO following. */
+	followVfo?: boolean
 	reach: DecoderReach
 	channelBandwidthHz: number
 	channelTransitionHz: number
