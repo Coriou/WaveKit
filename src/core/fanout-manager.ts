@@ -123,12 +123,16 @@ export class FanoutManager extends EventEmitter {
 	 * Requirement 2.1: Accept source stream as input
 	 */
 	attachSource(source: Readable): void {
+		this.attachIngest(source, chunk => this.distributeData(chunk))
+	}
+
+	attachIngest(source: Readable, ingest: (chunk: Buffer) => void): void {
 		if (this.source) {
 			this.detachSource()
 		}
 
 		this.source = source
-		this.dataHandler = (chunk: Buffer) => this.distributeData(chunk)
+		this.dataHandler = ingest
 
 		source.on("data", this.dataHandler)
 		this.sourceErrorHandler = err => {
@@ -273,6 +277,36 @@ export class FanoutManager extends EventEmitter {
 	 */
 	getBranchIds(): string[] {
 		return Array.from(this.branches.keys())
+	}
+
+	distribute(chunk: Buffer): void {
+		this.distributeData(chunk)
+	}
+
+	congestedBranchIds(out: Set<string>): void {
+		out.clear()
+		for (const [id, branch] of this.branches) {
+			if (
+				branch.active &&
+				(branch.backpressure ||
+					(branch.startupDraining &&
+						(branch.stream.destroyed ||
+							branch.stream.writableEnded ||
+							branch.stream.writableLength >= branch.highWaterMark)))
+			)
+				out.add(id)
+		}
+	}
+
+	activeBranchIds(out: Set<string>): void {
+		out.clear()
+		for (const [id, branch] of this.branches) {
+			if (branch.active) out.add(id)
+		}
+	}
+
+	isBranchActive(id: string): boolean {
+		return this.branches.get(id)?.active ?? false
 	}
 
 	/**
