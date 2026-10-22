@@ -200,6 +200,13 @@ describe("scanner drawer search", () => {
 			freqMaxHz: 162_000_000,
 		})
 		expect(buildDiscoveryQuery([], "lastSeen")).toEqual({})
+		// WG12: proven only unless weak activity is shown; nothing on an older core
+		expect(buildDiscoveryQuery([], "lastSeen", false)).toEqual({
+			evidence: "proven",
+		})
+		expect(buildDiscoveryQuery([], "lastSeen", true)).toEqual({
+			evidence: "all",
+		})
 		expect(sameQuery({ protocol: "dmr" }, { protocol: "dmr" })).toBe(true)
 		expect(
 			sameQuery({ protocol: "dmr" }, { protocol: "dmr", sort: "frequency" }),
@@ -591,5 +598,38 @@ describe("scanner drawer actions and Watch here", () => {
 				false,
 			),
 		).toMatchObject({ on: true, canToggle: false })
+	})
+})
+
+describe("scanner drawer proofs (WG12)", () => {
+	const proof = {
+		kind: "decoded" as const,
+		protocol: "dmr" as const,
+		transport: "live" as const,
+		at: ago(1000),
+		observationId: "o1",
+		tried: [],
+		unavailable: [],
+		encrypted: false,
+		summary: "DMR decoded (CC1, TG 9)",
+	}
+
+	it("titles and explains a proven discovery with its proof", () => {
+		const d = disc({ proof, evidenceLevel: "proven" })
+		expect(discoveryRow(d, NOW).title).toBe("DMR decoded (CC1, TG 9)")
+		expect(whyText(d)).toBe("DMR decoded (CC1, TG 9)")
+		// a name someone gave it still wins
+		expect(
+			discoveryRow(disc({ proof, operator: { label: "Taxis" } }), NOW).title,
+		).toBe("Taxis")
+	})
+
+	it("ends the list with the weak-activity toggle only on cores that prove", () => {
+		const items = [disc()]
+		const last = (weak: "none" | "hidden" | "shown") =>
+			listEntries(items, "lastSeen", new Set(), NOW, false, weak).at(-1)
+		expect(last("none")?.type).toBe("row")
+		expect(last("hidden")).toEqual({ type: "weak", key: "weak", shown: false })
+		expect(last("shown")).toEqual({ type: "weak", key: "weak", shown: true })
 	})
 })

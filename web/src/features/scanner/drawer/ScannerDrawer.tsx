@@ -282,6 +282,8 @@ function Discoveries() {
 	const scanner = useServices().data.scanner
 	const tokens = useStore(drawerView, s => s.tokens)
 	const sort = useStore(drawerView, s => s.sort)
+	const showWeak = useStore(drawerView, s => s.showWeak)
+	const evidence = useStore(scanner, s => s.discoveries.evidenceSupported)
 	const loaded = useStore(scanner, s => s.discoveries.loaded)
 	const loading = useStore(scanner, s => s.discoveries.loading)
 	const error = useStore(scanner, s => s.discoveries.error)
@@ -293,10 +295,10 @@ function Discoveries() {
 	useEffect(() => {
 		if (first.current) first.current = false
 		else openDiscovery(null)
-		const q = buildDiscoveryQuery(tokens, sort)
+		const q = buildDiscoveryQuery(tokens, sort, evidence ? showWeak : null)
 		const d = scanner.get().discoveries
 		if (!d.loaded || !sameQuery(d.query, q)) void scanner.refreshDiscoveries(q)
-	}, [tokens, sort, scanner])
+	}, [tokens, sort, showWeak, evidence, scanner])
 
 	const searching = tokens.length > 0
 	return (

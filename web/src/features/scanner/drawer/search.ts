@@ -286,13 +286,18 @@ export function addToken(
 	return [...tokens.filter(x => x.kind !== t.kind), t]
 }
 
-/** The core query for the chips and the sort. */
+/**
+ * The core query for the chips and the sort. `weak` (WG12 cores): proven discoveries only unless weak
+ * activity is shown; null on a core that takes no `evidence` filter.
+ */
 export function buildDiscoveryQuery(
 	tokens: readonly ScanToken[],
 	sort: DiscoverySort,
+	weak: boolean | null = null,
 ): DiscoveryQuery {
 	const q: DiscoveryQuery = {}
 	if (sort !== "lastSeen") q.sort = sort
+	if (weak !== null) q.evidence = weak ? "all" : "proven"
 	for (const t of tokens) {
 		switch (t.kind) {
 			case "text":

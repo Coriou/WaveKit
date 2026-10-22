@@ -12,6 +12,7 @@ import {
 	discoveryTitle,
 	formatWait,
 	jobStateLine,
+	scanPhaseText,
 	sweepProgress,
 } from "../../data/scanner-format.ts"
 import { formatMHz } from "../format.ts"
@@ -79,7 +80,15 @@ export interface HoldRowInput {
 	/** The sweep's latest progress (layer.scanner.progress); falls back to the job's own. */
 	progress: Pick<
 		ScannerProgressEventData,
-		"sweepIndex" | "hopIndex" | "hopCount" | "centerHz"
+		| "sweepIndex"
+		| "hopIndex"
+		| "hopCount"
+		| "centerHz"
+		| "phase"
+		| "parked"
+		| "holding"
+		| "trial"
+		| "replayQueueDepth"
 	> | null
 	now: number
 	/** The frequency held on (heldFrequencyHz), when holding. */
@@ -167,7 +176,9 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 		centerHz: job.plan.hops[job.progress.hopIndex]?.centreHz ?? 0,
 	}
 	const prog = sweepProgress(p)
-	const oneHop = prog.hopCount === 1
+	// WG12: a window that fits parks the receiver, like one hop
+	const oneHop =
+		prog.hopCount === 1 || (input.progress ?? job.progress).parked === true
 	const band = planBand(job.plan)
 	const how = oneHop
 		? band
@@ -198,6 +209,12 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 				title = `Watching ${name}`
 				freq = band ? bandText(band.startHz, band.endHz) : null
 			} else freq = p.centerHz > 0 ? scanFreq(p.centerHz) : null
+			{
+				// WG12: what the scan is doing now, when it is more than scanning or watching
+				const phase = scanPhaseText(input.progress ?? job.progress)
+				if (phase !== null && phase !== "Watching")
+					detail = ` · ${phase.charAt(0).toLowerCase()}${phase.slice(1)}`
+			}
 			actions = [PAUSE, STOP]
 			break
 		case "holding": {

@@ -301,6 +301,27 @@ describe("ScannerStore loading", () => {
 		store.dispose()
 	})
 
+	it("asks again without the evidence filter when the core refuses it", async () => {
+		const { store, calls } = setup(call =>
+			call.url.includes("evidence=")
+				? { status: 400, body: { code: "VALIDATION_ERROR", message: "bad" } }
+				: call.url.startsWith("/api/scanner/discoveries")
+					? { body: { items: [discovery("a")], nextCursor: null } }
+					: undefined,
+		)
+		await store.refreshDiscoveries({ evidence: "proven" })
+		await vi.waitFor(() => expect(store.get().discoveries.loaded).toBe(true))
+		expect(calls.map(c => c.url)).toEqual([
+			"/api/scanner/discoveries?evidence=proven",
+			"/api/scanner/discoveries",
+		])
+		expect(store.get().discoveries).toMatchObject({
+			evidenceSupported: false,
+			error: null,
+			query: {},
+		})
+	})
+
 	it("records a list error", async () => {
 		const { store } = setup(call =>
 			call.url.startsWith("/api/scanner/discoveries")
@@ -416,6 +437,24 @@ describe("ScannerStore live events", () => {
 		expect(store.get().discoveries.items.map(d => d.id)).toEqual([
 			"keep",
 			"other",
+		])
+	})
+
+	it("on merged drops exactly the ids the core names (WG12 mergedIds)", async () => {
+		const { store, send, tick } = await loaded([
+			discovery("keep", { lastSeenAt: iso(5) }),
+			discovery("lookalike", { lastSeenAt: iso(4) }),
+			discovery("far", { frequencyKey: "1", lastSeenAt: iso(3) }),
+		])
+		send("scanner:discovery", {
+			change: "merged",
+			discovery: discovery("keep", { lastSeenAt: iso(6) }),
+			mergedIds: ["far"],
+		})
+		tick()
+		expect(store.get().discoveries.items.map(d => d.id)).toEqual([
+			"keep",
+			"lookalike",
 		])
 	})
 

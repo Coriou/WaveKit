@@ -8,6 +8,7 @@ import type {
 	IdentityKind,
 	JobState,
 	ScanJob,
+	ScanJobProgress,
 	ScannerConfidence,
 	ScannerProtocol,
 	ScannerTrialOutcome,
@@ -311,6 +312,40 @@ export function heldFrequencyHz(
 		if (a.active && a.jobIds.includes(job.id))
 			if (!best || a.peakDbfs > best.peakDbfs) best = a
 	return best?.frequencyHz ?? null
+}
+
+/**
+ * What a running scan is doing now (WG12 `phase`): "Settling", "Holding 446.00625", "Trying DMR",
+ * "Trying FM voice from capture", "Replaying a capture · 2 queued", "Capturing", "Watching". Null on cores
+ * before WG12.
+ */
+export function scanPhaseText(
+	p: Pick<ScanJobProgress, "phase" | "holding" | "trial" | "replayQueueDepth">,
+): string | null {
+	switch (p.phase) {
+		case "settling":
+			return "Settling"
+		case "holding":
+			return p.holding
+				? `Holding ${formatMHz(p.holding.frequencyHz)}`
+				: "Holding"
+		case "trialing": {
+			if (!p.trial) return "Trying decoders"
+			const from = p.trial.transport === "replay" ? " from capture" : ""
+			return `Trying ${protocolName(p.trial.protocol)}${from}`
+		}
+		case "replaying": {
+			const queued = (p.replayQueueDepth ?? 0) - 1
+			return queued > 0
+				? `Replaying a capture · ${queued} queued`
+				: "Replaying a capture"
+		}
+		case "capturing":
+			return "Capturing"
+		case "watching":
+			return "Watching"
+	}
+	return null
 }
 
 export interface SweepProgress {

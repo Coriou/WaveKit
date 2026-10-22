@@ -56,6 +56,8 @@ export interface DiscoveryQuery {
 	encrypted?: boolean
 	/** ISO date-time: last seen at or after. */
 	since?: string
+	/** WG12: `proven` (has a proof), `weak` (none) or `all`; absent means all. Older cores refuse it. */
+	evidence?: "proven" | "weak" | "all"
 }
 
 /** The answer of GET /api/scanner/discoveries. */
@@ -103,6 +105,8 @@ export interface ScannerDiscoveriesState {
 	loading: boolean
 	loadingMore: boolean
 	error: string | null
+	/** False once the core refused the `evidence` filter (a core before WG12): the list asks without it. */
+	evidenceSupported: boolean
 }
 
 export interface ScannerState {
@@ -190,6 +194,12 @@ export function matchesDiscoveryQuery(
 	)
 		return false
 	if (query.encrypted !== undefined && d.encrypted !== query.encrypted)
+		return false
+	// a discovery without `evidenceLevel` comes from an older core: it matches either way
+	if (
+		(query.evidence === "proven" && d.evidenceLevel === "weak") ||
+		(query.evidence === "weak" && d.evidenceLevel === "proven")
+	)
 		return false
 	if (query.identity !== undefined) {
 		const colon = query.identity.indexOf(":")
@@ -304,6 +314,13 @@ export function progressOfJob(job: ScanJob): ScannerProgressEventData {
 		probes: p.probes.length,
 	}
 	if (p.holdingOn) out.holdingOn = p.holdingOn
+	// WG12: what the scan is doing
+	if (p.phase !== undefined) out.phase = p.phase
+	if (p.parked !== undefined) out.parked = p.parked
+	if (p.holding !== undefined) out.holding = p.holding
+	if (p.trial !== undefined) out.trial = p.trial
+	if (p.replayQueueDepth !== undefined)
+		out.replayQueueDepth = p.replayQueueDepth
 	if (p.hitStats) {
 		out.hits = p.hitStats.hits
 		out.newDiscoveries = p.hitStats.newDiscoveries
@@ -331,6 +348,7 @@ const INITIAL_DISCOVERIES: ScannerDiscoveriesState = {
 	loading: false,
 	loadingMore: false,
 	error: null,
+	evidenceSupported: true,
 }
 
 const INITIAL: ScannerState = {
@@ -550,6 +568,20 @@ export class ScannerStore extends Store<ScannerState> {
 				},
 				(error: unknown) => {
 					if (generation !== this.discoveryGeneration) return
+					if (
+						q.evidence !== undefined &&
+						isApiError(error) &&
+						error.status === 400
+					) {
+						// a core before WG12: ask again without the filter, and stop asking
+						const { evidence: _, ...older } = q
+						this.commit(s => ({
+							...s,
+							discoveries: { ...s.discoveries, evidenceSupported: false },
+						}))
+						void this.refreshDiscoveries(older, keepCount)
+						return
+					}
 					this.commit(s => ({
 						...s,
 						discoveries: {
@@ -858,13 +890,15 @@ export class ScannerStore extends Store<ScannerState> {
 		s: ScannerState,
 		d: Discovery,
 		change: ScannerDiscoveryEventData["change"],
+		mergedIds?: readonly string[],
 	): ScannerState {
 		const list = s.discoveries
 		const byId = new Map(list.byId)
 		byId.set(d.id, d)
 		let items = list.items.filter(x => x.id !== d.id)
 		if (change === "merged") {
-			const gone = new Set(absorbedBy(d, items))
+			// WG12 cores name what the merge absorbed; older ones are guessed
+			const gone = new Set(mergedIds ?? absorbedBy(d, items))
 			if (gone.size > 0) {
 				items = items.filter(x => !gone.has(x.id))
 				for (const id of gone) byId.delete(id)
@@ -903,7 +937,7 @@ export class ScannerStore extends Store<ScannerState> {
 		let next =
 			e.change === "deleted"
 				? this.withoutDiscovery(s, e.discovery.id)
-				: this.withDiscovery(s, e.discovery, e.change)
+				: this.withDiscovery(s, e.discovery, e.change, e.mergedIds)
 		if (e.jobHits && e.jobHits.length > 0) {
 			const jobHits = new Map(next.jobHits)
 			for (const hit of e.jobHits) {

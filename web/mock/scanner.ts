@@ -47,6 +47,7 @@ import type {
 	ScannerDiscoveryEventData,
 	ScannerIdentifyResult,
 	ScannerProgressEventData,
+	ScannerProof,
 	ScannerProtocol,
 	ScannerSettingBounds,
 	ScannerSettingProvenance,
@@ -55,6 +56,7 @@ import type {
 	ScannerStatus,
 	TunerState,
 } from "@wavekit/api-types"
+import { SCANNER_PROOF_PROTOCOL_LABEL } from "@wavekit/api-types"
 import {
 	DISCOVERY_SEEDS,
 	MOCK_SIGNALS,
@@ -411,6 +413,7 @@ const discoveryQuerySchema = {
 		sort: { type: "string", enum: ["lastSeen", "frequency", "confidence"] },
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },
+		evidence: { type: "string", enum: ["proven", "weak", "all"] },
 	},
 	additionalProperties: false,
 }
@@ -3594,6 +3597,29 @@ export function registerScannerMock(
 		sort?: "lastSeen" | "frequency" | "confidence"
 		cursor?: string
 		limit?: number
+		evidence?: "proven" | "weak" | "all"
+	}
+
+	/** WG12: the mock proves what it decoded; the rest is weak activity. */
+	const withProof = (d: Discovery): Discovery => {
+		if (d.confidence !== "decoded" || d.protocol === "carrier")
+			return { ...d, evidenceLevel: "weak" }
+		const id = d.identity
+			? ` (${d.identity.kind === "dmr-cc" ? "CC" : ""}${d.identity.value}${d.metadata.talkgroups[0] ? `, TG ${d.metadata.talkgroups[0]}` : ""})`
+			: ""
+		const proof: ScannerProof = {
+			kind: "decoded",
+			protocol: d.protocol,
+			transport: "live",
+			at: d.lastSeenAt,
+			observationId: `${d.id}-o`,
+			tried: [d.protocol],
+			unavailable: [],
+			encrypted: d.encrypted,
+			summary: `${SCANNER_PROOF_PROTOCOL_LABEL[d.protocol]} decoded${id}`,
+			...(d.identity ? { identity: d.identity } : {}),
+		}
+		return { ...d, proof, evidenceLevel: "proven" }
 	}
 
 	const identityFromQuery = (raw: string): Identity => {
@@ -3633,9 +3659,12 @@ export function registerScannerMock(
 				const identityValue = identity?.value.trim().toLowerCase()
 				const min = f.minConfidence
 				const items = [...discoveries.values()]
-					.map(x => x.d)
+					.map(x => withProof(x.d))
 					.filter(
 						d =>
+							(f.evidence === undefined ||
+								f.evidence === "all" ||
+								d.evidenceLevel === f.evidence) &&
 							(f.jobId === undefined || d.jobIds.includes(f.jobId)) &&
 							(f.sourceId === undefined || d.sourceIds.includes(f.sourceId)) &&
 							(f.protocol === undefined || d.protocol === f.protocol) &&

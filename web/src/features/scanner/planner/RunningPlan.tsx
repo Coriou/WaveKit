@@ -26,6 +26,7 @@ import {
 	confidenceText,
 	discoveryTitle,
 	jobStateLine,
+	scanPhaseText,
 	sweepProgress,
 } from "../../../data/scanner-format.ts"
 import { planIssues } from "../../../data/scanner-store.ts"
@@ -772,11 +773,19 @@ function RunFooter({ job }: { job: ScanJob }) {
 	const hops = job.plan.hops.length
 	const period = job.progress.sweepPeriodMs
 	let text: string
-	if (hops === 1)
+	// WG12: a window that fits parks the receiver, like one hop
+	if (hops === 1 || progress.parked === true)
 		text = `Watching · the receiver stays at ${formatMHz(job.plan.hops[0]?.centreHz ?? 0)}`
 	else
 		text = `Pass ${sp.pass} · ${sp.percent} %${period !== null ? ` · full pass ${passPhrase(period)}` : ""}`
-	const word = job.state === "running" ? null : jobStateLine(job, { now })
+	// while it runs, say what the scan is doing (WG12 phase); "Watching" is already the parked line
+	const phase = job.state === "running" ? scanPhaseText(progress) : null
+	const word =
+		job.state === "running"
+			? phase === "Watching"
+				? null
+				: phase
+			: jobStateLine(job, { now })
 	return (
 		<span
 			role="status"

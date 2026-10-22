@@ -30,7 +30,7 @@ import {
 	measuredText,
 	whyText,
 } from "./rows.ts"
-import { drawerView, toggleIgnored } from "./state.ts"
+import { drawerView, toggleIgnored, toggleWeak } from "./state.ts"
 import { useVirtual } from "./use-virtual.ts"
 
 export function DiscoveryList() {
@@ -42,6 +42,8 @@ export function DiscoveryList() {
 	const more = useStore(scanner, s => s.discoveries.nextCursor !== null)
 	const sort = useStore(drawerView, s => s.sort)
 	const showIgnored = useStore(drawerView, s => s.showIgnored)
+	const showWeak = useStore(drawerView, s => s.showWeak)
+	const weakFilter = useStore(scanner, s => s.discoveries.evidenceSupported)
 	const openId = useStore(scannerUi, s => s.openDiscoveryId)
 	// a discovery opened from elsewhere (the tuned card, the spectrum) that this search does not list
 	const extra = useStore(scanner, s =>
@@ -58,14 +60,21 @@ export function DiscoveryList() {
 	}, [openId, scanner])
 
 	const entries = useMemo(() => {
-		const list = listEntries(items, sort, activeNow, now, showIgnored)
+		const list = listEntries(
+			items,
+			sort,
+			activeNow,
+			now,
+			showIgnored,
+			!weakFilter ? "none" : showWeak ? "shown" : "hidden",
+		)
 		if (!extra) return list
 		const pinned: ListEntry[] = [
 			{ type: "group", key: "g:opened", label: "Opened" },
 			{ type: "row", key: extra.id, discovery: extra },
 		]
 		return [...pinned, ...list]
-	}, [items, sort, activeNow, now, showIgnored, extra])
+	}, [items, sort, activeNow, now, showIgnored, showWeak, weakFilter, extra])
 	const keys = useMemo(() => entries.map(e => e.key), [entries])
 	const v = useVirtual(
 		keys,
@@ -194,6 +203,28 @@ export function DiscoveryList() {
 											name={showIgnored ? "chevron-up" : "chevron-down"}
 											size={16}
 										/>
+									</button>
+								</div>
+							) : e.type === "weak" ? (
+								<div
+									key={e.key}
+									data-key={e.key}
+									ref={v.measure}
+									className="wks-ign-wrap"
+								>
+									<button
+										type="button"
+										className="wk-row wks-ign"
+										aria-pressed={e.shown}
+										onClick={toggleWeak}
+									>
+										<ScanIcon name={e.shown ? "eye-off" : "eye"} size={15} />
+										<span className="wks-ign-count">
+											{e.shown ? "Hide weak activity" : "Show weak activity"}
+										</span>
+										<span className="wks-ign-names">
+											Heard, but nothing proved what it is
+										</span>
 									</button>
 								</div>
 							) : (

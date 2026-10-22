@@ -21,6 +21,8 @@ export interface DrawerViewState {
 	tab: DrawerTab
 	newOnly: boolean
 	showIgnored: boolean
+	/** WG12: list discoveries with no proof too (`evidence=all`); proven ones only by default. */
+	showWeak: boolean
 }
 
 export const drawerView = new Store<DrawerViewState>({
@@ -29,6 +31,7 @@ export const drawerView = new Store<DrawerViewState>({
 	tab: "scan",
 	newOnly: false,
 	showIgnored: false,
+	showWeak: false,
 })
 
 export function addSearchToken(t: ScanToken): void {
@@ -56,6 +59,10 @@ export function setTab(tab: DrawerTab): void {
 
 export function toggleNewOnly(): void {
 	drawerView.update(s => ({ ...s, newOnly: !s.newOnly }))
+}
+
+export function toggleWeak(): void {
+	drawerView.update(s => ({ ...s, showWeak: !s.showWeak }))
 }
 
 export function toggleIgnored(): void {

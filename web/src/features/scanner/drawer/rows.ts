@@ -170,8 +170,10 @@ export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
 	const confidence = confidenceText(d)
 	const label = d.operator?.label?.trim() ?? ""
 	const ident = identityLine(d)
+	// WG12 cores say how it was proven ("DMR decoded (CC1, TG 9)", "Analog FM voice, CTCSS 88.5")
 	const title =
 		label ||
+		d.proof?.summary ||
 		ident ||
 		(d.bandwidthHz > 0 ? `${formatWidth(d.bandwidthHz)} wide` : "")
 	const tone: RowTone =
@@ -279,7 +281,11 @@ export function groupDiscoveries(
 export type ListEntry =
 	| { type: "group"; key: string; label: string }
 	| { type: "ignored"; key: string; count: number; names: string }
+	| { type: "weak"; key: string; shown: boolean }
 	| { type: "row"; key: string; discovery: Discovery }
+
+/** The weak-activity toggle at the end of the list: none on cores without proofs (WG12). */
+export type WeakToggle = "none" | "hidden" | "shown"
 
 /** Flat entries for the windowed list: group headers, rows, then the ignored toggle (and its rows). */
 export function listEntries(
@@ -288,6 +294,7 @@ export function listEntries(
 	activeNow: ReadonlySet<string>,
 	now: number,
 	showIgnored: boolean,
+	weak: WeakToggle = "none",
 ): ListEntry[] {
 	const { groups, ignored } = groupDiscoveries(items, sort, activeNow, now)
 	const out: ListEntry[] = []
@@ -311,13 +318,15 @@ export function listEntries(
 			for (const d of ignored)
 				out.push({ type: "row", key: d.id, discovery: d })
 	}
+	if (weak !== "none")
+		out.push({ type: "weak", key: "weak", shown: weak === "shown" })
 	return out
 }
 
 /** Row height before measuring (closed row; the open row is measured). */
 export function estimateHeight(e: ListEntry, open: boolean): number {
 	if (e.type === "group") return 34
-	if (e.type === "ignored") return 52
+	if (e.type === "ignored" || e.type === "weak") return 52
 	if (open) return 360
 	return e.discovery.undecodedReason || e.discovery.confidenceCap ? 78 : 62
 }
@@ -340,6 +349,7 @@ const CLASS_WORDS: Readonly<Record<ScannerClass, string | null>> = {
 
 /** Why it has that confidence, in one sentence, from what the core keeps. */
 export function whyText(d: Discovery): string {
+	if (d.proof) return d.proof.summary
 	const shape = CLASS_WORDS[d.class]
 	const id = identityText(d.identity)
 	if (d.protocol === "carrier" || d.class === "carrier")

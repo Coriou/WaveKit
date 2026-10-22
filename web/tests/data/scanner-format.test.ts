@@ -9,6 +9,7 @@ import {
 	jobStateLine,
 	jobTone,
 	protocolName,
+	scanPhaseText,
 	sweepProgress,
 	trialOutcomeText,
 	undecodedReasonText,
@@ -202,5 +203,36 @@ describe("scanner-format", () => {
 		expect(
 			sweepProgress({ sweepIndex: 0, hopIndex: 0, hopCount: 0 }),
 		).toMatchObject({ pass: 1, percent: 0, text: "Pass 1" })
+	})
+
+	it("says what a running scan is doing (WG12 phase)", () => {
+		expect(scanPhaseText({})).toBeNull()
+		expect(scanPhaseText({ phase: "settling" })).toBe("Settling")
+		expect(
+			scanPhaseText({
+				phase: "holding",
+				holding: { discoveryId: null, frequencyHz: 446_006_250, trackId: "t" },
+			}),
+		).toBe("Holding 446.00625")
+		expect(
+			scanPhaseText({
+				phase: "trialing",
+				trial: {
+					protocol: "dmr",
+					decoder: "dsd-fme",
+					transport: "replay",
+					discoveryId: null,
+				},
+			}),
+		).toBe("Trying DMR from capture")
+		expect(scanPhaseText({ phase: "replaying", replayQueueDepth: 3 })).toBe(
+			"Replaying a capture · 2 queued",
+		)
+		expect(scanPhaseText({ phase: "watching" })).toBe("Watching")
+	})
+
+	it("never shows a heard trial as decoded", () => {
+		expect(trialOutcomeText("heard")).toBe("Heard")
+		expect(trialOutcomeText("carrier-only")).toBe("Carrier only")
 	})
 })
