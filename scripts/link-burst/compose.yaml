@@ -21,7 +21,6 @@ services:
     image: "${LINK_BURST_IMAGE:-wavekit:latest}"
     pull_policy: never
     depends_on: [fake]
-    ports: ["127.0.0.1::3000"]
     environment:
       WAVEKIT_CONFIG_PATH: /app/config
       WAVEKIT_SOURCES_0_CAPS__SAMPLE_RATE: "${LINK_BURST_RATE:-2048000}"
@@ -31,6 +30,18 @@ services:
     volumes:
       - ./config.yaml:/app/config/default.yaml:ro
       - ./slow-sink:/opt/link-burst/bin:ro
+  # Docker never publishes ports from an internal network, so only this
+  # forwarder joins a second network to publish the API on loopback.
+  api:
+    image: python:3.13-slim
+    pull_policy: never
+    depends_on: [core]
+    entrypoint: ["python3", "/opt/api_proxy.py"]
+    ports: ["127.0.0.1::3000"]
+    networks: [default, edge]
+    volumes:
+      - ./api_proxy.py:/opt/api_proxy.py:ro
 networks:
   default:
     internal: true
+  edge: {}

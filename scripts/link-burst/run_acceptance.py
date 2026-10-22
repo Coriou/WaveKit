@@ -102,6 +102,14 @@ class Experiment:
         with self.opener.open(self.base + path, timeout=5) as response:
             return json.load(response)
 
+    def ready(self):
+        # The API answers before the source connects; wait for the source's
+        # link report and the slow-sink branch so the first sample is complete.
+        reports = self.get("/api/resources/link-quality")
+        branches = self.get("/api/telemetry/fanout")["branches"]
+        return (any(r.get("sourceId") == SOURCE and r.get("transport") == "network" for r in reports)
+                and any(b.get("sourceId") == SOURCE and SINK in b["id"] for b in branches))
+
     def sentinel(self, rate):
         self.compose("exec", "-T", "core", "sh", "-c",
                      f"printf '%s' {rate} > /tmp/link-burst-slow")
@@ -275,13 +283,13 @@ class Experiment:
             self.compose("up", "-d", "--no-build", "--pull", "never")
             deadline = time.monotonic() + 120
             while True:
-                port = self.compose("port", "core", "3000", check=False).stdout.strip()
+                port = self.compose("port", "api", "3000", check=False).stdout.strip()
                 if re.fullmatch(r"127\.0\.0\.1:\d+", port):
                     self.base = "http://" + port
                     try:
-                        self.get("/api/decoders/efficiency")
-                        break
-                    except (OSError, ValueError):
+                        if self.ready():
+                            break
+                    except (OSError, ValueError, KeyError, TypeError):
                         pass
                 if time.monotonic() >= deadline:
                     raise InvalidRun("API did not become ready")
