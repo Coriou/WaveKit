@@ -63,8 +63,8 @@ function scenario(
 		absorber.ingest(bytes === block.length ? block : Buffer.alloc(bytes))
 	}
 	for (now = 0; now <= 80000; now += 16) {
-		sibling.read()
-		ingest(65536)
+		// Seed complete, lossless history before exercising paced fanout.
+		recorder.observeChunk(65536, now)
 		if (now % 2000 === 0) monitor.sampleNow()
 	}
 	now = 80000
@@ -197,3 +197,198 @@ it("resolves recovered overflow across stall lengths and tick phases", () => {
 		{ numRuns: 100 },
 	)
 }, 30000)
+
+function intervalScenario() {
+	let now = 0
+	let shortfall: boolean | null = null
+	let sequence = 1
+	const totals = { absorber: 0, a: 0 }
+	const log = createLogger({ level: "fatal" })
+	const logs = vi.spyOn(log, "info")
+	const monitor = createEfficiencyMonitor({
+		log,
+		sources: () => ["s"],
+		branchCounters: () =>
+			new Map([
+				[
+					"@absorber",
+					{ droppedBytesTotal: totals.absorber, droppedChunksTotal: 0 },
+				],
+				["a", { droppedBytesTotal: totals.a, droppedChunksTotal: 0 }],
+				["b", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
+			]),
+		topology: () => "fixed",
+		cpu: { normalisedPercent: 10 },
+		now: () => now,
+		monoNow: () => now,
+		ingest: () => ({ maxGapMs: 1000, catchupBytes: 0, chunks: 100 }),
+		loopDelay: () => ({ maxMs: 15, p99Ms: 15 }),
+		shortfall: () => true,
+		recovery: () => ({
+			sequence,
+			completedSequence: 0,
+			failedSequence: 0,
+			maxGapMs: 1000,
+			shortfall,
+		}),
+		setInterval: () => ({ cancel() {} }),
+	})
+	const tick = (at: number) => {
+		now = at
+		return monitor.sampleNow().sources.get("s")!
+	}
+	for (now = 0; now <= 16000; now += 2000) monitor.sampleNow()
+	totals.absorber = 100
+	tick(18000)
+	return {
+		monitor,
+		tick,
+		totals,
+		logs,
+		recover: (value: boolean | null, nextSequence = sequence) => {
+			shortfall = value
+			sequence = nextSequence
+		},
+	}
+}
+
+it("keeps independent consumer loss in its original late window during pending recovery", () => {
+	const h = intervalScenario()
+	h.tick(20000)
+	h.totals.a = 7
+	expect(h.tick(22000)).toMatchObject({
+		attribution: "consumer",
+		droppedBytesDelta: 7,
+	})
+	h.recover(false)
+	expect(h.tick(24000)).toMatchObject({
+		attribution: "link",
+		droppedBytesDelta: 100,
+	})
+	for (const at of [26000, 28000, 30000]) h.tick(at)
+	expect(h.monitor.lateWindows("s").slice(-2)).toEqual([
+		expect.objectContaining({
+			startMono: 10000,
+			endMono: 20000,
+			condemning: false,
+			linkOrUnknownDrops: true,
+		}),
+		expect.objectContaining({
+			startMono: 20000,
+			endMono: 30000,
+			condemning: true,
+		}),
+	])
+	h.monitor.stop()
+})
+
+it("resolves expired overflow independently of a concurrent consumer loss", () => {
+	const h = intervalScenario()
+	h.tick(20000)
+	h.totals.a = 7
+	h.recover(true)
+	expect(h.tick(22000)).toMatchObject({
+		attribution: "consumer",
+		droppedBytesDelta: 7,
+	})
+	expect(h.logs).toHaveBeenCalledWith(
+		expect.objectContaining({
+			attribution: "unknown",
+			dropBytes: 100,
+			intervalMono: 18000,
+		}),
+		"Drop interval attributed",
+	)
+	expect(h.logs).toHaveBeenCalledWith(
+		expect.objectContaining({
+			attribution: "consumer",
+			dropBytes: 7,
+			intervalMono: 22000,
+		}),
+		"Drop interval attributed",
+	)
+	expect(h.monitor.droppedBetweenMono("s", 18000, 18000)).toBe(true)
+	expect(h.monitor.droppedBetweenMono("s", 22000, 22000)).toBe(true)
+	for (const at of [24000, 26000, 28000, 30000]) h.tick(at)
+	expect(h.monitor.lateWindows("s").slice(-2)).toEqual([
+		expect.objectContaining({
+			startMono: 10000,
+			endMono: 20000,
+			condemning: false,
+			linkOrUnknownDrops: true,
+		}),
+		expect.objectContaining({
+			startMono: 20000,
+			endMono: 30000,
+			condemning: true,
+		}),
+	])
+	h.monitor.stop()
+})
+
+it("rate limits completed recovery logs when a new loss arrives on the same tick", () => {
+	const h = intervalScenario()
+	h.recover(false)
+	h.totals.absorber++
+	h.tick(20000)
+	h.recover(null, 2)
+	h.totals.absorber += 100
+	h.tick(22000)
+	h.recover(false)
+	h.totals.absorber++
+	h.tick(24000)
+	const links = h.logs.mock.calls.filter(
+		([fields, message]) =>
+			message === "Drop interval attributed" &&
+			typeof fields === "object" &&
+			fields !== null &&
+			"attribution" in fields &&
+			fields.attribution === "link",
+	)
+	expect(links).toHaveLength(1)
+	h.monitor.stop()
+})
+
+it("retains every deferred loss timestamp across late-window boundaries", () => {
+	const h = intervalScenario()
+	const unknown = h.monitor.attributionCounts("s")!.counts10m.unknown
+	h.tick(20000)
+	h.totals.absorber += 100
+	h.tick(22000)
+	h.recover(true)
+	h.tick(24000)
+	expect(h.monitor.attributionCounts("s")!.counts10m.unknown).toBe(unknown + 2)
+	expect(h.monitor.droppedBetweenMono("s", 18000, 18000)).toBe(true)
+	expect(h.monitor.droppedBetweenMono("s", 22000, 22000)).toBe(true)
+	for (const at of [26000, 28000, 30000]) h.tick(at)
+	expect(h.monitor.lateWindows("s").slice(-2)).toEqual([
+		expect.objectContaining({
+			startMono: 10000,
+			endMono: 20000,
+			linkOrUnknownDrops: true,
+		}),
+		expect.objectContaining({
+			startMono: 20000,
+			endMono: 30000,
+			linkOrUnknownDrops: true,
+		}),
+	])
+	h.monitor.stop()
+})
+
+it.each([false, true])(
+	"bounds rapid-poll deferred losses, overflow=%s",
+	overflow => {
+		const h = intervalScenario()
+		for (let i = 1; i <= (overflow ? 8 : 7); i++) {
+			h.totals.absorber++
+			h.tick(18000 + i * 100)
+		}
+		expect(h.monitor.droppedSinceMono("s", 18000)).toBe(overflow)
+		h.recover(false)
+		h.tick(19000)
+		expect(h.monitor.droppedSinceMono("s", 18000)).toBe(overflow)
+		expect(h.monitor.latestAttribution("s")).toBe(overflow ? "unknown" : "link")
+		h.monitor.stop()
+	},
+)

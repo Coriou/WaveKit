@@ -50,11 +50,11 @@ const recoverySchema = z.object({
 	shortfall: z.boolean().nullable(),
 })
 const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
+type WindowEvidence = LateDropWindow & { complete: boolean; closedAt?: number }
 type SourceState = {
 	pending: {
 		sequence: number
-		bytes: number
-		chunks: number
+		losses: { at: number; bytes: number; chunks: number }[]
 		at: number
 		gap: number
 		loop: number
@@ -70,8 +70,9 @@ type SourceState = {
 	lastNonNone: DropAttribution | null
 	counts: { mono: number; code: DropAttribution }[]
 	linkDrops: number[]
+	deferredWindows: WindowEvidence[]
 	windows: LateDropWindow[]
-	openWindow: (LateDropWindow & { complete: boolean }) | null
+	openWindow: WindowEvidence | null
 	logged: Map<DropAttribution, number>
 	/** Last valid counters per branch identity, kept across unreadable reads. */
 	seen: Map<string, Counters> | null
@@ -90,6 +91,11 @@ type SourceState = {
 	/** Times of samples that observed a positive drop delta, oldest first. */
 	drops: number[]
 }
+/** Maximum supported capacity, gap allowance and one sample period. */
+const MAX_PENDING_WAIT_MS =
+	LINK_RECOVERY_WAIT_MS + LINK_GAP_MS + EFFICIENCY_SAMPLE_MS
+const MAX_PENDING_LOSSES =
+	Math.ceil(MAX_PENDING_WAIT_MS / EFFICIENCY_SAMPLE_MS) + 1
 /** Coverage history bound; dropping the oldest only lengthens probation. */
 const MAX_COVERED_INTERVALS = 256
 /** Drop history bound: about 34 minutes of continuous drops at 2 s samples. */
@@ -175,6 +181,7 @@ export function createEfficiencyMonitor(deps: {
 			s.pending = null
 			s.rawSamples = []
 			s.windows = []
+			s.deferredWindows = []
 			s.openWindow = null
 			s.coverageBlocked = false
 			s.upstream = null
@@ -220,6 +227,7 @@ export function createEfficiencyMonitor(deps: {
 		s.upstream = null
 		s.covered = []
 		s.windows = []
+		s.deferredWindows = []
 		s.openWindow = null
 		s.lastCompleteMono = null
 		s.latest = "unknown"
@@ -252,6 +260,7 @@ export function createEfficiencyMonitor(deps: {
 		counts: [],
 		linkDrops: [],
 		windows: [],
+		deferredWindows: [],
 		openWindow: null,
 		logged: new Map(),
 		seen: null,
@@ -536,165 +545,138 @@ export function createEfficiencyMonitor(deps: {
 			if (!applies) evidenceValid = true
 			const intervalBytes = bytes
 			const positiveNow = bytes > 0 || chunks > 0
-			// A completed episode can be followed by another gap between monitor polls.
-			const completedPending =
-				s.pending !== null &&
-				recovery !== null &&
-				recovery.completedSequence >= s.pending.sequence &&
-				recovery.failedSequence < s.pending.sequence &&
-				comparable &&
-				evidenceValid &&
-				s.pending.valid &&
-				s.pending.upstream === 0 &&
-				upstreamDropDelta === 0 &&
-				s.pending.gap - s.pending.loop >= LINK_GAP_MS
-			const completed = completedPending ? s.pending : null
-			if (completed) {
-				if (s.openWindow) s.openWindow.linkOrUnknownDrops = true
-				// A new loss may belong to a successor episode. Resolve the old
-				// interval independently so its bytes cannot inherit that verdict.
-				if (positiveNow) {
-					s.counts.push({ mono: completed.at, code: "link" })
-					try {
-						deps.log?.info(
-							{
-								sourceId: id,
-								attribution: "link",
-								dropBytes: completed.bytes,
-								intervalMono: completed.at,
-								gapMs: completed.gap,
-								loopDelayMs: completed.loop,
-								cpuPercent: completed.cpu,
-							},
-							"Drop interval attributed",
-						)
-					} catch {
-						/* Observability cannot alter evidence. */
-					}
-				} else {
-					maxGapMs = completed.gap
-					loopDelayMaxMs = completed.loop
-					cpuPercent = completed.cpu
-				}
-				s.linkDrops.push(s.pending!.at)
-				if (s.linkDrops.length > 32) s.linkDrops.shift()
-				s.pending = null
+			let currentCode: DropAttribution = !applies
+				? positiveNow
+					? "unknown"
+					: "none"
+				: attributeInterval({
+						complete: comparable && evidenceValid,
+						branchDrops: s.branchDrops,
+						absorberOverflow,
+						maxGapMs,
+						loopDelayMaxMs,
+						cpuPercent,
+						cpuGuardPercent:
+							typeof cpuGuardPercent === "number" ? cpuGuardPercent : NaN,
+						shortfall,
+						upstreamDropDelta,
+					})
+			type Resolved = {
+				at: number
+				bytes: number
+				chunks: number
+				code: DropAttribution
+				gap: number | null
+				loop: number | null
+				cpu: number | null
 			}
-			const consumerNow =
-				applies &&
-				comparable &&
-				evidenceValid &&
-				(absorberOverflow ?? 0) === 0 &&
-				[...s.branchDrops.values()].some(drop => drop > 0) &&
-				[...s.branchDrops.values()].some(drop => drop === 0)
-			if (consumerNow && s.pending) {
-				s.lastDropMono = at
-				s.drops.push(at)
-				if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
-				fault(s, at)
-			}
-			if (
-				recovery &&
-				recovery.retired !== true &&
-				comparable &&
-				evidenceValid &&
-				positiveNow &&
-				maxGapMs !== null &&
-				loopDelayMaxMs !== null &&
-				maxGapMs - loopDelayMaxMs >= LINK_GAP_MS &&
-				((absorberOverflow ?? 0) > 0 ||
-					(s.branchDrops.size > 0 &&
-						[...s.branchDrops.values()].every(drop => drop > 0))) &&
-				!s.pending
-			)
-				s.pending = {
-					sequence: recovery.sequence,
-					bytes: 0,
-					chunks: 0,
-					at,
-					gap: maxGapMs,
-					loop: loopDelayMaxMs,
-					cpu: cpuPercent ?? NaN,
-					upstream: 0,
-					valid: comparable && evidenceValid,
-				}
-			const pending = s.pending
-			if (pending) {
-				if (!consumerNow) {
-					pending.bytes += bytes
-					pending.chunks += chunks
-				}
-				pending.valid &&=
+			// At most eight deferred losses and the current independent loss.
+			const resolved: Resolved[] = []
+			const old = s.pending
+			if (old) {
+				old.valid &&=
 					comparable &&
 					evidenceValid &&
-					(recovery === null || recovery.failedSequence < pending.sequence)
-				pending.upstream += upstreamDropDelta ?? 0
-				pending.loop = Math.max(pending.loop, loopDelayMaxMs ?? NaN)
-				pending.cpu = Math.max(pending.cpu, cpuPercent ?? NaN)
-				maxGapMs = pending.gap
-				loopDelayMaxMs = pending.loop
-				cpuPercent = pending.cpu
-				upstreamDropDelta = pending.upstream
-				shortfall = recovery?.shortfall ?? null
-				absorberOverflow = Math.max(absorberOverflow ?? 0, 1)
-				evidenceValid &&= pending.valid
+					(recovery === null || recovery.failedSequence < old.sequence)
+				old.upstream += upstreamDropDelta ?? 0
+				old.loop = Math.max(old.loop, loopDelayMaxMs ?? NaN)
+				old.cpu = Math.max(old.cpu, cpuPercent ?? NaN)
+				const expired = at - old.at >= MAX_PENDING_WAIT_MS
+				const delivered =
+					!expired &&
+					recovery !== null &&
+					recovery.failedSequence < old.sequence &&
+					(recovery.completedSequence >= old.sequence ||
+						(recovery.sequence === old.sequence &&
+							recovery.shortfall === false))
+				if (
+					delivered ||
+					expired ||
+					recovery?.shortfall === true ||
+					(recovery !== null && recovery.failedSequence >= old.sequence)
+				) {
+					const code = attributeInterval({
+						complete: old.valid,
+						branchDrops: new Map(),
+						absorberOverflow: 1,
+						maxGapMs: old.gap,
+						loopDelayMaxMs: old.loop,
+						cpuPercent: old.cpu,
+						cpuGuardPercent:
+							typeof cpuGuardPercent === "number" ? cpuGuardPercent : NaN,
+						shortfall: delivered ? false : true,
+						upstreamDropDelta: old.upstream,
+					})
+					for (const loss of old.losses)
+						resolved.push({
+							...loss,
+							code,
+							gap: old.gap,
+							loop: old.loop,
+							cpu: old.cpu,
+						})
+					s.pending = null
+				}
 			}
-			const waiting =
-				pending !== null &&
-				recovery?.shortfall !== false &&
-				recovery?.shortfall !== true &&
-				// Maximum supported capacity plus a gap and one polling period.
-				at - pending.at <
-					LINK_RECOVERY_WAIT_MS + LINK_GAP_MS + EFFICIENCY_SAMPLE_MS
-			const unresolved = waiting && !consumerNow
-			const attribution =
-				completedPending && !positiveNow
-					? "link"
-					: consumerNow
-						? "consumer"
-						: !applies
-							? positiveNow
-								? "unknown"
-								: "none"
-							: attributeInterval({
-									complete: comparable && evidenceValid,
-									branchDrops: s.branchDrops,
-									absorberOverflow,
-									maxGapMs,
-									loopDelayMaxMs,
-									cpuPercent,
-									cpuGuardPercent:
-										typeof cpuGuardPercent === "number"
-											? cpuGuardPercent
-											: Number.NaN,
-									shortfall,
-									upstreamDropDelta,
-								})
-			if (pending && !waiting) {
-				bytes = pending.bytes
-				chunks = pending.chunks
+			let heldCurrent = false
+			if (positiveNow && currentCode !== "consumer") {
+				if (s.pending) {
+					if (s.pending.losses.length < MAX_PENDING_LOSSES) {
+						s.pending.losses.push({ at, bytes, chunks })
+						heldCurrent = true
+					} else {
+						// Faster-than-contract polling cannot grow the evidence queue
+						// or make an unproven loss eligible for link attribution.
+						s.pending.valid = false
+						currentCode = "unknown"
+					}
+				} else if (
+					recovery &&
+					recovery.retired !== true &&
+					recovery.shortfall === null &&
+					comparable &&
+					evidenceValid &&
+					maxGapMs !== null &&
+					loopDelayMaxMs !== null &&
+					maxGapMs - loopDelayMaxMs >= LINK_GAP_MS &&
+					((absorberOverflow ?? 0) > 0 ||
+						(s.branchDrops.size > 0 &&
+							[...s.branchDrops.values()].every(drop => drop > 0)))
+				) {
+					s.pending = {
+						sequence: recovery.sequence,
+						losses: [{ at, bytes, chunks }],
+						at,
+						gap: maxGapMs,
+						loop: loopDelayMaxMs,
+						cpu: cpuPercent ?? NaN,
+						upstream: upstreamDropDelta ?? NaN,
+						valid: true,
+					}
+					heldCurrent = true
+				}
 			}
-			if (!waiting && !positiveNow && completed) {
-				bytes += completed.bytes
-				chunks += completed.chunks
-			}
-			const resolvedAt =
-				pending?.at ?? (!positiveNow ? completed?.at : undefined) ?? at
-			const positive = positiveNow || pending !== null || completedPending
-			const link =
-				(attribution === "link" || (completedPending && !positiveNow)) &&
-				positive
-			if (positive && !waiting) {
-				if (link) {
-					s.linkDrops.push(resolvedAt)
+			if (positiveNow && !heldCurrent)
+				resolved.push({
+					at,
+					bytes,
+					chunks,
+					code: currentCode,
+					gap: maxGapMs,
+					loop: loopDelayMaxMs,
+					cpu: cpuPercent,
+				})
+			const waiting = s.pending !== null
+			const link = resolved.some(r => r.code === "link")
+			for (const r of resolved) {
+				if (r.code === "link") {
+					s.linkDrops.push(r.at)
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
 				} else {
-					s.lastDropMono = Math.max(
-						s.lastDropMono ?? -Infinity,
-						pending?.at ?? at,
-					)
-					s.drops.push(pending?.at ?? at)
+					s.lastDropMono = Math.max(s.lastDropMono ?? -Infinity, r.at)
+					s.drops.push(r.at)
 					if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
+					fault(s, at)
 				}
 			}
 			if (
@@ -709,49 +691,37 @@ export function createEfficiencyMonitor(deps: {
 				else s.covered.push({ from: s.lastCompleteMono!, to: at })
 				if (s.covered.length > MAX_COVERED_INTERVALS) s.covered.shift()
 			}
-			if (!link && !waiting) {
-				if (comparable && evidenceValid && attribution === "none" && !positive)
+			if (!link && !waiting && resolved.length === 0) {
+				if (comparable && evidenceValid && currentCode === "none")
 					s.cleanSinceMono ??= at
 				else fault(s, Number.isFinite(at) ? at : null)
 			}
 			s.coverageBlocked = link || waiting || !evidenceValid
-			if (!waiting) s.pending = null
-			s.latest = unresolved ? null : attribution
+			const published = resolved.at(-1)
+			s.latest = published?.code ?? (waiting ? null : currentCode)
 			if (Number.isFinite(at)) {
-				if (!unresolved) s.counts.push({ mono: resolvedAt, code: attribution })
-				if (s.counts.length > 300) s.counts.shift()
-				// Windows are (start, end]: the closing sample belongs to the window it closes.
-				if (s.openWindow === null)
-					s.openWindow = {
-						startMono: at,
-						endMono: at + EFFICIENCY_DROP_WINDOW_MS,
-						condemning: false,
-						linkOrUnknownDrops: false,
-						complete: true,
+				if (resolved.length === 0 && !waiting)
+					s.counts.push({ mono: at, code: currentCode })
+				for (const r of resolved) s.counts.push({ mono: r.at, code: r.code })
+				while (s.counts.length > 300) s.counts.shift()
+				const closeWindow = () => {
+					if (s.openWindow) {
+						s.openWindow.closedAt = at
+						s.deferredWindows.push(s.openWindow)
 					}
-				const w = s.openWindow
-				if (at > w.startMono) {
-					w.complete &&= comparable && evidenceValid
-					if (positive && !unresolved) {
-						if (attribution === "host" || attribution === "consumer")
-							w.condemning = true
-						else w.linkOrUnknownDrops = true
-					}
+					// ceil(12080 / 10000) + two endpoint windows; losing old
+					// evidence can only withhold a late-shed verdict.
+					if (s.deferredWindows.length > 4) s.deferredWindows.shift()
 				}
-				if (at >= w.endMono && !waiting) {
-					if (w.complete) {
-						s.windows.push({
-							startMono: w.startMono,
-							endMono: w.endMono,
-							condemning: w.condemning,
-							linkOrUnknownDrops: !w.condemning && w.linkOrUnknownDrops,
-						})
-						if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
-					}
+				if (s.openWindow && at > s.openWindow.endMono) {
+					s.openWindow.complete &&= comparable && evidenceValid
 					const start =
-						w.endMono +
-						Math.floor((at - w.endMono) / EFFICIENCY_DROP_WINDOW_MS) *
+						s.openWindow.endMono +
+						Math.floor(
+							(at - s.openWindow.endMono) / EFFICIENCY_DROP_WINDOW_MS,
+						) *
 							EFFICIENCY_DROP_WINDOW_MS
+					closeWindow()
 					s.openWindow = {
 						startMono: start,
 						endMono: start + EFFICIENCY_DROP_WINDOW_MS,
@@ -760,64 +730,116 @@ export function createEfficiencyMonitor(deps: {
 						complete: comparable && evidenceValid,
 					}
 				}
+				s.openWindow ??= {
+					startMono: at,
+					endMono: at + EFFICIENCY_DROP_WINDOW_MS,
+					condemning: false,
+					linkOrUnknownDrops: false,
+					complete: true,
+				}
+				if (at > s.openWindow.startMono)
+					s.openWindow.complete &&= comparable && evidenceValid
+				for (const r of resolved) {
+					const w = [...s.deferredWindows, s.openWindow].find(
+						w => r.at > w.startMono && r.at <= (w.closedAt ?? w.endMono),
+					)
+					if (w) {
+						if (r.code === "consumer" || r.code === "host") w.condemning = true
+						else w.linkOrUnknownDrops = true
+					}
+				}
+				if (at === s.openWindow.endMono) {
+					closeWindow()
+					s.openWindow = {
+						startMono: at,
+						endMono: at + EFFICIENCY_DROP_WINDOW_MS,
+						condemning: false,
+						linkOrUnknownDrops: false,
+						complete: comparable && evidenceValid,
+					}
+				}
+				if (!waiting) {
+					for (const w of s.deferredWindows)
+						if (w.complete) {
+							s.windows.push({
+								startMono: w.startMono,
+								endMono: w.endMono,
+								condemning: w.condemning,
+								linkOrUnknownDrops: !w.condemning && w.linkOrUnknownDrops,
+							})
+							if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
+						}
+					s.deferredWindows = []
+				}
 				if (validClock && lastRaw !== null) {
 					s.rawSamples.push(lastRaw)
 					if (s.rawSamples.length > 2) s.rawSamples.shift()
 				}
-				try {
-					if (
-						!unresolved &&
-						attribution !== "none" &&
-						attribution !== s.lastNonNone
-					) {
+				if (
+					resolved.length === 0 &&
+					!waiting &&
+					currentCode !== "none" &&
+					currentCode !== s.lastNonNone
+				) {
+					try {
 						deps.log?.info(
-							{ sourceId: id, from: s.lastNonNone, to: attribution },
+							{ sourceId: id, from: s.lastNonNone, to: currentCode },
 							"Drop attribution changed",
 						)
-						s.lastNonNone = attribution
+						s.lastNonNone = currentCode
+					} catch {
+						/* Observability cannot alter evidence. */
 					}
-					const logged = s.logged.get(attribution)
-					if (
-						!unresolved &&
-						positive &&
-						(logged === undefined || at - logged >= 60_000)
-					) {
-						deps.log?.info(
-							{
-								sourceId: id,
-								attribution,
-								dropBytes: bytes,
-								intervalMono: resolvedAt,
-								gapMs: maxGapMs,
-								loopDelayMs: loopDelayMaxMs,
-								cpuPercent,
-							},
-							"Drop interval attributed",
-						)
-						s.logged.set(attribution, at)
-					}
-				} catch {
-					/* Observability cannot alter evidence. */
 				}
+				for (const r of resolved)
+					try {
+						if (r.code !== s.lastNonNone) {
+							deps.log?.info(
+								{ sourceId: id, from: s.lastNonNone, to: r.code },
+								"Drop attribution changed",
+							)
+							s.lastNonNone = r.code
+						}
+						const logged = s.logged.get(r.code)
+						if (logged === undefined || at - logged >= 60_000) {
+							deps.log?.info(
+								{
+									sourceId: id,
+									attribution: r.code,
+									dropBytes: r.bytes,
+									intervalMono: r.at,
+									gapMs: r.gap,
+									loopDelayMs: r.loop,
+									cpuPercent: r.cpu,
+								},
+								"Drop interval attributed",
+							)
+							s.logged.set(r.code, at)
+						}
+					} catch {
+						/* Observability cannot alter evidence. */
+					}
 			}
-
 			s.rate = comparable && gap > 0 ? (intervalBytes * 1000) / gap : null
 			s.lastCompleteMono =
 				counters !== null && signature !== null && valid && validClock
 					? at
 					: null
 			s.lastTickMono = Number.isFinite(at) ? at : null
-			sources.set(id, {
-				...(unresolved ? {} : { attribution }),
-				droppedBytesDelta:
-					!unresolved && (comparable || pending !== null || completedPending)
-						? bytes
-						: null,
-				droppedChunksDelta:
-					!unresolved && (comparable || pending !== null || completedPending)
-						? chunks
-						: null,
-			})
+			sources.set(
+				id,
+				published
+					? {
+							attribution: published.code,
+							droppedBytesDelta: published.bytes,
+							droppedChunksDelta: published.chunks,
+						}
+					: {
+							...(waiting ? {} : { attribution: currentCode }),
+							droppedBytesDelta: comparable && !waiting ? bytes : null,
+							droppedChunksDelta: comparable && !waiting ? chunks : null,
+						},
+			)
 		}
 		let atMs = NaN
 		try {
