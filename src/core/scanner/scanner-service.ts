@@ -567,7 +567,7 @@ export class ScannerService extends EventEmitter {
 	private readonly analogCounts = new Map<string, number>()
 	private readonly analogJobs = new Map<
 		string,
-		{ controller: AbortController; discoveryId: string }
+		{ controller: AbortController; discoveryId: string; sourceId: string }
 	>()
 	private readonly captures: CaptureStore
 	private readonly recorder: CaptureRecorder
@@ -2527,7 +2527,12 @@ export class ScannerService extends EventEmitter {
 		if (captureAtGate.request) {
 			this.requestIqCapture(live, track)
 		}
-		if (!synthetic && !late && !closing && track.gate === "passed")
+		if (
+			!synthetic &&
+			!late &&
+			!closing &&
+			(track.gate === undefined || track.gate === "passed")
+		)
 			this.requestJobAnalog(live, track)
 		const needs =
 			!synthetic && !late && this.needsConfirm(live, track, !closing)
@@ -3891,7 +3896,7 @@ export class ScannerService extends EventEmitter {
 
 	// === WG11 req 6: IQ capture on detection, replay results ===
 
-	/** A18: one private analog trial alongside the digital trials of a narrow keyup. */
+	/** A18: classification and measured bandwidth never exclude an allowed analog trial. */
 	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
 		const runner = this.admittedAnalog()
 		const protocols = this.protocolsFor(live, track.centreHz)
@@ -3911,12 +3916,13 @@ export class ScannerService extends EventEmitter {
 			track.flags.iqImage ||
 			(this.analogCounts.get(live.sourceId) ?? 0) >= 2 ||
 			!runner?.runLive ||
-			!Number.isFinite(track.obwHz) ||
-			track.obwHz <= 0 ||
-			track.obwHz > 22_500 ||
 			(protocols.length > 0 && !protocols.includes("analog-fm")) ||
 			this.analogAttempted.has(live) ||
-			live.acceptedIdentity !== undefined
+			[...this.analogJobs.values()].some(
+				trial =>
+					trial.sourceId === live.sourceId &&
+					trial.discoveryId === live.discoveryId,
+			)
 		)
 			return
 		this.analogCounts.set(
@@ -3928,6 +3934,7 @@ export class ScannerService extends EventEmitter {
 		this.analogJobs.set(live.observationId, {
 			controller,
 			discoveryId: live.discoveryId,
+			sourceId: live.sourceId,
 		})
 		const order = this.store.nextTrialOrder()
 		const row = {
@@ -3996,7 +4003,9 @@ export class ScannerService extends EventEmitter {
 					for (const pending of this.live.values())
 						if (
 							pending.sourceId === live.sourceId &&
-							pending.lastTrack?.gate === "passed"
+							pending.lastTrack !== null &&
+							(pending.lastTrack.gate === undefined ||
+								pending.lastTrack.gate === "passed")
 						)
 							this.requestJobAnalog(pending, pending.lastTrack)
 			})
