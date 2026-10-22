@@ -361,3 +361,23 @@ Each becomes a property test (`fast-check`, `numRuns ≥ 100`) with the trace co
 14. **Identify is never excluded by priors** (verified on the scanner side, task ID-F.1). For any
     band plan and target without a user-typed list, the trial set equals the set with no band
     plan. _Validates 9.1._
+
+## Configured VFO amendment — 2026-10-22
+
+The planner gives unpinned configured single-channel audio adapters one VFO placement
+(or the capture centre when no VFO belongs to that source). `followVfo: false` preserves
+explicit frequency-option intent even when a value is invalid. A channelizer provider
+selects channel reach; without one the placement retains its target and the manager
+injects `target - capture centre` as the raw demodulation offset. Original options are
+copied before injecting runtime options so later evaluations cannot mistake the VFO
+for a configured pin. No IQ/audio processing loop changes.
+
+Primary VFO placements use the same provider retune operation as VFO workers, after the
+existing 1,000 ms VFO settle and 300 ms caps-work debounce. Refused retunes use the
+existing close/reopen path. Configured placements retain the requirement 4.9 exemption.
+Status targets aggregate placement channels, centre-reach source centres, and the
+existing declared targets for raw wideband adapters.
+
+15. **Configured VFO target.** For any admissible VFO in a source's usable span, an
+    unpinned configured channel decoder reports exactly that frequency, with or without
+    a channelizer. _Validates 3.11, 3.12, 4.9, 5.5._

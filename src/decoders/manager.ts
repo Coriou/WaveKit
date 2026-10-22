@@ -91,8 +91,10 @@ import {
 	createDecoderExitError,
 	createDecoderLastError,
 	describeDecoderStatusFields,
+	resolveDecoderTargetFrequencies,
 } from "./status-fields.js"
 import type { DecoderRegistry } from "./registry.js"
+import { VFO_CHANNEL_TYPES } from "./enablement/placement.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type {
 	ChannelAdmissionReason,
@@ -961,7 +963,7 @@ export class DecoderManager extends EventEmitter {
 			const hz = centreHz + offset
 			if (Number.isFinite(hz) && hz > 0) return [hz]
 		}
-		return []
+		return resolveDecoderTargetFrequencies(config) ?? []
 	}
 
 	private logPlacement(
@@ -1017,6 +1019,15 @@ export class DecoderManager extends EventEmitter {
 						startMode: state.startMode,
 						configuredSourceId: config.sourceId ?? null,
 						band: this.resolveBand(state).requirements,
+						followVfo:
+							![
+								"channelHz",
+								"channelsHz",
+								"offsetHz",
+								"frequency",
+								"frequencies",
+							].some(key => Object.hasOwn(config.options, key)) &&
+							config.frequencies === undefined,
 						configuredChannelsHz: this.configuredChannels(
 							config,
 							caps?.centerFreq,
@@ -1215,8 +1226,55 @@ export class DecoderManager extends EventEmitter {
 					state.desiredRunning = parent.desiredRunning
 					state.intentionallyStopped = parent.intentionallyStopped
 				}
-				const moved =
-					state.placement !== undefined && state.placement.key !== placement.key
+				const rawOffsetHz =
+					placement.reach === "raw" && placement.channelHz !== null
+						? placement.channelHz -
+							(this.sourceManager?.getCaps(placement.sourceId)?.centerFreq ??
+								placement.channelHz)
+						: undefined
+				let moved =
+					state.placement !== undefined &&
+					(state.placement.key !== placement.key ||
+						(rawOffsetHz !== undefined &&
+							state.config.options["offsetHz"] !== rawOffsetHz))
+				if (
+					moved &&
+					this.gateExempt(state) &&
+					state.placement?.origin === "vfo" &&
+					placement.origin === "vfo" &&
+					state.channel &&
+					state.decoder.getStatus().running &&
+					placement.channelHz !== null &&
+					state.placement.sourceId === placement.sourceId
+				) {
+					const provider = state.channel.provider as ChannelProvider & {
+						retuneChannel?: (
+							sourceId: string,
+							channelId: string,
+							centerHz: number,
+						) => Promise<"retuned" | "refused">
+					}
+					try {
+						if (
+							(await provider.retuneChannel?.(
+								placement.sourceId,
+								state.channel.channelId,
+								placement.channelHz,
+							)) === "retuned"
+						) {
+							if (parent.parentIntent !== parentIntent || this.destroying)
+								continue
+							this.logPlacement(placement, "moved")
+							state.placement = placement
+							moved = false
+						}
+					} catch (error) {
+						this.log.warn(
+							{ err: safeErrorFields(error) },
+							"Placement retune failed",
+						)
+					}
+				}
 				const wasWanted = state.desiredRunning
 				if (moved && state.placement) {
 					enablement.gate?.forget(state.placement.key)
@@ -1243,7 +1301,12 @@ export class DecoderManager extends EventEmitter {
 					options: {
 						...original.options,
 						...(placement.channelHz !== null
-							? { channelHz: placement.channelHz }
+							? {
+									channelHz: placement.channelHz,
+									...(rawOffsetHz !== undefined
+										? { offsetHz: rawOffsetHz }
+										: {}),
+								}
 							: {}),
 					},
 				}
@@ -2657,6 +2720,50 @@ export class DecoderManager extends EventEmitter {
 				lastError: state.lastError,
 				idleTimeoutMs: this.config.idleTimeout,
 			}),
+			...this.placementTargetFields(state),
+		}
+	}
+
+	private placementTargetFields(
+		parent: DecoderState,
+	): Pick<DecoderStatus, "targetFrequenciesHz"> {
+		const states = [...this.decoders.values()].filter(
+			state => state === parent || state.parentId === parent.config.id,
+		)
+		if (!states.some(state => state.placement)) return {}
+		const targets = states.flatMap(state => {
+			const placement = state.placement
+			if (!placement) return []
+			if (placement.channelHz !== null) return [placement.channelHz]
+			if (placement.reach === "centre") {
+				const centre = this.sourceManager?.getCaps(
+					placement.sourceId,
+				)?.centerFreq
+				return typeof centre === "number" &&
+					Number.isFinite(centre) &&
+					centre > 0
+					? [centre]
+					: []
+			}
+			if (VFO_CHANNEL_TYPES.includes(state.config.type)) {
+				const centre = this.sourceManager?.getCaps(
+					placement.sourceId,
+				)?.centerFreq
+				const offset = state.config.options["offsetHz"] ?? 0
+				if (
+					typeof centre === "number" &&
+					typeof offset === "number" &&
+					Number.isFinite(centre + offset) &&
+					centre + offset > 0
+				)
+					return [centre + offset]
+				return []
+			}
+			// Raw wideband adapters keep their declared-frequency semantics.
+			return resolveDecoderTargetFrequencies(state.config) ?? []
+		})
+		return {
+			targetFrequenciesHz: targets.length ? [...new Set(targets)] : undefined,
 		}
 	}
 
@@ -3304,7 +3411,7 @@ export class DecoderManager extends EventEmitter {
 		if (provider && sourceId && request)
 			return this.wireDecoderToChannel(state, provider, sourceId, request)
 		// Raw path again (no channel request now): the decoder reads CU8.
-		if (config.useChannelizer === true)
+		if (config.useChannelizer === true || state.placement?.reach === "raw")
 			decoder.updateOptions({ inputIqFormat: "cu8" })
 		const branchId = `decoder-${config.id}`
 		const fanout = this.sourceRouting?.getFanout(sourceId) ?? this.fanout
