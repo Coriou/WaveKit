@@ -19,6 +19,7 @@ import type {
 	LiveAudioConfig,
 	LiveAudioLevel,
 	LiveAudioStatus,
+	ResourceAlert,
 	ScanJob,
 	ScannerActivityEventData,
 	ScannerDiscoveryEventData,
@@ -32,6 +33,7 @@ import type {
 	SpectrumSubscribeOptions,
 	TunerCommandSentEventData,
 	TunerControlMode,
+	TunerRatePolicyEventData,
 	TunerState,
 } from "@wavekit/api-types"
 
@@ -75,6 +77,9 @@ export interface EventMap {
 	"tuner:command-sent": TunerCommandSentEventData
 	"tuner:control-mode-changed": { sourceId: string; mode: TunerControlMode }
 	"tuner:error": { sourceId: string; error: string }
+	/** The 1090 MHz rate policy raised, restored or skipped a sample-rate write. */
+	"tuner:rate-policy": TunerRatePolicyEventData
+	"resources:alert": ResourceAlert
 	"live-audio:status": LiveAudioStatus
 	"live-audio:config": LiveAudioConfig
 	"live-audio:level": LiveAudioLevel

@@ -5,6 +5,7 @@ import type {
 	ScanJob,
 	ScanJobHit,
 	ScannerClass,
+	ScannerIqCaptureStatus,
 	ScannerProgressEventData,
 	ScannerProtocol,
 } from "@wavekit/api-types"
@@ -571,6 +572,49 @@ export function footerText(f: FooterInput): string {
 	}
 	if (f.watching) return `${lead}Watching where you are tuned`
 	return `${lead}Not watching · discoveries so far are kept`
+}
+
+const CAPTURE_FAILURES: Readonly<
+	Record<
+		NonNullable<ScannerIqCaptureStatus["lastToolFailure"]>["reason"],
+		string
+	>
+> = {
+	usage: "the tool refused its arguments",
+	"sample-rate": "the sample rate",
+	bandwidth: "the bandwidth",
+	anchor: "the frequency anchor",
+	"out-dir": "the capture folder",
+	"control-fd": "the control pipe",
+	other: "an unknown error",
+}
+
+/**
+ * The IQ capture that feeds "from capture" replays (scanner status `iqCapture`, absent while capture is off):
+ * "IQ capture on · 12 captured", amber once the capture tool failed. Null when the core has no capture.
+ */
+export function iqCaptureText(
+	iq: ScannerIqCaptureStatus | undefined,
+): { text: string; title: string; amber: boolean } | null {
+	if (!iq) return null
+	const t = iq.trialCaptures
+	const title =
+		"WaveKit records a short IQ capture of each new signal, so a decoder can try it after the transmission ended"
+	const fail = iq.lastToolFailure
+	if (fail && iq.toolFailures > 0)
+		return {
+			text: `IQ capture failing · ${CAPTURE_FAILURES[fail.reason]}`,
+			title: `${title}. The capture tool failed ${iq.toolFailures} time${iq.toolFailures === 1 ? "" : "s"}.`,
+			amber: true,
+		}
+	if (!t || t.completed === 0)
+		return { text: "IQ capture on", title, amber: false }
+	const failed = t.failed > 0 ? ` · ${t.failed} failed` : ""
+	return {
+		text: `IQ capture on · ${t.completed} captured${failed}`,
+		title,
+		amber: false,
+	}
 }
 
 /** "160.6–163.0" (MHz, one decimal): the span Watch here looks at. */

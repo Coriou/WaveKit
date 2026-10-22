@@ -16,6 +16,7 @@ import { Plot } from "../plot/index.ts"
 import { Shell } from "../shell/Shell.tsx"
 import { followDeepLinks } from "../shell/deep-link-sync.ts"
 import { shellStore } from "../shell/store.ts"
+import { watchReceiverNotices } from "../features/receiver/notices.ts"
 import { ServicesContext } from "./context.ts"
 import { createServices, type AppServices } from "./services.ts"
 
@@ -46,12 +47,14 @@ export function App() {
 		let disposed = false
 		setServices(s)
 		const offLinks = followDeepLinks(s)
+		const offNotices = watchReceiverNotices(s.data.events)
 		queueMicrotask(() => {
 			if (!disposed) void s.start()
 		})
 		return () => {
 			disposed = true
 			offLinks()
+			offNotices()
 			s.dispose()
 			setServices(null)
 		}

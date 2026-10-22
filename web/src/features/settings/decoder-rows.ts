@@ -3,11 +3,14 @@
 // (GET /api/decoders/:id/settings, protected cores only). Patchable keys get a widget by type; the rest are read-only.
 // Every option applies when the decoder next starts, so changes wait for Apply. Pure.
 import type {
+	DecoderEfficiencyDetail,
 	DecoderInfo,
 	DecoderOptionDescriptor,
+	DecoderPlacementView,
 	DecoderSettingValue,
 } from "@wavekit/api-types"
 
+import { clockText } from "../display.ts"
 import { decoderLabel } from "../tuned/signal.ts"
 import type { SettingsActions, SettingsSnapshot } from "./rows.ts"
 import { words } from "./rows.ts"
@@ -110,6 +113,49 @@ export function decoderWhere(d: DecoderInfo): string {
 	if (f.length === 0) return "The tuned channel"
 	if (f.length <= 2) return `${f.map(MHZ).join(" and ")} MHz`
 	return `${f.length} channels at ${MHZ(f[0] ?? 0).split(".")[0]} MHz`
+}
+
+const PLACED_BY: Readonly<Record<DecoderPlacementView["origin"], string>> = {
+	configured: "configured",
+	band: "its band",
+	vfo: "tuned",
+	bandplan: "band plan",
+	fallback: "fallback",
+}
+
+/** Where the core placed it (`placements[]`): "162.025 MHz (tuned), whole capture (its band)". Null on older cores. */
+export function placementsText(d: DecoderInfo): string | null {
+	const ps = d.placements
+	if (!ps || ps.length === 0) return null
+	const one = (p: DecoderPlacementView) => {
+		const where =
+			p.channelHz !== undefined
+				? `${MHZ(p.channelHz)} MHz`
+				: p.reach === "centre"
+					? "the capture centre"
+					: "the whole capture"
+		const paused = p.suspension ? ", paused" : p.running ? "" : ", stopped"
+		return `${where} (${PLACED_BY[p.origin]}${paused})`
+	}
+	if (ps.length <= 3) return ps.map(one).join(", ")
+	return `${ps.length} channels · ${ps.filter(p => p.running).length} running`
+}
+
+const EFFICIENCY: Readonly<Record<DecoderEfficiencyDetail, string>> = {
+	budget: "Waiting: over the CPU budget",
+	cpu: "Waiting: the CPU is too busy",
+	drops: "Waiting: it dropped samples",
+	unknown: "Waiting for a clean measurement",
+}
+
+/** What the efficiency gate holds it on (`efficiency`), with the retry time. Null while admitted or on older cores. */
+export function efficiencyText(d: DecoderInfo): string | null {
+	const e = d.efficiency
+	if (!e) return null
+	const at = e.retryAt ? Date.parse(e.retryAt) : NaN
+	return Number.isFinite(at)
+		? `${EFFICIENCY[e.detail]} · tries again at ${clockText(at)}`
+		: EFFICIENCY[e.detail]
 }
 
 const restarts = (name: string): SettingEffect => ({
@@ -286,6 +332,35 @@ export function decoderRows(
 							"This WaveKit keeps decoder settings in the YAML (open access mode)",
 					}),
 		})
+		const placed = placementsText(d)
+		if (placed !== null)
+			rows.push({
+				id: `dec.${d.id}.placements`,
+				group: "decoders",
+				page: d.id,
+				label: "Runs on",
+				help:
+					d.origin === "config"
+						? "From your YAML configuration"
+						: "Built in: WaveKit places it from the tuned frequency, its band and the band plans",
+				keys: words("runs on placement channel where"),
+				widget: { kind: "read" },
+				value: placed,
+				text: placed,
+			})
+		const gate = efficiencyText(d)
+		if (gate !== null)
+			rows.push({
+				id: `dec.${d.id}.efficiency`,
+				group: "decoders",
+				page: d.id,
+				label: "Efficiency",
+				help: "WaveKit starts a built-in decoder only while the receiver keeps every sample",
+				keys: words("efficiency budget cpu drops"),
+				widget: { kind: "read" },
+				value: gate,
+				text: gate,
+			})
 		if (!type?.options || !view) continue
 		let shownEssentials = 0
 		const descs = [...type.options].sort(

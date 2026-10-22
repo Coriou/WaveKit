@@ -19,7 +19,13 @@ import { DiscoveryList } from "./DiscoveryList.tsx"
 import { HitLog } from "./HitLog.tsx"
 import { ScanIcon } from "./icons.tsx"
 import { closeMoreMenu, MoreMenu } from "./MoreMenu.tsx"
-import { footerText, headerCount, isOneHop, spanText } from "./rows.ts"
+import {
+	footerText,
+	headerCount,
+	iqCaptureText,
+	isOneHop,
+	spanText,
+} from "./rows.ts"
 import { buildDiscoveryQuery, sameQuery } from "./search.ts"
 import { SearchBar } from "./SearchBar.tsx"
 import type { DrawerTab } from "./state.ts"
@@ -372,6 +378,7 @@ function Footer() {
 			: 0
 	})
 	const passive = useStore(scanner, s => s.passive)
+	const iq = useStore(scanner, s => s.status?.iqCapture)
 	const progress = useStore(scanner.progress)
 	const tuner = useTunerState()
 	const watch = useStore(watchController(data.api, scanner))
@@ -397,12 +404,22 @@ function Footer() {
 		readOnly,
 		now,
 	})
+	const capture = iqCaptureText(iq)
 	const amber = sweep?.state === "paused"
 	return (
 		<footer className="wks-footer" data-tone={amber ? "amber" : undefined}>
 			<span className="wks-ellipsis" title={text}>
 				{text}
 			</span>
+			{capture && (
+				<span
+					className="wks-footer-iq wks-ellipsis"
+					title={capture.title}
+					data-tone={capture.amber ? "amber" : undefined}
+				>
+					{capture.text}
+				</span>
+			)}
 		</footer>
 	)
 }

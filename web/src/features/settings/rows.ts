@@ -64,6 +64,7 @@ import {
 import { sourceTitle } from "../receiver/summary.ts"
 import { STEPS } from "../tuner/prefs.ts"
 import { decoderRows } from "./decoder-rows.ts"
+import { ratePolicyNote } from "../receiver/notices.ts"
 import { devicesCount, devicesSummary } from "./devices.ts"
 import {
 	optionText,
@@ -543,7 +544,8 @@ function receiverRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 		id: "rx.rate",
 		group: "receiver",
 		label: "Sample rate",
-		help: "Wider shows more spectrum and uses more CPU",
+		help:
+			ratePolicyNote(tuner) ?? "Wider shows more spectrum and uses more CPU",
 		keys: words("span bandwidth sdr ms/s msps"),
 		widget:
 			rates.length > 5

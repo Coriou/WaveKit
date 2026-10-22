@@ -574,3 +574,6 @@ core source, reported against a live core)
 - [ ] An identified digital channel is not decoded afterwards: Identify's probe stops, and no decoder follows
   the frequency, so the card says "No decoder runs on this frequency". A "Decode here" action (start the
   protocol's decoder on that channel, or follow the live-audio channel) would turn an answer into traffic.
+  Partly (decoder enablement, 2026-10-21/22): built-in decoders get placements from the tuned frequency, their
+  band and the band plans (`placements[]`, shown in Settings › Decoders › Runs on); nothing yet starts the
+  identified protocol's decoder on that channel.

@@ -44,6 +44,7 @@ import {
 	nearestGainIndex,
 } from "./gain.ts"
 import { receiverSummary, sourceTitle } from "./summary.ts"
+import { ratePolicyNote } from "./notices.ts"
 import "./receiver.css"
 
 /** The value to show: the in-flight target, else the core's. */
@@ -147,6 +148,7 @@ function SampleRate({ tuner, caps, locked, status, dismiss }: SectionProps) {
 	const asking = confirmHz !== null && !disabled && confirmHz !== current
 	const declaredOnly = tuner.declaredOnlyFields?.includes("sampleRate") ?? false
 	const warn = rateWarning(confirmHz ?? current)
+	const policy = ratePolicyNote(tuner)
 	return (
 		<div className="wkf-field">
 			<Label>Sample rate</Label>
@@ -205,6 +207,9 @@ function SampleRate({ tuner, caps, locked, status, dismiss }: SectionProps) {
 				<span className="wkf-quiet wkf-small" role="status">
 					Restarting the stream at {formatRate(current)}…
 				</span>
+			)}
+			{policy && !rate?.pending && (
+				<span className="wkf-quiet wkf-small">{policy}</span>
 			)}
 			{declaredOnly && !rate?.pending && (
 				<span className="wkf-quiet wkf-small">

@@ -684,8 +684,15 @@
 		color: var(--wk-text-3);
 		font-variant-numeric: tabular-nums;
 	}
-	.wks-footer[data-tone="amber"] {
+	.wks-footer[data-tone="amber"],
+	.wks-footer-iq[data-tone="amber"] {
 		color: var(--wk-amber);
+	}
+	.wks-footer-iq {
+		flex: none;
+		max-width: 50%;
+		margin-left: auto;
+		padding-left: 12px;
 	}
 
 	/* Last 24 h: transmissions per hour, then the last few */
