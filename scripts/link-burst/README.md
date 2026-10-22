@@ -29,8 +29,13 @@ counter must increase; core overflow is not required. If core branches drop,
 The current link-quality API exposes live absorber totals and the latest monitor
 attribution, without a shared completed-interval identity. Its `at` field is the
 report read time. Overflow attribution cannot be correlated exactly through this
-API: overflow/upstream runs with core overflow are marked invalid pending interval
-evidence, rather than comparing counters against potentially stale attribution.
+API. The summary labels the check `attributionCheck: "aggregate"` and records
+`attributionIncreases`: positive changes between successive monitor `counts10m`
+observations, excluding the first observation as a baseline. Overflow must rise
+during the run, link classifications must increase, and consumer/host
+classifications must not increase. Upstream runs with core overflow use the same
+aggregate check. This cannot verify per-interval pairing; rolling-window expiry
+can also mask increases between polls. Keep raw samples for that limitation.
 
 The marked YAML `rtl433` instance uses the raw fanout path and is gate exempt.
 The shim delegates every unmarked invocation to `/usr/local/bin/rtl_433`. It reads
@@ -44,8 +49,10 @@ the run. No output marks a decoder idle; it does not itself trigger a restart.
 Late-shed reserves an initial 600-second smooth interval for graduation and
 invalidates the run if overflow begins before the admitted catalogue leaves
 probation. It then measures three minutes of overflow stalls before enabling the
-slow sink. The fake service stays running throughout; phase timestamps are
-monotonic. Admission order in the summary is first-observed order (two-second
+slow sink. Before enabling it, the driver clears `LINK_BURST_SCHEDULE` and
+recreates only `fake` in the same Compose project, leaving core running. It waits
+for the source to be connected with increasing received bytes before establishing
+consumer drop baselines and enabling the slow sink. Phase timestamps are monotonic. Admission order in the summary is first-observed order (two-second
 resolution). A shed involving simultaneous first observations invalidates the
 run because exact admission order is not exposed by the API. The driver checks
 observed newest eligible automatic placement, reverse order and cooldown spacing; it cannot prove unexposed gate-window

@@ -3,7 +3,7 @@ import importlib.util
 from pathlib import Path
 import signal
 import tempfile
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -28,11 +28,49 @@ class DriverTests(unittest.TestCase):
         experiment.summary["upstreamDroppedBytes"] = 0
         self.assertIn("upstream drops were not exercised", experiment.failures())
 
-    def test_unpaired_overflow_is_invalid(self):
+    def test_aggregate_overflow_attribution(self):
+        for scenario in ("overflow", "upstream"):
+            experiment = self.experiment(scenario)
+            experiment.summary["overflowBytes"] = 100
+            experiment.summary["upstreamDroppedBytes"] = 100
+            experiment.record_attribution(dict(link=5, consumer=2, host=1, unknown=0))
+            self.assertIn("aggregate link classifications did not increase", experiment.failures())
+            experiment.record_attribution(dict(link=6, consumer=2, host=1, unknown=0))
+            self.assertEqual(experiment.failures(), [])
+            self.assertEqual(experiment.summary["attributionCheck"], "aggregate")
+            experiment.record_attribution(dict(link=7, consumer=3, host=1, unknown=0))
+            self.assertIn("aggregate consumer or host classifications increased", experiment.failures())
         experiment = self.experiment("overflow")
-        experiment.summary["overflowAttributionUnavailable"] = True
-        with self.assertRaisesRegex(driver.InvalidRun, "completed interval"):
-            experiment.failures()
+        experiment.monitor_counts["link"] = 1
+        self.assertIn("overflow was not exercised", experiment.failures())
+
+    def test_host_increase_fails_and_window_expiry_is_not_an_increase(self):
+        experiment = self.experiment("overflow")
+        experiment.summary["overflowBytes"] = 10
+        experiment.record_attribution(dict(link=10, consumer=4, host=2))
+        experiment.record_attribution(dict(link=9, consumer=3, host=1))
+        self.assertEqual(experiment.monitor_counts["consumer"], 0)
+        experiment.record_attribution(dict(link=10, consumer=3, host=2))
+        self.assertIn("aggregate consumer or host classifications increased", experiment.failures())
+
+    def test_smooth_link_recreates_only_fake_and_waits_for_traffic(self):
+        experiment = self.experiment("late-shed")
+        original_command = list(experiment.command)
+        experiment.compose = Mock()
+        experiment.get = Mock(side_effect=[
+            [dict(id=driver.SOURCE, connected=False, bytesReceived=100)],
+            [dict(id=driver.SOURCE, connected=True, bytesReceived=100)],
+            [dict(id=driver.SOURCE, connected=True, bytesReceived=200)]])
+        with patch.object(driver.time, "sleep"):
+            experiment.smooth_link()
+        self.assertEqual(experiment.command, original_command)
+        self.assertEqual(experiment.env["LINK_BURST_SCHEDULE"], "")
+        experiment.compose.assert_called_once_with(
+            "up", "-d", "--no-deps", "--force-recreate", "--no-build", "--pull", "never", "fake")
+        self.assertEqual(experiment.get.call_count, 3)
+        self.assertEqual(experiment.phase, "reconnecting")
+        self.assertIsNone(experiment.slow_at)
+        self.assertIsNone(experiment.consumer_baseline)
 
     def test_consumer_window_excludes_link_phase(self):
         experiment = self.experiment("late-shed")

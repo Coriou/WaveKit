@@ -18,6 +18,7 @@ it("isolates the scratch project and validates the slow sink", () => {
 	expect(compose.networks.default.internal).toBe(true)
 	expect(Object.keys(compose.services).sort()).toEqual(["core", "fake"])
 	expect(compose.services.fake.command).toContain("--loop")
+	expect(compose.services.fake.command).toContain("${LINK_BURST_SCHEDULE:-}")
 	expect(compose.services.fake.ports).toBeUndefined()
 	expect(compose.services.core.ports).toEqual(["127.0.0.1::3000"])
 	expect(compose.services.core.volumes).toContain(

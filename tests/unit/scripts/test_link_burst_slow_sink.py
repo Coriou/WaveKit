@@ -89,7 +89,7 @@ class AcceptanceTests(unittest.TestCase):
                 "absorber": {"enabled": True, "peakHeldBytes10m": 0, "peakHeldMs10m": 0,
                     "laggardExcludeMsMax10m": None, "overflowBytesTotal": overflow},
                 "histograms": {"chunkSizeBucketUpperBytes": [65536], "chunkSizeCounts": [1]},
-                "attribution": {"last": attribution, "counts10m": {attribution: 1}}}],
+                "attribution": {"last": attribution, "counts10m": {key: int(key == attribution) for key in ("none", "link", "consumer", "host", "unknown")}}}],
             "fanout": {"branches": [
                 {"id": run.SINK, "sourceId": run.SOURCE, "droppedBytesTotal": 0, "totalBytesWritten": 1000},
                 {"id": "sibling", "sourceId": run.SOURCE, "droppedBytesTotal": drops, "totalBytesWritten": 1000}]},
@@ -112,8 +112,8 @@ class AcceptanceTests(unittest.TestCase):
         experiment.record(self.sample(attribution="link", overflow=1))
         experiment.record(self.sample(attribution="consumer", overflow=2))
         self.assertEqual(experiment.interval_failures, set())
-        with self.assertRaisesRegex(run.InvalidRun, "completed interval"):
-            experiment.failures()
+        self.assertEqual(experiment.summary["overflowBytes"], 1)
+        self.assertIn("aggregate consumer or host classifications increased", experiment.failures())
 
     def test_upstream_counter_rises_without_core_overflow(self):
         experiment = self.experiment("upstream")

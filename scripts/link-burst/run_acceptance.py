@@ -59,7 +59,7 @@ class Experiment:
                         LINK_BURST_SCHEDULE=stall_schedule(args.scenario),
                         LINK_BURST_MODE="drop" if args.scenario == "upstream" else "catchup")
         if args.scenario == "late-shed":
-            # Leave a bounded smooth graduation window without restarting the source.
+            # Leave a bounded smooth graduation window before the link-only phase.
             entries = stall_schedule("late-shed").split(",") * 20
             entries[0] = "600:2500"
             self.env["LINK_BURST_SCHEDULE"] = ",".join(entries)
@@ -83,7 +83,9 @@ class Experiment:
         self.phase_at = None
         self.known_suspensions = set()
         self.sink_pid = None
-        self.last_overflow = 0
+        self.last_overflow = None
+        self.previous_counts = None
+        self.monitor_counts = Counter()
         self.interval_failures = set()
         self.admission_groups = {}
         self.previous_sink_uptime = None
@@ -128,15 +130,12 @@ class Experiment:
         for key in ("peakHeldBytes10m", "peakHeldMs10m", "laggardExcludeMsMax10m"):
             self.summary[key] = max(self.summary[key], absorber[key] or 0)
         overflow = absorber["overflowBytesTotal"]
-        if overflow < self.last_overflow:
-            raise InvalidRun("absorber counter reset")
-        # `at` is the report read time, not a completed monitor interval.
-        # The API exposes no interval counter/attribution pair: never compare
-        # live cumulative overflow with attribution.last from an earlier tick.
-        if overflow > self.last_overflow and self.args.scenario in ("overflow", "upstream"):
-            self.summary["overflowAttributionUnavailable"] = True
+        if self.last_overflow is not None:
+            if overflow < self.last_overflow:
+                raise InvalidRun("absorber counter reset")
+            self.summary["overflowBytes"] += overflow - self.last_overflow
         self.last_overflow = overflow
-        self.summary["overflowBytes"] = overflow
+        self.record_attribution(report["attribution"]["counts10m"])
         histogram = report["histograms"]
         edges = histogram["chunkSizeBucketUpperBytes"]
         counts = histogram["chunkSizeCounts"]
@@ -221,6 +220,34 @@ class Experiment:
         self.previous = admitted
         return source, sink
 
+    def record_attribution(self, counts):
+        if self.previous_counts is not None:
+            for key, count in counts.items():
+                self.monitor_counts[key] += max(0, count - self.previous_counts[key])
+        self.previous_counts = dict(counts)
+        self.summary["attributionIncreases"] = dict(self.monitor_counts)
+        if self.args.scenario in ("overflow", "upstream"):
+            self.summary["attributionCheck"] = "aggregate"
+
+    def smooth_link(self):
+        self.phase = "reconnecting"
+        self.env["LINK_BURST_SCHEDULE"] = ""
+        self.compose("up", "-d", "--no-deps", "--force-recreate", "--no-build",
+                     "--pull", "never", "fake")
+        deadline = time.monotonic() + 120
+        previous = None
+        while time.monotonic() < deadline:
+            sources = self.get("/api/sources")
+            source = next((s for s in sources if s["id"] == SOURCE), None)
+            if source is None:
+                raise InvalidRun("fake source is missing during reconnect")
+            received = source["bytesReceived"]
+            if source["connected"] and previous is not None and received > previous:
+                return
+            previous = received
+            time.sleep(2)
+        raise InvalidRun("smooth fake source did not reconnect and resume traffic")
+
     def record_consumer(self, sample, absorber, branches):
         if sample["phase"] != "consumer":
             return
@@ -290,6 +317,13 @@ class Experiment:
                                 (self.args.scenario == "late-shed" and self.phase == "link-only" and
                                  now - self.phase_at >= 180))
                     if slow_due and self.slow_at is None:
+                        if self.args.scenario == "late-shed":
+                            self.smooth_link()
+                            now = time.monotonic()
+                            sample = self.sample(now)
+                            output.write(json.dumps(sample) + "\n")
+                            output.flush()
+                            source, sink = self.record(sample)
                         self.sentinel(131072)
                         self.slow_at, self.sink_baseline = now, sink["droppedBytesTotal"]
                         self.phase = "consumer"
@@ -340,13 +374,16 @@ class Experiment:
             failures.append("lossless run dropped bytes")
         if scenario == "overflow" and not self.summary["overflowBytes"]:
             failures.append("overflow was not exercised")
-        if self.summary.get("overflowAttributionUnavailable"):
-            raise InvalidRun("link-quality API lacks completed interval counters and attribution; overflow attribution cannot be verified")
+        if scenario == "overflow" or (scenario == "upstream" and self.summary["overflowBytes"]):
+            if not self.monitor_counts["link"]:
+                failures.append("aggregate link classifications did not increase")
+            if self.monitor_counts["consumer"] or self.monitor_counts["host"]:
+                failures.append("aggregate consumer or host classifications increased")
         if scenario == "upstream" and drops and not self.attributions["unknown"]:
             failures.append("upstream with core drops was not attributed unknown")
         if scenario == "upstream" and not self.summary["upstreamDroppedBytes"]:
             failures.append("upstream drops were not exercised")
-        expected = {"overflow": "link", "host": "host", "consumer": "consumer"}.get(scenario)
+        expected = {"host": "host", "consumer": "consumer"}.get(scenario)
         if scenario == "host" and not drops:
             failures.append("host drops were not exercised")
         if expected and not self.attributions[expected]:
