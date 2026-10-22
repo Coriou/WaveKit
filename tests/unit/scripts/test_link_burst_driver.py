@@ -76,7 +76,7 @@ class DriverTests(unittest.TestCase):
         experiment = self.experiment("late-shed")
         experiment.slow_at = 100
         branches = [{"id": "sibling", "droppedBytesTotal": 500}]
-        absorber = {"peakHeldMs10m": 2500, "laggardExcludeMsMax10m": None}
+        absorber = {"peakHeldMs10m": 2500, "peakHeldBytes10m": 0, "laggardExcludeMsMax10m": None}
         experiment.record_consumer({"phase": "link-only", "mono": 99}, absorber, branches)
         self.assertIsNone(experiment.consumer_baseline)
         experiment.record_consumer({"phase": "consumer", "mono": 100}, absorber, branches)
@@ -95,6 +95,31 @@ class DriverTests(unittest.TestCase):
         self.assertIn("host drops were not exercised", experiment.failures())
         experiment.summary["overflowBytes"] = 100
         self.assertEqual(experiment.failures(), [])
+
+    def test_exclusion_bound_rounds_loop_delay_up_to_meter_resolution(self):
+        experiment = self.experiment("consumer")
+        experiment.summary["oneChunkMs"] = 16
+        self.assertEqual(experiment.exclusion_bound(14.8), 500 + 16 + 20)
+        self.assertEqual(experiment.exclusion_bound(20), 500 + 16 + 20)
+        with self.assertRaises(driver.InvalidRun):
+            experiment.exclusion_bound(None)
+
+    def test_amended_latency_criterion(self):
+        experiment = self.experiment("consumer")
+        experiment.summary["oneChunkMs"] = 16
+        experiment.exclusion = {"ms": 531, "loopMs": 15}
+        # 1966080 B at 4096000 B/s and an assumed 1x excess drain in 480 ms.
+        experiment.drain = {"ms": 900, "bytes": 1966080, "exclusionMs": 500, "loopMs": 15}
+        self.assertEqual(experiment.latency_failures(), [])
+        self.assertEqual(experiment.summary["consumerDrainBoundMs"], 536 + 480)
+        experiment.exclusion["ms"] = 537
+        self.assertIn("laggard exclusion exceeded laggard plus one chunk plus loop delay",
+                      experiment.latency_failures())
+        experiment.exclusion["ms"] = 500
+        experiment.drain["ms"] = 1017
+        failures = experiment.latency_failures()
+        self.assertIn("post-exclusion drain exceeded its bound", failures)
+        self.assertIn("implied sibling excess rate is below the assumption", failures)
 
     def test_interruption_tears_down(self):
         experiment = self.experiment("upstream")

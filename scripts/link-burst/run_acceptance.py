@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,11 @@ SOURCE = "link-burst-fake"
 SINK = "link-burst-slow-sink"
 SIBLING = "link-burst-sibling"
 INTERVALS = (9, 1, 130, 50, 40, 71, 161)
+# Assumed excess drain rate of a non-excluded sibling, as a multiple of the
+# source byte rate (a sibling consuming at twice real time). The 2 s polls
+# cannot measure it; the implied excess is reported and checked against it.
+SIBLING_EXCESS = 1.0
+LOOP_METER_RESOLUTION_MS = 10
 ROOT = Path(__file__).resolve().parent
 
 
@@ -92,6 +98,9 @@ class Experiment:
         self.previous_sink_uptime = None
         self.consumer_baseline = None
         self.consumer_peaks = None
+        self.previous_loop_ms = None
+        self.exclusion = None
+        self.drain = None
         self.upstream_baseline = None
         self.summary["upstreamDroppedBytes"] = 0
 
@@ -263,6 +272,9 @@ class Experiment:
         raise InvalidRun("smooth fake source did not reconnect and resume traffic")
 
     def record_consumer(self, sample, absorber, branches):
+        report = next((r for r in sample.get("linkQuality", []) if r.get("sourceId") == SOURCE), {})
+        loop_ms = ((report.get("loopDelay") or {}).get("last") or {}).get("maxMs")
+        previous_loop_ms, self.previous_loop_ms = self.previous_loop_ms, loop_ms
         if sample["phase"] != "consumer":
             return
         if self.consumer_baseline is None:
@@ -276,6 +288,18 @@ class Experiment:
             peak = max(absorber["peakHeldMs10m"], absorber["laggardExcludeMsMax10m"] or 0)
             self.consumer_peaks = max(self.consumer_peaks or 0, peak)
             self.summary["consumerPeakHeldMs"] = self.consumer_peaks
+            # Exclusion runs on ingest and drain events, so its timing carries
+            # the loop delay of the interval in which it happened (or the one
+            # before, at a poll boundary).
+            loops = [v for v in (loop_ms, previous_loop_ms) if v is not None]
+            tolerance = max(loops) if loops else None
+            lag = absorber["laggardExcludeMsMax10m"] or 0
+            if self.exclusion is None or lag > self.exclusion["ms"]:
+                self.exclusion = {"ms": lag, "loopMs": tolerance}
+            held = absorber["peakHeldMs10m"] or 0
+            if self.drain is None or held > self.drain["ms"]:
+                self.drain = {"ms": held, "bytes": absorber["peakHeldBytes10m"] or 0,
+                              "exclusionMs": lag, "loopMs": tolerance}
 
     @staticmethod
     def key(placement):
@@ -376,6 +400,35 @@ class Experiment:
                 signal.signal(sig, handler)
         return exit_code
 
+    def exclusion_bound(self, loop_ms):
+        if loop_ms is None:
+            raise InvalidRun("loop delay is missing for the latency check")
+        tolerance = math.ceil(loop_ms / LOOP_METER_RESOLUTION_MS) * LOOP_METER_RESOLUTION_MS
+        return self.summary["ABSORBER_LAGGARD_MS"] + self.summary["oneChunkMs"] + tolerance
+
+    def latency_failures(self):
+        """Amended 9.2: exclusion latency gates; post-exclusion drain is bounded."""
+        failures = []
+        byte_rate = self.args.rate * 2
+        exclusion, drain = self.exclusion, self.drain
+        exclusion_bound = self.exclusion_bound(exclusion["loopMs"])
+        drain_bound = (self.exclusion_bound(drain["loopMs"])
+                       + drain["bytes"] * 1000 / (SIBLING_EXCESS * byte_rate))
+        drain_ms = drain["ms"] - drain["exclusionMs"]
+        implied = (drain["bytes"] * 1000 / drain_ms / byte_rate) if drain_ms > 0 else None
+        self.summary.update(
+            SIBLING_EXCESS=SIBLING_EXCESS, consumerExclusionMs=exclusion["ms"],
+            consumerExclusionBoundMs=exclusion_bound, consumerDrainMs=drain["ms"],
+            consumerDrainBoundMs=drain_bound, consumerBacklogBytes=drain["bytes"],
+            impliedSiblingExcess=implied)
+        if exclusion["ms"] > exclusion_bound:
+            failures.append("laggard exclusion exceeded laggard plus one chunk plus loop delay")
+        if drain["ms"] > drain_bound:
+            failures.append("post-exclusion drain exceeded its bound")
+        if implied is not None and implied < SIBLING_EXCESS:
+            failures.append("implied sibling excess rate is below the assumption")
+        return failures
+
     def failures(self):
         failures = sorted(self.interval_failures)
         scenario = self.args.scenario
@@ -410,11 +463,9 @@ class Experiment:
         if scenario in ("consumer", "late-shed"):
             if self.summary.get("consumerSiblingDrops", 0):
                 failures.append("slow sink caused sibling drops")
-            bound = self.summary["ABSORBER_LAGGARD_MS"] + self.summary["oneChunkMs"]
             if self.consumer_peaks is None:
                 raise InvalidRun("consumer phase needs a full 10-minute latency window")
-            if self.consumer_peaks > bound:
-                failures.append("sibling latency proxy exceeded laggard plus one chunk")
+            failures += self.latency_failures()
         if scenario == "late-shed":
             sheds = self.summary["sheds"]
             if not sheds:
@@ -439,7 +490,47 @@ class Experiment:
         return failures
 
 
+def replay(directory):
+    """Recompute a run's verdicts from its kept samples."""
+    original = directory / "summary.original.json"
+    if not original.exists():
+        original.write_text((directory / "summary.json").read_text())
+    kept = json.loads(original.read_text())
+    args = argparse.Namespace(rate=kept["rate"], scenario=kept["scenario"],
+                              minutes=kept.get("measuredSeconds", 600) / 60, out=directory)
+    experiment = Experiment(args)
+    experiment.summary["sinkMode"] = kept.get("sinkMode", "fast")
+    if "measuredSeconds" in kept:
+        experiment.summary["measuredSeconds"] = kept["measuredSeconds"]
+    previous = None
+    try:
+        with (directory / "samples.jsonl").open() as samples:
+            for line in samples:
+                sample = json.loads(line)
+                if sample["phase"] == "consumer" and experiment.slow_at is None and previous:
+                    # The slow sink was enabled on the sample before the first consumer one.
+                    branches = [b for b in previous["fanout"]["branches"] if b.get("sourceId") == SOURCE]
+                    sink = next(b for b in branches if SINK in b["id"])
+                    experiment.slow_at, experiment.sink_baseline = previous["mono"], sink["droppedBytesTotal"]
+                    experiment.consumer_baseline = {b["id"]: b["droppedBytesTotal"] for b in branches}
+                experiment.phase = sample["phase"]
+                experiment.record(sample)
+                previous = sample
+        failures = experiment.failures()
+        experiment.summary.update(failures=failures, result="fail" if failures else "pass")
+    except (InvalidRun, KeyError, TypeError, ValueError) as exc:
+        experiment.summary.update(result="invalid", invalidReason=str(exc))
+    if kept.get("result") == "invalid":
+        # Invalidity decided by the live loop (timeouts, teardown) is kept.
+        experiment.summary.update(result="invalid", invalidReason=kept.get("invalidReason"))
+    experiment.summary["replayedFrom"] = original.name
+    (directory / "summary.json").write_text(json.dumps(experiment.summary, indent=2) + "\n")
+    return {"pass": 0, "fail": 1}.get(experiment.summary["result"], 2)
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--replay":
+        return replay(Path(sys.argv[2]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rate", type=int, choices=(2048000, 2400000), required=True)
     parser.add_argument("--scenario", choices=("lossless", "overflow", "consumer", "host", "upstream", "late-shed"), required=True)

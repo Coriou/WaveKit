@@ -18,6 +18,9 @@ Run each scenario at both 2048000 and 2400000 samples/s. Scenarios are `lossless
 its containers, network and volumes on completion. Exit codes: 0 pass, 1 failed
 acceptance, 2 invalid experiment. Raw observations are in `samples.jsonl` and
 aggregates, verdicts and invalid reasons are in `summary.json`.
+`run_acceptance.py --replay <out>` recomputes the verdicts from the kept samples,
+keeping the first summary as `summary.original.json`; invalid results decided by
+the live loop stay invalid.
 
 The repeating start-to-start intervals are 9, 1, 130, 50, 40, 71 and 161 seconds.
 Lossless stall lengths cycle through 150, 500, 1000 and 1800 ms; overflow and
@@ -61,8 +64,15 @@ history or the one-warning-per-minute rule. Keep core logs for those checks.
 Summary latency proxies are the maxima of `peakHeldBytes10m`, `peakHeldMs10m` and
 `laggardExcludeMsMax10m`. The largest occupied chunk bucket gives one chunk's
 milliseconds at twice the configured sample rate. Consumer sibling latency is
-checked against `ABSORBER_LAGGARD_MS` read directly from the source contract plus
-that chunk allowance. Sibling drop checks use a baseline at the consumer phase
+checked in two parts. Exclusion latency (`laggardExcludeMsMax10m`) must not exceed
+`ABSORBER_LAGGARD_MS`, read directly from the source contract, plus that chunk
+allowance plus the loop delay of the interval in which it occurred (or the one
+before), rounded up to the 10 ms meter resolution. Post-exclusion drain latency
+(`peakHeldMs10m`) must not exceed that bound plus the held backlog divided by an
+assumed sibling excess drain rate (`SIBLING_EXCESS`, one source byte rate: a
+sibling consuming at twice real time). Two-second polls cannot measure that rate,
+so the summary reports the implied excess and fails the run if it is below the
+assumption. Any sibling drop fails the run. Sibling drop checks use a baseline at the consumer phase
 transition. In late-shed runs, latency checks start after ten minutes in the
 consumer phase so the rolling maxima exclude the preceding link-only phase;
 shorter runs are invalid. `consumerPeakHeldMs` records the checked maximum.

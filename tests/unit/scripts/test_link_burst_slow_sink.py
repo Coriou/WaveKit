@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import io
 import argparse
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -149,6 +150,21 @@ class AcceptanceTests(unittest.TestCase):
         sample["fanout"]["branches"] = sample["fanout"]["branches"][:1]
         with self.assertRaisesRegex(run.InvalidRun, "sibling"):
             experiment.record(sample)
+
+    def test_replay_recomputes_verdicts_and_keeps_the_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "summary.json").write_text(json.dumps(
+                {"rate": 2048000, "scenario": "overflow", "result": "pass", "sinkMode": "fast"}))
+            (path / "samples.jsonl").write_text(
+                json.dumps(self.sample()) + "\n" + json.dumps(self.sample()) + "\n")
+            self.assertEqual(run.replay(path), 1)
+            summary = json.loads((path / "summary.json").read_text())
+            self.assertIn("overflow was not exercised", summary["failures"])
+            self.assertEqual(json.loads((path / "summary.original.json").read_text())["result"], "pass")
+            (path / "summary.original.json").write_text(json.dumps(
+                {"rate": 2048000, "scenario": "overflow", "result": "invalid", "invalidReason": "x"}))
+            self.assertEqual(run.replay(path), 2)
 
     def test_missing_histogram_invalidates(self):
         experiment = self.experiment()
