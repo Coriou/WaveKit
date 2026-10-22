@@ -67,6 +67,7 @@ export type ReceiverEvidenceRead =
 	| { readonly kind: "missing" | "unavailable" | "conflict" | "limit" }
 	| { readonly kind: "present"; readonly evidence: SourceReceiverEvidence }
 
+// prettier-ignore
 export type ReceiverEvidencePageRead =
 	| { readonly kind: "unavailable" | "conflict" | "limit" }
 	| {
@@ -74,7 +75,7 @@ export type ReceiverEvidencePageRead =
 			readonly candidates: readonly SourceReceiverEvidence[]
 			readonly capturedAt: number
 			readonly snapshotId: string | null
-	  }
+	}
 
 /** Synchronous detached captures. No lifecycle or writable capability is exposed. */
 export interface ReceiverEvidenceReader {
