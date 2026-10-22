@@ -38,9 +38,13 @@
 		border-radius: 50%;
 		background: currentColor;
 	}
+	/* the protocol is a label (the board's caps), the title carries the weight */
 	.wkd-proto {
-		font-size: var(--wk-fs-lg);
+		font-family: var(--wk-font-head);
+		font-size: var(--wk-fs-md);
 		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
 		color: var(--wk-text-2);
 		white-space: nowrap;
 		overflow: hidden;
@@ -61,8 +65,8 @@
 	}
 	.wkd-title {
 		font-weight: 700;
-		font-size: var(--wk-fs-xl);
-		line-height: 1.15;
+		font-size: 17px;
+		line-height: 1.25;
 		overflow-wrap: anywhere;
 	}
 	.wkd-title[data-large] {
@@ -92,24 +96,21 @@
 		color: var(--wk-text-3);
 		font-style: italic;
 	}
-	/* hairlines drawn by each cell (right and bottom, clipped at the edge), so a short last row leaves no grey block */
+	/* readings: label over value, each as wide as it needs, wrapping; no grid of empty cells for one or two values */
 	.wkd-fields {
 		margin: 0;
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-		border-radius: var(--wk-r-3);
-		overflow: hidden;
-		background: var(--wk-glass-strong);
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px 22px;
+		padding-top: 12px;
+		border-top: 1px solid var(--wk-line-08);
 	}
 	.wkd-field {
 		min-width: 0;
+		max-width: 100%;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		padding: 8px 10px;
-		box-shadow:
-			1px 0 0 var(--wk-line-08),
-			0 1px 0 var(--wk-line-08);
 	}
 	.wkd-field dt {
 		font-size: var(--wk-fs-2xs);
@@ -120,6 +121,7 @@
 	}
 	.wkd-field dd {
 		margin: 0;
+		font-size: var(--wk-fs-xl);
 		font-weight: 700;
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;
@@ -378,12 +380,28 @@
 		overscroll-behavior: contain;
 		padding: 12px 24px 16px;
 	}
+	/* title and chips stay in reach while the cards scroll under them */
+	.wkg-bar {
+		position: sticky;
+		top: -12px;
+		z-index: 2;
+		margin: -12px 0 14px;
+		/* spans the tuned card's lane: only the cards keep clear of it */
+		margin-left: calc(24px - var(--wkg-lane, 24px));
+		padding: 12px 0 12px;
+		background: var(--wk-bg);
+		box-shadow: 0 1px 0 var(--wk-line-08);
+	}
 	.wkg-head {
 		display: flex;
 		align-items: center;
 		gap: 10px;
 		min-width: 0;
-		margin-bottom: 14px;
+		margin-bottom: 12px;
+	}
+	.wkg-pause {
+		color: var(--wk-text-2);
+		font-weight: 400;
 	}
 	.wkg-head .wk-h2 {
 		margin: 0;
@@ -411,18 +429,14 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 6px;
-		margin-bottom: 14px;
 	}
 	.wkg-chips .wk-chip > svg {
 		flex: none;
 	}
+	/* hangs under the bar, over the cards */
 	.wkg-newpill {
-		position: sticky;
-		top: 8px;
-		left: auto;
-		display: block;
-		margin: 0 auto 8px;
-		transform: none;
+		top: calc(100% + 10px);
+		left: calc(50% + (var(--wkg-lane, 24px) - 24px) / 2);
 	}
 	.wkg-grid {
 		display: grid;
@@ -438,12 +452,112 @@
 	.wkg-end {
 		height: 1px;
 	}
-	.wkg .wka-note {
-		margin: 0 0 14px;
+	.wkg-col > [role="listitem"] {
+		min-width: 0;
 	}
+
+	/* empty, off and error: one quiet block in the middle of the view, with the way out */
+	.wkg-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+		max-width: 360px;
+		margin: 12vh auto 0;
+		text-align: center;
+	}
+	.wkg-empty-tile {
+		width: 44px;
+		height: 44px;
+		margin-bottom: 4px;
+		color: var(--wk-text-3);
+	}
+	.wkg-empty[data-tone="warn"] .wkg-empty-tile {
+		color: var(--wk-amber);
+	}
+	.wkg-empty-title {
+		margin: 0;
+		font-size: var(--wk-fs-xl);
+		font-weight: 700;
+	}
+	.wkg-empty-text {
+		margin: 0 0 6px;
+		font-size: var(--wk-fs-md);
+		line-height: 1.5;
+		color: var(--wk-text-3);
+	}
+
+	/* loading: card shapes in the columns, fading in late so a fast load never flashes them */
+	.wkg-skel {
+		animation: wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 120ms both;
+	}
+	.wkg-skel-card {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 16px;
+		border-radius: var(--wk-r-4);
+		border: 1px solid var(--wk-line-08);
+		animation: wk-skel-wave 1.6s var(--wk-ease-inout) calc(var(--i, 0) * 90ms)
+			infinite;
+	}
+	.wkg-skel-card > span {
+		display: block;
+		border-radius: var(--wk-r-2);
+		background: var(--wk-fill);
+	}
+	.wkg-skel-head {
+		width: 38%;
+		height: 14px;
+	}
+	.wkg-skel-title {
+		width: 64%;
+		height: 20px;
+	}
+	.wkg-skel-line {
+		width: 46%;
+		height: 12px;
+	}
+	.wkg-skel-well {
+		height: 44px;
+	}
+	.wkg-skel-well[data-tall] {
+		height: 88px;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.wkg-skel-card {
+			animation: none;
+		}
+	}
+
+	/* phone: one row of chips that scrolls sideways instead of three wrapped rows */
 	@media (max-width: 760px) {
 		.wkg-scroll {
 			padding-left: 16px;
+		}
+		.wkg-chips {
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: none;
+			margin: 0 -16px;
+			padding: 0 16px;
+			mask-image: linear-gradient(
+				90deg,
+				transparent,
+				#000 16px,
+				#000 calc(100% - 24px),
+				transparent
+			);
+		}
+		.wkg-chips::-webkit-scrollbar {
+			display: none;
+		}
+		.wkg-chips .wk-chip {
+			flex: none;
+		}
+		.wkg-grid,
+		.wkg-col {
+			gap: 10px;
 		}
 	}
 }

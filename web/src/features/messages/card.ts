@@ -29,7 +29,7 @@ export interface MessageView {
 	/** "14:02:39" local. */
 	time: string
 	title: string
-	/** Talkgroups and callsigns read large, in the heading face. */
+	/** Talkgroups read large, in the heading face. */
 	large: boolean
 	sub: string
 	text: string | null
@@ -355,6 +355,8 @@ export function messageView(
 			)
 				return false
 			if (text !== null && f.value === text) return false
+			// the header already says "NFM voice"
+			if (analog && f.key === "modulation") return false
 			// identifiers already in the title or subtitle; readings (with a unit) always stay
 			if (!f.unit && typeof f.value !== "boolean" && said(f, said_))
 				return false
@@ -373,10 +375,7 @@ export function messageView(
 		badges,
 		time: timeOf(item.producedAt),
 		title: row.title,
-		large:
-			!notice &&
-			!analog &&
-			(item.category === "aircraft" || item.category === "voice"),
+		large: !notice && !analog && item.category === "voice",
 		sub,
 		text,
 		mono: isMono(protocol, text),

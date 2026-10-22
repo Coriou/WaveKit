@@ -46,6 +46,7 @@ import {
 	type CardAnchor,
 	type Point,
 	type ShellGeometry,
+	type ShellLayout,
 } from "./layout.ts"
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
@@ -428,9 +429,7 @@ export function Shell({
 			)}
 			{state.view === "messages" && (
 				<Suspense fallback={null}>
-					<MessagesGallery
-						insets={{ top: L.topRow, right: L.rxRight, bottom: L.bottomRow }}
-					/>
+					<MessagesGallery insets={galleryInsets(L, !!card, geo.W)} />
 				</Suspense>
 			)}
 
@@ -698,4 +697,13 @@ function ShellToast({
 			)}
 		</div>
 	)
+}
+
+// The Messages view keeps clear of the tuned card: a lane down the side the card sits on, so no message hides under it.
+function galleryInsets(L: ShellLayout, card: boolean, W: number) {
+	const base = { top: L.topRow, right: L.rxRight, bottom: L.bottomRow, left: 0 }
+	if (!card || !L.card) return base
+	if (L.card.x + CARD_W / 2 < W / 2)
+		return { ...base, left: L.card.x + CARD_W + G }
+	return { ...base, right: Math.max(base.right, W - L.card.x + G) }
 }

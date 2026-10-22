@@ -3,13 +3,23 @@ import "./messages.css"
 
 import type { ActivitySummary } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+	memo,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	type CSSProperties,
+	type ReactNode,
+} from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import { shellStore } from "../../shell/store.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
+import { Icon } from "../../ui/Icon.tsx"
 import { estimateCardHeight } from "../activity/rows.ts"
 import { CATEGORY_CHIPS } from "../activity/search.ts"
 import { MessageCard } from "./MessageCard.tsx"
@@ -22,6 +32,8 @@ export interface GalleryInsets {
 	right: number
 	/** Height of the bottom row (Listen, dock). */
 	bottom: number
+	/** Clearance on the left: the tuned card's lane, or 0. */
+	left: number
 }
 
 // each live batch deals every card shown again: guess a card's height once
@@ -60,8 +72,9 @@ export default function MessagesGallery({ insets }: { insets: GalleryInsets }) {
 	const [width, setWidth] = useState(1080)
 	const [shown, setShown] = useState(GALLERY_STEP)
 
+	// the cards' width: the end marker spans the content box (the scroller's clientWidth counts the tuned card's lane)
 	useEffect(() => {
-		const el = scroller.current
+		const el = end.current
 		if (!el) return
 		const measure = () => setWidth(el.clientWidth)
 		measure()
@@ -147,76 +160,91 @@ export default function MessagesGallery({ insets }: { insets: GalleryInsets }) {
 			<div
 				ref={scroller}
 				className="wkg-scroll wk-scroll"
-				style={{ paddingRight: insets.right + 8 }}
+				style={{
+					paddingRight: insets.right + 8,
+					paddingLeft: insets.left > 0 ? insets.left : undefined,
+					["--wkg-lane" as string]:
+						insets.left > 0 ? `${insets.left}px` : undefined,
+				}}
 				onScroll={onScroll}
 			>
-				<header className="wkg-head">
-					<h2 className="wk-h2">Messages</h2>
-					<span className="wkg-live" data-paused={paused || undefined}>
-						<span className="wka-live-dot" />
-						{paused
-							? pending > 0
-								? `Paused · ${pending} waiting`
-								: "Paused"
-							: "Live"}
-					</span>
-					{searching && tokens.length > 0 && (
-						<span className="wkg-search">{activity.title()}</span>
-					)}
-					<span className="wkd-grow" />
-					{tokens.length > 0 && (
-						<Button variant="ghost" size="sm" onClick={() => activity.clear()}>
-							Clear search
-						</Button>
-					)}
-					<Button
-						variant="outline"
-						size="sm"
-						onClick={() => activity.setPaused(!paused)}
-					>
-						{paused ? "Resume" : "Pause"}
-					</Button>
-				</header>
-				<div className="wkg-chips" role="radiogroup" aria-label="Show">
-					<Chip
-						role="radio"
-						aria-checked={chip === null}
-						pressed={chip === null}
-						onClick={() => activity.setChip(null)}
-					>
-						All
-					</Chip>
-					{CATEGORY_CHIPS.map(c => {
-						const n = counts?.[c.id]
-						return (
-							<Chip
-								key={c.id}
-								role="radio"
-								aria-checked={chip === c.id}
-								pressed={chip === c.id}
-								count={n !== undefined ? n : undefined}
-								onClick={() => activity.setChip(c.id)}
+				<div className="wkg-bar">
+					<header className="wkg-head">
+						<h2 className="wk-h2">Messages</h2>
+						<span className="wkg-live" data-paused={paused || undefined}>
+							<span className="wka-live-dot" />
+							{paused
+								? pending > 0
+									? `Paused · ${pending} waiting`
+									: "Paused"
+								: "Live"}
+						</span>
+						{searching && tokens.length > 0 && (
+							<span className="wkg-search">{activity.title()}</span>
+						)}
+						<span className="wkd-grow" />
+						{tokens.length > 0 && (
+							<Button
+								variant="ghost"
+								size="sm"
+								onClick={() => activity.clear()}
 							>
-								<WaveKitIcon name={c.categories[0]} size={16} />
-								<span>{c.label}</span>
-							</Chip>
-						)
-					})}
+								Clear search
+							</Button>
+						)}
+						<Button
+							variant="ghost"
+							size="sm"
+							className="wkg-pause"
+							onClick={() => activity.setPaused(!paused)}
+						>
+							{paused ? "Resume" : "Pause"}
+						</Button>
+					</header>
+					<div className="wkg-chips" role="radiogroup" aria-label="Show">
+						<Chip
+							role="radio"
+							aria-checked={chip === null}
+							pressed={chip === null}
+							onClick={() => activity.setChip(null)}
+						>
+							All
+						</Chip>
+						{CATEGORY_CHIPS.map(c => {
+							const n = counts?.[c.id]
+							return (
+								<Chip
+									key={c.id}
+									role="radio"
+									aria-checked={chip === c.id}
+									pressed={chip === c.id}
+									count={n !== undefined ? n : undefined}
+									onClick={() => activity.setChip(c.id)}
+								>
+									<WaveKitIcon name={c.categories[0]} size={16} />
+									<span>{c.label}</span>
+								</Chip>
+							)
+						})}
+					</div>
+					{pending > 0 && !paused && (
+						<button
+							type="button"
+							className="wka-newpill wkg-newpill"
+							onClick={toTop}
+						>
+							↑ {pending} new
+						</button>
+					)}
 				</div>
-				{pending > 0 && !paused && (
-					<button
-						type="button"
-						className="wka-newpill wkg-newpill"
-						onClick={toTop}
-					>
-						↑ {pending} new
-					</button>
-				)}
 				<GalleryNote
 					available={available}
 					status={status}
 					empty={items.length === 0}
 					searching={searching}
+					cols={cols}
+					onRetry={() => void feed.reload()}
+					onClear={() => activity.clear()}
 				/>
 				<div
 					className="wkg-grid"
@@ -276,33 +304,108 @@ function GalleryNote({
 	status,
 	empty,
 	searching,
+	cols,
+	onRetry,
+	onClear,
 }: {
 	available: boolean
 	status: string
 	empty: boolean
 	searching: boolean
+	cols: number
+	onRetry: () => void
+	onClear: () => void
 }) {
 	if (!available)
 		return (
-			<p className="wka-note">
-				Activity is turned off on this receiver, so there are no messages to
-				show. Decodes still show on the spectrum.
-			</p>
+			<GalleryEmpty title="Activity is off on this receiver">
+				There are no messages to show. Decodes still show on the spectrum.
+			</GalleryEmpty>
 		)
 	if (status === "error")
 		return (
-			<p className="wka-note" data-tone="warn">
-				Could not load messages.
-			</p>
+			<GalleryEmpty
+				title="Could not load messages"
+				tone="warn"
+				action={
+					<Button variant="outline" size="sm" onClick={onRetry}>
+						Try again
+					</Button>
+				}
+			>
+				The receiver did not answer. Live messages resume once it does.
+			</GalleryEmpty>
 		)
-	if (status === "loading" && empty) return <p className="wka-note">Loading…</p>
+	if (status === "loading" && empty) return <GallerySkeleton cols={cols} />
 	if (status === "live" && empty)
-		return (
-			<p className="wka-note">
-				{searching
-					? "Nothing matches this search yet. New matches appear here as they are decoded."
-					: "Nothing decoded yet. Messages appear here as they arrive."}
-			</p>
+		return searching ? (
+			<GalleryEmpty
+				title="Nothing matches yet"
+				action={
+					<Button variant="outline" size="sm" onClick={onClear}>
+						Clear search
+					</Button>
+				}
+			>
+				New matches appear here as they are decoded.
+			</GalleryEmpty>
+		) : (
+			<GalleryEmpty title="Nothing decoded yet">
+				Messages appear here as the decoders hear them: pagers, aircraft, ships,
+				APRS, sensors and digital voice.
+			</GalleryEmpty>
 		)
 	return null
+}
+
+function GalleryEmpty({
+	title,
+	tone,
+	action,
+	children,
+}: {
+	title: string
+	tone?: "warn"
+	action?: ReactNode
+	children: ReactNode
+}) {
+	return (
+		<div className="wkg-empty" data-tone={tone} role="status">
+			<span className="wk-tile wkg-empty-tile" aria-hidden="true">
+				<Icon name="messages" size={20} />
+			</span>
+			<p className="wkg-empty-title">{title}</p>
+			<p className="wkg-empty-text">{children}</p>
+			{action}
+		</div>
+	)
+}
+
+// The first page on its way: card-shaped placeholders in the gallery's columns, fading in late like the drawers'.
+function GallerySkeleton({ cols }: { cols: number }) {
+	return (
+		<div
+			className="wkg-grid wkg-skel"
+			role="status"
+			aria-label="Loading messages"
+			style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
+		>
+			{Array.from({ length: cols * 2 }, (_, i) => (
+				<div
+					key={i}
+					className="wkg-skel-card"
+					aria-hidden="true"
+					style={{ "--i": String(i) } as CSSProperties}
+				>
+					<span className="wkg-skel-head" />
+					<span className="wkg-skel-title" />
+					<span className="wkg-skel-line" />
+					<span
+						className="wkg-skel-well"
+						data-tall={i % 3 === 0 || undefined}
+					/>
+				</div>
+			))}
+		</div>
+	)
 }

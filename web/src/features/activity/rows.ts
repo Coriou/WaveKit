@@ -9,6 +9,7 @@ import type { CategoryName } from "@wavekit/brand/react"
 
 import { clockText, convertMeasure, dateText, sameDay } from "../display.ts"
 import { formatMHz } from "../format.ts"
+import { formatDuration } from "../recordings/model.ts"
 
 export interface RowView {
 	icon: CategoryName | null
@@ -84,6 +85,15 @@ const groupNumber = (n: number): string =>
 
 /** "18.4 °C", "36 000 ft", "Yes". Only measurements (with a unit) get digit groups: identifiers stay as sent. */
 export function fieldText(field: DecodeField): string {
+	// a duration reads as a clock ("0:07"), not "7000 ms"
+	if (
+		typeof field.value === "number" &&
+		/^duration/i.test(field.key) &&
+		(field.unit === "ms" || field.unit === "s")
+	)
+		return formatDuration(
+			field.unit === "ms" ? field.value / 1000 : field.value,
+		)
 	// speeds, distances, altitudes and temperatures follow Settings › Display › Units
 	const m =
 		typeof field.value === "number" && field.unit
