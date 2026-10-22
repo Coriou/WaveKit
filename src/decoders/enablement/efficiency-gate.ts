@@ -63,7 +63,10 @@ export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
 	deps: { drops?: DropReader; log?: Logger } = {},
 ): EfficiencyGate {
-	const placementEpochs = new Map<string, { sourceId: string; epoch: number }>()
+	const placementEpochs = new Map<
+		string,
+		{ sourceId: string; epoch: number; placement: WantedPlacement }
+	>()
 	const reconnectRetained = new Set<string>()
 	const refreshReconnects = () => {
 		for (const [key, previous] of placementEpochs) {
@@ -352,8 +355,6 @@ export function createEfficiencyGate(
 			const mono = monoNow()
 			observeRunning(running, mono)
 			if (!valid(now)) return { admit: false, detail: "unknown", retryAtMs: 0 }
-			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key))
-				return { admit: true }
 			const retry = retries.get(newcomer.key)
 			if (retry?.pending) {
 				retry.at = Math.max(retry.at, now + retry.delay)
@@ -361,6 +362,26 @@ export function createEfficiencyGate(
 			}
 			if (retry && now < retry.at) {
 				return { admit: false, detail: retry.detail, retryAtMs: retry.at }
+			}
+			// A disconnected placement still owns its admitted capacity. Otherwise
+			// another source could spend it before the placement resumes.
+			const present = new Set(running.map(p => p.key))
+			const reserved: WantedPlacement[] = []
+			for (const key of reconnectRetained) {
+				const previous = placementEpochs.get(key)
+				if (previous && !present.has(key)) reserved.push(previous.placement)
+			}
+			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key)) {
+				const resumedCost = total([
+					...running.filter(p => p.key !== newcomer.key),
+					...reserved.filter(p => p.key !== newcomer.key),
+					newcomer,
+				])
+				if (valid(inputs.budgetCores) && resumedCost <= inputs.budgetCores) {
+					const previous = placementEpochs.get(newcomer.key)
+					if (previous) previous.placement = { ...newcomer }
+					return { admit: true }
+				}
 			}
 			const attribution = latestAttribution(newcomer.sourceId)
 			if (attribution === "link")
@@ -384,8 +405,8 @@ export function createEfficiencyGate(
 			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) detail = "cpu"
 			else if (
 				!valid(inputs.budgetCores) ||
-				!Number.isFinite(total([...running, newcomer])) ||
-				total([...running, newcomer]) > inputs.budgetCores
+				!Number.isFinite(total([...running, ...reserved, newcomer])) ||
+				total([...running, ...reserved, newcomer]) > inputs.budgetCores
 			)
 				detail = "budget"
 			// Otherwise admissible: one gated probationer per source, so probation
@@ -418,6 +439,7 @@ export function createEfficiencyGate(
 						placementEpochs.set(newcomer.key, {
 							sourceId: newcomer.sourceId,
 							epoch,
+							placement: { ...newcomer },
 						})
 				} catch {
 					/* Optional lifecycle evidence. */

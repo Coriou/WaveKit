@@ -229,3 +229,91 @@ it("isolates reconnect loss at arbitrary outage lengths and monitor phases", asy
 		{ numRuns: 100 },
 	)
 }, 20000)
+
+// Feature: decoder-enablement, Property 7: Budget bound
+// Validates: Requirements 4.1, 4.4
+it("reserves an absent reconnecting placement's capacity across sources", () => {
+	fc.assert(
+		fc.property(fc.integer({ min: 1, max: 9 }), costTenths => {
+			let mono = 0
+			let epoch = 0
+			const gate = createEfficiencyGate(
+				{ budgetCores: 1, cpuGuardPercent: 90 },
+				{
+					drops: {
+						monoNow: () => mono,
+						sourceEpoch: id => (id === "s" ? epoch : 0),
+						sources: () => ["s", "other"],
+						dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+						droppedSinceMono: () => false,
+						droppedWithinMs: () => false,
+					},
+				},
+			)
+			const a = { ...placement, costCores: costTenths / 10 }
+			const b = {
+				...placement,
+				key: "other#raw@other",
+				sourceId: "other",
+				costCores: (10 - costTenths) / 10,
+			}
+			expect(gate.admit(a, [], mono).admit).toBe(true)
+			mono = 30_000
+			const active = { ...running, ...a }
+			gate.probation([active], mono)
+			epoch++
+			gate.probation([], mono)
+			// The exact remaining capacity is available, with no double reservation
+			// when the original is visible in running again.
+			expect(gate.admit(b, [], mono).admit).toBe(true)
+			const other = { ...running, ...b }
+			expect(gate.admit(a, [other], mono).admit).toBe(true)
+			expect(
+				gate.admit({ ...a, costCores: a.costCores + 0.01 }, [other], mono),
+			).toMatchObject({ admit: false, detail: "budget" })
+			expect(
+				gate
+					.view([active, other], [], mono)
+					.sources.find(s => s.sourceId === "s")!.admitted[0]!.probation,
+			).toBe(false)
+			const extra = { ...b, key: "extra", costCores: 0.01 }
+			expect(gate.admit(extra, [other], mono)).toMatchObject({
+				admit: false,
+				detail: "budget",
+			})
+			gate.forget(a.key)
+			mono += 30_000
+			gate.probation([other], mono)
+			expect(
+				gate.admit({ ...extra, key: "released" }, [other], mono).admit,
+			).toBe(true)
+		}),
+		{ numRuns: 100 },
+	)
+})
+
+it("blocks a second source from consuming capacity reserved by a reconnect", () => {
+	let epoch = 0
+	const gate = createEfficiencyGate(
+		{ budgetCores: 1, cpuGuardPercent: 90 },
+		{
+			drops: {
+				monoNow: () => 0,
+				sourceEpoch: id => (id === "s" ? epoch : 0),
+				sources: () => ["s", "other"],
+				dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+				droppedSinceMono: () => false,
+				droppedWithinMs: () => false,
+			},
+		},
+	)
+	const a = { ...placement, costCores: 0.7 }
+	const b = { ...placement, key: "b", sourceId: "other", costCores: 0.7 }
+	expect(gate.admit(a, [], 0).admit).toBe(true)
+	epoch++
+	gate.probation([], 0)
+	expect(gate.admit(b, [], 0)).toMatchObject({ admit: false, detail: "budget" })
+	expect(gate.admit(a, [], 0).admit).toBe(true)
+	gate.noteSuspended(a.key, "drops", 0)
+	expect(gate.admit({ ...b, key: "after-suspension" }, [], 0).admit).toBe(true)
+})
