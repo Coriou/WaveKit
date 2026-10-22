@@ -4,7 +4,7 @@
  * rename, the BandOverrideStore pattern); oldest-first retention.
  */
 import { createHash } from "node:crypto"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync } from "node:fs"
 import {
 	lstat,
 	mkdir,
@@ -161,6 +161,11 @@ export class CaptureStore {
 		}
 		if (left > 0)
 			this.log.warn({ left }, "Capture staging entries that are not files left")
+	}
+
+	/** Once per capture open: staging may have been removed since startup. */
+	ensureStaging(): void {
+		mkdirSync(join(this.opts.dir, ".tmp"), { recursive: true })
 	}
 
 	tempPath(id: string): string {

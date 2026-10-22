@@ -11,6 +11,7 @@
  * `capped` capture (MAX_CAPTURE_SECONDS reached before its track closed) has a
  * complete file and waits for the close.
  */
+import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { EventEmitter } from "node:events"
 import { createWriteStream, type WriteStream } from "node:fs"
 import type { ScannerCapture } from "@wavekit/api-types"
@@ -170,12 +171,22 @@ export class CaptureRecorder extends EventEmitter {
 	private readonly sealing = new Set<Recording>()
 	/** Commits in flight (seal, manifest entry); stop() awaits them (S1-B final review, finding 5). */
 	private readonly committing = new Set<Promise<void>>()
+	private lastWriteWarning: number | null = null
 	private readonly decodeWaitMs: number
 
 	constructor(private readonly deps: CaptureRecorderDeps) {
 		super()
 		this.log = createComponentLogger(deps.logger, "CaptureRecorder")
 		this.decodeWaitMs = deps.decodeWaitMs ?? AMBIENT_PAIR_MS + PARK_MARGIN_MS
+	}
+
+	/** At most one disk failure warning per minute, across captures. */
+	private warnWrite(err: unknown): void {
+		const now = this.deps.now()
+		if (this.lastWriteWarning !== null && now - this.lastWriteWarning < 60_000)
+			return
+		this.lastWriteWarning = now
+		this.log.warn(safeErrorFields(err), "Capture write failed")
 	}
 
 	activeCount(): number {
@@ -223,6 +234,12 @@ export class CaptureRecorder extends EventEmitter {
 		// Never before the capture's epoch: older samples are another centre frequency.
 		const from = Math.max(requestedFrom, epoch.startSample ?? 0)
 		const id = `cap_${ulid(now).toLowerCase()}`
+		try {
+			this.deps.store.ensureStaging()
+		} catch (err) {
+			this.warnWrite(err)
+			return false
+		}
 		const file = createWriteStream(this.deps.store.tempPath(id))
 		const rec: Recording = {
 			id,
@@ -259,7 +276,7 @@ export class CaptureRecorder extends EventEmitter {
 			failed: false,
 		}
 		file.on("error", (err: Error) => {
-			this.log.warn({ err, id }, "Capture write failed")
+			this.warnWrite(err)
 			rec.failed = true
 		})
 		// Ring read and tap in one synchronous block: nothing lost or repeated. The read runs to the
@@ -466,9 +483,7 @@ export class CaptureRecorder extends EventEmitter {
 
 	private startCommit(rec: Recording): void {
 		const run: Promise<void> = this.commit(rec)
-			.catch((err: unknown) =>
-				this.log.warn({ err, id: rec.id }, "Committing a capture failed"),
-			)
+			.catch((err: unknown) => this.warnWrite(err))
 			.finally(() => this.committing.delete(run))
 		this.committing.add(run)
 	}
@@ -486,8 +501,7 @@ export class CaptureRecorder extends EventEmitter {
 		await this.endFile(rec)
 		this.sealing.delete(rec)
 		const fail = async (reason: DiscardReason, err?: unknown) => {
-			if (err !== undefined)
-				this.log.warn({ err, id: rec.id }, `Capture ${reason}`)
+			if (err !== undefined) this.warnWrite(err)
 			await this.deps.store.discard(rec.id).catch(() => undefined)
 			this.emit("discarded", rec.req.observationId, reason)
 		}
