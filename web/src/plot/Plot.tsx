@@ -68,6 +68,7 @@ import {
 } from "./layout.ts"
 import { BandRuler } from "./BandRuler.tsx"
 import { isReadOnly } from "../app/context.ts"
+import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
@@ -297,7 +298,8 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		gateRef.current = stepLabelGate(gateRef.current, m, performance.now(), {
 			mode: g.mode,
 			tunedHz: g.tunedHz,
-			isNamed: (hz, widthHz) =>
+			isNamed: (hz, widthHz, scanner) =>
+				scanner?.confidence === "decoded" ||
 				namedChannelAt(g.plan, hz, widthHz) ||
 				savedNear(g.saved, hz, widthHz) !== null ||
 				identifiedAt(g.discoveries.values(), hz, widthHz) !== null,
@@ -763,33 +765,38 @@ function SignalLabels({
 	onPick: (hz: number) => void
 }) {
 	const shown = useMemo(() => gated.filter(g => !g.leaving), [gated])
-	const signals = useMemo(
-		() =>
-			describeTracks(
-				shown.map(g => ({
-					startHz: g.hz - g.widthHz / 2,
-					endHz: g.hz + g.widthHz / 2,
-					flags: { burst: g.burst, iqImage: false, edge: false },
-					peakDb: g.peakDb,
-				})),
-				plan,
-			).map(s => {
-				// what was identified there names the signal first, then a saved frequency, then the band plan
-				const d = identifiedAt(discoveries.values(), s.hz, s.widthHz)
-				if (d)
-					return {
-						...s,
-						label: identifiedLabel(d),
-						sub: formatMHz(s.hz, 3),
-						known: true,
-					}
-				const f = savedNear(saved, s.hz, s.widthHz)
-				return f
-					? { ...s, label: f.name, sub: formatMHz(s.hz, 3), known: true }
-					: s
-			}),
-		[shown, plan, saved, discoveries],
-	)
+	const signals = useMemo(() => {
+		const byHz = new Map(shown.map(g => [g.hz, g]))
+		return describeTracks(
+			shown.map(g => ({
+				startHz: g.hz - g.widthHz / 2,
+				endHz: g.hz + g.widthHz / 2,
+				flags: { burst: g.burst, iqImage: false, edge: false },
+				peakDb: g.peakDb,
+			})),
+			plan,
+		).map(s => {
+			// what was identified there names the signal first, then a saved frequency, then the band plan;
+			// the core's own identity of the emission (WG11 frame tracks) wins over a match by frequency
+			const scanner = byHz.get(s.hz)?.scanner ?? null
+			const own = scanner ? discoveries.get(scanner.discoveryId) : undefined
+			const d =
+				own && own.confidence === "decoded" && !own.operator?.lockout
+					? own
+					: identifiedAt(discoveries.values(), s.hz, s.widthHz)
+			const label = d
+				? identifiedLabel(d)
+				: scanner?.confidence === "decoded"
+					? confidenceText(scanner)
+					: null
+			if (label !== null)
+				return { ...s, label, sub: formatMHz(s.hz, 3), known: true }
+			const f = savedNear(saved, s.hz, s.widthHz)
+			return f
+				? { ...s, label: f.name, sub: formatMHz(s.hz, 3), known: true }
+				: s
+		})
+	}, [shown, plan, saved, discoveries])
 	const placed: PlacedLabel[] = useMemo(
 		() =>
 			placeLabels(signals, view, {

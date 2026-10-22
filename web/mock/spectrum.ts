@@ -200,6 +200,9 @@ export function synthFrame(input: FrameInput): SpectrumFrameEventData {
 					iqImage: false,
 					edge: lo === lay.startHz || hi === endHz,
 				},
+				// WG11: a stable id per emission and the core's surfacing verdict
+				trackId: `m${Math.round(signal.hz)}`,
+				surfaced: true,
 			})
 	}
 	const bytes = new Uint8Array(bins)

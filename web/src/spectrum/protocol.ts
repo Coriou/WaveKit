@@ -4,6 +4,8 @@
  * posts decoded rows as transferable buffers and the main thread hands them back for reuse.
  */
 
+import type { SpectrumFrameTrack } from "@wavekit/api-types"
+
 export interface SpectrumSubscription {
 	sourceId: string
 	/** Frames per second asked of the core (0.5–25). */
@@ -58,13 +60,11 @@ export interface SpectrumFrameMeta {
 	sampleRateHz: number
 	floorDbfs: number
 	thresholdDb: number
-	tracks: {
-		startHz: number
-		endHz: number
-		flags: { burst: boolean; iqImage: boolean; edge: boolean }
+	/** The core's tracks (WG11 cores add a stable `trackId`, `surfaced`, `flags.spur` and the scanner's identity). */
+	tracks: (SpectrumFrameTrack & {
 		/** Peak dBFS over the track in the newest row (web-side, rounded to 3 dB); null when unknown. */
 		peakDb?: number | null
-	}[]
+	})[]
 	tuningTrust: TuningTrust
 	epoch: number
 	at: string

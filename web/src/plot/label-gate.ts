@@ -1,8 +1,11 @@
-// Which spectrum signals get a chip (Settings › Signal labels). The core's frame tracks are one block's raw
-// segments, with no id, level or age (CORE-GAPS "Stable signal tracks on spectrum frames"), so a flicker of noise
-// is a new "signal" every frame. The gate follows each emission across frames, measures how far it stands over the
-// floor and for how long, and labels the tuned signal, named channels and clear, steady unknowns, with hysteresis
-// so a chip neither blinks nor moves while its signal lasts. Pure: the caller passes the clock.
+// Which spectrum signals get a chip (Settings › Signal labels). The gate follows each emission across frames and
+// labels the tuned signal, named channels and clear, steady unknowns, with hysteresis so a chip neither blinks nor
+// moves while its signal lasts. WG11/WG12 cores give each track a stable id, a `surfaced` verdict (the channel gate:
+// a real transmission) and a spur flag: the gate then follows by (sourceId, trackId), trusts `surfaced` instead of
+// its own clear-for-a-second rule and drops spurs. Older cores send bare segments, which are followed by position
+// and measured against the floor as before. Pure: the caller passes the clock.
+
+import type { SpectrumFrameTrackScanner } from "@wavekit/api-types"
 
 import type { Track } from "./maths.ts"
 
@@ -19,6 +22,8 @@ export interface GatedSignal {
 	readonly peakDb: number | null
 	/** The chip is fading out (drawn last, transparent). */
 	readonly leaving: boolean
+	/** The scanner's identity of this emission (WG11 frame tracks), when the core sent one. */
+	readonly scanner: SpectrumFrameTrackScanner | null
 }
 
 interface Followed {
@@ -36,6 +41,11 @@ interface Followed {
 	weakSince: number | null
 	shown: boolean
 	leavingSince: number | null
+	/** `${sourceId}/${trackId}` of the core's track, when the core sends ids. */
+	key: string | null
+	/** The core's surfacing verdict in the newest frame it was seen in; null when the core sends none. */
+	surfaced: boolean | null
+	scanner: SpectrumFrameTrackScanner | null
 }
 
 export interface LabelGateState {
@@ -46,6 +56,7 @@ export interface LabelGateState {
 export const EMPTY_LABEL_GATE: LabelGateState = { followed: [], nextId: 1 }
 
 export interface LabelGateFrame {
+	sourceId: string
 	tracks: readonly Track[]
 	floorDbfs: number
 	binHz: number
@@ -54,8 +65,12 @@ export interface LabelGateFrame {
 export interface LabelGateContext {
 	mode: SignalLabelsMode
 	tunedHz: number | null
-	/** A band-plan channel (or another name) sits on the signal. */
-	isNamed: (hz: number, widthHz: number) => boolean
+	/** A band-plan channel (or another name) sits on the signal; `scanner` is the core's identity of it, if any. */
+	isNamed: (
+		hz: number,
+		widthHz: number,
+		scanner: SpectrumFrameTrackScanner | null,
+	) => boolean
 }
 
 /** An unknown signal earns a chip at this many dB over the floor… */
@@ -103,19 +118,29 @@ export function stepLabelGate(
 	const followed = state.followed.map(f => ({ ...f }))
 	let nextId = state.nextId
 	const seen = new Set<Followed>()
+	const byKey = new Map<string, Followed>()
+	for (const f of followed) if (f.key !== null) byKey.set(f.key, f)
 	// strongest tracks first, so a split emission keeps its strongest part
 	const tracks = [...frame.tracks]
-		.filter(t => !t.flags.iqImage)
+		.filter(t => !t.flags.iqImage && !t.flags.spur)
 		.sort((a, b) => (b.peakDb ?? -Infinity) - (a.peakDb ?? -Infinity))
 	for (const t of tracks) {
+		const key =
+			t.trackId === undefined ? null : `${frame.sourceId}/${t.trackId}`
 		let best: Followed | null = null
-		let bestD = Infinity
-		for (const f of followed) {
-			if (seen.has(f)) continue
-			const d = near(f, t, tol)
-			if (d !== null && d < bestD) {
-				best = f
-				bestD = d
+		const same = key === null ? undefined : byKey.get(key)
+		if (same && !seen.has(same)) best = same
+		else {
+			// by position; an emission the core already names differently is another emission
+			let bestD = Infinity
+			for (const f of followed) {
+				if (seen.has(f) || (key !== null && f.key !== null && f.key !== key))
+					continue
+				const d = near(f, t, tol)
+				if (d !== null && d < bestD) {
+					best = f
+					bestD = d
+				}
 			}
 		}
 		const hz = (t.startHz + t.endHz) / 2
@@ -137,6 +162,9 @@ export function stepLabelGate(
 				weakSince: null,
 				shown: false,
 				leavingSince: null,
+				key,
+				surfaced: t.surfaced ?? null,
+				scanner: t.scanner ?? null,
 			}
 			followed.push(best)
 		} else {
@@ -157,6 +185,10 @@ export function stepLabelGate(
 						: Math.max(peak, decayed)
 			best.snrDb = snr
 			best.lastSeen = now
+			best.key = key ?? best.key
+			best.surfaced = t.surfaced ?? null
+			// the identity is absent for about 1 s after the core's rollover: keep the last one
+			if (t.scanner) best.scanner = t.scanner
 		}
 		seen.add(best)
 	}
@@ -177,7 +209,9 @@ export function stepLabelGate(
 			const snr = f.snrDb ?? -Infinity
 			if (snr >= CLEAR_SNR_DB) f.clearSince ??= now
 			else if (snr < KEEP_SNR_DB) f.clearSince = null
-			f.weakSince = snr < KEEP_SNR_DB ? (f.weakSince ?? now) : null
+			// the core's gate passing is a real transmission, however low its peak reads here
+			f.weakSince =
+				snr < KEEP_SNR_DB && f.surfaced !== true ? (f.weakSince ?? now) : null
 		}
 		kept.push(f)
 	}
@@ -219,13 +253,14 @@ function wanted(
 	if (ctx.mode === "all") return "unknown"
 	const snr = f.snrDb ?? -Infinity
 	const weakTooLong = f.weakSince !== null && now - f.weakSince >= WEAK_FOR_MS
-	if (ctx.isNamed(f.hz, f.widthHz)) {
+	if (ctx.isNamed(f.hz, f.widthHz, f.scanner)) {
 		if (f.shown) return weakTooLong ? null : "named"
 		return snr >= NAMED_SNR_DB ? "named" : null
 	}
 	if (ctx.mode === "named") return null
 	if (unknownSoFar >= MAX_UNKNOWN) return null
 	if (f.shown) return weakTooLong ? null : "unknown"
+	if (f.surfaced !== null) return f.surfaced ? "unknown" : null
 	return f.clearSince !== null && now - f.clearSince >= CLEAR_FOR_MS
 		? "unknown"
 		: null
@@ -246,6 +281,7 @@ export function gatedSignals(state: LabelGateState): GatedSignal[] {
 						? null
 						: Math.round(f.peakDb / PEAK_STEP_DB) * PEAK_STEP_DB,
 				leaving,
+				scanner: f.scanner,
 			}))
 	return [...out(false), ...out(true)]
 }

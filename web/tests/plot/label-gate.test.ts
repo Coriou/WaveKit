@@ -51,7 +51,7 @@ function run(
 	for (let t = from; t <= to; t += 100)
 		s = stepLabelGate(
 			s,
-			{ tracks: tracks(t), floorDbfs: FLOOR, binHz: 250 },
+			{ sourceId: "rtl", tracks: tracks(t), floorDbfs: FLOOR, binHz: 250 },
 			t,
 			c,
 		)
@@ -166,5 +166,52 @@ describe("label gate", () => {
 		}
 		const s = run(EMPTY_LABEL_GATE, () => [image], 0, 2000, ctx("all"))
 		expect(gatedSignals(s)).toEqual([])
+	})
+
+	it("drops spurs", () => {
+		const spur = {
+			...track(446.1, 30),
+			flags: { burst: false, iqImage: false, edge: false, spur: true },
+		}
+		const s = run(EMPTY_LABEL_GATE, () => [spur], 0, 2000, ctx("all"))
+		expect(gatedSignals(s)).toEqual([])
+	})
+
+	it("trusts the core's surfacing verdict when it sends one", () => {
+		// strong but not through the core's gate: no chip, however long it lasts
+		const held =
+			(surfaced: boolean, snr = 20) =>
+			() => [{ ...track(446.1, snr), trackId: "t1", surfaced }]
+		let s = run(EMPTY_LABEL_GATE, held(false), 0, 3000, ctx())
+		expect(shownMHz(s)).toEqual([])
+		// through the gate: a chip at once, kept while the core says it is real even when it reads faint here
+		s = run(s, held(true), 3100, 3100, ctx())
+		expect(shownMHz(s)).toEqual([446.1])
+		s = run(s, held(true, 3), 3200, 3200 + WEAK_FOR_MS + 500, ctx())
+		expect(shownMHz(s)).toEqual([446.1])
+	})
+
+	it("follows the core's track id, so two close emissions keep their own chips", () => {
+		// the second emission starts right next to the first: by position alone it would be the same signal
+		const a = { ...track(446.1, 20), trackId: "a", surfaced: true }
+		const b = {
+			...track(446.104, 20),
+			trackId: "b",
+			surfaced: true,
+			scanner: {
+				discoveryId: "d-7",
+				protocol: "dmr" as const,
+				confidence: "decoded" as const,
+			},
+		}
+		let s = run(EMPTY_LABEL_GATE, () => [a], 0, 200, ctx())
+		const first = gatedSignals(s)[0]?.id
+		s = run(s, () => [a, b], 300, 500, ctx())
+		const chips = gatedSignals(s).filter(g => !g.leaving)
+		expect(chips).toHaveLength(2)
+		expect(chips.find(g => g.scanner?.discoveryId === "d-7")?.id).not.toBe(
+			first,
+		)
+		expect(chips.find(g => g.scanner === null)?.id).toBe(first)
 	})
 })
