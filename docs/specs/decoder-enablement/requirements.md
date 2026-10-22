@@ -410,3 +410,20 @@ dongle, and on the current network receiver (rtl_tcp at 1.024 Msps over Wi-Fi).
 AIS at 161.5 MHz centre; rtl_433 at 433.92 MHz; POCSAG on a configured channel and on the VFO;
 DMR on the VFO; every running decoder's branch at 0.00 % drops for 10 minutes; the efficiency view
 matches the processes running.
+
+## Configured VFO amendment — 2026-10-22
+
+3.11 Configured narrowband audio decoders (`dsd-fme`, `multimon-ng`, `direwolf`,
+`acarsdec`) with no explicit channel, offset or frequency option follow their source's
+settled VFO, subject to the existing band and reach rules. Without a VFO they retain
+capture-centre decoding. They use the channelizer when available and the existing
+shift/decimate path otherwise. Explicit `channelHz`, `channelsHz`, `offsetHz`,
+`frequency` or `frequencies` keeps the fixed configuration. AIS, VDL2 and rtl_433
+retain their protocol-specific windows. Requirement 4.9 still applies: YAML decoders
+are exempt from admission and shedding.
+
+3.12 Status `targetFrequenciesHz` reflects placement channels (including raw VFO
+fallbacks), or the source centre for centre reach. Parent status includes its worker
+channels. Raw wideband decoders retain declared-frequency semantics. The field stays
+optional when no target is known. VFO movement uses the existing settle and caps-work
+debounce; channelizer VFO channels retune in place when supported.

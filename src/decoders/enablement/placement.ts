@@ -15,6 +15,14 @@ import {
 	READSB_REACH_HZ,
 } from "../../core/rate-policy-contract.js"
 
+/** Single-channel audio adapters; AIS/VDL2 and rtl433 retain their protocol windows. */
+export const VFO_CHANNEL_TYPES: readonly string[] = [
+	"dsd-fme",
+	"multimon-ng",
+	"direwolf",
+	"acarsdec",
+]
+
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 const nonnegative = (n: unknown): n is number =>
@@ -59,6 +67,7 @@ function validDecoder(d: PlannerDecoder): boolean {
 		typeof d.unavailable === "boolean" &&
 		typeof d.ownDevice === "boolean" &&
 		typeof d.channelPlacements === "boolean" &&
+		(d.followVfo === undefined || typeof d.followVfo === "boolean") &&
 		Array.isArray(d.configuredChannelsHz) &&
 		Array.isArray(d.protocols) &&
 		(d.reach === "raw" || d.reach === "centre" || d.reach === "channel")
@@ -198,7 +207,29 @@ export const planPlacements: PlacementPlanner = input => {
 				)
 					local.push({ source: s, hz, reach: d.reach, origin, index })
 			}
-			if (
+			const followsVfo =
+				d.origin === "config" &&
+				d.reach === "channel" &&
+				VFO_CHANNEL_TYPES.includes(d.type) &&
+				d.followVfo !== false &&
+				d.configuredChannelsHz.length === 0
+			if (followsVfo) {
+				// One configured decoder follows one source, never extra capture centres.
+				const selected =
+					sources.find(source => source.id === input.vfo?.sourceId) ??
+					sources[0]
+				if (s !== selected) continue
+				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
+				const hz = vfo ? vfo.frequencyHz : centre
+				if (fitsReach(d, s, hz) && bandFits(d, hz, vfo ? 0 : half))
+					local.push({
+						source: s,
+						hz,
+						reach: s.channelizerAvailable ? "channel" : "raw",
+						origin: vfo ? "vfo" : "configured",
+						index: 0,
+					})
+			} else if (
 				d.reach === "channel" &&
 				(d.channelPlacements !== true || s.channelizerAvailable !== true)
 			) {
@@ -266,7 +297,10 @@ export const planPlacements: PlacementPlanner = input => {
 						: [])
 						add(hz, "band")
 				} else configured.forEach((hz, i) => add(hz, "configured", i))
-				if (d.type === "dsd-fme" || d.type === "multimon-ng") {
+				if (
+					d.origin === "catalogue" &&
+					(d.type === "dsd-fme" || d.type === "multimon-ng")
+				) {
 					const cap =
 						Number.isInteger(input.maxBandplanChannels) &&
 						input.maxBandplanChannels >= 0

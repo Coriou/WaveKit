@@ -1495,3 +1495,12 @@ The contract additions are optional and additive; older cores omit the new field
 2. `GET /api/resources/link-quality` returns `SourceLinkQuality[]`; `GET /api/resources/link-quality/:sourceId` returns one report or 404 `LINK_QUALITY_NOT_FOUND`. The `resources` channel gains `resources:link-quality` with the report array.
 3. `LinkAdvisory.burst?` (`LinkBurstSummary`) contains `worstStallMs`, `overflowedBytes10m` and `burstSeconds`. Efficiency source entries gain `attribution?` and `lateDrops?` (`condemningWindows`, `windows`, `cooldownUntil`, `sheddable`, `held`). `lateDrops.held` is `nothing-sheddable` | `link-or-unknown` | null; `DecoderEfficiencyDetail` gains `late-drops`. Exhaustive detail switches should label sustained late-drop shedding.
 4. `ReceiverCapabilities.iqDelivery?` contains `advertised` (nullable `raw` / `channels` array), `configured` (`raw` | `channels` | `auto`) and `resolved` (`raw`). `SdrHostStatus.iqDelivery?` is nullable and contains `modes` (`raw` / `channels` array). `auto` resolves to `raw`; configured `channels` is reserved and rejected.
+
+### Configured channel decoders follow the VFO — 2026-10-22
+
+`targetFrequenciesHz` is now present for configured narrowband decoders: it reports
+placement channels, including the settled VFO (or capture centre without a VFO).
+Explicit frequency options retain fixed behavior; YAML decoders remain gate-exempt.
+Parent targets include worker channels; centre-reach decoders report capture centre.
+Raw wideband declared-frequency semantics and the optional DTO remain unchanged.
+The web tuned card needs no change.

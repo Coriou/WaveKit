@@ -1151,3 +1151,37 @@ it("a crash of a run adopted by a newer parent start is retried", async () => {
 	expect(decoder.starts).toBe(2)
 	expect(decoder.running).toBe(true)
 })
+
+it("status targets include primary and worker channels once, overriding configured hints", async () => {
+	const f = setup()
+	f.create("dec", { frequency: 100_000_000 })
+	f.plan([f.place("dec", 162_000_000), f.place("dec", 162_025_000, false)])
+	await f.manager.startAll()
+	expect(f.manager.getStatus("dec")?.targetFrequenciesHz).toEqual([
+		162_000_000, 162_025_000,
+	])
+})
+
+it("centre reach reports the capture centre while raw wideband retains declared targets", async () => {
+	const f = setup()
+	f.create("centre")
+	f.create("raw", { frequency: 433_920_000 })
+	f.plan([
+		{ ...f.place("centre", 162_000_000), channelHz: null, reach: "centre" },
+		{ ...f.place("raw", 162_000_000), channelHz: null, reach: "raw" },
+	])
+	await f.manager.startAll()
+	expect(f.manager.getStatus("centre")?.targetFrequenciesHz).toEqual([
+		162_000_000,
+	])
+	expect(f.manager.getStatus("raw")?.targetFrequenciesHz).toEqual([433_920_000])
+})
+
+it("unknown centre reach never falls back to a configured target hint", async () => {
+	const f = setup()
+	f.create("dec", { frequency: 100_000_000 })
+	f.plan([{ ...f.place("dec", 162_000_000), channelHz: null, reach: "centre" }])
+	await f.manager.startAll()
+	f.sources.caps.delete("rtl")
+	expect(f.manager.getStatus("dec")?.targetFrequenciesHz).toBeUndefined()
+})
