@@ -1,10 +1,11 @@
 /**
- * Absorber/recorder per-chunk cost over simulated CU8 arrivals (no sleeping).
+ * Absorber/recorder cost over simulated CU8 arrivals and paced CLI arrivals.
  * Each 10 s has 100 ms steady input, a 600 ms source stall, then 600 ms at 2x.
  * Three fake branches block together during catch-up, then drain together.
- * Core fractions are measured hold/release time divided by stream duration.
- * loopP99AddedMs is a synchronous blocking-cost estimate above direct fanout,
- * including drain calls; it is not a live event-loop histogram or a CPU gate.
+ * Active core fractions use the scripted holding/catch-up wall time; Avg fields
+ * use the whole stream duration. The CLI measures event-loop p99 against a paced
+ * direct-fanout baseline (10 ms histogram resolution); runBench leaves it at 0.
+ * Per-chunk costs are medians of five passes after a discarded warmup pass.
  *
  *   pnpm exec esbuild scripts/bench/burst-absorber.ts --bundle \
  *     --platform=node --format=esm --packages=external \
@@ -13,8 +14,9 @@
  *   node output/bench/burst-absorber.mjs --rate 2400000 --seconds 30
  */
 import { EventEmitter } from "node:events"
-import { performance } from "node:perf_hooks"
+import { monitorEventLoopDelay, performance } from "node:perf_hooks"
 import process from "node:process"
+import { setTimeout as sleep } from "node:timers/promises"
 import { pathToFileURL } from "node:url"
 import pino from "pino"
 import { createBurstAbsorber } from "../../src/core/link-burst/absorber.js"
@@ -28,6 +30,11 @@ export interface BenchResult {
 	recorderNsPerChunk: number
 	holdCoreFraction: number
 	releaseCoreFraction: number
+	holdCoreFractionAvg: number
+	releaseCoreFractionAvg: number
+	holdPeriodMs: number
+	catchupPeriodMs: number
+	maxDrainMs: number
 	loopP99AddedMs: number
 	ringBytes: number
 	ingestedBytes: number
@@ -35,8 +42,13 @@ export interface BenchResult {
 	overflowBytes: number
 }
 
-/** Isolated synchronous workload; only execution timings vary between calls. */
-export function runBench(opts: { rate: number; seconds: number }): BenchResult {
+type BenchOptions = { rate: number; seconds: number }
+
+/** Each yield precedes an arrival, letting the CLI pace the same workload. */
+function* pass(
+	opts: BenchOptions,
+	directOnly = false,
+): Generator<number, BenchResult, void> {
 	const { rate, seconds } = opts
 	if (
 		!Number.isSafeInteger(rate) ||
@@ -93,14 +105,21 @@ export function runBench(opts: { rate: number; seconds: number }): BenchResult {
 	let holdMs = 0
 	let releaseMs = 0
 	let baselineMs = 0
-	const delays: number[] = []
+	let maxDrainMs = 0
+	let activePeriodMs = 0
+	for (let cycle = 0; cycle < seconds * 1000; cycle += 10000)
+		activePeriodMs +=
+			Math.max(0, Math.min(1200, seconds * 1000 - cycle - 100)) / 2
 	const drain = () => {
 		blocked = false
 		const start = performance.now()
-		for (const id of ids) events.emit("drain", id)
+		for (const id of ids) {
+			const start = performance.now()
+			if (!directOnly) events.emit("drain", id)
+			maxDrainMs = Math.max(maxDrainMs, performance.now() - start)
+		}
 		const elapsed = performance.now() - start
 		releaseMs += elapsed
-		delays.push(elapsed)
 	}
 	while (ingestedBytes < target) {
 		const buffer = buffers[chunks % buffers.length]!
@@ -113,6 +132,7 @@ export function runBench(opts: { rate: number; seconds: number }): BenchResult {
 		const phase = productionMs - cycle
 		now =
 			cycle + (phase < 100 || phase >= 1300 ? phase : 700 + (phase - 100) / 2)
+		yield now
 		if (blocked && phase >= 1300) drain()
 		blocked = phase >= 100 && phase < 1300
 		// Direct fanout baseline uses the same buffers and three branch writes.
@@ -123,37 +143,86 @@ export function runBench(opts: { rate: number; seconds: number }): BenchResult {
 		for (let i = 0; i < branches.length; i++)
 			branches[i] = branches[i]! - chunk.length
 		start = performance.now()
-		recorder.observeChunk(chunk.length, now)
+		if (!directOnly) recorder.observeChunk(chunk.length, now)
 		const record = performance.now() - start
 		recorderMs += record
 		start = performance.now()
-		absorber.ingest(chunk)
+		if (directOnly) fanout.distribute(chunk)
+		else absorber.ingest(chunk)
 		const elapsed = performance.now() - start
 		if (blocked) holdMs += elapsed
 		else passMs += elapsed
-		delays.push(Math.max(0, elapsed + record - direct))
 		if (!blocked) passChunks++
 		ingestedBytes += chunk.length
 		chunks++
 	}
-	now = Math.max(now, seconds * 1000) + 1
+	now = Math.max(now, seconds * 1000)
+	yield now
 	drain()
 	const counters = absorber.counters()
 	absorber.dispose()
-	delays.sort((a, b) => a - b)
 	return {
 		rate,
 		passThroughNsPerChunk:
 			Math.max(0, passMs / Math.max(1, passChunks) - baselineMs / chunks) * 1e6,
 		recorderNsPerChunk: (recorderMs / chunks) * 1e6,
-		holdCoreFraction: holdMs / (seconds * 1000),
-		releaseCoreFraction: releaseMs / (seconds * 1000),
-		loopP99AddedMs:
-			delays[Math.max(0, Math.ceil(delays.length * 0.99) - 1)] ?? 0,
+		holdCoreFraction: activePeriodMs > 0 ? holdMs / activePeriodMs : 0,
+		releaseCoreFraction: activePeriodMs > 0 ? releaseMs / activePeriodMs : 0,
+		holdCoreFractionAvg: holdMs / (seconds * 1000),
+		releaseCoreFractionAvg: releaseMs / (seconds * 1000),
+		holdPeriodMs: activePeriodMs,
+		catchupPeriodMs: activePeriodMs,
+		maxDrainMs,
+		loopP99AddedMs: 0,
 		ringBytes: counters.capacityBytes,
 		ingestedBytes,
 		deliveredBytes: branches[0]!,
 		overflowBytes: counters.overflowBytesTotal,
+	}
+}
+
+/** Isolated synchronous workload; no timers or event-loop histogram. */
+export function runBench(opts: BenchOptions): BenchResult {
+	const run = () => {
+		const workload = pass(opts)
+		let step = workload.next()
+		while (!step.done) step = workload.next()
+		return step.value
+	}
+	run() // Discard JIT/allocation warmup.
+	const results = Array.from({ length: 5 }, run)
+	const median = (key: "passThroughNsPerChunk" | "recorderNsPerChunk") =>
+		results.map(result => result[key]).sort((a, b) => a - b)[2]!
+	return {
+		...results[2]!,
+		passThroughNsPerChunk: median("passThroughNsPerChunk"),
+		recorderNsPerChunk: median("recorderNsPerChunk"),
+		maxDrainMs: Math.max(...results.map(result => result.maxDrainMs)),
+	}
+}
+
+async function loopPhase(opts: BenchOptions, directOnly: boolean) {
+	const workload = pass(opts, directOnly)
+	// Allocate and configure before sampling, identically for both phases.
+	let step = workload.next()
+	const histogram = monitorEventLoopDelay({ resolution: 10 })
+	histogram.enable()
+	await sleep(20)
+	histogram.reset()
+	const start = performance.now()
+	try {
+		while (!step.done) {
+			const deadline = start + step.value
+			while (performance.now() < deadline)
+				await sleep(Math.max(1, deadline - performance.now()))
+			step = workload.next()
+		}
+		// Let the histogram observe the final synchronous drain too.
+		await sleep(20)
+		return { p99Ms: histogram.percentile(99) / 1e6, result: step.value }
+	} finally {
+		histogram.disable()
+		workload.return(undefined as never)
 	}
 }
 
@@ -171,5 +240,10 @@ if (
 		overflowBytes: _overflow,
 		...result
 	} = runBench({ rate: arg("rate", 2_048_000), seconds: arg("seconds", 30) })
+	const opts = { rate: result.rate, seconds: arg("seconds", 30) }
+	const baseline = await loopPhase(opts, true)
+	const workload = await loopPhase(opts, false)
+	result.loopP99AddedMs = Math.max(0, workload.p99Ms - baseline.p99Ms)
+	result.maxDrainMs = Math.max(result.maxDrainMs, workload.result.maxDrainMs)
 	process.stdout.write(`${JSON.stringify(result)}\n`)
 }

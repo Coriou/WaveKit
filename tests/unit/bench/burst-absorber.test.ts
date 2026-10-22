@@ -8,6 +8,15 @@ describe("burst absorber bench", () => {
 			expect(Number.isFinite(value)).toBe(true)
 			expect(value).toBeGreaterThanOrEqual(0)
 		}
+		expect(result.loopP99AddedMs).toBe(0)
+		expect(result.holdPeriodMs).toBe(450)
+		expect(result.catchupPeriodMs).toBe(450)
+		expect(result.holdCoreFraction * 450).toBeCloseTo(
+			result.holdCoreFractionAvg * 1000,
+		)
+		expect(result.releaseCoreFraction * 450).toBeCloseTo(
+			result.releaseCoreFractionAvg * 1000,
+		)
 		expect(result.ringBytes).toBe(2 * 2_048_000 * 2)
 		expect(result.ingestedBytes).toBe(2_048_000 * 2)
 		expect(result.deliveredBytes + result.overflowBytes).toBe(
