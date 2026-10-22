@@ -573,6 +573,7 @@ export class ScannerService extends EventEmitter {
 		string,
 		{
 			controller: AbortController
+			channelKey: string
 			discoveryId: string | null
 			sourceId: string
 		}
@@ -4076,11 +4077,22 @@ export class ScannerService extends EventEmitter {
 				job.spec.signalsOnly !== true
 			)
 		})
+		// A historical discovery can contain several measured channels after overload.
+		// Ownership follows this emission's centre, never that merged median.
+		const raster = this.rastersAt(live.sourceId, track.centreHz).sort(
+			(a, b) => a.spacingHz - b.spacingHz,
+		)[0]
+		const spacingHz = raster?.spacingHz ?? 6250
+		const originHz = raster?.firstChannelHz ?? 0
+		const channelHz =
+			originHz + Math.round((track.centreHz - originHz) / spacingHz) * spacingHz
+		const channelKey = `${spacingHz}:${channelHz}`
 		const owned = [...this.analogJobs.values()].some(
 			trial =>
 				trial.sourceId === live.sourceId &&
 				live.discoveryId !== null &&
-				trial.discoveryId === live.discoveryId,
+				trial.discoveryId === live.discoveryId &&
+				trial.channelKey === channelKey,
 		)
 		const reason = !eligible
 			? "not-allowed"
@@ -4134,6 +4146,7 @@ export class ScannerService extends EventEmitter {
 		const controller = new AbortController()
 		this.analogJobs.set(live.observationId, {
 			controller,
+			channelKey,
 			discoveryId: live.discoveryId,
 			sourceId: live.sourceId,
 		})

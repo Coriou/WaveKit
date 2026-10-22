@@ -311,87 +311,105 @@ it("admits two private analog trials per source and retries the third when capac
 	}
 })
 
-it("gives clipped keyups an analog turn while a persistent carrier has repeated observations", async () => {
-	const h = serviceHarness({
-		patch: s => {
-			s.passive.enabled = false
-		},
-	})
-	const internal = h.service as unknown as {
-		deps: ScannerServiceDeps
-		live: Map<string, LiveObservation>
-		requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void
-	}
-	const runLive = vi.fn(
-		(_req: unknown, _mode: unknown, signal: AbortSignal) =>
-			new Promise<never>(resolve => {
-				signal.addEventListener("abort", () => resolve(null as never), {
-					once: true,
-				})
-			}),
-	)
-	internal.deps = { ...internal.deps, analogTrial: { run: vi.fn(), runLive } }
-	try {
-		await h.service.start()
-		const job = await h.service.createJob({
-			sourceId: "rtl",
-			mode: "in-window",
-			ranges: [{ startHz: 446_000_000, endHz: 446_100_000 }],
-			protocols: ["analog-fm", "dmr", "dpmr"],
+it.each(["fallback", "configured"] as const)(
+	"gives clipped keyups on %s channels an analog turn within a merged discovery",
+	async rasterMode => {
+		const h = serviceHarness({
+			patch: s => {
+				s.passive.enabled = false
+			},
 		})
-		const makeLive = (id: string, discoveryId: string): LiveObservation => {
-			const track = makeTrack({
-				id,
-				centreHz: 446_056_250,
-				startedAt: 0,
-				obwHz: 5000,
-			})
-			track.flags.overload = true
-			track.peakDbfs = 0
-			track.meanDbfs = 2
-			track.dutyCycle = 0.9
-			track.acf30 = 0.75
-			return {
-				observationId: id,
-				sourceId: "rtl",
-				trackId: track.trackId,
-				epoch: track.epoch,
-				jobIds: [job.id],
-				discoveryId,
-				startedAt: 0,
-				classification: {
-					class: "fsk4-6k25",
-					hypotheses: [{ protocol: "dpmr", score: 0.5 }],
-					tier: "spectral",
-				},
-				probeIds: new Set(),
-				lastActivityAt: 0,
-				lastIngestAt: 0,
-				lastTrack: track,
-				decoded: false,
-				encrypted: false,
-			}
+		const internal = h.service as unknown as {
+			deps: ScannerServiceDeps
+			live: Map<string, LiveObservation>
+			requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void
 		}
-		const ambient = makeLive("ambient", "d_ambient")
-		ambient.lastTrack!.centreHz = 446_046_880
-		ambient.lastTrack!.meanDbfs = -46
-		internal.requestJobAnalog(ambient, ambient.lastTrack!)
-		const repeat = makeLive("ambient-repeat", "d_ambient")
-		internal.requestJobAnalog(repeat, repeat.lastTrack!)
-		expect(runLive).toHaveBeenCalledTimes(1)
-		const keyup = makeLive("clipped", "d_keyup")
-		internal.requestJobAnalog(keyup, keyup.lastTrack!)
-		expect(runLive).toHaveBeenCalledTimes(2)
-		expect(runLive).toHaveBeenLastCalledWith(
-			expect.objectContaining({ observationId: "clipped" }),
-			"nfm",
-			expect.any(AbortSignal),
+		const runLive = vi.fn(
+			(_req: unknown, _mode: unknown, signal: AbortSignal) =>
+				new Promise<never>(resolve => {
+					signal.addEventListener("abort", () => resolve(null as never), {
+						once: true,
+					})
+				}),
 		)
-	} finally {
-		await h.service.stop()
-		await rm(h.dir, { recursive: true, force: true })
-	}
-})
+		internal.deps = { ...internal.deps, analogTrial: { run: vi.fn(), runLive } }
+		try {
+			await h.service.start()
+			const job = await h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				ranges:
+					rasterMode === "fallback"
+						? [{ startHz: 446_000_000, endHz: 446_100_000 }]
+						: [
+								{
+									startHz: 446_040_000,
+									endHz: 446_050_000,
+									rasters: [{ spacingHz: 6250, firstChannelHz: 446_046_875 }],
+								},
+								{
+									startHz: 446_050_001,
+									endHz: 446_100_000,
+									rasters: [{ spacingHz: 6250, firstChannelHz: 446_056_250 }],
+								},
+							],
+				protocols: ["analog-fm", "dmr", "dpmr"],
+			})
+			const makeLive = (id: string, discoveryId: string): LiveObservation => {
+				const track = makeTrack({
+					id,
+					centreHz: 446_056_250,
+					startedAt: 0,
+					obwHz: 5000,
+				})
+				track.flags.overload = true
+				track.peakDbfs = 0
+				track.meanDbfs = 2
+				track.dutyCycle = 0.9
+				track.acf30 = 0.75
+				return {
+					observationId: id,
+					sourceId: "rtl",
+					trackId: track.trackId,
+					epoch: track.epoch,
+					jobIds: [job.id],
+					discoveryId,
+					startedAt: 0,
+					classification: {
+						class: "fsk4-6k25",
+						hypotheses: [{ protocol: "dpmr", score: 0.5 }],
+						tier: "spectral",
+					},
+					probeIds: new Set(),
+					lastActivityAt: 0,
+					lastIngestAt: 0,
+					lastTrack: track,
+					decoded: false,
+					encrypted: false,
+				}
+			}
+			const ambient = makeLive("ambient", "d_ambient")
+			ambient.lastTrack!.centreHz = 446_046_880
+			ambient.lastTrack!.meanDbfs = -46
+			internal.requestJobAnalog(ambient, ambient.lastTrack!)
+			const repeat = makeLive("ambient-repeat", "d_ambient")
+			repeat.lastTrack!.centreHz = ambient.lastTrack!.centreHz
+			internal.requestJobAnalog(repeat, repeat.lastTrack!)
+			expect(runLive).toHaveBeenCalledTimes(1)
+			const keyup = makeLive("clipped", "d_ambient")
+			internal.requestJobAnalog(keyup, keyup.lastTrack!)
+			expect(runLive).toHaveBeenCalledTimes(2)
+			expect(runLive).toHaveBeenLastCalledWith(
+				expect.objectContaining({ observationId: "clipped" }),
+				"nfm",
+				expect.any(AbortSignal),
+			)
+		} finally {
+			await h.service.stop()
+			await rm(h.dir, { recursive: true, force: true })
+		}
+	},
+)
 
 it("admits allowed analog within one observation for arbitrary priors with a persistent ambient trial", async () => {
 	const h = serviceHarness({
