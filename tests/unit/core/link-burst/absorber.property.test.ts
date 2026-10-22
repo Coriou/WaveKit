@@ -265,7 +265,7 @@ describe("BurstAbsorber properties", () => {
 	})
 	// Feature: link-burst-resilience, Property 6: Laggard bound
 	// Validates: Requirements 1.5, 9.2
-	it("bounds laggard delay and never excludes a single active branch", () => {
+	it("bounds laggard delay with or without siblings", () => {
 		fc.assert(
 			fc.property(
 				frame,
@@ -284,21 +284,14 @@ describe("BurstAbsorber properties", () => {
 							absorber.ingest(Buffer.alloc(bytes))
 							vi.runAllTimers()
 						}
-						if (single) {
-							expect(fanout.delivered).toHaveLength(0)
-							expect(absorber.counters().window.maxLaggardExcludeMs).toBeNull()
-						} else {
-							expect(fanout.ticks[0]).toBeGreaterThanOrEqual(
-								ABSORBER_LAGGARD_MS,
-							)
-							expect(fanout.ticks[0]).toBeLessThanOrEqual(
-								ABSORBER_LAGGARD_MS + interval,
-							)
-							const chunk = Buffer.alloc(bytes)
-							absorber.ingest(chunk)
-							expect(fanout.delivered.at(-1)).toBe(chunk)
-							expect(fanout.drops.get("b") ?? 0).toBe(0)
-						}
+						expect(fanout.ticks[0]).toBeGreaterThanOrEqual(ABSORBER_LAGGARD_MS)
+						expect(fanout.ticks[0]).toBeLessThanOrEqual(
+							ABSORBER_LAGGARD_MS + interval,
+						)
+						const chunk = Buffer.alloc(bytes)
+						absorber.ingest(chunk)
+						expect(fanout.delivered.at(-1)).toBe(chunk)
+						expect(fanout.drops.get("b") ?? 0).toBe(0)
 					}
 				},
 			),

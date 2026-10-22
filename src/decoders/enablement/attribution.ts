@@ -57,6 +57,17 @@ export function attributeInterval(e: IntervalEvidence): DropAttribution {
 			(input.cpuPercent !== null && input.cpuPercent >= input.cpuGuardPercent)
 		)
 			return "host"
+		if (
+			input.branchDrops.size === 1 &&
+			positive === 1 &&
+			input.absorberOverflow === 0 &&
+			input.maxGapMs !== null &&
+			input.maxGapMs < LINK_GAP_MS &&
+			input.shortfall === false &&
+			input.loopDelayMaxMs !== null &&
+			input.cpuPercent !== null
+		)
+			return "consumer"
 		return "unknown"
 	} catch {
 		return "unknown"

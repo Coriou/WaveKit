@@ -156,17 +156,19 @@ interface BurstAbsorber {
   `ABSORBER_RELEASE_BYTES` frame-aligned bytes from the head, copy them into a fresh
   `Buffer.allocUnsafe` (the fanout keeps references to written chunks, so ring memory cannot be
   handed out), advance the head, `distribute` it. Releases are triggered by `ingest` and by the
-  fanout's `drain`, `branch-removed` and `branch-added` events; there are no timers.
-- **Congestion.** `FanoutManager` gains one read-only method, `congestedBranchIds(out: Set<string>)`,
-  which clears `out` and adds every active branch in backpressure or startup refusal. It reads
-  existing fields only. The absorber keeps `congestedSinceMono` per branch from the `backpressure`
-  and `drain` events and from these reads, and `siblingProgressMono` (the last time any other
-  gating branch was seen uncongested).
-- **Laggard rule.** On every ingest and release attempt: a congested branch whose
-  `congestedSinceMono` is at least `ABSORBER_LAGGARD_MS` old and that saw sibling progress since
-  then joins the excluded set; it leaves when the fanout reports it drained. A single active
-  branch can never be a laggard, so a lone slow consumer fills the ring and then overflows
-  (attributed by the monitor, not by the absorber).
+  fanout's `drain`, `branch-removed` and `branch-added` events and the holding deadline.
+- **Congestion.** Read the fanout's active and congested branch sets without changing its
+  backpressure semantics. Track continuous congestion per branch.
+- **Laggard rule (supersedes requirements 1.5 and the lone-branch case of 3.3).** Exclude every branch congested for `ABSORBER_LAGGARD_MS`, including a
+  lone branch or all branches together. Also exclude current blockers once the holding
+  episode reaches that deadline, so rotating congestion cannot renew the hold indefinitely.
+  Exclusion ends on drain. One unref'ed timeout per holding episode wakes release even
+  without new input; flush/dispose cancels it. The deadline bounds congestion waiting to
+  500 ms (below the default 2 s capacity); draining still uses four-block steps and event-loop
+  continuations. An event-loop stall can delay the callback; release resumes on the next turn.
+  All-congested drops follow the existing host evidence path (otherwise unknown or link when
+  positively established). A lone branch with complete smooth-input, healthy-host evidence
+  and no overflow or upstream loss is consumer loss. Fanout counts every released drop.
 - **Flush.** On disconnect, removal, rate or format change: discard held bytes, count them as
   `flushedBytes`, clear congestion bookkeeping.
 
@@ -358,7 +360,7 @@ monotonic clocks.
 6. **Laggard bound.** For any schedule with one consumer stuck while a sibling progresses, the
    stuck branch is excluded no later than `ABSORBER_LAGGARD_MS` plus one ingest after it
    congested; afterwards siblings receive every byte with no added delay beyond the release of
-   what was held; a single active branch is never excluded. _Validates 1.5, 9.2._
+   what was held; lone and all-congested branches obey the same deadline. _Validates 1.5, 9.2._
 7. **Attribution rules.** `attributeInterval` is total and deterministic; incomplete evidence is
    `unknown`; a strict subset with no overflow is `consumer`; `link` implies every rule of 3.4
    holds; a positive upstream delta with drops is never `link`; any null among gap, loop delay or
@@ -448,8 +450,7 @@ Each amended criterion gains an in-place note in
 - Copying held bytes into a preallocated ring, with one allocation per released 64 KiB block
   while draining, rather than holding socket buffers by reference.
 - Overflow drops the newest bytes that do not fit.
-- A lone slow consumer is never excluded as a laggard; the ring fills and overflows, and the
-  monitor attributes it.
+- A lone slow consumer is excluded at the holding deadline; branch drops expose the loss.
 - A measured upstream drop with core drops is `unknown`; an unmeasured upstream does not block
   `link` because the received-rate check stands in for it.
 - `unknown` drops keep condemning probationers (today's rule) but never shed after graduation.

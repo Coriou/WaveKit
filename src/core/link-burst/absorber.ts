@@ -29,7 +29,8 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	const congested = new Set<string>()
 	const excluded = new Set<string>()
 	const since = new Map<string, number>()
-	const progress = new Map<string, number>()
+	let deadline: ReturnType<typeof setTimeout> | null = null
+	let expired = false
 	const slots = LINK_QUALITY_WINDOW_MS / LINK_QUALITY_SLOT_MS
 	const peaks = new Float64Array(slots)
 	const absorbs = new Float64Array(slots)
@@ -62,6 +63,9 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		if (holdingSince !== null) {
 			durations[index()] = Math.max(durations[index()]!, now - holdingSince)
 			holdingSince = null
+			expired = false
+			if (deadline !== null) clearTimeout(deadline)
+			deadline = null
 		}
 	}
 	function endOverflow(now: number): void {
@@ -79,27 +83,21 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	function gated(now: number): boolean {
 		fanout.activeBranchIds(active)
 		fanout.congestedBranchIds(congested)
-		if (active.size <= 1) excluded.clear()
 		for (const id of since.keys()) {
 			if (!active.has(id) || !congested.has(id)) {
 				since.delete(id)
-				progress.delete(id)
 				excluded.delete(id)
 			}
 		}
-		let hasProgress = false
-		for (const id of active)
-			if (!excluded.has(id) && !congested.has(id)) hasProgress = true
 		let blocked = false
 		for (const id of congested) {
 			if (!active.has(id)) continue
 			const start = since.get(id) ?? now
 			since.set(id, start)
-			if (hasProgress) progress.set(id, now)
 			if (
-				active.size > 1 &&
-				now - start >= ABSORBER_LAGGARD_MS &&
-				(progress.get(id) ?? -Infinity) >= start
+				expired ||
+				now - start >= ABSORBER_LAGGARD_MS ||
+				(holdingSince !== null && now - holdingSince >= ABSORBER_LAGGARD_MS)
 			) {
 				if (!excluded.has(id)) {
 					excluded.add(id)
@@ -161,7 +159,6 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	}
 	const drain = (id: string) => {
 		since.delete(id)
-		progress.delete(id)
 		excluded.delete(id)
 		wake()
 	}
@@ -180,7 +177,6 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		endHolding(now)
 		endOverflow(now)
 		since.clear()
-		progress.clear()
 		excluded.clear()
 	}
 	return {
@@ -208,7 +204,34 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 					? chunk.length
 					: Math.floor(free / frameBytes) * frameBytes
 			if (accepted > 0) {
-				if (length === 0) holdingSince = now
+				if (length === 0) {
+					holdingSince = now
+					let wait = ABSORBER_LAGGARD_MS
+					for (const id of congested) {
+						const start = since.get(id)
+						if (active.has(id) && !excluded.has(id) && start !== undefined)
+							wait = Math.min(
+								wait,
+								Math.max(0, start + ABSORBER_LAGGARD_MS - now),
+							)
+					}
+					const onDeadline = () => {
+						deadline = null
+						const at = monoNow()
+						expired =
+							holdingSince !== null && at - holdingSince >= ABSORBER_LAGGARD_MS
+						wake()
+						if (holdingSince !== null && !expired) {
+							deadline = setTimeout(
+								onDeadline,
+								Math.max(1, holdingSince + ABSORBER_LAGGARD_MS - at),
+							)
+							deadline.unref()
+						}
+					}
+					deadline = setTimeout(onDeadline, wait)
+					deadline.unref()
+				}
 				const tail = (head + length) % ring.length
 				const first = Math.min(accepted, ring.length - tail)
 				chunk.copy(ring, tail, 0, first)
