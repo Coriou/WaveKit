@@ -1,4 +1,7 @@
-import type { DecoderEfficiencyDetail } from "@wavekit/api-types"
+import type {
+	DecoderEfficiencyDetail,
+	DropAttribution,
+} from "@wavekit/api-types"
 import {
 	channelizerBaseCores,
 	EFFICIENCY_CLEAR_MS,
@@ -10,6 +13,7 @@ import {
 } from "./contract.js"
 import type {
 	AdmissionDecision,
+	LateDropWindow,
 	EfficiencyGate,
 	EfficiencyInputs,
 	RunningPlacement,
@@ -21,6 +25,9 @@ const valid = (value: unknown): value is number =>
 
 /** Stateful decision core; all time and observations are supplied by the caller. */
 export interface DropReader {
+	latestAttribution?(id: string): DropAttribution | null
+	lateWindows?(id: string): readonly LateDropWindow[]
+	linkDropsSince?(id: string, sinceMono: number): boolean
 	dropState(id: string): {
 		state: "ok" | "dropping" | "unknown"
 		dropBytesPerSecond: number | null

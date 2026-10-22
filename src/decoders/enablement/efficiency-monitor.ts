@@ -1,14 +1,56 @@
 import { performance } from "node:perf_hooks"
+import type { DropAttribution } from "@wavekit/api-types"
+import { z } from "zod"
+import type {
+	IngestInterval,
+	LoopDelayInterval,
+} from "../../core/link-burst/contract.js"
+import type { Logger } from "../../utils/logger.js"
+import { attributeInterval } from "./attribution.js"
 import {
 	EFFICIENCY_CLEAR_MS,
+	EFFICIENCY_CPU_GUARD_PERCENT,
+	EFFICIENCY_DROP_WINDOW_MS,
+	LATE_SHED_WINDOWS,
 	EFFICIENCY_SAMPLE_MS,
 	EFFICIENCY_STALE_MS,
 } from "./contract.js"
-import type { EfficiencySample, SourceDropSample } from "./contract.js"
+import type {
+	EfficiencySample,
+	SourceDropSample,
+	LateDropWindow,
+} from "./contract.js"
 import type { DropReader } from "./efficiency-gate.js"
 
-type Counters = { droppedBytesTotal: number; droppedChunksTotal: number }
+type Counters = {
+	droppedBytesTotal: number
+	droppedChunksTotal: number
+	active?: boolean
+}
+const nonNegative = z.number().finite().nonnegative()
+const counterSchema = z.object({
+	droppedBytesTotal: z.number().int().nonnegative().safe(),
+	droppedChunksTotal: z.number().int().nonnegative().safe(),
+	active: z.boolean().optional(),
+})
+const ingestSchema = z.object({
+	maxGapMs: nonNegative,
+	catchupBytes: nonNegative,
+	chunks: nonNegative,
+})
+const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
 type SourceState = {
+	branchDrops: Map<string, number>
+	rawSamples: number[]
+	upstream: number | null
+	coverageBlocked: boolean
+	latest: DropAttribution | null
+	lastNonNone: DropAttribution | null
+	counts: { mono: number; code: DropAttribution }[]
+	linkDrops: number[]
+	windows: LateDropWindow[]
+	openWindow: (LateDropWindow & { complete: boolean }) | null
+	logged: Map<DropAttribution, number>
 	/** Last valid counters per branch identity, kept across unreadable reads. */
 	seen: Map<string, Counters> | null
 	/** Branches first seen with invalid counters: baselined when they turn valid. */
@@ -37,6 +79,16 @@ const validTotal = (n: unknown): n is number =>
 export function createEfficiencyMonitor(deps: {
 	sources: () => readonly string[]
 	branchCounters: (id: string) => ReadonlyMap<string, Counters> | null
+	ingest?: (
+		id: string,
+		fromMono: number,
+		toMono: number,
+	) => IngestInterval | null
+	loopDelay?: () => LoopDelayInterval | null
+	shortfall?: (id: string) => boolean | null
+	upstreamDroppedTotal?: (id: string) => number | null
+	cpuGuardPercent?: number
+	log?: Logger
 	topology?: (id: string) => string | null
 	cpu: { readonly normalisedPercent: number | null }
 	now: () => number
@@ -54,12 +106,25 @@ export function createEfficiencyMonitor(deps: {
 			| "droppedBetweenMono"
 		>
 	> & {
+		latestAttribution(id: string): DropAttribution | null
+		lateWindows(id: string): readonly LateDropWindow[]
+		linkDropsSince(id: string, sinceMono: number): boolean
+		attributionCounts(id: string): {
+			last: DropAttribution | null
+			counts10m: Record<DropAttribution, number>
+		} | null
 		start(): void
 		stop(): void
 		sampleNow(): EfficiencySample
 	} {
 	const states = new Map<string, SourceState>()
 	const monoNow = deps.monoNow ?? (() => performance.now())
+	// Default only an omitted guard: a supplied malformed value (null included)
+	// must fail validation rather than become the default.
+	const cpuGuardPercent: unknown =
+		deps.cpuGuardPercent === undefined
+			? EFFICIENCY_CPU_GUARD_PERCENT
+			: deps.cpuGuardPercent
 	let lastMono: number | null = null
 	let interval: { cancel(): void } | undefined
 	// Evidence time is strictly monotonic: a raw clock that goes back is offset
@@ -71,6 +136,11 @@ export function createEfficiencyMonitor(deps: {
 	let offset = 0
 	const discontinuity = () => {
 		for (const s of states.values()) {
+			s.rawSamples = []
+			s.windows = []
+			s.openWindow = null
+			s.coverageBlocked = false
+			s.upstream = null
 			s.covered = []
 			s.lastCompleteMono = null
 			// Admission needs a fresh full clean window after a discontinuity.
@@ -82,9 +152,13 @@ export function createEfficiencyMonitor(deps: {
 		try {
 			raw = monoNow()
 		} catch {
+			discontinuity()
 			return NaN
 		}
-		if (!Number.isFinite(raw)) return NaN
+		if (!Number.isFinite(raw) || raw < 0) {
+			discontinuity()
+			return NaN
+		}
 		if (lastRaw !== null && raw < lastRaw) {
 			offset += lastRaw - raw
 			discontinuity()
@@ -93,6 +167,17 @@ export function createEfficiencyMonitor(deps: {
 		return raw + offset
 	}
 	const fresh = (): SourceState => ({
+		branchDrops: new Map(),
+		rawSamples: [],
+		upstream: null,
+		coverageBlocked: false,
+		latest: null,
+		lastNonNone: null,
+		counts: [],
+		linkDrops: [],
+		windows: [],
+		openWindow: null,
+		logged: new Map(),
 		seen: null,
 		unbaselined: new Set(),
 		signature: null,
@@ -119,8 +204,9 @@ export function createEfficiencyMonitor(deps: {
 		let ids: readonly string[] = []
 		let readable = true
 		try {
-			ids = Array.from(deps.sources())
-			if (ids.some(id => typeof id !== "string" || !id)) readable = false
+			const parsed = z.array(z.string().min(1)).safeParse(deps.sources())
+			if (parsed.success) ids = parsed.data
+			else readable = false
 		} catch {
 			readable = false
 		}
@@ -133,16 +219,77 @@ export function createEfficiencyMonitor(deps: {
 			const present = new Set(ids)
 			for (const id of states.keys()) if (!present.has(id)) states.delete(id)
 		}
+		let cpuPercent: number | null = null
+		const attributionEnabled = [
+			deps.ingest,
+			deps.loopDelay,
+			deps.shortfall,
+			deps.upstreamDroppedTotal,
+		].some(value => value !== undefined)
+		let commonValid =
+			(!attributionEnabled ||
+				[deps.ingest, deps.loopDelay, deps.shortfall].every(
+					value => typeof value === "function",
+				)) &&
+			(deps.upstreamDroppedTotal === undefined ||
+				typeof deps.upstreamDroppedTotal === "function") &&
+			(deps.monoNow === undefined || typeof deps.monoNow === "function") &&
+			typeof deps.cpu === "object" &&
+			deps.cpu !== null
+		let loopDelayMaxMs: number | null = null
+		try {
+			const cpu = deps.cpu.normalisedPercent
+			if (cpu !== null && Number.isFinite(cpu) && cpu >= 0 && cpu <= 100)
+				cpuPercent = cpu
+			else if (attributionEnabled) commonValid = false
+		} catch {
+			if (attributionEnabled) commonValid = false
+		}
+		try {
+			if (deps.loopDelay !== undefined) {
+				const parsed = loopSchema.safeParse(deps.loopDelay())
+				if (parsed.success) loopDelayMaxMs = parsed.data.maxMs
+				else commonValid = false
+			}
+		} catch {
+			commonValid = false
+		}
 		const sources = new Map<string, SourceDropSample>()
 		for (const id of readable ? new Set(ids) : states.keys()) {
 			const s = states.get(id) ?? fresh()
 			states.set(id, s)
+			s.branchDrops.clear()
 			let counters: ReadonlyMap<string, Counters> | null = null
 			let signature: string | null = null
 			try {
 				counters = deps.branchCounters(id)
 				signature = deps.topology?.(id) ?? null
-				if (counters !== null) counters = new Map(counters)
+				if (typeof signature !== "string" || !signature) signature = null
+				if (counters !== null) {
+					const snapshot = new Map<string, Counters>()
+					for (const [key, value] of counters) {
+						if (typeof key !== "string") {
+							snapshot.clear()
+							counters = null
+							break
+						}
+						const parsed = counterSchema.safeParse(value)
+						// Retain invalid totals for the existing per-key recovery path.
+						snapshot.set(
+							key,
+							parsed.success
+								? {
+										droppedBytesTotal: parsed.data.droppedBytesTotal,
+										droppedChunksTotal: parsed.data.droppedChunksTotal,
+										...(parsed.data.active === undefined
+											? {}
+											: { active: parsed.data.active }),
+									}
+								: { droppedBytesTotal: NaN, droppedChunksTotal: NaN },
+						)
+					}
+					if (counters !== null) counters = snapshot
+				}
 			} catch {
 				counters = null
 			}
@@ -153,6 +300,7 @@ export function createEfficiencyMonitor(deps: {
 			// across unreadable reads and other branches' additions or removals. A
 			// branch added since the last valid read started at zero, so its first
 			// total is its delta. A decrease or removal loses that branch only.
+			let absorberOverflow: number | null = null
 			let bytes = 0
 			let chunks = 0
 			let complete = counters !== null && signature !== null
@@ -183,6 +331,7 @@ export function createEfficiencyMonitor(deps: {
 					next.set(key, {
 						droppedBytesTotal: value.droppedBytesTotal,
 						droppedChunksTotal: value.droppedChunksTotal,
+						...(value.active === undefined ? {} : { active: value.active }),
 					})
 					if (first || s.unbaselined.delete(key)) {
 						complete = false
@@ -196,15 +345,23 @@ export function createEfficiencyMonitor(deps: {
 						complete = false
 						continue
 					}
+					if (
+						previous &&
+						(previous.active !== false) !== (value.active !== false)
+					)
+						complete = false
+					const delta = value.droppedBytesTotal - base.droppedBytesTotal
+					const chunkDelta = value.droppedChunksTotal - base.droppedChunksTotal
+					// Chunk-only loss is still positive drop evidence.
+					const loss = Math.max(delta, chunkDelta)
+					if (value.active === false && loss > 0) complete = false
+					if (key.startsWith("@"))
+						absorberOverflow = (absorberOverflow ?? 0) + loss
+					else if (value.active !== false) s.branchDrops.set(key, loss)
 					bytes += value.droppedBytesTotal - base.droppedBytesTotal
 					chunks += value.droppedChunksTotal - base.droppedChunksTotal
 				}
 				s.seen = next
-				if (bytes > 0 || chunks > 0) {
-					s.lastDropMono = at
-					s.drops.push(at)
-					if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
-				}
 			}
 			if (signature !== s.signature) complete = false
 			if (counters !== null && signature !== null) s.signature = signature
@@ -220,14 +377,161 @@ export function createEfficiencyMonitor(deps: {
 				s.lastTickMono === s.lastCompleteMono &&
 				gap > 0 &&
 				gap <= 1.5 * EFFICIENCY_SAMPLE_MS
-			if (comparable) {
+			let evidenceValid =
+				commonValid && nonNegative.safeParse(cpuGuardPercent).success
+			let maxGapMs: number | null = null
+			let shortfall: boolean | null = null
+			let upstreamDropDelta: number | null = null
+			try {
+				if (deps.ingest !== undefined) {
+					const from = s.rawSamples.at(-2)
+					if (from !== undefined && validClock && lastRaw !== null) {
+						const parsed = ingestSchema.safeParse(
+							deps.ingest(id, from, lastRaw),
+						)
+						if (parsed.success) maxGapMs = parsed.data.maxGapMs
+						else evidenceValid = false
+					} else evidenceValid = false
+				}
+			} catch {
+				evidenceValid = false
+			}
+			try {
+				if (deps.shortfall !== undefined) {
+					const parsed = z.boolean().safeParse(deps.shortfall(id))
+					if (parsed.success) shortfall = parsed.data
+					else evidenceValid = false
+				}
+			} catch {
+				evidenceValid = false
+			}
+			try {
+				const total = deps.upstreamDroppedTotal?.(id) ?? null
+				if (total !== null && validTotal(total)) {
+					if (s.upstream !== null && total >= s.upstream)
+						upstreamDropDelta = total - s.upstream
+					else evidenceValid = false
+					s.upstream = total
+				} else {
+					if (deps.upstreamDroppedTotal !== undefined) evidenceValid = false
+					s.upstream = null
+				}
+			} catch {
+				s.upstream = null
+				evidenceValid = false
+			}
+			const attribution = attributeInterval({
+				complete: comparable && evidenceValid,
+				branchDrops: s.branchDrops,
+				absorberOverflow,
+				maxGapMs,
+				loopDelayMaxMs,
+				cpuPercent,
+				cpuGuardPercent:
+					typeof cpuGuardPercent === "number" ? cpuGuardPercent : Number.NaN,
+				shortfall,
+				upstreamDropDelta,
+			})
+			const positive = bytes > 0 || chunks > 0
+			const link = attribution === "link" && positive
+			if (positive) {
+				if (link) {
+					s.linkDrops.push(at)
+					if (s.linkDrops.length > 32) s.linkDrops.shift()
+				} else {
+					s.lastDropMono = at
+					s.drops.push(at)
+					if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
+				}
+			}
+			if (comparable && evidenceValid && !link && !s.coverageBlocked) {
 				const last = s.covered.at(-1)
 				if (last && last.to === s.lastCompleteMono) last.to = at
 				else s.covered.push({ from: s.lastCompleteMono!, to: at })
 				if (s.covered.length > MAX_COVERED_INTERVALS) s.covered.shift()
 			}
-			if (comparable && bytes === 0 && chunks === 0) s.cleanSinceMono ??= at
-			else fault(s, Number.isFinite(at) ? at : null)
+			if (!link) {
+				if (comparable && evidenceValid && attribution === "none" && !positive)
+					s.cleanSinceMono ??= at
+				else fault(s, Number.isFinite(at) ? at : null)
+			}
+			s.coverageBlocked = link || !evidenceValid
+			s.latest = attribution
+			if (Number.isFinite(at)) {
+				s.counts.push({ mono: at, code: attribution })
+				if (s.counts.length > 300) s.counts.shift()
+				// Windows are (start, end]: the closing sample belongs to the window it closes.
+				if (s.openWindow === null)
+					s.openWindow = {
+						startMono: at,
+						endMono: at + EFFICIENCY_DROP_WINDOW_MS,
+						condemning: false,
+						linkOrUnknownDrops: false,
+						complete: true,
+					}
+				const w = s.openWindow
+				if (at > w.startMono) {
+					w.complete &&= comparable && evidenceValid
+					if (positive) {
+						if (attribution === "host" || attribution === "consumer")
+							w.condemning = true
+						else w.linkOrUnknownDrops = true
+					}
+				}
+				if (at >= w.endMono) {
+					if (w.complete) {
+						s.windows.push({
+							startMono: w.startMono,
+							endMono: w.endMono,
+							condemning: w.condemning,
+							linkOrUnknownDrops: !w.condemning && w.linkOrUnknownDrops,
+						})
+						if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
+					}
+					const start =
+						w.endMono +
+						Math.floor((at - w.endMono) / EFFICIENCY_DROP_WINDOW_MS) *
+							EFFICIENCY_DROP_WINDOW_MS
+					s.openWindow = {
+						startMono: start,
+						endMono: start + EFFICIENCY_DROP_WINDOW_MS,
+						condemning: false,
+						linkOrUnknownDrops: false,
+						complete: comparable && evidenceValid,
+					}
+				}
+				if (validClock && lastRaw !== null) {
+					s.rawSamples.push(lastRaw)
+					if (s.rawSamples.length > 2) s.rawSamples.shift()
+				}
+				try {
+					if (attribution !== "none" && attribution !== s.lastNonNone) {
+						deps.log?.info(
+							{ sourceId: id, from: s.lastNonNone, to: attribution },
+							"Drop attribution changed",
+						)
+						s.lastNonNone = attribution
+					}
+					const logged = s.logged.get(attribution)
+					if (positive && (logged === undefined || at - logged >= 60_000)) {
+						deps.log?.info(
+							{
+								sourceId: id,
+								attribution,
+								dropBytes: bytes,
+								gapMs: maxGapMs,
+								loopDelayMs: loopDelayMaxMs,
+								cpuPercent,
+							},
+							"Drop interval attributed",
+						)
+						s.logged.set(attribution, at)
+					}
+				} catch {
+					/* Observability cannot alter evidence. */
+				}
+			}
+
 			s.rate = comparable && gap > 0 ? (bytes * 1000) / gap : null
 			s.lastCompleteMono =
 				counters !== null && signature !== null && valid && validClock
@@ -235,21 +539,14 @@ export function createEfficiencyMonitor(deps: {
 					: null
 			s.lastTickMono = Number.isFinite(at) ? at : null
 			sources.set(id, {
+				attribution,
 				droppedBytesDelta: comparable ? bytes : null,
 				droppedChunksDelta: comparable ? chunks : null,
 			})
 		}
 		let atMs = NaN
-		let cpuPercent: number | null = null
 		try {
 			atMs = deps.now()
-		} catch {
-			/* Display only. */
-		}
-		try {
-			const cpu = deps.cpu.normalisedPercent
-			if (cpu !== null && Number.isFinite(cpu) && cpu >= 0 && cpu <= 100)
-				cpuPercent = cpu
 		} catch {
 			/* Display only. */
 		}
@@ -336,6 +633,55 @@ export function createEfficiencyMonitor(deps: {
 		return null
 	}
 	return {
+		latestAttribution(id) {
+			const at = clock()
+			const s = states.get(id)
+			return s &&
+				Number.isFinite(at) &&
+				s.lastTickMono !== null &&
+				at >= s.lastTickMono &&
+				at - s.lastTickMono <= EFFICIENCY_STALE_MS
+				? s.latest
+				: null
+		},
+		lateWindows(id) {
+			const at = clock()
+			const s = states.get(id)
+			if (
+				!s ||
+				!Number.isFinite(at) ||
+				s.lastTickMono === null ||
+				at < s.lastTickMono ||
+				at - s.lastTickMono > EFFICIENCY_STALE_MS
+			)
+				return []
+			return s.windows.map(w => ({ ...w }))
+		},
+		linkDropsSince(id, since) {
+			const at = clock()
+			return (
+				Number.isFinite(at) &&
+				Number.isFinite(since) &&
+				since <= at &&
+				(states.get(id)?.linkDrops.some(t => t >= since && t <= at) ?? false)
+			)
+		},
+		attributionCounts(id) {
+			const at = clock()
+			const s = states.get(id)
+			if (!s || !Number.isFinite(at)) return null
+			const counts10m: Record<DropAttribution, number> = {
+				none: 0,
+				link: 0,
+				host: 0,
+				consumer: 0,
+				unknown: 0,
+			}
+			for (const entry of s.counts)
+				if (entry.mono <= at && at - entry.mono <= 600_000)
+					counts10m[entry.code]++
+			return { last: s.latest, counts10m }
+		},
 		monoNow: clock,
 		lastSampleMono: () => lastMono,
 		droppedBetweenMono,
@@ -351,9 +697,9 @@ export function createEfficiencyMonitor(deps: {
 		},
 		sampleNow,
 		dropState,
-		/** Inclusive lookback: a drop or fault at admission counts. Missing,
-		 * stale and invalid-clock evidence fails closed. An unknown interval lasts
-		 * until a full clean window is earned; any overlap with the lookback counts. */
+		// Inclusive lookback: a drop or fault at admission counts. Missing,
+		// stale and invalid-clock evidence fails closed. An unknown interval lasts
+		// until a full clean window is earned; any overlap with the lookback counts.
 		droppedWithinMs(id, ms) {
 			const at = clock()
 			const s = states.get(id)
