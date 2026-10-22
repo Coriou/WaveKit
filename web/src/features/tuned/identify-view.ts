@@ -194,6 +194,9 @@ const WORD: Readonly<Record<ScannerTrialOutcome, string>> = {
 	pending: "Queued",
 	running: "Trying",
 	decoded: "Decoded",
+	heard: "Heard",
+	"data-like": "Data-like",
+	"carrier-only": "Carrier only",
 	"no-sync": "No sync",
 	"crc-errors": "CRC errors",
 	timeout: "Timed out",
@@ -207,6 +210,10 @@ const TONE: Readonly<Record<ScannerTrialOutcome, TrialTone>> = {
 	pending: "queued",
 	running: "busy",
 	decoded: "ok",
+	// WG11: voice was heard but nothing was decoded, so it is not shown as a decode
+	heard: "skip",
+	"data-like": "fail",
+	"carrier-only": "fail",
 	"no-sync": "fail",
 	"crc-errors": "fail",
 	timeout: "fail",
@@ -233,10 +240,15 @@ export function trialRow(
 ): IdentifyTrialRow {
 	const protocol = protocolLabel(trial.protocol)
 	// WG7 ambient trials read a decoder already running there (AIS, ACARS, VDL2, LoRa): no probe
+	// WG11/WG12 replay trials run on a short IQ capture of the target after it ended
+	const named =
+		trial.decoder === "analog-demod" ? "analog demod" : trial.decoder
 	const decoder =
 		trial.transport === "ambient"
-			? `running ${trial.decoder ?? "decoder"}`
-			: (trial.decoder ?? "no decoder")
+			? `running ${named ?? "decoder"}`
+			: trial.transport === "replay"
+				? `${named ?? "decoder"} from capture`
+				: (named ?? "no decoder")
 	const word = WORD[trial.outcome]
 	const why = trial.reason ? REASON[trial.reason] : null
 	return {

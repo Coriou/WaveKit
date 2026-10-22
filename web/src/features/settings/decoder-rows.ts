@@ -72,12 +72,28 @@ export function decoderTone(d: DecoderInfo): "run" | "idle" | "fault" | "off" {
 	return d.health === "restarting" ? "fault" : "run"
 }
 
+/** Why a decoder is paused, in words; the core's band and rate reasons read "outside the capture". */
+function suspensionText(d: DecoderInfo): string {
+	switch (d.suspension?.reasonCode) {
+		case "efficiency-budget":
+			return "over the efficiency budget"
+		case "decoder-unavailable":
+			return "not installed"
+		case "channelizer-unavailable":
+			return "needs the channelizer"
+		case "tuner-scanning":
+			return "the scanner has the receiver"
+		default:
+			return "outside the capture"
+	}
+}
+
 export function decoderStatusText(d: DecoderInfo): string {
 	if (d.health === "faulted")
 		return `Stopped · ${d.lastError?.message ?? "it kept failing"}`
 	if (d.health === "restarting") return "Restarting"
 	if (!d.running) return d.desiredRunning === false ? "Stopped" : "Not running"
-	if (d.suspended) return "Paused · outside the capture"
+	if (d.suspended) return `Paused · ${suspensionText(d)}`
 	const rate = d.rateHistory?.at(-2)
 	if (rate !== undefined) return `${rate} msg/min`
 	return d.health === "idle" ? "Running · nothing heard lately" : "Running"
