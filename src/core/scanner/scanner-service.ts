@@ -722,11 +722,7 @@ export class ScannerService extends EventEmitter {
 				port?.settle(pending.captureId, `analog-${id}`)
 				this.refuseAnalog(pending.live, reason)
 			} else if (port.view(pending.captureId))
-				this.requestJobAnalog(
-					pending.live,
-					pending.track,
-					pending.live.endReason !== undefined,
-				)
+				this.requestJobAnalog(pending.live, pending.track)
 		}
 	}
 	private readonly captures: CaptureStore
@@ -2621,24 +2617,8 @@ export class ScannerService extends EventEmitter {
 		const opened = !live
 		if (!live) {
 			if (covering.length === 0) return
-			// Pending tracks wait for the gate, except an explicitly allowed analog
-			// emission gets a final capture opportunity on close.
-			if (
-				track.gate !== undefined &&
-				track.gate !== "passed" &&
-				!(
-					ev.kind === "track-close" &&
-					(ev.endReason === "quiet" || ev.endReason === "max-duration") &&
-					!synthetic &&
-					this.deps.analogTrial?.runLive !== undefined &&
-					covering.some(
-						d =>
-							d.record.spec.signalsOnly !== true &&
-							(!d.record.spec.protocols?.length ||
-								d.record.spec.protocols.includes("analog-fm")),
-					)
-				)
-			) {
+			// Only gate-accepted emissions become observations and receive trials.
+			if (track.gate !== undefined && track.gate !== "passed") {
 				this.refuseAnalog(
 					{ sourceId, observationId: null, discoveryId: null },
 					`gate-${track.gate}`,
@@ -2711,9 +2691,9 @@ export class ScannerService extends EventEmitter {
 			!synthetic &&
 			!late &&
 			(!closing || endReason === "quiet" || endReason === "max-duration") &&
-			(closing || track.gate === undefined || track.gate === "passed")
+			(track.gate === undefined || track.gate === "passed")
 		)
-			this.requestJobAnalog(live, track, closing)
+			this.requestJobAnalog(live, track)
 		else if (!synthetic && !late && track.gate !== undefined)
 			this.refuseAnalog(live, `gate-${track.gate}`)
 		if (captureAtGate.request && !this.analogDeferred.has(live.observationId)) {
@@ -4085,11 +4065,7 @@ export class ScannerService extends EventEmitter {
 	// === WG11 req 6: IQ capture on detection, replay results ===
 
 	/** A18: classification and measured bandwidth never exclude an allowed analog trial. */
-	private requestJobAnalog(
-		live: LiveObservation,
-		track: TrackSnapshot,
-		closing = false,
-	): void {
+	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
 		const runner = this.admittedAnalog()
 		const protocols = this.protocolsFor(live, track.centreHz)
 		const eligible = live.jobIds.some(id => {
@@ -4110,7 +4086,7 @@ export class ScannerService extends EventEmitter {
 			? "not-allowed"
 			: this.discoveryLockedOut(live.discoveryId)
 				? "lockout"
-				: live.discoveryId === null && !closing
+				: live.discoveryId === null
 					? "no-discovery"
 					: track.flags.spur || track.flags.iqImage
 						? "spur-image"

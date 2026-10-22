@@ -490,7 +490,90 @@ it("admits allowed analog within one observation for arbitrary priors with a per
 	}
 })
 
-it.each(["passed", "pending", "below", "busy"] as const)(
+it.each(["pending", "below"] as const)(
+	"refuses unplaced %s emissions only at the gate",
+	async gate => {
+		const h = serviceHarness({
+			patch: s => {
+				s.passive.enabled = false
+			},
+		})
+		const internal = h.service as unknown as {
+			deps: ScannerServiceDeps
+			store: DiscoveryStore
+			live: Map<string, LiveObservation>
+			analogDeferred: Map<string, unknown>
+			onTrack(
+				sourceId: string,
+				event: {
+					kind: "track-open" | "track-close"
+					track: TrackSnapshot
+					endReason?: "quiet"
+				},
+			): void
+			log: { info: (...args: unknown[]) => void }
+		}
+		const run = vi.fn()
+		const runLive = vi.fn()
+		const captureFor = vi.fn()
+		const log = vi.spyOn(internal.log, "info")
+		const trial = vi.spyOn(internal.store, "recordTrial")
+		const analog = vi.spyOn(internal.store, "recordAnalog")
+		try {
+			await h.service.start()
+			await h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				ranges: [{ startHz: 446_000_000, endHz: 446_100_000 }],
+				protocols: ["analog-fm"],
+			})
+			internal.deps = {
+				...internal.deps,
+				analogTrial: { run, runLive },
+				iqCapture: { captureFor } as unknown as NonNullable<
+					ScannerServiceDeps["iqCapture"]
+				>,
+			}
+			const track = makeTrack({
+				id: "unplaced",
+				centreHz: 446_056_250,
+				startedAt: 0,
+			})
+			track.gate = gate
+			internal.onTrack("rtl", { kind: "track-open", track })
+			internal.onTrack("rtl", {
+				kind: "track-close",
+				track,
+				endReason: "quiet",
+			})
+			expect(internal.live.size).toBe(0)
+			expect(internal.analogDeferred.size).toBe(0)
+			expect(runLive).not.toHaveBeenCalled()
+			expect(run).not.toHaveBeenCalled()
+			expect(captureFor).not.toHaveBeenCalled()
+			expect(trial).not.toHaveBeenCalled()
+			expect(analog).not.toHaveBeenCalled()
+			const refusals = log.mock.calls.filter(
+				([, message]) => message === "Analog trial refused",
+			)
+			expect(refusals).toEqual([
+				[
+					expect.objectContaining({
+						reason: `gate-${gate}`,
+						observationId: null,
+						discoveryId: null,
+					}),
+					"Analog trial refused",
+				],
+			])
+		} finally {
+			await h.service.stop()
+			await rm(h.dir, { recursive: true, force: true })
+		}
+	},
+)
+
+it.each(["passed", "busy"] as const)(
 	"preserves analog turns for closed %s emissions",
 	async gate => {
 		const h = serviceHarness({
@@ -500,6 +583,7 @@ it.each(["passed", "pending", "below", "busy"] as const)(
 		})
 		const internal = h.service as unknown as {
 			deps: ScannerServiceDeps
+			store: DiscoveryStore
 			live: Map<string, LiveObservation>
 			onTrack(
 				sourceId: string,
@@ -520,7 +604,26 @@ it.each(["passed", "pending", "below", "busy"] as const)(
 					signal.addEventListener("abort", finish, { once: true })
 				}),
 		)
-		const run = vi.fn().mockResolvedValue({ malformed: true })
+		const run = vi.fn().mockResolvedValue({
+			outcome: "decoded",
+			mode: "nfm",
+			voice: true,
+			tones: { ctcssHz: 74.4, dcs: null, audioSeconds: 1 },
+			stats: {
+				mode: "nfm",
+				frames: [
+					{
+						carrierDb: -20,
+						hfNoiseDb: -40,
+						audioDb: -12,
+						syllabic: 0.4,
+						cluster: 0.9,
+					},
+				],
+				gapSamples: 0,
+				floorDb: -90,
+			},
+		})
 		const captures = new Map<string, string>()
 		let ready = false
 		let busy = gate === "busy"
@@ -582,6 +685,11 @@ it.each(["passed", "pending", "below", "busy"] as const)(
 			})
 			second.gate = gate === "busy" ? "passed" : gate
 			internal.onTrack("rtl", { kind: "track-open", track: second })
+			const secondLive = internal.live.get(second.trackId)!
+			const secondId = secondLive.observationId
+			const discoveryId = secondLive.discoveryId!
+			const trial = vi.spyOn(internal.store, "recordTrial")
+			const analog = vi.spyOn(internal.store, "recordAnalog")
 			internal.onTrack("rtl", {
 				kind: "track-close",
 				track: second,
@@ -592,6 +700,23 @@ it.each(["passed", "pending", "below", "busy"] as const)(
 			finish()
 			await vi.waitFor(() =>
 				expect(runLive.mock.calls.length + run.mock.calls.length).toBe(2),
+			)
+			await vi.waitFor(() => {
+				expect(analog).toHaveBeenCalledWith(
+					secondId,
+					expect.objectContaining({
+						tone: expect.objectContaining({ ctcssHz: 74.4 }),
+					}),
+				)
+				expect(analog.mock.results.at(-1)?.value).toBe(true)
+			})
+			expect(trial).toHaveBeenCalledWith(
+				secondId,
+				expect.objectContaining({ outcome: "decoded" }),
+			)
+			expect(trial.mock.results.at(-1)?.value).toBe(true)
+			expect(internal.store.observations(discoveryId, null, 10).items).toEqual(
+				expect.arrayContaining([expect.objectContaining({ id: secondId })]),
 			)
 			if (gate === "passed" || gate === "busy") {
 				expect(captureFor).toHaveBeenCalledTimes(gate === "busy" ? 2 : 1)
