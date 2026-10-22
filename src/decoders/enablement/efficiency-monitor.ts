@@ -53,6 +53,8 @@ const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
 type SourceState = {
 	pending: {
 		sequence: number
+		bytes: number
+		chunks: number
 		at: number
 		gap: number
 		loop: number
@@ -532,6 +534,7 @@ export function createEfficiencyMonitor(deps: {
 				evidenceValid = false
 			}
 			if (!applies) evidenceValid = true
+			const intervalBytes = bytes
 			const positiveNow = bytes > 0 || chunks > 0
 			// A completed episode can be followed by another gap between monitor polls.
 			const completedPending =
@@ -545,7 +548,34 @@ export function createEfficiencyMonitor(deps: {
 				s.pending.upstream === 0 &&
 				upstreamDropDelta === 0 &&
 				s.pending.gap - s.pending.loop >= LINK_GAP_MS
-			if (completedPending) {
+			const completed = completedPending ? s.pending : null
+			if (completed) {
+				if (s.openWindow) s.openWindow.linkOrUnknownDrops = true
+				// A new loss may belong to a successor episode. Resolve the old
+				// interval independently so its bytes cannot inherit that verdict.
+				if (positiveNow) {
+					s.counts.push({ mono: completed.at, code: "link" })
+					try {
+						deps.log?.info(
+							{
+								sourceId: id,
+								attribution: "link",
+								dropBytes: completed.bytes,
+								intervalMono: completed.at,
+								gapMs: completed.gap,
+								loopDelayMs: completed.loop,
+								cpuPercent: completed.cpu,
+							},
+							"Drop interval attributed",
+						)
+					} catch {
+						/* Observability cannot alter evidence. */
+					}
+				} else {
+					maxGapMs = completed.gap
+					loopDelayMaxMs = completed.loop
+					cpuPercent = completed.cpu
+				}
 				s.linkDrops.push(s.pending!.at)
 				if (s.linkDrops.length > 32) s.linkDrops.shift()
 				s.pending = null
@@ -579,6 +609,8 @@ export function createEfficiencyMonitor(deps: {
 			)
 				s.pending = {
 					sequence: recovery.sequence,
+					bytes: 0,
+					chunks: 0,
 					at,
 					gap: maxGapMs,
 					loop: loopDelayMaxMs,
@@ -588,6 +620,10 @@ export function createEfficiencyMonitor(deps: {
 				}
 			const pending = s.pending
 			if (pending) {
+				if (!consumerNow) {
+					pending.bytes += bytes
+					pending.chunks += chunks
+				}
 				pending.valid &&=
 					comparable &&
 					evidenceValid &&
@@ -605,8 +641,12 @@ export function createEfficiencyMonitor(deps: {
 			}
 			const waiting =
 				pending !== null &&
-				recovery?.shortfall === null &&
-				at - pending.at < LINK_RECOVERY_WAIT_MS
+				recovery?.shortfall !== false &&
+				recovery?.shortfall !== true &&
+				// Maximum supported capacity plus a gap and one polling period.
+				at - pending.at <
+					LINK_RECOVERY_WAIT_MS + LINK_GAP_MS + EFFICIENCY_SAMPLE_MS
+			const unresolved = waiting && !consumerNow
 			const attribution =
 				completedPending && !positiveNow
 					? "link"
@@ -630,13 +670,23 @@ export function createEfficiencyMonitor(deps: {
 									shortfall,
 									upstreamDropDelta,
 								})
+			if (pending && !waiting) {
+				bytes = pending.bytes
+				chunks = pending.chunks
+			}
+			if (!waiting && !positiveNow && completed) {
+				bytes += completed.bytes
+				chunks += completed.chunks
+			}
+			const resolvedAt =
+				pending?.at ?? (!positiveNow ? completed?.at : undefined) ?? at
 			const positive = positiveNow || pending !== null || completedPending
 			const link =
 				(attribution === "link" || (completedPending && !positiveNow)) &&
 				positive
 			if (positive && !waiting) {
 				if (link) {
-					s.linkDrops.push(at)
+					s.linkDrops.push(resolvedAt)
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
 				} else {
 					s.lastDropMono = Math.max(
@@ -666,9 +716,9 @@ export function createEfficiencyMonitor(deps: {
 			}
 			s.coverageBlocked = link || waiting || !evidenceValid
 			if (!waiting) s.pending = null
-			s.latest = attribution
+			s.latest = unresolved ? null : attribution
 			if (Number.isFinite(at)) {
-				s.counts.push({ mono: at, code: attribution })
+				if (!unresolved) s.counts.push({ mono: resolvedAt, code: attribution })
 				if (s.counts.length > 300) s.counts.shift()
 				// Windows are (start, end]: the closing sample belongs to the window it closes.
 				if (s.openWindow === null)
@@ -681,14 +731,14 @@ export function createEfficiencyMonitor(deps: {
 					}
 				const w = s.openWindow
 				if (at > w.startMono) {
-					w.complete &&= comparable && evidenceValid && !waiting
-					if (positive) {
+					w.complete &&= comparable && evidenceValid
+					if (positive && !unresolved) {
 						if (attribution === "host" || attribution === "consumer")
 							w.condemning = true
 						else w.linkOrUnknownDrops = true
 					}
 				}
-				if (at >= w.endMono) {
+				if (at >= w.endMono && !waiting) {
 					if (w.complete) {
 						s.windows.push({
 							startMono: w.startMono,
@@ -715,7 +765,11 @@ export function createEfficiencyMonitor(deps: {
 					if (s.rawSamples.length > 2) s.rawSamples.shift()
 				}
 				try {
-					if (attribution !== "none" && attribution !== s.lastNonNone) {
+					if (
+						!unresolved &&
+						attribution !== "none" &&
+						attribution !== s.lastNonNone
+					) {
 						deps.log?.info(
 							{ sourceId: id, from: s.lastNonNone, to: attribution },
 							"Drop attribution changed",
@@ -723,12 +777,17 @@ export function createEfficiencyMonitor(deps: {
 						s.lastNonNone = attribution
 					}
 					const logged = s.logged.get(attribution)
-					if (positive && (logged === undefined || at - logged >= 60_000)) {
+					if (
+						!unresolved &&
+						positive &&
+						(logged === undefined || at - logged >= 60_000)
+					) {
 						deps.log?.info(
 							{
 								sourceId: id,
 								attribution,
 								dropBytes: bytes,
+								intervalMono: resolvedAt,
 								gapMs: maxGapMs,
 								loopDelayMs: loopDelayMaxMs,
 								cpuPercent,
@@ -742,16 +801,22 @@ export function createEfficiencyMonitor(deps: {
 				}
 			}
 
-			s.rate = comparable && gap > 0 ? (bytes * 1000) / gap : null
+			s.rate = comparable && gap > 0 ? (intervalBytes * 1000) / gap : null
 			s.lastCompleteMono =
 				counters !== null && signature !== null && valid && validClock
 					? at
 					: null
 			s.lastTickMono = Number.isFinite(at) ? at : null
 			sources.set(id, {
-				attribution,
-				droppedBytesDelta: comparable ? bytes : null,
-				droppedChunksDelta: comparable ? chunks : null,
+				...(unresolved ? {} : { attribution }),
+				droppedBytesDelta:
+					!unresolved && (comparable || pending !== null || completedPending)
+						? bytes
+						: null,
+				droppedChunksDelta:
+					!unresolved && (comparable || pending !== null || completedPending)
+						? chunks
+						: null,
 			})
 		}
 		let atMs = NaN
@@ -831,7 +896,7 @@ export function createEfficiencyMonitor(deps: {
 		amount: number,
 	): number | null => {
 		const s = states.get(id)
-		if (!s || !Number.isFinite(since)) return null
+		if (!s || s.pending !== null || !Number.isFinite(since)) return null
 		let total = 0
 		let end = since
 		for (const { from, to } of s.covered) {
