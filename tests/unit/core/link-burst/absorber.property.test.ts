@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import fc from "fast-check"
 import { createBurstAbsorber } from "../../../../src/core/link-burst/absorber.js"
 import { ABSORBER_LAGGARD_MS } from "../../../../src/core/link-burst/contract.js"
@@ -30,6 +30,10 @@ const lengths = fc.array(fc.integer({ min: 1, max: 70_000 }), {
 })
 
 describe("BurstAbsorber properties", () => {
+	beforeEach(() =>
+		vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] }),
+	)
+	afterEach(() => vi.useRealTimers())
 	// Feature: link-burst-resilience, Property 2: Pass-through identity (absorber half)
 	// Validates: Requirements 1.3
 	it("preserves pass-through identity and tick", () => {
@@ -72,6 +76,7 @@ describe("BurstAbsorber properties", () => {
 					let input = 0
 					let delivered = 0
 					function checkRelease() {
+						vi.runAllTimers()
 						if (fanout.congested.size === 0) {
 							const size = Math.floor(held.length / bytes) * bytes
 							expected.push(Buffer.from(held.subarray(0, size)))
@@ -171,6 +176,7 @@ describe("BurstAbsorber properties", () => {
 				if (offset < total) second.absorber.ingest(stream.subarray(offset))
 				first.fanout.drain("a")
 				second.fanout.drain("a")
+				vi.runAllTimers()
 				expect(
 					Buffer.concat(first.fanout.delivered).equals(
 						Buffer.concat(second.fanout.delivered),
@@ -204,6 +210,7 @@ describe("BurstAbsorber properties", () => {
 				for (const target of [first, second]) {
 					expect(target.absorber.counters().heldBytes).toBe(capacity)
 					target.fanout.drain("a")
+					vi.runAllTimers()
 					expect(
 						Buffer.concat(target.fanout.delivered).equals(
 							stream.subarray(0, capacity),
@@ -244,6 +251,7 @@ describe("BurstAbsorber properties", () => {
 					absorber.ingest(chunk)
 					expect(absorber.counters().heldBytes).toBeLessThanOrEqual(70_004)
 					fanout.drain("a")
+					vi.runAllTimers()
 					expect(absorber.counters().heldBytes).toBe(0)
 					expect(
 						Buffer.concat(fanout.delivered).equals(Buffer.concat(expected)),
@@ -274,6 +282,7 @@ describe("BurstAbsorber properties", () => {
 						) {
 							fanout.tick = now
 							absorber.ingest(Buffer.alloc(bytes))
+							vi.runAllTimers()
 						}
 						if (single) {
 							expect(fanout.delivered).toHaveLength(0)
