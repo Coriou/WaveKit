@@ -188,13 +188,15 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 **Analog transmissions** (one package: a squelch-delimited event carries all of these)
 - [x] Analog transmission events (start, end, duration, frequency) from squelch:
   `live-audio:transmission` and the `analog-transmission` Activity kind (WG1 §3–4).
-- [ ] Analog vs digital detected per transmission on shared channels (ROADMAP §5b), so
+- [x] Analog vs digital detected per transmission on shared channels (ROADMAP §5b), so
   "What you hear: Auto" switches per transmission and the event carries the mode.
-- [ ] Tone on live status while a transmission is open (Listen offers the tone of the last
+  Done in core (WG12: a proof per observation). Not wired yet: Listen's "What you hear: Auto".
+- [x] Tone on live status while a transmission is open (Listen offers the tone of the last
   closed transmission). Done: tone squelch (`toneSquelch`, WG7, NFM; Listen offers it), DCS on
   closed transmissions (WG6). Partly: CTCSS (50 standard tones) on each closed
   transmission as `tone.ctcssHz`, stored and searchable as text (WG2 §7); saved frequencies
   store a tone (ctcss, dcs code + polarity); scanner discoveries carry `ctcssHz` (S2, disabled).
+  Done in core (WG12 `LiveAudioStatus.tone`). Not wired yet: Listen still offers the last closed tone.
 - [x] DTMF on the tuned analog channel: digits on each closed transmission as `tone.dtmf` (up to
   32 symbols, WG2 §7), one per transmission, rather than a separate `audio:dtmf` event.
 - [ ] The recording id on the event (see Recordings).
@@ -222,7 +224,7 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   the passive job (on by default, off on Pi 4-class hosts); ADS-B, AIS, ACARS, VDL2 and LoRa
   decodes never become discoveries. Activity rows now carry frequency and provenance, but no
   per-bucket summary exists.
-- [ ] Stable signal tracks on spectrum frames (web app, 2026-10-17): `spectrum:frame.tracks` are the
+- [x] Stable signal tracks on spectrum frames (web app, 2026-10-17): `spectrum:frame.tracks` are the
   block's raw segments (`pipeline.ts`, `segs.map`): no id, no level, no age, so every flicker of
   noise is a new "signal" and the app cannot keep a label on the same emission from one frame to
   the next. The tracker already knows all of it (`TrackSnapshot`). Wanted per frame track: the
@@ -232,6 +234,8 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   and, when the scanner has one, its identity (discovery id, best protocol and confidence level).
   The app then labels the tuned and named signals, plus surfaced unknowns above a level, without
   guessing from one frame (today it filters on its own: about 10 dB over the floor for about 1 s).
+  Done in core (WG11, 2026-10-18; WG12 adds `gate` and `channelSnrDb`): wired on the web branch, the label
+  gate follows (`sourceId`, `trackId`), trusts `surfaced`, drops spurs and names a chip from `scanner`.
 
 **Event contract** (one replay contract, ROADMAP §4)
 - [ ] Live push with replay from a cursor for scanner events (scanner WS has none; clients
@@ -297,13 +301,15 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 - [x] `preemptedBy: {jobId, name}` on `paused(preempted-job)` (SF1 §4).
 - [ ] Optional `discoveryId` on saved frequencies; the discovery DTO lists
   `savedFrequencyIds`.
-- [ ] Identify until a transmission (web app, 2026-10-17): an open wait for a signal on
+- [x] Identify until a transmission (web app, 2026-10-17): an open wait for a signal on
   `POST /api/scanner/identify` (`timeoutMs: null` or `waitUntilSignal: true`, ended by
   `DELETE` or a retune), and an explicit `result.ended: "no-signal"` when the wait ran out with
   nothing heard. Today `timeoutMs` stops at 120 s, so the tuned card's "Wait until a
   transmission" chains 120 s jobs and reads "nothing heard" from an `unidentified` result with
   no trials and spectrum measurements (`web/src/data/identify-store.ts`); each round leaves a
   job in the scanner history.
+  Done in core (WG12 `waitUntilSignal`, `waitMs` up to 10 min, `result.ended: "no-signal"`): wired, the
+  web app asks for the open wait and falls back to 120 s jobs on an older core.
 - [ ] S2 enabled (parallel identify trials, "Likely", CTCSS, analog recordings) and S3
   listen-scan ("Scan a list") for the later Scanner mode.
 - [x] Decoder IDs in a sweep's impact (`Impact.runningDecoders`, `pinnedDecoders`); the UI
@@ -449,9 +455,10 @@ re-checked 2026-10-17 on the branch after merging main 1da448e1)
 - [ ] `PATCH /api/live-audio/config` out-of-range offset 400 has no `code`
   (`src/api/routes/live-audio.ts:389-395`); while stopped the same PATCH is accepted and the next start
   fails with `CHANNEL_OFFSET_OUT_OF_RANGE`. Both still so on main (checked with curl).
-- [ ] Identify reports decoders whose binary is missing as `no-sync` (`src/core/scanner/identify.ts:461`,
+- [x] Identify reports decoders whose binary is missing as `no-sync` (`src/core/scanner/identify.ts:461`,
   `job-runner.ts:229`); one job went `candidate` then back to `trying` (`identify.ts:1384`). The first
   is still so on main (every dsd-fme trial "No sync" here); the bounce did not recur in the re-check.
+  Fixed in core (WG12: `unsupported` with reason `decoder-unavailable`, listed in `proof.unavailable`).
 - [ ] "Decode as…" (web app) is Identify with `protocols: [one]`, but the core keeps only protocols a
   compatible class lists (`identifyScores`, `src/core/scanner/identify.ts:279`) and never probes AIS, ACARS,
   VDL2 or LoRa. So the operator cannot force a decoder the classifier rules out: the card says "It does not
@@ -497,12 +504,15 @@ core source and run against the mock, not yet against a live core)
 **Found by the web app, Scanner pass** (2026-10-17, branch `claude/project-thread-afdtom`; read from the
 core source and run against the mock, not yet against a live core)
 
-- [ ] `scanner:discovery` with `change: "merged"` names only the surviving discovery, and the absorbed one's
+- [x] `scanner:discovery` with `change: "merged"` names only the surviving discovery, and the absorbed one's
   `deleted` is never sent (it is emitted after the record is gone). The web app guesses the absorbed entry
   from the merge key; a `mergedIds[]` on the event would make it exact.
-- [ ] `progress.holdingOn` is the scheduler's hold track id, not a discovery id or a frequency. The Tuner hold
+  Done in core (WG12 `mergedIds`): wired, the guess stays for older cores.
+- [x] `progress.holdingOn` is the scheduler's hold track id, not a discovery id or a frequency. The Tuner hold
   row finds the held signal from probe targets or `scanner:activity`; a `holding: {discoveryId?, frequencyHz}`
   on progress would name the hit at once ("Hearing DMR · CC 1").
+  Done in core (WG12 `progress.holding`, plus `phase` and `trial`): the plan footer and the hold row say
+  the phase; the hold row still finds the held discovery as before.
 - [ ] Discovery queries take one value per filter (one `protocol`, one `identity`): the search cannot ask for
   "DMR or P25", so a second chip of the same kind replaces the first.
 - [ ] A discovery's own 24 h history (hourly airtime or last transmissions) for the activity strip of the
@@ -548,16 +558,19 @@ core source, reported against a live core)
 **Found by the web app, Identify on its own** (2026-10-18, branch `claude/project-thread-afdtom`; read from
 `src/core/scanner/identify.ts` and `scanner-service.ts`)
 
-- [ ] The core identifies only on request (`POST /api/scanner/identify`), so a transmission on the frequency
+- [x] The core identifies only on request (`POST /api/scanner/identify`), so a transmission on the frequency
   you sit on is never named unless you ask. The web app now asks by itself (Settings › Identify on its own,
   on by default, `web/src/features/tuned/auto-identify.ts`): when the live-audio squelch opens on a frequency
   no decoder follows, once per visit, while that browser is listening. A core-side option (identify a
   transmission on the live-audio channel when nothing decodes it) would cover the times no browser listens
   and would not depend on the squelch.
-- [ ] What Identify named is kept by the web app for the session only (the card keeps "DMR · CC 0" after
+  Done in core (WG12: the live-audio channel's closed transmissions attach analog evidence to the
+  matching discovery). The web app's own Identify on its own stays for digital channels.
+- [x] What Identify named is kept by the web app for the session only (the card keeps "DMR · CC 0" after
   the banner is dismissed). The discovery holds it, but nothing answers "what is known at 446.925 MHz" in one
   call; a lookup by frequency (`GET /api/scanner/discoveries?nearHz=&toleranceHz=`) would let the card name a
   frequency identified before, from any browser.
+  Done in core (WG12 `nearHz` / `toleranceHz`). Not wired yet: the card still keeps it per session.
 - [ ] An identified digital channel is not decoded afterwards: Identify's probe stops, and no decoder follows
   the frequency, so the card says "No decoder runs on this frequency". A "Decode here" action (start the
   protocol's decoder on that channel, or follow the live-audio channel) would turn an answer into traffic.
