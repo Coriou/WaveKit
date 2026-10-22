@@ -15,6 +15,7 @@ import { EventEmitter } from "node:events"
 import { z } from "zod"
 import { isDialableEndpoint } from "./endpoint-probe.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
+import type { SdrHostLinkFacts } from "./link-burst/contract.js"
 import type { SdrHostStatus } from "@wavekit/api-types"
 
 // ============================================================================
@@ -67,6 +68,35 @@ export function parseReceiverEndpoints(
 	return result.success ? result.data : null
 }
 
+const ReadingStateSchema = z.enum(["ok", "stale", "unavailable"])
+const HostLinkSchema = z.object({
+	network: z.object({
+		state: ReadingStateSchema,
+		value: z
+			.array(
+				z.object({
+					kind: z.enum(["ethernet", "wireless", "other"]),
+					defaultRouteMetric: z.number().finite().nonnegative().nullable(),
+					wireless: z.object({ signalDbm: z.number().finite() }).nullable(),
+				}),
+			)
+			.nullable(),
+	}),
+	power: z.object({
+		undervoltageNow: z.object({
+			state: ReadingStateSchema,
+			value: z.boolean().nullable(),
+		}),
+		throttling: z.object({
+			state: ReadingStateSchema,
+			value: z.object({ throttled: z.boolean() }).nullable(),
+		}),
+	}),
+})
+const IqDeliverySchema = z.object({
+	modes: z.array(z.enum(["raw", "channels"])).max(2),
+})
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -102,6 +132,7 @@ export interface SdrHostPollerOptions {
 interface PollerState {
 	config: SdrHostConfig
 	lastStatus: SdrHostStatus | null
+	linkFacts: SdrHostLinkFacts | null
 	consecutiveFailures: number
 	nextPollAt: number
 	timer: ReturnType<typeof setTimeout> | null
@@ -136,6 +167,7 @@ export class SdrHostPoller extends EventEmitter {
 			this.pollers.set(config.sourceId, {
 				config,
 				lastStatus: null,
+				linkFacts: null,
 				consecutiveFailures: 0,
 				nextPollAt: 0,
 				timer: null,
@@ -199,6 +231,12 @@ export class SdrHostPoller extends EventEmitter {
 		return state.lastStatus ?? this.createUnavailableStatus(state.config, null)
 	}
 
+	/** Latest validated receiver facts, without host names or addresses. */
+	getLinkFacts(sourceId: string): SdrHostLinkFacts | null {
+		const facts = this.pollers.get(sourceId)?.linkFacts
+		return facts ? { ...facts } : null
+	}
+
 	/**
 	 * Gets all SDR host statuses.
 	 */
@@ -221,6 +259,7 @@ export class SdrHostPoller extends EventEmitter {
 		const state: PollerState = {
 			config,
 			lastStatus: null,
+			linkFacts: null,
 			consecutiveFailures: 0,
 			nextPollAt: 0,
 			timer: null,
@@ -277,6 +316,7 @@ export class SdrHostPoller extends EventEmitter {
 
 		try {
 			const { status, endpoints } = await this.fetchStatus(state.config)
+			state.linkFacts = await this.fetchLinkFacts(state.config)
 
 			// Track recovery
 			if (state.consecutiveFailures > 0) {
@@ -294,6 +334,7 @@ export class SdrHostPoller extends EventEmitter {
 			// Schedule next poll at normal interval
 			this.scheduleNextPoll(sourceId, this.pollIntervalMs)
 		} catch (error) {
+			state.linkFacts = null
 			state.consecutiveFailures++
 
 			const backoffDelay = Math.min(
@@ -320,6 +361,51 @@ export class SdrHostPoller extends EventEmitter {
 
 			// Schedule retry with backoff
 			this.scheduleNextPoll(sourceId, backoffDelay)
+		}
+	}
+
+	private async fetchLinkFacts(
+		config: SdrHostConfig,
+	): Promise<SdrHostLinkFacts | null> {
+		const controller = new AbortController()
+		const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
+		try {
+			const response = await this.fetchFn(`${config.apiUrl}/api/host`, {
+				signal: controller.signal,
+				headers: { Accept: "application/json" },
+			})
+			if (!response.ok) return null
+			const body: unknown = await response.json()
+			const parsed = HostLinkSchema.safeParse(body)
+			if (!parsed.success) return null
+			const { network, power } = parsed.data
+			let preferred: NonNullable<typeof network.value>[number] | null = null
+			let preferredMetric = Infinity
+			if (network.state === "ok") {
+				for (const iface of network.value ?? []) {
+					const metric = iface.defaultRouteMetric
+					if (metric !== null && metric < preferredMetric) {
+						preferred = iface
+						preferredMetric = metric
+					}
+				}
+			}
+			return {
+				interfaceKind: preferred?.kind ?? null,
+				signalDbm: preferred?.wireless?.signalDbm ?? null,
+				undervoltageNow:
+					power.undervoltageNow.state === "ok"
+						? power.undervoltageNow.value
+						: null,
+				throttled:
+					power.throttling.state === "ok"
+						? (power.throttling.value?.throttled ?? null)
+						: null,
+			}
+		} catch {
+			return null
+		} finally {
+			clearTimeout(timeoutId)
 		}
 	}
 
@@ -442,7 +528,11 @@ export class SdrHostPoller extends EventEmitter {
 				}
 			}
 
+			const iqDelivery = IqDeliverySchema.safeParse(
+				(body as Record<string, unknown>)["iqDelivery"],
+			)
 			const status: SdrHostStatus = {
+				iqDelivery: iqDelivery.success ? iqDelivery.data : null,
 				available: true,
 				sourceId: config.sourceId,
 				apiUrl: config.apiUrl,
