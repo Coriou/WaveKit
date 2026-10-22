@@ -43,6 +43,9 @@ export function attributeInterval(e: IntervalEvidence): DropAttribution {
 		if (positive === 0 && !overflow) return "none"
 		if (positive > 0 && positive < input.branchDrops.size && !overflow)
 			return "consumer"
+		// Drops on every branch do not prove host overload: a consumer release
+		// can affect siblings too. Require independent loop/CPU evidence below;
+		// otherwise retain link evidence or fail closed to unknown.
 		if ((input.upstreamDropDelta ?? 0) > 0) return "unknown"
 		if (
 			input.maxGapMs !== null &&

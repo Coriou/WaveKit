@@ -254,9 +254,9 @@ describe("BurstAbsorber", () => {
 		const initial = absorber.counters()
 		expect(initial.window).toEqual({
 			peakHeldBytes: 4,
-			absorbedBytes: 6,
+			absorbedBytes: 4,
 			overflowBytes: 6,
-			flushedBytes: 2,
+			flushedBytes: 0,
 			peakHeldMs: 510,
 			maxLaggardExcludeMs: 510,
 		})
@@ -308,7 +308,7 @@ describe("BurstAbsorber", () => {
 		expect(Buffer.concat(fanout.delivered).equals(stream)).toBe(true)
 		expect(absorber.counters().heldBytes).toBe(0)
 	})
-	it("rejoins an excluded branch on drain and gates after re-congestion", () => {
+	it("keeps an excluded branch isolated through transient drains", () => {
 		const { fanout, absorber, time } = setup()
 		fanout.congest("a")
 		absorber.ingest(Buffer.from([1, 2]))
@@ -319,11 +319,11 @@ describe("BurstAbsorber", () => {
 		fanout.congest("a")
 		time(600)
 		absorber.ingest(Buffer.from([5, 6]))
-		expect(absorber.counters().heldBytes).toBe(2)
-		expect(fanout.delivered).toHaveLength(1)
+		expect(absorber.counters().heldBytes).toBe(0)
+		expect(fanout.delivered).toHaveLength(2)
 		time(999)
 		absorber.ingest(Buffer.from([7, 8]))
-		expect(absorber.counters().heldBytes).toBe(4)
+		expect(absorber.counters().heldBytes).toBe(0)
 		fanout.drain("a")
 		expect(Buffer.concat(fanout.delivered)).toEqual(
 			Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]),
