@@ -489,3 +489,258 @@ it("admits allowed analog within one observation for arbitrary priors with a per
 		await rm(h.dir, { recursive: true, force: true })
 	}
 })
+
+it.each(["passed", "pending", "below", "busy"] as const)(
+	"preserves analog turns for closed %s emissions",
+	async gate => {
+		const h = serviceHarness({
+			patch: s => {
+				s.passive.enabled = false
+			},
+		})
+		const internal = h.service as unknown as {
+			deps: ScannerServiceDeps
+			live: Map<string, LiveObservation>
+			onTrack(
+				sourceId: string,
+				event: {
+					kind: "track-open" | "track-close"
+					track: TrackSnapshot
+					endReason?: "quiet"
+				},
+			): void
+			log: { info: (...args: unknown[]) => void }
+			retryAnalog(): void
+		}
+		let finish = () => {}
+		const runLive = vi.fn(
+			(_req: unknown, _mode: unknown, signal: AbortSignal) =>
+				new Promise<never>(resolve => {
+					finish = () => resolve(null as never)
+					signal.addEventListener("abort", finish, { once: true })
+				}),
+		)
+		const run = vi.fn().mockResolvedValue({ malformed: true })
+		const captures = new Map<string, string>()
+		let ready = false
+		let busy = gate === "busy"
+		const captureFor = vi.fn((_req: unknown, holder: string) => {
+			if (busy) {
+				busy = false
+				return { refused: "busy" as const }
+			}
+			captures.set("deferred", holder)
+			return { captureId: "deferred" }
+		})
+		const end = vi.fn(() => {
+			ready = true
+		})
+		const settle = vi.fn((id: string) => {
+			captures.delete(id)
+		})
+		const port = {
+			captureFor,
+			end,
+			settle,
+			capture: vi.fn(() => ({ refused: "disabled" })),
+			holderOf: (id: string) => captures.get(id),
+			view: () => (ready ? {} : null),
+		}
+		const log = vi.spyOn(internal.log, "info")
+		try {
+			await h.service.start()
+			await h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				ranges: [{ startHz: 446_000_000, endHz: 446_100_000 }],
+				protocols: ["analog-fm"],
+			})
+			internal.deps = {
+				...internal.deps,
+				analogTrial: { run, runLive },
+				iqCapture: port as unknown as NonNullable<
+					ScannerServiceDeps["iqCapture"]
+				>,
+			}
+			const first = makeTrack({
+				id: "first",
+				centreHz: 446_056_250,
+				startedAt: 0,
+			})
+			first.gate = "passed"
+			internal.onTrack("rtl", { kind: "track-open", track: first })
+			// Close materializes the discovery while its private analog analysis remains active.
+			internal.onTrack("rtl", {
+				kind: "track-close",
+				track: first,
+				endReason: "quiet",
+			})
+			const second = makeTrack({
+				id: "second",
+				centreHz: 446_056_250,
+				startedAt: 100,
+			})
+			second.gate = gate === "busy" ? "passed" : gate
+			internal.onTrack("rtl", { kind: "track-open", track: second })
+			internal.onTrack("rtl", {
+				kind: "track-close",
+				track: second,
+				endReason: "quiet",
+			})
+			expect(internal.live.size).toBe(0)
+			internal.retryAnalog()
+			finish()
+			await vi.waitFor(() =>
+				expect(runLive.mock.calls.length + run.mock.calls.length).toBe(2),
+			)
+			if (gate === "passed" || gate === "busy") {
+				expect(captureFor).toHaveBeenCalledTimes(gate === "busy" ? 2 : 1)
+				expect(run).toHaveBeenCalledWith(
+					"deferred",
+					"nfm",
+					expect.any(AbortSignal),
+				)
+				expect(log).toHaveBeenCalledWith(
+					expect.objectContaining({
+						reason: "discovery-owned",
+						activeSource: 1,
+					}),
+					"Analog trial refused",
+				)
+			}
+		} finally {
+			finish()
+			await h.service.stop()
+			await rm(h.dir, { recursive: true, force: true })
+		}
+	},
+)
+
+it("bounds deferred captures, expires lost IQ, and throttles each refusal reason", async () => {
+	const h = serviceHarness({
+		patch: s => {
+			s.passive.enabled = false
+		},
+	})
+	const internal = h.service as unknown as {
+		deps: ScannerServiceDeps
+		now: () => number
+		log: { info: (...args: unknown[]) => void }
+		analogDeferred: Map<
+			string,
+			{
+				live: LiveObservation
+				track: TrackSnapshot
+				captureId: string | null
+				at: number
+			}
+		>
+		deferAnalog(live: LiveObservation, track: TrackSnapshot): void
+		retryAnalog(): void
+		refuseAnalog(live: LiveObservation, reason: string): void
+	}
+	const track = makeTrack({
+		id: "bounded",
+		centreHz: 446_056_250,
+		startedAt: 0,
+	})
+	const live: LiveObservation = {
+		observationId: "bounded",
+		sourceId: "rtl",
+		trackId: track.trackId,
+		epoch: track.epoch,
+		jobIds: [],
+		discoveryId: "d_bound",
+		startedAt: 0,
+		classification: { class: "unknown", hypotheses: [], tier: "spectral" },
+		probeIds: new Set(),
+		lastActivityAt: 0,
+		lastIngestAt: 0,
+		lastTrack: track,
+		decoded: false,
+		encrypted: false,
+	}
+	let now = 0
+	const captures = new Set<string>()
+	const captureFor = vi.fn(() => {
+		const captureId = `capture-${captures.size}`
+		captures.add(captureId)
+		return { captureId }
+	})
+	const settle = vi.fn((id: string) => captures.delete(id))
+	try {
+		await h.service.start()
+		internal.now = () => now
+		internal.deps = {
+			...internal.deps,
+			iqCapture: {
+				captureFor,
+				settle,
+				holderOf: (id: string) => (captures.has(id) ? "holder" : undefined),
+				view: () => null,
+			} as unknown as NonNullable<ScannerServiceDeps["iqCapture"]>,
+		}
+		const log = vi.spyOn(internal.log, "info")
+		for (let i = 0; i < 129; i++)
+			internal.deferAnalog({ ...live, observationId: `bounded-${i}` }, track)
+		expect(internal.analogDeferred.size).toBe(128)
+		expect(captureFor).toHaveBeenCalledTimes(128)
+		internal.refuseAnalog(live, "capacity")
+		now = 59_999
+		internal.refuseAnalog(live, "capacity")
+		expect(
+			log.mock.calls.filter(
+				([row]) => (row as { reason: string }).reason === "capacity",
+			),
+		).toHaveLength(1)
+		now = 60_000
+		internal.refuseAnalog(live, "capacity")
+		expect(log).toHaveBeenLastCalledWith(
+			expect.objectContaining({ reason: "capacity", suppressed: 1 }),
+			"Analog trial refused",
+		)
+		now = 599_999
+		internal.retryAnalog()
+		expect(internal.analogDeferred.size).toBe(128)
+		captures.delete("capture-0")
+		internal.retryAnalog()
+		expect(internal.analogDeferred.size).toBe(127)
+		expect(log).toHaveBeenLastCalledWith(
+			expect.objectContaining({ reason: "capture-gone" }),
+			"Analog trial refused",
+		)
+		now = 600_000
+		internal.retryAnalog()
+		expect(internal.analogDeferred.size).toBe(0)
+		expect(settle).toHaveBeenCalledTimes(128)
+		internal.deps = {
+			...internal.deps,
+			iqCapture: {
+				captureFor: () => ({ refused: "busy" }),
+			} as unknown as NonNullable<ScannerServiceDeps["iqCapture"]>,
+		}
+		internal.deferAnalog(live, track)
+		expect(internal.analogDeferred.size).toBe(1)
+		expect(log).toHaveBeenLastCalledWith(
+			expect.objectContaining({ reason: "capture-busy" }),
+			"Analog trial refused",
+		)
+		now += 1999
+		internal.retryAnalog()
+		expect(internal.analogDeferred.size).toBe(1)
+		now++
+		internal.retryAnalog()
+		expect(internal.analogDeferred.size).toBe(0)
+		internal.refuseAnalog(
+			{ ...live, observationId: "untrusted\nvalue" },
+			"spur-image",
+		)
+		expect(log).toHaveBeenLastCalledWith(
+			expect.objectContaining({ reason: "spur-image", observationId: null }),
+			"Analog trial refused",
+		)
+	} finally {
+		await h.service.stop()
+		await rm(h.dir, { recursive: true, force: true })
+	}
+})

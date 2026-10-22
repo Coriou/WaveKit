@@ -86,6 +86,10 @@ import {
 } from "./evidence/capture-recorder.js"
 import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
+import {
+	IQ_CAPTURE_ORPHAN_TTL_MS,
+	IQ_CAPTURE_PREROLL_MAX_MS,
+} from "./iq-capture-contract.js"
 import type {
 	IqCaptureDiscardReason,
 	IqCapturePort,
@@ -567,8 +571,164 @@ export class ScannerService extends EventEmitter {
 	private readonly analogCounts = new Map<string, number>()
 	private readonly analogJobs = new Map<
 		string,
-		{ controller: AbortController; discoveryId: string; sourceId: string }
+		{
+			controller: AbortController
+			discoveryId: string | null
+			sourceId: string
+		}
 	>()
+	/** At most 128 held captures; each expires with the capture store's ten-minute TTL. */
+	private readonly analogDeferred = new Map<
+		string,
+		{
+			live: LiveObservation
+			track: TrackSnapshot
+			captureId: string | null
+			at: number
+		}
+	>()
+	private readonly analogRefusals = new Map<
+		string,
+		{ at: number; suppressed: number; total: number }
+	>()
+
+	private refuseAnalog(
+		live: {
+			sourceId: string
+			observationId: string | null
+			discoveryId: string | null
+		},
+		reason: string,
+	): void {
+		const now = this.now()
+		const prior = this.analogRefusals.get(reason)
+		if (prior) prior.total++
+		if (prior && now - prior.at < 60_000) {
+			prior.suppressed++
+			return
+		}
+		this.analogRefusals.set(reason, {
+			at: now,
+			suppressed: 0,
+			total: prior?.total ?? 1,
+		})
+		const safeId = (id: string | null): string | null =>
+			id !== null && /^[a-zA-Z0-9_-]{1,128}$/.test(id) ? id : null
+		this.log.info(
+			{
+				sourceId: safeId(live.sourceId),
+				observationId: safeId(live.observationId),
+				discoveryId: safeId(live.discoveryId),
+				reason,
+				activeSource: this.analogCounts.get(live.sourceId) ?? 0,
+				activeTotal: this.analogJobs.size,
+				activeDiscovery: [...this.analogJobs.values()].filter(
+					trial =>
+						trial.sourceId === live.sourceId &&
+						trial.discoveryId === live.discoveryId,
+				).length,
+				total: prior?.total ?? 1,
+				deferred: this.analogDeferred.size,
+				suppressed: prior?.suppressed ?? 0,
+			},
+			"Analog trial refused",
+		)
+	}
+
+	private deferAnalog(live: LiveObservation, track: TrackSnapshot): void {
+		const pending = this.analogDeferred.get(live.observationId)
+		if (pending?.captureId != null) return
+		const port = this.deps.iqCapture
+		if (!port) {
+			this.refuseAnalog(live, "capture-unavailable")
+			return
+		}
+		if (!pending && this.analogDeferred.size >= 128) {
+			this.refuseAnalog(live, "deferred-full")
+			return
+		}
+		const result = port.captureFor(
+			{
+				sourceId: live.sourceId,
+				observationId: live.observationId,
+				epoch: track.epoch,
+				rfHz: track.centreHz,
+				tuningTrust: track.tuningTrust,
+				fromSample: track.startSample,
+				reason: "detection",
+			},
+			`analog-${live.observationId}`,
+		)
+		if ("refused" in result) {
+			this.refuseAnalog(live, `capture-${result.refused}`)
+			if (["busy", "full", "rate-limited"].includes(result.refused))
+				this.analogDeferred.set(live.observationId, {
+					live,
+					track,
+					captureId: null,
+					at: pending?.at ?? this.now(),
+				})
+			return
+		}
+		this.analogDeferred.set(live.observationId, {
+			live,
+			track,
+			captureId: result.captureId,
+			at: this.now(),
+		})
+		if (live.endedAt !== undefined) port.end(result.captureId)
+	}
+
+	private retryAnalog(): void {
+		if (this.consumerLifecycle.admissionSealed) return
+		for (const [id, pending] of this.analogDeferred) {
+			const port = this.deps.iqCapture
+			if (pending.captureId === null) {
+				if (
+					this.now() - pending.at >= IQ_CAPTURE_PREROLL_MAX_MS ||
+					(pending.live.endReason !== undefined &&
+						pending.live.endReason !== "quiet" &&
+						pending.live.endReason !== "max-duration") ||
+					this.discoveryLockedOut(pending.live.discoveryId)
+				) {
+					this.analogDeferred.delete(id)
+					this.refuseAnalog(
+						pending.live,
+						this.discoveryLockedOut(pending.live.discoveryId)
+							? "lockout"
+							: "capture-preroll-expired",
+					)
+				} else this.deferAnalog(pending.live, pending.track)
+				continue
+			}
+			if (
+				!port ||
+				port.holderOf(pending.captureId) === undefined ||
+				this.now() - pending.at >= IQ_CAPTURE_ORPHAN_TTL_MS ||
+				this.discoveryLockedOut(pending.live.discoveryId) ||
+				(pending.live.endReason !== undefined &&
+					pending.live.endReason !== "quiet" &&
+					pending.live.endReason !== "max-duration")
+			) {
+				const reason =
+					!port || port.holderOf(pending.captureId) === undefined
+						? "capture-gone"
+						: this.discoveryLockedOut(pending.live.discoveryId)
+							? "lockout"
+							: this.now() - pending.at >= IQ_CAPTURE_ORPHAN_TTL_MS
+								? "deferred-ttl"
+								: "observation-ended"
+				this.analogDeferred.delete(id)
+				port?.settle(pending.captureId, `analog-${id}`)
+				this.refuseAnalog(pending.live, reason)
+			} else if (port.view(pending.captureId))
+				this.requestJobAnalog(
+					pending.live,
+					pending.track,
+					pending.live.endReason !== undefined,
+				)
+		}
+	}
 	private readonly captures: CaptureStore
 	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
@@ -1245,6 +1405,10 @@ export class ScannerService extends EventEmitter {
 		_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown",
 	): void {
 		this.consumerLifecycle.sealAdmission()
+		for (const [id, pending] of this.analogDeferred)
+			if (pending.captureId !== null)
+				this.deps.iqCapture?.settle(pending.captureId, `analog-${id}`)
+		this.analogDeferred.clear()
 		for (const { controller } of this.analogJobs.values()) controller.abort()
 		this.started = false
 		if (this.timer) clearInterval(this.timer)
@@ -2457,9 +2621,28 @@ export class ScannerService extends EventEmitter {
 		const opened = !live
 		if (!live) {
 			if (covering.length === 0) return
-			// WG12 R 2.5, 4.1: a track still pending opens nothing; one that closes `below` is a
-			// transient only (no observation, store ingest, capture, probe or activity event).
-			if (track.gate !== undefined && track.gate !== "passed") {
+			// Pending tracks wait for the gate, except an explicitly allowed analog
+			// emission gets a final capture opportunity on close.
+			if (
+				track.gate !== undefined &&
+				track.gate !== "passed" &&
+				!(
+					ev.kind === "track-close" &&
+					(ev.endReason === "quiet" || ev.endReason === "max-duration") &&
+					!synthetic &&
+					this.deps.analogTrial?.runLive !== undefined &&
+					covering.some(
+						d =>
+							d.record.spec.signalsOnly !== true &&
+							(!d.record.spec.protocols?.length ||
+								d.record.spec.protocols.includes("analog-fm")),
+					)
+				)
+			) {
+				this.refuseAnalog(
+					{ sourceId, observationId: null, discoveryId: null },
+					`gate-${track.gate}`,
+				)
 				if (ev.kind === "track-close" && track.gate === "below")
 					for (const d of covering) d.record.counts.transients += 1
 				return
@@ -2524,16 +2707,18 @@ export class ScannerService extends EventEmitter {
 			alreadyRequested: this.iqTried.has(live.observationId),
 		})
 		if (captureAtGate.materialize) this.ingest(live, track)
-		if (captureAtGate.request) {
-			this.requestIqCapture(live, track)
-		}
 		if (
 			!synthetic &&
 			!late &&
-			!closing &&
-			(track.gate === undefined || track.gate === "passed")
+			(!closing || endReason === "quiet" || endReason === "max-duration") &&
+			(closing || track.gate === undefined || track.gate === "passed")
 		)
-			this.requestJobAnalog(live, track)
+			this.requestJobAnalog(live, track, closing)
+		else if (!synthetic && !late && track.gate !== undefined)
+			this.refuseAnalog(live, `gate-${track.gate}`)
+		if (captureAtGate.request && !this.analogDeferred.has(live.observationId)) {
+			this.requestIqCapture(live, track)
+		}
 		const needs =
 			!synthetic && !late && this.needsConfirm(live, track, !closing)
 		for (const d of covering) d.onTrack(live, track, needs)
@@ -2553,6 +2738,9 @@ export class ScannerService extends EventEmitter {
 		if (endReason !== "quiet" && endReason !== "max-duration")
 			this.analogJobs.get(live.observationId)?.controller.abort()
 		this.rememberClosed(track.trackId)
+		const deferredAnalog = this.analogDeferred.get(live.observationId)
+		if (deferredAnalog?.captureId != null)
+			this.deps.iqCapture?.end(deferredAnalog.captureId)
 		this.endIqCapture(live)
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
@@ -3897,7 +4085,11 @@ export class ScannerService extends EventEmitter {
 	// === WG11 req 6: IQ capture on detection, replay results ===
 
 	/** A18: classification and measured bandwidth never exclude an allowed analog trial. */
-	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
+	private requestJobAnalog(
+		live: LiveObservation,
+		track: TrackSnapshot,
+		closing = false,
+	): void {
 		const runner = this.admittedAnalog()
 		const protocols = this.protocolsFor(live, track.centreHz)
 		const eligible = live.jobIds.some(id => {
@@ -3908,23 +4100,56 @@ export class ScannerService extends EventEmitter {
 				job.spec.signalsOnly !== true
 			)
 		})
+		const owned = [...this.analogJobs.values()].some(
+			trial =>
+				trial.sourceId === live.sourceId &&
+				live.discoveryId !== null &&
+				trial.discoveryId === live.discoveryId,
+		)
+		const reason = !eligible
+			? "not-allowed"
+			: this.discoveryLockedOut(live.discoveryId)
+				? "lockout"
+				: live.discoveryId === null && !closing
+					? "no-discovery"
+					: track.flags.spur || track.flags.iqImage
+						? "spur-image"
+						: !runner?.runLive
+							? "runner-unavailable"
+							: protocols.length > 0 && !protocols.includes("analog-fm")
+								? "not-allowed"
+								: this.analogAttempted.has(live)
+									? "attempted"
+									: owned
+										? "discovery-owned"
+										: (this.analogCounts.get(live.sourceId) ?? 0) >= 2
+											? "capacity"
+											: undefined
+		if (reason) {
+			this.refuseAnalog(live, reason)
+			if (reason !== "capacity" && reason !== "discovery-owned") {
+				const pending = this.analogDeferred.get(live.observationId)
+				this.analogDeferred.delete(live.observationId)
+				if (pending?.captureId != null)
+					this.deps.iqCapture?.settle(
+						pending.captureId,
+						`analog-${live.observationId}`,
+					)
+			}
+			if (reason === "capacity" || reason === "discovery-owned")
+				this.deferAnalog(live, track)
+			return
+		}
+		if (!runner?.runLive) return
+		const deferred = this.analogDeferred.get(live.observationId)
+		const deferredCaptureId = deferred?.captureId ?? undefined
 		if (
-			!eligible ||
-			this.discoveryLockedOut(live.discoveryId) ||
-			live.discoveryId === null ||
-			track.flags.spur ||
-			track.flags.iqImage ||
-			(this.analogCounts.get(live.sourceId) ?? 0) >= 2 ||
-			!runner?.runLive ||
-			(protocols.length > 0 && !protocols.includes("analog-fm")) ||
-			this.analogAttempted.has(live) ||
-			[...this.analogJobs.values()].some(
-				trial =>
-					trial.sourceId === live.sourceId &&
-					trial.discoveryId === live.discoveryId,
-			)
+			deferred &&
+			(deferredCaptureId === undefined ||
+				!this.deps.iqCapture?.view(deferredCaptureId))
 		)
 			return
+		this.analogDeferred.delete(live.observationId)
 		this.analogCounts.set(
 			live.sourceId,
 			(this.analogCounts.get(live.sourceId) ?? 0) + 1,
@@ -3955,20 +4180,23 @@ export class ScannerService extends EventEmitter {
 			},
 			{ once: true },
 		)
-		const run = runner
-			.runLive(
-				{
-					sourceId: live.sourceId,
-					observationId: live.observationId,
-					epoch: track.epoch,
-					rfHz: track.centreHz,
-					tuningTrust: track.tuningTrust,
-					fromSample: track.startSample,
-					reason: "detection",
-				},
-				"nfm",
-				controller.signal,
-			)
+		const run = (
+			deferredCaptureId !== undefined
+				? runner.run(deferredCaptureId, "nfm", controller.signal)
+				: runner.runLive(
+						{
+							sourceId: live.sourceId,
+							observationId: live.observationId,
+							epoch: track.epoch,
+							rfHz: track.centreHz,
+							tuningTrust: track.tuningTrust,
+							fromSample: track.startSample,
+							reason: "detection",
+						},
+						"nfm",
+						controller.signal,
+					)
+		)
 			.then(raw => {
 				if (controller.signal.aborted) return
 				const judged = judgeAnalogResult(raw, "nfm")
@@ -3995,10 +4223,16 @@ export class ScannerService extends EventEmitter {
 				})
 			})
 			.finally(() => {
+				if (deferredCaptureId !== undefined)
+					this.deps.iqCapture?.settle(
+						deferredCaptureId,
+						`analog-${live.observationId}`,
+					)
 				this.analogJobs.delete(live.observationId)
 				const remaining = (this.analogCounts.get(live.sourceId) ?? 1) - 1
 				if (remaining === 0) this.analogCounts.delete(live.sourceId)
 				else this.analogCounts.set(live.sourceId, remaining)
+				this.retryAnalog()
 				if (!this.consumerLifecycle.admissionSealed)
 					for (const pending of this.live.values())
 						if (
@@ -6222,6 +6456,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private tick(): void {
+		this.retryAnalog()
 		if (this.consumerLifecycle.admissionSealed) return
 		this.channelTaps?.tick()
 		const now = this.now()
