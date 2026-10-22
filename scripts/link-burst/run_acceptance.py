@@ -53,12 +53,18 @@ class InvalidRun(Exception):
     pass
 
 
+# Host runs: the core gets this many CPUs and stress-ng this many workers, so
+# contention exceeds what the core absorbs (it kept up on five CPUs against one
+# worker per CPU); the fake keeps the last CPU to itself.
+HOST_CORE_CPUS = 2
+HOST_STRESS_WORKERS = 8
+
+
 def cpu_split(count):
     """Core CPUs and the fake's reserved CPU for the host scenario."""
-    if count < 2:
-        raise InvalidRun("host scenario needs at least two CPUs")
-    core = "0" if count == 2 else f"0-{count - 2}"
-    return core, str(count - 1)
+    if count < HOST_CORE_CPUS + 1:
+        raise InvalidRun(f"host scenario needs at least {HOST_CORE_CPUS + 1} CPUs")
+    return f"0-{HOST_CORE_CPUS - 1}", str(count - 1)
 
 
 def interrupted(signum, _frame):
@@ -332,7 +338,7 @@ class Experiment:
                                            capture_output=True, check=True, timeout=30).stdout)
                 core, fake = cpu_split(count)
                 self.env.update(LINK_BURST_CORE_CPUS=core, LINK_BURST_FAKE_CPUS=fake)
-                self.summary.update(coreCpus=core, fakeCpus=fake)
+                self.summary.update(coreCpus=core, fakeCpus=fake, stressWorkers=HOST_STRESS_WORKERS)
             self.compose("up", "-d", "--no-build", "--pull", "never")
             deadline = time.monotonic() + 120
             while True:
@@ -348,7 +354,7 @@ class Experiment:
                     raise InvalidRun("API did not become ready")
                 time.sleep(2)
             if self.args.scenario == "host":
-                self.compose("exec", "-T", "-d", "core", "stress-ng", "--cpu", "0",
+                self.compose("exec", "-T", "-d", "core", "stress-ng", "--cpu", str(HOST_STRESS_WORKERS),
                              "--timeout", f"{int(self.args.minutes * 60 + 60)}s")
             start = time.monotonic()
             measured_at = start

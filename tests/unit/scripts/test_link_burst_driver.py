@@ -122,10 +122,10 @@ class DriverTests(unittest.TestCase):
         self.assertIn("implied sibling excess rate is below the assumption", failures)
 
     def test_host_scenario_reserves_a_cpu_for_the_fake(self):
-        self.assertEqual(driver.cpu_split(6), ("0-4", "5"))
-        self.assertEqual(driver.cpu_split(2), ("0", "1"))
+        self.assertEqual(driver.cpu_split(6), ("0-1", "5"))
+        self.assertEqual(driver.cpu_split(3), ("0-1", "2"))
         with self.assertRaises(driver.InvalidRun):
-            driver.cpu_split(1)
+            driver.cpu_split(2)
 
     def test_upstream_waits_for_upstream_statistics(self):
         experiment = self.experiment("upstream")
