@@ -1,0 +1,36 @@
+services:
+  fake:
+    image: python:3.13-slim
+    pull_policy: never
+    entrypoint: ["python3", "/opt/fake_rtl_tcp.py"]
+    command:
+      - --loop
+      - --rate
+      - "${LINK_BURST_RATE:-2048000}"
+      - --duration
+      - "${LINK_BURST_DURATION:-1800}"
+      - --stall-schedule
+      - "${LINK_BURST_SCHEDULE:-}"
+      - --stall-mode
+      - "${LINK_BURST_MODE:-catchup}"
+      - --stats-port
+      - "1235"
+    volumes:
+      - ../capacity/fake_rtl_tcp.py:/opt/fake_rtl_tcp.py:ro
+  core:
+    image: "${LINK_BURST_IMAGE:-wavekit:latest}"
+    pull_policy: never
+    depends_on: [fake]
+    ports: ["127.0.0.1::3000"]
+    environment:
+      WAVEKIT_CONFIG_PATH: /app/config
+      WAVEKIT_SOURCES_0_CAPS__SAMPLE_RATE: "${LINK_BURST_RATE:-2048000}"
+      WAVEKIT_SOURCES_0_BURST_ABSORBER__SECONDS: "${LINK_BURST_SECONDS:-2}"
+      WAVEKIT_DECODERS_0_OPTIONS__INPUT_SAMPLE_RATE: "${LINK_BURST_RATE:-2048000}"
+      PATH: /opt/link-burst/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - ./config.yaml:/app/config/default.yaml:ro
+      - ./slow-sink:/opt/link-burst/bin:ro
+networks:
+  default:
+    internal: true
