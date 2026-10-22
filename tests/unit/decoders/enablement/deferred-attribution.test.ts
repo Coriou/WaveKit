@@ -198,13 +198,14 @@ it("resolves recovered overflow across stall lengths and tick phases", () => {
 	)
 }, 30000)
 
-function intervalScenario() {
+function intervalScenario(initialCpu = 10, initialLoop = 15) {
 	let includeSibling = true
 	let now = 0
 	let shortfall: boolean | null = null
 	let sequence = 1
 	let gap = 1000
-	let cpu = 10
+	let cpu = initialCpu
+	let loop = initialLoop
 	const totals = { absorber: 0, absorberChunks: 0, a: 0 }
 	const log = createLogger({ level: "fatal" })
 	const logs = vi.spyOn(log, "info")
@@ -234,7 +235,7 @@ function intervalScenario() {
 		now: () => now,
 		monoNow: () => now,
 		ingest: () => ({ maxGapMs: gap, catchupBytes: 0, chunks: 100 }),
-		loopDelay: () => ({ maxMs: 15, p99Ms: 15 }),
+		loopDelay: () => ({ maxMs: loop, p99Ms: loop }),
 		shortfall: () => true,
 		recovery: () => ({
 			sequence,
@@ -258,6 +259,7 @@ function intervalScenario() {
 			includeSibling = false
 		},
 		evidence: (nextGap: number, nextCpu: number) => {
+			loop = 15
 			gap = nextGap
 			cpu = nextCpu
 		},
@@ -495,3 +497,21 @@ it("keeps original deferred deltas when recovery resolves during an incomparable
 	})
 	h.monitor.stop()
 })
+
+it.each([
+	[90, 15],
+	[10, 100],
+])(
+	"resolves deferred loss using original host evidence CPU %i loop %i",
+	(cpu, loop) => {
+		const h = intervalScenario(cpu, loop)
+		h.evidence(0, 10)
+		h.recover(false)
+		expect(h.tick(20000)).toMatchObject({
+			attribution: "host",
+			droppedBytesDelta: 100,
+		})
+		expect(h.monitor.droppedBetweenMono("s", 18000, 18000)).toBe(true)
+		h.monitor.stop()
+	},
+)

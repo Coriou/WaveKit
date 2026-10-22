@@ -47,6 +47,13 @@ export function attributeInterval(e: IntervalEvidence): DropAttribution {
 		// can affect siblings too. Require independent loop/CPU evidence below;
 		// otherwise retain link evidence or fail closed to unknown.
 		if ((input.upstreamDropDelta ?? 0) > 0) return "unknown"
+		// Event-loop starvation makes ingest gaps unreliable link evidence.
+		if (
+			(input.loopDelayMaxMs !== null &&
+				input.loopDelayMaxMs >= HOST_LOOP_DELAY_MS) ||
+			(input.cpuPercent !== null && input.cpuPercent >= input.cpuGuardPercent)
+		)
+			return "host"
 		if (
 			input.maxGapMs !== null &&
 			input.loopDelayMaxMs !== null &&
@@ -54,12 +61,6 @@ export function attributeInterval(e: IntervalEvidence): DropAttribution {
 			input.maxGapMs - input.loopDelayMaxMs >= LINK_GAP_MS
 		)
 			return "link"
-		if (
-			(input.loopDelayMaxMs !== null &&
-				input.loopDelayMaxMs >= HOST_LOOP_DELAY_MS) ||
-			(input.cpuPercent !== null && input.cpuPercent >= input.cpuGuardPercent)
-		)
-			return "host"
 		if (
 			input.branchDrops.size === 1 &&
 			positive === 1 &&
