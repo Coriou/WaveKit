@@ -12,7 +12,7 @@ sources:
       format: U8_IQ
       centerFreq: 433920000
     sdrHost:
-      rtlmuxStatsUrl: http://fake:1235/stats.json
+      apiUrl: http://fake:1235
       endpointSelection: off
 decoders:
   - id: link-burst-slow-sink

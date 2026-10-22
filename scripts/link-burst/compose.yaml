@@ -2,7 +2,7 @@ services:
   fake:
     image: python:3.13-slim
     pull_policy: never
-    entrypoint: ["python3", "/opt/fake_rtl_tcp.py"]
+    entrypoint: ["python3", "/opt/fake_host_status.py"]
     command:
       - --loop
       - --rate
@@ -17,6 +17,7 @@ services:
       - "1235"
     volumes:
       - ../capacity/fake_rtl_tcp.py:/opt/fake_rtl_tcp.py:ro
+      - ./fake_host_status.py:/opt/fake_host_status.py:ro
   core:
     image: "${LINK_BURST_IMAGE:-wavekit:latest}"
     pull_policy: never
