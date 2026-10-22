@@ -80,6 +80,7 @@ async function inWindow(
 	})
 	h.engine.push(FS)
 	const spec = makeNormalisedSpec({
+		protocols: ["dmr", "nxdn96"],
 		sourceId: "rtl",
 		mode: "in-window",
 		hold: {
@@ -90,6 +91,7 @@ async function inWindow(
 		},
 		ranges: [{ startHz: CENTRE - 400_000, endHz: CENTRE + 400_000 }],
 	})
+	spec.provenance["protocols"] = "operator"
 	const record: JobRecord = {
 		id: "job-a",
 		name: null,

@@ -1,3 +1,5 @@
+import { TrialRotation } from "./trial-rotation.js"
+import { probeModesFor } from "./probes/probe-pool.js"
 import type { ObservationEndReason } from "../spectrum/types.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
 /**
@@ -20,6 +22,7 @@ import {
 } from "./job-state.js"
 import { DEFAULT_CONFIRM_HOLD_MS } from "./plan/plan-preview.js"
 import type {
+	ProbeMode,
 	ProbePool,
 	ProbeRequest,
 	ProbeStatus,
@@ -52,6 +55,8 @@ import type {
 	NormalisedJobSpec,
 	PauseReason,
 	PlanIssue,
+	ScannerClass,
+	ScannerProtocol,
 	ScannerConfidence,
 	ScannerSettings,
 	UndecodedReason,
@@ -417,9 +422,39 @@ function liveProbeView(
 	}
 }
 
+/** Class evidence orders candidates; allowed protocols still get later turns. */
+export function jobTrialModes(
+	cls: ScannerClass,
+	protocols: ScannerProtocol[],
+	obwHz: number,
+): ProbeMode[] {
+	const key = (mode: ProbeMode) =>
+		`${mode.decoderType}:${JSON.stringify(mode.options)}`
+	const candidates = probeModesFor(cls, protocols)
+	if (
+		cls !== "ook-burst" &&
+		Number.isFinite(obwHz) &&
+		obwHz > 0 &&
+		obwHz <= 22_500
+	) {
+		for (const alternative of [
+			"fsk4-12k5",
+			"fsk4-6k25",
+			"gmsk-narrow",
+			"fsk2-wide",
+			"afsk-fm",
+		] as const)
+			for (const mode of probeModesFor(alternative, protocols))
+				if (!candidates.some(candidate => key(candidate) === key(mode)))
+					candidates.push(mode)
+	}
+	return candidates
+}
+
 export class JobRunner implements JobDriver {
 	private releaseAnalogSession: (() => void) | undefined
 	readonly record: JobRecord
+	private readonly trialRotation = new TrialRotation()
 	private readonly log: Logger
 	private scheduler: SweepScheduler | null = null
 	private lease: Lease | null = null
@@ -1499,6 +1534,17 @@ export class JobRunner implements JobDriver {
 		)
 	}
 
+	/** Called by the service for actual mode starts, including queued admissions and steps. */
+	noteTrialStarted(req: ProbeRequest, mode: ProbeMode): void {
+		if (req.jobId !== this.record.id || req.replay) return
+		const key =
+			req.discoveryId ?? `${req.sourceId}:${Math.round(req.targetHz / 6250)}`
+		this.trialRotation.attempt(
+			key,
+			`${mode.decoderType}:${JSON.stringify(mode.options)}`,
+		)
+	}
+
 	private requestProbe(
 		live: LiveObservation,
 		track: TrackSnapshot,
@@ -1510,6 +1556,30 @@ export class JobRunner implements JobDriver {
 		const engine = this.deps.engine(this.sourceId)
 		const fs = engine?.currentEpoch().sampleRateHz ?? 0
 		const protocols = protocolsForFrequency(this.record.spec, track.centreHz)
+		const modeKey = (mode: ProbeMode) =>
+			`${mode.decoderType}:${JSON.stringify(mode.options)}`
+		const classModes = probeModesFor(live.classification.class, protocols)
+		const candidates = jobTrialModes(
+			live.classification.class,
+			protocols,
+			track.obwHz,
+		)
+		const originalHead = classModes[0]
+		if (originalHead) {
+			const head = candidates.find(
+				mode => modeKey(mode) === modeKey(originalHead),
+			)
+			if (head)
+				head.holdMs = Math.max(
+					head.holdMs,
+					holdMs -
+						classModes.slice(1).reduce((sum, mode) => sum + mode.holdMs, 0),
+				)
+		}
+		const key =
+			live.discoveryId ??
+			`${this.sourceId}:${Math.round(track.centreHz / 6250)}`
+		const modes = this.trialRotation.order(key, candidates, modeKey)
 		const req: ProbeRequest = {
 			jobId: this.record.id,
 			priority: this.record.spec.priority,
@@ -1524,6 +1594,7 @@ export class JobRunner implements JobDriver {
 			epoch: live.epoch,
 			cls: live.classification.class,
 			protocols,
+			modes,
 			preRollFromSample: Math.max(
 				0,
 				track.startSample - Math.round((s.hold.preRollMs * fs) / 1000),
@@ -1541,8 +1612,9 @@ export class JobRunner implements JobDriver {
 			},
 		}
 		const res = this.deps.probes.request(req)
-		if ("started" in res) live.probeIds.add(res.started)
-		else {
+		if ("started" in res) {
+			live.probeIds.add(res.started)
+		} else {
 			const reason = undecodedForDeferral(res.deferred)
 			if (reason) this.deps.undecoded(live, reason)
 		}

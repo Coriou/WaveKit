@@ -1,3 +1,4 @@
+import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
 import { applyRangePatch } from "./plan/range-edits.js"
@@ -148,6 +149,7 @@ import {
 } from "./listen.js"
 import {
 	JobRunner,
+	jobTrialModes,
 	chooseLeaseHolder,
 	impactGrew,
 	undecodedForProbe,
@@ -561,6 +563,9 @@ export class ScannerService extends EventEmitter {
 	private readonly ambient: AmbientEvidence
 	/** Core spectrum service (engines, frames, occupancy); also served at /api/spectrum. */
 	readonly spectrum: SpectrumService
+	private readonly analogAttempted = new WeakSet<LiveObservation>()
+	private readonly analogCounts = new Map<string, number>()
+	private readonly analogJobs = new Map<string, AbortController>()
 	private readonly captures: CaptureStore
 	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
@@ -1237,6 +1242,7 @@ export class ScannerService extends EventEmitter {
 		_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown",
 	): void {
 		this.consumerLifecycle.sealAdmission()
+		for (const controller of this.analogJobs.values()) controller.abort()
 		this.started = false
 		if (this.timer) clearInterval(this.timer)
 		this.timer = null
@@ -2513,7 +2519,11 @@ export class ScannerService extends EventEmitter {
 			alreadyRequested: this.iqTried.has(live.observationId),
 		})
 		if (captureAtGate.materialize) this.ingest(live, track)
-		if (captureAtGate.request) this.requestIqCapture(live, track)
+		if (captureAtGate.request) {
+			this.requestIqCapture(live, track)
+		}
+		if (!synthetic && !late && !closing && track.gate === "passed")
+			this.requestJobAnalog(live, track)
 		const needs =
 			!synthetic && !late && this.needsConfirm(live, track, !closing)
 		for (const d of covering) d.onTrack(live, track, needs)
@@ -2530,6 +2540,8 @@ export class ScannerService extends EventEmitter {
 				live.observationId,
 				endReason === "gap" ? "stream-changed" : "cancelled",
 			)
+		if (endReason !== "quiet" && endReason !== "max-duration")
+			this.analogJobs.get(live.observationId)?.abort()
 		this.rememberClosed(track.trackId)
 		this.endIqCapture(live)
 		for (const jobId of live.jobIds)
@@ -2685,7 +2697,8 @@ export class ScannerService extends EventEmitter {
 					?.ended(live.observationId, res.discoveryId, durationMs)
 		}
 		live.discoveryId = res.discoveryId
-		live.decoded = this.store.get(res.discoveryId)?.confidence === "decoded"
+		// A discovery proof belongs to its original transmission.
+		live.decoded = live.acceptedIdentity !== undefined
 		if (live.undecodedReason) {
 			this.markUndecoded(live, live.undecodedReason)
 			delete live.undecodedReason
@@ -3181,9 +3194,10 @@ export class ScannerService extends EventEmitter {
 		const d = live.discoveryId ? this.store.get(live.discoveryId) : undefined
 		if (d?.operator?.lockout) return false
 		if (
-			probeModesFor(
+			jobTrialModes(
 				live.classification.class,
 				this.protocolsFor(live, track.centreHz),
+				track.obwHz,
 			).length === 0
 		)
 			return false
@@ -3802,6 +3816,8 @@ export class ScannerService extends EventEmitter {
 	): void {
 		const mode = probeModeAt(req, book.modes.length)
 		if (mode === undefined) return
+		const driver = this.drivers.get(req.jobId)
+		if (driver instanceof JobRunner) driver.noteTrialStarted(req, mode)
 		const trial: ProbeModeTrial = {
 			order: this.store.nextTrialOrder(),
 			protocol: mode.protocol,
@@ -3863,6 +3879,114 @@ export class ScannerService extends EventEmitter {
 	}
 
 	// === WG11 req 6: IQ capture on detection, replay results ===
+
+	/** A18: one private analog trial alongside the digital trials of a narrow keyup. */
+	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
+		const runner = this.admittedAnalog()
+		const protocols = this.protocolsFor(live, track.centreHz)
+		const eligible = live.jobIds.some(id => {
+			const job = this.jobs.get(id)
+			return (
+				job !== undefined &&
+				!isTerminal(job.state) &&
+				job.spec.signalsOnly !== true
+			)
+		})
+		if (
+			!eligible ||
+			live.discoveryId === null ||
+			track.flags.spur ||
+			track.flags.iqImage ||
+			(this.analogCounts.get(live.sourceId) ?? 0) >= 2 ||
+			!runner?.runLive ||
+			!Number.isFinite(track.obwHz) ||
+			track.obwHz <= 0 ||
+			track.obwHz > 22_500 ||
+			(protocols.length > 0 && !protocols.includes("analog-fm")) ||
+			this.analogAttempted.has(live) ||
+			live.acceptedIdentity !== undefined
+		)
+			return
+		this.analogCounts.set(
+			live.sourceId,
+			(this.analogCounts.get(live.sourceId) ?? 0) + 1,
+		)
+		this.analogAttempted.add(live)
+		const controller = new AbortController()
+		this.analogJobs.set(live.observationId, controller)
+		const order = this.store.nextTrialOrder()
+		const row = {
+			protocol: "analog-fm" as const,
+			decoder: "analog-demod",
+			order,
+			at: this.now(),
+		}
+		this.store.recordTrial(live.observationId, { ...row, outcome: "running" })
+		controller.signal.addEventListener(
+			"abort",
+			() => {
+				this.store.recordTrial(live.observationId, {
+					...row,
+					at: this.now(),
+					outcome: "cancelled",
+				})
+			},
+			{ once: true },
+		)
+		const run = runner
+			.runLive(
+				{
+					sourceId: live.sourceId,
+					observationId: live.observationId,
+					epoch: track.epoch,
+					rfHz: track.centreHz,
+					tuningTrust: track.tuningTrust,
+					fromSample: track.startSample,
+					reason: "detection",
+				},
+				"nfm",
+				controller.signal,
+			)
+			.then(raw => {
+				if (controller.signal.aborted) return
+				const judged = judgeAnalogResult(raw, "nfm")
+				this.store.recordTrial(live.observationId, {
+					...row,
+					at: this.now(),
+					outcome: judged.outcome,
+				})
+				const analog = judged.analog
+				if (analog)
+					this.store.recordAnalog(live.observationId, {
+						outcome: analog.outcome,
+						mode: "nfm",
+						voice: analog.voice,
+						tone: analog.tones,
+						transport: "live",
+						at: this.now(),
+					})
+			})
+			.catch(() => {
+				this.store.recordTrial(live.observationId, {
+					...row,
+					outcome: "cancelled",
+				})
+			})
+			.finally(() => {
+				this.analogJobs.delete(live.observationId)
+				const remaining = (this.analogCounts.get(live.sourceId) ?? 1) - 1
+				if (remaining === 0) this.analogCounts.delete(live.sourceId)
+				else this.analogCounts.set(live.sourceId, remaining)
+				if (!this.consumerLifecycle.admissionSealed)
+					for (const pending of this.live.values())
+						if (
+							pending.sourceId === live.sourceId &&
+							pending.lastTrack?.gate === "passed"
+						)
+							this.requestJobAnalog(pending, pending.lastTrack)
+			})
+		this.track(run, "Analog trial settlement failed")
+	}
 
 	/**
 	 * Req 6.3: once per observation, when its track surfaced (it has a discovery), has no confirmed result
