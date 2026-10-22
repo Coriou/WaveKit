@@ -155,7 +155,7 @@ function bodyFails(status: number, err: unknown) {
 		})
 }
 
-describe("A2 fix round 1", () => {
+describe("I1: a body read that times out or resets is timeout/network, not invalid", () => {
 	it("I1: a body read that times out or resets is timeout/network, not invalid", async () => {
 		const t = await client(
 			bodyFails(200, new DOMException("t", "TimeoutError")),

@@ -85,7 +85,7 @@ describe("drop now", () => {
 		).toBeNull()
 		expect(branchDropNow([], "decoder-a")).toBeNull()
 	})
-	it("only uses deltas, so a server clock ahead of the local clock still computes (review focus 3)", () => {
+	it("only uses deltas, so a server clock ahead of the local clock still computes", () => {
 		const future = Date.now() + 3_600_000
 		expect(
 			branchDropNow(

@@ -1,3 +1,5 @@
+import { judgeAnalogResult } from "../iq-capture/analog-result.js"
+import { AnalogAdmission } from "./analog-admission.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
 import { applyRangePatch } from "./plan/range-edits.js"
 import {
@@ -39,7 +41,10 @@ import type {
 	ScannerSettingsView,
 	ScannerStatus,
 	SpectrumBinsCapView,
+	SpectrumFrameTrackScanner,
 	SpectrumSourceStatus,
+	ScannerProbeDecoderType,
+	ScannerTrialOutcome,
 } from "@wavekit/api-types"
 import {
 	SCANNER_AMBIENT_PROTOCOLS,
@@ -69,6 +74,10 @@ import {
 	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
+import {
+	createBandRangeCache,
+	withBandBurstPrior,
+} from "./band-scan-burst-prior.js"
 import { classifySpectral, leakOrIntermod } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
 import {
@@ -77,6 +86,56 @@ import {
 } from "./evidence/capture-recorder.js"
 import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
+import {
+	IQ_CAPTURE_ORPHAN_TTL_MS,
+	IQ_CAPTURE_PREROLL_MAX_MS,
+} from "./iq-capture-contract.js"
+import type {
+	IqCaptureDiscardReason,
+	IqCapturePort,
+	IqCaptureRefusal,
+	IqCaptureRequest,
+	IqCaptureView,
+	IqReplayPlanInput,
+	IqReplayTrial,
+	IqReplayResult,
+} from "./iq-capture-contract.js"
+import {
+	createPoolReplayProbes,
+	type ReplayPoolAdapter,
+} from "../iq-capture/pool-adapter.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { probeReplayShapes } from "../iq-capture/shapes.js"
+import type { IqReplayShapes } from "../iq-capture/service.js"
+import {
+	createIqReplayQueue,
+	IQ_REPLAY_QUEUE_HOLDER,
+	type IqReplayQueue,
+} from "../iq-capture/replay-queue.js"
+import {
+	captureRemovedRelease,
+	captureServiceIsOn,
+	gatePassCapture,
+	needsLiveConfirm,
+	replayConfirmInput,
+	replayEvidenceCalls,
+	replayOutcomeSummary,
+} from "../iq-capture/replay-first.js"
+import type {
+	AnalogTrialRunner,
+	ProofTrialInput,
+} from "./scanner-redesign-contract.js"
+import { replayMissEligible } from "../iq-capture/replay-miss.js"
+import { createKnownProtocolMemory } from "./known-protocol.js"
+import { narrowRasterAt } from "./narrow-digital.js"
+import { planReplayTrials } from "./replay-plan.js"
+import type { AnalogEvidenceLog } from "./analog-evidence.js"
+import {
+	createLiveAudioEvidence,
+	type LiveAudioEvidence,
+} from "./live-audio-evidence.js"
+import type { JobActivityView } from "./scanner-redesign-contract.js"
+import { tuningTrustOf } from "../tuning-trust.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -94,6 +153,7 @@ import {
 } from "./listen.js"
 import {
 	JobRunner,
+	jobTrialModes,
 	chooseLeaseHolder,
 	impactGrew,
 	undecodedForProbe,
@@ -117,12 +177,16 @@ import {
 import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import {
 	ProbePool,
+	REPLAY_PROBE_PRIORITY,
 	offsetTransport,
 	probeModesFor,
+	type ProbeMode,
 	type ProbeRecordings,
 	type ProbeRequest,
+	type ProbeUnavailableStop,
 	type TransportStrategy,
 } from "./probes/probe-pool.js"
+import { createReplayTransport } from "./probes/replay-transport.js"
 import {
 	DEFAULT_TUNING,
 	USABLE_FRACTION,
@@ -154,6 +218,17 @@ import {
 	type PersistedLease,
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
+import {
+	passiveCostDecision,
+	passiveProbationDue,
+	windowedUtilization,
+	type EluSample,
+} from "./passive-cost.js"
+import {
+	PASSIVE_COST_LIMIT_DEFAULT,
+	PASSIVE_COST_RECHECK_MS,
+	PASSIVE_COST_WINDOW_MS,
+} from "./passive-cost-contract.js"
 import {
 	SCANNER_SETTINGS_BOUNDS,
 	applySettingsPatch,
@@ -193,7 +268,6 @@ import type {
 	PlanPreview,
 	ScanJobSpec,
 	ScanRange,
-	ScannerConfidence,
 	ScannerProtocol,
 	ScannerSettings,
 	UndecodedReason,
@@ -230,9 +304,72 @@ import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
 import type { AnalogCut } from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
+import {
+	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
+	CHANNEL_GATE_MAX_WIDTH_HZ,
+	CHANNEL_GATE_MIN_WIDTH_HZ,
+	type ChannelPlan,
+	type ChannelPlanEntry,
+} from "./scanner-redesign-contract.js"
+
+/**
+ * WG11 req 6: the IQ capture service as the scanner uses it (the port plus the epoch flush). The
+ * scanner hands it the replay shapes (from the probe channel requests) when it is constructed, so
+ * the composition root never imports the probe channel modules.
+ */
+export type ScannerIqCapture = IqCapturePort & {
+	/** Review M2: a capture held for `holder` from the start (identify's own request). */
+	captureFor(
+		req: IqCaptureRequest,
+		holder: string,
+	): { captureId: string } | { refused: IqCaptureRefusal }
+	/** A ready capture's view (any holder), else null. */
+	view(captureId: string): IqCaptureView | null
+	/** The replay queue's port (the scanner owns the queue): finished captures, holders, discard. */
+	onFinished(listener: (view: IqCaptureView) => void): () => void
+	/** Safety: a capture left the store (any reason). */
+	onRemoved(
+		listener: (captureId: string, observationId: string | null) => void,
+	): () => void
+	holderOf(captureId: string): string | null | undefined
+	discard(
+		captureId: string,
+		reason: IqCaptureDiscardReason,
+		holder?: string,
+	): boolean
+	counters?(): NonNullable<ScannerStatus["iqCapture"]>
+	setShapes(shapes: IqReplayShapes): void
+	flush(
+		sourceId: string,
+		next?: { epoch?: number; centerHz?: number; sampleRateHz?: number },
+	): void
+	attachSource(
+		sourceId: string,
+		source: {
+			sampleRateHz: number
+			centerHz: number
+			epoch: number
+			engine: Pick<SpectrumEngine, "tap" | "liveEdge">
+		},
+	): void
+	detachSource(sourceId: string): void
+	/**
+	 * WG12: `"on"` while capture runs. Absent, or any other state, means capture
+	 * is not running (off, legacy, missing binary), so confirm keeps today's path.
+	 */
+	state?(): "idle" | "off" | "not-protected" | "unavailable" | "on" | "stopped"
+}
+
+/** Review m3: planned replay trials kept per capture (the queue holds one at a time; slack for races). */
+const REPLAY_PLANS_MAX = 64
+/** closed observation spans kept for late replay results. */
+const REPLAY_SPANS_MAX = 1024
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
+	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
+	readonly analogTrial?: AnalogTrialRunner
+	readonly iqCapture?: ScannerIqCapture
 	/** WG10 req 3: the live demodulator's transmission evidence for identify; absent keeps today's behaviour. */
 	readonly analogEvidence?: IdentifyAnalogEvidence
 	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
@@ -320,8 +457,6 @@ const RECENT_KEEP_MS = 10_000
 const RECONFIRM_AFTER_MS = 15 * 60_000
 /** Task 29 review, finding 6: bound on waiting for the source caps to show a restored tuning. */
 const RESTORE_CAPS_TIMEOUT_MS = 1_000
-const PASSIVE_COST_WINDOW_MS = 60_000
-const PASSIVE_COST_LIMIT = 0.25
 /** Track ids closed by the service (real or synthesized), kept to ignore their late events (R2). */
 const CLOSED_TRACKS_KEEP = 4096
 const BURST_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set([
@@ -432,6 +567,175 @@ export class ScannerService extends EventEmitter {
 	private readonly ambient: AmbientEvidence
 	/** Core spectrum service (engines, frames, occupancy); also served at /api/spectrum. */
 	readonly spectrum: SpectrumService
+	private readonly analogAttempted = new WeakSet<LiveObservation>()
+	private readonly analogCounts = new Map<string, number>()
+	private readonly analogJobs = new Map<
+		string,
+		{
+			controller: AbortController
+			channelKey: string
+			discoveryId: string | null
+			sourceId: string
+		}
+	>()
+	/** At most 128 held captures; each expires with the capture store's ten-minute TTL. */
+	private readonly analogDeferred = new Map<
+		string,
+		{
+			live: LiveObservation
+			track: TrackSnapshot
+			captureId: string | null
+			at: number
+		}
+	>()
+	private readonly analogRefusals = new Map<
+		string,
+		{ at: number; suppressed: number; total: number }
+	>()
+
+	private refuseAnalog(
+		live: {
+			sourceId: string
+			observationId: string | null
+			discoveryId: string | null
+		},
+		reason: string,
+	): void {
+		const safeId = (id: string | null): string | null =>
+			id !== null && /^[a-zA-Z0-9_-]{1,128}$/.test(id) ? id : null
+		const now = this.now()
+		const prior = this.analogRefusals.get(reason)
+		if (prior) prior.total++
+		if (prior && now - prior.at < 60_000) {
+			prior.suppressed++
+			this.log.debug(
+				{
+					sourceId: safeId(live.sourceId),
+					observationId: safeId(live.observationId),
+					discoveryId: safeId(live.discoveryId),
+					reason,
+					total: prior.total,
+				},
+				"Analog trial refusal suppressed",
+			)
+			return
+		}
+		this.analogRefusals.set(reason, {
+			at: now,
+			suppressed: 0,
+			total: prior?.total ?? 1,
+		})
+		this.log.info(
+			{
+				sourceId: safeId(live.sourceId),
+				observationId: safeId(live.observationId),
+				discoveryId: safeId(live.discoveryId),
+				reason,
+				activeSource: this.analogCounts.get(live.sourceId) ?? 0,
+				activeTotal: this.analogJobs.size,
+				activeDiscovery: [...this.analogJobs.values()].filter(
+					trial =>
+						trial.sourceId === live.sourceId &&
+						trial.discoveryId === live.discoveryId,
+				).length,
+				total: prior?.total ?? 1,
+				deferred: this.analogDeferred.size,
+				suppressed: prior?.suppressed ?? 0,
+			},
+			"Analog trial refused",
+		)
+	}
+
+	private deferAnalog(live: LiveObservation, track: TrackSnapshot): void {
+		const pending = this.analogDeferred.get(live.observationId)
+		if (pending?.captureId != null) return
+		const port = this.deps.iqCapture
+		if (!port) {
+			this.refuseAnalog(live, "capture-unavailable")
+			return
+		}
+		if (!pending && this.analogDeferred.size >= 128) {
+			this.refuseAnalog(live, "deferred-full")
+			return
+		}
+		const result = port.captureFor(
+			{
+				sourceId: live.sourceId,
+				observationId: live.observationId,
+				epoch: track.epoch,
+				rfHz: track.centreHz,
+				tuningTrust: track.tuningTrust,
+				fromSample: track.startSample,
+				reason: "detection",
+			},
+			`analog-${live.observationId}`,
+		)
+		if ("refused" in result) {
+			this.refuseAnalog(live, `capture-${result.refused}`)
+			if (["busy", "full", "rate-limited"].includes(result.refused))
+				this.analogDeferred.set(live.observationId, {
+					live,
+					track,
+					captureId: null,
+					at: pending?.at ?? this.now(),
+				})
+			return
+		}
+		this.analogDeferred.set(live.observationId, {
+			live,
+			track,
+			captureId: result.captureId,
+			at: this.now(),
+		})
+		if (live.endedAt !== undefined) port.end(result.captureId)
+	}
+
+	private retryAnalog(): void {
+		if (this.consumerLifecycle.admissionSealed) return
+		for (const [id, pending] of this.analogDeferred) {
+			const port = this.deps.iqCapture
+			if (pending.captureId === null) {
+				if (
+					this.now() - pending.at >= IQ_CAPTURE_PREROLL_MAX_MS ||
+					(pending.live.endReason !== undefined &&
+						pending.live.endReason !== "quiet" &&
+						pending.live.endReason !== "max-duration") ||
+					this.discoveryLockedOut(pending.live.discoveryId)
+				) {
+					this.analogDeferred.delete(id)
+					this.refuseAnalog(
+						pending.live,
+						this.discoveryLockedOut(pending.live.discoveryId)
+							? "lockout"
+							: "capture-preroll-expired",
+					)
+				} else this.deferAnalog(pending.live, pending.track)
+				continue
+			}
+			if (
+				!port ||
+				port.holderOf(pending.captureId) === undefined ||
+				this.now() - pending.at >= IQ_CAPTURE_ORPHAN_TTL_MS ||
+				this.discoveryLockedOut(pending.live.discoveryId) ||
+				(pending.live.endReason !== undefined &&
+					pending.live.endReason !== "quiet" &&
+					pending.live.endReason !== "max-duration")
+			) {
+				const reason =
+					!port || port.holderOf(pending.captureId) === undefined
+						? "capture-gone"
+						: this.discoveryLockedOut(pending.live.discoveryId)
+							? "lockout"
+							: this.now() - pending.at >= IQ_CAPTURE_ORPHAN_TTL_MS
+								? "deferred-ttl"
+								: "observation-ended"
+				this.analogDeferred.delete(id)
+				port?.settle(pending.captureId, `analog-${id}`)
+				this.refuseAnalog(pending.live, reason)
+			} else if (port.view(pending.captureId))
+				this.requestJobAnalog(pending.live, pending.track)
+		}
+	}
 	private readonly captures: CaptureStore
 	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
@@ -439,9 +743,19 @@ export class ScannerService extends EventEmitter {
 	/** WG2 req 13: per-job hit statistics (in memory; reset on start, dropped with the job). */
 	private readonly hits = new Map<string, JobHits>()
 	/** Store changes raised inside one ingest, emitted after its hits are counted (WG2 req 13.2). */
-	private ingestChanges: [string, StoreChange][] | null = null
-	/** § 10.7: engine instances the passive cost rule already judged (once, at openedAt + 60 s). */
-	private readonly costChecked = new WeakSet<SpectrumEngine>()
+	private ingestChanges:
+		| [string, StoreChange, readonly string[] | undefined][]
+		| null = null
+	/**
+	 * § 10.7 / WG11 req 2: when the passive guard last judged each source's running engine. An entry
+	 * for another (replaced) engine counts as never checked, so the first window applies again.
+	 */
+	private readonly costCheckedAt = new Map<
+		string,
+		{ engine: SpectrumEngine; at: number; sample: EluSample | null }
+	>()
+	/** WG11 review M2: when the passive guard disabled each source (for the probation re-enable). */
+	private readonly passiveDisabledAt = new Map<string, number>()
 	private readonly live = new Map<string, LiveObservation>()
 	private recent: LiveObservation[] = []
 	private readonly bestPsd = new Map<
@@ -449,10 +763,39 @@ export class ScannerService extends EventEmitter {
 		{ startHz: number; binHz: number; bins: number[]; snrDb: number }
 	>()
 	private readonly lastConfirm = new Map<string, number>()
+	/** WG11 req 1.7: the known protocol is the store's decoded protocol (`get` clones: no cheaper read). */
+	private readonly knownProtocols = createKnownProtocolMemory({
+		discovery: id => {
+			const d = this.store.get(id)
+			return d ? { protocol: d.protocol, confidence: d.confidence } : undefined
+		},
+	})
+	/** WG11 req 1.4: the band-plan ranges of the sweep ISM fill, rebuilt only when the plans change. */
+	private readonly bandBurstRanges = createBandRangeCache()
 	private readonly persistedLeases = new Map<string, PersistedLease>()
 	private readonly bootResume = new Map<string, string[]>()
 	private readonly passiveDisabled = new Map<string, string>()
-	private readonly probeOutcomes = new Map<string, ProbeOutcome>()
+	private readonly probeOutcomes = new Map<string, ProbeTrialBook>()
+	/** WG11 req 6.3: observations a detection capture was tried for (once each) and their capture ids. */
+	private readonly iqTried = new Set<string>()
+	private readonly iqCaptureLifecycle = new Map<
+		string,
+		{ captureId: string; sourceId: string }
+	>()
+	private readonly iqCaptureOf = new Map<
+		string,
+		{ captureId: string; sourceId: string }
+	>()
+	/** WG12: detection captures the port refused, or that were dropped before a result. */
+	private readonly iqRefused = new Set<string>()
+	/** WG12: replay applied for an observation, and whether that result decoded. */
+	private readonly replaySettled = new Map<string, boolean>()
+	/** True while a replay result is applied: its decode is not a live confirmation. */
+	private applyingReplay = false
+	/** Review m3: each queued capture's planned trials until its result (bounded, oldest evicted). */
+	private readonly replayPlans = new Map<string, readonly IqReplayTrial[]>()
+	/** The engine each source is attached to in the capture service. */
+	private readonly iqEngines = new Map<string, SpectrumEngine>()
 	private readonly frequencyErrors = new Map<
 		string,
 		{ hz: number; ppm: number; n: number }
@@ -514,6 +857,8 @@ export class ScannerService extends EventEmitter {
 
 	constructor(private readonly deps: ScannerServiceDeps) {
 		super()
+		// WG11 req 6.7: the replay shapes come from the probe channel requests this module owns.
+		deps.iqCapture?.setShapes(probeReplayShapes())
 		if (
 			deps.construction &&
 			deps.channelOwnership &&
@@ -642,8 +987,19 @@ export class ScannerService extends EventEmitter {
 					this.channelEngineStarts.set(sourceId, engine)
 					this.invalidateChannelAdmission()
 					this.probes.watchEngine(sourceId, engine)
+					// WG11 batch review R1 3: any stop of this engine (job release, display close, source
+					// removal) detaches it from the capture service, not only a fatal failure.
+					if (deps.iqCapture)
+						engine.on("stream", (_stream: number, reason: string) => {
+							if (reason === "stop") this.detachIqEngine(sourceId, engine)
+						})
 				},
 			})
+			// WG11 req 5.3: frame tracks carry the scanner's identity of a live track (null-safe,
+			// owned here so the entry-point composition is unchanged).
+			this.spectrum.setTrackIdentityLookup((sourceId, trackId) =>
+				this.trackIdentity(sourceId, trackId),
+			)
 			this.store = new DiscoveryStore({
 				maxDiscoveries: deps.settings.storage.maxDiscoveries,
 				now: this.now,
@@ -765,7 +1121,10 @@ export class ScannerService extends EventEmitter {
 				digitalVoice: deps.digitalVoice,
 				engines: sourceId => this.spectrum.engine(sourceId),
 				settings: () => this.settings(),
-				transports: deps.transports ?? [offsetTransport],
+				transports: [
+					...(deps.transports ?? [offsetTransport]),
+					...(deps.iqCapture ? [createReplayTransport(deps.iqCapture)] : []),
+				],
 				cpu: {
 					get normalisedPercent() {
 						return deps.cpuMeter?.normalisedPercent ?? null
@@ -876,19 +1235,22 @@ export class ScannerService extends EventEmitter {
 		if (this.started) return Promise.resolve()
 		this.startupAttempted = true
 		this.started = true
-		this.startPromise = this.startUp().catch((err: unknown) => {
-			// The caller stops a scanner whose start failed, which disposes the arbiter (S1-B final
-			// review, Info 3): say plainly that no persisted lease is restored this boot (H4).
-			this.log.error(
-				{ err, pendingLeases: [...this.persistedLeases.keys()] },
-				"Scanner start failed: crash recovery of persisted tuner leases does not run this boot; a tuner may stay on a scan frequency until the next start",
-			)
-			throw err
-		})
+		this.startPromise = this.startUp()
+			.then(() => this.startReplayQueue())
+			.catch((err: unknown) => {
+				// The caller stops a scanner whose start failed, which disposes the arbiter (S1-B final
+				// review, Info 3): say plainly that no persisted lease is restored this boot (H4).
+				this.log.error(
+					{ err, pendingLeases: [...this.persistedLeases.keys()] },
+					"Scanner start failed: crash recovery of persisted tuner leases does not run this boot; a tuner may stay on a scan frequency until the next start",
+				)
+				throw err
+			})
 		return this.startPromise
 	}
 
 	private async startUp(): Promise<void> {
+		this.startLiveAudioEvidence()
 		// A restarted service must not publish during its new recovery barrier.
 		this.store.off("change", this.onStoreChange)
 		let loaded: LoadedState
@@ -1009,6 +1371,7 @@ export class ScannerService extends EventEmitter {
 		this.probes.on("evidence", this.onProbeEvidence)
 		this.probes.on("recordings", this.onProbeRecordings)
 		this.probes.on("probe-state", this.onProbeState)
+		this.probes.on("replay-end", this.onReplayEnd)
 		this.ambient.on("evidence", this.onAmbientEvidence)
 		this.startCoverageRefresh()
 		// A lease whose job was deleted is persisted unattached: its recovery still runs (H4).
@@ -1049,6 +1412,11 @@ export class ScannerService extends EventEmitter {
 		_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown",
 	): void {
 		this.consumerLifecycle.sealAdmission()
+		for (const [id, pending] of this.analogDeferred)
+			if (pending.captureId !== null)
+				this.deps.iqCapture?.settle(pending.captureId, `analog-${id}`)
+		this.analogDeferred.clear()
+		for (const { controller } of this.analogJobs.values()) controller.abort()
 		this.started = false
 		if (this.timer) clearInterval(this.timer)
 		this.timer = null
@@ -1057,6 +1425,8 @@ export class ScannerService extends EventEmitter {
 	}
 
 	beginStop(): Readonly<ScannerStopHandle> {
+		this.sharedAnalog?.stop()
+		this.replayStopped = true
 		this.sealAdmission()
 		return this.consumerLifecycle.beginStop()
 	}
@@ -1093,6 +1463,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
+		this.stopLiveAudioEvidence()
 		const handle = this.beginStop()
 		await handle.producerSettled.catch(() => undefined)
 		await this.finalizeStopNative()
@@ -1101,6 +1472,7 @@ export class ScannerService extends EventEmitter {
 
 	/** EACH independent actual component settles before an aggregate failure; no native66 wait. */
 	private async cleanupServiceComponents(): Promise<CleanupOutcome> {
+		this.stopLiveAudioEvidence()
 		let failed = false
 		const attempt = async (
 			cleanup: () => unknown | Promise<unknown>,
@@ -1191,7 +1563,8 @@ export class ScannerService extends EventEmitter {
 		}
 		if (this.arbiter) await attempt(() => this.arbiter.dispose())
 		if (this.stateLoaded)
-			await attempt(() => this.persistence.writeSnapshot(this.store.snapshot()))
+			await attempt(() => this.persistence.writeSnapshotOf(this.store))
+		await attempt(() => this.persistence.closeSnapshotWorker())
 		if (this.startupAttempted && this.persistence)
 			await attempt(() => this.persistJobs())
 		return failed
@@ -1209,6 +1582,8 @@ export class ScannerService extends EventEmitter {
 
 	private drainProbeComponents(): Promise<void> {
 		this.probeComponentDrain ??= Promise.resolve().then(async () => {
+			// WG11 req 6.4: the replay queue stops (its replay cancelled) before the probes drain.
+			await this.stopReplayQueue()
 			if (this.probes) await this.probes.destroy()
 		})
 		return this.probeComponentDrain
@@ -1217,6 +1592,7 @@ export class ScannerService extends EventEmitter {
 	// === status and settings ===
 
 	status(): ScannerStatus {
+		const captureCounters = this.deps.iqCapture?.counters?.()
 		const s = this.settings()
 		const probes = this.probes.status()
 		const spectrum = this.spectrum.status().sources
@@ -1227,6 +1603,17 @@ export class ScannerService extends EventEmitter {
 			),
 		)
 		return {
+			...(captureCounters
+				? {
+						iqCapture: {
+							...(captureCounters.trialCaptures
+								? { trialCaptures: captureCounters.trialCaptures }
+								: {}),
+							toolFailures: captureCounters.toolFailures,
+							lastToolFailure: captureCounters.lastToolFailure,
+						},
+					}
+				: {}),
 			enabled: s.enabled,
 			channelizerAvailable: false,
 			engines,
@@ -1698,6 +2085,8 @@ export class ScannerService extends EventEmitter {
 			)
 		const d = this.store.setOperator(id, patch)
 		if (patch.lockout) {
+			for (const trial of this.analogJobs.values())
+				if (trial.discoveryId === id) trial.controller.abort()
 			await Promise.all(
 				this.probes
 					.status()
@@ -1922,6 +2311,40 @@ export class ScannerService extends EventEmitter {
 		return this.captures.delete(id)
 	}
 
+	/**
+	 * WG11 req 5.3: the scanner identity of a live track of `sourceId`, for the spectrum service's
+	 * frame tracks. O(1): one `live` map lookup, then `discoveryIdOf` (the merge survivor) and
+	 * `identityOf` (scalars, no clone). Never throws; null when the track is unknown, of another source, ended, or has no discovery. `trackId` is the full
+	 * tracker id of the chain's current track (after a max-duration rollover, the successor's).
+	 * Keyed on it with the same-source check, two sources' equal suffixes never cross-match.
+	 */
+	trackIdentity(
+		sourceId: string,
+		trackId: string,
+	): SpectrumFrameTrackScanner | null {
+		try {
+			const live = this.live.get(trackId)
+			if (
+				!live ||
+				live.sourceId !== sourceId ||
+				live.endedAt !== undefined ||
+				!live.discoveryId
+			)
+				return null
+			const id = this.store.discoveryIdOf(live.observationId)
+			if (id === undefined) return null
+			const d = this.store.identityOf(id)
+			if (!d || !d.protocol || !d.confidence) return null
+			return {
+				discoveryId: d.id,
+				protocol: d.protocol,
+				confidence: d.confidence,
+			}
+		} catch {
+			return null
+		}
+	}
+
 	async listen(discoveryId: string): Promise<ListenResult> {
 		const discovery = this.store.get(discoveryId)
 		if (!discovery)
@@ -1977,6 +2400,7 @@ export class ScannerService extends EventEmitter {
 		reason: EngineStreamReason,
 	): void => {
 		this.cancelChannelSource(sourceId)
+		if (reason === "stop") this.detachIqEngine(sourceId)
 		this.streamFloor.set(sourceId, reason === "stop" ? stream + 1 : stream)
 		// A summary of an ended stream never measures for identify.
 		this.lastSummaries.delete(sourceId)
@@ -2049,7 +2473,44 @@ export class ScannerService extends EventEmitter {
 			// § 6.2: in-window while no sweep lease holds the source (truncated segments → `edge`).
 			inWindow: this.arbiter.holder(sourceId) === undefined,
 		})
+		// WG12 R 2.1: the channel gate follows every mask change (start, stop, range edit, lease).
+		this.spectrum.setChannelPlan(sourceId, this.channelPlanOf(sourceId))
 		this.updateRing(sourceId)
+	}
+
+	/**
+	 * WG12 R 2.1: one channel-plan entry per enabled range of the source's running jobs, plus
+	 * the band-plan view's ranges while the source's passive job runs (the gate clips entries
+	 * to the tuned window). Null when no job runs on the source.
+	 */
+	channelPlanOf(sourceId: string): ChannelPlan | null {
+		const records = [...this.jobs.values()].filter(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state),
+		)
+		if (records.length === 0) return null
+		const ranges = records.flatMap(j => j.spec.ranges.filter(isRangeEnabled))
+		if (records.some(j => j.passive))
+			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+				ranges.push(...b.ranges.filter(isRangeEnabled))
+		const entries = ranges.map((r): ChannelPlanEntry => {
+			const raster = r.rasters?.[0]
+			const width =
+				r.obwHz?.[0] ?? raster?.spacingHz ?? CHANNEL_GATE_DEFAULT_WIDTH_HZ
+			return {
+				startHz: r.startHz,
+				endHz: r.endHz,
+				widthHz: Math.min(
+					CHANNEL_GATE_MAX_WIDTH_HZ,
+					Math.max(CHANNEL_GATE_MIN_WIDTH_HZ, width),
+				),
+				rasterHz: raster?.spacingHz ?? null,
+				firstChannelHz: raster?.firstChannelHz ?? null,
+				// A11: the same burst rule as the masks' burstRanges.
+				burst: (r.protocols ?? []).some(p => BURST_PROTOCOLS.has(p)),
+				rangeKey: `${Math.round(r.startHz)}:${Math.round(r.endHz)}`,
+			}
+		})
+		return { sourceId, entries, defaultWidthHz: CHANNEL_GATE_DEFAULT_WIDTH_HZ }
 	}
 
 	/**
@@ -2106,6 +2567,7 @@ export class ScannerService extends EventEmitter {
 		switch (ev.kind) {
 			case "epoch-started":
 				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
+				this.syncIqCapture(sourceId, epoch)
 				this.probes
 					.onEpoch(sourceId, ev.epoch, epoch.centreHz)
 					.catch((err: unknown) =>
@@ -2134,6 +2596,8 @@ export class ScannerService extends EventEmitter {
 			case "untracked-retune":
 				// § 4.7: the engine already marked the epoch unverified; sweeps re-send their hop,
 				// in-window jobs continue with unverified observations.
+				// DT (R 1.2): the holder's next same-centre retune must write, not no-op.
+				this.arbiter.distrust(sourceId)
 				for (const d of drivers) d.onUntrackedRetune()
 				return
 			case "stats":
@@ -2164,6 +2628,16 @@ export class ScannerService extends EventEmitter {
 		const opened = !live
 		if (!live) {
 			if (covering.length === 0) return
+			// Only gate-accepted emissions become observations and receive trials.
+			if (track.gate !== undefined && track.gate !== "passed") {
+				this.refuseAnalog(
+					{ sourceId, observationId: null, discoveryId: null },
+					`gate-${track.gate}`,
+				)
+				if (ev.kind === "track-close" && track.gate === "below")
+					for (const d of covering) d.record.counts.transients += 1
+				return
+			}
 			live = {
 				observationId: `o_${ulid(now)}`,
 				sourceId,
@@ -2183,6 +2657,12 @@ export class ScannerService extends EventEmitter {
 			this.live.set(track.trackId, live)
 			this.emitActivity(live, track, true)
 		}
+		if (
+			track.gate === "passed" &&
+			live.epoch === track.epoch &&
+			live.gatePassedAt === undefined
+		)
+			live.gatePassedAt = now
 		for (const d of covering)
 			if (!live.jobIds.includes(d.record.id)) live.jobIds.push(d.record.id)
 		// After the job ids: the capture-enabled covering job decides (Task 34a).
@@ -2199,13 +2679,39 @@ export class ScannerService extends EventEmitter {
 					? "gap"
 					: undefined
 		const closing = endReason !== undefined
-		if (
+		const throttledIngest =
 			closing ||
 			(now - live.startedAt >= 1000 && now - live.lastIngestAt >= 1000)
-		) {
-			this.ingest(live, track, endReason)
+		const everIngested = live.lastIngestAt !== 0
+		if (throttledIngest) this.ingest(live, track, endReason)
+		// WG12 req 4.3: first gate pass. Inside the first second the throttle has
+		// not materialized a discovery, so ingest once, then ask. A later pass
+		// does not ask again. WG11 6.3 bounds stay inside requestIqCapture.
+		const captureAtGate = gatePassCapture({
+			synthetic,
+			late,
+			closing,
+			gate: track.gate,
+			hasDiscovery: live.discoveryId !== null,
+			ingestedThisSnapshot: throttledIngest,
+			everIngested: everIngested || throttledIngest,
+			alreadyRequested: this.iqTried.has(live.observationId),
+		})
+		if (captureAtGate.materialize) this.ingest(live, track)
+		if (
+			!synthetic &&
+			!late &&
+			(!closing || endReason === "quiet" || endReason === "max-duration") &&
+			(track.gate === undefined || track.gate === "passed")
+		)
+			this.requestJobAnalog(live, track)
+		else if (!synthetic && !late && track.gate !== undefined)
+			this.refuseAnalog(live, `gate-${track.gate}`)
+		if (captureAtGate.request && !this.analogDeferred.has(live.observationId)) {
+			this.requestIqCapture(live, track)
 		}
-		const needs = !synthetic && !late && this.needsConfirm(live, track)
+		const needs =
+			!synthetic && !late && this.needsConfirm(live, track, !closing)
 		for (const d of covering) d.onTrack(live, track, needs)
 		if (!closing) {
 			this.refineLiveChannel(live, track)
@@ -2220,7 +2726,13 @@ export class ScannerService extends EventEmitter {
 				live.observationId,
 				endReason === "gap" ? "stream-changed" : "cancelled",
 			)
+		if (endReason !== "quiet" && endReason !== "max-duration")
+			this.analogJobs.get(live.observationId)?.controller.abort()
 		this.rememberClosed(track.trackId)
+		const deferredAnalog = this.analogDeferred.get(live.observationId)
+		if (deferredAnalog?.captureId != null)
+			this.deps.iqCapture?.end(deferredAnalog.captureId)
+		this.endIqCapture(live)
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
 		this.probes.trackClosed(track.trackId)
@@ -2230,6 +2742,7 @@ export class ScannerService extends EventEmitter {
 		)
 		this.live.delete(track.trackId)
 		live.endedAt = now
+		if (endReason !== undefined) live.endReason = endReason
 		this.recent.push(live)
 		this.emitActivity(live, track, false)
 		if (live.probeIds.size === 0 && live.discoveryId)
@@ -2269,21 +2782,23 @@ export class ScannerService extends EventEmitter {
 		live: LiveObservation,
 		track: TrackSnapshot,
 		endReason?: ObservationEndReason,
+		decode?: DecodeEvidence,
 	): void {
 		const outer = this.ingestChanges
-		const changes: [string, StoreChange][] = []
+		const changes: [string, StoreChange, readonly string[] | undefined][] = []
 		this.ingestChanges = changes
 		let reported = new Map<string, Set<string>>()
 		try {
-			reported = this.ingestTracked(live, track, endReason)
+			reported = this.ingestTracked(live, track, endReason, decode)
 		} finally {
 			this.ingestChanges = outer
-			for (const [id, change] of changes) {
+			for (const [id, change, mergedIds] of changes) {
 				const jobIds = reported.get(id)
 				this.emitDiscoveryChange(
 					id,
 					change,
 					jobIds ? this.jobHitsOf([...jobIds], id) : [],
+					mergedIds,
 				)
 			}
 		}
@@ -2297,23 +2812,27 @@ export class ScannerService extends EventEmitter {
 		live: LiveObservation,
 		track: TrackSnapshot,
 		endReason?: ObservationEndReason,
+		decode?: DecodeEvidence,
 	): Map<string, Set<string>> {
 		const reported = new Map<string, Set<string>>()
 		const now = this.now()
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
 		)
-		const res = this.store.ingest({
-			id: live.observationId,
-			sourceId: live.sourceId,
-			jobIds: live.jobIds,
-			track,
-			classification: live.classification,
-			startedAt: live.startedAt,
-			...(endReason ? { endedAt: now, endReason } : {}),
-			...(live.hopIndex !== undefined ? { hopIndex: live.hopIndex } : {}),
-			singleBlockSurfacingAllowed: sweep,
-		})
+		const res = this.store.ingest(
+			{
+				id: live.observationId,
+				sourceId: live.sourceId,
+				jobIds: live.jobIds,
+				track,
+				classification: live.classification,
+				startedAt: live.startedAt,
+				...(endReason ? { endedAt: live.endedAt ?? now, endReason } : {}),
+				...(live.hopIndex !== undefined ? { hopIndex: live.hopIndex } : {}),
+				singleBlockSurfacingAllowed: sweep,
+			},
+			decode ? { decode } : {},
+		)
 		live.lastIngestAt = now
 		if (res.change === "transient" || res.discoveryId === null) {
 			// A re-ingest that raised truncated/iqImage unlinks the observation (StoreMutation.removedObservations):
@@ -2367,7 +2886,8 @@ export class ScannerService extends EventEmitter {
 					?.ended(live.observationId, res.discoveryId, durationMs)
 		}
 		live.discoveryId = res.discoveryId
-		live.decoded = this.store.get(res.discoveryId)?.confidence === "decoded"
+		// A discovery proof belongs to its original transmission.
+		live.decoded = live.acceptedIdentity !== undefined
 		if (live.undecodedReason) {
 			this.markUndecoded(live, live.undecodedReason)
 			delete live.undecodedReason
@@ -2439,7 +2959,27 @@ export class ScannerService extends EventEmitter {
 		}
 		if (!all)
 			for (const p of probeProtocols) if (!protocols.includes(p)) priors[p] = 0
-		return { priors, protocols }
+		// WG11 req 1.4: a sweep silent at this frequency takes the band plan's ISM prior, so a young
+		// land-mobile track is not an ISM burst (no probe) at the sweep's dwell decision.
+		return {
+			priors: withBandBurstPrior(
+				{
+					hz: centreHz,
+					priors,
+					protocols,
+					rangesListProtocols: bandProtocols.length > 0,
+					sweep: specs.some(s => s.mode === "sweep"),
+				},
+				() =>
+					priorsFor(
+						this.bandBurstRanges(
+							this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
+						),
+						centreHz,
+					),
+			),
+			protocols,
+		}
 	}
 
 	private classify(track: TrackSnapshot, sourceId: string): Classification {
@@ -2818,7 +3358,17 @@ export class ScannerService extends EventEmitter {
 		return [...new Set(selections.flat())]
 	}
 
-	private needsConfirm(live: LiveObservation, track: TrackSnapshot): boolean {
+	private discoveryLockedOut(discoveryId: string | null): boolean {
+		return Boolean(
+			discoveryId && this.store.get(discoveryId)?.operator?.lockout,
+		)
+	}
+
+	private needsConfirm(
+		live: LiveObservation,
+		track: TrackSnapshot,
+		open = true,
+	): boolean {
 		// § 10.8: an active identify job owns the confirmation of the tracks it is identifying.
 		const identifying = live.jobIds.some(id => {
 			const d = this.drivers.get(id)
@@ -2827,6 +3377,8 @@ export class ScannerService extends EventEmitter {
 			)
 		})
 		if (identifying) return false
+		// WG12 R 4.1: confirm candidates are gated tracks only (absent gate: no plan, today's rule).
+		if (track.gate !== undefined && track.gate !== "passed") return false
 		if (
 			track.flags.truncated ||
 			track.flags.edge ||
@@ -2835,12 +3387,36 @@ export class ScannerService extends EventEmitter {
 		)
 			return false
 		const d = live.discoveryId ? this.store.get(live.discoveryId) : undefined
-		if (d?.operator?.lockout) return false
+		if (this.discoveryLockedOut(live.discoveryId)) return false
 		if (
-			probeModesFor(
+			jobTrialModes(
 				live.classification.class,
 				this.protocolsFor(live, track.centreHz),
+				track.obwHz,
 			).length === 0
+		)
+			return false
+		// WG12 req 4.1–4.2: a live hold only for a passed gate, and only in the
+		// replay-first cases. The reconfirm interval below is today's path once
+		// needsLiveConfirm allows it.
+		const onAir = open && live.endedAt === undefined
+		if (
+			!needsLiveConfirm(
+				replayConfirmInput({
+					serviceOn: this.iqCaptureOn(),
+					refused: this.iqRefused.has(live.observationId),
+					pendingCapture:
+						this.iqCaptureLifecycle.has(live.observationId) ||
+						this.iqCaptureOf.has(live.observationId),
+					replaySettled: this.replaySettled.has(live.observationId),
+					replayDecoded: this.replaySettled.get(live.observationId) === true,
+					acceptedIdentity: live.acceptedIdentity !== undefined,
+					gate: track.gate,
+					trackOpen: onAir,
+					discoveryDecoded: d?.confidence === "decoded",
+					emitterOnAir: onAir,
+				}),
+			)
 		)
 			return false
 		if (!d || d.confidence !== "decoded") return true
@@ -2849,6 +3425,57 @@ export class ScannerService extends EventEmitter {
 			this.now() - last >= RECONFIRM_AFTER_MS ||
 			d.class !== live.classification.class
 		)
+	}
+
+	/** `port.state()`, not a detached method: the service reads `this.st`. */
+	private iqCaptureOn(): boolean {
+		return captureServiceIsOn(this.deps.iqCapture, err => {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture state failed")
+		})
+	}
+
+	/** No replay is coming, so live confirm may use today's path. */
+	private giveUpIqCapture(observationId: string): void {
+		this.iqCaptureLifecycle.delete(observationId)
+		if (!this.replaySettled.has(observationId))
+			this.iqRefused.add(observationId)
+	}
+
+	/**
+	 * A capture left the store with no replay result (native abort or error).
+	 * Drop that pending entry and give up, so the next confirm sees capture
+	 * not running and falls back to today's live path.
+	 */
+	private releaseRemovedCapture(
+		captureId: string,
+		observationId: string | null,
+	): void {
+		const release = captureRemovedRelease({
+			removedCaptureId: captureId,
+			removedObservationId: observationId,
+			pending: [
+				...new Map([...this.iqCaptureOf, ...this.iqCaptureLifecycle]),
+			].map(([id, hit]) => ({
+				observationId: id,
+				captureId: hit.captureId,
+			})),
+			settledObservationIds: this.replaySettled,
+		})
+		if (release === null) return
+		this.iqCaptureOf.delete(release)
+		this.iqCaptureLifecycle.delete(release)
+		this.giveUpIqCapture(release)
+	}
+
+	private noteReplaySettled(observationId: string, decoded: boolean): void {
+		this.iqCaptureLifecycle.delete(observationId)
+		this.replaySettled.delete(observationId)
+		this.replaySettled.set(observationId, decoded)
+		while (this.replaySettled.size > REPLAY_SPANS_MAX) {
+			const oldest = this.replaySettled.keys().next().value
+			if (oldest === undefined) break
+			this.replaySettled.delete(oldest)
+		}
 	}
 
 	/** Best-SNR PSD slice per open observation (§ 8 evidence). */
@@ -3010,11 +3637,47 @@ export class ScannerService extends EventEmitter {
 			outcome.output = true
 			if (!ev.crcClean) outcome.crcFailures += 1
 			if (ev.identity || ev.encrypted !== undefined) outcome.confirmed = true
+			const trial = outcome.modes.at(-1)
+			if (trial && !trial.closed) {
+				trial.output = true
+				if (!ev.crcClean) trial.crcFailures += 1
+				if (ev.identity || ev.encrypted !== undefined) trial.confirmed = true
+				if (ev.identity) trial.identity = true
+			}
 		}
-		const live = this.findObservation(req.observationId)
+		// WG11 req 6.4: a queue replay's decode lands once, through the queue's sink (applyReplayResult).
+		if (req.replay && req.jobId === IQ_REPLAY_QUEUE_HOLDER) return
+		const found = this.findObservation(req.observationId)
+		if (req.replay) {
+			// a replay's evidence carries the capture's time, not the processing time.
+			ev = {
+				...ev,
+				at: this.replayEvidenceAt(
+					req.replay.captureId,
+					found,
+					req.observationId,
+				),
+				transport: "replay",
+			}
+			if (!found) {
+				// the observation left live/recent: its stored discovery takes it, once.
+				const discoveryId = this.store.discoveryIdOf(req.observationId)
+				if (discoveryId)
+					this.applyStoredReplay(req.observationId, discoveryId, ev)
+				return
+			}
+		}
+		const live = found
 		if (!live || ev.epoch !== live.epoch) return
 		live.probeIds.add(probeId)
-		this.applyEvidence(live, ev)
+		// An identify replay is applied here (identify has no other path to the store) but is no live confirmation.
+		const wasReplaying = this.applyingReplay
+		if (req.replay) this.applyingReplay = true
+		try {
+			this.applyEvidence(live, ev)
+		} finally {
+			this.applyingReplay = wasReplaying
+		}
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onEvidence(probeId, ev)
 	}
@@ -3036,22 +3699,42 @@ export class ScannerService extends EventEmitter {
 				e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
 			)
 		})
+		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
+		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
+		// trials leave the count to this path).
+		const counted = new Set<string>()
 		for (const live of candidates) {
-			this.applyEvidence(live, e.ev)
+			const before = live.acceptedIdentity
+			const accepted = this.applyEvidence(live, e.ev)
+			const discoveryId = live.discoveryId
+			if (
+				accepted &&
+				e.ev.identity &&
+				discoveryId &&
+				live.acceptedIdentity !== before &&
+				!counted.has(discoveryId)
+			) {
+				counted.add(discoveryId)
+				this.knownProtocols.recordDecode(discoveryId)
+			}
 			// WG7 req 1.5: identify jobs pairing this observation may decode an ambient trial.
 			for (const jobId of live.jobIds)
 				this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)
 		}
 	}
 
-	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): void {
-		if (live.evidenceDeleted) return
+	/** Returns whether the observation accepted the evidence (§ 7.1; replay results count only then). */
+	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): boolean {
+		if (live.evidenceDeleted) return false
 		if (ev.metadata.talkgroups?.[0]) live.talkgroup = ev.metadata.talkgroups[0]
 		if (ev.metadata.sources?.[0]) live.source = ev.metadata.sources[0]
 		if (ev.encrypted) live.encrypted = true
-		if (!live.discoveryId && live.lastTrack) this.ingest(live, live.lastTrack)
+		// An accepted identity decode places a track whose gate has not passed
+		// (a short AIS, VDL2 or LoRa burst never passes the burst gate).
+		if (!live.discoveryId && live.lastTrack)
+			this.ingest(live, live.lastTrack, live.endReason, ev)
 		const discoveryId = live.discoveryId
-		if (!discoveryId) return
+		if (!discoveryId) return false
 		// § 7.1: the observation keeps its own accepted evidence (Observation.decode; A1/A3 metrics).
 		const accepted = this.store.appendObservationEvidence(
 			live.observationId,
@@ -3064,14 +3747,16 @@ export class ScannerService extends EventEmitter {
 		// § 6.2: leak/intermod caps are decided before the decode is applied, so a capped decode never reaches `decoded`.
 		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
+		const wasLiveDecoded = live.decoded
 		this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
 		// The decode may have merged the discovery (identity key): follow the survivor.
 		const survivor = this.store.discoveryIdOf(live.observationId) ?? discoveryId
 		live.discoveryId = survivor
 		this.dirty = true
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
-			return
+			return accepted
 		live.decoded = true
+		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
 			live.acceptedIdentity = {
 				identity: ev.identity,
@@ -3081,6 +3766,7 @@ export class ScannerService extends EventEmitter {
 		this.recorder.decoded(live.observationId)
 		this.lastConfirm.set(survivor, this.now())
 		if (!wasDecoded) this.updateFrequencyError(live.sourceId, { rekey: true })
+		return accepted
 	}
 
 	private capFor(
@@ -3251,28 +3937,915 @@ export class ScannerService extends EventEmitter {
 		probeId: string,
 		state: string,
 		req: ProbeRequest,
+		terminal?: ProbeUnavailableStop,
 	): void => {
 		// "starting" occurs synchronously before launch's first allocation/effect.
 		if (state === "starting" || state === "stopped")
 			this.invalidateChannelAdmission()
-		// Mode stepping re-emits "starting" for the same probe: keep the first start (the hold covers all modes).
-		if (state === "starting" && !this.probeOutcomes.has(probeId)) {
-			this.probeOutcomes.set(probeId, {
-				startedAt: this.now(),
-				holdMs: req.holdMs,
-				output: false,
-				crcFailures: 0,
-				confirmed: false,
-			})
+		if (req.replay && this.replayOrders.has(req.replay.captureId)) {
+			this.emitProgressFor(null)
+			return
 		}
+		// Mode stepping re-emits "starting" on the same probe id. The request hold
+		// stays on the first start; each mode takes its own trial.
+		if (state === "starting") {
+			let book = this.probeOutcomes.get(probeId)
+			if (book === undefined) {
+				book = {
+					startedAt: this.now(),
+					holdMs: req.holdMs,
+					output: false,
+					crcFailures: 0,
+					confirmed: false,
+					modes: [],
+				}
+				this.probeOutcomes.set(probeId, book)
+			}
+			const rows: ProofTrialInput[] = []
+			this.finishMode(req, book, "step", rows)
+			this.openMode(req, book, rows)
+			this.store.recordTrials(req.observationId, rows)
+		}
+		// `confirming` is emitted after the decoder process exists. `following`
+		// is only reached from there. `starting` is before launch.
+		if (state === "confirming" || state === "following")
+			this.markDecoderStarted(probeId)
 		if (state === "stopped") {
-			const outcome = this.probeOutcomes.get(probeId)
+			const book = this.probeOutcomes.get(probeId)
 			this.probeOutcomes.delete(probeId)
-			const reason = outcome ? undecodedForProbe(outcome, this.now()) : null
-			const live = reason ? this.findObservation(req.observationId) : undefined
-			if (live && reason) this.markUndecoded(live, reason)
+			if (book) {
+				const unavailable =
+					terminal?.outcome === "unsupported" &&
+					terminal.reason === "decoder-unavailable"
+				// A missing program is not a decode failure and not a known-protocol miss.
+				this.finishMode(req, book, unavailable ? "unavailable" : "stop")
+				if (!unavailable) {
+					const reason = undecodedForProbe(book, this.now())
+					const live = reason
+						? this.findObservation(req.observationId)
+						: undefined
+					if (live && reason) this.markUndecoded(live, reason)
+				}
+			}
 		}
 		this.emitProgressFor(null)
+	}
+
+	/** The pool emits this before "stopped" when a replay decoder finished cleanly. */
+	private readonly onReplayEnd = (probeId: string): void => {
+		const trial = this.probeOutcomes.get(probeId)?.modes.at(-1)
+		if (trial && !trial.closed) trial.replayEnded = true
+	}
+
+	/** The open mode's decoder process exists (`confirming` or `following`). */
+	private markDecoderStarted(probeId: string): void {
+		const trial = this.probeOutcomes.get(probeId)?.modes.at(-1)
+		if (trial !== undefined && !trial.closed) trial.decoderStarted = true
+	}
+
+	/** One trial for the mode that is starting. `running` is replaced when it ends. */
+	private openMode(
+		req: ProbeRequest,
+		book: ProbeTrialBook,
+		rows: ProofTrialInput[],
+	): void {
+		const mode = probeModeAt(req, book.modes.length)
+		if (mode === undefined) return
+		const driver = this.drivers.get(req.jobId)
+		if (driver instanceof JobRunner) driver.noteTrialStarted(req, mode)
+		const trial: ProbeModeTrial = {
+			order: this.store.nextTrialOrder(),
+			protocol: mode.protocol,
+			decoder: mode.decoderType,
+			output: false,
+			crcFailures: 0,
+			confirmed: false,
+			identity: false,
+			replayEnded: false,
+			decoderStarted: false,
+			closed: false,
+		}
+		book.modes.push(trial)
+		this.recordProbeTrial(req.observationId, trial, "running", rows)
+	}
+
+	/** Close the mode that is open. A later row for its order replaces `running`. */
+	private finishMode(
+		req: ProbeRequest,
+		book: ProbeTrialBook,
+		how: "step" | "stop" | "unavailable",
+		rows?: ProofTrialInput[],
+	): void {
+		const trial = book.modes.at(-1)
+		if (trial === undefined || trial.closed) return
+		trial.closed = true
+		if (how === "unavailable") {
+			this.recordProbeTrial(req.observationId, trial, "unsupported")
+			const type = probeDecoderType(trial.decoder)
+			if (type !== undefined)
+				this.store.recordUnavailable(req.observationId, type)
+			return
+		}
+		const outcome =
+			req.replay !== undefined
+				? replayTrialOutcome(trial)
+				: how === "step"
+					? completedModeOutcome(trial)
+					: liveStopOutcome(book, trial, this.now())
+		this.recordProbeTrial(req.observationId, trial, outcome, rows)
+	}
+
+	/** One trial row. A later outcome replaces `running` on the same order. */
+	private recordProbeTrial(
+		observationId: string,
+		trial: ProbeModeTrial,
+		outcome: ScannerTrialOutcome,
+		rows?: ProofTrialInput[],
+	): void {
+		const row: ProofTrialInput = {
+			protocol: trial.protocol,
+			decoder: trial.decoder,
+			outcome,
+			order: trial.order,
+			at: this.now(),
+		}
+		if (rows) rows.push(row)
+		else this.store.recordTrial(observationId, row)
+	}
+
+	// === WG11 req 6: IQ capture on detection, replay results ===
+
+	/** A18: classification and measured bandwidth never exclude an allowed analog trial. */
+	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
+		const runner = this.admittedAnalog()
+		const protocols = this.protocolsFor(live, track.centreHz)
+		const eligible = live.jobIds.some(id => {
+			const job = this.jobs.get(id)
+			return (
+				job !== undefined &&
+				!isTerminal(job.state) &&
+				job.spec.signalsOnly !== true
+			)
+		})
+		// A historical discovery can contain several measured channels after overload.
+		// Ownership follows this emission's centre, never that merged median.
+		const raster = this.rastersAt(live.sourceId, track.centreHz).sort(
+			(a, b) => a.spacingHz - b.spacingHz,
+		)[0]
+		const spacingHz = raster?.spacingHz ?? 6250
+		const originHz = raster?.firstChannelHz ?? 0
+		const channelHz =
+			originHz + Math.round((track.centreHz - originHz) / spacingHz) * spacingHz
+		const channelKey = `${spacingHz}:${channelHz}`
+		const owned = [...this.analogJobs.values()].some(
+			trial =>
+				trial.sourceId === live.sourceId &&
+				live.discoveryId !== null &&
+				trial.discoveryId === live.discoveryId &&
+				trial.channelKey === channelKey,
+		)
+		const reason = !eligible
+			? "not-allowed"
+			: this.discoveryLockedOut(live.discoveryId)
+				? "lockout"
+				: live.discoveryId === null
+					? "no-discovery"
+					: track.flags.spur || track.flags.iqImage
+						? "spur-image"
+						: !runner?.runLive
+							? "runner-unavailable"
+							: protocols.length > 0 && !protocols.includes("analog-fm")
+								? "not-allowed"
+								: this.analogAttempted.has(live)
+									? "attempted"
+									: owned
+										? "discovery-owned"
+										: (this.analogCounts.get(live.sourceId) ?? 0) >= 2
+											? "capacity"
+											: undefined
+		if (reason) {
+			this.refuseAnalog(live, reason)
+			if (reason !== "capacity" && reason !== "discovery-owned") {
+				const pending = this.analogDeferred.get(live.observationId)
+				this.analogDeferred.delete(live.observationId)
+				if (pending?.captureId != null)
+					this.deps.iqCapture?.settle(
+						pending.captureId,
+						`analog-${live.observationId}`,
+					)
+			}
+			if (reason === "capacity" || reason === "discovery-owned")
+				this.deferAnalog(live, track)
+			return
+		}
+		if (!runner?.runLive) return
+		const deferred = this.analogDeferred.get(live.observationId)
+		const deferredCaptureId = deferred?.captureId ?? undefined
+		if (
+			deferred &&
+			(deferredCaptureId === undefined ||
+				!this.deps.iqCapture?.view(deferredCaptureId))
+		)
+			return
+		this.analogDeferred.delete(live.observationId)
+		this.analogCounts.set(
+			live.sourceId,
+			(this.analogCounts.get(live.sourceId) ?? 0) + 1,
+		)
+		this.analogAttempted.add(live)
+		const controller = new AbortController()
+		this.analogJobs.set(live.observationId, {
+			controller,
+			channelKey,
+			discoveryId: live.discoveryId,
+			sourceId: live.sourceId,
+		})
+		const order = this.store.nextTrialOrder()
+		const row = {
+			protocol: "analog-fm" as const,
+			decoder: "analog-demod",
+			order,
+			at: this.now(),
+		}
+		this.store.recordTrial(live.observationId, { ...row, outcome: "running" })
+		controller.signal.addEventListener(
+			"abort",
+			() => {
+				this.store.recordTrial(live.observationId, {
+					...row,
+					at: this.now(),
+					outcome: "cancelled",
+				})
+			},
+			{ once: true },
+		)
+		const run = (
+			deferredCaptureId !== undefined
+				? runner.run(deferredCaptureId, "nfm", controller.signal)
+				: runner.runLive(
+						{
+							sourceId: live.sourceId,
+							observationId: live.observationId,
+							epoch: track.epoch,
+							rfHz: track.centreHz,
+							tuningTrust: track.tuningTrust,
+							fromSample: track.startSample,
+							reason: "detection",
+						},
+						"nfm",
+						controller.signal,
+					)
+		)
+			.then(raw => {
+				if (controller.signal.aborted) return
+				const judged = judgeAnalogResult(raw, "nfm")
+				this.store.recordTrial(live.observationId, {
+					...row,
+					at: this.now(),
+					outcome: judged.outcome,
+				})
+				const analog = judged.analog
+				if (analog)
+					this.store.recordAnalog(live.observationId, {
+						outcome: analog.outcome,
+						mode: "nfm",
+						voice: analog.voice,
+						tone: analog.tones,
+						transport: "live",
+						at: this.now(),
+					})
+			})
+			.catch(() => {
+				this.store.recordTrial(live.observationId, {
+					...row,
+					outcome: "cancelled",
+				})
+			})
+			.finally(() => {
+				if (deferredCaptureId !== undefined)
+					this.deps.iqCapture?.settle(
+						deferredCaptureId,
+						`analog-${live.observationId}`,
+					)
+				this.analogJobs.delete(live.observationId)
+				const remaining = (this.analogCounts.get(live.sourceId) ?? 1) - 1
+				if (remaining === 0) this.analogCounts.delete(live.sourceId)
+				else this.analogCounts.set(live.sourceId, remaining)
+				this.retryAnalog()
+				if (!this.consumerLifecycle.admissionSealed)
+					for (const pending of this.live.values())
+						if (
+							pending.sourceId === live.sourceId &&
+							pending.lastTrack !== null &&
+							(pending.lastTrack.gate === undefined ||
+								pending.lastTrack.gate === "passed")
+						)
+							this.requestJobAnalog(pending, pending.lastTrack)
+			})
+		this.track(run, "Analog trial settlement failed")
+	}
+
+	/**
+	 * Req 6.3: once per observation, when its track surfaced (it has a discovery), has no confirmed result
+	 * for this transmission, is no spur or image and lies in the usable span. The caller asks on the first
+	 * gate pass (WG12 req 4.3). The port enforces the per-source rate, the concurrency, the cap and protected mode.
+	 */
+	private requestIqCapture(live: LiveObservation, track: TrackSnapshot): void {
+		const port = this.deps.iqCapture
+		if (
+			!port ||
+			live.discoveryId === null ||
+			live.acceptedIdentity !== undefined ||
+			track.flags.iqImage ||
+			track.flags.spur ||
+			this.iqTried.has(live.observationId)
+		)
+			return
+		const epoch = this.spectrum.engine(live.sourceId)?.currentEpoch()
+		if (
+			!epoch ||
+			epoch.epoch !== track.epoch ||
+			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
+		)
+			return
+		this.iqTried.add(live.observationId)
+		try {
+			const res = port.capture({
+				sourceId: live.sourceId,
+				observationId: live.observationId,
+				epoch: track.epoch,
+				rfHz: track.centreHz,
+				tuningTrust: track.tuningTrust,
+				fromSample: track.startSample,
+				reason: "detection",
+			})
+			if ("captureId" in res) {
+				this.iqCaptureLifecycle.set(live.observationId, {
+					captureId: res.captureId,
+					sourceId: live.sourceId,
+				})
+				this.iqCaptureOf.set(live.observationId, {
+					captureId: res.captureId,
+					sourceId: live.sourceId,
+				})
+			} else this.giveUpIqCapture(live.observationId)
+		} catch (err: unknown) {
+			this.giveUpIqCapture(live.observationId)
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
+		}
+	}
+
+	/** The captured track closed: the capture finishes now. */
+	private endIqCapture(live: LiveObservation): void {
+		const hit = this.iqCaptureOf.get(live.observationId)
+		this.iqCaptureOf.delete(live.observationId)
+		this.iqTried.delete(live.observationId)
+		this.iqRefused.delete(live.observationId)
+		if (!hit) return
+		try {
+			this.deps.iqCapture?.end(hit.captureId)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture end failed")
+		}
+	}
+
+	/**
+	 * Epoch change: open captures end with the old epoch (the bookkeeping of the source goes with them). The
+	 * first epoch of an engine (or a recreated engine) attaches the source to the capture service; later ones
+	 * flush it with the new epoch, centre and rate. Only IQ engines are attached.
+	 */
+	private syncIqCapture(sourceId: string, epoch: EngineEpoch): void {
+		const port = this.deps.iqCapture
+		if (!port) return
+		for (const [observationId, hit] of this.iqCaptureOf)
+			if (hit.sourceId === sourceId) {
+				this.iqCaptureOf.delete(observationId)
+				this.giveUpIqCapture(observationId)
+			}
+		try {
+			const engine = this.spectrum.engine(sourceId)
+			const next = {
+				epoch: epoch.epoch,
+				centerHz: epoch.centreHz,
+				sampleRateHz: epoch.sampleRateHz,
+			}
+			if (!engine || engine.format !== "U8_IQ") {
+				if (this.iqEngines.delete(sourceId)) port.detachSource(sourceId)
+			} else if (this.iqEngines.get(sourceId) !== engine) {
+				this.iqEngines.set(sourceId, engine)
+				port.attachSource(sourceId, { ...next, engine })
+			} else port.flush(sourceId, next)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture epoch sync failed",
+			)
+		}
+	}
+
+	/**
+	 * WG11 batch review R1 3: the source leaves the capture service (its capture child, slot and ring go)
+	 * when its engine stops or the source is removed. With `engine`, only while that engine is the attached
+	 * one (a replacement already attached stays).
+	 */
+	private detachIqEngine(sourceId: string, engine?: SpectrumEngine): void {
+		const port = this.deps.iqCapture
+		if (!port) return
+		const attached = this.iqEngines.get(sourceId)
+		if (!attached || (engine !== undefined && attached !== engine)) return
+		this.iqEngines.delete(sourceId)
+		for (const [observationId, hit] of this.iqCaptureOf)
+			if (hit.sourceId === sourceId) {
+				this.iqCaptureOf.delete(observationId)
+				this.giveUpIqCapture(observationId)
+			}
+		try {
+			port.detachSource(sourceId)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture detach failed")
+		}
+	}
+
+	/** A live decode on the observation: its captures whose replay has not started are discarded. */
+	private confirmIqLive(live: LiveObservation): void {
+		try {
+			this.deps.iqCapture?.confirmLive(live.sourceId, live.observationId)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture live confirmation failed",
+			)
+		}
+	}
+
+	/**
+	 * The replay queue's sink (requirement 6.4): decode evidence on the capture's observation in the capture's
+	 * epoch (through the normal evidence path, so H2 and the P17 rules apply), otherwise the undecoded reason.
+	 * The known-protocol memory counts the decode or the known protocol's full-hold miss (requirements 1.7, 1.8).
+	 */
+	/** WG11 req 6.4: the replay queue and its pool adapter, owned here (created at start, stopped first). */
+	private replayQueue: IqReplayQueue | null = null
+	private replayAdapter: ReplayPoolAdapter | null = null
+	private sharedAnalog: AnalogAdmission | null = null
+
+	private admittedAnalog(): AnalogAdmission | undefined {
+		if (!this.deps.analogTrial) return undefined
+		this.sharedAnalog ??= new AnalogAdmission(this.deps.analogTrial, cores =>
+			this.probes.reserveExternal(cores),
+		)
+		return this.sharedAnalog
+	}
+
+	private readonly replayTrialHooks: {
+		analog?: AnalogTrialRunner
+		reserveCores?: (cores: number) => (() => void) | null
+	} = {}
+	/** WG12 req 6.3: closed live-audio transmissions recorded onto nearby discoveries. */
+	private liveAudio: LiveAudioEvidence | null = null
+
+	/** set by stop; a start still pending then never creates the queue. */
+	private replayStopped = false
+
+	private startReplayQueue(): void {
+		const port = this.deps.iqCapture
+		if (
+			!port ||
+			this.replayQueue ||
+			this.replayStopped ||
+			this.consumerLifecycle.admissionSealed
+		)
+			return
+		const probes = this.replayProbes()
+		if (this.deps.analogTrial)
+			this.replayTrialHooks.analog = this.deps.analogTrial
+		this.replayTrialHooks.reserveCores = cores =>
+			this.admittedAnalog()?.reserve(cores) ?? null
+		const { analog, reserveCores } = this.replayTrialHooks
+		const queue = createIqReplayQueue({
+			port,
+			probes,
+			planner: input => this.planReplay(input),
+			progress: (capture, trials, done, running) =>
+				this.recordReplayProgress(capture, trials, done, running),
+			sink: result => this.applyReplayResult(result),
+			planInput: capture => this.replayPlanInput(capture),
+			skip: capture => this.replaySkip(capture),
+			logger: this.deps.logger,
+			// Analog trials share the probe pool core budget.
+			...(analog ? { analog } : {}),
+			reserveCores,
+		})
+		this.replayAdapter = probes
+		this.replayQueue = queue
+		const offFinished = port.onFinished(view => this.pinSpan(view))
+		const offRemoved = port.onRemoved((captureId, observationId) => {
+			this.releaseRemovedCapture(captureId, observationId)
+			this.unpinSpan(captureId, observationId)
+		})
+		this.offSpanPins = () => {
+			offFinished()
+			offRemoved()
+		}
+		this.setReplayRecheck(() => queue.recheck())
+		queue.start()
+	}
+
+	private async stopReplayQueue(): Promise<void> {
+		this.replayStopped = true
+		this.offSpanPins?.()
+		this.offSpanPins = null
+		this.replayTracks.clear()
+		const queue = this.replayQueue
+		const probes = this.replayAdapter
+		this.replayQueue = null
+		this.replayAdapter = null
+		this.setReplayRecheck(null)
+		try {
+			await queue?.stop()
+		} finally {
+			probes?.dispose()
+			this.replayPlans.clear()
+			this.replayOrders.clear()
+		}
+	}
+
+	/** The replay queue's view of the probe pool (WG11 req 6.4): replay probes under the queue's own job. */
+	replayProbes(): ReplayPoolAdapter {
+		return createPoolReplayProbes(this.probes, {
+			priority: REPLAY_PROBE_PRIORITY,
+			jobId: IQ_REPLAY_QUEUE_HOLDER,
+		})
+	}
+
+	/**
+	 * The replay queue's planner (WG11 req 6.4): lane ID's `planReplayTrials`, reached through the scanner so
+	 * the index bundle gains no identify/probe runtime module.
+	 */
+	private readonly replayOrders = new Map<string, number[]>()
+
+	private recordReplayProgress(
+		capture: IqCaptureView,
+		trials: readonly IqReplayTrial[],
+		done: IqReplayResult["trials"],
+		running: number | null,
+	): void {
+		if (!capture.observationId) return
+		const orders = this.replayOrders.get(capture.captureId)
+		if (!orders) return
+		this.store.recordTrials(
+			capture.observationId,
+			trials.map((trial, index) => ({
+				protocol: trial.protocol,
+				decoder:
+					trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
+				order: orders[index]!,
+				at: this.now(),
+				outcome:
+					done[index]?.outcome ??
+					(running === index
+						? "running"
+						: running === null
+							? "cancelled"
+							: "pending"),
+			})),
+		)
+	}
+
+	planReplay(input: IqReplayPlanInput): readonly IqReplayTrial[] {
+		const trials = planReplayTrials(input)
+		const id = input.capture.captureId
+		this.replayPlans.delete(id)
+		this.replayPlans.set(id, trials)
+		const orders = trials.map(() => this.store.nextTrialOrder())
+		this.replayOrders.set(id, orders)
+		if (input.capture.observationId)
+			this.store.recordTrials(
+				input.capture.observationId,
+				trials.map((trial, index) => ({
+					protocol: trial.protocol,
+					decoder:
+						trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
+					order: orders[index]!,
+					at: this.now(),
+					outcome: "pending",
+				})),
+			)
+		while (this.replayPlans.size > REPLAY_PLANS_MAX) {
+			const oldest = this.replayPlans.keys().next().value
+			if (oldest === undefined) break
+			this.replayPlans.delete(oldest)
+			this.replayOrders.delete(oldest)
+		}
+		return trials
+	}
+
+	/**
+	 * spans of observations that left `recent`, so a replay result arriving later is
+	 * still stamped inside its observation. Bounded (oldest evicted); a replay comes within the 10 min
+	 * orphan TTL of its capture, far fewer than REPLAY_SPANS_MAX observations close in that time.
+	 */
+	private readonly replaySpans = new Map<
+		string,
+		{ startedAt: number; endedAt?: number }
+	>()
+
+	private rememberReplaySpan(o: LiveObservation): void {
+		this.replaySpans.delete(o.observationId)
+		this.replaySpans.set(o.observationId, {
+			startedAt: o.startedAt,
+			...(o.endedAt !== undefined ? { endedAt: o.endedAt } : {}),
+		})
+		// the oldest span no stored capture needs goes; pinned ones stay.
+		while (this.replaySpans.size > REPLAY_SPANS_MAX) {
+			let evicted = false
+			for (const id of this.replaySpans.keys())
+				if (!this.spanPinned(id)) {
+					this.replaySpans.delete(id)
+					evicted = true
+					break
+				}
+			if (!evicted) break
+		}
+	}
+
+	/**
+	 * observations whose finished captures are still stored (pinned by the capture
+	 * service's finished events, released by its removal events, r7 B4; `spanPinned` also drops a
+	 * pin whose capture `holderOf` no longer knows). Bound:
+	 * one pin per stored capture; a finished capture holds ≥ 4 800 samples × 8 B = 38 400 B, so at
+	 * most 256 MiB / 38 400 B = 6 990 pins at the largest cap (174 full 4 s captures); the detection
+	 * rate (6 per minute per source over the 10 min orphan TTL: 60 per source) keeps it far lower.
+	 */
+	private readonly spanPins = new Map<string, Set<string>>()
+	/**
+	 * WG11 batch review R1 1: the track of each stored finished capture, taken when it finished and
+	 * released with its removal (same bound as the pins), so a capture queued past its observation's
+	 * `recent` life is still planned from its track (bandplan priors, alternative trials).
+	 */
+	private readonly replayTracks = new Map<string, TrackSnapshot>()
+	private offSpanPins: (() => void) | null = null
+
+	/**
+	 * r7 B4: a removed capture releases its pin at once, so pins ≤ stored captures at all times
+	 * (a pin is only taken for a capture still stored; every removal is announced).
+	 */
+	private unpinSpan(captureId: string, observationId: string | null): void {
+		this.forgetWritingCapture(captureId)
+		this.replayTracks.delete(captureId)
+		if (!observationId) return
+		const set = this.spanPins.get(observationId)
+		if (!set) return
+		set.delete(captureId)
+		if (set.size === 0) this.spanPins.delete(observationId)
+	}
+
+	private pinSpan(view: IqCaptureView): void {
+		if (view.observationId) {
+			const hit = this.iqCaptureOf.get(view.observationId)
+			if (hit?.captureId === view.captureId)
+				this.iqCaptureLifecycle.set(view.observationId, hit)
+		}
+		this.forgetWritingCapture(view.captureId)
+		if (!view.observationId) return
+		let stored = false
+		try {
+			stored = this.deps.iqCapture?.holderOf(view.captureId) !== undefined
+		} catch {
+			stored = false
+		}
+		if (!stored) return
+		const set = this.spanPins.get(view.observationId) ?? new Set<string>()
+		set.add(view.captureId)
+		this.spanPins.set(view.observationId, set)
+		// WG11 batch review R1 1: the captured track stays with the stored capture for its planning.
+		const track = this.findObservation(view.observationId)?.lastTrack
+		if (track) this.replayTracks.set(view.captureId, track)
+	}
+
+	private spanPinned(observationId: string): boolean {
+		const set = this.spanPins.get(observationId)
+		if (!set) return false
+		for (const captureId of [...set]) {
+			let stored = false
+			try {
+				stored = this.deps.iqCapture?.holderOf(captureId) !== undefined
+			} catch {
+				stored = false
+			}
+			if (!stored) set.delete(captureId)
+		}
+		if (set.size === 0) this.spanPins.delete(observationId)
+		return set.size > 0
+	}
+
+	/** the replay queue's re-check of the captures it parked for identify. */
+	private replayRecheck: (() => void) | null = null
+
+	setReplayRecheck(fn: (() => void) | null): void {
+		this.replayRecheck = fn
+	}
+
+	private recheckReplays(): void {
+		try {
+			this.replayRecheck?.()
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "Replay recheck failed")
+		}
+	}
+
+	/**
+	 * Review M2: the replay queue leaves a capture alone while an identify job works on its
+	 * observation (that job claims it); a throw is answered true by the queue (fail closed).
+	 */
+	replaySkip(capture: IqCaptureView): boolean {
+		for (const d of this.drivers.values())
+			if (d instanceof IdentifyRunner && d.worksOn(capture)) return true
+		return false
+	}
+
+	/**
+	 * Review m3: a known protocol's replay trial without a decode is a miss only when the capture
+	 * holds the decoder's whole hold without a gap: gapSamples 0 and durationMs ≥ the trial mode's
+	 * holdMs (e.g. DMR on dsd-fme auto: 1 800 ms of the at most 4 000 ms capture). A shorter or
+	 * gapped capture, or a capture whose plan or view is gone, is no miss.
+	 */
+	private replayFullHold(
+		captureId: string,
+		trial: IqReplayResult["trials"][number],
+	): boolean {
+		const view = this.deps.iqCapture?.view(captureId)
+		const planned = this.replayPlans
+			.get(captureId)
+			?.find(
+				p =>
+					p.known &&
+					p.protocol === trial.protocol &&
+					p.mode.decoderType === trial.decoderType,
+			)
+		return replayMissEligible(view, planned?.mode.holdMs)
+	}
+
+	/** The planner input of a finished capture: the captured track when the scanner still holds it. */
+	replayPlanInput(capture: IqCaptureView): IqReplayPlanInput {
+		const live = capture.observationId
+			? this.findObservation(capture.observationId)
+			: undefined
+		const ranges = (
+			this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
+		).flatMap(b => b.ranges)
+		// Minor: the stored discovery once the observation left live/recent.
+		const discoveryId =
+			live?.discoveryId ??
+			(capture.observationId
+				? (this.store.discoveryIdOf(capture.observationId) ?? null)
+				: null)
+		return {
+			capture,
+			track:
+				live?.lastTrack ?? this.replayTracks.get(capture.captureId) ?? null,
+			knownProtocol: discoveryId
+				? this.knownProtocols.known(discoveryId)
+				: null,
+			priors: priorsFor(ranges, capture.rfHz),
+			narrowRaster: narrowRasterAt(ranges, capture.rfHz),
+		}
+	}
+
+	applyReplayResult(result: IqReplayResult): void {
+		const summary = replayOutcomeSummary(result)
+		const live = result.observationId
+			? this.findObservation(result.observationId)
+			: undefined
+		if (result.observationId) {
+			this.noteReplaySettled(result.observationId, summary.replayDecoded)
+			try {
+				replayEvidenceCalls(
+					result,
+					result.observationId,
+					this.replayOrders.has(result.captureId)
+						? {
+								nextTrialOrder: () => this.store.nextTrialOrder(),
+								recordTrial: () => false,
+								recordAnalog: (id, row) => this.store.recordAnalog(id, row),
+								recordUnavailable: (id, type) =>
+									this.store.recordUnavailable(id, type),
+							}
+						: this.store,
+					this.replayEvidenceAt(result.captureId, live, result.observationId),
+				)
+			} catch (err: unknown) {
+				this.log.warn({ err: safeErrorFields(err) }, "Replay evidence failed")
+			}
+		}
+		const discoveryId =
+			live?.discoveryId ??
+			(result.observationId
+				? this.store.discoveryIdOf(result.observationId)
+				: undefined) ??
+			null
+		if (result.decoded) {
+			const ev: DecodeEvidence = {
+				protocol: result.decoded.protocol,
+				identity: result.decoded.identity,
+				metadata: {},
+				crcClean: true,
+				at: this.now(),
+				epoch: result.epoch,
+				origin: "probe",
+				transport: "replay",
+			}
+			let applied = false
+			ev.at = this.replayEvidenceAt(
+				result.captureId,
+				live,
+				result.observationId,
+			)
+			if (live) {
+				if (live.epoch === result.epoch) {
+					this.applyingReplay = true
+					try {
+						// Only evidence the observation accepted counts.
+						applied = this.applyEvidence(live, ev)
+					} finally {
+						this.applyingReplay = false
+					}
+				}
+			} else if (result.observationId && discoveryId)
+				// the observation closed and left `recent` (10 s) before its replay
+				// ended; the discovery it fed is still stored: the decode lands there.
+				applied = this.applyStoredReplay(result.observationId, discoveryId, ev)
+			// The memory counts a decode only where it was applied.
+			const counted = live?.discoveryId ?? discoveryId
+			if (applied && counted) this.knownProtocols.recordDecode(counted)
+			this.replayPlans.delete(result.captureId)
+			this.replayOrders.delete(result.captureId)
+			return
+		}
+		const ran = summary.unsuccessful
+		if (discoveryId)
+			for (const t of ran)
+				if (t.known && this.replayFullHold(result.captureId, t))
+					this.knownProtocols.recordMiss(discoveryId, t.protocol)
+		this.replayPlans.delete(result.captureId)
+		this.replayOrders.delete(result.captureId)
+		if (
+			live &&
+			live.epoch === result.epoch &&
+			ran.length > 0 &&
+			!summary.replayDecoded
+		) {
+			const reason = ran.some(t => t.outcome === "crc-errors")
+				? "crc-errors"
+				: ran.some(t => t.outcome === "timeout")
+					? "timeout"
+					: "no-sync"
+			this.markUndecoded(live, reason)
+		}
+	}
+
+	/**
+	 * A replay decode of an observation the scanner no longer holds (closed and out of `recent`): the
+	 * observation's evidence and the stored discovery take it, in the capture's epoch (carried by the
+	 * evidence). False when the discovery is gone (nothing applied).
+	 */
+	private applyStoredReplay(
+		observationId: string,
+		discoveryId: string,
+		ev: DecodeEvidence,
+	): boolean {
+		if (!this.store.get(discoveryId)) return false
+		// The observation's own rules decide (epoch, not after a retune/hop end): refused, nothing lands.
+		if (!this.store.appendObservationEvidence(observationId, ev)) return false
+		this.store.applyEvidence(discoveryId, ev, {})
+		this.dirty = true
+		return true
+	}
+
+	/**
+	 * a replay decode's timestamp is the capture's: its finish (`capturedAtMs` is the
+	 * finish time, so the decoded signal lies at or before it), clamped inside the observation's span
+	 * [startedAt, endedAt) when the scanner still holds it. The processing time when the view is gone.
+	 */
+	private replayEvidenceAt(
+		captureId: string,
+		live: LiveObservation | undefined,
+		observationId: string | null,
+	): number {
+		let at = this.now()
+		try {
+			const view = this.deps.iqCapture?.view(captureId)
+			if (view && Number.isFinite(view.capturedAtMs)) at = view.capturedAtMs
+		} catch {
+			// keep the processing time
+		}
+		const span =
+			live ?? (observationId ? this.replaySpans.get(observationId) : undefined)
+		if (span) {
+			at = Math.max(at, span.startedAt)
+			// The store refuses at >= endedAt (retune/hop end, strict): the last ms inside is endedAt - 1.
+			if (span.endedAt !== undefined) at = Math.min(at, span.endedAt - 1)
+		}
+		return at
 	}
 
 	private findObservation(observationId: string): LiveObservation | undefined {
@@ -3363,6 +4936,8 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onEngineFatal = (sourceId: string, err: Error): void => {
+		if (this.iqEngines.delete(sourceId))
+			this.deps.iqCapture?.detachSource(sourceId)
 		this.cancelChannelSource(sourceId, "engine-failed")
 		if (!this.started) return
 		this.lastSummaries.delete(sourceId)
@@ -3451,6 +5026,7 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onSourceRemoved = (sourceId: string): void => {
 		this.cancelChannelSource(sourceId)
+		this.detachIqEngine(sourceId)
 		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (!isTerminal(d.record.state))
@@ -3524,7 +5100,10 @@ export class ScannerService extends EventEmitter {
 	private createDriver(record: JobRecord): JobDriver {
 		return new JobRunner({
 			record,
+			leaseAnalogSession: sourceId =>
+				this.deps.analogTrial?.leaseSession?.(sourceId),
 			autoResumeReady: () => this.autoResumeReady(record),
+			knownProtocols: this.knownProtocols,
 			arbiter: this.arbiter,
 			probes: this.probes,
 			decoders: this.deps.decoders,
@@ -3540,7 +5119,7 @@ export class ScannerService extends EventEmitter {
 			impact: () =>
 				this.arbiter.impact(record.spec.sourceId, record.spec, record.id),
 			undecoded: (live, reason) => this.markUndecoded(live, reason),
-			discoveryCounts: jobId => this.discoveryCounts(jobId),
+			discoveryCounts: jobId => this.store.countsByJob(jobId),
 			awaitRestoredCaps: (sourceId, snapshot, restored) =>
 				this.awaitRestoredCaps(sourceId, snapshot, restored),
 			persist: () => void this.persistJobs(),
@@ -3561,7 +5140,243 @@ export class ScannerService extends EventEmitter {
 			},
 			logger: this.deps.logger,
 			now: this.now,
+			activity: jobId => this.jobActivity(jobId),
 		})
+	}
+
+	/**
+	 * WG12 req 7. Open detection captures, the running replay probe, and the
+	 * captures waiting on or held by the replay queue for a discovery of this job.
+	 * The queue exposes the active analog or digital trial; span pins give per-job depth.
+	 */
+	private jobActivity(jobId: string): JobActivityView {
+		return {
+			capturing: this.capturingOf(jobId),
+			replaying: this.replayingOf(jobId),
+			replayQueueDepth: this.replayQueueDepthOf(jobId),
+		}
+	}
+
+	private capturingOf(jobId: string): number {
+		let count = 0
+		for (const observationId of this.iqCaptureOf.keys()) {
+			try {
+				const live = this.findObservation(observationId)
+				if (live?.jobIds.includes(jobId)) {
+					count += 1
+					continue
+				}
+				const discoveryId =
+					live?.discoveryId ?? this.store.discoveryIdOf(observationId)
+				if (!discoveryId) continue
+				if (this.store.get(discoveryId)?.jobIds.includes(jobId)) count += 1
+			} catch {
+				// One unreadable observation does not zero the activity view.
+			}
+		}
+		return count
+	}
+
+	/**
+	 * The earliest running replay probe whose observation belongs to a discovery
+	 * of this job, including an active analog trial.
+	 */
+	private replayingOf(jobId: string): JobActivityView["replaying"] {
+		const active = this.replayQueue?.active()
+		if (active?.observationId) {
+			const discoveryId = this.discoveryIdForActivity(active.observationId)
+			if (discoveryId && this.discoveryInJob(discoveryId, jobId))
+				return {
+					protocol: active.protocol,
+					decoder: active.decoder,
+					discoveryId,
+				}
+		}
+		let probes: ReturnType<ProbePool["status"]>
+		try {
+			probes = this.probes.status()
+		} catch {
+			return null
+		}
+		const running = probes
+			.filter(
+				probe =>
+					probe.transport === "replay" &&
+					probe.jobId === IQ_REPLAY_QUEUE_HOLDER &&
+					probe.state !== "stopping",
+			)
+			.sort(
+				(a, b) =>
+					a.startedAt - b.startedAt || a.probeId.localeCompare(b.probeId),
+			)
+		for (const probe of running) {
+			const discoveryId = this.discoveryIdForActivity(probe.observationId)
+			if (!discoveryId || !this.discoveryInJob(discoveryId, jobId)) continue
+			return {
+				protocol: probe.protocol,
+				decoder: probe.decoderType,
+				discoveryId,
+			}
+		}
+		return null
+	}
+
+	/**
+	 * Finished captures still stored for a discovery of this job, waiting (no
+	 * holder, including parked for identify) or held by the replay queue.
+	 * Identify's own holder and a capture the store has dropped are excluded.
+	 */
+	private replayQueueDepthOf(jobId: string): number {
+		const port = this.deps.iqCapture
+		if (!port) return 0
+		let count = 0
+		for (const [observationId, captures] of this.spanPins) {
+			const discoveryId = this.discoveryIdForActivity(observationId)
+			if (!discoveryId || !this.discoveryInJob(discoveryId, jobId)) continue
+			for (const captureId of captures) {
+				let holder: string | null | undefined
+				try {
+					holder = port.holderOf(captureId)
+				} catch {
+					continue
+				}
+				if (holder === null || holder === IQ_REPLAY_QUEUE_HOLDER) count += 1
+			}
+		}
+		return count
+	}
+
+	private discoveryIdForActivity(observationId: string): string | null {
+		if (!observationId) return null
+		try {
+			const live = this.findObservation(observationId)
+			return (
+				live?.discoveryId ?? this.store.discoveryIdOf(observationId) ?? null
+			)
+		} catch {
+			return null
+		}
+	}
+
+	private discoveryInJob(discoveryId: string, jobId: string): boolean {
+		try {
+			return this.store.get(discoveryId)?.jobIds.includes(jobId) === true
+		} catch {
+			return false
+		}
+	}
+
+	/** A finished or removed capture is no longer an open detection writer. */
+	private forgetWritingCapture(captureId: string): void {
+		for (const [observationId, hit] of this.iqCaptureOf)
+			if (hit.captureId === captureId) this.iqCaptureOf.delete(observationId)
+	}
+
+	/**
+	 * WG12 req 6.3: subscribe the in-memory analog evidence sink to closed
+	 * live-audio transmissions. A log without `subscribe` (older fakes) is skipped.
+	 * The store is passed as-is; `near` and `recordAnalog` land with the evidence lane.
+	 */
+	private startLiveAudioEvidence(): void {
+		if (this.liveAudio) return
+		const log = this.deps.analogEvidence
+		if (!log || !("subscribe" in log) || typeof log.subscribe !== "function")
+			return
+		this.liveAudio = createLiveAudioEvidence({
+			store: this.store,
+			analogLog: log as AnalogEvidenceLog,
+			trust: sourceId => this.liveAudioTrust(sourceId),
+			logger: this.deps.logger,
+		})
+		this.liveAudio.start()
+	}
+
+	private stopLiveAudioEvidence(): void {
+		this.liveAudio?.stop()
+		this.liveAudio = null
+	}
+
+	/** Fail closed: unknown tuner state, an unwritten connection, or a throw. */
+	private liveAudioTrust(sourceId: string): TuningTrust {
+		try {
+			const trust = tuningTrustOf(this.deps.tuner.getState(sourceId))
+			if (trust === "unverified") return trust
+			if (this.deps.tuner.tuningWrittenOnConnection(sourceId) !== true)
+				return "unverified"
+			return trust
+		} catch {
+			return "unverified"
+		}
+	}
+
+	/**
+	 * WG12 req 6.1: an open track of this source whose gate passed within
+	 * `toleranceHz` of `hz`. A track gated at or after `jobStartedMs` is preferred
+	 * over a nearer track that gated earlier, so an old carrier cannot hide a
+	 * transmission that opened with this job. Within that set the nearest centre
+	 * wins, and a distance tie breaks toward the smaller track id. At most 256
+	 * open tracks of this source are scanned. `startSample` is the gate-passed
+	 * sample. `atMs` is the wall-clock receipt of the first gate pass.
+	 */
+	private gatedTransmission(
+		sourceId: string,
+		hz: number,
+		toleranceHz: number,
+		jobStartedMs: number,
+	): { startSample: number; atMs: number } | null {
+		if (
+			!Number.isFinite(hz) ||
+			!Number.isFinite(toleranceHz) ||
+			toleranceHz < 0
+		)
+			return null
+		let scanned = 0
+		const jobStart = Number.isFinite(jobStartedMs) ? jobStartedMs : null
+		let best: {
+			trackId: string
+			distance: number
+			startSample: number
+			atMs: number
+			fresh: boolean
+		} | null = null
+		for (const live of this.live.values()) {
+			if (live.sourceId !== sourceId || live.endedAt !== undefined) continue
+			const track = live.lastTrack
+			if (!track) continue
+			scanned += 1
+			if (scanned > 256) break
+			if (track.gate !== "passed") continue
+			const sample = track.gatePassedSample
+			if (typeof sample !== "number" || !Number.isFinite(sample) || sample < 0)
+				continue
+			if (!Number.isFinite(track.centreHz)) continue
+			const distance = Math.abs(track.centreHz - hz)
+			if (distance > toleranceHz) continue
+			const atMs = live.gatePassedAt
+			if (atMs === undefined || live.epoch !== track.epoch) continue
+			if (!Number.isFinite(atMs)) continue
+			const fresh = jobStart !== null && atMs >= jobStart
+			const nearer =
+				best !== null &&
+				(distance < best.distance ||
+					(distance === best.distance && track.trackId < best.trackId))
+			if (
+				best === null ||
+				(fresh && !best.fresh) ||
+				(fresh === best.fresh && nearer)
+			) {
+				best = {
+					trackId: track.trackId,
+					distance,
+					startSample: sample,
+					atMs,
+					fresh,
+				}
+			}
+		}
+		return best === null
+			? null
+			: { startSample: best.startSample, atMs: best.atMs }
 	}
 
 	private createIdentifyDriver(
@@ -3603,6 +5418,8 @@ export class ScannerService extends EventEmitter {
 				return id ? this.store.get(id) : undefined
 			},
 			priorsAt: hz => priorsFor(ranges, hz),
+			narrowRasterAt: hz => narrowRasterAt(ranges, hz),
+			knownProtocols: this.knownProtocols,
 			format: sourceId =>
 				this.identifyEngine(sourceId)?.format ??
 				this.deps.sources.getCaps(sourceId)?.format ??
@@ -3620,8 +5437,21 @@ export class ScannerService extends EventEmitter {
 			...(this.deps.analogEvidence
 				? { analogEvidence: this.deps.analogEvidence }
 				: {}),
+			...(this.deps.analogTrial ? { analogTrial: this.admittedAnalog()! } : {}),
+			...(this.deps.iqCapture ? { iqCapture: this.deps.iqCapture } : {}),
 			settings: () => this.settings(),
-			emit: data => this.emit("identify", data),
+			gatedAt: (sourceId, hz, toleranceHz) =>
+				this.gatedTransmission(
+					sourceId,
+					hz,
+					toleranceHz,
+					record.startedAt ?? record.createdAt,
+				),
+			emit: data => {
+				this.emit("identify", data)
+				// a target or job that ended may release captures the queue parked.
+				this.recheckReplays()
+			},
 			logger: this.deps.logger,
 			now: this.now,
 		})
@@ -3683,6 +5513,11 @@ export class ScannerService extends EventEmitter {
 		e: Parameters<JobDriver["dispatch"]>[0],
 	): Promise<ScanJob> {
 		const record = this.requireJob(id)
+		// WG11 req 1.6: cancelling an ended job changes nothing, so it skips arbitration and masks.
+		if (e.type === "cancel" && isTerminal(record.state)) {
+			this.requireDriver(id)
+			return this.toDto(record)
+		}
 		await this.requireDriver(id).dispatch(e)
 		await this.arbitrate(record.spec.sourceId)
 		this.updateMasks(record.spec.sourceId)
@@ -3741,7 +5576,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Explicit resume of a preempted sweep (fix round 2): on the arbitration chain, at once (no idle
+	 * Explicit resume of a preempted sweep: on the arbitration chain, at once (no idle
 	 * wait; the resume is the consent). It gets the lease only when no job holds it and it is the
 	 * best waiter (`chooseLeaseHolder`, P16); otherwise 409 with its state unchanged.
 	 */
@@ -4177,12 +6012,6 @@ export class ScannerService extends EventEmitter {
 		return out
 	}
 
-	private discoveryCounts(jobId: string): Record<ScannerConfidence, number> {
-		const counts = { activity: 0, candidate: 0, classified: 0, decoded: 0 }
-		for (const d of this.allDiscoveries({ jobId })) counts[d.confidence] += 1
-		return counts
-	}
-
 	private readonly resumeActivities = new Map<string, ResumeActivity>()
 	private readonly resumeViews = new Map<string, string>()
 	private operatorActivityOff: (() => void) | undefined
@@ -4360,6 +6189,13 @@ export class ScannerService extends EventEmitter {
 				probes: p.probes.length,
 				hits: stats.hits,
 				newDiscoveries: stats.newDiscoveries,
+				...(p.phase !== undefined ? { phase: p.phase } : {}),
+				...(p.parked !== undefined ? { parked: p.parked } : {}),
+				...(p.holding !== undefined ? { holding: p.holding } : {}),
+				...(p.trial !== undefined ? { trial: p.trial } : {}),
+				...(p.replayQueueDepth !== undefined
+					? { replayQueueDepth: p.replayQueueDepth }
+					: {}),
 			}
 			this.emit("progress", data)
 		}
@@ -4516,6 +6352,7 @@ export class ScannerService extends EventEmitter {
 	private readonly onStoreEvicted = (evicted: Discovery[]): void => {
 		for (const discovery of evicted) {
 			this.lastConfirm.delete(discovery.id)
+			this.knownProtocols.forget(discovery.id)
 			this.emit("discovery", {
 				change: "deleted",
 				discovery,
@@ -4536,23 +6373,32 @@ export class ScannerService extends EventEmitter {
 		)
 	}
 
-	private readonly onStoreChange = (id: string, change: StoreChange): void => {
-		// WG2 R1 #8 / R2: eviction and age pruning never remove a lockout, and operator deletion
+	private readonly onStoreChange = (
+		id: string,
+		change: StoreChange,
+		mergedIds?: readonly string[],
+	): void => {
+		// WG11 req 1.7: a deleted discovery drops its known-protocol miss count. A merge reports
+		// the merged-away discovery as `deleted` and the survivor (which keeps its count) as `merged`.
+		if (change === "deleted") this.knownProtocols.forget(id)
+		// WG2: eviction and age pruning never remove a lockout, and operator deletion
 		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
 		// locked survivor schedules a replan (no-op when no job's lockout list changes).
 		if (change === "merged" && this.store.get(id)?.operator?.lockout === true)
 			this.scheduleLockoutReplan()
+		const absorbed = mergedIds === undefined ? undefined : [...mergedIds]
 		if (this.ingestChanges) {
-			this.ingestChanges.push([id, change])
+			this.ingestChanges.push([id, change, absorbed])
 			return
 		}
-		this.emitDiscoveryChange(id, change, [])
+		this.emitDiscoveryChange(id, change, [], absorbed)
 	}
 
 	private emitDiscoveryChange(
 		id: string,
 		change: StoreChange,
 		jobHits: ScanJobHit[],
+		mergedIds?: readonly string[],
 	): void {
 		if (change === "transient") return
 		const discovery = this.store.get(id)
@@ -4561,6 +6407,9 @@ export class ScannerService extends EventEmitter {
 			change,
 			discovery,
 			...(jobHits.length > 0 ? { jobHits } : {}),
+			...(change === "merged" && mergedIds !== undefined
+				? { mergedIds: [...mergedIds] }
+				: {}),
 		} satisfies ScannerDiscoveryEventData)
 	}
 
@@ -4606,6 +6455,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private tick(): void {
+		this.retryAnalog()
 		if (this.consumerLifecycle.admissionSealed) return
 		this.channelTaps?.tick()
 		const now = this.now()
@@ -4616,9 +6466,12 @@ export class ScannerService extends EventEmitter {
 		this.resumeIdleWaiters(now)
 		// cpu- and budget-deferred probe requests start once the meter drops, not only when another probe stops
 		this.probes.pump()
-		this.recent = this.recent.filter(
-			o => (o.endedAt ?? now) > now - RECENT_KEEP_MS,
-		)
+		this.recent = this.recent.filter(o => {
+			const keep = (o.endedAt ?? now) > now - RECENT_KEEP_MS
+			// a late replay decode still needs the span to stamp inside it.
+			if (!keep && this.deps.iqCapture) this.rememberReplaySpan(o)
+			return keep
+		})
 		if (now - this.lastStatusAt >= STATUS_EVERY_MS) {
 			this.lastStatusAt = now
 			this.emitStatus(false)
@@ -4653,7 +6506,7 @@ export class ScannerService extends EventEmitter {
 		this.snapshotRequested = false
 		this.snapshotInFlight = true
 		this.persistence
-			.writeSnapshot(this.store.snapshot())
+			.writeSnapshotOf(this.store)
 			.then(
 				() => {
 					this.snapshotFailed = false
@@ -4756,34 +6609,105 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * § 10.7: passive off for a source whose engine costs > 25 % of a core over its first minute.
-	 * Evaluated once per engine instance, at openedAt + 60 s (later load from sweeps never counts).
+	 * § 10.7 / WG11 req 2: passive off for a source whose spectrum engine costs more than the limit
+	 * (`scanner.passive.maxEngineUtilization`, default 0.25 of a core). Judged `PASSIVE_COST_WINDOW_MS`
+	 * after the engine opened, then every `PASSIVE_COST_RECHECK_MS`; a disabled source comes back at
+	 * or below `limit × PASSIVE_COST_CLEAR_RATIO`.
 	 */
 	private async checkPassiveCost(now: number): Promise<void> {
+		const limit =
+			this.settings().passive.maxEngineUtilization ?? PASSIVE_COST_LIMIT_DEFAULT
+		// WG11 review M2: a disabled source whose engine closed (no display holds it) gets probation.
+		for (const [sourceId, disabledAt] of [...this.passiveDisabledAt]) {
+			const engineOpen = this.spectrum.engine(sourceId) !== undefined
+			if (engineOpen) continue
+			this.costCheckedAt.delete(sourceId)
+			if (
+				!passiveProbationDue({
+					disabled: this.passiveDisabled.has(sourceId),
+					engineOpen,
+					sinceDisabledMs: now - disabledAt,
+				})
+			)
+				continue
+			this.passiveDisabled.delete(sourceId)
+			this.passiveDisabledAt.delete(sourceId)
+			this.log.info(
+				{ sourceId },
+				"Passive scanning on probation: re-enabling to re-measure the spectrum engine",
+			)
+			await this.refreshPassive()
+		}
 		for (const sourceId of this.spectrum.sourceIds()) {
 			const openedAt = this.spectrum.openedAt(sourceId)
 			const engine = this.spectrum.engine(sourceId)
-			if (
-				!engine ||
-				openedAt === null ||
-				this.costChecked.has(engine) ||
-				now - openedAt < PASSIVE_COST_WINDOW_MS
-			)
+			if (!engine || openedAt === null) {
+				this.costCheckedAt.delete(sourceId)
 				continue
-			this.costChecked.add(engine)
-			if (this.passiveDisabled.has(sourceId)) continue
-			if (!this.jobs.has(`passive-${sourceId}`)) continue
-			const utilization = engine.utilization()
-			if (utilization === null || utilization <= PASSIVE_COST_LIMIT) continue
-			this.passiveDisabled.set(
-				sourceId,
-				`engine-cpu ${(utilization * 100).toFixed(0)} % of a core`,
-			)
-			this.log.warn(
-				{ sourceId, utilization },
-				"Passive scanning disabled: spectrum engine too costly on this host",
-			)
-			await this.refreshPassive()
+			}
+			const previous = this.costCheckedAt.get(sourceId)
+			const sameEngine = previous?.engine === engine
+			const lastCheck = sameEngine ? previous.at : null
+			const disabled = this.passiveDisabled.has(sourceId)
+			// Only a source with a passive job to turn off, or one this guard disabled, is judged.
+			if (!disabled && !this.jobs.has(`passive-${sourceId}`)) continue
+			const sinceOpenMs = now - openedAt
+			const sinceLastCheckMs = lastCheck === null ? null : now - lastCheck
+			const due =
+				sinceLastCheckMs === null
+					? sinceOpenMs >= PASSIVE_COST_WINDOW_MS
+					: sinceLastCheckMs >= PASSIVE_COST_RECHECK_MS
+			if (!due) continue
+			// WG11 review M1: utilization over the window since the previous check of this engine (the
+			// first check: since the worker started at open), never the engine's whole life.
+			// WG11 review: the sample carries its worker generation; a replaced worker (reconfigure) is a
+			// fresh window even when its counters exceed the previous worker's.
+			const worker = engine.eluSample()
+			const sample: EluSample | null =
+				worker === null
+					? null
+					: {
+							idle: worker.elu.idle,
+							active: worker.elu.active,
+							generation: worker.generation,
+						}
+			const utilization =
+				sample === null
+					? engine.utilization()
+					: windowedUtilization(
+							sample,
+							sameEngine ? (previous.sample ?? null) : null,
+						)
+			// An unknown reading is no judgement: the window keeps running until one is measurable.
+			if (utilization === null) continue
+			this.costCheckedAt.set(sourceId, { engine, at: now, sample })
+			const decision = passiveCostDecision({
+				utilization,
+				limit,
+				disabled,
+				sinceOpenMs,
+				sinceLastCheckMs,
+			})
+			if (decision === "disable") {
+				this.passiveDisabled.set(
+					sourceId,
+					`engine-cpu ${(utilization * 100).toFixed(0)} % of a core`,
+				)
+				this.passiveDisabledAt.set(sourceId, now)
+				this.log.warn(
+					{ sourceId, utilization },
+					"Passive scanning disabled: spectrum engine too costly on this host",
+				)
+				await this.refreshPassive()
+			} else if (decision === "clear") {
+				this.passiveDisabled.delete(sourceId)
+				this.passiveDisabledAt.delete(sourceId)
+				this.log.info(
+					{ sourceId, utilization },
+					"Passive scanning re-enabled: spectrum engine within budget",
+				)
+				await this.refreshPassive()
+			}
 		}
 	}
 
@@ -4933,6 +6857,104 @@ function isPreempted(r: JobRecord): boolean {
 			r.reason === "preempted-operator" ||
 			r.reason === "preempted-relay")
 	)
+}
+
+/** One decoder run inside a probe. The request hold stays on the book, not here. */
+interface ProbeModeTrial {
+	order: number
+	protocol: ScannerProtocol
+	decoder: string
+	output: boolean
+	crcFailures: number
+	confirmed: boolean
+	/** Accepted identity. Replay's decoded outcome needs this, not only encryption. */
+	identity: boolean
+	/** The pool reported `replay-end` while this mode was the open one. */
+	replayEnded: boolean
+	/**
+	 * Pool `confirming` or `following` for this mode. The pool emits `confirming`
+	 * only after the decoder process exists. `starting` is before that.
+	 */
+	decoderStarted: boolean
+	closed: boolean
+}
+
+/** Request-hold bookkeeping for markUndecoded, plus one trial per mode that started. */
+interface ProbeTrialBook extends ProbeOutcome {
+	modes: ProbeModeTrial[]
+}
+
+/** The mode a probe is starting. The pool reuses the probe id as it steps. */
+function probeModeAt(req: ProbeRequest, index: number): ProbeMode | undefined {
+	const modes = req.modes ?? probeModesFor(req.cls, req.protocols)
+	return modes[index]
+}
+
+/**
+ * A mode the pool stepped off has run its hold. A failure row still needs
+ * `decoderStarted`: the step's predecessor is `confirming`, and a mode that
+ * never reached it did not run.
+ */
+function completedModeOutcome(trial: ProbeModeTrial): ScannerTrialOutcome {
+	if (trial.confirmed) return "decoded"
+	if (!trial.decoderStarted) return "cancelled"
+	if (trial.crcFailures > 0) return "crc-errors"
+	if (trial.output) return "timeout"
+	return "no-sync"
+}
+
+/**
+ * Live stop keeps the request-hold gate, measured from the probe's first start.
+ * Counts are this mode's. `no-sync`, `crc-errors` and `timeout` need this mode's
+ * decoder process (`confirming` or `following`) and the hold elapsed. A mode
+ * that never started is cancelled. A stop before the hold is cancelled.
+ */
+function liveStopOutcome(
+	book: ProbeTrialBook,
+	trial: ProbeModeTrial,
+	now: number,
+): ScannerTrialOutcome {
+	if (trial.confirmed) return "decoded"
+	if (!trial.decoderStarted) return "cancelled"
+	const reason = undecodedForProbe(
+		{
+			startedAt: book.startedAt,
+			holdMs: book.holdMs,
+			output: trial.output,
+			crcFailures: trial.crcFailures,
+			confirmed: false,
+		},
+		now,
+	)
+	if (reason === "no-sync" || reason === "crc-errors" || reason === "timeout")
+		return reason
+	return "cancelled"
+}
+
+/**
+ * A replay row follows the pool's clean end, not elapsed time. `replay-end`
+ * is that end (decoded, no-sync, crc-errors, or timeout). A run that never
+ * ends cleanly, including a grace release, is cancelled.
+ */
+function replayTrialOutcome(trial: ProbeModeTrial): ScannerTrialOutcome {
+	if (!trial.replayEnded) return "cancelled"
+	if (trial.identity) return "decoded"
+	if (trial.crcFailures > 0) return "crc-errors"
+	if (trial.output) return "timeout"
+	return "no-sync"
+}
+
+function probeDecoderType(
+	decoder: string | undefined,
+): ScannerProbeDecoderType | undefined {
+	if (
+		decoder === "dsd-fme" ||
+		decoder === "multimon-ng" ||
+		decoder === "direwolf" ||
+		decoder === "rtl433"
+	)
+		return decoder
+	return undefined
 }
 
 /** Protocols a prior can be set on (every ScannerProtocol except the generic ones). */

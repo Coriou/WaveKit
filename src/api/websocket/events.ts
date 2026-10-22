@@ -149,6 +149,7 @@ interface ExistingServerMessage {
 		| "tuner:command-sent"
 		| "tuner:control-mode-changed"
 		| "tuner:error"
+		| "tuner:rate-policy"
 		| "aircraft:new"
 		| "aircraft:update"
 		| "aircraft:lost"
@@ -271,6 +272,13 @@ function isActivityClientMessage(data: unknown): boolean {
 	if (typeof data !== "object" || data === null) return false
 	const type = (data as { type?: unknown }).type
 	return type === "activity:subscribe" || type === "activity:unsubscribe"
+}
+
+/** Live-audio clients never receive the native demod binary path. */
+function liveAudioConfigForClient(config: LiveDemodConfig): LiveDemodConfig {
+	const client = { ...config }
+	delete client.chanBinaryPath
+	return client
 }
 
 /**
@@ -1012,7 +1020,10 @@ export class WebSocketEventBroadcaster {
 	broadcastLiveAudioStatus(status: LiveDemodStatus): void {
 		this.broadcast("live-audio", {
 			type: "live-audio:status",
-			data: status,
+			data: {
+				...status,
+				config: liveAudioConfigForClient(status.config),
+			},
 		})
 	}
 
@@ -1063,7 +1074,7 @@ export class WebSocketEventBroadcaster {
 	broadcastLiveAudioConfig(config: LiveDemodConfig): void {
 		this.broadcast("live-audio", {
 			type: "live-audio:config",
-			data: config,
+			data: liveAudioConfigForClient(config),
 		})
 	}
 

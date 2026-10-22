@@ -20,6 +20,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [build-devx-overhaul](build-devx-overhaul/requirements.md)
 - [core-access-policy](core-access-policy/requirements.md)
 - [decode-envelope](decode-envelope/requirements.md)
+- [decoder-enablement](decoder-enablement/requirements.md): every shipped decoder built in with
+  an auto/always/off mode, off-centre placements on channelizer channels (VFO and band-plan
+  channels for dsd-fme and multimon-ng), a drop-free efficiency gate, the 1090 MHz rate raise
+  with a link advisory, multi-source binding rules (WG13)
 - [lora-decoder](lora-decoder/requirements.md)
 - [operator-data](operator-data/requirements.md)
 - [receiver-capabilities](receiver-capabilities/requirements.md)
@@ -28,6 +32,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [regional-display-registry](regional-display-registry/requirements.md)
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)
+- [scanner-redesign](scanner-redesign/requirements.md): a fitting window stays tuned, a
+  channel-matched detector gate, labels only from trial evidence with a per-transmission proof,
+  replay first with an analog replay trial, identify until a transmission, scan phases, IQ
+  capture on by default in protected mode after live acceptance (WG12)
 - [viewed-slice-spectrum](viewed-slice-spectrum/requirements.md)
 - [web-gaps-1](web-gaps-1/requirements.md): waterfall backfill and averaging, analog
   transmission events, AIS vessel tracker, Activity on by default (WG1)
@@ -60,6 +68,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
   folder protection, kept totals and delete leftover sweep; live audio that survives
   click-to-tune, a carrier-aware auto squelch, operator rate proof and the untracked-retune root
   cause; identify for analog voice and unavailable decoders (WG10)
+- [web-gaps-11](web-gaps-11/requirements.md): heard versus decoded, narrow digital trials and a
+  clean scan stop; passive guard recheck and scanner store CPU; configured gain on connect;
+  stable tracks on spectrum frames; IQ capture on detection replayed into identify (WG11)
 
 ## The three files
 

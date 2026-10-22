@@ -54,10 +54,13 @@ export function decoderOptionDescriptors(
 	type: string,
 ): DecoderOptionDescriptor[] | undefined {
 	if (!Object.hasOwn(DESCRIPTORS, type)) return undefined
-	return (DESCRIPTORS[type] ?? []).map(d => ({
-		...d,
-		...(d.enumValues ? { enumValues: [...d.enumValues] } : {}),
-	}))
+	// Sorted by key (UTF-16 order) so lists extended in place stay in a stable, documented order.
+	return (DESCRIPTORS[type] ?? [])
+		.map(d => ({
+			...d,
+			...(d.enumValues ? { enumValues: [...d.enumValues] } : {}),
+		}))
+		.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 }
 
 /** Cuts text to the issue text bound (UTF-16 code units). */

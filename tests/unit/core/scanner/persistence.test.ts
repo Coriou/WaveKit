@@ -650,6 +650,8 @@ describe("ScannerPersistence properties", () => {
 						expect(replica.get(restored.discoveryId ?? "")?.frequencyKey).toBe(
 							store.get(original.discoveryId ?? "")?.frequencyKey,
 						)
+						// The late ingest journals too: settle it before the directory is removed.
+						await Promise.allSettled(writes)
 					})
 				},
 			),

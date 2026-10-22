@@ -83,7 +83,8 @@ describe("WG7 contract", () => {
 		expect(
 			same<
 				Api.ScannerIdentifyTrial["transport"],
-				"offset" | "channel" | "ambient" | null
+				// WG11 req 6.6: identify replay trials
+				"offset" | "channel" | "ambient" | "replay" | null
 			>(true),
 		).toBe(true)
 		expect(
@@ -96,6 +97,8 @@ describe("WG7 contract", () => {
 				| Api.ScannerAmbientDecoderType
 				// WG10 req 3.2 widens the decoder with the live-audio analog evidence
 				| "live-audio"
+				// WG12: analog replay trial
+				| "analog-demod"
 				| null
 			>(true),
 		).toBe(true)

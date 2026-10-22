@@ -1,0 +1,23 @@
+{
+	"version": 1,
+	"absoluteFloors": [
+		{
+			"key": "256000:m:496:256",
+			"dbfs": -48.53300155377177
+		}
+	],
+	"spurs": [],
+	"provisionalSpurs": [],
+	"kByRange": [
+		{
+			"startHz": 444000000,
+			"endHz": 446000000,
+			"k": 4
+		},
+		{
+			"startHz": 446000000,
+			"endHz": 448000000,
+			"k": 4
+		}
+	]
+}

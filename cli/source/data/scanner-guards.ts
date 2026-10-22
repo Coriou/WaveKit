@@ -1,4 +1,11 @@
 import { z } from "zod"
+import { validProofFields } from "./scanner-proof.js"
+import type { ScannerProof } from "@wavekit/api-types"
+import {
+	SCANNER_PROOF_PROTOCOL_LABEL,
+	SCANNER_PROOF_SUMMARY_MAX_CHARS,
+	SCANNER_PROOF_TRIED_MAX,
+} from "@wavekit/api-types"
 import type { IdentifyRequest } from "./identify-state.js"
 import type {
 	SpectrumFrameEventData,
@@ -151,7 +158,7 @@ const state = z.enum([
 	"failed",
 ])
 const confidence = z.enum(["activity", "candidate", "classified", "decoded"])
-const identity = z.object({ kind: text, value: text })
+const identity = z.object({ kind: text, value: z.string().max(1024) })
 const levels = z.object({
 	peakDbfs: num,
 	meanDbfs: num,
@@ -170,7 +177,7 @@ const trial = z.object({
 	protocol: text,
 	decoder: text.nullable(),
 	mode: text.nullable(),
-	transport: z.enum(["offset", "channel", "ambient"]).nullable(),
+	transport: z.enum(["offset", "channel", "ambient", "replay"]).nullable(),
 	outcome: z.enum([
 		"pending",
 		"running",
@@ -182,42 +189,134 @@ const trial = z.object({
 		"unsupported",
 		"not-needed",
 		"cancelled",
+		"heard",
+		"data-like",
+		"carrier-only",
 	]),
 	reason: text.optional(),
 })
-const result = z.object({
-	protocol: text.optional(),
-	confidence,
-	identity: identity.optional(),
-	metadata,
-	discoveryId: id.optional(),
-	observationId: id.optional(),
-	artefact: z.enum(["dc", "spur", "image", "rfi"]).optional(),
-	ended: z.literal("window-moved").optional(),
-	measurements: z.object({
-		source: z.enum(["track", "spectrum"]),
-		centreHz: hz,
-		obwHz: hz.nullable(),
-		peakDbfs: num.nullable(),
-		snrDb: num.nullable(),
-		floorDbfs: num.nullable(),
-		dutyCycle: num.min(0).max(1).nullable(),
-		class: text,
-	}),
-})
-const identifyTarget = z.object({
-	jobId: id,
-	targetHz: hz,
-	state: z.enum([
-		"waiting-for-signal",
-		"trying",
-		"identified",
-		"candidate",
-		"unidentified",
-	]),
-	trials: boundedArray(trial, 128),
-	result: result.optional(),
-})
+const proofProtocol = z
+	.string()
+	.refine(value => Object.hasOwn(SCANNER_PROOF_PROTOCOL_LABEL, value))
+const proof = z
+	.object({
+		kind: z.enum([
+			"decoded",
+			"analog-tone",
+			"analog-voice",
+			"digital-undecoded",
+			"carrier-only",
+		]),
+		protocol: proofProtocol,
+		transport: z.enum(["live", "replay", "ambient"]),
+		at: text.refine(value => Number.isFinite(Date.parse(value))),
+		observationId: id,
+		identity: z
+			.object({ kind: text, value: z.string().min(1).max(1024) })
+			.optional(),
+		talkgroup: z.string().min(1).max(1024).optional(),
+		tone: z
+			.object({
+				ctcssHz: positive.nullable(),
+				dcs: z
+					.object({
+						code: z.string().regex(/^[0-7]{3}$/),
+						polarity: z.enum(["normal", "inverted"]),
+					})
+					.nullable(),
+			})
+			.optional(),
+		voice: z.boolean().optional(),
+		tried: boundedArray(proofProtocol, SCANNER_PROOF_TRIED_MAX),
+		unavailable: boundedArray(
+			z.enum(["dsd-fme", "multimon-ng", "direwolf", "rtl433"]),
+			16,
+		),
+		encrypted: z.boolean(),
+		summary: z.string().max(SCANNER_PROOF_SUMMARY_MAX_CHARS),
+	})
+	.refine(value => validProofFields(value as ScannerProof))
+const hint = z.enum([
+	"fsk4-12k5",
+	"fsk4-6k25",
+	"tdma-ms",
+	"fsk2-wide",
+	"gmsk-narrow",
+	"afsk-fm",
+	"analog-fm",
+	"ook-burst",
+	"carrier",
+	"wideband",
+	"unknown",
+])
+const result = z
+	.object({
+		analog: z.unknown().optional(),
+		proof: proof.optional().catch(undefined),
+		hint: hint.optional().catch(undefined),
+		protocol: text.optional(),
+		confidence,
+		identity: identity.optional(),
+		metadata,
+		discoveryId: id.optional(),
+		observationId: id.optional(),
+		artefact: z.enum(["dc", "spur", "image", "rfi"]).optional(),
+		ended: z.enum(["window-moved", "no-signal"]).optional(),
+		measurements: z.object({
+			source: z.enum(["track", "spectrum"]),
+			centreHz: hz,
+			obwHz: hz.nullable(),
+			peakDbfs: num.nullable(),
+			snrDb: num.nullable(),
+			floorDbfs: num.nullable(),
+			dutyCycle: num.min(0).max(1).nullable(),
+			class: text,
+		}),
+	})
+	.transform(({ analog, ...result }) => {
+		// finishTarget excludes failure proofs whenever analog evidence won.
+		if (analog && result.proof?.kind !== "decoded") delete result.proof
+		return result
+	})
+const identifyTarget = z
+	.object({
+		jobId: id,
+		targetHz: hz,
+		state: z.enum([
+			"waiting-for-signal",
+			"trying",
+			"identified",
+			"candidate",
+			"unidentified",
+		]),
+		trials: boundedArray(trial, 128),
+		result: result.optional(),
+	})
+	.transform(target => {
+		const result = target.result
+		const proof = result?.proof
+		if (result && proof) {
+			const matches =
+				proof.kind === "decoded"
+					? target.state === "identified" &&
+						result.confidence === "decoded" &&
+						result.artefact === undefined &&
+						result.protocol === proof.protocol &&
+						result.identity?.kind === proof.identity?.kind &&
+						result.identity?.value === proof.identity?.value
+					: // finishTarget only attaches digital failure proofs, without a
+						// current decode, analog result or artefact. Discovery confidence
+						// alone does not establish a decode in this job.
+						proof.kind === "digital-undecoded" &&
+						(target.state === "candidate" || target.state === "unidentified") &&
+						result.protocol === undefined &&
+						result.identity === undefined &&
+						result.artefact === undefined
+			if (!matches) delete result.proof
+		}
+		return target
+	})
+
 const job = z.object({
 	id,
 	name: text.nullable(),
@@ -243,7 +342,7 @@ const job = z.object({
 				decoderId: id,
 				targetHz: hz,
 				protocol: text,
-				transport: z.enum(["offset", "channel"]),
+				transport: z.enum(["offset", "channel", "replay"]),
 				state: text,
 			}),
 			128,

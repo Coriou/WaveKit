@@ -221,7 +221,7 @@ describe("nodeWsFactory (in-test server on 127.0.0.1, never the live core)", () 
 	})
 })
 
-describe("A2 fix round 1", () => {
+describe("I3: a factory that throws schedules a retry instead of escaping", () => {
 	it("I3: a factory that throws schedules a retry instead of escaping", () => {
 		const emitted: Inbound[] = []
 		const timers: Array<() => void> = []

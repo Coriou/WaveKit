@@ -1,8 +1,13 @@
+import { performance } from "node:perf_hooks"
 import { WaveKitError } from "../../utils/errors.js"
 import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
-import type { TrackerBlock } from "./emissions/tracker.js"
+import type { GateTrace, TrackerBlock } from "./emissions/tracker.js"
+import { blockTrackOf, isFrameTrackId } from "./frame-tracks.js"
+import type { TrackAssociation } from "./frame-tracks.js"
+import { createComponentLogger, createLogger } from "../../utils/logger.js"
+import type { Logger } from "../../utils/logger.js"
 import { flagIqImages } from "./emissions/iq-image.js"
 import type {
 	BlockSummary,
@@ -17,7 +22,13 @@ import type {
 	TrackSnapshot,
 	TuningTrust,
 } from "./types.js"
-import { dcGuardBins, Detector, shortK, usableEdgeBins } from "./detector.js"
+import {
+	dcGuardBins,
+	defaultK,
+	Detector,
+	shortK,
+	usableEdgeBins,
+} from "./detector.js"
 import type { CfarRange } from "./detector.js"
 import { accumulateShiftedPower, Fft, powerToDb } from "./fft.js"
 import { bytesPerSample, FrameSource } from "./frame-source.js"
@@ -30,12 +41,22 @@ import { ImpulseBlanker } from "./impulse-blanker.js"
 import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
 import {
+	ALARM_FEATURE_MARGIN_DB,
 	classifyAlarm,
 	untrackedRetuneAlarm,
 	vanishedFeatures,
 } from "./retune-alarm.js"
 import type { AlarmSuspect } from "./retune-alarm.js"
 import type { PersistentFeature, SegmentRange } from "./retune-alarm.js"
+import { createChannelGate } from "./channel-gate.js"
+import type { ChannelGate, ChannelGateReading } from "./channel-gate.js"
+import {
+	CHANNEL_GATE_K_DB,
+	CHANNEL_GATE_MARGIN_DB,
+	CHANNEL_GATE_MIN_DURATION_MS,
+	type ChannelPlan,
+} from "../scanner/scanner-redesign-contract.js"
+import type { WorkerPipelineInput } from "./worker-protocol.js"
 
 /**
  * The whole tier-1 pipeline for one source (decision D1): bytes → frames → blocks → floor →
@@ -67,6 +88,8 @@ const BURST_MAX_ON_MS = 15 // a burst block has the short path on for at most th
 const SPEC_PAD_BINS = 2
 const OVERLAP_EDOF_GAIN = 1.89 // Welch equivalent independent frames, Hann at 50 % overlap
 const PERSISTENT_TRACK_S = 10
+/** Require sustained strength before a disappearance can imply receiver motion. */
+const ALARM_FEATURE_WINDOW_MS = 1000
 /** WG10 req 2.9: a track this far above the floor (best block SNR) is a strong transmission. */
 export const ALARM_STRONG_SNR_DB = 30
 /** WG10 req 2.9: tracks starting within this of a strong track's start are its images/IM lines. */
@@ -74,6 +97,56 @@ export const ALARM_CO_BIRTH_S = 1
 const IMAGE_TOLERANCE_HZ = 1000
 const IMAGE_MIN_REJECTION_DB = 20
 const IMAGE_MAX_REJECTION_DB = 65
+/** Returned when `publishGate` asks and the gate has not been created yet. */
+const IDLE_GATE: ChannelGateReading = {
+	state: "pending",
+	channelSnrDb: Number.NEGATIVE_INFINITY,
+	passedSample: null,
+	runStartSample: null,
+	minDurationMs: CHANNEL_GATE_MIN_DURATION_MS,
+	kDb: CHANNEL_GATE_K_DB,
+	marginDb: CHANNEL_GATE_MARGIN_DB,
+	valid: false,
+}
+
+/** Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is set. */
+export const PIPELINE_PROFILE_STAGES = [
+	"window",
+	"fft",
+	"power",
+	"frameDb",
+	"floor",
+	"detector",
+	"gate",
+	"tracker",
+	"wire",
+] as const
+
+export type PipelineProfileStage = (typeof PIPELINE_PROFILE_STAGES)[number]
+
+/** Aggregated `performance.now()` spans for blocks sampled one in `sampleEvery`. */
+export interface PipelineProfile {
+	blocks: number
+	busyMs: number
+	stages: Record<PipelineProfileStage, number>
+}
+
+/** Main-thread listeners a bench can time. Null sink: the hot path does not call `performance.now()`. */
+export type SpectrumMainSpan = "tap-feed" | "summary-decode" | "frame-build"
+
+type SpectrumMainSpanSink = (name: SpectrumMainSpan, ms: number) => void
+
+let spectrumMainSpan: SpectrumMainSpanSink | null = null
+
+export function installSpectrumMainSpanSink(
+	sink: SpectrumMainSpanSink | null,
+): void {
+	spectrumMainSpan = sink
+}
+
+export function spectrumMainSpanSink(): SpectrumMainSpanSink | null {
+	return spectrumMainSpan
+}
 
 interface EpochState {
 	epoch: number
@@ -174,6 +247,7 @@ export class SpectrumPipeline {
 	private readonly mergedDb: Float32Array
 	private floorReady = false
 	private prevPersistent: PersistentFeature[] = []
+	private readonly alarmStrength = new Map<string, number>()
 	/** WG10 req 2.9: open and just-closed tracks for the transmission-end classifier. */
 	private readonly trackInfo = new Map<
 		string,
@@ -237,12 +311,70 @@ export class SpectrumPipeline {
 	/** IQ-image tracks of the last block, for artefactMasks() and the block summary's `iqImage` (emitWithImages). */
 	private imageTracks: { centreHz: number; obwHz: number }[] = []
 	private out: PipelineEvent[] = []
+	private logger: Logger | null
+	private warnedTrackId = false
+	/** Opt-in stage profile. Off: no `performance.now()` and export-state has no `profile` key. */
+	private readonly profileOn: boolean
+	private readonly sampleEvery: number
+	private profileOrdinal = 0
+	private profileBlocks = 0
+	private profileBusyMs = 0
+	private sampling = false
+	private pendingWindowMs = 0
+	/** Frameless chunk time held for the next frame while the block is not sampled. */
+	private leadWindowMs = 0
+	/** Set when this handle finished a sampled block; the worker charges encode + post. */
+	private wirePending = false
+	private readonly profileClock: () => number
+	private stageWindow = 0
+	private stageFft = 0
+	private stagePower = 0
+	private stageFrameDb = 0
+	private stageFloor = 0
+	private stageDetector = 0
+	private stageTracker = 0
+	private stageGate = 0
+	private stageWire = 0
+	private gate: ChannelGate | null = null
+	/** Last block index whose gate run was continued. −1 starts a fresh run. */
+	private gateBlock = -1
+	private readonly gatePower: Float64Array
+	private readonly gateMask: Uint8Array
+	private channelPlan: ChannelPlan | null = null
+	private planActive = false
+	private readonly gateNow: (() => number) | undefined
 
 	constructor(
 		private readonly cfg: PipelineConfig,
-		/** `provisionalWindowMs` (default 30 s) is a test knob: P24 runs the comb property at 3 s. */
-		deps: { now?: () => number; provisionalWindowMs?: number } = {},
+		/**
+		 * `provisionalWindowMs` (default 30 s) is a test knob: P24 runs the comb property at 3 s.
+		 * `profile` samples one finished block in `sampleEvery` (R 9.2). Absent: no profile.
+		 */
+		deps: {
+			now?: () => number
+			provisionalWindowMs?: number
+			logger?: Logger
+			profile?: { sampleEvery: number }
+			/** Profile spans. Default `performance.now`. Not called when profiling is off. */
+			profileNow?: () => number
+		} = {},
 	) {
+		this.logger = deps.logger ?? null
+		this.profileClock = deps.profileNow ?? (() => performance.now())
+		const every = deps.profile?.sampleEvery
+		if (every === undefined) {
+			this.profileOn = false
+			this.sampleEvery = 1
+		} else if (!Number.isInteger(every) || every < 1) {
+			throw new WaveKitError(
+				`spectrum profile sampleEvery must be a positive integer, got ${String(every)}`,
+				"SCANNER_PIPELINE_PROFILE",
+			)
+		} else {
+			this.profileOn = true
+			this.sampleEvery = every
+		}
+		this.gateNow = deps.now
 		const now = deps.now ?? Date.now
 		this.n = cfg.fftSize
 		this.fs = cfg.sampleRateHz
@@ -343,6 +475,8 @@ export class SpectrumPipeline {
 		})
 		this.frameAcc = new Float64Array(this.n)
 		this.blockAcc = new Float64Array(this.n)
+		this.gatePower = new Float64Array(this.n)
+		this.gateMask = new Uint8Array(this.n)
 		this.frameDb = new Float32Array(this.n)
 		this.powerDb = new Float32Array(this.n)
 		this.floorDb = new Float32Array(this.n)
@@ -390,8 +524,9 @@ export class SpectrumPipeline {
 		}
 	}
 
-	handle(input: PipelineInput): PipelineEvent[] {
+	handle(input: WorkerPipelineInput): PipelineEvent[] {
 		this.out = []
+		this.wirePending = false
 		switch (input.kind) {
 			case "bytes":
 				this.onBytes(input.startSample, input.bytes)
@@ -414,12 +549,31 @@ export class SpectrumPipeline {
 			case "spectrum-feed":
 				this.feed = input.enabled
 				break
+			case "channel-plan":
+				this.channelPlan = input.plan
+				this.planActive = input.plan !== null
+				this.tracker.setGatePlan(this.planActive)
+				this.wideband.setGatePlan(this.planActive)
+				if (this.gate) {
+					this.gate.setPlan(this.planActive ? this.channelPlan : null)
+					this.pushFaTargets()
+				}
+				break
 		}
 		return this.out
 	}
 
+	/**
+	 * Test hook for each track's own gate run. Production leaves it unset
+	 * and the tracker allocates nothing. Both trackers share the callback.
+	 */
+	setGateTrace(fn: ((e: GateTrace) => void) | null): void {
+		this.tracker.setGateTrace(fn)
+		this.wideband.setGateTrace(fn)
+	}
+
 	exportEngineState(): EngineState {
-		return {
+		const state: EngineState = {
 			version: 1,
 			absoluteFloors: this.floor.exportState().absoluteFloors,
 			spurs: this.spurs.exportState().spurs,
@@ -429,6 +583,80 @@ export class SpectrumPipeline {
 				return { startHz: r.startHz, endHz: r.endHz, k: s.k }
 			}),
 		}
+		if (!this.profileOn) return state
+		return Object.assign(state, { profile: this.profileSnapshot() })
+	}
+
+	/** `gate` is charged only while a channel plan is set and this block is sampled. */
+	private profileSnapshot(): PipelineProfile {
+		return {
+			blocks: this.profileBlocks,
+			busyMs: this.profileBusyMs,
+			stages: {
+				window: this.stageWindow,
+				fft: this.stageFft,
+				power: this.stagePower,
+				frameDb: this.stageFrameDb,
+				floor: this.stageFloor,
+				detector: this.stageDetector,
+				gate: this.stageGate,
+				tracker: this.stageTracker,
+				wire: this.stageWire,
+			},
+		}
+	}
+
+	private mark(sample: boolean): number {
+		return sample ? this.profileClock() : 0
+	}
+
+	private take(sample: boolean, stage: PipelineProfileStage, t0: number): void {
+		if (!sample) return
+		const dt = this.profileClock() - t0
+		if (!(dt > 0)) return
+		if (stage === "window") this.stageWindow += dt
+		else if (stage === "fft") this.stageFft += dt
+		else if (stage === "power") this.stagePower += dt
+		else if (stage === "frameDb") this.stageFrameDb += dt
+		else if (stage === "floor") this.stageFloor += dt
+		else if (stage === "detector") this.stageDetector += dt
+		else if (stage === "gate") this.stageGate += dt
+		else if (stage === "tracker") this.stageTracker += dt
+		else this.stageWire += dt
+	}
+
+	/** One finished block in `sampleEvery`. The window span of this frame is already in `pendingWindowMs`. */
+	private armSample(): void {
+		this.profileOrdinal++
+		this.sampling = this.profileOrdinal % this.sampleEvery === 0
+	}
+
+	/** Counts a sampled block. Busy time is charged per synchronous frame, not across chunk waits. */
+	private closeSample(): void {
+		this.profileBlocks++
+		this.sampling = false
+	}
+
+	private chargeBusy(dt: number): void {
+		if (dt > 0) this.profileBusyMs += dt
+	}
+
+	/**
+	 * True after this handle finished a sampled block. The worker times
+	 * `encodeEventsForWire` and `postMessage` only then, so profiling off
+	 * never reads the clock.
+	 */
+	wireSpanOpen(): boolean {
+		return this.wirePending
+	}
+
+	/** Charge one encode + post span. Does not read the clock. */
+	chargeWireSpan(ms: number): void {
+		if (!this.wirePending) return
+		this.wirePending = false
+		if (!(ms > 0)) return
+		this.stageWire += ms
+		this.profileBusyMs += ms
 	}
 
 	/**
@@ -538,6 +766,10 @@ export class SpectrumPipeline {
 			this.emit(this.wideband.closeAll("gap"))
 		}
 		this.drain()
+		// Blocks finished above still belong to the run. Anything after the hole does not.
+		this.prevPersistent = []
+		this.alarmStrength.clear()
+		this.interruptGate()
 		this.checkMarkerTimeout(startSample + samples)
 		this.maybeStats()
 	}
@@ -656,9 +888,12 @@ export class SpectrumPipeline {
 		this.resetArtefacts()
 		this.floorReady = false
 		this.prevPersistent = []
+		this.alarmStrength.clear()
 		this.alarmWaitedBlocks = 0
 		this.floor.useKey(ep.absKey)
 		this.applyMasks()
+		this.gateBlock = -1
+		this.openGate(ep.centreHz)
 	}
 
 	private checkMarkerTimeout(atSample: number): void {
@@ -701,10 +936,33 @@ export class SpectrumPipeline {
 	}
 
 	private drain(): void {
+		if (!this.profileOn) {
+			this.frames.drain(
+				f => this.onFrame(f),
+				r => this.onCounterRun(r),
+			)
+			return
+		}
+		// U8 conversion and windowing run inside FrameSource. A chunk that
+		// yields no frame still did that work; account it so chunk boundaries
+		// do not bias a sampled block.
+		let cursor = this.profileClock()
 		this.frames.drain(
-			f => this.onFrame(f),
+			f => {
+				this.pendingWindowMs =
+					this.leadWindowMs + (this.profileClock() - cursor)
+				this.leadWindowMs = 0
+				this.onFrame(f)
+				cursor = this.profileClock()
+			},
 			r => this.onCounterRun(r),
 		)
+		const tail = this.profileClock() - cursor
+		if (!(tail > 0)) return
+		if (this.sampling) {
+			this.stageWindow += tail
+			this.chargeBusy(tail)
+		} else this.leadWindowMs += tail
 	}
 
 	private onCounterRun(run: { startSample: number; endSample: number }): void {
@@ -742,23 +1000,56 @@ export class SpectrumPipeline {
 				return
 			}
 			this.blockIndex = bi
+			if (this.profileOn) this.armSample()
 		}
-		this.fft.transform(f.re, f.im)
-		this.frameAcc.fill(0)
-		accumulateShiftedPower(f.re, f.im, this.frameAcc)
+		const sample = this.profileOn && this.sampling
+		const frameStart = sample ? this.profileClock() : 0
+		if (this.pendingWindowMs > 0) {
+			if (sample) {
+				this.stageWindow += this.pendingWindowMs
+				this.chargeBusy(this.pendingWindowMs)
+			}
+			this.pendingWindowMs = 0
+		}
+		if (!sample) {
+			this.fft.transform(f.re, f.im)
+			this.frameAcc.fill(0)
+			accumulateShiftedPower(f.re, f.im, this.frameAcc)
+		} else {
+			let t = this.mark(true)
+			this.fft.transform(f.re, f.im)
+			this.take(true, "fft", t)
+			t = this.mark(true)
+			this.frameAcc.fill(0)
+			accumulateShiftedPower(f.re, f.im, this.frameAcc)
+			this.take(true, "power", t)
+		}
 		this.blockClipped += f.clipped
 		this.blockFrames++
 		// § 4.9 (Task 7a): a blanked frame, or a pending one in an epoch's first block, is neither integrated,
 		// short-pathed nor enveloped; the frame after it is a seam for shortFrame, so the 5 ms window restarts
+		let ft = this.mark(sample)
 		if (this.blanker.offer(this.frameAcc, f.startSample) === "keep") {
 			for (let i = 0; i < this.n; i++)
 				this.blockAcc[i] = (this.blockAcc[i] ?? 0) + (this.frameAcc[i] ?? 0)
+			this.take(sample, "power", ft)
+			ft = this.mark(sample)
 			this.shortFrame(f.startSample)
+			this.take(sample, "tracker", ft)
 			if (this.tracker.openCount > 0) {
+				ft = this.mark(sample)
 				powerToDb(this.frameAcc, 1, this.frameDb)
+				this.take(sample, "frameDb", ft)
+				ft = this.mark(sample)
 				this.tracker.frame(this.frameDb, f.startSample)
+				this.take(sample, "tracker", ft)
 			}
+		} else {
+			this.take(sample, "power", ft)
 		}
+		// Frame time stops here. Finalization charges itself, including when a
+		// later frame calls it after a gap (before that frame's clock starts).
+		if (sample) this.chargeBusy(this.profileClock() - frameStart)
 		if (f.startSample + this.hop >= blockEnd) this.finishBlock()
 	}
 
@@ -824,19 +1115,32 @@ export class SpectrumPipeline {
 	}
 
 	private discardBlock(): void {
+		if (this.sampling) this.closeSample()
 		this.resetBlock()
 		this.blockIndex = -1
 		this.noiseEdgeBlock = -1
 	}
 
+	/** Block finalization is timed once on every path, then offered to the worker as wire. */
 	private finishBlock(): void {
+		const sample = this.sampling
+		const t0 = sample ? this.profileClock() : 0
+		this.finishBlockWork()
+		if (!sample) return
+		this.wirePending = true
+		this.chargeBusy(this.profileClock() - t0)
+	}
+
+	private finishBlockWork(): void {
 		const ep = this.ep
 		const s0 = ep?.settledStart
 		const frames = this.blockFrames
 		if (!ep || s0 === null || s0 === undefined || frames === 0) {
 			this.resetBlock()
+			if (this.sampling) this.closeSample()
 			return
 		}
+		const sample = this.sampling
 		const blockStart = s0 + this.blockIndex * this.blockSamples
 		const blockEnd = blockStart + this.blockSamples
 		this.blocksSeen++
@@ -850,12 +1154,21 @@ export class SpectrumPipeline {
 		const overload =
 			this.blockClipped / (frames * this.n) > this.cfg.clipFraction
 		const blanking = this.blanker.endBlock(this.blockAcc) // § 4.9: blanked frames are not integrated
+		let t = this.mark(sample)
 		powerToDb(this.blockAcc, blanking.integrated, this.powerDb)
+		this.take(sample, "power", t)
+		const integrated = blanking.integrated
+		if (this.planActive) {
+			const tCopy = this.mark(sample)
+			this.gatePower.set(this.blockAcc)
+			this.take(sample, "gate", tCopy)
+		}
 		this.burstCountDone.set(this.burstCount)
 		this.burstPeakDone.set(this.burstPeakDb)
 		this.resetBlock()
 		this.gaps = this.gaps.filter(g => g.end > blockEnd)
 
+		t = this.mark(sample)
 		this.extra.set(this.exclusionMask)
 		this.spurs.mask(ep.absKey, this.extra)
 		const masks = {
@@ -870,10 +1183,13 @@ export class SpectrumPipeline {
 		const effective = this.floor.effectiveFloor(blockFloor, ep.absKey)
 		this.floor.perBinFloor(this.floorDb, effective)
 		this.floorReady = true
+		this.take(sample, "floor", t)
 		// recordNoiseEdges assumes adjacent blocks: after a skipped, stale, gap, overload or excluded block, start afresh
 		if (this.blockIndex !== this.noiseEdgeBlock + 1) this.detector.reset()
+		t = this.mark(sample)
 		this.detector.detect(this.powerDb, this.floorDb, this.on)
 		const k = this.detector.kFor(this.n / 2)
+		this.take(sample, "detector", t)
 		const floorOccupied = this.floor.occupied(blockFloor, k, ep.absKey)
 		const segOpts: SegmentOptions = {
 			gapBins: this.gapBins,
@@ -889,10 +1205,12 @@ export class SpectrumPipeline {
 				dcBin: this.n / 2,
 			},
 		}
+		t = this.mark(sample)
 		const segs = this.withoutLines(
 			ep,
 			segment(this.on, this.powerDb, this.floorDb, segOpts),
 		)
+		this.take(sample, "tracker", t)
 
 		if (ep.staleLeft > 0) {
 			if (this.isStale(segs, ep)) {
@@ -903,13 +1221,21 @@ export class SpectrumPipeline {
 				// the sliding short window spans blocks and frames stay contiguous through a stale discard: restart it,
 				// or the first accepted block opens a burst ghost at the previous hop's emitters (spec § 4.6)
 				this.resetShort()
+				this.prevPersistent = []
+				this.alarmStrength.clear()
 				this.out.push({ kind: "stale-discard", epoch: ep.epoch, blocks: 1 })
+				this.interruptGate()
+				if (sample) this.closeSample()
 				return
 			}
 			ep.staleLeft = 0
 			ep.staleRef = null
 		}
 
+		if (gap || overload || blanking.excluded) {
+			this.prevPersistent = []
+			this.alarmStrength.clear()
+		}
 		const segRanges = segs.map(s => this.segmentRf(s, ep))
 		let holdPersistent = false
 		if (
@@ -959,6 +1285,7 @@ export class SpectrumPipeline {
 					// mirrored, and an automatic one-byte re-align on an aligned stream would swap
 					// I/Q for good: every alarm but signal-change is the frozen untracked epoch.
 					this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz, suspected)
+					if (sample) this.closeSample()
 					return
 				}
 			}
@@ -968,12 +1295,14 @@ export class SpectrumPipeline {
 		if (learn && !blanking.excluded) {
 			for (let i = 0; i < this.n; i++)
 				this.learnMask[i] = unmasked[i] === 1 && this.on[i] !== 1 ? 1 : 0
+			t = this.mark(sample)
 			this.floor.update(
 				this.powerDb,
 				this.learnMask,
 				segs.length === 0,
 				ep.absKey,
 			)
+			this.take(sample, "floor", t)
 			this.spurs.observe(
 				ep.absKey,
 				{ epoch: ep.epoch, centreHz: ep.centreHz, binHz: this.binHz },
@@ -982,6 +1311,7 @@ export class SpectrumPipeline {
 			)
 			this.observeLines(ep)
 		}
+		t = this.mark(sample)
 		const { trackSegs, burstSet } = this.mergeBursts(segs, segOpts)
 		const block: TrackerBlock = {
 			endSample: blockEnd,
@@ -993,8 +1323,13 @@ export class SpectrumPipeline {
 			overload,
 			burstSegments: burstSet,
 		}
+		const gateFrom = this.out.length
 		this.emit(this.tracker.flagSpurs(this.lineMask))
 		this.noteActivity(trackSegs, blockEnd)
+		// A gap, a skip or an exclusion resets in-progress runs before the
+		// tracker counts a miss as an off block. Passed state stays.
+		const holdGate = gap || blanking.excluded
+		this.prepareGate(holdGate)
 		this.emitWithImages(this.tracker.block(trackSegs, block), ep)
 		this.emit(
 			this.wideband.block(floorOccupied ? [this.widebandSegment()] : [], {
@@ -1002,20 +1337,36 @@ export class SpectrumPipeline {
 				powerDb: this.powerDb,
 			}),
 		)
+		this.take(sample, "tracker", t)
+		this.applyChannelGate(
+			blockEnd,
+			integrated,
+			gateFrom,
+			// Overload still measures. A clipped block is the emission (a 7 dB
+			// NFM in U8 clips) and must be able to pass. A gap or an excluded
+			// block is not a measurement, so it cannot continue a run.
+			holdGate,
+		)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
-		if (!gap && !overload && !blanking.excluded && !holdPersistent)
-			this.prevPersistent = this.persistentFeatures(segRanges, ep)
+		if (!gap && !overload && !blanking.excluded) {
+			// Qualification follows every valid block, even while classification holds
+			// the old reference scene. A returning feature must earn a fresh window.
+			const currentPersistent = this.persistentFeatures(trackSegs, ep)
+			if (!holdPersistent) this.prevPersistent = currentPersistent
+		}
 		if (learn) {
 			this.tracker.trackBinsMask(this.joined, 2)
 			let usable = 0
 			for (let i = 0; i < this.n; i++) usable += unmasked[i] ?? 0
 			if (!blanking.excluded) {
+				t = this.mark(sample)
 				this.detector.recordNoiseEdges(
 					this.on,
 					this.joined,
 					this.blockMs / 60_000,
 					(usable * this.binHz) / 1e6,
 				)
+				this.take(sample, "detector", t)
 				this.noiseEdgeBlock = this.blockIndex
 			}
 			this.settledSamples += this.blockSamples
@@ -1023,20 +1374,21 @@ export class SpectrumPipeline {
 		if (overload) this.overloadedBlocks++
 		this.lastFloorDbfs = effective
 		if (this.feed) {
-			this.out.push({
-				kind: "block-summary",
-				summary: this.summary(
-					ep,
-					blockEnd,
-					effective,
-					k,
-					trackSegs,
-					floorOccupied,
-					overload,
-					burstSet,
-				),
-			})
+			t = this.mark(sample)
+			const summary = this.summary(
+				ep,
+				blockEnd,
+				effective,
+				k,
+				trackSegs,
+				floorOccupied,
+				overload,
+				burstSet,
+			)
+			this.take(sample, "wire", t)
+			this.out.push({ kind: "block-summary", summary })
 		}
+		if (sample) this.closeSample()
 	}
 
 	/**
@@ -1212,26 +1564,71 @@ export class SpectrumPipeline {
 		return judge([...closed, ...open]) === "signal-change" ? "pending" : now
 	}
 
-	/** Long-lived tracks and RF-fixed carriers present in this block (spec § 4.7). */
+	/** Minimum margin over a full second of consecutive present, strong blocks. */
 	private persistentFeatures(
-		segRanges: SegmentRange[],
+		segs: Segment[],
 		ep: EpochState,
 	): PersistentFeature[] {
-		const tol = this.binHz
-		const out: PersistentFeature[] = this.tracker.longLived(
-			PERSISTENT_TRACK_S * this.fs,
-		)
+		const candidates = this.tracker.longLived(0)
 		for (const c of this.spurs.rfCarriers()) {
 			if (!this.visibleRf(c.rfHz, ep)) continue
+			const bin = (c.rfHz - ep.centreHz) / this.binHz + this.n / 2
+			const segment = segs.find(s => bin >= s.startBin && bin < s.endBin)
+			if (!segment) continue
 			if (
-				!segRanges.some(
-					s => c.rfHz >= s.startHz - tol && c.rfHz <= s.endHz + tol,
+				candidates.some(
+					f =>
+						f.ageSamples >= PERSISTENT_TRACK_S * this.fs &&
+						Math.abs(f.rfHz - c.rfHz) <= this.binHz,
 				)
 			)
 				continue
-			if (out.some(f => Math.abs(f.rfHz - c.rfHz) <= tol)) continue
-			out.push({ rfHz: c.rfHz, widthHz: c.widthBins * this.binHz })
+			candidates.push({
+				trackId: `rf:${c.rfHz}`,
+				rfHz: c.rfHz,
+				widthHz: c.widthBins * this.binHz,
+				startBin: segment.startBin,
+				endBin: segment.endBin,
+				ageSamples: Infinity,
+			})
 		}
+		const present = new Set<string>()
+		const out: PersistentFeature[] = []
+		for (const f of candidates) {
+			present.add(f.trackId)
+			let marginDb = -Infinity
+			for (let bin = f.startBin; bin < f.endBin; bin++) {
+				if (this.detector.unmasked()[bin] !== 1 || this.lineMask[bin] === 1)
+					continue
+				marginDb = Math.max(
+					marginDb,
+					(this.powerDb[bin] ?? -Infinity) -
+						(this.floorDb[bin] ?? Infinity) -
+						this.detector.kFor(bin),
+				)
+			}
+			// A consecutive threshold run is equivalent to requiring the window minimum
+			// to meet the margin, without storing or rescanning a ring of measurements.
+			const blocks =
+				marginDb >= ALARM_FEATURE_MARGIN_DB
+					? Math.min(
+							(this.alarmStrength.get(f.trackId) ?? 0) + 1,
+							Math.ceil(ALARM_FEATURE_WINDOW_MS / this.blockMs),
+						)
+					: 0
+			this.alarmStrength.set(f.trackId, blocks)
+			if (
+				blocks * this.blockMs >= ALARM_FEATURE_WINDOW_MS &&
+				f.ageSamples >= PERSISTENT_TRACK_S * this.fs
+			)
+				out.push({
+					rfHz: f.rfHz,
+					widthHz: f.widthHz,
+					marginDb: ALARM_FEATURE_MARGIN_DB,
+				})
+		}
+		for (const key of this.alarmStrength.keys())
+			if (!present.has(key)) this.alarmStrength.delete(key)
 		return out
 	}
 
@@ -1444,6 +1841,178 @@ export class SpectrumPipeline {
 
 	// ---- masks, summaries, stats ----
 
+	/** Pinned detector k minus the table k. null keeps adaptive kCh. */
+	private pinnedOffsetDb(): number | null {
+		if (this.cfg.thresholdDb === null) return null
+		return this.cfg.thresholdDb - defaultK(this.binHz, this.cfg.integrationMs)
+	}
+
+	private openGate(centreHz: number): void {
+		if (this.gate) {
+			this.gate.recentre(centreHz)
+			this.gate.setPinnedOffsetDb(this.pinnedOffsetDb())
+			this.pushFaTargets()
+			return
+		}
+		const gate = createChannelGate(
+			this.gateNow
+				? {
+						binHz: this.binHz,
+						blockMs: this.blockMs,
+						centreHz,
+						bins: this.n,
+						now: this.gateNow,
+					}
+				: {
+						binHz: this.binHz,
+						blockMs: this.blockMs,
+						centreHz,
+						bins: this.n,
+					},
+		)
+		gate.setPinnedOffsetDb(this.pinnedOffsetDb())
+		gate.setPlan(this.planActive ? this.channelPlan : null)
+		this.gate = gate
+		this.pushFaTargets()
+	}
+
+	/** CFAR targets: rounded mask keys, plus a plan entry's rangeKey on the same span. */
+	private pushFaTargets(): void {
+		const gate = this.gate
+		if (!gate) return
+		const map = new Map<string, number>()
+		for (const r of this.masks.cfarRanges) {
+			if (r.faTargetPerMhzMin === undefined) continue
+			map.set(
+				`${Math.round(r.startHz)}:${Math.round(r.endHz)}`,
+				r.faTargetPerMhzMin,
+			)
+			const plan = this.channelPlan
+			if (!plan) continue
+			for (const e of plan.entries) {
+				if (e.startHz === r.startHz && e.endHz === r.endHz)
+					map.set(e.rangeKey, r.faTargetPerMhzMin)
+			}
+		}
+		gate.setFaTargets(map, this.cfg.faTargetPerMhzMin)
+	}
+
+	/**
+	 * Detector mask (unmasked inverted) plus spur/exclusion `extra` plus image
+	 * bins. Same 1e-9 edge slack as the channel gate's bin span.
+	 */
+	private fillGateMask(): void {
+		const mask = this.gateMask
+		const unmasked = this.detector.unmasked()
+		const extra = this.extra
+		const n = this.n
+		for (let i = 0; i < n; i++)
+			mask[i] = unmasked[i] === 0 || extra[i] === 1 ? 1 : 0
+		const ep = this.ep
+		if (!ep) return
+		const half = n / 2
+		const binHz = this.binHz
+		const centre = ep.centreHz
+		for (const image of this.imageTracks) {
+			const lo = image.centreHz - image.obwHz / 2
+			const hi = image.centreHz + image.obwHz / 2
+			const i0 = Math.max(0, Math.ceil((lo - centre) / binHz + half - 1e-9))
+			const i1 = Math.min(n, Math.ceil((hi - centre) / binHz + half - 1e-9))
+			for (let i = i0; i < i1; i++) mask[i] = 1
+		}
+	}
+
+	/** Reused by `readGate`. One reading per observed track, no allocation. */
+	private readonly gateScratch: ChannelGateReading = {
+		state: "pending",
+		channelSnrDb: Number.NEGATIVE_INFINITY,
+		passedSample: null,
+		runStartSample: null,
+		minDurationMs: CHANNEL_GATE_MIN_DURATION_MS,
+		kDb: CHANNEL_GATE_K_DB,
+		marginDb: CHANNEL_GATE_MARGIN_DB,
+		valid: false,
+	}
+
+	/** Bound once. `publishGate` calls it per observed track, not per block allocation. */
+	private readonly readGate = (
+		centreHz: number,
+		obwHz: number,
+	): ChannelGateReading => {
+		const gate = this.gate
+		return gate ? gate.gateInto(centreHz, obwHz, this.gateScratch) : IDLE_GATE
+	}
+
+	/**
+	 * A gap, a skipped or stale block, an exclusion, a retune or a new epoch
+	 * ends every slot run and every open track's in-progress run. A track
+	 * that already passed stays passed. kCh stays. An overload block is still
+	 * measured: clipping does not erase the emission.
+	 */
+	private interruptGate(): void {
+		this.gate?.resetRuns()
+		this.tracker.resetGateRuns()
+		this.wideband.resetGateRuns()
+		this.gateBlock = -1
+	}
+
+	/**
+	 * Runs before `tracker.block`. A miss on a reset block must not be the
+	 * tolerated off that completes a pass. `hold` is a gap or an exclusion.
+	 */
+	private prepareGate(hold: boolean): void {
+		if (!this.planActive) return
+		const jumped = this.blockIndex !== this.gateBlock + 1
+		if (!jumped && !hold) return
+		this.gate?.resetRuns()
+		this.tracker.resetGateRuns()
+		this.wideband.resetGateRuns()
+		this.tracker.noteGateBreak()
+		this.wideband.noteGateBreak()
+	}
+
+	private applyChannelGate(
+		blockEnd: number,
+		integrated: number,
+		gateFrom: number,
+		hold: boolean,
+	): void {
+		if (!this.planActive) return
+		const gate = this.gate
+		const ep = this.ep
+		if (!gate || !ep) return
+		const sample = this.sampling
+		const t0 = this.mark(sample)
+		this.gateBlock = this.blockIndex
+		if (!hold) {
+			this.fillGateMask()
+			gate.blockLinear(
+				this.gatePower,
+				integrated,
+				this.floorDb,
+				this.gateMask,
+				blockEnd,
+			)
+		}
+		// The linear-power copy is the earlier `gate` step. This span is the
+		// block measurement plus per-track geometry, run stepping and painting.
+		const mainExtra = this.tracker.publishGate(
+			this.readGate,
+			this.out,
+			gateFrom,
+			!hold,
+		)
+		const wideExtra = this.wideband.publishGate(
+			this.readGate,
+			this.out,
+			gateFrom,
+			!hold,
+		)
+		if (mainExtra.length > 0) this.emit(mainExtra)
+		if (wideExtra.length > 0) this.emit(wideExtra)
+		this.take(sample, "gate", t0)
+	}
+
 	private applyMasks(): void {
 		const ep = this.ep
 		if (!ep) return
@@ -1484,6 +2053,7 @@ export class SpectrumPipeline {
 			extra: this.exclusionMask,
 		})
 		this.detector.setCfarRanges(this.cfarRanges(c))
+		this.pushFaTargets()
 	}
 
 	/** Per-range CFAR buckets over the usable span: bandplan/job ranges first, else 2 MHz RF buckets. */
@@ -1563,23 +2133,64 @@ export class SpectrumPipeline {
 			bins,
 			floorDbfs,
 			thresholdDb: k,
-			tracks: segs.map(s => ({
-				startHz: this.rfLow(ep, s.startBin),
-				endHz: this.rfLow(ep, s.endBin),
-				flags: {
-					burst: burstSet.has(s),
-					iqImage: this.imageTracks.some(
-						t =>
-							t.centreHz >= this.rfLow(ep, s.startBin) &&
-							t.centreHz <= this.rfLow(ep, s.endBin),
-					),
-					edge: s.flags.edge,
-				},
-			})),
+			// WG11 req 5.1: the tracker's own association of each segment in this block (no geometry).
+			tracks: segs.map(s => {
+				const assoc = this.frameAssociation(s)
+				// Surfaced rule uses the spectrum detection config's minSurfaceBlocks (the scanner may use runtime settings).
+				return blockTrackOf(
+					this.rfLow(ep, s.startBin),
+					this.rfLow(ep, s.endBin),
+					{
+						burst: burstSet.has(s),
+						iqImage: this.imageTracks.some(
+							t =>
+								t.centreHz >= this.rfLow(ep, s.startBin) &&
+								t.centreHz <= this.rfLow(ep, s.endBin),
+						),
+						edge: s.flags.edge,
+					},
+					assoc,
+					this.fs,
+					this.cfg.minSurfaceBlocks,
+				)
+			}),
 			masks: { dcHz: ep.centreHz, dcGuardHz: this.dcGuardHz, spurRanges },
 			floorOccupied,
 			overload,
 		}
+	}
+
+	/**
+	 * The tracker's association of a segment with the frame `trackId`: the tracker id without
+	 * this pipeline's own `${sourceId}-` prefix (ids are `${sourceId}-${ms base36}-${seq base36}`,
+	 * trackIdPrefixes), cut by its known length, never by a search in the id. The rest is
+	 * `<8 base36>-<seq base36>` (8 chars until 2059), ≤ FRAME_TRACK_ID_MAX_CHARS = 30 while
+	 * seq < 36^21, in the frame id charset. The spectrum service rebuilds the chain's current full id as
+	 * `${frame.sourceId}-${trackerId ?? trackId}` for the identity lookup.
+	 */
+	private frameAssociation(s: Segment): TrackAssociation | null {
+		const a = this.tracker.associationOf(s)
+		if (a === null) return null
+		a.trackId = a.trackId.slice(this.cfg.sourceId.length + 1)
+		a.trackerId = a.trackerId.slice(this.cfg.sourceId.length + 1)
+		if (
+			!this.warnedTrackId &&
+			(!isFrameTrackId(a.trackId) || !isFrameTrackId(a.trackerId))
+		)
+			this.warnTrackIdBound()
+		return a
+	}
+
+	/** One fixed-text warning per pipeline (unreachable by the bound above); never echoes the id. */
+	private warnTrackIdBound(): void {
+		this.warnedTrackId = true
+		this.logger ??= createComponentLogger(
+			createLogger({ level: "warn" }),
+			"SpectrumPipeline",
+		)
+		this.logger.warn(
+			"track id suffixes exceed the frame track id bound; frame track fields omitted",
+		)
 	}
 
 	private maybeStats(): void {

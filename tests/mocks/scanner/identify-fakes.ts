@@ -67,6 +67,8 @@ export function trackOf(over: Partial<TrackSnapshot> = {}): TrackSnapshot {
 		dutyCycle: 1,
 		spectralShape: "flat",
 		tuningTrust: "commanded",
+		// Surfacing fixtures. Pass `gate` to pin pending, passed or below.
+		gate: "passed",
 		...over,
 		flags: { ...FLAGS, ...over.flags },
 	}

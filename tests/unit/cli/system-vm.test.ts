@@ -304,7 +304,7 @@ describe("system view-model (spec §6.5)", () => {
 		expect(audioResultText(ok, t0 + 1000)).toBe("audio started · 0 clients")
 	})
 
-	describe("C3 fix round 1", () => {
+	describe("keeps CORE and AUDIO with many host warnings and two hosts at 59x12, with markers", () => {
 		const live = scenarioState("live")
 		const r = live.resources.value!
 		const host = r.sdrHosts[0]!
@@ -446,7 +446,7 @@ describe("system view-model (spec §6.5)", () => {
 		})
 	})
 
-	describe("C3 fix round 2", () => {
+	describe("sampling upstream rate reads ? on an old lane (T6)", () => {
 		const live = scenarioState("live")
 		const r = live.resources.value!
 		const host = r.sdrHosts[0]!

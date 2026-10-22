@@ -44,7 +44,7 @@ type Same<A, B> =
 const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 
 describe("WG10 contract: identify analog evidence and unavailable decoders", () => {
-	it("widens trial decoder and reason, keeps the outcome and state lists", () => {
+	it("widens trial decoder and reason, keeps the state list (WG11 adds the heard outcome)", () => {
 		type Decoder = Api.ScannerIdentifyTrial["decoder"]
 		expect(
 			same<
@@ -55,6 +55,8 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 				| "rtl433"
 				| Api.ScannerAmbientDecoderType
 				| "live-audio"
+				// WG12: analog replay trial
+				| "analog-demod"
 				| null
 			>(true),
 		).toBe(true)
@@ -83,6 +85,11 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 				| "unsupported"
 				| "not-needed"
 				| "cancelled"
+				// WG11 req 1.1: an analog squelch opening without a tone or code
+				| "heard"
+				// WG12: analog replay trial outcomes
+				| "data-like"
+				| "carrier-only"
 			>(true),
 		).toBe(true)
 		expect(
@@ -157,7 +164,7 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 		expect(same<Optional<"decodersUnavailable">, true>(true)).toBe(true)
 	})
 
-	it("is accepted by the CLI identify guard (closed outcome list unchanged)", () => {
+	it("is accepted by the CLI identify guard (closed outcome list; WG11 adds heard)", () => {
 		const target = SCAN_JOB.identify!.targets[0]!
 		const job = {
 			...SCAN_JOB,

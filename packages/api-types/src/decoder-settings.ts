@@ -1,4 +1,4 @@
-import type { DecoderOptionIssue } from "./decoders.js"
+import type { DecoderMode, DecoderOptionIssue } from "./decoders.js"
 
 /**
  * WG8 decoder settings store and decoder PATCH (docs/specs/web-gaps-8, requirements 1 to 3).
@@ -59,6 +59,7 @@ export interface DecoderOptionSetting {
 
 /** WG8 req 2.7: GET /api/decoders/:id/settings body (and `settings` of a PATCH result). */
 export interface DecoderSettingsView {
+	mode?: { value: DecoderMode; source: DecoderSettingSource }
 	decoderId: string
 	type: string
 	/** Store revision (one counter for the whole file); send it as If-Match. */
@@ -79,6 +80,7 @@ export interface DecoderSettingsView {
  * null removes it, an absent key is unchanged. At least one key.
  */
 export interface DecoderSettingsUpdate {
+	mode?: DecoderMode | null
 	enabled?: boolean | null
 	options?: Record<string, DecoderSettingValue | null>
 }

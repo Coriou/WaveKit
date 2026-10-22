@@ -409,7 +409,7 @@ describe("R15: status events", () => {
 	})
 })
 
-describe("A1 fix round 1", () => {
+describe("R13 at compile time: DecoderRow has no rateAssessment", () => {
 	it("R13 at compile time: DecoderRow has no rateAssessment", () => {
 		const row: DecoderRow | undefined = guardDecoder(decoder)
 		// @ts-expect-error DecoderRow omits rateAssessment (spec §2, R13)
@@ -676,5 +676,36 @@ describe("R85: tuner unknownFields and source rateMismatch", () => {
 			type: "tuner:state-changed",
 			state: { unknownFields: ["gain"] },
 		})
+	})
+})
+
+describe("tuner:command-sent origin", () => {
+	it("keeps every known origin, including a decoder rate write, and drops unknown ones", () => {
+		for (const origin of ["rest", "scanner", "replay", "decoder-rate"]) {
+			expect(
+				parseServerMessage({
+					type: "tuner:command-sent",
+					channel: "tuner",
+					data: {
+						sourceId: "s",
+						command: "SET_SAMPLE_RATE",
+						value: 2400000,
+						origin,
+					},
+				}),
+			).toMatchObject({ type: "tuner:command-sent", origin })
+		}
+		const unknown = parseServerMessage({
+			type: "tuner:command-sent",
+			channel: "tuner",
+			data: {
+				sourceId: "s",
+				command: "SET_SAMPLE_RATE",
+				value: 2400000,
+				origin: "other",
+			},
+		})
+		expect(unknown).toBeDefined()
+		expect(unknown).not.toHaveProperty("origin")
 	})
 })

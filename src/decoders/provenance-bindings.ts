@@ -242,9 +242,18 @@ export function createDecoderProvenanceIndex(
 	}
 	for (const decoder of decoders.getAllDecoders()) bind(decoder.id)
 	return {
-		lookup: id => {
-			const entry = entries.get(id)
+		lookup: (id, context) => {
+			let entry = entries.get(id)
 			if (!entry) return null
+			if (context) {
+				entry = {
+					...entry,
+					configured: context.sourceId,
+					targets:
+						context.channelHz === null ? entry.targets : [context.channelHz],
+					cache: {},
+				}
+			}
 			const sourceId =
 				entry.configured === undefined
 					? (defaultSourceId() ?? null)

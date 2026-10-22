@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
+import {
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { ScannerCapture } from "@wavekit/api-types"
 import {
 	CaptureRecorder,
@@ -198,6 +204,49 @@ const readCapture = (dir: string, c: ScannerCapture) => ({
 const sampleAt = (iq: Buffer, i: number) => iq[2 * i]! + (iq[2 * i + 1]! << 8)
 
 describe("CaptureRecorder", () => {
+	it("recreates staging removed after init before opening a capture", async () => {
+		const h = setup()
+		try {
+			await h.store.init()
+			rmSync(join(h.dir, "captures"), { recursive: true })
+			h.view.push(64_000)
+			expect(
+				h.recorder.open(req({ spec: { ...req().spec, onlyDecoded: false } })),
+			).toBe(true)
+			h.close("o1", 64_000)
+			h.view.push(16_000)
+			await until(() => h.captured.length === 1)
+			expect(h.captured).toHaveLength(1)
+		} finally {
+			await h.recorder.stop()
+			rmSync(h.dir, { recursive: true, force: true })
+		}
+	})
+
+	it("refuses an unavailable staging directory without opening a stream", async () => {
+		const h = setup()
+		try {
+			const warn = vi.spyOn(
+				(h.recorder as unknown as { log: { warn(): void } }).log,
+				"warn",
+			)
+			writeFileSync(join(h.dir, "captures"), "blocked")
+			expect(h.recorder.open(req())).toBe(false)
+			expect(h.recorder.activeCount()).toBe(0)
+			for (let i = 0; i < 145; i++) expect(h.recorder.open(req())).toBe(false)
+			expect(warn).toHaveBeenCalledTimes(1)
+			h.clock.now += 59_999
+			expect(h.recorder.open(req())).toBe(false)
+			expect(warn).toHaveBeenCalledTimes(1)
+			h.clock.now += 1
+			expect(h.recorder.open(req())).toBe(false)
+			expect(warn).toHaveBeenCalledTimes(2)
+		} finally {
+			await h.recorder.stop()
+			rmSync(h.dir, { recursive: true, force: true })
+		}
+	})
+
 	it("writes [start − pre, end + post] with live post-roll and a valid manifest entry", async () => {
 		const h = setup()
 		await h.store.init()

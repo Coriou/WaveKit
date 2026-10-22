@@ -1,5 +1,5 @@
 /**
- * WG7 MA.1 (BX seam): band-plan skips through the scanner service (req 6) and the
+ * WG7 (BX seam): band-plan skips through the scanner service (req 6) and the
  * decoded-elsewhere refresh on decoder manager events (req 7, with Main's max-wait).
  */
 import { rm } from "node:fs/promises"

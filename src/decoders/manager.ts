@@ -18,7 +18,40 @@
  */
 
 import { EventEmitter } from "node:events"
+import {
+	PlacementLifecycle,
+	PLACEMENT_STOP_TIMEOUT_MS,
+} from "./placement-lifecycle.js"
+import type { ChildProcess } from "node:child_process"
+import { signalDecoder } from "./process-tools.js"
+import type { DecoderEnablementOptions } from "./manager-options.js"
 import type {
+	PlannerInput,
+	PlannerVfo,
+	WantedPlacement,
+	ResolvedMode,
+	RunningPlacement,
+	AdmissionDecision,
+} from "./enablement/contract.js"
+import {
+	EFFICIENCY_SAMPLE_MS,
+	EFFICIENCY_RETRY_MS,
+	EFFICIENCY_RETRY_MAX_MS,
+	EFFICIENCY_PROBATION_MS,
+	CHANNEL_CAPABLE_TYPES,
+	DECODER_BRANCH_STARTUP_BUFFER_S,
+	DECODER_BRANCH_STARTUP_MS,
+	DECODER_PROTOCOLS,
+} from "./enablement/contract.js"
+import {
+	ADSB_FREQUENCY_HZ,
+	READSB_REACH_HZ,
+	type ReadsbRateFacts,
+} from "../core/rate-policy-contract.js"
+import type {
+	DecoderMode,
+	DecoderPlacementView,
+	DecoderEfficiencyView,
 	DecoderOptionIssue,
 	DecoderSettingValue,
 } from "@wavekit/api-types"
@@ -45,7 +78,9 @@ import {
 	validateDeclaredRateRequirements,
 	type DecoderRateContext,
 } from "./rate-resolver.js"
-import { assessDecoderBand } from "./band-resolver.js"
+import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
+import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
+import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import {
 	normalizeBandOverride,
 	resolveBandRequirements,
@@ -56,8 +91,10 @@ import {
 	createDecoderExitError,
 	createDecoderLastError,
 	describeDecoderStatusFields,
+	resolveDecoderTargetFrequencies,
 } from "./status-fields.js"
 import type { DecoderRegistry } from "./registry.js"
+import { VFO_CHANNEL_TYPES } from "./enablement/placement.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type {
 	ChannelAdmissionReason,
@@ -72,6 +109,7 @@ import { channelisedRatePlan } from "../core/channelizer/rate-plan.js"
 import { isValidRtlSampleRate } from "../core/tuner-controller.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
+import { iqFrameBytes } from "../core/source-manager.js"
 import {
 	decoderOptionDescriptors,
 	validateDecoderOptions,
@@ -99,6 +137,7 @@ export type ActivityPublisher = (
  * Configuration for the Decoder Manager.
  */
 export interface DecoderManagerConfig {
+	enablement?: DecoderEnablementOptions
 	/** Initial restart delay in milliseconds (default: 2000) */
 	restartDelay: number
 	/** Maximum restart delay in milliseconds (default: 30000) */
@@ -164,6 +203,7 @@ interface DecoderState {
 	bandPlan: DecoderBandAssessment | undefined
 	/** Operator intent: set by start, cleared by stop/remove */
 	desiredRunning: boolean
+	parentIntent?: { generation: number; supersede: () => void }
 	/** Set while the source rate or band makes the instance unusable (reversible) */
 	suspension: DecoderSuspension | null
 	/** An in-flight suspend (stop pending or failed) or resume */
@@ -187,7 +227,26 @@ interface DecoderState {
 	 */
 	startMode: DecoderStartMode
 	/** "scanner": a runtime-only probe owned by a scanner job (spec § 6.5). */
-	owner: "config" | "scanner"
+	owner: "config" | "scanner" | "placement"
+	workerLog?: Array<{ stream: "stdout" | "stderr"; line: string }>
+	originalConfig?: DecoderConfig
+	effectiveConfig?: DecoderConfig
+	loggedSuspension?: string | null
+	parentId?: string
+	placement?: WantedPlacement
+	unplaced?: DecoderSuspensionReasonCode
+	available?: boolean
+	modeOverride?: ResolvedMode
+	stopping?: boolean
+	lifecycle?: PlacementLifecycle
+	processStartPending?: boolean
+	placementOutcome?: WireOutcome
+	removalPending?: boolean
+	admittedAtMs?: number
+	admission?: AdmissionDecision
+	/** Activates the deferred raw branch once the decoder has started. */
+	branchReady?: () => void
+	efficiencyBackoffMs?: number
 	/** Owning scanner job of a probe; null for configured decoders. */
 	scannerJobId: string | null
 	/** Scanner-provided input used instead of a fanout branch (probes only). */
@@ -221,6 +280,13 @@ function sameJsonValue(a: unknown, b: unknown): boolean {
 		return true
 	}
 	return false
+}
+
+/** A parent placement start failed (fixed text, no cause). */
+export class DecoderPlacementStartError extends WaveKitError {
+	constructor() {
+		super("Decoder placement start failed", "DECODER_PLACEMENT_START_FAILED")
+	}
 }
 
 /** The rebuild of a decoder with staged options failed (fixed text, no cause). */
@@ -294,7 +360,7 @@ function publicSuspension(s: DecoderSuspension | null): {
 interface Eligibility {
 	rate: DecoderRateAssessment
 	band: DecoderBandAssessment
-	blockedBy: DecoderSuspensionReasonCode | null
+	blockedBy: CoreSuspensionReason | null
 }
 
 /** Result of DecoderManager.previewRates. */
@@ -379,6 +445,66 @@ export interface DecoderStartIntent {
 }
 
 /**
+ * A just-spawned decoder reads slowly for its first moments: its raw branch
+ * may buffer DECODER_BRANCH_STARTUP_BUFFER_S of the source's byte rate for
+ * DECODER_BRANCH_STARTUP_MS before congestion counts as drops.
+ */
+export function startupBuffer(
+	caps: SourceCaps | null | undefined,
+): { highWaterMark: number; durationMs: number } | undefined {
+	if (!caps || !Number.isFinite(caps.sampleRate) || caps.sampleRate <= 0)
+		return undefined
+	const channels = caps.channels ?? 1
+	// IQ frames use the source's own frame size; audio frames are per channel.
+	const bytesPerFrame =
+		iqFrameBytes(caps) ??
+		(caps.format === "S16LE"
+			? 2 * channels
+			: caps.format === "FLOAT32LE"
+				? 4 * channels
+				: 2) // "auto" and unknown: CU8
+	return {
+		highWaterMark: Math.ceil(
+			caps.sampleRate * bytesPerFrame * DECODER_BRANCH_STARTUP_BUFFER_S,
+		),
+		durationMs: DECODER_BRANCH_STARTUP_MS,
+	}
+}
+
+/**
+ * LoRa decodes the capture centre (requirement 3.2, `centre` reach): its
+ * region slot is the configured channel (frequency ± bw/2, the centre itself
+ * with followCenter) and its passband the decimated span bw × oversampling,
+ * bounded by the source's usable window. Unparseable options yield no reach.
+ */
+function loraCentreReach(
+	options: Record<string, unknown>,
+	caps: SourceCaps | null | undefined,
+): { slotHz: { minHz: number; maxHz: number }; passbandHz: number } | null {
+	let parsed: LoraMeshtasticOptions
+	try {
+		parsed = parseLoraMeshtasticOptions(options)
+	} catch {
+		return null
+	}
+	const frequency =
+		options["followCenter"] === true && caps?.centerFreq !== undefined
+			? caps.centerFreq
+			: parsed.frequency
+	const usable =
+		caps?.sampleRate !== undefined
+			? caps.sampleRate * USABLE_WINDOW_FRACTION
+			: Infinity
+	return {
+		slotHz: {
+			minHz: frequency - parsed.bw / 2,
+			maxHz: frequency + parsed.bw / 2,
+		},
+		passbandHz: Math.min(parsed.effectiveTargetRate, usable),
+	}
+}
+
+/**
  * DecoderManager - Orchestrates decoder lifecycle and coordinates with other components.
  *
  * Handles:
@@ -395,6 +521,9 @@ export class DecoderManager extends EventEmitter {
 	private readonly fanout: FanoutManager
 	private readonly config: DecoderManagerConfig
 	private readonly decoders: Map<string, DecoderState> = new Map()
+	private settledVfo: PlannerVfo | null | undefined
+	private reconcilingPlacements = false
+	private applyingCaps = false
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
 	private sourceManager: SourceManager | null = null
 	private sourceRouting: SourceFanoutRouter | null = null
@@ -408,6 +537,10 @@ export class DecoderManager extends EventEmitter {
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
 	/** Tail of the serial caps worker; each drain runs after the previous one. */
 	private capsWork: Promise<void> = Promise.resolve()
+	private efficiencyTimer: ReturnType<typeof setTimeout> | null = null
+	private lastEfficiencyWarningMs = -Infinity
+	private probationPass: Promise<void> | undefined
+	private probationRerun = false
 	private destroying = false
 	private readonly pendingCapsChanges = new Map<
 		string,
@@ -439,6 +572,772 @@ export class DecoderManager extends EventEmitter {
 	private channelInvalidatedHandler:
 		| ((sourceId: string, generation: number, channelIds: string[]) => void)
 		| null = null
+
+	private modeFor(state: DecoderState): ResolvedMode {
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		return (
+			parent?.modeOverride ??
+			this.config.enablement?.resolveMode(
+				parent?.config.id ?? state.config.id,
+			) ?? { mode: "auto", source: "default" }
+		)
+	}
+
+	private isUnavailable(state: DecoderState): boolean {
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		return (
+			parent?.available === false ||
+			(parent?.available !== true &&
+				(this.config.enablement?.unavailable(
+					parent?.config.id ?? state.config.id,
+				) ??
+					false))
+		)
+	}
+
+	async applyDecoderMode(id: string, mode: DecoderMode): Promise<void> {
+		const state = this.decoders.get(id)
+		if (!state || state.owner !== "config" || !this.config.enablement) return
+		const previousMode = this.modeFor(state).mode
+		state.modeOverride = {
+			mode,
+			source: this.config.enablement.resolveMode(id).source,
+		}
+		if (previousMode !== mode)
+			this.log.info({ decoderId: id, reasonCode: mode }, "Decoder mode changed")
+		if (!this.usesPlacementPlanning(state)) {
+			if (mode === "off") await this.stopDecoder(id)
+			else if (!state.desiredRunning)
+				await this.startDecoder(id, { startMode: "auto" })
+			else {
+				state.startMode = "auto"
+				this.notifyBandplansChanged()
+				await this.drainCapsChanges()
+			}
+			this.emitStatusChanged(state)
+			return
+		}
+		const applying =
+			mode === "off"
+				? this.stopDecoder(id)
+				: this.startDecoder(id, { startMode: "auto" })
+		const request = state.parentIntent
+		await applying
+		if (state.parentIntent === request) this.emitStatusChanged(state)
+	}
+
+	notifyVfoSettled(vfo: PlannerVfo | null): void {
+		this.settledVfo = vfo ? { ...vfo } : null
+		this.notifyBandplansChanged()
+	}
+
+	notifyBandplansChanged(): void {
+		if (!this.config.enablement || this.destroying) return
+		for (const source of this.sourceManager?.getAllStatus() ?? [])
+			this.enqueueSourceEvaluation(source.id, {
+				caps: this.sourceManager?.getCaps(source.id) ?? null,
+				adapt: false,
+			})
+	}
+
+	readsbRateFacts(sourceId: string): ReadsbRateFacts | null {
+		for (const state of this.decoders.values()) {
+			if (state.owner !== "config" || state.config.type !== "readsb") continue
+			if (this.selectedSourceId(state) !== sourceId) continue
+			return {
+				mode: this.modeFor(state).mode,
+				ownDevice:
+					state.decoder.getBandDeclaration?.().ownSource === true ||
+					state.decoder.caps.input === "external",
+			}
+		}
+		return null
+	}
+
+	/**
+	 * The efficiency gate governs built-in catalogue decoders only. A YAML
+	 * decoder's placements (origin "config", whatever mode an operator set) are
+	 * admitted without a gate verdict and never suspended by probation; their
+	 * declared cost still counts in the budget and the efficiency view.
+	 */
+	private gateExempt(state: DecoderState): boolean {
+		const enablement = this.config.enablement
+		if (!enablement || !state.placement) return false
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		return (
+			parent?.owner === "config" &&
+			!enablement.isCatalogue(parent.originalConfig ?? parent.config)
+		)
+	}
+
+	private gateExemptKey(key: string): boolean {
+		for (const state of this.decoders.values())
+			if (state.placement?.key === key) return this.gateExempt(state)
+		return false
+	}
+
+	private runningPlacements(): RunningPlacement[] {
+		return [...this.decoders.values()].flatMap(state =>
+			state.placement &&
+			(state.decoder.getStatus().running ||
+				state.processStartPending ||
+				(state.admission?.admit === true && state.desiredRunning))
+				? [
+						{
+							key: state.placement.key,
+							sourceId: state.placement.sourceId,
+							reach: state.placement.reach,
+							costCores: state.placement.costCores,
+							sampleRateHz: state.placement.sampleRateHz,
+							admittedAtMs: state.stopping
+								? performance.now() - EFFICIENCY_PROBATION_MS
+								: (state.admittedAtMs ?? performance.now()),
+						},
+					]
+				: [],
+		)
+	}
+
+	efficiencyView(): DecoderEfficiencyView {
+		const gate = this.config.enablement?.gate
+		if (!gate) return { budgetCores: 0, cpuGuardPercent: 90, sources: [] }
+		const mono = performance.now()
+		const epoch = Date.now()
+		const view = gate.view(
+			this.runningPlacements(),
+			[...this.decoders.values()].flatMap(state =>
+				state.placement && state.admission?.admit === false
+					? [{ placement: state.placement, decision: state.admission }]
+					: [],
+			),
+			performance.now(),
+		)
+		const configured = (decoderId: string) => {
+			const parent = this.decoders.get(decoderId)
+			return (
+				parent?.owner === "config" &&
+				!this.config.enablement!.isCatalogue(
+					parent.originalConfig ?? parent.config,
+				)
+			)
+		}
+		return {
+			...view,
+			sources: view.sources.map(source => ({
+				...source,
+				admitted: source.admitted.map(placement =>
+					configured(placement.decoderId)
+						? { ...placement, probation: false, detail: "configured" as const }
+						: placement,
+				),
+				blocked: source.blocked.map(placement => ({
+					...placement,
+					...(placement.retryAt
+						? {
+								retryAt: new Date(
+									epoch + Date.parse(placement.retryAt) - mono,
+								).toISOString(),
+							}
+						: {}),
+				})),
+			})),
+		}
+	}
+
+	private scheduleEfficiencyEvaluation(): void {
+		if (
+			this.efficiencyTimer ||
+			this.destroying ||
+			!this.config.enablement?.gate
+		)
+			return
+		if (
+			![...this.decoders.values()].some(
+				state =>
+					state.placement &&
+					(state.decoder.getStatus().running ||
+						(state.desiredRunning && state.admission?.admit === false)),
+			)
+		)
+			return
+		this.efficiencyTimer = setTimeout(() => {
+			this.efficiencyTimer = null
+			const work = this.capsWork.then(async () => {
+				if (this.destroying) return
+				await this.applyProbation()
+				if (
+					[...this.decoders.values()].some(
+						state =>
+							state.desiredRunning &&
+							state.admission?.admit === false &&
+							state.admission.retryAtMs <= performance.now(),
+					)
+				)
+					this.notifyBandplansChanged()
+				this.scheduleEfficiencyEvaluation()
+			})
+			this.capsWork = work.catch(error => {
+				this.log.warn(
+					{ err: safeErrorFields(error) },
+					"Efficiency sampling failed",
+				)
+			})
+		}, EFFICIENCY_SAMPLE_MS)
+		this.efficiencyTimer.unref()
+	}
+
+	/**
+	 * One probation pass at a time. A caller arriving during a pass marks it
+	 * dirty and shares its promise, which settles only after one follow-up pass
+	 * has read the evidence available at that call; any number of joins during
+	 * a pass coalesce into a single rerun.
+	 */
+	private applyProbation(): Promise<void> {
+		if (this.probationPass) {
+			this.probationRerun = true
+			return this.probationPass
+		}
+		this.probationPass = (async () => {
+			try {
+				do {
+					this.probationRerun = false
+					await this.applyProbationNow()
+				} while (this.probationRerun && !this.destroying)
+			} finally {
+				this.probationPass = undefined
+				this.probationRerun = false
+			}
+		})()
+		return this.probationPass
+	}
+
+	private async applyProbationNow(): Promise<void> {
+		const gate = this.config.enablement?.gate
+		if (!gate) return
+		const now = performance.now()
+		const running = this.runningPlacements()
+		// Admission, probation and retry bookkeeping share the monotonic clock.
+		// YAML placements are never on probation; their cost still counts for
+		// admission through runningPlacements().
+		const verdicts = gate.probation(
+			running.filter(item => !this.gateExemptKey(item.key)),
+			now,
+		)
+		const condemned = new Set(verdicts.map(verdict => verdict.key))
+		for (const state of this.decoders.values()) {
+			if (
+				state.decoder.getStatus().running &&
+				state.admittedAtMs !== undefined &&
+				!(state.placement && condemned.has(state.placement.key)) &&
+				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
+			)
+				delete state.efficiencyBackoffMs
+		}
+		// Each verdict belongs to the run the gate judged; a suspension awaited
+		// below may let another placement stop or restart, so its verdict is
+		// applied only while that same run is still live.
+		const judged = verdicts.flatMap(verdict => {
+			if (!running.some(item => item.key === verdict.key)) return []
+			const state = [...this.decoders.values()].find(
+				item => item.placement?.key === verdict.key,
+			)
+			return state
+				? [
+						{
+							verdict,
+							state,
+							admission: state.admission,
+							admittedAtMs: state.admittedAtMs,
+							run: state.lifecycle?.runGeneration,
+						},
+					]
+				: []
+		})
+		for (const { verdict, state, admission, admittedAtMs, run } of judged) {
+			if (
+				this.destroying ||
+				this.gateExempt(state) ||
+				this.decoders.get(state.config.id) !== state ||
+				state.placement?.key !== verdict.key ||
+				!state.decoder.getStatus().running ||
+				state.suspension !== null ||
+				state.admission !== admission ||
+				state.admittedAtMs !== admittedAtMs ||
+				state.lifecycle?.runGeneration !== run
+			)
+				continue
+			gate.noteSuspended(verdict.key, verdict.detail, now)
+			state.efficiencyBackoffMs = Math.min(
+				state.efficiencyBackoffMs === undefined
+					? EFFICIENCY_RETRY_MS
+					: state.efficiencyBackoffMs * 2,
+				EFFICIENCY_RETRY_MAX_MS,
+			)
+			state.admission = {
+				admit: false,
+				detail: verdict.detail,
+				retryAtMs: now + state.efficiencyBackoffMs,
+			}
+			delete state.admittedAtMs
+			await this.suspend(state, this.assessEligibility(state))
+		}
+		if (verdicts.length === 0 && now - this.lastEfficiencyWarningMs >= 60_000) {
+			const view = this.efficiencyView()
+			if (
+				view.sources.some(
+					source =>
+						!running.some(
+							placement =>
+								placement.sourceId === source.sourceId &&
+								now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
+						) &&
+						(source.drops === "dropping" ||
+							(source.cpu.percent !== null &&
+								source.cpu.percent > source.cpu.limit)),
+				)
+			) {
+				this.lastEfficiencyWarningMs = now
+				this.log.warn(
+					{ reasonCode: "efficiency-budget" },
+					"Decoder efficiency drops or CPU limit exceeded",
+				)
+			}
+		}
+	}
+
+	private placementViews(parent: DecoderState): DecoderPlacementView[] {
+		return [...this.decoders.values()].flatMap(state => {
+			const placement = state.placement
+			if (
+				!placement ||
+				(state !== parent && state.parentId !== parent.config.id)
+			)
+				return []
+			return [
+				{
+					sourceId: placement.sourceId,
+					...(placement.channelHz !== null
+						? { channelHz: placement.channelHz }
+						: {}),
+					reach: placement.reach,
+					origin: placement.origin,
+					primary: placement.primary,
+					running: state.decoder.getStatus().running,
+					costCores: placement.costCores,
+					...(state.suspension
+						? {
+								suspension: {
+									reasonCode: state.suspension
+										.reasonCode as DecoderSuspensionReasonCode,
+									since: state.suspension.since.toISOString(),
+								},
+							}
+						: {}),
+					...(state.admission?.admit === false
+						? { efficiencyDetail: state.admission.detail }
+						: {}),
+				},
+			]
+		})
+	}
+
+	private configuredChannels(
+		config: DecoderConfig,
+		centreHz: number | undefined,
+	): number[] {
+		const channels = config.options["channelsHz"]
+		if (Array.isArray(channels))
+			return channels.filter(
+				(hz): hz is number =>
+					typeof hz === "number" && Number.isFinite(hz) && hz > 0,
+			)
+		const channel = config.options["channelHz"]
+		if (typeof channel === "number" && Number.isFinite(channel) && channel > 0)
+			return [channel]
+		const offset = config.options["offsetHz"]
+		if (
+			typeof offset === "number" &&
+			Number.isFinite(offset) &&
+			centreHz !== undefined
+		) {
+			const hz = centreHz + offset
+			if (Number.isFinite(hz) && hz > 0) return [hz]
+		}
+		return resolveDecoderTargetFrequencies(config) ?? []
+	}
+
+	private logPlacement(
+		placement: WantedPlacement,
+		reasonCode: "started" | "moved" | "removed",
+	): void {
+		this.log.info(
+			{
+				decoderId: placement.decoderId,
+				sourceId: placement.sourceId,
+				placementKey: placement.key,
+				channelHz: placement.channelHz,
+				reasonCode,
+			},
+			"Decoder placement changed",
+		)
+	}
+
+	private plannerInput(): PlannerInput {
+		const enablement = this.config.enablement!
+		return {
+			decoders: [...this.decoders.values()]
+				.filter(state => state.owner === "config")
+				.map((state, order) => {
+					const config =
+						state.effectiveConfig ?? state.originalConfig ?? state.config
+					const catalogue = enablement.isCatalogue(config)
+					const sourceId = this.selectedSourceId(state)
+					const caps = sourceId
+						? this.sourceManager?.getCaps(sourceId)
+						: undefined
+					const request = state.decoder.getChannelRequest?.({
+						sampleRateHz: caps?.sampleRate ?? 2_400_000,
+						...(caps?.centerFreq !== undefined
+							? { centerHz: caps.centerFreq }
+							: {}),
+					})
+					const channel =
+						request && !("invalid" in request) ? request : undefined
+					const lora =
+						config.type === "lora-meshtastic"
+							? loraCentreReach(config.options, caps)
+							: null
+					const channelCapable = (
+						CHANNEL_CAPABLE_TYPES as readonly string[]
+					).includes(config.type)
+					return {
+						id: config.id,
+						type: config.type,
+						origin: catalogue ? ("catalogue" as const) : ("config" as const),
+						order,
+						mode: this.modeFor(state).mode,
+						startMode: state.startMode,
+						configuredSourceId: config.sourceId ?? null,
+						band: this.resolveBand(state).requirements,
+						followVfo:
+							![
+								"channelHz",
+								"channelsHz",
+								"offsetHz",
+								"frequency",
+								"frequencies",
+							].some(key => Object.hasOwn(config.options, key)) &&
+							config.frequencies === undefined,
+						configuredChannelsHz: this.configuredChannels(
+							config,
+							caps?.centerFreq,
+						),
+						reach:
+							state.decoder.reach?.() ??
+							(channelCapable || config.useChannelizer === true
+								? ("channel" as const)
+								: config.type === "lora-meshtastic"
+									? ("centre" as const)
+									: ("raw" as const)),
+						channelBandwidthHz: channel?.bandwidthHz ?? 12_500,
+						channelTransitionHz: channel?.transitionHz ?? 2_500,
+						protocols: Object.hasOwn(DECODER_PROTOCOLS, config.type)
+							? (DECODER_PROTOCOLS[
+									config.type as keyof typeof DECODER_PROTOCOLS
+								] ?? [])
+							: [],
+						channelPlacements: catalogue || config.useChannelizer === true,
+						unavailable: this.isUnavailable(state),
+						ownDevice:
+							state.decoder.getBandDeclaration?.().ownSource === true ||
+							state.decoder.caps.input === "external",
+						centreSlotHz:
+							config.type === "readsb"
+								? {
+										minHz: ADSB_FREQUENCY_HZ - READSB_REACH_HZ,
+										maxHz: ADSB_FREQUENCY_HZ + READSB_REACH_HZ,
+									}
+								: (lora?.slotHz ?? null),
+						centrePassbandHz: lora?.passbandHz ?? null,
+					}
+				}),
+			sources: (this.sourceManager?.getAllStatus() ?? []).map(
+				(source, order) => {
+					const caps = this.sourceManager?.getCaps(source.id)
+					const config = this.sourceManager?.getConfig?.(source.id)
+					const exclusive = this.sourceManager
+						?.getSourceAssignments?.(source.id)
+						.find(assignment => assignment.wantsExclusiveSource)
+					return {
+						id: source.id,
+						centreHz: caps?.centerFreq ?? null,
+						sampleRateHz: caps?.sampleRate ?? null,
+						usableFraction: USABLE_WINDOW_FRACTION,
+						dedicatedScanner: config?.scanner?.role === "dedicated",
+						held: this.isSourceHeld(source.id),
+						reservedBy: exclusive?.decoderId ?? null,
+						channelizerAvailable: this.channelizer !== null,
+						order,
+					}
+				},
+			),
+			vfo: this.settledVfo === undefined ? enablement.vfo() : this.settledVfo,
+			bandplanChannels: enablement.bandplanChannels,
+			maxBandplanChannels: enablement.maxBandplanChannels,
+		}
+	}
+
+	private async reconcilePlacements(): Promise<void> {
+		const enablement = this.config.enablement
+		if (!enablement || this.reconcilingPlacements || this.destroying) return
+		this.reconcilingPlacements = true
+		try {
+			await this.applyProbation()
+			const plan = enablement.planner(this.plannerInput())
+			const wanted = plan.wanted.filter(placement => {
+				const parent = this.decoders.get(placement.decoderId)
+				return parent?.owner === "config" && this.modeFor(parent).mode !== "off"
+			})
+			for (const worker of [...this.decoders.values()]) {
+				if (
+					worker.owner !== "placement" ||
+					wanted.some(placement => placement.key === worker.placement?.key) ||
+					(worker.placement !== undefined &&
+						this.isSourceHeld(worker.placement.sourceId))
+				)
+					continue
+				const moved = wanted.find(
+					placement =>
+						!placement.primary &&
+						placement.origin === "vfo" &&
+						worker.placement?.origin === "vfo" &&
+						placement.decoderId === worker.parentId &&
+						placement.sourceId === worker.placement.sourceId,
+				)
+				if (moved && worker.channel && worker.decoder.getStatus().running) {
+					const provider = worker.channel.provider as ChannelProvider & {
+						retuneChannel?: (
+							sourceId: string,
+							channelId: string,
+							centerHz: number,
+						) => Promise<"retuned" | "refused">
+					}
+					if (provider.retuneChannel && moved.channelHz !== null) {
+						let verdict: "retuned" | "refused" = "refused"
+						try {
+							verdict = await provider.retuneChannel(
+								moved.sourceId,
+								worker.channel.channelId,
+								moved.channelHz,
+							)
+						} catch (error) {
+							this.log.warn(
+								{ err: safeErrorFields(error) },
+								"Placement retune failed",
+							)
+						}
+						if (this.decoders.get(worker.config.id) !== worker) continue
+						if (verdict === "retuned") {
+							this.decoders.delete(worker.config.id)
+							this.sourceManager?.unassignDecoder(worker.config.id)
+							worker.config = { ...worker.config, id: moved.key }
+							this.decoders.set(moved.key, worker)
+							this.logPlacement(moved, "moved")
+							worker.placement = moved
+							this.reserveSource(worker)
+							worker.config.options = {
+								...worker.config.options,
+								channelHz: moved.channelHz,
+							}
+							worker.decoder.updateOptions({ channelHz: moved.channelHz })
+							continue
+						}
+					}
+				}
+				if (worker.placement) this.logPlacement(worker.placement, "removed")
+				await this.removeDecoder(worker.config.id)
+			}
+			for (const parent of [...this.decoders.values()]) {
+				if (parent.owner !== "config") continue
+				const parentIntent = parent.parentIntent
+				const primary = wanted.find(
+					placement =>
+						placement.decoderId === parent.config.id && placement.primary,
+				)
+				const reason = plan.unplaced.get(parent.config.id)
+				if (reason !== undefined) parent.unplaced = reason
+				else delete parent.unplaced
+				if (
+					!primary &&
+					parent.placement &&
+					!this.isSourceHeld(parent.placement.sourceId)
+				) {
+					if (parent.decoder.getStatus().running || parent.lifecycle?.pending) {
+						await this.stopPlacement(parent)
+						if (parent.parentIntent !== parentIntent) continue
+						if (parent.decoder.getStatus().running || parent.lifecycle?.pending)
+							continue
+					}
+					enablement.gate?.forget(parent.placement.key)
+					this.logPlacement(parent.placement, "removed")
+					delete parent.efficiencyBackoffMs
+					delete parent.admission
+					delete parent.admittedAtMs
+					delete parent.placement
+					delete parent.lifecycle
+					if (parent.desiredRunning) {
+						const eligibility = this.assessEligibility(parent)
+						if (eligibility.blockedBy) await this.suspend(parent, eligibility)
+					}
+				}
+			}
+			for (const placement of wanted) {
+				const parent = this.decoders.get(placement.decoderId)
+				if (!parent || this.modeFor(parent).mode === "off") continue
+				const parentIntent = parent.parentIntent
+				let state = placement.primary
+					? parent
+					: [...this.decoders.values()].find(
+							worker =>
+								worker.parentId === placement.decoderId &&
+								worker.placement?.key === placement.key,
+						)
+				if (!state) {
+					if (!parent.desiredRunning) continue
+					const config =
+						parent.effectiveConfig ?? parent.originalConfig ?? parent.config
+					this.registerDecoder(
+						{
+							...config,
+							id: placement.key,
+							sourceId: placement.sourceId,
+							useChannelizer: placement.reach === "channel",
+							options: {
+								...config.options,
+								...(placement.channelHz !== null
+									? { channelHz: placement.channelHz }
+									: {}),
+							},
+						},
+						null,
+						parent.config.id,
+					)
+					state = this.decoders.get(placement.key)!
+					state.desiredRunning = parent.desiredRunning
+					state.intentionallyStopped = parent.intentionallyStopped
+				}
+				const rawOffsetHz =
+					placement.reach === "raw" && placement.channelHz !== null
+						? placement.channelHz -
+							(this.sourceManager?.getCaps(placement.sourceId)?.centerFreq ??
+								placement.channelHz)
+						: undefined
+				let moved =
+					state.placement !== undefined &&
+					(state.placement.key !== placement.key ||
+						(rawOffsetHz !== undefined &&
+							state.config.options["offsetHz"] !== rawOffsetHz))
+				if (
+					moved &&
+					this.gateExempt(state) &&
+					state.placement?.origin === "vfo" &&
+					placement.origin === "vfo" &&
+					state.channel &&
+					state.decoder.getStatus().running &&
+					placement.channelHz !== null &&
+					state.placement.sourceId === placement.sourceId
+				) {
+					const provider = state.channel.provider as ChannelProvider & {
+						retuneChannel?: (
+							sourceId: string,
+							channelId: string,
+							centerHz: number,
+						) => Promise<"retuned" | "refused">
+					}
+					try {
+						if (
+							(await provider.retuneChannel?.(
+								placement.sourceId,
+								state.channel.channelId,
+								placement.channelHz,
+							)) === "retuned"
+						) {
+							if (parent.parentIntent !== parentIntent || this.destroying)
+								continue
+							this.logPlacement(placement, "moved")
+							state.placement = placement
+							moved = false
+						}
+					} catch (error) {
+						this.log.warn(
+							{ err: safeErrorFields(error) },
+							"Placement retune failed",
+						)
+					}
+				}
+				const wasWanted = state.desiredRunning
+				if (moved && state.placement) {
+					enablement.gate?.forget(state.placement.key)
+					delete state.efficiencyBackoffMs
+					delete state.admission
+					delete state.admittedAtMs
+				}
+				if (moved && state.decoder.getStatus().running) {
+					state.intentionallyStopped = true
+					await this.stopPlacement(state)
+					if (parent.parentIntent !== parentIntent) continue
+					this.unwireDecoderFromFanout(state)
+					state.intentionallyStopped = false
+				}
+				if (state.owner === "config" && !state.originalConfig)
+					state.originalConfig = state.config
+				const original =
+					state.effectiveConfig ?? state.originalConfig ?? state.config
+				state.config = {
+					...original,
+					id: state.config.id,
+					sourceId: placement.sourceId,
+					useChannelizer: placement.reach === "channel",
+					options: {
+						...original.options,
+						...(placement.channelHz !== null
+							? {
+									channelHz: placement.channelHz,
+									...(rawOffsetHz !== undefined
+										? { offsetHz: rawOffsetHz }
+										: {}),
+								}
+							: {}),
+					},
+				}
+				state.decoder.updateOptions(state.config.options)
+				if (!state.placement || moved)
+					this.logPlacement(placement, moved ? "moved" : "started")
+				state.placement = placement
+				delete state.unplaced
+				if (
+					!state.decoder.getStatus().running &&
+					parent.desiredRunning &&
+					!parent.intentionallyStopped
+				) {
+					this.clearExpiredAdmission(state)
+					if (
+						(state.owner === "placement" && (!wasWanted || !state.lifecycle)) ||
+						moved
+					)
+						await this.startDecoderNow(
+							state.config.id,
+							{ startMode: parent.startMode },
+							() =>
+								parent.parentIntent === parentIntent && parent.desiredRunning,
+						)
+				}
+			}
+		} finally {
+			this.reconcilingPlacements = false
+			this.scheduleEfficiencyEvaluation()
+		}
+	}
 
 	private onChannelsInvalidated(
 		provider: ChannelProvider,
@@ -480,7 +1379,7 @@ export class DecoderManager extends EventEmitter {
 				!channelIds.includes(ref.channelId)
 			)
 				continue
-			if (state.owner === "config") affected = true
+			if (state.owner !== "scanner") affected = true
 			this.claimChannel(state, ref, false)
 			claimed.push({ state, ref })
 		}
@@ -524,7 +1423,7 @@ export class DecoderManager extends EventEmitter {
 			if (!ref || ref.provider === provider) continue
 			this.claimChannel(state, ref, true)
 			replaced.push({ state, ref })
-			if (state.owner === "config") sources.add(ref.sourceId)
+			if (state.owner !== "scanner") sources.add(ref.sourceId)
 		}
 		if (this.channelInvalidatedHandler)
 			this.channelizer?.off(
@@ -550,6 +1449,7 @@ export class DecoderManager extends EventEmitter {
 		for (const { state, ref } of replaced) this.finishChannelDrop(state, ref)
 		for (const sourceId of sources) this.recheckStaleChannel(sourceId)
 		if (!this.channelizer) this.clearChannelRetries()
+		this.notifyBandplansChanged()
 	}
 
 	/**
@@ -623,6 +1523,7 @@ export class DecoderManager extends EventEmitter {
 	private registerDecoder(
 		config: DecoderConfig,
 		probe: { jobId: string; input: Readable | null } | null,
+		parentId?: string,
 	): Decoder {
 		if (this.decoders.has(config.id)) {
 			this.log.warn(
@@ -641,7 +1542,12 @@ export class DecoderManager extends EventEmitter {
 			"Creating decoder",
 		)
 
-		const decoder = this.registry.create(config, this.log)
+		const decoder = this.registry.create(
+			this.config.enablement && !probe
+				? { ...config, options: { ...config.options } }
+				: config,
+			this.log,
+		)
 		const declared = decoder.getRateRequirements?.()
 		if (declared !== undefined) {
 			try {
@@ -693,7 +1599,8 @@ export class DecoderManager extends EventEmitter {
 			channelStale: false,
 			keepFailureAccounting: false,
 			startMode: "auto",
-			owner: probe ? "scanner" : "config",
+			owner: parentId ? "placement" : probe ? "scanner" : "config",
+			...(parentId ? { parentId } : {}),
 			scannerJobId: probe?.jobId ?? null,
 			input: probe?.input ?? null,
 			inputAttached: false,
@@ -703,8 +1610,9 @@ export class DecoderManager extends EventEmitter {
 
 		this.decoders.set(config.id, state)
 		this.setupDecoderEventHandlers(state)
+		this.installParentLog(state)
 		this.refreshRatePlan(state)
-		this.emit("decoder:created", config.id)
+		if (!parentId) this.emit("decoder:created", config.id)
 
 		return decoder
 	}
@@ -957,7 +1865,7 @@ export class DecoderManager extends EventEmitter {
 
 	/** The hold reason that applies to a configured stdin decoder, if any. */
 	private heldReason(state: DecoderState): "tuner-scanning" | null {
-		if (state.owner !== "config" || state.decoder.caps.input === "external")
+		if (state.owner === "scanner" || state.decoder.caps.input === "external")
 			return null
 		const sourceId = this.selectedSourceId(state)
 		return sourceId !== undefined && this.isSourceHeld(sourceId)
@@ -973,6 +1881,121 @@ export class DecoderManager extends EventEmitter {
 		)
 	}
 
+	private usesPlacementPlanning(state: DecoderState | undefined): boolean {
+		return (
+			this.config.enablement !== undefined &&
+			state !== undefined &&
+			state.owner === "config" &&
+			state.decoder.caps.input !== "external" &&
+			state.decoder.getBandDeclaration?.().ownSource !== true
+		)
+	}
+
+	/** Public parent intent is recorded before any asynchronous placement work. */
+	private parentRequest(
+		state: DecoderState,
+		running: boolean,
+		work: (current: () => boolean) => Promise<void>,
+		restart = false,
+	): Promise<void> {
+		const previous = state.parentIntent
+		let supersede!: () => void
+		const superseded = new Promise<void>(resolve => {
+			supersede = resolve
+		})
+		const request = { generation: (previous?.generation ?? 0) + 1, supersede }
+		state.parentIntent = request
+		previous?.supersede()
+		state.desiredRunning = running
+		state.intentionallyStopped = !running
+		state.stopRevision++
+		state.rateGeneration++
+		const current = () => state.parentIntent === request
+		for (const placement of this.decoders.values()) {
+			if (placement !== state && placement.parentId !== state.config.id)
+				continue
+			placement.desiredRunning = running
+			placement.intentionallyStopped = !running
+			this.cancelScheduledRestart(placement)
+			if (!running) {
+				placement.startMode = "auto"
+				this.clearChannelRetry(this.selectedSourceId(placement), true)
+			}
+			if (placement.placement)
+				placement.lifecycle?.record(
+					running ? "running" : "stopped",
+					request.generation,
+				)
+			if (running && !restart && placement.lifecycle) placement.lifecycle.kick()
+		}
+		const placements = () =>
+			[...this.decoders.values()].filter(
+				candidate =>
+					candidate === state || candidate.parentId === state.config.id,
+			)
+		const failure = (candidate: DecoderState) => {
+			const error = new DecoderPlacementStartError()
+			candidate.lastError = createDecoderLastError(error, "error")
+			this.updateDecoderHealth(candidate, "faulted")
+			this.emitStatusChanged(candidate)
+			if (candidate !== state) {
+				state.lastError = createDecoderLastError(error, "error")
+				this.emitStatusChanged(state)
+			}
+			return error
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const deadline = new Promise<void>((_resolve, reject) => {
+			if (!running) return
+			timer = setTimeout(() => {
+				if (!current()) return
+				const pending = placements().filter(
+					candidate => candidate.lifecycle?.pending,
+				)
+				for (const candidate of pending) failure(candidate)
+				reject(new DecoderPlacementStartError())
+			}, PLACEMENT_STOP_TIMEOUT_MS)
+		})
+		const operation = (async () => {
+			await work(current)
+			if (!running || !current()) return
+			for (;;) {
+				const snapshot = placements()
+				await Promise.all(
+					snapshot.flatMap(candidate =>
+						candidate.lifecycle ? [candidate.lifecycle.settled()] : [],
+					),
+				)
+				if (!current()) return
+				if (
+					placements().some(
+						candidate =>
+							!snapshot.includes(candidate) || candidate.lifecycle?.pending,
+					)
+				)
+					continue
+				const failed = snapshot.find(
+					candidate =>
+						candidate.lifecycle?.error ||
+						(candidate.lifecycle?.desired === "running" &&
+							!candidate.decoder.getStatus().running &&
+							!candidate.suspension &&
+							!candidate.unplaced),
+				)
+				if (failed) throw failure(failed)
+				return
+			}
+		})().catch((error: unknown) => {
+			if (!current()) return
+			const failed = placements().find(candidate => candidate.lifecycle?.error)
+			if (running && failed) throw failure(failed)
+			throw error
+		})
+		return Promise.race([operation, superseded, deadline]).finally(() =>
+			clearTimeout(timer),
+		)
+	}
+
 	/**
 	 * Starts a decoder by ID.
 	 * Wires the decoder to a fanout branch for audio input.
@@ -982,17 +2005,87 @@ export class DecoderManager extends EventEmitter {
 	 *   (internal restarts), "operator" ignores the band check
 	 * @throws Error if decoder not found
 	 */
-	async startDecoder(id: string, intent?: DecoderStartIntent): Promise<void> {
+	startDecoder(id: string, intent?: DecoderStartIntent): Promise<void> {
+		const parent = this.decoders.get(id)
+		if (parent && this.usesPlacementPlanning(parent))
+			return this.parentRequest(
+				parent,
+				this.modeFor(parent).mode !== "off",
+				current => this.startDecoderNow(id, intent, current),
+			)
+
+		if (
+			this.decoders.get(id)?.lifecycle ||
+			!this.config.enablement ||
+			this.reconcilingPlacements ||
+			this.applyingCaps
+		)
+			return this.startDecoderNow(id, intent)
+		const state = this.decoders.get(id)
+		const stopRevision = state?.stopRevision
+		const work = this.capsWork.then(() => {
+			if (
+				state &&
+				(this.decoders.get(id) !== state || state.stopRevision !== stopRevision)
+			)
+				return
+			return this.startDecoderNow(id, intent)
+		})
+		this.capsWork = work.catch(error => {
+			this.log.warn({ err: safeErrorFields(error) }, "Decoder start failed")
+		})
+		return work
+	}
+
+	private async startDecoderNow(
+		id: string,
+		intent?: DecoderStartIntent,
+		current: () => boolean = () => true,
+	): Promise<void> {
 		const state = this.decoders.get(id)
 		if (!state) {
 			throw new Error(`Decoder not found: ${id}`)
+		}
+
+		const stopRevision = state.stopRevision
+		if (this.config.enablement && state.owner === "config") {
+			if (this.modeFor(state).mode === "off") return
+			if (intent?.startMode === "operator" && this.isUnavailable(state)) {
+				try {
+					const available = await this.config.enablement.recheckAvailable(id)
+					if (!current()) return
+					state.available = available
+				} catch (error) {
+					if (!current()) return
+					state.available = false
+					this.log.warn(
+						{ err: safeErrorFields(error) },
+						"Decoder availability check failed",
+					)
+				}
+			}
+			if (!current()) return
+			if (intent) state.startMode = intent.startMode
+			if (
+				this.decoders.get(id) !== state ||
+				state.stopRevision !== stopRevision ||
+				!current()
+			)
+				return
+			if (!this.reconcilingPlacements) await this.reconcilePlacements()
+			if (
+				this.decoders.get(id) !== state ||
+				state.stopRevision !== stopRevision ||
+				!current()
+			)
+				return
 		}
 
 		// Consumed by this start whatever happens next.
 		const keepFailureAccounting = state.keepFailureAccounting
 		state.keepFailureAccounting = false
 
-		if (state.decoder.getStatus().running) {
+		if (state.decoder.getStatus().running && !state.lifecycle) {
 			this.log.warn({ decoderId: id }, "Decoder already running")
 			return
 		}
@@ -1024,8 +2117,10 @@ export class DecoderManager extends EventEmitter {
 		// Intent is recorded separately from eligibility: an unusable source
 		// rate, or a band covering none of its targets, suspends the instance
 		// instead of spawning a pipeline that cannot decode.
-		if (state.decoder.caps.input !== "external") {
+		if (state.decoder.caps.input !== "external" || this.config.enablement) {
 			const sourceId = this.selectedSourceId(state)
+			this.clearExpiredAdmission(state)
+			this.scheduleEfficiencyEvaluation()
 			const eligibility = this.assessEligibility(
 				state,
 				(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined) ?? null,
@@ -1047,11 +2142,18 @@ export class DecoderManager extends EventEmitter {
 					this.emitStatusChanged(state)
 					throw err
 				}
-				this.log.info(
-					{ decoderId: id, reasonCode: state.suspension.reasonCode },
-					"Start recorded; decoder suspended (see reasonCode)",
-				)
+				if (!this.config.enablement)
+					this.log.info(
+						{ decoderId: id, reasonCode: state.suspension.reasonCode },
+						"Start recorded; decoder suspended (see reasonCode)",
+					)
 				this.emitStatusChanged(state)
+				if (
+					this.config.enablement &&
+					state.owner === "config" &&
+					!this.reconcilingPlacements
+				)
+					await this.reconcilePlacements()
 				return
 			}
 		}
@@ -1059,19 +2161,28 @@ export class DecoderManager extends EventEmitter {
 		state.transition = null
 
 		try {
-			const outcome = await this.wireDecoderToFanout(state)
+			const outcome = await this.startPlacement(state, current)
+			if (!current()) return
 			if (!outcome.wired) {
 				if (!outcome.superseded) this.holdForChannel(state, outcome)
 				return
 			}
-			await state.decoder.start()
 		} catch (err) {
+			if (!current()) return
 			state.lastError = createDecoderLastError(err, "error")
+			if (state.admission?.admit) delete state.admission
+			delete state.admittedAtMs
 			this.unwireDecoderFromFanout(state)
 			this.updateDecoderHealth(state, "faulted")
 			throw err
 		}
 		this.recheckStaleChannel(this.selectedSourceId(state), state)
+		if (
+			this.config.enablement &&
+			state.owner === "config" &&
+			!this.reconcilingPlacements
+		)
+			await this.reconcilePlacements()
 	}
 
 	/**
@@ -1081,7 +2192,37 @@ export class DecoderManager extends EventEmitter {
 	 * @param id - The decoder ID to stop
 	 * @throws Error if decoder not found
 	 */
-	async stopDecoder(id: string): Promise<void> {
+	stopDecoder(id: string): Promise<void> {
+		const state = this.decoders.get(id)
+		if (state && this.usesPlacementPlanning(state))
+			return this.parentRequest(state, false, async current => {
+				const placements = [...this.decoders.values()].filter(
+					candidate => candidate === state || candidate.parentId === id,
+				)
+				const results = await Promise.allSettled(
+					placements.map(candidate => this.stopPlacement(candidate)),
+				)
+				if (!current()) return
+				for (const worker of placements) {
+					if (worker === state) continue
+					if (worker.decoder.getStatus().running || worker.lifecycle?.pending) {
+						worker.removalPending = true
+						continue
+					}
+					this.finalizeRemoval(worker)
+				}
+				state.suspension = null
+				state.transition = null
+				this.cancelScheduledRestart(state)
+				this.unwireDecoderFromFanout(state)
+				this.emitStatusChanged(state)
+				for (const result of results)
+					if (result.status === "rejected") throw result.reason
+			})
+		return this.stopDecoderNow(id)
+	}
+
+	private async stopDecoderNow(id: string): Promise<void> {
 		const state = this.decoders.get(id)
 		if (!state) {
 			throw new Error(`Decoder not found: ${id}`)
@@ -1093,9 +2234,25 @@ export class DecoderManager extends EventEmitter {
 		state.intentionallyStopped = true
 		state.stopRevision++
 		state.desiredRunning = false
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		state.startMode = "auto"
 		state.rateGeneration++
 		const stopGeneration = state.rateGeneration
+		let stopError: unknown = null
+		for (const worker of [...this.decoders.values()]) {
+			if (worker.parentId !== id) continue
+			try {
+				await this.removeDecoder(worker.config.id)
+			} catch (error: unknown) {
+				stopError ??= error
+				this.log.warn(
+					{ decoderId: id, err: safeErrorFields(error) },
+					"Placement worker stop failed",
+				)
+			}
+		}
+
 		state.suspension = null
 		state.transition = null
 		this.clearChannelRetry(this.selectedSourceId(state), true)
@@ -1112,7 +2269,9 @@ export class DecoderManager extends EventEmitter {
 
 		// Stop the decoder process
 		try {
-			await state.decoder.stop()
+			await this.stopPlacement(state)
+		} catch (error) {
+			stopError ??= error
 		} finally {
 			if (
 				state.owner !== "scanner" ||
@@ -1123,6 +2282,7 @@ export class DecoderManager extends EventEmitter {
 				this.emitStatusChanged(state)
 			}
 		}
+		if (stopError !== null) throw stopError
 	}
 
 	/**
@@ -1140,6 +2300,37 @@ export class DecoderManager extends EventEmitter {
 			throw new Error(`Decoder not found: ${id}`)
 		}
 		if (opts.refuseIfHeld === true) this.assertNotHeld(state)
+		if (this.usesPlacementPlanning(state) && this.modeFor(state).mode === "off")
+			return this.stopDecoder(id)
+		if (this.usesPlacementPlanning(state))
+			return this.parentRequest(
+				state,
+				true,
+				async current => {
+					const placements = [...this.decoders.values()].filter(
+						candidate => candidate === state || candidate.parentId === id,
+					)
+					await Promise.all(
+						placements.map(candidate => this.stopPlacement(candidate, true)),
+					)
+					if (!current()) return
+					for (const worker of placements) {
+						if (worker === state) continue
+						if (worker.decoder.getStatus().running || worker.lifecycle?.pending)
+							throw new WaveKitError(
+								"Placement worker is still running",
+								"DECODER_STOP_PENDING",
+							)
+						this.finalizeRemoval(worker)
+					}
+					await this.startDecoderNow(
+						id,
+						{ startMode: state.startMode },
+						current,
+					)
+				},
+				true,
+			)
 
 		this.log.info({ decoderId: id }, "Restarting decoder")
 
@@ -1168,11 +2359,38 @@ export class DecoderManager extends EventEmitter {
 		this.log.info("Starting all enabled decoders")
 
 		const startPromises: Promise<void>[] = []
+		const states = new Map(this.decoders)
+		const enablement = this.config.enablement
+		const order = enablement
+			? [
+					...new Set([
+						...enablement
+							.planner(this.plannerInput())
+							.wanted.map(placement => placement.decoderId),
+						...states.keys(),
+					]),
+				]
+			: [...states.keys()]
 
-		for (const [id, state] of this.decoders) {
+		for (const id of order) {
+			const state = states.get(id)
+			if (!state) continue
 			// Probes are started and owned by the scanner's probe pool (spec § 6.5).
-			if (state.owner === "scanner") continue
-			if (state.config.enabled) {
+			if (state.owner !== "config") continue
+			if (
+				this.config.enablement
+					? this.modeFor(state).mode !== "off"
+					: state.config.enabled
+			) {
+				if (this.config.enablement) {
+					await this.startDecoder(id, { startMode: "auto" }).catch(error => {
+						this.log.error(
+							{ err: safeErrorFields(error), decoderId: id },
+							"Failed to start decoder",
+						)
+					})
+					continue
+				}
 				startPromises.push(
 					this.startDecoder(id, { startMode: "auto" }).catch(err => {
 						this.log.error(
@@ -1263,13 +2481,18 @@ export class DecoderManager extends EventEmitter {
 	private rebuildIfPending(
 		state: DecoderState,
 		keepFailureAccounting = false,
+		actorStarting = false,
 	): boolean {
 		if (state.owner !== "config" || !state.stagedOptions) return false
 		if (!this.stagedDiffers(state)) {
 			state.stagedOptions = null
 			return false
 		}
-		if (state.decoder.getStatus().running) return false
+		if (
+			state.decoder.getStatus().running ||
+			(state.lifecycle?.pending && !actorStarting)
+		)
+			return false
 		const id = state.config.id
 		const options: Record<string, unknown> = { ...(state.config.options ?? {}) }
 		for (const [key, value] of Object.entries(state.stagedOptions)) {
@@ -1325,13 +2548,23 @@ export class DecoderManager extends EventEmitter {
 		// already detached; stop() is a no-op on an exited process. Not awaited:
 		// the swap commits synchronously so no stop, remove, start or staging can
 		// interleave with it.
-		void retired.stop().catch((err: unknown) => {
-			this.log.warn(
-				{ decoderId: id, err: safeErrorFields(err) },
-				"Retired decoder cleanup failed",
-			)
-		})
+		if (!state.lifecycle)
+			void retired.stop().catch((err: unknown) => {
+				this.log.warn(
+					{ decoderId: id, err: safeErrorFields(err) },
+					"Retired decoder cleanup failed",
+				)
+			})
 		state.config = config
+		if (this.config.enablement) {
+			const effective = state.effectiveConfig ?? state.originalConfig ?? config
+			const effectiveOptions = { ...effective.options }
+			for (const [key, value] of Object.entries(state.stagedOptions)) {
+				if (value === null) delete effectiveOptions[key]
+				else effectiveOptions[key] = structuredClone(value)
+			}
+			state.effectiveConfig = { ...effective, options: effectiveOptions }
+		}
 		state.stagedOptions = null
 		// Counters and derived views as on a fresh create.
 		state.versionValidation = this.config.validateVersions
@@ -1349,6 +2582,7 @@ export class DecoderManager extends EventEmitter {
 		state.lastStartedAt = null
 		this.updateDecoderHealth(state, "running")
 		this.setupDecoderEventHandlers(state)
+		this.installParentLog(state)
 		this.refreshRatePlan(state)
 		this.emit("decoder:created", id)
 		return true
@@ -1387,7 +2621,9 @@ export class DecoderManager extends EventEmitter {
 	 * @returns Array of all decoder instances
 	 */
 	getAllDecoders(): Decoder[] {
-		return Array.from(this.decoders.values()).map(state => state.decoder)
+		return Array.from(this.decoders.values())
+			.filter(state => state.owner !== "placement")
+			.map(state => state.decoder)
 	}
 
 	/**
@@ -1397,7 +2633,8 @@ export class DecoderManager extends EventEmitter {
 	getConfiguredDecoderConfigs(): readonly DecoderConfig[] {
 		const configs: DecoderConfig[] = []
 		for (const state of this.decoders.values())
-			if (state.owner === "config") configs.push(state.config)
+			if (state.owner === "config")
+				configs.push(state.originalConfig ?? state.config)
 		return configs
 	}
 
@@ -1410,6 +2647,21 @@ export class DecoderManager extends EventEmitter {
 	getStatus(id: string): DecoderStatus | undefined {
 		const state = this.decoders.get(id)
 		if (!state) return undefined
+		const suspension =
+			this.config.enablement && !state.placement && state.suspension
+				? {
+						...state.suspension,
+						reasonCode:
+							this.heldReason(state) ??
+							(state.ratePlan?.verdict === "unusable"
+								? (state.ratePlan.reasonCode ?? "unsupported-sample-rate")
+								: this.isUnavailable(state)
+									? "decoder-unavailable"
+									: state.suspension.reasonCode === "channelizer-unavailable"
+										? "channelizer-unavailable"
+										: (state.unplaced ?? state.suspension.reasonCode)),
+					}
+				: state.suspension
 		return {
 			...state.decoder.getStatus(),
 			health: state.lastHealth,
@@ -1422,10 +2674,41 @@ export class DecoderManager extends EventEmitter {
 			...(state.nextRestartAt ? { nextRestartAt: state.nextRestartAt } : {}),
 			desiredRunning: state.desiredRunning,
 			suspended: state.suspension !== null,
-			...publicSuspension(state.suspension),
+			...(this.config.enablement && suspension
+				? {
+						suspension: {
+							reasonCode: suspension.reasonCode as DecoderSuspensionReasonCode,
+							since: suspension.since,
+						},
+					}
+				: publicSuspension(state.suspension)),
 			...(state.transition ? { transition: state.transition } : {}),
 			...(state.desiredRunning ? { startMode: state.startMode } : {}),
 			owner: state.owner,
+			...(this.config.enablement && state.owner === "config"
+				? {
+						mode: this.modeFor(state).mode,
+						modeSource: this.modeFor(state).source,
+						origin: this.config.enablement.isCatalogue(
+							state.originalConfig ?? state.config,
+						)
+							? ("catalogue" as const)
+							: ("config" as const),
+						placements: this.placementViews(state),
+						...(state.admission?.admit === false
+							? {
+									efficiency: {
+										detail: state.admission.detail,
+										retryAt: new Date(
+											Date.now() +
+												state.admission.retryAtMs -
+												performance.now(),
+										).toISOString(),
+									},
+								}
+							: {}),
+					}
+				: {}),
 			...(state.scannerJobId !== null
 				? { scannerJobId: state.scannerJobId }
 				: {}),
@@ -1437,6 +2720,50 @@ export class DecoderManager extends EventEmitter {
 				lastError: state.lastError,
 				idleTimeoutMs: this.config.idleTimeout,
 			}),
+			...this.placementTargetFields(state),
+		}
+	}
+
+	private placementTargetFields(
+		parent: DecoderState,
+	): Pick<DecoderStatus, "targetFrequenciesHz"> {
+		const states = [...this.decoders.values()].filter(
+			state => state === parent || state.parentId === parent.config.id,
+		)
+		if (!states.some(state => state.placement)) return {}
+		const targets = states.flatMap(state => {
+			const placement = state.placement
+			if (!placement) return []
+			if (placement.channelHz !== null) return [placement.channelHz]
+			if (placement.reach === "centre") {
+				const centre = this.sourceManager?.getCaps(
+					placement.sourceId,
+				)?.centerFreq
+				return typeof centre === "number" &&
+					Number.isFinite(centre) &&
+					centre > 0
+					? [centre]
+					: []
+			}
+			if (VFO_CHANNEL_TYPES.includes(state.config.type)) {
+				const centre = this.sourceManager?.getCaps(
+					placement.sourceId,
+				)?.centerFreq
+				const offset = state.config.options["offsetHz"] ?? 0
+				if (
+					typeof centre === "number" &&
+					typeof offset === "number" &&
+					Number.isFinite(centre + offset) &&
+					centre + offset > 0
+				)
+					return [centre + offset]
+				return []
+			}
+			// Raw wideband adapters keep their declared-frequency semantics.
+			return resolveDecoderTargetFrequencies(state.config) ?? []
+		})
+		return {
+			targetFrequenciesHz: targets.length ? [...new Set(targets)] : undefined,
 		}
 	}
 
@@ -1474,7 +2801,7 @@ export class DecoderManager extends EventEmitter {
 	 * @returns Array of DecoderStatus for all decoders
 	 */
 	getAllStatus(): DecoderStatus[] {
-		return Array.from(this.decoders.keys()).map(id => this.getStatus(id)!)
+		return this.getAllDecoders().map(decoder => this.getStatus(decoder.id)!)
 	}
 
 	/**
@@ -1490,18 +2817,59 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		this.log.info({ decoderId: id }, "Removing decoder")
-
-		// Also cancel pending restarts when the process has already exited.
-		// A probe is removed even when its stop fails: the probe pool cannot
-		// retry a removal that would fail the same way (spec § 6.5).
+		if (state.owner === "placement" || state.lifecycle)
+			state.removalPending = true
 		let stopFailed = false
 		let stopError: unknown
 		try {
 			await this.stopDecoder(id)
+			if (state.lifecycle?.pending && state.lifecycle.actual === "starting")
+				await state.lifecycle.request("stopped")
 		} catch (err) {
-			if (state.owner !== "scanner") throw err
+			if (
+				state.owner !== "scanner" &&
+				state.owner !== "placement" &&
+				!state.lifecycle
+			)
+				throw err
 			stopFailed = true
 			stopError = err
+		}
+		if (
+			(state.owner === "placement" || state.lifecycle) &&
+			(state.decoder.getStatus().running ||
+				state.lifecycle?.pending ||
+				state.stopping)
+		)
+			throw (
+				stopError ??
+				new WaveKitError(
+					"Placement worker is still running",
+					"DECODER_STOP_PENDING",
+				)
+			)
+		this.finalizeRemoval(state)
+		if (stopFailed) throw stopError
+	}
+
+	private finalizeRemoval(state: DecoderState): void {
+		const id = state.config.id
+		if (this.decoders.get(id) !== state) return
+		delete state.stopping
+		delete state.removalPending
+
+		if (state.placement)
+			this.config.enablement?.gate?.forget(state.placement.key)
+		if (state.parentId) {
+			const parent = this.decoders.get(state.parentId)
+			if (parent)
+				parent.workerLog = [
+					...(parent.workerLog ?? []),
+					...(state.decoder.getLog?.(200) ?? []).map(entry => ({
+						...entry,
+						line: `[${state.placement?.channelHz}] ${entry.line}`,
+					})),
+				].slice(-200)
 		}
 
 		// Remove event listeners
@@ -1510,9 +2878,8 @@ export class DecoderManager extends EventEmitter {
 		// Remove from map
 		if (this.decoders.get(id) === state) {
 			this.decoders.delete(id)
-			this.emit("decoder:removed", id)
+			if (state.owner !== "placement") this.emit("decoder:removed", id)
 		}
-		if (stopFailed) throw stopError
 	}
 
 	/**
@@ -1520,6 +2887,8 @@ export class DecoderManager extends EventEmitter {
 	 */
 	async destroy(): Promise<void> {
 		this.destroying = true
+		if (this.efficiencyTimer) clearTimeout(this.efficiencyTimer)
+		this.efficiencyTimer = null
 		for (const state of this.pendingScannerChannels.keys())
 			this.cancelScannerChannelAttempt(state)
 		this.log.info("Destroying DecoderManager")
@@ -1554,6 +2923,25 @@ export class DecoderManager extends EventEmitter {
 		if (this.ownsSourceRouting) this.sourceRouting?.destroy()
 	}
 
+	private installParentLog(state: DecoderState): void {
+		if (this.config.enablement && state.owner === "config") {
+			const decoder = state.decoder
+			const ownLog = decoder.getLog?.bind(decoder)
+			decoder.getLog = (lines = 200) => {
+				const entries = [...(ownLog?.(lines) ?? []), ...(state.workerLog ?? [])]
+				for (const worker of this.decoders.values()) {
+					if (worker.parentId !== state.config.id) continue
+					for (const entry of worker.decoder.getLog?.(lines) ?? [])
+						entries.push({
+							...entry,
+							line: `[${worker.placement?.channelHz}] ${entry.line}`,
+						})
+				}
+				return entries.slice(-lines)
+			}
+		}
+	}
+
 	/**
 	 * Sets up event handlers for a decoder to forward events and handle auto-restart.
 	 * All handlers are wrapped in try-catch to ensure failure isolation (Requirement 10.1).
@@ -1568,14 +2956,26 @@ export class DecoderManager extends EventEmitter {
 		// Forward output events (Requirement 4.4, 4.6)
 		// Also track last output time for health checks (Requirement 20.1, 20.2)
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
-		decoder.on("output", (output: DecoderOutput) => {
+		decoder.on("output", (original: DecoderOutput) => {
+			const parentId = state.parentId ?? decoder.id
+			const output: DecoderOutput = state.placement
+				? { ...original, decoder: parentId }
+				: original
+			// Keep internal binding context out of serialized output and envelope metadata.
+			if (state.placement)
+				Object.defineProperty(output, "provenanceBinding", {
+					value: {
+						sourceId: state.placement.sourceId,
+						channelHz: state.placement.channelHz,
+					},
+				})
 			try {
 				state.lastOutputAt = new Date()
 				state.currentDelay = this.config.restartDelay
 				// Output proves the run is stable and ends any crash loop.
 				state.consecutiveFailures = 0
 				this.updateDecoderHealth(state, "running")
-				this.emit("decoder:output", decoder.id, output)
+				this.emit("decoder:output", parentId, output)
 			} catch (err) {
 				this.log.error(
 					{ err: safeErrorFields(err), decoderId: decoder.id },
@@ -1585,7 +2985,7 @@ export class DecoderManager extends EventEmitter {
 			const publish = this.activityPublisher
 			if (!publish) return
 			try {
-				publish(decoder.id, decoder.type, output)
+				publish(parentId, decoder.type, output)
 			} catch (err) {
 				this.log.error(
 					{ err: safeErrorFields(err), decoderId: decoder.id },
@@ -1615,6 +3015,7 @@ export class DecoderManager extends EventEmitter {
 		// Handle started event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("started", () => {
+			state.lifecycle?.kick()
 			try {
 				state.lastOutputAt = null
 				state.lastStartedAt = new Date()
@@ -1633,6 +3034,14 @@ export class DecoderManager extends EventEmitter {
 		// Handle stopped event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("stopped", () => {
+			if (state.lifecycle && decoder.getStatus().running) return
+			state.lifecycle?.exited()
+			if (!decoder.getStatus().running && !state.lifecycle?.pending) {
+				delete state.stopping
+				if (state.removalPending) this.finalizeRemoval(state)
+			}
+			if (state.admission?.admit) delete state.admission
+			delete state.admittedAtMs
 			try {
 				this.emit("decoder:stopped", decoder.id)
 			} catch (err) {
@@ -1681,6 +3090,22 @@ export class DecoderManager extends EventEmitter {
 		signal: string | null,
 	): void {
 		const { decoder } = state
+		if (state.lifecycle && decoder.getStatus().running) return
+		const actor = state.lifecycle
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		const parentGeneration = parent?.parentIntent?.generation ?? 0
+		const currentCrash =
+			!actor ||
+			(parent?.desiredRunning === true &&
+				!parent.intentionallyStopped &&
+				actor.runDecoderGeneration === parentGeneration)
+		state.lifecycle?.exited()
+		if (!decoder.getStatus().running && !state.lifecycle?.pending) {
+			delete state.stopping
+			if (state.removalPending) this.finalizeRemoval(state)
+		}
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		const now = Date.now()
 
 		// A suspension stop is not a failure: keep the reservation, record no
@@ -1725,7 +3150,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		// Don't restart if intentionally stopped
-		if (state.intentionallyStopped) {
+		if (state.intentionallyStopped || !currentCrash) {
 			this.log.debug(
 				{ decoderId: decoder.id },
 				"Decoder stopped intentionally, not restarting",
@@ -1790,15 +3215,95 @@ export class DecoderManager extends EventEmitter {
 		this.emitStatusChanged(state)
 		this.emit("decoder:restarting", decoder.id, state.restartCount, delay)
 
+		const placementGeneration = actor?.generation
+		const retryCurrent = () =>
+			this.decoders.get(state.config.id) === state &&
+			!state.intentionallyStopped &&
+			(!actor ||
+				(parent?.desiredRunning === true &&
+					parent.parentIntent?.generation === parentGeneration &&
+					actor.generation === placementGeneration &&
+					actor.runDecoderGeneration === parentGeneration))
 		state.restartTimer = setTimeout(() => {
+			if (!retryCurrent()) return
 			state.restartTimer = null
 			state.nextRestartAt = null
 
 			// Use void to handle the promise without blocking
-			void (async () => {
+			const restart = async () => {
+				if (!retryCurrent()) return
+				if (actor) {
+					actor.record("running", parentGeneration)
+					actor.kick()
+					const restartGeneration = actor.generation
+					const restartCurrent = () =>
+						this.decoders.get(state.config.id) === state &&
+						!state.intentionallyStopped &&
+						parent?.desiredRunning === true &&
+						parent.parentIntent?.generation === parentGeneration &&
+						actor.generation === restartGeneration
+					// A failed start is one more unstable run: the exit path applies
+					// the crash-loop accounting and schedules the next backoff.
+					const conclude = () => {
+						if (!actor.error || !restartCurrent() || state.restartTimer) return
+						state.lastError = createDecoderLastError(
+							new DecoderPlacementStartError(),
+							"error",
+						)
+						this.log.error(
+							{ decoderId: decoder.id },
+							"Failed to restart decoder placement - other decoders continue operating",
+						)
+						this.handleDecoderExit(state, null, null)
+					}
+					const settled = actor.settled()
+					let timer: ReturnType<typeof setTimeout> | undefined
+					const bounded = await Promise.race([
+						settled.then(() => true),
+						new Promise<false>(resolve => {
+							timer = setTimeout(
+								() => resolve(false),
+								PLACEMENT_STOP_TIMEOUT_MS,
+							)
+						}),
+					])
+					clearTimeout(timer)
+					if (bounded) {
+						conclude()
+						return
+					}
+					// The actor keeps the unfinished start; the shared queue moves on.
+					if (restartCurrent() && actor.pending) {
+						state.lastError = createDecoderLastError(
+							new DecoderPlacementStartError(),
+							"error",
+						)
+						this.updateDecoderHealth(state, "faulted")
+						this.emitStatusChanged(state)
+						this.log.warn(
+							{ decoderId: decoder.id },
+							"Decoder placement restart did not settle in time - other decoders continue operating",
+						)
+					}
+					void settled.then(conclude)
+					return
+				}
 				try {
 					// Wire to fanout and start
-					if (state.intentionallyStopped) return
+					if (
+						state.intentionallyStopped ||
+						this.decoders.get(state.config.id) !== state
+					)
+						return
+					if (this.config.enablement) {
+						this.clearExpiredAdmission(state)
+						this.scheduleEfficiencyEvaluation()
+						const eligibility = this.assessEligibility(state)
+						if (eligibility.blockedBy) {
+							await this.suspend(state, eligibility)
+							return
+						}
+					}
 					if (state.stagedOptions && this.rebuildIfPending(state)) {
 						const blocked = this.blockedAfterRebuild(state)
 						if (blocked) {
@@ -1806,7 +3311,10 @@ export class DecoderManager extends EventEmitter {
 							return
 						}
 					}
-					const outcome = await this.wireDecoderToFanout(state)
+					const outcome = await this.startPlacement(
+						state,
+						() => !state.intentionallyStopped,
+					)
 					if (state.intentionallyStopped) {
 						this.unwireDecoderFromFanout(state)
 						return
@@ -1815,7 +3323,7 @@ export class DecoderManager extends EventEmitter {
 						if (!outcome.superseded) this.holdForChannel(state, outcome)
 						return
 					}
-					await state.decoder.start()
+					if (this.config.enablement) this.scheduleEfficiencyEvaluation()
 					this.recheckStaleChannel(this.selectedSourceId(state), state)
 				} catch (err) {
 					// A failed rebuild already left the decoder stopped with its error.
@@ -1831,7 +3339,13 @@ export class DecoderManager extends EventEmitter {
 						this.handleDecoderExit(state, null, null)
 					}
 				}
-			})()
+			}
+			if (state.placement && this.config.enablement?.gate) {
+				this.capsWork = this.capsWork.then(restart)
+				void this.capsWork
+			} else {
+				void restart()
+			}
 		}, delay)
 
 		// Calculate next delay with exponential backoff (Requirement 4.2)
@@ -1870,12 +3384,15 @@ export class DecoderManager extends EventEmitter {
 			caps = this.sourceManager.getCaps(sourceId)
 			if (caps) {
 				state.inputCaps = { ...caps }
-				decoder.updateOptions({
-					inputSampleRate: caps.sampleRate,
-					...(caps.centerFreq !== undefined
-						? { inputCenterFreq: caps.centerFreq }
-						: {}),
-				})
+				// A caller-supplied channel IQ input (WG11 replay: cf32 at the capture rate) is not the
+				// source stream: the source rate would add a spurious resample stage to the demod chain.
+				if (!(state.input && config.options["inputIqFormat"] === "cf32"))
+					decoder.updateOptions({
+						inputSampleRate: caps.sampleRate,
+						...(caps.centerFreq !== undefined
+							? { inputCenterFreq: caps.centerFreq }
+							: {}),
+					})
 			}
 			this.refreshRatePlan(state, caps ?? null)
 			this.sourceManager.assignDecoder(config.id, sourceId, {
@@ -1894,19 +3411,33 @@ export class DecoderManager extends EventEmitter {
 		if (provider && sourceId && request)
 			return this.wireDecoderToChannel(state, provider, sourceId, request)
 		// Raw path again (no channel request now): the decoder reads CU8.
-		if (config.useChannelizer === true)
+		if (config.useChannelizer === true || state.placement?.reach === "raw")
 			decoder.updateOptions({ inputIqFormat: "cu8" })
 		const branchId = `decoder-${config.id}`
 		const fanout = this.sourceRouting?.getFanout(sourceId) ?? this.fanout
 		// Track resources before attaching so failed attachment is cleaned up too.
 		state.branchId = branchId
 		state.branchFanout = fanout
+		// The branch receives data only once the decoder is reading: before its
+		// process has spawned and connected stdin, bytes would only fill the
+		// branch and count as drops against the newcomer.
 		const branch = fanout.addBranch({
 			id: branchId,
 			decoderId: config.id,
 			...(sourceId ? { sourceId } : {}),
+			deferred: true,
 		})
 		decoder.attachInput(branch)
+		const activate = () => {
+			if (state.branchReady !== activate) return
+			delete state.branchReady
+			decoder.off("started", activate)
+			if (state.branchFanout === fanout && state.branchId === branchId)
+				fanout.activateBranch(branchId, startupBuffer(caps))
+		}
+		state.branchReady = activate
+		if (decoder.getStatus().running) activate()
+		else decoder.on("started", activate)
 
 		this.log.debug(
 			{ decoderId: decoder.id, branchId },
@@ -2285,6 +3816,8 @@ export class DecoderManager extends EventEmitter {
 		outcome: ChannelHold,
 		heldSince?: Date,
 	): void {
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		state.suspension = {
 			reasonCode: outcome.reasonCode,
 			since: state.suspension?.since ?? heldSince ?? new Date(),
@@ -2310,7 +3843,8 @@ export class DecoderManager extends EventEmitter {
 				this.channelizerUnavailableLogged = true
 			}
 		} else {
-			this.log.info(fields, "Decoder suspended: channel not admitted")
+			if (!this.config.enablement)
+				this.log.info(fields, "Decoder suspended: channel not admitted")
 		}
 		this.emitStatusChanged(state)
 	}
@@ -2388,6 +3922,10 @@ export class DecoderManager extends EventEmitter {
 			this.dropChannel(state, true)
 		const { decoder, branchId, branchFanout, assignedSourceId, inputAttached } =
 			state
+		if (state.branchReady) {
+			decoder.off("started", state.branchReady)
+			delete state.branchReady
+		}
 		try {
 			if (branchId || inputAttached) decoder.detachInput()
 		} finally {
@@ -2548,6 +4086,7 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	private async runPendingCapsChanges(): Promise<void> {
+		this.applyingCaps = true
 		try {
 			while (this.capsChangedHandler && this.pendingCapsChanges.size > 0) {
 				const pending = new Map(this.pendingCapsChanges)
@@ -2561,6 +4100,8 @@ export class DecoderManager extends EventEmitter {
 				{ err: safeErrorFields(err) },
 				"Failed to apply source tuning changes",
 			)
+		} finally {
+			this.applyingCaps = false
 		}
 	}
 
@@ -2572,6 +4113,7 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 		adapt = true,
 	): Promise<void> {
+		if (this.config.enablement) await this.reconcilePlacements()
 		const affectedDecoders: string[] = []
 
 		// Every decoder selecting this source gets a fresh plan and, if the
@@ -2751,6 +4293,7 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 	): Promise<boolean> {
 		const before = this.rateKey(state)
+		this.clearExpiredAdmission(state)
 		const eligibility = this.assessEligibility(state, caps)
 		const plan = eligibility.rate
 		state.bandPlan = eligibility.band
@@ -2759,7 +4302,11 @@ export class DecoderManager extends EventEmitter {
 		const terminalFault =
 			!running && !state.restartTimer && state.lastHealth === "faulted"
 
-		if (external || !state.desiredRunning || state.intentionallyStopped) {
+		if (
+			(external && !this.config.enablement) ||
+			!state.desiredRunning ||
+			state.intentionallyStopped
+		) {
 			state.ratePlan = plan
 			this.publishIfRateChanged(state, before)
 			return false
@@ -2824,13 +4371,15 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * Stops the process and detaches its branch but keeps the source
 	 * reservation and intent. A failed stop leaves transition "suspending"
-	 * (the process may still run); the next evaluation retries.
+	 * until the process exits.
 	 */
 	private async suspend(
 		state: DecoderState,
 		eligibility: Eligibility,
 	): Promise<void> {
 		const id = state.config.id
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		state.rateGeneration++
 		state.suspension = {
 			reasonCode: eligibility.blockedBy ?? "unsupported-sample-rate",
@@ -2842,18 +4391,25 @@ export class DecoderManager extends EventEmitter {
 		this.cancelScheduledRestart(state)
 		if (state.lastHealth === "restarting")
 			this.updateDecoderHealth(state, "running")
-		this.log.info(
-			{ decoderId: id, reasonCode: state.suspension.reasonCode },
-			"Suspending decoder (see reasonCode)",
-		)
+		if (!this.config.enablement)
+			this.log.info(
+				{ decoderId: id, reasonCode: state.suspension.reasonCode },
+				"Suspending decoder (see reasonCode)",
+			)
 		this.emitStatusChanged(state)
 
 		try {
-			if (state.decoder.getStatus().running) await state.decoder.stop()
+			if (
+				state.lifecycle?.actual === "starting" &&
+				!state.decoder.getStatus().running
+			) {
+				void this.stopPlacement(state).catch(() => {})
+			} else if (state.decoder.getStatus().running || state.lifecycle)
+				await this.stopPlacement(state)
 		} catch (err) {
 			this.log.error(
 				{ err: safeErrorFields(err), decoderId: id },
-				"Failed to stop decoder for rate suspension; will retry",
+				"Failed to stop decoder for rate suspension",
 			)
 			this.emitStatusChanged(state)
 			return
@@ -2893,7 +4449,7 @@ export class DecoderManager extends EventEmitter {
 		// not treated as a crash, then start a fresh pipeline.
 		if (state.decoder.getStatus().running) {
 			try {
-				await state.decoder.stop()
+				await this.stopPlacement(state)
 			} catch (err) {
 				this.log.error(
 					{ err: safeErrorFields(err), decoderId: id },
@@ -2918,7 +4474,7 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: id, reasonCode: prior.reasonCode },
 				"Re-requesting channel for a held decoder",
 			)
-		else
+		else if (!this.config.enablement)
 			this.log.info(
 				{ decoderId: id },
 				"Resuming decoder: source rate and band are usable",
@@ -2930,7 +4486,7 @@ export class DecoderManager extends EventEmitter {
 			if (this.decoders.get(id) !== state) return
 			if (startedProcess) {
 				try {
-					await state.decoder.stop()
+					await this.stopPlacement(state)
 				} catch (err) {
 					this.log.error(
 						{ err: safeErrorFields(err), decoderId: id },
@@ -2956,14 +4512,16 @@ export class DecoderManager extends EventEmitter {
 					return
 				}
 			}
-			const outcome = await this.wireDecoderToFanout(state)
-			if (!this.stillWanted(state, generation)) return await abandon(false)
+			const outcome = await this.startPlacement(state, () =>
+				this.stillWanted(state, generation),
+			)
+			if (!this.stillWanted(state, generation))
+				return await abandon(outcome.wired)
 			if (!outcome.wired) {
 				if (outcome.superseded) return await abandon(false)
 				this.holdForChannel(state, outcome, prior?.since)
 				return
 			}
-			await state.decoder.start()
 		} catch (err) {
 			if (err instanceof DecoderRebuildError) return await abandon(false)
 			if (!this.stillWanted(state, generation)) return await abandon(false)
@@ -2978,7 +4536,7 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 		if (!this.stillWanted(state, generation)) return await abandon(true)
-		if (channelRetry)
+		if (channelRetry && !this.config.enablement)
 			this.log.info({ decoderId: id }, "Resuming decoder: channel opened")
 		state.transition = null
 		this.emitStatusChanged(state)
@@ -3154,10 +4712,269 @@ export class DecoderManager extends EventEmitter {
 		return request && !("invalid" in request) ? request : undefined
 	}
 
+	private clearExpiredAdmission(state: DecoderState): void {
+		if (
+			state.admission?.admit === false &&
+			state.admission.retryAtMs <= performance.now()
+		)
+			delete state.admission
+	}
+
+	private placementLifecycle(state: DecoderState): PlacementLifecycle {
+		const actor = (state.lifecycle ??= new PlacementLifecycle({
+			start: async generation => {
+				if (
+					state.lifecycle?.generation !== generation ||
+					state.lifecycle.desired !== "running"
+				)
+					return false
+				// The actor has finished its previous stop before entering this start.
+				if (state.stagedOptions) this.rebuildIfPending(state, false, true)
+				const eligibility = this.assessEligibility(state)
+				if (
+					eligibility.blockedBy &&
+					eligibility.blockedBy !== "efficiency-budget"
+				) {
+					await this.suspend(state, eligibility)
+					return false
+				}
+				try {
+					const outcome = await this.startPlacementNow(
+						state,
+						() =>
+							state.lifecycle?.generation === generation &&
+							state.lifecycle.desired === "running",
+					)
+					state.placementOutcome = outcome
+					return outcome.wired
+				} catch {
+					const error = new DecoderPlacementStartError()
+					if (state.lifecycle?.generation === generation) {
+						state.lastError = createDecoderLastError(error, "error")
+						this.updateDecoderHealth(state, "faulted")
+						this.emitStatusChanged(state)
+					}
+					throw error
+				}
+			},
+			stop: async signal => {
+				const decoder = state.decoder
+				const pid = decoder.getStatus().pid
+				const proc = (decoder as unknown as { process?: ChildProcess }).process
+				const runGeneration = state.lifecycle?.runGeneration
+				const stopGeneration = state.lifecycle?.generation
+				const currentRun = () =>
+					state.lifecycle?.runGeneration === runGeneration &&
+					decoder.getStatus().pid === pid
+				let timer: ReturnType<typeof setTimeout> | undefined
+				const deadline = new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(
+						() =>
+							reject(
+								new WaveKitError(
+									"Placement stop deadline exceeded",
+									"DECODER_STOP_PENDING",
+								),
+							),
+						PLACEMENT_STOP_TIMEOUT_MS,
+					)
+				})
+				let confirmExit: (() => void) | undefined
+				const exited = new Promise<void>(resolve => {
+					confirmExit = () => resolve()
+					signal.addEventListener("abort", confirmExit, {
+						once: true,
+					})
+				})
+				try {
+					await Promise.race([
+						exited,
+						Promise.resolve()
+							.then(() => decoder.stop())
+							.catch(error => {
+								if (!currentRun() || !decoder.getStatus().running) return
+								if (
+									state.lifecycle &&
+									state.lifecycle.generation === stopGeneration &&
+									state.lifecycle.desired === "stopped"
+								)
+									state.lifecycle.error = error
+								try {
+									if (proc) signalDecoder(proc, "SIGTERM")
+								} catch {
+									// The captured process still needs escalation at the deadline.
+								}
+								return deadline
+							})
+							.then(() => {
+								if (currentRun() && decoder.getStatus().running) return deadline
+								return undefined
+							}),
+						deadline,
+					])
+				} catch (error) {
+					if (state.lifecycle && currentRun()) state.lifecycle.error = error
+					if (decoder.getStatus().running && currentRun()) {
+						try {
+							if (proc) signalDecoder(proc, "SIGKILL")
+							else if (pid !== undefined)
+								signalDecoder(
+									{
+										pid,
+										kill: (signal: NodeJS.Signals) => process.kill(pid, signal),
+									} as ChildProcess,
+									"SIGKILL",
+								)
+						} catch (escalationError) {
+							this.log.warn(
+								{
+									decoderId: state.config.id,
+									err: safeErrorFields(escalationError),
+								},
+								"Placement worker escalation failed",
+							)
+						}
+					}
+					throw error
+				} finally {
+					clearTimeout(timer)
+					if (confirmExit) signal.removeEventListener("abort", confirmExit)
+				}
+			},
+			running: () => state.decoder.getStatus().running,
+			invalidate: () => {
+				if (state.admission?.admit) delete state.admission
+				delete state.admittedAtMs
+			},
+			incomplete: () => {
+				state.stopping = true
+				this.log.warn(
+					{
+						decoderId: state.parentId ?? state.config.id,
+						placementKey: state.placement?.key,
+						reasonCode: "worker-shutdown-incomplete",
+					},
+					"Placement worker shutdown incomplete",
+				)
+				this.emitStatusChanged(state)
+			},
+			idle: () => {
+				delete state.stopping
+				if (state.removalPending) this.finalizeRemoval(state)
+			},
+		}))
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		actor.decoderGeneration = parent?.parentIntent?.generation ?? 0
+		return actor
+	}
+
+	private async stopPlacement(
+		state: DecoderState,
+		restart = false,
+	): Promise<void> {
+		if (!this.config.enablement || !state.placement) return state.decoder.stop()
+		const actor = this.placementLifecycle(state)
+		const stopping = actor.request(restart ? "running" : "stopped", restart)
+		if (
+			state.owner === "config" &&
+			actor.pending &&
+			!state.decoder.getStatus().running
+		)
+			return
+		await stopping
+		if (actor.error) throw actor.error
+	}
+
+	private async startPlacement(
+		state: DecoderState,
+		canStart: () => boolean = () => true,
+	): Promise<WireOutcome> {
+		if (!this.config.enablement || !state.placement)
+			return this.startPlacementNow(state, canStart)
+		if (!canStart() || state.removalPending || this.destroying)
+			return { wired: false, superseded: true }
+		const actor = this.placementLifecycle(state)
+		delete state.placementOutcome
+		await actor.request("running")
+		if (actor.error) throw actor.error
+		return state.decoder.getStatus().running && actor.desired === "running"
+			? { wired: true }
+			: (state.placementOutcome ?? { wired: false, superseded: true })
+	}
+
 	/**
-	 * Scanner hold first (spec § 10.4), then rate, then band. Rate and band are
-	 * still assessed for reporting while held.
+	 * Preflight admission avoids allocating a channel for a blocked placement.
+	 * Wiring can await a channel, so only the fresh decision immediately before
+	 * start establishes the run's admission and probation clock.
 	 */
+	private async startPlacementNow(
+		state: DecoderState,
+		canStart: () => boolean = () => true,
+	): Promise<WireOutcome> {
+		if (state.stopping || !canStart()) return { wired: false, superseded: true }
+		const gate = this.config.enablement?.gate
+		const generation = state.rateGeneration
+		// YAML placements keep today's behaviour: admitted without a verdict.
+		const exempt = this.gateExempt(state)
+		if (gate && state.placement) {
+			delete state.admission
+			delete state.admittedAtMs
+			state.admission = exempt
+				? { admit: true }
+				: gate.admit(
+						state.placement,
+						this.runningPlacements(),
+						performance.now(),
+					)
+			if (!state.admission.admit) {
+				await this.suspend(state, this.assessEligibility(state))
+				this.scheduleEfficiencyEvaluation()
+				return { wired: false, superseded: true }
+			}
+		}
+		try {
+			const outcome = await this.wireDecoderToFanout(state)
+			if (
+				!outcome.wired ||
+				!canStart() ||
+				(gate && state.placement && !this.stillWanted(state, generation))
+			) {
+				if (state.admission?.admit) delete state.admission
+				delete state.admittedAtMs
+				return outcome.wired ? { wired: false, superseded: true } : outcome
+			}
+			if (gate && state.placement) {
+				delete state.admission
+				delete state.admittedAtMs
+				const now = performance.now()
+				state.admission = exempt
+					? { admit: true }
+					: gate.admit(state.placement, this.runningPlacements(), now)
+				if (!state.admission.admit) {
+					this.unwireDecoderFromFanout(state)
+					await this.suspend(state, this.assessEligibility(state))
+					this.scheduleEfficiencyEvaluation()
+					return { wired: false, superseded: true }
+				}
+				state.admittedAtMs = now
+			}
+			this.scheduleEfficiencyEvaluation()
+			state.processStartPending = true
+			try {
+				await state.decoder.start()
+			} finally {
+				delete state.processStartPending
+			}
+
+			this.scheduleEfficiencyEvaluation()
+			return outcome
+		} catch (error) {
+			if (state.admission?.admit) delete state.admission
+			delete state.admittedAtMs
+			throw error
+		}
+	}
+
 	private assessEligibility(
 		state: DecoderState,
 		caps?: SourceCaps | null,
@@ -3167,17 +4984,68 @@ export class DecoderManager extends EventEmitter {
 		// An operator start (pin) and the per-decoder opt-out override only
 		// the band check; an unusable rate still suspends. Probes are exempt.
 		const bandSuspends =
-			state.owner === "config" &&
+			state.owner !== "scanner" &&
+			this.modeFor(state).mode !== "always" &&
+			!state.placement &&
 			this.config.bandSuspension &&
 			this.decoderBandSuspension(state) &&
 			state.startMode !== "operator"
+		const unplaced =
+			state.unplaced === "frequency-out-of-band" &&
+			(this.modeFor(state).mode === "always" || state.startMode === "operator")
+				? undefined
+				: state.unplaced
+		const channelizerUnavailable =
+			!this.channelizer &&
+			(state.placement?.reach === "channel" ||
+				(!state.placement &&
+					this.config.enablement?.isCatalogue(
+						state.originalConfig ?? state.config,
+					) === true &&
+					(CHANNEL_CAPABLE_TYPES as readonly string[]).includes(
+						state.config.type,
+					)))
+		// A built-in decoder runs only through placements: a built-in parent
+		// with no placement is never eligible to start, whatever the source
+		// state. It waits for its source (unknown rate or centre, or not
+		// connected) or reports the planner's reason. Own-device and external
+		// built-ins are never planned and keep running as before.
+		const builtinUnplaced =
+			!state.placement &&
+			!state.parentId &&
+			state.owner === "config" &&
+			state.decoder.caps.input !== "external" &&
+			state.decoder.getBandDeclaration?.().ownSource !== true &&
+			this.config.enablement?.isCatalogue(
+				state.originalConfig ?? state.config,
+			) === true
+		const sourceId = this.selectedSourceId(state)
+		const sourceCaps =
+			caps ?? (sourceId ? this.sourceManager?.getCaps(sourceId) : undefined)
+		const sourceKnown =
+			rate.reasonCode !== "source-rate-unknown" &&
+			sourceId !== undefined &&
+			this.sourceManager?.getStatus(sourceId)?.connected === true &&
+			sourceCaps?.centerFreq !== undefined
 		const blockedBy =
 			this.heldReason(state) ??
+			(this.isUnavailable(state) ? "decoder-unavailable" : null) ??
 			(rate.verdict === "unusable"
 				? (rate.reasonCode ?? "unsupported-sample-rate")
-				: bandSuspends && band.verdict === "out-of-band"
-					? "frequency-out-of-band"
-					: null)
+				: !state.placement && channelizerUnavailable
+					? "channelizer-unavailable"
+					: builtinUnplaced
+						? sourceKnown
+							? (unplaced ?? "frequency-out-of-band")
+							: "source-rate-unknown"
+						: bandSuspends && band.verdict === "out-of-band"
+							? "frequency-out-of-band"
+							: (unplaced ??
+								(channelizerUnavailable
+									? "channelizer-unavailable"
+									: state.admission?.admit === false
+										? "efficiency-budget"
+										: null)))
 		return { rate, band, blockedBy }
 	}
 
@@ -3190,7 +5058,7 @@ export class DecoderManager extends EventEmitter {
 			type: state.config.type,
 			declaration: state.decoder.getBandDeclaration?.(),
 			configOverride: state.config.band,
-			apiOverride: this.bandOverrides.get(state.config.id),
+			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
 		})
 	}
@@ -3445,6 +5313,31 @@ export class DecoderManager extends EventEmitter {
 		return state.lastHealth
 	}
 
+	/** True only after every process belonging to this decoder has stopped cleanly. */
+	isDecoderConfirmedStopped(id: string): boolean {
+		const states = [...this.decoders.values()].filter(
+			state => state.config.id === id || state.parentId === id,
+		)
+		return (
+			states.length > 0 &&
+			states.every(state => {
+				const status = state.decoder.getStatus()
+				return (
+					!status.running &&
+					status.pid === undefined &&
+					!state.stopping &&
+					!state.processStartPending &&
+					!state.lifecycle?.pending &&
+					status.health !== "faulted" &&
+					!state.transition &&
+					state.lifecycle?.actual !== "stopping" &&
+					state.lifecycle?.actual !== "stopping-failed" &&
+					state.lastHealth !== "faulted"
+				)
+			})
+		)
+	}
+
 	/**
 	 * Gets the health state of all managed decoders (Requirements 20.1, 20.2, 20.3).
 	 *
@@ -3593,8 +5486,20 @@ export class DecoderManager extends EventEmitter {
 	 * are isolated so they never interrupt stop or restart handling.
 	 */
 	private emitStatusChanged(state: DecoderState): void {
+		if (this.config.enablement) {
+			const reasonCode = state.suspension?.reasonCode ?? null
+			if (
+				state.loggedSuspension !== reasonCode &&
+				(state.loggedSuspension !== undefined || reasonCode !== null)
+			)
+				this.log.info(
+					{ decoderId: state.parentId ?? state.config.id, reasonCode },
+					"Decoder suspension changed",
+				)
+			state.loggedSuspension = reasonCode
+		}
 		try {
-			this.emit("decoder:status-changed", state.decoder.id)
+			this.emit("decoder:status-changed", state.parentId ?? state.decoder.id)
 		} catch (err) {
 			this.log.error(
 				{ err: safeErrorFields(err), decoderId: state.decoder.id },

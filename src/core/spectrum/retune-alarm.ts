@@ -2,7 +2,7 @@
  * Spec § 4.7 discontinuity alarm. Given the persistent features present in the previous settled
  * block (RF-fixed carriers and long-lived tracks) and this block's segments, decide whether the
  * receiver moved without the core seeing a command: ≥ ALARM_FRACTION of ≥ ALARM_MIN_FEATURES
- * visible features vanished. When most of them reappear at one common shift Δ (± toleranceHz),
+ * strong visible features vanished. When most of them reappear at one common shift Δ (± toleranceHz),
  * Δ (apparent: new − old) is reported.
  */
 import type { SpectrumWarningSuspect } from "@wavekit/api-types"
@@ -10,6 +10,8 @@ import type { SpectrumWarningSuspect } from "@wavekit/api-types"
 export interface PersistentFeature {
 	rfHz: number
 	widthHz: number
+	/** Lower bound on margin above the local detection threshold over the qualified recent window, in dB. */
+	marginDb: number
 }
 
 export interface SegmentRange {
@@ -18,6 +20,8 @@ export interface SegmentRange {
 	centreHz: number
 }
 
+/** Disappearance near threshold can be fading or segmentation flicker, not receiver motion. */
+export const ALARM_FEATURE_MARGIN_DB = 10
 export const ALARM_MIN_FEATURES = 3
 export const ALARM_FRACTION = 0.6
 /** WG10 req 2.9: signal-change needs this many eligible features still in place (fail closed). */
@@ -70,7 +74,9 @@ export function untrackedRetuneAlarm(
 	const tol = opts.toleranceHz
 	const minFeatures = opts.minFeatures ?? ALARM_MIN_FEATURES
 	const fraction = opts.fraction ?? ALARM_FRACTION
-	const eligible = features.filter(f => opts.visible(f.rfHz))
+	const eligible = features.filter(
+		f => f.marginDb >= ALARM_FEATURE_MARGIN_DB && opts.visible(f.rfHz),
+	)
 	if (eligible.length < minFeatures) return null
 	const present = (hz: number): boolean =>
 		segments.some(s => hz >= s.startHz - tol && hz <= s.endHz + tol)
@@ -109,7 +115,7 @@ export function untrackedRetuneAlarm(
 }
 
 /**
- * WG10 req 2.9: the visible features of `features` that are absent from `segments` (the alarm's
+ * WG10 req 2.9: the strong visible features of `features` that are absent from `segments` (the alarm's
  * vanished set, same visibility and tolerance rules as untrackedRetuneAlarm).
  */
 export function vanishedFeatures(
@@ -120,6 +126,7 @@ export function vanishedFeatures(
 	const tol = opts.toleranceHz
 	return features.filter(
 		f =>
+			f.marginDb >= ALARM_FEATURE_MARGIN_DB &&
 			opts.visible(f.rfHz) &&
 			!segments.some(s => f.rfHz >= s.startHz - tol && f.rfHz <= s.endHz + tol),
 	)
@@ -154,7 +161,9 @@ export function classifyAlarm(input: {
 }): AlarmSuspect {
 	const tol = input.toleranceHz
 	const fraction = input.fraction ?? ALARM_FRACTION
-	const eligible = input.features.filter(f => input.visible(f.rfHz))
+	const eligible = input.features.filter(
+		f => f.marginDb >= ALARM_FEATURE_MARGIN_DB && input.visible(f.rfHz),
+	)
 	const vanished = vanishedFeatures(input.features, input.segments, input)
 	const contains = (hz: number): boolean =>
 		input.segments.some(s => hz >= s.startHz - tol && hz <= s.endHz + tol)

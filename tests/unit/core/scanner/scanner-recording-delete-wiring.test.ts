@@ -474,7 +474,7 @@ describe("scanner recording delete through real stores (WG10 req 1.1-1.4)", () =
 	})
 })
 
-describe("Main wiring: the late-bound scanner deleter (WG10 MA.1)", () => {
+describe("Main wiring: the late-bound scanner deleter (WG10)", () => {
 	it("answers 409 RECORDING_DELETE_UNSUPPORTED with nothing touched until the scanner exists, then deletes", async () => {
 		const late = { bound: false }
 		const w = await world({ lateBound: late })

@@ -207,7 +207,7 @@ describe("formatMessage", () => {
 		expect(acars.protocol).toBe("ACARS")
 		expect(segs(acars)).toEqual([".EI-DCL", "RYR4KT", "H1", "131.550 MHz"])
 	})
-	it("bounds and sanitises hostile payloads (review focus 4)", () => {
+	it("bounds and sanitises hostile payloads", () => {
 		const huge = "A".repeat(100_000) + "\x1b[2J\r\n🚀"
 		const m = formatMessage(
 			out("pocsag", "multimon-ng", { address: 1, message: huge }),

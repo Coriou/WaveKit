@@ -155,7 +155,7 @@ describe("resolveKey", () => {
 	})
 })
 
-describe("fix round 1", () => {
+describe("says control is unknown on e, naming no key, while control is unknown", () => {
 	const receiver = (control: KeyContext["v"]["control"]): KeyContext => ({
 		...base,
 		view: "receiver",
@@ -197,7 +197,7 @@ describe("fix round 1", () => {
 	})
 })
 
-describe("B5 fix round 1", () => {
+describe("I4: PgUp/PgDn scroll the Decoders detail; the §6.2 footer is unchanged", () => {
 	it("I4: PgUp/PgDn scroll the Decoders detail; the §6.2 footer is unchanged", () => {
 		const d = {
 			...base,

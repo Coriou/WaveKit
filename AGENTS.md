@@ -21,7 +21,8 @@ docs; read them only when your task needs them.
 3. **Task context.** For spec-driven work, read [`docs/specs/README.md`](docs/specs/README.md)
    and the feature's spec. For architecture, decoders or the API, see
    [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/DECODER-GUIDE.md`](docs/DECODER-GUIDE.md),
-   [`docs/API.md`](docs/API.md); Docker in [`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md).
+   [`docs/API.md`](docs/API.md); Docker in [`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md);
+   hot-path (IQ, DSP, audio) rules in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 ## What this is
 

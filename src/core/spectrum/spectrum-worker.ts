@@ -3,12 +3,17 @@
  * every validated input goes to SpectrumPipeline.handle(), events go back,
  * and each transferred byte buffer is transferred back for reuse.
  */
+import { performance } from "node:perf_hooks"
 import { parentPort } from "node:worker_threads"
 import { WaveKitError } from "../../utils/errors.js"
-import type { PipelineConfig, PipelineEvent, PipelineInput } from "./types.js"
+import type { PipelineConfig, PipelineEvent } from "./types.js"
 import { SpectrumPipeline } from "./pipeline.js"
 import { encodeEventsForWire } from "./summary-wire.js"
-import { MainToWorkerSchema, type WorkerToMain } from "./worker-protocol.js"
+import {
+	MainToWorkerSchema,
+	type WorkerPipelineInput,
+	type WorkerToMain,
+} from "./worker-protocol.js"
 
 const port = parentPort
 if (!port) {
@@ -51,10 +56,13 @@ port.on("message", (raw: unknown) => {
 	const message = parsed.data
 	switch (message.type) {
 		case "init":
-			pipeline = new SpectrumPipeline(message.config as PipelineConfig)
+			pipeline = new SpectrumPipeline(
+				message.config as PipelineConfig,
+				message.profile ? { profile: message.profile } : {},
+			)
 			return
 		case "input": {
-			const input = message.input as PipelineInput
+			const input = message.input as WorkerPipelineInput
 			if (!pipeline) {
 				post({ type: "error", message: "input before init" })
 			} else {
@@ -65,9 +73,13 @@ port.on("message", (raw: unknown) => {
 					post({ type: "error", message: errorMessage(err) })
 				}
 				if (events.length > 0) {
+					// Clock only when this handle finished a sampled block.
+					const span = pipeline.wireSpanOpen()
+					const t0 = span ? performance.now() : 0
 					const transfer: ArrayBuffer[] = []
 					encodeEventsForWire(events, transfer)
 					post({ type: "events", events }, transfer)
+					if (span) pipeline.chargeWireSpan(performance.now() - t0)
 				}
 			}
 			if (input.kind === "bytes") {

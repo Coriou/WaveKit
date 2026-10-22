@@ -16,6 +16,10 @@ import type {
 	ScannerSettings,
 } from "../../../src/core/scanner/types.js"
 import type { Bandplan } from "../../../src/core/scanner/bandplan/index.js"
+import type {
+	PipelineEvent,
+	TrackSnapshot,
+} from "../../../src/core/spectrum/types.js"
 import { ArbiterFakeTuner } from "./arbiter-fakes.js"
 import { FakeFanout, FakeSources, testSettings } from "./engine-fakes.js"
 import { FakeDecoderManager } from "./probe-fakes.js"
@@ -53,6 +57,38 @@ export class ServiceFakeDecoders extends FakeDecoderManager {
 
 export const FS = 1_024_000
 export const CENTRE = 446_100_000
+
+const BURST_EXTRA_DB = 3
+
+/**
+ * Engine tracks carry no gate until a channel plan exists. A fixture that means
+ * to surface still follows the old block rule: enough blocks, or a burst 3 dB
+ * over threshold. Anything else stays pending and creates no discovery.
+ */
+function stampLegacyGate(
+	service: ScannerService,
+	settings: ScannerSettings,
+): void {
+	service.spectrum.prependListener(
+		"pipeline",
+		(_sourceId: string, ev: PipelineEvent) => {
+			if (
+				ev.kind !== "track-open" &&
+				ev.kind !== "track-update" &&
+				ev.kind !== "track-close"
+			)
+				return
+			const track: TrackSnapshot = ev.track
+			if (track.gate !== undefined) return
+			const flags = track.flags
+			if (flags.truncated || flags.iqImage || flags.spur) return
+			const passed = flags.burst
+				? track.maxBlockSnrDb >= track.thresholdDb + BURST_EXTRA_DB
+				: track.blocks >= settings.detection.minSurfaceBlocks
+			if (passed) track.gate = "passed"
+		},
+	)
+}
 
 export function serviceHarness(
 	opts: {
@@ -142,6 +178,7 @@ export function serviceHarness(
 		engineHost: "inline",
 		tickMs: 20,
 	})
+	stampLegacyGate(service, settings)
 	return {
 		service,
 		sources,

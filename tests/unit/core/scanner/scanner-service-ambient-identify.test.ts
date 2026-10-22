@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { ScannerIdentifyEventData } from "@wavekit/api-types"
 import fc from "fast-check"
 import {
@@ -27,11 +27,21 @@ import {
 	packCu8,
 } from "../../../mocks/scanner/signals.js"
 
-// WG7 MA.1 AMB: the scanner service wires ambient targets, trust and coverage into identify.
+// WG7 AMB: the scanner service wires ambient targets, trust and coverage into identify.
 
 const AIS_A = 161_975_000
 const AIS_B = 162_025_000
 /** Source centre 100 kHz below AIS channel A: both AIS channels lie in the 1.024 Msps window. */
+// WG11 req 1.3: the 446/162 MHz test band plans list 6.25 kHz rasters, so identify first adds the
+// narrow digital trials (nxdn48, dpmr, dstar) ahead of the ambient one. Their outcome is timing
+// dependent (pending, running, no-sync), so only their identity is asserted.
+const NARROW_TRIALS = [
+	expect.objectContaining({ protocol: "analog-fm", outcome: "unsupported" }),
+	expect.objectContaining({ protocol: "nxdn48", transport: "offset" }),
+	expect.objectContaining({ protocol: "dpmr", transport: "offset" }),
+	expect.objectContaining({ protocol: "dstar", transport: "offset" }),
+]
+
 const CENTRE_AIS = AIS_A - 100_000
 
 const aisConfig = (id = "ais"): DecoderConfig => ({
@@ -128,7 +138,7 @@ const firstTarget = (r: Rig, jobId: string): ScannerIdentifyEventData =>
 	r.h.service.getJob(jobId)?.identify?.targets[0] ??
 	({ trials: [] } as unknown as ScannerIdentifyEventData)
 
-describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
+describe("ScannerService ambient identify (WG7)", () => {
 	it("identifies an AIS target from a config-owned AIS decoder on the same source with commanded trust", async () => {
 		const seen: [string, number, string][] = []
 		const r = rig({
@@ -153,6 +163,15 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 		try {
 			const evidence: AmbientEvidenceEvent[] = []
 			r.ambient().on("evidence", (e: AmbientEvidenceEvent) => evidence.push(e))
+			// WG11 batch review R1 4: the ambient decode resets the known-protocol memory exactly once.
+			const recordDecode = vi.spyOn(
+				(
+					r.h.service as unknown as {
+						knownProtocols: { recordDecode(id: string): void }
+					}
+				).knownProtocols,
+				"recordDecode",
+			)
 			const jobId = await identifyAisTarget(r, 60_000)
 			await until(() =>
 				(firstTarget(r, jobId).trials ?? []).some(
@@ -160,6 +179,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 				),
 			)
 			expect(firstTarget(r, jobId).trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					decoder: "ais-catcher",
@@ -173,6 +193,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			const target = firstTarget(r, jobId)
 			expect(target.state).toBe("identified")
 			expect(target.trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",
@@ -180,6 +201,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 				}),
 			])
 			expect(target.result).toMatchObject({ protocol: "ais" })
+			expect(recordDecode).toHaveBeenCalledTimes(1)
 			// The trust lookup got the decode's own frequency and the target's source.
 			expect(seen).toContainEqual(["ais", AIS_A, "rtl"])
 			// Real decodes at 161.975 MHz: evidence at that frequency; the second carries the H2 identity.
@@ -225,6 +247,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			const target = firstTarget(r, jobId)
 			expect(target.state).not.toBe("identified")
 			expect(target.trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",
@@ -248,8 +271,8 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			expect(evidence).toEqual([])
 			const target = firstTarget(r, jobId)
-			expect(target.state).toBe("candidate")
-			expect(target.trials).toEqual([])
+			expect(target.state).toBe("unidentified")
+			expect(target.trials).toEqual(NARROW_TRIALS)
 		} finally {
 			await r.h.service.stop()
 		}
@@ -367,6 +390,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			const target = firstTarget(r, job.id)
 			expect(target.state).not.toBe("identified")
 			expect(target.trials).toEqual([
+				...NARROW_TRIALS.slice(1),
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",

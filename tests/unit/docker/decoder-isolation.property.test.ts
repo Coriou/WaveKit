@@ -226,6 +226,7 @@ describe("Feature: docker-setup, Property 19: Decoder Failure Isolation", () => 
 		fanout = {
 			addBranch: vi.fn().mockReturnValue(new PassThrough()),
 			removeBranch: vi.fn(),
+			activateBranch: vi.fn(),
 		} as unknown as FanoutManager
 
 		// Create manager with short restart delay for faster tests

@@ -1,6 +1,8 @@
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	CTCSS_HZ,
+	CtcssBank,
 	selectCtcssTone,
 } from "../../../../src/core/audio-tones/ctcss.js"
 import {
@@ -390,3 +392,78 @@ describe("tone detector", () => {
 		expect(elapsed).toBeLessThan(1_000)
 	})
 })
+
+describe("CTCSS transmission continuity", () => {
+	it("rejects a short 67 Hz segment followed by voice without a tone", () => {
+		const bank = new CtcssBank()
+		for (let i = 0; i < 32000; i++) {
+			const hz = i < 6400 ? 67 : 1000
+			bank.pushSample(0.3 * Math.sin((2 * Math.PI * hz * i) / 8000))
+		}
+		expect(bank.result()).toBeNull()
+	})
+
+	it("rejects a weak sub-audible line beneath dominant voice energy", () => {
+		const bank = new CtcssBank()
+		for (let i = 0; i < 8000; i++) {
+			bank.pushSample(
+				0.01 * Math.sin((2 * Math.PI * 67 * i) / 8000) +
+					0.5 * Math.sin((2 * Math.PI * 2500 * i) / 8000),
+			)
+		}
+		expect(bank.result()).toBeNull()
+	})
+
+	// Feature: scanner-redesign, Property 25: sustained tone survives voice and phase
+	// Validates: Requirements 4.5, 5.4
+	it("retains real 74.4 and 114.8 Hz tones across voice phases", () => {
+		fc.assert(
+			fc.property(
+				fc.constantFrom(74.4, 114.8),
+				fc.double({ min: 0, max: 6.28, noNaN: true }),
+				(hz, phase) => {
+					const bank = new CtcssBank()
+					for (let i = 0; i < 8000; i++) {
+						bank.pushSample(
+							0.1 * Math.sin((2 * Math.PI * hz * i) / 8000 + phase) +
+								0.5 * Math.sin((2 * Math.PI * 1000 * i) / 8000),
+						)
+					}
+					expect(bank.result()).toBe(hz)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+})
+
+it.each([
+	[0.0502, null],
+	[0.0503, 100],
+] as const)(
+	"requires one percent whole-audio power at amplitude %s",
+	(amplitude, expected) => {
+		const bank = new CtcssBank()
+		for (let i = 0; i < 8000; i++)
+			bank.pushSample(
+				amplitude * Math.sin((2 * Math.PI * 100 * i) / 8000) +
+					0.5 * Math.sin((2 * Math.PI * 2500 * i) / 8000),
+			)
+		expect(bank.result()).toBe(expected)
+	},
+)
+
+it.each([
+	[12000, 100],
+	[14000, null],
+] as const)(
+	"requires sixty percent of completed blocks at %s samples",
+	(samples, expected) => {
+		const bank = new CtcssBank()
+		for (let i = 0; i < samples; i++)
+			bank.pushSample(
+				i < 8000 ? 0.3 * Math.sin((2 * Math.PI * 100 * i) / 8000) : 0,
+			)
+		expect(bank.result()).toBe(expected)
+	},
+)

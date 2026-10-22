@@ -274,6 +274,11 @@ describe("WG9 contract", () => {
 				| "unsupported"
 				| "not-needed"
 				| "cancelled"
+				// WG11 req 1.1: an analog squelch opening without a tone or code
+				| "heard"
+				// WG12: analog replay trial outcomes
+				| "data-like"
+				| "carrier-only"
 			>(true),
 		).toBe(true)
 	})

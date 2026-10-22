@@ -14,8 +14,8 @@ import type {
 import type {
 	EngineState,
 	PipelineEvent,
-	PipelineInput,
 } from "../../../../src/core/spectrum/types.js"
+import type { WorkerPipelineInput } from "../../../../src/core/spectrum/worker-protocol.js"
 import {
 	addInto,
 	analogFm,
@@ -161,7 +161,7 @@ describe("cause 1: I/Q byte slip", () => {
 			branch = realAdd(cfg)
 			return branch
 		}
-		const inputs: PipelineInput[] = []
+		const inputs: WorkerPipelineInput[] = []
 		const engine = new SpectrumEngine({
 			sourceId: "rtl",
 			sources,
@@ -457,10 +457,10 @@ describe("cause 4: a source reconnect (ruled out)", () => {
 
 function recordingHost(
 	handlers: PipelineHostHandlers,
-	inputs: PipelineInput[],
+	inputs: WorkerPipelineInput[],
 ): PipelineHost {
 	return {
-		send(input: PipelineInput, transfer?: ArrayBuffer): void {
+		send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 			inputs.push(
 				input.kind === "bytes"
 					? { ...input, bytes: Uint8Array.from(input.bytes) }
@@ -485,7 +485,7 @@ function fakeEngine() {
 	const sources = new FakeSources()
 	const fanout = new FakeFanout()
 	const tuner = new FakeTuner()
-	const inputs: PipelineInput[] = []
+	const inputs: WorkerPipelineInput[] = []
 	let h: PipelineHostHandlers | null = null
 	const engine = new SpectrumEngine({
 		sourceId: "rtl",

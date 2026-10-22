@@ -8,6 +8,56 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 
 ## Immediate priorities (re-ordered 2026-10-12)
 
+Landed in the scanner redesign batch (WG12): parked sweeps, a channel-matched gate,
+evidence-only labels and transmission proofs, replay-first analog trials, waiting
+identify and activity phases ([spec](specs/scanner-redesign/requirements.md)). The
+untracked-retune alarm now counts only sustained strong features (amendment A16).
+IQ capture remains off by default. The
+[Rust live demodulator phase A](specs/rust-demod-a/requirements.md) also landed:
+NFM/AM is opt-in through `liveDemod.engine: rust`, with csdr the default and fallback
+(in a live A/B on one receiver it used more CPU than csdr).
+
+Live acceptance (2026-10-20, one RTL-SDR on a Wi-Fi-linked receiver host) is
+partial. Passing: no false retune alarm while parked, POCSAG decoded, a DMR
+transmission identified with talkgroup, source and slot. Open, in priority order:
+
+- Enable every decoder the image ships (rtl433, AIS, ACARS, VDL2, direwolf, readsb)
+  in a supported default setup, gated on drop-free fanout; ADS-B needs 1090 MHz at
+  2.4 Msps, so decide between a second tuner and time-sharing one.
+- Identify analog FM, CTCSS and DCS without a live-audio listener: an analog trial
+  must run its own demodulator. Analog FM with a sub-audible tone is measured as a
+  narrow 4FSK signal today and gets only digital trials.
+- Fair decoder-slot scheduling: a trial on one ambient signal can hold the slot for
+  minutes while a user's transmission is never tried; "decode here" must outrank
+  background trials.
+- IQ capture: the capture tool can fail repeatedly at startup and turn capture off
+  without a logged reason; log the tool's failure cause, then run the capture-on
+  acceptance before the default flips.
+- Detection quality: broadband impulses and interference create many weak
+  discoveries at once; a discovery can sit on the hop centre spanning the window;
+  one emitter can split into several discoveries; strong close transmissions widen
+  their tracks and attach to a neighbouring discovery; APRS packets merge into a
+  wide track whose centre falls outside the job range.
+- Proofs: an undecoded digital discovery must carry "Digital, not decoded (tried
+  ...)"; identify must not report a protocol without a decode; a probe whose decoder
+  never connected must not report `no-sync`; a range's protocol list must bound its
+  trials; legacy discoveries keep prior-derived labels.
+- Low-bandwidth links: halving the source rate removed upstream drops on Wi-Fi.
+  Design pass weighing a source jitter buffer, larger fanout branch buffers, a relay
+  buffer on the receiver host, link-quality reporting, and decimation or
+  channelization on the receiver host.
+- Remove the core's port-forwarder sidecar from the protected Docker setup (review
+  against the access policy).
+- Persist trial, analog and unavailable evidence across restart (amendment A12).
+- Add band-aware decoder auto-start, toward all decoders running at once once no
+  branch drops samples.
+- Move the analog tone pass to Rust (amendment A14).
+- Calibrate GMSK labelling on a real corpus (amendment A15).
+- Decide requirement 9.3's Rust detector engine after an idle-host profile; the
+  per-frame dB conversion determines the front-end share used for that decision.
+- Make `protected-runtime-process` tolerate Node 25's SQLite ExperimentalWarning.
+- Route dsd-fme and multimon-ng through the channelizer by default.
+
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
 reversible suspension, `restarting`/crash-loop `faulted` health); bounded CSDR
@@ -85,6 +135,168 @@ activity hygiene (a deliberate behaviour change): squelch re-opens within 1.5 s 
 into one transmission, transmissions under 500 ms and nfm/wfm ones without FM-quieting
 carrier evidence are not published (WS, Activity, identify), while live audio gating is
 unchanged. No CLI or web change required.
+
+Landed in the 2026-10-18 web-gap batch 11 (WG11, core only, [spec](specs/web-gaps-11/requirements.md)):
+
+- **Identify quality.** A squelch opening without CTCSS or DCS is now `heard`, not
+  `decoded` (new trial outcome); analog evidence no longer stops digital trials;
+  `nxdn48`, `dpmr` and `dstar` are tried on 6.25 kHz rasters (last narrow run ends
+  about 10.6 s in, inside the default 15 s); a discovery's known decoded protocol is
+  tried first and forgotten after 2 full-hold misses; a cancel of an ended job is a
+  200 no-op.
+- **Band-scan DMR root cause** (see [SCANNER.md](SCANNER.md#why-a-dmr-band-scan-found-only-heard-signals-wg11)):
+  young sweep tracks were classified as OOK bursts (no probe mode) because sweeps
+  saw no band ISM prior; the dsd-fme `auto` hold was 600 ms, under a DMR late
+  entry. Both fixed (band prior outside the OOK SRD allocations; 1 800 ms hold).
+- **Passive CPU guard.** Configurable limit (`scanner.passive.maxEngineUtilization`,
+  default 0.25), a windowed re-check every 5 min with an 80 % clear threshold, and
+  a 15 min probation for a source whose engine closed.
+- **Scanner store CPU** at 10 000 discoveries and 50 000 observations (budgets in
+  brackets): ingest 41.5 µs (≤ 50; it did not finish in over 10 min before, and grew
+  roughly with n³: 2 148 µs at 2 000 discoveries), progress counts 1.1 µs (O(1);
+  65.5 ms at 3 000 before), steady snapshot 1.71 ms of main-thread time (≤ 5 ms; a
+  worker writes it; 335.5 ms on the main thread at 3 000 before), event-loop p99
+  2.9 ms. The first snapshot after boot or a reset still runs on the main thread
+  (1.2 s at that size).
+- **Configured gain on connect.** `sources[].tuner` (`gainMode`, `gainDb`,
+  `agcMode`) is written on every new connection with tuner command origin `config`;
+  values set through the API or the relay keep precedence. At most 3 commands per
+  connection; without the key nothing changes.
+- **Stable tracks on spectrum frames.** `trackId`, `snrDb`, `peakDbfs`, `blocks`,
+  `ageMs`, `surfaced`, `flags.spur` and the scanner's discovery identity, stable
+  across the tracker's 120 s rollover; at most 260 B more JSON per track (typically
+  105 B, 217 B with the identity). Frame build plus stringify at 64 tracks went from
+  182 to 637 µs in a loaded bench; the identity lookup reads the store without a
+  clone.
+- **IQ capture on detection** (protected mode, off by default): `wavekit-iqcap`
+  keeps a 2 s ring per source and writes up to 4 s of 48 kHz cf32 per transmission
+  (≤ 1.5 MB each, 256 MiB total); a FIFO queue replays it into dsd-fme, multimon-ng
+  or direwolf after the transmission ended (68× to 384× real time), the result lands
+  on the observation and the capture is deleted at once (orphans after 10 min).
+  Tool cost 0.06 to 0.14 cores with 2 captures active at 2.048 / 2.4 Msps, about
+  11.4 MB per source; the tap feed left the event-loop p99 unchanged (2.06 ms).
+
+No CLI change: the CLI guards accept `heard` and `replay` and strip the new frame
+track fields and the `config` origin. The web outcome-label map needs a `heard`
+entry ([CLI-COORDINATION.md](CLI-COORDINATION.md)).
+
+Open after WG11:
+
+- IQ capture: the native tool and Node prove the capture directory chain before
+  every create, link and remove, but a swap between the proof and the syscall is
+  still possible; closing it needs directory-relative calls (`openat`, `unlinkat`)
+  through a libc dependency in `wavekit-iqcap`. A protocol-violating `captured`
+  event after the tool's own `aborted` for the same id leaves a stray file until the
+  next startup sweep. The replay result carries no `crcClean` and is treated as a
+  clean decode. A capture requested right after dropped samples can be refused.
+  The tool's resident memory with a full ring is arithmetic (8.2 MB), not measured.
+- Known protocol: a protocol covered only by a probe's last mode (`nxdn96` in
+  dsd-fme `auto`) never takes a miss from a scan job (safe direction: it stays
+  first, every other trial still runs); only identify decays it.
+- Scanner store: `evictionVictim()` still scans every discovery for each new one
+  once the store is full; a snapshot above V8's maximum string length (about
+  10 000 discoveries × 256 observations) cannot be built at all.
+- CLI: its guards strip the new frame track fields and the `config` tuner origin; a
+  follow-up if the CLI wants to show them.
+- Live acceptance: heard versus decoded on a PMR446 handheld with and without
+  CTCSS, a 6.25 kHz digital identify, passive coming back in a container, gain
+  after a receiver reconnect, and IQ capture identifying a short transmission
+  after it ended.
+
+### Performance and native DSP plan (2026-10-17)
+
+A read-only performance audit of the core found that the cost is dominated by two
+things: full-rate IQ copied into one csdr process chain per analog consumer (with
+pipes and format conversion between stages), and the JavaScript FFT of the
+detector spectrum. Node itself is not the bottleneck; the main thread mostly routes
+buffers. The detector FFT (radix-2 in JS, N = fs/1000, so 2048 at 2.048 Msps, every
+sample transformed) costs 6–8 % of a Mac core but saturates a Pi 3B core (0.99, §8).
+On a Pi 3 four independent decoder chains need 5.37 cores where one shared front
+end needs 0.99 ([Pi channelizer research](RESEARCH-2026-10-08-PI-CHANNELIZER.md)).
+
+Direction: grow `wavekit-chan` into the single per-source Rust DSP engine. It
+already reads each source's CU8 stream once and serves channels over Unix sockets.
+It stays a child process (crash isolation, already built and tested in the image,
+warm channel opens of a few milliseconds, no blocking of the Node event loop); an
+N-API binding would only pay for small, frequent synchronous calls, which none of
+these are. Spectrum frames get a small binary framed side channel; channel and
+audio streams stay raw. Ideas and published algorithms are taken from SDR++ (one
+front end and a splitter feeding every VFO and the FFT, retune by changing only the
+NCO phase increment, re-tap without losing filter history, multistage power-of-two
+decimation, peak-follower AGC, hysteresis squelch); no code is copied. The rules
+every hot-path change follows are in [PERFORMANCE.md](PERFORMANCE.md). Web-UI
+features come first; an optimisation is scheduled as a feature when it is the
+cheapest way to ship one.
+
+Now:
+
+1. **Viewed-slice zoom as a `wavekit-chan` zoom output, plus an in-place `tune`
+   request.** NCO and decimation to the viewed span with the existing channel
+   chain, then a small windowed FFT (`rustfft`) at 5 transforms a second or less,
+   framed to Node. A 128 kHz span at 2.048 Msps (÷16) with a 4096-point FFT gives
+   31.25 Hz bins, the same resolution as a full-rate N 65 536 transform, for the
+   cost of one decimating channel (about 0.1 Mac core in the capacity report) and
+   no main-thread work. `tune` changes the NCO phase increment so the slice pans
+   without a close and reopen. This replaces the JavaScript-worker zoom decision
+   in §8. The truthful-axis contract of the viewed-slice design still holds: the
+   output reports its own `Fs/N`, window, NCO and passband ripple, and resets at
+   gaps and seams. Tests: a golden tone at a known offset (bin, `Fs/N`, ENBW),
+   chunk-split invariance, and a comparison with the JS zoom bench.
+2. **Quick wins.** Delete `src/core/format-converter.ts` (only its own unit test
+   imports it). In the spectrum worker, keep the Zod parse for `init` and control
+   messages but use a cheap structural guard on the hot `input` message (an
+   internal, transferred boundary), and drop the extra `bytes.slice()` copy in
+   `FrameSource.push` (the engine already pools transferred buffers). Measure
+   both worker changes before and after.
+
+WG12:
+
+- **Rust live demodulator, phase A**: a `demod` channel kind in `wavekit-chan` for
+  NFM and AM with in-place retune and bandwidth re-tap, power squelch with
+  hysteresis plus the existing noise squelch, feeding the current HTTP live audio
+  and then the planned 48 kHz WebSocket stream (§5b). It sits behind a config flag
+  with the csdr chain as the fallback. It removes two shells and 4–9 processes per
+  listener, the restart gap on bandwidth and mode changes (offset changes already
+  swap only the front stage since WG10) and the csdr dependency that has no macOS
+  build. Tests: synthetic FM/AM with SINAD bounds, phase continuity and no sample
+  gap across a retune, A/B against csdr on fixtures, squelch latency goldens, and
+  CTCSS surviving the chain.
+- **Drag retune and a wide-band panorama** in the web dashboard, built on the Rust
+  zoom output and `tune` (see the drag-to-tune measurement in §8).
+
+Next:
+
+- Rust demodulator phase B: WFM stereo, SSB/CW/DSB, AGC modes in the engine, noise
+  blanker and notch (the §5b audio DSP item).
+- A Rust detector frame engine (convert, window, FFT, power and block
+  accumulation), with floor, detection and tracking kept in the TypeScript worker
+  and the JS backend kept as the fallback. It must match the existing detector
+  goldens across backends; it unblocks per-client `fftSize` up to 16 384 and
+  higher bin caps on modest hosts.
+- DC blocking, IQ swap and optional IQ imbalance correction once per source in the
+  engine, opt-in per consumer (the §8 DC/IQ item); then remove the ignored
+  `iqDcBlock` flag.
+
+Later:
+
+- Channelizer internals: reused scratch buffers instead of per-chunk
+  allocations, an f32 NCO with block resync that vectorises, and more than one DSP
+  thread (today one thread runs every channel's DSP, which limits headroom at
+  N = 8 in the capacity report). Re-baseline the bit-exact properties deliberately.
+- Channelizer on by default and csdr retired for IQ consumers (`IqDecimateDecoder`
+  and `AudioDemodDecoder` read channels; analog decoders read `demod` audio). Ship
+  the binary everywhere first: a missing binary must not suspend decoders.
+- Scanner evidence and recorder DSP (the JS channel decimator and FM demodulator)
+  moved to engine channels and demod outputs.
+- An FFT fast-convolution filter bank, only if the channel count grows past
+  about 16.
+- Smaller JavaScript clean-ups while those paths remain: one preallocated block
+  assembler for live-audio squelch instead of two re-blockers, `Float32Array` views
+  instead of per-float reads, one reused buffer for muted blocks and for the paced
+  PCM output, and an f32 radix-4 JS FFT as a stopgap fallback.
+
+Not planned for Rust: tone detection (Goertzel banks), level tracking, the audio
+client registry, the tuner relay, and the access and API paths.
 
 Order of the remaining core gaps, by what they unblock in the dashboard:
 
@@ -602,6 +814,16 @@ open. Missing proof retains ownership rather than admitting a successor.
       run (remembered 300 s, not respawned meanwhile). Open: analog identify needs
       live audio on the target (an in-process FM demodulator or a probe FM decoder
       would lift that); real-RF acceptance on PMR446 with CTCSS.
+- [x] Identify quality (WG11): `heard` for a squelch opening without a tone or code,
+      analog evidence no longer stops digital trials, narrow digital trials on
+      6.25 kHz rasters, known protocol first with decay, clean cancel of an ended
+      job, the band-scan DMR root cause fixed, the passive guard re-check, and
+      scanner store CPU off the main thread (see the WG11 summary above). Open: the
+      `nxdn96` last-mode miss in jobs and the `evictionVictim()` scan.
+- [x] IQ capture on detection replayed into identify (WG11, protected mode, off by
+      default): capture → queue → replay trials → result → discard. Open: the
+      directory-relative syscall follow-up in `wavekit-iqcap`, the stray file after
+      a protocol-violating tool event, and `crcClean` on the replay result.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -700,8 +922,8 @@ recording Keep protects one recording independently.
       opaque ids, time, talkgroup, duration and size (frequency only when
       known), and `GET /api/recordings/:id/file` downloads the whole file (no
       `Range`). WaveKit changes no file; the catalog below stays open.
-- [x] Keep individual recordings (WG9, protected mode only): `PUT`/`DELETE
-      /api/recordings/:id/keep` and `DELETE /api/recordings/:id` for dsd-fme
+- [x] Keep individual recordings (WG9, protected mode only):
+      `PUT`/`DELETE /api/recordings/:id/keep` and `DELETE /api/recordings/:id` for dsd-fme
       calls, behind one synchronous deletion decision that the dsd-fme pruner,
       scanner retention, discovery removal and analog retention consult (fail
       closed: an unusable keep store protects everything). Inventory items carry
@@ -905,7 +1127,9 @@ same view, and a program can do the watching more reliably than a person.
       as confirmation. Recording IQ around detected bursts also gives
       automatic fixture capture for decoder goldens.
 - [ ] Keep the engine behind an interface so a native backend can take over.
-      `wavekit-chan` already reads the full CU8 stream per source.
+      `wavekit-chan` already reads the full CU8 stream per source. A Rust detector
+      frame engine with the JS backend as fallback is in the "Next" list of the
+      performance plan above.
 - [ ] A stale `caps.centerFreq` (a retune from SDR++ that bypasses the relay)
       puts the frequency axis and every emission centre on the wrong RF. Partly
       solved: decoder receptions carry the WG5 tuning trust (`unverified` unless
@@ -945,50 +1169,53 @@ and measured limits belong to that session's delta/review.
   late join/reconnect snapshots, retune boundaries and demand cleanup. Announce
   final contracts in `docs/CLI-COORDINATION.md` before landing.
 - [ ] Follow-up: genuine higher-resolution FFT of the viewed slice, with bounded
-  DSP work and unchanged full-stream detection. Magnifying/cropping published
-  bins does not satisfy this item.
-  Prepared Sol/Astra design: benchmark a separate longer raw-IQ FFT at bounded
-  display cadence, then select the viewed bins from that new transform. Require
-  real contiguous samples and report its own `Fs/N`, observation duration, window
-  and sample support separately from detector resolution and delivery cadence.
-  Preserve detector conversion arithmetic, deduplicate overlapping sample ranges
-  and reset at gap/marker/settle/stream boundaries. Borrowed raw arrays must remain
-  synchronous and display accumulation bounded. Translation/anti-alias decimation
-  is a measured optimization if the simpler transform exceeds available headroom.
-  Implementation waits for reviewed Task 37a contracts/summary measurements and
-  the 35a/38 shared-file window; sustained zoom workload measurements then choose
-  FFT, memory, rate and DSP-profile limits.
-  WG9 measured the sustained zoom workload on the Mac (`scripts/bench/zoom-workload.ts`,
-  2.048 Msps, 128 kHz span, 60 s cells, a loaded machine, so indicative only): the
-  event-loop rule (+2 ms p99), not CPU, is the binding limit while the zoom FFT runs
-  on the main thread. One transform takes about 2.3 ms at N 32 768, 7 ms at 65 536
-  and 18 ms at 131 072, so above about N 16 384 almost any main-thread placement
-  fails; incremental CPU alone would allow N 65 536 at 5/s with 1-2 slices (0.015 to
-  0.058 core). Decision: the zoom transform belongs in a worker (the spectrum worker
-  or its own). Proposed Mac caps in a worker: N ≤ 65 536 (31.25 Hz bins), at most
-  5 transforms a second, at most 2 slices per source, 0.20 core in total; N 131 072
-  and above fail CPU or memory. Until the Pi run (pending), the Pi proposal is
-  N ≤ 32 768, 5/s, 1 slice per source and 2 in total, in a worker; Pi 3 N ≤ 16 384.
-  Measured on a Raspberry Pi 3B with the same bench at 2.048 Msps: the JavaScript
-  detector proxy alone saturates one core (0.99), so every zoom cell fails; one
-  transform takes about 5 ms at N 8 192 up to 200 ms at N 131 072. Conclusion: zoom
-  limits depend on the core host, not the receiver. A Pi-class core host needs the
-  zoom FFT off the main thread, preferably in Rust (a `wavekit-chan` extension), and
-  even then has no headroom while the JS detector runs; caps must come from a
-  measurement on the host that runs the core.
+      DSP work and unchanged full-stream detection. Magnifying/cropping published
+      bins does not satisfy this item.
+      Prepared Sol/Astra design: benchmark a separate longer raw-IQ FFT at bounded
+      display cadence, then select the viewed bins from that new transform. Require
+      real contiguous samples and report its own `Fs/N`, observation duration, window
+      and sample support separately from detector resolution and delivery cadence.
+      Preserve detector conversion arithmetic, deduplicate overlapping sample ranges
+      and reset at gap/marker/settle/stream boundaries. Borrowed raw arrays must remain
+      synchronous and display accumulation bounded. Translation/anti-alias decimation
+      is a measured optimization if the simpler transform exceeds available headroom.
+      Implementation waits for reviewed Task 37a contracts/summary measurements and
+      the 35a/38 shared-file window; sustained zoom workload measurements then choose
+      FFT, memory, rate and DSP-profile limits.
+      WG9 measured the sustained zoom workload on the Mac (`scripts/bench/zoom-workload.ts`,
+      2.048 Msps, 128 kHz span, 60 s cells, a loaded machine, so indicative only): the
+      event-loop rule (+2 ms p99), not CPU, is the binding limit while the zoom FFT runs
+      on the main thread. One transform takes about 2.3 ms at N 32 768, 7 ms at 65 536
+      and 18 ms at 131 072, so above about N 16 384 almost any main-thread placement
+      fails; incremental CPU alone would allow N 65 536 at 5/s with 1-2 slices (0.015 to
+      0.058 core). Decision: the zoom transform belongs in a worker (the spectrum worker
+      or its own). Proposed Mac caps in a worker: N ≤ 65 536 (31.25 Hz bins), at most
+      5 transforms a second, at most 2 slices per source, 0.20 core in total; N 131 072
+      and above fail CPU or memory. Until the Pi run (pending), the Pi proposal is
+      N ≤ 32 768, 5/s, 1 slice per source and 2 in total, in a worker; Pi 3 N ≤ 16 384.
+      Measured on a Raspberry Pi 3B with the same bench at 2.048 Msps: the JavaScript
+      detector proxy alone saturates one core (0.99), so every zoom cell fails; one
+      transform takes about 5 ms at N 8 192 up to 200 ms at N 131 072. Conclusion: zoom
+      limits depend on the core host, not the receiver. A Pi-class core host needs the
+      zoom FFT off the main thread, preferably in Rust (a `wavekit-chan` extension), and
+      even then has no headroom while the JS detector runs; caps must come from a
+      measurement on the host that runs the core.
+      Superseded 2026-10-17: the zoom transform moves to a `wavekit-chan` zoom output
+      (DDC to the viewed span plus a small Rust FFT, panned in place by `tune`) instead
+      of a JavaScript worker; see "Performance and native DSP plan" above.
 - [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
-  WS tuning. Any transport reuses authorization, ordering, scanner preemption
-  and tuner origin semantics. WG9 measured the operator retune to first frame at
-  the new centre offline (fake rtl_tcp on loopback, 50 retunes per injected delay,
-  network settle 1000 ms): p90 1148 ms before, 264 ms after at zero delay (280 ms
-  at 100 ms, 383 ms at 250 ms, 611 ms at 500 ms, where some old-centre blocks show
-  but are labelled `unverified`). The 150 ms operator display settle replaces the
-  1 s network settle for display; frames stay `unverified` until the network
-  settle. Revisit WS tuning with these numbers; a real-receiver measurement is
-  open.
+      WS tuning. Any transport reuses authorization, ordering, scanner preemption
+      and tuner origin semantics. WG9 measured the operator retune to first frame at
+      the new centre offline (fake rtl_tcp on loopback, 50 retunes per injected delay,
+      network settle 1000 ms): p90 1148 ms before, 264 ms after at zero delay (280 ms
+      at 100 ms, 383 ms at 250 ms, 611 ms at 500 ms, where some old-centre blocks show
+      but are labelled `unverified`). The 150 ms operator display settle replaces the
+      1 s network settle for display; frames stay `unverified` until the network
+      settle. Revisit WS tuning with these numbers; a real-receiver measurement is
+      open. Drag retune is planned for WG12 on top of the Rust zoom output and `tune`.
 - [ ] Implement source/channel DC removal, IQ correction and IQ swap as measured
-  sample-processing controls. Existing DC/image/spur masks only affect detection
-  and display; the ignored legacy IQ DC-block flag must not imply correction.
+      sample-processing controls. Existing DC/image/spur masks only affect detection
+      and display; the ignored legacy IQ DC-block flag must not imply correction.
 
 ## 8b. Positions, maps and coverage
 

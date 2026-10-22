@@ -513,7 +513,7 @@ describe("MeshTracker", () => {
 		expect(statsEvents).toEqual([2])
 	})
 
-	it("keeps the rate window to at most 61 one-second buckets under a packet flood (R1 #9)", () => {
+	it("keeps the rate window to at most 61 one-second buckets under a packet flood", () => {
 		let clock = 0
 		const nodes = tracker({ now: () => clock, maxNodes: 10 })
 		for (let i = 0; i < 6_000; i++) {

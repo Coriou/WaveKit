@@ -51,6 +51,30 @@ fn bessel_i0(x: f64) -> f64 {
     sum
 }
 
+/// Kaiser-windowed lowpass with exactly `taps` coefficients and DC gain `gain`.
+///
+/// `cutoff` is the −6 dB point as a fraction of the sample rate, the same convention as
+/// [`lowpass`]. `taps` must be odd and at least 1; an even count is not a type-I filter, so
+/// this returns a length-`taps` impulse (center tap `gain`) instead of designing one.
+/// Invalid `cutoff` or `gain` does the same, so a caller that keeps a delay line never sees
+/// a different length and this function does not panic.
+pub fn kaiser_lowpass(cutoff: f64, taps: usize, gain: f64) -> Vec<f32> {
+    if taps == 0 || taps.is_multiple_of(2) {
+        return impulse(taps.max(1), gain);
+    }
+    if !cutoff.is_finite() || cutoff <= 0.0 || cutoff >= 0.5 || !gain.is_finite() || gain <= 0.0 {
+        return impulse(taps, gain);
+    }
+    windowed_sinc(cutoff, taps, gain)
+}
+
+fn impulse(taps: usize, gain: f64) -> Vec<f32> {
+    let mut v = vec![0.0; taps.max(1)];
+    let mid = v.len() / 2;
+    v[mid] = if gain.is_finite() { gain as f32 } else { 1.0 };
+    v
+}
+
 /// Kaiser-windowed sinc with exactly `n` (odd) taps, normalised to DC gain `gain`.
 fn windowed_sinc(cutoff: f64, n: usize, gain: f64) -> Vec<f32> {
     windowed_sinc_checked(cutoff, n, gain, None).expect("uncancelled design")

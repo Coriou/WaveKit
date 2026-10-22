@@ -89,6 +89,9 @@ export const decoderSuspensionReasonCodes = [
 	...decoderRateReasonCodes,
 	"frequency-out-of-band",
 	"tuner-scanning",
+	"efficiency-budget",
+	"decoder-unavailable",
+	"channelizer-unavailable",
 ] as const
 
 const frequency = { type: "number", exclusiveMinimum: 0 } as const

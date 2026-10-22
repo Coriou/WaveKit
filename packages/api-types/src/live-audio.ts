@@ -79,6 +79,8 @@ export interface LiveAudioConfig {
 	offsetHz?: number
 	/** WG4: absent = modulation default. */
 	agc?: LiveAudioAgcMode
+	/** Demodulator for this config. Absent means csdr. */
+	engine?: "csdr" | "rust"
 }
 
 export interface LiveAudioStatus {
@@ -112,6 +114,25 @@ export interface LiveAudioStatus {
 	 * or the tone not heard: audio muted), `open` (tone heard: audio passes).
 	 */
 	toneSquelch?: { state: "off" | "waiting" | "open" }
+	/** Demodulator that produced this status. `csdr` when Rust fell back or was not asked. */
+	engine?: "csdr" | "rust"
+	/** Why a requested Rust engine is not the one running. Present only when set. */
+	engineFallback?:
+		| "binary-unavailable"
+		| "protocol-unsupported"
+		| "input-format-unsupported"
+		| "modulation-unsupported"
+		| "open-rejected"
+		| "process-unstable"
+	/**
+	 * WG12: last closed or current transmission's tone. Absent until one is reported;
+	 * cleared on retune and stop.
+	 */
+	tone?: {
+		ctcssHz: number | null
+		dcs: AnalogTransmissionDcs | null
+		at: string
+	}
 }
 
 export type LiveDemodConfig = LiveAudioConfig

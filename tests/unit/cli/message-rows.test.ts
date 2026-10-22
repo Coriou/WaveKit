@@ -115,13 +115,13 @@ describe("message rows", () => {
 		expect(out.lines).toHaveLength(3)
 	})
 
-	it("sanitises server-sent decoder ids (review focus 4)", () => {
+	it("sanitises server-sent decoder ids", () => {
 		const e: MessageEntry = { ...at(0), decoderId: "x\x1b[2J\u202Ey" }
 		const line = lineText(messageRow(e, messageLayout(119), false, false))
 		expect(/[\u0000-\u001f\u007f-\u009f\u202E]/.test(line)).toBe(false)
 	})
 
-	describe("fix round 1", () => {
+	describe("m8: segments plus short text are not squeezed by a fixed reservation", () => {
 		const fm = (texts: string[], text?: string): FormattedMessage => ({
 			protocol: "T",
 			category: "other",

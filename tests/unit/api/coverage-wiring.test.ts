@@ -1,5 +1,5 @@
 /**
- * Coverage per bearing through the real ApiServer (WG3 req 7, MA.2 lane C wiring): the
+ * WG3: Coverage per bearing through the real ApiServer: the
  * CoverageManager passed in the dependencies serves GET /api/coverage; without one the
  * route is not mounted.
  */

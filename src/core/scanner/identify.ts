@@ -22,11 +22,15 @@ import type {
 	ScannerAmbientDecoderType,
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
+	TuningTrust,
 } from "@wavekit/api-types"
 import {
 	IDENTIFY_AMBIENT_MAX_TRIALS,
 	DCS_STANDARD_CODES,
 	IDENTIFY_ANALOG_LOOKBACK_MS,
+	IDENTIFY_WAIT_DEFAULT_MS,
+	IDENTIFY_WAIT_MAX_MS,
+	IDENTIFY_WAIT_MIN_MS,
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
 	SCANNER_AMBIENT_PROTOCOLS,
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
@@ -43,18 +47,50 @@ import {
 	CLASS_HYPOTHESES,
 	classOf,
 	classifySpectral,
+	protocolPrior,
 } from "./classify/classifier.js"
+import { proofFromFacts } from "./proof.js"
 import { ScannerApiError } from "./errors.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { replayMissEligible } from "../iq-capture/replay-miss.js"
+import {
+	IDENTIFY_REPLAY_MAX_CAPTURES,
+	IQ_REPLAY_MAX_TRIALS,
+	type IqCapturePort,
+	type IqCaptureRefusal,
+	type IqCaptureRequest,
+	type IqCaptureView,
+} from "./iq-capture-contract.js"
+
+/**
+ * WG11 req 6.8 (review M2): the capture port as identify uses it. With `captureFor` and `view` (the
+ * capture service), a capture identify requests is held for the job from the start, so the replay
+ * queue never takes it over; without them, the frozen port alone (claimed once finished).
+ */
+export type IdentifyIqCapture = IqCapturePort & {
+	captureFor?(
+		req: IqCaptureRequest,
+		holder: string,
+	): { captureId: string } | { refused: IqCaptureRefusal }
+	view?(captureId: string): IqCaptureView | null
+}
 import type {
 	AnalogEvidenceTransmission,
 	IdentifyAnalogEvidence,
 } from "./identify-analog-contract.js"
+import {
+	ANALOG_TRIAL_FRAME_MS,
+	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalogTrialMode,
+	type AnalogTrialRunner,
+} from "./scanner-redesign-contract.js"
 import {
 	JOB_STARTUP_CAP_MS,
 	type JobDriver,
 	type JobRecord,
 } from "./job-runner.js"
 import type { JobEvent } from "./job-state.js"
+import type { KnownProtocolMemory } from "./known-protocol-contract.js"
 import { PROTOCOL_DECODER, probeTransportFor } from "./plan/plan-preview.js"
 import {
 	probeModesFor,
@@ -62,16 +98,16 @@ import {
 	type ProbePool,
 	type ProbeRequest,
 } from "./probes/probe-pool.js"
-import {
-	CONFIDENCE_RANK,
-	type DecodeEvidence,
-	type Discovery,
-	type Hypothesis,
-	type Identity,
-	type ScannerClass,
-	type ScannerConfidence,
-	type ScannerProtocol,
-	type ScannerSettings,
+import type {
+	DecodeEvidence,
+	Discovery,
+	Hypothesis,
+	Identity,
+	ScannerClass,
+	ScannerConfidence,
+	ScannerProtocol,
+	ScannerSettings,
+	ScannerProof,
 } from "./types.js"
 
 export const IDENTIFY_DEFAULT_TIMEOUT_MS = 15_000
@@ -88,10 +124,35 @@ export const IDENTIFY_ALL_MAX_TARGETS = 16
 export const IDENTIFY_CANDIDATE_SCORE = 0.5
 /** Weight of a class the bandwidth allows but the spectral features did not pick. */
 export const IDENTIFY_ALT_CLASS_WEIGHT = 0.5
+export const IDENTIFY_ANALOG_MIN_SCORE = 0.3
 /** Relative slack on each class's OBW window (below 20 dB SNR the OBW is the on-bin width). */
 export const IDENTIFY_OBW_SLACK = 0.25
+/**
+ * WG11 req 1.3: the floor score of the narrow digital trials (`nxdn48`, `dpmr`, `dstar`) on a target inside a
+ * band plan range listing a raster of at most 6 250 Hz, before the bandplan prior.
+ */
+export const IDENTIFY_NARROW_DIGITAL_MIN_SCORE = 0.3
+/** WG11 req 1.3: the classes whose hypotheses a narrow raster adds, and the protocols taken from them. */
+const NARROW_DIGITAL_CLASSES: readonly ScannerClass[] = [
+	"fsk4-6k25",
+	"gmsk-narrow",
+]
+const NARROW_DIGITAL_PROTOCOLS: ReadonlySet<ScannerProtocol> =
+	new Set<ScannerProtocol>(["nxdn48", "dpmr", "dstar"])
 /** Ended identify jobs kept listed (they are never persisted). */
 export const IDENTIFY_KEEP_JOBS = 50
+/** WG11 req 6.8: how long a requested capture may take to finish once the live runs are over. */
+export const IDENTIFY_REPLAY_CAPTURE_WAIT_MS = 2000
+/**
+ * Wall-clock cap for one analog replay trial.
+ * ANALOG_TRIAL_MAX_FRAMES × ANALOG_TRIAL_FRAME_MS is the longest capture
+ * (IQ_CAPTURE_MAX_MS, 4 000 ms). ANALOG_REPLAY_TRIAL_SLACK_MS bounds process
+ * startup and the tone pass after the last statistics frame.
+ * 80 × 50 + 1 000 = 5 000.
+ */
+const ANALOG_REPLAY_TRIAL_SLACK_MS = 1_000
+export const ANALOG_REPLAY_TRIAL_DEADLINE_MS =
+	ANALOG_TRIAL_MAX_FRAMES * ANALOG_TRIAL_FRAME_MS + ANALOG_REPLAY_TRIAL_SLACK_MS
 /** The classifier's burst limit (Task 11): a track this short may be an OOK burst. */
 const BURST_MAX_BLOCKS = 4
 
@@ -163,7 +224,12 @@ const MODE_CLASS: Readonly<Partial<Record<ScannerProtocol, ScannerClass>>> = {
 	ism: "ook-burst",
 }
 
-export type NormalisedIdentify = Omit<ScannerIdentifyView, "targets">
+export type NormalisedIdentify = Omit<ScannerIdentifyView, "targets"> & {
+	/** WG12 req 6.1: stay waiting until a gated transmission. Absent: today's path. */
+	waitUntilSignal?: boolean
+	/** Give up that wait after this many ms. Absent: IDENTIFY_WAIT_DEFAULT_MS. */
+	waitMs?: number
+}
 
 export interface IdentifyTrackView {
 	observationId: string
@@ -222,6 +288,12 @@ export function normaliseIdentify(
 		protocols: [...new Set(r.protocols ?? [])],
 		exhaustive: r.exhaustive ?? false,
 		record: r.record ?? true,
+		...(r.waitUntilSignal === true ? { waitUntilSignal: true as const } : {}),
+		...(r.waitUntilSignal === true &&
+		typeof r.waitMs === "number" &&
+		Number.isFinite(r.waitMs)
+			? { waitMs: r.waitMs }
+			: {}),
 	}
 }
 
@@ -245,14 +317,17 @@ export function inWindow(
 /** The classes the track's bandwidth and features allow, the spectral class first. */
 export function compatibleClasses(track: TrackSnapshot): ScannerClass[] {
 	const own = classOf(track)
-	if (own === "carrier" || own === "wideband") return [own]
+	if (own === "wideband") return [own]
 	const out: ScannerClass[] = [own]
+	if (track.obwHz <= 18_000 * (1 + IDENTIFY_OBW_SLACK) && own !== "analog-fm")
+		out.push("analog-fm")
+	if (own === "carrier") return out
 	const short = track.flags.burst || track.blocks <= BURST_MAX_BLOCKS
 	for (const [cls, window] of Object.entries(CLASS_OBW_HZ) as [
 		ScannerClass,
 		readonly [number, number],
 	][]) {
-		if (cls === own || (cls === "ook-burst" && !short)) continue
+		if (out.includes(cls) || (cls === "ook-burst" && !short)) continue
 		if (
 			track.obwHz >= window[0] * (1 - IDENTIFY_OBW_SLACK) &&
 			track.obwHz <= window[1] * (1 + IDENTIFY_OBW_SLACK)
@@ -264,24 +339,33 @@ export function compatibleClasses(track: TrackSnapshot): ScannerClass[] {
 
 /**
  * § 10.8 plausible decoders: every identify protocol some compatible class lists, scored
- * hypothesis × class weight × bandplan prior (missing = 1), cut to the request's protocols,
- * best first (ties by name). A prior of 0 removes a protocol.
+ * hypothesis × class weight × bandplan prior (missing = 1), bounded only by explicit protocols,
+ * best first (ties by name). Priors never exclude a protocol. WG11 req 1.3: with `narrow` (the target lies on a
+ * <= 6.25 kHz raster) `nxdn48`, `dpmr` and `dstar` are scored at least IDENTIFY_NARROW_DIGITAL_MIN_SCORE before the
+ * prior, whatever the track's width; absent or false: today's scores.
  */
 export function identifyScores(
 	track: TrackSnapshot,
 	ctx: {
 		priors: Partial<Record<ScannerProtocol, number>>
 		protocols: readonly ScannerProtocol[]
+		narrow?: boolean
+		/** Non-explicit defaults order trials without excluding protocols. */
+		explicit?: boolean
 	},
 ): Hypothesis[] {
 	const classes = compatibleClasses(track)
 	const own = classes[0]
-	const only = ctx.protocols.length > 0 ? new Set(ctx.protocols) : null
+	const only =
+		ctx.explicit !== false && ctx.protocols.length > 0
+			? new Set(ctx.protocols)
+			: null
 	const best = new Map<ScannerProtocol, number>()
 	for (const cls of classes) {
 		const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
 		for (const h of CLASS_HYPOTHESES[cls]) {
 			if (
+				(own === "carrier" && h.protocol !== "analog-fm") ||
 				!IDENTIFY_PROTOCOLS.includes(h.protocol) ||
 				SCANNER_AMBIENT_PROTOCOLS.includes(h.protocol) ||
 				(only && !only.has(h.protocol))
@@ -289,10 +373,53 @@ export function identifyScores(
 				continue
 			const score = Math.min(
 				1,
-				Math.max(0, h.score * weight * (ctx.priors[h.protocol] ?? 1)),
+				Math.max(0, h.score * weight * protocolPrior(ctx.priors[h.protocol])),
 			)
 			if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
 		}
+	}
+	if (ctx.narrow === true) {
+		for (const cls of NARROW_DIGITAL_CLASSES) {
+			const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
+			for (const h of CLASS_HYPOTHESES[cls]) {
+				if (
+					!NARROW_DIGITAL_PROTOCOLS.has(h.protocol) ||
+					(only && !only.has(h.protocol))
+				)
+					continue
+				const base = Math.max(
+					h.score * weight,
+					IDENTIFY_NARROW_DIGITAL_MIN_SCORE,
+				)
+				const score = Math.min(
+					1,
+					Math.max(0, base * protocolPrior(ctx.priors[h.protocol])),
+				)
+				if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
+			}
+		}
+	}
+	// An explicit request can try a protocol even outside its expected bandwidth.
+	for (const protocol of new Set<ScannerProtocol>([
+		"analog-fm",
+		...(only ?? []),
+	])) {
+		if (
+			SCANNER_AMBIENT_PROTOCOLS.includes(protocol) ||
+			(only && !only.has(protocol)) ||
+			(!only && protocol === "analog-fm" && !classes.includes("analog-fm"))
+		)
+			continue
+		const base =
+			protocol === "analog-fm" && classes.includes("analog-fm")
+				? IDENTIFY_ANALOG_MIN_SCORE
+				: 0.01
+		const score = Math.min(1, base * protocolPrior(ctx.priors[protocol]))
+		best.set(protocol, Math.max(best.get(protocol) ?? 0, score))
+	}
+	if (ctx.explicit === false && ctx.protocols.length > 0) {
+		for (const [protocol, score] of best)
+			if (!ctx.protocols.includes(protocol)) best.set(protocol, score * 0.5)
 	}
 	return [...best]
 		.map(([protocol, score]) => ({ protocol, score }))
@@ -366,6 +493,31 @@ export function planIdentifyTrials(
 		})
 	}
 	return { trials, runs }
+}
+
+/**
+ * WG11 req 1.7 (pure): `scores` with the known protocol first (stable order otherwise, never a removal), so its
+ * probe mode's run is the plan's first. Added at its own score (0 when the track did not suggest it) unless it
+ * has no probe mode or the request's explicit protocol list excludes it.
+ */
+export function knownFirst(
+	scores: readonly Hypothesis[],
+	known: ScannerProtocol,
+	priors: Partial<Record<ScannerProtocol, number>>,
+	protocols: readonly ScannerProtocol[],
+): Hypothesis[] {
+	const prior = protocolPrior(priors[known])
+	if (
+		identifyModeFor(known) === null ||
+		(protocols.length > 0 && !protocols.includes(known)) ||
+		!(prior > 0)
+	)
+		return [...scores]
+	const own = scores.find(h => h.protocol === known) ?? {
+		protocol: known,
+		score: 0,
+	}
+	return [own, ...scores.filter(h => h.protocol !== known)]
 }
 
 /**
@@ -488,18 +640,124 @@ export function identifyVerdict(v: {
 	topScore: number
 	analog?: IdentifyVerdictAnalog | null
 }): "identified" | "candidate" | "unidentified" {
-	if (v.artefact) return "unidentified"
-	if (v.decoded) return "identified"
-	if (v.heardIdentity) return "candidate" // an identity capped by a leak/intermod flag (§ 6.2)
-	// WG10 req 3.4: a digital decode wins; analog voice is identified only with a reported tone on a trusted frequency.
-	if (v.analog)
-		return v.analog.tone && v.analog.trusted ? "identified" : "candidate"
-	if (
-		v.discoveryConfidence !== null &&
-		CONFIDENCE_RANK[v.discoveryConfidence] >= CONFIDENCE_RANK.classified
-	)
-		return "candidate"
-	return v.topScore >= IDENTIFY_CANDIDATE_SCORE ? "candidate" : "unidentified"
+	try {
+		if (v.artefact) return "unidentified"
+		if (v.decoded === true) return "identified"
+		if (v.heardIdentity === true) return "candidate" // an identity capped by a leak/intermod flag (§ 6.2)
+		// WG10 req 3.4: a digital decode wins; analog voice is identified only with a reported tone on a trusted frequency.
+		if (
+			v.analog &&
+			typeof v.analog.tone === "boolean" &&
+			typeof v.analog.trusted === "boolean"
+		)
+			return v.analog.tone === true && v.analog.trusted === true
+				? "identified"
+				: "candidate"
+		return "unidentified"
+	} catch {
+		return "unidentified"
+	}
+}
+
+/** Completed unsuccessful digital trials prove the attempt, never a protocol label. */
+export function identifyDigitalProof(
+	trials: readonly ScannerIdentifyTrial[],
+	observationId: string,
+	at: number,
+): ScannerProof | null {
+	try {
+		const decoders = new Set([
+			"dsd-fme",
+			"multimon-ng",
+			"direwolf",
+			"rtl433",
+			"ais-catcher",
+			"acarsdec",
+			"dumpvdl2",
+			"lora-meshtastic",
+			"live-audio",
+			"analog-demod",
+			null,
+		])
+		const transports = new Set(["offset", "channel", "ambient", "replay", null])
+		const outcomes = new Set([
+			"not-needed",
+			"pending",
+			"running",
+			"decoded",
+			"no-sync",
+			"crc-errors",
+			"timeout",
+			"unsupported",
+			"cancelled",
+			"heard",
+			"data-like",
+			"carrier-only",
+		])
+		if (
+			!trials.every(
+				t =>
+					t !== null &&
+					IDENTIFY_PROTOCOLS.includes(t.protocol) &&
+					decoders.has(t.decoder) &&
+					transports.has(t.transport) &&
+					(t.mode === null || typeof t.mode === "string") &&
+					outcomes.has(t.outcome) &&
+					(t.outcome === "unsupported" ||
+						(t.decoder !== null && t.transport !== null)),
+			)
+		)
+			return null
+		const digital = trials.filter(
+			t =>
+				t.decoder !== "live-audio" &&
+				t.decoder !== "analog-demod" &&
+				t.decoder !== null &&
+				t.outcome !== "unsupported" &&
+				t.outcome !== "not-needed",
+		)
+		const dataLike = trials.filter(
+			t =>
+				t.decoder === "analog-demod" &&
+				IDENTIFY_ANALOG_PROTOCOLS.includes(t.protocol) &&
+				t.outcome === "data-like",
+		)
+		if (
+			(digital.length === 0 && dataLike.length === 0) ||
+			!digital.every(t => t.outcome === "no-sync" || t.outcome === "timeout") ||
+			trials.some(t => t.outcome === "decoded" || t.outcome === "heard")
+		)
+			return null
+		const supporting = [...digital, ...dataLike]
+		return proofFromFacts(
+			{
+				observationId,
+				decodes: [],
+				analog: [],
+				unavailable: [],
+				trust: "unverified",
+				digitalPlanComplete: true,
+				trials: digital.map((t, order) => ({
+					protocol: t.protocol,
+					decoder: t.decoder ?? "",
+					outcome: t.outcome,
+					order,
+					at,
+				})),
+			},
+			{
+				kind: "digital-undecoded",
+				protocol: "digital-unknown",
+				transport: supporting.every(t => t.transport === "replay")
+					? "replay"
+					: "live",
+				at,
+				encrypted: false,
+			},
+		)
+	} catch {
+		return null
+	}
 }
 
 /**
@@ -620,6 +878,87 @@ export function analogVerdictOf(
 	return {
 		tone: a.ctcssHz !== null || a.dcs !== null,
 		trusted: a.tuningTrust === "commanded" || a.tuningTrust === "relay",
+	}
+}
+
+const ANALOG_TRIAL_OUTCOMES = new Set([
+	"decoded",
+	"heard",
+	"data-like",
+	"carrier-only",
+	"no-sync",
+])
+
+/**
+ * A replay verdict the runner will trust. An error, a missing body or an unknown outcome is
+ * no verdict (the trial is cancelled). Tones are re-checked separately.
+ */
+function parseAnalogTrial(raw: unknown): {
+	outcome: "decoded" | "heard" | "data-like" | "carrier-only" | "no-sync"
+	mode: AnalogTrialMode
+	tones: unknown
+} | null {
+	if (typeof raw !== "object" || raw === null) return null
+	if (typeof (raw as { then?: unknown }).then === "function") return null
+	const error = (raw as { error?: unknown }).error
+	if (error !== undefined) return null
+	const outcome = (raw as { outcome?: unknown }).outcome
+	if (typeof outcome !== "string" || !ANALOG_TRIAL_OUTCOMES.has(outcome))
+		return null
+	const mode = (raw as { mode?: unknown }).mode
+	if (mode !== "nfm" && mode !== "am") return null
+	return {
+		outcome: outcome as
+			| "decoded"
+			| "heard"
+			| "data-like"
+			| "carrier-only"
+			| "no-sync",
+		mode,
+		tones: (raw as { tones?: unknown }).tones,
+	}
+}
+
+/** A gated start the runner will time from. Anything else, including a promise, is no start. */
+function parseGateStart(
+	raw: unknown,
+): { startSample: number; atMs: number } | null {
+	if (typeof raw !== "object" || raw === null) return null
+	if (typeof (raw as { then?: unknown }).then === "function") return null
+	const startSample = (raw as { startSample?: unknown }).startSample
+	const atMs = (raw as { atMs?: unknown }).atMs
+	if (typeof startSample !== "number" || typeof atMs !== "number") return null
+	if (!Number.isFinite(startSample) || startSample < 0) return null
+	if (!Number.isFinite(atMs)) return null
+	return { startSample, atMs }
+}
+
+/** Trust is only the three known answers. Anything else is unverified. */
+function captureTrust(trust: unknown): TuningTrust {
+	return trust === "commanded" || trust === "relay" ? trust : "unverified"
+}
+
+/** A standard CTCSS tone or DCS code. A heard result, or anything else, is no tone. */
+function standardTone(tones: unknown): {
+	ctcssHz: number | null
+	dcs: ScannerIdentifyAnalog["dcs"]
+} {
+	if (typeof tones !== "object" || tones === null)
+		return { ctcssHz: null, dcs: null }
+	const ctcss = (tones as { ctcssHz?: unknown }).ctcssHz
+	const dcs = (tones as { dcs?: unknown }).dcs
+	let code: string | null = null
+	let polarity: "normal" | "inverted" | null = null
+	if (typeof dcs === "object" && dcs !== null) {
+		const c = (dcs as { code?: unknown }).code
+		const p = (dcs as { polarity?: unknown }).polarity
+		if (typeof c === "string" && ANALOG_DCS.has(c)) code = c
+		if (p === "normal" || p === "inverted") polarity = p
+	}
+	return {
+		ctcssHz:
+			typeof ctcss === "number" && ANALOG_CTCSS.has(ctcss) ? ctcss : null,
+		dcs: code !== null && polarity !== null ? { code, polarity } : null,
 	}
 }
 
@@ -782,6 +1121,10 @@ export interface IdentifyDeps {
 	discoveryOf: (observationId: string) => Discovery | undefined
 	/** Bandplan priors at a frequency (Task 12 `priorsFor` over the region's bandplans). */
 	priorsAt: (hz: number) => Partial<Record<ScannerProtocol, number>>
+	rangeProtocolsAt?: (hz: number) => {
+		protocols: readonly ScannerProtocol[]
+		explicit: boolean
+	}
 	format: (sourceId: string) => string
 	/** True once the core channelizer serves probe channels (S2, Task 40): parallel trials. */
 	channelizer: () => boolean
@@ -793,6 +1136,34 @@ export interface IdentifyDeps {
 	ambient?: IdentifyAmbientLookup
 	/** WG10 req 3.1: the live demodulator's transmissions. Absent: analog trials stay `unsupported`/`no-decoder`. */
 	analogEvidence?: IdentifyAnalogEvidence
+	/**
+	 * WG11 req 1.3: true when a band plan range of the active region containing `hz` lists a raster of at most
+	 * 6 250 Hz. Absent (or throwing): no narrow digital trials are added, today's plan.
+	 */
+	narrowRasterAt?: (hz: number) => boolean
+	/**
+	 * WG11 req 1.7/1.8: the known-protocol memory. Absent: today's order and no miss or decode counting.
+	 */
+	knownProtocols?: KnownProtocolMemory
+	/**
+	 * WG11 req 6.8: the IQ capture port. Absent: no capture is claimed, requested or replayed, and the
+	 * flow is unchanged.
+	 */
+	iqCapture?: IdentifyIqCapture
+	/**
+	 * WG12 req 6.1: the next gated transmission at a point target, or null. One call per waiting
+	 * target per tick. Absent, or without `waitUntilSignal`: today's path.
+	 */
+	gatedAt?: (
+		sourceId: string,
+		hz: number,
+		toleranceHz: number,
+	) => { startSample: number; atMs: number } | null
+	/**
+	 * WG12 req 6.6: analog replay of a claimed capture whose plan includes analog. Absent: no
+	 * `analog-demod` trial. The runner owns admission to the probe budget.
+	 */
+	analogTrial?: AnalogTrialRunner
 }
 
 /**
@@ -824,6 +1195,41 @@ interface RunState {
 	seen: Map<ScannerProtocol, TrialSeen>
 	/** WG9 req 5.4: the pool reported this run's decoder program cannot run. */
 	unavailable: boolean
+	/**
+	 * WG11 req 6.5: a replay run of a claimed capture. Its `runIndex` is -1 (it owns no trial; the live
+	 * trials stay as they are unless the replay decodes or completes one); `planRun` is the plan run it repeats.
+	 */
+	replay?: { captureId: string; planRun: number }
+	/** The pool reported the replay decoder's clean end (its verdict is the evidence seen). */
+	replayDone: boolean
+}
+
+/** One step of a target's replay queue: a probe run, or the analog trial that shares that queue. */
+type ReplayWork =
+	| { kind: "probe"; captureId: string; planRun: number }
+	| { kind: "analog"; captureId: string }
+
+/** WG11 req 6.8: one target's IQ captures. */
+interface ReplayState {
+	/** Captures this job holds (claimed at plan, or once a requested one finished). */
+	claimed: string[]
+	/** each claimed capture's own epoch, observation and tuning trust (its replay carries them). */
+	views: Map<
+		string,
+		{
+			epoch: number
+			observationId: string | null
+			tuningTrust: TuningTrust
+		}
+	>
+	/** Replay runs still to start; null until the live runs are over. */
+	queue: ReplayWork[] | null
+	/** A capture requested for the resolved track (at most once per target). */
+	requested: string | null
+	/** The requested capture is held for this job from the start (captureFor). */
+	reserved: boolean
+	asked: boolean
+	waitUntil: number | null
 }
 
 interface TargetState {
@@ -853,6 +1259,22 @@ interface TargetState {
 	/** WG10 req 3.5: plan runs not requested because the memo names their decoder type. */
 	memoSkip: Set<number>
 	analog: AnalogState
+	replay: ReplayState
+	/** WG11 req 1.7: the resolved discovery's known protocol at plan time (its run is first); null: none. */
+	known: { discoveryId: string; protocol: ScannerProtocol } | null
+	/** WG12: the gated start this target times from. Null until one is accepted. */
+	gate: { startSample: number; atMs: number } | null
+	/** Claimed captures that already have an analog replay trial. */
+	analogArmed: Set<string>
+	/**
+	 * Captures whose analog replay decoded or was heard. R4.6: the remaining digital
+	 * replays of that capture are not run. Other captures are unaffected.
+	 */
+	analogStopped: Set<string>
+	/** In-flight analog replay trials. Aborted when the target ends or replans. */
+	analogAbort: AbortController[]
+	/** Per-trial wall-clock deadline (ANALOG_REPLAY_TRIAL_DEADLINE_MS from start). */
+	analogDue: Map<AbortController, number>
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -864,6 +1286,8 @@ const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
 /** Trial outcomes a decoder actually produced (kept across an in-window epoch change). */
 const COMPLETED: ReadonlySet<ScannerTrialOutcome> = new Set([
 	"decoded",
+	// WG11 req 1.1: final like `decoded` (a live-audio match without a tone or code).
+	"heard",
 	"no-sync",
 	"crc-errors",
 	"timeout",
@@ -892,8 +1316,14 @@ export class IdentifyRunner implements JobDriver {
 	private detached = false
 	private ambientErrorLogged = false
 	private analogErrorLogged = false
+	/** WG12: a throwing gatedAt is logged once per job, with no frequency and no message. */
+	private gateErrorLogged = false
+	/** dispose() has run: a late analog result must not emit. */
+	private disposed = false
 	/** WG10 req 3.5: probe decoder types unavailable during this job (memo at planning, or reported). */
 	private readonly unavailableTypes = new Set<ScannerProbeDecoderType>()
+	/** Cancel / source-down: captures are settled once the probes are released. */
+	private aborting = false
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -901,16 +1331,22 @@ export class IdentifyRunner implements JobDriver {
 		deps.probes.on("probe-state", this.onProbeState)
 		deps.probes.on("evidence", this.onPoolEvidence)
 		deps.probes.on("decoder-unavailable", this.onDecoderUnavailable)
+		if (deps.iqCapture) deps.probes.on("replay-end", this.onReplayEnd)
 	}
 
 	private get sourceId(): string {
 		return this.record.spec.sourceId
 	}
 
-	/** `ScanJob.identify` (Task 25). */
+	/** `ScanJob.identify` (Task 25). The wait fields stay on the request, not this view. */
 	view(): ScannerIdentifyView {
+		const identify = this.deps.identify
 		return {
-			...this.deps.identify,
+			target: identify.target,
+			timeoutMs: identify.timeoutMs,
+			protocols: identify.protocols,
+			exhaustive: identify.exhaustive,
+			record: identify.record,
 			targets: this.targets.map(t => this.eventOf(t)),
 		}
 	}
@@ -1045,6 +1481,8 @@ export class IdentifyRunner implements JobDriver {
 	}
 
 	async dispose(): Promise<void> {
+		this.disposed = true
+		for (const t of this.targets) this.stopAnalog(t)
 		this.detach()
 		await this.deps.inner.dispose()
 	}
@@ -1052,13 +1490,10 @@ export class IdentifyRunner implements JobDriver {
 	// === the identify flow (tick-driven) ===
 
 	private step(now: number): void {
-		if (
-			this.inflight > 0 ||
-			this.phase === "finished" ||
-			this.record.state !== "running"
-		)
-			return
+		if (this.phase === "finished" || this.record.state !== "running") return
 		// The window moved off a target (operator retune, sweep takeover): end it now with what it has.
+		// This runs before the inflight return. Artefact checks and probe releases take that slot;
+		// an analog replay trial does not.
 		let moved = false
 		for (const x of this.targets) {
 			if (FINAL.has(x.state) || !this.windowMoved(x)) continue
@@ -1066,6 +1501,7 @@ export class IdentifyRunner implements JobDriver {
 			moved = true
 		}
 		if (moved) return
+		if (this.inflight > 0) return
 		// First-IQ startup is separately capped; this budget bounds signal wait after readiness.
 		const started = this.record.startedAt ?? now
 		const { target, timeoutMs } = this.deps.identify
@@ -1150,12 +1586,27 @@ export class IdentifyRunner implements JobDriver {
 			result: null,
 			ambientUntil: Number.POSITIVE_INFINITY,
 			memoSkip: new Set(),
+			replay: {
+				claimed: [],
+				views: new Map(),
+				queue: null,
+				requested: null,
+				reserved: false,
+				asked: false,
+				waitUntil: null,
+			},
 			analog: {
 				everMonitored: false,
 				openSeen: new Set(),
 				result: null,
 				resultProtocol: null,
 			},
+			known: null,
+			gate: null,
+			analogArmed: new Set(),
+			analogStopped: new Set(),
+			analogAbort: [],
+			analogDue: new Map(),
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -1195,6 +1646,31 @@ export class IdentifyRunner implements JobDriver {
 			t.recheckArtefact = false
 			this.checkArtefact(t, false)
 			return
+		}
+		// WG12 req 6.1: a point target with waitUntilSignal stays here until a gated start. The trial
+		// timeout then counts from that start. The wait elapsing first is no-signal, not a verdict.
+		if (this.blockingOnGate(t)) {
+			const start = this.takeGate(t)
+			const signalStarted = this.signalStarted()
+			const signalDeadline = signalStarted + this.signalWaitMs()
+			// A start still in the future is not a transmission this tick. One already open when
+			// the job started is: the trial timeout counts from the job start, not the earlier gate.
+			const openedAt =
+				start === null ? null : Math.max(start.atMs, signalStarted)
+			if (
+				start !== null &&
+				openedAt !== null &&
+				start.atMs <= now &&
+				openedAt <= signalDeadline
+			) {
+				t.gate = start
+				t.deadline = openedAt + this.deps.identify.timeoutMs
+			} else if (now >= signalDeadline) {
+				this.endNoSignal(t)
+				return
+			} else {
+				return
+			}
 		}
 		// Restarted by an in-window epoch change past the deadline: end with the evidence so far (like a window move).
 		if (t.fallback && now >= t.deadline) {
@@ -1239,10 +1715,29 @@ export class IdentifyRunner implements JobDriver {
 	private plan(t: TargetState): void {
 		const view = t.view
 		if (!view) return
-		const scores = identifyScores(view.track, {
-			priors: this.deps.priorsAt(view.track.centreHz),
-			protocols: this.deps.identify.protocols,
+		const priors = this.deps.priorsAt(view.track.centreHz)
+		const narrow = this.narrowAt(t.targetHz)
+		let range:
+			| { protocols: readonly ScannerProtocol[]; explicit: boolean }
+			| undefined
+		try {
+			range = this.deps.rangeProtocolsAt?.(t.targetHz)
+		} catch {
+			/* No range constraint. */
+		}
+		const requested = this.deps.identify.protocols
+		const protocols =
+			requested.length > 0 ? requested : (range?.protocols ?? [])
+		const explicit = requested.length > 0 || range?.explicit === true
+		const bounds = explicit ? protocols : []
+		let scores = identifyScores(view.track, {
+			priors,
+			protocols,
+			explicit,
+			...(narrow ? { narrow } : {}),
 		})
+		t.known = this.knownOf(view)
+		if (t.known) scores = knownFirst(scores, t.known.protocol, priors, bounds)
 		const plan = planIdentifyTrials(scores, {
 			format: this.deps.format(this.sourceId),
 			channelizer: this.deps.channelizer(),
@@ -1256,7 +1751,7 @@ export class IdentifyRunner implements JobDriver {
 					toleranceHz: t.toleranceHz,
 				},
 				this.deps.ambient,
-				this.deps.identify.protocols,
+				bounds,
 				// Fixed message, no exception payload (its text may carry decoder details); once per job.
 				() => {
 					if (this.ambientErrorLogged) return
@@ -1265,8 +1760,8 @@ export class IdentifyRunner implements JobDriver {
 				},
 			),
 		)
-		if (this.deps.analogEvidence)
-			plan.trials = planAnalogTrials(plan.trials, this.deps.identify.protocols)
+		if (this.deps.analogEvidence || this.deps.analogTrial?.runLive)
+			plan.trials = planAnalogTrials(plan.trials, bounds)
 		t.memoSkip = this.applyMemo(plan)
 		t.plan = plan
 		t.ambientUntil = Number.isFinite(t.deadline)
@@ -1290,6 +1785,83 @@ export class IdentifyRunner implements JobDriver {
 		t.nextRun = 0
 		t.active = []
 		t.state = "trying"
+		this.claimCaptures(t, view)
+		if (this.deps.analogTrial?.runLive && this.analogChoice(t))
+			this.startAnalogItem(t, "", view)
+		this.emitTarget(t)
+	}
+
+	/** WG12: wait for a gate only on a point target that asked, and only until one is accepted. */
+	private blockingOnGate(t: TargetState): boolean {
+		if (this.deps.identify.waitUntilSignal !== true) return false
+		if (this.deps.gatedAt === undefined) return false
+		if (t.gate !== null) return false
+		return !("all" in this.deps.identify.target)
+	}
+
+	private signalStarted(): number {
+		return this.record.startedAt ?? this.record.createdAt
+	}
+
+	private signalWaitMs(): number {
+		const waitMs = this.deps.identify.waitMs
+		const raw =
+			typeof waitMs === "number" && Number.isFinite(waitMs)
+				? waitMs
+				: IDENTIFY_WAIT_DEFAULT_MS
+		// The route already rejects values outside this span. Clamp here so an
+		// internal caller cannot wait forever or give the signal up immediately.
+		if (raw < IDENTIFY_WAIT_MIN_MS) return IDENTIFY_WAIT_MIN_MS
+		if (raw > IDENTIFY_WAIT_MAX_MS) return IDENTIFY_WAIT_MAX_MS
+		return raw
+	}
+
+	/** One lookup. A throw or a malformed value is no start; the value itself is never logged. */
+	private takeGate(
+		t: TargetState,
+	): { startSample: number; atMs: number } | null {
+		const gatedAt = this.deps.gatedAt
+		if (!gatedAt) return null
+		try {
+			return parseGateStart(gatedAt(this.sourceId, t.targetHz, t.toleranceHz))
+		} catch (err: unknown) {
+			this.gateFailed(err)
+			return null
+		}
+	}
+
+	private gateFailed(err: unknown): void {
+		if (this.gateErrorLogged) return
+		this.gateErrorLogged = true
+		this.log.warn(
+			{ err: safeErrorFields(err) },
+			"Gated transmission lookup failed",
+		)
+	}
+
+	/** No gated transmission in time: unidentified, every trial cancelled, no verdict and no miss. */
+	private endNoSignal(t: TargetState): void {
+		if (FINAL.has(t.state)) return
+		this.stopAnalog(t)
+		const runs = t.active.splice(0)
+		for (const r of runs) this.setTrials(t, r.runIndex, () => "cancelled")
+		this.releaseRuns(runs)
+		for (const trial of t.trials)
+			if (trial.outcome === "pending" || trial.outcome === "running")
+				trial.outcome = "cancelled"
+		t.result = {
+			confidence: "activity",
+			metadata: emptyMetadata(),
+			measurements: measureTarget(
+				null,
+				this.deps.lastSummary(this.sourceId),
+				t.targetHz,
+				t.toleranceHz,
+			),
+			ended: "no-signal",
+		}
+		t.state = "unidentified"
+		if (!this.aborting) this.settleTarget(t)
 		this.emitTarget(t)
 	}
 
@@ -1297,10 +1869,15 @@ export class IdentifyRunner implements JobDriver {
 		const plan = t.plan
 		if (!plan) return
 		if (this.analogStep(t, now)) this.emitTarget(t)
+		// Req 6.1: once a gate is accepted, timeoutMs is the end of the trials, not only of the wait.
+		const gateOver =
+			t.gate !== null && Number.isFinite(t.deadline) && now >= t.deadline
 		for (const r of [...t.active]) {
 			if (r.endsAt !== null && now >= r.endsAt) {
 				this.endRun(t, r, "hold")
-				return
+				// One run per tick, unless this tick is the gated deadline (finish it below).
+				if (!gateOver) return
+				continue
 			}
 			if (r.queuedUntil !== null && now >= r.queuedUntil) {
 				this.deps.probes.dequeue(r.req)
@@ -1315,18 +1892,60 @@ export class IdentifyRunner implements JobDriver {
 			this.endAmbient(
 				t,
 				"timeout",
-				x => !(this.deps.analogEvidence && x.decoder === "live-audio"),
+				x =>
+					x.decoder !== "analog-demod" &&
+					!(this.deps.analogEvidence && x.decoder === "live-audio"),
 			)
 		)
 			this.emitTarget(t)
+		if (gateOver) {
+			this.stopForGateDeadline(t)
+			return
+		}
 		if (!this.fillRuns(t, now)) return
 		// A target with running ambient trials waits for their evidence or deadline.
+		// Replay (and the analog trial that shares that queue) starts only once the live runs are done.
 		if (
-			t.active.length === 0 &&
-			t.nextRun >= plan.runs.length &&
-			!this.ambientRunning(t)
+			t.active.length !== 0 ||
+			t.nextRun < plan.runs.length ||
+			this.ambientRunning(t)
 		)
-			this.finishTarget(t, null)
+			return
+		if (this.replayStep(t, now)) return
+		if (this.analogReplayOpen(t)) return
+		this.finishTarget(t, null)
+	}
+
+	/**
+	 * The gated deadline has arrived. A run whose full hold already elapsed ends as that hold. A run
+	 * the deadline cuts short is cancelled, not a completed hold, and never a known-protocol miss
+	 * (the same rule as a job hold that releases a probe before its mode timer). Drop replay still
+	 * queued, and abort analog replay. Live-audio may keep settling; the target finishes when it stops.
+	 */
+	private stopForGateDeadline(t: TargetState): void {
+		if (FINAL.has(t.state)) return
+		if (t.plan) t.nextRun = t.plan.runs.length
+		if (t.replay.queue) t.replay.queue = []
+		for (const r of [...t.active]) {
+			const completed = r.replay
+				? r.replayDone
+				: r.endsAt !== null && this.deps.now() >= r.endsAt
+			this.endRun(t, r, completed ? "hold" : "deadline")
+		}
+		this.stopAnalog(t)
+		for (const trial of t.trials)
+			if (
+				trial.decoder === "analog-demod" &&
+				(trial.outcome === "running" || trial.outcome === "pending")
+			)
+				trial.outcome = "cancelled"
+		this.endAmbient(
+			t,
+			"timeout",
+			x => !(this.deps.analogEvidence && x.decoder === "live-audio"),
+		)
+		if (this.ambientRunning(t)) return
+		if (!FINAL.has(t.state)) this.finishTarget(t, null)
 	}
 
 	/** Starts runs up to the parallel limit; false when the target went back to waiting (the epoch moved). */
@@ -1335,6 +1954,9 @@ export class IdentifyRunner implements JobDriver {
 		if (!plan) return false
 		// Never a new run while the job ends (cancel, source-down, stop) or once it left `running`.
 		if (this.phase !== "running" || this.record.state !== "running") return true
+		// A gated deadline ends the trials (req 6.1). endRun asks for the next run before releasing the slot.
+		if (t.gate !== null && Number.isFinite(t.deadline) && now >= t.deadline)
+			return true
 		// [S2] After the channelizer: parallel runs within maxProbes.channel (Task 40 sets `channelizer`).
 		const parallel = this.deps.channelizer()
 			? Math.max(1, this.deps.settings().maxProbes.channel)
@@ -1387,6 +2009,7 @@ export class IdentifyRunner implements JobDriver {
 			endsAt: null,
 			seen: new Map(),
 			unavailable: false,
+			replayDone: false,
 		}
 		if ("started" in res) {
 			t.active.push(state)
@@ -1439,9 +2062,21 @@ export class IdentifyRunner implements JobDriver {
 		const runs = t.active.splice(0)
 		for (const r of runs) this.setTrials(t, r.runIndex, () => "cancelled")
 		this.releaseRuns(runs)
-		// Keep the evidence: decoder outcomes of completed runs, and the resolved track for the verdict.
+		this.stopAnalog(t)
 		for (const trial of t.trials)
-			if (COMPLETED.has(trial.outcome))
+			if (
+				trial.decoder === "analog-demod" &&
+				(trial.outcome === "running" || trial.outcome === "pending")
+			)
+				trial.outcome = "cancelled"
+		t.analogArmed.clear()
+		t.analogDue.clear()
+		this.requeueAnalog(t)
+		// Keep the evidence: decoder outcomes of completed runs, and the resolved track for the verdict.
+		// An analog replay trial shares the analog-fm/analog-am protocol with live audio. Copying it
+		// would start the replanned live-audio trial as already heard, instead of running.
+		for (const trial of t.trials)
+			if (COMPLETED.has(trial.outcome) && trial.decoder !== "analog-demod")
 				t.done.set(trial.protocol, trial.outcome)
 		t.fallback = t.view ?? t.fallback
 		t.state = "waiting-for-signal"
@@ -1464,6 +2099,9 @@ export class IdentifyRunner implements JobDriver {
 			(this.deps.channelizer() ? "channel" : "offset")
 		r.probeId = probeId
 		r.queuedUntil = null
+		// Full hold, gated or not. An ungated wait deadline does not cut it. A gated deadline
+		// that arrives sooner cancels the run; it does not move endsAt, so the cut is not a
+		// completed hold and not a known-protocol miss.
 		r.endsAt =
 			now +
 			r.run.holdMs +
@@ -1477,7 +2115,7 @@ export class IdentifyRunner implements JobDriver {
 	private endRun(
 		t: TargetState,
 		r: RunState,
-		why: "hold" | "stopped" | "decoded",
+		why: "hold" | "stopped" | "decoded" | "deadline",
 	): void {
 		const index = t.active.indexOf(r)
 		if (index < 0) return
@@ -1486,17 +2124,29 @@ export class IdentifyRunner implements JobDriver {
 		const stop = why === "decoded" && !this.deps.identify.exhaustive
 		// The pool stopped the probe before its hold (epoch change, spawn failure, shutdown) and nothing was
 		// accepted: that is no decoder verdict.
-		const cutShort =
-			why === "stopped" &&
-			r.endsAt !== null &&
-			this.deps.now() < r.endsAt &&
-			![...r.seen.values()].some(seen => seen.identity !== null)
+		// A gated deadline that arrives before the full hold is the same kind of cut.
+		// A replay run stopped without its decoder's clean end (input failed, capture gone) is cut short
+		// whatever the wall clock says.
+		// a replay run's verdict needs its clean replay-end; a hold expiry without it
+		// (a decoder that never exited) is cut short too: cancelled, no miss.
+		const sawIdentity = [...r.seen.values()].some(
+			seen => seen.identity !== null,
+		)
+		const cutShort = r.replay
+			? why !== "decoded" && !r.replayDone
+			: (why === "deadline" && !sawIdentity) ||
+				(why === "stopped" &&
+					!r.replayDone &&
+					r.endsAt !== null &&
+					this.deps.now() < r.endsAt &&
+					!sawIdentity)
 		// WG9 req 5.4: a run whose decoder program could not run and that saw no
 		// output is no decoder verdict either; it is unsupported, not no-sync.
 		const unavailable =
 			why === "stopped" &&
 			r.unavailable &&
 			![...r.seen.values()].some(seen => seen.output)
+		this.countKnownMiss(t, r, why, unavailable)
 		this.setTrials(t, r.runIndex, (protocol, trial) => {
 			if (unavailable) {
 				if (PROBE_DECODER_TYPES.has(r.run.mode.decoderType))
@@ -1510,6 +2160,7 @@ export class IdentifyRunner implements JobDriver {
 			const outcome = trialOutcome(r.seen.get(protocol))
 			return stop && outcome !== "decoded" ? "not-needed" : outcome
 		})
+		if (r.replay) this.applyReplayRun(t, r, cutShort || unavailable)
 		const ended = [r]
 		if (stop) {
 			for (const other of t.active.splice(0)) {
@@ -1520,7 +2171,11 @@ export class IdentifyRunner implements JobDriver {
 				if (trial.outcome === "pending") trial.outcome = "not-needed"
 			this.endAmbient(t, "not-needed")
 			t.nextRun = t.plan?.runs.length ?? 0
-		} else if (t.state === "trying" && why !== "stopped") {
+		} else if (
+			t.state === "trying" &&
+			why !== "stopped" &&
+			why !== "deadline"
+		) {
 			// Request the next run before this one's slot is released: the pool's priority queue then hands the slot to
 			// it, not to a queued passive probe that the next run would only preempt again (a spawn and a kill per run).
 			// A run the pool stopped is followed from the next tick (after an epoch change, or never at shutdown).
@@ -1537,6 +2192,7 @@ export class IdentifyRunner implements JobDriver {
 		unavailable = false,
 	): void {
 		if (FINAL.has(t.state)) return
+		this.stopAnalog(t)
 		const resolved = t.view ?? t.fallback
 		const latest = resolved
 			? (this.deps
@@ -1554,17 +2210,8 @@ export class IdentifyRunner implements JobDriver {
 				}).hypotheses[0]
 			: undefined
 		const analog = t.analog.result
-		const classified =
-			discovery !== undefined &&
-			CONFIDENCE_RANK[discovery.confidence] >= CONFIDENCE_RANK.classified
-		// WG10 R1 m3: a digital signal heard through live audio also opens the squelch, so analog evidence
-		// never replaces a classified digital protocol: the digital candidate is the result (as before analog
-		// evidence existed) and `result.analog` is only supplementary.
-		const digitalClassified =
-			classified &&
-			discovery !== undefined &&
-			!IDENTIFY_ANALOG_PROTOCOLS.includes(discovery.protocol)
-		const analogVerdict = digitalClassified ? null : analogVerdictOf(analog)
+
+		const analogVerdict = analogVerdictOf(analog)
 		const state = identifyVerdict({
 			analog: analogVerdict,
 			artefact,
@@ -1577,32 +2224,30 @@ export class IdentifyRunner implements JobDriver {
 			discoveryConfidence: discovery?.confidence ?? null,
 			topScore: top?.score ?? 0,
 		})
-		// WG10 req 3.4: analog evidence names the protocol unless a digital decode (or capped identity) or a
-		// classified digital discovery did.
+		// A tone can name analog; voice alone cannot name a protocol.
 		const analogProtocol =
-			analog && t.decoded === null && !digitalClassified
+			analog && analogVerdict?.tone === true && t.decoded === null
 				? t.analog.resultProtocol
 				: null
 		const protocol =
 			state === "unidentified"
 				? undefined
-				: (t.decoded?.protocol ??
-					analogProtocol ??
-					(classified ? discovery?.protocol : top?.protocol))
-		const identity =
-			state === "unidentified"
-				? undefined
-				: (t.decoded?.identity ??
-					(analogProtocol !== null && discovery?.protocol !== analogProtocol
-						? undefined
-						: discovery?.identity))
+				: (t.decoded?.protocol ?? analogProtocol ?? undefined)
+		const identity = state === "unidentified" ? undefined : t.decoded?.identity
 		const analogIdentified = analogProtocol !== null && state === "identified"
 		const baseMetadata = discovery?.metadata ?? emptyMetadata()
 		const unavailableTypes = [...this.unavailableTypes].sort()
 		for (const trial of t.trials)
 			if (trial.outcome === "pending" || trial.outcome === "running")
 				trial.outcome = "cancelled"
+		const proof = identifyDigitalProof(
+			t.trials,
+			latest?.observationId ?? "identify",
+			this.deps.now(),
+		)
 		t.result = {
+			...(proof && !analog && !t.decoded && !artefact ? { proof } : {}),
+			...(!protocol && track && !artefact ? { hint: classOf(track) } : {}),
 			...(protocol ? { protocol } : {}),
 			confidence: analogIdentified
 				? "classified"
@@ -1631,6 +2276,8 @@ export class IdentifyRunner implements JobDriver {
 				: {}),
 		}
 		t.state = state
+		// WG11 req 6.8: the result exists; its claimed captures are discarded (after the probes on abort).
+		if (!this.aborting) this.settleTarget(t)
 		this.emitTarget(t)
 	}
 
@@ -1711,6 +2358,7 @@ export class IdentifyRunner implements JobDriver {
 	private async abort(): Promise<void> {
 		if (this.phase === "finished") return
 		this.phase = "finished"
+		this.aborting = true
 		const releases: Promise<void>[] = []
 		for (const t of this.targets) {
 			for (const r of t.active.splice(0)) {
@@ -1723,6 +2371,7 @@ export class IdentifyRunner implements JobDriver {
 		await Promise.all(releases).catch((err: unknown) =>
 			this.log.warn({ err }, "Releasing identify probes failed"),
 		)
+		for (const t of this.targets) this.settleTarget(t)
 	}
 
 	// === probe pool events ===
@@ -1735,6 +2384,13 @@ export class IdentifyRunner implements JobDriver {
 		if (req.jobId !== this.record.id) return
 		const hit = this.findRun(r => r.probeId === probeId)
 		if (hit) hit.r.unavailable = true
+	}
+
+	/** WG11 req 6.5: the replay decoder ended cleanly: the evidence seen is its verdict, not a cut-short run. */
+	private readonly onReplayEnd = (probeId: string, req: ProbeRequest): void => {
+		if (req.jobId !== this.record.id) return
+		const hit = this.findRun(r => r.probeId === probeId)
+		if (hit) hit.r.replayDone = true
 	}
 
 	private readonly onProbeState = (
@@ -1783,7 +2439,10 @@ export class IdentifyRunner implements JobDriver {
 		if (ev.identity) seen.identity = ev.identity
 		hit.r.seen.set(ev.protocol, seen)
 		if (!ev.identity) return
+		this.countDecode(hit.t)
 		hit.t.decoded ??= { protocol: ev.protocol, identity: ev.identity }
+		// WG11 req 6.5: a live decode discards the observation's captures that were not replayed yet.
+		if (!hit.r.replay) this.confirmLive(req.observationId)
 		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
 	}
 
@@ -1817,7 +2476,10 @@ export class IdentifyRunner implements JobDriver {
 			)
 			if (!trial) continue
 			trial.outcome = "decoded"
+			// WG11 batch review R1 4: the scanner's ambient path records this evidence's decode
+			// (once, only where the observation accepted it); counting here too would double it.
 			t.decoded ??= { protocol: ev.protocol, identity }
+			this.confirmLive(observationId)
 			if (!this.deps.identify.exhaustive) {
 				// § 10.8 (3) like a probe decode: every other trial is not needed.
 				const runs = t.active.splice(0)
@@ -1931,9 +2593,12 @@ export class IdentifyRunner implements JobDriver {
 		for (const trial of running) {
 			const m = analogMatches(list, target, trial.protocol)
 			const analog = analogResultOf(m.closed)
-			// A closed match (ended at or before the deadline) decodes even when first seen on the deadline tick.
+			// A closed match (ended at or before the deadline) decides even when first seen on the deadline tick.
+			// WG11 req 1.1: `decoded` only when that newest match carried a (standard) CTCSS tone or DCS code,
+			// else `heard` (a squelch opening is no decode).
 			if (analog) {
-				trial.outcome = "decoded"
+				trial.outcome =
+					analog.ctcssHz !== null || analog.dcs !== null ? "decoded" : "heard"
 				trial.mode = analog.modulation
 				decoded = true
 				changed = true
@@ -1951,6 +2616,7 @@ export class IdentifyRunner implements JobDriver {
 			changed = true
 			if (t.analog.openSeen.has(trial.protocol)) trial.outcome = "timeout"
 			else if (t.analog.everMonitored) trial.outcome = "no-sync"
+			else if (this.deps.analogTrial?.runLive) trial.outcome = "not-needed"
 			else {
 				trial.outcome = "unsupported"
 				trial.mode = null
@@ -1962,11 +2628,129 @@ export class IdentifyRunner implements JobDriver {
 			t.analog.result = best.analog
 			t.analog.resultProtocol = best.protocol
 		}
-		// Req 3.3: a match stops the waiting trials unless exhaustive. Probe runs keep going so a digital decode
-		// still wins (a digital signal heard through live audio also opens the squelch).
+		// WG11 req 1.2 (WG10 3.3 amended): a match ends only the other live-audio trials still running (they
+		// cannot add evidence) unless exhaustive. Probe runs and ambient trials of other decoders keep going to
+		// their own end, so a digital decode still wins (a digital signal also opens the squelch).
 		if (decoded && !this.deps.identify.exhaustive)
-			this.endAmbient(t, "not-needed")
+			this.endAmbient(t, "not-needed", x => x.decoder === "live-audio")
 		return changed
+	}
+
+	// === WG11: narrow rasters and the known-protocol memory ===
+
+	/** `deps.narrowRasterAt` at the target; absent, throwing or not `true`: false (today's plan). */
+	private narrowAt(hz: number): boolean {
+		const at = this.deps.narrowRasterAt
+		if (!at) return false
+		try {
+			return at(hz) === true
+		} catch {
+			return false
+		}
+	}
+
+	/** The discovery id of a resolved view (the store's), or null. */
+	private discoveryIdOf(view: IdentifyTrackView | null): string | null {
+		if (!view) return null
+		try {
+			const id = this.deps.discoveryOf(view.observationId)?.id
+			return typeof id === "string" ? id : null
+		} catch {
+			return null
+		}
+	}
+
+	/** Req 1.7: the resolved discovery's known protocol, when it names an identify protocol; never throws. */
+	private knownOf(
+		view: IdentifyTrackView,
+	): { discoveryId: string; protocol: ScannerProtocol } | null {
+		const memory = this.deps.knownProtocols
+		if (!memory) return null
+		const discoveryId = this.discoveryIdOf(view)
+		if (discoveryId === null) return null
+		try {
+			const protocol = memory.known(discoveryId)
+			return typeof protocol === "string" &&
+				IDENTIFY_PROTOCOLS.includes(protocol)
+				? { discoveryId, protocol }
+				: null
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * Req 1.8: the run of the known protocol ran its full hold (ended by the hold, or stopped by the pool at or
+	 * after its end) and decoded nothing: one miss. A run cut short, including one a gated deadline ends
+	 * before that hold, unavailable, never begun or cancelled is no miss; a decode is counted by countDecode.
+	 */
+	private countKnownMiss(
+		t: TargetState,
+		r: RunState,
+		why: "hold" | "stopped" | "decoded" | "deadline",
+		unavailable: boolean,
+	): void {
+		const memory = this.deps.knownProtocols
+		const known = t.known
+		if (!memory || !known || !r.run.protocols.includes(known.protocol)) return
+		if (why === "decoded" || why === "deadline" || unavailable) return
+		if (r.replay) {
+			// a replay's wall clock says nothing (faster than real time). It is a miss
+			// only after the decoder's clean end over a gap-free capture holding the whole mode hold.
+			if (!r.replayDone) return
+			if ([...r.seen.values()].some(seen => seen.identity !== null)) return
+			let capture: IqCaptureView | null = null
+			try {
+				capture = this.deps.iqCapture?.view?.(r.replay.captureId) ?? null
+			} catch {
+				capture = null
+			}
+			if (!replayMissEligible(capture, r.run.mode.holdMs)) return
+			try {
+				memory.recordMiss(known.discoveryId, known.protocol)
+			} catch {
+				// As below.
+			}
+			return
+		}
+		if (r.endsAt === null) return
+		if (why === "stopped" && this.deps.now() < r.endsAt) return
+		if ([...r.seen.values()].some(seen => seen.identity !== null)) return
+		// Review m2: the transmission must cover the whole known hold. A track that closed before
+		// the run (trials on its last snapshot) or during it is no longer live at the hold's end.
+		if (!this.trackLive(t)) return
+		try {
+			memory.recordMiss(known.discoveryId, known.protocol)
+		} catch {
+			// The memory never throws by contract; a broken one changes nothing here.
+		}
+	}
+
+	/** The target's resolved track is still live in the current epoch (never throws: false). */
+	private trackLive(t: TargetState): boolean {
+		const view = t.view
+		if (!view || t.gone) return false
+		try {
+			return this.currentTracks().some(
+				v => v.trackId === view.trackId && v.epoch === view.epoch,
+			)
+		} catch {
+			return false
+		}
+	}
+
+	/** Req 1.8: an accepted (H2) decode on the target's discovery resets its miss count. */
+	private countDecode(t: TargetState): void {
+		const memory = this.deps.knownProtocols
+		if (!memory) return
+		const discoveryId =
+			this.discoveryIdOf(t.view) ?? t.known?.discoveryId ?? null
+		if (discoveryId === null) return
+		try {
+			memory.recordDecode(discoveryId)
+		} catch {
+			// As above.
+		}
 	}
 
 	/** Fixed message, no exception payload; once per job. */
@@ -1997,6 +2781,589 @@ export class IdentifyRunner implements JobDriver {
 				ended = true
 			}
 		return ended
+	}
+
+	// === WG12 req 6.6: analog replay of a claimed capture ===
+
+	private stopAnalog(t: TargetState): void {
+		// Copy first: an abort listener splices the controller out, and a live loop would skip one.
+		const pending = t.analogAbort.splice(0)
+		for (const ac of pending) ac.abort()
+	}
+
+	private analogReplayOpen(t: TargetState): boolean {
+		return t.trials.some(
+			x =>
+				x.decoder === "analog-demod" &&
+				(x.outcome === "pending" || x.outcome === "running"),
+		)
+	}
+
+	/** Abort analog replay trials whose own deadline has passed. The abort marks them cancelled. */
+	private expireAnalog(t: TargetState, now: number): void {
+		for (const ac of [...t.analogAbort]) {
+			const due = t.analogDue.get(ac)
+			if (due !== undefined && now >= due) ac.abort()
+		}
+	}
+
+	/** nfm when the plan includes analog-fm (alone or with AM); am only when AM is the analog plan. */
+	private analogChoice(
+		t: TargetState,
+	): { protocol: ScannerProtocol; mode: AnalogTrialMode } | null {
+		const protocols = new Set((t.plan?.trials ?? []).map(p => p.protocol))
+		const am = protocols.has("analog-am")
+		const fm = protocols.has("analog-fm")
+		if (!am && !fm) return null
+		if (am && !fm) return { protocol: "analog-am", mode: "am" }
+		return { protocol: "analog-fm", mode: "nfm" }
+	}
+
+	/**
+	 * One analog-demod replay trial for a claimed capture. Does not take the identify inflight slot:
+	 * a stalled runner must not hide a window move. "running" while the runner is in flight.
+	 * The injected runner admits the trial to the probe budget; this job does not reserve cores.
+	 */
+	private startAnalogItem(
+		t: TargetState,
+		captureId: string,
+		live?: IdentifyTrackView,
+	): "running" | "skipped" {
+		if (t.analogArmed.has(captureId) || (captureId.length === 0 && !live))
+			return "skipped"
+		const runner = this.deps.analogTrial
+		const choice = this.analogChoice(t)
+		if (!runner || !choice) return "skipped"
+		t.analogArmed.add(captureId)
+		const trial: ScannerIdentifyTrial = {
+			protocol: choice.protocol,
+			decoder: "analog-demod",
+			mode: choice.mode,
+			transport: live ? "ambient" : "replay",
+			outcome: "pending",
+		}
+		t.trials.push(trial)
+		trial.outcome = "running"
+		const ac = new AbortController()
+		t.analogAbort.push(ac)
+		t.analogDue.set(
+			ac,
+			this.deps.now() + ANALOG_REPLAY_TRIAL_DEADLINE_MS + (live ? 2000 : 0),
+		)
+		const mode = choice.mode
+		let settled = false
+		const finish = (raw: unknown, failed: boolean): void => {
+			if (settled) return
+			settled = true
+			const index = t.analogAbort.indexOf(ac)
+			if (index >= 0) t.analogAbort.splice(index, 1)
+			t.analogDue.delete(ac)
+			if (ac.signal.aborted || this.disposed) {
+				if (
+					!this.disposed &&
+					(trial.outcome === "running" || trial.outcome === "pending")
+				)
+					trial.outcome = "cancelled"
+				return
+			}
+			if (failed) {
+				this.log.warn(
+					{ err: safeErrorFields(raw) },
+					"Analog replay trial failed",
+				)
+				this.applyAnalogReplay(t, trial, captureId, null)
+				return
+			}
+			this.applyAnalogReplay(t, trial, captureId, raw)
+		}
+		ac.signal.addEventListener("abort", () => {
+			finish(null, false)
+		})
+		void Promise.resolve()
+			.then(() =>
+				live && runner.runLive
+					? runner.runLive(
+							{
+								sourceId: this.sourceId,
+								observationId: live.observationId,
+								epoch: live.epoch,
+								rfHz: live.track.centreHz,
+								tuningTrust: live.track.tuningTrust,
+								fromSample: live.track.startSample,
+								reason: "identify",
+							},
+							mode,
+							ac.signal,
+						)
+					: runner.run(captureId, mode, ac.signal),
+			)
+			.then(result => {
+				finish(result, false)
+			})
+			.catch((err: unknown) => {
+				finish(err, true)
+			})
+		this.emitTarget(t)
+		return "running"
+	}
+
+	/** After an in-window restart, analog trials still owed to claimed captures go back on the queue. */
+	private requeueAnalog(t: TargetState): void {
+		const queue = t.replay.queue
+		if (!queue || !this.deps.analogTrial || !this.analogChoice(t)) return
+		const queued = new Set(
+			queue.flatMap(item => (item.kind === "analog" ? [item.captureId] : [])),
+		)
+		for (const captureId of t.replay.claimed) {
+			if (captureId.length === 0 || queued.has(captureId)) continue
+			queue.push({ kind: "analog", captureId })
+		}
+	}
+
+	/**
+	 * Feed a decoded or heard verdict as a live-audio match. A tone counts only on `decoded` and only
+	 * when it is in the standard tables. no-sync, data-like and carrier-only stay on the trial.
+	 * A throw, a missing result or an unknown outcome cancels the trial and records no analog match.
+	 */
+	private applyAnalogReplay(
+		t: TargetState,
+		trial: ScannerIdentifyTrial,
+		captureId: string,
+		raw: unknown,
+	): void {
+		if (this.disposed) return
+		if (FINAL.has(t.state)) return
+		if (trial.outcome !== "running" && trial.outcome !== "pending") return
+		const parsed = parseAnalogTrial(raw)
+		// A verdict for a different mode than the one requested is no match.
+		if (!parsed || parsed.mode !== trial.mode) {
+			if (
+				raw !== null &&
+				typeof raw === "object" &&
+				(raw as { error?: unknown }).error === "not-protected"
+			) {
+				trial.outcome = "unsupported"
+				trial.reason = "decoder-unavailable"
+			} else trial.outcome = "cancelled"
+			this.emitTarget(t)
+			return
+		}
+		if (parsed.outcome === "decoded" || parsed.outcome === "heard") {
+			const tone =
+				parsed.outcome === "decoded"
+					? standardTone(parsed.tones)
+					: { ctcssHz: null, dcs: null }
+			const noTone = tone.ctcssHz === null && tone.dcs === null
+			trial.outcome =
+				parsed.outcome === "decoded" && noTone ? "heard" : parsed.outcome
+			const stored =
+				captureId === ""
+					? t.view
+						? {
+								observationId: t.view.observationId,
+								tuningTrust: t.view.track.tuningTrust,
+							}
+						: undefined
+					: t.replay.views.get(captureId)
+			this.keepAnalog(t, trial.protocol, {
+				source: "live-audio",
+				modulation: trial.mode === "am" ? "am" : "nfm",
+				transmissions: 1,
+				transmissionId:
+					typeof stored?.observationId === "string"
+						? stored.observationId
+						: "analog-replay",
+				ctcssHz: tone.ctcssHz,
+				dcs: tone.dcs,
+				tuningTrust: captureTrust(stored?.tuningTrust),
+			})
+			// R4.6: heard or a tone ends this capture's remaining digital replays.
+			// The known-protocol probe already ran (it is queued ahead of analog).
+			t.analogStopped.add(captureId)
+		} else {
+			trial.outcome = parsed.outcome
+		}
+		this.emitTarget(t)
+	}
+
+	/** A stronger analog match replaces a weaker one. no-sync never clears a match already kept. */
+	private keepAnalog(
+		t: TargetState,
+		protocol: ScannerProtocol,
+		analog: ScannerIdentifyAnalog,
+	): void {
+		const rank = (a: ScannerIdentifyAnalog | null): number => {
+			const v = analogVerdictOf(a)
+			if (!v) return 0
+			return v.tone && v.trusted ? 2 : 1
+		}
+		if (rank(analog) <= rank(t.analog.result)) return
+		t.analog.result = analog
+		t.analog.resultProtocol = protocol
+	}
+
+	// === WG11 req 6.8: IQ capture claim, replay runs, settle ===
+
+	/** At plan: claim the newest captures near the target; request one for the track when none exists. */
+	private claimCaptures(t: TargetState, view: IdentifyTrackView): void {
+		const port = this.deps.iqCapture
+		if (!port) return
+		try {
+			const near = this.claimNear(t, view)
+			if (near > 0 || t.replay.asked) return
+			t.replay.asked = true
+			const req: IqCaptureRequest = {
+				sourceId: this.sourceId,
+				observationId: view.observationId,
+				epoch: view.epoch,
+				rfHz: view.track.centreHz,
+				tuningTrust: view.track.tuningTrust,
+				fromSample: view.track.startSample,
+				reason: "identify",
+			}
+			// Review M2: held for this job from the start (the queue skips held captures).
+			const reserve = port.captureFor !== undefined && port.view !== undefined
+			const res =
+				reserve && port.captureFor
+					? port.captureFor(req, this.record.id)
+					: port.capture(req)
+			if ("captureId" in res) {
+				t.replay.requested = res.captureId
+				t.replay.reserved = reserve
+			}
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture claim failed; identifying live only",
+			)
+		}
+	}
+
+	/**
+	 * Claims the newest unheld finished captures near the target (its own source; trusted tuning or
+	 * its observation) up to IDENTIFY_REPLAY_MAX_CAPTURES; returns how many were found near.
+	 */
+	private claimNear(t: TargetState, view: IdentifyTrackView): number {
+		const port = this.deps.iqCapture
+		if (!port) return 0
+		const near = port.near(this.sourceId, view.track.centreHz, t.toleranceHz, {
+			observationId: view.observationId,
+			limit: IDENTIFY_REPLAY_MAX_CAPTURES,
+		})
+		for (const c of near) {
+			if (t.replay.claimed.length >= IDENTIFY_REPLAY_MAX_CAPTURES) break
+			if (
+				c.sourceId !== this.sourceId ||
+				t.replay.claimed.includes(c.captureId) ||
+				!(
+					c.tuningTrust === "commanded" ||
+					c.tuningTrust === "relay" ||
+					c.observationId === view.observationId
+				) ||
+				// the target's own transmission only: its epoch, or its observation.
+				!(c.epoch === view.epoch || c.observationId === view.observationId)
+			)
+				continue
+			if (port.claim(c.captureId, this.record.id)) {
+				t.replay.claimed.push(c.captureId)
+				t.replay.views.set(c.captureId, {
+					epoch: c.epoch,
+					observationId: c.observationId,
+					tuningTrust: captureTrust(c.tuningTrust),
+				})
+			}
+		}
+		return near.length
+	}
+
+	/**
+	 * After the live runs: claim the requested capture once it finished, then one replay step per tick
+	 * (a probe run, or the analog trial that shares the queue). True while the target must keep waiting.
+	 * A decode that stops the probes skips every remaining probe and analog item.
+	 */
+	private replayStep(t: TargetState, now: number): boolean {
+		const port = this.deps.iqCapture
+		const rp = t.replay
+		if (
+			!port ||
+			this.phase !== "running" ||
+			this.record.state !== "running" ||
+			!t.view
+		)
+			return false
+		const stopProbes = t.decoded !== null && !this.deps.identify.exhaustive
+		try {
+			if (!stopProbes && rp.requested !== null) {
+				const id = rp.requested
+				const done =
+					rp.reserved && port.view
+						? port.view(id) !== null
+						: port
+								.near(this.sourceId, t.view.track.centreHz, t.toleranceHz, {
+									observationId: t.view.observationId,
+									limit: IDENTIFY_REPLAY_MAX_CAPTURES + 1,
+								})
+								.some(c => c.captureId === id)
+				if (done) {
+					const reserved = rp.reserved
+					rp.requested = null
+					rp.reserved = false
+					if (
+						rp.claimed.length < IDENTIFY_REPLAY_MAX_CAPTURES &&
+						port.claim(id, this.record.id)
+					) {
+						rp.claimed.push(id)
+						// Requested for the resolved track: its epoch and observation, or the capture's own.
+						const cv = port.view?.(id)
+						rp.views.set(id, {
+							epoch: cv?.epoch ?? t.view.epoch,
+							observationId: cv?.observationId ?? t.view.observationId,
+							tuningTrust: captureTrust(cv?.tuningTrust),
+						})
+					} else if (reserved) port.settle(id, this.record.id)
+				} else if (rp.waitUntil === null) {
+					// The track may still be on air: finish the capture now, then wait a bounded time for it.
+					port.end(id)
+					rp.waitUntil = now + IDENTIFY_REPLAY_CAPTURE_WAIT_MS
+					return true
+				} else if (now < rp.waitUntil) return true
+				else this.dropRequested(t) // never finished in time
+			}
+			// Review M2: captures of the target finished meanwhile (the queue left them to this job).
+			if (
+				!stopProbes &&
+				rp.queue === null &&
+				rp.claimed.length < IDENTIFY_REPLAY_MAX_CAPTURES
+			)
+				this.claimNear(t, t.view)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture lookup failed")
+			this.dropRequested(t)
+		}
+		rp.queue ??= this.replayQueue(t)
+		// Req 5.5: one analog trial at a time, and never beside a replay probe.
+		// Each trial's own deadline is ANALOG_REPLAY_TRIAL_DEADLINE_MS from its start.
+		// Past that, abort it: cancelled, no match and no miss, so the target can finish
+		// and release the capture.
+		if (this.analogReplayOpen(t)) {
+			this.expireAnalog(t, now)
+			if (this.analogReplayOpen(t)) return true
+		}
+		while (rp.queue.length > 0) {
+			const next = rp.queue.shift()
+			if (!next) break
+			if (next.kind === "analog") {
+				if (stopProbes) continue
+				if (this.startAnalogItem(t, next.captureId) === "running") return true
+				continue
+			}
+			// R4.6 is per capture. A digital decode still stops every remaining probe.
+			if (t.analogStopped.has(next.captureId)) continue
+			if (stopProbes) continue
+			if (this.startReplayRun(t, next, now)) return true
+		}
+		return false
+	}
+
+	/** Probe replays for one capture, plus its analog trial after the known-protocol run (else first). */
+	private replayQueue(t: TargetState): ReplayWork[] {
+		const out: ReplayWork[] = []
+		for (const captureId of t.replay.claimed)
+			out.push(...this.replayItemsForCapture(t, captureId))
+		return out
+	}
+
+	private replayItemsForCapture(
+		t: TargetState,
+		captureId: string,
+	): ReplayWork[] {
+		const probes = this.probeReplayItems(t, captureId)
+		if (!this.analogWorkFor(t, captureId)) return probes
+		const analog: ReplayWork = { kind: "analog", captureId }
+		const knownRun = this.knownPlanRun(t)
+		const at = probes.findIndex(
+			item => item.kind === "probe" && item.planRun === knownRun,
+		)
+		if (at >= 0) probes.splice(at + 1, 0, analog)
+		else probes.unshift(analog)
+		// Req 5.5: the analog trial counts as one of the eight. Probe-only queues stay unsliced.
+		return probes.slice(0, IQ_REPLAY_MAX_TRIALS)
+	}
+
+	private analogWorkFor(t: TargetState, captureId: string): boolean {
+		return (
+			captureId.length > 0 &&
+			this.deps.analogTrial !== undefined &&
+			this.analogChoice(t) !== null &&
+			!t.analogArmed.has(captureId)
+		)
+	}
+
+	/** The known protocol's plan run, when that protocol has a probe mode. */
+	private knownPlanRun(t: TargetState): number | null {
+		const known = t.known
+		if (!known) return null
+		const planned = t.plan?.trials.find(p => p.protocol === known.protocol)
+		return planned?.run ?? null
+	}
+
+	private probeReplayItems(t: TargetState, captureId: string): ReplayWork[] {
+		const out: ReplayWork[] = []
+		const runs = t.plan?.runs ?? []
+		runs.forEach((run, planRun) => {
+			const type = run.mode.decoderType
+			const live = t.plan?.trials.flatMap((p, i) =>
+				p.run === planRun && t.trials[i] ? [t.trials[i]!] : [],
+			)
+			if (
+				type === "rtl433" ||
+				t.memoSkip.has(planRun) ||
+				this.unavailableTypes.has(type as ScannerProbeDecoderType) ||
+				(live ?? []).some(
+					x => x.outcome === "decoded" || x.outcome === "unsupported",
+				)
+			)
+				return
+			out.push({ kind: "probe", captureId, planRun })
+		})
+		return out
+	}
+
+	/** Requests one replay run; false when it cannot run (no replay transport, stale source): skipped. */
+	private startReplayRun(
+		t: TargetState,
+		next: { captureId: string; planRun: number },
+		now: number,
+	): boolean {
+		const view = t.view
+		const run = t.plan?.runs[next.planRun]
+		if (!view || !run) return false
+		// the replay's evidence is the capture's: its own epoch and observation.
+		const cv = t.replay.views.get(next.captureId)
+		const observationId = cv?.observationId ?? view.observationId
+		const req: ProbeRequest = {
+			jobId: this.record.id,
+			priority: IDENTIFY_PROBE_PRIORITY,
+			sourceId: this.sourceId,
+			trackId: view.trackId,
+			observationId,
+			discoveryId: this.deps.discoveryOf(observationId)?.id ?? null,
+			targetHz: view.track.centreHz,
+			epoch: cv?.epoch ?? view.epoch,
+			cls: run.cls,
+			protocols: run.protocols,
+			modes: [run.mode],
+			preRollFromSample: null,
+			holdMs: run.holdMs,
+			record: false,
+			admission: { kind: "protocol-target", snrDb: view.track.snrDb },
+			replay: { captureId: next.captureId },
+		}
+		const res = this.request(req)
+		const state: RunState = {
+			runIndex: -1,
+			run,
+			req,
+			probeId: null,
+			queuedUntil: null,
+			endsAt: null,
+			seen: new Map(),
+			unavailable: false,
+			replayDone: false,
+			replay: { captureId: next.captureId, planRun: next.planRun },
+		}
+		if ("started" in res) {
+			t.active.push(state)
+			this.begin(t, state, res.started, now)
+		} else if (
+			res.deferred === "max-probes" ||
+			res.deferred === "budget" ||
+			res.deferred === "cpu"
+		) {
+			state.queuedUntil = now + IDENTIFY_QUEUE_WAIT_MS
+			t.active.push(state)
+		} else return false
+		this.emitTarget(t)
+		return true
+	}
+
+	/**
+	 * A finished replay run decides its plan run's trials only where it adds a verdict: a decode, or a
+	 * completed outcome over a live trial that never completed (cancelled, skipped). Transport `replay` then.
+	 */
+	private applyReplayRun(t: TargetState, r: RunState, cutShort: boolean): void {
+		const replay = r.replay
+		if (!replay || cutShort) return
+		t.plan?.trials.forEach((planned, i) => {
+			const trial = t.trials[i]
+			if (planned.run !== replay.planRun || !trial) return
+			const outcome = trialOutcome(r.seen.get(planned.protocol))
+			if (
+				outcome === "decoded" ||
+				(COMPLETED.has(outcome) && !COMPLETED.has(trial.outcome))
+			) {
+				trial.outcome = outcome
+				trial.transport = "replay"
+			}
+		})
+	}
+
+	private confirmLive(observationId: string): void {
+		try {
+			this.deps.iqCapture?.confirmLive(this.sourceId, observationId)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture live confirmation failed",
+			)
+		}
+	}
+
+	/** A reserved capture that is no use any more is released (discarded); others are left to the TTL. */
+	private dropRequested(t: TargetState): void {
+		const id = t.replay.requested
+		const reserved = t.replay.reserved
+		t.replay.requested = null
+		t.replay.reserved = false
+		if (id === null || !reserved) return
+		try {
+			this.deps.iqCapture?.settle(id, this.record.id)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture settle failed")
+		}
+	}
+
+	/**
+	 * Review M2: whether this job works on the capture's observation (a target resolved to it that has
+	 * no result yet, or a job still collecting that covers its frequency): the replay queue leaves the
+	 * capture for this job.
+	 */
+	worksOn(capture: IqCaptureView): boolean {
+		if (this.phase === "finished" || capture.sourceId !== this.sourceId)
+			return false
+		if (this.phase === "idle" || this.phase === "collecting")
+			return this.covers(capture.sourceId, capture.rfHz)
+		return this.targets.some(
+			t =>
+				!FINAL.has(t.state) &&
+				capture.observationId !== null &&
+				t.view?.observationId === capture.observationId,
+		)
+	}
+
+	/** Discards every capture this target holds; safe to repeat. */
+	private settleTarget(t: TargetState): void {
+		const port = this.deps.iqCapture
+		this.dropRequested(t)
+		const ids = t.replay.claimed.splice(0)
+		t.replay.views.clear()
+		if (!port) return
+		for (const id of ids)
+			try {
+				port.settle(id, this.record.id)
+			} catch (err: unknown) {
+				this.log.warn({ err: safeErrorFields(err) }, "IQ capture settle failed")
+			}
 	}
 
 	private request(req: ProbeRequest): ReturnType<ProbePool["request"]> {
@@ -2067,6 +3434,10 @@ export class IdentifyRunner implements JobDriver {
 	private detach(): void {
 		if (this.detached) return
 		this.detached = true
+		// Shutdown, dispose, or any end path that did not settle: no capture stays held by a finished job.
+		for (const t of this.targets) this.settleTarget(t)
+		if (this.deps.iqCapture)
+			this.deps.probes.off("replay-end", this.onReplayEnd)
 		this.deps.probes.off("probe-state", this.onProbeState)
 		this.deps.probes.off("evidence", this.onPoolEvidence)
 		this.deps.probes.off("decoder-unavailable", this.onDecoderUnavailable)

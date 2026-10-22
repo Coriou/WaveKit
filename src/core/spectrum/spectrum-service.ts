@@ -10,6 +10,7 @@
  * full CU8 stream.
  */
 import { EventEmitter } from "node:events"
+import { performance } from "node:perf_hooks"
 import {
 	SPECTRUM_BINS_CAP_CHOICES,
 	SPECTRUM_BINS_CAP_SETTINGS,
@@ -19,6 +20,7 @@ import type {
 	SpectrumBinsCapView,
 	SpectrumBinEncoding,
 	SpectrumFrameEventData,
+	SpectrumFrameTrack,
 	SpectrumOccupancyResponse,
 	SpectrumProfileAdjustment,
 	SpectrumProfileEventData,
@@ -30,7 +32,12 @@ import type { SourceConfig, SourceManager } from "../source-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { TunerController } from "../tuner-controller.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ChannelPlan } from "../scanner/scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { spectrumMainSpanSink } from "./pipeline.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { frameTrackScannerOf } from "./frame-tracks.js"
+import type { SpectrumTrackIdentityLookup } from "./track-identity-contract.js"
 import {
 	OccupancyHistory,
 	OccupancyStateSchema,
@@ -38,6 +45,7 @@ import {
 } from "./occupancy.js"
 import type {
 	BlockSummary,
+	BlockTrack,
 	EngineState,
 	FreqRange,
 	PipelineConfig,
@@ -98,6 +106,8 @@ export {
 	type SpectrumProfile,
 } from "./spectrum-averaging.js"
 const MAX_SINCE_MS = 168 * 3_600_000
+/** WG11 req 5.3: a failing or malformed identity lookup logs one fixed-text debug line per minute. */
+export const TRACK_IDENTITY_LOG_INTERVAL_MS = 60_000
 const TOP_N = 10
 
 /** The default profile from ws.spectrumHz/spectrumBins, averaging off (settings are already bounded). */
@@ -180,6 +190,8 @@ export interface SpectrumServiceDeps {
 	createHost?: SpectrumEngineDeps["createHost"]
 	/** Called for every new engine instance before it starts (the probe pool's stream watch, Task 34). */
 	engineCreated?: (sourceId: string, engine: SpectrumEngine) => void
+	/** Opt-in worker stage profile forwarded to each engine. Absent: no profile. */
+	profile?: { sampleEvery: number }
 	/**
 	 * WG8 req 5: the host bins cap, resolved once at startup (bin-cap.ts). Absent = the 2 048
 	 * floor and no `limits.binsCap` on the status. Read once at construction.
@@ -406,6 +418,9 @@ export class SpectrumService extends EventEmitter {
 	/** M1: bumped on each permanent removal. */
 	private readonly sourceGen = new Map<string, number>()
 	private stopping = false
+	/** WG11 req 5.3: the scanner's identity of a frame track (wired by Main); null: no `scanner` field. */
+	private trackIdentity: SpectrumTrackIdentityLookup | null = null
+	private trackIdentityLoggedAt = Number.NEGATIVE_INFINITY
 
 	/** WG8: resolved once; the engine budget and the client clamp read the same cap. */
 	private readonly binsCap: {
@@ -418,6 +433,15 @@ export class SpectrumService extends EventEmitter {
 		this.binsCap = resolveBinsCap(deps.binsCap)
 		this.log = createComponentLogger(deps.logger, "SpectrumService")
 		this.now = deps.now ?? Date.now
+	}
+
+	/**
+	 * WG11 req 5.3: sets (or clears with null) the scanner identity port. Frames built after
+	 * the call (live, snapshot, backfill, status) read it; a throwing or absent lookup, or a
+	 * malformed answer, gives no `scanner` field.
+	 */
+	setTrackIdentityLookup(lookup: SpectrumTrackIdentityLookup | null): void {
+		this.trackIdentity = lookup
 	}
 
 	/** Loads occupancy histories of every eligible source (engines start on demand). */
@@ -491,6 +515,10 @@ export class SpectrumService extends EventEmitter {
 
 	engine(sourceId: string): SpectrumEngine | undefined {
 		return this.entries.get(sourceId)?.engine
+	}
+
+	setChannelPlan(sourceId: string, plan: ChannelPlan | null): void {
+		this.engine(sourceId)?.setChannelPlan(plan)
 	}
 
 	openedAt(sourceId: string): number | null {
@@ -737,6 +765,7 @@ export class SpectrumService extends EventEmitter {
 			...(persisted ? { persistedEngine: persisted } : {}),
 			...(this.deps.hostCentre ? { hostCentre: this.deps.hostCentre } : {}),
 			...(this.deps.createHost ? { createHost: this.deps.createHost } : {}),
+			...(this.deps.profile ? { profile: this.deps.profile } : {}),
 		}
 		const engine = new SpectrumEngine(engineDeps)
 		const entry: Entry = {
@@ -1388,7 +1417,17 @@ export class SpectrumService extends EventEmitter {
 				atMs,
 			)
 			this.observe(sourceId, entry, summary, epoch)
-			this.frames(sourceId, entry, summary, epoch)
+			const span = spectrumMainSpanSink()
+			if (!span) {
+				this.frames(sourceId, entry, summary, epoch)
+			} else {
+				const t0 = performance.now()
+				try {
+					this.frames(sourceId, entry, summary, epoch)
+				} finally {
+					span("frame-build", performance.now() - t0)
+				}
+			}
 		}
 		this.emit("pipeline", sourceId, ev, epoch)
 	}
@@ -1443,6 +1482,7 @@ export class SpectrumService extends EventEmitter {
 		const entry = this.entries.get(sel.sourceId)
 		const cfg = entry?.engine.config()
 		if (!entry || !cfg) return []
+		const sourceId = sel.sourceId
 		const cur = entry.engine.currentEpoch()
 		const snapshotted = snapshots.some(s => s.sourceId === sel.sourceId)
 		return buildBackfillFrames({
@@ -1457,7 +1497,61 @@ export class SpectrumService extends EventEmitter {
 			integrationMs: cfg.integrationMs,
 			sampleRateHz: cfg.sampleRateHz,
 			fftSize: cfg.fftSize,
+			tracks: tracks => this.frameTracks(sourceId, tracks),
 		})
+	}
+
+	/**
+	 * WG11 req 5.1-5.3: a frame's tracks. The fields the pipeline recorded with the block are
+	 * already on them; with a lookup, a track with an id gets the scanner's identity for this
+	 * source, read once per track per frame. The summary's tracks are never mutated (the ring
+	 * and the other profile groups share them); without a lookup or an id they are returned
+	 * as they are (the frozen frame).
+	 */
+	private frameTracks(
+		sourceId: string,
+		tracks: BlockTrack[],
+	): SpectrumFrameTrack[] {
+		const lookup = this.trackIdentity
+		const internal = tracks.some(t => t.trackerId !== undefined)
+		if (
+			!internal &&
+			(lookup === null || !tracks.some(t => t.trackId !== undefined))
+		)
+			return tracks
+		return tracks.map(track => {
+			// `trackerId` is host-internal (the chain's current tracker id): never on a frame.
+			const { trackerId, ...t } = track
+			if (lookup === null || t.trackId === undefined) return t
+			let answer: unknown
+			try {
+				// The frame id is the chain id without `${sourceId}-` (pipeline frameAssociation); the
+				// lookup gets the chain's current full tracker id on this frame's own source, never
+				// another source's.
+				answer = lookup(sourceId, `${sourceId}-${trackerId ?? t.trackId}`)
+			} catch (err: unknown) {
+				this.logTrackIdentity("Spectrum track identity lookup failed", err)
+				return t
+			}
+			if (answer === null) return t
+			const scanner = frameTrackScannerOf(answer)
+			if (scanner === null) {
+				this.logTrackIdentity(
+					"Spectrum track identity lookup returned an invalid identity",
+				)
+				return t
+			}
+			return { ...t, scanner }
+		})
+	}
+
+	private logTrackIdentity(msg: string, err?: unknown): void {
+		const now = this.now()
+		if (now - this.trackIdentityLoggedAt < TRACK_IDENTITY_LOG_INTERVAL_MS)
+			return
+		this.trackIdentityLoggedAt = now
+		if (err === undefined) this.log.debug(msg)
+		else this.log.debug({ error: safeErrorFields(err) }, msg)
 	}
 
 	/**
@@ -1568,7 +1662,7 @@ export class SpectrumService extends EventEmitter {
 			binEncoding: BIN_ENCODING,
 			floorDbfs: summary.floorDbfs,
 			thresholdDb: summary.thresholdDb,
-			tracks: summary.tracks,
+			tracks: this.frameTracks(sourceId, summary.tracks),
 			masks: summary.masks,
 			at: new Date(this.now()).toISOString(),
 		}

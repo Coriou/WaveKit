@@ -83,6 +83,13 @@
 #       format: "S16LE"
 #       exclusive: false
 
+# Optional per-source gain on connect (rtl_tcp only; unset by default):
+#   - id: "rtl"
+#     type: "rtl_tcp"
+#     tuner: { gainMode: manual, gainDb: 49.6, agcMode: false }
+#   gainMode: manual needs gainDb (0 to 50, 0.1 dB steps); agc refuses gainDb.
+#   Every core (re)connect rewrites this gain, overwriting a gain another client
+#   (e.g. SDR++) set on a shared rtlmux; a gain set via the WaveKit API still wins.
 sources: []
 
 # -----------------------------------------------------------------------------
@@ -445,6 +452,9 @@ csdr:
 # sourceId.
 #
 # scanner:
+#   # IQ capture defaults on in protected mode; set enabled: false to disable.
+#   iqCapture:
+#     enabled: true
 #   enabled: true
 #   channelTier:                # config only; not exposed or changed by scanner settings PATCH
 #     enabled: false
@@ -726,9 +736,15 @@ csdr:
 #   idleTimeout: 30000
 # ---
 
-# Core channelizer (opt-in prototype; docs/superpowers/specs/2026-10-09-core-channelizer-prototype-addendum.md).
-# Off by default. When on, decoders with `useChannelizer: true` get exact-rate IQ
-# from one wavekit-chan process per source; raw fanout is unchanged.
+# Core channelizer: one wavekit-chan process per source gives decoders exact-rate
+# IQ channels; raw fanout is unchanged.
+# With channelizer.enabled absent or false it is composed automatically on x86-64
+# hosts (capacity record docs/engineering/CAPACITY-2026-10-21-DECODER-ENABLEMENT.md):
+# it starts for a source only when a built-in decoder's channel placement needs
+# it, and stops after 60 s without a channel. On arm64 hosts it stays off until
+# a Pi 4-class host is measured. channelizer.auto: false disables automatic
+# composition; channelizer.enabled: true always composes it (and YAML decoders
+# with `useChannelizer: true` use it).
 # channelizer:
 #   enabled: false
 #   binaryPath: wavekit-chan
@@ -791,3 +807,11 @@ access:
 #   altM: 35
 #   callsign: F1ABC
 #   country: FR # uppercase ISO 3166-1 alpha-2; WAVEKIT_COUNTRY locks this value
+
+# Decoder modes: auto follows the band, always skips band suspension, off stops.
+# Set decoders[].mode to override the legacy enabled/band settings.
+# decoderPolicy.catalogue: false disables derived built-in decoder instances.
+# decoderPolicy.rateRaise: false disables the operator ADS-B rate policy.
+# decoderPolicy.efficiency: cpuBudgetCores, cpuGuardPercent, maxBandplanChannels.
+# channelizer.auto defaults to true; automatic composition is accepted on x86-64
+# hosts only (see the channelizer section above).

@@ -1,5 +1,7 @@
 /** Core spectrum service DTOs (waterfalls for the CLI/web and the scanner). */
 
+import type { ScannerConfidence, ScannerProtocol } from "./scanner.js"
+
 export type SpectrumBinEncoding = "u8-halfdb-127.5"
 
 export interface SpectrumFrameEventData {
@@ -20,11 +22,7 @@ export interface SpectrumFrameEventData {
 	binEncoding: SpectrumBinEncoding
 	floorDbfs: number
 	thresholdDb: number
-	tracks: {
-		startHz: number
-		endHz: number
-		flags: { burst: boolean; iqImage: boolean; edge: boolean }
-	}[]
+	tracks: SpectrumFrameTrack[]
 	/** DC spike at the tuned centre ± guard; baseband spurs as RF ranges (§ 4.9). */
 	masks: {
 		dcHz: number
@@ -41,6 +39,74 @@ export interface SpectrumFrameEventData {
 	backfill?: true
 	at: string
 }
+
+/**
+ * One segment of the frame's block (RF). WG11 req 5.1: a segment the tracker associated with an
+ * open track also carries that track's stable id and its stats from the same block; a segment
+ * without a track carries none of the optional fields. Key tracks by (sourceId, trackId).
+ */
+export interface SpectrumFrameTrack {
+	startHz: number
+	endHz: number
+	/** WG11: `spur` = the track lies wholly on a spur line (never surfaced, never probed). */
+	flags: { burst: boolean; iqImage: boolean; edge: boolean; spur?: boolean }
+	/**
+	 * The tracker's id without its `<sourceId>-` prefix (at most 30 characters), so it is unique
+	 * only per source: key tracks by (sourceId, trackId). The full tracker id, as
+	 * `ScanJobProbe.trackId` carries it, is `${sourceId}-${trackId}`. Stable for the emission's
+	 * life (burst gaps within the hang included) and across the tracker's 120 s max-duration
+	 * rollover, which keeps the chain's first id; a new epoch gives a new id. Never reused.
+	 */
+	trackId?: string
+	/**
+	 * Lifetime mean over the track's chain so far (mean band power over mean floor power, against
+	 * the core's floor), rounded to 0.5 dB; not this block's instantaneous value.
+	 */
+	snrDb?: number
+	/** Lifetime maximum block peak over the track's chain so far, rounded to 0.5 dB. */
+	peakDbfs?: number
+	/** Integration blocks the track's chain was on so far; saturates at 9 999 999. */
+	blocks?: number
+	/**
+	 * Since the track's chain started, from sample counts; keeps growing across the 120 s
+	 * rollover and saturates at 99 999 999 ms. First seen ≈ `at` − ageMs.
+	 */
+	ageMs?: number
+	/**
+	 * The display surfacing rule evaluated for this frame's block: false for a spur or an image,
+	 * or while the segment is flagged iqImage in this block (not sticky across frames); a burst at
+	 * threshold + 3 dB, else at least minSurfaceBlocks blocks. Survives the max-duration rollover.
+	 */
+	surfaced?: boolean
+	/**
+	 * The scanner's discovery for this track, when it holds a live observation of it on the same
+	 * source. Absent for about 1 s after a rollover, until the new observation has its discovery.
+	 */
+	scanner?: SpectrumFrameTrackScanner
+	/**
+	 * WG12: channel-gate state for this frame. Absent on engines without a channel plan
+	 * and on cores before the redesign. `below` is not sent.
+	 */
+	gate?: "pending" | "passed"
+	/** WG12: SNR over the channel slot, not the per-bin `snrDb`. */
+	channelSnrDb?: number
+}
+/** WG11 req 5.1: the scanner's identity of a frame track. */
+export interface SpectrumFrameTrackScanner {
+	discoveryId: string
+	protocol: ScannerProtocol
+	confidence: ScannerConfidence
+}
+/**
+ * WG11 req 5.5: JSON bytes a frame track may grow by with every optional field present (measured
+ * typical growth: about 105 B per track without `scanner`, 217 B with it).
+ */
+export const SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES = 260
+/**
+ * WG12: JSON bytes `gate` plus `channelSnrDb` may add to one frame track
+ * (`"gate":"passed"` 15, `"channelSnrDb":12.5` 20, separators).
+ */
+export const SPECTRUM_FRAME_TRACK_GATE_MAX_EXTRA_BYTES = 40
 
 /** WG10 req 2.9: what an untracked-retune warning most likely means. */
 export type SpectrumWarningSuspect =

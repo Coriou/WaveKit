@@ -902,6 +902,7 @@ export class ApiServer {
 
 		// Tuner controller events
 		if (this.tunerController) {
+			wireTunerRatePolicyBroadcast(this.tunerController, this.wsBroadcaster)
 			this.tunerController.on("state-changed", (sourceId, state) => {
 				this.wsBroadcaster.broadcastTunerStateChanged(sourceId, state)
 			})
@@ -1584,4 +1585,13 @@ export class ApiServer {
 
 		this.log.debug("Routes registered")
 	}
+}
+
+export function wireTunerRatePolicyBroadcast(
+	tuner: Pick<TunerController, "on">,
+	broadcaster: Pick<WebSocketEventBroadcaster, "broadcast">,
+): void {
+	tuner.on("rate-policy", data => {
+		broadcaster.broadcast("tuner", { type: "tuner:rate-policy", data })
+	})
 }

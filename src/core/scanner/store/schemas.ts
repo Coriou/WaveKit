@@ -139,6 +139,7 @@ export const DecodeEvidenceSchema = z.object({
 	origin: z.enum(["probe", "ambient"]),
 	probeId: z.string().optional(),
 	decoderId: z.string().optional(),
+	transport: z.enum(["live", "replay"]).optional(),
 })
 export type DecodeEvidenceCheck = Assert<
 	SchemaMatches<DecodeEvidence, typeof DecodeEvidenceSchema>
@@ -191,8 +192,12 @@ export const DiscoverySchema = z.object({
 		iq: z.boolean(),
 	}),
 })
+/** `proof` and `evidenceLevel` are derived DTO fields (A12). They are not journal keys. */
 export type DiscoveryCheck = Assert<
-	SchemaMatches<Discovery, typeof DiscoverySchema>
+	SchemaMatches<
+		Omit<Discovery, "proof" | "evidenceLevel">,
+		typeof DiscoverySchema
+	>
 >
 
 export const ObservationSchema = z.object({
@@ -240,8 +245,9 @@ export const ObservationSchema = z.object({
 	hopIndex: z.number().int().optional(),
 	tuningTrust: TuningTrustSchema,
 })
+/** `proof` is a derived DTO field (A12). It is not a journal key. */
 export type ObservationCheck = Assert<
-	SchemaMatches<Observation, typeof ObservationSchema>
+	SchemaMatches<Omit<Observation, "proof">, typeof ObservationSchema>
 >
 
 /** One journal payload: the resulting records of one store mutation (spec § 8). */

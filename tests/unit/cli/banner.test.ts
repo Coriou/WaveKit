@@ -120,7 +120,7 @@ describe("banner copy (spec §9)", () => {
 		expect(out).toBe("! GET /api/x failing · 5 00 · other endpoints answering")
 	})
 
-	describe("fix round 1", () => {
+	describe("drops the reason before +N, never the other way round", () => {
 		const rest: BannerCondition = {
 			kind: "rest-down",
 			reason: "timeout 2s",

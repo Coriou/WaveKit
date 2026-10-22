@@ -332,7 +332,7 @@ describe("durable remembered-browser authority", () => {
 		})
 	})
 
-	it("clears a stored last-seen hour after the current hour or before creation instead of rejecting (R1 #13)", async () => {
+	it("clears a stored last-seen hour after the current hour or before creation instead of rejecting", async () => {
 		const HOUR = 3_600_000
 		const env = await setup({ epochNow: () => 5 * HOUR })
 		created(await env.store.create())

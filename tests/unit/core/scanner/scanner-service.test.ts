@@ -705,7 +705,7 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	// ---- Task 35 fix round 1 ----
+	// Lifecycle regression coverage.
 
 	const noPassive = (s: { passive: { enabled: boolean } }): void => {
 		s.passive.enabled = false
@@ -934,9 +934,9 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	// ---- Task 35 fix round 2: explicit resume of a preempted sweep ----
+	// ---- explicit resume of a preempted sweep ----
 
-	it("resumes a sweep preempted by an operator write at once (fix round 2)", async () => {
+	it("resumes a sweep preempted by an operator write at once", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		await h.service.start()
 		const job = await h.service.createJob(sweep(50))
@@ -950,7 +950,7 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	it("refuses the resume of a relay-preempted sweep while the relay holds control (fix round 2)", async () => {
+	it("refuses the resume of a relay-preempted sweep while the relay holds control", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		await h.service.start()
 		const job = await h.service.createJob(sweep(50))
@@ -992,7 +992,7 @@ describe("ScannerService", () => {
 		return { h, low, mid, high }
 	}
 
-	it("resumes only the best preempted-job waiter on a free lease (fix round 2, P16)", async () => {
+	it("resumes only the best preempted-job waiter on a free lease (P16)", async () => {
 		const { h, low, mid } = await twoWaiters()
 		await expect(
 			h.service.resumeJob(low.id, { takeover: true }),
@@ -1140,7 +1140,7 @@ describe("ScannerService", () => {
 		await b.service.stop()
 	})
 
-	it("judges an engine's passive cost once, over its first minute (finding 10)", async () => {
+	it("judges an engine's passive cost over its first minute, then every five minutes (finding 10, WG11 req 2)", async () => {
 		const h = serviceHarness()
 		await h.service.start()
 		const internals = internalsOf(h)
@@ -1148,9 +1148,9 @@ describe("ScannerService", () => {
 		const openedAt = h.service.spectrum.openedAt("rtl")!
 		engine.utilization = () => 0.1
 		await internals.checkPassiveCost(openedAt + 61_000)
-		// later sweep load on the shared engine never disables passive scanning
+		// WG11 req 2: no check is due before the five minute recheck, so a spike in between is ignored
 		engine.utilization = () => 0.9
-		await internals.checkPassiveCost(openedAt + 3_600_000)
+		await internals.checkPassiveCost(openedAt + 61_000 + 299_000)
 		expect(h.service.getJob("passive-rtl")).toBeDefined()
 		await h.service.stop()
 		const costly = serviceHarness()
@@ -1227,9 +1227,9 @@ describe("ScannerService", () => {
 			ranges: [{ startHz: 446_000_000, endHz: 446_400_000 }],
 		})
 		feedTones(h.fanout, 2, [
-			{ offsetHz: 100_000, amp: 0.4 },
-			{ offsetHz: 150_000, amp: 0.4 },
-			{ offsetHz: 50_000, amp: 0.08 }, // 2 × 100 kHz − 150 kHz
+			{ offsetHz: 106_250, amp: 0.4 },
+			{ offsetHz: 156_250, amp: 0.4 },
+			{ offsetHz: 56_250, amp: 0.08 }, // 2 × 106.25 kHz − 156.25 kHz, all on the 12.5 kHz raster
 		])
 		await tick(50)
 		const internals = h.service as unknown as {
@@ -1239,7 +1239,7 @@ describe("ScannerService", () => {
 				{ epoch: number; lastTrack: { centreHz: number } | null }
 			>
 		}
-		const hz = CENTRE + 50_000
+		const hz = CENTRE + 56_250
 		const im = [...internals.live.values()].find(
 			o => Math.abs((o.lastTrack?.centreHz ?? 0) - hz) < 2_000,
 		)

@@ -159,7 +159,7 @@ describe("iqView (T2)", () => {
 			"unknown",
 		)
 	})
-	it("summarises two sources with the worst glyph (review focus 5)", () => {
+	it("summarises two sources with the worst glyph", () => {
 		const lane = laneOk(
 			[
 				source(),
@@ -268,7 +268,7 @@ describe("memoOne", () => {
 	})
 })
 
-describe("A1 fix round 1", () => {
+describe("TTL boundary: 15 000 ms is fresh, 15 001 ms is old (P17)", () => {
 	it("TTL boundary: 15 000 ms is fresh, 15 001 ms is old (P17)", () => {
 		const lane = laneOk([1], 1000, "rest")
 		expect(isOld(lane, 1000 + 15000)).toBe(false)

@@ -229,7 +229,7 @@ describe("decoder rows (live fixture)", () => {
 		expect(rtl && text(decoderCells(rtl, s.now)["nominal"])).toBe("433.920*")
 	})
 
-	it("sanitises server-sent decoder ids (review focus 4)", () => {
+	it("sanitises server-sent decoder ids", () => {
 		const evil = "x\x1b[2J\u202Ey"
 		const f: DecoderFacts = {
 			...by("readsb"),
@@ -242,7 +242,7 @@ describe("decoder rows (live fixture)", () => {
 			)
 	})
 
-	describe("fix round 1", () => {
+	describe("I1: a configured band is marked at every width the column shows", () => {
 		const configured = facts.filter(f => f.bandOrigin === "configured")
 		it("I1: a configured band is marked at every width the column shows", () => {
 			expect(configured.map(f => f.row.id).sort()).toEqual([

@@ -6,6 +6,7 @@
  * and the epoch triggers (§ 4.6). Implements EpochClock for the arbiter.
  */
 import { EventEmitter } from "node:events"
+import { performance } from "node:perf_hooks"
 import type { Readable } from "node:stream"
 import { SPECTRUM_WARNING_LOG_INTERVAL_MS } from "@wavekit/api-types"
 import type {
@@ -20,8 +21,10 @@ import type { SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
 import { tuningTrustOf } from "../tuning-trust.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ChannelPlan } from "../scanner/scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { defaultFftSize } from "./fft.js"
+import { spectrumMainSpanSink } from "./pipeline.js"
 import { PROFILE_BINS_FLOOR } from "./subscribe-options.js"
 import type {
 	CfarMaskRange,
@@ -31,7 +34,6 @@ import type {
 	PendingEpoch,
 	PipelineConfig,
 	PipelineEvent,
-	PipelineInput,
 	PipelineStats,
 	Raster,
 	SpectrumSettings,
@@ -41,6 +43,7 @@ import type {
 import { bytesPerSample } from "./frame-source.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { IqRing } from "./iq-ring.js"
+import type { WorkerPipelineInput } from "./worker-protocol.js"
 import {
 	blockSamplesOf,
 	frameTrust,
@@ -52,6 +55,7 @@ import {
 	type PipelineHost,
 	type PipelineHostHandlers,
 	type PipelineHostMode,
+	type WorkerEluSample,
 } from "./pipeline-host.js"
 
 /** Pre-channelizer usable fraction of the captured span (§ 5.3). */
@@ -205,6 +209,26 @@ export interface SpectrumEngineDeps {
 	hostCentrePollMs?: number
 	/** WG10 req 2.9: clock for warning times, command ages and the warn-log interval (default Date.now). */
 	now?: () => number
+	/** Opt-in worker stage profile. Absent: export-state has no `profile` key. */
+	profile?: { sampleEvery: number }
+}
+
+/**
+ * Process-wide opt-in for a bench that cannot pass `profile` through ScannerService.
+ * Absent by default, so production hosts send the same init message as before.
+ */
+let installedProfile: { sampleEvery: number } | undefined
+let installedWorkerUrl: URL | undefined
+
+export function installSpectrumPipelineProfile(
+	profile: { sampleEvery: number } | undefined,
+): void {
+	installedProfile = profile
+}
+
+/** Overrides the worker script URL when the caller cannot pass `workerUrl` on the engine. */
+export function installSpectrumWorkerUrl(url: URL | undefined): void {
+	installedWorkerUrl = url
 }
 
 export function isScannerIqFormat(
@@ -381,6 +405,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		(startSample: number, bytes: Uint8Array) => void
 	>()
 	private masks: EngineMasks | null = null
+	private channelPlan: ChannelPlan | null = null
+	private channelPlanSet = false
 	private spectrumFeed = false
 	private lastStats: PipelineStats | null = null
 	private readonly warningList: EngineWarning[] = []
@@ -663,6 +689,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.send({ kind: "masks", ...masks })
 	}
 
+	setChannelPlan(plan: ChannelPlan | null): void {
+		this.channelPlan = plan
+		this.channelPlanSet = true
+		this.send({ kind: "channel-plan", plan })
+	}
+
 	setSpectrumFeed(enabled: boolean): void {
 		if (this.spectrumFeed === enabled) return
 		this.spectrumFeed = enabled
@@ -697,6 +729,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/** Worker utilisation since the pipeline started (§ 10.7 passive cost rule). */
 	utilization(): number | null {
 		return this.host?.utilization() ?? null
+	}
+
+	/**
+	 * WG11 req 2.2: the current pipeline worker's raw cumulative event-loop sample; null without a
+	 * pipeline or when not measurable (inline). A recreated pipeline starts a new cumulative sample
+	 * under a new worker generation.
+	 */
+	eluSample(): WorkerEluSample | null {
+		return this.host?.eluSample?.() ?? null
 	}
 
 	/** Applies new tuning (fftSize, integration, k) by recreating the pipeline. */
@@ -737,8 +778,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			},
 		}
 		if (this.deps.createHost) return this.deps.createHost(cfg, handlers)
+		const profile = this.deps.profile ?? installedProfile
+		const workerUrl = this.deps.workerUrl ?? installedWorkerUrl
 		return createPipelineHost(this.deps.host ?? "thread", cfg, handlers, {
-			...(this.deps.workerUrl ? { workerUrl: this.deps.workerUrl } : {}),
+			...(workerUrl ? { workerUrl } : {}),
+			...(profile ? { profile } : {}),
 			logger: this.deps.logger,
 		})
 	}
@@ -790,6 +834,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
 			if (this.masks) this.send({ kind: "masks", ...this.masks })
+			if (this.channelPlanSet)
+				this.send({ kind: "channel-plan", plan: this.channelPlan })
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
 			this.restarting = false
 			this.dropStaleBranchMarks()
@@ -876,7 +922,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		})
 	}
 
-	private send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	private send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		if (!this.host) {
 			if (transfer) this.onBuffer(transfer)
 			return
@@ -887,6 +933,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	// === Internals: bytes, gaps and batches ===
 
 	private readonly onData = (chunk: Buffer): void => {
+		const sink = spectrumMainSpanSink()
+		if (!sink) {
+			this.consumeBranchChunk(chunk)
+			return
+		}
+		const t0 = performance.now()
+		try {
+			this.consumeBranchChunk(chunk)
+		} finally {
+			sink("tap-feed", performance.now() - t0)
+		}
+	}
+
+	private consumeBranchChunk(chunk: Buffer): void {
 		// A branch can deliver synchronously in the trigger's own tick, before its microtask.
 		if (this.externalPending) this.flushExternal()
 		if (!this.running || this.restarting) {
@@ -1345,7 +1405,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/**
 	 * A write that landed inside the scanner's suppression window (a REST write during a retune)
 	 * posted no epoch: when the window closes, a caps centre other than the latest submitted one
-	 * (or the current epoch's) gets an external epoch (Task 35 fix round, review finding 14).
+	 * (or the current epoch's) gets an external epoch.
 	 */
 	private checkSuppressedCentre(): void {
 		if (!this.running || this.restarting) return

@@ -1,5 +1,5 @@
 /**
- * WG3 req 5.2 (MA.2 lane P wiring): the decoder provenance index Main passes to
+ * WG3 req 5.2: the decoder provenance index Main passes to
  * startActivityRuntime as `resolveProvenance`, driven by a real DecoderManager.
  */
 

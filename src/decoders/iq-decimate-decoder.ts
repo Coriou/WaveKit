@@ -1,3 +1,4 @@
+import type { DecoderReach } from "./enablement/contract.js"
 /**
  * IQ Decimate Decoder - Abstract base class for decoders that need decimated IQ data
  *
@@ -236,6 +237,10 @@ export function iqDecimateRateAdapter(
  * - Piping decimated IQ to decoder stdin
  */
 export abstract class IqDecimateDecoder extends BaseDecoder {
+	override reach(): DecoderReach {
+		return this.channelizerSupported() ? "channel" : "raw"
+	}
+
 	private unknownCentreLogged = false
 	private filterCutoffLogged = false
 	/** One warning per key for this decoder (WG7 HW.2); never logs the value. */

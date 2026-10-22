@@ -975,6 +975,7 @@ Errors use `{ error: "BandPlansError", code, message }`: 400 `BANDPLANS_INVALID`
 curl http://localhost:9000/api/bandplans/presets/builtin-pmr446/job
 # then POST its "spec" to /api/scanner/jobs
 ```
+
 ### Receiver capabilities
 
 `GET /api/receiver-capabilities` lists a page; `GET
@@ -1077,6 +1078,37 @@ command or the configured baseline (the `reset` baseline must mirror the
 receiver's startup arguments). A relay rate the controller rejects never
 changes source caps. Combine with the source `connected` flag to tell sent from
 pending.
+
+**Configured gain and AGC on connect (WG11).** An `rtl_tcp` source may carry
+`tuner: { gainMode, gainDb?, agcMode? }` in its config (`sources[].tuner`, also
+accepted by `POST /api/sources`): `gainMode` `manual` needs `gainDb` (0 to 50 dB
+in 0.1 dB steps), `agc` refuses it; `agcMode` is the RTL2832 digital AGC flag. An
+invalid value fails startup with `ConfigValidationError`; on another source type
+the key is ignored with one warn at startup. On every new connection, at the
+session's first payload and before the restore above, core writes the gain mode,
+the gain and the AGC flag (at most 3 commands of 5 bytes, once per connection,
+never periodically) under internal control only; each is a `tuner:command-sent`
+with origin `config`. A value accepted from this API or the relay in this process
+wins for the rest of the process (the restore writes it instead; a held gain or
+gain mode also suppresses the other configured gain field, because a gain write
+switches the tuner to manual), until a `reset` reconnect discards it; under external control nothing is
+written. The configured values are the baseline: the state shows them, but they
+stay in `unknownFields` until written on the current connection, and `reset`
+returns to them. A failed write is a restore failure (`lastError`, retried on the
+next connection). A `config` write is not operator activity: it never preempts a
+scanner lease. Without `tuner` every connect writes exactly what it wrote before
+WG11. Through a shared rtlmux every core (re)connect rewrites the configured gain,
+overwriting a gain another client (SDR++) set there; a gain set through this API
+still wins.
+
+```yaml
+sources:
+  - id: rtl
+    type: rtl_tcp
+    host: 127.0.0.1
+    port: 1234
+    tuner: { gainMode: manual, gainDb: 40.2, agcMode: false }
+```
 
 Reconciliation is not readback. After a core-only restart nothing has been
 accepted, so nothing is written and caps show the configured baseline, while the
@@ -1705,19 +1737,19 @@ curl http://localhost:9000/api/decoders
 start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 `decoder:status` WebSocket event):
 
-| Field                 | Meaning                                                                                                                                                                                                                                                                                                        |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rateHistory`         | Messages per minute for the last 15 minutes, oldest first, including the current partial minute; empty minutes are 0. Kept across the instance's own process restarts.                                                                                                                                    |
-| `sourceId`            | WaveKit source the decoder reads: the live assignment while wired, otherwise the configured `sourceId`. Absent for external-input decoders (they own their device) and for unwired decoders relying on the default source.                                                                                     |
-| `deviceSerial`        | Configured device serial of an external-input decoder (`caps.input: "external"`). Never inferred; absent when not configured and always absent for stdin decoders (their serial options are ignored in stdin mode).                                                                                            |
-| `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
-| `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0. |
-| `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                       |
-| `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
-| `owner`               | `"config"` or `"scanner"`: who created the instance. Scanner probes are `"scanner"`; their start/stop/restart and band routes answer 409 `DECODER_OWNED_BY_SCANNER`. Sent by current cores.                                                                                                                                                       |
-| `scannerJobId`        | The scanner job that owns a probe; present only with `owner: "scanner"`.                                                                                                                                                                                                                                                                          |
-| `optionIssues`        | WG6, report only: problems with the instance's `options` found when it was created (config, API create and scanner probes), `[{ path, code, message }]` with `code` `unknown-key`, `invalid-value` or `truncated`. `[]` when valid; absent for a type without an option schema. At most 32 entries (the 32nd is a `truncated` entry counting the rest); `path` and `message` ≤ 256 UTF-16 code units; messages never echo option values. The decoder is created and started exactly as before (`DECODER_OPTIONS_ENFORCE` is false); one warn log per decoder lists the issue paths. |
-| `ephemeral`           | `true` for runtime-only instances (scanner probes: not in config, never persisted, announced by `decoder:created` / `decoder:removed`). Hide or group them in decoder lists.                                                                                                                                                                       |
+| Field                 | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rateHistory`         | Messages per minute for the last 15 minutes, oldest first, including the current partial minute; empty minutes are 0. Kept across the instance's own process restarts.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `sourceId`            | WaveKit source the decoder reads: the live assignment while wired, otherwise the configured `sourceId`. Absent for external-input decoders (they own their device) and for unwired decoders relying on the default source.                                                                                                                                                                                                                                                                                                                                                                                            |
+| `deviceSerial`        | Configured device serial of an external-input decoder (`caps.input: "external"`). Never inferred; absent when not configured and always absent for stdin decoders (their serial options are ignored in stdin mode).                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `targetFrequenciesHz` | Frequencies in Hz targeted by current placements: channel frequencies (including configured VFO raw fallbacks), or the capture centre for centre reach. Parent status includes worker channels, without duplicates. Configured narrowband decoders without an explicit frequency follow the settled source VFO, or capture centre if none exists. Raw wideband and unplaced decoders retain declared config targets: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Optional when no target is known; check placement `running` and suspension fields for whether decoding is active. |
+| `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0.                                                                                                                                               |
+| `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `owner`               | `"config"` or `"scanner"`: who created the instance. Scanner probes are `"scanner"`; their start/stop/restart and band routes answer 409 `DECODER_OWNED_BY_SCANNER`. Sent by current cores.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `scannerJobId`        | The scanner job that owns a probe; present only with `owner: "scanner"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `optionIssues`        | WG6, report only: problems with the instance's `options` found when it was created (config, API create and scanner probes), `[{ path, code, message }]` with `code` `unknown-key`, `invalid-value` or `truncated`. `[]` when valid; absent for a type without an option schema. At most 32 entries (the 32nd is a `truncated` entry counting the rest); `path` and `message` ≤ 256 UTF-16 code units; messages never echo option values. The decoder is created and started exactly as before (`DECODER_OPTIONS_ENFORCE` is false); one warn log per decoder lists the issue paths.                                   |
+| `ephemeral`           | `true` for runtime-only instances (scanner probes: not in config, never persisted, announced by `decoder:created` / `decoder:removed`). Hide or group them in decoder lists.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 `health` after an unexpected exit:
 
@@ -1752,13 +1784,13 @@ readsb, AIS-catcher, dumpvdl2 and rtl_433 report `unknown` with observed rates
 until fixture-verified requirements exist; external-input decoders report
 `external-input`.
 
-| Field            | Meaning                                                                                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                |
-| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source. |
+| Field            | Meaning                                                                                                                                                                                                                                                                                                    |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                                                                                                                                           |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source.                                               |
 | `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, or `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends). |
-| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
-| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`. |
+| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).                                                                                                                                 |
+| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`.    |
 
 A decoder that is running is suspended when its source changes to an unusable
 rate and resumed when the rate becomes usable again (or the source reconnects
@@ -1800,18 +1832,18 @@ The API and config override layers merge field-wise (API wins per field): the
 band (`rangesHz` + `targetsHz` as one unit), `region` and `bandSuspension`. An
 override changes band admission only, never the process arguments.
 
-| Decoder | Band without a configured frequency or override |
-| --- | --- |
-| acarsdec | 129–137 MHz (`region-default`) |
-| dsd-fme | 136–174, 380–512, 764–941 MHz (`region-default`) |
-| direwolf | APRS per region: EU 144.800, US/CA 144.390, AU 145.175, NZ 144.575, JP/CN 144.640 MHz, plus 145.825 MHz ISS (`region-default`) |
-| rtl433 | ISM/SRD ranges per region, e.g. EU 433.05–434.79 and 863–870 MHz (`region-default`) |
-| multimon-ng | none → `unknown` (paging plans are country specific) |
-| readsb (stdin) | 1 090 MHz (`protocol`); rtlTcpHost mode is external |
-| ais-catcher | 161.975 and 162.025 MHz (`protocol`) |
-| dumpvdl2 | its channel list: configured, else the built-in default the process actually decodes (`decoder-default`) |
-| dumpvdl2 `followCenter` | the configured list bounds the band it follows; no configured list → `unknown` |
-| lora-meshtastic | configured `frequency` (`configured`) |
+| Decoder                        | Band without a configured frequency or override                                                                                                                                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| acarsdec                       | 129–137 MHz (`region-default`)                                                                                                                                                                 |
+| dsd-fme                        | 136–174, 380–512, 764–941 MHz (`region-default`)                                                                                                                                               |
+| direwolf                       | APRS per region: EU 144.800, US/CA 144.390, AU 145.175, NZ 144.575, JP/CN 144.640 MHz, plus 145.825 MHz ISS (`region-default`)                                                                 |
+| rtl433                         | ISM/SRD ranges per region, e.g. EU 433.05–434.79 and 863–870 MHz (`region-default`)                                                                                                            |
+| multimon-ng                    | none → `unknown` (paging plans are country specific)                                                                                                                                           |
+| readsb (stdin)                 | 1 090 MHz (`protocol`); rtlTcpHost mode is external                                                                                                                                            |
+| ais-catcher                    | 161.975 and 162.025 MHz (`protocol`)                                                                                                                                                           |
+| dumpvdl2                       | its channel list: configured, else the built-in default the process actually decodes (`decoder-default`)                                                                                       |
+| dumpvdl2 `followCenter`        | the configured list bounds the band it follows; no configured list → `unknown`                                                                                                                 |
+| lora-meshtastic                | configured `frequency` (`configured`)                                                                                                                                                          |
 | lora-meshtastic `followCenter` | a top-level `frequencies` list bounds the band it follows (`configured`); without one, the Meshtastic firmware range of its `options.region` (`decoder-default`, e.g. EU_868 869.4–869.65 MHz) |
 
 A `followCenter` decoder decodes the source centre itself, so it is in band
@@ -1849,11 +1881,19 @@ The decoder's band override layers, effective region and current assessment
 ```json
 {
 	"decoderId": "ism",
-	"override": { "rangesHz": [{ "minHz": 433050000, "maxHz": 434790000 }], "bandSuspension": false },
+	"override": {
+		"rangesHz": [{ "minHz": 433050000, "maxHz": 434790000 }],
+		"bandSuspension": false
+	},
 	"configOverride": null,
 	"region": { "code": "EU", "source": "guessed:tz" },
 	"persisted": true,
-	"bandAssessment": { "verdict": "in-band", "basis": "override", "overrideSource": "api", "...": "..." }
+	"bandAssessment": {
+		"verdict": "in-band",
+		"basis": "override",
+		"overrideSource": "api",
+		"...": "..."
+	}
 }
 ```
 
@@ -1915,15 +1955,15 @@ WG8 adds `patchable` to a descriptor: `true` when the protected
 older core reads as not patchable. Patchable keys are receive tuning and
 decode parameters whose value is a bounded number, a boolean or a closed set:
 
-| Type              | Patchable keys                                                                                         |
-| ----------------- | ------------------------------------------------------------------------------------------------------ |
-| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                         |
-| `ais-catcher`     | `gain`, `ppm`                                                                                          |
-| `readsb`          | `ppm`                                                                                                  |
-| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`                      |
-| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                         |
-| `rtl433`          | `analyze`, `protocols`                                                                                 |
-| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                       |
+| Type              | Patchable keys                                                                    |
+| ----------------- | --------------------------------------------------------------------------------- |
+| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                    |
+| `ais-catcher`     | `gain`, `ppm`                                                                     |
+| `readsb`          | `ppm`                                                                             |
+| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc` |
+| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                    |
+| `rtl433`          | `analyze`, `protocols`                                                            |
+| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                  |
 
 Never patchable, by meaning: `extraArgs`; secrets; free-text `string` and
 `object` options; a `string-list` without a closed set; anything naming a path,
@@ -2022,12 +2062,12 @@ decoder runs wherever the source is tuned and is never band-suspended. On an
 unusable source rate the start is recorded instead: 200 with the full status
 (`suspended: true`, `suspension`, `rateAssessment`), never 409.
 
-| Decoder state | No body | `{ "pin": true }` | `{ "pin": false }` |
-| --- | --- | --- | --- |
-| stopped | start as `"operator"` | same | start as `"auto"` (may band-suspend at once) |
-| band-suspended | pin + resume ("run anyway") | same | 200 no-op, stays `"auto"` |
-| rate-suspended | 200 no-op, pin recorded (holds when the rate recovers) | same | 200 no-op, mode `"auto"` |
-| running | 409 `DECODER_ALREADY_RUNNING` | 200, mode → `"operator"` | 200, mode → `"auto"`; band re-evaluated, may suspend |
+| Decoder state  | No body                                                | `{ "pin": true }`        | `{ "pin": false }`                                   |
+| -------------- | ------------------------------------------------------ | ------------------------ | ---------------------------------------------------- |
+| stopped        | start as `"operator"`                                  | same                     | start as `"auto"` (may band-suspend at once)         |
+| band-suspended | pin + resume ("run anyway")                            | same                     | 200 no-op, stays `"auto"`                            |
+| rate-suspended | 200 no-op, pin recorded (holds when the rate recovers) | same                     | 200 no-op, mode `"auto"`                             |
+| running        | 409 `DECODER_ALREADY_RUNNING`                          | 200, mode → `"operator"` | 200, mode → `"auto"`; band re-evaluated, may suspend |
 
 An invalid body is 400 `INVALID_START_REQUEST`. `/restart` keeps the current
 mode; `/stop` clears it.
@@ -2116,8 +2156,21 @@ answers `DecoderSettingsView` with `Cache-Control: no-store`:
 	"revision": 3,
 	"enabled": { "value": true, "source": "config" },
 	"options": [
-		{ "key": "callTimeoutMs", "source": "override", "patchable": true, "secret": false, "present": true, "value": 2500 },
-		{ "key": "udpPort", "source": "config", "patchable": false, "secret": false, "present": true }
+		{
+			"key": "callTimeoutMs",
+			"source": "override",
+			"patchable": true,
+			"secret": false,
+			"present": true,
+			"value": 2500
+		},
+		{
+			"key": "udpPort",
+			"source": "config",
+			"patchable": false,
+			"secret": false,
+			"present": true
+		}
 	],
 	"undocumentedKeys": 0,
 	"pendingRestart": true
@@ -2174,15 +2227,15 @@ configured keys the patch does not touch never fails the patch. A refused
 patch changes nothing. Error bodies `{ error, code, message, issues?, keys?,
 unknownKeys? }` never carry a submitted value:
 
-| Status | Code                                 | When                                                                                                       |
-| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id        |
-| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`) or undocumented keys (counted in `unknownKeys`, never named)       |
-| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                            |
-| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                            |
-| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                                 |
-| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                       |
-| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                              |
+| Status | Code                                 | When                                                                                                 |
+| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id  |
+| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`) or undocumented keys (counted in `unknownKeys`, never named) |
+| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                      |
+| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                      |
+| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                           |
+| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                 |
+| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                        |
 
 A denial answers before the body is parsed, with the access code-only body.
 
@@ -2353,7 +2406,12 @@ curl http://localhost:9000/api/scanner
 			"rbwHz": 1000,
 			"fftSize": 2048,
 			"kByRange": [
-				{ "startHz": 445200000, "endHz": 446800000, "k": 9.2, "faPerMhzMin": 0.8 }
+				{
+					"startHz": 445200000,
+					"endHz": 446800000,
+					"k": 9.2,
+					"faPerMhzMin": 0.8
+				}
 			],
 			"floorDbfs": -92.5,
 			"floorOccupied": false,
@@ -2384,7 +2442,32 @@ curl http://localhost:9000/api/scanner
 
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
-`passive.disabledReason` explains a passive job switched off by the cost rule.
+`passive.disabledReason` explains a passive job switched off by the cost rule
+(for example `engine-cpu 31 % of a core`).
+
+**Passive cost rule (WG11).** The limit is `scanner.passive.maxEngineUtilization`
+(config only, 0.05 to 1; absent means 0.25 of one core, the earlier fixed value;
+not a settings PATCH key). The first check runs 60 s after the source's spectrum
+engine opened; after it the guard re-checks every 300 s
+(`PASSIVE_COST_RECHECK_MS`). Each check measures the engine worker's utilization
+over the window since the previous check of the same engine and worker (the first
+check, or a replaced worker, uses the worker's life so far), not the engine's whole
+life. An enabled source above the limit is disabled (warn log, as before); a
+disabled source at or below `limit × 0.8` is enabled again (info log
+`Passive scanning re-enabled: spectrum engine within budget`, passive job
+rebuilt, `disabledReason` cleared). An unknown reading changes nothing and is not
+counted as a check. A source disabled by the guard whose engine then closed (no job
+or display holds it) gets probation 15 min (`PASSIVE_PROBATION_MS`, 3 × 300 s)
+after it was disabled: passive is re-enabled (info log), the engine opens again and
+the usual first check judges it. A host with headroom therefore gets passive back
+within one recheck (5 min) while a display keeps the engine open, else at the next
+probation; a host that stays too slow switches at most once per check.
+
+```yaml
+scanner:
+  passive:
+    maxEngineUtilization: 0.4
+```
 
 #### GET /api/scanner/settings
 
@@ -2419,7 +2502,10 @@ curl http://localhost:9000/api/scanner/settings
 	},
 	"bounds": {
 		"cpuBudgetCores": { "type": "number", "min": 0.1, "max": 64 },
-		"detection.sensitivity": { "type": "string", "enum": ["low", "normal", "high"] },
+		"detection.sensitivity": {
+			"type": "string",
+			"enum": ["low", "normal", "high"]
+		},
 		"passive.<sourceId>": { "type": "boolean" }
 	}
 }
@@ -2507,12 +2593,40 @@ curl -X POST http://localhost:9000/api/scanner/plan \
 
 ```json
 {
-	"spec": { "sourceId": "rtl", "mode": "sweep", "fftSize": 2048, "dwellMs": 185, "provenance": { "ranges": "bandplan", "fftSize": "default" } },
-	"plan": { "hops": [{ "index": 0, "centreHz": 400819200, "covered": { "startHz": 400000000, "endHz": 401638400 }, "channelCount": 131, "dcAdjacentChannelsHz": [], "excluded": [], "dcMinEdgeHz": 1500 }], "usableHalfSpanHz": 819200, "dcGuardHz": 1500, "ppmMarginHz": 940 },
+	"spec": {
+		"sourceId": "rtl",
+		"mode": "sweep",
+		"fftSize": 2048,
+		"dwellMs": 185,
+		"provenance": { "ranges": "bandplan", "fftSize": "default" }
+	},
+	"plan": {
+		"hops": [
+			{
+				"index": 0,
+				"centreHz": 400819200,
+				"covered": { "startHz": 400000000, "endHz": 401638400 },
+				"channelCount": 131,
+				"dcAdjacentChannelsHz": [],
+				"excluded": [],
+				"dcMinEdgeHz": 1500
+			}
+		],
+		"usableHalfSpanHz": 819200,
+		"dcGuardHz": 1500,
+		"ppmMarginHz": 940
+	},
 	"sweepPeriodMs": 8140,
 	"poi": [{ "hopIndex": 0, "detection": 0.61, "decode": 0.17 }],
 	"estimates": { "cpuCores": 0.75, "diskMbPerHour": 57.6, "probes": 1 },
-	"impact": { "liveAudioClients": 0, "digitalVoiceListeners": 0, "runningDecoders": ["dsd-fme"], "pinnedDecoders": [], "scannerJobs": [], "unrestorable": [] },
+	"impact": {
+		"liveAudioClients": 0,
+		"digitalVoiceListeners": 0,
+		"runningDecoders": ["dsd-fme"],
+		"pinnedDecoders": [],
+		"scannerJobs": [],
+		"unrestorable": []
+	},
 	"issues": [
 		{
 			"code": "poi-low",
@@ -2640,7 +2754,11 @@ curl -X POST http://localhost:9000/api/scanner/jobs \
 	"message": "The job spec has errors",
 	"details": {
 		"issues": [
-			{ "code": "range-empty", "severity": "error", "message": "a sweep needs at least one range or bandplan" }
+			{
+				"code": "range-empty",
+				"severity": "error",
+				"message": "a sweep needs at least one range or bandplan"
+			}
 		]
 	}
 }
@@ -2692,10 +2810,27 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 	"name": null,
 	"state": "holding",
 	"passive": false,
-	"spec": { "sourceId": "rtl", "mode": "sweep", "kind": "discover", "priority": 50 },
-	"plan": { "hops": [], "usableHalfSpanHz": 819200, "dcGuardHz": 1500, "ppmMarginHz": 940 },
+	"spec": {
+		"sourceId": "rtl",
+		"mode": "sweep",
+		"kind": "discover",
+		"priority": 50
+	},
+	"plan": {
+		"hops": [],
+		"usableHalfSpanHz": 819200,
+		"dcGuardHz": 1500,
+		"ppmMarginHz": 940
+	},
 	"issues": [],
-	"impact": { "liveAudioClients": 0, "digitalVoiceListeners": 0, "runningDecoders": [], "pinnedDecoders": [], "scannerJobs": [], "unrestorable": [] },
+	"impact": {
+		"liveAudioClients": 0,
+		"digitalVoiceListeners": 0,
+		"runningDecoders": [],
+		"pinnedDecoders": [],
+		"scannerJobs": [],
+		"unrestorable": []
+	},
 	"unrestorable": [],
 	"progress": {
 		"sweepIndex": 3,
@@ -2720,7 +2855,12 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 		"counts": {
 			"observations": 120,
 			"transients": 4,
-			"discoveries": { "activity": 5, "candidate": 3, "classified": 0, "decoded": 2 }
+			"discoveries": {
+				"activity": 5,
+				"candidate": 3,
+				"classified": 0,
+				"decoded": 2
+			}
 		}
 	},
 	"createdAt": "2026-10-10T13:55:00.000Z",
@@ -2733,7 +2873,11 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
 `resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
-carry `identify` (see `POST /api/scanner/identify`).
+carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
+`offset`, `channel` or (WG11) `replay`: a probe fed from an IQ capture rather than
+the live stream ([IQ capture on detection](#iq-capture-on-detection-wg11)). Its
+`trackId` is the full tracker id, `<sourceId>-<suffix>`; a `spectrum:frame` track
+carries only the suffix (see [spectrum:frame](#spectrumframe)).
 
 A job in `paused(preempted-job)` carries `preemptedBy: { jobId, name }`: the job
 that holds its source lease now (`name` is null when that job has none). The field
@@ -2892,6 +3036,14 @@ from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.
 current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
 identify job.
 
+`cancel` of a job that already ended (`completed`, `cancelled` or `failed`,
+identify jobs included) answers **200** with the unchanged job (WG11): no state
+change, no end action, no event and no persistence write, so a client may cancel
+without first checking the state. (Before WG11 it answered 409
+`SCANNER_INVALID_TRANSITION`.) A cancel racing a natural completion ends in
+exactly one terminal state. An unknown id stays 404; `pause` and `resume` of an
+ended job keep the 409 `SCANNER_INVALID_TRANSITION`.
+
 ```bash
 curl -X POST http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH/resume \
   -H 'Content-Type: application/json' -d '{"takeover": true}'
@@ -2989,10 +3141,27 @@ curl 'http://localhost:9000/api/scanner/discoveries?identity=dmr-cc:1'
 			"observationCount": 7,
 			"airtimeMs": 41200,
 			"signal": {
-				"best": { "peakDbfs": -38.5, "meanDbfs": -41.0, "snrDb": 51.5, "floorDbfs": -92.5 },
-				"last": { "peakDbfs": -40.0, "meanDbfs": -42.5, "snrDb": 50.0, "floorDbfs": -92.5 }
+				"best": {
+					"peakDbfs": -38.5,
+					"meanDbfs": -41.0,
+					"snrDb": 51.5,
+					"floorDbfs": -92.5
+				},
+				"last": {
+					"peakDbfs": -40.0,
+					"meanDbfs": -42.5,
+					"snrDb": 50.0,
+					"floorDbfs": -92.5
+				}
 			},
-			"metadata": { "talkgroups": ["9"], "sources": ["2060945"], "slots": [1], "callsigns": [], "capcodes": [], "ismModels": [] },
+			"metadata": {
+				"talkgroups": ["9"],
+				"sources": ["2060945"],
+				"slots": [1],
+				"callsigns": [],
+				"capcodes": [],
+				"ismModels": []
+			},
 			"sourceIds": ["rtl"],
 			"jobIds": ["j_01JA2T6Q4M3XZ8R6V5W2NKD7QH"],
 			"tuningTrust": "commanded",
@@ -3037,8 +3206,7 @@ Deletes the discovery with its evidence and recordings (`scanner:discovery`
 (see [Recordings](#recordings)): nothing changes; unkeep first. The check runs
 before any change and again before each recording file is unlinked: if a Keep
 commits while the delete runs, the discovery is already gone but the kept file and
-its folder stay (files removed before it stay removed) and the request answers
-409. Inactive pruning and capacity eviction skip a discovery that holds a kept
+its folder stay (files removed before it stay removed) and the request answers 409. Inactive pruning and capacity eviction skip a discovery that holds a kept
 recording.
 
 Success waits for accepted evidence writes and recording moves to drain and
@@ -3133,7 +3301,12 @@ curl -X POST http://localhost:9000/api/scanner/identify \
 	"id": "j_01JA2TB0Q7ZPM1V8C4X2N6R3TY",
 	"name": "Identify 446.05625 MHz",
 	"state": "running",
-	"spec": { "kind": "identify", "mode": "in-window", "sourceId": "rtl", "priority": 100 },
+	"spec": {
+		"kind": "identify",
+		"mode": "in-window",
+		"sourceId": "rtl",
+		"priority": 100
+	},
 	"identify": {
 		"target": { "frequencyHz": 446056250, "bandwidthHz": 12500 },
 		"timeoutMs": 15000,
@@ -3146,9 +3319,28 @@ curl -X POST http://localhost:9000/api/scanner/identify \
 				"targetHz": 446056250,
 				"state": "trying",
 				"trials": [
-					{ "protocol": "dmr", "decoder": "dsd-fme", "mode": "auto", "transport": "offset", "outcome": "running" },
-					{ "protocol": "pocsag", "decoder": "multimon-ng", "mode": "multimon-ng", "transport": "offset", "outcome": "pending" },
-					{ "protocol": "ism", "decoder": "rtl433", "mode": null, "transport": null, "outcome": "unsupported", "reason": "needs-channelizer" }
+					{
+						"protocol": "dmr",
+						"decoder": "dsd-fme",
+						"mode": "auto",
+						"transport": "offset",
+						"outcome": "running"
+					},
+					{
+						"protocol": "pocsag",
+						"decoder": "multimon-ng",
+						"mode": "multimon-ng",
+						"transport": "offset",
+						"outcome": "pending"
+					},
+					{
+						"protocol": "ism",
+						"decoder": "rtl433",
+						"mode": null,
+						"transport": null,
+						"outcome": "unsupported",
+						"reason": "needs-channelizer"
+					}
 				]
 			}
 		]
@@ -3233,12 +3425,20 @@ frequency lies within the target's tolerance (`max(1 kHz, bandwidth/2)`) and it 
 open or ended no earlier than 30 s (`IDENTIFY_ANALOG_LOOKBACK_MS`) before the job
 started; the core keeps the latest 32 (`IDENTIFY_ANALOG_MAX_TRANSMISSIONS`). `nfm` or
 `wfm` answers `analog-fm`, `am` or `dsb` answers `analog-am`; other modulations are
-no evidence. Outcomes: `decoded` once a matching closed transmission exists;
+no evidence. Outcomes (WG11): `decoded` once a matching closed transmission exists
+and the newest one carried a CTCSS tone or a DCS code; `heard` when the matching
+closed transmissions carried neither (a squelch opening was heard, nothing was
+decoded; before WG11 this was `decoded`). `heard` is final and no other trial uses
+it.
 `timeout` when only a matching open one is present at the target's deadline;
 `no-sync` when live audio was on the target during the window but nothing matched;
 `unsupported` with reason `no-live-audio` when live audio was not running on the
-job's source, or not tuned within the tolerance, for the whole window. A match is a
-stop like an accepted identity unless `exhaustive`; a digital decode keeps priority
+job's source, or not tuned within the tolerance, for the whole window. Since WG11 a
+match ends only the target's other waiting `live-audio` trials: probe runs, pending
+runs and ambient trials of other decoders keep running to their own end (an analog
+match no longer marks them `not-needed`), and the target finishes when every trial
+ended, so an identify job with analog evidence can run until its digital trials
+end. A digital decode keeps priority
 and then no `analog` is reported (a classified digital discovery keeps its protocol; analog evidence
 is supplementary and only appears in `result.analog`). Identify reads the same published
 transmissions as WebSocket and Activity, so the activity hygiene rules below
@@ -3247,8 +3447,8 @@ opening is never evidence, and a closed event arrives up to the merge gap (1.5 s
 ended. A trial that sees a matching open transmission at the target's deadline, or an opening
 the tracker still holds back (under the 500 ms minimum, started by the deadline), therefore
 waits up to 1 750 ms past the deadline (`IDENTIFY_ANALOG_SETTLE_MS`: merge gap plus the 250 ms
-hang; fixed from the deadline): a closed match that ended by the deadline in that time decodes,
-otherwise the trial ends `timeout` (never `no-sync`). Tone detection runs over every merged
+hang; fixed from the deadline): a closed match that ended by the deadline in that time decides
+(`decoded` or `heard`), otherwise the trial ends `timeout` (never `no-sync`). Tone detection runs over every merged
 segment, so a merged transmission gives the detector more audio, not less; a different speaker
 with a different confirmed tone is a separate transmission. A matching transmission with a CTCSS tone or a DCS
 code on a `commanded` or `relay` frequency makes the target `identified` with
@@ -3270,8 +3470,10 @@ the transmission tracker reported are used. `result.analog`:
 ```
 
 Identify never starts or retunes live audio: to identify analog voice, listen on the
-target (or have listened in the last 30 s). The outcome and state lists are unchanged;
-`live-audio` and `no-live-audio` are new values of the free-text `decoder` and `reason`.
+target (or have listened in the last 30 s). WG10 left the outcome and state lists
+unchanged (`live-audio` and `no-live-audio` are values of the free-text `decoder` and
+`reason`); WG11 adds the trial outcome `heard`. A client with a closed outcome map must
+add it.
 
 A decode counts only when all of these hold (fail closed):
 
@@ -3292,6 +3494,107 @@ The identity is attached on its second clean decode within one engine epoch.
 Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
 (`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
 of these types, or without tuning trust, identify behaves as before WG7.
+
+**Narrow digital trials (WG11).** When the target lies in a band-plan range of the
+active region that lists a channel raster of at most 6 250 Hz, the plan includes
+`nxdn48`, `dpmr` and `dstar` (unless `protocols` excludes them) even when the
+track's width does not suggest them, each scored at least 0.3
+(`IDENTIFY_NARROW_DIGITAL_MIN_SCORE`) before the band priors; a prior of 0 still
+removes a protocol. That is at most 3 more trials and 2 more runs (`dstar` shares the
+dsd-fme `auto` run). For an analog-looking 12.5 kHz track on a 6.25 kHz raster the
+last narrow run ends about 10.6 s after the start, inside the default 15 s.
+
+**Known protocol first (WG11).** A discovery's known protocol is its `protocol`
+while its confidence is `decoded` and it has fewer than 2
+(`KNOWN_PROTOCOL_MAX_MISSES`) consecutive misses. When identify resolves the target
+to such a discovery, that protocol's run goes first (added as a trial when the track
+does not suggest it, unless excluded, given a prior of 0 or without a probe mode);
+every other trial still follows in the usual order. A known trial that ran its full
+hold on a live transmission of the discovery and decoded nothing counts one miss; any
+accepted decode on the discovery (identify, a job probe, an ambient decoder or a
+replay) resets the count. After 2 misses the discovery plans as an undecoded one
+until it decodes again. Misses live in memory only: they never change the stored
+protocol or confidence, and a restart clears them. Scan job probes count misses and
+decodes the same way, except that a protocol covered only by a probe's last mode
+(`nxdn96` in dsd-fme `auto`) never takes a miss from a job, and sweep probes never
+count misses (a hop cut cannot be told from an expired hold).
+
+**Replay trials (WG11, IQ capture on).** With `scanner.iqCapture` on (see
+[IQ capture on detection](#iq-capture-on-detection-wg11) below), identify takes over
+up to 2 (`IDENTIFY_REPLAY_MAX_CAPTURES`) stored captures near the target (same
+source, frequency within the tolerance and trust `commanded` or `relay`, or the same
+observation), newest first; when the resolved track has none, it requests one and
+waits up to 2 s for it. After its live runs, every probe protocol not decoded live
+gets one replay run per capture, as trials with `transport: "replay"`, so a trial
+list can hold a live and a replay trial for one protocol. A replay decode counts
+like a live one (the same acceptance rule, in the capture's epoch). The captures are
+discarded when the target reaches its result, on every path. A live decode of the
+observation before its replay started discards the capture unreplayed.
+
+#### IQ capture on detection (WG11)
+
+On by default in protected access mode. A transmission is identified even when
+it ended before a decoder could run: the core keeps up to about 4 s of narrowband IQ
+of it, replays that into the probe decoders off-air, records the result and deletes
+the IQ at once. Config (`scanner.iqCapture`, config only; unknown keys are refused):
+
+```yaml
+scanner:
+  iqCapture:
+    enabled: true # default true
+    maxTotalMb: 256 # 16 to 256 (the cap, 256 MiB)
+    maxCaptureMs: 4000 # 500 to 4000, pre-roll included
+    preRollMs: 500 # 0 to 2000 (the native ring)
+    binaryPath: wavekit-iqcap
+```
+
+- **Scope.** `enabled: false`: no process, no file, no change anywhere. In
+  legacy mode the key is not acted on and one info line says so. A missing binary
+  turns capture off with one info log explaining how to build it (`make chan-build`);
+  identify and the scanner work as before.
+- **Capture.** One `wavekit-iqcap` process per IQ source (a second binary of the
+  `wavekit-chan` crate, in the image) reads the spectrum engine's CU8 tap (no new
+  fanout branch) into a full-rate ring of at most 2 s. The scanner requests a capture
+  when a track surfaces and its discovery has no confirmed result for this
+  transmission yet (below `decoded`, or `decoded` with a known protocol no live
+  probe has confirmed on this observation), not on a spur or an image, inside the
+  usable span; at most 6 per source per minute and 2 at once. The tool shifts the
+  channel to baseband and decimates it to 48 000 Hz complex float32 (cf32) at the
+  widest probe passband, from the pre-roll to the track's close (plus the tracker
+  hang) or `maxCaptureMs`: at most 1 536 000 B per capture (4 s × 48 000 × 8 B).
+  Gaps are counted, never filled; a capture shorter than 100 ms is discarded.
+- **Order.** capture → queue → replay trials → result → discard. A finished capture
+  joins one FIFO replay queue per core. Its trials (at most 8,
+  `IQ_REPLAY_MAX_TRIALS`) are the known protocol first, then the probe modes the
+  captured track scores (narrow digital included), deduplicated. They run one at a
+  time through the `replay` probe transport (`dsd-fme`, `multimon-ng`, `direwolf`;
+  never `rtl433`), each fed the capture filtered to that decoder's probe channel
+  shape, faster than real time (68× to 384× in the bench). At most one replay probe
+  runs at once, costing 0.15 cores of `cpuBudgetCores`, at a priority below identify
+  and above passive; it never preempts and is never preempted, and it needs no live
+  spectrum engine. The first accepted decode is the result and ends the remaining
+  trials; otherwise the result is "no decode" once every trial ended. The result is
+  applied to the capture's observation in the capture's epoch (decode evidence, or
+  the undecoded reason, and the known-protocol miss rule above), then the capture
+  is deleted. A replay deferred by the CPU budget or guard waits in place for at most
+  60 s.
+- **Discard.** At its result; unreplayed when a live probe or identify decodes the
+  observation first; 10 min (`IQ_CAPTURE_ORPHAN_TTL_MS`) after it finished when it
+  never got a result (backlog, decoders unavailable); at once when its source's
+  epoch changed during it, its file is missing, oversized or not ours, or its
+  process failed (no replay, no verdict, no miss). At `maxTotalMb` a new capture is
+  refused until the queue drains. Captures do not survive a restart.
+- **Files.** `<scanner.storage.dir>/iq-captures/` (mode 0700), files
+  `<uuid v4>.cf32` (0600), regular files only with no symbolic link on the way. The
+  startup sweep removes only files matching that name grammar, owned by this user,
+  and leaves anything else. Logs and bodies name no path, file name, capture id or
+  frequency, only counts and codes. These captures are not the burst captures below
+  and are not listed by any route.
+- **Cost (measured on the reference Mac).** The tool takes 0.0002 cores with only the
+  ring and about 0.06 to 0.14 cores with 2 captures active (2.048 and 2.4 Msps); the
+  main-thread tap feed left the event-loop p99 at 2.06 ms (2.04 ms without it). Memory
+  per source outside the file cap is about 11.4 MB at 2.048 Msps (the 8.2 MB ring,
+  native and Node queues, the pipe).
 
 #### GET /api/scanner/captures
 
@@ -3324,7 +3627,10 @@ Burst IQ captures (job option `capture`, [SCANNER.md](SCANNER.md#burst-iq-captur
 		"postTruncated": false,
 		"durationS": 5,
 		"bytes": 20480000,
-		"files": { "iq": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv.cu8", "manifest": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv.json" }
+		"files": {
+			"iq": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv.cu8",
+			"manifest": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv.json"
+		}
 	}
 ]
 ```
@@ -3486,9 +3792,21 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 	"bucketHz": 12500,
 	"sinceMs": 86400000,
 	"buckets": [
-		{ "startHz": 446050000, "dutyByHour": [0.02, 0.11, null], "observedMs": 7200000, "activeMs": 468000 }
+		{
+			"startHz": 446050000,
+			"dutyByHour": [0.02, 0.11, null],
+			"observedMs": 7200000,
+			"activeMs": 468000
+		}
 	],
-	"top": [{ "startHz": 446050000, "duty": 0.065, "observedMs": 7200000, "activeMs": 468000 }]
+	"top": [
+		{
+			"startHz": 446050000,
+			"duty": 0.065,
+			"observedMs": 7200000,
+			"activeMs": 468000
+		}
+	]
 }
 ```
 
@@ -3653,7 +3971,7 @@ keys, later ports count under `other`), `lastPortnum`, `decoderId`,
 `firstSeen` and `lastSeen`, and from WG3:
 
 - `telemetry`: `{ batteryPct, powered, voltageV, channelUtilizationPct,
-  airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
+airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
   A `battery_level` above 100 means `powered: true` and `batteryPct: null`; an
   absent metric is null; `at` is the packet's receive time. Values are reported
   as sent, not rounded: `voltageV`, `channelUtilizationPct` and `airUtilTxPct`
@@ -3721,7 +4039,12 @@ still 200:
 	"windowHours": 24,
 	"bearingStepDeg": 1,
 	"protocols": [],
-	"rejected": { "invalid-position": 0, "too-far": 0, "stale": 0, "no-station": 12 },
+	"rejected": {
+		"invalid-position": 0,
+		"too-far": 0,
+		"stale": 0,
+		"no-station": 12
+	},
 	"timestamp": "2026-10-16T12:00:00.000Z"
 }
 ```
@@ -4735,21 +5058,21 @@ The reader worker has its own 5 s startup budget. The 250 ms deadline (1,000 ms
 for trails) starts only after the reader is ready. A reader that cannot start is
 `ACTIVITY_QUERY_FAILED`.
 
-| Code                         | HTTP | When |
-| ---------------------------- | ---- | ---- |
-| `ACTIVITY_DISABLED`          | 404  | `activity.enabled` is false |
-| `NOT_FOUND`                  | 404  | Detail id is not in the store |
-| `ACTIVITY_UNAVAILABLE`       | 503  | Enabled, but the store did not open. `reason` says why |
-| `ACTIVITY_QUERY_INVALID`     | 400  | Bad query, trails window or timestamp, facet list, event id or subscribe message |
-| `ACTIVITY_CURSOR_INVALID`    | 400  | Cursor does not verify. `reason`: `invalid-cursor` |
-| `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
-| `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
-| `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
-| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms; 1,000 ms for trails, band map and timeline) after the reader was ready |
-| `ACTIVITY_QUERY_FAILED`      | 500  | The reader did not start, the reader failed, or the store read failed |
-| `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
-| `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |
-| `ACTIVITY_STATUS_UNAVAILABLE`| 500  | Status was requested without a stats provider |
+| Code                          | HTTP | When                                                                                                                    |
+| ----------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------- |
+| `ACTIVITY_DISABLED`           | 404  | `activity.enabled` is false                                                                                             |
+| `NOT_FOUND`                   | 404  | Detail id is not in the store                                                                                           |
+| `ACTIVITY_UNAVAILABLE`        | 503  | Enabled, but the store did not open. `reason` says why                                                                  |
+| `ACTIVITY_QUERY_INVALID`      | 400  | Bad query, trails window or timestamp, facet list, event id or subscribe message                                        |
+| `ACTIVITY_CURSOR_INVALID`     | 400  | Cursor does not verify. `reason`: `invalid-cursor`                                                                      |
+| `ACTIVITY_SNAPSHOT_RESET`     | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset`                                       |
+| `ACTIVITY_CURSOR_GAP`         | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
+| `ACTIVITY_QUERY_BUSY`         | 429  | Reader admission is full                                                                                                |
+| `ACTIVITY_QUERY_TIMEOUT`      | 429  | The read passed its deadline (250 ms; 1,000 ms for trails, band map and timeline) after the reader was ready            |
+| `ACTIVITY_QUERY_FAILED`       | 500  | The reader did not start, the reader failed, or the store read failed                                                   |
+| `ACTIVITY_QUERY_CLOSED`       | 503  | The query service is closed                                                                                             |
+| `ACTIVITY_RECORD_CORRUPT`     | 500  | A stored record failed validation                                                                                       |
+| `ACTIVITY_STATUS_UNAVAILABLE` | 500  | Status was requested without a stats provider                                                                           |
 
 Cursor failures include `reason`. A query hash ignores `order` and paging, so
 a reconnect must send the same `query` as the cursor. A changed query is
@@ -4763,7 +5086,7 @@ retention removes rows from the largest share). Paging and replay never skip suc
 a row silently:
 
 - A page continuation fails with 409 `ACTIVITY_SNAPSHOT_RESET`, `reason:
-  "snapshot-reset"`, when retention opened a hole after the first page was read.
+"snapshot-reset"`, when retention opened a hole after the first page was read.
   Start a new search.
 - A replay (REST `replayCursor` or WebSocket cursor) resets with `cursor-gap`
   when a hole opened above its position, that is, a row it had not delivered was
@@ -4782,7 +5105,12 @@ Under cap pressure with several shares, expect more `snapshot-reset` and
 `activity` is not a channel of `subscribe`. Clients send:
 
 ```json
-{ "type": "activity:subscribe", "id": "live", "query": {}, "cursor": "<optional>" }
+{
+	"type": "activity:subscribe",
+	"id": "live",
+	"query": {},
+	"cursor": "<optional>"
+}
 ```
 
 ```json
@@ -5112,7 +5440,10 @@ more than one `decoder:status` per transition; always apply the latest.
 		"stats": { "bytesIn": 0, "eventsOut": 0, "errors": 0 },
 		"lastOutputAt": null,
 		"restartCount": 8,
-		"rateAssessment": { "verdict": "unknown", "reasonCode": "unknown-requirements" },
+		"rateAssessment": {
+			"verdict": "unknown",
+			"reasonCode": "unknown-requirements"
+		},
 		"sourceId": "rtl-pi",
 		"idleTimeoutMs": 30000,
 		"lastError": {
@@ -5120,7 +5451,11 @@ more than one `decoder:status` per transition; always apply the latest.
 			"message": "Process exited unexpectedly (code 1)",
 			"at": "2026-10-08T12:00:00.000Z"
 		},
-		"caps": { "input": "iq", "output": "text", "integrationPattern": "pure_consumer" }
+		"caps": {
+			"input": "iq",
+			"output": "text",
+			"integrationPattern": "pure_consumer"
+		}
 	}
 }
 ```
@@ -5239,8 +5574,19 @@ to one `GET /api/sources` item. Cadence, per source:
 		"bytesReceived": 847000000,
 		"dataRate": 4800,
 		"reconnectAttempts": 0,
-		"caps": { "kind": "iq", "sampleRate": 2400000, "format": "U8_IQ", "exclusive": false },
-		"assignments": [{ "decoderId": "dmr", "sourceId": "rtl-pi", "assignedAt": "2026-10-08T11:00:00.000Z" }],
+		"caps": {
+			"kind": "iq",
+			"sampleRate": 2400000,
+			"format": "U8_IQ",
+			"exclusive": false
+		},
+		"assignments": [
+			{
+				"decoderId": "dmr",
+				"sourceId": "rtl-pi",
+				"assignedAt": "2026-10-08T11:00:00.000Z"
+			}
+		],
 		"consumers": 2,
 		"available": true
 	}
@@ -5290,8 +5636,9 @@ further `source:status` or `source:disconnected` follows for that `sourceId`
 
 On the `tuner` channel after a tuner command was written to an rtl_tcp source.
 `origin` (optional) says who issued it: `"rest"` (the REST API), `"scanner"`
-(a sweep through the scanner's lease) or `"replay"` (desired state re-sent on
-reconnect). It is absent for writes whose origin is not tagged. Relay (SDR++)
+(a sweep through the scanner's lease), `"replay"` (desired state re-sent on
+reconnect) or (WG11) `"config"` (the source's configured gain mode, gain or AGC
+flag written on a new connection; see [Tuner](#tuner)). It is absent for writes whose origin is not tagged. Relay (SDR++)
 commands do not pass through here.
 
 ```json
@@ -5396,7 +5743,7 @@ everything it publishes (these events, Activity rows and identify's analog evide
 alike); live audio gating and playback are unchanged:
 
 1. Merge: a squelch close ends a segment at `endMs = max(segment start, close − 250 ms
-   hang)`. A re-open at `t` with `t − endMs ≤ 1500 ms` (`ANALOG_TRANSMISSION_MERGE_GAP_MS`)
+hang)`. A re-open at `t` with `t − endMs ≤ 1500 ms` (`ANALOG_TRANSMISSION_MERGE_GAP_MS`)
    on the same source, modulation, bandwidth, offset, squelch mode and frequency continues
    the same transmission (same id and start; power, tone and audio accumulate). Otherwise,
    or 1.5 s after `endMs`, the transmission is final with `endedAt = endMs`. `stopped`,
@@ -5557,7 +5904,15 @@ The full `ScanJob` (the `GET /api/scanner/jobs/:id` body) on create, on every
 state change and after every edit.
 
 ```json
-{ "type": "scanner:job", "channel": "scanner", "data": { "id": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH", "state": "paused", "reason": "preempted-operator" } }
+{
+	"type": "scanner:job",
+	"channel": "scanner",
+	"data": {
+		"id": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+		"state": "paused",
+		"reason": "preempted-operator"
+	}
+}
 ```
 
 #### scanner:progress
@@ -5610,10 +5965,14 @@ most 1/s per (job, target); the latest state is always delivered.
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
   `decoder-unavailable` (WG9), `no-live-audio` (WG10); `mode` and `transport` null),
-  `not-needed` (an earlier trial decoded and `exhaustive` is false) and
-  `cancelled`. `transport` is `offset`, `channel` or `ambient` (WG7: an
-  already-running AIS, ACARS, VDL2 or LoRa decoder; WG10: decoder `live-audio` for
-  `analog-fm` / `analog-am`; see `POST /api/scanner/identify`).
+  `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
+  match no longer causes it, WG11), `cancelled` and (WG11) `heard` (a `live-audio`
+  trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`
+  on a `live-audio` trial now means a tone or code was heard). `transport` is
+  `offset`, `channel`, `ambient` (WG7: an already-running AIS, ACARS, VDL2 or LoRa
+  decoder; WG10: decoder `live-audio` for `analog-fm` / `analog-am`) or (WG11)
+  `replay` (a probe decoder fed from an IQ capture of the target, after the
+  transmission ended); see `POST /api/scanner/identify`.
 - `result`: see `POST /api/scanner/identify`, including `artefact?`,
   `ended?: "window-moved"`, and (WG10) `analog?` and `decodersUnavailable?`.
 
@@ -5629,16 +5988,44 @@ the job completes with `identify.targets: []` (`scanner:job`).
 		"targetHz": 446056250,
 		"state": "identified",
 		"trials": [
-			{ "protocol": "dmr", "decoder": "dsd-fme", "mode": "auto", "transport": "offset", "outcome": "decoded" },
-			{ "protocol": "pocsag", "decoder": "multimon-ng", "mode": "multimon-ng", "transport": "offset", "outcome": "not-needed" }
+			{
+				"protocol": "dmr",
+				"decoder": "dsd-fme",
+				"mode": "auto",
+				"transport": "offset",
+				"outcome": "decoded"
+			},
+			{
+				"protocol": "pocsag",
+				"decoder": "multimon-ng",
+				"mode": "multimon-ng",
+				"transport": "offset",
+				"outcome": "not-needed"
+			}
 		],
 		"result": {
 			"protocol": "dmr",
 			"confidence": "decoded",
 			"identity": { "kind": "dmr-cc", "value": "1" },
-			"metadata": { "talkgroups": ["9"], "sources": ["2060945"], "slots": [1], "callsigns": [], "capcodes": [], "ismModels": [] },
+			"metadata": {
+				"talkgroups": ["9"],
+				"sources": ["2060945"],
+				"slots": [1],
+				"callsigns": [],
+				"capcodes": [],
+				"ismModels": []
+			},
 			"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
-			"measurements": { "source": "track", "centreHz": 446055970, "obwHz": 9800, "peakDbfs": -38.5, "snrDb": 51.5, "floorDbfs": -92.5, "dutyCycle": 0.5, "class": "tdma-ms" }
+			"measurements": {
+				"source": "track",
+				"centreHz": 446055970,
+				"obwHz": 9800,
+				"peakDbfs": -38.5,
+				"snrDb": 51.5,
+				"floorDbfs": -92.5,
+				"dutyCycle": 0.5,
+				"class": "tdma-ms"
+			}
 		}
 	}
 }
@@ -5725,12 +6112,75 @@ One frame per source and profile:
 		"binEncoding": "u8-halfdb-127.5",
 		"floorDbfs": -92.5,
 		"thresholdDb": 9.2,
-		"tracks": [{ "startHz": 446051000, "endHz": 446061000, "flags": { "burst": false, "iqImage": false, "edge": false } }],
-		"masks": { "dcHz": 446000000, "dcGuardHz": 1500, "spurRanges": [{ "startHz": 446249500, "endHz": 446250500 }] },
+		"tracks": [
+			{
+				"startHz": 446051000,
+				"endHz": 446061000,
+				"flags": {
+					"burst": false,
+					"iqImage": false,
+					"edge": false,
+					"spur": false
+				},
+				"trackId": "mgv3k2a1-1f",
+				"snrDb": 41.5,
+				"peakDbfs": -38.5,
+				"blocks": 37,
+				"ageMs": 1850,
+				"surfaced": true,
+				"scanner": {
+					"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+					"protocol": "dmr",
+					"confidence": "decoded"
+				}
+			}
+		],
+		"masks": {
+			"dcHz": 446000000,
+			"dcGuardHz": 1500,
+			"spurRanges": [{ "startHz": 446249500, "endHz": 446250500 }]
+		},
 		"at": "2026-10-10T14:02:15.050Z"
 	}
 }
 ```
+
+- `tracks[]` (`SpectrumFrameTrack`, at most 256 per frame): the segments of the
+  frame's newest block summary, `{startHz, endHz, flags}`. Since WG11 a segment the
+  tracker associated with an open track also carries that track's fields, all taken
+  from the same block (no look-ahead; backfill and averaged frames carry the values
+  recorded with their block). A segment without a track carries none of them. All
+  are optional; older cores omit them.
+  - `trackId`: the tracker id without its `<sourceId>-` prefix (at most 30
+    characters). Key tracks by **(`sourceId`, `trackId`)**: two sources can show
+    the same suffix. The full tracker id is `` `${sourceId}-${trackId}` `` (the form
+    `ScanJobProbe.trackId` carries). It is stable for the emission's life, burst gaps
+    within the tracker's hang included, and survives the tracker's 120 s
+    maximum-duration rollover (the frame keeps the chain's first id; an epoch change
+    gives a new id). Ids are never reused.
+  - `snrDb`: the lifetime mean over the track's chain so far (mean band power over
+    mean floor power, against the core's floor), rounded to 0.5 dB; not this block's
+    value. `peakDbfs`: the lifetime maximum block peak so far, rounded to 0.5 dB.
+    Both continue across the rollover.
+  - `blocks`: on-blocks so far; `ageMs`: since the chain started, from sample
+    counts. Both keep growing across the rollover and saturate at 9 999 999 blocks
+    and 99 999 999 ms (about 27.8 h). First seen ≈ `at` − `ageMs`.
+  - `surfaced`: the display surfacing rule evaluated for this block: false when the
+    track is a spur or an image, or this block's segment is flagged `iqImage`; a
+    burst track at threshold + 3 dB, otherwise at least
+    `detection.minSurfaceBlocks` blocks. It is not sticky: it is recomputed every
+    block, so a surfaced track can read false in a frame where its segment is an
+    image. It survives the rollover.
+  - `flags.spur`: the track lies wholly on a spur line (never surfaced, never
+    probed).
+  - `scanner`: `{discoveryId, protocol, confidence}` when the scanner holds a live
+    observation of this track on the same source with a discovery, looked up when
+    the frame is sent. It is absent for about 1 s after each rollover, until the
+    scanner's new observation gets its discovery.
+  - Size: a track grows by at most 260 bytes of JSON
+    (`SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES`): typically about 105 B without and
+    217 B with `scanner`, so a 64-track frame is up to about 16.6 KB larger. Tracks
+    per frame, the cadence and every other field are unchanged.
 
 - `profile` is the key `<hz>:<bins>` (the default profile or the client's),
   `<hz>:<bins>:a<n>` for an averaged profile.
@@ -5740,7 +6190,7 @@ One frame per source and profile:
 - `binCount ≤ bins`, never upsampled; `binHz` is the true width and
   `nativeBinHz` is `fs / fftSize` (`binHz / nativeBinHz` is the max-hold
   factor). The engine summary budget (`min(scanner.ws.spectrumSummaryBins,
-  host bins cap)`, 2048 by default) caps the detail.
+host bins cap)`, 2048 by default) caps the detail.
 - Cadence: one frame per `ceil(blockHz / hz)` block summaries, with
   `blockHz = 1000 / integrationMs` (20 at the default): 25 Hz gives 20 Hz, 10 or
   15 Hz gives 10 Hz. `effectiveHz` is that cadence while blocks flow and an
@@ -5822,7 +6272,15 @@ reconnect.
 {
 	"type": "vessel:update",
 	"channel": "vessels",
-	"data": { "mmsi": "244660000", "vesselClass": "A", "name": "EVER GIVEN", "position": { "lat": 51.9, "lon": 4.1, "at": "2026-10-13T14:02:15.000Z" }, "sog": 11.2, "cog": 254.1, "lastSeen": "2026-10-13T14:02:15.000Z" }
+	"data": {
+		"mmsi": "244660000",
+		"vesselClass": "A",
+		"name": "EVER GIVEN",
+		"position": { "lat": 51.9, "lon": 4.1, "at": "2026-10-13T14:02:15.000Z" },
+		"sog": 11.2,
+		"cog": 254.1,
+		"lastSeen": "2026-10-13T14:02:15.000Z"
+	}
 }
 ```
 
@@ -5961,50 +6419,50 @@ the status code.
 
 ### Error Codes
 
-| Code                      | HTTP Status | Description                    |
-| ------------------------- | ----------- | ------------------------------ |
-| `DECODER_NOT_FOUND`       | 404         | Decoder ID doesn't exist       |
-| `SOURCE_NOT_FOUND`        | 404         | Source ID doesn't exist        |
-| `DECODER_ALREADY_RUNNING` | 409         | Decoder is already running     |
-| `DECODER_NOT_RUNNING`     | 409         | Decoder is not running         |
-| `INVALID_CONFIG`          | 400         | Invalid configuration provided |
-| `SOURCE_CONNECTION_ERROR` | 503         | Cannot connect to source       |
-| `INTERNAL_ERROR`          | 500         | Internal server error          |
-| Activity codes            |             | See [Activity](#activity)      |
-| `DECODER_OWNED_BY_SCANNER` | 409        | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`) |
-| `SOURCE_HELD_BY_SCANNER`  | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
+| Code                       | HTTP Status | Description                                                                      |
+| -------------------------- | ----------- | -------------------------------------------------------------------------------- |
+| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                         |
+| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                          |
+| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                       |
+| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                           |
+| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                   |
+| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                         |
+| `INTERNAL_ERROR`           | 500         | Internal server error                                                            |
+| Activity codes             |             | See [Activity](#activity)                                                        |
+| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)          |
+| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
 
 ### Scanner and spectrum codes
 
 Scanner and spectrum routes answer with the flat body
 `{ "error": "<name>", "code": "<CODE>", "message": "…", "details"?: {…} }`.
 
-| Code                            | HTTP | When                                                                                                                                         |
-| ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                  |
-| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                 |
-| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                        |
-| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                       |
-| `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                  |
-| `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                        |
-| `SCANNER_NOT_FOUND`             | 404  | Route level: the job, discovery, recording, evidence or capture in the path does not exist                                                   |
-| `SCANNER_JOB_NOT_FOUND`         | 404  | Service level: an action on a missing job                                                                                                    |
-| `SCANNER_DISCOVERY_NOT_FOUND`   | 404  | Service level: an action on a missing discovery (observations, PATCH, listen)                                                                |
-| `SPECTRUM_SOURCE_NOT_FOUND`     | 404  | Occupancy query: no history for the source                                                                                                  |
-| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep (or the resume of a `paused(operator)` sweep that lost its lease) disturbs other consumers; `details.impact`; resend with `takeover: true` |
+| Code                            | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SCANNER_NOT_FOUND`             | 404  | Route level: the job, discovery, recording, evidence or capture in the path does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SCANNER_JOB_NOT_FOUND`         | 404  | Service level: an action on a missing job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `SCANNER_DISCOVERY_NOT_FOUND`   | 404  | Service level: an action on a missing discovery (observations, PATCH, listen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `SPECTRUM_SOURCE_NOT_FOUND`     | 404  | Occupancy query: no history for the source                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep (or the resume of a `paused(operator)` sweep that lost its lease) disturbs other consumers; `details.impact`; resend with `takeover: true`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `SCANNER_SOURCE_BUSY`           | 409  | The tuner is not available; the detail is in `message` (a relay client controls the tuner, "holder is starting", "releasing", "recovery pending", lease held by another job). `details.reason`: `"releasing"` (the previous lease is still restoring), `"recovery-pending"` (a crash or outage recovery waits for the source's data), `"holder-starting"` (the holder is still starting), `"relay"` (a relay client controls the tuner) or `"held"` (another scanner job holds the lease, or waits for it with a better claim). The first three clear by themselves within seconds; retry. `relay` and `held` last until the relay or the holder lets go. `details.holderJobId` when a job holds the source; `details.waiter` when a better-placed job waits; `details.issues` when the preview found it |
-| `SCANNER_NO_TUNER_CONTROL`      | 409  | The source has no rtl_tcp tuner control (sweep)                                                                                              |
-| `SCANNER_JOB_TERMINAL`          | 409  | Edit or action on an ended job                                                                                                               |
-| `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                         |
-| `SCANNER_INVALID_TRANSITION`    | 409  | The lifecycle action does not apply to the current state                                                                                     |
-| `SCANNER_DISCOVERY_LOCKED_OUT`  | 409  | `listen` on a locked-out discovery                                                                                                           |
-| `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`; listen adds `details` with `liveSourceId`/`sourceId`, `offsetHz`/`usableHalfSpanHz` or `offsetHz` (see listen) |
-| `LIVE_AUDIO_UNAVAILABLE`        | 409  | `listen` without live audio                                                                                                                  |
-| `SCANNER_IDENTIFY_NOT_PAUSABLE` | 409  | `pause` / `resume` on an identify job                                                                                                        |
-| `SCANNER_IDENTIFY_NOT_EDITABLE` | 409  | `PATCH` on an identify job                                                                                                                   |
-| `SCANNER_SETTINGS_WRITE_FAILED` | 500  | `settings.json` could not be written; nothing changed                                                                                        |
-| `SCANNER_DISABLED`              | 503  | Job or identify creation with `scanner.enabled: false`                                                                                       |
-| `SCANNER_STATE_UNAVAILABLE`     | 503  | The persisted jobs and settings could not be read at boot; sweeps, sweep resumes and settings changes are refused for this run               |
+| `SCANNER_NO_TUNER_CONTROL`      | 409  | The source has no rtl_tcp tuner control (sweep)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `SCANNER_JOB_TERMINAL`          | 409  | Edit or action on an ended job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `SCANNER_INVALID_TRANSITION`    | 409  | The lifecycle action does not apply to the current state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `SCANNER_DISCOVERY_LOCKED_OUT`  | 409  | `listen` on a locked-out discovery                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`; listen adds `details` with `liveSourceId`/`sourceId`, `offsetHz`/`usableHalfSpanHz` or `offsetHz` (see listen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `LIVE_AUDIO_UNAVAILABLE`        | 409  | `listen` without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SCANNER_IDENTIFY_NOT_PAUSABLE` | 409  | `pause` / `resume` on an identify job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SCANNER_IDENTIFY_NOT_EDITABLE` | 409  | `PATCH` on an identify job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SCANNER_SETTINGS_WRITE_FAILED` | 500  | `settings.json` could not be written; nothing changed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SCANNER_DISABLED`              | 503  | Job or identify creation with `scanner.enabled: false`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SCANNER_STATE_UNAVAILABLE`     | 503  | The persisted jobs and settings could not be read at boot; sweeps, sweep resumes and settings changes are refused for this run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 `spectrum:profile` codes (WS only): `SPECTRUM_OPTIONS_INVALID`,
 `SPECTRUM_SOURCE_NOT_FOUND`, `SPECTRUM_SOURCE_NOT_IQ`, `SPECTRUM_SOURCE_REMOVED`,
@@ -6029,3 +6487,73 @@ api:
     enabled: true
     origins: ["*"]
 ```
+
+### Scanner evidence and activity (WG12)
+
+The existing scanner REST responses and `scanner:discovery` events carry optional
+`Discovery.proof` and `evidenceLevel` (`proven` when a proof exists, otherwise `weak`).
+Each observation also has its own optional `proof`. `ScannerProof` contains `kind`
+(`decoded`, `analog-tone`, `analog-voice`, `digital-undecoded`, `carrier-only`),
+`protocol`, `transport` (`live`, `replay`, `ambient`), `at`, `observationId`, optional
+`identity`, `talkgroup`, `tone { ctcssHz, dcs }` and `voice`, plus `tried`,
+`unavailable`, `encrypted` and `summary`. The summary is fixed English, at most
+160 characters; `tried` holds at most 16 unique protocols in trial order.
+`DecodeEvidence.transport?: "live" | "replay"` is additive and persisted.
+A `scanner:discovery` merge carries optional `mergedIds`, the absorbed discovery ids.
+
+`GET /api/scanner/discoveries` accepts `evidence=proven|weak|all` (absent means
+`all`), and `nearHz` with optional `toleranceHz` (default 6 250 Hz, inclusive,
+maximum 1 MHz). `nearHz` must be positive and at most 100 GHz; tolerance is
+nonnegative and requires `nearHz`. Results sort by distance, then id, with the
+existing pagination. Both numbers must be finite. Non-finite values return 400
+`VALIDATION_ERROR` with `message: "Invalid query parameter: nearHz must be a finite number"`
+or `"Invalid query parameter: toleranceHz must be a finite number"`; multiple
+problems are joined with `; `. A tolerance without a centre is invalid.
+
+`POST /api/scanner/identify` accepts `waitUntilSignal: true` and optional `waitMs`
+(integer 1 000–600 000, default 300 000; requires `waitUntilSignal: true`). It waits
+for a gated transmission, including one already on air, then counts `timeoutMs`
+from that transmission's start. If none arrives, the result is `unidentified`
+with `ended: "no-signal"`, cancelled trials and no verdict or miss.
+
+`ScanJobProgress` and `scanner:progress` add optional `phase`, `parked`,
+`holding { discoveryId, frequencyHz, trackId }`,
+`trial { protocol, decoder, transport, discoveryId }` and `replayQueueDepth`.
+Phase precedence is `settling`, `holding`, `trialing` (parked live probe),
+`replaying`, `capturing`, then `watching`. Capturing means an open capture;
+replaying includes the analog replay trial. Queue depth counts waiting replays.
+There are no public `capturing` count or `replaying` object fields: those are
+internal activity inputs. While parked, `sweepPeriodMs` is null.
+
+On `spectrum:frame`, tracks add optional `gate: "pending" | "passed"` and
+`channelSnrDb` (channel-slot SNR, distinct from per-bin `snrDb`). `below` tracks
+are not sent; `surfaced` means the channel gate passed. Older cores omit these fields.
+
+`ScannerIdentifyTrial.decoder` includes `analog-demod`, with `mode: "nfm" | "am"`
+and `transport: "replay"`. Outcomes include `not-needed` (remaining trial unnecessary),
+`skipped-budget` (no CPU admission), `unsupported` (cannot run), `heard` (voice
+without decoded tone), `data-like` and `carrier-only`, alongside `pending`,
+`running`, `decoded`, `no-sync`, `crc-errors`, `timeout` and `cancelled`.
+Missing decoder programs report `unsupported` with `reason: "decoder-unavailable"`,
+never a failed synchronization, and appear in `proof.unavailable`.
+
+`scanner.iqCapture.allowLegacy` (default false) is reserved: today IQ capture runs
+only in protected access mode, whatever this flag says. It is meant to permit capture
+in legacy mode in the future. Capture is on by default in protected mode.
+Trial, analog and unavailable evidence is currently
+in memory; persisted decode evidence can rebuild decoded proofs after restart.
+
+### Live audio engine and tone (WG12)
+
+`LiveAudioConfig.engine` and PATCH `/api/live-audio/config` accept `csdr|rust`; absent
+means `csdr`. Changing it restarts the pipeline. Rust is opt-in for NFM/AM;
+unsupported configurations fall back to csdr. `LiveAudioStatus.engine` identifies
+the engine actually used. Optional `engineFallback` is `binary-unavailable`,
+`protocol-unsupported`, `input-format-unsupported`, `modulation-unsupported`,
+`open-rejected` or `process-unstable`.
+
+Optional `LiveAudioStatus.tone { ctcssHz, dcs, at }` reports the current or last
+closed transmission's tone; `ctcssHz` and `dcs` may be null. DCS is
+`{ code, polarity: "normal" | "inverted" }`. Tone is absent until reported and
+cleared on retune or stop. Closed `live-audio:transmission` events attach analog
+evidence to overlapping scanner observations at trusted frequencies.

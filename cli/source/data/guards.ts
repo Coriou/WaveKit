@@ -1057,6 +1057,7 @@ const isAlertType = oneOf<ResourceAlert["type"]>([
 	"container-memory",
 	"container-cpu",
 	"sdr-host-error",
+	"link-capacity",
 ])
 const isSeverity = oneOf<ResourceAlert["severity"]>(["warning", "critical"])
 
@@ -1607,7 +1608,8 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 						value: data["value"],
 						...(data["origin"] === "rest" ||
 						data["origin"] === "scanner" ||
-						data["origin"] === "replay"
+						data["origin"] === "replay" ||
+						data["origin"] === "decoder-rate"
 							? { origin: data["origin"] }
 							: {}),
 					}

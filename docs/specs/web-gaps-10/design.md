@@ -203,6 +203,21 @@ a closed strong track, and width-matched survivors of the old scene, at least 2:
 epoch: the features are dropped from `prevPersistent` and the epoch keeps its label; the
 decision can wait up to the track hang plus 2 blocks). `external-control` otherwise. `lastCommandAgeMs` from the engine's last `command-sent` time.
 
+Discontinuity evidence (scanner amendment A16): only persistent features at least 10 dB
+above their recent local detection threshold count toward the § 4.7 alarm or its
+classification. Weak disappearances are not retune evidence; three strong features are
+required before arming. Strength must stay at least 10 dB above threshold for
+1 s of consecutive present blocks (the window minimum, never a one-block maximum).
+A weak or absent block resets qualification; epoch changes, gaps, overload and stale
+discards clear it. Measure only the current segment's half-open bin span, skipping
+detector masks (including DC and exclusions) and spur-line bins. RF carriers require
+a current matching segment. The 1 s window rejects brief spikes while retaining
+sustained scene-loss evidence once features qualify.
+After an epoch start or a reset, a real retune before features qualify is not
+detected by this alarm: RF carriers need 1 s of sustained strength, and ordinary
+tracks additionally need the existing 10 s age. A vanished scene cannot qualify
+retrospectively. This is the accepted trade-off against false alarms.
+
 ## Identify for analog voice (lane ID)
 
 **Evidence log** (`analog-evidence.ts`): a ring of the latest 32 transmission events by id

@@ -166,6 +166,10 @@ describe("protected PATCH", () => {
 				properties: {
 					enabled: { type: ["boolean", "null"] },
 					options: { type: "object", additionalProperties: true },
+					mode: {
+						type: ["string", "null"],
+						enum: ["auto", "always", "off", null],
+					},
 				},
 				additionalProperties: false,
 			},

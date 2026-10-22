@@ -63,40 +63,47 @@ describe("DiscoveryStore attribution for job hits (WG2 req 13.1)", () => {
 		])
 	})
 
-	it("credits every pending single-block observation a promotion attaches", () => {
+	it("credits every observation whose gate passed and none still pending", () => {
 		const store = newStore()
-		const hit = (id: string, t: number, jobIds: string[]) =>
-			makeObs({ id, centreHz: CH, startedAt: t, blocks: 1, jobIds })
-		expect(store.ingest(hit("a1", T0, ["A"])).attributed).toBeUndefined()
+		const hit = (
+			id: string,
+			t: number,
+			jobIds: string[],
+			gate: "passed" | "pending" | "below" | "absent",
+		) => makeObs({ id, centreHz: CH, startedAt: t, blocks: 1, jobIds, gate })
 		expect(
-			store.ingest(hit("a2", T0 + 60_000, ["B"])).attributed,
+			store.ingest(hit("a1", T0, ["A"], "pending")).attributed,
 		).toBeUndefined()
-		const third = store.ingest(hit("a3", T0 + 120_000, ["A"]))
-		expect(third.change).toBe("created")
 		expect(
-			[...(third.attributed ?? [])].sort((a, b) =>
-				a.observationId.localeCompare(b.observationId),
-			),
-		).toEqual([
-			{
-				observationId: "a1",
-				discoveryId: third.discoveryId,
-				jobIds: ["A"],
-				created: true,
-			},
-			{
-				observationId: "a2",
-				discoveryId: third.discoveryId,
-				jobIds: ["B"],
-				created: true,
-			},
+			store.ingest(hit("a2", T0 + 60_000, ["B"], "absent")).attributed,
+		).toBeUndefined()
+		expect(
+			store.ingest(hit("a5", T0 + 90_000, ["C"], "below")).attributed,
+		).toBeUndefined()
+		const passed = store.ingest(hit("a3", T0 + 120_000, ["A"], "passed"))
+		expect(passed.change).toBe("created")
+		expect(passed.attributed).toEqual([
 			{
 				observationId: "a3",
-				discoveryId: third.discoveryId,
+				discoveryId: passed.discoveryId,
 				jobIds: ["A"],
 				created: true,
 			},
 		])
+		const joined = store.ingest(hit("a4", T0 + 180_000, ["B"], "passed"))
+		expect(joined.attributed).toEqual([
+			{
+				observationId: "a4",
+				discoveryId: passed.discoveryId,
+				jobIds: ["B"],
+				created: false,
+			},
+		])
+		expect(store.discoveryIdOf("a1")).toBeUndefined()
+		expect(store.discoveryIdOf("a2")).toBeUndefined()
+		expect(store.discoveryIdOf("a5")).toBeUndefined()
+		expect(store.discoveryIdOf("a3")).toBe(passed.discoveryId)
+		expect(store.discoveryIdOf("a4")).toBe(passed.discoveryId)
 	})
 
 	it("keeps a joining job's credit when retention trims the re-ingested observation at once (Sol R2 1a)", () => {

@@ -548,7 +548,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     CI=true pnpm prune --prod \
         --config.enable-global-virtual-store=false
 
-RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js
+RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js && test -f dist/snapshot-worker.js
 
 # ============================================================================
 # Stage: chan-build
@@ -568,7 +568,8 @@ COPY native/wavekit-chan/src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/src/wavekit-chan/target,id=chan-target-${TARGETARCH} \
     cargo build --release --locked && \
-    install -m 0755 target/release/wavekit-chan /usr/local/bin/wavekit-chan
+    install -m 0755 target/release/wavekit-chan /usr/local/bin/wavekit-chan && \
+    install -m 0755 target/release/wavekit-iqcap /usr/local/bin/wavekit-iqcap
 
 # ============================================================================
 # Stage: final-base
@@ -625,6 +626,8 @@ COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
 # wavekit-chan core channelizer (opt-in via channelizer.enabled), with the
 # third-party notices of the crates linked into it
 COPY --from=chan-build /usr/local/bin/wavekit-chan /usr/local/bin/
+# wavekit-iqcap: IQ capture on detection and replay (scanner.iqCapture, protected mode)
+COPY --from=chan-build /usr/local/bin/wavekit-iqcap /usr/local/bin/
 COPY native/wavekit-chan/LICENSES.md /usr/share/doc/wavekit-chan/LICENSES.md
 
 # SoapyRTLTCP module so acarsdec / dumpvdl2 can stream from rtl_tcp
@@ -661,8 +664,11 @@ RUN echo "Verifying decoder installations..." && \
     wavekit-chan --version && \
     { ldd /usr/local/bin/wavekit-chan | awk '{print $1}' | grep -Ev '^(linux-vdso\.so\.1|/lib.*/ld-linux.*|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1)$' > /tmp/chan-libs || true; } && \
     { if [ -s /tmp/chan-libs ]; then echo "unexpected wavekit-chan libs:"; cat /tmp/chan-libs; exit 1; fi; } && \
-    rm -f /tmp/chan-libs && \
-    echo "All 9 decoders + csdr + wavekit-chan verified successfully"
+    wavekit-iqcap --version && \
+    { ldd /usr/local/bin/wavekit-iqcap | awk '{print $1}' | grep -Ev '^(linux-vdso\.so\.1|/lib.*/ld-linux.*|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1)$' > /tmp/iqcap-libs || true; } && \
+    { if [ -s /tmp/iqcap-libs ]; then echo "unexpected wavekit-iqcap libs:"; cat /tmp/iqcap-libs; exit 1; fi; } && \
+    rm -f /tmp/chan-libs /tmp/iqcap-libs && \
+    echo "All 9 decoders + csdr + wavekit-chan + wavekit-iqcap verified successfully"
 
 # Node runtime + app dist + workspace packages + config
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
@@ -703,7 +709,7 @@ VOLUME ["/var/log/wavekit", "/var/run/wavekit"]
 WORKDIR /app
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD s6-svstat -u /run/service/wavekit-api > /dev/null 2>&1 || exit 1
+    CMD /command/s6-svstat -u /run/service/wavekit-api > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/init"]
 
@@ -816,7 +822,7 @@ RUN chmod -R 755 /etc/s6-overlay/s6-rc.d
 EXPOSE 5259
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD s6-svstat -u /run/service/sdrpp-server > /dev/null 2>&1 || exit 1
+    CMD /command/s6-svstat -u /run/service/sdrpp-server > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/init"]
 

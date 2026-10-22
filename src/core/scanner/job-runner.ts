@@ -1,3 +1,6 @@
+import { TrialRotation } from "./trial-rotation.js"
+import { probeModesFor } from "./probes/probe-pool.js"
+import type { ObservationEndReason } from "../spectrum/types.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
 /**
  * One discovery job (spec § 10.1–§ 10.5): the transition table, the sweep
@@ -6,6 +9,7 @@ import { protocolsForFrequency } from "./plan/protocols.js"
  */
 import type { ScanJobProgress, ScanJobProbe } from "@wavekit/api-types"
 import type { DecoderManager } from "../../decoders/manager.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { ScannerApiError } from "./errors.js"
@@ -17,7 +21,19 @@ import {
 	type JobEvent,
 } from "./job-state.js"
 import { DEFAULT_CONFIRM_HOLD_MS } from "./plan/plan-preview.js"
-import type { ProbePool, ProbeRequest } from "./probes/probe-pool.js"
+import type {
+	ProbeMode,
+	ProbePool,
+	ProbeRequest,
+	ProbeStatus,
+} from "./probes/probe-pool.js"
+import { jobProgressFields } from "./job-phase.js"
+import type {
+	JobActivityView,
+	JobPhaseInput,
+} from "./scanner-redesign-contract.js"
+import { ScannerProtocolSchema } from "./store/schemas.js"
+import type { KnownProtocolMemory } from "./known-protocol-contract.js"
 import { SweepScheduler, type SchedulerAction } from "./scheduler.js"
 import type {
 	EngineEpoch,
@@ -39,6 +55,8 @@ import type {
 	NormalisedJobSpec,
 	PauseReason,
 	PlanIssue,
+	ScannerClass,
+	ScannerProtocol,
 	ScannerConfidence,
 	ScannerSettings,
 	UndecodedReason,
@@ -84,7 +102,10 @@ export interface LiveObservation {
 	jobIds: string[]
 	discoveryId: string | null
 	startedAt: number
+	/** Wall-clock receipt of the first gate pass for this track and epoch. */
+	gatePassedAt?: number
 	endedAt?: number
+	endReason?: ObservationEndReason
 	classification: Classification
 	probeIds: Set<string>
 	hopIndex?: number
@@ -230,6 +251,7 @@ export function undecodedForProbe(
 }
 
 export interface JobRunnerDeps {
+	leaseAnalogSession?: (sourceId: string) => (() => void) | undefined
 	/** Rechecked on the serial dispatch chain before an automatic acquisition. */
 	autoResumeReady?: () => boolean
 	record: JobRecord
@@ -251,7 +273,9 @@ export interface JobRunnerDeps {
 		| "follow"
 		| "status"
 		| "startLatencyMs"
-	>
+	> &
+		/** WG11 1.8: the pool's per-mode full-hold record; absent (a fake): no miss is counted. */
+		Partial<Pick<ProbePool, "fullHoldCovers">>
 	decoders: Pick<DecoderManager, "holdSource" | "releaseSource">
 	settings: () => ScannerSettings
 	openEngine: (sourceId: string) => Promise<SpectrumEngine>
@@ -283,6 +307,17 @@ export interface JobRunnerDeps {
 	changed: (kind: "state" | "progress") => void
 	logger: Logger
 	now: () => number
+	/**
+	 * WG11 requirements 1.7 and 1.8: the known-protocol memory. Absent: no miss or decode is
+	 * counted (behaviour as before WG11).
+	 */
+	knownProtocols?: KnownProtocolMemory
+	/**
+	 * WG12 req 7: captures and replays of this job. Absent: `progress()` stays the
+	 * pre-redesign object (no phase, parked, holding, trial or replayQueueDepth).
+	 * The plan calls this `JobDriverDeps`; the runner's dependency bag is `JobRunnerDeps`.
+	 */
+	activity?: (jobId: string) => JobActivityView
 }
 
 /** Acquire refusals that clear by themselves: an operator-paused resume stays `paused(operator)` (R4). */
@@ -303,6 +338,13 @@ const LOST_EVENTS: ReadonlySet<JobEvent["type"]> = new Set([
 	"preempted-job",
 ])
 
+const ACTIVITY_LIMIT = 1_000_000
+const EMPTY_ACTIVITY: JobActivityView = {
+	capturing: 0,
+	replaying: null,
+	replayQueueDepth: 0,
+}
+
 function inRange(hz: number, r: { startHz: number; endHz: number }): boolean {
 	return hz >= r.startHz && hz <= r.endHz
 }
@@ -320,8 +362,99 @@ function blockSamplesOf(cfg: {
 	return frames * cfg.fftSize
 }
 
+function countOf(value: unknown): number | null {
+	if (typeof value !== "number" || !Number.isInteger(value)) return null
+	if (value < 0 || value > ACTIVITY_LIMIT) return null
+	return value
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+	if (value === null || typeof value !== "object" || Array.isArray(value))
+		return null
+	return value as Record<string, unknown>
+}
+
+/** Null is a valid "not replaying". Undefined means the view is malformed. */
+function replayOf(value: unknown): JobActivityView["replaying"] | undefined {
+	if (value === null) return null
+	const row = recordOf(value)
+	if (!row) return undefined
+	const protocol = ScannerProtocolSchema.safeParse(row["protocol"])
+	if (!protocol.success) return undefined
+	const decoder = row["decoder"]
+	if (typeof decoder !== "string" || decoder.length === 0) return undefined
+	const discoveryId = row["discoveryId"]
+	if (discoveryId !== null && typeof discoveryId !== "string") return undefined
+	return { protocol: protocol.data, decoder, discoveryId }
+}
+
+function parseActivity(value: unknown): JobActivityView | null {
+	const row = recordOf(value)
+	if (!row) return null
+	const capturing = countOf(row["capturing"])
+	const replayQueueDepth = countOf(row["replayQueueDepth"])
+	if (capturing === null || replayQueueDepth === null) return null
+	const replaying = replayOf(row["replaying"])
+	if (replaying === undefined) return null
+	return { capturing, replaying, replayQueueDepth }
+}
+
+function liveProbeView(
+	raw: readonly ProbeStatus[],
+): JobPhaseInput["liveProbe"] {
+	const live = raw
+		.filter(
+			(s): s is ProbeStatus & { transport: "offset" | "channel" } =>
+				s.transport === "offset" || s.transport === "channel",
+		)
+		.sort(
+			(a, b) => a.startedAt - b.startedAt || a.probeId.localeCompare(b.probeId),
+		)
+	const s = live[0]
+	if (!s) return null
+	return {
+		protocol: s.protocol,
+		decoder: s.decoderType,
+		transport: s.transport,
+		discoveryId: s.discoveryId,
+		frequencyHz: s.targetHz,
+		trackId: s.trackId,
+	}
+}
+
+/** Class evidence orders candidates; allowed protocols still get later turns. */
+export function jobTrialModes(
+	cls: ScannerClass,
+	protocols: ScannerProtocol[],
+	obwHz: number,
+): ProbeMode[] {
+	const key = (mode: ProbeMode) =>
+		`${mode.decoderType}:${JSON.stringify(mode.options)}`
+	const candidates = probeModesFor(cls, protocols)
+	if (
+		cls !== "ook-burst" &&
+		Number.isFinite(obwHz) &&
+		obwHz > 0 &&
+		obwHz <= 22_500
+	) {
+		for (const alternative of [
+			"fsk4-12k5",
+			"fsk4-6k25",
+			"gmsk-narrow",
+			"fsk2-wide",
+			"afsk-fm",
+		] as const)
+			for (const mode of probeModesFor(alternative, protocols))
+				if (!candidates.some(candidate => key(candidate) === key(mode)))
+					candidates.push(mode)
+	}
+	return candidates
+}
+
 export class JobRunner implements JobDriver {
+	private releaseAnalogSession: (() => void) | undefined
 	readonly record: JobRecord
+	private readonly trialRotation = new TrialRotation()
 	private readonly log: Logger
 	private scheduler: SweepScheduler | null = null
 	private lease: Lease | null = null
@@ -348,7 +481,13 @@ export class JobRunner implements JobDriver {
 	>()
 	private readonly windowHolds = new Map<
 		string,
-		{ probeId: string; timer: NodeJS.Timeout | null; following: boolean }
+		{
+			probeId: string
+			timer: NodeJS.Timeout | null
+			following: boolean
+			/** WG11 1.8: the observation's accepted identity when the probe started. */
+			identityAtStart?: LiveObservation["acceptedIdentity"]
+		}
 	>()
 
 	constructor(private readonly deps: JobRunnerDeps) {
@@ -361,6 +500,8 @@ export class JobRunner implements JobDriver {
 	}
 
 	private autoResumeGuardActive = false
+	/** One log for a thrown or malformed activity view, for the life of the runner. */
+	private activityFaultLogged = false
 
 	private get sourceId(): string {
 		return this.record.spec.sourceId
@@ -372,11 +513,25 @@ export class JobRunner implements JobDriver {
 	}
 
 	async start(): Promise<void> {
-		await this.dispatch({ type: "start" })
+		this.releaseAnalogSession ??= this.deps.leaseAnalogSession?.(this.sourceId)
+		try {
+			await this.dispatch({ type: "start" })
+		} catch (error) {
+			this.releaseAnalogSession?.()
+			this.releaseAnalogSession = undefined
+			throw error
+		}
 	}
 
 	dispatch(e: JobEvent): Promise<void> {
-		const run = this.chain.then(() => this.apply(e))
+		// WG11 requirement 1.6: a cancel of an ended job is a no-op (no transition, action, event or
+		// persistence write). Checked on the chain, so a cancel queued behind the event that ends
+		// the job sees the terminal state and the job ends exactly once.
+		const run = this.chain.then(() =>
+			e.type === "cancel" && isTerminal(this.record.state)
+				? undefined
+				: this.apply(e),
+		)
 		this.chain = run.catch(() => undefined)
 		return run
 	}
@@ -427,20 +582,20 @@ export class JobRunner implements JobDriver {
 		const engine = this.deps.engine(this.sourceId)
 		const p = this.scheduler?.progress()
 		const stats = engine?.stats()
-		const probes: ScanJobProbe[] = this.deps.probes
+		const raw = this.deps.probes
 			.status()
 			.filter(s => s.jobId === this.record.id)
-			.map(s => ({
-				probeId: s.probeId,
-				decoderId: s.decoderId,
-				trackId: s.trackId,
-				targetHz: s.targetHz,
-				protocol: s.protocol,
-				transport: s.transport,
-				state: s.state === "starting" ? "confirming" : s.state,
-				startedAt: new Date(s.startedAt).toISOString(),
-			}))
-		return {
+		const probes: ScanJobProbe[] = raw.map(s => ({
+			probeId: s.probeId,
+			decoderId: s.decoderId,
+			trackId: s.trackId,
+			targetHz: s.targetHz,
+			protocol: s.protocol,
+			transport: s.transport,
+			state: s.state === "starting" ? "confirming" : s.state,
+			startedAt: new Date(s.startedAt).toISOString(),
+		}))
+		const base: ScanJobProgress = {
 			sweepIndex: p?.sweepIndex ?? 0,
 			hopIndex: p?.hopIndex ?? 0,
 			hopCount: p?.hopCount ?? this.record.plan.hops.length,
@@ -458,6 +613,109 @@ export class JobRunner implements JobDriver {
 				discoveries: this.deps.discoveryCounts(this.record.id),
 			},
 		}
+		// Req 1.3: a parked sweep reports no period. In-window already has none.
+		const parked = this.jobParked()
+		const sweepPeriodMs = parked ? null : base.sweepPeriodMs
+		if (!this.deps.activity) {
+			return sweepPeriodMs === base.sweepPeriodMs
+				? base
+				: { ...base, sweepPeriodMs }
+		}
+		const fields = jobProgressFields(
+			{
+				schedulerPhase: this.schedulerPhase(),
+				parked,
+				liveProbe: liveProbeView(raw),
+				hold: this.holdView(raw),
+				activity: this.readActivity(),
+			},
+			base.sweepPeriodMs,
+		)
+		return {
+			...base,
+			sweepPeriodMs: fields.sweepPeriodMs,
+			phase: fields.phase,
+			parked: fields.parked,
+			replayQueueDepth: fields.replayQueueDepth,
+			...(fields.holding ? { holding: fields.holding } : {}),
+			...(fields.trial ? { trial: fields.trial } : {}),
+		}
+	}
+
+	/**
+	 * Parked when the job is in-window, or when the scheduler says so. A sweep
+	 * counts as parked only when the scheduler exposes parked === true.
+	 */
+	private jobParked(): boolean {
+		if (!this.sweep) return true
+		const scheduler = this.scheduler
+		if (!scheduler) return false
+		const parked = (scheduler as { parked?: unknown }).parked
+		return parked === true
+	}
+
+	/**
+	 * `holdingOn` is set only while the scheduler phase is hold. Before this job's
+	 * own epoch the hop is still tuning. Engine `settleMode` stays `"timer"` after
+	 * the hop has settled, so it is not this phase. The contract's `"settling"` is
+	 * accepted by `jobPhase` when a caller passes it; this runner has no separate
+	 * settling signal yet.
+	 */
+	private schedulerPhase(): JobPhaseInput["schedulerPhase"] {
+		if (!this.sweep || !this.scheduler) return null
+		if (this.scheduler.progress().holdingOn !== null) return "hold"
+		if (!this.epochOwn) return "tuning"
+		return "dwell"
+	}
+
+	private holdView(raw: readonly ProbeStatus[]): JobPhaseInput["hold"] {
+		if (!this.sweep || !this.scheduler) return null
+		const trackId = this.scheduler.progress().holdingOn
+		if (trackId === null) return null
+		const held = this.tracks.get(trackId)
+		if (held) {
+			return {
+				discoveryId: held.live.discoveryId,
+				frequencyHz: held.track.centreHz,
+				trackId,
+			}
+		}
+		const probe = raw.find(s => s.trackId === trackId)
+		// The held track and its probe are both gone. A made-up centre would
+		// publish a holding phase at 0 Hz; null lets the phase fall back.
+		if (!probe) return null
+		return {
+			discoveryId: probe.discoveryId ?? null,
+			frequencyHz: probe.targetHz,
+			trackId,
+		}
+	}
+
+	private readActivity(): JobActivityView {
+		const read = this.deps.activity
+		if (!read) return EMPTY_ACTIVITY
+		try {
+			const parsed = parseActivity(read(this.record.id))
+			if (parsed) return parsed
+			this.logActivityFault(
+				new WaveKitError(
+					"Job activity view is malformed",
+					"SCANNER_ACTIVITY_VIEW",
+				),
+			)
+		} catch (err: unknown) {
+			this.logActivityFault(err)
+		}
+		return EMPTY_ACTIVITY
+	}
+
+	private logActivityFault(err: unknown): void {
+		if (this.activityFaultLogged) return
+		this.activityFaultLogged = true
+		this.log.warn(
+			{ err: safeErrorFields(err) },
+			"Scan job activity view failed",
+		)
 	}
 
 	tick(now: number): void {
@@ -591,6 +849,7 @@ export class JobRunner implements JobDriver {
 			const hold = this.windowHolds.get(track.trackId)
 			if (hold && !hold.following) {
 				this.windowHolds.delete(track.trackId)
+				this.recordFullHoldMiss(live, hold)
 				this.releaseProbe(hold.probeId)
 			}
 		}, holdMs)
@@ -599,6 +858,9 @@ export class JobRunner implements JobDriver {
 			probeId: res.started,
 			timer,
 			following: false,
+			...(this.deps.knownProtocols
+				? { identityAtStart: live.acceptedIdentity }
+				: {}),
 		})
 	}
 
@@ -622,6 +884,7 @@ export class JobRunner implements JobDriver {
 		const probe = this.deps.probes
 			.status()
 			.find(p => p.probeId === probeId && p.jobId === this.record.id)
+		if (probe && ev.identity) this.recordAcceptedDecode(probe.trackId)
 		if (probe) {
 			const { spec } = this.record
 			const follow = spec.hold.policy === "hold" && spec.record.voice
@@ -645,7 +908,8 @@ export class JobRunner implements JobDriver {
 	replan(spec: NormalisedJobSpec, plan: HopPlan): void {
 		this.record.spec = spec
 		this.record.plan = plan
-		this.scheduler?.replan(plan, spec)
+		// DT (R 1.1): a parked one-hop plan that moves returns its stop-probes and one tune.
+		if (this.scheduler) this.exec(this.scheduler.replan(plan, spec))
 		for (const p of this.deps.probes.status()) {
 			if (
 				p.jobId === this.record.id &&
@@ -657,11 +921,65 @@ export class JobRunner implements JobDriver {
 	}
 
 	async dispose(): Promise<void> {
+		this.releaseAnalogSession?.()
+		this.releaseAnalogSession = undefined
 		await this.idle()
 		await this.teardown()
 	}
 
 	// === internals ===
+
+	/**
+	 * WG11 1.8: an identity on a probe of this job resets the discovery's miss count when the
+	 * observation accepted it (ScannerService applies the evidence before the drivers see it).
+	 * The passive job's reconfirm probes take this path too.
+	 */
+	private recordAcceptedDecode(trackId: string): void {
+		const memory = this.deps.knownProtocols
+		if (!memory) return
+		const live = this.tracks.get(trackId)?.live
+		if (live?.discoveryId && live.acceptedIdentity)
+			try {
+				memory.recordDecode(live.discoveryId)
+			} catch {
+				// The memory never throws by contract; a broken one changes nothing here.
+			}
+	}
+
+	/**
+	 * WG11 1.8: the confirm hold timer of a window probe expired without a confirmation. It counts
+	 * a miss of the discovery's known protocol only when one of the probe's modes covering it ran
+	 * its full mode hold (the pool's per-mode record: the probe's current mode says nothing, it
+	 * may already have stepped on, or be stopping for the step), the probe is still this job's,
+	 * the observation has a discovery and accepted no new identity during the hold. A mode cut
+	 * short by the job hold, an unavailable or never-confirming mode, a track that closed, a
+	 * cancel, a pause or a sweep hop (they release the probe elsewhere) is never a miss.
+	 */
+	private recordFullHoldMiss(
+		live: LiveObservation,
+		hold: {
+			probeId: string
+			identityAtStart?: LiveObservation["acceptedIdentity"]
+		},
+	): void {
+		const memory = this.deps.knownProtocols
+		if (!memory || !this.driving || live.discoveryId === null) return
+		if (live.acceptedIdentity !== hold.identityAtStart) return
+		try {
+			const probes = this.deps.probes
+			const probe = probes
+				.status()
+				.find(p => p.probeId === hold.probeId && p.jobId === this.record.id)
+			if (!probe) return
+			const known = memory.known(live.discoveryId)
+			if (known === null) return
+			const covers = probes.fullHoldCovers?.(hold.probeId) ?? []
+			if (!covers.includes(known)) return
+			memory.recordMiss(live.discoveryId, known)
+		} catch {
+			// As above: a throwing memory or pool must not escape the hold timer.
+		}
+	}
 
 	/**
 	 * The epoch of a retune still in flight. The engine can start it before `retune()` resolves
@@ -942,6 +1260,8 @@ export class JobRunner implements JobDriver {
 		}
 		if (!this.driving) this.epochOwn = false
 		if (isTerminal(t.state)) {
+			this.releaseAnalogSession?.()
+			this.releaseAnalogSession = undefined
 			record.endedAt = now
 			await this.teardown()
 		}
@@ -1182,7 +1502,13 @@ export class JobRunner implements JobDriver {
 					: undefined,
 			)
 			this.autoResumeGuardActive = false
+			// R 1.2: only an explicit no-op has no epoch-started event to resume the visit.
+			// A real retune can emit that event before its promise resolves.
 			this.addOwnEpoch(pending.epoch)
+			if (pending.skipped === true && this.driving && this.scheduler) {
+				this.epochOwn = true
+				this.exec(this.scheduler.onTuneSkipped())
+			}
 		} catch (err) {
 			if (err instanceof WaveKitError && err.code === "SCANNER_RESUME_HELD") {
 				this.queueEvent({ type: "rest-write" })
@@ -1208,6 +1534,17 @@ export class JobRunner implements JobDriver {
 		)
 	}
 
+	/** Called by the service for actual mode starts, including queued admissions and steps. */
+	noteTrialStarted(req: ProbeRequest, mode: ProbeMode): void {
+		if (req.jobId !== this.record.id || req.replay) return
+		const key =
+			req.discoveryId ?? `${req.sourceId}:${Math.round(req.targetHz / 6250)}`
+		this.trialRotation.attempt(
+			key,
+			`${mode.decoderType}:${JSON.stringify(mode.options)}`,
+		)
+	}
+
 	private requestProbe(
 		live: LiveObservation,
 		track: TrackSnapshot,
@@ -1219,9 +1556,36 @@ export class JobRunner implements JobDriver {
 		const engine = this.deps.engine(this.sourceId)
 		const fs = engine?.currentEpoch().sampleRateHz ?? 0
 		const protocols = protocolsForFrequency(this.record.spec, track.centreHz)
+		const modeKey = (mode: ProbeMode) =>
+			`${mode.decoderType}:${JSON.stringify(mode.options)}`
+		const classModes = probeModesFor(live.classification.class, protocols)
+		const candidates = jobTrialModes(
+			live.classification.class,
+			protocols,
+			track.obwHz,
+		)
+		const originalHead = classModes[0]
+		if (originalHead) {
+			const head = candidates.find(
+				mode => modeKey(mode) === modeKey(originalHead),
+			)
+			if (head)
+				head.holdMs = Math.max(
+					head.holdMs,
+					holdMs -
+						classModes.slice(1).reduce((sum, mode) => sum + mode.holdMs, 0),
+				)
+		}
+		const key =
+			live.discoveryId ??
+			`${this.sourceId}:${Math.round(track.centreHz / 6250)}`
+		const modes = this.trialRotation.order(key, candidates, modeKey)
 		const req: ProbeRequest = {
 			jobId: this.record.id,
 			priority: this.record.spec.priority,
+			...(live.gatePassedAt !== undefined
+				? { gatePassedAt: live.gatePassedAt }
+				: {}),
 			sourceId: this.sourceId,
 			trackId: track.trackId,
 			observationId: live.observationId,
@@ -1230,6 +1594,7 @@ export class JobRunner implements JobDriver {
 			epoch: live.epoch,
 			cls: live.classification.class,
 			protocols,
+			modes,
 			preRollFromSample: Math.max(
 				0,
 				track.startSample - Math.round((s.hold.preRollMs * fs) / 1000),
@@ -1247,8 +1612,9 @@ export class JobRunner implements JobDriver {
 			},
 		}
 		const res = this.deps.probes.request(req)
-		if ("started" in res) live.probeIds.add(res.started)
-		else {
+		if ("started" in res) {
+			live.probeIds.add(res.started)
+		} else {
 			const reason = undecodedForDeferral(res.deferred)
 			if (reason) this.deps.undecoded(live, reason)
 		}

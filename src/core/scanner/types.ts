@@ -176,6 +176,11 @@ export interface DecodeEvidence {
 	origin: "probe" | "ambient"
 	probeId?: string
 	decoderId?: string
+	/**
+	 * How a persisted probe decode was produced. Absent on a legacy journal
+	 * row, and absent means live. Ambient origin still wins over this field.
+	 */
+	transport?: "live" | "replay"
 }
 
 export interface ObservationInput {
@@ -211,6 +216,35 @@ export interface DiscoveryMetadata {
 	ismModels: string[]
 	ctcssHz?: number
 }
+
+/** WG12: how a proof was established. Rank is decoded > analog-tone > analog-voice > digital-undecoded > carrier-only. */
+export type ScannerProofKind =
+	| "decoded"
+	| "analog-tone"
+	| "analog-voice"
+	| "digital-undecoded"
+	| "carrier-only"
+export type ScannerProofTransport = "live" | "replay" | "ambient"
+export interface ScannerProof {
+	kind: ScannerProofKind
+	protocol: ScannerProtocol
+	transport: ScannerProofTransport
+	at: string
+	observationId: string
+	identity?: Identity
+	talkgroup?: string
+	tone?: {
+		ctcssHz: number | null
+		dcs: { code: string; polarity: "normal" | "inverted" } | null
+	}
+	voice?: boolean
+	tried: ScannerProtocol[]
+	unavailable: ("dsd-fme" | "multimon-ng" | "direwolf" | "rtl433")[]
+	encrypted: boolean
+	summary: string
+}
+/** WG12: `proven` is a discovery with a proof; `weak` is one without. */
+export type ScannerEvidenceLevel = "proven" | "weak"
 
 export type UndecodedReason =
 	| "no-sync"
@@ -258,6 +292,10 @@ export interface Discovery {
 		keep?: boolean
 	}
 	evidence: { recordings: number; psd: boolean; iq: boolean }
+	/** WG12: derived from stored evidence. Absent on cores before the redesign and when nothing is proven. */
+	proof?: ScannerProof
+	/** WG12: `proven` when `proof` is set, otherwise `weak`. Absent on cores before the redesign. */
+	evidenceLevel?: ScannerEvidenceLevel
 }
 
 export interface Observation {
@@ -297,6 +335,8 @@ export interface Observation {
 	jobIds: string[]
 	hopIndex?: number
 	tuningTrust: TuningTrust
+	/** WG12: derived from this observation's evidence. Absent when nothing is proven. */
+	proof?: ScannerProof
 }
 
 // ---------------------------------------------------------------- jobs and plans (§ 10, § 5)
@@ -658,7 +698,12 @@ export interface BandPlanSkipSource {
  */
 export interface ScannerSettings {
 	enabled: boolean
-	passive: { enabled: boolean; offsetProbes: boolean }
+	passive: {
+		enabled: boolean
+		offsetProbes: boolean
+		/** WG11 req 2.1: config only; absent means 0.25 (PASSIVE_COST_LIMIT_DEFAULT). */
+		maxEngineUtilization?: number | undefined
+	}
 	cpuBudgetCores: number
 	cpuGuardPercent: number
 	maxProbes: { offset: number; channel: number }
@@ -698,4 +743,15 @@ export interface ScannerSettings {
 		/** WG8 req 5.2: config only; absent means "auto" (the bins cap; see SpectrumBinsCapSetting). */
 		spectrumBinsCap?: "auto" | 2048 | 4096 | 8192 | undefined
 	}
+	/** WG11 req 6.1: config only, protected access mode only; absent means no IQ capture. */
+	iqCapture?: ScannerIqCaptureConfig | undefined
+}
+
+/** WG11 req 6.1: `scanner.iqCapture` (bounds in src/config.ts and iq-capture-contract.ts). */
+export interface ScannerIqCaptureConfig {
+	enabled: boolean
+	maxTotalMb: number
+	maxCaptureMs: number
+	preRollMs: number
+	binaryPath: string
 }

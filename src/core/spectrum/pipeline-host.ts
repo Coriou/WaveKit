@@ -5,20 +5,20 @@
  * transferred buffers handed back through `handlers.buffer`.
  */
 import { existsSync } from "node:fs"
+import { performance, type EventLoopUtilization } from "node:perf_hooks"
 import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
-import type {
-	EngineState,
-	PipelineConfig,
-	PipelineEvent,
-	PipelineInput,
-} from "./types.js"
+import type { EngineState, PipelineConfig, PipelineEvent } from "./types.js"
 import type { ArtefactMasks } from "./artefacts.js"
-import { SpectrumPipeline } from "./pipeline.js"
+import { SpectrumPipeline, spectrumMainSpanSink } from "./pipeline.js"
 import { decodeEventsFromWire } from "./summary-wire.js"
-import { WorkerToMainSchema, type MainToWorker } from "./worker-protocol.js"
+import {
+	WorkerToMainSchema,
+	type MainToWorker,
+	type WorkerPipelineInput,
+} from "./worker-protocol.js"
 
 export interface PipelineHostHandlers {
 	events(events: PipelineEvent[]): void
@@ -30,14 +30,31 @@ export interface PipelineHostHandlers {
 
 export interface PipelineHost {
 	/** Posts one input; `transfer` (the bytes' ArrayBuffer) is detached by the call. */
-	send(input: PipelineInput, transfer?: ArrayBuffer): void
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void
 	exportState(): Promise<EngineState>
 	/** Current artefact masks (§ 4.9) after every input sent before the call (identify, Task 35a). Optional: test hosts need not implement it. */
 	artefactMasks?(): Promise<ArtefactMasks>
 	/** Worker event-loop utilisation (0–1) since start; null when not measurable (inline). */
 	utilization(): number | null
+	/**
+	 * WG11 req 2.2: the worker's raw cumulative event-loop sample (since the worker started), for a
+	 * caller that measures its own window by difference, tagged with the worker's generation (unique
+	 * per started worker in this process) so the caller can tell a replacement worker apart even when
+	 * its counters exceed the old one's; null when not measurable. Optional: test hosts need not
+	 * implement it.
+	 */
+	eluSample?(): WorkerEluSample | null
 	close(): Promise<void>
 }
+
+/** WG11 req 2.2: a cumulative worker event-loop sample and the generation of the worker it came from. */
+export interface WorkerEluSample {
+	generation: number
+	elu: EventLoopUtilization
+}
+
+/** Bumped on every worker start, process-wide, so no two workers share a generation. */
+let nextWorkerGeneration = 0
 
 export type PipelineHostMode = "thread" | "inline"
 
@@ -61,11 +78,12 @@ export class InlinePipelineHost implements PipelineHost {
 	constructor(
 		cfg: PipelineConfig,
 		private readonly handlers: PipelineHostHandlers,
+		profile?: { sampleEvery: number },
 	) {
-		this.pipeline = new SpectrumPipeline(cfg)
+		this.pipeline = new SpectrumPipeline(cfg, profile ? { profile } : {})
 	}
 
-	send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		if (!this.pipeline) {
 			if (transfer) this.handlers.buffer(transfer)
 			return
@@ -102,6 +120,10 @@ export class InlinePipelineHost implements PipelineHost {
 		return null
 	}
 
+	eluSample(): WorkerEluSample | null {
+		return null
+	}
+
 	close(): Promise<void> {
 		this.pipeline = null
 		return Promise.resolve()
@@ -134,12 +156,14 @@ export class ThreadPipelineHost implements PipelineHost {
 	private closing = false
 	private exited = false
 	private fatalReported = false
+	private readonly generation: number
 
 	constructor(
 		cfg: PipelineConfig,
 		private readonly handlers: PipelineHostHandlers,
 		workerUrl: URL,
 		logger: Logger,
+		private readonly profile?: { sampleEvery: number },
 	) {
 		this.log = createComponentLogger(logger, "SpectrumWorkerHost")
 		if (!existsSync(fileURLToPath(workerUrl))) {
@@ -149,6 +173,7 @@ export class ThreadPipelineHost implements PipelineHost {
 			)
 		}
 		this.worker = new Worker(workerUrl, { name: `spectrum-${cfg.sourceId}` })
+		this.generation = ++nextWorkerGeneration
 		this.eluStart = this.worker.performance.eventLoopUtilization()
 		this.worker.on("message", (raw: unknown) => this.onMessage(raw))
 		this.worker.on("error", err => this.reportFatal(asError(err))) // @types/node types the listener arg as unknown
@@ -177,7 +202,11 @@ export class ThreadPipelineHost implements PipelineHost {
 				)
 			}
 		})
-		this.post({ type: "init", config: cfg })
+		this.post(
+			this.profile
+				? { type: "init", config: cfg, profile: this.profile }
+				: { type: "init", config: cfg },
+		)
 	}
 
 	private reportFatal(err: Error): void {
@@ -187,7 +216,7 @@ export class ThreadPipelineHost implements PipelineHost {
 		else this.handlers.error(err)
 	}
 
-	send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		if (this.exited) {
 			if (transfer) this.handlers.buffer(transfer)
 			return
@@ -245,6 +274,14 @@ export class ThreadPipelineHost implements PipelineHost {
 			.utilization
 	}
 
+	eluSample(): WorkerEluSample | null {
+		if (this.exited) return null
+		return {
+			generation: this.generation,
+			elu: this.worker.performance.eventLoopUtilization(),
+		}
+	}
+
 	async close(): Promise<void> {
 		if (this.exited) return
 		this.closing = true
@@ -278,10 +315,18 @@ export class ThreadPipelineHost implements PipelineHost {
 		}
 		const message = parsed.data
 		switch (message.type) {
-			case "events":
-				decodeEventsFromWire(message.events)
+			case "events": {
+				const sink = spectrumMainSpanSink()
+				if (sink) {
+					const t0 = performance.now()
+					decodeEventsFromWire(message.events)
+					sink("summary-decode", performance.now() - t0)
+				} else {
+					decodeEventsFromWire(message.events)
+				}
 				this.handlers.events(message.events)
 				return
+			}
 			case "buffer":
 				this.handlers.buffer(message.buffer)
 				return
@@ -314,14 +359,19 @@ export function createPipelineHost(
 	mode: PipelineHostMode,
 	cfg: PipelineConfig,
 	handlers: PipelineHostHandlers,
-	opts: { workerUrl?: URL; logger: Logger },
+	opts: {
+		workerUrl?: URL
+		logger: Logger
+		profile?: { sampleEvery: number }
+	},
 ): PipelineHost {
 	return mode === "inline"
-		? new InlinePipelineHost(cfg, handlers)
+		? new InlinePipelineHost(cfg, handlers, opts.profile)
 		: new ThreadPipelineHost(
 				cfg,
 				handlers,
 				opts.workerUrl ?? defaultWorkerUrl(),
 				opts.logger,
+				opts.profile,
 			)
 }

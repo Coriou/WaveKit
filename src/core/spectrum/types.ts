@@ -105,6 +105,15 @@ export interface TrackSnapshot {
 	spectralShape: "flat" | "peaked" | "narrow"
 	flags: TrackFlags
 	tuningTrust: TuningTrust
+	/**
+	 * WG12 channel gate (`ChannelGateState` in scanner-redesign-contract.ts). Absent on
+	 * engines without a channel plan.
+	 */
+	gate?: "pending" | "passed" | "below"
+	/** WG12: SNR summed over the covering channel slots. */
+	channelSnrDb?: number
+	/** WG12: engine sample when the gate first passed. */
+	gatePassedSample?: number
 }
 
 export interface BlockSummary {
@@ -133,7 +142,35 @@ export interface BlockTrack {
 	startHz: number
 	endHz: number
 	/** burst: short-path burst segment (Task 10a); iqImage: mirror image (Task 11a); edge: touches the usable span in-window. */
-	flags: { burst: boolean; iqImage: boolean; edge: boolean }
+	flags: { burst: boolean; iqImage: boolean; edge: boolean; spur?: boolean }
+	/**
+	 * WG11 req 5.1 (frame-tracks.ts): set only when the tracker associated this segment with an
+	 * open track in this same block; then also `flags.spur`. Absent on an untracked segment.
+	 */
+	trackId?: string
+	/** The track's SNR against the core's floor, 0.5 dB grid. */
+	snrDb?: number
+	/** The track's peak, 0.5 dB grid. */
+	peakDbfs?: number
+	/** On-blocks so far. */
+	blocks?: number
+	/** (lastSample − startSample) / fs, ms. */
+	ageMs?: number
+	/** Display surfacing rule (req 5.1). */
+	surfaced?: boolean
+	/**
+	 * Host-internal, never on a frame: the chain's current tracker id without the source prefix,
+	 * set only after a max-duration rollover (then it differs from `trackId`, the chain id). The
+	 * spectrum service keys the scanner identity lookup on it and strips it from every frame.
+	 */
+	trackerId?: string
+	/**
+	 * WG12 channel gate on a block segment that can ride a frame. Frames carry only
+	 * `"pending" | "passed"`; `"below"` stays on `TrackSnapshot`. Absent without a channel plan.
+	 */
+	gate?: "pending" | "passed"
+	/** WG12: SNR summed over the covering channel slots. */
+	channelSnrDb?: number
 }
 
 export interface PipelineStats {

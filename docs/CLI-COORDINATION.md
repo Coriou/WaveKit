@@ -1427,3 +1427,71 @@ listener):
 
 Verified against a protected core: the analog and digital streams answer 200 with data when the cookie is sent
 cross-port.
+
+#### Core: WG11 web gaps (heard versus decoded, replay transport, clean cancel, stable frame tracks, configured gain) — 2026-10-18
+
+Announcement for the CLI and for the web session. Spec: [web-gaps-11](specs/web-gaps-11/requirements.md). Details in [API.md](API.md). Two closed enums were widened in `@wavekit/api-types` (`ScannerTrialOutcome` gains `heard`; `TunerCommandOrigin` gains `config`) and two transport unions gain `replay`; every new frame field is optional (older cores omit them). No route, state or error code was added. IQ capture and configured gain are off by default.
+
+1. `heard` trial outcome: a `live-audio` (`analog-fm` / `analog-am`) identify trial whose matching transmission carried no CTCSS tone or DCS code now ends `heard`, not `decoded`. "Decoded" therefore now means decoder evidence (a probe or ambient decode) or, on a `live-audio` trial, a heard tone or DCS code. The target verdict rule is unchanged (`identified` still needs a tone or code on a `commanded` or `relay` frequency, else `candidate`). An analog match also no longer marks the other trials `not-needed`: probe and ambient trials run to their own end, so an identify job with analog evidence can take longer. Web: `web/src/data/scanner-format.ts` `TRIAL_OUTCOMES: Record<ScannerTrialOutcome, string>` fails the web typecheck once it pulls these api-types; add a `heard` entry (for example "Heard") and do not label `heard` as decoded.
+2. `replay` transport: `ScannerIdentifyTrial.transport` and `ScanJobProbe.transport` can be `replay`, a probe decoder fed from a narrowband IQ capture of the target after the transmission ended (protected mode with `scanner.iqCapture.enabled` only). A trial list can then hold a live and a replay trial for the same protocol. Web: give `replay` a label (for example "from capture").
+3. Cancel of an ended job: `POST /api/scanner/jobs/:id/cancel` on a `completed`, `cancelled` or `failed` job (identify jobs too) answers 200 with the unchanged job and no event (was 409 `SCANNER_INVALID_TRANSITION`). A stop button can cancel without checking the state first; pause and resume of an ended job still answer 409.
+4. Frame track fields on `spectrum:frame` `tracks[]` (`SpectrumFrameTrack`), only on a segment the tracker associated with an open track: `trackId`, `snrDb`, `peakDbfs`, `blocks`, `ageMs`, `surfaced`, `flags.spur` and `scanner: { discoveryId, protocol, confidence }`. Keying: `trackId` is the tracker id without its `<sourceId>-` prefix, unique per source only, so key tracks by (`sourceId`, `trackId`); the full tracker id (the form `ScanJobProbe.trackId` carries) is `${sourceId}-${trackId}`. The id is stable for the emission's life and across the tracker's 120 s max-duration rollover; a new epoch gives a new id. Semantics: `snrDb` is the lifetime mean over the track so far (not this block's value) and `peakDbfs` the lifetime maximum, both rounded to 0.5 dB; `ageMs` counts from the chain start and keeps growing across the rollover (first seen ≈ `at` − `ageMs`); `blocks` and `ageMs` saturate at 9 999 999 and 99 999 999; `surfaced` is the display surfacing rule recomputed every block and is not sticky (a frame where the segment is an image reads false); `scanner` is absent for about 1 s after a rollover. Size: at most 260 B more JSON per track (`SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES`), typically about 105 B, or 217 B with `scanner`. Tracks per frame (at most 256), the cadence and every other field are unchanged.
+5. Tuner command origin `config`: `tuner:command-sent` carries `origin: "config"` when core writes a source's configured gain mode, gain or AGC flag (`sources[].tuner`) on a new connection. Values set through the API or the relay keep precedence; a `config` write is not operator activity.
+6. CLI: nothing breaks and no CLI change is required. `cli/source/data/scanner-guards.ts` already accepts `heard` (outcome enum) and `replay` (trial and probe transport, widened in the contract commit); `cli/source/view-models/scan.ts` prints the outcome as is (shows `heard`). The frame guard (`scanner-guards.ts`, `tracks`, non-strict object, bound 256 unchanged) strips the new track fields, and `cli/source/data/guards.ts` (`tuner:command-sent`) drops an unknown origin, so `config` is not shown. A CLI that wants the track fields or the `config` origin needs a guard follow-up. Pinned by `tests/unit/core/wg11-contract.test.ts`.
+
+For the web session:
+
+1. Add the `heard` outcome label and the `replay` transport label (item 1 and 2 above) when you pull the new api-types.
+2. Keep a label on one emission across frames with (`sourceId`, `trackId`); filter noise with `surfaced` and `flags.spur`; show `scanner.protocol` and `scanner.confidence` on the waterfall when present; first seen is `at − ageMs`.
+3. Scan stop: a cancel of a job that already ended is a 200 no-op, so treat it as success.
+4. `docs/web/CORE-GAPS.md` on the web branch can tick: stable tracks on `spectrum:frame` (trackId, snrDb, peakDbfs, first seen via ageMs, surfaced, spur, scanner identity), heard versus decoded, a clean scan stop, gain written on connect (configured), passive scanning that comes back.
+
+#### Core: WG12 scanner redesign (parking, channel gate, evidence-only labels, analog replay trial, scan phases) — 2026-10-20
+
+Announcement for the CLI and for the web session. Spec: `docs/specs/scanner-redesign/requirements.md`. Details in `docs/API.md`. One closed enum was widened in `@wavekit/api-types` (`ScannerTrialOutcome` gains `data-like` and `carrier-only`), `ScannerIdentifyTrial.decoder` gains `analog-demod`, and `ScannerIdentifyResult.ended` gains `no-signal`. Every new field is optional (older cores omit them). No route, WebSocket event type, state or error code was added.
+
+1. Labels come only from evidence. `Discovery.protocol` stays `unknown` until a decode or an analog trial names something; priors no longer produce "Maybe X". Show `discovery.proof.summary` (fixed English, at most 160 characters: "DMR decoded (CC1, TG 9)", "Analog FM voice, CTCSS 88.5", "Digital, not decoded (tried DMR, dPMR, NXDN)", "Carrier only"). `evidenceLevel` is `proven` or `weak`; request `GET /api/scanner/discoveries?evidence=proven` for the result list and offer "show weak activity" (`evidence=all`, today's default answer). Each observation has its own `proof` (analog or digital per transmission).
+2. Only real transmissions surface. A channel-matched gate (channel width from the range, 300 ms at 6 dB channel SNR by default; bursts 100 ms at 9 dB) replaces the old surfacing rules. On `spectrum:frame` tracks, `surfaced` now means "passed the gate"; new optional `gate` (`pending` | `passed`) and `channelSnrDb`. Keep keying by (`sourceId`, `trackId`).
+3. A window that fits stays tuned. A one-hop scan parks: no retune, no epoch change, track ids stay for a whole transmission. `sweepPeriodMs` is null while parked; progress has `parked: true`.
+4. What the scan is doing: `ScanJobProgress` / `scanner:progress` gain `phase` (`settling`, `holding`, `trialing`, `replaying`, `capturing`, `watching`), `holding { discoveryId, frequencyHz, trackId }`, `trial { protocol, decoder, transport, discoveryId }` and `replayQueueDepth`.
+5. Trials: the analog replay trial shows as `decoder: "analog-demod"`, `mode: "nfm" | "am"`, `transport: "replay"`, outcomes `decoded` (tone or DCS), `heard` (voice), `data-like`, `carrier-only` or `no-sync`. A missing decoder program is `unsupported` with reason `decoder-unavailable` on every path (never `no-sync`) and appears in `proof.unavailable`. Web: `web/src/data/scanner-format.ts` `TRIAL_OUTCOMES: Record<ScannerTrialOutcome, string>` fails the web typecheck once it pulls these api-types; add `data-like` ("Data-like") and `carrier-only` ("Carrier only"), and label `analog-demod` (for example "Analog (from capture)").
+6. Decode here: `POST /api/scanner/identify` with `{ target: { frequencyHz }, waitUntilSignal: true, waitMs? }` waits (default 5 min, at most 10 min) for the next gated transmission (a transmission already on air when the job starts counts); `timeoutMs` then counts from its start; no transmission ends `unidentified` with `result.ended: "no-signal"`.
+7. Also: `GET /api/scanner/discoveries?nearHz=&toleranceHz=` (default 6 250 Hz, at most 1 MHz, sorted by distance); `scanner:discovery` `merged` events carry `mergedIds`; `LiveAudioStatus.tone { ctcssHz, dcs, at }` while live audio runs; the live-audio channel's closed transmissions now attach analog evidence to the matching discovery automatically.
+8. IQ capture and replay: unchanged and off by default until the live acceptance passes; then on by default in protected mode (legacy needs `scanner.iqCapture.allowLegacy: true`). A follow-up note announces the flip.
+9. CLI: nothing breaks. `cli/source/data/scanner-guards.ts` accepts the new outcomes and `ended: "no-signal"` (widened in the contract commit); the discovery, progress and frame guards strip the new fields. Pinned by `tests/unit/core/scanner-redesign-contract.test.ts`.
+10. Short bursts: an accepted identity decode places its observation even when the burst was too short for the gate (AIS, VDL2, short LoRa), so ambient decodes of those still create discoveries. `DecodeEvidence.transport` (`live` | `replay`, optional) says where a decode came from.
+11. Live audio engine (opt-in): `LiveAudioConfig.engine` and `PATCH /api/live-audio/config` accept `csdr` (default) or `rust`; `LiveAudioStatus` carries `engine` and, after a failed start of the Rust engine, `engineFallback`. Nothing changes unless `rust` is chosen. The CLI live-audio guards (`cli/source/data/guards.ts`) copy known fields only, so `engine`, `engineFallback` and `tone` are ignored there.
+
+For the web session: result list = `evidence=proven` with `proof.summary`; "show weak activity" toggles `evidence=all`; a scan header from `phase`, `parked`, `holding`, `trial` and `replayQueueDepth`; "Decode here" = identify with `waitUntilSignal`; `docs/web/CORE-GAPS.md` can tick identify until a transmission, `nearHz`, `mergedIds`, `progress.holding`, missing decoder reported as unavailable, analog versus digital per transmission, tone on live status, the CTCSS trial, and the automatic identify of the live-audio channel.
+
+## Main → CLI / Web: decoder enablement contract — 2026-10-21
+
+Spec: `docs/specs/decoder-enablement/`. Contract only; no runtime producer is wired yet, the shipped config parses
+identically and channelizer auto start stays off until its capacity acceptance. Every new field is optional (older
+cores omit them).
+
+1. `DecoderInfo` gains optional `mode` (`auto` | `always` | `off`), `modeSource`, `origin` (built-in catalogue or
+   YAML), `placements[]` and `efficiency`. Settings views and `PATCH` gain an optional `mode`.
+2. Suspension reasons widen with `efficiency-budget` ("over the efficiency budget") and `decoder-unavailable`
+   ("not installed"). Exhaustive switches over the reason union must add both.
+3. `tuner:command-sent` `origin` widens with `decoder-rate` (a rate write made by the 1090 MHz rate policy).
+   `TunerState` gains optional `ratePolicy`; a new `tuner:rate-policy` event reports raises, restores and skips.
+4. Resources: `LinkAdvisory` and a `link-capacity` resource alert (advisory, `critical` when samples go missing after
+   a raise).
+5. CLI: `cli/source/data/guards.ts` accepts `link-capacity`, the new reason words and the `decoder-rate` origin; it
+   strips the other new fields. Web: label the two reasons and the `decoder-rate` origin; show `mode` as a three-way
+   switch once the core ships the producer (a follow-up note announces it).
+
+### IQ capture default on — 2026-10-22
+
+The scanner status `iqCapture` field is now normally present in protected mode; clients should show capture state.
+
+
+### Configured channel decoders follow the VFO — 2026-10-22
+
+`targetFrequenciesHz` is now present for configured narrowband decoders: it reports
+placement channels, including the settled VFO (or capture centre without a VFO).
+Explicit frequency options retain fixed behavior; YAML decoders remain gate-exempt.
+Parent targets include worker channels; centre-reach decoders report capture centre.
+Raw wideband declared-frequency semantics and the optional DTO remain unchanged.
+The web tuned card needs no change.

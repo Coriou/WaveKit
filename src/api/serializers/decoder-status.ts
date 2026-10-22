@@ -19,6 +19,24 @@ export function toApiDecoderStatus(
 	status: InternalDecoderStatus,
 ): ApiDecoderStatus {
 	return {
+		...(status.mode !== undefined ? { mode: status.mode } : {}),
+		...(status.modeSource !== undefined
+			? { modeSource: status.modeSource }
+			: {}),
+		...(status.origin !== undefined ? { origin: status.origin } : {}),
+		...(status.placements !== undefined
+			? {
+					placements: status.placements.map(placement => ({
+						...placement,
+						...(placement.suspension
+							? { suspension: { ...placement.suspension } }
+							: {}),
+					})),
+				}
+			: {}),
+		...(status.efficiency !== undefined
+			? { efficiency: { ...status.efficiency } }
+			: {}),
 		id: status.id,
 		type: status.type,
 		running: status.running,
@@ -98,7 +116,9 @@ export function toApiDecoderStatus(
 			? { transition: status.transition }
 			: {}),
 		...(status.startMode !== undefined ? { startMode: status.startMode } : {}),
-		...(status.owner !== undefined ? { owner: status.owner } : {}),
+		...(status.owner !== undefined && status.owner !== "placement"
+			? { owner: status.owner }
+			: {}),
 		...(status.scannerJobId !== undefined
 			? { scannerJobId: status.scannerJobId }
 			: {}),

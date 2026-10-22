@@ -537,7 +537,7 @@ function flakyCore(discoverMs = 100) {
 	return Object.assign(state, { discover, fetchFn, factory, goDown })
 }
 
-describe("rediscovery (fix round 1, Critical)", () => {
+describe("rediscovery", () => {
 	it("discovered target lost for 120 s, then recovered: one chain, one gap, no extra reconnects", async () => {
 		const core = flakyCore()
 		const rt = createRuntime({

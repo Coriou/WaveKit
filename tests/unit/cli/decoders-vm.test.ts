@@ -299,7 +299,7 @@ describe("decoders view-model", () => {
 		expect(decoderActionText(later, "readsb", t0 + 32_000)).toBeNull()
 	})
 
-	it("truncates unknown long decoder ids and shows ? for unknown nominal bands (review focus)", () => {
+	it("truncates unknown long decoder ids and shows ? for unknown nominal bands", () => {
 		const odd: DecoderRow = {
 			id: "an-extremely-long-decoder-identifier-used-for-truncation-tests",
 			type: "mystery",
@@ -394,7 +394,7 @@ describe("R65 M2: server-chosen types are plain keys", () => {
 	})
 })
 
-describe("B5 fix round 1", () => {
+describe("I1/R75: the last decoder write is the footer notice while the detail is closed", () => {
 	const s = scenarioState("live")
 	const fact = (st: AppState, id: string): DecoderFacts => {
 		const f = decoderFacts(st).find(x => x.row.id === id)

@@ -1,5 +1,5 @@
 /**
- * WG10 MA.1 (Main, rk2 review minor 3): src/index.ts hands the sweep the scanner recordings
+ * WG10 (Main, rk2 review minor 3): src/index.ts hands the sweep the scanner recordings
  * directory under the realpath of the configured storage root (the same real directory the
  * evidence store pins), so a symlinked root is swept, and a missing root sweeps nothing.
  */
@@ -43,7 +43,7 @@ async function layout() {
 	return { base, real, link, priv }
 }
 
-describe("delete sweep wiring: the scanner root is realpath-resolved (WG10 MA.1)", () => {
+describe("delete sweep wiring: the scanner root is realpath-resolved (WG10)", () => {
 	it("resolves a symlinked storage root to its real directory", async () => {
 		const { base, real, link } = await layout()
 		expect(await scannerDeleteSweepDir(base, link)).toBe(

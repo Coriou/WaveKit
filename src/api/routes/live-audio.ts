@@ -71,6 +71,7 @@ const liveDemodConfigSchema = {
 		iqDcBlock: { type: "boolean" },
 		offsetHz: { type: "number" },
 		agc: { type: "string", enum: ["off", "slow", "fast"] },
+		engine: { type: "string", enum: ["csdr", "rust"] },
 	},
 	required: [
 		"enabled",
@@ -121,6 +122,44 @@ const liveDemodStatusSchema = {
 				state: { type: "string", enum: ["off", "waiting", "open"] },
 			},
 			required: ["state"],
+		},
+		tone: {
+			type: "object",
+			additionalProperties: false,
+			required: ["ctcssHz", "dcs", "at"],
+			properties: {
+				ctcssHz: { type: ["number", "null"] },
+				dcs: {
+					anyOf: [
+						{ type: "null" },
+						{
+							type: "object",
+							additionalProperties: false,
+							required: ["code", "polarity"],
+							properties: {
+								code: { type: "string" },
+								polarity: {
+									type: "string",
+									enum: ["normal", "inverted"],
+								},
+							},
+						},
+					],
+				},
+				at: { type: "string", maxLength: 64 },
+			},
+		},
+		engine: { type: "string", enum: ["csdr", "rust"] },
+		engineFallback: {
+			type: "string",
+			enum: [
+				"binary-unavailable",
+				"protocol-unsupported",
+				"input-format-unsupported",
+				"modulation-unsupported",
+				"open-rejected",
+				"process-unstable",
+			],
 		},
 	},
 	required: [
@@ -229,6 +268,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			offsetHz: config.offsetHz,
 			...(config.sourceId !== undefined ? { sourceId: config.sourceId } : {}),
 			...(config.agc !== undefined ? { agc: config.agc } : {}),
+			...(config.engine !== undefined ? { engine: config.engine } : {}),
 		}
 	}
 
@@ -268,6 +308,13 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			...(status.agc !== undefined ? { agc: status.agc } : {}),
 			...(status.toneSquelch !== undefined
 				? { toneSquelch: { state: status.toneSquelch.state } }
+				: {}),
+			...(status.tone !== undefined
+				? { tone: copyStatusTone(status.tone) }
+				: {}),
+			engine: status.engine ?? "csdr",
+			...(status.engineFallback !== undefined
+				? { engineFallback: status.engineFallback }
 				: {}),
 		}
 	}
@@ -402,6 +449,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				...(body.offsetHz !== undefined ? { offsetHz: body.offsetHz } : {}),
 				...(body.sourceId !== undefined ? { sourceId: body.sourceId } : {}),
 				...(body.agc !== undefined ? { agc: body.agc } : {}),
+				...(body.engine !== undefined ? { engine: body.engine } : {}),
 			}
 
 			try {
@@ -453,6 +501,19 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			}
 		},
 	)
+}
+
+function copyStatusTone(
+	tone: NonNullable<LiveDemodStatus["tone"]>,
+): NonNullable<LiveDemodStatus["tone"]> {
+	return {
+		ctcssHz: tone.ctcssHz,
+		dcs:
+			tone.dcs === null
+				? null
+				: { code: tone.dcs.code, polarity: tone.dcs.polarity },
+		at: tone.at,
+	}
 }
 
 function copyTone(tone: LiveAudioToneSquelch): LiveAudioToneSquelch {

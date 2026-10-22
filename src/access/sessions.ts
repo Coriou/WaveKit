@@ -246,7 +246,7 @@ export class SessionStore {
 			ids.add(record.deviceId)
 			hashes.add(record.tokenHash)
 		}
-		// WG2 R1 #13: a last-seen hour after the current hour (clock moved back) or before the
+		// WG2: a last-seen hour after the current hour (clock moved back) or before the
 		// device's creation hour is not evidence of use; clear it rather than reject the file.
 		const nowHour = floorHour(this.#lastNow)
 		return {

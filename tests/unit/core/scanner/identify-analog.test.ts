@@ -292,9 +292,9 @@ describe("identify analog trials (WG10 3.2)", () => {
 		await h.settle()
 		expect(h.trials()).toEqual({
 			"analog-fm": "not-needed",
-			"analog-am": "decoded",
+			"analog-am": "heard", // WG11 req 1.1: AM without a tone
 		})
-		expect(h.last()?.result?.protocol).toBe("analog-am")
+		expect(h.last()?.result?.protocol).toBeUndefined()
 	})
 
 	for (const [label, t] of [
@@ -458,7 +458,7 @@ describe("identify analog trials (WG10 3.2)", () => {
 		]
 		await h.start()
 		await h.settle()
-		expect(h.trials()["analog-fm"]).toBe("decoded")
+		expect(h.trials()["analog-fm"]).toBe("heard") // WG11 req 1.1: no standard tone or code
 		expect(h.last()?.state).toBe("candidate")
 		expect(h.last()?.result?.analog).toMatchObject({ ctcssHz: null, dcs: null })
 		expect(h.last()?.result?.metadata).not.toHaveProperty("ctcssHz")
@@ -614,7 +614,7 @@ describe("digital decode keeps priority (WG10 3.3)", () => {
 		})
 	}
 
-	it("review WG10 R1 m3: analog evidence never replaces a classified DMR discovery without a decode (golden: the result without analog evidence)", async () => {
+	it("tone evidence beats a classified DMR discovery without a decode", async () => {
 		// The founding identify case: DMR classified on the waterfall, no decode this time, and the
 		// NFM squelch heard the bursts (with a tone, on a commanded frequency).
 		const dmr = {
@@ -638,27 +638,17 @@ describe("digital decode keeps priority (WG10 3.3)", () => {
 		}
 		const withAnalog = await run(new FakePort())
 		const golden = await run(null)
-		// Golden (no analog evidence, as before WG10): the classified digital candidate.
-		expect(golden.state).toBe("candidate")
-		expect(golden.result).toMatchObject({
-			protocol: "dmr",
-			confidence: "classified",
-			identity: { colorCode: 1 },
-			metadata: { colorCode: 1 },
-			discoveryId: "d_dmr",
-		})
-		expect(withAnalog.state).toBe(golden.state)
-		const { analog, ...rest } = withAnalog.result!
-		const { analog: none, ...goldenRest } = golden.result!
-		expect(none).toBeUndefined()
-		expect(rest).toEqual(goldenRest)
-		// Analog only as supplementary evidence.
+		expect(golden.state).toBe("unidentified")
+		expect(golden.result?.protocol).toBeUndefined()
+		expect(withAnalog.state).toBe("identified")
+		expect(withAnalog.result?.protocol).toBe("analog-fm")
+		const analog = withAnalog.result?.analog
 		expect(analog).toMatchObject({
 			source: "live-audio",
 			modulation: "nfm",
 			ctcssHz: 88.5,
 		})
-		expect(rest.metadata).not.toHaveProperty("ctcssHz")
+		expect(withAnalog.result?.metadata.ctcssHz).toBe(88.5)
 		expect(
 			withAnalog.trials.find(t => t.protocol === "analog-fm")?.outcome,
 		).toBe("decoded")
@@ -817,7 +807,7 @@ describe("property 9", () => {
 	})
 })
 
-describe("Main wiring: live demodulator transmissions feed identify (WG10 MA.1)", () => {
+describe("Main wiring: live demodulator transmissions feed identify (WG10)", () => {
 	const at = (ms: number) => new Date(ms).toISOString()
 	function wired(opts: {
 		liveSource?: string

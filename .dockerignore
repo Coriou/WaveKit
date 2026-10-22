@@ -16,7 +16,9 @@ dist
 *.js.map
 *.d.ts.map
 coverage
-**/coverage
+cli/coverage
+packages/*/coverage
+web/coverage
 .tsc-cache
 **/.tsc-cache
 native/wavekit-chan/target
@@ -53,6 +55,8 @@ wip
 tests
 **/tests
 vitest.config.ts
+# Benchmarks (not runtime; some import test mocks, which the build context leaves out)
+scripts/bench
 
 # Large test fixture data (keep scripts/manifest, ignore downloaded artifacts)
 fixtures/raw

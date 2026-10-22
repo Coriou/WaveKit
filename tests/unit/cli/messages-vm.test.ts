@@ -231,7 +231,7 @@ describe("detail placement", () => {
 	})
 })
 
-describe("hostile text (review focus 4)", () => {
+describe("hostile text", () => {
 	const s = scenarioState("burst", deps)
 	it("sanitises the draft, the applied filter and the empty-result echo", () => {
 		const evil = "a\u001b[2J\u0007b\u009bc"
@@ -284,7 +284,7 @@ const headerOf = (s: AppState, mu: MessagesUi, width = 119): string =>
 	lineText(messagesHeader(s, mu, feedView(s.messages.ring, mu), width))
 const following = initialUi("messages").messages
 
-describe("T40 fix round 1: header truth", () => {
+describe("header truth", () => {
 	it("I1: a feed that never went live shows its state, not 0 in 60s", () => {
 		const idle = scenarioState("idle", deps)
 		const never: AppState = {
@@ -326,7 +326,7 @@ describe("T40 fix round 1: header truth", () => {
 	})
 })
 
-describe("T40 fix round 1: pause", () => {
+describe("pause", () => {
 	it("I3: a paused slice with only newer matches says so instead of 0 of N", () => {
 		const s = scenarioState("burst", deps)
 		const mu = { ...following, following: false, pausedAtSeq: -1 }
@@ -360,7 +360,7 @@ describe("T40 fix round 1: pause", () => {
 	})
 })
 
-describe("T40 fix round 1: input and detail", () => {
+describe("input and detail", () => {
 	it("I5: a 100 KB paste is clipped in linear time and keeps its tail", () => {
 		const big = "a".repeat(100_000) + "TAIL"
 		const t0 = performance.now()
@@ -387,7 +387,7 @@ describe("T40 fix round 1: input and detail", () => {
 	})
 })
 
-describe("T40 fix round 1: R73 / R66", () => {
+describe("R73 / R66", () => {
 	it("M5: a gap opened after the pause stays out even directly above the frozen row", () => {
 		const ring = createRing()
 		for (const d of ["d1", "d2"]) ringPush(ring, entry(d))
@@ -435,7 +435,7 @@ describe("T40 fix round 1: R73 / R66", () => {
 	})
 })
 
-describe("T40 fix round 1 addendum: right-placement header", () => {
+describe("right-placement header", () => {
 	it("fits the header and the input to the list column when the detail sits on the right", () => {
 		const s = scenarioState("burst", deps)
 		const filterText = "readsb,ais " + "x".repeat(150)

@@ -5,8 +5,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import Fastify, { type FastifyInstance } from "fastify"
 import { EventEmitter } from "node:events"
+import type { WebSocket } from "ws"
 import { liveAudioRoutes } from "../../../src/api/routes/live-audio.js"
+import { WebSocketEventBroadcaster } from "../../../src/api/websocket/events.js"
 import type { LiveDemodStatus } from "../../../src/core/live-demodulator.js"
+import { createLogger } from "../../../src/utils/logger.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
 
 function createMockLiveDemodulator() {
@@ -227,6 +230,175 @@ describe("Live Audio Routes", () => {
 		})
 		expect(response.statusCode).toBe(400)
 		expect(JSON.parse(response.body).message).toMatch(/offsetHz/)
+	})
+
+	it("GET status reports csdr, omits an unset fallback, and hides chanBinaryPath", async () => {
+		const current = mockLiveDemod.getStatus()
+		mockLiveDemod.getStatus.mockReturnValue({
+			...current,
+			config: {
+				...current.config,
+				chanBinaryPath: "do-not-leak-chan-binary",
+			},
+		})
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/live-audio/status",
+		})
+		expect(response.statusCode).toBe(200)
+		const body = JSON.parse(response.body) as {
+			engine?: string
+			engineFallback?: string
+			config: { engine?: string; chanBinaryPath?: string }
+		}
+		expect(body.engine).toBe("csdr")
+		expect(Object.hasOwn(body, "engineFallback")).toBe(false)
+		expect(Object.hasOwn(body.config, "chanBinaryPath")).toBe(false)
+		expect(response.body).not.toContain("do-not-leak-chan-binary")
+	})
+
+	it("GET status includes engineFallback only when set and still hides chanBinaryPath", async () => {
+		const current = mockLiveDemod.getStatus()
+		mockLiveDemod.getStatus.mockReturnValue({
+			...current,
+			engine: "csdr",
+			engineFallback: "binary-unavailable",
+			config: {
+				...current.config,
+				engine: "rust",
+				chanBinaryPath: "do-not-leak-chan-binary",
+			},
+		})
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/live-audio/status",
+		})
+		expect(response.statusCode).toBe(200)
+		const body = JSON.parse(response.body) as {
+			engine?: string
+			engineFallback?: string
+			config: { engine?: string }
+		}
+		expect(body.engine).toBe("csdr")
+		expect(body.engineFallback).toBe("binary-unavailable")
+		expect(body.config.engine).toBe("rust")
+		expect(response.body).not.toContain("do-not-leak-chan-binary")
+		expect(response.body).not.toContain("chanBinaryPath")
+	})
+
+	it("live-audio:status omits chanBinaryPath even when the core config has one", () => {
+		const current = mockLiveDemod.getStatus()
+		const status: LiveDemodStatus = {
+			...current,
+			engine: "rust",
+			engineFallback: "open-rejected",
+			config: {
+				...current.config,
+				engine: "rust",
+				chanBinaryPath: "do-not-leak-chan-binary",
+			},
+		}
+		const broadcaster = new WebSocketEventBroadcaster(
+			createLogger({ level: "fatal" }),
+		)
+		const messages: string[] = []
+		const socket = {
+			readyState: 1,
+			send: (data: string) => {
+				messages.push(data)
+			},
+			close: () => undefined,
+			on: () => undefined,
+			bufferedAmount: 0,
+		}
+		const clients = (
+			broadcaster as unknown as {
+				clients: Map<
+					string,
+					{ socket: WebSocket; subscriptions: Set<string>; id: string }
+				>
+			}
+		).clients
+		clients.set("client-1", {
+			socket: socket as unknown as WebSocket,
+			subscriptions: new Set(["live-audio"]),
+			id: "client-1",
+		})
+		broadcaster.broadcastLiveAudioStatus(status)
+		expect(messages).toHaveLength(1)
+		const raw = messages[0] ?? ""
+		const parsed = JSON.parse(raw) as {
+			type: string
+			data: {
+				engine?: string
+				engineFallback?: string
+				config: { engine?: string; chanBinaryPath?: string }
+			}
+		}
+		expect(parsed.type).toBe("live-audio:status")
+		expect(parsed.data.engine).toBe("rust")
+		expect(parsed.data.engineFallback).toBe("open-rejected")
+		expect(parsed.data.config.engine).toBe("rust")
+		expect(Object.hasOwn(parsed.data.config, "chanBinaryPath")).toBe(false)
+		expect(raw).not.toContain("do-not-leak-chan-binary")
+		expect(raw).not.toContain("chanBinaryPath")
+	})
+
+	it("live-audio:config omits chanBinaryPath", () => {
+		const current = mockLiveDemod.getStatus()
+		const config = {
+			...current.config,
+			chanBinaryPath: "SECRET-PATH",
+		}
+		const broadcaster = new WebSocketEventBroadcaster(
+			createLogger({ level: "fatal" }),
+		)
+		const messages: string[] = []
+		const socket = {
+			readyState: 1,
+			send: (data: string) => {
+				messages.push(data)
+			},
+			close: () => undefined,
+			on: () => undefined,
+			bufferedAmount: 0,
+		}
+		const clients = (
+			broadcaster as unknown as {
+				clients: Map<
+					string,
+					{ socket: WebSocket; subscriptions: Set<string>; id: string }
+				>
+			}
+		).clients
+		clients.set("client-1", {
+			socket: socket as unknown as WebSocket,
+			subscriptions: new Set(["live-audio"]),
+			id: "client-1",
+		})
+		broadcaster.broadcastLiveAudioConfig(config)
+		expect(messages).toHaveLength(1)
+		const raw = messages[0] ?? ""
+		const parsed = JSON.parse(raw) as {
+			type: string
+			data: { modulation?: string; gain?: number; chanBinaryPath?: string }
+		}
+		expect(parsed.type).toBe("live-audio:config")
+		expect(parsed.data.modulation).toBe("nfm")
+		expect(parsed.data.gain).toBe(current.config.gain)
+		expect(Object.hasOwn(parsed.data, "chanBinaryPath")).toBe(false)
+		expect(raw).not.toContain("SECRET-PATH")
+		expect(raw).not.toContain("chanBinaryPath")
+	})
+
+	it("PATCH forwards engine", async () => {
+		const response = await app.inject({
+			method: "PATCH",
+			url: "/api/live-audio/config",
+			payload: { engine: "rust" },
+		})
+		expect(response.statusCode).toBe(200)
+		expect(mockLiveDemod.reconfigure).toHaveBeenCalledWith({ engine: "rust" })
 	})
 
 	it("GET /api/live-audio/presets returns presets", async () => {

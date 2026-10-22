@@ -15,14 +15,13 @@
 import {
 	appendFile,
 	mkdir,
-	open,
 	readdir,
 	readFile,
 	rename,
 	rm,
 	truncate,
 } from "node:fs/promises"
-import { dirname, join, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger } from "../../../utils/logger.js"
@@ -51,6 +50,14 @@ import {
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import type { StoreMutation } from "./schemas.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
+import { atomicWrite } from "./atomic-write.js"
+import { snapshotHeadOf } from "./snapshot-mirror.js"
+import type { MirrorCounts, SnapshotParts } from "./snapshot-mirror.js"
+import { SnapshotWriter } from "./snapshot-writer.js"
+import type {
+	SnapshotWorkerFactory,
+	SnapshotWorkerStatus,
+} from "./snapshot-writer.js"
 import { OccupancyStateSchema } from "../../spectrum/occupancy.js"
 import type { OccupancyState } from "../../spectrum/occupancy.js"
 import {
@@ -409,31 +416,8 @@ function journalName(ms: number): string {
 	return `observations-${dayStamp(ms)}.jsonl`
 }
 
-/** Tmp file + fsync + rename, as in BandOverrideStore.write. Also used by the EvidenceStore (Task 17). */
-export async function atomicWrite(
-	file: string,
-	data: string | Uint8Array,
-): Promise<void> {
-	const tmp = `${file}.${process.pid}.tmp`
-	try {
-		await mkdir(dirname(file), { recursive: true })
-		const handle = await open(tmp, "w")
-		try {
-			await handle.writeFile(data)
-			await handle.sync()
-		} finally {
-			await handle.close()
-		}
-		await rename(tmp, file)
-	} catch (err) {
-		await rm(tmp, { force: true }).catch(() => undefined)
-		throw new WaveKitError(
-			`Could not write ${file}`,
-			"SCANNER_PERSIST_FAILED",
-			err instanceof Error ? err : undefined,
-		)
-	}
-}
+/** Tmp file + fsync + rename (moved to atomic-write.ts for the snapshot worker; re-exported). */
+export { atomicWrite }
 
 type JsonRead =
 	| { kind: "missing" }
@@ -476,12 +460,55 @@ interface JournalBatch {
 	written: Promise<void>
 }
 
-/** A queued snapshot write; `text` is dropped once written or superseded. */
+/**
+ * A queued snapshot write; `text` is dropped once written or superseded. A worker slot holds no
+ * text (the worker built it): `worker` is its request id, null once committed or superseded.
+ */
 interface SnapshotSlot {
 	text: string | null
+	worker: { id: number; store: SnapshotStore } | null
 	lastSeq: number
 	/** The newer write that superseded this one; its settlement is this one's. */
 	successor: Promise<void> | null
+}
+
+/** What a store removes from the snapshot set without a journal entry (`mirror-removal`). */
+export interface SnapshotMirrorRemoval {
+	discoveries: string[]
+	observations: string[]
+}
+
+/**
+ * The store surface `writeSnapshotOf` uses (DiscoveryStore). Without `recordCounts` and
+ * `snapshotParts` every snapshot is written on the main thread.
+ */
+export interface SnapshotStore {
+	snapshot(): StoreSnapshot
+	/** O(1): what `snapshot()` would hold. */
+	recordCounts?: () => MirrorCounts
+	/** `snapshot()` without the records: corrections, prepared recording operations, aliases. */
+	snapshotParts?: () => SnapshotParts
+	on(
+		event: "mirror-removal",
+		listener: (removal: SnapshotMirrorRemoval) => void,
+	): unknown
+	off(
+		event: "mirror-removal",
+		listener: (removal: SnapshotMirrorRemoval) => void,
+	): unknown
+}
+
+export interface SnapshotWorkerOptions {
+	/** False: never start the worker (every snapshot on the main thread). Default true. */
+	enabled?: boolean
+	url?: URL
+	factory?: SnapshotWorkerFactory
+	/** Charged bytes of unacknowledged worker messages (default 16 MiB). */
+	maxQueuedBytes?: number
+	commitTimeoutMs?: number
+	/** How long a failed worker may take to exit before its snapshot falls back anyway (10 s). */
+	terminateWaitMs?: number
+	heapMb?: number
 }
 
 export class ScannerPersistence {
@@ -506,6 +533,14 @@ export class ScannerPersistence {
 	/** lastSeq of the newest snapshot queued or written (null after it failed). */
 	private coverSeq: number | null = null
 	private readonly maxJournalBacklogBytes: number
+	/** lastSeq of the newest snapshot written; an older queued one is then skipped. */
+	private writtenSeq = -1
+	private readonly snapshotWorkerOptions: SnapshotWorkerOptions
+	private writer: SnapshotWriter | null = null
+	private attached: {
+		store: SnapshotStore
+		listener: (removal: SnapshotMirrorRemoval) => void
+	} | null = null
 	private nextSeq = 1
 	private durableLastSeq = 0
 	private loaded = false
@@ -526,7 +561,9 @@ export class ScannerPersistence {
 		now: () => number
 		appendFile?: (path: string, data: string) => Promise<void>
 		maxJournalBacklogBytes?: number
+		snapshotWorker?: SnapshotWorkerOptions
 	}) {
+		this.snapshotWorkerOptions = opts.snapshotWorker ?? {}
 		this.maxJournalBacklogBytes =
 			opts.maxJournalBacklogBytes ?? DEFAULT_MAX_JOURNAL_BACKLOG_BYTES
 		this.root = resolve(opts.dir)
@@ -592,7 +629,7 @@ export class ScannerPersistence {
 
 	/**
 	 * Jobs, runtime settings and engine state alone, independent of the snapshot and the journal:
-	 * ScannerService's fallback when load() rejects (Task 35 fix round). The readers never throw.
+	 * ScannerService's fallback when load() rejects. The readers never throw.
 	 * Never marks the state loaded, so journal and snapshot writes stay refused.
 	 */
 	async loadConfig(): Promise<
@@ -620,6 +657,8 @@ export class ScannerPersistence {
 		if (!this.loaded) return Promise.reject(notLoaded())
 		const seq = this.nextSeq++
 		const line = `${JSON.stringify({ seq, at: entry.at, op: entry.op, payload: entry.payload })}\n`
+		// Every seq, refused ones too: the mirror follows the store, not the disk.
+		this.writer?.feed(line)
 		const cost = line.length * 2 + APPEND_OVERHEAD_BYTES
 		const overCap =
 			opts.reserved !== true &&
@@ -737,16 +776,127 @@ export class ScannerPersistence {
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
 		if (!this.loaded) return Promise.reject(notLoaded())
+		const built = this.mainSnapshotText(s)
+		if (built === null) return Promise.reject(invalidRecordingSnapshot())
+		return this.queueSnapshot({
+			text: built.text,
+			worker: null,
+			lastSeq: built.lastSeq,
+			successor: null,
+		})
+	}
+
+	/**
+	 * WG11 req 3.5: the snapshot of `store`, built and written by the snapshot worker from its
+	 * journal-fed mirror; the same text `writeSnapshot(store.snapshot())` writes, with the same
+	 * queueing (one outstanding, a newer one supersedes a queued one, after every append up to its
+	 * lastSeq). Falls back to the main thread when the worker is off, stale (first snapshot,
+	 * after an overflow or a reset) or fails; the main path resets the mirror.
+	 */
+	writeSnapshotOf(store: SnapshotStore): Promise<void> {
+		if (!this.loaded) return Promise.reject(notLoaded())
+		const writer = this.writerFor(store)
+		if (
+			writer === null ||
+			!writer.live() ||
+			store.recordCounts === undefined ||
+			store.snapshotParts === undefined
+		)
+			return this.writeMainSnapshot(store, writer)
+		const parts = store.snapshotParts()
+		const prepared = PreparedRecordingOperationsSchema.safeParse(
+			parts.recordingOperations ?? [],
+		)
+		if (!prepared.success) return Promise.reject(invalidRecordingSnapshot())
+		const lastSeq = this.nextSeq - 1
+		const head = snapshotHeadOf(parts, prepared.data, lastSeq, this.now())
+		const id = writer.request(head, store.recordCounts())
+		if (id === null) return this.writeMainSnapshot(store, writer)
+		return this.queueSnapshot({
+			text: null,
+			worker: { id, store },
+			lastSeq,
+			successor: null,
+		})
+	}
+
+	/** The snapshot worker's counters, heap and last timings (null before the first writeSnapshotOf). */
+	snapshotWorkerStatus(): SnapshotWorkerStatus | null {
+		return this.writer?.status() ?? null
+	}
+
+	/** Stops the snapshot worker (shutdown); later snapshots are written on the main thread. */
+	async closeSnapshotWorker(): Promise<void> {
+		this.detachStore()
+		await this.writer?.close()
+	}
+
+	private writerFor(store: SnapshotStore): SnapshotWriter | null {
+		if (this.snapshotWorkerOptions.enabled === false) return null
+		if (store.recordCounts === undefined || store.snapshotParts === undefined)
+			return null
+		if (this.writer === null) {
+			const o = this.snapshotWorkerOptions
+			this.writer = new SnapshotWriter({
+				logger: this.log,
+				now: this.now,
+				...(o.url ? { url: o.url } : {}),
+				...(o.factory ? { factory: o.factory } : {}),
+				...(o.maxQueuedBytes !== undefined
+					? { maxQueuedBytes: o.maxQueuedBytes }
+					: {}),
+				...(o.commitTimeoutMs !== undefined
+					? { commitTimeoutMs: o.commitTimeoutMs }
+					: {}),
+				...(o.terminateWaitMs !== undefined
+					? { terminateWaitMs: o.terminateWaitMs }
+					: {}),
+				...(o.heapMb !== undefined ? { heapMb: o.heapMb } : {}),
+			})
+		}
+		const writer = this.writer
+		if (this.attached?.store !== store) {
+			this.detachStore()
+			const listener = (removal: SnapshotMirrorRemoval): void =>
+				writer.remove(removal)
+			store.on("mirror-removal", listener)
+			this.attached = { store, listener }
+			writer.markStale()
+		}
+		return writer
+	}
+
+	private detachStore(): void {
+		const attached = this.attached
+		if (attached === null) return
+		this.attached = null
+		attached.store.off("mirror-removal", attached.listener)
+	}
+
+	/** Main path, queued like writeSnapshot; its text resets the worker's mirror (posted now, in order). */
+	private writeMainSnapshot(
+		store: SnapshotStore,
+		writer: SnapshotWriter | null,
+	): Promise<void> {
+		const built = this.mainSnapshotText(store.snapshot())
+		if (built === null) return Promise.reject(invalidRecordingSnapshot())
+		writer?.reset(built.text, built.lastSeq)
+		return this.queueSnapshot({
+			text: built.text,
+			worker: null,
+			lastSeq: built.lastSeq,
+			successor: null,
+		})
+	}
+
+	/** Today's snapshot text for `s` at the current lastSeq; null when its recording operations are invalid. */
+	private mainSnapshotText(
+		s: StoreSnapshot,
+	): { text: string; lastSeq: number } | null {
 		const prepared = PreparedRecordingOperationsSchema.safeParse(
 			s.recordingOperations ?? [],
 		)
-		if (!prepared.success)
-			return Promise.reject(
-				new WaveKitError(
-					"Invalid recording snapshot",
-					"SCANNER_JOURNAL_INVALID",
-				),
-			)
+		if (!prepared.success) return null
 		const lastSeq = this.nextSeq - 1
 		const text = JSON.stringify({
 			version: FILE_VERSION,
@@ -758,33 +908,105 @@ export class ScannerPersistence {
 			recordingOperations: prepared.data,
 			...(s.aliases && s.aliases.length > 0 ? { aliases: s.aliases } : {}),
 		})
+		return { text, lastSeq }
+	}
+
+	private queueSnapshot(slot: SnapshotSlot): Promise<void> {
 		// A slow disk must not queue one full-store text per call (the 2 GB heap OOM): a newer
 		// snapshot supersedes one that has not started, which drops its text and settles with the
 		// newer write. The newest keeps its own place after every append up to its lastSeq.
-		const slot: SnapshotSlot = { text, lastSeq, successor: null }
 		const superseded = this.queuedSnapshot
 		this.queuedSnapshot = slot
-		this.coverSeq = lastSeq
+		this.coverSeq = slot.lastSeq
 		const own = this.enqueue(async () => {
 			if (this.queuedSnapshot === slot) this.queuedSnapshot = null
 			const body = slot.text
-			if (body === null) return
+			const worker = slot.worker
+			if (body === null && worker === null) return
 			slot.text = null
-			try {
-				await atomicWrite(join(this.root, SNAPSHOT_FILE), body)
-			} catch (err) {
-				// Lines queued after this snapshot no longer follow a covering one.
-				if (this.coverSeq === slot.lastSeq) this.coverSeq = null
-				throw err
+			slot.worker = null
+			// A main-thread fallback already wrote a newer state: nothing to add.
+			if (slot.lastSeq < this.writtenSeq) return
+			const file = join(this.root, SNAPSHOT_FILE)
+			if (body !== null) {
+				await this.writeSnapshotFile(file, body, slot.lastSeq)
+				return
 			}
-			this.snapshotDurable(slot.lastSeq)
+			if (worker === null) return
+			const writer = this.writer
+			const result =
+				writer === null
+					? ({ ok: false, reason: "worker-failed" } as const)
+					: await writer.commitTo(worker.id, file)
+			if (result.ok) {
+				this.writtenSeq = Math.max(this.writtenSeq, slot.lastSeq)
+				this.snapshotDurable(slot.lastSeq)
+				return
+			}
+			if (result.reason === "io") {
+				if (this.coverSeq === slot.lastSeq) this.coverSeq = null
+				throw new WaveKitError(
+					`Could not write ${file}`,
+					"SCANNER_PERSIST_FAILED",
+				)
+			}
+			await this.writeFallback(file, worker.store, slot, result.reason)
 		})
 		const done = own.then(() => slot.successor ?? undefined)
 		if (superseded) {
 			superseded.text = null
+			superseded.worker = null
 			superseded.successor = done
 		}
 		return done
+	}
+
+	private async writeSnapshotFile(
+		file: string,
+		body: string,
+		lastSeq: number,
+	): Promise<void> {
+		try {
+			await atomicWrite(file, body)
+		} catch (err) {
+			// Lines queued after this snapshot no longer follow a covering one.
+			if (this.coverSeq === lastSeq) this.coverSeq = null
+			throw err
+		}
+		this.writtenSeq = Math.max(this.writtenSeq, lastSeq)
+		this.snapshotDurable(lastSeq)
+		await this.writer?.sweepAbandoned()
+	}
+
+	/**
+	 * The worker could not write this snapshot (diverged mirror, crash, timeout): the main thread
+	 * writes the store's state now, at the current lastSeq (≥ the request's: later lines are still
+	 * queued behind this step, and replay skips what it covers), and resets the mirror from it.
+	 */
+	private async writeFallback(
+		file: string,
+		store: SnapshotStore,
+		slot: SnapshotSlot,
+		reason: string,
+	): Promise<void> {
+		const built = this.mainSnapshotText(store.snapshot())
+		if (built === null) {
+			if (this.coverSeq === slot.lastSeq) this.coverSeq = null
+			throw invalidRecordingSnapshot()
+		}
+		this.writer?.noteFallback(reason)
+		if (this.attached?.store === store)
+			this.writer?.reset(built.text, built.lastSeq)
+		this.coverSeq = Math.max(this.coverSeq ?? built.lastSeq, built.lastSeq)
+		try {
+			await atomicWrite(file, built.text)
+		} catch (err) {
+			if (this.coverSeq === built.lastSeq) this.coverSeq = null
+			throw err
+		}
+		this.writtenSeq = Math.max(this.writtenSeq, built.lastSeq)
+		this.snapshotDurable(built.lastSeq)
+		await this.writer?.sweepAbandoned()
 	}
 
 	/**
@@ -798,9 +1020,11 @@ export class ScannerPersistence {
 		journalBytes: number
 		refusedLines: number
 	} {
-		const text = this.queuedSnapshot?.text ?? null
+		const queued = this.queuedSnapshot
+		const text = queued?.text ?? null
 		return {
-			snapshots: text === null ? 0 : 1,
+			// A worker snapshot holds no text here (the worker holds at most one, see its status).
+			snapshots: text === null && (queued?.worker ?? null) === null ? 0 : 1,
 			snapshotBytes: text === null ? 0 : text.length,
 			journalLines: this.queuedLines,
 			journalBytes: this.queuedBytes,
@@ -1161,6 +1385,13 @@ export class ScannerPersistence {
 		}
 		return parsed.data as EngineState
 	}
+}
+
+function invalidRecordingSnapshot(): WaveKitError {
+	return new WaveKitError(
+		"Invalid recording snapshot",
+		"SCANNER_JOURNAL_INVALID",
+	)
 }
 
 function notLoaded(): WaveKitError {
