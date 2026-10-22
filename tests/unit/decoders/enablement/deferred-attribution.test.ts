@@ -202,6 +202,8 @@ function intervalScenario() {
 	let now = 0
 	let shortfall: boolean | null = null
 	let sequence = 1
+	let gap = 1000
+	let cpu = 10
 	const totals = { absorber: 0, a: 0 }
 	const log = createLogger({ level: "fatal" })
 	const logs = vi.spyOn(log, "info")
@@ -218,10 +220,14 @@ function intervalScenario() {
 				["b", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
 			]),
 		topology: () => "fixed",
-		cpu: { normalisedPercent: 10 },
+		cpu: {
+			get normalisedPercent() {
+				return cpu
+			},
+		},
 		now: () => now,
 		monoNow: () => now,
-		ingest: () => ({ maxGapMs: 1000, catchupBytes: 0, chunks: 100 }),
+		ingest: () => ({ maxGapMs: gap, catchupBytes: 0, chunks: 100 }),
 		loopDelay: () => ({ maxMs: 15, p99Ms: 15 }),
 		shortfall: () => true,
 		recovery: () => ({
@@ -241,6 +247,10 @@ function intervalScenario() {
 	totals.absorber = 100
 	tick(18000)
 	return {
+		evidence: (nextGap: number, nextCpu: number) => {
+			gap = nextGap
+			cpu = nextCpu
+		},
 		monitor,
 		tick,
 		totals,
@@ -392,3 +402,74 @@ it.each([false, true])(
 		h.monitor.stop()
 	},
 )
+
+it.each([10, 95])(
+	"does not lend a pending gap to an independent loss at CPU %i",
+	cpu => {
+		const h = intervalScenario()
+		h.tick(20000)
+		h.evidence(0, cpu)
+		h.totals.absorber += 7
+		const code = cpu === 95 ? "host" : "unknown"
+		expect(h.tick(22000)).toMatchObject({
+			attribution: code,
+			droppedBytesDelta: 7,
+		})
+		expect(h.monitor.droppedBetweenMono("s", 22000, 22000)).toBe(true)
+		h.recover(false)
+		expect(h.tick(24000)).toMatchObject({
+			attribution: "link",
+			droppedBytesDelta: 100,
+		})
+		expect(h.monitor.attributionCounts("s")!.counts10m.link).toBe(1)
+		expect(h.monitor.attributionCounts("s")!.counts10m.host).toBe(
+			cpu === 95 ? 1 : 0,
+		)
+		for (const at of [26000, 28000, 30000]) h.tick(at)
+		expect(h.monitor.lateWindows("s").slice(-2)).toEqual([
+			expect.objectContaining({
+				startMono: 10000,
+				endMono: 20000,
+				condemning: false,
+				linkOrUnknownDrops: true,
+			}),
+			expect.objectContaining({
+				startMono: 20000,
+				endMono: 30000,
+				condemning: cpu === 95,
+				linkOrUnknownDrops: cpu !== 95,
+			}),
+		])
+		h.monitor.stop()
+	},
+)
+
+it("uses each deferred interval's own host evidence when recovery fails", () => {
+	const h = intervalScenario()
+	h.tick(20000)
+	h.evidence(100, 95)
+	h.totals.absorber += 7
+	expect(h.tick(22000).droppedBytesDelta).toBeNull()
+	h.recover(true)
+	expect(h.tick(24000)).toMatchObject({
+		attribution: "host",
+		droppedBytesDelta: 7,
+	})
+	expect(h.logs).toHaveBeenCalledWith(
+		expect.objectContaining({
+			attribution: "unknown",
+			dropBytes: 100,
+			intervalMono: 18000,
+		}),
+		"Drop interval attributed",
+	)
+	expect(h.logs).toHaveBeenCalledWith(
+		expect.objectContaining({
+			attribution: "host",
+			dropBytes: 7,
+			intervalMono: 22000,
+		}),
+		"Drop interval attributed",
+	)
+	h.monitor.stop()
+})

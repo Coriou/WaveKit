@@ -50,15 +50,20 @@ const recoverySchema = z.object({
 	shortfall: z.boolean().nullable(),
 })
 const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
+type DeferredLoss = {
+	at: number
+	bytes: number
+	chunks: number
+	gap: number
+	loop: number
+	cpu: number
+}
 type WindowEvidence = LateDropWindow & { complete: boolean; closedAt?: number }
 type SourceState = {
 	pending: {
 		sequence: number
-		losses: { at: number; bytes: number; chunks: number }[]
+		losses: DeferredLoss[]
 		at: number
-		gap: number
-		loop: number
-		cpu: number
 		upstream: number
 		valid: boolean
 	} | null
@@ -579,8 +584,6 @@ export function createEfficiencyMonitor(deps: {
 					evidenceValid &&
 					(recovery === null || recovery.failedSequence < old.sequence)
 				old.upstream += upstreamDropDelta ?? 0
-				old.loop = Math.max(old.loop, loopDelayMaxMs ?? NaN)
-				old.cpu = Math.max(old.cpu, cpuPercent ?? NaN)
 				const expired = at - old.at >= MAX_PENDING_WAIT_MS
 				const delivered =
 					!expired &&
@@ -595,34 +598,48 @@ export function createEfficiencyMonitor(deps: {
 					recovery?.shortfall === true ||
 					(recovery !== null && recovery.failedSequence >= old.sequence)
 				) {
-					const code = attributeInterval({
-						complete: old.valid,
-						branchDrops: new Map(),
-						absorberOverflow: 1,
-						maxGapMs: old.gap,
-						loopDelayMaxMs: old.loop,
-						cpuPercent: old.cpu,
-						cpuGuardPercent:
-							typeof cpuGuardPercent === "number" ? cpuGuardPercent : NaN,
-						shortfall: delivered ? false : true,
-						upstreamDropDelta: old.upstream,
-					})
-					for (const loss of old.losses)
-						resolved.push({
-							...loss,
-							code,
-							gap: old.gap,
-							loop: old.loop,
-							cpu: old.cpu,
+					for (const loss of old.losses) {
+						const code = attributeInterval({
+							complete: old.valid,
+							branchDrops: new Map(),
+							absorberOverflow: 1,
+							maxGapMs: loss.gap,
+							loopDelayMaxMs: loss.loop,
+							cpuPercent: loss.cpu,
+							cpuGuardPercent:
+								typeof cpuGuardPercent === "number" ? cpuGuardPercent : NaN,
+							shortfall: delivered ? false : true,
+							upstreamDropDelta: old.upstream,
 						})
+						resolved.push({ ...loss, code })
+					}
 					s.pending = null
 				}
 			}
 			let heldCurrent = false
-			if (positiveNow && currentCode !== "consumer") {
+			// Each loss needs its own gap evidence, even during an older recovery.
+			const gapLoss =
+				applies &&
+				comparable &&
+				evidenceValid &&
+				maxGapMs !== null &&
+				loopDelayMaxMs !== null &&
+				maxGapMs - loopDelayMaxMs >= LINK_GAP_MS &&
+				((absorberOverflow ?? 0) > 0 ||
+					(s.branchDrops.size > 0 &&
+						[...s.branchDrops.values()].every(drop => drop > 0)))
+			if (positiveNow && currentCode !== "consumer" && gapLoss) {
+				const loss: DeferredLoss = {
+					at,
+					bytes,
+					chunks,
+					gap: maxGapMs!,
+					loop: loopDelayMaxMs!,
+					cpu: cpuPercent ?? NaN,
+				}
 				if (s.pending) {
 					if (s.pending.losses.length < MAX_PENDING_LOSSES) {
-						s.pending.losses.push({ at, bytes, chunks })
+						s.pending.losses.push(loss)
 						heldCurrent = true
 					} else {
 						// Faster-than-contract polling cannot grow the evidence queue
@@ -633,23 +650,12 @@ export function createEfficiencyMonitor(deps: {
 				} else if (
 					recovery &&
 					recovery.retired !== true &&
-					recovery.shortfall === null &&
-					comparable &&
-					evidenceValid &&
-					maxGapMs !== null &&
-					loopDelayMaxMs !== null &&
-					maxGapMs - loopDelayMaxMs >= LINK_GAP_MS &&
-					((absorberOverflow ?? 0) > 0 ||
-						(s.branchDrops.size > 0 &&
-							[...s.branchDrops.values()].every(drop => drop > 0)))
+					recovery.shortfall === null
 				) {
 					s.pending = {
 						sequence: recovery.sequence,
-						losses: [{ at, bytes, chunks }],
+						losses: [loss],
 						at,
-						gap: maxGapMs,
-						loop: loopDelayMaxMs,
-						cpu: cpuPercent ?? NaN,
 						upstream: upstreamDropDelta ?? NaN,
 						valid: true,
 					}
