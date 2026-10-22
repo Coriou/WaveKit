@@ -215,6 +215,8 @@ interface IntervalEvidence {
 function attributeInterval(e: IntervalEvidence): DropAttribution
 ```
 
+Any malformed or non-finite evidence field makes the whole interval `unknown` (fail closed).
+
 Rules in order: incomplete → `unknown`; no positive delta anywhere → `none`; a strict non-empty
 subset of branches rose and no overflow → `consumer`; upstream delta above 0 → `unknown`; gap,
 loop delay and shortfall all known, `maxGapMs − loopDelayMaxMs ≥ LINK_GAP_MS` and no shortfall
@@ -231,7 +233,8 @@ otherwise `unknown`.
   Erratum: the monitor keeps the window ring; the gate keeps the last shed time (cooldown) and the late-since mark (last probationer or shed). Behaviour is unchanged.
 - `SourceDropSample` gains `attribution`. A `link` sample does not set `lastDropMono` and does
   not reset `cleanSinceMono`; it breaks the credited coverage chain as an incomplete read does.
-- `probation()` keeps its shape. For the newest probationer it now condemns only on drops in
+- `probation()` skips `always` and operator-started placements, consistent with never shedding
+  these placements. For the newest eligible probationer it now condemns only on drops in
   samples attributed `consumer`, `host` or `unknown`. When a source has no probationer, it
   evaluates the late-drop rule and may return one verdict `{ key, detail: "late-drops" }` for the
   newest eligible placement. Eligibility needs the placement's mode and start mode, so
@@ -297,21 +300,21 @@ Provisional values are confirmed or replaced by the instrumentation record (requ
 Desktop reference host and Pi 4-class core host as in decoder-enablement (Pi estimated at 4 × the
 reference cost per core until measured, requirement 9.4).
 
-| Item                                 | When                                | Desktop 2.048 / 2.4 Msps                                            | Pi 4-class 2.048 / 2.4 Msps | Basis                                                 |
-| ------------------------------------ | ----------------------------------- | ------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------- |
-| Recorder                             | per chunk (about 60–3 000 chunks/s) | ≤ 0.002 / 0.002 core                                                | ≤ 0.008 / 0.008             | one clock read and a few integer ops per chunk; bench |
-| Absorber pass-through                | per chunk, ring empty               | < 0.001 / 0.001                                                     | < 0.004 / 0.004             | one length check and one congestion read              |
-| Absorber hold                        | only while holding                  | memcpy 4.10 / 4.80 MB/s ≈ 0.002 core                                | ≈ 0.008                     | bench                                                 |
-| Absorber release                     | only while draining                 | one 64 KiB alloc and memcpy per block; ≈ 0.003 core during catch-up | ≈ 0.012                     | bench                                                 |
-| Fanout of released bytes             | same as today per byte              | unchanged                                                           | unchanged                   | existing fanout                                       |
-| Loop meter                           | continuous                          | negligible                                                          | negligible                  | native histogram                                      |
-| Attribution, late rule, link quality | every 2 s per source                | < 0.05 ms per sample                                                | < 0.2 ms                    | unit bench                                            |
-| Total steady state                   |                                     | < 0.01 core                                                         | < 0.04 core                 | well below the 0.3-core noise floor                   |
-| Event-loop p99 added                 |                                     | ≤ 0.2 ms (largest step: one release block × branches)               | ≤ 1 ms                      | rule 2 cap 2 ms; acceptance 9.4                       |
-| Memory                               | per network source                  | ring 8.2 / 9.6 MB; recorder < 64 KB                                 | same                        | preallocated                                          |
+| Item                                 | When                                | Desktop 2.048 / 2.4 Msps                                            | Pi 4-class 2.048 / 2.4 Msps       | Basis                                                 |
+| ------------------------------------ | ----------------------------------- | ------------------------------------------------------------------- | --------------------------------- | ----------------------------------------------------- |
+| Recorder                             | per chunk (about 60–3 000 chunks/s) | ≤ 0.002 / 0.002 core                                                | ≤ 0.008 / 0.008                   | one clock read and a few integer ops per chunk; bench |
+| Absorber pass-through                | per chunk, ring empty               | < 0.001 / 0.001                                                     | < 0.004 / 0.004                   | one length check and one congestion read              |
+| Absorber hold                        | only while holding                  | ≈ 0.005 core active-period; ≈ 0.0003 averaged                       | ≈ 0.020 active; ≈ 0.0012 averaged | bench                                                 |
+| Absorber release                     | only while draining                 | one 64 KiB alloc and memcpy per block; ≈ 0.003 core during catch-up | ≈ 0.012                           | bench                                                 |
+| Fanout of released bytes             | same as today per byte              | unchanged                                                           | unchanged                         | existing fanout                                       |
+| Loop meter                           | continuous                          | negligible                                                          | negligible                        | native histogram                                      |
+| Attribution, late rule, link quality | every 2 s per source                | < 0.05 ms per sample                                                | < 0.2 ms                          | unit bench                                            |
+| Total steady state                   |                                     | < 0.01 core                                                         | < 0.04 core                       | well below the 0.3-core noise floor                   |
+| Event-loop p99 added                 |                                     | largest release step ≤ 256 KiB ≈ 0.2–0.6 ms                         | ≤ 1 ms                            | rule 2 cap 2 ms; acceptance 9.4                       |
+| Memory                               | per network source                  | ring 8.2 / 9.6 MB; recorder < 64 KB                                 | same                              | preallocated                                          |
 
-Main-thread bound: a release loop runs only while no gating branch is congested, so one event
-releases at most about the largest gating mark (512 KiB) before a branch congests; no step is
+Main-thread bound: `ABSORBER_RELEASE_STEP_BLOCKS` caps each synchronous release at four
+64 KiB blocks (256 KiB); remaining bytes resume on a later event-loop turn. No step is
 proportional to the ring's size.
 
 ## Correctness properties

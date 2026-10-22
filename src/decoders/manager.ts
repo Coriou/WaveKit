@@ -708,7 +708,7 @@ export class DecoderManager extends EventEmitter {
 		if (!gate) return { budgetCores: 0, cpuGuardPercent: 90, sources: [] }
 		const mono = performance.now()
 		const epoch = Date.now()
-		// A malformed or out-of-range cooldown reads as none rather than throwing.
+		// Malformed or out-of-range deadlines read as none rather than throwing.
 		const rebaseCooldown = (value: string | null): string | null => {
 			if (!value) return null
 			const at = epoch + Date.parse(value) - mono
@@ -752,11 +752,9 @@ export class DecoderManager extends EventEmitter {
 				),
 				blocked: source.blocked.map(placement => ({
 					...placement,
-					...(placement.retryAt
+					...(placement.retryAt !== undefined
 						? {
-								retryAt: new Date(
-									epoch + Date.parse(placement.retryAt) - mono,
-								).toISOString(),
+								retryAt: rebaseCooldown(placement.retryAt),
 							}
 						: {}),
 				})),

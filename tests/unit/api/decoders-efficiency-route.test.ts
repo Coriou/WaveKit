@@ -377,3 +377,26 @@ it("decoder status efficiency schema accepts late-drops and rejects unknown deta
 		await app.close()
 	}
 })
+
+it("efficiency route preserves an unavailable retry deadline as null", async () => {
+	const unavailable: DecoderEfficiencyView = {
+		...view,
+		sources: view.sources.map(source => ({
+			...source,
+			blocked: source.blocked.map(item => ({ ...item, retryAt: null })),
+		})),
+	}
+	const app = Fastify()
+	await app.register(decoderRoutes, {
+		decoderManager: {
+			efficiencyView: () => unavailable,
+		} as unknown as DecoderRoutesOptions["decoderManager"],
+	})
+	try {
+		const response = await app.inject("/api/decoders/efficiency")
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toEqual(unavailable)
+	} finally {
+		await app.close()
+	}
+})

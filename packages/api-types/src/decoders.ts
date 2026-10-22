@@ -415,7 +415,7 @@ export interface DecoderEfficiencyPlacement {
 	probation: boolean
 	/** "configured": a YAML decoder, admitted without the gate; its cost still counts. */
 	detail?: DecoderEfficiencyDetail | "configured"
-	retryAt?: string
+	retryAt?: string | null
 }
 export interface DecoderEfficiencySourceView {
 	attribution?: DropAttribution

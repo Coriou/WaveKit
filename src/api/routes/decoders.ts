@@ -425,7 +425,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				type: "string",
 				enum: ["budget", "cpu", "drops", "unknown", "late-drops", "configured"],
 			},
-			retryAt: { type: "string" },
+			retryAt: { type: ["string", "null"] },
 		},
 	} as const
 	fastify.get<{ Reply: DecoderEfficiencyView }>(

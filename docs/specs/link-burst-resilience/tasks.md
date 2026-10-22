@@ -26,57 +26,57 @@ contract files (`packages/api-types/**`, `src/core/link-burst/contract.ts`,
 
 ## Lane AB: absorber
 
-- [ ] AB.1 FanoutManager seams (read-only congestion view, public `distribute`) and the
+- [x] AB.1 FanoutManager seams (read-only congestion view, public `distribute`) and the
       backpressure oracle
   - _Requirements: 1.1-1.9_
-- [ ] AB.2 BurstAbsorber with held-duration and laggard-exclusion figures
+- [x] AB.2 BurstAbsorber with held-duration and laggard-exclusion figures
   - _Requirements: 1.1-1.9, 8.3, 9.2_
-- [ ] AB.3 Router wiring and the `@absorber` drop counter
+- [x] AB.3 Router wiring and the `@absorber` drop counter
   - _Requirements: 1.1-1.9_
 
 ## Lane IR: instrumentation and reporting
 
-- [ ] IR.1 IngestRecorder (gap, chunk-size and catch-up histograms) and EventLoopMeter
+- [x] IR.1 IngestRecorder (gap, chunk-size and catch-up histograms) and EventLoopMeter
       (`report()` never resets)
   - _Requirements: 2.1, 2.2_
-- [ ] IR.2 SDR host link facts and `iqDelivery` in the poller and its response schema
+- [x] IR.2 SDR host link facts and `iqDelivery` in the poller and its response schema
   - _Requirements: 8.1_
-- [ ] IR.3 LinkQuality, the route and the WebSocket event
+- [x] IR.3 LinkQuality, the route and the WebSocket event
   - _Requirements: 2.1-2.3, 6.1-6.3, 6.5, 6.6, 8.1_
-- [ ] IR.4 Link advisory: shortfall, link hold, burst summary, per-tick re-check
+- [x] IR.4 Link advisory: shortfall, link hold, burst summary, per-tick re-check
   - _Requirements: 6.1-6.6_
 
 ## Lane AG: attribution and gate
 
-- [ ] AG.1 `attributeInterval`
+- [x] AG.1 `attributeInterval`
   - _Requirements: 3.1-3.8_
-- [ ] AG.2 EfficiencyMonitor attribution, link path and late windows
+- [x] AG.2 EfficiencyMonitor attribution, link path and late windows
   - _Requirements: 3.1-3.8, 4.1-4.6, 5.1-5.5, 8.3_
-- [ ] AG.3 Gate: link admission wait, late shedding and the rate-limited held warning
+- [x] AG.3 Gate: link admission wait, late shedding and the rate-limited held warning
   - _Requirements: 4.1-4.6, 5.1-5.6, 8.3_
-- [ ] AG.4 Manager and efficiency schemas
+- [x] AG.4 Manager and efficiency schemas
   - _Requirements: 5.1-5.5, 8.1, 8.3_
 
 ## Lane FL: fake link and benches
 
-- [ ] FL.1 Stall schedule in the fake `rtl_tcp`
+- [x] FL.1 Stall schedule in the fake `rtl_tcp`
   - _Requirements: 9.1, 9.3_
-- [ ] FL.2 Scratch compose project, slow-sink consumer and acceptance driver
+- [x] FL.2 Scratch compose project, slow-sink consumer and acceptance driver
   - _Requirements: 9.1-9.3_
-- [ ] FL.3 Absorber and recorder bench (after AB.2 and IR.1 merge)
+- [x] FL.3 Absorber and recorder bench (after AB.2 and IR.1 merge)
   - _Requirements: 9.4_
 
 ## Lane HD: delivery hook and docs
 
-- [ ] HD.1 `iqDelivery` in receiver capabilities and the SDR host
+- [x] HD.1 `iqDelivery` in receiver capabilities and the SDR host
   - _Requirements: 7.1-7.3_
-- [ ] HD.2 Decoder-enablement amendments, design erratum, spec index, API docs, coordination
+- [x] HD.2 Decoder-enablement amendments, design erratum, spec index, API docs, coordination
       note
   - _Requirements: 8.1, 10.1_
 
 ## Main
 
-- [ ] M.1 Composition (after AB, IR, AG and HD merge)
+- [x] M.1 Composition (after AB, IR, AG and HD merge)
   - _Requirements: 2.2, 5.5, 6.4_
 - [ ] M.2 Fake-link acceptance
   - _Requirements: 9.1-9.4_

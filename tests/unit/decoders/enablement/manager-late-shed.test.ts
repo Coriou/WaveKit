@@ -3,6 +3,9 @@ import { PassThrough } from "node:stream"
 import { afterEach, expect, it, vi } from "vitest"
 import pino from "pino"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
+import { SourceFanoutRouter } from "../../../../src/core/source-fanout-router.js"
+import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/efficiency-monitor.js"
+import { composeLinkBurst } from "../../../../src/core/link-burst/compose.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
@@ -22,8 +25,11 @@ import type { Decoder } from "../../../../src/decoders/types.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
 
 let manager: DecoderManager | undefined
+let closeRouting: (() => void) | undefined
 afterEach(async () => {
 	await manager?.destroy()
+	closeRouting?.()
+	closeRouting = undefined
 	vi.useRealTimers()
 })
 
@@ -31,6 +37,7 @@ function setup(
 	type = "rate-test",
 	gate?: EfficiencyGate,
 	mode: "auto" | "always" = "auto",
+	withRouting = false,
 ) {
 	vi.useFakeTimers()
 	vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"))
@@ -102,7 +109,36 @@ function setup(
 			maxBandplanChannels: 4,
 		},
 	})
-	manager.setSourceManager(sources as unknown as SourceManager)
+	const fanout = new FanoutManager(logger)
+	const composed = withRouting
+		? composeLinkBurst({ log: logger, monoNow: () => performance.now() })
+		: null
+	const sourceStream = new PassThrough()
+	const routedSources = Object.assign(sources, {
+		getStream: () => sourceStream,
+		getConfig: () => ({
+			type: "rtl_tcp",
+			host: "example.invalid",
+			burstAbsorber: { seconds: 0 },
+		}),
+	})
+	const routing = composed
+		? new SourceFanoutRouter(
+				routedSources as unknown as SourceManager,
+				fanout,
+				logger,
+				"rtl",
+				{ linkBurst: composed.factories },
+			)
+		: undefined
+	if (routing)
+		closeRouting = () => {
+			routing.destroy()
+			fanout.destroy()
+			composed?.dispose()
+			sourceStream.destroy()
+		}
+	manager.setSourceManager(sources as unknown as SourceManager, routing)
 	const provider = Object.assign(new EventEmitter(), {
 		requestChannel: vi.fn(
 			async (): Promise<ChannelRequestResult> => ({
@@ -156,6 +192,9 @@ function setup(
 	}
 	return {
 		manager,
+		routing,
+		fanout,
+		sourceStream,
 		onStart: (callback: () => void) => {
 			beforeStart = callback
 		},
@@ -398,3 +437,106 @@ it.each([
 		)
 	},
 )
+
+it.each([
+	"",
+	"invalid",
+	"+999999-01-01T00:00:00.000Z",
+	"+275760-09-13T00:00:00.000Z",
+])("efficiency view returns null for malformed retry %s", retryAt => {
+	const gate = fakeGate()
+	gate.view = () => ({
+		budgetCores: 1,
+		cpuGuardPercent: 90,
+		sources: [
+			{
+				sourceId: "rtl",
+				coresInUse: 0,
+				cpu: { percent: 0, limit: 90 },
+				drops: "ok",
+				dropBytesPerSecond: 0,
+				admitted: [],
+				blocked: [
+					{
+						decoderId: "dec",
+						sourceId: "rtl",
+						channelHz: null,
+						reach: "raw",
+						costCores: 0.1,
+						probation: false,
+						detail: "unknown",
+						retryAt,
+					},
+				],
+			},
+		],
+	})
+	const f = setup("rate-test", gate)
+	expect(f.manager.efficiencyView().sources[0]?.blocked[0]?.retryAt).toBeNull()
+})
+
+it("composed monitoring holds link drops and sheds one graduated auto placement for consumer drops", async () => {
+	let f: ReturnType<typeof setup>
+	let gap = 0
+	const monitor = createEfficiencyMonitor({
+		sources: () => ["rtl"],
+		onSample: sample => gate.record(sample),
+		branchCounters: id => f.routing!.branchDropCounters(id),
+		topology: id => f.routing!.branchTopology(id),
+		cpu: { normalisedPercent: 0 },
+		now: Date.now,
+		monoNow: () => performance.now(),
+		setInterval: () => ({ cancel() {} }),
+		ingest: () => ({ maxGapMs: gap, catchupBytes: 0, chunks: 1 }),
+		loopDelay: () => ({ maxMs: 0, p99Ms: 0 }),
+		shortfall: () => false,
+		upstreamDroppedTotal: () => 0,
+	})
+	const gate = createEfficiencyGate(
+		{ budgetCores: 10, cpuGuardPercent: 90 },
+		{ drops: monitor },
+	)
+	f = setup("rate-test", gate, "auto", true)
+	f.create("auto")
+	f.yamlDecoder("yaml")
+	f.create("yaml")
+	f.plan([f.place("auto", 162_000_000), f.place("yaml", 162_025_000)])
+	// Two real fanout branches supply independent counters; no socket is opened.
+	const slow = f.fanout.addBranch({ id: "slow", highWaterMark: 16 })
+	const sibling = f.fanout.addBranch({ id: "sibling", highWaterMark: 16 })
+	const chunk = Buffer.alloc(64)
+	const tick = async (drop: "none" | "link" | "consumer") => {
+		gap = drop === "link" ? 100 : 0
+		if (drop !== "none") {
+			f.sourceStream.write(chunk)
+			if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)
+			f.sourceStream.write(chunk)
+			if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)
+			f.sourceStream.write(chunk)
+		}
+		monitor.sampleNow()
+		if (drop !== "none") {
+			slow.resume()
+			sibling.resume()
+			await vi.advanceTimersByTimeAsync(0)
+			slow.pause()
+			if (drop === "link") sibling.pause()
+		}
+		await vi.advanceTimersByTimeAsync(2000)
+	}
+	await tick("none")
+	await tick("none")
+	await f.manager.startAll()
+	for (let i = 0; i < 34; i++) await tick("none")
+	for (let i = 0; i < 15; i++) await tick("link")
+	expect(monitor.latestAttribution("rtl")).toBe("link")
+	expect([...f.instances.values()].filter(d => d.running)).toHaveLength(2)
+	expect(
+		gate.admit(f.place("next", 162_050_000), [], performance.now()),
+	).toMatchObject({ admit: false, detail: "unknown" })
+	for (let i = 0; i < 20; i++) await tick("consumer")
+	expect(monitor.latestAttribution("rtl")).toBe("consumer")
+	expect(f.instances.get("auto")?.running).toBe(false)
+	expect(f.instances.get("yaml")?.running).toBe(true)
+	expect(f.instances.get("auto")?.stops).toBe(1)
+})
