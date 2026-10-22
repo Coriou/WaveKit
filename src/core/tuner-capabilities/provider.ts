@@ -1,6 +1,7 @@
 import type {
 	ReceiverCapabilities,
 	ReceiverCapabilitiesPage,
+	ReceiverIqDelivery,
 } from "@wavekit/api-types"
 import {
 	prepareReceiverPolicy,
@@ -29,6 +30,10 @@ import type {
 	ReceiverRestCommandPolicy,
 	SourceReceiverEvidence,
 } from "./types.js"
+
+type IqDeliveryReader = (
+	sourceId: string,
+) => Omit<ReceiverIqDelivery, "resolved"> | null
 
 type PageFailure = Exclude<ReceiverProviderFailureCode, "NOT_FOUND">
 const failure = <C extends ReceiverProviderFailureCode>(
@@ -145,6 +150,7 @@ function coherentEvidence(e: SourceReceiverEvidence): boolean {
 function project(
 	input: SourceReceiverEvidence,
 	policy: ReceiverRestCommandPolicy,
+	iqDelivery: IqDeliveryReader | undefined,
 ): ReceiverProviderResult<ReceiverCapabilities> {
 	if (!isDetachedPlainData(input, true)) return failure("CONFLICT")
 	if (
@@ -161,7 +167,20 @@ function project(
 	const e = parsed.data
 	const controls = projectReceiverControls(policy, e.source.type === "rtl_tcp")
 	const peerHeader = projectReceiverHeader(e)
+	let delivery: ReceiverIqDelivery | null = null
+	try {
+		const input = iqDelivery?.(e.sourceId)
+		if (input)
+			delivery = {
+				advertised: input.advertised,
+				configured: input.configured,
+				resolved: "raw",
+			}
+	} catch {
+		delivery = null
+	}
 	const dto = {
+		...(delivery === null ? {} : { iqDelivery: delivery }),
 		schemaVersion: 1 as const,
 		sourceId: e.sourceId,
 		sourceIncarnation: e.sourceIncarnation,
@@ -221,6 +240,7 @@ function project(
 export function createReceiverCapabilitiesProvider(
 	reader: ReceiverEvidenceReader | null | undefined,
 	descriptor: ReceiverRestCommandPolicy,
+	iqDelivery?: IqDeliveryReader,
 ): ReceiverCapabilitiesProvider {
 	let disposed = false
 	let policy: ReceiverRestCommandPolicy | null = null
@@ -264,7 +284,7 @@ export function createReceiverCapabilitiesProvider(
 					result.evidence.sourceId !== sourceId
 				)
 					return failure("CONFLICT")
-				return project(result.evidence, policy)
+				return project(result.evidence, policy, iqDelivery)
 			} catch {
 				return failure("FAILED")
 			}
@@ -341,7 +361,7 @@ export function createReceiverCapabilitiesProvider(
 						candidate.snapshotId !== result.snapshotId
 					)
 						return failure("CONFLICT")
-					const item = project(candidate, policy)
+					const item = project(candidate, policy, iqDelivery)
 					if (!item.ok)
 						return failure(
 							item.code === "NOT_FOUND" || item.code === "UNAVAILABLE"
