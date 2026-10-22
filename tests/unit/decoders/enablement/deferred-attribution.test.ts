@@ -199,12 +199,13 @@ it("resolves recovered overflow across stall lengths and tick phases", () => {
 }, 30000)
 
 function intervalScenario() {
+	let includeSibling = true
 	let now = 0
 	let shortfall: boolean | null = null
 	let sequence = 1
 	let gap = 1000
 	let cpu = 10
-	const totals = { absorber: 0, a: 0 }
+	const totals = { absorber: 0, absorberChunks: 0, a: 0 }
 	const log = createLogger({ level: "fatal" })
 	const logs = vi.spyOn(log, "info")
 	const monitor = createEfficiencyMonitor({
@@ -214,10 +215,15 @@ function intervalScenario() {
 			new Map([
 				[
 					"@absorber",
-					{ droppedBytesTotal: totals.absorber, droppedChunksTotal: 0 },
+					{
+						droppedBytesTotal: totals.absorber,
+						droppedChunksTotal: totals.absorberChunks,
+					},
 				],
 				["a", { droppedBytesTotal: totals.a, droppedChunksTotal: 0 }],
-				["b", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
+				...(includeSibling
+					? [["b", { droppedBytesTotal: 0, droppedChunksTotal: 0 }] as const]
+					: []),
 			]),
 		topology: () => "fixed",
 		cpu: {
@@ -245,8 +251,12 @@ function intervalScenario() {
 	}
 	for (now = 0; now <= 16000; now += 2000) monitor.sampleNow()
 	totals.absorber = 100
+	totals.absorberChunks = 3
 	tick(18000)
 	return {
+		removeSibling: () => {
+			includeSibling = false
+		},
 		evidence: (nextGap: number, nextCpu: number) => {
 			gap = nextGap
 			cpu = nextCpu
@@ -471,5 +481,17 @@ it("uses each deferred interval's own host evidence when recovery fails", () => 
 		}),
 		"Drop interval attributed",
 	)
+	h.monitor.stop()
+})
+
+it("keeps original deferred deltas when recovery resolves during an incomparable read", () => {
+	const h = intervalScenario()
+	h.removeSibling()
+	h.recover(false)
+	expect(h.tick(20000)).toMatchObject({
+		attribution: "unknown",
+		droppedBytesDelta: 100,
+		droppedChunksDelta: 3,
+	})
 	h.monitor.stop()
 })

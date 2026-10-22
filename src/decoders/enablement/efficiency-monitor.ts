@@ -567,6 +567,7 @@ export function createEfficiencyMonitor(deps: {
 						upstreamDropDelta,
 					})
 			type Resolved = {
+				deferred: boolean
 				at: number
 				bytes: number
 				chunks: number
@@ -611,7 +612,7 @@ export function createEfficiencyMonitor(deps: {
 							shortfall: delivered ? false : true,
 							upstreamDropDelta: old.upstream,
 						})
-						resolved.push({ ...loss, code })
+						resolved.push({ ...loss, code, deferred: true })
 					}
 					s.pending = null
 				}
@@ -664,6 +665,7 @@ export function createEfficiencyMonitor(deps: {
 			}
 			if (positiveNow && !heldCurrent)
 				resolved.push({
+					deferred: false,
 					at,
 					bytes,
 					chunks,
@@ -837,8 +839,10 @@ export function createEfficiencyMonitor(deps: {
 				published
 					? {
 							attribution: published.code,
-							droppedBytesDelta: published.bytes,
-							droppedChunksDelta: published.chunks,
+							droppedBytesDelta:
+								comparable || published.deferred ? published.bytes : null,
+							droppedChunksDelta:
+								comparable || published.deferred ? published.chunks : null,
 						}
 					: {
 							...(waiting ? {} : { attribution: currentCode }),
