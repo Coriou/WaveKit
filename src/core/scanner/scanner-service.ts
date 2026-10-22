@@ -565,7 +565,10 @@ export class ScannerService extends EventEmitter {
 	readonly spectrum: SpectrumService
 	private readonly analogAttempted = new WeakSet<LiveObservation>()
 	private readonly analogCounts = new Map<string, number>()
-	private readonly analogJobs = new Map<string, AbortController>()
+	private readonly analogJobs = new Map<
+		string,
+		{ controller: AbortController; discoveryId: string }
+	>()
 	private readonly captures: CaptureStore
 	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
@@ -1242,7 +1245,7 @@ export class ScannerService extends EventEmitter {
 		_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown",
 	): void {
 		this.consumerLifecycle.sealAdmission()
-		for (const controller of this.analogJobs.values()) controller.abort()
+		for (const { controller } of this.analogJobs.values()) controller.abort()
 		this.started = false
 		if (this.timer) clearInterval(this.timer)
 		this.timer = null
@@ -1911,6 +1914,8 @@ export class ScannerService extends EventEmitter {
 			)
 		const d = this.store.setOperator(id, patch)
 		if (patch.lockout) {
+			for (const trial of this.analogJobs.values())
+				if (trial.discoveryId === id) trial.controller.abort()
 			await Promise.all(
 				this.probes
 					.status()
@@ -2541,7 +2546,7 @@ export class ScannerService extends EventEmitter {
 				endReason === "gap" ? "stream-changed" : "cancelled",
 			)
 		if (endReason !== "quiet" && endReason !== "max-duration")
-			this.analogJobs.get(live.observationId)?.abort()
+			this.analogJobs.get(live.observationId)?.controller.abort()
 		this.rememberClosed(track.trackId)
 		this.endIqCapture(live)
 		for (const jobId of live.jobIds)
@@ -3169,6 +3174,12 @@ export class ScannerService extends EventEmitter {
 		return [...new Set(selections.flat())]
 	}
 
+	private discoveryLockedOut(discoveryId: string | null): boolean {
+		return Boolean(
+			discoveryId && this.store.get(discoveryId)?.operator?.lockout,
+		)
+	}
+
 	private needsConfirm(
 		live: LiveObservation,
 		track: TrackSnapshot,
@@ -3192,7 +3203,7 @@ export class ScannerService extends EventEmitter {
 		)
 			return false
 		const d = live.discoveryId ? this.store.get(live.discoveryId) : undefined
-		if (d?.operator?.lockout) return false
+		if (this.discoveryLockedOut(live.discoveryId)) return false
 		if (
 			jobTrialModes(
 				live.classification.class,
@@ -3894,6 +3905,7 @@ export class ScannerService extends EventEmitter {
 		})
 		if (
 			!eligible ||
+			this.discoveryLockedOut(live.discoveryId) ||
 			live.discoveryId === null ||
 			track.flags.spur ||
 			track.flags.iqImage ||
@@ -3913,7 +3925,10 @@ export class ScannerService extends EventEmitter {
 		)
 		this.analogAttempted.add(live)
 		const controller = new AbortController()
-		this.analogJobs.set(live.observationId, controller)
+		this.analogJobs.set(live.observationId, {
+			controller,
+			discoveryId: live.discoveryId,
+		})
 		const order = this.store.nextTrialOrder()
 		const row = {
 			protocol: "analog-fm" as const,
