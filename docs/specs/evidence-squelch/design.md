@@ -145,7 +145,8 @@ place from the meter ring; `carrierDb` and `hfNoiseDb` are not used by these fun
 is the gate's own count, below). The judge allocates small arrays for its medians; it runs at
 most 20 times per second and only while stage 1 is open and the gate is waiting (at most 30 calls
 per over), which is outside steady-state streaming. A property pins agreement with
-`classifyAnalogTrial` (Property 2).
+`classifyAnalogTrial` (Property 2). Because the gate equals the judge, syllable-timed FSK bursts
+that the judge calls voice also latch the gate (requirements, known limitation after 1.4).
 
 ### EvidenceGate (`src/core/evidence-squelch/evidence-gate.ts`)
 
