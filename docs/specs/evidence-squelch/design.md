@@ -385,6 +385,48 @@ impulses at 3 to 20 Hz), impulse noise and unquieted noise, each at most 4 s (th
 the real csdr and Rust chains (requirement 8.2), which covers the back chain's filters that the
 golden audio does not.
 
+**Amendment 2026-10-23 (requirement 5.1 resolved, A8 applied).** The analyzer's 48 kHz
+statistics and the meter's 8 kHz statistics measure different signal paths: the analyzer takes
+audio power from its 48 kHz DC-blocked demod output before DC restore, clamp and the 3.4 kHz
+FIR decimation, and clusters 48 kHz discriminator samples through 2.4 and 4.8 kHz views; the
+8 kHz PCM has no 4.8 kHz view. Equivalence is therefore checked in two parts
+(`tests/unit/core/evidence-squelch/meter-equivalence.test.ts`):
+
+- **Same path.** `scripts/evidence-squelch/pcm_reference.py` (standard library, float64)
+  applies the analyzer's statistic definitions to the committed 8 kHz PCM at 8 kHz, with the
+  discriminator views rounded to binary32 as the analyzer stores them, and writes
+  `<name>.pcmstats.json`. The meter must match it per frame, for gain 2 and for 1.5× audio at
+  gain 3, with identical verdicts on all 17 fixtures:
+
+  | Statistic | Bound | Measured  | Justification                                              |
+  | --------- | ----- | --------- | ---------------------------------------------------------- |
+  | audioDb   | 1e-12 | ≤ 1.5e-14 | float64 on both sides; summation-order rounding only       |
+  | syllabic  | 1e-12 | ≤ 9e-16   | float64 on both sides; summation-order rounding only       |
+  | cluster   | 1e-12 | 0         | binary32 views on both sides give bit-identical histograms |
+
+  Without the binary32 rounding the per-frame cluster delta reached 0.16: one sample crossing a
+  bin edge reseeds the k-means, so the score is not continuous in its input.
+
+- **Cross path** (analyzer `<name>.stats.json`, whole-file medians). NFM verdicts agree on every
+  fixture except `nfm-dmr-4fsk-continuous` (analyzer data-like, 8 kHz PCM neither: median
+  cluster 0.49 against 0.80, the missing 4.8 kHz view); the gate still rejects it (median
+  syllabic ≤ 0.05 < 0.3). Bounds, from the measured maxima over the 13 NFM fixtures:
+
+  | Statistic                 | Bound | Measured | Justification                                                                      |
+  | ------------------------- | ----- | -------- | ---------------------------------------------------------------------------------- |
+  | audioDb                   | 2.0   | 1.81     | 48 kHz pre-decimation band power vs decimated s16 PCM; largest on noise-like audio |
+  | syllabic                  | 0.1   | 0.07     | same envelope definition over the differing band powers                            |
+  | cluster                   | 0.1   | 0.09     | 3.4 kHz-limited 8 kHz views vs 48 kHz 2.4/4.8 kHz views                            |
+  | cluster (4FSK continuous) | 0.35  | 0.31     | the documented flip above                                                          |
+
+  AM rows are informational only: under A8 the evidence gate applies to NFM, and the analyzer's
+  AM cluster (no AM zeroing) is a different observable from the meter's.
+
+The AGC case of requirement 5.2 uses an additional AGC stress transform (peak follower, instant
+attack, 100 ms release, reference 0.4, gain ≤ 1 000). It is not the Rust fast AGC (5 ms attack,
+300 ms decay, max gain 65 535); its verdicts and the `EVIDENCE-SQUELCH 8.4:` line are
+informational.
+
 ## Correctness properties
 
 Each becomes a property test (`fast-check`, `numRuns ≥ 100`) with the trace comment
