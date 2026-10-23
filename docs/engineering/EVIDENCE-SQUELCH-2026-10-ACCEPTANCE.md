@@ -36,7 +36,7 @@ manifest is `tests/mocks/fixtures/evidence-squelch/manifest.json`.
 | `nfm-fsk-syllabic-bursts`                                           | nfm     | known limitation: expected to open as voice; record the result            |
 | Marginal-level voice (synthetic `voiceLike` seed 24; unit e2e only) | nfm, am | known limitation: expected late latch about 1.85 s, start clipped; record |
 
-The last row is the syllable-timed audio-frequency FSK burst case (about 100 ms on, 100 ms off, or
+`nfm-fsk-syllabic-bursts` is the syllable-timed audio-frequency FSK burst case (about 100 ms on, 100 ms off, or
 500 ms on, 250 ms off) from the known limitation after requirement 1.4; it is not a pass or fail
 criterion. The marginal-level voice row is the known limitation after requirement 8.1; it runs only
 in the unit end-to-end tests, not on the fake link.
