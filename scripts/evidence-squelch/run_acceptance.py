@@ -549,27 +549,36 @@ def _pcm16(raw):
 	return out
 
 
-def open_steps(manual_pcm, manual, clock, anchor):
+def open_steps(manual_pcm, manual, clock, anchor, engine="csdr"):
 	"""{over: (manual sample index, source open time)} of the stage-1 open as the manual stream
 	renders it. While closed the AM chain plays the hold residue (peak about -21 dBFS); the first
 	open block arrives with the AGC at full gain and clips. The step is the first sample at least
 	STEP_MIN_ABS reached within STEP_RISE_S of the end of a STEP_QUIET_S run with no sample of
 	STEP_QUIET_ABS (a finite rise time is allowed; its crossing lies within the edge map error).
 
-	Rust engine: the gate zeroes the demodulated audio of every closed block
-	(native/wavekit-chan/src/demod_channel.rs, consume_baseband), so a closed AM stage 1 is
-	exact zeros, and the AGC (after the DC block, fast attack) has settled by the first open
-	block: no clip. The open is then the first non-zero sample after a run of at least
-	STEP_QUIET_S of exact zeros, which is the gate's own block boundary (10 ms blocks of 480
-	samples at 48 kHz). csdr never plays exact zeros while closed (the hold residue), so the two
-	forms cannot be confused.
+	Rust engine (engine="rust" only; csdr uses the clip form): the gate zeroes the demodulated
+	audio of every closed block (native/wavekit-chan/src/demod_channel.rs, consume_baseband), so
+	a closed AM stage 1 is exact zeros, and the AGC (after the DC block, fast attack) has settled
+	by the first open block: no clip. The open is then the first non-zero sample after a run of
+	at least STEP_QUIET_S of exact zeros, the gate's own block boundary (10 ms blocks of 480
+	samples at 48 kHz). That finds audio onset, which is the gate onset only if the open over
+	carries no exact-zero PCM, so silence is treated conservatively (INVALID, never a late edge):
+	  - a run of STEP_QUIET_S or more of exact zeros inside an over's open window (step to step +
+	    its durationMs) means zero runs are not gate markers here;
+	  - each over's step minus its stamp (mapped through the arrival anchor) may exceed the
+	    smallest such offset by at most one fake send chunk + one squelch
+	    block + the 10 ms map error: 84 ms at 2.048 Msps; measured spread 53 ms on Rust
+	    am-voice), so zeros played after an open (a late step) are caught.
 
 	Searched from STEP_EARLY_S before to MAX_DELAY_S after the open's source time on the arrival
 	anchor (the fake sends IQ up to one chunk early). Each over's edges are placed from its own
 	step."""
+	if engine not in ("csdr", "rust"):
+		raise InvalidRun(f"no AM open-step locator for engine {engine!r}")
+	rust = engine == "rust"
 	x, rate = _pcm16(manual_pcm), manual["audioRate"]
 	quiet, rise = int(STEP_QUIET_S * rate), max(1, int(STEP_RISE_S * rate))
-	out = {}
+	out, durations = {}, {}
 	for e in manual.get("transmissions", []):
 		if e.get("state") != "closed" or not isinstance(e.get("startedAt"), str):
 			continue
@@ -592,9 +601,12 @@ def open_steps(manual_pcm, manual, clock, anchor):
 			zrun = zrun + 1 if v == 0 else 0
 		for i in range(lo, hi):
 			v = x[i]
-			if v != 0 and zeros[i - base] >= quiet:
-				out[k] = (i, rel)  # Rust: the first open block after the zeroed closed blocks
-				break
+			if rust:
+				if v != 0 and zeros[i - base] >= quiet:
+					out[k] = (i, rel)  # the first open block after the zeroed closed blocks
+					durations[k] = e.get("durationMs")
+					break
+				continue
 			if v >= STEP_MIN_ABS or v <= -STEP_MIN_ABS:
 				# A quiet run ends at most `rise` samples before the crossing (finite rise time).
 				if any(runs[j - base] >= quiet for j in range(i - rise, i + 1)):
@@ -604,6 +616,24 @@ def open_steps(manual_pcm, manual, clock, anchor):
 			raise InvalidRun(f"over {k}: stage-1 open step not found in the manual AM stream")
 	if len(out) < MIN_OVERS:
 		raise InvalidRun(f"{len(out)} stage-1 open steps in the manual AM stream, need {MIN_OVERS}")
+	if rust:
+		offsets = {k: j / rate - (rel - anchor) for k, (j, rel) in out.items()}
+		least = min(offsets.values())
+		chunk = FAKE_CHUNK_BYTES / (2 * clock["iqRate"]) if _number(clock.get("iqRate")) and clock["iqRate"] > 0 else None
+		if chunk is None:
+			raise InvalidRun("missing fixture IQ rate (sidecar) for the Rust open-step spread")
+		spread = chunk + SQUELCH_BLOCK_S + STAGE1_EDGE_MAP_ERR_S
+		for k, (j, _rel) in sorted(out.items()):
+			if offsets[k] - least > spread:
+				raise InvalidRun(f"over {k}: Rust open step {(offsets[k] - least) * 1000:.0f} ms later than the earliest"
+					f" (limit {spread * 1000:.0f} ms): zero PCM after the open is ambiguous with a closed gate")
+			end = j + int((durations[k] / 1000 if _number(durations.get(k)) else 0.0) * rate)
+			run = 0
+			for i in range(j, min(end, len(x))):
+				run = run + 1 if x[i] == 0 else 0
+				if run >= quiet:
+					raise InvalidRun(f"over {k}: {STEP_QUIET_S * 1000:.0f} ms of exact zeros inside the open over: Rust zero runs"
+						" are not gate markers here")
 	return out
 
 
@@ -1100,17 +1130,32 @@ def evaluate(obs, guard_ms):
 	failures, notes = [], {}
 	auto, manual = obs["auto"], obs["manual"]
 	modulation = obs["mode"]
-	clocks = {mode: source_clock(obs[mode], obs[mode].get("fixture")) for mode in ("auto", "manual")}
-	notes["clockRttMs"] = [clocks[m]["rttS"] * 1000 for m in ("auto", "manual")]
 	expect_open = expects_open(modulation, obs["expect"])
 	rate = auto["audioRate"]
 	byte_rate = rate * 2
+	# Clock-independent checks first: a clock step must not hide them (record_fixture retries a
+	# clock step only when it is the sole blocker).
 	runs = nonzero_runs(auto["samples8k"], REF_RATE)
 	if f := verdict_opened(expect_open, runs):
 		failures.append(f)
 	for mode in ("auto", "manual"):
 		if f := verdict_auto_state(obs[mode].get("status", []), mode, modulation, expect_open):
 			failures.append(f)
+	f, rates = verdict_byte_rate(auto["arrivals"], byte_rate)
+	notes["byteRates"] = rates
+	if f:
+		failures.append(f)
+	try:
+		clocks = {mode: source_clock(obs[mode], obs[mode].get("fixture")) for mode in ("auto", "manual")}
+	except ClockStep as exc:
+		if not failures:
+			raise
+		# A final FAIL: the clock-independent failures stand; the clock-dependent checks
+		# (onset, playback, delay, events, p99, drain, AM identity) were not judged.
+		notes["clockStep"] = str(exc)
+		notes["notJudged"] = "clock-dependent checks (onset, playback, delay, events, p99Smoke, drain, AM identity)"
+		return failures, notes
+	notes["clockRttMs"] = [clocks[m]["rttS"] * 1000 for m in ("auto", "manual")]
 	gated = modulation in EVIDENCE_MODULATIONS
 	if not gated:
 		# A8: auto is today's stage-1 auto squelch, judged as one stream against the manual
@@ -1119,15 +1164,18 @@ def evaluate(obs, guard_ms):
 			raw = obs[mode].get("pcm")
 			if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2:
 				raise InvalidRun(f"no {mode} raw stream to compare the ungated auto run with its manual baseline")
+		engines = run_engines(obs)
+		if len(engines) > 1:
+			raise InvalidRun(f"auto and manual ran different engines {sorted(engines)}")
+		engine = next(iter(engines), "csdr")  # recordings without the field predate Rust runs
 		timing = stage1_timing(auto, manual, clocks)
-		steps = open_steps(manual["pcm"], manual, clocks["manual"], timing["manualAnchorS"])
+		steps = open_steps(manual["pcm"], manual, clocks["manual"], timing["manualAnchorS"], engine)
 		edges = stage1_edges((auto, manual), (clocks["auto"], clocks["manual"]), steps, manual["audioRate"], obs["hangS"])
 		if not _number(clocks["auto"].get("iqRate")) or clocks["auto"]["iqRate"] <= 0:
 			raise InvalidRun("missing fixture IQ rate (sidecar) for the edge slack")
 		slack_s = SQUELCH_BLOCK_S + FAKE_CHUNK_BYTES / (2 * clocks["auto"]["iqRate"]) + STAGE1_EDGE_MAP_ERR_S
-		engines = run_engines(obs)
 		notes["engines"] = sorted(engines)
-		if "rust" in engines:
+		if engine == "rust":
 			# Not checkable on Rust: its 48 kHz rational resampler (3/128 at 2.048 Msps) emits
 			# by a running input count from the channel open, so the output sampling phase against
 			# the file depends on where live audio started in the IQ stream, and differs per
@@ -1167,10 +1215,6 @@ def evaluate(obs, guard_ms):
 			notes["maxDelayS"] = worst
 			if f:
 				failures.append(f)
-	f, rates = verdict_byte_rate(auto["arrivals"], byte_rate)
-	notes["byteRates"] = rates
-	if f:
-		failures.append(f)
 	f, notes["p99Smoke"] = verdict_p99(auto, manual, clocks)
 	if f:
 		failures.append(f)
@@ -1516,6 +1560,18 @@ def self_test():
 		pass
 	else:
 		raise AssertionError("a fake-progress clock step is not a ClockStep")
+	# A clock step never hides a clock-independent failure (reviewer repro): a never-open NFM
+	# fixture that plays audio, with a 50 ms probe step, is a final FAIL (not a ClockStep), and
+	# the retry policy does not re-record it.
+	stepped = dict(top__expect="none", auto__status=status("waiting"), manual__clockProbes=probe_series(step_at=20, step=-0.05))
+	got = variant(**stepped)
+	assert any("opened" in f for f in got), got
+	step_obs = json.loads(json.dumps(base))
+	step_obs["expect"] = "none"
+	step_obs["auto"]["status"] = status("waiting")
+	step_obs["manual"]["clockProbes"] = probe_series(step_at=20, step=-0.05)
+	step_failures, step_notes = evaluate(step_obs, 200)
+	assert "moved" in step_notes["clockStep"] and "notJudged" in step_notes and any("opened" in x for x in step_failures), step_notes
 	# Rust-engine onset clipping as recorded (the evidence path dropped 34 ms of every other
 	# over) fails on the same 20 ms limit: no per-engine allowance.
 	assert any("onset" in f for f in variant(auto__samples8k=recorded(int(0.034 * rate)),
@@ -1669,9 +1725,32 @@ def self_test():
 		n = min(len(rust_manual), i + int(over_s * rate)) - i
 		rust_manual[i : i + n] = [int(5000 * noise()) or 1 for _ in range(n)]
 	rust_side = {"audioRate": float(rate), "transmissions": events()}
-	clock_m = {"connected": conn, "onset": gap, "period": period}
-	found = open_steps(struct.pack(f"<{len(rust_manual)}h", *rust_manual), rust_side, clock_m, stream_lead + latency)
+	clock_m = {"connected": conn, "onset": gap, "period": period, "iqRate": 2_048_000}
+
+	def rust_steps(values, engine="rust"):
+		return open_steps(struct.pack(f"<{len(values)}h", *values), rust_side, clock_m, stream_lead + latency, engine)
+
+	found = rust_steps(rust_manual)
 	assert all(found[k][0] == step_at[k] for k in found) and len(found) >= 9, found
+	# The locator is chosen by engine: the zero-run form never runs on csdr (no clip here), and
+	# an unknown engine has none.
+	for engine, words in (("csdr", "open step not found"), ("sdrpp", "no AM open-step locator")):
+		try:
+			rust_steps(rust_manual, engine)
+			raise AssertionError(f"{engine} located Rust-form steps")
+		except InvalidRun as exc:
+			assert words in str(exc), (engine, exc)
+	# Ambiguous silence on Rust is INVALID, never a late edge: 100 ms of exact zeros right after
+	# over 4's open (the step would read 100 ms late), and 60 ms of zeros 1 s into over 5.
+	for label, at, n, words in (("after the open", step_at[4], int(0.1 * rate), "later than the earliest"),
+			("inside the over", step_at[5] + rate, int(0.06 * rate), "exact zeros inside the open over")):
+		zeroed = list(rust_manual)
+		zeroed[at : at + n] = [0] * n
+		try:
+			rust_steps(zeroed)
+			raise AssertionError(f"zeros {label} accepted")
+		except InvalidRun as exc:
+			assert words in str(exc), (label, exc)
 	# AM sample identity is not checkable on Rust (resampler phase differs per run): the check is
 	# INVALID, the rest of the fixture is still judged, and the run goes on.
 	rust_status = [[0.0, {"autoSquelch": {"state": "off"}, "engine": "rust"}]]
@@ -1992,6 +2071,43 @@ def self_test():
 		assert result["failures"] == ["onset"] and result["retries"] == [] and modes == ["auto", "manual"], result
 		result, modes, _dirs = run_policy([{"invalid": "over 0: stage-1 open step not found"}])
 		assert result["invalid"].startswith("over 0") and result["retries"] == [] and len(modes) == 2, result
+		# The reviewer repro through the policy: the stepped never-open FAIL is final.
+		def fail_then_pass():
+			yield {"failures": step_failures, "notes": step_notes}
+			yield ok
+		gen = fail_then_pass()
+		args = types.SimpleNamespace(out=Path(tmp) / "repro", rate=2_048_000, engine="csdr", cpu_quota=None)
+		args.out.mkdir()
+		result = record_fixture(args, "nfm-carrier", None, None, None, 200,
+			recorder=lambda mode, out: out.mkdir(parents=True, exist_ok=True), judge_one=lambda _d: dict(next(gen)))
+		assert result["retries"] == [] and any("opened" in x for x in result["failures"]), result
+	# Replay keeps the retry history and re-judges every kept attempt.
+	with tempfile.TemporaryDirectory() as tmp:
+		out = Path(tmp)
+		for d in ("nfm-voice", "nfm-voice.attempt-1", "nfm-voice.attempt-2", "am-voice"):
+			(out / d).mkdir()
+		history = [{"attempt": 1, "reason": "container wall clock moved 38.2 ms", "kept": "nfm-voice.attempt-1"},
+			{"attempt": 2, "reason": "container wall clock moved 41.0 ms", "kept": "nfm-voice.attempt-2"}]
+		(out / "verdicts.json").write_text(json.dumps({"nfm-voice": {"failures": [], "notes": {}, "retries": history, "engine": "csdr"}}))
+		verdict_of = {"nfm-voice": {"failures": [], "notes": {}},
+			"nfm-voice.attempt-1": {"invalid": "container wall clock moved 38.2 ms", "clockStep": True},
+			"nfm-voice.attempt-2": {"failures": ["onset"], "notes": {}}, "am-voice": {"failures": [], "notes": {}}}
+
+		def judged(run_dir, _name):
+			return dict(verdict_of[run_dir.name])
+
+		with contextlib.redirect_stdout(io.StringIO()):
+			code = replay(out, judge_dir=judged)
+		got = json.loads((out / "verdicts.json").read_text())
+		assert code == 0 and got["nfm-voice"]["retries"] == history and got["nfm-voice"]["engine"] == "csdr", got
+		assert [(a["attempt"], a["verdict"]) for a in got["nfm-voice"]["attempts"]] == [(1, "INVALID"), (2, "FAIL")], got
+		assert got["am-voice"]["retries"] == [] and "attempts" not in got["am-voice"], got
+		(out / "verdicts.json").unlink()  # without the history: rebuilt from the attempt dirs
+		with contextlib.redirect_stdout(io.StringIO()):
+			replay(out, judge_dir=judged)
+		got = json.loads((out / "verdicts.json").read_text())
+		assert [(r["attempt"], r["rebuilt"]) for r in got["nfm-voice"]["retries"]] == [(1, True), (2, True)], got
+		assert "38.2 ms" in got["nfm-voice"]["retries"][0]["reason"], got
 	print("ok")
 
 
@@ -2466,6 +2582,8 @@ def report(out, results):
 	for name, r in results.items():
 		for retry in r.get("retries") or []:
 			print(f"{name}: retry {retry['attempt']} after clock-step INVALID ({retry['reason']}); kept {retry['kept']}")
+		for a in r.get("attempts") or []:
+			print(f"{name}: attempt {a['attempt']} ({a['kept']}) re-judged {a['verdict']}: {a['reason']}")
 		if "invalid" in r:
 			print(f"{name}: INVALID {r['invalid']}")
 			continue
@@ -2545,15 +2663,53 @@ def acceptance(args):
 	return report(args.out, results)
 
 
-def replay(out):
+def replay(out, judge_dir=None):
+	"""Re-judge every recorded fixture and its kept clock-step attempts (<name>.attempt-<n>).
+	The retry history (each retry's original reason) comes from the existing verdicts.json when it
+	has one, else it is rebuilt from the attempt dirs; every attempt's re-judged verdict is
+	listed under `attempts`."""
 	entries = manifest()
 	guard_ms = contract_ms("CLOSE_GUARD_MS")
+	judge_dir = judge_dir or (lambda run_dir, name: judge_fixture(run_dir, name, entries[name], guard_ms))
+	previous = {}
+	try:
+		loaded = json.loads((out / "verdicts.json").read_text())
+		previous = loaded if isinstance(loaded, dict) else {}
+	except (OSError, ValueError):
+		pass
+	attempt_dirs = {}
+	for p in out.iterdir():
+		match = re.fullmatch(r"(.+)\.attempt-(\d+)", p.name)
+		if p.is_dir() and match and match[1] in entries:
+			attempt_dirs.setdefault(match[1], []).append((int(match[2]), p))
 	results = {}
-	for name in sorted(p.name for p in out.iterdir() if p.is_dir() and p.name in entries):
+	names = {p.name for p in out.iterdir() if p.is_dir() and p.name in entries} | set(attempt_dirs)
+	for name in sorted(names):
 		# One fixture's missing evidence does not hide the others; malformed observations are
 		# invalid, never a pass.
-		results[name] = judge_fixture(out / name, name, entries[name], guard_ms)
-		results[name].pop("clockStep", None)
+		if (out / name).is_dir():
+			result = judge_dir(out / name, name)
+		else:
+			result = {"invalid": "no final attempt recorded (only kept attempts)"}
+		result.pop("clockStep", None)
+		attempts = []
+		for n, path in sorted(attempt_dirs.get(name, [])):
+			earlier = judge_dir(path, name)
+			earlier.pop("clockStep", None)
+			verdict = "INVALID" if "invalid" in earlier else "FAIL" if earlier["failures"] else "PASS"
+			attempts.append({"attempt": n, "kept": path.name, "verdict": verdict,
+				"reason": earlier.get("invalid") or earlier.get("failures") or None})
+		old = previous.get(name) if isinstance(previous.get(name), dict) else {}
+		retries = old.get("retries") if isinstance(old.get("retries"), list) else None
+		if retries is None:
+			retries = [{"attempt": a["attempt"], "reason": a["reason"], "kept": a["kept"], "rebuilt": True} for a in attempts]
+		for key in ("rate", "engine", "cpuQuota"):
+			if key in old:
+				result.setdefault(key, old[key])
+		result["retries"] = retries
+		if attempts:
+			result["attempts"] = attempts
+		results[name] = result
 	if not results:
 		raise InvalidRun("no recorded fixtures under " + str(out))
 	return report(out, results)

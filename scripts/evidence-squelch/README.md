@@ -250,12 +250,24 @@ Per-fixture outcome and retries:
   in `verdicts.json`.
 - **No other retries.** A FAIL and every other INVALID are final; the judging tolerances do not
   change between attempts.
+- **A clock step never hides a failure.** The clock-independent checks run first: opened or not,
+  `autoSquelch` state and byte rate. If any of them fails, the attempt is a final FAIL, noted
+  with the clock step and the checks it left unjudged. A retry happens only when the clock step
+  is the sole blocker.
+- **Replay.** `--replay` re-judges every `<fixture>.attempt-<n>` too and lists each attempt's
+  verdict under `attempts`. It keeps the `retries` history from the existing `verdicts.json`,
+  or rebuilds it from the attempt dirs.
 
 Rust engine:
 
-- **AM open steps.** On Rust the gate zeroes the audio of closed blocks, so the AM open step is
-  the first non-zero sample after at least 50 ms of exact zeros (the gate's 10 ms block
-  boundary). There is no AGC clip on Rust.
+- **AM open steps.** The locator is chosen by the recorded engine: the clip form on csdr, the
+  zero-run form on Rust only. On Rust the gate zeroes the audio of closed blocks, so the open step
+  is the first non-zero sample after at least 50 ms of exact zeros (the gate's 10 ms block
+  boundary); there is no AGC clip. That finds audio onset, so silence is treated as ambiguous and
+  the fixture is INVALID, never given a late edge, in two cases:
+  - 50 ms or more of exact zeros inside an open over;
+  - an over's step more than one fake chunk + one block + 10 ms (84 ms at 2.048 Msps) later
+    against its stamp than the earliest over's (measured spread on Rust am-voice: 53 ms).
 - **AM identity is not checkable on Rust.** The 48 kHz rational resampler emits by a running
   input count from the channel open, so two runs sample the content at different phases: on
   am-voice only 42.7 % of samples were equal, median 2 LSB, max 14 778. The `stage1Identity`
