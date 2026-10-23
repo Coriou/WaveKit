@@ -5,7 +5,11 @@ import {
 	EvidenceGate,
 	judgeEvidence,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
-import { pcmSampleBytes } from "../../../../src/core/evidence-squelch/contract.js"
+import {
+	EVIDENCE_NOTE_DISCARD,
+	EVIDENCE_NOTE_RESET,
+	pcmSampleBytes,
+} from "../../../../src/core/evidence-squelch/contract.js"
 import type {
 	EvidenceGatePort,
 	EvidencePcmFormat,
@@ -431,18 +435,27 @@ describe("voice window reset on carrier onset (design amendment 2026-10-23)", ()
 		expect(r.latchByte).toBe(-1)
 	})
 
-	it("returns true exactly when it resets the window while waiting", () => {
+	it("returns RESET on armed onsets and DISCARD only after an ARM-length unquieted run", () => {
 		const gate = nfm()
 		const pcm = toPcm(voice(0.1), "s16le")
-		expect(gate.noteBlock(false)).toBe(false) // idle: nothing to reset
+		const RESET = EVIDENCE_NOTE_RESET
+		const BOTH = EVIDENCE_NOTE_RESET | EVIDENCE_NOTE_DISCARD
+		expect(gate.noteBlock(false)).toBe(0) // idle: nothing to reset
 		gate.push(pcm, "s16le", 0, 500)
-		expect(gate.noteBlock(true)).toBe(true) // armed, after an unquieted block, waiting
-		expect(gate.noteBlock(true)).toBe(false)
-		expect(gate.noteBlock(false)).toBe(false)
-		expect(gate.noteBlock(true)).toBe(true) // still armed: 2 < 5 quieted so far
+		// A 1-block unquieted run: reset the analysis window, keep the held audio.
+		expect(gate.noteBlock(true)).toBe(RESET)
+		expect(gate.noteBlock(true)).toBe(0)
+		expect(gate.noteBlock(false)).toBe(0)
+		expect(gate.noteBlock(true)).toBe(RESET) // still armed: 2 < 5 quieted so far
+		// A 5-block (ARM) unquieted run is a real noise lead-in: reset and discard.
+		for (let i = 0; i < 5; i++) expect(gate.noteBlock(false)).toBe(0)
+		expect(gate.noteBlock(true)).toBe(BOTH)
+		// At the bound: 4 unquieted blocks reset only.
+		for (let i = 0; i < 4; i++) gate.noteBlock(false)
+		expect(gate.noteBlock(true)).toBe(RESET)
 		for (let i = 0; i < 5; i++) gate.noteBlock(true) // disarm
-		expect(gate.noteBlock(false)).toBe(false)
-		expect(gate.noteBlock(true)).toBe(false) // a 1-block fade does not arm
+		expect(gate.noteBlock(false)).toBe(0)
+		expect(gate.noteBlock(true)).toBe(0) // a 1-block fade does not arm
 	})
 
 	it("weak fluttery voice (random 10-30 ms dropouts, >= 50 ms apart) latches within the 1.5 s pre-roll", () => {
@@ -506,7 +519,7 @@ describe("noteBlock allocation (window-reset revision)", () => {
 		let resets = 0
 		// Lead-in noise, flickers, onsets and fades: every branch of the onset tracker.
 		for (let i = 0; i < 100_000; i++)
-			if (gate.noteBlock(i % 37 < 7 || i % 11 === 3)) resets++
+			if (gate.noteBlock(i % 37 < 7 || i % 11 === 3) !== 0) resets++
 		vi.unstubAllGlobals()
 		const calls = spies.map(s => s.mock.calls.length)
 		vi.restoreAllMocks()

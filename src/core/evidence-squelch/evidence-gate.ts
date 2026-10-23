@@ -31,7 +31,11 @@ import type {
 	AnalogTrialStats,
 	AnalogTrialTones,
 } from "../scanner/scanner-redesign-contract.js"
-import { msToSamples } from "./contract.js"
+import {
+	EVIDENCE_NOTE_DISCARD,
+	EVIDENCE_NOTE_RESET,
+	msToSamples,
+} from "./contract.js"
 import type {
 	EvidenceGateOptions,
 	EvidenceGatePort,
@@ -259,14 +263,17 @@ export class EvidenceGate implements EvidenceGatePort {
 		return this.internal === "open" ? this.latchedEvidence : null
 	}
 
-	noteBlock(carrier: boolean): boolean {
+	noteBlock(carrier: boolean): number {
 		const value = carrier === true ? 1 : 0
 		// Window reset on carrier onset (design amendment 2026-10-23, revised): while armed, a
 		// quieted block right after an unquieted one restarts the voice window (meter, frame
 		// window, quiet ring), so the noise stage 1 was open on (power gate or hang) is never
 		// judged with the over. Tracked from stage-1 open, also before the first PCM. The tone
 		// stage, decimator and audio clock are kept: tones need no window and must not lose time.
-		let didReset = false
+		// Analysis reset and playback discard are separate (review 2026-10-23): the window resets
+		// on every armed onset, but the held audio is discarded only after an unquieted run of at
+		// least ARM blocks (a real noise lead-in), so an early 10-40 ms fade never drops speech.
+		let flags = 0
 		if (value === 1) {
 			if (
 				this.onsetArmed &&
@@ -274,7 +281,10 @@ export class EvidenceGate implements EvidenceGatePort {
 				this.internal === "waiting"
 			) {
 				this.resetVoiceWindow()
-				didReset = true
+				flags =
+					this.unquietedRun >= EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS
+						? EVIDENCE_NOTE_RESET | EVIDENCE_NOTE_DISCARD
+						: EVIDENCE_NOTE_RESET
 			}
 			this.unquietedRun = 0
 			if (this.onsetArmed) {
@@ -290,7 +300,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				this.onsetArmed = true
 		}
 		this.prevUnquieted = value === 0
-		if (this.internal !== "waiting") return didReset
+		if (this.internal !== "waiting") return flags
 		const ring = this.quiet
 		if (this.quietLen === ring.length)
 			this.quietCount -= ring[this.quietHead] ?? 0
@@ -298,7 +308,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		ring[this.quietHead] = value
 		this.quietCount += value
 		this.quietHead = (this.quietHead + 1) % ring.length
-		return didReset
+		return flags
 	}
 
 	push(

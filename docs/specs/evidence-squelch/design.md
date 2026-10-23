@@ -156,10 +156,12 @@ Per run, built for an NFM or AM stream (rate and format known). Interface:
 interface EvidenceGatePort {
 	readonly state: "waiting" | "open"
 	readonly evidence: "voice" | "ctcss" | "dcs" | null
-	/** One 10 ms IQ block while stage 1 is open: carrier evidence of that block. True when
-	 *  the block reset the voice window on a carrier onset while waiting (amendment
-	 *  2026-10-23, revised: was `void`); the owner then abandons the pre-roll. */
-	noteBlock(carrier: boolean): boolean
+	/** One 10 ms IQ block while stage 1 is open: carrier evidence of that block. Returns
+	 *  `EVIDENCE_NOTE_*` bit flags (amendment 2026-10-23, revised: was `void`): RESET (1) when
+	 *  the block reset the voice window on a carrier onset while waiting, plus DISCARD (2)
+	 *  when the unquieted run before it was ≥ 5 blocks; on DISCARD the owner abandons the
+	 *  pre-roll. */
+	noteBlock(carrier: boolean): number
 	/** PCM bytes [start, end) received while stage 1 is open. Returns the byte offset in
 	 *  [start, end] of the first sample after the gate latched in this call, or -1. */
 	push(
@@ -206,9 +208,16 @@ scalar state (no allocation), from stage-1 open and also before the first PCM:
   the hang inside `closed()`), and again after an unquieted run of at least
   `EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS` = 5 blocks (50 ms, one frame).
 - While armed and waiting, every quieted block that follows an unquieted block resets the voice
-  meter, the 20-frame window and the quiet ring, and `noteBlock` returns true; the wiring then
-  calls `preRoll.abandon()`, so the held noise is dropped. Resets happen on every such onset,
-  not once per episode, so a quieted flicker inside the lead-in cannot consume the reset.
+  meter, the 20-frame window and the quiet ring (`noteBlock` returns RESET). Resets happen on
+  every such onset, not once per episode, so a quieted flicker inside the lead-in cannot
+  consume the reset.
+- Analysis reset and playback discard are separate (review, 2026-10-23): the held audio is
+  discarded (DISCARD, the wiring calls `preRoll.abandon()`) only when the unquieted run before
+  the onset was at least 5 blocks, a real noise lead-in. An early 10-40 ms fade inside the over
+  resets the analysis window but keeps the held speech, so playback still starts at the over's
+  first sample (nfm-voice with blocks 0-3 quieted, 4 unquieted: window reset at 50 ms, latch
+  1.05 s, first played sample = over sample 0). Consequence: a noise lead-in shorter than 5
+  blocks (10-40 ms) is not discarded and plays before the over.
 - **Disarmed** after `EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS` = 5 consecutive quieted blocks
   (50 ms). Afterwards fades of 1-4 blocks (10-40 ms) inside the over neither arm nor reset; the
   quiet-fraction rule judges them as before.
@@ -354,8 +363,9 @@ alignment), plus the back chain's own latency as today.
 - **Stage 1 transitions:** `publishSquelchChange` on close without a latch calls `gate.reset()` and
   `preRoll.abandon()`; with a latch it only starts the guard and hang clocks (inside the gate).
 - **Blocks:** `measureRun` (both engines) calls `gate.noteBlock(carrier)` for each measured block
-  while stage 1 is open, after the floor update, and calls `preRoll.abandon()` when it returns
-  true (amendment 2026-10-23, revised: the gate is the only onset tracker).
+  while stage 1 is open, after the floor update, and calls `preRoll.abandon()` when the result
+  has `EVIDENCE_NOTE_DISCARD` (amendment 2026-10-23, revised: the gate is the only onset
+  tracker).
 - **Lifecycle (requirement 2.9):** mode change out of auto, `toneSquelch` set, offset swap
   (`gateHeld`), retune and stop: `gate.reset()` and `preRoll.clear()`. Mode change into auto:
   the gate starts idle with an empty FIFO; if stage 1 is open the current over starts waiting from

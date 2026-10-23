@@ -78,6 +78,7 @@ import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
 import {
+	EVIDENCE_NOTE_DISCARD,
 	evidenceGateApplies,
 	pcmSampleBytes,
 	type EvidenceGatePort,
@@ -1069,8 +1070,10 @@ export class LiveDemodulator extends EventEmitter {
 		if (evidence !== null && runGateOpen(run) && !run.gateHeld) {
 			// A carrier onset while waiting reset the gate's voice window: the held noise lead-in
 			// stage 1 was open on is not the over (amendment 2026-10-23; the gate decides).
-			if (evidence.gate.noteBlock(this.evidenceCarrier(run, power, sample)))
-				evidence.preRoll.abandon()
+			const flags = evidence.gate.noteBlock(
+				this.evidenceCarrier(run, power, sample),
+			)
+			if ((flags & EVIDENCE_NOTE_DISCARD) !== 0) evidence.preRoll.abandon()
 		}
 		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
 		// The squelch samples this estimate only while closed (it rises while

@@ -24,6 +24,7 @@ import {
 	EvidenceGate,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
 import { PreRoll } from "../../../../src/core/evidence-squelch/pre-roll.js"
+import { EVIDENCE_NOTE_DISCARD } from "../../../../src/core/evidence-squelch/contract.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
 import { dataLike, isVoice } from "../../../../src/core/scanner/analog-trial.js"
 import {
@@ -519,6 +520,8 @@ function leadInRun(
 	leadMs: number,
 	leadCarrier: (block: number) => boolean = () => false,
 	leadSilent: (block: number) => boolean = () => false,
+	/** Carrier evidence of over block `b` (over-relative); default: the fixture class. */
+	overCarrier?: (block: number) => boolean,
 ): LeadInRun {
 	const entry = manifest[name]
 	if (entry === undefined) throw new Error(`no manifest entry ${name}`)
@@ -540,9 +543,14 @@ function leadInRun(
 	for (let s = 0; s < composed.length; s += BLOCK_SAMPLES) {
 		const end = Math.min(composed.length, s + BLOCK_SAMPLES)
 		const carrier =
-			s < lead ? leadCarrier(Math.floor(s / BLOCK_SAMPLES)) : !unquieted
-		// The wiring: the gate reports a carrier-onset reset, the owner drops the held lead-in.
-		if (gate.noteBlock(carrier)) preRoll.abandon()
+			s < lead
+				? leadCarrier(Math.floor(s / BLOCK_SAMPLES))
+				: overCarrier !== undefined
+					? overCarrier(Math.floor((s - lead) / BLOCK_SAMPLES))
+					: !unquieted
+		// The wiring: the gate flags a noise lead-in; the owner drops the held audio.
+		if ((gate.noteBlock(carrier) & EVIDENCE_NOTE_DISCARD) !== 0)
+			preRoll.abandon()
 		const k = gate.push(buf, "s16le", s * 2, end * 2)
 		if (k >= 0) {
 			if (latchS === null) latchS = (k / 2 - lead) / RATE
@@ -707,6 +715,43 @@ describe("lead-in flicker and kerchunks (window-reset revision 2026-10-23)", () 
 			"nfm-dmr-4fsk-continuous+4",
 			"nfm-clicks+1",
 		])
+	})
+})
+
+describe("onset preservation: early fades never discard the over (review 2026-10-23)", () => {
+	it("review repro: nfm-voice, blocks 0-3 quieted, block 4 unquieted, then quieted: plays from over sample 0", () => {
+		const r = leadInRun("nfm-voice", 0, undefined, undefined, b => b !== 4)
+		// The analysis window resets at 50 ms (latch 1.05 s), but the held audio is kept.
+		expect(r.latchS).toBeCloseTo(1.05, 6)
+		expect(r.playedFrom).toBe(0)
+	})
+
+	for (const name of ["nfm-voice", "nfm-ctcss-670-voice", "nfm-dcs-023n-voice"])
+		it(`${name}: flutter (random 10-40 ms dropouts) keeps the over's first sample`, () => {
+			for (const seed of [1, 2, 3, 4, 5, 6]) {
+				const rand = mulberry32(seed)
+				const drop = new Set<number>()
+				let b = Math.floor(rand() * 8)
+				while (b < 400) {
+					const len = 1 + Math.floor(rand() * 4) // 1-4 blocks: under ARM, never discards
+					for (let i = 0; i < len; i++) drop.add(b + i)
+					b += len + 5 + Math.floor(rand() * 20)
+				}
+				const r = leadInRun(name, 0, undefined, undefined, x => !drop.has(x))
+				expect(r.latchS).not.toBeNull()
+				expect(r.latchS ?? Infinity).toBeLessThanOrEqual(1.5)
+				expect(r.playedFrom).toBe(0)
+			}
+		})
+
+	it("documented consequence: a noise lead-in under ARM (10-40 ms) plays before the over", () => {
+		for (const leadMs of [10, 20, 30, 40]) {
+			const r = leadInRun("nfm-voice", leadMs)
+			expect(r.latchS).not.toBeNull()
+			expect(r.playedFrom).toBe(-(leadMs * RATE) / 1_000)
+		}
+		// At ARM (50 ms) the lead-in is discarded: playback starts at the over.
+		expect(leadInRun("nfm-voice", 50).playedFrom).toBe(0)
 	})
 })
 
