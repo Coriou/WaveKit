@@ -1448,7 +1448,8 @@ Configuration notes:
   default (6 dB, a carrier is present) never seeds the floor and never raises it
   (falls still apply); until the first unquieted block seeds the floor, the gate
   follows the quieting decision, as in `noise` mode, so a strong carrier already
-  present at start or after a retune is heard at once instead of becoming the floor.
+  present at start or after a retune opens stage 1 at once instead of becoming the
+  floor (on `nfm` listeners still need stage 2 evidence to hear it).
   `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
