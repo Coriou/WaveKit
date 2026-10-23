@@ -96,6 +96,74 @@ class DriverTests(unittest.TestCase):
         experiment.summary["overflowBytes"] = 100
         self.assertEqual(experiment.failures(), [])
 
+    def test_host_consumer_share_at_and_past_its_bound(self):
+        experiment = self.experiment("host")
+        experiment.summary["overflowBytes"] = 100
+        experiment.attributions["host"] = 1
+        # 1 consumer of 10 judged = 10 %: at the bound passes.
+        experiment.monitor_counts.update(host=9, consumer=1)
+        self.assertEqual(experiment.failures(), [])
+        # 2 of 11 = 18 %, and the recorded 143 of 235, fail.
+        experiment.monitor_counts.update(consumer=1)
+        self.assertIn("host overload was attributed consumer beyond its share", experiment.failures())
+        experiment.monitor_counts.clear()
+        experiment.monitor_counts.update(host=92, consumer=143)
+        self.assertIn("host overload was attributed consumer beyond its share", experiment.failures())
+        # The recorded 2.4 Msps residual, 9 of 280, passes.
+        experiment.monitor_counts.clear()
+        experiment.monitor_counts.update(host=271, consumer=9)
+        self.assertEqual(experiment.failures(), [])
+
+    def test_upstream_host_scenario_uses_drop_mode_and_host_throttling(self):
+        experiment = self.experiment("upstream-host")
+        self.assertEqual(experiment.env["LINK_BURST_MODE"], "drop")
+        self.assertEqual(experiment.env["LINK_BURST_SCHEDULE"], driver.stall_schedule("upstream"))
+        self.assertIn("upstream-host", driver.HOST_SCENARIOS)
+        self.assertIn("upstream-host", driver.UPSTREAM_SCENARIOS)
+
+    def poll(self, experiment, overflow, sink, upstream, unknown, link=0):
+        experiment.polls += 1
+        experiment.record_attribution(dict(link=link, consumer=0, host=0, unknown=unknown))
+        branches = [dict(id="sink", droppedBytesTotal=sink), dict(id="sibling", droppedBytesTotal=0)]
+        experiment.record_coincidence(overflow, branches, dict(bytesDroppedUpstream=upstream))
+
+    def test_upstream_host_requires_coinciding_loss_attributed_unknown(self):
+        experiment = self.experiment("upstream-host")
+        experiment.summary["upstreamDroppedBytes"] = 100
+        self.poll(experiment, 0, 0, 0, 0)
+        # Upstream loss alone, then core loss alone: never coinciding.
+        self.poll(experiment, 0, 0, 50, 0)
+        self.poll(experiment, 0, 10, 50, 0)
+        self.assertIn("core loss never coincided with upstream loss", experiment.failures())
+        # Both rise in poll 4; no unknown in polls 4..7 fails.
+        self.poll(experiment, 0, 20, 60, 0)
+        self.assertEqual(experiment.coincident_polls, [4])
+        for _ in range(4):
+            self.poll(experiment, 0, 20, 60, 0)
+        self.assertIn("coinciding core and upstream loss was not attributed unknown",
+                      experiment.failures())
+
+    def test_upstream_host_pairs_unknown_within_three_polls(self):
+        for delay, paired in ((0, True), (3, True), (4, False)):
+            experiment = self.experiment("upstream-host")
+            experiment.summary["upstreamDroppedBytes"] = 100
+            self.poll(experiment, 0, 0, 0, 0)
+            # Absorber overflow is core loss too.
+            self.poll(experiment, 5, 0, 1, 1 if delay == 0 else 0)
+            for i in range(1, 5):
+                self.poll(experiment, 5, 0, 1, 1 if i >= delay and delay else 0)
+            failures = experiment.failures()
+            self.assertEqual("coinciding core and upstream loss was not attributed unknown" in failures,
+                             not paired, delay)
+
+    def test_upstream_host_link_increase_fails(self):
+        experiment = self.experiment("upstream-host")
+        experiment.summary["upstreamDroppedBytes"] = 100
+        self.poll(experiment, 0, 0, 0, 0)
+        self.poll(experiment, 0, 10, 5, 1, link=1)
+        self.assertEqual(experiment.failures(),
+                         ["aggregate link classifications increased with upstream loss"])
+
     def test_exclusion_bound_rounds_loop_delay_up_to_meter_resolution(self):
         experiment = self.experiment("consumer")
         experiment.summary["oneChunkMs"] = 16

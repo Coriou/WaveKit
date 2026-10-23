@@ -258,3 +258,44 @@ statistics were not in the shape the core reads.
 | B3    | 2048000 | host      | FAIL                       | stress on every CPU starved the fake: one loss event attributed `link` (gap 337 ms, loop 216 ms, CPU 100 %) and `consumer`, no `host` (H)                                  |
 | B3    | 2048000 | overflow  | PASS                       | all 7 overflow intervals `link`                                                                                                                                            |
 | B4    | 2400000 | upstream  | INVALID ×2                 | "upstream statistics are unavailable": the first sample preceded the sdr-host poller's first successful read (6.4 s after start); the driver now waits for it (`7cb3369c`) |
+
+## Follow-ups (2026-10-23)
+
+Code follow-ups to open items 3–6. The recorded results above are unchanged; the fake-link
+matrix has not been rerun.
+
+1. **Host versus consumer (item 3).** A strict subset of dropping branches with no overflow is
+   `consumer` only when the interval has no host evidence (loop delay below
+   `HOST_LOOP_DELAY_MS` and CPU below the guard). With host evidence it falls through to the
+   upstream rule (`unknown`) and then `host`. The candidate exception, "unless the dropping
+   subset is a single branch already excluded as a laggard", was not adopted: with an absorber
+   attached, chunks reach the fanout only once every congested active branch is excluded, and a
+   branch drops only while congested, so every branch drop lands on a laggard. The exception
+   would have kept a single-branch host-overload subset `consumer`. A slow sink on a healthy
+   host stays `consumer`. Both classes condemn on probation and in late windows, so gate
+   behaviour is unchanged. One change: a subset with host evidence and upstream loss is now
+   `unknown` instead of `consumer`, so it no longer counts toward a late shed. Spec amendment
+   needed: requirement 3.3, design rule 3 and property 7 gain "and no host evidence".
+2. **Upstream `unknown` (item 4).** Deterministic tests with an injected clock and a fake
+   upstream counter cover these cases: an all-branch link burst is `link` with flat upstream and
+   `unknown` with an upstream rise; upstream loss outranks host evidence; upstream loss alone is
+   `none`; a held gap loss that resolves after an upstream rise is `unknown`. No code change was
+   needed.
+3. **Repeated late shed (item 5).** A gate-level test with four eligible placements, interleaved
+   with YAML, `always` and operator placements, sheds in reverse admission order. Each shed
+   lands exactly at the cooldown bound, never at bound − 1, even when fresh condemning windows
+   arrive inside the cooldown. Protected placements are never shed. A property test covers
+   random mixes (100 runs). No code change was needed.
+4. **Absorber pass-through (item 6).** `gated()` now reads only the congested set while no
+   branch is congested and no per-branch state is held. In that case the full pass prunes
+   nothing and returns false. The ingest path also skips `rotate()` within the current slot
+   while nothing is held. A tight-loop microbenchmark (65 536 B chunks, three branches, load
+   about 4.4) measured about 190 ns per chunk before and about 74 ns after. At 3 000 chunks/s
+   that is about 0.0002 core, within the < 0.001 budget. The repository bench timer uses one
+   `performance.now()` pair per chunk (about 114 ns per pair on this host). At load 3.4–5.1 it
+   gave 513–854 ns before and 495–1 011 ns after, so it cannot resolve this change. A
+   batch-timed variant is needed to confirm.
+5. **Driver.** The host scenario fails when consumer is more than 10 % of the aggregate
+   host-or-consumer increases. A new `upstream-host` scenario combines upstream drop-mode
+   stalls with the host CPU quota and stress. It requires a poll in which both core loss and
+   upstream loss rose, an `unknown` increase within three polls of it, and no `link` increase.

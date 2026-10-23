@@ -35,7 +35,7 @@ def constant(name):
 
 def stall_schedule(scenario):
     lengths = (150, 500, 1000, 1800) if scenario == "lossless" else (2500, 4000)
-    if scenario not in ("lossless", "overflow", "upstream", "late-shed"):
+    if scenario not in ("lossless", "overflow", "upstream", "upstream-host", "late-shed"):
         return ""
     # Repeat the joint cycle, preserving both sequences across schedule wraps.
     import math
@@ -60,6 +60,18 @@ class InvalidRun(Exception):
 HOST_CORE_CPUS = 2
 HOST_STRESS_WORKERS = 4
 HOST_CORE_QUOTA = "0.75"
+HOST_SCENARIOS = ("host", "upstream-host")
+UPSTREAM_SCENARIOS = ("upstream", "upstream-host")
+# Host runs: at most this share of aggregate host-or-consumer classifications
+# may be consumer. A strict subset is host loss whenever its own interval shows
+# host evidence, so consumer remains only for intervals sampled without it.
+# Recorded before the rule: 143 of 235 (61 %) at 2.048 Msps and 9 of 280
+# (3.2 %) at 2.4 Msps; 10 % keeps about three times the 2.4 Msps residual.
+HOST_CONSUMER_SHARE_MAX = 0.10
+# Upstream-host runs: a monitor interval with core and upstream loss is
+# unknown when it resolves; deferred gap losses resolve up to two polls later,
+# so an unknown increase in the coinciding poll or the next three pairs with it.
+UPSTREAM_UNKNOWN_PAIRING_POLLS = 3
 
 
 def cpu_split(count):
@@ -80,7 +92,7 @@ class Experiment:
         self.env.update(LINK_BURST_RATE=str(args.rate), LINK_BURST_SECONDS="2",
                         LINK_BURST_DURATION=str(args.minutes * 60 + 1800),
                         LINK_BURST_SCHEDULE=stall_schedule(args.scenario),
-                        LINK_BURST_MODE="drop" if args.scenario == "upstream" else "catchup")
+                        LINK_BURST_MODE="drop" if args.scenario in UPSTREAM_SCENARIOS else "catchup")
         if args.scenario == "late-shed":
             # Leave a bounded smooth graduation window before the link-only phase.
             entries = stall_schedule("late-shed").split(",") * 20
@@ -119,6 +131,11 @@ class Experiment:
         self.drain = None
         self.upstream_baseline = None
         self.summary["upstreamDroppedBytes"] = 0
+        self.polls = 0
+        self.previous_core_loss = None
+        self.previous_upstream = None
+        self.coincident_polls = []
+        self.unknown_polls = []
 
     def compose(self, *args, check=True):
         return subprocess.run(self.command + list(args), env=self.env, text=True,
@@ -136,7 +153,7 @@ class Experiment:
         ready = (any(r.get("sourceId") == SOURCE and r.get("transport") == "network" for r in reports)
                  and any(b.get("sourceId") == SOURCE and SINK in b["id"] for b in branches)
                  and any(b.get("sourceId") == SOURCE and SIBLING in b["id"] for b in branches))
-        if ready and self.args.scenario == "upstream":
+        if ready and self.args.scenario in UPSTREAM_SCENARIOS:
             # The sdr-host poller can take a few seconds (with backoff) to read
             # the fake's statistics for the first time.
             upstream = self.get("/api/resources/backpressure")
@@ -159,6 +176,7 @@ class Experiment:
 
     def record(self, sample):
         now = sample["mono"]
+        self.polls += 1
         reports = sample["linkQuality"]
         if not isinstance(reports, list):
             raise InvalidRun("link-quality response must be an array")
@@ -189,7 +207,7 @@ class Experiment:
         self.summary["attributionCounts"] = dict(self.attributions)
         self.summary["attributionWindowCounts"] = report["attribution"]["counts10m"]
         upstream = next((b for b in sample["backpressure"] if b["sourceId"] == SOURCE), None)
-        if self.args.scenario == "upstream":
+        if self.args.scenario in UPSTREAM_SCENARIOS:
             if upstream is None or not upstream["available"]:
                 raise InvalidRun("upstream statistics are unavailable")
             total = upstream["bytesDroppedUpstream"]
@@ -199,6 +217,7 @@ class Experiment:
                 raise InvalidRun("upstream counter reset")
             self.summary["upstreamDroppedBytes"] = total - self.upstream_baseline
         branches = [b for b in sample["fanout"]["branches"] if b.get("sourceId") == SOURCE]
+        self.record_coincidence(overflow, branches, upstream)
         sinks = [b for b in branches if SINK in b["id"]]
         if len(sinks) != 1:
             raise InvalidRun("expected exactly one slow-sink fanout branch")
@@ -265,8 +284,27 @@ class Experiment:
         self.previous = admitted
         return source, sink
 
+    def record_coincidence(self, overflow, branches, upstream):
+        """Records polls in which core loss and upstream loss both rose (upstream-host)."""
+        if self.args.scenario != "upstream-host":
+            return
+        # Branches come and go; only those present in both polls contribute.
+        totals = {b["id"]: b["droppedBytesTotal"] for b in branches}
+        totals[None] = overflow
+        upstream_total = upstream["bytesDroppedUpstream"]
+        if self.previous_core_loss is not None:
+            core = sum(max(0, total - self.previous_core_loss.get(key, total))
+                       for key, total in totals.items())
+            if core > 0 and upstream_total > self.previous_upstream:
+                self.coincident_polls.append(self.polls)
+        self.previous_core_loss = totals
+        self.previous_upstream = upstream_total
+        self.summary["coincidentLossPolls"] = len(self.coincident_polls)
+
     def record_attribution(self, counts):
         if self.previous_counts is not None:
+            if counts.get("unknown", 0) > self.previous_counts.get("unknown", 0):
+                self.unknown_polls.append(self.polls)
             for key, count in counts.items():
                 self.monitor_counts[key] += max(0, count - self.previous_counts[key])
         self.previous_counts = dict(counts)
@@ -332,7 +370,7 @@ class Experiment:
         exit_code = 2
         handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
         try:
-            if self.args.scenario == "host":
+            if self.args.scenario in HOST_SCENARIOS:
                 # Confine stress-ng (run inside core) to the core's CPU set so the
                 # fake receiver is not starved: a loaded core host does not slow
                 # the remote receiver.
@@ -357,7 +395,7 @@ class Experiment:
                 if time.monotonic() >= deadline:
                     raise InvalidRun("API did not become ready")
                 time.sleep(2)
-            if self.args.scenario == "host":
+            if self.args.scenario in HOST_SCENARIOS:
                 self.compose("exec", "-T", "-d", "core", "stress-ng", "--cpu", str(HOST_STRESS_WORKERS),
                              "--timeout", f"{int(self.args.minutes * 60 + 60)}s")
             start = time.monotonic()
@@ -481,8 +519,20 @@ class Experiment:
                 failures.append("aggregate consumer or host classifications increased")
         if scenario == "upstream" and drops and not self.attributions["unknown"]:
             failures.append("upstream with core drops was not attributed unknown")
-        if scenario == "upstream" and not self.summary["upstreamDroppedBytes"]:
+        if scenario in UPSTREAM_SCENARIOS and not self.summary["upstreamDroppedBytes"]:
             failures.append("upstream drops were not exercised")
+        if scenario == "host":
+            judged = self.monitor_counts["host"] + self.monitor_counts["consumer"]
+            if self.monitor_counts["consumer"] > HOST_CONSUMER_SHARE_MAX * judged:
+                failures.append("host overload was attributed consumer beyond its share")
+        if scenario == "upstream-host":
+            if not self.coincident_polls:
+                failures.append("core loss never coincided with upstream loss")
+            elif not any(p <= u <= p + UPSTREAM_UNKNOWN_PAIRING_POLLS
+                         for p in self.coincident_polls for u in self.unknown_polls):
+                failures.append("coinciding core and upstream loss was not attributed unknown")
+            if self.monitor_counts["link"]:
+                failures.append("aggregate link classifications increased with upstream loss")
         expected = {"host": "host", "consumer": "consumer"}.get(scenario)
         # Absorber overflow counts as dropped bytes, like branch drops.
         if scenario == "host" and not (drops or self.summary["overflowBytes"]):
@@ -566,7 +616,7 @@ def main():
         return replay(Path(sys.argv[2]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rate", type=int, choices=(2048000, 2400000), required=True)
-    parser.add_argument("--scenario", choices=("lossless", "overflow", "consumer", "host", "upstream", "late-shed"), required=True)
+    parser.add_argument("--scenario", choices=("lossless", "overflow", "consumer", "host", "upstream", "upstream-host", "late-shed"), required=True)
     parser.add_argument("--minutes", type=float, default=10)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
