@@ -10,7 +10,8 @@ export const LIVE_AUDIO_AGC_MODES: readonly LiveAudioAgcMode[] = [
 ]
 
 /**
- * WG7 (docs/specs/web-gaps-7, requirement 2): squelch modes. `manual` (default when absent):
+ * WG7 (docs/specs/web-gaps-7, requirement 2): squelch modes (absent = `auto`, the evidence
+ * squelch runtime default; see `LiveAudioConfig.squelchMode`). `manual`:
  * `squelch` is the channel-power threshold; `auto`: noise-floor estimate + `autoMarginDb`;
  * `noise` (NFM and WFM only): opens when the FM discriminator's high-frequency noise is at least
  * `noiseQuietingDb` below its noise-only reference.
@@ -48,6 +49,39 @@ export type LiveAudioToneSquelch =
 export const LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT = 2
 export const LIVE_AUDIO_TONE_SQUELCH_CLOSE_COUNT = 2
 
+/**
+ * Evidence squelch (docs/specs/evidence-squelch): modulations whose `auto` squelch gates client
+ * audio on voice or tone evidence, and those where tone evidence counts.
+ */
+export const LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS: readonly LiveAudioConfig["modulation"][] =
+	Object.freeze(["nfm", "am"])
+export const LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS: readonly LiveAudioConfig["modulation"][] =
+	Object.freeze(["nfm"])
+/** Voice meter frame length (equals ANALOG_TRIAL_FRAME_MS). */
+export const LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS = 50
+/** Frames in the voice judgement window (1 s). */
+export const LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES = 20
+/** Measured blocks in the carrier quieting window. */
+export const LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS = 100
+/** Audio before a qualified tone opens the gate (equals DCS_MIN_AUDIO_SECONDS). */
+export const LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS = 750
+/** Latch hang after stage 1 closes (equals ANALOG_TRANSMISSION_MERGE_GAP_MS). */
+export const LIVE_AUDIO_AUTO_SQUELCH_HANG_MS = 1_500
+/** Pre-roll capacity: the most audio held while waiting for evidence. */
+export const LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS = 1_500
+/** Audio after a latched stage-1 close that still plays (the over's tail in the back chain). */
+export const LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS = 200
+
+export type LiveAudioAutoSquelchEvidence = "voice" | "ctcss" | "dcs"
+/**
+ * Evidence gate state: `off` (not evidence-gated), `waiting` (no evidence yet, audio held),
+ * `open` (latched on `evidence`, audio passes).
+ */
+export interface LiveAudioAutoSquelch {
+	state: "off" | "waiting" | "open"
+	evidence?: LiveAudioAutoSquelchEvidence
+}
+
 export interface LiveAudioConfig {
 	enabled: boolean
 	sourceId?: string
@@ -55,7 +89,11 @@ export interface LiveAudioConfig {
 	modulation: "nfm" | "wfm" | "am" | "usb" | "lsb" | "dsb" | "cw" | "raw"
 	bandwidth: number
 	squelch: number
-	/** Manual preserves the configured threshold; auto uses a channel-power floor estimate; WG7 noise: FM quieting. */
+	/**
+	 * `auto` is the runtime default: a channel-power floor estimate + margin and, on NFM and AM,
+	 * client audio gated on voice or tone evidence with a pre-roll. `manual` (configured
+	 * threshold) and WG7 `noise` (FM quieting) are unchanged.
+	 */
 	squelchMode?: LiveAudioSquelchMode
 	/** Auto threshold margin above the estimate, 0–40 dB; default 6. */
 	autoMarginDb?: number
@@ -133,6 +171,8 @@ export interface LiveAudioStatus {
 		dcs: AnalogTransmissionDcs | null
 		at: string
 	}
+	/** Evidence squelch gate while running; `off` when the evidence path is inactive. */
+	autoSquelch?: LiveAudioAutoSquelch
 }
 
 export type LiveDemodConfig = LiveAudioConfig
@@ -145,6 +185,8 @@ export interface LiveAudioLevel {
 	noiseFloorDbfs: number | null
 	squelchOpen: boolean
 	thresholdDbfs: number
+	/** Evidence squelch gate state at the measured block. */
+	autoSquelch?: LiveAudioAutoSquelch
 }
 
 /** Why an analog transmission ended (WG1). */
