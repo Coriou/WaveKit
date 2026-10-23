@@ -258,7 +258,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			modulation: config.modulation,
 			bandwidth: config.bandwidth,
 			squelch: config.squelch,
-			squelchMode: config.squelchMode ?? "manual",
+			squelchMode: config.squelchMode ?? "auto",
 			autoMarginDb: config.autoMarginDb ?? 6,
 			noiseQuietingDb:
 				config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,

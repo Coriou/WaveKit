@@ -95,6 +95,13 @@ describe("live audio auto squelch (REST)", () => {
 		delete status.autoSquelch
 		expect(Object.keys(await getStatusBody())).not.toContain("autoSquelch")
 	})
+
+	// Validates: Requirements 3.1
+	it("status config reports auto when the core config lacks squelchMode", async () => {
+		delete status.config.squelchMode
+		const config = (await getStatusBody())["config"] as Record<string, unknown>
+		expect(config["squelchMode"]).toBe("auto")
+	})
 })
 
 describe("live audio auto squelch (WebSocket level)", () => {
