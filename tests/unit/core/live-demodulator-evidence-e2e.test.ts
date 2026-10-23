@@ -3,13 +3,12 @@
  * plan W.3, requirement 8.1): 25 kHz s16le PCM out of the fake csdr back stage, stage 1 scripted,
  * one measured 10 ms block per 10 ms chunk. Every config sets `squelchMode` explicitly.
  */
+import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import http from "node:http"
 import { LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS } from "@wavekit/api-types"
 import { afterEach, describe, expect, it } from "vitest"
-import type { EvidenceSquelchFactory } from "../../../src/core/evidence-squelch/contract.js"
 import { wavStreamHeader } from "../../../src/core/live-demodulator.js"
-import { WaveKitError } from "../../../src/utils/errors.js"
 import {
 	createDemodHarness,
 	waitFor,
@@ -36,7 +35,6 @@ interface E2eRun {
 }
 
 interface E2eInternals {
-	options: { evidenceSquelch?: EvidenceSquelchFactory }
 	run: E2eRun | null
 	handleAudioData(chunk: Buffer): void
 	measureRun(run: unknown): void
@@ -49,16 +47,6 @@ const LEAD_SECONDS = 0.5
 const OVER_SECONDS = 3
 const TAIL_SECONDS = 2
 const AM_FLOOR_DBFS = -60
-
-/** A5 oracle: a factory that throws leaves the run on the frozen stage-1 path. */
-const FROZEN_PATH: EvidenceSquelchFactory = {
-	createGate() {
-		throw new WaveKitError("frozen-path oracle", "TEST_ORACLE")
-	},
-	createPreRoll() {
-		throw new WaveKitError("frozen-path oracle", "TEST_ORACLE")
-	},
-}
 
 /** An 8 kHz s16le evidence-squelch fixture, linearly upsampled to the harness rate. */
 function fixtureAt25k(name: string): Float32Array {
@@ -78,6 +66,10 @@ function fixtureAt25k(name: string): Float32Array {
 		out[i] = (a + (b - a) * (pos - k)) / 32_768
 	}
 	return out
+}
+
+function sha256(bytes: Buffer): string {
+	return createHash("sha256").update(bytes).digest("hex")
 }
 
 function overVoice(seed: number): Float32Array {
@@ -110,8 +102,9 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		modulation: "nfm" | "am",
 		segments: Segment[],
 		wav = false,
-		factory?: EvidenceSquelchFactory,
-	): Promise<Driven & { wavBody: Buffer | null; states: Set<string> }> {
+	): Promise<
+		Driven & { wavBody: Buffer | null; states: Set<string>; pcm: Buffer }
+	> {
 		h = await createDemodHarness({
 			config: {
 				modulation,
@@ -119,8 +112,9 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			},
 		})
 		const internals = h.demod as unknown as E2eInternals
-		if (factory !== undefined) internals.options.evidenceSquelch = factory
 		await h.demod.start()
+		const pcmChunks: Buffer[] = []
+		h.demod.on("pcm", (chunk: Buffer) => pcmChunks.push(Buffer.from(chunk)))
 		const run = internals.run
 		if (run === null) throw new Error("no run")
 		expect(run.stream).toEqual({ rate: RATE, format: "s16le" })
@@ -178,6 +172,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			openAfterSeconds,
 			everOpen,
 			states,
+			pcm: Buffer.concat(pcmChunks),
 			wavBody: wavBody === null ? null : await wavBody.done(fed),
 		}
 	}
@@ -407,9 +402,13 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 	// Amendment A8 (2026-10-23): AM is outside the evidence path. A bare AM carrier key-up latched
 	// voice 1.65 s after onset under the gate (the AM chain's fast AGC raises the carrier noise
 	// envelope), so AM auto keeps the frozen stage-1 auto squelch with `autoSquelch` `off`.
-	const AM_FROZEN: Array<[string, () => Segment[]]> = [
+	// SHA-256 of the complete client byte stream and of the `pcm` event stream for each input
+	// below, recorded with this same harness from the pre-evidence-squelch code (commit
+	// d9eee19a). The frozen path passes every byte, so the two streams are equal there.
+	const AM_FROZEN: Array<[string, string, () => Segment[]]> = [
 		[
 			"am-carrier regression: AM stays ungated by evidence",
+			"e4a4223024756fe5b48758efb1eaeda82d24182ff0dc6780826cf501d62aff9b",
 			() => {
 				const audio = fixtureAt25k("am-carrier")
 				const onset = Math.round(0.25 * RATE)
@@ -429,10 +428,12 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		],
 		[
 			"AM voice: stage-1 auto squelch, ungated by evidence",
+			"e46e1a36d3fb3dc4703868f4b58248574e48a787b268f6638aa3203ce7742560",
 			() => overScript(overVoice(26)),
 		],
 		[
 			"bare AM carrier: stage-1 auto squelch, ungated by evidence",
+			"77a5ec96e2c231d5d1cc158e1977d9dfeff128ddec3363629e591e5ae52a736e",
 			() => [
 				{
 					pcm: toPcm(carrierSilence({ rate: RATE, seconds: 4 }), "s16le"),
@@ -443,15 +444,13 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		],
 	]
 
-	for (const [name, script] of AM_FROZEN) {
+	for (const [name, frozenSha256, script] of AM_FROZEN) {
 		// Validates: Requirements 1.7 (amendment A8)
 		it(name, async () => {
 			const segments = script()
-			const oracle = await drive("am", segments, false, FROZEN_PATH)
-			await h?.dispose()
-			h = null
 			const result = await drive("am", segments)
-			expect(result.received).toEqual(oracle.received)
+			expect(sha256(result.received)).toBe(frozenSha256)
+			expect(sha256(result.pcm)).toBe(frozenSha256)
 			expect([...result.states]).toEqual(["off"])
 			// Stage 1 open passes every byte; closed segments are the frozen path's zeros.
 			let at = 0
