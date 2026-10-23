@@ -273,12 +273,12 @@ interface PreRollPort {
 `bytes = (capacitySamples + 1) × width`, width 2 (s16le) or 4 (f32le). The audio rate is the
 pipeline's effective rate, `iqRate / round(iqRate / (2 × bandwidth))`:
 
-| Case                                 | Rate (Hz) | Samples | s16le bytes | f32le bytes |
-| ------------------------------------ | --------- | ------- | ----------- | ----------- |
-| NFM 12.5 kHz at 2.048 Msps (default) | 24 975.6  | 37 464  | 74 930      | 149 860     |
-| NFM 12.5 kHz at 2.4 Msps             | 25 000    | 37 500  | 75 002      | 150 004     |
-| NFM 25 kHz channel at 2.4 Msps       | 50 000    | 75 000  | 150 002     | 300 004     |
-| AM 10 kHz at 2.048 Msps              | 20 078.4  | 30 118  | 60 238      | 120 476     |
+| Case                                    | Rate (Hz) | Samples | s16le bytes | f32le bytes |
+| --------------------------------------- | --------- | ------- | ----------- | ----------- |
+| NFM 12.5 kHz at 2.048 Msps (default)    | 24 975.6  | 37 464  | 74 930      | 149 860     |
+| NFM 12.5 kHz at 2.4 Msps                | 25 000    | 37 500  | 75 002      | 150 004     |
+| NFM 25 kHz channel at 2.4 Msps          | 50 000    | 75 000  | 150 002     | 300 004     |
+| AM 10 kHz at 2.048 Msps (not wired, A8) | 20 078.4  | 30 118  | 60 238      | 120 476     |
 
 Tag ring: tags change at most once per stage-1 transition, latch, guard expiry or overflow. Stage
 1 decisions are 10 ms blocks, so a full FIFO holds at most `ceil(1 500 / 10) + 3` = 153 runs;
@@ -424,8 +424,8 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     sample discarded by overflow was `pending`; no `pass` or `guard` sample is ever discarded; the
     delay is zero within one sample after the last `pass` or `guard` sample has played.
     _Validates 2.5, 2.6._
-12. **Byte-identical elsewhere.** For any PCM stream and config with modulation outside
-    `nfm`/`am`, mode `manual` or `noise`, or a configured tone squelch, the bytes written to the
+12. **Byte-identical elsewhere.** For any PCM stream and config with modulation other than
+    `nfm` (A8: `am` included), mode `manual` or `noise`, or a configured tone squelch, the bytes written to the
     registry and the `pcm` event bytes equal those of the frozen `handleAudioData`; for every
     config the `pcm` event bytes are unchanged. _Validates 1.6 to 1.9._
 13. **Lifecycle.** After `clear()` the delay is zero and no sample queued before it is ever
