@@ -73,9 +73,9 @@ CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
 # The status rate (fractional, e.g. 2.048 Msps / 82 = 24 975.61 Hz) must match the WAV header
 # rate (integer) within this.
 RATE_MATCH_HZ = 1.0
-# A stage-1 close (endedAt + hang) lies after its over's carrier-off by at most the hang plus
-# this detection allowance.
-CLOSE_MATCH_S = 0.5
+# Cross-check bound between a close event's endedAt (core audio end) and the over's sidecar
+# carrier-off: one 50 ms block of detection plus 50 ms of clock/probe error.
+ENDED_MATCH_S = 0.1
 # Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
 # ±RESAMPLE_HALF_WIDTH output periods, fractional position quantised to 1/RESAMPLE_PHASES of an
 # input sample (time error ≤ 1 / (2 x 512 x 24 975) s ≈ 39 ns). Symmetric kernel: zero delay.
@@ -454,25 +454,31 @@ def verdict_p99(auto_p99, manual_p99):
 
 def drain_per_over(samples, rate, arrivals, events, clock, hang_s, carrier, ws_complete):
 	"""Manual run: per over, the arrival of its last audible stream sample after the stage-1
-	close, in ms. The close instant is the closed event's endedAt (the core's audio end,
-	`close - hang`) plus the stage-1 hang, on the probe-aligned container clock; the event's
-	late announcement is never used. Each close must sit after its over's carrier-off
-	(sidecar) by at most CLOSE_MATCH_S. Measured over the overs the stream and the WebSocket
-	both fully cover; an over without a close is a transmission failure (verdict_events), a
-	close without endedAt or, on a carrier-bearing fixture, without a played tail is an invalid
-	run, never a short drain."""
+	close, in ms. The stage-1 close is the over's carrier-off on the source clock (sidecar)
+	plus the core's squelch hang. The real close also waits for the block that detects the
+	carrier-off (at most one block later), so the reference is early by at most that and the
+	drain reads conservatively high. The event's endedAt is only a cross-check: the core
+	clamps it to the segment start and converts stream-time hang in wall time, so it is not a
+	close instant. One squelch close per over; any other close reason, a second close in the
+	over, or endedAt more than ENDED_MATCH_S from the carrier-off is an invalid run. Measured
+	over the overs the stream and the WebSocket both fully cover; an over without a close is a
+	transmission failure (verdict_events); a closed over of a carrier-bearing fixture without a
+	played tail is invalid, never a short drain."""
 	closes = {}
 	for e in events:
 		if e.get("state") != "closed":
 			continue
-		if not isinstance(e.get("endedAt"), str):
-			raise InvalidRun("closed transmission without endedAt (stage-1 close time)")
-		close = parse_iso(e["endedAt"]) + hang_s
 		k, onset = over_at(clock, parse_iso(e.get("startedAt")))
+		if e.get("closeReason") != "squelch":
+			raise InvalidRun(f"over {k}: unsupported close reason for drain (want squelch)")
+		if not isinstance(e.get("endedAt"), str):
+			raise InvalidRun(f"over {k}: closed transmission without endedAt")
 		carrier_off = onset + clock["overS"]
-		if not carrier_off - ASSOC_SLACK_S <= close <= carrier_off + hang_s + CLOSE_MATCH_S:
-			raise InvalidRun(f"stage-1 close of over {k} does not match its carrier-off")
-		closes.setdefault(k, []).append(close)
+		if abs(parse_iso(e["endedAt"]) - carrier_off) > ENDED_MATCH_S:
+			raise InvalidRun(f"over {k}: endedAt disagrees with the carrier-off by more than {ENDED_MATCH_S * 1000:.0f} ms")
+		if k in closes:
+			raise InvalidRun(f"over {k}: more than one close (merged or split transmission)")
+		closes[k] = carrier_off + hang_s
 	tails = {}
 	for s, e in nonzero_runs(samples, rate):
 		first = arrival_time(arrivals, s * 2)
@@ -488,7 +494,7 @@ def drain_per_over(samples, rate, arrivals, events, clock, hang_s, carrier, ws_c
 			if carrier:
 				raise InvalidRun(f"over {k}: stage-1 closed but no played tail to measure drain on")
 			continue
-		out.append({"over": k, "drainMs": (tails[k] - max(closes[k])) * 1000})
+		out.append({"over": k, "drainMs": (tails[k] - closes[k]) * 1000})
 	return out
 
 
@@ -729,7 +735,7 @@ def self_test():
 			mono = start + host_offset + announce
 			out.append({"state": "open", "startedAt": format_iso(start), "endedAt": None, "durationMs": None, "mono": mono})
 			out.append({"state": "closed", "startedAt": format_iso(start), "endedAt": format_iso(start + 3.75),
-				"durationMs": 3750, "mono": start + 3.75 + hang + close_late + host_offset})
+				"closeReason": "squelch", "durationMs": 3750, "mono": start + 3.75 + hang + close_late + host_offset})
 		return out
 
 	def manual_stream(tail):
@@ -843,18 +849,37 @@ def self_test():
 	assert any("did open" in f for f in variant(top__expect="none", auto__samples8k=silent))
 	assert any("p99" in f for f in variant(auto__p99Ms=[5.0]))
 	assert any("p99" in f for f in variant(auto__p99Ms=[]))
-	# Drain from the stage-1 close (endedAt + hang), not the late close announcement: a 120 ms
-	# tail reads 120 ms, a 350 ms tail announced 1.6 s late reads 350 ms and exceeds the guard.
+	# Drain from the stage-1 close (carrier-off + hang), not the late close announcement: a 120 ms
+	# tail reads about 120 ms, a 350 ms tail announced 1.6 s late about 350 ms (over the guard).
 	d = drain_of()
-	assert d["overs"] == len(complete) and abs(d["maxMs"] - 120) <= 20 and not d["exceedsGuard"], d
+	# The true close here is one 50 ms block after carrier-off + hang, so the drain reads at most
+	# that block (plus 20 ms of chunk quantisation) high, never low.
+	high = lambda v, tail: tail <= v <= tail + 50 + 20
+	assert d["overs"] == len(complete) and high(d["maxMs"], 120) and not d["exceedsGuard"], d
 	d = drain_of(manual__samples=manual_stream(0.35))
-	assert abs(d["maxMs"] - 350) <= 20 and abs(d["medianMs"] - 350) <= 20 and d["exceedsGuard"], d
+	assert high(d["maxMs"], 350) and high(d["medianMs"], 350) and d["exceedsGuard"], d
 	no_end = [dict(e, endedAt=None) for e in events()]
 	assert "endedAt" in invalid(manual__transmissions=no_end)
 	assert "played tail" in invalid(manual__samples=[v if not (conn + gap + 5 * period - 1 < conn + stream_lead + i / rate
 		< conn + gap + 6 * period - 1) else 0 for i, v in enumerate(manual_stream(0.12))])
-	assert "carrier-off" in invalid(manual__transmissions=[dict(e, endedAt=format_iso(parse_iso(e["startedAt"]) + 1.0))
-		if e["state"] == "closed" else e for e in events()])
+	def closes_with(**fields):
+		return [dict(e, **fields) if e["state"] == "closed" else e for e in events()]
+
+	def shifted_end(dt):
+		return [dict(e, endedAt=format_iso(parse_iso(e["startedAt"]) - stage1 + 3.75 + dt)) if e["state"] == "closed" else e
+			for e in events()]
+
+	# endedAt is a cross-check only: within 100 ms of carrier-off it does not move the drain.
+	d = drain_of(manual__samples=manual_stream(0.35), manual__transmissions=shifted_end(0.09))
+	assert high(d["maxMs"], 350), d
+	# A clamped short final segment (endedAt 200 ms early), a mismatch and non-squelch closes
+	# are invalid, never a short drain.
+	assert "endedAt disagrees" in invalid(manual__samples=manual_stream(0.35), manual__transmissions=shifted_end(-0.2))
+	assert "endedAt disagrees" in invalid(manual__transmissions=shifted_end(0.5))
+	for reason in ("stopped", "config", "retune", "max-duration", None):
+		assert "close reason" in invalid(manual__transmissions=closes_with(closeReason=reason))
+	split = events() + [e for e in events(overs=[4]) if e["state"] == "closed"]
+	assert "more than one close" in invalid(manual__transmissions=split)
 	flag, summary = verdict_drain([{"over": 0, "drainMs": 250.0}, {"over": 1, "drainMs": 150.0}], 200)
 	assert flag and summary["maxMs"] == 250.0 and summary["medianMs"] == 200.0
 	assert nonzero_runs([0, 1, 1, 0, 0, 0, 2], 1, min_gap_s=2) == [(1, 3), (6, 7)]

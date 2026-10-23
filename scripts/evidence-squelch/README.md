@@ -133,9 +133,11 @@ last sample behind the source ≤ 1.5 s; byte rate within 0.5 % of nominal per m
 transmission events equal to the manual run per over over the overs both WebSocket recordings
 fully cover (open and close within 10 ms, same count, at least one per over on carrier-bearing
 fixtures, at least 3 shared overs); p99 within 2 ms of manual; the back-chain drain of the manual run per
-over (arrival of the last audible sample after the stage-1 close, which is the close event's
-`endedAt` plus the core's `SQUELCH_HANG_MS`, on the probe-aligned clock and checked against the
-sidecar carrier-off; never the late close announcement), reported as max and median against
+over (arrival of the last audible sample after the stage-1 close, taken as the over's sidecar
+carrier-off on the source clock plus the core's `SQUELCH_HANG_MS`; the real close waits up to one
+detection block longer, so the drain reads at most that much high, never low). The close event's
+`endedAt` is only a cross-check (within 100 ms of carrier-off); a non-squelch close reason, two
+closes in one over or a failed cross-check is invalid. Reported as max and median against
 `CLOSE_GUARD_MS` and flagged `EXCEEDS GUARD` above it.
 
 Evidence squelch is NFM only. `autoSquelch.state` must be `off` on AM runs and manual runs and
