@@ -161,7 +161,7 @@ describe("live demodulator evidence path (fake ports)", () => {
 		})
 
 		// Window-reset amendment (2026-10-23): the gate is the only onset tracker; the wiring
-		// abandons the pre-roll exactly when noteBlock reports a reset.
+		// abandons the pre-roll exactly when noteBlock reports DISCARD (RESET alone keeps the audio).
 		it("abandons the pre-roll exactly when noteBlock reports DISCARD", async () => {
 			const t = await start({ modulation: "nfm", squelchMode: "auto" })
 			const run = t.internals.run
