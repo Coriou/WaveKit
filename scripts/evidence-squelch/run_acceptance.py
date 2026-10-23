@@ -103,9 +103,11 @@ RESAMPLE_PHASES = 512
 # STAGE1_SEARCH_S of the arrival-time estimate, keeping the best-agreeing shift; then every sample
 # must agree within STAGE1_LSB_TOLERANCE (AGC state after a block-different edge), and larger
 # differences may only form clusters (merged across STAGE1_MERGE_S) no longer than
-# STAGE1_EDGE_WINDOW_S, at most two per file period (the open and the close edge: auto and
-# manual thresholds differ). Evidence gating (a waiting gate mutes at least the 1 s voice
-# window per over) or a pre-roll delay breaks this. The search is bounded because the residue
+# STAGE1_EDGE_WINDOW_S, at most one per over edge (the open and the close edge: auto and
+# manual thresholds differ), each starting at a stage-1 edge of either run. The content shift
+# must also match the arrival-time shift (stage1_timing), so a playback delay cannot be aligned
+# away. Evidence gating (a waiting gate mutes at least the 1 s voice window per over), a pre-roll
+# delay or an interior mute breaks this. The search is bounded because the residue
 # is periodic: an unbounded search could align a delayed over (am-voice 2.048 Msps csdr: the
 # estimate was 323 samples, 13 ms, off the true shift).
 STAGE1_PROBE_S = 0.05
@@ -114,6 +116,26 @@ STAGE1_SEARCH_S = 0.2
 STAGE1_LSB_TOLERANCE = 1
 STAGE1_MERGE_S = 0.1
 STAGE1_EDGE_WINDOW_S = 0.5
+# Timing of the ungated stream (stage1_timing): latency-floor jitter between two runs (measured
+# p1 minus min of the arrival latency envelope: 3.5 and 4.0 ms on the 2.048 Msps csdr am-voice
+# runs), and the largest tolerance that still shows a 20 ms delay.
+STAGE1_FLOOR_JITTER_S = 0.005
+STAGE1_TIMING_TOL_MAX_S = 0.020
+# Edge mapping (open_steps, stage1_edges). The AM golden does not correlate with the live
+# chain's stream (scores 0.17-0.49 at inconsistent lags on 2.048 Msps csdr am-voice), so each
+# over is placed by the stage-1 open step in the manual stream: hold residue peaking at 2 958,
+# then 32 767. Arrival-anchor latency of that step ranged -68 to -17 ms over the 19 overs (the
+# fake's chunked early delivery), hence the per-over placement. A difference cluster must start
+# within the edge slack of a gate edge of either run: one 10 ms squelch block, one fake send
+# chunk (event times are core wall stamps, which move against stream samples by the chunk
+# phase: 64.0 ms at 2.048 Msps, 54.6 ms at 2.4 Msps; measured 30 ms on am-voice) and
+# STAGE1_EDGE_MAP_ERR_S for ms timestamps and the step sample: 84 ms at 2.048 Msps. At most one
+# cluster per over edge. An interior mute (a waiting gate mutes 1 s) starts far from any edge.
+STEP_MIN_ABS = 16_384
+STEP_QUIET_ABS = 8_192
+STEP_QUIET_S = 0.05
+STEP_EARLY_S = 0.2
+STAGE1_EDGE_MAP_ERR_S = 0.010
 
 
 class InvalidRun(Exception):
@@ -434,29 +456,121 @@ def verdict_early(early):
 		f" first over onset {first['firstOnsetS']:.3f} s")
 
 
-def stream_start_s(side, clock):
-	"""Estimated source time (s after the fake's pacing epoch) of a stream's first sample: its
-	first read's arrival minus the samples it held. Late by the stream latency; it only seeds
-	the alignment search of verdict_stage1_identity."""
+def stream_anchor(side, clock):
+	"""Arrival-time position of a stream on its source clock: min over reads of (read time
+	minus the samples received so far / rate), in s after the fake's pacing epoch. That is the
+	source time of the stream's first sample plus the stream's latency floor. Host time is
+	mapped by the low-RTT clock probe nearest the pacing epoch: the source schedule is the epoch
+	plus monotonic elapsed time, so later wall-clock drift does not move it. Returns (anchor,
+	error) with error = that probe's half round trip."""
 	arrivals = side.get("arrivals") or []
-	if not arrivals:
-		raise InvalidRun("no stream arrivals to align the stage-1 streams")
-	t, total = arrivals[0]
-	return t + clock["toWall"] - clock["connected"] - (total / 2) / side["audioRate"]
+	rate = side.get("audioRate")
+	if not arrivals or not _number(rate) or rate <= 0:
+		raise InvalidRun("no stream arrivals to time the ungated stage-1 stream")
+	epoch_host = clock["connected"] - clock["toWall"]
+	near = []
+	for probe in side.get("clockProbes") or []:
+		if isinstance(probe, (list, tuple)) and len(probe) == 3 and all(_number(v) for v in probe):
+			m0, m1, wall = probe
+			if 0 <= m1 - m0 <= CLOCK_MAX_RTT_S:
+				near.append((abs((m0 + m1) / 2 - epoch_host), (m1 - m0) / 2, wall - (m0 + m1) / 2))
+	if not near:
+		raise InvalidRun("no low round-trip clock probe to time the ungated stage-1 stream")
+	dist, err, to_wall = min(near)
+	if dist > PROBE_GAP_MAX_S:
+		raise InvalidRun(f"nearest clock probe is {dist:.1f} s from the pacing epoch (limit {PROBE_GAP_MAX_S:.0f} s)")
+	anchor = min(t + to_wall - clock["connected"] - (b / 2) / rate for t, b in arrivals)
+	return anchor, err
 
 
-def verdict_stage1_identity(auto_pcm, manual_pcm, rate, estimate, period_s, min_periods=MIN_OVERS):
-	"""Ungated (AM, A8) auto run against the manual run: the same stage-1 stream (see
-	STAGE1_* above). auto_pcm and manual_pcm are raw s16le bytes; estimate is the expected
-	manual sample index of auto sample 0. Returns (failure or None, notes)."""
+def stage1_timing(auto, manual, clocks):
+	"""Expected auto-to-manual sample shift from arrival times alone, and its tolerance.
+
+	A same-source sample sits at auto index i and manual index i + shift with
+	shift = (anchorAuto - anchorManual) x rate when both streams have the same latency floor
+	(no pre-roll on either). A playback delay d on auto raises anchorAuto by d, so the content
+	shift then misses this estimate by d. Tolerance, all measured per run:
+	  STAGE1_FLOOR_JITTER_S (latency-floor jitter between runs) + both probes' half round trips
+	  + both pacing-epoch brackets (epochErrS).
+	2.048 Msps csdr am-voice: 5 + 0.7 + 0.8 + 0 + 0 = 6.5 ms; the estimate missed the content
+	shift by 0.66 ms. More than STAGE1_TIMING_TOL_MAX_S is invalid (a 20 ms delay must show)."""
+	a, ea = stream_anchor(auto, clocks["auto"])
+	m, em = stream_anchor(manual, clocks["manual"])
+	tol = STAGE1_FLOOR_JITTER_S + ea + em + clocks["auto"]["epochErr"] + clocks["manual"]["epochErr"]
+	if tol > STAGE1_TIMING_TOL_MAX_S:
+		raise InvalidRun(f"stage-1 timing tolerance {tol * 1000:.1f} ms exceeds {STAGE1_TIMING_TOL_MAX_S * 1000:.0f} ms")
+	return {"autoAnchorS": a, "manualAnchorS": m, "expectedShiftS": a - m, "tolS": tol}
+
+
+def _pcm16(raw):
 	from array import array
 
-	a, m = array("h"), array("h")
-	a.frombytes(auto_pcm[: len(auto_pcm) // 2 * 2])
-	m.frombytes(manual_pcm[: len(manual_pcm) // 2 * 2])
+	out = array("h")
+	out.frombytes(bytes(raw[: len(raw) // 2 * 2]))
 	if sys.byteorder != "little":
-		a.byteswap()
-		m.byteswap()
+		out.byteswap()
+	return out
+
+
+def open_steps(manual_pcm, manual, clock, anchor):
+	"""{over: (manual sample index, source open time)} of the stage-1 open as the manual stream
+	renders it. While closed the AM chain plays the hold residue (peak about -21 dBFS); the first
+	open block arrives with the AGC at full gain and clips. The step is the first sample at least
+	STEP_MIN_ABS with none of STEP_QUIET_ABS in the STEP_QUIET_S before it, searched from
+	STEP_EARLY_S before to MAX_DELAY_S after the open's source time on the arrival anchor (the
+	fake sends IQ up to one chunk early). Each over's edges are placed from its own step."""
+	x, rate = _pcm16(manual_pcm), manual["audioRate"]
+	quiet = int(STEP_QUIET_S * rate)
+	out = {}
+	for e in manual.get("transmissions", []):
+		if e.get("state") != "closed" or not isinstance(e.get("startedAt"), str):
+			continue
+		rel = parse_iso(e["startedAt"]) - clock["connected"]
+		k = math.floor((rel - clock["onset"] + ASSOC_SLACK_S) / clock["period"])
+		lo = int((rel - anchor - STEP_EARLY_S) * rate)
+		hi = int((rel - anchor + MAX_DELAY_S) * rate)
+		if lo < quiet or hi > len(x):
+			continue  # the open is outside the recording
+		run = 0
+		for i in range(lo - quiet, hi):
+			v = x[i]
+			if i >= lo and run >= quiet and (v >= STEP_MIN_ABS or v <= -STEP_MIN_ABS):
+				out[k] = (i, rel)
+				break
+			run = 0 if v >= STEP_QUIET_ABS or v <= -STEP_QUIET_ABS else run + 1
+		else:
+			raise InvalidRun(f"over {k}: stage-1 open step not found in the manual AM stream")
+	if len(out) < MIN_OVERS:
+		raise InvalidRun(f"{len(out)} stage-1 open steps in the manual AM stream, need {MIN_OVERS}")
+	return out
+
+
+def stage1_edges(sides, clocks, steps, rate, hang_s):
+	"""Stage-1 gate edges of both runs as (manual sample index, over, kind): open at startedAt,
+	close at startedAt + durationMs + hang, each placed from its over's open step in the manual
+	stream by its source-time offset from the manual open (each run on its own source clock;
+	both fakes replay the same file from their epoch). Overs without a step are not placed."""
+	out = []
+	for side, clock in zip(sides, clocks):
+		for e in side.get("transmissions", []):
+			if e.get("state") != "closed" or not isinstance(e.get("startedAt"), str) or not _number(e.get("durationMs")):
+				continue
+			rel = parse_iso(e["startedAt"]) - clock["connected"]
+			k = math.floor((rel - clock["onset"] + ASSOC_SLACK_S) / clock["period"])
+			if k not in steps:
+				continue
+			j, ref = steps[k]
+			for t, kind in ((rel, "open"), (rel + e["durationMs"] / 1000 + hang_s, "close")):
+				out.append((j + round((t - ref) * rate), k, kind))
+	return out
+
+
+def verdict_stage1_identity(auto_pcm, manual_pcm, rate, timing, edges, slack_s, period_s, min_periods=MIN_OVERS):
+	"""Ungated (AM, A8) auto run against the manual run: the same stage-1 stream at the same
+	time (see STAGE1_* above). auto_pcm and manual_pcm are raw s16le bytes; timing is
+	stage1_timing(); edges are stage1_edges() in auto samples. Returns (failure or None, notes)."""
+	a, m = _pcm16(auto_pcm), _pcm16(manual_pcm)
+	estimate = round(timing["expectedShiftS"] * rate)
 	probe_n, search = max(1, int(STAGE1_PROBE_S * rate)), int(STAGE1_SEARCH_S * rate)
 	tol = STAGE1_LSB_TOLERANCE
 	mb = m.tobytes()
@@ -492,6 +606,13 @@ def verdict_stage1_identity(auto_pcm, manual_pcm, rate, estimate, period_s, min_
 	if not scored or scored[0][0] < 0.5:
 		return "auto stream never equals the manual stage-1 stream (evidence-gated or delayed on an ungated modulation)", {}
 	shift = scored[0][2]
+	# Content alignment alone would absorb a playback delay: the arrival times must agree too.
+	late = timing["expectedShiftS"] - shift / rate
+	notes = {"shiftSamples": shift, "expectedShiftSamples": timing["expectedShiftS"] * rate,
+		"autoLaterMs": late * 1000, "timingTolMs": timing["tolS"] * 1000}
+	if abs(late) > timing["tolS"]:
+		return (f"auto plays {abs(late) * 1000:.1f} ms {'later' if late > 0 else 'earlier'} than the manual stage-1"
+			f" stream (arrival-time tolerance {timing['tolS'] * 1000:.1f} ms)"), notes
 	start, end = max(0, -shift), min(len(a), len(m) - shift)
 	overlap_s = (end - start) / rate
 	if overlap_s < min_periods * period_s:
@@ -510,15 +631,25 @@ def verdict_stage1_identity(auto_pcm, manual_pcm, rate, estimate, period_s, min_
 		else:
 			clusters.append([i, i])
 	longest = max(((e - s + 1) / rate for s, e in clusters), default=0.0)
-	allowed = 2 * (math.ceil(overlap_s / period_s) + 1)
-	notes = {"shiftSamples": shift, "estimateSamples": estimate, "overlapS": overlap_s, "lsbDiffs": lsb,
-		"edgeClusters": len(clusters), "longestClusterS": longest, "allowedClusters": allowed}
-	if longest > STAGE1_EDGE_WINDOW_S:
-		s, e = max(clusters, key=lambda c: c[1] - c[0])
-		return (f"auto differs from the manual stage-1 stream for {longest:.3f} s from auto sample {s}"
-			f" (limit {STAGE1_EDGE_WINDOW_S} s around a stage-1 edge)"), notes
-	if len(clusters) > allowed:
-		return f"auto differs from the manual stage-1 stream in {len(clusters)} places (at most {allowed} stage-1 edges)", notes
+	notes.update({"overlapS": overlap_s, "lsbDiffs": lsb, "edgeClusters": len(clusters), "longestClusterS": longest})
+	slack = slack_s * rate
+	claimed, offsets = {}, []
+	notes["edgeOffsetsMs"] = offsets
+	for s, e in clusters:
+		if (e - s + 1) / rate > STAGE1_EDGE_WINDOW_S:
+			return (f"auto differs from the manual stage-1 stream for {(e - s + 1) / rate:.3f} s from auto sample {s}"
+				f" (limit {STAGE1_EDGE_WINDOW_S} s at a stage-1 edge)"), notes
+		# A difference starts where the two runs' gates first disagree: at a gate edge of either
+		# run. Edges are manual sample indices; auto sample s is manual sample s + shift.
+		near = sorted((abs(s + shift - i), k, kind, s + shift - i) for i, k, kind in edges if abs(s + shift - i) <= slack)
+		if not near:
+			return (f"auto differs from the manual stage-1 stream at {s / rate:.3f} s into the auto stream,"
+				f" not within {slack_s * 1000:.0f} ms of a stage-1 edge (interior mute)"), notes
+		_dist, k, kind, off = near[0]
+		offsets.append(round(off / rate * 1000, 2))
+		if (k, kind) in claimed:
+			return f"more than one difference at the over {k} {kind} edge (at {claimed[(k, kind)] / rate:.3f} s and {s / rate:.3f} s)", notes
+		claimed[(k, kind)] = s
 	return None, notes
 
 
@@ -742,10 +873,18 @@ def evaluate(obs, guard_ms):
 	if not gated:
 		# A8: auto is today's stage-1 auto squelch, judged as one stream against the manual
 		# stage-1 run; a closed AM stage 1 is not exact silence, so there are no overs to split.
-		if not isinstance(auto.get("pcm"), (bytes, bytearray)) or not isinstance(manual.get("pcm"), (bytes, bytearray)):
-			raise InvalidRun("no raw stream to compare the ungated auto run with its manual baseline")
-		estimate = round((stream_start_s(auto, clocks["auto"]) - stream_start_s(manual, clocks["manual"])) * rate)
-		f, notes["stage1Identity"] = verdict_stage1_identity(auto["pcm"], manual["pcm"], rate, estimate, clocks["auto"]["period"])
+		for mode in ("auto", "manual"):
+			raw = obs[mode].get("pcm")
+			if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2:
+				raise InvalidRun(f"no {mode} raw stream to compare the ungated auto run with its manual baseline")
+		timing = stage1_timing(auto, manual, clocks)
+		steps = open_steps(manual["pcm"], manual, clocks["manual"], timing["manualAnchorS"])
+		edges = stage1_edges((auto, manual), (clocks["auto"], clocks["manual"]), steps, manual["audioRate"], obs["hangS"])
+		if not _number(clocks["auto"].get("iqRate")) or clocks["auto"]["iqRate"] <= 0:
+			raise InvalidRun("missing fixture IQ rate (sidecar) for the edge slack")
+		slack_s = SQUELCH_BLOCK_S + FAKE_CHUNK_BYTES / (2 * clocks["auto"]["iqRate"]) + STAGE1_EDGE_MAP_ERR_S
+		f, ident = verdict_stage1_identity(auto["pcm"], manual["pcm"], rate, timing, edges, slack_s, clocks["auto"]["period"])
+		notes["stage1Identity"] = dict(ident, edgeSlackMs=slack_s * 1000, openSteps=len(steps))
 		if f:
 			failures.append(f)
 	elif expect_open and runs:
@@ -1117,8 +1256,13 @@ def self_test():
 	# am-carrier included) with autoSquelch off; NFM auto must be waiting/open.
 	# AM auto is judged as one stage-1 stream against manual: a closed AM stage 1 is not exact
 	# zeros (a low-frequency residue on both runs), so there are no exact-zero overs to split.
+	# Each over opens with a clipped step (the AGC at full gain), as the AM chain renders it.
 	residue = [(i % 80) - 40 or 1 for i in range(int(stream_s * rate))]
 	am_manual = [int(8000 * noise()) + r if v else r for v, r in zip(manual_stream(0.05), residue)]
+	step_at = {k: int((gap + k * period - stream_lead) * rate) for k in range(10)}
+	for i in step_at.values():
+		if i + 5 <= len(am_manual):
+			am_manual[i : i + 5] = [32767] * 5
 
 	def pcm(values):
 		return [max(-32768, min(32767, int(v))) for v in values]
@@ -1134,45 +1278,87 @@ def self_test():
 			side, key = path.split("__")
 			if side == "top":
 				obs[key] = value
+			elif value is None:
+				obs[side].pop(key, None)
 			else:
 				obs[side][key] = value
 		return evaluate(obs, 200)
 
-	assert am_obs(am_manual)[0] == [], am_obs(am_manual)[0]
-	_f, am_notes = am_obs(am_manual)
+	def am_invalid(*args, **changes):
+		try:
+			am_obs(*args, **changes)
+		except InvalidRun as exc:
+			return str(exc)
+		raise AssertionError(f"ungated run accepted without evidence: {list(changes)}")
+
+	f, am_notes = am_obs(am_manual)
+	assert f == [], f
 	assert am_notes["drain"] is None and "A8" in am_notes["drainSkipped"], am_notes
-	# The recorded am-voice shape: the auto stream starts 40 samples later in the same stage-1
-	# stream, ±1 LSB AGC differences anywhere, one 0.2 s edge cluster per over (thresholds differ).
-	shifted = am_manual[40:]
-	assert am_obs(shifted)[1]["stage1Identity"]["shiftSamples"] == 40
-	assert am_obs(shifted)[0] == []
+	ident = am_notes["stage1Identity"]
+	assert ident["shiftSamples"] == 0 and ident["openSteps"] == 10 and abs(ident["autoLaterMs"]) < 0.1, ident
+	# The recorded am-voice shape: the auto stream starts 40 samples (5 ms) later in the same
+	# stage-1 stream and its reads arrive 5 ms later; ±1 LSB AGC differences anywhere; one 0.2 s
+	# cluster at each over's close edge (thresholds differ).
+	shifted = am_obs(am_manual[40:], auto__arrivals=[[t + 40 / rate, b] for t, b in arrivals()])
+	assert shifted[0] == [] and shifted[1]["stage1Identity"]["shiftSamples"] == 40, shifted
 	lsb = [v + (1 if i % 7 == 0 else 0) for i, v in enumerate(am_manual)]
 	assert am_obs(lsb)[0] == []
-	edges = list(am_manual)
+	edged = list(am_manual)
 	for k in complete:
-		c = int((gap + k * period + over_s + hang - stream_lead) * rate)
-		edges[c : c + int(0.2 * rate)] = [v + 500 for v in edges[c : c + int(0.2 * rate)]]
-	assert am_obs(edges)[0] == [], am_obs(edges)[0]
-	# Evidence gating on AM (a waiting gate mutes the 1 s voice window of every over), a
-	# pre-roll delay, an all-muted stream and scattered differences all fail; never pass.
+		c = step_at[k] + int((over_s + hang) * rate)  # gate close: startedAt + durationMs + hang
+		edged[c : c + int(0.2 * rate)] = [v + 500 for v in edged[c : c + int(0.2 * rate)]]
+		o = step_at[k]
+		edged[o + 10 : o + 60] = [v + 500 for v in edged[o + 10 : o + 60]]  # and at the open
+	assert am_obs(edged)[0] == [], am_obs(edged)[0]
+	# A playback delay cannot be aligned away: content shift -400/-800 samples, arrivals unchanged.
+	for delay_ms in (50, 100):
+		n = delay_ms * rate // 1000
+		late = am_obs([0] * n + am_manual[:-n])[0]
+		assert any(f"plays {delay_ms}.0 ms later" in f for f in late), (delay_ms, late)
+	# Evidence gating on AM (a waiting gate mutes the 1 s voice window of every over), a pre-roll
+	# delay only while the over plays, an all-muted stream: fail, never pass.
 	waiting = list(am_manual)
 	for k in complete:
-		i = int((gap + k * period - stream_lead) * rate)
-		waiting[i : i + int(1.0 * rate)] = [0] * int(1.0 * rate)
+		waiting[step_at[k] : step_at[k] + int(1.0 * rate)] = [0] * int(1.0 * rate)
 	assert any("stage-1 stream for 1.0" in f for f in am_obs(waiting)[0]), am_obs(waiting)[0]
 	delayed = list(am_manual)
 	for k in complete:
-		i, n = int((gap + k * period - stream_lead) * rate), int((over_s + 0.3) * rate)
+		i, n = step_at[k], int((over_s + 0.3) * rate)
 		delayed[i : i + n] = [residue[i]] * int(0.3 * rate) + am_manual[i : i + n - int(0.3 * rate)]
 	assert any("manual stage-1 stream" in f for f in am_obs(delayed)[0]), am_obs(delayed)[0]
 	assert any("never equals" in f for f in am_obs([0] * len(am_manual))[0])
+	# Interior mutes (400 ms at 4, 10.75, 17.5, 24.25 s, inside overs 0-3) are not stage-1 edges.
+	muted = list(am_manual)
+	for t in (4.0, 10.75, 17.5, 24.25):
+		muted[int(t * rate) : int((t + 0.4) * rate)] = [0] * int(0.4 * rate)
+	assert any("interior mute" in f for f in am_obs(muted)[0]), am_obs(muted)[0]
 	scattered = [v + (300 if 1000 <= i % int(0.5 * rate) < 1008 else 0) for i, v in enumerate(am_manual)]
-	assert any("places" in f for f in am_obs(scattered)[0]), am_obs(scattered)[0]
-	try:
-		am_obs(am_manual, manual__pcm=None)
-		raise AssertionError("ungated run judged without its manual stream")
-	except InvalidRun as exc:
-		assert "raw stream" in str(exc)
+	assert any("interior mute" in f for f in am_obs(scattered)[0]), am_obs(scattered)[0]
+	# Concentrated clusters: two separate differences at one close edge (80 ms before and 30 ms
+	# after it, both inside the slack), and a third difference in one period away from its edges.
+	c = step_at[2] + int((over_s + hang) * rate)
+	twice = list(am_manual)
+	for a in (c - int(0.08 * rate), c + int(0.03 * rate)):
+		twice[a : a + 40] = [v + 500 for v in twice[a : a + 40]]
+	assert any("more than one difference at the over 2 close edge" in f for f in am_obs(twice)[0]), am_obs(twice)[0]
+	third = list(edged)
+	third[c + int(0.6 * rate) : c + int(0.65 * rate)] = [0] * int(0.05 * rate)
+	assert any("interior mute" in f for f in am_obs(third)[0]), am_obs(third)[0]
+	# Container clock drift of either sign near the 25 ms limit (probes and the fake's progress)
+	# does not move the arrival-time check: the probe nearest the pacing epoch maps host time.
+	for d in (0.00034, -0.00034):
+		drift = dict(manual__clockProbes=probe_series(drift_per_s=d), manual__source=dict(source, progress=progress(drift_per_s=d)))
+		assert am_obs(am_manual, **drift)[0] == [], (d, am_obs(am_manual, **drift)[0])
+		assert any("plays 50.0 ms later" in f for f in am_obs([0] * 400 + am_manual[:-400], **drift)[0]), d
+	# Missing evidence is invalid: no or empty raw stream, a probe-less epoch, no open steps,
+	# timing too uncertain to show a 20 ms delay.
+	assert "raw stream" in am_invalid(am_manual, manual__pcm=None)
+	assert "raw stream" in am_invalid([])
+	assert "raw stream" in am_invalid(am_manual, [])
+	assert "nearest clock probe" in am_invalid(am_manual, manual__clockProbes=[p for p in probes if p[0] > m0 + 0.5])
+	assert "open step" in am_invalid(am_manual, [v if abs(v) < 32767 else 0 for v in am_manual])
+	slow = [[a, a + 0.016, w] for a, _b, w in probe_series(leg=0.0)[1:]]  # 8 ms half round trip each
+	assert "timing tolerance" in am_invalid(am_manual, auto__clockProbes=slow, manual__clockProbes=slow)
 	am_auto = dict(auto__status=status("off"), top__mode="am",
 		auto__pcm=struct.pack(f"<{len(am_manual)}h", *pcm(am_manual)), manual__pcm=struct.pack(f"<{len(am_manual)}h", *pcm(am_manual)))
 	assert variant(**am_auto) == []
@@ -1278,6 +1464,37 @@ def self_test():
 	assert flag and summary["maxMs"] == 250.0 and summary["medianMs"] == 200.0 and summary["lowerMaxMs"] == 180.0
 	assert nonzero_runs([0, 1, 1, 0, 0, 0, 2], 1, min_gap_s=2) == [(1, 3), (6, 7)]
 	assert parse_iso("1970-01-01T00:00:01.5Z") == 1.5 and parse_iso(format_iso(conn + 0.25)) == conn + 0.25
+	# NFM: container clock drift of either sign near the 25 ms limit stays valid, is subtracted
+	# from the drain bound (the true drain still lies in the interval), and just past the limit
+	# is invalid.
+	for d in (0.00034, -0.00034):
+		near_limit = dict(manual__clockProbes=probe_series(drift_per_s=d), manual__source=dict(source, progress=progress(drift_per_s=d)))
+		assert variant(**near_limit) == [], (d, variant(**near_limit))
+		dd = drain_of(**near_limit, **early)
+		assert holds(dd, 230) and dd["exceedsGuard"], (d, dd)
+		past = dict(manual__clockProbes=probe_series(drift_per_s=d * 1.25), manual__source=dict(source, progress=progress(drift_per_s=d * 1.25)))
+		assert "moved" in invalid(**past) or "stepped" in invalid(**past), d
+	# Replay: a fixture whose stream or observations cannot be read is INVALID and the later
+	# fixtures are still judged.
+	import contextlib
+	import io
+	import tempfile
+	with tempfile.TemporaryDirectory() as tmp:
+		out = Path(tmp)
+		(out / "am-voice" / "auto").mkdir(parents=True)
+		(out / "am-voice" / "auto" / "observations.json").write_text(json.dumps({"audioRate": 8000, "streamT0": 0.0}))
+		(out / "nfm-carrier" / "auto").mkdir(parents=True)
+		(out / "nfm-carrier" / "auto" / "observations.json").write_text("[1]")
+		(out / "nfm-voice" / "auto").mkdir(parents=True)
+		(out / "nfm-voice" / "auto" / "observations.json").write_text("{not json")
+		printed = io.StringIO()
+		with contextlib.redirect_stdout(printed):
+			code = replay(out)
+		got = json.loads((out / "verdicts.json").read_text())
+		assert code == 2 and sorted(got) == ["am-voice", "nfm-carrier", "nfm-voice"], (code, got)
+		assert "stream.s16le" in got["am-voice"]["invalid"], got
+		assert "not an object" in got["nfm-carrier"]["invalid"] and "unreadable observations" in got["nfm-voice"]["invalid"], got
+		assert printed.getvalue().count("INVALID") == 3, printed.getvalue()
 	print("ok")
 
 
@@ -1719,13 +1936,21 @@ def judge(run_dir, name, entry, guard_ms):
 		path = run_dir / mode / "observations.json"
 		if not path.exists():
 			raise InvalidRun(f"missing {path}")
-		side = json.loads(path.read_text())
+		try:
+			side = json.loads(path.read_text())
+		except (OSError, ValueError) as exc:  # unreadable, not UTF-8 or not JSON
+			raise InvalidRun(f"{name} {mode}: unreadable observations ({type(exc).__name__})") from exc
+		if not isinstance(side, dict):
+			raise InvalidRun(f"{name} {mode}: observations are not an object")
 		side["dir"] = str(run_dir / mode)
 		if "audioRate" not in side or "streamT0" not in side:
 			raise InvalidRun(f"{name} {mode}: no stream recorded")
 		side["audioRate"] = audio_rate(side)
+		try:
+			data = (run_dir / mode / "stream.s16le").read_bytes()
+		except OSError as exc:
+			raise InvalidRun(f"{name} {mode}: unreadable stream.s16le ({type(exc).__name__})") from exc
 		side["samples8k"] = to_8k(run_dir / mode / "stream.s16le", side["audioRate"]) if mode == "auto" else []
-		data = (run_dir / mode / "stream.s16le").read_bytes()
 		side["pcm"] = data  # raw s16le: the ungated (A8) stage-1 identity check
 		if mode == "manual":
 			side["samples"] = struct.unpack(f"<{len(data) // 2}h", data[: len(data) // 2 * 2])
@@ -1786,6 +2011,10 @@ def replay(out):
 			failures, notes = judge(out / name, name, entries[name], guard_ms)
 		except InvalidRun as exc:  # one fixture's missing evidence does not hide the others
 			results[name] = {"invalid": str(exc)}
+			continue
+		except (KeyError, TypeError, ValueError, IndexError, AttributeError, struct.error) as exc:
+			# Malformed recorded observations (wrong field types or shapes): invalid, never a pass.
+			results[name] = {"invalid": f"malformed observations ({type(exc).__name__}: {exc})"}
 			continue
 		results[name] = {"failures": failures, "notes": notes}
 	if not results:

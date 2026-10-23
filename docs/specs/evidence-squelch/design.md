@@ -584,6 +584,12 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   1 500 samples, 99.8 % of samples equal, 2 190 samples differing by 1 LSB, and one 0.165 s edge
   cluster. On NFM, audio played before the first over now fails "never opens without evidence"
   instead of making the run invalid. `scripts/evidence-squelch/README.md` has the details.
+  Review round 1 (2026-10-23) tightened the AM check:
+  - The content shift must match the arrival-time shift. Tolerance 7.9 ms on that run, cap 20 ms;
+    measured miss 1.3 ms. This catches a playback delay that content alignment would hide.
+  - Each difference cluster must start within 84 ms of a stage-1 gate edge of either run, placed
+    per over from the manual stream's open step, with at most one cluster per over edge. The one
+    cluster on that run started 30 ms from its close edge.
 
 ## Live acceptance plan (requirement 8.3, Main with the user)
 

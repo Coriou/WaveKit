@@ -157,17 +157,38 @@ noise) fails as "never opens without evidence"; it is not an invalid run.
 AM auto runs keep today's stage-1 auto squelch, so they are not split into overs: a closed AM
 stage 1 is not exact zeros. The -80 dBFS hold sample goes through the fast AGC and DC block and
 comes out as a low-frequency residue of about -29 dBFS RMS (peak about -21 dBFS, about 80 Hz) on
-the manual run too. Instead the AM auto stream is checked against the manual stage-1 stream. The
-driver finds the auto stream in the manual one with an exact 50 ms probe, or a short probe within
-1 LSB, searched within ±0.2 s of the arrival-time estimate, and keeps the best-agreeing shift.
-After that every sample must agree within 1 LSB. Larger differences are allowed only in clusters
-of at most 0.5 s (merged across 0.1 s), at most two per file period: the open and close edges,
-where the auto and manual thresholds differ. Evidence gating, which mutes at least the 1 s voice
-window of every over, or a pre-roll delay fails this check. AM runs have no onset, playback or
-delay verdict and no drain measurement, because the close guard belongs to the NFM evidence gate.
-Byte rate, transmission events and p99 are judged as on NFM.
+the manual run too. Instead the AM auto stream must be the manual stage-1 stream, at the same
+time:
 
-`--replay` judges every fixture directory, even when an earlier one is invalid. Each fixture
+- **Content.** The driver finds the auto stream in the manual one with an exact 50 ms probe, or a
+  short probe within 1 LSB, searched within ±0.2 s of the arrival-time estimate, and keeps the
+  best-agreeing shift. Every sample must then agree within 1 LSB.
+- **Timing.** Content alignment alone would absorb a playback delay. So the content shift must
+  match the shift from arrival times alone. Each run's anchor is the minimum over reads of
+  (read time minus samples received / rate), mapped by the low round-trip clock probe nearest the
+  fake's pacing epoch, so later wall-clock drift does not move it. The tolerance is 5 ms of
+  latency-floor jitter between runs (3.5 and 4.0 ms measured), plus both probes' half round trips,
+  plus both epoch brackets. It came to 7.9 ms on the 2.048 Msps csdr am-voice run, which missed by
+  1.3 ms. A tolerance over 20 ms is invalid. A 50 ms or 100 ms delay fails.
+- **Edges.** Larger differences are allowed only in clusters of at most 0.5 s (merged across
+  0.1 s), at most one per over edge. Each cluster must start within the edge slack of a stage-1
+  gate edge of either run: the open at `startedAt`, or the close at `startedAt` + `durationMs` +
+  hang.
+  - Edges are placed per over from that over's open step in the manual stream (the residue, then
+    a clip to full scale as the first open block meets the AGC at full gain). The AM golden does
+    not correlate with the live chain.
+  - The slack is 10 ms squelch block + one fake send chunk (event stamps move against stream
+    samples by the chunk phase) + 10 ms: 84 ms at 2.048 Msps. The am-voice cluster started 30 ms
+    from its close edge.
+
+Evidence gating (which mutes at least the 1 s voice window of every over), a pre-roll delay or an
+interior mute fails. AM runs have no onset, playback or delay verdict and no drain measurement,
+because the close guard belongs to the NFM evidence gate. Byte rate, transmission events and p99
+are judged as on NFM. A missing or empty AM stream, missing open steps, or an epoch with no probe
+within 5 s is invalid.
+
+`--replay` judges every fixture directory, even when an earlier one is invalid or unreadable (a
+missing `stream.s16le`, observations that are not a JSON object, or malformed fields). Each fixture
 prints PASS, FAIL or INVALID, and `verdicts.json` records it.
 
 Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
