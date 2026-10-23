@@ -196,6 +196,7 @@ function liveStatus() {
 			modulation: "nfm",
 			bandwidth: 12500,
 			squelch: 0,
+			squelchMode: "manual",
 			noiseReduction: "off",
 			lowPass: 0,
 			highPass: 0,

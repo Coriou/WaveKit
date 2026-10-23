@@ -59,6 +59,7 @@ async function setup() {
 	const started = new Set<FakeProcess>()
 	let autoStart = true
 	harness = await createDemodHarness({
+		config: { squelchMode: "manual" },
 		onSpawn: proc => {
 			if (autoStart) started.add(proc)
 			echo(proc, started)
