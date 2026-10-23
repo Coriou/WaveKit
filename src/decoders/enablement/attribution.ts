@@ -41,19 +41,32 @@ export function attributeInterval(e: IntervalEvidence): DropAttribution {
 		}
 		const overflow = (input.absorberOverflow ?? 0) > 0
 		if (positive === 0 && !overflow) return "none"
-		if (positive > 0 && positive < input.branchDrops.size && !overflow)
+		// Event-loop starvation or CPU at the guard: the host itself is short.
+		const hostEvidence =
+			(input.loopDelayMaxMs !== null &&
+				input.loopDelayMaxMs >= HOST_LOOP_DELAY_MS) ||
+			(input.cpuPercent !== null && input.cpuPercent >= input.cpuGuardPercent)
+		// A strict subset is consumer loss only while the host is healthy. An
+		// overloaded host starves the heavy branches while a light one (the
+		// scanner) survives, so the subset then names no slow consumer; it
+		// falls through to the upstream and host rules below. The laggard
+		// exclusion cannot tell the two apart: with an absorber, chunks reach
+		// the fanout only once every congested branch is excluded, so every
+		// branch drop lands on a laggard either way. Both classes condemn and
+		// shed alike, so this changes reporting only.
+		if (
+			positive > 0 &&
+			positive < input.branchDrops.size &&
+			!overflow &&
+			!hostEvidence
+		)
 			return "consumer"
 		// Drops on every branch do not prove host overload: a consumer release
 		// can affect siblings too. Require independent loop/CPU evidence below;
 		// otherwise retain link evidence or fail closed to unknown.
 		if ((input.upstreamDropDelta ?? 0) > 0) return "unknown"
 		// Event-loop starvation makes ingest gaps unreliable link evidence.
-		if (
-			(input.loopDelayMaxMs !== null &&
-				input.loopDelayMaxMs >= HOST_LOOP_DELAY_MS) ||
-			(input.cpuPercent !== null && input.cpuPercent >= input.cpuGuardPercent)
-		)
-			return "host"
+		if (hostEvidence) return "host"
 		if (
 			input.maxGapMs !== null &&
 			input.loopDelayMaxMs !== null &&
