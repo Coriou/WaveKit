@@ -146,10 +146,29 @@ of both bounds are reported against `CLOSE_GUARD_MS`, flagged `EXCEEDS GUARD` on
 A non-squelch close reason, two closes in one over, or no observed open-then-closed level is
 invalid.
 
-Evidence squelch is NFM only. `autoSquelch.state` must be `off` on AM runs and manual runs and
-`waiting`/`open` on NFM auto runs (reaching `open` exactly on expected-open fixtures). AM auto
-runs use today's stage-1 auto squelch: `am-voice` and `am-carrier` both open on the carrier and
-play every over, with no onset (pre-roll) check.
+Evidence squelch is NFM only (amendment A8; the driver's gated set is checked against
+`LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` by the self-test). `autoSquelch.state` must be `off` on AM
+runs and manual runs and `waiting`/`open` on NFM auto runs (reaching `open` exactly on
+expected-open fixtures).
+
+On NFM auto runs, audio played before the first over's onset (the gate opened on pre-over
+noise) fails as "never opens without evidence"; it is not an invalid run.
+
+AM auto runs keep today's stage-1 auto squelch, so they are not split into overs: a closed AM
+stage 1 is not exact zeros. The -80 dBFS hold sample goes through the fast AGC and DC block and
+comes out as a low-frequency residue of about -29 dBFS RMS (peak about -21 dBFS, about 80 Hz) on
+the manual run too. Instead the AM auto stream is checked against the manual stage-1 stream. The
+driver finds the auto stream in the manual one with an exact 50 ms probe, or a short probe within
+1 LSB, searched within ±0.2 s of the arrival-time estimate, and keeps the best-agreeing shift.
+After that every sample must agree within 1 LSB. Larger differences are allowed only in clusters
+of at most 0.5 s (merged across 0.1 s), at most two per file period: the open and close edges,
+where the auto and manual thresholds differ. Evidence gating, which mutes at least the 1 s voice
+window of every over, or a pre-roll delay fails this check. AM runs have no onset, playback or
+delay verdict and no drain measurement, because the close guard belongs to the NFM evidence gate.
+Byte rate, transmission events and p99 are judged as on NFM.
+
+`--replay` judges every fixture directory, even when an earlier one is invalid. Each fixture
+prints PASS, FAIL or INVALID, and `verdicts.json` records it.
 
 Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
 state, stage-1 transmission for played audio, a closed over without a played tail) and a stream or WebSocket that ends before the

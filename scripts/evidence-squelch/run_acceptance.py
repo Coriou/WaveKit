@@ -70,6 +70,9 @@ CLOCK_PORT = 3002
 CLOCK_MAX_RTT_S = 0.020
 # Fixtures whose over has no carrier: the manual baseline may legitimately see no transmission.
 CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
+# LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS (amendment A8: NFM only); the self-test checks the
+# contract. Other modulations in auto keep today's stage-1 auto squelch.
+EVIDENCE_MODULATIONS = frozenset(("nfm",))
 # The status rate (fractional, e.g. 2.048 Msps / 82 = 24 975.61 Hz) must match the WAV header
 # rate (integer) within this.
 RATE_MATCH_HZ = 1.0
@@ -92,6 +95,25 @@ EMIT_LAG_S = 0.002
 RESAMPLE_CUTOFF = 0.45
 RESAMPLE_HALF_WIDTH = 16
 RESAMPLE_PHASES = 512
+# Ungated (AM, amendment A8) auto runs are judged against the manual run as one stage-1 stream:
+# a closed AM stage 1 is not exact zeros (the -80 dBFS hold through the fast AGC and DC block
+# leaves a low-frequency residue near -29 dBFS on both runs), so played audio cannot be split
+# into overs. The auto stream is located in the manual one by an exact match of a
+# STAGE1_PROBE_S probe (or, failing that, a short probe within the LSB tolerance) within
+# STAGE1_SEARCH_S of the arrival-time estimate, keeping the best-agreeing shift; then every sample
+# must agree within STAGE1_LSB_TOLERANCE (AGC state after a block-different edge), and larger
+# differences may only form clusters (merged across STAGE1_MERGE_S) no longer than
+# STAGE1_EDGE_WINDOW_S, at most two per file period (the open and the close edge: auto and
+# manual thresholds differ). Evidence gating (a waiting gate mutes at least the 1 s voice
+# window per over) or a pre-roll delay breaks this. The search is bounded because the residue
+# is periodic: an unbounded search could align a delayed over (am-voice 2.048 Msps csdr: the
+# estimate was 323 samples, 13 ms, off the true shift).
+STAGE1_PROBE_S = 0.05
+STAGE1_PROBES = 8
+STAGE1_SEARCH_S = 0.2
+STAGE1_LSB_TOLERANCE = 1
+STAGE1_MERGE_S = 0.1
+STAGE1_EDGE_WINDOW_S = 0.5
 
 
 class InvalidRun(Exception):
@@ -373,12 +395,15 @@ def arrival_time(arrivals, byte_index):
 
 
 def played_overs(side, runs, clock, rate):
-	"""Per played run: its over, the stage-1 start (event startedAt) after the source onset and
-	the delay of its first and last sample behind the source. Every played run must have a
-	recorded stage-1 transmission starting at its over."""
+	"""Evidence-gated (NFM) auto run. Per played run: its over, the stage-1 start (event
+	startedAt) after the source onset and the delay of its first and last sample behind the
+	source. Returns (overs, early): a run whose first sample arrives before the first over's
+	onset (over index < 0: only pre-over noise has been received) is returned in `early` as
+	played audio without evidence, a failure for the caller. Every other played run must have a
+	recorded stage-1 transmission starting at its over, else the run is invalid."""
 	starts = sorted(parse_iso(e["startedAt"]) for e in side.get("transmissions", [])
 		if isinstance(e.get("startedAt"), str))
-	out = []
+	out, early = [], []
 	for s, e in runs:
 		first = arrival_time(side["arrivals"], int(s * rate / REF_RATE) * 2)
 		last = arrival_time(side["arrivals"], int((e - 1) * rate / REF_RATE) * 2)
@@ -386,12 +411,115 @@ def played_overs(side, runs, clock, rate):
 			raise InvalidRun("played sample without an arrival time")
 		w_first, w_last = first + clock["toWall"], last + clock["toWall"]
 		k, onset = over_at(clock, w_first)
+		if k < 0:
+			early.append({"startS": w_first - clock["connected"], "lengthS": (e - s) / REF_RATE,
+				"firstOnsetS": clock["onset"]})
+			continue
 		stage1 = [t for t in starts if onset - ASSOC_SLACK_S <= t <= onset + MAX_DELAY_S]
-		if k < 0 or not stage1:
+		if not stage1:
 			raise InvalidRun(f"no stage-1 transmission recorded for played over {k}")
 		out.append({"over": k, "stage1S": stage1[0] - onset, "startS": w_first - onset,
 			"endS": w_last - (onset + (e - 1 - s) / REF_RATE)})
-	return out
+	return out, early
+
+
+def verdict_early(early):
+	"""Evidence-gated run: audio played before the first over's onset was let through on
+	pre-over noise, a failure of "never opens without evidence" (requirement 1.4)."""
+	if not early:
+		return None
+	first = early[0]
+	return (f"played {len(early)} run(s) before the first over without evidence (never opens without"
+		f" evidence): first at {first['startS']:.3f} s after connect, {first['lengthS']:.3f} s long,"
+		f" first over onset {first['firstOnsetS']:.3f} s")
+
+
+def stream_start_s(side, clock):
+	"""Estimated source time (s after the fake's pacing epoch) of a stream's first sample: its
+	first read's arrival minus the samples it held. Late by the stream latency; it only seeds
+	the alignment search of verdict_stage1_identity."""
+	arrivals = side.get("arrivals") or []
+	if not arrivals:
+		raise InvalidRun("no stream arrivals to align the stage-1 streams")
+	t, total = arrivals[0]
+	return t + clock["toWall"] - clock["connected"] - (total / 2) / side["audioRate"]
+
+
+def verdict_stage1_identity(auto_pcm, manual_pcm, rate, estimate, period_s, min_periods=MIN_OVERS):
+	"""Ungated (AM, A8) auto run against the manual run: the same stage-1 stream (see
+	STAGE1_* above). auto_pcm and manual_pcm are raw s16le bytes; estimate is the expected
+	manual sample index of auto sample 0. Returns (failure or None, notes)."""
+	from array import array
+
+	a, m = array("h"), array("h")
+	a.frombytes(auto_pcm[: len(auto_pcm) // 2 * 2])
+	m.frombytes(manual_pcm[: len(manual_pcm) // 2 * 2])
+	if sys.byteorder != "little":
+		a.byteswap()
+		m.byteswap()
+	probe_n, search = max(1, int(STAGE1_PROBE_S * rate)), int(STAGE1_SEARCH_S * rate)
+	tol = STAGE1_LSB_TOLERANCE
+	mb = m.tobytes()
+	probes = [p for p in range(0, max(0, len(a) - probe_n), max(1, int(2 * rate)))
+		if len(set(a[p : p + probe_n])) > 2]  # a flat (muted) probe matches anywhere
+	candidates = set()
+	for p in probes[:STAGE1_PROBES]:
+		needle = a[p : p + probe_n].tobytes()
+		lo, hi = max(0, p + estimate - search), min(len(m), p + estimate + search + probe_n)
+		at = mb.find(needle, 2 * lo, 2 * hi)
+		while at >= 0:
+			if at % 2 == 0:
+				candidates.add(at // 2 - p)
+			at = mb.find(needle, at + 1, 2 * hi)
+	if not candidates:  # ±1 LSB differences everywhere: a short probe within tolerance
+		short = min(probe_n, 64)
+		for p in probes[:4]:
+			probe = a[p : p + short]
+			for d in range(estimate - search, estimate + search + 1):
+				j = p + d
+				if j < 0 or j + short > len(m):
+					continue
+				if all(-tol <= x - y <= tol for x, y in zip(probe, m[j : j + short])):
+					candidates.add(d)
+
+	def agreement(d):
+		lo, hi = max(0, -d), min(len(a), len(m) - d)
+		idx = range(lo, hi, 97)
+		return sum(1 for i in idx if -tol <= a[i] - m[i + d] <= tol) / max(1, len(idx))
+
+	# A periodic residue matches one residue period apart too: keep the best-agreeing shift.
+	scored = sorted(((agreement(d), -abs(d - estimate), d) for d in candidates), reverse=True)
+	if not scored or scored[0][0] < 0.5:
+		return "auto stream never equals the manual stage-1 stream (evidence-gated or delayed on an ungated modulation)", {}
+	shift = scored[0][2]
+	start, end = max(0, -shift), min(len(a), len(m) - shift)
+	overlap_s = (end - start) / rate
+	if overlap_s < min_periods * period_s:
+		raise InvalidRun(f"auto and manual streams overlap {overlap_s:.1f} s, need {min_periods} periods")
+	merge = int(STAGE1_MERGE_S * rate)
+	clusters, lsb = [], 0
+	for i in range(start, end):
+		d = a[i] - m[i + shift]
+		if d == 0:
+			continue
+		if -tol <= d <= tol:
+			lsb += 1
+			continue
+		if clusters and i - clusters[-1][1] <= merge:
+			clusters[-1][1] = i
+		else:
+			clusters.append([i, i])
+	longest = max(((e - s + 1) / rate for s, e in clusters), default=0.0)
+	allowed = 2 * (math.ceil(overlap_s / period_s) + 1)
+	notes = {"shiftSamples": shift, "estimateSamples": estimate, "overlapS": overlap_s, "lsbDiffs": lsb,
+		"edgeClusters": len(clusters), "longestClusterS": longest, "allowedClusters": allowed}
+	if longest > STAGE1_EDGE_WINDOW_S:
+		s, e = max(clusters, key=lambda c: c[1] - c[0])
+		return (f"auto differs from the manual stage-1 stream for {longest:.3f} s from auto sample {s}"
+			f" (limit {STAGE1_EDGE_WINDOW_S} s around a stage-1 edge)"), notes
+	if len(clusters) > allowed:
+		return f"auto differs from the manual stage-1 stream in {len(clusters)} places (at most {allowed} stage-1 edges)", notes
+	return None, notes
 
 
 def verdict_playback(overs, eligible):
@@ -442,7 +570,7 @@ def verdict_auto_state(statuses, squelch_mode, modulation, expect_open):
 	if not states:
 		raise InvalidRun(f"no autoSquelch state in {squelch_mode} status samples")
 	seen = set(states)
-	if squelch_mode != "auto" or modulation != "nfm":
+	if squelch_mode != "auto" or modulation not in EVIDENCE_MODULATIONS:
 		return None if seen == {"off"} else f"autoSquelch {sorted(seen)} on {modulation} {squelch_mode}, want off"
 	if seen - {"waiting", "open"}:
 		return f"autoSquelch {sorted(seen)} on nfm auto, want waiting/open"
@@ -591,7 +719,7 @@ def verdict_drain(per_over, guard_ms):
 def expects_open(modulation, expect):
 	"""AM is not evidence-gated (A8): stage-1 auto squelch opens on the carrier and passes audio
 	for am-voice and am-carrier alike. NFM follows the manifest."""
-	return modulation == "am" or expect != "none"
+	return modulation not in EVIDENCE_MODULATIONS or expect != "none"
 
 
 def evaluate(obs, guard_ms):
@@ -610,13 +738,28 @@ def evaluate(obs, guard_ms):
 	for mode in ("auto", "manual"):
 		if f := verdict_auto_state(obs[mode].get("status", []), mode, modulation, expect_open):
 			failures.append(f)
-	if expect_open and runs:
-		if modulation != "am":  # pre-roll onset is an evidence-squelch property (NFM only)
-			lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs]
-			if f := verdict_onset(lags):
-				failures.append(f)
-			notes["onsetLagsS"] = lags
-		overs = played_overs(auto, runs, clocks["auto"], rate)
+	gated = modulation in EVIDENCE_MODULATIONS
+	if not gated:
+		# A8: auto is today's stage-1 auto squelch, judged as one stream against the manual
+		# stage-1 run; a closed AM stage 1 is not exact silence, so there are no overs to split.
+		if not isinstance(auto.get("pcm"), (bytes, bytearray)) or not isinstance(manual.get("pcm"), (bytes, bytearray)):
+			raise InvalidRun("no raw stream to compare the ungated auto run with its manual baseline")
+		estimate = round((stream_start_s(auto, clocks["auto"]) - stream_start_s(manual, clocks["manual"])) * rate)
+		f, notes["stage1Identity"] = verdict_stage1_identity(auto["pcm"], manual["pcm"], rate, estimate, clocks["auto"]["period"])
+		if f:
+			failures.append(f)
+	elif expect_open and runs:
+		overs, early = played_overs(auto, runs, clocks["auto"], rate)
+		if f := verdict_early(early):
+			failures.append(f)
+		if early:
+			notes["earlyRuns"] = early
+		# Pre-roll onset is an evidence-squelch property (NFM only). Early runs come first and
+		# have no over onset to align.
+		lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs[len(early) :]]
+		if f := verdict_onset(lags):
+			failures.append(f)
+		notes["onsetLagsS"] = lags
 		notes["overs"] = overs
 		if auto["arrivals"]:
 			eligible = complete_overs(auto["arrivals"][0][0], auto["arrivals"][-1][0], clocks["auto"], MAX_DELAY_S)
@@ -624,10 +767,11 @@ def evaluate(obs, guard_ms):
 			eligible = set()
 		if f := verdict_playback(overs, eligible):
 			failures.append(f)
-		f, worst = verdict_delay(overs)
-		notes["maxDelayS"] = worst
-		if f:
-			failures.append(f)
+		if overs or not early:  # only early audio: already failed, no over to measure delay on
+			f, worst = verdict_delay(overs)
+			notes["maxDelayS"] = worst
+			if f:
+				failures.append(f)
 	f, rates = verdict_byte_rate(auto["arrivals"], byte_rate)
 	notes["byteRates"] = rates
 	if f:
@@ -636,6 +780,12 @@ def evaluate(obs, guard_ms):
 		failures.append(f)
 	if f := verdict_p99(auto["p99Ms"], manual["p99Ms"]):
 		failures.append(f)
+	if not gated:
+		# The close guard is the evidence gate's (NFM); a closed AM stage 1 leaves no exact-zero
+		# tail edge to measure a drain on.
+		notes["drain"] = None
+		notes["drainSkipped"] = f"{modulation} is not evidence-gated (A8): no close guard, no drain"
+		return failures, notes
 	per_over = drain_per_over(manual.get("samples", []), manual["audioRate"], manual.get("arrivals", []),
 		manual["transmissions"], manual.get("levels", []), clocks["manual"], obs["hangS"], obs["carrier"], ws_overs(manual, clocks["manual"]))
 	f, notes["drain"] = verdict_drain(per_over, guard_ms)
@@ -965,12 +1115,85 @@ def self_test():
 		auto__transmissions=[], manual__transmissions=[]) == []
 	# A8: evidence squelch is NFM only. AM plays every over on stage-1 (no onset/pre-roll check,
 	# am-carrier included) with autoSquelch off; NFM auto must be waiting/open.
-	am_auto = dict(auto__status=status("off"), top__mode="am")
+	# AM auto is judged as one stage-1 stream against manual: a closed AM stage 1 is not exact
+	# zeros (a low-frequency residue on both runs), so there are no exact-zero overs to split.
+	residue = [(i % 80) - 40 or 1 for i in range(int(stream_s * rate))]
+	am_manual = [int(8000 * noise()) + r if v else r for v, r in zip(manual_stream(0.05), residue)]
+
+	def pcm(values):
+		return [max(-32768, min(32767, int(v))) for v in values]
+
+	def am_obs(auto_values, manual_values=None, **changes):
+		obs = json.loads(json.dumps(base))
+		obs["mode"] = "am"
+		obs["auto"]["status"] = status("off")
+		obs["auto"]["pcm"] = struct.pack(f"<{len(auto_values)}h", *pcm(auto_values))
+		mv = am_manual if manual_values is None else manual_values
+		obs["manual"]["pcm"] = struct.pack(f"<{len(mv)}h", *pcm(mv))
+		for path, value in changes.items():
+			side, key = path.split("__")
+			if side == "top":
+				obs[key] = value
+			else:
+				obs[side][key] = value
+		return evaluate(obs, 200)
+
+	assert am_obs(am_manual)[0] == [], am_obs(am_manual)[0]
+	_f, am_notes = am_obs(am_manual)
+	assert am_notes["drain"] is None and "A8" in am_notes["drainSkipped"], am_notes
+	# The recorded am-voice shape: the auto stream starts 40 samples later in the same stage-1
+	# stream, ±1 LSB AGC differences anywhere, one 0.2 s edge cluster per over (thresholds differ).
+	shifted = am_manual[40:]
+	assert am_obs(shifted)[1]["stage1Identity"]["shiftSamples"] == 40
+	assert am_obs(shifted)[0] == []
+	lsb = [v + (1 if i % 7 == 0 else 0) for i, v in enumerate(am_manual)]
+	assert am_obs(lsb)[0] == []
+	edges = list(am_manual)
+	for k in complete:
+		c = int((gap + k * period + over_s + hang - stream_lead) * rate)
+		edges[c : c + int(0.2 * rate)] = [v + 500 for v in edges[c : c + int(0.2 * rate)]]
+	assert am_obs(edges)[0] == [], am_obs(edges)[0]
+	# Evidence gating on AM (a waiting gate mutes the 1 s voice window of every over), a
+	# pre-roll delay, an all-muted stream and scattered differences all fail; never pass.
+	waiting = list(am_manual)
+	for k in complete:
+		i = int((gap + k * period - stream_lead) * rate)
+		waiting[i : i + int(1.0 * rate)] = [0] * int(1.0 * rate)
+	assert any("stage-1 stream for 1.0" in f for f in am_obs(waiting)[0]), am_obs(waiting)[0]
+	delayed = list(am_manual)
+	for k in complete:
+		i, n = int((gap + k * period - stream_lead) * rate), int((over_s + 0.3) * rate)
+		delayed[i : i + n] = [residue[i]] * int(0.3 * rate) + am_manual[i : i + n - int(0.3 * rate)]
+	assert any("manual stage-1 stream" in f for f in am_obs(delayed)[0]), am_obs(delayed)[0]
+	assert any("never equals" in f for f in am_obs([0] * len(am_manual))[0])
+	scattered = [v + (300 if 1000 <= i % int(0.5 * rate) < 1008 else 0) for i, v in enumerate(am_manual)]
+	assert any("places" in f for f in am_obs(scattered)[0]), am_obs(scattered)[0]
+	try:
+		am_obs(am_manual, manual__pcm=None)
+		raise AssertionError("ungated run judged without its manual stream")
+	except InvalidRun as exc:
+		assert "raw stream" in str(exc)
+	am_auto = dict(auto__status=status("off"), top__mode="am",
+		auto__pcm=struct.pack(f"<{len(am_manual)}h", *pcm(am_manual)), manual__pcm=struct.pack(f"<{len(am_manual)}h", *pcm(am_manual)))
 	assert variant(**am_auto) == []
 	assert variant(auto__samples8k=recorded(int(0.03 * rate)), **am_auto) == []
 	assert variant(top__expect="none", **am_auto) == []
 	assert any("opened" in f for f in variant(top__expect="none", auto__samples8k=silent, **am_auto))
-	assert any("autoSquelch" in f for f in variant(top__mode="am"))
+	assert any("autoSquelch" in f for f in variant(**dict(am_auto, auto__status=status("waiting", "open"))))
+	# The driver's gated set is the frozen contract's.
+	contract = (ROOT.parents[1] / "packages/api-types/src/live-audio.ts").read_text()
+	listed = re.search(r"LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS\b[^=]*=\s*Object\.freeze\(\[([^\]]*)\]\)", contract)
+	assert listed and frozenset(re.findall(r'"(\w+)"', listed[1])) == EVIDENCE_MODULATIONS, listed
+	# NFM (gated): audio played before the first over (gate open on pre-over noise) is a failure
+	# of "never opens without evidence", not an invalid run, with or without the overs after it.
+	noisy = recorded()
+	noisy[int(0.5 * rate) : int(1.5 * rate)] = [noise() for _ in range(int(1.0 * rate))]
+	early = variant(auto__samples8k=noisy)
+	assert len(early) == 1 and "before the first over" in early[0], early
+	only_early = [0.0] * int(stream_s * rate)
+	only_early[int(0.5 * rate) : int(1.5 * rate)] = noisy[int(0.5 * rate) : int(1.5 * rate)]
+	failed = variant(auto__samples8k=only_early)
+	assert any("before the first over" in f for f in failed) and any("no playback" in f for f in failed), failed
 	assert any("autoSquelch" in f for f in variant(auto__status=status("off")))
 	assert any("autoSquelch" in f for f in variant(manual__status=status("waiting")))
 	assert any("never open" in f for f in variant(auto__status=status("waiting")))
@@ -1502,8 +1725,9 @@ def judge(run_dir, name, entry, guard_ms):
 			raise InvalidRun(f"{name} {mode}: no stream recorded")
 		side["audioRate"] = audio_rate(side)
 		side["samples8k"] = to_8k(run_dir / mode / "stream.s16le", side["audioRate"]) if mode == "auto" else []
+		data = (run_dir / mode / "stream.s16le").read_bytes()
+		side["pcm"] = data  # raw s16le: the ungated (A8) stage-1 identity check
 		if mode == "manual":
-			data = (run_dir / mode / "stream.s16le").read_bytes()
 			side["samples"] = struct.unpack(f"<{len(data) // 2}h", data[: len(data) // 2 * 2])
 		obs[mode] = side
 	obs["hangS"] = squelch_hang_ms() / 1000
@@ -1513,6 +1737,9 @@ def judge(run_dir, name, entry, guard_ms):
 def report(out, results):
 	(out / "verdicts.json").write_text(json.dumps(results, indent=2) + "\n")
 	for name, r in results.items():
+		if "invalid" in r:
+			print(f"{name}: INVALID {r['invalid']}")
+			continue
 		print(f"{name}: {'PASS' if not r['failures'] else 'FAIL'} {json.dumps(r['notes'])}")
 		drain = r["notes"].get("drain")
 		if drain:
@@ -1521,6 +1748,8 @@ def report(out, results):
 				f" (CLOSE_GUARD_MS {drain['guardMs']}){' EXCEEDS GUARD' if drain['exceedsGuard'] else ''}")
 		for f in r["failures"]:
 			print("  - " + f)
+	if any("invalid" in r for r in results.values()):
+		return 2
 	return 1 if any(r["failures"] for r in results.values()) else 0
 
 
@@ -1553,7 +1782,11 @@ def replay(out):
 	guard_ms = contract_ms("CLOSE_GUARD_MS")
 	results = {}
 	for name in sorted(p.name for p in out.iterdir() if p.is_dir() and p.name in entries):
-		failures, notes = judge(out / name, name, entries[name], guard_ms)
+		try:
+			failures, notes = judge(out / name, name, entries[name], guard_ms)
+		except InvalidRun as exc:  # one fixture's missing evidence does not hide the others
+			results[name] = {"invalid": str(exc)}
+			continue
 		results[name] = {"failures": failures, "notes": notes}
 	if not results:
 		raise InvalidRun("no recorded fixtures under " + str(out))

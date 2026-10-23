@@ -573,6 +573,17 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
 - A CPU-quota variant (as the link-burst acceptance) stands in for a weak host. The record goes
   to `docs/engineering/EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md`. Every scratch container, network
   and volume is removed after each run.
+- Amendment A8 (2026-10-23), driver note. AM auto runs are judged as stage-1 auto rather than as
+  evidence-gated overs. The 2.048 Msps csdr `am-voice` run was invalid ("no stage-1 transmission
+  recorded for played over -1") because a closed AM stage 1 is not exact zeros. The -80 dBFS hold
+  through the fast AGC and DC block leaves about -29 dBFS RMS of low-frequency residue on both
+  the auto and the manual run, so the whole 130 s stream was one played run that started before
+  over 0. The driver now requires `autoSquelch` `off` and an auto stream equal to the manual
+  stage-1 stream: within 1 LSB, apart from edge clusters of at most 0.5 s, at most two per period.
+  It skips the onset, playback, delay and drain verdicts on AM. Measured on that run: aligned shift
+  1 500 samples, 99.8 % of samples equal, 2 190 samples differing by 1 LSB, and one 0.165 s edge
+  cluster. On NFM, audio played before the first over now fails "never opens without evidence"
+  instead of making the run invalid. `scripts/evidence-squelch/README.md` has the details.
 
 ## Live acceptance plan (requirement 8.3, Main with the user)
 
