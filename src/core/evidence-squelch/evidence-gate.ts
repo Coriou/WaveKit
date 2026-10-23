@@ -98,16 +98,46 @@ function toneKind(
 export function judgeEvidence(
 	input: JudgeEvidenceInput,
 ): LiveAudioAutoSquelchEvidence | null {
-	const scratch: ToneScratch = { ctcssHz: null, dcs: null, audioSeconds: 0 }
-	const tone = toneKind(input.modulation, input.tone, input.audioMs, scratch)
-	if (tone !== null) return tone
-	if (input.framesFinite !== true) return null
-	if (dataLike(input.stats)) return null
+	// Fail closed on malformed input: unknown modulation, non-finite or impossible counts.
+	const modulation: unknown = input.modulation
+	if (modulation !== "nfm" && modulation !== "am") return null
 	const noted = input.notedBlocks
 	const quiet = input.quietBlocks
+	if (
+		!Number.isFinite(input.audioMs) ||
+		!Number.isInteger(noted) ||
+		!Number.isInteger(quiet) ||
+		quiet < 0 ||
+		quiet > noted
+	)
+		return null
+	const scratch: ToneScratch = { ctcssHz: null, dcs: null, audioSeconds: 0 }
+	const tone = toneKind(modulation, input.tone, input.audioMs, scratch)
+	if (tone !== null) return tone
+	// A10: frame finiteness gates voice only, checked both by flag and by value.
+	if (input.framesFinite !== true || !voiceFramesFinite(input.stats))
+		return null
+	if (dataLike(input.stats)) return null
 	if (!(noted > 0 && quiet >= ANALOG_TRIAL_MIN_QUIET_FRACTION * noted))
 		return null
 	return isVoice(input.stats) ? "voice" : null
+}
+
+/** At least one frame, each with finite `audioDb`, `syllabic` and `cluster`. */
+function voiceFramesFinite(stats: AnalogTrialStats): boolean {
+	if (stats === null || typeof stats !== "object") return false
+	const frames: unknown = (stats as { frames?: unknown }).frames
+	if (!Array.isArray(frames) || frames.length === 0) return false
+	for (const frame of frames as readonly (AnalogTrialFrame | null)[]) {
+		if (frame === null || typeof frame !== "object") return false
+		if (
+			!Number.isFinite(frame.audioDb) ||
+			!Number.isFinite(frame.syllabic) ||
+			!Number.isFinite(frame.cluster)
+		)
+			return false
+	}
+	return true
 }
 
 type GateState = "idle" | "waiting" | "open"

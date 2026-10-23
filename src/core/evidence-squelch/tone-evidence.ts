@@ -61,6 +61,8 @@ export class ToneEvidence {
 	private lastBit = 0
 	private dcsActive = false
 	private dcsLastQualifiedBit = 0
+	private lastReading = -1
+	private lastHits = 0
 	/** The kind qualified most recently (preferred by `current()` while both are current). */
 	private latest: "ctcss" | "dcs" | null = null
 
@@ -100,6 +102,8 @@ export class ToneEvidence {
 		this.lastBit = 0
 		this.dcsActive = false
 		this.dcsLastQualifiedBit = 0
+		this.lastReading = -1
+		this.lastHits = 0
 		this.latest = null
 		this.ctcssRecord.index = -1
 		this.ctcssRecord.hz = 0
@@ -124,7 +128,14 @@ export class ToneEvidence {
 			hits >= LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT
 				? STANDARD_DCS.get(reading)
 				: undefined
-		if (standard !== undefined) {
+		// A new qualifying word: the chain's reading or hit count changed on this bit. Between
+		// word boundaries `wordHits()` keeps its value, which must not refresh the hold.
+		const newWord =
+			standard !== undefined &&
+			(reading !== this.lastReading || hits !== this.lastHits)
+		this.lastReading = reading
+		this.lastHits = hits
+		if (standard !== undefined && newWord) {
 			this.dcsLastQualifiedBit = bits
 			if (this.dcsActive && this.dcsRecord.packed === reading) return
 			this.dcsRecord.packed = reading

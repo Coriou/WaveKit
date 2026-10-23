@@ -9,11 +9,14 @@ import type {
 	EvidenceGatePort,
 	EvidencePcmFormat,
 } from "../../../../src/core/evidence-squelch/contract.js"
+import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
+import { classifyAnalogTrial } from "../../../../src/core/scanner/analog-trial.js"
 import type { AnalogTrialFrame } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import {
 	carrierSilence,
 	ctcssMix,
 	dcsMix,
+	fskBursts,
 	mix,
 	toPcm,
 	voiceLike,
@@ -248,6 +251,92 @@ describe("EvidenceGate", () => {
 				framesFinite: false,
 			}),
 		).toBe("ctcss")
+	})
+
+	it("judgeEvidence fails closed on malformed input", () => {
+		const frames: AnalogTrialFrame[] = Array.from({ length: 20 }, () => ({
+			carrierDb: 0,
+			hfNoiseDb: 0,
+			audioDb: -5,
+			syllabic: 1,
+			cluster: 0,
+		}))
+		const good = {
+			modulation: "nfm" as const,
+			stats: { mode: "nfm" as const, frames, gapSamples: 0, floorDb: -100 },
+			tone: null,
+			audioMs: 1_000,
+			quietBlocks: 100,
+			notedBlocks: 100,
+			framesFinite: true,
+		}
+		expect(judgeEvidence(good)).toBe("voice")
+		for (const bad of [
+			{ quietBlocks: Infinity },
+			{ notedBlocks: Infinity, quietBlocks: Infinity },
+			{ quietBlocks: NaN },
+			{ notedBlocks: NaN },
+			{ quietBlocks: 101 },
+			{ quietBlocks: -1 },
+			{ quietBlocks: 50.5 },
+			{ audioMs: NaN },
+			{ modulation: "wfm" as unknown as "nfm" },
+		])
+			expect(judgeEvidence({ ...good, ...bad })).toBeNull()
+		const nanCluster = frames.map((f, i) =>
+			i === 3 ? { ...f, cluster: NaN } : f,
+		)
+		expect(
+			judgeEvidence({ ...good, stats: { ...good.stats, frames: nanCluster } }),
+		).toBeNull()
+		expect(
+			judgeEvidence({ ...good, stats: { ...good.stats, frames: [] } }),
+		).toBeNull()
+		// Unknown modulation also blocks a qualified tone.
+		expect(
+			judgeEvidence({
+				...good,
+				modulation: "wfm" as unknown as "nfm",
+				tone: { kind: "ctcss", index: 0, hz: CTCSS_HZ[0] ?? 67 },
+			}),
+		).toBeNull()
+	})
+
+	it("syllabic-rate burst FSK on a quiet carrier: gate agrees with the scanner judge", () => {
+		// Escalated: 2FSK bursts at 100 ms on / 100 ms off look syllabic to the pinned analog
+		// trial judge (median syllabic about 0.59, audio about -22 dB, cluster about 0.34), so
+		// `classifyAnalogTrial` calls the same statistics `heard`. The gate must not diverge from
+		// the pinned judge; this pins agreement, not the desired outcome (requirement 1.4).
+		const audio = fskBursts({
+			rate: GATE_RATE,
+			seconds: 4,
+			levels: 2,
+			baud: 1_200,
+			burstMs: 100,
+			gapMs: 100,
+			seed: 5,
+		})
+		const gate = nfm()
+		driveOpen(gate, toPcm(audio, "f32le"), "f32le", quiet)
+		const meter = new VoiceFrameMeter({ gain: 2 })
+		const decimated = fskBursts({
+			rate: 8_000,
+			seconds: 1,
+			levels: 2,
+			baud: 1_200,
+			burstMs: 100,
+			gapMs: 100,
+			seed: 5,
+		})
+		const window: AnalogTrialFrame[] = []
+		for (const v of decimated)
+			if (meter.push(v))
+				window.push({ ...meter.frame, carrierDb: -20, hfNoiseDb: -10 })
+		const scanner = classifyAnalogTrial(
+			{ mode: "nfm", frames: window, gapSamples: 0, floorDb: -100 },
+			{ ctcssHz: null, dcs: null, audioSeconds: 1 },
+		)
+		expect(scanner === "heard").toBe(gate.evidence === "voice")
 	})
 
 	it("an empty quiet window is not quiet (A11)", () => {

@@ -419,6 +419,27 @@ describe("evidence gate stream properties", () => {
 				carrier: false,
 			},
 			{ pcm: nrz4(SECONDS, 8), carrier: true },
+			// Audio FSK on a quiet carrier that must reject: continuous, and TDMA-like 30 ms
+			// bursts (syllabic-rate bursts are escalated; see evidence-gate.test.ts).
+			...(
+				[
+					[2, 1_200, 1_000, 0],
+					[4, 4_800, 1_000, 0],
+					[2, 512, 30, 30],
+					[4, 4_800, 30, 30],
+				] as const
+			).map(([levels, baud, burstMs, gapMs]) => ({
+				pcm: fskBursts({
+					rate: RATE,
+					seconds: SECONDS,
+					levels,
+					baud,
+					burstMs,
+					gapMs,
+					seed: 6,
+				}),
+				carrier: true,
+			})),
 			{
 				pcm: fskBursts({
 					rate: RATE,

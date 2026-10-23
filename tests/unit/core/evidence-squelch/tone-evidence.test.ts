@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { dcsTwin } from "../../../../src/core/audio-tones/dcs.js"
+import {
+	DCS_WORD_BITS,
+	DcsDecoder,
+	dcsTwin,
+} from "../../../../src/core/audio-tones/dcs.js"
 import { ToneEvidence } from "../../../../src/core/evidence-squelch/tone-evidence.js"
 import type { ToneReading } from "../../../../src/core/evidence-squelch/tone-evidence.js"
 import {
@@ -103,6 +107,40 @@ describe("ToneEvidence", () => {
 					}),
 				).first,
 			).toBe(-1)
+	})
+
+	it("DCS hold expires 2 word periods after the last qualifying word", () => {
+		const signal = new Float32Array(RATE * 3)
+		signal.set(
+			dcsMix({ rate: RATE, seconds: 1.5, code: 0o23, polarity: "normal" }),
+		)
+		// A twin decoder on the same input shows the bit clock and the word hits.
+		const probe = new DcsDecoder()
+		const tone = new ToneEvidence()
+		const hold = DCS_WORD_BITS * 2
+		let lastBit = 0
+		let lastHits = 0
+		let lastReading = -1
+		let lastWordBit = -1
+		const activeAtBit = new Map<number, boolean>()
+		for (const sample of signal) {
+			probe.pushSample(sample)
+			tone.push(sample)
+			const bits = probe.bitCount()
+			if (bits === lastBit) continue
+			lastBit = bits
+			const reading = probe.wordReading()
+			const hits = probe.wordHits()
+			if (hits >= 2 && (hits !== lastHits || reading !== lastReading))
+				lastWordBit = bits
+			lastHits = hits
+			lastReading = reading
+			activeAtBit.set(bits, tone.current()?.kind === "dcs")
+		}
+		expect(lastWordBit).toBeGreaterThan(0)
+		expect(activeAtBit.get(lastWordBit + hold - 1)).toBe(true)
+		expect(activeAtBit.get(lastWordBit + hold)).toBe(false)
+		expect(activeAtBit.get(lastWordBit + hold + 1)).toBe(false)
 	})
 
 	it("reset clears", () => {
