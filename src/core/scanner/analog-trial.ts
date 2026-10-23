@@ -62,11 +62,21 @@ export function classifyAnalogTrial(
 	if (stats.mode !== "nfm" && stats.mode !== "am") return "no-sync"
 	if (toneQualified(tones)) return "decoded"
 	if (frames.length === 0) return "no-sync"
-	const cluster = median(frames.map(frame => frame.cluster))
-	if (cluster !== null && cluster >= ANALOG_TRIAL_DATA_SCORE) return "data-like"
+	if (dataLike(stats)) return "data-like"
 	if (!quietEnough(stats, frames)) return "no-sync"
 	if (isVoice(stats)) return "heard"
 	return "carrier-only"
+}
+
+/**
+ * A discrete discriminator: the median cluster score meets `ANALOG_TRIAL_DATA_SCORE`.
+ * Missing frames or any non-finite cluster score is not data-like.
+ */
+export function dataLike(stats: AnalogTrialStats): boolean {
+	const frames = framesOf(stats)
+	if (frames === null || frames.length === 0) return false
+	const cluster = median(frames.map(frame => frame?.cluster))
+	return cluster !== null && cluster >= ANALOG_TRIAL_DATA_SCORE
 }
 
 /**
@@ -133,7 +143,9 @@ function frameFinite(frame: AnalogTrialFrame | null | undefined): boolean {
  * minimum and the WG6 DCS minimum). The tone must be one of the 50 standard
  * frequencies, or the code one of `DCS_STANDARD_CODES` with a polarity.
  */
-function toneQualified(tones: AnalogTrialTones | null | undefined): boolean {
+export function toneQualified(
+	tones: AnalogTrialTones | null | undefined,
+): boolean {
 	if (tones === null || tones === undefined || typeof tones !== "object")
 		return false
 	const seconds = (tones as { audioSeconds?: unknown }).audioSeconds
