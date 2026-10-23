@@ -106,6 +106,28 @@ the scanner's pinned judge, and 1.4 is read with that judge's definition of data
 Continuous FSK and short TDMA-like bursts (for example 30 ms on, 30 ms off) are rejected; real
 POCSAG, APRS/AFSK packets and DMR reject as continuous or TDMA-like.
 
+**Known limitation (2026-10-23): residual openings on the never-open NFM fixtures.** The window
+reset on carrier onset (design, EvidenceGate) closes the noisy-onset openings of
+`nfm-dmr-4fsk-continuous` and `nfm-clicks`; three residual cases remain, pinned by tests in
+`tests/unit/core/evidence-squelch/meter-equivalence.test.ts`:
+
+- (a) 10-40 ms of noise flagged quieted touching the onset (the last 1-4 blocks of a 250 ms noise
+  lead-in quieted, no unquieted block before the over): `nfm-dmr-4fsk-continuous` latches voice
+  with 2-4 such blocks, `nfm-clicks` with 1.
+- (b) a 50 ms quieted stretch of noise, then under 50 ms of unquieted noise right before the over
+  (20 noise blocks, 5 quieted, then 1-4 noise blocks): `nfm-dmr-4fsk-continuous` latches voice
+  with 1-4 blocks, `nfm-clicks` with 1.
+- (c) clicks on a quieted carrier: `nfm-clicks` latches voice when only 10 or 60 ms of quiet
+  carrier precede it, with no noise at all. Clicks on a quieted carrier can latch from the pinned
+  judge alone; this was already so before the window reset existed (verified on gate versions
+  before the reset). The moved 50 ms frame edges are enough for the judge to call the first
+  window voice.
+
+Every other never-open NFM fixture stays closed in all three cases. Documented consequence of
+the reset: a noise lead-in of 10-40 ms (under the 5-block discard threshold) is not discarded and
+may play before the over. If live acceptance (M.4) shows real interference opening the gate, a
+stage-2 data test becomes the next squelch task, not a backlog item.
+
 1.5 **Latch and close.** Once open, stage 2 stays open for as long as stage 1 is open; pauses
 between syllables never close it. It closes once stage 1 has been closed for
 `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS` (1 500 ms, equal to `ANALOG_TRANSMISSION_MERGE_GAP_MS`) of

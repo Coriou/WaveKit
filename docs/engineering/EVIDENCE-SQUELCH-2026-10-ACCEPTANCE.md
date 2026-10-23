@@ -27,10 +27,10 @@ manifest is `tests/mocks/fixtures/evidence-squelch/manifest.json`.
 | `nfm-carrier`                                                       | nfm  | never open                                                                |
 | `am-carrier`                                                        | am   | A8 regression: ungated by evidence; stage-1 auto, `autoSquelch` `off`     |
 | `nfm-dmr-4fsk`                                                      | nfm  | never open                                                                |
-| `nfm-dmr-4fsk-continuous`                                           | nfm  | never open                                                                |
+| `nfm-dmr-4fsk-continuous`                                           | nfm  | never open; known limitation (a), (b): record whether it opens            |
 | `nfm-pocsag-512`                                                    | nfm  | never open                                                                |
 | `nfm-pocsag-1200`                                                   | nfm  | never open                                                                |
-| `nfm-clicks`                                                        | nfm  | never open                                                                |
+| `nfm-clicks`                                                        | nfm  | never open; known limitation (a), (b), (c): record whether it opens       |
 | `nfm-impulse`                                                       | nfm  | never open                                                                |
 | `nfm-noise`                                                         | nfm  | never open                                                                |
 | `nfm-fsk-syllabic-bursts`                                           | nfm  | known limitation: expected to open as voice; record the result            |
@@ -40,6 +40,15 @@ manifest is `tests/mocks/fixtures/evidence-squelch/manifest.json`.
 500 ms on, 250 ms off) from the known limitation after requirement 1.4; it is not a pass or fail
 criterion. The marginal-level voice row is the known limitation after requirement 8.1; it runs only
 in the unit end-to-end tests, not on the fake link.
+
+Known limitation (2026-10-23, requirements after 1.4), pinned in the unit tests: `nfm-clicks`
+latches voice with 10 or 60 ms of quiet carrier before it (c), and with 1 noise block flagged
+quieted at the onset (a) or 1 noise block after a 50 ms quieted stretch (b);
+`nfm-dmr-4fsk-continuous` latches voice with 2-4 quieted-flagged noise blocks at the onset (a) or
+1-4 noise blocks after a 50 ms quieted stretch (b). Clicks on a quieted carrier can latch from the
+pinned judge alone, already before the window reset existed. A 10-40 ms noise lead-in may play
+before the over. If live acceptance shows real interference opening the gate, a stage-2 data test
+becomes the next squelch task, not a backlog item.
 
 `am-carrier` and `nfm-clicks` carry `rollingWindowRisk` in `manifest.json`: some rolling 20-frame
 windows sit near the voice thresholds. Record whether they open.
@@ -56,5 +65,9 @@ guard covers the measured back-chain drain.
 Resolved 2026-10-23 as amendment A8 (requirements, after 1.2): evidence gating is NFM only. Replay evidence: gate replay of the `am-carrier` fixture latched voice 1.65 s after onset (the AM chain's envelope, DC removal and fast AGC raise the carrier noise envelope over about 1.5 s; rolling 20-frame windows 13-22 medians `audioDb` -29.0 to -20.1 dB, `syllabic` 1.9 to 0.3, `cluster` 0.0). Checkpoint line: `EVIDENCE-SQUELCH 8.4: am-voice agc=voice audioDb=-14.52 syllabic=0.45 cluster=0.21; am-carrier agc=neither audioDb=-12.94 syllabic=0.11 cluster=0.29`.
 
 ## Live results (to fill)
+
+- Real interference opening the gate (known limitation after requirement 1.4): record every case
+  (source, frequency, `autoSquelch.evidence`, frame medians). Any such case makes the stage-2 data
+  test the next squelch task.
 
 - Quiet or low-deviation NFM over: record the real `audioDb`, `syllabic` and `cluster` medians.

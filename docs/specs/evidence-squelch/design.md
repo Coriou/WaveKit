@@ -250,6 +250,14 @@ Limits (tested, pending decision):
   voice. The continuous-4FSK and clicks goldens are close to the voice judge; small changes in
   the first window open them.
 
+Accepted limitation (Main decision, 2026-10-23; requirements, known limitation after 1.4): the
+three residual cases above (a: 10-40 ms of noise flagged quieted touching the onset; b: a 50 ms
+quieted stretch of noise then under 50 ms of noise before the over; c: clicks on a quieted
+carrier) stay open. Clicks on a quieted carrier can latch from the pinned judge alone, already
+before the window reset existed. A 10-40 ms noise lead-in may play before the over. If live
+acceptance (M.4) shows real interference opening the gate, a stage-2 data test is the next
+squelch task, not a backlog item.
+
 | State   | Event                                       | Next                                        |
 | ------- | ------------------------------------------- | ------------------------------------------- |
 | waiting | armed, quieted block after an unquieted one | waiting (voice window and quiet ring empty) |
