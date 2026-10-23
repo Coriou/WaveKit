@@ -116,7 +116,7 @@ python3 -I scripts/evidence-squelch/run_acceptance.py --replay output/evidence-s
 
 Recorded per run (`<out>/<fixture>/<mode>/`): `/stream.wav` bytes with arrival times,
 `live-audio:level` and `live-audio:transmission` events with the WebSocket recording span, status
-samples, the event-loop p99 of the link-quality report, the fake source's `connected` time from
+samples, the event-loop p99 of the link-quality report, the fake source's pacing epoch (`epochTs`) from
 its log, and wall-clock probes of the forwarder (a third published port). Timing is measured on
 the source clock: over k starts at the fake's pacing epoch (`epochTs`) plus the sidecar over onset plus k file
 periods. Host times are mapped onto the containers' wall clock by the probe with the smallest
