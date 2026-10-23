@@ -2,12 +2,15 @@
  * Meter equivalence (requirements 5.1, 5.2, 8.4; plan Task FX.2; design "Meter equivalence",
  * amendment 2026-10-23).
  *
- * (a) Same path: the TypeScript `VoiceFrameMeter` against `<name>.pcmstats.json`, the
- *     analyzer's statistic definitions applied to the same committed 8 kHz PCM by an
- *     independent float64 reference (`scripts/evidence-squelch/pcm_reference.py`).
+ * (a) Same path (the asserted contract): the TypeScript `VoiceFrameMeter` against
+ *     `<name>.pcmstats.json`, an adapted reference of the analyzer's statistic definitions
+ *     applied to the same committed 8 kHz PCM (`scripts/evidence-squelch/pcm_reference.py`;
+ *     float64 histogram arithmetic where analyze.rs uses binary32, so not an exact oracle).
  * (b) Cross path: against the analyzer's own 48 kHz statistics (`<name>.stats.json`), which
- *     measure a different signal path; NFM verdicts agree except the documented flip, numeric
- *     deltas stay within measured bounds; AM rows are informational (A8: NFM-only gating).
+ *     measure a different signal path; NFM verdicts agree except the documented flip; numeric
+ *     deltas are informational (no bound asserted); AM rows are informational (A8).
+ * Requirement 5.1 (1.5 dB, identical verdicts) is not met cross-path; design.md "Meter
+ * equivalence" proposes a revision, pending decision.
  * Plus gate-level replays of every golden through the real `EvidenceGate`.
  */
 import { readFileSync } from "node:fs"
@@ -47,24 +50,11 @@ const SAME_SYLLABIC = 1e-12
 const SAME_CLUSTER = 1e-12
 
 /**
- * Cross path, NFM medians (measured over the 13 NFM fixtures, rounded up to the next 0.1).
- * audioDb: the analyzer measures 300 Hz–3 kHz of its 48 kHz DC-blocked demod output before
- * DC restore, clamp and the 3.4 kHz FIR decimation to s16; the meter's 8 kHz RBJ sections
- * see that decimated PCM. Measured 0.10-1.81 dB, largest on noise-like audio (nfm-carrier,
- * nfm-noise, nfm-dmr-4fsk, nfm-clicks), whose band-edge energy the two paths weight differently.
- * Bound 2.0 dB.
+ * Cross path: numeric deltas are printed, not asserted. The analyzer measures audio power on its
+ * 48 kHz DC-blocked demod output before DC restore, clamp and the 3.4 kHz FIR decimation, and
+ * clusters 48 kHz discriminator samples through 2.4 and 4.8 kHz views; 8 kHz PCM cannot
+ * reproduce either, so no bound follows from first principles.
  */
-const CROSS_AUDIO_DB = 2.0 // measured max 1.81 (nfm-carrier)
-/** Syllabic: both from the same 20-frame audio envelope; the band powers differ as above (measured 0.07). Bound 0.1. */
-const CROSS_SYLLABIC = 0.1
-/**
- * Cluster: the analyzer clusters 48 kHz discriminator samples through 2.4 and 4.8 kHz views
- * (stride 4); 8 kHz PCM has no 4.8 kHz view and a 3.4 kHz-low-passed raw one, so sharp 4FSK
- * levels smear (measured 0.31, nfm-dmr-4fsk-continuous; ≤ 0.09 for every other NFM fixture).
- * Bound 0.35 for the documented flip, 0.1 otherwise.
- */
-const CROSS_CLUSTER = 0.1
-const CROSS_CLUSTER_FLIP = 0.35
 /** The one documented cross-path verdict flip: analyzer data-like, 8 kHz PCM neither. */
 const CROSS_FLIP: Readonly<Record<string, "neither">> = {
 	"nfm-dmr-4fsk-continuous": "neither",
@@ -257,7 +247,7 @@ describe("meter equivalence: cross path (analyzer 48 kHz statistics)", () => {
 	for (const name of names) {
 		const entry = manifest[name]
 		if (entry === undefined) continue
-		it(`${name}: ${entry.mode === "am" ? "informational (A8)" : "verdict and bounded deltas"}`, () => {
+		it(`${name}: ${entry.mode === "am" ? "informational (A8)" : "verdict agreement (deltas informational)"}`, () => {
 			const want = mediansOf(analyzerOf(name))
 			const frames = meterFrames(audioOf(name), 2)
 			const got = mediansOf(frames)
@@ -267,12 +257,7 @@ describe("meter equivalence: cross path (analyzer 48 kHz statistics)", () => {
 				`EVIDENCE-SQUELCH CROSS: ${name} ts{${fmt(got)}} analyzer{${fmt(want)}} delta{${fmt(d)}} verdict ts=${verdict} analyzer=${entry.verdict}`,
 			)
 			if (entry.mode === "am") return
-			expect(d.audioDb).toBeLessThanOrEqual(CROSS_AUDIO_DB)
-			expect(d.syllabic).toBeLessThanOrEqual(CROSS_SYLLABIC)
 			const flip = CROSS_FLIP[name]
-			expect(d.cluster).toBeLessThanOrEqual(
-				flip === undefined ? CROSS_CLUSTER : CROSS_CLUSTER_FLIP,
-			)
 			expect(verdict).toBe(flip ?? entry.verdict)
 		})
 	}
@@ -332,7 +317,7 @@ function pcmOf(samples: ArrayLike<number>): Buffer {
  * live channel power): the analyzer `carrierDb` of the enclosing frame ≥ the pre-onset
  * median + `ANALOG_TRIAL_AM_CARRIER_DB`. AM is ungated under A8, so AM rows are informational.
  */
-function replay(name: string): Replay {
+function replay(name: string, preOpen = false): Replay {
 	const entry = manifest[name]
 	if (entry === undefined) throw new Error(`no manifest entry ${name}`)
 	const audio = audioOf(name)
@@ -344,7 +329,9 @@ function replay(name: string): Replay {
 	)
 	const unquieted = name === "nfm-noise" || name === "nfm-impulse"
 	const gate = new EvidenceGate({ rate: RATE, modulation: entry.mode, gain: 2 })
-	gate.closed(onset * 2, "s16le")
+	// preOpen: stage 1 already open on the unquieted pre-over noise (its power gate or 250 ms
+	// hang, src/core/channel-squelch.ts), so those blocks are pushed and noted unquieted.
+	if (!preOpen) gate.closed(onset * 2, "s16le")
 	const out: Replay = {
 		latched: false,
 		atS: null,
@@ -352,10 +339,11 @@ function replay(name: string): Replay {
 		finalEvidence: null,
 		changes: [],
 	}
-	for (let s = onset; s < audio.length; s += BLOCK_SAMPLES) {
+	for (let s = preOpen ? 0 : onset; s < audio.length; s += BLOCK_SAMPLES) {
 		const end = Math.min(audio.length, s + BLOCK_SAMPLES)
 		let carrier: boolean
-		if (entry.mode === "am") {
+		if (s < onset) carrier = false
+		else if (entry.mode === "am") {
 			const frame = frames[Math.floor(s / FRAME_SAMPLES)]
 			carrier =
 				frame !== undefined &&
@@ -445,7 +433,7 @@ function driveQuieted(pcm: Buffer, rate: number): boolean {
 }
 
 describe("continuous 4FSK never latches (quieted NFM carrier)", () => {
-	it("golden nfm-dmr-4fsk-continuous: rejected by the voice rule (median syllabic < 0.3)", () => {
+	it("golden nfm-dmr-4fsk-continuous, stage 1 opening at the onset: rejected by the voice rule (median syllabic < 0.3); see the pre-open known risk below", () => {
 		const audio = audioOf("nfm-dmr-4fsk-continuous")
 		const onset = Math.round(
 			(manifest["nfm-dmr-4fsk-continuous"]?.overOnsetS ?? 0) * RATE,
@@ -479,6 +467,33 @@ describe("continuous 4FSK never latches (quieted NFM carrier)", () => {
 				`EVIDENCE-SQUELCH 4FSK: synthetic seed ${seed} median cluster=${m.cluster.toFixed(2)} syllabic=${m.syllabic.toFixed(2)}`,
 			)
 			expect(m.syllabic).toBeLessThan(ANALOG_TRIAL_VOICE_INDEX)
+		})
+	}
+})
+
+/**
+ * Known risks (pending decision): with stage 1 already open on the pre-over noise, the first
+ * full 20-frame window (frames 0-19) holds 5 unquieted noise frames plus the key-up, with 25
+ * unquieted and 75 quieted blocks (quiet fraction 0.75 >= 0.5), and its medians are
+ * voice-positive. Gate code and thresholds unchanged; these pin the current behaviour.
+ */
+const PREOPEN_KNOWN_RISK = new Set(["nfm-dmr-4fsk-continuous", "nfm-clicks"])
+
+describe("stage 1 open on noise before the over (never-open NFM fixtures)", () => {
+	for (const name of names) {
+		const entry = manifest[name]
+		if (entry?.mode !== "nfm" || entry.expect !== "none") continue
+		const risk = PREOPEN_KNOWN_RISK.has(name)
+		it(`${risk ? "known risk (pending decision): " : ""}${name}: pre-over noise unquieted ${risk ? "latches voice" : "never latches"}`, () => {
+			const r = replay(name, true)
+			const m = mediansOf(meterFrames(audioOf(name), 2).slice(0, 20))
+			console.info(
+				`EVIDENCE-SQUELCH PREOPEN: ${name} ${show(r)} first-window{${fmt(m)} syllabic4=${m.syllabic.toFixed(4)}}`,
+			)
+			if (risk) {
+				expect(r.latched).toBe(true)
+				expect(r.evidence).toBe("voice")
+			} else expect(r.latched).toBe(false)
 		})
 	}
 })

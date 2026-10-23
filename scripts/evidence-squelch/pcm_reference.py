@@ -20,8 +20,10 @@ The 8 kHz analogues of the analyzer's 48 kHz paths (fixed here, by definition):
   larger of the two views. View samples are rounded to binary32, the storage type of the
   analyzer's `disc_lo` / `disc_hi`; the rest is float64.
 
-Written from the Rust definitions, not from src/core/evidence-squelch/voice-meter.ts; the
-meter equivalence test compares the two. Deterministic: same input, same bytes.
+An adapted reference, not an exact oracle of analyze.rs: it follows the Rust definitions
+(written from them, not from src/core/evidence-squelch/voice-meter.ts) at 8 kHz, but does the
+filter, histogram and k-means arithmetic in float64 where analyze.rs (cluster_levels,
+kmeans_hist, Biquad) uses binary32. The meter equivalence test compares it with the meter. Deterministic: same input, same bytes.
 
 Usage: python3 -I scripts/evidence-squelch/pcm_reference.py [--dir tests/mocks/fixtures/evidence-squelch] [--check]
 """
