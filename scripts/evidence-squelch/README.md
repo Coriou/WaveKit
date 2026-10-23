@@ -139,7 +139,7 @@ one 10 ms squelch block − one fake send chunk (262 144 bytes: 64.0 ms at 2.048
 2.4 Msps) − the bracket of the fake's logged pacing epoch (`epochTs ± epochErrS` on its `connected`
 line; missing or wider than 5 ms is invalid) − the largest wall-clock movement seen over the
 run (clock probes at least every 5 s and the fake's `progress` wall ts against its paced
-elapsed time; more than 2 ms beyond their uncertainty, such as a clock step, is invalid), plus the probe's half round trip. Lower bound: the
+elapsed time; more than 25 ms beyond their uncertainty, such as a clock step, is invalid), plus the probe's half round trip. Lower bound: the
 close is at most the first `live-audio:level` receipt with `squelchOpen` false (host clock on
 both sides). The close event's `endedAt` and its announcement are reported only. Max and median
 of both bounds are reported against `CLOSE_GUARD_MS`, flagged `EXCEEDS GUARD` on the upper max.

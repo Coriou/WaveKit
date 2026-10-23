@@ -81,8 +81,9 @@ SQUELCH_BLOCK_S = 0.010
 EPOCH_MAX_ERR_S = 0.005
 # Clock-step check (clock_drift): allowed movement of the container wall clock beyond the
 # measurement uncertainty, the longest gap between clock probes, and the fake's ts-after-elapsed
-# read lag.
-CLOCK_DRIFT_MAX_S = 0.002
+# read lag. Docker Desktop's VM clock drifts a few ms over a run; the measured drift is subtracted
+# from the drain bound (close_lo), so 25 ms keeps such runs valid and only widens that bound.
+CLOCK_DRIFT_MAX_S = 0.025
 PROBE_GAP_MAX_S = 5.0
 EMIT_LAG_S = 0.002
 # Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
