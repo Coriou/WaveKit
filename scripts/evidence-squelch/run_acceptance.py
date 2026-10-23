@@ -74,11 +74,11 @@ CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
 # rate (integer) within this.
 RATE_MATCH_HZ = 1.0
 # Drain close bound terms (see drain_per_over): the fake's send chunk (fake_rtl_tcp.py BLOCK),
-# the core's squelch block (live-demodulator.ts LEVEL_BLOCK_SECONDS) and the fake's
-# `connected` timestamp lag.
+# the core's squelch block (live-demodulator.ts LEVEL_BLOCK_SECONDS). The fake's pacing epoch
+# comes with its own logged bracket (epochErrS); larger than this is not trusted.
 FAKE_CHUNK_BYTES = 262_144
 SQUELCH_BLOCK_S = 0.010
-CONNECT_EMIT_S = 0.005
+EPOCH_MAX_ERR_S = 0.005
 # Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
 # ±RESAMPLE_HALF_WIDTH output periods, fractional position quantised to 1/RESAMPLE_PHASES of an
 # input sample (time error ≤ 1 / (2 x 512 x 24 975) s ≈ 39 ns). Symmetric kernel: zero delay.
@@ -284,8 +284,10 @@ def source_clock(side, fixture):
 	align clocks: the core announces them late on purpose (qualification and hang). Missing
 	evidence is an invalid run."""
 	src = side.get("source")
-	if not isinstance(src, dict) or not _number(src.get("connectedTs")):
-		raise InvalidRun("missing source clock (fake rtl_tcp connected event)")
+	if not isinstance(src, dict) or not _number(src.get("epochTs")) or not _number(src.get("epochErrS")):
+		raise InvalidRun("missing source clock (fake rtl_tcp pacing epoch on its connected event)")
+	if not 0 <= src["epochErrS"] <= EPOCH_MAX_ERR_S:
+		raise InvalidRun("fake rtl_tcp pacing epoch bracket too wide")
 	if src.get("connections") != 1:
 		raise InvalidRun("fake rtl_tcp saw more than one connection (source clock ambiguous)")
 	if not isinstance(fixture, dict) or not all(_number(fixture.get(k)) for k in ("overOnsetS", "periodS", "overS")):
@@ -302,7 +304,7 @@ def source_clock(side, fixture):
 	rtt, to_wall = min(probes)
 	if rtt > CLOCK_MAX_RTT_S:
 		raise InvalidRun(f"clock probe round trip {rtt * 1000:.1f} ms exceeds {CLOCK_MAX_RTT_S * 1000:.0f} ms")
-	return {"connected": float(src["connectedTs"]), "onset": float(fixture["overOnsetS"]),
+	return {"connected": float(src["epochTs"]), "epochErr": float(src["epochErrS"]), "onset": float(fixture["overOnsetS"]),
 		"period": float(fixture["periodS"]), "overS": float(fixture["overS"]), "toWall": to_wall, "rttS": rtt,
 		"iqRate": fixture.get("rate")}
 
@@ -461,10 +463,10 @@ def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carri
 	the true drain (arrival of the last audible stream sample minus the stage-1 close).
 
 	Close, lower bound (so upperMs can only over-estimate), on the container wall clock:
-	  carrier_off + hang - SQUELCH_BLOCK_S - chunk_s - CONNECT_EMIT_S
-	  - carrier_off: sidecar over end on the source clock (`connected` ts + onset + k x period).
-	    The ts is taken after the stream started (round to 1 ms, header send, thread start):
-	    CONNECT_EMIT_S = 5 ms.
+	  carrier_off + hang - SQUELCH_BLOCK_S - chunk_s - epoch_err
+	  - carrier_off: sidecar over end on the source clock (the fake's pacing epoch, the exact
+	    instant its byte schedule is computed from, + onset + k x period). epoch_err is the
+	    logged half-width of the two wall reads bracketing that monotonic read (epochErrS).
 	  - hang runs from the last qualifying 10 ms squelch block (channel-squelch.ts), which
 	    starts no earlier than one block before carrier-off: SQUELCH_BLOCK_S = 10 ms.
 	  - the fake sends BLOCK-byte chunks at their starting source time, so IQ arrives up to
@@ -513,7 +515,7 @@ def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carri
 				raise InvalidRun(f"over {k}: stage-1 closed but no played tail to measure drain on")
 			continue
 		carrier_off, ended = closes[k]
-		close_lo = carrier_off + hang_s - SQUELCH_BLOCK_S - chunk_s - CONNECT_EMIT_S
+		close_lo = carrier_off + hang_s - SQUELCH_BLOCK_S - chunk_s - clock["epochErr"]
 		was_open = any(v for t, v in observed if carrier_off - clock["overS"] <= t <= close_lo)
 		closed_at = next((t for t, v in observed if t >= close_lo and not v), None)
 		if not was_open or closed_at is None or closed_at > carrier_off + clock["period"] - clock["overS"]:
@@ -805,7 +807,9 @@ def self_test():
 	m0 = conn + 10.0 + host_offset
 	probes = [[m0 - 5, m0 - 4.9, conn + 7.0], [m0, m0 + 0.002, conn + 10.001]]  # slow wrong one, fast right one
 	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
-	common = {"source": {"connectedTs": conn, "connections": 1}, "clockProbes": probes, "wsSpan": ws_span,
+	# `connected` is logged 30 ms after the pacing epoch (header send, thread start): unused.
+	source = {"epochTs": conn, "epochErrS": 0.0001, "connectedTs": conn + 0.03, "connections": 1}
+	common = {"source": source, "clockProbes": probes, "wsSpan": ws_span,
 		"fixture": {"overOnsetS": gap, "periodS": period, "overS": over_s, "rate": 2_048_000}}
 	base = {
 		"expect": "voice", "mode": "nfm", "hangS": hang, "reference8k": ref, "refOnset8k": onset, "carrier": True,
@@ -861,7 +865,9 @@ def self_test():
 	assert any("no playback" in f for f in variant(auto__samples8k=recorded(overs=[k for k in complete if k != 4])))
 	# Missing timing evidence is invalid, never a zero-delay pass.
 	assert "source clock" in invalid(auto__source=None)
-	assert "more than one" in invalid(auto__source={"connectedTs": conn, "connections": 2})
+	assert "more than one" in invalid(auto__source=dict(source, connections=2))
+	assert "pacing epoch" in invalid(manual__source={"connectedTs": conn, "connections": 1})
+	assert "bracket" in invalid(manual__source=dict(source, epochErrS=0.02))
 	assert "sidecar" in invalid(auto__fixture={"periodS": period, "overOnsetS": gap})
 	assert "clock probe" in invalid(auto__clockProbes=None)
 	assert "round trip" in invalid(auto__clockProbes=[probes[0]])
@@ -915,6 +921,10 @@ def self_test():
 	early = dict(manual__samples=manual_stream(0.23, delta=0.01 - 0.064), manual__levels=manual_levels(delta=0.01 - 0.064))
 	d = drain_of(**early)
 	assert holds(d, 230) and d["exceedsGuard"], d
+	# The pacing epoch, not `connected` (logged 30 ms later), anchors carrier-off: anchored on
+	# `connected` the same run's upper bound would fall below the true drain.
+	late_anchor = dict(source, epochTs=conn + 0.03)
+	assert not holds(drain_of(manual__source=late_anchor, **early), 230)
 	# Probe error both directions (18 ms round trip, all of it on one leg): bounds still hold.
 	for leg in (0.0, 0.018):
 		probe = [[m0, m0 + 0.018, conn + 10.0 + leg]]
@@ -1177,11 +1187,14 @@ class Recorder:
 				event = json.loads(line)
 			except ValueError:
 				continue
-			if isinstance(event, dict) and event.get("event") == "connected" and _number(event.get("ts")):
-				connected.append(float(event["ts"]))
+			if isinstance(event, dict) and event.get("event") == "connected":
+				connected.append(event)
 		if not connected:
 			raise InvalidRun("fake rtl_tcp logged no connection")
-		return {"connectedTs": connected[0], "connections": len(connected)}
+		first = connected[0]
+		# A missing epoch (an older fake) stays missing: source_clock makes the run invalid.
+		return {"epochTs": first.get("epochTs"), "epochErrS": first.get("epochErrS"),
+			"connectedTs": first.get("ts"), "connections": len(connected)}
 
 	def run(self, entry, cu8, cu8_meta):
 		self.dir.mkdir(parents=True, exist_ok=True)

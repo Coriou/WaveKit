@@ -118,7 +118,7 @@ Recorded per run (`<out>/<fixture>/<mode>/`): `/stream.wav` bytes with arrival t
 `live-audio:level` and `live-audio:transmission` events with the WebSocket recording span, status
 samples, the event-loop p99 of the link-quality report, the fake source's `connected` time from
 its log, and wall-clock probes of the forwarder (a third published port). Timing is measured on
-the source clock: over k starts at the `connected` time plus the sidecar over onset plus k file
+the source clock: over k starts at the fake's pacing epoch (`epochTs`) plus the sidecar over onset plus k file
 periods. Host times are mapped onto the containers' wall clock by the probe with the smallest
 round trip (at most 20 ms; error at most half of it). Event `startedAt` gives a transmission's
 start; its announcement is late on purpose (qualification and hang) and is never used for
@@ -136,7 +136,8 @@ fixtures, at least 3 shared overs); p99 within 2 ms of manual; the back-chain dr
 over as an interval that holds the true drain (arrival of the last audible sample minus the
 stage-1 close). Upper bound: the close is at least carrier-off (sidecar, source clock) + hang −
 one 10 ms squelch block − one fake send chunk (262 144 bytes: 64.0 ms at 2.048 Msps, 54.6 ms at
-2.4 Msps) − 5 ms of `connected` timestamp lag, plus the probe's half round trip. Lower bound: the
+2.4 Msps) − the bracket of the fake's logged pacing epoch (`epochTs ± epochErrS` on its `connected`
+line; missing or wider than 5 ms is invalid), plus the probe's half round trip. Lower bound: the
 close is at most the first `live-audio:level` receipt with `squelchOpen` false (host clock on
 both sides). The close event's `endedAt` and its announcement are reported only. Max and median
 of both bounds are reported against `CLOSE_GUARD_MS`, flagged `EXCEEDS GUARD` on the upper max.

@@ -177,7 +177,11 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
            stall_schedule=None, stall_mode="catchup", stats=None):
     conn.settimeout(None)
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    # Pacing epoch: byte n is due at start + n / bytes_per_second. Its wall-clock time is
+    # bracketed by two wall reads and logged on `connected` (epochTs ± epochErrS).
+    wall_before = time.time()
     start = time.monotonic()
+    wall_after = time.time()
     sent = 0
     scheduled = 0
     stats = stats if stats is not None else StreamStats()
@@ -191,7 +195,9 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
     try:
         conn.sendall(b"RTL0" + struct.pack(">II", 5, 29))
         threading.Thread(target=drain_commands, args=(conn,), daemon=True).start()
-        emit({"event": "connected", "connection": connection, "peer": str(peer)})
+        emit({"event": "connected", "connection": connection, "peer": str(peer),
+              "epochTs": round((wall_before + wall_after) / 2, 6),
+              "epochErrS": round((wall_after - wall_before) / 2 + 5e-7, 6)})
         while True:
             now = time.monotonic()
             if now >= deadline:
