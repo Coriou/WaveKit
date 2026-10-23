@@ -22,7 +22,7 @@ api:
 liveDemod:
   enabled: true
   sourceId: evs-fake
-  # Internal only; the api forwarder publishes it on an ephemeral loopback port.
+  # Internal only; the api forwarder publishes it on a driver-chosen loopback port.
   httpPort: 3001
   modulation: "nfm" # driver: fixture mode
   bandwidth: 12500

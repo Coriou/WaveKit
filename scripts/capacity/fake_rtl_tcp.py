@@ -168,6 +168,15 @@ def serve(args: argparse.Namespace) -> None:
         http.server_close()
 
 
+def epoch_fields(wall_before: float, wall_after: float) -> dict:
+    """The pacing epoch as serialised: midpoint of the two wall reads and a half-width rounded
+    outward at the 1 us serialisation, so [epochTs - epochErrS, epochTs + epochErrS] contains
+    [wall_before, wall_after] after the midpoint's own rounding."""
+    mid = round((wall_before + wall_after) / 2, 6)
+    err = max(mid - wall_before, wall_after - mid)
+    return {"epochTs": mid, "epochErrS": math.ceil(err * 1e6 + 1e-3) / 1e6}
+
+
 def emit(event: dict) -> None:
     event["ts"] = round(time.time(), 3)
     print(json.dumps(event), flush=True)
@@ -177,7 +186,11 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
            stall_schedule=None, stall_mode="catchup", stats=None):
     conn.settimeout(None)
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    # Pacing epoch: byte n is due at start + n / bytes_per_second. Its wall-clock time is
+    # bracketed by two wall reads and logged on `connected` (epochTs ± epochErrS).
+    wall_before = time.time()
     start = time.monotonic()
+    wall_after = time.time()
     sent = 0
     scheduled = 0
     stats = stats if stats is not None else StreamStats()
@@ -191,7 +204,8 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
     try:
         conn.sendall(b"RTL0" + struct.pack(">II", 5, 29))
         threading.Thread(target=drain_commands, args=(conn,), daemon=True).start()
-        emit({"event": "connected", "connection": connection, "peer": str(peer)})
+        emit({"event": "connected", "connection": connection, "peer": str(peer),
+              **epoch_fields(wall_before, wall_after)})
         while True:
             now = time.monotonic()
             if now >= deadline:
@@ -236,6 +250,7 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
             if time.monotonic() >= next_report:
                 elapsed = time.monotonic() - start
                 emit({"event": "progress", "connection": connection, "t": round(elapsed, 1),
+                      "elapsedS": round(elapsed, 6),
                       "bytes": sent, "expectedBytes": int(elapsed * bytes_per_second),
                       "maxLagSeconds": round(max_lag, 3)})
                 next_report += report
