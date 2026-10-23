@@ -232,6 +232,11 @@ clicks, impulse noise and unquieted noise: the gate opens on the first four with
 `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS` of stage 1 opening and never on the rest; the pre-roll
 plays each opened over from its first sample.
 
+**Known limitation (2026-10-23).** Voice whose medians sit within about 1 dB of the -30 dB audio
+threshold (`ANALOG_TRIAL_AUDIO_MIN_DB`) may latch after the pre-roll limit; the start of the over
+is then clipped (measured: synthetic voice at medians about -31 dB latched 1.85 s after stage 1
+opened, losing about 350 ms of speech). To be revisited with live measurements (M.4).
+
 8.2 **Fake-link scenario (early).** The same fixtures as IQ through a scratch core fed by the fake
 `rtl_tcp`, on the default csdr engine and on Rust: open and no-open verdicts as 8.1, played audio
 aligned with the over's onset, delay at most 1.5 s, stream byte rate nominal, transmission events
