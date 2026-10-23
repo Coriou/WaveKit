@@ -132,8 +132,11 @@ once, each on a stage-1 transmission of that over; per played over, the delay of
 last sample behind the source ≤ 1.5 s; byte rate within 0.5 % of nominal per minute;
 transmission events equal to the manual run per over over the overs both WebSocket recordings
 fully cover (open and close within 10 ms, same count, at least one per over on carrier-bearing
-fixtures, at least 3 shared overs); p99 within 2 ms of manual; the measured back-chain drain is
-reported against `CLOSE_GUARD_MS`.
+fixtures, at least 3 shared overs); p99 within 2 ms of manual; the back-chain drain of the manual run per
+over (arrival of the last audible sample after the stage-1 close, which is the close event's
+`endedAt` plus the core's `SQUELCH_HANG_MS`, on the probe-aligned clock and checked against the
+sidecar carrier-off; never the late close announcement), reported as max and median against
+`CLOSE_GUARD_MS` and flagged `EXCEEDS GUARD` above it.
 
 Evidence squelch is NFM only. `autoSquelch.state` must be `off` on AM runs and manual runs and
 `waiting`/`open` on NFM auto runs (reaching `open` exactly on expected-open fixtures). AM auto
@@ -141,5 +144,6 @@ runs use today's stage-1 auto squelch: `am-voice` and `am-carrier` both open on 
 play every over, with no onset (pre-roll) check.
 
 Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
-state or stage-1 transmission for played audio) and a stream or WebSocket that ends before the
+state, stage-1 transmission for played audio, a close without `endedAt` or a closed
+over without a played tail) and a stream or WebSocket that ends before the
 run are invalid. Exit codes: 0 pass, 1 fail, 2 invalid.

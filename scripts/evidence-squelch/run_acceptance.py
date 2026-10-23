@@ -73,6 +73,9 @@ CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
 # The status rate (fractional, e.g. 2.048 Msps / 82 = 24 975.61 Hz) must match the WAV header
 # rate (integer) within this.
 RATE_MATCH_HZ = 1.0
+# A stage-1 close (endedAt + hang) lies after its over's carrier-off by at most the hang plus
+# this detection allowance.
+CLOSE_MATCH_S = 0.5
 # Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
 # ±RESAMPLE_HALF_WIDTH output periods, fractional position quantised to 1/RESAMPLE_PHASES of an
 # input sample (time error ≤ 1 / (2 x 512 x 24 975) s ≈ 39 ns). Symmetric kernel: zero delay.
@@ -449,12 +452,57 @@ def verdict_p99(auto_p99, manual_p99):
 	return None if a - m <= P99_TOLERANCE_MS else f"event-loop p99 {a:.2f} ms vs manual {m:.2f} ms"
 
 
-def verdict_drain(drains_ms, guard_ms):
-	"""Back-chain drain: last audible stream byte after the close event (manual run)."""
-	if not drains_ms:
+def drain_per_over(samples, rate, arrivals, events, clock, hang_s, carrier, ws_complete):
+	"""Manual run: per over, the arrival of its last audible stream sample after the stage-1
+	close, in ms. The close instant is the closed event's endedAt (the core's audio end,
+	`close - hang`) plus the stage-1 hang, on the probe-aligned container clock; the event's
+	late announcement is never used. Each close must sit after its over's carrier-off
+	(sidecar) by at most CLOSE_MATCH_S. Measured over the overs the stream and the WebSocket
+	both fully cover; an over without a close is a transmission failure (verdict_events), a
+	close without endedAt or, on a carrier-bearing fixture, without a played tail is an invalid
+	run, never a short drain."""
+	closes = {}
+	for e in events:
+		if e.get("state") != "closed":
+			continue
+		if not isinstance(e.get("endedAt"), str):
+			raise InvalidRun("closed transmission without endedAt (stage-1 close time)")
+		close = parse_iso(e["endedAt"]) + hang_s
+		k, onset = over_at(clock, parse_iso(e.get("startedAt")))
+		carrier_off = onset + clock["overS"]
+		if not carrier_off - ASSOC_SLACK_S <= close <= carrier_off + hang_s + CLOSE_MATCH_S:
+			raise InvalidRun(f"stage-1 close of over {k} does not match its carrier-off")
+		closes.setdefault(k, []).append(close)
+	tails = {}
+	for s, e in nonzero_runs(samples, rate):
+		first = arrival_time(arrivals, s * 2)
+		last = arrival_time(arrivals, (e - 1) * 2)
+		if first is None or last is None:
+			raise InvalidRun("played sample without an arrival time")
+		k, _onset = over_at(clock, first + clock["toWall"])
+		tails[k] = max(tails.get(k, -math.inf), last + clock["toWall"])
+	eligible = complete_overs(arrivals[0][0], arrivals[-1][0], clock, MAX_DELAY_S) if arrivals else set()
+	out = []
+	for k in sorted(eligible & ws_complete & set(closes)):  # boundary overs may be cut short
+		if k not in tails:
+			if carrier:
+				raise InvalidRun(f"over {k}: stage-1 closed but no played tail to measure drain on")
+			continue
+		out.append({"over": k, "drainMs": (tails[k] - max(closes[k])) * 1000})
+	return out
+
+
+def verdict_drain(per_over, guard_ms):
+	"""Back-chain drain per over against CLOSE_GUARD_MS: (flag or None, summary)."""
+	if not per_over:
 		return None, None
-	worst = max(drains_ms)
-	return (None if worst <= guard_ms else f"measured back-chain drain {worst:.0f} ms > CLOSE_GUARD_MS {guard_ms}"), worst
+	values = sorted(o["drainMs"] for o in per_over)
+	mid = len(values) // 2
+	median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+	summary = {"maxMs": values[-1], "medianMs": median, "overs": len(values), "guardMs": guard_ms,
+		"exceedsGuard": values[-1] > guard_ms, "perOver": per_over}
+	flag = f"measured back-chain drain max {values[-1]:.0f} ms (median {median:.0f} ms) > CLOSE_GUARD_MS {guard_ms}"
+	return (flag if values[-1] > guard_ms else None), summary
 
 
 def expects_open(modulation, expect):
@@ -505,8 +553,9 @@ def evaluate(obs, guard_ms):
 		failures.append(f)
 	if f := verdict_p99(auto["p99Ms"], manual["p99Ms"]):
 		failures.append(f)
-	f, drain = verdict_drain(manual.get("drainsMs", []), guard_ms)
-	notes["drainMs"] = drain
+	per_over = drain_per_over(manual.get("samples", []), manual["audioRate"], manual.get("arrivals", []),
+		manual["transmissions"], clocks["manual"], obs["hangS"], obs["carrier"], ws_overs(manual, clocks["manual"]))
+	f, notes["drain"] = verdict_drain(per_over, guard_ms)
 	if f:
 		notes["drainReport"] = f  # reported, not a failure (plan: else report the measured drain)
 	return failures, notes
@@ -650,6 +699,7 @@ def self_test():
 	ref = [0.0] * onset + [noise() for _ in range(int(3.75 * rate))]
 	conn, gap, period, over_s = 1_792_000_000.0, 3.0, 6.75, 3.75
 	host_offset, stream_lead, latency, stage1, stream_s = -1_791_990_000.0, 0.3, 0.25, 0.05, 65.0
+	hang = 0.25
 	complete = range(9)  # overs 0..8 are complete in both the stream and the WebSocket span
 
 	def recorded(skip=0, overs=complete):
@@ -663,21 +713,33 @@ def self_test():
 
 	def arrivals(stretch=1.0, stall_after=None):
 		out = []
-		for step in range(int(stream_s * 10) + 1):
-			t = conn + stream_lead + latency + step * 0.1 * stretch
-			if stall_after is not None and step * 0.1 > stall_after:
+		for step in range(int(stream_s * 50) + 1):
+			t = conn + stream_lead + latency + step * 0.02 * stretch
+			if stall_after is not None and step * 0.02 > stall_after:
 				t += 2.0
-			out.append((t + host_offset, int(step * 0.1 * 2 * rate)))
+			out.append((t + host_offset, int(step * 0.02 * 2 * rate)))
 		return out
 
-	def events(shift=0.0, overs=range(10), announce=0.6):
-		"""Opens are announced `announce` s after they start (qualification), closes after hang."""
+	def events(shift=0.0, overs=range(10), announce=0.6, close_late=1.6):
+		"""Opens are announced `announce` s after they start (qualification); closes `close_late`
+		s after the stage-1 close (merge gap). endedAt is the audio end, the close minus hang."""
 		out = []
 		for k in overs:
 			start = conn + gap + k * period + stage1 + shift
 			mono = start + host_offset + announce
-			out.append({"state": "open", "startedAt": format_iso(start), "durationMs": None, "mono": mono})
-			out.append({"state": "closed", "startedAt": format_iso(start), "durationMs": 3750, "mono": mono + 4.0})
+			out.append({"state": "open", "startedAt": format_iso(start), "endedAt": None, "durationMs": None, "mono": mono})
+			out.append({"state": "closed", "startedAt": format_iso(start), "endedAt": format_iso(start + 3.75),
+				"durationMs": 3750, "mono": start + 3.75 + hang + close_late + host_offset})
+		return out
+
+	def manual_stream(tail):
+		"""Manual run: over k audible from its onset until `tail` s after its stage-1 close arrives."""
+		out = [0] * int(stream_s * rate)
+		for k in complete:
+			close = conn + gap + k * period + stage1 + 3.75 + hang
+			i = int((gap + k * period - stream_lead) * rate)
+			j = int((close + tail - conn - stream_lead - latency) * rate)
+			out[i:j] = [1000] * (j - i)
 		return out
 
 	def status(*states):
@@ -689,10 +751,11 @@ def self_test():
 	common = {"source": {"connectedTs": conn, "connections": 1}, "clockProbes": probes, "wsSpan": ws_span,
 		"fixture": {"overOnsetS": gap, "periodS": period, "overS": over_s}}
 	base = {
-		"expect": "voice", "mode": "nfm", "reference8k": ref, "refOnset8k": onset, "carrier": True,
+		"expect": "voice", "mode": "nfm", "hangS": hang, "reference8k": ref, "refOnset8k": onset, "carrier": True,
 		"auto": dict(common, audioRate=rate, samples8k=recorded(), arrivals=arrivals(), transmissions=events(),
 			p99Ms=[3.0], status=status("waiting", "open")),
-		"manual": dict(common, audioRate=rate, transmissions=events(), p99Ms=[2.5], drainsMs=[120.0], status=status("off")),
+		"manual": dict(common, audioRate=rate, transmissions=events(), p99Ms=[2.5], arrivals=arrivals(),
+			samples=manual_stream(0.12), status=status("off")),
 	}
 
 	def variant(**changes):
@@ -707,12 +770,26 @@ def self_test():
 				obs[side][key] = value
 		return evaluate(obs, 200)[0]
 
+	def drain_of(**changes):
+		obs = json.loads(json.dumps(base))
+		for path, value in changes.items():
+			side, key = path.split("__")
+			obs[side][key] = value
+		return evaluate(obs, 200)[1]["drain"]
+
 	def invalid(**changes):
 		try:
 			variant(**changes)
 		except InvalidRun as exc:
 			return str(exc)
 		raise AssertionError(f"accepted without timing evidence: {list(changes)}")
+
+	def rejected(**changes):
+		"""Failures, or the invalid-run reason (a dropped manual close also voids its drain)."""
+		try:
+			return variant(**changes)
+		except InvalidRun as exc:
+			return ["invalid: " + str(exc)]
 
 	silent = [0.0] * int(stream_s * rate)
 	assert variant() == [], variant()
@@ -740,12 +817,12 @@ def self_test():
 	assert any("edges" in f for f in variant(manual__transmissions=events(shift=0.05)))
 	late = [dict(e, durationMs=3800) if e["state"] == "closed" else e for e in events()]
 	assert any("edges" in f for f in variant(manual__transmissions=late))
-	assert any("over 3" in f for f in variant(manual__transmissions=events(overs=[k for k in range(10) if k != 3])))
-	assert any("over 8" in f for f in variant(manual__transmissions=events(overs=range(8))))
+	assert any("over 3" in f for f in rejected(manual__transmissions=events(overs=[k for k in range(10) if k != 3])))
+	assert any("over 8" in f for f in rejected(manual__transmissions=events(overs=range(8))))
 	assert variant(manual__transmissions=events(overs=range(9))) == []
 	short = [ws_span[0], conn + 29.0 + host_offset]  # manual covers overs 0..2 only
 	assert variant(manual__wsSpan=short, manual__transmissions=events(overs=range(3))) == []
-	assert any("over 2" in f for f in variant(manual__wsSpan=short, manual__transmissions=events(overs=range(2))))
+	assert any("over 2" in f for f in rejected(manual__wsSpan=short, manual__transmissions=events(overs=range(2))))
 	assert "complete overs" in invalid(manual__wsSpan=[ws_span[0], conn + 15.0 + host_offset])
 	empty = variant(top__expect="none", auto__samples8k=silent, auto__status=status("waiting"),
 		auto__transmissions=[], manual__transmissions=[])
@@ -766,7 +843,20 @@ def self_test():
 	assert any("did open" in f for f in variant(top__expect="none", auto__samples8k=silent))
 	assert any("p99" in f for f in variant(auto__p99Ms=[5.0]))
 	assert any("p99" in f for f in variant(auto__p99Ms=[]))
-	assert verdict_drain([250.0], 200)[0] is not None and verdict_drain([150.0], 200)[0] is None
+	# Drain from the stage-1 close (endedAt + hang), not the late close announcement: a 120 ms
+	# tail reads 120 ms, a 350 ms tail announced 1.6 s late reads 350 ms and exceeds the guard.
+	d = drain_of()
+	assert d["overs"] == len(complete) and abs(d["maxMs"] - 120) <= 20 and not d["exceedsGuard"], d
+	d = drain_of(manual__samples=manual_stream(0.35))
+	assert abs(d["maxMs"] - 350) <= 20 and abs(d["medianMs"] - 350) <= 20 and d["exceedsGuard"], d
+	no_end = [dict(e, endedAt=None) for e in events()]
+	assert "endedAt" in invalid(manual__transmissions=no_end)
+	assert "played tail" in invalid(manual__samples=[v if not (conn + gap + 5 * period - 1 < conn + stream_lead + i / rate
+		< conn + gap + 6 * period - 1) else 0 for i, v in enumerate(manual_stream(0.12))])
+	assert "carrier-off" in invalid(manual__transmissions=[dict(e, endedAt=format_iso(parse_iso(e["startedAt"]) + 1.0))
+		if e["state"] == "closed" else e for e in events()])
+	flag, summary = verdict_drain([{"over": 0, "drainMs": 250.0}, {"over": 1, "drainMs": 150.0}], 200)
+	assert flag and summary["maxMs"] == 250.0 and summary["medianMs"] == 200.0
 	assert nonzero_runs([0, 1, 1, 0, 0, 0, 2], 1, min_gap_s=2) == [(1, 3), (6, 7)]
 	assert parse_iso("1970-01-01T00:00:01.5Z") == 1.5 and parse_iso(format_iso(conn + 0.25)) == conn + 0.25
 	print("ok")
@@ -1188,25 +1278,13 @@ def reference(name):
 	return [v / 32768 for v in struct.unpack(f"<{len(data) // 2}h", data)]
 
 
-def drains(obs):
-	"""Manual run: last non-zero stream byte after each close event, in ms (arrival time)."""
-	out = []
-	if not obs.get("arrivals"):
-		return out
-	samples_path = Path(obs["dir"]) / "stream.s16le"
-	data = samples_path.read_bytes() if samples_path.exists() else b""
-	for event in obs["transmissions"]:
-		if event.get("state") != "closed":
-			continue
-		after = [(t, b) for t, b in obs["arrivals"] if t >= event["mono"]]
-		last_audible = None
-		for t, b in after[:50]:
-			window = data[max(0, b - 4096) : b]
-			if any(window):
-				last_audible = t
-		if last_audible is not None:
-			out.append((last_audible - event["mono"]) * 1000)
-	return out
+def squelch_hang_ms():
+	"""The stage-1 squelch hang the core uses (SQUELCH_HANG_MS in live-demodulator.ts)."""
+	text = (ROOT.parents[1] / "src/core/live-demodulator.ts").read_text()
+	match = re.search(r"^const SQUELCH_HANG_MS = ([\d_]+)$", text, re.M)
+	if not match:
+		raise InvalidRun("missing SQUELCH_HANG_MS")
+	return int(match[1].replace("_", ""))
 
 
 def judge(run_dir, name, entry, guard_ms):
@@ -1222,8 +1300,11 @@ def judge(run_dir, name, entry, guard_ms):
 			raise InvalidRun(f"{name} {mode}: no stream recorded")
 		side["audioRate"] = audio_rate(side)
 		side["samples8k"] = to_8k(run_dir / mode / "stream.s16le", side["audioRate"]) if mode == "auto" else []
-		side["drainsMs"] = drains(side) if mode == "manual" else []
+		if mode == "manual":
+			data = (run_dir / mode / "stream.s16le").read_bytes()
+			side["samples"] = struct.unpack(f"<{len(data) // 2}h", data[: len(data) // 2 * 2])
 		obs[mode] = side
+	obs["hangS"] = squelch_hang_ms() / 1000
 	return evaluate(obs, guard_ms)
 
 
@@ -1231,6 +1312,10 @@ def report(out, results):
 	(out / "verdicts.json").write_text(json.dumps(results, indent=2) + "\n")
 	for name, r in results.items():
 		print(f"{name}: {'PASS' if not r['failures'] else 'FAIL'} {json.dumps(r['notes'])}")
+		drain = r["notes"].get("drain")
+		if drain:
+			print(f"  drain max {drain['maxMs']:.0f} ms, median {drain['medianMs']:.0f} ms over {drain['overs']} overs"
+				f" (CLOSE_GUARD_MS {drain['guardMs']}){' EXCEEDS GUARD' if drain['exceedsGuard'] else ''}")
 		for f in r["failures"]:
 			print("  - " + f)
 	return 1 if any(r["failures"] for r in results.values()) else 0
