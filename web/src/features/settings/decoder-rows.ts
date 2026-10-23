@@ -148,6 +148,7 @@ const EFFICIENCY: Readonly<Record<DecoderEfficiencyDetail, string>> = {
 	budget: "Waiting: over the CPU budget",
 	cpu: "Waiting: the CPU is too busy",
 	drops: "Waiting: it dropped samples",
+	"late-drops": "Waiting: it fell behind and dropped late samples",
 	unknown: "Waiting for a clean measurement",
 }
 
