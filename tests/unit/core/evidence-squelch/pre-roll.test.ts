@@ -334,6 +334,31 @@ describe("PreRoll", () => {
 			expect(pre.delaySamples).toBeLessThanOrEqual(pre.capacitySamples)
 		})
 
+		it("maximum alternation (10 ms pass/drop blocks) never exceeds 153 runs", () => {
+			for (const format of FORMATS) {
+				const pre = new PreRoll({ rate: RATE, format })
+				const width = pcmSampleBytes(format)
+				const stream = Buffer.alloc(ms(10) * width, 3)
+				// Chunks deliberately misaligned with the 10 ms blocks (odd byte counts).
+				const chunkBytes = 333
+				let maxRuns = 0
+				const feed = (tag: PreRollTag): void => {
+					for (let at = 0; at < stream.length; at += chunkBytes) {
+						const piece = Buffer.from(stream.subarray(at, at + chunkBytes))
+						pre.process(piece, 0, piece.length, tag)
+						maxRuns = Math.max(maxRuns, pre.tagRuns)
+					}
+				}
+				for (let b = 0; b < 200; b++) feed("pending")
+				pre.latch()
+				expect(pre.delaySamples).toBe(pre.capacitySamples)
+				for (let b = 0; b < 3_000; b++) feed(b % 2 === 0 ? "pass" : "drop")
+				expect(maxRuns).toBeGreaterThan(140)
+				expect(maxRuns).toBeLessThanOrEqual(153)
+				expect(pre.runOverflows).toBe(0)
+			}
+		})
+
 		it("a worst-case wiring schedule never exceeds 153 runs", () => {
 			for (const format of FORMATS) {
 				const pre = new PreRoll({ rate: RATE, format })
