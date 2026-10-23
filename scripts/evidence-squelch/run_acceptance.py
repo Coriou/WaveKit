@@ -60,10 +60,14 @@ assert not FORBIDDEN_PORTS & set(SAFE_PORTS)
 # A stage-1 open may precede the source onset by this much (block quantisation) and still
 # belong to that over.
 ASSOC_SLACK_S = 0.1
-# Carrier-bearing fixtures must close at least max(MIN_EVENTS, overs in the recording after
-# STARTUP_S, minus one) transmissions in both runs.
-MIN_EVENTS = 3
-STARTUP_S = 30.0
+# Overs both WebSocket recordings must fully cover; a close is announced after its hang, so
+# an over counts as covered only CLOSE_ALLOWANCE_S after its end.
+MIN_OVERS = 3
+CLOSE_ALLOWANCE_S = 3.0
+CLOCK_PORT = 3002
+# The forwarder's wall-clock probe aligns host monotonic time with the containers' clock to
+# within half its round trip; probes slower than this are not trusted.
+CLOCK_MAX_RTT_S = 0.020
 # Fixtures whose over has no carrier: the manual baseline may legitimately see no transmission.
 CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
 # The status rate (fractional, e.g. 2.048 Msps / 82 = 24 975.61 Hz) must match the WAV header
@@ -234,10 +238,9 @@ def best_lag(recorded, start, reference, ref_start, rate):
 	return None if best is None else best / rate
 
 
-def verdict_opened(expect, runs):
+def verdict_opened(expect_open, runs):
 	opened = len(runs) > 0
-	want = expect != "none"
-	return None if opened == want else f"opened={opened}, manifest expect={expect}"
+	return None if opened == expect_open else f"opened={opened}, expected open={expect_open}"
 
 
 def verdict_onset(lags):
@@ -268,31 +271,49 @@ def _number(value):
 
 
 def source_clock(side, fixture):
-	"""The source timeline of one run: when the fake started sending the file (its `connected`
-	event, core-side wall clock), where the over sits in the file (fixture sidecar), the file
-	period, and the host-monotonic minus core-wall offset bounded by the earliest transmission
-	event receipt (None without events). Missing evidence is an invalid run."""
+	"""The source timeline of one run on the containers' shared wall clock: when the fake
+	started sending the file (its `connected` event), where the over sits in the file and how
+	long it is (fixture sidecar), the file period, and host-monotonic to wall from the
+	forwarder's clock probe with the smallest round trip. Transmission events are not used to
+	align clocks: the core announces them late on purpose (qualification and hang). Missing
+	evidence is an invalid run."""
 	src = side.get("source")
 	if not isinstance(src, dict) or not _number(src.get("connectedTs")):
 		raise InvalidRun("missing source clock (fake rtl_tcp connected event)")
 	if src.get("connections") != 1:
 		raise InvalidRun("fake rtl_tcp saw more than one connection (source clock ambiguous)")
-	if not isinstance(fixture, dict) or not _number(fixture.get("overOnsetS")) or not _number(fixture.get("periodS")):
-		raise InvalidRun("missing fixture sidecar onset or period")
-	if fixture["periodS"] <= 0:
+	if not isinstance(fixture, dict) or not all(_number(fixture.get(k)) for k in ("overOnsetS", "periodS", "overS")):
+		raise InvalidRun("missing fixture sidecar onset, length or period")
+	if fixture["periodS"] <= 0 or fixture["overS"] <= 0:
 		raise InvalidRun("invalid fixture period")
-	offsets = []
-	for event in side.get("transmissions", []):
-		if _number(event.get("mono")) and isinstance(event.get("startedAt"), str):
-			offsets.append(event["mono"] - parse_iso(event["startedAt"]))
+	probes = []
+	for probe in side.get("clockProbes") or []:
+		if isinstance(probe, (list, tuple)) and len(probe) == 3 and all(_number(v) for v in probe) and probe[1] >= probe[0]:
+			m0, m1, wall = probe
+			probes.append((m1 - m0, wall - (m0 + m1) / 2))
+	if not probes:
+		raise InvalidRun("missing clock probe (host monotonic to container wall clock)")
+	rtt, to_wall = min(probes)
+	if rtt > CLOCK_MAX_RTT_S:
+		raise InvalidRun(f"clock probe round trip {rtt * 1000:.1f} ms exceeds {CLOCK_MAX_RTT_S * 1000:.0f} ms")
 	return {"connected": float(src["connectedTs"]), "onset": float(fixture["overOnsetS"]),
-		"period": float(fixture["periodS"]), "offset": min(offsets) if offsets else None}
+		"period": float(fixture["periodS"]), "overS": float(fixture["overS"]), "toWall": to_wall, "rttS": rtt}
 
 
 def over_at(clock, wall):
-	"""(index, source onset wall time) of the over a core-wall time belongs to."""
+	"""(index, source onset wall time) of the over a wall time belongs to."""
 	k = math.floor((wall - clock["connected"] - clock["onset"] + ASSOC_SLACK_S) / clock["period"])
 	return k, clock["connected"] + clock["onset"] + k * clock["period"]
+
+
+def complete_overs(start_mono, end_mono, clock, tail_s):
+	"""Overs whose onset is at least ASSOC_SLACK_S after the start of a recording and whose end
+	plus tail_s is inside it (boundary overs are genuinely incomplete and excluded)."""
+	base = clock["connected"] + clock["onset"]
+	start, end = start_mono + clock["toWall"], end_mono + clock["toWall"]
+	first = math.ceil((start + ASSOC_SLACK_S - base) / clock["period"])
+	last = math.floor((end - clock["overS"] - tail_s - base) / clock["period"])
+	return set(range(max(0, first), last + 1))
 
 
 def arrival_time(arrivals, byte_index):
@@ -303,30 +324,37 @@ def arrival_time(arrivals, byte_index):
 
 
 def played_overs(side, runs, clock, rate):
-	"""Per played run: its over, stage-1 latency and the delay of its first and last sample
-	behind the source. Every played run must sit on a recorded stage-1 open of its over."""
-	if clock["offset"] is None:
-		raise InvalidRun("audio played but no transmission event places it on the source clock")
-	opens = sorted(parse_iso(e["startedAt"]) for e in side.get("transmissions", [])
-		if e.get("state") == "open" and isinstance(e.get("startedAt"), str))
-	if not opens:
-		raise InvalidRun("audio played but no stage-1 open event recorded")
+	"""Per played run: its over, the stage-1 start (event startedAt) after the source onset and
+	the delay of its first and last sample behind the source. Every played run must have a
+	recorded stage-1 transmission starting at its over."""
+	starts = sorted(parse_iso(e["startedAt"]) for e in side.get("transmissions", [])
+		if isinstance(e.get("startedAt"), str))
 	out = []
 	for s, e in runs:
 		first = arrival_time(side["arrivals"], int(s * rate / REF_RATE) * 2)
 		last = arrival_time(side["arrivals"], int((e - 1) * rate / REF_RATE) * 2)
 		if first is None or last is None:
 			raise InvalidRun("played sample without an arrival time")
-		w_first, w_last = first - clock["offset"], last - clock["offset"]
-		i = bisect_left(opens, w_first + 1e-9) - 1
-		if i < 0:
-			raise InvalidRun("played audio before any stage-1 open")
-		k, onset = over_at(clock, opens[i])
-		if k < 0 or not onset - ASSOC_SLACK_S <= opens[i] <= onset + MAX_DELAY_S:
-			raise InvalidRun("stage-1 open does not match a source over onset")
-		out.append({"over": k, "stage1S": opens[i] - onset, "startS": w_first - onset,
+		w_first, w_last = first + clock["toWall"], last + clock["toWall"]
+		k, onset = over_at(clock, w_first)
+		stage1 = [t for t in starts if onset - ASSOC_SLACK_S <= t <= onset + MAX_DELAY_S]
+		if k < 0 or not stage1:
+			raise InvalidRun(f"no stage-1 transmission recorded for played over {k}")
+		out.append({"over": k, "stage1S": stage1[0] - onset, "startS": w_first - onset,
 			"endS": w_last - (onset + (e - 1 - s) / REF_RATE)})
 	return out
+
+
+def verdict_playback(overs, eligible):
+	"""Every complete source over in the stream recording is played exactly once."""
+	if not eligible:
+		raise InvalidRun("stream recording covers no complete over")
+	played = [o["over"] for o in overs]
+	missing = sorted(eligible - set(played))
+	if missing:
+		return f"no playback for complete overs {missing} of {len(eligible)}"
+	twice = sorted({k for k in played if played.count(k) > 1})
+	return f"overs {twice} played as more than one run" if twice else None
 
 
 def verdict_delay(overs):
@@ -357,42 +385,60 @@ def verdict_byte_rate(arrivals, byte_rate):
 	return (f"byte rate off nominal {byte_rate}: {bad}" if bad else None), rates
 
 
+def verdict_auto_state(statuses, squelch_mode, modulation, expect_open):
+	"""Evidence squelch is NFM only (A8): `off` on AM and on manual runs; `waiting`/`open` on NFM
+	auto runs, reaching `open` exactly when the fixture is expected to open."""
+	states = [s["autoSquelch"].get("state") for _t, s in statuses
+		if isinstance(s, dict) and isinstance(s.get("autoSquelch"), dict)]
+	if not states:
+		raise InvalidRun(f"no autoSquelch state in {squelch_mode} status samples")
+	seen = set(states)
+	if squelch_mode != "auto" or modulation != "nfm":
+		return None if seen == {"off"} else f"autoSquelch {sorted(seen)} on {modulation} {squelch_mode}, want off"
+	if seen - {"waiting", "open"}:
+		return f"autoSquelch {sorted(seen)} on nfm auto, want waiting/open"
+	if expect_open != ("open" in seen):
+		return f"autoSquelch {'never' if expect_open else 'did'} open on nfm auto"
+	return None
+
+
 def event_edges(events, clock):
-	"""{(over, n): (open, close)} of completed transmissions, seconds after the source onset of
-	their over (the n-th transmission within that over)."""
-	out, seen = {}, {}
+	"""{over: [(open, close), ...]} of completed transmissions, seconds after the source onset
+	of their over, from each event's startedAt (not its late announcement)."""
+	out = {}
 	for e in events:
 		if e.get("state") != "closed" or not _number(e.get("durationMs")):
 			continue
 		start = parse_iso(e.get("startedAt"))
 		k, onset = over_at(clock, start)
-		n = seen.get(k, 0)
-		seen[k] = n + 1
-		out[(k, n)] = (start - onset, start - onset + e["durationMs"] / 1000)
+		out.setdefault(k, []).append((start - onset, start - onset + e["durationMs"] / 1000))
 	return out
 
 
-def required_events(carrier, seconds, period):
-	if not carrier:
-		return 0
-	return max(MIN_EVENTS, int((seconds - STARTUP_S) / period) - 1)
+def ws_overs(side, clock):
+	span = side.get("wsSpan")
+	if not isinstance(span, (list, tuple)) or len(span) != 2 or not all(_number(v) for v in span):
+		raise InvalidRun("missing websocket recording span")
+	return complete_overs(span[0], span[1], clock, CLOSE_ALLOWANCE_S)
 
 
-def verdict_events(auto_events, manual_events, auto_clock, manual_clock, required):
-	"""Transmissions of both runs on their own source clock: enough of them, the same overs and
-	edges within EVENT_TOLERANCE_S (a systematic shift fails)."""
-	a, m = event_edges(auto_events, auto_clock), event_edges(manual_events, manual_clock)
-	if len(a) < required or len(m) < required:
-		return f"too few completed transmissions: auto {len(a)}, manual {len(m)}, need {required}"
-	if a or m:
-		horizon = min(max(a)[0] if a else -1, max(m)[0] if m else -1)
-		differ = sorted(key for key in set(a) ^ set(m) if key[0] <= horizon)
-		if differ:
-			return f"transmission sets differ at over {differ[0][0]}: auto {len(a)} manual {len(m)}"
-	for key in sorted(set(a) & set(m)):
-		(ao, ac), (mo, mc) = a[key], m[key]
-		if abs(ao - mo) > EVENT_TOLERANCE_S or abs(ac - mc) > EVENT_TOLERANCE_S:
-			return f"transmission edges differ at over {key[0]}: auto {ao:.3f}-{ac:.3f} manual {mo:.3f}-{mc:.3f}"
+def verdict_events(auto, manual, auto_clock, manual_clock, carrier):
+	"""Transmissions over the overs both WebSocket recordings fully cover, each run on its own
+	source clock: the same transmissions per over with edges within EVENT_TOLERANCE_S, and on
+	carrier-bearing fixtures at least one per over."""
+	common = ws_overs(auto, auto_clock) & ws_overs(manual, manual_clock)
+	if len(common) < MIN_OVERS:
+		raise InvalidRun(f"recordings share {len(common)} complete overs, need {MIN_OVERS}")
+	a, m = event_edges(auto["transmissions"], auto_clock), event_edges(manual["transmissions"], manual_clock)
+	for k in sorted(common):
+		la, lm = a.get(k, []), m.get(k, [])
+		if carrier and (not la or not lm):
+			return f"no completed transmission in over {k}: auto {len(la)} manual {len(lm)}"
+		if len(la) != len(lm):
+			return f"transmission count differs in over {k}: auto {len(la)} manual {len(lm)}"
+		for (ao, ac), (mo, mc) in zip(la, lm):
+			if abs(ao - mo) > EVENT_TOLERANCE_S or abs(ac - mc) > EVENT_TOLERANCE_S:
+				return f"transmission edges differ in over {k}: auto {ao:.3f}-{ac:.3f} manual {mo:.3f}-{mc:.3f}"
 	return None
 
 
@@ -411,23 +457,42 @@ def verdict_drain(drains_ms, guard_ms):
 	return (None if worst <= guard_ms else f"measured back-chain drain {worst:.0f} ms > CLOSE_GUARD_MS {guard_ms}"), worst
 
 
+def expects_open(modulation, expect):
+	"""AM is not evidence-gated (A8): stage-1 auto squelch opens on the carrier and passes audio
+	for am-voice and am-carrier alike. NFM follows the manifest."""
+	return modulation == "am" or expect != "none"
+
+
 def evaluate(obs, guard_ms):
 	"""All verdicts of one fixture from its recorded observations."""
 	failures, notes = [], {}
 	auto, manual = obs["auto"], obs["manual"]
+	modulation = obs["mode"]
 	clocks = {mode: source_clock(obs[mode], obs[mode].get("fixture")) for mode in ("auto", "manual")}
+	notes["clockRttMs"] = [clocks[m]["rttS"] * 1000 for m in ("auto", "manual")]
+	expect_open = expects_open(modulation, obs["expect"])
 	rate = auto["audioRate"]
 	byte_rate = rate * 2
 	runs = nonzero_runs(auto["samples8k"], REF_RATE)
-	if f := verdict_opened(obs["expect"], runs):
+	if f := verdict_opened(expect_open, runs):
 		failures.append(f)
-	if obs["expect"] != "none" and runs:
-		lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs]
-		if f := verdict_onset(lags):
+	for mode in ("auto", "manual"):
+		if f := verdict_auto_state(obs[mode].get("status", []), mode, modulation, expect_open):
 			failures.append(f)
-		notes["onsetLagsS"] = lags
+	if expect_open and runs:
+		if modulation != "am":  # pre-roll onset is an evidence-squelch property (NFM only)
+			lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs]
+			if f := verdict_onset(lags):
+				failures.append(f)
+			notes["onsetLagsS"] = lags
 		overs = played_overs(auto, runs, clocks["auto"], rate)
 		notes["overs"] = overs
+		if auto["arrivals"]:
+			eligible = complete_overs(auto["arrivals"][0][0], auto["arrivals"][-1][0], clocks["auto"], MAX_DELAY_S)
+		else:
+			eligible = set()
+		if f := verdict_playback(overs, eligible):
+			failures.append(f)
 		f, worst = verdict_delay(overs)
 		notes["maxDelayS"] = worst
 		if f:
@@ -436,8 +501,7 @@ def evaluate(obs, guard_ms):
 	notes["byteRates"] = rates
 	if f:
 		failures.append(f)
-	required = required_events(obs["carrier"], obs["seconds"], clocks["auto"]["period"])
-	if f := verdict_events(auto["transmissions"], manual["transmissions"], clocks["auto"], clocks["manual"], required):
+	if f := verdict_events(auto, manual, clocks["auto"], clocks["manual"], obs["carrier"]):
 		failures.append(f)
 	if f := verdict_p99(auto["p99Ms"], manual["p99Ms"]):
 		failures.append(f)
@@ -584,14 +648,15 @@ def self_test():
 
 	onset = int(0.25 * rate)
 	ref = [0.0] * onset + [noise() for _ in range(int(3.75 * rate))]
-	conn, gap, period, host_offset, pipe_delay = 1_792_000_000.0, 3.0, 6.75, -1_791_990_000.0, 0.3
-	stream_s, overs_played, overs_tx, stage1 = 65.0, 2, 8, 0.05
+	conn, gap, period, over_s = 1_792_000_000.0, 3.0, 6.75, 3.75
+	host_offset, stream_lead, latency, stage1, stream_s = -1_791_990_000.0, 0.3, 0.25, 0.05, 65.0
+	complete = range(9)  # overs 0..8 are complete in both the stream and the WebSocket span
 
-	def recorded(skip=0):
-		"""Stream samples: over k plays from source onset (minus pipe_delay of stream start)."""
+	def recorded(skip=0, overs=complete):
+		"""Stream sample i carries source time conn + stream_lead + i / rate; over k plays whole."""
 		out = [0.0] * int(stream_s * rate)
-		for k in range(overs_played):
-			i = int((gap + k * period - pipe_delay) * rate)
+		for k in overs:
+			i = int((gap + k * period - stream_lead) * rate)
 			body = ref[onset + skip :]
 			out[i : i + len(body)] = body
 		return out
@@ -599,31 +664,35 @@ def self_test():
 	def arrivals(stretch=1.0, stall_after=None):
 		out = []
 		for step in range(int(stream_s * 10) + 1):
-			t = conn + pipe_delay + 0.25 + step * 0.1 * stretch
+			t = conn + stream_lead + latency + step * 0.1 * stretch
 			if stall_after is not None and step * 0.1 > stall_after:
 				t += 2.0
 			out.append((t + host_offset, int(step * 0.1 * 2 * rate)))
 		return out
 
-	def events(shift=0.0, count=overs_tx, skip=()):
+	def events(shift=0.0, overs=range(10), announce=0.6):
+		"""Opens are announced `announce` s after they start (qualification), closes after hang."""
 		out = []
-		for k in range(count):
-			if k in skip:
-				continue
+		for k in overs:
 			start = conn + gap + k * period + stage1 + shift
-			mono = start + host_offset + 0.002
+			mono = start + host_offset + announce
 			out.append({"state": "open", "startedAt": format_iso(start), "durationMs": None, "mono": mono})
-			out.append({"state": "closed", "startedAt": format_iso(start), "durationMs": 3750, "mono": mono + 3.75})
+			out.append({"state": "closed", "startedAt": format_iso(start), "durationMs": 3750, "mono": mono + 4.0})
 		return out
 
-	fixture = {"overOnsetS": gap, "periodS": period}
-	source = {"connectedTs": conn, "connections": 1}
+	def status(*states):
+		return [[0.0, {"autoSquelch": {"state": s}}] for s in states]
+
+	m0 = conn + 10.0 + host_offset
+	probes = [[m0 - 5, m0 - 4.9, conn + 7.0], [m0, m0 + 0.002, conn + 10.001]]  # slow wrong one, fast right one
+	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
+	common = {"source": {"connectedTs": conn, "connections": 1}, "clockProbes": probes, "wsSpan": ws_span,
+		"fixture": {"overOnsetS": gap, "periodS": period, "overS": over_s}}
 	base = {
-		"expect": "voice", "reference8k": ref, "refOnset8k": onset, "carrier": True, "seconds": stream_s,
-		"auto": {"audioRate": rate, "samples8k": recorded(), "arrivals": arrivals(), "transmissions": events(),
-			"p99Ms": [3.0], "source": source, "fixture": fixture},
-		"manual": {"audioRate": rate, "transmissions": events(), "p99Ms": [2.5], "drainsMs": [120.0],
-			"source": source, "fixture": fixture},
+		"expect": "voice", "mode": "nfm", "reference8k": ref, "refOnset8k": onset, "carrier": True,
+		"auto": dict(common, audioRate=rate, samples8k=recorded(), arrivals=arrivals(), transmissions=events(),
+			p99Ms=[3.0], status=status("waiting", "open")),
+		"manual": dict(common, audioRate=rate, transmissions=events(), p99Ms=[2.5], drainsMs=[120.0], status=status("off")),
 	}
 
 	def variant(**changes):
@@ -645,29 +714,56 @@ def self_test():
 			return str(exc)
 		raise AssertionError(f"accepted without timing evidence: {list(changes)}")
 
+	silent = [0.0] * int(stream_s * rate)
 	assert variant() == [], variant()
+	# Late announcements (event receipt) do not move any timing verdict.
+	assert variant(auto__transmissions=events(announce=1.4), manual__transmissions=events(announce=0.9)) == []
 	assert any("opened" in f for f in variant(top__expect="none"))
 	assert any("onset" in f for f in variant(auto__samples8k=recorded(int(0.03 * rate))))
 	assert any("byte rate" in f for f in variant(auto__arrivals=arrivals(1.02)))
 	assert any("delay" in f for f in variant(auto__arrivals=arrivals(stall_after=gap + 1.0)))
+	# Every complete over must play (2 of 9 played no longer passes); boundary overs are exempt.
+	assert any("no playback" in f for f in variant(auto__samples8k=recorded(overs=range(2))))
+	assert any("no playback" in f for f in variant(auto__samples8k=recorded(overs=[k for k in complete if k != 4])))
 	# Missing timing evidence is invalid, never a zero-delay pass.
 	assert "source clock" in invalid(auto__source=None)
 	assert "more than one" in invalid(auto__source={"connectedTs": conn, "connections": 2})
-	assert "sidecar" in invalid(auto__fixture={"periodS": period})
-	assert "transmission event" in invalid(auto__transmissions=[], manual__transmissions=[])
+	assert "sidecar" in invalid(auto__fixture={"periodS": period, "overOnsetS": gap})
+	assert "clock probe" in invalid(auto__clockProbes=None)
+	assert "round trip" in invalid(auto__clockProbes=[probes[0]])
+	assert "stage-1" in invalid(auto__transmissions=[])
 	assert "stage-1" in invalid(auto__transmissions=events(shift=MAX_DELAY_S + 0.2))
-	assert "stage-1" in invalid(auto__transmissions=[e for e in events() if e["state"] == "closed"])
-	# Transmissions: a systematic shift, a missing over, too few and empty sets all fail.
+	assert "span" in invalid(manual__wsSpan=None)
+	assert "autoSquelch" in invalid(auto__status=[])
+	# Transmissions: a systematic shift, a dropped over (also a trailing one inside coverage),
+	# missing and empty sets fail; an over outside the shared coverage is not compared.
 	assert any("edges" in f for f in variant(manual__transmissions=events(shift=0.05)))
 	late = [dict(e, durationMs=3800) if e["state"] == "closed" else e for e in events()]
 	assert any("edges" in f for f in variant(manual__transmissions=late))
-	assert any("differ" in f for f in variant(manual__transmissions=events(skip=(3,))))
-	assert any("few" in f for f in variant(auto__transmissions=events(count=2), manual__transmissions=events(count=2)))
-	empty = variant(top__expect="none", auto__samples8k=[0.0] * int(stream_s * rate),
+	assert any("over 3" in f for f in variant(manual__transmissions=events(overs=[k for k in range(10) if k != 3])))
+	assert any("over 8" in f for f in variant(manual__transmissions=events(overs=range(8))))
+	assert variant(manual__transmissions=events(overs=range(9))) == []
+	short = [ws_span[0], conn + 29.0 + host_offset]  # manual covers overs 0..2 only
+	assert variant(manual__wsSpan=short, manual__transmissions=events(overs=range(3))) == []
+	assert any("over 2" in f for f in variant(manual__wsSpan=short, manual__transmissions=events(overs=range(2))))
+	assert "complete overs" in invalid(manual__wsSpan=[ws_span[0], conn + 15.0 + host_offset])
+	empty = variant(top__expect="none", auto__samples8k=silent, auto__status=status("waiting"),
 		auto__transmissions=[], manual__transmissions=[])
-	assert any("few" in f for f in empty), empty
-	assert variant(top__expect="none", top__carrier=False, auto__samples8k=[0.0] * int(stream_s * rate),
+	assert any("no completed transmission" in f for f in empty), empty
+	assert variant(top__expect="none", top__carrier=False, auto__samples8k=silent, auto__status=status("waiting"),
 		auto__transmissions=[], manual__transmissions=[]) == []
+	# A8: evidence squelch is NFM only. AM plays every over on stage-1 (no onset/pre-roll check,
+	# am-carrier included) with autoSquelch off; NFM auto must be waiting/open.
+	am_auto = dict(auto__status=status("off"), top__mode="am")
+	assert variant(**am_auto) == []
+	assert variant(auto__samples8k=recorded(int(0.03 * rate)), **am_auto) == []
+	assert variant(top__expect="none", **am_auto) == []
+	assert any("opened" in f for f in variant(top__expect="none", auto__samples8k=silent, **am_auto))
+	assert any("autoSquelch" in f for f in variant(top__mode="am"))
+	assert any("autoSquelch" in f for f in variant(auto__status=status("off")))
+	assert any("autoSquelch" in f for f in variant(manual__status=status("waiting")))
+	assert any("never open" in f for f in variant(auto__status=status("waiting")))
+	assert any("did open" in f for f in variant(top__expect="none", auto__samples8k=silent))
 	assert any("p99" in f for f in variant(auto__p99Ms=[5.0]))
 	assert any("p99" in f for f in variant(auto__p99Ms=[]))
 	assert verdict_drain([250.0], 200)[0] is not None and verdict_drain([150.0], 200)[0] is None
@@ -703,8 +799,16 @@ def proxy():
 		async with server:
 			await server.serve_forever()
 
+	async def clock(_reader, writer):
+		# The containers' wall clock (the fake's `connected` ts and the core's startedAt).
+		writer.write(json.dumps({"t": time.time()}).encode())
+		await writer.drain()
+		writer.close()
+
 	async def main():
-		await asyncio.gather(serve(API_PORT), serve(STREAM_PORT))
+		server = await asyncio.start_server(clock, "0.0.0.0", CLOCK_PORT)
+		async with server:
+			await asyncio.gather(serve(API_PORT), serve(STREAM_PORT), server.serve_forever())
 
 	asyncio.run(main())
 
@@ -893,20 +997,23 @@ class Recorder:
 	def run(self, entry, cu8, cu8_meta):
 		self.dir.mkdir(parents=True, exist_ok=True)
 		config = self.write_config(entry)
-		api_port, stream_port = pick_ports(2, loopback_free)
+		api_port, stream_port, clock_port = pick_ports(3, loopback_free)
+		self.obs["clockProbes"] = []
 		self.obs["fixture"] = cu8_meta
 		self.obs["seconds"] = self.args.seconds
 		self.env = dict(os.environ, EVIDENCE_SQUELCH_CU8=cu8.name, EVIDENCE_SQUELCH_DATA=str(cu8.parent.resolve()),
 			EVIDENCE_SQUELCH_CONFIG=str(config.resolve()), EVIDENCE_SQUELCH_RATE=str(self.args.rate),
 			EVIDENCE_SQUELCH_DURATION=str(int(self.args.seconds) + 300),
 			EVIDENCE_SQUELCH_CORE_QUOTA=str(self.args.cpu_quota or 0),
-			EVIDENCE_SQUELCH_API_PORT=str(api_port), EVIDENCE_SQUELCH_STREAM_PORT=str(stream_port))
+			EVIDENCE_SQUELCH_API_PORT=str(api_port), EVIDENCE_SQUELCH_STREAM_PORT=str(stream_port),
+			EVIDENCE_SQUELCH_CLOCK_PORT=str(clock_port))
 		threads = []
 		try:
 			self.compose("up", "-d", "--no-build", "--pull", "never", timeout=180)
 			# Both endpoints are verified before any client (including the readiness poll) starts.
 			host, api = self.endpoint(API_PORT, api_port)
 			stream = self.endpoint(STREAM_PORT, stream_port)
+			self.clock = self.endpoint(CLOCK_PORT, clock_port)
 			self.base = f"http://{host}:{api}"
 			deadline = time.monotonic() + 90
 			while True:
@@ -979,14 +1086,31 @@ class Recorder:
 
 	def record_ws(self, host, port):
 		try:
-			read_ws(WsClient.connect(host, port, ["live-audio"], self.stop), self.stop, self.obs)
+			ws = WsClient.connect(host, port, ["live-audio"], self.stop)
+			start = time.monotonic()
+			read_ws(ws, self.stop, self.obs)
+			self.obs["wsSpan"] = [start, time.monotonic()]
 		except (OSError, InvalidRun, ValueError) as exc:
 			self.obs["error"] = "websocket: " + str(exc)
 			self.stop.set()
 
+	def probe_clock(self):
+		"""(host mono before, host mono after, container wall clock) from the forwarder."""
+		host, port = check_endpoint(*self.clock)
+		m0 = time.monotonic()
+		with socket.create_connection((host, port), timeout=2) as sock:
+			data = b""
+			while chunk := sock.recv(256):
+				data += chunk
+		m1 = time.monotonic()
+		wall = json.loads(data).get("t")
+		if _number(wall):
+			self.obs["clockProbes"].append([m0, m1, wall])
+
 	def poll(self):
 		while not self.stop.wait(1.0):
 			try:
+				self.probe_clock()
 				self.obs["status"].append((time.monotonic(), self.get("/api/live-audio/status")))
 				for report in self.get("/api/resources/link-quality"):
 					last = ((report.get("loopDelay") or {}).get("last") or {})
@@ -1086,7 +1210,7 @@ def drains(obs):
 
 
 def judge(run_dir, name, entry, guard_ms):
-	obs = {"expect": entry["expect"], "reference8k": reference(name), "refOnset8k": int(entry["overOnsetS"] * REF_RATE),
+	obs = {"expect": entry["expect"], "mode": entry["mode"], "reference8k": reference(name), "refOnset8k": int(entry["overOnsetS"] * REF_RATE),
 		"carrier": name not in CARRIERLESS}
 	for mode in ("auto", "manual"):
 		path = run_dir / mode / "observations.json"
@@ -1100,9 +1224,6 @@ def judge(run_dir, name, entry, guard_ms):
 		side["samples8k"] = to_8k(run_dir / mode / "stream.s16le", side["audioRate"]) if mode == "auto" else []
 		side["drainsMs"] = drains(side) if mode == "manual" else []
 		obs[mode] = side
-	obs["seconds"] = obs["auto"].get("seconds")
-	if not _number(obs["seconds"]):
-		raise InvalidRun(f"{name}: recording length missing")
 	return evaluate(obs, guard_ms)
 
 

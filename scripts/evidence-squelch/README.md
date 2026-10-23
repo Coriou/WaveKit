@@ -115,21 +115,31 @@ python3 -I scripts/evidence-squelch/run_acceptance.py --replay output/evidence-s
 ```
 
 Recorded per run (`<out>/<fixture>/<mode>/`): `/stream.wav` bytes with arrival times,
-`live-audio:level` and `live-audio:transmission` events, status samples, the event-loop p99 of
-the link-quality report, and the fake source's `connected` time from its log. Timing is measured
-on the source clock: over k starts at that time plus the sidecar over onset plus k file periods.
-Host arrival times are mapped onto it by the earliest transmission-event receipt (so a delay is
-understated by at most the WebSocket latency).
+`live-audio:level` and `live-audio:transmission` events with the WebSocket recording span, status
+samples, the event-loop p99 of the link-quality report, the fake source's `connected` time from
+its log, and wall-clock probes of the forwarder (a third published port). Timing is measured on
+the source clock: over k starts at the `connected` time plus the sidecar over onset plus k file
+periods. Host times are mapped onto the containers' wall clock by the probe with the smallest
+round trip (at most 20 ms; error at most half of it). Event `startedAt` gives a transmission's
+start; its announcement is late on purpose (qualification and hang) and is never used for
+timing.
 
-Verdicts: opened or not per manifest `expect`; first played sample within 20 ms of the over onset
-(normalised cross-correlation with the analyzer golden, after windowed-sinc resampling of the
-stream to 8 kHz from the exact status rate, e.g. 24 975.61 Hz at 2.048 Msps; the kernel is
-symmetric, so it adds no delay); per played over, the delay of its first and last sample behind
-the source ≤ 1.5 s, each played over tied to a stage-1 open of the same over; byte rate within
-0.5 % of nominal per minute; transmission events equal to the manual run per over on each run's
-source clock (open and close within 10 ms, no over missing, and for carrier-bearing fixtures at
-least max(3, overs after the first 30 s minus one) completed in each run); p99 within 2 ms of
-manual; the measured back-chain drain is reported against `CLOSE_GUARD_MS`. Missing timing
-evidence (no source clock, sidecar onset or stage-1 open for played audio) and a stream or
-WebSocket that ends before the run are invalid. Evidence squelch is NFM only: AM runs exercise
-today's stage-1 auto squelch. Exit codes: 0 pass, 1 fail, 2 invalid.
+Verdicts: opened or not per expectation; on NFM, first played sample within 20 ms of the over
+onset (normalised cross-correlation with the analyzer golden, after windowed-sinc resampling of
+the stream to 8 kHz from the exact status rate, e.g. 24 975.61 Hz at 2.048 Msps; the kernel is
+symmetric, so it adds no delay); every complete over of the stream recording played exactly
+once, each on a stage-1 transmission of that over; per played over, the delay of its first and
+last sample behind the source ≤ 1.5 s; byte rate within 0.5 % of nominal per minute;
+transmission events equal to the manual run per over over the overs both WebSocket recordings
+fully cover (open and close within 10 ms, same count, at least one per over on carrier-bearing
+fixtures, at least 3 shared overs); p99 within 2 ms of manual; the measured back-chain drain is
+reported against `CLOSE_GUARD_MS`.
+
+Evidence squelch is NFM only. `autoSquelch.state` must be `off` on AM runs and manual runs and
+`waiting`/`open` on NFM auto runs (reaching `open` exactly on expected-open fixtures). AM auto
+runs use today's stage-1 auto squelch: `am-voice` and `am-carrier` both open on the carrier and
+play every over, with no onset (pre-roll) check.
+
+Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
+state or stage-1 transmission for played audio) and a stream or WebSocket that ends before the
+run are invalid. Exit codes: 0 pass, 1 fail, 2 invalid.
