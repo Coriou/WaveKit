@@ -1411,8 +1411,8 @@ Fields:
   and from older cores.
 - `autoSquelch` — the evidence (stage 2) gate of `auto` squelch while the pipeline
   runs: `{ state, evidence? }` with `state` `off` (not evidence-gated: `manual` or
-  `noise` mode, a configured `toneSquelch`, or a modulation other than `nfm` and
-  `am`), `waiting` (no evidence yet: audio is held and the stream carries silence)
+  `noise` mode, a configured `toneSquelch`, or a modulation other than `nfm`,
+  including `am`), `waiting` (no evidence yet: audio is held and the stream carries silence)
   or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
 - `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
@@ -1423,14 +1423,15 @@ Configuration notes:
 
 - `squelchMode` — `auto` (default) or `manual` (`squelch` is the threshold). `auto`
   stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
-  default 6, and delimits transmissions. On `nfm` and `am`, `auto` adds stage 2, an
+  default 6, and delimits transmissions. On `nfm` only, `auto` adds stage 2, an
   evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
   or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
   to 1.5 s and played when the gate latches. During an over the stream can run up
   to 1.5 s behind; it catches up by dropping the silence after the over. An over
   shorter than about one second with no tone is not heard. `manual` and `noise`
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
-  replaces stage 2); other modulations keep stage 1 alone. The stage 1
+  replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
+  keep stage 1 alone, with `autoSquelch` state `off`. The stage 1
   floor is a constant-memory running lower envelope: falls are immediate; rises
   are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
   stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within

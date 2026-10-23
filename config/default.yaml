@@ -309,10 +309,11 @@ tuner:
 #                            # -10..-30, so -40 opens on real signals only
 #   squelchMode: "auto"      # auto (default) | manual | noise. auto: floor
 #                            # estimate + autoMarginDb delimits overs; on
-#                            # nfm/am audio then passes only on voice (or nfm
-#                            # CTCSS/DCS >= 750 ms), up to 1.5 s behind; short
-#                            # toneless overs are not heard. manual/noise: any
-#                            # carrier opens
+#                            # nfm audio then passes only on voice or
+#                            # CTCSS/DCS >= 750 ms, up to 1.5 s behind; short
+#                            # toneless overs are not heard. Other modulations
+#                            # (am too) keep the floor gate alone. manual/noise:
+#                            # any carrier opens
 #   autoMarginDb: 6          # dB above the floor estimate, auto mode (0-40)
 #   noiseReduction: "off"    # off | voice | noaa-apt | narrow-band
 #   lowPass: 0               # Hz (0 disables)
