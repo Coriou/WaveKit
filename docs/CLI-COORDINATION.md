@@ -1510,9 +1510,9 @@ The web tuned card needs no change.
 Spec: [evidence-squelch](specs/evidence-squelch/requirements.md). Details in [API.md](API.md).
 The contract additions are optional and additive; older cores omit the new fields.
 
-1. `squelchMode: "auto"` on `nfm` and `am` (`am` subject to checkpoint 8.4) is two-stage: stage 1 (channel-power floor + `autoMarginDb`) still delimits transmissions; stage 2 passes client audio only on voice, or on `nfm` a CTCSS/DCS tone heard for at least 750 ms. Other modulations keep stage 1 alone; `manual` and `noise` keep "any carrier opens"; a configured `toneSquelch` is unchanged.
+1. `squelchMode: "auto"` on `nfm` only is two-stage: stage 1 (channel-power floor + `autoMarginDb`) still delimits transmissions; stage 2 passes client audio only on voice or a CTCSS/DCS tone heard for at least 750 ms. `am` and other modulations keep stage 1 alone (`am` by decision A8); `manual` and `noise` keep "any carrier opens"; a configured `toneSquelch` is unchanged.
 2. Default flip: the runtime default `squelchMode` becomes `auto` (lands with checkpoint 8.4, task M.3). Status and config responses report `auto` when unset.
-3. `LiveAudioStatus.autoSquelch?` and `LiveAudioLevel.autoSquelch?` (`live-audio:level`) are `LiveAudioAutoSquelch` `{ state: "off" | "waiting" | "open", evidence?: "voice" | "ctcss" | "dcs" }`. `off` while running outside the evidence path; absent while stopped and from older cores.
+3. `LiveAudioStatus.autoSquelch?` and `LiveAudioLevel.autoSquelch?` (`live-audio:level`) are `LiveAudioAutoSquelch` `{ state: "off" | "waiting" | "open", evidence?: "voice" | "ctcss" | "dcs" }`. `off` while running outside the evidence path (including on `am`); absent while stopped and from older cores.
 4. `squelchOpen` is unchanged: it is stage 1, not whether audio passes. `autoMarginDb` tunes stage 1 only.
 5. While an over waits for evidence its audio is held in a pre-roll and replayed when the gate latches, so the stream runs up to 1.5 s behind during an over and catches up by dropping the silence after it. Overs under about one second with no tone are not heard.
 6. Known limitations: syllable-timed audio-frequency FSK bursts open as `voice` (the gate equals the pinned scanner judge); voice whose medians sit within about 1 dB of the -30 dB audio threshold may latch after the pre-roll limit, clipping the start of the over.
