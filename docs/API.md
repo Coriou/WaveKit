@@ -1348,7 +1348,7 @@ curl http://localhost:9000/api/live-audio/status
 		"modulation": "nfm",
 		"bandwidth": 12500,
 		"squelch": -40,
-		"squelchMode": "manual",
+		"squelchMode": "auto",
 		"autoMarginDb": 6,
 		"noiseQuietingDb": 6,
 		"noiseReduction": "off",
@@ -1371,7 +1371,8 @@ curl http://localhost:9000/api/live-audio/status
 	"pipelineRestarts": 0,
 	"channelPowerDbfs": -61.3,
 	"squelchOpen": false,
-	"toneSquelch": { "state": "off" }
+	"toneSquelch": { "state": "off" },
+	"autoSquelch": { "state": "waiting" }
 }
 ```
 
@@ -1397,7 +1398,8 @@ Fields:
   full-scale IQ sample (present while the pipeline runs). This is the level the
   `squelch` threshold compares against.
 - `squelchOpen` — squelch gate state while the pipeline runs (`true` with squelch
-  off).
+  off). In `auto` mode this is still stage 1 (the carrier gate), not whether audio
+  passes; see `autoSquelch`.
 - `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
   threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
 - `agc` (WG4) — the effective AGC mode of the chain after the modulation
@@ -1407,14 +1409,28 @@ Fields:
   with `off` (no tone set), `waiting` (squelch closed or the tone not heard yet: the
   stream carries silence) or `open` (tone heard: audio passes). Absent while stopped
   and from older cores.
+- `autoSquelch` — the evidence (stage 2) gate of `auto` squelch while the pipeline
+  runs: `{ state, evidence? }` with `state` `off` (not evidence-gated: `manual` or
+  `noise` mode, a configured `toneSquelch`, or a modulation other than `nfm` and
+  `am`), `waiting` (no evidence yet: audio is held and the stream carries silence)
+  or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
+  `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
 - `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
-  are always present in config and status responses, with their defaults (`manual`,
+  are always present in config and status responses, with their defaults (`auto`,
   6 and 6) when not set. `config.toneSquelch` is present only when it is set.
 
 Configuration notes:
 
-- `squelchMode` — `manual` (default: `squelch` is the threshold) or `auto` (an
-  estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB, default 6). The
+- `squelchMode` — `auto` (default) or `manual` (`squelch` is the threshold). `auto`
+  stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
+  default 6, and delimits transmissions. On `nfm` and `am`, `auto` adds stage 2, an
+  evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
+  or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
+  to 1.5 s and played when the gate latches. During an over the stream can run up
+  to 1.5 s behind; it catches up by dropping the silence after the over. An over
+  shorter than about one second with no tone is not heard. `manual` and `noise`
+  keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
+  replaces stage 2); other modulations keep stage 1 alone. The stage 1
   floor is a constant-memory running lower envelope: falls are immediate; rises
   are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
   stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within
@@ -1432,7 +1448,8 @@ Configuration notes:
   default (6 dB, a carrier is present) never seeds the floor and never raises it
   (falls still apply); until the first unquieted block seeds the floor, the gate
   follows the quieting decision, as in `noise` mode, so a strong carrier already
-  present at start or after a retune is heard at once instead of becoming the floor.
+  present at start or after a retune opens stage 1 at once instead of becoming the
+  floor (on `nfm` listeners still need stage 2 evidence to hear it).
   `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
@@ -5751,7 +5768,9 @@ Backpressure status snapshot.
 
 On the `live-audio` channel while the live demodulator runs, published at
 10 Hz. `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
-first complete IQ block; `thresholdDbfs` is the threshold in effect.
+first complete IQ block; `thresholdDbfs` is the threshold in effect. `squelchOpen`
+is stage 1; the optional `autoSquelch` is the evidence gate at the measured block,
+as in [GET /api/live-audio/status](#get-apilive-audiostatus).
 
 ```json
 {
@@ -5762,7 +5781,8 @@ first complete IQ block; `thresholdDbfs` is the threshold in effect.
 		"channelPowerDbfs": -52.3,
 		"noiseFloorDbfs": -61.8,
 		"squelchOpen": true,
-		"thresholdDbfs": -55.8
+		"thresholdDbfs": -55.8,
+		"autoSquelch": { "state": "open", "evidence": "voice" }
 	}
 }
 ```
@@ -5834,7 +5854,7 @@ shape is unchanged.
 		"frequency": { "hz": 446006250, "tuningTrust": "commanded" },
 		"modulation": "nfm",
 		"bandwidthHz": 12500,
-		"squelchMode": "manual",
+		"squelchMode": "auto",
 		"thresholdDbfs": -40,
 		"peakChannelPowerDbfs": -11.2,
 		"meanChannelPowerDbfs": -16.4,
