@@ -25,6 +25,7 @@ function createLiveDemod() {
 		config: LiveDemodRuntimeConfigSchema.parse({
 			enabled: true,
 			sourceId: "rtl-pi",
+			squelchMode: "manual",
 			httpPort: 8081,
 		}),
 		effectiveSampleRate: 25_000,

@@ -111,6 +111,10 @@ design's option tables or budget rationale, only what each task pins.
 - **A8 AM at the pinned thresholds.** Until M.3 resolves requirement 8.4, `am` stays in
   `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`. If Main decides AM keeps stage 1 only, it amends the constant
   to `["nfm"]` and the requirements; no wiring change follows because W reads the constant.
+  **Applied 2026-10-23:** Main decided NFM only (a bare AM carrier latched voice 1.65 s after onset in
+  gate replay); the constant is `["nfm"]`, the requirements carry the amendment, and the AM e2e and
+  golden cases now pin the frozen stage-1 path. The AM half of the 8.1 known limitation (seed 24) no
+  longer applies.
 - **A9 Fixture storage.** Committed goldens are the analyzer's 8 kHz s16le audio and statistics JSON
   per fixture (at most 4 s, 64 KB each). CU8 files for the fake `rtl_tcp` are generated on demand
   into `output/evidence-squelch/` (git-ignored) and never committed.

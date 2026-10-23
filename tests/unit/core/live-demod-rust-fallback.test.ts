@@ -182,6 +182,7 @@ describe("live demod rust fallback and retune", () => {
 			httpPort: port,
 			engine: "rust",
 			chanBinaryPath: "do-not-log-binary",
+			squelchMode: "manual",
 			...overrides,
 		})
 		const captured = capturingLogger()
@@ -930,6 +931,7 @@ describe("live demod rust fallback and retune", () => {
 			modulation: "nfm",
 			bandwidth: 12_500,
 			squelch: 0,
+			squelchMode: "manual",
 			audioFormat: "s16le",
 		})
 		demod = new LiveDemodulatorClass(

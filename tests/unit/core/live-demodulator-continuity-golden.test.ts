@@ -62,6 +62,7 @@ describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: PORT,
+			squelchMode: "manual",
 			...overrides,
 		})
 		liveDemod = new LiveDemodulatorClass(

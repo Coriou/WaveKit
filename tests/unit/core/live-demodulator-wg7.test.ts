@@ -156,6 +156,7 @@ describe("LiveDemodulator WG7", () => {
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,
+			squelchMode: "manual",
 			...overrides,
 		})
 		return new LiveDemodulatorClass(

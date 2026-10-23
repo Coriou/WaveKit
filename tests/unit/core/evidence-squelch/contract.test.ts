@@ -34,7 +34,7 @@ import {
 
 describe("evidence squelch contract", () => {
 	it("pins the constants and their equalities", () => {
-		expect(LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS).toEqual(["nfm", "am"])
+		expect(LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS).toEqual(["nfm"])
 		expect(LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS).toEqual(["nfm"])
 		expect(Object.isFrozen(LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS)).toBe(true)
 		expect(Object.isFrozen(LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS)).toBe(true)
@@ -72,7 +72,7 @@ describe("evidence squelch contract", () => {
 		expect(msToSamples(1, 25_001)).toBe(26)
 	})
 
-	it("applies only to auto NFM/AM without a tone squelch", () => {
+	it("applies only to auto NFM without a tone squelch (AM excluded, amendment A8)", () => {
 		expect(
 			evidenceGateApplies({ squelchMode: "auto", modulation: "nfm" }),
 		).toBe(true)
@@ -82,7 +82,10 @@ describe("evidence squelch contract", () => {
 				modulation: "am",
 				toneSquelch: { kind: "none" },
 			}),
-		).toBe(true)
+		).toBe(false)
+		expect(evidenceGateApplies({ squelchMode: "auto", modulation: "am" })).toBe(
+			false,
+		)
 		for (const m of ["wfm", "usb", "lsb", "dsb", "cw", "raw"] as const)
 			expect(evidenceGateApplies({ squelchMode: "auto", modulation: m })).toBe(
 				false,

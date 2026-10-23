@@ -32,6 +32,7 @@ import {
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_SQUELCH_MODES,
 	type AnalogTransmissionDcs,
+	type LiveAudioAutoSquelch,
 	type LiveAudioSquelchMode,
 } from "@wavekit/api-types"
 import {
@@ -76,6 +77,18 @@ import {
 import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
+import {
+	evidenceGateApplies,
+	pcmSampleBytes,
+	type EvidenceGatePort,
+	type EvidencePcmFormat,
+	type EvidenceSquelchFactory,
+	type PreRollPort,
+	type PreRollTag,
+} from "./evidence-squelch/contract.js"
+import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
+import { PreRoll } from "./evidence-squelch/pre-roll.js"
+import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
@@ -111,6 +124,8 @@ export interface LiveAudioLevel {
 	noiseFloorDbfs: number | null
 	squelchOpen: boolean
 	thresholdDbfs: number
+	/** Evidence squelch gate state (a fresh object per level). */
+	autoSquelch?: LiveAudioAutoSquelch
 }
 
 export interface LiveDemodStatus {
@@ -145,6 +160,8 @@ export interface LiveDemodStatus {
 	agc?: "off" | "slow" | "fast"
 	/** WG7 req 3.4: tone squelch gate state, while running. */
 	toneSquelch?: { state: "off" | "waiting" | "open" }
+	/** Evidence squelch gate state, while running (`off` when not evidence-gated). */
+	autoSquelch?: LiveAudioAutoSquelch
 	/**
 	 * WG12 req 6.4: current or last closed transmission's tone, while running.
 	 * Absent until one is reported; cleared on retune and stop.
@@ -206,9 +223,15 @@ export interface LiveDemodulatorOptions {
 	spawnStage?: (command: string) => ChildProcess
 	/** WG10: clock and timers of the silence fill and the front swap timeout. */
 	clock?: SilenceFillClock
+	/**
+	 * Evidence squelch ports (A5). Absent: the real `EvidenceGate` and `PreRoll`
+	 * (`DEFAULT_EVIDENCE_SQUELCH`); tests inject fakes.
+	 */
+	evidenceSquelch?: EvidenceSquelchFactory
 }
 
 type InjectedOptionKeys =
+	| "evidenceSquelch"
 	| "httpAccess"
 	| "publicOrigin"
 	| "httpHost"
@@ -218,6 +241,18 @@ type ResolvedOptions = Required<
 	Omit<LiveDemodulatorOptions, InjectedOptionKeys>
 > &
 	Pick<LiveDemodulatorOptions, InjectedOptionKeys>
+
+/** Evidence squelch state of one run (NFM and AM streams only). */
+interface RunEvidence {
+	gate: EvidenceGatePort
+	preRoll: PreRollPort
+	/** Tag of the sample split by the last chunk's end (its completing bytes take it, A3). */
+	tailTag: PreRollTag
+	/** `evidenceGateApplies` when last synced; a flip resets the gate and clears the pre-roll. */
+	active: boolean
+	/** False after a build or clear: bytes completing a split sample are skipped (muted) once. */
+	aligned: boolean
+}
 
 /** WG10 req 2.3: a new front started by an offset change, not yet switched in. */
 interface PendingFrontSwap {
@@ -294,6 +329,15 @@ export interface PipelineRun {
 	externalGate?: boolean
 	/** Latest Rust metrics power. Absent on the csdr path. */
 	externalPowerDbfs?: number | null
+	/**
+	 * Evidence squelch gate and pre-roll, built at run start for NFM and AM streams in every
+	 * squelch mode when a factory is configured; null otherwise or when the factory failed.
+	 * Absent until first synced (a Rust run is built by its controller).
+	 */
+	evidence?: RunEvidence | null
+	/** Modulation and gain `evidence` was built for (rebuilt when either changes in place). */
+	evidenceModulation?: LiveDemodConfig["modulation"]
+	evidenceGain?: number
 }
 
 /**
@@ -449,7 +493,10 @@ export class LiveDemodulator extends EventEmitter {
 			publishSquelchChange: () => this.publishSquelchChange(),
 			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
 			measureRun: (run, sample) => this.measureRun(run, sample),
-			resetFloorForRetune: run => this.resetFloorForRetune(run),
+			resetFloorForRetune: run => {
+				this.resetFloorForRetune(run)
+				this.resetEvidence(run)
+			},
 			clearCloseOverride: () => {
 				this.closeOverride = null
 			},
@@ -463,6 +510,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.applySquelchConfig(this.run)
 					this.applySquelchThreshold(this.run)
 					this.applyToneSquelch(this.run)
+					this.syncEvidence(this.run)
 				}
 				this.publishSquelchChange()
 				this.emit("config-changed", this.config)
@@ -547,6 +595,7 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.closeOverride = "stopped"
 		try {
+			if (this.run) this.resetEvidence(this.run)
 			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
@@ -652,6 +701,8 @@ export class LiveDemodulator extends EventEmitter {
 				this.applySquelchConfig(this.run)
 				this.applySquelchThreshold(this.run)
 				this.applyToneSquelch(this.run)
+				// A restarted run builds its own evidence path at start.
+				if (!restarting) this.syncEvidence(this.run)
 			}
 			this.publishSquelchChange()
 
@@ -678,6 +729,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.rustRuns.canRetune(changedPipelineKeys, validated)
 				) {
 					this.rustRuns.retune(run, previous, validated)
+					this.syncEvidence(run)
 				} else if (
 					swapPlan !== null &&
 					run !== null &&
@@ -686,6 +738,8 @@ export class LiveDemodulator extends EventEmitter {
 					// The transmission closes as "config", as on a full restart.
 					run.gateHeld = true
 					this.publishSquelchChange()
+					// Requirement 2.9: the swap start clears the gate and the pre-roll.
+					this.resetEvidence(run)
 					this.closeOverride = null
 					const outcome = await this.swapFront(run, swapPlan.front)
 					if (outcome === "timeout" || outcome === "failed") {
@@ -760,7 +814,10 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		if (this.lastError) status.lastError = this.lastError
 		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
-		if (run) status.toneSquelch = { state: toneSquelchState(run) }
+		if (run) {
+			status.toneSquelch = { state: toneSquelchState(run) }
+			status.autoSquelch = this.autoSquelchState(run)
+		}
 		if (this.http.listening && this.channelTone !== null)
 			status.tone = copyChannelTone(this.channelTone)
 
@@ -888,6 +945,16 @@ export class LiveDemodulator extends EventEmitter {
 		this.reportedSquelchOpen = open
 		// WG7 req 3.2: the tone gate closes at once with the squelch.
 		if (!open) this.run?.tone?.gate?.reset()
+		// A close before a latch discards the over's evidence and its held audio. A held gate
+		// (offset swap, Rust identity retune) is cleared by whoever held it.
+		const run = this.run
+		if (!open && run !== null && !run.gateHeld) {
+			const evidence = this.activeEvidence(run)
+			if (evidence !== null && evidence.gate.state === "waiting") {
+				evidence.gate.reset()
+				evidence.preRoll.abandon()
+			}
+		}
 		this.emit("squelch-changed", open)
 	}
 
@@ -997,6 +1064,10 @@ export class LiveDemodulator extends EventEmitter {
 				)
 			}
 		}
+		// Evidence squelch: one measured block while stage 1 is open (A4: a held gate is closed).
+		const evidence = this.activeEvidence(run)
+		if (evidence !== null && runGateOpen(run) && !run.gateHeld)
+			evidence.gate.noteBlock(this.evidenceCarrier(run, power, sample))
 		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
 		// The squelch samples this estimate only while closed (it rises while
 		// open), so a held carrier is never judged against its own level.
@@ -1098,6 +1169,7 @@ export class LiveDemodulator extends EventEmitter {
 				squelchOpen: runGateOpen(run),
 				thresholdDbfs: this.effectiveThreshold(run),
 			}
+			level.autoSquelch = this.autoSquelchState(run)
 			this.emit("level", level)
 		}, 1000 / this.options.levelHz)
 		this.levelTimer.unref()
@@ -1193,7 +1265,10 @@ export class LiveDemodulator extends EventEmitter {
 			// A second retune before any block keeps the first remembered floor.
 			// Auto squelch only (its threshold derives from the floor); manual and
 			// noise modes reset as before.
-			if (this.run) this.resetFloorForRetune(this.run)
+			if (this.run) {
+				this.resetFloorForRetune(this.run)
+				this.resetEvidence(this.run)
+			}
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -1340,6 +1415,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.run = run
 		this.lastRunStream = run.stream
 		this.applyToneSquelch(run)
+		this.syncEvidence(run)
 		this.audio.configure(run.stream)
 		this.pipelineHealth = "running"
 		this.lastError = null
@@ -1436,6 +1512,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.run = run
 		this.lastRunStream = stream
 		this.applyToneSquelch(run)
+		this.syncEvidence(run)
 		this.audio.configure(stream)
 
 		this.wireRun(run)
@@ -1860,6 +1937,16 @@ export class LiveDemodulator extends EventEmitter {
 		const phase = run?.pcmPhase ?? 0
 		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
 		const tone = run?.tone ?? null
+		const evidence =
+			run !== null && tone === null ? this.syncEvidence(run) : null
+		if (run !== null && evidence !== null) {
+			run.pcmTailMuted = false
+			// Decode regardless of listening: pcm listeners see the chunk before any rewrite.
+			this.emitPcm(chunk)
+			this.processEvidence(run, evidence, chunk, phase)
+			this.audio.write(chunk)
+			return
+		}
 		if (run === null || tone === null) {
 			if (run !== null) run.pcmTailMuted = false
 			this.audio.write(chunk)
@@ -1909,6 +1996,181 @@ export class LiveDemodulator extends EventEmitter {
 		this.audio.write(chunk)
 	}
 
+	/**
+	 * Builds the run's evidence path when missing or stale (modulation or gain changed in
+	 * place), resets it on any flip of `evidenceGateApplies`, and returns it while it governs
+	 * client audio (no tone squelch), else null.
+	 */
+	private syncEvidence(run: PipelineRun): RunEvidence | null {
+		const factory = this.options.evidenceSquelch ?? DEFAULT_EVIDENCE_SQUELCH
+		const { modulation, gain } = this.config
+		if (run.evidenceModulation !== modulation || run.evidenceGain !== gain) {
+			run.evidenceModulation = modulation
+			run.evidenceGain = gain
+			run.evidence = this.buildEvidence(factory, run)
+		}
+		const evidence = run.evidence ?? null
+		if (evidence === null) return null
+		const applies = run.tone === null && evidenceGateApplies(this.config)
+		if (applies !== evidence.active) {
+			evidence.active = applies
+			this.resetEvidence(run)
+		}
+		return applies ? evidence : null
+	}
+
+	private buildEvidence(
+		factory: EvidenceSquelchFactory,
+		run: PipelineRun,
+	): RunEvidence | null {
+		const modulation = this.config.modulation
+		if (modulation !== "nfm" && modulation !== "am") return null
+		const { rate, format } = run.stream
+		try {
+			const gate = factory.createGate({
+				rate,
+				modulation,
+				gain: this.config.gain,
+			})
+			const preRoll = factory.createPreRoll({ rate, format })
+			return {
+				gate,
+				preRoll,
+				tailTag: "drop",
+				active: evidenceGateApplies(this.config),
+				// Resolved against the next chunk's phase (processEvidence).
+				aligned: false,
+			}
+		} catch (err) {
+			// A5: the run keeps the frozen stage-1 path.
+			this.log.warn(
+				{ err: safeErrorFields(err), rate, modulation },
+				"Evidence squelch unavailable for this pipeline; stage-1 squelch only",
+			)
+			return null
+		}
+	}
+
+	/** The evidence path when it governs client audio now (no build, no reset). */
+	private activeEvidence(run: PipelineRun): RunEvidence | null {
+		const evidence = run.evidence ?? null
+		if (evidence === null || !evidence.active || run.tone !== null) return null
+		return evidenceGateApplies(this.config) ? evidence : null
+	}
+
+	/** Drops evidence, the latch and every held byte (flip, swap start, retune, stop). */
+	private resetEvidence(run: PipelineRun): void {
+		const evidence = run.evidence ?? null
+		if (evidence === null) return
+		evidence.gate.reset()
+		evidence.preRoll.clear()
+		evidence.tailTag = "drop"
+		evidence.aligned = false
+	}
+
+	/** Requirement 4.1: present while the pipeline runs; `off` outside the evidence path. */
+	private autoSquelchState(run: PipelineRun): LiveAudioAutoSquelch {
+		const evidence = this.activeEvidence(run)
+		if (evidence === null) return { state: "off" }
+		const { state, evidence: kind } = evidence.gate
+		return kind !== null ? { state, evidence: kind } : { state }
+	}
+
+	/** Per-block carrier evidence for the gate's quieting window. */
+	private evidenceCarrier(
+		run: PipelineRun,
+		power: number | null,
+		sample: { quieted: boolean } | undefined,
+	): boolean {
+		if (this.config.modulation === "am")
+			return (
+				power !== null &&
+				run.noiseFloorDbfs !== null &&
+				power >= run.noiseFloorDbfs + ANALOG_TRIAL_AM_CARRIER_DB
+			)
+		return sample !== undefined ? sample.quieted : run.squelch.blockQuieted()
+	}
+
+	/**
+	 * Tags the chunk for the pre-roll in slices of at most TONE_SLICE_MS that start on sample
+	 * boundaries, after the bytes completing the previous chunk's split sample.
+	 */
+	private processEvidence(
+		run: PipelineRun,
+		evidence: RunEvidence,
+		chunk: Buffer,
+		phase: number,
+	): void {
+		const format = run.stream.format
+		const width = pcmSampleBytes(format)
+		// A4: stage 1 as reported (a held gate is closed), sampled at chunk arrival.
+		const open = runGateOpen(run) && !run.gateHeld
+		const toBoundary = (width - (phase % width)) % width
+		const lead = Math.min(chunk.length, toBoundary)
+		if (lead > 0) {
+			// A partial sample the pre-roll never saw the start of is muted, not framed.
+			if (!evidence.aligned) chunk.fill(0, 0, lead)
+			else this.evidenceSpan(evidence, chunk, 0, lead, open, format, true)
+		}
+		// Unaligned until the stream reaches a sample boundary (a short chunk may not).
+		if (chunk.length >= toBoundary) evidence.aligned = true
+		const slice =
+			Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) * width
+		for (let start = lead; start < chunk.length; start += slice)
+			this.evidenceSpan(
+				evidence,
+				chunk,
+				start,
+				Math.min(chunk.length, start + slice),
+				open,
+				format,
+				false,
+			)
+	}
+
+	/** One slice; `completing` bytes finish a split sample and take its tag (A3). */
+	private evidenceSpan(
+		evidence: RunEvidence,
+		chunk: Buffer,
+		start: number,
+		end: number,
+		open: boolean,
+		format: EvidencePcmFormat,
+		completing: boolean,
+	): void {
+		const { gate, preRoll } = evidence
+		if (open) {
+			const k = gate.push(chunk, format, start, end)
+			if (k >= 0) {
+				if (completing) preRoll.process(chunk, start, end, evidence.tailTag)
+				else if (k > start) preRoll.process(chunk, start, k, "pending")
+				preRoll.latch()
+				if (!completing && end > k) {
+					preRoll.process(chunk, k, end, "pass")
+					evidence.tailTag = "pass"
+				}
+				return
+			}
+			const tag: PreRollTag = completing
+				? evidence.tailTag
+				: gate.state === "open"
+					? "pass"
+					: "pending"
+			preRoll.process(chunk, start, end, tag)
+			evidence.tailTag = tag
+			return
+		}
+		if (gate.state === "waiting") preRoll.abandon()
+		const guard = Math.min(end - start, gate.closed(end - start, format))
+		if (completing) {
+			preRoll.process(chunk, start, end, evidence.tailTag)
+			return
+		}
+		if (guard > 0) preRoll.process(chunk, start, start + guard, "guard")
+		if (end > start + guard) preRoll.process(chunk, start + guard, end, "drop")
+		evidence.tailTag = end > start + guard ? "drop" : "guard"
+	}
+
 	private emitPcm(chunk: Buffer): void {
 		if (this.listenerCount("pcm") === 0) return
 		const stream = this.run?.stream ?? this.plannedStream()
@@ -1923,6 +2185,12 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		this.emit("pcm", chunk, announced)
 	}
+}
+
+/** The production evidence squelch ports (A5, plan W.3). */
+const DEFAULT_EVIDENCE_SQUELCH: EvidenceSquelchFactory = {
+	createGate: options => new EvidenceGate(options),
+	createPreRoll: options => new PreRoll(options),
 }
 
 /** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */

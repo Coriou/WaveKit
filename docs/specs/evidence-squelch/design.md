@@ -75,17 +75,17 @@ Three ideas carry the design:
 
 Constants added to `packages/api-types/src/live-audio.ts` (requirement 4.3):
 
-| Constant                                      | Value           | Basis                                                         |
-| --------------------------------------------- | --------------- | ------------------------------------------------------------- |
-| `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`         | `["nfm", "am"]` | requirement 1.1                                               |
-| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS`    | `["nfm"]`       | requirement 1.2 (AM: voice only)                              |
-| `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`            | 50              | `ANALOG_TRIAL_FRAME_MS`                                       |
-| `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES`        | 20              | `SYLLABIC_WINDOW` in `analyze.rs`: 1 s                        |
-| `LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS` | 100             | 10 ms IQ blocks in the 1 s voice window                       |
-| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS`         | 750             | `DCS_MIN_AUDIO_SECONDS` × 1 000                               |
-| `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS`             | 1 500           | `ANALOG_TRANSMISSION_MERGE_GAP_MS`                            |
-| `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`      | 1 500           | voice window 1 000 ms + up to 500 ms late speech after key-up |
-| `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS`      | 200             | back-chain drain after stage 1 closes (measured in 8.2)       |
+| Constant                                      | Value     | Basis                                                         |
+| --------------------------------------------- | --------- | ------------------------------------------------------------- |
+| `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`         | `["nfm"]` | requirement 1.1 (amendment A8, 2026-10-23: AM removed)        |
+| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS`    | `["nfm"]` | requirement 1.2 (AM: voice only)                              |
+| `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`            | 50        | `ANALOG_TRIAL_FRAME_MS`                                       |
+| `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES`        | 20        | `SYLLABIC_WINDOW` in `analyze.rs`: 1 s                        |
+| `LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS` | 100       | 10 ms IQ blocks in the 1 s voice window                       |
+| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS`         | 750       | `DCS_MIN_AUDIO_SECONDS` × 1 000                               |
+| `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS`             | 1 500     | `ANALOG_TRANSMISSION_MERGE_GAP_MS`                            |
+| `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`      | 1 500     | voice window 1 000 ms + up to 500 ms late speech after key-up |
+| `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS`      | 200       | back-chain drain after stage 1 closes (measured in 8.2)       |
 
 Type: `LiveAudioAutoSquelch = { state: "off" | "waiting" | "open"; evidence?: "voice" | "ctcss" | "dcs" }`,
 added as optional `autoSquelch` to `LiveAudioStatus` and `LiveAudioLevel`. The core contract
@@ -145,7 +145,8 @@ place from the meter ring; `carrierDb` and `hfNoiseDb` are not used by these fun
 is the gate's own count, below). The judge allocates small arrays for its medians; it runs at
 most 20 times per second and only while stage 1 is open and the gate is waiting (at most 30 calls
 per over), which is outside steady-state streaming. A property pins agreement with
-`classifyAnalogTrial` (Property 2).
+`classifyAnalogTrial` (Property 2). Because the gate equals the judge, syllable-timed FSK bursts
+that the judge calls voice also latch the gate (requirements, known limitation after 1.4).
 
 ### EvidenceGate (`src/core/evidence-squelch/evidence-gate.ts`)
 
@@ -539,3 +540,5 @@ The record is added to the acceptance document above; failures become amendments
 - A tone squelch gets no pre-roll in this spec.
 - A different tone on a reopen within the hang renews the evidence label; it never mutes.
 - AM keeps evidence gating only if the AM fixture opens through the default fast-AGC chain (8.4).
+  Amendment A8 (2026-10-23): resolved as NFM only; a bare AM carrier opened the gate as voice, so
+  AM keeps the stage-1 auto squelch. The gate and pre-roll still support `am` but do not govern it.
