@@ -187,6 +187,26 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(experiment.failures(), [])
         self.assertEqual(experiment.result([]), "pass")
 
+    def test_upstream_host_rejects_an_unknown_after_a_long_poll_gap(self):
+        # Irregular polls: a 120 s gap before the unknown poll cannot localise it.
+        experiment = self.experiment("upstream-host")
+        experiment.summary["upstreamDroppedBytes"] = 100
+        self.poll(experiment, 0, 0, 0, 0)
+        self.poll(experiment, 0, 10, 100, 0)
+        self.poll(experiment, 0, 20, 100, 1, period=120)
+        self.assertEqual(experiment.coincident_polls, [2])
+        self.assertEqual(experiment.unknown_polls, [3])
+        self.assertIn("coinciding core and upstream loss was not attributed unknown",
+                      experiment.failures())
+        # A gap just over two sample periods is rejected too; at the bound it pairs.
+        for gap, paired in ((4.01, False), (4.0, True)):
+            experiment = self.experiment("upstream-host")
+            experiment.summary["upstreamDroppedBytes"] = 100
+            self.poll(experiment, 0, 0, 0, 0)
+            self.poll(experiment, 0, 10, 100, 0)
+            self.poll(experiment, 0, 20, 100, 1, period=gap)
+            self.assertEqual(experiment.failures() == [], paired, gap)
+
     def test_upstream_host_without_coincidence_is_not_applicable(self):
         experiment = self.experiment("upstream-host")
         experiment.summary["upstreamDroppedBytes"] = 100

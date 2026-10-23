@@ -44,8 +44,9 @@ increase of `unknown` in a poll that itself bears core loss, and no `link` incre
 The monitor holds a stall's gap loss and resolves it when its pending wait expires
 (`LINK_RECOVERY_WAIT_MS + LINK_GAP_MS + EFFICIENCY_SAMPLE_MS`, 12.2 s), so the
 `unknown` pairs when the poll before it is less than 20.2 s after the coinciding
-poll: the pending wait, one monitor tick, the longest stall (4 s, counted upstream
-when it starts) and one more tick. A drop-mode stall withholds input, so the core
+poll (the pending wait, one monitor tick, the longest stall of 4 s, counted upstream
+when it starts, and one more tick) and the `unknown` poll follows its previous poll
+by at most 4 s, so its increase is localised. A drop-mode stall withholds input, so the core
 is relieved while it lasts and the two losses share a poll only when host loss
 happens just before a stall starts. A run whose only failure is that they never
 shared a poll, with both core and upstream loss exercised, is `not-applicable`

@@ -79,8 +79,8 @@ HOST_CONSUMER_SHARE_MAX = 0.10
 # sample). The fake counts a whole stall when it starts, so the first held loss
 # lands up to one stall plus one sample after the upstream rise that the driver
 # observed at the coinciding poll. An unknown increase pairs when the poll
-# before it is within that bound of the coinciding poll; the next poll then
-# observes it, whatever the poll period. Recorded at 2.4 Msps: coinciding
+# before it is within that bound of the coinciding poll and the unknown poll
+# itself follows within MAX_POLL_GAP_S (below). Recorded at 2.4 Msps: coinciding
 # polls 64 and 106, held losses resolved unknown 10.8 s and 10.9 s later
 # (polls 69 and 111), outside the former three-poll window.
 EFFICIENCY_CONTRACT = "src/decoders/enablement/contract.ts"
@@ -88,6 +88,10 @@ UPSTREAM_UNKNOWN_PAIRING_S = (
     constant("BURST_ABSORBER_MAX_S") * 1000 + constant("LINK_GAP_MS")
     + 2 * constant("EFFICIENCY_SAMPLE_MS", EFFICIENCY_CONTRACT)
     + max(STALL_MS) + constant("EFFICIENCY_SAMPLE_MS", EFFICIENCY_CONTRACT)) / 1000
+# The pairing also bounds the unknown poll itself: it must follow its previous
+# poll by at most two sample periods (recorded gaps were 2.0-3.3 s), so its
+# counter delta is localised, and lie within the pairing bound plus that gap.
+MAX_POLL_GAP_S = 2 * constant("EFFICIENCY_SAMPLE_MS", EFFICIENCY_CONTRACT) / 1000
 NOT_COINCIDING = "core loss never coincided with upstream loss"
 
 
@@ -526,9 +530,12 @@ class Experiment:
         """Whether an unknown increase can be the coinciding poll's held loss resolving."""
         if unknown == coinciding:
             return True
-        if not coinciding < unknown or unknown - 1 not in self.poll_mono:
+        mono = self.poll_mono
+        if not coinciding < unknown or not {coinciding, unknown - 1, unknown} <= mono.keys():
             return False
-        return self.poll_mono[unknown - 1] - self.poll_mono[coinciding] < UPSTREAM_UNKNOWN_PAIRING_S
+        return (mono[unknown] - mono[unknown - 1] <= MAX_POLL_GAP_S
+                and mono[unknown - 1] - mono[coinciding] < UPSTREAM_UNKNOWN_PAIRING_S
+                and mono[unknown] - mono[coinciding] < UPSTREAM_UNKNOWN_PAIRING_S + MAX_POLL_GAP_S)
 
     def result(self, failures):
         """Pass, fail, or not applicable for an upstream-host run without coincidence.

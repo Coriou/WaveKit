@@ -331,10 +331,14 @@ matrix has not been rerun.
      polls 69 and 111, 10.8 s and 10.9 s later, and both of those polls bore core loss. The monitor
      resolves a held loss when its pending wait expires (`MAX_PENDING_WAIT_MS` = 10 000 + 200 +
      2 000 = 12.2 s). The driver had assumed two polls and paired only within three. The host
-     increases in those polls (+1 at 64, +2 at 69 and 111) are the intervals sampled without
-     upstream delta. The driver now pairs an `unknown` when the poll before it is less than
+     increases in those polls (+1 at 64, +2 at 69 and 111) are intervals sampled without upstream
+     delta: in `attributeInterval` the upstream rule (`unknown`) precedes `host`; only a
+     strict subset of dropping branches on a healthy host can be `consumer` before it, and none
+     was (consumer +0). The driver now pairs an `unknown` when the poll before it is less than
      20.2 s after the coinciding poll: 12.2 s, one monitor tick, the longest stall (4 s, counted
-     upstream when it starts) and one more tick. Replaying the kept samples passes, with 2
+     upstream when it starts) and one more tick. The `unknown` poll itself must follow its
+     previous poll by at most 4 s (two samples; recorded gaps were 2.0–3.3 s), so a late poll
+     cannot pair an increase it cannot localise. Replaying the kept samples passes, with 2
      coinciding polls.
    - **2.048 Msps: not applicable.** A drop-mode stall withholds input, so the core is relieved
      while it lasts. All seven polls with an upstream rise (4, 63, 86, 105, 137, 212 and 216)
