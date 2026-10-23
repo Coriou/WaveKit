@@ -232,6 +232,32 @@ describe("live demodulator evidence path (fake ports)", () => {
 		})
 	}
 
+	for (const format of ["s16le", "f32le"] as const) {
+		const width = format === "s16le" ? 2 : 4
+		for (let phase = 1; phase < width; phase++) {
+			it(`reset mid-sample then one-byte chunks keep framing (${format}, phase ${phase})`, async () => {
+				const t = await start({
+					modulation: "nfm",
+					squelchMode: "auto",
+					audioFormat: format,
+				})
+				t.stage.open = true
+				t.feed(Buffer.alloc(width * 10 + phase, 1))
+				const preRoll = t.factory.preRolls[0]
+				const before = preRoll?.calls.length ?? 0
+				t.h.sourceManager.emitCaps({ centerFreq: 446_100_000 })
+				expect(preRoll?.ops).toContain("clear")
+				const boundary = width * 11
+				for (let i = 0; i < width - phase; i++) t.feed(Buffer.alloc(1, 1))
+				expect(preRoll?.calls.length).toBe(before)
+				t.feed(Buffer.alloc(width * 3, 1))
+				const after = (preRoll?.calls ?? []).slice(before)
+				expect(after[0]?.start).toBe(boundary)
+				for (const call of after) expect(call.start % width).toBe(0)
+			})
+		}
+	}
+
 	describe("mode change mid-over clears the queue", () => {
 		async function expectClearedOnce(t: EvidenceHarness): Promise<void> {
 			await waitFor(() => (t.factory.preRolls[0]?.ops ?? []).includes("clear"))

@@ -334,7 +334,8 @@ export interface PipelineRun {
 	 */
 	evidence?: RunEvidence | null
 	/** Modulation and gain `evidence` was built for (rebuilt when either changes in place). */
-	evidenceKey?: string
+	evidenceModulation?: LiveDemodConfig["modulation"]
+	evidenceGain?: number
 }
 
 /**
@@ -2004,9 +2005,9 @@ export class LiveDemodulator extends EventEmitter {
 		const factory = this.options.evidenceSquelch
 		if (factory === undefined) return null
 		const { modulation, gain } = this.config
-		const key = `${modulation}:${gain}`
-		if (run.evidenceKey !== key) {
-			run.evidenceKey = key
+		if (run.evidenceModulation !== modulation || run.evidenceGain !== gain) {
+			run.evidenceModulation = modulation
+			run.evidenceGain = gain
 			run.evidence = this.buildEvidence(factory, run)
 		}
 		const evidence = run.evidence ?? null
@@ -2038,7 +2039,8 @@ export class LiveDemodulator extends EventEmitter {
 				preRoll,
 				tailTag: "drop",
 				active: evidenceGateApplies(this.config),
-				aligned: run.pcmPhase % pcmSampleBytes(format) === 0,
+				// Resolved against the next chunk's phase (processEvidence).
+				aligned: false,
 			}
 		} catch (err) {
 			// A5: the run keeps the frozen stage-1 path.
@@ -2105,13 +2107,15 @@ export class LiveDemodulator extends EventEmitter {
 		const width = pcmSampleBytes(format)
 		// A4: stage 1 as reported (a held gate is closed), sampled at chunk arrival.
 		const open = runGateOpen(run) && !run.gateHeld
-		const lead = Math.min(chunk.length, (width - (phase % width)) % width)
+		const toBoundary = (width - (phase % width)) % width
+		const lead = Math.min(chunk.length, toBoundary)
 		if (lead > 0) {
 			// A partial sample the pre-roll never saw the start of is muted, not framed.
 			if (!evidence.aligned) chunk.fill(0, 0, lead)
 			else this.evidenceSpan(evidence, chunk, 0, lead, open, format, true)
 		}
-		evidence.aligned = true
+		// Unaligned until the stream reaches a sample boundary (a short chunk may not).
+		if (chunk.length >= toBoundary) evidence.aligned = true
 		const slice =
 			Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) * width
 		for (let start = lead; start < chunk.length; start += slice)
