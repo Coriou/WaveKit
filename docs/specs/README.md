@@ -24,6 +24,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
   an auto/always/off mode, off-centre placements on channelizer channels (VFO and band-plan
   channels for dsd-fme and multimon-ng), a drop-free efficiency gate, the 1090 MHz rate raise
   with a link advisory, multi-source binding rules (WG13)
+- [evidence-squelch](evidence-squelch/requirements.md): the auto squelch opens only on analog
+  voice or a CTCSS/DCS tone, on by default, and plays each over from its start with a bounded
+  pre-roll delay that catches up in the silence after the over
 - [link-burst-resilience](link-burst-resilience/requirements.md): bounded IQ burst absorption,
   link-quality telemetry, drop attribution and sustained late-drop shedding
 - [lora-decoder](lora-decoder/requirements.md)
