@@ -208,7 +208,8 @@ Landed in the 2026-10-23 evidence squelch batch (core only, [spec](specs/evidenc
 `autoMarginDb` stage still delimits transmissions, and a second stage passes client
 audio only on voice (the scanner's pinned analog trial judge) or a CTCSS/DCS tone heard
 for 750 ms; the voice window resets when a carrier comes on. `am` keeps the stage-1 auto squelch (decision A8: a bare AM key-up opened
-the gate as voice in replay). The over is held in a pre-roll
+the gate as voice in replay), and so do Rust-engine runs (decision A12: Rust gate events and
+audio travel on separate channels, so the gate runs on the default csdr engine only). The over is held in a pre-roll
 of up to 1.5 s and replayed on latch; the stream catches up by dropping the silence
 after the over. Overs under about one second with no tone are not heard. Status and
 `live-audio:level` gain optional `autoSquelch` `{ state, evidence? }`; `squelchOpen`
@@ -234,6 +235,9 @@ Open after the evidence squelch batch:
   after the live measurements (M.4).
 - AM evidence gating needs an AGC-aware voice test (for example pre-AGC envelope
   modulation, or a measured AM threshold) before AM can be evidence-gated.
+- Rust engine: in-band stage-1 gate markers so the evidence squelch can apply
+  (amendment A12, 2026-10-23: until then the evidence gate runs on csdr only and
+  Rust `auto` is the stage-1 auto squelch).
 - Live acceptance on a PMR handheld (M.4) and Pi 4-class CPU (M.5).
 
 ### Performance and native DSP plan (2026-10-17)
@@ -911,7 +915,8 @@ and status. Shared browser audio and richer controls remain open.
       (observer 24-36 µs per 10 ms block); real-RF check on a nearby handheld open.
       Evidence squelch (2026-10-23): `auto` is the default and, on NFM only,
       passes audio only on voice or a CTCSS/DCS tone, with up to 1.5 s of
-      pre-roll delay; AM keeps the stage-1 auto squelch; `squelchOpen` stays stage 1. Live
+      pre-roll delay; AM and the Rust engine keep the stage-1 auto squelch (A8, A12);
+      `squelchOpen` stays stage 1. Live
       acceptance on a PMR handheld (M.4) and Pi CPU (M.5) are open.
 - [x] Live-audio AGC off/slow/fast including FM (WG4): `liveDemod.agc` and
       PATCH `agc` (null resets); absent keeps the per-modulation chain unchanged.

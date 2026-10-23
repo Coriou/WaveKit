@@ -250,7 +250,7 @@ interface RunEvidence {
 	preRoll: PreRollPort
 	/** Tag of the sample split by the last chunk's end (its completing bytes take it, A3). */
 	tailTag: PreRollTag
-	/** `evidenceGateApplies` when last synced; a flip resets the gate and clears the pre-roll. */
+	/** `evidenceAppliesTo` when last synced; a flip resets the gate and clears the pre-roll. */
 	active: boolean
 	/** False after a build or clear: bytes completing a split sample are skipped (muted) once. */
 	aligned: boolean
@@ -2006,8 +2006,8 @@ export class LiveDemodulator extends EventEmitter {
 
 	/**
 	 * Builds the run's evidence path when missing or stale (modulation or gain changed in
-	 * place), resets it on any flip of `evidenceGateApplies`, and returns it while it governs
-	 * client audio (no tone squelch), else null.
+	 * place), resets it on any flip of `evidenceAppliesTo`, and returns it while it governs
+	 * client audio (csdr engine, no tone squelch), else null.
 	 */
 	private syncEvidence(run: PipelineRun): RunEvidence | null {
 		const factory = this.options.evidenceSquelch ?? DEFAULT_EVIDENCE_SQUELCH
@@ -2019,7 +2019,7 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		const evidence = run.evidence ?? null
 		if (evidence === null) return null
-		const applies = run.tone === null && evidenceGateApplies(this.config)
+		const applies = this.evidenceAppliesTo(run)
 		if (applies !== evidence.active) {
 			evidence.active = applies
 			this.resetEvidence(run)
@@ -2033,7 +2033,9 @@ export class LiveDemodulator extends EventEmitter {
 	): RunEvidence | null {
 		const modulation = this.config.modulation
 		// Amendment A8: no instances outside the evidence modulations (AM included).
+		// Amendment A12: none on the Rust engine (stage-1 auto squelch only).
 		if (
+			run.rust !== undefined ||
 			!LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS.includes(modulation) ||
 			(modulation !== "nfm" && modulation !== "am")
 		)
@@ -2050,7 +2052,7 @@ export class LiveDemodulator extends EventEmitter {
 				gate,
 				preRoll,
 				tailTag: "drop",
-				active: evidenceGateApplies(this.config),
+				active: this.evidenceAppliesTo(run),
 				// Resolved against the next chunk's phase (processEvidence).
 				aligned: false,
 			}
@@ -2067,8 +2069,22 @@ export class LiveDemodulator extends EventEmitter {
 	/** The evidence path when it governs client audio now (no build, no reset). */
 	private activeEvidence(run: PipelineRun): RunEvidence | null {
 		const evidence = run.evidence ?? null
-		if (evidence === null || !evidence.active || run.tone !== null) return null
-		return evidenceGateApplies(this.config) ? evidence : null
+		if (evidence === null || !evidence.active) return null
+		return this.evidenceAppliesTo(run) ? evidence : null
+	}
+
+	/**
+	 * True when the evidence gate governs this run's client audio: `evidenceGateApplies` for
+	 * the config, no tone squelch, and the csdr engine. Amendment A12: Rust sends gate events
+	 * and audio on separate channels, so its runs keep the stage-1 auto squelch until the
+	 * gate state rides in-band with the audio.
+	 */
+	private evidenceAppliesTo(run: PipelineRun): boolean {
+		return (
+			run.rust === undefined &&
+			run.tone === null &&
+			evidenceGateApplies(this.config)
+		)
 	}
 
 	/** Drops evidence, the latch and every held byte (flip, swap start, retune, stop). */
@@ -2089,7 +2105,11 @@ export class LiveDemodulator extends EventEmitter {
 		return kind !== null ? { state, evidence: kind } : { state }
 	}
 
-	/** Per-block carrier evidence for the gate's quieting window. */
+	/**
+	 * Per-block carrier evidence for the gate's quieting window. Only Rust metrics pass a
+	 * `sample`, and amendment A12 keeps Rust runs off the evidence path; the branch stays for
+	 * the in-band follow-up.
+	 */
 	private evidenceCarrier(
 		run: PipelineRun,
 		power: number | null,

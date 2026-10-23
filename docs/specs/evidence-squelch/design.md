@@ -43,6 +43,15 @@ Three ideas carry the design:
    second of every over. Holding that second and replaying it costs a bounded, constant delay
    inside the over, paid back from the silence after it.
 
+**Amendment (2026-10-23, A12): csdr engine only.** The diagram's stage 2 and pre-roll run on
+csdr runs only (the default engine). A Rust run builds no gate or pre-roll, and `auto` on Rust is
+the stage-1 auto squelch, byte-identical, with `autoSquelch` `off`, as AM under A8. Rust sends
+stage-1 gate events on stdout and audio on a separate socket, and aligning the two in TypeScript
+has races that cannot be closed there: close events that arrive early or late against the audio,
+native audio drops that shift the events' `atOutputSample` indices, and input-gap resets that
+produce no gate event. The follow-up is in-band stage-1 gate markers on the Rust audio socket
+(see the Rust-engine onset finding).
+
 ## Options weighed
 
 ### A. Where evidence is measured
@@ -358,8 +367,11 @@ alignment), plus the back chain's own latency as today.
 ### Wiring (`src/core/live-demodulator.ts`)
 
 - **Applies when** `squelchMode === "auto"`, the modulation is in
-  `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`, `configuredTone(config) === null` and the run has a
-  pre-roll (allocated at run start for NFM streams only, amendment A8). Otherwise `handleAudioData` takes its
+  `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`, `configuredTone(config) === null`, the run is on the
+  csdr engine (amendment A12: `run.rust` unset) and the run has a pre-roll (allocated at run start
+  for csdr NFM streams only, amendments A8 and A12). The predicate is `evidenceAppliesTo(run)`; a
+  flip of it resets the gate and clears the pre-roll. An engine change always builds a new run,
+  so a Rust fallback onto csdr starts with a fresh gate. Otherwise `handleAudioData` takes its
   frozen path unchanged (requirements 1.7 to 1.9).
 - **Per chunk:** emit `pcm` first (unchanged); then walk the chunk in slices of at most
   `TONE_SLICE_MS` (10 ms) on sample boundaries. For each slice: stage 1 open
@@ -409,8 +421,8 @@ squelch is a possible follow-up, not part of this spec.
 
 ### Interaction with modulation changes
 
-Only `nfm` runs allocate a gate and pre-roll (amendment A8, 2026-10-23: AM and every other
-modulation allocate none). A modulation change restarts the pipeline (rule 5 allows a restart
+Only `nfm` runs on the csdr engine allocate a gate and pre-roll (amendment A8, 2026-10-23: AM and
+every other modulation allocate none; amendment A12: Rust runs allocate none). A modulation change restarts the pipeline (rule 5 allows a restart
 because the stream changes), so the old run's FIFO and gate are dropped with the run and nothing
 queued is played; the new run allocates its own gate and FIFO, at its own rate and format, only if
 its modulation is `nfm`. The standalone gate class still supports `am` (voice evidence only), but
@@ -545,7 +557,7 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     delay is zero within one sample after the last `pass` or `guard` sample has played.
     _Validates 2.5, 2.6._
 12. **Byte-identical elsewhere.** For any PCM stream and config with modulation other than
-    `nfm` (A8: `am` included), mode `manual` or `noise`, or a configured tone squelch, the bytes written to the
+    `nfm` (A8: `am` included), a Rust run (A12), mode `manual` or `noise`, or a configured tone squelch, the bytes written to the
     registry and the `pcm` event bytes equal those of the frozen `handleAudioData`; for every
     config the `pcm` event bytes are unchanged. _Validates 1.6 to 1.9._
 13. **Lifecycle.** After `clear()` the delay is zero and no sample queued before it is ever
@@ -685,6 +697,13 @@ Before the speed-up: 0.0044-0.0049 core and 2.4-7.3 ms per 64 KiB.
 **Finding (2026-10-23): Rust-engine onset defect in the evidence path, fake-link es-c
 2.048 Msps.** All six NFM fixtures fail "first played sample off the over onset". The tolerance
 is not changed, because this is a defect, not physics.
+
+**Status (2026-10-23, amendment A12): closed by scope, not fixed.** The evidence gate no longer
+runs on Rust, so Rust NFM auto is the stage-1 auto squelch and has no evidence-path onset to miss.
+The defect below still describes what would happen if the gate ran on Rust today. An attempt to
+align the stdout gate events with the socket audio in TypeScript was not merged: early or late
+close events, native audio drops that shift indices, and input-gap resets with no gate event
+leave races it cannot close. The fix is in-band stage-1 gate markers on the Rust audio socket.
 
 - **Measured on `nfm-ctcss-670-voice`.** The manual (stage-1 only) Rust stream starts every over
   0.4 ms from the reference onset. Auto loses 31.9-35.9 ms on even overs and 4.1-6.4 ms on odd

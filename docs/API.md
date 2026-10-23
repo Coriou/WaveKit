@@ -1411,8 +1411,8 @@ Fields:
   and from older cores.
 - `autoSquelch` — the evidence (stage 2) gate of `auto` squelch while the pipeline
   runs: `{ state, evidence? }` with `state` `off` (not evidence-gated: `manual` or
-  `noise` mode, a configured `toneSquelch`, or a modulation other than `nfm`,
-  including `am`), `waiting` (no evidence yet: audio is held and the stream carries silence)
+  `noise` mode, a configured `toneSquelch`, a modulation other than `nfm`,
+  including `am`, or a run on the Rust engine), `waiting` (no evidence yet: audio is held and the stream carries silence)
   or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
 - `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
@@ -1423,15 +1423,19 @@ Configuration notes:
 
 - `squelchMode` — `auto` (default) or `manual` (`squelch` is the threshold). `auto`
   stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
-  default 6, and delimits transmissions. On `nfm` only, `auto` adds stage 2, an
-  evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
+  default 6, and delimits transmissions. On `nfm` on the csdr engine (the default)
+  only, `auto` adds stage 2, an evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
   or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
   to 1.5 s and played when the gate latches. During an over the stream can run up
   to 1.5 s behind; it catches up by dropping the silence after the over. An over
   shorter than about one second with no tone is not heard. `manual` and `noise`
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
   replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
-  keep stage 1 alone, with `autoSquelch` state `off`. The stage 1
+  keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine
+  (`engine: "rust"`), `auto` on `nfm` is stage 1 alone too, byte-identical to the
+  stage-1 auto squelch, with `autoSquelch` state `off` (amendment A12, 2026-10-23),
+  until the Rust audio carries its gate state in-band; a fallback to csdr starts
+  the evidence gate fresh. The stage 1
   floor is a constant-memory running lower envelope: falls are immediate; rises
   are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
   stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within
@@ -1450,7 +1454,7 @@ Configuration notes:
   (falls still apply); until the first unquieted block seeds the floor, the gate
   follows the quieting decision, as in `noise` mode, so a strong carrier already
   present at start or after a retune opens stage 1 at once instead of becoming the
-  floor (on `nfm` listeners still need stage 2 evidence to hear it).
+  floor (on `nfm` on csdr listeners still need stage 2 evidence to hear it).
   `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
