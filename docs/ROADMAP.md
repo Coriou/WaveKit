@@ -203,6 +203,28 @@ Open after WG11:
   after a receiver reconnect, and IQ capture identifying a short transmission
   after it ended.
 
+Landed in the 2026-10-23 evidence squelch batch (core only, [spec](specs/evidence-squelch/requirements.md)):
+`squelchMode: "auto"` is the default. On `nfm` and `am` (`am` subject to checkpoint 8.4)
+it is two-stage: the floor + `autoMarginDb` stage still delimits transmissions, and a
+second stage passes client audio only on voice (the scanner's pinned analog trial
+judge) or, on `nfm`, a CTCSS/DCS tone heard for 750 ms. The over is held in a pre-roll
+of up to 1.5 s and replayed on latch; the stream catches up by dropping the silence
+after the over. Overs under about one second with no tone are not heard. Status and
+`live-audio:level` gain optional `autoSquelch` `{ state, evidence? }`; `squelchOpen`
+is unchanged. `manual`, `noise`, tone squelch and other modulations are unchanged.
+Acceptance record: [EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md](engineering/EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md).
+No CLI change required ([CLI-COORDINATION.md](CLI-COORDINATION.md)).
+
+Open after the evidence squelch batch:
+
+- Syllable-timed audio-frequency FSK bursts open as voice (known limitation): add a
+  stage-2-only data test (tone steadiness or spectral flatness) that rejects them
+  without changing the pinned scanner judge.
+- Marginal-level voice (medians within about 1 dB of -30 dB) latches after the pre-roll
+  limit and loses the start of the over: revisit the pre-roll length or the threshold
+  after the live measurements (M.4).
+- Live acceptance on a PMR handheld (M.4) and Pi 4-class CPU (M.5).
+
 ### Performance and native DSP plan (2026-10-17)
 
 A read-only performance audit of the core found that the cost is dominated by two
@@ -876,6 +898,10 @@ and status. Shared browser audio and richer controls remain open.
       12 dB CNR, WFM pilot harmonics), Pi CPU unmeasured. WG10: in auto mode on
       NFM/WFM an FM-quieted block (a carrier) never seeds or raises the floor
       (observer 24-36 µs per 10 ms block); real-RF check on a nearby handheld open.
+      Evidence squelch (2026-10-23): `auto` is the default and, on NFM and AM (AM
+      subject to checkpoint 8.4), passes audio only on voice or an NFM CTCSS/DCS
+      tone, with up to 1.5 s of pre-roll delay; `squelchOpen` stays stage 1. Live
+      acceptance on a PMR handheld (M.4) and Pi CPU (M.5) are open.
 - [x] Live-audio AGC off/slow/fast including FM (WG4): `liveDemod.agc` and
       PATCH `agc` (null resets); absent keeps the per-modulation chain unchanged.
       Open: csdr `-p slow` at the pinned csdr is unverified until an image smoke
