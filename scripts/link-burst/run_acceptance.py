@@ -53,11 +53,13 @@ class InvalidRun(Exception):
     pass
 
 
-# Host runs: the core gets this many CPUs and stress-ng this many workers, so
-# contention exceeds what the core absorbs (it kept up on five CPUs against one
-# worker per CPU); the fake keeps the last CPU to itself.
+# Host runs: the core gets two CPUs under a 0.75-CPU quota and shares it with
+# four stress-ng workers, so host-caused loss is sustained without the source
+# disconnecting (the core kept up on two or five saturated CPUs without a
+# quota). The fake keeps the last CPU to itself.
 HOST_CORE_CPUS = 2
-HOST_STRESS_WORKERS = 8
+HOST_STRESS_WORKERS = 4
+HOST_CORE_QUOTA = "0.75"
 
 
 def cpu_split(count):
@@ -337,8 +339,10 @@ class Experiment:
                 count = int(subprocess.run(["docker", "info", "--format", "{{.NCPU}}"], text=True,
                                            capture_output=True, check=True, timeout=30).stdout)
                 core, fake = cpu_split(count)
-                self.env.update(LINK_BURST_CORE_CPUS=core, LINK_BURST_FAKE_CPUS=fake)
-                self.summary.update(coreCpus=core, fakeCpus=fake, stressWorkers=HOST_STRESS_WORKERS)
+                self.env.update(LINK_BURST_CORE_CPUS=core, LINK_BURST_FAKE_CPUS=fake,
+                                LINK_BURST_CORE_QUOTA=HOST_CORE_QUOTA)
+                self.summary.update(coreCpus=core, fakeCpus=fake, stressWorkers=HOST_STRESS_WORKERS,
+                                    coreQuota=HOST_CORE_QUOTA)
             self.compose("up", "-d", "--no-build", "--pull", "never")
             deadline = time.monotonic() + 120
             while True:

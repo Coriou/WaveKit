@@ -24,6 +24,8 @@ services:
     image: "${LINK_BURST_IMAGE:-wavekit:latest}"
     pull_policy: never
     cpuset: "${LINK_BURST_CORE_CPUS:-}"
+    # Host runs only: a CPU quota (0 = none) throttles the whole core cgroup.
+    cpus: "${LINK_BURST_CORE_QUOTA:-0}"
     depends_on: [fake]
     environment:
       WAVEKIT_CONFIG_PATH: /app/config

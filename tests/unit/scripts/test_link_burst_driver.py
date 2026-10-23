@@ -126,6 +126,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.cpu_split(3), ("0-1", "2"))
         with self.assertRaises(driver.InvalidRun):
             driver.cpu_split(2)
+        self.assertEqual(driver.HOST_CORE_QUOTA, "0.75")
 
     def test_upstream_waits_for_upstream_statistics(self):
         experiment = self.experiment("upstream")
