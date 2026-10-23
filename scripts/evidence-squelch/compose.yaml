@@ -27,14 +27,17 @@ services:
     volumes:
       - "${EVIDENCE_SQUELCH_CONFIG:?set by run_acceptance.py}:/app/config/default.yaml:ro"
   # Docker never publishes ports from an internal network, so only this forwarder joins a
-  # second network; it publishes the API (3000) and the audio stream (3001) on ephemeral
-  # loopback ports.
+  # second network; it publishes the API (3000) and the audio stream (3001) on 127.0.0.1
+  # host ports the driver picks from its safe range (47100-47999, which excludes every port
+  # of the live setup) and verifies again after `up`.
   api:
     image: python:3.13-slim
     pull_policy: never
     depends_on: [core]
     entrypoint: ["python3", "/opt/run_acceptance.py", "--proxy"]
-    ports: ["127.0.0.1::3000", "127.0.0.1::3001"]
+    ports:
+      - "127.0.0.1:${EVIDENCE_SQUELCH_API_PORT:?set by run_acceptance.py}:3000"
+      - "127.0.0.1:${EVIDENCE_SQUELCH_STREAM_PORT:?set by run_acceptance.py}:3001"
     networks: [default, edge]
     volumes:
       - ./run_acceptance.py:/opt/run_acceptance.py:ro

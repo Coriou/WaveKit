@@ -5,11 +5,13 @@ Per fixture: an `auto` run and a `manual` baseline on the same looped CU8 file, 
 own project `wkevs-<pid>` with an internal network, the in-container fake rtl_tcp
 (`fake:1234`) and the core image from EVIDENCE_SQUELCH_IMAGE (default wavekit:latest; never
 built or pulled here). The API and the audio stream are reached through a forwarder
-published on ephemeral loopback ports only. Recorded: `/stream.wav` bytes with arrival
-times, `live-audio:level` and `live-audio:transmission` events, status samples and the
-event-loop p99 of the link-quality report.
+published on 127.0.0.1 ports the driver picks from SAFE_PORTS (never a live-setup port) and
+verifies after `up`, before any client starts. Recorded: `/stream.wav` bytes with arrival
+times, `live-audio:level` and `live-audio:transmission` events, status samples, the
+event-loop p99 of the link-quality report and the fake source's connection time (the
+source clock every timing verdict is measured on).
 
-Exit codes: 0 pass, 1 fail, 2 invalid (setup, teardown or recording failure).
+Exit codes: 0 pass, 1 fail, 2 invalid (setup, teardown, recording or timing evidence failure).
 
   run_acceptance.py --rate 2048000 --engine csdr --fixture all --out <dir> [--cpu-quota 0.75]
   run_acceptance.py --replay <dir>      # recompute verdicts from a recorded <dir>
@@ -18,9 +20,14 @@ Exit codes: 0 pass, 1 fail, 2 invalid (setup, teardown or recording failure).
 import argparse
 import asyncio
 import base64
+from bisect import bisect_left
+import calendar
 import json
+import math
+import operator
 import os
 from pathlib import Path
+import random
 import re
 import signal
 import socket
@@ -45,6 +52,29 @@ CORR_WINDOW_S = 0.25
 CORR_SEARCH_S = 0.05
 API_PORT = 3000
 STREAM_PORT = 3001
+# Ports of the live setup on this host; never published, connected to or configured.
+FORBIDDEN_PORTS = frozenset((15555, 15556, 18080, 9000, 5173, 8081, 8082))
+# Host ports the forwarder may be published on (900 ports, none of them forbidden).
+SAFE_PORTS = range(47100, 48000)
+assert not FORBIDDEN_PORTS & set(SAFE_PORTS)
+# A stage-1 open may precede the source onset by this much (block quantisation) and still
+# belong to that over.
+ASSOC_SLACK_S = 0.1
+# Carrier-bearing fixtures must close at least max(MIN_EVENTS, overs in the recording after
+# STARTUP_S, minus one) transmissions in both runs.
+MIN_EVENTS = 3
+STARTUP_S = 30.0
+# Fixtures whose over has no carrier: the manual baseline may legitimately see no transmission.
+CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
+# The status rate (fractional, e.g. 2.048 Msps / 82 = 24 975.61 Hz) must match the WAV header
+# rate (integer) within this.
+RATE_MATCH_HZ = 1.0
+# Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
+# ±RESAMPLE_HALF_WIDTH output periods, fractional position quantised to 1/RESAMPLE_PHASES of an
+# input sample (time error ≤ 1 / (2 x 512 x 24 975) s ≈ 39 ns). Symmetric kernel: zero delay.
+RESAMPLE_CUTOFF = 0.45
+RESAMPLE_HALF_WIDTH = 16
+RESAMPLE_PHASES = 512
 
 
 class InvalidRun(Exception):
@@ -63,6 +93,101 @@ def contract_ms(name):
 def manifest():
 	path = ROOT.parents[1] / "tests/mocks/fixtures/evidence-squelch/manifest.json"
 	return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Endpoint safety (pure; exercised by --self-test)
+
+
+def check_port(port):
+	if not isinstance(port, int) or port in FORBIDDEN_PORTS or port not in SAFE_PORTS:
+		raise InvalidRun("refusing host port outside the safe range " + f"{SAFE_PORTS.start}-{SAFE_PORTS.stop - 1}")
+	return port
+
+
+def check_endpoint(host, port, expected=None):
+	"""Refuse anything but 127.0.0.1 on a safe, non-forbidden port (and the requested one)."""
+	if host != "127.0.0.1":
+		raise InvalidRun("published endpoint is not 127.0.0.1")
+	check_port(port)
+	if expected is not None and port != expected:
+		raise InvalidRun("published port differs from the requested one")
+	return host, port
+
+
+def pick_ports(count, is_free, rng=None):
+	"""`count` distinct safe ports for which is_free(port) holds."""
+	rng = rng or random.Random()
+	candidates = [p for p in SAFE_PORTS if p not in FORBIDDEN_PORTS]
+	rng.shuffle(candidates)
+	out = []
+	for port in candidates:
+		if is_free(port):
+			out.append(check_port(port))
+			if len(out) == count:
+				return out
+	raise InvalidRun("no free port in the safe range")
+
+
+def loopback_free(port):
+	"""Bind-only probe on 127.0.0.1 (never connects)."""
+	check_port(port)
+	with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+		try:
+			probe.bind(("127.0.0.1", port))
+		except OSError:
+			return False
+	return True
+
+
+# ---------------------------------------------------------------------------
+# Resampling (pure; exercised by --self-test)
+
+
+def _resample_table(ratio):
+	"""Per phase, the normalised taps for input offsets -half..half (ratio = in/out rate)."""
+	fc = RESAMPLE_CUTOFF / ratio  # cycles per input sample
+	half = math.ceil(RESAMPLE_HALF_WIDTH * ratio)
+	span = RESAMPLE_HALF_WIDTH * ratio
+	table = []
+	for p in range(RESAMPLE_PHASES):
+		frac = p / RESAMPLE_PHASES
+		taps = []
+		for j in range(-half, half + 1):
+			x = j - frac
+			if abs(x) >= span:
+				taps.append(0.0)
+				continue
+			sinc = 2 * fc if x == 0 else math.sin(2 * math.pi * fc * x) / (math.pi * x)
+			w = 0.42 + 0.5 * math.cos(math.pi * x / span) + 0.08 * math.cos(2 * math.pi * x / span)
+			taps.append(sinc * w)
+		total = sum(taps)
+		table.append([t / total for t in taps])
+	return half, table
+
+
+def resample(samples, rate_in, rate_out=REF_RATE):
+	"""Arbitrary-ratio windowed-sinc resampling; output n sits at input time n x rate_in/rate_out
+	exactly (symmetric kernel, so no group delay to compensate). Edges are zero-padded."""
+	if rate_in <= 0 or not math.isfinite(rate_in):
+		raise InvalidRun("invalid audio rate")
+	if rate_in < rate_out:
+		raise InvalidRun("audio rate below the reference rate")
+	ratio = rate_in / rate_out
+	half, table = _resample_table(ratio)
+	padded = [0.0] * half + list(samples) + [0.0] * (half + 1)
+	width = 2 * half + 1
+	out = []
+	count = int(len(samples) / ratio)
+	mul = operator.mul
+	for n in range(count):
+		t = n * ratio
+		i0 = int(t)
+		phase = int((t - i0) * RESAMPLE_PHASES + 0.5)
+		if phase == RESAMPLE_PHASES:
+			i0, phase = i0 + 1, 0
+		out.append(sum(map(mul, padded[i0 : i0 + width], table[phase])))
+	return out
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +228,7 @@ def best_lag(recorded, start, reference, ref_start, rate):
 		energy = sum(v * v for v in seg)
 		if energy <= 0:
 			continue
-		score = abs(sum(x * y for x, y in zip(seg, ref))) / (energy * ref_energy) ** 0.5
+		score = abs(sum(map(operator.mul, seg, ref))) / (energy * ref_energy) ** 0.5
 		if score > best_score:
 			best, best_score = lag, score
 	return None if best is None else best / rate
@@ -122,23 +247,96 @@ def verdict_onset(lags):
 	return None
 
 
-def stream_lag(arrivals, byte_rate):
-	"""Per arrival (mono, cumulative bytes): wall time minus stream time, relative to the first."""
-	if not arrivals:
-		return []
-	t0 = arrivals[0][0] - arrivals[0][1] / byte_rate
-	return [(t, t - t0 - b / byte_rate) for t, b in arrivals]
+def parse_iso(text):
+	match = re.match(r"(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+(?:\.\d+)?)Z$", text if isinstance(text, str) else "")
+	if not match:
+		raise InvalidRun("unparsable event timestamp")
+	y, mo, d, h, mi = (int(match[i]) for i in range(1, 6))
+	return calendar.timegm((y, mo, d, h, mi, 0, 0, 0, 0)) + float(match[6])
 
 
-def verdict_delay(arrivals, byte_rate, overs):
-	"""Per over (mono start, mono end): stream delay growth inside the over ≤ MAX_DELAY_S."""
-	lags = stream_lag(arrivals, byte_rate)
-	worst = 0.0
-	for start, end in overs:
-		inside = [lag for t, lag in lags if start <= t <= end + MAX_DELAY_S]
-		before = [lag for t, lag in lags if t < start]
-		if inside and before:
-			worst = max(worst, max(inside) - before[-1])
+def format_iso(t):
+	whole = math.floor(t)
+	ms = int(round((t - whole) * 1000))
+	if ms == 1000:
+		whole, ms = whole + 1, 0
+	return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(whole)) + f".{ms:03d}Z"
+
+
+def _number(value):
+	return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def source_clock(side, fixture):
+	"""The source timeline of one run: when the fake started sending the file (its `connected`
+	event, core-side wall clock), where the over sits in the file (fixture sidecar), the file
+	period, and the host-monotonic minus core-wall offset bounded by the earliest transmission
+	event receipt (None without events). Missing evidence is an invalid run."""
+	src = side.get("source")
+	if not isinstance(src, dict) or not _number(src.get("connectedTs")):
+		raise InvalidRun("missing source clock (fake rtl_tcp connected event)")
+	if src.get("connections") != 1:
+		raise InvalidRun("fake rtl_tcp saw more than one connection (source clock ambiguous)")
+	if not isinstance(fixture, dict) or not _number(fixture.get("overOnsetS")) or not _number(fixture.get("periodS")):
+		raise InvalidRun("missing fixture sidecar onset or period")
+	if fixture["periodS"] <= 0:
+		raise InvalidRun("invalid fixture period")
+	offsets = []
+	for event in side.get("transmissions", []):
+		if _number(event.get("mono")) and isinstance(event.get("startedAt"), str):
+			offsets.append(event["mono"] - parse_iso(event["startedAt"]))
+	return {"connected": float(src["connectedTs"]), "onset": float(fixture["overOnsetS"]),
+		"period": float(fixture["periodS"]), "offset": min(offsets) if offsets else None}
+
+
+def over_at(clock, wall):
+	"""(index, source onset wall time) of the over a core-wall time belongs to."""
+	k = math.floor((wall - clock["connected"] - clock["onset"] + ASSOC_SLACK_S) / clock["period"])
+	return k, clock["connected"] + clock["onset"] + k * clock["period"]
+
+
+def arrival_time(arrivals, byte_index):
+	"""Host-monotonic arrival of the chunk holding byte_index; arrivals are (mono, cumulative)."""
+	totals = [b for _t, b in arrivals]
+	i = bisect_left(totals, byte_index + 1)
+	return arrivals[i][0] if i < len(arrivals) else None
+
+
+def played_overs(side, runs, clock, rate):
+	"""Per played run: its over, stage-1 latency and the delay of its first and last sample
+	behind the source. Every played run must sit on a recorded stage-1 open of its over."""
+	if clock["offset"] is None:
+		raise InvalidRun("audio played but no transmission event places it on the source clock")
+	opens = sorted(parse_iso(e["startedAt"]) for e in side.get("transmissions", [])
+		if e.get("state") == "open" and isinstance(e.get("startedAt"), str))
+	if not opens:
+		raise InvalidRun("audio played but no stage-1 open event recorded")
+	out = []
+	for s, e in runs:
+		first = arrival_time(side["arrivals"], int(s * rate / REF_RATE) * 2)
+		last = arrival_time(side["arrivals"], int((e - 1) * rate / REF_RATE) * 2)
+		if first is None or last is None:
+			raise InvalidRun("played sample without an arrival time")
+		w_first, w_last = first - clock["offset"], last - clock["offset"]
+		i = bisect_left(opens, w_first + 1e-9) - 1
+		if i < 0:
+			raise InvalidRun("played audio before any stage-1 open")
+		k, onset = over_at(clock, opens[i])
+		if k < 0 or not onset - ASSOC_SLACK_S <= opens[i] <= onset + MAX_DELAY_S:
+			raise InvalidRun("stage-1 open does not match a source over onset")
+		out.append({"over": k, "stage1S": opens[i] - onset, "startS": w_first - onset,
+			"endS": w_last - (onset + (e - 1 - s) / REF_RATE)})
+	return out
+
+
+def verdict_delay(overs):
+	"""Per played over: delay of its first and last sample behind the source ≤ MAX_DELAY_S."""
+	if not overs:
+		raise InvalidRun("no played over to measure delay on")
+	delays = [d for o in overs for d in (o["startS"], o["endS"])]
+	worst, least = max(delays), min(delays)
+	if least < -ONSET_TOLERANCE_S:
+		return f"played {-least:.3f} s before its source time (clock evidence inconsistent)", worst
 	return (None if worst <= MAX_DELAY_S else f"per-over delay {worst:.3f} s > {MAX_DELAY_S} s"), worst
 
 
@@ -147,43 +345,54 @@ def verdict_byte_rate(arrivals, byte_rate):
 	if not arrivals:
 		return "no stream bytes", []
 	t0, b0 = arrivals[0]
-	rates, edge, i = [], t0 + 60.0, 0
+	rates, edge = [], t0 + 60.0
 	prev_b = b0
 	for t, b in arrivals:
 		if t >= edge:
 			rates.append((b - prev_b) / 60.0)
 			prev_b, edge = b, edge + 60.0
-		i += 1
 	bad = [r for r in rates if abs(r / byte_rate - 1) > BYTE_RATE_TOLERANCE]
 	if not rates:
 		return "under one minute of stream recorded", rates
 	return (f"byte rate off nominal {byte_rate}: {bad}" if bad else None), rates
 
 
-def event_edges(events):
-	"""(open, close) seconds relative to the first open, from transmission events."""
-	opens = [e for e in events if e.get("state") == "closed" and e.get("durationMs") is not None]
-	if not opens:
-		return []
-	first = parse_iso(opens[0]["startedAt"])
-	return [(parse_iso(e["startedAt"]) - first, parse_iso(e["startedAt"]) - first + e["durationMs"] / 1000) for e in opens]
+def event_edges(events, clock):
+	"""{(over, n): (open, close)} of completed transmissions, seconds after the source onset of
+	their over (the n-th transmission within that over)."""
+	out, seen = {}, {}
+	for e in events:
+		if e.get("state") != "closed" or not _number(e.get("durationMs")):
+			continue
+		start = parse_iso(e.get("startedAt"))
+		k, onset = over_at(clock, start)
+		n = seen.get(k, 0)
+		seen[k] = n + 1
+		out[(k, n)] = (start - onset, start - onset + e["durationMs"] / 1000)
+	return out
 
 
-def parse_iso(text):
-	match = re.match(r"(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+(?:\.\d+)?)Z$", text or "")
-	if not match:
-		raise InvalidRun("unparsable event timestamp")
-	y, mo, d, h, mi = (int(match[i]) for i in range(1, 6))
-	return time.mktime((y, mo, d, h, mi, 0, 0, 0, 0)) - time.timezone + float(match[6])
+def required_events(carrier, seconds, period):
+	if not carrier:
+		return 0
+	return max(MIN_EVENTS, int((seconds - STARTUP_S) / period) - 1)
 
 
-def verdict_events(auto_events, manual_events):
-	a, m = event_edges(auto_events), event_edges(manual_events)
-	if len(a) != len(m):
-		return f"transmission count auto {len(a)} != manual {len(m)}"
-	for (ao, ac), (mo, mc) in zip(a, m):
+def verdict_events(auto_events, manual_events, auto_clock, manual_clock, required):
+	"""Transmissions of both runs on their own source clock: enough of them, the same overs and
+	edges within EVENT_TOLERANCE_S (a systematic shift fails)."""
+	a, m = event_edges(auto_events, auto_clock), event_edges(manual_events, manual_clock)
+	if len(a) < required or len(m) < required:
+		return f"too few completed transmissions: auto {len(a)}, manual {len(m)}, need {required}"
+	if a or m:
+		horizon = min(max(a)[0] if a else -1, max(m)[0] if m else -1)
+		differ = sorted(key for key in set(a) ^ set(m) if key[0] <= horizon)
+		if differ:
+			return f"transmission sets differ at over {differ[0][0]}: auto {len(a)} manual {len(m)}"
+	for key in sorted(set(a) & set(m)):
+		(ao, ac), (mo, mc) = a[key], m[key]
 		if abs(ao - mo) > EVENT_TOLERANCE_S or abs(ac - mc) > EVENT_TOLERANCE_S:
-			return f"transmission edges differ: auto {ao:.3f}-{ac:.3f} manual {mo:.3f}-{mc:.3f}"
+			return f"transmission edges differ at over {key[0]}: auto {ao:.3f}-{ac:.3f} manual {mo:.3f}-{mc:.3f}"
 	return None
 
 
@@ -206,19 +415,20 @@ def evaluate(obs, guard_ms):
 	"""All verdicts of one fixture from its recorded observations."""
 	failures, notes = [], {}
 	auto, manual = obs["auto"], obs["manual"]
+	clocks = {mode: source_clock(obs[mode], obs[mode].get("fixture")) for mode in ("auto", "manual")}
 	rate = auto["audioRate"]
 	byte_rate = rate * 2
 	runs = nonzero_runs(auto["samples8k"], REF_RATE)
-	for f in (verdict_opened(obs["expect"], runs),):
-		if f:
-			failures.append(f)
+	if f := verdict_opened(obs["expect"], runs):
+		failures.append(f)
 	if obs["expect"] != "none" and runs:
 		lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs]
 		if f := verdict_onset(lags):
 			failures.append(f)
 		notes["onsetLagsS"] = lags
-		overs = [(auto["streamT0"] + s / REF_RATE, auto["streamT0"] + e / REF_RATE) for s, e in runs]
-		f, worst = verdict_delay(auto["arrivals"], byte_rate, overs)
+		overs = played_overs(auto, runs, clocks["auto"], rate)
+		notes["overs"] = overs
+		f, worst = verdict_delay(overs)
 		notes["maxDelayS"] = worst
 		if f:
 			failures.append(f)
@@ -226,7 +436,8 @@ def evaluate(obs, guard_ms):
 	notes["byteRates"] = rates
 	if f:
 		failures.append(f)
-	if f := verdict_events(auto["transmissions"], manual["transmissions"]):
+	required = required_events(obs["carrier"], obs["seconds"], clocks["auto"]["period"])
+	if f := verdict_events(auto["transmissions"], manual["transmissions"], clocks["auto"], clocks["manual"], required):
 		failures.append(f)
 	if f := verdict_p99(auto["p99Ms"], manual["p99Ms"]):
 		failures.append(f)
@@ -241,7 +452,129 @@ def evaluate(obs, guard_ms):
 # Self-test
 
 
+class _FakeSock:
+	"""recv() replays bytes, "timeout" (socket.timeout) or b"" (peer closed)."""
+
+	def __init__(self, items):
+		self.items, self.sent = list(items), []
+
+	def recv(self, _n):
+		if not self.items:
+			raise socket.timeout()
+		item = self.items.pop(0)
+		if item == "timeout":
+			raise socket.timeout()
+		return item
+
+	def sendall(self, data):
+		self.sent.append(data)
+
+
+def _frame(payload, opcode=1, fin=True):
+	data = payload.encode() if isinstance(payload, str) else payload
+	n = len(data)
+	head = bytes([(0x80 if fin else 0) | opcode]) + (bytes([n]) if n < 126 else bytes([126]) + struct.pack(">H", n))
+	return head + data
+
+
+def _self_test_ws():
+	big = json.dumps({"type": "live-audio:transmission", "data": {"state": "open", "x": "y" * 300}})
+	small = json.dumps({"type": "live-audio:level", "data": {"dbfs": -20}})
+	wire = _frame(big) + _frame(small[:10], fin=False) + _frame(small[10:], opcode=0) + _frame(b"", opcode=9)
+	# Timeouts inside the 2-byte header, the 16-bit length and the payload.
+	items = [wire[:1], "timeout", wire[1:3], "timeout", wire[3:50], "timeout", "timeout", wire[50:]]
+	stop = threading.Event()
+	obs = {"levels": [], "transmissions": []}
+	ws = WsClient(_FakeSock(items + [_frame(b"", opcode=8)]), stop)
+	try:
+		read_ws(ws, stop, obs)
+		raise AssertionError("unexpected close not reported")
+	except InvalidRun as exc:
+		assert "closed" in str(exc)
+	assert len(obs["transmissions"]) == 1 and len(obs["levels"]) == 1, obs
+	assert obs["transmissions"][0]["x"] == "y" * 300
+	assert any(s[0] == 0x8A for s in ws.sock.sent), "ping not answered"
+	# Peer EOF mid-run is invalid.
+	try:
+		read_ws(WsClient(_FakeSock([wire[:5], b""]), threading.Event()), threading.Event(), {"levels": [], "transmissions": []})
+		raise AssertionError("EOF not reported")
+	except InvalidRun:
+		pass
+	# Stop during timeouts ends cleanly, keeping what was read.
+	stop = threading.Event()
+	obs = {"levels": [], "transmissions": []}
+	sock = _FakeSock([_frame(small), wire[:3]])
+	ws = WsClient(sock, stop)
+	orig = sock.recv
+
+	def recv(n):
+		if not sock.items:
+			stop.set()
+		return orig(n)
+
+	sock.recv = recv
+	read_ws(ws, stop, obs)
+	assert len(obs["levels"]) == 1
+
+
+def _self_test_ports():
+	for port in sorted(FORBIDDEN_PORTS):
+		for call in (lambda: check_port(port), lambda: check_endpoint("127.0.0.1", port)):
+			try:
+				call()
+				raise AssertionError(f"forbidden port {port} accepted")
+			except InvalidRun:
+				pass
+	for host, port, expected in (("0.0.0.0", 47100, None), ("::1", 47100, None), ("192.168.1.2", 47100, None),
+			("localhost", 47100, None), ("127.0.0.1", 32768, None), ("127.0.0.1", 47101, 47100)):
+		try:
+			check_endpoint(host, port, expected)
+			raise AssertionError(f"endpoint {host}:{port} accepted")
+		except InvalidRun:
+			pass
+	assert check_endpoint("127.0.0.1", 47100, 47100) == ("127.0.0.1", 47100)
+	ports = pick_ports(2, lambda p: p % 3 == 0, random.Random(1))
+	assert len(set(ports)) == 2 and all(p in SAFE_PORTS and p not in FORBIDDEN_PORTS and p % 3 == 0 for p in ports)
+	try:
+		pick_ports(2, lambda _p: False)
+		raise AssertionError("no-free-port not refused")
+	except InvalidRun:
+		pass
+
+
+def _self_test_resampler():
+	for rate_in in (2_048_000 / 82, 25_000.0, 16_000.0):
+		for freq in (300.0, 1_000.0, 2_500.0):
+			n_in = int(0.6 * rate_in)
+			x = [0.5 * math.sin(2 * math.pi * freq * i / rate_in + 0.3) for i in range(n_in)]
+			y = resample(x, rate_in)
+			assert abs(len(y) - int(0.6 * REF_RATE)) <= 1, len(y)
+			margin = int(0.05 * REF_RATE)
+			seg = range(margin, len(y) - margin)
+			sin_p = sum(y[n] * math.sin(2 * math.pi * freq * n / REF_RATE + 0.3) for n in seg)
+			cos_p = sum(y[n] * math.cos(2 * math.pi * freq * n / REF_RATE + 0.3) for n in seg)
+			amp = 2 * math.hypot(sin_p, cos_p) / len(seg)
+			delay = math.atan2(-cos_p, sin_p) / (2 * math.pi * freq)
+			err = max(abs(y[n] - 0.5 * math.sin(2 * math.pi * freq * n / REF_RATE + 0.3)) for n in seg)
+			assert abs(amp / 0.5 - 1) < 0.003, (rate_in, freq, amp)
+			assert abs(delay) < 2e-6, (rate_in, freq, delay)
+			if freq <= 1_000.0:
+				assert err < 2e-3, (rate_in, freq, err)
+		# A band-limited pulse at a known time lands on the same output time (no delay).
+		center = 0.3
+		x = [math.exp(-(((i / rate_in) - center) / 0.0008) ** 2) for i in range(int(0.6 * rate_in))]
+		y = resample(x, rate_in)
+		k = max(range(len(y)), key=y.__getitem__)
+		a, b, c = (math.log(y[i]) for i in (k - 1, k, k + 1))  # a Gaussian is a log-parabola
+		peak = (k + 0.5 * (a - c) / (a - 2 * b + c)) / REF_RATE
+		assert abs(peak - center) < 5e-6, (rate_in, peak)
+	assert resample([1.0] * 8000, 8000.0)[100] == 1.0
+
+
 def self_test():
+	_self_test_ports()
+	_self_test_ws()
+	_self_test_resampler()
 	rate = REF_RATE
 	seed = [12345]
 
@@ -251,20 +584,46 @@ def self_test():
 
 	onset = int(0.25 * rate)
 	ref = [0.0] * onset + [noise() for _ in range(int(3.75 * rate))]
+	conn, gap, period, host_offset, pipe_delay = 1_792_000_000.0, 3.0, 6.75, -1_791_990_000.0, 0.3
+	stream_s, overs_played, overs_tx, stage1 = 65.0, 2, 8, 0.05
 
-	def recorded(skip):
-		"""Waiting zeros, then the over from `skip` samples after its first sample."""
-		return [0.0] * rate + ref[onset + skip :] + [0.0] * rate
+	def recorded(skip=0):
+		"""Stream samples: over k plays from source onset (minus pipe_delay of stream start)."""
+		out = [0.0] * int(stream_s * rate)
+		for k in range(overs_played):
+			i = int((gap + k * period - pipe_delay) * rate)
+			body = ref[onset + skip :]
+			out[i : i + len(body)] = body
+		return out
 
-	def arrivals(seconds, byte_rate, stretch=1.0):
-		return [(100.0 + t * 0.1 * stretch, int(t * 0.1 * byte_rate)) for t in range(int(seconds * 10) + 1)]
+	def arrivals(stretch=1.0, stall_after=None):
+		out = []
+		for step in range(int(stream_s * 10) + 1):
+			t = conn + pipe_delay + 0.25 + step * 0.1 * stretch
+			if stall_after is not None and step * 0.1 > stall_after:
+				t += 2.0
+			out.append((t + host_offset, int(step * 0.1 * 2 * rate)))
+		return out
 
-	tx = [{"state": "closed", "startedAt": "2026-10-23T10:00:00.000Z", "durationMs": 3750}]
+	def events(shift=0.0, count=overs_tx, skip=()):
+		out = []
+		for k in range(count):
+			if k in skip:
+				continue
+			start = conn + gap + k * period + stage1 + shift
+			mono = start + host_offset + 0.002
+			out.append({"state": "open", "startedAt": format_iso(start), "durationMs": None, "mono": mono})
+			out.append({"state": "closed", "startedAt": format_iso(start), "durationMs": 3750, "mono": mono + 3.75})
+		return out
+
+	fixture = {"overOnsetS": gap, "periodS": period}
+	source = {"connectedTs": conn, "connections": 1}
 	base = {
-		"expect": "voice", "reference8k": ref, "refOnset8k": onset,
-		"auto": {"audioRate": rate, "samples8k": recorded(0), "streamT0": 100.0, "arrivals": arrivals(130, 2 * rate),
-			"transmissions": tx, "p99Ms": [3.0]},
-		"manual": {"audioRate": rate, "transmissions": tx, "p99Ms": [2.5], "drainsMs": [120.0]},
+		"expect": "voice", "reference8k": ref, "refOnset8k": onset, "carrier": True, "seconds": stream_s,
+		"auto": {"audioRate": rate, "samples8k": recorded(), "arrivals": arrivals(), "transmissions": events(),
+			"p99Ms": [3.0], "source": source, "fixture": fixture},
+		"manual": {"audioRate": rate, "transmissions": events(), "p99Ms": [2.5], "drainsMs": [120.0],
+			"source": source, "fixture": fixture},
 	}
 
 	def variant(**changes):
@@ -273,25 +632,47 @@ def self_test():
 			side, key = path.split("__")
 			if side == "top":
 				obs[key] = value
+			elif value is None:
+				obs[side].pop(key, None)
 			else:
 				obs[side][key] = value
 		return evaluate(obs, 200)[0]
 
+	def invalid(**changes):
+		try:
+			variant(**changes)
+		except InvalidRun as exc:
+			return str(exc)
+		raise AssertionError(f"accepted without timing evidence: {list(changes)}")
+
 	assert variant() == [], variant()
 	assert any("opened" in f for f in variant(top__expect="none"))
 	assert any("onset" in f for f in variant(auto__samples8k=recorded(int(0.03 * rate))))
-	assert any("byte rate" in f for f in variant(auto__arrivals=arrivals(130, 2 * rate, 1.02)))
-	assert any("count" in f for f in variant(manual__transmissions=tx * 2))
-	late = [dict(tx[0], durationMs=3800)]
+	assert any("byte rate" in f for f in variant(auto__arrivals=arrivals(1.02)))
+	assert any("delay" in f for f in variant(auto__arrivals=arrivals(stall_after=gap + 1.0)))
+	# Missing timing evidence is invalid, never a zero-delay pass.
+	assert "source clock" in invalid(auto__source=None)
+	assert "more than one" in invalid(auto__source={"connectedTs": conn, "connections": 2})
+	assert "sidecar" in invalid(auto__fixture={"periodS": period})
+	assert "transmission event" in invalid(auto__transmissions=[], manual__transmissions=[])
+	assert "stage-1" in invalid(auto__transmissions=events(shift=MAX_DELAY_S + 0.2))
+	assert "stage-1" in invalid(auto__transmissions=[e for e in events() if e["state"] == "closed"])
+	# Transmissions: a systematic shift, a missing over, too few and empty sets all fail.
+	assert any("edges" in f for f in variant(manual__transmissions=events(shift=0.05)))
+	late = [dict(e, durationMs=3800) if e["state"] == "closed" else e for e in events()]
 	assert any("edges" in f for f in variant(manual__transmissions=late))
+	assert any("differ" in f for f in variant(manual__transmissions=events(skip=(3,))))
+	assert any("few" in f for f in variant(auto__transmissions=events(count=2), manual__transmissions=events(count=2)))
+	empty = variant(top__expect="none", auto__samples8k=[0.0] * int(stream_s * rate),
+		auto__transmissions=[], manual__transmissions=[])
+	assert any("few" in f for f in empty), empty
+	assert variant(top__expect="none", top__carrier=False, auto__samples8k=[0.0] * int(stream_s * rate),
+		auto__transmissions=[], manual__transmissions=[]) == []
 	assert any("p99" in f for f in variant(auto__p99Ms=[5.0]))
 	assert any("p99" in f for f in variant(auto__p99Ms=[]))
-	stalled = arrivals(130, 2 * rate)
-	stalled = [(t + (2.0 if t > 101.5 else 0.0), b) for t, b in stalled]
-	assert any("delay" in f for f in variant(auto__arrivals=stalled))
 	assert verdict_drain([250.0], 200)[0] is not None and verdict_drain([150.0], 200)[0] is None
 	assert nonzero_runs([0, 1, 1, 0, 0, 0, 2], 1, min_gap_s=2) == [(1, 3), (6, 7)]
-	assert parse_iso("1970-01-01T00:00:01.5Z") == 1.5
+	assert parse_iso("1970-01-01T00:00:01.5Z") == 1.5 and parse_iso(format_iso(conn + 0.25)) == conn + 0.25
 	print("ok")
 
 
@@ -332,30 +713,36 @@ def proxy():
 # Live recording (Docker; never run by --self-test or --replay)
 
 
-def loopback_only(host):
-	if host not in ("127.0.0.1", "::1", "localhost"):
-		raise InvalidRun("published port is not on loopback")
+class _WsStopped(Exception):
+	pass
 
 
 class WsClient:
-	"""Minimal RFC 6455 text client (stdlib only) for the core's /ws."""
+	"""Minimal RFC 6455 text client (stdlib only) for the core's /ws. A socket timeout only
+	re-checks `stop`; buffered bytes of a partial frame are kept."""
 
-	def __init__(self, host, port, channels):
-		loopback_only(host)
-		self.sock = socket.create_connection((host, port), timeout=10)
+	def __init__(self, sock, stop, buf=b""):
+		self.sock, self.stop, self.buf = sock, stop, buf
+
+	@classmethod
+	def connect(cls, host, port, channels, stop):
+		check_endpoint(host, port)
+		sock = socket.create_connection((host, port), timeout=10)
 		key = base64.b64encode(os.urandom(16)).decode()
-		self.sock.sendall((f"GET /ws HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+		sock.sendall((f"GET /ws HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
 			f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
 		head = b""
 		while b"\r\n\r\n" not in head:
-			chunk = self.sock.recv(4096)
+			chunk = sock.recv(4096)
 			if not chunk:
 				raise InvalidRun("websocket handshake closed")
 			head += chunk
 		if b" 101 " not in head.split(b"\r\n", 1)[0]:
 			raise InvalidRun("websocket handshake refused")
-		self.buf = head.split(b"\r\n\r\n", 1)[1]
-		self.send(json.dumps({"type": "subscribe", "channels": channels}))
+		sock.settimeout(2)
+		ws = cls(sock, stop, head.split(b"\r\n\r\n", 1)[1])
+		ws.send(json.dumps({"type": "subscribe", "channels": channels}))
+		return ws
 
 	def send(self, text, opcode=1):
 		data = text.encode() if isinstance(text, str) else text
@@ -365,31 +752,65 @@ class WsClient:
 		header += bytes([0x80 | n]) if n < 126 else (bytes([0x80 | 126]) + struct.pack(">H", n) if n < 65536 else bytes([0x80 | 127]) + struct.pack(">Q", n))
 		self.sock.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
 
-	def _read(self, n):
+	def _fill(self, n):
 		while len(self.buf) < n:
-			chunk = self.sock.recv(65536)
+			if self.stop.is_set():
+				raise _WsStopped
+			try:
+				chunk = self.sock.recv(65536)
+			except socket.timeout:
+				continue
 			if not chunk:
-				raise EOFError
+				raise InvalidRun("websocket ended by the core before the run did")
 			self.buf += chunk
-		out, self.buf = self.buf[:n], self.buf[n:]
-		return out
+
+	def _frame(self):
+		"""One whole frame (fin, opcode, payload); consumes nothing until it is complete."""
+		self._fill(2)
+		b0, b1 = self.buf[0], self.buf[1]
+		n, head = b1 & 0x7F, 2
+		if n == 126:
+			self._fill(4)
+			n, head = struct.unpack(">H", self.buf[2:4])[0], 4
+		elif n == 127:
+			self._fill(10)
+			n, head = struct.unpack(">Q", self.buf[2:10])[0], 10
+		self._fill(head + n)
+		payload, self.buf = self.buf[head : head + n], self.buf[head + n :]
+		return bool(b0 & 0x80), b0 & 0x0F, payload
 
 	def messages(self):
-		while True:
-			b0, b1 = self._read(2)
-			n = b1 & 0x7F
-			if n == 126:
-				n = struct.unpack(">H", self._read(2))[0]
-			elif n == 127:
-				n = struct.unpack(">Q", self._read(8))[0]
-			payload = self._read(n)
-			opcode = b0 & 0x0F
-			if opcode == 8:
-				return
-			if opcode == 9:
-				self.send(payload, opcode=10)
-			elif opcode == 1:
-				yield payload.decode("utf-8", "replace")
+		"""Text messages until `stop`; a close frame or EOF before it is an invalid run."""
+		parts = None
+		try:
+			while True:
+				fin, opcode, payload = self._frame()
+				if opcode == 8:
+					raise InvalidRun("websocket closed by the core before the run did")
+				if opcode == 9:
+					self.send(payload, opcode=10)
+				elif opcode == 1:
+					parts = [payload]
+				elif opcode == 0 and parts is not None:
+					parts.append(payload)
+				if opcode in (0, 1) and fin and parts is not None:
+					yield b"".join(parts).decode("utf-8", "replace")
+					parts = None
+		except _WsStopped:
+			return
+
+
+def read_ws(ws, stop, obs):
+	for text in ws.messages():
+		msg = json.loads(text)
+		kind = msg.get("type") if isinstance(msg, dict) else None
+		if kind == "live-audio:level":
+			obs["levels"].append((time.monotonic(), msg.get("data")))
+		elif kind == "live-audio:transmission":
+			data = msg.get("data")
+			obs["transmissions"].append(dict(data if isinstance(data, dict) else {}, mono=time.monotonic()))
+	if not stop.is_set():
+		raise InvalidRun("websocket reader ended before the run did")
 
 
 def parse_wav_header(read):
@@ -422,12 +843,15 @@ class Recorder:
 		cmd = ["docker", "compose", "-p", self.project, "-f", str(ROOT / "compose.yaml"), *args]
 		return subprocess.run(cmd, env=self.env, text=True, capture_output=True, check=check, timeout=timeout)
 
-	def port(self, inner):
-		out = self.compose("port", "api", str(inner)).stdout.strip()
-		host, _, port = out.rpartition(":")
-		host = host.strip("[]")
-		loopback_only(host if host != "0.0.0.0" else "invalid")
-		return host, int(port)
+	def endpoint(self, inner, expected):
+		"""The published endpoint of the forwarder's `inner` port; must be the requested safe one."""
+		lines = [line.strip() for line in self.compose("port", "api", str(inner)).stdout.splitlines() if line.strip()]
+		if len(lines) != 1:
+			raise InvalidRun("forwarder must publish exactly one endpoint per port")
+		host, _, port = lines[0].rpartition(":")
+		if not port.isdigit():
+			raise InvalidRun("unparsable published port")
+		return check_endpoint(host.strip("[]"), int(port), expected)
 
 	def get(self, path, method="GET"):
 		req = Request(self.base + path, method=method, data=b"{}" if method == "POST" else None,
@@ -435,7 +859,7 @@ class Recorder:
 		with self.opener.open(req, timeout=5) as response:
 			return json.load(response)
 
-	def write_config(self, entry, cu8_meta):
+	def write_config(self, entry):
 		text = (ROOT / "config.yaml").read_text()
 		swaps = {
 			r'sampleRate: \d+ # driver: --rate': f"sampleRate: {self.args.rate}",
@@ -451,17 +875,38 @@ class Recorder:
 		path.write_text(text)
 		return path
 
+	def source_events(self):
+		"""The fake's `connected` events (core-side wall clock) from its log."""
+		out = self.compose("logs", "--no-color", "--no-log-prefix", "fake").stdout
+		connected = []
+		for line in out.splitlines():
+			try:
+				event = json.loads(line)
+			except ValueError:
+				continue
+			if isinstance(event, dict) and event.get("event") == "connected" and _number(event.get("ts")):
+				connected.append(float(event["ts"]))
+		if not connected:
+			raise InvalidRun("fake rtl_tcp logged no connection")
+		return {"connectedTs": connected[0], "connections": len(connected)}
+
 	def run(self, entry, cu8, cu8_meta):
 		self.dir.mkdir(parents=True, exist_ok=True)
-		config = self.write_config(entry, cu8_meta)
+		config = self.write_config(entry)
+		api_port, stream_port = pick_ports(2, loopback_free)
+		self.obs["fixture"] = cu8_meta
+		self.obs["seconds"] = self.args.seconds
 		self.env = dict(os.environ, EVIDENCE_SQUELCH_CU8=cu8.name, EVIDENCE_SQUELCH_DATA=str(cu8.parent.resolve()),
 			EVIDENCE_SQUELCH_CONFIG=str(config.resolve()), EVIDENCE_SQUELCH_RATE=str(self.args.rate),
 			EVIDENCE_SQUELCH_DURATION=str(int(self.args.seconds) + 300),
-			EVIDENCE_SQUELCH_CORE_QUOTA=str(self.args.cpu_quota or 0))
+			EVIDENCE_SQUELCH_CORE_QUOTA=str(self.args.cpu_quota or 0),
+			EVIDENCE_SQUELCH_API_PORT=str(api_port), EVIDENCE_SQUELCH_STREAM_PORT=str(stream_port))
 		threads = []
 		try:
 			self.compose("up", "-d", "--no-build", "--pull", "never", timeout=180)
-			host, api = self.port(API_PORT)
+			# Both endpoints are verified before any client (including the readiness poll) starts.
+			host, api = self.endpoint(API_PORT, api_port)
+			stream = self.endpoint(STREAM_PORT, stream_port)
 			self.base = f"http://{host}:{api}"
 			deadline = time.monotonic() + 90
 			while True:
@@ -476,14 +921,20 @@ class Recorder:
 			if not self.get("/api/live-audio/status").get("running"):
 				self.get("/api/live-audio/start", method="POST")
 			threads = [threading.Thread(target=t, args=a, daemon=True) for t, a in (
-				(self.record_stream, self.port(STREAM_PORT)), (self.record_ws, (host, api)), (self.poll, ()))]
+				(self.record_stream, stream), (self.record_ws, (host, api)), (self.poll, ()))]
 			for t in threads:
 				t.start()
 			end = time.monotonic() + self.args.seconds
 			while time.monotonic() < end and not self.stop.is_set():
 				time.sleep(0.5)
+			self.stop.set()
+			for t in threads:
+				t.join(timeout=10)
 			if "error" in self.obs:
 				raise InvalidRun(self.obs["error"])
+			if any(t.is_alive() for t in threads):
+				raise InvalidRun("a recorder thread did not stop")
+			self.obs["source"] = self.source_events()
 		finally:
 			self.stop.set()
 			for t in threads:
@@ -496,8 +947,8 @@ class Recorder:
 		return self.obs
 
 	def record_stream(self, host, port):
-		loopback_only(host)
 		try:
+			check_endpoint(host, port)
 			with socket.create_connection((host, port), timeout=10) as sock:
 				sock.sendall(f"GET /stream.wav HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n".encode())
 				reader = sock.makefile("rb")
@@ -515,7 +966,7 @@ class Recorder:
 					while not self.stop.is_set():
 						data = reader.read1(65536) if not chunked else dechunk(reader, None)
 						if not data:
-							break
+							raise InvalidRun("stream ended before the run did")
 						now = time.monotonic()
 						if total == 0:
 							self.obs["streamT0"] = now
@@ -528,22 +979,7 @@ class Recorder:
 
 	def record_ws(self, host, port):
 		try:
-			ws = WsClient(host, port, ["live-audio"])
-			ws.sock.settimeout(2)
-			messages = ws.messages()
-			while not self.stop.is_set():
-				try:
-					text = next(messages)
-				except socket.timeout:
-					continue
-				except (StopIteration, EOFError):
-					break
-				msg = json.loads(text)
-				kind = msg.get("type")
-				if kind == "live-audio:level":
-					self.obs["levels"].append((time.monotonic(), msg.get("data")))
-				elif kind == "live-audio:transmission":
-					self.obs["transmissions"].append(dict(msg.get("data") or {}, mono=time.monotonic()))
+			read_ws(WsClient.connect(host, port, ["live-audio"], self.stop), self.stop, self.obs)
 		except (OSError, InvalidRun, ValueError) as exc:
 			self.obs["error"] = "websocket: " + str(exc)
 			self.stop.set()
@@ -591,13 +1027,35 @@ def dechunk(reader, n):
 # Post-processing
 
 
+def audio_rate(side):
+	"""The exact (possibly fractional) audio rate: the status effectiveSampleRate, which must
+	agree with the integer WAV header rate."""
+	header = side.get("audioRate")
+	if not _number(header):
+		raise InvalidRun("no WAV header rate")
+	status = [s.get("effectiveSampleRate") for _t, s in side.get("status", []) if isinstance(s, dict)]
+	status = [r for r in status if _number(r) and r > 0]
+	if not status:
+		return float(header)
+	if abs(status[-1] - header) > RATE_MATCH_HZ:
+		raise InvalidRun(f"status rate {status[-1]} disagrees with WAV header {header}")
+	return float(status[-1])
+
+
 def to_8k(path, rate):
 	data = path.read_bytes()
 	samples = struct.unpack(f"<{len(data) // 2}h", data[: len(data) // 2 * 2])
-	if rate % REF_RATE:
-		raise InvalidRun(f"audio rate {rate} is not a multiple of {REF_RATE}")
-	k = rate // REF_RATE
-	return [sum(samples[i : i + k]) / (k * 32768) for i in range(0, len(samples) - k + 1, k)]
+	# Filtering smears held/closed silence; outputs whose kernel support lies wholly inside
+	# exact zeros are kept exactly zero so nonzero_runs still sees the gate. One linear pass.
+	out = resample([v / 32768 for v in samples], rate)
+	ratio = rate / REF_RATE
+	half = math.ceil(RESAMPLE_HALF_WIDTH * ratio)
+	mask = [False] * len(out)
+	for s, e in nonzero_runs(samples, rate, min_gap_s=(2 * half + 2) / rate):
+		lo, hi = max(0, math.ceil((s - half) / ratio)), min(len(out) - 1, int((e - 1 + half) / ratio))
+		for n in range(lo, hi + 1):
+			mask[n] = True
+	return [v if m else 0.0 for v, m in zip(out, mask)]
 
 
 def reference(name):
@@ -628,7 +1086,8 @@ def drains(obs):
 
 
 def judge(run_dir, name, entry, guard_ms):
-	obs = {"expect": entry["expect"], "reference8k": reference(name), "refOnset8k": int(entry["overOnsetS"] * REF_RATE)}
+	obs = {"expect": entry["expect"], "reference8k": reference(name), "refOnset8k": int(entry["overOnsetS"] * REF_RATE),
+		"carrier": name not in CARRIERLESS}
 	for mode in ("auto", "manual"):
 		path = run_dir / mode / "observations.json"
 		if not path.exists():
@@ -637,9 +1096,13 @@ def judge(run_dir, name, entry, guard_ms):
 		side["dir"] = str(run_dir / mode)
 		if "audioRate" not in side or "streamT0" not in side:
 			raise InvalidRun(f"{name} {mode}: no stream recorded")
-		side["samples8k"] = to_8k(run_dir / mode / "stream.s16le", side["audioRate"])
+		side["audioRate"] = audio_rate(side)
+		side["samples8k"] = to_8k(run_dir / mode / "stream.s16le", side["audioRate"]) if mode == "auto" else []
 		side["drainsMs"] = drains(side) if mode == "manual" else []
 		obs[mode] = side
+	obs["seconds"] = obs["auto"].get("seconds")
+	if not _number(obs["seconds"]):
+		raise InvalidRun(f"{name}: recording length missing")
 	return evaluate(obs, guard_ms)
 
 
@@ -664,6 +1127,10 @@ def acceptance(args):
 			subprocess.run([sys.executable, "-I", str(ROOT / "fixtures.py"), "--format", "cu8", "--rate", str(args.rate),
 				"--out", str(cu8_dir), "--gap-s", str(GAP_S), "--fixture", name], check=True, timeout=900)
 		meta = json.loads((cu8_dir / f"{cu8.name}.json").read_text())
+		if not _number(meta.get("overOnsetS")):
+			raise InvalidRun(f"{name}: sidecar has no over onset")
+		# The fake replays whole I/Q pairs of the file in a loop: that is the over period.
+		meta["periodS"] = (cu8.stat().st_size // 2) / args.rate
 		for mode in ("auto", "manual"):
 			Recorder(args, name, mode, args.out / name / mode).run(entries[name], cu8, meta)
 		failures, notes = judge(args.out / name, name, entries[name], guard_ms)
