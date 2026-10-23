@@ -116,6 +116,11 @@ export class VoiceFrameMeter {
 		LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES,
 	)
 	private readonly hist = new Uint32Array(HIST_BINS)
+	/** Occupied histogram bins of the current `clusterScore`: centre, left edge, count. */
+	private readonly binCenters = new Float64Array(HIST_BINS)
+	private readonly binLefts = new Float64Array(HIST_BINS)
+	private readonly binWeights = new Float64Array(HIST_BINS)
+	private binsUsed = 0
 	private readonly cents = new Float64Array(4)
 	private readonly sums = new Float64Array(4)
 	private readonly counts = new Float64Array(4)
@@ -274,22 +279,44 @@ export class VoiceFrameMeter {
 			hist[bin] = (hist[bin] ?? 0) + 1
 		}
 		const binW = span / HIST_BINS
+		// Occupied bins only, in bin order: empty bins add nothing to any pass below.
+		const centers = this.binCenters
+		const lefts = this.binLefts
+		const weights = this.binWeights
+		let used = 0
+		for (let bin = 0; bin < HIST_BINS; bin++) {
+			const weight = hist[bin] ?? 0
+			if (weight === 0) continue
+			centers[used] = min + (bin + 0.5) * binW
+			lefts[used] = min + bin * binW
+			weights[used] = weight
+			used += 1
+		}
+		this.binsUsed = used
 		const two = this.kmeans(min, binW, samples.length, 2)
 		const four = this.kmeans(min, binW, samples.length, 4)
 		return two > four ? two : four
 	}
 
+	/**
+	 * k-means over the occupied bins of `clusterScore`. Equivalent to iterating all
+	 * HIST_BINS bins (empty bins seed, move and hit nothing), and it stops once an iteration
+	 * leaves every centroid unchanged: from a fixed point the remaining iterations repeat it.
+	 */
 	private kmeans(origin: number, binW: number, n: number, k: number): number {
-		const hist = this.hist
+		const centers = this.binCenters
+		const lefts = this.binLefts
+		const weights = this.binWeights
+		const used = this.binsUsed
 		const cents = this.cents
 		const sums = this.sums
 		const counts = this.counts
 		// Seed at the (q + 0.5) / k quantiles.
 		let cum = 0
 		let q = 0
-		for (let bin = 0; bin < HIST_BINS; bin++) {
-			cum += hist[bin] ?? 0
-			const center = origin + (bin + 0.5) * binW
+		for (let j = 0; j < used; j++) {
+			cum += weights[j] ?? 0
+			const center = centers[j] ?? 0
 			while (q < k && cum >= ((q + 0.5) / k) * n) {
 				cents[q] = center
 				q += 1
@@ -302,10 +329,9 @@ export class VoiceFrameMeter {
 		for (let iter = 0; iter < KMEANS_ITERS; iter++) {
 			sums.fill(0)
 			counts.fill(0)
-			for (let bin = 0; bin < HIST_BINS; bin++) {
-				const weight = hist[bin] ?? 0
-				if (weight === 0) continue
-				const x = origin + (bin + 0.5) * binW
+			for (let j = 0; j < used; j++) {
+				const weight = weights[j] ?? 0
+				const x = centers[j] ?? 0
 				let best = 0
 				let bestD = Infinity
 				for (let i = 0; i < k; i++) {
@@ -318,10 +344,16 @@ export class VoiceFrameMeter {
 				sums[best] = (sums[best] ?? 0) + x * weight
 				counts[best] = (counts[best] ?? 0) + weight
 			}
+			let moved = false
 			for (let i = 0; i < k; i++) {
 				const c = counts[i] ?? 0
-				if (c > 0) cents[i] = (sums[i] ?? 0) / c
+				if (c > 0) {
+					const next = (sums[i] ?? 0) / c
+					if (next !== cents[i]) moved = true
+					cents[i] = next
+				}
 			}
+			if (!moved) break
 		}
 		// Insertion sort of the first k centroids (k ≤ 4).
 		for (let i = 1; i < k; i++) {
@@ -344,10 +376,9 @@ export class VoiceFrameMeter {
 		if (!Number.isFinite(spacing)) return 0
 		const tolerance = CLUSTER_FRACTION * spacing
 		let hit = 0
-		for (let bin = 0; bin < HIST_BINS; bin++) {
-			const weight = hist[bin] ?? 0
-			if (weight === 0) continue
-			const left = origin + bin * binW
+		for (let j = 0; j < used; j++) {
+			const weight = weights[j] ?? 0
+			const left = lefts[j] ?? 0
 			const mid = left + 0.5 * binW
 			let nearest = cents[0] ?? 0
 			let bestD = Math.abs(mid - nearest)
