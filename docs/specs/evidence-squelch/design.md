@@ -422,7 +422,7 @@ squelch is a possible follow-up, not part of this spec.
 ### Interaction with modulation changes
 
 Only `nfm` runs on the csdr engine allocate a gate and pre-roll (amendment A8, 2026-10-23: AM and
-every other modulation allocate none; amendment A12: Rust runs allocate none). A modulation change restarts the pipeline (rule 5 allows a restart
+every other modulation allocate none; amendment A12: Rust runs allocate none). On the csdr engine a modulation change restarts the pipeline (rule 5 allows a restart
 because the stream changes), so the old run's FIFO and gate are dropped with the run and nothing
 queued is played; the new run allocates its own gate and FIFO, at its own rate and format, only if
 its modulation is `nfm`. The standalone gate class still supports `am` (voice evidence only), but

@@ -218,12 +218,12 @@ describe("evidence squelch scope: csdr only (amendment A12)", () => {
 			if (next !== open) {
 				open = next
 				channel.emitLine(
-					demodEvent("gate", { open, atOutputSample: offset / 2 }),
+					demodEvent("gate", { open, atOutputSample: Math.floor(offset / 2) }),
 				)
 			}
 			channel.emitLine(
 				demodEvent("metrics", {
-					atOutputSample: offset / 2,
+					atOutputSample: Math.floor(offset / 2),
 					powerDbfs: [open ? -40 : -80],
 					quietingDb: [open ? 30 : null],
 				}),
