@@ -239,6 +239,30 @@ within 5 s is invalid.
 missing `stream.s16le`, observations that are not a JSON object, or malformed fields). Each fixture
 prints PASS, FAIL or INVALID, and `verdicts.json` records it.
 
+Per-fixture outcome and retries:
+
+- **Invalid fixtures.** An INVALID fixture never stops the run; the driver goes on with the next
+  fixture.
+- **Clock steps.** A clock-step INVALID (the container wall clock moved more than 25 ms; Docker
+  Desktop's VM clock stepped 38.2 and 123.2 ms in October runs) is a host property. The fixture
+  is re-recorded with fresh cores up to 2 more times. Earlier attempts are kept as
+  `<fixture>.attempt-<n>`, and each retry is printed with its reason and stored under `retries`
+  in `verdicts.json`.
+- **No other retries.** A FAIL and every other INVALID are final; the judging tolerances do not
+  change between attempts.
+
+Rust engine:
+
+- **AM open steps.** On Rust the gate zeroes the audio of closed blocks, so the AM open step is
+  the first non-zero sample after at least 50 ms of exact zeros (the gate's 10 ms block
+  boundary). There is no AGC clip on Rust.
+- **AM identity is not checkable on Rust.** The 48 kHz rational resampler emits by a running
+  input count from the channel open, so two runs sample the content at different phases: on
+  am-voice only 42.7 % of samples were equal, median 2 LSB, max 14 778. The `stage1Identity`
+  check is INVALID on Rust and the fixture's other checks are still judged.
+- **NFM onset.** Rust NFM onset is judged on the same 20 ms limit as csdr (see the design note
+  on the Rust onset defect).
+
 Known limitations of the fake-link check:
 
 - **AM decay rule.** It can be fooled by an engineered, slowly decaying mute behind an in-window

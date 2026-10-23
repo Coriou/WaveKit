@@ -682,6 +682,26 @@ Before the speed-up: 0.0044-0.0049 core and 2.4-7.3 ms per 64 KiB.
   above 2 ms, reached only on a backlog burst (for example after a front stall), not in steady
   state.
 
+**Finding (2026-10-23): Rust-engine onset defect in the evidence path, fake-link es-c
+2.048 Msps.** All six NFM fixtures fail "first played sample off the over onset". The tolerance
+is not changed, because this is a defect, not physics.
+
+- **Measured on `nfm-ctcss-670-voice`.** The manual (stage-1 only) Rust stream starts every over
+  0.4 ms from the reference onset. Auto loses 31.9-35.9 ms on even overs and 4.1-6.4 ms on odd
+  overs. The other fixtures show the same alternation, 4-8 ms and 26-48 ms.
+- **Stage 1 is not the cause.** Auto's stage-1 threshold is lower than manual's, so stage 1
+  opened in time. The audio is dropped in the TypeScript evidence path.
+- **Cause.** Rust reports gate changes as stdout events carrying `atOutputSample`. The audio
+  arrives on a separate socket. `rust-engine.ts` forwards only `open` (`onGate(open)`), and
+  `processEvidence` samples stage 1 at chunk arrival (A4). So audio of an already open Rust gate
+  that arrives before the gate event is tagged closed and dropped from the pre-roll. Requirement
+  2.1 (play from the first sample after stage 1 opens) is not met on Rust.
+- **Edge stamps.** Rust edge stamps also show 33-66 ms outliers in both directions on opens and
+  closes; per-over medians stay small. They come from the same stdout timing, so they are not
+  loosened either.
+- **AM.** AM sample identity is not checkable on Rust, because the resampler phase differs per
+  run. The driver marks that check INVALID per fixture.
+
 ## Live acceptance plan (requirement 8.3, Main with the user)
 
 On the user's receiver with the default csdr engine, an NFM channel in the PMR446 band and a

@@ -83,6 +83,9 @@ CLOCK_PORT = 3002
 CLOCK_MAX_RTT_S = 0.020
 # Fixtures whose over has no carrier: the manual baseline may legitimately see no transmission.
 CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
+# Clock-step re-recordings per fixture (record_fixture): two, so three attempts in all. The steps
+# seen (38.2 and 123.2 ms) came one per run, in its first fixture.
+FIXTURE_RETRIES = 2
 # LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS (amendment A8: NFM only); the self-test checks the
 # contract. Other modulations in auto keep today's stage-1 auto squelch.
 EVIDENCE_MODULATIONS = frozenset(("nfm",))
@@ -162,6 +165,12 @@ STAGE1_EDGE_MAP_ERR_S = 0.010
 
 class InvalidRun(Exception):
 	pass
+
+
+class ClockStep(InvalidRun):
+	"""The container wall clock stepped or drifted past CLOCK_DRIFT_MAX_S during a recording (Docker
+	Desktop's VM clock: 38.2 ms and 123.2 ms steps seen). A property of the host, not of the core:
+	acceptance() re-records the fixture (FIXTURE_RETRIES)."""
 
 
 def contract_ms(name):
@@ -399,7 +408,7 @@ def clock_drift(good, rtt, to_wall, src, progress):
 	for _m0, r, off in good:
 		dev = abs(off - to_wall)
 		if dev - (r + rtt) / 2 > CLOCK_DRIFT_MAX_S:
-			raise InvalidRun(f"container wall clock moved {dev * 1000:.1f} ms during the run (clock step or drift)")
+			raise ClockStep(f"container wall clock moved {dev * 1000:.1f} ms during the run (clock step or drift)")
 		spread = max(spread, dev)
 	if not isinstance(progress, list) or not progress:
 		raise InvalidRun("missing fake rtl_tcp progress (wall vs paced elapsed) for the clock-step check")
@@ -410,7 +419,7 @@ def clock_drift(good, rtt, to_wall, src, progress):
 			raise InvalidRun("malformed fake rtl_tcp progress")
 		step = item[0] - (float(src["epochTs"]) + item[1])
 		if not -slack - CLOCK_DRIFT_MAX_S <= step <= slack + EMIT_LAG_S + CLOCK_DRIFT_MAX_S:
-			raise InvalidRun(f"fake wall clock stepped {step * 1000:.1f} ms against its paced elapsed time")
+			raise ClockStep(f"fake wall clock stepped {step * 1000:.1f} ms against its paced elapsed time")
 		step_max = max(step_max, abs(step))
 	return max(spread, step_max)
 
@@ -505,6 +514,12 @@ def stream_anchor(side, clock):
 	return anchor, err
 
 
+def run_engines(obs):
+	"""Live demod engines the two runs report in their status samples (`engine`)."""
+	return {s.get("engine") for mode in ("auto", "manual") for _t, s in obs[mode].get("status", [])
+		if isinstance(s, dict) and isinstance(s.get("engine"), str)}
+
+
 def stage1_timing(auto, manual, clocks):
 	"""Expected auto-to-manual sample shift from arrival times alone, and its tolerance.
 
@@ -539,10 +554,19 @@ def open_steps(manual_pcm, manual, clock, anchor):
 	renders it. While closed the AM chain plays the hold residue (peak about -21 dBFS); the first
 	open block arrives with the AGC at full gain and clips. The step is the first sample at least
 	STEP_MIN_ABS reached within STEP_RISE_S of the end of a STEP_QUIET_S run with no sample of
-	STEP_QUIET_ABS (a finite rise time is allowed; its crossing lies within the edge map error),
-	searched from
-	STEP_EARLY_S before to MAX_DELAY_S after the open's source time on the arrival anchor (the
-	fake sends IQ up to one chunk early). Each over's edges are placed from its own step."""
+	STEP_QUIET_ABS (a finite rise time is allowed; its crossing lies within the edge map error).
+
+	Rust engine: the gate zeroes the demodulated audio of every closed block
+	(native/wavekit-chan/src/demod_channel.rs, consume_baseband), so a closed AM stage 1 is
+	exact zeros, and the AGC (after the DC block, fast attack) has settled by the first open
+	block: no clip. The open is then the first non-zero sample after a run of at least
+	STEP_QUIET_S of exact zeros, which is the gate's own block boundary (10 ms blocks of 480
+	samples at 48 kHz). csdr never plays exact zeros while closed (the hold residue), so the two
+	forms cannot be confused.
+
+	Searched from STEP_EARLY_S before to MAX_DELAY_S after the open's source time on the arrival
+	anchor (the fake sends IQ up to one chunk early). Each over's edges are placed from its own
+	step."""
 	x, rate = _pcm16(manual_pcm), manual["audioRate"]
 	quiet, rise = int(STEP_QUIET_S * rate), max(1, int(STEP_RISE_S * rate))
 	out = {}
@@ -559,13 +583,18 @@ def open_steps(manual_pcm, manual, clock, anchor):
 		base = lo - quiet - rise
 		if base < 0:
 			continue
-		runs, run = [], 0
+		runs, zeros, run, zrun = [], [], 0, 0
 		for i in range(base, hi):
 			runs.append(run)
+			zeros.append(zrun)
 			v = x[i]
 			run = 0 if v >= STEP_QUIET_ABS or v <= -STEP_QUIET_ABS else run + 1
+			zrun = zrun + 1 if v == 0 else 0
 		for i in range(lo, hi):
 			v = x[i]
+			if v != 0 and zeros[i - base] >= quiet:
+				out[k] = (i, rel)  # Rust: the first open block after the zeroed closed blocks
+				break
 			if v >= STEP_MIN_ABS or v <= -STEP_MIN_ABS:
 				# A quiet run ends at most `rise` samples before the crossing (finite rise time).
 				if any(runs[j - base] >= quiet for j in range(i - rise, i + 1)):
@@ -1096,10 +1125,24 @@ def evaluate(obs, guard_ms):
 		if not _number(clocks["auto"].get("iqRate")) or clocks["auto"]["iqRate"] <= 0:
 			raise InvalidRun("missing fixture IQ rate (sidecar) for the edge slack")
 		slack_s = SQUELCH_BLOCK_S + FAKE_CHUNK_BYTES / (2 * clocks["auto"]["iqRate"]) + STAGE1_EDGE_MAP_ERR_S
-		f, ident = verdict_stage1_identity(auto["pcm"], manual["pcm"], rate, timing, edges, slack_s, clocks["auto"]["period"])
-		notes["stage1Identity"] = dict(ident, edgeSlackMs=slack_s * 1000, openSteps=len(steps))
-		if f:
-			failures.append(f)
+		engines = run_engines(obs)
+		notes["engines"] = sorted(engines)
+		if "rust" in engines:
+			# Not checkable on Rust: its 48 kHz rational resampler (3/128 at 2.048 Msps) emits
+			# by a running input count from the channel open, so the output sampling phase against
+			# the file depends on where live audio started in the IQ stream, and differs per
+			# run. Up to half a 48 kHz sample of phase is about 20 % of a 3 kHz tone's amplitude,
+			# so no sample tolerance separates that from a real difference (2.048 Msps Rust
+			# am-voice: 42.7 % of samples equal, mostly the zeroed closed blocks, median 2 LSB,
+			# max 14 778). The open steps are still located (exact zeros, then the open block).
+			notes["stage1Identity"] = {"openSteps": len(steps), "edgeSlackMs": slack_s * 1000}
+			notes.setdefault("invalidChecks", []).append(
+				"stage1Identity: AM sample identity is not checkable on the Rust engine (resampler phase differs per run)")
+		else:
+			f, ident = verdict_stage1_identity(auto["pcm"], manual["pcm"], rate, timing, edges, slack_s, clocks["auto"]["period"])
+			notes["stage1Identity"] = dict(ident, edgeSlackMs=slack_s * 1000, openSteps=len(steps))
+			if f:
+				failures.append(f)
 	elif expect_open and runs:
 		overs, early = played_overs(auto, runs, clocks["auto"], rate)
 		if f := verdict_early(early):
@@ -1461,6 +1504,22 @@ def self_test():
 	# extrapolated wall time): a 50 ms backward step is invalid in the probes and in the fake's
 	# progress; drift inside the bound is valid, subtracted, and the drain stays contained.
 	assert "moved" in invalid(manual__clockProbes=probe_series(step_at=20, step=-0.05))
+	try:
+		variant(manual__clockProbes=probe_series(step_at=20, step=-0.05))
+	except ClockStep:
+		pass
+	else:
+		raise AssertionError("a clock step is not a ClockStep")
+	try:
+		variant(manual__source=dict(source, progress=progress(step_at=30, step=-0.05)))
+	except ClockStep:
+		pass
+	else:
+		raise AssertionError("a fake-progress clock step is not a ClockStep")
+	# Rust-engine onset clipping as recorded (the evidence path dropped 34 ms of every other
+	# over) fails on the same 20 ms limit: no per-engine allowance.
+	assert any("onset" in f for f in variant(auto__samples8k=recorded(int(0.034 * rate)),
+		auto__status=[[0.0, {"autoSquelch": {"state": "waiting"}, "engine": "rust"}], [0.0, {"autoSquelch": {"state": "open"}, "engine": "rust"}]]))
 	assert "stepped" in invalid(manual__source=dict(source, progress=progress(step_at=30, step=-0.05)))
 	assert "moved" in invalid(manual__clockProbes=probe_series(step_at=20, step=0.05),
 		manual__source=dict(source, progress=progress(step_at=30, step=0.05)))
@@ -1603,6 +1662,23 @@ def self_test():
 	third = list(edged)
 	third[c + int(0.6 * rate) : c + int(0.65 * rate)] = [0] * int(0.05 * rate)
 	assert any("interior mute" in f for f in am_obs(third)[0]), am_obs(third)[0]
+	# Rust engine: closed blocks are exact zeros and the open block does not clip (the AGC runs
+	# after the DC block and has settled). The open is the first non-zero sample after the zeros.
+	rust_manual = [0] * len(am_manual)
+	for i in step_at.values():
+		n = min(len(rust_manual), i + int(over_s * rate)) - i
+		rust_manual[i : i + n] = [int(5000 * noise()) or 1 for _ in range(n)]
+	rust_side = {"audioRate": float(rate), "transmissions": events()}
+	clock_m = {"connected": conn, "onset": gap, "period": period}
+	found = open_steps(struct.pack(f"<{len(rust_manual)}h", *rust_manual), rust_side, clock_m, stream_lead + latency)
+	assert all(found[k][0] == step_at[k] for k in found) and len(found) >= 9, found
+	# AM sample identity is not checkable on Rust (resampler phase differs per run): the check is
+	# INVALID, the rest of the fixture is still judged, and the run goes on.
+	rust_status = [[0.0, {"autoSquelch": {"state": "off"}, "engine": "rust"}]]
+	f, rust_notes = am_obs(rust_manual, rust_manual, auto__status=rust_status, manual__status=rust_status)
+	assert f == [] and rust_notes["invalidChecks"] == [
+		"stage1Identity: AM sample identity is not checkable on the Rust engine (resampler phase differs per run)"], (f, rust_notes)
+	assert rust_notes["stage1Identity"]["openSteps"] >= 9 and rust_notes["engines"] == ["rust"], rust_notes
 	# A finite rise at the open (10 000, 20 000, then clipped) in both streams is still located.
 	ramped = list(am_manual)
 	for i in step_at.values():
@@ -1888,6 +1964,34 @@ def self_test():
 		assert "stream.s16le" in got["am-voice"]["invalid"], got
 		assert "not an object" in got["nfm-carrier"]["invalid"] and "unreadable observations" in got["nfm-voice"]["invalid"], got
 		assert printed.getvalue().count("INVALID") == 3, printed.getvalue()
+	# Clock-step retry policy (record_fixture): a ClockStep INVALID re-records up to
+	# FIXTURE_RETRIES times, keeping each earlier attempt; FAIL and other INVALID are never retried.
+	import types
+	with tempfile.TemporaryDirectory() as tmp:
+		def run_policy(outcomes):
+			args = types.SimpleNamespace(out=Path(tmp) / str(len(list(Path(tmp).iterdir()))), rate=2_048_000, engine="csdr", cpu_quota=None)
+			args.out.mkdir()
+			queue, recorded_modes = list(outcomes), []
+
+			def recorder(mode, out):
+				out.mkdir(parents=True, exist_ok=True)
+				recorded_modes.append(mode)
+
+			result = record_fixture(args, "nfm-voice", None, None, None, 200, recorder=recorder, judge_one=lambda _d: dict(queue.pop(0)))
+			return result, recorded_modes, sorted(p.name for p in args.out.iterdir())
+
+		step = {"invalid": "container wall clock moved 38.2 ms during the run (clock step or drift)", "clockStep": True}
+		ok = {"failures": [], "notes": {}}
+		result, modes, dirs = run_policy([step, step, ok])
+		assert result["failures"] == [] and [r["attempt"] for r in result["retries"]] == [1, 2], result
+		assert "38.2 ms" in result["retries"][0]["reason"] and modes == ["auto", "manual"] * 3, (result, modes)
+		assert dirs == ["nfm-voice", "nfm-voice.attempt-1", "nfm-voice.attempt-2"], dirs
+		result, modes, _dirs = run_policy([step, step, step])
+		assert "38.2 ms" in result["invalid"] and len(result["retries"]) == 2 and "clockStep" not in result, result
+		result, modes, _dirs = run_policy([{"failures": ["onset"], "notes": {}}])
+		assert result["failures"] == ["onset"] and result["retries"] == [] and modes == ["auto", "manual"], result
+		result, modes, _dirs = run_policy([{"invalid": "over 0: stage-1 open step not found"}])
+		assert result["invalid"].startswith("over 0") and result["retries"] == [] and len(modes) == 2, result
 	print("ok")
 
 
@@ -2360,6 +2464,8 @@ def judge(run_dir, name, entry, guard_ms):
 def report(out, results):
 	(out / "verdicts.json").write_text(json.dumps(results, indent=2) + "\n")
 	for name, r in results.items():
+		for retry in r.get("retries") or []:
+			print(f"{name}: retry {retry['attempt']} after clock-step INVALID ({retry['reason']}); kept {retry['kept']}")
 		if "invalid" in r:
 			print(f"{name}: INVALID {r['invalid']}")
 			continue
@@ -2380,6 +2486,45 @@ def report(out, results):
 	return 1 if any(r["failures"] for r in results.values()) else 0
 
 
+def judge_fixture(run_dir, name, entry, guard_ms):
+	"""One fixture's verdicts, or its invalid reason: an invalid fixture never stops the run."""
+	try:
+		failures, notes = judge(run_dir, name, entry, guard_ms)
+	except ClockStep as exc:
+		return {"invalid": str(exc), "clockStep": True}
+	except InvalidRun as exc:
+		return {"invalid": str(exc)}
+	except (KeyError, TypeError, ValueError, IndexError, AttributeError, struct.error) as exc:
+		return {"invalid": f"malformed observations ({type(exc).__name__}: {exc})"}
+	return {"failures": failures, "notes": notes}
+
+
+def record_fixture(args, name, entry, cu8, meta, guard_ms, recorder=None, judge_one=None):
+	"""Record and judge one fixture. Retry policy: a clock-step INVALID (ClockStep, a host
+	property) re-records the fixture with fresh cores (a new scratch project per mode) up to
+	FIXTURE_RETRIES more times; each earlier attempt's data is kept as <name>.attempt-<n> and every
+	retry is listed with its reason. Any other INVALID and every FAIL are final on the first
+	attempt (a FAIL is never retried). The judging tolerances do not change between attempts."""
+	recorder = recorder or (lambda mode, out: Recorder(args, name, mode, out).run(entry, cu8, meta))
+	judge_one = judge_one or (lambda run_dir: judge_fixture(run_dir, name, entry, guard_ms))
+	run_dir = args.out / name
+	retries = []
+	for attempt in range(FIXTURE_RETRIES + 1):
+		for mode in ("auto", "manual"):
+			recorder(mode, run_dir / mode)
+		result = judge_one(run_dir)
+		if not result.get("clockStep") or attempt == FIXTURE_RETRIES:
+			break
+		kept = args.out / f"{name}.attempt-{attempt + 1}"
+		if kept.exists():
+			raise InvalidRun(f"{kept} exists: refusing to overwrite a kept attempt")
+		run_dir.rename(kept)
+		retries.append({"attempt": attempt + 1, "reason": result["invalid"], "kept": kept.name})
+	result.pop("clockStep", None)
+	result.update({"rate": args.rate, "engine": args.engine, "cpuQuota": args.cpu_quota, "retries": retries})
+	return result
+
+
 def acceptance(args):
 	entries = manifest()
 	names = list(entries) if args.fixture == "all" else [args.fixture]
@@ -2396,11 +2541,7 @@ def acceptance(args):
 			raise InvalidRun(f"{name}: sidecar has no over onset")
 		# The fake replays whole I/Q pairs of the file in a loop: that is the over period.
 		meta["periodS"] = (cu8.stat().st_size // 2) / args.rate
-		for mode in ("auto", "manual"):
-			Recorder(args, name, mode, args.out / name / mode).run(entries[name], cu8, meta)
-		failures, notes = judge(args.out / name, name, entries[name], guard_ms)
-		results[name] = {"failures": failures, "notes": notes, "rate": args.rate, "engine": args.engine,
-			"cpuQuota": args.cpu_quota}
+		results[name] = record_fixture(args, name, entries[name], cu8, meta, guard_ms)
 	return report(args.out, results)
 
 
@@ -2409,16 +2550,10 @@ def replay(out):
 	guard_ms = contract_ms("CLOSE_GUARD_MS")
 	results = {}
 	for name in sorted(p.name for p in out.iterdir() if p.is_dir() and p.name in entries):
-		try:
-			failures, notes = judge(out / name, name, entries[name], guard_ms)
-		except InvalidRun as exc:  # one fixture's missing evidence does not hide the others
-			results[name] = {"invalid": str(exc)}
-			continue
-		except (KeyError, TypeError, ValueError, IndexError, AttributeError, struct.error) as exc:
-			# Malformed recorded observations (wrong field types or shapes): invalid, never a pass.
-			results[name] = {"invalid": f"malformed observations ({type(exc).__name__}: {exc})"}
-			continue
-		results[name] = {"failures": failures, "notes": notes}
+		# One fixture's missing evidence does not hide the others; malformed observations are
+		# invalid, never a pass.
+		results[name] = judge_fixture(out / name, name, entries[name], guard_ms)
+		results[name].pop("clockStep", None)
 	if not results:
 		raise InvalidRun("no recorded fixtures under " + str(out))
 	return report(out, results)
