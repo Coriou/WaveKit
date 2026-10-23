@@ -73,9 +73,12 @@ CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
 # The status rate (fractional, e.g. 2.048 Msps / 82 = 24 975.61 Hz) must match the WAV header
 # rate (integer) within this.
 RATE_MATCH_HZ = 1.0
-# Cross-check bound between a close event's endedAt (core audio end) and the over's sidecar
-# carrier-off: one 50 ms block of detection plus 50 ms of clock/probe error.
-ENDED_MATCH_S = 0.1
+# Drain close bound terms (see drain_per_over): the fake's send chunk (fake_rtl_tcp.py BLOCK),
+# the core's squelch block (live-demodulator.ts LEVEL_BLOCK_SECONDS) and the fake's
+# `connected` timestamp lag.
+FAKE_CHUNK_BYTES = 262_144
+SQUELCH_BLOCK_S = 0.010
+CONNECT_EMIT_S = 0.005
 # Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
 # ±RESAMPLE_HALF_WIDTH output periods, fractional position quantised to 1/RESAMPLE_PHASES of an
 # input sample (time error ≤ 1 / (2 x 512 x 24 975) s ≈ 39 ns). Symmetric kernel: zero delay.
@@ -300,7 +303,8 @@ def source_clock(side, fixture):
 	if rtt > CLOCK_MAX_RTT_S:
 		raise InvalidRun(f"clock probe round trip {rtt * 1000:.1f} ms exceeds {CLOCK_MAX_RTT_S * 1000:.0f} ms")
 	return {"connected": float(src["connectedTs"]), "onset": float(fixture["overOnsetS"]),
-		"period": float(fixture["periodS"]), "overS": float(fixture["overS"]), "toWall": to_wall, "rttS": rtt}
+		"period": float(fixture["periodS"]), "overS": float(fixture["overS"]), "toWall": to_wall, "rttS": rtt,
+		"iqRate": fixture.get("rate")}
 
 
 def over_at(clock, wall):
@@ -452,18 +456,33 @@ def verdict_p99(auto_p99, manual_p99):
 	return None if a - m <= P99_TOLERANCE_MS else f"event-loop p99 {a:.2f} ms vs manual {m:.2f} ms"
 
 
-def drain_per_over(samples, rate, arrivals, events, clock, hang_s, carrier, ws_complete):
-	"""Manual run: per over, the arrival of its last audible stream sample after the stage-1
-	close, in ms. The stage-1 close is the over's carrier-off on the source clock (sidecar)
-	plus the core's squelch hang. The real close also waits for the block that detects the
-	carrier-off (at most one block later), so the reference is early by at most that and the
-	drain reads conservatively high. The event's endedAt is only a cross-check: the core
-	clamps it to the segment start and converts stream-time hang in wall time, so it is not a
-	close instant. One squelch close per over; any other close reason, a second close in the
-	over, or endedAt more than ENDED_MATCH_S from the carrier-off is an invalid run. Measured
-	over the overs the stream and the WebSocket both fully cover; an over without a close is a
-	transmission failure (verdict_events); a closed over of a carrier-bearing fixture without a
-	played tail is invalid, never a short drain."""
+def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carrier, ws_complete):
+	"""Manual run: per over, the back-chain drain as an interval [lowerMs, upperMs] that holds
+	the true drain (arrival of the last audible stream sample minus the stage-1 close).
+
+	Close, lower bound (so upperMs can only over-estimate), on the container wall clock:
+	  carrier_off + hang - SQUELCH_BLOCK_S - chunk_s - CONNECT_EMIT_S
+	  - carrier_off: sidecar over end on the source clock (`connected` ts + onset + k x period).
+	    The ts is taken after the stream started (round to 1 ms, header send, thread start):
+	    CONNECT_EMIT_S = 5 ms.
+	  - hang runs from the last qualifying 10 ms squelch block (channel-squelch.ts), which
+	    starts no earlier than one block before carrier-off: SQUELCH_BLOCK_S = 10 ms.
+	  - the fake sends BLOCK-byte chunks at their starting source time, so IQ arrives up to
+	    chunk_s = 262 144 / (2 x rate) early (64.0 ms at 2.048 Msps, 54.6 ms at 2.4 Msps).
+	Close, upper bound (so lowerMs can only under-estimate): the first `live-audio:level`
+	receipt with squelchOpen false after the lower bound (an observation of the closed gate).
+	Host times map to the container clock with the probe's half round trip as error in either
+	direction: upperMs (host tail minus container close) adds it; lowerMs (host minus host)
+	needs none. Arrival of the tail is the read that
+	returned the last audible byte (late, never early). endedAt is informational only.
+
+	One squelch close per over; another close reason, a second close, a closed over without an
+	open level then a closed level, or (carrier-bearing) without a played tail is invalid.
+	Measured over the overs the stream and the WebSocket both fully cover."""
+	if not _number(clock.get("iqRate")) or clock["iqRate"] <= 0:
+		raise InvalidRun("missing fixture IQ rate (sidecar) for the chunk bound")
+	chunk_s = FAKE_CHUNK_BYTES / (2 * clock["iqRate"])
+	err = clock["rttS"] / 2
 	closes = {}
 	for e in events:
 		if e.get("state") != "closed":
@@ -471,14 +490,13 @@ def drain_per_over(samples, rate, arrivals, events, clock, hang_s, carrier, ws_c
 		k, onset = over_at(clock, parse_iso(e.get("startedAt")))
 		if e.get("closeReason") != "squelch":
 			raise InvalidRun(f"over {k}: unsupported close reason for drain (want squelch)")
-		if not isinstance(e.get("endedAt"), str):
-			raise InvalidRun(f"over {k}: closed transmission without endedAt")
-		carrier_off = onset + clock["overS"]
-		if abs(parse_iso(e["endedAt"]) - carrier_off) > ENDED_MATCH_S:
-			raise InvalidRun(f"over {k}: endedAt disagrees with the carrier-off by more than {ENDED_MATCH_S * 1000:.0f} ms")
 		if k in closes:
 			raise InvalidRun(f"over {k}: more than one close (merged or split transmission)")
-		closes[k] = carrier_off + hang_s
+		carrier_off = onset + clock["overS"]
+		ended = parse_iso(e["endedAt"]) - carrier_off if isinstance(e.get("endedAt"), str) else None
+		closes[k] = (carrier_off, ended)
+	observed = sorted((t + clock["toWall"], bool(d.get("squelchOpen"))) for t, d in levels
+		if _number(t) and isinstance(d, dict) and isinstance(d.get("squelchOpen"), bool))
 	tails = {}
 	for s, e in nonzero_runs(samples, rate):
 		first = arrival_time(arrivals, s * 2)
@@ -494,21 +512,36 @@ def drain_per_over(samples, rate, arrivals, events, clock, hang_s, carrier, ws_c
 			if carrier:
 				raise InvalidRun(f"over {k}: stage-1 closed but no played tail to measure drain on")
 			continue
-		out.append({"over": k, "drainMs": (tails[k] - closes[k]) * 1000})
+		carrier_off, ended = closes[k]
+		close_lo = carrier_off + hang_s - SQUELCH_BLOCK_S - chunk_s - CONNECT_EMIT_S
+		was_open = any(v for t, v in observed if carrier_off - clock["overS"] <= t <= close_lo)
+		closed_at = next((t for t, v in observed if t >= close_lo and not v), None)
+		if not was_open or closed_at is None or closed_at > carrier_off + clock["period"] - clock["overS"]:
+			raise InvalidRun(f"over {k}: no observed stage-1 close (open then closed level) to bound the drain")
+		# Tail and level receipt are both host times: the probe error cancels in lowerMs.
+		out.append({"over": k, "lowerMs": (tails[k] - closed_at) * 1000,
+			"upperMs": (tails[k] - close_lo + err) * 1000,
+			"endedAfterCarrierOffMs": None if ended is None else ended * 1000})
 	return out
 
 
 def verdict_drain(per_over, guard_ms):
-	"""Back-chain drain per over against CLOSE_GUARD_MS: (flag or None, summary)."""
+	"""Drain intervals against CLOSE_GUARD_MS, flagged on the upper bound: (flag or None, summary)."""
 	if not per_over:
 		return None, None
-	values = sorted(o["drainMs"] for o in per_over)
-	mid = len(values) // 2
-	median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
-	summary = {"maxMs": values[-1], "medianMs": median, "overs": len(values), "guardMs": guard_ms,
-		"exceedsGuard": values[-1] > guard_ms, "perOver": per_over}
-	flag = f"measured back-chain drain max {values[-1]:.0f} ms (median {median:.0f} ms) > CLOSE_GUARD_MS {guard_ms}"
-	return (flag if values[-1] > guard_ms else None), summary
+
+	def stats(key):
+		values = sorted(o[key] for o in per_over)
+		mid = len(values) // 2
+		return values[-1], values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+	upper_max, upper_median = stats("upperMs")
+	lower_max, lower_median = stats("lowerMs")
+	summary = {"maxMs": upper_max, "medianMs": upper_median, "lowerMaxMs": lower_max, "lowerMedianMs": lower_median,
+		"overs": len(per_over), "guardMs": guard_ms, "exceedsGuard": upper_max > guard_ms, "perOver": per_over}
+	flag = (f"back-chain drain upper bound max {upper_max:.0f} ms (median {upper_median:.0f} ms; lower max"
+		f" {lower_max:.0f} ms) > CLOSE_GUARD_MS {guard_ms}")
+	return (flag if upper_max > guard_ms else None), summary
 
 
 def expects_open(modulation, expect):
@@ -560,7 +593,7 @@ def evaluate(obs, guard_ms):
 	if f := verdict_p99(auto["p99Ms"], manual["p99Ms"]):
 		failures.append(f)
 	per_over = drain_per_over(manual.get("samples", []), manual["audioRate"], manual.get("arrivals", []),
-		manual["transmissions"], clocks["manual"], obs["hangS"], obs["carrier"], ws_overs(manual, clocks["manual"]))
+		manual["transmissions"], manual.get("levels", []), clocks["manual"], obs["hangS"], obs["carrier"], ws_overs(manual, clocks["manual"]))
 	f, notes["drain"] = verdict_drain(per_over, guard_ms)
 	if f:
 		notes["drainReport"] = f  # reported, not a failure (plan: else report the measured drain)
@@ -738,14 +771,32 @@ def self_test():
 				"closeReason": "squelch", "durationMs": 3750, "mono": start + 3.75 + hang + close_late + host_offset})
 		return out
 
-	def manual_stream(tail):
+	def true_close(k, delta):
+		"""Stage-1 close on the container clock: carrier-off + hang + delta (delta = one 10 ms
+		block of detection by default; negative when the fake delivered IQ early)."""
+		return conn + gap + k * period + over_s + hang + delta
+
+	def manual_stream(tail, delta=0.01):
 		"""Manual run: over k audible from its onset until `tail` s after its stage-1 close arrives."""
 		out = [0] * int(stream_s * rate)
 		for k in complete:
-			close = conn + gap + k * period + stage1 + 3.75 + hang
+			close = true_close(k, delta)
 			i = int((gap + k * period - stream_lead) * rate)
 			j = int((close + tail - conn - stream_lead - latency) * rate)
 			out[i:j] = [1000] * (j - i)
+		return out
+
+	def manual_levels(delta=0.01, ws=0.02, closed=True, opened=True):
+		"""live-audio:level receipts (host mono): open every 50 ms during the over, closed after."""
+		out = []
+		for k in range(10):
+			o, c = conn + gap + k * period, true_close(k, delta)
+			t = o + 0.3
+			while opened and t < c:
+				out.append([t + ws + host_offset, {"squelchOpen": True}])
+				t += 0.05
+			if closed:
+				out += [[c + ws + i * 0.05 + host_offset, {"squelchOpen": False}] for i in range(3)]
 		return out
 
 	def status(*states):
@@ -755,13 +806,13 @@ def self_test():
 	probes = [[m0 - 5, m0 - 4.9, conn + 7.0], [m0, m0 + 0.002, conn + 10.001]]  # slow wrong one, fast right one
 	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
 	common = {"source": {"connectedTs": conn, "connections": 1}, "clockProbes": probes, "wsSpan": ws_span,
-		"fixture": {"overOnsetS": gap, "periodS": period, "overS": over_s}}
+		"fixture": {"overOnsetS": gap, "periodS": period, "overS": over_s, "rate": 2_048_000}}
 	base = {
 		"expect": "voice", "mode": "nfm", "hangS": hang, "reference8k": ref, "refOnset8k": onset, "carrier": True,
 		"auto": dict(common, audioRate=rate, samples8k=recorded(), arrivals=arrivals(), transmissions=events(),
 			p99Ms=[3.0], status=status("waiting", "open")),
 		"manual": dict(common, audioRate=rate, transmissions=events(), p99Ms=[2.5], arrivals=arrivals(),
-			samples=manual_stream(0.12), status=status("off")),
+			samples=manual_stream(0.05), levels=manual_levels(), status=status("off")),
 	}
 
 	def variant(**changes):
@@ -849,39 +900,62 @@ def self_test():
 	assert any("did open" in f for f in variant(top__expect="none", auto__samples8k=silent))
 	assert any("p99" in f for f in variant(auto__p99Ms=[5.0]))
 	assert any("p99" in f for f in variant(auto__p99Ms=[]))
-	# Drain from the stage-1 close (carrier-off + hang), not the late close announcement: a 120 ms
-	# tail reads about 120 ms, a 350 ms tail announced 1.6 s late about 350 ms (over the guard).
+	# Drain intervals: the true drain (tail) always lies in [lowerMs, upperMs]; the guard is
+	# flagged on upperMs, so a drain over 200 ms can never read as under the guard.
+	def holds(d, tail_ms):
+		return all(o["lowerMs"] <= tail_ms <= o["upperMs"] for o in d["perOver"]) and d["overs"] == len(complete)
+
 	d = drain_of()
-	# The true close here is one 50 ms block after carrier-off + hang, so the drain reads at most
-	# that block (plus 20 ms of chunk quantisation) high, never low.
-	high = lambda v, tail: tail <= v <= tail + 50 + 20
-	assert d["overs"] == len(complete) and high(d["maxMs"], 120) and not d["exceedsGuard"], d
+	assert holds(d, 50) and not d["exceedsGuard"], d
+	# A 350 ms tail whose close is announced 1.6 s late (events) is measured from the close.
 	d = drain_of(manual__samples=manual_stream(0.35))
-	assert high(d["maxMs"], 350) and high(d["medianMs"], 350) and d["exceedsGuard"], d
-	no_end = [dict(e, endedAt=None) for e in events()]
-	assert "endedAt" in invalid(manual__transmissions=no_end)
+	assert holds(d, 350) and d["lowerMaxMs"] > 200 and d["exceedsGuard"], d
+	# Early chunk delivery: IQ 64 ms ahead closes stage 1 54 ms before carrier-off + hang; a true
+	# 230 ms drain must not read under the guard (the old reference read 176 ms).
+	early = dict(manual__samples=manual_stream(0.23, delta=0.01 - 0.064), manual__levels=manual_levels(delta=0.01 - 0.064))
+	d = drain_of(**early)
+	assert holds(d, 230) and d["exceedsGuard"], d
+	# Probe error both directions (18 ms round trip, all of it on one leg): bounds still hold.
+	for leg in (0.0, 0.018):
+		probe = [[m0, m0 + 0.018, conn + 10.0 + leg]]
+		d = drain_of(manual__clockProbes=probe, manual__samples=manual_stream(0.15), **{"manual__levels": manual_levels()})
+		assert holds(d, 150), (leg, d)
+		d = drain_of(manual__clockProbes=probe, **{k: v for k, v in early.items()})
+		assert holds(d, 230) and d["exceedsGuard"], (leg, d)
+	# 150 ms of valid upstream latency (front buffering): the close and endedAt are late; valid,
+	# endedAt reported only.
+	lagged = [dict(e, endedAt=format_iso(parse_iso(e["startedAt"]) - stage1 + over_s + 0.15)) if e["state"] == "closed" else e
+		for e in events()]
+	d = drain_of(manual__transmissions=lagged, manual__samples=manual_stream(0.1, delta=0.15),
+		manual__levels=manual_levels(delta=0.15))
+	assert holds(d, 100) and all(abs(o["endedAfterCarrierOffMs"] - 150) < 2 for o in d["perOver"]), d
+	assert variant(manual__transmissions=lagged, manual__samples=manual_stream(0.1, delta=0.15),
+		manual__levels=manual_levels(delta=0.15)) == []
+	# endedAt missing or clamped (short final segment) is informational, never the close.
+	d = drain_of(manual__transmissions=[dict(e, endedAt=None) for e in events()])
+	assert holds(d, 50) and d["perOver"][0]["endedAfterCarrierOffMs"] is None
+	clamped = [dict(e, endedAt=format_iso(parse_iso(e["startedAt"]) - stage1 + over_s - 0.2)) if e["state"] == "closed" else e
+		for e in events()]
+	d = drain_of(manual__transmissions=clamped, manual__samples=manual_stream(0.35))
+	assert holds(d, 350) and d["exceedsGuard"], d
+	# Missing timing evidence is invalid, never a short drain.
+	assert "observed stage-1 close" in invalid(manual__levels=manual_levels(closed=False))
+	assert "observed stage-1 close" in invalid(manual__levels=manual_levels(opened=False))
+	assert "observed stage-1 close" in invalid(manual__levels=[])
+	assert "IQ rate" in invalid(manual__fixture={"overOnsetS": gap, "periodS": period, "overS": over_s})
 	assert "played tail" in invalid(manual__samples=[v if not (conn + gap + 5 * period - 1 < conn + stream_lead + i / rate
-		< conn + gap + 6 * period - 1) else 0 for i, v in enumerate(manual_stream(0.12))])
+		< conn + gap + 6 * period - 1) else 0 for i, v in enumerate(manual_stream(0.05))])
+
 	def closes_with(**fields):
 		return [dict(e, **fields) if e["state"] == "closed" else e for e in events()]
 
-	def shifted_end(dt):
-		return [dict(e, endedAt=format_iso(parse_iso(e["startedAt"]) - stage1 + 3.75 + dt)) if e["state"] == "closed" else e
-			for e in events()]
-
-	# endedAt is a cross-check only: within 100 ms of carrier-off it does not move the drain.
-	d = drain_of(manual__samples=manual_stream(0.35), manual__transmissions=shifted_end(0.09))
-	assert high(d["maxMs"], 350), d
-	# A clamped short final segment (endedAt 200 ms early), a mismatch and non-squelch closes
-	# are invalid, never a short drain.
-	assert "endedAt disagrees" in invalid(manual__samples=manual_stream(0.35), manual__transmissions=shifted_end(-0.2))
-	assert "endedAt disagrees" in invalid(manual__transmissions=shifted_end(0.5))
 	for reason in ("stopped", "config", "retune", "max-duration", None):
 		assert "close reason" in invalid(manual__transmissions=closes_with(closeReason=reason))
 	split = events() + [e for e in events(overs=[4]) if e["state"] == "closed"]
 	assert "more than one close" in invalid(manual__transmissions=split)
-	flag, summary = verdict_drain([{"over": 0, "drainMs": 250.0}, {"over": 1, "drainMs": 150.0}], 200)
-	assert flag and summary["maxMs"] == 250.0 and summary["medianMs"] == 200.0
+	flag, summary = verdict_drain([{"over": 0, "lowerMs": 180.0, "upperMs": 250.0},
+		{"over": 1, "lowerMs": 90.0, "upperMs": 150.0}], 200)
+	assert flag and summary["maxMs"] == 250.0 and summary["medianMs"] == 200.0 and summary["lowerMaxMs"] == 180.0
 	assert nonzero_runs([0, 1, 1, 0, 0, 0, 2], 1, min_gap_s=2) == [(1, 3), (6, 7)]
 	assert parse_iso("1970-01-01T00:00:01.5Z") == 1.5 and parse_iso(format_iso(conn + 0.25)) == conn + 0.25
 	print("ok")
@@ -1339,7 +1413,8 @@ def report(out, results):
 		print(f"{name}: {'PASS' if not r['failures'] else 'FAIL'} {json.dumps(r['notes'])}")
 		drain = r["notes"].get("drain")
 		if drain:
-			print(f"  drain max {drain['maxMs']:.0f} ms, median {drain['medianMs']:.0f} ms over {drain['overs']} overs"
+			print(f"  drain upper max {drain['maxMs']:.0f} ms, median {drain['medianMs']:.0f} ms; lower max"
+				f" {drain['lowerMaxMs']:.0f} ms over {drain['overs']} overs"
 				f" (CLOSE_GUARD_MS {drain['guardMs']}){' EXCEEDS GUARD' if drain['exceedsGuard'] else ''}")
 		for f in r["failures"]:
 			print("  - " + f)

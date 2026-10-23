@@ -133,12 +133,15 @@ last sample behind the source ≤ 1.5 s; byte rate within 0.5 % of nominal per m
 transmission events equal to the manual run per over over the overs both WebSocket recordings
 fully cover (open and close within 10 ms, same count, at least one per over on carrier-bearing
 fixtures, at least 3 shared overs); p99 within 2 ms of manual; the back-chain drain of the manual run per
-over (arrival of the last audible sample after the stage-1 close, taken as the over's sidecar
-carrier-off on the source clock plus the core's `SQUELCH_HANG_MS`; the real close waits up to one
-detection block longer, so the drain reads at most that much high, never low). The close event's
-`endedAt` is only a cross-check (within 100 ms of carrier-off); a non-squelch close reason, two
-closes in one over or a failed cross-check is invalid. Reported as max and median against
-`CLOSE_GUARD_MS` and flagged `EXCEEDS GUARD` above it.
+over as an interval that holds the true drain (arrival of the last audible sample minus the
+stage-1 close). Upper bound: the close is at least carrier-off (sidecar, source clock) + hang −
+one 10 ms squelch block − one fake send chunk (262 144 bytes: 64.0 ms at 2.048 Msps, 54.6 ms at
+2.4 Msps) − 5 ms of `connected` timestamp lag, plus the probe's half round trip. Lower bound: the
+close is at most the first `live-audio:level` receipt with `squelchOpen` false (host clock on
+both sides). The close event's `endedAt` and its announcement are reported only. Max and median
+of both bounds are reported against `CLOSE_GUARD_MS`, flagged `EXCEEDS GUARD` on the upper max.
+A non-squelch close reason, two closes in one over, or no observed open-then-closed level is
+invalid.
 
 Evidence squelch is NFM only. `autoSquelch.state` must be `off` on AM runs and manual runs and
 `waiting`/`open` on NFM auto runs (reaching `open` exactly on expected-open fixtures). AM auto
@@ -146,6 +149,5 @@ runs use today's stage-1 auto squelch: `am-voice` and `am-carrier` both open on 
 play every over, with no onset (pre-roll) check.
 
 Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
-state, stage-1 transmission for played audio, a close without `endedAt` or a closed
-over without a played tail) and a stream or WebSocket that ends before the
+state, stage-1 transmission for played audio, a closed over without a played tail) and a stream or WebSocket that ends before the
 run are invalid. Exit codes: 0 pass, 1 fail, 2 invalid.
