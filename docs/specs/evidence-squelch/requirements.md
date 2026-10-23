@@ -5,7 +5,7 @@ Status: design, not implemented (2026-10-23). See [design](design.md) and [tasks
 ## What changes for the user
 
 - **Auto squelch opens on a voice or a tone, not on every burst.** In `squelchMode: "auto"` on
-  NFM (AM removed by amendment A8, 2026-10-23), live audio passes only once the over shows analog voice, or any standard
+  NFM (AM removed by amendment A8, 2026-10-23; csdr engine only, amendment A12), live audio passes only once the over shows analog voice, or any standard
   CTCSS tone or DCS code. A bare carrier, interference, clicks, impulse noise, data-like audio
   (POCSAG, APRS-like FSK) and digital bursts (DMR and similar) stay silent.
 - **Each over plays from its start.** The core keeps the last moments of audio while it waits
@@ -56,7 +56,7 @@ and injected clocks; the fake-link scenario uses a fake `rtl_tcp` inside a scrat
 and never a live receiver or its ports. Live acceptance is run by Main with the user.
 
 Defaults stay byte-identical except where a requirement here changes them on purpose (1.1 to 1.5
-and 2.x evidence gating and pre-roll in auto on NFM (NFM only, amendment A8), 3.1 the default flip, 4.1 the
+and 2.x evidence gating and pre-roll in auto on NFM (NFM only, amendment A8; csdr engine only, amendment A12), 3.1 the default flip, 4.1 the
 additive status field). Lanes prove the rest against goldens recorded from the frozen code and
 list every golden they change with the requirement that changes it.
 
@@ -82,6 +82,20 @@ Evidence gating (1.1 to 1.5, 2.x) applies to `nfm` only; `am` in `auto` keeps to
 squelch, like `wfm` and the other modulations, with byte-identical client audio and `autoSquelch`
 state `off`. The AM text in this document is kept for the gate class (which still supports `am`)
 but is not wired. A bare AM carrier key-up opened the real gate as voice. Replay evidence: gate replay of the `am-carrier` fixture latched voice 1.65 s after onset (the AM chain's envelope, DC removal and fast AGC raise the carrier noise envelope over about 1.5 s; rolling 20-frame windows 13-22 medians `audioDb` -29.0 to -20.1 dB, `syllabic` 1.9 to 0.3, `cluster` 0.0). Checkpoint line: `EVIDENCE-SQUELCH 8.4: am-voice agc=voice audioDb=-14.52 syllabic=0.45 cluster=0.21; am-carrier agc=neither audioDb=-12.94 syllabic=0.11 cluster=0.29`.
+
+**Amendment (2026-10-23, A12): csdr engine only.** Evidence gating (1.1 to 1.5, 2.x) and the
+pre-roll apply only to runs on the csdr engine, which is the default. On the Rust engine,
+`squelchMode: "auto"` on `nfm` keeps today's stage-1 auto squelch (the Rust power gate with the
+TypeScript floor and margin), with client audio and `pcm` event bytes byte-identical to the
+stage-1-only path and `autoSquelch` state `off`, exactly as `am` under A8. A Rust run allocates no
+gate or pre-roll. A run that moves onto csdr (a Rust fallback, a crash latch, or an engine change)
+starts with a fresh gate and an empty pre-roll; a run that moves onto Rust drops both. Reason: Rust
+reports stage-1 gate changes as stdout events and sends audio on a separate socket, so stage 1
+cannot be sampled at the audio's own sample position (design, Finding: Rust-engine onset defect).
+Aligning the two in TypeScript has races that cannot be closed there: a close event that arrives
+early or late against the audio, native audio drops that shift the event's output-sample index,
+and input-gap resets that produce no gate event. Follow-up: in-band stage-1 gate markers on the
+Rust audio socket, after which this amendment can be lifted.
 
 1.3 **Voice evidence** uses the scanner's pinned judgement over the last
 `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES` (20) frames of `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS` (50 ms)
@@ -154,6 +168,8 @@ byte-identical to the frozen code.
 1.10 **Both engines.** The evidence gate and pre-roll run in TypeScript on PCM decimated to 8 kHz
 for both the csdr (default) and the Rust engine; the Rust engine keeps stage 1 only (rust-demod-a
 4.5 unchanged).
+Amendment A12 (2026-10-23): superseded. The evidence gate and pre-roll run on csdr runs only;
+Rust runs in `auto` keep the stage-1 auto squelch, byte-identical (see the amendment after 1.2).
 
 1.11 **In-place changes.** Switching `squelchMode` to or from `auto`, setting or clearing
 `toneSquelch`, and changing `autoMarginDb` apply without a pipeline restart; only a modulation
@@ -289,6 +305,9 @@ stage-1 auto path instead, and an `am-carrier` replay regression pins that AM st
 `rtl_tcp`, on the default csdr engine and on Rust: open and no-open verdicts as 8.1, played audio
 aligned with the over's onset, delay at most 1.5 s, stream byte rate nominal, transmission events
 identical to a manual-mode run, event-loop p99 within 6.1.
+Amendment A12 (2026-10-23): on Rust, the NFM auto runs assert the stage-1 auto path (as AM
+under A8): `autoSquelch` `off` and an auto stream equal to the stage-1 stream. The open, no-open,
+onset and delay verdicts apply on csdr only until the Rust audio carries in-band gate markers.
 
 8.3 **Live (Main with the user).** On a real PMR handheld: overs with CTCSS, DCS and no tone are
 heard from their first syllable; a short key-up with no speech and no tone, a silent held carrier
