@@ -156,8 +156,10 @@ Per run, built for an NFM or AM stream (rate and format known). Interface:
 interface EvidenceGatePort {
 	readonly state: "waiting" | "open"
 	readonly evidence: "voice" | "ctcss" | "dcs" | null
-	/** One 10 ms IQ block while stage 1 is open: carrier evidence of that block. */
-	noteBlock(carrier: boolean): void
+	/** One 10 ms IQ block while stage 1 is open: carrier evidence of that block. True when
+	 *  the block reset the voice window on a carrier onset while waiting (amendment
+	 *  2026-10-23, revised: was `void`); the owner then abandons the pre-roll. */
+	noteBlock(carrier: boolean): boolean
 	/** PCM bytes [start, end) received while stage 1 is open. Returns the byte offset in
 	 *  [start, end] of the first sample after the gate latched in this call, or -1. */
 	push(
@@ -195,26 +197,53 @@ data-like, then quieting with voice. Carrier evidence per block: on NFM the owne
 carrier evidence (csdr `blockQuieted()` of the auto observer; Rust `metricsQuieted`); on AM it
 passes `powerDbfs ≥ noiseFloorDbfs + ANALOG_TRIAL_AM_CARRIER_DB` (false while no floor exists).
 
-**Amendment 2026-10-23: voice window reset on carrier onset.** Stage 1 can open on unquieted
-noise before an over (its power gate, or its 250 ms hang), so the gate's first voice window
-could judge that noise together with the key-up. Per waiting episode (from stage-1 open or
-`reset()`) the gate tracks the noted blocks with `stepLeadIn`: `unknown` until the first noted
-block, `lead-in` while every noted block is unquieted, `done` after the first quieted block (at
-once when the first block is quieted, the ideal onset). The lead-in → quieted step is the
-carrier onset: while waiting it resets the voice meter, the 20-frame window and the quiet ring
-(no allocation: fills and index resets). At most once per episode, so later fades inside the
-over keep the window and are judged by the quiet-fraction rule. Judge thresholds are unchanged;
-only which frames are judged changes. The tone stage, decimator and audio clock are kept (choice:
-tone evidence needs no window, and resetting it would delay CTCSS/DCS by the lead-in; the
-750 ms tone minimum then counts from stage-1 open, so DCS 023N after a 500 ms lead-in latched
-0.34 s after the onset instead of 0.75 s). The wiring mirrors `stepLeadIn` and calls
-`preRoll.abandon()` at the onset while waiting, so the held noise is dropped and the pre-roll
-plays from the over: reset at the onset block, the window is full at onset + 1.0 s, and the
-pre-roll then holds 1.0 s of the over, inside its 1.5 s capacity.
+**Amendment 2026-10-23 (revised after review): voice window reset on carrier onset.** Stage 1
+can open on unquieted noise before an over (its power gate, or its 250 ms hang), so the gate's
+first voice window could judge that noise with the key-up. The gate tracks the noted blocks with
+scalar state (no allocation), from stage-1 open and also before the first PCM:
 
-| State   | Event                                          | Next                                        |
-| ------- | ---------------------------------------------- | ------------------------------------------- |
-| waiting | first quieted block after an unquieted lead-in | waiting (voice window and quiet ring empty) |
+- **Armed** at the start of every episode (stage-1 open or `reset()`, including the reset after
+  the hang inside `closed()`), and again after an unquieted run of at least
+  `EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS` = 5 blocks (50 ms, one frame).
+- While armed and waiting, every quieted block that follows an unquieted block resets the voice
+  meter, the 20-frame window and the quiet ring, and `noteBlock` returns true; the wiring then
+  calls `preRoll.abandon()`, so the held noise is dropped. Resets happen on every such onset,
+  not once per episode, so a quieted flicker inside the lead-in cannot consume the reset.
+- **Disarmed** after `EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS` = 5 consecutive quieted blocks
+  (50 ms). Afterwards fades of 1-4 blocks (10-40 ms) inside the over neither arm nor reset; the
+  quiet-fraction rule judges them as before.
+
+Judge thresholds are unchanged; only which frames are judged changes. The tone stage,
+decimator and audio clock are kept (tone evidence needs no window, and resetting it would delay
+CTCSS/DCS by the lead-in; the 750 ms tone minimum then counts from stage-1 open, so DCS 023N
+after a 500 ms lead-in latched 0.34 s after the onset instead of 0.75 s). Arithmetic: the reset
+falls on the over's first block, the window is full at onset + 1.0 s (20 × 50 ms), and the
+pre-roll then holds 1.0 s of the over, inside its 1.5 s capacity; when the block is measured
+after its PCM (as in the e2e harness) the first 10 ms block is dropped with the lead-in, inside
+the 20 ms onset tolerance.
+
+Limits (tested, pending decision):
+
+- A fade of 50 ms or more (5 blocks) while waiting arms and resets the window: 50 ms fades every
+  500 ms never latch (40 ms fades every 500 ms latch). Weak fluttery voice with 10-30 ms
+  dropouts at least 50 ms apart latches within 1.5 s; dropouts closer than 50 ms keep the reset
+  armed at the start of the over and delay the latch until a 50 ms dropout-free stretch.
+- A quieted run of 50 ms or more inside the noise disarms; if fewer than 5 noise blocks then
+  precede the over, they are judged with it (indistinguishable from a fade). With 20 noise, 5
+  quieted and 1-4 noise blocks before the over, `nfm-dmr-4fsk-continuous` (1-4) and
+  `nfm-clicks` (1) latch voice; every other never-open NFM fixture stays closed.
+- A quieted flicker on the noise right before the over (no unquieted block between it and the
+  over) is judged as the over's start: with 250 ms of noise whose last 1-4 blocks are flagged
+  quieted, `nfm-dmr-4fsk-continuous` (2-4 blocks) and `nfm-clicks` (1) latch voice. Flickers
+  followed by at least one unquieted block never open any never-open NFM fixture (property).
+- Independent of the reset: `nfm-clicks` latches voice when only 10 or 60 ms of quiet carrier
+  (silence, no noise) precede it; the 50 ms frame edges move and the first window is judged
+  voice. The continuous-4FSK and clicks goldens are close to the voice judge; small changes in
+  the first window open them.
+
+| State   | Event                                       | Next                                        |
+| ------- | ------------------------------------------- | ------------------------------------------- |
+| waiting | armed, quieted block after an unquieted one | waiting (voice window and quiet ring empty) |
 
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
@@ -325,7 +354,8 @@ alignment), plus the back chain's own latency as today.
 - **Stage 1 transitions:** `publishSquelchChange` on close without a latch calls `gate.reset()` and
   `preRoll.abandon()`; with a latch it only starts the guard and hang clocks (inside the gate).
 - **Blocks:** `measureRun` (both engines) calls `gate.noteBlock(carrier)` for each measured block
-  while stage 1 is open, after the floor update.
+  while stage 1 is open, after the floor update, and calls `preRoll.abandon()` when it returns
+  true (amendment 2026-10-23, revised: the gate is the only onset tracker).
 - **Lifecycle (requirement 2.9):** mode change out of auto, `toneSquelch` set, offset swap
   (`gateHeld`), retune and stop: `gate.reset()` and `preRoll.clear()`. Mode change into auto:
   the gate starts idle with an empty FIFO; if stage 1 is open the current over starts waiting from
@@ -453,8 +483,10 @@ informational.
 unquieted pre-over noise, the first 20-frame window used to hold that noise and the key-up with
 75 of 100 blocks quieted, and `nfm-dmr-4fsk-continuous` (window medians −10.05 dB, syllabic
 0.3124, cluster 0.48) and `nfm-clicks` (−22.24 dB, 0.4134, 0.31) latched voice at 1.0 s. The
-window reset on carrier onset (EvidenceGate state machine amendment) closes it: every
-never-open NFM fixture stays closed with an ideal onset and after any 0-500 ms noise lead-in.
+window reset on carrier onset (EvidenceGate state machine amendment, revised) closes it: every
+never-open NFM fixture stays closed with an ideal onset, after any 0-500 ms noise lead-in, with
+quieted flickers of 1-4 blocks inside it, and after kerchunk → noise → over; the residual case
+is listed under that amendment's limits.
 
 ## Correctness properties
 
