@@ -19,8 +19,9 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
 import {
+	EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS,
+	EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS,
 	EvidenceGate,
-	stepLeadIn,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
 import { PreRoll } from "../../../../src/core/evidence-squelch/pre-roll.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
@@ -507,29 +508,41 @@ interface LeadInRun {
 	playedFrom: number | null
 }
 
-function leadInRun(name: string, leadMs: number): LeadInRun {
+/**
+ * `leadCarrier(block)` gives the carrier evidence of each lead-in block (default: all
+ * unquieted). Lead blocks carry the fixture's pre-over noise (a quieting flicker is a flag
+ * flicker on that noise), except blocks where `leadSilent(block)` (a kerchunk: quiet carrier,
+ * silence).
+ */
+function leadInRun(
+	name: string,
+	leadMs: number,
+	leadCarrier: (block: number) => boolean = () => false,
+	leadSilent: (block: number) => boolean = () => false,
+): LeadInRun {
 	const entry = manifest[name]
 	if (entry === undefined) throw new Error(`no manifest entry ${name}`)
 	const audio = audioOf(name)
 	const onset = Math.round(entry.overOnsetS * RATE)
 	const lead = Math.round((leadMs * RATE) / 1_000)
 	const composed = new Float64Array(lead + audio.length - onset)
-	for (let i = 0; i < lead; i++) composed[i] = audio[i % onset] ?? 0
+	for (let i = 0; i < lead; i++)
+		composed[i] = leadSilent(Math.floor(i / BLOCK_SAMPLES))
+			? 0
+			: (audio[i % onset] ?? 0)
 	composed.set(audio.subarray(onset), lead)
 	const input = pcmOf(composed)
 	const buf = Buffer.from(input)
 	const unquieted = name === "nfm-noise" || name === "nfm-impulse"
 	const gate = new EvidenceGate({ rate: RATE, modulation: "nfm", gain: 2 })
 	const preRoll = new PreRoll({ rate: RATE, format: "s16le" })
-	let leadIn: Parameters<typeof stepLeadIn>[0] = "unknown"
 	let latchS: number | null = null
 	for (let s = 0; s < composed.length; s += BLOCK_SAMPLES) {
 		const end = Math.min(composed.length, s + BLOCK_SAMPLES)
-		const carrier = s >= lead && !unquieted
-		const step = stepLeadIn(leadIn, carrier)
-		leadIn = step.next
-		if (step.onset && gate.state === "waiting") preRoll.abandon()
-		gate.noteBlock(carrier)
+		const carrier =
+			s < lead ? leadCarrier(Math.floor(s / BLOCK_SAMPLES)) : !unquieted
+		// The wiring: the gate reports a carrier-onset reset, the owner drops the held lead-in.
+		if (gate.noteBlock(carrier)) preRoll.abandon()
 		const k = gate.push(buf, "s16le", s * 2, end * 2)
 		if (k >= 0) {
 			if (latchS === null) latchS = (k / 2 - lead) / RATE
@@ -590,6 +603,150 @@ describe("stage 1 open on noise before the over (never-open NFM fixtures)", () =
 			),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+/** Lead-in flicker pattern: unquieted noise with quieted runs of at most DISARM - 1 blocks. */
+const flickerArb = fc
+	.tuple(
+		fc.integer({ min: 1, max: LEAD_IN_MAX_MS / 10 }),
+		fc.array(
+			fc.tuple(
+				fc.integer({ min: 0, max: LEAD_IN_MAX_MS / 10 - 1 }),
+				fc.integer({ min: 1, max: EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS - 1 }),
+			),
+			{ maxLength: 8 },
+		),
+	)
+	.map(([blocks, flickers]) => {
+		const quiet = new Set<number>()
+		for (const [at, len] of flickers)
+			for (let i = at; i < at + len && i < blocks; i++) quiet.add(i)
+		// Keep every quieted run under the disarm length (merged flickers can touch).
+		let run = 0
+		for (let i = 0; i < blocks; i++) {
+			if (quiet.has(i)) {
+				run += 1
+				if (run >= EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS) {
+					quiet.delete(i)
+					run = 0
+				}
+			} else run = 0
+		}
+		// The last lead block stays unquieted, so the over's first block is an onset; a flicker
+		// touching the over is the documented limit below.
+		quiet.delete(blocks - 1)
+		return { blocks, quiet }
+	})
+
+describe("lead-in flicker and kerchunks (window-reset revision 2026-10-23)", () => {
+	it("review repro: 250 ms lead-in unquieted except its second block never latches", () => {
+		for (const name of ["nfm-dmr-4fsk-continuous", "nfm-clicks"])
+			expect(leadInRun(name, 250, b => b === 1).latchS).toBeNull()
+	})
+
+	// Feature: evidence-squelch, Property 3: Bare carrier and data never open
+	// Validates: Requirements 1.4
+	it("Property 3 (flicker): quieted flickers of 1-4 blocks inside a 10-500 ms lead-in never open a never-open NFM fixture", () => {
+		fc.assert(
+			fc.property(
+				fc.constantFrom(...neverOpenNfm),
+				flickerArb,
+				(name, { blocks, quiet }) =>
+					leadInRun(name, blocks * 10, b => quiet.has(b)).latchS === null,
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("flicker bound: a 4-block quieted flicker keeps the reset armed; a 5-block one disarms, and noise of >= 5 blocks after it re-arms", () => {
+		// At the bound: 20 noise, 4 quieted, 6 noise -> the over still resets the window.
+		const at = (b: number): boolean => b >= 20 && b < 24
+		// Past the bound: 20 noise, 5 quieted (disarm), 5 noise (re-arm) -> reset at the over.
+		const past = (b: number): boolean => b >= 20 && b < 25
+		for (const name of neverOpenNfm) {
+			expect(leadInRun(name, 300, at).latchS).toBeNull()
+			expect(leadInRun(name, 300, past).latchS).toBeNull()
+		}
+	})
+
+	it("kerchunk -> noise -> over in one episode: never-open stay closed, voice plays from the over", () => {
+		// 100 ms kerchunk (quieted, disarms), 200 ms noise (re-arms), then the over.
+		const kerchunk = (b: number): boolean => b < 10
+		for (const name of neverOpenNfm)
+			expect(leadInRun(name, 300, kerchunk, kerchunk).latchS).toBeNull()
+		for (const name of ["nfm-voice", "nfm-ctcss-670-voice"]) {
+			const r = leadInRun(name, 300, kerchunk, kerchunk)
+			expect(r.latchS).toBe(1.0)
+			expect(r.playedFrom).toBe(0)
+		}
+	})
+
+	it("documented limit (pending decision): >= 50 ms quieted inside the noise, then under 50 ms of noise before the over", () => {
+		// 20 noise, 5 quieted (disarm), then 1-4 noise blocks before the over: not re-armed (a
+		// 1-4 block run is indistinguishable from a fade inside an over), so those blocks and the
+		// quieted ones are judged with the over. Pinned so a change is visible.
+		const rows: string[] = []
+		for (const name of neverOpenNfm)
+			for (
+				let noise = 1;
+				noise < EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS;
+				noise++
+			) {
+				const q = (b: number): boolean => b >= 20 && b < 25
+				const r = leadInRun(name, 250 + noise * 10, q, q)
+				if (r.latchS !== null) rows.push(`${name}+${noise}`)
+			}
+		console.info(
+			`EVIDENCE-SQUELCH ARM-LIMIT latches: ${rows.join(" ") || "none"}`,
+		)
+		expect(rows).toEqual([
+			"nfm-dmr-4fsk-continuous+1",
+			"nfm-dmr-4fsk-continuous+2",
+			"nfm-dmr-4fsk-continuous+3",
+			"nfm-dmr-4fsk-continuous+4",
+			"nfm-clicks+1",
+		])
+	})
+})
+
+describe("flicker touching the over (documented limit, pending decision)", () => {
+	it("a quieted flicker on noise right before the over is judged as the over's start", () => {
+		// The over starts after a quieted block, so no reset falls on it; the flicker's 10-40 ms
+		// of noise audio is in the first window. Pinned per fixture and flicker length.
+		const rows: string[] = []
+		for (const name of neverOpenNfm)
+			for (let len = 1; len < EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS; len++)
+				if (leadInRun(name, 250, b => b >= 25 - len).latchS !== null)
+					rows.push(`${name}+${len}`)
+		console.info(
+			`EVIDENCE-SQUELCH FLICKER-AT-ONSET latches: ${rows.join(" ") || "none"}`,
+		)
+		expect(rows).toEqual([
+			"nfm-dmr-4fsk-continuous+2",
+			"nfm-dmr-4fsk-continuous+3",
+			"nfm-dmr-4fsk-continuous+4",
+			"nfm-clicks+1",
+		])
+	})
+})
+
+describe("nfm-clicks alignment sensitivity (documented, pending decision)", () => {
+	it("latches voice when only 10 or 60 ms of quiet carrier (silence) precede it, no noise at all", () => {
+		// Independent of the window reset: shifting the clicks over by a quiet 10 ms block moves
+		// the 50 ms frame edges, and the judge then calls the first window voice. Pinned.
+		const rows: number[] = []
+		for (let k = 1; k <= 10; k++)
+			if (
+				leadInRun(
+					"nfm-clicks",
+					k * 10,
+					() => true,
+					() => true,
+				).latchS !== null
+			)
+				rows.push(k * 10)
+		expect(rows).toEqual([10, 60])
 	})
 })
 

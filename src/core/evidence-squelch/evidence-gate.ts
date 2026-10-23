@@ -143,22 +143,18 @@ function voiceFramesFinite(stats: AnalogTrialStats): boolean {
 type GateState = "idle" | "waiting" | "open"
 
 /**
- * Noise lead-in tracking for the window reset (design amendment 2026-10-23), per waiting episode
- * (from stage-1 open or `reset()`): `unknown` until the first noted block; `lead-in` while every
- * noted block so far is unquieted; `done` after the first quieted block (or when the first noted
- * block is quieted, the ideal onset). The unknown/lead-in → quieted step is the carrier onset.
+ * Window reset on carrier onset (design amendment 2026-10-23, revised): arming. An unquieted run
+ * of at least this many 10 ms blocks (5 = 50 ms, one voice frame) arms the reset; the episode
+ * also starts armed (stage-1 open or `reset()`), so a lead-in of any length is covered. Fades
+ * inside an over of 10-40 ms (1-4 blocks) never arm it.
  */
-export type EvidenceLeadIn = "unknown" | "lead-in" | "done"
-
-/** Next lead-in state and whether this block is the carrier onset after a noise lead-in. */
-export function stepLeadIn(
-	state: EvidenceLeadIn,
-	carrier: boolean,
-): { next: EvidenceLeadIn; onset: boolean } {
-	if (state === "done") return { next: "done", onset: false }
-	if (!carrier) return { next: "lead-in", onset: false }
-	return { next: "done", onset: state === "lead-in" }
-}
+export const EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS = 5
+/**
+ * Disarming: this many consecutive quieted blocks (5 = 50 ms) while armed end the onset. Until
+ * then every quieted block that follows an unquieted one resets again, so a quieted flicker of
+ * 1-4 blocks inside a noise lead-in cannot consume the reset.
+ */
+export const EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS = 5
 
 /** Tone identity for renewal: CTCSS table index, or 1 000 + packed DCS reading. */
 function toneKey(tone: Readonly<ToneReading>): number {
@@ -202,7 +198,11 @@ export class EvidenceGate implements EvidenceGatePort {
 	private quietHead = 0
 	private quietLen = 0
 	private quietCount = 0
-	private leadIn: EvidenceLeadIn = "unknown"
+	/** Onset tracking (scalars, no per-block allocation); see the two constants above. */
+	private onsetArmed = true
+	private prevUnquieted = false
+	private unquietedRun = 0
+	private quietedRun = 0
 	/** Input samples since waiting began (or since a reopen within the hang). */
 	private audioSamples = 0
 	/** A non-finite input went into the current decimation group. */
@@ -259,20 +259,38 @@ export class EvidenceGate implements EvidenceGatePort {
 		return this.internal === "open" ? this.latchedEvidence : null
 	}
 
-	noteBlock(carrier: boolean): void {
+	noteBlock(carrier: boolean): boolean {
 		const value = carrier === true ? 1 : 0
-		// Window reset on carrier onset (design amendment 2026-10-23): when the noted blocks of
-		// this episode began with unquieted noise (stage 1 open on noise through its power gate
-		// or hang), the first quieted block restarts the voice window, so that noise is never
-		// judged with the over. At most once per episode: later fades inside the over keep the
-		// window (the quiet-fraction rule judges them). Tracked from stage-1 open, also before
-		// the first PCM. The tone stage, decimator and audio counter are kept: tones need no
-		// window and must not lose time.
-		const step = stepLeadIn(this.leadIn, value === 1)
-		this.leadIn = step.next
-		const onset = step.onset
-		if (this.internal !== "waiting") return
-		if (onset) this.resetVoiceWindow()
+		// Window reset on carrier onset (design amendment 2026-10-23, revised): while armed, a
+		// quieted block right after an unquieted one restarts the voice window (meter, frame
+		// window, quiet ring), so the noise stage 1 was open on (power gate or hang) is never
+		// judged with the over. Tracked from stage-1 open, also before the first PCM. The tone
+		// stage, decimator and audio clock are kept: tones need no window and must not lose time.
+		let didReset = false
+		if (value === 1) {
+			if (
+				this.onsetArmed &&
+				this.prevUnquieted &&
+				this.internal === "waiting"
+			) {
+				this.resetVoiceWindow()
+				didReset = true
+			}
+			this.unquietedRun = 0
+			if (this.onsetArmed) {
+				this.quietedRun += 1
+				if (this.quietedRun >= EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS)
+					this.onsetArmed = false
+			}
+		} else {
+			this.quietedRun = 0
+			if (this.unquietedRun < EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS)
+				this.unquietedRun += 1
+			if (this.unquietedRun >= EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS)
+				this.onsetArmed = true
+		}
+		this.prevUnquieted = value === 0
+		if (this.internal !== "waiting") return didReset
 		const ring = this.quiet
 		if (this.quietLen === ring.length)
 			this.quietCount -= ring[this.quietHead] ?? 0
@@ -280,6 +298,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		ring[this.quietHead] = value
 		this.quietCount += value
 		this.quietHead = (this.quietHead + 1) % ring.length
+		return didReset
 	}
 
 	push(
@@ -394,7 +413,10 @@ export class EvidenceGate implements EvidenceGatePort {
 	}
 
 	reset(): void {
-		this.leadIn = "unknown"
+		this.onsetArmed = true
+		this.prevUnquieted = false
+		this.unquietedRun = 0
+		this.quietedRun = 0
 		this.internal = "idle"
 		this.latchedEvidence = null
 		this.latchedToneKey = -1

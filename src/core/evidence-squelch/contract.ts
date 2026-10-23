@@ -19,8 +19,12 @@ export type PreRollTag = "pending" | "pass" | "guard" | "drop"
 export interface EvidenceGatePort {
 	readonly state: "waiting" | "open"
 	readonly evidence: LiveAudioAutoSquelchEvidence | null
-	/** One measured block while stage 1 is open: `carrier` is the per-block carrier evidence. */
-	noteBlock(carrier: boolean): void
+	/**
+	 * One measured block while stage 1 is open: `carrier` is the per-block carrier evidence.
+	 * True when the block was a carrier onset that reset the voice window while waiting; the
+	 * owner then abandons the pre-roll's held lead-in (amendment 2026-10-23: was `void`).
+	 */
+	noteBlock(carrier: boolean): boolean
 	/** Byte offset in [start, end] of the first sample after a latch in this call, or -1. */
 	push(
 		pcm: Buffer,

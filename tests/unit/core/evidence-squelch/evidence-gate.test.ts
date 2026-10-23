@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { CTCSS_HZ } from "../../../../src/core/audio-tones/ctcss.js"
+import { mulberry32 } from "../audio-tones/synth.js"
 import {
 	EvidenceGate,
 	judgeEvidence,
-	stepLeadIn,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
 import { pcmSampleBytes } from "../../../../src/core/evidence-squelch/contract.js"
 import type {
@@ -407,15 +407,63 @@ describe("voice window reset on carrier onset (design amendment 2026-10-23)", ()
 		}
 	})
 
-	it("fades inside the over (after the first quieted block) keep the window", () => {
+	it("at the arming bound: 40 ms fades every 500 ms inside the over keep the window", () => {
 		const gate = nfm()
 		const pcm = toPcm(voice(3), "s16le")
-		// 40 ms unquieted every 500 ms after a quieted start: the episode's lead-in is done, so
-		// no reset; the quiet-fraction rule (92 % quieted) still latches.
+		// 40 ms (4 blocks) unquieted every 500 ms after a quieted start: 4 < ARM (5) blocks never
+		// arm a reset once the first 5 quieted blocks disarmed it; the quiet-fraction rule
+		// (92 % quieted) latches.
 		const r = driveOpen(gate, pcm, "s16le", i => i % 50 < 46)
 		expect(r.latchByte).toBeGreaterThan(0)
 		expect(r.states[r.states.length - 1]).toBe("open")
 		expect(gate.evidence).toBe("voice")
+	})
+
+	it("past the arming bound (documented limit): 50 ms fades every 500 ms restart the window, no latch", () => {
+		// 5 unquieted blocks arm the reset; the next quieted block restarts the window, so the
+		// 1.0 s window never fills between fades 0.5 s apart.
+		const r = driveOpen(
+			nfm(),
+			toPcm(voice(3), "s16le"),
+			"s16le",
+			i => i % 50 < 45,
+		)
+		expect(r.latchByte).toBe(-1)
+	})
+
+	it("returns true exactly when it resets the window while waiting", () => {
+		const gate = nfm()
+		const pcm = toPcm(voice(0.1), "s16le")
+		expect(gate.noteBlock(false)).toBe(false) // idle: nothing to reset
+		gate.push(pcm, "s16le", 0, 500)
+		expect(gate.noteBlock(true)).toBe(true) // armed, after an unquieted block, waiting
+		expect(gate.noteBlock(true)).toBe(false)
+		expect(gate.noteBlock(false)).toBe(false)
+		expect(gate.noteBlock(true)).toBe(true) // still armed: 2 < 5 quieted so far
+		for (let i = 0; i < 5; i++) gate.noteBlock(true) // disarm
+		expect(gate.noteBlock(false)).toBe(false)
+		expect(gate.noteBlock(true)).toBe(false) // a 1-block fade does not arm
+	})
+
+	it("weak fluttery voice (random 10-30 ms dropouts, >= 50 ms apart) latches within the 1.5 s pre-roll", () => {
+		for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+			const rand = mulberry32(seed)
+			const drop = new Set<number>()
+			let b = 2 + Math.floor(rand() * 10)
+			while (b < 300) {
+				const len = 1 + Math.floor(rand() * 3)
+				for (let i = 0; i < len; i++) drop.add(b + i)
+				b += len + 5 + Math.floor(rand() * 20)
+			}
+			const r = driveOpen(
+				nfm(),
+				toPcm(voice(3), "s16le"),
+				"s16le",
+				i => !drop.has(i),
+			)
+			expect(r.latchByte).toBeGreaterThan(0)
+			expect(r.latchByte / 2 / GATE_RATE).toBeLessThanOrEqual(1.5)
+		}
 	})
 
 	it("a quieted run without a preceding unquieted block keeps the window (no reset)", () => {
@@ -428,16 +476,42 @@ describe("voice window reset on carrier onset (design amendment 2026-10-23)", ()
 	})
 })
 
-describe("stepLeadIn", () => {
-	it("marks only the first quieted block after an unquieted lead-in as the onset", () => {
-		const seq = [false, false, true, false, true]
-		let state: Parameters<typeof stepLeadIn>[0] = "unknown"
-		const onsets = seq.map(c => {
-			const step = stepLeadIn(state, c)
-			state = step.next
-			return step.onset
-		})
-		expect(onsets).toEqual([false, false, true, false, false])
-		expect(stepLeadIn("unknown", true)).toEqual({ next: "done", onset: false })
+describe("noteBlock allocation (window-reset revision)", () => {
+	it("no Buffer or typed-array allocation across onset resets", () => {
+		const gate = nfm()
+		gate.push(toPcm(voice(0.1), "s16le"), "s16le", 0, 500)
+		const spies = [
+			vi.spyOn(Buffer, "alloc"),
+			vi.spyOn(Buffer, "allocUnsafe"),
+			vi.spyOn(Buffer, "from"),
+		]
+		let constructed = 0
+		for (const name of [
+			"Uint8Array",
+			"Float32Array",
+			"Float64Array",
+			"Uint32Array",
+		] as const) {
+			const Original = globalThis[name]
+			vi.stubGlobal(
+				name,
+				new Proxy(Original, {
+					construct(target, args, newTarget) {
+						constructed++
+						return Reflect.construct(target, args, newTarget) as object
+					},
+				}),
+			)
+		}
+		let resets = 0
+		// Lead-in noise, flickers, onsets and fades: every branch of the onset tracker.
+		for (let i = 0; i < 100_000; i++)
+			if (gate.noteBlock(i % 37 < 7 || i % 11 === 3)) resets++
+		vi.unstubAllGlobals()
+		const calls = spies.map(s => s.mock.calls.length)
+		vi.restoreAllMocks()
+		expect(resets).toBeGreaterThan(0)
+		expect(calls).toEqual([0, 0, 0])
+		expect(constructed).toBe(0)
 	})
 })

@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs"
 import http from "node:http"
 import { LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS } from "@wavekit/api-types"
+import fc from "fast-check"
 import { afterEach, describe, expect, it } from "vitest"
 import type { EvidenceSquelchFactory } from "../../../src/core/evidence-squelch/contract.js"
 import { wavStreamHeader } from "../../../src/core/live-demodulator.js"
@@ -111,6 +112,8 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		segments: Segment[],
 		wav = false,
 		factory?: EvidenceSquelchFactory,
+		/** Cut offsets (bytes, inside the block) at which each 10 ms block is split into chunks. */
+		split?: (block: number) => number[],
 	): Promise<Driven & { wavBody: Buffer | null; states: Set<string> }> {
 		h = await createDemodHarness({
 			config: {
@@ -142,6 +145,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		const wavBody = wav ? await openWavClient(h, RATE) : null
 		const { transport } = h.addClient()
 		let fed = 0
+		let blockIndex = 0
 		let openFed = 0
 		let openAfterSeconds: number | null = null
 		let everOpen = false
@@ -150,21 +154,25 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			control.open = segment.open
 			control.quieted = segment.quieted
 			for (let at = 0; at < segment.pcm.length; at += BLOCK_BYTES) {
-				const chunk = Buffer.from(
-					segment.pcm.subarray(
-						at,
-						Math.min(segment.pcm.length, at + BLOCK_BYTES),
-					),
-				)
-				internals.handleAudioData(chunk)
-				// A real socket drains between chunks (the registry drops a lagging client).
-				if (wav) await new Promise(resolve => setImmediate(resolve))
-				fed += chunk.length
-				// Property 7 at the wiring level: every fed byte reaches the client, per chunk.
-				expect(transport.received().length).toBe(fed)
+				const blockEnd = Math.min(segment.pcm.length, at + BLOCK_BYTES)
+				const cuts = (split?.(blockIndex) ?? [])
+					.map(c => at + c)
+					.filter(c => c > at && c < blockEnd)
+				blockIndex += 1
+				let from = at
+				for (const to of [...cuts, blockEnd]) {
+					const chunk = Buffer.from(segment.pcm.subarray(from, to))
+					from = to
+					internals.handleAudioData(chunk)
+					// A real socket drains between chunks (the registry drops a lagging client).
+					if (wav) await new Promise(resolve => setImmediate(resolve))
+					fed += chunk.length
+					// Property 7 at the wiring level: every fed byte reaches the client, per chunk.
+					expect(transport.received().length).toBe(fed)
+				}
 				run.noiseFloorDbfs = AM_FLOOR_DBFS
 				internals.measureRun(run)
-				if (segment.open) openFed += chunk.length
+				if (segment.open) openFed += blockEnd - at
 				const state = h.demod.getStatus().autoSquelch?.state
 				states.add(state ?? "absent")
 				if (state === "open") {
@@ -276,6 +284,96 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			expect(result.received.subarray(0, at).every(b => b === 0)).toBe(true)
 		})
 	}
+
+	/**
+	 * Consecutive overs (window-reset amendment 2026-10-23): over 1 latches; 10 s of closed
+	 * silence (the gate hangs out and resets itself inside `closed()`); then stage 1 opens on
+	 * 250 ms of unquieted noise before over 2. The gate is the only onset tracker: its
+	 * `noteBlock` reports the reset and the wiring abandons the held noise, so over 2 plays from
+	 * its first sample and no lead-in noise reaches the client.
+	 */
+	function consecutiveOvers(): {
+		segments: Segment[]
+		lead: Buffer
+		over2: Buffer
+	} {
+		const over1 = toPcm(overVoice(21), "s16le")
+		const lead = toPcm(
+			whiteNoise({ rate: RATE, seconds: 0.25, seed: 9, level: 0.9 }),
+			"s16le",
+		)
+		const over2 = toPcm(overVoice(23), "s16le")
+		return {
+			lead,
+			over2,
+			segments: [
+				{ pcm: over1, open: true, quieted: true },
+				{ pcm: Buffer.alloc(10 * RATE * 2), open: false, quieted: false },
+				{ pcm: lead, open: true, quieted: false },
+				{ pcm: over2, open: true, quieted: true },
+				{
+					pcm: toPcm(whiteNoise({ rate: RATE, seconds: 2, seed: 5 }), "s16le"),
+					open: false,
+					quieted: false,
+				},
+			],
+		}
+	}
+
+	function expectOver2FromFirstSample(
+		received: Buffer,
+		lead: Buffer,
+		over2: Buffer,
+	): void {
+		// This harness measures each block after its PCM, so the onset block itself (the first
+		// 10 ms of over 2) is already held when the reset abandons the lead-in: at most one block
+		// (10 ms, inside the 20 ms onset tolerance) is lost; the rest plays from there.
+		const at = received.indexOf(over2.subarray(BLOCK_BYTES, BLOCK_BYTES + RATE))
+		expect(at).toBeGreaterThan(0)
+		const tail = over2.length - BLOCK_BYTES - RATE * 2
+		expect(received.subarray(at, at + tail)).toEqual(
+			over2.subarray(BLOCK_BYTES, BLOCK_BYTES + tail),
+		)
+		// Nothing of the lead-in noise reaches the client: zeros right before over 2.
+		expect(
+			received.subarray(at - lead.length - BLOCK_BYTES, at).every(b => b === 0),
+		).toBe(true)
+		expect(received.indexOf(lead.subarray(0, 200))).toBe(-1)
+	}
+
+	it("consecutive overs: noisy lead-in before the second over is dropped (gate-owned onset)", async () => {
+		const { segments, lead, over2 } = consecutiveOvers()
+		const result = await drive("nfm", segments)
+		expectOver2FromFirstSample(result.received, lead, over2)
+	}, 60_000)
+
+	// Feature: evidence-squelch, Property 6: Chunk-split invariance
+	// Validates: Requirements 2.1, 2.3
+	it("consecutive overs: invariant under chunk splits inside each block", async () => {
+		const { segments, lead, over2 } = consecutiveOvers()
+		await fc.assert(
+			fc.asyncProperty(fc.integer({ min: 1, max: 0x7fffffff }), async seed => {
+				let x = seed
+				const split = (): number[] => {
+					x = (Math.imul(x, 1_103_515_245) + 12_345) & 0x7fffffff
+					const n = x % 3
+					const cuts: number[] = []
+					for (let i = 0; i < n; i++) {
+						x = (Math.imul(x, 1_103_515_245) + 12_345) & 0x7fffffff
+						// Sample-aligned cuts: the per-chunk byte check above assumes whole samples
+						// (odd splits are covered by the wiring's odd-chunk test).
+						cuts.push(2 * (1 + (x % (BLOCK_BYTES / 2 - 1))))
+					}
+					return cuts.sort((a, b) => a - b)
+				}
+				const result = await drive("nfm", segments, false, undefined, split)
+				expectOver2FromFirstSample(result.received, lead, over2)
+				await h?.dispose()
+				h = null
+			}),
+			{ numRuns: 100 },
+		)
+	}, 600_000)
 
 	const NEVER: Array<[string, "nfm" | "am", Segment[]]> = [
 		[

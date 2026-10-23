@@ -156,6 +156,27 @@ describe("live demodulator evidence path (fake ports)", () => {
 			expect(t.factory.gates[0]?.notes).toEqual([true, false])
 		})
 
+		// Window-reset amendment (2026-10-23): the gate is the only onset tracker; the wiring
+		// abandons the pre-roll exactly when noteBlock reports a reset.
+		it("abandons the pre-roll exactly when noteBlock reports an onset reset", async () => {
+			const t = await start({ modulation: "nfm", squelchMode: "auto" })
+			const run = t.internals.run
+			if (run === null) throw new Error("no run")
+			const gate = t.factory.gates[0]
+			if (gate === undefined) throw new Error("no gate")
+			gate.onsetAtNotes.add(2)
+			t.stage.open = true
+			for (const quieted of [false, false, true, true]) {
+				Object.defineProperty(run.squelch, "blockQuieted", {
+					configurable: true,
+					value: () => quieted,
+				})
+				t.internals.measureRun(run)
+			}
+			expect(gate.notes).toEqual([false, false, true, true])
+			expect(t.factory.preRolls[0]?.ops).toEqual(["abandon"])
+		})
+
 		// Amendment A8: AM is outside the evidence path, so no gate is fed.
 		it("AM auto feeds no gate (amendment A8)", async () => {
 			const t = await start({ modulation: "am", squelchMode: "auto" })

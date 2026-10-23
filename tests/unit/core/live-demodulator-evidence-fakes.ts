@@ -40,8 +40,12 @@ export class FakeGate implements EvidenceGatePort {
 		readonly latchEvidence: LiveAudioAutoSquelchEvidence = "voice",
 	) {}
 
-	noteBlock(carrier: boolean): void {
+	/** Note indexes (0-based) at which `noteBlock` reports a carrier-onset reset. */
+	readonly onsetAtNotes = new Set<number>()
+
+	noteBlock(carrier: boolean): boolean {
 		this.notes.push(carrier)
+		return this.onsetAtNotes.has(this.notes.length - 1)
 	}
 
 	push(
