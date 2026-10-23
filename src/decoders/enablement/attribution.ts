@@ -52,8 +52,10 @@ export function attributeInterval(e: IntervalEvidence): DropAttribution {
 		// falls through to the upstream and host rules below. The laggard
 		// exclusion cannot tell the two apart: with an absorber, chunks reach
 		// the fanout only once every congested branch is excluded, so every
-		// branch drop lands on a laggard either way. Both classes condemn and
-		// shed alike, so this changes reporting only.
+		// branch drop lands on a laggard either way. Host and consumer condemn
+		// and shed alike; but with upstream loss the subset now resolves
+		// unknown, which condemns probation yet no longer counts toward a late
+		// shed.
 		if (
 			positive > 0 &&
 			positive < input.branchDrops.size &&

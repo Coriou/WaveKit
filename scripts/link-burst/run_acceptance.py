@@ -135,6 +135,7 @@ class Experiment:
         self.previous_core_loss = None
         self.previous_upstream = None
         self.coincident_polls = []
+        self.core_loss_polls = set()
         self.unknown_polls = []
 
     def compose(self, *args, check=True):
@@ -295,6 +296,8 @@ class Experiment:
         if self.previous_core_loss is not None:
             core = sum(max(0, total - self.previous_core_loss.get(key, total))
                        for key, total in totals.items())
+            if core > 0:
+                self.core_loss_polls.add(self.polls)
             if core > 0 and upstream_total > self.previous_upstream:
                 self.coincident_polls.append(self.polls)
         self.previous_core_loss = totals
@@ -528,7 +531,9 @@ class Experiment:
         if scenario == "upstream-host":
             if not self.coincident_polls:
                 failures.append("core loss never coincided with upstream loss")
-            elif not any(p <= u <= p + UPSTREAM_UNKNOWN_PAIRING_POLLS
+            # The unknown must itself bear core loss: an unknown from a drop-free
+            # interval (an unreadable read, a reconnect) proves nothing here.
+            elif not any(p <= u <= p + UPSTREAM_UNKNOWN_PAIRING_POLLS and u in self.core_loss_polls
                          for p in self.coincident_polls for u in self.unknown_polls):
                 failures.append("coinciding core and upstream loss was not attributed unknown")
             if self.monitor_counts["link"]:

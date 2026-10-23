@@ -151,10 +151,26 @@ class DriverTests(unittest.TestCase):
             # Absorber overflow is core loss too.
             self.poll(experiment, 5, 0, 1, 1 if delay == 0 else 0)
             for i in range(1, 5):
-                self.poll(experiment, 5, 0, 1, 1 if i >= delay and delay else 0)
+                # Overflow keeps rising (core loss), upstream stays flat.
+                self.poll(experiment, 5 + i, 0, 1, 1 if i >= delay and delay else 0)
             failures = experiment.failures()
             self.assertEqual("coinciding core and upstream loss was not attributed unknown" in failures,
                              not paired, delay)
+
+    def test_upstream_host_rejects_a_drop_free_unknown(self):
+        experiment = self.experiment("upstream-host")
+        experiment.summary["upstreamDroppedBytes"] = 100
+        self.poll(experiment, 0, 0, 0, 0)
+        self.poll(experiment, 0, 10, 100, 0)
+        # Loss counters unchanged; unknown rises in a drop-free interval.
+        self.poll(experiment, 0, 10, 100, 1)
+        self.assertEqual(experiment.coincident_polls, [2])
+        self.assertEqual(experiment.unknown_polls, [3])
+        self.assertIn("coinciding core and upstream loss was not attributed unknown",
+                      experiment.failures())
+        # A later unknown whose own poll bears core loss pairs.
+        self.poll(experiment, 0, 20, 100, 2)
+        self.assertEqual(experiment.failures(), [])
 
     def test_upstream_host_link_increase_fails(self):
         experiment = self.experiment("upstream-host")

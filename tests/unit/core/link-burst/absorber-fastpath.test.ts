@@ -44,12 +44,29 @@ describe("BurstAbsorber pass-through fast path", () => {
 		expect(absorber.counters().heldBytes).toBe(4)
 	})
 
-	it("ignores a congested branch that is not active, as the full pass does", () => {
-		const { fanout, absorber } = setup()
-		fanout.active.delete("b")
-		fanout.congested.add("b")
+	it("prunes an excluded branch that went inactive, then returns to the fast path", () => {
+		const { fanout, absorber, time } = setup()
+		fanout.congest("b")
 		absorber.ingest(Buffer.alloc(4))
-		expect(fanout.delivered).toHaveLength(1)
+		time(ABSORBER_LAGGARD_MS)
+		absorber.ingest(Buffer.alloc(4))
+		// "b" is now an excluded laggard: both held chunks were released.
+		expect(absorber.counters().heldBytes).toBe(0)
+		// Inactive without a branch-removed event: the full pass must prune it.
+		fanout.active.delete("b")
+		time(ABSORBER_LAGGARD_MS + 100)
+		absorber.ingest(Buffer.alloc(4))
+		const active = vi.spyOn(fanout, "activeBranchIds")
+		time(ABSORBER_LAGGARD_MS + 200)
+		absorber.ingest(Buffer.alloc(4))
+		// Pruned state leaves nothing to scan: the fast path skips the read.
+		expect(active).not.toHaveBeenCalled()
+		// Reactivated and still congested: a fresh congestion, not a laggard,
+		// so the chunk is held rather than passed through.
+		fanout.active.add("b")
+		time(ABSORBER_LAGGARD_MS + 300)
+		absorber.ingest(Buffer.alloc(4))
+		expect(absorber.counters().heldBytes).toBe(4)
 	})
 
 	it.each([
