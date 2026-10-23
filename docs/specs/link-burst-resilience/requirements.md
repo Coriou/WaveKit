@@ -128,12 +128,11 @@ overflow delta, the ingest record (2.1), the event-loop delay (2.2), the normali
 the received byte rate and the upstream drop delta.
 3.2 `none`: every counter was read completely and no branch or absorber counter rose.
 3.3 `consumer`: drops rose on a non-empty strict subset of the active branches, the absorber
-did not overflow, and no host evidence (loop delay < `HOST_LOOP_DELAY_MS` and CPU < guard).
+did not overflow, and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence).
 A subset with host evidence falls through: with upstream loss it is `unknown` (condemns a
 probationer, does not count toward a late shed), otherwise `host` (3.5).
 
-> Amended 2026-10-23: 3.3 gains "and no host evidence (loop delay < `HOST_LOOP_DELAY_MS` and
-> CPU < guard)". Superseded wording: "drops rose on a non-empty strict subset of the active
+> Amended 2026-10-23: 3.3 gains "and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence)". Superseded wording: "drops rose on a non-empty strict subset of the active
 > branches and the absorber did not overflow". See the
 > [acceptance record](../../engineering/LINK-BURST-2026-10-ACCEPTANCE.md) follow-ups.
 
