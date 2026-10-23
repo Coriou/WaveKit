@@ -20,8 +20,9 @@ Two outputs:
       (A9); output/ is git-ignored.
 
 Deterministic per seed: Python's random.Random(seed) drives every random choice, and only
-the standard library is used, except that the POCSAG classes reuse the bit layer of
-fixtures/generators/pocsag.py (which imports numpy at module level).
+the standard library is used. The POCSAG bit layer is a port of
+fixtures/generators/pocsag.py (which needs numpy); --self-test compares the two when numpy
+is importable.
 
 Run with `python3 -I` (isolated mode); the repository paths are added explicitly.
 """
@@ -57,6 +58,8 @@ DCS_DEV_HZ = 400.0
 DCS_BIT_RATE = 134.4
 DMR_SYMBOL_RATE = 4_800
 DMR_DEVIATIONS_HZ = (-1_944.0, -648.0, 648.0, 1_944.0)
+DMR_RRC_ALPHA = 0.2
+DMR_BURST_S = 0.030
 POCSAG_DEV_HZ = 4_500.0
 AM_DEPTH = 0.8
 
@@ -71,7 +74,11 @@ FIXTURES = {
 	"am-voice": ("am", "voice", "voice", 12),
 	"nfm-carrier": ("nfm", "none", "neither", 21),
 	"am-carrier": ("am", "none", "neither", 22),
-	"nfm-dmr-4fsk": ("nfm", "none", "data-like", 31),
+	# The design expects data-like. Measured: neither (median cluster 0.3); the 30 ms
+	# noise-only gaps between bursts keep most 50 ms frames from clustering. Recorded as
+	# measured, not tuned; it still has no voice-positive window.
+	"nfm-dmr-4fsk": ("nfm", "none", "neither", 31),
+	"nfm-dmr-4fsk-continuous": ("nfm", "none", "data-like", 32),
 	"nfm-pocsag-512": ("nfm", "none", "data-like", 512),
 	"nfm-pocsag-1200": ("nfm", "none", "data-like", 1200),
 	"nfm-clicks": ("nfm", "none", "neither", 41),
@@ -221,27 +228,109 @@ def nfm_voice(rng, n, fs, sub=None):
 	return fm(freq, fs)
 
 
-def dmr_4fsk(rng, n, fs):
-	"""4 800 symbols/s 4FSK, a one-symbol moving average as the pulse shape, in 30 ms
-	TDMA bursts. Both slots are keyed (a repeater's continuous downlink); each burst has
-	its own symbols."""
+def dmr_symbols(rng, n, fs):
 	sps = fs // DMR_SYMBOL_RATE
-	raw = [0.0] * n
-	for s in range(0, n, sps):
-		d = DMR_DEVIATIONS_HZ[rng.randrange(4)]
-		for i in range(s, min(s + sps, n)):
-			raw[i] = d
-	return fm(raw, fs)
+	return sps, [DMR_DEVIATIONS_HZ[rng.randrange(4)] for _ in range(-(-n // sps))]
+
+
+def rrc(t, alpha):
+	"""Root-raised-cosine impulse response at t symbols (peak 1 - alpha + 4 alpha / pi)."""
+	if abs(t) < 1e-9:
+		return 1.0 - alpha + 4.0 * alpha / math.pi
+	if abs(abs(t) - 1.0 / (4.0 * alpha)) < 1e-9:
+		q = math.pi / (4.0 * alpha)
+		return alpha / math.sqrt(2.0) * ((1.0 + 2.0 / math.pi) * math.sin(q) + (1.0 - 2.0 / math.pi) * math.cos(q))
+	num = math.sin(math.pi * t * (1.0 - alpha)) + 4.0 * alpha * t * math.cos(math.pi * t * (1.0 + alpha))
+	return num / (math.pi * t * (1.0 - (4.0 * alpha * t) ** 2))
+
+
+def dmr_4fsk(rng, n, fs):
+	"""DMR-like handset uplink (design, Meter equivalence): 4 800 symbols/s 4FSK through a
+	root-raised-cosine pulse (alpha 0.2, +-4 symbols), keyed in 30 ms TDMA bursts every
+	60 ms (one slot of two) with 1 ms raised-cosine edges; between bursts the channel holds
+	only the noise floor."""
+	sps, symbols = dmr_symbols(rng, n, fs)
+	span = 4
+	taps = [rrc(k / sps, DMR_RRC_ALPHA) for k in range(-span * sps, span * sps + 1)]
+	gain = sps / sum(taps)  # a constant symbol stream keeps its deviation
+	freq = [0.0] * n
+	for i in range(n):
+		acc = 0.0
+		first = max(0, -((span * sps - i) // sps))  # ceil((i - span * sps) / sps)
+		last = min(len(symbols) - 1, (i + span * sps) // sps)
+		for k in range(first, last + 1):
+			acc += symbols[k] * taps[i - k * sps + span * sps]
+		freq[i] = gain * acc
+	burst = int(DMR_BURST_S * fs)
+	ramp = int(0.001 * fs)
+	keyed = [0.0] * n
+	for start in range(0, n, 2 * burst):
+		for i in range(min(burst, n - start)):
+			edge = min(i, burst - 1 - i)
+			keyed[start + i] = 1.0 if edge >= ramp else math.sin(0.5 * math.pi * (edge + 0.5) / ramp) ** 2
+	return fm(freq, fs, keyed=keyed)
+
+
+def dmr_4fsk_continuous(rng, n, fs):
+	"""Unshaped variant: rectangular 4 800 symbols/s 4FSK, keyed continuously (both slots,
+	as a repeater downlink)."""
+	sps, symbols = dmr_symbols(rng, n, fs)
+	return fm([symbols[i // sps] for i in range(n)], fs)
+
+
+POCSAG_SYNC = 0x7CD215D8
+POCSAG_IDLE = 0x7A89C197
+POCSAG_BCH = 0b11101101001
+POCSAG_PREAMBLE_BITS = 576
+POCSAG_NUMERIC = "0123456789*U -)("
+
+
+def _msb(word, width):
+	return [(word >> (width - 1 - i)) & 1 for i in range(width)]
+
+
+def _pocsag_codeword(data21):
+	reg = data21 << 10
+	for bit in range(30, 9, -1):
+		if reg & (1 << bit):
+			reg ^= POCSAG_BCH << (bit - 10)
+	cw31 = (data21 << 10) | (reg & 0x3FF)
+	return (cw31 << 1) | (bin(cw31).count("1") & 1)
+
+
+def pocsag_page_bits(address, function, numeric):
+	"""Standard-library port of page_bits in fixtures/generators/pocsag.py for a numeric
+	page (ITU-R M.584-2): preamble, then batches of sync + 16 codewords."""
+	digits = [POCSAG_NUMERIC.index(c) for c in numeric]
+	while len(digits) % 5:
+		digits.append(POCSAG_NUMERIC.index(" "))
+	payload = [(d >> i) & 1 for d in digits for i in range(4)]
+	message = []
+	for i in range(0, len(payload), 20):
+		data20 = 0
+		for k, b in enumerate(payload[i : i + 20]):
+			data20 |= b << (19 - k)
+		message.append(_pocsag_codeword((1 << 20) | data20))
+	words = []
+	while len(words) % 16 != 2 * (address & 7):
+		words.append(POCSAG_IDLE)
+	words.append(_pocsag_codeword(((address >> 3) << 2) | function))
+	words.extend(message)
+	words.append(POCSAG_IDLE)
+	while len(words) % 16:
+		words.append(POCSAG_IDLE)
+	bits = [(i + 1) & 1 for i in range(POCSAG_PREAMBLE_BITS)]
+	for b in range(0, len(words), 16):
+		bits += _msb(POCSAG_SYNC, 32)
+		for w in words[b : b + 16]:
+			bits += _msb(w, 32)
+	return bits
 
 
 def pocsag(rng, n, fs, baud):
-	if str(REPO) not in sys.path:
-		sys.path.insert(0, str(REPO))
-	from fixtures.generators.pocsag import page_bits  # noqa: E402  (bit layer only)
-
 	bits = []
 	while len(bits) * fs < n * baud:
-		bits += page_bits({"address": rng.randrange(1 << 21), "function": rng.randrange(4), "numeric": str(rng.randrange(10**9))})
+		bits += pocsag_page_bits(rng.randrange(1 << 21), rng.randrange(4), str(rng.randrange(10**9)))
 	freq = [-POCSAG_DEV_HZ if bits[min(i * baud // fs, len(bits) - 1)] else POCSAG_DEV_HZ for i in range(n)]
 	return fm(freq, fs)
 
@@ -298,6 +387,8 @@ def over(name, n, fs=ANALYZER_RATE):
 		return am([0.0] * n)
 	if name == "nfm-dmr-4fsk":
 		return dmr_4fsk(rng, n, fs)
+	if name == "nfm-dmr-4fsk-continuous":
+		return dmr_4fsk_continuous(rng, n, fs)
 	if name.startswith("nfm-pocsag-"):
 		return pocsag(rng, n, fs, int(name.split("-")[2]))
 	if name == "nfm-clicks":
@@ -380,6 +471,17 @@ def self_test():
 	cu8, onset = cu8_bytes("nfm-voice", 2_048_000, 0.01, over_s=0.02)
 	assert len(cu8) == 2 * (int(0.01 * 2_048_000) + int(0.02 * 2_048_000)) and onset == 0.01
 	assert cu8 == cu8_bytes("nfm-voice", 2_048_000, 0.01, over_s=0.02)[0]
+	try:
+		if str(REPO) not in sys.path:
+			sys.path.insert(0, str(REPO))
+		from fixtures.generators.pocsag import page_bits  # noqa: E402  (reference, needs numpy)
+	except ImportError:
+		print("pocsag reference skipped (numpy not importable)")
+	else:
+		ref_rng = random.Random(7)
+		for _ in range(50):
+			a, f, num = ref_rng.randrange(1 << 21), ref_rng.randrange(4), str(ref_rng.randrange(10**9))
+			assert pocsag_page_bits(a, f, num) == page_bits({"address": a, "function": f, "numeric": num}), (a, f, num)
 	assert golay_word(0o023) == golay_word(0o023) and golay_word(0) >> 11 == 0b100 << 9
 	print("ok")
 

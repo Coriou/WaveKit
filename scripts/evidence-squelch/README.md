@@ -2,8 +2,9 @@
 
 Synthetic fixtures for the evidence squelch (`docs/specs/evidence-squelch/`, design section
 Meter equivalence; requirements 5.1 and 8.1). They are not RF recordings. Every fixture is
-generated from a fixed seed with the Python standard library; the two POCSAG fixtures reuse
-the bit layer of `fixtures/generators/pocsag.py`, which needs numpy.
+generated from a fixed seed with the Python standard library; the POCSAG bit layer is a
+standard-library port of `fixtures/generators/pocsag.py` (the self-test compares the two
+when numpy is importable).
 
 ## Files
 
@@ -13,7 +14,7 @@ the bit layer of `fixtures/generators/pocsag.py`, which needs numpy.
 - `goldens.py`: runs `wavekit-iqcap analyze` on each 48 kHz input and writes the goldens.
 - `tests/mocks/fixtures/evidence-squelch/`: committed goldens. Per fixture, the analyzer's
   8 kHz s16le audio (`<name>.audio.s16le`, 64 000 bytes, 4 s) and its JSON line
-  (`<name>.stats.json`, about 9 KB, 80 frames), plus `manifest.json`. About 1.17 MB in total.
+  (`<name>.stats.json`, about 9 KB, 80 frames), plus `manifest.json`. About 1.25 MB in total (17 fixtures).
 
 CU8 files for the fake `rtl_tcp` are generated on demand into `output/evidence-squelch/`
 (git-ignored) and never committed.
@@ -41,36 +42,52 @@ medians do not give its manifest verdict. That check mirrors `isVoice` (median s
 
 ## Analyzer verdicts
 
-Medians over the 80 frames of each golden, as produced by `goldens.py`:
+Whole-file medians (80 frames) and the verdicts of the 61 rolling 20-frame windows
+(requirement 1.3 judges 1 s), as printed by `goldens.py`. Frames 0 to 4 precede the over.
 
-| Fixture                 | Mode | Expect | Verdict   | audioDb | syllabic | cluster |
-| ----------------------- | ---- | ------ | --------- | ------: | -------: | ------: |
-| nfm-ctcss-670-voice     | nfm  | ctcss  | voice     |   −14.4 |      0.6 |     0.3 |
-| nfm-ctcss-1000-voice    | nfm  | ctcss  | voice     |   −15.0 |      0.6 |     0.3 |
-| nfm-ctcss-2503-voice    | nfm  | ctcss  | voice     |   −16.0 |      0.6 |     0.3 |
-| nfm-dcs-023n-voice      | nfm  | dcs    | voice     |   −15.2 |      0.6 |     0.3 |
-| nfm-dcs-754i-voice      | nfm  | dcs    | voice     |   −15.7 |     0.65 |     0.3 |
-| nfm-voice               | nfm  | voice  | voice     |   −14.9 |      0.6 |     0.2 |
-| am-voice                | am   | voice  | voice     |   −15.7 |      0.7 |     0.0 |
-| nfm-carrier             | nfm  | none   | neither   |   −59.8 |      0.0 |     0.0 |
-| am-carrier              | am   | none   | neither   |   −19.3 |      0.1 |     0.0 |
-| nfm-dmr-4fsk            | nfm  | none   | data-like |    −9.7 |      0.0 |     0.8 |
-| nfm-pocsag-512          | nfm  | none   | data-like |    −1.7 |      0.1 |     1.0 |
-| nfm-pocsag-1200         | nfm  | none   | data-like |    −0.2 |      0.1 |     1.0 |
-| nfm-clicks              | nfm  | none   | neither   |   −59.1 |      0.8 |     0.0 |
-| nfm-impulse             | nfm  | none   | neither   |    −0.5 |      0.0 |     0.3 |
-| nfm-noise               | nfm  | none   | neither   |   −0.45 |      0.0 |     0.3 |
-| nfm-fsk-syllabic-bursts | nfm  | voice  | voice     |    −5.6 |      0.7 |     0.3 |
+| Fixture                 | Expect | File      | audioDb | syllabic | cluster | Windows voice / data-like / neither |
+| ----------------------- | ------ | --------- | ------: | -------: | ------: | ----------------------------------- |
+| nfm-ctcss-670-voice     | ctcss  | voice     |  −14.35 |      0.6 |     0.3 | 61 / 0 / 0                          |
+| nfm-ctcss-1000-voice    | ctcss  | voice     |   −15.0 |      0.6 |     0.3 | 61 / 0 / 0                          |
+| nfm-ctcss-2503-voice    | ctcss  | voice     |  −15.95 |      0.6 |     0.3 | 61 / 0 / 0                          |
+| nfm-dcs-023n-voice      | dcs    | voice     |   −15.2 |      0.6 |     0.3 | 61 / 0 / 0                          |
+| nfm-dcs-754i-voice      | dcs    | voice     |  −15.65 |     0.65 |     0.3 | 61 / 0 / 0                          |
+| nfm-voice               | voice  | voice     |  −14.85 |      0.6 |     0.2 | 61 / 0 / 0                          |
+| am-voice                | voice  | voice     |   −15.7 |      0.7 |     0.0 | 61 / 0 / 0                          |
+| nfm-carrier             | none   | neither   |   −59.8 |      0.0 |     0.0 | 0 / 0 / 61                          |
+| am-carrier              | none   | neither   |   −19.3 |      0.1 |     0.0 | 10 / 0 / 51 (risk, windows 13-22)   |
+| nfm-dmr-4fsk            | none   | neither   |   −2.85 |      0.1 |     0.3 | 0 / 0 / 61                          |
+| nfm-dmr-4fsk-continuous | none   | data-like |    −9.8 |      0.0 |     0.8 | 0 / 61 / 0                          |
+| nfm-pocsag-512          | none   | data-like |    −1.7 |      0.1 |     1.0 | 0 / 61 / 0                          |
+| nfm-pocsag-1200         | none   | data-like |    −0.2 |      0.1 |     1.0 | 0 / 61 / 0                          |
+| nfm-clicks              | none   | neither   |   −59.1 |      0.8 |     0.0 | 3 / 2 / 56 (risk, windows 0-2)      |
+| nfm-impulse             | none   | neither   |    −0.5 |      0.0 |     0.3 | 0 / 0 / 61                          |
+| nfm-noise               | none   | neither   |   −0.45 |      0.0 |     0.3 | 0 / 0 / 61                          |
+| nfm-fsk-syllabic-bursts | voice  | voice     |    −5.6 |      0.7 |     0.3 | 44 / 0 / 17 (known limitation)      |
 
-Synthesis parameters adjusted during generation (thresholds unchanged): voice is scaled to
-an RMS of 0.35 over its syllables and soft-limited, with shorter pauses; DCS deviation is
-400 Hz (at 600 Hz the DCS fixtures' median cluster reached 0.6, data-like); DMR uses
-rectangular symbols with both TDMA slots keyed (with a one-symbol moving-average pulse and
-only one slot keyed the median cluster was 0.3 to 0.4). The clicks fixture is `neither`
-because most 50 ms frames hold no click, so the median audio power stays at the floor.
+`rollingWindowRisk` in `manifest.json` lists every voice-positive window of a never-open
+fixture with its medians. These are findings, not tuned away:
+
+- `am-carrier`: the AM chain is `|x|`, DC block, then the fast AGC (reference 0.4). After
+  the DC block only the carrier's noise envelope is left, and the AGC raises its gain over
+  about 1.5 s after key-up: audio power climbs from −52 dB (frame 6) to its −19 dB steady
+  state (frame 33). The windows over that ramp see a rising envelope (syllabic 0.3 to 1.9)
+  with median audio above −30 dB, so they judge voice. Steady state is `neither`.
+- `nfm-clicks`: windows 0 to 2 contain the five unquieted noise frames before the over
+  (audio about −0.5 dB) and the key-up step, which lift both medians over the voice
+  thresholds.
+
+`nfm-dmr-4fsk` is the design's shaped burst case (root-raised-cosine, alpha 0.2, 30 ms
+bursts every 60 ms). The design expects data-like; the analyzer measures `neither`, because
+the noise-only gaps keep most 50 ms frames from clustering. The manifest records the
+measured verdict. `nfm-dmr-4fsk-continuous` (rectangular symbols, both slots keyed) is
+data-like.
 
 `nfm-fsk-syllabic-bursts` is a known limitation, marked `"knownLimitation": true` in the
 manifest: 1 200 baud Bell 202 AFSK keyed 100 ms on, 100 ms off on a quiet NFM carrier. The
 audio-frequency tones do not cluster in the discriminator and the 5 Hz keying reads as
-syllables, so the pinned scanner judge calls it voice and the evidence gate opens on it.
-Its manifest `expect` and `verdict` are therefore `voice`.
+syllables, so the pinned scanner judge calls it voice. Its `expect` and `verdict` are `voice`.
+
+Synthesis choices made while generating (thresholds unchanged): voice is scaled to an RMS of
+0.35 over its syllables and soft-limited, with short pauses; DCS deviation is 400 Hz. The
+clicks fixture is `neither` over the whole file because most 50 ms frames hold no click.

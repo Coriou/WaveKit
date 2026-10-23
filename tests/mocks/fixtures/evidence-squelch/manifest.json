@@ -60,14 +60,83 @@
 		"expect": "none",
 		"verdict": "neither",
 		"overOnsetS": 0.25,
-		"seed": 22
+		"seed": 22,
+		"rollingWindowRisk": [
+			{
+				"start": 13,
+				"audioDb": -29.0,
+				"syllabic": 1.9,
+				"cluster": 0.0
+			},
+			{
+				"start": 14,
+				"audioDb": -27.9,
+				"syllabic": 1.75,
+				"cluster": 0.0
+			},
+			{
+				"start": 15,
+				"audioDb": -26.7,
+				"syllabic": 1.05,
+				"cluster": 0.0
+			},
+			{
+				"start": 16,
+				"audioDb": -25.15,
+				"syllabic": 0.4,
+				"cluster": 0.0
+			},
+			{
+				"start": 17,
+				"audioDb": -23.9,
+				"syllabic": 0.4,
+				"cluster": 0.0
+			},
+			{
+				"start": 18,
+				"audioDb": -23.45,
+				"syllabic": 0.35,
+				"cluster": 0.0
+			},
+			{
+				"start": 19,
+				"audioDb": -22.5,
+				"syllabic": 0.3,
+				"cluster": 0.0
+			},
+			{
+				"start": 20,
+				"audioDb": -21.25,
+				"syllabic": 0.3,
+				"cluster": 0.0
+			},
+			{
+				"start": 21,
+				"audioDb": -20.5,
+				"syllabic": 0.3,
+				"cluster": 0.0
+			},
+			{
+				"start": 22,
+				"audioDb": -20.1,
+				"syllabic": 0.3,
+				"cluster": 0.0
+			}
+		]
 	},
 	"nfm-dmr-4fsk": {
 		"mode": "nfm",
 		"expect": "none",
-		"verdict": "data-like",
+		"verdict": "neither",
 		"overOnsetS": 0.25,
 		"seed": 31
+	},
+	"nfm-dmr-4fsk-continuous": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "data-like",
+		"overOnsetS": 0.25,
+		"seed": 32
 	},
 	"nfm-pocsag-512": {
 		"mode": "nfm",
@@ -88,7 +157,27 @@
 		"expect": "none",
 		"verdict": "neither",
 		"overOnsetS": 0.25,
-		"seed": 41
+		"seed": 41,
+		"rollingWindowRisk": [
+			{
+				"start": 0,
+				"audioDb": -22.2,
+				"syllabic": 0.4,
+				"cluster": 0.3
+			},
+			{
+				"start": 1,
+				"audioDb": -22.2,
+				"syllabic": 0.4,
+				"cluster": 0.3
+			},
+			{
+				"start": 2,
+				"audioDb": -22.2,
+				"syllabic": 0.45,
+				"cluster": 0.3
+			}
+		]
 	},
 	"nfm-impulse": {
 		"mode": "nfm",

@@ -5,7 +5,10 @@ For every fixture in fixtures.py: write the 48 kHz cf32 input to a temporary dir
 run `wavekit-iqcap analyze --in <abs cf32> --mode nfm|am` with fd 4 inherited to capture
 the one JSON line, and store stdout as <name>.audio.s16le (8 kHz s16le) and the JSON as
 <name>.stats.json next to manifest.json. Exits non-zero on any analyzer `reject`, on a
-golden over its size bound, or when the medians do not give the manifest verdict.
+golden over its size bound, when the whole-file medians do not give the manifest verdict,
+or when a fixture expected to open has no voice-positive 20-frame window. A never-open
+fixture with any voice-positive 20-frame window is not a failure here: it is recorded in
+manifest.json as `rollingWindowRisk` (window start frame and medians) for review.
 
 The verdict check mirrors `isVoice` (median syllabic >= 0.3 and median audioDb >= -30)
 and `dataLike` (median cluster >= 0.6) of src/core/scanner/analog-trial.ts with the
@@ -38,6 +41,7 @@ MAX_GOLDEN_BYTES = 65_536
 VOICE_INDEX = 0.3
 AUDIO_MIN_DB = -30.0
 DATA_SCORE = 0.6
+WINDOW = 20
 
 
 def analyze(cf32, mode):
@@ -66,19 +70,27 @@ def analyze(cf32, mode):
 	return audio, event
 
 
+def medians(frames):
+	return {k: statistics.median(f[k] for f in frames) for k in ("audioDb", "syllabic", "cluster")}
+
+
 def verdict(frames):
-	cluster = statistics.median(f["cluster"] for f in frames)
-	if cluster >= DATA_SCORE:
+	m = medians(frames)
+	if m["cluster"] >= DATA_SCORE:
 		return "data-like"
-	syllabic = statistics.median(f["syllabic"] for f in frames)
-	audio = statistics.median(f["audioDb"] for f in frames)
-	return "voice" if syllabic >= VOICE_INDEX and audio >= AUDIO_MIN_DB else "neither"
+	return "voice" if m["syllabic"] >= VOICE_INDEX and m["audioDb"] >= AUDIO_MIN_DB else "neither"
+
+
+def rolling(frames):
+	"""Verdict of every WINDOW-frame window (requirement 1.3 judges 20 frames, 1 s),
+	as (start frame, verdict, medians)."""
+	return [(s, verdict(frames[s : s + WINDOW]), medians(frames[s : s + WINDOW])) for s in range(len(frames) - WINDOW + 1)]
 
 
 def main():
 	p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 	p.add_argument("--out", type=pathlib.Path, required=True)
-	p.add_argument("--fixture", default="all", help="manifest name or all (manifest.json is always complete)")
+	p.add_argument("--fixture", default="all", help="manifest name or all (manifest.json is written only for all)")
 	args = p.parse_args()
 	if args.fixture != "all" and args.fixture not in fixtures.FIXTURES:
 		p.error("unknown fixture")
@@ -101,11 +113,24 @@ def main():
 			(args.out / f"{name}.stats.json").write_text(stats)
 			frames = event["frames"]
 			got = verdict(frames)
-			med = {k: round(statistics.median(f[k] for f in frames), 2) for k in ("carrierDb", "hfNoiseDb", "audioDb", "syllabic", "cluster")}
-			print(f"{name:22s} frames={len(frames)} audio={len(audio)}B stats={len(stats)}B verdict={got} {json.dumps(med)}")
+			windows = rolling(frames)
+			voiced = [w for w in windows if w[1] == "voice"]
+			med = {k: round(v, 2) for k, v in medians(frames).items()}
+			counts = {v: sum(1 for w in windows if w[1] == v) for v in ("voice", "data-like", "neither")}
+			print(f"{name:24s} file={got:9s} windows={json.dumps(counts)} {json.dumps(med)}")
 			if got != entry["verdict"]:
-				failed.append(f"{name}: verdict {got}, manifest {entry['verdict']}")
-	(args.out / "manifest.json").write_text(json.dumps(entries, indent="\t") + "\n")
+				failed.append(f"{name}: whole-file verdict {got}, manifest {entry['verdict']}")
+			if entry["expect"] == "none" and voiced:
+				# A never-open fixture with a voice-positive window: recorded, not hidden.
+				entry["rollingWindowRisk"] = [
+					{"start": s, "audioDb": round(m["audioDb"], 2), "syllabic": round(m["syllabic"], 2), "cluster": round(m["cluster"], 2)}
+					for s, _v, m in voiced
+				]
+				print(f"  rolling-window risk: voice-positive windows starting at {[w[0] for w in voiced]}")
+			if entry["expect"] != "none" and not voiced:
+				failed.append(f"{name}: expected to open but no 20-frame window is voice-positive")
+	if args.fixture == "all":
+		(args.out / "manifest.json").write_text(json.dumps(entries, indent="\t") + "\n")
 	if failed:
 		print("\n".join(failed), file=sys.stderr)
 		return 1
