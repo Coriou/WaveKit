@@ -253,6 +253,9 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
 {
   "afterOffset": {
     "agc": "off",
+    "autoSquelch": {
+      "state": "off",
+    },
     "bytesStreamed": 0,
     "clientCount": 0,
     "config": {
@@ -295,6 +298,9 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
   },
   "running": {
     "agc": "off",
+    "autoSquelch": {
+      "state": "off",
+    },
     "bytesStreamed": 0,
     "clientCount": 0,
     "config": {
