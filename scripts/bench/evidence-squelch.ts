@@ -3,7 +3,10 @@
  * closed fast path, at 25 kHz and 50 kHz audio in s16le and f32le. The voice case starts a fresh
  * gate in `waiting` over seeded speech-shaped audio and runs through the latch to `open`; the
  * idle case is stage 1 closed with an empty FIFO. Work is sliced into 10 ms stage-1 blocks
- * inside 64 KiB chunks, as the live wiring decides per block. Core fraction is processing time
+ * inside 64 KiB chunks, as the live wiring decides per block. Core fraction is process CPU time
+ * (process.cpuUsage() user + system deltas around each timed step) per second of audio, shown
+ * next to an elapsed-time proxy (performance.now()); the core budget is judged on CPU time.
+ * Durations below MIN_SECONDS are rejected (see there). Processing time
  * per second of audio; the step is the largest synchronous 64 KiB chunk. Both are medians of
  * five passes after a discarded warmup pass. Pass/fail is against the desktop budgets
  * (docs/specs/evidence-squelch/design.md, Budgets): <= 0.006 core and <= 1 ms per 64 KiB.
@@ -30,6 +33,12 @@ const CHUNK_BYTES = 64 * 1024
 const BLOCK_MS = 10
 const CORE_BUDGET = 0.006
 const STEP_BUDGET_MS = 1
+/**
+ * Shortest run that fills a whole 64 KiB chunk and reaches a latch in every case: the longest
+ * chunk is s16le at 25 kHz, 65 536 / (2 x 25 000) = 1.31 s of audio; the earliest voice latch is
+ * VOICE_FRAMES x FRAME_MS = 20 x 50 ms = 1 s. 2 s covers both with margin.
+ */
+export const MIN_SECONDS = 2
 
 export type BenchPath =
 	| "frozen fill(0)"
@@ -42,7 +51,10 @@ export interface BenchRow {
 	stage: "before" | "after"
 	rate: number
 	format: EvidencePcmFormat
+	/** Process CPU (user + system) per second of audio. */
 	coreFraction: number
+	/** Elapsed-time proxy (performance.now()) per second of audio. */
+	elapsedCoreFraction: number
 	maxStepMs: number
 	/** Seconds of audio before the latch (voice case), else null. */
 	latchS: number | null
@@ -51,6 +63,8 @@ export interface BenchRow {
 
 interface PassResult {
 	ms: number
+	cpuUs: number
+	fullChunks: number
 	maxStepMs: number
 	latchS: number | null
 }
@@ -120,19 +134,27 @@ function runPass(
 		}
 	}
 	let ms = 0
+	let cpuUs = 0
+	let fullChunks = 0
 	let maxStepMs = 0
 	for (base = 0; base < source.length; base += CHUNK_BYTES) {
 		const n = Math.min(CHUNK_BYTES, source.length - base)
 		// The copy stands in for the demodulator's fresh output chunk and is not timed.
 		source.copy(scratch, 0, base, base + n)
+		const c0 = process.cpuUsage()
 		const t0 = performance.now()
 		step(scratch, 0, n)
 		const dt = performance.now() - t0
+		const c = process.cpuUsage(c0)
+		cpuUs += c.user + c.system
 		ms += dt
+		if (n === CHUNK_BYTES) fullChunks += 1
 		if (n === CHUNK_BYTES && dt > maxStepMs) maxStepMs = dt
 	}
 	return {
 		ms,
+		cpuUs,
+		fullChunks,
 		maxStepMs,
 		latchS: latchByte < 0 ? null : latchByte / width / rate,
 	}
@@ -145,8 +167,11 @@ function median(values: number[]): number {
 
 export function runBench(opts: { seconds: number }): BenchRow[] {
 	const { seconds } = opts
-	if (!Number.isFinite(seconds) || seconds <= 0)
-		throw new WaveKitError("Expected positive seconds", "INVALID_BENCH_OPTIONS")
+	if (!Number.isFinite(seconds) || seconds < MIN_SECONDS)
+		throw new WaveKitError(
+			`Expected at least ${MIN_SECONDS} seconds (one full 64 KiB chunk and a latch)`,
+			"INVALID_BENCH_OPTIONS",
+		)
 	const rows: BenchRow[] = []
 	const scratch = Buffer.alloc(CHUNK_BYTES)
 	for (const rate of [25_000, 50_000])
@@ -157,7 +182,15 @@ export function runBench(opts: { seconds: number }): BenchRow[] {
 				const passes = Array.from({ length: 5 }, () =>
 					runPass(path, source, scratch, rate, format),
 				)
-				const coreFraction = median(passes.map(p => p.ms)) / (seconds * 1000)
+				const coreFraction =
+					median(passes.map(p => p.cpuUs)) / (seconds * 1_000_000)
+				const elapsedCoreFraction =
+					median(passes.map(p => p.ms)) / (seconds * 1000)
+				const latchS = passes[0]?.latchS ?? null
+				// Never pass a row whose step or (voice) latch went unmeasured.
+				const measured =
+					passes.every(p => p.fullChunks > 0) &&
+					(!path.startsWith("EvidenceGate") || latchS !== null)
 				const maxStepMs = median(passes.map(p => p.maxStepMs))
 				rows.push({
 					path,
@@ -165,9 +198,13 @@ export function runBench(opts: { seconds: number }): BenchRow[] {
 					rate,
 					format,
 					coreFraction,
+					elapsedCoreFraction,
 					maxStepMs,
-					latchS: passes[0]?.latchS ?? null,
-					pass: coreFraction <= CORE_BUDGET && maxStepMs <= STEP_BUDGET_MS,
+					latchS,
+					pass:
+						measured &&
+						coreFraction <= CORE_BUDGET &&
+						maxStepMs <= STEP_BUDGET_MS,
 				})
 			}
 		}
@@ -176,18 +213,18 @@ export function runBench(opts: { seconds: number }): BenchRow[] {
 
 export function formatTable(rows: BenchRow[]): string {
 	const lines = [
-		"| Stage | Path | Rate | Format | Core fraction | Max step per 64 KiB (ms) | Latch (s) | Pass |",
-		"| --- | --- | --- | --- | --- | --- | --- | --- |",
+		"| Stage | Path | Rate | Format | CPU core fraction | Elapsed core fraction (proxy) | Max step per 64 KiB (ms) | Latch (s) | Pass |",
+		"| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	]
 	for (const r of rows)
 		lines.push(
-			`| ${r.stage} | ${r.path} | ${r.rate / 1000} kHz | ${r.format} | ${r.coreFraction.toFixed(5)} | ${r.maxStepMs.toFixed(3)} | ${r.latchS === null ? "-" : r.latchS.toFixed(2)} | ${r.pass ? "pass" : "FAIL"} |`,
+			`| ${r.stage} | ${r.path} | ${r.rate / 1000} kHz | ${r.format} | ${r.coreFraction.toFixed(5)} | ${r.elapsedCoreFraction.toFixed(5)} | ${r.maxStepMs.toFixed(3)} | ${r.latchS === null ? "-" : r.latchS.toFixed(2)} | ${r.pass ? "pass" : "FAIL"} |`,
 		)
 	lines.push(
-		`| budget | Total while a carrier is up (desktop) | 25 / 50 kHz | both | <= ${CORE_BUDGET} | <= ${STEP_BUDGET_MS} | - | - |`,
-		"| budget | Decimator + VoiceFrameMeter + ToneEvidence (desktop) | 25 kHz | both | <= 0.001 + 0.001 + 0.003 | - | - | - |",
-		"| budget | Judge + PreRoll copy (desktop) | 25 kHz | both | < 0.001 each | - | - | - |",
-		"| budget | Fast path (closed, FIFO empty) | any | both | as today (one fill(0)) | - | - | - |",
+		`| budget | Total while a carrier is up (desktop) | 25 / 50 kHz | both | <= ${CORE_BUDGET} | - | <= ${STEP_BUDGET_MS} | - | - |`,
+		"| budget | Decimator + VoiceFrameMeter + ToneEvidence (desktop) | 25 kHz | both | <= 0.001 + 0.001 + 0.003 | - | - | - | - |",
+		"| budget | Judge + PreRoll copy (desktop) | 25 kHz | both | < 0.001 each | - | - | - | - |",
+		"| budget | Fast path (closed, FIFO empty) | any | both | as today (one fill(0)) | - | - | - | - |",
 	)
 	return lines.join("\n")
 }
