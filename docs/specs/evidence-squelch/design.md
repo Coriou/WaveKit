@@ -590,6 +590,43 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   - Each difference cluster must start within 84 ms of a stage-1 gate edge of either run, placed
     per over from the manual stream's open step, with at most one cluster per over edge. The one
     cluster on that run started 30 ms from its close edge.
+  Review round 2 (2026-10-23): a cluster's divergence (its start and its largest difference) must
+  lie inside the window from the earlier to the later of the two runs' edge stamps, ±84 ms.
+  - Past that window the difference may only decay through the back chain's memory: at most
+    0.7 times the in-window peak per 10 ms block. Measured 0.607 per block (τ 20.0 ms) over 13
+    blocks on the am-voice close.
+  - A cluster cannot fit inside ±84 ms. That cluster is 165 ms long because the chain decays
+    for about 135 ms after both gates agree, so a length bound of block + chunk phase would
+    reject the recorded run. The decay bound rejects a 400 ms mute 80 ms after the open and a
+    mute of an over's first 400 ms.
+  - The open-step locator allows a 5 ms rise.
+- Amendment (2026-10-23): measurement windows for 6.1 and 8.2. Requirement 6.1 ("at most 2 ms added
+  to event-loop delay p99") and the hot-path table's "Event-loop p99 added" row mean steady
+  streaming. The driver compares only loop-meter intervals wholly after the source's first over
+  onset.
+  - The meter takes one interval per 2 s (`EFFICIENCY_SAMPLE_MS`), so a poll at t covers from
+    t − 4.5 s on.
+  - Live audio starts 0.8-1.0 s after the fake's epoch, with pipeline spawn and JIT cold start.
+    The first over is also the gate's first open.
+  - The startup intervals are reported only. They read 95-135 ms on auto and 97-1 684 ms on
+    manual at 2.048 Msps csdr; the first is the largest in every run.
+  - Criterion: median steady p99 of auto − median steady p99 of manual ≤ 2 ms. Steady p90 and
+    max of both runs are reported only.
+  - Why the median: am-voice is ungated and so runs identical code in both modes, yet its steady
+    maxima differ by 7.7 ms (21.9 vs 14.2). Single 2 s intervals carry host noise. The median
+    measures the gate's added steady delay.
+  - Measured steady state: medians 12.5-12.8 ms with auto − manual within 0.4 ms. p90 13.2-13.8
+    ms on six fixtures; ctcss-1000 reads 19.1 vs 15.1. Maxima 14.2-106.6 ms.
+  The stage-1 comparison of 8.2 ("transmission events identical to a manual-mode run", design
+  "within one block") checks requirement 1.6. Open and close times are as today, so auto may not
+  delay them. Event `startedAt` is the core's wall clock when Node handles the edge.
+  - The fake's chunk phase (-55 to +6 ms per over) is the same in both runs and cancels.
+  - Per over, |auto − manual| ≤ one 10 ms block (the two thresholds may cross in adjacent blocks)
+    plus both runs' median steady interval p99, about 35 ms. The median auto − manual over the
+    overs must be within 5 ms, for opens and closes, so a gate delaying stage-1 events by 8 ms
+    fails.
+  - Measured: worst per over 6.1-25.9 ms. Biases -2.5 to +2.3 ms on opens and -1.3 to +1.8 ms on
+    closes.
 
 ## Live acceptance plan (requirement 8.3, Main with the user)
 

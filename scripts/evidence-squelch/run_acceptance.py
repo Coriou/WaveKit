@@ -46,7 +46,15 @@ ONSET_TOLERANCE_S = 0.020
 MAX_DELAY_S = 1.5
 BYTE_RATE_TOLERANCE = 0.005
 EVENT_TOLERANCE_S = 0.010
+# Stage-1 edge bias (verdict_events): half a squelch block.
+EDGE_BIAS_S = 0.005
 P99_TOLERANCE_MS = 2.0
+# Loop meter (verdict_p99): one interval per EFFICIENCY_SAMPLE_MS (decoders/enablement/contract.ts)
+# of 2 s; a tick may run late by the slack. At least P99_MIN_STEADY steady samples (polled each
+# second, so about P99_MIN_STEADY / 2 intervals).
+EFFICIENCY_SAMPLE_S = 2.0
+P99_TICK_SLACK_S = 0.5
+P99_MIN_STEADY = 10
 REF_RATE = 8_000
 CORR_WINDOW_S = 0.25
 CORR_SEARCH_S = 0.05
@@ -102,9 +110,8 @@ RESAMPLE_PHASES = 512
 # STAGE1_PROBE_S probe (or, failing that, a short probe within the LSB tolerance) within
 # STAGE1_SEARCH_S of the arrival-time estimate, keeping the best-agreeing shift; then every sample
 # must agree within STAGE1_LSB_TOLERANCE (AGC state after a block-different edge), and larger
-# differences may only form clusters (merged across STAGE1_MERGE_S) no longer than
-# STAGE1_EDGE_WINDOW_S, at most one per over edge (the open and the close edge: auto and
-# manual thresholds differ), each starting at a stage-1 edge of either run. The content shift
+# differences may only form clusters (merged across STAGE1_MERGE_S), at most one per over edge (the open and the close edge: auto and manual thresholds differ),
+# each diverging inside that edge's window and only decaying after it. The content shift
 # must also match the arrival-time shift (stage1_timing), so a playback delay cannot be aligned
 # away. Evidence gating (a waiting gate mutes at least the 1 s voice window per over), a pre-roll
 # delay or an interior mute breaks this. The search is bounded because the residue
@@ -115,7 +122,13 @@ STAGE1_PROBES = 8
 STAGE1_SEARCH_S = 0.2
 STAGE1_LSB_TOLERANCE = 1
 STAGE1_MERGE_S = 0.1
-STAGE1_EDGE_WINDOW_S = 0.5
+# Difference tail past an edge window (verdict_stage1_identity): once both gates agree, the
+# difference decays through the back chain's memory. Measured on the 2.048 Msps csdr am-voice
+# close: a factor 0.607 per 10 ms block (tau 20.0 ms) for 13 consecutive blocks (19 664, 6 767,
+# 1 493, 907, 551, 335, ... to within 1 LSB 165 ms after the divergence). 0.7 per block (tau
+# 28 ms) leaves 40 % margin on tau. With a 32 767 peak the tail is at most 30 blocks (0.3 s).
+STAGE1_TAIL_BLOCK_S = 0.010
+STAGE1_TAIL_DECAY = 0.7
 # Timing of the ungated stream (stage1_timing): latency-floor jitter between two runs (measured
 # p1 minus min of the arrival latency envelope: 3.5 and 4.0 ms on the 2.048 Msps csdr am-voice
 # runs), and the largest tolerance that still shows a 20 ms delay.
@@ -135,6 +148,10 @@ STEP_MIN_ABS = 16_384
 STEP_QUIET_ABS = 8_192
 STEP_QUIET_S = 0.05
 STEP_EARLY_S = 0.2
+# Rise allowance: 5 ms, the fast AGC attack the design quotes; live am-voice rose in one sample
+# (850 to 32 767) and the analyzer's am-carrier and am-voice goldens in one 10 ms block. Shorter
+# than STAGE1_EDGE_MAP_ERR_S, so a ramp's crossing still places the edge within the map error.
+STEP_RISE_S = 0.005
 STAGE1_EDGE_MAP_ERR_S = 0.010
 
 
@@ -516,11 +533,13 @@ def open_steps(manual_pcm, manual, clock, anchor):
 	"""{over: (manual sample index, source open time)} of the stage-1 open as the manual stream
 	renders it. While closed the AM chain plays the hold residue (peak about -21 dBFS); the first
 	open block arrives with the AGC at full gain and clips. The step is the first sample at least
-	STEP_MIN_ABS with none of STEP_QUIET_ABS in the STEP_QUIET_S before it, searched from
+	STEP_MIN_ABS reached within STEP_RISE_S of the end of a STEP_QUIET_S run with no sample of
+	STEP_QUIET_ABS (a finite rise time is allowed; its crossing lies within the edge map error),
+	searched from
 	STEP_EARLY_S before to MAX_DELAY_S after the open's source time on the arrival anchor (the
 	fake sends IQ up to one chunk early). Each over's edges are placed from its own step."""
 	x, rate = _pcm16(manual_pcm), manual["audioRate"]
-	quiet = int(STEP_QUIET_S * rate)
+	quiet, rise = int(STEP_QUIET_S * rate), max(1, int(STEP_RISE_S * rate))
 	out = {}
 	for e in manual.get("transmissions", []):
 		if e.get("state") != "closed" or not isinstance(e.get("startedAt"), str):
@@ -531,13 +550,22 @@ def open_steps(manual_pcm, manual, clock, anchor):
 		hi = int((rel - anchor + MAX_DELAY_S) * rate)
 		if lo < quiet or hi > len(x):
 			continue  # the open is outside the recording
-		run = 0
-		for i in range(lo - quiet, hi):
+		# runs[j]: consecutive quiet samples ending just before sample (lo - quiet - rise + j).
+		base = lo - quiet - rise
+		if base < 0:
+			continue
+		runs, run = [], 0
+		for i in range(base, hi):
+			runs.append(run)
 			v = x[i]
-			if i >= lo and run >= quiet and (v >= STEP_MIN_ABS or v <= -STEP_MIN_ABS):
-				out[k] = (i, rel)
-				break
 			run = 0 if v >= STEP_QUIET_ABS or v <= -STEP_QUIET_ABS else run + 1
+		for i in range(lo, hi):
+			v = x[i]
+			if v >= STEP_MIN_ABS or v <= -STEP_MIN_ABS:
+				# A quiet run ends at most `rise` samples before the crossing (finite rise time).
+				if any(runs[j - base] >= quiet for j in range(i - rise, i + 1)):
+					out[k] = (i, rel)
+					break
 		else:
 			raise InvalidRun(f"over {k}: stage-1 open step not found in the manual AM stream")
 	if len(out) < MIN_OVERS:
@@ -633,23 +661,44 @@ def verdict_stage1_identity(auto_pcm, manual_pcm, rate, timing, edges, slack_s, 
 	longest = max(((e - s + 1) / rate for s, e in clusters), default=0.0)
 	notes.update({"overlapS": overlap_s, "lsbDiffs": lsb, "edgeClusters": len(clusters), "longestClusterS": longest})
 	slack = slack_s * rate
-	claimed, offsets = {}, []
-	notes["edgeOffsetsMs"] = offsets
+	# One window per over edge: from the earlier of the two runs' own edge stamps minus the
+	# slack to the later plus the slack (manual sample indices).
+	windows = {}
+	for i, k, kind in edges:
+		lo, hi = windows.get((k, kind), (i, i))
+		windows[(k, kind)] = (min(lo, i), max(hi, i))
+	windows = {key: (lo - slack, hi + slack) for key, (lo, hi) in windows.items()}
+	block = max(1, int(STAGE1_TAIL_BLOCK_S * rate))
+	claimed, offsets, tails = {}, [], []
+	notes.update({"edgeOffsetsMs": offsets, "tailBlocks": tails})
 	for s, e in clusters:
-		if (e - s + 1) / rate > STAGE1_EDGE_WINDOW_S:
-			return (f"auto differs from the manual stage-1 stream for {(e - s + 1) / rate:.3f} s from auto sample {s}"
-				f" (limit {STAGE1_EDGE_WINDOW_S} s at a stage-1 edge)"), notes
-		# A difference starts where the two runs' gates first disagree: at a gate edge of either
-		# run. Edges are manual sample indices; auto sample s is manual sample s + shift.
-		near = sorted((abs(s + shift - i), k, kind, s + shift - i) for i, k, kind in edges if abs(s + shift - i) <= slack)
-		if not near:
+		# The two gates first disagree at a gate edge of either run: the whole divergence (the
+		# cluster's start and its largest difference) lies inside that edge's window. Auto
+		# sample s is manual sample s + shift.
+		ms, me = s + shift, e + shift
+		inside = sorted((abs(ms - (lo + hi) / 2), key, lo, hi) for key, (lo, hi) in windows.items() if lo <= ms <= hi)
+		if not inside:
 			return (f"auto differs from the manual stage-1 stream at {s / rate:.3f} s into the auto stream,"
 				f" not within {slack_s * 1000:.0f} ms of a stage-1 edge (interior mute)"), notes
-		_dist, k, kind, off = near[0]
-		offsets.append(round(off / rate * 1000, 2))
+		_d, (k, kind), lo, hi = inside[0]
+		offsets.append(round((ms - (lo + hi) / 2) / rate * 1000, 2))
 		if (k, kind) in claimed:
 			return f"more than one difference at the over {k} {kind} edge (at {claimed[(k, kind)] / rate:.3f} s and {s / rate:.3f} s)", notes
 		claimed[(k, kind)] = s
+		stop = min(me, int(hi))
+		peak = max(abs(a[i - shift] - m[i]) for i in range(ms, stop + 1))
+		# Past the window both gates agree, and the difference only decays through the back
+		# chain's memory: each STAGE1_TAIL_BLOCK_S block's largest difference stays under
+		# peak x STAGE1_TAIL_DECAY^(n + 1) + LSB tolerance. A mute or any new difference does not.
+		n = 0
+		for b in range(stop + 1, me + 1, block):
+			top = max(abs(a[i - shift] - m[i]) for i in range(b, min(me + 1, b + block)))
+			bound = peak * STAGE1_TAIL_DECAY ** (n + 1) + tol
+			if top > bound:
+				return (f"auto differs from the manual stage-1 stream {(b - hi) / rate * 1000:.0f} ms after the over {k} {kind}"
+					f" edge window by {top} (decaying bound {bound:.0f} from {peak}): not a stage-1 edge difference"), notes
+			n += 1
+		tails.append(n)
 	return None, notes
 
 
@@ -730,31 +779,120 @@ def ws_overs(side, clock):
 	return complete_overs(span[0], span[1], clock, CLOSE_ALLOWANCE_S)
 
 
-def verdict_events(auto, manual, auto_clock, manual_clock, carrier):
+def verdict_events(auto, manual, auto_clock, manual_clock, carrier, jitter_s):
 	"""Transmissions over the overs both WebSocket recordings fully cover, each run on its own
-	source clock: the same transmissions per over with edges within EVENT_TOLERANCE_S, and on
-	carrier-bearing fixtures at least one per over."""
+	source clock: the same transmissions per over, at least one per over on carrier-bearing
+	fixtures, and edges that match within the stamp physics (requirement 1.6: stage-1 open and
+	close times as today; 8.2 checks them against the manual run).
+
+	An edge's startedAt is the core's wall clock when Node handles the squelch edge, not a
+	sample-derived time. Its offset from the source onset carries the fake's chunk phase (-55 to
+	+6 ms over the 19 overs, the same pattern in every run: both fakes replay the same file from
+	their epoch), which cancels between the runs. What does not cancel: the two thresholds may
+	cross the carrier in adjacent 10 ms blocks, and each stamp is late by that run's event-loop
+	delay. Per over, |auto - manual| <= EVENT_TOLERANCE_S + jitter_s, where jitter_s is the sum of
+	both runs' median steady interval p99 loop delay (2.048 Msps csdr: 10 + 12.7 + 12.7 = 35 ms).
+	A gate that delays stage-1 events shows as a bias, so the median of auto - manual over all
+	compared overs must stay within EDGE_BIAS_S (half a block), for opens and for closes. Returns (failure or None, notes)."""
 	common = ws_overs(auto, auto_clock) & ws_overs(manual, manual_clock)
 	if len(common) < MIN_OVERS:
 		raise InvalidRun(f"recordings share {len(common)} complete overs, need {MIN_OVERS}")
 	a, m = event_edges(auto["transmissions"], auto_clock), event_edges(manual["transmissions"], manual_clock)
+	limit = EVENT_TOLERANCE_S + jitter_s
+	opens, closes = [], []
+	notes = {"edgeLimitMs": limit * 1000, "edgeBiasLimitMs": EDGE_BIAS_S * 1000}
+	worst = None
 	for k in sorted(common):
 		la, lm = a.get(k, []), m.get(k, [])
 		if carrier and (not la or not lm):
-			return f"no completed transmission in over {k}: auto {len(la)} manual {len(lm)}"
+			return f"no completed transmission in over {k}: auto {len(la)} manual {len(lm)}", notes
 		if len(la) != len(lm):
-			return f"transmission count differs in over {k}: auto {len(la)} manual {len(lm)}"
+			return f"transmission count differs in over {k}: auto {len(la)} manual {len(lm)}", notes
 		for (ao, ac), (mo, mc) in zip(la, lm):
-			if abs(ao - mo) > EVENT_TOLERANCE_S or abs(ac - mc) > EVENT_TOLERANCE_S:
-				return f"transmission edges differ in over {k}: auto {ao:.3f}-{ac:.3f} manual {mo:.3f}-{mc:.3f}"
-	return None
+			opens.append(ao - mo)
+			closes.append(ac - mc)
+			d = max(abs(ao - mo), abs(ac - mc))
+			if worst is None or d > worst[0]:
+				worst = (d, k, ao, ac, mo, mc)
+	if worst is not None:
+		notes["edgeMaxMs"] = worst[0] * 1000
+		if worst[0] > limit:
+			_d, k, ao, ac, mo, mc = worst
+			return (f"transmission edges differ in over {k}: auto {ao:.3f}-{ac:.3f} manual {mo:.3f}-{mc:.3f}"
+				f" (limit {limit * 1000:.1f} ms: one block + both runs' median steady loop p99)"), notes
+
+	def median(values):
+		v = sorted(values)
+		return (v[len(v) // 2] + v[(len(v) - 1) // 2]) / 2
+
+	for kind, values in (("open", opens), ("close", closes)):
+		if values:
+			bias = median(values)
+			notes[f"{kind}BiasMs"] = bias * 1000
+			if abs(bias) > EDGE_BIAS_S:
+				return (f"auto stage-1 {kind}s are {abs(bias) * 1000:.1f} ms {'later' if bias > 0 else 'earlier'} than manual"
+					f" in the median of {len(values)} overs (limit {EDGE_BIAS_S * 1000:.0f} ms)"), notes
+	return None, notes
 
 
-def verdict_p99(auto_p99, manual_p99):
-	if not auto_p99 or not manual_p99:
-		return "missing event-loop p99 samples"
-	a, m = max(auto_p99), max(manual_p99)
-	return None if a - m <= P99_TOLERANCE_MS else f"event-loop p99 {a:.2f} ms vs manual {m:.2f} ms"
+def p99_series(side, clock):
+	"""(poll host time, p99 ms) of each loop-meter sample. New recordings carry p99Samples
+	[[mono, intervals10m, p99Ms, maxMs], ...]; older ones carry p99Ms, one per status sample
+	(the same poll iteration appends the status first), so they pair with the status times only
+	when the counts agree."""
+	samples = side.get("p99Samples")
+	if samples is not None:
+		out = [(s[0], s[2]) for s in samples if isinstance(s, (list, tuple)) and len(s) >= 3 and _number(s[0]) and _number(s[2])]
+		if len(out) != len(samples):
+			raise InvalidRun("malformed loop-meter samples")
+		return out
+	values, status = side.get("p99Ms") or [], side.get("status") or []
+	if values and len(values) != len(status):
+		raise InvalidRun(f"{len(values)} p99 samples for {len(status)} status polls: cannot time them")
+	return [(t, v) for (t, _s), v in zip(status, values) if _number(t) and _number(v)]
+
+
+def steady_p99(side, clock):
+	"""Split one run's loop-meter samples at the settle point: the source's first over onset
+	(sidecar) on the host clock. Live audio starts about 0.8-1.0 s after the fake's epoch
+	(stream anchors 0.77-0.96 s), before that onset, and the first over is also where stage 1
+	first opens (the gate's first-run code paths). The meter takes one interval per
+	EFFICIENCY_SAMPLE_S and the poll reports the latest, so a sample polled at t covers no
+	earlier than t - 2 x EFFICIENCY_SAMPLE_S - P99_TICK_SLACK_S: it is steady when that is at or
+	after the settle point. Returns (steady values, startup values)."""
+	settle = clock["connected"] + clock["onset"] - clock["toWall"]
+	cover = 2 * EFFICIENCY_SAMPLE_S + P99_TICK_SLACK_S
+	steady, startup = [], []
+	for t, v in p99_series(side, clock):
+		(steady if t - cover >= settle else startup).append(v)
+	return steady, startup
+
+
+def verdict_p99(auto, manual, clocks):
+	"""Requirement 6.1 at steady state (design amendment 2026-10-23): median(auto steady p99) -
+	median(manual steady p99) <= P99_TOLERANCE_MS. Single 2 s intervals carry host noise (the
+	ungated am-voice, identical code in both modes, showed a 7.7 ms gap in the maxima), so the
+	median measures the gate's added steady delay. Polls see each interval about twice, which
+	leaves the median of the intervals unchanged. Steady p90 and max and the startup intervals are
+	reported only. Returns (failure or None, notes)."""
+	a, a0 = steady_p99(auto, clocks["auto"])
+	m, m0 = steady_p99(manual, clocks["manual"])
+	notes = {"startupMs": {"auto": sorted(set(a0), key=a0.index), "manual": sorted(set(m0), key=m0.index)},
+		"steadySamples": [len(a), len(m)]}
+	if not a and not a0 or not m and not m0:
+		return "missing event-loop p99 samples", notes
+	if min(len(a), len(m)) < P99_MIN_STEADY:
+		raise InvalidRun(f"{min(len(a), len(m))} steady loop-meter samples, need {P99_MIN_STEADY}")
+	def q(values, f):
+		v = sorted(values)
+		return v[min(len(v) - 1, int(f * len(v)))]
+
+	notes.update({"autoSteadyMaxMs": max(a), "manualSteadyMaxMs": max(m),
+		"steadyMedianMs": [q(a, 0.5), q(m, 0.5)], "steadyP90Ms": [q(a, 0.9), q(m, 0.9)]})
+	med_a, med_m = q(a, 0.5), q(m, 0.5)
+	if med_a - med_m > P99_TOLERANCE_MS:
+		return f"steady median event-loop p99 {med_a:.2f} ms vs manual {med_m:.2f} ms (limit +{P99_TOLERANCE_MS} ms)", notes
+	return None, notes
 
 
 def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carrier, ws_complete):
@@ -915,9 +1053,16 @@ def evaluate(obs, guard_ms):
 	notes["byteRates"] = rates
 	if f:
 		failures.append(f)
-	if f := verdict_events(auto, manual, clocks["auto"], clocks["manual"], obs["carrier"]):
+	f, notes["p99"] = verdict_p99(auto, manual, clocks)
+	if f:
 		failures.append(f)
-	if f := verdict_p99(auto["p99Ms"], manual["p99Ms"]):
+	# Edge stamps are Node callbacks at random moments: a typical interval's p99 bounds their
+	# lateness, so the jitter term is each run's median steady interval p99 (the maxima are set by
+	# single-interval spikes: up to 106.6 ms on a manual run).
+	steady = notes["p99"].get("steadyMedianMs") or []
+	jitter_s = sum(steady) / 1000 if len(steady) == 2 and all(_number(v) for v in steady) else 0.0
+	f, notes["events"] = verdict_events(auto, manual, clocks["auto"], clocks["manual"], obs["carrier"], jitter_s)
+	if f:
 		failures.append(f)
 	if not gated:
 		# The close guard is the evidence gate's (NFM); a closed AM stage 1 leaves no exact-zero
@@ -1154,6 +1299,16 @@ def self_test():
 			for t in range(5, 70, 5)]
 
 	probes = probe_series()
+
+	def p99s(steady, startup, spikes=None):
+		"""Loop-meter polls each second from 1 s after the epoch (host clock); polls 0-6 cover
+		the settle point (over 0 onset at 3 s, + 4.5 s of interval cover), 7 on are steady."""
+		out = []
+		for i in range(65):
+			v = startup if i <= 6 else steady
+			v = (spikes or {}).get(i, v)
+			out.append([conn + host_offset + 1.0 + i, i // 2, v, v])
+		return out
 	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
 	# `connected` is logged 30 ms after the pacing epoch (header send, thread start): unused.
 	source = {"epochTs": conn, "epochErrS": 0.0001, "connectedTs": conn + 0.03, "connections": 1, "progress": progress()}
@@ -1162,8 +1317,8 @@ def self_test():
 	base = {
 		"expect": "voice", "mode": "nfm", "hangS": hang, "reference8k": ref, "refOnset8k": onset, "carrier": True,
 		"auto": dict(common, audioRate=rate, samples8k=recorded(), arrivals=arrivals(), transmissions=events(),
-			p99Ms=[3.0], status=status("waiting", "open")),
-		"manual": dict(common, audioRate=rate, transmissions=events(), p99Ms=[2.5], arrivals=arrivals(),
+			p99Samples=p99s(3.0, 135.0), status=status("waiting", "open")),
+		"manual": dict(common, audioRate=rate, transmissions=events(), p99Samples=p99s(2.5, 1684.0), arrivals=arrivals(),
 			samples=manual_stream(0.05), levels=manual_levels(), status=status("off")),
 	}
 
@@ -1303,13 +1458,34 @@ def self_test():
 	assert shifted[0] == [] and shifted[1]["stage1Identity"]["shiftSamples"] == 40, shifted
 	lsb = [v + (1 if i % 7 == 0 else 0) for i, v in enumerate(am_manual)]
 	assert am_obs(lsb)[0] == []
+	def decaying(values, at, peak=19_664, factor=0.607):
+		"""The recorded close shape: a divergence, then 0.607 per 10 ms block to within 1 LSB."""
+		out, n = list(values), 0
+		while peak * factor ** (n / (0.01 * rate)) >= 2:
+			out[at + n] += int(peak * factor ** (n / (0.01 * rate)))
+			n += 1
+		return out
+
 	edged = list(am_manual)
 	for k in complete:
 		c = step_at[k] + int((over_s + hang) * rate)  # gate close: startedAt + durationMs + hang
-		edged[c : c + int(0.2 * rate)] = [v + 500 for v in edged[c : c + int(0.2 * rate)]]
-		o = step_at[k]
-		edged[o + 10 : o + 60] = [v + 500 for v in edged[o + 10 : o + 60]]  # and at the open
-	assert am_obs(edged)[0] == [], am_obs(edged)[0]
+		edged = decaying(edged, c - int(0.03 * rate))  # 30 ms before the stamp, as recorded
+		edged = decaying(edged, step_at[k] + 10, peak=4000)  # and at the open
+	f, edged_notes = am_obs(edged)
+	assert f == [] and max(edged_notes["stage1Identity"]["tailBlocks"]) >= 5, (f, edged_notes)
+	# Interior mutes next to an edge: 400 ms from 80 ms after every open step (inside the 84 ms
+	# slack), the first 400 ms of every over, and a constant (not decaying) difference at a close.
+	for label, lo_s in (("80 ms after the open", 0.08), ("first 400 ms", 0.0)):
+		near_edge = list(am_manual)
+		for k in complete:
+			i = step_at[k] + int(lo_s * rate)
+			near_edge[i : i + int(0.4 * rate)] = [0] * int(0.4 * rate)
+		got = am_obs(near_edge)[0]
+		assert any("edge window" in f for f in got), (label, got)
+	flat = list(am_manual)
+	c = step_at[3] + int((over_s + hang) * rate)
+	flat[c : c + int(0.2 * rate)] = [v + 500 for v in flat[c : c + int(0.2 * rate)]]
+	assert any("edge window" in f for f in am_obs(flat)[0]), am_obs(flat)[0]
 	# A playback delay cannot be aligned away: content shift -400/-800 samples, arrivals unchanged.
 	for delay_ms in (50, 100):
 		n = delay_ms * rate // 1000
@@ -1320,7 +1496,7 @@ def self_test():
 	waiting = list(am_manual)
 	for k in complete:
 		waiting[step_at[k] : step_at[k] + int(1.0 * rate)] = [0] * int(1.0 * rate)
-	assert any("stage-1 stream for 1.0" in f for f in am_obs(waiting)[0]), am_obs(waiting)[0]
+	assert any("edge window" in f for f in am_obs(waiting)[0]), am_obs(waiting)[0]
 	delayed = list(am_manual)
 	for k in complete:
 		i, n = step_at[k], int((over_s + 0.3) * rate)
@@ -1344,6 +1520,28 @@ def self_test():
 	third = list(edged)
 	third[c + int(0.6 * rate) : c + int(0.65 * rate)] = [0] * int(0.05 * rate)
 	assert any("interior mute" in f for f in am_obs(third)[0]), am_obs(third)[0]
+	# A finite rise at the open (10 000, 20 000, then clipped) in both streams is still located.
+	ramped = list(am_manual)
+	for i in step_at.values():
+		if i + 5 <= len(ramped):
+			ramped[i : i + 5] = [10000, 20000, 32767, 32767, 32767]
+	f, ramp_notes = am_obs(ramped, ramped)
+	assert f == [] and ramp_notes["stage1Identity"]["openSteps"] == 10, (f, ramp_notes)
+	slow_rise = list(am_manual)
+	for i in step_at.values():
+		if i + 60 <= len(slow_rise):
+			slow_rise[i : i + 60] = [9000] * 55 + [32767] * 5  # 6.9 ms above quiet before the clip
+	assert "open step" in am_invalid(slow_rise, slow_rise)
+	# Carrier-only PCM: the analyzer's am-carrier golden (noise peaking at about 150, then the
+	# key-up clip at 0.25 s) tiled as a 4 s period. Every over whose search window is recorded is
+	# located within 10 ms of its onset: valid edges, not INVALID.
+	golden = reference("am-carrier")
+	tiles = [int(v * 32768) for v in golden] * 7
+	side = {"audioRate": 8000.0, "transmissions": [{"state": "closed", "startedAt": format_iso(conn + 0.25 + 4 * k),
+		"durationMs": 3750} for k in range(7)]}
+	found = open_steps(struct.pack(f"<{len(tiles)}h", *pcm(tiles)), side, {"connected": conn, "onset": 0.25, "period": 4.0}, 0.0)
+	assert sorted(found) == list(range(1, 7)), found
+	assert all(abs(j / 8000 - (0.25 + 4 * k)) <= 0.010 for k, (j, _rel) in found.items()), found
 	# Container clock drift of either sign near the 25 ms limit (probes and the fake's progress)
 	# does not move the arrival-time check: the probe nearest the pacing epoch maps host time.
 	for d in (0.00034, -0.00034):
@@ -1384,8 +1582,44 @@ def self_test():
 	assert any("autoSquelch" in f for f in variant(manual__status=status("waiting")))
 	assert any("never open" in f for f in variant(auto__status=status("waiting")))
 	assert any("did open" in f for f in variant(top__expect="none", auto__samples8k=silent))
-	assert any("p99" in f for f in variant(auto__p99Ms=[5.0]))
-	assert any("p99" in f for f in variant(auto__p99Ms=[]))
+	# p99 at steady state: the startup intervals (here 135 and 1 684 ms) are reported only; the
+	# steady medians differ by at most 2 ms; single steady spikes (host noise) are reported only.
+	p99_notes = evaluate(json.loads(json.dumps(base)), 200)[1]["p99"]
+	assert p99_notes["startupMs"] == {"auto": [135.0], "manual": [1684.0]} and p99_notes["steadySamples"] == [58, 58], p99_notes
+	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(5.0, 135.0)))
+	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(5.1, 135.0)))  # +2.6 ms
+	assert variant(auto__p99Samples=p99s(4.4, 135.0)) == []  # +1.9 ms
+	assert variant(auto__p99Samples=p99s(3.0, 135.0, {7: 50.0, 20: 34.0})) == []  # single spikes
+	raised = {i: 5.6 for i in range(7, 65) if i % 5 < 3}  # 60 % of the steady polls +3.1 ms
+	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(3.0, 135.0, raised)))
+	settle = {i: 50.0 for i in range(0, 7)}  # polls covering the settle point never count
+	assert variant(auto__p99Samples=p99s(3.0, 135.0, settle)) == []
+	spiky = evaluate(json.loads(json.dumps(dict(base, auto=dict(base["auto"], p99Samples=p99s(3.0, 135.0, {20: 34.0}))))), 200)[1]["p99"]
+	assert spiky["autoSteadyMaxMs"] == 34.0 and spiky["steadyMedianMs"] == [3.0, 2.5], spiky
+	assert any("missing event-loop p99" in f for f in variant(auto__p99Samples=[]))
+	assert "steady loop-meter samples" in invalid(manual__p99Samples=p99s(2.5, 1684.0)[:12])
+	assert "malformed loop-meter" in invalid(manual__p99Samples=[[0.0, 1]])
+	# Older recordings: p99Ms pairs with the status poll times, only when the counts agree.
+	polls = [[t, {"autoSquelch": {"state": "off"}}] for t, _i, _v, _m in p99s(0, 0)]
+	old_format = dict(manual__p99Samples=None, manual__p99Ms=[v for _t, _i, v, _m in p99s(2.5, 1684.0)], manual__status=polls)
+	assert variant(**old_format) == [], variant(**old_format)
+	assert "cannot time them" in invalid(**dict(old_format, manual__status=polls[:-1]))
+	contract_ms_text = (ROOT.parents[1] / "src/decoders/enablement/contract.ts").read_text()
+	assert re.search(r"EFFICIENCY_SAMPLE_MS = ([\d_]+)", contract_ms_text)[1].replace("_", "") == str(int(EFFICIENCY_SAMPLE_S * 1000))
+	# Stage-1 edges: chunk phase cancels; one block + both median steady p99 (10 + 3 + 2.5 = 15.5 ms) per
+	# over, and a median bias of at most 5 ms. Zero-median jitter of ±12 ms passes; a gate that
+	# delays every stage-1 event by 8 ms (inside the per-over limit) or one over by 20 ms fails.
+	def jittered(amount, overs=range(10)):
+		return [e for k in overs for e in events(shift=(-amount, 0.0, amount, 0.0)[k % 4], overs=[k])]
+
+	assert variant(manual__transmissions=jittered(0.012)) == [], variant(manual__transmissions=jittered(0.012))
+	assert variant(auto__transmissions=events(shift=0.004)) == []
+	assert any("later than manual" in f for f in variant(auto__transmissions=events(shift=0.008)))
+	assert any("earlier than manual" in f for f in variant(auto__transmissions=events(shift=-0.008)))
+	one_late = [e for k in range(10) for e in events(shift=0.02 if k == 4 else 0.0, overs=[k])]
+	assert any("edges differ in over 4" in f for f in variant(auto__transmissions=one_late))
+	limits = evaluate(json.loads(json.dumps(base)), 200)[1]["events"]
+	assert abs(limits["edgeLimitMs"] - 15.5) < 1e-9, limits
 	# Drain intervals: the true drain (tail) always lies in [lowerMs, upperMs]; the guard is
 	# flagged on upperMs, so a drain over 200 ms can never read as under the guard.
 	def holds(d, tail_ms):
@@ -1667,7 +1901,7 @@ class Recorder:
 		self.project = f"wkevs-{os.getpid()}"
 		self.opener = build_opener(ProxyHandler({}))
 		self.stop = threading.Event()
-		self.obs = {"mode": mode, "arrivals": [], "levels": [], "transmissions": [], "status": [], "p99Ms": []}
+		self.obs = {"mode": mode, "arrivals": [], "levels": [], "transmissions": [], "status": [], "p99Ms": [], "p99Samples": []}
 
 	def compose(self, *args, check=True, timeout=120):
 		cmd = ["docker", "compose", "-p", self.project, "-f", str(ROOT / "compose.yaml"), *args]
@@ -1845,9 +2079,11 @@ class Recorder:
 				self.probe_clock()
 				self.obs["status"].append((time.monotonic(), self.get("/api/live-audio/status")))
 				for report in self.get("/api/resources/link-quality"):
-					last = ((report.get("loopDelay") or {}).get("last") or {})
+					loop = report.get("loopDelay") or {}
+					last = loop.get("last") or {}
 					if isinstance(last.get("p99Ms"), (int, float)):
 						self.obs["p99Ms"].append(last["p99Ms"])
+						self.obs["p99Samples"].append([time.monotonic(), loop.get("intervals10m"), last["p99Ms"], last.get("maxMs")])
 			except (OSError, ValueError):
 				continue
 

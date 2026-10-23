@@ -131,8 +131,14 @@ symmetric, so it adds no delay); every complete over of the stream recording pla
 once, each on a stage-1 transmission of that over; per played over, the delay of its first and
 last sample behind the source ≤ 1.5 s; byte rate within 0.5 % of nominal per minute;
 transmission events equal to the manual run per over over the overs both WebSocket recordings
-fully cover (open and close within 10 ms, same count, at least one per over on carrier-bearing
-fixtures, at least 3 shared overs); p99 within 2 ms of manual; the back-chain drain of the manual run per
+fully cover. Same count, at least one per over on carrier-bearing fixtures, at least 3 shared
+overs, and edges per over within one 10 ms block plus both runs' median steady interval p99 (event
+stamps are Node wall-clock times; the fake's chunk phase cancels between runs). The median
+auto − manual is within 5 ms for opens and for closes, so a gate delaying stage-1 events fails.
+Event-loop p99 is compared at steady state, over loop-meter intervals wholly after the first over
+onset (a poll at t covers from t − 4.5 s): median steady auto − median steady manual ≤ 2 ms.
+Single 2 s intervals carry host noise: the ungated am-voice, identical code in both modes, showed
+a 7.7 ms gap in the maxima. The startup intervals and the steady p90 and max are reported only. Then the back-chain drain of the manual run per
 over as an interval that holds the true drain (arrival of the last audible sample minus the
 stage-1 close). Upper bound: the close is at least carrier-off (sidecar, source clock) + hang −
 one 10 ms squelch block − one fake send chunk (262 144 bytes: 64.0 ms at 2.048 Msps, 54.6 ms at
@@ -170,13 +176,17 @@ time:
   latency-floor jitter between runs (3.5 and 4.0 ms measured), plus both probes' half round trips,
   plus both epoch brackets. It came to 7.9 ms on the 2.048 Msps csdr am-voice run, which missed by
   1.3 ms. A tolerance over 20 ms is invalid. A 50 ms or 100 ms delay fails.
-- **Edges.** Larger differences are allowed only in clusters of at most 0.5 s (merged across
-  0.1 s), at most one per over edge. Each cluster must start within the edge slack of a stage-1
-  gate edge of either run: the open at `startedAt`, or the close at `startedAt` + `durationMs` +
-  hang.
-  - Edges are placed per over from that over's open step in the manual stream (the residue, then
-    a clip to full scale as the first open block meets the AGC at full gain). The AM golden does
-    not correlate with the live chain.
+- **Edges.** Larger differences are allowed only in clusters (merged across 0.1 s), at most one
+  per over edge. A cluster's start and its largest difference must lie inside the window from the
+  earlier to the later of the two runs' edge stamps, widened by the edge slack. Edge stamps are the
+  open at `startedAt` and the close at `startedAt` + `durationMs` + hang. Past the window the
+  difference may only decay through the back chain's memory: each 10 ms block stays under the
+  in-window peak × 0.7ⁿ⁺¹. The measured decay was 0.607 per block (τ 20 ms) on am-voice, whose one
+  cluster is 165 ms long with a 6-block tail.
+  - Edges are placed per over from that over's open step in the manual stream: the residue, then
+    a clip to full scale as the first open block meets the AGC at full gain. A rise of up to 5 ms
+    is allowed. On the tiled am-carrier golden the locator finds every over within 10 ms. The AM
+    golden does not correlate with the live chain.
   - The slack is 10 ms squelch block + one fake send chunk (event stamps move against stream
     samples by the chunk phase) + 10 ms: 84 ms at 2.048 Msps. The am-voice cluster started 30 ms
     from its close edge.
