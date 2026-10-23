@@ -91,6 +91,15 @@ is full and repeats on every new frame until the gate opens or stage 1 closes.
 audio and digital bursts never open stage 2 on their own, whatever their power. A non-finite
 statistic fails that judgement closed.
 
+**Known limitation (2026-10-23).** Syllable-timed audio-frequency FSK bursts on a quiet `nfm`
+carrier (2- or 4-level, 512 to 4 800 baud, keyed about 100 ms on and 100 ms off, or 500 ms on and
+250 ms off) pass the pinned judgement of 1.3 as voice (median syllabic index about 0.59, at least
+0.3; median audio power about -22 dB, at least -30 dB; median cluster score about 0.34, below the
+0.6 data threshold), so stage 2 latches on `voice`. This is accepted: the gate deliberately equals
+the scanner's pinned judge, and 1.4 is read with that judge's definition of data-like audio.
+Continuous FSK and short TDMA-like bursts (for example 30 ms on, 30 ms off) are rejected; real
+POCSAG, APRS/AFSK packets and DMR reject as continuous or TDMA-like.
+
 1.5 **Latch and close.** Once open, stage 2 stays open for as long as stage 1 is open; pauses
 between syllables never close it. It closes once stage 1 has been closed for
 `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS` (1 500 ms, equal to `ANALOG_TRANSMISSION_MERGE_GAP_MS`) of
