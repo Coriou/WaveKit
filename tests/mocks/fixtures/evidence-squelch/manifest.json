@@ -1,0 +1,115 @@
+{
+	"nfm-ctcss-670-voice": {
+		"mode": "nfm",
+		"expect": "ctcss",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 670
+	},
+	"nfm-ctcss-1000-voice": {
+		"mode": "nfm",
+		"expect": "ctcss",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 1000
+	},
+	"nfm-ctcss-2503-voice": {
+		"mode": "nfm",
+		"expect": "ctcss",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 2503
+	},
+	"nfm-dcs-023n-voice": {
+		"mode": "nfm",
+		"expect": "dcs",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 23
+	},
+	"nfm-dcs-754i-voice": {
+		"mode": "nfm",
+		"expect": "dcs",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 754
+	},
+	"nfm-voice": {
+		"mode": "nfm",
+		"expect": "voice",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 11
+	},
+	"am-voice": {
+		"mode": "am",
+		"expect": "voice",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 12
+	},
+	"nfm-carrier": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "neither",
+		"overOnsetS": 0.25,
+		"seed": 21
+	},
+	"am-carrier": {
+		"mode": "am",
+		"expect": "none",
+		"verdict": "neither",
+		"overOnsetS": 0.25,
+		"seed": 22
+	},
+	"nfm-dmr-4fsk": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "data-like",
+		"overOnsetS": 0.25,
+		"seed": 31
+	},
+	"nfm-pocsag-512": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "data-like",
+		"overOnsetS": 0.25,
+		"seed": 512
+	},
+	"nfm-pocsag-1200": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "data-like",
+		"overOnsetS": 0.25,
+		"seed": 1200
+	},
+	"nfm-clicks": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "neither",
+		"overOnsetS": 0.25,
+		"seed": 41
+	},
+	"nfm-impulse": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "neither",
+		"overOnsetS": 0.25,
+		"seed": 42
+	},
+	"nfm-noise": {
+		"mode": "nfm",
+		"expect": "none",
+		"verdict": "neither",
+		"overOnsetS": 0.25,
+		"seed": 43
+	},
+	"nfm-fsk-syllabic-bursts": {
+		"mode": "nfm",
+		"expect": "voice",
+		"verdict": "voice",
+		"overOnsetS": 0.25,
+		"seed": 51,
+		"knownLimitation": true
+	}
+}
