@@ -4,6 +4,10 @@
  */
 import { afterEach, describe, expect, it } from "vitest"
 import {
+	EVIDENCE_NOTE_DISCARD,
+	EVIDENCE_NOTE_RESET,
+} from "../../../src/core/evidence-squelch/contract.js"
+import {
 	capturingLogger,
 	waitFor,
 } from "./live-demodulator-continuity-fakes.js"
@@ -154,6 +158,29 @@ describe("live demodulator evidence path (fake ports)", () => {
 			t.stage.open = false
 			t.internals.measureRun(run, { powerDbfs: -50, quieted: true })
 			expect(t.factory.gates[0]?.notes).toEqual([true, false])
+		})
+
+		// Window-reset amendment (2026-10-23): the gate is the only onset tracker; the wiring
+		// abandons the pre-roll exactly when noteBlock reports DISCARD (RESET alone keeps the audio).
+		it("abandons the pre-roll exactly when noteBlock reports DISCARD", async () => {
+			const t = await start({ modulation: "nfm", squelchMode: "auto" })
+			const run = t.internals.run
+			if (run === null) throw new Error("no run")
+			const gate = t.factory.gates[0]
+			if (gate === undefined) throw new Error("no gate")
+			// Note 2: analysis reset only (short fade) -> no abandon; note 4: reset + discard.
+			gate.noteFlags.set(2, EVIDENCE_NOTE_RESET)
+			gate.noteFlags.set(4, EVIDENCE_NOTE_RESET | EVIDENCE_NOTE_DISCARD)
+			t.stage.open = true
+			for (const quieted of [false, false, true, false, true, true]) {
+				Object.defineProperty(run.squelch, "blockQuieted", {
+					configurable: true,
+					value: () => quieted,
+				})
+				t.internals.measureRun(run)
+			}
+			expect(gate.notes).toEqual([false, false, true, false, true, true])
+			expect(t.factory.preRolls[0]?.ops).toEqual(["abandon"])
 		})
 
 		// Amendment A8: AM is outside the evidence path, so no instances are built.

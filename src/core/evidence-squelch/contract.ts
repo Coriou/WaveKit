@@ -19,8 +19,14 @@ export type PreRollTag = "pending" | "pass" | "guard" | "drop"
 export interface EvidenceGatePort {
 	readonly state: "waiting" | "open"
 	readonly evidence: LiveAudioAutoSquelchEvidence | null
-	/** One measured block while stage 1 is open: `carrier` is the per-block carrier evidence. */
-	noteBlock(carrier: boolean): void
+	/**
+	 * One measured block while stage 1 is open: `carrier` is the per-block carrier evidence.
+	 * Returns `EVIDENCE_NOTE_*` bit flags (amendment 2026-10-23: was `void`): `RESET` when the
+	 * block was a carrier onset that reset the voice window while waiting; `DISCARD` as well
+	 * when the unquieted run before it was a real noise lead-in, and the owner then abandons
+	 * the pre-roll's held audio. 0 otherwise.
+	 */
+	noteBlock(carrier: boolean): number
 	/** Byte offset in [start, end] of the first sample after a latch in this call, or -1. */
 	push(
 		pcm: Buffer,
@@ -33,6 +39,11 @@ export interface EvidenceGatePort {
 	/** Drop all evidence and the latch (close without latch, retune, mode change). */
 	reset(): void
 }
+
+/** `noteBlock` flag: the voice window was reset on a carrier onset. */
+export const EVIDENCE_NOTE_RESET = 1
+/** `noteBlock` flag: the held audio before the onset is noise; abandon the pre-roll. */
+export const EVIDENCE_NOTE_DISCARD = 2
 
 export interface PreRollPort {
 	process(chunk: Buffer, start: number, end: number, tag: PreRollTag): void

@@ -40,8 +40,12 @@ export class FakeGate implements EvidenceGatePort {
 		readonly latchEvidence: LiveAudioAutoSquelchEvidence = "voice",
 	) {}
 
-	noteBlock(carrier: boolean): void {
+	/** Note index (0-based) → `EVIDENCE_NOTE_*` flags `noteBlock` returns there (else 0). */
+	readonly noteFlags = new Map<number, number>()
+
+	noteBlock(carrier: boolean): number {
 		this.notes.push(carrier)
+		return this.noteFlags.get(this.notes.length - 1) ?? 0
 	}
 
 	push(

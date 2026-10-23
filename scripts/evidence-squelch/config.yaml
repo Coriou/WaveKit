@@ -1,0 +1,42 @@
+# Scratch core config for the evidence squelch fake-link acceptance (run_acceptance.py).
+# The driver copies this file per run and rewrites only the lines marked "driver:".
+# The only source is the in-container fake rtl_tcp on the internal network.
+sources:
+  - id: evs-fake
+    type: rtl_tcp
+    host: fake
+    port: 1234
+    caps:
+      kind: iq
+      sampleRate: 2048000 # driver: --rate
+      format: U8_IQ
+      centerFreq: 446000000
+decoders: []
+tunerRelay:
+  enabled: false
+audio:
+  monitoring: false
+api:
+  host: "::"
+  port: 3000
+liveDemod:
+  enabled: true
+  sourceId: evs-fake
+  # Internal only; the api forwarder publishes it on an ephemeral loopback port.
+  httpPort: 3001
+  modulation: "nfm" # driver: fixture mode
+  bandwidth: 12500
+  squelch: -40 # driver: manual baseline threshold
+  squelchMode: "auto" # driver: auto | manual
+  autoMarginDb: 6
+  gain: 2.0
+  audioFormat: "s16le"
+  offsetHz: 0
+  engine: "csdr" # driver: --engine
+digitalVoice:
+  enabled: false
+health:
+  bandSuspension: false
+channelizer:
+  enabled: false
+stateDir: /tmp/evidence-squelch-state

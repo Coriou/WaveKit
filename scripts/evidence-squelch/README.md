@@ -91,3 +91,30 @@ syllables, so the pinned scanner judge calls it voice. Its `expect` and `verdict
 Synthesis choices made while generating (thresholds unchanged): voice is scaled to an RMS of
 0.35 over its syllables and soft-limited, with short pauses; DCS deviation is 400 Hz. The
 clicks fixture is `neither` over the whole file because most 50 ms frames hold no click.
+
+## Fake-link acceptance
+
+`run_acceptance.py` runs each fixture twice, `squelchMode: auto` and a `manual` baseline
+(−40 dBFS), on the same looped CU8 file (generated into `<out>/cu8` with a 3 s gap when
+missing). Every run is its own scratch Compose project `wkevs-<pid>` (`compose.yaml`): an
+internal network, the fake `rtl_tcp` at `fake:1234` replaying the file
+(`scripts/capacity/fake_rtl_tcp.py --file <cu8> --loop`), the core image from
+`EVIDENCE_SQUELCH_IMAGE` (default `wavekit:latest`; the script never builds or pulls it) and a
+forwarder that publishes the API and the audio stream on ephemeral loopback ports only.
+`config.yaml` is copied per run; only the lines marked `driver:` change (rate, modulation,
+squelch mode, engine). Containers, networks and volumes are removed in a `finally`.
+
+```bash
+python3 -I scripts/evidence-squelch/run_acceptance.py --self-test   # verdicts on synthetic observations, no Docker
+python3 -I scripts/evidence-squelch/run_acceptance.py --rate 2048000 --engine csdr --fixture all \
+	--out output/evidence-squelch/2048000-csdr [--cpu-quota 0.75]
+python3 -I scripts/evidence-squelch/run_acceptance.py --replay output/evidence-squelch/2048000-csdr
+```
+
+Recorded per run (`<out>/<fixture>/<mode>/`): `/stream.wav` bytes with arrival times,
+`live-audio:level` and `live-audio:transmission` events, status samples and the event-loop
+p99 of the link-quality report. Verdicts: opened or not per manifest `expect`; first played
+sample within 20 ms of the over onset (normalised cross-correlation with the analyzer golden);
+per-over delay ≤ 1.5 s; byte rate within 0.5 % of nominal per minute; transmission events equal
+to the manual run (count; open and close within 10 ms); p99 within 2 ms of manual; the measured
+back-chain drain is reported against `CLOSE_GUARD_MS`. Exit codes: 0 pass, 1 fail, 2 invalid.

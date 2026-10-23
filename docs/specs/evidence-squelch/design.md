@@ -156,8 +156,12 @@ Per run, built for an NFM or AM stream (rate and format known; wired for NFM onl
 interface EvidenceGatePort {
 	readonly state: "waiting" | "open"
 	readonly evidence: "voice" | "ctcss" | "dcs" | null
-	/** One 10 ms IQ block while stage 1 is open: carrier evidence of that block. */
-	noteBlock(carrier: boolean): void
+	/** One 10 ms IQ block while stage 1 is open: carrier evidence of that block. Returns
+	 *  `EVIDENCE_NOTE_*` bit flags (amendment 2026-10-23, revised: was `void`): RESET (1) when
+	 *  the block reset the voice window on a carrier onset while waiting, plus DISCARD (2)
+	 *  when the unquieted run before it was ≥ 5 blocks; on DISCARD the owner abandons the
+	 *  pre-roll. */
+	noteBlock(carrier: boolean): number
 	/** PCM bytes [start, end) received while stage 1 is open. Returns the byte offset in
 	 *  [start, end] of the first sample after the gate latched in this call, or -1. */
 	push(
@@ -194,6 +198,69 @@ Voice judgement on a new frame: not `dataLike` over the 20 frames; quiet count �
 data-like, then quieting with voice. Carrier evidence per block: on NFM the owner passes the WG10
 carrier evidence (csdr `blockQuieted()` of the auto observer; Rust `metricsQuieted`); on AM it
 passes `powerDbfs ≥ noiseFloorDbfs + ANALOG_TRIAL_AM_CARRIER_DB` (false while no floor exists).
+
+**Amendment 2026-10-23 (revised after review): voice window reset on carrier onset.** Stage 1
+can open on unquieted noise before an over (its power gate, or its 250 ms hang), so the gate's
+first voice window could judge that noise with the key-up. The gate tracks the noted blocks with
+scalar state (no allocation), from stage-1 open and also before the first PCM:
+
+- **Armed** at the start of every episode (stage-1 open or `reset()`, including the reset after
+  the hang inside `closed()`), and again after an unquieted run of at least
+  `EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS` = 5 blocks (50 ms, one frame).
+- While armed and waiting, every quieted block that follows an unquieted block resets the voice
+  meter, the 20-frame window and the quiet ring (`noteBlock` returns RESET). Resets happen on
+  every such onset, not once per episode, so a quieted flicker inside the lead-in cannot
+  consume the reset.
+- Analysis reset and playback discard are separate (review, 2026-10-23): the held audio is
+  discarded (DISCARD, the wiring calls `preRoll.abandon()`) only when the unquieted run before
+  the onset was at least 5 blocks, a real noise lead-in. An early 10-40 ms fade inside the over
+  resets the analysis window but keeps the held speech, so playback still starts at the over's
+  first sample (nfm-voice with blocks 0-3 quieted, 4 unquieted: window reset at 50 ms, latch
+  1.05 s, first played sample = over sample 0). Consequence: a noise lead-in shorter than 5
+  blocks (10-40 ms) is not discarded and plays before the over.
+- **Disarmed** after `EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS` = 5 consecutive quieted blocks
+  (50 ms). Afterwards fades of 1-4 blocks (10-40 ms) inside the over neither arm nor reset; the
+  quiet-fraction rule judges them as before.
+
+Judge thresholds are unchanged; only which frames are judged changes. The tone stage,
+decimator and audio clock are kept (tone evidence needs no window, and resetting it would delay
+CTCSS/DCS by the lead-in; the 750 ms tone minimum then counts from stage-1 open, so DCS 023N
+after a 500 ms lead-in latched 0.34 s after the onset instead of 0.75 s). Arithmetic: the reset
+falls on the over's first block, the window is full at onset + 1.0 s (20 × 50 ms), and the
+pre-roll then holds 1.0 s of the over, inside its 1.5 s capacity; when the block is measured
+after its PCM (as in the e2e harness) the first 10 ms block is dropped with the lead-in, inside
+the 20 ms onset tolerance.
+
+Limits (tested, pending decision):
+
+- A fade of 50 ms or more (5 blocks) while waiting arms and resets the window: 50 ms fades every
+  500 ms never latch (40 ms fades every 500 ms latch). Weak fluttery voice with 10-30 ms
+  dropouts at least 50 ms apart latches within 1.5 s; dropouts closer than 50 ms keep the reset
+  armed at the start of the over and delay the latch until a 50 ms dropout-free stretch.
+- A quieted run of 50 ms or more inside the noise disarms; if fewer than 5 noise blocks then
+  precede the over, they are judged with it (indistinguishable from a fade). With 20 noise, 5
+  quieted and 1-4 noise blocks before the over, `nfm-dmr-4fsk-continuous` (1-4) and
+  `nfm-clicks` (1) latch voice; every other never-open NFM fixture stays closed.
+- A quieted flicker on the noise right before the over (no unquieted block between it and the
+  over) is judged as the over's start: with 250 ms of noise whose last 1-4 blocks are flagged
+  quieted, `nfm-dmr-4fsk-continuous` (2-4 blocks) and `nfm-clicks` (1) latch voice. Flickers
+  followed by at least one unquieted block never open any never-open NFM fixture (property).
+- Independent of the reset: `nfm-clicks` latches voice when only 10 or 60 ms of quiet carrier
+  (silence, no noise) precede it; the 50 ms frame edges move and the first window is judged
+  voice. The continuous-4FSK and clicks goldens are close to the voice judge; small changes in
+  the first window open them.
+
+Accepted limitation (Main decision, 2026-10-23; requirements, known limitation after 1.4): the
+three residual cases above (a: 10-40 ms of noise flagged quieted touching the onset; b: a 50 ms
+quieted stretch of noise then under 50 ms of noise before the over; c: clicks on a quieted
+carrier) stay open. Clicks on a quieted carrier can latch from the pinned judge alone, already
+before the window reset existed. A 10-40 ms noise lead-in may play before the over. If live
+acceptance (M.4) shows real interference opening the gate, a stage-2 data test is the next
+squelch task, not a backlog item.
+
+| State   | Event                                       | Next                                        |
+| ------- | ------------------------------------------- | ------------------------------------------- |
+| waiting | armed, quieted block after an unquieted one | waiting (voice window and quiet ring empty) |
 
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
@@ -304,7 +371,9 @@ alignment), plus the back chain's own latency as today.
 - **Stage 1 transitions:** `publishSquelchChange` on close without a latch calls `gate.reset()` and
   `preRoll.abandon()`; with a latch it only starts the guard and hang clocks (inside the gate).
 - **Blocks:** `measureRun` (both engines) calls `gate.noteBlock(carrier)` for each measured block
-  while stage 1 is open, after the floor update.
+  while stage 1 is open, after the floor update, and calls `preRoll.abandon()` when the result
+  has `EVIDENCE_NOTE_DISCARD` (amendment 2026-10-23, revised: the gate is the only onset
+  tracker).
 - **Lifecycle (requirement 2.9):** mode change out of auto, `toneSquelch` set, offset swap
   (`gateHeld`), retune and stop: `gate.reset()` and `preRoll.clear()`. Mode change into auto:
   the gate starts idle with an empty FIFO; if stage 1 is open the current over starts waiting from
@@ -386,6 +455,57 @@ impulses at 3 to 20 Hz), impulse noise and unquieted noise, each at most 4 s (th
 `VoiceFrameMeter` and checks requirement 5.1. The fake-link scenario repeats the verdicts through
 the real csdr and Rust chains (requirement 8.2), which covers the back chain's filters that the
 golden audio does not.
+
+**Amendment 2026-10-23 (A8 applied; requirement 5.1 amended, accepted; see requirements 5.1).**
+Requirement 5.1 as first written (1.5 dB, identical verdicts against the analyzer) was not met: the
+analyzer's 48 kHz statistics and the meter's 8 kHz statistics measure different signal paths.
+The analyzer takes audio power from its 48 kHz DC-blocked demod output before DC restore, clamp
+and the 3.4 kHz FIR decimation, and clusters 48 kHz discriminator samples through 2.4 and
+4.8 kHz views; the 8 kHz PCM has no 4.8 kHz view. Accepted revision of 5.1, as the test
+(`tests/unit/core/evidence-squelch/meter-equivalence.test.ts`) checks it:
+
+- **Same-path equivalence (asserted).** `scripts/evidence-squelch/pcm_reference.py` (standard
+  library) is an adapted reference of the analyzer's statistic definitions applied to the
+  committed 8 kHz PCM at 8 kHz, writing `<name>.pcmstats.json`. It is not an exact oracle:
+  its filter, histogram and k-means arithmetic is float64 where `analyze.rs` uses binary32;
+  only the discriminator views are rounded to binary32, as the analyzer stores them. The meter
+  must match it per frame, for gain 2 and for 1.5× audio at gain 3, with identical verdicts on
+  all 17 fixtures:
+
+  | Statistic | Bound | Measured  | Justification                                              |
+  | --------- | ----- | --------- | ---------------------------------------------------------- |
+  | audioDb   | 1e-12 | ≤ 1.5e-14 | float64 on both sides; summation-order rounding only       |
+  | syllabic  | 1e-12 | ≤ 9e-16   | float64 on both sides; summation-order rounding only       |
+  | cluster   | 1e-12 | 0         | binary32 views on both sides give bit-identical histograms |
+
+  Without the binary32 rounding the per-frame cluster delta reached 0.16: one sample crossing a
+  bin edge reseeds the k-means, so the score is not continuous in its input.
+
+- **Cross-path verdicts (asserted, one listed exception).** On the 15 NFM fixtures the meter's
+  whole-file verdict equals the analyzer's, except `nfm-dmr-4fsk-continuous` (analyzer
+  data-like, 8 kHz PCM neither: median cluster 0.49 against 0.80, the missing 4.8 kHz view).
+  The exception holds on the condition that continuous 4FSK never opening is asserted at gate
+  level, with an ideal and with a noisy stage-1 onset (golden and synthetic 25 kHz seeds).
+- **Cross-path numeric deltas (informational).** Printed, not bounded: no bound follows from
+  first principles for two different paths, and bounds fitted to these fixtures would only
+  restate them. Measured on the 15 NFM fixtures: audioDb ≤ 1.81 dB, syllabic ≤ 0.07, cluster
+  ≤ 0.09 (0.31 for the exception).
+- **AM (informational).** Under A8 the evidence gate applies to NFM only; the analyzer's AM
+  cluster (no AM zeroing) is a different observable from the meter's.
+
+The AGC case of requirement 5.2 uses an additional AGC stress transform (peak follower, instant
+attack, 100 ms release, reference 0.4, gain ≤ 1 000). It is not the Rust fast AGC (5 ms attack,
+300 ms decay, max gain 65 535); its verdicts and the `EVIDENCE-SQUELCH 8.4:` line are
+informational.
+
+**Resolved (2026-10-23): stage 1 open on noise before the over.** With stage 1 already open on
+unquieted pre-over noise, the first 20-frame window used to hold that noise and the key-up with
+75 of 100 blocks quieted, and `nfm-dmr-4fsk-continuous` (window medians −10.05 dB, syllabic
+0.3124, cluster 0.48) and `nfm-clicks` (−22.24 dB, 0.4134, 0.31) latched voice at 1.0 s. The
+window reset on carrier onset (EvidenceGate state machine amendment, revised) closes it: every
+never-open NFM fixture stays closed with an ideal onset, after any 0-500 ms noise lead-in, with
+quieted flickers of 1-4 blocks inside it, and after kerchunk → noise → over; the residual case
+is listed under that amendment's limits.
 
 ## Correctness properties
 

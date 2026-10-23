@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { CTCSS_HZ } from "../../../../src/core/audio-tones/ctcss.js"
+import { mulberry32 } from "../audio-tones/synth.js"
 import {
 	EvidenceGate,
 	judgeEvidence,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
-import { pcmSampleBytes } from "../../../../src/core/evidence-squelch/contract.js"
+import {
+	EVIDENCE_NOTE_DISCARD,
+	EVIDENCE_NOTE_RESET,
+	pcmSampleBytes,
+} from "../../../../src/core/evidence-squelch/contract.js"
 import type {
 	EvidenceGatePort,
 	EvidencePcmFormat,
@@ -20,6 +25,7 @@ import {
 	mix,
 	toPcm,
 	voiceLike,
+	whiteNoise,
 } from "./synthetic.js"
 
 const GATE_RATE = 25_000
@@ -366,5 +372,159 @@ describe("EvidenceGate", () => {
 		expect(
 			judgeEvidence({ ...input, quietBlocks: 49, notedBlocks: 100 }),
 		).toBeNull()
+	})
+})
+
+describe("voice window reset on carrier onset (design amendment 2026-10-23)", () => {
+	/** Latch time in seconds of `voice(3)` after `leadMs` of unquieted noise (stage 1 open). */
+	function latchAfterLead(leadMs: number): number {
+		const lead = whiteNoise({
+			rate: GATE_RATE,
+			seconds: leadMs / 1_000,
+			seed: 3,
+			level: 0.9,
+		})
+		const pcm = toPcm(mix2(lead, voice(3)), "s16le")
+		const leadSlices = Math.round(leadMs / 10)
+		const r = driveOpen(nfm(), pcm, "s16le", i => i >= leadSlices)
+		return r.latchByte < 0 ? -1 : r.latchByte / 2 / GATE_RATE
+	}
+
+	function mix2(a: Float32Array, b: Float32Array): Float32Array {
+		const out = new Float32Array(a.length + b.length)
+		out.set(a)
+		out.set(b, a.length)
+		return out
+	}
+
+	it("judges only frames after the onset: latch at onset + 1.0 s for any lead-in up to 500 ms", () => {
+		// Reset at the first quieted block (the onset, block aligned); the meter starts empty, so
+		// the 20-frame window (20 × 50 ms = 1.0 s) is full at onset + 1.0 s.
+		const ideal = latchAfterLead(0)
+		expect(ideal).toBeGreaterThanOrEqual(1.0)
+		for (const leadMs of [10, 40, 100, 250, 500]) {
+			const at = latchAfterLead(leadMs)
+			expect(at).toBeGreaterThan(0)
+			// Same judged frames; the 25 kHz → 8 kHz decimator keeps its phase (not reset), so
+			// frame edges may shift by under one 8 kHz sample.
+			expect(Math.abs(at - leadMs / 1_000 - ideal)).toBeLessThan(0.001)
+		}
+	})
+
+	it("at the arming bound: 40 ms fades every 500 ms inside the over keep the window", () => {
+		const gate = nfm()
+		const pcm = toPcm(voice(3), "s16le")
+		// 40 ms (4 blocks) unquieted every 500 ms after a quieted start: 4 < ARM (5) blocks never
+		// arm a reset once the first 5 quieted blocks disarmed it; the quiet-fraction rule
+		// (92 % quieted) latches.
+		const r = driveOpen(gate, pcm, "s16le", i => i % 50 < 46)
+		expect(r.latchByte).toBeGreaterThan(0)
+		expect(r.states[r.states.length - 1]).toBe("open")
+		expect(gate.evidence).toBe("voice")
+	})
+
+	it("past the arming bound (documented limit): 50 ms fades every 500 ms restart the window, no latch", () => {
+		// 5 unquieted blocks arm the reset; the next quieted block restarts the window, so the
+		// 1.0 s window never fills between fades 0.5 s apart.
+		const r = driveOpen(
+			nfm(),
+			toPcm(voice(3), "s16le"),
+			"s16le",
+			i => i % 50 < 45,
+		)
+		expect(r.latchByte).toBe(-1)
+	})
+
+	it("returns RESET on armed onsets and DISCARD only after an ARM-length unquieted run", () => {
+		const gate = nfm()
+		const pcm = toPcm(voice(0.1), "s16le")
+		const RESET = EVIDENCE_NOTE_RESET
+		const BOTH = EVIDENCE_NOTE_RESET | EVIDENCE_NOTE_DISCARD
+		expect(gate.noteBlock(false)).toBe(0) // idle: nothing to reset
+		gate.push(pcm, "s16le", 0, 500)
+		// A 1-block unquieted run: reset the analysis window, keep the held audio.
+		expect(gate.noteBlock(true)).toBe(RESET)
+		expect(gate.noteBlock(true)).toBe(0)
+		expect(gate.noteBlock(false)).toBe(0)
+		expect(gate.noteBlock(true)).toBe(RESET) // still armed: 2 < 5 quieted so far
+		// A 5-block (ARM) unquieted run is a real noise lead-in: reset and discard.
+		for (let i = 0; i < 5; i++) expect(gate.noteBlock(false)).toBe(0)
+		expect(gate.noteBlock(true)).toBe(BOTH)
+		// At the bound: 4 unquieted blocks reset only.
+		for (let i = 0; i < 4; i++) gate.noteBlock(false)
+		expect(gate.noteBlock(true)).toBe(RESET)
+		for (let i = 0; i < 5; i++) gate.noteBlock(true) // disarm
+		expect(gate.noteBlock(false)).toBe(0)
+		expect(gate.noteBlock(true)).toBe(0) // a 1-block fade does not arm
+	})
+
+	it("weak fluttery voice (random 10-30 ms dropouts, >= 50 ms apart) latches within the 1.5 s pre-roll", () => {
+		for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+			const rand = mulberry32(seed)
+			const drop = new Set<number>()
+			let b = 2 + Math.floor(rand() * 10)
+			while (b < 300) {
+				const len = 1 + Math.floor(rand() * 3)
+				for (let i = 0; i < len; i++) drop.add(b + i)
+				b += len + 5 + Math.floor(rand() * 20)
+			}
+			const r = driveOpen(
+				nfm(),
+				toPcm(voice(3), "s16le"),
+				"s16le",
+				i => !drop.has(i),
+			)
+			expect(r.latchByte).toBeGreaterThan(0)
+			expect(r.latchByte / 2 / GATE_RATE).toBeLessThanOrEqual(1.5)
+		}
+	})
+
+	it("a quieted run without a preceding unquieted block keeps the window (no reset)", () => {
+		// Frozen behaviour for the ideal onset: all-quiet latches exactly as before the change.
+		const pcm = toPcm(voice(3), "s16le")
+		const a = driveOpen(nfm(), pcm, "s16le", quiet)
+		const b = driveOpen(nfm(), pcm, "s16le", quiet)
+		expect(a.latchByte).toBe(b.latchByte)
+		expect(a.latchByte / 2 / GATE_RATE).toBeLessThanOrEqual(1.05)
+	})
+})
+
+describe("noteBlock allocation (window-reset revision)", () => {
+	it("no Buffer or typed-array allocation across onset resets", () => {
+		const gate = nfm()
+		gate.push(toPcm(voice(0.1), "s16le"), "s16le", 0, 500)
+		const spies = [
+			vi.spyOn(Buffer, "alloc"),
+			vi.spyOn(Buffer, "allocUnsafe"),
+			vi.spyOn(Buffer, "from"),
+		]
+		let constructed = 0
+		for (const name of [
+			"Uint8Array",
+			"Float32Array",
+			"Float64Array",
+			"Uint32Array",
+		] as const) {
+			const Original = globalThis[name]
+			vi.stubGlobal(
+				name,
+				new Proxy(Original, {
+					construct(target, args, newTarget) {
+						constructed++
+						return Reflect.construct(target, args, newTarget) as object
+					},
+				}),
+			)
+		}
+		let resets = 0
+		// Lead-in noise, flickers, onsets and fades: every branch of the onset tracker.
+		for (let i = 0; i < 100_000; i++)
+			if (gate.noteBlock(i % 37 < 7 || i % 11 === 3) !== 0) resets++
+		vi.unstubAllGlobals()
+		const calls = spies.map(s => s.mock.calls.length)
+		vi.restoreAllMocks()
+		expect(resets).toBeGreaterThan(0)
+		expect(calls).toEqual([0, 0, 0])
+		expect(constructed).toBe(0)
 	})
 })
