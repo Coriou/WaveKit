@@ -83,6 +83,9 @@ CLOCK_PORT = 3002
 CLOCK_MAX_RTT_S = 0.020
 # Fixtures whose over has no carrier: the manual baseline may legitimately see no transmission.
 CARRIERLESS = frozenset(("nfm-noise", "nfm-impulse"))
+# Clock-free transmission count slack (verdict_transmissions_clock_free): one boundary over at
+# each end of a recording.
+TX_COUNT_SLACK = 2
 # Clock-step re-recordings per fixture (record_fixture): two, so three attempts in all. The steps
 # seen (38.2 and 123.2 ms) came one per run, in its first fixture.
 FIXTURE_RETRIES = 2
@@ -1125,121 +1128,227 @@ def expects_open(modulation, expect):
 	return modulation not in EVIDENCE_MODULATIONS or expect != "none"
 
 
-def evaluate(obs, guard_ms):
-	"""All verdicts of one fixture from its recorded observations."""
-	failures, notes = [], {}
-	auto, manual = obs["auto"], obs["manual"]
-	modulation = obs["mode"]
-	expect_open = expects_open(modulation, obs["expect"])
-	rate = auto["audioRate"]
-	byte_rate = rate * 2
-	# Clock-independent checks first: a clock step must not hide them (record_fixture retries a
-	# clock step only when it is the sole blocker).
-	runs = nonzero_runs(auto["samples8k"], REF_RATE)
-	if f := verdict_opened(expect_open, runs):
-		failures.append(f)
+def verdict_transmissions_clock_free(auto, manual, carrier):
+	"""Transmission evidence that needs no clock mapping:
+	  - no duplicate completed transmission (same startedAt and durationMs) in either run;
+	  - on carrier-bearing fixtures, at least one completed transmission in each run;
+	  - counts agree for the recorded durations. With one transmission per over each run's count
+	    is its WebSocket span / period within TX_COUNT_SLACK (a boundary over at each end may be
+	    cut or missed), so |auto - manual x r| <= TX_COUNT_SLACK x (1 + r), r = spanAuto /
+	    spanManual. Split transmissions are judged per over after the clock (verdict_events).
+	The per-over comparison (verdict_events) needs the source clock and runs after it."""
+	counts, spans = {}, {}
+	for mode, side in (("auto", auto), ("manual", manual)):
+		closed = [(e.get("startedAt"), e.get("durationMs")) for e in side.get("transmissions", [])
+			if isinstance(e, dict) and e.get("state") == "closed"]
+		seen = set()
+		for key in closed:
+			if key in seen:
+				return f"duplicate completed transmission in the {mode} run (startedAt {key[0]})"
+			seen.add(key)
+		if carrier and not closed:
+			return f"no completed transmission in the {mode} run"
+		counts[mode] = len(closed)
+		span = side.get("wsSpan")
+		spans[mode] = span[1] - span[0] if isinstance(span, (list, tuple)) and len(span) == 2 and all(_number(v) for v in span) else None
+	if spans["auto"] and spans["manual"] and spans["auto"] > 0 and spans["manual"] > 0:
+		ratio = spans["auto"] / spans["manual"]
+		expected = counts["manual"] * ratio
+		if abs(counts["auto"] - expected) > TX_COUNT_SLACK * (1 + ratio):
+			return (f"transmission count differs: auto {counts['auto']}, manual {counts['manual']}"
+				f" ({expected:.1f} expected over the auto recording, slack {TX_COUNT_SLACK * (1 + ratio):.1f})")
+	return None
+
+
+def _check_opened(c):
+	if f := verdict_opened(c.expect_open, c.runs):
+		c.failures.append(f)
+
+
+def _check_auto_state(c):
 	for mode in ("auto", "manual"):
-		if f := verdict_auto_state(obs[mode].get("status", []), mode, modulation, expect_open):
-			failures.append(f)
-	f, rates = verdict_byte_rate(auto["arrivals"], byte_rate)
-	notes["byteRates"] = rates
+		if f := verdict_auto_state(c.obs[mode].get("status", []), mode, c.modulation, c.expect_open):
+			c.failures.append(f)
+
+
+def _check_byte_rate(c):
+	f, c.notes["byteRates"] = verdict_byte_rate(c.auto["arrivals"], c.rate * 2)
 	if f:
-		failures.append(f)
-	try:
-		clocks = {mode: source_clock(obs[mode], obs[mode].get("fixture")) for mode in ("auto", "manual")}
-	except ClockStep as exc:
-		if not failures:
-			raise
-		# A final FAIL: the clock-independent failures stand; the clock-dependent checks
-		# (onset, playback, delay, events, p99, drain, AM identity) were not judged.
-		notes["clockStep"] = str(exc)
-		notes["notJudged"] = "clock-dependent checks (onset, playback, delay, events, p99Smoke, drain, AM identity)"
-		return failures, notes
-	notes["clockRttMs"] = [clocks[m]["rttS"] * 1000 for m in ("auto", "manual")]
-	gated = modulation in EVIDENCE_MODULATIONS
-	if not gated:
-		# A8: auto is today's stage-1 auto squelch, judged as one stream against the manual
-		# stage-1 run; a closed AM stage 1 is not exact silence, so there are no overs to split.
-		for mode in ("auto", "manual"):
-			raw = obs[mode].get("pcm")
-			if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2:
-				raise InvalidRun(f"no {mode} raw stream to compare the ungated auto run with its manual baseline")
-		engines = run_engines(obs)
-		if len(engines) > 1:
-			raise InvalidRun(f"auto and manual ran different engines {sorted(engines)}")
-		engine = next(iter(engines), "csdr")  # recordings without the field predate Rust runs
-		timing = stage1_timing(auto, manual, clocks)
-		steps = open_steps(manual["pcm"], manual, clocks["manual"], timing["manualAnchorS"], engine)
-		edges = stage1_edges((auto, manual), (clocks["auto"], clocks["manual"]), steps, manual["audioRate"], obs["hangS"])
-		if not _number(clocks["auto"].get("iqRate")) or clocks["auto"]["iqRate"] <= 0:
-			raise InvalidRun("missing fixture IQ rate (sidecar) for the edge slack")
-		slack_s = SQUELCH_BLOCK_S + FAKE_CHUNK_BYTES / (2 * clocks["auto"]["iqRate"]) + STAGE1_EDGE_MAP_ERR_S
-		notes["engines"] = sorted(engines)
-		if engine == "rust":
-			# Not checkable on Rust: its 48 kHz rational resampler (3/128 at 2.048 Msps) emits
-			# by a running input count from the channel open, so the output sampling phase against
-			# the file depends on where live audio started in the IQ stream, and differs per
-			# run. Up to half a 48 kHz sample of phase is about 20 % of a 3 kHz tone's amplitude,
-			# so no sample tolerance separates that from a real difference (2.048 Msps Rust
-			# am-voice: 42.7 % of samples equal, mostly the zeroed closed blocks, median 2 LSB,
-			# max 14 778). The open steps are still located (exact zeros, then the open block).
-			notes["stage1Identity"] = {"openSteps": len(steps), "edgeSlackMs": slack_s * 1000}
-			notes.setdefault("invalidChecks", []).append(
-				"stage1Identity: AM sample identity is not checkable on the Rust engine (resampler phase differs per run)")
-		else:
-			f, ident = verdict_stage1_identity(auto["pcm"], manual["pcm"], rate, timing, edges, slack_s, clocks["auto"]["period"])
-			notes["stage1Identity"] = dict(ident, edgeSlackMs=slack_s * 1000, openSteps=len(steps))
-			if f:
-				failures.append(f)
-	elif expect_open and runs:
-		overs, early = played_overs(auto, runs, clocks["auto"], rate)
-		if f := verdict_early(early):
-			failures.append(f)
-		if early:
-			notes["earlyRuns"] = early
-		# Pre-roll onset is an evidence-squelch property (NFM only). Early runs come first and
-		# have no over onset to align.
-		lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs[len(early) :]]
-		if f := verdict_onset(lags):
-			failures.append(f)
-		notes["onsetLagsS"] = lags
-		notes["overs"] = overs
-		if auto["arrivals"]:
-			eligible = complete_overs(auto["arrivals"][0][0], auto["arrivals"][-1][0], clocks["auto"], MAX_DELAY_S)
-		else:
-			eligible = set()
-		if f := verdict_playback(overs, eligible):
-			failures.append(f)
-		if overs or not early:  # only early audio: already failed, no over to measure delay on
-			f, worst = verdict_delay(overs)
-			notes["maxDelayS"] = worst
-			if f:
-				failures.append(f)
-	f, notes["p99Smoke"] = verdict_p99(auto, manual, clocks)
+		c.failures.append(f)
+
+
+def _check_transmissions(c):
+	if f := verdict_transmissions_clock_free(c.auto, c.manual, c.obs["carrier"]):
+		c.failures.append(f)
+
+
+def _check_am_identity(c):
+	if c.gated:
+		return
+	auto, manual, obs, clocks, notes = c.auto, c.manual, c.obs, c.clocks, c.notes
+	# A8: auto is today's stage-1 auto squelch, judged as one stream against the manual
+	# stage-1 run; a closed AM stage 1 is not exact silence, so there are no overs to split.
+	for mode in ("auto", "manual"):
+		raw = obs[mode].get("pcm")
+		if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2:
+			raise InvalidRun(f"no {mode} raw stream to compare the ungated auto run with its manual baseline")
+	engines = run_engines(obs)
+	if len(engines) > 1:
+		raise InvalidRun(f"auto and manual ran different engines {sorted(engines)}")
+	engine = next(iter(engines), "csdr")  # recordings without the field predate Rust runs
+	notes["engines"] = sorted(engines)
+	timing = stage1_timing(auto, manual, clocks)
+	if engine == "rust":
+		# Not checkable on Rust: its 48 kHz rational resampler (3/128 at 2.048 Msps) emits
+		# by a running input count from the channel open, so the output sampling phase against
+		# the file depends on where live audio started in the IQ stream, and differs per
+		# run. Up to half a 48 kHz sample of phase is about 20 % of a 3 kHz tone's amplitude,
+		# so no sample tolerance separates that from a real difference (2.048 Msps Rust
+		# am-voice: 42.7 % of samples equal, mostly the zeroed closed blocks, median 2 LSB,
+		# max 14 778). The open steps and edges feed only this identity check, so on Rust they
+		# are located for information only and no other check consumes them; a locator
+		# refusal is a note, not an invalid fixture.
+		info = {}
+		try:
+			info["openSteps"] = len(open_steps(manual["pcm"], manual, clocks["manual"], timing["manualAnchorS"], engine))
+		except InvalidRun as exc:
+			info["openStepsError"] = str(exc)
+		notes["stage1Identity"] = info
+		notes.setdefault("invalidChecks", []).append(
+			"stage1Identity: AM sample identity is not checkable on the Rust engine (resampler phase differs per run)")
+		return
+	steps = open_steps(manual["pcm"], manual, clocks["manual"], timing["manualAnchorS"], engine)
+	edges = stage1_edges((auto, manual), (clocks["auto"], clocks["manual"]), steps, manual["audioRate"], obs["hangS"])
+	if not _number(clocks["auto"].get("iqRate")) or clocks["auto"]["iqRate"] <= 0:
+		raise InvalidRun("missing fixture IQ rate (sidecar) for the edge slack")
+	slack_s = SQUELCH_BLOCK_S + FAKE_CHUNK_BYTES / (2 * clocks["auto"]["iqRate"]) + STAGE1_EDGE_MAP_ERR_S
+	f, ident = verdict_stage1_identity(auto["pcm"], manual["pcm"], c.rate, timing, edges, slack_s, clocks["auto"]["period"])
+	notes["stage1Identity"] = dict(ident, edgeSlackMs=slack_s * 1000, openSteps=len(steps))
 	if f:
-		failures.append(f)
-	if "invalid" in notes["p99Smoke"]:
-		notes.setdefault("invalidChecks", []).append("p99Smoke: " + notes["p99Smoke"]["invalid"])
+		c.failures.append(f)
+
+
+def _check_onset_playback_delay(c):
+	if not c.gated or not (c.expect_open and c.runs):
+		return
+	auto, obs, clocks, notes, runs = c.auto, c.obs, c.clocks, c.notes, c.runs
+	overs, early = played_overs(auto, runs, clocks["auto"], c.rate)
+	if f := verdict_early(early):
+		c.failures.append(f)
+	if early:
+		notes["earlyRuns"] = early
+	# Pre-roll onset is an evidence-squelch property (NFM only). Early runs come first and
+	# have no over onset to align.
+	lags = [best_lag(auto["samples8k"], s, obs["reference8k"], obs["refOnset8k"], REF_RATE) for s, _e in runs[len(early) :]]
+	if f := verdict_onset(lags):
+		c.failures.append(f)
+	notes["onsetLagsS"] = lags
+	notes["overs"] = overs
+	if auto["arrivals"]:
+		eligible = complete_overs(auto["arrivals"][0][0], auto["arrivals"][-1][0], clocks["auto"], MAX_DELAY_S)
+	else:
+		eligible = set()
+	if f := verdict_playback(overs, eligible):
+		c.failures.append(f)
+	if overs or not early:  # only early audio: already failed, no over to measure delay on
+		f, worst = verdict_delay(overs)
+		notes["maxDelayS"] = worst
+		if f:
+			c.failures.append(f)
+
+
+def _check_p99(c):
+	f, c.notes["p99Smoke"] = verdict_p99(c.auto, c.manual, c.clocks)
+	if f:
+		c.failures.append(f)
+	if "invalid" in c.notes["p99Smoke"]:
+		c.notes.setdefault("invalidChecks", []).append("p99Smoke: " + c.notes["p99Smoke"]["invalid"])
+
+
+def _check_events(c):
 	# Edge stamps are Node callbacks at random moments: a typical interval's p99 bounds their
 	# lateness, so the jitter term is each run's median steady interval p99 (the maxima are set by
-	# single-interval spikes: up to 106.6 ms on a manual run).
-	steady = notes["p99Smoke"].get("steadyMedianMs") or []
+	# single-interval spikes: up to 106.6 ms on a manual run). Runs after _check_p99.
+	steady = (c.notes.get("p99Smoke") or {}).get("steadyMedianMs") or []
 	jitter_s = sum(steady) / 1000 if len(steady) == 2 and all(_number(v) for v in steady) else 0.0
-	f, notes["events"] = verdict_events(auto, manual, clocks["auto"], clocks["manual"], obs["carrier"], jitter_s)
+	f, c.notes["events"] = verdict_events(c.auto, c.manual, c.clocks["auto"], c.clocks["manual"], c.obs["carrier"], jitter_s)
 	if f:
-		failures.append(f)
-	if not gated:
+		c.failures.append(f)
+
+
+def _check_drain(c):
+	if not c.gated:
 		# The close guard is the evidence gate's (NFM); a closed AM stage 1 leaves no exact-zero
 		# tail edge to measure a drain on.
-		notes["drain"] = None
-		notes["drainSkipped"] = f"{modulation} is not evidence-gated (A8): no close guard, no drain"
-		return failures, notes
+		c.notes["drain"] = None
+		c.notes["drainSkipped"] = f"{c.modulation} is not evidence-gated (A8): no close guard, no drain"
+		return
+	manual = c.manual
 	per_over = drain_per_over(manual.get("samples", []), manual["audioRate"], manual.get("arrivals", []),
-		manual["transmissions"], manual.get("levels", []), clocks["manual"], obs["hangS"], obs["carrier"], ws_overs(manual, clocks["manual"]))
-	f, notes["drain"] = verdict_drain(per_over, guard_ms)
+		manual["transmissions"], manual.get("levels", []), c.clocks["manual"], c.obs["hangS"], c.obs["carrier"],
+		ws_overs(manual, c.clocks["manual"]))
+	f, c.notes["drain"] = verdict_drain(per_over, c.guard_ms)
 	if f:
-		notes["drainReport"] = f  # reported, not a failure (plan: else report the measured drain)
-	return failures, notes
+		c.notes["drainReport"] = f  # reported, not a failure (plan: else report the measured drain)
+
+
+# Every check, in order, with whether it consumes the source-clock mapping (source_clock:
+# fake epoch, sidecar onset and the host-to-container probe). Checks that do not run before the
+# clock is read, so a clock step can never hide their failures; a new check must be declared
+# here (the self-test pins the table).
+CHECKS = (
+	("opened", False, _check_opened),
+	("autoSquelch", False, _check_auto_state),
+	("byteRate", False, _check_byte_rate),
+	("transmissions", False, _check_transmissions),
+	("stage1Identity", True, _check_am_identity),
+	("onsetPlaybackDelay", True, _check_onset_playback_delay),
+	("p99Smoke", True, _check_p99),
+	("events", True, _check_events),
+	("drain", True, _check_drain),
+)
+
+
+def evaluate(obs, guard_ms):
+	"""All verdicts of one fixture from its recorded observations, check by check (CHECKS).
+
+	The checks that need no clock run first. If the clock then steps (ClockStep), any of their
+	failures make a final FAIL (noted with the step and the checks left unjudged); with none,
+	the ClockStep propagates and record_fixture may retry the fixture. Likewise an INVALID
+	(missing evidence) in a clock-dependent check after a failure is a final FAIL."""
+	import types
+
+	c = types.SimpleNamespace(obs=obs, auto=obs["auto"], manual=obs["manual"], modulation=obs["mode"],
+		guard_ms=guard_ms, failures=[], notes={}, clocks=None)
+	c.expect_open = expects_open(c.modulation, obs["expect"])
+	c.rate = c.auto["audioRate"]
+	c.gated = c.modulation in EVIDENCE_MODULATIONS
+	c.runs = nonzero_runs(c.auto["samples8k"], REF_RATE)
+	for _name, needs_clock, check in CHECKS:
+		if not needs_clock:
+			check(c)
+	try:
+		c.clocks = {mode: source_clock(obs[mode], obs[mode].get("fixture")) for mode in ("auto", "manual")}
+	except ClockStep as exc:
+		if not c.failures:
+			raise
+		c.notes["clockStep"] = str(exc)
+		c.notes["notJudged"] = [name for name, needs_clock, _check in CHECKS if needs_clock]
+		return c.failures, c.notes
+	c.notes["clockRttMs"] = [c.clocks[m]["rttS"] * 1000 for m in ("auto", "manual")]
+	pending = [(name, check) for name, needs_clock, check in CHECKS if needs_clock]
+	for i, (name, check) in enumerate(pending):
+		try:
+			check(c)
+		except InvalidRun as exc:
+			# Missing clock-dependent evidence never hides a failure already found: the attempt
+			# is a final FAIL, the rest noted as not judged (as for a clock step).
+			if not c.failures:
+				raise
+			c.notes["invalidEvidence"] = f"{name}: {exc}"
+			c.notes["notJudged"] = [n for n, _check in pending[i:]]
+			return c.failures, c.notes
+	return c.failures, c.notes
 
 
 # ---------------------------------------------------------------------------
@@ -1572,6 +1681,28 @@ def self_test():
 	step_obs["manual"]["clockProbes"] = probe_series(step_at=20, step=-0.05)
 	step_failures, step_notes = evaluate(step_obs, 200)
 	assert "moved" in step_notes["clockStep"] and "notJudged" in step_notes and any("opened" in x for x in step_failures), step_notes
+	# Structurally (reviewer round 2): every check that needs no clock runs before the clock is
+	# read, so with a clock step any of their failures is a final FAIL, never a retryable
+	# ClockStep. Repros: duplicated auto transmissions, missing auto transmissions, extra
+	# (non-duplicate) auto transmissions.
+	assert [(n, clock) for n, clock, _f in CHECKS] == [("opened", False), ("autoSquelch", False), ("byteRate", False),
+		("transmissions", False), ("stage1Identity", True), ("onsetPlaybackDelay", True), ("p99Smoke", True),
+		("events", True), ("drain", True)], CHECKS
+	clock_step = probe_series(step_at=20, step=-0.05)
+	for label, txs, words in (("duplicated", events() + events(), "duplicate completed transmission"),
+			("missing", [], "no completed transmission in the auto run"),
+			("extra", events() + events(shift=1.0), "transmission count differs")):
+		obs = json.loads(json.dumps(base))
+		obs["auto"]["transmissions"] = txs
+		obs["manual"]["clockProbes"] = clock_step
+		got, got_notes = evaluate(obs, 200)
+		assert any(words in x for x in got) and "moved" in got_notes["clockStep"], (label, got, got_notes)
+		assert got_notes["notJudged"] == [n for n, clock, _f in CHECKS if clock], got_notes
+		assert any(words in x for x in rejected(auto__transmissions=txs)), label  # also without a step
+	# Clock-free count bound: a short manual recording (28.5 s against 65.1 s) with its 3 overs
+	# passes; one transmission per over within 2 boundary overs at each end.
+	assert verdict_transmissions_clock_free(base["auto"], dict(base["manual"], wsSpan=[ws_span[0], conn + 29.0 + host_offset],
+		transmissions=events(overs=range(3))), True) is None
 	# Rust-engine onset clipping as recorded (the evidence path dropped 34 ms of every other
 	# over) fails on the same 20 ms limit: no per-engine allowance.
 	assert any("onset" in f for f in variant(auto__samples8k=recorded(int(0.034 * rate)),
@@ -1584,7 +1715,12 @@ def self_test():
 	drifting = dict(manual__clockProbes=probe_series(drift_per_s=0.00002),
 		manual__source=dict(source, progress=progress(drift_per_s=0.00002)))
 	assert variant(**drifting) == []
-	assert "stage-1" in invalid(auto__transmissions=[])
+	# No auto transmissions on a carrier fixture is a FAIL of the clock-free transmission check;
+	# the played overs' missing stage-1 evidence is noted, not an INVALID that hides it.
+	no_tx = json.loads(json.dumps(base))
+	no_tx["auto"]["transmissions"] = []
+	got, got_notes = evaluate(no_tx, 200)
+	assert any("no completed transmission in the auto run" in x for x in got) and "stage-1" in got_notes["invalidEvidence"], (got, got_notes)
 	assert "stage-1" in invalid(auto__transmissions=events(shift=MAX_DELAY_S + 0.2))
 	assert "span" in invalid(manual__wsSpan=None)
 	assert "autoSquelch" in invalid(auto__status=[])
@@ -1599,7 +1735,7 @@ def self_test():
 	short = [ws_span[0], conn + 29.0 + host_offset]  # manual covers overs 0..2 only
 	assert variant(manual__wsSpan=short, manual__transmissions=events(overs=range(3))) == []
 	assert any("over 2" in f for f in rejected(manual__wsSpan=short, manual__transmissions=events(overs=range(2))))
-	assert "complete overs" in invalid(manual__wsSpan=[ws_span[0], conn + 15.0 + host_offset])
+	assert "complete overs" in invalid(manual__wsSpan=[ws_span[0], conn + 15.0 + host_offset], manual__transmissions=events(overs=range(2)))
 	empty = variant(top__expect="none", auto__samples8k=silent, auto__status=status("waiting"),
 		auto__transmissions=[], manual__transmissions=[])
 	assert any("no completed transmission" in f for f in empty), empty
@@ -2006,7 +2142,11 @@ def self_test():
 	for reason in ("stopped", "config", "retune", "max-duration", None):
 		assert "close reason" in invalid(manual__transmissions=closes_with(closeReason=reason))
 	split = events() + [e for e in events(overs=[4]) if e["state"] == "closed"]
-	assert "more than one close" in invalid(manual__transmissions=split)
+	# An exact duplicate close is a clock-free FAIL; the drain's "more than one close" is noted.
+	split_obs = json.loads(json.dumps(base))
+	split_obs["manual"]["transmissions"] = split
+	got, got_notes = evaluate(split_obs, 200)
+	assert any("duplicate completed transmission" in x for x in got) and "more than one close" in got_notes["invalidEvidence"], (got, got_notes)
 	flag, summary = verdict_drain([{"over": 0, "lowerMs": 180.0, "upperMs": 250.0},
 		{"over": 1, "lowerMs": 90.0, "upperMs": 150.0}], 200)
 	assert flag and summary["maxMs"] == 250.0 and summary["medianMs"] == 200.0 and summary["lowerMaxMs"] == 180.0
@@ -2108,6 +2248,14 @@ def self_test():
 		got = json.loads((out / "verdicts.json").read_text())
 		assert [(r["attempt"], r["rebuilt"]) for r in got["nfm-voice"]["retries"]] == [(1, True), (2, True)], got
 		assert "38.2 ms" in got["nfm-voice"]["retries"][0]["reason"], got
+		# An attempt with an invalid check is INVALID with that check in its reasons, as in
+		# normal reporting (never PASS).
+		verdict_of["nfm-voice.attempt-2"] = {"failures": [], "notes": {"invalidChecks": ["p99Smoke: no loop-meter interval identity"]}}
+		with contextlib.redirect_stdout(io.StringIO()):
+			replay(out, judge_dir=judged)
+		got = json.loads((out / "verdicts.json").read_text())
+		second = got["nfm-voice"]["attempts"][1]
+		assert second["verdict"] == "INVALID" and second["reason"] == ["invalid check: p99Smoke: no loop-meter interval identity"], second
 	print("ok")
 
 
@@ -2696,13 +2844,16 @@ def replay(out, judge_dir=None):
 		for n, path in sorted(attempt_dirs.get(name, [])):
 			earlier = judge_dir(path, name)
 			earlier.pop("clockStep", None)
-			verdict = "INVALID" if "invalid" in earlier else "FAIL" if earlier["failures"] else "PASS"
-			attempts.append({"attempt": n, "kept": path.name, "verdict": verdict,
-				"reason": earlier.get("invalid") or earlier.get("failures") or None})
+			checks = (earlier.get("notes") or {}).get("invalidChecks") or []
+			verdict = "INVALID" if "invalid" in earlier or checks else "FAIL" if earlier["failures"] else "PASS"
+			reason = [earlier["invalid"]] if "invalid" in earlier else list(earlier.get("failures") or [])
+			reason += ["invalid check: " + x for x in checks]
+			attempts.append({"attempt": n, "kept": path.name, "verdict": verdict, "reason": reason or None})
 		old = previous.get(name) if isinstance(previous.get(name), dict) else {}
 		retries = old.get("retries") if isinstance(old.get("retries"), list) else None
 		if retries is None:
-			retries = [{"attempt": a["attempt"], "reason": a["reason"], "kept": a["kept"], "rebuilt": True} for a in attempts]
+			retries = [{"attempt": a["attempt"], "reason": "; ".join(a["reason"] or []), "kept": a["kept"], "rebuilt": True}
+				for a in attempts]
 		for key in ("rate", "engine", "cpuQuota"):
 			if key in old:
 				result.setdefault(key, old[key])

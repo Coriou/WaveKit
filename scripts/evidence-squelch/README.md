@@ -250,10 +250,16 @@ Per-fixture outcome and retries:
   in `verdicts.json`.
 - **No other retries.** A FAIL and every other INVALID are final; the judging tolerances do not
   change between attempts.
-- **A clock step never hides a failure.** The clock-independent checks run first: opened or not,
-  `autoSquelch` state and byte rate. If any of them fails, the attempt is a final FAIL, noted
-  with the clock step and the checks it left unjudged. A retry happens only when the clock step
-  is the sole blocker.
+- **A clock step never hides a failure.** Every check is declared in the driver's `CHECKS`
+  table with whether it needs the source-clock mapping; the self-test pins the table.
+  - The checks that need no clock run before the clock is read: opened or not, `autoSquelch`
+    state, byte rate, and transmission evidence.
+  - Transmission evidence means no duplicate completed transmission, at least one per run on
+    carrier fixtures, and counts that agree for the recorded durations within two boundary
+    overs per end.
+  - If any of these fails, the attempt is a final FAIL, noted with the clock step and the checks
+    it left unjudged. So is missing evidence in a later clock-dependent check.
+  - A retry happens only when the clock step is the sole blocker.
 - **Replay.** `--replay` re-judges every `<fixture>.attempt-<n>` too and lists each attempt's
   verdict under `attempts`. It keeps the `retries` history from the existing `verdicts.json`,
   or rebuilds it from the attempt dirs.
@@ -268,6 +274,11 @@ Rust engine:
   - 50 ms or more of exact zeros inside an open over;
   - an over's step more than one fake chunk + one block + 10 ms (84 ms at 2.048 Msps) later
     against its stamp than the earliest over's (measured spread on Rust am-voice: 53 ms).
+- **Known limitation: Rust open steps after uniform silence.** The zero-run locator finds
+  audio onset. If every over began with the same run of genuine zero PCM, all edges would be
+  equally late (for example 100 ms) and pass the spread check. This is not material today: on
+  Rust the open steps and edges feed only the AM identity check, which is INVALID on Rust; no
+  other check consumes them. It matters only if Rust AM identity is ever made checkable.
 - **AM identity is not checkable on Rust.** The 48 kHz rational resampler emits by a running
   input count from the channel open, so two runs sample the content at different phases: on
   am-voice only 42.7 % of samples were equal, median 2 LSB, max 14 778. The `stage1Identity`
