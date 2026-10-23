@@ -27,6 +27,7 @@ import { Transform, type Readable } from "node:stream"
 import { z } from "zod"
 import {
 	DCS_STANDARD_CODES,
+	LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
@@ -242,7 +243,7 @@ type ResolvedOptions = Required<
 > &
 	Pick<LiveDemodulatorOptions, InjectedOptionKeys>
 
-/** Evidence squelch state of one run (NFM and AM streams only). */
+/** Evidence squelch state of one run (streams in `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` only). */
 interface RunEvidence {
 	gate: EvidenceGatePort
 	preRoll: PreRollPort
@@ -330,8 +331,8 @@ export interface PipelineRun {
 	/** Latest Rust metrics power. Absent on the csdr path. */
 	externalPowerDbfs?: number | null
 	/**
-	 * Evidence squelch gate and pre-roll, built at run start for NFM and AM streams in every
-	 * squelch mode when a factory is configured; null otherwise or when the factory failed.
+	 * Evidence squelch gate and pre-roll, built at run start for streams whose modulation is in
+	 * `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` (NFM only, amendment A8) in every squelch mode when a factory is configured; null otherwise or when the factory failed.
 	 * Absent until first synced (a Rust run is built by its controller).
 	 */
 	evidence?: RunEvidence | null
@@ -2024,7 +2025,12 @@ export class LiveDemodulator extends EventEmitter {
 		run: PipelineRun,
 	): RunEvidence | null {
 		const modulation = this.config.modulation
-		if (modulation !== "nfm" && modulation !== "am") return null
+		// Amendment A8: no instances outside the evidence modulations (AM included).
+		if (
+			!LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS.includes(modulation) ||
+			(modulation !== "nfm" && modulation !== "am")
+		)
+			return null
 		const { rate, format } = run.stream
 		try {
 			const gate = factory.createGate({

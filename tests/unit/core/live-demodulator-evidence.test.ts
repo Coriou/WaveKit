@@ -156,15 +156,16 @@ describe("live demodulator evidence path (fake ports)", () => {
 			expect(t.factory.gates[0]?.notes).toEqual([true, false])
 		})
 
-		// Amendment A8: AM is outside the evidence path, so no gate is fed.
-		it("AM auto feeds no gate (amendment A8)", async () => {
+		// Amendment A8: AM is outside the evidence path, so no instances are built.
+		it("AM auto builds no gate or pre-roll (amendment A8)", async () => {
 			const t = await start({ modulation: "am", squelchMode: "auto" })
 			const run = t.internals.run
 			if (run === null) throw new Error("no run")
 			t.stage.open = true
 			run.noiseFloorDbfs = -60
 			t.internals.measureRun(run, { powerDbfs: -40, quieted: true })
-			expect(t.factory.gates[0]?.notes ?? []).toEqual([])
+			expect(t.factory.gates).toHaveLength(0)
+			expect(t.factory.preRolls).toHaveLength(0)
 			expect(t.h.demod.getStatus().autoSquelch?.state).toBe("off")
 		})
 	})
@@ -327,12 +328,21 @@ describe("live demodulator evidence path (fake ports)", () => {
 			expect(t.factory.preRolls).toHaveLength(0)
 		})
 
-		it("a modulation change NFM to AM builds new instances", async () => {
+		// Amendment A8: AM runs build no evidence instances; NFM runs do.
+		it("NFM to AM builds nothing for AM; AM to NFM builds new instances", async () => {
 			const t = await start({ modulation: "nfm", squelchMode: "auto" })
 			expect(t.factory.gates[0]?.options.modulation).toBe("nfm")
+			const nfmRun = t.internals.run
 			await t.h.demod.reconfigure({ modulation: "am" })
+			await waitFor(
+				() => t.internals.run !== null && t.internals.run !== nfmRun,
+			)
+			expect(t.factory.gates).toHaveLength(1)
+			expect(t.factory.preRolls).toHaveLength(1)
+			expect(t.h.demod.getStatus().autoSquelch?.state).toBe("off")
+			await t.h.demod.reconfigure({ modulation: "nfm" })
 			await waitFor(() => t.factory.gates.length === 2)
-			expect(t.factory.gates[1]?.options.modulation).toBe("am")
+			expect(t.factory.gates[1]?.options.modulation).toBe("nfm")
 			expect(t.factory.preRolls).toHaveLength(2)
 			const run = t.internals.run
 			expect(t.factory.preRolls[1]?.options).toEqual({
