@@ -165,8 +165,11 @@ interface EvidenceGatePort {
 		start: number,
 		end: number,
 	): number
-	/** PCM bytes received while stage 1 is closed: advance the hang, keep sample framing. */
-	closed(byteCount: number, format: "s16le" | "f32le"): void
+	/** PCM bytes received while stage 1 is closed: advance the hang and the close guard, keep
+	 *  sample framing. Returns the count of leading bytes inside the close guard (0 unless
+	 *  latched). Amendment: originally returned `void`; the guard bytes keep the guard clock
+	 *  inside the gate and the guard/drop boundary exact for any chunk split. */
+	closed(byteCount: number, format: "s16le" | "f32le"): number
 	/** Stage 1 closed with no latch, a retune, a mode change: drop all evidence and the latch. */
 	reset(): void
 }
@@ -294,8 +297,9 @@ alignment), plus the back chain's own latency as today.
   `TONE_SLICE_MS` (10 ms) on sample boundaries. For each slice: stage 1 open
   (`runGateOpen(run)` at chunk arrival, as the tone gate does) → `gate.push`; if it latched at
   offset `k`, process `[start, k)` as `pending`, call `preRoll.latch()`, process `[k, end)` as
-  `pass`; else process as `pass` or `pending` by gate state. Stage 1 closed → `gate.closed`; tag
-  `guard` while latched within the guard, else `drop`. Then `audio.write(chunk)` once.
+  `pass`; else process as `pass` or `pending` by gate state. Stage 1 closed → `g = gate.closed(...)`; tag
+  the first `g` bytes `guard` (the gate reports bytes inside the close guard while latched), the
+  rest `drop`. Then `audio.write(chunk)` once.
 - **Stage 1 transitions:** `publishSquelchChange` on close without a latch calls `gate.reset()` and
   `preRoll.abandon()`; with a latch it only starts the guard and hang clocks (inside the gate).
 - **Blocks:** `measureRun` (both engines) calls `gate.noteBlock(carrier)` for each measured block

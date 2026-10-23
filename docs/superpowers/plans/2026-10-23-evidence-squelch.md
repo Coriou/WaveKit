@@ -26,9 +26,9 @@ design's option tables or budget rationale, only what each task pins.
 
 ## Global Constraints
 
-- Worktree `/Users/ben/Projects/wavekit-evs`, branch `batch/evidence-squelch` off `main`. Task 0.1
+- Worktree `../wavekit-evs`, branch `batch/evidence-squelch` off `main`. Task 0.1
   lands first; each lane then works in its own worktree off `batch/evidence-squelch`
-  (`/Users/ben/Projects/wavekit-evs-<lane>`). Commit only own paths with
+  (`../wavekit-evs-<lane>`). Commit only own paths with
   `git commit -m "..." -- <paths>`; never `git add -A`; never `git stash` without a unique tag; do not
   push unless the brief says so.
 - File ownership (tasks.md, exclusive): **M** `packages/api-types/src/live-audio.ts`,
@@ -84,7 +84,8 @@ design's option tables or budget rationale, only what each task pins.
   untracked/modified in the shared checkout. Main commits exactly those four paths on `main`
   (`git commit -m "docs(evidence-squelch): spec" -- docs/specs/evidence-squelch docs/specs/README.md`)
   before creating the batch worktree.
-- **A2 Close-guard reporting.** The design's `closed()` returns `void`, yet the wiring must tag the
+- **A2 Close-guard reporting (design amendment, recorded in design.md).** The design's `closed()`
+  returned `void`, yet the wiring must tag the
   first `CLOSE_GUARD_MS` of closed PCM `guard` (design, Wiring: "tag `guard` while latched within the
   guard"). The contract makes `closed()` return the count of leading bytes of that range that fall
   inside the close guard (0 unless latched), so guard and hang clocks stay inside the gate and the
@@ -105,14 +106,15 @@ design's option tables or budget rationale, only what each task pins.
 - **A7 Existing tests and the default flip.** Existing tests that relied on the implicit `manual`
   default with an `nfm`/`am` config may change behaviour after W.1's flip. W may add an explicit
   `squelchMode: "manual"` to those configs (one-line edits, no other change) in files outside its
-  list, and lists every such file in its report.
+  list, and lists every such file in its report. These edits land in their own commit before the
+  flip; the flip is the last commit of lane W and stays unmerged until M.3.
 - **A8 AM at the pinned thresholds.** Until M.3 resolves requirement 8.4, `am` stays in
   `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`. If Main decides AM keeps stage 1 only, it amends the constant
   to `["nfm"]` and the requirements; no wiring change follows because W reads the constant.
 - **A9 Fixture storage.** Committed goldens are the analyzer's 8 kHz s16le audio and statistics JSON
   per fixture (at most 4 s, 64 KB each). CU8 files for the fake `rtl_tcp` are generated on demand
   into `output/evidence-squelch/` (git-ignored) and never committed.
-- **A10 Non-finite frames and tone evidence.** Requirement 1.4's "a non-finite statistic fails that
+- **A10 Non-finite frames and tone evidence (accepted).** Requirement 1.4's "a non-finite statistic fails that
   judgement closed" applies to the voice judgement (1.3) only. A non-finite frame in the voice window
   does **not** block tone evidence: tones are qualified by `CtcssBank`/`DcsDecoder`, which have their
   own input handling, and a NaN in the meter's window says nothing about a tone that the detectors
@@ -120,7 +122,7 @@ design's option tables or budget rationale, only what each task pins.
   deliberately differs from `classifyAnalogTrial`, which returns `no-sync` for any non-finite frame
   before it looks at the tone; Property 2 therefore never generates a qualified tone together with a
   non-finite frame.
-- **A11 Empty quiet window.** With `notedBlocks === 0` the window is not quiet enough (fail closed);
+- **A11 Empty quiet window (accepted).** With `notedBlocks === 0` the window is not quiet enough (fail closed);
   the rule `quietBlocks >= ANALOG_TRIAL_MIN_QUIET_FRACTION × notedBlocks` applies only when
   `notedBlocks > 0`. Without this, `0 >= 0` would count an empty window as quiet.
 
@@ -145,28 +147,28 @@ design's option tables or budget rationale, only what each task pins.
 
 ## File Structure
 
-| Path                                                               | Lane | Responsibility                                                            |
-| ------------------------------------------------------------------ | ---- | ------------------------------------------------------------------------- |
-| `packages/api-types/src/live-audio.ts`                             | M    | `LIVE_AUDIO_AUTO_SQUELCH_*`, `LiveAudioAutoSquelch`, optional fields      |
-| `src/core/evidence-squelch/contract.ts`                            | M    | Ports, factory type, sizing and applicability helpers                     |
-| `tests/unit/core/evidence-squelch/synthetic.ts`                    | M    | Synthetic 8 kHz-and-up PCM generators shared by lanes                     |
-| `tests/unit/core/evidence-squelch/contract.test.ts`                | M    | Pins values, equalities and the sizing table                              |
-| `src/core/evidence-squelch/voice-meter.ts`                         | EV   | `VoiceFrameMeter` (audioDb, syllabic, cluster per 50 ms frame)            |
-| `src/core/evidence-squelch/tone-evidence.ts`                       | EV   | `ToneEvidence` (any standard CTCSS / DCS)                                 |
-| `src/core/evidence-squelch/evidence-gate.ts`                       | EV   | `EvidenceGate` state machine, `judgeEvidence`                             |
-| `src/core/scanner/analog-trial.ts`                                 | EV   | Export `toneQualified`, `dataLike` (no behaviour change)                  |
-| `src/core/evidence-squelch/pre-roll.ts`                            | PR   | `PreRoll` tagged FIFO                                                     |
-| `scripts/bench/evidence-squelch.ts`                                | PR   | Bench, before/after table                                                 |
-| `scripts/evidence-squelch/{fixtures.py,goldens.py}`                | FX   | Fixture generator (CF32 48 kHz, CU8 2.048/2.4 Msps), analyzer goldens     |
-| `scripts/evidence-squelch/{compose.yaml,config*.yaml,run_acceptance.py,README.md}` | FX | Scratch fake-link project and driver                              |
-| `tests/mocks/fixtures/evidence-squelch/`                           | FX   | `<name>.audio.s16le`, `<name>.stats.json`, `manifest.json`                |
-| `tests/unit/core/evidence-squelch/meter-equivalence.test.ts`       | FX   | Requirement 5.1/5.2                                                       |
-| `src/core/live-demodulator.ts`                                     | W    | Default flip, evidence path, lifecycle, status                            |
-| `src/api/routes/live-audio.ts`, `src/api/websocket/events.ts`      | W    | Route fallback, `autoSquelch` in REST status DTO + schema, `live-audio:level` |
-| `tests/unit/core/live-demodulator-evidence*.test.ts`               | W    | Goldens, wiring, integration                                              |
-| `tests/unit/api/live-audio-auto-squelch*.test.ts`                  | W    | Route default, REST status `autoSquelch` (inject), level DTO              |
-| `docs/API.md`, `docs/ROADMAP.md`, `docs/CLI-COORDINATION.md`, `config/default.yaml` | D | Docs and coordination                                     |
-| `docs/engineering/EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md`          | M    | Fake-link and live records                                                |
+| Path                                                                                | Lane | Responsibility                                                                |
+| ----------------------------------------------------------------------------------- | ---- | ----------------------------------------------------------------------------- |
+| `packages/api-types/src/live-audio.ts`                                              | M    | `LIVE_AUDIO_AUTO_SQUELCH_*`, `LiveAudioAutoSquelch`, optional fields          |
+| `src/core/evidence-squelch/contract.ts`                                             | M    | Ports, factory type, sizing and applicability helpers                         |
+| `tests/unit/core/evidence-squelch/synthetic.ts`                                     | M    | Synthetic 8 kHz-and-up PCM generators shared by lanes                         |
+| `tests/unit/core/evidence-squelch/contract.test.ts`                                 | M    | Pins values, equalities and the sizing table                                  |
+| `src/core/evidence-squelch/voice-meter.ts`                                          | EV   | `VoiceFrameMeter` (audioDb, syllabic, cluster per 50 ms frame)                |
+| `src/core/evidence-squelch/tone-evidence.ts`                                        | EV   | `ToneEvidence` (any standard CTCSS / DCS)                                     |
+| `src/core/evidence-squelch/evidence-gate.ts`                                        | EV   | `EvidenceGate` state machine, `judgeEvidence`                                 |
+| `src/core/scanner/analog-trial.ts`                                                  | EV   | Export `toneQualified`, `dataLike` (no behaviour change)                      |
+| `src/core/evidence-squelch/pre-roll.ts`                                             | PR   | `PreRoll` tagged FIFO                                                         |
+| `scripts/bench/evidence-squelch.ts`                                                 | PR   | Bench, before/after table                                                     |
+| `scripts/evidence-squelch/{fixtures.py,goldens.py}`                                 | FX   | Fixture generator (CF32 48 kHz, CU8 2.048/2.4 Msps), analyzer goldens         |
+| `scripts/evidence-squelch/{compose.yaml,config*.yaml,run_acceptance.py,README.md}`  | FX   | Scratch fake-link project and driver                                          |
+| `tests/mocks/fixtures/evidence-squelch/`                                            | FX   | `<name>.audio.s16le`, `<name>.stats.json`, `manifest.json`                    |
+| `tests/unit/core/evidence-squelch/meter-equivalence.test.ts`                        | FX   | Requirement 5.1/5.2                                                           |
+| `src/core/live-demodulator.ts`                                                      | W    | Default flip, evidence path, lifecycle, status                                |
+| `src/api/routes/live-audio.ts`, `src/api/websocket/events.ts`                       | W    | Route fallback, `autoSquelch` in REST status DTO + schema, `live-audio:level` |
+| `tests/unit/core/live-demodulator-evidence*.test.ts`                                | W    | Goldens, wiring, integration                                                  |
+| `tests/unit/api/live-audio-auto-squelch*.test.ts`                                   | W    | Route default, REST status `autoSquelch` (inject), level DTO                  |
+| `docs/API.md`, `docs/ROADMAP.md`, `docs/CLI-COORDINATION.md`, `config/default.yaml` | D    | Docs and coordination                                                         |
+| `docs/engineering/EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md`                           | M    | Fake-link and live records                                                    |
 
 Order: 0.1 → (EV, PR.1-PR.2, FX.1, D.1, W.1-W.2 in parallel) → FX.2 after EV.1; PR.3 after EV.3;
 W.3 after EV and PR merge → M.2 immediately after W.3 → M.3 before W.1's default-flip commit merges
@@ -179,6 +181,7 @@ W.3 after EV and PR merge → M.2 immediately after W.3 → M.3 before W.1's def
 ### Task 0.1: Freeze the contract (Main)
 
 **Files:**
+
 - Modify: `packages/api-types/src/live-audio.ts` (after `LIVE_AUDIO_TONE_SQUELCH_CLOSE_COUNT`, line 49;
   `LiveAudioConfig.squelchMode` doc comment line 58; `LiveAudioStatus` line 86; `LiveAudioLevel`
   line 142)
@@ -187,6 +190,7 @@ W.3 after EV and PR merge → M.2 immediately after W.3 → M.3 before W.1's def
 - Test: `tests/unit/core/evidence-squelch/contract.test.ts`
 
 **Interfaces:**
+
 - Produces (api-types, exported from `@wavekit/api-types`):
   - `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS: readonly LiveAudioConfig["modulation"][]` = frozen
     `["nfm", "am"]`
@@ -206,7 +210,12 @@ export interface EvidenceGatePort {
 	readonly evidence: LiveAudioAutoSquelchEvidence | null
 	noteBlock(carrier: boolean): void
 	/** Byte offset in [start, end] of the first sample after a latch in this call, or -1. */
-	push(pcm: Buffer, format: EvidencePcmFormat, start: number, end: number): number
+	push(
+		pcm: Buffer,
+		format: EvidencePcmFormat,
+		start: number,
+		end: number,
+	): number
 	/** Stage-1-closed bytes: advances hang and guard; returns leading bytes inside the close guard (A2). */
 	closed(byteCount: number, format: EvidencePcmFormat): number
 	reset(): void
@@ -218,8 +227,15 @@ export interface PreRollPort {
 	clear(): void
 	readonly delaySamples: number
 }
-export interface EvidenceGateOptions { rate: number; modulation: "nfm" | "am"; gain: number }
-export interface PreRollOptions { rate: number; format: EvidencePcmFormat }
+export interface EvidenceGateOptions {
+	rate: number
+	modulation: "nfm" | "am"
+	gain: number
+}
+export interface PreRollOptions {
+	rate: number
+	format: EvidencePcmFormat
+}
 export interface EvidenceSquelchFactory {
 	createGate(options: EvidenceGateOptions): EvidenceGatePort
 	createPreRoll(options: PreRollOptions): PreRollPort
@@ -239,7 +255,10 @@ export function evidenceGateApplies(config: {
   speech-shaped signal, 4 Hz syllabic envelope with pauses), `ctcssMix({ rate, seconds, hz })`,
   `dcsMix({ rate, seconds, code, polarity })`, `carrierSilence({ rate, seconds, noiseLevel? })`,
   `fskBursts({ rate, seconds, levels: 2 | 4, baud, burstMs, gapMs, seed })`,
-  `clicks({ rate, seconds, perSecond, seed })`, `impulseNoise(...)`, `whiteNoise(...)`, `mix(a, b)`,
+  `clicks({ rate, seconds, perSecond, seed })`,
+  `impulseNoise({ rate, seconds, seed, level?, perSecond? })` (sparse single-sample impulses of
+  random sign at `level`), `whiteNoise({ rate, seconds, seed, level? })` (uniform noise, peak `level`),
+  `mix(a, b)`,
   `toPcm(samples, format): Buffer`. Reuse `speechLike`, `ctcssTone`, `dcsAudio`, `whiteNoise` from
   `tests/unit/core/audio-tones/dcs-synth.ts` where they fit.
 
@@ -251,22 +270,52 @@ expect(LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS).toEqual(["nfm"])
 expect(LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS).toBe(ANALOG_TRIAL_FRAME_MS)
 expect(LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS).toBe(DCS_MIN_AUDIO_SECONDS * 1000)
 expect(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS).toBe(ANALOG_TRANSMISSION_MERGE_GAP_MS)
-expect(LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES * LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS).toBe(1000)
+expect(
+	LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES * LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS,
+).toBe(1000)
 expect(LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS).toBe(100)
-expect([LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS, LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS]).toEqual([1500, 200])
+expect([
+	LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS,
+	LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS,
+]).toEqual([1500, 200])
 // Sizing table (design, Pre-roll sizing): rate, samples, s16le bytes, f32le bytes
 for (const [rate, samples, s16, f32] of [
 	[2_048_000 / Math.round(2_048_000 / 25_000), 37_464, 74_930, 149_860],
 	[25_000, 37_500, 75_002, 150_004],
 	[50_000, 75_000, 150_002, 300_004],
 	[2_048_000 / Math.round(2_048_000 / 20_000), 30_118, 60_238, 120_476],
-]) { expect(preRollCapacitySamples(rate)).toBe(samples); expect(preRollBytes(rate, "s16le")).toBe(s16); expect(preRollBytes(rate, "f32le")).toBe(f32) }
-expect(evidenceGateApplies({ squelchMode: "auto", modulation: "nfm" })).toBe(true)
-expect(evidenceGateApplies({ squelchMode: "auto", modulation: "am", toneSquelch: { kind: "none" } })).toBe(true)
-for (const m of ["wfm", "usb", "lsb", "dsb", "cw", "raw"] as const) expect(evidenceGateApplies({ squelchMode: "auto", modulation: m })).toBe(false)
-expect(evidenceGateApplies({ squelchMode: "manual", modulation: "nfm" })).toBe(false)
-expect(evidenceGateApplies({ squelchMode: "noise", modulation: "nfm" })).toBe(false)
-expect(evidenceGateApplies({ squelchMode: "auto", modulation: "nfm", toneSquelch: { kind: "ctcss", frequencyTenthsHz: 670 } })).toBe(false)
+]) {
+	expect(preRollCapacitySamples(rate)).toBe(samples)
+	expect(preRollBytes(rate, "s16le")).toBe(s16)
+	expect(preRollBytes(rate, "f32le")).toBe(f32)
+}
+expect(evidenceGateApplies({ squelchMode: "auto", modulation: "nfm" })).toBe(
+	true,
+)
+expect(
+	evidenceGateApplies({
+		squelchMode: "auto",
+		modulation: "am",
+		toneSquelch: { kind: "none" },
+	}),
+).toBe(true)
+for (const m of ["wfm", "usb", "lsb", "dsb", "cw", "raw"] as const)
+	expect(evidenceGateApplies({ squelchMode: "auto", modulation: m })).toBe(
+		false,
+	)
+expect(evidenceGateApplies({ squelchMode: "manual", modulation: "nfm" })).toBe(
+	false,
+)
+expect(evidenceGateApplies({ squelchMode: "noise", modulation: "nfm" })).toBe(
+	false,
+)
+expect(
+	evidenceGateApplies({
+		squelchMode: "auto",
+		modulation: "nfm",
+		toneSquelch: { kind: "ctcss", frequencyTenthsHz: 670 },
+	}),
+).toBe(false)
 ```
 
 Plus a smoke test per `synthetic.ts` generator: length `round(rate × seconds)`, all finite, same
@@ -278,12 +327,12 @@ Run: `pnpm exec vitest run tests/unit/core/evidence-squelch/contract.test.ts`
 Expected: FAIL (missing exports).
 
 - [ ] **Step 3: Implement the api-types additions, `contract.ts` and `synthetic.ts`** as listed in
-  Interfaces. Change the `squelchMode` doc comment to say `auto` is the runtime default and, on NFM
-  and AM, gates client audio on voice/tone evidence with a pre-roll; `manual` and `noise` unchanged.
-  Do not edit the core `LiveAudioLevel` in `src/core/live-demodulator.ts` (lane W).
+      Interfaces. Change the `squelchMode` doc comment to say `auto` is the runtime default and, on NFM
+      and AM, gates client audio on voice/tone evidence with a pre-roll; `manual` and `noise` unchanged.
+      Do not edit the core `LiveAudioLevel` in `src/core/live-demodulator.ts` (lane W).
 
 - [ ] **Step 4: Run to verify it passes**, then `pnpm run build`, `pnpm run typecheck`, `pnpm run lint`.
-  Expected: PASS, no errors.
+      Expected: PASS, no errors.
 
 - [ ] **Step 5: Commit**
 
@@ -298,17 +347,24 @@ git commit -m "feat(evidence-squelch): freeze contract" -- packages/api-types/sr
 ### Task EV.1: `VoiceFrameMeter`
 
 **Files:**
+
 - Create: `src/core/evidence-squelch/voice-meter.ts`
 - Test: `tests/unit/core/evidence-squelch/voice-meter.test.ts`
 
 **Interfaces:**
+
 - Consumes: `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`, `_VOICE_FRAMES`; `AUDIO_TONE_RATE_HZ` (8 000) from
   `src/core/audio-tones/tone-detector.ts`.
 - Produces:
 
 ```ts
 export const VOICE_METER_FRAME_SAMPLES = 400
-export interface VoiceFrame { audioDb: number; syllabic: number; cluster: number; finite: boolean }
+export interface VoiceFrame {
+	audioDb: number
+	syllabic: number
+	cluster: number
+	finite: boolean
+}
 export class VoiceFrameMeter {
 	constructor(options: { gain: number }) // WaveKitError "EVIDENCE_GAIN" unless finite and > 0
 	/** One 8 kHz sample in PCM full-scale units. True when a frame completed (read `frame`). */
@@ -345,7 +401,7 @@ of the histogram k-means score (256 bins, 6 iterations, k = 2 and 4, 15 % band, 
   - `reset returns to constructed state`: run voice, `reset()`, run silence → identical frames to a
     fresh meter on silence.
 - [ ] **Step 2: Run** `pnpm exec vitest run tests/unit/core/evidence-squelch/voice-meter.test.ts` →
-  FAIL (module missing).
+      FAIL (module missing).
 - [ ] **Step 3: Implement `VoiceFrameMeter`** per Interfaces.
 - [ ] **Step 4: Run** → PASS.
 - [ ] **Step 5: Commit** `feat(evidence-squelch): voice frame meter` with both paths.
@@ -353,6 +409,7 @@ of the histogram k-means score (256 bins, 6 iterations, k = 2 and 4, 15 % band, 
 ### Task EV.2: `ToneEvidence` and judge exports
 
 **Files:**
+
 - Create: `src/core/evidence-squelch/tone-evidence.ts`
 - Modify: `src/core/scanner/analog-trial.ts` (export `toneQualified` at line 135; add exported
   `dataLike(stats: AnalogTrialStats): boolean` = the median-cluster test now inline in
@@ -360,6 +417,7 @@ of the histogram k-means score (256 bins, 6 iterations, k = 2 and 4, 15 % band, 
 - Test: `tests/unit/core/evidence-squelch/tone-evidence.test.ts`
 
 **Interfaces:**
+
 - Consumes: `CtcssBank`, `CTCSS_HZ` (`src/core/audio-tones/ctcss.ts`); `DcsDecoder`, `packDcs`
   (`src/core/audio-tones/dcs.ts`); `DCS_STANDARD_CODES`, `LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT`.
 - Produces:
@@ -376,7 +434,9 @@ export class ToneEvidence {
 	current(): Readonly<ToneReading> | null
 	reset(): void
 }
-export function toneQualified(tones: AnalogTrialTones | null | undefined): boolean // analog-trial.ts
+export function toneQualified(
+	tones: AnalogTrialTones | null | undefined,
+): boolean // analog-trial.ts
 export function dataLike(stats: AnalogTrialStats): boolean // analog-trial.ts: median cluster >= ANALOG_TRIAL_DATA_SCORE
 ```
 
@@ -401,18 +461,20 @@ standard table and `wordHits() >= LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT`. Allocatio
     `audioSeconds: 0.74 → false`.
 - [ ] **Step 2: Run** `pnpm exec vitest run tests/unit/core/evidence-squelch/tone-evidence.test.ts tests/unit/core/scanner/analog-trial.test.ts tests/unit/core/scanner/analog-trial.property.test.ts tests/unit/core/scanner/job-analog-trial.test.ts` → FAIL (new exports missing).
 - [ ] **Step 3: Implement** `ToneEvidence` and the two exports (no behaviour change to
-  `classifyAnalogTrial`).
+      `classifyAnalogTrial`).
 - [ ] **Step 4: Run** → PASS, including every existing scanner test.
 - [ ] **Step 5: Commit** `feat(evidence-squelch): tone evidence and judge exports`.
 
 ### Task EV.3: `EvidenceGate`
 
 **Files:**
+
 - Create: `src/core/evidence-squelch/evidence-gate.ts`
 - Test: `tests/unit/core/evidence-squelch/evidence-gate.test.ts`,
   `tests/unit/core/evidence-squelch/evidence-gate.property.test.ts`
 
 **Interfaces:**
+
 - Consumes: EV.1, EV.2; `PcmDecimator` (`src/core/audio-tones/tone-detector.ts:55`);
   `isVoice`, `dataLike`, `toneQualified`, `classifyAnalogTrial`; `ANALOG_TRIAL_MIN_QUIET_FRACTION`;
   contract `EvidenceGatePort`, `EvidenceGateOptions`, `msToSamples`.
@@ -453,7 +515,7 @@ samples carried as in `ToneSquelchGate` (4-byte hold). `reset()` → `idle`, all
 framing kept. Allocation only inside `judgeEvidence` medians.
 
 - [ ] **Step 1: Write failing example tests** (`evidence-gate.test.ts`, 25 kHz s16le unless stated;
-  stage-1 open throughout unless stated; carrier blocks noted every 10 ms of audio):
+      stage-1 open throughout unless stated; carrier blocks noted every 10 ms of audio):
   - `opens on voice within 1.5 s`: `voiceLike` with all blocks quiet → `state` `open`, `evidence`
     `voice`, latch offset ≤ bytes of 1 500 ms.
   - `opens on CTCSS at >= 750 ms`, `opens on DCS at >= 750 ms` (NFM), evidence `ctcss` / `dcs`.
@@ -470,7 +532,7 @@ framing kept. Allocation only inside `judgeEvidence` medians.
     DCS 023N → `evidence === "dcs"`, `state` stays `open`, `push` never returns ≥ 0 again.
   - `rate below 8 kHz throws`.
 - [ ] **Step 2: Write failing property tests** (`evidence-gate.property.test.ts`), each with its trace
-  comments and `numRuns: 100`:
+      comments and `numRuns: 100`:
   - Property 1 Monotone in evidence (Validates 1.2, 1.3): drive `judgeEvidence` frame by frame for a
     generated frame sequence and a dominated-by-better sequence; the better one opens no later.
   - Property 2 Judge agreement (Validates 1.2, 1.3, 1.4): generate `modulation` (`nfm` | `am`),
@@ -500,7 +562,11 @@ framing kept. Allocation only inside `judgeEvidence` medians.
       `judgeEvidence` with a qualified NFM CTCSS, `audioMs = 800`, `framesFinite = false` → `"ctcss"`.
   - Property 3 Bare carrier and data never open (Validates 1.4): generated stage-1 schedules over
     silence, an off-table steady tone, noise with `noteBlock(false)`, `fskBursts` → never `open`.
-  - Property 4 Latch through the hang (Validates 1.5).
+  - Property 4 Latch through the hang (Validates 1.5). Generator: a stage-1 run schedule in samples
+    (alternating open/closed run lengths at the gate rate) over `voiceLike` PCM, a latch point drawn
+    inside the first open run (scripted by a qualified CTCSS), and closed gaps drawn around
+    `HANG_MS` (below, at, just above, well above, in whole samples). Expect: a reopen after a gap
+    `< HANG_MS` stays `open` with no new evidence window; a gap `>= HANG_MS` returns to `waiting`.
   - Property 5 Status at received time, gate part (Validates 2.7, 4.1): the sample index at which
     `state` becomes `open` is the same whether or not a `PreRoll` stub consumes the bytes.
   - Property 6 Chunk-split invariance, gate state sequence (Validates 2.3): same PCM and schedule, two
@@ -518,11 +584,13 @@ framing kept. Allocation only inside `judgeEvidence` medians.
 ### Task PR.1: `PreRoll`
 
 **Files:**
+
 - Create: `src/core/evidence-squelch/pre-roll.ts`
 - Test: `tests/unit/core/evidence-squelch/pre-roll.test.ts`,
   `tests/unit/core/evidence-squelch/pre-roll.property.test.ts`
 
 **Interfaces:**
+
 - Consumes: contract `PreRollPort`, `PreRollOptions`, `PreRollTag`, `preRollCapacitySamples`,
   `preRollBytes`.
 - Produces: `export class PreRoll implements PreRollPort { constructor(options: PreRollOptions); readonly capacitySamples: number }`
@@ -553,11 +621,11 @@ output-in-flight counter per A3; fast path: FIFO empty and tag `drop` → `chunk
   - `clear`: queued `pass`, `clear()` → `delaySamples === 0`; next `pass` input emitted at delay 0 and
     no earlier byte ever appears.
 - [ ] **Step 2: Write failing properties** (`pre-roll.property.test.ts`, generated per-sample tag
-  schedules consistent with the wiring: `pending` runs end in `latch()` or `abandon()`, `guard` only
-  after `pass`), each `numRuns: 100` with trace comments: Property 6 (output bytes, Validates 2.3),
-  7 Nominal rate (2.3), 8 Delayed copy (2.4), 9 Bounded delay (2.2), 10 Onset (2.1), 11 Catch-up
-  drops only silence (2.5, 2.6; instrument with a reference model that labels every input sample and
-  checks each discarded one), 13 Lifecycle (2.9).
+      schedules consistent with the wiring: `pending` runs end in `latch()` or `abandon()`, `guard` only
+      after `pass`), each `numRuns: 100` with trace comments: Property 6 (output bytes, Validates 2.3),
+      7 Nominal rate (2.3), 8 Delayed copy (2.4), 9 Bounded delay (2.2), 10 Onset (2.1), 11 Catch-up
+      drops only silence (2.5, 2.6; instrument with a reference model that labels every input sample and
+      checks each discarded one), 13 Lifecycle (2.9).
 - [ ] **Step 3: Run** `pnpm exec vitest run tests/unit/core/evidence-squelch/pre-roll.test.ts tests/unit/core/evidence-squelch/pre-roll.property.test.ts` → FAIL.
 - [ ] **Step 4: Implement `PreRoll`.**
 - [ ] **Step 5: Run** → PASS.
@@ -568,12 +636,15 @@ output-in-flight counter per A3; fast path: FIFO empty and tag `drop` → `chunk
 **Files:** Test: `tests/unit/core/evidence-squelch/pre-roll.alloc.test.ts`
 
 - [ ] **Step 1: Write the test** `no allocation after construction`: construct `PreRoll` (25 kHz,
-  s16le and f32le), preallocate 10 000 input chunks of mixed sizes (1..2 048 bytes) and a tag schedule
-  covering every tag, `latch`, `abandon`; then `vi.spyOn` `Buffer.alloc`, `Buffer.allocUnsafe`,
-  `Buffer.from`, `Buffer.concat` and wrap the `Int32Array`, `Uint8Array`, `Float32Array`,
-  `Float64Array` constructors via `vi.stubGlobal`; run all chunks through `process`; assert zero calls.
+      s16le and f32le), preallocate 10 000 input chunks of mixed sizes (1..2 048 bytes) and a tag schedule
+      covering every tag, `latch`, `abandon`; then `vi.spyOn` `Buffer.alloc`, `Buffer.allocUnsafe`,
+      `Buffer.from`, `Buffer.concat` and wrap the `Int32Array`, `Uint8Array`, `Float32Array`,
+      `Float64Array` constructors via `vi.stubGlobal`, and spy `Buffer.prototype.subarray` and
+      `Buffer.prototype.slice` (or, if spying them is impractical, assert a `process.memoryUsage()`
+      heap delta below a small bound after a warm-up and `global.gc` when exposed); run all chunks
+      through `process`; assert zero calls.
 - [ ] **Step 2: Run** `pnpm exec vitest run tests/unit/core/evidence-squelch/pre-roll.alloc.test.ts` →
-  PASS (fix `pre-roll.ts` if not).
+      PASS (fix `pre-roll.ts` if not).
 - [ ] **Step 3: Commit** `test(evidence-squelch): pre-roll allocation check`.
 
 ### Task PR.3: Bench (after EV.3 merges)
@@ -582,16 +653,16 @@ output-in-flight counter per A3; fast path: FIFO empty and tag `drop` → `chunk
 document by Main (M.2).
 
 - [ ] **Step 1: Write the bench** (same header style and esbuild invocation as
-  `scripts/bench/burst-absorber.ts`): cases 25 kHz and 50 kHz audio, s16le and f32le, voice over
-  `waiting` → `open`, closed idle; measures (a) CPU per second of audio (core fraction) and (b) the
-  largest synchronous step for a 64 KiB chunk (median of five passes after a warmup) for: the frozen
-  path (`ToneSquelchGate`-free `chunk.fill(0)` and a `ToneSquelchGate` push), `EvidenceGate.push` +
-  `PreRoll.process`, and the fast path. Prints a Markdown table "before/after" with design budget
-  rows (Budgets table) and a pass/fail column against ≤ 0.006 core and ≤ 1 ms per 64 KiB on desktop.
-  CLI: `--seconds <n>` (default 30), `--json`.
+      `scripts/bench/burst-absorber.ts`): cases 25 kHz and 50 kHz audio, s16le and f32le, voice over
+      `waiting` → `open`, closed idle; measures (a) CPU per second of audio (core fraction) and (b) the
+      largest synchronous step for a 64 KiB chunk (median of five passes after a warmup) for: the frozen
+      path (`ToneSquelchGate`-free `chunk.fill(0)` and a `ToneSquelchGate` push), `EvidenceGate.push` +
+      `PreRoll.process`, and the fast path. Prints a Markdown table "before/after" with design budget
+      rows (Budgets table) and a pass/fail column against ≤ 0.006 core and ≤ 1 ms per 64 KiB on desktop.
+      CLI: `--seconds <n>` (default 30), `--json`.
 - [ ] **Step 2: Run**
-  `pnpm exec esbuild scripts/bench/evidence-squelch.ts --bundle --platform=node --format=esm --packages=external --outfile=output/bench/evidence-squelch.mjs && node output/bench/evidence-squelch.mjs --seconds 10`
-  Expected: a table with every row filled; report the numbers in the lane report.
+      `pnpm exec esbuild scripts/bench/evidence-squelch.ts --bundle --platform=node --format=esm --packages=external --outfile=output/bench/evidence-squelch.mjs && node output/bench/evidence-squelch.mjs --seconds 10`
+      Expected: a table with every row filled; report the numbers in the lane report.
 - [ ] **Step 3: Commit** `bench(evidence-squelch): gate and pre-roll cost`.
 
 ---
@@ -601,6 +672,7 @@ document by Main (M.2).
 ### Task FX.1: Fixture generator and analyzer goldens
 
 **Files:**
+
 - Create: `scripts/evidence-squelch/fixtures.py`, `scripts/evidence-squelch/goldens.py`,
   `scripts/evidence-squelch/README.md`
 - Create: `tests/mocks/fixtures/evidence-squelch/manifest.json`,
@@ -608,6 +680,7 @@ document by Main (M.2).
   `tests/mocks/fixtures/evidence-squelch/<name>.stats.json`
 
 **Interfaces:**
+
 - Produces fixture names (manifest keys) and expected verdicts: `nfm-ctcss-670-voice`,
   `nfm-ctcss-1000-voice`, `nfm-ctcss-2503-voice` (open, `ctcss`), `nfm-dcs-023n-voice`,
   `nfm-dcs-754i-voice` (open, `dcs`), `nfm-voice` (open, `voice`), `am-voice` (open, `voice`,
@@ -623,33 +696,33 @@ document by Main (M.2).
   `<name>.stats.json`; exits non-zero on any `reject`.
 
 - [ ] **Step 1: Write `fixtures.py`** with a `--self-test` that asserts each class's length, finite
-  samples and determinism.
+      samples and determinism.
 - [ ] **Step 2: Run** `python3 scripts/evidence-squelch/fixtures.py --self-test` → `ok`.
 - [ ] **Step 3: Write `goldens.py`**; run `make chan-build` then
-  `python3 scripts/evidence-squelch/goldens.py --out tests/mocks/fixtures/evidence-squelch` → one
-  audio and one stats file per manifest entry; total under 1.2 MB.
+      `python3 scripts/evidence-squelch/goldens.py --out tests/mocks/fixtures/evidence-squelch` → one
+      audio and one stats file per manifest entry; total under 1.2 MB.
 - [ ] **Step 4: Check the analyzer verdicts** in the README: for every fixture, the stats JSON's
-  medians give the manifest `verdict` (apply `isVoice`/`dataLike` by hand or with a one-off
-  `pnpm exec tsx` snippet that is not committed). A fixture whose analyzer verdict disagrees with its
-  class is regenerated with adjusted synthesis parameters, not with changed thresholds.
+      medians give the manifest `verdict` (apply `isVoice`/`dataLike` by hand or with a one-off
+      `pnpm exec tsx` snippet that is not committed). A fixture whose analyzer verdict disagrees with its
+      class is regenerated with adjusted synthesis parameters, not with changed thresholds.
 - [ ] **Step 5: Commit** `test(evidence-squelch): fixtures and analyzer goldens` with the scripts,
-  README, manifest and goldens.
+      README, manifest and goldens.
 
 ### Task FX.2: Meter equivalence (after EV.1 merges)
 
 **Files:** Test: `tests/unit/core/evidence-squelch/meter-equivalence.test.ts`
 
 - [ ] **Step 1: Write the test**: for every manifest fixture, feed `<name>.audio.s16le` (as
-  `int16 / 32768`) through `new VoiceFrameMeter({ gain: 2 })`; compare medians with the stats JSON
-  frames: `|ΔaudioDb| <= 1.5`, `|Δsyllabic| <= 0.1`, `|Δcluster| <= 0.15` and same side of 0.6; the
-  verdict (`voice` = `isVoice`, `data-like` = `dataLike`, else `neither`) equals the manifest
-  `verdict`. Non-default gain case: the same audio scaled by 1.5 into a meter with `gain: 3` meets
-  the same tolerances. AGC and de-emphasis cases: apply a TS reimplementation of a fast AGC and a
-  50 µs de-emphasis to the audio, compute verdicts, and `console.info` them in the test output only
-  (no assertion; requirement 5.2, 8.4); the AM fixture's AGC verdict and its three medians are printed
-  in a line beginning `EVIDENCE-SQUELCH 8.4:` for Main.
+      `int16 / 32768`) through `new VoiceFrameMeter({ gain: 2 })`; compare medians with the stats JSON
+      frames: `|ΔaudioDb| <= 1.5`, `|Δsyllabic| <= 0.1`, `|Δcluster| <= 0.15` and same side of 0.6; the
+      verdict (`voice` = `isVoice`, `data-like` = `dataLike`, else `neither`) equals the manifest
+      `verdict`. Non-default gain case: the same audio scaled by 1.5 into a meter with `gain: 3` meets
+      the same tolerances. AGC and de-emphasis cases: apply a TS reimplementation of a fast AGC and a
+      50 µs de-emphasis to the audio, compute verdicts, and `console.info` them in the test output only
+      (no assertion; requirement 5.2, 8.4); the AM fixture's AGC verdict and its three medians are printed
+      in a line beginning `EVIDENCE-SQUELCH 8.4:` for Main.
 - [ ] **Step 2: Run** `pnpm exec vitest run tests/unit/core/evidence-squelch/meter-equivalence.test.ts`
-  → PASS; copy the `8.4` line into the lane report.
+      → PASS; copy the `8.4` line into the lane report.
 - [ ] **Step 3: Commit** `test(evidence-squelch): meter equivalence`.
 
 ### Task FX.3: Scratch Compose project and acceptance driver
@@ -674,9 +747,9 @@ run (count; open/close within one 10 ms block); p99 within 2 ms of manual; measu
 container, network and volume removed in a `finally`.
 
 - [ ] **Step 1: Write the driver** with `--self-test`, which runs the verdict functions on synthetic
-  recorded observations (one passing, one per failure kind) without Docker.
+      recorded observations (one passing, one per failure kind) without Docker.
 - [ ] **Step 2: Run** `python3 scripts/evidence-squelch/run_acceptance.py --self-test` → `ok`;
-  `python3 -m py_compile scripts/evidence-squelch/*.py` → no output. Do not run Docker.
+      `python3 -m py_compile scripts/evidence-squelch/*.py` → no output. Do not run Docker.
 - [ ] **Step 3: Commit** `test(evidence-squelch): fake-link acceptance driver`.
 
 ---
@@ -688,6 +761,7 @@ Line numbers below refer to `src/core/live-demodulator.ts` at the batch base.
 ### Task W.1: Goldens from the frozen code and the default flip
 
 **Files:**
+
 - Test: `tests/unit/core/live-demodulator-evidence-golden.test.ts`,
   `tests/unit/api/live-audio-auto-squelch.test.ts`
 - Modify: `src/core/live-demodulator.ts:88-102` (`.default("auto")`),
@@ -697,15 +771,17 @@ Line numbers below refer to `src/core/live-demodulator.ts` at the batch base.
 `tests/unit/core/live-demodulator-continuity-fakes.ts`.
 
 - [ ] **Step 1: Record goldens on the frozen code** (before any `src/` edit): a harness feeds a
-  deterministic PCM script (synthetic voice, silence, FSK; 3 s, chunk sizes cycling 1 / 333 / 4 096 /
-  65 536 bytes) out of the fake back stage, with stage 1 scripted open/closed through the fake
-  squelch, for each case: `manual` × every modulation; `noise` × `nfm`, `wfm`; tone squelch CTCSS
-  67.0 and DCS 023N on `nfm` with `squelchMode` auto and manual; `auto` × `wfm`, `usb`, `lsb`, `dsb`,
-  `cw`, `raw`; plus `auto` × `nfm`, `am` for the `pcm` event only. Store SHA-256 of the registry bytes
-  (client transport) and of the concatenated `pcm` event bytes inline in the test as a `GOLDENS`
-  record, with a header comment naming the base commit.
+      deterministic PCM script (synthetic voice, silence, FSK; 3 s, chunk sizes cycling 1 / 333 / 4 096 /
+      65 536 bytes) out of the fake back stage, with stage 1 scripted open/closed through the fake
+      squelch, for each case: `manual` × every modulation; `noise` × `nfm`, `wfm`; tone squelch CTCSS
+      67.0 and DCS 023N on `nfm` with `squelchMode` auto and manual; `auto` × `wfm`, `usb`, `lsb`, `dsb`,
+      `cw`, `raw`; plus `auto` × `nfm`, `am` for the `pcm` event only. Store SHA-256 of the registry bytes
+      (client transport) and of the concatenated `pcm` event bytes inline in the test as a `GOLDENS`
+      record, with a header comment naming the base commit.
 - [ ] **Step 2: Run** `pnpm exec vitest run tests/unit/core/live-demodulator-evidence-golden.test.ts`
-  → PASS on the frozen code. Commit `test(evidence-squelch): frozen live-audio goldens`.
+      → PASS on the frozen code. Commit `test(evidence-squelch): frozen live-audio goldens`.
+- [ ] **Step 2a: Grep** `rg -n 'squelchMode \?\? "manual"' src/` and record in the report, per hit,
+      whether it flips to `"auto"` (runtime default paths) or stays (with the reason).
 - [ ] **Step 3: Write failing default tests**:
   - Property 14 Default (Validates 3.1, `numRuns: 100` over generated valid configs):
     `LiveDemodRuntimeConfigSchema.parse(cfgWithout squelchMode).squelchMode === "auto"`; an explicit
@@ -715,15 +791,21 @@ Line numbers below refer to `src/core/live-demodulator.ts` at the batch base.
     `tests/unit/api/live-audio.test.ts` (in-process Fastify `inject`, no port).
 - [ ] **Step 4: Run** → FAIL. **Step 5: Implement** the two one-line changes.
 - [ ] **Step 6: Run** the new tests plus
-  `pnpm exec vitest run tests/unit/core/live-demod* tests/unit/core/live-demodulator* tests/unit/api/live-audio* tests/unit/core/analog-transmission*`
-  → PASS after applying A7 (explicit `squelchMode: "manual"` where a test relied on the old default).
-  The golden test stays green (the auto-NFM/AM registry bytes are not pinned by it).
-- [ ] **Step 7: Commit separately** `feat(evidence-squelch): auto squelch by default` with the two
-  source files, the new tests and any A7 edits. Main merges this commit only after M.3.
+      `pnpm exec vitest run tests/unit/core/live-demod* tests/unit/core/live-demodulator* tests/unit/api/live-audio* tests/unit/core/analog-transmission*`
+      → PASS after applying A7 (explicit `squelchMode: "manual"` where a test relied on the old default).
+      The golden test stays green (the auto-NFM/AM registry bytes are not pinned by it).
+- [ ] **Step 7: Commit the A7 edits first and separately**
+      `test(evidence-squelch): explicit manual squelch where tests relied on the default`, before the flip
+      (they pass on the frozen default too).
+- [ ] **Step 8: Hold the flip.** Keep the two source changes and the default tests uncommitted (or on
+      a local commit rebased last) while W.2 and W.3 land; commit
+      `feat(evidence-squelch): auto squelch by default` as the last commit of lane W. Main merges it only
+      after M.3. W.2 and W.3 tests set `squelchMode` explicitly and never rely on the default.
 
 ### Task W.2: Evidence path against fake ports
 
 **Files:**
+
 - Modify: `src/core/live-demodulator.ts` (`LiveDemodulatorOptions` ~line 186 and
   `InjectedOptionKeys`; core `LiveAudioLevel` line 107; `PipelineRun` line 239; run creation ~line
   1416; `getStatus` line 716; `publishSquelchChange` line 885; `measureRun` line 956; level timer line
@@ -737,6 +819,7 @@ Line numbers below refer to `src/core/live-demodulator.ts` at the batch base.
   `tests/unit/api/live-audio-auto-squelch.test.ts` (extend)
 
 **Interfaces:**
+
 - Consumes: contract (`EvidenceSquelchFactory`, ports, `evidenceGateApplies`,
   `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`), api-types `LiveAudioAutoSquelch`.
 - Produces: `LiveDemodulatorOptions.evidenceSquelch?: EvidenceSquelchFactory` (A5);
@@ -749,6 +832,7 @@ Line numbers below refer to `src/core/live-demodulator.ts` at the batch base.
   schema carry it (see REST status below).
 
 Behaviour (design, Wiring):
+
 - `handleAudioData`: when `run.tone === null`, `run.evidence !== null` and
   `evidenceGateApplies(this.config)`: `emitPcm(chunk)` first; `open = runGateOpen(run) && !run.gateHeld`
   (A4) at chunk arrival; leading bytes completing a held sample get `run.evidence.tailTag`; then
@@ -763,8 +847,8 @@ Behaviour (design, Wiring):
 - `measureRun`: after the floor update, while stage 1 open and the path active,
   `gate.noteBlock(carrier)` with `carrier` = NFM csdr `run.squelch.blockQuieted()`, NFM Rust
   `sample.quieted`, AM `power !== null && run.noiseFloorDbfs !== null && power >= run.noiseFloorDbfs + ANALOG_TRIAL_AM_CARRIER_DB`.
-- Lifecycle: `gate.reset()` + `preRoll.clear()` when `evidenceGateApplies` flips either way on
-  reconfigure (mode, tone squelch), at offset-swap start, on retune and on stop. The silence fill is
+- Lifecycle: `gate.reset()` + `preRoll.clear()` on ANY flip of `evidenceGateApplies` (either way:
+  mode, tone squelch, or anything else on reconfigure), at offset-swap start, on retune and on stop. The silence fill is
   untouched.
 - Status: `autoSquelch` = `{ state: "off" }` when the path is inactive; else
   `{ state: gate.state, ...(gate.evidence !== null ? { evidence: gate.evidence } : {}) }`, a fresh
@@ -779,8 +863,8 @@ Behaviour (design, Wiring):
   The `live-audio:status` WS event spreads the whole core status, so it needs no change.
 
 - [ ] **Step 1: Write failing tests** with fake ports (scripted `EvidenceGatePort` latching at a
-  chosen sample; recording `PreRollPort` that logs `(start, end, tag)` and calls) on
-  `createDemodHarness`:
+      chosen sample; recording `PreRollPort` that logs `(start, end, tag)` and calls) on
+      `createDemodHarness`; every config sets `squelchMode` explicitly (the default flip is held):
   - `pcm event bytes unchanged and emitted before rewrite` (all modes).
   - `slices and tags`: stage 1 open, gate waiting then latching at sample 12 345 → the recorded calls
     are `pending` up to the latch byte, `latch()`, then `pass`, with slice ends on sample boundaries.
@@ -793,7 +877,8 @@ Behaviour (design, Wiring):
     open → latch → close sequence → the tags the fake pre-roll receives, mapped per sample, equal
     those of a single-chunk run.
   - `mode change mid-over clears the queue`: auto→manual, auto + tone squelch set, offset swap,
-    retune, stop → `reset()` and `clear()` called once each; manual→auto → no clear, gate starts idle.
+    retune, stop → `reset()` and `clear()` called once each; manual→auto, tone squelch removed →
+    `reset()` and `clear()` called once each (any flip), gate starts idle.
   - `pre-roll per NFM or AM run only`: a WFM run calls neither factory method; a modulation change
     NFM→AM builds new instances.
   - `factory failure falls back`: `createGate` throws → warning logged, registry bytes equal the
@@ -811,16 +896,17 @@ Behaviour (design, Wiring):
     schedules and latch points, the `squelchOpen` and `autoSquelch.state` sequence observed per chunk
     is independent of the fake pre-roll's delay.
 - [ ] **Step 2: Run**
-  `pnpm exec vitest run tests/unit/core/live-demodulator-evidence.test.ts tests/unit/core/live-demodulator-evidence.property.test.ts tests/unit/api/live-audio-auto-squelch.test.ts`
-  → FAIL.
+      `pnpm exec vitest run tests/unit/core/live-demodulator-evidence.test.ts tests/unit/core/live-demodulator-evidence.property.test.ts tests/unit/api/live-audio-auto-squelch.test.ts`
+      → FAIL.
 - [ ] **Step 3: Implement** per Behaviour.
 - [ ] **Step 4: Run** the three files, the golden test (W.1) and
-  `pnpm exec vitest run tests/unit/core/live-demod* tests/unit/core/live-demodulator* tests/unit/api/live-audio*` → PASS.
+      `pnpm exec vitest run tests/unit/core/live-demod* tests/unit/core/live-demodulator* tests/unit/api/live-audio*` → PASS.
 - [ ] **Step 5: Commit** `feat(evidence-squelch): live demodulator evidence path`.
 
 ### Task W.3: Integration with the real gate and pre-roll (after EV and PR merge)
 
 **Files:**
+
 - Modify: `src/core/live-demodulator.ts` (default factory),
   `src/api/websocket/events.ts` (doc comment of `broadcastLiveAudioLevel` naming `autoSquelch`; the
   payload already passes `level` through)
@@ -842,11 +928,11 @@ Behaviour (design, Wiring):
   - `live-audio:level` broadcast carries `autoSquelch` (events test through `broadcastLiveAudioLevel`
     with a capturing broadcaster).
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement** the default factory
-  `{ createGate: o => new EvidenceGate(o), createPreRoll: o => new PreRoll(o) }` when
-  `options.evidenceSquelch` is absent.
+      `{ createGate: o => new EvidenceGate(o), createPreRoll: o => new PreRoll(o) }` when
+      `options.evidenceSquelch` is absent.
 - [ ] **Step 4: Run** all W test files and
-  `pnpm exec vitest run tests/unit/core/live-demod* tests/unit/core/live-demodulator* tests/unit/api/live-audio* tests/unit/core/analog-transmission* tests/unit/core/evidence-squelch`
-  → PASS; `pnpm run typecheck`, `pnpm run lint`.
+      `pnpm exec vitest run tests/unit/core/live-demod* tests/unit/core/live-demodulator* tests/unit/api/live-audio* tests/unit/core/analog-transmission* tests/unit/core/evidence-squelch`
+      → PASS; `pnpm run typecheck`, `pnpm run lint`.
 - [ ] **Step 5: Commit** `feat(evidence-squelch): integrate gate and pre-roll`.
 
 ---
@@ -860,12 +946,12 @@ Behaviour (design, Wiring):
 only).
 
 - [ ] **Step 1:** Document: `auto` is the default; on NFM and AM it is two-stage (stage 1 floor +
-  `autoMarginDb` delimits transmissions; stage 2 passes audio on voice, or NFM CTCSS/DCS, after
-  ≥ 750 ms); the stream runs up to 1.5 s behind during an over and catches up by dropping the silence
-  after it; `squelchOpen` is still stage 1; `autoSquelch` `{ state, evidence? }` on status and
-  `live-audio:level`; overs under about one second with no tone are not heard; `manual`/`noise` keep
-  "any carrier"; a configured tone squelch is unchanged; other modulations unchanged. Update both
-  examples (`"squelchMode": "auto"`, add `"autoSquelch": { "state": "waiting" }`).
+      `autoMarginDb` delimits transmissions; stage 2 passes audio on voice, or NFM CTCSS/DCS, after
+      ≥ 750 ms); the stream runs up to 1.5 s behind during an over and catches up by dropping the silence
+      after it; `squelchOpen` is still stage 1; `autoSquelch` `{ state, evidence? }` on status and
+      `live-audio:level`; overs under about one second with no tone are not heard; `manual`/`noise` keep
+      "any carrier"; a configured tone squelch is unchanged; other modulations unchanged. Update both
+      examples (`"squelchMode": "auto"`, add `"autoSquelch": { "state": "waiting" }`).
 - [ ] **Step 2: Verify** `git diff --check -- docs/API.md config/default.yaml` → no output; every relative link added resolves (`ls` each target).
 - [ ] **Step 3: Commit** `docs(evidence-squelch): API and config comments` -- `docs/API.md config/default.yaml`.
 
@@ -874,13 +960,13 @@ only).
 **Files:** Modify: `docs/ROADMAP.md`, `docs/CLI-COORDINATION.md` (append by hand, never Prettier).
 
 - [ ] **Step 1:** `rg -n "squelchMode|squelchOpen|autoMarginDb" cli/source` and record every hit and
-  whether it assumes a `manual` default.
+      whether it assumes a `manual` default.
 - [ ] **Step 2:** Append `### Evidence auto squelch — 2026-10-23` (same style as the link-burst note):
-  auto semantics, default flip, optional `autoSquelch`, `squelchOpen` unchanged, `autoMarginDb` tunes
-  stage 1, stream delay up to 1.5 s, the CLI hits from Step 1.
+      auto semantics, default flip, optional `autoSquelch`, `squelchOpen` unchanged, `autoMarginDb` tunes
+      stage 1, stream delay up to 1.5 s, the CLI hits from Step 1.
 - [ ] **Step 3:** ROADMAP: update the live-audio squelch item and add a Landed paragraph.
 - [ ] **Step 4: Verify** `git diff --stat docs/CLI-COORDINATION.md` shows only appended lines;
-  `git diff --check -- docs/ROADMAP.md` → no output.
+      `git diff --check -- docs/ROADMAP.md` → no output.
 - [ ] **Step 5: Commit** `docs(evidence-squelch): roadmap and coordination note` -- both paths.
 
 ---
@@ -890,37 +976,39 @@ only).
 ### Task M.1: Merge order and full suite
 
 - [ ] Merge into `batch/evidence-squelch` in order EV, PR (PR.1-PR.2), FX.1, D.1, W.1 golden commit,
-  W.2, then W.3, FX.2, PR.3. Hold W.1's default-flip commit until M.3.
+      W.2, then W.3, FX.2, PR.3. Hold W.1's default-flip commit until M.3. W's A7 edits touch test
+      files outside W's tasks.md file list; that is expected (A7), list them in the merge record.
 - [ ] After W.3: `pnpm run build && pnpm run typecheck && pnpm run lint && pnpm test` → all green;
-  record base/head.
+      record base/head.
 
 ### Task M.2: Fake-link acceptance (early, right after W.3)
 
 - [ ] Build the core image from the batch worktree (never the shared checkout); generate CU8 with
-  `fixtures.py --format cu8` at 2.048 and 2.4 Msps; run
-  `python3 scripts/evidence-squelch/run_acceptance.py --rate <r> --engine <csdr|rust> --fixture all --out output/evidence-squelch/<r>-<engine>`
-  for both rates and engines, plus `--cpu-quota 0.75`.
+      `fixtures.py --format cu8` at 2.048 and 2.4 Msps; run
+      `python3 scripts/evidence-squelch/run_acceptance.py --rate <r> --engine <csdr|rust> --fixture all --out output/evidence-squelch/<r>-<engine>`
+      for both rates and engines, plus `--cpu-quota 0.75`.
 - [ ] Record verdicts, the PR.3 bench table and the measured back-chain drain in
-  `docs/engineering/EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md`; if drain > 200 ms, amend
-  `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS` in the contract and the design table. Remove scratch
-  images and output per disk hygiene.
+      `docs/engineering/EVIDENCE-SQUELCH-2026-10-ACCEPTANCE.md`; if drain > 200 ms, amend
+      `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS` in the contract and the design table. Remove scratch
+      images and output per disk hygiene.
 
 ### Task M.3: Checkpoint 8.4 (before the default flip merges)
 
 - [ ] From FX.2's `EVIDENCE-SQUELCH 8.4:` line and the M.2 AM run: keep AM evidence-gated, set a
-  measured AM threshold (amend requirements), or set `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS = ["nfm"]`
-  (A8). Record the decision as an amendment in `docs/specs/evidence-squelch/requirements.md`, then
-  merge W.1's flip commit and D.2.
+      measured AM threshold (amend requirements), or set `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS = ["nfm"]`
+      (A8). Record the decision as an amendment in `docs/specs/evidence-squelch/requirements.md`; with any
+      AM amendment also revise D.1 and the AM wording in `docs/API.md`; then merge W.1's flip commit and
+      D.2.
 
 ### Task M.4: Live acceptance with the user (design, Live acceptance plan)
 
 - [ ] Steps 1-6 of the design's live plan on the default csdr engine; append the record to the
-  acceptance document; failures become amendments.
+      acceptance document; failures become amendments.
 
 ### Task M.5: Pi 4-class measurement (when a host exists)
 
 - [ ] CPU and event-loop p99 at 2.048 and 2.4 Msps; until then the Pi 4-class column stays an
-  estimate.
+      estimate.
 
 ## Self-review notes
 

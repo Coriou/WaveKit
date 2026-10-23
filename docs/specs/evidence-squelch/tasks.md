@@ -91,7 +91,9 @@ runs M.2 as soon as W.3 lands, before any polishing.
 
 - [ ] W.1 Default flip in `LiveDemodRuntimeConfigSchema` and the route fallback; golden tests that
       manual, noise, a configured tone squelch and auto on WFM, USB, LSB, DSB, CW and raw write the
-      same registry bytes and `pcm` bytes as the frozen code
+      same registry bytes and `pcm` bytes as the frozen code; A7 test edits (explicit
+      `squelchMode: "manual"`) in their own commit before the flip; the flip is the last commit of
+      lane W, held unmerged until M.3
   - _Requirements: 1.7-1.9, 3.1_
   - **Property 12: Byte-identical elsewhere**
   - **Property 14: Default**
@@ -118,12 +120,14 @@ runs M.2 as soon as W.3 lands, before any polishing.
 
 ## Main
 
-- [ ] M.1 Merge order EV, PR, FX.1, then W; run the full root suite once after W.3
+- [ ] M.1 Merge order EV, PR, FX.1, then W; run the full root suite once after W.3; A7 edits
+      fall outside W's file list (expected)
   - _Requirements: 1.6-1.9_
 - [ ] M.2 Fake-link acceptance on csdr and Rust, early; amend `CLOSE_GUARD_MS` from the measured
       back-chain drain if needed; record in the acceptance document
   - _Requirements: 2.6, 6.1, 8.2_
-- [ ] M.3 Checkpoint: resolve 8.4 (AM through the fast-AGC chain) before the default flip lands
+- [ ] M.3 Checkpoint: resolve 8.4 (AM through the fast-AGC chain) before the default flip lands;
+      revise D.1 and the `docs/API.md` AM wording with any AM amendment
   - _Requirements: 8.4_
 - [ ] M.4 Live acceptance with the user (design, Live acceptance plan)
   - _Requirements: 8.3_
