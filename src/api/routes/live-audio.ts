@@ -123,6 +123,14 @@ const liveDemodStatusSchema = {
 			},
 			required: ["state"],
 		},
+		autoSquelch: {
+			type: "object",
+			properties: {
+				state: { type: "string", enum: ["off", "waiting", "open"] },
+				evidence: { type: "string", enum: ["voice", "ctcss", "dcs"] },
+			},
+			required: ["state"],
+		},
 		tone: {
 			type: "object",
 			additionalProperties: false,
@@ -308,6 +316,16 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			...(status.agc !== undefined ? { agc: status.agc } : {}),
 			...(status.toneSquelch !== undefined
 				? { toneSquelch: { state: status.toneSquelch.state } }
+				: {}),
+			...(status.autoSquelch !== undefined
+				? {
+						autoSquelch: {
+							state: status.autoSquelch.state,
+							...(status.autoSquelch.evidence !== undefined
+								? { evidence: status.autoSquelch.evidence }
+								: {}),
+						},
+					}
 				: {}),
 			...(status.tone !== undefined
 				? { tone: copyStatusTone(status.tone) }

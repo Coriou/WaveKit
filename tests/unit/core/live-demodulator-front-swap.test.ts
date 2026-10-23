@@ -60,7 +60,9 @@ function noiseIq(samples: number, amplitude: number): Buffer {
 } // 10 ms at the 25 kHz default channel rate
 
 async function startHarness(config: Record<string, unknown> = {}) {
-	harness = await createDemodHarness({ config })
+	harness = await createDemodHarness({
+		config: { squelchMode: "manual", ...config },
+	})
 	await harness.demod.start()
 	return harness
 }
