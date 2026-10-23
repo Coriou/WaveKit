@@ -3,6 +3,7 @@ import { CTCSS_HZ } from "../../../../src/core/audio-tones/ctcss.js"
 import {
 	EvidenceGate,
 	judgeEvidence,
+	stepLeadIn,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
 import { pcmSampleBytes } from "../../../../src/core/evidence-squelch/contract.js"
 import type {
@@ -20,6 +21,7 @@ import {
 	mix,
 	toPcm,
 	voiceLike,
+	whiteNoise,
 } from "./synthetic.js"
 
 const GATE_RATE = 25_000
@@ -366,5 +368,76 @@ describe("EvidenceGate", () => {
 		expect(
 			judgeEvidence({ ...input, quietBlocks: 49, notedBlocks: 100 }),
 		).toBeNull()
+	})
+})
+
+describe("voice window reset on carrier onset (design amendment 2026-10-23)", () => {
+	/** Latch time in seconds of `voice(3)` after `leadMs` of unquieted noise (stage 1 open). */
+	function latchAfterLead(leadMs: number): number {
+		const lead = whiteNoise({
+			rate: GATE_RATE,
+			seconds: leadMs / 1_000,
+			seed: 3,
+			level: 0.9,
+		})
+		const pcm = toPcm(mix2(lead, voice(3)), "s16le")
+		const leadSlices = Math.round(leadMs / 10)
+		const r = driveOpen(nfm(), pcm, "s16le", i => i >= leadSlices)
+		return r.latchByte < 0 ? -1 : r.latchByte / 2 / GATE_RATE
+	}
+
+	function mix2(a: Float32Array, b: Float32Array): Float32Array {
+		const out = new Float32Array(a.length + b.length)
+		out.set(a)
+		out.set(b, a.length)
+		return out
+	}
+
+	it("judges only frames after the onset: latch at onset + 1.0 s for any lead-in up to 500 ms", () => {
+		// Reset at the first quieted block (the onset, block aligned); the meter starts empty, so
+		// the 20-frame window (20 × 50 ms = 1.0 s) is full at onset + 1.0 s.
+		const ideal = latchAfterLead(0)
+		expect(ideal).toBeGreaterThanOrEqual(1.0)
+		for (const leadMs of [10, 40, 100, 250, 500]) {
+			const at = latchAfterLead(leadMs)
+			expect(at).toBeGreaterThan(0)
+			// Same judged frames; the 25 kHz → 8 kHz decimator keeps its phase (not reset), so
+			// frame edges may shift by under one 8 kHz sample.
+			expect(Math.abs(at - leadMs / 1_000 - ideal)).toBeLessThan(0.001)
+		}
+	})
+
+	it("fades inside the over (after the first quieted block) keep the window", () => {
+		const gate = nfm()
+		const pcm = toPcm(voice(3), "s16le")
+		// 40 ms unquieted every 500 ms after a quieted start: the episode's lead-in is done, so
+		// no reset; the quiet-fraction rule (92 % quieted) still latches.
+		const r = driveOpen(gate, pcm, "s16le", i => i % 50 < 46)
+		expect(r.latchByte).toBeGreaterThan(0)
+		expect(r.states[r.states.length - 1]).toBe("open")
+		expect(gate.evidence).toBe("voice")
+	})
+
+	it("a quieted run without a preceding unquieted block keeps the window (no reset)", () => {
+		// Frozen behaviour for the ideal onset: all-quiet latches exactly as before the change.
+		const pcm = toPcm(voice(3), "s16le")
+		const a = driveOpen(nfm(), pcm, "s16le", quiet)
+		const b = driveOpen(nfm(), pcm, "s16le", quiet)
+		expect(a.latchByte).toBe(b.latchByte)
+		expect(a.latchByte / 2 / GATE_RATE).toBeLessThanOrEqual(1.05)
+	})
+})
+
+describe("stepLeadIn", () => {
+	it("marks only the first quieted block after an unquieted lead-in as the onset", () => {
+		const seq = [false, false, true, false, true]
+		let state: Parameters<typeof stepLeadIn>[0] = "unknown"
+		const onsets = seq.map(c => {
+			const step = stepLeadIn(state, c)
+			state = step.next
+			return step.onset
+		})
+		expect(onsets).toEqual([false, false, true, false, false])
+		expect(stepLeadIn("unknown", true)).toEqual({ next: "done", onset: false })
 	})
 })

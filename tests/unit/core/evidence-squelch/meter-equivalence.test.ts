@@ -15,9 +15,14 @@
  */
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
-import { EvidenceGate } from "../../../../src/core/evidence-squelch/evidence-gate.js"
+import {
+	EvidenceGate,
+	stepLeadIn,
+} from "../../../../src/core/evidence-squelch/evidence-gate.js"
+import { PreRoll } from "../../../../src/core/evidence-squelch/pre-roll.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
 import { dataLike, isVoice } from "../../../../src/core/scanner/analog-trial.js"
 import {
@@ -33,6 +38,8 @@ const RATE = 8_000
 /** 10 ms measurement blocks at 8 kHz, as the live demodulator's level timer notes them. */
 const BLOCK_SAMPLES = 80
 const FRAME_SAMPLES = 400
+/** Noisy stage-1 lead-in bound: 250 ms power-gate lead + 250 ms hang (channel-squelch.ts). */
+const LEAD_IN_MAX_MS = 500
 
 // --- Tolerances (each justified; mirrored in design.md "Meter equivalence") -------------
 /**
@@ -421,11 +428,12 @@ function continuous4fsk(
 	return out
 }
 
-function driveQuieted(pcm: Buffer, rate: number): boolean {
+/** Quieted NFM drive; the first `leadBytes` are a noise lead-in noted unquieted. */
+function driveQuieted(pcm: Buffer, rate: number, leadBytes = 0): boolean {
 	const gate = new EvidenceGate({ rate, modulation: "nfm", gain: 2 })
 	const block = Math.round(rate / 100) * 2
 	for (let s = 0; s < pcm.length; s += block) {
-		gate.noteBlock(true)
+		gate.noteBlock(s >= leadBytes)
 		if (gate.push(pcm, "s16le", s, Math.min(pcm.length, s + block)) >= 0)
 			return true
 	}
@@ -440,6 +448,8 @@ describe("continuous 4FSK never latches (quieted NFM carrier)", () => {
 		)
 		// Stage 1 opens at the over onset (the pre-over frames are unquieted noise, closed).
 		expect(driveQuieted(pcmOf(audio.subarray(onset)), RATE)).toBe(false)
+		// Noisy onset: stage 1 open on the 250 ms pre-over noise, noted unquieted.
+		expect(driveQuieted(pcmOf(audio), RATE, onset * 2)).toBe(false)
 		// Which rule rejects it, on every full 20-frame window the gate judges:
 		const frames = meterFrames(audio.subarray(onset), 2)
 		let maxSyllabic = 0
@@ -459,6 +469,15 @@ describe("continuous 4FSK never latches (quieted NFM carrier)", () => {
 			const rate = 25_000
 			const audio = continuous4fsk(rate, 4, seed)
 			expect(driveQuieted(pcmOf(audio), rate)).toBe(false)
+			// Noisy onset: 0-500 ms of unquieted noise (stage 1 open on it) before the symbols.
+			const noise = mulberry32(seed + 100)
+			for (const leadMs of [10, 40, 250, LEAD_IN_MAX_MS]) {
+				const lead = Math.round((rate * leadMs) / 1_000)
+				const withLead = new Float64Array(lead + audio.length)
+				for (let i = 0; i < lead; i++) withLead[i] = 0.9 * (2 * noise() - 1)
+				withLead.set(audio, lead)
+				expect(driveQuieted(pcmOf(withLead), rate, lead * 2)).toBe(false)
+			}
 			// The same symbols synthesised at the meter's 8 kHz rate, to show which rules reject:
 			// rectangular levels are data-like (cluster) and not syllabic.
 			const at8k = continuous4fsk(RATE, 4, seed)
@@ -472,28 +491,134 @@ describe("continuous 4FSK never latches (quieted NFM carrier)", () => {
 })
 
 /**
- * Known risks (pending decision): with stage 1 already open on the pre-over noise, the first
- * full 20-frame window (frames 0-19) holds 5 unquieted noise frames plus the key-up, with 25
- * unquieted and 75 quieted blocks (quiet fraction 0.75 >= 0.5), and its medians are
- * voice-positive. Gate code and thresholds unchanged; these pin the current behaviour.
+ * Noisy stage-1 lead-in (design amendment 2026-10-23, window reset on carrier onset). Stage 1
+ * can be open on unquieted noise before the over through its power gate or its 250 ms hang
+ * (src/core/channel-squelch.ts); the bound used here is 250 ms + 250 ms = 500 ms of lead-in.
+ * The lead-in is the fixture's own pre-over noise (8 kHz golden, cycled), noted unquieted; the
+ * over is noted as the fixture class gives. This mirrors the wiring (live-demodulator.ts):
+ * per 10 ms block, the carrier-onset rule (abandon the pre-roll while waiting), noteBlock, then
+ * push and the pre-roll tags.
  */
-const PREOPEN_KNOWN_RISK = new Set(["nfm-dmr-4fsk-continuous", "nfm-clicks"])
+
+interface LeadInRun {
+	/** Latch time after the over onset (s), or null. */
+	latchS: number | null
+	/** Over-relative index (8 kHz samples) of the first played sample; negative = lead-in noise. */
+	playedFrom: number | null
+}
+
+function leadInRun(name: string, leadMs: number): LeadInRun {
+	const entry = manifest[name]
+	if (entry === undefined) throw new Error(`no manifest entry ${name}`)
+	const audio = audioOf(name)
+	const onset = Math.round(entry.overOnsetS * RATE)
+	const lead = Math.round((leadMs * RATE) / 1_000)
+	const composed = new Float64Array(lead + audio.length - onset)
+	for (let i = 0; i < lead; i++) composed[i] = audio[i % onset] ?? 0
+	composed.set(audio.subarray(onset), lead)
+	const input = pcmOf(composed)
+	const buf = Buffer.from(input)
+	const unquieted = name === "nfm-noise" || name === "nfm-impulse"
+	const gate = new EvidenceGate({ rate: RATE, modulation: "nfm", gain: 2 })
+	const preRoll = new PreRoll({ rate: RATE, format: "s16le" })
+	let leadIn: Parameters<typeof stepLeadIn>[0] = "unknown"
+	let latchS: number | null = null
+	for (let s = 0; s < composed.length; s += BLOCK_SAMPLES) {
+		const end = Math.min(composed.length, s + BLOCK_SAMPLES)
+		const carrier = s >= lead && !unquieted
+		const step = stepLeadIn(leadIn, carrier)
+		leadIn = step.next
+		if (step.onset && gate.state === "waiting") preRoll.abandon()
+		gate.noteBlock(carrier)
+		const k = gate.push(buf, "s16le", s * 2, end * 2)
+		if (k >= 0) {
+			if (latchS === null) latchS = (k / 2 - lead) / RATE
+			preRoll.process(buf, s * 2, k, "pending")
+			preRoll.latch()
+			preRoll.process(buf, k, end * 2, "pass")
+		} else
+			preRoll.process(
+				buf,
+				s * 2,
+				end * 2,
+				gate.state === "open" ? "pass" : "pending",
+			)
+	}
+	let playedFrom: number | null = null
+	const n = buf.length >> 1
+	let q = 0
+	while (q < n && buf.readInt16LE(q * 2) === 0) q++
+	const match = 32
+	if (q + match <= n)
+		for (let p = Math.max(0, q - 1.5 * RATE); p <= q; p++) {
+			let same = true
+			for (let j = 0; j < match && same; j++)
+				same = buf.readInt16LE((q + j) * 2) === input.readInt16LE((p + j) * 2)
+			if (same) {
+				playedFrom = p - lead
+				break
+			}
+		}
+	return { latchS, playedFrom }
+}
+
+const neverOpenNfm = names.filter(
+	n => manifest[n]?.mode === "nfm" && manifest[n]?.expect === "none",
+)
 
 describe("stage 1 open on noise before the over (never-open NFM fixtures)", () => {
-	for (const name of names) {
-		const entry = manifest[name]
-		if (entry?.mode !== "nfm" || entry.expect !== "none") continue
-		const risk = PREOPEN_KNOWN_RISK.has(name)
-		it(`${risk ? "known risk (pending decision): " : ""}${name}: pre-over noise unquieted ${risk ? "latches voice" : "never latches"}`, () => {
-			const r = replay(name, true)
-			const m = mediansOf(meterFrames(audioOf(name), 2).slice(0, 20))
+	for (const name of neverOpenNfm) {
+		it(`${name}: closed with ideal onset and with the 250 ms pre-over noise open`, () => {
+			const ideal = replay(name)
+			const noisy = replay(name, true)
 			console.info(
-				`EVIDENCE-SQUELCH PREOPEN: ${name} ${show(r)} first-window{${fmt(m)} syllabic4=${m.syllabic.toFixed(4)}}`,
+				`EVIDENCE-SQUELCH PREOPEN: ${name} ideal{${show(ideal)}} noisy{${show(noisy)}}`,
 			)
-			if (risk) {
-				expect(r.latched).toBe(true)
-				expect(r.evidence).toBe("voice")
-			} else expect(r.latched).toBe(false)
+			expect(ideal.latched).toBe(false)
+			expect(noisy.latched).toBe(false)
 		})
 	}
+
+	// Feature: evidence-squelch, Property 3: Bare carrier and data never open
+	// Validates: Requirements 1.4
+	it("Property 3 (noisy lead-in): no never-open NFM fixture latches after 0-500 ms of noise", () => {
+		fc.assert(
+			fc.property(
+				fc.constantFrom(...neverOpenNfm),
+				fc.integer({ min: 0, max: LEAD_IN_MAX_MS / 10 }),
+				(name, blocks) => leadInRun(name, blocks * 10).latchS === null,
+			),
+			{ numRuns: 100 },
+		)
+	})
+})
+
+describe("exhaustive noisy lead-in sweep", () => {
+	it("no never-open NFM fixture latches for any lead-in of 0-500 ms in 10 ms steps", () => {
+		const hits: string[] = []
+		for (const name of neverOpenNfm)
+			for (let ms = 0; ms <= LEAD_IN_MAX_MS; ms += 10)
+				if (leadInRun(name, ms).latchS !== null) hits.push(`${name}@${ms}ms`)
+		expect(hits).toEqual([])
+	}, 120_000)
+})
+
+describe("a real over after a noisy lead-in still latches from the over", () => {
+	for (const name of ["nfm-voice", "nfm-ctcss-670-voice", "nfm-dcs-023n-voice"])
+		for (const leadMs of [0, 50, 250, LEAD_IN_MAX_MS]) {
+			it(`${name} after ${leadMs} ms of noise: latch by onset + 1.0 s, pre-roll starts at the over`, () => {
+				// Reset at the onset block, empty meter: the 20-frame window (1.0 s) is full at
+				// onset + 1.0 s; the pre-roll was abandoned at the onset, so it holds 1.0 s of the
+				// over (under its 1.5 s capacity) and plays from the over's first sample.
+				const r = leadInRun(name, leadMs)
+				console.info(
+					`EVIDENCE-SQUELCH LEADIN: ${name} lead=${leadMs}ms latch=${r.latchS?.toFixed(4) ?? "-"}s playedFrom=${r.playedFrom ?? "-"}`,
+				)
+				expect(r.latchS).not.toBeNull()
+				expect(r.latchS ?? Infinity).toBeLessThanOrEqual(1.0)
+				expect(r.playedFrom).not.toBeNull()
+				expect(r.playedFrom ?? -1).toBeGreaterThanOrEqual(0)
+				expect(r.playedFrom ?? Infinity).toBeLessThanOrEqual(RATE * 0.02)
+			})
+		}
 })

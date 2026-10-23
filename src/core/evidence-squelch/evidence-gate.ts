@@ -142,6 +142,24 @@ function voiceFramesFinite(stats: AnalogTrialStats): boolean {
 
 type GateState = "idle" | "waiting" | "open"
 
+/**
+ * Noise lead-in tracking for the window reset (design amendment 2026-10-23), per waiting episode
+ * (from stage-1 open or `reset()`): `unknown` until the first noted block; `lead-in` while every
+ * noted block so far is unquieted; `done` after the first quieted block (or when the first noted
+ * block is quieted, the ideal onset). The unknown/lead-in → quieted step is the carrier onset.
+ */
+export type EvidenceLeadIn = "unknown" | "lead-in" | "done"
+
+/** Next lead-in state and whether this block is the carrier onset after a noise lead-in. */
+export function stepLeadIn(
+	state: EvidenceLeadIn,
+	carrier: boolean,
+): { next: EvidenceLeadIn; onset: boolean } {
+	if (state === "done") return { next: "done", onset: false }
+	if (!carrier) return { next: "lead-in", onset: false }
+	return { next: "done", onset: state === "lead-in" }
+}
+
 /** Tone identity for renewal: CTCSS table index, or 1 000 + packed DCS reading. */
 function toneKey(tone: Readonly<ToneReading>): number {
 	return tone.kind === "ctcss" ? tone.index : 1_000 + tone.packed
@@ -184,6 +202,7 @@ export class EvidenceGate implements EvidenceGatePort {
 	private quietHead = 0
 	private quietLen = 0
 	private quietCount = 0
+	private leadIn: EvidenceLeadIn = "unknown"
 	/** Input samples since waiting began (or since a reopen within the hang). */
 	private audioSamples = 0
 	/** A non-finite input went into the current decimation group. */
@@ -241,9 +260,20 @@ export class EvidenceGate implements EvidenceGatePort {
 	}
 
 	noteBlock(carrier: boolean): void {
-		if (this.internal !== "waiting") return
-		const ring = this.quiet
 		const value = carrier === true ? 1 : 0
+		// Window reset on carrier onset (design amendment 2026-10-23): when the noted blocks of
+		// this episode began with unquieted noise (stage 1 open on noise through its power gate
+		// or hang), the first quieted block restarts the voice window, so that noise is never
+		// judged with the over. At most once per episode: later fades inside the over keep the
+		// window (the quiet-fraction rule judges them). Tracked from stage-1 open, also before
+		// the first PCM. The tone stage, decimator and audio counter are kept: tones need no
+		// window and must not lose time.
+		const step = stepLeadIn(this.leadIn, value === 1)
+		this.leadIn = step.next
+		const onset = step.onset
+		if (this.internal !== "waiting") return
+		if (onset) this.resetVoiceWindow()
+		const ring = this.quiet
 		if (this.quietLen === ring.length)
 			this.quietCount -= ring[this.quietHead] ?? 0
 		else this.quietLen += 1
@@ -351,7 +381,20 @@ export class EvidenceGate implements EvidenceGatePort {
 		return guard
 	}
 
+	/** Voice meter, frame window and quiet ring back to empty (allocation-free). */
+	private resetVoiceWindow(): void {
+		this.meter.reset()
+		this.frameHead = 0
+		this.frameLen = 0
+		this.frameFinite.fill(0)
+		this.quiet.fill(0)
+		this.quietHead = 0
+		this.quietLen = 0
+		this.quietCount = 0
+	}
+
 	reset(): void {
+		this.leadIn = "unknown"
 		this.internal = "idle"
 		this.latchedEvidence = null
 		this.latchedToneKey = -1

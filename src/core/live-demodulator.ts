@@ -86,7 +86,8 @@ import {
 	type PreRollPort,
 	type PreRollTag,
 } from "./evidence-squelch/contract.js"
-import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
+import { EvidenceGate, stepLeadIn } from "./evidence-squelch/evidence-gate.js"
+import type { EvidenceLeadIn } from "./evidence-squelch/evidence-gate.js"
 import { PreRoll } from "./evidence-squelch/pre-roll.js"
 import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
 import type { FanoutManager } from "./fanout-manager.js"
@@ -252,6 +253,12 @@ interface RunEvidence {
 	active: boolean
 	/** False after a build or clear: bytes completing a split sample are skipped (muted) once. */
 	aligned: boolean
+	/**
+	 * Noise lead-in state of the noted blocks, mirroring the gate (`stepLeadIn`). At the carrier
+	 * onset after a lead-in the gate restarts its voice window and the held noise is dropped
+	 * (amendment 2026-10-23).
+	 */
+	leadIn: EvidenceLeadIn
 }
 
 /** WG10 req 2.3: a new front started by an offset change, not yet switched in. */
@@ -953,6 +960,7 @@ export class LiveDemodulator extends EventEmitter {
 			if (evidence !== null && evidence.gate.state === "waiting") {
 				evidence.gate.reset()
 				evidence.preRoll.abandon()
+				evidence.leadIn = "unknown"
 			}
 		}
 		this.emit("squelch-changed", open)
@@ -1066,8 +1074,15 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		// Evidence squelch: one measured block while stage 1 is open (A4: a held gate is closed).
 		const evidence = this.activeEvidence(run)
-		if (evidence !== null && runGateOpen(run) && !run.gateHeld)
-			evidence.gate.noteBlock(this.evidenceCarrier(run, power, sample))
+		if (evidence !== null && runGateOpen(run) && !run.gateHeld) {
+			const carrier = this.evidenceCarrier(run, power, sample)
+			// Carrier onset while waiting: the noise lead-in stage 1 was open on is not the over.
+			const step = stepLeadIn(evidence.leadIn, carrier)
+			evidence.leadIn = step.next
+			if (step.onset && evidence.gate.state === "waiting")
+				evidence.preRoll.abandon()
+			evidence.gate.noteBlock(carrier)
+		}
 		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
 		// The squelch samples this estimate only while closed (it rises while
 		// open), so a held carrier is never judged against its own level.
@@ -2040,6 +2055,7 @@ export class LiveDemodulator extends EventEmitter {
 				active: evidenceGateApplies(this.config),
 				// Resolved against the next chunk's phase (processEvidence).
 				aligned: false,
+				leadIn: "unknown",
 			}
 		} catch (err) {
 			// A5: the run keeps the frozen stage-1 path.
@@ -2066,6 +2082,7 @@ export class LiveDemodulator extends EventEmitter {
 		evidence.preRoll.clear()
 		evidence.tailTag = "drop"
 		evidence.aligned = false
+		evidence.leadIn = "unknown"
 	}
 
 	/** Requirement 4.1: present while the pipeline runs; `off` outside the evidence path. */
