@@ -565,6 +565,11 @@ const capabilities = closed({
 		],
 	},
 })
+capabilities.properties["iqDelivery"] = closed({
+	advertised: nullable({ type: "array", items: { enum: ["raw", "channels"] } }),
+	configured: { enum: ["raw", "channels", "auto"] },
+	resolved: literal("raw"),
+})
 const page = closed({
 	schemaVersion: literal(1),
 	items: { type: "array", maxItems: 16, items: capabilities },

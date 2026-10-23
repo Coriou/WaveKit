@@ -13,6 +13,7 @@ import type { FastifyPluginAsync } from "fastify"
 import type { ResourceAggregator } from "../../core/resource-aggregator.js"
 import type {
 	ResourceSnapshot,
+	SourceLinkQuality,
 	ContainerResources,
 	SdrHostStatus,
 	SourceBackpressure,
@@ -21,6 +22,101 @@ import type {
 // ============================================================================
 // Schema Definitions
 // ============================================================================
+
+const linkQualitySchema = {
+	type: "object",
+	properties: {
+		sourceId: { type: "string" },
+		transport: { type: "string", enum: ["network", "loopback"] },
+		at: { type: "string" },
+		absorber: {
+			type: "object",
+			properties: {
+				capacityBytes: { type: "number" },
+				capacitySeconds: { type: "number" },
+				heldBytes: { type: "number" },
+				peakHeldBytes10m: { type: "number" },
+				peakHeldMs10m: { type: "number" },
+				absorbedBytesTotal: { type: "number" },
+				overflowBytesTotal: { type: "number" },
+				overflowChunksTotal: { type: "number" },
+				flushedBytesTotal: { type: "number" },
+				absorbedBytes10m: { type: "number" },
+				overflowBytes10m: { type: "number" },
+				flushedBytes10m: { type: "number" },
+				enabled: { type: "boolean" },
+				laggardExcludeMsMax10m: { type: ["number", "null"] },
+			},
+		},
+		arrivals: {
+			type: "object",
+			properties: {
+				windowMs: { type: "number" },
+				worstStallMs: { type: ["number", "null"] },
+				gapP99Ms: { type: ["number", "null"] },
+				burstSeconds: { type: "number" },
+				catchupBytes10m: { type: "number" },
+				chunks10m: { type: "number" },
+			},
+		},
+		attribution: {
+			type: "object",
+			properties: {
+				last: {
+					type: ["string", "null"],
+					enum: ["none", "link", "host", "consumer", "unknown", null],
+				},
+				counts10m: {
+					type: "object",
+					properties: {
+						none: { type: "number" },
+						link: { type: "number" },
+						host: { type: "number" },
+						consumer: { type: "number" },
+						unknown: { type: "number" },
+					},
+				},
+			},
+		},
+		upstreamDropBytesPerSecond: { type: ["number", "null"] },
+		receiver: {
+			type: ["object", "null"],
+			properties: {
+				interfaceKind: {
+					type: ["string", "null"],
+					enum: ["ethernet", "wireless", "other", null],
+				},
+				signalDbm: { type: ["number", "null"] },
+				undervoltageNow: { type: ["boolean", "null"] },
+				throttled: { type: ["boolean", "null"] },
+			},
+		},
+		histograms: {
+			type: "object",
+			properties: {
+				windowMs: { type: "number" },
+				gapBucketUpperMs: { type: "array", items: { type: "number" } },
+				gapCounts: { type: "array", items: { type: "number" } },
+				chunkSizeBucketUpperBytes: { type: "array", items: { type: "number" } },
+				chunkSizeCounts: { type: "array", items: { type: "number" } },
+				catchupBucketUpperBytes: { type: "array", items: { type: "number" } },
+				catchupCounts: { type: "array", items: { type: "number" } },
+			},
+		},
+		loopDelay: {
+			type: ["object", "null"],
+			properties: {
+				last: {
+					type: ["object", "null"],
+					properties: { maxMs: { type: "number" }, p99Ms: { type: "number" } },
+				},
+				maxMs10m: { type: ["number", "null"] },
+				p99MaxMs10m: { type: ["number", "null"] },
+				intervals10m: { type: "number" },
+			},
+		},
+	},
+} as const
 
 const containerResourcesSchema = {
 	type: "object",
@@ -63,6 +159,15 @@ const sdrHostStatusSchema = {
 				clients: { type: "number" },
 				bytesPerSec: { type: "number" },
 				totalBytesSent: { type: "number" },
+			},
+		},
+		iqDelivery: {
+			type: ["object", "null"],
+			properties: {
+				modes: {
+					type: "array",
+					items: { type: "string", enum: ["raw", "channels"] },
+				},
 			},
 		},
 		dongle: {
@@ -136,6 +241,55 @@ export const resourceRoutes: FastifyPluginAsync<ResourceRoutesOptions> = async (
 	options,
 ) => {
 	const { resourceAggregator } = options
+
+	fastify.get<{ Reply: SourceLinkQuality[] }>(
+		"/api/resources/link-quality",
+		{
+			schema: {
+				response: { 200: { type: "array", items: linkQualitySchema } },
+			},
+		},
+		async () => resourceAggregator.getLinkQuality(),
+	)
+
+	fastify.get<{
+		Params: { sourceId: string }
+		Reply: SourceLinkQuality | { error: string; code: string; message: string }
+	}>(
+		"/api/resources/link-quality/:sourceId",
+		{
+			schema: {
+				params: {
+					type: "object",
+					properties: { sourceId: { type: "string" } },
+					required: ["sourceId"],
+				},
+				response: {
+					200: linkQualitySchema,
+					404: {
+						type: "object",
+						properties: {
+							error: { type: "string" },
+							code: { type: "string" },
+							message: { type: "string" },
+						},
+						required: ["error", "code", "message"],
+					},
+				},
+			},
+		},
+		async (request, reply) => {
+			const report = resourceAggregator.getLinkQualityFor(
+				request.params.sourceId,
+			)
+			if (report) return report
+			return reply.status(404).send({
+				error: "NotFound",
+				code: "LINK_QUALITY_NOT_FOUND",
+				message: "No link-quality report for this source",
+			})
+		},
+	)
 
 	/**
 	 * GET /api/resources

@@ -1,7 +1,8 @@
 # Link burst resilience requirements
 
-Status: design, not implemented (2026-10-22). See [design](design.md). A `tasks.md` follows
-from the implementation plan.
+Status: implemented; fake-link acceptance and instrumentation recorded (2026-10-23).
+Live soak (9.5) and Pi 4-class measurement (9.4) remain open. See [design](design.md)
+and [tasks](tasks.md).
 
 ## What changes for the user
 
@@ -246,13 +247,26 @@ private network (never the live receiver's bridge ports or the live API port): s
 at intervals of 9, 1, 130, 50, 40, 71 and 161 s, each followed by a catch-up burst of the
 withheld bytes, at 2.048 and 2.4 Msps. Stalls up to 1.8 s with the default absorber: every
 branch drops 0.00 % of bytes over the run and the absorber does not overflow. Stalls of 2.5 s
-and 4 s: overflow equals the withheld bytes beyond capacity within one release block, every
+and 4 s: overflow is ≤ withheld bytes − capacity and ≥ that amount minus the sum of
+downstream branch buffers; every
 such interval is attributed `link`, no probationer is suspended and the clean window is not
 restarted.
 9.2 Attribution replay: a deliberately slow test consumer gives `consumer` with its siblings at
-0.00 % drops and their added latency at most `ABSORBER_LAGGARD_MS` plus one chunk; CPU
+0.00 % drops. Exclusion latency is ≤ `ABSORBER_LAGGARD_MS` + one chunk + the measured
+loop delay of the interval or its predecessor (rounded up to loop-meter resolution).
+Post-exclusion drain time is bounded by held backlog / (sibling drain rate − source rate),
+with a positive excess rate; total holding time is bounded by exclusion plus drain. The
+acceptance replay assumes excess drain of one source byte rate and reports the implied excess
+(the 2 s polls cannot measure it directly). CPU
 contention on the scratch core with a smooth link gives `host`; a fake upstream drop gives
 `unknown`.
+
+> Superseded wording within 9.1: “overflow equals the withheld bytes beyond capacity within
+> one release block”. Downstream buffering also accepts withheld bytes.
+> Superseded wording within 9.2: “their added latency at most `ABSORBER_LAGGARD_MS` plus one
+> chunk”. Exclusion includes scheduling delay and siblings must then drain held backlog.
+> See the [acceptance record](../../engineering/LINK-BURST-2026-10-ACCEPTANCE.md).
+
 9.3 Late-drop replay: with every placement graduated, sustained consumer drops shed the newest
 eligible catalogue placement after two of three windows and nothing else for the cooldown;
 YAML, `always` and operator-started placements are untouched; link-only bursts shed nothing.

@@ -1,6 +1,14 @@
-import type { DecoderEfficiencyDetail } from "@wavekit/api-types"
+import type { Logger } from "../../utils/logger.js"
+import type {
+	DecoderEfficiencyDetail,
+	DropAttribution,
+} from "@wavekit/api-types"
 import {
 	channelizerBaseCores,
+	LATE_SHED_WINDOWS,
+	LATE_SHED_HITS,
+	LATE_SHED_COOLDOWN_MS,
+	EFFICIENCY_DROP_WINDOW_MS,
 	EFFICIENCY_CLEAR_MS,
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MS,
@@ -10,6 +18,7 @@ import {
 } from "./contract.js"
 import type {
 	AdmissionDecision,
+	LateDropWindow,
 	EfficiencyGate,
 	EfficiencyInputs,
 	RunningPlacement,
@@ -21,6 +30,10 @@ const valid = (value: unknown): value is number =>
 
 /** Stateful decision core; all time and observations are supplied by the caller. */
 export interface DropReader {
+	sourceEpoch?(id: string): number
+	latestAttribution?(id: string): DropAttribution | null
+	lateWindows?(id: string): readonly LateDropWindow[]
+	linkDropsSince?(id: string, sinceMono: number): boolean
 	dropState(id: string): {
 		state: "ok" | "dropping" | "unknown"
 		dropBytesPerSecond: number | null
@@ -48,8 +61,26 @@ export interface DropReader {
 
 export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
-	deps: { drops?: DropReader } = {},
+	deps: { drops?: DropReader; log?: Logger } = {},
 ): EfficiencyGate {
+	const placementEpochs = new Map<
+		string,
+		{ sourceId: string; epoch: number; placement: WantedPlacement }
+	>()
+	const reconnectRetained = new Set<string>()
+	const refreshReconnects = () => {
+		for (const [key, previous] of placementEpochs) {
+			try {
+				const epoch = deps.drops?.sourceEpoch?.(previous.sourceId)
+				if (valid(epoch) && epoch > previous.epoch) {
+					reconnectRetained.add(key)
+					previous.epoch = epoch
+				}
+			} catch {
+				/* Missing source evidence cannot establish a reconnect. */
+			}
+		}
+	}
 	const admittedMono = new Map<string, number>()
 	const monoNow = () => {
 		try {
@@ -70,6 +101,27 @@ export function createEfficiencyGate(
 			return { state: "unknown" as const, dropBytesPerSecond: null }
 		}
 	}
+	const latestAttribution = (id: string): DropAttribution | undefined => {
+		try {
+			const read = deps.drops?.latestAttribution
+			if (read === undefined) return undefined
+			if (typeof read !== "function") return "unknown"
+			const value = read.call(deps.drops, id)
+			return value === "none" ||
+				value === "link" ||
+				value === "host" ||
+				value === "consumer"
+				? value
+				: "unknown"
+		} catch {
+			return "unknown"
+		}
+	}
+	const lateSince = new Map<string, number>()
+	const cooldownUntil = new Map<string, number>()
+	const warned = new Map<string, Map<string, number>>()
+	let lastLateMono: number | null = null
+
 	const retries = new Map<
 		string,
 		{
@@ -131,10 +183,12 @@ export function createEfficiencyGate(
 		mono: number,
 		prune = false,
 	) => {
+		refreshReconnects()
 		if (prune) {
 			const present = new Set(running.map(p => p.key))
 			for (const key of admittedMono.keys())
-				if (!present.has(key)) {
+				if (!present.has(key) && !reconnectRetained.has(key)) {
+					placementEpochs.delete(key)
 					admittedMono.delete(key)
 					graduated.delete(key)
 					gated.delete(key)
@@ -177,18 +231,24 @@ export function createEfficiencyGate(
 		const admitted = admittedMono.get(p.key) ?? NaN
 		if (!Number.isFinite(mono) || !Number.isFinite(admitted)) return null
 		const reader = deps.drops
-		if (reader?.coverageCompleteAtMono) {
+		if (reader?.coverageCompleteAtMono !== undefined) {
+			if (typeof reader.coverageCompleteAtMono !== "function") return null
 			try {
 				const at = reader.coverageCompleteAtMono(
 					p.sourceId,
 					admitted,
 					EFFICIENCY_PROBATION_MS,
 				)
-				return at !== null && Number.isFinite(at) ? at : null
+				return valid(at) &&
+					at >= admitted + EFFICIENCY_PROBATION_MS &&
+					at <= mono
+					? at
+					: null
 			} catch {
 				return null
 			}
 		}
+		if (reader?.latestAttribution !== undefined) return null
 		return mono - admitted >= EFFICIENCY_PROBATION_MS
 			? admitted + EFFICIENCY_PROBATION_MS
 			: null
@@ -199,6 +259,70 @@ export function createEfficiencyGate(
 		return at !== null && evidence(p, admittedMono.get(p.key)!, at) === null
 	}
 	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
+
+	const lateState = (
+		sourceId: string,
+		running: readonly RunningPlacement[],
+		mono: number,
+	) => {
+		const placements = running.filter(p => p.sourceId === sourceId)
+		const probation = placements.some(p => onProbation(p, mono))
+		const eligible = placements.filter(
+			p =>
+				gated.has(p.key) &&
+				graduated.has(p.key) &&
+				(p.mode === "auto" || p.mode === "off") &&
+				p.startMode === "auto",
+		)
+		let windows: readonly LateDropWindow[] = []
+		try {
+			const read = deps.drops?.lateWindows
+			if (typeof read === "function" && valid(mono)) {
+				const value = read.call(deps.drops, sourceId)
+				if (
+					Array.isArray(value) &&
+					value.every(
+						(w: LateDropWindow, i: number) =>
+							w &&
+							valid(w.startMono) &&
+							valid(w.endMono) &&
+							w.endMono - w.startMono === EFFICIENCY_DROP_WINDOW_MS &&
+							w.endMono <= mono &&
+							typeof w.condemning === "boolean" &&
+							typeof w.linkOrUnknownDrops === "boolean" &&
+							(i === 0 || value[i - 1].endMono <= w.startMono),
+					)
+				)
+					windows = value
+						.filter(w => w.startMono >= (lateSince.get(sourceId) ?? mono))
+						.slice(-LATE_SHED_WINDOWS)
+			}
+		} catch {
+			/* Unreadable windows never condemn or credit. */
+		}
+		const condemningWindows = windows.filter(w => w.condemning).length
+		let held: "nothing-sheddable" | "link-or-unknown" | null = null
+		if (!probation) {
+			if (condemningWindows >= LATE_SHED_HITS && eligible.length === 0)
+				held = "nothing-sheddable"
+			else if (
+				condemningWindows < LATE_SHED_HITS &&
+				windows.filter(w => w.condemning || w.linkOrUnknownDrops).length >=
+					LATE_SHED_HITS
+			)
+				held = "link-or-unknown"
+		}
+
+		return {
+			eligible,
+			condemningWindows,
+			windows: windows.length,
+			held,
+			cooldownUntil: cooldownUntil.has(sourceId)
+				? new Date(cooldownUntil.get(sourceId)!).toISOString()
+				: null,
+		}
+	}
 
 	return {
 		record(sample) {
@@ -239,16 +363,50 @@ export function createEfficiencyGate(
 			if (retry && now < retry.at) {
 				return { admit: false, detail: retry.detail, retryAtMs: retry.at }
 			}
+			// A disconnected placement still owns its admitted capacity. Otherwise
+			// another source could spend it before the placement resumes.
+			const present = new Set(running.map(p => p.key))
+			const reserved: WantedPlacement[] = []
+			for (const key of reconnectRetained) {
+				const previous = placementEpochs.get(key)
+				if (previous && !present.has(key)) reserved.push(previous.placement)
+			}
+			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key)) {
+				const resumedCost = total([
+					...running.filter(p => p.key !== newcomer.key),
+					...reserved.filter(p => p.key !== newcomer.key),
+					newcomer,
+				])
+				if (valid(inputs.budgetCores) && resumedCost <= inputs.budgetCores) {
+					const previous = placementEpochs.get(newcomer.key)
+					if (previous) previous.placement = { ...newcomer }
+					return { admit: true }
+				}
+			}
+			const attribution = latestAttribution(newcomer.sourceId)
+			if (attribution === "link")
+				return {
+					admit: false,
+					detail: "unknown",
+					retryAtMs: now + EFFICIENCY_SAMPLE_MS,
+				}
+
 			const state = readDrops(newcomer.sourceId).state
 			let detail: DecoderEfficiencyDetail | null = null
-			if (!valid(now) || state === "unknown") detail = "unknown"
+			if (
+				!valid(now) ||
+				state === "unknown" ||
+				attribution === "unknown" ||
+				(attribution !== undefined && !valid(mono))
+			)
+				detail = "unknown"
 			else if (state !== "ok") detail = "drops"
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
 			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) detail = "cpu"
 			else if (
 				!valid(inputs.budgetCores) ||
-				!Number.isFinite(total([...running, newcomer])) ||
-				total([...running, newcomer]) > inputs.budgetCores
+				!Number.isFinite(total([...running, ...reserved, newcomer])) ||
+				total([...running, ...reserved, newcomer]) > inputs.budgetCores
 			)
 				detail = "budget"
 			// Otherwise admissible: one gated probationer per source, so probation
@@ -275,6 +433,17 @@ export function createEfficiencyGate(
 				// fresh probation window.
 				if (!running.some(p => p.key === newcomer.key)) mark(newcomer.key, mono)
 				gated.add(newcomer.key)
+				try {
+					const epoch = deps.drops?.sourceEpoch?.(newcomer.sourceId)
+					if (valid(epoch))
+						placementEpochs.set(newcomer.key, {
+							sourceId: newcomer.sourceId,
+							epoch,
+							placement: { ...newcomer },
+						})
+				} catch {
+					/* Optional lifecycle evidence. */
+				}
 				return { admit: true }
 			}
 			// Missing evidence is not a rejection: no backoff is recorded and the
@@ -311,6 +480,13 @@ export function createEfficiencyGate(
 		probation(running) {
 			const mono = monoNow()
 			observeRunning(running, mono, true)
+			const sourceIds = new Set(running.map(p => p.sourceId))
+			if (!valid(mono) || (lastLateMono !== null && mono < lastLateMono)) {
+				for (const id of sourceIds)
+					lateSince.set(id, valid(mono) ? mono : Infinity)
+			}
+			lastLateMono = valid(mono) ? mono : null
+
 			// Graduation is sticky: a later discontinuity that discards coverage
 			// restarts only the placements still on probation.
 			for (const placement of running)
@@ -327,17 +503,75 @@ export function createEfficiencyGate(
 					newest.set(placement.sourceId, { placement, admitted })
 				}
 			}
-			const verdicts: { key: string; detail: "drops" | "cpu" }[] = []
+			const verdicts: {
+				key: string
+				detail: "drops" | "cpu" | "late-drops"
+			}[] = []
 			for (const { placement, admitted } of newest.values()) {
+				if (valid(mono)) lateSince.set(placement.sourceId, mono)
 				const detail = evidence(placement, admitted)
-				if (detail) {
+				if (
+					detail &&
+					placement.mode !== "always" &&
+					placement.startMode !== "operator"
+				) {
 					failures.add(placement.key)
 					verdicts.push({ key: placement.key, detail })
 				}
 			}
+			if (valid(mono))
+				for (const sourceId of new Set(running.map(p => p.sourceId))) {
+					if (newest.has(sourceId)) continue
+					if (!valid(lateSince.get(sourceId))) lateSince.set(sourceId, mono)
+					const state = lateState(sourceId, running, mono)
+					if (state.held !== null) {
+						const times = warned.get(sourceId) ?? new Map<string, number>()
+						const previous = times.get(state.held)
+						if (previous === undefined || mono - previous >= 60_000) {
+							times.set(state.held, mono)
+							warned.set(sourceId, times)
+							try {
+								deps.log?.warn(
+									{
+										sourceId,
+										reason: state.held,
+										condemningWindows: state.condemningWindows,
+										windows: state.windows,
+									},
+									"Late drops not shed",
+								)
+							} catch {
+								/* Logging cannot change a verdict. */
+							}
+						}
+					}
+					if (
+						mono < (cooldownUntil.get(sourceId) ?? 0) ||
+						state.condemningWindows < LATE_SHED_HITS
+					)
+						continue
+					const newestEligible = state.eligible.reduce<
+						RunningPlacement | undefined
+					>(
+						(best, p) =>
+							!best || admittedMono.get(p.key)! > admittedMono.get(best.key)!
+								? p
+								: best,
+						undefined,
+					)
+					if (newestEligible) {
+						failures.add(newestEligible.key)
+						verdicts.push({ key: newestEligible.key, detail: "late-drops" })
+						cooldownUntil.set(sourceId, mono + LATE_SHED_COOLDOWN_MS)
+						lateSince.set(sourceId, mono)
+					}
+				}
 			return verdicts
 		},
 		noteSuspended(key, detail, now) {
+			reconnectRetained.delete(key)
+			placementEpochs.delete(key)
+			gated.delete(key)
 			const previous = retries.get(key)
 			const delay =
 				failures.delete(key) && previous
@@ -351,6 +585,8 @@ export function createEfficiencyGate(
 			})
 		},
 		forget(key) {
+			reconnectRetained.delete(key)
+			placementEpochs.delete(key)
 			admittedMono.delete(key)
 			graduated.delete(key)
 			gated.delete(key)
@@ -374,46 +610,69 @@ export function createEfficiencyGate(
 			return {
 				budgetCores: inputs.budgetCores,
 				cpuGuardPercent: inputs.cpuGuardPercent,
-				sources: [...ids].map(sourceId => ({
-					sourceId,
-					coresInUse: total(running.filter(p => p.sourceId === sourceId)),
-					cpu: { percent: currentCpu(now), limit: inputs.cpuGuardPercent },
-					drops: readDrops(sourceId).state,
-					dropBytesPerSecond: readDrops(sourceId).dropBytesPerSecond,
-					admitted: running
-						.filter(p => p.sourceId === sourceId)
-						.map(p => {
-							const separator = p.key.lastIndexOf("#")
-							const channel = p.key.slice(separator + 1, p.key.lastIndexOf("@"))
-							return {
-								decoderId: p.key.slice(0, separator),
+				sources: [...ids].map(sourceId => {
+					const attribution = latestAttribution(sourceId)
+					return {
+						sourceId,
+						...(attribution !== undefined ? { attribution } : {}),
+						...(deps.drops?.lateWindows !== undefined
+							? {
+									lateDrops: (() => {
+										const state = lateState(sourceId, running, mono)
+										return {
+											condemningWindows: state.condemningWindows,
+											windows: state.windows,
+											cooldownUntil: state.cooldownUntil,
+											sheddable: state.eligible.length,
+											held: state.held,
+										}
+									})(),
+								}
+							: {}),
+						coresInUse: total(running.filter(p => p.sourceId === sourceId)),
+						cpu: { percent: currentCpu(now), limit: inputs.cpuGuardPercent },
+						drops: readDrops(sourceId).state,
+						dropBytesPerSecond: readDrops(sourceId).dropBytesPerSecond,
+						admitted: running
+							.filter(p => p.sourceId === sourceId)
+							.map(p => {
+								const separator = p.key.lastIndexOf("#")
+								const channel = p.key.slice(
+									separator + 1,
+									p.key.lastIndexOf("@"),
+								)
+								return {
+									decoderId: p.key.slice(0, separator),
+									sourceId,
+									channelHz:
+										p.reach === "channel" && valid(Number(channel))
+											? Number(channel)
+											: null,
+									reach: p.reach,
+									costCores: p.costCores,
+									probation: onProbation(p, mono),
+								}
+							}),
+						blocked: blocked
+							.filter(
+								b => b.placement.sourceId === sourceId && !b.decision.admit,
+							)
+							.map(({ placement: p, decision }) => ({
+								decoderId: p.decoderId,
 								sourceId,
-								channelHz:
-									p.reach === "channel" && valid(Number(channel))
-										? Number(channel)
-										: null,
+								channelHz: p.channelHz,
 								reach: p.reach,
 								costCores: p.costCores,
-								probation: onProbation(p, mono),
-							}
-						}),
-					blocked: blocked
-						.filter(b => b.placement.sourceId === sourceId && !b.decision.admit)
-						.map(({ placement: p, decision }) => ({
-							decoderId: p.decoderId,
-							sourceId,
-							channelHz: p.channelHz,
-							reach: p.reach,
-							costCores: p.costCores,
-							probation: false,
-							...(!decision.admit
-								? {
-										detail: decision.detail,
-										retryAt: new Date(decision.retryAtMs).toISOString(),
-									}
-								: {}),
-						})),
-				})),
+								probation: false,
+								...(!decision.admit
+									? {
+											detail: decision.detail,
+											retryAt: new Date(decision.retryAtMs).toISOString(),
+										}
+									: {}),
+							})),
+					}
+				}),
 			}
 		},
 	}

@@ -91,6 +91,7 @@ export interface SdrHostDongleInfo {
  * Complete SDR host status from wavekit-sdr-host /api/status endpoint.
  */
 export interface SdrHostStatus {
+	iqDelivery?: { modes: ("raw" | "channels")[] } | null
 	/** Whether the SDR host API is reachable */
 	available: boolean
 
@@ -191,6 +192,7 @@ export interface ResourceSnapshot {
  * Resource-related WebSocket event types.
  */
 export type ResourceEventType =
+	| "resources:link-quality"
 	| "resources:snapshot"
 	| "resources:container"
 	| "resources:sdr-host"
@@ -211,4 +213,70 @@ export interface ResourceAlert {
 	sourceId?: string
 	message: string
 	timestamp: string
+}
+
+export type DropAttribution = "none" | "link" | "host" | "consumer" | "unknown"
+export interface SourceLinkAbsorber {
+	enabled: boolean
+	capacityBytes: number
+	capacitySeconds: number
+	heldBytes: number
+	peakHeldBytes10m: number
+	/** Longest continuous holding episode in the window (sibling latency proxy, 9.2). */
+	peakHeldMs10m: number
+	/** Longest congested-to-excluded time of a laggard in the window; null when none was excluded. */
+	laggardExcludeMsMax10m: number | null
+	absorbedBytesTotal: number
+	overflowBytesTotal: number
+	overflowChunksTotal: number
+	flushedBytesTotal: number
+	absorbedBytes10m: number
+	overflowBytes10m: number
+	flushedBytes10m: number
+}
+export interface SourceLinkArrivals {
+	windowMs: number
+	worstStallMs: number | null
+	gapP99Ms: number | null
+	burstSeconds: number
+	catchupBytes10m: number
+	chunks10m: number
+}
+export interface SourceLinkReceiver {
+	interfaceKind: "ethernet" | "wireless" | "other" | null
+	signalDbm: number | null
+	undervoltageNow: boolean | null
+	throttled: boolean | null
+}
+/** Raw distributions over the 10 min window (requirement 2.1, record 2.3). Counts align with edges. */
+export interface SourceLinkHistograms {
+	windowMs: number
+	gapBucketUpperMs: number[]
+	gapCounts: number[] // 48 buckets
+	chunkSizeBucketUpperBytes: number[]
+	chunkSizeCounts: number[] // 16 buckets
+	catchupBucketUpperBytes: number[]
+	catchupCounts: number[] // 16 buckets, one count per closed catch-up window (burst)
+}
+/** Event-loop delay per efficiency sample interval (requirement 2.2); process-wide. */
+export interface SourceLinkLoopDelay {
+	last: { maxMs: number; p99Ms: number } | null
+	maxMs10m: number | null
+	p99MaxMs10m: number | null
+	intervals10m: number
+}
+export interface SourceLinkQuality {
+	sourceId: string
+	transport: "loopback" | "network"
+	at: string
+	absorber: SourceLinkAbsorber
+	arrivals: SourceLinkArrivals
+	attribution: {
+		last: DropAttribution | null
+		counts10m: Record<DropAttribution, number>
+	}
+	upstreamDropBytesPerSecond: number | null
+	receiver: SourceLinkReceiver | null
+	histograms?: SourceLinkHistograms
+	loopDelay?: SourceLinkLoopDelay | null
 }

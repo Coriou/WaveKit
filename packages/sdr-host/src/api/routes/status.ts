@@ -37,6 +37,7 @@ export function registerStatusRoutes(
 
 		return reply.send({
 			version: SDR_HOST_VERSION,
+			iqDelivery: { modes: ["raw"] },
 			receiverId: fastify.receiverId,
 			uptime,
 			dongle: preflightResult.dongle,

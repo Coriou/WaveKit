@@ -40,3 +40,29 @@ describe("SDR host status route version (WG4 5.5)", () => {
 		}
 	})
 })
+
+it.each([{ modes: ["raw"] as ("raw" | "channels")[] }, null])(
+	"preserves iqDelivery %j on both routes",
+	async iqDelivery => {
+		const value = { ...status(null), iqDelivery }
+		const aggregator = {
+			getSdrHostStatuses: () => [value],
+		} as unknown as ResourceAggregator
+		const app = Fastify()
+		try {
+			await app.register(resourceRoutes, { resourceAggregator: aggregator })
+			const list = await app.inject({
+				method: "GET",
+				url: "/api/resources/sdr-hosts",
+			})
+			const single = await app.inject({
+				method: "GET",
+				url: "/api/resources/sdr-hosts/local-iq",
+			})
+			expect(list.json()[0]).toEqual(value)
+			expect(single.json()).toEqual(value)
+		} finally {
+			await app.close()
+		}
+	},
+)

@@ -139,7 +139,11 @@ describe("source branch drop telemetry", () => {
 		try {
 			// Use real telemetry reads: mocks would dominate this small read budget.
 			for (let i = 0; i < 64; i++) primary.addBranch({ id: `branch-${i}` })
-			const expected = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+			const expected = {
+				droppedBytesTotal: 0,
+				droppedChunksTotal: 0,
+				active: true,
+			}
 			for (let i = 0; i < 1000; i++) router.branchDropCounters("a")
 			const timings: number[] = []
 			for (let i = 0; i < 1001; i++) {
@@ -346,6 +350,7 @@ it("per-branch snapshots are copied and preserve invalid entries", () => {
 		expect(branch(first, "one")).toEqual({
 			droppedBytesTotal: 100,
 			droppedChunksTotal: 100,
+			active: true,
 		})
 		expect(branch(first, "bad")?.droppedBytesTotal).toBeNaN()
 		const value = branch(first, "one")

@@ -1,0 +1,176 @@
+import { describe, it, expect } from "vitest"
+import { createIngestRecorder } from "../../../../src/core/link-burst/recorder.js"
+
+describe("IngestRecorder", () => {
+	it("reports the exact worst gap for the open-ended percentile bucket", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(1, 0)
+		r.observeChunk(1, 60000)
+		expect(r.window(60000)).toMatchObject({
+			gapP99Ms: 60000,
+			worstStallMs: 60000,
+		})
+	})
+	it("counts oversized chunks in the last size bucket", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(70000, 0)
+		const { chunkSizeCounts } = r.histograms(0)
+		expect(chunkSizeCounts.at(-1)).toBe(1)
+		expect(chunkSizeCounts.reduce((a, b) => a + b, 0)).toBe(1)
+	})
+	it("rejects intervals overwritten when a reporting read closes catch-up", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(1, 0)
+		r.observeChunk(1, 400)
+		r.observeChunk(1, 15900)
+		r.window(16400)
+		expect(r.interval(250, 500)).toBeNull()
+	})
+	it("retains exactly the oldest cell at the wraparound boundary", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(1, 0)
+		r.observeChunk(1, 250)
+		r.observeChunk(1, 16000)
+		expect(r.interval(250, 500)).toEqual({
+			maxGapMs: 250,
+			chunks: 1,
+			catchupBytes: 0,
+		})
+		expect(r.interval(0, 250)).toBeNull()
+	})
+	it("resetArrival breaks the gap chain", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(10, 0)
+		r.observeChunk(10, 10)
+		r.resetArrival()
+		r.observeChunk(10, 10000)
+		expect(r.window(10000).worstStallMs).toBe(10)
+	})
+	it("catch-up counts bytes above nominal after a long gap", () => {
+		const r = createIngestRecorder()
+		r.configure(1000, 2)
+		r.observeChunk(10, 0)
+		r.observeChunk(2000, 200)
+		r.observeChunk(1000, 300)
+		expect(r.window(800).catchupBytes).toBe(2000)
+		expect(r.histograms(800).catchupCounts.reduce((a, b) => a + b, 0)).toBe(1)
+		expect(r.window(900).catchupBytes).toBe(2000)
+	})
+	it("interval returns the largest gap ended in range", () => {
+		const r = createIngestRecorder()
+		expect(r.interval(0, 250)).toBeNull()
+		r.observeChunk(1, 0)
+		r.observeChunk(1, 100)
+		r.observeChunk(1, 400)
+		expect(r.interval(250, 500)).toEqual({
+			maxGapMs: 300,
+			chunks: 1,
+			catchupBytes: 0,
+		})
+		expect(r.interval(0, 17000)).toBeNull()
+	})
+	it("histograms sums in-window slots and matches window()", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(32, 0)
+		r.observeChunk(64, 10)
+		r.resetArrival()
+		r.observeChunk(128, 600000)
+		r.observeChunk(256, 600020)
+		const h = r.histograms(600020)
+		expect(h.gapCounts.reduce((a, b) => a + b, 0)).toBe(1)
+		expect(h.chunkSizeCounts.reduce((a, b) => a + b, 0)).toBe(
+			r.window(600020).chunks,
+		)
+		expect(r.window(600020).worstStallMs).toBe(20)
+	})
+	it("configure keeps history and clears pending catch-up", () => {
+		const r = createIngestRecorder()
+		r.observeChunk(10000, 0)
+		r.observeChunk(10000, 100)
+		r.configure(1000, 2)
+		r.observeChunk(1, 10000)
+		expect(r.window(10000)).toMatchObject({
+			worstStallMs: 100,
+			catchupBytes: 0,
+			chunks: 3,
+		})
+	})
+	it("observeChunk allocates nothing", () => {
+		const r = createIngestRecorder()
+		const feed = (start: number, count: number) => {
+			for (let i = start; i < start + count; i++) r.observeChunk(32, i)
+		}
+		feed(0, 100000)
+		const before = process.memoryUsage().heapUsed
+		feed(100000, 10000)
+		expect(process.memoryUsage().heapUsed - before).toBeLessThan(65536)
+	})
+})
+
+it("each recovered stall gets its own recovery deadline", () => {
+	const r = createIngestRecorder()
+	r.configure(500, 2)
+	r.observeChunk(10, 0)
+	r.observeChunk(1000, 1000)
+	expect(r.recovery(1000)?.shortfall).toBe(false)
+	r.observeChunk(10, 9000)
+	expect(r.recovery(11000)?.shortfall).toBeNull()
+	r.observeChunk(11000, 12000)
+	expect(r.recovery(12000)?.shortfall).toBe(false)
+})
+
+it("a deficit waits through the recovery bound, then remains a shortfall", () => {
+	const r = createIngestRecorder()
+	r.configure(500, 2)
+	r.observeChunk(10, 0)
+	r.observeChunk(10, 5042)
+	expect(r.recovery(15041)?.shortfall).toBeNull()
+	expect(r.recovery(15042)?.shortfall).toBe(true)
+	expect(r.recovery(15043)?.shortfall).toBe(true)
+	r.resetArrival()
+	expect(r.recovery(15043)).toBeNull()
+})
+
+it("retires completed recovery so subsequent sustained-rate evidence is used", () => {
+	const r = createIngestRecorder()
+	r.configure(500, 2)
+	r.observeChunk(10, 0)
+	r.observeChunk(1000, 1000)
+	expect(r.recovery(1000)?.shortfall).toBe(false)
+	expect(r.recovery(11000)).toMatchObject({
+		retired: true,
+		completedSequence: 1,
+		shortfall: null,
+	})
+	expect(r.recovery(11001)).toMatchObject({
+		retired: true,
+		completedSequence: 1,
+		shortfall: null,
+	})
+})
+
+it.each([10999, 11000, 11001])(
+	"latches delivery timing at the recovery deadline: %i",
+	at => {
+		const r = createIngestRecorder()
+		r.configure(500, 2)
+		r.observeChunk(10, 0)
+		r.observeChunk(10, 1000)
+		// No recovery reads between the gap and catch-up.
+		r.observeChunk(20000, at)
+		const result = r.recovery(at)
+		if (at < 11000) expect(result?.failedSequence ?? 0).toBe(0)
+		else expect(result?.failedSequence).toBeGreaterThan(0)
+	},
+)
+
+it.each([
+	[199, 0],
+	[200, 1],
+	[201, 1],
+])("counts burst seconds at a %i ms gap", (gap, bursts) => {
+	const r = createIngestRecorder()
+	r.observeChunk(1, 0)
+	r.observeChunk(1, gap)
+	expect(r.window(gap).burstSeconds).toBe(bursts)
+})

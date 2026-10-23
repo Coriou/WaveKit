@@ -1486,6 +1486,15 @@ cores omit them).
 
 The scanner status `iqCapture` field is now normally present in protected mode; clients should show capture state.
 
+### Link-burst resilience contract — 2026-10-22
+
+Spec: [link-burst-resilience](specs/link-burst-resilience/requirements.md). Details in [API.md](API.md).
+The contract additions are optional and additive; older cores omit the new fields.
+
+1. `SourceLinkQuality` and its parts (`SourceLinkAbsorber`, `SourceLinkArrivals`, `SourceLinkReceiver`, `SourceLinkHistograms`, `SourceLinkLoopDelay`) describe IQ arrival bursts, buffering, receiver facts and process-wide loop delay. `DropAttribution` is `none` | `link` | `host` | `consumer` | `unknown`. Optional `histograms?` carries bucket edges and counts; optional nullable `loopDelay?` carries interval and ten-minute delay measurements.
+2. `GET /api/resources/link-quality` returns `SourceLinkQuality[]`; `GET /api/resources/link-quality/:sourceId` returns one report or 404 `LINK_QUALITY_NOT_FOUND`. The `resources` channel gains `resources:link-quality` with the report array.
+3. `LinkAdvisory.burst?` (`LinkBurstSummary`) contains `worstStallMs`, `overflowedBytes10m` and `burstSeconds`. Efficiency source entries gain `attribution?` and `lateDrops?` (`condemningWindows`, `windows`, `cooldownUntil`, `sheddable`, `held`). `lateDrops.held` is `nothing-sheddable` | `link-or-unknown` | null; `DecoderEfficiencyDetail` gains `late-drops`. Exhaustive detail switches should label sustained late-drop shedding.
+4. `ReceiverCapabilities.iqDelivery?` contains `advertised` (nullable `raw` / `channels` array), `configured` (`raw` | `channels` | `auto`) and `resolved` (`raw`). `SdrHostStatus.iqDelivery?` is nullable and contains `modes` (`raw` / `channels` array). `auto` resolves to `raw`; configured `channels` is reserved and rejected.
 
 ### Configured channel decoders follow the VFO — 2026-10-22
 

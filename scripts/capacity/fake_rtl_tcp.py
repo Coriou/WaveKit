@@ -23,6 +23,7 @@ delivery.
 
 import argparse
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import math
 import pathlib
 import socket
@@ -32,6 +33,52 @@ import threading
 import time
 
 BLOCK = 262144
+
+
+def parse_stall_schedule(value: str) -> list[tuple[float, float]]:
+    """Parse repeating start-to-start offsets and stall lengths in milliseconds."""
+    schedule = []
+    for item in value.split(",") if value else []:
+        offset, duration = map(float, item.split(":"))
+        if not math.isfinite(offset) or not math.isfinite(duration) or offset <= 0 or duration < 0:
+            raise ValueError("stall offsets must be positive and durations nonnegative and finite")
+        schedule.append((offset, duration))
+    return schedule
+
+
+class StreamStats:
+    def __init__(self):
+        self.sent = 0
+        self.dropped = 0
+        self.lock = threading.Lock()
+
+    def add(self, sent=0, dropped=0):
+        with self.lock:
+            self.sent += sent
+            self.dropped += dropped
+            return self.dropped
+
+    def snapshot(self):
+        with self.lock:
+            return {"clients": [{"bytesDropped": self.dropped}], "totalSent": self.sent}
+
+
+def stats_server(port, stats):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(stats.snapshot()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def synthesize(rate: int, seed: int) -> bytes:
@@ -101,6 +148,8 @@ def serve(args: argparse.Namespace) -> None:
     server_deadline = time.monotonic() + args.duration
     listener.settimeout(1.0)
     connection = 0
+    stats = StreamStats()
+    http = stats_server(args.stats_port, stats) if args.stats_port is not None else None
     # Keep accepting until the deadline, so a reconnecting client gets data again.
     # Every disconnect is logged with a wall-clock "ts"; the driver marks a run
     # aborted if one falls inside the measurement window.
@@ -111,8 +160,12 @@ def serve(args: argparse.Namespace) -> None:
             continue
         connection += 1
         stream(conn, peer, connection, period, args.loop, args.pacing == "unpaced",
-               bytes_per_second, server_deadline, args.report)
+               bytes_per_second, server_deadline, args.report, args.stall_schedule,
+               args.stall_mode, stats)
     listener.close()
+    if http is not None:
+        http.shutdown()
+        http.server_close()
 
 
 def emit(event: dict) -> None:
@@ -120,11 +173,18 @@ def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
-def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, deadline, report):
+def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, deadline, report,
+           stall_schedule=None, stall_mode="catchup", stats=None):
     conn.settimeout(None)
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     start = time.monotonic()
     sent = 0
+    scheduled = 0
+    stats = stats if stats is not None else StreamStats()
+    schedule = stall_schedule or []
+    stall_index = 0
+    stall_at = start + schedule[0][0] if schedule else math.inf
+    drop_until = start
     offset = 0
     max_lag = 0.0
     next_report = start + report
@@ -136,17 +196,43 @@ def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, dead
             now = time.monotonic()
             if now >= deadline:
                 break
-            due = start + sent / bytes_per_second
-            if due > now:
-                if not unpaced:  # unpaced sends as fast as the client reads
-                    time.sleep(min(due, deadline) - now)
-                    if time.monotonic() >= deadline:
-                        break
+            due = start + scheduled / bytes_per_second
+            if stall_at <= max(now, due) and stall_at < deadline:
+                if stall_at > now:
+                    time.sleep(stall_at - now)
+                duration = schedule[stall_index][1]
+                end = stall_at + duration / 1000
+                # Count available paced bytes, excluding intervals already dropped.
+                first_at = max(stall_at, drop_until) if stall_mode == "drop" else stall_at
+                first = max(scheduled // BLOCK, math.ceil((first_at - start) * bytes_per_second / BLOCK))
+                last = math.ceil((end - start) * bytes_per_second / BLOCK)
+                first_byte = first * BLOCK
+                last_byte = last * BLOCK if loop else min(last * BLOCK, len(period))
+                withheld = max(0, last_byte - first_byte)
+                event = {"event": "stall", "stall_ms": duration, "mode": stall_mode,
+                         "withheld_bytes": withheld}
+                if stall_mode == "drop":
+                    event["dropped_bytes_total"] = stats.add(dropped=withheld)
+                    drop_until = max(drop_until, end)
+                emit(event)
+                stall_index = (stall_index + 1) % len(schedule)
+                stall_at += schedule[stall_index][0]
+                time.sleep(max(0, min(end, deadline) - time.monotonic()))
+                continue
+            if due > now and not unpaced:
+                time.sleep(min(due, stall_at, deadline) - now)
+                if time.monotonic() >= deadline:
+                    break
+                if time.monotonic() >= stall_at:
+                    continue
             else:
                 max_lag = max(max_lag, now - due)
             block, offset, done = next_block(period, offset, loop)
-            conn.sendall(block)
-            sent += len(block)
+            scheduled += len(block)
+            if due >= drop_until:
+                conn.sendall(block)
+                sent += len(block)
+                stats.add(sent=len(block))
             if time.monotonic() >= next_report:
                 elapsed = time.monotonic() - start
                 emit({"event": "progress", "connection": connection, "t": round(elapsed, 1),
@@ -176,6 +262,10 @@ def main() -> None:
     parser.add_argument("--loop", action="store_true", help="replay the period forever")
     parser.add_argument("--pacing", choices=["paced", "unpaced"], default="paced",
                         help="paced = real time at --rate; unpaced = as fast as the client reads")
+    parser.add_argument("--stall-schedule", type=parse_stall_schedule, default=[],
+                        help="repeating offset_s:stall_ms pairs, relative to the previous stall")
+    parser.add_argument("--stall-mode", choices=["catchup", "drop"], default="catchup")
+    parser.add_argument("--stats-port", type=int, help="optional HTTP statistics port")
     serve(parser.parse_args())
 
 

@@ -1,4 +1,6 @@
 import { isIP } from "node:net"
+import type { LinkBurstSummary } from "@wavekit/api-types"
+import { LINK_DROPPING_HOLD_MS } from "./link-burst/contract.js"
 import type { LinkAdvisor } from "./rate-policy-contract.js"
 import {
 	LINK_SHORTFALL_PERCENT,
@@ -27,7 +29,12 @@ const valid = (value: number | null): value is number =>
 const exceedsShortfall = (received: number, payload: number): boolean =>
 	received < payload * (1 - LINK_SHORTFALL_PERCENT / 100) - payload * 1e-9
 
-export function createLinkAdvisor(deps: { now: () => number }): LinkAdvisor {
+export function createLinkAdvisor(deps: {
+	now: () => number
+	monoNow?: () => number
+	linkDropsSince?: (sourceId: string, sinceMono: number) => boolean
+	burst?: (sourceId: string) => LinkBurstSummary | null
+}): LinkAdvisor & Required<Pick<LinkAdvisor, "shortfall">> {
 	const histories = new Map<string, History>()
 	const average = (history: History, at: number): number | null => {
 		const samples = history.samples
@@ -81,6 +88,22 @@ export function createLinkAdvisor(deps: { now: () => number }): LinkAdvisor {
 				history.sustained = Math.max(history.sustained ?? 0, received)
 			histories.set(sourceId, history)
 		},
+		shortfall(sourceId, sampleRateHz, frameBytes) {
+			const history = histories.get(sourceId)
+			if (
+				!history ||
+				history.rate !== sampleRateHz ||
+				!valid(sampleRateHz) ||
+				sampleRateHz === 0 ||
+				!valid(frameBytes) ||
+				frameBytes === 0
+			)
+				return null
+			const received = average(history, deps.now())
+			return received === null
+				? null
+				: exceedsShortfall(received, sampleRateHz * frameBytes)
+		},
 		classify(input, drops) {
 			const payload = valid(input.sampleRateHz) ? input.sampleRateHz * 2 : 0
 			const history = histories.get(input.sourceId)
@@ -95,7 +118,26 @@ export function createLinkAdvisor(deps: { now: () => number }): LinkAdvisor {
 			const upstream = valid(drops) ? drops : null
 			const loopback = isLoopbackHost(input.host)
 			const sustained = history?.sustained ?? null
+			let linkDropping = false
+			let burst: LinkBurstSummary | null = null
+			if (!loopback) {
+				try {
+					linkDropping =
+						deps.linkDropsSince?.(
+							input.sourceId,
+							(deps.monoNow?.() ?? performance.now()) - LINK_DROPPING_HOLD_MS,
+						) ?? false
+				} catch {
+					/* Optional evidence is unavailable. */
+				}
+				try {
+					burst = deps.burst?.(input.sourceId) ?? null
+				} catch {
+					/* Optional summary is unavailable. */
+				}
+			}
 			const dropping =
+				linkDropping ||
 				(received !== null && exceedsShortfall(received, payload)) ||
 				(upstream !== null && upstream > LINK_UPSTREAM_DROPS_BYTES_PER_SECOND)
 			return {
@@ -111,6 +153,7 @@ export function createLinkAdvisor(deps: { now: () => number }): LinkAdvisor {
 				sustainedBytesPerSecond: sustained,
 				shortfallPercent: shortfall,
 				upstreamDropBytesPerSecond: upstream,
+				...(burst === null ? {} : { burst }),
 			}
 		},
 		reset(sourceId) {

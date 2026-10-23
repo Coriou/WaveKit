@@ -307,8 +307,8 @@ and reports both as `efficiency-budget` (`budget`). IQ link payloads: 1.024 Msps
   fallback.
 - Band-plan channels are `Band.channels` of the resolved stack (built-in packs have none), with
   the protocol taken from the scanner plan range covering the channel.
-- Probation suspends only the newest placement; drops with no probationer close the gate but
-  suspend nothing.
+- Probation suspends only the newest placement; drops with no probationer follow
+  [link-burst-resilience](../link-burst-resilience/requirements.md) 5.
 - An operator pin on a built-in (catalogue) decoder is still subject to the gate (ordered first); a
   YAML decoder is never gated (requirement 4.9).
 - Default budgets 1.5 (x86-64) and 0.75 (arm64 ≤ 4 cores) reference cores.
@@ -334,7 +334,8 @@ Each becomes a property test (`fast-check`, `numRuns ≥ 100`) with the trace co
    (in range) and up to 4 band-plan channels whose plan range lists a decoder protocol, in the
    order of 3.7. _Validates 3.4, 3.5, 3.7._
 6. **No eviction.** For any sequence of samples, admissions and plans, a running placement is
-   suspended by the gate only while on probation, and only the newest probationer of its source.
+   suspended by the gate only while on probation, as the newest probationer of its source, or by the late-drop rule
+   ([link-burst-resilience](../link-burst-resilience/requirements.md) 5).
    _Validates 4.3, 4.4._
 7. **Budget bound.** After every admission, the sum of declared costs of admitted placements is at
    most the budget, and admission follows 4.2 order (no later placement admitted while an earlier

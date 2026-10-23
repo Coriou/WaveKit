@@ -90,11 +90,23 @@ export const SourceTunerConfigSchema = z
 			})
 	})
 
+export const CHANNELS_RESERVED_MESSAGE =
+	'delivery "channels" is reserved for a later receiver-side channelizer (link-burst-resilience 7.1)'
+
 /**
  * Schema for SDR source configuration.
  * Supports rtl_tcp, SDR++ network sink, and recording sources.
  */
 export const SourceConfigSchema = z.object({
+	burstAbsorber: z
+		.object({ seconds: z.number().min(0).max(10) })
+		.strict()
+		.optional(),
+	delivery: z
+		.enum(["raw", "channels", "auto"])
+		.default("auto")
+		.refine(v => v !== "channels", { message: CHANNELS_RESERVED_MESSAGE }),
+
 	id: z.string().min(1),
 	type: z.enum(["sdrpp-network", "rtl_tcp", "recording"]),
 	host: z.string().min(1).optional(),
@@ -940,7 +952,13 @@ export const ConfigSchema = z
 // ============================================================================
 
 export type SourceCaps = z.infer<typeof SourceCapsSchema>
-export type SourceConfig = z.infer<typeof SourceConfigSchema>
+/** Programmatic sources may omit delivery; configuration parsing defaults it to auto. */
+export type SourceConfig = Omit<
+	z.infer<typeof SourceConfigSchema>,
+	"delivery"
+> & {
+	delivery?: z.infer<typeof SourceConfigSchema>["delivery"]
+}
 export type SourceTunerConfig = z.infer<typeof SourceTunerConfigSchema>
 export type DecoderCaps = z.infer<typeof DecoderCapsSchema>
 export type DecoderConfig = z.infer<typeof DecoderConfigSchema>

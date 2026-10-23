@@ -686,13 +686,142 @@ it.each(["start", "stop", "restart-start", "restart-stop", "error-start"])(
 	},
 )
 
+type LifecycleCommand =
+	| "start"
+	| "stop"
+	| "restart"
+	| "mode"
+	| "crash"
+	| "crash-fail"
+	| "crash-hang"
+
+async function exerciseParentGenerations(
+	commands: LifecycleCommand[],
+	running: boolean,
+	checkBackoff = false,
+) {
+	const f = setup()
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	for (const decoder of f.instances.values()) {
+		const start = decoder.start.bind(decoder)
+		vi.spyOn(decoder, "start").mockImplementation(async () => {
+			expect(decoder.running).toBe(false)
+			await start()
+		})
+	}
+	const decoder = f.instances.get(worker.key)!
+	const stop = decoder.stop.bind(decoder)
+	let release!: () => void
+	const pending = new Promise<void>(resolve => {
+		release = resolve
+	})
+	vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
+		await pending
+		await stop()
+	})
+	const calls: Promise<void>[] = []
+	// Rejections are observed at the end; mark them handled meanwhile.
+	const add = (call: Promise<void>) => {
+		call.catch(() => undefined)
+		calls.push(call)
+	}
+	add(f.manager.stopDecoder("dec"))
+	await vi.advanceTimersByTimeAsync(0)
+	add(f.manager.startDecoder("dec"))
+	// Crash restarts that fail or hang past the request bound may fail
+	// intermediate calls; the final state must still converge.
+	const strict = commands.every(command => !command.startsWith("crash-"))
+	let hangs = 0
+	for (const command of commands) {
+		if (command.startsWith("crash")) {
+			const internal = f.manager as unknown as {
+				decoders: Map<string, { lifecycle?: { actual: string } }>
+			}
+			const crashed: RateDecoder[] = []
+			for (const [id, placement] of f.instances)
+				if (
+					placement.running &&
+					internal.decoders.get(id)?.lifecycle?.actual === "running"
+				) {
+					crashed.push(placement)
+					if (command === "crash-fail") placement.failStart = true
+					if (command === "crash-hang") {
+						const gate = deferred()
+						placement.startGate = gate
+						setTimeout(gate.resolve, 6000)
+						hangs++
+					}
+					placement.crash()
+				}
+			// Let the 2000 ms backoff fire so its restart meets the fault.
+			await vi.advanceTimersByTimeAsync(command === "crash" ? 0 : 2000)
+			for (const placement of crashed) placement.failStart = false
+			continue
+		}
+		add(
+			command === "stop"
+				? f.manager.stopDecoder("dec")
+				: command === "restart"
+					? f.manager.restartDecoder("dec")
+					: command === "mode"
+						? f.manager.applyDecoderMode("dec", "always")
+						: f.manager.startDecoder("dec"),
+		)
+		await vi.advanceTimersByTimeAsync(0)
+	}
+	add(running ? f.manager.startDecoder("dec") : f.manager.stopDecoder("dec"))
+	release()
+	// Releasing the original stop can end a newer run after its parent start.
+	// That exit uses the worker's accumulated crash backoff, up to 30 seconds.
+	if (checkBackoff) {
+		await vi.advanceTimersByTimeAsync(5001)
+		expect(decoder.running).toBe(false)
+		expect(f.manager.getStatus("dec")?.desiredRunning).toBe(true)
+		await vi.advanceTimersByTimeAsync(2998)
+		expect(decoder.running).toBe(false)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(decoder.running).toBe(true)
+	} else {
+		await vi.advanceTimersByTimeAsync(30_000 + (hangs > 0 ? 11_002 : 5001))
+	}
+	if (strict) await Promise.all(calls)
+	else await Promise.allSettled(calls)
+	expect(f.manager.getStatus("dec")?.desiredRunning).toBe(running)
+	expect(f.manager.getStatus("dec")?.running).toBe(running)
+	const states = (
+		f.manager as unknown as {
+			decoders: Map<
+				string,
+				{
+					lifecycle?: { desired: string; decoderGeneration: number }
+					parentId?: string
+					parentIntent?: { generation: number }
+				}
+			>
+		}
+	).decoders
+	for (const [id, state] of states) {
+		if (id !== "dec" && state.parentId !== "dec") continue
+		expect(state.lifecycle?.desired).toBe(running ? "running" : "stopped")
+		expect(state.lifecycle?.decoderGeneration).toBe(
+			states.get("dec")?.parentIntent?.generation,
+		)
+		expect(f.instances.get(id)?.running).toBe(running)
+	}
+	await f.manager.destroy()
+	manager = undefined
+}
+
 // Feature: decoder-enablement, Property 12: Placement lifecycle is serial
 // Validates: Requirements 2.5, 3.7, 4.1, 4.2, 4.3, 11.3
 it("parent generations preserve the last call across deferred worker completion", async () => {
 	await fc.assert(
 		fc.asyncProperty(
 			fc.array(
-				fc.constantFrom(
+				fc.constantFrom<LifecycleCommand>(
 					"start",
 					"stop",
 					"restart",
@@ -704,115 +833,17 @@ it("parent generations preserve the last call across deferred worker completion"
 				{ maxLength: 12 },
 			),
 			fc.boolean(),
-			async (commands, running) => {
-				const f = setup()
-				f.create("dec")
-				const worker = f.place("dec", 162_025_000, false)
-				f.plan([f.place("dec", 162_000_000), worker])
-				await f.manager.startAll()
-				for (const decoder of f.instances.values()) {
-					const start = decoder.start.bind(decoder)
-					vi.spyOn(decoder, "start").mockImplementation(async () => {
-						expect(decoder.running).toBe(false)
-						await start()
-					})
-				}
-				const decoder = f.instances.get(worker.key)!
-				const stop = decoder.stop.bind(decoder)
-				let release!: () => void
-				const pending = new Promise<void>(resolve => {
-					release = resolve
-				})
-				vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
-					await pending
-					await stop()
-				})
-				const calls: Promise<void>[] = []
-				// Rejections are observed at the end; mark them handled meanwhile.
-				const add = (call: Promise<void>) => {
-					call.catch(() => undefined)
-					calls.push(call)
-				}
-				add(f.manager.stopDecoder("dec"))
-				await vi.advanceTimersByTimeAsync(0)
-				add(f.manager.startDecoder("dec"))
-				// Crash restarts that fail or hang past the request bound may fail
-				// intermediate calls; the final state must still converge.
-				const strict = commands.every(command => !command.startsWith("crash-"))
-				let hangs = 0
-				for (const command of commands) {
-					if (command.startsWith("crash")) {
-						const internal = f.manager as unknown as {
-							decoders: Map<string, { lifecycle?: { actual: string } }>
-						}
-						const crashed: RateDecoder[] = []
-						for (const [id, placement] of f.instances)
-							if (
-								placement.running &&
-								internal.decoders.get(id)?.lifecycle?.actual === "running"
-							) {
-								crashed.push(placement)
-								if (command === "crash-fail") placement.failStart = true
-								if (command === "crash-hang") {
-									const gate = deferred()
-									placement.startGate = gate
-									setTimeout(gate.resolve, 6000)
-									hangs++
-								}
-								placement.crash()
-							}
-						// Let the 2000 ms backoff fire so its restart meets the fault.
-						await vi.advanceTimersByTimeAsync(command === "crash" ? 0 : 2000)
-						for (const placement of crashed) placement.failStart = false
-						continue
-					}
-					add(
-						command === "stop"
-							? f.manager.stopDecoder("dec")
-							: command === "restart"
-								? f.manager.restartDecoder("dec")
-								: command === "mode"
-									? f.manager.applyDecoderMode("dec", "always")
-									: f.manager.startDecoder("dec"),
-					)
-					await vi.advanceTimersByTimeAsync(0)
-				}
-				add(
-					running
-						? f.manager.startDecoder("dec")
-						: f.manager.stopDecoder("dec"),
-				)
-				release()
-				await vi.advanceTimersByTimeAsync(hangs > 0 ? 11_002 : 5001)
-				if (strict) await Promise.all(calls)
-				else await Promise.allSettled(calls)
-				expect(f.manager.getStatus("dec")?.desiredRunning).toBe(running)
-				expect(f.manager.getStatus("dec")?.running).toBe(running)
-				const states = (
-					f.manager as unknown as {
-						decoders: Map<
-							string,
-							{
-								lifecycle?: { desired: string; decoderGeneration: number }
-								parentId?: string
-								parentIntent?: { generation: number }
-							}
-						>
-					}
-				).decoders
-				for (const [id, state] of states) {
-					if (id !== "dec" && state.parentId !== "dec") continue
-					expect(state.lifecycle?.desired).toBe(running ? "running" : "stopped")
-					expect(state.lifecycle?.decoderGeneration).toBe(
-						states.get("dec")?.parentIntent?.generation,
-					)
-					expect(f.instances.get(id)?.running).toBe(running)
-				}
-				await f.manager.destroy()
-				manager = undefined
-			},
+			(commands, running) => exerciseParentGenerations(commands, running),
 		),
 		{ numRuns: 200 },
+	)
+}, 30_000)
+
+it("a late deferred stop recovers after accumulated crash restart backoff", async () => {
+	await exerciseParentGenerations(
+		["crash-fail", "crash-fail", "crash-fail", "start", "crash-fail", "start"],
+		true,
+		true,
 	)
 })
 
