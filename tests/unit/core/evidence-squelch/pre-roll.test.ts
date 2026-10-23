@@ -303,4 +303,82 @@ describe("PreRoll", () => {
 			}
 		})
 	})
+
+	describe("run ring bound (160 runs, 153 from the wiring)", () => {
+		/** pending `wait` samples, latch, then `n` alternating one-sample drop/pass inputs. */
+		function alternate(pre: PreRoll, wait: number, n: number): void {
+			const one = Buffer.alloc(2, 1)
+			const queue = Buffer.alloc(wait * 2, 1)
+			pre.process(queue, 0, queue.length, "pending")
+			pre.latch()
+			for (let i = 0; i < n; i++)
+				pre.process(one, 0, 2, i % 2 === 0 ? "drop" : "pass")
+		}
+
+		it("holds exactly 160 runs without discarding", () => {
+			const pre = new PreRoll({ rate: RATE, format: "s16le" })
+			alternate(pre, 1_000, 159)
+			expect(pre.tagRuns).toBe(160)
+			expect(pre.runOverflows).toBe(0)
+			expect(pre.delaySamples).toBe(1_000)
+		})
+
+		it("past the bound discards the oldest run, stays bounded and never throws", () => {
+			const pre = new PreRoll({ rate: RATE, format: "s16le" })
+			alternate(pre, 1_000, 160)
+			expect(pre.runOverflows).toBe(1)
+			expect(pre.tagRuns).toBe(160)
+			expect(pre.delaySamples).toBeLessThan(1_000)
+			alternate(pre, 10, 5_000)
+			expect(pre.tagRuns).toBeLessThanOrEqual(160)
+			expect(pre.delaySamples).toBeLessThanOrEqual(pre.capacitySamples)
+		})
+
+		it("a worst-case wiring schedule never exceeds 153 runs", () => {
+			for (const format of FORMATS) {
+				const pre = new PreRoll({ rate: RATE, format })
+				const width = pcmSampleBytes(format)
+				const block = ms(10)
+				// Chunks deliberately misaligned with the 10 ms blocks (odd byte counts).
+				const chunkBytes = 333
+				const stream = Buffer.alloc(block * width, 3)
+				let maxRuns = 0
+				let pending = 0
+				const feed = (tag: PreRollTag): void => {
+					for (let at = 0; at < stream.length; at += chunkBytes) {
+						const piece = Buffer.from(stream.subarray(at, at + chunkBytes))
+						pre.process(piece, 0, piece.length, tag)
+						maxRuns = Math.max(maxRuns, pre.tagRuns)
+					}
+				}
+				// Fill the FIFO to capacity while waiting, then latch.
+				for (let b = 0; b < 200; b++) feed("pending")
+				pre.latch()
+				expect(pre.delaySamples).toBe(pre.capacitySamples)
+				// Stage 1 flips every block: pass, guard, then drop once the guard expires,
+				// and a new over (pending) starting during the tail, then latching again.
+				const cycle: PreRollTag[] = [
+					"pass",
+					"guard",
+					"drop",
+					"drop",
+					"pass",
+					"drop",
+				]
+				for (let b = 0; b < 3_000; b++) {
+					const tag = cycle[b % cycle.length] ?? "drop"
+					if (b % 500 === 400) {
+						for (let k = 0; k < 30; k++) feed("pending")
+						pending++
+						pre.latch()
+					}
+					feed(tag)
+				}
+				expect(pending).toBeGreaterThan(0)
+				expect(maxRuns).toBeGreaterThan(100)
+				expect(maxRuns).toBeLessThanOrEqual(153)
+				expect(pre.runOverflows).toBe(0)
+			}
+		})
+	})
 })

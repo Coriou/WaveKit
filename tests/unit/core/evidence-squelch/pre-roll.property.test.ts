@@ -291,15 +291,33 @@ describe("PreRoll properties", () => {
 						id => id !== 0 && m.finalTag.get(id) === "pass",
 					)
 					expect(passOut).toEqual(passIn.sort((x, y) => x - y))
-					// Consecutive played pass samples of consecutive ids keep one delay.
+					// Across each latched interval (a maximal run of consecutive input ids that all
+					// played as pass or guard), the delay (output index - input index) is one value.
+					const outIndex = new Map<number, number>()
+					r.out.forEach((id, i) => {
+						if (id !== 0) outIndex.set(id, i)
+					})
+					const playedTag = (id: number): boolean => {
+						const tag = m.finalTag.get(id)
+						return tag === "pass" || tag === "guard"
+					}
 					let delayChanges = 0
-					for (let i = 1; i < r.out.length; i++) {
-						const cur = r.out[i] ?? 0
-						const prev = r.out[i - 1] ?? 0
-						if (cur !== 0 && prev === cur - 1 && m.finalTag.get(cur) === "pass")
-							if (i - cur !== i - 1 - prev) delayChanges++
+					let intervals = 0
+					let intervalDelay: number | undefined
+					for (let id = 1; id < m.next; id++) {
+						const at = outIndex.get(id)
+						if (at === undefined || !playedTag(id)) {
+							intervalDelay = undefined
+							continue
+						}
+						const delay = at - (id - 1)
+						if (intervalDelay === undefined) {
+							intervalDelay = delay
+							intervals++
+						} else if (delay !== intervalDelay) delayChanges++
 					}
 					expect(delayChanges).toBe(0)
+					if (passIn.length > 0) expect(intervals).toBeGreaterThan(0)
 					// No pass sample is ever discarded.
 					expect(
 						m.discards.filter(d => d.tag === "pass" && d.reason !== "clear"),

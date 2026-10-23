@@ -26,10 +26,12 @@ const PLAY = 1
 const DROP = 2
 
 /**
- * Tag runs: tags change at most once per stage-1 transition, latch, guard expiry or overflow,
- * stage 1 decides per 10 ms block, so a full 1 500 ms FIFO holds at most ceil(1 500 / 10) + 3 =
- * 153 runs (design, Pre-roll sizing). Past the bound (not reachable from the wiring) the oldest
- * run is discarded so the ring never overflows.
+ * Tag runs. Adjacent runs of one code merge (pass and guard share a code), so runs alternate.
+ * Tags change at most once per stage-1 transition, latch, guard expiry or overflow, and stage 1
+ * decides per 10 ms block, so every interior run spans at least one whole block: a full 1 500 ms
+ * FIFO holds at most ceil(1 500 / 10) = 150 block runs + a partial head run + a partial tail block
+ * + the pending suffix = 153 runs (design, Pre-roll sizing). 160 leaves margin; past it (not
+ * reachable from the wiring, see `runOverflows`) the oldest run is discarded.
  */
 const MAX_RUNS = 160
 
@@ -69,6 +71,7 @@ export class PreRoll implements PreRollPort {
 	private curSlotByte = 0
 	/** Byte offset of the in-flight output sample's source slot, or -1 for zero. */
 	private curSrcByte = -1
+	private overflowCount = 0
 
 	constructor(options: PreRollOptions) {
 		const { rate, format } = options
@@ -83,6 +86,16 @@ export class PreRoll implements PreRollPort {
 		this.capacitySamples = preRollCapacitySamples(rate)
 		this.slots = this.capacitySamples + 1
 		this.ring = Buffer.alloc(preRollBytes(rate, format))
+	}
+
+	/** Tag runs held now (diagnostic; bounded by 160). */
+	get tagRuns(): number {
+		return this.runCount
+	}
+
+	/** Runs discarded because the run ring was full (diagnostic; 0 under the wiring). */
+	get runOverflows(): number {
+		return this.overflowCount
 	}
 
 	get delaySamples(): number {
@@ -308,7 +321,13 @@ export class PreRoll implements PreRollPort {
 				return
 			}
 		}
-		if (this.runCount === MAX_RUNS) this.dropHeadRun()
+		if (this.runCount === MAX_RUNS) {
+			// Unreachable from the wiring (at most 153 runs, see MAX_RUNS). The head is never
+			// `drop` here (leading drop runs are discarded before every append), so this loses
+			// the oldest queued audio; it keeps the ring and the delay bounded instead of throwing.
+			this.overflowCount++
+			this.dropHeadRun()
+		}
 		const idx = (this.runHead + this.runCount) % MAX_RUNS
 		this.runs[2 * idx] = len
 		this.runs[2 * idx + 1] = code
