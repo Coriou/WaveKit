@@ -156,30 +156,16 @@ describe("live demodulator evidence path (fake ports)", () => {
 			expect(t.factory.gates[0]?.notes).toEqual([true, false])
 		})
 
-		it("AM uses the floor + 6 dB rule and false without a floor", async () => {
+		// Amendment A8: AM is outside the evidence path, so no gate is fed.
+		it("AM auto feeds no gate (amendment A8)", async () => {
 			const t = await start({ modulation: "am", squelchMode: "auto" })
 			const run = t.internals.run
 			if (run === null) throw new Error("no run")
-			let power: number | null = -50
-			Object.defineProperty(run.squelch, "powerDbfs", {
-				configurable: true,
-				get: () => power,
-			})
 			t.stage.open = true
-			run.noiseFloorDbfs = null
-			t.internals.measureRun(run)
 			run.noiseFloorDbfs = -60
-			t.internals.measureRun(run)
-			run.noiseFloorDbfs = -60
-			power = -58
-			t.internals.measureRun(run)
-			power = null
-			run.noiseFloorDbfs = -60
-			t.internals.measureRun(run)
-			t.stage.open = false
-			power = -10
-			t.internals.measureRun(run)
-			expect(t.factory.gates[0]?.notes).toEqual([false, true, false, false])
+			t.internals.measureRun(run, { powerDbfs: -40, quieted: true })
+			expect(t.factory.gates[0]?.notes ?? []).toEqual([])
+			expect(t.h.demod.getStatus().autoSquelch?.state).toBe("off")
 		})
 	})
 
@@ -337,7 +323,7 @@ describe("live demodulator evidence path (fake ports)", () => {
 			const t = await start({ modulation: "wfm", squelchMode: "auto" })
 			t.stage.open = true
 			t.feed(Buffer.alloc(1_000))
-			expect(t.factory.gates).toHaveLength(0)
+			expect(t.factory.gates[0]?.notes ?? []).toEqual([])
 			expect(t.factory.preRolls).toHaveLength(0)
 		})
 

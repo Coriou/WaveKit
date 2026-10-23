@@ -51,10 +51,12 @@ export const LIVE_AUDIO_TONE_SQUELCH_CLOSE_COUNT = 2
 
 /**
  * Evidence squelch (docs/specs/evidence-squelch): modulations whose `auto` squelch gates client
- * audio on voice or tone evidence, and those where tone evidence counts.
+ * audio on voice or tone evidence, and those where tone evidence counts. NFM only (amendment
+ * A8, 2026-10-23): a bare AM carrier opened the gate as voice, so AM keeps the stage-1 auto
+ * squelch like WFM and the other modulations, with `autoSquelch` state `off`.
  */
 export const LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS: readonly LiveAudioConfig["modulation"][] =
-	Object.freeze(["nfm", "am"])
+	Object.freeze(["nfm"])
 export const LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS: readonly LiveAudioConfig["modulation"][] =
 	Object.freeze(["nfm"])
 /** Voice meter frame length (equals ANALOG_TRIAL_FRAME_MS). */
@@ -90,8 +92,9 @@ export interface LiveAudioConfig {
 	bandwidth: number
 	squelch: number
 	/**
-	 * `auto` is the runtime default: a channel-power floor estimate + margin and, on NFM and AM,
-	 * client audio gated on voice or tone evidence with a pre-roll. `manual` (configured
+	 * `auto` is the runtime default: a channel-power floor estimate + margin and, on NFM only,
+	 * client audio gated on voice or tone evidence with a pre-roll (AM and the other modulations
+	 * keep the stage-1 auto squelch). `manual` (configured
 	 * threshold) and WG7 `noise` (FM quieting) are unchanged.
 	 */
 	squelchMode?: LiveAudioSquelchMode
@@ -171,7 +174,7 @@ export interface LiveAudioStatus {
 		dcs: AnalogTransmissionDcs | null
 		at: string
 	}
-	/** Evidence squelch gate while running; `off` when the evidence path is inactive. */
+	/** Evidence squelch gate while running; `off` when the evidence path is inactive (any non-NFM modulation). */
 	autoSquelch?: LiveAudioAutoSquelch
 }
 

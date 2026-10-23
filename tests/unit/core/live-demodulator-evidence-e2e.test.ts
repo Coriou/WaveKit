@@ -3,10 +3,13 @@
  * plan W.3, requirement 8.1): 25 kHz s16le PCM out of the fake csdr back stage, stage 1 scripted,
  * one measured 10 ms block per 10 ms chunk. Every config sets `squelchMode` explicitly.
  */
+import { readFileSync } from "node:fs"
 import http from "node:http"
 import { LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS } from "@wavekit/api-types"
 import { afterEach, describe, expect, it } from "vitest"
+import type { EvidenceSquelchFactory } from "../../../src/core/evidence-squelch/contract.js"
 import { wavStreamHeader } from "../../../src/core/live-demodulator.js"
+import { WaveKitError } from "../../../src/utils/errors.js"
 import {
 	createDemodHarness,
 	waitFor,
@@ -33,6 +36,7 @@ interface E2eRun {
 }
 
 interface E2eInternals {
+	options: { evidenceSquelch?: EvidenceSquelchFactory }
 	run: E2eRun | null
 	handleAudioData(chunk: Buffer): void
 	measureRun(run: unknown): void
@@ -45,6 +49,36 @@ const LEAD_SECONDS = 0.5
 const OVER_SECONDS = 3
 const TAIL_SECONDS = 2
 const AM_FLOOR_DBFS = -60
+
+/** A5 oracle: a factory that throws leaves the run on the frozen stage-1 path. */
+const FROZEN_PATH: EvidenceSquelchFactory = {
+	createGate() {
+		throw new WaveKitError("frozen-path oracle", "TEST_ORACLE")
+	},
+	createPreRoll() {
+		throw new WaveKitError("frozen-path oracle", "TEST_ORACLE")
+	},
+}
+
+/** An 8 kHz s16le evidence-squelch fixture, linearly upsampled to the harness rate. */
+function fixtureAt25k(name: string): Float32Array {
+	const bytes = readFileSync(
+		new URL(
+			`../../mocks/fixtures/evidence-squelch/${name}.audio.s16le`,
+			import.meta.url,
+		),
+	)
+	const src = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
+	const out = new Float32Array(Math.floor((src.length * RATE) / 8_000))
+	for (let i = 0; i < out.length; i++) {
+		const pos = (i * 8_000) / RATE
+		const k = Math.floor(pos)
+		const a = src[k] ?? 0
+		const b = src[k + 1] ?? a
+		out[i] = (a + (b - a) * (pos - k)) / 32_768
+	}
+	return out
+}
 
 function overVoice(seed: number): Float32Array {
 	return voiceLike({ rate: RATE, seconds: OVER_SECONDS, seed })
@@ -76,15 +110,17 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		modulation: "nfm" | "am",
 		segments: Segment[],
 		wav = false,
-	): Promise<Driven & { wavBody: Buffer | null }> {
+		factory?: EvidenceSquelchFactory,
+	): Promise<Driven & { wavBody: Buffer | null; states: Set<string> }> {
 		h = await createDemodHarness({
 			config: {
 				modulation,
 				squelchMode: "auto",
 			},
 		})
-		await h.demod.start()
 		const internals = h.demod as unknown as E2eInternals
+		if (factory !== undefined) internals.options.evidenceSquelch = factory
+		await h.demod.start()
 		const run = internals.run
 		if (run === null) throw new Error("no run")
 		expect(run.stream).toEqual({ rate: RATE, format: "s16le" })
@@ -109,6 +145,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		let openFed = 0
 		let openAfterSeconds: number | null = null
 		let everOpen = false
+		const states = new Set<string>()
 		for (const segment of segments) {
 			control.open = segment.open
 			control.quieted = segment.quieted
@@ -129,6 +166,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 				internals.measureRun(run)
 				if (segment.open) openFed += chunk.length
 				const state = h.demod.getStatus().autoSquelch?.state
+				states.add(state ?? "absent")
 				if (state === "open") {
 					everOpen = true
 					openAfterSeconds ??= openFed / 2 / RATE
@@ -139,6 +177,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			received: transport.received(),
 			openAfterSeconds,
 			everOpen,
+			states,
 			wavBody: wavBody === null ? null : await wavBody.done(fed),
 		}
 	}
@@ -190,10 +229,10 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 				),
 		],
 		["NFM voice", "nfm", () => overVoice(23)],
-		["AM voice", "am", () => overVoice(26)],
 	]
 
-	for (const modulation of ["nfm", "am"] as const) {
+	// Amendment A8: the AM half of this known limitation no longer applies (AM is not gated).
+	for (const modulation of ["nfm"] as const) {
 		// Known limitation (req 8.1, pending): seed 24's voice sits just under the pinned voice
 		// audio level (frame audioDb medians about -31 dB against -30 dB), so the gate latches
 		// about 1.85 s after stage 1 opens, past the 1.5 s pre-roll, and the over's first
@@ -242,17 +281,6 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		[
 			"bare NFM carrier",
 			"nfm",
-			[
-				{
-					pcm: toPcm(carrierSilence({ rate: RATE, seconds: 4 }), "s16le"),
-					open: true,
-					quieted: true,
-				},
-			],
-		],
-		[
-			"bare AM carrier",
-			"am",
 			[
 				{
 					pcm: toPcm(carrierSilence({ rate: RATE, seconds: 4 }), "s16le"),
@@ -373,6 +401,65 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 				segments.reduce((sum, s) => sum + s.pcm.length, 0),
 			)
 			expect(result.received.every(b => b === 0)).toBe(true)
+		})
+	}
+
+	// Amendment A8 (2026-10-23): AM is outside the evidence path. A bare AM carrier key-up latched
+	// voice 1.65 s after onset under the gate (the AM chain's fast AGC raises the carrier noise
+	// envelope), so AM auto keeps the frozen stage-1 auto squelch with `autoSquelch` `off`.
+	const AM_FROZEN: Array<[string, () => Segment[]]> = [
+		[
+			"am-carrier regression: AM stays ungated by evidence",
+			() => {
+				const audio = fixtureAt25k("am-carrier")
+				const onset = Math.round(0.25 * RATE)
+				return [
+					{
+						pcm: toPcm(audio.subarray(0, onset), "s16le"),
+						open: false,
+						quieted: false,
+					},
+					{
+						pcm: toPcm(audio.subarray(onset), "s16le"),
+						open: true,
+						quieted: true,
+					},
+				]
+			},
+		],
+		[
+			"AM voice: stage-1 auto squelch, ungated by evidence",
+			() => overScript(overVoice(26)),
+		],
+		[
+			"bare AM carrier: stage-1 auto squelch, ungated by evidence",
+			() => [
+				{
+					pcm: toPcm(carrierSilence({ rate: RATE, seconds: 4 }), "s16le"),
+					open: true,
+					quieted: true,
+				},
+			],
+		],
+	]
+
+	for (const [name, script] of AM_FROZEN) {
+		// Validates: Requirements 1.7 (amendment A8)
+		it(name, async () => {
+			const segments = script()
+			const oracle = await drive("am", segments, false, FROZEN_PATH)
+			await h?.dispose()
+			h = null
+			const result = await drive("am", segments)
+			expect(result.received).toEqual(oracle.received)
+			expect([...result.states]).toEqual(["off"])
+			// Stage 1 open passes every byte; closed segments are the frozen path's zeros.
+			let at = 0
+			for (const segment of segments) {
+				const got = result.received.subarray(at, at + segment.pcm.length)
+				if (segment.open) expect(got).toEqual(segment.pcm)
+				at += segment.pcm.length
+			}
 		})
 	}
 

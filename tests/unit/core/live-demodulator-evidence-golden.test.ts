@@ -48,11 +48,12 @@ const CASES: GoldenCase[] = [
 			config: { modulation: "nfm", squelchMode, toneSquelch: DCS },
 		},
 	]),
-	...["wfm", "usb", "lsb", "dsb", "cw", "raw"].map(modulation => ({
+	// Amendment A8: AM is outside the evidence path (stage-1 auto squelch, frozen).
+	...["wfm", "am", "usb", "lsb", "dsb", "cw", "raw"].map(modulation => ({
 		name: `auto ${modulation}`,
 		config: { modulation, squelchMode: "auto" },
 	})),
-	...["nfm", "am"].map(modulation => ({
+	...["nfm"].map(modulation => ({
 		name: `auto ${modulation} pcm`,
 		config: { modulation, squelchMode: "auto" },
 		pcmOnly: true,
@@ -135,7 +136,7 @@ const GOLDENS: Record<string, { registry?: string; pcm: string }> = {
 			...MODULATIONS.map(m => `manual ${m}`),
 			"noise nfm",
 			"noise wfm",
-			...["wfm", "usb", "lsb", "dsb", "cw", "raw"].map(m => `auto ${m}`),
+			...["wfm", "am", "usb", "lsb", "dsb", "cw", "raw"].map(m => `auto ${m}`),
 		].map(name => [name, { registry: PASS, pcm: PASS }]),
 	),
 	...Object.fromEntries(
@@ -147,7 +148,6 @@ const GOLDENS: Record<string, { registry?: string; pcm: string }> = {
 		].map(name => [name, { registry: MUTED, pcm: PASS }]),
 	),
 	"auto nfm pcm": { pcm: PASS },
-	"auto am pcm": { pcm: PASS },
 }
 
 describe("live demodulator evidence goldens (frozen behaviour)", () => {
@@ -192,7 +192,8 @@ const OUTSIDE: Record<string, unknown>[] = [
 		modulation,
 		squelchMode: "noise",
 	})),
-	...["wfm", "usb", "lsb", "dsb", "cw", "raw"].map(modulation => ({
+	// Amendment A8: AM auto is outside the evidence path.
+	...["wfm", "am", "usb", "lsb", "dsb", "cw", "raw"].map(modulation => ({
 		modulation,
 		squelchMode: "auto",
 	})),
