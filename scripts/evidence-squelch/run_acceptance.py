@@ -79,6 +79,12 @@ RATE_MATCH_HZ = 1.0
 FAKE_CHUNK_BYTES = 262_144
 SQUELCH_BLOCK_S = 0.010
 EPOCH_MAX_ERR_S = 0.005
+# Clock-step check (clock_drift): allowed movement of the container wall clock beyond the
+# measurement uncertainty, the longest gap between clock probes, and the fake's ts-after-elapsed
+# read lag.
+CLOCK_DRIFT_MAX_S = 0.002
+PROBE_GAP_MAX_S = 5.0
+EMIT_LAG_S = 0.002
 # Resampler: windowed-sinc low-pass at RESAMPLE_CUTOFF x REF_RATE, Blackman window spanning
 # ±RESAMPLE_HALF_WIDTH output periods, fractional position quantised to 1/RESAMPLE_PHASES of an
 # input sample (time error ≤ 1 / (2 x 512 x 24 975) s ≈ 39 ns). Symmetric kernel: zero delay.
@@ -298,15 +304,48 @@ def source_clock(side, fixture):
 	for probe in side.get("clockProbes") or []:
 		if isinstance(probe, (list, tuple)) and len(probe) == 3 and all(_number(v) for v in probe) and probe[1] >= probe[0]:
 			m0, m1, wall = probe
-			probes.append((m1 - m0, wall - (m0 + m1) / 2))
+			probes.append((m1 - m0, wall - (m0 + m1) / 2, m0))
 	if not probes:
 		raise InvalidRun("missing clock probe (host monotonic to container wall clock)")
-	rtt, to_wall = min(probes)
-	if rtt > CLOCK_MAX_RTT_S:
-		raise InvalidRun(f"clock probe round trip {rtt * 1000:.1f} ms exceeds {CLOCK_MAX_RTT_S * 1000:.0f} ms")
-	return {"connected": float(src["epochTs"]), "epochErr": float(src["epochErrS"]), "onset": float(fixture["overOnsetS"]),
+	good = sorted((m0, rtt, off) for rtt, off, m0 in probes if rtt <= CLOCK_MAX_RTT_S)
+	if not good:
+		raise InvalidRun(f"every clock probe round trip exceeds {CLOCK_MAX_RTT_S * 1000:.0f} ms")
+	rtt, to_wall, _m0 = min(probes)
+	drift = clock_drift(good, rtt, to_wall, src, src.get("progress"))
+	return {"connected": float(src["epochTs"]), "epochErr": float(src["epochErrS"]), "driftS": drift, "onset": float(fixture["overOnsetS"]),
 		"period": float(fixture["periodS"]), "overS": float(fixture["overS"]), "toWall": to_wall, "rttS": rtt,
 		"iqRate": fixture.get("rate")}
+
+
+def clock_drift(good, rtt, to_wall, src, progress):
+	"""Largest observed movement of the container wall clock over the run, or an invalid run.
+
+	Probes: every low-RTT probe's host-to-container offset must agree with the best one within
+	CLOCK_DRIFT_MAX_S beyond both half round trips, and consecutive ones may be at most
+	PROBE_GAP_MAX_S apart. Fake progress: wall ts minus (epochTs + monotonic elapsedS) must stay
+	within CLOCK_DRIFT_MAX_S beyond the epoch bracket, the ts rounding (0.5 ms) and EMIT_LAG_S
+	(ts is read after elapsed). A wall step shows in both. Returns the raw maximum deviation
+	(probe offset spread and progress step), which close_lo subtracts."""
+	if len(good) < 2 or any(b[0] - a[0] > PROBE_GAP_MAX_S for a, b in zip(good, good[1:])):
+		raise InvalidRun(f"clock probes do not cover the run (need one per {PROBE_GAP_MAX_S:.0f} s)")
+	spread = 0.0
+	for _m0, r, off in good:
+		dev = abs(off - to_wall)
+		if dev - (r + rtt) / 2 > CLOCK_DRIFT_MAX_S:
+			raise InvalidRun(f"container wall clock moved {dev * 1000:.1f} ms during the run (clock step or drift)")
+		spread = max(spread, dev)
+	if not isinstance(progress, list) or not progress:
+		raise InvalidRun("missing fake rtl_tcp progress (wall vs paced elapsed) for the clock-step check")
+	step_max = 0.0
+	slack = float(src["epochErrS"]) + 0.0005
+	for item in progress:
+		if not (isinstance(item, (list, tuple)) and len(item) == 2 and all(_number(v) for v in item)):
+			raise InvalidRun("malformed fake rtl_tcp progress")
+		step = item[0] - (float(src["epochTs"]) + item[1])
+		if not -slack - CLOCK_DRIFT_MAX_S <= step <= slack + EMIT_LAG_S + CLOCK_DRIFT_MAX_S:
+			raise InvalidRun(f"fake wall clock stepped {step * 1000:.1f} ms against its paced elapsed time")
+		step_max = max(step_max, abs(step))
+	return max(spread, step_max)
 
 
 def over_at(clock, wall):
@@ -463,10 +502,12 @@ def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carri
 	the true drain (arrival of the last audible stream sample minus the stage-1 close).
 
 	Close, lower bound (so upperMs can only over-estimate), on the container wall clock:
-	  carrier_off + hang - SQUELCH_BLOCK_S - chunk_s - epoch_err
+	  carrier_off + hang - SQUELCH_BLOCK_S - chunk_s - epoch_err - drift
 	  - carrier_off: sidecar over end on the source clock (the fake's pacing epoch, the exact
 	    instant its byte schedule is computed from, + onset + k x period). epoch_err is the
 	    logged half-width of the two wall reads bracketing that monotonic read (epochErrS).
+	    carrier_off extrapolates wall time from that epoch, so drift (clock_drift: the largest
+	    wall-clock movement seen by the probes and the fake's progress) is subtracted too.
 	  - hang runs from the last qualifying 10 ms squelch block (channel-squelch.ts), which
 	    starts no earlier than one block before carrier-off: SQUELCH_BLOCK_S = 10 ms.
 	  - the fake sends BLOCK-byte chunks at their starting source time, so IQ arrives up to
@@ -515,7 +556,7 @@ def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carri
 				raise InvalidRun(f"over {k}: stage-1 closed but no played tail to measure drain on")
 			continue
 		carrier_off, ended = closes[k]
-		close_lo = carrier_off + hang_s - SQUELCH_BLOCK_S - chunk_s - clock["epochErr"]
+		close_lo = carrier_off + hang_s - SQUELCH_BLOCK_S - chunk_s - clock["epochErr"] - clock["driftS"]
 		was_open = any(v for t, v in observed if carrier_off - clock["overS"] <= t <= close_lo)
 		closed_at = next((t for t, v in observed if t >= close_lo and not v), None)
 		if not was_open or closed_at is None or closed_at > carrier_off + clock["period"] - clock["overS"]:
@@ -805,10 +846,27 @@ def self_test():
 		return [[0.0, {"autoSquelch": {"state": s}}] for s in states]
 
 	m0 = conn + 10.0 + host_offset
-	probes = [[m0 - 5, m0 - 4.9, conn + 7.0], [m0, m0 + 0.002, conn + 10.001]]  # slow wrong one, fast right one
+
+	def probe_series(leg=0.001, step_at=None, step=0.0, drift_per_s=0.0):
+		"""One probe per second over the run (2 ms round trip, `leg` of it before the container
+		reads its clock), a slow wrong one, and an optional wall step or linear drift."""
+		out = [[m0 - 5, m0 - 4.9, conn + 7.0]]
+		for i in range(-9, 60):
+			wall = conn + 10.0 + i + leg + drift_per_s * (i + 9)
+			if step_at is not None and i >= step_at:
+				wall += step
+			out.append([m0 + i, m0 + i + (0.002 if leg <= 0.002 else 0.018), wall])
+		return out
+
+	def progress(step_at=None, step=0.0, drift_per_s=0.0):
+		"""Fake progress every 5 s: [wall ts (ms rounding), monotonic elapsed]."""
+		return [[round(conn + t + 0.0003 + drift_per_s * t + (step if step_at is not None and t >= step_at else 0.0), 3), t]
+			for t in range(5, 70, 5)]
+
+	probes = probe_series()
 	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
 	# `connected` is logged 30 ms after the pacing epoch (header send, thread start): unused.
-	source = {"epochTs": conn, "epochErrS": 0.0001, "connectedTs": conn + 0.03, "connections": 1}
+	source = {"epochTs": conn, "epochErrS": 0.0001, "connectedTs": conn + 0.03, "connections": 1, "progress": progress()}
 	common = {"source": source, "clockProbes": probes, "wsSpan": ws_span,
 		"fixture": {"overOnsetS": gap, "periodS": period, "overS": over_s, "rate": 2_048_000}}
 	base = {
@@ -871,6 +929,18 @@ def self_test():
 	assert "sidecar" in invalid(auto__fixture={"periodS": period, "overOnsetS": gap})
 	assert "clock probe" in invalid(auto__clockProbes=None)
 	assert "round trip" in invalid(auto__clockProbes=[probes[0]])
+	# Container wall-clock steps and drift over the run (pacing is monotonic, carrier_off is
+	# extrapolated wall time): a 50 ms backward step is invalid in the probes and in the fake's
+	# progress; drift inside the bound is valid, subtracted, and the drain stays contained.
+	assert "moved" in invalid(manual__clockProbes=probe_series(step_at=20, step=-0.05))
+	assert "stepped" in invalid(manual__source=dict(source, progress=progress(step_at=30, step=-0.05)))
+	assert "moved" in invalid(manual__clockProbes=probe_series(step_at=20, step=0.05),
+		manual__source=dict(source, progress=progress(step_at=30, step=0.05)))
+	assert "cover" in invalid(manual__clockProbes=probes[:3] + probes[10:])
+	assert "progress" in invalid(manual__source=dict(source, progress=[]))
+	drifting = dict(manual__clockProbes=probe_series(drift_per_s=0.00002),
+		manual__source=dict(source, progress=progress(drift_per_s=0.00002)))
+	assert variant(**drifting) == []
 	assert "stage-1" in invalid(auto__transmissions=[])
 	assert "stage-1" in invalid(auto__transmissions=events(shift=MAX_DELAY_S + 0.2))
 	assert "span" in invalid(manual__wsSpan=None)
@@ -922,12 +992,28 @@ def self_test():
 	d = drain_of(**early)
 	assert holds(d, 230) and d["exceedsGuard"], d
 	# The pacing epoch, not `connected` (logged 30 ms later), anchors carrier-off: anchored on
-	# `connected` the same run's upper bound would fall below the true drain.
+	# `connected` the same run's upper bound would fall below the true drain; the progress check
+	# catches such a misplaced anchor.
 	late_anchor = dict(source, epochTs=conn + 0.03)
-	assert not holds(drain_of(manual__source=late_anchor, **early), 230)
+	assert not holds(drain_of(manual__source=dict(late_anchor, progress=progress(step=0.03, step_at=0)), **early), 230)
+	assert "stepped" in invalid(manual__source=late_anchor)
+	d = drain_of(**drifting, **early)
+	assert holds(d, 230) and d["exceedsGuard"], d
+	# The fake's serialised epoch bracket contains both wall reads (outward rounding).
+	import importlib.util
+	spec = importlib.util.spec_from_file_location("fake_rtl_tcp", ROOT.parent / "capacity/fake_rtl_tcp.py")
+	fake = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(fake)
+	rng = random.Random(7)
+	for _ in range(2000):
+		w0 = conn + rng.uniform(0, 100)
+		w1 = w0 + rng.choice((0.0, 1e-7, 4.9e-7, 5e-7, 1e-6, rng.uniform(0, 1e-3)))
+		f = fake.epoch_fields(w0, w1)
+		assert f["epochTs"] - f["epochErrS"] <= w0 and w1 <= f["epochTs"] + f["epochErrS"], (w0, w1, f)
+		assert f["epochErrS"] == round(f["epochErrS"], 6) and f["epochTs"] == round(f["epochTs"], 6)
 	# Probe error both directions (18 ms round trip, all of it on one leg): bounds still hold.
 	for leg in (0.0, 0.018):
-		probe = [[m0, m0 + 0.018, conn + 10.0 + leg]]
+		probe = probe_series(leg=leg)
 		d = drain_of(manual__clockProbes=probe, manual__samples=manual_stream(0.15), **{"manual__levels": manual_levels()})
 		assert holds(d, 150), (leg, d)
 		d = drain_of(manual__clockProbes=probe, **{k: v for k, v in early.items()})
@@ -1181,7 +1267,7 @@ class Recorder:
 	def source_events(self):
 		"""The fake's `connected` events (core-side wall clock) from its log."""
 		out = self.compose("logs", "--no-color", "--no-log-prefix", "fake").stdout
-		connected = []
+		connected, progress = [], []
 		for line in out.splitlines():
 			try:
 				event = json.loads(line)
@@ -1189,12 +1275,15 @@ class Recorder:
 				continue
 			if isinstance(event, dict) and event.get("event") == "connected":
 				connected.append(event)
+			elif isinstance(event, dict) and event.get("event") == "progress" and event.get("connection") == 1:
+				if _number(event.get("ts")) and _number(event.get("elapsedS")):
+					progress.append([event["ts"], event["elapsedS"]])
 		if not connected:
 			raise InvalidRun("fake rtl_tcp logged no connection")
 		first = connected[0]
 		# A missing epoch (an older fake) stays missing: source_clock makes the run invalid.
 		return {"epochTs": first.get("epochTs"), "epochErrS": first.get("epochErrS"),
-			"connectedTs": first.get("ts"), "connections": len(connected)}
+			"connectedTs": first.get("ts"), "connections": len(connected), "progress": progress}
 
 	def run(self, entry, cu8, cu8_meta):
 		self.dir.mkdir(parents=True, exist_ok=True)
