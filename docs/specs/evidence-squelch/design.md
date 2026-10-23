@@ -150,7 +150,7 @@ that the judge calls voice also latch the gate (requirements, known limitation a
 
 ### EvidenceGate (`src/core/evidence-squelch/evidence-gate.ts`)
 
-Per run, built for an NFM or AM stream (rate and format known). Interface:
+Per run, built for an NFM or AM stream (rate and format known; wired for NFM only, amendment A8). Interface:
 
 ```ts
 interface EvidenceGatePort {
@@ -332,12 +332,12 @@ interface PreRollPort {
 `bytes = (capacitySamples + 1) × width`, width 2 (s16le) or 4 (f32le). The audio rate is the
 pipeline's effective rate, `iqRate / round(iqRate / (2 × bandwidth))`:
 
-| Case                                 | Rate (Hz) | Samples | s16le bytes | f32le bytes |
-| ------------------------------------ | --------- | ------- | ----------- | ----------- |
-| NFM 12.5 kHz at 2.048 Msps (default) | 24 975.6  | 37 464  | 74 930      | 149 860     |
-| NFM 12.5 kHz at 2.4 Msps             | 25 000    | 37 500  | 75 002      | 150 004     |
-| NFM 25 kHz channel at 2.4 Msps       | 50 000    | 75 000  | 150 002     | 300 004     |
-| AM 10 kHz at 2.048 Msps              | 20 078.4  | 30 118  | 60 238      | 120 476     |
+| Case                                    | Rate (Hz) | Samples | s16le bytes | f32le bytes |
+| --------------------------------------- | --------- | ------- | ----------- | ----------- |
+| NFM 12.5 kHz at 2.048 Msps (default)    | 24 975.6  | 37 464  | 74 930      | 149 860     |
+| NFM 12.5 kHz at 2.4 Msps                | 25 000    | 37 500  | 75 002      | 150 004     |
+| NFM 25 kHz channel at 2.4 Msps          | 50 000    | 75 000  | 150 002     | 300 004     |
+| AM 10 kHz at 2.048 Msps (not wired, A8) | 20 078.4  | 30 118  | 60 238      | 120 476     |
 
 Tag ring: tags change at most once per stage-1 transition, latch, guard expiry or overflow. Stage
 1 decisions are 10 ms blocks, so a full FIFO holds at most `ceil(1 500 / 10) + 3` = 153 runs;
@@ -351,7 +351,7 @@ alignment), plus the back chain's own latency as today.
 
 - **Applies when** `squelchMode === "auto"`, the modulation is in
   `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`, `configuredTone(config) === null` and the run has a
-  pre-roll (allocated at run start for NFM and AM streams). Otherwise `handleAudioData` takes its
+  pre-roll (allocated at run start for NFM streams only, amendment A8). Otherwise `handleAudioData` takes its
   frozen path unchanged (requirements 1.7 to 1.9).
 - **Per chunk:** emit `pcm` first (unchanged); then walk the chunk in slices of at most
   `TONE_SLICE_MS` (10 ms) on sample boundaries. For each slice: stage 1 open
@@ -401,11 +401,12 @@ squelch is a possible follow-up, not part of this spec.
 
 ### Interaction with modulation changes
 
-Only `nfm` and `am` runs allocate a pre-roll. A modulation change restarts the pipeline (rule 5
-allows a restart because the stream changes), so the old run's FIFO and gate are dropped with the
-run and nothing queued is played; the new run allocates its own FIFO if its modulation is `nfm`
-or `am` and at its own rate and format. Between NFM and AM the gate also switches tone evidence
-off (AM) or on (NFM).
+Only `nfm` runs allocate a gate and pre-roll (amendment A8, 2026-10-23: AM and every other
+modulation allocate none). A modulation change restarts the pipeline (rule 5 allows a restart
+because the stream changes), so the old run's FIFO and gate are dropped with the run and nothing
+queued is played; the new run allocates its own gate and FIFO, at its own rate and format, only if
+its modulation is `nfm`. The standalone gate class still supports `am` (voice evidence only), but
+it is not wired.
 
 ## Budgets (performance rule 3)
 
@@ -425,7 +426,7 @@ per core until measured (no Pi 4-class host is available for this batch).
 | Total while a carrier is up    |                                | ≤ 0.006 core                 | ≤ 0.024 core                       | below the 0.3-core noise floor                |
 | Total idle                     |                                | ≈ 0                          | ≈ 0                                |                                               |
 | Event-loop p99 added           | 2.048 Msps                     | ≤ 1 ms (largest chunk)       | ≤ 2 ms target                      | rule 2 cap 2 ms; measured in 8.2              |
-| Memory                         | per NFM or AM run              | 75–300 KB FIFO; < 8 KB other | same                               | Pre-roll sizing                               |
+| Memory                         | per NFM run (A8)               | 75–300 KB FIFO; < 8 KB other | same                               | Pre-roll sizing                               |
 
 Largest synchronous step: one PCM chunk. A 64 KiB s16le chunk is 32 768 samples (1.3 s at
 25 kHz), about 10 500 decimated samples through the meter and 50 Goertzel filters, estimated
@@ -535,8 +536,8 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     sample discarded by overflow was `pending`; no `pass` or `guard` sample is ever discarded; the
     delay is zero within one sample after the last `pass` or `guard` sample has played.
     _Validates 2.5, 2.6._
-12. **Byte-identical elsewhere.** For any PCM stream and config with modulation outside
-    `nfm`/`am`, mode `manual` or `noise`, or a configured tone squelch, the bytes written to the
+12. **Byte-identical elsewhere.** For any PCM stream and config with modulation other than
+    `nfm` (A8: `am` included), mode `manual` or `noise`, or a configured tone squelch, the bytes written to the
     registry and the `pcm` event bytes equal those of the frozen `handleAudioData`; for every
     config the `pcm` event bytes are unchanged. _Validates 1.6 to 1.9._
 13. **Lifecycle.** After `clear()` the delay is zero and no sample queued before it is ever
