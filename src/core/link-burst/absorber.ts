@@ -100,8 +100,19 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		}
 	}
 	function gated(now: number): boolean {
-		fanout.activeBranchIds(active)
 		fanout.congestedBranchIds(congested)
+		// Pass-through fast path: with no congestion and no per-branch state,
+		// the full pass below prunes nothing, excludes nothing and returns
+		// false, so the active-set read and the five loops are skipped.
+		if (
+			congested.size === 0 &&
+			since.size === 0 &&
+			excluded.size === 0 &&
+			recovering.size === 0 &&
+			reincluded.size === 0
+		)
+			return false
+		fanout.activeBranchIds(active)
 		for (const state of branchStates)
 			for (const id of state.keys()) if (!active.has(id)) state.delete(id)
 		for (const id of excluded) {
@@ -263,7 +274,14 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		ingest(chunk) {
 			if (disposed) return
 			const now = monoNow()
-			rotate(now)
+			// rotate() is a no-op within the current slot while nothing is held
+			// (peaks already >= 0, no holding duration), so skip the call there.
+			if (
+				length !== 0 ||
+				holdingSince !== null ||
+				Math.floor(now / LINK_QUALITY_SLOT_MS) !== slot
+			)
+				rotate(now)
 			if (!ring || (length === 0 && !gated(now))) {
 				fanout.distribute(chunk)
 				return
