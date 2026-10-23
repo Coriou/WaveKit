@@ -195,6 +195,27 @@ data-like, then quieting with voice. Carrier evidence per block: on NFM the owne
 carrier evidence (csdr `blockQuieted()` of the auto observer; Rust `metricsQuieted`); on AM it
 passes `powerDbfs ≥ noiseFloorDbfs + ANALOG_TRIAL_AM_CARRIER_DB` (false while no floor exists).
 
+**Amendment 2026-10-23: voice window reset on carrier onset.** Stage 1 can open on unquieted
+noise before an over (its power gate, or its 250 ms hang), so the gate's first voice window
+could judge that noise together with the key-up. Per waiting episode (from stage-1 open or
+`reset()`) the gate tracks the noted blocks with `stepLeadIn`: `unknown` until the first noted
+block, `lead-in` while every noted block is unquieted, `done` after the first quieted block (at
+once when the first block is quieted, the ideal onset). The lead-in → quieted step is the
+carrier onset: while waiting it resets the voice meter, the 20-frame window and the quiet ring
+(no allocation: fills and index resets). At most once per episode, so later fades inside the
+over keep the window and are judged by the quiet-fraction rule. Judge thresholds are unchanged;
+only which frames are judged changes. The tone stage, decimator and audio clock are kept (choice:
+tone evidence needs no window, and resetting it would delay CTCSS/DCS by the lead-in; the
+750 ms tone minimum then counts from stage-1 open, so DCS 023N after a 500 ms lead-in latched
+0.34 s after the onset instead of 0.75 s). The wiring mirrors `stepLeadIn` and calls
+`preRoll.abandon()` at the onset while waiting, so the held noise is dropped and the pre-roll
+plays from the over: reset at the onset block, the window is full at onset + 1.0 s, and the
+pre-roll then holds 1.0 s of the over, inside its 1.5 s capacity.
+
+| State   | Event                                          | Next                                        |
+| ------- | ---------------------------------------------- | ------------------------------------------- |
+| waiting | first quieted block after an unquieted lead-in | waiting (voice window and quiet ring empty) |
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
@@ -386,13 +407,13 @@ impulses at 3 to 20 Hz), impulse noise and unquieted noise, each at most 4 s (th
 the real csdr and Rust chains (requirement 8.2), which covers the back chain's filters that the
 golden audio does not.
 
-**Amendment 2026-10-23 (A8 applied; requirement 5.1 revision PROPOSED, pending decision).**
-Requirement 5.1 as written (1.5 dB, identical verdicts against the analyzer) is not met: the
+**Amendment 2026-10-23 (A8 applied; requirement 5.1 amended, accepted; see requirements 5.1).**
+Requirement 5.1 as first written (1.5 dB, identical verdicts against the analyzer) was not met: the
 analyzer's 48 kHz statistics and the meter's 8 kHz statistics measure different signal paths.
 The analyzer takes audio power from its 48 kHz DC-blocked demod output before DC restore, clamp
 and the 3.4 kHz FIR decimation, and clusters 48 kHz discriminator samples through 2.4 and
-4.8 kHz views; the 8 kHz PCM has no 4.8 kHz view. Proposed revision of 5.1, as the test
-(`tests/unit/core/evidence-squelch/meter-equivalence.test.ts`) now checks it:
+4.8 kHz views; the 8 kHz PCM has no 4.8 kHz view. Accepted revision of 5.1, as the test
+(`tests/unit/core/evidence-squelch/meter-equivalence.test.ts`) checks it:
 
 - **Same-path equivalence (asserted).** `scripts/evidence-squelch/pcm_reference.py` (standard
   library) is an adapted reference of the analyzer's statistic definitions applied to the
@@ -414,6 +435,8 @@ and the 3.4 kHz FIR decimation, and clusters 48 kHz discriminator samples throug
 - **Cross-path verdicts (asserted, one listed exception).** On the 15 NFM fixtures the meter's
   whole-file verdict equals the analyzer's, except `nfm-dmr-4fsk-continuous` (analyzer
   data-like, 8 kHz PCM neither: median cluster 0.49 against 0.80, the missing 4.8 kHz view).
+  The exception holds on the condition that continuous 4FSK never opening is asserted at gate
+  level, with an ideal and with a noisy stage-1 onset (golden and synthetic 25 kHz seeds).
 - **Cross-path numeric deltas (informational).** Printed, not bounded: no bound follows from
   first principles for two different paths, and bounds fitted to these fixtures would only
   restate them. Measured on the 15 NFM fixtures: audioDb ≤ 1.81 dB, syllabic ≤ 0.07, cluster
@@ -426,13 +449,12 @@ attack, 100 ms release, reference 0.4, gain ≤ 1 000). It is not the Rust fast 
 300 ms decay, max gain 65 535); its verdicts and the `EVIDENCE-SQUELCH 8.4:` line are
 informational.
 
-**Known risk (pending decision): stage 1 open on noise before the over.** When stage 1 is
-already open on unquieted pre-over noise (its power gate or 250 ms hang), the first full
-20-frame window holds that noise and the key-up with 75 of 100 blocks quieted (≥ 0.5), and two
-never-open NFM fixtures latch voice at 1.0 s: `nfm-dmr-4fsk-continuous` (window medians audio
-−10.05 dB, syllabic 0.3124, cluster 0.48) and `nfm-clicks` (−22.24 dB, 0.4134, 0.31). The
-other never-open NFM fixtures stay closed. The test pins this behaviour; gate and thresholds
-are unchanged.
+**Resolved (2026-10-23): stage 1 open on noise before the over.** With stage 1 already open on
+unquieted pre-over noise, the first 20-frame window used to hold that noise and the key-up with
+75 of 100 blocks quieted, and `nfm-dmr-4fsk-continuous` (window medians −10.05 dB, syllabic
+0.3124, cluster 0.48) and `nfm-clicks` (−22.24 dB, 0.4134, 0.31) latched voice at 1.0 s. The
+window reset on carrier onset (EvidenceGate state machine amendment) closes it: every
+never-open NFM fixture stays closed with an ideal onset and after any 0-500 ms noise lead-in.
 
 ## Correctness properties
 

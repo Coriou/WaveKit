@@ -207,8 +207,25 @@ their values and their equalities with `DCS_MIN_AUDIO_SECONDS`,
 within 0.1, of cluster score within 0.15 and on the same side of 0.6, and the same verdict (voice,
 data-like or neither) on every fixture.
 
-5.2 With non-default `gain`, the meter normalises audio power to the analyzer's deviation scale;
-with AGC or de-emphasis on, the verdicts on the fixtures are measured and recorded, not gated.
+**Amendment (2026-10-23, accepted): 5.1 revised.** The analyzer's 48 kHz statistics and the
+meter's 8 kHz statistics measure different signal paths, so 5.1 is checked as (design, Meter
+equivalence):
+
+- Same-path equivalence (asserted): the meter matches an adapted reference of the analyzer's
+  statistic definitions applied to the same 8 kHz PCM
+  (`scripts/evidence-squelch/pcm_reference.py`, float64 arithmetic with binary32 views, not an
+  exact oracle) per frame within 1e-12 for audio power, syllabic index and cluster score, with
+  identical verdicts on every fixture.
+- Cross-path verdicts (asserted): on every NFM fixture the meter's verdict equals the
+  analyzer's, except continuous 4FSK (`nfm-dmr-4fsk-continuous`: analyzer data-like, 8 kHz PCM
+  neither), on the condition that continuous 4FSK never opening is asserted at gate level with an
+  ideal and with a noisy stage-1 onset.
+- Cross-path numeric deltas (informational): recorded, not bounded; no bound follows from first
+  principles for two different paths.
+- AM rows are informational (A8).
+
+  5.2 With non-default `gain`, the meter normalises audio power to the analyzer's deviation scale;
+  with AGC or de-emphasis on, the verdicts on the fixtures are measured and recorded, not gated.
 
 ## 6. Performance
 
