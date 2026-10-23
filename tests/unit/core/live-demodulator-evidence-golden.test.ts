@@ -6,7 +6,10 @@
  * `auto` × `nfm`/`am` pins the `pcm` event only (its client bytes change by design).
  */
 import { createHash } from "node:crypto"
+import fc from "fast-check"
 import { afterEach, describe, expect, it } from "vitest"
+import type { EvidenceSquelchFactory } from "../../../src/core/evidence-squelch/contract.js"
+import { WaveKitError } from "../../../src/utils/errors.js"
 import {
 	createDemodHarness,
 	writeAndSettle,
@@ -170,4 +173,105 @@ describe("live demodulator evidence goldens (frozen behaviour)", () => {
 			else expect(actual).toEqual(GOLDENS[testCase.name])
 		})
 	}
+})
+
+/** A5: a factory that throws leaves every run on the frozen stage-1 path (the oracle). */
+const FROZEN_PATH: EvidenceSquelchFactory = {
+	createGate() {
+		throw new WaveKitError("frozen-path oracle", "TEST_ORACLE")
+	},
+	createPreRoll() {
+		throw new WaveKitError("frozen-path oracle", "TEST_ORACLE")
+	},
+}
+
+/** Configs outside the evidence path (requirements 1.7-1.9). */
+const OUTSIDE: Record<string, unknown>[] = [
+	...MODULATIONS.map(modulation => ({ modulation, squelchMode: "manual" })),
+	...["nfm", "wfm"].map(modulation => ({
+		modulation,
+		squelchMode: "noise",
+	})),
+	...["wfm", "usb", "lsb", "dsb", "cw", "raw"].map(modulation => ({
+		modulation,
+		squelchMode: "auto",
+	})),
+	...(["auto", "manual"] as const).flatMap(squelchMode => [
+		{ modulation: "nfm", squelchMode, toneSquelch: CTCSS },
+		{ modulation: "nfm", squelchMode, toneSquelch: DCS },
+	]),
+	{
+		modulation: "nfm",
+		squelchMode: "auto",
+		audioFormat: "f32le" as const,
+		toneSquelch: CTCSS,
+	},
+	{ modulation: "am", squelchMode: "manual", audioFormat: "f32le" as const },
+]
+
+interface FeedInternals {
+	options: { evidenceSquelch?: EvidenceSquelchFactory }
+	run: { squelch: object } | null
+	handleAudioData(chunk: Buffer): void
+}
+
+async function digests(
+	config: Record<string, unknown>,
+	chunks: ReadonlyArray<{ bytes: Uint8Array; open: boolean }>,
+	factory: EvidenceSquelchFactory | undefined,
+): Promise<{ registry: string; pcm: string }> {
+	const harness = await createDemodHarness({ config })
+	try {
+		const internals = harness.demod as unknown as FeedInternals
+		if (factory !== undefined) internals.options.evidenceSquelch = factory
+		await harness.demod.start()
+		const pcm: Buffer[] = []
+		harness.demod.on("pcm", (chunk: Buffer) => pcm.push(Buffer.from(chunk)))
+		const { transport } = harness.addClient()
+		const control = scriptStageOne(harness)
+		for (const chunk of chunks) {
+			control.open = chunk.open
+			internals.handleAudioData(Buffer.from(chunk.bytes))
+		}
+		return {
+			registry: sha256(transport.received()),
+			pcm: sha256(Buffer.concat(pcm)),
+		}
+	} finally {
+		await harness.dispose()
+	}
+}
+
+describe("evidence squelch byte-identical elsewhere (Property 12)", () => {
+	// Feature: evidence-squelch, Property 12: Byte-identical elsewhere
+	// Validates: Requirements 1.6, 1.7, 1.8, 1.9
+	it("registry and pcm digests equal the frozen-path oracle", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.constantFrom(...OUTSIDE),
+				fc.array(
+					fc.record({
+						bytes: fc.uint8Array({ minLength: 1, maxLength: 2_000 }),
+						open: fc.boolean(),
+					}),
+					{ minLength: 1, maxLength: 12 },
+				),
+				async (config, chunks) => {
+					const actual = await digests(config, chunks, undefined)
+					const oracle = await digests(config, chunks, FROZEN_PATH)
+					expect(actual).toEqual(oracle)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
+
+	it("the oracle discriminates: auto nfm (in the evidence path) differs", async () => {
+		const chunks = [{ bytes: new Uint8Array(2_000).fill(7), open: true }]
+		const config = { modulation: "nfm", squelchMode: "auto" }
+		const actual = await digests(config, chunks, undefined)
+		const oracle = await digests(config, chunks, FROZEN_PATH)
+		expect(actual.pcm).toBe(oracle.pcm)
+		expect(actual.registry).not.toBe(oracle.registry)
+	})
 })

@@ -86,6 +86,8 @@ import {
 	type PreRollPort,
 	type PreRollTag,
 } from "./evidence-squelch/contract.js"
+import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
+import { PreRoll } from "./evidence-squelch/pre-roll.js"
 import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
@@ -222,8 +224,8 @@ export interface LiveDemodulatorOptions {
 	/** WG10: clock and timers of the silence fill and the front swap timeout. */
 	clock?: SilenceFillClock
 	/**
-	 * Evidence squelch ports (A5). Absent: no evidence path (frozen behaviour) until the real
-	 * gate and pre-roll are wired in.
+	 * Evidence squelch ports (A5). Absent: the real `EvidenceGate` and `PreRoll`
+	 * (`DEFAULT_EVIDENCE_SQUELCH`); tests inject fakes.
 	 */
 	evidenceSquelch?: EvidenceSquelchFactory
 }
@@ -814,8 +816,7 @@ export class LiveDemodulator extends EventEmitter {
 		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
 		if (run) {
 			status.toneSquelch = { state: toneSquelchState(run) }
-			const autoSquelch = this.autoSquelchState(run)
-			if (autoSquelch !== undefined) status.autoSquelch = autoSquelch
+			status.autoSquelch = this.autoSquelchState(run)
 		}
 		if (this.http.listening && this.channelTone !== null)
 			status.tone = copyChannelTone(this.channelTone)
@@ -1168,8 +1169,7 @@ export class LiveDemodulator extends EventEmitter {
 				squelchOpen: runGateOpen(run),
 				thresholdDbfs: this.effectiveThreshold(run),
 			}
-			const autoSquelch = this.autoSquelchState(run)
-			if (autoSquelch !== undefined) level.autoSquelch = autoSquelch
+			level.autoSquelch = this.autoSquelchState(run)
 			this.emit("level", level)
 		}, 1000 / this.options.levelHz)
 		this.levelTimer.unref()
@@ -2002,8 +2002,7 @@ export class LiveDemodulator extends EventEmitter {
 	 * client audio (no tone squelch), else null.
 	 */
 	private syncEvidence(run: PipelineRun): RunEvidence | null {
-		const factory = this.options.evidenceSquelch
-		if (factory === undefined) return null
+		const factory = this.options.evidenceSquelch ?? DEFAULT_EVIDENCE_SQUELCH
 		const { modulation, gain } = this.config
 		if (run.evidenceModulation !== modulation || run.evidenceGain !== gain) {
 			run.evidenceModulation = modulation
@@ -2069,9 +2068,8 @@ export class LiveDemodulator extends EventEmitter {
 		evidence.aligned = false
 	}
 
-	/** Undefined without a factory (A5: frozen status and level shapes). */
-	private autoSquelchState(run: PipelineRun): LiveAudioAutoSquelch | undefined {
-		if (this.options.evidenceSquelch === undefined) return undefined
+	/** Requirement 4.1: present while the pipeline runs; `off` outside the evidence path. */
+	private autoSquelchState(run: PipelineRun): LiveAudioAutoSquelch {
 		const evidence = this.activeEvidence(run)
 		if (evidence === null) return { state: "off" }
 		const { state, evidence: kind } = evidence.gate
@@ -2187,6 +2185,12 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		this.emit("pcm", chunk, announced)
 	}
+}
+
+/** The production evidence squelch ports (A5, plan W.3). */
+const DEFAULT_EVIDENCE_SQUELCH: EvidenceSquelchFactory = {
+	createGate: options => new EvidenceGate(options),
+	createPreRoll: options => new PreRoll(options),
 }
 
 /** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */

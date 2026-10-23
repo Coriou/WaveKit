@@ -1,11 +1,14 @@
 /**
  * Evidence squelch on the live audio REST surface (docs/specs/evidence-squelch): the status DTO
- * and its response schema carry `autoSquelch` (requirement 4.1).
+ * and its response schema carry `autoSquelch`, and so does the `live-audio:level` broadcast
+ * (requirement 4.1).
  */
 import Fastify, { type FastifyInstance } from "fastify"
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { liveAudioRoutes } from "../../../src/api/routes/live-audio.js"
+import { WebSocketEventBroadcaster } from "../../../src/api/websocket/events.js"
+import { createLogger } from "../../../src/utils/logger.js"
 import type { LiveDemodStatus } from "../../../src/core/live-demodulator.js"
 
 function baseStatus(): LiveDemodStatus {
@@ -91,5 +94,56 @@ describe("live audio auto squelch (REST)", () => {
 		expect(Object.keys(waiting as object)).not.toContain("evidence")
 		delete status.autoSquelch
 		expect(Object.keys(await getStatusBody())).not.toContain("autoSquelch")
+	})
+})
+
+describe("live audio auto squelch (WebSocket level)", () => {
+	// Validates: Requirements 4.1, 4.2
+	it("live-audio:level carries autoSquelch unchanged", () => {
+		const broadcaster = new WebSocketEventBroadcaster(
+			createLogger({ level: "fatal" }),
+		)
+		const sent: unknown[] = []
+		vi.spyOn(broadcaster, "broadcast").mockImplementation(
+			(channel, message) => {
+				sent.push({ channel, message })
+			},
+		)
+		const base = {
+			sourceId: "rtl-pi",
+			channelPowerDbfs: -40,
+			noiseFloorDbfs: -60,
+			squelchOpen: true,
+			thresholdDbfs: -54,
+		}
+		broadcaster.broadcastLiveAudioLevel({
+			...base,
+			autoSquelch: { state: "open", evidence: "dcs" },
+		})
+		broadcaster.broadcastLiveAudioLevel({
+			...base,
+			autoSquelch: { state: "waiting" },
+		})
+		broadcaster.broadcastLiveAudioLevel(base)
+		expect(sent).toEqual([
+			{
+				channel: "live-audio",
+				message: {
+					type: "live-audio:level",
+					data: { ...base, autoSquelch: { state: "open", evidence: "dcs" } },
+				},
+			},
+			{
+				channel: "live-audio",
+				message: {
+					type: "live-audio:level",
+					data: { ...base, autoSquelch: { state: "waiting" } },
+				},
+			},
+			{
+				channel: "live-audio",
+				message: { type: "live-audio:level", data: base },
+			},
+		])
 	})
 })
