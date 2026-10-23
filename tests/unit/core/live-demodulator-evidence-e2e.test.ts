@@ -193,6 +193,35 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		["AM voice", "am", () => overVoice(26)],
 	]
 
+	for (const modulation of ["nfm", "am"] as const) {
+		// Known limitation (req 8.1, pending): seed 24's voice sits just under the pinned voice
+		// audio level (frame audioDb medians about -31 dB against -30 dB), so the gate latches
+		// about 1.85 s after stage 1 opens, past the 1.5 s pre-roll, and the over's first
+		// ~350 ms are lost. A design change is expected to flip this test (latch within 1.5 s,
+		// audio from the over's first sample); update it then.
+		it(`known limitation (req 8.1, pending): marginal-level voice latches late (${modulation})`, async () => {
+			const over = overVoice(24)
+			const overPcm = toPcm(over, "s16le")
+			const result = await drive(modulation, overScript(over))
+			// The status is read once per 10 ms chunk: the latch falls in (1.84 s, 1.85 s].
+			expect(result.openAfterSeconds).toBe(1.85)
+			const latchBytes = Math.round(1.85 * RATE) * 2
+			const capacityBytes =
+				Math.round((LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS / 1_000) * RATE) * 2
+			// Lost: the over's first latch - capacity = 8 750 samples (350 ms).
+			const lost = latchBytes - capacityBytes
+			expect(lost).toBe(17_500)
+			// Client audio starts at the latch position in the stream, with over sample 8 750.
+			const startsAt = LEAD_SECONDS * RATE * 2 + latchBytes
+			expect(result.received.subarray(0, startsAt).every(b => b === 0)).toBe(
+				true,
+			)
+			expect(
+				result.received.subarray(startsAt, startsAt + overPcm.length - lost),
+			).toEqual(overPcm.subarray(lost))
+		})
+	}
+
 	for (const [name, modulation, make] of OPENS) {
 		// Validates: Requirements 8.1, 1.2, 2.1
 		it(`${name}: opens within the pre-roll and plays the over from its first sample`, async () => {
