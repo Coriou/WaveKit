@@ -200,6 +200,7 @@ describe("LiveDemodulator", () => {
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,
+			squelchMode: "manual",
 			...overrides,
 		})
 		return new LiveDemodulatorClass(
@@ -908,7 +909,11 @@ describe("LiveDemodulator", () => {
 			testLogger,
 			sourceManager as any,
 			router as any,
-			LiveDemodConfigSchema.parse({ enabled: true, httpPort: port }),
+			LiveDemodConfigSchema.parse({
+				enabled: true,
+				httpPort: port,
+				squelchMode: "manual",
+			}),
 			{},
 		)
 		await liveDemod.start()
