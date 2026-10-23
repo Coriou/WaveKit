@@ -1,0 +1,163 @@
+import argparse
+import importlib.util
+from pathlib import Path
+import signal
+import tempfile
+from unittest.mock import Mock, patch
+import unittest
+
+ROOT = Path(__file__).resolve().parents[3]
+spec = importlib.util.spec_from_file_location("driver", ROOT / "scripts/link-burst/run_acceptance.py")
+driver = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(driver)
+
+
+class DriverTests(unittest.TestCase):
+    def experiment(self, scenario):
+        experiment = driver.Experiment(argparse.Namespace(
+            rate=2048000, minutes=10, scenario=scenario, out=Path("unused")))
+        experiment.summary["branches"] = {
+            "sibling": {"sink": False, "droppedBytesTotal": 0},
+            "sink": {"sink": True, "droppedBytesTotal": 0}}
+        return experiment
+
+    def test_upstream_does_not_require_core_overflow(self):
+        experiment = self.experiment("upstream")
+        experiment.summary["upstreamDroppedBytes"] = 100
+        self.assertEqual(experiment.failures(), [])
+        experiment.summary["upstreamDroppedBytes"] = 0
+        self.assertIn("upstream drops were not exercised", experiment.failures())
+
+    def test_aggregate_overflow_attribution(self):
+        for scenario in ("overflow", "upstream"):
+            experiment = self.experiment(scenario)
+            experiment.summary["overflowBytes"] = 100
+            experiment.summary["upstreamDroppedBytes"] = 100
+            experiment.record_attribution(dict(link=5, consumer=2, host=1, unknown=0))
+            self.assertIn("aggregate link classifications did not increase", experiment.failures())
+            experiment.record_attribution(dict(link=6, consumer=2, host=1, unknown=0))
+            self.assertEqual(experiment.failures(), [])
+            self.assertEqual(experiment.summary["attributionCheck"], "aggregate")
+            experiment.record_attribution(dict(link=7, consumer=3, host=1, unknown=0))
+            self.assertIn("aggregate consumer or host classifications increased", experiment.failures())
+        experiment = self.experiment("overflow")
+        experiment.monitor_counts["link"] = 1
+        self.assertIn("overflow was not exercised", experiment.failures())
+
+    def test_host_increase_fails_and_window_expiry_is_not_an_increase(self):
+        experiment = self.experiment("overflow")
+        experiment.summary["overflowBytes"] = 10
+        experiment.record_attribution(dict(link=10, consumer=4, host=2))
+        experiment.record_attribution(dict(link=9, consumer=3, host=1))
+        self.assertEqual(experiment.monitor_counts["consumer"], 0)
+        experiment.record_attribution(dict(link=10, consumer=3, host=2))
+        self.assertIn("aggregate consumer or host classifications increased", experiment.failures())
+
+    def test_smooth_link_recreates_only_fake_and_waits_for_traffic(self):
+        experiment = self.experiment("late-shed")
+        original_command = list(experiment.command)
+        experiment.compose = Mock()
+        experiment.get = Mock(side_effect=[
+            [dict(id=driver.SOURCE, connected=False, bytesReceived=100)],
+            [dict(id=driver.SOURCE, connected=True, bytesReceived=100)],
+            [dict(id=driver.SOURCE, connected=True, bytesReceived=200)]])
+        with patch.object(driver.time, "sleep"):
+            experiment.smooth_link()
+        self.assertEqual(experiment.command, original_command)
+        self.assertEqual(experiment.env["LINK_BURST_SCHEDULE"], "")
+        experiment.compose.assert_called_once_with(
+            "up", "-d", "--no-deps", "--force-recreate", "--no-build", "--pull", "never", "fake")
+        self.assertEqual(experiment.get.call_count, 3)
+        self.assertEqual(experiment.phase, "reconnecting")
+        self.assertIsNone(experiment.slow_at)
+        self.assertIsNone(experiment.consumer_baseline)
+
+    def test_consumer_window_excludes_link_phase(self):
+        experiment = self.experiment("late-shed")
+        experiment.slow_at = 100
+        branches = [{"id": "sibling", "droppedBytesTotal": 500}]
+        absorber = {"peakHeldMs10m": 2500, "peakHeldBytes10m": 0, "laggardExcludeMsMax10m": None}
+        experiment.record_consumer({"phase": "link-only", "mono": 99}, absorber, branches)
+        self.assertIsNone(experiment.consumer_baseline)
+        experiment.record_consumer({"phase": "consumer", "mono": 100}, absorber, branches)
+        self.assertEqual(experiment.summary["consumerSiblingDrops"], 0)
+        self.assertIsNone(experiment.consumer_peaks)
+        absorber["peakHeldMs10m"] = 50
+        experiment.record_consumer({"phase": "consumer", "mono": 700}, absorber, branches)
+        self.assertEqual(experiment.consumer_peaks, 50)
+        branches[0]["droppedBytesTotal"] += 10
+        experiment.record_consumer({"phase": "consumer", "mono": 702}, absorber, branches)
+        self.assertEqual(experiment.summary["consumerSiblingDrops"], 10)
+
+    def test_host_accepts_absorber_overflow_as_exercised_loss(self):
+        experiment = self.experiment("host")
+        experiment.attributions["host"] = 1
+        self.assertIn("host drops were not exercised", experiment.failures())
+        experiment.summary["overflowBytes"] = 100
+        self.assertEqual(experiment.failures(), [])
+
+    def test_exclusion_bound_rounds_loop_delay_up_to_meter_resolution(self):
+        experiment = self.experiment("consumer")
+        experiment.summary["oneChunkMs"] = 16
+        self.assertEqual(experiment.exclusion_bound(14.8), 500 + 16 + 20)
+        self.assertEqual(experiment.exclusion_bound(20), 500 + 16 + 20)
+        with self.assertRaises(driver.InvalidRun):
+            experiment.exclusion_bound(None)
+
+    def test_amended_latency_criterion(self):
+        experiment = self.experiment("consumer")
+        experiment.summary["oneChunkMs"] = 16
+        experiment.exclusion = {"ms": 531, "loopMs": 15}
+        # 1966080 B at 4096000 B/s and an assumed 1x excess drain in 480 ms.
+        experiment.drain = {"ms": 900, "bytes": 1966080, "exclusionMs": 500, "loopMs": 15}
+        self.assertEqual(experiment.latency_failures(), [])
+        self.assertEqual(experiment.summary["consumerDrainBoundMs"], 536 + 480)
+        experiment.exclusion["ms"] = 537
+        self.assertIn("laggard exclusion exceeded laggard plus one chunk plus loop delay",
+                      experiment.latency_failures())
+        experiment.exclusion["ms"] = 500
+        experiment.drain["ms"] = 1017
+        failures = experiment.latency_failures()
+        self.assertIn("post-exclusion drain exceeded its bound", failures)
+        self.assertIn("implied sibling excess rate is below the assumption", failures)
+
+    def test_host_scenario_reserves_a_cpu_for_the_fake(self):
+        self.assertEqual(driver.cpu_split(6), ("0-1", "5"))
+        self.assertEqual(driver.cpu_split(3), ("0-1", "2"))
+        with self.assertRaises(driver.InvalidRun):
+            driver.cpu_split(2)
+        self.assertEqual(driver.HOST_CORE_QUOTA, "0.75")
+
+    def test_upstream_waits_for_upstream_statistics(self):
+        experiment = self.experiment("upstream")
+        reports = [dict(sourceId=driver.SOURCE, transport="network")]
+        fanout = {"branches": [dict(sourceId=driver.SOURCE, id="decoder-" + driver.SINK),
+                               dict(sourceId=driver.SOURCE, id="decoder-" + driver.SIBLING)]}
+        backpressure = [dict(sourceId=driver.SOURCE, available=False)]
+        experiment.get = Mock(side_effect=lambda path: {
+            "/api/resources/link-quality": reports, "/api/telemetry/fanout": fanout,
+            "/api/resources/backpressure": backpressure}[path])
+        self.assertFalse(experiment.ready())
+        backpressure[0]["available"] = True
+        self.assertTrue(experiment.ready())
+        experiment.args.scenario = "lossless"
+        backpressure[0]["available"] = False
+        self.assertTrue(experiment.ready())
+
+    def test_interruption_tears_down(self):
+        experiment = self.experiment("upstream")
+        with tempfile.TemporaryDirectory() as directory:
+            experiment.args.out = Path(directory)
+            experiment.compose = Mock(side_effect=[driver.InvalidRun("interrupted by SIGTERM"), None])
+            self.assertEqual(experiment.run(), 2)
+            self.assertEqual(experiment.compose.call_args.args, ("down", "--volumes", "--remove-orphans"))
+            self.assertTrue((Path(directory) / "summary.json").exists())
+
+    def test_signals_raise_catchable_interruption(self):
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.assertRaisesRegex(driver.InvalidRun, signal.Signals(sig).name):
+                driver.interrupted(sig, None)
+
+
+if __name__ == "__main__":
+    unittest.main()

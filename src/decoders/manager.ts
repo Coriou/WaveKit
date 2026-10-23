@@ -247,6 +247,7 @@ interface DecoderState {
 	/** Activates the deferred raw branch once the decoder has started. */
 	branchReady?: () => void
 	efficiencyBackoffMs?: number
+	efficiencyLateShed?: boolean
 	/** Owning scanner job of a probe; null for configured decoders. */
 	scannerJobId: string | null
 	/** Scanner-provided input used instead of a fanout branch (probes only). */
@@ -677,13 +678,17 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	private runningPlacements(): RunningPlacement[] {
-		return [...this.decoders.values()].flatMap(state =>
-			state.placement &&
-			(state.decoder.getStatus().running ||
-				state.processStartPending ||
-				(state.admission?.admit === true && state.desiredRunning))
+		return [...this.decoders.values()].flatMap(state => {
+			const owner = state.parentId ? this.decoders.get(state.parentId) : state
+			return state.placement &&
+				(state.decoder.getStatus().running ||
+					state.processStartPending ||
+					(state.admission?.admit === true && state.desiredRunning))
 				? [
 						{
+							...(owner
+								? { mode: this.modeFor(owner).mode, startMode: owner.startMode }
+								: {}),
 							key: state.placement.key,
 							sourceId: state.placement.sourceId,
 							reach: state.placement.reach,
@@ -694,8 +699,8 @@ export class DecoderManager extends EventEmitter {
 								: (state.admittedAtMs ?? performance.now()),
 						},
 					]
-				: [],
-		)
+				: []
+		})
 	}
 
 	efficiencyView(): DecoderEfficiencyView {
@@ -703,6 +708,13 @@ export class DecoderManager extends EventEmitter {
 		if (!gate) return { budgetCores: 0, cpuGuardPercent: 90, sources: [] }
 		const mono = performance.now()
 		const epoch = Date.now()
+		// Malformed or out-of-range deadlines read as none rather than throwing.
+		const rebaseCooldown = (value: string | null): string | null => {
+			if (!value) return null
+			const at = epoch + Date.parse(value) - mono
+			const date = new Date(at)
+			return Number.isNaN(date.getTime()) ? null : date.toISOString()
+		}
 		const view = gate.view(
 			this.runningPlacements(),
 			[...this.decoders.values()].flatMap(state =>
@@ -725,6 +737,14 @@ export class DecoderManager extends EventEmitter {
 			...view,
 			sources: view.sources.map(source => ({
 				...source,
+				...(source.lateDrops
+					? {
+							lateDrops: {
+								...source.lateDrops,
+								cooldownUntil: rebaseCooldown(source.lateDrops.cooldownUntil),
+							},
+						}
+					: {}),
 				admitted: source.admitted.map(placement =>
 					configured(placement.decoderId)
 						? { ...placement, probation: false, detail: "configured" as const }
@@ -732,11 +752,9 @@ export class DecoderManager extends EventEmitter {
 				),
 				blocked: source.blocked.map(placement => ({
 					...placement,
-					...(placement.retryAt
+					...(placement.retryAt !== undefined
 						? {
-								retryAt: new Date(
-									epoch + Date.parse(placement.retryAt) - mono,
-								).toISOString(),
+								retryAt: rebaseCooldown(placement.retryAt),
 							}
 						: {}),
 				})),
@@ -828,6 +846,7 @@ export class DecoderManager extends EventEmitter {
 			if (
 				state.decoder.getStatus().running &&
 				state.admittedAtMs !== undefined &&
+				!state.efficiencyLateShed &&
 				!(state.placement && condemned.has(state.placement.key)) &&
 				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
 			)
@@ -866,6 +885,18 @@ export class DecoderManager extends EventEmitter {
 				state.lifecycle?.runGeneration !== run
 			)
 				continue
+			if (verdict.detail === "late-drops") {
+				state.efficiencyLateShed = true
+				this.log.warn(
+					{
+						reasonCode: "efficiency-budget",
+						detail: "late-drops",
+						sourceId: state.placement.sourceId,
+						decoderId: state.placement.decoderId,
+					},
+					"Late drops shed a decoder",
+				)
+			}
 			gate.noteSuspended(verdict.key, verdict.detail, now)
 			state.efficiencyBackoffMs = Math.min(
 				state.efficiencyBackoffMs === undefined

@@ -67,6 +67,7 @@ export type ReceiverEvidenceRead =
 	| { readonly kind: "missing" | "unavailable" | "conflict" | "limit" }
 	| { readonly kind: "present"; readonly evidence: SourceReceiverEvidence }
 
+// prettier-ignore
 export type ReceiverEvidencePageRead =
 	| { readonly kind: "unavailable" | "conflict" | "limit" }
 	| {
@@ -507,10 +508,21 @@ const receiverCapabilitiesObjectSchema = z
 			.strict(),
 		sampleRatePresets: sampleRatePresetsSchema,
 		gainTable: receiverGainTableSchema,
+		iqDelivery: z
+			.object({
+				advertised: z.array(z.enum(["raw", "channels"])).nullable(),
+				configured: z.enum(["raw", "channels", "auto"]),
+				resolved: z.literal("raw"),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict()
 
-export const receiverCapabilitiesSchema = receiverCapabilitiesObjectSchema
+export const receiverCapabilitiesSchema =
+	receiverCapabilitiesObjectSchema.transform(({ iqDelivery, ...item }) =>
+		iqDelivery === undefined ? item : { ...item, iqDelivery },
+	)
 
 /**
  * Presets correlation (checked with the other item correlations, failure is CONFLICT):

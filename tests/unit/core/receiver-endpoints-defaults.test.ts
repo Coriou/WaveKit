@@ -19,9 +19,9 @@ const SOURCE = {
 }
 
 describe("receiver-endpoints defaults", () => {
-	it("parses a source config without adding keys (golden)", () => {
+	it("parses source defaults without adding endpoint-selection keys (golden)", () => {
 		expect(JSON.stringify(SourceConfigSchema.parse(SOURCE))).toBe(
-			'{"id":"pi","type":"rtl_tcp","host":"192.0.2.69","port":5555,"loop":false,"playbackSpeed":1,"caps":{"kind":"iq","sampleRate":2048000,"format":"U8_IQ","exclusive":false},"sdrHost":{"apiUrl":"http://192.0.2.69:8080"}}',
+			'{"delivery":"auto","id":"pi","type":"rtl_tcp","host":"192.0.2.69","port":5555,"loop":false,"playbackSpeed":1,"caps":{"kind":"iq","sampleRate":2048000,"format":"U8_IQ","exclusive":false},"sdrHost":{"apiUrl":"http://192.0.2.69:8080"}}',
 		)
 		expect(
 			SourceConfigSchema.parse({

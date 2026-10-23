@@ -196,6 +196,7 @@ export interface TunerRatePolicy {
 	since: string
 }
 export interface LinkAdvisory {
+	burst?: LinkBurstSummary
 	level: "none" | "unproven" | "dropping"
 	transport: "loopback" | "network"
 	payloadBytesPerSecond: number
@@ -211,4 +212,10 @@ export interface TunerRatePolicyEventData {
 	toHz: number
 	skipped?: "external-control" | "rate-above" | "write-failed"
 	link?: LinkAdvisory
+}
+
+export interface LinkBurstSummary {
+	worstStallMs: number | null
+	overflowedBytes10m: number
+	burstSeconds: number
 }

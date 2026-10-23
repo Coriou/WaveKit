@@ -47,6 +47,9 @@ import {
 	defaultCpuBudgetCores,
 } from "./decoders/enablement/contract.js"
 import { createRatePolicy } from "./core/rate-policy.js"
+import { composeLinkBurst } from "./core/link-burst/compose.js"
+import { createLinkQuality } from "./core/link-burst/link-quality.js"
+import { frameBytesFor } from "./core/link-burst/contract.js"
 import { createLinkAdvisor } from "./core/link-advisory.js"
 import type { DropReader } from "./decoders/enablement/efficiency-gate.js"
 import type {
@@ -494,8 +497,9 @@ export function composeDecoderRatePolicyLifetime(
 export function composeDecoderEfficiencyGate(
 	inputs: EfficiencyInputs,
 	drops: DropReader,
+	log?: Logger,
 ): EfficiencyGate {
-	const gate = createEfficiencyGate(inputs, { drops })
+	const gate = createEfficiencyGate(inputs, { drops, ...(log ? { log } : {}) })
 	return {
 		...gate,
 		record: sample => gate.record({ ...sample, atMs: drops.monoNow() }),
@@ -1166,6 +1170,8 @@ async function main(): Promise<void> {
 			await disposeReceiverAfterApi()
 			await sourceManager.disconnectAll()
 		})
+		const composed = composeLinkBurst({ log: logger })
+		own(20, composed.dispose)
 		const fanoutManager = new FanoutManager(logger)
 		const sourceRouting = new SourceFanoutRouter(
 			sourceManager,
@@ -1173,6 +1179,7 @@ async function main(): Promise<void> {
 			logger,
 			defaultSourceIdFor(config.sources),
 			{
+				linkBurst: composed.factories,
 				dedicated: new Set(
 					config.sources
 						.filter(s => sourceScannerConfig(s).role === "dedicated")
@@ -1319,7 +1326,34 @@ async function main(): Promise<void> {
 		const efficiencyCpu = new CpuMeter({ sampleMs: EFFICIENCY_SAMPLE_MS })
 		efficiencyCpu.start()
 		own(20, () => efficiencyCpu.stop())
+		let backpressureTracker: SourceBackpressureTracker | undefined
+		const advisorRef: { current: ReturnType<typeof createLinkAdvisor> | null } =
+			{ current: null }
 		const monitor = createEfficiencyMonitor({
+			sourceEvents: sourceManager,
+			monoNow: composed.factories.monoNow,
+			attributionApplies: id =>
+				sourceRouting.linkBurst(id)?.transport === "network",
+			recovery: (id, now) =>
+				sourceRouting.linkBurst(id)?.recorder?.recovery(now) ?? null,
+			ingest: (id, from, to) =>
+				sourceRouting.linkBurst(id)?.recorder?.interval(from, to) ?? null,
+			loopDelay: () => composed.loopMeter.takeInterval(),
+			shortfall: id =>
+				advisorRef.current?.shortfall(
+					id,
+					tunerController.getState(id)?.sampleRate ?? 0,
+					frameBytesFor(sourceManager.getCaps(id)?.format ?? "") ?? 0,
+				) ?? null,
+			upstreamDroppedTotal: id =>
+				config.resources.sdrHostPoller.enabled &&
+				config.sources.find(source => source.id === id)?.sdrHost?.apiUrl
+					? (backpressureTracker?.upstreamDroppedTotal(id) ?? null)
+					: undefined,
+			cpuGuardPercent:
+				config.decoderPolicy?.efficiency?.cpuGuardPercent ??
+				EFFICIENCY_CPU_GUARD_PERCENT,
+			log: createComponentLogger(logger, "EfficiencyMonitor"),
 			sources: () => sourceManager.getAllStatus().map(source => source.id),
 			branchCounters: id => sourceRouting.branchDropCounters(id),
 			topology: id => sourceRouting.branchTopology(id),
@@ -1344,6 +1378,7 @@ async function main(): Promise<void> {
 					EFFICIENCY_CPU_GUARD_PERCENT,
 			},
 			monitor,
+			createComponentLogger(logger, "EfficiencyGate"),
 		)
 		const vfo = createVfoTracker({
 			now: () => performance.now(),
@@ -1791,7 +1826,34 @@ async function main(): Promise<void> {
 		let containerMonitor: ContainerMonitor | undefined
 		let sdrHostPoller: SdrHostPoller | undefined
 		let endpointSelector: EndpointSelector | undefined
-		let backpressureTracker: SourceBackpressureTracker | undefined
+		const linkInputOf = (id: string) => {
+			const source = sourceManager.getConfig(id)
+			const rate = tunerController.getState(id)?.sampleRate
+			return source?.host && rate
+				? { sourceId: id, host: source.host, sampleRateHz: rate }
+				: null
+		}
+		const linkQuality = createLinkQuality({
+			sources: () => sourceManager.getAllStatus().map(source => source.id),
+			handles: id => sourceRouting.linkBurst(id),
+			attribution: id => monitor.attributionCounts(id),
+			upstreamDropRate: id => backpressureTracker?.peekDropRate(id) ?? null,
+			receiver: id => sdrHostPoller?.getLinkFacts(id) ?? null,
+			loopDelay: () => composed.loopMeter.report(monitor.monoNow()),
+			monoNow: monitor.monoNow,
+			now: Date.now,
+			advisory: id => {
+				const input = linkInputOf(id)
+				return input && advisorRef.current
+					? advisorRef.current.classify(
+							input,
+							backpressureTracker?.peekDropRate(id) ?? null,
+						)
+					: null
+			},
+			reportAdvisory: (id, advisory) =>
+				resourceAggregator?.reportLinkAdvisory(id, advisory),
+		})
 
 		if (config.resources.enabled) {
 			// Create container monitor
@@ -1901,6 +1963,7 @@ async function main(): Promise<void> {
 					containerMonitor: containerMonitor ?? null,
 					sdrHostPoller: sdrHostPoller ?? null,
 					backpressureTracker,
+					linkQuality,
 				},
 			)
 
@@ -1936,7 +1999,13 @@ async function main(): Promise<void> {
 			sdrHostPoller?.stop()
 			containerMonitor?.stop()
 		})
-		const linkAdvisor = createLinkAdvisor({ now: Date.now })
+		const linkAdvisor = createLinkAdvisor({
+			now: Date.now,
+			monoNow: monitor.monoNow,
+			linkDropsSince: monitor.linkDropsSince,
+			burst: id => linkQuality.burst(id),
+		})
+		advisorRef.current = linkAdvisor
 		const ratePolicy = createRatePolicy({
 			port: { readsbOn: id => decoderManager.readsbRateFacts(id) },
 			tuner: {
@@ -1946,17 +2015,8 @@ async function main(): Promise<void> {
 					tunerController.setSampleRate(id, hz, opts),
 			},
 			link: linkAdvisor,
-			linkInput: id => {
-				const source = sourceManager.getConfig(id)
-				const rate = tunerController.getState(id)?.sampleRate
-				return source?.host && rate
-					? { sourceId: id, host: source.host, sampleRateHz: rate }
-					: null
-			},
-			upstreamDropsOf: id => {
-				const value = backpressureTracker?.getBackpressure(id)
-				return value?.available ? value.dropRate : null
-			},
+			linkInput: linkInputOf,
+			upstreamDropsOf: id => backpressureTracker?.peekDropRate(id) ?? null,
 			reportLink: decoderLinkReporter(() => resourceAggregator),
 			setTimer: decoderPolicyTimer,
 			emit: event => tunerController.emitRatePolicy(event),
@@ -2071,6 +2131,16 @@ async function main(): Promise<void> {
 					sourceManager.getReceiverEvidencePage(after, limit),
 			},
 			TUNER_REST_COMMAND_POLICY,
+			id => {
+				const source = sourceManager.getConfig(id)
+				return source
+					? {
+							configured: source.delivery ?? "auto",
+							advertised:
+								sdrHostPoller?.getStatus(id)?.iqDelivery?.modes ?? null,
+						}
+					: null
+			},
 		)
 		let receiverDisposed = false
 		disposeReceiver = () => {

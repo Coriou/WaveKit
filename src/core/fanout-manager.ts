@@ -20,10 +20,8 @@ export interface BranchConfig {
 	highWaterMark?: number // Default: 256KB (262144 bytes)
 	decoderId?: string // Optional decoder ID for telemetry context
 	sourceId?: string // Optional source ID for telemetry context
-	/**
-	 * Created inactive: it receives no data (and counts no drops) until
-	 * activateBranch(), so a consumer that is still starting cannot fill it.
-	 */
+	// Created inactive: it receives no data (and counts no drops) until
+	// activateBranch(), so a consumer that is still starting cannot fill it.
 	deferred?: boolean
 }
 
@@ -74,6 +72,7 @@ export interface FanoutStatus {
 export interface FanoutManagerEvents {
 	backpressure: (branchId: string, bufferedBytes: number) => void
 	drain: (branchId: string, durationMs: number) => void
+	"writable-drain": (branchId: string) => void
 	"branch-added": (branchId: string) => void
 	"branch-removed": (branchId: string) => void
 }
@@ -118,17 +117,19 @@ export class FanoutManager extends EventEmitter {
 		this.log = createComponentLogger(logger, "FanoutManager")
 	}
 
-	/**
-	 * Attach a source stream to distribute data from.
-	 * Requirement 2.1: Accept source stream as input
-	 */
+	// Attach a source stream to distribute data from.
+	// Requirement 2.1: Accept source stream as input
 	attachSource(source: Readable): void {
+		this.attachIngest(source, chunk => this.distributeData(chunk))
+	}
+
+	attachIngest(source: Readable, ingest: (chunk: Buffer) => void): void {
 		if (this.source) {
 			this.detachSource()
 		}
 
 		this.source = source
-		this.dataHandler = (chunk: Buffer) => this.distributeData(chunk)
+		this.dataHandler = ingest
 
 		source.on("data", this.dataHandler)
 		this.sourceErrorHandler = err => {
@@ -143,9 +144,7 @@ export class FanoutManager extends EventEmitter {
 		this.log.info("Source attached")
 	}
 
-	/**
-	 * Detach the current source stream.
-	 */
+	// Detach the current source stream.
 	detachSource(): void {
 		if (this.source && this.dataHandler) {
 			this.source.removeListener("data", this.dataHandler)
@@ -161,10 +160,8 @@ export class FanoutManager extends EventEmitter {
 		}
 	}
 
-	/**
-	 * Add a new branch for a consumer.
-	 * Requirement 2.2: Create independent buffered stream for consumer
-	 */
+	// Add a new branch for a consumer.
+	// Requirement 2.2: Create independent buffered stream for consumer
 	addBranch(config: BranchConfig): PassThrough {
 		if (this.branches.has(config.id)) {
 			this.log.warn(
@@ -203,6 +200,12 @@ export class FanoutManager extends EventEmitter {
 			lastDrainAt: undefined,
 		} as BranchState
 
+		// Startup buffering can suppress drop-mode while writableLength reaches
+		// its effective mark. Wake read-only congestion observers on that drain
+		// too; ordinary drop-mode already emits through its one-shot listener.
+		stream.on("drain", () => {
+			if (!branchState.backpressure) this.emit("writable-drain", config.id)
+		})
 		this.branches.set(config.id, branchState)
 		this.emit("branch-added", config.id)
 		this.log.info({ branchId: config.id, highWaterMark }, "Branch added")
@@ -210,13 +213,11 @@ export class FanoutManager extends EventEmitter {
 		return stream
 	}
 
-	/**
-	 * Starts delivering data to a deferred branch; every later drop counts.
-	 * With `startup`, the branch buffers up to `highWaterMark` bytes for
-	 * `durationMs` (a consumer's first reads after spawn are slow), then returns
-	 * to its normal mark: a larger backlog is left to drain, and new data is not
-	 * accepted beyond the normal mark until it has.
-	 */
+	// Starts delivering data to a deferred branch; every later drop counts.
+	// With `startup`, the branch buffers up to `highWaterMark` bytes for
+	// `durationMs` (a consumer's first reads after spawn are slow), then returns
+	// to its normal mark: a larger backlog is left to drain, and new data is not
+	// accepted beyond the normal mark until it has.
 	activateBranch(
 		id: string,
 		startup?: { highWaterMark: number; durationMs: number },
@@ -245,10 +246,8 @@ export class FanoutManager extends EventEmitter {
 		this.log.debug({ branchId: id }, "Branch activated")
 	}
 
-	/**
-	 * Remove a branch and clean up its resources.
-	 * Requirement 2.5: Clean up resources when branch is removed
-	 */
+	// Remove a branch and clean up its resources.
+	// Requirement 2.5: Clean up resources when branch is removed
 	removeBranch(id: string): void {
 		const branch = this.branches.get(id)
 		if (!branch) {
@@ -268,16 +267,42 @@ export class FanoutManager extends EventEmitter {
 		this.log.info({ branchId: id }, "Branch removed")
 	}
 
-	/**
-	 * Get all branch IDs.
-	 */
+	// Get all branch IDs.
 	getBranchIds(): string[] {
 		return Array.from(this.branches.keys())
 	}
 
-	/**
-	 * Get status for a specific branch.
-	 */
+	distribute(chunk: Buffer): void {
+		this.distributeData(chunk)
+	}
+
+	congestedBranchIds(out: Set<string>): void {
+		out.clear()
+		for (const [id, branch] of this.branches) {
+			if (
+				branch.active &&
+				(branch.backpressure ||
+					branch.stream.destroyed ||
+					branch.stream.writableEnded ||
+					branch.stream.writableLength >=
+						(branch.startupHighWaterMark ?? branch.highWaterMark))
+			)
+				out.add(id)
+		}
+	}
+
+	activeBranchIds(out: Set<string>): void {
+		out.clear()
+		for (const [id, branch] of this.branches) {
+			if (branch.active) out.add(id)
+		}
+	}
+
+	isBranchActive(id: string): boolean {
+		return this.branches.get(id)?.active ?? false
+	}
+
+	// Get status for a specific branch.
 	getBranchStatus(id: string): BranchStatus | undefined {
 		const branch = this.branches.get(id)
 		if (!branch) {
@@ -291,12 +316,10 @@ export class FanoutManager extends EventEmitter {
 		}
 	}
 
-	/**
-	 * Distribute data to all active branches.
-	 * Requirement 2.3: Copy data to all active branches
-	 * Requirement 2.4: Emit backpressure without blocking source
-	 * Requirement 2.6: Prioritize real-time flow over buffering
-	 */
+	// Distribute data to all active branches.
+	// Requirement 2.3: Copy data to all active branches
+	// Requirement 2.4: Emit backpressure without blocking source
+	// Requirement 2.6: Prioritize real-time flow over buffering
 	private distributeData(chunk: Buffer): void {
 		const chunkLength = chunk.length
 
@@ -401,10 +424,8 @@ export class FanoutManager extends EventEmitter {
 		}
 	}
 
-	/**
-	 * Get extended telemetry for a specific branch.
-	 * Used for real-time monitoring dashboards.
-	 */
+	// Get extended telemetry for a specific branch.
+	// Used for real-time monitoring dashboards.
 	getBranchTelemetry(id: string): BranchTelemetry | undefined {
 		const branch = this.branches.get(id)
 		if (!branch) {
@@ -436,10 +457,8 @@ export class FanoutManager extends EventEmitter {
 		return telemetry
 	}
 
-	/**
-	 * Get complete telemetry snapshot for all branches.
-	 * Provides global view of fanout system health for dashboards and APIs.
-	 */
+	// Get complete telemetry snapshot for all branches.
+	// Provides global view of fanout system health for dashboards and APIs.
 	getTelemetrySnapshot(): FanoutStatus {
 		const branches: BranchTelemetry[] = []
 		let backpressureActiveCount = 0
@@ -493,9 +512,7 @@ export class FanoutManager extends EventEmitter {
 		return branch.stream.readableLength + branch.stream.writableLength
 	}
 
-	/**
-	 * Clean up all branches and detach source.
-	 */
+	// Clean up all branches and detach source.
 	destroy(): void {
 		this.detachSource()
 

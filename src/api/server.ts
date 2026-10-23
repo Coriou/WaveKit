@@ -895,6 +895,10 @@ export class ApiServer {
 				this.wsBroadcaster.broadcastResourceSnapshot(snapshot)
 			})
 
+			this.resourceAggregator.on("link-quality", reports => {
+				this.wsBroadcaster.broadcastLinkQuality(reports)
+			})
+
 			this.resourceAggregator.on("alert", alert => {
 				this.wsBroadcaster.broadcastResourceAlert(alert)
 			})

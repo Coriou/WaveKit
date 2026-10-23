@@ -897,6 +897,7 @@ describe("API Server", () => {
 				// The body is parsed with SourceConfigSchema, which applies defaults.
 				expect(mockSourceManager.connect).toHaveBeenCalledWith({
 					...newSource,
+					delivery: "auto",
 					loop: false,
 					playbackSpeed: 1,
 				})

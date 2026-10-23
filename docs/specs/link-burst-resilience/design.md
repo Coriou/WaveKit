@@ -156,17 +156,19 @@ interface BurstAbsorber {
   `ABSORBER_RELEASE_BYTES` frame-aligned bytes from the head, copy them into a fresh
   `Buffer.allocUnsafe` (the fanout keeps references to written chunks, so ring memory cannot be
   handed out), advance the head, `distribute` it. Releases are triggered by `ingest` and by the
-  fanout's `drain`, `branch-removed` and `branch-added` events; there are no timers.
-- **Congestion.** `FanoutManager` gains one read-only method, `congestedBranchIds(out: Set<string>)`,
-  which clears `out` and adds every active branch in backpressure or startup refusal. It reads
-  existing fields only. The absorber keeps `congestedSinceMono` per branch from the `backpressure`
-  and `drain` events and from these reads, and `siblingProgressMono` (the last time any other
-  gating branch was seen uncongested).
-- **Laggard rule.** On every ingest and release attempt: a congested branch whose
-  `congestedSinceMono` is at least `ABSORBER_LAGGARD_MS` old and that saw sibling progress since
-  then joins the excluded set; it leaves when the fanout reports it drained. A single active
-  branch can never be a laggard, so a lone slow consumer fills the ring and then overflows
-  (attributed by the monitor, not by the absorber).
+  fanout's `drain`, `branch-removed` and `branch-added` events and the holding deadline.
+- **Congestion.** Read the fanout's active and congested branch sets without changing its
+  backpressure semantics. Track continuous congestion per branch.
+- **Laggard rule (supersedes requirements 1.5 and the lone-branch case of 3.3).** Exclude every branch congested for `ABSORBER_LAGGARD_MS`, including a
+  lone branch or all branches together. Also exclude current blockers once the holding
+  episode reaches that deadline, so rotating congestion cannot renew the hold indefinitely.
+  Exclusion ends on drain. One unref'ed timeout per holding episode wakes release even
+  without new input; flush/dispose cancels it. The deadline bounds congestion waiting to
+  500 ms (below the default 2 s capacity); draining still uses four-block steps and event-loop
+  continuations. An event-loop stall can delay the callback; release resumes on the next turn.
+  All-congested drops follow the existing host evidence path (otherwise unknown or link when
+  positively established). A lone branch with complete smooth-input, healthy-host evidence
+  and no overflow or upstream loss is consumer loss. Fanout counts every released drop.
 - **Flush.** On disconnect, removal, rate or format change: discard held bytes, count them as
   `flushedBytes`, clear congestion bookkeeping.
 
@@ -215,11 +217,37 @@ interface IntervalEvidence {
 function attributeInterval(e: IntervalEvidence): DropAttribution
 ```
 
-Rules in order: incomplete → `unknown`; no positive delta anywhere → `none`; a strict non-empty
-subset of branches rose and no overflow → `consumer`; upstream delta above 0 → `unknown`; gap,
-loop delay and shortfall all known, `maxGapMs − loopDelayMaxMs ≥ LINK_GAP_MS` and no shortfall
-→ `link`; loop delay at least `HOST_LOOP_DELAY_MS` or CPU at or above the guard → `host`;
-otherwise `unknown`.
+Any malformed or non-finite evidence field makes the whole interval `unknown` (fail closed).
+An absent receiver counter is not a failed read: it contributes no upstream loss; a configured
+counter that fails remains invalid. Local sources retain the counter-only efficiency rules.
+For network gaps, ingest byte totals from the arrival before the gap through catch-up replace
+lagging metrics for the full-rate check. A loss waits up to 10 s after the gap arrival for
+99% of nominal bytes to arrive. While waiting it earns no coverage and cannot condemn probation;
+a recovered link loss preserves the clean-window origin. A sustained deficit resolves unknown.
+Recovery episodes carry sequence, completion and failure marks, so a second stall that begins after
+catch-up between polls gets its own deadline. Completion of a later episode cannot erase an
+earlier sustained deficit. A completed episode stops overriding rolling-rate evidence after its
+recovery deadline. Its completion/failure marks remain available to resolve a pending loss at
+its next poll, independently of that rate override. Arrival-time completion must precede the
+deadline; bytes at or after it cannot repair an expired deficit. The recovery state is fixed-size
+and reads use the monitor's monotonic clock.
+
+Rules are evaluated in this precedence order (superseding the link-before-host order in requirements 3.4–3.5):
+
+| Priority | Evidence                                                                                          | Attribution |
+| -------- | ------------------------------------------------------------------------------------------------- | ----------- |
+| 1        | Incomplete or malformed evidence                                                                  | `unknown`   |
+| 2        | No positive delta anywhere                                                                        | `none`      |
+| 3        | Strict non-empty subset of branches rose, no overflow                                             | `consumer`  |
+| 4        | Upstream delta above 0                                                                            | `unknown`   |
+| 5        | Loop delay ≥ `HOST_LOOP_DELAY_MS` or CPU ≥ guard                                                  | `host`      |
+| 6        | Gap, loop delay and shortfall known; gap − loop delay ≥ `LINK_GAP_MS`; no shortfall               | `link`      |
+| 7        | Complete healthy-host evidence, sole branch dropping, no overflow or qualifying gap, no shortfall | `consumer`  |
+| 8        | Otherwise                                                                                         | `unknown`   |
+
+Host overload makes ingest gaps unreliable link evidence. Missing host evidence retains the
+existing fail-closed rules. Deferred intervals use the loop delay and CPU captured when each
+loss was observed, so recovery cannot turn an originally overloaded interval into `link`.
 
 ### EfficiencyMonitor and EfficiencyGate changes
 
@@ -228,9 +256,11 @@ otherwise `unknown`.
   last shed time. The absorber's overflow counter enters the existing per-branch counter map
   under the reserved key `@absorber#<instance>` (the router refuses fanout branch ids starting
   with `@`), so overflow is drop evidence under every existing rule.
+  Erratum: the monitor keeps the window ring; the gate keeps the last shed time (cooldown) and the late-since mark (last probationer or shed). Behaviour is unchanged.
 - `SourceDropSample` gains `attribution`. A `link` sample does not set `lastDropMono` and does
   not reset `cleanSinceMono`; it breaks the credited coverage chain as an incomplete read does.
-- `probation()` keeps its shape. For the newest probationer it now condemns only on drops in
+- `probation()` skips `always` and operator-started placements, consistent with never shedding
+  these placements. For the newest eligible probationer it now condemns only on drops in
   samples attributed `consumer`, `host` or `unknown`. When a source has no probationer, it
   evaluates the late-drop rule and may return one verdict `{ key, detail: "late-drops" }` for the
   newest eligible placement. Eligibility needs the placement's mode and start mode, so
@@ -274,15 +304,15 @@ resolved `"raw"`). The SDR host status API reports `iqDelivery: { modes: ["raw"]
 
 ## Constants
 
-Provisional values are confirmed or replaced by the instrumentation record (requirement 2.3).
+Values are confirmed by the [instrumentation record](../../engineering/LINK-BURST-2026-10-INSTRUMENTATION.md) (requirement 2.3); network IQ absorption defaults to enabled.
 
 | Constant                               | Value   | Sizing rationale                                                                                                                                                                                                                    |
 | -------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BURST_ABSORBER_DEFAULT_S`             | 2       | Operator decision. Above the 1.5 s decoder start-up buffer precedent and rtlmux's ~0.9–1 s queue, so a stall the receiver survives is also survived in the core. Memory 8.2 MB at 2.048 Msps, 9.6 MB at 2.4 Msps per network source |
 | `BURST_ABSORBER_MAX_S`                 | 10      | Bounds memory at 48 MB per source at 2.4 Msps                                                                                                                                                                                       |
 | `ABSORBER_RELEASE_BYTES`               | 65 536  | Node's socket read size; keeps one release step's memcpy and fanout writes small (rule 2)                                                                                                                                           |
-| `ABSORBER_LAGGARD_MS` (provisional)    | 500     | A healthy branch's congestion episode during catch-up lasts the time to drain its mark at faster than real time (under about 130 ms); 500 ms is about 4× that, while bounding siblings' extra latency                               |
-| `LINK_GAP_MS` (provisional)            | 80      | About 70 % of the smallest effective branch buffering (about 110 ms), so every stall that can overflow a branch qualifies as link evidence                                                                                          |
+| `ABSORBER_LAGGARD_MS`                  | 500     | A healthy branch's congestion episode during catch-up lasts the time to drain its mark at faster than real time (under about 130 ms); 500 ms is about 4× that, while bounding siblings' extra latency                               |
+| `LINK_GAP_MS`                          | 200     | Above measured normal gap p99 (108–136 ms) with margin, below observed stalls (495–1965 ms); avoids crediting normal jitter as link evidence                                                                                        |
 | `HOST_LOOP_DELAY_MS`                   | 50      | 25 × the 2 ms rule-2 budget; a loop stall this long can by itself overflow a 256 KiB branch at 2.4 Msps (55 ms)                                                                                                                     |
 | `CATCHUP_WINDOW_MS`                    | 500     | Longer than the observed catch-up bursts' arrival span; short enough not to merge bursts                                                                                                                                            |
 | `LINK_QUALITY_WINDOW_MS`               | 600 000 | 10 min, as requested for burst-seconds; sixty 10 s slots                                                                                                                                                                            |
@@ -296,21 +326,21 @@ Provisional values are confirmed or replaced by the instrumentation record (requ
 Desktop reference host and Pi 4-class core host as in decoder-enablement (Pi estimated at 4 × the
 reference cost per core until measured, requirement 9.4).
 
-| Item                                 | When                                | Desktop 2.048 / 2.4 Msps                                            | Pi 4-class 2.048 / 2.4 Msps | Basis                                                 |
-| ------------------------------------ | ----------------------------------- | ------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------- |
-| Recorder                             | per chunk (about 60–3 000 chunks/s) | ≤ 0.002 / 0.002 core                                                | ≤ 0.008 / 0.008             | one clock read and a few integer ops per chunk; bench |
-| Absorber pass-through                | per chunk, ring empty               | < 0.001 / 0.001                                                     | < 0.004 / 0.004             | one length check and one congestion read              |
-| Absorber hold                        | only while holding                  | memcpy 4.10 / 4.80 MB/s ≈ 0.002 core                                | ≈ 0.008                     | bench                                                 |
-| Absorber release                     | only while draining                 | one 64 KiB alloc and memcpy per block; ≈ 0.003 core during catch-up | ≈ 0.012                     | bench                                                 |
-| Fanout of released bytes             | same as today per byte              | unchanged                                                           | unchanged                   | existing fanout                                       |
-| Loop meter                           | continuous                          | negligible                                                          | negligible                  | native histogram                                      |
-| Attribution, late rule, link quality | every 2 s per source                | < 0.05 ms per sample                                                | < 0.2 ms                    | unit bench                                            |
-| Total steady state                   |                                     | < 0.01 core                                                         | < 0.04 core                 | well below the 0.3-core noise floor                   |
-| Event-loop p99 added                 |                                     | ≤ 0.2 ms (largest step: one release block × branches)               | ≤ 1 ms                      | rule 2 cap 2 ms; acceptance 9.4                       |
-| Memory                               | per network source                  | ring 8.2 / 9.6 MB; recorder < 64 KB                                 | same                        | preallocated                                          |
+| Item                                 | When                                | Desktop 2.048 / 2.4 Msps                                            | Pi 4-class 2.048 / 2.4 Msps       | Basis                                                 |
+| ------------------------------------ | ----------------------------------- | ------------------------------------------------------------------- | --------------------------------- | ----------------------------------------------------- |
+| Recorder                             | per chunk (about 60–3 000 chunks/s) | ≤ 0.002 / 0.002 core                                                | ≤ 0.008 / 0.008                   | one clock read and a few integer ops per chunk; bench |
+| Absorber pass-through                | per chunk, ring empty               | < 0.001 / 0.001                                                     | < 0.004 / 0.004                   | one length check and one congestion read              |
+| Absorber hold                        | only while holding                  | ≈ 0.005 core active-period; ≈ 0.0003 averaged                       | ≈ 0.020 active; ≈ 0.0012 averaged | bench                                                 |
+| Absorber release                     | only while draining                 | one 64 KiB alloc and memcpy per block; ≈ 0.003 core during catch-up | ≈ 0.012                           | bench                                                 |
+| Fanout of released bytes             | same as today per byte              | unchanged                                                           | unchanged                         | existing fanout                                       |
+| Loop meter                           | continuous                          | negligible                                                          | negligible                        | native histogram                                      |
+| Attribution, late rule, link quality | every 2 s per source                | < 0.05 ms per sample                                                | < 0.2 ms                          | unit bench                                            |
+| Total steady state                   |                                     | < 0.01 core                                                         | < 0.04 core                       | well below the 0.3-core noise floor                   |
+| Event-loop p99 added                 |                                     | largest release step ≤ 256 KiB ≈ 0.2–0.6 ms                         | ≤ 1 ms                            | rule 2 cap 2 ms; acceptance 9.4                       |
+| Memory                               | per network source                  | ring 8.2 / 9.6 MB; recorder < 64 KB                                 | same                              | preallocated                                          |
 
-Main-thread bound: a release loop runs only while no gating branch is congested, so one event
-releases at most about the largest gating mark (512 KiB) before a branch congests; no step is
+Main-thread bound: `ABSORBER_RELEASE_STEP_BLOCKS` caps each synchronous release at four
+64 KiB blocks (256 KiB); remaining bytes resume on a later event-loop turn. No step is
 proportional to the ring's size.
 
 ## Correctness properties
@@ -344,7 +374,7 @@ monotonic clocks.
 6. **Laggard bound.** For any schedule with one consumer stuck while a sibling progresses, the
    stuck branch is excluded no later than `ABSORBER_LAGGARD_MS` plus one ingest after it
    congested; afterwards siblings receive every byte with no added delay beyond the release of
-   what was held; a single active branch is never excluded. _Validates 1.5, 9.2._
+   what was held; lone and all-congested branches obey the same deadline. _Validates 1.5, 9.2._
 7. **Attribution rules.** `attributeInterval` is total and deterministic; incomplete evidence is
    `unknown`; a strict subset with no overflow is `consumer`; `link` implies every rule of 3.4
    holds; a positive upstream delta with drops is never `link`; any null among gap, loop delay or
@@ -434,8 +464,7 @@ Each amended criterion gains an in-place note in
 - Copying held bytes into a preallocated ring, with one allocation per released 64 KiB block
   while draining, rather than holding socket buffers by reference.
 - Overflow drops the newest bytes that do not fit.
-- A lone slow consumer is never excluded as a laggard; the ring fills and overflows, and the
-  monitor attributes it.
+- A lone slow consumer is excluded at the holding deadline; branch drops expose the loss.
 - A measured upstream drop with core drops is `unknown`; an unmeasured upstream does not block
   `link` because the received-rate check stands in for it.
 - `unknown` drops keep condemning probationers (today's rule) but never shed after graduation.

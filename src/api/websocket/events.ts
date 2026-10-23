@@ -28,6 +28,7 @@ import type {
 } from "../../core/live-demodulator.js"
 import type {
 	ResourceSnapshot,
+	SourceLinkQuality,
 	ResourceAlert,
 	TunerState,
 	TunerControlMode,
@@ -145,6 +146,7 @@ interface ExistingServerMessage {
 		| "digital-voice:status"
 		| "resources:snapshot"
 		| "resources:alert"
+		| "resources:link-quality"
 		| "tuner:state-changed"
 		| "tuner:command-sent"
 		| "tuner:control-mode-changed"
@@ -1075,6 +1077,14 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("live-audio", {
 			type: "live-audio:config",
 			data: liveAudioConfigForClient(config),
+		})
+	}
+
+	/** Broadcasts per-source link-quality reports to subscribed clients. */
+	broadcastLinkQuality(reports: SourceLinkQuality[]): void {
+		this.broadcast("resources", {
+			type: "resources:link-quality",
+			data: reports,
 		})
 	}
 
