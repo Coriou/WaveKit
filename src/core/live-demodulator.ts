@@ -104,7 +104,7 @@ export const LiveDemodRuntimeConfigSchema = LiveDemodConfigSchema.and(
 	z.object({
 		squelchMode: z
 			.enum(LIVE_AUDIO_SQUELCH_MODES as [LiveAudioSquelchMode])
-			.default("manual"),
+			.default("auto"),
 		autoMarginDb: z.number().finite().min(0).max(40).default(6),
 		noiseQuietingDb: z
 			.number()

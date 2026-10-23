@@ -3,6 +3,7 @@
  */
 import * as fc from "fast-check"
 import { describe, expect, it } from "vitest"
+import { LiveDemodRuntimeConfigSchema } from "../../../src/core/live-demodulator.js"
 import { startEvidenceHarness } from "./live-demodulator-evidence-fakes.js"
 
 interface Observed {
@@ -64,4 +65,44 @@ describe("live demodulator evidence wiring properties", () => {
 			{ numRuns: 100 },
 		)
 	}, 120_000)
+
+	// Feature: evidence-squelch, Property 14: Default
+	// Validates: Requirements 3.1
+	it("squelchMode defaults to auto and an explicit value is kept", () => {
+		const modulations = ["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"]
+		fc.assert(
+			fc.property(
+				fc.record({
+					modulation: fc.constantFrom(...modulations),
+					squelch: fc.integer({ min: -120, max: 0 }),
+					gain: fc.integer({ min: 1, max: 40 }),
+					audioFormat: fc.constantFrom("s16le", "f32le"),
+					autoMarginDb: fc.integer({ min: 0, max: 40 }),
+				}),
+				fc.option(fc.constantFrom("manual", "auto", "noise"), {
+					nil: undefined,
+				}),
+				(base, explicit) => {
+					const config = { enabled: true, httpPort: 18_999, ...base }
+					expect(LiveDemodRuntimeConfigSchema.parse(config).squelchMode).toBe(
+						"auto",
+					)
+					if (explicit === undefined) return
+					if (
+						explicit === "noise" &&
+						base.modulation !== "nfm" &&
+						base.modulation !== "wfm"
+					)
+						return
+					expect(
+						LiveDemodRuntimeConfigSchema.parse({
+							...config,
+							squelchMode: explicit,
+						}).squelchMode,
+					).toBe(explicit)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
 })
