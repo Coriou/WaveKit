@@ -299,3 +299,13 @@ Known limitations of the fake-link check:
 Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
 state, stage-1 transmission for played audio, a closed over without a played tail) and a stream or WebSocket that ends before the
 run are invalid. Exit codes: 0 pass, 1 fail, 2 invalid.
+
+### Known limitations of the retry policy (2026-10-23)
+
+- The clock-free transmission count allows a slack of `2·(1 + r)` transmissions, so on a short recording a
+  transmission added or dropped in every over can stay within it; if the same attempt also has a clock step,
+  that attempt is retried instead of failing.
+- An attempt whose clock probes are missing is INVALID even when a clock-free check had already failed.
+
+Both are mitigated by the attempt history: every attempt is kept and replayed. Acceptance records inspect
+every attempt of a retried fixture, and a clock-free failure in any attempt fails the fixture.
