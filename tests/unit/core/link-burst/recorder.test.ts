@@ -50,11 +50,11 @@ describe("IngestRecorder", () => {
 		const r = createIngestRecorder()
 		r.configure(1000, 2)
 		r.observeChunk(10, 0)
-		r.observeChunk(2000, 100)
-		r.observeChunk(1000, 200)
-		expect(r.window(600).catchupBytes).toBe(2000)
-		expect(r.histograms(600).catchupCounts.reduce((a, b) => a + b, 0)).toBe(1)
-		expect(r.window(700).catchupBytes).toBe(2000)
+		r.observeChunk(2000, 200)
+		r.observeChunk(1000, 300)
+		expect(r.window(800).catchupBytes).toBe(2000)
+		expect(r.histograms(800).catchupCounts.reduce((a, b) => a + b, 0)).toBe(1)
+		expect(r.window(900).catchupBytes).toBe(2000)
 	})
 	it("interval returns the largest gap ended in range", () => {
 		const r = createIngestRecorder()
@@ -163,3 +163,14 @@ it.each([10999, 11000, 11001])(
 		else expect(result?.failedSequence).toBeGreaterThan(0)
 	},
 )
+
+it.each([
+	[199, 0],
+	[200, 1],
+	[201, 1],
+])("counts burst seconds at a %i ms gap", (gap, bursts) => {
+	const r = createIngestRecorder()
+	r.observeChunk(1, 0)
+	r.observeChunk(1, gap)
+	expect(r.window(gap).burstSeconds).toBe(bursts)
+})

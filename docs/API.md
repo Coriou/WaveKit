@@ -6599,3 +6599,10 @@ closed transmission's tone; `ctcssHz` and `dcs` may be null. DCS is
 `{ code, polarity: "normal" | "inverted" }`. Tone is absent until reported and
 cleared on retune or stop. Closed `live-audio:transmission` events attach analog
 evidence to overlapping scanner observations at trusted frequencies.
+
+### Network IQ burst buffering
+
+`sources[].burstAbsorber.seconds` accepts 0–10 seconds. Omitted, network IQ sources
+use a 2 s buffer; loopback sources use 0. Recordings and non-IQ formats are not buffered.
+Set `seconds: 0` to opt out. The buffer adds no delay while the link is smooth.
+See the [instrumentation record](engineering/LINK-BURST-2026-10-INSTRUMENTATION.md).

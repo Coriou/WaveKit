@@ -4,7 +4,7 @@ import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/eff
 
 const fixture = (overflow = false, sibling = false) => {
 	let mono = 0
-	let gap = 100
+	let gap = 200
 	let total = 0
 	let siblingTotal = 0
 	let loop = 0
@@ -50,7 +50,7 @@ const fixture = (overflow = false, sibling = false) => {
 		monitor,
 		step(code: "link" | "unknown" | "none" | "host" | "consumer") {
 			mono += 2000
-			gap = code === "unknown" || code === "host" ? 0 : 100
+			gap = code === "unknown" || code === "host" ? 0 : 200
 			loop = code === "host" ? 50 : 0
 			if (code !== "none") {
 				total++

@@ -111,7 +111,7 @@ it("attributes a 5042 ms stall despite the stale half-rate metric", () => {
 it("attributes recovered stalls through the ten-second absorber capacity", () => {
 	fc.assert(
 		fc.property(
-			fc.integer({ min: 100, max: 10000 }),
+			fc.integer({ min: 216, max: 10000 }),
 			fc.integer({ min: 0, max: 499 }).map(n => n * 10),
 			(stall, phase) => {
 				scenario(stall, phase)
@@ -190,12 +190,14 @@ it("a recovered successor cannot excuse an expired sustained deficit", () => {
 	for (now = 22000; now <= 24000; now += 2000) monitor.sampleNow()
 	recorder.observeChunk(10, 24500)
 	counter.droppedBytesTotal++
-	for (now = 24510; now <= 34400; now += 10) {
+	for (now = 24510; now <= 34280; now += 10) {
 		recorder.observeChunk(10, now)
 		if (now % 2000 === 0) monitor.sampleNow()
 	}
-	// The old deficit expires exactly as a new, fully delivered 100 ms gap arrives.
-	recorder.observeChunk(100, 34500)
+	// The old deficit expires as a fully delivered 220 ms successor gap arrives.
+	const priorSequence = recorder.recovery(34280)?.sequence ?? 0
+	recorder.observeChunk(220, 34500)
+	expect(recorder.recovery(34500)?.sequence).toBeGreaterThan(priorSequence)
 	for (now = 34510; now <= 36000; now += 10) recorder.observeChunk(10, now)
 	now = 36000
 	expect(monitor.sampleNow().sources.get("s")?.attribution).toBe("unknown")
@@ -235,8 +237,10 @@ it("late catch-up between polls cannot erase an expired deficit", () => {
 	for (now = 34410; now <= 34990; now += 10) recorder.observeChunk(10, now)
 	// Recovery deadline was 34500. Late catch-up and a successor both occur between polls.
 	recorder.observeChunk(5000, 35000)
-	recorder.observeChunk(100, 35100)
-	for (now = 35110; now <= 36000; now += 10) recorder.observeChunk(10, now)
+	const priorSequence = recorder.recovery(35000)?.sequence ?? 0
+	recorder.observeChunk(220, 35220)
+	expect(recorder.recovery(35220)?.sequence).toBeGreaterThan(priorSequence)
+	for (now = 35230; now <= 36000; now += 10) recorder.observeChunk(10, now)
 	expect(recorder.recovery(36000)?.failedSequence).toBeGreaterThan(0)
 	now = 36000
 	expect(monitor.sampleNow().sources.get("s")?.attribution).toBe("unknown")

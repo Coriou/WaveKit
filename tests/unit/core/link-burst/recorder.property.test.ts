@@ -1,5 +1,6 @@
 import { it, expect } from "vitest"
 import fc from "fast-check"
+import { LINK_GAP_MS } from "../../../../src/core/link-burst/contract.js"
 import { createIngestRecorder } from "../../../../src/core/link-burst/recorder.js"
 
 // Feature: link-burst-resilience, Property 12: Report bounds (recorder half)
@@ -24,7 +25,7 @@ it("reports only retained slots, bounded percentiles and distinct burst seconds"
 					now += a.delta
 					r.observeChunk(a.bytes, now)
 					if (i > 0) gaps.push({ time: now, gap: a.delta })
-					if ((i > 0 && a.delta >= 80) || a.holding)
+					if ((i > 0 && a.delta >= LINK_GAP_MS) || a.holding)
 						seconds.add(Math.floor(now / 1000))
 					if (a.holding) r.noteHolding(now)
 				}

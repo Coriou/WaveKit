@@ -2,11 +2,11 @@ import type { Logger } from "../../utils/logger.js"
 
 export const BURST_ABSORBER_DEFAULT_S = 2
 export const BURST_ABSORBER_MAX_S = 10
-/** Instrumentation first (requirement 2.3): disabled until the live record accepts it. */
-export const BURST_ABSORBER_DEFAULT_ENABLED = false
+/** Accepted by the October 2026 instrumentation record (requirement 2.3). */
+export const BURST_ABSORBER_DEFAULT_ENABLED = true
 export const ABSORBER_RELEASE_BYTES = 65_536
-export const ABSORBER_LAGGARD_MS = 500 // provisional
-export const LINK_GAP_MS = 80 // provisional
+export const ABSORBER_LAGGARD_MS = 500
+export const LINK_GAP_MS = 200
 export const HOST_LOOP_DELAY_MS = 50
 export const CATCHUP_WINDOW_MS = 500
 /** Allow one maximum-capacity backlog to catch up at twice nominal rate. */

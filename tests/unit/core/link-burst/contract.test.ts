@@ -10,10 +10,10 @@ describe("link burst contract", () => {
 	it("pins the shared constants", () => {
 		expect(contract.BURST_ABSORBER_DEFAULT_S).toBe(2)
 		expect(contract.BURST_ABSORBER_MAX_S).toBe(10)
-		expect(contract.BURST_ABSORBER_DEFAULT_ENABLED).toBe(false)
+		expect(contract.BURST_ABSORBER_DEFAULT_ENABLED).toBe(true)
 		expect(contract.ABSORBER_RELEASE_BYTES).toBe(65_536)
 		expect(contract.ABSORBER_LAGGARD_MS).toBe(500)
-		expect(contract.LINK_GAP_MS).toBe(80)
+		expect(contract.LINK_GAP_MS).toBe(200)
 		expect(contract.HOST_LOOP_DELAY_MS).toBe(50)
 		expect(contract.CATCHUP_WINDOW_MS).toBe(500)
 		expect(contract.LINK_QUALITY_WINDOW_MS).toBe(600_000)
@@ -36,8 +36,8 @@ describe("link burst contract", () => {
 		for (const format of ["S16LE", "auto", "", "unknown"])
 			expect(contract.frameBytesFor(format)).toBeNull()
 	})
-	it("keeps absorption opt-in until instrumentation accepts it", () => {
-		expect(contract.resolveAbsorberSeconds(undefined, "network")).toBe(0)
+	it("defaults network absorption to two seconds and keeps loopback unbuffered", () => {
+		expect(contract.resolveAbsorberSeconds(undefined, "network")).toBe(2)
 		expect(contract.resolveAbsorberSeconds(undefined, "loopback")).toBe(0)
 		expect(contract.resolveAbsorberSeconds(3, "loopback")).toBe(3)
 		expect(contract.resolveAbsorberSeconds(0, "network")).toBe(0)

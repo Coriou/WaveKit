@@ -511,7 +511,7 @@ it.each([false, true])(
 		const sibling = f.fanout.addBranch({ id: "sibling", highWaterMark: 16 })
 		const chunk = Buffer.alloc(64)
 		const tick = async (drop: "none" | "link" | "consumer") => {
-			gap = drop === "link" ? 100 : 0
+			gap = drop === "link" ? 200 : 0
 			if (drop !== "none") {
 				f.sourceStream.write(chunk)
 				if (drop === "consumer") await vi.advanceTimersByTimeAsync(0)

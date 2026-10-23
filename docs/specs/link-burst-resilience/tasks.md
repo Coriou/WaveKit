@@ -78,9 +78,9 @@ contract files (`packages/api-types/**`, `src/core/link-burst/contract.ts`,
 
 - [x] M.1 Composition (after AB, IR, AG and HD merge)
   - _Requirements: 2.2, 5.5, 6.4_
-- [ ] M.2 Fake-link acceptance
+- [x] M.2 Fake-link acceptance (9.4 Pi measurement remains open in M.5)
   - _Requirements: 9.1-9.4_
-- [ ] M.3 Instrumentation record and default flip
+- [x] M.3 Instrumentation record and default flip
   - _Requirements: 2.3_
 - [ ] M.4 Live soak
   - _Requirements: 9.5_

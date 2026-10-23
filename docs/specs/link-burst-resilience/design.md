@@ -304,15 +304,15 @@ resolved `"raw"`). The SDR host status API reports `iqDelivery: { modes: ["raw"]
 
 ## Constants
 
-Provisional values are confirmed or replaced by the instrumentation record (requirement 2.3).
+Values are confirmed by the [instrumentation record](../../engineering/LINK-BURST-2026-10-INSTRUMENTATION.md) (requirement 2.3); network IQ absorption defaults to enabled.
 
 | Constant                               | Value   | Sizing rationale                                                                                                                                                                                                                    |
 | -------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BURST_ABSORBER_DEFAULT_S`             | 2       | Operator decision. Above the 1.5 s decoder start-up buffer precedent and rtlmux's ~0.9–1 s queue, so a stall the receiver survives is also survived in the core. Memory 8.2 MB at 2.048 Msps, 9.6 MB at 2.4 Msps per network source |
 | `BURST_ABSORBER_MAX_S`                 | 10      | Bounds memory at 48 MB per source at 2.4 Msps                                                                                                                                                                                       |
 | `ABSORBER_RELEASE_BYTES`               | 65 536  | Node's socket read size; keeps one release step's memcpy and fanout writes small (rule 2)                                                                                                                                           |
-| `ABSORBER_LAGGARD_MS` (provisional)    | 500     | A healthy branch's congestion episode during catch-up lasts the time to drain its mark at faster than real time (under about 130 ms); 500 ms is about 4× that, while bounding siblings' extra latency                               |
-| `LINK_GAP_MS` (provisional)            | 80      | About 70 % of the smallest effective branch buffering (about 110 ms), so every stall that can overflow a branch qualifies as link evidence                                                                                          |
+| `ABSORBER_LAGGARD_MS`                  | 500     | A healthy branch's congestion episode during catch-up lasts the time to drain its mark at faster than real time (under about 130 ms); 500 ms is about 4× that, while bounding siblings' extra latency                               |
+| `LINK_GAP_MS`                          | 200     | Above measured normal gap p99 (108–136 ms) with margin, below observed stalls (495–1965 ms); avoids crediting normal jitter as link evidence                                                                                        |
 | `HOST_LOOP_DELAY_MS`                   | 50      | 25 × the 2 ms rule-2 budget; a loop stall this long can by itself overflow a 256 KiB branch at 2.4 Msps (55 ms)                                                                                                                     |
 | `CATCHUP_WINDOW_MS`                    | 500     | Longer than the observed catch-up bursts' arrival span; short enough not to merge bursts                                                                                                                                            |
 | `LINK_QUALITY_WINDOW_MS`               | 600 000 | 10 min, as requested for burst-seconds; sixty 10 s slots                                                                                                                                                                            |

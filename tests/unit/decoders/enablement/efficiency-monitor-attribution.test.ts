@@ -6,7 +6,7 @@ const setupAttribution = (
 	overrides: Partial<Parameters<typeof createEfficiencyMonitor>[0]> = {},
 ) => {
 	let mono = 0
-	let gap = 100
+	let gap = 200
 	let loop = 0
 	let shortfall: boolean | null = false
 	let upstream: number | null = 0
@@ -619,7 +619,7 @@ it.each([false, true])(
 				]),
 			loopDelay: () => ({ maxMs: loop, p99Ms: loop }),
 			ingest: id => ({
-				maxGapMs: id === "a" ? 5042 : 100,
+				maxGapMs: id === "a" ? 5042 : 240,
 				catchupBytes: 0,
 				chunks: 1,
 			}),
@@ -627,7 +627,7 @@ it.each([false, true])(
 				sequence: 1,
 				completedSequence: 0,
 				failedSequence: 0,
-				maxGapMs: id === "a" ? 5042 : 100,
+				maxGapMs: id === "a" ? 5042 : 240,
 				shortfall: id === "a" ? null : false,
 			}),
 		})

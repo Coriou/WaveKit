@@ -150,7 +150,7 @@ function scenario(
 		expect(monitor.cleanAtMono("s")).toBe(clean)
 	} else {
 		recoveryAvailable = !missingRecovery
-		const deadline = missingRecovery ? 12080 : 10000 - phase
+		const deadline = missingRecovery ? 12200 : 10000 - phase
 		for (now = pendingAt + 2000; now < pendingAt + deadline; now += 2000) {
 			monitor.sampleNow()
 			expect(monitor.lateWindows("s")).toEqual(windows)
@@ -459,7 +459,7 @@ it.each([10, 95])(
 it("uses each deferred interval's own host evidence when recovery fails", () => {
 	const h = intervalScenario()
 	h.tick(20000)
-	h.evidence(100, 95)
+	h.evidence(240, 95)
 	h.totals.absorber += 7
 	expect(h.tick(22000).droppedBytesDelta).toBeNull()
 	h.recover(true)

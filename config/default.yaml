@@ -56,7 +56,7 @@
 #     type: "rtl_tcp"
 #     host: "192.168.1.100"
 #     port: 1234
-#     # IQ burst buffer: omitted means disabled until live acceptance; seconds: 0 opts out.
+#     # IQ burst buffer: omitted means 2 s on network IQ sources, 0 on loopback; seconds: 0 opts out.
 #     # Explicit capacity is 0–10 seconds (network target when enabled: 2 seconds).
 #     # burstAbsorber: { seconds: 0 }
 #     # delivery: auto # default; resolves to raw; channels is reserved and rejected
