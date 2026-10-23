@@ -299,3 +299,26 @@ matrix has not been rerun.
    host-or-consumer increases. A new `upstream-host` scenario combines upstream drop-mode
    stalls with the host CPU quota and stress. It requires a poll in which both core loss and
    upstream loss rose, an `unknown` increase within three polls of it, and no `link` increase.
+6. **Batch-timed pass-through (item 6 confirmation).** The bench now reports
+   `passThroughBatchedNsPerChunk`: steady-state pass-through with no branch congested, timed in
+   batches of 1 000 chunks (4 096, 16 384 and 65 536 B in rotation, three branches) per
+   `performance.now()` pair, minus a batched direct-fanout baseline, median of 50 batch pairs
+   after 5 discarded. "Before" is the parent of the host-evidence commit with the new bench
+   harness copied in (absorber unchanged); "after" is this branch. Runs alternated
+   before/after, `--seconds 30`, on a heavily loaded host (1-minute load averages 10–22):
+
+   | Rate (sps) | Build  | Load avg (1/5/15 min) | ns/chunk | Core at 3 000 chunks/s |
+   | ---------- | ------ | --------------------- | -------- | ---------------------- |
+   | 2 048 000  | before | 22.49 / 12.53 / 9.20  | 565      | 0.0017                 |
+   | 2 048 000  | after  | 22.12 / 14.95 / 10.38 | 367      | 0.0011                 |
+   | 2 048 000  | before | 12.76 / 13.56 / 10.17 | 828      | 0.0025                 |
+   | 2 048 000  | after  | 17.72 / 15.02 / 10.97 | 184      | 0.0006                 |
+   | 2 400 000  | before | 10.26 / 13.41 / 10.65 | 557      | 0.0017                 |
+   | 2 400 000  | after  | 15.56 / 13.92 / 11.00 | 262      | 0.0008                 |
+   | 2 400 000  | before | 15.80 / 14.58 / 11.46 | 809      | 0.0024                 |
+   | 2 400 000  | after  | 14.00 / 14.51 / 11.66 | 164      | 0.0005                 |
+
+   The fast path cuts batched pass-through cost by roughly 2–5x. Before exceeds the < 0.001
+   budget in every run; after is within it in three of four runs and at 0.0011 in the run with
+   the highest load. These numbers include scheduler contention from the loaded host; a quiet
+   host rerun is still needed for a clean budget figure.
