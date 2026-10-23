@@ -302,11 +302,11 @@ describe("EvidenceGate", () => {
 		).toBeNull()
 	})
 
-	it("syllabic-rate burst FSK on a quiet carrier: gate agrees with the scanner judge", () => {
-		// Escalated: 2FSK bursts at 100 ms on / 100 ms off look syllabic to the pinned analog
-		// trial judge (median syllabic about 0.59, audio about -22 dB, cluster about 0.34), so
-		// `classifyAnalogTrial` calls the same statistics `heard`. The gate must not diverge from
-		// the pinned judge; this pins agreement, not the desired outcome (requirement 1.4).
+	it("known limitation (req 1.4 note, 2026-10-23): syllable-timed burst FSK opens as voice", () => {
+		// Accepted known limitation: 2FSK bursts at 100 ms on / 100 ms off look syllabic to the
+		// pinned analog trial judge (median syllabic about 0.59, audio about -22 dB, cluster about
+		// 0.34), and the gate equals that judge. A future stage-2 data test is expected to flip
+		// this test deliberately (gate stays waiting, judge no longer "heard").
 		const audio = fskBursts({
 			rate: GATE_RATE,
 			seconds: 4,
@@ -317,7 +317,7 @@ describe("EvidenceGate", () => {
 			seed: 5,
 		})
 		const gate = nfm()
-		driveOpen(gate, toPcm(audio, "f32le"), "f32le", quiet)
+		const run = driveOpen(gate, toPcm(audio, "f32le"), "f32le", quiet)
 		const meter = new VoiceFrameMeter({ gain: 2 })
 		const decimated = fskBursts({
 			rate: 8_000,
@@ -336,7 +336,10 @@ describe("EvidenceGate", () => {
 			{ mode: "nfm", frames: window, gapSamples: 0, floorDb: -100 },
 			{ ctcssHz: null, dcs: null, audioSeconds: 1 },
 		)
-		expect(scanner === "heard").toBe(gate.evidence === "voice")
+		expect(run.latchByte).toBeGreaterThan(0)
+		expect(gate.state).toBe("open")
+		expect(gate.evidence).toBe("voice")
+		expect(scanner).toBe("heard")
 	})
 
 	it("an empty quiet window is not quiet (A11)", () => {
