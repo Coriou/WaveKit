@@ -1,0 +1,44 @@
+# Scratch fake-link project for run_acceptance.py (project name wkevs-<pid>).
+# Never built or pulled here: every image must already exist locally.
+services:
+  fake:
+    image: python:3.13-slim
+    pull_policy: never
+    entrypoint: ["python3", "/opt/fake_rtl_tcp.py"]
+    command:
+      - --file
+      - "/data/${EVIDENCE_SQUELCH_CU8:?set by run_acceptance.py}"
+      - --loop
+      - --rate
+      - "${EVIDENCE_SQUELCH_RATE:-2048000}"
+      - --duration
+      - "${EVIDENCE_SQUELCH_DURATION:-600}"
+    volumes:
+      - ../capacity/fake_rtl_tcp.py:/opt/fake_rtl_tcp.py:ro
+      - "${EVIDENCE_SQUELCH_DATA:?set by run_acceptance.py}:/data:ro"
+  core:
+    image: "${EVIDENCE_SQUELCH_IMAGE:-wavekit:latest}"
+    pull_policy: never
+    # A CPU quota (0 = none) throttles the whole core cgroup (--cpu-quota).
+    cpus: "${EVIDENCE_SQUELCH_CORE_QUOTA:-0}"
+    depends_on: [fake]
+    environment:
+      WAVEKIT_CONFIG_PATH: /app/config
+    volumes:
+      - "${EVIDENCE_SQUELCH_CONFIG:?set by run_acceptance.py}:/app/config/default.yaml:ro"
+  # Docker never publishes ports from an internal network, so only this forwarder joins a
+  # second network; it publishes the API (3000) and the audio stream (3001) on ephemeral
+  # loopback ports.
+  api:
+    image: python:3.13-slim
+    pull_policy: never
+    depends_on: [core]
+    entrypoint: ["python3", "/opt/run_acceptance.py", "--proxy"]
+    ports: ["127.0.0.1::3000", "127.0.0.1::3001"]
+    networks: [default, edge]
+    volumes:
+      - ./run_acceptance.py:/opt/run_acceptance.py:ro
+networks:
+  default:
+    internal: true
+  edge: {}
