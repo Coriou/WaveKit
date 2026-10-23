@@ -604,8 +604,12 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   to event-loop delay p99") and the hot-path table's "Event-loop p99 added" row mean steady
   streaming. The driver compares only loop-meter intervals wholly after the source's first over
   onset.
-  - The meter takes one interval per 2 s (`EFFICIENCY_SAMPLE_MS`), so a poll at t covers from
-    t − 4.5 s on.
+  - The meter takes one interval per 2 s (`EFFICIENCY_SAMPLE_MS`). Follow-up (2026-10-23):
+    intervals are deduplicated by their identity, the `intervals10m` ring count, which rises by
+    one per interval on a fresh core; older recordings fall back to value change. Steady means
+    the interval's own start bound (the poll before the previous interval was first seen) is
+    after the onset. At least 20 distinct steady intervals per run (40 s, about six over
+    periods), else invalid.
   - Live audio starts 0.8-1.0 s after the fake's epoch, with pipeline spawn and JIT cold start.
     The first over is also the gate's first open.
   - The startup intervals are reported only. They read 95-135 ms on auto and 97-1 684 ms on
@@ -615,6 +619,11 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   - Why the median: am-voice is ungated and so runs identical code in both modes, yet its steady
     maxima differ by 7.7 ms (21.9 vs 14.2). Single 2 s intervals carry host noise. The median
     measures the gate's added steady delay.
+  - Tail (follow-up, 2026-10-23): at most max(1, 10 %) of the steady auto intervals may exceed
+    manual p90 + 10 ms, so a recurring stall fails where the median alone passes. The manual
+    count against auto p90 is a control, reported only. Measured on the 2.048 Msps csdr replay:
+    60-63 distinct steady intervals per run, auto above the threshold 0-2 of 6 allowed (the
+    threshold 23.2-25.0 ms), the manual control 0-1.
   - Measured steady state: medians 12.5-12.8 ms with auto − manual within 0.4 ms. p90 13.2-13.8
     ms on six fixtures; ctcss-1000 reads 19.1 vs 15.1. Maxima 14.2-106.6 ms.
   The stage-1 comparison of 8.2 ("transmission events identical to a manual-mode run", design
@@ -627,6 +636,13 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     fails.
   - Measured: worst per over 6.1-25.9 ms. Biases -2.5 to +2.3 ms on opens and -1.3 to +1.8 ms on
     closes.
+  Known limitations (2026-10-23):
+  - The AM divergence decay rule can be fooled by an engineered slowly decaying mute behind an
+    in-window peak. The fake-link AM check is a smoke test; the authoritative AM identity proof
+    is the unit-level frozen-code hash regression (property 12).
+  - The per-over edge limit is empirical, not a validated timing-error bound.
+  - A systematic stage-1 delay under 5 ms passes. Requirement 1.6 rests on the deterministic
+    unit goldens.
 
 ## Live acceptance plan (requirement 8.3, Main with the user)
 

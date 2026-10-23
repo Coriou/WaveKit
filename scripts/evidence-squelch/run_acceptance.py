@@ -50,11 +50,16 @@ EVENT_TOLERANCE_S = 0.010
 EDGE_BIAS_S = 0.005
 P99_TOLERANCE_MS = 2.0
 # Loop meter (verdict_p99): one interval per EFFICIENCY_SAMPLE_MS (decoders/enablement/contract.ts)
-# of 2 s; a tick may run late by the slack. At least P99_MIN_STEADY steady samples (polled each
-# second, so about P99_MIN_STEADY / 2 intervals).
+# of 2 s, identified by the ring count (LOOP_DELAY_RING in core/link-burst/contract.ts).
+# P99_MIN_INTERVALS distinct steady intervals per run: 40 s of steady streaming, about six over
+# periods of 6.75 s (so every over phase, waiting, open and drain, is sampled several times), and
+# enough that the tail allowance (10 %) is 2 intervals rather than the floor of 1. A 130 s run
+# gives about 60. Tail: auto intervals above manual p90 + 10 ms.
 EFFICIENCY_SAMPLE_S = 2.0
-P99_TICK_SLACK_S = 0.5
-P99_MIN_STEADY = 10
+LOOP_DELAY_RING = 300
+P99_MIN_INTERVALS = 20
+P99_TAIL_MARGIN_MS = 10.0
+P99_TAIL_FRACTION = 0.10
 REF_RATE = 8_000
 CORR_WINDOW_S = 0.25
 CORR_SEARCH_S = 0.05
@@ -835,63 +840,115 @@ def verdict_events(auto, manual, auto_clock, manual_clock, carrier, jitter_s):
 	return None, notes
 
 
-def p99_series(side, clock):
-	"""(poll host time, p99 ms) of each loop-meter sample. New recordings carry p99Samples
-	[[mono, intervals10m, p99Ms, maxMs], ...]; older ones carry p99Ms, one per status sample
-	(the same poll iteration appends the status first), so they pair with the status times only
-	when the counts agree."""
+def p99_intervals(side):
+	"""Distinct loop-meter intervals of one run as (identity, start lower bound, value), oldest
+	first, from the polls. The core reports only the latest interval (loopDelay.last) and
+	intervals10m, the count of intervals in its 10 min ring: that count rises by one per interval
+	on a fresh core for its first 10 min, so it is the interval's identity. No interval timestamp
+	is exposed. An interval first seen by poll t ended after the poll before t; an interval starts
+	where the previous one ended (a tick with no loop samples only starts it later), so its start
+	is after the poll before the previous interval was first seen. Repeated polls of one interval
+	count once.
+
+	Recordings without p99Samples (or without intervals10m) fall back to p99Ms paired with the
+	status poll times (the same poll iteration appends both; counts must agree), with identity by
+	value change. Two adjacent intervals with equal values then merge: the count can only fall, and
+	the start bound stays valid. Returns (intervals, source)."""
+	polls, source = [], "intervals10m"
 	samples = side.get("p99Samples")
 	if samples is not None:
-		out = [(s[0], s[2]) for s in samples if isinstance(s, (list, tuple)) and len(s) >= 3 and _number(s[0]) and _number(s[2])]
-		if len(out) != len(samples):
-			raise InvalidRun("malformed loop-meter samples")
-		return out
-	values, status = side.get("p99Ms") or [], side.get("status") or []
-	if values and len(values) != len(status):
-		raise InvalidRun(f"{len(values)} p99 samples for {len(status)} status polls: cannot time them")
-	return [(t, v) for (t, _s), v in zip(status, values) if _number(t) and _number(v)]
+		for item in samples:
+			if not (isinstance(item, (list, tuple)) and len(item) >= 3 and _number(item[0]) and _number(item[2])):
+				raise InvalidRun("malformed loop-meter samples")
+		if samples and all(_number(item[1]) for item in samples):
+			polls = [(item[0], item[1], item[2]) for item in samples]
+		else:
+			source = "value change"
+			polls = [(item[0], None, item[2]) for item in samples]
+	else:
+		source = "value change (status poll times)"
+		values, status = side.get("p99Ms") or [], side.get("status") or []
+		if values and len(values) != len(status):
+			raise InvalidRun(f"{len(values)} p99 samples for {len(status)} status polls: cannot time them")
+		polls = [(t, None, v) for (t, _s), v in zip(status, values) if _number(t) and _number(v)]
+	out, prev_poll, last_id, last_value, ident = [], None, None, None, 0
+	first_prev = []  # per distinct interval: the poll time before it was first seen
+	for t, n, v in polls:
+		if n is not None:
+			if n >= LOOP_DELAY_RING - 1:
+				raise InvalidRun(f"loop-meter interval count {n} at its {LOOP_DELAY_RING}-interval ring: identity ambiguous")
+			if last_id is not None and n < last_id:
+				raise InvalidRun("loop-meter interval count went backwards")
+			if n == last_id:
+				if v != last_value:
+					raise InvalidRun(f"loop-meter interval {n} reported two values ({last_value}, {v})")
+				prev_poll = t
+				continue
+			ident = n
+		else:
+			if out and v == last_value:
+				prev_poll = t
+				continue
+			ident += 1
+		first_prev.append(prev_poll)
+		start = first_prev[-2] if len(first_prev) >= 2 else None
+		out.append((ident, start, v))
+		last_id, last_value, prev_poll = (n if n is not None else ident), v, t
+	return out, source
 
 
 def steady_p99(side, clock):
-	"""Split one run's loop-meter samples at the settle point: the source's first over onset
-	(sidecar) on the host clock. Live audio starts about 0.8-1.0 s after the fake's epoch
+	"""Split one run's distinct loop-meter intervals at the settle point: the source's first over
+	onset (sidecar) on the host clock. Live audio starts about 0.8-1.0 s after the fake's epoch
 	(stream anchors 0.77-0.96 s), before that onset, and the first over is also where stage 1
-	first opens (the gate's first-run code paths). The meter takes one interval per
-	EFFICIENCY_SAMPLE_S and the poll reports the latest, so a sample polled at t covers no
-	earlier than t - 2 x EFFICIENCY_SAMPLE_S - P99_TICK_SLACK_S: it is steady when that is at or
-	after the settle point. Returns (steady values, startup values)."""
+	first opens (the gate's first-run code paths). An interval is steady when its own start bound
+	(p99_intervals) is at or after the settle point; an interval whose start cannot be bounded
+	(the first one seen) is startup. Returns (steady values, startup values, source)."""
 	settle = clock["connected"] + clock["onset"] - clock["toWall"]
-	cover = 2 * EFFICIENCY_SAMPLE_S + P99_TICK_SLACK_S
-	steady, startup = [], []
-	for t, v in p99_series(side, clock):
-		(steady if t - cover >= settle else startup).append(v)
-	return steady, startup
+	intervals, source = p99_intervals(side)
+	steady = [v for _i, start, v in intervals if start is not None and start >= settle]
+	startup = [v for _i, start, v in intervals if start is None or start < settle]
+	return steady, startup, source
 
 
 def verdict_p99(auto, manual, clocks):
-	"""Requirement 6.1 at steady state (design amendment 2026-10-23): median(auto steady p99) -
-	median(manual steady p99) <= P99_TOLERANCE_MS. Single 2 s intervals carry host noise (the
-	ungated am-voice, identical code in both modes, showed a 7.7 ms gap in the maxima), so the
-	median measures the gate's added steady delay. Polls see each interval about twice, which
-	leaves the median of the intervals unchanged. Steady p90 and max and the startup intervals are
-	reported only. Returns (failure or None, notes)."""
-	a, a0 = steady_p99(auto, clocks["auto"])
-	m, m0 = steady_p99(manual, clocks["manual"])
-	notes = {"startupMs": {"auto": sorted(set(a0), key=a0.index), "manual": sorted(set(m0), key=m0.index)},
-		"steadySamples": [len(a), len(m)]}
+	"""Requirement 6.1 at steady state (design amendment 2026-10-23), over distinct steady
+	loop-meter intervals:
+	  - median: median(auto) - median(manual) <= P99_TOLERANCE_MS. Single 2 s intervals carry host
+	    noise (the ungated am-voice, identical code in both modes, showed a 7.7 ms gap in the
+	    maxima), so the median measures the gate's added steady delay;
+	  - tail: the auto intervals above manual p90 + P99_TAIL_MARGIN_MS number at most
+	    max(1, P99_TAIL_FRACTION x auto intervals), so a recurring stall fails where the median
+	    alone would pass. The same count of manual intervals against auto p90 is a control,
+	    reported only.
+	At least P99_MIN_INTERVALS distinct steady intervals per run, else invalid. Steady p90 and max
+	and the startup intervals are reported only. Returns (failure or None, notes)."""
+	a, a0, src_a = steady_p99(auto, clocks["auto"])
+	m, m0, src_m = steady_p99(manual, clocks["manual"])
+	notes = {"startupMs": {"auto": a0, "manual": m0}, "steadyIntervals": [len(a), len(m)], "identity": [src_a, src_m]}
 	if not a and not a0 or not m and not m0:
 		return "missing event-loop p99 samples", notes
-	if min(len(a), len(m)) < P99_MIN_STEADY:
-		raise InvalidRun(f"{min(len(a), len(m))} steady loop-meter samples, need {P99_MIN_STEADY}")
+	if min(len(a), len(m)) < P99_MIN_INTERVALS:
+		raise InvalidRun(f"{min(len(a), len(m))} distinct steady loop-meter intervals, need {P99_MIN_INTERVALS}")
+
 	def q(values, f):
 		v = sorted(values)
 		return v[min(len(v) - 1, int(f * len(v)))]
 
-	notes.update({"autoSteadyMaxMs": max(a), "manualSteadyMaxMs": max(m),
-		"steadyMedianMs": [q(a, 0.5), q(m, 0.5)], "steadyP90Ms": [q(a, 0.9), q(m, 0.9)]})
-	med_a, med_m = q(a, 0.5), q(m, 0.5)
+	med_a, med_m, p90_a, p90_m = q(a, 0.5), q(m, 0.5), q(a, 0.9), q(m, 0.9)
+	over_a = sum(1 for v in a if v > p90_m + P99_TAIL_MARGIN_MS)
+	over_m = sum(1 for v in m if v > p90_a + P99_TAIL_MARGIN_MS)
+	allow_a = max(1, int(P99_TAIL_FRACTION * len(a)))
+	allow_m = max(1, int(P99_TAIL_FRACTION * len(m)))
+	notes.update({"autoSteadyMaxMs": max(a), "manualSteadyMaxMs": max(m), "steadyMedianMs": [med_a, med_m],
+		"steadyP90Ms": [p90_a, p90_m], "tailAuto": {"over": over_a, "allowed": allow_a, "thresholdMs": p90_m + P99_TAIL_MARGIN_MS},
+		"tailManualControl": {"over": over_m, "allowed": allow_m, "thresholdMs": p90_a + P99_TAIL_MARGIN_MS,
+			"wouldFail": over_m > allow_m}})
 	if med_a - med_m > P99_TOLERANCE_MS:
 		return f"steady median event-loop p99 {med_a:.2f} ms vs manual {med_m:.2f} ms (limit +{P99_TOLERANCE_MS} ms)", notes
+	if over_a > allow_a:
+		return (f"{over_a} of {len(a)} steady auto intervals have p99 above manual p90 + {P99_TAIL_MARGIN_MS:.0f} ms"
+			f" ({p90_m + P99_TAIL_MARGIN_MS:.2f} ms), allowed {allow_a}"), notes
 	return None, notes
 
 
@@ -1300,15 +1357,20 @@ def self_test():
 
 	probes = probe_series()
 
-	def p99s(steady, startup, spikes=None):
-		"""Loop-meter polls each second from 1 s after the epoch (host clock); polls 0-6 cover
-		the settle point (over 0 onset at 3 s, + 4.5 s of interval cover), 7 on are steady."""
+	def p99s(steady, startup, spikes=None, values=None):
+		"""Loop-meter polls each second from 1 s after the epoch (host clock), two per 2 s
+		interval; interval j (intervals10m = j + 1) is first seen at poll 2j, so its start is
+		bounded by poll 2j - 2. Intervals 0-2 start before the settle point (over 0 onset at 3 s),
+		3 on are steady: 30 of them, or len(values) with explicit steady values."""
+		vals = [startup] * 3 + (list(values) if values is not None else [steady] * 30)
+		for j, v in (spikes or {}).items():
+			vals[j] = v
 		out = []
-		for i in range(65):
-			v = startup if i <= 6 else steady
-			v = (spikes or {}).get(i, v)
-			out.append([conn + host_offset + 1.0 + i, i // 2, v, v])
+		for j, v in enumerate(vals):
+			for i in (2 * j, 2 * j + 1):
+				out.append([conn + host_offset + 1.0 + i, j + 1, v, v])
 		return out
+
 	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
 	# `connected` is logged 30 ms after the pacing epoch (header send, thread start): unused.
 	source = {"epochTs": conn, "epochErrS": 0.0001, "connectedTs": conn + 0.03, "connections": 1, "progress": progress()}
@@ -1582,28 +1644,64 @@ def self_test():
 	assert any("autoSquelch" in f for f in variant(manual__status=status("waiting")))
 	assert any("never open" in f for f in variant(auto__status=status("waiting")))
 	assert any("did open" in f for f in variant(top__expect="none", auto__samples8k=silent))
-	# p99 at steady state: the startup intervals (here 135 and 1 684 ms) are reported only; the
-	# steady medians differ by at most 2 ms; single steady spikes (host noise) are reported only.
+	# p99 over distinct steady loop-meter intervals: the startup intervals (here 135 and
+	# 1 684 ms) are reported only; the steady medians differ by at most 2 ms; single steady
+	# spikes (host noise) pass, a recurring stall fails the tail criterion.
 	p99_notes = evaluate(json.loads(json.dumps(base)), 200)[1]["p99"]
-	assert p99_notes["startupMs"] == {"auto": [135.0], "manual": [1684.0]} and p99_notes["steadySamples"] == [58, 58], p99_notes
+	assert p99_notes["startupMs"] == {"auto": [135.0] * 3, "manual": [1684.0] * 3}, p99_notes
+	assert p99_notes["steadyIntervals"] == [30, 30] and p99_notes["identity"] == ["intervals10m"] * 2, p99_notes
 	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(5.0, 135.0)))
 	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(5.1, 135.0)))  # +2.6 ms
 	assert variant(auto__p99Samples=p99s(4.4, 135.0)) == []  # +1.9 ms
-	assert variant(auto__p99Samples=p99s(3.0, 135.0, {7: 50.0, 20: 34.0})) == []  # single spikes
-	raised = {i: 5.6 for i in range(7, 65) if i % 5 < 3}  # 60 % of the steady polls +3.1 ms
+	assert variant(auto__p99Samples=p99s(3.0, 135.0, {3: 50.0, 10: 34.0})) == []  # single spikes
+	raised = {j: 5.6 for j in range(3, 33) if j % 5 < 3}  # 60 % of the steady intervals +3.1 ms
 	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(3.0, 135.0, raised)))
-	settle = {i: 50.0 for i in range(0, 7)}  # polls covering the settle point never count
-	assert variant(auto__p99Samples=p99s(3.0, 135.0, settle)) == []
-	spiky = evaluate(json.loads(json.dumps(dict(base, auto=dict(base["auto"], p99Samples=p99s(3.0, 135.0, {20: 34.0}))))), 200)[1]["p99"]
-	assert spiky["autoSteadyMaxMs"] == 34.0 and spiky["steadyMedianMs"] == [3.0, 2.5], spiky
+
+	def p99_of(**changes):
+		obs = json.loads(json.dumps(base))
+		for path, value in changes.items():
+			side, key = path.split("__")
+			obs[side][key] = value
+		return evaluate(obs, 200)[1]["p99"]
+
+	# The interval's own start decides: interval 2 (start bound 2 s, before the 3 s onset) is
+	# startup, interval 3 (start bound 4 s) is steady.
+	assert p99_of(auto__p99Samples=p99s(3.0, 135.0, {2: 50.0}))["autoSteadyMaxMs"] == 3.0
+	assert p99_of(auto__p99Samples=p99s(3.0, 135.0, {3: 50.0}))["autoSteadyMaxMs"] == 50.0
+	# Staleness: ten polls of one old interval are one interval, never ten steady samples.
+	stale = [[conn + host_offset + 20.0 + i, 1, 13.0, 13.0] for i in range(10)]
+	assert "distinct steady loop-meter intervals" in invalid(auto__p99Samples=stale, manual__p99Samples=stale)
+	assert "distinct steady loop-meter intervals" in invalid(manual__p99Samples=p99s(2.5, 1684.0, values=[2.5] * 19))
+	assert variant(manual__p99Samples=p99s(2.5, 1684.0, values=[2.5] * 20)) == []
+	assert "two values" in invalid(auto__p99Samples=[[conn + host_offset + 9.0, 4, 3.0, 3.0], [conn + host_offset + 10.0, 4, 9.0, 9.0]])
+	assert "backwards" in invalid(auto__p99Samples=[[conn + host_offset + 9.0, 5, 3.0, 3.0], [conn + host_offset + 10.0, 4, 9.0, 9.0]])
+	assert "ring" in invalid(auto__p99Samples=[[conn + host_offset + 9.0, LOOP_DELAY_RING - 1, 3.0, 3.0]])
+	# Tail: a recurring stall (8 of 20 intervals at 100 ms) passes the median but fails the tail;
+	# up to max(1, 10 %) = 2 intervals above manual p90 + 10 ms pass. Manual stalls are a control.
+	twenty = [13.0] * 20
+	stall = dict(auto__p99Samples=p99s(0, 135.0, values=[13.0] * 12 + [100.0] * 8), manual__p99Samples=p99s(0, 1684.0, values=twenty))
+	got = variant(**stall)
+	assert len(got) == 1 and "8 of 20 steady auto intervals" in got[0], got
+	for n, ok in ((1, True), (2, True), (3, False)):
+		got = variant(auto__p99Samples=p99s(0, 135.0, values=[13.0] * (20 - n) + [100.0] * n), manual__p99Samples=p99s(0, 1684.0, values=twenty))
+		assert (got == []) == ok, (n, got)
+	control = dict(auto__p99Samples=p99s(0, 135.0, values=twenty), manual__p99Samples=p99s(0, 1684.0, values=[13.0] * 12 + [100.0] * 8))
+	assert variant(**control) == [] and p99_of(**control)["tailManualControl"]["wouldFail"], p99_of(**control)
 	assert any("missing event-loop p99" in f for f in variant(auto__p99Samples=[]))
-	assert "steady loop-meter samples" in invalid(manual__p99Samples=p99s(2.5, 1684.0)[:12])
 	assert "malformed loop-meter" in invalid(manual__p99Samples=[[0.0, 1]])
-	# Older recordings: p99Ms pairs with the status poll times, only when the counts agree.
-	polls = [[t, {"autoSquelch": {"state": "off"}}] for t, _i, _v, _m in p99s(0, 0)]
-	old_format = dict(manual__p99Samples=None, manual__p99Ms=[v for _t, _i, v, _m in p99s(2.5, 1684.0)], manual__status=polls)
+	# Older recordings: p99Ms pairs with the status poll times (counts must agree); identity by
+	# value change, so a meter stuck on one value is one interval.
+	varied = p99s(0, 1684.0, values=[2.5 + 0.001 * j for j in range(30)])
+	polls = [[t, {"autoSquelch": {"state": "off"}}] for t, _i, _v, _m in varied]
+	old_format = dict(manual__p99Samples=None, manual__p99Ms=[v for _t, _i, v, _m in varied], manual__status=polls)
 	assert variant(**old_format) == [], variant(**old_format)
+	# The three equal startup intervals merge into one, so the first steady interval has no start
+	# bound and counts as startup: 29 of 30 (conservative).
+	assert p99_of(**old_format)["identity"][1].startswith("value change") and p99_of(**old_format)["steadyIntervals"][1] == 29
 	assert "cannot time them" in invalid(**dict(old_format, manual__status=polls[:-1]))
+	assert "distinct steady" in invalid(**dict(old_format, manual__p99Ms=[13.0] * len(polls)))
+	ring_text = (ROOT.parents[1] / "src/core/link-burst/contract.ts").read_text()
+	assert re.search(r"LOOP_DELAY_RING = ([\d_]+)", ring_text)[1].replace("_", "") == str(LOOP_DELAY_RING)
 	contract_ms_text = (ROOT.parents[1] / "src/decoders/enablement/contract.ts").read_text()
 	assert re.search(r"EFFICIENCY_SAMPLE_MS = ([\d_]+)", contract_ms_text)[1].replace("_", "") == str(int(EFFICIENCY_SAMPLE_S * 1000))
 	# Stage-1 edges: chunk phase cancels; one block + both median steady p99 (10 + 3 + 2.5 = 15.5 ms) per

@@ -134,11 +134,25 @@ transmission events equal to the manual run per over over the overs both WebSock
 fully cover. Same count, at least one per over on carrier-bearing fixtures, at least 3 shared
 overs, and edges per over within one 10 ms block plus both runs' median steady interval p99 (event
 stamps are Node wall-clock times; the fake's chunk phase cancels between runs). The median
-auto − manual is within 5 ms for opens and for closes, so a gate delaying stage-1 events fails.
-Event-loop p99 is compared at steady state, over loop-meter intervals wholly after the first over
-onset (a poll at t covers from t − 4.5 s): median steady auto − median steady manual ≤ 2 ms.
-Single 2 s intervals carry host noise: the ungated am-voice, identical code in both modes, showed
-a 7.7 ms gap in the maxima. The startup intervals and the steady p90 and max are reported only. Then the back-chain drain of the manual run per
+auto − manual is within 5 ms for opens and for closes, so a systematic stage-1 delay of 5 ms or
+more fails (see the limitations below). Event-loop p99 is compared at steady state, over distinct
+loop-meter intervals:
+- **Identity.** The core exposes the latest interval and `intervals10m`, its 10 min ring count.
+  That count rises by one per 2 s interval on a fresh core, so it identifies the interval. Repeated
+  polls of one interval count once. Recordings without it fall back to value change, which can
+  only undercount.
+- **Steady.** An interval is steady when its own start is after the first over onset. The start
+  is bounded by the poll before the previous interval was first seen.
+- **Minimum.** At least 20 distinct steady intervals per run, else invalid: 40 s, about six over
+  periods. A 130 s run gives about 60.
+- **Median.** Median steady auto − median steady manual ≤ 2 ms. Single 2 s intervals carry host
+  noise: the ungated am-voice, identical code in both modes, showed a 7.7 ms gap in the maxima.
+- **Tail.** At most max(1, 10 %) of the steady auto intervals may exceed manual p90 + 10 ms, so a
+  recurring stall fails. The same count of manual intervals against auto p90 is a control,
+  reported only.
+- The startup intervals and the steady p90 and max are reported only.
+
+Then the back-chain drain of the manual run per
 over as an interval that holds the true drain (arrival of the last audible sample minus the
 stage-1 close). Upper bound: the close is at least carrier-off (sidecar, source clock) + hang −
 one 10 ms squelch block − one fake send chunk (262 144 bytes: 64.0 ms at 2.048 Msps, 54.6 ms at
@@ -200,6 +214,16 @@ within 5 s is invalid.
 `--replay` judges every fixture directory, even when an earlier one is invalid or unreadable (a
 missing `stream.s16le`, observations that are not a JSON object, or malformed fields). Each fixture
 prints PASS, FAIL or INVALID, and `verdicts.json` records it.
+
+Known limitations of the fake-link check:
+
+- **AM decay rule.** It can be fooled by an engineered, slowly decaying mute behind an in-window
+  peak. The fake-link AM check is a smoke test. The authoritative AM identity proof is the
+  unit-level frozen-code hash regression (design, property 12).
+- **Stage-1 edge limit.** The per-over limit (one block plus both runs' median steady p99) is
+  empirical, not a validated timing-error bound.
+- **Small stage-1 delays.** A systematic stage-1 delay under 5 ms passes the bias check.
+  Requirement 1.6 (stage-1 open and close times as today) rests on the deterministic unit goldens.
 
 Missing timing evidence (no source clock, sidecar onset, clock probe, WebSocket span, status
 state, stage-1 transmission for played audio, a closed over without a played tail) and a stream or WebSocket that ends before the
