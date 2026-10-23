@@ -845,15 +845,19 @@ def p99_intervals(side):
 	first, from the polls. The core reports only the latest interval (loopDelay.last) and
 	intervals10m, the count of intervals in its 10 min ring: that count rises by one per interval
 	on a fresh core for its first 10 min, so it is the interval's identity. No interval timestamp
-	is exposed. An interval first seen by poll t ended after the poll before t; an interval starts
-	where the previous one ended (a tick with no loop samples only starts it later), so its start
-	is after the poll before the previous interval was first seen. Repeated polls of one interval
-	count once.
+	is exposed. A poll's time is its request start (p99Samples[i][0]): the core reads the latest
+	interval at some moment before its response, so an interval not reported by poll t ended after
+	t's request start. An interval first seen by poll t ended after the previous poll's request
+	start; an interval starts where the previous one ended (a tick with no loop samples only
+	starts it later), so its start is after the request start of the poll before the previous
+	interval was first seen. Repeated polls of one interval count once.
 
 	Recordings without p99Samples (or without intervals10m) fall back to p99Ms paired with the
 	status poll times (the same poll iteration appends both; counts must agree), with identity by
-	value change. Two adjacent intervals with equal values then merge: the count can only fall, and
-	the start bound stays valid. Returns (intervals, source)."""
+	value change. That fallback is informational only (verdict_p99 marks the check invalid): equal
+	adjacent intervals merge (30 consecutive stalls read as one), a stale interval polled between
+	alternating values reads as new intervals, and status poll times are response times.
+	Returns (intervals, source)."""
 	polls, source = [], "intervals10m"
 	samples = side.get("p99Samples")
 	if samples is not None:
@@ -912,24 +916,34 @@ def steady_p99(side, clock):
 
 
 def verdict_p99(auto, manual, clocks):
-	"""Requirement 6.1 at steady state (design amendment 2026-10-23), over distinct steady
-	loop-meter intervals:
+	"""p99 regression smoke test (`p99Smoke`), not a proof of requirement 6.1: 6.1 (at most 2 ms
+	added event-loop p99) is established by the deterministic per-chunk bench (tasks PR.3; design
+	amendment 2026-10-23). Over distinct steady loop-meter intervals:
 	  - median: median(auto) - median(manual) <= P99_TOLERANCE_MS. Single 2 s intervals carry host
 	    noise (the ungated am-voice, identical code in both modes, showed a 7.7 ms gap in the
-	    maxima), so the median measures the gate's added steady delay;
+	    maxima);
 	  - tail: the auto intervals above manual p90 + P99_TAIL_MARGIN_MS number at most
-	    max(1, P99_TAIL_FRACTION x auto intervals), so a recurring stall fails where the median
-	    alone would pass. The same count of manual intervals against auto p90 is a control,
-	    reported only.
-	At least P99_MIN_INTERVALS distinct steady intervals per run, else invalid. Steady p90 and max
-	and the startup intervals are reported only. Returns (failure or None, notes)."""
+	    max(1, P99_TAIL_FRACTION x auto intervals). The same count of manual intervals against
+	    auto p90 is a control, reported only.
+	Detection limits: a median shift of at most 2 ms, and stalls up to 10 ms above manual p90 or in
+	at most 10 % of the intervals, pass.
+
+	The check is invalid (its numbers still reported) without interval identity (intervals10m) on
+	both runs, or with fewer than P99_MIN_INTERVALS distinct steady intervals: value-change
+	grouping can merge any run of equal intervals, such as 30 consecutive stalls.
+	Returns (failure or None, notes); notes["invalid"] holds the reason of an invalid check."""
 	a, a0, src_a = steady_p99(auto, clocks["auto"])
 	m, m0, src_m = steady_p99(manual, clocks["manual"])
-	notes = {"startupMs": {"auto": a0, "manual": m0}, "steadyIntervals": [len(a), len(m)], "identity": [src_a, src_m]}
+	notes = {"startupMs": {"auto": a0, "manual": m0}, "steadyIntervals": [len(a), len(m)], "identity": [src_a, src_m],
+		"detectionLimits": f"median shift > {P99_TOLERANCE_MS} ms; > {P99_TAIL_FRACTION:.0%} of intervals above manual p90 + {P99_TAIL_MARGIN_MS:.0f} ms"}
 	if not a and not a0 or not m and not m0:
-		return "missing event-loop p99 samples", notes
-	if min(len(a), len(m)) < P99_MIN_INTERVALS:
-		raise InvalidRun(f"{min(len(a), len(m))} distinct steady loop-meter intervals, need {P99_MIN_INTERVALS}")
+		return "p99Smoke: missing event-loop p99 samples", notes
+	if src_a != "intervals10m" or src_m != "intervals10m":
+		notes["invalid"] = "no loop-meter interval identity (intervals10m) in the recording; numbers informational"
+	elif min(len(a), len(m)) < P99_MIN_INTERVALS:
+		notes["invalid"] = f"{min(len(a), len(m))} distinct steady loop-meter intervals, need {P99_MIN_INTERVALS}"
+	if not a or not m:
+		return None, notes
 
 	def q(values, f):
 		v = sorted(values)
@@ -944,12 +958,16 @@ def verdict_p99(auto, manual, clocks):
 		"steadyP90Ms": [p90_a, p90_m], "tailAuto": {"over": over_a, "allowed": allow_a, "thresholdMs": p90_m + P99_TAIL_MARGIN_MS},
 		"tailManualControl": {"over": over_m, "allowed": allow_m, "thresholdMs": p90_a + P99_TAIL_MARGIN_MS,
 			"wouldFail": over_m > allow_m}})
+	f = None
 	if med_a - med_m > P99_TOLERANCE_MS:
-		return f"steady median event-loop p99 {med_a:.2f} ms vs manual {med_m:.2f} ms (limit +{P99_TOLERANCE_MS} ms)", notes
-	if over_a > allow_a:
-		return (f"{over_a} of {len(a)} steady auto intervals have p99 above manual p90 + {P99_TAIL_MARGIN_MS:.0f} ms"
-			f" ({p90_m + P99_TAIL_MARGIN_MS:.2f} ms), allowed {allow_a}"), notes
-	return None, notes
+		f = f"p99Smoke: steady median event-loop p99 {med_a:.2f} ms vs manual {med_m:.2f} ms (limit +{P99_TOLERANCE_MS} ms)"
+	elif over_a > allow_a:
+		f = (f"p99Smoke: {over_a} of {len(a)} steady auto intervals have p99 above manual p90 + {P99_TAIL_MARGIN_MS:.0f} ms"
+			f" ({p90_m + P99_TAIL_MARGIN_MS:.2f} ms), allowed {allow_a}")
+	if "invalid" in notes:
+		notes["wouldFail"] = f
+		return None, notes
+	return f, notes
 
 
 def drain_per_over(samples, rate, arrivals, events, levels, clock, hang_s, carrier, ws_complete):
@@ -1110,13 +1128,15 @@ def evaluate(obs, guard_ms):
 	notes["byteRates"] = rates
 	if f:
 		failures.append(f)
-	f, notes["p99"] = verdict_p99(auto, manual, clocks)
+	f, notes["p99Smoke"] = verdict_p99(auto, manual, clocks)
 	if f:
 		failures.append(f)
+	if "invalid" in notes["p99Smoke"]:
+		notes.setdefault("invalidChecks", []).append("p99Smoke: " + notes["p99Smoke"]["invalid"])
 	# Edge stamps are Node callbacks at random moments: a typical interval's p99 bounds their
 	# lateness, so the jitter term is each run's median steady interval p99 (the maxima are set by
 	# single-interval spikes: up to 106.6 ms on a manual run).
-	steady = notes["p99"].get("steadyMedianMs") or []
+	steady = notes["p99Smoke"].get("steadyMedianMs") or []
 	jitter_s = sum(steady) / 1000 if len(steady) == 2 and all(_number(v) for v in steady) else 0.0
 	f, notes["events"] = verdict_events(auto, manual, clocks["auto"], clocks["manual"], obs["carrier"], jitter_s)
 	if f:
@@ -1368,7 +1388,8 @@ def self_test():
 		out = []
 		for j, v in enumerate(vals):
 			for i in (2 * j, 2 * j + 1):
-				out.append([conn + host_offset + 1.0 + i, j + 1, v, v])
+				t = conn + host_offset + 1.0 + i
+				out.append([t, j + 1, v, v, t])  # request start, intervals10m, p99, max, response
 		return out
 
 	ws_span = [conn + 0.5 + host_offset, conn + 65.6 + host_offset]
@@ -1647,7 +1668,7 @@ def self_test():
 	# p99 over distinct steady loop-meter intervals: the startup intervals (here 135 and
 	# 1 684 ms) are reported only; the steady medians differ by at most 2 ms; single steady
 	# spikes (host noise) pass, a recurring stall fails the tail criterion.
-	p99_notes = evaluate(json.loads(json.dumps(base)), 200)[1]["p99"]
+	p99_notes = evaluate(json.loads(json.dumps(base)), 200)[1]["p99Smoke"]
 	assert p99_notes["startupMs"] == {"auto": [135.0] * 3, "manual": [1684.0] * 3}, p99_notes
 	assert p99_notes["steadyIntervals"] == [30, 30] and p99_notes["identity"] == ["intervals10m"] * 2, p99_notes
 	assert any("steady median event-loop p99" in f for f in variant(auto__p99Samples=p99s(5.0, 135.0)))
@@ -1662,16 +1683,28 @@ def self_test():
 		for path, value in changes.items():
 			side, key = path.split("__")
 			obs[side][key] = value
-		return evaluate(obs, 200)[1]["p99"]
+		return evaluate(obs, 200)[1]["p99Smoke"]
 
 	# The interval's own start decides: interval 2 (start bound 2 s, before the 3 s onset) is
 	# startup, interval 3 (start bound 4 s) is steady.
 	assert p99_of(auto__p99Samples=p99s(3.0, 135.0, {2: 50.0}))["autoSteadyMaxMs"] == 3.0
 	assert p99_of(auto__p99Samples=p99s(3.0, 135.0, {3: 50.0}))["autoSteadyMaxMs"] == 50.0
-	# Staleness: ten polls of one old interval are one interval, never ten steady samples.
-	stale = [[conn + host_offset + 20.0 + i, 1, 13.0, 13.0] for i in range(10)]
-	assert "distinct steady loop-meter intervals" in invalid(auto__p99Samples=stale, manual__p99Samples=stale)
-	assert "distinct steady loop-meter intervals" in invalid(manual__p99Samples=p99s(2.5, 1684.0, values=[2.5] * 19))
+	def p99_check(**changes):
+		"""(failures, invalid checks) of an observation variant."""
+		obs = json.loads(json.dumps(base))
+		for path, value in changes.items():
+			side, key = path.split("__")
+			obs[side][key] = value
+		failed, notes = evaluate(obs, 200)
+		return failed, notes.get("invalidChecks") or []
+
+	# Staleness: ten polls of one old interval are one interval, never ten steady samples; too few
+	# distinct steady intervals make the check invalid (its numbers informational).
+	stale = [[conn + host_offset + 20.0 + i, 1, 13.0, 13.0, conn + host_offset + 20.0 + i] for i in range(10)]
+	failed, checks = p99_check(auto__p99Samples=stale, manual__p99Samples=stale)
+	assert any("distinct steady loop-meter intervals" in c for c in checks) and not any("p99Smoke" in f for f in failed), (failed, checks)
+	failed, checks = p99_check(manual__p99Samples=p99s(2.5, 1684.0, values=[2.5] * 19))
+	assert any("1 distinct" in c or "19 distinct" in c for c in checks), checks
 	assert variant(manual__p99Samples=p99s(2.5, 1684.0, values=[2.5] * 20)) == []
 	assert "two values" in invalid(auto__p99Samples=[[conn + host_offset + 9.0, 4, 3.0, 3.0], [conn + host_offset + 10.0, 4, 9.0, 9.0]])
 	assert "backwards" in invalid(auto__p99Samples=[[conn + host_offset + 9.0, 5, 3.0, 3.0], [conn + host_offset + 10.0, 4, 9.0, 9.0]])
@@ -1689,17 +1722,45 @@ def self_test():
 	assert variant(**control) == [] and p99_of(**control)["tailManualControl"]["wouldFail"], p99_of(**control)
 	assert any("missing event-loop p99" in f for f in variant(auto__p99Samples=[]))
 	assert "malformed loop-meter" in invalid(manual__p99Samples=[[0.0, 1]])
-	# Older recordings: p99Ms pairs with the status poll times (counts must agree); identity by
-	# value change, so a meter stuck on one value is one interval.
+	# Detection limit (documented PASS): recurring stalls 20 ms above manual p90 in 9 % of the
+	# intervals are not detected; the smoke test catches more than 10 % of intervals above manual
+	# p90 + 10 ms. Requirement 6.1 rests on the per-chunk bench, not on this check.
+	limit_case = dict(auto__p99Samples=p99s(0, 135.0, values=[13.0] * 91 + [33.0] * 9),
+		manual__p99Samples=p99s(0, 1684.0, values=[13.0] * 100))
+	assert variant(**limit_case) == [], variant(**limit_case)
+	# Without interval identity the check is invalid; with it the same data fails. Reviewer
+	# repro: 30 consecutive 100 ms intervals after 30 distinct normal ones. Value-change grouping
+	# reads the 30 stalls as one interval and would pass.
+	stalls = [13.0 + 0.001 * j for j in range(30)] + [100.0] * 30
+	with_ids = dict(auto__p99Samples=p99s(0, 135.0, values=stalls), manual__p99Samples=p99s(0, 1684.0, values=[13.0] * 60))
+	failed, checks = p99_check(**with_ids)
+	assert any(f.startswith("p99Smoke:") for f in failed) and not checks, (failed, checks)
+	no_ids = p99s(0, 135.0, values=stalls)
+	auto_polls = [[t, {"autoSquelch": {"state": "waiting"}}] for t, *_rest in no_ids]
+	failed, checks = p99_check(auto__p99Samples=None, auto__p99Ms=[v for _t, _i, v, *_r in no_ids], auto__status=auto_polls,
+		manual__p99Samples=p99s(0, 1684.0, values=[13.0] * 60))
+	assert not any("p99Smoke" in f for f in failed) and any("no loop-meter interval identity" in c for c in checks), (failed, checks)
+	assert p99_of(auto__p99Samples=[[t, None, v, m, r] for t, _i, v, m, r in no_ids])["identity"][0] == "value change"
+	# Older recordings (p99Ms with status times, no identity) replay their numbers only.
 	varied = p99s(0, 1684.0, values=[2.5 + 0.001 * j for j in range(30)])
-	polls = [[t, {"autoSquelch": {"state": "off"}}] for t, _i, _v, _m in varied]
-	old_format = dict(manual__p99Samples=None, manual__p99Ms=[v for _t, _i, v, _m in varied], manual__status=polls)
-	assert variant(**old_format) == [], variant(**old_format)
+	polls = [[t, {"autoSquelch": {"state": "off"}}] for t, *_rest in varied]
+	old_format = dict(manual__p99Samples=None, manual__p99Ms=[v for _t, _i, v, *_r in varied], manual__status=polls)
+	failed, checks = p99_check(**old_format)
+	assert failed == [] and checks == ["p99Smoke: no loop-meter interval identity (intervals10m) in the recording; numbers informational"], (failed, checks)
 	# The three equal startup intervals merge into one, so the first steady interval has no start
 	# bound and counts as startup: 29 of 30 (conservative).
 	assert p99_of(**old_format)["identity"][1].startswith("value change") and p99_of(**old_format)["steadyIntervals"][1] == 29
 	assert "cannot time them" in invalid(**dict(old_format, manual__status=polls[:-1]))
-	assert "distinct steady" in invalid(**dict(old_format, manual__p99Ms=[13.0] * len(polls)))
+	# Request-start stamps (reviewer repro): poll P2 starts at 2.5 s but answers at 4.4 s. The
+	# core read the interval before answering, so interval 3, first seen by P3, ended after 2.5 s
+	# only: interval 4's start bound is 2.5 s (before the 3 s onset) and its 50 ms stays startup.
+	# Stamped at the response, the bound would read 4.4 s and count it as steady.
+	h = conn + host_offset
+	slow = [[h + 1.0, 1, 135.0, 135.0, h + 1.0], [h + 2.0, 1, 135.0, 135.0, h + 2.0], [h + 2.5, 2, 135.0, 135.0, h + 4.4],
+		[h + 4.5, 3, 3.0, 3.0, h + 4.5], [h + 5.5, 4, 50.0, 50.0, h + 5.5], [h + 6.5, 4, 50.0, 50.0, h + 6.5]]
+	slow += [[h + 7.5 + i, 5 + i // 2, 3.0, 3.0, h + 7.5 + i] for i in range(60)]
+	assert p99_of(auto__p99Samples=slow)["autoSteadyMaxMs"] == 3.0
+	assert p99_of(auto__p99Samples=[[r, n, v, m, r] for _t, n, v, m, r in slow])["autoSteadyMaxMs"] == 50.0
 	ring_text = (ROOT.parents[1] / "src/core/link-burst/contract.ts").read_text()
 	assert re.search(r"LOOP_DELAY_RING = ([\d_]+)", ring_text)[1].replace("_", "") == str(LOOP_DELAY_RING)
 	contract_ms_text = (ROOT.parents[1] / "src/decoders/enablement/contract.ts").read_text()
@@ -2176,12 +2237,15 @@ class Recorder:
 			try:
 				self.probe_clock()
 				self.obs["status"].append((time.monotonic(), self.get("/api/live-audio/status")))
+				# Request start: the core reads the latest interval at some moment before the
+				# response, so an interval not yet reported ended after this time at the earliest.
+				asked = time.monotonic()
 				for report in self.get("/api/resources/link-quality"):
 					loop = report.get("loopDelay") or {}
 					last = loop.get("last") or {}
 					if isinstance(last.get("p99Ms"), (int, float)):
 						self.obs["p99Ms"].append(last["p99Ms"])
-						self.obs["p99Samples"].append([time.monotonic(), loop.get("intervals10m"), last["p99Ms"], last.get("maxMs")])
+						self.obs["p99Samples"].append([asked, loop.get("intervals10m"), last["p99Ms"], last.get("maxMs"), time.monotonic()])
 			except (OSError, ValueError):
 				continue
 
@@ -2299,7 +2363,11 @@ def report(out, results):
 		if "invalid" in r:
 			print(f"{name}: INVALID {r['invalid']}")
 			continue
-		print(f"{name}: {'PASS' if not r['failures'] else 'FAIL'} {json.dumps(r['notes'])}")
+		checks = r["notes"].get("invalidChecks") or []
+		state = "INVALID" if checks else "PASS" if not r["failures"] else "FAIL"
+		print(f"{name}: {state} {json.dumps(r['notes'])}")
+		for c in checks:
+			print("  invalid check: " + c)
 		drain = r["notes"].get("drain")
 		if drain:
 			print(f"  drain upper max {drain['maxMs']:.0f} ms, median {drain['medianMs']:.0f} ms; lower max"
@@ -2307,7 +2375,7 @@ def report(out, results):
 				f" (CLOSE_GUARD_MS {drain['guardMs']}){' EXCEEDS GUARD' if drain['exceedsGuard'] else ''}")
 		for f in r["failures"]:
 			print("  - " + f)
-	if any("invalid" in r for r in results.values()):
+	if any("invalid" in r or r["notes"].get("invalidChecks") for r in results.values()):
 		return 2
 	return 1 if any(r["failures"] for r in results.values()) else 0
 

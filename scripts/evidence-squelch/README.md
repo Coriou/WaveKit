@@ -135,22 +135,46 @@ fully cover. Same count, at least one per over on carrier-bearing fixtures, at l
 overs, and edges per over within one 10 ms block plus both runs' median steady interval p99 (event
 stamps are Node wall-clock times; the fake's chunk phase cancels between runs). The median
 auto − manual is within 5 ms for opens and for closes, so a systematic stage-1 delay of 5 ms or
-more fails (see the limitations below). Event-loop p99 is compared at steady state, over distinct
-loop-meter intervals:
+more fails (see the limitations below).
+
+Event-loop p99: `p99Smoke`, a regression smoke test, not a proof of requirement 6.1. Requirement
+6.1 (at most 2 ms added event-loop p99) is established by the deterministic per-chunk bench
+(`scripts/bench/evidence-squelch.ts`, task PR.3: largest synchronous step per chunk and core
+fraction).
+- **Measured (PR.3).** EvidenceGate + PreRoll after the voice-meter and CTCSS speed-up
+  (85b49943), on this x86_64 host at load about 10: core fraction 0.0018-0.0029, and a largest
+  step per 64 KiB chunk of 3.56-4.56 ms (25 kHz s16), 1.69-1.92 ms (25 kHz f32), 2.04-2.09 ms
+  (50 kHz s16) and 1.14-1.43 ms (50 kHz f32). Before the speed-up: 0.0044-0.0049 core and
+  2.4-7.3 ms per 64 KiB. Design amendment 2026-10-23 has the table.
+- **Chunk arithmetic.** The step is linear in chunk size, about core fraction × chunk audio
+  duration. The live stream is s16 at 24 975 Hz, so a client-side read of at most 3.5 KB (median
+  500 B) holds 1 792 samples, 71.7 ms of audio. That costs 0.0022-0.0029 × 71.7 ms = 0.16-0.21 ms,
+  or 0.19-0.25 ms scaled from the measured 64 KiB step.
+- **Backlog bound.** A 64 KiB backlog chunk (1.31 s of s16 25 kHz audio) costs 3.6-4.6 ms, above
+  2 ms. That is a known bound for a backlog burst, not a steady-state cost.
+- **Detection limits.** p99Smoke catches a steady median shift of more than 2 ms, and recurring
+  intervals more than 10 ms above manual p90 in more than 10 % of the intervals. Smaller or
+  rarer stalls are not detected; for example 9 % of the intervals 20 ms above manual p90 pass.
+
+The smoke test runs over distinct loop-meter intervals:
 - **Identity.** The core exposes the latest interval and `intervals10m`, its 10 min ring count.
   That count rises by one per 2 s interval on a fresh core, so it identifies the interval. Repeated
-  polls of one interval count once. Recordings without it fall back to value change, which can
-  only undercount.
+  polls of one interval count once.
+  - Without `intervals10m` on both runs the check is INVALID; its numbers are reported only.
+  - This affects recordings made before this driver.
+  - The value-change fallback can merge 30 consecutive stalled intervals into one, and it reads a
+    stale interval polled between alternating values as new intervals.
 - **Steady.** An interval is steady when its own start is after the first over onset. The start
-  is bounded by the poll before the previous interval was first seen.
-- **Minimum.** At least 20 distinct steady intervals per run, else invalid: 40 s, about six over
-  periods. A 130 s run gives about 60.
+  is bounded by the request start of the poll before the previous interval was first seen.
+  Request start, not the response: the core reads the interval before it answers.
+- **Minimum.** At least 20 distinct steady intervals per run, else the check is INVALID: 40 s,
+  about six over periods. A 130 s run gives about 60.
 - **Median.** Median steady auto − median steady manual ≤ 2 ms. Single 2 s intervals carry host
   noise: the ungated am-voice, identical code in both modes, showed a 7.7 ms gap in the maxima.
-- **Tail.** At most max(1, 10 %) of the steady auto intervals may exceed manual p90 + 10 ms, so a
-  recurring stall fails. The same count of manual intervals against auto p90 is a control,
-  reported only.
-- The startup intervals and the steady p90 and max are reported only.
+- **Tail.** At most max(1, 10 %) of the steady auto intervals may exceed manual p90 + 10 ms. The
+  same count of manual intervals against auto p90 is a control, reported only.
+- The startup intervals and the steady p90 and max are reported only. A fixture with an invalid
+  check prints INVALID (exit 2) with that check named; its other verdicts still print.
 
 Then the back-chain drain of the manual run per
 over as an interval that holds the true drain (arrival of the last audible sample minus the

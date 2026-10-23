@@ -69,9 +69,13 @@ runs M.2 as soon as W.3 lands, before any polishing.
 - [ ] PR.2 Allocation check: a test that runs 10 000 chunks through `process` and asserts no
       `Buffer` or typed array is created after construction (spy on the constructors)
   - _Requirements: 2.8, 6.1_
-- [ ] PR.3 Bench (after EV.3 merges): gate plus pre-roll per second of 25 kHz and 50 kHz audio and
+- [x] PR.3 Bench (after EV.3 merges): gate plus pre-roll per second of 25 kHz and 50 kHz audio and
       per 64 KiB chunk, s16le and f32le, against the frozen tone-gate path; before/after table
   - _Requirements: 6.2_
+  - Done 2026-10-23: `scripts/bench/evidence-squelch.ts` (c0762cf1, 235551c5), measured before
+    and after the speed-up (85b49943); numbers in design, amendment "requirement 6.1 step budget,
+    measured by PR.3". The bench's own "≤ 1 ms per 64 KiB" column fails (1.14-4.56 ms) and is
+    restated there. Pasting the table into the acceptance record is M.2's step.
 
 ## Lane FX: fixtures and equivalence
 

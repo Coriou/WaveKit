@@ -606,10 +606,11 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   onset.
   - The meter takes one interval per 2 s (`EFFICIENCY_SAMPLE_MS`). Follow-up (2026-10-23):
     intervals are deduplicated by their identity, the `intervals10m` ring count, which rises by
-    one per interval on a fresh core; older recordings fall back to value change. Steady means
-    the interval's own start bound (the poll before the previous interval was first seen) is
-    after the onset. At least 20 distinct steady intervals per run (40 s, about six over
-    periods), else invalid.
+    one per interval on a fresh core. Without that identity on both runs the check is invalid
+    (numbers informational): value-change grouping merges consecutive equal intervals. Steady
+    means the interval's own start bound is after the onset. The bound is the request start of
+    the poll before the previous interval was first seen. At least 20 distinct steady intervals
+    per run (40 s, about six over periods), else invalid.
   - Live audio starts 0.8-1.0 s after the fake's epoch, with pipeline spawn and JIT cold start.
     The first over is also the gate's first open.
   - The startup intervals are reported only. They read 95-135 ms on auto and 97-1 684 ms on
@@ -619,6 +620,14 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   - Why the median: am-voice is ungated and so runs identical code in both modes, yet its steady
     maxima differ by 7.7 ms (21.9 vs 14.2). Single 2 s intervals carry host noise. The median
     measures the gate's added steady delay.
+  - Amendment (2026-10-23, follow-up round 2): the fake-link check is a regression smoke test,
+    named `p99Smoke` in the driver's output. It is not the proof of 6.1.
+    - 6.1 is established by the deterministic per-chunk bench (PR.3: largest synchronous step
+      per chunk and core fraction).
+    - The PR.3 bench numbers and the restated step budget are in the next amendment.
+    - Detection limits of the smoke test: a steady median shift of more than 2 ms, and intervals
+      more than 10 ms above manual p90 in more than 10 % of the intervals. Smaller or rarer stalls
+      are not detected (9 % of the intervals 20 ms above manual p90 pass).
   - Tail (follow-up, 2026-10-23): at most max(1, 10 %) of the steady auto intervals may exceed
     manual p90 + 10 ms, so a recurring stall fails where the median alone passes. The manual
     count against auto p90 is a control, reported only. Measured on the 2.048 Msps csdr replay:
@@ -643,6 +652,35 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   - The per-over edge limit is empirical, not a validated timing-error bound.
   - A systematic stage-1 delay under 5 ms passes. Requirement 1.6 rests on the deterministic
     unit goldens.
+
+**Amendment (2026-10-23): requirement 6.1 step budget, measured by PR.3.** The Budgets table's
+"≤ 1 ms per 64 KiB" step is restated, because it contradicts the core budget. A 64 KiB chunk
+holds 1.31 s of s16 25 kHz audio. 1 ms per chunk is 0.00076 core, eight times stricter than the
+0.006 core budget, which allows 0.006 × 1.31 s = 7.9 ms for that chunk. `scripts/bench/evidence-squelch.ts`
+measured EvidenceGate + PreRoll after the voice-meter and CTCSS speed-up (85b49943), on the
+x86_64 integration host at load about 10:
+
+| Format     | Core fraction | Largest step per 64 KiB |
+| ---------- | ------------- | ----------------------- |
+| 25 kHz s16 | 0.0022-0.0029 | 3.56-4.56 ms            |
+| 25 kHz f32 | 0.0018-0.0023 | 1.69-1.92 ms            |
+| 50 kHz s16 | 0.0021-0.0022 | 2.04-2.09 ms            |
+| 50 kHz f32 | 0.0021-0.0025 | 1.14-1.43 ms            |
+
+Before the speed-up: 0.0044-0.0049 core and 2.4-7.3 ms per 64 KiB.
+
+6.1 is met by:
+
+- **Core fraction.** At most 0.006 core.
+- **Linear step.** A per-chunk step linear in chunk size, about core fraction × chunk audio
+  duration: 0.0022-0.0029 × duration at 25 kHz s16.
+  - Worked number: the live stream is s16 at 24 975 Hz. The client-side reads seen in the
+    fake-link runs were at most 3.5 KB, which is 1 792 samples or 71.7 ms of audio.
+  - Such a chunk costs 0.16-0.21 ms by core fraction, or 0.19-0.25 ms scaled from the measured
+    64 KiB step. These are client-side reads, not the core's PCM chunk size.
+- **Backlog bound.** A 64 KiB backlog chunk costs 3.6-4.6 ms at 25 kHz s16. That is a known bound
+  above 2 ms, reached only on a backlog burst (for example after a front stall), not in steady
+  state.
 
 ## Live acceptance plan (requirement 8.3, Main with the user)
 
