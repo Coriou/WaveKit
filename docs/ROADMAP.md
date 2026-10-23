@@ -217,9 +217,10 @@ No CLI change required ([CLI-COORDINATION.md](CLI-COORDINATION.md)).
 
 Open after the evidence squelch batch:
 
-- Syllable-timed audio-frequency FSK bursts open as voice (known limitation): add a
-  stage-2-only data test (tone steadiness or spectral flatness) that rejects them
-  without changing the pinned scanner judge.
+- Syllable-timed audio-frequency FSK bursts open as voice: an accepted known limitation,
+  because the gate deliberately equals the pinned scanner judge. A possible follow-up is
+  to investigate a stage-2-only data test (tone steadiness or spectral flatness); it
+  would need a spec amendment and a decision before any implementation.
 - Marginal-level voice (medians within about 1 dB of -30 dB) latches after the pre-roll
   limit and loses the start of the over: revisit the pre-roll length or the threshold
   after the live measurements (M.4).
