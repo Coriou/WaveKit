@@ -322,3 +322,26 @@ matrix has not been rerun.
    budget in every run; after is within it in three of four runs and at 0.0011 in the run with
    the highest load. These numbers include scheduler contention from the loaded host; a quiet
    host rerun is still needed for a clean budget figure.
+
+7. **`upstream-host` matrix rows (2026-10-23).** Both rows failed on a run of this branch's image
+   with link-burst code unchanged. Neither failure is an attribution gap.
+   - **2.4 Msps: driver window.** Polls were 2.03–2.48 s apart (monitor sample 2 s). Core and
+     upstream loss shared polls 64 and 106. The core-side attribution read `unknown` in the next
+     two polls while the stall's gap loss was held. The held loss resolved `unknown` (+2) in
+     polls 69 and 111, 10.8 s and 10.9 s later, and both of those polls bore core loss. The monitor
+     resolves a held loss when its pending wait expires (`MAX_PENDING_WAIT_MS` = 10 000 + 200 +
+     2 000 = 12.2 s). The driver had assumed two polls and paired only within three. The host
+     increases in those polls (+1 at 64, +2 at 69 and 111) are the intervals sampled without
+     upstream delta. The driver now pairs an `unknown` when the poll before it is less than
+     20.2 s after the coinciding poll: 12.2 s, one monitor tick, the longest stall (4 s, counted
+     upstream when it starts) and one more tick. Replaying the kept samples passes, with 2
+     coinciding polls.
+   - **2.048 Msps: not applicable.** A drop-mode stall withholds input, so the core is relieved
+     while it lasts. All seven polls with an upstream rise (4, 63, 86, 105, 137, 212 and 216)
+     had zero core loss. Core loss was bursty: 63 of 275 polls, in runs at polls 1–35, 111–125
+     and 235–275. It was mostly absorber overflow (64 MB, sink drop 0 %). No stall started just
+     after host loss within one poll. At 2.4 Msps loss was nearly continuous, so two stalls
+     shared a poll with it. The fixture can produce coincidence only by such a straddle, so the
+     driver now reports `not-applicable` (exit 3, not a pass) when that is the only failure and
+     both core and upstream loss were exercised. Replaying the kept samples gives
+     `not-applicable`.

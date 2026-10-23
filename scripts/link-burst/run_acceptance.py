@@ -17,6 +17,7 @@ SOURCE = "link-burst-fake"
 SINK = "link-burst-slow-sink"
 SIBLING = "link-burst-sibling"
 INTERVALS = (9, 1, 130, 50, 40, 71, 161)
+STALL_MS = (2500, 4000)
 # Assumed excess drain rate of a non-excluded sibling, as a multiple of the
 # source byte rate (a sibling consuming at twice real time). The 2 s polls
 # cannot measure it; the implied excess is reported and checked against it.
@@ -25,8 +26,8 @@ LOOP_METER_RESOLUTION_MS = 10
 ROOT = Path(__file__).resolve().parent
 
 
-def constant(name):
-    text = (ROOT.parents[1] / "src/core/link-burst/contract.ts").read_text()
+def constant(name, contract="src/core/link-burst/contract.ts"):
+    text = (ROOT.parents[1] / contract).read_text()
     match = re.search(r"export const " + name + r" = ([\d_]+)", text)
     if not match:
         raise ValueError("missing contract constant: " + name)
@@ -34,7 +35,7 @@ def constant(name):
 
 
 def stall_schedule(scenario):
-    lengths = (150, 500, 1000, 1800) if scenario == "lossless" else (2500, 4000)
+    lengths = (150, 500, 1000, 1800) if scenario == "lossless" else STALL_MS
     if scenario not in ("lossless", "overflow", "upstream", "upstream-host", "late-shed"):
         return ""
     # Repeat the joint cycle, preserving both sequences across schedule wraps.
@@ -47,6 +48,9 @@ def branch_percent(branch):
     dropped = branch["droppedBytesTotal"]
     total = branch["totalBytesWritten"]
     return 100 * dropped / total if total else 0
+
+
+RESULT_EXIT = {"pass": 0, "fail": 1, "invalid": 2, "not-applicable": 3}
 
 
 class InvalidRun(Exception):
@@ -68,10 +72,23 @@ UPSTREAM_SCENARIOS = ("upstream", "upstream-host")
 # Recorded before the rule: 143 of 235 (61 %) at 2.048 Msps and 9 of 280
 # (3.2 %) at 2.4 Msps; 10 % keeps about three times the 2.4 Msps residual.
 HOST_CONSUMER_SHARE_MAX = 0.10
-# Upstream-host runs: a monitor interval with core and upstream loss is
-# unknown when it resolves; deferred gap losses resolve up to two polls later,
-# so an unknown increase in the coinciding poll or the next three pairs with it.
-UPSTREAM_UNKNOWN_PAIRING_POLLS = 3
+# Upstream-host runs: a stall's gap loss is held by the monitor and resolves
+# (unknown, with the upstream rise accumulated) when its pending wait expires,
+# MAX_PENDING_WAIT_MS = LINK_RECOVERY_WAIT_MS + LINK_GAP_MS + EFFICIENCY_SAMPLE_MS
+# (12.2 s) after the first held loss, checked only on a monitor tick (one more
+# sample). The fake counts a whole stall when it starts, so the first held loss
+# lands up to one stall plus one sample after the upstream rise that the driver
+# observed at the coinciding poll. An unknown increase pairs when the poll
+# before it is within that bound of the coinciding poll; the next poll then
+# observes it, whatever the poll period. Recorded at 2.4 Msps: coinciding
+# polls 64 and 106, held losses resolved unknown 10.8 s and 10.9 s later
+# (polls 69 and 111), outside the former three-poll window.
+EFFICIENCY_CONTRACT = "src/decoders/enablement/contract.ts"
+UPSTREAM_UNKNOWN_PAIRING_S = (
+    constant("BURST_ABSORBER_MAX_S") * 1000 + constant("LINK_GAP_MS")
+    + 2 * constant("EFFICIENCY_SAMPLE_MS", EFFICIENCY_CONTRACT)
+    + max(STALL_MS) + constant("EFFICIENCY_SAMPLE_MS", EFFICIENCY_CONTRACT)) / 1000
+NOT_COINCIDING = "core loss never coincided with upstream loss"
 
 
 def cpu_split(count):
@@ -137,6 +154,7 @@ class Experiment:
         self.coincident_polls = []
         self.core_loss_polls = set()
         self.unknown_polls = []
+        self.poll_mono = {}
 
     def compose(self, *args, check=True):
         return subprocess.run(self.command + list(args), env=self.env, text=True,
@@ -178,6 +196,7 @@ class Experiment:
     def record(self, sample):
         now = sample["mono"]
         self.polls += 1
+        self.poll_mono[self.polls] = now
         reports = sample["linkQuality"]
         if not isinstance(reports, list):
             raise InvalidRun("link-quality response must be an array")
@@ -456,8 +475,8 @@ class Experiment:
                     time.sleep(2)
             failures = self.failures()
             self.summary["failures"] = failures
-            self.summary["result"] = "fail" if failures else "pass"
-            exit_code = 1 if failures else 0
+            self.summary["result"] = self.result(failures)
+            exit_code = RESULT_EXIT[self.summary["result"]]
         except (InvalidRun, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             self.summary.update(result="invalid", invalidReason=str(exc))
         finally:
@@ -503,6 +522,28 @@ class Experiment:
             failures.append("implied sibling excess rate is below the assumption")
         return failures
 
+    def pairs(self, coinciding, unknown):
+        """Whether an unknown increase can be the coinciding poll's held loss resolving."""
+        if unknown == coinciding:
+            return True
+        if not coinciding < unknown or unknown - 1 not in self.poll_mono:
+            return False
+        return self.poll_mono[unknown - 1] - self.poll_mono[coinciding] < UPSTREAM_UNKNOWN_PAIRING_S
+
+    def result(self, failures):
+        """Pass, fail, or not applicable for an upstream-host run without coincidence.
+
+        A drop-mode stall withholds input, so the core has no pressure while it
+        lasts; core and upstream loss share a poll only when host loss happens
+        just before a stall starts within that poll. When both losses were
+        exercised but never shared a poll and nothing else failed, the
+        attribution of coinciding loss was not tested: not applicable, not pass.
+        """
+        if (failures == [NOT_COINCIDING] and self.core_loss_polls
+                and self.summary["upstreamDroppedBytes"]):
+            return "not-applicable"
+        return "fail" if failures else "pass"
+
     def failures(self):
         failures = sorted(self.interval_failures)
         scenario = self.args.scenario
@@ -530,10 +571,10 @@ class Experiment:
                 failures.append("host overload was attributed consumer beyond its share")
         if scenario == "upstream-host":
             if not self.coincident_polls:
-                failures.append("core loss never coincided with upstream loss")
+                failures.append(NOT_COINCIDING)
             # The unknown must itself bear core loss: an unknown from a drop-free
             # interval (an unreadable read, a reconnect) proves nothing here.
-            elif not any(p <= u <= p + UPSTREAM_UNKNOWN_PAIRING_POLLS and u in self.core_loss_polls
+            elif not any(self.pairs(p, u) and u in self.core_loss_polls
                          for p in self.coincident_polls for u in self.unknown_polls):
                 failures.append("coinciding core and upstream loss was not attributed unknown")
             if self.monitor_counts["link"]:
@@ -605,7 +646,7 @@ def replay(directory):
                 experiment.record(sample)
                 previous = sample
         failures = experiment.failures()
-        experiment.summary.update(failures=failures, result="fail" if failures else "pass")
+        experiment.summary.update(failures=failures, result=experiment.result(failures))
     except (InvalidRun, KeyError, TypeError, ValueError) as exc:
         experiment.summary.update(result="invalid", invalidReason=str(exc))
     if kept.get("result") == "invalid":
@@ -613,7 +654,7 @@ def replay(directory):
         experiment.summary.update(result="invalid", invalidReason=kept.get("invalidReason"))
     experiment.summary["replayedFrom"] = original.name
     (directory / "summary.json").write_text(json.dumps(experiment.summary, indent=2) + "\n")
-    return {"pass": 0, "fail": 1}.get(experiment.summary["result"], 2)
+    return RESULT_EXIT.get(experiment.summary["result"], 2)
 
 
 def main():
