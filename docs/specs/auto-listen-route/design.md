@@ -191,12 +191,21 @@ phases and the phase step lands on table points (8 k → 48 k: `L = 6`; 25 k →
 `L`) the table holds 512 phases and adjacent phases are linearly interpolated; the
 interpolation error is bounded by `(π × 0.5 / 512)² / 8 ≈ 1.2 × 10⁻⁶` (about −118 dB), far
 below the stopband. The phase accumulator is the integer pair (`k mod L`, input index), so long
-runs never drift. Tables (`Float64Array(phases × N)`, Float64 so the dot product needs no float32 conversion; at most 513 × 138 × 8 B ≈ 566 kB) and an
+runs never drift.
+
+Fractional input rates (requirement 2.2): the input rate is the exact fraction `num / den`, so
+`L / M = 48 000 × den / num` reduced (1 024 000 / 41 Hz: `L / M = 123 / 64`, exact phases).
+`AnalogInput` recovers it with `rationalRate(rate)`, a continued fraction bounded by
+`RESAMPLER_MAX_RATE_DEN = 4 096` (any IQ rate up to 8 000 × 4 096 = 32.768 MHz). A double
+computed as `p / q` with `q ≤ 4 096` comes back exact (its error, at most about 4.4 × 10⁻¹¹ Hz,
+is far below the 1 / 4 096² gap between such fractions); otherwise the residual is below
+1 / 4 096 Hz (at most 3.1 × 10⁻⁸ relative: one 48 kHz sample in about 670 s). A rate it cannot
+represent is rejected (silence). Tables (`Float64Array(phases × N)`, Float64 so the dot product needs no float32 conversion; at most 513 × 138 × 8 B ≈ 566 kB) and an
 `N`-sample history ring are allocated in the constructor only, and only when the rate changes.
 
 ```ts
 class PolyphaseResampler {
-	constructor(inRate: number, outRate: number)
+	constructor(inRate: number | { num: number; den: number }, outRate: number)
 	/** Reads input samples from a typed view and writes into out[outStart..outEnd). */
 	process(
 		input: Int16Array | Float32Array,

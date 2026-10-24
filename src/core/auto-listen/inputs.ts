@@ -7,7 +7,7 @@
 import type { PcmFormat, StreamFormat } from "../audio-stream-server.js"
 import type { VoiceCoverage, VoiceTapCall } from "./contract.js"
 import { LIVE_AUDIO_AUTO_ROUTE_RATE } from "@wavekit/api-types"
-import { PolyphaseResampler } from "./resampler.js"
+import { PolyphaseResampler, rationalRate } from "./resampler.js"
 import { FLAG_ADMITTED, FLAG_SILENT, SourceFifo } from "./source-fifo.js"
 import type { SampleFlag } from "./source-fifo.js"
 
@@ -190,16 +190,6 @@ function validStream(stream: StreamFormat): boolean {
 }
 
 /**
- * The resampler's integer input rate for a pipeline rate: the nearest integer. The error is at
- * most 0.5 Hz, so at most 0.5 / 8 000 = 62.5 ppm (24 975.61 Hz: 0.39 / 24 975.61 = 15.6 ppm).
- * The pacer absorbs it: at 62.5 ppm a continuous source is 48 000 × 62.5e-6 = 3 samples/s off,
- * one 960-sample block in 960 / 3 = 320 s (one underrun or a silent catch-up), no drift kept.
- */
-export function resamplerInputRate(rate: number): number {
-	return Math.round(rate)
-}
-
-/**
  * Analog input: client bytes of `/stream` in sample-aligned spans (requirement 3.6) with a
  * split-sample remainder (lead bytes completing a sample take the previous span's flag).
  * Rebuilds its resampler on a rate or format change, keeping the queued 48 kHz audio (5.2).
@@ -312,10 +302,22 @@ export class AnalogInput {
 			this.rate = 0
 			return false
 		}
-		this.res = new PolyphaseResampler(
-			resamplerInputRate(stream.rate),
-			LIVE_AUDIO_AUTO_ROUTE_RATE,
-		)
+		// The exact fraction (rationalRate: csdr's IQ rate / decimation is recovered exactly), so
+		// the 48 kHz output never drifts from the input; a rejected fraction rejects the stream.
+		const exact = rationalRate(stream.rate)
+		let res: PolyphaseResampler | null = null
+		if (exact !== null) {
+			try {
+				res = new PolyphaseResampler(exact, LIVE_AUDIO_AUTO_ROUTE_RATE)
+			} catch {
+				res = null
+			}
+		}
+		this.res = res
+		if (res === null) {
+			this.rate = 0
+			return false
+		}
 		this.rate = stream.rate
 		this.format = stream.format
 		this.frameBytes = stream.format === "f32le" ? 4 : 2

@@ -19,7 +19,10 @@ import type {
 	VoiceTapSource,
 } from "../../src/core/auto-listen/contract.js"
 import { PreRollShadow } from "../../src/core/auto-listen/preroll-shadow.js"
-import { PolyphaseResampler } from "../../src/core/auto-listen/resampler.js"
+import {
+	PolyphaseResampler,
+	rationalRate,
+} from "../../src/core/auto-listen/resampler.js"
 import { AutoListenRouter } from "../../src/core/auto-listen/router.js"
 import type { StreamFormat } from "../../src/core/audio-stream-server.js"
 import { createLogger } from "../../src/utils/logger.js"
@@ -97,7 +100,8 @@ function setup(withVoice: boolean): {
 }
 
 function analogChunk(rate: number, format: "s16le" | "f32le"): Buffer {
-	const n = rate / 50
+	// 20 ms of samples (rounded for a fractional rate; the bench measures cost, not timing).
+	const n = Math.round(rate / 50)
 	if (format === "s16le") {
 		const a = Int16Array.from({ length: n }, (_, i) =>
 			Math.round(10_000 * Math.sin(i * 0.05)),
@@ -128,7 +132,7 @@ function analogSecond(rate: number, format: "s16le" | "f32le") {
 }
 
 function resampleSecond(rate: number, format: "s16le" | "f32le") {
-	const res = new PolyphaseResampler(rate, 48_000)
+	const res = new PolyphaseResampler(rationalRate(rate) ?? rate, 48_000)
 	const chunk = analogChunk(rate, format)
 	const view =
 		format === "s16le"
@@ -151,6 +155,10 @@ describe("resampler alone, 1 s of audio per iteration (mean ms / 1 000 = core)",
 	bench("resample 8 000 Hz voice → 48 kHz", resampleSecond(8_000, "s16le"))
 	bench("resample 25 600 Hz s16le → 48 kHz", resampleSecond(25_600, "s16le"))
 	bench("resample 25 000 Hz s16le → 48 kHz", resampleSecond(25_000, "s16le"))
+	bench(
+		"resample 24 975.61 Hz s16le (1 024 000 / 41) → 48 kHz",
+		resampleSecond(1_024_000 / 41, "s16le"),
+	)
 	bench("resample 200 000 Hz f32le → 48 kHz", resampleSecond(200_000, "f32le"))
 })
 
@@ -160,6 +168,10 @@ describe("auto listen route, 1 s of audio per iteration (mean ms / 1 000 = core)
 		analogSecond(25_600, "s16le"),
 	)
 	bench("analog NFM 25 000 Hz s16le (2.4 Msps)", analogSecond(25_000, "s16le"))
+	bench(
+		"analog NFM 24 975.61 Hz s16le (1.024 Msps / 41)",
+		analogSecond(1_024_000 / 41, "s16le"),
+	)
 	bench("analog 200 000 Hz f32le (worst case)", analogSecond(200_000, "f32le"))
 
 	{

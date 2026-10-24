@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-	AnalogInput,
-	resamplerInputRate,
-} from "../../../../src/core/auto-listen/inputs.js"
+import { AnalogInput } from "../../../../src/core/auto-listen/inputs.js"
 import { FLAG_AUDIBLE } from "../../../../src/core/auto-listen/source-fifo.js"
 
 /** Pushes 0.1 s of a loud s16le square at `rate`; returns push's result and the queued audio. */
@@ -49,11 +46,9 @@ describe("AnalogInput pipeline rates (requirement 2.2)", () => {
 		}
 	})
 
-	it("rounds the resampler input rate to the nearest integer (error at most 0.5 Hz)", () => {
-		expect(resamplerInputRate(1_024_000 / 41)).toBe(24_976)
-		expect(resamplerInputRate(8_000.4)).toBe(8_000)
-		expect(resamplerInputRate(199_999.6)).toBe(200_000)
-		for (const rate of [8_000.5, 12_345.678, 24_975.61, 199_999.5])
-			expect(Math.abs(resamplerInputRate(rate) - rate)).toBeLessThanOrEqual(0.5)
+	it("keeps the exact 1 024 000 / 41 ratio (123 / 64): 0.1 s in gives 0.1 s out less the delay", () => {
+		const { qualified } = pushAt(1_024_000 / 41)
+		// floor(2 497 × 123 / 64) = 4 798 outputs once the 17-sample group delay is filled.
+		expect(qualified).toBe(Math.floor(((2_497 - 17) * 123) / 64) + 1)
 	})
 })

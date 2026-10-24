@@ -3,7 +3,9 @@
  * PolyphaseResampler), Kaiser window, sized from requirement 2.3.
  *
  * Output sample j is the band-limited input signal at input time t_j = j × in / out, kept as the
- * exact integer pair (input index, phase numerator) so long runs never drift. Output j needs the
+ * exact integer pair (input index, phase numerator) so long runs never drift. The input rate may
+ * be a fraction `num / den` (csdr: IQ rate / decimation, 1 024 000 / 41 Hz); the ratio stays
+ * exact (there: up / down = 123 / 64). Output j needs the
  * inputs up to floor(t_j) + N / 2, so its production lags its input by N / 2 samples
  * (`delayInputSamples`). Every call is a pure function of the per-sample state, so any split of
  * the input into calls yields identical output (requirement 2.5).
@@ -26,6 +28,69 @@ export const RESAMPLER_MAX_EXACT_PHASES = 512
 /** Supported input and output rates (requirement 2.2: 8 000 to 200 000 Hz in). */
 export const RESAMPLER_MIN_RATE = 1_000
 export const RESAMPLER_MAX_RATE = 400_000
+/**
+ * Largest input-rate denominator. A csdr rate is IQ rate / decimation with a rate ≥ 8 000 Hz, so
+ * 4 096 covers any IQ rate up to 8 000 × 4 096 = 32.768 MHz. Bounds the ratio terms: up ≤ 48 000
+ * × 4 096 ≈ 1.97e8 and down ≤ 400 000 × 4 096 ≈ 1.64e9, so `ph + down` < 2^31 and the
+ * interpolated `ph × 512` < 2^53 stay exact.
+ */
+export const RESAMPLER_MAX_RATE_DEN = 4_096
+
+/** An input rate of exactly `num / den` Hz (both integers, `den` ≥ 1). */
+export interface RationalRate {
+	num: number
+	den: number
+}
+
+/**
+ * The fraction with denominator ≤ `maxDen` closest to `rate` (continued fraction, then the best
+ * semiconvergent), reduced, or null for a non-finite or non-positive rate. A rate computed in
+ * double as p / q with q ≤ `maxDen` is recovered exactly: the double's error (≤ rate × 2^-52, at
+ * most 200 000 × 2.2e-16 ≈ 4.4e-11 Hz) is far below the 1 / maxDen² ≈ 6e-8 gap between distinct
+ * such fractions. Otherwise the residual is below 1 / maxDen Hz (≤ 2.4e-4 Hz, ≤ 3.1e-8 relative at
+ * 8 000 Hz: one 48 kHz sample per 1 / (48 000 × 3.1e-8) ≈ 670 s, the 3 s FIFO after ~3.3 years).
+ */
+export function rationalRate(
+	rate: number,
+	maxDen = RESAMPLER_MAX_RATE_DEN,
+): RationalRate | null {
+	if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0)
+		return null
+	const dMax = Math.max(1, Math.floor(maxDen))
+	if (Number.isInteger(rate)) return { num: rate, den: 1 }
+	// Convergents p/q: (p0, q0) the previous, (p1, q1) the current.
+	let p0 = 0
+	let q0 = 1
+	let p1 = 1
+	let q1 = 0
+	let x = rate
+	for (let step = 0; step < 64; step++) {
+		const a = Math.floor(x)
+		const q2 = q0 + a * q1
+		if (q2 > dMax) {
+			// Best semiconvergent within the bound, against the last convergent.
+			const k = Math.floor((dMax - q0) / q1)
+			const ps = p0 + k * p1
+			const qs = q0 + k * q1
+			if (k >= 1 && Math.abs(rate - ps / qs) < Math.abs(rate - p1 / q1)) {
+				p1 = ps
+				q1 = qs
+			}
+			break
+		}
+		const p2 = p0 + a * p1
+		p0 = p1
+		q0 = q1
+		p1 = p2
+		q1 = q2
+		const r = x - a
+		// Exact (to the double's precision): p1 / q1 is the rate.
+		if (r < 1e-9 || Math.abs(rate - p1 / q1) <= rate * 1e-15) break
+		x = 1 / r
+	}
+	const g = gcd(p1, q1)
+	return { num: p1 / g, den: q1 / g }
+}
 
 function gcd(a: number, b: number): number {
 	let x = a
@@ -112,24 +177,48 @@ export class PolyphaseResampler {
 	private lastProduced = 0
 	private lastFlagged = 0
 
-	constructor(inRate: number, outRate: number) {
-		if (!validRate(inRate) || !validRate(outRate))
+	/** Input rate as the exact fraction `inRateNum / inRateDen` (reduced). */
+	readonly inRateNum: number
+	readonly inRateDen: number
+
+	/** `inRate`: integer Hz, or an exact fraction (`rationalRate`); `outRate`: integer Hz. */
+	constructor(inRate: number | RationalRate, outRate: number) {
+		const num = typeof inRate === "number" ? inRate : inRate.num
+		const den = typeof inRate === "number" ? 1 : inRate.den
+		if (
+			!Number.isInteger(num) ||
+			!Number.isInteger(den) ||
+			den < 1 ||
+			den > RESAMPLER_MAX_RATE_DEN ||
+			!validRate(outRate)
+		)
 			throw new WaveKitError(
 				"Resampler rates must be integers in range",
 				"RESAMPLER_RATE",
 			)
-		this.inRate = inRate
+		const rate = num / den
+		if (!(rate >= RESAMPLER_MIN_RATE && rate <= RESAMPLER_MAX_RATE))
+			throw new WaveKitError(
+				"Resampler rates must be integers in range",
+				"RESAMPLER_RATE",
+			)
+		const r = gcd(num, den)
+		this.inRateNum = num / r
+		this.inRateDen = den / r
+		this.inRate = rate
 		this.outRate = outRate
-		const g = gcd(outRate, inRate)
-		this.up = outRate / g
-		this.down = inRate / g
-		const n = resamplerTaps(inRate, outRate)
+		// out / in = outRate × den / num, reduced.
+		const top = outRate * this.inRateDen
+		const g = gcd(top, this.inRateNum)
+		this.up = top / g
+		this.down = this.inRateNum / g
+		const n = resamplerTaps(rate, outRate)
 		this.taps = n
 		this.interpolated = this.up > RESAMPLER_MAX_EXACT_PHASES
 		this.phases = this.interpolated ? RESAMPLER_MAX_EXACT_PHASES : this.up
 		const rows = this.interpolated ? this.phases + 1 : this.phases
 		this.table = new Float64Array(rows * n)
-		const fc = (CUTOFF * Math.min(inRate, outRate)) / inRate
+		const fc = (CUTOFF * Math.min(rate, outRate)) / rate
 		const i0b = besselI0(KAISER_BETA)
 		const half = n / 2
 		for (let p = 0; p < rows; p++) {

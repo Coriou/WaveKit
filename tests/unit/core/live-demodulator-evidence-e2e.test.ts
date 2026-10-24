@@ -940,14 +940,23 @@ describe("/auto on the real evidence wiring at a fractional csdr rate", () => {
 		]
 		const actives = new Set<string>()
 		let gateOpened = false
+		let elapsedMs = 0
+		let fedSamples = 0
 		for (const segment of segments) {
 			control.open = segment.open
 			control.quieted = segment.quieted
-			// One 10 ms block (250 samples, 500 bytes) per chunk, and 10 ms of route clock.
-			for (let at = 0; at < segment.pcm.length; at += BLOCK_BYTES) {
+			// One 10 ms chunk per tick at the true rate: the samples due by the cumulative elapsed
+			// time, floor(elapsed ms × 1 024 000 / 41 000), so chunks are 249 or 250 samples.
+			let at = 0
+			while (at < segment.pcm.length) {
+				elapsedMs += 10
+				const due = Math.floor((elapsedMs * 1_024_000) / 41_000)
+				const bytes = Math.min(segment.pcm.length - at, 2 * (due - fedSamples))
+				fedSamples += bytes / 2
 				internals.handleAudioData(
-					Buffer.from(segment.pcm.subarray(at, at + BLOCK_BYTES)),
+					Buffer.from(segment.pcm.subarray(at, at + bytes)),
 				)
+				at += bytes
 				internals.measureRun(run)
 				routeClock.tick(10)
 				const status = h.demod.getStatus()
