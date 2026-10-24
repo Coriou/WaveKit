@@ -131,6 +131,30 @@ All state (biquads, envelope ring `Float64Array(20)`, two `Float32Array(400)` fr
 to the constructed state. A non-finite input resets the frame and marks it non-finite, which the
 judge fails closed.
 
+**Amendment (2026-10-24, A13): deviation normalisation.** `VoiceFrameMeter` takes an optional
+`deviationHz` (default 5 000) and multiplies samples by `(2 / gain) × (5 000 / deviationHz)`, so
+the channel's own full deviation lands on the analyzer's reference. The wiring passes
+`evidenceDeviationHz(config.bandwidth)` (`contract.ts`: 2 500 Hz for a bandwidth of at most
+12 500 Hz, else 5 000 Hz) on `nfm`, and rebuilds the gate when the bandwidth changes in place (as
+for modulation and gain). Physics: FM audio amplitude is set by deviation only (the RF level is
+removed by the discriminator's normalisation), and the 12.5 kHz plan halves the peak deviation,
+so the same speech reads 6.02 dB lower than on the 25 kHz plan the thresholds were set on.
+Measured on the live PMR446 overs (12.5 kHz, about +1 dBFS channel power, ungated run, 1 s windows
+every 0.5 s):
+
+| Segment             | median audioDb (5 kHz ref) | syllabic    | cluster     | FM quieting per block   | latch from onset, 5 kHz / 2.5 kHz |
+| ------------------- | -------------------------- | ----------- | ----------- | ----------------------- | --------------------------------- |
+| over 1 (normal)     | -32.9 to -29.6             | 0.28 - 0.62 | 0.00        | 38.9 - 52.6 dB (p5-p95) | 2.6 s / 1.5 s                     |
+| over 2 (normal)     | -25.2 to -20.8             | 0.37 - 0.76 | 0.00        | 43.8 - 53.9 dB          | 1.0 s / 1.0 s                     |
+| noise between overs | -4.2 to -3.7               | 0.06 - 0.09 | 0.29 - 0.31 | -2.0 - 0.5 dB           | never / never                     |
+
+Rejected alternatives: an `audioDb` offset alone (+6.02 dB, cluster untouched) opens the
+synthetic impulse train of the end-to-end suite (median audio -36.4 dB at 5 kHz, syllabic 0.34,
+cluster 0 because its decimated span is under 0.15 rad): the scale must apply to the span test
+too, where the narrow plan makes the impulses data-like (cluster 1.00). Lowering
+`ANALOG_TRIAL_AUDIO_MIN_DB` would retune the scanner's pinned judge for every channel. Kurtosis
+does not separate the synthetic voice (window medians 21-26) from impulses (36-59).
+
 ### ToneEvidence (`src/core/evidence-squelch/tone-evidence.ts`)
 
 Owns one `CtcssBank` and one `DcsDecoder` fed by the gate's 8 kHz samples (NFM only).
@@ -270,6 +294,28 @@ squelch task, not a backlog item.
 | State   | Event                                       | Next                                        |
 | ------- | ------------------------------------------- | ------------------------------------------- |
 | waiting | armed, quieted block after an unquieted one | waiting (voice window and quiet ring empty) |
+
+**Amendment (2026-10-24, A14): carrier hang.** The hang no longer counts stage-1-closed PCM only.
+`sinceCarrier` counts every PCM sample after the latch, open or closed; it returns to 0 on each
+sample while the last noted block was quieted (`carrierNow`, cleared by `closed()`), when the
+latched tone or code is current in the tone stage, on a renewal and at the latch. The latch ends
+when `sinceCarrier` reaches `HANG_MS`: inside `closed()` as before (to idle), or inside `push()`
+(to waiting, fresh window, onset armed; the wiring tags the rest of that slice `pending`, so the
+weak re-open is held and abandoned when stage 1 closes). Rows changed:
+
+| State | Event                                                      | Next                                                                |
+| ----- | ---------------------------------------------------------- | ------------------------------------------------------------------- |
+| open  | `HANG_MS` of PCM (open or closed) without carrier evidence | idle (closed) or waiting (stage 1 open)                             |
+| open  | stage 1 reopens within the hang                            | open (latch carried; the hang keeps counting until a quieted block) |
+
+Live timeline (run2): after the CTCSS latch at 09:25:48 the status showed `open`/`ctcss` on every
+poll to the end of the auto capture (09:28:48), across the DCS over, the quiet over and the bare
+key-up, with weak re-opens at -44 to -50 dBFS against a -55 dBFS floor. In the client stream after
+the latch (93.8 s) the longest muted stretch is 0.74 s (stage 1 closed beyond the 200 ms guard),
+so no close reached the 1.5 s hang, and 69.7 % of that time played interference as full-scale
+noise (about -3 dBFS RMS). Bound: with no stage-1
+close after the tone ends, the tone stage keeps its last 500 ms CTCSS block current, so the latch
+can outlive the tone by the hang plus one block (tested: at most 2.0 s).
 
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
@@ -537,6 +583,8 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
 4. **Latch through the hang.** Once open, the gate stays open for every sample while stage 1 is
    open and until `HANG_MS` of stage-1-closed samples have passed; a reopen within the hang keeps
    it open; a closure without a latch discards all evidence. _Validates 1.5._
+   Amendment A14 (2026-10-24): "while stage 1 is open" reads "while the transmission shows
+   carrier evidence"; the test notes the over's blocks quieted and a quieted reopen.
 5. **Status at received time.** The sample index at which `state` becomes `open` depends only on
    the received PCM and blocks, not on the pre-roll delay; `squelchOpen` is stage 1 for every
    sample. _Validates 2.7, 4.1, 4.2._
@@ -564,6 +612,12 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     emitted. _Validates 2.9._
 14. **Default.** Parsing a runtime config without `squelchMode` gives `auto`; an explicit value is
     kept. _Validates 3.1._
+15. **Deviation normalisation (A13, 2026-10-24).** For any deviation, gain and PCM, a meter at
+    deviation `d` emits the same frames as the 5 kHz meter fed the samples × 5 000 / `d`.
+    _Validates 1.3, 5.2._
+16. **Latch needs carrier evidence (A14, 2026-10-24).** After an over's last quieted block and a
+    stage-1 close, for any pattern of unquieted re-opens and closes the gate stays open exactly
+    until `HANG_MS` of PCM has passed and is waiting from then on. _Validates 1.5._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 
@@ -602,8 +656,8 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   - Each difference cluster must start within 84 ms of a stage-1 gate edge of either run, placed
     per over from the manual stream's open step, with at most one cluster per over edge. The one
     cluster on that run started 30 ms from its close edge.
-  Review round 2 (2026-10-23): a cluster's divergence (its start and its largest difference) must
-  lie inside the window from the earlier to the later of the two runs' edge stamps, ±84 ms.
+    Review round 2 (2026-10-23): a cluster's divergence (its start and its largest difference) must
+    lie inside the window from the earlier to the later of the two runs' edge stamps, ±84 ms.
   - Past that window the difference may only decay through the back chain's memory: at most
     0.7 times the in-window peak per 10 ms block. Measured 0.607 per block (τ 20.0 ms) over 13
     blocks on the am-voice close.
@@ -647,9 +701,9 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     threshold 23.2-25.0 ms), the manual control 0-1.
   - Measured steady state: medians 12.5-12.8 ms with auto − manual within 0.4 ms. p90 13.2-13.8
     ms on six fixtures; ctcss-1000 reads 19.1 vs 15.1. Maxima 14.2-106.6 ms.
-  The stage-1 comparison of 8.2 ("transmission events identical to a manual-mode run", design
-  "within one block") checks requirement 1.6. Open and close times are as today, so auto may not
-  delay them. Event `startedAt` is the core's wall clock when Node handles the edge.
+    The stage-1 comparison of 8.2 ("transmission events identical to a manual-mode run", design
+    "within one block") checks requirement 1.6. Open and close times are as today, so auto may not
+    delay them. Event `startedAt` is the core's wall clock when Node handles the edge.
   - The fake's chunk phase (-55 to +6 ms per over) is the same in both runs and cancels.
   - Per over, |auto − manual| ≤ one 10 ms block (the two thresholds may cross in adjacent blocks)
     plus both runs' median steady interval p99, about 35 ms. The median auto − manual over the
@@ -657,7 +711,7 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     fails.
   - Measured: worst per over 6.1-25.9 ms. Biases -2.5 to +2.3 ms on opens and -1.3 to +1.8 ms on
     closes.
-  Known limitations (2026-10-23):
+    Known limitations (2026-10-23):
   - The AM divergence decay rule can be fooled by an engineered slowly decaying mute behind an
     in-window peak. The fake-link AM check is a smoke test; the authoritative AM identity proof
     is the unit-level frozen-code hash regression (property 12).

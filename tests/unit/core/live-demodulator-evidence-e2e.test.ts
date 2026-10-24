@@ -241,28 +241,57 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		// about 1.85 s after stage 1 opens, past the 1.5 s pre-roll, and the over's first
 		// ~350 ms are lost. A design change is expected to flip this test (latch within 1.5 s,
 		// audio from the over's first sample); update it then.
-		it(`known limitation (req 8.1, pending): marginal-level voice latches late (${modulation})`, async () => {
+		// Amendment A13 (2026-10-24): on a 12.5 kHz channel (the default bandwidth) the meter
+		// normalises the ±2.5 kHz plan onto its 5 kHz reference, so this over latches as soon as
+		// its first window is full and plays from its first sample.
+		it(`A13: marginal-level voice latches with its first window on a 12.5 kHz channel (${modulation})`, async () => {
 			const over = overVoice(24)
 			const overPcm = toPcm(over, "s16le")
 			const result = await drive(modulation, overScript(over))
-			// The status is read once per 10 ms chunk: the latch falls in (1.84 s, 1.85 s].
-			expect(result.openAfterSeconds).toBe(1.85)
-			const latchBytes = Math.round(1.85 * RATE) * 2
-			const capacityBytes =
-				Math.round((LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS / 1_000) * RATE) * 2
-			// Lost: the over's first latch - capacity = 8 750 samples (350 ms).
-			const lost = latchBytes - capacityBytes
-			expect(lost).toBe(17_500)
-			// Client audio starts at the latch position in the stream, with over sample 8 750.
-			const startsAt = LEAD_SECONDS * RATE * 2 + latchBytes
-			expect(result.received.subarray(0, startsAt).every(b => b === 0)).toBe(
-				true,
-			)
-			expect(
-				result.received.subarray(startsAt, startsAt + overPcm.length - lost),
-			).toEqual(overPcm.subarray(lost))
+			// The status is read once per 10 ms chunk: the latch falls in (0.99 s, 1.00 s].
+			expect(result.openAfterSeconds).toBe(1)
+			// Played from over sample 0, behind the 1 s wait held in the pre-roll.
+			const at = result.received.indexOf(overPcm.subarray(0, RATE))
+			expect(at).toBe((LEAD_SECONDS + 1) * RATE * 2)
+			expect(result.received.subarray(0, at).every(b => b === 0)).toBe(true)
+			expect(result.received.subarray(at, at + overPcm.length)).toEqual(overPcm)
 		})
 	}
+
+	// Amendment A14 (2026-10-24), live run2: weak interference re-opens stage 1 every 0.5 s after
+	// a CTCSS over. Only carrier evidence keeps the latch; the flicker plays nothing once the hang
+	// after the over's last quieted block has run out.
+	it("A14: interference flicker after a tone over is muted once the hang runs out", async () => {
+		const over = mix(
+			ctcssMix({ rate: RATE, seconds: OVER_SECONDS, hz: 67 }),
+			voiceLike({ rate: RATE, seconds: OVER_SECONDS, seed: 41, level: 0.4 }),
+		)
+		const overPcm = toPcm(over, "s16le")
+		const segments: Segment[] = [
+			{ pcm: overPcm, open: true, quieted: true },
+			{ pcm: Buffer.alloc(0.3 * RATE * 2), open: false, quieted: false },
+		]
+		for (let i = 0; i < 20; i++)
+			segments.push(
+				{
+					pcm: toPcm(
+						whiteNoise({ rate: RATE, seconds: 0.2, seed: 60 + i, level: 0.9 }),
+						"s16le",
+					),
+					open: true,
+					quieted: false,
+				},
+				{ pcm: Buffer.alloc(0.3 * RATE * 2), open: false, quieted: false },
+			)
+		const result = await drive("nfm", segments)
+		// The over plays (behind its pre-roll delay of at most 1.5 s).
+		const at = result.received.indexOf(overPcm.subarray(0, RATE))
+		expect(at).toBeGreaterThanOrEqual(0)
+		// From over end + hang (1.5 s) + the largest pre-roll delay (1.5 s) on, only zeros.
+		const quietFrom = overPcm.length + 3 * RATE * 2
+		expect(result.received.subarray(quietFrom).every(b => b === 0)).toBe(true)
+		expect(result.states.has("waiting")).toBe(true)
+	})
 
 	for (const [name, modulation, make] of OPENS) {
 		// Validates: Requirements 8.1, 1.2, 2.1

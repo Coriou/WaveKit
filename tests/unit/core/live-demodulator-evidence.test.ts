@@ -108,6 +108,20 @@ describe("live demodulator evidence path (fake ports)", () => {
 		])
 	})
 
+	// Amendment A13 (2026-10-24): the gate's deviation reference follows the channel bandwidth.
+	it("A13: a 12.5 kHz channel builds the gate on the 2.5 kHz plan, a 25 kHz channel on 5 kHz", async () => {
+		const narrow = await start({ modulation: "nfm", squelchMode: "auto" })
+		expect(narrow.factory.gates[0]?.options.deviationHz).toBe(2_500)
+		await e?.h.dispose()
+		e = null
+		const wide = await start({
+			modulation: "nfm",
+			squelchMode: "auto",
+			bandwidth: 25_000,
+		})
+		expect(wide.factory.gates[0]?.options.deviationHz).toBe(5_000)
+	})
+
 	it("close before latch abandons and resets", async () => {
 		const t = await start({ modulation: "nfm", squelchMode: "auto" })
 		t.stage.open = true

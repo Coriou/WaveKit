@@ -3,8 +3,9 @@
  * While stage 1 is open, the PCM is decimated to 8 kHz (`PcmDecimator`, as the tone squelch
  * gate) and fed to a `VoiceFrameMeter` and, on NFM, to `ToneEvidence`. The gate latches on a
  * qualified standard tone (NFM, after `TONE_MIN_MS` of audio) or on a voice judgement over the
- * last `VOICE_FRAMES` frames with enough quiet carrier blocks, and holds through
- * `HANG_MS` of stage-1-closed PCM.
+ * last `VOICE_FRAMES` frames with enough quiet carrier blocks, and holds until `HANG_MS` of PCM
+ * (stage 1 open or closed) has passed without carrier evidence of the latched transmission
+ * (amendment A14, 2026-10-24).
  *
  * Stream time is counted in PCM samples, so chunking never changes a decision. A sample split
  * across calls is carried in a 4-byte hold. Per sample nothing is allocated; the only
@@ -212,7 +213,15 @@ export class EvidenceGate implements EvidenceGatePort {
 	/** A non-finite input went into the current decimation group. */
 	private nonFiniteGroup = false
 	private closing = false
-	private closedSamples = 0
+	/**
+	 * Carrier hang (amendment 2026-10-24, A14): PCM samples, open or closed, since the latched
+	 * transmission last showed carrier evidence (PCM after a quieted block, or its latched tone
+	 * current). The latch ends when this reaches `hangSamples`; a stage-1 re-open does not
+	 * restart it.
+	 */
+	private sinceCarrier = 0
+	/** The last noted block was quieted and stage 1 has not closed since (A14). */
+	private carrierNow = false
 	private guardBytesLeft = 0
 	/** Byte offset of the first latch in the current `push`, or -1. */
 	private latchAt = -1
@@ -230,7 +239,13 @@ export class EvidenceGate implements EvidenceGatePort {
 			)
 		this.rate = rate
 		this.modulation = options.modulation === "am" ? "am" : "nfm"
-		this.meter = new VoiceFrameMeter({ gain: options.gain })
+		this.meter =
+			options.deviationHz === undefined
+				? new VoiceFrameMeter({ gain: options.gain })
+				: new VoiceFrameMeter({
+						gain: options.gain,
+						deviationHz: options.deviationHz,
+					})
 		this.tone = this.modulation === "nfm" ? new ToneEvidence() : null
 		this.guardSamples = msToSamples(
 			LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS,
@@ -300,6 +315,8 @@ export class EvidenceGate implements EvidenceGatePort {
 				this.onsetArmed = true
 		}
 		this.prevUnquieted = value === 0
+		// A14: only carrier evidence keeps a latch alive; a bare stage-1 re-open does not.
+		this.carrierNow = value === 1
 		if (this.internal !== "waiting") return flags
 		const ring = this.quiet
 		if (this.quietLen === ring.length)
@@ -333,9 +350,9 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.internal = "waiting"
 			this.audioSamples = 0
 		} else if (this.internal === "open" && this.closing) {
-			// Reopen within the hang: latch kept, closed counter and tone stage reset.
+			// Reopen within the hang: latch kept, tone stage reset. The carrier hang keeps
+			// counting (A14): a re-open without carrier evidence lets the latch expire.
 			this.closing = false
-			this.closedSamples = 0
 			this.audioSamples = 0
 			this.tone?.reset()
 			this.decimator.arm(this.rate)
@@ -396,17 +413,17 @@ export class EvidenceGate implements EvidenceGatePort {
 		// The bytes are not inspected: a straddling sample reads zeros for its skipped bytes.
 		this.hold.fill(0)
 		this.holdLen = total % width
+		this.carrierNow = false
 		if (this.internal !== "open") return 0
 		if (!this.closing) {
 			this.closing = true
-			this.closedSamples = 0
 			// A sample whose first bytes arrived while open is the first closed sample.
 			this.guardBytesLeft = Math.max(0, this.guardSamples * width - heldBefore)
 		}
 		const guard = bytes < this.guardBytesLeft ? bytes : this.guardBytesLeft
 		this.guardBytesLeft -= guard
-		this.closedSamples += completed
-		if (this.closedSamples >= this.hangSamples) this.reset()
+		this.sinceCarrier += completed
+		if (this.sinceCarrier >= this.hangSamples) this.reset()
 		return guard
 	}
 
@@ -443,12 +460,22 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.quietCount = 0
 		this.audioSamples = 0
 		this.closing = false
-		this.closedSamples = 0
+		this.sinceCarrier = 0
+		this.carrierNow = false
 		this.guardBytesLeft = 0
 	}
 
 	/** One input sample; `after` is the byte offset just past it. */
 	private takeSample(sample: number, after: number): void {
+		if (this.internal === "open") {
+			if (this.carrierNow) this.sinceCarrier = 0
+			else if (++this.sinceCarrier >= this.hangSamples) {
+				// A14: the hang ran out while stage 1 is open on something without carrier
+				// evidence (a weak re-open): the latch ends and this audio earns its own evidence.
+				this.reset()
+				this.internal = "waiting"
+			}
+		}
 		this.audioSamples += 1
 		if (!Number.isFinite(sample)) this.nonFiniteGroup = true
 		if (!this.decimator.take(sample)) return
@@ -484,7 +511,11 @@ export class EvidenceGate implements EvidenceGatePort {
 
 	private observeTone(reading: Readonly<ToneReading>, after: number): void {
 		const key = toneKey(reading)
-		if (this.internal === "open" && key === this.latchedToneKey) return
+		if (this.internal === "open" && key === this.latchedToneKey) {
+			// A14: the latched tone still present is carrier evidence of the same transmission.
+			this.sinceCarrier = 0
+			return
+		}
 		const kind = toneKind(
 			this.modulation,
 			reading,
@@ -493,9 +524,10 @@ export class EvidenceGate implements EvidenceGatePort {
 		)
 		if (kind === null) return
 		if (this.internal === "open") {
-			// Renewal: a different standard tone while latched.
+			// Renewal: a different standard tone while latched is new evidence (its own label).
 			this.latchedEvidence = kind
 			this.latchedToneKey = key
+			this.sinceCarrier = 0
 			return
 		}
 		this.latch(kind, key, after)
@@ -509,6 +541,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.internal = "open"
 		this.latchedEvidence = evidence
 		this.latchedToneKey = key
+		this.sinceCarrier = 0
 		if (this.latchAt < 0) this.latchAt = after
 	}
 

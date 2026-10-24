@@ -107,6 +107,25 @@ voice-like by `isVoice` (median syllabic index at least `ANALOG_TRIAL_VOICE_INDE
 median audio power at least `ANALOG_TRIAL_AUDIO_MIN_DB`, -30 dB). Judging starts once the window
 is full and repeats on every new frame until the gate opens or stage 1 closes.
 
+**Amendment (2026-10-24, A13): the voice meter follows the channel plan.** Live acceptance on a
+PMR446 handheld (12.5 kHz channel, channel power about +1 dBFS) left a normal voice over
+`waiting` for its whole 6.4 s. The analog trial's thresholds are calibrated on the 25 kHz plan
+(0 dB = a ±5 kHz full-deviation sine), but 12.5 kHz channels deviate at most ±2.5 kHz, so the same
+speech reads 6.02 dB lower. Ungated live overs measured median `audioDb` -29.6 to -32.9 dB (over 1)
+and -20.8 to -25.2 dB (over 2) per 1 s window against the -30 dB threshold; syllabic 0.28 to 0.76,
+cluster 0.00 (not data-like), FM quieting 39 to 54 dB on every block (carrier evidence was never
+the problem) and one window reset per over. RF saturation does not change FM audio: the limiter
+and discriminator make the audio level a function of deviation only. Requirement: on `nfm`, the
+meter normalises the channel's nominal peak deviation onto the 5 kHz reference, exactly as it
+normalises `gain` (5.2): samples × 5 000 / deviation. The nominal deviation is 2 500 Hz for a
+configured bandwidth of at most 12 500 Hz and 5 000 Hz otherwise. Thresholds are unchanged; the
+analyzer comparison (5.1) is unchanged at the 5 kHz reference. With the narrow plan both live
+overs latch voice within 1.5 s of onset at ×1, ×2 and ×4 (clipped) level; every never-open NFM
+fixture stays closed with an ideal onset, a 250 ms noisy onset, every 0-500 ms noise lead-in and
+quieted flickers in it. The residual cases of 1.4 grow at the narrow plan only for `nfm-clicks`
+(cases (a) and (b) with 3 blocks, case (c) at 30 and 80 ms as well as 10 and 60 ms): a click is a
+2π phase step whatever the channel, so it is twice as large relative to a ±2.5 kHz channel.
+
 1.4 **What never opens it.** A bare carrier, unquieted noise, clicks, impulse noise, data-like
 audio and digital bursts never open stage 2 on their own, whatever their power. A non-finite
 statistic fails that judgement closed.
@@ -150,6 +169,23 @@ once. If, during a reopened over, a standard CTCSS tone or DCS code qualifies th
 the latched one, the latch is renewed with the new evidence (a new over; audio is not
 interrupted). When stage 1 closes before any evidence, the evidence collected so far is
 discarded.
+
+**Amendment (2026-10-24, A14): the latch needs carrier evidence to survive.** Live acceptance
+showed a CTCSS latch that never released: weak interference about 10 dB over the floor re-opened
+stage 1 every 0.5 to 1 s, so every stage-1 close was shorter than the 1.5 s hang (the longest
+muted stretch of the client stream in the 93.8 s after the latch is 0.74 s, behind a 200 ms close
+guard), so the latch carried from 09:25:48 through the DCS over, the quiet over and the bare
+key-up, and the client heard the interference as full-scale noise (about -3 dBFS RMS, up to 34 %
+clipped samples) after every over. Revised rule: the hang counts PCM samples, stage 1 open or
+closed, since the latched transmission last showed carrier evidence: the PCM after a quieted
+block (the existing carrier evidence of 1.3) or its latched tone or code still current. The latch
+ends when the hang runs out, also while stage 1 is open; that audio then waits for its own
+evidence. A pause inside an over (carrier held, quieted) or a fade of under 1.5 s keeps the latch;
+a re-open without carrier evidence does not restart the hang. Without a stage-1 close the tone
+stage can keep the last 500 ms CTCSS block current after the tone ends, so the bound is the hang
+plus one CTCSS block. A different standard tone or code is new evidence: within the hang it
+renews the label (as above); after the hang the over starts from waiting and its label is its
+own, never the previous over's.
 
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
@@ -300,6 +336,9 @@ opened, losing about 350 ms of speech). To be revisited with live measurements (
 Amendment A8 (2026-10-23): the AM half of this limitation no longer applies (AM is not evidence
 gated); it stands for NFM. Under A8 the AM voice and bare AM carrier cases of 8.1 assert the frozen
 stage-1 auto path instead, and an `am-carrier` replay regression pins that AM stays ungated.
+Amendment A13 (2026-10-24): on a 12.5 kHz channel (the default bandwidth) the meter normalises
+the ±2.5 kHz plan, and the synthetic marginal voice latches with its first window (1.0 s) and
+plays from its first sample. The limitation stands for channels wider than 12.5 kHz.
 
 8.2 **Fake-link scenario (early).** The same fixtures as IQ through a scratch core fed by the fake
 `rtl_tcp`, on the default csdr engine and on Rust: open and no-open verdicts as 8.1, played audio
