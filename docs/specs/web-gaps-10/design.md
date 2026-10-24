@@ -585,3 +585,9 @@ masked and the silence inserted immediately. `rust-run.ts` keeps `CARRIER_LOG_GA
 notices, enough to trigger the same fail-closed state. Tests: 16 and 17 gaps for the masks, the
 output offset and the fed audio; 16 and 17 startup notices; the late notice with metrics
 draining before the next chunk.
+
+Follow-up 2026-10-24 (review round 3): entering the desynchronized state also discards the held
+200 ms STE window (it is never fed), and the STE flush is a no-op while desynchronized.
+`rust-run.ts` sums the queue-overflow dropped samples of startup notices past its kept list and
+replays the sum as one more notice, so `droppedTotal` stays exact (the list is already past the
+cap there, so the run fails closed either way).

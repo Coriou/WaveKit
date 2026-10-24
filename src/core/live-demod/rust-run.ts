@@ -357,6 +357,8 @@ export class RustLiveRun {
 			gate: null,
 			metrics: [],
 			discontinuities: [],
+			droppedBeyond: 0,
+			lastBeyondIndex: 0,
 		}
 		let live = false
 		const epoch = this.startEpoch
@@ -396,6 +398,11 @@ export class RustLiveRun {
 							// One past the block log's cap is enough: the log then fails closed.
 							if (startup.discontinuities.length <= CARRIER_LOG_GAPS)
 								startup.discontinuities.push({ sampleIndex, dropped, cause })
+							else if (cause === "queue-overflow") {
+								// Past the list: still count every dropped output sample.
+								startup.droppedBeyond += dropped
+								startup.lastBeyondIndex = sampleIndex
+							}
 							return
 						}
 						const current = slot.run
@@ -665,6 +672,15 @@ export class RustLiveRun {
 		for (const gap of startup.discontinuities)
 			this.host.noteDiscontinuity(run, gap.sampleIndex, gap.dropped, gap.cause)
 		startup.discontinuities.length = 0
+		// The list is already past the log's cap here, so this only keeps droppedTotal exact.
+		if (startup.droppedBeyond > 0)
+			this.host.noteDiscontinuity(
+				run,
+				startup.lastBeyondIndex,
+				startup.droppedBeyond,
+				"queue-overflow",
+			)
+		startup.droppedBeyond = 0
 		for (const sample of startup.metrics)
 			this.onMetrics(
 				run,
@@ -760,6 +776,9 @@ export class RustLiveRun {
 
 interface StartupBuffer {
 	gate: boolean | null
+	/** Queue-overflow samples of startup notices past the kept list. */
+	droppedBeyond: number
+	lastBeyondIndex: number
 	discontinuities: Array<{
 		sampleIndex: number
 		dropped: number

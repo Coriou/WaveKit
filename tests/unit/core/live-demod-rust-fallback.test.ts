@@ -548,7 +548,7 @@ describe("live demod rust fallback and retune", () => {
 		},
 	)
 
-	it.each([16, 17])(
+	it.each([16, 17, 18])(
 		"%i startup discontinuities: all reach the block log, past its cap it fails closed (WG10 req 3.8.1)",
 		async count => {
 			const lines: string[] = []

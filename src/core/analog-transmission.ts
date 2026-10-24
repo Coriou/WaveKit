@@ -1536,6 +1536,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.desynced = true
 		this.desyncCount += 1
 		this.runLen = 0
+		// The held STE window is audio of a run we no longer trust: discard it, never feed it.
+		this.steOwner = null
+		this.steLen = 0
+		this.steS1 = 0
+		this.steS2 = 0
+		this.steEnergy = 0
 		if (this.inSpan) this.endSpan()
 		this.decisions.fill(DROP)
 		this.pendingGaps.length = 0
@@ -1790,7 +1796,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** Decides a partial window before a tone is read. */
 	private steFlush(open: OpenTransmission): void {
 		const format = this.pcmFormat
-		if (this.steOwner !== open || format === null) return
+		if (this.desynced || this.steOwner !== open || format === null) return
 		this.steDecide(open, format)
 	}
 

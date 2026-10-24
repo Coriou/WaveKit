@@ -130,3 +130,7 @@ Follow-up 2026-10-24:
       run past `CARRIER_LOG_GAPS` (`CarrierBlockLog.desynced`, `droppedTotal`, tracker
       `enterDesync`, `desyncedRuns()`), startup notice cap (`rust-run.ts`); tests at 16 and 17.
   - _Requirements: 3.8.1_
+- [x] A1.10 Review round 3 (2026-10-24): desync discards the held STE window (`enterDesync`,
+      `steFlush`); startup dropped-sample sum past the kept notices (`rust-run.ts`
+      `applyStartup`); tests for 15 blocks + 17 gaps and 18 startup notices.
+  - _Requirements: 3.8.1, 3.8.13_

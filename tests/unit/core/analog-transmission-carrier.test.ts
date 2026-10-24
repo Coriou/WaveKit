@@ -573,6 +573,45 @@ describe("WG10 req 3.8 review fixes", () => {
 		},
 	)
 
+	it("desync discards the held STE window without feeding it", () => {
+		const source = new CarrierSource()
+		const run = {}
+		let now = T0
+		let pushed = 0
+		const tracker = new AnalogTransmissionTracker({
+			source,
+			frequencyAt: () => ({ hz: 446_068_750, tuningTrust: "commanded" }),
+			now: () => now,
+			setTimer: () => () => undefined,
+			createToneDetector: () => ({
+				push(pcm) {
+					pushed += pcm.length / 4
+				},
+				result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
+				reset() {},
+			}),
+		})
+		tracker.start()
+		source.gate(true)
+		for (let k = 0; k < 15; k++) {
+			now += 10
+			source.log.note(run, RATE, true, true, k)
+			const pcm = Buffer.alloc(320)
+			for (let i = 0; i < 80; i++) pcm.writeFloatLE(0.2, i * 4)
+			source.log.notePcm(run, RATE, pcm.length)
+			source.emit("pcm", pcm, { rate: RATE, format: "f32le" })
+		}
+		// Fed audio still waits in the 200 ms STE window.
+		expect(pushed).toBe(0)
+		for (let k = 0; k <= CARRIER_LOG_GAPS; k++)
+			source.log.noteDiscontinuity(run, RATE, 80_000 + k * 80, 0, "input-gap")
+		source.log.note(run, RATE, true, true, 15)
+		expect(tracker.desyncedRuns()).toBe(1)
+		expect(pushed).toBe(0)
+		tracker.stop()
+		expect(pushed).toBe(0)
+	})
+
 	it("voice-like harmonics from 65 Hz up never look like STE", () => {
 		for (const f of [65, 70, 80, 90, 100, 120]) {
 			const s = emptyScript()
