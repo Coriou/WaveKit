@@ -30,6 +30,19 @@ jobs:
       - name: Test
         run: pnpm test
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # Links fail the job; mapped code changed without its page is a warning (CONTRIBUTING.md).
+      - name: Check docs
+        run: node scripts/check-docs.mjs --since="${{ github.event.pull_request.base.sha || github.event.before }}"
+
   docker-build:
     needs: lint-typecheck-test
     runs-on: ubuntu-latest

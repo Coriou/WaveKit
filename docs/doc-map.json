@@ -1,0 +1,36 @@
+{
+	"$comment": "Which documentation page describes which code. scripts/check-docs.mjs flags a change to the code without a change to its page. Paths are prefixes from the repository root.",
+	"entries": [
+		{
+			"code": [
+				"web/src/features/",
+				"web/src/shell/",
+				"web/src/spectrum/",
+				"web/src/pwa/"
+			],
+			"docs": ["docs/WEB-APP.md"]
+		},
+		{ "code": ["web/mock/"], "docs": ["web/mock/README.md"] },
+		{
+			"code": ["src/api/routes/", "packages/api-types/src/"],
+			"docs": ["docs/API.md"]
+		},
+		{
+			"code": ["src/config.ts", "config/default.yaml"],
+			"docs": ["docs/CORE-REFERENCE.md", "docs/DOCKER-RUNTIME.md"]
+		},
+		{
+			"code": ["src/decoders/builtin/"],
+			"docs": ["readme.md", "docs/DECODER-GUIDE.md"]
+		},
+		{ "code": ["cli/source/"], "docs": ["docs/CLI.md"] },
+		{
+			"code": ["compose.yaml", "compose.usb.yaml", "Makefile"],
+			"docs": ["docs/DOCKER-RUNTIME.md", "docs/DOCKER-SETUP.md"]
+		},
+		{
+			"code": ["packages/sdr-host/src/", "packages/sdr-host/scripts/"],
+			"docs": ["packages/sdr-host/README.md", "docs/SDR-HOST-SETUP.md"]
+		}
+	]
+}
