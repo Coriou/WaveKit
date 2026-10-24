@@ -48,6 +48,8 @@ const LEAD_SECONDS = 0.5
 const OVER_SECONDS = 3
 const TAIL_SECONDS = 2
 const AM_FLOOR_DBFS = -60
+/** A16 tail bound: the 200 ms guard + one 10 ms block (this harness notes a block after its PCM). */
+const TAIL_BYTES = (0.2 * RATE + 250) * 2
 
 /** An 8 kHz s16le evidence-squelch fixture, linearly upsampled to the harness rate. */
 function fixtureAt25k(name: string): Float32Array {
@@ -309,10 +311,97 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		// The over plays (behind its pre-roll delay of at most 1.5 s).
 		const at = result.received.indexOf(overPcm.subarray(0, RATE))
 		expect(at).toBeGreaterThanOrEqual(0)
-		// From over end + hang (1.5 s) + the largest pre-roll delay (1.5 s) on, only zeros.
-		const quietFrom = overPcm.length + 3 * RATE * 2
+		// A16: from the over's end + the 200 ms guard + one block on, only zeros (the flicker
+		// is unquieted, so it is muted even while the latch lasts).
+		const quietFrom = at + overPcm.length + TAIL_BYTES
 		expect(result.received.subarray(quietFrom).every(b => b === 0)).toBe(true)
 		expect(result.states.has("waiting")).toBe(true)
+	})
+
+	// Amendment A16 (2026-10-24): tail mute. While latched, audio passes only with current
+	// carrier evidence (plus the 200 ms guard for the back-chain drain).
+	it("A16: an over, then unkey to loud unquieted noise with stage 1 still open: the noise after the guard is zeros", async () => {
+		const overPcm = toPcm(overVoice(51), "s16le")
+		const noise = toPcm(
+			whiteNoise({ rate: RATE, seconds: 2, seed: 52, level: 0.9 }),
+			"s16le",
+		)
+		const result = await drive("nfm", [
+			{ pcm: overPcm, open: true, quieted: true },
+			{ pcm: noise, open: true, quieted: false },
+			{ pcm: Buffer.alloc(RATE * 2), open: false, quieted: false },
+		])
+		const at = result.received.indexOf(overPcm.subarray(0, RATE))
+		expect(at).toBeGreaterThanOrEqual(0)
+		// The whole over plays, then at most the guard + one block of the noise.
+		expect(result.received.subarray(at, at + overPcm.length)).toEqual(overPcm)
+		const tail = result.received.subarray(at + overPcm.length)
+		let played = 0
+		for (let i = 0; i < tail.length; i += 2)
+			if (tail.readInt16LE(i) !== 0) played = i + 2
+		expect(played).toBeLessThanOrEqual(TAIL_BYTES)
+		expect(played).toBeGreaterThan(0)
+		// The noise itself (beyond the tail) never reaches the client.
+		expect(
+			result.received.indexOf(noise.subarray(TAIL_BYTES, TAIL_BYTES + 400)),
+		).toBe(-1)
+	})
+
+	it("A16: a speech pause inside a quieted over passes in full", async () => {
+		const over = Buffer.concat([
+			toPcm(overVoice(53), "s16le"),
+			toPcm(carrierSilence({ rate: RATE, seconds: 1 }), "s16le"),
+			toPcm(overVoice(54), "s16le"),
+		])
+		const result = await drive("nfm", [
+			{ pcm: over, open: true, quieted: true },
+			{ pcm: Buffer.alloc(RATE * 2), open: false, quieted: false },
+		])
+		const at = result.received.indexOf(over.subarray(0, RATE))
+		expect(at).toBeGreaterThanOrEqual(0)
+		expect(result.received.subarray(at, at + over.length)).toEqual(over)
+	})
+
+	it("A16: a 600 ms unquieted fade, then the same tone over back: the over resumes; the fade is muted after 300 ms + one block", async () => {
+		const toneOver = (seconds: number, seed: number): Buffer =>
+			toPcm(
+				mix(
+					ctcssMix({ rate: RATE, seconds, hz: 67 }),
+					voiceLike({ rate: RATE, seconds, seed, level: 0.4 }),
+				),
+				"s16le",
+			)
+		const first = toneOver(2, 55)
+		const fade = toPcm(
+			whiteNoise({ rate: RATE, seconds: 0.6, seed: 56, level: 0.9 }),
+			"s16le",
+		)
+		const second = toneOver(2, 57)
+		const result = await drive("nfm", [
+			{ pcm: first, open: true, quieted: true },
+			{ pcm: fade, open: true, quieted: false },
+			{ pcm: second, open: true, quieted: true },
+			{ pcm: Buffer.alloc(RATE * 2), open: false, quieted: false },
+		])
+		expect([...result.states].includes("open")).toBe(true)
+		const at = result.received.indexOf(first.subarray(0, RATE))
+		expect(at).toBeGreaterThanOrEqual(0)
+		// The fade's start plays for the longer of the 200 ms guard and the tone's 300 ms pass
+		// after its last sighting (+ one block); the rest of it is dropped, not delayed (the
+		// pre-roll's catch-up removes it), so the second part follows that prefix directly.
+		const resumed = result.received.indexOf(
+			second.subarray(BLOCK_BYTES, BLOCK_BYTES + RATE),
+		)
+		const fadeAt = at + first.length
+		expect(resumed).toBeGreaterThan(fadeAt)
+		const prefix = resumed - fadeAt - BLOCK_BYTES
+		expect(prefix).toBeLessThanOrEqual((0.3 * RATE + 250) * 2)
+		expect(result.received.subarray(fadeAt, fadeAt + prefix)).toEqual(
+			fade.subarray(0, prefix),
+		)
+		expect(
+			result.received.indexOf(fade.subarray(prefix + 1_000, prefix + 1_400)),
+		).toBe(-1)
 	})
 
 	for (const [name, modulation, make] of OPENS) {

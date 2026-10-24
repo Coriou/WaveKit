@@ -364,6 +364,18 @@ order is now `window-filling`, `non-finite`, `data-like`, `not-quiet`, `low-syll
 latched, `path` (`median`, `runs` or `tone`). Property 17 pins that loud frames only in stretches
 of at most 2 never qualify through the run path.
 
+**Amendment (2026-10-24, A16): tail mute.** `EvidenceGatePort` gains an optional `passing`
+(absent: the pre-A16 pass). `EvidenceGate.passing` is true while open and either `carrierNow`,
+`tailGuardLeft > 0` (set to `guardSamples` on each quieted note and at the latch, counted down per
+pushed PCM sample while the last note was unquieted, cleared by `closed()`), or, on a tone latch,
+`sinceSighting < msToSamples(EVIDENCE_TONE_PASS_MS)` (reset on each sighting of the latched key, at
+a renewal and at the latch, ended by `closed()`). The wiring tags an open slice of a latched gate
+`pass` when `passing`, else `drop` (`evidenceSpan`); a latching slice is still `pass` from the
+latch sample. Tags attach to input samples, so the mute follows the over through the pre-roll
+delay, and `drop` samples behind the queued `pass` audio are skipped by catch-up (the stream
+catches up during the tail instead of playing it). Property 18 pins the pass rule against a
+model for any pattern of quieted, unquieted and closed blocks after a voice latch.
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
@@ -671,6 +683,10 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     syllable-level frames come only in stretches of at most 2, `syllableRuns` is 0, `voicePath`
     never returns `runs`, and the judge says voice exactly when the pinned median rule does.
     _Validates 1.3, 1.4._
+18. **Tail mute (A16, 2026-10-24).** After a voice latch, for any pattern of quieted, unquieted and
+    closed blocks, the gate passes an open block exactly while the gate is open and the last note
+    was quieted or fewer than `CLOSE_GUARD_MS` of PCM have followed the last quieted note since
+    stage 1 last opened. _Validates 1.5._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 

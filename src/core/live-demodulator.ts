@@ -2210,10 +2210,14 @@ export class LiveDemodulator extends EventEmitter {
 				}
 				return
 			}
+			// A16 tail mute: a latched slice without current carrier evidence is dropped (the
+			// latch memory stays; the tag applies to these input samples, whatever the delay).
 			const tag: PreRollTag = completing
 				? evidence.tailTag
 				: gate.state === "open"
-					? "pass"
+					? gate.passing === false
+						? "drop"
+						: "pass"
 					: "pending"
 			preRoll.process(chunk, start, end, tag)
 			evidence.tailTag = tag

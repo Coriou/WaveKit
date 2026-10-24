@@ -1439,7 +1439,10 @@ Configuration notes:
   or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
   to 1.5 s and played when the gate latches. During an over the stream can run up
   to 1.5 s behind; it catches up by dropping the silence after the over. An over
-  shorter than about one second with no tone is not heard. `manual` and `noise`
+  shorter than about one second with no tone is not heard. Once latched, audio passes
+  only while the carrier is FM-quieted (plus 200 ms for the demodulator's drain), or on
+  a tone latch while the tone is still heard: the noise after an unkey is muted at once
+  (amendment A16, 2026-10-24). `manual` and `noise`
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
   replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
   keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine

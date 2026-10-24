@@ -21,6 +21,11 @@ export interface EvidenceGatePort {
 	readonly state: "waiting" | "open"
 	readonly evidence: LiveAudioAutoSquelchEvidence | null
 	/**
+	 * A16 tail mute (2026-10-24): while open, whether the PCM just pushed carries current carrier
+	 * evidence and may play. Absent: every open slice plays (the pre-A16 behaviour).
+	 */
+	readonly passing?: boolean
+	/**
 	 * One measured block while stage 1 is open: `carrier` is the per-block carrier evidence.
 	 * Returns `EVIDENCE_NOTE_*` bit flags (amendment 2026-10-23: was `void`): `RESET` when the
 	 * block was a carrier onset that reset the voice window while waiting; `DISCARD` as well
