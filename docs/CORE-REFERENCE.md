@@ -29,7 +29,7 @@ curl http://localhost:9000/api/sources
 curl http://localhost:9000/api/tuner
 
 # Set tuner frequency
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \\
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \
   -H "Content-Type: application/json" -d '{"hz":144800000}'
 ```
 
@@ -40,19 +40,22 @@ Connect to `ws://localhost:9000/ws` and subscribe to channels:
 ```javascript
 const ws = new WebSocket("ws://localhost:9000/ws")
 
-ws.send(
-	JSON.stringify({
-		type: "subscribe",
-		channels: [
-			"decoders",
-			"sources",
-			"metrics",
-			"health",
-			"fanout",
-			"live-audio",
-		],
-	}),
-)
+// Subscribe once the connection is open; sending earlier throws.
+ws.onopen = () => {
+	ws.send(
+		JSON.stringify({
+			type: "subscribe",
+			channels: [
+				"decoders",
+				"sources",
+				"metrics",
+				"health",
+				"fanout",
+				"live-audio",
+			],
+		}),
+	)
+}
 
 ws.onmessage = event => {
 	const msg = JSON.parse(event.data)
@@ -108,16 +111,16 @@ or the REST API to tune frequency, gain, and other settings.
 curl http://localhost:9000/api/tuner
 
 # Set frequency
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \\
-  -H "Content-Type: application/json" -d '{\"hz\":144800000}'
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \
+  -H "Content-Type: application/json" -d '{"hz":144800000}'
 
 # Release control to SDR++
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \\
-  -H "Content-Type: application/json" -d '{\"mode\":\"external\"}'
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
+  -H "Content-Type: application/json" -d '{"mode":"external"}'
 
 # Reclaim control
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \\
-  -H "Content-Type: application/json" -d '{\"mode\":\"internal\"}'
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
+  -H "Content-Type: application/json" -d '{"mode":"internal"}'
 ```
 
 ### Tuner Relay (SDR++)
@@ -145,7 +148,8 @@ tunerRelay:
 
 - The relay expects an IQ source in `U8_IQ` format (standard RTL-TCP/rtlmux output).
 - In `exclusive` mode, the first client gets control and others are read-only.
-- The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
+- The relay streams the source named by `tunerRelay.sourceId`. Without it, the relay uses the
+  default source: the first configured source whose `scanner.role` is `shared` (the default role).
 - RTL-TCP commands are tracked and available via `GET /api/tuner-relay`.
 - Relay commands update the internal tuner state and will switch control mode to
   `external` while a relay control client is active. When the relay becomes idle,
@@ -241,7 +245,7 @@ Configuration via YAML (`config/default.yaml`) or environment variables:
 sources:
   - id: "sdrpp-main"
     type: "sdrpp-network"
-    host: "192.168.1.69"
+    host: "<sdrpp-host>" # address of the machine running SDR++
     port: 5555
     caps:
       kind: "audio_pcm"
@@ -282,10 +286,13 @@ tunerRelay:
 ```bash
 WAVEKIT_API_PORT=9000
 WAVEKIT_LOG_LEVEL=debug
-WAVEKIT_SOURCES_0_HOST=192.168.1.100
+WAVEKIT_SOURCES_0_HOST=<sdrpp-host>
 WAVEKIT_TUNER_RELAY__ENABLED=true
 WAVEKIT_TUNER_RELAY__PORT=1234
 ```
+
+`WAVEKIT_SOURCES_<index>_...` and `WAVEKIT_DECODERS_<index>_...` only change an entry that the
+YAML file already defines; they cannot add one. Startup fails if the index does not exist.
 
 ## RTL-SDR Setup
 
@@ -310,11 +317,13 @@ rtlmux -a 0.0.0.0 -p 5555 -s 5556 127.0.0.1 1234
 
 Three build targets, all produced by a single `docker buildx bake` invocation:
 
-| Target                 | Contents               | Use Case           |
-| ---------------------- | ---------------------- | ------------------ |
-| `wavekit:latest`       | SDR++ + API + Decoders | All-in-one         |
-| `wavekit:latest-core`  | API + Decoders         | External SDR++     |
-| `wavekit:latest-sdrpp` | SDR++ only             | Dedicated SDR host |
+| Image                                 | Bake target   | Contents               | Use Case           |
+| ------------------------------------- | ------------- | ---------------------- | ------------------ |
+| `ghcr.io/coriou/wavekit:latest`       | `final`       | SDR++ + API + Decoders | All-in-one         |
+| `ghcr.io/coriou/wavekit:latest-core`  | `final-core`  | API + Decoders         | External SDR++     |
+| `ghcr.io/coriou/wavekit:latest-sdrpp` | `final-sdrpp` | SDR++ only             | Dedicated SDR host |
+
+The registry and tag come from the `REGISTRY` and `TAG` variables in `docker/bake.hcl`.
 
 ```bash
 # Build the default group (all three images)
@@ -322,14 +331,42 @@ make docker-build
 
 # Single-arch local build (skip multi-arch when you don't need it)
 docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64" --load
-
-# Run with external SDR++
-docker run -p 9000:3000 -p 8080:8080 \
-  -p 1234:1234 \
-  -e WAVEKIT_SOURCES_0_HOST=192.168.1.69 \
-  -e WAVEKIT_SOURCES_0_PORT=5555 \
-  -e WAVEKIT_TUNER_RELAY__ENABLED=true \
-  wavekit:latest-core
 ```
+
+To run the core image against an external SDR++, write a config file with a complete source
+entry. The image's built-in configuration has no sources, and environment overrides cannot
+add one. Save this as `wavekit.yaml`, replacing `<sdrpp-host>` with the address of the machine
+running SDR++ (an IP address is safest; `.local` names may not resolve inside a container):
+
+```yaml
+sources:
+  - id: "sdrpp-main"
+    type: "sdrpp-network"
+    host: "<sdrpp-host>"
+    port: 5555
+    caps:
+      kind: "audio_pcm"
+      sampleRate: 48000
+      format: "FLOAT32LE"
+decoders: []
+api:
+  host: "0.0.0.0"
+  port: 9000
+audio:
+  tcpPort: 8080
+```
+
+Then mount it and point `WAVEKIT_CONFIG` at it:
+
+```bash
+docker run -p 9000:9000 -p 8080:8080 \
+  -v "$PWD/wavekit.yaml:/config/wavekit.yaml:ro" \
+  -e WAVEKIT_CONFIG=/config/wavekit.yaml \
+  ghcr.io/coriou/wavekit:latest-core
+```
+
+`WAVEKIT_CONFIG` selects that one file instead of `/app/config/default.yaml`; settings it
+leaves out take their schema defaults. The tuner relay needs an `rtl_tcp` source with `U8_IQ`
+IQ, so it is not enabled for this SDR++ audio source.
 
 See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`dev`, `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.

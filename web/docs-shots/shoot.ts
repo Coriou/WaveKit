@@ -2,7 +2,8 @@
 // docs/assets/screenshots/. Usage: pnpm --filter @wavekit/web docs:shots [--no-build] [--only=a,b]
 //
 // The mock serves the same seeded data on every run, so a shot changes only when the app does.
-// Each shot loads the app fresh with its theme in localStorage, presses its dock buttons, waits
+// Each shot loads the app fresh with its theme and blank map tiles in localStorage, refuses every
+// request that is not to the local preview or mock, presses its dock buttons, waits
 // for the waterfall and live data to settle, then captures the viewport at 2x.
 // Chromium: PLAYWRIGHT_CHROMIUM_PATH, else /opt/pw-browsers, else playwright-core's own lookup.
 
@@ -38,6 +39,14 @@ interface Shot {
 }
 
 const DESKTOP = { width: 1440, height: 900 }
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"])
+
+function isLoopback(url: string): boolean {
+	const { protocol, hostname } = new URL(url)
+	if (protocol === "data:" || protocol === "blob:") return true
+	return LOOPBACK_HOSTS.has(hostname)
+}
 const PHONE = { width: 390, height: 844 }
 
 const SHOTS: readonly Shot[] = [
@@ -173,16 +182,26 @@ async function main(): Promise<void> {
 				colorScheme: shot.theme,
 				serviceWorkers: "block",
 			})
+			// Only the local preview and mock: anything else, such as map tiles, is refused.
+			await context.route("**/*", route =>
+				isLoopback(route.request().url()) ? route.continue() : route.abort(),
+			)
 			await context.addInitScript(
-				([key, value]) => localStorage.setItem(key, value),
+				entries => {
+					for (const [key, value] of entries) localStorage.setItem(key, value)
+				},
 				[
-					"wavekit.web.theme",
-					JSON.stringify({
-						theme: shot.theme,
-						ground: "black",
-						accent: "mono",
-						waterfall: "match",
-					}),
+					[
+						"wavekit.web.theme",
+						JSON.stringify({
+							theme: shot.theme,
+							ground: "black",
+							accent: "mono",
+							waterfall: "match",
+						}),
+					],
+					// Map › Tiles: blank, so the map shot draws no network tiles.
+					["wavekit.web.device", JSON.stringify({ mapTiles: "blank" })],
 				] as const,
 			)
 			const page = await context.newPage()

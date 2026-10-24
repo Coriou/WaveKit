@@ -9,6 +9,9 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **Audio Stream**: `tcp://localhost:8080`
 - **Live Audio Stream**: `http://localhost:8081/stream` (raw PCM) and `http://localhost:8081/stream.wav` (WAV-wrapped)
 
+In the examples, `<sdrpp-host>` and `<pi-address>` stand for your own receiver addresses, and
+`192.0.2.x` addresses are from the range reserved for documentation.
+
 ## Protected runtime (opt-in)
 
 Legacy mode remains the default. Protected mode loads provisioned private access
@@ -432,7 +435,7 @@ curl http://localhost:9000/api/status
 				"value": 446524920,
 				"at": "2024-05-21T03:12:01.123Z",
 				"clientId": "client-1",
-				"clientRemote": "192.168.1.50:50522"
+				"clientRemote": "192.0.2.50:50522"
 			}
 		]
 	}
@@ -513,7 +516,7 @@ curl http://localhost:9000/api/sources
 	{
 		"id": "sdrpp-main",
 		"type": "sdrpp-network",
-		"host": "192.168.1.69",
+		"host": "<sdrpp-host>",
 		"port": 5555,
 		"connected": true,
 		"activity": {
@@ -1290,7 +1293,7 @@ curl http://localhost:9000/api/tuner-relay
 	"sourceFormat": "U8_IQ",
 	"compatibility": "ok",
 	"clientsConnected": 1,
-	"controlClientRemote": "192.168.1.50:50522",
+	"controlClientRemote": "192.0.2.50:50522",
 	"controlPolicy": "exclusive",
 	"bytesSent": 421000000,
 	"bytesReceived": 120,
@@ -1316,7 +1319,7 @@ curl http://localhost:9000/api/tuner-relay
 			"value": 446524920,
 			"at": "2024-05-21T03:12:01.123Z",
 			"clientId": "client-1",
-			"clientRemote": "192.168.1.50:50522"
+			"clientRemote": "192.0.2.50:50522"
 		}
 	]
 }
@@ -1754,7 +1757,7 @@ curl -X POST http://localhost:9000/api/sources \
   -d '{
     "id": "rtl-pi",
     "type": "rtl_tcp",
-    "host": "192.168.1.100",
+    "host": "<pi-address>",
     "port": 1234,
     "caps": {
       "kind": "audio_pcm",
@@ -5680,7 +5683,7 @@ to one `GET /api/sources` item. Cadence, per source:
 	"data": {
 		"id": "rtl-pi",
 		"type": "rtl_tcp",
-		"url": "192.168.1.50:1234",
+		"url": "192.0.2.50:1234",
 		"connected": true,
 		"activity": {
 			"state": "stale",
