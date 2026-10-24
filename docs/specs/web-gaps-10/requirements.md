@@ -272,40 +272,67 @@ detector, fed the whole chain, never reached its 60 % CTCSS continuity and a CTC
 DCS D031N over showed no tone. Requirement 3.7 is amended by 3.8; its numbers and constants stay.
 Live audio gating and the evidence squelch are unchanged.
 
-3.8 **Carrier-bounded transmissions.** On a pipeline that reports carrier runs (nfm/wfm, every
-squelch mode), the tracker delimits transmissions by carrier evidence, not by power re-opens:
+3.8 **Carrier-bounded transmissions.** On a pipeline that logs carrier blocks (nfm/wfm, every
+squelch mode), the tracker delimits transmissions by per-block carrier evidence, not by power
+re-opens. Every rule below is evaluated on the logged block sequence in block order, never on
+a latest-value snapshot, so batched, delayed or split delivery gives the same result.
 
-- 3.8.1 **Carrier span.** While the squelch is open, a span starts when
-  `ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS` (10) consecutive 10 ms blocks carry FM quieting
-  (`ChannelSquelch.blockCarrier`, or the sampled-path rule); its start is the first block of
-  that run. It ends at the end of its last carrier block once the squelch closes or no block
-  has carried for `SQUELCH_HANG_MS` (250 ms, 25 blocks), whichever is first.
-- 3.8.2 **Open.** A transmission opens only with a span; its `startedAt` is the span start (not
-  the squelch open). A squelch segment without a span (an evidence-less segment) is discarded:
-  it opens nothing, adds no audio, power or tone, and never extends or restarts a merge timer.
-- 3.8.3 **Extend and merge.** A span that starts within `ANALOG_TRANSMISSION_MERGE_GAP_MS`
-  (1500 ms, inclusive) of the transmission's last carrier block end, with the same source,
-  config identity and frequency, continues it (same id); the 3.7 tone split still applies.
-  The merge timer runs from the last carrier block end only; squelch edges never restart it.
-- 3.8.4 **End.** The transmission ends (`endedAt`) at its last carrier block end and is final
-  at that end + 1500 ms, even while interference holds the power squelch open. Stop, config,
-  retune and max-duration closes stay final at once.
-- 3.8.5 **Publish.** Summed span audio (gaps excluded) of at least `ANALOG_TRANSMISSION_MIN_MS`
-  (500 ms) publishes; the 3.7 single-segment carrier rule is implied (10 ≥ 3). A bare carrier
-  key-up without any tone is one transmission with a null tone.
-- 3.8.6 **Tone input.** The tone detector (and the split detector) are fed only PCM of carrier
-  blocks: the 100 ms before a span qualifies (the run itself, from a fixed pre-roll) and then
-  each chunk while the last measured block carried. DCS `DCS_MIN_AUDIO_SECONDS` and the 0.75 s
-  CTCSS gate count fed audio only.
-- 3.8.7 **Fallback.** A source without carrier runs (am, usb, lsb, dsb, cw, raw, or the hook
-  absent or failing) keeps 3.7 byte-identical.
-- 3.8.8 **Consumers.** No REST, WebSocket, Activity row or identify DTO field changes. Activity
+- 3.8.1 **Block log.** The live demodulator appends one record per measured squelch block of a
+  pipeline run: its index in the run, whether the squelch was open and whether the block
+  carried FM quieting (`ChannelSquelch.blockCarrier`, or the sampled-path rule). Block `k` of a
+  run covers output PCM samples `[k × B, (k + 1) × B)` of that run, `B` the squelch block length
+  in samples (output rate equals the squelch rate on both engines). Block time is
+  `anchor + k × blockMs`.
+- 3.8.2 **Carrier span.** A span starts when `ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS` (10)
+  consecutive blocks are open and carried; its start is the first block of that run. It ends at
+  the end of its last open carried block once a block is closed or 25 blocks
+  (`SQUELCH_HANG_MS` 250 ms) in a row did not carry.
+- 3.8.3 **Open and discard.** A transmission opens only with a span, at the span start. Blocks
+  outside spans (an evidence-less segment, or a run of fewer than 10) add no audio, power or
+  tone and never extend, merge or postpone a transmission.
+- 3.8.4 **Merge.** A span whose start is at most `ANALOG_TRANSMISSION_MERGE_GAP_MS` (1500 ms,
+  inclusive, on block time) after the transmission's last carrier block end, with the same
+  source, config identity and frequency, continues it (same id; the 3.7 tone split applies).
+- 3.8.5 **End and finalisation.** `endedAt` is the last carrier block end. The transmission is
+  final at the first block ending more than 1500 ms after it, unless a run that started within
+  the 1500 ms is still provisional (fewer than 10 blocks so far); finalisation then waits for
+  that run to qualify (merge) or break (final), at most 9 blocks (90 ms). Squelch edges, level
+  samples and timers never restart or shorten this. Stop, config, retune and max-duration
+  closes stay final at once.
+- 3.8.6 **Publish.** Summed span audio of at least `ANALOG_TRANSMISSION_MIN_MS` (500 ms)
+  publishes; the 3.7 single-segment carrier rule is implied (10 ≥ 3). A bare carrier key-up
+  without a tone is one transmission with a null tone.
+- 3.8.7 **Tone input by sample position.** The tone detector (and the split detector) receive
+  exactly the PCM samples of open carried blocks of a span, the run's first 9 blocks included,
+  located by output-sample position, never by arrival time; a chunk that spans carried and
+  uncarried blocks is cut at the block boundary. PCM waits in a bounded ring until its blocks are
+  decided. DCS `DCS_MIN_AUDIO_SECONDS` and the 0.75 s CTCSS gate count fed audio only. Lost
+  audio inside a span (uncarried blocks) is removed, not replaced, and no CTCSS/DCS guarantee is
+  claimed for spans with more than one fade per 2 s of fed audio.
+- 3.8.8 **Fallback.** A source without the block log (am, usb, lsb, dsb, cw, raw, or the hook
+  absent) keeps 3.7 byte-identical.
+- 3.8.9 **Consumers.** No REST, WebSocket, Activity row or identify DTO field changes. Activity
   gets one row per over with its tone and true bounds and no interference rows; identify's
   analog evidence and `pending()` see only carrier-bearing transmissions (an interference-only
-  target is `no-sync`, not `timeout`); WG12 live-audio scanner evidence follows the same
-  stream. Recordings are not driven by the tracker and are unchanged.
-- 3.8.9 **Acceptance.** Deterministic tests (no RF): a 5 s CTCSS 79.7 Hz over amid 0.5 s weak
-  flicker is exactly one transmission of 5 s ± 20 ms with `ctcssHz` 79.7; a DCS D031N over the
-  same with that code; flicker alone publishes none; an over with a 1 s unkeyed pause is one
-  transmission; a bare carrier key-up is one transmission with a null tone; the live timeline
-  regression of the design (five overs amid flicker) is five transmissions with their tones.
+  target is `no-sync`, not `timeout`); WG12 live-audio scanner evidence follows the same stream.
+  Recordings are not driven by the tracker and are unchanged.
+- 3.8.10 **Acceptance (deterministic).** A 5 s CTCSS 79.7 Hz over amid 0.5 s flicker without
+  carrier runs is one transmission of 5 s ± 10 ms with `ctcssHz` 79.7; a DCS D031N over the same
+  with that code; flicker alone publishes none; an over with a 1 s unkeyed pause is one
+  transmission; a bare carrier key-up is one transmission with a null tone; the bounds hold at 9
+  and 10 run blocks and at merge gaps of 1490, 1500 (merge) and 1510 ms (split; block time is
+  quantised to 10 ms, so 1501 ms is not representable); the result is the same when blocks
+  arrive in batches of 10 after their PCM (start times then within one batch, 100 ms) or with
+  PCM split at arbitrary byte offsets; the
+  synthetic boundary regression of the design holds.
+- 3.8.11 **Acceptance (live, Main only).** That real interference never forms a 10-block carrier
+  run is an assumption the deterministic tests cannot prove (the live status log has no
+  per-block quieting). Main confirms it on the live receiver per the design's acceptance plan
+  before 3.8 counts as accepted.
+- 3.8.12 **Squelch tail elimination (STE).** An over that ends with a 55 Hz STE tone (about
+  0.4 s after PTT release, carrier still up) ends at the carrier drop, the last carried block,
+  not at the STE onset: carrier evidence is the 3.8 boundary rule and STE audio is carried; no
+  STE detector is needed (one in the evidence squelch may be reused later, not imported now);
+  0.4 s is under the 1500 ms merge gap and never splits an over. The 55 Hz tail never becomes a
+  CTCSS tone, and a 120° or 180° CTCSS phase reversal at PTT release (the other STE form) still
+  ends at the carrier drop and costs at most the analysis blocks that hold it (design bound).

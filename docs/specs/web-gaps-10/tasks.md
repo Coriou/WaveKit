@@ -74,41 +74,31 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 ## Amendment 2026-10-24: carrier-bounded transmissions
 
 Requirement 3.8, design section "Amendment 2026-10-24". Paths: `src/core/analog-transmission.ts`,
-the hook in `src/core/live-demodulator.ts` (only the lines named below), tests. No change to
-`src/core/evidence-squelch/**`, `src/core/channel-squelch.ts`, `packages/**` or `src/index.ts`.
+the hook lines in `src/core/live-demodulator.ts` named below, tests. No change to
+`src/core/evidence-squelch/**`, `src/core/channel-squelch.ts`, `src/core/live-demod/**`,
+`packages/**` or `src/index.ts`.
 
-- [ ] A1.1 Carrier-run hook. `src/core/live-demodulator.ts`: fields `carrierRunCount` and
-      `blocksSinceCarrier` next to `carrierBlockCount`, updated only at the existing
-      `carrierBlockCount` increment in the per-block measurement (both the sampled and the
-      `run.squelch.blockCarrier()` branch), reset when a pipeline run starts; public
-      `readCarrierRun(into)` beside `carrierBlocks()`, same null rule. Verify a Rust metrics
-      point is one 10 ms block (else scale the counts) and say so in the test.
-  - _Requirements: 3.8.1, 3.8.7_
-- [ ] A1.2 Tracker. `src/core/analog-transmission.ts`: `AnalogCarrierRun`,
-      `AnalogTransmissionSource.readCarrierRun?`, constants
-      `ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS` and `ANALOG_CARRIER_BLOCK_MS`; carrier mode chosen
-      in `openTransmission`'s caller (`handleSquelch`) by the hook; new private
-      `observeCarrier(now)` called from `handlePcm`, `handleLevel` and `handleSquelch`; span
-      qualification replaces the bare-open path of `handleSquelch`/`resumeSegment`; `endSegment`
-      and `canMerge` use the last carrier block end; `close`/`finalise` end at it; `pending()`
-      returns only a qualified span; `discardedSegments()`. Fallback path untouched.
-  - _Requirements: 3.8.2–3.8.5, 3.8.7, 3.8.8_
-- [ ] A1.3 Tone input. `handlePcm` feeds the detector and the split detector only per 3.8.6
-      through the preallocated pre-roll ring; `noteAudio` counts fed audio only; ring sized
-      once per PCM format.
-  - _Requirements: 3.8.6_
-- [ ] A1.4 Tests. `tests/unit/core/analog-transmission-hygiene-fakes.ts` gains an opt-in block
-      script (power open, quieted per block, tagged PCM) driving `readCarrierRun` and the clock;
-      new `tests/unit/core/analog-transmission-carrier.test.ts` (the five 3.8.9 cases, the bounds
-      9 vs 10 run blocks, 1500 vs 1501 ms merge, 249 vs 250 ms span hang, the run2 timeline
-      regression, the am fallback golden), with real `ToneDetector` and synthetic 79.7 Hz and
-      D031N PCM (reuse the DCS synth of `tests/unit/core/analog-transmission-dcs.test.ts`); new
-      `tests/unit/core/analog-transmission-carrier.property.test.ts` (Properties 13, 14); hook
-      test in `tests/unit/core/live-demodulator-wg7.test.ts` (run and since-last counts on a
-      `carrierWindows` channel). Existing tracker tests stay unchanged (their fakes have no
-      hook); any golden that changes is listed with 3.8.
-  - _Requirements: 3.8.9_
+- [x] A1.1 Block log. `src/core/analog-transmission.ts`: `CarrierBlockLog` (fixed ring,
+      `note(run, rate, open, carried)`, `notePcm(run, rate, bytes)`, epoch per run).
+      `src/core/live-demodulator.ts`: field `carrierLog`, one `note` at the existing
+      `carrierBlockCount` increment in `measureRun`, one `notePcm` at the top of
+      `handleAudioData`, getter `carrierBlockLog()` with the `carrierBlocks()` null rule.
+  - _Requirements: 3.8.1, 3.8.8_
+- [x] A1.2 Tracker carrier path. `AnalogTransmissionTracker`: `drainCarrier()` consumes the log in
+      block order (`carrierBlock(k, flags)`: run, span, merge, provisional finalisation), called
+      from `handlePcm`, `handleLevel`, `handleSquelch`, `handleStopped`, `handleConfig` and
+      `stop`; `audioSoFar`, `close` and `pending()` honour spans; `discardedRuns()`.
+  - _Requirements: 3.8.2–3.8.6, 3.8.9_
+- [x] A1.3 Tone input. Per-block feed decisions ring and PCM ring (`CarrierPcmRing`, sized once
+      per PCM format), drained by output-sample position with cuts at block boundaries.
+  - _Requirements: 3.8.7_
+- [x] A1.4 Tests. `tests/unit/core/analog-transmission-carrier.test.ts` (3.8.10 cases with real
+      `ToneDetector`, CTCSS and D031N synthesis from `tests/unit/core/audio-tones/dcs-synth.ts`,
+      repeated fades, batched, delayed and split delivery, run2 boundary regression, fallback),
+      `tests/unit/core/analog-transmission-carrier.property.test.ts` (Properties 13, 14), the
+      `CarrierBlockLog` unit test in the carrier suite, STE tests (3.8.12), and the deliberate
+      `tests/unit/core/live-demodulator-wg7.test.ts` changes (carrier blocks matching PCM).
+  - _Requirements: 3.8.10, 3.8.12_
   - **Property 13: Spans bound transmissions**, **Property 14: Tone hears only carrier**
-- [ ] A1.5 Checkpoint: touched tests, `pnpm run typecheck`, `pnpm run lint`; CPU check of the
-      hook and the ring against the design budget; spec ticks.
-  - _Requirements: 3.8, 6.1_
+- [ ] A1.5 Live acceptance (Main): the design's acceptance plan.
+  - _Requirements: 3.8.11_

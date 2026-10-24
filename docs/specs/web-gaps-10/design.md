@@ -331,77 +331,108 @@ has no caps, via an exact Main diff; a test shows the `connected` retry builds i
 
 ## Amendment 2026-10-24: carrier-bounded transmissions (requirement 3.8)
 
-Additive to "Identify for analog voice" and Property 11/12; the 3.7 text above records what
-landed and stays. Pipeline position: unchanged (the tracker listens to the live demodulator's
-`squelch-changed`, `level` and `pcm` events); only its segment rule and its tone input change.
+Additive to "Identify for analog voice" and Properties 11 and 12; the 3.7 text records what
+landed and stays. Pipeline position unchanged: the tracker listens to the live demodulator's
+`squelch-changed`, `level`, `config-changed`, `stopped` and `pcm` events and now also reads a
+block log the demodulator fills.
 
 ### Why
 
 3.7 qualifies a transmission by carrier but delimits it by power: any squelch re-open within
-1500 ms of the previous segment's audio end (`close - 250 ms hang`) resumes it and re-arms the
-gap timer. Live timeline (status samples about every 0.55 s, nfm, auto squelch, floor about
--55 dBFS, threshold about -49 dBFS): interference near -45 dBFS opened the squelch every 0.52
-to 1.1 s for 214 s; overs near 0 dBFS ran at about 19.1-26.0, 33.7-41.0, 54.9-61.6, 75.9-81.0
-and 84.4-88.8 s, and after each over the interference held the power squelch open. Every gap
-was below 1500 ms, so the chain never ended; the only tone report (at 214.5 s) was null.
+1500 ms of the previous segment's audio end resumes it and re-arms the gap timer. Live timeline
+(status samples about every 0.55 s, nfm, auto squelch, floor about -55 dBFS, threshold about
+-49 dBFS): interference near -45 dBFS opened the squelch every 0.52 to 1.1 s for 214 s; overs
+near 0 dBFS ran at about 19.1-26.0, 33.7-41.0, 54.9-61.6, 75.9-81.0 and 84.4-88.8 s, and after
+each over the interference held the power squelch open. Every gap was under 1500 ms, so the
+chain never ended; the only tone report (at 214.5 s) was null.
 
-### Hook (live demodulator, tiny)
+### Why a block log, not a snapshot
 
-```ts
-/** Carrier-run snapshot, in measured 10 ms blocks; written into a caller-owned object. */
-export interface AnalogCarrierRun {
-	total: number // equals carrierBlocks()
-	run: number // consecutive carrier blocks ending at the last measured block (0: it had none)
-	sinceLast: number // measured blocks since the last carrier block (0: the last one carried)
-}
-// AnalogTransmissionSource (optional):
-readCarrierRun?(into: AnalogCarrierRun): boolean // false where carrierBlocks() is null
-```
+PCM reaches the tracker asynchronously (`handleAudioData`), several measured blocks can pass
+between two tracker observations, and the Rust engine reports metrics in batches of ten 10 ms
+blocks, possibly after the matching audio. A latest-value snapshot would lose runs (10 carrier
+blocks followed by one noise block before the next observation reads as run 0) and would accept
+a whole chunk that mixes noise and carrier blocks. So the demodulator logs every block, the
+tracker consumes the log in order, and PCM is matched to blocks by output-sample position.
 
-`LiveDemodulator` keeps `carrierRunCount` and `blocksSinceCarrier` beside `carrierBlockCount`,
-updated at the same increment point after `publishSquelchChange()` (two integer writes per
-block, no allocation), reset when a run starts. `ChannelSquelch` is not changed:
-`blockCarrier()` already is the per-block evidence. `ANALOG_CARRIER_BLOCK_MS` (10) converts
-blocks to milliseconds (`LEVEL_BLOCK_SECONDS`).
+### Hook (live demodulator, three lines)
 
-### Rules and bounds
+`CarrierBlockLog` lives in `src/core/analog-transmission.ts`: a fixed `Uint8Array` ring of
+`CARRIER_LOG_CAPACITY` (2048 blocks, 20.48 s) flags (bit 0 squelch open, bit 1 carried), the
+run's block count, its PCM byte count, the block length `B = max(1, round(rate × 10 / 1000))`
+samples (the same rounding as `ChannelSquelch`), `blockMs = B / rate × 1000` and an epoch that
+increments when the run object changes. `LiveDemodulator` holds one instance and calls
+`note(run, run.stream.rate, reportedOpen, carried)` where it already counts `carrierBlockCount`,
+`notePcm(run, run.stream.rate, chunk.length)` first in `handleAudioData`, and exposes
+`carrierBlockLog()` (null exactly when `carrierBlocks()` is null). After each noted block the log calls its
+`onBlock` listener (set by the tracker), so the tracker consumes blocks as they are measured and
+samples config and frequency at block time; a batch is consumed in order. The block-time anchor
+is `clock - blocks × blockMs` at first sight, lowered to the least such estimate while no run,
+span or transmission is held (a logged block is never earlier than its stream time). Both engines emit output PCM
+at the squelch rate (csdr: channel rate; Rust: 48 kHz with 480-sample blocks), so block `k`
+covers output samples `[k × B, (k + 1) × B)`. Known offsets, not compensated: the csdr back
+chain's filter delay (a few samples) and Rust startup metrics dropped beyond the handshake
+buffer (the log then lags; a resync at the next run). No `src/core/live-demod/**` change.
 
-- **Span start: a run of 10 carrier blocks (100 ms).** Upper side: the shortest publishable
-  transmission is 500 ms = 50 blocks, so a real carrier has 5x the run it needs, and the run is
-  shorter than one hang (25 blocks) so the gate's own timing is never the limit. Lower side:
-  with noise quieting a block with probability p (sporadic quieting of a noise or interference
-  block; p = 0.1 is generous at the 6 dB default), a 10-block run per block start is p^10 =
-  1e-10, about 5e-9 over a 50-block flicker segment, so at two segments a second interference
-  forms a span about once in 3 years; at 3 blocks (the 3.7 count) it is 1e-3 per start, about
-  one false span every 10 s. The bound is tested at 9 (none) and 10 (span). The span start is
-  `now - run × 10 ms` at the observation that first sees `run ≥ 10`.
-- **Span end: last carrier block end**, on squelch close or once `sinceLast × 10 ms ≥ 250 ms`
-  (the squelch hang, so a span ends no later than the gate would close on carrier loss alone).
-  Short fades (fewer than 25 unquieted blocks) stay inside the span.
-- **Merge: 1500 ms from the last carrier block end**, inclusive, timer armed only there. An
-  over with a 1 s unkeyed pause: gap 1000 ms ≤ 1500 ms, one transmission, audio = both spans.
-- **End: last carrier block end; final at end + 1500 ms** (timer, or the next observation), so
-  interference holding the squelch open cannot hold a transmission open. A span after that is a
-  new transmission. Max-duration, retune, stop and config behave as in 3.7.
-- **Discard:** a squelch segment that closes without a span changes no tracker state except a
-  `discardedSegments()` counter (tests and debug; not in any DTO, `suppressed()` unchanged).
-- **Fallback:** `readCarrierRun` absent or returning false at the first open selects the 3.7
-  path for that transmission (am, ssb, cw, raw and every existing fake).
+### Tracker carrier path
 
-### Tone input: carrier-gated feeding with a pre-roll ring (chosen)
+`drainCarrier()` processes every new block `k` once, in order (block time
+`t(k) = anchor + k × blockMs`, anchor set when an epoch is first seen):
 
-Considered: per-segment detectors (one `ToneDetector` per squelch segment, keep the result of
-carrier-bearing ones). Rejected: it runs the CTCSS bank and DCS decoder on every interference
-segment (two a second here), cannot join continuity across segments of one over, and still
-needs a carrier gate inside a segment, because interference holds the squelch open after the
-over. Chosen: one detector per transmission (as today) fed only carrier audio. While a
-provisional segment has no span, PCM goes into a ring preallocated once per PCM format with
-100 ms of audio (at most 48 kHz × 4 B × 0.1 s = 19.2 kB); when the span qualifies the ring is
-pushed first, then each chunk while `sinceLast` is 0. Chunks during fades are skipped (at most
-240 ms per fade; CTCSS needs 60 % of 500 ms blocks, so a 5 s over keeps above 95 % continuity).
-Cost: flicker audio now runs no detector (today it ran the full bank), the ring copy is one
-`Buffer.copy` per chunk, the hook two integer writes per block: well inside the 3.7 meter
-budget; no per-chunk allocation, per docs/PERFORMANCE.md.
+- `open && carried`: the run grows (start remembered). In a span the block is fed and the
+  span's carrier end becomes `t(k + 1)`. Outside a span, the run's blocks stay undecided until
+  it reaches 10 blocks (span start = run start: merge or open, the 10 blocks fed) or breaks
+  (the blocks are dropped and counted in `discardedRuns()`).
+- otherwise: the run breaks; the block is dropped; in a span, a closed block or the 25th
+  uncarried block in a row ends the span at its carrier end (audio += carrier end - span start).
+- finalisation, outside a span: once `t(k + 1) - carrierEnd > 1500 ms` and no run that started
+  at most 1500 ms after the carrier end is pending, close with reason `squelch` at the carrier
+  end. A run that starts at 1490 ms and qualifies at 1590 ms therefore merges; the 3.7 gap timer
+  is not used on this path, so a timer firing early cannot finalise.
+
+Merge test: `t(spanStart) - carrierEnd ≤ 1500 ms` plus the 3.7 identity checks. Retune and
+max-duration closes inside a span reopen at once (max-duration as an exempt continuation);
+stop and config close at the event time. A new epoch ends an open span at its carrier end.
+
+### Tone input
+
+Feed decisions are a per-block ring (undecided, feed, drop). PCM is copied into a ring sized
+once per PCM format (`CARRIER_PCM_RING_MS` 2000 ms: at most 48 kHz × 4 B × 2 s = 384 kB) and
+drained while the oldest buffered sample's block is decided; each piece ends at a block boundary,
+so a mixed chunk is cut there. Fed pieces go to the transmission's detector (and the split
+detector) if the block is at or after its start. PCM older than the decision ring, or beyond the
+PCM ring, is dropped unfed. Considered and rejected: per-segment detectors (run the banks on
+every interference segment, cannot join continuity across segments of one over, still need a
+carrier gate since interference holds the squelch open after the over).
+
+Fades: uncarried blocks inside a span are removed, not replaced, so they lower no vote by
+noise; the cost is a phase splice per fade. A CTCSS analysis block (500 ms, hop 250 ms) holding a
+splice may lose its vote, so one splice can cost 2 of the 4 votes per second; 60 % continuity
+then survives at most one splice per 1.25 s of fed audio. The requirement states the weaker
+"one fade per 2 s" and the tests check CTCSS and D031N with a 50 ms fade every 2 s; no guarantee
+is claimed beyond it.
+
+Cost: per block one byte write in the demodulator and a few integer operations in the tracker
+(100 blocks/s); per chunk one `Buffer.copy` into the ring and at most two `subarray` views per
+fed piece (no buffer allocation). Interference audio runs no detector (3.7 fed it all).
+
+### Squelch tail elimination (3.8.12)
+
+An over on the user's PMR446 radios is speech with CTCSS, then about 0.4 s of 55 Hz STE with the
+carrier still up, then the carrier drop. The STE blocks are carried, so the span, and the
+transmission, end at the carrier drop. CTCSS safety: the bank holds only the 50 standard tones,
+67.0-254.1 Hz (no lower entry). A 500 ms Goertzel block has its first null at 1 / 0.5 s = 2 Hz,
+so 55 Hz lies 12 Hz = 6 bins below the lowest tone, where a rectangular window leaks about
+1 / (π × 6)² ≈ -35 dB; 55 Hz is inside the 50-300 Hz reference band, so a 55 Hz-only block puts
+under 0.1 % of the band in any tone bin, far under the 0.65 vote fraction. Continuity: blocks hop
+250 ms, so a 0.4 s tail touches at most ceil(0.4 / 0.25) + 1 = 3 blocks; with N completed blocks
+the tone keeps 60 % if (N - 3) / N ≥ 0.6, so N ≥ 8, i.e. at least 0.5 + 7 × 0.25 - 0.4 = 1.85 s
+of CTCSS before the tail. Shorter overs may lose their tone (stated, not guaranteed). A phase
+reversal (120° or 180°) instead of a tone lowers the magnitude of the blocks that straddle it
+(at most 2, plus the reversed tail if it is longer than one hop); the same bound applies and the
+transmission still ends at the carrier drop. Tests: 5 s CTCSS 79.7 + 0.4 s 55 Hz is one
+transmission ending at the drop with 79.7; 55 Hz alone for 0.6 s and 3 s reports no CTCSS; a
+180° reversal for the last 0.2 s keeps 79.7.
 
 ### Consumers
 
@@ -410,41 +441,44 @@ No contract change (REST, WS `transmission`/`closed` events, Activity rows, iden
 the last carrier, tone filled; aggregates follow. Identify: evidence from carrier transmissions
 only; `pending()` is non-null only with a qualified span, so interference no longer triggers the
 1750 ms settle wait (`no-sync` instead of `timeout`). Scanner hits (WG12 6.3 live-audio
-evidence): same stream, fewer and correctly toned. Recordings: unaffected (no tracker input).
+evidence): same stream. Recordings: unaffected.
 
 ### Deliberate test changes
 
-Existing tracker suites use fakes without `readCarrierRun`, so they take the fallback and stay
-as they are: `analog-transmission.test.ts`, `analog-transmission.property.test.ts`,
-`analog-transmission-dcs.test.ts`, `analog-transmission-hygiene.test.ts`,
-`analog-transmission-hygiene-r2.test.ts`, `analog-transmission-hygiene.property.test.ts`,
-`analog-transmission-wiring.test.ts` (all under `tests/unit/core/`). Expected to need review,
-listed with 3.8 if changed: `live-demodulator-wg7.test.ts` (real demodulator with carrier
-windows), `scanner/identify-analog.test.ts` and `scanner/live-audio-evidence.test.ts` (pending
-and settle cases), `activity/runtime-transmission.test.ts`. The Activity storage, aggregate,
-contract and compatibility tests (`activity/**`, `wg2-contract-compat`, `wg6-contract`,
-`wg7-contract`, `evidence-squelch/contract`) must stay unchanged.
+Existing tracker suites use fakes without `carrierBlockLog`, so they take the fallback and stay
+as they are. Changed deliberately in `live-demodulator-wg7.test.ts`: the noise-mode transmission
+and mode-switch tests feed 60 carrier blocks (600 ms) instead of 20 and 10, because span audio
+now counts blocks, not the test clock; the tone-gate integration test feeds one carrier block per
+10 ms of PCM, because PCM is matched to blocks by position. A teardown squelch edge (stop or a
+transmission-closing reconfigure) still closes at once on the carrier path. Suites with a real `LiveDemodulator` and a tracker (`live-demodulator-wg7`) and the
+identify and Activity consumers (`scanner/identify-analog`, `scanner/live-audio-evidence`,
+`activity/runtime-transmission`) are run unchanged; any change is listed with 3.8.
 
-### Live timeline regression (deterministic, no audio)
+### Synthetic boundary regression (shaped on the live timeline)
 
-A block script at 10 ms: floor blocks unquieted and squelch closed; interference as squelch
-opens of 500 ms every 1000 ms (the measured 0.52-1.1 s cadence at its tight end) with at most
-2 scattered quieted blocks each; five overs of 6.9, 7.3, 6.7, 5.1 and 4.4 s at the measured
-starts (19.1, 33.7, 54.9, 75.9, 84.4 s) with every block quieted, each preceded within 300 ms
-by an interference open and followed by 1 s of interference holding the squelch open; PCM
-chunks are tagged tone or noise and a fake detector reports CTCSS 79.7 only when at least
-60 % of the audio fed to it is tone. Expected: exactly five transmissions, each starting at its
-over (± 10 ms) and ending at its last carrier block (± 10 ms), CTCSS 79.7 each, none longer than
-7.4 s, `discardedSegments()` equal to the interference opens; under the 3.7 path the same
-script gives one transmission of about 214 s (asserted as the before case).
+The live status log has about one sample per 0.55 s and no per-block quieting, so it fixes the
+shape, not the evidence. The test script, at 10 ms blocks: floor closed; interference opens of
+500 ms every 1000 ms with carried blocks only in runs of at most 3; five overs of 6.9, 7.3, 6.7,
+5.1 and 4.4 s from 19.1, 33.7, 54.9, 75.9 and 84.4 s, every block carried, each opened by an
+interference open 300 ms earlier and followed by 1 s of interference holding the squelch open;
+PCM is CTCSS 79.7 Hz during overs and noise otherwise. Expected: five transmissions at the
+over bounds (± 10 ms), CTCSS 79.7 each. It proves the boundary logic only.
+
+### Live acceptance plan (Main)
+
+On the live receiver, PMR446 ch5 with the interference present: (1) log, for a test build or a
+debug probe, the longest carried run in each interference opening for 10 minutes and confirm none
+reaches 10 blocks (if any does, raise the bound or add a power or deviation condition by a new
+amendment); (2) key five 5 s overs with CTCSS 79.7 and five with D031N and confirm ten Activity
+rows of about 5 s with the tones; (3) confirm no Activity row during 10 minutes of interference
+alone.
 
 ### Properties
 
-13. **Spans bound transmissions.** For random block scripts (squelch, quieting, gaps, fades),
-    published transmissions are exactly the oracle's span groups (spans of ≥ 10 carrier blocks,
-    merged within 1500 ms of the last carrier block end, ≥ 500 ms of span audio), start at the
-    first span start and end at the last carrier block end; a script with no 10-block run
-    publishes nothing. _Validates 3.8.1-3.8.5._
-14. **Tone hears only carrier.** For random scripts with tagged PCM, every chunk pushed to a
-    detector belongs to a carrier block of a span or its 100 ms pre-roll, and no chunk of an
-    evidence-less segment is ever pushed. _Validates 3.8.6._
+13. **Spans bound transmissions.** For random block scripts (squelch, carrier, fades, gaps)
+    delivered in random batches, published transmissions are exactly the oracle's span groups
+    (runs of ≥ 10 open carried blocks, merged within 1500 ms of the last carrier end, ≥ 500 ms of
+    span audio), start at the first span start and end at the last carrier end; a script without
+    a 10-block run publishes nothing. _Validates 3.8.2-3.8.6._
+14. **Tone hears only carrier.** For the same scripts with PCM split at random byte offsets, the
+    samples pushed to the detector are exactly those of fed blocks, in order. _Validates 3.8.7._

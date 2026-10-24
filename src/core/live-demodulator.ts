@@ -67,6 +67,7 @@ import {
 	ToneSquelchGate,
 	type ToneSquelchTone,
 } from "./audio-tones/tone-squelch.js"
+import { CarrierBlockLog } from "./analog-transmission.js"
 import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
 import {
 	DEFAULT_IQ_SAMPLE_RATE,
@@ -401,6 +402,7 @@ export class LiveDemodulator extends EventEmitter {
 	private reportedSquelchOpen = false
 	/** WG10 activity hygiene: blocks with carrier evidence, monotonic (see carrierBlocks()). */
 	private carrierBlockCount = 0
+	private readonly carrierLog = new CarrierBlockLog()
 	/**
 	 * Set only while `stop()` or a transmission-closing `reconfigure()` is in
 	 * progress. `stopRun` emits `squelch-changed(false)` before `stopped` or
@@ -937,6 +939,11 @@ export class LiveDemodulator extends EventEmitter {
 		return this.carrierBlockCount
 	}
 
+	/** WG10 req 3.8.1: the per-block carrier log; null exactly when `carrierBlocks()` is. */
+	carrierBlockLog(): CarrierBlockLog | null {
+		return this.carrierBlocks() === null ? null : this.carrierLog
+	}
+
 	/** Channel-squelch hang in use, in milliseconds. */
 	squelchHangMs(): number {
 		return SQUELCH_HANG_MS
@@ -1096,10 +1103,18 @@ export class LiveDemodulator extends EventEmitter {
 		// block (its tracker snapshot taken inside publishSquelchChange) includes it.
 		// Rust reports quieting directly, so the sampled path uses the same rule as
 		// ChannelSquelch.blockCarrier instead of the IQ meter.
-		if (sampled) {
-			if (this.sampledBlockCarrier(run, sample.quietingDb ?? null))
-				this.carrierBlockCount += 1
-		} else if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
+		const carried = sampled
+			? this.sampledBlockCarrier(run, sample.quietingDb ?? null)
+			: run.squelch.blockCarrier()
+		if (carried) this.carrierBlockCount += 1
+		// WG10 req 3.8.1: the per-block record the transmission tracker consumes in order.
+		if (run.squelch.hasCarrierEvidence)
+			this.carrierLog.note(
+				run,
+				run.stream.rate,
+				this.reportedSquelchOpen,
+				carried,
+			)
 	}
 
 	/**
@@ -1950,6 +1965,9 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		const run = this.run
+		// WG10 req 3.8.1: output-sample position of the run's PCM for the tracker.
+		if (run !== null)
+			this.carrierLog.notePcm(run, run.stream.rate, chunk.length)
 		// WG10 req 2.2: the new run's first audio ends the silence fill.
 		if (run !== null) this.silence.disarm("audio")
 		const phase = run?.pcmPhase ?? 0
