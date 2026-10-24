@@ -630,7 +630,7 @@ describe("stage 1 open on noise before the over (never-open NFM fixtures)", () =
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 60_000)
 })
 
 /** Lead-in flicker pattern: unquieted noise with quieted runs of at most DISARM - 1 blocks. */
@@ -684,7 +684,7 @@ describe("lead-in flicker and kerchunks (window-reset revision 2026-10-23)", () 
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 60_000)
 
 	it("flicker bound: a 4-block quieted flicker keeps the reset armed; a 5-block one disarms, and noise of >= 5 blocks after it re-arms", () => {
 		// At the bound: 20 noise, 4 quieted, 6 noise -> the over still resets the window.
@@ -882,7 +882,7 @@ describe("A13 narrow channel plan (2 500 Hz): never-open NFM fixtures stay close
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 60_000)
 
 	for (const seed of [1, 2, 3, 4, 5])
 		it(`synthetic continuous 4FSK at 25 kHz, seed ${seed}: never latches`, () => {

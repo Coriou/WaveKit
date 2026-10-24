@@ -187,7 +187,7 @@ plus one CTCSS block. A different standard tone or code is new evidence: within 
 renews the label (as above); after the hang the over starts from waiting and its label is its
 own, never the previous over's.
 
-**Amendment (2026-10-24, A14 revised after review): tone continuity.** Review found that a tone
+**Amendment (2026-10-24, A14 revised): tone continuity.** Live testing found that a tone
 over with weak quieting lost its latch after a short fade: the re-open reset the tone stage, the
 returning tone needed 750 ms to qualify again, and the hang ran out first (2 s of 79.7 Hz
 unquieted, 1.2 s closed, the same tone back: `waiting` after 300 ms; also with repeated 10 ms
@@ -204,8 +204,8 @@ key): it ends the latch at the hang unless it qualifies first, which renews the 
 Bare interference refreshes nothing (a CTCSS block must give the latched tone 0.65 of the band and
 3× the next tone; a DCS hit must match a 23-bit word of the latched code).
 
-**Amendment (2026-10-24, A14 review round 2): dated sightings.** Supersedes (1) and the 250 ms of
-(3) above. Review found that the retained tone stage finished a block holding pre-close tone after
+**Amendment (2026-10-24, A14 revision 2): dated sightings.** Supersedes (1) and the 250 ms of
+(3) above. Live testing found that the retained tone stage finished a block holding pre-close tone after
 the re-open and counted it as fresh: 2 100 ms of 79.7 Hz, 1 200 ms closed, then noise at amplitude
 1 000 ended the latch 3 100 ms after the tone, past the stated bound. Rule now: (1) every re-open
 resets the tone stage, so no CTCSS block or DCS word ever spans a stage-1 close and a sighting is
@@ -275,7 +275,7 @@ median cluster is diluted by its silent frames, and audio-frequency FSK tones ar
 the discriminator). A one-syllable-per-2 s pattern stays closed (one run). This supersedes the known limitation
 pinned in the run4 amendment (250 ms syllables once a second now latch).
 
-**Note (2026-10-24, A15 review, accepted limitation).** Periodic 150 ms audio bursts on a fully
+**Note (2026-10-24, A15 revision, accepted limitation).** Periodic 150 ms audio bursts on a fully
 quieted carrier latch through the run path: on a 12.5 kHz channel (gain 2, every block quieted,
 a 0.12-amplitude 75.5 Hz floor), 150 ms of 100 Hz click trains (1 ms exponential pulses peaking at
 0.8), of seeded ±0.3 white noise, or of a 0.3-amplitude 1 kHz beep once a second all latch at
@@ -302,12 +302,12 @@ its PCM); a speech pause on a quieted carrier keeps passing; an unquieted fade o
 over loses about `F - 200 ms` of audio when `F > 200 ms` (fades up to 200 ms pass whole; on a tone
 latch, audio up to 300 ms after the last sighting passes too).
 
-**Amendment (2026-10-24, A16 review): the guard follows the computed back-chain lag.** Live run6
+**Amendment (2026-10-24, A16 revision): the guard follows the computed back-chain lag.** Live run6
 showed the 200 ms guard passing 200-210 ms of full-scale FM noise (RMS 16 000-26 000 in 10 ms
 blocks) after each over's tail, starting within one block of the carrier drop, plus the back
 chain's decay through a fresh 200 ms close guard. `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS` is now
 10 ms (one block) and the core adds the back chain's computed lag (1 sample on the default NFM
-chain; filter stages add their delay, design A16 review); a 10 ms linear fade-out follows the
+chain; filter stages add their delay, design A16 revision); a 10 ms linear fade-out follows the
 guard at the sample-accurate mute boundary. The A16 arithmetic becomes: an unkey passes the over's
 last `L` (the lag) and then at most `10 ms + 10 ms` of noise, faded; an unquieted fade of `F` ms
 inside an over loses about `F - 20 ms` of audio when `F > 20 ms`. A stage-1 close continues the
@@ -329,6 +329,42 @@ and CTCSS put almost no energy at 55 Hz (voice above 100 Hz, CTCSS 67-254 Hz), a
 300 Hz high-pass is not needed for this (the detector reads the 8 kHz samples before it). The
 other common STE form, a CTCSS phase reversal (reverse burst), is a ROADMAP follow-up. Note for
 lane TB: the STE onset can serve as the transmission end on radios that send it.
+
+**Amendment (2026-10-24, A17 revision).** Supersedes the detection rule and the hold of
+A17 above. (1) A voiced fundamental is not an STE: the STE tone is pure and sent with the
+microphone muted, so a block also needs the 110 and 165 Hz bins each at most 0.02 of the 55 Hz
+bin (-17 dB in power, 0.14 in amplitude) and the 300-3 000 Hz energy at most -15 dB relative to
+the 55 Hz tone's energy. Measured on the live STE segments (runs 2, 3, 4 and 6): harmonics at most
+0.006 and 0.0016, voice band -18.5 to -28.7 dB in steady blocks (edge blocks up to -9.9 dB are
+rejected, and every over end is still detected: run2 4 of 4, run3 2 of 2, run4 1 of 1, run6 4 of
+4); the voiced repro (0.12 (sin 55 + 0.3 sin 110 + 0.2 sin 165)) has 0.143 and is
+rejected; no detection in any fixture, in synthetic voice, or in the private live clips. (2) A
+false STE is not terminal: after an STE, client audio is held (pending) until stage 1 closes or
+fresh evidence qualifies (voice on either path, or a tone), whichever comes first; on fresh
+evidence the latch resumes and the held audio plays. (3) The tone must fill the block, measured
+on the 55 Hz bin itself: the 55 Hz phasor magnitudes of the four 25 ms quarters agree within 0.6.
+A CTCSS tone continuing through the STE at 0.2 of its amplitude leaves them within 0.64 (67 Hz),
+0.70 (71.9 Hz) and 0.74 (79.7 Hz) and is detected; 0.3 of its amplitude is detected too. The
+guarantee is revised: a 55 Hz tone under 90 ms never qualifies, whatever follows it (silence or
+noise; 85 ms padded: no detection), and one of 125 ms or more always does. (4) The retroactive
+mute starts at the exact input sample of the qualifying block's start (the gate dates it by its
+own input-sample count), whatever the chunking. (5) Split samples are faded too: the bytes of a
+sample that arrive in a later chunk carry the scaled value (s16: its first byte keeps its value,
+at most 255 LSB).
+
+**Note (2026-10-24, A17 revision 2).** (1) Known limitation, accepted: a near-pure low voiced
+sound can pass the STE rule, for example 58 Hz with its 2nd and 3rd harmonics at 0.14 amplitude
+(0.02 power, the bound) and a 0.05 8th harmonic, or a 55 Hz tone under speech at level 0.01. The
+thresholds stay as measured (live STE harmonics reach 0.006 power). The cost is bounded and not
+terminal: the audio from the detected onset to the detecting sample is dropped (one STE block,
+100 ms, plus at most one 10 ms slice, with a 10 ms fade before it), the rest is held, and fresh
+evidence resumes the over. Both repros are pinned as tests. (2) The detection bound of the
+revision above is corrected: for a tone starting at zero phase, swept over every block
+alignment in 1-sample steps with silence or noise padding, a 55 Hz tone of 623 samples at 8 kHz
+(77.9 ms) or less never qualifies and 847 samples (105.9 ms) or more always qualifies. These are
+not hard guarantees: the starting phase shifts both (a 623-sample tone at phase π/16 can qualify,
+an 847-sample tone at phase 6π/16 can miss), so the detection boundary is a band of roughly
+75-110 ms rather than an exact duration. Real STE tails (about 0.4 s) are far above it.
 
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and

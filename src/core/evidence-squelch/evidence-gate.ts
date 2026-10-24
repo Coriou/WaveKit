@@ -46,7 +46,7 @@ import {
 	EVIDENCE_NOTE_RESET,
 	msToSamples,
 } from "./contract.js"
-import { STE_BLOCK_SAMPLES, SteDetector } from "./ste-detector.js"
+import { SteDetector } from "./ste-detector.js"
 import type {
 	EvidenceGateOptions,
 	EvidenceGatePort,
@@ -360,16 +360,25 @@ export class EvidenceGate implements EvidenceGatePort {
 	private sinceSighting = Number.MAX_SAFE_INTEGER
 	/** `msToSamples(TONE_PASS_MS, rate)`. */
 	private readonly tonePassSamples: number
-	/** Close-guard bytes left in this closing episode (A2; A16 review: never restarted). */
+	/** Close-guard bytes left in this closing episode (A2; A16 revision: never restarted). */
 	private guardBytesLeft = 0
-	/** A16 review: fade-out samples after the guard (`EVIDENCE_FADE_OUT_MS`). */
+	/** A16 revision: fade-out samples after the guard (`EVIDENCE_FADE_OUT_MS`). */
 	private readonly fadeSamples: number
-	/** A16 review: fade samples left after the tail guard (counts down like the guard). */
+	/** A16 revision: fade samples left after the tail guard (counts down like the guard). */
 	private fadeLeft = 0
 	/** A17: STE tone detector (NFM only). */
 	private readonly ste: SteDetector | null
-	/** A17: input samples of one STE block (800 at 8 kHz). */
-	private readonly steBlockInput: number
+	/** A17 revision: input samples taken since construction (monotonic; dates the STE onset). */
+	private inputCount = 0
+	/** Input-sample index where the current decimation group began. */
+	private groupStart = 0
+	/** A17 revision: input-sample index of the STE onset (the qualifying block's start). */
+	private steOnsetIndex = 0
+	/** A16 revision: scratch for a split sample's scaled bytes, and a straddling sample's bytes. */
+	private readonly splitScratch = Buffer.alloc(4)
+	private readonly straddle = Buffer.alloc(4)
+	/** Bytes of the current sample that lie in this `push` (< width for a split sample). */
+	private curSampleBytes = 0
 	/** A17: an STE tone ended this over: everything muted until stage 1 closes. */
 	private steHold = false
 	/** A17: one-shot STE tail for the owner (`takeSteBack`). */
@@ -406,7 +415,7 @@ export class EvidenceGate implements EvidenceGatePort {
 						deviationHz: options.deviationHz,
 					})
 		this.tone = this.modulation === "nfm" ? new ToneEvidence() : null
-		// A16 review (2026-10-24): the back-chain lag plus one 10 ms block.
+		// A16 revision (2026-10-24): the back-chain lag plus one 10 ms block.
 		const lag = options.drainLagSamples
 		this.guardSamples =
 			msToSamples(LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS, rate) +
@@ -415,9 +424,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				: 0)
 		this.fadeSamples = msToSamples(EVIDENCE_FADE_OUT_MS, rate)
 		this.ste = this.modulation === "nfm" ? new SteDetector() : null
-		this.steBlockInput = Math.round(
-			(STE_BLOCK_SAMPLES * rate) / AUDIO_TONE_RATE_HZ,
-		)
+
 		this.hangSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS, rate)
 		this.toneMinSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS, rate)
 		this.toneGraceSamples = msToSamples(EVIDENCE_TONE_HANG_GRACE_MS, rate)
@@ -473,10 +480,16 @@ export class EvidenceGate implements EvidenceGatePort {
 		return this.steHold
 	}
 
+	/** A17: input-sample index (since construction) of the last STE onset (diagnostic, tests). */
+	get steOnset(): number {
+		return this.steOnsetIndex
+	}
+
 	takeSteBack(): number {
-		const back = this.steBack
+		if (this.steBack === 0) return 0
 		this.steBack = 0
-		return back
+		// Exact from the onset sample to the last sample taken, whatever the chunking.
+		return Math.max(1, this.inputCount - this.steOnsetIndex)
 	}
 
 	/** Guard and fade back to full (current carrier evidence). */
@@ -577,6 +590,7 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.tone?.reset()
 			this.ste?.reset()
 			this.decimator.arm(this.rate)
+			this.groupStart = this.inputCount
 			this.nonFiniteGroup = false
 		}
 		this.closing = false
@@ -588,6 +602,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.curWidth = width
 		this.curFrom = from
 		this.curFormat = format
+		this.curSampleBytes = width
 		let offset = from
 		if (this.holdLen > 0) {
 			const need = width - this.holdLen
@@ -597,6 +612,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				return -1
 			}
 			pcm.copy(this.hold, this.holdLen, from, from + need)
+			this.curSampleBytes = need
 			this.takeSample(
 				format === "s16le"
 					? this.hold.readInt16LE(0) / 32_768
@@ -604,6 +620,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				from + need,
 			)
 			this.holdLen = 0
+			this.curSampleBytes = width
 			offset = from + need
 		}
 		const last = to - ((to - offset) % width)
@@ -617,6 +634,9 @@ export class EvidenceGate implements EvidenceGatePort {
 		if (last < to) {
 			pcm.copy(this.hold, 0, last, to)
 			this.holdLen = to - last
+			// A split sample's first bytes take the decision its sample will get (A3): audible
+			// when the gate still passes after the last whole sample.
+			if (this.passing && this.audibleEndByte === last) this.audibleEndByte = to
 		}
 		this.curPcm = null
 		return this.latchAt
@@ -643,8 +663,22 @@ export class EvidenceGate implements EvidenceGatePort {
 		const heldBefore = this.holdLen
 		const total = heldBefore + bytes
 		const completed = Math.floor(total / width)
-		// The bytes are not inspected: a straddling sample reads zeros for its skipped bytes.
-		this.hold.fill(0)
+		// A straddling sample's first bytes, kept for the fade of a split sample (A16 revision);
+		// without `pcm` the bytes are not inspected and a straddling sample reads zeros.
+		const from = typeof start === "number" ? start : 0
+		const straddle = this.straddle
+		if (completed === 0) {
+			if (pcm !== undefined) pcm.copy(this.hold, heldBefore, from, from + bytes)
+			else this.hold.fill(0, heldBefore)
+		} else {
+			if (pcm !== undefined && heldBefore > 0)
+				pcm.copy(this.hold, heldBefore, from, from + width - heldBefore)
+			this.hold.copy(straddle, 0, 0, width)
+			this.hold.fill(0)
+			const rest = total % width
+			if (pcm !== undefined && rest > 0)
+				pcm.copy(this.hold, 0, from + bytes - rest, from + bytes)
+		}
 		this.holdLen = total % width
 		const wasCarrier = this.carrierNow || this.toneRecent()
 		this.carrierNow = false
@@ -657,7 +691,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		if (this.internal !== "open") return 0
 		if (!this.closing) {
 			this.closing = true
-			// A16 review (2026-10-24): the guard on a close is what is left of the carrier guard
+			// A16 revision (2026-10-24): the guard on a close is what is left of the carrier guard
 			// and its fade, never a fresh one (full only when the close follows carrier evidence).
 			// A sample whose first bytes arrived while open is the first closed sample.
 			if (wasCarrier) this.refreshGuard()
@@ -668,23 +702,56 @@ export class EvidenceGate implements EvidenceGatePort {
 		}
 		const guard = bytes < this.guardBytesLeft ? bytes : this.guardBytesLeft
 		this.guardBytesLeft -= guard
-		// The counters advance per completed sample; the fade is applied in place.
-		const base =
-			pcm !== undefined && typeof start === "number" ? start - heldBefore : -1
+		// The counters advance per completed sample; the fade is applied in place (a straddling
+		// sample: on its bytes in this call, its earlier bytes being queued already).
+		const base = from - heldBefore
 		for (let k = 0; k < completed; k++) {
 			if (this.tailGuardLeft > 0) this.tailGuardLeft -= 1
 			else if (this.fadeLeft > 0) {
 				const gain = this.fadeLeft / (this.fadeSamples + 1)
 				this.fadeLeft -= 1
-				const at = base + k * width
-				// Only whole samples of this call's bytes (earlier bytes are already queued).
-				if (pcm !== undefined && base >= 0 && at >= (start ?? 0))
-					scaleSample(pcm, at, format, gain)
+				if (pcm === undefined) continue
+				if (k === 0 && heldBefore > 0) {
+					const value =
+						format === "s16le"
+							? straddle.readInt16LE(0) / 32_768
+							: straddle.readFloatLE(0)
+					this.writeSplit(
+						pcm,
+						from + width - heldBefore,
+						width - heldBefore,
+						value,
+						gain,
+					)
+				} else scaleSample(pcm, base + k * width, format, gain)
 			} else break
 		}
 		this.sinceCarrier += completed
 		if (this.sinceCarrier >= this.hangSamples) this.reset()
 		return guard
+	}
+
+	/**
+	 * Writes the last `bytes` bytes of `value × gain` (current format) so they end at `end` in
+	 * `pcm`: the part of a split sample that is still in reach.
+	 */
+	private writeSplit(
+		pcm: Buffer,
+		end: number,
+		bytes: number,
+		value: number,
+		gain: number,
+	): void {
+		const scratch = this.splitScratch
+		const width = this.format === "f32le" ? 4 : 2
+		if (width === 2)
+			scratch.writeInt16LE(
+				Math.max(-32_768, Math.min(32_767, Math.round(value * 32_768 * gain))),
+				0,
+			)
+		else scratch.writeFloatLE(value * gain, 0)
+		if (end - bytes < 0 || end > pcm.length) return
+		scratch.copy(pcm, end - bytes, width - bytes, width)
 	}
 
 	/** Voice meter, frame window and quiet ring back to empty (allocation-free). */
@@ -822,6 +889,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.sinceSighting = Number.MAX_SAFE_INTEGER
 		this.steHold = false
 		this.ste?.reset()
+		this.groupStart = this.inputCount
 		this.guardBytesLeft = 0
 	}
 
@@ -838,9 +906,17 @@ export class EvidenceGate implements EvidenceGatePort {
 				this.fadeLeft -= 1
 			} else gain = 0
 			const pcm = this.curPcm
-			const at = after - this.curWidth
-			if (gain < 1 && pcm !== null && at >= this.curFrom)
-				scaleSample(pcm, at, this.curFormat, gain)
+			if (gain < 1 && pcm !== null) {
+				const width = this.curWidth
+				if (this.curSampleBytes >= width)
+					scaleSample(pcm, after - width, this.curFormat, gain)
+				else {
+					// A16 revision: a split sample; its earlier bytes are already queued, so only the
+					// bytes in this push get the scaled value (s16: the low byte keeps its value,
+					// at most 255 LSB of error).
+					this.writeSplit(pcm, after, this.curSampleBytes, sample, gain)
+				}
+			}
 			if (gain > 0) this.audibleEndByte = after
 			if (this.carrierNow) this.sinceCarrier = 0
 			else if (
@@ -855,14 +931,22 @@ export class EvidenceGate implements EvidenceGatePort {
 			}
 		}
 		this.audioSamples += 1
+		const index = this.inputCount
+		this.inputCount += 1
 		if (!Number.isFinite(sample)) this.nonFiniteGroup = true
 		if (!this.decimator.take(sample)) return
 		const value = this.decimator.output
+		const groupFirst = this.groupStart
+		this.groupStart = index + 1
 		const nonFinite = this.nonFiniteGroup
 		this.nonFiniteGroup = false
-		if (this.steHold) return
-		// A17: an STE tone ends the over: retroactive mute from its onset, the latch ends.
-		if (this.ste !== null && this.ste.push(value)) {
+		// A17: an STE tone ends the over: retroactive mute from its onset, the latch ends. While
+		// held, a further STE changes nothing; fresh evidence still latches (not terminal).
+		if (
+			this.ste !== null &&
+			this.ste.push(value, groupFirst) &&
+			!this.steHold
+		) {
 			this.onSte()
 			return
 		}
@@ -912,11 +996,12 @@ export class EvidenceGate implements EvidenceGatePort {
 	/** A17: an STE block just completed: mute from its onset (at most 50 ms after the tone's). */
 	private onSte(): void {
 		const wasOpen = this.internal === "open"
-		const back = this.steBlockInput
+		const onset = this.ste?.onsetIndex ?? this.inputCount
 		this.reset()
 		this.internal = "waiting"
 		this.steHold = true
-		this.steBack = back
+		this.steOnsetIndex = onset
+		this.steBack = 1
 		this.wasOpenAtPush = this.wasOpenAtPush || wasOpen
 	}
 
@@ -949,6 +1034,8 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.internal = "open"
 		this.latchedEvidence = evidence
 		this.latchedToneKey = key
+		// A17 revision: fresh evidence after a (possibly false) STE ends the hold.
+		this.steHold = false
 		this.sinceCarrier = 0
 		// A16: the latch is evidence at this sample (a voice latch needed quieted blocks).
 		this.sinceSighting = 0

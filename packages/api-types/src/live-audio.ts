@@ -74,7 +74,7 @@ export const LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS = 1_500
 /**
  * Audio after the last carrier evidence of a latched over that still plays (the over's tail in
  * the back chain): one 10 ms block, to which the core adds the back chain's computed lag (1
- * sample on the default NFM chain). Changed 2026-10-24 (A16 review) from 200 ms: live run6 showed
+ * sample on the default NFM chain). Changed 2026-10-24 (A16 revision) from 200 ms: live run6 showed
  * the old guard passing 200 ms of full-scale FM noise after every over, with the noise starting
  * within one block of the carrier drop.
  */

@@ -279,7 +279,7 @@ export function planLiveDemodPipeline(
 }
 
 /**
- * Evidence squelch guard (amendment A16 review, 2026-10-24): the lag, in channel samples, between
+ * Evidence squelch guard (amendment A16 revision, 2026-10-24): the lag, in channel samples, between
  * the IQ block the carrier observer measures and the PCM samples it becomes at the client path.
  * The NFM back chain runs at the channel rate (no decimation), so the lag is the stages' filter
  * delay plus any input window a stage retains before it can emit:

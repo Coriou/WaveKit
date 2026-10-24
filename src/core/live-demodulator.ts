@@ -80,19 +80,16 @@ import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
 import {
-	EVIDENCE_FADE_OUT_MS,
 	EVIDENCE_NOTE_DISCARD,
 	evidenceDeviationHz,
-	msToSamples,
 	evidenceGateApplies,
-	pcmSampleBytes,
-	type EvidenceGatePort,
-	type EvidencePcmFormat,
 	type EvidenceSquelchFactory,
-	type PreRollPort,
-	type PreRollTag,
 } from "./evidence-squelch/contract.js"
 import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
+import {
+	processEvidenceChunk,
+	type EvidenceWiring,
+} from "./evidence-squelch/wiring.js"
 import { PreRoll } from "./evidence-squelch/pre-roll.js"
 import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
 import type { FanoutManager } from "./fanout-manager.js"
@@ -249,15 +246,9 @@ type ResolvedOptions = Required<
 	Pick<LiveDemodulatorOptions, InjectedOptionKeys>
 
 /** Evidence squelch state of one run (streams in `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` only). */
-interface RunEvidence {
-	gate: EvidenceGatePort
-	preRoll: PreRollPort
-	/** Tag of the sample split by the last chunk's end (its completing bytes take it, A3). */
-	tailTag: PreRollTag
+interface RunEvidence extends EvidenceWiring {
 	/** `evidenceAppliesTo` when last synced; a flip resets the gate and clears the pre-roll. */
 	active: boolean
-	/** False after a build or clear: bytes completing a split sample are skipped (muted) once. */
-	aligned: boolean
 }
 
 /** WG10 req 2.3: a new front started by an offset change, not yet switched in. */
@@ -2065,7 +2056,7 @@ export class LiveDemodulator extends EventEmitter {
 				rate,
 				modulation,
 				gain: this.config.gain,
-				// A16 review: the guard is the back chain's lag plus one 10 ms block.
+				// A16 revision: the guard is the back chain's lag plus one 10 ms block.
 				drainLagSamples: backChainDrainSamples(run.backCommand),
 				...(modulation === "nfm"
 					? { deviationHz: evidenceDeviationHz(this.config.bandwidth) }
@@ -2156,8 +2147,8 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	/**
-	 * Tags the chunk for the pre-roll in slices of at most TONE_SLICE_MS that start on sample
-	 * boundaries, after the bytes completing the previous chunk's split sample.
+	 * Tags the chunk for the pre-roll (`processEvidenceChunk`, evidence-squelch/wiring.ts) with
+	 * stage 1 as reported (A4: a held gate is closed), sampled at chunk arrival.
 	 */
 	private processEvidence(
 		run: PipelineRun,
@@ -2165,111 +2156,14 @@ export class LiveDemodulator extends EventEmitter {
 		chunk: Buffer,
 		phase: number,
 	): void {
-		const format = run.stream.format
-		const width = pcmSampleBytes(format)
-		// A4: stage 1 as reported (a held gate is closed), sampled at chunk arrival.
-		const open = runGateOpen(run) && !run.gateHeld
-		const toBoundary = (width - (phase % width)) % width
-		const lead = Math.min(chunk.length, toBoundary)
-		if (lead > 0) {
-			// A partial sample the pre-roll never saw the start of is muted, not framed.
-			if (!evidence.aligned) chunk.fill(0, 0, lead)
-			else this.evidenceSpan(evidence, chunk, 0, lead, open, format, true)
-		}
-		// Unaligned until the stream reaches a sample boundary (a short chunk may not).
-		if (chunk.length >= toBoundary) evidence.aligned = true
-		const slice =
-			Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) * width
-		for (let start = lead; start < chunk.length; start += slice)
-			this.evidenceSpan(
-				evidence,
-				chunk,
-				start,
-				Math.min(chunk.length, start + slice),
-				open,
-				format,
-				false,
-			)
-	}
-
-	/** One slice; `completing` bytes finish a split sample and take its tag (A3). */
-	private evidenceSpan(
-		evidence: RunEvidence,
-		chunk: Buffer,
-		start: number,
-		end: number,
-		open: boolean,
-		format: EvidencePcmFormat,
-		completing: boolean,
-	): void {
-		const { gate, preRoll } = evidence
-		if (open) {
-			const k = gate.push(chunk, format, start, end)
-			const steBack = gate.takeSteBack?.() ?? 0
-			if (steBack > 0) {
-				// A17: an STE tone ended the over. Everything from its onset is dropped: this slice,
-				// and (retroactively, while still held by the pre-roll delay) the queued tail, with
-				// a fade-out at the onset; pending audio is abandoned. No close guard follows.
-				if (k >= 0) preRoll.latch()
-				preRoll.process(
-					chunk,
-					start,
-					end,
-					completing ? evidence.tailTag : "drop",
-				)
-				preRoll.abandon()
-				preRoll.muteTail?.(
-					steBack,
-					msToSamples(EVIDENCE_FADE_OUT_MS, this.run?.stream.rate ?? 0),
-				)
-				evidence.tailTag = "drop"
-				return
-			}
-			// A16 (sample-accurate, review 2026-10-24): while latched, the gate's audible prefix of
-			// the slice passes and the rest is dropped (the latch memory stays; the tags apply to
-			// these input samples, whatever the pre-roll delay).
-			const audibleEnd = (from: number): number =>
-				Math.max(from, Math.min(end, gate.audibleEnd ?? end))
-			if (k >= 0) {
-				if (completing) preRoll.process(chunk, start, end, evidence.tailTag)
-				else if (k > start) preRoll.process(chunk, start, k, "pending")
-				preRoll.latch()
-				if (!completing && end > k) {
-					const cut = audibleEnd(k)
-					preRoll.process(chunk, k, cut, "pass")
-					if (end > cut) preRoll.process(chunk, cut, end, "drop")
-					evidence.tailTag = end > cut ? "drop" : "pass"
-				}
-				return
-			}
-			if (completing) {
-				preRoll.process(chunk, start, end, evidence.tailTag)
-				return
-			}
-			if (gate.pushWasOpen ?? gate.state === "open") {
-				const cut = audibleEnd(start)
-				if (cut > start) preRoll.process(chunk, start, cut, "pass")
-				if (end > cut) preRoll.process(chunk, cut, end, "drop")
-				evidence.tailTag = end > cut ? "drop" : "pass"
-				return
-			}
-			const tag: PreRollTag = gate.muted === true ? "drop" : "pending"
-			preRoll.process(chunk, start, end, tag)
-			evidence.tailTag = tag
-			return
-		}
-		if (gate.state === "waiting") preRoll.abandon()
-		const guard = Math.min(
-			end - start,
-			gate.closed(end - start, format, chunk, start),
+		processEvidenceChunk(
+			evidence,
+			chunk,
+			phase,
+			runGateOpen(run) && !run.gateHeld,
+			run.stream.format,
+			run.stream.rate,
 		)
-		if (completing) {
-			preRoll.process(chunk, start, end, evidence.tailTag)
-			return
-		}
-		if (guard > 0) preRoll.process(chunk, start, start + guard, "guard")
-		if (end > start + guard) preRoll.process(chunk, start + guard, end, "drop")
-		evidence.tailTag = end > start + guard ? "drop" : "guard"
 	}
 
 	private emitPcm(chunk: Buffer): void {

@@ -47,6 +47,8 @@ import type { AnalogTrialFrame } from "../../../../src/core/scanner/scanner-rede
 import { PcmDecimator } from "../../../../src/core/audio-tones/tone-detector.js"
 import { dataLike, isVoice } from "../../../../src/core/scanner/analog-trial.js"
 import { mulberry32 } from "../audio-tones/synth.js"
+import { referencePreRoll, samples, WiredGate } from "./wiring-harness.js"
+import type { ModelTag } from "./wiring-harness.js"
 import {
 	carrierSilence,
 	ctcssMix,
@@ -886,7 +888,7 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 	})
 
 	/**
-	 * Review of A15 (2026-10-24), accepted as a known limitation: periodic 150 ms audio bursts on a
+	 * A15 (2026-10-24), accepted as a known limitation: periodic 150 ms audio bursts on a
 	 * fully quieted carrier latch through the run path. A quieted carrier carrying periodic audio
 	 * is a real transmission, not the weak interference the evidence squelch targets.
 	 */
@@ -911,7 +913,7 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 				0.3 * Math.sin((2 * Math.PI * 1_000 * i) / RATE),
 		],
 	] as const)
-		it(`known limitation (A15 review): 150 ms ${name} once a second on a quieted carrier latch via runs at 1.15 s`, () => {
+		it(`known limitation (A15 revision): 150 ms ${name} once a second on a quieted carrier latch via runs at 1.15 s`, () => {
 			const out = floor(5)
 			for (let at = 0; at + 0.15 <= 5; at += 1) {
 				const start = Math.round(RATE * at)
@@ -1054,7 +1056,7 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 })
 
 /**
- * Amendment A16 (2026-10-24), with its review: tail mute. While latched, the gate passes PCM only
+ * Amendment A16 (2026-10-24): tail mute. While latched, the gate passes PCM only
  * with current carrier evidence: the last noted block quieted, then the guard (back-chain lag +
  * one 10 ms block), then a 10 ms linear fade to zero, or (tone latches) a sighting of the latched
  * tone within 300 ms. Sample-accurate (`audibleEnd`); a stage-1 close carries what is left of the
@@ -1082,87 +1084,113 @@ describe("A16: tail mute", () => {
 
 	// Feature: evidence-squelch, Property 18: No unquieted, tone-less audio passes after the guard
 	// Validates: Requirements 1.5
-	it("Property 18: after a voice latch, the delivered samples of every block (pushed or closed) match the guard-and-fade model, and muted samples are zeros", () => {
+	it("Property 18: after a voice latch, the client output (real wiring and pre-roll) is the over and then exactly the guard-and-fade model's samples", () => {
 		const over = toPcm(
 			voiceLike({ rate: RATE, seconds: 1.5, seed: 31, level: 0.8 }),
 			"s16le",
 		)
+		const n = BLOCK_BYTES / 2
+		const G = GUARD + 1 // + the back chain's 1-sample lag (the harness default)
 		fc.assert(
 			fc.property(
 				fc.array(
 					fc.record({
 						open: fc.boolean(),
 						quieted: fc.boolean(),
-						blocks: fc.integer({ min: 1, max: 30 }),
+						blocks: fc.integer({ min: 1, max: 12 }),
 					}),
-					{ minLength: 1, maxLength: 20 },
+					{ minLength: 1, maxLength: 10 },
 				),
 				fc.integer({ min: 1, max: 1_000 }),
-				(pattern, seed) => {
-					const g = gate()
-					drive(g, [{ pcm: over, open: true, quieted: true }])
-					expect(g.state).toBe("open")
+				fc.boolean(),
+				(pattern, seed, oddCuts) => {
+					const w = new WiredGate()
+					// Optional odd byte cuts exercise split samples (fade on their own bytes only).
 					const rand = mulberry32(seed)
-					const n = BLOCK_BYTES / 2
-					// Model: guard then fade left; carrier flag; close-episode byte budget.
-					let guard = GUARD
-					let fade = FADE
+					const cuts = (): number[] =>
+						oddCuts ? [1 + 2 * Math.floor(rand() * (n - 1))] : []
+					w.segments([{ pcm: over, open: true, quieted: true }], cuts)
+					expect(w.gate.state).toBe("open")
+					// The complete client output, zeros and positions included, against the gate model
+					// run through a reference pre-roll (design, PreRoll output rule).
+					const values = samples(over)
+					const tags: ModelTag[] = values.map((_, i) =>
+						i < w.latchSample ? "pending" : "pass",
+					)
+					const events = new Map<number, "latch" | "abandon">([
+						[w.latchSample, "latch"],
+					])
 					let carrier = true
+					let g = G
+					let f = FADE
+					let since = 0
+					let expired = false
 					let closing = false
-					let budget = 0
-					for (const run of pattern)
+					const flush = { open: false, quieted: false, blocks: 200 }
+					for (const run of [...pattern, flush])
 						for (let b = 0; b < run.blocks; b++) {
-							if (g.state !== "open") return
 							const block = Buffer.alloc(BLOCK_BYTES)
 							for (let i = 0; i < BLOCK_BYTES; i += 2)
 								block.writeInt16LE(
-									Math.round((rand() * 2 - 1) * 20_000) || 1,
+									run === flush
+										? 0
+										: Math.round((rand() * 2 - 1) * 20_000) || 1,
 									i,
 								)
-							let expected: number
+							if (!run.open && !closing && carrier) {
+								g = G
+								f = FADE
+							}
+							for (let i = 0; i < n; i++) {
+								const v = block.readInt16LE(i * 2)
+								let gain = 0
+								if (!expired) {
+									if (run.open && carrier) {
+										g = G
+										f = FADE
+										gain = 1
+										since = 0
+									} else {
+										if (g > 0) {
+											g -= 1
+											gain = 1
+										} else if (f > 0) {
+											gain = f / (FADE + 1)
+											f -= 1
+										}
+										since += 1
+									}
+								}
+								if (expired && !run.open) events.set(values.length, "abandon")
+								values.push(gain === 1 ? v : Math.round(v * gain))
+								tags.push(
+									gain > 0 ? "pass" : expired && run.open ? "pending" : "drop",
+								)
+								if (since >= HANG) expired = true
+							}
 							if (run.open) {
 								closing = false
 								carrier = run.quieted
-								if (carrier) {
-									guard = GUARD
-									fade = FADE
-									expected = n
-								} else {
-									expected = Math.min(n, guard + fade)
-									const g1 = Math.min(guard, n)
-									guard -= g1
-									fade -= Math.min(fade, n - g1)
-								}
 							} else {
-								if (!closing) {
-									closing = true
-									if (carrier) {
-										guard = GUARD
-										fade = FADE
-									}
-									budget = guard + fade
-								}
+								closing = true
 								carrier = false
-								expected = Math.min(n, budget)
-								budget -= expected
-								const g1 = Math.min(guard, n)
-								guard -= g1
-								fade -= Math.min(fade, n - g1)
 							}
-							const delivered = step(g, block, run.open, run.quieted)
-							expect(delivered).toBe(expected)
-							// Pushed muted samples are zeroed in place; the fade only attenuates.
-							if (run.open)
-								for (let i = delivered; i < n; i++)
-									expect(block.readInt16LE(i * 2)).toBe(0)
+							w.block(block, run.open, run.quieted, cuts())
 						}
+					const want = referencePreRoll(values, tags, events, RATE * 1.5)
+					const got = samples(w.received())
+					expect(got.length).toBe(want.length)
+					const tolerance = oddCuts ? 255 : 0
+					for (let i = 0; i < want.length; i++)
+						if (Math.abs((got[i] ?? 0) - (want[i] ?? 0)) > tolerance)
+							expect([i, got[i]]).toEqual([i, want[i]])
 				},
 			),
 			{ numRuns: 100 },
 		)
 	}, 120_000)
 
-	it("review repro (MAJOR): a stage-1 close after the muted tail returns no fresh guard", () => {
+	it("a stage-1 close after the muted tail returns no fresh guard", () => {
 		const g = gate()
 		drive(g, [
 			{
@@ -1206,6 +1234,45 @@ describe("A16: tail mute", () => {
 			)
 		for (let i = GUARD + FADE; i < GUARD + FADE + 100; i++)
 			expect(block.readInt16LE(2 * i)).toBe(0)
+	})
+
+	it("byte-by-byte pushes fade the same samples as whole-sample pushes (within the split's low byte)", () => {
+		const run = (bytesPerPush: number): Buffer => {
+			const g = gate()
+			drive(g, [
+				{
+					pcm: toPcm(
+						voiceLike({ rate: RATE, seconds: 1.5, seed: 31, level: 0.8 }),
+						"s16le",
+					),
+					open: true,
+					quieted: true,
+				},
+			])
+			g.noteBlock(false)
+			const block = Buffer.alloc(2 * (GUARD + FADE + 50))
+			for (let i = 0; i < block.length; i += 2) block.writeInt16LE(10_000, i)
+			for (let s = 0; s < block.length; s += bytesPerPush)
+				g.push(block, "s16le", s, Math.min(block.length, s + bytesPerPush))
+			return block
+		}
+		const whole = run(2)
+		const bytes = run(1)
+		const attenuated = (b: Buffer, floor: number): number => {
+			let n = 0
+			for (let i = 0; i < b.length; i += 2) {
+				const v = b.readInt16LE(i)
+				if (v > floor && v < 10_000) n += 1
+			}
+			return n
+		}
+		expect(attenuated(whole, 0)).toBe(FADE)
+		// Split samples keep their low byte (at most 255 LSB), so compare above it.
+		expect(attenuated(bytes, 255)).toBe(attenuated(whole, 255))
+		for (let i = 0; i < whole.length; i += 2)
+			expect(
+				Math.abs(whole.readInt16LE(i) - bytes.readInt16LE(i)),
+			).toBeLessThanOrEqual(255)
 	})
 
 	it("the guard follows the computed back-chain lag; the last syllable ending at the carrier drop is not clipped", () => {
@@ -1285,6 +1352,7 @@ describe("A16: tail mute", () => {
  * mutes from its onset (retroactively, in the pre-roll), with no close guard after it.
  */
 describe("A17: STE tone", () => {
+	const FADE = Math.round((RATE * EVIDENCE_FADE_OUT_MS) / 1_000)
 	function steTone(seconds: number, amplitude = 0.12): Float32Array {
 		const out = new Float32Array(Math.round(RATE * seconds))
 		for (let i = 0; i < out.length; i++)
@@ -1302,7 +1370,7 @@ describe("A17: STE tone", () => {
 		return hits
 	}
 
-	it("detection: 55 Hz (and 52-58 Hz) of 125 ms or more is detected; under 100 ms, 50/60 Hz hum, 45 and 67 Hz are not", () => {
+	it("detection: 55 Hz (and 52-58 Hz) of 125 ms or more is detected; under 78 ms, 50/60 Hz hum, 45 and 67 Hz are not", () => {
 		const tone = (hz: number, ms: number): Float32Array =>
 			Float32Array.from(
 				{ length: 8 * ms },
@@ -1342,7 +1410,7 @@ describe("A17: STE tone", () => {
 			).toBe(0)
 	})
 
-	it("a 55 Hz tone under 100 ms after an over is not acted on", () => {
+	it("a 55 Hz tone under 78 ms after an over is not acted on", () => {
 		const g = gate()
 		drive(g, [
 			{
@@ -1353,7 +1421,7 @@ describe("A17: STE tone", () => {
 				open: true,
 				quieted: true,
 			},
-			{ pcm: toPcm(steTone(0.09), "s16le"), open: true, quieted: true },
+			{ pcm: toPcm(steTone(0.077), "s16le"), open: true, quieted: true },
 			{
 				pcm: toPcm(carrierSilence({ rate: RATE, seconds: 0.3 }), "s16le"),
 				open: true,
@@ -1367,76 +1435,238 @@ describe("A17: STE tone", () => {
 
 	// Feature: evidence-squelch, Property 19: Nothing of an over passes after its STE tone
 	// Validates: Requirements 1.5
-	it("Property 19: after an STE detection, no later sample of that over is delivered until stage 1 closes", () => {
+	it("Property 19: for any chunking, the client output is exactly the over up to the STE onset (faded over its last 10 ms), and nothing after it", () => {
 		fc.assert(
 			fc.property(
 				fc.integer({ min: 1, max: 1_000 }),
-				fc.constantFrom(0.4, 0.25, 0.15),
-				fc.array(
-					fc.record({
-						quieted: fc.boolean(),
-						kind: fc.constantFrom("noise", "voice", "tone"),
-					}),
-					{ minLength: 1, maxLength: 12 },
-				),
-				(seed, steSeconds, after) => {
-					const g = gate()
-					drive(g, [
-						{
-							pcm: toPcm(
-								voiceLike({ rate: RATE, seconds: 1.5, seed, level: 0.8 }),
-								"s16le",
-							),
-							open: true,
-							quieted: true,
-						},
+				fc.constantFrom(0.4, 0.2, 0.13),
+				fc.integer({ min: 0, max: 3 }),
+				(seed, steSeconds, cutsPerBlock) => {
+					const w = new WiredGate()
+					const rand = mulberry32(seed)
+					const cuts = (): number[] => {
+						const out: number[] = []
+						for (let i = 0; i < cutsPerBlock; i++)
+							out.push(1 + Math.floor(rand() * (BLOCK_BYTES - 1)))
+						return out.sort((a, b) => a - b)
+					}
+					// A first chunk of an odd size moves every later cut.
+					const over = toPcm(
+						voiceLike({ rate: RATE, seconds: 1.5, seed, level: 0.8 }),
+						"s16le",
+					)
+					const tail = toPcm(
+						mix(
+							steTone(steSeconds),
+							carrierSilence({ rate: RATE, seconds: steSeconds }),
+						),
+						"s16le",
+					)
+					const noise = toPcm(
+						whiteNoise({
+							rate: RATE,
+							seconds: 0.5,
+							seed: seed + 1,
+							level: 0.9,
+						}),
+						"s16le",
+					)
+					w.segments(
+						[
+							{ pcm: over, open: true, quieted: true },
+							{ pcm: tail, open: true, quieted: true },
+							{ pcm: noise, open: true, quieted: false },
+							{ pcm: Buffer.alloc(2 * RATE * 2), open: false, quieted: false },
+						],
+						b => (b === 0 ? [26] : cuts()),
+					)
+					const onset = w.gate.steOnset
+					// The onset is the tone's (at most 25 ms late), never inside the over.
+					expect(onset).toBeGreaterThanOrEqual(over.length / 2)
+					expect(onset).toBeLessThanOrEqual(over.length / 2 + 0.025 * RATE)
+					// The complete client output, zeros and positions included: a reference pre-roll fed
+					// pending until the latch, the over until the onset (its last FADE samples faded by
+					// j / (F + 1)), and nothing that plays after it (held, then abandoned at the close).
+					const input = samples(
+						Buffer.concat([over, tail, noise, Buffer.alloc(2 * RATE * 2)]),
+					)
+					const total = input.length
+					const closeAt = (over.length + tail.length + noise.length) / 2
+					const values = input.map((v, i) => {
+						const j = onset - i
+						// `|| 0`: no negative zero (toEqual tells -0 from +0).
+						return j >= 1 && j <= FADE
+							? Math.round((v * j) / (FADE + 1)) || 0
+							: v
+					})
+					const tags: ModelTag[] = input.map((_, i) =>
+						i < w.latchSample
+							? "pending"
+							: i < onset
+								? "pass"
+								: i < closeAt
+									? "pending"
+									: "drop",
+					)
+					const events = new Map<number, "latch" | "abandon">([
+						[w.latchSample, "latch"],
+						[closeAt, "abandon"],
 					])
-					expect(g.state).toBe("open")
-					let detected = false
-					const ste = toPcm(steTone(steSeconds), "s16le")
-					for (let s = 0; s < ste.length; s += BLOCK_BYTES) {
-						g.noteBlock(true)
-						g.push(ste, "s16le", s, Math.min(ste.length, s + BLOCK_BYTES))
-						// The detecting slice itself is dropped whole by the wiring; later ones are mute.
-						if (detected) expect(g.audibleEnd).toBe(s)
-						if (g.takeSteBack() > 0) detected = true
-					}
-					expect(detected).toBe(true)
-					expect(g.muted).toBe(true)
-					expect(g.state).toBe("waiting")
-					for (const [i, a] of after.entries()) {
-						const pcm = toPcm(
-							a.kind === "noise"
-								? whiteNoise({
-										rate: RATE,
-										seconds: 0.2,
-										seed: seed + i,
-										level: 0.9,
-									})
-								: a.kind === "voice"
-									? voiceLike({
-											rate: RATE,
-											seconds: 0.2,
-											seed: seed + i,
-											level: 0.8,
-										})
-									: ctcssMix({ rate: RATE, seconds: 0.2, hz: 79.7 }),
-							"s16le",
-						)
-						for (let s = 0; s < pcm.length; s += BLOCK_BYTES) {
-							g.noteBlock(a.quieted)
-							g.push(pcm, "s16le", s, Math.min(pcm.length, s + BLOCK_BYTES))
-							expect(g.pushWasOpen).toBe(false)
-							expect(g.state).toBe("waiting")
-							expect(g.muted).toBe(true)
-						}
-					}
-					// The close guard does not apply after an STE; the close ends the hold.
-					expect(g.closed(BLOCK_BYTES * 20, "s16le")).toBe(0)
-					expect(g.muted).toBe(false)
+					expect(total).toBe(samples(w.received()).length)
+					expect(samples(w.received())).toEqual(
+						referencePreRoll(values, tags, events, RATE * 1.5),
+					)
 				},
 			),
 			{ numRuns: 100 },
 		)
 	}, 120_000)
+
+	it("a voiced 55 Hz fundamental with harmonics after a CTCSS latch is not an STE; a false STE would recover on fresh evidence", () => {
+		const voiced = (seconds: number): Buffer => {
+			const out = new Float32Array(Math.round(RATE * seconds))
+			for (let i = 0; i < out.length; i++) {
+				const t = (2 * Math.PI * 55 * i) / RATE
+				out[i] =
+					0.12 * (Math.sin(t) + 0.3 * Math.sin(2 * t) + 0.2 * Math.sin(3 * t))
+			}
+			return toPcm(out, "s16le")
+		}
+		const g = gate()
+		drive(g, [
+			{
+				pcm: toPcm(ctcssMix({ rate: RATE, seconds: 1.5, hz: 79.7 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+			{ pcm: voiced(0.4), open: true, quieted: true },
+		])
+		expect([g.state, g.muted]).toEqual(["open", false])
+		// A real STE (pure tone), then valid CTCSS again: the hold ends on fresh evidence.
+		drive(g, [{ pcm: toPcm(steTone(0.4), "s16le"), open: true, quieted: true }])
+		expect([g.state, g.muted]).toEqual(["waiting", true])
+		drive(g, [
+			{
+				pcm: toPcm(ctcssMix({ rate: RATE, seconds: 1.5, hz: 79.7 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect([g.state, g.evidence, g.muted]).toEqual(["open", "ctcss", false])
+	})
+
+	for (const hz of [67, 71.9, 79.7])
+		it(`CTCSS ${hz} Hz continuing through the STE (0.2 of its amplitude) still ends the over`, () => {
+			const w = new WiredGate()
+			const over = toPcm(
+				mix(
+					ctcssMix({ rate: RATE, seconds: 2, hz }),
+					voiceLike({ rate: RATE, seconds: 2, seed: 5, level: 0.4 }),
+				),
+				"s16le",
+			)
+			const ste = new Float32Array(Math.round(RATE * 0.4))
+			for (let i = 0; i < ste.length; i++)
+				ste[i] =
+					0.12 *
+					(Math.sin((2 * Math.PI * 55 * i) / RATE) +
+						0.2 * Math.sin((2 * Math.PI * hz * i) / RATE))
+			const noise = toPcm(
+				whiteNoise({ rate: RATE, seconds: 0.5, seed: 9, level: 0.9 }),
+				"s16le",
+			)
+			w.segments([
+				{ pcm: over, open: true, quieted: true },
+				{ pcm: toPcm(ste, "s16le"), open: true, quieted: true },
+				{ pcm: noise, open: true, quieted: false },
+				{ pcm: Buffer.alloc(2 * RATE * 2), open: false, quieted: false },
+			])
+			expect(w.gate.steOnset).toBeGreaterThanOrEqual(over.length / 2)
+			expect(w.gate.steOnset).toBeLessThanOrEqual(
+				over.length / 2 + 0.025 * RATE,
+			)
+			// Nothing of the noise reaches the client.
+			expect(w.received().indexOf(noise.subarray(400, 800))).toBe(-1)
+		})
+
+	it("the exact bounds: a 55 Hz tone of 623 samples (77.9 ms) or less never fires, 624 fires at some phase, 847 (105.9 ms) or more always fires, padded with silence or noise", () => {
+		const fires = (len: number, offset: number, noise: boolean): boolean => {
+			const ste = new SteDetector()
+			let x = 7
+			for (let i = 0; i < 1_600 + offset + len + 1_600; i++) {
+				x = (x * 16_807) % 2_147_483_647
+				const t = i - 1_600 - offset
+				const v =
+					(t >= 0 && t < len
+						? 0.12 * Math.sin((2 * Math.PI * 55 * t) / 8_000)
+						: 0) + (noise ? 0.002 * (x / 2_147_483_647 - 0.5) : 0)
+				if (ste.push(v, i)) return true
+			}
+			return false
+		}
+		// Every offset within one 25 ms phase step (200 samples) covers all block alignments.
+		for (const noise of [false, true]) {
+			let at623 = 0
+			let at624 = 0
+			let at847 = 0
+			for (let offset = 0; offset < 200; offset++) {
+				if (fires(623, offset, noise)) at623 += 1
+				if (fires(624, offset, noise)) at624 += 1
+				if (fires(847, offset, noise)) at847 += 1
+			}
+			expect([noise, at623, at624 > 0, at847]).toEqual([noise, 0, true, 200])
+		}
+	})
+
+	/**
+	 * Known limitation (A17 revision 2, accepted 2026-10-24): a near-pure low voiced sound can
+	 * pass the STE rule (harmonics at the -17 dB bound; a 55 Hz tone under very quiet speech). The
+	 * cost is bounded and not terminal: the audio from the detected onset is held (at most one STE
+	 * block, 100-125 ms, is lost) and fresh evidence resumes the over.
+	 */
+	it("known limitation: 58 Hz with harmonics at 0.14 amplitude and a 0.05 8th harmonic fires after a CTCSS latch; CTCSS then resumes", () => {
+		const voiced = new Float32Array(Math.round(RATE * 0.4))
+		for (let i = 0; i < voiced.length; i++) {
+			const t = (2 * Math.PI * 58 * i) / RATE
+			voiced[i] =
+				0.12 *
+				(Math.sin(t) +
+					0.14 * Math.sin(2 * t) +
+					0.14 * Math.sin(3 * t) +
+					0.05 * Math.sin(8 * t))
+		}
+		const g = gate()
+		drive(g, [
+			{
+				pcm: toPcm(ctcssMix({ rate: RATE, seconds: 1.5, hz: 79.7 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+			{ pcm: toPcm(voiced, "s16le"), open: true, quieted: true },
+		])
+		expect([g.state, g.muted, g.steOnset]).toEqual(["waiting", true, 37_500])
+		drive(g, [
+			{
+				pcm: toPcm(ctcssMix({ rate: RATE, seconds: 1.5, hz: 79.7 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect([g.state, g.evidence, g.muted]).toEqual(["open", "ctcss", false])
+	})
+
+	it("known limitation: a 55 Hz tone under voice at level 0.01 fires", () => {
+		const tone = steTone(0.4)
+		const voice = voiceLike({ rate: RATE, seconds: 0.4, seed: 3, level: 0.01 })
+		const g = gate()
+		drive(g, [
+			{
+				pcm: toPcm(ctcssMix({ rate: RATE, seconds: 1.5, hz: 79.7 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+			{ pcm: toPcm(mix(tone, voice), "s16le"), open: true, quieted: true },
+		])
+		expect([g.state, g.muted]).toEqual(["waiting", true])
+	})
 })

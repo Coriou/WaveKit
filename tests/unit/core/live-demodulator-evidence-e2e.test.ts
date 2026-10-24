@@ -26,6 +26,7 @@ import {
 	voiceLike,
 	whiteNoise,
 } from "./evidence-squelch/synthetic.js"
+import { WiredGate } from "./evidence-squelch/wiring-harness.js"
 
 type Harness = Awaited<ReturnType<typeof createDemodHarness>>
 
@@ -49,7 +50,7 @@ const OVER_SECONDS = 3
 const TAIL_SECONDS = 2
 const AM_FLOOR_DBFS = -60
 /**
- * A16 tail bound (review 2026-10-24): the guard (one 10 ms block + the back chain's 1-sample
+ * A16 tail bound (2026-10-24): the guard (one 10 ms block + the back chain's 1-sample
  * lag), the 10 ms fade, and one 10 ms block (this harness notes a block after its PCM).
  */
 const TAIL_BYTES = (0.01 * RATE + 1 + 0.01 * RATE + 250) * 2
@@ -361,8 +362,37 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		return toPcm(out, "s16le")
 	}
 
-	for (const [name, over] of [
-		["voice", (): Buffer => toPcm(overVoice(61), "s16le")],
+	const ctcssOver = (hz: number): Buffer =>
+		toPcm(
+			mix(
+				ctcssMix({ rate: RATE, seconds: OVER_SECONDS, hz }),
+				voiceLike({ rate: RATE, seconds: OVER_SECONDS, seed: 64, level: 0.4 }),
+			),
+			"s16le",
+		)
+	/** The STE with the over's CTCSS continuing under it at 0.2 of its amplitude. */
+	const steThrough = (hz: number): Buffer => {
+		const out = new Float32Array(Math.round(RATE * 0.4))
+		for (let i = 0; i < out.length; i++)
+			out[i] =
+				0.12 *
+				(Math.sin((2 * Math.PI * 55 * i) / RATE) +
+					0.2 * Math.sin((2 * Math.PI * hz * i) / RATE))
+		return toPcm(out, "s16le")
+	}
+	for (const [name, over, through] of [
+		["voice", (): Buffer => toPcm(overVoice(61), "s16le"), null],
+		["CTCSS 67 Hz continuing through the STE", (): Buffer => ctcssOver(67), 67],
+		[
+			"CTCSS 71.9 Hz continuing through the STE",
+			(): Buffer => ctcssOver(71.9),
+			71.9,
+		],
+		[
+			"CTCSS 79.7 Hz continuing through the STE",
+			(): Buffer => ctcssOver(79.7),
+			79.7,
+		],
 		[
 			"CTCSS 79.7 Hz + voice",
 			(): Buffer =>
@@ -378,11 +408,12 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 					),
 					"s16le",
 				),
+			null,
 		],
 	] as const)
 		it(`A17: ${name} over, 0.4 s of 55 Hz STE, then loud noise: speech, a fade, then zeros`, async () => {
 			const overPcm = over()
-			const ste = steTone(0.4)
+			const ste = through === null ? steTone(0.4) : steThrough(through)
 			const noise = toPcm(
 				whiteNoise({ rate: RATE, seconds: 1, seed: 63, level: 0.9 }),
 				"s16le",
@@ -407,7 +438,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			for (let i = 0; i < after.length; i += 2)
 				if (after.readInt16LE(i) !== 0) last = i
 			console.info(
-				`EVIDENCE-SQUELCH A17 ${name}: ${(last + 2) / 2} samples after the over`,
+				`EVIDENCE-SQUELCH A17 ${name}: ${last < 0 ? 0 : last / 2 + 1} samples after the over`,
 			)
 			expect(last).toBeLessThanOrEqual(0.025 * RATE * 2)
 			expect(result.received.indexOf(noise.subarray(400, 800))).toBe(-1)
@@ -494,7 +525,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 	 * `noteBlock` reports the reset and the wiring abandons the held noise, so over 2 plays from
 	 * its first sample and no lead-in noise reaches the client.
 	 */
-	function consecutiveOvers(): {
+	function consecutiveOvers(gapSeconds = 10): {
 		segments: Segment[]
 		lead: Buffer
 		over2: Buffer
@@ -510,7 +541,11 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			over2,
 			segments: [
 				{ pcm: over1, open: true, quieted: true },
-				{ pcm: Buffer.alloc(10 * RATE * 2), open: false, quieted: false },
+				{
+					pcm: Buffer.alloc(gapSeconds * RATE * 2),
+					open: false,
+					quieted: false,
+				},
 				{ pcm: lead, open: true, quieted: false },
 				{ pcm: over2, open: true, quieted: true },
 				{
@@ -551,31 +586,37 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 
 	// Feature: evidence-squelch, Property 6: Chunk-split invariance
 	// Validates: Requirements 2.1, 2.3
-	it("consecutive overs: invariant under chunk splits inside each block", async () => {
-		const { segments, lead, over2 } = consecutiveOvers()
-		await fc.assert(
-			fc.asyncProperty(fc.integer({ min: 1, max: 0x7fffffff }), async seed => {
+	it("consecutive overs: the client bytes are invariant under chunk splits inside each block (real wiring)", () => {
+		// The wiring the demodulator runs (processEvidenceChunk with the real gate and pre-roll),
+		// driven directly: milliseconds per case instead of seconds through the harness. The
+		// closed gap is 2 s (past the 1.5 s hang), the property is byte-identity with the
+		// unsplit run, and the end-to-end test above keeps one run through the demodulator.
+		const { segments, lead, over2 } = consecutiveOvers(2)
+		const wired = (cuts?: (block: number) => number[]): Buffer => {
+			const w = new WiredGate()
+			w.segments(segments, cuts)
+			return w.received()
+		}
+		const reference = wired()
+		expectOver2FromFirstSample(reference, lead, over2)
+		fc.assert(
+			fc.property(fc.integer({ min: 1, max: 0x7fffffff }), seed => {
 				let x = seed
 				const split = (): number[] => {
 					x = (Math.imul(x, 1_103_515_245) + 12_345) & 0x7fffffff
-					const n = x % 3
+					const n = x % 4
 					const cuts: number[] = []
 					for (let i = 0; i < n; i++) {
 						x = (Math.imul(x, 1_103_515_245) + 12_345) & 0x7fffffff
-						// Sample-aligned cuts: the per-chunk byte check above assumes whole samples
-						// (odd splits are covered by the wiring's odd-chunk test).
 						cuts.push(2 * (1 + (x % (BLOCK_BYTES / 2 - 1))))
 					}
 					return cuts.sort((a, b) => a - b)
 				}
-				const result = await drive("nfm", segments, false, split)
-				expectOver2FromFirstSample(result.received, lead, over2)
-				await h?.dispose()
-				h = null
+				expect(wired(split).equals(reference)).toBe(true)
 			}),
 			{ numRuns: 100 },
 		)
-	}, 600_000)
+	}, 60_000)
 
 	const NEVER: Array<[string, "nfm" | "am", Segment[]]> = [
 		[
