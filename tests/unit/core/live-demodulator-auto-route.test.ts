@@ -929,4 +929,101 @@ describe("auto listen route: shadow mismatch silences selected analog (review fi
 				.some(b => b !== 0),
 		).toBe(true)
 	})
+
+	it("a persistent mismatch (sync off by one while delayed) stays silent until the pre-roll drains to zero, then recovers", async () => {
+		// Latched 500 samples into the over: the real pre-roll holds 500 samples while it plays.
+		evidenceScript.latchByte = 1_000
+		evidenceScript.guardBytes = 0
+		const h = await harness({
+			config: { modulation: "nfm", squelchMode: "auto" },
+			factory: scriptedEvidence,
+		})
+		const stream = h.addStreamClient()
+		const auto = h.addAutoClient()
+		const run = h.internals.run as unknown as {
+			evidence: {
+				preRoll: { delaySamples: number }
+				shadow: {
+					failed: boolean
+					mismatches: number
+					sync(realDelaySamples: number): boolean
+				}
+			}
+		}
+		const { preRoll, shadow } = run.evidence
+		h.stage.open = true
+		let seed = 0
+		const step = (open: boolean) => {
+			h.stage.open = open
+			h.feed(ramp(500, seed))
+			seed += 500
+			h.routeClock.tick(20)
+		}
+		for (let i = 0; i < 10; i++) step(true)
+		expect(h.demod.getStatus().autoRoute?.active).toBe("analog")
+		expect(preRoll.delaySamples).toBe(500)
+		expect(shadow.failed).toBe(false)
+		// A defect stand-in: one sync against a real delay off by one while the delay is non-zero.
+		const sync = shadow.sync.bind(shadow)
+		let inject = true
+		shadow.sync = real => {
+			if (!inject) return sync(real)
+			inject = false
+			return sync(real + 1)
+		}
+		const mark = auto.transport.received().length
+		const streamMark = stream.received().length
+		// Failure: the over keeps playing on /stream with the real delay non-zero throughout.
+		for (let i = 0; i < 20; i++) {
+			step(true)
+			expect(shadow.failed).toBe(true)
+			expect(preRoll.delaySamples).toBe(500)
+		}
+		expect(shadow.mismatches).toBe(1)
+		expect(
+			stream
+				.received()
+				.subarray(streamMark)
+				.some(b => b !== 0),
+		).toBe(true)
+		// The close drains the pre-roll to zero: the shadow resyncs on that call.
+		let drained = -1
+		for (let i = 0; i < 10; i++) {
+			step(false)
+			if (drained < 0 && !shadow.failed) drained = i
+		}
+		expect(preRoll.delaySamples).toBe(0)
+		expect(drained).toBeGreaterThanOrEqual(0)
+		expect(shadow.failed).toBe(false)
+		expect(shadow.mismatches).toBe(1)
+		// Silence on /auto throughout the failure and the drain (fail closed).
+		const failure = auto.transport.received().subarray(mark)
+		expect(failure.length).toBe(30 * 1_920)
+		expect(failure.every(b => b === 0)).toBe(true)
+		// Recovery: the next over (the gate stays latched, delay 0) is exact against /stream.
+		for (let i = 0; i < 20; i++) step(false)
+		expect(h.demod.getStatus().autoRoute?.active).toBe("none")
+		const streamFrom = stream.received().length
+		const autoFrom = auto.transport.received().length
+		for (let i = 0; i < 20; i++) step(true)
+		for (let i = 0; i < 20; i++) step(false)
+		expect(shadow.failed).toBe(false)
+		expect(shadow.mismatches).toBe(1)
+		const over = stream.received().subarray(streamFrom)
+		expect(over.subarray(0, 20 * 1_000).every(b => b !== 0)).toBe(true)
+		expect(over.subarray(20 * 1_000).every(b => b === 0)).toBe(true)
+		const ref = resampled(over, h.internals.run?.stream.rate ?? 0)
+		const got = autoSamples(auto.transport).slice(autoFrom / 2)
+		const start = got.findIndex(v => v !== 0)
+		const refStart = ref.findIndex(v => v !== 0)
+		expect(start).toBeGreaterThanOrEqual(0)
+		// The over's 20 × 500 samples at 48 kHz, in order, once (an underrun gap of the first
+		// block aside: compare the samples after it).
+		const body = ref.slice(refStart + 1_920, refStart + 18_000)
+		const at = got.indexOf(body[0] ?? 0, start + 1_920)
+		// Where it belongs: 1 920 samples in, plus at most one block of underrun zeros.
+		expect(at - start).toBeGreaterThanOrEqual(1_920)
+		expect(at - start).toBeLessThanOrEqual(1_920 + 960)
+		expect(firstDifference(got.slice(at, at + body.length), body)).toBe(-1)
+	})
 })
