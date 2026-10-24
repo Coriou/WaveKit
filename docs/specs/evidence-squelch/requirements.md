@@ -561,10 +561,16 @@ requests framing (`audioFraming: "wkaf1"` on the demod `open`) only when the pro
 protocol 3 or later, and on every such Rust run regardless of modulation and squelch mode, so a
 later in-place switch into `auto` (1.11) needs no restart. The run is framed only when the
 `opened` event echoes `audioFraming: "wkaf1"`. A binary reporting protocol 2 gets the
-protocol-2 `open`, byte for byte, and the run is unframed.
+protocol-2 `open`, byte for byte, and the run is unframed. Revision (2026-10-24): the producer
+writes raw PCM, exactly as today, unless its `opened` echoes acceptance; it never frames a stream
+it did not acknowledge. Once the echo is received the stream is framed for the whole run: a valid
+echo followed by an invalid preamble is a framing error (9.6 (b)) and the bytes are never
+reinterpreted as raw PCM.
 Acceptance: a protocol-2 fake binary receives an `open` byte-identical to today's and its run
 reports `autoSquelch` `off`; a protocol-3 fake that omits the echo gives an unframed run that
-parses the socket as raw PCM; a protocol-3 fake that echoes gives a framed run.
+parses the socket as raw PCM, and a Rust test shows a channel opened without the echo writes raw
+PCM; a protocol-3 fake that echoes gives a framed run; a fake that echoes and then writes raw PCM
+(or a corrupted preamble) ends the run safely with no client byte from the socket.
 
 9.2 **Wire format.** A framed socket starts with a 16-byte preamble and then carries only frames
 (8-byte header, then payload), little-endian, as specified in the design. Frame types: PCM, gate
@@ -589,10 +595,12 @@ gives the gate history of the stdout `gate` events.
 
 9.4 **Bounds.** The preamble is 16 bytes. A PCM payload is 1 to 65 536 bytes and a whole number of
 samples. A marker payload is at most 64 bytes, and a known marker type has exactly its specified
-length. Rust never writes a frame past a bound; the consumer holds at most 16 bytes of header or
-marker state across chunks and never allocates per byte.
+length. Rust never writes a frame past a bound; the consumer holds at most 64 bytes of preamble,
+header or marker state across chunks (one fixed scratch, sized to the largest marker payload) and
+never allocates per byte.
 Acceptance: tests at each bound and one past it (PCM 65 536 and 65 538 bytes, PCM 0 bytes, PCM of a
-partial sample, marker payload 64 and 65 bytes, a known type at its length plus and minus one).
+partial sample, marker payload 64 and 65 bytes, a known type at its length plus and minus one), and
+a RESET and a DROP split after each payload byte, including after byte 16, parse as one marker.
 
 9.5 **Unknown types.** A well-formed frame of an unknown type with a payload of at most 64 bytes
 is skipped. If the type is ignorable (0x8000 or above) nothing else happens. If it is below
@@ -612,10 +620,13 @@ PCM as delivered), with `autoSquelch` `off`. Later markers are parsed for framin
 bytes), or a header breaks 9.4, or a reserved field is not zero. No later byte is trusted: the
 run writes no further Rust bytes to clients (the silence fill runs as for a stalled source), the
 evidence state is reset and cleared as in (a), and the run ends through the existing Rust failure
-path, as a closed socket does today.
+path, as a closed socket does today. Revision (2026-10-24): this failure counts toward the
+Rust crash latch like any other run failure, and a run reports exactly one failure: a later
+socket close, socket error or child exit of the same run adds no second notification.
 Acceptance: each listed malformation, injected at a random position and chunking, produces the
 class above, at most one log line with only the safe fields, no played byte from the pre-roll
-after the error, and (b) no client byte after the error offset.
+after the error, and (b) no client byte after the error offset and exactly one failure
+notification and one crash-latch count when the socket closes and the child exits afterwards.
 
 9.7 **Chunk independence.** The consumer gives the same PCM bytes, markers and marker positions
 for any split of the socket stream into chunks, including splits inside the preamble, a header, a
@@ -623,16 +634,26 @@ marker payload and a sample.
 Acceptance: fast-check property, `numRuns` at least 100, over random framed streams and random
 chunk splits (including 1-byte chunks), compared with a one-chunk parse.
 
-9.8 **Same verdicts as csdr.** On a framed Rust NFM run in `auto` with no tone squelch, the
-evidence gate and pre-roll take stage-1 state per sample from the markers, block carrier evidence
-from the block markers, and stage-1 edges from the gate markers, in stream order. For the same
-PCM, the same stage-1 open and close samples and the same per-block carrier evidence, the
-framed-Rust path and the csdr path give the same verdicts: latch sample and evidence, first played
-sample (the over's onset, requirement 2.1), pre-roll start, tail end (guard and fade, A16), STE
-detection and mute start (A17), and the same tagged output bytes.
-Acceptance: a differential test feeds synthetic overs (CTCSS voice, DCS voice, plain voice, bare
-carrier, data-like, an STE tail, two overs inside the hang, a drop and a reset inside an over)
-through both paths and asserts equal verdicts and equal client bytes.
+9.8 **Same verdicts as the ordered reference.** Revision (2026-10-24): supersedes the first form
+of 9.8. Equivalence is defined against a canonical ordered-input reference: the same PCM and a
+sample-positioned timeline of stage-1 edges, block carrier evidence and discontinuities, fed in
+sample order into the evidence gate and pre-roll (design, ordered reference). On a framed Rust NFM
+run in `auto` with no tone squelch, the evidence gate and pre-roll take stage-1 state per sample
+and stage-1 edges from the gate markers, block carrier evidence from the block markers and
+discontinuities from RESET and DROP, in stream order. Framed Rust meets the reference exactly for
+any chunking: latch sample and evidence, first played sample (the over's onset, requirement 2.1),
+pre-roll start, tail end (guard and fade, A16), STE detection and mute start (A17), and the tagged
+output bytes. The csdr path meets it only approximately. Known limitation, unchanged by A18: on
+csdr, `measureRun` receives block callbacks from the front of the chain while the client audio is
+gated by the stage-1 state at chunk arrival, so csdr edges and carrier evidence can be skewed
+against the PCM by up to one PCM chunk plus the back chain's lag (design, ordered reference). A18
+changes nothing on csdr.
+Acceptance: a differential test drives the production framed-Rust consumer path (parser, wiring,
+gate, pre-roll) and the reference with the same synthetic overs (CTCSS voice, DCS voice, plain
+voice, bare carrier, data-like, an STE tail, two overs inside the hang, a drop and a reset inside
+an over, a drop and a reset after a latch) under random chunkings and asserts equal verdicts and
+equal client bytes; the csdr path on the same overs matches the reference within the documented
+skew.
 
 9.9 **Status and contract.** `autoSquelch` on a framed Rust NFM `auto` run reports `waiting` and
 `open` as on csdr; on an unframed or failed-safe run it reports `off`. No field is added or
@@ -642,13 +663,37 @@ stdout events exactly as today (1.6).
 Acceptance: status tests for framed, unframed and failed-safe runs; the existing contract tests
 pass unchanged.
 
-9.10 **Performance.** Marker overhead stays within the design's A18 budget: at most 9 % of the
-PCM byte rate at s16 (worst case) and under 0.001 core for parsing on the desktop; the PCM payload
-is forwarded as views, never copied by the parser.
-Acceptance: the bench of 6.2 reports parse cost per second of audio and the framing overhead
-bytes per second on a framed run.
+9.10 **Performance.** Revision (2026-10-24): framing overhead is bounded by the 10 ms block
+cadence, not by input read sizes. Rust coalesces PCM across feeds into one record and flushes it
+only at a marker, at a 10 ms block end, or at 65 536 bytes; gate changes are marked at most once
+per block boundary (control-driven changes at one boundary are coalesced to the net state); RESET
+records are at most two per 480 output samples (closer resets are coalesced, design). Overhead
+stays within the design's A18 budget: at most 5 % of the s16 PCM byte rate without
+discontinuities and at most 15 % under a sustained storm of input gaps and queue drops; parsing
+under 0.001 core on the desktop; PCM forwarded as views, never copied by the parser.
+Acceptance: Rust tests with 1-sample and other short feed schedules show at most one PCM record
+per block plus the flushes forced by markers, and the coalescing of gate changes and resets; the
+bench of 6.2 reports parse cost per second of audio and framing overhead bytes per second.
 
 9.11 **Acceptance updates.** 8.2's open, no-open, onset and delay verdicts apply on Rust for
 framed runs (superseding the A12 amendment under 8.2 for them), and the fake-link scenario runs
 the Rust leg with a protocol-3 binary; one Rust leg with a protocol-2 binary asserts the A12 path.
 The Rust-engine onset finding (design) is fixed for framed runs when 9.8 passes.
+
+9.12 **Stdout gate events do not touch evidence on framed runs.** Revision (2026-10-24). On a
+framed run the stdout `gate` events drive only `squelchOpen`, transmissions, Activity and the
+other stage-1 consumers (1.6); they never reset, abandon or clear the evidence gate, the pre-roll,
+the shadow or the wiring state (today `publishSquelchChange` resets a waiting gate and abandons
+the pre-roll on a close). Only the in-band markers change evidence state. Unframed runs are
+unchanged (no evidence state exists, A12).
+Acceptance: on a framed run, the same over with its stdout close delivered before the audio up to
+the close marker, and delivered after it, gives the same verdicts and client bytes as the
+reference; likewise for the stdout open.
+
+9.13 **Discontinuities clear.** Revision (2026-10-24). A RESET or a DROP fully clears evidence
+state, as a retune does: the gate is reset, the pre-roll and its shadow are cleared (held audio is
+dropped, not abandoned into the tail), and the wiring's tail tag and alignment are reset. The run
+then continues with the flagged gate state; an over still open starts waiting afresh.
+Acceptance: a RESET and a DROP each before a latch, after a latch while audio plays from the
+pre-roll, and inside the close guard: no held byte from before the discontinuity is played, and
+the next over latches on fresh evidence only.
