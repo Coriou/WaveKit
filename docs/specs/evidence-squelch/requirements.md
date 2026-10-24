@@ -697,3 +697,203 @@ then continues with the flagged gate state; an over still open starts waiting af
 Acceptance: a RESET and a DROP each before a latch, after a latch while audio plays from the
 pre-roll, and inside the close guard: no held byte from before the discontinuity is played, and
 the next over latches on fresh evidence only.
+
+## Amendment A19 (2026-10-24): AM closed-squelch hum, and the AM voice test study
+
+**Finding.** A closed AM stage 1 is not silent: the client hears a steady low hum at about
+-29 dBFS RMS (measured -29.3 dBFS, fundamental 81 Hz with harmonics at 162 and 243 Hz, peak
+0.090 full scale). The cause is the csdr fast AGC, not the squelch decision: the closed gate
+holds a constant -80 dBFS vector (`MUTED_MAGNITUDE` in `ChannelSquelch`), `csdr amdemod` turns it into a
+constant envelope, and the fast AGC limit-cycles on any constant envelope (gain rises 0.1 % per
+sample until the output passes the reference, falls 10 %, holds 200 samples, rises again). The
+DC block passes the sawtooth. The level does not depend on the envelope's level: a constant
+1e-4, a held -30 dBFS carrier and the closed gate all measure -29.3 dBFS. Design A19 has the
+arithmetic and the study.
+
+A19.1 **Closed AM is silent, at any rate and gain.** On `am`, `dsb` and `cw` (the
+envelope-demodulator chains) on the csdr engine, in every squelch mode: (a) while stage 1 is
+closed, the channel IQ handed to the back chain is exact zeros (not the -80 dBFS hold vector);
+(b) every PCM sample the back chain makes from a closed channel sample reaches clients and `pcm`
+listeners as exact zero bytes (s16le and f32le alike). The back chain emits one PCM sample per
+channel sample, so PCM sample `p` is channel sample `p` (with `lowPass`, channel sample `p + 39`, the
+FIR lead of design A19); the mute is counted in samples, not
+time, and holds at every channel rate (bandwidth) and every `gain` from 0.1 to 100.
+Revision (2026-10-24): the first A19.1 text relied on the DC block's decay ("below -70 dBFS
+from 200 ms") and held only near 25 kHz and gain 2: at 8 kHz the decay gave about -35 dBFS in
+the 200-300 ms window (spec review), and the behavioural model of design A19 measures -57.9 dBFS
+there at gain 2 and -23.9 dBFS at gain 100. (b) replaces that dependence.
+
+A19.2 **FM, SSB, raw and Rust unchanged.** On `nfm`, `wfm`, `usb`, `lsb` and `raw` the closed
+gate keeps the phase-continuous -80 dBFS hold vector and no PCM is muted; their channel IQ and
+audio are byte-identical to the frozen code. Rust-engine runs (any modulation) are unchanged, and
+the default engine stays csdr.
+
+A19.3 **Closing and reopening.** (1) The closing transient: today the 100 ms after an AM close
+carry the DC block's step and the hum (behavioural model, 25 kHz, gain 2: -17.0 dBFS RMS); under
+A19.1(b) those samples are muted, so the transient is gone. With the IQ zeros alone the step's
+first 20 ms measured -10.3 dBFS peak against -11.5 dBFS today in the csdr study (design A19); that
+1.2 dB rise is accepted only because A19.1(b) mutes it, and any IQ-only variant must stay within
++1.5 dB of today's peak (the study's 1.2 dB plus 0.3 dB for float32 rounding across seeds). (2)
+Reopening: exact zeros freeze the AGC, so a reopen starts at the gain the AGC held at the close,
+whatever the closure's length (today the hold vector winds it up towards `0.4 / 1e-4`, about
+4 000). This change of reopen gain is allowed. A stronger carrier may clip at the `limit` stage for
+a few samples until the AGC attack catches it (a 20 dB step: about 22 samples at 10 % per sample);
+a weaker one starts quiet and rises with the AGC decay. Reopen audio is not muted.
+
+A19.4 **Everything else as before.** Stage-1 decisions, channel power, transmission events,
+Activity, the `pcm` event's timing and byte counts, and the stream byte rate are unchanged; only
+closed AM samples change (to zeros), on both the IQ and the PCM side.
+
+**Known limitation (A19).** The same AGC limit cycle plays while stage 1 is open on an
+unmodulated AM carrier and in the pauses of an over (measured -28.6 dBFS on a held -30 dBFS
+carrier). A19.1 removes it only while closed; the open case needs a change to the AGC (its hang
+and attack, or a non-csdr AGC); it is proposed for the ROADMAP evidence-squelch follow-ups.
+
+A19.5 **AM stays out of the evidence gate.** `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` stays
+`["nfm"]`; AM `auto` keeps the stage-1 auto squelch (A8 stands). The pre-AGC envelope voice test
+of design A19 was prototyped on synthetic signals and does not separate weak AM voice from
+flutter with one threshold (design A19, study): at the threshold that never opens on a carrier,
+noise, fades, 10 Hz flutter or a heterodyne whistle, voice at 10-15 dB carrier-to-noise opens
+only 8 to 13 times in 20, and a lower threshold opens on flutter 20 times in 20. Gating AM on that
+evidence would mute weak overs that stage 1 plays today.
+
+A19.6 **Enabling later (not in this batch).** AM evidence gating may be enabled only by a further
+amendment that shows, on recorded AM channel IQ (airband or similar, through the default csdr
+chain): every voice over that stage 1 plays opens within `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`
+and plays from its first syllable through the pre-roll; an unmodulated carrier, noise, fades and
+a heterodyne whistle never open. The test then reads the pre-AGC channel envelope (design A19),
+never the post-AGC audio.
+
+A19.7 **Tests.** The design A19 test list is required for A19.1-A19.4. Tests assert on WaveKit's
+side (exact-zero IQ, muted PCM bytes, the option wired for am, dsb and cw only, Rust unchanged)
+and, where a back chain is needed, use a behavioural envelope-chain model written for the tests,
+not a port of csdr (performance rule 8). The study script is not kept in the repository.
+
+## Amendment A20 (2026-10-24): reverse-burst squelch-tail elimination
+
+**Finding.** A17 ends an over on the 55 Hz STE tone. The other common STE form is the CTCSS
+reverse burst: after PTT release, with the carrier still up, the radio shifts the phase of its
+CTCSS tone by 180° (some radios 120°) for about 150-200 ms, then drops the carrier. The CTCSS bank
+(`CtcssBank`) measures tone power only, so it cannot see the reversal, and the over ends through
+the A16 tail mute (at most the guard plus the 10 ms fade of noise). A20 adds one phase tracker on
+the latched CTCSS tone and ends the over at the reversal, retroactively, as A17 does. Design A20
+has the alignment sweep, the corpus, the study table and the arithmetic. (Revised 2026-10-24
+after review: mixed-block onset, retained-latch drain, tracker restart on reopen, enforceable
+false-alarm corpus, bounded properties.)
+
+A20.1 **When the tracker runs.** On `nfm`, on the csdr engine, in `auto` with no configured tone
+squelch (1.9 stands), exactly one reverse-burst tracker per evidence gate runs, and only while the
+gate is latched (open, not held after an STE) on a CTCSS tone: the latched tone key is a CTCSS
+table index. It is armed at the latched tone's standard frequency (`CTCSS_HZ`) when a latch or a
+renewal (A14) sets that key, re-armed when a renewal changes the key, and disarmed (no per-sample
+work) while waiting, while held, after any reset, and on a voice, DCS or data latch. On a stage-1
+reopen within a retained latch (the gate's reopen path) the tracker restarts: same tone, empty
+history, fresh block grid, so a phase jump across the close is never compared with the phase
+before it. No block spans a stage-1 close.
+
+A20.2 **Where it taps.** The tracker reads the same 8 kHz samples the tone bank sees: the gate's
+`PcmDecimator` output, before the meter's filters, in the same `takeSample` step as the A17
+`SteDetector` and right after it. It is dated by the gate's input-sample index (the decimation
+group's first input sample), as A17 revision (4).
+
+A20.3 **Detection rule.** Coherent 40 ms blocks (320 samples at 8 kHz) of the latched tone's
+single-bin quadrature phasor, with a phase-continuous oscillator. The tracker keeps the last 8
+block phasors in chronological order, blocks `k - 5` to `k + 2`. Each completed block is stored
+first; then the rule runs with the newest block as `k + 2`. The first evaluation is therefore at
+the end of the 8th block after arming or a restart (320 ms). A reversal is detected when all of:
+(a) the 4 phase increments `k-5 -> k-4` to `k-2 -> k-1` each lie within 25° of their circular mean
+(the drift; a ±0.5 Hz transmitter error is 7.2° per block);
+(b) the magnitudes of blocks `k - 5` to `k - 1` have a coefficient of variation of at most 0.3;
+(c) `wrap(phase(k + 1) - phase(k - 1) - 2 drift)` is at least 90° in magnitude;
+(d) `wrap(phase(k + 2) - phase(k + 1) - drift)` lies within 25° (the new phase persists);
+(e) blocks `k - 1`, `k + 1` and `k + 2` each keep at least 0.5 of the median magnitude of blocks
+`k - 5` to `k - 1`.
+The reversal may lie in block `k` or in block `k + 1` (a mixed block that already passes
+(c)-(e)). Its position is estimated from both: each block's phasor is projected on the segment
+from the post phasor (block `k + 2` taken back by the drift) to the pre phasor (block `k - 1`
+advanced by it), which gives the fraction of that block still before the reversal; the position
+is block `k`'s start plus the sum of the two fractions, in blocks. The onset is that position
+less 80 samples (10 ms). A 120° or a 180° reversal is detected; a step under 90° is not.
+
+A20.3a **Measured bounds (alignment sweep).** Over all 50 CTCSS tones, 120° and 180°, tone errors
+of -0.5, 0 and +0.5 Hz and every reversal position 0 to 319 inside a block (96 000 cases, noise
+-40 dB below the tone): every reversal is detected; the onset lies 41 to 121 samples before the
+reversal (5.1 to 15.1 ms); the decision comes 520 to 892 samples after it (65 to 111.5 ms), plus
+at most one decimation group in input samples. The review's mixed-block example (127.3 Hz, 120°,
+sample 10 x 320 + 80) decides 560 samples (70 ms) after the reversal with the onset 79 samples
+(9.9 ms) before it, not at the start of the earlier block. Under the impaired conditions of
+A20.6 the estimate spreads (design A20 table): in the required conditions the onset lies 27 to
+111 samples before the reversal; in the weakest measured conditions it can lie up to 231 samples
+(29 ms) after it, which lets that much reversed tone (no noise) play.
+
+A20.4 **Ending the over.** A detection ends the over exactly as an A17 STE does (A17 and its
+revisions): client audio is muted retroactively from the onset with the 10 ms fade before it,
+through `takeSteBack()` and `PreRoll.muteTail`; the latch ends; held audio waits for stage 1 to
+close or for fresh evidence (A17 revision (2)); no close guard follows. Audio before the
+reversal lost to the 41-121 sample margin is part of the cost: radios send the burst after PTT
+release, but this amendment does not assume the speech has ended at the onset; at most 15.1 ms
+(clean sweep) of whatever precedes the reversal is muted.
+
+A20.4a **Retroactive span: what is guaranteed.** The retroactive mute covers only samples still
+queued in the pre-roll. While the queued delay is at least the decision latency plus one 10 ms
+slice (about 122 ms), nothing from the onset on plays. Normally it is: a tone latch starts at a
+0.75 s delay. The guarantee is limited, not universal: with the latch retained across a stage-1
+close, the queue plays out during the close (a close longer than the delay drains it fully) and
+the pre-roll's catch-up removes dropped samples, so the reopened over can play at a smaller delay,
+down to 0. Then the samples between the onset and the decision (at most 892 samples at 8 kHz plus
+one decimation group and one 10 ms slice, about 122 ms, of reversed tone) may already have
+played. In every case nothing after the decision plays, so the noise after the carrier drop is
+removed. No minimum retained delay is added (the pre-roll is unchanged).
+
+A20.5 **One end per over.** The 55 Hz STE (A17), the reverse burst (A20) and the A16 tail mute
+never end one over twice. In `takeSample` the 55 Hz detector runs first, then the tracker; either
+ends the over only while not held, so within one uninterrupted hold (from the detection to the
+stage-1 close or fresh evidence) the first detection wins and a later one of either kind changes
+nothing (no second `takeSteBack`, no second fade). The hold resets the gate, which disarms the
+tracker. A reverse burst detected while the A16 guard or fade runs supersedes it from the onset;
+samples already faded or dropped before the onset stay as they are. When stage 1 closes before
+the decision (a burst or carrier shorter than the decision latency), the tracker is not fed and
+the A16 tail mute governs, byte-identical to the gate without A20. The CTCSS bank does not end the
+hold during the burst: the gate's reset clears the tone stage, and requalifying a tone needs
+750 ms of audio, longer than the 150-200 ms burst, whatever the bank's 500 ms blocks do around
+the reversal (a block straddling a 180° reversal loses power; no claim is made that sightings
+continue). Diagnostics report `ste: true` while held (no status contract change); the gate's
+`endCause` (tests only) tells the two detectors apart.
+
+A20.6 **False alarms.** Enforced by a seeded corpus test (`reverse-burst-corpus.test.ts`): the
+FM-link model of design A20, 12 conditions, 4 seeds of 6 s each (24 s per condition, 288 s in
+all). Every detection counts, not only a run's first: the tracker is re-armed after each one, as
+on a resumed latch. Ceilings: 0 detections in each condition except the known limit, at most 1
+there. Conditions: a clean carrier (30 dB carrier-to-noise); ±0.5 Hz tone error; 10 Hz Rayleigh
+fading (amplitude and phase) at 20 and at 12 dB; slow fades to -20 dB; 10 Hz tone flutter of 15°
+RMS phase and 30 % amplitude; a weak carrier (8 dB); a weak tone at -30 dB relative to deviation;
+voice at 0.4 RMS of deviation over the tone; voice with Rayleigh fading, 15 dB, +0.5 Hz; and the
+known limit, a -30 dB tone under voice at 0.4. The design study (100 seeds, 600 s per condition,
+same model and counting) measured 0 detections in 6 600 s outside the known limit and 3 in 600 s
+in it (3 runs, one each). A false detection costs, conditionally: the audio from the onset to the
+decision is dropped; the rest is held; if fresh evidence (the tone requalifying after 750 ms, or
+voice) arrives before stage 1 closes, the held audio replays; if stage 1 closes first, the held
+speech from the onset to the close is lost.
+
+A20.7 **Detection.** In the corpus test, every reversal (4 seeds x 120° and 180°) is detected,
+with the onset 0 to 121 samples before the reversal and the decision at most 892 samples after
+it, in the clean, ±0.5 Hz, Rayleigh 20 dB, slow-fade, weak-carrier and weak-tone conditions. The
+others are measured, not required (design A20 study table); a missed reversal falls back to the
+A16 tail mute.
+
+A20.8 **CPU.** One tracker per gate, running only while CTCSS-latched; disarmed it costs one
+branch per decimated sample. Estimate (operation count, not measured): per 8 kHz sample one
+oscillator rotation and one real-by-complex accumulate (6 multiplies, 4 adds), per 40 ms block
+one `atan2`, one `hypot`, a `cos` and `sin` re-seed and the rule over the 8-block ring; about
+0.08 Mflop/s per latched channel. Measured (`scripts/bench/reverse-burst.ts`, desktop host under a
+load average of about 11-12, 30 s of audio, median of 7 interleaved passes): the tracker alone
+0.0002 core; `EvidenceGate.push` on a tone-latched over 0.00297 -> 0.00334 core at 25 kHz and
+0.00404 -> 0.00456 core at 50 kHz (+0.0004 to +0.0005, within run noise of the same order). On a
+Pi 4-class core, estimated 4-5x: about 0.001-0.0025 core. The tracker runs at 8 kHz whatever the
+source rate, so the figures hold at 2.048 and 2.4 Msps; all are far below the 0.3-core noise floor
+of performance rule 3. No allocation after construction (performance rule 4).
+
+A20.9 **Tests.** The design A20 test list is required: deterministic tests on synthetic 8 kHz and
+25 kHz signals with seeded noise, the seeded corpus with its ceilings, fast-check properties with
+`numRuns` of at least 100 and the trace comment, and no wall-clock assertion (latency is counted
+in samples). The prototype scripts are not kept in the repository.

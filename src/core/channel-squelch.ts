@@ -112,7 +112,27 @@ export interface ChannelSquelchOptions {
 	 * Default false: `blockCarrier()` always false, `hasCarrierEvidence` false.
 	 */
 	carrierEvidence?: boolean
+	/**
+	 * Evidence squelch A19 (envelope demodulators: am, dsb, cw on csdr): a closed block is exact
+	 * zeros instead of the -80 dBFS hold vector, with no rotation on reopen, and every closed
+	 * output sample is logged so `muteClosedPcm` can zero the PCM it becomes. Default false.
+	 */
+	muteZeros?: boolean
+	/**
+	 * A19 revision: channel samples by which the PCM content leads the PCM sample count (a FIR
+	 * stage that keeps its window back emits sample `p` centred on input `p + lead`). PCM
+	 * sample `p` is muted when channel sample `p + lead` was closed. Default 0.
+	 */
+	pcmLeadSamples?: number
 }
+
+/**
+ * Closed spans in flight for `muteClosedPcm` (a ring). At the cap the two oldest spans merge,
+ * muting the open gap between them: silence is never lost, at worst some open audio is muted.
+ * At most 50 closes per second (alternating 10 ms blocks) x a PCM backlog of a few seconds
+ * stays far below 1 024; the cap covers about 20 s of backlog at that worst rate.
+ */
+export const CLOSED_SPANS_MAX = 1024
 
 /** Reported floor for an all-zero channel (matches the config minimum). */
 export const CHANNEL_POWER_FLOOR_DBFS = -160
@@ -167,6 +187,17 @@ export class ChannelSquelch {
 	private evidenceMeter: NoiseSquelch | null = null
 	/** Last measured block carried a carrier (evidence only, never gating). */
 	private lastBlockCarrier = false
+	/** A19: zeros while closed, plus the closed-span log. */
+	private readonly muteZeros: boolean
+	/** Output samples emitted so far (A19 span positions). */
+	private emittedSamples = 0
+	/** A19: closed output-sample spans [start, end) in a ring, oldest at `spanHead`. */
+	private readonly spanStarts: Float64Array
+	private readonly spanEnds: Float64Array
+	private spanHead = 0
+	private spanCount = 0
+	/** A19 revision: PCM content lead in channel samples (see `pcmLeadSamples`). */
+	private readonly pcmLead: number
 
 	constructor(options: ChannelSquelchOptions) {
 		const blockSamples = Math.max(
@@ -193,6 +224,12 @@ export class ChannelSquelch {
 		this.observer =
 			options.carrierObserver === true ? this.createObserver() : null
 		this.evidenceEnabled = options.carrierEvidence === true
+		this.muteZeros = options.muteZeros === true
+		// 16 KB per muting squelch only; others keep empty rings.
+		this.spanStarts = new Float64Array(this.muteZeros ? CLOSED_SPANS_MAX : 0)
+		this.spanEnds = new Float64Array(this.muteZeros ? CLOSED_SPANS_MAX : 0)
+		const lead = options.pcmLeadSamples ?? 0
+		this.pcmLead = Number.isFinite(lead) && lead > 0 ? Math.round(lead) : 0
 		if (options.mode === "noise") this.setMode("noise")
 	}
 
@@ -463,9 +500,78 @@ export class ChannelSquelch {
 			q !== null && q >= LIVE_AUDIO_NOISE_QUIETING_DB.default
 	}
 
+	/** A19: true when closed output is exact zeros and its PCM can be muted. */
+	get mutesClosedPcm(): boolean {
+		return this.muteZeros
+	}
+
+	/** A19: closed spans not yet consumed by `muteClosedPcm` (tests, diagnostics). */
+	get closedSpansInFlight(): number {
+		return this.spanCount
+	}
+
+	/**
+	 * A19: zeroes the bytes of `chunk` whose PCM samples came from closed output samples. The
+	 * back chain emits one PCM sample per channel sample, so PCM sample `p` is output sample
+	 * `p + pcmLeadSamples`; `startByte` is the stream byte position of the chunk, `width` the
+	 * sample width. Spans wholly before the chunk's end are dropped. No-op without `muteZeros`.
+	 */
+	muteClosedPcm(chunk: Buffer, startByte: number, width: number): void {
+		if (!this.muteZeros) return
+		const endByte = startByte + chunk.length
+		const lead = this.pcmLead
+		while (this.spanCount > 0) {
+			const i = this.spanHead
+			const from = Math.max(0, this.spanStarts[i]! - lead) * width
+			const to = Math.max(0, this.spanEnds[i]! - lead) * width
+			if (from >= endByte) return
+			const a = Math.max(from, startByte)
+			const b = Math.min(to, endByte)
+			if (b > a) chunk.fill(0, a - startByte, b - startByte)
+			if (to > endByte) return
+			this.spanHead = (i + 1) % CLOSED_SPANS_MAX
+			this.spanCount--
+		}
+	}
+
+	private noteSpan(closed: boolean, samples: number): void {
+		const start = this.emittedSamples
+		this.emittedSamples += samples
+		if (!closed || samples === 0) return
+		if (this.spanCount > 0) {
+			const last = (this.spanHead + this.spanCount - 1) % CLOSED_SPANS_MAX
+			if (this.spanEnds[last] === start) {
+				this.spanEnds[last] = this.emittedSamples
+				return
+			}
+		}
+		if (this.spanCount === CLOSED_SPANS_MAX) {
+			// Merge the two oldest: the gap between them is muted too (never less silence).
+			const oldest = this.spanHead
+			const next = (oldest + 1) % CLOSED_SPANS_MAX
+			this.spanStarts[next] = this.spanStarts[oldest]!
+			this.spanHead = next
+			this.spanCount--
+		}
+		const slot = (this.spanHead + this.spanCount) % CLOSED_SPANS_MAX
+		this.spanStarts[slot] = start
+		this.spanEnds[slot] = this.emittedSamples
+		this.spanCount++
+	}
+
 	/** Passes (rotated) IQ or the muted vector, keeping the phase continuous. */
 	private emitBlock(block: Buffer): Buffer {
 		const samples = Math.floor(block.length / BYTES_PER_COMPLEX_SAMPLE)
+		if (this.muteZeros) {
+			this.noteSpan(!this.gateOpen, samples)
+			// A19: exact zeros freeze the envelope chain's AGC; no phase to continue.
+			if (!this.gateOpen) {
+				this.outputOpen = false
+				return Buffer.alloc(block.length)
+			}
+			this.outputOpen = true
+			return block
+		}
 		if (!this.gateOpen) {
 			if (this.outputOpen) {
 				const magnitude = Math.hypot(this.lastI, this.lastQ)

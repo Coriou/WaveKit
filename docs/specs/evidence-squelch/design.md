@@ -1228,3 +1228,508 @@ The record is added to the acceptance document above; failures become amendments
 - AM keeps evidence gating only if the AM fixture opens through the default fast-AGC chain (8.4).
   Amendment A8 (2026-10-23): resolved as NFM only; a bare AM carrier opened the gate as voice, so
   AM keeps the stage-1 auto squelch. The gate and pre-roll still support `am` but do not govern it.
+
+## Amendment A19 (2026-10-24): AM closed-squelch hum, and the AM voice test study
+
+### Root cause of the closed-squelch hum (requirement A19 finding)
+
+Measured in process: the real `ChannelSquelch` (power mode, threshold -45 dBFS) fed a -30 dBFS
+carrier with -60 dBFS channel noise for 2 s, then noise only, at 24 975.6 Hz (2.048 Msps / 82,
+the 12.5 kHz AM channel), and its output run through a float32 port of the default csdr AM back
+chain at the pinned csdr revision (`amdemod | agc -f float -p fast -r 0.4 | dcblock | gain 2 |
+limit | convert -o s16`; csdr is not installed on the host and Docker was not used).
+
+| Input to the back chain                         | Output RMS (steady) | Spectrum                            |
+| ----------------------------------------------- | ------------------- | ----------------------------------- |
+| Closed gate after an over (hold vector, today)  | -29.3 dBFS          | 81 Hz 48 %, 162 Hz 16 %, 243 Hz 2 % |
+| Closed gate, never opened                       | -29.3 dBFS          | same; AGC gain settles near 3 600   |
+| Constant 1e-4 envelope, no squelch              | -29.3 dBFS          | same                                |
+| Constant -30 dBFS carrier, no noise, no squelch | -29.3 dBFS          | same                                |
+| Closed gate with exact-zero IQ (A19.1)          | exact zero          | none                                |
+
+DC of the hum is -5e-6 (no DC step); the upward zero-crossing rate is 81.0 per second. The level
+is independent of the envelope's level, so the AGC, not the residue's size, is the cause:
+
+- `src/core/channel-squelch.ts:122` (`MUTED_MAGNITUDE = 1e-4`) and `:478-481` at base f2f3d2f2
+  (`emitBlock` writes the hold vector into every closed block): the closed gate hands the back chain a constant,
+  non-zero envelope.
+- `src/core/live-demod-pipeline.ts:189-190` (`csdr amdemod`, then the AGC from `agcStage`,
+  `:50-54`, fast by default for AM): csdr's AGC raises the gain by `decay` = 0.1 % per sample while
+  `|x| * gain < 0.4`, cuts it by `attack` = 10 % once above, then holds for `hang` = 200 samples;
+  its alpha-beta gain smoother (alpha 1.5) overshoots each step. One cycle is the hold plus the
+  climb back: `200 + ln(1 / 0.9) / ln(1.001) = 200 + 105.4 ≈ 305` samples, plus the smoother's
+  lag, about 308 samples, so `24 975.6 / 308 = 81.1 Hz`. The output swings about ±10 % around the
+  0.4 reference, `x 2` after `csdr gain 2`: peak 0.090 full scale, RMS -29.3 dBFS once the DC
+  block removes the mean.
+- A csdr AGC skips exact-zero samples (`isZero`: the gain neither rises nor falls), so exact zeros
+  freeze it and the chain outputs zeros: `amdemod(0) = 0`, `0 x gain = 0`, and the DC block decays
+  to zero (`R = 0.998`, 20 ms time constant).
+
+The live recording of the A8 driver note (about -29 dBFS of low-frequency residue on both the
+auto and the manual AM run) matches this figure.
+
+### Fix (A19.1-A19.4), revised 2026-10-24
+
+Two parts, both on WaveKit's side of the pipes:
+
+1. **IQ zeros.** `ChannelSquelchOptions.muteZeros` (default false). When true, a closed block is
+   `Buffer.alloc(block.length)` (no hold-vector loop) and a reopen applies no rotation (envelope
+   detection ignores phase). Exact zeros freeze csdr's AGC: `Agc<T>::process` skips the gain
+   update for a zero sample (`if (!isZero(input[i]))`, `src/lib/agc.cpp:44` at the pinned
+   `CSDR_REF` 1f15b8c5) and `Agc<float>::isZero` is `in == 0.0f` (`:124`), so no limit cycle runs
+   and the gain is held for the reopen.
+2. **PCM mute, counted in samples.** With `muteZeros` the squelch logs each closed output span
+   `[start, end)` in output-sample units in a ring of `CLOSED_SPANS_MAX` = 1 024 entries
+   (`Float64Array`, a head index, no `shift`/`splice`; allocated only for a muting squelch,
+   16 KB). Adjacent closed blocks extend one span; spans wholly consumed are dropped.
+   `ChannelSquelch.muteClosedPcm(chunk, startByte, width)` zeroes the chunk bytes of every PCM
+   sample inside a span, byte-wise, so a sample split across chunks is muted in both. The live
+   demodulator calls it first thing in `handleAudioData` for a run whose squelch
+   `mutesClosedPcm`, with `run.pcmBytes` (bytes received this run) and the stream's sample width
+   (2 for s16le, 4 for f32le), before `pcm` listeners and clients see the chunk.
+
+   Cap policy (diff review r1): at the cap the two oldest spans merge into one, so the open gap
+   between them is muted too; a closed sample is never left unmuted, at worst some open audio is.
+   Arithmetic: the gate decides per 10 ms block, so at most 50 closes per second (alternating
+   blocks); the PCM backlog is the pipes and csdr buffers between the squelch and the PCM reader,
+   well under a few seconds (two 64 KiB pipes hold 8 192 complex samples and 32 768 s16 samples,
+   0.3 s and 1.3 s at 25 kHz; 1.0 s and 4.1 s at 8 kHz). 50 x 5 s = 250 spans worst case, so 1 024
+   covers about 20 s of backlog at the worst toggle rate, and merging should never happen in
+   practice.
+
+The live demodulator passes `muteZeros: true` when it builds the csdr run's squelch for `am`,
+`dsb` and `cw` (`ENVELOPE_MUTE_MODULATIONS`), the modulations whose back chain starts with
+`csdr amdemod`. A modulation change restarts the pipeline and builds a new squelch, so no
+runtime toggle is needed. Rust runs build their own squelch (`src/core/live-demod/rust-run.ts`)
+without the option and are unchanged; FM and SSB keep the hold vector (the discriminator needs
+it, design header of `channel-squelch.ts`). SSB (`realpart | agc`) may show the same limit cycle
+and is to be measured separately.
+
+Sample mapping: every stage of the default AM back chain (`amdemod`, `agc`, `dcblock`, `gain`,
+`limit`, `convert`) emits one sample per input sample and retains none, so PCM sample `p` is
+channel sample `p` exactly. A `csdr lowpass` (set by `lowPass`) is an FIR that keeps its tap
+window back. Its length, verified at the pinned `CSDR_REF` 1f15b8c5 (round 2 review):
+`LowpassCommand` declares `float transitionBandwidth = 0.05` (`src/apps/csdr/commands.hpp`) and
+passes it to `LowPassFilter(cutoff, float transition, ...)`, which sizes the filter with
+`FirFilter::filterLength(float transition)` (`src/lib/fir.cpp`): `size_t result = 4.0 /
+transition`, a double division by the float widened to double, then made odd if even. 0.05f is
+0.0500000007450580596923828125, so `4.0 / 0.05f = 79.9999988...`, truncated to 79, already odd:
+79 taps (an earlier revision of this section said 81, from `4 / 0.05 = 80` in exact arithmetic).
+`FilterModule` holds `taps_length` input samples back and computes output `k` from inputs `k` to
+`k + 78`, so output `k` is centred on input `k + 39` and the PCM count trails the channel count
+by 79. `backChainPcmLeadSamples(backCommand)` (`src/core/live-demod-pipeline.ts`, next to
+`backChainDrainSamples`) returns `(CSDR_LOWPASS_DEFAULT_TAPS - 1) / 2 = 39` per `csdr lowpass`,
+0 otherwise, and the run's squelch gets it as `pcmLeadSamples`: PCM sample `p` is muted when
+channel sample `p + 39` was closed, so the mute boundary sits on the FIR's centre on close and on
+reopen alike (tested at 8 kHz, closed, carrier, closed, with an independent window-back FIR
+model; uncompensated, both boundaries would be 39 samples, 4.9 ms at 8 kHz, late). A test pins
+`trunc(4 / fround(0.05)) = 79`. The count is read from source, not measured on a csdr binary
+(none on this host). Should a build differ by one tap, the boundary moves by one sample
+(125 µs at 8 kHz, 40 µs at 25 kHz). That is harmless: every close is preceded by the stage-1
+hang (250 ms of sub-threshold noise, 2 000 samples at 8 kHz), so the samples around the close
+boundary are hang noise, not the over; and a reopen boundary one sample early or late mutes or
+passes one sample of the carrier's onset. The ±39-sample smear of the FIR itself remains on both
+sides of each boundary, as for any filtered edge. `sox` (a `highPass`) is IIR and keeps the
+count; its phase delay is not compensated (a few samples in the voice band). Note: the A16
+`backChainDrainSamples` estimate for `csdr lowpass` (120, "an 81-tap window") assumes 81 taps;
+by the arithmetic above it is 79 + 39 = 118. It is an estimate for the NFM guard and is not
+changed here.
+
+Why both parts. The IQ zeros alone leave the DC block's step, which decays by `R = 0.998` per
+sample, so its length is fixed in samples, not time: from the AGC reference 0.4 x `gain` (worst
+case 1.0 after `limit`) to below one s16 LSB (1 / 32 768) takes `ln(0.8 x 32 768) / -ln(0.998)
+= 10.174 / 0.002002 ≈ 5 082` samples at gain 2 (203.5 ms at 24 975.6 Hz, 635 ms at 8 kHz) and
+`ln(32 768) / 0.002002 ≈ 5 194` samples at full scale. Falling below one LSB is exact zero only
+for s16le (it rounds to 0); in f32le the IIR tail stays a non-zero float far longer
+(`0.998^n` reaches the float32 subnormal range only after tens of thousands of samples). The PCM
+mute makes the guarantee independent of rate, gain and format.
+
+Measured with the behavioural model of the tests (an envelope, an AGC that skips exact zeros with
+a 10 % attack, 0.1 % decay and 200-sample hang, a 0.998 DC block, gain and limit; not a csdr
+port), after a 1 s -30 dBFS over and the 250 ms hang, s16le RMS from the close (the model's hum
+is -32.7 dBFS rather than csdr's -29.3, as it lacks csdr's gain smoother):
+
+| Channel rate | Gain | Hold vector (today) 0-100 / 200-300 ms / 1-2 s | IQ zeros only         | IQ zeros + PCM mute |
+| ------------ | ---- | ---------------------------------------------- | --------------------- | ------------------- |
+| 6 000 Hz     | 2    | -30.1 / -39.5 / -32.6                          | -28.4 / -49.2 / zero  | zero throughout     |
+| 8 000 Hz     | 0.1  | -60.3 / -53.7 / -58.7                          | -56.1 / -83.8 / zero  | zero throughout     |
+| 8 000 Hz     | 2    | -34.3 / -27.6 / -32.7                          | -30.1 / -57.9 / zero  | zero throughout     |
+| 8 000 Hz     | 100  | -3.1 / -0.0 / -2.5                             | -0.6 / -23.9 / zero   | zero throughout     |
+| 12 000 Hz    | 2    | -30.1 / -15.7 / -32.7                          | -25.5 / -67.3 / zero  | zero throughout     |
+| 24 975.6 Hz  | 2    | -17.0 / -32.6 / -32.7                          | -17.5 / -103.8 / zero | zero throughout     |
+| 24 975.6 Hz  | 100  | -0.2 / -2.5 / -2.5                             | -1.5 / -70.4 / zero   | zero throughout     |
+| 48 000 Hz    | 2    | -19.2 / -32.6 / -32.7                          | -19.9 / zero / zero   | zero throughout     |
+
+Every rate in {6 000, 8 000, 12 000, 24 975.6, 25 000, 48 000} Hz at every gain in {0.1, 1, 2,
+10, 100}, s16le and f32le: zero throughout with the PCM mute (test 4).
+
+Closing transient (A19.3): in the csdr study, IQ zeros alone gave a first-20 ms peak of
+-10.3 dBFS against -11.5 dBFS with the hold vector (+1.2 dB: the AGC output steps from its
+reference instead of from a hum trough). The PCM mute removes it. Tolerance for an IQ-only
+variant: +1.5 dB (the measured 1.2 dB plus 0.3 dB for float32 rounding and seed spread); the
+shipped design does not rely on it.
+
+Budget (diff review r1, round 2). Reproducible, opt-in bench:
+`scripts/bench/am-closed-mute.ts` (repository convention: bundle with esbuild to
+`output/bench/`, run with node; informational, no pass/fail, not a test). It runs 25 kHz, 10 ms
+blocks alternating open and closed (the worst toggle rate, 50 closes per second), a 4 096-byte
+s16le PCM chunk (8.2 blocks) per step, and times each step (its `process` calls plus one
+`muteClosedPcm`) and the mute call alone, with the PCM 0, 244 (about 1 000 spans in flight) or
+300 (past the 1 024 cap, merging) steps behind the IQ.
+
+Measured per-call latency (desktop, three repetitions of 4 000 steps, 2026-10-24; the host was
+under extreme unrelated load, `os.loadavg()` 227-240 / 153-154 / 99-100, so only the p50 is
+meaningful and the p99 is scheduler noise):
+
+| Variant                             | Step p50 (µs) | `muteClosedPcm` p50 / p99 (µs) |
+| ----------------------------------- | ------------- | ------------------------------ |
+| Hold vector, no mute (as f2f3d2f2)  | 96.5-114.5    | -                              |
+| `muteZeros`                         | 67.3-72.4     | 1.38-2.43 / 7.4-26.5           |
+| `muteZeros`, about 1 000 spans      | 67.9-68.7     | 1.36-1.46 / 6.7-8.6            |
+| `muteZeros`, past the cap (merging) | 66.7-67.6     | 0.92-1.01 / 6.1-8.0            |
+
+An earlier scratch run (load 24-33) gave the same picture: base step p50 87-102 µs, the
+first array-based cut's mute call 1.2-3.0 µs p50 (13.7-19.3 µs p99 at a 1 000-span backlog),
+the ring's 0.6-1.2 µs p50; the ring replaced `shift`/`splice` for that reason.
+
+Inferred budget (arithmetic on the measured p50, not measured itself): the closed path is
+cheaper than the hold vector (one zeroed allocation instead of a 250-sample `writeFloatLE`
+loop), so the squelch's own cost goes down. The mute adds about 1.5 µs per PCM chunk; at about
+12 chunks per second (4 096-byte s16le chunks at 25 kHz; larger chunks mean fewer calls) that is
+about 20 µs/s ≈ 0.00002 core on the desktop, and an estimated 0.0001 core on a Pi 4-class core
+(4 x the desktop cost, not measured), at 2.048 and 2.4 Msps alike (same channel rate). Event
+loop: the largest synchronous addition is one mute call, a few µs at p50 and under 30 µs even at
+the loaded p99 above, far under the 2 ms p99 cap of performance rule 2; the event-loop p99 itself
+was not measured here.
+
+### AM voice test study (A19.5, A19.6; prototype only, not built)
+
+Where the tap would live: on the channel IQ that `ChannelSquelch.process` already walks per
+10 ms block, before the back chain and so before the AGC. The envelope `|z|` is formed there per
+sample (25 k complex samples per second, audio rate, allowed in TypeScript by performance rule 1
+with a typed-array view instead of `readFloatLE`).
+
+Algorithm (per 10 ms block of `B = 250` channel samples):
+
+1. `e = |z|`; `mu` = block mean of `e`.
+2. Voice band: `e` through a 300 Hz high-pass and a 3 000 Hz low-pass biquad (Butterworth, Q
+   0.707); `Pv` = block mean square. Noise reference: `e` through a 4 000 Hz high-pass biquad;
+   `Ph` = block mean square. Both are normalised by `mu²`, which cancels fades and flutter.
+3. Noise in the voice band: `N = K x mean(Ph / mu²)` over the last 5 blocks, with `K = 1.38`, the
+   median of `Pv / Ph` measured on carrier plus channel-filtered noise (p95 1.99), roughly the
+   bandwidth ratio of the two bands in the envelope's 0-6.25 kHz noise.
+4. Excess `x = max(0, Pv / mu² - N)`; ratio `q = (Pv / mu²) / N`.
+5. Over the last 100 blocks (1 s; the first decision after 50 blocks, then every 5 blocks):
+   `H` = share of blocks with `q ≥ 2` (voice band 3 dB over its noise); `G` = share of blocks with
+   `x ≤ 0.25 x p90(x)` (syllabic dips of 6 dB or more). Voice when `H ≥ 0.20` and `G ≥ 0.15`.
+   A heterodyne whistle is steady (`G = 0`); a carrier, noise and fades have no voice-band excess
+   (`H` near 0).
+
+Cost, had it been built (estimates, not measured): per channel sample one `sqrt`, three biquads
+(15 multiply-adds) and three accumulations, about 25 operations x 25 000 samples/s ≈ 0.6 M
+operations/s. Assuming about 1 ns per operation for JIT-compiled typed-array code on the desktop
+reference host and 4 x that on a Pi 4-class core (the rule used elsewhere in this spec until
+measured), with a 3 x margin for loop and call overhead: ≤ 0.002 core desktop and ≤ 0.008 core
+Pi 4-class, equal at 2.048 and 2.4 Msps (channel rate 24 975.6 and 25 000 Hz). Decisions: three quantiles of 100 values at 20 per
+second, negligible. Memory: three 100-entry `Float64Array` rings, 2.4 KB.
+
+Synthetic study: 20 seeds per case, 4 s each, channel-filtered complex Gaussian noise, a
+speech-like modulator (harmonics of a 100-220 Hz fundamental up to 3 kHz with three random
+formants, 120-300 ms syllables with 50-250 ms gaps, peak-normalised), heterodyne beat 500-2000 Hz
+at 0.1-0.7 of the carrier, fades 0.15-1.0 of the carrier at 0.2-1.5 Hz, flutter ±30 % at 10 Hz.
+Columns: for voice the minimum of `H` and `G` over all decisions (range over seeds), for the rest
+the maximum; opened = seeds with any voice decision in the 4 s.
+
+| Case (C/N = carrier to channel noise)    | H (`q ≥ 2`) | G         | Opened | First open |
+| ---------------------------------------- | ----------- | --------- | ------ | ---------- |
+| Voice, depth 30-90 %, C/N 30 dB          | 0.28-0.38   | 0.53-0.67 | 20/20  | 0.5 s      |
+| Voice, depth 30-90 %, C/N 30 dB, fades   | 0.14-0.35   | 0.53-0.67 | 20/20  | 0.5 s      |
+| Voice, depth 30-90 %, C/N 30 dB, flutter | 0.30-0.42   | 0.52-0.67 | 20/20  | 0.5 s      |
+| Voice, depth 30-50 %, C/N 15 dB          | 0.03-0.18   | 0.52-0.64 | 13/20  | 0.5-0.6 s  |
+| Voice, depth 30-90 %, C/N 10 dB          | 0.00-0.18   | 0.44-0.63 | 8/20   | 0.5-1.4 s  |
+| Voice, depth 30 %, C/N 6 dB              | 0.00        | 0.51-0.64 | 0/20   |            |
+| Carrier, C/N 30 dB                       | 0.02        | 0.70-0.80 | 0/20   |            |
+| Carrier, C/N 6 dB / 3 dB                 | 0.00        | 0.73-0.90 | 0/20   |            |
+| Noise only                               | 0.00        | 1.00      | 0/20   |            |
+| Carrier with fades, C/N 30 dB            | 0.02-0.03   | 0.81-0.89 | 0/20   |            |
+| Carrier with fades, C/N 10 dB            | 0.00-0.02   | 0.82-0.97 | 0/20   |            |
+| Carrier with 10 Hz flutter               | 0.03-0.10   | 0.67-0.71 | 0/20   |            |
+| Heterodyne, C/N 30 dB, steady or fading  | 1.00        | 0.00      | 0/20   |            |
+| Heterodyne, C/N 10 dB                    | 0.05-1.00   | 0.00-0.32 | 0/20   |            |
+
+With `q ≥ 1.5` instead of 2, weak voice improves (C/N 15 dB 20/20, C/N 10 dB 16/20) but a carrier
+with 10 Hz flutter opens 20/20 and a weak heterodyne 3/20. Earlier variants were worse: a
+post-correction depth and spread rule opened on weak carriers (C/N 3-10 dB, 20/20); a
+window-median noise reference opened on fades (20/20).
+
+Decision: strong voice separates cleanly (H ≥ 0.14 against ≤ 0.10, first decision at 0.5 s,
+inside the 1.5 s pre-roll), but no single threshold covers weak voice without opening on
+flutter, and the corpus is synthetic only (peak-normalised speech is weaker on average than
+compressed airband audio, so the weak-voice figures may be pessimistic). Gating AM would mute
+weak overs that stage 1 plays today. Ship the hum fix only; AM evidence gating stays off.
+Eligibility is `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` (`packages/api-types/src/live-audio.ts:58`,
+`["nfm"]`), not `src/core/evidence-squelch/wiring.ts`, which has no modulation check; enabling AM
+later is adding `"am"` there plus the AM branch of `buildEvidence` (A19.6).
+
+### Tests (A19.1-A19.4), revised 2026-10-24
+
+Deterministic, synthetic IQ, sample counts only (no wall-clock assertions). No test ports csdr
+(performance rule 8): tests assert on WaveKit's side, and where a back chain is needed they use
+the behavioural envelope-chain model described above, written for the tests. Argv goldens keep
+pinning the real csdr command.
+
+1. `tests/unit/core/channel-squelch-am-mute.test.ts`: with `muteZeros`, every closed block is
+   all zero bytes, open blocks are byte-identical to the input (no rotation after a reopen), and
+   the output length equals the input length.
+2. Same file: without `muteZeros` the closed output keeps the 1e-4 hold vector, `mutesClosedPcm`
+   is false and `muteClosedPcm` leaves the PCM untouched.
+3. Same file, Property 20 (fast-check, `numRuns: 100`), `// Feature: evidence-squelch, Property
+20: closed AM is zero` / `// Validates: Requirements A19.1, A19.4`: for any open/closed block
+   pattern, sample width (2 or 4) and chunking (1-977-byte cuts, odd included), a PCM byte is
+   zeroed exactly when its sample's channel sample was emitted closed.
+4. Same file: through the behavioural chain, at every rate in {6 000, 8 000, 12 000, 24 975.6,
+   25 000, 48 000} Hz and every gain in {0.1, 1, 2, 10, 100}, s16le and f32le, every 100 ms window
+   from the first closed sample is exact zero (RMS -∞).
+5. Same file: with the IQ zeros alone (no PCM mute) at 8 kHz, gain 2, the 200-300 ms window
+   after the close is above -70 dBFS (pins why A19.1(b) exists).
+6. Same file, reopen (A19.3): after a 50 ms and a 10 s closure, the model's AGC gain at reopen
+   equals its gain at the close; a 20 dB stronger reopen clips at the limit and is back under
+   full scale within 40 samples; a 20 dB weaker reopen never clips; with the hold vector instead,
+   a 10 s closure winds the gain above 1 000.
+7. Same file, span cap: with 1 024 spans in flight every closed sample is muted and every open
+   sample kept; with 1 025 the two oldest merge and the only extra muted samples are the open gap
+   between them.
+8. Same file, FIR alignment at 8 kHz: `backChainPcmLeadSamples` is 0 for the default AM chain and
+   39 with `lowPass` (and `trunc(4 / fround(0.05)) = 79` taps is pinned); through an independent
+   79-tap window-back FIR model, closed -> carrier ->
+   closed, the muted PCM samples are exactly those centred on closed channel samples (close and
+   reopen boundaries); without the lead both boundaries are 39 samples late.
+9. `tests/unit/core/live-demod-am-closed-mute.test.ts`: on the default (csdr) engine the run's
+   squelch has `mutesClosedPcm` for `am`, `dsb` and `cw` and not for `nfm`, `wfm`, `usb`, `lsb`,
+   `raw`; the parsed default config has no `engine` (csdr); a Rust AM run's squelch does not mute
+   (A19.2).
+10. Same file: a closed then an open block through the run's squelch, and their PCM delivered in
+    two chunks split at an odd byte: `pcm` listeners and the client receive zeros for the closed
+    block and the original bytes for the open one.
+11. AM replay regression (`am-carrier`, existing): `autoSquelch` stays `off` (A19.5).
+
+## Amendment A20 (2026-10-24): reverse-burst squelch-tail elimination
+
+Revised 2026-10-24 after review (mixed-block onset, retained-latch drain, restart on reopen,
+enforceable corpus, bounded properties, history arithmetic, measured CPU).
+
+### Signal models (requirement A20.6, A20.7)
+
+All synthetic and seeded; no recording, no receiver. Two models, both in
+`tests/unit/core/evidence-squelch/reverse-burst-signals.ts`:
+
+- `directTone`: an 8 kHz tone, optionally reversed at a sample, with an amplitude envelope, an
+  extra phase path and Gaussian noise. Used for the alignment sweep, the unit tests and
+  Property 22.
+- `fmLink`: the message (the CTCSS tone at 0.15 of deviation unless stated, plus, where stated,
+  speech-shaped audio: voiced harmonics of a 100-220 Hz fundamental to 3 kHz under a 3-5 Hz
+  syllable envelope, an unvoiced part and first-order pre-emphasis, at 0.4 RMS of deviation) is
+  frequency-modulated at 5 kHz deviation on 24 kHz complex baseband, multiplied by the fading
+  (Rayleigh: 16-path sum of sinusoids, 10 Hz Doppler, amplitude and phase; slow fades: dips to
+  -20 dB), given complex Gaussian noise at the carrier-to-noise in 12.5 kHz, filtered by a
+  31-tap 6 kHz low-pass, discriminated (`atan2` of `x[n] conj(x[n-1])`) and block-averaged by 3 to
+  8 kHz (the gate's decimator). Tone flutter modulates the tone with 10 Hz low-pass phase noise
+  (15° RMS) and amplitude (30 %). A reversal run reverses the tone at `2 + ((seed x 2 654 435 761)
+mod 3 400) / 1 000` s, stops the voice there (PTT released) and ends 180 ms later.
+
+The first prototype (a numpy model at 32 kHz with a 129-tap channel filter) gave the same picture;
+the figures below are from the TypeScript tracker on the `fmLink` model.
+
+### Alignment sweep (requirement A20.3a)
+
+`directTone`, noise RMS 0.0015 (-37 dB below the 0.15 tone), reversal at block 12 plus every
+offset 0-319, all 50 tones, 120° and 180°, errors -0.5, 0, +0.5 Hz: 96 000 cases.
+
+| Measure                                    | Result                                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------- |
+| Detected                                   | 96 000 / 96 000                                                                 |
+| Onset - reversal (8 kHz samples)           | -121 to -41 (120°: -121 / -79 / -41 min / median / max; 180°: -114 / -79 / -43) |
+| Decision + 1 - reversal (8 kHz samples)    | 520 to 892 (65 to 111.5 ms)                                                     |
+| Review case: 127.3 Hz, 120°, 10 x 320 + 80 | decision 560 (70 ms), onset -79                                                 |
+
+Why the literal first rule failed: with the reversal at offset 80 of block 10, the earliest
+evaluation that passes is `k = 9` (block 10, three quarters reversed, already passes (c)-(e)),
+and the old onset, the start of block `k`, was 400 samples (50 ms) early. The mixed-block
+estimate fixes it: a block holding `o` pre-reversal samples has the phasor
+`(o P + (N - o) Q) / N` for pre and post phasors `P` and `Q` (rectangular window, oscillator at
+the tone), so the projection `Re((X - Q) conj(P - Q)) / |P - Q|^2` is `o / N`. Summing the
+fractions of blocks `k` and `k + 1` gives the position whichever of them is mixed; noise and the
+oscillator's drift spread it by about ±40 samples, hence the 80-sample margin (onset always
+before the reversal in the sweep).
+
+### Study and corpus (requirement A20.6, A20.7)
+
+Study: 100 seeds per condition, 6 s false-alarm runs (600 s), 100 reversal runs each at 120° and
+180°; tones rotate 67.0, 127.3, 254.1 Hz. Every detection counts (re-armed after each). Onset and
+latency in 8 kHz samples, over detected runs.
+
+| Condition                                  | False alarms        | Detected 120° | Detected 180° | Onset - reversal | Decision - reversal |
+| ------------------------------------------ | ------------------- | ------------- | ------------- | ---------------- | ------------------- |
+| Clean, CNR 30 dB                           | 0 in 600 s          | 100/100       | 100/100       | -106 to -51      | 536 to 880          |
+| Tone error +0.5 Hz                         | 0 in 600 s          | 100/100       | 100/100       | -97 to -54       | 528 to 880          |
+| Tone error -0.5 Hz                         | 0 in 600 s          | 100/100       | 100/100       | -99 to -55       | 552 to 880          |
+| Rayleigh 10 Hz, CNR 20 dB                  | 0 in 600 s          | 100/100       | 100/100       | -111 to -27      | 536 to 880          |
+| Rayleigh 10 Hz, CNR 12 dB                  | 0 in 600 s          | 93/100        | 95/100        | -182 to +161     | 536 to 1 088        |
+| Slow fades to -20 dB, CNR 25 dB            | 0 in 600 s          | 100/100       | 100/100       | -106 to -51      | 536 to 880          |
+| Tone flutter 10 Hz, 15° RMS + 30 % AM      | 0 in 600 s          | 69/100        | 76/100        | -153 to +231     | 552 to 1 008        |
+| Weak carrier, CNR 8 dB                     | 0 in 600 s          | 100/100       | 100/100       | -106 to -52      | 552 to 880          |
+| Weak tone -30 dB of deviation, CNR 20 dB   | 0 in 600 s          | 100/100       | 100/100       | -105 to -51      | 536 to 880          |
+| Voice 0.4 RMS over the tone                | 0 in 600 s          | 95/100        | 95/100        | -122 to +1       | 544 to 952          |
+| Voice + Rayleigh, CNR 15 dB, +0.5 Hz       | 0 in 600 s          | 92/100        | 95/100        | -145 to +76      | 528 to 1 024        |
+| Weak tone -30 dB + voice 0.4 (known limit) | 3 in 600 s (3 runs) | 58/100        | 55/100        | -258 to +12      | 552 to 1 040        |
+
+Gates weighed and dropped in the first prototype: without the magnitude-variation gate (b), or
+with a 35° steadiness bound, the known-limit condition gave 4-6 false runs in 60; a 6-block
+history halved those but cost 5-10 points of detection; a tone-fraction-of-block gate and a
+300-3 000 Hz quiet-band gate (A17 style) do not separate, because the discriminator noise fills
+the band in both classes.
+
+Corpus test (`reverse-burst-corpus.test.ts`): the first 4 seeds of the study per condition
+(false alarms: seeds 1000-1003, 24 s per condition; reversals: seeds 5120-5123 and 5180-5183).
+Ceilings: 0 detections per condition, at most 1 in the known limit; every reversal detected, with
+the onset 0 to 121 samples before it and the decision at most 892 after it, in the clean, ±0.5 Hz,
+Rayleigh 20 dB, slow-fade, weak-carrier and weak-tone conditions. About 11 s of test time.
+
+### Constants (requirement A20.3)
+
+| Constant                        | Value | Arithmetic                                                                                                                       |
+| ------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `REVERSE_BURST_BLOCK_SAMPLES`   | 320   | 40 ms at 8 kHz; decision 65-111.5 ms after the reversal (sweep), inside the shortest 150 ms burst; 2.7 cycles of 67 Hz per block |
+| `REVERSE_BURST_HISTORY_BLOCKS`  | 4     | increments `k-5 -> k-4` to `k-2 -> k-1`, over 5 history blocks (200 ms of steady tone)                                           |
+| `REVERSE_BURST_RING_BLOCKS`     | 8     | 5 history blocks, `k`, `k + 1`, `k + 2`; first evaluation after 8 blocks = 320 ms, under the 750 ms tone-latch floor             |
+| `REVERSE_BURST_STEADY_DEG`      | 25    | ±0.5 Hz is 7.2° per block and is removed as drift; a 120° step clears the 90° bar by 30°                                         |
+| `REVERSE_BURST_STEP_DEG`        | 90    | midway between no step and 180°; 30° under a 120° reversal                                                                       |
+| `REVERSE_BURST_MAGNITUDE_RATIO` | 0.5   | -6 dB: a fade, a null or a carrier drop fails it; a reversal does not (outside the mixed block)                                  |
+| `REVERSE_BURST_MAGNITUDE_CV`    | 0.3   | history magnitudes vary little on a tone-dominated bin; voice-dominated phasors vary more                                        |
+| `REVERSE_BURST_ONSET_MARGIN`    | 80    | 10 ms: twice the ±40-sample spread of the position estimate in the sweep                                                         |
+
+### Component: `ReverseBurstTracker` (`src/core/evidence-squelch/reverse-burst.ts`)
+
+`arm(hz)`, `restart()`, `disarm()`, `push(x, index): boolean`, `onsetIndex`, `armed`, `toneHz`.
+State: an oscillator phasor stepped by a fixed rotation and re-seeded at each block start from an
+exact fractional cycle count (no drift in phase or magnitude); the block accumulators; a ring of
+8 slots (real, imaginary, phase, magnitude, start index), oldest first. Order per completed
+block: store into the ring (overwriting the oldest once full), re-seed, then, if 8 blocks have
+completed since the arm or restart, evaluate with the newest as `k + 2`. A true return disarms
+the tracker. Allocation free after construction (seven `Float64Array`s of 8 or 5 entries).
+Rectangular window.
+
+### Wiring in `EvidenceGate`
+
+- Construction: a tracker on `nfm` unless `reverseBurst: false` (`EvidenceGateBuildOptions`,
+  tests and the bench only).
+- `latch(evidence, key, after)` and the renewal branch of `observeTone` call `armReverse(key)`:
+  a CTCSS table index arms at `CTCSS_HZ[key]` (unless already armed there); any other key
+  disarms. `reset()` disarms.
+- The reopen path of `push` (open and closing: the latch is retained) calls `restart()` next to
+  the tone and STE resets (A20.1).
+- `takeSample`, after the decimator: the 55 Hz `ste.push` first, then, if open, not held and armed,
+  `reverse.push(value, groupFirst)`. Either detection calls `endOver(onset, cause)`, which is the
+  former `onSte()` with the onset and cause as arguments; `endCause` (tests only) reports the
+  cause while held. No `@wavekit/api-types`, wiring, pre-roll or demodulator change.
+
+Interaction with A16 and the pre-roll (A20.4a): during the A16 guard or fade the gate is still
+latched and the tracker still runs; a detection mutes from the onset. After a retained-latch
+close the pre-roll may have played out (a close longer than the queued delay) and the reopened
+over plays at delay 0: then `muteTail` drops only what is queued, the reversed tone between the
+onset and the decision may have played (at most about 122 ms), and nothing after the decision
+plays. A stage 1 close before the decision leaves A16 in charge.
+
+### CPU (requirement A20.8)
+
+Estimate (operations, not measured): per armed 8 kHz sample 10 operations (rotation 4 multiplies
+2 adds, accumulate 2 multiplies 2 adds), 80 000 per second; per block (25 per second) one `atan2`,
+one `hypot`, one `cos`, one `sin` and the rule over the ring (about 40 operations, plus a 5-entry
+sort for the median), about 2 000 per second; about 0.08 Mflop/s.
+
+Measured with `scripts/bench/reverse-burst.ts` (opt-in; 30 s of a 100 Hz tone plus seeded
+speech-shaped audio at 0.3, tone-latched; before and after passes interleaved, median of 7 after
+a warmup; desktop host, load averages 11.61 12.57 17.41 before and 11.08 12.44 17.34 after):
+
+| Path                             | Rate   | CPU core fraction |
+| -------------------------------- | ------ | ----------------- |
+| `EvidenceGate.push`, tracker off | 25 kHz | 0.002970          |
+| `EvidenceGate.push`, tracker on  | 25 kHz | 0.003344          |
+| `EvidenceGate.push`, tracker off | 50 kHz | 0.004041          |
+| `EvidenceGate.push`, tracker on  | 50 kHz | 0.004557          |
+| `ReverseBurstTracker.push` alone | 8 kHz  | 0.000200          |
+
+The tracker costs about 0.0002 core on its own; the gate difference (+0.0004 to +0.0005) is of
+the same order as the run-to-run noise on a host this loaded. Pi 4-class core: estimated 4-5x,
+about 0.001-0.0025 core. Both at 2.048 and 2.4 Msps (8 kHz either way), far below 0.3 core.
+
+### Correctness properties
+
+21. **Reverse burst ends the over (A20, 2026-10-24).** For any of the 50 CTCSS tones, a tone
+    error in [-0.5, 0.5] Hz, any starting phase, a reversal of 120° or 180° at 2.0 s plus 0-999
+    input samples (25 kHz), a burst of 150-200 ms, uniform noise of peak 0.018 (RMS 0.0104, -20 dB
+    under the 0.15 tone), then 0.3 s of open unquieted noise and a close, and any chunking (an
+    odd first chunk and 0-3 random cuts per 10 ms block): the over is ended by the tracker before
+    the burst ends, `muteTail` runs once, the onset lies within the sweep bounds (scaled to the
+    input rate, plus one decimation group), and the complete client output equals the reference
+    pre-roll fed the over until the onset (its last 10 ms faded by `j / (F + 1)`), held audio
+    abandoned at the close, nothing after. _Validates A20.3, A20.4._
+22. **No reverse burst without a step (A20, 2026-10-24).** On `directTone`, for any of the 50
+    tones, error in [-0.5, 0.5] Hz, starting phase and seed, over 100 blocks (4 s): an amplitude
+    path piecewise-linear per block in [0.2, 1] of the tone, changing by at most x2 per block; a
+    phase path piecewise-linear with at most 20° per block; Gaussian noise of RMS 0.003 (0.1 of
+    the smallest amplitude). The tracker, re-armed after any detection, never fires. Fades below
+    0.2, carrier drops and flutter are deterministic tests and corpus conditions, not part of the
+    property. _Validates A20.3, A20.6._
+23. **One end per over (A20, 2026-10-24).** Within one uninterrupted hold (no fresh evidence
+    and no stage-1 close between the two detections), for any order of a 55 Hz STE (with the
+    CTCSS tone continuing at 0.2) and a 180° reversal, spaced 0-300 ms, at 67, 100 or 151.4 Hz:
+    `muteTail` is called exactly once and `endCause` keeps the first detector's value from the
+    first detection to the close. _Validates A20.5._
+
+Each property runs with `numRuns: 100` and carries the trace comment, for example
+`// Feature: evidence-squelch, Property 21: reverse burst ends the over` /
+`// Validates: Requirements A20.3, A20.4`. No assertion reads a clock.
+
+### Tests (A20.1-A20.9)
+
+1. `tests/unit/core/evidence-squelch/reverse-burst.test.ts`: 120° and 180° at 67.0, 127.3 and
+   254.1 Hz within the sweep bounds; every alignment 0-319 at 127.3 Hz for 120° and 180° at ±0.5
+   Hz within the bounds; the review's mixed-block case pinned (decision 560 samples, onset within
+   bounds and after `9 x 320 + 160`); 60° and 80° steps not detected; no detection on slow fades
+   to -20 dB, a carrier drop to noise and 10 Hz phase flutter of 15° RMS (10 seeds x 3 tones x 6 s
+   each); arming (8 blocks before the first evaluation, a step at block 3 ignored), `disarm`,
+   `restart` (a step 2 blocks after a restart ignored); Property 22.
+2. `tests/unit/core/evidence-squelch/reverse-burst-corpus.test.ts`: the seeded corpus and its
+   ceilings (A20.6, A20.7).
+3. `tests/unit/core/evidence-squelch/evidence-gate-reverse.test.ts`, through the real wiring and
+   pre-roll:
+   - arming on a CTCSS latch and renewal only, never on voice or DCS, disarmed when waiting or
+     after a reset;
+   - Property 21 and Property 23;
+   - retained latch: closes of 20, 100, 300, 700 and 1 000 ms and reopen phases 0, 1.3, 3.14 and
+     4.4 rad: no detection on the reopen phase jump, the tracker still armed on the tone, and a
+     reversal 1.5 s after the reopen detected (M3);
+   - drained pre-roll: latch, a 1 s close, reopen (the reopened over plays at delay 0, asserted),
+     a reversal 1 s later: nothing plays after the decision, and what plays between the reversal
+     and the decision is at most the decision span (A20.4a);
+   - false detection mid-over (tone and voice continue): held, then resumed on fresh evidence,
+     the held audio replayed; conditional cost: with stage 1 closing 0.4 s after the step, nothing
+     from the onset on ever plays;
+   - the CTCSS bank: reversal at every 25 ms across a 250 ms hop, a 200 ms burst then noise: the
+     hold never ends before the close;
+   - A16 interplay: carrier evidence lost 200 ms before the reversal (tone pass): still one
+     `muteTail`, onset within bounds, nothing from the onset on plays;
+   - fallback, pinned: reversal at stream sample 50 000 (2.0 s at 25 kHz), 10 ms blocks without
+     cuts, a 50 ms burst and stage 1 closing at the carrier drop (under the 65 ms smallest
+     decision latency): no `muteTail`, client output byte-identical to the gate with
+     `reverseBurst: false`.
+4. Regression: the existing evidence-squelch suites (including the A17 STE tests and fixtures)
+   pass. One A14 test input was corrected: "repeated 10 ms closes between 600 ms unquieted tone
+   stretches keep the latch" (`evidence-gate-live.test.ts`) joined a 2 s and a 0.6 s 79.7 Hz tone,
+   each generated from phase 0, with no close between them (79.7 Hz x 2 s = 159.4 cycles: a real
+   144° phase step on an open, tone-latched over, which the tracker ended at 2.07 s). The tone is
+   now one phase-continuous signal sliced across the stretches; the repeated 10 ms closes, the
+   test's purpose, are unchanged. A phase break in a test tone is a reverse burst under A20.
+5. Bench: `scripts/bench/reverse-burst.ts` (opt-in, not in the suite), run before and after with
+   the load average recorded.
