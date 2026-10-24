@@ -244,6 +244,37 @@ and noted block counts, the window-reset count, the audio time and the meter's d
 computed per request from the gate's state (no per-sample or per-chunk work, never on level
 events), so the next live test shows which criterion fails.
 
+**Amendment (2026-10-24, A15): sparse-syllable voice.** Decision after the run4 finding above. On
+`nfm`, a window is voice when it is not data-like and quiet enough (both unchanged) and either the
+pinned median rule passes (median syllabic ≥ 0.3 and median audioDb ≥ -30 dB, the scanner's
+`isVoice`, unchanged) or the syllable-run path does: median syllabic ≥ 0.3 and at least two
+syllable runs in the last 2 s. A syllable run is at least 3 consecutive 50 ms frames (150 ms), each
+at audioDb ≥ -30 dB at the channel's deviation reference (A13) and with sustained energy: at least
+5 of its ten 5 ms sub-blocks at that level. The scanner's analog-trial judge is unchanged.
+Physics: a syllable nucleus lasts 100 to 300 ms of sustained voiced energy; a click or impulse
+lasts a few ms and fills one or two sub-blocks, so it never makes a syllable frame even when it
+lifts the frame's mean power (without the sub-block test, `nfm-clicks` at 8 clicks per second
+made runs of three adjacent click frames and widened every clicks pin, measured with runs over
+the 1 s window: the clicks alignment case went from 10 and 60 ms to 10, 20, 30, 60, 70 and 80 ms); data is rejected by the cluster rule; a
+bare carrier has no audio level; a CTCSS leak sits near -33 dB under the 300 Hz high-pass and never
+reaches -30 dB. Two deviations from the decision as first written, both measured: (1) the runs
+are counted over 2 s (40 frames), not the 1 s window: syllables once a second (run4: 4-5 frame
+syllables 19 to 23 frames apart) never put two runs in 20 frames; (2) the sub-block test above.
+Results: synthetic run4-pattern speech (225 and 250 ms syllables once a second from the onset over
+a -33 dB floor) latches 1.15 s after onset on the run path; 150 ms syllables every 0.8 s latch at
+1.0 s; run4's live voice (the CTCSS over's audio) passes the run path in 40 of 112 windows and
+first at 2.45 s after onset, at the end of its second syllable (its first syllable, 1.3 s after
+onset, is inside the 1.5 s pre-roll at that point), against 0 windows on the median rule. Every
+never-open fixture stays closed with an ideal and a noisy onset, over the 0-500 ms lead-in sweep
+and under the flicker properties, and no pin of the residual cases moves at either deviation
+reference. The `nfm-fsk-syllabic-bursts` fixture still latches at 1.25 s on the median path, but
+the FSK-burst limitation widens: on a quieted carrier at the 2.5 kHz reference, 56 of 240
+synthetic 2- and 4-level keyings (512 to 4 800 baud) that the median rule left closed now latch on
+the run path, all with bursts of 150 to 500 ms and gaps of 250 to 800 ms (a sparse burst train's
+median cluster is diluted by its silent frames, and audio-frequency FSK tones are not discrete in
+the discriminator). A one-syllable-per-2 s pattern stays closed (one run). This supersedes the known limitation
+pinned in the run4 amendment (250 ms syllables once a second now latch).
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

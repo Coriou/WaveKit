@@ -34,10 +34,14 @@ import {
 	EVIDENCE_TONE_HANG_GRACE_MS,
 	EvidenceGate,
 	judgeEvidence,
+	syllableRuns,
+	voicePath,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
 import { ToneEvidence } from "../../../../src/core/evidence-squelch/tone-evidence.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
 import type { AnalogTrialFrame } from "../../../../src/core/scanner/scanner-redesign-contract.js"
+import { PcmDecimator } from "../../../../src/core/audio-tones/tone-detector.js"
+import { dataLike, isVoice } from "../../../../src/core/scanner/analog-trial.js"
 import { mulberry32 } from "../audio-tones/synth.js"
 import {
 	carrierSilence,
@@ -149,6 +153,31 @@ function gateLatch(
 	return null
 }
 
+/** First latch time (s) of the pinned median rule alone (`isVoice`, not data-like), or null. */
+function medianLatch(
+	samples: Float32Array,
+	deviationHz: number,
+): number | null {
+	const decimator = new PcmDecimator()
+	decimator.arm(SYNTH_RATE)
+	const meter = new VoiceFrameMeter({ gain: 2, deviationHz })
+	const frames: AnalogTrialFrame[] = []
+	for (const x of samples) {
+		if (!decimator.take(x) || !meter.push(decimator.output)) continue
+		const { audioDb, syllabic, cluster } = meter.frame
+		frames.push({ carrierDb: 0, hfNoiseDb: 0, audioDb, syllabic, cluster })
+		if (frames.length < LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES) continue
+		const stats = {
+			mode: "nfm" as const,
+			frames: frames.slice(-LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES),
+			gapSamples: 0,
+			floorDb: 0,
+		}
+		if (!dataLike(stats) && isVoice(stats)) return (frames.length * 50) / 1_000
+	}
+	return null
+}
+
 const privateDir = process.env["EVIDENCE_SQUELCH_PRIVATE_FIXTURES"] ?? ""
 const privateFiles = [1, 2].map(n =>
 	join(privateDir, `live-pmr446-voice-${n}.audio.s16le`),
@@ -206,19 +235,25 @@ describe("A13: live PMR446 overs on a 12.5 kHz channel", () => {
 			expect(latch).not.toBeNull()
 			expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
 		}
-		// Without A13 the marginal seed latches only after the pre-roll (1.85 s).
-		const marginal = toPcm(
-			voiceLike({
-				rate: SYNTH_RATE,
-				seconds: 3,
-				seed: 24,
-				level: NARROW_VOICE_LEVEL,
-			}),
-			"s16le",
+		// Without A13 the marginal seed passes the median rule only after the pre-roll (1.85 s);
+		// since A15 the gate also takes it on the syllable-run path at 1.0 s.
+		const marginal = voiceLike({
+			rate: SYNTH_RATE,
+			seconds: 3,
+			seed: 24,
+			level: NARROW_VOICE_LEVEL,
+		})
+		expect(medianLatch(marginal, EVIDENCE_WIDE_DEVIATION_HZ)).toBeCloseTo(
+			1.85,
+			6,
 		)
 		expect(
-			gateLatch(marginal, SYNTH_RATE, EVIDENCE_WIDE_DEVIATION_HZ),
-		).toBeCloseTo(1.85, 6)
+			gateLatch(
+				toPcm(marginal, "s16le"),
+				SYNTH_RATE,
+				EVIDENCE_WIDE_DEVIATION_HZ,
+			),
+		).toBe(1)
 	})
 
 	it.skipIf(!havePrivate)(
@@ -754,40 +789,152 @@ describe("A14: the latch survives only the same transmission", () => {
 })
 
 /**
- * Live retest 2026-10-24 (run4): the only voice the gated stream holds (a CTCSS over, played once
- * the tone latched) is sparse speech: 4-5 frames (200-250 ms) at -7 to -16 dB about once a second
- * over a -33 dB floor, so the median audioDb of every 1 s window stays near -33 dB at the 2.5 kHz
- * reference and the voice rule fails on audio level while FM quieting (30-58 dB per block, none
- * under 6 dB), syllabic (median 0.10-1.49) and cluster (0.33) pass. Synthetic stand-in below;
- * pinned as a known limitation (pending decision), with the diagnostic naming the criterion.
+ * Live retest 2026-10-24 (run4) and amendment A15: the only voice the gated stream holds (a CTCSS
+ * over, played once the tone latched) is sparse speech: 4-5 frames (200-250 ms) at -7 to -16 dB
+ * about once a second over a -33 dB floor (the CTCSS tone's residue under the meter's 300 Hz
+ * high-pass), so the median audioDb of every 1 s window stays near -33 dB. A15 adds the
+ * syllable-run path: two runs of at least 3 consecutive sustained frames at -30 dB or more within
+ * the last 2 s, with the syllabic median unchanged.
  */
-describe("live retest: sparse speech and the diagnostic status", () => {
-	function sparseSpeech(seconds: number): Buffer {
-		const base = carrierSilence({ rate: RATE, seconds })
-		const burst = voiceLike({ rate: RATE, seconds: 0.25, seed: 77, level: 0.8 })
-		for (let start = 0.5; start + 0.25 <= seconds; start += 1) {
-			const at = Math.round(start * RATE)
-			for (let i = 0; i < burst.length; i++)
-				base[at + i] = (base[at + i] ?? 0) + (burst[i] ?? 0)
-		}
-		return toPcm(base, "s16le")
+describe("A15: sparse syllables and the diagnostic status", () => {
+	/** Sub-audible 75.5 Hz hum (not a CTCSS tone) at the run4 CTCSS level: a -33 dB floor. */
+	function floor(seconds: number): Float32Array {
+		const out = new Float32Array(Math.round(RATE * seconds))
+		for (let i = 0; i < out.length; i++)
+			out[i] = 0.12 * Math.sin((2 * Math.PI * 75.5 * i) / RATE)
+		return out
 	}
 
-	it("known limitation (pending decision): 250 ms syllables once a second on a quieted carrier never latch; the diagnostic says low-audio", () => {
+	/** Syllables of `burstMs` every `everyMs`, the first at `firstMs`, over the floor. */
+	function syllables(
+		seconds: number,
+		burstMs: number,
+		everyMs: number,
+		firstMs = 0,
+		level = 0.5,
+	): Float32Array {
+		const out = floor(seconds)
+		const burst = voiceLike({
+			rate: RATE,
+			seconds: burstMs / 1_000,
+			seed: 77,
+			level,
+		})
+		for (let at = firstMs; at + burstMs <= seconds * 1_000; at += everyMs) {
+			const start = Math.round((RATE * at) / 1_000)
+			for (let i = 0; i < burst.length; i++)
+				out[start + i] = (out[start + i] ?? 0) + (burst[i] ?? 0)
+		}
+		return out
+	}
+
+	function latchSeconds(samples: Float32Array): number | null {
 		const g = gate()
-		const t = drive(g, [{ pcm: sparseSpeech(6), open: true, quieted: true }])
+		const t = drive(g, [
+			{ pcm: toPcm(samples, "s16le"), open: true, quieted: true },
+		])
+		const at = t.states.indexOf("open")
+		if (at >= 0) expect(g.diagnostics().path).toBe("runs")
+		return at < 0 ? null : (at + 1) / 100
+	}
+
+	it("run4 pattern: 225-250 ms syllables once a second from the onset latch within 1.5 s on the run path", () => {
+		for (const burstMs of [225, 250])
+			for (const level of [0.5, 0.8]) {
+				const samples = syllables(5, burstMs, 1_000, 0, level)
+				// The median rule alone never passes this speech.
+				expect(medianLatch(samples, EVIDENCE_NARROW_DEVIATION_HZ)).toBeNull()
+				const latch = latchSeconds(samples)
+				console.info(
+					`EVIDENCE-SQUELCH A15 run4 pattern ${burstMs} ms x${level}: latch ${latch ?? "-"} s`,
+				)
+				expect(latch).not.toBeNull()
+				expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
+			}
+	})
+
+	it("150 ms syllables every 0.8 s latch within 1.5 s", () => {
+		const latch = latchSeconds(syllables(5, 150, 800))
+		console.info(`EVIDENCE-SQUELCH A15 150 ms / 0.8 s: latch ${latch ?? "-"} s`)
+		expect(latch).not.toBeNull()
+		expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
+	})
+
+	it("one syllable per 2 s never makes two runs: waiting, verdict low-audio", () => {
+		const g = gate()
+		const t = drive(g, [
+			{
+				pcm: toPcm(syllables(1.5, 250, 2_100, 300), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
 		expect(t.states.every(s => s === "waiting")).toBe(true)
 		const d = g.diagnostics()
 		expect(d.verdict).toBe("low-audio")
-		expect(d.frames).toBe(20)
-		expect(d.audioDb ?? 0).toBeLessThan(-30)
+		expect(d.syllableRuns).toBe(1)
 		expect(d.syllabic ?? 0).toBeGreaterThanOrEqual(0.3)
-		expect(d.cluster ?? 1).toBeLessThan(0.6)
-		expect(d.quietBlocks).toBe(d.notedBlocks)
-		expect(d.deviationHz).toBe(EVIDENCE_NARROW_DEVIATION_HZ)
 	})
 
-	it("the diagnostic verdict follows the judge's order", () => {
+	// Feature: evidence-squelch, Property 17: Short loud stretches are not syllables
+	// Validates: Requirements 1.3, 1.4
+	it("Property 17: windows whose loud frames come only in runs of at most 2 never qualify via the run path", () => {
+		const frameArb = fc.record({
+			loud: fc.boolean(),
+			audioDb: fc.double({ min: -60, max: 10, noNaN: true }),
+			sustained: fc.integer({ min: 0, max: 10 }),
+			syllabic: fc.double({ min: 0, max: 3, noNaN: true }),
+			cluster: fc.double({ min: 0, max: 0.59, noNaN: true }),
+		})
+		fc.assert(
+			fc.property(
+				fc.array(frameArb, { minLength: 20, maxLength: 40 }),
+				drafts => {
+					// Break every loud stretch after 2 frames: "loud" = a syllable frame.
+					let run = 0
+					const frames = drafts.map(d => {
+						let loud = d.loud
+						if (loud && run >= 2) loud = false
+						run = loud ? run + 1 : 0
+						return {
+							carrierDb: 0,
+							hfNoiseDb: 0,
+							audioDb: loud
+								? Math.max(-30, d.audioDb)
+								: Math.min(-30.01, d.audioDb),
+							sustained: d.sustained,
+							syllabic: d.syllabic,
+							cluster: d.cluster,
+						}
+					})
+					const runs = syllableRuns(frames)
+					expect(runs).toBe(0)
+					const stats = {
+						mode: "nfm" as const,
+						frames: frames.slice(-20),
+						gapSamples: 0,
+						floorDb: 0,
+					}
+					expect(voicePath(stats, runs)).not.toBe("runs")
+					// Also through the judge: voice only if the pinned median rule passes.
+					const verdict = judgeEvidence({
+						modulation: "nfm",
+						stats,
+						tone: null,
+						audioMs: 2_000,
+						quietBlocks: 100,
+						notedBlocks: 100,
+						framesFinite: true,
+						syllableRuns: runs,
+					})
+					expect(verdict === "voice").toBe(!dataLike(stats) && isVoice(stats))
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("the diagnostic verdict follows the judge's order and names the path", () => {
 		const filling = gate()
 		drive(filling, [
 			{
@@ -817,9 +964,9 @@ describe("live retest: sparse speech and the diagnostic status", () => {
 				quieted: true,
 			},
 		])
-		expect(silent.diagnostics().verdict).toBe("low-audio")
-		const latched = gate()
-		drive(latched, [
+		expect(silent.diagnostics().verdict).toBe("low-syllabic")
+		const median = gate()
+		drive(median, [
 			{
 				pcm: toPcm(
 					voiceLike({ rate: RATE, seconds: 2, seed: 3, level: 0.8 }),
@@ -829,7 +976,16 @@ describe("live retest: sparse speech and the diagnostic status", () => {
 				quieted: true,
 			},
 		])
-		expect(latched.diagnostics().verdict).toBe("latched")
+		expect(median.diagnostics()).toMatchObject({
+			verdict: "latched",
+			path: "median",
+		})
+		const tone = gate()
+		drive(tone, [{ pcm: ctcssOver(2), open: true, quieted: false }])
+		expect(tone.diagnostics()).toMatchObject({
+			verdict: "latched",
+			path: "tone",
+		})
 		// A noise lead-in, then the over: one window reset at the onset.
 		const lead = gate()
 		drive(lead, [
@@ -846,6 +1002,7 @@ describe("live retest: sparse speech and the diagnostic status", () => {
 			frames: 0,
 			windowResets: 0,
 			audioDb: null,
+			syllableRuns: 0,
 		})
 	})
 })

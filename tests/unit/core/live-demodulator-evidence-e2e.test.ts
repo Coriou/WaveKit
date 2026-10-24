@@ -272,7 +272,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		const diagnostics = h.demod.getStatus({ diagnostics: true }).autoSquelch
 			?.diagnostics
 		expect(diagnostics).toMatchObject({
-			verdict: "low-audio",
+			verdict: "low-syllabic",
 			frames: 20,
 			quietBlocks: 100,
 			notedBlocks: 100,

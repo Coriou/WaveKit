@@ -350,6 +350,20 @@ passes `?diagnostics=true`, level events never do. Type `LiveAudioAutoSquelchDia
 `packages/api-types`, documented as diagnostic and unstable. Findings and the pending sparse-speech
 decision: requirements, amendment after 1.5.
 
+**Amendment (2026-10-24, A15): sparse-syllable path.** `VoiceFrame` gains `sustained` (5 ms
+sub-blocks of the frame, 0-10, whose band mean square is at least the -30 dB level; scalar
+accumulators, no allocation). The gate keeps a 40-entry `Uint8Array` ring of syllable-frame flags
+(`isSyllableFrame`: finite audioDb ≥ -30 and sustained ≥ 5), cleared with the voice window and on
+`reset()`, and counts runs of at least 3 flags oldest first (at most 40 steps per judged frame).
+`judgeEvidence` takes `syllableRuns` and step 5 becomes `voicePath(stats, runs) !== null`:
+`median` (`isVoice`) or `runs` (median syllabic ≥ 0.3 and runs ≥ 2). Frames without `sustained`
+(any caller other than the gate's meter) never form runs, so Property 2's agreement with
+`classifyAnalogTrial` holds whenever `syllableRuns` is absent or under 2. The diagnostic verdict
+order is now `window-filling`, `non-finite`, `data-like`, `not-quiet`, `low-syllabic`, then
+`voice-median`, `voice-runs` or `low-audio` (neither path); it reports `syllableRuns` and, while
+latched, `path` (`median`, `runs` or `tone`). Property 17 pins that loud frames only in stretches
+of at most 2 never qualify through the run path.
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
@@ -653,6 +667,10 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     until `HANG_MS` of PCM has passed (`HANG_MS` + 500 ms when the block is open on a tone latch;
     an unquieted over's last sighting may precede the close by one 250 ms CTCSS hop)
     and is waiting from then on. _Validates 1.5._
+17. **Short loud stretches are not syllables (A15, 2026-10-24).** For any frame sequence whose
+    syllable-level frames come only in stretches of at most 2, `syllableRuns` is 0, `voicePath`
+    never returns `runs`, and the judge says voice exactly when the pinned median rule does.
+    _Validates 1.3, 1.4._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 

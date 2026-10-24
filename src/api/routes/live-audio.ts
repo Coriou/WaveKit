@@ -137,6 +137,8 @@ const liveDemodStatusSchema = {
 						audioDb: { type: ["number", "null"] },
 						syllabic: { type: ["number", "null"] },
 						cluster: { type: ["number", "null"] },
+						syllableRuns: { type: "number" },
+						path: { type: "string" },
 						quietBlocks: { type: "number" },
 						notedBlocks: { type: "number" },
 						windowResets: { type: "number" },

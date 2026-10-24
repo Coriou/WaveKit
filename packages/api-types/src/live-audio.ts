@@ -93,18 +93,20 @@ export interface LiveAudioAutoSquelch {
 /**
  * Why the evidence gate is waiting, in the judge's order: `window-filling` (fewer than 20
  * frames since the window started), `non-finite` (a frame failed closed), `data-like` (median
- * cluster ≥ 0.6), `not-quiet` (quieted blocks under half of the noted blocks), `low-audio`
- * (median audioDb under -30), `low-syllabic` (median syllabic index under 0.3), `voice` (the
- * window passes; the next frame latches); `latched` while open.
+ * cluster ≥ 0.6), `not-quiet` (quieted blocks under half of the noted blocks), `low-syllabic`
+ * (median syllabic index under 0.3), `low-audio` (neither voice path: median audioDb under -30
+ * and fewer than two syllable runs, A15), `voice-median` or `voice-runs` (the window passes on
+ * that path; the next frame latches); `latched` while open (see `path`).
  */
 export type LiveAudioAutoSquelchVerdict =
 	| "window-filling"
 	| "non-finite"
 	| "data-like"
 	| "not-quiet"
-	| "low-audio"
 	| "low-syllabic"
-	| "voice"
+	| "low-audio"
+	| "voice-median"
+	| "voice-runs"
 	| "latched"
 
 /** DIAGNOSTIC AND UNSTABLE: the evidence gate's current voice window (see `diagnostics`). */
@@ -116,6 +118,10 @@ export interface LiveAudioAutoSquelchDiagnostics {
 	audioDb: number | null
 	syllabic: number | null
 	cluster: number | null
+	/** Syllable runs (≥ 3 consecutive frames at ≥ -30 dB) in the window (A15). */
+	syllableRuns: number
+	/** While latched: `median` or `runs` (the voice path, A15) or `tone`. */
+	path?: "median" | "runs" | "tone"
 	/** Quieted and noted 10 ms blocks in the quiet window (at most 100). */
 	quietBlocks: number
 	notedBlocks: number

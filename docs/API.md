@@ -1419,7 +1419,9 @@ Fields:
   `GET /api/live-audio/status?diagnostics=true` while the evidence gate runs, never on
   level events; it may change or disappear without notice. The gate's current voice
   window: `verdict` (`window-filling`, `non-finite`, `data-like`, `not-quiet`,
-  `low-audio`, `low-syllabic`, `voice` or `latched`, in the judge's order), `frames`
+  `low-syllabic`, then `voice-median`, `voice-runs` or `low-audio` when neither voice
+  path passes, or `latched`, in the judge's order), `path` while latched (`median`,
+  `runs` or `tone`), `syllableRuns` (syllable runs in the last 2 s, A15), `frames`
   (0-20), the window medians `audioDb`, `syllabic` and `cluster` (null when empty),
   `quietBlocks` and `notedBlocks` (10 ms blocks in the quiet window), `windowResets`
   (carrier-onset resets this episode), `audioMs` and `deviationHz` (the voice meter's
