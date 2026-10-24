@@ -25,6 +25,7 @@ import { followingText, sweepLive } from "../tuner/scan-hold.ts"
 import {
 	audioAttachKey,
 	audioSource,
+	autoRouteSource,
 	LEVEL_MAX_DBFS,
 	LEVEL_MIN_DBFS,
 	levelFraction,
@@ -37,7 +38,12 @@ import type { ListenPhase } from "./controller.ts"
 import { recordClock, recordFileName } from "./recorder.ts"
 import {
 	agcOf,
+	autoRouteNow,
+	autoSquelchNow,
+	coreRouteHint,
+	coreRoutes,
 	deemphOf,
+	evidenceText,
 	deemphPatch,
 	hearHint,
 	liveTone,
@@ -46,6 +52,7 @@ import {
 	noiseReductionSub,
 	offeredTone,
 	playsDigital,
+	routeProtocol,
 	toneGateOn,
 	toneSquelchFits,
 	toneSquelchPatch,
@@ -93,6 +100,22 @@ export function useTransmissionKind(
 	})
 }
 
+/**
+ * Auto on a core that serves `/auto`: the core picks analog or decoded voice, and `now` says which
+ * plays (level events, status as fallback). Null when this browser picks the stream itself.
+ */
+export function useCoreRoute() {
+	const { data, listen } = useServices()
+	const status = useLiveStatus()
+	const hear = useStore(listen, s => s.hear)
+	const level = useStore(data.liveAudio, s => s.level)
+	if (!coreRoutes(hear, status)) return null
+	return {
+		now: autoRouteNow(status, level),
+		digitalAvailable: status?.autoRoute?.digitalAvailable === true,
+	}
+}
+
 /** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
 export function AudioOutput() {
 	const { data, listen } = useServices()
@@ -105,17 +128,22 @@ export function AudioOutput() {
 	const wanted = useStore(listen, s => s.wanted)
 	const route = useVoiceRoute()
 	const kind = useTransmissionKind(route)
-	const digital = playsDigital(hear, route, kind)
+	// Auto on a core with /auto: the core switches between analog and decoded voice in one stream
+	const core = coreRoutes(hear, status)
+	const digital = !core && playsDigital(hear, route, kind)
 	const voiceRunning = useStore(data.digitalVoice, s => s.status?.running)
 	// analog plays until the decoded voice stream is up; both need live audio running (Listen drives the
 	// squelch meter, and a null source would end listening)
-	const source =
-		digital && route && voiceRunning && status?.running
+	const source = core
+		? autoRouteSource(status, base, credentials)
+		: digital && route && voiceRunning && status?.running
 			? voiceSource(route, base, credentials)
 			: audioSource(status, base, credentials)
-	// the decoded voice stream starts on demand, like live audio does on Listen
+	// the decoded voice stream starts on demand, like live audio does on Listen; /auto needs the
+	// digital voice service running to route a call, and plays analog meanwhile
+	const needsVoice = digital || (core && route !== null)
 	useEffect(() => {
-		if (!wanted || !digital || voiceRunning) return
+		if (!wanted || !needsVoice || voiceRunning) return
 		data.digitalVoice.ensureRunning().catch((error: unknown) => {
 			showAppToast(
 				`Decoded voice could not start: ${error instanceof Error ? error.message : "the core refused"}`,
@@ -123,7 +151,7 @@ export function AudioOutput() {
 			)
 			listen.setHear("analog")
 		})
-	}, [data, listen, wanted, digital, voiceRunning])
+	}, [data, listen, wanted, needsVoice, voiceRunning])
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])
@@ -158,13 +186,20 @@ function useLevel() {
 		setting,
 		running ? (level?.thresholdDbfs ?? null) : null,
 	)
-	const open = running
+	// stage 1: the carrier opened the squelch; on NFM auto the evidence gate may still hold the audio
+	const carrier = running
 		? (level?.squelchOpen ?? status.squelchOpen ?? true)
 		: false
+	const gate = autoSquelchNow(status, level)
+	const open = carrier && gate?.state !== "waiting"
 	return {
 		power,
 		threshold,
+		/** Audio passes: the carrier is up and no evidence gate holds it. */
 		open,
+		carrier,
+		/** The evidence squelch (NFM auto), null when the core does not report it. */
+		gate,
 		setting,
 		floor: level?.noiseFloorDbfs ?? null,
 	}
@@ -176,12 +211,15 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	const state = useStore(listen)
 	const status = useLiveStatus()
 	const hz = useSettledHz()
-	const { power, threshold, open } = useLevel()
+	const { power, threshold, open, carrier, gate: evidence } = useLevel()
 	const on = state.wanted
 	const mode = status ? modeSpec(status.config.modulation).label : null
 	const route = useVoiceRoute()
 	const kind = useTransmissionKind(route)
-	const digital = on && playsDigital(state.hear, route, kind) && route !== null
+	const core = useCoreRoute()
+	const digital = core
+		? on && core.now?.active === "digital"
+		: on && playsDigital(state.hear, route, kind) && route !== null
 	const heardTone = on && open ? liveTone(status?.tone) : null
 	// a tone gate set on another channel stays on the core: say so while it holds the audio
 	const gate =
@@ -190,21 +228,24 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 			: null
 	const sub = digital
 		? [
-				`${route.protocol ?? "Digital"} voice`,
-				route.call ?? (hz === null ? null : formatMHz(hz)),
+				`${routeProtocol(core?.now ?? null, route) ?? "Digital"} voice`,
+				route?.call ?? (hz === null ? null : formatMHz(hz)),
 			]
 				.filter(Boolean)
 				.join(" · ")
 		: on && gate && status?.toneSquelch?.state === "waiting"
 			? `Waiting for ${toneText(gate)}`
-			: [
-					mode,
-					hz === null ? null : formatMHz(hz),
-					// the tone of the transmission on the air (WG12)
-					heardTone ? toneText(heardTone) : null,
-				]
-					.filter(Boolean)
-					.join(" · ")
+			: on && carrier && evidence?.state === "waiting"
+				? // NFM auto squelch: a carrier is up, its audio waits for voice or a tone
+					"Waiting for voice or a tone"
+				: [
+						mode,
+						hz === null ? null : formatMHz(hz),
+						// the tone of the transmission on the air (WG12)
+						heardTone ? toneText(heardTone) : null,
+					]
+						.filter(Boolean)
+						.join(" · ")
 	const toggle = () => {
 		if (state.phase === "blocked") return listen.resume()
 		void (on ? listen.stop() : listen.start())
@@ -289,7 +330,7 @@ function ListenPanel() {
 	const volume = useStore(listen, s => s.volume)
 	const listenError = useStore(listen, s => s.error)
 	const audioError = useStore(data.liveAudio, s => s.error)
-	const { power, threshold, open, setting, floor } = useLevel()
+	const { power, threshold, open, carrier, gate, setting, floor } = useLevel()
 	const [drag, setDrag] = useState<number | null>(null)
 	const running = status?.running === true
 	const sq =
@@ -321,7 +362,13 @@ function ListenPanel() {
 							data-size="md"
 							data-variant={open ? "accent" : undefined}
 						>
-							{setting.kind === "off" ? "Off" : open ? "Open" : "Closed"}
+							{setting.kind === "off"
+								? "Off"
+								: open
+									? (evidenceText(gate) ?? "Open")
+									: carrier && gate?.state === "waiting"
+										? "Waiting for voice"
+										: "Closed"}
 						</span>
 					)}
 					<span className="wkf-gap" />
@@ -538,6 +585,7 @@ function WhatYouHear({ status }: { status: LiveAudioStatus }) {
 	const hear = useStore(listen, s => s.hear)
 	const route = useVoiceRoute()
 	const kind = useTransmissionKind(route)
+	const core = useCoreRoute()
 	const mode = modeSpec(status.config.modulation).label
 	return (
 		<div className="wkf-field">
@@ -551,7 +599,11 @@ function WhatYouHear({ status }: { status: LiveAudioStatus }) {
 			/>
 			<div className="wkf-hear-hint">
 				<span className="wkf-hear-dot" aria-hidden="true" />
-				<span>{hearHint(hear, route, mode, kind)}</span>
+				<span>
+					{core
+						? coreRouteHint({ ...core, route, modeLabel: mode })
+						: hearHint(hear, route, mode, kind)}
+				</span>
 			</div>
 		</div>
 	)

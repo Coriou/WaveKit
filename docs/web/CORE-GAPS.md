@@ -192,7 +192,13 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   "What you hear: Auto" switches per transmission and the event carries the mode.
   Done in core (WG12: a proof per observation). Wired: Auto plays decoded voice during a call, the analog
   audio when a tone is heard live, otherwise follows the channel's latest observation proof
-  (`features/listen/sound.ts` `transmissionKind`).
+  (`features/listen/sound.ts` `transmissionKind`). Since the auto listen route (2026-10-24) the core does
+  it itself: on a core that serves `/auto`, Auto plays `autoRoute.httpUrl` and labels the source from
+  `autoRoute.active` / `protocol` (`coreRoutes`, `autoRouteSource`); the browser-side choice stays for
+  older cores.
+- [x] Evidence auto squelch (2026-10-23, NFM): Listen shows `autoSquelch` (Squelched with "Waiting for voice
+  or a tone" while a carrier waits, the squelch tag "Open on voice / CTCSS / DCS"; `autoSquelchNow`,
+  `evidenceText`).
 - [x] Tone on live status while a transmission is open (Listen offers the tone of the last
   closed transmission). Done: tone squelch (`toneSquelch`, WG7, NFM; Listen offers it), DCS on
   closed transmissions (WG6). Partly: CTCSS (50 standard tones) on each closed

@@ -1,5 +1,6 @@
 // Listen island logic (docs/web/canvas/Listen.dc.html; DESIGN.md "Audio follows tuning", "Squelch UX"). Pure.
 import {
+	LIVE_AUDIO_AUTO_ROUTE_RATE,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_TONE_SQUELCH_MODULATIONS,
@@ -96,6 +97,29 @@ export function voiceSource(
 	const wavUrl = reachableAudioUrl(route.wavUrl, base)
 	if (!httpUrl && !wavUrl) return null
 	return { httpUrl, wavUrl, format: "s16le", rate: route.rate, credentials }
+}
+
+/**
+ * The core's auto listen route (`/auto`, auto-listen-route): one stream that plays the analog channel
+ * or a decoded call, always 48 kHz s16le mono. Null while live audio is stopped or on cores without it.
+ */
+export function autoRouteSource(
+	status: LiveAudioStatus | null,
+	base: string,
+	credentials = false,
+): AudioStreamSource | null {
+	const route = status?.running ? status.autoRoute : undefined
+	if (!route) return null
+	const httpUrl = reachableAudioUrl(route.httpUrl, base)
+	const wavUrl = reachableAudioUrl(route.wavUrl, base)
+	if (!httpUrl && !wavUrl) return null
+	return {
+		httpUrl,
+		wavUrl,
+		format: "s16le",
+		rate: LIVE_AUDIO_AUTO_ROUTE_RATE,
+		credentials,
+	}
 }
 
 /**
