@@ -285,14 +285,17 @@ the shadow's `play` samples are exactly the non-zero output samples.
 
 ### Digital resampler tail (requirement 4.11)
 
-The resampler holds `delayInputSamples` (about `N / 2`, 17 samples, about 2 ms at 8 kHz) of
-input whose effect has not reached its output, so the last syllable of a call would never
+The resampler's history holds up to `N − 1` input samples (33 at 8 kHz, about 4 ms) whose
+contribution to the output is not yet complete, so the last syllable of a call would never
 appear when no further datagram arrives. A voice input **flushes** when its call ends (`call`
 with `active: false`) or when it has admitted no frame for `DIGITAL_HOLD_MS`, whichever comes
-first: it feeds `delayInputSamples` zero samples from a preallocated zero scratch, writes the
-produced output with the flag of the last real input sample (`admitted` if the last frame was
-admitted), then `reset()`s the resampler so the next call starts from an empty history. A flush
-happens at most once per call; a frame after a flush simply starts a new history. `detach` and
+first: it feeds `N − 1` zero samples from a preallocated zero scratch (the full remaining filter
+support, so every real sample's response is complete), writes all produced output with the flag
+of the last real input sample (`admitted` if the last frame was admitted), then `reset()`s the
+resampler so the next samples start from an empty history. The flush is armed whenever real
+samples enter the resampler and disarmed by a flush or reset; a duplicate flush is suppressed
+only while the history is empty. So a hold-expiry flush in the middle of a call, later frames of
+the same call, then the call end give two flushes, each completing the samples before it. `detach` and
 invalidation do not flush: they clear the FIFO and reset the resampler. Analog needs no flush:
 its stream is continuous (muted audio arrives as zeros) and `resetAnalog` discards on purpose.
 
@@ -571,7 +574,7 @@ inner loops are taken at about 1 ns per MAC on the desktop reference host and 5 
 | Per-client queueing (existing registry)    | 96 kB/s per client                  | ≤ 0.001      | ≤ 0.003                    |
 | Total, NFM + one decoder, one client       |                                     | ≤ 0.01       | ≤ 0.035                    |
 | Total, worst case (200 kHz + two decoders) |                                     | ≤ 0.025      | ≤ 0.1                      |
-| No `/auto` client                          | one branch per chunk                | 0            | 0                          |
+| No `/auto` client                          | shadow tags plus one branch/chunk   | ≤ 0.0005     | ≤ 0.002                    |
 
 All below the 0.3-core noise floor. The bench `tests/bench/auto-listen-route.bench.ts` (not
 collected by the root suite, which takes only `tests/**/*.test.ts`; run with
@@ -633,8 +636,10 @@ synthetic PCM, a fake voice source, a fake coverage port and an injected clock.
     the start for every sample after the connect; after an injected mismatch, qualification is
     silent until the first zero delay and exact after it. _Validates 3.6, 3.7._
 16. **Digital tail.** For random calls ending in a non-zero impulse followed by no datagram,
-    the impulse's full resampled response is emitted once (at call end or hold expiry), and the
-    next call starts from an empty history. _Validates 4.11._
+    the impulse's full resampled response (all `N − 1` trailing input samples of support) is
+    emitted exactly once with its admission flag, and the next samples start from an empty
+    history; this includes a hold-expiry flush mid-call, later frames of the same call, then the
+    call end (two flushes, nothing lost or repeated). _Validates 4.11._
 
 ## Fake-link acceptance plan (requirement 9.1, in-process)
 

@@ -198,8 +198,10 @@ generation changes (3.4), coverage stops being `yes`, or it is older than
 `FIFO_MS`. The digital voice service notifies the router of every call change and detach.
 
 4.11 **Digital tail flush.** When a call ends, or a decoder has admitted no frame for
-`DIGITAL_HOLD_MS`, its resampler is flushed through its group delay with zeros, the flushed
-output keeps the last frame's admission, and the resampler is reset; so the final samples of a
+`DIGITAL_HOLD_MS`, its resampler is flushed with `N − 1` zeros (the full remaining filter
+support), the flushed output keeps the last frame's admission, and the resampler is reset; the
+flush is re-armed whenever new real samples enter the resampler and skipped only while its
+history is empty; so the final samples of a
 call are emitted even when no further datagram arrives. Detach and invalidation reset without
 flushing.
 
@@ -236,7 +238,8 @@ count.
 ## 7. Defaults and compatibility
 
 7.1 Without an `/auto` client, the router's pacer is stopped, the analog tap is not called, no
-voice tap is registered, and the CPU cost is a branch per chunk.
+voice tap is registered, and the CPU cost is a branch per chunk plus the continuous pre-roll
+shadow's tag bookkeeping on the evidence path (3.7, under 0.0005 core).
 
 7.2 `/stream`, `/stream.wav`, the digital voice `/stream` and `/decoders/<id>/stream` bytes,
 headers and timing are byte-identical with and without `/auto` clients (golden tests).
