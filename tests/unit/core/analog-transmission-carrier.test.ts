@@ -347,6 +347,18 @@ describe("WG10 req 3.8 review fixes", () => {
 		expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7, 88.5])
 	})
 
+	it("delayed PCM: a 1 s second over still splits on its own tone", () => {
+		const s = emptyScript()
+		addBlocks(s, 50, false, false, noise(331, 0.3))
+		over(s, 2000, tone(79.7))
+		addBlocks(s, 50, false, false, noise(332, 0.3))
+		over(s, 1000, tone(88.5))
+		addBlocks(s, 300, false, false, noise(333, 0.3))
+		// At the second span end only 600 ms of its PCM reached the detector (< 0.75 s).
+		const { rows } = runScript(s, { pcmLagBlocks: 40 })
+		expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7, 88.5])
+	})
+
 	it("delayed PCM is still fed before finalisation", () => {
 		const s = emptyScript()
 		addBlocks(s, 50, false, false, noise(321, 0.3))

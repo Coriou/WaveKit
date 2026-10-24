@@ -377,27 +377,24 @@ buffer (the log then lags; a resync at the next run). No `src/core/live-demod/**
 ### Rust event order (amendment 2026-10-24, review fixes)
 
 Native sends a `gate` change at once with `atOutputSample` at the end of the block that decided
-it, and `metrics` in batches of ten blocks later. `RustEngine` (`src/core/live-demod/rust-engine.ts`,
-the one change outside the tracker and the demodulator hook) now keeps sample order: once metrics
-flow, a gate whose block is not yet reported waits and is released just before that block's
-metrics (a batch is split there), or after `GATE_HOLD_MAX_MS` (250 ms) if no batch comes. A gap in
-metrics positions is filled with empty blocks (no power, no quieting) in the same batch, and
-metrics before the channel opens are merged into one batch from output sample 0 (at most 60 s)
-instead of the downstream startup buffer keeping only the newest eight; so block `k` of the log
-is always output samples `[480 k, 480 (k + 1))`. Startup gates keep their positions too: the engine replays them between the blocks of the merged
-startup batch, and `src/core/live-demod/rust-run.ts` keeps its startup gate and metrics events in
-arrival order (it kept only the last gate and the newest eight batches). Once the channel is
-open every gate waits for its block's metrics, because native always sends metrics. Audio
-alignment (checked in `native/wavekit-chan`): the channel counts `atOutputSample` from its first
-output sample, and the runtime queues output from that sample until the client connects, so
-socket byte `n` is output sample `n / width`. The exception is a full queue: native then drops
-samples and reports a `discontinuity` event (`sampleIndex`, `droppedSamples`,
-`queue-overflow`), which the TypeScript protocol does not parse today; after one, the mapping is
-off by the dropped count until the next run (open item).
-Deliberate test changes: `live-demod-rust-fallback.test.ts` "keeps every startup metric in
-order" (was "keeps only the newest startup metrics") and "mirrors gate events into
-squelch-changed", and `live-demod-rust-engine.test.ts` "drops hostile event lines", whose gate
-for block 0 now waits for block 0's metrics.
+it, and `metrics` in batches of ten blocks later. Gate notifications are not delayed:
+`squelch-changed`, the tone squelch and every other listener see a change when it arrives, as
+before 3.8. Instead `RustEngine` keeps a position-indexed gate history (`GATE_HISTORY_MAX`, 256
+changes; native sends at most one per block, so it covers at least 2.56 s, more than the 8-batch
+startup buffer's 80 blocks plus one batch of lag; an evicted change becomes the window's base
+state, native starting closed) and hands each metrics batch its `atOutputSample` and the gate
+state of every block (the latest change at or before the block's end). `rust-run.ts` passes both
+to `measureRun` as `blockIndex` (`atOutputSample / 480 + i`) and `gateOpen`, and the block log
+notes block `blockIndex`: blocks never reported (startup batches beyond the buffer's 8, dropped
+lines) are filled closed and uncarried, so block `k` of the log is always output samples
+`[480 k, 480 (k + 1))`. The startup buffer is unchanged (last gate, newest 8 batches); no
+position is lost because every batch carries its own. Audio alignment (checked in
+`native/wavekit-chan`): the channel counts `atOutputSample` from its first output sample, and the
+runtime queues output from that sample until the client connects, so socket byte `n` is output
+sample `n / width`. The exception is a full queue: native then drops samples and reports a
+`discontinuity` event (`sampleIndex`, `droppedSamples`, `queue-overflow`), which the TypeScript
+protocol does not parse today; after one, the mapping is off by the dropped count until the next
+run (open item). No existing Rust test changed.
 
 ### Tracker carrier path
 
@@ -421,8 +418,8 @@ stop and config close at the event time. A new epoch ends an open span at its ca
 
 ### Tone input
 
-Span end and delayed PCM: the span-end tone snapshot (the tone-split reference) and the split
-detector wait until the PCM up to the span's carrier end has been consumed, at most
+Span end and delayed PCM: the segment stays open for a tone split, and the span-end tone snapshot
+(the split reference) and the split detector wait, until the PCM up to the span's carrier end has been consumed, at most
 `CARRIER_SNAPSHOT_WAIT_BLOCKS` (50 blocks, 500 ms), and are settled at once when a new span
 merges. Late PCM of an ended span is still fed to its transmission until finalisation (1500 ms
 later); later PCM is dropped. A closing config change or teardown edge also clears the run and

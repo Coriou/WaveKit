@@ -198,15 +198,6 @@ describe("RustEngine process", () => {
 			`${JSON.stringify({ v: 1, type: "gate", id: "live-demod", generation: 1, open: "no", atOutputSample: 0 })}\n`,
 		)
 		channel?.emitLine(demodEvent("gate", { open: true, atOutputSample: 480 }))
-		// WG10 req 3.8.1 (deliberate): the gate decided by block 0 waits for block 0's metrics.
-		expect(gates).toEqual([])
-		channel?.emitLine(
-			demodEvent("metrics", {
-				atOutputSample: 0,
-				powerDbfs: [-30],
-				quietingDb: [null],
-			}),
-		)
 		expect(engine.droppedEvents).toBe(3)
 		expect(gates).toEqual([true])
 	})

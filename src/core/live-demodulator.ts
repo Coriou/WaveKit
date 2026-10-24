@@ -1045,6 +1045,8 @@ export class LiveDemodulator extends EventEmitter {
 			powerDbfs: number | null
 			quieted: boolean
 			quietingDb?: number | null
+			blockIndex?: number
+			gateOpen?: boolean
 		},
 	): void {
 		if (this.run !== run || run.stopping) return
@@ -1112,8 +1114,9 @@ export class LiveDemodulator extends EventEmitter {
 			this.carrierLog.note(
 				run,
 				run.stream.rate,
-				this.reportedSquelchOpen,
+				sample?.gateOpen ?? this.reportedSquelchOpen,
 				carried,
+				sample?.blockIndex,
 			)
 	}
 

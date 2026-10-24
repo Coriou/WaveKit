@@ -107,8 +107,27 @@ export class CarrierBlockLog {
 	onBlock: (() => void) | null = null
 	private owner: object | null = null
 
-	note(run: object, rate: number, open: boolean, carried: boolean): void {
+	/**
+	 * `index` (block position in the run, when the engine reports one): blocks never reported
+	 * (dropped metrics) are filled as closed and uncarried, an already noted index is ignored,
+	 * so block `k` of the log is always output samples `[k × B, (k + 1) × B)`.
+	 */
+	note(
+		run: object,
+		rate: number,
+		open: boolean,
+		carried: boolean,
+		index?: number,
+	): void {
 		this.sync(run, rate)
+		if (index !== undefined) {
+			if (index < this.blocks) return
+			const gap = index - this.blocks
+			const fill = Math.min(gap, CARRIER_LOG_CAPACITY)
+			for (let i = 0; i < fill; i++)
+				this.flags[(index - fill + i) % CARRIER_LOG_CAPACITY] = 0
+			this.blocks = index
+		}
 		this.flags[this.blocks % CARRIER_LOG_CAPACITY] =
 			(open ? CARRIER_FLAG_OPEN : 0) | (carried ? CARRIER_FLAG_CARRIED : 0)
 		this.blocks += 1
@@ -840,6 +859,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		let reason = asked
 		const open = this.transmission
 		if (!open) return
+		// A span that ended on carrier evidence is in its gap, whatever its PCM still owes.
+		if (open.snapshotDueBlock !== null) this.settleSnapshot(true)
 		this.transmission = null
 		this.cancelGapTimer(open)
 		this.detachPcm()
@@ -1172,13 +1193,18 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.carrierCursor - due < CARRIER_SNAPSHOT_WAIT_BLOCKS
 		)
 			return
+		// The segment ends now, once its PCM is in: until here it stayed open for a tone split.
 		open.snapshotDueBlock = null
+		open.segmentOpen = false
+		open.gapEndMs = open.spanEndMs
+		open.audioMs += Math.max(0, open.spanEndMs - open.segmentStartMs)
 		open.segmentEndTone = this.snapshotTone(open)
 		open.split = null
 	}
 
 	/** A span qualified: merge into the held transmission or open a new one at its start. */
 	private startSpan(startBlock: number, endMs: number): void {
+		this.settleSnapshot(true)
 		this.inSpan = true
 		this.uncarried = 0
 		const startMs = this.blockTime(startBlock)
@@ -1217,12 +1243,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.uncarried = 0
 		const open = this.transmission
 		if (open === null || !open.carrierSpans || !open.segmentOpen) return
-		open.segmentOpen = false
-		open.gapEndMs = open.spanEndMs
-		open.audioMs += Math.max(0, open.spanEndMs - open.segmentStartMs)
-		// The span's last PCM may still be on its way: the snapshot (and the split detector)
-		// wait for it, bounded (3.8.7).
-		open.segmentEndTone = null
+		// The span's last PCM may still be on its way: the segment stays open (for a tone split)
+		// until its PCM through the last carrier block is consumed, bounded (3.8.7).
 		open.snapshotDueBlock = this.spanEndBlock
 		this.settleSnapshot(false)
 	}
