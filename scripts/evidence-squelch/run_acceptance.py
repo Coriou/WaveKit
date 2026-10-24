@@ -1669,7 +1669,7 @@ def self_test():
 		pass
 	else:
 		raise AssertionError("a fake-progress clock step is not a ClockStep")
-	# A clock step never hides a clock-independent failure (reviewer repro): a never-open NFM
+	# A clock step never hides a clock-independent failure: a never-open NFM
 	# fixture that plays audio, with a 50 ms probe step, is a final FAIL (not a ClockStep), and
 	# the retry policy does not re-record it.
 	stepped = dict(top__expect="none", auto__status=status("waiting"), manual__clockProbes=probe_series(step_at=20, step=-0.05))
@@ -1681,7 +1681,7 @@ def self_test():
 	step_obs["manual"]["clockProbes"] = probe_series(step_at=20, step=-0.05)
 	step_failures, step_notes = evaluate(step_obs, 200)
 	assert "moved" in step_notes["clockStep"] and "notJudged" in step_notes and any("opened" in x for x in step_failures), step_notes
-	# Structurally (reviewer round 2): every check that needs no clock runs before the clock is
+	# Structurally: every check that needs no clock runs before the clock is
 	# read, so with a clock step any of their failures is a final FAIL, never a retryable
 	# ClockStep. Repros: duplicated auto transmissions, missing auto transmissions, extra
 	# (non-duplicate) auto transmissions.
@@ -2019,8 +2019,8 @@ def self_test():
 	limit_case = dict(auto__p99Samples=p99s(0, 135.0, values=[13.0] * 91 + [33.0] * 9),
 		manual__p99Samples=p99s(0, 1684.0, values=[13.0] * 100))
 	assert variant(**limit_case) == [], variant(**limit_case)
-	# Without interval identity the check is invalid; with it the same data fails. Reviewer
-	# repro: 30 consecutive 100 ms intervals after 30 distinct normal ones. Value-change grouping
+	# Without interval identity the check is invalid; with it the same data fails.
+	# 30 consecutive 100 ms intervals after 30 distinct normal ones. Value-change grouping
 	# reads the 30 stalls as one interval and would pass.
 	stalls = [13.0 + 0.001 * j for j in range(30)] + [100.0] * 30
 	with_ids = dict(auto__p99Samples=p99s(0, 135.0, values=stalls), manual__p99Samples=p99s(0, 1684.0, values=[13.0] * 60))
@@ -2042,7 +2042,7 @@ def self_test():
 	# bound and counts as startup: 29 of 30 (conservative).
 	assert p99_of(**old_format)["identity"][1].startswith("value change") and p99_of(**old_format)["steadyIntervals"][1] == 29
 	assert "cannot time them" in invalid(**dict(old_format, manual__status=polls[:-1]))
-	# Request-start stamps (reviewer repro): poll P2 starts at 2.5 s but answers at 4.4 s. The
+	# Request-start stamps: poll P2 starts at 2.5 s but answers at 4.4 s. The
 	# core read the interval before answering, so interval 3, first seen by P3, ended after 2.5 s
 	# only: interval 4's start bound is 2.5 s (before the 3 s onset) and its 50 ms stays startup.
 	# Stamped at the response, the bound would read 4.4 s and count it as steady.
@@ -2211,7 +2211,7 @@ def self_test():
 		assert result["failures"] == ["onset"] and result["retries"] == [] and modes == ["auto", "manual"], result
 		result, modes, _dirs = run_policy([{"invalid": "over 0: stage-1 open step not found"}])
 		assert result["invalid"].startswith("over 0") and result["retries"] == [] and len(modes) == 2, result
-		# The reviewer repro through the policy: the stepped never-open FAIL is final.
+		# The repro through the policy: the stepped never-open FAIL is final.
 		def fail_then_pass():
 			yield {"failures": step_failures, "notes": step_notes}
 			yield ok

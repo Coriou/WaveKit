@@ -322,7 +322,7 @@ the gate resets `sinceCarrier` when a new sighting has the latched key. On a re-
 hang a tone latch keeps its tone stage (only the decimator and the audio clock restart), so the
 next block (at most 250 ms of audio away; blocks are 500 ms every 250 ms) sights the returning
 tone. While stage 1 is open a tone latch expires at `HANG_MS + EVIDENCE_TONE_HANG_GRACE_MS`
-(250 ms), in `closed()` at `HANG_MS`. Regressions: the review repro (2 s unquieted 79.7 Hz, 1.2 s
+(250 ms), in `closed()` at `HANG_MS`. Regressions: the repro (2 s unquieted 79.7 Hz, 1.2 s
 closed, tone back: open throughout), repeated 10 ms closes between 600 ms stretches, CTCSS and DCS
 overs with no quieted block, a different tone after a fade (latch ends, the new tone latches on
 its own), and flicker after an unquieted tone over (expires within hang + grace + one block).
@@ -332,7 +332,7 @@ Property 16 checks the open-side limit `HANG_MS + grace` for a tone latch.
 stage again for every latch (the retained stage dated pre-close tone as fresh), so a sighting's
 block lies inside one stage-1-open stretch. `EVIDENCE_TONE_HANG_GRACE_MS` is 500 ms (the reset
 stage's first block). `ToneEvidence` counts a DCS sighting only for a word chain of at least
-`LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT` (2) hits. Regressions: the review repro at eight tone lengths
+`LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT` (2) hits. Regressions: the repro at eight tone lengths
 (2 100 to 2 359 ms, block phases) and noise at 100 to 3 000 (latch ends 175 to 196 blocks after
 the close, at most 200), a DCS fade, a seeded sighting-rate test (none in 10 min of white noise
 at 0.5 and 5 min of voice), and Property 16 with bare tones of random length (1.5 to 2.6 s),
@@ -797,13 +797,13 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
   1 500 samples, 99.8 % of samples equal, 2 190 samples differing by 1 LSB, and one 0.165 s edge
   cluster. On NFM, audio played before the first over now fails "never opens without evidence"
   instead of making the run invalid. `scripts/evidence-squelch/README.md` has the details.
-  Review round 1 (2026-10-23) tightened the AM check:
+  A 2026-10-23 revision tightened the AM check:
   - The content shift must match the arrival-time shift. Tolerance 7.9 ms on that run, cap 20 ms;
     measured miss 1.3 ms. This catches a playback delay that content alignment would hide.
   - Each difference cluster must start within 84 ms of a stage-1 gate edge of either run, placed
     per over from the manual stream's open step, with at most one cluster per over edge. The one
     cluster on that run started 30 ms from its close edge.
-    Review round 2 (2026-10-23): a cluster's divergence (its start and its largest difference) must
+    2026-10-23 revision: a cluster's divergence (its start and its largest difference) must
     lie inside the window from the earlier to the later of the two runs' edge stamps, ±84 ms.
   - Past that window the difference may only decay through the back chain's memory: at most
     0.7 times the in-window peak per 10 ms block. Measured 0.607 per block (τ 20.0 ms) over 13

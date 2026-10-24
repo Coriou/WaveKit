@@ -261,7 +261,7 @@ export const EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS = 5
 export const EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS = 5
 
 /**
- * Tone continuity (amendment A14, review round 2, 2026-10-24): on a tone latch the hang runs this
+ * Tone continuity (amendment A14, revision 2, 2026-10-24): on a tone latch the hang runs this
  * much longer while stage 1 is open: one CTCSS block, the time the reset tone stage needs to
  * sight a returning tone after a re-open (its first 500 ms block; a DCS word pair takes 342 ms).
  * Only a sighting of the latched tone or code restarts the hang; noise and other codes cannot.
@@ -582,7 +582,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		} else if (this.internal === "open" && this.closing) {
 			// Reopen within the hang: latch kept, tone stage reset. The carrier hang keeps counting
 			// (A14): a re-open without carrier evidence lets the latch expire. The reset is what
-			// dates sightings (A14, review round 2): no CTCSS block or DCS word ever spans a
+			// dates sightings (A14, revision 2): no CTCSS block or DCS word ever spans a
 			// stage-1 close, so a sighting's evidence is at most one block (500 ms) of open audio
 			// old when it completes.
 			this.closing = false

@@ -218,7 +218,7 @@ its first block after a re-open. Fade continuity: a same-tone fade survives whil
 last sighting at the close, at most 250 ms) + closed time + 500 ms stays under 2.0 s, so fades up
 to 1.25 s hold. Bound: a tone latch ends at most `HANG_MS` + 500 ms after its last sighting, so at
 most 2.5 s after the tone's last sample while stage 1 stays open, and at most 2.0 s after a close
-that ended the tone (measured on the review repro across eight block phases and noise at 100 to
+that ended the tone (measured on the repro across eight block phases and noise at 100 to
 3 000: 1.75 to 1.96 s).
 
 **Amendment (2026-10-24, live retest run4): sparse speech; diagnostic status.** On an image with

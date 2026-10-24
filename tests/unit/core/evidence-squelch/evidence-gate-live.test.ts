@@ -523,8 +523,8 @@ describe("A14: the latch survives only the same transmission", () => {
 		expect(drive(gate(), quick).evidence.at(-1)).toBe("dcs")
 	})
 
-	// Review round 1 (A14 revised): a tone over with weak or no quieting survives short fades.
-	it("review repro: 2 s CTCSS unquieted, 1.2 s close, the same tone back unquieted: stays open/ctcss", () => {
+	// A14 revised: a tone over with weak or no quieting survives short fades.
+	it("2 s CTCSS unquieted, 1.2 s close, the same tone back unquieted: stays open/ctcss", () => {
 		const g = gate()
 		drive(g, [{ pcm: ctcssOver(2), open: true, quieted: false }])
 		expect([g.state, g.evidence]).toEqual(["open", "ctcss"])
@@ -556,7 +556,7 @@ describe("A14: the latch survives only the same transmission", () => {
 		expect(t.evidence.at(-1)).toBe("dcs")
 	})
 
-	it("review repro: repeated 10 ms closes between 600 ms unquieted tone stretches keep the latch", () => {
+	it("repeated 10 ms closes between 600 ms unquieted tone stretches keep the latch", () => {
 		// Latched first (a close before a latch discards the evidence, requirement 1.5).
 		const segments: Segment[] = [
 			{ pcm: ctcssOver(2), open: true, quieted: false },
@@ -634,8 +634,8 @@ describe("A14: the latch survives only the same transmission", () => {
 		expect(t.evidence.at(-1)).toBe("ctcss")
 	})
 
-	// Review round 2: a retained tone-stage block must not date old tone as fresh evidence.
-	it("review repro: 2.1 s tone, 1.2 s closed, low noise after: the latch ends within hang + grace of the tone's end", () => {
+	// A14 revision 2: a retained tone-stage block must not date old tone as fresh evidence.
+	it("2.1 s tone, 1.2 s closed, low noise after: the latch ends within hang + grace of the tone's end", () => {
 		const rows: string[] = []
 		// Four tone lengths (74 ms apart, so the close falls at different CTCSS block phases) at
 		// the lowest and the highest noise level: 8 cases, kept cheap for a loaded machine.
@@ -668,7 +668,7 @@ describe("A14: the latch survives only the same transmission", () => {
 		console.info(`EVIDENCE-SQUELCH A14 dated sightings: ${rows.join(" ")}`)
 	})
 
-	// Review round 2 (minor): a DCS sighting is a word pair; a CTCSS sighting one won block.
+	// A14 revision 2: a DCS sighting is a word pair; a CTCSS sighting one won block.
 	it("sightings in seeded noise and voice: none in 10 min of white noise at 0.5 and 5 min of voice (single DCS words: about 68 and 7 per hour)", () => {
 		let count = 0
 		const feed = (samples: Float32Array): void => {
@@ -701,7 +701,7 @@ describe("A14: the latch survives only the same transmission", () => {
 	// Feature: evidence-squelch, Property 16: Latch needs carrier evidence to survive
 	// Validates: Requirements 1.5
 	it("Property 16: after a tone over and a stage-1 close, any pattern of re-opens on noise of any level ends the latch within its hang", () => {
-		// A bare 79.7 Hz tone (the review repro) and tone + voice.
+		// A bare 79.7 Hz tone (the repro) and tone + voice.
 		const sine = (amplitude: number, ms: number): Buffer => {
 			const out = Buffer.alloc(Math.round((RATE * ms) / 1_000) * 2)
 			for (let i = 0; i < out.length / 2; i++)
@@ -764,7 +764,7 @@ describe("A14: the latch survives only the same transmission", () => {
 			),
 			{
 				numRuns: 100,
-				// The review repro shape: a 1.2 s close, then low-level noise.
+				// The repro shape: a 1.2 s close, then low-level noise.
 				examples: [
 					[
 						[

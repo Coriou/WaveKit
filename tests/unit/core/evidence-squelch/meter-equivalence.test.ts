@@ -667,7 +667,7 @@ const flickerArb = fc
 	})
 
 describe("lead-in flicker and kerchunks (window-reset revision 2026-10-23)", () => {
-	it("review repro: 250 ms lead-in unquieted except its second block never latches", () => {
+	it("250 ms lead-in unquieted except its second block never latches", () => {
 		for (const name of ["nfm-dmr-4fsk-continuous", "nfm-clicks"])
 			expect(leadInRun(name, 250, b => b === 1).latchS).toBeNull()
 	})
@@ -738,7 +738,7 @@ describe("lead-in flicker and kerchunks (window-reset revision 2026-10-23)", () 
 })
 
 describe("onset preservation: early fades never discard the over (review 2026-10-23)", () => {
-	it("review repro: nfm-voice, blocks 0-3 quieted, block 4 unquieted, then quieted: plays from over sample 0", () => {
+	it("nfm-voice, blocks 0-3 quieted, block 4 unquieted, then quieted: plays from over sample 0", () => {
 		const r = leadInRun("nfm-voice", 0, undefined, undefined, b => b !== 4)
 		// The analysis window resets at 50 ms (latch 1.05 s), but the held audio is kept.
 		expect(r.latchS).toBeCloseTo(1.05, 6)

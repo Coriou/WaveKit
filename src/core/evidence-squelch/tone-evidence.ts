@@ -159,7 +159,7 @@ export class ToneEvidence {
 		// word boundaries `wordHits()` keeps its value, which must not refresh the hold.
 		const changed = reading !== this.lastReading || hits !== this.lastHits
 		// A DCS sighting is a word pair (two matching words 23 bits apart, 342 ms): single words
-		// occur in noise (review round 2: about 68 per hour in white noise at 0.5).
+		// occur in noise (measured: about 68 per hour in white noise at 0.5).
 		if (hits >= LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT && reading >= 0 && changed)
 			this.sight(1_000 + reading)
 		const newWord = standard !== undefined && changed
