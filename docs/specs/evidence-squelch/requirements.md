@@ -330,6 +330,28 @@ and CTCSS put almost no energy at 55 Hz (voice above 100 Hz, CTCSS 67-254 Hz), a
 other common STE form, a CTCSS phase reversal (reverse burst), is a ROADMAP follow-up. Note for
 lane TB: the STE onset can serve as the transmission end on radios that send it.
 
+**Amendment (2026-10-24, A17 review revision).** Supersedes the detection rule and the hold of
+A17 above. (1) A voiced fundamental is not an STE: the STE tone is pure and sent with the
+microphone muted, so a block also needs the 110 and 165 Hz bins each at most 0.02 of the 55 Hz
+bin (-17 dB in power, 0.14 in amplitude) and the 300-3 000 Hz energy at most -15 dB relative to
+the 55 Hz tone's energy. Measured on the live STE segments (runs 2, 3, 4 and 6): harmonics at most
+0.006 and 0.0016, voice band -18.5 to -28.7 dB in steady blocks (edge blocks up to -9.9 dB are
+rejected, and every over end is still detected: run2 4 of 4, run3 2 of 2, run4 1 of 1, run6 4 of
+4); the reviewer's voiced repro (0.12 (sin 55 + 0.3 sin 110 + 0.2 sin 165)) has 0.143 and is
+rejected; no detection in any fixture, in synthetic voice, or in the private live clips. (2) A
+false STE is not terminal: after an STE, client audio is held (pending) until stage 1 closes or
+fresh evidence qualifies (voice on either path, or a tone), whichever comes first; on fresh
+evidence the latch resumes and the held audio plays. (3) The tone must fill the block, measured
+on the 55 Hz bin itself: the 55 Hz phasor magnitudes of the four 25 ms quarters agree within 0.6.
+A CTCSS tone continuing through the STE at 0.2 of its amplitude leaves them within 0.64 (67 Hz),
+0.70 (71.9 Hz) and 0.74 (79.7 Hz) and is detected; 0.3 of its amplitude is detected too. The
+guarantee is revised: a 55 Hz tone under 90 ms never qualifies, whatever follows it (silence or
+noise; 85 ms padded: no detection), and one of 125 ms or more always does. (4) The retroactive
+mute starts at the exact input sample of the qualifying block's start (the gate dates it by its
+own input-sample count), whatever the chunking. (5) Split samples are faded too: the bytes of a
+sample that arrive in a later chunk carry the scaled value (s16: its first byte keeps its value,
+at most 255 LSB).
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

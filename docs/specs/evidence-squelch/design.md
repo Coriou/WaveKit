@@ -415,6 +415,25 @@ in place. The pre-roll delay (about 1 s after a voice latch, 0.75 s after a tone
 `ste: true` while held. Note for lane TB (transmission boundaries, another branch): the STE onset
 is a reliable transmission end on radios that send it; `analog-transmission.ts` is unchanged here.
 
+**Amendment (2026-10-24, A17 review revision).** `SteDetector` blocks qualify on: 55 Hz power
+≥ 0.65 of the block's AC energy; ≥ 3x the 45 and 67 Hz bins; the 110 and 165 Hz bins ≤ 0.02 of it;
+the 300-3 000 Hz energy (RBJ high-pass 300 Hz, low-pass 3 kHz, shared by the phases) ≤ -15 dB of
+the tone's energy; and the four quarters' 55 Hz phasor magnitudes (correlation with a shared
+800-entry cos/sin table) within 0.6. Each phase records the gate's input-sample index of its
+block's first sample (`push(x, index)`; the gate passes the index where the decimation group
+began), so `onsetIndex` is exact and `takeSteBack()` returns `inputCount - onset` whatever the
+chunking. After an STE the gate keeps judging (window reset, tone stage reset) and `latch()`
+clears `steHold`; the wiring tags held audio `pending` (abandoned on the close, replayed on a
+latch). Split samples get the fade on their bytes in reach (`writeSplit`, in `push` and in
+`closed()`, which now keeps a straddling sample's first bytes when it is given the buffer), and a
+split sample's first bytes are tagged as its sample will be decided (`audibleEnd` extends to the
+end of the range while the gate still passes). The wiring is now `processEvidenceChunk`
+(`evidence-squelch/wiring.ts`), shared by the demodulator and the tests, with no per-slice
+closure. Properties 18 and 19 run that wiring with the real pre-roll and compare the complete
+client output; Property 6 (chunk-split invariance) is now byte identity of the client output
+under random sample-aligned splits, on the wiring directly (about 5 s for 100 cases on a loaded
+machine, from 250 s through the harness; one end-to-end run through the demodulator stays).
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
@@ -723,14 +742,16 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     never returns `runs`, and the judge says voice exactly when the pinned median rule does.
     _Validates 1.3, 1.4._
 18. **Tail mute (A16, 2026-10-24; review revision).** After a voice latch, for any pattern of
-    quieted, unquieted and closed blocks, the samples each block delivers (the audible prefix of a
-    push, the guard bytes of a close) equal the model: all of a quieted block; otherwise what is
-    left of the guard (`CLOSE_GUARD_MS` + lag) and then the 10 ms fade, counted across closes and
-    never restarted by one; muted pushed samples are zeros. _Validates 1.5._
-19. **Nothing after an STE tone (A17, 2026-10-24).** For any over followed by an STE tone of
-    0.15-0.4 s and any continuation (noise, voice or tone, quieted or not), no sample after the
-    detecting slice is delivered while stage 1 stays open, the close returns no guard, and the
-    close ends the hold. _Validates 1.5._
+    quieted, unquieted and closed blocks, with whole-sample or odd byte chunking, the complete
+    client output (real wiring and pre-roll) is the over and then exactly the model's samples: all
+    of a quieted block; otherwise what is left of the guard (`CLOSE_GUARD_MS` + lag) and then the
+    10 ms fade, counted across closes and never restarted by one, until the hang ends the latch
+    (split samples within 255 LSB). _Validates 1.5._
+19. **Nothing after an STE tone (A17, 2026-10-24; review revision).** For any over followed by an
+    STE tone of 0.13-0.4 s, then noise, and any chunking (an odd first chunk and 0-3 random cuts per
+    block), the client output is exactly the over's samples before the STE onset, the last 10 ms
+    faded by `j / (F + 1)`, and nothing after it; the onset lies within 25 ms after the tone's.
+    _Validates 1.5._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 
