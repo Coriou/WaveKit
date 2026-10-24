@@ -461,6 +461,10 @@ export async function buildMockServer(
 		running: false,
 		clients: 0,
 		bytes: 0,
+		autoClients: 0,
+		autoActive: "none" as "analog" | "digital" | "none",
+		autoSince: Date.now(),
+		carrierSince: null as number | null,
 		config: {
 			enabled: true,
 			sourceId: MOCK_SOURCE_ID,
@@ -556,6 +560,39 @@ export async function buildMockServer(
 			Math.round(heard * 10) === gate.frequencyTenthsHz
 			? "open"
 			: "waiting"
+	}
+
+	/**
+	 * Evidence squelch (docs/specs/evidence-squelch): NFM auto squelch waits for voice or a tone.
+	 * The mock hears the transmission's tone after 750 ms, else calls it voice after a second.
+	 */
+	const autoSquelchOf = (
+		open: boolean,
+	): NonNullable<LiveAudioStatus["autoSquelch"]> => {
+		if (live.config.modulation !== "nfm" || live.config.squelchMode !== "auto")
+			return { state: "off" }
+		if (!open) {
+			live.carrierSince = null
+			return { state: "waiting" }
+		}
+		live.carrierSince ??= Date.now()
+		const held = Date.now() - live.carrierSince
+		const tone = toneHere()
+		if (tone !== null && held >= 750)
+			return { state: "open", evidence: "ctcss" }
+		if (held >= 1000) return { state: "open", evidence: "voice" }
+		return { state: "waiting" }
+	}
+
+	/** What `/auto` plays now: the decoded call while one talks (and voice runs), else the analog channel. */
+	const autoRouteLevel = (): NonNullable<LiveAudioLevel["autoRoute"]> => {
+		const digital = voice.running && voiceCall().talking
+		const active = digital ? "digital" : level().squelchOpen ? "analog" : "none"
+		if (active !== live.autoActive) {
+			live.autoActive = active
+			live.autoSince = Date.now()
+		}
+		return digital ? { active, protocol: "dmr" } : { active }
 	}
 
 	// --- Digital voice (dsd-fme): the decoded voice stream on the audio port's /voice. ---
@@ -660,6 +697,26 @@ export async function buildMockServer(
 					: "off")
 			// WG7 req 3.4: the gate opens while a transmission with the set tone is on the air
 			status.toneSquelch = { state: toneGateState(l.squelchOpen) }
+			status.autoSquelch = autoSquelchOf(l.squelchOpen)
+		}
+		// auto-listen-route: present whenever the audio server listens
+		if (live.running) {
+			const route = autoRouteLevel()
+			status.autoRoute = {
+				...route,
+				...(route.active === "digital"
+					? { decoderId: "dsd-fme", slot: 1 }
+					: {}),
+				since: new Date(live.autoSince).toISOString(),
+				httpUrl: `${audioOrigin}/auto`,
+				wavUrl: `${audioOrigin}/auto.wav`,
+				clientCount: live.autoClients,
+				digitalAvailable: true,
+				underruns: 0,
+				droppedMs: 0,
+				clockRebases: 0,
+				latencyMs: 80,
+			}
 		}
 		return status
 	}
@@ -889,7 +946,12 @@ export async function buildMockServer(
 	let lastMessageAt = Date.now()
 	const onTick = () => {
 		tick += 1
-		if (live.running) broadcast("live-audio", "live-audio:level", level())
+		if (live.running) {
+			const l: LiveAudioLevel = level()
+			l.autoSquelch = autoSquelchOf(l.squelchOpen)
+			if (live.autoClients > 0) l.autoRoute = autoRouteLevel()
+			broadcast("live-audio", "live-audio:level", l)
+		}
 		// several per tick under load (messageEvery below the 250 ms tick)
 		while (Date.now() - lastMessageAt >= messageEvery) {
 			lastMessageAt += messageEvery
@@ -2122,6 +2184,11 @@ export async function buildMockServer(
 		voice: {
 			sampleRate: () => (voice.running ? VOICE_RATE : null),
 			talking: () => voiceCall().talking,
+		},
+		auto: {
+			onClient: delta => {
+				live.autoClients = Math.max(0, live.autoClients + delta)
+			},
 		},
 	})
 

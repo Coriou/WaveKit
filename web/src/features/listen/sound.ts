@@ -5,7 +5,10 @@ import type {
 	ActivitySummary,
 	DecoderInfo,
 	DigitalVoiceStatus,
+	LiveAudioAutoRouteLevel,
+	LiveAudioAutoSquelch,
 	LiveAudioConfig,
+	LiveAudioLevel,
 	LiveAudioStatus,
 	LiveAudioToneSquelch,
 } from "@wavekit/api-types"
@@ -274,6 +277,76 @@ export function hearHint(
 	if (route)
 		return `This transmission is analog. Playing ${modeLabel} audio, back to ${route.protocol ?? "decoded voice"} when a call comes.`
 	return `No digital voice decoder on this channel. Playing ${modeLabel} audio.`
+}
+
+// ---- Auto listen route (the core's /auto)
+
+/** The core picks the source itself: Auto, on a core that serves `/auto` while live audio runs. */
+export function coreRoutes(
+	choice: HearChoice,
+	status: LiveAudioStatus | null,
+): boolean {
+	return choice === "auto" && status?.running === true && !!status.autoRoute
+}
+
+/** What `/auto` plays now: the level event's selection (live), else the status's (fallback). */
+export function autoRouteNow(
+	status: LiveAudioStatus | null,
+	level: LiveAudioLevel | null,
+): LiveAudioAutoRouteLevel | null {
+	const route = status?.running ? status.autoRoute : undefined
+	if (!route) return null
+	if (level?.autoRoute) return level.autoRoute
+	return route.protocol === undefined
+		? { active: route.active }
+		: { active: route.active, protocol: route.protocol }
+}
+
+/** "DMR" from the route's protocol ("dmr"), else the decoder's, else null. */
+export function routeProtocol(
+	now: LiveAudioAutoRouteLevel | null,
+	route: VoiceRoute | null,
+): string | null {
+	return now?.protocol ? now.protocol.toUpperCase() : (route?.protocol ?? null)
+}
+
+/** The hint under What you hear while the core routes Auto (`/auto`). */
+export function coreRouteHint(input: {
+	now: LiveAudioAutoRouteLevel | null
+	digitalAvailable: boolean
+	route: VoiceRoute | null
+	modeLabel: string
+}): string {
+	const { now, route, modeLabel } = input
+	const what = routeProtocol(now, route)
+	if (now?.active === "digital")
+		return `${what ?? "Digital voice"} call. Playing decoded voice.`
+	if (!input.digitalAvailable)
+		return `This core plays analog audio only on Auto. Playing ${modeLabel} audio.`
+	if (route)
+		return `Playing ${modeLabel} audio, decoded ${what ?? "digital"} voice when a call comes.`
+	return `No digital voice decoder on this channel. Playing ${modeLabel} audio.`
+}
+
+// ---- Evidence squelch (NFM auto squelch waits for voice or a tone)
+
+/** The evidence gate's state: the level event's, else the status's; null on older cores or while stopped. */
+export function autoSquelchNow(
+	status: LiveAudioStatus | null,
+	level: LiveAudioLevel | null,
+): LiveAudioAutoSquelch | null {
+	if (!status?.running) return null
+	return level?.autoSquelch ?? status.autoSquelch ?? null
+}
+
+const EVIDENCE_TEXT: Readonly<
+	Record<NonNullable<LiveAudioAutoSquelch["evidence"]>, string>
+> = { voice: "voice", ctcss: "CTCSS", dcs: "DCS" }
+
+/** "Open on voice", "Open on CTCSS"; null when the gate is off or says nothing. */
+export function evidenceText(gate: LiveAudioAutoSquelch | null): string | null {
+	if (gate?.state !== "open") return null
+	return gate.evidence ? `Open on ${EVIDENCE_TEXT[gate.evidence]}` : "Open"
 }
 
 const HEAR_KEY = "wavekit.web.listen.hear"

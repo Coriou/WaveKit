@@ -7,7 +7,10 @@ import type {
 	LiveAudioConfig,
 	LiveAudioStatus,
 } from "@wavekit/api-types"
-import { voiceSource } from "../../src/features/listen/audio.ts"
+import {
+	autoRouteSource,
+	voiceSource,
+} from "../../src/features/listen/audio.ts"
 import {
 	recordClock,
 	recordFileName,
@@ -16,12 +19,18 @@ import {
 } from "../../src/features/listen/recorder.ts"
 import {
 	agcOf,
+	autoRouteNow,
+	autoSquelchNow,
+	coreRouteHint,
+	coreRoutes,
 	deemphOf,
+	evidenceText,
 	deemphPatch,
 	hearHint,
 	liveTone,
 	offeredTone,
 	playsDigital,
+	routeProtocol,
 	sameTone,
 	toneOfSummary,
 	toneSquelchFits,
@@ -330,5 +339,134 @@ describe("Listen › Record audio", () => {
 			new Date(2026, 9, 17, 17, 5, 9).getTime(),
 		)
 		expect(name).toBe("WaveKit 161.150 MHz 2026-10-17 17-05-09.wav")
+	})
+})
+
+describe("Listen › Auto listen route (/auto)", () => {
+	const route = {
+		active: "analog",
+		since: "2026-10-24T00:00:00Z",
+		httpUrl: "http://localhost:8081/auto",
+		wavUrl: "http://localhost:8081/auto.wav",
+		clientCount: 1,
+		digitalAvailable: true,
+		underruns: 0,
+		droppedMs: 0,
+		clockRebases: 0,
+		latencyMs: 60,
+	} as const
+	const running = (over: Record<string, unknown> = {}): LiveAudioStatus =>
+		({
+			running: true,
+			config: config(),
+			autoRoute: route,
+			...over,
+		}) as unknown as LiveAudioStatus
+
+	it("Auto hands the choice to the core only when it serves /auto while running", () => {
+		expect(coreRoutes("auto", running())).toBe(true)
+		expect(coreRoutes("analog", running())).toBe(false)
+		expect(coreRoutes("digital", running())).toBe(false)
+		expect(coreRoutes("auto", running({ autoRoute: undefined }))).toBe(false)
+		expect(coreRoutes("auto", running({ running: false }))).toBe(false)
+		expect(coreRoutes("auto", null)).toBe(false)
+	})
+
+	it("plays /auto at 48 kHz s16le, a loopback host following the page", () => {
+		expect(autoRouteSource(running(), "http://pi.local:3000/", true)).toEqual({
+			httpUrl: "http://pi.local:8081/auto",
+			wavUrl: "http://pi.local:8081/auto.wav",
+			format: "s16le",
+			rate: 48_000,
+			credentials: true,
+		})
+		expect(autoRouteSource(running({ running: false }), "http://x/")).toBeNull()
+		expect(
+			autoRouteSource(running({ autoRoute: undefined }), "http://x/"),
+		).toBeNull()
+	})
+
+	it("reads the source from the level event, the status as fallback", () => {
+		expect(autoRouteNow(running(), null)).toEqual({ active: "analog" })
+		const level = {
+			autoRoute: { active: "digital", protocol: "dmr" },
+		} as unknown as Parameters<typeof autoRouteNow>[1]
+		expect(autoRouteNow(running(), level)).toEqual({
+			active: "digital",
+			protocol: "dmr",
+		})
+		expect(autoRouteNow(running({ autoRoute: undefined }), level)).toBeNull()
+		expect(routeProtocol({ active: "digital", protocol: "p25" }, null)).toBe(
+			"P25",
+		)
+	})
+
+	it("words the hint from what the core plays", () => {
+		const r = voiceRoute([dsd()], voice(), 161_150_000, 6250)
+		expect(
+			coreRouteHint({
+				now: { active: "digital", protocol: "dmr" },
+				digitalAvailable: true,
+				route: r,
+				modeLabel: "NFM",
+			}),
+		).toBe("DMR call. Playing decoded voice.")
+		expect(
+			coreRouteHint({
+				now: { active: "analog" },
+				digitalAvailable: true,
+				route: { ...r!, protocol: "DMR" },
+				modeLabel: "NFM",
+			}),
+		).toBe("Playing NFM audio, decoded DMR voice when a call comes.")
+		expect(
+			coreRouteHint({
+				now: { active: "none" },
+				digitalAvailable: false,
+				route: r,
+				modeLabel: "NFM",
+			}),
+		).toBe("This core plays analog audio only on Auto. Playing NFM audio.")
+		expect(
+			coreRouteHint({
+				now: { active: "none" },
+				digitalAvailable: true,
+				route: null,
+				modeLabel: "AM",
+			}),
+		).toBe("No digital voice decoder on this channel. Playing AM audio.")
+	})
+})
+
+describe("Listen › Evidence squelch", () => {
+	const st = (autoSquelch?: unknown, isRunning = true) =>
+		({ running: isRunning, autoSquelch }) as unknown as LiveAudioStatus
+
+	it("prefers the level event, falls back to the status, null when stopped or absent", () => {
+		const level = {
+			autoSquelch: { state: "open", evidence: "voice" },
+		} as unknown as Parameters<typeof autoSquelchNow>[1]
+		expect(autoSquelchNow(st({ state: "waiting" }), level)).toEqual({
+			state: "open",
+			evidence: "voice",
+		})
+		expect(autoSquelchNow(st({ state: "waiting" }), null)).toEqual({
+			state: "waiting",
+		})
+		expect(autoSquelchNow(st(undefined), null)).toBeNull()
+		expect(autoSquelchNow(st({ state: "open" }, false), null)).toBeNull()
+	})
+
+	it("names the evidence that opened the gate", () => {
+		expect(evidenceText({ state: "open", evidence: "voice" })).toBe(
+			"Open on voice",
+		)
+		expect(evidenceText({ state: "open", evidence: "ctcss" })).toBe(
+			"Open on CTCSS",
+		)
+		expect(evidenceText({ state: "open", evidence: "dcs" })).toBe("Open on DCS")
+		expect(evidenceText({ state: "open" })).toBe("Open")
+		expect(evidenceText({ state: "waiting" })).toBeNull()
+		expect(evidenceText(null)).toBeNull()
 	})
 })
