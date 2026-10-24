@@ -537,3 +537,74 @@ thresholds, the lane reports the measured statistics and Main decides between a 
 threshold and leaving AM on stage 1 only; the decision is recorded here as an amendment.
 
 **Resolved (2026-10-23, A8): AM stays on stage 1 only.** See the amendment after 1.2.
+
+## Amendment A19 (2026-10-24): AM closed-squelch hum, and the AM voice test study
+
+**Finding.** A closed AM stage 1 is not silent: the client hears a steady low hum at about
+-29 dBFS RMS (measured -29.3 dBFS, fundamental 81 Hz with harmonics at 162 and 243 Hz, peak
+0.090 full scale). The cause is the csdr fast AGC, not the squelch decision: the closed gate
+holds a constant -80 dBFS vector (`MUTED_MAGNITUDE` in `ChannelSquelch`), `csdr amdemod` turns it into a
+constant envelope, and the fast AGC limit-cycles on any constant envelope (gain rises 0.1 % per
+sample until the output passes the reference, falls 10 %, holds 200 samples, rises again). The
+DC block passes the sawtooth. The level does not depend on the envelope's level: a constant
+1e-4, a held -30 dBFS carrier and the closed gate all measure -29.3 dBFS. Design A19 has the
+arithmetic and the study.
+
+A19.1 **Closed AM is silent, at any rate and gain.** On `am`, `dsb` and `cw` (the
+envelope-demodulator chains) on the csdr engine, in every squelch mode: (a) while stage 1 is
+closed, the channel IQ handed to the back chain is exact zeros (not the -80 dBFS hold vector);
+(b) every PCM sample the back chain makes from a closed channel sample reaches clients and `pcm`
+listeners as exact zero bytes (s16le and f32le alike). The back chain emits one PCM sample per
+channel sample, so PCM sample `p` is channel sample `p` (with `lowPass`, channel sample `p + 39`, the
+FIR lead of design A19); the mute is counted in samples, not
+time, and holds at every channel rate (bandwidth) and every `gain` from 0.1 to 100.
+Revision (2026-10-24): the first A19.1 text relied on the DC block's decay ("below -70 dBFS
+from 200 ms") and held only near 25 kHz and gain 2: at 8 kHz the decay gave about -35 dBFS in
+the 200-300 ms window (spec review), and the behavioural model of design A19 measures -57.9 dBFS
+there at gain 2 and -23.9 dBFS at gain 100. (b) replaces that dependence.
+
+A19.2 **FM, SSB, raw and Rust unchanged.** On `nfm`, `wfm`, `usb`, `lsb` and `raw` the closed
+gate keeps the phase-continuous -80 dBFS hold vector and no PCM is muted; their channel IQ and
+audio are byte-identical to the frozen code. Rust-engine runs (any modulation) are unchanged, and
+the default engine stays csdr.
+
+A19.3 **Closing and reopening.** (1) The closing transient: today the 100 ms after an AM close
+carry the DC block's step and the hum (behavioural model, 25 kHz, gain 2: -17.0 dBFS RMS); under
+A19.1(b) those samples are muted, so the transient is gone. With the IQ zeros alone the step's
+first 20 ms measured -10.3 dBFS peak against -11.5 dBFS today in the csdr study (design A19); that
+1.2 dB rise is accepted only because A19.1(b) mutes it, and any IQ-only variant must stay within
++1.5 dB of today's peak (the study's 1.2 dB plus 0.3 dB for float32 rounding across seeds). (2)
+Reopening: exact zeros freeze the AGC, so a reopen starts at the gain the AGC held at the close,
+whatever the closure's length (today the hold vector winds it up towards `0.4 / 1e-4`, about
+4 000). This change of reopen gain is allowed. A stronger carrier may clip at the `limit` stage for
+a few samples until the AGC attack catches it (a 20 dB step: about 22 samples at 10 % per sample);
+a weaker one starts quiet and rises with the AGC decay. Reopen audio is not muted.
+
+A19.4 **Everything else as before.** Stage-1 decisions, channel power, transmission events,
+Activity, the `pcm` event's timing and byte counts, and the stream byte rate are unchanged; only
+closed AM samples change (to zeros), on both the IQ and the PCM side.
+
+**Known limitation (A19).** The same AGC limit cycle plays while stage 1 is open on an
+unmodulated AM carrier and in the pauses of an over (measured -28.6 dBFS on a held -30 dBFS
+carrier). A19.1 removes it only while closed; the open case needs a change to the AGC (its hang
+and attack, or a non-csdr AGC); it is proposed for the ROADMAP evidence-squelch follow-ups.
+
+A19.5 **AM stays out of the evidence gate.** `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` stays
+`["nfm"]`; AM `auto` keeps the stage-1 auto squelch (A8 stands). The pre-AGC envelope voice test
+of design A19 was prototyped on synthetic signals and does not separate weak AM voice from
+flutter with one threshold (design A19, study): at the threshold that never opens on a carrier,
+noise, fades, 10 Hz flutter or a heterodyne whistle, voice at 10-15 dB carrier-to-noise opens
+only 8 to 13 times in 20, and a lower threshold opens on flutter 20 times in 20. Gating AM on that
+evidence would mute weak overs that stage 1 plays today.
+
+A19.6 **Enabling later (not in this batch).** AM evidence gating may be enabled only by a further
+amendment that shows, on recorded AM channel IQ (airband or similar, through the default csdr
+chain): every voice over that stage 1 plays opens within `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`
+and plays from its first syllable through the pre-roll; an unmodulated carrier, noise, fades and
+a heterodyne whistle never open. The test then reads the pre-AGC channel envelope (design A19),
+never the post-AGC audio.
+
+A19.7 **Tests.** The design A19 test list is required for A19.1-A19.4. Tests assert on WaveKit's
+side (exact-zero IQ, muted PCM bytes, the option wired for am, dsb and cw only, Rust unchanged)
+and, where a back chain is needed, use a behavioural envelope-chain model written for the tests,
+not a port of csdr (performance rule 8). The study script is not kept in the repository.

@@ -307,3 +307,29 @@ export function backChainDrainSamples(backCommand: string): number {
 	}
 	return lag
 }
+
+/**
+ * Taps of a `csdr lowpass` at its default transition, verified against the pinned csdr source
+ * (`CSDR_REF` 1f15b8c5): `LowpassCommand::transitionBandwidth` is `float` 0.05f
+ * (`src/apps/csdr/commands.hpp`), and `FirFilter::filterLength(float transition)`
+ * (`src/lib/fir.cpp`) computes `size_t result = 4.0 / transition`, a double division by the
+ * float widened to double: 4.0 / 0.0500000007450580596923828125 = 79.9999988..., truncated to
+ * 79, which is already odd, so it stays 79 (not 81: the float 0.05f is slightly above 0.05).
+ */
+export const CSDR_LOWPASS_DEFAULT_TAPS = 79
+
+/**
+ * Evidence squelch A19 revision (2026-10-24): channel samples by which the back chain's PCM
+ * content leads its PCM sample count. A `csdr lowpass` keeps its tap window back before
+ * emitting, so its output sample `k` is centred on input `k + (taps - 1) / 2` (39 at the
+ * default 79 taps). Every other stage of the envelope chains (`amdemod`, `agc`, `dcblock`,
+ * `gain`, `limit`, `convert`) emits one sample per input with no lead; `sox` (IIR) keeps the
+ * count and its phase delay is not compensated.
+ */
+export function backChainPcmLeadSamples(backCommand: string): number {
+	let lead = 0
+	for (const raw of backCommand.split("|"))
+		if (raw.includes("csdr lowpass"))
+			lead += (CSDR_LOWPASS_DEFAULT_TAPS - 1) / 2
+	return lead
+}

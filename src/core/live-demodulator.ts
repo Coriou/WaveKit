@@ -76,6 +76,7 @@ import {
 	liveDemodRates,
 	effectiveAgc,
 	backChainDrainSamples,
+	backChainPcmLeadSamples,
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
@@ -299,6 +300,8 @@ type FrontSwapOutcome =
 	| "aborted"
 
 export interface PipelineRun {
+	/** Evidence squelch A19: PCM bytes received this run (csdr runs with `muteZeros`). */
+	pcmBytes?: number
 	front: ChildProcess
 	back: ChildProcess
 	/**
@@ -1594,6 +1597,13 @@ export class LiveDemodulator extends EventEmitter {
 			...(LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation)
 				? { carrierEvidence: true }
 				: {}),
+			// Evidence squelch A19: closed envelope-demodulator runs are silent at any rate.
+			...(ENVELOPE_MUTE_MODULATIONS.has(this.config.modulation)
+				? {
+						muteZeros: true,
+						pcmLeadSamples: backChainPcmLeadSamples(plan.back),
+					}
+				: {}),
 		})
 		const run: PipelineRun = {
 			front: this.spawnStage(plan.front),
@@ -2096,6 +2106,16 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		const run = this.run
+		// Evidence squelch A19: PCM from closed channel samples is exact zeros (csdr AM family).
+		if (run !== null && run.squelch.mutesClosedPcm) {
+			const at = run.pcmBytes ?? 0
+			run.squelch.muteClosedPcm(
+				chunk,
+				at,
+				run.stream.format === "s16le" ? 2 : 4,
+			)
+			run.pcmBytes = at + chunk.length
+		}
 		// WG10 req 3.8.1: output-sample position of the run's PCM for the tracker.
 		if (run !== null)
 			this.carrierLog.notePcm(run, run.stream.rate, chunk.length)
@@ -2432,6 +2452,13 @@ const DEFAULT_EVIDENCE_SQUELCH: EvidenceSquelchFactory = {
 	createGate: options => new EvidenceGate(options),
 	createPreRoll: options => new PreRoll(options),
 }
+
+/**
+ * Evidence squelch A19: modulations whose csdr back chain starts with `csdr amdemod`. A closed
+ * gate feeds them exact zeros and their closed PCM is zeroed (no AGC limit-cycle hum).
+ */
+const ENVELOPE_MUTE_MODULATIONS: ReadonlySet<LiveDemodConfig["modulation"]> =
+	new Set(["am", "dsb", "cw"])
 
 /** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */
 const TONE_SLICE_MS = 10
