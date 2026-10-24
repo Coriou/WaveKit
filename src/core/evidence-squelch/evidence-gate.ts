@@ -162,12 +162,12 @@ export const EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS = 5
 export const EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS = 5
 
 /**
- * Tone continuity (amendment A14 revised, 2026-10-24): on a tone latch the hang may run this much
- * longer while stage 1 is open, so the tone stage gets one more decision (a CTCSS block every
- * 250 ms of audio, a DCS word every 171 ms) before the latch ends. Only a sighting of the latched
- * tone or code uses it; noise and other codes cannot.
+ * Tone continuity (amendment A14, review round 2, 2026-10-24): on a tone latch the hang runs this
+ * much longer while stage 1 is open: one CTCSS block, the time the reset tone stage needs to
+ * sight a returning tone after a re-open (its first 500 ms block; a DCS word pair takes 342 ms).
+ * Only a sighting of the latched tone or code restarts the hang; noise and other codes cannot.
  */
-export const EVIDENCE_TONE_HANG_GRACE_MS = 250
+export const EVIDENCE_TONE_HANG_GRACE_MS = 500
 
 /** Tone identity for renewal: CTCSS table index, or 1 000 + packed DCS reading. */
 function toneKey(tone: Readonly<ToneReading>): number {
@@ -186,7 +186,7 @@ export class EvidenceGate implements EvidenceGatePort {
 	private readonly hangSamples: number
 	/** `msToSamples(TONE_MIN_MS, rate)`: 18 750 at 25 kHz. */
 	private readonly toneMinSamples: number
-	/** `msToSamples(TONE_HANG_GRACE_MS, rate)`: 6 250 at 25 kHz. */
+	/** `msToSamples(TONE_HANG_GRACE_MS, rate)`: 12 500 at 25 kHz. */
 	private readonly toneGraceSamples: number
 	/** `ToneEvidence.sightingCount` when last checked. */
 	private toneSightings = 0
@@ -364,13 +364,14 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.internal = "waiting"
 			this.audioSamples = 0
 		} else if (this.internal === "open" && this.closing) {
-			// Reopen within the hang: latch kept. The carrier hang keeps counting (A14): a re-open
-			// without carrier evidence lets the latch expire. A tone latch keeps its tone stage
-			// (A14 revised), so the same tone after a fade is sighted at the next block instead of
-			// re-qualifying from scratch; a voice latch resets it (a new over's tone qualifies clean).
+			// Reopen within the hang: latch kept, tone stage reset. The carrier hang keeps counting
+			// (A14): a re-open without carrier evidence lets the latch expire. The reset is what
+			// dates sightings (A14, review round 2): no CTCSS block or DCS word ever spans a
+			// stage-1 close, so a sighting's evidence is at most one block (500 ms) of open audio
+			// old when it completes.
 			this.closing = false
 			this.audioSamples = 0
-			if (this.latchedToneKey < 0) this.tone?.reset()
+			this.tone?.reset()
 			this.decimator.arm(this.rate)
 			this.nonFiniteGroup = false
 		}

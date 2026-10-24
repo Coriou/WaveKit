@@ -35,6 +35,7 @@ import {
 	EvidenceGate,
 	judgeEvidence,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
+import { ToneEvidence } from "../../../../src/core/evidence-squelch/tone-evidence.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
 import type { AnalogTrialFrame } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import { mulberry32 } from "../audio-tones/synth.js"
@@ -424,7 +425,11 @@ describe("A14: the latch survives only the same transmission", () => {
 		const expired = t.states.indexOf("waiting", overEnd)
 		// Without a close the tone stage keeps its last 500 ms CTCSS block current: up to 50
 		// more blocks of refresh after the tone ended (design, A14).
-		expect(expired - overEnd).toBeLessThanOrEqual(HANG / 250 + 50)
+		// Without a close a block straddling the tone's end can still sight it: bound hang +
+		// grace + one 500 ms block (50 blocks of 10 ms) after the tone (design, A14).
+		expect(expired - overEnd).toBeLessThanOrEqual(
+			(HANG + TONE_GRACE) / 250 + 50,
+		)
 		expect(t.states.slice(expired).every(s => s === "waiting")).toBe(true)
 	})
 
@@ -490,6 +495,26 @@ describe("A14: the latch survives only the same transmission", () => {
 		expect(t.evidence.every(e => e === "ctcss")).toBe(true)
 	})
 
+	it("DCS: 2 s of 023N unquieted, 1.2 s close, the same code back unquieted: stays open/dcs", () => {
+		const dcs = (seconds: number, seed: number): Buffer =>
+			toPcm(
+				mix(
+					dcsMix({ rate: RATE, seconds, code: 0o23, polarity: "normal" }),
+					voiceLike({ rate: RATE, seconds, seed, level: 0.4 }),
+				),
+				"s16le",
+			)
+		const g = gate()
+		drive(g, [{ pcm: dcs(2, 1), open: true, quieted: false }])
+		expect([g.state, g.evidence]).toEqual(["open", "dcs"])
+		const t = drive(g, [
+			closedFor(1_200),
+			{ pcm: dcs(3, 2), open: true, quieted: false },
+		])
+		expect(t.states.every(s => s === "open")).toBe(true)
+		expect(t.evidence.at(-1)).toBe("dcs")
+	})
+
 	it("review repro: repeated 10 ms closes between 600 ms unquieted tone stretches keep the latch", () => {
 		// Latched first (a close before a latch discards the evidence, requirement 1.5).
 		const segments: Segment[] = [
@@ -546,7 +571,7 @@ describe("A14: the latch survives only the same transmission", () => {
 		const expired = t.states.indexOf("waiting", overEnd)
 		expect(expired).toBeGreaterThan(overEnd)
 		expect(expired - overEnd).toBeLessThanOrEqual(
-			(HANG + TONE_GRACE) / 250 + 25,
+			(HANG + TONE_GRACE) / 250 + 50,
 		)
 		expect(t.states.slice(expired).every(s => s === "waiting")).toBe(true)
 	})
@@ -555,21 +580,97 @@ describe("A14: the latch survives only the same transmission", () => {
 		const g = gate()
 		drive(g, [{ pcm: ctcssOver(2), open: true, quieted: false }])
 		const t = drive(g, [
-			closedFor(1_000),
+			closedFor(1_300),
 			{ pcm: ctcssOver(3, 100, 6), open: true, quieted: false },
 		])
 		const ended = t.states.indexOf("waiting")
-		// 100 blocks closed, then at most hang + grace - 1 s of the other tone.
-		expect(ended).toBeGreaterThanOrEqual(100)
-		expect(ended).toBeLessThanOrEqual(100 + 75)
+		// 130 blocks closed, then the hang + grace (2.0 s from the last 79.7 Hz sighting, at most
+		// 250 ms before the close) runs out before 100 Hz can qualify (750 ms after the re-open):
+		// its own sightings have another key and never refresh the latch.
+		expect(ended).toBeGreaterThanOrEqual(130)
+		expect(ended).toBeLessThanOrEqual(130 + 70)
 		expect(t.states.at(-1)).toBe("open")
 		expect(t.evidence.at(-1)).toBe("ctcss")
 	})
 
+	// Review round 2: a retained tone-stage block must not date old tone as fresh evidence.
+	it("review repro: 2.1 s tone, 1.2 s closed, low noise after: the latch ends within hang + grace of the tone's end", () => {
+		const rows: string[] = []
+		for (const toneMs of [
+			2_100, 2_137, 2_174, 2_211, 2_248, 2_285, 2_322, 2_359,
+		])
+			for (const noise of [100, 300, 1_000, 3_000]) {
+				const tone = Buffer.alloc(Math.round((RATE * toneMs) / 1_000) * 2)
+				for (let i = 0; i < tone.length / 2; i++)
+					tone.writeInt16LE(
+						Math.round(6_000 * Math.sin((2 * Math.PI * 79.7 * i) / RATE)),
+						i * 2,
+					)
+				const rand = mulberry32(toneMs + noise)
+				const after = Buffer.alloc(4 * RATE * 2)
+				for (let i = 0; i < after.length / 2; i++)
+					after.writeInt16LE(Math.round((rand() * 2 - 1) * noise), i * 2)
+				const g = gate()
+				drive(g, [{ pcm: tone, open: true, quieted: false }])
+				expect(g.state).toBe("open")
+				const t = drive(g, [
+					closedFor(1_200),
+					{ pcm: after, open: true, quieted: false },
+				])
+				const ended = t.states.indexOf("waiting")
+				rows.push(`${toneMs}/${noise}:${ended}`)
+				// The tone ends at the close: at most hang + grace (200 blocks of 10 ms) later.
+				expect(ended).toBeGreaterThan(0)
+				expect(ended).toBeLessThanOrEqual((HANG + TONE_GRACE) / 250)
+				expect(t.states.slice(ended).every(s => s === "waiting")).toBe(true)
+			}
+		console.info(`EVIDENCE-SQUELCH A14 dated sightings: ${rows.join(" ")}`)
+	})
+
+	// Review round 2 (minor): a DCS sighting is a word pair; a CTCSS sighting one won block.
+	it("sightings in seeded noise and voice: none in 10 min of white noise at 0.5 and 5 min of voice (single DCS words: about 68 and 7 per hour)", () => {
+		let count = 0
+		const feed = (samples: Float32Array): void => {
+			const evidence = new ToneEvidence()
+			let last = evidence.sightingCount
+			for (const x of samples) {
+				evidence.push(x)
+				if (evidence.sightingCount !== last) {
+					last = evidence.sightingCount
+					count += 1
+				}
+			}
+		}
+		for (let minute = 0; minute < 10; minute++)
+			feed(
+				whiteNoise({
+					rate: 8_000,
+					seconds: 60,
+					seed: 900 + minute,
+					level: 0.5,
+				}),
+			)
+		for (let minute = 0; minute < 5; minute++)
+			feed(
+				voiceLike({ rate: 8_000, seconds: 60, seed: 950 + minute, level: 0.8 }),
+			)
+		expect(count).toBe(0)
+	}, 120_000)
+
 	// Feature: evidence-squelch, Property 16: Latch needs carrier evidence to survive
 	// Validates: Requirements 1.5
-	it("Property 16: after the over's last quieted block, any pattern of unquieted re-opens and closes ends the latch exactly at the hang", () => {
-		const over = ctcssOver(2)
+	it("Property 16: after a tone over and a stage-1 close, any pattern of re-opens on noise of any level ends the latch within its hang", () => {
+		// A bare 79.7 Hz tone (the review repro) and tone + voice.
+		const sine = (amplitude: number, ms: number): Buffer => {
+			const out = Buffer.alloc(Math.round((RATE * ms) / 1_000) * 2)
+			for (let i = 0; i < out.length / 2; i++)
+				out.writeInt16LE(
+					Math.round(amplitude * Math.sin((2 * Math.PI * 79.7 * i) / RATE)),
+					i * 2,
+				)
+			return out
+		}
+		const voiced = ctcssOver(2)
 		fc.assert(
 			fc.property(
 				fc.array(
@@ -580,33 +681,74 @@ describe("A14: the latch survives only the same transmission", () => {
 					{ minLength: 1, maxLength: 20 },
 				),
 				fc.integer({ min: 1, max: 1_000 }),
-				(pattern, seed) => {
+				fc.boolean(),
+				fc.constantFrom(20_000, 3_000, 1_000, 300, 100),
+				fc.constantFrom(6_000, 2_000, 0),
+				fc.integer({ min: 1_500, max: 2_600 }),
+				(pattern, seed, quieted, level, amplitude, toneMs) => {
 					const g = gate()
 					// The over ends with stage 1 closing for one block (its carrier is gone).
 					drive(g, [
-						{ pcm: over, open: true, quieted: true },
+						{
+							// 0: tone + voice; otherwise a bare tone of random length (block phase).
+							pcm: amplitude === 0 ? voiced : sine(amplitude, toneMs),
+							open: true,
+							quieted,
+						},
 						{ pcm: Buffer.alloc(BLOCK_BYTES), open: false, quieted: false },
 					])
 					expect(g.state).toBe("open")
 					const rand = mulberry32(seed)
+					// Samples since the over's last carrier evidence: exact for a quieted over; an
+					// unquieted over's last sighting is at most one CTCSS hop (250 ms) before the close.
 					let since = BLOCK_BYTES / 2
+					const stale = quieted ? 0 : RATE / 4
+					let expired = false
 					for (const step of pattern)
 						for (let b = 0; b < step.blocks; b++) {
 							const block = Buffer.alloc(BLOCK_BYTES)
 							for (let i = 0; i < BLOCK_BYTES; i += 2)
-								block.writeInt16LE(Math.round((rand() * 2 - 1) * 20_000), i)
-							const before = g.state
+								block.writeInt16LE(Math.round((rand() * 2 - 1) * level), i)
 							drive(g, [{ pcm: block, open: step.open, quieted: false }])
-							if (before === "open") since += BLOCK_BYTES / 2
-							// A tone latch gets the tone grace while stage 1 is open (A14 revised).
+							since += BLOCK_BYTES / 2
+							// A tone latch gets the tone grace while stage 1 is open (A14).
 							const limit = step.open ? HANG + TONE_GRACE : HANG
-							if (before === "open")
-								expect(g.state).toBe(since < limit ? "open" : "waiting")
-							else expect(g.state).toBe("waiting")
+							if (expired || since >= limit) {
+								expect(g.state).toBe("waiting")
+								expired = true
+							} else if (since + stale < limit) expect(g.state).toBe("open")
+							else if (g.state === "waiting") expired = true
 						}
 				},
 			),
-			{ numRuns: 100 },
+			{
+				numRuns: 100,
+				// The review repro shape: a 1.2 s close, then low-level noise.
+				examples: [
+					[
+						[
+							{ open: false, blocks: 119 },
+							{ open: true, blocks: 150 },
+						],
+						7,
+						false,
+						1_000,
+						6_000,
+						2_100,
+					],
+					[
+						[
+							{ open: false, blocks: 60 },
+							{ open: true, blocks: 150 },
+						],
+						8,
+						false,
+						100,
+						2_000,
+						2_248,
+					],
+				],
+			},
 		)
 	}, 120_000)
 })

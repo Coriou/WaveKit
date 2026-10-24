@@ -204,6 +204,23 @@ key): it ends the latch at the hang unless it qualifies first, which renews the 
 Bare interference refreshes nothing (a CTCSS block must give the latched tone 0.65 of the band and
 3× the next tone; a DCS hit must match a 23-bit word of the latched code).
 
+**Amendment (2026-10-24, A14 review round 2): dated sightings.** Supersedes (1) and the 250 ms of
+(3) above. Review found that the retained tone stage finished a block holding pre-close tone after
+the re-open and counted it as fresh: 2 100 ms of 79.7 Hz, 1 200 ms closed, then noise at amplitude
+1 000 ended the latch 3 100 ms after the tone, past the stated bound. Rule now: (1) every re-open
+resets the tone stage, so no CTCSS block or DCS word ever spans a stage-1 close and a sighting is
+dated by its own block: its tone content is at most one block (500 ms of open audio) old when it
+completes; (2) a DCS sighting is a word pair (two matching words 23 bits apart, within 342 ms), not
+one word (single words occurred in white noise at amplitude 0.5 about 68 times per hour, 2 of them
+023N, and in synthetic voice about 7 times per hour; with pairs, none in 10 min of noise and 5 min
+of voice); (3) the open-side grace is 500 ms, one CTCSS block, the time the reset stage needs for
+its first block after a re-open. Fade continuity: a same-tone fade survives while (time since the
+last sighting at the close, at most 250 ms) + closed time + 500 ms stays under 2.0 s, so fades up
+to 1.25 s hold. Bound: a tone latch ends at most `HANG_MS` + 500 ms after its last sighting, so at
+most 2.5 s after the tone's last sample while stage 1 stays open, and at most 2.0 s after a close
+that ended the tone (measured on the review repro across eight block phases and noise at 100 to
+3 000: 1.75 to 1.96 s).
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.
