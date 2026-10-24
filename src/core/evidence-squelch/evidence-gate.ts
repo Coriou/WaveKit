@@ -266,6 +266,14 @@ export const EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS = 5
  */
 export const EVIDENCE_TONE_HANG_GRACE_MS = 500
 
+/**
+ * Tail mute (amendment A16, 2026-10-24): while latched, audio passes only with current carrier
+ * evidence. A latched tone or code counts as current for this long after its last sighting: one
+ * CTCSS hop (a continuing tone is sighted every 250 ms of audio; DCS word pairs every 171 ms)
+ * plus 50 ms of margin. A stage-1 close ends it (the tone must be sighted again).
+ */
+export const EVIDENCE_TONE_PASS_MS = 300
+
 /** Tone identity for renewal: CTCSS table index, or 1 000 + packed DCS reading. */
 function toneKey(tone: Readonly<ToneReading>): number {
 	return tone.kind === "ctcss" ? tone.index : 1_000 + tone.packed
@@ -341,6 +349,15 @@ export class EvidenceGate implements EvidenceGatePort {
 	private sinceCarrier = 0
 	/** The last noted block was quieted and stage 1 has not closed since (A14). */
 	private carrierNow = false
+	/**
+	 * A16: PCM samples that still pass after the last quieted block (the back-chain drain, as
+	 * the close guard: `guardSamples`). Cleared by `closed()`, whose own guard takes over.
+	 */
+	private tailGuardLeft = 0
+	/** A16: PCM samples since the latched tone or code was last sighted (or latched). */
+	private sinceSighting = Number.MAX_SAFE_INTEGER
+	/** `msToSamples(TONE_PASS_MS, rate)`. */
+	private readonly tonePassSamples: number
 	private guardBytesLeft = 0
 	/** Byte offset of the first latch in the current `push`, or -1. */
 	private latchAt = -1
@@ -374,6 +391,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.hangSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS, rate)
 		this.toneMinSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS, rate)
 		this.toneGraceSamples = msToSamples(EVIDENCE_TONE_HANG_GRACE_MS, rate)
+		this.tonePassSamples = msToSamples(EVIDENCE_TONE_PASS_MS, rate)
 		for (let i = 0; i < LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES; i++)
 			this.frames.push({
 				carrierDb: 0,
@@ -394,6 +412,21 @@ export class EvidenceGate implements EvidenceGatePort {
 
 	get state(): "waiting" | "open" {
 		return this.internal === "open" ? "open" : "waiting"
+	}
+
+	/**
+	 * A16 tail mute: while latched, whether the PCM just pushed may play. True while the last
+	 * noted block was quieted, for `CLOSE_GUARD_MS` of PCM after it (back-chain drain), and for
+	 * `EVIDENCE_TONE_PASS_MS` of PCM after a sighting of the latched tone or code (not across a
+	 * stage-1 close). False while waiting.
+	 */
+	get passing(): boolean {
+		return (
+			this.internal === "open" &&
+			(this.carrierNow ||
+				this.tailGuardLeft > 0 ||
+				(this.latchedToneKey >= 0 && this.sinceSighting < this.tonePassSamples))
+		)
 	}
 
 	get evidence(): LiveAudioAutoSquelchEvidence | null {
@@ -440,6 +473,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.prevUnquieted = value === 0
 		// A14: only carrier evidence keeps a latch alive; a bare stage-1 re-open does not.
 		this.carrierNow = value === 1
+		if (value === 1) this.tailGuardLeft = this.guardSamples
 		if (this.internal !== "waiting") return flags
 		const ring = this.quiet
 		if (this.quietLen === ring.length)
@@ -540,6 +574,8 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.hold.fill(0)
 		this.holdLen = total % width
 		this.carrierNow = false
+		this.tailGuardLeft = 0
+		this.sinceSighting = Number.MAX_SAFE_INTEGER
 		if (this.internal !== "open") return 0
 		if (!this.closing) {
 			this.closing = true
@@ -682,12 +718,17 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.closing = false
 		this.sinceCarrier = 0
 		this.carrierNow = false
+		this.tailGuardLeft = 0
+		this.sinceSighting = Number.MAX_SAFE_INTEGER
 		this.guardBytesLeft = 0
 	}
 
 	/** One input sample; `after` is the byte offset just past it. */
 	private takeSample(sample: number, after: number): void {
 		if (this.internal === "open") {
+			// A16: the tail guard and the sighting age advance with the PCM.
+			if (!this.carrierNow && this.tailGuardLeft > 0) this.tailGuardLeft -= 1
+			if (this.sinceSighting < Number.MAX_SAFE_INTEGER) this.sinceSighting += 1
 			if (this.carrierNow) this.sinceCarrier = 0
 			else if (
 				++this.sinceCarrier >=
@@ -716,8 +757,10 @@ export class EvidenceGate implements EvidenceGatePort {
 				if (
 					this.internal === "open" &&
 					tone.sightingKey === this.latchedToneKey
-				)
+				) {
 					this.sinceCarrier = 0
+					this.sinceSighting = 0
+				}
 			}
 			const reading = tone.current()
 			if (reading !== null && this.audioSamples >= this.toneMinSamples)
@@ -762,6 +805,7 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.latchedEvidence = kind
 			this.latchedToneKey = key
 			this.sinceCarrier = 0
+			this.sinceSighting = 0
 			return
 		}
 		this.latch(kind, key, after)
@@ -776,6 +820,9 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.latchedEvidence = evidence
 		this.latchedToneKey = key
 		this.sinceCarrier = 0
+		// A16: the latch is evidence at this sample (a voice latch needed quieted blocks).
+		this.sinceSighting = 0
+		this.tailGuardLeft = this.guardSamples
 		if (this.latchAt < 0) this.latchAt = after
 	}
 

@@ -275,6 +275,33 @@ median cluster is diluted by its silent frames, and audio-frequency FSK tones ar
 the discriminator). A one-syllable-per-2 s pattern stays closed (one run). This supersedes the known limitation
 pinned in the run4 amendment (250 ms syllables once a second now latch).
 
+**Note (2026-10-24, A15 review, accepted limitation).** Periodic 150 ms audio bursts on a fully
+quieted carrier latch through the run path: on a 12.5 kHz channel (gain 2, every block quieted,
+a 0.12-amplitude 75.5 Hz floor), 150 ms of 100 Hz click trains (1 ms exponential pulses peaking at
+0.8), of seeded ±0.3 white noise, or of a 0.3-amplitude 1 kHz beep once a second all latch at
+1.15 s via runs (pinned in `tests/unit/core/evidence-squelch/evidence-gate-live.test.ts`). A
+quieted carrier carrying periodic audio is a real transmission, not the weak interference this
+feature targets. The run history is bounded: runs more than 2 s apart never add up (pinned with
+one syllable every 2.1 s for 10 s).
+
+**Amendment (2026-10-24, A16): tail mute.** Live retest on A13-A15: voice and tones open and
+interference and a bare key-up stay quiet, but after each unkey the client heard FM noise until
+the latch ended (1.5 s of hang, plus the 500 ms tone grace). Latch memory and audio pass are now
+separate. While latched, audio passes only while it carries current carrier evidence: the last
+noted block was quieted, for the 200 ms close guard of PCM after it (the back-chain drain, the
+same `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS` that already protects the end of the last syllable
+when stage 1 closes), or, on a tone latch, for 300 ms of PCM after a sighting of the latched tone
+or code (`EVIDENCE_TONE_PASS_MS`: one 250 ms CTCSS hop plus 50 ms; DCS pairs come every 171 ms;
+a stage-1 close ends it). Other latched audio is dropped, not delayed: it is tagged `drop` on its
+input samples, so the mute lands on the right samples whatever the pre-roll delay, and the
+pre-roll's catch-up removes it. The latch memory (A14) is unchanged, so a re-open with evidence
+within the hang resumes without re-qualifying. Arithmetic, with a back-chain lag `L` under the
+guard: an unkey passes the over's last `L` and then `200 ms - L` of noise, so the tail is at most
+the guard (tested end to end: at most 200 ms + one 10 ms block, the harness noting each block after
+its PCM); a speech pause on a quieted carrier keeps passing; an unquieted fade of `F` ms inside an
+over loses about `F - 200 ms` of audio when `F > 200 ms` (fades up to 200 ms pass whole; on a tone
+latch, audio up to 300 ms after the last sighting passes too).
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

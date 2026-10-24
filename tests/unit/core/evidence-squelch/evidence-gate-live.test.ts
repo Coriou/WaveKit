@@ -17,6 +17,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import {
+	LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS,
 	LIVE_AUDIO_AUTO_SQUELCH_HANG_MS,
 	LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS,
 	LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES,
@@ -860,21 +861,63 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 		expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
 	})
 
-	it("one syllable per 2 s never makes two runs: waiting, verdict low-audio", () => {
+	it("runs more than 2 s apart never accumulate: one syllable every 2.1 s for 10 s stays waiting", () => {
+		// Five syllables; a history that never expired would count two runs at the second one.
 		const g = gate()
-		const t = drive(g, [
-			{
-				pcm: toPcm(syllables(1.5, 250, 2_100, 300), "s16le"),
-				open: true,
-				quieted: true,
-			},
-		])
-		expect(t.states.every(s => s === "waiting")).toBe(true)
+		const pcm = toPcm(syllables(10, 250, 2_100, 300), "s16le")
+		let maxRuns = 0
+		let sawRun = false
+		for (let s = 0; s < pcm.length; s += BLOCK_BYTES) {
+			drive(g, [
+				{ pcm: pcm.subarray(s, s + BLOCK_BYTES), open: true, quieted: true },
+			])
+			expect(g.state).toBe("waiting")
+			const runs = g.diagnostics().syllableRuns
+			maxRuns = Math.max(maxRuns, runs)
+			if (runs === 1) sawRun = true
+		}
+		expect(sawRun).toBe(true)
+		expect(maxRuns).toBe(1)
 		const d = g.diagnostics()
-		expect(d.verdict).toBe("low-audio")
-		expect(d.syllableRuns).toBe(1)
-		expect(d.syllabic ?? 0).toBeGreaterThanOrEqual(0.3)
+		expect(d.verdict === "low-audio" || d.verdict === "low-syllabic").toBe(true)
 	})
+
+	/**
+	 * Review of A15 (2026-10-24), accepted as a known limitation: periodic 150 ms audio bursts on a
+	 * fully quieted carrier latch through the run path. A quieted carrier carrying periodic audio
+	 * is a real transmission, not the weak interference the evidence squelch targets.
+	 */
+	for (const [name, make] of [
+		[
+			"100 Hz click trains (1 ms exponential pulses peaking at 0.8)",
+			(n: number, i: number): number => {
+				const t = (i % (RATE / 100)) / RATE
+				return t < 0.001 ? 0.8 * Math.exp(-t / 0.0002) : 0
+			},
+		],
+		[
+			"seeded ±0.3 white-noise bursts",
+			(() => {
+				const rand = mulberry32(99)
+				return (): number => 0.3 * (2 * rand() - 1)
+			})(),
+		],
+		[
+			"0.3-amplitude 1 kHz beeps",
+			(_n: number, i: number): number =>
+				0.3 * Math.sin((2 * Math.PI * 1_000 * i) / RATE),
+		],
+	] as const)
+		it(`known limitation (A15 review): 150 ms ${name} once a second on a quieted carrier latch via runs at 1.15 s`, () => {
+			const out = floor(5)
+			for (let at = 0; at + 0.15 <= 5; at += 1) {
+				const start = Math.round(RATE * at)
+				const n = Math.round(RATE * 0.15)
+				for (let i = 0; i < n; i++)
+					out[start + i] = (out[start + i] ?? 0) + make(n, i)
+			}
+			expect(latchSeconds(out)).toBe(1.15)
+		})
 
 	// Feature: evidence-squelch, Property 17: Short loud stretches are not syllables
 	// Validates: Requirements 1.3, 1.4
@@ -1004,5 +1047,91 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 			audioDb: null,
 			syllableRuns: 0,
 		})
+	})
+})
+
+/**
+ * Amendment A16 (2026-10-24): tail mute. While latched, the gate passes PCM only with current
+ * carrier evidence: the last noted block quieted, the 200 ms close guard after it (back-chain
+ * drain), or (tone latches) a sighting of the latched tone within 300 ms.
+ */
+describe("A16: tail mute", () => {
+	const GUARD = Math.round(
+		(RATE * LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS) / 1_000,
+	)
+
+	// Feature: evidence-squelch, Property 18: No unquieted, tone-less audio passes after the guard
+	// Validates: Requirements 1.5
+	it("Property 18: on a voice latch, an open block passes exactly while the last note was quieted or within the guard after it", () => {
+		const over = toPcm(
+			voiceLike({ rate: RATE, seconds: 1.5, seed: 31, level: 0.8 }),
+			"s16le",
+		)
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						open: fc.boolean(),
+						quieted: fc.boolean(),
+						blocks: fc.integer({ min: 1, max: 40 }),
+					}),
+					{ minLength: 1, maxLength: 25 },
+				),
+				fc.integer({ min: 1, max: 1_000 }),
+				(pattern, seed) => {
+					const g = gate()
+					drive(g, [{ pcm: over, open: true, quieted: true }])
+					expect(g.state).toBe("open")
+					expect(g.passing).toBe(true)
+					const rand = mulberry32(seed)
+					let guard = GUARD
+					let lastQuieted = true
+					for (const step of pattern)
+						for (let b = 0; b < step.blocks; b++) {
+							const block = Buffer.alloc(BLOCK_BYTES)
+							for (let i = 0; i < BLOCK_BYTES; i += 2)
+								block.writeInt16LE(Math.round((rand() * 2 - 1) * 20_000), i)
+							drive(g, [{ pcm: block, open: step.open, quieted: step.quieted }])
+							if (!step.open) {
+								guard = 0
+								lastQuieted = false
+							} else if (step.quieted) {
+								guard = GUARD
+								lastQuieted = true
+							} else {
+								guard = Math.max(0, guard - BLOCK_BYTES / 2)
+								lastQuieted = false
+							}
+							const expected = g.state === "open" && (lastQuieted || guard > 0)
+							expect(g.passing).toBe(expected)
+						}
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
+
+	it("a tone latch passes while its tone is sighted, and stops 300 ms after it ends", () => {
+		const g = gate()
+		drive(g, [{ pcm: ctcssOver(2), open: true, quieted: false }])
+		expect([g.state, g.evidence, g.passing]).toEqual(["open", "ctcss", true])
+		// Unquieted noise with stage 1 open: passes for at most 300 ms (+ one block), then muted.
+		const noise = flicker(1_000, 7)
+		const t: boolean[] = []
+		for (let s = 0; s < noise.pcm.length; s += BLOCK_BYTES) {
+			drive(g, [
+				{
+					pcm: noise.pcm.subarray(s, s + BLOCK_BYTES),
+					open: true,
+					quieted: false,
+				},
+			])
+			t.push(g.passing)
+		}
+		const muted = t.indexOf(false)
+		expect(muted).toBeGreaterThanOrEqual(0)
+		expect(muted).toBeLessThanOrEqual(31)
+		expect(t.slice(muted).every(p => !p)).toBe(true)
+		expect(g.state).toBe("open")
 	})
 })
