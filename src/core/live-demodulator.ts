@@ -39,8 +39,8 @@ import {
 	type LiveAudioSquelchMode,
 } from "@wavekit/api-types"
 import {
-	LiveDemodConfigSchema,
-	type LiveDemodConfig as BaseLiveDemodConfig,
+	LiveDemodRuntimeBaseSchema,
+	type LiveDemodRuntimeBaseConfig as BaseLiveDemodConfig,
 	type SourceCaps,
 } from "../config.js"
 import type { Logger } from "../utils/logger.js"
@@ -111,11 +111,11 @@ import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
 
 /**
- * Runtime schema: the startup schema (with its WG7 refinements: noise squelch
- * only on nfm/wfm, tone squelch only on nfm with a standard tone) plus the
- * runtime defaults of the squelch keys.
+ * Runtime schema: the startup schema without the config-only `publicOrigin`
+ * (with its WG7 refinements: noise squelch only on nfm/wfm, tone squelch only
+ * on nfm with a standard tone) plus the runtime defaults of the squelch keys.
  */
-export const LiveDemodRuntimeConfigSchema = LiveDemodConfigSchema.and(
+export const LiveDemodRuntimeConfigSchema = LiveDemodRuntimeBaseSchema.and(
 	z.object({
 		squelchMode: z
 			.enum(LIVE_AUDIO_SQUELCH_MODES as [LiveAudioSquelchMode])

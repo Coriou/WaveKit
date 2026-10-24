@@ -66,6 +66,7 @@ import {
 	loadConfig,
 	DigitalVoiceConfigSchema,
 	LiveDemodConfigSchema,
+	liveDemodAdvertisedOrigin,
 	splitLiveDemodConfig,
 	sourceScannerConfig,
 	type Config,
@@ -1212,20 +1213,26 @@ async function main(): Promise<void> {
 		})
 		const { config: liveDemodConfig, publicOrigin: legacyAudioOrigin } =
 			splitLiveDemodConfig(LiveDemodConfigSchema.parse(config.liveDemod ?? {}))
+		const liveDemodOrigin = liveDemodAdvertisedOrigin(
+			config.access,
+			legacyAudioOrigin,
+		)
 		const liveDemod = new LiveDemodulator(
 			logger,
 			sourceManager,
 			sourceRouting,
 			liveDemodConfig,
-			access && config.access.mode === "protected"
-				? {
-						httpAccess: access.analogAudio,
-						publicOrigin: config.access.publicOrigins.analogAudio,
-						httpHost: config.access.audio.analog.bindHost,
-					}
-				: legacyAudioOrigin !== undefined
-					? { publicOrigin: legacyAudioOrigin }
-					: {},
+			{
+				...(access && config.access.mode === "protected"
+					? {
+							httpAccess: access.analogAudio,
+							httpHost: config.access.audio.analog.bindHost,
+						}
+					: {}),
+				...(liveDemodOrigin !== undefined
+					? { publicOrigin: liveDemodOrigin }
+					: {}),
+			},
 		)
 		admissionGates.push(() => liveDemod.shutdownAdmission())
 		own(50, () => liveDemod.stop())

@@ -650,6 +650,20 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().config.iqDcBlock).toBe(true)
 	})
 
+	it("neither stores nor restarts CSDR for a reconfigure carrying the config-only publicOrigin", async () => {
+		await liveDemod.start()
+		const before = liveDemod.getStatus()
+		await liveDemod.reconfigure({
+			publicOrigin: "http://other.lan:8081",
+		} as Parameters<LiveDemodulatorType["reconfigure"]>[0])
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+		const after = liveDemod.getStatus()
+		expect(Object.hasOwn(after.config, "publicOrigin")).toBe(false)
+		expect(after.config).toEqual(before.config)
+		expect(after.httpUrl).toBe(before.httpUrl)
+		expect(after.pipelineRestarts).toBe(before.pipelineRestarts)
+	})
+
 	it("lets a sample-rate change wait for a pending restart backoff", async () => {
 		vi.useFakeTimers()
 		liveDemod = create({}, { stableRunMs: 60_000 })

@@ -21,6 +21,7 @@ import {
 	AccessRuntimeConfigSchema,
 	validateProtectedRuntimeMapping,
 } from "./access/runtime-config.js"
+import type { RuntimeAccessConfig } from "./access/runtime-config.js"
 import { normalizeOrigin } from "./access/authority.js"
 import {
 	CSDR_BUFFER_MAX_ELEMENTS,
@@ -282,70 +283,132 @@ export const TunerConfigSchema = z.object({
 
 const LIVE_AUDIO_AGC_MODES_TUPLE = ["off", "slow", "fast"] as const
 
+/** Live demodulation fields shared by the startup and runtime schemas. */
+const liveDemodFields = z.object({
+	enabled: z.boolean().default(false),
+	sourceId: z.string().optional(),
+	httpPort: z.number().int().min(1).max(65535).default(8081),
+	modulation: z
+		.enum(["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"])
+		.default("nfm"),
+	bandwidth: z.number().int().min(0).default(12500),
+	/**
+	 * Squelch threshold in dBFS (negative) of channel power measured before
+	 * demodulation (|IQ| = 1 is 0 dBFS). 0 disables squelch (open).
+	 */
+	squelch: z.number().min(-160).max(0).default(0),
+	/**
+	 * manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`;
+	 * WG7 noise (NFM/WFM): FM discriminator quieting of at least `noiseQuietingDb`.
+	 */
+	squelchMode: z.enum(["manual", "auto", "noise"]).optional(),
+	autoMarginDb: z.number().finite().min(0).max(40).optional(),
+	/** WG7: noise squelch quieting threshold in dB (runtime default 6). */
+	noiseQuietingDb: z
+		.number()
+		.finite()
+		.min(LIVE_AUDIO_NOISE_QUIETING_DB.min)
+		.max(LIVE_AUDIO_NOISE_QUIETING_DB.max)
+		.optional(),
+	/** WG7: tone squelch gate (NFM only); absent or `none` = no tone gate. */
+	toneSquelch: toneSchema.optional(),
+	noiseReduction: z
+		.enum(["off", "voice", "noaa-apt", "narrow-band"])
+		.default("off"),
+	lowPass: z.number().int().min(0).max(20000).default(0),
+	highPass: z.number().int().min(0).max(5000).default(0),
+	/**
+	 * Audio gain after demodulation. For FM, CSDR's discriminator gives full
+	 * scale at a deviation of half the demod rate (12.5 kHz at 25 kHz), so 2
+	 * puts ±5 kHz deviation at 0.8 full scale. The former default of 10
+	 * hard-clipped NFM noise and voice.
+	 */
+	gain: z.number().min(0.1).max(100).default(2.0),
+	deEmphasis: z.boolean().default(false),
+	deEmphasisTau: z.union([z.literal(50), z.literal(75)]).default(50),
+	audioFormat: z.enum(["s16le", "f32le"]).default("s16le"),
+	/**
+	 * Deprecated, accepted for compatibility and ignored. `csdr dcblock` is
+	 * real-only: on interleaved I/Q it mixed I and Q. Use offsetHz to move
+	 * the channel away from the receiver's DC spike instead.
+	 */
+	iqDcBlock: z.boolean().default(false),
+	/**
+	 * Channel offset from the tuned centre in Hz: a carrier at
+	 * centre + offsetHz is shifted to DC before decimation. 0 demodulates
+	 * at the tuned centre.
+	 */
+	offsetHz: z.number().finite().min(-10_000_000).max(10_000_000).default(0),
+	/**
+	 * WG4: post-demodulation AGC. Absent (no default) keeps the modulation
+	 * default: AM, CW, DSB, USB and LSB `fast`; NFM, WFM and raw none.
+	 */
+	agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
+	/**
+	 * Demodulator engine. `csdr` is the shipped chain. `rust` uses one
+	 * wavekit-chan demod channel and falls back to csdr when it cannot run.
+	 * Optional with no schema default: absence means csdr at runtime, and
+	 * a default would show up in snapshots of the parsed config.
+	 */
+	engine: z.enum(["csdr", "rust"]).optional(),
+	/**
+	 * wavekit-chan binary for `engine: rust`. Absent unless set: a default
+	 * string would show up in snapshots of the parsed config. The runtime
+	 * uses `wavekit-chan` when this is omitted.
+	 */
+	chanBinaryPath: z.string().min(1).optional(),
+})
+
+function refineLiveDemod(
+	value: z.infer<typeof liveDemodFields>,
+	ctx: z.RefinementCtx,
+): void {
+	if (value.modulation !== "raw" && value.bandwidth <= 0) {
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			message: "bandwidth must be greater than 0 for non-raw modulation",
+			path: ["bandwidth"],
+		})
+	}
+	// WG7 req 2.3, 3.1: noise squelch is FM-only, tone squelch NFM-only, standard tones only.
+	if (
+		value.squelchMode === "noise" &&
+		!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(value.modulation)
+	) {
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			message: "noise squelch requires nfm or wfm modulation",
+			path: ["squelchMode"],
+		})
+	}
+	const tone = value.toneSquelch
+	if (tone !== undefined && tone.kind !== "none") {
+		if (!LIVE_AUDIO_TONE_SQUELCH_MODULATIONS.includes(value.modulation))
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "tone squelch requires nfm modulation",
+				path: ["toneSquelch"],
+			})
+		const standard =
+			tone.kind === "ctcss"
+				? (CTCSS_HZ as readonly number[]).some(
+						hz => Math.round(hz * 10) === tone.frequencyTenthsHz,
+					)
+				: DCS_STANDARD_CODES.includes(tone.code)
+		if (!standard)
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "tone squelch requires a standard CTCSS tone or DCS code",
+				path: ["toneSquelch"],
+			})
+	}
+}
+
 /**
- * Schema for live demodulation configuration.
+ * Schema for live demodulation configuration (startup config: YAML and env).
  */
-export const LiveDemodConfigSchema = z
-	.object({
-		enabled: z.boolean().default(false),
-		sourceId: z.string().optional(),
-		httpPort: z.number().int().min(1).max(65535).default(8081),
-		modulation: z
-			.enum(["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"])
-			.default("nfm"),
-		bandwidth: z.number().int().min(0).default(12500),
-		/**
-		 * Squelch threshold in dBFS (negative) of channel power measured before
-		 * demodulation (|IQ| = 1 is 0 dBFS). 0 disables squelch (open).
-		 */
-		squelch: z.number().min(-160).max(0).default(0),
-		/**
-		 * manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`;
-		 * WG7 noise (NFM/WFM): FM discriminator quieting of at least `noiseQuietingDb`.
-		 */
-		squelchMode: z.enum(["manual", "auto", "noise"]).optional(),
-		autoMarginDb: z.number().finite().min(0).max(40).optional(),
-		/** WG7: noise squelch quieting threshold in dB (runtime default 6). */
-		noiseQuietingDb: z
-			.number()
-			.finite()
-			.min(LIVE_AUDIO_NOISE_QUIETING_DB.min)
-			.max(LIVE_AUDIO_NOISE_QUIETING_DB.max)
-			.optional(),
-		/** WG7: tone squelch gate (NFM only); absent or `none` = no tone gate. */
-		toneSquelch: toneSchema.optional(),
-		noiseReduction: z
-			.enum(["off", "voice", "noaa-apt", "narrow-band"])
-			.default("off"),
-		lowPass: z.number().int().min(0).max(20000).default(0),
-		highPass: z.number().int().min(0).max(5000).default(0),
-		/**
-		 * Audio gain after demodulation. For FM, CSDR's discriminator gives full
-		 * scale at a deviation of half the demod rate (12.5 kHz at 25 kHz), so 2
-		 * puts ±5 kHz deviation at 0.8 full scale. The former default of 10
-		 * hard-clipped NFM noise and voice.
-		 */
-		gain: z.number().min(0.1).max(100).default(2.0),
-		deEmphasis: z.boolean().default(false),
-		deEmphasisTau: z.union([z.literal(50), z.literal(75)]).default(50),
-		audioFormat: z.enum(["s16le", "f32le"]).default("s16le"),
-		/**
-		 * Deprecated, accepted for compatibility and ignored. `csdr dcblock` is
-		 * real-only: on interleaved I/Q it mixed I and Q. Use offsetHz to move
-		 * the channel away from the receiver's DC spike instead.
-		 */
-		iqDcBlock: z.boolean().default(false),
-		/**
-		 * Channel offset from the tuned centre in Hz: a carrier at
-		 * centre + offsetHz is shifted to DC before decimation. 0 demodulates
-		 * at the tuned centre.
-		 */
-		offsetHz: z.number().finite().min(-10_000_000).max(10_000_000).default(0),
-		/**
-		 * WG4: post-demodulation AGC. Absent (no default) keeps the modulation
-		 * default: AM, CW, DSB, USB and LSB `fast`; NFM, WFM and raw none.
-		 */
-		agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
+export const LiveDemodConfigSchema = liveDemodFields
+	.extend({
 		/**
 		 * Legacy access mode only: the origin advertised in the live-audio status
 		 * `httpUrl` / `wavUrl` (e.g. `http://receiver.lan:8081`), for browsers on
@@ -362,61 +425,16 @@ export const LiveDemodConfigSchema = z
 					"publicOrigin must be a canonical http(s) origin (scheme://host[:port], no path)",
 			})
 			.optional(),
-		/**
-		 * Demodulator engine. `csdr` is the shipped chain. `rust` uses one
-		 * wavekit-chan demod channel and falls back to csdr when it cannot run.
-		 * Optional with no schema default: absence means csdr at runtime, and
-		 * a default would show up in snapshots of the parsed config.
-		 */
-		engine: z.enum(["csdr", "rust"]).optional(),
-		/**
-		 * wavekit-chan binary for `engine: rust`. Absent unless set: a default
-		 * string would show up in snapshots of the parsed config. The runtime
-		 * uses `wavekit-chan` when this is omitted.
-		 */
-		chanBinaryPath: z.string().min(1).optional(),
 	})
-	.superRefine((value, ctx) => {
-		if (value.modulation !== "raw" && value.bandwidth <= 0) {
-			ctx.addIssue({
-				code: z.ZodIssueCode.custom,
-				message: "bandwidth must be greater than 0 for non-raw modulation",
-				path: ["bandwidth"],
-			})
-		}
-		// WG7 req 2.3, 3.1: noise squelch is FM-only, tone squelch NFM-only, standard tones only.
-		if (
-			value.squelchMode === "noise" &&
-			!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(value.modulation)
-		) {
-			ctx.addIssue({
-				code: z.ZodIssueCode.custom,
-				message: "noise squelch requires nfm or wfm modulation",
-				path: ["squelchMode"],
-			})
-		}
-		const tone = value.toneSquelch
-		if (tone !== undefined && tone.kind !== "none") {
-			if (!LIVE_AUDIO_TONE_SQUELCH_MODULATIONS.includes(value.modulation))
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					message: "tone squelch requires nfm modulation",
-					path: ["toneSquelch"],
-				})
-			const standard =
-				tone.kind === "ctcss"
-					? (CTCSS_HZ as readonly number[]).some(
-							hz => Math.round(hz * 10) === tone.frequencyTenthsHz,
-						)
-					: DCS_STANDARD_CODES.includes(tone.code)
-			if (!standard)
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					message: "tone squelch requires a standard CTCSS tone or DCS code",
-					path: ["toneSquelch"],
-				})
-		}
-	})
+	.superRefine(refineLiveDemod)
+
+/**
+ * Runtime live demodulation fields: the startup schema without the config-only
+ * `publicOrigin`, which parsing strips (status, PATCH, WebSocket and
+ * reconfigure never carry it).
+ */
+export const LiveDemodRuntimeBaseSchema =
+	liveDemodFields.superRefine(refineLiveDemod)
 
 /**
  * Digital voice audio is on by default: dsd-fme `-o udp` measured +0.2 %
@@ -965,6 +983,9 @@ export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
 export type TunerRelayConfig = z.infer<typeof TunerRelayConfigSchema>
 export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
+export type LiveDemodRuntimeBaseConfig = z.infer<
+	typeof LiveDemodRuntimeBaseSchema
+>
 
 /**
  * Splits the config-only `publicOrigin` off a parsed live-demod config: the
@@ -972,11 +993,25 @@ export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
  * it; the origin goes to the LiveDemodulator options in legacy mode.
  */
 export function splitLiveDemodConfig(parsed: LiveDemodConfig): {
-	config: LiveDemodConfig
+	config: LiveDemodRuntimeBaseConfig
 	publicOrigin: string | undefined
 } {
 	const { publicOrigin, ...config } = parsed
 	return { config, publicOrigin }
+}
+
+/**
+ * The origin the live demodulator advertises: protected mode always uses
+ * `access.publicOrigins.analogAudio` and ignores `liveDemod.publicOrigin`;
+ * legacy mode uses `liveDemod.publicOrigin` when set.
+ */
+export function liveDemodAdvertisedOrigin(
+	access: RuntimeAccessConfig,
+	liveDemodPublicOrigin: string | undefined,
+): string | undefined {
+	return access.mode === "protected"
+		? access.publicOrigins.analogAudio
+		: liveDemodPublicOrigin
 }
 export type DigitalVoiceConfig = z.infer<typeof DigitalVoiceConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
