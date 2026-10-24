@@ -351,3 +351,11 @@ Follow-up 2026-10-24 (3.8 hardening):
   dropped with the rest of the span, so the tail never enters CTCSS, DCS or DTMF votes. A tone is
   guaranteed with at least 0.95 s of CTCSS before the tail (design); 55 Hz alone never reports a
   CTCSS tone, and 67.0 Hz is not taken for STE.
+
+Follow-up 2026-10-24 (review round): a `queue-overflow` discontinuity is applied at its
+`sampleIndex` (when the PCM cursor reaches it, or at once if already passed, masking the
+misplaced samples), invalidates blocks already decided in the gap, and never feeds gap silence;
+`input-gap` (a native DSP reset that drops no output position) and any unknown cause shift
+nothing and close the block at `sampleIndex`, ending a carrier run or span there. STE windows
+are skipped one by one; a later non-STE window feeds again, so a mid-over burst of a low tone
+never hides the tone after it. The 0.95 s minimum of 3.8.13 is unchanged.

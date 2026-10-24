@@ -120,3 +120,9 @@ Follow-up 2026-10-24:
       `tests/unit/core/live-demod-rust-fallback.test.ts`,
       `tests/unit/core/live-demod-rust-protocol-discontinuity.test.ts`.
   - _Requirements: 3.8.1, 3.8.7, 3.8.13_
+- [x] A1.8 Review round: positional discontinuity queue with cause semantics
+      (`CarrierBlockLog.noteDiscontinuity`, tracker `readGaps`, `invalidateBlocks`, `lateMask`,
+      `carrierPcm`), startup replay order (`rust-run.ts` `applyStartup`), cause passthrough
+      (`rust-protocol.ts`, `rust-engine.ts`), window-only STE skip (`steDecide`); the review's
+      repro cases ported into `tests/unit/core/analog-transmission-carrier.test.ts`.
+  - _Requirements: 3.8.1, 3.8.13_

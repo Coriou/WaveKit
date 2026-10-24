@@ -522,18 +522,31 @@ describe("live demod rust fallback and retune", () => {
 		tracker.stop()
 	})
 
-	it("a discontinuity advances the block log's PCM position (WG10 req 3.8.1)", async () => {
-		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
-		const before = demod?.carrierBlockLog()?.pcmBytes ?? -1
-		channels[0]?.emitLine(
-			demodEvent("discontinuity", {
-				sampleIndex: 0,
-				droppedSamples: 480,
-				cause: "queue-overflow",
-			}),
-		)
-		expect(demod?.carrierBlockLog()?.pcmBytes).toBe(before + 480 * 2)
-	})
+	it.each([
+		["queue-overflow", 480, 480],
+		["input-gap", 0, 0],
+		["input-gap", 960, 0],
+		["unknown-cause", 480, 0],
+	])(
+		"a %s discontinuity (dropped %i) reaches the block log with its cause (WG10 req 3.8.1)",
+		async (cause, droppedSamples, shifted) => {
+			await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+			const log = demod?.carrierBlockLog()
+			const before = log?.pcmBytes ?? -1
+			channels[0]?.emitLine(
+				demodEvent("discontinuity", {
+					sampleIndex: 4800,
+					droppedSamples,
+					cause,
+				}),
+			)
+			// The socket count never jumps; only an overflow queues a position skip.
+			expect(log?.pcmBytes).toBe(before)
+			expect(log?.gapCount).toBe(1)
+			expect(log?.gapDropped[0]).toBe(shifted)
+			expect(log?.masked(10)).toBe(true)
+		},
+	)
 
 	it("does not seed the auto floor from a quieted carrier and sends the floor", async () => {
 		await boot({ squelchMode: "auto", autoMarginDb: 6, modulation: "nfm" })

@@ -122,6 +122,7 @@ export interface RustRunHost {
 		run: PipelineRun,
 		sampleIndex: number,
 		droppedSamples: number,
+		cause: string,
 	): void
 	resetFloorForRetune(run: PipelineRun): void
 	clearCloseOverride(): void
@@ -389,15 +390,15 @@ export class RustLiveRun {
 						const current = slot.run
 						if (current) this.onRetuned(current)
 					},
-					onDiscontinuity: (sampleIndex, dropped) => {
+					onDiscontinuity: (sampleIndex, dropped, cause) => {
 						if (!live) {
 							if (startup.discontinuities.length < 16)
-								startup.discontinuities.push({ sampleIndex, dropped })
+								startup.discontinuities.push({ sampleIndex, dropped, cause })
 							return
 						}
 						const current = slot.run
 						if (current)
-							this.host.noteDiscontinuity(current, sampleIndex, dropped)
+							this.host.noteDiscontinuity(current, sampleIndex, dropped, cause)
 					},
 					onRejected: reasonCode => {
 						const current = slot.run
@@ -658,6 +659,10 @@ export class RustLiveRun {
 	/** Gate and metrics that arrived in the `opened` chunk. */
 	private applyStartup(run: PipelineRun, startup: StartupBuffer): void {
 		if (startup.gate !== null) this.onGate(run, startup.gate)
+		// Discontinuities first: they mask their blocks before the startup metrics log them.
+		for (const gap of startup.discontinuities.splice(0, 16))
+			this.host.noteDiscontinuity(run, gap.sampleIndex, gap.dropped, gap.cause)
+		startup.discontinuities.length = 0
 		for (const sample of startup.metrics)
 			this.onMetrics(
 				run,
@@ -667,9 +672,6 @@ export class RustLiveRun {
 				sample.gates,
 			)
 		startup.metrics.length = 0
-		for (const gap of startup.discontinuities.splice(0, 16))
-			this.host.noteDiscontinuity(run, gap.sampleIndex, gap.dropped)
-		startup.discontinuities.length = 0
 	}
 
 	private onMetrics(
@@ -756,7 +758,11 @@ export class RustLiveRun {
 
 interface StartupBuffer {
 	gate: boolean | null
-	discontinuities: Array<{ sampleIndex: number; dropped: number }>
+	discontinuities: Array<{
+		sampleIndex: number
+		dropped: number
+		cause: string
+	}>
 	metrics: Array<{
 		power: Array<number | null>
 		quieting: Array<number | null>

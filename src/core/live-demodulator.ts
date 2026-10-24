@@ -500,14 +500,14 @@ export class LiveDemodulator extends EventEmitter {
 			publishSquelchChange: () => this.publishSquelchChange(),
 			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
 			measureRun: (run, sample) => this.measureRun(run, sample),
-			noteDiscontinuity: (run, sampleIndex, dropped) => {
+			noteDiscontinuity: (run, sampleIndex, dropped, cause) => {
 				if (this.run === run && run.squelch.hasCarrierEvidence)
 					this.carrierLog.noteDiscontinuity(
 						run,
 						run.stream.rate,
 						sampleIndex,
 						dropped,
-						pcmSampleBytes(run.stream.format),
+						cause,
 					)
 			},
 			resetFloorForRetune: run => {

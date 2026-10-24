@@ -87,7 +87,11 @@ export interface RustEngineHandlers {
 	/** First output sample of an applied retune (`retuned.atOutputSample`). */
 	onRetuned?: (atOutputSample: number) => void
 	/** WG10 req 3.8.1: native dropped output samples from `sampleIndex` (`discontinuity`). */
-	onDiscontinuity?: (sampleIndex: number, droppedSamples: number) => void
+	onDiscontinuity?: (
+		sampleIndex: number,
+		droppedSamples: number,
+		cause: string,
+	) => void
 	/** Control line the process refused (`rejected.reasonCode`). */
 	onRejected?: (reasonCode: string) => void
 }
@@ -528,7 +532,11 @@ export class RustEngine implements LiveDemodEngine {
 			return
 		}
 		if (event.type === "discontinuity" && event.id === DEMOD_CHANNEL_ID) {
-			this.handlers?.onDiscontinuity?.(event.sampleIndex, event.droppedSamples)
+			this.handlers?.onDiscontinuity?.(
+				event.sampleIndex,
+				event.droppedSamples,
+				event.cause,
+			)
 			return
 		}
 		if (event.type === "retuned" && event.id === DEMOD_CHANNEL_ID) {

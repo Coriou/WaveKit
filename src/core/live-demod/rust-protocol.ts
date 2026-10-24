@@ -112,7 +112,8 @@ const DiscontinuityEventSchema = z
 		id,
 		generation,
 		sampleIndex: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-		droppedSamples: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+		// `input-gap` may drop no output sample (a DSP reset); `queue-overflow` drops at least one.
+		droppedSamples: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 		cause: z.string().regex(/^[a-z][a-z-]{0,31}$/),
 	})
 	.strict()

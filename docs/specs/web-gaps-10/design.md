@@ -546,3 +546,26 @@ alone.
   the tone before this change; the earlier 1.85 s bound was pessimistic. Cost: per fed sample one
   Goertzel step, one square and one copy into the preallocated window (allocated once per PCM
   format); the tone results arrive up to 200 ms later.
+
+### Follow-up 2026-10-24 (review round): positional discontinuities, recoverable STE
+
+- **Causes (read in `native/wavekit-chan/src/runtime.rs`).** `queue-overflow`: the writer queue
+  was full, `droppedSamples` output samples from `sampleIndex` never reach the socket (the
+  channel's output count advanced). `input-gap`: input bytes were lost upstream; the channel's
+  DSP is reset and `sampleIndex` is its current output count, which does not advance by
+  `droppedSamples` (that figure is input loss scaled to the output rate and may be 0). The
+  protocol now accepts `droppedSamples` ≥ 0 and keeps `cause`; the engine, `rust-run.ts` (startup
+  discontinuities replayed before startup metrics) and the host pass it to
+  `CarrierBlockLog.noteDiscontinuity`.
+- **Log.** The socket count `pcmBytes` never jumps. Each discontinuity masks blocks (overflow:
+  `[sampleIndex / B, (sampleIndex + dropped) / B)`; any other cause: the one block at
+  `sampleIndex`, a closed block that ends a run or span) and is kept in a 16-entry gap ring.
+- **Tracker.** It reads new gaps on every drain: overflow gaps wait in a queue until the PCM
+  cursor (true sample positions = socket bytes plus re-inserted gaps) reaches `sampleIndex`, then
+  silence of `dropped` samples is inserted there; a gap already passed is inserted at once and
+  the samples since (placed up to `dropped` early) are masked tracker-side. Blocks of a gap that
+  the tracker already decided become dropped, an open span ends at the gap start, a provisional
+  run is discarded; `drainPcm` also refuses any masked block. Residual: audio already pushed to
+  the detector before a late notice cannot be taken back.
+- **STE.** `steDecide` skips an STE-dominated window only; the next window feeds again. A real
+  tail is followed by the carrier drop, so it is still removed.

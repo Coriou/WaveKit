@@ -284,6 +284,31 @@ describe("WG10 req 3.8.12 squelch tail elimination", () => {
 		},
 	)
 
+	it.each([57, 55])(
+		"200 ms of %i Hz mid-over is skipped alone: the CTCSS after it still counts",
+		hz => {
+			const s = emptyScript()
+			addBlocks(s, 50, false, false, noise(421, 0.3))
+			over(s, 200, tone(hz, 0.4))
+			over(s, 3000, tone(79.7))
+			addBlocks(s, 200, false, false, noise(422, 0.3))
+			const { rows } = runScript(s)
+			expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7])
+		},
+	)
+
+	it("a late first-span tail does not suppress the resumed span", () => {
+		const s = emptyScript()
+		addBlocks(s, 50, false, false, noise(431, 0.3))
+		over(s, 1000, tone(79.7))
+		over(s, 400, tone(55, 0.6))
+		addBlocks(s, 10, false, false, noise(432, 0.3))
+		over(s, 2000, tone(88.5))
+		addBlocks(s, 200, false, false, noise(433, 0.3))
+		const { rows } = runScript(s, { pcmLagBlocks: 40 })
+		expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7, 88.5])
+	})
+
 	it.each([3000, 1200])(
 		"a genuine 67.0 Hz tone for %i ms is not mistaken for STE",
 		ms => {
@@ -415,60 +440,70 @@ describe("WG10 req 3.8 review fixes", () => {
 		expect(rows[0]?.tone?.ctcssHz).toBe(79.7)
 	})
 
-	it("a native discontinuity keeps sample positions: the gap is never fed", () => {
-		const source = new CarrierSource()
-		const run = {}
-		const pushed: number[] = []
-		let now = T0
-		const tracker = new AnalogTransmissionTracker({
-			source,
-			frequencyAt: () => ({ hz: 446_068_750, tuningTrust: "commanded" }),
-			now: () => now,
-			setTimer: () => () => undefined,
-			createToneDetector: () => ({
-				push(pcm) {
-					for (let i = 0; i + 4 <= pcm.length; i += 4)
-						pushed.push(pcm.readFloatLE(i))
-				},
-				result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
-				reset() {},
-			}),
-		})
-		tracker.start()
-		source.gate(true)
-		const blocks = 300
-		const gapFrom = 8000
-		const gapSamples = 800
-		for (let k = 0; k < blocks; k++) {
-			now += 10
-			// Native reports the drop before the metrics of the dropped blocks arrive.
-			if (k === 100)
-				source.log.noteDiscontinuity(run, RATE, gapFrom, gapSamples, 4)
-			source.log.note(run, RATE, true, true, k)
-			const pcm = Buffer.alloc(80 * 4)
-			let n = 0
-			for (let i = 0; i < 80; i++) {
-				const sample = k * 80 + i
-				if (sample >= gapFrom && sample < gapFrom + gapSamples) continue
-				pcm.writeFloatLE(sample, n * 4)
-				n += 1
-			}
-			if (n === 0) continue
-			const chunk = Buffer.from(pcm.subarray(0, n * 4))
-			source.log.notePcm(run, RATE, chunk.length)
-			source.emit("pcm", chunk, { rate: RATE, format: "f32le" })
-		}
-		source.gate(false)
-		for (let k = blocks; k < blocks + 200; k++) {
-			now += 10
-			source.log.note(run, RATE, false, false, k)
-		}
+	it.each([
+		["before its blocks", [["event"], ["notes", 300], ["pcm", 24_000]]],
+		[
+			"after metrics, before its PCM",
+			[
+				["notes", 100],
+				["pcm", 8000],
+				["notes", 120],
+				["event"],
+				["pcm", 24_000],
+				["notes", 300],
+			],
+		],
+		[
+			"ahead of the PCM cursor",
+			[["notes", 300], ["pcm", 6000], ["event"], ["pcm", 24_000]],
+		],
+	] as const)(
+		"a queue-overflow discontinuity announced %s keeps positions and feeds no gap silence",
+		(_name, steps) => {
+			const pushed = gapRun(steps, 8000, 800, "queue-overflow")
+			expect(pushed.filter(x => x === 0)).toHaveLength(0)
+			const want: number[] = []
+			for (let v = 0; v < 24_000; v++)
+				if (v < 8000 || v >= 8800) want.push(v + 1)
+			expect(pushed).toEqual(want)
+		},
+	)
+
+	it("an overflow announced after its PCM arrived (still undecided) masks the misplaced samples", () => {
+		const pushed = gapRun(
+			[
+				["notes", 100],
+				["pcm", 9600],
+				["event"],
+				["notes", 300],
+				["pcm", 24_000],
+			],
+			8000,
+			800,
+			"queue-overflow",
+		)
+		// Samples 8801-9600 sat at 8000-8799 when the notice came: masked with the gap.
 		const want: number[] = []
-		for (let sample = 0; sample < blocks * 80; sample++)
-			if (sample < gapFrom || sample >= gapFrom + gapSamples) want.push(sample)
+		for (let v = 0; v < 24_000; v++) if (v < 8000 || v >= 9600) want.push(v + 1)
 		expect(pushed).toEqual(want)
-		tracker.stop()
 	})
+
+	it.each(["input-gap", "some-future-cause"])(
+		"a %s discontinuity ends the run without shifting positions",
+		cause => {
+			const pushed = gapRun(
+				[["notes", 100], ["event"], ["notes", 300], ["pcm", 24_000]],
+				8040,
+				0,
+				cause,
+			)
+			// Block 100 (samples 8000-8079) is closed; everything else keeps its position.
+			const want: number[] = []
+			for (let v = 0; v < 24_000; v++)
+				if (v < 8000 || v >= 8080) want.push(v + 1)
+			expect(pushed).toEqual(want)
+		},
+	)
 
 	it.each([
 		["s16le", 0],
@@ -528,3 +563,74 @@ describe("WG10 req 3.8 review fixes", () => {
 		},
 	)
 })
+
+type GapStep =
+	| readonly ["notes", number]
+	| readonly ["pcm", number]
+	| readonly ["event"]
+
+/**
+ * Plays 300 live blocks at 8 kHz f32 whose sample `v` carries the value v + 1, in the given
+ * order of block notes, socket PCM (up to a true sample position; dropped samples never travel)
+ * and the discontinuity event; then closes and stops. Returns what the detector heard.
+ */
+function gapRun(
+	steps: ReadonlyArray<GapStep>,
+	at: number,
+	dropped: number,
+	cause: string,
+): number[] {
+	const source = new CarrierSource()
+	const run = {}
+	const pushed: number[] = []
+	let now = T0
+	const tracker = new AnalogTransmissionTracker({
+		source,
+		frequencyAt: () => ({ hz: 446_068_750, tuningTrust: "commanded" }),
+		now: () => now,
+		setTimer: () => () => undefined,
+		createToneDetector: () => ({
+			push(pcm) {
+				for (let i = 0; i + 4 <= pcm.length; i += 4)
+					pushed.push(pcm.readFloatLE(i))
+			},
+			result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
+			reset() {},
+		}),
+	})
+	tracker.start()
+	source.gate(true)
+	let noted = 0
+	let sent = 0
+	const overflow = cause === "queue-overflow"
+	for (const step of steps) {
+		if (step[0] === "event")
+			source.log.noteDiscontinuity(run, RATE, at, dropped, cause)
+		else if (step[0] === "notes")
+			for (; noted < step[1]; noted++) {
+				now += 10
+				source.log.note(run, RATE, true, true, noted)
+			}
+		else {
+			const values: number[] = []
+			for (; sent < step[1]; sent++)
+				if (!overflow || sent < at || sent >= at + dropped)
+					values.push(sent + 1)
+			// 100 ms socket chunks (the PCM ring holds 2 s).
+			for (let from = 0; from < values.length; from += 800) {
+				const part = values.slice(from, from + 800)
+				const chunk = Buffer.alloc(part.length * 4)
+				part.forEach((v, i) => chunk.writeFloatLE(v, i * 4))
+				source.log.notePcm(run, RATE, chunk.length)
+				source.emit("pcm", chunk, { rate: RATE, format: "f32le" })
+			}
+		}
+	}
+	source.gate(false)
+	for (let k = 300; k < 500; k++) {
+		now += 10
+		source.log.note(run, RATE, false, false, k)
+	}
+	tracker.stop()
+	return pushed
+}

@@ -20,10 +20,18 @@ describe("rust protocol discontinuity", () => {
 		expect(parsed).toEqual({ ok: true, event: valid })
 	})
 
+	it("parses an input-gap that dropped no output sample", () => {
+		const gap = { ...valid, cause: "input-gap", droppedSamples: 0 }
+		expect(parseDemodEventLine(JSON.stringify(gap))).toEqual({
+			ok: true,
+			event: gap,
+		})
+	})
+
 	it.each([
 		["negative index", { ...valid, sampleIndex: -1 }],
 		["fractional index", { ...valid, sampleIndex: 1.5 }],
-		["zero dropped", { ...valid, droppedSamples: 0 }],
+		["negative dropped", { ...valid, droppedSamples: -1 }],
 		["string dropped", { ...valid, droppedSamples: "480" }],
 		["missing cause", { ...valid, cause: undefined }],
 		["cause with a newline", { ...valid, cause: "queue\noverflow" }],
