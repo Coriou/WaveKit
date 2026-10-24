@@ -29,8 +29,8 @@ docs; read them only when your task needs them.
 WaveKit is a TypeScript SDR stream-processing framework. One Node.js process pulls IQ/audio
 from rtl_tcp or SDR++ sources, fans it out to decoder adapters (ADS-B, AIS, ACARS, VDL2,
 DMR/P25/YSF, POCSAG/FLEX, APRS, ISM, Meshtastic LoRa), and serves Fastify REST, WebSocket,
-a raw audio TCP port and an optional RTL-TCP relay. The Ink/React terminal dashboard in
-`cli/` is the main UI; the core ships as a Docker image with s6-overlay supervising the
+a raw audio TCP port and an optional RTL-TCP relay. The web app in `web/` is the main UI,
+with the Ink/React terminal dashboard in `cli/` beside it; the core ships as a Docker image with s6-overlay supervising the
 decoder binaries. A local USB dongle and a Raspberry Pi receiver are equally supported.
 
 ## Layout
@@ -140,8 +140,18 @@ Several agents work in this repository at once.
 - Do not deploy to, retune or reboot the Raspberry Pi receiver, and do not stop the
   running `wavekit-app` container, unless your brief says so.
 
+## Documentation
+
+User docs are plain GitHub Markdown, indexed in [`docs/README.md`](docs/README.md). When your
+change alters what a user sees or does (a web app feature, an API route, a config key, a
+decoder, a command), update the page that describes it in the same commit;
+[`docs/doc-map.json`](docs/doc-map.json) says which page covers which code. If mapped code
+changes with nothing to document, end the commit message with the trailer `Docs: none`.
+Refresh screenshots with `pnpm --filter @wavekit/web docs:shots` when the UI changes visibly.
+Rules and style: [`CONTRIBUTING.md`](CONTRIBUTING.md#documentation).
+
 ## Before reporting done
 
-Run the touched test files, `pnpm run typecheck` and `pnpm run lint` (the full suite when
-runtime code changes broadly). Report exact base/head and commits, check results with any
-failure output, and open gaps. Never claim a check you skipped.
+Run the touched test files, `pnpm run typecheck`, `pnpm run lint` and
+`node scripts/check-docs.mjs` (the full suite when runtime code changes broadly). Report exact
+base/head and commits, check results with any failure output, and open gaps. Never claim a check you skipped.
