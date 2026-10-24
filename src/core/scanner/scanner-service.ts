@@ -5027,6 +5027,7 @@ export class ScannerService extends EventEmitter {
 	private readonly onSourceRemoved = (sourceId: string): void => {
 		this.cancelChannelSource(sourceId)
 		this.detachIqEngine(sourceId)
+		this.store.clearPending(sourceId) // DQ 1.5
 		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (!isTerminal(d.record.state))

@@ -43,6 +43,8 @@ const sha = (text: string): string =>
 	createHash("sha256").update(text).digest("hex")
 
 /** Seed, ops, maxDiscoveries, dense, then the frozen base's byte length and sha256. */
+// WG15 DQ: re-baselined after the seeded ops moved undecoded SNR from 10..29 to 18..37 dB (DQ 1.3
+// creation bar). Same op stream and structure (byte lengths unchanged); only the SNR fields moved.
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -58,7 +60,7 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		false,
 		19206,
-		"3808cd5a0780ce380aeff91c73439657d4635fc012325ec23177e60161a09e6f",
+		"32d541ef411eedeaaefe9238684518124f28881ac186a602192f1d55884710db",
 	],
 	[
 		3,
@@ -66,7 +68,7 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		false,
 		38639,
-		"80cbd879621005f655bdaf7bb38eaba4e987f6f6d4b4d46b68f1b626556b669b",
+		"246b0c7190e0819cd795189450bf7914a344afd24cfd3e25ea8c59a893b288e0",
 	],
 	[
 		4,
@@ -74,7 +76,7 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		12,
 		false,
 		62239,
-		"a685e257d2642314ec49b38946b367efe76766f54aa767293d6840a4c7875235",
+		"d493f8dd0a1b609a1d76535f8b142c88d23bcc732f0d785c2e5d27cb4831630f",
 	],
 	[
 		5,
@@ -82,7 +84,7 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		200,
 		false,
 		70343,
-		"529cc556c1d68254a8e57efb2c0c1e1c43e18889887babac80d38dc634cf1e4f",
+		"6d66ee2967c69fdafd0b6332b13654a8ee900b370127abee1a83bf9bc162ad91",
 	],
 	[
 		6,
@@ -90,7 +92,7 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		true,
 		334528,
-		"54bd406ee10982e82367375235bcca6924d878e652b23af47cb9306e27406950",
+		"042d3a8c4c32059d14b393416b432973786e23fb8edee0486cb7789b4812941f",
 	],
 ]
 

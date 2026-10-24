@@ -83,10 +83,10 @@ describe("centre index non-finite centres (WG11 SC m6)", () => {
 					}),
 				).discoveryId,
 		)
-		// no non-finite observation was absorbed by a finite discovery (two NaNs may share the
-		// frequency key, a separate path)
+		// no non-finite observation was absorbed by a finite discovery; since WG15 DQ 1.7 an
+		// undecoded observation with a non-finite centre is rejected outright (transient)
 		expect(new Set(ids).size).toBe(5)
-		for (const id of odd) expect(ids).not.toContain(id)
+		for (const id of odd) expect(id).toBeNull()
 		const i = internals(store)
 		const family = i.discoveries.get(ids[0] ?? "")?.family ?? "unknown"
 		centres.forEach((centreHz, k) => {
@@ -97,8 +97,9 @@ describe("centre index non-finite centres (WG11 SC m6)", () => {
 			const obs = makeObs({ id: "p", centreHz, startedAt: T0, blocks: 2 })
 			for (const f of FAMILIES) expect(i.stickyMatch(obs, f)).toBeUndefined()
 		}
+		// DQ 1.7: rejected before placement, so the index never sees them.
 		expect(
 			(i as unknown as { centres: CentreIndex }).centres.refusedNonFinite(),
-		).toBeGreaterThan(0)
+		).toBe(0)
 	})
 })

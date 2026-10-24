@@ -579,9 +579,9 @@ describe("pipeline channel gate", () => {
 		if (typeof sample !== "number" || main === undefined) return
 		expect(sample).toBeGreaterThanOrEqual(main.track.startSample)
 		expect(sample).toBeLessThanOrEqual(main.track.lastSample)
-		// Five on-blocks are 250 ms. The noise block is the tolerated off that
-		// reaches 300 ms, so the pass belongs to that block of this track.
-		expect(sample).toBe(main.track.startSample + 6 * BLOCK)
+		// Five on-blocks are 250 ms. The noise block is the tolerated off: it keeps
+		// the run but does not count (DQ 1.8), so the sixth strong block passes.
+		expect(sample).toBe(main.track.startSample + 7 * BLOCK)
 	})
 
 	it("keeps a passed gate on the successor of a max-duration rollover", () => {
@@ -613,10 +613,11 @@ describe("pipeline channel gate", () => {
 		h.send({ kind: "channel-plan", plan: planAt(CENTRE + 20_000) })
 		const rng = mulberry32(20261048)
 		h.push(noiseIq(rng, 12 * BLOCK))
-		// on, on, off, on, on, on. The fourth block rolls a 200 ms track over.
+		// on, on, off, on, on, on, on. The fourth block rolls a 200 ms track over.
+		// DQ 1.8: the off does not count, so six strong blocks need a fourth after it.
 		h.push(toneIq(rng, 2 * BLOCK, 20_000, STRONG_AMP))
 		h.push(noiseIq(rng, BLOCK))
-		h.push(toneIq(rng, 3 * BLOCK, 20_000, STRONG_AMP))
+		h.push(toneIq(rng, 4 * BLOCK, 20_000, STRONG_AMP))
 		h.push(noiseIq(rng, 16 * BLOCK))
 		const closes = h
 			.of("track-close")
@@ -877,12 +878,21 @@ describe("pipeline channel gate", () => {
 							e.track.lastSample + BLOCK,
 						)
 					}
-					// Counting the one tolerated dropout as on, `blocks` blocks are one
-					// run. It meets 300 ms at the end of the sixth block. A track
-					// still open then passes; one that closed earlier stays below.
+					// `blocks` blocks are one run; the one tolerated dropout keeps it alive
+					// but adds no duration (DQ 1.8). It meets 300 ms at the end of the
+					// sixth strong block. A track still open then passes; one that closed
+					// earlier stays below.
 					const minPassBlocks = CHANNEL_GATE_MIN_DURATION_MS / BLOCK_MS
-					if (blocks >= minPassBlocks && Number.isFinite(emissionStart(h))) {
-						const passSample = emissionStart(h) + minPassBlocks * BLOCK
+					const strongBlocks = dropoutAt >= 0 ? blocks - 1 : blocks
+					const passBlocks =
+						dropoutAt >= 0 && dropoutAt < minPassBlocks
+							? minPassBlocks + 1
+							: minPassBlocks
+					if (
+						strongBlocks >= minPassBlocks &&
+						Number.isFinite(emissionStart(h))
+					) {
+						const passSample = emissionStart(h) + passBlocks * BLOCK
 						for (const e of strongCloses) {
 							if (e.track.lastSample >= passSample)
 								expect(e.track.gate, detail).toBe("passed")
@@ -1213,6 +1223,7 @@ interface OracleRun {
 	/** The run is alive. Independent of the sticky `passed` verdict. */
 	run: boolean
 	off: boolean
+	/** Strong blocks (snr >= k) of the run: the tracker's `gateStrongBlocks` (DQ 1.8). */
 	onBlocks: number
 	best: number
 	k: number
@@ -1320,7 +1331,7 @@ function foldGate(events: GateTrace[]): Map<string, OracleRun> {
 			if (r.run && !r.off) {
 				r.off = true
 				r.on = false
-				r.onBlocks++
+				// DQ 1.8: the tolerated off keeps the run but adds no duration.
 				noteQualified(r, e.endSample)
 			} else endRun(r)
 			continue
@@ -1342,7 +1353,8 @@ function foldGate(events: GateTrace[]): Map<string, OracleRun> {
 				r.qualified = false
 				r.qualifiedSample = null
 			}
-			r.onBlocks++
+			// DQ 1.8: only strong blocks (snr >= k) count toward the duration.
+			if (e.snr >= e.kDb) r.onBlocks++
 			if (e.snr > r.best) r.best = e.snr
 			r.k = e.kDb
 			r.margin = e.marginDb
@@ -1350,7 +1362,6 @@ function foldGate(events: GateTrace[]): Map<string, OracleRun> {
 		} else if (r.run && !r.off) {
 			r.off = true
 			r.on = false
-			r.onBlocks++
 		} else {
 			endRun(r)
 			continue

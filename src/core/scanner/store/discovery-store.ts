@@ -96,6 +96,11 @@ import type { IndexedCentre } from "./frequency-index.js"
 import { JobCounts } from "./job-counts.js"
 import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
+import { PendingAdmission, admissionSnrOf } from "./pending-admission.js"
+import {
+	DQ_CREATE_SNR_DB,
+	DQ_OVERLOAD_CREATE_SNR_DB,
+} from "../detection-quality-contract.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -670,6 +675,9 @@ export class DiscoveryStore
 {
 	private maxDiscoveries: number
 	private readonly now: () => number
+	/** DQ 1.4: weak undecoded candidates, memory only. */
+	private readonly pending: PendingAdmission
+	private lastPendingSweep = Number.NEGATIVE_INFINITY
 	private readonly newId: () => string
 	/** Accepted for the frame display role (R 2.5). Creation follows `track.gate`. */
 	private minSurfaceBlocks: number
@@ -761,6 +769,7 @@ export class DiscoveryStore
 			: undefined
 		this.maxDiscoveries = opts.maxDiscoveries
 		this.now = opts.now
+		this.pending = new PendingAdmission(opts.now)
 		this.newId = opts.newId
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.rastersFor = opts.rasters ?? (() => [])
@@ -818,7 +827,56 @@ export class DiscoveryStore
 			return this.commit("observation", op =>
 				this.addObservation(op, into, input),
 			)
+		if (!decodeProvesSignal(input, opts.decode) && !this.admits(input))
+			return TRANSIENT
 		return this.createFrom(input, label, target.coChannel)
+	}
+
+	/**
+	 * DQ 1.2 to 1.7: may an undecoded observation that matched nothing create a record? Invalid
+	 * input is rejected (1.7); overload needs 25 dB and never pends (1.2); otherwise 18 dB, or
+	 * promotion from pending (1.3, 1.4).
+	 */
+	private admits(input: ObservationInput): boolean {
+		this.sweepPendingIfDue()
+		const track = input.track
+		const snr = admissionSnrOf(track)
+		const overload: unknown = (
+			track.flags as { overload?: unknown } | undefined
+		)?.overload
+		if (
+			!Number.isFinite(track.centreHz) ||
+			!Number.isFinite(snr) ||
+			typeof overload !== "boolean"
+		)
+			return false
+		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB
+		if (snr >= DQ_CREATE_SNR_DB) return true
+		return this.pending.note(input)
+	}
+
+	/** Refresh-cadence sweep of expired pending entries (at most every 10 s, from ingest). */
+	private sweepPendingIfDue(): void {
+		const now = this.now()
+		if (now - this.lastPendingSweep < 10_000) return
+		this.lastPendingSweep = now
+		this.pending.sweep(now)
+	}
+
+	/** DQ 1.5: retune or source removal drops that source's pending entries; none = all. */
+	clearPending(sourceId?: string): void {
+		this.pending.clear(sourceId)
+	}
+
+	/** DQ 1.5: deletes pending entries whose fixed window has ended. */
+	sweepPending(): void {
+		this.lastPendingSweep = this.now()
+		this.pending.sweep(this.lastPendingSweep)
+	}
+
+	/** Pending entries held for a source (tests, diagnostics). */
+	pendingCount(sourceId?: string): number {
+		return this.pending.size(sourceId)
 	}
 
 	/**
