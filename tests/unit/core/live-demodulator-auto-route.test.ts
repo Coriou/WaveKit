@@ -1004,7 +1004,20 @@ describe("auto listen route: shadow mismatch silences selected analog (review fi
 		for (let i = 0; i < 20; i++) step(false)
 		expect(h.demod.getStatus().autoRoute?.active).toBe("none")
 		const streamFrom = stream.received().length
-		const autoFrom = auto.transport.received().length
+		const autoFrom = auto.transport.received().length / 2
+		// Per block: the underrun counter after it, and the block analog is selected for.
+		const underrunsBefore = h.router.underruns
+		const underrunsAfter: number[] = []
+		const write = h.router.registry.write.bind(h.router.registry)
+		h.router.registry.write = (chunk: Buffer) => {
+			underrunsAfter.push(h.router.underruns)
+			write(chunk)
+		}
+		let selectedAt = -1
+		h.router.on("auto-route-changed", (level: { active: string }) => {
+			if (level.active === "analog" && selectedAt < 0)
+				selectedAt = h.router.emittedSamples
+		})
 		for (let i = 0; i < 20; i++) step(true)
 		for (let i = 0; i < 20; i++) step(false)
 		expect(shadow.failed).toBe(false)
@@ -1012,18 +1025,63 @@ describe("auto listen route: shadow mismatch silences selected analog (review fi
 		const over = stream.received().subarray(streamFrom)
 		expect(over.subarray(0, 20 * 1_000).every(b => b !== 0)).toBe(true)
 		expect(over.subarray(20 * 1_000).every(b => b === 0)).toBe(true)
-		const ref = resampled(over, h.internals.run?.stream.rate ?? 0)
-		const got = autoSamples(auto.transport).slice(autoFrom / 2)
-		const start = got.findIndex(v => v !== 0)
-		const refStart = ref.findIndex(v => v !== 0)
-		expect(start).toBeGreaterThanOrEqual(0)
-		// The over's 20 × 500 samples at 48 kHz, in order, once (an underrun gap of the first
-		// block aside: compare the samples after it).
-		const body = ref.slice(refStart + 1_920, refStart + 18_000)
-		const at = got.indexOf(body[0] ?? 0, start + 1_920)
-		// Where it belongs: 1 920 samples in, plus at most one block of underrun zeros.
-		expect(at - start).toBeGreaterThanOrEqual(1_920)
-		expect(at - start).toBeLessThanOrEqual(1_920 + 960)
-		expect(firstDifference(got.slice(at, at + body.length), body)).toBe(-1)
+		// Reference: the /stream bytes through a fresh resampler, flagged where they play. The
+		// 20 silent steps before are zeros, a multiple of the 25-sample phase period, so a fresh
+		// resampler has the router's state.
+		const input = new Int16Array(over.length / 2)
+		for (let i = 0; i < input.length; i++) input[i] = over.readInt16LE(2 * i)
+		const ref = feed(
+			new PolyphaseResampler(h.internals.run?.stream.rate ?? 0, 48_000),
+			input,
+			[10_000],
+			4_096,
+			at => (at < 10_000 ? 1 : 0),
+		)
+		const r0 = ref.flags.indexOf(1)
+		const r1 = ref.flags.lastIndexOf(1)
+		const want = ref.samples.slice(r0, r1 + 1)
+		// The whole over: 10 000 samples at 25 kHz are 19 200 at 48 kHz.
+		expect(want.length).toBe(19_200)
+		const got = autoSamples(auto.transport)
+		// Selected in a block after the recovery mark, from the over's first sample.
+		expect(selectedAt).toBeGreaterThanOrEqual(autoFrom)
+		expect(selectedAt % 960).toBe(0)
+		// Walk the whole over: one for one, except the first block, which may hold fewer samples
+		// than 960 (no analog start buffer); its zero fill must end that block and be counted.
+		let k = selectedAt
+		let gap: { at: number; length: number } | null = null
+		for (let j = 0; j < want.length; ) {
+			if (got[k] === want[j]) {
+				k++
+				j++
+				continue
+			}
+			expect(gap).toBeNull()
+			expect(k).toBeLessThan(selectedAt + 960)
+			expect(got.slice(k, selectedAt + 960).every(v => v === 0)).toBe(true)
+			gap = { at: k, length: selectedAt + 960 - k }
+			k = selectedAt + 960
+		}
+		const first = (selectedAt - autoFrom) / 960
+		for (
+			let blk = first;
+			blk < first + Math.floor((k - selectedAt) / 960);
+			blk++
+		) {
+			const stepUp =
+				(underrunsAfter[blk] ?? 0) -
+				(underrunsAfter[blk - 1] ?? underrunsBefore)
+			expect({ blk, stepUp }).toEqual({
+				blk,
+				stepUp: gap !== null && blk === first ? 1 : 0,
+			})
+		}
+		// The measured allowance: the first block comes up short by the 25 kHz resampler's group
+		// delay, 928 of 960 samples, so exactly 32 zeros (as in the 9.1 acceptance run).
+		expect(gap).not.toBeNull()
+		expect(gap?.length).toBe(32)
+		expect(gap?.at).toBe(selectedAt + 928)
+		// Nothing after the over but its ringing and silence.
+		expect(got.slice(k + 200).every(v => v === 0)).toBe(true)
 	})
 })

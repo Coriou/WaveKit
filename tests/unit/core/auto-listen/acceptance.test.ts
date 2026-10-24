@@ -92,13 +92,20 @@ function inCall(
  * next queued sample in the next block. So every reference sample appears exactly once, in
  * order (none lost or repeated). Returns the end index (exclusive) and the underrun gaps.
  */
+interface Gap {
+	/** Output index of the first zero-filled sample. */
+	at: number
+	/** Zero-filled samples, to the end of the block. */
+	length: number
+}
+
 function matchWithUnderruns(
 	auto: readonly number[],
 	want: readonly number[],
 	at: number,
-): { end: number; gaps: number } {
+): { end: number; gaps: Gap[] } {
 	let k = at
-	let gaps = 0
+	const gaps: Gap[] = []
 	for (let j = 0; j < want.length; ) {
 		if (k >= auto.length) throw new Error(`output ended at reference ${j}`)
 		if (auto[k] === want[j]) {
@@ -110,47 +117,98 @@ function matchWithUnderruns(
 		const rest = auto.slice(k, blockEnd)
 		if (rest.some(v => v !== 0))
 			throw new Error(`sample ${k} differs from reference ${j}`)
-		gaps++
+		gaps.push({ at: k, length: blockEnd - k })
 		k = blockEnd
 	}
 	return { end: k, gaps }
 }
 
 /**
- * The analog over in `/auto`: from `at` (the block analog was selected for) the reference from
- * its first audible sample to its last (at most `limit` samples), with underrun gaps only.
+ * The underrun counter moved in exactly the blocks wholly before `to` from `from` that hold a gap, by one each:
+ * every zero fill inside the matched audio is a counted underrun and nothing else is.
+ */
+function expectGapsCounted(
+	h: Harness,
+	gaps: readonly Gap[],
+	from: number,
+	to: number,
+): void {
+	const gapBlocks = new Set(gaps.map(g => Math.floor(g.at / BLOCK)))
+	// The block holding `to` is excluded: the source may run out inside it (its end).
+	for (let b = Math.floor(from / BLOCK); b < Math.floor(to / BLOCK); b++) {
+		const step = (h.underrunsAfter[b] ?? 0) - (h.underrunsAfter[b - 1] ?? 0)
+		expect({ block: b, step }).toEqual({
+			block: b,
+			step: gapBlocks.has(b) ? 1 : 0,
+		})
+	}
+}
+
+/**
+ * The analog over in `/auto`: from `at` (the block analog was selected for) the independent
+ * `/stream` reference from its first playing sample to its last (at most `limit` samples).
+ * Analog plays from its first queued sample without a start buffer, so the first block of the
+ * over may come up short: at most one gap, in that first block, of exactly the samples the FIFO
+ * lacked (`firstGap` when given), counted as an underrun in that block.
  */
 function expectAnalogOver(
 	h: Harness,
 	auto: readonly number[],
 	at: number,
 	limit = Number.POSITIVE_INFINITY,
+	firstGap?: number,
 ): number {
-	const ref = analogReference(h.spans, RATE)
+	const ref = analogReference(h.streamSinceAuto(), h.rate())
 	const r0 = ref.flags.indexOf(1)
 	const r1 = ref.flags.lastIndexOf(1)
 	expect(r0).toBeGreaterThanOrEqual(0)
 	const want = ref.samples.slice(r0, Math.min(r1 + 1, r0 + limit))
 	expect(want.length).toBeGreaterThan(0)
 	const { end, gaps } = matchWithUnderruns(auto, want, at)
-	// Analog plays from its first queued sample without a start buffer, so the first block of an
-	// over can come up short by the resampler's group delay: one underrun gap at most.
-	expect(gaps).toBeLessThanOrEqual(1)
-	expect(gaps).toBeLessThanOrEqual(h.router.underruns)
+	expect(gaps.length).toBeLessThanOrEqual(1)
+	const gap = gaps[0]
+	if (gap !== undefined) {
+		expect(Math.floor(gap.at / BLOCK)).toBe(Math.floor(at / BLOCK))
+		expect(gap.at + gap.length).toBe(at + BLOCK)
+	}
+	if (firstGap !== undefined) expect(gap?.length ?? 0).toBe(firstGap)
+	expectGapsCounted(h, gaps, at, end)
 	return end
 }
 
-/** The digital call in `/auto` from `at`: its full resampled voice and tail, exactly once. */
+/**
+ * The digital call in `/auto` from `at`: its full resampled voice and tail, exactly once, with
+ * no gap, or (hold expiry) gaps only in whole blocks after the last voice sample and before the
+ * flushed tail.
+ */
 function expectDigitalCall(
 	h: Harness,
 	auto: readonly number[],
 	frames: readonly Int16Array[],
 	at: number,
-	maxGaps = 0,
+	tailGaps?: { voiceSamples: number },
 ): number {
-	const { end, gaps } = matchWithUnderruns(auto, digitalReference(frames), at)
-	expect(gaps).toBeLessThanOrEqual(maxGaps)
-	expect(gaps).toBeLessThanOrEqual(h.router.underruns)
+	const want = digitalReference(frames)
+	const { end, gaps } = matchWithUnderruns(auto, want, at)
+	if (tailGaps === undefined) expect(gaps).toEqual([])
+	else {
+		expect(gaps.length).toBeGreaterThan(0)
+		// The voice before the flush plays without a gap; the gaps are contiguous whole blocks
+		// (the first possibly partial), then the tail resumes.
+		const first = gaps[0]
+		if (first === undefined) throw new Error("no gap")
+		const before = auto.slice(at, first.at)
+		expect(before.length).toBeGreaterThanOrEqual(tailGaps.voiceSamples)
+		for (let i = 1; i < gaps.length; i++) {
+			expect(gaps[i]?.at).toBe(
+				(gaps[i - 1]?.at ?? 0) + (gaps[i - 1]?.length ?? 0),
+			)
+			expect(gaps[i]?.length).toBe(BLOCK)
+		}
+		// At most the 300 ms hold: 300 / 20 = 15 blocks.
+		expect(gaps.length).toBeLessThanOrEqual(15)
+	}
+	expectGapsCounted(h, gaps, at, end)
 	return end
 }
 
@@ -230,7 +288,8 @@ describe("auto listen route acceptance: the fake link (9.1)", () => {
 		expect(statuses[2]).toMatchObject({ active: "none", droppedMs: 0 })
 
 		const a0 = changeAt(h, "analog")
-		const aEnd = expectAnalogOver(h, auto, a0)
+		// 9.1: the first block holds 928 of the 960 samples (the resampler group delay): 32 zeros.
+		const aEnd = expectAnalogOver(h, auto, a0, Number.POSITIVE_INFINITY, 32)
 		// About 3 s of the over at 48 kHz (the whole delayed over plays once).
 		expect(aEnd - a0).toBeGreaterThan(3 * 48_000 - 2 * RING)
 		expect(aEnd - a0).toBeLessThan(3 * 48_000 + 2 * RING)
@@ -539,7 +598,7 @@ describe("auto listen route acceptance: 9.2 scenarios", () => {
 				auto,
 				frames,
 				d0,
-				ending === "hold expiry" ? 15 : 0,
+				ending === "hold expiry" ? { voiceSamples: 15 * 160 * 6 } : undefined,
 			)
 			expectZero(auto, dEnd, auto.length)
 			expect(actives(h)).toEqual(["digital", "none"])

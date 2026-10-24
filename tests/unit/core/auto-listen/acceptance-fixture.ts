@@ -206,32 +206,20 @@ export function samplesOf(bytes: Buffer): Int16Array {
 }
 
 /**
- * The analog reference: the captured `/auto` spans through a fresh 48 kHz resampler, split at
- * the span boundaries, with each output sample's qualification.
+ * The analog reference, independent of the `/auto` wiring: the bytes a `/stream` client received
+ * from the `/auto` connect on, through a fresh 48 kHz resampler. A `/stream` sample qualifies
+ * exactly when it plays (the analog input is never zero while the squelch passes it, and muted
+ * samples are zeros), so the input is split wherever that changes.
  */
 export function analogReference(
-	spans: readonly Span[],
+	streamBytes: Buffer,
 	rate: number,
 ): { samples: number[]; flags: number[] } {
-	const bytes = Buffer.concat(spans.map(s => s.bytes))
-	const input = samplesOf(bytes)
+	const input = samplesOf(streamBytes)
 	const cuts: number[] = []
-	const starts: Array<{ at: number; audible: boolean }> = []
-	let at = 0
-	for (const span of spans) {
-		const s = at / 2
-		if (s > 0 && s < input.length && cuts.at(-1) !== s) cuts.push(s)
-		starts.push({ at: s, audible: span.audible })
-		at += span.bytes.length
-	}
-	const flagOf = (sample: number): number => {
-		let flag = 0
-		for (const start of starts) {
-			if (start.at > sample) break
-			flag = start.audible ? 1 : 0
-		}
-		return flag
-	}
+	for (let i = 1; i < input.length; i++)
+		if ((input[i] !== 0) !== (input[i - 1] !== 0)) cuts.push(i)
+	const flagOf = (sample: number): number => (input[sample] !== 0 ? 1 : 0)
 	return feed(new PolyphaseResampler(rate, 48_000), input, cuts, 4_096, flagOf)
 }
 
@@ -406,12 +394,23 @@ export async function harness(options: HarnessOptions = {}) {
 	// Every block the router produced, by reference (Property 14 compares the clients' bytes).
 	const blocks: Buffer[] = []
 	const blockCopies: Buffer[] = []
+	/** `router.underruns` after each block (an increment marks that block as an underrun). */
+	const underrunsAfter: number[] = []
 	const write = router.registry.write.bind(router.registry)
 	router.registry.write = (chunk: Buffer) => {
 		blocks.push(chunk)
+		underrunsAfter.push(router.underruns)
 		blockCopies.push(Buffer.from(chunk))
 		write(chunk)
 	}
+	// The oracle's input: a `/stream` client from the start, and its byte count at the first
+	// `/auto` connect (the `/auto` analog reference starts there).
+	const witness = new ClientTransport()
+	internals.registerClient(witness, "witness")
+	let streamAtAuto: number | null = null
+	router.registry.on("client-connected", () => {
+		streamAtAuto ??= witness.received().length
+	})
 	const changes: RouteChange[] = []
 	router.on("auto-route-changed", (level: LiveAudioAutoRouteLevel) => {
 		const route = demod.getStatus().autoRoute
@@ -482,7 +481,12 @@ export async function harness(options: HarnessOptions = {}) {
 		spans,
 		blocks,
 		blockCopies,
+		underrunsAfter,
 		changes,
+		/** The `/stream` bytes since the first `/auto` connect. */
+		streamSinceAuto(): Buffer {
+			return witness.received().subarray(streamAtAuto ?? 0)
+		},
 		sourceManager,
 		coverage,
 		service,
