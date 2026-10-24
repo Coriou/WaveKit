@@ -156,6 +156,7 @@ describe("LiveDemodulator WG7", () => {
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,
+			squelchMode: "manual",
 			...overrides,
 		})
 		return new LiveDemodulatorClass(
@@ -525,7 +526,8 @@ describe("LiveDemodulator WG7", () => {
 				true,
 			)
 			await liveDemod.start()
-			feed(carrierBlock(-30), 20)
+			// WG10 req 3.8: span audio counts blocks, so the carrier lasts 600 ms of blocks.
+			feed(carrierBlock(-30), 60)
 			t += 1000
 			feed(Buffer.alloc(BLOCK_SAMPLES * 8), 40)
 			tracker.stop()
@@ -556,7 +558,8 @@ describe("LiveDemodulator WG7", () => {
 				now: () => t,
 			})
 			await liveDemod.start()
-			feed(carrierBlock(-30), 10)
+			// WG10 req 3.8: 600 ms of carrier blocks, so the span is announced before the switch.
+			feed(carrierBlock(-30), 60)
 			expect(liveDemod.isSquelchOpen()).toBe(true)
 			// WG10 activity hygiene: long enough to be published (ANALOG_TRANSMISSION_MIN_MS).
 			t += 1000
@@ -826,8 +829,9 @@ describe("LiveDemodulator WG7", () => {
 				)
 				feed(carrierBlock(-30), 2)
 				const blocks = pcmBlocks(tonePcm(88.5, 2, 9))
-				for (const [index, block] of blocks.entries()) {
-					if (index % 10 === 0) feed(carrierBlock(-30))
+				for (const block of blocks) {
+					// WG10 req 3.8: one carrier block per 10 ms of PCM (the tracker matches PCM to blocks).
+					feed(carrierBlock(-30))
 					clock += 10
 					internals().handleAudioData(block)
 				}

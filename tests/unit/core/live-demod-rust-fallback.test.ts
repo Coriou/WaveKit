@@ -2,8 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { MockInstance } from "vitest"
 import * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
+import type { AnalogTransmissionEventData } from "@wavekit/api-types"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
-import { HANDSHAKE_EARLY_MAX } from "../../../src/core/live-demod/rust-engine.js"
+import { wireAnalogTransmissions } from "../../../src/core/analog-transmission.js"
+import type { AnalogTransmissionSource } from "../../../src/core/analog-transmission.js"
+import {
+	GATE_HISTORY_MAX,
+	HANDSHAKE_EARLY_MAX,
+} from "../../../src/core/live-demod/rust-engine.js"
 import {
 	RUST_RETUNE_REJECTED_LOG,
 	SQUELCH_REJECTED_REASON,
@@ -182,6 +188,7 @@ describe("live demod rust fallback and retune", () => {
 			httpPort: port,
 			engine: "rust",
 			chanBinaryPath: "do-not-log-binary",
+			squelchMode: "manual",
 			...overrides,
 		})
 		const captured = capturingLogger()
@@ -480,6 +487,89 @@ describe("live demod rust fallback and retune", () => {
 		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
 		expect(demod?.isSquelchOpen()).toBe(true)
 	})
+
+	it("logs no open block and no transmission while a retune is unacknowledged (WG10 req 3.8.1)", async () => {
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const tracker = wireAnalogTransmissions({
+			source: demod as unknown as AnalogTransmissionSource,
+			frequencyAt: (_id, offsetHz) => ({
+				hz: 446_000_000 + offsetHz,
+				tuningTrust: "commanded",
+			}),
+			broadcast: () => undefined,
+			sink: () => null,
+		})
+		const events: AnalogTransmissionEventData[] = []
+		tracker.on("transmission", event => events.push(event))
+		await demod?.reconfigure({ offsetHz: 2_500 })
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: true, atOutputSample: 480 }),
+		)
+		for (let b = 0; b < 6; b++)
+			channels[0]?.emitLine(
+				demodEvent("metrics", {
+					atOutputSample: 4800 * b,
+					powerDbfs: new Array<number>(10).fill(-30),
+					quietingDb: new Array<number>(10).fill(30),
+				}),
+			)
+		const log = demod?.carrierBlockLog()
+		expect(log?.blocks).toBe(60)
+		expect(
+			Array.from(log?.flags.subarray(0, 60) ?? []).every(f => f === 2),
+		).toBe(true)
+		expect(events).toEqual([])
+		tracker.stop()
+	})
+
+	it.each([
+		["queue-overflow", 480, 480],
+		["input-gap", 0, 0],
+		["input-gap", 960, 0],
+		["unknown-cause", 480, 0],
+	])(
+		"a %s discontinuity (dropped %i) reaches the block log with its cause (WG10 req 3.8.1)",
+		async (cause, droppedSamples, shifted) => {
+			await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+			const log = demod?.carrierBlockLog()
+			const before = log?.pcmBytes ?? -1
+			channels[0]?.emitLine(
+				demodEvent("discontinuity", {
+					sampleIndex: 4800,
+					droppedSamples,
+					cause,
+				}),
+			)
+			// The socket count never jumps; only an overflow queues a position skip.
+			expect(log?.pcmBytes).toBe(before)
+			expect(log?.gapCount).toBe(1)
+			expect(log?.gapDropped[0]).toBe(shifted)
+			expect(log?.masked(10)).toBe(true)
+		},
+	)
+
+	it.each([16, 17, 18])(
+		"%i startup discontinuities: all reach the block log, past its cap it fails closed (WG10 req 3.8.1)",
+		async count => {
+			const lines: string[] = []
+			for (let k = 0; k < count; k++)
+				lines.push(
+					JSON.stringify(
+						demodEvent("discontinuity", {
+							sampleIndex: 480 * k,
+							droppedSamples: 10,
+							cause: "queue-overflow",
+						}),
+					),
+				)
+			openedChunkSuffix = `${lines.join("\n")}\n`
+			await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+			const log = demod?.carrierBlockLog()
+			expect(log?.gapCount).toBe(count)
+			expect(log?.droppedTotal).toBe(count * 10)
+			expect(log?.desynced).toBe(count > 16)
+		},
+	)
 
 	it("does not seed the auto floor from a quieted carrier and sends the floor", async () => {
 		await boot({ squelchMode: "auto", autoMarginDb: 6, modulation: "nfm" })
@@ -930,6 +1020,7 @@ describe("live demod rust fallback and retune", () => {
 			modulation: "nfm",
 			bandwidth: 12_500,
 			squelch: 0,
+			squelchMode: "manual",
 			audioFormat: "s16le",
 		})
 		demod = new LiveDemodulatorClass(
@@ -959,6 +1050,99 @@ describe("live demod rust fallback and retune", () => {
 		expect(demod.getStatus().config.offsetHz).toBe(1000)
 		expect(retunes()).toHaveLength(1)
 	})
+
+	it("a gate close inside a metrics batch applies from its block on, and squelch-changed stays immediate (WG10 req 3.8.1)", async () => {
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const edges: boolean[] = []
+		demod?.on("squelch-changed", open => edges.push(open))
+		const batch = (at: number) =>
+			demodEvent("metrics", {
+				atOutputSample: at,
+				powerDbfs: new Array<number>(10).fill(-30),
+				quietingDb: new Array<number>(10).fill(30),
+			})
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: true, atOutputSample: 480 }),
+		)
+		expect(edges).toEqual([true])
+		channels[0]?.emitLine(batch(0))
+		// Native order: the close (end of block 15) comes before the batch of blocks 10-19,
+		// which may arrive any time later; listeners hear the close at once.
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: false, atOutputSample: 480 * 16 }),
+		)
+		expect(edges).toEqual([true, false])
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(batch(4800))
+		expect(edges).toEqual([true, false])
+		const log = demod?.carrierBlockLog()
+		expect(log?.blocks).toBe(20)
+		expect(Array.from(log?.flags.subarray(0, 20) ?? [])).toEqual([
+			...new Array<number>(15).fill(3),
+			2,
+			2,
+			2,
+			2,
+			2,
+		])
+	})
+
+	it("startup gates and dropped startup batches keep block positions (WG10 req 3.8.1)", async () => {
+		const lines: string[] = [
+			JSON.stringify(demodEvent("gate", { open: true, atOutputSample: 480 })),
+			JSON.stringify(
+				demodEvent("gate", { open: false, atOutputSample: 480 * 5 }),
+			),
+		]
+		// HANDSHAKE_EARLY_MAX + 2 one-block batches: the two oldest are dropped downstream.
+		for (let i = 0; i < HANDSHAKE_EARLY_MAX + 2; i++)
+			lines.push(
+				JSON.stringify(
+					demodEvent("metrics", {
+						atOutputSample: 480 * i,
+						powerDbfs: [-30],
+						quietingDb: [30],
+					}),
+				),
+			)
+		openedChunkSuffix = `${lines.join("\n")}\n`
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const log = demod?.carrierBlockLog()
+		expect(log?.blocks).toBe(HANDSHAKE_EARLY_MAX + 2)
+		// Blocks 0-1 dropped (filled closed, uncarried); 2-3 open; 4+ closed by the gate at block 4.
+		expect(Array.from(log?.flags.subarray(0, 10) ?? [])).toEqual([
+			0, 0, 3, 3, 2, 2, 2, 2, 2, 2,
+		])
+	})
+
+	it.each([GATE_HISTORY_MAX, GATE_HISTORY_MAX + 2])(
+		"the gate history holds %i changes before a late batch (WG10 req 3.8.1)",
+		async changes => {
+			await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+			// One change per block end, open first; then the batch of blocks 0-9 arrives.
+			for (let i = 0; i < changes; i++)
+				channels[0]?.emitLine(
+					demodEvent("gate", {
+						open: i % 2 === 0,
+						atOutputSample: 480 * (i + 1),
+					}),
+				)
+			channels[0]?.emitLine(
+				demodEvent("metrics", {
+					atOutputSample: 0,
+					powerDbfs: new Array<number>(10).fill(-30),
+					quietingDb: new Array<number>(10).fill(30),
+				}),
+			)
+			const flags = Array.from(
+				demod?.carrierBlockLog()?.flags.subarray(0, 4) ?? [],
+			)
+			// Within the bound every block is exact; two past it, block 1's change is the base.
+			expect(flags).toEqual(
+				changes === GATE_HISTORY_MAX ? [3, 2, 3, 2] : [2, 2, 3, 2],
+			)
+		},
+	)
 
 	it("keeps only the newest startup metrics and clears them after apply", async () => {
 		const stale = -90

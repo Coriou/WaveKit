@@ -14,12 +14,14 @@ import type { SourceCaps } from "../../config.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import type { Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { CARRIER_LOG_GAPS } from "../analog-transmission.js"
 import { ChannelSquelch } from "../channel-squelch.js"
 import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
 import type { DemodRetune, DemodSquelch } from "./engine.js"
 import {
 	HANDSHAKE_EARLY_MAX,
+	RUST_METRIC_BLOCK_SAMPLES,
 	RustEngine,
 	type RustStartResult,
 } from "./rust-engine.js"
@@ -86,6 +88,10 @@ export const RUST_RETUNE_REJECTED_LOG = "Live demodulation Rust retune rejected"
 export const SQUELCH_REJECTED_REASON = "squelch-rejected"
 
 export interface RustPowerSample {
+	/** WG10 req 3.8.1: block index in the run (output sample / 480). */
+	blockIndex?: number
+	/** WG10 req 3.8.1: gate state this block was decided with. */
+	gateOpen?: boolean
 	powerDbfs: number | null
 	/** FM quieting shows a carrier, matching `ChannelSquelch.blockQuieted`. */
 	quieted: boolean
@@ -112,6 +118,13 @@ export interface RustRunHost {
 	publishSquelchChange(): void
 	handleRunFailure(run: PipelineRun, reason: string): void
 	measureRun(run: PipelineRun, sample: RustPowerSample): void
+	/** WG10 req 3.8.1: native dropped output samples (the block log keeps positions). */
+	noteDiscontinuity(
+		run: PipelineRun,
+		sampleIndex: number,
+		droppedSamples: number,
+		cause: string,
+	): void
 	resetFloorForRetune(run: PipelineRun): void
 	clearCloseOverride(): void
 	/**
@@ -340,7 +353,13 @@ export class RustLiveRun {
 			clock: this.host.clock,
 		})
 		const slot: { run: PipelineRun | null } = { run: null }
-		const startup: StartupBuffer = { gate: null, metrics: [] }
+		const startup: StartupBuffer = {
+			gate: null,
+			metrics: [],
+			discontinuities: [],
+			droppedBeyond: 0,
+			lastBeyondIndex: 0,
+		}
 		let live = false
 		const epoch = this.startEpoch
 		this.starting = engine
@@ -374,14 +393,30 @@ export class RustLiveRun {
 						const current = slot.run
 						if (current) this.onRetuned(current)
 					},
+					onDiscontinuity: (sampleIndex, dropped, cause) => {
+						if (!live) {
+							// One past the block log's cap is enough: the log then fails closed.
+							if (startup.discontinuities.length <= CARRIER_LOG_GAPS)
+								startup.discontinuities.push({ sampleIndex, dropped, cause })
+							else if (cause === "queue-overflow") {
+								// Past the list: still count every dropped output sample.
+								startup.droppedBeyond += dropped
+								startup.lastBeyondIndex = sampleIndex
+							}
+							return
+						}
+						const current = slot.run
+						if (current)
+							this.host.noteDiscontinuity(current, sampleIndex, dropped, cause)
+					},
 					onRejected: reasonCode => {
 						const current = slot.run
 						if (current) this.onRetuneRejected(current, reasonCode)
 					},
-					onMetrics: (power, quieting) => {
+					onMetrics: (power, quieting, at, gates) => {
 						const normalized = quieting.map(asQuietingNumber)
 						if (!live) {
-							startup.metrics.push({ power, quieting: normalized })
+							startup.metrics.push({ power, quieting: normalized, at, gates })
 							if (startup.metrics.length > HANDSHAKE_EARLY_MAX) {
 								startup.metrics.splice(
 									0,
@@ -391,7 +426,7 @@ export class RustLiveRun {
 							return
 						}
 						const current = slot.run
-						if (current) this.onMetrics(current, power, normalized)
+						if (current) this.onMetrics(current, power, normalized, at, gates)
 					},
 					onDown: () => {
 						const current = slot.run
@@ -633,8 +668,27 @@ export class RustLiveRun {
 	/** Gate and metrics that arrived in the `opened` chunk. */
 	private applyStartup(run: PipelineRun, startup: StartupBuffer): void {
 		if (startup.gate !== null) this.onGate(run, startup.gate)
+		// Discontinuities first: they mask their blocks before the startup metrics log them.
+		for (const gap of startup.discontinuities)
+			this.host.noteDiscontinuity(run, gap.sampleIndex, gap.dropped, gap.cause)
+		startup.discontinuities.length = 0
+		// The list is already past the log's cap here, so this only keeps droppedTotal exact.
+		if (startup.droppedBeyond > 0)
+			this.host.noteDiscontinuity(
+				run,
+				startup.lastBeyondIndex,
+				startup.droppedBeyond,
+				"queue-overflow",
+			)
+		startup.droppedBeyond = 0
 		for (const sample of startup.metrics)
-			this.onMetrics(run, sample.power, sample.quieting)
+			this.onMetrics(
+				run,
+				sample.power,
+				sample.quieting,
+				sample.at,
+				sample.gates,
+			)
 		startup.metrics.length = 0
 	}
 
@@ -642,15 +696,21 @@ export class RustLiveRun {
 		run: PipelineRun,
 		powerDbfs: Array<number | null>,
 		quietingDb: Array<number | null>,
+		at: number,
+		gates: ReadonlyArray<boolean>,
 	): void {
 		if (this.host.currentRun() !== run || run.stopping) return
+		const first = Math.round(at / RUST_METRIC_BLOCK_SAMPLES)
 		const config = this.host.config()
 		const count = Math.max(powerDbfs.length, quietingDb.length)
 		for (let i = 0; i < count; i++) {
 			const power = powerDbfs[i] ?? null
 			const quieting = quietingDb[i] ?? null
 			if (power !== null) run.externalPowerDbfs = power
+			const gateOpen = gates[i]
 			this.host.measureRun(run, {
+				blockIndex: first + i,
+				...(gateOpen === undefined ? {} : { gateOpen }),
 				powerDbfs: power,
 				quieted: metricsQuieted(config, quieting),
 				quietingDb: quieting,
@@ -716,9 +776,19 @@ export class RustLiveRun {
 
 interface StartupBuffer {
 	gate: boolean | null
+	/** Queue-overflow samples of startup notices past the kept list. */
+	droppedBeyond: number
+	lastBeyondIndex: number
+	discontinuities: Array<{
+		sampleIndex: number
+		dropped: number
+		cause: string
+	}>
 	metrics: Array<{
 		power: Array<number | null>
 		quieting: Array<number | null>
+		at: number
+		gates: ReadonlyArray<boolean>
 	}>
 }
 

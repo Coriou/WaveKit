@@ -76,6 +76,165 @@ export const ANALOG_TRANSMISSION_MIN_MS = 500
 /** WG10 activity hygiene: 10 ms blocks with FM quieting a nfm/wfm transmission needs. */
 export const ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS = 3
 
+/** WG10 req 3.8: consecutive open carried blocks that start a carrier span. */
+export const ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS = 10
+/** WG10 req 3.8: blocks the carrier block log keeps (20.48 s at 10 ms). */
+export const CARRIER_LOG_CAPACITY = 2048
+/** WG10 req 3.8: PCM the tracker holds until its blocks are decided. */
+export const CARRIER_PCM_RING_MS = 2000
+/** WG10 req 3.8.7: longest wait of a span-end tone snapshot for its PCM (500 ms). */
+export const CARRIER_SNAPSHOT_WAIT_BLOCKS = 50
+/** WG10 req 3.8.13: squelch tail elimination tone, analysis window and dominance. */
+export const CARRIER_STE_HZ = 55
+export const CARRIER_STE_WINDOW_MS = 200
+export const CARRIER_STE_FRACTION = 0.5
+/** WG10 req 3.8.1: native discontinuities the block log keeps per run. */
+export const CARRIER_LOG_GAPS = 16
+export const CARRIER_FLAG_OPEN = 1
+export const CARRIER_FLAG_CARRIED = 2
+
+/**
+ * WG10 req 3.8.1: one record per measured squelch block of a pipeline run (squelch open,
+ * carried), plus the run's PCM byte count, so the tracker consumes carrier evidence in block
+ * order and matches PCM by output-sample position. Block `k` covers output samples
+ * `[k × blockSamples, (k + 1) × blockSamples)`. Allocation-free after construction.
+ */
+export class CarrierBlockLog {
+	readonly flags = new Uint8Array(CARRIER_LOG_CAPACITY)
+	/** Increments when the run changes. */
+	epoch = 0
+	/** Blocks noted in this epoch. */
+	blocks = 0
+	/** PCM bytes noted in this epoch. */
+	pcmBytes = 0
+	blockSamples = 1
+	blockMs = 10
+	/** Called after every noted block (the tracker consumes it at once). */
+	onBlock: (() => void) | null = null
+	private owner: object | null = null
+	/** Block ranges [from, to) of native discontinuities: never open or carried. */
+	private readonly masks: number[] = []
+
+	/**
+	 * `index` (block position in the run, when the engine reports one): blocks never reported
+	 * (dropped metrics) are filled as closed and uncarried, an already noted index is ignored,
+	 * so block `k` of the log is always output samples `[k × B, (k + 1) × B)`.
+	 */
+	note(
+		run: object,
+		rate: number,
+		open: boolean,
+		carried: boolean,
+		index?: number,
+	): void {
+		this.sync(run, rate)
+		if (index !== undefined) {
+			if (index < this.blocks) return
+			const gap = index - this.blocks
+			const fill = Math.min(gap, CARRIER_LOG_CAPACITY)
+			for (let i = 0; i < fill; i++)
+				this.flags[(index - fill + i) % CARRIER_LOG_CAPACITY] = 0
+			this.blocks = index
+		}
+		this.flags[this.blocks % CARRIER_LOG_CAPACITY] =
+			this.desynced || this.masked(this.blocks)
+				? 0
+				: (open ? CARRIER_FLAG_OPEN : 0) | (carried ? CARRIER_FLAG_CARRIED : 0)
+		this.blocks += 1
+		const listener = this.onBlock
+		if (listener === null) return
+		try {
+			listener()
+		} catch {
+			// The tracker never throws into the demodulator.
+		}
+	}
+
+	notePcm(run: object, rate: number, bytes: number): void {
+		this.sync(run, rate)
+		this.pcmBytes += bytes
+	}
+
+	/**
+	 * WG10 req 3.8.1: a native `discontinuity`. `queue-overflow`: native dropped `dropped` output
+	 * samples from `sampleIndex` (the socket never carries them); their blocks count as closed
+	 * and the tracker re-inserts the gap when its PCM cursor reaches `sampleIndex`. Any other
+	 * cause (`input-gap`: a DSP reset without output loss, or an unknown cause): no shift; the
+	 * block at `sampleIndex` counts as closed, which ends a carrier run or span there.
+	 */
+	noteDiscontinuity(
+		run: object,
+		rate: number,
+		sampleIndex: number,
+		dropped: number,
+		cause: string,
+	): void {
+		this.sync(run, rate)
+		if (!Number.isSafeInteger(sampleIndex) || sampleIndex < 0) return
+		const overflow = cause === "queue-overflow"
+		if (overflow && !(dropped > 0)) return
+		if (overflow) this.droppedTotal += dropped
+		if (this.gapCount >= CARRIER_LOG_GAPS) {
+			// More gaps than the run can track: fail closed until the next run (3.8.1).
+			this.desynced = true
+			this.gapCount += 1
+			return
+		}
+		const from = Math.floor(sampleIndex / this.blockSamples)
+		const to = overflow
+			? Math.ceil((sampleIndex + dropped) / this.blockSamples)
+			: from + 1
+		const first = Math.max(from, this.blocks - CARRIER_LOG_CAPACITY)
+		for (let k = first; k < Math.min(to, this.blocks); k++)
+			this.flags[k % CARRIER_LOG_CAPACITY] = 0
+		this.masks.push(from, to)
+		const slot = this.gapCount % CARRIER_LOG_GAPS
+		this.gapFrom[slot] = from
+		this.gapTo[slot] = to
+		this.gapAt[slot] = sampleIndex
+		this.gapDropped[slot] = overflow ? dropped : 0
+		this.gapCount += 1
+	}
+
+	/** Discontinuities noted this epoch (at most CARRIER_LOG_GAPS are kept). */
+	gapCount = 0
+	/** Output samples dropped by queue overflows this epoch, all of them. */
+	droppedTotal = 0
+	/** More than CARRIER_LOG_GAPS discontinuities this epoch: every block is closed. */
+	desynced = false
+	readonly gapFrom = new Float64Array(CARRIER_LOG_GAPS)
+	readonly gapTo = new Float64Array(CARRIER_LOG_GAPS)
+	readonly gapAt = new Float64Array(CARRIER_LOG_GAPS)
+	/** Output samples the socket never carries (queue-overflow), else 0. */
+	readonly gapDropped = new Float64Array(CARRIER_LOG_GAPS)
+
+	masked(block: number): boolean {
+		for (let i = 0; i + 1 < this.masks.length; i += 2)
+			if (block >= (this.masks[i] ?? 0) && block < (this.masks[i + 1] ?? 0))
+				return true
+		return false
+	}
+
+	private sync(run: object, rate: number): void {
+		if (run === this.owner) return
+		this.owner = run
+		this.epoch += 1
+		this.blocks = 0
+		this.pcmBytes = 0
+		this.masks.length = 0
+		this.gapCount = 0
+		this.droppedTotal = 0
+		this.desynced = false
+		const r = Number.isFinite(rate) && rate > 0 ? rate : 1
+		// Same rounding as ChannelSquelch (10 ms blocks).
+		this.blockSamples = Math.max(1, Math.round((r * 10) / 1000))
+		this.blockMs = (this.blockSamples / r) * 1000
+	}
+}
+
+const FEED = 1
+const DROP = 2
+
 /** Hygiene knobs (tests; production uses the constants). */
 export interface AnalogTransmissionHygiene {
 	mergeGapMs: number
@@ -110,6 +269,8 @@ export interface AnalogTransmissionSource {
 	 * when the pipeline has none (absent: the carrier rule is skipped).
 	 */
 	carrierBlocks?(): number | null
+	/** WG10 req 3.8: the per-block carrier log, null exactly when `carrierBlocks()` is null. */
+	carrierBlockLog?(): CarrierBlockLog | null
 	on(event: "squelch-changed", listener: (open: boolean) => void): unknown
 	on(event: "level", listener: (level: LiveAudioLevel) => void): unknown
 	on(
@@ -218,12 +379,28 @@ interface OpenTransmission {
 	/** The carrier rule applies (the source reported a count at the first open). */
 	carrierRequired: boolean
 	cancelTimer: (() => void) | null
+	/** WG10 req 3.8: delimited by carrier spans (block log path). */
+	carrierSpans: boolean
+	/** Carrier end of the open span (block time), ms. */
+	spanEndMs: number
+	/** First block whose PCM this transmission's detector takes. */
+	feedFromBlock: number
+	/**
+	 * Carrier end block of the last span while its tone snapshot waits for the PCM up to that
+	 * block (3.8.7); null when settled.
+	 */
+	snapshotDueBlock: number | null
+	/** A span merged while the previous span's snapshot was pending (its split waits for it). */
+	snapshotResumed: boolean
 }
 
 /** The held part of a transmission while a resumed segment may split off (WG10 R2). */
 interface SegmentSplit {
-	/** The transmission's tone at the last segment end: the held part's tone on a split. */
-	heldTone: AnalogTransmissionTone
+	/**
+	 * The transmission's tone at the last segment end: the held part's tone on a split. Null
+	 * while that span's PCM is still arriving (3.8.7); no split decision until it is known.
+	 */
+	heldTone: AnalogTransmissionTone | null
 	heldGapEndMs: number
 	heldAudioMs: number
 	heldBestSegmentCarrier: number
@@ -237,6 +414,8 @@ interface SegmentSplit {
 	peak: number | null
 	powerSum: number
 	powerCount: number
+	/** First block whose PCM the segment detector takes (carrier path). */
+	feedFromBlock: number
 }
 
 type AssertExtends<T extends U, U> = T
@@ -362,6 +541,54 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		short: 0,
 		noCarrier: 0,
 	}
+	// WG10 req 3.8 carrier path state (block log).
+	private readonly carrierWanted: boolean
+	private carrierEpoch = -1
+	private carrierAnchorMs = 0
+	private carrierBlockMs = 10
+	private carrierBlockSamples = 1
+	private carrierCursor = 0
+	private runLen = 0
+	private runStart = 0
+	private uncarried = 0
+	private inSpan = false
+	private discardedRunCount = 0
+	private readonly decisions = new Uint8Array(CARRIER_LOG_CAPACITY)
+	private pcmRing: Buffer | null = null
+	private pcmRingRate = 0
+	private pcmRingWidth = 0
+	private pcmFormat: TonePcmFormat | null = null
+	/** Epoch byte position of the ring head, ring offset of the head, bytes held. */
+	private pcmHead = 0
+	private pcmHeadOff = 0
+	private pcmLen = 0
+	/** Epoch byte position after the last accepted chunk. */
+	private pcmEnd = 0
+	private hookedLog: CarrierBlockLog | null = null
+	// WG10 req 3.8.1 discontinuities: socket bytes seen, bytes native dropped and re-inserted,
+	// gaps read from the log, overflow gaps waiting for the PCM cursor, tracker-only masks.
+	private socketEnd = 0
+	private gapsRead = 0
+	private readonly pendingGaps: Array<{ at: number; dropped: number }> = []
+	private readonly lateMasks: number[] = []
+	private log: CarrierBlockLog | null = null
+	/** WG10 req 3.8.1: this run lost track of its gaps; nothing is fed until the next run. */
+	private desynced = false
+	private desyncCount = 0
+	// WG10 req 3.8.13: one held window of transmission-detector audio and its 55 Hz Goertzel.
+	private steBuf: Buffer | null = null
+	private steLen = 0
+	private steRate = 0
+	private steWidth = 0
+	private steCoeff = 0
+	private steS1 = 0
+	private steS2 = 0
+	private steEnergy = 0
+	private steOwner: OpenTransmission | null = null
+	/** Block after the last carried block of the open span. */
+	private spanEndBlock = 0
+	/** PCM bytes dropped unfed (ring overflow or resync), since construction. */
+	private droppedPcmBytes = 0
 
 	constructor(options: AnalogTransmissionTrackerOptions) {
 		super()
@@ -390,6 +617,22 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 		this.setTimer = options.setTimer ?? defaultTimer
 		this.onSuppressed = options.onSuppressed
+		this.carrierWanted = typeof this.source.carrierBlockLog === "function"
+	}
+
+	/** WG10 req 3.8: carried runs shorter than a span that were dropped, since construction. */
+	discardedRuns(): number {
+		return this.discardedRunCount
+	}
+
+	/** WG10 req 3.8.1: runs that saw more discontinuities than tracked (fail closed). */
+	desyncedRuns(): number {
+		return this.desyncCount
+	}
+
+	/** WG10 req 3.8.7: PCM bytes dropped unfed (ring overflow or resync), since construction. */
+	droppedPcm(): number {
+		return this.droppedPcmBytes
 	}
 
 	/** WG10 activity hygiene: transmissions suppressed (short, no carrier) since construction. */
@@ -409,6 +652,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.source.on("level", this.handleLevel)
 		this.source.on("config-changed", this.handleConfig)
 		this.source.on("stopped", this.handleStopped)
+		if (this.carrierWanted) {
+			this.attachPcm()
+			this.readLog()
+		}
 	}
 
 	/** Closes an open transmission with "stopped" (a merge-gap one at its end), then detaches. */
@@ -416,6 +663,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		try {
 			if (this.transmission)
 				this.guard(() => {
+					this.drainCarrier()
 					this.close("stopped", this.clock())
 				})
 		} finally {
@@ -445,6 +693,21 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	private readonly handleSquelch = (open: boolean): void => {
 		this.guard(() => {
+			if (this.readLog() !== null) {
+				// WG10 req 3.8: squelch edges only prompt the block log, except a teardown
+				// edge (stop or a transmission-closing reconfigure), which closes at once.
+				this.drainCarrier()
+				if (open || this.transmission === null) return
+				const reason = this.squelchCloseReason()
+				if (reason !== "squelch") {
+					this.close(
+						this.transmission.segmentOpen ? reason : "squelch",
+						this.clock(),
+					)
+					this.resetSpanState()
+				}
+				return
+			}
 			const now = this.clock()
 			if (open) {
 				const held = this.transmission
@@ -473,6 +736,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	private readonly handleLevel = (level: LiveAudioLevel): void => {
 		this.guard(() => {
+			if (this.readLog() !== null) this.drainCarrier()
+			if (this.transmission?.carrierSpans === true) {
+				this.carrierLevel(level)
+				return
+			}
 			const open = this.transmission
 			if (!open) return
 			const now = this.clock()
@@ -501,14 +769,24 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	private readonly handleConfig = (config: LiveDemodConfig): void => {
 		this.guard(() => {
+			this.drainCarrier()
 			const open = this.transmission
 			if (!open) return
 			if (!this.configClosesTransmission(open, config)) return
 			this.close(open.segmentOpen ? "config" : "squelch", this.clock())
+			// WG10 req 3.8: blocks after the change need a new 10-block run to reopen.
+			this.resetSpanState()
 		})
 	}
 
 	private readonly handlePcm = (chunk: Buffer, format: TonePcmFormat): void => {
+		const log = this.carrierWanted ? this.readLog() : null
+		if (log !== null) {
+			this.guard(() => {
+				this.carrierPcm(log, chunk, format)
+			})
+			return
+		}
 		const open = this.transmission
 		if (!open || !open.segmentOpen || this.toneBroken) return
 		this.noteAudio(open, chunk, format)
@@ -541,6 +819,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	private readonly handleStopped = (): void => {
 		this.guard(() => {
+			this.drainCarrier()
 			const open = this.transmission
 			if (!open) return
 			this.close(open.segmentOpen ? "stopped" : "squelch", this.clock())
@@ -548,7 +827,13 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private detach(): void {
+		if (this.hookedLog !== null && this.hookedLog.onBlock === this.blockHook)
+			this.hookedLog.onBlock = null
+		this.hookedLog = null
+		const wasAttached = this.attached
+		this.attached = false
 		this.detachPcm()
+		this.attached = wasAttached
 		const held = this.transmission
 		if (held) {
 			// Detached while a transmission is held: drop it without output (stop() closed it first).
@@ -571,6 +856,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	private detachPcm(): void {
 		if (!this.pcmAttached) return
+		if (this.carrierWanted && this.attached) return
 		this.pcmAttached = false
 		this.source.off("pcm", this.handlePcm)
 	}
@@ -602,7 +888,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		return "squelch"
 	}
 
-	private openTransmission(now: number, continuation = false): void {
+	private openTransmission(
+		now: number,
+		continuation = false,
+		carrier: { startBlock: number; endMs: number } | null = null,
+	): void {
 		let status: LiveDemodStatus
 		try {
 			status = this.source.getStatus()
@@ -652,8 +942,14 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			carrierBase: null,
 			carrierRequired: false,
 			cancelTimer: null,
+			carrierSpans: carrier !== null,
+			spanEndMs: carrier?.endMs ?? now,
+			feedFromBlock: carrier?.startBlock ?? 0,
+			snapshotDueBlock: null,
+			snapshotResumed: false,
 		}
-		const base = this.readCarrierBlocks()
+		// WG10 req 3.8.6: on the carrier path the span rule implies the 3.7 carrier rule.
+		const base = carrier === null ? this.readCarrierBlocks() : null
 		this.transmission.carrierBase = base
 		this.transmission.carrierRequired = base !== null
 		this.attachPcm()
@@ -668,6 +964,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		let reason = asked
 		const open = this.transmission
 		if (!open) return
+		// A span that ended on carrier evidence is in its gap, whatever its PCM still owes.
+		if (open.snapshotDueBlock !== null) this.settleSnapshot(true)
 		this.transmission = null
 		this.cancelGapTimer(open)
 		this.detachPcm()
@@ -676,8 +974,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.collectCarrier(open)
 			// Only a squelch close happens a hang after the last above-threshold
 			// block; retune, max-duration, stop and config end at the close itself.
-			endedMs =
-				reason === "squelch"
+			endedMs = open.carrierSpans
+				? reason === "squelch"
+					? open.spanEndMs
+					: Math.max(open.segmentStartMs, closeAt)
+				: reason === "squelch"
 					? Math.max(open.segmentStartMs, closeAt - this.hangMs())
 					: closeAt
 			open.audioMs += Math.max(0, endedMs - open.segmentStartMs)
@@ -766,7 +1067,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		return !this.frequencyDrifted(open)
 	}
 
-	private resumeSegment(open: OpenTransmission, now: number): void {
+	private resumeSegment(
+		open: OpenTransmission,
+		now: number,
+		tonePending = false,
+	): void {
 		this.cancelGapTimer(open)
 		open.segmentOpen = true
 		open.segmentStartMs = now
@@ -774,8 +1079,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		if (open.carrierRequired)
 			open.carrierBase = this.readCarrierBlocks() ?? open.carrierBase
 		open.split = null
-		const heldTone = open.segmentEndTone
-		if (heldTone !== null && toneKeys(heldTone).length > 0) {
+		const heldTone = tonePending ? null : open.segmentEndTone
+		if (tonePending || (heldTone !== null && toneKeys(heldTone).length > 0)) {
 			const detector = this.makeSegmentDetector()
 			if (detector !== null)
 				open.split = {
@@ -792,6 +1097,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 					peak: null,
 					powerSum: 0,
 					powerCount: 0,
+					feedFromBlock: open.feedFromBlock,
 				}
 		}
 		this.attachPcm()
@@ -808,8 +1114,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		if (split === null || this.transmission !== open || !open.segmentOpen)
 			return
 		const segmentTone = gatedTone(split.detector, split.audioSeconds)
-		if (segmentTone === null || !tonesDiffer(split.heldTone, segmentTone))
-			return
+		const heldTone = split.heldTone
+		if (heldTone === null) return
+		if (segmentTone === null || !tonesDiffer(heldTone, segmentTone)) return
+		this.steFlush(open)
 		const held: OpenTransmission = {
 			...open,
 			segmentOpen: false,
@@ -841,10 +1149,677 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			segmentEndTone: null,
 			split: null,
 			cancelTimer: null,
+			feedFromBlock: split.feedFromBlock,
 		}
 		this.transmission = next
-		this.finalise(held, "squelch", split.heldGapEndMs, split.heldTone)
+		this.finalise(held, "squelch", split.heldGapEndMs, heldTone)
 		if (this.transmission === next) this.announceIfQualified(next, now)
+	}
+
+	// ---- WG10 req 3.8: carrier path (block log) ----
+
+	private readLog(): CarrierBlockLog | null {
+		if (!this.carrierWanted) return null
+		let log: CarrierBlockLog | null
+		try {
+			log = this.source.carrierBlockLog?.() ?? null
+		} catch {
+			return null
+		}
+		if (log !== null && log.onBlock !== this.blockHook && this.attached) {
+			log.onBlock = this.blockHook
+			this.hookedLog = log
+		}
+		return log
+	}
+
+	private readonly blockHook = (): void => {
+		this.guard(() => {
+			this.drainCarrier()
+		})
+	}
+
+	private blockTime(block: number): number {
+		return this.carrierAnchorMs + block * this.carrierBlockMs
+	}
+
+	/** Consumes every new block of the log in order, then the PCM those blocks decide. */
+	private drainCarrier(): void {
+		const log = this.readLog()
+		if (log === null) return
+		if (log.epoch !== this.carrierEpoch) this.resetCarrier(log, 0)
+		this.log = log
+		this.readGaps(log)
+		this.refineAnchor(log)
+		const end = log.blocks
+		if (end - this.carrierCursor > CARRIER_LOG_CAPACITY) {
+			// Blocks overwritten before they were read: a break in the evidence.
+			this.runLen = 0
+			if (this.inSpan) this.endSpan()
+			this.carrierCursor = end - CARRIER_LOG_CAPACITY
+		}
+		while (this.carrierCursor < end) {
+			const k = this.carrierCursor
+			this.carrierCursor = k + 1
+			this.carrierBlock(k, log.flags[k % CARRIER_LOG_CAPACITY] ?? 0)
+		}
+		this.drainPcm()
+		this.settleSnapshot(false)
+	}
+
+	private resetCarrier(log: CarrierBlockLog, pendingPcm: number): void {
+		if (this.inSpan) this.endSpan()
+		this.settleSnapshot(true)
+		this.carrierEpoch = log.epoch
+		this.carrierBlockMs = log.blockMs
+		this.carrierBlockSamples = log.blockSamples
+		this.carrierAnchorMs = this.clock() - log.blocks * log.blockMs
+		this.carrierCursor = Math.max(0, log.blocks - CARRIER_LOG_CAPACITY)
+		this.runLen = 0
+		this.uncarried = 0
+		this.decisions.fill(0)
+		this.socketEnd = log.pcmBytes - pendingPcm
+		this.pcmEnd = this.socketEnd
+		this.gapsRead = 0
+		this.pendingGaps.length = 0
+		this.lateMasks.length = 0
+		this.desynced = false
+		this.pcmHead = this.pcmEnd
+		this.pcmHeadOff = 0
+		this.pcmLen = 0
+	}
+
+	/**
+	 * Blocks are logged no earlier than their stream time, so `clock - blocks × blockMs` only
+	 * overestimates the run's start; the least estimate seen while idle is the anchor (3.8.1).
+	 */
+	private refineAnchor(log: CarrierBlockLog): void {
+		// Only while idle, so the times of a span and its transmission share one anchor.
+		if (this.transmission !== null || this.inSpan || this.runLen > 0) return
+		const estimate = this.clock() - log.blocks * log.blockMs
+		if (estimate < this.carrierAnchorMs) this.carrierAnchorMs = estimate
+	}
+
+	private hangBlocks(): number {
+		return Math.max(1, Math.ceil(this.hangMs() / this.carrierBlockMs))
+	}
+
+	private carrierBlock(k: number, flags: number): void {
+		const live =
+			(flags & (CARRIER_FLAG_OPEN | CARRIER_FLAG_CARRIED)) ===
+			(CARRIER_FLAG_OPEN | CARRIER_FLAG_CARRIED)
+		const endMs = this.blockTime(k + 1)
+		if (live) {
+			if (this.runLen === 0) this.runStart = k
+			this.runLen += 1
+			this.uncarried = 0
+			if (this.inSpan) {
+				this.decisions[k % CARRIER_LOG_CAPACITY] = FEED
+				this.spanEndBlock = k + 1
+				const open = this.transmission
+				if (open !== null && open.carrierSpans && open.segmentOpen) {
+					open.spanEndMs = endMs
+					this.announceIfQualified(open, endMs)
+				}
+			} else if (this.runLen >= ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS) {
+				for (let i = this.runStart; i <= k; i++)
+					this.decisions[i % CARRIER_LOG_CAPACITY] = FEED
+				this.spanEndBlock = k + 1
+				this.startSpan(this.runStart, endMs)
+			}
+		} else {
+			if (!this.inSpan && this.runLen > 0) {
+				for (let i = this.runStart; i < k; i++)
+					this.decisions[i % CARRIER_LOG_CAPACITY] = DROP
+				this.discardedRunCount += 1
+			}
+			this.runLen = 0
+			this.decisions[k % CARRIER_LOG_CAPACITY] = DROP
+			if (this.inSpan) {
+				this.uncarried += 1
+				if (
+					(flags & CARRIER_FLAG_OPEN) === 0 ||
+					this.uncarried >= this.hangBlocks()
+				)
+					this.endSpan()
+			}
+		}
+		this.settleSnapshot(false)
+		if (!this.inSpan) this.finaliseIfDue(endMs)
+	}
+
+	/** Clears run and span state (a closing config change or teardown edge). */
+	private resetSpanState(): void {
+		this.inSpan = false
+		this.runLen = 0
+		this.uncarried = 0
+	}
+
+	/**
+	 * Takes the deferred span-end tone snapshot once the PCM up to the span's carrier end was
+	 * consumed, or at most CARRIER_SNAPSHOT_WAIT_BLOCKS blocks later, or when forced.
+	 */
+	private settleSnapshot(force: boolean): void {
+		const open = this.transmission
+		if (open === null || open.snapshotDueBlock === null) return
+		const due = open.snapshotDueBlock
+		const blockBytes = this.carrierBlockSamples * Math.max(1, this.pcmRingWidth)
+		const consumed = Math.floor(this.pcmHead / blockBytes)
+		if (
+			!force &&
+			consumed < due &&
+			this.carrierCursor - due < CARRIER_SNAPSHOT_WAIT_BLOCKS
+		)
+			return
+		open.snapshotDueBlock = null
+		if (open.snapshotResumed) {
+			// A later span already merged: its split detector now learns the earlier tone. The
+			// main detector holds exactly the earlier span's audio when settled on time.
+			open.snapshotResumed = false
+			const tone = this.snapshotTone(open)
+			open.segmentEndTone = tone
+			const split = open.split
+			if (split !== null) {
+				if (tone === null || toneKeys(tone).length === 0) open.split = null
+				else split.heldTone = tone
+			}
+			return
+		}
+		// The segment ends now, once its PCM is in: until here it stayed open for a tone split.
+		if (open.segmentOpen) this.closeSegmentBooks(open)
+		open.segmentEndTone = this.snapshotTone(open)
+		open.split = null
+	}
+
+	/** Gap bookkeeping of a span end (the snapshot may still wait for its PCM). */
+	private closeSegmentBooks(open: OpenTransmission): void {
+		open.segmentOpen = false
+		open.gapEndMs = open.spanEndMs
+		open.audioMs += Math.max(0, open.spanEndMs - open.segmentStartMs)
+	}
+
+	/** A span qualified: merge into the held transmission or open a new one at its start. */
+	private startSpan(startBlock: number, endMs: number): void {
+		this.inSpan = true
+		this.uncarried = 0
+		const startMs = this.blockTime(startBlock)
+		const held = this.transmission
+		if (held !== null) {
+			// The previous span's snapshot keeps waiting for its PCM (3.8.7); only its gap books close.
+			if (held.snapshotResumed) this.settleSnapshot(true)
+			if (held.snapshotDueBlock !== null && held.segmentOpen)
+				this.closeSegmentBooks(held)
+			if (
+				held.carrierSpans &&
+				!held.segmentOpen &&
+				startMs - held.gapEndMs <= this.hygiene.mergeGapMs &&
+				this.canMerge(held, startMs)
+			) {
+				held.spanEndMs = endMs
+				const pending = held.snapshotDueBlock !== null
+				this.resumeSegment(held, startMs, pending)
+				if (held.split !== null) held.split.feedFromBlock = startBlock
+				held.snapshotResumed = pending
+				if (pending) this.settleSnapshot(false)
+				return
+			}
+			this.close("squelch", startMs)
+		}
+		this.openSpanTransmission(startBlock, endMs, false)
+	}
+
+	private openSpanTransmission(
+		startBlock: number,
+		endMs: number,
+		continuation: boolean,
+	): void {
+		if (!this.canOpen()) return
+		const startMs = this.blockTime(startBlock)
+		this.openTransmission(startMs, continuation, { startBlock, endMs })
+	}
+
+	/** Ends the open span at its carrier end; the held transmission waits a merge gap. */
+	private endSpan(): void {
+		this.inSpan = false
+		this.uncarried = 0
+		const open = this.transmission
+		if (open === null || !open.carrierSpans || !open.segmentOpen) return
+		if (open.snapshotResumed) this.settleSnapshot(true)
+		// The span's last PCM may still be on its way: the segment stays open (for a tone split)
+		// until its PCM through the last carrier block is consumed, bounded (3.8.7).
+		open.snapshotDueBlock = this.spanEndBlock
+		this.settleSnapshot(false)
+	}
+
+	/** Final once past the merge gap, unless a run started inside the gap is still provisional. */
+	private finaliseIfDue(endMs: number): void {
+		const open = this.transmission
+		if (open === null || !open.carrierSpans || open.segmentOpen) return
+		if (endMs - open.gapEndMs <= this.hygiene.mergeGapMs) return
+		if (
+			this.runLen > 0 &&
+			this.blockTime(this.runStart) - open.gapEndMs <= this.hygiene.mergeGapMs
+		)
+			return
+		this.drainPcm()
+		if (this.transmission === open) this.close("squelch", endMs)
+	}
+
+	/** Level samples on the carrier path: power, tone split, announce, max duration, retune. */
+	private carrierLevel(level: LiveAudioLevel): void {
+		const open = this.transmission
+		if (open === null || !open.segmentOpen) return
+		const now = this.clock()
+		this.notePower(open, level.channelPowerDbfs)
+		this.splitIfToneChanged(open, now)
+		const current = this.transmission
+		if (current === null) return
+		this.announceIfQualified(current, now)
+		const next = this.carrierCursor
+		if (now - current.startedAtMs >= this.maxDurationMs) {
+			this.close("max-duration", now)
+			if (this.inSpan)
+				this.openTransmission(now, true, {
+					startBlock: next,
+					endMs: now,
+				})
+			return
+		}
+		if (this.frequencyDrifted(current)) {
+			this.close("retune", now)
+			if (this.inSpan && this.canOpen())
+				this.openTransmission(now, false, { startBlock: next, endMs: now })
+		}
+	}
+
+	private carrierPcm(
+		log: CarrierBlockLog,
+		chunk: Buffer,
+		format: TonePcmFormat,
+	): void {
+		if (log.epoch !== this.carrierEpoch) this.resetCarrier(log, chunk.length)
+		this.log = log
+		this.pcmFormat = format
+		const width = format.format === "s16le" ? 2 : 4
+		if (this.pcmRingRate !== format.rate || this.pcmRingWidth !== width) {
+			const bytes =
+				Math.max(1, Math.ceil((format.rate * CARRIER_PCM_RING_MS) / 1000)) *
+				width
+			this.pcmRing = Buffer.alloc(bytes)
+			this.pcmRingRate = format.rate
+			this.pcmRingWidth = width
+			this.pcmHead = this.pcmEnd
+			this.pcmHeadOff = 0
+			this.pcmLen = 0
+		}
+		this.readGaps(log)
+		const start = log.pcmBytes - chunk.length
+		if (start !== this.socketEnd) {
+			// Not counted by the log (not this run's audio): ignore it.
+			if (log.pcmBytes === this.socketEnd) return
+			// A gap or overlap in the socket count: restart the ring at this chunk.
+			this.droppedPcmBytes += this.pcmLen
+			this.pcmEnd += start - this.socketEnd
+			this.pcmHead = this.pcmEnd
+			this.pcmHeadOff = 0
+			this.pcmLen = 0
+		}
+		this.socketEnd = log.pcmBytes
+		if (this.desynced) {
+			// Positions stay exact by the cumulative count; nothing is buffered or fed.
+			this.pcmEnd = this.socketEnd + log.droppedTotal * width
+			this.pcmHead = this.pcmEnd
+			this.pcmLen = 0
+			this.drainCarrier()
+			return
+		}
+		// Output samples native dropped re-enter as silence at their own position (3.8.1).
+		let from = 0
+		while (this.pendingGaps.length > 0) {
+			const gap = this.pendingGaps[0]
+			if (gap === undefined) break
+			const at = gap.at * width
+			const cut = at - this.pcmEnd
+			if (cut > chunk.length - from) break
+			this.pendingGaps.shift()
+			if (cut > 0) {
+				this.appendPcm(chunk.subarray(from, from + cut), cut)
+				this.pcmEnd += cut
+				from += cut
+			} else if (cut < 0) {
+				// Queued before the ring's width was known and since passed (as readGaps).
+				this.lateMask(gap.at, this.pcmEnd / width + gap.dropped)
+			}
+			this.appendPcm(null, gap.dropped * width)
+			this.pcmEnd += gap.dropped * width
+		}
+		const rest = chunk.length - from
+		if (rest > 0) {
+			this.appendPcm(from === 0 ? chunk : chunk.subarray(from), rest)
+			this.pcmEnd += rest
+		}
+		this.drainCarrier()
+	}
+
+	/** Takes new discontinuities: queues overflow gaps and invalidates decided blocks they cover. */
+	private readGaps(log: CarrierBlockLog): void {
+		if (this.desynced) return
+		if (log.desynced) {
+			this.enterDesync()
+			return
+		}
+		const width = this.pcmRingWidth
+		while (this.gapsRead < log.gapCount) {
+			const slot = this.gapsRead % CARRIER_LOG_GAPS
+			this.gapsRead += 1
+			const from = log.gapFrom[slot] ?? 0
+			const to = log.gapTo[slot] ?? 0
+			const dropped = log.gapDropped[slot] ?? 0
+			const at = log.gapAt[slot] ?? 0
+			this.invalidateBlocks(from, to)
+			if (dropped <= 0) continue
+			if (width > 0 && at * width < this.pcmEnd) {
+				// Announced after its PCM passed: mask the samples since (placed up to `dropped`
+				// early) at once, before any later drain, and insert the gap here.
+				this.lateMask(at, this.pcmEnd / width + dropped)
+				this.appendPcm(null, dropped * width)
+				this.pcmEnd += dropped * width
+			} else this.pendingGaps.push({ at, dropped })
+		}
+	}
+
+	/**
+	 * Fail closed (3.8.1): the open span ends, a provisional run is dropped, no block counts as
+	 * carried and no audio is fed until the next run, where positions start again.
+	 */
+	private enterDesync(): void {
+		this.desynced = true
+		this.desyncCount += 1
+		this.runLen = 0
+		// The held STE window is audio of a run we no longer trust: discard it, never feed it.
+		this.steOwner = null
+		this.steLen = 0
+		this.steS1 = 0
+		this.steS2 = 0
+		this.steEnergy = 0
+		if (this.inSpan) this.endSpan()
+		this.decisions.fill(DROP)
+		this.pendingGaps.length = 0
+		this.droppedPcmBytes += this.pcmLen
+		this.pcmHead = this.pcmEnd
+		this.pcmHeadOff = 0
+		this.pcmLen = 0
+	}
+
+	/** Already consumed blocks in [from, to) become not carried: no feed, and a break. */
+	private invalidateBlocks(from: number, to: number): void {
+		const first = Math.max(from, this.carrierCursor - CARRIER_LOG_CAPACITY)
+		const last = Math.min(to, this.carrierCursor)
+		if (first >= last) return
+		for (let k = first; k < last; k++)
+			this.decisions[k % CARRIER_LOG_CAPACITY] = DROP
+		if (
+			!this.inSpan &&
+			this.runLen > 0 &&
+			this.runStart + this.runLen > first
+		) {
+			this.runLen = 0
+		}
+		if (this.inSpan && first < this.spanEndBlock) {
+			const open = this.transmission
+			if (open !== null && open.carrierSpans && open.segmentOpen)
+				open.spanEndMs = Math.max(
+					open.segmentStartMs,
+					Math.min(open.spanEndMs, this.blockTime(first)),
+				)
+			this.spanEndBlock = Math.min(this.spanEndBlock, first)
+			this.runLen = 0
+			this.endSpan()
+		}
+	}
+
+	/** Tracker-side mask of samples placed too early by a late overflow notice. */
+	private lateMask(fromSample: number, toSample: number): void {
+		const b = Math.max(1, this.carrierBlockSamples)
+		const from = Math.floor(fromSample / b)
+		const to = Math.ceil(toSample / b)
+		// At most one per tracked gap (CARRIER_LOG_GAPS), then the run is desynchronized.
+		this.lateMasks.push(from, to)
+		this.invalidateBlocks(from, to)
+	}
+
+	private feedMasked(block: number): boolean {
+		if (this.log?.masked(block) === true) return true
+		for (let i = 0; i + 1 < this.lateMasks.length; i += 2)
+			if (
+				block >= (this.lateMasks[i] ?? 0) &&
+				block < (this.lateMasks[i + 1] ?? 0)
+			)
+				return true
+		return false
+	}
+
+	/**
+	 * Appends a chunk; on overflow the oldest whole samples leave unfed (counted in
+	 * `droppedPcm()`), so the ring head stays on a sample boundary (3.8.7).
+	 */
+	private appendPcm(chunk: Buffer | null, length: number): void {
+		const ring = this.pcmRing
+		if (ring === null) return
+		const cap = ring.length
+		const width = Math.max(1, this.pcmRingWidth)
+		let from = 0
+		if (this.pcmLen === 0 && this.pcmHead % width !== 0) {
+			// After a resync the head may sit inside a sample: skip to the next boundary.
+			const skip = Math.min(length, width - (this.pcmHead % width))
+			from = skip
+			this.pcmHead += skip
+			this.droppedPcmBytes += skip
+		}
+		const total = this.pcmLen + length - from
+		if (total > cap) {
+			const start = this.pcmHead + this.pcmLen
+			const head = Math.ceil((this.pcmHead + total - cap) / width) * width
+			this.droppedPcmBytes += head - this.pcmHead
+			if (head >= start) {
+				from += head - start
+				this.pcmHead = head
+				this.pcmHeadOff = 0
+				this.pcmLen = 0
+			} else {
+				const drop = head - this.pcmHead
+				this.pcmHead = head
+				this.pcmHeadOff = (this.pcmHeadOff + drop) % cap
+				this.pcmLen -= drop
+			}
+		}
+		const n = length - from
+		if (n <= 0) return
+		const write = (this.pcmHeadOff + this.pcmLen) % cap
+		const first = Math.min(n, cap - write)
+		if (chunk === null) {
+			// A native gap (discontinuity): silence that is never fed (its blocks are not carried).
+			ring.fill(0, write, write + first)
+			if (first < n) ring.fill(0, 0, n - first)
+		} else {
+			chunk.copy(ring, write, from, from + first)
+			if (first < n) chunk.copy(ring, 0, from + first, length)
+		}
+		this.pcmLen += n
+	}
+
+	/** Feeds or drops buffered PCM whose blocks are decided, cut at block boundaries. */
+	private drainPcm(): void {
+		const ring = this.pcmRing
+		const format = this.pcmFormat
+		if (ring === null || format === null || this.pcmLen === 0) return
+		if (this.desynced) {
+			this.droppedPcmBytes += this.pcmLen
+			this.pcmHead += this.pcmLen
+			this.pcmHeadOff = 0
+			this.pcmLen = 0
+			return
+		}
+		const width = this.pcmRingWidth
+		const blockBytes = this.carrierBlockSamples * width
+		const decidedEnd =
+			!this.inSpan && this.runLen > 0 ? this.runStart : this.carrierCursor
+		const oldest = this.carrierCursor - CARRIER_LOG_CAPACITY
+		while (this.pcmLen > 0) {
+			const block = Math.floor(this.pcmHead / blockBytes)
+			if (block >= decidedEnd) return
+			// Whole samples only: a split sample waits for its remaining bytes.
+			const held = this.pcmLen - ((this.pcmHead + this.pcmLen) % width)
+			const n = Math.min(held, (block + 1) * blockBytes - this.pcmHead)
+			if (n <= 0) return
+			// A pending span-end snapshot settles exactly when its PCM is consumed, before any
+			// later block reaches the detector.
+			const due = this.transmission?.snapshotDueBlock ?? null
+			if (due !== null && block >= due) this.settleSnapshot(false)
+			if (
+				block >= oldest &&
+				this.decisions[block % CARRIER_LOG_CAPACITY] === FEED &&
+				!this.feedMasked(block)
+			)
+				this.feedPiece(ring, block, n, format)
+			this.pcmHead += n
+			this.pcmHeadOff = (this.pcmHeadOff + n) % ring.length
+			this.pcmLen -= n
+		}
+	}
+
+	private feedPiece(
+		ring: Buffer,
+		block: number,
+		n: number,
+		format: TonePcmFormat,
+	): void {
+		const open = this.transmission
+		if (open === null || !open.carrierSpans || this.toneBroken) return
+		const off = this.pcmHeadOff
+		const first = Math.min(n, ring.length - off)
+		this.feedRange(open, block, ring.subarray(off, off + first), format)
+		if (first < n)
+			this.feedRange(open, block, ring.subarray(0, n - first), format)
+		this.splitIfToneChanged(open, this.clock())
+	}
+
+	private feedRange(
+		open: OpenTransmission,
+		block: number,
+		piece: Buffer,
+		format: TonePcmFormat,
+	): void {
+		if (block >= open.feedFromBlock) this.steFeed(open, piece, format)
+		if (this.toneBroken) return
+		const split = open.split
+		if (split === null || block < split.feedFromBlock) return
+		this.noteAudio(split, piece, format)
+		try {
+			split.detector.push(piece, format)
+		} catch {
+			open.split = null
+		}
+	}
+
+	/**
+	 * WG10 req 3.8.13 (STE): the transmission detector hears its audio one
+	 * `CARRIER_STE_WINDOW_MS` window late. A window whose power is mostly 55 Hz
+	 * (`CARRIER_STE_FRACTION`) is a squelch tail and is skipped; later windows feed again.
+	 */
+	private steFeed(
+		open: OpenTransmission,
+		piece: Buffer,
+		format: TonePcmFormat,
+	): void {
+		const width = format.format === "s16le" ? 2 : 4
+		if (
+			this.steOwner !== open ||
+			this.steRate !== format.rate ||
+			this.steWidth !== width
+		)
+			this.steReset(open, format, width)
+		const buf = this.steBuf
+		if (buf === null) return
+		const coeff = this.steCoeff
+		for (let at = 0; at + width <= piece.length; at += width) {
+			const x =
+				width === 2 ? piece.readInt16LE(at) / 32_768 : piece.readFloatLE(at)
+			const s0 = x + coeff * this.steS1 - this.steS2
+			this.steS2 = this.steS1
+			this.steS1 = s0
+			this.steEnergy += x * x
+			piece.copy(buf, this.steLen, at, at + width)
+			this.steLen += width
+			if (this.steLen === buf.length) {
+				this.steDecide(open, format)
+				if (this.toneBroken) return
+			}
+		}
+	}
+
+	/** Pushes the held window to the detector, or skips it as STE. */
+	private steDecide(open: OpenTransmission, format: TonePcmFormat): void {
+		const buf = this.steBuf
+		const bytes = this.steLen
+		const samples = bytes / Math.max(1, this.steWidth)
+		const power =
+			this.steS1 * this.steS1 +
+			this.steS2 * this.steS2 -
+			this.steCoeff * this.steS1 * this.steS2
+		const energy = this.steEnergy
+		this.steLen = 0
+		this.steS1 = 0
+		this.steS2 = 0
+		this.steEnergy = 0
+		if (buf === null || bytes === 0) return
+		// A partial window shorter than half (under 5.5 cycles of 55 Hz) is never judged STE.
+		const full = Math.max(1, buf === null ? 1 : buf.length / this.steWidth)
+		// An STE-dominated window is skipped alone; the next window feeds again (a mid-over
+		// low tone never hides what follows; a real tail ends with the carrier anyway).
+		if (
+			samples * 2 >= full &&
+			energy > 1e-9 &&
+			(2 * power) / (samples * energy) >= CARRIER_STE_FRACTION
+		)
+			return
+		const piece = buf.subarray(0, bytes)
+		this.noteAudio(open, piece, format)
+		try {
+			open.detector.push(piece, format)
+		} catch {
+			this.toneErrorCount += 1
+			this.toneBroken = true
+		}
+	}
+
+	/** Decides a partial window before a tone is read. */
+	private steFlush(open: OpenTransmission): void {
+		const format = this.pcmFormat
+		if (this.desynced || this.steOwner !== open || format === null) return
+		this.steDecide(open, format)
+	}
+
+	private steReset(
+		open: OpenTransmission,
+		format: TonePcmFormat,
+		width: number,
+	): void {
+		this.steOwner = open
+		this.steLen = 0
+		this.steS1 = 0
+		this.steS2 = 0
+		this.steEnergy = 0
+		if (this.steRate !== format.rate || this.steWidth !== width) {
+			const samples = Math.max(
+				1,
+				Math.round((format.rate * CARRIER_STE_WINDOW_MS) / 1000),
+			)
+			this.steBuf = Buffer.alloc(samples * width)
+			this.steRate = format.rate
+			this.steWidth = width
+			this.steCoeff = 2 * Math.cos((2 * Math.PI * CARRIER_STE_HZ) / format.rate)
+		}
 	}
 
 	private cancelGapTimer(open: OpenTransmission): void {
@@ -888,6 +1863,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** Summed audio so far: closed segments plus the open one up to `now - hang`. */
 	private audioSoFar(open: OpenTransmission, now: number): number {
 		if (!open.segmentOpen) return open.audioMs
+		if (open.carrierSpans)
+			return open.audioMs + Math.max(0, open.spanEndMs - open.segmentStartMs)
 		return open.audioMs + Math.max(0, now - this.hangMs() - open.segmentStartMs)
 	}
 
@@ -1100,6 +2077,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private finishTone(open: OpenTransmission): AnalogTransmissionTone {
+		this.steFlush(open)
 		if (this.toneBroken) return { ctcssHz: null, dtmf: null, dcs: null }
 		try {
 			return gateTone(open.detector.result(), open.audioSeconds)
@@ -1111,6 +2089,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	/** The transmission's tone at a segment end (split reference); a failure is no tone. */
 	private snapshotTone(open: OpenTransmission): AnalogTransmissionTone | null {
+		this.steFlush(open)
 		if (this.toneBroken) return null
 		return gatedTone(open.detector, open.audioSeconds)
 	}

@@ -123,6 +123,33 @@ const liveDemodStatusSchema = {
 			},
 			required: ["state"],
 		},
+		autoSquelch: {
+			type: "object",
+			properties: {
+				state: { type: "string", enum: ["off", "waiting", "open"] },
+				evidence: { type: "string", enum: ["voice", "ctcss", "dcs"] },
+				// DIAGNOSTIC AND UNSTABLE: only with ?diagnostics=true.
+				diagnostics: {
+					type: "object",
+					properties: {
+						verdict: { type: "string" },
+						frames: { type: "number" },
+						audioDb: { type: ["number", "null"] },
+						syllabic: { type: ["number", "null"] },
+						cluster: { type: ["number", "null"] },
+						syllableRuns: { type: "number" },
+						path: { type: "string" },
+						quietBlocks: { type: "number" },
+						notedBlocks: { type: "number" },
+						windowResets: { type: "number" },
+						audioMs: { type: "number" },
+						deviationHz: { type: "number" },
+						ste: { type: "boolean" },
+					},
+				},
+			},
+			required: ["state"],
+		},
 		tone: {
 			type: "object",
 			additionalProperties: false,
@@ -148,6 +175,36 @@ const liveDemodStatusSchema = {
 				},
 				at: { type: "string", maxLength: 64 },
 			},
+		},
+		autoRoute: {
+			type: "object",
+			properties: {
+				active: { type: "string", enum: ["analog", "digital", "none"] },
+				protocol: { type: "string" },
+				decoderId: { type: "string" },
+				slot: { type: ["number", "null"] },
+				since: { type: "string" },
+				httpUrl: { type: "string" },
+				wavUrl: { type: "string" },
+				clientCount: { type: "number" },
+				digitalAvailable: { type: "boolean" },
+				underruns: { type: "number" },
+				droppedMs: { type: "number" },
+				clockRebases: { type: "number" },
+				latencyMs: { type: "number" },
+			},
+			required: [
+				"active",
+				"since",
+				"httpUrl",
+				"wavUrl",
+				"clientCount",
+				"digitalAvailable",
+				"underruns",
+				"droppedMs",
+				"clockRebases",
+				"latencyMs",
+			],
 		},
 		engine: { type: "string", enum: ["csdr", "rust"] },
 		engineFallback: {
@@ -250,7 +307,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			modulation: config.modulation,
 			bandwidth: config.bandwidth,
 			squelch: config.squelch,
-			squelchMode: config.squelchMode ?? "manual",
+			squelchMode: config.squelchMode ?? "auto",
 			autoMarginDb: config.autoMarginDb ?? 6,
 			noiseQuietingDb:
 				config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
@@ -309,8 +366,24 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			...(status.toneSquelch !== undefined
 				? { toneSquelch: { state: status.toneSquelch.state } }
 				: {}),
+			...(status.autoSquelch !== undefined
+				? {
+						autoSquelch: {
+							state: status.autoSquelch.state,
+							...(status.autoSquelch.evidence !== undefined
+								? { evidence: status.autoSquelch.evidence }
+								: {}),
+							...(status.autoSquelch.diagnostics !== undefined
+								? { diagnostics: { ...status.autoSquelch.diagnostics } }
+								: {}),
+						},
+					}
+				: {}),
 			...(status.tone !== undefined
 				? { tone: copyStatusTone(status.tone) }
+				: {}),
+			...(status.autoRoute !== undefined
+				? { autoRoute: { ...status.autoRoute } }
 				: {}),
 			engine: status.engine ?? "csdr",
 			...(status.engineFallback !== undefined
@@ -319,20 +392,32 @@ export const liveAudioRoutes: FastifyPluginAsync<
 		}
 	}
 
-	fastify.get<{ Reply: LiveDemodStatus }>(
+	fastify.get<{
+		Reply: LiveDemodStatus
+		Querystring: { diagnostics?: boolean }
+	}>(
 		"/api/live-audio/status",
 		{
 			schema: {
 				tags: ["live-audio"],
 				summary: "Get live audio status",
-				description: "Returns live demodulator status and configuration",
+				description:
+					"Returns live demodulator status and configuration. `diagnostics=true` adds the evidence gate's voice window to `autoSquelch` (diagnostic and unstable).",
+				querystring: {
+					type: "object",
+					properties: { diagnostics: { type: "boolean" } },
+				},
 				response: {
 					200: liveDemodStatusSchema,
 				},
 			},
 		},
 		async (request, reply) => {
-			const status = toApiLiveDemodStatus(liveDemod.getStatus())
+			const status = toApiLiveDemodStatus(
+				request.query.diagnostics === true
+					? liveDemod.getStatus({ diagnostics: true })
+					: liveDemod.getStatus(),
+			)
 			if (options.legacyAudioHost !== true) return status
 			// Per response only: never stored, logged or broadcast.
 			const host = requestHostHeader(request)
@@ -342,12 +427,29 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				status.wavUrl === undefined
 					? undefined
 					: deriveLegacyAudioUrl(status.wavUrl, host, port)
-			if (httpUrl === status.httpUrl && wavUrl === status.wavUrl) return status
+			const auto = status.autoRoute
+			const autoRoute =
+				auto === undefined
+					? undefined
+					: {
+							...auto,
+							httpUrl: deriveLegacyAudioUrl(auto.httpUrl, host, port),
+							wavUrl: deriveLegacyAudioUrl(auto.wavUrl, host, port),
+						}
+			if (
+				httpUrl === status.httpUrl &&
+				wavUrl === status.wavUrl &&
+				(auto === undefined ||
+					(autoRoute?.httpUrl === auto.httpUrl &&
+						autoRoute.wavUrl === auto.wavUrl))
+			)
+				return status
 			void reply.header("Cache-Control", "no-store")
 			return {
 				...status,
 				httpUrl,
 				...(wavUrl === undefined ? {} : { wavUrl }),
+				...(autoRoute === undefined ? {} : { autoRoute }),
 			}
 		},
 	)

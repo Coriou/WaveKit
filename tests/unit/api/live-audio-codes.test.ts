@@ -35,6 +35,7 @@ async function app(reconfigure: () => unknown, redactErrors?: boolean) {
 				audioFormat: "s16le",
 				iqDcBlock: true,
 				offsetHz: 0,
+				squelchMode: "manual",
 			},
 			effectiveSampleRate: 25000,
 			decimationFactor: 96,
