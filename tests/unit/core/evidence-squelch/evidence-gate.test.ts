@@ -190,9 +190,11 @@ describe("EvidenceGate", () => {
 		expect(gate.evidence).toBeNull()
 	})
 
+	// A16 review (2026-10-24): the guard is one 10 ms block (+ the back-chain lag, 0 here) and the
+	// 10 ms fade after it.
 	it("close guard", () => {
 		const gate = latched()
-		expect(gate.closed(bytesOf(300), "s16le")).toBe(bytesOf(200))
+		expect(gate.closed(bytesOf(300), "s16le")).toBe(bytesOf(20))
 		expect(gate.closed(bytesOf(300), "s16le")).toBe(0)
 	})
 
@@ -200,7 +202,7 @@ describe("EvidenceGate", () => {
 		const gate = latched()
 		let guard = 0
 		for (let i = 0; i < 3_000; i++) guard += gate.closed(7, "s16le")
-		expect(guard).toBe(bytesOf(200))
+		expect(guard).toBe(bytesOf(20))
 	})
 
 	it("reopen within the hang with carrier evidence keeps the latch", () => {

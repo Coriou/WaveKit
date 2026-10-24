@@ -133,6 +133,72 @@ export class PreRoll implements PreRollPort {
 		this.retagPending(DROP)
 	}
 
+	/**
+	 * A17 (2026-10-24): retags the newest `samples` queued samples `drop` (sample-accurate, so a
+	 * mute can reach back to an STE onset still held by the delay) and fades the up to
+	 * `fadeSamples` queued `pass`/`guard` samples right before them linearly to zero in place.
+	 * Samples already played (or a sample whose output is in flight) are out of reach. O(runs).
+	 */
+	muteTail(samples: number, fadeSamples: number): void {
+		const inFlight = this.partial > 0 ? 1 : 0
+		const n = Math.min(
+			Math.max(0, Math.floor(samples) || 0),
+			this.size - inFlight,
+		)
+		if (n <= 0) return
+		// The in-flight sample (if any) is the newest; it keeps its own decision.
+		const cut = n
+		// Rebuild the tail: [kept prefix][drop × n][in-flight sample, if any, with its code].
+		const flightCode =
+			inFlight > 0 ? (this.runs[2 * this.lastIndex() + 1] ?? DROP) : DROP
+		this.popTail(n + inFlight)
+		this.pushRun(DROP, cut)
+		if (inFlight > 0) this.pushRun(flightCode, 1)
+		// Fade the playable samples just before the dropped stretch.
+		const fade = Math.max(0, Math.floor(fadeSamples) || 0)
+		const boundary = this.size - inFlight - cut
+		for (let j = 1; j <= fade && boundary - j >= 0; j++) {
+			if (this.codeAt(boundary - j) !== PLAY) break
+			const slot = (this.headSlot + boundary - j) % this.slots
+			this.scaleSlot(slot, j / (fade + 1))
+		}
+	}
+
+	/** Removes `n` samples from the tail runs (the slots stay; the caller re-adds runs). */
+	private popTail(n: number): void {
+		let left = n
+		while (left > 0 && this.runCount > 0) {
+			const last = this.lastIndex()
+			const len = this.runs[2 * last] ?? 0
+			if (len <= left) {
+				left -= len
+				this.runCount--
+			} else {
+				this.runs[2 * last] = len - left
+				left = 0
+			}
+		}
+	}
+
+	/** Tag code of queued sample `pos` (0 = head). */
+	private codeAt(pos: number): number {
+		let at = pos
+		for (let i = 0; i < this.runCount; i++) {
+			const run = (this.runHead + i) % MAX_RUNS
+			const len = this.runs[2 * run] ?? 0
+			if (at < len) return this.runs[2 * run + 1] ?? DROP
+			at -= len
+		}
+		return DROP
+	}
+
+	private scaleSlot(slot: number, gain: number): void {
+		const at = slot * this.width
+		if (this.width === 2)
+			this.ring.writeInt16LE(Math.round(this.ring.readInt16LE(at) * gain), at)
+		else this.ring.writeFloatLE(this.ring.readFloatLE(at) * gain, at)
+	}
+
 	clear(): void {
 		this.runHead = 0
 		this.runCount = 0

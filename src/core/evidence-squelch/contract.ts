@@ -40,13 +40,39 @@ export interface EvidenceGatePort {
 		start: number,
 		end: number,
 	): number
-	/** Stage-1-closed bytes: advances hang and guard; returns leading bytes inside the close guard (A2). */
-	closed(byteCount: number, format: EvidencePcmFormat): number
+	/**
+	 * Stage-1-closed bytes: advances hang and guard; returns leading bytes inside the close guard
+	 * (A2). A16 review (2026-10-24): the guard is what is left of the carrier guard and its fade
+	 * at the close, never a fresh one; with `pcm` and `start` the fade is applied in place.
+	 */
+	closed(
+		byteCount: number,
+		format: EvidencePcmFormat,
+		pcm?: Buffer,
+		start?: number,
+	): number
+	/**
+	 * A16 (sample-accurate, 2026-10-24): byte offset in the last `push` range up to which samples
+	 * may play while latched; samples after it are muted. Absent: the whole range plays.
+	 */
+	readonly audibleEnd?: number
+	/** The gate was latched when the last `push` began (it may have ended inside it). */
+	readonly pushWasOpen?: boolean
+	/** A17: the gate holds everything muted after an STE tone until stage 1 closes. */
+	readonly muted?: boolean
+	/**
+	 * A17: one-shot; input samples from the STE onset to the end of the last `push` when an STE
+	 * tone was detected in it, else 0. The owner retags that queued tail `drop`.
+	 */
+	takeSteBack?(): number
 	/** Drop all evidence and the latch (close without latch, retune, mode change). */
 	reset(): void
 	/** DIAGNOSTIC AND UNSTABLE: the current voice window, computed on demand (optional). */
 	diagnostics?(): LiveAudioAutoSquelchDiagnostics
 }
+
+/** A16 review: fade-out at a mute boundary (10 ms, linear to zero), so the cut does not click. */
+export const EVIDENCE_FADE_OUT_MS = 10
 
 /** `noteBlock` flag: the voice window was reset on a carrier onset. */
 export const EVIDENCE_NOTE_RESET = 1
@@ -58,6 +84,11 @@ export interface PreRollPort {
 	latch(): void
 	abandon(): void
 	clear(): void
+	/**
+	 * A17: retags the newest `samples` queued samples `drop` and fades the `fadeSamples` queued
+	 * playable samples before them to zero (in place). Samples already played are out of reach.
+	 */
+	muteTail?(samples: number, fadeSamples: number): void
 	readonly delaySamples: number
 }
 
@@ -65,6 +96,12 @@ export interface EvidenceGateOptions {
 	rate: number
 	modulation: "nfm" | "am"
 	gain: number
+	/**
+	 * A16 review (2026-10-24): samples of back-chain lag between a measured IQ block and its PCM
+	 * (`backChainDrainSamples`); the carrier and close guard is this plus one 10 ms block.
+	 * Absent: 0.
+	 */
+	drainLagSamples?: number
 	/**
 	 * Nominal peak deviation of the channel (amendment 2026-10-24, A13; `evidenceDeviationHz`):
 	 * the voice meter normalises it onto the analyzer's 5 kHz scale. Absent: 5 000 Hz.

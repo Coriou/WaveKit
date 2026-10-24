@@ -84,17 +84,17 @@ produce no gate event. The follow-up is in-band stage-1 gate markers on the Rust
 
 Constants added to `packages/api-types/src/live-audio.ts` (requirement 4.3):
 
-| Constant                                      | Value     | Basis                                                         |
-| --------------------------------------------- | --------- | ------------------------------------------------------------- |
-| `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`         | `["nfm"]` | requirement 1.1 (amendment A8, 2026-10-23: AM removed)        |
-| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS`    | `["nfm"]` | requirement 1.2 (AM: voice only)                              |
-| `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`            | 50        | `ANALOG_TRIAL_FRAME_MS`                                       |
-| `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES`        | 20        | `SYLLABIC_WINDOW` in `analyze.rs`: 1 s                        |
-| `LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS` | 100       | 10 ms IQ blocks in the 1 s voice window                       |
-| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS`         | 750       | `DCS_MIN_AUDIO_SECONDS` × 1 000                               |
-| `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS`             | 1 500     | `ANALOG_TRANSMISSION_MERGE_GAP_MS`                            |
-| `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`      | 1 500     | voice window 1 000 ms + up to 500 ms late speech after key-up |
-| `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS`      | 200       | back-chain drain after stage 1 closes (measured in 8.2)       |
+| Constant                                      | Value     | Basis                                                                                 |
+| --------------------------------------------- | --------- | ------------------------------------------------------------------------------------- |
+| `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`         | `["nfm"]` | requirement 1.1 (amendment A8, 2026-10-23: AM removed)                                |
+| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS`    | `["nfm"]` | requirement 1.2 (AM: voice only)                                                      |
+| `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`            | 50        | `ANALOG_TRIAL_FRAME_MS`                                                               |
+| `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES`        | 20        | `SYLLABIC_WINDOW` in `analyze.rs`: 1 s                                                |
+| `LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS` | 100       | 10 ms IQ blocks in the 1 s voice window                                               |
+| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS`         | 750       | `DCS_MIN_AUDIO_SECONDS` × 1 000                                                       |
+| `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS`             | 1 500     | `ANALOG_TRANSMISSION_MERGE_GAP_MS`                                                    |
+| `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`      | 1 500     | voice window 1 000 ms + up to 500 ms late speech after key-up                         |
+| `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS`      | 10        | one 10 ms block, plus the back chain's computed lag (A16 review, 2026-10-24; was 200) |
 
 Type: `LiveAudioAutoSquelch = { state: "off" | "waiting" | "open"; evidence?: "voice" | "ctcss" | "dcs" }`,
 added as optional `autoSquelch` to `LiveAudioStatus` and `LiveAudioLevel`. The core contract
@@ -375,6 +375,45 @@ latch sample. Tags attach to input samples, so the mute follows the over through
 delay, and `drop` samples behind the queued `pass` audio are skipped by catch-up (the stream
 catches up during the tail instead of playing it). Property 18 pins the pass rule against a
 model for any pattern of quieted, unquieted and closed blocks after a voice latch.
+
+**Amendment (2026-10-24, A16 review): sample-accurate guard and fade.** Live run6 (image with
+A13-A16) still played a loud burst about half a second after each unkey. Each over ended with
+speech, about 0.4 s of a steady tone (the radio's STE tone, A17), then 20-21 blocks of 10 ms at
+RMS 16 000-26 000 (full-scale FM noise, the old 200 ms tail guard plus the block in which the
+carrier dropped), then the exponential decay of the back chain on zeroed IQ (the old 200 ms close
+guard). The noise began within one 10 ms block of the carrier drop, so the IQ-to-PCM lag is about
+zero. Computed lag of the back chain (`backChainDrainSamples`, `live-demod-pipeline.ts`; the NFM
+back chain runs at the channel rate, no decimation): `fmdemod` 1 sample; `dcblock`, `gain`,
+`limit`, `convert` 0; a `lowpass` or NFM `deemphasis` FIR 120 (an 81-tap window, estimated); WFM
+`deemphasis` 1; `sox` 4 096 (estimated). The default live chain lags 1 sample. The guard is now
+`CLOSE_GUARD_MS` (10 ms, one block) plus that lag (`drainLagSamples`), followed by a 10 ms linear
+fade to zero (`EVIDENCE_FADE_OUT_MS`, gain `k / (F + 1)` for the `k`-th last fade sample), so the
+noise heard after an unkey is at most guard + fade = 20 ms + lag (measured end to end: 751
+samples = 30 ms at 25 kHz including the harness's one-block note lag, against 5 250 samples
+before). The gate decides per sample: `audibleEnd` is the byte offset of the last audible sample
+of the push, muted samples are zeroed in place and fade samples scaled in place before the
+pre-roll copies them, and the wiring tags `[start, audibleEnd)` `pass` and the rest `drop`, so
+the expiry no longer drops the slice that holds it (review MINOR). A stage-1 close carries what
+is left of the guard and fade (`guardBytesLeft` from the counters, full only when the close
+follows carrier evidence) and fades in place; it never restarts the guard (review MAJOR: the old
+close returned a fresh 200 ms guard after a muted tail). Property 18 now checks the samples each
+pushed and closed block delivers against a guard-and-fade model, and that muted pushed samples
+are zeros.
+
+**Amendment (2026-10-24, A17): squelch-tail elimination (STE).** `SteDetector`
+(`ste-detector.ts`) runs on the gate's 8 kHz samples while stage 1 is open: 100 ms blocks in four
+phases 25 ms apart; a block qualifies when the 55 Hz Goertzel bin holds at least 0.65 of the
+block's AC energy, at least 3x the 45 Hz and the 67.0 Hz bins, and the four 25 ms quarters'
+energies agree within 0.8 (the tone fills the block, about 95 ms or more). On a qualifying block
+the gate ends the latch (`reset()`, then `waiting` with `steHold`), reports the onset through
+`takeSteBack()` as one block of input samples back (the block starts at most 25 ms after the
+tone), and holds everything muted until stage 1 closes (`closed()` then returns 0 and resets).
+The wiring drops the slice, abandons any pending audio and calls `PreRoll.muteTail(back, fade)`,
+which retags the newest queued samples `drop` and fades the 10 ms of playable samples before them
+in place. The pre-roll delay (about 1 s after a voice latch, 0.75 s after a tone latch) exceeds the
+100-125 ms detection latency, so the tone and the noise after it never play. Diagnostics report
+`ste: true` while held. Note for lane TB (transmission boundaries, another branch): the STE onset
+is a reliable transmission end on radios that send it; `analog-transmission.ts` is unchanged here.
 
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
@@ -683,10 +722,15 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     syllable-level frames come only in stretches of at most 2, `syllableRuns` is 0, `voicePath`
     never returns `runs`, and the judge says voice exactly when the pinned median rule does.
     _Validates 1.3, 1.4._
-18. **Tail mute (A16, 2026-10-24).** After a voice latch, for any pattern of quieted, unquieted and
-    closed blocks, the gate passes an open block exactly while the gate is open and the last note
-    was quieted or fewer than `CLOSE_GUARD_MS` of PCM have followed the last quieted note since
-    stage 1 last opened. _Validates 1.5._
+18. **Tail mute (A16, 2026-10-24; review revision).** After a voice latch, for any pattern of
+    quieted, unquieted and closed blocks, the samples each block delivers (the audible prefix of a
+    push, the guard bytes of a close) equal the model: all of a quieted block; otherwise what is
+    left of the guard (`CLOSE_GUARD_MS` + lag) and then the 10 ms fade, counted across closes and
+    never restarted by one; muted pushed samples are zeros. _Validates 1.5._
+19. **Nothing after an STE tone (A17, 2026-10-24).** For any over followed by an STE tone of
+    0.15-0.4 s and any continuation (noise, voice or tone, quieted or not), no sample after the
+    detecting slice is delivered while stage 1 stays open, the close returns no guard, and the
+    close ends the hold. _Validates 1.5._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 

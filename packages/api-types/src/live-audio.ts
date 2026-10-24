@@ -71,8 +71,14 @@ export const LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS = 750
 export const LIVE_AUDIO_AUTO_SQUELCH_HANG_MS = 1_500
 /** Pre-roll capacity: the most audio held while waiting for evidence. */
 export const LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS = 1_500
-/** Audio after a latched stage-1 close that still plays (the over's tail in the back chain). */
-export const LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS = 200
+/**
+ * Audio after the last carrier evidence of a latched over that still plays (the over's tail in
+ * the back chain): one 10 ms block, to which the core adds the back chain's computed lag (1
+ * sample on the default NFM chain). Changed 2026-10-24 (A16 review) from 200 ms: live run6 showed
+ * the old guard passing 200 ms of full-scale FM noise after every over, with the noise starting
+ * within one block of the carrier drop.
+ */
+export const LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS = 10
 
 export type LiveAudioAutoSquelchEvidence = "voice" | "ctcss" | "dcs"
 /**
@@ -131,6 +137,8 @@ export interface LiveAudioAutoSquelchDiagnostics {
 	audioMs: number
 	/** Deviation the voice meter normalises to (2 500 or 5 000 Hz). */
 	deviationHz: number
+	/** A17: an STE tone ended the over; everything is muted until stage 1 closes. */
+	ste?: true
 }
 
 export interface LiveAudioConfig {

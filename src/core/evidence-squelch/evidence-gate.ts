@@ -41,10 +41,12 @@ import type {
 	AnalogTrialTones,
 } from "../scanner/scanner-redesign-contract.js"
 import {
+	EVIDENCE_FADE_OUT_MS,
 	EVIDENCE_NOTE_DISCARD,
 	EVIDENCE_NOTE_RESET,
 	msToSamples,
 } from "./contract.js"
+import { STE_BLOCK_SAMPLES, SteDetector } from "./ste-detector.js"
 import type {
 	EvidenceGateOptions,
 	EvidenceGatePort,
@@ -358,7 +360,27 @@ export class EvidenceGate implements EvidenceGatePort {
 	private sinceSighting = Number.MAX_SAFE_INTEGER
 	/** `msToSamples(TONE_PASS_MS, rate)`. */
 	private readonly tonePassSamples: number
+	/** Close-guard bytes left in this closing episode (A2; A16 review: never restarted). */
 	private guardBytesLeft = 0
+	/** A16 review: fade-out samples after the guard (`EVIDENCE_FADE_OUT_MS`). */
+	private readonly fadeSamples: number
+	/** A16 review: fade samples left after the tail guard (counts down like the guard). */
+	private fadeLeft = 0
+	/** A17: STE tone detector (NFM only). */
+	private readonly ste: SteDetector | null
+	/** A17: input samples of one STE block (800 at 8 kHz). */
+	private readonly steBlockInput: number
+	/** A17: an STE tone ended this over: everything muted until stage 1 closes. */
+	private steHold = false
+	/** A17: one-shot STE tail for the owner (`takeSteBack`). */
+	private steBack = 0
+	/** A16 sample-accurate pass: the buffer and range of the current `push`. */
+	private curPcm: Buffer | null = null
+	private curWidth = 2
+	private curFrom = 0
+	private curFormat: EvidencePcmFormat = "s16le"
+	private audibleEndByte = 0
+	private wasOpenAtPush = false
 	/** Byte offset of the first latch in the current `push`, or -1. */
 	private latchAt = -1
 
@@ -384,9 +406,17 @@ export class EvidenceGate implements EvidenceGatePort {
 						deviationHz: options.deviationHz,
 					})
 		this.tone = this.modulation === "nfm" ? new ToneEvidence() : null
-		this.guardSamples = msToSamples(
-			LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS,
-			rate,
+		// A16 review (2026-10-24): the back-chain lag plus one 10 ms block.
+		const lag = options.drainLagSamples
+		this.guardSamples =
+			msToSamples(LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS, rate) +
+			(typeof lag === "number" && Number.isFinite(lag) && lag > 0
+				? Math.ceil(lag)
+				: 0)
+		this.fadeSamples = msToSamples(EVIDENCE_FADE_OUT_MS, rate)
+		this.ste = this.modulation === "nfm" ? new SteDetector() : null
+		this.steBlockInput = Math.round(
+			(STE_BLOCK_SAMPLES * rate) / AUDIO_TONE_RATE_HZ,
 		)
 		this.hangSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS, rate)
 		this.toneMinSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS, rate)
@@ -415,18 +445,48 @@ export class EvidenceGate implements EvidenceGatePort {
 	}
 
 	/**
-	 * A16 tail mute: while latched, whether the PCM just pushed may play. True while the last
-	 * noted block was quieted, for `CLOSE_GUARD_MS` of PCM after it (back-chain drain), and for
-	 * `EVIDENCE_TONE_PASS_MS` of PCM after a sighting of the latched tone or code (not across a
-	 * stage-1 close). False while waiting.
+	 * A16 tail mute: while latched, whether the next PCM may play. True while the last noted
+	 * block was quieted, for the guard (back-chain lag + one 10 ms block) and the 10 ms fade of
+	 * PCM after it, and for `EVIDENCE_TONE_PASS_MS` of PCM after a sighting of the latched tone or
+	 * code (not across a stage-1 close). False while waiting and after an STE tone (A17).
 	 */
 	get passing(): boolean {
 		return (
 			this.internal === "open" &&
+			!this.steHold &&
 			(this.carrierNow ||
+				this.toneRecent() ||
 				this.tailGuardLeft > 0 ||
-				(this.latchedToneKey >= 0 && this.sinceSighting < this.tonePassSamples))
+				this.fadeLeft > 0)
 		)
+	}
+
+	get audibleEnd(): number {
+		return this.audibleEndByte
+	}
+
+	get pushWasOpen(): boolean {
+		return this.wasOpenAtPush
+	}
+
+	get muted(): boolean {
+		return this.steHold
+	}
+
+	takeSteBack(): number {
+		const back = this.steBack
+		this.steBack = 0
+		return back
+	}
+
+	/** Guard and fade back to full (current carrier evidence). */
+	private refreshGuard(): void {
+		this.tailGuardLeft = this.guardSamples
+		this.fadeLeft = this.fadeSamples
+	}
+
+	private toneRecent(): boolean {
+		return this.latchedToneKey >= 0 && this.sinceSighting < this.tonePassSamples
 	}
 
 	get evidence(): LiveAudioAutoSquelchEvidence | null {
@@ -473,7 +533,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.prevUnquieted = value === 0
 		// A14: only carrier evidence keeps a latch alive; a bare stage-1 re-open does not.
 		this.carrierNow = value === 1
-		if (value === 1) this.tailGuardLeft = this.guardSamples
+		if (value === 1) this.refreshGuard()
 		if (this.internal !== "waiting") return flags
 		const ring = this.quiet
 		if (this.quietLen === ring.length)
@@ -515,12 +575,19 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.closing = false
 			this.audioSamples = 0
 			this.tone?.reset()
+			this.ste?.reset()
 			this.decimator.arm(this.rate)
 			this.nonFiniteGroup = false
 		}
 		this.closing = false
 		this.latchAt = -1
 		const width = format === "s16le" ? 2 : 4
+		this.wasOpenAtPush = this.internal === "open"
+		this.audibleEndByte = from
+		this.curPcm = pcm
+		this.curWidth = width
+		this.curFrom = from
+		this.curFormat = format
 		let offset = from
 		if (this.holdLen > 0) {
 			const need = width - this.holdLen
@@ -551,10 +618,16 @@ export class EvidenceGate implements EvidenceGatePort {
 			pcm.copy(this.hold, 0, last, to)
 			this.holdLen = to - last
 		}
+		this.curPcm = null
 		return this.latchAt
 	}
 
-	closed(byteCount: number, format: EvidencePcmFormat): number {
+	closed(
+		byteCount: number,
+		format: EvidencePcmFormat,
+		pcm?: Buffer,
+		start?: number,
+	): number {
 		if (format !== "s16le" && format !== "f32le") {
 			this.format = null
 			this.holdLen = 0
@@ -573,17 +646,42 @@ export class EvidenceGate implements EvidenceGatePort {
 		// The bytes are not inspected: a straddling sample reads zeros for its skipped bytes.
 		this.hold.fill(0)
 		this.holdLen = total % width
+		const wasCarrier = this.carrierNow || this.toneRecent()
 		this.carrierNow = false
-		this.tailGuardLeft = 0
 		this.sinceSighting = Number.MAX_SAFE_INTEGER
+		// A17: stage 1 closed after an STE tone: the over is over; a reopen starts fresh.
+		if (this.steHold) {
+			this.reset()
+			return 0
+		}
 		if (this.internal !== "open") return 0
 		if (!this.closing) {
 			this.closing = true
+			// A16 review (2026-10-24): the guard on a close is what is left of the carrier guard
+			// and its fade, never a fresh one (full only when the close follows carrier evidence).
 			// A sample whose first bytes arrived while open is the first closed sample.
-			this.guardBytesLeft = Math.max(0, this.guardSamples * width - heldBefore)
+			if (wasCarrier) this.refreshGuard()
+			this.guardBytesLeft = Math.max(
+				0,
+				(this.tailGuardLeft + this.fadeLeft) * width - heldBefore,
+			)
 		}
 		const guard = bytes < this.guardBytesLeft ? bytes : this.guardBytesLeft
 		this.guardBytesLeft -= guard
+		// The counters advance per completed sample; the fade is applied in place.
+		const base =
+			pcm !== undefined && typeof start === "number" ? start - heldBefore : -1
+		for (let k = 0; k < completed; k++) {
+			if (this.tailGuardLeft > 0) this.tailGuardLeft -= 1
+			else if (this.fadeLeft > 0) {
+				const gain = this.fadeLeft / (this.fadeSamples + 1)
+				this.fadeLeft -= 1
+				const at = base + k * width
+				// Only whole samples of this call's bytes (earlier bytes are already queued).
+				if (pcm !== undefined && base >= 0 && at >= (start ?? 0))
+					scaleSample(pcm, at, format, gain)
+			} else break
+		}
 		this.sinceCarrier += completed
 		if (this.sinceCarrier >= this.hangSamples) this.reset()
 		return guard
@@ -672,6 +770,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				: {}),
 			audioMs: Math.round((this.audioSamples * 1_000) / this.rate),
 			deviationHz: this.deviationHz,
+			...(this.steHold ? { ste: true as const } : {}),
 		}
 	}
 
@@ -719,16 +818,30 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.sinceCarrier = 0
 		this.carrierNow = false
 		this.tailGuardLeft = 0
+		this.fadeLeft = 0
 		this.sinceSighting = Number.MAX_SAFE_INTEGER
+		this.steHold = false
+		this.ste?.reset()
 		this.guardBytesLeft = 0
 	}
 
 	/** One input sample; `after` is the byte offset just past it. */
 	private takeSample(sample: number, after: number): void {
-		if (this.internal === "open") {
-			// A16: the tail guard and the sighting age advance with the PCM.
-			if (!this.carrierNow && this.tailGuardLeft > 0) this.tailGuardLeft -= 1
+		if (this.internal === "open" && !this.steHold) {
+			// A16: per sample, pass with carrier evidence, then the guard, then the fade to zero.
 			if (this.sinceSighting < Number.MAX_SAFE_INTEGER) this.sinceSighting += 1
+			let gain = 1
+			if (this.carrierNow || this.toneRecent()) this.refreshGuard()
+			else if (this.tailGuardLeft > 0) this.tailGuardLeft -= 1
+			else if (this.fadeLeft > 0) {
+				gain = this.fadeLeft / (this.fadeSamples + 1)
+				this.fadeLeft -= 1
+			} else gain = 0
+			const pcm = this.curPcm
+			const at = after - this.curWidth
+			if (gain < 1 && pcm !== null && at >= this.curFrom)
+				scaleSample(pcm, at, this.curFormat, gain)
+			if (gain > 0) this.audibleEndByte = after
 			if (this.carrierNow) this.sinceCarrier = 0
 			else if (
 				++this.sinceCarrier >=
@@ -747,6 +860,12 @@ export class EvidenceGate implements EvidenceGatePort {
 		const value = this.decimator.output
 		const nonFinite = this.nonFiniteGroup
 		this.nonFiniteGroup = false
+		if (this.steHold) return
+		// A17: an STE tone ends the over: retroactive mute from its onset, the latch ends.
+		if (this.ste !== null && this.ste.push(value)) {
+			this.onSte()
+			return
+		}
 		const tone = this.tone
 		if (tone !== null) {
 			tone.push(value)
@@ -790,6 +909,17 @@ export class EvidenceGate implements EvidenceGatePort {
 		if (verdict !== null) this.latch(verdict, -1, after)
 	}
 
+	/** A17: an STE block just completed: mute from its onset (at most 50 ms after the tone's). */
+	private onSte(): void {
+		const wasOpen = this.internal === "open"
+		const back = this.steBlockInput
+		this.reset()
+		this.internal = "waiting"
+		this.steHold = true
+		this.steBack = back
+		this.wasOpenAtPush = this.wasOpenAtPush || wasOpen
+	}
+
 	private observeTone(reading: Readonly<ToneReading>, after: number): void {
 		const key = toneKey(reading)
 		if (this.internal === "open" && key === this.latchedToneKey) return
@@ -822,7 +952,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.sinceCarrier = 0
 		// A16: the latch is evidence at this sample (a voice latch needed quieted blocks).
 		this.sinceSighting = 0
-		this.tailGuardLeft = this.guardSamples
+		this.refreshGuard()
 		if (this.latchAt < 0) this.latchAt = after
 	}
 
@@ -841,5 +971,21 @@ export class EvidenceGate implements EvidenceGatePort {
 		if (this.syllableLen < this.syllableFlags.length) this.syllableLen += 1
 		this.frameHead = (this.frameHead + 1) % this.frames.length
 		if (this.frameLen < this.frames.length) this.frameLen += 1
+	}
+}
+
+/** Scales one whole sample in place (A16 fade and mute). */
+function scaleSample(
+	pcm: Buffer,
+	at: number,
+	format: EvidencePcmFormat,
+	gain: number,
+): void {
+	if (format === "s16le") {
+		if (at < 0 || at + 2 > pcm.length) return
+		pcm.writeInt16LE(Math.round(pcm.readInt16LE(at) * gain), at)
+	} else {
+		if (at < 0 || at + 4 > pcm.length) return
+		pcm.writeFloatLE(pcm.readFloatLE(at) * gain, at)
 	}
 }
