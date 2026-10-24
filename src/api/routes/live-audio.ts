@@ -144,6 +144,7 @@ const liveDemodStatusSchema = {
 						windowResets: { type: "number" },
 						audioMs: { type: "number" },
 						deviationHz: { type: "number" },
+						ste: { type: "boolean" },
 					},
 				},
 			},

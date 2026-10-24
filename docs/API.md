@@ -1425,7 +1425,8 @@ Fields:
   (0-20), the window medians `audioDb`, `syllabic` and `cluster` (null when empty),
   `quietBlocks` and `notedBlocks` (10 ms blocks in the quiet window), `windowResets`
   (carrier-onset resets this episode), `audioMs` and `deviationHz` (the voice meter's
-  reference). Computed per request.
+  reference), and `ste: true` after a squelch-tail-elimination tone ended the over.
+  Computed per request.
 - `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
   are always present in config and status responses, with their defaults (`auto`,
   6 and 6) when not set. `config.toneSquelch` is present only when it is set.
@@ -1440,9 +1441,10 @@ Configuration notes:
   to 1.5 s and played when the gate latches. During an over the stream can run up
   to 1.5 s behind; it catches up by dropping the silence after the over. An over
   shorter than about one second with no tone is not heard. Once latched, audio passes
-  only while the carrier is FM-quieted (plus 200 ms for the demodulator's drain), or on
-  a tone latch while the tone is still heard: the noise after an unkey is muted at once
-  (amendment A16, 2026-10-24). `manual` and `noise`
+  only while the carrier is FM-quieted (plus 10 ms and a 10 ms fade for the demodulator's
+  drain), or on a tone latch while the tone is still heard: the noise after an unkey is
+  muted at once (amendment A16, 2026-10-24). A 55 Hz squelch-tail-elimination tone at the
+  end of an over mutes from its onset and ends the latch (amendment A17). `manual` and `noise`
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
   replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
   keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine

@@ -52,7 +52,7 @@ describe("evidence squelch contract", () => {
 		expect([
 			LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS,
 			LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS,
-		]).toEqual([1500, 200])
+		]).toEqual([1500, 10])
 	})
 
 	it("sizes the pre-roll per the design table", () => {

@@ -239,6 +239,11 @@ Open after the evidence squelch batch:
   (amendment A12, 2026-10-23: until then the evidence gate runs on csdr only and
   Rust `auto` is the stage-1 auto squelch).
 - Live acceptance on a PMR handheld (M.4) and Pi 4-class CPU (M.5).
+- Squelch-tail elimination, the second common form (amendment A17, 2026-10-24): a CTCSS
+  phase reversal of 120 or 180 degrees (a "reverse burst") for about 150-200 ms before the
+  carrier drops. The 55 Hz STE tone is detected; the reverse burst is not yet. It needs a
+  phase tracker on the latched CTCSS tone (the CTCSS bank reports power, not phase) and a
+  false-alarm study on fades, so it is a follow-up, not part of A17.
 
 ### Performance and native DSP plan (2026-10-17)
 

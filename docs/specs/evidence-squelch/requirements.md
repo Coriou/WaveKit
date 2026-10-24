@@ -302,6 +302,34 @@ its PCM); a speech pause on a quieted carrier keeps passing; an unquieted fade o
 over loses about `F - 200 ms` of audio when `F > 200 ms` (fades up to 200 ms pass whole; on a tone
 latch, audio up to 300 ms after the last sighting passes too).
 
+**Amendment (2026-10-24, A16 review): the guard follows the computed back-chain lag.** Live run6
+showed the 200 ms guard passing 200-210 ms of full-scale FM noise (RMS 16 000-26 000 in 10 ms
+blocks) after each over's tail, starting within one block of the carrier drop, plus the back
+chain's decay through a fresh 200 ms close guard. `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS` is now
+10 ms (one block) and the core adds the back chain's computed lag (1 sample on the default NFM
+chain; filter stages add their delay, design A16 review); a 10 ms linear fade-out follows the
+guard at the sample-accurate mute boundary. The A16 arithmetic becomes: an unkey passes the over's
+last `L` (the lag) and then at most `10 ms + 10 ms` of noise, faded; an unquieted fade of `F` ms
+inside an over loses about `F - 20 ms` of audio when `F > 20 ms`. A stage-1 close continues the
+guard and fade that are left and never starts a new one. Speech ending exactly at the carrier drop
+is not clipped: its last `L` samples arrive inside the guard.
+
+**Amendment (2026-10-24, A17): squelch-tail elimination.** The steady tone before the noise in
+run6 is a 55 Hz STE tone (Goertzel: about 99 % of the energy at 55 Hz, 0.38-0.40 s, at the end of
+every over, toned or not, carrier still up; the user has no roger beep). On `nfm`, while stage 1
+is open, a 55 Hz tone that fills a 100 ms block (at least 0.65 of its energy, 3x the 45 and 67 Hz
+bins, steady across the block) ends the over: client audio is muted from the tone's onset (at most
+25 ms late; retroactively, because the pre-roll still holds those samples) with the 10 ms fade,
+the latch ends at once (a later reopen needs fresh evidence), everything after it is muted until
+stage 1 closes, and no close guard follows. False alarms: no detection in any evidence-squelch
+fixture (voice, CTCSS and DCS voice, data, noise, clicks, impulse), in synthetic voice, or inside
+the speech of the recorded live overs (runs 2-4 and 6: detections only at each over's end, never in
+run5); 50 and 60 Hz hum, 45 and 67 Hz tones and 55 Hz tones under 100 ms are not detected. Speech
+and CTCSS put almost no energy at 55 Hz (voice above 100 Hz, CTCSS 67-254 Hz), and the meter's
+300 Hz high-pass is not needed for this (the detector reads the 8 kHz samples before it). The
+other common STE form, a CTCSS phase reversal (reverse burst), is a ROADMAP follow-up. Note for
+lane TB: the STE onset can serve as the transmission end on radios that send it.
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

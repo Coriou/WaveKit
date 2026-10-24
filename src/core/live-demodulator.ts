@@ -72,6 +72,7 @@ import {
 	DEFAULT_IQ_SAMPLE_RATE,
 	liveDemodRates,
 	effectiveAgc,
+	backChainDrainSamples,
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
@@ -79,8 +80,10 @@ import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
 import {
+	EVIDENCE_FADE_OUT_MS,
 	EVIDENCE_NOTE_DISCARD,
 	evidenceDeviationHz,
+	msToSamples,
 	evidenceGateApplies,
 	pcmSampleBytes,
 	type EvidenceGatePort,
@@ -2062,6 +2065,8 @@ export class LiveDemodulator extends EventEmitter {
 				rate,
 				modulation,
 				gain: this.config.gain,
+				// A16 review: the guard is the back chain's lag plus one 10 ms block.
+				drainLagSamples: backChainDrainSamples(run.backCommand),
 				...(modulation === "nfm"
 					? { deviationHz: evidenceDeviationHz(this.config.bandwidth) }
 					: {}),
@@ -2200,31 +2205,64 @@ export class LiveDemodulator extends EventEmitter {
 		const { gate, preRoll } = evidence
 		if (open) {
 			const k = gate.push(chunk, format, start, end)
+			const steBack = gate.takeSteBack?.() ?? 0
+			if (steBack > 0) {
+				// A17: an STE tone ended the over. Everything from its onset is dropped: this slice,
+				// and (retroactively, while still held by the pre-roll delay) the queued tail, with
+				// a fade-out at the onset; pending audio is abandoned. No close guard follows.
+				if (k >= 0) preRoll.latch()
+				preRoll.process(
+					chunk,
+					start,
+					end,
+					completing ? evidence.tailTag : "drop",
+				)
+				preRoll.abandon()
+				preRoll.muteTail?.(
+					steBack,
+					msToSamples(EVIDENCE_FADE_OUT_MS, this.run?.stream.rate ?? 0),
+				)
+				evidence.tailTag = "drop"
+				return
+			}
+			// A16 (sample-accurate, review 2026-10-24): while latched, the gate's audible prefix of
+			// the slice passes and the rest is dropped (the latch memory stays; the tags apply to
+			// these input samples, whatever the pre-roll delay).
+			const audibleEnd = (from: number): number =>
+				Math.max(from, Math.min(end, gate.audibleEnd ?? end))
 			if (k >= 0) {
 				if (completing) preRoll.process(chunk, start, end, evidence.tailTag)
 				else if (k > start) preRoll.process(chunk, start, k, "pending")
 				preRoll.latch()
 				if (!completing && end > k) {
-					preRoll.process(chunk, k, end, "pass")
-					evidence.tailTag = "pass"
+					const cut = audibleEnd(k)
+					preRoll.process(chunk, k, cut, "pass")
+					if (end > cut) preRoll.process(chunk, cut, end, "drop")
+					evidence.tailTag = end > cut ? "drop" : "pass"
 				}
 				return
 			}
-			// A16 tail mute: a latched slice without current carrier evidence is dropped (the
-			// latch memory stays; the tag applies to these input samples, whatever the delay).
-			const tag: PreRollTag = completing
-				? evidence.tailTag
-				: gate.state === "open"
-					? gate.passing === false
-						? "drop"
-						: "pass"
-					: "pending"
+			if (completing) {
+				preRoll.process(chunk, start, end, evidence.tailTag)
+				return
+			}
+			if (gate.pushWasOpen ?? gate.state === "open") {
+				const cut = audibleEnd(start)
+				if (cut > start) preRoll.process(chunk, start, cut, "pass")
+				if (end > cut) preRoll.process(chunk, cut, end, "drop")
+				evidence.tailTag = end > cut ? "drop" : "pass"
+				return
+			}
+			const tag: PreRollTag = gate.muted === true ? "drop" : "pending"
 			preRoll.process(chunk, start, end, tag)
 			evidence.tailTag = tag
 			return
 		}
 		if (gate.state === "waiting") preRoll.abandon()
-		const guard = Math.min(end - start, gate.closed(end - start, format))
+		const guard = Math.min(
+			end - start,
+			gate.closed(end - start, format, chunk, start),
+		)
 		if (completing) {
 			preRoll.process(chunk, start, end, evidence.tailTag)
 			return

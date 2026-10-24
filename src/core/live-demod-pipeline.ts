@@ -277,3 +277,33 @@ export function planLiveDemodPipeline(
 		warnings,
 	}
 }
+
+/**
+ * Evidence squelch guard (amendment A16 review, 2026-10-24): the lag, in channel samples, between
+ * the IQ block the carrier observer measures and the PCM samples it becomes at the client path.
+ * The NFM back chain runs at the channel rate (no decimation), so the lag is the stages' filter
+ * delay plus any input window a stage retains before it can emit:
+ *
+ * - `csdr fmdemod`: 1 sample (the previous sample of the phase difference).
+ * - `csdr dcblock`, `gain`, `limit`, `convert`: 0 (memoryless or a one-pole IIR with no
+ *   retained input; CSDR AnyLengthModule stages emit what they read).
+ * - `csdr lowpass` and `csdr deemphasis --nfm` (FIR): 120 (an 81-tap window at the default
+ *   0.05 transition: 80 retained + 40 group delay; an estimate, not measured).
+ * - `csdr deemphasis --wfm` (one-pole IIR): 1.
+ * - `sox` (high-pass): 4 096 (two 8 192-byte float32 buffers in flight; an estimate).
+ *
+ * The default live NFM chain (`fmdemod | dcblock | gain | limit | convert`) lags 1 sample. Live
+ * run6 (2026-10-24) agrees: the client's noise began within one 10 ms block of the carrier drop.
+ */
+export function backChainDrainSamples(backCommand: string): number {
+	let lag = 0
+	for (const raw of backCommand.split("|")) {
+		const stage = raw.trim()
+		if (stage.includes("csdr fmdemod")) lag += 1
+		else if (stage.includes("csdr lowpass")) lag += 120
+		else if (stage.includes("csdr deemphasis --nfm")) lag += 120
+		else if (stage.includes("csdr deemphasis")) lag += 1
+		else if (/(^|\s)sox(\s|$)/.test(stage)) lag += 4_096
+	}
+	return lag
+}

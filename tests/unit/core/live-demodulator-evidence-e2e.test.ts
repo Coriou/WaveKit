@@ -48,8 +48,11 @@ const LEAD_SECONDS = 0.5
 const OVER_SECONDS = 3
 const TAIL_SECONDS = 2
 const AM_FLOOR_DBFS = -60
-/** A16 tail bound: the 200 ms guard + one 10 ms block (this harness notes a block after its PCM). */
-const TAIL_BYTES = (0.2 * RATE + 250) * 2
+/**
+ * A16 tail bound (review 2026-10-24): the guard (one 10 ms block + the back chain's 1-sample
+ * lag), the 10 ms fade, and one 10 ms block (this harness notes a block after its PCM).
+ */
+const TAIL_BYTES = (0.01 * RATE + 1 + 0.01 * RATE + 250) * 2
 
 /** An 8 kHz s16le evidence-squelch fixture, linearly upsampled to the harness rate. */
 function fixtureAt25k(name: string): Float32Array {
@@ -339,6 +342,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		let played = 0
 		for (let i = 0; i < tail.length; i += 2)
 			if (tail.readInt16LE(i) !== 0) played = i + 2
+		console.info(`EVIDENCE-SQUELCH A16 unkey tail: ${played / 2} samples`)
 		expect(played).toBeLessThanOrEqual(TAIL_BYTES)
 		expect(played).toBeGreaterThan(0)
 		// The noise itself (beyond the tail) never reaches the client.
@@ -346,6 +350,69 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			result.received.indexOf(noise.subarray(TAIL_BYTES, TAIL_BYTES + 400)),
 		).toBe(-1)
 	})
+
+	// Amendment A17 (2026-10-24): an STE tone (55 Hz, after PTT release, carrier still up) ends
+	// the over: muted from its onset (retroactively in the pre-roll) with a 10 ms fade, the latch
+	// ends, and the noise burst after it never plays.
+	function steTone(seconds: number): Buffer {
+		const out = new Float32Array(Math.round(RATE * seconds))
+		for (let i = 0; i < out.length; i++)
+			out[i] = 0.12 * Math.sin((2 * Math.PI * 55 * i) / RATE)
+		return toPcm(out, "s16le")
+	}
+
+	for (const [name, over] of [
+		["voice", (): Buffer => toPcm(overVoice(61), "s16le")],
+		[
+			"CTCSS 79.7 Hz + voice",
+			(): Buffer =>
+				toPcm(
+					mix(
+						ctcssMix({ rate: RATE, seconds: OVER_SECONDS, hz: 79.7 }),
+						voiceLike({
+							rate: RATE,
+							seconds: OVER_SECONDS,
+							seed: 62,
+							level: 0.4,
+						}),
+					),
+					"s16le",
+				),
+		],
+	] as const)
+		it(`A17: ${name} over, 0.4 s of 55 Hz STE, then loud noise: speech, a fade, then zeros`, async () => {
+			const overPcm = over()
+			const ste = steTone(0.4)
+			const noise = toPcm(
+				whiteNoise({ rate: RATE, seconds: 1, seed: 63, level: 0.9 }),
+				"s16le",
+			)
+			const result = await drive("nfm", [
+				{ pcm: overPcm, open: true, quieted: true },
+				{ pcm: ste, open: true, quieted: true },
+				{ pcm: noise, open: true, quieted: false },
+				{ pcm: Buffer.alloc(RATE * 2), open: false, quieted: false },
+			])
+			const at = result.received.indexOf(overPcm.subarray(0, RATE))
+			expect(at).toBeGreaterThanOrEqual(0)
+			// All but at most the last 10 ms (the fade) of the over plays unchanged.
+			const fadeBytes = 0.01 * RATE * 2
+			expect(
+				result.received.subarray(at, at + overPcm.length - fadeBytes),
+			).toEqual(overPcm.subarray(0, overPcm.length - fadeBytes))
+			// After the over: at most 25 ms of STE onset slack (the detector's phase step) is heard,
+			// faded, then only zeros; no noise sample ever reaches the client.
+			const after = result.received.subarray(at + overPcm.length)
+			let last = -1
+			for (let i = 0; i < after.length; i += 2)
+				if (after.readInt16LE(i) !== 0) last = i
+			console.info(
+				`EVIDENCE-SQUELCH A17 ${name}: ${(last + 2) / 2} samples after the over`,
+			)
+			expect(last).toBeLessThanOrEqual(0.025 * RATE * 2)
+			expect(result.received.indexOf(noise.subarray(400, 800))).toBe(-1)
+			expect(result.states.has("waiting")).toBe(true)
+		})
 
 	it("A16: a speech pause inside a quieted over passes in full", async () => {
 		const over = Buffer.concat([
