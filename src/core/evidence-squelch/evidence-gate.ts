@@ -46,6 +46,8 @@ import {
 	EVIDENCE_NOTE_RESET,
 	msToSamples,
 } from "./contract.js"
+import { CTCSS_HZ } from "../audio-tones/ctcss.js"
+import { ReverseBurstTracker } from "./reverse-burst.js"
 import { SteDetector } from "./ste-detector.js"
 import type {
 	EvidenceGateOptions,
@@ -281,6 +283,15 @@ function toneKey(tone: Readonly<ToneReading>): number {
 	return tone.kind === "ctcss" ? tone.index : 1_000 + tone.packed
 }
 
+/** `EvidenceGateOptions` plus the A20 switch (tests and the bench compare with it off). */
+export interface EvidenceGateBuildOptions extends EvidenceGateOptions {
+	/** A20: the reverse-burst tracker on `nfm` (default true). */
+	reverseBurst?: boolean
+}
+
+/** A20: which detector ended the over (tests only). */
+export type EvidenceEndCause = "ste55" | "reverse"
+
 export class EvidenceGate implements EvidenceGatePort {
 	private readonly rate: number
 	private readonly deviationHz: number
@@ -393,7 +404,12 @@ export class EvidenceGate implements EvidenceGatePort {
 	/** Byte offset of the first latch in the current `push`, or -1. */
 	private latchAt = -1
 
-	constructor(options: EvidenceGateOptions) {
+	/** A20: reverse-burst phase tracker on the latched CTCSS tone (NFM only). */
+	private readonly reverse: ReverseBurstTracker | null
+	/** A20: the detector that ended the current hold, or null. */
+	private endCauseValue: EvidenceEndCause | null = null
+
+	constructor(options: EvidenceGateBuildOptions) {
 		const rate = options.rate
 		if (
 			typeof rate !== "number" ||
@@ -424,6 +440,10 @@ export class EvidenceGate implements EvidenceGatePort {
 				: 0)
 		this.fadeSamples = msToSamples(EVIDENCE_FADE_OUT_MS, rate)
 		this.ste = this.modulation === "nfm" ? new SteDetector() : null
+		this.reverse =
+			this.modulation === "nfm" && options.reverseBurst !== false
+				? new ReverseBurstTracker()
+				: null
 
 		this.hangSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS, rate)
 		this.toneMinSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS, rate)
@@ -483,6 +503,16 @@ export class EvidenceGate implements EvidenceGatePort {
 	/** A17: input-sample index (since construction) of the last STE onset (diagnostic, tests). */
 	get steOnset(): number {
 		return this.steOnsetIndex
+	}
+
+	/** A20: which detector ended the over while held (tests only), else null. */
+	get endCause(): EvidenceEndCause | null {
+		return this.steHold ? this.endCauseValue : null
+	}
+
+	/** A20: the frequency the reverse-burst tracker is armed on, or 0 (tests only). */
+	get reverseToneHz(): number {
+		return this.reverse?.toneHz ?? 0
 	}
 
 	takeSteBack(): number {
@@ -589,6 +619,8 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.audioSamples = 0
 			this.tone?.reset()
 			this.ste?.reset()
+			// A20 (M3): no block spans a close; the tracker resumes from an empty history.
+			this.reverse?.restart()
 			this.decimator.arm(this.rate)
 			this.groupStart = this.inputCount
 			this.nonFiniteGroup = false
@@ -889,6 +921,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.sinceSighting = Number.MAX_SAFE_INTEGER
 		this.steHold = false
 		this.ste?.reset()
+		this.reverse?.disarm()
 		this.groupStart = this.inputCount
 		this.guardBytesLeft = 0
 	}
@@ -947,7 +980,19 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.ste.push(value, groupFirst) &&
 			!this.steHold
 		) {
-			this.onSte()
+			this.endOver(this.ste.onsetIndex, "ste55")
+			return
+		}
+		// A20: the reverse-burst tracker, armed only while latched on a CTCSS tone.
+		const reverse = this.reverse
+		if (
+			reverse !== null &&
+			reverse.armed &&
+			this.internal === "open" &&
+			!this.steHold &&
+			reverse.push(value, groupFirst)
+		) {
+			this.endOver(reverse.onsetIndex, "reverse")
 			return
 		}
 		const tone = this.tone
@@ -993,16 +1038,32 @@ export class EvidenceGate implements EvidenceGatePort {
 		if (verdict !== null) this.latch(verdict, -1, after)
 	}
 
-	/** A17: an STE block just completed: mute from its onset (at most 50 ms after the tone's). */
-	private onSte(): void {
+	/**
+	 * A17 / A20: an STE (55 Hz block or reverse burst) ends the over: mute from `onset`. Callers
+	 * check `!steHold`, so the first detection of an over wins and `steBack` is set once.
+	 */
+	private endOver(onset: number, cause: EvidenceEndCause): void {
 		const wasOpen = this.internal === "open"
-		const onset = this.ste?.onsetIndex ?? this.inputCount
 		this.reset()
+		this.endCauseValue = cause
 		this.internal = "waiting"
 		this.steHold = true
 		this.steOnsetIndex = onset
 		this.steBack = 1
 		this.wasOpenAtPush = this.wasOpenAtPush || wasOpen
+	}
+
+	/** A20.1: armed on a CTCSS key (re-armed when it changes), disarmed on any other latch. */
+	private armReverse(key: number): void {
+		const reverse = this.reverse
+		if (reverse === null) return
+		const hz = key >= 0 && key < 1_000 ? CTCSS_HZ[key] : undefined
+		if (hz === undefined) {
+			reverse.disarm()
+			return
+		}
+		if (reverse.armed && reverse.toneHz === hz) return
+		reverse.arm(hz)
 	}
 
 	private observeTone(reading: Readonly<ToneReading>, after: number): void {
@@ -1021,6 +1082,7 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.latchedToneKey = key
 			this.sinceCarrier = 0
 			this.sinceSighting = 0
+			this.armReverse(key)
 			return
 		}
 		this.latch(kind, key, after)
@@ -1034,6 +1096,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.internal = "open"
 		this.latchedEvidence = evidence
 		this.latchedToneKey = key
+		this.armReverse(key)
 		// A17 revision: fresh evidence after a (possibly false) STE ends the hold.
 		this.steHold = false
 		this.sinceCarrier = 0

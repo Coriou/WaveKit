@@ -558,12 +558,25 @@ describe("A14: the latch survives only the same transmission", () => {
 
 	it("repeated 10 ms closes between 600 ms unquieted tone stretches keep the latch", () => {
 		// Latched first (a close before a latch discards the evidence, requirement 1.5).
+		// One phase-continuous tone across every stretch: a phase break is a reverse burst under A20.
+		const tone = ctcssMix({ rate: RATE, seconds: 2 + 10 * 0.6, hz: 79.7 })
+		const stretch = (from: number, seconds: number, seed: number): Buffer => {
+			const at = Math.round(RATE * from)
+			const n = Math.round(RATE * seconds)
+			return toPcm(
+				mix(
+					tone.subarray(at, at + n),
+					voiceLike({ rate: RATE, seconds, seed, level: 0.4 }),
+				),
+				"s16le",
+			)
+		}
 		const segments: Segment[] = [
-			{ pcm: ctcssOver(2), open: true, quieted: false },
+			{ pcm: stretch(0, 2, 3), open: true, quieted: false },
 		]
 		for (let i = 0; i < 10; i++)
 			segments.push(
-				{ pcm: ctcssOver(0.6, 79.7, 20 + i), open: true, quieted: false },
+				{ pcm: stretch(2 + 0.6 * i, 0.6, 20 + i), open: true, quieted: false },
 				closedFor(10),
 			)
 		const t = drive(gate(), segments)

@@ -1247,3 +1247,224 @@ pinning the real csdr command.
     two chunks split at an odd byte: `pcm` listeners and the client receive zeros for the closed
     block and the original bytes for the open one.
 11. AM replay regression (`am-carrier`, existing): `autoSquelch` stays `off` (A19.5).
+
+## Amendment A20 (2026-10-24): reverse-burst squelch-tail elimination
+
+Revised 2026-10-24 after review (mixed-block onset, retained-latch drain, restart on reopen,
+enforceable corpus, bounded properties, history arithmetic, measured CPU).
+
+### Signal models (requirement A20.6, A20.7)
+
+All synthetic and seeded; no recording, no receiver. Two models, both in
+`tests/unit/core/evidence-squelch/reverse-burst-signals.ts`:
+
+- `directTone`: an 8 kHz tone, optionally reversed at a sample, with an amplitude envelope, an
+  extra phase path and Gaussian noise. Used for the alignment sweep, the unit tests and
+  Property 22.
+- `fmLink`: the message (the CTCSS tone at 0.15 of deviation unless stated, plus, where stated,
+  speech-shaped audio: voiced harmonics of a 100-220 Hz fundamental to 3 kHz under a 3-5 Hz
+  syllable envelope, an unvoiced part and first-order pre-emphasis, at 0.4 RMS of deviation) is
+  frequency-modulated at 5 kHz deviation on 24 kHz complex baseband, multiplied by the fading
+  (Rayleigh: 16-path sum of sinusoids, 10 Hz Doppler, amplitude and phase; slow fades: dips to
+  -20 dB), given complex Gaussian noise at the carrier-to-noise in 12.5 kHz, filtered by a
+  31-tap 6 kHz low-pass, discriminated (`atan2` of `x[n] conj(x[n-1])`) and block-averaged by 3 to
+  8 kHz (the gate's decimator). Tone flutter modulates the tone with 10 Hz low-pass phase noise
+  (15° RMS) and amplitude (30 %). A reversal run reverses the tone at `2 + ((seed x 2 654 435 761)
+mod 3 400) / 1 000` s, stops the voice there (PTT released) and ends 180 ms later.
+
+The first prototype (a numpy model at 32 kHz with a 129-tap channel filter) gave the same picture;
+the figures below are from the TypeScript tracker on the `fmLink` model.
+
+### Alignment sweep (requirement A20.3a)
+
+`directTone`, noise RMS 0.0015 (-37 dB below the 0.15 tone), reversal at block 12 plus every
+offset 0-319, all 50 tones, 120° and 180°, errors -0.5, 0, +0.5 Hz: 96 000 cases.
+
+| Measure                                    | Result                                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------- |
+| Detected                                   | 96 000 / 96 000                                                                 |
+| Onset - reversal (8 kHz samples)           | -121 to -41 (120°: -121 / -79 / -41 min / median / max; 180°: -114 / -79 / -43) |
+| Decision + 1 - reversal (8 kHz samples)    | 520 to 892 (65 to 111.5 ms)                                                     |
+| Review case: 127.3 Hz, 120°, 10 x 320 + 80 | decision 560 (70 ms), onset -79                                                 |
+
+Why the literal first rule failed: with the reversal at offset 80 of block 10, the earliest
+evaluation that passes is `k = 9` (block 10, three quarters reversed, already passes (c)-(e)),
+and the old onset, the start of block `k`, was 400 samples (50 ms) early. The mixed-block
+estimate fixes it: a block holding `o` pre-reversal samples has the phasor
+`(o P + (N - o) Q) / N` for pre and post phasors `P` and `Q` (rectangular window, oscillator at
+the tone), so the projection `Re((X - Q) conj(P - Q)) / |P - Q|^2` is `o / N`. Summing the
+fractions of blocks `k` and `k + 1` gives the position whichever of them is mixed; noise and the
+oscillator's drift spread it by about ±40 samples, hence the 80-sample margin (onset always
+before the reversal in the sweep).
+
+### Study and corpus (requirement A20.6, A20.7)
+
+Study: 100 seeds per condition, 6 s false-alarm runs (600 s), 100 reversal runs each at 120° and
+180°; tones rotate 67.0, 127.3, 254.1 Hz. Every detection counts (re-armed after each). Onset and
+latency in 8 kHz samples, over detected runs.
+
+| Condition                                  | False alarms        | Detected 120° | Detected 180° | Onset - reversal | Decision - reversal |
+| ------------------------------------------ | ------------------- | ------------- | ------------- | ---------------- | ------------------- |
+| Clean, CNR 30 dB                           | 0 in 600 s          | 100/100       | 100/100       | -106 to -51      | 536 to 880          |
+| Tone error +0.5 Hz                         | 0 in 600 s          | 100/100       | 100/100       | -97 to -54       | 528 to 880          |
+| Tone error -0.5 Hz                         | 0 in 600 s          | 100/100       | 100/100       | -99 to -55       | 552 to 880          |
+| Rayleigh 10 Hz, CNR 20 dB                  | 0 in 600 s          | 100/100       | 100/100       | -111 to -27      | 536 to 880          |
+| Rayleigh 10 Hz, CNR 12 dB                  | 0 in 600 s          | 93/100        | 95/100        | -182 to +161     | 536 to 1 088        |
+| Slow fades to -20 dB, CNR 25 dB            | 0 in 600 s          | 100/100       | 100/100       | -106 to -51      | 536 to 880          |
+| Tone flutter 10 Hz, 15° RMS + 30 % AM      | 0 in 600 s          | 69/100        | 76/100        | -153 to +231     | 552 to 1 008        |
+| Weak carrier, CNR 8 dB                     | 0 in 600 s          | 100/100       | 100/100       | -106 to -52      | 552 to 880          |
+| Weak tone -30 dB of deviation, CNR 20 dB   | 0 in 600 s          | 100/100       | 100/100       | -105 to -51      | 536 to 880          |
+| Voice 0.4 RMS over the tone                | 0 in 600 s          | 95/100        | 95/100        | -122 to +1       | 544 to 952          |
+| Voice + Rayleigh, CNR 15 dB, +0.5 Hz       | 0 in 600 s          | 92/100        | 95/100        | -145 to +76      | 528 to 1 024        |
+| Weak tone -30 dB + voice 0.4 (known limit) | 3 in 600 s (3 runs) | 58/100        | 55/100        | -258 to +12      | 552 to 1 040        |
+
+Gates weighed and dropped in the first prototype: without the magnitude-variation gate (b), or
+with a 35° steadiness bound, the known-limit condition gave 4-6 false runs in 60; a 6-block
+history halved those but cost 5-10 points of detection; a tone-fraction-of-block gate and a
+300-3 000 Hz quiet-band gate (A17 style) do not separate, because the discriminator noise fills
+the band in both classes.
+
+Corpus test (`reverse-burst-corpus.test.ts`): the first 4 seeds of the study per condition
+(false alarms: seeds 1000-1003, 24 s per condition; reversals: seeds 5120-5123 and 5180-5183).
+Ceilings: 0 detections per condition, at most 1 in the known limit; every reversal detected, with
+the onset 0 to 121 samples before it and the decision at most 892 after it, in the clean, ±0.5 Hz,
+Rayleigh 20 dB, slow-fade, weak-carrier and weak-tone conditions. About 11 s of test time.
+
+### Constants (requirement A20.3)
+
+| Constant                        | Value | Arithmetic                                                                                                                       |
+| ------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `REVERSE_BURST_BLOCK_SAMPLES`   | 320   | 40 ms at 8 kHz; decision 65-111.5 ms after the reversal (sweep), inside the shortest 150 ms burst; 2.7 cycles of 67 Hz per block |
+| `REVERSE_BURST_HISTORY_BLOCKS`  | 4     | increments `k-5 -> k-4` to `k-2 -> k-1`, over 5 history blocks (200 ms of steady tone)                                           |
+| `REVERSE_BURST_RING_BLOCKS`     | 8     | 5 history blocks, `k`, `k + 1`, `k + 2`; first evaluation after 8 blocks = 320 ms, under the 750 ms tone-latch floor             |
+| `REVERSE_BURST_STEADY_DEG`      | 25    | ±0.5 Hz is 7.2° per block and is removed as drift; a 120° step clears the 90° bar by 30°                                         |
+| `REVERSE_BURST_STEP_DEG`        | 90    | midway between no step and 180°; 30° under a 120° reversal                                                                       |
+| `REVERSE_BURST_MAGNITUDE_RATIO` | 0.5   | -6 dB: a fade, a null or a carrier drop fails it; a reversal does not (outside the mixed block)                                  |
+| `REVERSE_BURST_MAGNITUDE_CV`    | 0.3   | history magnitudes vary little on a tone-dominated bin; voice-dominated phasors vary more                                        |
+| `REVERSE_BURST_ONSET_MARGIN`    | 80    | 10 ms: twice the ±40-sample spread of the position estimate in the sweep                                                         |
+
+### Component: `ReverseBurstTracker` (`src/core/evidence-squelch/reverse-burst.ts`)
+
+`arm(hz)`, `restart()`, `disarm()`, `push(x, index): boolean`, `onsetIndex`, `armed`, `toneHz`.
+State: an oscillator phasor stepped by a fixed rotation and re-seeded at each block start from an
+exact fractional cycle count (no drift in phase or magnitude); the block accumulators; a ring of
+8 slots (real, imaginary, phase, magnitude, start index), oldest first. Order per completed
+block: store into the ring (overwriting the oldest once full), re-seed, then, if 8 blocks have
+completed since the arm or restart, evaluate with the newest as `k + 2`. A true return disarms
+the tracker. Allocation free after construction (seven `Float64Array`s of 8 or 5 entries).
+Rectangular window.
+
+### Wiring in `EvidenceGate`
+
+- Construction: a tracker on `nfm` unless `reverseBurst: false` (`EvidenceGateBuildOptions`,
+  tests and the bench only).
+- `latch(evidence, key, after)` and the renewal branch of `observeTone` call `armReverse(key)`:
+  a CTCSS table index arms at `CTCSS_HZ[key]` (unless already armed there); any other key
+  disarms. `reset()` disarms.
+- The reopen path of `push` (open and closing: the latch is retained) calls `restart()` next to
+  the tone and STE resets (A20.1).
+- `takeSample`, after the decimator: the 55 Hz `ste.push` first, then, if open, not held and armed,
+  `reverse.push(value, groupFirst)`. Either detection calls `endOver(onset, cause)`, which is the
+  former `onSte()` with the onset and cause as arguments; `endCause` (tests only) reports the
+  cause while held. No `@wavekit/api-types`, wiring, pre-roll or demodulator change.
+
+Interaction with A16 and the pre-roll (A20.4a): during the A16 guard or fade the gate is still
+latched and the tracker still runs; a detection mutes from the onset. After a retained-latch
+close the pre-roll may have played out (a close longer than the queued delay) and the reopened
+over plays at delay 0: then `muteTail` drops only what is queued, the reversed tone between the
+onset and the decision may have played (at most about 122 ms), and nothing after the decision
+plays. A stage 1 close before the decision leaves A16 in charge.
+
+### CPU (requirement A20.8)
+
+Estimate (operations, not measured): per armed 8 kHz sample 10 operations (rotation 4 multiplies
+2 adds, accumulate 2 multiplies 2 adds), 80 000 per second; per block (25 per second) one `atan2`,
+one `hypot`, one `cos`, one `sin` and the rule over the ring (about 40 operations, plus a 5-entry
+sort for the median), about 2 000 per second; about 0.08 Mflop/s.
+
+Measured with `scripts/bench/reverse-burst.ts` (opt-in; 30 s of a 100 Hz tone plus seeded
+speech-shaped audio at 0.3, tone-latched; before and after passes interleaved, median of 7 after
+a warmup; desktop host, load averages 11.61 12.57 17.41 before and 11.08 12.44 17.34 after):
+
+| Path                             | Rate   | CPU core fraction |
+| -------------------------------- | ------ | ----------------- |
+| `EvidenceGate.push`, tracker off | 25 kHz | 0.002970          |
+| `EvidenceGate.push`, tracker on  | 25 kHz | 0.003344          |
+| `EvidenceGate.push`, tracker off | 50 kHz | 0.004041          |
+| `EvidenceGate.push`, tracker on  | 50 kHz | 0.004557          |
+| `ReverseBurstTracker.push` alone | 8 kHz  | 0.000200          |
+
+The tracker costs about 0.0002 core on its own; the gate difference (+0.0004 to +0.0005) is of
+the same order as the run-to-run noise on a host this loaded. Pi 4-class core: estimated 4-5x,
+about 0.001-0.0025 core. Both at 2.048 and 2.4 Msps (8 kHz either way), far below 0.3 core.
+
+### Correctness properties
+
+21. **Reverse burst ends the over (A20, 2026-10-24).** For any of the 50 CTCSS tones, a tone
+    error in [-0.5, 0.5] Hz, any starting phase, a reversal of 120° or 180° at 2.0 s plus 0-999
+    input samples (25 kHz), a burst of 150-200 ms, uniform noise of peak 0.018 (RMS 0.0104, -20 dB
+    under the 0.15 tone), then 0.3 s of open unquieted noise and a close, and any chunking (an
+    odd first chunk and 0-3 random cuts per 10 ms block): the over is ended by the tracker before
+    the burst ends, `muteTail` runs once, the onset lies within the sweep bounds (scaled to the
+    input rate, plus one decimation group), and the complete client output equals the reference
+    pre-roll fed the over until the onset (its last 10 ms faded by `j / (F + 1)`), held audio
+    abandoned at the close, nothing after. _Validates A20.3, A20.4._
+22. **No reverse burst without a step (A20, 2026-10-24).** On `directTone`, for any of the 50
+    tones, error in [-0.5, 0.5] Hz, starting phase and seed, over 100 blocks (4 s): an amplitude
+    path piecewise-linear per block in [0.2, 1] of the tone, changing by at most x2 per block; a
+    phase path piecewise-linear with at most 20° per block; Gaussian noise of RMS 0.003 (0.1 of
+    the smallest amplitude). The tracker, re-armed after any detection, never fires. Fades below
+    0.2, carrier drops and flutter are deterministic tests and corpus conditions, not part of the
+    property. _Validates A20.3, A20.6._
+23. **One end per over (A20, 2026-10-24).** Within one uninterrupted hold (no fresh evidence
+    and no stage-1 close between the two detections), for any order of a 55 Hz STE (with the
+    CTCSS tone continuing at 0.2) and a 180° reversal, spaced 0-300 ms, at 67, 100 or 151.4 Hz:
+    `muteTail` is called exactly once and `endCause` keeps the first detector's value from the
+    first detection to the close. _Validates A20.5._
+
+Each property runs with `numRuns: 100` and carries the trace comment, for example
+`// Feature: evidence-squelch, Property 21: reverse burst ends the over` /
+`// Validates: Requirements A20.3, A20.4`. No assertion reads a clock.
+
+### Tests (A20.1-A20.9)
+
+1. `tests/unit/core/evidence-squelch/reverse-burst.test.ts`: 120° and 180° at 67.0, 127.3 and
+   254.1 Hz within the sweep bounds; every alignment 0-319 at 127.3 Hz for 120° and 180° at ±0.5
+   Hz within the bounds; the review's mixed-block case pinned (decision 560 samples, onset within
+   bounds and after `9 x 320 + 160`); 60° and 80° steps not detected; no detection on slow fades
+   to -20 dB, a carrier drop to noise and 10 Hz phase flutter of 15° RMS (10 seeds x 3 tones x 6 s
+   each); arming (8 blocks before the first evaluation, a step at block 3 ignored), `disarm`,
+   `restart` (a step 2 blocks after a restart ignored); Property 22.
+2. `tests/unit/core/evidence-squelch/reverse-burst-corpus.test.ts`: the seeded corpus and its
+   ceilings (A20.6, A20.7).
+3. `tests/unit/core/evidence-squelch/evidence-gate-reverse.test.ts`, through the real wiring and
+   pre-roll:
+   - arming on a CTCSS latch and renewal only, never on voice or DCS, disarmed when waiting or
+     after a reset;
+   - Property 21 and Property 23;
+   - retained latch: closes of 20, 100, 300, 700 and 1 000 ms and reopen phases 0, 1.3, 3.14 and
+     4.4 rad: no detection on the reopen phase jump, the tracker still armed on the tone, and a
+     reversal 1.5 s after the reopen detected (M3);
+   - drained pre-roll: latch, a 1 s close, reopen (the reopened over plays at delay 0, asserted),
+     a reversal 1 s later: nothing plays after the decision, and what plays between the reversal
+     and the decision is at most the decision span (A20.4a);
+   - false detection mid-over (tone and voice continue): held, then resumed on fresh evidence,
+     the held audio replayed; conditional cost: with stage 1 closing 0.4 s after the step, nothing
+     from the onset on ever plays;
+   - the CTCSS bank: reversal at every 25 ms across a 250 ms hop, a 200 ms burst then noise: the
+     hold never ends before the close;
+   - A16 interplay: carrier evidence lost 200 ms before the reversal (tone pass): still one
+     `muteTail`, onset within bounds, nothing from the onset on plays;
+   - fallback, pinned: reversal at stream sample 50 000 (2.0 s at 25 kHz), 10 ms blocks without
+     cuts, a 50 ms burst and stage 1 closing at the carrier drop (under the 65 ms smallest
+     decision latency): no `muteTail`, client output byte-identical to the gate with
+     `reverseBurst: false`.
+4. Regression: the existing evidence-squelch suites (including the A17 STE tests and fixtures)
+   pass. One A14 test input was corrected: "repeated 10 ms closes between 600 ms unquieted tone
+   stretches keep the latch" (`evidence-gate-live.test.ts`) joined a 2 s and a 0.6 s 79.7 Hz tone,
+   each generated from phase 0, with no close between them (79.7 Hz x 2 s = 159.4 cycles: a real
+   144° phase step on an open, tone-latched over, which the tracker ended at 2.07 s). The tone is
+   now one phase-continuous signal sliced across the stretches; the repeated 10 ms closes, the
+   test's purpose, are unchanged. A phase break in a test tone is a reverse burst under A20.
+5. Bench: `scripts/bench/reverse-burst.ts` (opt-in, not in the suite), run before and after with
+   the load average recorded.
