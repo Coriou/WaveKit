@@ -31,6 +31,7 @@ import {
 	evidenceDeviationHz,
 } from "../../../../src/core/evidence-squelch/contract.js"
 import {
+	EVIDENCE_TONE_HANG_GRACE_MS,
 	EvidenceGate,
 	judgeEvidence,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
@@ -294,6 +295,7 @@ describe("A13: live PMR446 overs on a 12.5 kHz channel", () => {
 
 const RATE = 25_000
 const HANG = Math.round((RATE * LIVE_AUDIO_AUTO_SQUELCH_HANG_MS) / 1_000)
+const TONE_GRACE = Math.round((RATE * EVIDENCE_TONE_HANG_GRACE_MS) / 1_000)
 /** One 10 ms block at 25 kHz, in bytes. */
 const BLOCK_BYTES = 500
 
@@ -475,6 +477,95 @@ describe("A14: the latch survives only the same transmission", () => {
 		expect(drive(gate(), quick).evidence.at(-1)).toBe("dcs")
 	})
 
+	// Review round 1 (A14 revised): a tone over with weak or no quieting survives short fades.
+	it("review repro: 2 s CTCSS unquieted, 1.2 s close, the same tone back unquieted: stays open/ctcss", () => {
+		const g = gate()
+		drive(g, [{ pcm: ctcssOver(2), open: true, quieted: false }])
+		expect([g.state, g.evidence]).toEqual(["open", "ctcss"])
+		const t = drive(g, [
+			closedFor(1_200),
+			{ pcm: ctcssOver(3, 79.7, 8), open: true, quieted: false },
+		])
+		expect(t.states.every(s => s === "open")).toBe(true)
+		expect(t.evidence.every(e => e === "ctcss")).toBe(true)
+	})
+
+	it("review repro: repeated 10 ms closes between 600 ms unquieted tone stretches keep the latch", () => {
+		// Latched first (a close before a latch discards the evidence, requirement 1.5).
+		const segments: Segment[] = [
+			{ pcm: ctcssOver(2), open: true, quieted: false },
+		]
+		for (let i = 0; i < 10; i++)
+			segments.push(
+				{ pcm: ctcssOver(0.6, 79.7, 20 + i), open: true, quieted: false },
+				closedFor(10),
+			)
+		const t = drive(gate(), segments)
+		const latched = t.states.indexOf("open")
+		expect(latched).toBeGreaterThan(0)
+		expect(t.states.slice(latched).every(s => s === "open")).toBe(true)
+		expect(t.evidence.at(-1)).toBe("ctcss")
+	})
+
+	it("a tone over with no quieting at all stays open to its end, then ends at the hang", () => {
+		for (const tone of ["ctcss", "dcs"] as const) {
+			const pcm =
+				tone === "ctcss"
+					? ctcssOver(6)
+					: toPcm(
+							mix(
+								dcsMix({
+									rate: RATE,
+									seconds: 6,
+									code: 0o23,
+									polarity: "normal",
+								}),
+								voiceLike({ rate: RATE, seconds: 6, seed: 4, level: 0.4 }),
+							),
+							"s16le",
+						)
+			const g = gate()
+			const t = drive(g, [{ pcm, open: true, quieted: false }])
+			const latched = t.states.indexOf("open")
+			expect(latched).toBeGreaterThan(0)
+			expect(t.states.slice(latched).every(s => s === "open")).toBe(true)
+			expect(g.evidence).toBe(tone)
+			const after = drive(g, [closedFor(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS)])
+			expect(after.states.at(-1)).toBe("waiting")
+		}
+	})
+
+	it("flicker after an unquieted tone over still expires (bound: hang + tone grace + one block)", () => {
+		const segments: Segment[] = [
+			{ pcm: ctcssOver(4), open: true, quieted: false },
+			closedFor(300),
+			...flickerTrain(10_000, 200, 300, 400),
+		]
+		const t = drive(gate(), segments)
+		const overEnd = blocksBefore(segments, 1)
+		const expired = t.states.indexOf("waiting", overEnd)
+		expect(expired).toBeGreaterThan(overEnd)
+		expect(expired - overEnd).toBeLessThanOrEqual(
+			(HANG + TONE_GRACE) / 250 + 25,
+		)
+		expect(t.states.slice(expired).every(s => s === "waiting")).toBe(true)
+	})
+
+	it("a different tone after a fade cannot keep the latch: it ends, and the new tone latches on its own", () => {
+		const g = gate()
+		drive(g, [{ pcm: ctcssOver(2), open: true, quieted: false }])
+		const t = drive(g, [
+			closedFor(1_000),
+			{ pcm: ctcssOver(3, 100, 6), open: true, quieted: false },
+		])
+		const ended = t.states.indexOf("waiting")
+		// 100 blocks closed, then at most hang + grace - 1 s of the other tone.
+		expect(ended).toBeGreaterThanOrEqual(100)
+		expect(ended).toBeLessThanOrEqual(100 + 75)
+		expect(t.states.at(-1)).toBe("open")
+		expect(t.evidence.at(-1)).toBe("ctcss")
+	})
+
 	// Feature: evidence-squelch, Property 16: Latch needs carrier evidence to survive
 	// Validates: Requirements 1.5
 	it("Property 16: after the over's last quieted block, any pattern of unquieted re-opens and closes ends the latch exactly at the hang", () => {
@@ -507,8 +598,11 @@ describe("A14: the latch survives only the same transmission", () => {
 							const before = g.state
 							drive(g, [{ pcm: block, open: step.open, quieted: false }])
 							if (before === "open") since += BLOCK_BYTES / 2
-							if (since < HANG) expect(g.state).toBe("open")
-							else if (before === "open") expect(g.state).toBe("waiting")
+							// A tone latch gets the tone grace while stage 1 is open (A14 revised).
+							const limit = step.open ? HANG + TONE_GRACE : HANG
+							if (before === "open")
+								expect(g.state).toBe(since < limit ? "open" : "waiting")
+							else expect(g.state).toBe("waiting")
 						}
 				},
 			),

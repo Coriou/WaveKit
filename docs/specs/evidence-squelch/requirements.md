@@ -187,6 +187,23 @@ plus one CTCSS block. A different standard tone or code is new evidence: within 
 renews the label (as above); after the hang the over starts from waiting and its label is its
 own, never the previous over's.
 
+**Amendment (2026-10-24, A14 revised after review): tone continuity.** Review found that a tone
+over with weak quieting lost its latch after a short fade: the re-open reset the tone stage, the
+returning tone needed 750 ms to qualify again, and the hang ran out first (2 s of 79.7 Hz
+unquieted, 1.2 s closed, the same tone back: `waiting` after 300 ms; also with repeated 10 ms
+closes between 600 ms stretches). Revised rule for a latch on a tone or code: (1) a re-open within
+the hang keeps the tone stage (a voice latch still resets it); (2) a single sighting of the
+latched tone or code is carrier evidence: one completed 500 ms CTCSS block won by the latched
+tone, or one DCS word hit with the latched reading; qualification (two blocks, two words, 750 ms
+of audio) is still required to latch or renew; (3) while stage 1 is open the hang of a tone latch
+runs 250 ms longer (`EVIDENCE_TONE_HANG_GRACE_MS`, one CTCSS hop, longer than one 171 ms DCS word),
+so the tone stage gets one more decision before the latch ends; while stage 1 is closed the hang
+is unchanged. Bound: a latch outlives its tone by at most the hang + 250 ms + one block straddling
+the tone's end. A different tone or code never refreshes the latch (its sightings have another
+key): it ends the latch at the hang unless it qualifies first, which renews the label as before.
+Bare interference refreshes nothing (a CTCSS block must give the latched tone 0.65 of the band and
+3× the next tone; a DCS hit must match a 23-bit word of the latched code).
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

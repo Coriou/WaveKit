@@ -161,6 +161,14 @@ export const EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS = 5
  */
 export const EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS = 5
 
+/**
+ * Tone continuity (amendment A14 revised, 2026-10-24): on a tone latch the hang may run this much
+ * longer while stage 1 is open, so the tone stage gets one more decision (a CTCSS block every
+ * 250 ms of audio, a DCS word every 171 ms) before the latch ends. Only a sighting of the latched
+ * tone or code uses it; noise and other codes cannot.
+ */
+export const EVIDENCE_TONE_HANG_GRACE_MS = 250
+
 /** Tone identity for renewal: CTCSS table index, or 1 000 + packed DCS reading. */
 function toneKey(tone: Readonly<ToneReading>): number {
 	return tone.kind === "ctcss" ? tone.index : 1_000 + tone.packed
@@ -178,6 +186,10 @@ export class EvidenceGate implements EvidenceGatePort {
 	private readonly hangSamples: number
 	/** `msToSamples(TONE_MIN_MS, rate)`: 18 750 at 25 kHz. */
 	private readonly toneMinSamples: number
+	/** `msToSamples(TONE_HANG_GRACE_MS, rate)`: 6 250 at 25 kHz. */
+	private readonly toneGraceSamples: number
+	/** `ToneEvidence.sightingCount` when last checked. */
+	private toneSightings = 0
 	private readonly frames: AnalogTrialFrame[] = []
 	private readonly frameFinite = new Uint8Array(
 		LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES,
@@ -215,8 +227,9 @@ export class EvidenceGate implements EvidenceGatePort {
 	private closing = false
 	/**
 	 * Carrier hang (amendment 2026-10-24, A14): PCM samples, open or closed, since the latched
-	 * transmission last showed carrier evidence (PCM after a quieted block, or its latched tone
-	 * current). The latch ends when this reaches `hangSamples`; a stage-1 re-open does not
+	 * transmission last showed carrier evidence (PCM after a quieted block, or a sighting of its
+	 * latched tone or code). The latch ends when this reaches `hangSamples` (plus
+	 * `toneGraceSamples` on a tone latch while stage 1 is open); a stage-1 re-open does not
 	 * restart it.
 	 */
 	private sinceCarrier = 0
@@ -253,6 +266,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		)
 		this.hangSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_HANG_MS, rate)
 		this.toneMinSamples = msToSamples(LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS, rate)
+		this.toneGraceSamples = msToSamples(EVIDENCE_TONE_HANG_GRACE_MS, rate)
 		for (let i = 0; i < LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES; i++)
 			this.frames.push({
 				carrierDb: 0,
@@ -350,11 +364,13 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.internal = "waiting"
 			this.audioSamples = 0
 		} else if (this.internal === "open" && this.closing) {
-			// Reopen within the hang: latch kept, tone stage reset. The carrier hang keeps
-			// counting (A14): a re-open without carrier evidence lets the latch expire.
+			// Reopen within the hang: latch kept. The carrier hang keeps counting (A14): a re-open
+			// without carrier evidence lets the latch expire. A tone latch keeps its tone stage
+			// (A14 revised), so the same tone after a fade is sighted at the next block instead of
+			// re-qualifying from scratch; a voice latch resets it (a new over's tone qualifies clean).
 			this.closing = false
 			this.audioSamples = 0
-			this.tone?.reset()
+			if (this.latchedToneKey < 0) this.tone?.reset()
 			this.decimator.arm(this.rate)
 			this.nonFiniteGroup = false
 		}
@@ -469,7 +485,11 @@ export class EvidenceGate implements EvidenceGatePort {
 	private takeSample(sample: number, after: number): void {
 		if (this.internal === "open") {
 			if (this.carrierNow) this.sinceCarrier = 0
-			else if (++this.sinceCarrier >= this.hangSamples) {
+			else if (
+				++this.sinceCarrier >=
+				this.hangSamples +
+					(this.latchedToneKey >= 0 ? this.toneGraceSamples : 0)
+			) {
 				// A14: the hang ran out while stage 1 is open on something without carrier
 				// evidence (a weak re-open): the latch ends and this audio earns its own evidence.
 				this.reset()
@@ -485,6 +505,16 @@ export class EvidenceGate implements EvidenceGatePort {
 		const tone = this.tone
 		if (tone !== null) {
 			tone.push(value)
+			const sightings = tone.sightingCount
+			if (sightings !== this.toneSightings) {
+				this.toneSightings = sightings
+				// A14: a sighting of the latched tone or code is carrier evidence of this over.
+				if (
+					this.internal === "open" &&
+					tone.sightingKey === this.latchedToneKey
+				)
+					this.sinceCarrier = 0
+			}
 			const reading = tone.current()
 			if (reading !== null && this.audioSamples >= this.toneMinSamples)
 				this.observeTone(reading, after)
@@ -511,11 +541,7 @@ export class EvidenceGate implements EvidenceGatePort {
 
 	private observeTone(reading: Readonly<ToneReading>, after: number): void {
 		const key = toneKey(reading)
-		if (this.internal === "open" && key === this.latchedToneKey) {
-			// A14: the latched tone still present is carrier evidence of the same transmission.
-			this.sinceCarrier = 0
-			return
-		}
+		if (this.internal === "open" && key === this.latchedToneKey) return
 		const kind = toneKind(
 			this.modulation,
 			reading,

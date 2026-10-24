@@ -298,7 +298,7 @@ squelch task, not a backlog item.
 **Amendment (2026-10-24, A14): carrier hang.** The hang no longer counts stage-1-closed PCM only.
 `sinceCarrier` counts every PCM sample after the latch, open or closed; it returns to 0 on each
 sample while the last noted block was quieted (`carrierNow`, cleared by `closed()`), when the
-latched tone or code is current in the tone stage, on a renewal and at the latch. The latch ends
+latched tone or code is sighted (revised below), on a renewal and at the latch. The latch ends
 when `sinceCarrier` reaches `HANG_MS`: inside `closed()` as before (to idle), or inside `push()`
 (to waiting, fresh window, onset armed; the wiring tags the rest of that slice `pending`, so the
 weak re-open is held and abandoned when stage 1 closes). Rows changed:
@@ -313,9 +313,20 @@ poll to the end of the auto capture (09:28:48), across the DCS over, the quiet o
 key-up, with weak re-opens at -44 to -50 dBFS against a -55 dBFS floor. In the client stream after
 the latch (93.8 s) the longest muted stretch is 0.74 s (stage 1 closed beyond the 200 ms guard),
 so no close reached the 1.5 s hang, and 69.7 % of that time played interference as full-scale
-noise (about -3 dBFS RMS). Bound: with no stage-1
-close after the tone ends, the tone stage keeps its last 500 ms CTCSS block current, so the latch
-can outlive the tone by the hang plus one block (tested: at most 2.0 s).
+noise (about -3 dBFS RMS).
+
+**Amendment (2026-10-24, A14 revised after review): tone continuity.** The continuous "latched tone
+current" refresh is replaced by sightings: `ToneEvidence` counts every completed CTCSS block with
+a winner and every new DCS word hit (`sightingCount`, `sightingKey` in the gate's tone-key form);
+the gate resets `sinceCarrier` when a new sighting has the latched key. On a re-open within the
+hang a tone latch keeps its tone stage (only the decimator and the audio clock restart), so the
+next block (at most 250 ms of audio away; blocks are 500 ms every 250 ms) sights the returning
+tone. While stage 1 is open a tone latch expires at `HANG_MS + EVIDENCE_TONE_HANG_GRACE_MS`
+(250 ms), in `closed()` at `HANG_MS`. Regressions: the review repro (2 s unquieted 79.7 Hz, 1.2 s
+closed, tone back: open throughout), repeated 10 ms closes between 600 ms stretches, CTCSS and DCS
+overs with no quieted block, a different tone after a fade (latch ends, the new tone latches on
+its own), and flicker after an unquieted tone over (expires within hang + grace + one block).
+Property 16 checks the open-side limit `HANG_MS + grace` for a tone latch.
 
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
@@ -617,7 +628,8 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     _Validates 1.3, 5.2._
 16. **Latch needs carrier evidence (A14, 2026-10-24).** After an over's last quieted block and a
     stage-1 close, for any pattern of unquieted re-opens and closes the gate stays open exactly
-    until `HANG_MS` of PCM has passed and is waiting from then on. _Validates 1.5._
+    until `HANG_MS` of PCM has passed (`HANG_MS` + 250 ms when the block is open on a tone latch)
+    and is waiting from then on. _Validates 1.5._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 
