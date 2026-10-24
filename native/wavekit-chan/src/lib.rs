@@ -6,6 +6,7 @@ pub mod demod;
 pub mod demod_channel;
 pub mod design;
 pub mod disposal;
+pub mod framing;
 pub mod iqcap;
 pub mod plan;
 mod preparation;

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub const VERSION_LINE: &str = "wavekit-chan 0.2.0 protocol 2";
+pub const VERSION_LINE: &str = "wavekit-chan 0.2.0 protocol 3";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Args {

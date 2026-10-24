@@ -20,6 +20,8 @@ export type QuietingDb = number | typeof QUIETING_DB_INFINITE | null
 export const DEMOD_CHANNEL_ID = "live-demod"
 /** One second of 48 kHz s16, inside the process queue cap. */
 export const DEMOD_QUEUE_BYTES = 96_000
+/** A18: the only `open.audioFraming` value (framed demod audio, `framing.rs`). */
+export const DEMOD_AUDIO_FRAMING = "wkaf1"
 export const DEMOD_HYSTERESIS_DB = 2
 export const DEMOD_HANG_MS = 250
 export const DEMOD_DEVIATION_HZ = 5_000
@@ -57,6 +59,8 @@ const OpenedEventSchema = z
 		kind: z.literal("demod"),
 		filterTaps: z.number().int().nonnegative(),
 		groupDelaySamples: z.number().finite().nonnegative(),
+		/** A18: echo of an accepted `open.audioFraming`; the socket is then framed. */
+		audioFraming: z.literal(DEMOD_AUDIO_FRAMING).optional(),
 	})
 	.strict()
 
@@ -304,6 +308,8 @@ export function encodeOpen(input: {
 	config: LiveDemodConfig
 	centerHz: number
 	squelch: DemodSquelch
+	/** A18: request a framed audio socket (protocol 3+ only; absent keeps the protocol-2 bytes). */
+	audioFraming?: typeof DEMOD_AUDIO_FRAMING
 }): string {
 	const audio = demodAudioOptions(input.config)
 	const modulation = input.config.modulation === "am" ? "am" : "nfm"
@@ -324,6 +330,9 @@ export function encodeOpen(input: {
 		audio: audioRecord(audio),
 		squelch,
 		metrics: true,
+		...(input.audioFraming !== undefined
+			? { audioFraming: input.audioFraming }
+			: {}),
 	})
 }
 

@@ -30,7 +30,7 @@ fn opt_in_args_preserve_default_struct_version_and_private_fd3() {
         panic!("default run");
     };
     assert_eq!(default.control_fd, 3);
-    assert_eq!(VERSION_LINE, "wavekit-chan 0.2.0 protocol 2");
+    assert_eq!(VERSION_LINE, "wavekit-chan 0.2.0 protocol 3");
     let mut opt = args.clone();
     opt.extend(["--settlement-socket".into(), "/tmp/private/ack.sock".into()]);
     let Command::RunObserved {

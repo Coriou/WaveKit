@@ -10,6 +10,7 @@ use crate::demod::{
     Modulation, NoiseGate, NoiseMeter, PowerGate,
 };
 use crate::design::{self, kaiser_lowpass};
+use crate::framing::{self, PcmStager};
 use crate::plan::{plan_chain, ChainPlan};
 use crate::protocol::{
     AudioFormat, AudioOpts, AudioUpdate, DemodOpen, RetuneReq, SquelchMode, SquelchOpts,
@@ -120,6 +121,12 @@ struct RetunePlan {
     noise_reference: Option<f64>,
 }
 
+/// Framed output (A18): the open PCM record and the gate state last marked in the stream.
+struct Framed {
+    pcm: PcmStager,
+    marked_open: bool,
+}
+
 struct PendingSquelch {
     opts: SquelchOpts,
     /// `None` leaves the floor. `Some(None)` clears it. `Some(Some(dbfs))` sets it.
@@ -171,6 +178,7 @@ pub struct DemodChannel {
     metric_at: Option<u64>,
     power_batch: Vec<Value>,
     quiet_batch: Vec<Value>,
+    framed: Option<Framed>,
 }
 
 impl DemodChannel {
@@ -239,6 +247,10 @@ impl DemodChannel {
             metric_at: None,
             power_batch: Vec::new(),
             quiet_batch: Vec::new(),
+            framed: open.audio_framing.then(|| Framed {
+                pcm: PcmStager::new(),
+                marked_open: gate_open,
+            }),
         })
     }
 
@@ -254,6 +266,39 @@ impl DemodChannel {
 
     pub fn output_samples(&self) -> u64 {
         self.audio_emitted
+    }
+
+    pub fn is_framed(&self) -> bool {
+        self.framed.is_some()
+    }
+
+    /// Stage-1 gate state now (for the preamble at open and the RESET flag after a reset).
+    pub fn gate_open(&self) -> bool {
+        self.gate_open
+    }
+
+    /// Framed only: writes the staged PCM record and any gate change still waiting at the current
+    /// block boundary to `out`. The runtime calls it before a reset, a close and EOF, so no
+    /// staged sample crosses a written RESET record. A no-op for unframed channels.
+    pub fn flush_framed(&mut self, out: &mut Vec<u8>) {
+        if self.fill == 0 {
+            self.mark_boundary(out);
+        }
+        if let Some(f) = &mut self.framed {
+            f.pcm.flush(out);
+        }
+    }
+
+    /// Framed only: one gate marker per block boundary, for the net state of every change made
+    /// there (block decision, `squelch` request, mode change). Called as the boundary is left.
+    fn mark_boundary(&mut self, out: &mut Vec<u8>) {
+        if let Some(f) = &mut self.framed {
+            if self.gate_open != f.marked_open {
+                f.pcm.flush(out);
+                framing::write_gate(out, self.gate_open, self.audio_emitted);
+                f.marked_open = self.gate_open;
+            }
+        }
     }
 
     /// Validate and remember a retune. It is applied at the start of the next [`Self::process`].
@@ -319,6 +364,11 @@ impl DemodChannel {
         self.metric_at = None;
         self.power_batch.clear();
         self.quiet_batch.clear();
+        if let Some(f) = &mut self.framed {
+            // The RESET record carries the fresh state. The runtime flushes staged PCM first
+            // when a RESET record will be written; inside a burst it keeps coalescing.
+            f.marked_open = open;
+        }
     }
 
     pub fn process(
@@ -567,6 +617,7 @@ impl DemodChannel {
             if self.fill == 0 {
                 self.apply_pending_squelch(events);
                 self.block_at = self.audio_emitted;
+                self.mark_boundary(out);
             }
             let n = (BLOCK - self.fill).min(i.len());
             for k in 0..n {
@@ -580,21 +631,25 @@ impl DemodChannel {
             if !self.gate_open {
                 self.audio_scratch[self.fill..end].fill(0.0);
             }
-            saturated += encode(self.format, &self.audio_scratch[self.fill..end], out);
+            let pcm = match &mut self.framed {
+                Some(f) => f.pcm.room_for(n * self.format.sample_bytes(), out),
+                None => &mut *out,
+            };
+            saturated += encode(self.format, &self.audio_scratch[self.fill..end], pcm);
             self.fill = end;
             self.audio_emitted += n as u64;
             samples += n as u64;
             i = &i[n..];
             q = &q[n..];
             if self.fill == BLOCK {
-                self.finish_block(events);
+                self.finish_block(events, out);
                 self.fill = 0;
             }
         }
         (samples, saturated)
     }
 
-    fn finish_block(&mut self, events: &mut Vec<Value>) {
+    fn finish_block(&mut self, events: &mut Vec<Value>, out: &mut Vec<u8>) {
         let iq = &self.block[..BLOCK];
         let power = block_power_dbfs(iq);
         let want_noise = self.config.modulation == Modulation::Nfm
@@ -610,6 +665,15 @@ impl DemodChannel {
         } else {
             None
         };
+        if let Some(f) = &mut self.framed {
+            f.pcm.flush(out);
+            // NaN: not measured (AM) or unusable (NaN, −∞); +∞ stays a silent discriminator.
+            let q = match quieting {
+                Some(q) if !(q.is_infinite() && q.is_sign_negative()) => q,
+                _ => f32::NAN,
+            };
+            framing::write_block(out, self.audio_emitted, power, q);
+        }
         let next_open = match &mut self.gate {
             Gate::Off => true,
             Gate::Power(gate) => gate.push(f64::from(power)),
