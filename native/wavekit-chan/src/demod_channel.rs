@@ -279,7 +279,7 @@ impl DemodChannel {
 
     /// Framed only: writes the staged PCM record and any gate change still waiting at the current
     /// block boundary to `out`. The runtime calls it before a reset, a close and EOF, so no
-    /// staged sample crosses a RESET record. A no-op for unframed channels.
+    /// staged sample crosses a written RESET record. A no-op for unframed channels.
     pub fn flush_framed(&mut self, out: &mut Vec<u8>) {
         if self.fill == 0 {
             self.mark_boundary(out);
@@ -365,8 +365,8 @@ impl DemodChannel {
         self.power_batch.clear();
         self.quiet_batch.clear();
         if let Some(f) = &mut self.framed {
-            // The RESET record carries the fresh state. Staged PCM was flushed by the runtime.
-            debug_assert_eq!(f.pcm.payload_len(), 0, "reset with staged PCM");
+            // The RESET record carries the fresh state. The runtime flushes staged PCM first
+            // when a RESET record will be written; inside a burst it keeps coalescing.
             f.marked_open = open;
         }
     }

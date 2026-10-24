@@ -847,10 +847,15 @@ impl Runtime {
                 // Opened at or after the marked byte (a late mark): no input before the gap, no seam.
                 continue;
             }
-            if let (Some(_), Engine::Demod(dsp)) = (&ch.framer, &mut ch.dsp) {
-                // A18: no staged sample may cross the RESET record.
+            if let (Some(sink), Engine::Demod(dsp)) = (&ch.framer, &mut ch.dsp) {
+                // A18: no staged sample may cross a written RESET record. Inside a burst the reset
+                // writes no record (its position is not on the wire), so staged PCM keeps
+                // coalescing across it; sample counts stay exact either way.
+                let in_burst = sink.in_burst();
                 let mut out = Vec::new();
-                dsp.flush_framed(&mut out);
+                if !in_burst {
+                    dsp.flush_framed(&mut out);
+                }
                 let start = ch.out_samples;
                 push_output(id, ch, &out, start, &mut events);
             }
@@ -865,7 +870,7 @@ impl Runtime {
                 "cause": "input-gap",
             }));
             if let (Some(sink), Engine::Demod(dsp)) = (&mut ch.framer, &ch.dsp) {
-                sink.on_reset(&ch.queue, dropped as u64, dsp.gate_open());
+                sink.on_reset(&ch.queue, ch.out_samples, dropped as u64, dsp.gate_open());
             }
         }
         for e in events {
@@ -2715,5 +2720,46 @@ mod tests {
         let (_, frames) = framing::decode_stream(&v, 2).unwrap();
         assert_eq!(frames, [framing::Frame::Pcm(v[24..].to_vec())]);
         assert_eq!(v.len() as u64, 24 + samples * 2);
+    }
+
+    // Review repro 3 (requirement 9.10): a reset at nearly every output sample must not split
+    // PCM into one record per sample. Suppressed in-burst resets keep the record coalescing.
+    #[test]
+    fn a_reset_storm_keeps_pcm_coalesced_within_the_overhead_bound() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.request_and_wait(demod_open("st", 1 << 22, true));
+        // 86 input bytes is about one output sample at 2.048 MHz.
+        let gaps = 3_000u64;
+        for k in 1..=gaps {
+            r.request_and_wait(Request::MarkGap {
+                at_input_byte: Some(k * 86),
+                dropped_input_bytes: Some(2),
+            });
+        }
+        let input = iq_bytes(((gaps + 1) * 86) as usize);
+        for chunk in input.chunks(86) {
+            r.on_input(chunk);
+        }
+        let q = r.channels["st"].queue.clone();
+        let samples = r.channels["st"].out_samples;
+        r.on_eof_no_exit_for_test();
+        let mut v = Vec::new();
+        q.try_pop_for_test(&mut v);
+        let (_, frames) = framing::decode_stream(&v, 2).unwrap();
+        let pcm: usize = frames
+            .iter()
+            .map(|f| match f {
+                framing::Frame::Pcm(p) => p.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(samples > 1_000, "{samples} samples");
+        let overhead = (v.len() - framing::PREAMBLE_LEN - pcm) as f64 / pcm as f64;
+        assert!(
+            overhead <= 0.15,
+            "overhead {:.1} % over {samples} samples",
+            overhead * 100.0
+        );
     }
 }

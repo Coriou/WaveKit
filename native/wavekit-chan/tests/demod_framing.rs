@@ -372,7 +372,8 @@ fn an_unframed_channel_writes_raw_pcm() {
     assert_ne!(&out[..4], b"WKAF");
 }
 
-/// A producer of the lossless record stream for sink tests: each sample is its index (u16), a
+/// A producer of the lossless record stream for sink tests: each f32le-sized sample is its index
+/// (u32, so tags never wrap in a test), a
 /// BLOCK at every 480, and gate toggles at random boundaries.
 struct Producer {
     pos: u64,
@@ -383,8 +384,8 @@ struct Producer {
 impl Producer {
     fn feed(&mut self, n: usize, rng: &mut Lcg, out: &mut Vec<u8>) {
         for _ in 0..n {
-            let s = (self.pos as u16).to_le_bytes();
-            self.stager.room_for(2, out).extend_from_slice(&s);
+            let s = (self.pos as u32).to_le_bytes();
+            self.stager.room_for(4, out).extend_from_slice(&s);
             self.pos += 1;
             if self.pos.is_multiple_of(BLOCK as u64) {
                 self.stager.flush(out);
@@ -400,46 +401,88 @@ impl Producer {
 
 #[derive(Debug, Clone)]
 enum SinkOp {
-    Feed(usize),
+    /// Samples, and whether each record goes in its own push (so a push can start with a
+    /// marker right after a pending DROP).
+    Feed(usize, bool),
     Reset(bool),
     Drain(usize),
 }
 
 fn sink_op() -> impl Strategy<Value = SinkOp> {
     prop_oneof![
-        4 => (1usize..1_500).prop_map(SinkOp::Feed),
+        4 => (1usize..1_500, any::<bool>()).prop_map(|(n, split)| SinkOp::Feed(n, split)),
         1 => any::<bool>().prop_map(SinkOp::Reset),
         3 => (0usize..6_000).prop_map(SinkOp::Drain),
     ]
 }
 
-/// Checks a framed stream from a `Producer` through a sink: exact indices (decoder), each
-/// delivered sample at its own index outside bursts, at most two RESET/DROP records in any
-/// 480 samples, and no gate marker inside a burst.
-fn check_stream(stream: &[u8], total: u64, finished_outside_burst: bool) -> Result<(), String> {
-    let (_, frames) = decode_stream(stream, 2)?;
+/// Checks a framed stream from a `Producer` through a sink.
+///
+/// - Exact marker indices and no gate repeat (the decoder).
+/// - Every delivered sample is delivered once, in order (tags strictly increase).
+/// - Outside a burst every delivered sample sits at its own index (tag == consumer position).
+/// - Inside a burst the consumer position may lag the true index by the drops since the burst
+///   start (tag >= position), never lead it; no gate or BLOCK marker, no nested burst start.
+/// - After a closing record the position equals the true index again: the next delivered sample
+///   is checked at its own index, and a closing RESET implies nothing was dropped in the burst.
+/// - At most two RESET/DROP records in any 480 samples.
+/// - At the end the position equals the sink's consumer position. Outside a burst it equals
+///   the samples produced. Inside an open burst (EOF in a burst writes nothing more) it lags
+///   them by exactly the drops no record has carried: position + unreported == produced.
+/// - A closing record sits at least 480 samples after the last reset in `resets` before it
+///   (true output positions), so the burst timer follows the true reset positions.
+fn check_stream(stream: &[u8], sink: &FrameSink, total: u64, resets: &[u64]) -> Result<(), String> {
+    let (_, frames) = decode_stream(stream, 4)?;
     let mut pos = 0u64;
+    let mut next_true = 0u64; // one past the last delivered tag
     let mut burst = false;
     let mut discs: Vec<u64> = Vec::new();
     for f in &frames {
         match f {
             Frame::Pcm(p) => {
-                for s in p.as_chunks::<2>().0 {
-                    let tag = u16::from_le_bytes([s[0], s[1]]);
-                    if !burst && tag != pos as u16 {
+                for s in p.as_chunks::<4>().0 {
+                    let tag = u32::from_le_bytes(*s) as u64;
+                    if tag < next_true {
+                        return Err(format!("sample {tag} repeated or out of order"));
+                    }
+                    if !burst && tag != pos {
                         return Err(format!("sample tagged {tag} at {pos}"));
                     }
+                    if burst && tag < pos {
+                        return Err(format!("position {pos} leads sample {tag} in a burst"));
+                    }
+                    next_true = tag + 1;
                     pos += 1;
                 }
             }
             Frame::Gate { .. } if burst => return Err("gate marker inside a burst".into()),
             Frame::Block { .. } if burst => return Err("BLOCK inside a burst".into()),
             Frame::Reset { at, flags, .. } | Frame::Drop { at, flags, .. } => {
-                if let Frame::Drop { dropped, .. } = f {
-                    pos += dropped;
-                }
-                if burst && flags & FLAG_BURST_START != 0 {
+                let closing = burst && flags & FLAG_BURST_START == 0;
+                if burst && !closing {
                     return Err("burst start inside a burst".into());
+                }
+                match f {
+                    Frame::Drop { dropped, .. } => pos += dropped,
+                    _ if closing && pos != next_true => {
+                        return Err(format!("closing RESET at {pos}, true index {next_true}"));
+                    }
+                    _ => {}
+                }
+                if pos < next_true {
+                    return Err(format!(
+                        "position {pos} behind true {next_true} after {f:?}"
+                    ));
+                }
+                if closing {
+                    if let Some(&r) = resets.iter().rev().find(|&&r| r < pos) {
+                        if pos - r < BURST_WINDOW {
+                            return Err(format!(
+                                "burst closed at {pos}, {} after a reset",
+                                pos - r
+                            ));
+                        }
+                    }
                 }
                 burst = flags & FLAG_BURST_START != 0;
                 discs.push(*at);
@@ -452,8 +495,20 @@ fn check_stream(stream: &[u8], total: u64, finished_outside_burst: bool) -> Resu
             return Err(format!("three discontinuities within 480: {w:?}"));
         }
     }
-    if finished_outside_burst && !burst && pos != total {
-        return Err(format!("stream ends at {pos}, produced {total}"));
+    if pos != sink.consumer_position() {
+        return Err(format!(
+            "stream ends at {pos}, sink says {}",
+            sink.consumer_position()
+        ));
+    }
+    if burst != sink.in_burst() {
+        return Err("burst state differs from the sink".into());
+    }
+    let unreported = if burst { sink.unreported_dropped() } else { 0 };
+    if pos + unreported != total {
+        return Err(format!(
+            "end at {pos} + {unreported} unreported, produced {total}"
+        ));
     }
     Ok(())
 }
@@ -468,31 +523,48 @@ proptest! {
         ops in prop::collection::vec(sink_op(), 1..120),
         seed in any::<u64>(),
     ) {
-        let cap = cap.max(framing::min_framed_queue_bytes(AudioFormat::S16Le));
-        let q = ChannelQueue::new(cap, 2);
-        let mut sink = FrameSink::new(AudioFormat::S16Le, false);
-        sink.start(&q, AudioFormat::S16Le);
+        let cap = cap.max(framing::min_framed_queue_bytes(AudioFormat::F32Le));
+        let q = ChannelQueue::new(cap, 4);
+        let mut sink = FrameSink::new(AudioFormat::F32Le, false);
+        sink.start(&q, AudioFormat::F32Le);
         let mut p = Producer { pos: 0, stager: PcmStager::new(), gate: false };
         let mut rng = Lcg(seed);
         let mut stream = Vec::new();
         let (mut accepted, mut dropped) = (0u64, 0u64);
+        let mut resets = Vec::new();
         for op in ops {
             match op {
-                SinkOp::Feed(n) => {
+                SinkOp::Feed(n, split) => {
                     let mut recs = Vec::new();
                     p.feed(n, &mut rng, &mut recs);
-                    let r = sink.push(&q, &recs);
-                    accepted += r.accepted_samples;
-                    dropped += r.dropped_samples;
+                    let mut rest = &recs[..];
+                    while !rest.is_empty() {
+                        let len = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
+                        let take = if split { 8 + len } else { rest.len() };
+                        let r = sink.push(&q, &rest[..take]);
+                        accepted += r.accepted_samples;
+                        dropped += r.dropped_samples;
+                        rest = &rest[take..];
+                        if split && rng.next().is_multiple_of(2) {
+                            // A reader that catches up between records.
+                            let mut all = Vec::new();
+                            q.try_pop_for_test(&mut all);
+                            stream.extend_from_slice(&all);
+                        }
+                    }
                 }
                 SinkOp::Reset(gate) => {
+                    // As the runtime: staged PCM is flushed only when the reset is written.
                     let mut recs = Vec::new();
-                    p.stager.flush(&mut recs);
+                    if !sink.in_burst() {
+                        p.stager.flush(&mut recs);
+                    }
                     let r = sink.push(&q, &recs);
                     accepted += r.accepted_samples;
                     dropped += r.dropped_samples;
                     p.gate = gate;
-                    sink.on_reset(&q, 5, gate);
+                    resets.push(p.pos);
+                    sink.on_reset(&q, p.pos, 5, gate);
                 }
                 SinkOp::Drain(max) => {
                     let mut all = Vec::new();
@@ -515,7 +587,7 @@ proptest! {
         q.try_pop_for_test(&mut stream);
         prop_assert_eq!(accepted + dropped, p.pos);
         prop_assert_eq!(sink.position(), p.pos);
-        if let Err(e) = check_stream(&stream, p.pos, true) {
+        if let Err(e) = check_stream(&stream, &sink, p.pos, &resets) {
             prop_assert!(false, "{}", e);
         }
     }
@@ -524,9 +596,9 @@ proptest! {
 // Validates: Requirement 9.10 (reset storm: at most two records per 480 samples, closing sums)
 #[test]
 fn a_reset_burst_closes_with_the_summed_count_and_the_gate_then() {
-    let q = ChannelQueue::new(1 << 20, 2);
-    let mut sink = FrameSink::new(AudioFormat::S16Le, false);
-    sink.start(&q, AudioFormat::S16Le);
+    let q = ChannelQueue::new(1 << 20, 4);
+    let mut sink = FrameSink::new(AudioFormat::F32Le, false);
+    sink.start(&q, AudioFormat::F32Le);
     let mut p = Producer {
         pos: 0,
         stager: PcmStager::new(),
@@ -540,18 +612,18 @@ fn a_reset_burst_closes_with_the_summed_count_and_the_gate_then() {
         sink.push(&q, &recs);
     };
     feed(&mut p, &mut sink, 100, &mut rng);
-    sink.on_reset(&q, 1, false); // at 100: written
+    sink.on_reset(&q, p.pos, 1, false); // at 100: written
     feed(&mut p, &mut sink, 100, &mut rng);
-    sink.on_reset(&q, 2, true); // at 200: burst start
+    sink.on_reset(&q, p.pos, 2, true); // at 200: burst start
     for k in 0..5 {
         feed(&mut p, &mut sink, 50, &mut rng);
-        sink.on_reset(&q, 10, k % 2 == 0); // suppressed
+        sink.on_reset(&q, p.pos, 10, k % 2 == 0); // suppressed
     }
     // Last reset at 450 with gate open; the closing goes at the first block end >= 930.
     feed(&mut p, &mut sink, 1_000, &mut rng);
     let mut stream = Vec::new();
     q.try_pop_for_test(&mut stream);
-    let (_, frames) = decode_stream(&stream, 2).unwrap();
+    let (_, frames) = decode_stream(&stream, 4).unwrap();
     let discs: Vec<&Frame> = frames
         .iter()
         .filter(|f| matches!(f, Frame::Reset { .. } | Frame::Drop { .. }))
@@ -590,7 +662,7 @@ fn a_reset_burst_closes_with_the_summed_count_and_the_gate_then() {
         "{at}"
     );
     assert_eq!(flags & FLAG_GATE_OPEN != 0, p_gate_at(&frames, at));
-    check_stream(&stream, p.pos, true).unwrap();
+    check_stream(&stream, &sink, p.pos, &[]).unwrap();
 }
 
 /// The producer gate state at `at` cannot be read back from the stream inside a burst, so the
@@ -616,10 +688,10 @@ fn p_gate_at(frames: &[Frame], at: u64) -> bool {
 #[test]
 fn a_drop_burst_closes_with_a_drop_that_realigns_the_index() {
     // A few blocks of room: a record of one whole block must fit for a burst to close.
-    let cap = framing::min_framed_queue_bytes(AudioFormat::S16Le) + 3_000;
-    let q = ChannelQueue::new(cap, 2);
-    let mut sink = FrameSink::new(AudioFormat::S16Le, false);
-    sink.start(&q, AudioFormat::S16Le);
+    let cap = framing::min_framed_queue_bytes(AudioFormat::F32Le) + 3_000;
+    let q = ChannelQueue::new(cap, 4);
+    let mut sink = FrameSink::new(AudioFormat::F32Le, false);
+    sink.start(&q, AudioFormat::F32Le);
     let mut p = Producer {
         pos: 0,
         stager: PcmStager::new(),
@@ -651,7 +723,7 @@ fn a_drop_burst_closes_with_a_drop_that_realigns_the_index() {
     sink.push(&q, &recs);
     sink.finish(&q);
     q.try_pop_for_test(&mut stream);
-    let (_, frames) = decode_stream(&stream, 2).unwrap();
+    let (_, frames) = decode_stream(&stream, 4).unwrap();
     assert!(frames
         .iter()
         .any(|f| matches!(f, Frame::Drop { flags, .. } if flags & FLAG_BURST_START != 0)));
@@ -664,7 +736,7 @@ fn a_drop_burst_closes_with_a_drop_that_realigns_the_index() {
         matches!(last_drop, Frame::Drop { flags, .. } if flags & FLAG_BURST_START == 0),
         "{last_drop:?}"
     );
-    check_stream(&stream, p.pos, true).unwrap();
+    check_stream(&stream, &sink, p.pos, &[]).unwrap();
 }
 
 /// Overhead per second of audio: (framed bytes - PCM bytes) for an s16 channel, printed.
@@ -677,8 +749,8 @@ fn marker_overhead_bytes_per_second() {
     let report = |name: &str, framed: usize, pcm: usize| {
         let over = (framed - pcm) as f64 / seconds as f64;
         println!(
-            "{name}: {over:.0} B/s overhead, {:.2} % of s16 ({:.0} B/s PCM)",
-            100.0 * over / (pcm as f64 / seconds as f64),
+            "{name}: {over:.0} B/s overhead, {:.2} % of the s16 rate (96 000 B/s; {:.0} B/s PCM)",
+            100.0 * over / 96_000.0,
             pcm as f64 / seconds as f64
         );
     };
@@ -708,9 +780,9 @@ fn marker_overhead_bytes_per_second() {
     // Worst case without discontinuities: a gate marker at every block boundary (the producer
     // with a toggle every block), through a sink with room to spare, 7-sample pushes.
     let worst = |toggle_every_block: bool, reset_every: Option<usize>| {
-        let q = ChannelQueue::new(1 << 22, 2);
-        let mut sink = FrameSink::new(AudioFormat::S16Le, false);
-        sink.start(&q, AudioFormat::S16Le);
+        let q = ChannelQueue::new(1 << 22, 4);
+        let mut sink = FrameSink::new(AudioFormat::F32Le, false);
+        sink.start(&q, AudioFormat::F32Le);
         let mut p = Producer {
             pos: 0,
             stager: PcmStager::new(),
@@ -719,12 +791,12 @@ fn marker_overhead_bytes_per_second() {
         let mut stream = Vec::new();
         let (mut fed, mut since_reset) = (0usize, 0usize);
         while fed < n {
-            let k = 7.min(n - fed);
+            let k = reset_every.unwrap_or(7).min(7).min(n - fed);
             let mut recs = Vec::new();
             for _ in 0..k {
                 p.stager
-                    .room_for(2, &mut recs)
-                    .extend_from_slice(&(p.pos as u16).to_le_bytes());
+                    .room_for(4, &mut recs)
+                    .extend_from_slice(&(p.pos as u32).to_le_bytes());
                 p.pos += 1;
                 if p.pos.is_multiple_of(BLOCK as u64) {
                     p.stager.flush(&mut recs);
@@ -739,9 +811,12 @@ fn marker_overhead_bytes_per_second() {
             since_reset += k;
             if reset_every.is_some_and(|e| since_reset >= e) {
                 since_reset = 0;
-                p.stager.flush(&mut recs);
+                // As the runtime: flush only when the reset will be written (not in a burst).
+                if !sink.in_burst() {
+                    p.stager.flush(&mut recs);
+                }
                 sink.push(&q, &recs);
-                sink.on_reset(&q, 1, p.gate);
+                sink.on_reset(&q, p.pos, 1, p.gate);
             } else {
                 sink.push(&q, &recs);
             }
@@ -752,7 +827,7 @@ fn marker_overhead_bytes_per_second() {
         sink.push(&q, &recs);
         sink.finish(&q);
         q.try_pop_for_test(&mut stream);
-        let (_, frames) = decode_stream(&stream, 2).unwrap();
+        let (_, frames) = decode_stream(&stream, 4).unwrap();
         let (mut pcm, mut discs) = (0usize, 0usize);
         for f in &frames {
             match f {
@@ -769,7 +844,7 @@ fn marker_overhead_bytes_per_second() {
         framed,
         pcm,
     );
-    for every in [100usize, 240, 490] {
+    for every in [1usize, 100, 240, 490] {
         let (framed, pcm, discs) = worst(true, Some(every));
         report(
             &format!("storm, reset every {every} samples + marker every block"),
@@ -782,9 +857,9 @@ fn marker_overhead_bytes_per_second() {
         );
     }
     // Overflow storm: a reader that keeps the queue overflowing on the worst-case stream.
-    let q = ChannelQueue::new(96_000, 2);
-    let mut sink = FrameSink::new(AudioFormat::S16Le, false);
-    sink.start(&q, AudioFormat::S16Le);
+    let q = ChannelQueue::new(96_000, 4);
+    let mut sink = FrameSink::new(AudioFormat::F32Le, false);
+    sink.start(&q, AudioFormat::F32Le);
     let mut p = Producer {
         pos: 0,
         stager: PcmStager::new(),
@@ -808,7 +883,7 @@ fn marker_overhead_bytes_per_second() {
         q.append(|a| a.extend(&rest));
     }
     q.try_pop_for_test(&mut stream);
-    let (_, frames) = decode_stream(&stream, 2).unwrap();
+    let (_, frames) = decode_stream(&stream, 4).unwrap();
     let (mut pcm, mut discs) = (0usize, 0usize);
     for f in &frames {
         match f {

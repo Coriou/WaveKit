@@ -52,9 +52,12 @@ pub const DROP_RESERVE: usize = HEADER_LEN + DROP_LEN;
 /// RESET and DROP records together: at most two in any window of this many output samples.
 pub const BURST_WINDOW: u64 = DEMOD_BLOCK_SAMPLES as u64;
 
-/// Smallest framed `queueBytes`: the preamble, the DROP reserve and one one-sample PCM record.
+/// Smallest framed `queueBytes`. Recovery from overflow on a drained queue writes the pending
+/// DROP (32) and a one-sample PCM record (8 + sample) and must still leave the reserve (32) free
+/// for the next DROP: 2 × 32 + 8 + sample, i.e. 74 bytes for s16 and 76 for f32. The preamble
+/// (16) fits inside the reserve, so the first record at open needs no more.
 pub fn min_framed_queue_bytes(format: AudioFormat) -> usize {
-    PREAMBLE_LEN + DROP_RESERVE + HEADER_LEN + format.sample_bytes()
+    2 * DROP_RESERVE + HEADER_LEN + format.sample_bytes()
 }
 
 pub fn format_code(format: AudioFormat) -> u8 {
@@ -148,6 +151,13 @@ impl PcmStager {
         out.extend_from_slice(&self.buf);
         self.buf.truncate(HEADER_LEN);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    Written,
+    Suppressed,
+    NoRoom,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -285,11 +295,16 @@ impl FrameSink {
                             self.fold_marker();
                         } else if open == self.stream_gate && self.pending.is_none() {
                             // Net no change for the consumer (after a RESET or DROP flag).
-                        } else if self.try_write(a.as_deref_mut(), record) {
-                            self.stream_gate = open;
                         } else {
-                            folding = true;
-                            self.fold_marker();
+                            match self.try_write(a.as_deref_mut(), record) {
+                                Write::Written => self.stream_gate = open,
+                                // The pending record started a burst: no gate marker inside it.
+                                Write::Suppressed => {}
+                                Write::NoRoom => {
+                                    folding = true;
+                                    self.fold_marker();
+                                }
+                            }
                         }
                     }
                     self.gate = open;
@@ -305,7 +320,7 @@ impl FrameSink {
                                 }
                             }
                         }
-                    } else if folding || !self.try_write(a.as_deref_mut(), record) {
+                    } else if folding || self.try_write(a.as_deref_mut(), record) == Write::NoRoom {
                         folding = true;
                         self.fold_marker();
                     }
@@ -339,15 +354,35 @@ impl FrameSink {
         }
     }
 
-    /// Writes the pending record (outside a burst) and then `record`, if both fit.
-    fn try_write(&mut self, a: Option<&mut Appender>, record: &[u8]) -> bool {
-        let Some(a) = a else { return false };
+    /// Writes the pending record (outside a burst) and then the marker `record`, if both fit.
+    /// When the pending record starts a burst the marker is not written: no gate or BLOCK marker
+    /// goes inside a burst.
+    fn try_write(&mut self, a: Option<&mut Appender>, record: &[u8]) -> Write {
+        let Some(a) = a else { return Write::NoRoom };
         if record.len() + self.pending_bytes() > self.room(a) {
-            return false;
+            return Write::NoRoom;
         }
         self.write_pending(a);
+        if self.burst {
+            return Write::Suppressed;
+        }
         a.extend(record);
-        true
+        Write::Written
+    }
+
+    /// True inside a discontinuity burst: a reset now writes no record.
+    pub fn in_burst(&self) -> bool {
+        self.burst
+    }
+
+    /// Delivered samples plus the counts of written DROP records: the consumer's position.
+    pub fn consumer_position(&self) -> u64 {
+        self.cpos
+    }
+
+    /// Samples dropped and not yet carried by a written DROP (inside a burst, or pending).
+    pub fn unreported_dropped(&self) -> u64 {
+        self.pending.as_ref().map_or(0, |p| p.dropped)
     }
 
     fn fold_samples(&mut self, n: u64, first: u64) {
@@ -412,9 +447,14 @@ impl FrameSink {
 
     /// An input-gap reset (`Runtime::input_gap`), after the channel's staged records were pushed
     /// and its DSP reset. `gate_after` is the fresh stage-1 state.
-    pub fn on_reset(&mut self, q: &ChannelQueue, dropped_input: u64, gate_after: bool) {
+    ///
+    /// `at` is the true output position of the reset (`out_samples`). Outside a burst the staged
+    /// PCM was pushed first, so it equals this sink's position; inside one the staged PCM may
+    /// still be in the channel, and `at` keeps the burst's 480-sample timer exact.
+    pub fn on_reset(&mut self, q: &ChannelQueue, at: u64, dropped_input: u64, gate_after: bool) {
+        debug_assert!(at >= self.pos && (self.burst || at == self.pos));
         self.gate = gate_after;
-        self.last_event = self.pos;
+        self.last_event = at;
         let p = self.pending.get_or_insert_with(Pending::default);
         p.reset = true;
         p.dropped_input = p.dropped_input.saturating_add(dropped_input);
@@ -769,10 +809,11 @@ mod tests {
 
     #[test]
     fn pending_drop_fits_in_the_reserve_at_close() {
-        let cap = PREAMBLE_LEN + DROP_RESERVE + 8 + 2;
+        let cap = min_framed_queue_bytes(AudioFormat::S16Le);
         let q = ChannelQueue::new(cap, 2);
         let mut sink = FrameSink::new(AudioFormat::S16Le, true);
         sink.start(&q, AudioFormat::S16Le);
+        // 74 - 16 preamble - 32 reserve - 8 header = 18 bytes: 9 samples.
         sink.push(&q, &pcm(50));
         sink.finish(&q);
         assert_eq!(q.high_water(), cap);
@@ -780,10 +821,102 @@ mod tests {
         assert_eq!(
             frames[1],
             Frame::Drop {
-                at: 1,
-                dropped: 49,
+                at: 9,
+                dropped: 41,
                 flags: FLAG_GATE_OPEN
             }
+        );
+    }
+
+    // Review repro 1: at the minimum a drained queue recovers from overflow (pending DROP plus
+    // one sample plus the reserve); one byte below it, it cannot, which is why open rejects it.
+    #[test]
+    fn the_minimum_queue_recovers_after_overflow_and_one_below_does_not() {
+        for (cap, recovers) in [
+            (min_framed_queue_bytes(AudioFormat::S16Le), true),
+            (min_framed_queue_bytes(AudioFormat::S16Le) - 1, false),
+        ] {
+            let q = ChannelQueue::new(cap, 2);
+            let mut sink = FrameSink::new(AudioFormat::S16Le, false);
+            sink.start(&q, AudioFormat::S16Le);
+            let first = sink.push(&q, &pcm(100));
+            assert!(first.dropped_samples > 0);
+            let mut all = drain(&q);
+            let r = sink.push(&q, &pcm(1));
+            assert_eq!(r.accepted_samples, u64::from(recovers), "cap {cap}");
+            all.extend(drain(&q));
+            if recovers {
+                let (_, frames) = decode_stream(&all, 2).unwrap();
+                let n = frames.len();
+                assert_eq!(
+                    frames[n - 2],
+                    Frame::Drop {
+                        at: first.accepted_samples,
+                        dropped: first.dropped_samples,
+                        flags: 0
+                    }
+                );
+                assert_eq!(frames[n - 1], Frame::Pcm(vec![0, 1]));
+                // And again: recovery is repeatable, not a one-off.
+                sink.push(&q, &pcm(200));
+                drain(&q);
+                assert_eq!(sink.push(&q, &pcm(1)).accepted_samples, 1);
+            }
+        }
+    }
+
+    // Review repro 2: a pending DROP that starts a burst must not be followed by a gate or BLOCK
+    // marker in the same write.
+    #[test]
+    fn a_marker_after_a_burst_starting_drop_is_not_written() {
+        let q = ChannelQueue::new(128, 2);
+        let mut sink = FrameSink::new(AudioFormat::S16Le, false);
+        sink.start(&q, AudioFormat::S16Le);
+        let mut all = drain(&q);
+        sink.on_reset(&q, 0, 0, false);
+        all.extend(drain(&q));
+        let mut recs = pcm(480);
+        write_block(&mut recs, 480, -20.0, 10.0);
+        sink.push(&q, &recs);
+        all.extend(drain(&q));
+        let mut g = Vec::new();
+        write_gate(&mut g, true, 480);
+        sink.push(&q, &g);
+        all.extend(drain(&q));
+        let (_, frames) = decode_stream(&all, 2).unwrap();
+        assert!(sink.in_burst());
+        assert_eq!(
+            frames[frames.len() - 1],
+            Frame::Drop {
+                at: 44,
+                dropped: 436,
+                flags: FLAG_BURST_START
+            },
+            "{frames:?}"
+        );
+        // The same with a BLOCK as the record after the pending DROP.
+        let q = ChannelQueue::new(128, 2);
+        let mut sink = FrameSink::new(AudioFormat::S16Le, false);
+        sink.start(&q, AudioFormat::S16Le);
+        let mut all = drain(&q);
+        sink.on_reset(&q, 0, 0, false);
+        all.extend(drain(&q));
+        sink.push(&q, &pcm(470));
+        all.extend(drain(&q));
+        let mut b = pcm(0)[..0].to_vec();
+        write_block(&mut b, 470, -20.0, 10.0);
+        sink.push(&q, &b);
+        all.extend(drain(&q));
+        let (_, frames) = decode_stream(&all, 2).unwrap();
+        assert!(
+            matches!(
+                frames.last(),
+                Some(Frame::Drop {
+                    flags: FLAG_BURST_START,
+                    ..
+                })
+            ),
+            "{frames:?}"
         );
     }
 
@@ -793,7 +926,7 @@ mod tests {
         let mut sink = FrameSink::new(AudioFormat::S16Le, false);
         sink.start(&q, AudioFormat::S16Le);
         sink.push(&q, &pcm(10));
-        sink.on_reset(&q, 3, true);
+        sink.on_reset(&q, 10, 3, true);
         let mut g = Vec::new();
         write_gate(&mut g, true, 10);
         sink.push(&q, &g);
