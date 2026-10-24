@@ -237,13 +237,13 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 				<Icon name="headphones" size={22} />
 			</button>
 			<div className="wk-shell-listen-text">
-				<div>
+				<div className="wk-shell-listen-title">
 					<b>
 						{state.phase === "playing" &&
 						(!open || status?.toneSquelch?.state === "waiting")
 							? "Squelched"
 							: TITLE[state.phase]}
-					</b>{" "}
+					</b>
 					{follow ? (
 						<span className="wk-shell-sub wkf-following" title={follow.title}>
 							<Icon name="scanner" size={13} />

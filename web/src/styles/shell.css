@@ -183,6 +183,23 @@
 		gap: 6px;
 		white-space: nowrap;
 	}
+	/* title and subtitle on one line: the subtitle ellipsizes before the options toggle */
+	.wk-shell-listen-title {
+		display: flex;
+		align-items: baseline;
+		gap: 0.3em;
+		min-width: 0;
+	}
+	.wk-shell-listen-title > b {
+		flex: none;
+	}
+	.wk-shell-listen-title > .wk-shell-sub {
+		flex: 0 1 auto;
+	}
+	.wk-shell-listen-title > .wkf-following {
+		max-width: none;
+		align-self: center;
+	}
 	.wk-shell-listen-text .wk-meter {
 		background: var(--wk-fill);
 	}
@@ -191,6 +208,13 @@
 	}
 	.wk-shell-listen-head .wk-icon-btn[aria-expanded="true"] {
 		background: var(--wk-fill);
+	}
+	/* keyboard focus (also when Escape hands it back): the toggle's own fill and a hairline on its edge, not the offset ring */
+	.wk-shell-listen-head .wk-icon-btn:focus-visible {
+		outline: none;
+		background: var(--wk-fill);
+		color: var(--wk-text);
+		box-shadow: inset 0 0 0 1px var(--wk-line-26);
 	}
 
 	/* tuned card home (above Listen, as wide as Listen's 340 px head); hidden on narrow windows like the board's .wk-float */

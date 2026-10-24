@@ -355,9 +355,17 @@
 		gap: 6px;
 		min-width: 0;
 	}
+	/* text actions as tall as the 36 px icon actions (board: wk-tc-act) */
 	.wkf-actions > .wk-btn {
 		min-width: 0;
+		height: 36px;
 		padding-inline: 10px;
+		font-size: var(--wk-fs-md);
+		overflow: hidden;
+	}
+	/* text actions share the row by their labels, as on the board (flex 1 1 auto) */
+	.wkf-actions > .wkf-grow {
+		flex: 1 1 auto;
 	}
 	/* icon-only actions: 36 px, chip-filled, pressed = selected fill and accent (board: wk-tc-act) */
 	.wkf-act-icon {
