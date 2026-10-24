@@ -188,6 +188,84 @@ describe("SourceFifo", () => {
 		expect(fifo.queuedAudibleSamples).toBe(0)
 	})
 
+	it("writes output left after a ring segment fills, then drops exactly (regression)", () => {
+		// 184 inputs at 8 kHz, delay 17: (184 − 17) × 6 = 1 002 outputs into 1 000 slots.
+		const input = ramp(184, 11)
+		const ref = feed(
+			new PolyphaseResampler(8_000, OUT),
+			input,
+			[],
+			100_000,
+		).samples
+		expect(ref.length).toBe(1_002)
+		const fifo = new SourceFifo(1_000)
+		const res = new PolyphaseResampler(8_000, OUT)
+		fifo.writeFrom(res, input, 0, input.length, FLAG_AUDIBLE)
+		expect(res.pendingOutput(0)).toBe(0)
+		expect(fifo.queuedSamples).toBe(1_000)
+		expect(fifo.overflowDroppedSamples).toBe(2)
+		expect(drain(fifo).samples).toEqual(ref.slice(2))
+	})
+
+	it("writes across the wrap boundary in one call without loss", () => {
+		const input = ramp(400, 12)
+		const ref = feed(
+			new PolyphaseResampler(8_000, OUT),
+			input,
+			[],
+			100_000,
+		).samples
+		const fifo = new SourceFifo(1_000)
+		const res = new PolyphaseResampler(8_000, OUT)
+		// 100 inputs → (100 − 17) × 6 = 498 outputs; read 497 so the head sits at slot 497.
+		fifo.writeFrom(res, input, 0, 100, FLAG_SILENT)
+		const head = new Int16Array(497)
+		fifo.read(head, 0, 497)
+		// 150 more inputs → 900 outputs in one call: slots 498..999 then 0..397 (901 queued).
+		fifo.writeFrom(res, input, 100, 250, FLAG_AUDIBLE)
+		expect(fifo.queuedSamples).toBe(901)
+		expect(fifo.overflowDroppedSamples).toBe(0)
+		expect([...head, ...drain(fifo).samples]).toEqual(ref.slice(0, 1_398))
+	})
+
+	it("keeps oldestQueuedAt exact under sustained partial draining (regression)", () => {
+		const fifo = new SourceFifo()
+		const res = new PolyphaseResampler(48_000, OUT)
+		const input = ramp(2_000, 13)
+		const one = new Int16Array(1)
+		// 19 inputs, delay 17: 2 outputs at t = 0; read 1.
+		fifo.writeFrom(res, input, 0, 19, FLAG_AUDIBLE, 0)
+		fifo.read(one, 0, 1)
+		for (let k = 1; k <= 1_000; k++) {
+			fifo.writeFrom(res, input, 18 + k, 19 + k, FLAG_AUDIBLE, k * 20)
+			fifo.read(one, 0, 1)
+			// One sample queued: the one written at k × 20 ms.
+			expect(fifo.queuedSamples).toBe(1)
+			expect(fifo.oldestQueuedAt).toBe(k * 20)
+		}
+	})
+
+	it("never reports a later time than the truth when the time ring saturates", () => {
+		const fifo = new SourceFifo()
+		const res = new PolyphaseResampler(48_000, OUT)
+		const input = ramp(1_000, 14)
+		fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, -1)
+		// 400 one-sample writes stay queued: more than the 256 entries.
+		for (let k = 0; k < 400; k++)
+			fifo.writeFrom(res, input, 17 + k, 18 + k, FLAG_AUDIBLE, k)
+		expect(fifo.queuedSamples).toBe(400)
+		const one = new Int16Array(1)
+		for (let k = 0; k < 400; k++) {
+			const at = fifo.oldestQueuedAt
+			expect(at).not.toBeNull()
+			// Exact while the head is in the first 255 entries, never later than the truth.
+			if (k < 255) expect(at).toBe(k)
+			else expect(at ?? Infinity).toBeLessThanOrEqual(k)
+			fifo.read(one, 0, 1)
+		}
+		expect(fifo.oldestQueuedAt).toBeNull()
+	})
+
 	// Feature: auto-listen-route, Property 1: Chunk-split invariance
 	// Validates: Requirements 2.4, 2.5
 	it("contents, flags and drops do not depend on the split", () => {

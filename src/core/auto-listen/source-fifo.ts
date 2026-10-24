@@ -20,9 +20,12 @@ export type SampleFlag =
 	| typeof FLAG_ADMITTED
 
 /**
- * Write-time entries (end position, time). One entry per write; when full, the newest entry is
- * extended (keeping its earlier time), so `oldestQueuedAt` stays exact for the oldest 255 writes
- * and is never later than the truth. 256 × 20 ms writes ≈ 5 s > the 3 s FIFO at 50 writes/s.
+ * Write-time entries (end position, time), one per write; consumed entries are retired before
+ * each append. Only when 256 writes are still queued does the newest entry absorb later writes
+ * (keeping its earlier time). Bound: `oldestQueuedAt` is exact while fewer than 256 queued writes
+ * exist and is never later than the truth; once the head reaches a coalesced entry it is early
+ * by at most that entry's time span, which is under the FIFO's own span (3 s). At 50 writes/s
+ * the 3 s FIFO holds at most 150 writes (< 256), so the wiring always stays exact.
  */
 const TIME_ENTRIES = 256
 
@@ -95,7 +98,9 @@ export class SourceFifo {
 			flag === FLAG_AUDIBLE || flag === FLAG_ADMITTED ? flag : FLAG_SILENT
 		const cap = this.capacity
 		let wrote = 0
-		while (i < stop) {
+		// Loop until the input is used up and the resampler has no output left that the consumed
+		// input already made available (a ring segment can fill before that output is written).
+		while (i < stop || resampler.pendingOutput(0) > 0) {
 			if (this.size === cap) {
 				// Drop exactly what this write will overwrite (at most the whole ring).
 				const need = Math.min(resampler.pendingOutput(stop - i), cap)
@@ -230,6 +235,8 @@ export class SourceFifo {
 	}
 
 	private noteTime(at: number): void {
+		// Retire consumed entries first, so the ring only coalesces while 256 writes are queued.
+		this.trimTimes()
 		const end = this.headPos + this.size
 		if (this.timeCount === TIME_ENTRIES) {
 			const last = (this.timeHead + this.timeCount - 1) % TIME_ENTRIES
