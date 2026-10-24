@@ -261,3 +261,51 @@ describe every new route behaviour, field, bound and rule; the CLI guards are ch
 6.1 Each property in the design has a fast-check test with `numRuns >= 100` and the trace
 comment.
 6.2 The root suite, typecheck and lint pass at every merge.
+
+## Amendment 2026-10-24: transmissions follow carrier evidence (3.8)
+
+Background (generic): on a PMR446 channel, weak interference about 10 dB over the floor
+(about -45 dBFS against a -55 dBFS floor and a -49 dBFS auto threshold) re-opened the power
+squelch every 0.5 to 1.1 s. Each re-open fell within the 3.7 merge gap of the previous one, so
+5 s operator overs merged with the interference into transmissions of 55 to 555 s; the tone
+detector, fed the whole chain, never reached its 60 % CTCSS continuity and a CTCSS 79.7 Hz or
+DCS D031N over showed no tone. Requirement 3.7 is amended by 3.8; its numbers and constants stay.
+Live audio gating and the evidence squelch are unchanged.
+
+3.8 **Carrier-bounded transmissions.** On a pipeline that reports carrier runs (nfm/wfm, every
+squelch mode), the tracker delimits transmissions by carrier evidence, not by power re-opens:
+
+- 3.8.1 **Carrier span.** While the squelch is open, a span starts when
+  `ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS` (10) consecutive 10 ms blocks carry FM quieting
+  (`ChannelSquelch.blockCarrier`, or the sampled-path rule); its start is the first block of
+  that run. It ends at the end of its last carrier block once the squelch closes or no block
+  has carried for `SQUELCH_HANG_MS` (250 ms, 25 blocks), whichever is first.
+- 3.8.2 **Open.** A transmission opens only with a span; its `startedAt` is the span start (not
+  the squelch open). A squelch segment without a span (an evidence-less segment) is discarded:
+  it opens nothing, adds no audio, power or tone, and never extends or restarts a merge timer.
+- 3.8.3 **Extend and merge.** A span that starts within `ANALOG_TRANSMISSION_MERGE_GAP_MS`
+  (1500 ms, inclusive) of the transmission's last carrier block end, with the same source,
+  config identity and frequency, continues it (same id); the 3.7 tone split still applies.
+  The merge timer runs from the last carrier block end only; squelch edges never restart it.
+- 3.8.4 **End.** The transmission ends (`endedAt`) at its last carrier block end and is final
+  at that end + 1500 ms, even while interference holds the power squelch open. Stop, config,
+  retune and max-duration closes stay final at once.
+- 3.8.5 **Publish.** Summed span audio (gaps excluded) of at least `ANALOG_TRANSMISSION_MIN_MS`
+  (500 ms) publishes; the 3.7 single-segment carrier rule is implied (10 ≥ 3). A bare carrier
+  key-up without any tone is one transmission with a null tone.
+- 3.8.6 **Tone input.** The tone detector (and the split detector) are fed only PCM of carrier
+  blocks: the 100 ms before a span qualifies (the run itself, from a fixed pre-roll) and then
+  each chunk while the last measured block carried. DCS `DCS_MIN_AUDIO_SECONDS` and the 0.75 s
+  CTCSS gate count fed audio only.
+- 3.8.7 **Fallback.** A source without carrier runs (am, usb, lsb, dsb, cw, raw, or the hook
+  absent or failing) keeps 3.7 byte-identical.
+- 3.8.8 **Consumers.** No REST, WebSocket, Activity row or identify DTO field changes. Activity
+  gets one row per over with its tone and true bounds and no interference rows; identify's
+  analog evidence and `pending()` see only carrier-bearing transmissions (an interference-only
+  target is `no-sync`, not `timeout`); WG12 live-audio scanner evidence follows the same
+  stream. Recordings are not driven by the tracker and are unchanged.
+- 3.8.9 **Acceptance.** Deterministic tests (no RF): a 5 s CTCSS 79.7 Hz over amid 0.5 s weak
+  flicker is exactly one transmission of 5 s ± 20 ms with `ctcssHz` 79.7; a DCS D031N over the
+  same with that code; flicker alone publishes none; an over with a 1 s unkeyed pause is one
+  transmission; a bare carrier key-up is one transmission with a null tone; the live timeline
+  regression of the design (five overs amid flicker) is five transmissions with their tones.
