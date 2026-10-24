@@ -36,6 +36,12 @@ import {
 } from "./rust-protocol.js"
 
 const CONTROL_FD = 3
+/** Native measures 10 ms blocks of output audio (480 samples at 48 kHz). */
+const METRIC_BLOCK_SAMPLES = RUST_AUDIO_RATE_HZ / 100
+/** Pre-open metrics merged into one startup batch, at most (60 s). */
+const PRE_OPEN_METRIC_BLOCKS = 6000
+/** A gate held for a metrics batch that never comes is released after this. */
+const GATE_HOLD_MAX_MS = 250
 const USABLE_FRACTION = 0.8
 const BLOCK_SAMPLES = 1024
 const VERSION_LIMIT_BYTES = 4096
@@ -121,6 +127,15 @@ export class RustEngine implements LiveDemodEngine {
 	private pendingMatch: ((event: DemodEvent) => void) | undefined
 	/** Handshake events that arrived before their waiter was installed. */
 	private early: DemodEvent[] = []
+	// WG10 req 3.8.1: gate and metrics in output-sample order.
+	private nextMetricAt = 0
+	private metricsSeen = false
+	private heldGates: Array<{ open: boolean; at: number }> = []
+	private gateHoldTimer: unknown = null
+	private preOpenGates: Array<{ open: boolean; at: number }> = []
+	private preOpenPower: Array<number | null> = []
+	private preOpenQuiet: QuietingDb[] = []
+	private preOpenAt: number | null = null
 	/** Async spawn failure (ENOENT / EACCES / no pid). Not an unexpected crash. */
 	private spawnFailure: unknown = undefined
 	/** Child exited on its own before start finished. */
@@ -173,6 +188,7 @@ export class RustEngine implements LiveDemodEngine {
 		this.exited = false
 		this.dropCount = 0
 		this.early = []
+		this.resetSampleOrder()
 		this.pendingMatch = undefined
 		this.spawnFailure = undefined
 		this.unexpectedExit = false
@@ -229,6 +245,7 @@ export class RustEngine implements LiveDemodEngine {
 	}
 
 	async stop(): Promise<void> {
+		this.clearGateHold()
 		if (this.stopping && this.exited) {
 			this.audio?.destroy()
 			this.audio = null
@@ -424,6 +441,7 @@ export class RustEngine implements LiveDemodEngine {
 		this.attachAudio(opened)
 		this.opened = true
 		this.early = []
+		this.flushPreOpen()
 		return { ok: true, format: opened.format, rate: RUST_AUDIO_RATE_HZ }
 	}
 
@@ -510,11 +528,15 @@ export class RustEngine implements LiveDemodEngine {
 			return
 		}
 		if (event.type === "gate" && event.id === DEMOD_CHANNEL_ID) {
-			this.handlers?.onGate(event.open)
+			this.onGateEvent(event.open, event.atOutputSample)
 			return
 		}
 		if (event.type === "metrics" && event.id === DEMOD_CHANNEL_ID) {
-			this.handlers?.onMetrics(event.powerDbfs, event.quietingDb)
+			this.onMetricsEvent(
+				event.atOutputSample,
+				event.powerDbfs,
+				event.quietingDb,
+			)
 			return
 		}
 		if (
@@ -540,6 +562,154 @@ export class RustEngine implements LiveDemodEngine {
 		socket.on("close", () => {
 			this.fail("Live demodulation Rust engine socket closed")
 		})
+	}
+
+	private resetSampleOrder(): void {
+		this.nextMetricAt = 0
+		this.metricsSeen = false
+		this.heldGates = []
+		this.clearGateHold()
+		this.preOpenGates = []
+		this.preOpenPower = []
+		this.preOpenQuiet = []
+		this.preOpenAt = null
+	}
+
+	/**
+	 * WG10 req 3.8.1: native sends a gate change at once (`atOutputSample` = the end of the block
+	 * that decided it) and metrics in batches of ten blocks later. A gate whose block is not yet
+	 * reported waits, so handlers see each block's metrics after the gate state it was decided
+	 * with. Before any metrics, or once a batch is overdue, gates pass at once.
+	 */
+	private onGateEvent(open: boolean, at: number): void {
+		if (!this.opened) {
+			this.preOpenGates.push({ open, at })
+			return
+		}
+		if (
+			this.metricsSeen &&
+			(this.heldGates.length > 0 ||
+				at - METRIC_BLOCK_SAMPLES >= this.nextMetricAt)
+		) {
+			this.heldGates.push({ open, at })
+			if (this.gateHoldTimer === null)
+				this.gateHoldTimer = this.clock.setTimer(() => {
+					this.gateHoldTimer = null
+					this.releaseHeldGates(Number.POSITIVE_INFINITY)
+				}, GATE_HOLD_MAX_MS)
+			return
+		}
+		this.handlers?.onGate(open)
+	}
+
+	private onMetricsEvent(
+		at: number,
+		power: Array<number | null>,
+		quiet: ReadonlyArray<QuietingDb>,
+	): void {
+		if (!this.opened) {
+			// Startup: one merged, gap-filled batch, so no block is lost downstream.
+			// Positions count from the first output sample, like the audio.
+			if (this.preOpenAt === null) this.preOpenAt = 0
+			const expected =
+				this.preOpenAt + this.preOpenPower.length * METRIC_BLOCK_SAMPLES
+			const gap = Math.round((at - expected) / METRIC_BLOCK_SAMPLES)
+			for (let i = 0; i < gap; i++) {
+				this.preOpenPower.push(null)
+				this.preOpenQuiet.push(null)
+			}
+			const count = Math.max(power.length, quiet.length)
+			for (let i = 0; i < count; i++) {
+				this.preOpenPower.push(power[i] ?? null)
+				this.preOpenQuiet.push(quiet[i] ?? null)
+			}
+			const over = this.preOpenPower.length - PRE_OPEN_METRIC_BLOCKS
+			if (over > 0) {
+				this.preOpenPower.splice(0, over)
+				this.preOpenQuiet.splice(0, over)
+				this.preOpenAt += over * METRIC_BLOCK_SAMPLES
+			}
+			return
+		}
+		this.metricsSeen = true
+		// Blocks native reported nowhere (dropped lines) keep their place as empty metrics.
+		const gap = Math.round((at - this.nextMetricAt) / METRIC_BLOCK_SAMPLES)
+		if (gap > 0) {
+			// One batch, so downstream sees one update (allocates only on a gap).
+			const empty = new Array<null>(gap).fill(null)
+			this.deliverMetrics(
+				this.nextMetricAt,
+				[...empty, ...power],
+				[...empty, ...quiet],
+			)
+			return
+		}
+		this.deliverMetrics(at, power, quiet)
+	}
+
+	/** One batch, split before each held gate that its blocks reach. */
+	private deliverMetrics(
+		at: number,
+		power: Array<number | null>,
+		quiet: ReadonlyArray<QuietingDb>,
+	): void {
+		const count = Math.max(power.length, quiet.length)
+		let start = 0
+		for (let i = 0; i < count; i++) {
+			const head = this.heldGates[0]
+			if (head === undefined) break
+			if (head.at > at + (i + 1) * METRIC_BLOCK_SAMPLES) continue
+			if (i > start)
+				this.handlers?.onMetrics(power.slice(start, i), quiet.slice(start, i))
+			start = i
+			this.releaseHeldGates(at + (i + 1) * METRIC_BLOCK_SAMPLES)
+		}
+		if (start === 0) this.handlers?.onMetrics(power, quiet)
+		else if (start < count)
+			this.handlers?.onMetrics(power.slice(start), quiet.slice(start))
+		this.nextMetricAt = Math.max(
+			this.nextMetricAt,
+			at + count * METRIC_BLOCK_SAMPLES,
+		)
+		this.releaseHeldGates(this.nextMetricAt)
+	}
+
+	private releaseHeldGates(upTo: number): void {
+		while (this.heldGates.length > 0) {
+			const head = this.heldGates[0]
+			if (head === undefined || head.at > upTo) break
+			this.heldGates.shift()
+			this.handlers?.onGate(head.open)
+		}
+		if (this.heldGates.length === 0) this.clearGateHold()
+	}
+
+	private clearGateHold(): void {
+		if (this.gateHoldTimer === null) return
+		this.clock.clearTimer(this.gateHoldTimer)
+		this.gateHoldTimer = null
+	}
+
+	/** Delivers the startup gates and the merged startup metrics once the channel is open. */
+	private flushPreOpen(): void {
+		// Startup gates keep their positions: replayed between the merged batch's blocks.
+		const gates = this.preOpenGates
+		this.preOpenGates = []
+		const power = this.preOpenPower
+		const quiet = this.preOpenQuiet
+		this.preOpenPower = []
+		this.preOpenQuiet = []
+		this.preOpenAt = null
+		// Metrics always flow (the open command asks for them): gates wait for their block.
+		this.metricsSeen = true
+		this.heldGates = gates
+		if (power.length > 0) this.deliverMetrics(0, power, quiet)
+		else this.releaseHeldGates(0)
+		if (this.heldGates.length > 0 && this.gateHoldTimer === null)
+			this.gateHoldTimer = this.clock.setTimer(() => {
+				this.gateHoldTimer = null
+				this.releaseHeldGates(Number.POSITIVE_INFINITY)
+			}, GATE_HOLD_MAX_MS)
 	}
 
 	private fail(reason: string): void {

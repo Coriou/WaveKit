@@ -82,6 +82,8 @@ export const ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS = 10
 export const CARRIER_LOG_CAPACITY = 2048
 /** WG10 req 3.8: PCM the tracker holds until its blocks are decided. */
 export const CARRIER_PCM_RING_MS = 2000
+/** WG10 req 3.8.7: longest wait of a span-end tone snapshot for its PCM (500 ms). */
+export const CARRIER_SNAPSHOT_WAIT_BLOCKS = 50
 export const CARRIER_FLAG_OPEN = 1
 export const CARRIER_FLAG_CARRIED = 2
 
@@ -290,6 +292,11 @@ interface OpenTransmission {
 	spanEndMs: number
 	/** First block whose PCM this transmission's detector takes. */
 	feedFromBlock: number
+	/**
+	 * Carrier end block of the last span while its tone snapshot waits for the PCM up to that
+	 * block (3.8.7); null when settled.
+	 */
+	snapshotDueBlock: number | null
 }
 
 /** The held part of a transmission while a resumed segment may split off (WG10 R2). */
@@ -460,6 +467,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** Epoch byte position after the last accepted chunk. */
 	private pcmEnd = 0
 	private hookedLog: CarrierBlockLog | null = null
+	/** Block after the last carried block of the open span. */
+	private spanEndBlock = 0
+	/** PCM bytes dropped unfed (ring overflow or resync), since construction. */
+	private droppedPcmBytes = 0
 
 	constructor(options: AnalogTransmissionTrackerOptions) {
 		super()
@@ -494,6 +505,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** WG10 req 3.8: carried runs shorter than a span that were dropped, since construction. */
 	discardedRuns(): number {
 		return this.discardedRunCount
+	}
+
+	/** WG10 req 3.8.7: PCM bytes dropped unfed (ring overflow or resync), since construction. */
+	droppedPcm(): number {
+		return this.droppedPcmBytes
 	}
 
 	/** WG10 activity hygiene: transmissions suppressed (short, no carrier) since construction. */
@@ -560,11 +576,13 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				this.drainCarrier()
 				if (open || this.transmission === null) return
 				const reason = this.squelchCloseReason()
-				if (reason !== "squelch")
+				if (reason !== "squelch") {
 					this.close(
 						this.transmission.segmentOpen ? reason : "squelch",
 						this.clock(),
 					)
+					this.resetSpanState()
+				}
 				return
 			}
 			const now = this.clock()
@@ -633,6 +651,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			if (!open) return
 			if (!this.configClosesTransmission(open, config)) return
 			this.close(open.segmentOpen ? "config" : "squelch", this.clock())
+			// WG10 req 3.8: blocks after the change need a new 10-block run to reopen.
+			this.resetSpanState()
 		})
 	}
 
@@ -802,6 +822,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			carrierSpans: carrier !== null,
 			spanEndMs: carrier?.endMs ?? now,
 			feedFromBlock: carrier?.startBlock ?? 0,
+			snapshotDueBlock: null,
 		}
 		// WG10 req 3.8.6: on the carrier path the span rule implies the 3.7 carrier rule.
 		const base = carrier === null ? this.readCarrierBlocks() : null
@@ -1049,10 +1070,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.carrierBlock(k, log.flags[k % CARRIER_LOG_CAPACITY] ?? 0)
 		}
 		this.drainPcm()
+		this.settleSnapshot(false)
 	}
 
 	private resetCarrier(log: CarrierBlockLog, pendingPcm: number): void {
 		if (this.inSpan) this.endSpan()
+		this.settleSnapshot(true)
 		this.carrierEpoch = log.epoch
 		this.carrierBlockMs = log.blockMs
 		this.carrierBlockSamples = log.blockSamples
@@ -1093,6 +1116,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.uncarried = 0
 			if (this.inSpan) {
 				this.decisions[k % CARRIER_LOG_CAPACITY] = FEED
+				this.spanEndBlock = k + 1
 				const open = this.transmission
 				if (open !== null && open.carrierSpans && open.segmentOpen) {
 					open.spanEndMs = endMs
@@ -1101,6 +1125,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			} else if (this.runLen >= ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS) {
 				for (let i = this.runStart; i <= k; i++)
 					this.decisions[i % CARRIER_LOG_CAPACITY] = FEED
+				this.spanEndBlock = k + 1
 				this.startSpan(this.runStart, endMs)
 			}
 		} else {
@@ -1120,7 +1145,36 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 					this.endSpan()
 			}
 		}
+		this.settleSnapshot(false)
 		if (!this.inSpan) this.finaliseIfDue(endMs)
+	}
+
+	/** Clears run and span state (a closing config change or teardown edge). */
+	private resetSpanState(): void {
+		this.inSpan = false
+		this.runLen = 0
+		this.uncarried = 0
+	}
+
+	/**
+	 * Takes the deferred span-end tone snapshot once the PCM up to the span's carrier end was
+	 * consumed, or at most CARRIER_SNAPSHOT_WAIT_BLOCKS blocks later, or when forced.
+	 */
+	private settleSnapshot(force: boolean): void {
+		const open = this.transmission
+		if (open === null || open.snapshotDueBlock === null) return
+		const due = open.snapshotDueBlock
+		const blockBytes = this.carrierBlockSamples * Math.max(1, this.pcmRingWidth)
+		const consumed = Math.floor(this.pcmHead / blockBytes)
+		if (
+			!force &&
+			consumed < due &&
+			this.carrierCursor - due < CARRIER_SNAPSHOT_WAIT_BLOCKS
+		)
+			return
+		open.snapshotDueBlock = null
+		open.segmentEndTone = this.snapshotTone(open)
+		open.split = null
 	}
 
 	/** A span qualified: merge into the held transmission or open a new one at its start. */
@@ -1137,6 +1191,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				this.canMerge(held, startMs)
 			) {
 				held.spanEndMs = endMs
+				this.settleSnapshot(true)
 				this.resumeSegment(held, startMs)
 				if (held.split !== null) held.split.feedFromBlock = startBlock
 				return
@@ -1163,10 +1218,13 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const open = this.transmission
 		if (open === null || !open.carrierSpans || !open.segmentOpen) return
 		open.segmentOpen = false
-		open.split = null
 		open.gapEndMs = open.spanEndMs
 		open.audioMs += Math.max(0, open.spanEndMs - open.segmentStartMs)
-		open.segmentEndTone = this.snapshotTone(open)
+		// The span's last PCM may still be on its way: the snapshot (and the split detector)
+		// wait for it, bounded (3.8.7).
+		open.segmentEndTone = null
+		open.snapshotDueBlock = this.spanEndBlock
+		this.settleSnapshot(false)
 	}
 
 	/** Final once past the merge gap, unless a run started inside the gap is still provisional. */
@@ -1234,6 +1292,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			// Not counted by the log (not this run's audio): ignore it.
 			if (log.pcmBytes === this.pcmEnd) return
 			// A gap or overlap: restart the ring at this chunk.
+			this.droppedPcmBytes += this.pcmLen
 			this.pcmHead = start
 			this.pcmHeadOff = 0
 			this.pcmLen = 0
@@ -1243,25 +1302,42 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.drainCarrier()
 	}
 
+	/**
+	 * Appends a chunk; on overflow the oldest whole samples leave unfed (counted in
+	 * `droppedPcm()`), so the ring head stays on a sample boundary (3.8.7).
+	 */
 	private appendPcm(chunk: Buffer): void {
 		const ring = this.pcmRing
 		if (ring === null) return
 		const cap = ring.length
+		const width = Math.max(1, this.pcmRingWidth)
 		let from = 0
-		if (chunk.length > cap) {
-			from = chunk.length - cap
-			this.pcmHead += this.pcmLen + from
-			this.pcmHeadOff = 0
-			this.pcmLen = 0
+		if (this.pcmLen === 0 && this.pcmHead % width !== 0) {
+			// After a resync the head may sit inside a sample: skip to the next boundary.
+			const skip = Math.min(chunk.length, width - (this.pcmHead % width))
+			from = skip
+			this.pcmHead += skip
+			this.droppedPcmBytes += skip
+		}
+		const total = this.pcmLen + chunk.length - from
+		if (total > cap) {
+			const start = this.pcmHead + this.pcmLen
+			const head = Math.ceil((this.pcmHead + total - cap) / width) * width
+			this.droppedPcmBytes += head - this.pcmHead
+			if (head >= start) {
+				from += head - start
+				this.pcmHead = head
+				this.pcmHeadOff = 0
+				this.pcmLen = 0
+			} else {
+				const drop = head - this.pcmHead
+				this.pcmHead = head
+				this.pcmHeadOff = (this.pcmHeadOff + drop) % cap
+				this.pcmLen -= drop
+			}
 		}
 		const n = chunk.length - from
-		const over = this.pcmLen + n - cap
-		if (over > 0) {
-			// Oldest bytes leave unfed (their blocks never got decided in time).
-			this.pcmHead += over
-			this.pcmHeadOff = (this.pcmHeadOff + over) % cap
-			this.pcmLen -= over
-		}
+		if (n <= 0) return
 		const write = (this.pcmHeadOff + this.pcmLen) % cap
 		const first = Math.min(n, cap - write)
 		chunk.copy(ring, write, from, from + first)

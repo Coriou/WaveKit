@@ -100,5 +100,12 @@ the hook lines in `src/core/live-demodulator.ts` named below, tests. No change t
       `tests/unit/core/live-demodulator-wg7.test.ts` changes (carrier blocks matching PCM).
   - _Requirements: 3.8.10, 3.8.12_
   - **Property 13: Spans bound transmissions**, **Property 14: Tone hears only carrier**
+- [x] A1.6 Review fixes: Rust gate and metrics in sample order with gap fill and merged startup
+      metrics (`src/core/live-demod/rust-engine.ts`), startup events in order
+      (`src/core/live-demod/rust-run.ts`), span reset on a closing config change,
+      deferred span-end snapshot, whole-sample PCM eviction; tests in
+      `tests/unit/core/analog-transmission-carrier.test.ts` and
+      `tests/unit/core/live-demod-rust-fallback.test.ts`.
+  - _Requirements: 3.8.1, 3.8.5, 3.8.7_
 - [ ] A1.5 Live acceptance (Main): the design's acceptance plan.
   - _Requirements: 3.8.11_

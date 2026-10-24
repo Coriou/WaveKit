@@ -340,7 +340,7 @@ export class RustLiveRun {
 			clock: this.host.clock,
 		})
 		const slot: { run: PipelineRun | null } = { run: null }
-		const startup: StartupBuffer = { gate: null, metrics: [] }
+		const startup: StartupBuffer = { events: [] }
 		let live = false
 		const epoch = this.startEpoch
 		this.starting = engine
@@ -363,7 +363,7 @@ export class RustLiveRun {
 					},
 					onGate: open => {
 						if (!live) {
-							startup.gate = open
+							pushStartup(startup, { open })
 							return
 						}
 						const current = slot.run
@@ -381,13 +381,7 @@ export class RustLiveRun {
 					onMetrics: (power, quieting) => {
 						const normalized = quieting.map(asQuietingNumber)
 						if (!live) {
-							startup.metrics.push({ power, quieting: normalized })
-							if (startup.metrics.length > HANDSHAKE_EARLY_MAX) {
-								startup.metrics.splice(
-									0,
-									startup.metrics.length - HANDSHAKE_EARLY_MAX,
-								)
-							}
+							pushStartup(startup, { power, quieting: normalized })
 							return
 						}
 						const current = slot.run
@@ -632,10 +626,12 @@ export class RustLiveRun {
 
 	/** Gate and metrics that arrived in the `opened` chunk. */
 	private applyStartup(run: PipelineRun, startup: StartupBuffer): void {
-		if (startup.gate !== null) this.onGate(run, startup.gate)
-		for (const sample of startup.metrics)
-			this.onMetrics(run, sample.power, sample.quieting)
-		startup.metrics.length = 0
+		// WG10 req 3.8.1: replayed in arrival order, which the engine keeps in sample order, so
+		// each startup block is measured with the gate state it was decided with.
+		for (const event of startup.events)
+			if ("open" in event) this.onGate(run, event.open)
+			else this.onMetrics(run, event.power, event.quieting)
+		startup.events.length = 0
 	}
 
 	private onMetrics(
@@ -714,12 +710,24 @@ export class RustLiveRun {
 	}
 }
 
+type StartupEvent =
+	| { open: boolean }
+	| { power: Array<number | null>; quieting: Array<number | null> }
+
 interface StartupBuffer {
-	gate: boolean | null
-	metrics: Array<{
-		power: Array<number | null>
-		quieting: Array<number | null>
-	}>
+	events: StartupEvent[]
+}
+
+/**
+ * Startup gate and metrics in order. The engine merges pre-open metrics into one batch, so the
+ * bound only matters for a long gap before the run is adopted; the oldest entries go first.
+ */
+const STARTUP_EVENTS_MAX = HANDSHAKE_EARLY_MAX * 64
+
+function pushStartup(startup: StartupBuffer, event: StartupEvent): void {
+	startup.events.push(event)
+	if (startup.events.length > STARTUP_EVENTS_MAX)
+		startup.events.splice(0, startup.events.length - STARTUP_EVENTS_MAX)
 }
 
 /** `inf` is +∞. Everything else is already a finite number or null. */

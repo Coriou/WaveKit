@@ -4,10 +4,14 @@
 import { describe, expect, it } from "vitest"
 import {
 	ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS,
+	AnalogTransmissionTracker,
 	CARRIER_LOG_CAPACITY,
+	CARRIER_PCM_RING_MS,
 	CarrierBlockLog,
 } from "../../../src/core/analog-transmission.js"
 import {
+	CarrierSource,
+	T0,
 	addBlocks,
 	at,
 	emptyScript,
@@ -308,4 +312,104 @@ describe("CarrierBlockLog", () => {
 			log.note(a, 8000, true, i % 2 === 0)
 		expect(log.blocks).toBe(CARRIER_LOG_CAPACITY + 3)
 	})
+})
+
+describe("WG10 req 3.8 review fixes", () => {
+	it("a closing config change mid-span resets the span: carried blocks after it reopen", () => {
+		const s = emptyScript()
+		addBlocks(s, 50, false, false, noise(301, 0.3))
+		const start = s.open.length
+		over(s, 3000, tone(79.7))
+		addBlocks(s, 200, false, false, noise(302, 0.3))
+		const change = start + 150
+		const { rows } = runScript(s, {
+			onBlock: (k, source) => {
+				if (k === change) source.reconfigure({ modulation: "wfm" })
+			},
+		})
+		expect(rows.map(r => r.closeReason)).toEqual(["config", "squelch"])
+		expect(rows[1]?.modulation).toBe("wfm")
+		// The new transmission needs a fresh 10-block run after the change.
+		expect(Date.parse(rows[1]?.startedAt ?? "")).toBeGreaterThanOrEqual(
+			Date.parse(at(change)),
+		)
+	})
+
+	it("delayed PCM across a span end: the snapshot waits, so a tone split still happens", () => {
+		const s = emptyScript()
+		addBlocks(s, 50, false, false, noise(311, 0.3))
+		over(s, 1000, tone(79.7))
+		addBlocks(s, 50, false, false, noise(312, 0.3))
+		over(s, 2000, tone(88.5))
+		addBlocks(s, 300, false, false, noise(313, 0.3))
+		// PCM 400 ms behind its blocks: at the first span end only 0.6 s of it was fed.
+		const { rows } = runScript(s, { pcmLagBlocks: 40 })
+		expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7, 88.5])
+	})
+
+	it("delayed PCM is still fed before finalisation", () => {
+		const s = emptyScript()
+		addBlocks(s, 50, false, false, noise(321, 0.3))
+		over(s, 1000, tone(79.7))
+		addBlocks(s, 300, false, false, noise(322, 0.3))
+		const { rows } = runScript(s, { pcmLagBlocks: 40 })
+		expect(rows).toHaveLength(1)
+		expect(rows[0]?.tone?.ctcssHz).toBe(79.7)
+	})
+
+	it.each([
+		["s16le", 0],
+		["s16le", 1],
+		["f32le", 0],
+		["f32le", 1],
+	] as const)(
+		"PCM ring overflow evicts whole samples (%s, capacity + %i bytes)",
+		(format, extra) => {
+			const width = format === "s16le" ? 2 : 4
+			const source = new CarrierSource()
+			const run = {}
+			const pushed: number[] = []
+			let now = T0
+			const tracker = new AnalogTransmissionTracker({
+				source,
+				frequencyAt: () => ({ hz: 446_068_750, tuningTrust: "commanded" }),
+				now: () => now,
+				setTimer: () => () => undefined,
+				createToneDetector: () => ({
+					push(pcm) {
+						for (let i = 0; i + width <= pcm.length; i += width)
+							pushed.push(width === 2 ? pcm.readInt16LE(i) : pcm.readFloatLE(i))
+						expect(pcm.length % width).toBe(0)
+					},
+					result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
+					reset() {},
+				}),
+			})
+			tracker.start()
+			const capSamples = (RATE * CARRIER_PCM_RING_MS) / 1000
+			const bytes = capSamples * width + extra
+			const pcm = Buffer.alloc(bytes + width)
+			for (let i = 0; i * width + width <= pcm.length; i++)
+				if (width === 2) pcm.writeInt16LE(i % 32_000, i * 2)
+				else pcm.writeFloatLE(i, i * 4)
+			// All PCM first (its blocks lag), then the blocks: everything open and carried.
+			const chunk = Buffer.from(pcm.subarray(0, bytes))
+			source.log.notePcm(run, RATE, chunk.length)
+			source.emit("pcm", chunk, { rate: RATE, format })
+			const blocks = capSamples / 80 + 1
+			source.gate(true)
+			for (let k = 0; k < blocks; k++) {
+				now += 10
+				source.log.note(run, RATE, true, true)
+			}
+			const dropped = extra === 0 ? 0 : 1
+			expect(tracker.droppedPcm()).toBe(dropped * width)
+			const want = Array.from(
+				{ length: capSamples - dropped },
+				(_, i) => i + dropped,
+			)
+			expect(pushed).toEqual(want)
+			tracker.stop()
+		},
+	)
 })

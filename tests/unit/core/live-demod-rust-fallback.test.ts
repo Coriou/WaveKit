@@ -364,6 +364,15 @@ describe("live demod rust fallback and retune", () => {
 		channels[0]?.emitLine(
 			demodEvent("gate", { open: false, atOutputSample: 480 }),
 		)
+		// WG10 req 3.8.1 (deliberate): a gate decided by block 0 waits for block 0's metrics.
+		expect(edges).toEqual([true])
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 0,
+				powerDbfs: [-30],
+				quietingDb: [null],
+			}),
+		)
 		expect(edges).toEqual([true, false])
 		expect(demod?.isSquelchOpen()).toBe(false)
 	})
@@ -962,7 +971,50 @@ describe("live demod rust fallback and retune", () => {
 		expect(retunes()).toHaveLength(1)
 	})
 
-	it("keeps only the newest startup metrics and clears them after apply", async () => {
+	it("a gate close inside a metrics batch applies from its block on (WG10 req 3.8.1)", async () => {
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const batch = (at: number) =>
+			demodEvent("metrics", {
+				atOutputSample: at,
+				powerDbfs: new Array<number>(10).fill(-30),
+				quietingDb: new Array<number>(10).fill(30),
+			})
+		channels[0]?.emitLine(demodEvent("gate", { open: true, atOutputSample: 0 }))
+		channels[0]?.emitLine(batch(0))
+		// Native order: the close (end of block 15) arrives before the batch of blocks 10-19.
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: false, atOutputSample: 480 * 16 }),
+		)
+		expect(demod?.isSquelchOpen()).toBe(true)
+		channels[0]?.emitLine(batch(4800))
+		expect(demod?.isSquelchOpen()).toBe(false)
+		const log = demod?.carrierBlockLog()
+		expect(log?.blocks).toBe(20)
+		const flags = Array.from(log?.flags.subarray(0, 20) ?? [])
+		expect(flags).toEqual([...new Array<number>(15).fill(3), 2, 2, 2, 2, 2])
+	})
+
+	it("startup gates keep their positions in the merged startup batch (WG10 req 3.8.1)", async () => {
+		const lines = [
+			demodEvent("gate", { open: true, atOutputSample: 480 }),
+			demodEvent("gate", { open: false, atOutputSample: 480 * 5 }),
+			demodEvent("metrics", {
+				atOutputSample: 0,
+				powerDbfs: new Array<number>(10).fill(-30),
+				quietingDb: new Array<number>(10).fill(30),
+			}),
+		].map(event => JSON.stringify(event))
+		openedChunkSuffix = `${lines.join("\n")}\n`
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const log = demod?.carrierBlockLog()
+		expect(log?.blocks).toBe(10)
+		// Block 0 opens the gate, block 4 closes it.
+		expect(Array.from(log?.flags.subarray(0, 10) ?? [])).toEqual([
+			3, 3, 3, 3, 2, 2, 2, 2, 2, 2,
+		])
+	})
+
+	it("keeps every startup metric in order (WG10 req 3.8.1) and clears them after apply", async () => {
 		const stale = -90
 		const kept = -30
 		const lines: string[] = []
@@ -994,8 +1046,11 @@ describe("live demod rust fallback and retune", () => {
 			modulation: "nfm",
 			squelchMode: "manual",
 		})
-		expect(demod?.getStatus().noiseFloorDbfs).toBe(kept)
+		// WG10 req 3.8.1 (deliberate): startup metrics are merged, not dropped, so block positions
+		// stay aligned with the audio; the floor is the lowest of all twelve blocks.
+		expect(demod?.getStatus().noiseFloorDbfs).toBeLessThan(-89)
 		expect(demod?.getStatus().channelPowerDbfs).toBe(kept)
+		expect(demod?.carrierBlockLog()?.blocks).toBe(13)
 		channels[0]?.emitLine(
 			demodEvent("metrics", {
 				atOutputSample: 480 * 40,
@@ -1003,10 +1058,9 @@ describe("live demod rust fallback and retune", () => {
 				quietingDb: [null],
 			}),
 		)
-		const floor = demod?.getStatus().noiseFloorDbfs
-		expect(floor).toBeGreaterThan(-40)
-		expect(floor).not.toBe(stale)
 		expect(demod?.getStatus().channelPowerDbfs).toBe(-25)
+		// The 27 blocks native never reported keep their place (block 40 is the 41st).
+		expect(demod?.carrierBlockLog()?.blocks).toBe(41)
 	})
 
 	it("rolls a rejected gain retune back so the same gain can be sent again", async () => {

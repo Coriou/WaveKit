@@ -113,6 +113,10 @@ export function runScript(
 		legacy?: boolean
 		/** Never start the tracker (harness cost baseline). */
 		detached?: boolean
+		/** "block" delivery: PCM arrives this many blocks after its block. */
+		pcmLagBlocks?: number
+		/** Called before block k is played (e.g. a reconfigure). */
+		onBlock?: (k: number, source: CarrierSource) => void
 		tracker?: Partial<AnalogTransmissionTrackerOptions>
 	} = {},
 ): RunResult {
@@ -186,9 +190,10 @@ export function runScript(
 	const blockBytes = BLOCK * width
 	for (let k = 0; k < blocks; k++) {
 		now = T0 + (k + 1) * 10
+		options.onBlock?.(k, source)
 		if (delivery === "block") {
 			noteBlocks(k + 1)
-			sendPcm((k + 1) * blockBytes)
+			sendPcm(Math.max(0, (k + 1 - (options.pcmLagBlocks ?? 0)) * blockBytes))
 		} else if (delivery === "batched") {
 			// PCM first; blocks in batches of ten, 100 ms late.
 			sendPcm((k + 1) * blockBytes)
