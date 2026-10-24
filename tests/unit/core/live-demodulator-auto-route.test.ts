@@ -794,3 +794,139 @@ describe("auto listen route: existing streams unchanged (Property 13)", () => {
 		expect(sha256(stream.received())).toBe(sha256(script))
 	})
 })
+
+/** /auto output samples (s16le) of a transport. */
+function autoSamples(transport: ClientTransport): number[] {
+	const out = transport.received()
+	const samples: number[] = []
+	for (let i = 0; i + 1 < out.length; i += 2) samples.push(out.readInt16LE(i))
+	return samples
+}
+
+/** Reference: the s16le bytes through a fresh 48 kHz resampler. */
+function resampled(bytes: Buffer, rate: number): number[] {
+	const input = new Int16Array(Math.floor(bytes.length / 2))
+	for (let i = 0; i < input.length; i++) input[i] = bytes.readInt16LE(2 * i)
+	return feed(new PolyphaseResampler(rate, 48_000), input, [], 4_096).samples
+}
+
+describe("auto listen route: sample phase on connect (review fix)", () => {
+	it("a connect after an odd byte count starts /auto at the next sample boundary", async () => {
+		const h = await harness({ config: { squelchMode: "manual" } })
+		h.stage.open = true
+		const script = ramp(6_000, 5)
+		h.feed(Buffer.from(script.subarray(0, 1)))
+		const auto = h.addAutoClient()
+		h.feed(Buffer.from(script.subarray(1, 4_001)))
+		h.feed(Buffer.from(script.subarray(4_001)))
+		for (let i = 0; i < 20; i++) h.routeClock.tick(20)
+		const rate = h.internals.run?.stream.rate ?? 0
+		// Byte 1 completes sample 0, which /auto never saw the start of: it starts at byte 2.
+		const ref = resampled(script.subarray(2), rate)
+		expect(autoSamples(auto.transport).slice(0, ref.length)).toEqual(ref)
+	})
+
+	it("a reconnect between chunks re-aligns to the run's sample phase", async () => {
+		const h = await harness({ config: { squelchMode: "manual" } })
+		h.stage.open = true
+		const script = ramp(6_000, 9)
+		const first = h.addAutoClient()
+		h.feed(Buffer.from(script.subarray(0, 3)))
+		h.router.registry.close(first.client, "test", true)
+		const auto = h.addAutoClient()
+		h.feed(Buffer.from(script.subarray(3)))
+		for (let i = 0; i < 20; i++) h.routeClock.tick(20)
+		const rate = h.internals.run?.stream.rate ?? 0
+		const ref = resampled(script.subarray(4), rate)
+		expect(autoSamples(auto.transport).slice(0, ref.length)).toEqual(ref)
+	})
+
+	it("tone: a connect inside a split sample keeps the bytes in phase", async () => {
+		const h = await harness({
+			config: {
+				modulation: "nfm",
+				squelchMode: "manual",
+				toneSquelch: { kind: "ctcss", frequencyTenthsHz: 670 },
+			},
+		})
+		const run = h.internals.run
+		if (run === null) throw new Error("no run")
+		run.tone = {
+			key: "fake",
+			gate: { push() {}, open: () => true, skip() {}, reset() {} },
+		}
+		h.stage.open = true
+		const script = ramp(6_000, 13)
+		h.feed(Buffer.from(script.subarray(0, 1)))
+		const auto = h.addAutoClient()
+		h.feed(Buffer.from(script.subarray(1)))
+		for (let i = 0; i < 20; i++) h.routeClock.tick(20)
+		const ref = resampled(script.subarray(2), run.stream.rate)
+		expect(autoSamples(auto.transport).slice(0, ref.length)).toEqual(ref)
+	})
+})
+
+describe("auto listen route: shadow mismatch silences selected analog (review fix)", () => {
+	it("after an injected mismatch /auto writes only silence while /stream plays", async () => {
+		evidenceScript.latchByte = 0
+		evidenceScript.guardBytes = 0
+		const h = await harness({
+			config: { modulation: "nfm", squelchMode: "auto" },
+			factory: scriptedEvidence,
+		})
+		const stream = h.addStreamClient()
+		const auto = h.addAutoClient()
+		h.stage.open = true
+		// Latched at once: the over plays; analog is selected and a short backlog stays queued.
+		for (let i = 0; i < 10; i++) {
+			h.feed(ramp(500, i * 500))
+			h.routeClock.tick(20)
+		}
+		expect(h.demod.getStatus().autoRoute?.active).toBe("analog")
+		expect(autoSamples(auto.transport).some(v => v !== 0)).toBe(true)
+		const run = h.internals.run as unknown as {
+			evidence: { shadow: { sync(realDelaySamples: number): boolean } }
+		}
+		// Analog audio queued but not yet played (under the 60 ms catch-up target).
+		h.feed(ramp(500, 5_000))
+		const droppedBefore = h.router.droppedSamples
+		// A defect stand-in: the next sync reports one mismatch (then the shadow is exact again).
+		const shadow = run.evidence.shadow
+		const sync = shadow.sync.bind(shadow)
+		let inject = true
+		shadow.sync = real => {
+			const ok = sync(real)
+			if (!inject) return ok
+			inject = false
+			return false
+		}
+		const mark = auto.transport.received().length
+		const before = stream.received().length
+		// The next pre-roll call sees the mismatch.
+		// 200 samples: inside one 10 ms tone slice (250 samples), so one pre-roll call.
+		h.feed(ramp(200, 20_000))
+		expect(
+			stream
+				.received()
+				.subarray(before)
+				.some(b => b !== 0),
+		).toBe(true)
+		for (let i = 0; i < 3; i++) h.routeClock.tick(20)
+		const after = auto.transport.received().subarray(mark)
+		expect(after.length).toBe(3 * 1_920)
+		// Neither the queued audio nor the chunk decided out of sync reaches /auto.
+		expect(after.every(b => b === 0)).toBe(true)
+		expect(h.router.droppedSamples).toBeGreaterThan(droppedBefore)
+		// In sync again: the over resumes on /auto.
+		for (let i = 0; i < 10; i++) {
+			h.feed(ramp(500, 30_000 + i * 500))
+			h.routeClock.tick(20)
+		}
+		expect(
+			auto.transport
+				.received()
+				.subarray(mark + after.length)
+				.some(b => b !== 0),
+		).toBe(true)
+	})
+})

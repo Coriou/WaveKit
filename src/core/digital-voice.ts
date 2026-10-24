@@ -231,11 +231,6 @@ interface VoiceChannel {
 	detach: (() => void) | null
 }
 
-/** Only the error class name: a tap error may carry untrusted text. */
-function safeTapError(err: unknown): string {
-	return err instanceof Error ? err.name : typeof err
-}
-
 function isDsdFmeMode(value: unknown): value is DsdFmeMode {
 	return DSD_FME_MODES.includes(value as DsdFmeMode)
 }
@@ -307,16 +302,17 @@ export class DigitalVoiceService
 		for (const tap of this.voiceTaps) {
 			try {
 				fn(tap)
-			} catch (err) {
-				this.noteTapFailure(err)
+			} catch {
+				this.noteTapFailure()
 			}
 		}
 	}
 
-	private noteTapFailure(err: unknown): void {
+	/** A fixed message: no property of the thrown value is read (it is untrusted). */
+	private noteTapFailure(): void {
 		if (this.voiceTapFailureLogged) return
 		this.voiceTapFailureLogged = true
-		this.log.warn({ err: safeTapError(err) }, "Auto listen voice tap failed")
+		this.log.warn("Auto listen voice tap failed")
 	}
 
 	/** Invalid optional call-metadata fields dropped so far. */
@@ -683,8 +679,8 @@ export class DigitalVoiceService
 		for (const tap of this.voiceTaps) {
 			try {
 				tap.frame(channel.decoderId, mono, channel.call)
-			} catch (err) {
-				this.noteTapFailure(err)
+			} catch {
+				this.noteTapFailure()
 			}
 		}
 		if (!own) return

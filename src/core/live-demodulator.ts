@@ -458,6 +458,13 @@ export class LiveDemodulator extends EventEmitter {
 	/** `/auto`: one stream that plays the analog over or covering digital voice. */
 	private readonly autoRoute: AutoListenRouter
 	private autoShadowMismatchLogged = false
+	/** Stream byte phase (mod 4) of the chunk being handled, for `/auto` sample alignment. */
+	private autoPhase = 0
+	/**
+	 * False after a connect from zero clients or an analog reset: the next `/auto` span is cut
+	 * to the run's next sample boundary, so the router never starts mid-sample.
+	 */
+	private autoAligned = false
 	private run: PipelineRun | null = null
 	private branchId: string | null = null
 	private branchStream: Readable | null = null
@@ -508,6 +515,10 @@ export class LiveDemodulator extends EventEmitter {
 				? { clock: options.autoRouteClock }
 				: {}),
 		})
+		// A first client (connect or reconnect) re-aligns the next analog span.
+		this.autoRoute.registry.on("client-connected", () => {
+			if (this.autoRoute.registry.size === 1) this.autoAligned = false
+		})
 		this.autoRoute.on("auto-route-changed", (level: LiveAudioAutoRouteLevel) =>
 			this.emit("auto-route-changed", level),
 		)
@@ -538,7 +549,7 @@ export class LiveDemodulator extends EventEmitter {
 			resetFloorForRetune: run => {
 				this.resetFloorForRetune(run)
 				this.resetEvidence(run)
-				this.autoRoute.resetAnalog()
+				this.resetAutoAnalog()
 			},
 			clearCloseOverride: () => {
 				this.closeOverride = null
@@ -639,7 +650,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.closeOverride = "stopped"
 		try {
 			if (this.run) this.resetEvidence(this.run)
-			this.autoRoute.resetAnalog()
+			this.resetAutoAnalog()
 			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
@@ -785,7 +796,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.publishSquelchChange()
 					// Requirement 2.9: the swap start clears the gate and the pre-roll.
 					this.resetEvidence(run)
-					this.autoRoute.resetAnalog()
+					this.resetAutoAnalog()
 					this.closeOverride = null
 					const outcome = await this.swapFront(run, swapPlan.front)
 					if (outcome === "timeout" || outcome === "failed") {
@@ -1341,7 +1352,7 @@ export class LiveDemodulator extends EventEmitter {
 				this.resetFloorForRetune(this.run)
 				this.resetEvidence(this.run)
 			}
-			this.autoRoute.resetAnalog()
+			this.resetAutoAnalog()
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -1896,7 +1907,7 @@ export class LiveDemodulator extends EventEmitter {
 		run.stopping = true
 		if (this.run === run) {
 			this.run = null
-			this.autoRoute.resetAnalog()
+			this.resetAutoAnalog()
 			this.stopLevelPublishing()
 			this.publishSquelchChange()
 		}
@@ -2019,8 +2030,25 @@ export class LiveDemodulator extends EventEmitter {
 		audible: boolean,
 		stream: StreamFormat,
 	): void {
-		if (end > start)
-			this.autoRoute.pushAnalog(chunk, start, end, audible, stream)
+		if (end <= start) return
+		if (!this.autoAligned) {
+			// Bytes finishing a sample the router never saw the start of are skipped.
+			const width = pcmSampleBytes(stream.format)
+			const skip = (width - ((this.autoPhase + start) % width)) % width
+			if (end - start <= skip) {
+				if (end - start === skip) this.autoAligned = true
+				return
+			}
+			start += skip
+			this.autoAligned = true
+		}
+		this.autoRoute.pushAnalog(chunk, start, end, audible, stream)
+	}
+
+	/** Clears `/auto` analog (FIFO, resampler, split sample) and re-aligns the next span. */
+	private resetAutoAnalog(): void {
+		this.autoRoute.resetAnalog()
+		this.autoAligned = false
 	}
 
 	/** Registers a streaming response (also used by tests with a stand-in). */
@@ -2041,6 +2069,8 @@ export class LiveDemodulator extends EventEmitter {
 		// WG10 req 2.2: the new run's first audio ends the silence fill.
 		if (run !== null) this.silence.disarm("audio")
 		const phase = run?.pcmPhase ?? 0
+		this.autoPhase = phase
+		if (!this.autoRoute.wanted) this.autoAligned = false
 		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
 		const tone = run?.tone ?? null
 		const evidence =
@@ -2382,8 +2412,13 @@ export class LiveDemodulator extends EventEmitter {
 		const shadow = evidence.shadow
 		let inSync = false
 		if (shadow !== null) {
+			const failedBefore = shadow.failed
 			shadow.process(end - start, tag)
 			inSync = shadow.sync(evidence.preRoll.delaySamples)
+			// A new mismatch drops queued /auto analog (it may be wrongly qualified) and a resync
+			// starts clean, so no audio decided while out of sync ever plays (fail closed).
+			if ((!failedBefore && !inSync) || (failedBefore && !shadow.failed))
+				this.resetAutoAnalog()
 			if (!inSync && !this.autoShadowMismatchLogged && shadow.mismatches > 0) {
 				this.autoShadowMismatchLogged = true
 				this.log.warn(

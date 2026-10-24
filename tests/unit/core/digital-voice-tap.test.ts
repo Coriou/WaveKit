@@ -20,7 +20,9 @@ import { AUTO_ROUTE_STREAM } from "../../../src/core/auto-listen/contract.js"
 import { AutoListenRouter } from "../../../src/core/auto-listen/router.js"
 import type { DigitalVoiceService as Service } from "../../../src/core/digital-voice.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
+import type { Logger } from "../../../src/utils/logger.js"
 import { createLogger } from "../../../src/utils/logger.js"
+import { capturingLogger } from "./live-demodulator-continuity-fakes.js"
 
 class FakeSocket extends EventEmitter {
 	static created: FakeSocket[] = []
@@ -159,7 +161,7 @@ afterEach(async () => {
 })
 
 /** A started service with one dsd-fme channel; HTTP rebound to 127.0.0.1 port 0. */
-async function started(): Promise<{
+async function started(log: Logger = logger): Promise<{
 	service: Service
 	decoder: EventEmitter
 	socket: FakeSocket
@@ -170,7 +172,7 @@ async function started(): Promise<{
 		jitterBufferMs: 100,
 		maxBufferMs: 500,
 	})
-	const service = new DigitalVoiceService(logger, config, {
+	const service = new DigitalVoiceService(log, config, {
 		httpHost: "127.0.0.1",
 	})
 	services.push(service)
@@ -324,6 +326,47 @@ describe("digital voice taps", () => {
 		socket.emit("message", datagram(5))
 		socket.emit("message", datagram(6))
 		expect(rec.frames).toHaveLength(2)
+	})
+
+	it("logs a fixed message for any thrown value and keeps later taps and the own stream", async () => {
+		const { logger: log, lines } = capturingLogger()
+		const { service, socket, connect } = await started(log)
+		const hostile = {
+			get name(): string {
+				throw new Error("getter")
+			},
+			get message(): string {
+				throw new Error("getter")
+			},
+			toString(): string {
+				throw new Error("getter")
+			},
+		}
+		const thrown: unknown[] = [new Error("SECRET-TEXT"), hostile]
+		let n = 0
+		service.addVoiceTap({
+			frame: () => {
+				throw thrown[n++ % thrown.length]
+			},
+			call: () => {
+				throw hostile
+			},
+			detach: () => undefined,
+		})
+		const { tap, rec } = recordingTap()
+		service.addVoiceTap(tap)
+		const own = connect()
+		for (let i = 0; i < 20; i++) socket.emit("message", datagram(900))
+		vi.advanceTimersByTime(400)
+		expect(rec.frames).toHaveLength(20)
+		expect(own.received().some(b => b !== 0)).toBe(true)
+		expect(service.getStatus().decoders[0]?.datagramsReceived).toBe(20)
+		const tapLines = lines.filter(l => l.msg === "Auto listen voice tap failed")
+		expect(tapLines).toHaveLength(1)
+		const text = JSON.stringify(lines)
+		expect(text).not.toContain("SECRET-TEXT")
+		expect(text).not.toContain("getter")
+		expect(tapLines[0]).not.toHaveProperty("err")
 	})
 
 	it("detaches on channel removal and on stop", async () => {
