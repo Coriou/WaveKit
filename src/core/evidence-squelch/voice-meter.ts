@@ -23,6 +23,7 @@ import {
 } from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
 import { AUDIO_TONE_RATE_HZ } from "../audio-tones/tone-detector.js"
+import { ANALOG_TRIAL_AUDIO_MIN_DB } from "../scanner/scanner-redesign-contract.js"
 
 /** 8 000 Hz × 50 ms / 1 000 = 400 samples per frame. */
 export const VOICE_METER_FRAME_SAMPLES =
@@ -32,12 +33,25 @@ export interface VoiceFrame {
 	audioDb: number
 	syllabic: number
 	cluster: number
+	/**
+	 * A15 (2026-10-24): 5 ms sub-blocks of the frame (0-10) whose band power is at least the
+	 * -30 dB audio level: sustained energy (a syllable nucleus fills the frame; a click of a few
+	 * ms fills one or two). 0 for a non-finite frame. Not an analyzer statistic.
+	 */
+	sustained: number
 	finite: boolean
 }
+
+/** A15: 5 ms sub-blocks per 50 ms frame (40 samples each at 8 kHz). */
+export const VOICE_METER_SUB_BLOCKS = 10
 
 /** Mean square of a full-deviation sine at gain 2 (0.8² / 2). */
 const FULL_DEVIATION_MEAN_SQUARE = 0.32
 const SILENCE_DB = -160
+/** Band mean square of the -30 dB audio level (A15 sub-block test). */
+const SUSTAINED_MEAN_SQUARE =
+	FULL_DEVIATION_MEAN_SQUARE * 10 ** (ANALOG_TRIAL_AUDIO_MIN_DB / 10)
+const SUB_BLOCK_SAMPLES = VOICE_METER_FRAME_SAMPLES / VOICE_METER_SUB_BLOCKS
 /** Peak deviation of the 0 dB reference (the analyzer's full-deviation sine). */
 export const VOICE_METER_REFERENCE_DEVIATION_HZ = 5_000
 const SYLLABIC_MAX = 160
@@ -111,8 +125,11 @@ export class VoiceFrameMeter {
 		audioDb: SILENCE_DB,
 		syllabic: 0,
 		cluster: 0,
+		sustained: 0,
 		finite: true,
 	}
+	private subPower = 0
+	private subCount = 0
 	private readonly scale: number
 	private readonly hp = new Biquad(true, AUDIO_TONE_RATE_HZ, 300)
 	private readonly lp = new Biquad(false, AUDIO_TONE_RATE_HZ, 3_000)
@@ -176,7 +193,13 @@ export class VoiceFrameMeter {
 		}
 		const y = this.lp.step(this.hp.step(x))
 		this.power += y * y
+		this.subPower += y * y
 		const index = this.fill
+		if ((index + 1) % SUB_BLOCK_SAMPLES === 0) {
+			if (this.subPower / SUB_BLOCK_SAMPLES >= SUSTAINED_MEAN_SQUARE)
+				this.subCount += 1
+			this.subPower = 0
+		}
 		this.rawView[index] = x * RAD_PER_UNIT
 		this.loView[index] = this.lo.step(x) * RAD_PER_UNIT
 		this.fill = index + 1
@@ -196,11 +219,14 @@ export class VoiceFrameMeter {
 		this.envLen = 0
 		this.fill = 0
 		this.power = 0
+		this.subPower = 0
+		this.subCount = 0
 		this.frameFinite = true
 		this.frames = 0
 		this.record.audioDb = SILENCE_DB
 		this.record.syllabic = 0
 		this.record.cluster = 0
+		this.record.sustained = 0
 		this.record.finite = true
 	}
 
@@ -231,11 +257,13 @@ export class VoiceFrameMeter {
 					: 10 * Math.log10(power / FULL_DEVIATION_MEAN_SQUARE)
 			record.syllabic = this.syllabic()
 			record.cluster = cluster
+			record.sustained = this.subCount
 			record.finite = Number.isFinite(record.syllabic)
 		} else {
 			record.audioDb = NaN
 			record.syllabic = NaN
 			record.cluster = NaN
+			record.sustained = 0
 			record.finite = false
 			// Recover from an overflowed filter state on the next frame.
 			if (!this.hp.finite() || !this.lp.finite() || !this.lo.finite()) {
@@ -246,6 +274,8 @@ export class VoiceFrameMeter {
 		}
 		this.fill = 0
 		this.power = 0
+		this.subPower = 0
+		this.subCount = 0
 		this.frameFinite = true
 		this.frames += 1
 	}

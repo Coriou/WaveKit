@@ -328,6 +328,42 @@ overs with no quieted block, a different tone after a fade (latch ends, the new 
 its own), and flicker after an unquieted tone over (expires within hang + grace + one block).
 Property 16 checks the open-side limit `HANG_MS + grace` for a tone latch.
 
+**Amendment (2026-10-24, A14 review round 2): dated sightings.** The re-open path resets the tone
+stage again for every latch (the retained stage dated pre-close tone as fresh), so a sighting's
+block lies inside one stage-1-open stretch. `EVIDENCE_TONE_HANG_GRACE_MS` is 500 ms (the reset
+stage's first block). `ToneEvidence` counts a DCS sighting only for a word chain of at least
+`LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT` (2) hits. Regressions: the review repro at eight tone lengths
+(2 100 to 2 359 ms, block phases) and noise at 100 to 3 000 (latch ends 175 to 196 blocks after
+the close, at most 200), a DCS fade, a seeded sighting-rate test (none in 10 min of white noise
+at 0.5 and 5 min of voice), and Property 16 with bare tones of random length (1.5 to 2.6 s),
+tone + voice, quieted or not, and noise at 100 to 20 000, plus the repro as explicit examples
+(it fails on the retained-stage gate). The different-tone regression uses a 1.3 s fade, so the
+latch ends before the other tone can qualify.
+
+**Amendment (2026-10-24, live retest run4): diagnostic status.** `EvidenceGatePort` gains an
+optional `diagnostics()` (`EvidenceGate` implements it): medians of the current frame window,
+quiet and noted counts, `windowResets` (counted in `noteBlock`, cleared by `reset()`), audio
+time, deviation, and the verdict in `judgeEvidence`'s order (`window-filling`, `non-finite`,
+`data-like`, `not-quiet`, `low-audio`, `low-syllabic`, `voice`, or `latched`). It allocates its
+medians when called; `LiveDemodulator.getStatus({ diagnostics: true })` calls it, the REST route
+passes `?diagnostics=true`, level events never do. Type `LiveAudioAutoSquelchDiagnostics` in
+`packages/api-types`, documented as diagnostic and unstable. Findings and the pending sparse-speech
+decision: requirements, amendment after 1.5.
+
+**Amendment (2026-10-24, A15): sparse-syllable path.** `VoiceFrame` gains `sustained` (5 ms
+sub-blocks of the frame, 0-10, whose band mean square is at least the -30 dB level; scalar
+accumulators, no allocation). The gate keeps a 40-entry `Uint8Array` ring of syllable-frame flags
+(`isSyllableFrame`: finite audioDb ≥ -30 and sustained ≥ 5), cleared with the voice window and on
+`reset()`, and counts runs of at least 3 flags oldest first (at most 40 steps per judged frame).
+`judgeEvidence` takes `syllableRuns` and step 5 becomes `voicePath(stats, runs) !== null`:
+`median` (`isVoice`) or `runs` (median syllabic ≥ 0.3 and runs ≥ 2). Frames without `sustained`
+(any caller other than the gate's meter) never form runs, so Property 2's agreement with
+`classifyAnalogTrial` holds whenever `syllableRuns` is absent or under 2. The diagnostic verdict
+order is now `window-filling`, `non-finite`, `data-like`, `not-quiet`, `low-syllabic`, then
+`voice-median`, `voice-runs` or `low-audio` (neither path); it reports `syllableRuns` and, while
+latched, `path` (`median`, `runs` or `tone`). Property 17 pins that loud frames only in stretches
+of at most 2 never qualify through the run path.
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
@@ -628,8 +664,13 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     _Validates 1.3, 5.2._
 16. **Latch needs carrier evidence (A14, 2026-10-24).** After an over's last quieted block and a
     stage-1 close, for any pattern of unquieted re-opens and closes the gate stays open exactly
-    until `HANG_MS` of PCM has passed (`HANG_MS` + 250 ms when the block is open on a tone latch)
+    until `HANG_MS` of PCM has passed (`HANG_MS` + 500 ms when the block is open on a tone latch;
+    an unquieted over's last sighting may precede the close by one 250 ms CTCSS hop)
     and is waiting from then on. _Validates 1.5._
+17. **Short loud stretches are not syllables (A15, 2026-10-24).** For any frame sequence whose
+    syllable-level frames come only in stretches of at most 2, `syllableRuns` is 0, `voicePath`
+    never returns `runs`, and the judge says voice exactly when the pinned median rule does.
+    _Validates 1.3, 1.4._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
 

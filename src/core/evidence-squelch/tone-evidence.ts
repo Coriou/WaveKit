@@ -66,8 +66,8 @@ export class ToneEvidence {
 	/** The kind qualified most recently (preferred by `current()` while both are current). */
 	private latest: "ctcss" | "dcs" | null = null
 	/**
-	 * Single-observation sightings (amendment A14 revised, 2026-10-24): counts every completed
-	 * 500 ms CTCSS block with a winning tone and every new DCS word hit (any hit count), and
+	 * Sightings (amendment A14 revised, 2026-10-24): counts every completed 500 ms CTCSS block
+	 * with a winning tone and every new DCS word hit of a chain of at least two words, and
 	 * keeps the identity of the latest one (`sightingKey`: CTCSS table index, or 1 000 + packed
 	 * DCS reading, as the gate's tone key). Not qualification: the gate uses a sighting only to
 	 * refresh the carrier hang of a latch on that same tone.
@@ -158,7 +158,10 @@ export class ToneEvidence {
 		// A new qualifying word: the chain's reading or hit count changed on this bit. Between
 		// word boundaries `wordHits()` keeps its value, which must not refresh the hold.
 		const changed = reading !== this.lastReading || hits !== this.lastHits
-		if (hits >= 1 && reading >= 0 && changed) this.sight(1_000 + reading)
+		// A DCS sighting is a word pair (two matching words 23 bits apart, 342 ms): single words
+		// occur in noise (review round 2: about 68 per hour in white noise at 0.5).
+		if (hits >= LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT && reading >= 0 && changed)
+			this.sight(1_000 + reading)
 		const newWord = standard !== undefined && changed
 		this.lastReading = reading
 		this.lastHits = hits

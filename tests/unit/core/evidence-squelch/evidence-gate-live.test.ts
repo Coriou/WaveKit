@@ -34,9 +34,14 @@ import {
 	EVIDENCE_TONE_HANG_GRACE_MS,
 	EvidenceGate,
 	judgeEvidence,
+	syllableRuns,
+	voicePath,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
+import { ToneEvidence } from "../../../../src/core/evidence-squelch/tone-evidence.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
 import type { AnalogTrialFrame } from "../../../../src/core/scanner/scanner-redesign-contract.js"
+import { PcmDecimator } from "../../../../src/core/audio-tones/tone-detector.js"
+import { dataLike, isVoice } from "../../../../src/core/scanner/analog-trial.js"
 import { mulberry32 } from "../audio-tones/synth.js"
 import {
 	carrierSilence,
@@ -148,6 +153,31 @@ function gateLatch(
 	return null
 }
 
+/** First latch time (s) of the pinned median rule alone (`isVoice`, not data-like), or null. */
+function medianLatch(
+	samples: Float32Array,
+	deviationHz: number,
+): number | null {
+	const decimator = new PcmDecimator()
+	decimator.arm(SYNTH_RATE)
+	const meter = new VoiceFrameMeter({ gain: 2, deviationHz })
+	const frames: AnalogTrialFrame[] = []
+	for (const x of samples) {
+		if (!decimator.take(x) || !meter.push(decimator.output)) continue
+		const { audioDb, syllabic, cluster } = meter.frame
+		frames.push({ carrierDb: 0, hfNoiseDb: 0, audioDb, syllabic, cluster })
+		if (frames.length < LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES) continue
+		const stats = {
+			mode: "nfm" as const,
+			frames: frames.slice(-LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES),
+			gapSamples: 0,
+			floorDb: 0,
+		}
+		if (!dataLike(stats) && isVoice(stats)) return (frames.length * 50) / 1_000
+	}
+	return null
+}
+
 const privateDir = process.env["EVIDENCE_SQUELCH_PRIVATE_FIXTURES"] ?? ""
 const privateFiles = [1, 2].map(n =>
 	join(privateDir, `live-pmr446-voice-${n}.audio.s16le`),
@@ -205,19 +235,25 @@ describe("A13: live PMR446 overs on a 12.5 kHz channel", () => {
 			expect(latch).not.toBeNull()
 			expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
 		}
-		// Without A13 the marginal seed latches only after the pre-roll (1.85 s).
-		const marginal = toPcm(
-			voiceLike({
-				rate: SYNTH_RATE,
-				seconds: 3,
-				seed: 24,
-				level: NARROW_VOICE_LEVEL,
-			}),
-			"s16le",
+		// Without A13 the marginal seed passes the median rule only after the pre-roll (1.85 s);
+		// since A15 the gate also takes it on the syllable-run path at 1.0 s.
+		const marginal = voiceLike({
+			rate: SYNTH_RATE,
+			seconds: 3,
+			seed: 24,
+			level: NARROW_VOICE_LEVEL,
+		})
+		expect(medianLatch(marginal, EVIDENCE_WIDE_DEVIATION_HZ)).toBeCloseTo(
+			1.85,
+			6,
 		)
 		expect(
-			gateLatch(marginal, SYNTH_RATE, EVIDENCE_WIDE_DEVIATION_HZ),
-		).toBeCloseTo(1.85, 6)
+			gateLatch(
+				toPcm(marginal, "s16le"),
+				SYNTH_RATE,
+				EVIDENCE_WIDE_DEVIATION_HZ,
+			),
+		).toBe(1)
 	})
 
 	it.skipIf(!havePrivate)(
@@ -424,7 +460,11 @@ describe("A14: the latch survives only the same transmission", () => {
 		const expired = t.states.indexOf("waiting", overEnd)
 		// Without a close the tone stage keeps its last 500 ms CTCSS block current: up to 50
 		// more blocks of refresh after the tone ended (design, A14).
-		expect(expired - overEnd).toBeLessThanOrEqual(HANG / 250 + 50)
+		// Without a close a block straddling the tone's end can still sight it: bound hang +
+		// grace + one 500 ms block (50 blocks of 10 ms) after the tone (design, A14).
+		expect(expired - overEnd).toBeLessThanOrEqual(
+			(HANG + TONE_GRACE) / 250 + 50,
+		)
 		expect(t.states.slice(expired).every(s => s === "waiting")).toBe(true)
 	})
 
@@ -490,6 +530,26 @@ describe("A14: the latch survives only the same transmission", () => {
 		expect(t.evidence.every(e => e === "ctcss")).toBe(true)
 	})
 
+	it("DCS: 2 s of 023N unquieted, 1.2 s close, the same code back unquieted: stays open/dcs", () => {
+		const dcs = (seconds: number, seed: number): Buffer =>
+			toPcm(
+				mix(
+					dcsMix({ rate: RATE, seconds, code: 0o23, polarity: "normal" }),
+					voiceLike({ rate: RATE, seconds, seed, level: 0.4 }),
+				),
+				"s16le",
+			)
+		const g = gate()
+		drive(g, [{ pcm: dcs(2, 1), open: true, quieted: false }])
+		expect([g.state, g.evidence]).toEqual(["open", "dcs"])
+		const t = drive(g, [
+			closedFor(1_200),
+			{ pcm: dcs(3, 2), open: true, quieted: false },
+		])
+		expect(t.states.every(s => s === "open")).toBe(true)
+		expect(t.evidence.at(-1)).toBe("dcs")
+	})
+
 	it("review repro: repeated 10 ms closes between 600 ms unquieted tone stretches keep the latch", () => {
 		// Latched first (a close before a latch discards the evidence, requirement 1.5).
 		const segments: Segment[] = [
@@ -546,7 +606,7 @@ describe("A14: the latch survives only the same transmission", () => {
 		const expired = t.states.indexOf("waiting", overEnd)
 		expect(expired).toBeGreaterThan(overEnd)
 		expect(expired - overEnd).toBeLessThanOrEqual(
-			(HANG + TONE_GRACE) / 250 + 25,
+			(HANG + TONE_GRACE) / 250 + 50,
 		)
 		expect(t.states.slice(expired).every(s => s === "waiting")).toBe(true)
 	})
@@ -555,21 +615,97 @@ describe("A14: the latch survives only the same transmission", () => {
 		const g = gate()
 		drive(g, [{ pcm: ctcssOver(2), open: true, quieted: false }])
 		const t = drive(g, [
-			closedFor(1_000),
+			closedFor(1_300),
 			{ pcm: ctcssOver(3, 100, 6), open: true, quieted: false },
 		])
 		const ended = t.states.indexOf("waiting")
-		// 100 blocks closed, then at most hang + grace - 1 s of the other tone.
-		expect(ended).toBeGreaterThanOrEqual(100)
-		expect(ended).toBeLessThanOrEqual(100 + 75)
+		// 130 blocks closed, then the hang + grace (2.0 s from the last 79.7 Hz sighting, at most
+		// 250 ms before the close) runs out before 100 Hz can qualify (750 ms after the re-open):
+		// its own sightings have another key and never refresh the latch.
+		expect(ended).toBeGreaterThanOrEqual(130)
+		expect(ended).toBeLessThanOrEqual(130 + 70)
 		expect(t.states.at(-1)).toBe("open")
 		expect(t.evidence.at(-1)).toBe("ctcss")
 	})
 
+	// Review round 2: a retained tone-stage block must not date old tone as fresh evidence.
+	it("review repro: 2.1 s tone, 1.2 s closed, low noise after: the latch ends within hang + grace of the tone's end", () => {
+		const rows: string[] = []
+		for (const toneMs of [
+			2_100, 2_137, 2_174, 2_211, 2_248, 2_285, 2_322, 2_359,
+		])
+			for (const noise of [100, 300, 1_000, 3_000]) {
+				const tone = Buffer.alloc(Math.round((RATE * toneMs) / 1_000) * 2)
+				for (let i = 0; i < tone.length / 2; i++)
+					tone.writeInt16LE(
+						Math.round(6_000 * Math.sin((2 * Math.PI * 79.7 * i) / RATE)),
+						i * 2,
+					)
+				const rand = mulberry32(toneMs + noise)
+				const after = Buffer.alloc(4 * RATE * 2)
+				for (let i = 0; i < after.length / 2; i++)
+					after.writeInt16LE(Math.round((rand() * 2 - 1) * noise), i * 2)
+				const g = gate()
+				drive(g, [{ pcm: tone, open: true, quieted: false }])
+				expect(g.state).toBe("open")
+				const t = drive(g, [
+					closedFor(1_200),
+					{ pcm: after, open: true, quieted: false },
+				])
+				const ended = t.states.indexOf("waiting")
+				rows.push(`${toneMs}/${noise}:${ended}`)
+				// The tone ends at the close: at most hang + grace (200 blocks of 10 ms) later.
+				expect(ended).toBeGreaterThan(0)
+				expect(ended).toBeLessThanOrEqual((HANG + TONE_GRACE) / 250)
+				expect(t.states.slice(ended).every(s => s === "waiting")).toBe(true)
+			}
+		console.info(`EVIDENCE-SQUELCH A14 dated sightings: ${rows.join(" ")}`)
+	})
+
+	// Review round 2 (minor): a DCS sighting is a word pair; a CTCSS sighting one won block.
+	it("sightings in seeded noise and voice: none in 10 min of white noise at 0.5 and 5 min of voice (single DCS words: about 68 and 7 per hour)", () => {
+		let count = 0
+		const feed = (samples: Float32Array): void => {
+			const evidence = new ToneEvidence()
+			let last = evidence.sightingCount
+			for (const x of samples) {
+				evidence.push(x)
+				if (evidence.sightingCount !== last) {
+					last = evidence.sightingCount
+					count += 1
+				}
+			}
+		}
+		for (let minute = 0; minute < 10; minute++)
+			feed(
+				whiteNoise({
+					rate: 8_000,
+					seconds: 60,
+					seed: 900 + minute,
+					level: 0.5,
+				}),
+			)
+		for (let minute = 0; minute < 5; minute++)
+			feed(
+				voiceLike({ rate: 8_000, seconds: 60, seed: 950 + minute, level: 0.8 }),
+			)
+		expect(count).toBe(0)
+	}, 120_000)
+
 	// Feature: evidence-squelch, Property 16: Latch needs carrier evidence to survive
 	// Validates: Requirements 1.5
-	it("Property 16: after the over's last quieted block, any pattern of unquieted re-opens and closes ends the latch exactly at the hang", () => {
-		const over = ctcssOver(2)
+	it("Property 16: after a tone over and a stage-1 close, any pattern of re-opens on noise of any level ends the latch within its hang", () => {
+		// A bare 79.7 Hz tone (the review repro) and tone + voice.
+		const sine = (amplitude: number, ms: number): Buffer => {
+			const out = Buffer.alloc(Math.round((RATE * ms) / 1_000) * 2)
+			for (let i = 0; i < out.length / 2; i++)
+				out.writeInt16LE(
+					Math.round(amplitude * Math.sin((2 * Math.PI * 79.7 * i) / RATE)),
+					i * 2,
+				)
+			return out
+		}
+		const voiced = ctcssOver(2)
 		fc.assert(
 			fc.property(
 				fc.array(
@@ -580,33 +716,293 @@ describe("A14: the latch survives only the same transmission", () => {
 					{ minLength: 1, maxLength: 20 },
 				),
 				fc.integer({ min: 1, max: 1_000 }),
-				(pattern, seed) => {
+				fc.boolean(),
+				fc.constantFrom(20_000, 3_000, 1_000, 300, 100),
+				fc.constantFrom(6_000, 2_000, 0),
+				fc.integer({ min: 1_500, max: 2_600 }),
+				(pattern, seed, quieted, level, amplitude, toneMs) => {
 					const g = gate()
 					// The over ends with stage 1 closing for one block (its carrier is gone).
 					drive(g, [
-						{ pcm: over, open: true, quieted: true },
+						{
+							// 0: tone + voice; otherwise a bare tone of random length (block phase).
+							pcm: amplitude === 0 ? voiced : sine(amplitude, toneMs),
+							open: true,
+							quieted,
+						},
 						{ pcm: Buffer.alloc(BLOCK_BYTES), open: false, quieted: false },
 					])
 					expect(g.state).toBe("open")
 					const rand = mulberry32(seed)
+					// Samples since the over's last carrier evidence: exact for a quieted over; an
+					// unquieted over's last sighting is at most one CTCSS hop (250 ms) before the close.
 					let since = BLOCK_BYTES / 2
+					const stale = quieted ? 0 : RATE / 4
+					let expired = false
 					for (const step of pattern)
 						for (let b = 0; b < step.blocks; b++) {
 							const block = Buffer.alloc(BLOCK_BYTES)
 							for (let i = 0; i < BLOCK_BYTES; i += 2)
-								block.writeInt16LE(Math.round((rand() * 2 - 1) * 20_000), i)
-							const before = g.state
+								block.writeInt16LE(Math.round((rand() * 2 - 1) * level), i)
 							drive(g, [{ pcm: block, open: step.open, quieted: false }])
-							if (before === "open") since += BLOCK_BYTES / 2
-							// A tone latch gets the tone grace while stage 1 is open (A14 revised).
+							since += BLOCK_BYTES / 2
+							// A tone latch gets the tone grace while stage 1 is open (A14).
 							const limit = step.open ? HANG + TONE_GRACE : HANG
-							if (before === "open")
-								expect(g.state).toBe(since < limit ? "open" : "waiting")
-							else expect(g.state).toBe("waiting")
+							if (expired || since >= limit) {
+								expect(g.state).toBe("waiting")
+								expired = true
+							} else if (since + stale < limit) expect(g.state).toBe("open")
+							else if (g.state === "waiting") expired = true
 						}
 				},
 			),
-			{ numRuns: 100 },
+			{
+				numRuns: 100,
+				// The review repro shape: a 1.2 s close, then low-level noise.
+				examples: [
+					[
+						[
+							{ open: false, blocks: 119 },
+							{ open: true, blocks: 150 },
+						],
+						7,
+						false,
+						1_000,
+						6_000,
+						2_100,
+					],
+					[
+						[
+							{ open: false, blocks: 60 },
+							{ open: true, blocks: 150 },
+						],
+						8,
+						false,
+						100,
+						2_000,
+						2_248,
+					],
+				],
+			},
 		)
 	}, 120_000)
+})
+
+/**
+ * Live retest 2026-10-24 (run4) and amendment A15: the only voice the gated stream holds (a CTCSS
+ * over, played once the tone latched) is sparse speech: 4-5 frames (200-250 ms) at -7 to -16 dB
+ * about once a second over a -33 dB floor (the CTCSS tone's residue under the meter's 300 Hz
+ * high-pass), so the median audioDb of every 1 s window stays near -33 dB. A15 adds the
+ * syllable-run path: two runs of at least 3 consecutive sustained frames at -30 dB or more within
+ * the last 2 s, with the syllabic median unchanged.
+ */
+describe("A15: sparse syllables and the diagnostic status", () => {
+	/** Sub-audible 75.5 Hz hum (not a CTCSS tone) at the run4 CTCSS level: a -33 dB floor. */
+	function floor(seconds: number): Float32Array {
+		const out = new Float32Array(Math.round(RATE * seconds))
+		for (let i = 0; i < out.length; i++)
+			out[i] = 0.12 * Math.sin((2 * Math.PI * 75.5 * i) / RATE)
+		return out
+	}
+
+	/** Syllables of `burstMs` every `everyMs`, the first at `firstMs`, over the floor. */
+	function syllables(
+		seconds: number,
+		burstMs: number,
+		everyMs: number,
+		firstMs = 0,
+		level = 0.5,
+	): Float32Array {
+		const out = floor(seconds)
+		const burst = voiceLike({
+			rate: RATE,
+			seconds: burstMs / 1_000,
+			seed: 77,
+			level,
+		})
+		for (let at = firstMs; at + burstMs <= seconds * 1_000; at += everyMs) {
+			const start = Math.round((RATE * at) / 1_000)
+			for (let i = 0; i < burst.length; i++)
+				out[start + i] = (out[start + i] ?? 0) + (burst[i] ?? 0)
+		}
+		return out
+	}
+
+	function latchSeconds(samples: Float32Array): number | null {
+		const g = gate()
+		const t = drive(g, [
+			{ pcm: toPcm(samples, "s16le"), open: true, quieted: true },
+		])
+		const at = t.states.indexOf("open")
+		if (at >= 0) expect(g.diagnostics().path).toBe("runs")
+		return at < 0 ? null : (at + 1) / 100
+	}
+
+	it("run4 pattern: 225-250 ms syllables once a second from the onset latch within 1.5 s on the run path", () => {
+		for (const burstMs of [225, 250])
+			for (const level of [0.5, 0.8]) {
+				const samples = syllables(5, burstMs, 1_000, 0, level)
+				// The median rule alone never passes this speech.
+				expect(medianLatch(samples, EVIDENCE_NARROW_DEVIATION_HZ)).toBeNull()
+				const latch = latchSeconds(samples)
+				console.info(
+					`EVIDENCE-SQUELCH A15 run4 pattern ${burstMs} ms x${level}: latch ${latch ?? "-"} s`,
+				)
+				expect(latch).not.toBeNull()
+				expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
+			}
+	})
+
+	it("150 ms syllables every 0.8 s latch within 1.5 s", () => {
+		const latch = latchSeconds(syllables(5, 150, 800))
+		console.info(`EVIDENCE-SQUELCH A15 150 ms / 0.8 s: latch ${latch ?? "-"} s`)
+		expect(latch).not.toBeNull()
+		expect(latch ?? Infinity).toBeLessThanOrEqual(1.5)
+	})
+
+	it("one syllable per 2 s never makes two runs: waiting, verdict low-audio", () => {
+		const g = gate()
+		const t = drive(g, [
+			{
+				pcm: toPcm(syllables(1.5, 250, 2_100, 300), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(t.states.every(s => s === "waiting")).toBe(true)
+		const d = g.diagnostics()
+		expect(d.verdict).toBe("low-audio")
+		expect(d.syllableRuns).toBe(1)
+		expect(d.syllabic ?? 0).toBeGreaterThanOrEqual(0.3)
+	})
+
+	// Feature: evidence-squelch, Property 17: Short loud stretches are not syllables
+	// Validates: Requirements 1.3, 1.4
+	it("Property 17: windows whose loud frames come only in runs of at most 2 never qualify via the run path", () => {
+		const frameArb = fc.record({
+			loud: fc.boolean(),
+			audioDb: fc.double({ min: -60, max: 10, noNaN: true }),
+			sustained: fc.integer({ min: 0, max: 10 }),
+			syllabic: fc.double({ min: 0, max: 3, noNaN: true }),
+			cluster: fc.double({ min: 0, max: 0.59, noNaN: true }),
+		})
+		fc.assert(
+			fc.property(
+				fc.array(frameArb, { minLength: 20, maxLength: 40 }),
+				drafts => {
+					// Break every loud stretch after 2 frames: "loud" = a syllable frame.
+					let run = 0
+					const frames = drafts.map(d => {
+						let loud = d.loud
+						if (loud && run >= 2) loud = false
+						run = loud ? run + 1 : 0
+						return {
+							carrierDb: 0,
+							hfNoiseDb: 0,
+							audioDb: loud
+								? Math.max(-30, d.audioDb)
+								: Math.min(-30.01, d.audioDb),
+							sustained: d.sustained,
+							syllabic: d.syllabic,
+							cluster: d.cluster,
+						}
+					})
+					const runs = syllableRuns(frames)
+					expect(runs).toBe(0)
+					const stats = {
+						mode: "nfm" as const,
+						frames: frames.slice(-20),
+						gapSamples: 0,
+						floorDb: 0,
+					}
+					expect(voicePath(stats, runs)).not.toBe("runs")
+					// Also through the judge: voice only if the pinned median rule passes.
+					const verdict = judgeEvidence({
+						modulation: "nfm",
+						stats,
+						tone: null,
+						audioMs: 2_000,
+						quietBlocks: 100,
+						notedBlocks: 100,
+						framesFinite: true,
+						syllableRuns: runs,
+					})
+					expect(verdict === "voice").toBe(!dataLike(stats) && isVoice(stats))
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("the diagnostic verdict follows the judge's order and names the path", () => {
+		const filling = gate()
+		drive(filling, [
+			{
+				pcm: toPcm(voiceLike({ rate: RATE, seconds: 0.5, seed: 3 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(filling.diagnostics().verdict).toBe("window-filling")
+		const notQuiet = gate()
+		drive(notQuiet, [
+			{
+				pcm: toPcm(
+					voiceLike({ rate: RATE, seconds: 2, seed: 3, level: 0.8 }),
+					"s16le",
+				),
+				open: true,
+				quieted: false,
+			},
+		])
+		expect(notQuiet.diagnostics().verdict).toBe("not-quiet")
+		const silent = gate()
+		drive(silent, [
+			{
+				pcm: toPcm(carrierSilence({ rate: RATE, seconds: 2 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(silent.diagnostics().verdict).toBe("low-syllabic")
+		const median = gate()
+		drive(median, [
+			{
+				pcm: toPcm(
+					voiceLike({ rate: RATE, seconds: 2, seed: 3, level: 0.8 }),
+					"s16le",
+				),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(median.diagnostics()).toMatchObject({
+			verdict: "latched",
+			path: "median",
+		})
+		const tone = gate()
+		drive(tone, [{ pcm: ctcssOver(2), open: true, quieted: false }])
+		expect(tone.diagnostics()).toMatchObject({
+			verdict: "latched",
+			path: "tone",
+		})
+		// A noise lead-in, then the over: one window reset at the onset.
+		const lead = gate()
+		drive(lead, [
+			flicker(300, 9),
+			{
+				pcm: toPcm(carrierSilence({ rate: RATE, seconds: 0.5 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(lead.diagnostics().windowResets).toBe(1)
+		lead.reset()
+		expect(lead.diagnostics()).toMatchObject({
+			frames: 0,
+			windowResets: 0,
+			audioDb: null,
+			syllableRuns: 0,
+		})
+	})
 })

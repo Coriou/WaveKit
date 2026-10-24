@@ -204,6 +204,77 @@ key): it ends the latch at the hang unless it qualifies first, which renews the 
 Bare interference refreshes nothing (a CTCSS block must give the latched tone 0.65 of the band and
 3× the next tone; a DCS hit must match a 23-bit word of the latched code).
 
+**Amendment (2026-10-24, A14 review round 2): dated sightings.** Supersedes (1) and the 250 ms of
+(3) above. Review found that the retained tone stage finished a block holding pre-close tone after
+the re-open and counted it as fresh: 2 100 ms of 79.7 Hz, 1 200 ms closed, then noise at amplitude
+1 000 ended the latch 3 100 ms after the tone, past the stated bound. Rule now: (1) every re-open
+resets the tone stage, so no CTCSS block or DCS word ever spans a stage-1 close and a sighting is
+dated by its own block: its tone content is at most one block (500 ms of open audio) old when it
+completes; (2) a DCS sighting is a word pair (two matching words 23 bits apart, within 342 ms), not
+one word (single words occurred in white noise at amplitude 0.5 about 68 times per hour, 2 of them
+023N, and in synthetic voice about 7 times per hour; with pairs, none in 10 min of noise and 5 min
+of voice); (3) the open-side grace is 500 ms, one CTCSS block, the time the reset stage needs for
+its first block after a re-open. Fade continuity: a same-tone fade survives while (time since the
+last sighting at the close, at most 250 ms) + closed time + 500 ms stays under 2.0 s, so fades up
+to 1.25 s hold. Bound: a tone latch ends at most `HANG_MS` + 500 ms after its last sighting, so at
+most 2.5 s after the tone's last sample while stage 1 stays open, and at most 2.0 s after a close
+that ended the tone (measured on the review repro across eight block phases and noise at 100 to
+3 000: 1.75 to 1.96 s).
+
+**Amendment (2026-10-24, live retest run4): sparse speech; diagnostic status.** On an image with
+A13 and A14, two strong plain-voice overs (+1 dBFS, about 5 s) stayed `waiting`; a CTCSS over
+latched and released and interference stayed muted. Findings: (1) carrier evidence is not the
+cause: the FM quieting of the live saturated CTCSS over, measured on its played PCM, is 30 to 58 dB
+per 10 ms block (median 50, none under the observer's 6 dB), and run3's ungated overs replayed
+through the real `LiveDemodulator` csdr path (real `ChannelSquelch` power gate and carrier observer
+on IQ rebuilt from the PCM phase at +1 dBFS, weak interference re-opens before the over, PCM lag
+0 to 500 ms, PCM chunks of 500 to 65 536 bytes) latch voice 1.0 to 2.0 s after onset; (2) the only
+live voice in run4 (in the CTCSS over) is sparse: 4 to 5 frames (200 to 250 ms) at -7 to -16 dB
+about once a second over a -33 dB floor (speech in about 17 % of frames), so the median audioDb of
+every 1 s window is -33 dB at the 2.5 kHz reference and 0 of 109 windows pass the -30 dB audio rule
+(syllabic and cluster pass in 86). The voice rule needs speech in at least half of the frames of a
+1 s window. The plain overs' audio is not recorded (muted), so this is the leading explanation, not
+a confirmation. A 75th-percentile audio rule would pass that speech (36 of 109 windows) but opens
+`nfm-clicks` (59 of 61) and bare-carrier windows, so it is rejected; a stage-2 rule for sparse
+syllables (for example sustained voice-level runs of at least 150 ms) is the pending decision.
+Pinned as a known limitation: 250 ms syllables once a second on a quieted carrier never latch.
+Diagnostic (unstable, additive): `GET /api/live-audio/status?diagnostics=true` adds
+`autoSquelch.diagnostics` with the verdict in the judge's order, the window medians, the quiet
+and noted block counts, the window-reset count, the audio time and the meter's deviation; it is
+computed per request from the gate's state (no per-sample or per-chunk work, never on level
+events), so the next live test shows which criterion fails.
+
+**Amendment (2026-10-24, A15): sparse-syllable voice.** Decision after the run4 finding above. On
+`nfm`, a window is voice when it is not data-like and quiet enough (both unchanged) and either the
+pinned median rule passes (median syllabic ≥ 0.3 and median audioDb ≥ -30 dB, the scanner's
+`isVoice`, unchanged) or the syllable-run path does: median syllabic ≥ 0.3 and at least two
+syllable runs in the last 2 s. A syllable run is at least 3 consecutive 50 ms frames (150 ms), each
+at audioDb ≥ -30 dB at the channel's deviation reference (A13) and with sustained energy: at least
+5 of its ten 5 ms sub-blocks at that level. The scanner's analog-trial judge is unchanged.
+Physics: a syllable nucleus lasts 100 to 300 ms of sustained voiced energy; a click or impulse
+lasts a few ms and fills one or two sub-blocks, so it never makes a syllable frame even when it
+lifts the frame's mean power (without the sub-block test, `nfm-clicks` at 8 clicks per second
+made runs of three adjacent click frames and widened every clicks pin, measured with runs over
+the 1 s window: the clicks alignment case went from 10 and 60 ms to 10, 20, 30, 60, 70 and 80 ms); data is rejected by the cluster rule; a
+bare carrier has no audio level; a CTCSS leak sits near -33 dB under the 300 Hz high-pass and never
+reaches -30 dB. Two deviations from the decision as first written, both measured: (1) the runs
+are counted over 2 s (40 frames), not the 1 s window: syllables once a second (run4: 4-5 frame
+syllables 19 to 23 frames apart) never put two runs in 20 frames; (2) the sub-block test above.
+Results: synthetic run4-pattern speech (225 and 250 ms syllables once a second from the onset over
+a -33 dB floor) latches 1.15 s after onset on the run path; 150 ms syllables every 0.8 s latch at
+1.0 s; run4's live voice (the CTCSS over's audio) passes the run path in 40 of 112 windows and
+first at 2.45 s after onset, at the end of its second syllable (its first syllable, 1.3 s after
+onset, is inside the 1.5 s pre-roll at that point), against 0 windows on the median rule. Every
+never-open fixture stays closed with an ideal and a noisy onset, over the 0-500 ms lead-in sweep
+and under the flicker properties, and no pin of the residual cases moves at either deviation
+reference. The `nfm-fsk-syllabic-bursts` fixture still latches at 1.25 s on the median path, but
+the FSK-burst limitation widens: on a quieted carrier at the 2.5 kHz reference, 56 of 240
+synthetic 2- and 4-level keyings (512 to 4 800 baud) that the median rule left closed now latch on
+the run path, all with bursts of 150 to 500 ms and gaps of 250 to 800 ms (a sparse burst train's
+median cluster is diluted by its silent frames, and audio-frequency FSK tones are not discrete in
+the discriminator). A one-syllable-per-2 s pattern stays closed (one run). This supersedes the known limitation
+pinned in the run4 amendment (250 ms syllables once a second now latch).
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

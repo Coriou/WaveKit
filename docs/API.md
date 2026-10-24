@@ -1415,6 +1415,17 @@ Fields:
   including `am`, or a run on the Rust engine), `waiting` (no evidence yet: audio is held and the stream carries silence)
   or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
+- `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
+  `GET /api/live-audio/status?diagnostics=true` while the evidence gate runs, never on
+  level events; it may change or disappear without notice. The gate's current voice
+  window: `verdict` (`window-filling`, `non-finite`, `data-like`, `not-quiet`,
+  `low-syllabic`, then `voice-median`, `voice-runs` or `low-audio` when neither voice
+  path passes, or `latched`, in the judge's order), `path` while latched (`median`,
+  `runs` or `tone`), `syllableRuns` (syllable runs in the last 2 s, A15), `frames`
+  (0-20), the window medians `audioDb`, `syllabic` and `cluster` (null when empty),
+  `quietBlocks` and `notedBlocks` (10 ms blocks in the quiet window), `windowResets`
+  (carrier-onset resets this episode), `audioMs` and `deviationHz` (the voice meter's
+  reference). Computed per request.
 - `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
   are always present in config and status responses, with their defaults (`auto`,
   6 and 6) when not set. `config.toneSquelch` is present only when it is set.

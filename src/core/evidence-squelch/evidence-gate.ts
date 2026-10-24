@@ -19,14 +19,22 @@ import {
 	LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS,
 	LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES,
 } from "@wavekit/api-types"
-import type { LiveAudioAutoSquelchEvidence } from "@wavekit/api-types"
+import type {
+	LiveAudioAutoSquelchDiagnostics,
+	LiveAudioAutoSquelchEvidence,
+} from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
 import {
 	AUDIO_TONE_RATE_HZ,
 	PcmDecimator,
 } from "../audio-tones/tone-detector.js"
 import { dataLike, isVoice, toneQualified } from "../scanner/analog-trial.js"
-import { ANALOG_TRIAL_MIN_QUIET_FRACTION } from "../scanner/scanner-redesign-contract.js"
+import {
+	ANALOG_TRIAL_AUDIO_MIN_DB,
+	ANALOG_TRIAL_DATA_SCORE,
+	ANALOG_TRIAL_MIN_QUIET_FRACTION,
+	ANALOG_TRIAL_VOICE_INDEX,
+} from "../scanner/scanner-redesign-contract.js"
 import type {
 	AnalogTrialFrame,
 	AnalogTrialStats,
@@ -56,6 +64,93 @@ export interface JudgeEvidenceInput {
 	/** Blocks noted in the last `QUIET_WINDOW_BLOCKS`. */
 	notedBlocks: number
 	framesFinite: boolean
+	/**
+	 * Syllable runs over the gate's syllable span (A15: the last `EVIDENCE_SYLLABLE_SPAN_FRAMES`
+	 * frames). Absent: 0, so the sparse path fails closed.
+	 */
+	syllableRuns?: number
+}
+
+/**
+ * Sparse-syllable voice (amendment A15, 2026-10-24): a syllable run is at least this many
+ * consecutive 50 ms frames (150 ms, the short end of a syllable nucleus), each a syllable frame:
+ * `audioDb` at or above `ANALOG_TRIAL_AUDIO_MIN_DB` at the channel's deviation reference (A13)
+ * and sustained energy (`EVIDENCE_SYLLABLE_SUSTAINED` of its ten 5 ms sub-blocks at that level).
+ */
+export const EVIDENCE_SYLLABLE_RUN_FRAMES = 3
+/**
+ * A15: sustained sub-blocks a syllable frame needs (5 of 10: at least 25 ms of the 50 ms frame at
+ * voice level). A click of a few ms fills one or two sub-blocks, so frames that are loud only
+ * because a click fell in each of them never make a run.
+ */
+export const EVIDENCE_SYLLABLE_SUSTAINED = 5
+
+/** A frame of the gate's window: the analog trial frame plus the A15 sub-block count. */
+export type EvidenceFrame = AnalogTrialFrame & { sustained?: number }
+/** A15: syllable runs the sparse path needs. */
+export const EVIDENCE_SYLLABLE_RUNS = 2
+/**
+ * A15: frames over which syllable runs are counted (2 s, twice the voice window): two syllables
+ * of speech with one-second pauses (counting, short words) never fit in one 1 s window.
+ */
+export const EVIDENCE_SYLLABLE_SPAN_FRAMES = 40
+
+/**
+ * A15 syllable frame: finite `audioDb` at or above -30 dB and at least `EVIDENCE_SYLLABLE_SUSTAINED`
+ * sustained sub-blocks. A frame without a `sustained` count (not from the gate's meter) is never
+ * one: the sparse path fails closed.
+ */
+export function isSyllableFrame(frame: EvidenceFrame | undefined): boolean {
+	if (frame === undefined || frame === null || typeof frame !== "object")
+		return false
+	const { audioDb, sustained } = frame
+	return (
+		typeof audioDb === "number" &&
+		Number.isFinite(audioDb) &&
+		audioDb >= ANALOG_TRIAL_AUDIO_MIN_DB &&
+		typeof sustained === "number" &&
+		sustained >= EVIDENCE_SYLLABLE_SUSTAINED
+	)
+}
+
+/** A15: syllable runs (≥ `EVIDENCE_SYLLABLE_RUN_FRAMES` consecutive syllable frames), in time order. */
+export function syllableRuns(frames: readonly EvidenceFrame[]): number {
+	let runs = 0
+	let length = 0
+	for (const frame of frames) {
+		if (isSyllableFrame(frame)) {
+			length += 1
+			if (length === EVIDENCE_SYLLABLE_RUN_FRAMES) runs += 1
+		} else length = 0
+	}
+	return runs
+}
+
+/** Median of finite values, or null (any non-finite value fails closed). */
+function medianOf(values: readonly number[]): number | null {
+	if (values.length === 0 || values.some(v => !Number.isFinite(v))) return null
+	const sorted = [...values].sort((a, b) => a - b)
+	const mid = sorted.length >> 1
+	return sorted.length % 2 === 1
+		? (sorted[mid] ?? null)
+		: ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+}
+
+/**
+ * Which voice path a window passes (A15): `median` (the scanner's pinned `isVoice`: median
+ * syllabic ≥ 0.3 and median audioDb ≥ -30), else `runs` (median syllabic ≥ 0.3 over the window
+ * and at least `EVIDENCE_SYLLABLE_RUNS` syllable runs over the syllable span), else null.
+ * Data-like and quiet rules are the caller's.
+ */
+export function voicePath(
+	stats: AnalogTrialStats,
+	runs: number,
+): "median" | "runs" | null {
+	if (isVoice(stats)) return "median"
+	if (!(Number.isInteger(runs) && runs >= EVIDENCE_SYLLABLE_RUNS)) return null
+	const syllabic = medianOf(stats.frames.map(frame => frame.syllabic))
+	if (syllabic === null || syllabic < ANALOG_TRIAL_VOICE_INDEX) return null
+	return "runs"
 }
 
 /** Mutable `AnalogTrialTones` scratch for the tone rule. */
@@ -98,7 +193,7 @@ function toneKind(
  * DCS) → its kind, regardless of `framesFinite` (A10); (2) `!framesFinite` → null; (3) median
  * cluster >= ANALOG_TRIAL_DATA_SCORE → null; (4) quiet enough: `notedBlocks > 0 &&
  * quietBlocks >= ANALOG_TRIAL_MIN_QUIET_FRACTION * notedBlocks` (A11), else null; (5) `isVoice`
- * → "voice", else null. AM never takes step 1.
+ * or (A15) the sparse-syllable path (`voicePath`) → "voice", else null. AM never takes step 1.
  */
 export function judgeEvidence(
 	input: JudgeEvidenceInput,
@@ -125,7 +220,9 @@ export function judgeEvidence(
 	if (dataLike(input.stats)) return null
 	if (!(noted > 0 && quiet >= ANALOG_TRIAL_MIN_QUIET_FRACTION * noted))
 		return null
-	return isVoice(input.stats) ? "voice" : null
+	return voicePath(input.stats, input.syllableRuns ?? 0) !== null
+		? "voice"
+		: null
 }
 
 /** At least one frame, each with finite `audioDb`, `syllabic` and `cluster`. */
@@ -162,12 +259,12 @@ export const EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS = 5
 export const EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS = 5
 
 /**
- * Tone continuity (amendment A14 revised, 2026-10-24): on a tone latch the hang may run this much
- * longer while stage 1 is open, so the tone stage gets one more decision (a CTCSS block every
- * 250 ms of audio, a DCS word every 171 ms) before the latch ends. Only a sighting of the latched
- * tone or code uses it; noise and other codes cannot.
+ * Tone continuity (amendment A14, review round 2, 2026-10-24): on a tone latch the hang runs this
+ * much longer while stage 1 is open: one CTCSS block, the time the reset tone stage needs to
+ * sight a returning tone after a re-open (its first 500 ms block; a DCS word pair takes 342 ms).
+ * Only a sighting of the latched tone or code restarts the hang; noise and other codes cannot.
  */
-export const EVIDENCE_TONE_HANG_GRACE_MS = 250
+export const EVIDENCE_TONE_HANG_GRACE_MS = 500
 
 /** Tone identity for renewal: CTCSS table index, or 1 000 + packed DCS reading. */
 function toneKey(tone: Readonly<ToneReading>): number {
@@ -176,6 +273,15 @@ function toneKey(tone: Readonly<ToneReading>): number {
 
 export class EvidenceGate implements EvidenceGatePort {
 	private readonly rate: number
+	private readonly deviationHz: number
+	/** Window resets on carrier onsets since the episode started (diagnostics only). */
+	private windowResets = 0
+	/** Voice path of the latch (A15, diagnostics only); null for a tone latch or none. */
+	private latchedPath: "median" | "runs" | null = null
+	/** A15: syllable-frame flags of the last `EVIDENCE_SYLLABLE_SPAN_FRAMES` frames (a ring). */
+	private readonly syllableFlags = new Uint8Array(EVIDENCE_SYLLABLE_SPAN_FRAMES)
+	private syllableHead = 0
+	private syllableLen = 0
 	private readonly modulation: "nfm" | "am"
 	private readonly decimator = new PcmDecimator()
 	private readonly meter: VoiceFrameMeter
@@ -186,11 +292,11 @@ export class EvidenceGate implements EvidenceGatePort {
 	private readonly hangSamples: number
 	/** `msToSamples(TONE_MIN_MS, rate)`: 18 750 at 25 kHz. */
 	private readonly toneMinSamples: number
-	/** `msToSamples(TONE_HANG_GRACE_MS, rate)`: 6 250 at 25 kHz. */
+	/** `msToSamples(TONE_HANG_GRACE_MS, rate)`: 12 500 at 25 kHz. */
 	private readonly toneGraceSamples: number
 	/** `ToneEvidence.sightingCount` when last checked. */
 	private toneSightings = 0
-	private readonly frames: AnalogTrialFrame[] = []
+	private readonly frames: EvidenceFrame[] = []
 	private readonly frameFinite = new Uint8Array(
 		LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES,
 	)
@@ -251,6 +357,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				"EVIDENCE_RATE",
 			)
 		this.rate = rate
+		this.deviationHz = options.deviationHz ?? 5_000
 		this.modulation = options.modulation === "am" ? "am" : "nfm"
 		this.meter =
 			options.deviationHz === undefined
@@ -274,6 +381,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				audioDb: 0,
 				syllabic: 0,
 				cluster: 0,
+				sustained: 0,
 			})
 		this.stats = {
 			mode: this.modulation,
@@ -310,6 +418,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				this.internal === "waiting"
 			) {
 				this.resetVoiceWindow()
+				this.windowResets += 1
 				flags =
 					this.unquietedRun >= EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS
 						? EVIDENCE_NOTE_RESET | EVIDENCE_NOTE_DISCARD
@@ -364,13 +473,14 @@ export class EvidenceGate implements EvidenceGatePort {
 			this.internal = "waiting"
 			this.audioSamples = 0
 		} else if (this.internal === "open" && this.closing) {
-			// Reopen within the hang: latch kept. The carrier hang keeps counting (A14): a re-open
-			// without carrier evidence lets the latch expire. A tone latch keeps its tone stage
-			// (A14 revised), so the same tone after a fade is sighted at the next block instead of
-			// re-qualifying from scratch; a voice latch resets it (a new over's tone qualifies clean).
+			// Reopen within the hang: latch kept, tone stage reset. The carrier hang keeps counting
+			// (A14): a re-open without carrier evidence lets the latch expire. The reset is what
+			// dates sightings (A14, review round 2): no CTCSS block or DCS word ever spans a
+			// stage-1 close, so a sighting's evidence is at most one block (500 ms) of open audio
+			// old when it completes.
 			this.closing = false
 			this.audioSamples = 0
-			if (this.latchedToneKey < 0) this.tone?.reset()
+			this.tone?.reset()
 			this.decimator.arm(this.rate)
 			this.nonFiniteGroup = false
 		}
@@ -445,6 +555,9 @@ export class EvidenceGate implements EvidenceGatePort {
 
 	/** Voice meter, frame window and quiet ring back to empty (allocation-free). */
 	private resetVoiceWindow(): void {
+		this.syllableFlags.fill(0)
+		this.syllableHead = 0
+		this.syllableLen = 0
 		this.meter.reset()
 		this.frameHead = 0
 		this.frameLen = 0
@@ -455,7 +568,98 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.quietCount = 0
 	}
 
+	/**
+	 * The current voice window for the diagnostic status (DIAGNOSTIC AND UNSTABLE). Computed on
+	 * demand (it allocates its medians); nothing is recorded per sample for it except the reset
+	 * count. The verdict follows `judgeEvidence`'s order on the window as it stands.
+	 */
+	diagnostics(): LiveAudioAutoSquelchDiagnostics {
+		const frames = this.frames.slice(0, this.frameLen)
+		const median = (
+			pick: (frame: AnalogTrialFrame) => number,
+		): number | null => {
+			const values = frames.map(pick)
+			if (values.length === 0 || values.some(v => !Number.isFinite(v)))
+				return null
+			values.sort((a, b) => a - b)
+			const mid = values.length >> 1
+			return values.length % 2 === 1
+				? (values[mid] ?? null)
+				: ((values[mid - 1] ?? 0) + (values[mid] ?? 0)) / 2
+		}
+		const audioDb = median(f => f.audioDb)
+		const syllabic = median(f => f.syllabic)
+		const cluster = median(f => f.cluster)
+		let finite = true
+		for (let i = 0; i < this.frameLen; i++)
+			if (this.frameFinite[i] !== 1) finite = false
+		const noted = this.quietLen
+		const quiet = this.quietCount
+		const runs = this.spanRuns()
+		const verdict: LiveAudioAutoSquelchDiagnostics["verdict"] =
+			this.internal === "open"
+				? "latched"
+				: this.frameLen < this.frames.length
+					? "window-filling"
+					: !finite || audioDb === null || syllabic === null || cluster === null
+						? "non-finite"
+						: cluster >= ANALOG_TRIAL_DATA_SCORE
+							? "data-like"
+							: !(noted > 0 && quiet >= ANALOG_TRIAL_MIN_QUIET_FRACTION * noted)
+								? "not-quiet"
+								: syllabic < ANALOG_TRIAL_VOICE_INDEX
+									? "low-syllabic"
+									: audioDb >= ANALOG_TRIAL_AUDIO_MIN_DB
+										? "voice-median"
+										: runs >= EVIDENCE_SYLLABLE_RUNS
+											? "voice-runs"
+											: "low-audio"
+		const round = (v: number | null, step: number): number | null =>
+			v === null ? null : Math.round(v / step) * step
+		return {
+			verdict,
+			frames: this.frameLen,
+			audioDb: round(audioDb, 0.1),
+			syllabic: round(syllabic, 0.001),
+			cluster: round(cluster, 0.001),
+			syllableRuns: runs,
+			quietBlocks: quiet,
+			notedBlocks: noted,
+			windowResets: this.windowResets,
+			...(this.internal === "open"
+				? {
+						path:
+							this.latchedEvidence === "voice"
+								? (this.latchedPath ?? "median")
+								: ("tone" as const),
+					}
+				: {}),
+			audioMs: Math.round((this.audioSamples * 1_000) / this.rate),
+			deviationHz: this.deviationHz,
+		}
+	}
+
+	/** A15: syllable runs over the span ring, oldest first (at most 40 steps, no allocation). */
+	private spanRuns(): number {
+		const size = this.syllableFlags.length
+		const first = (this.syllableHead - this.syllableLen + size) % size
+		let runs = 0
+		let length = 0
+		for (let i = 0; i < this.syllableLen; i++) {
+			if (this.syllableFlags[(first + i) % size] === 1) {
+				length += 1
+				if (length === EVIDENCE_SYLLABLE_RUN_FRAMES) runs += 1
+			} else length = 0
+		}
+		return runs
+	}
+
 	reset(): void {
+		this.windowResets = 0
+		this.latchedPath = null
+		this.syllableFlags.fill(0)
+		this.syllableHead = 0
+		this.syllableLen = 0
 		this.onsetArmed = true
 		this.prevUnquieted = false
 		this.unquietedRun = 0
@@ -527,6 +731,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		let finite = true
 		for (let i = 0; i < this.frameFinite.length; i++)
 			if (this.frameFinite[i] !== 1) finite = false
+		const runs = this.spanRuns()
 		const verdict = judgeEvidence({
 			modulation: this.modulation,
 			stats: this.stats,
@@ -535,7 +740,10 @@ export class EvidenceGate implements EvidenceGatePort {
 			quietBlocks: this.quietCount,
 			notedBlocks: this.quietLen,
 			framesFinite: finite,
+			syllableRuns: runs,
 		})
+		if (verdict === "voice")
+			this.latchedPath = voicePath(this.stats, runs) ?? "median"
 		if (verdict !== null) this.latch(verdict, -1, after)
 	}
 
@@ -578,7 +786,12 @@ export class EvidenceGate implements EvidenceGatePort {
 		target.audioDb = source.audioDb
 		target.syllabic = source.syllabic
 		target.cluster = source.cluster
+		target.sustained = source.sustained
 		this.frameFinite[this.frameHead] = source.finite ? 1 : 0
+		this.syllableFlags[this.syllableHead] =
+			source.finite && isSyllableFrame(target) ? 1 : 0
+		this.syllableHead = (this.syllableHead + 1) % this.syllableFlags.length
+		if (this.syllableLen < this.syllableFlags.length) this.syllableLen += 1
 		this.frameHead = (this.frameHead + 1) % this.frames.length
 		if (this.frameLen < this.frames.length) this.frameLen += 1
 	}
