@@ -258,3 +258,94 @@ statistics were not in the shape the core reads.
 | B3    | 2048000 | host      | FAIL                       | stress on every CPU starved the fake: one loss event attributed `link` (gap 337 ms, loop 216 ms, CPU 100 %) and `consumer`, no `host` (H)                                  |
 | B3    | 2048000 | overflow  | PASS                       | all 7 overflow intervals `link`                                                                                                                                            |
 | B4    | 2400000 | upstream  | INVALID ×2                 | "upstream statistics are unavailable": the first sample preceded the sdr-host poller's first successful read (6.4 s after start); the driver now waits for it (`7cb3369c`) |
+
+## Follow-ups (2026-10-23)
+
+Code follow-ups to open items 3–6. The recorded results above are unchanged; the fake-link
+matrix has not been rerun.
+
+1. **Host versus consumer (item 3).** A strict subset of dropping branches with no overflow is
+   `consumer` only when the interval has no host evidence (loop delay below
+   `HOST_LOOP_DELAY_MS` and CPU below the guard). With host evidence it falls through to the
+   upstream rule (`unknown`) and then `host`. The candidate exception, "unless the dropping
+   subset is a single branch already excluded as a laggard", was not adopted: with an absorber
+   attached, chunks reach the fanout only once every congested active branch is excluded, and a
+   branch drops only while congested, so every branch drop lands on a laggard. The exception
+   would have kept a single-branch host-overload subset `consumer`. A slow sink on a healthy
+   host stays `consumer`. Both classes condemn on probation and in late windows, so gate
+   behaviour is unchanged. One change: a subset with host evidence and upstream loss is now
+   `unknown` instead of `consumer`, so it no longer counts toward a late shed. Spec amendment
+   needed: requirement 3.3, design rule 3 and property 7 gain "and no host evidence".
+2. **Upstream `unknown` (item 4).** Deterministic tests with an injected clock and a fake
+   upstream counter cover these cases: an all-branch link burst is `link` with flat upstream and
+   `unknown` with an upstream rise; upstream loss outranks host evidence; upstream loss alone is
+   `none`; a held gap loss that resolves after an upstream rise is `unknown`. No code change was
+   needed.
+3. **Repeated late shed (item 5).** A gate-level test with four eligible placements, interleaved
+   with YAML, `always` and operator placements, sheds in reverse admission order. Each shed
+   lands exactly at the cooldown bound, never at bound − 1, even when fresh condemning windows
+   arrive inside the cooldown. Protected placements are never shed. A property test covers
+   random mixes (100 runs). No code change was needed.
+4. **Absorber pass-through (item 6).** `gated()` now reads only the congested set while no
+   branch is congested and no per-branch state is held. In that case the full pass prunes
+   nothing and returns false. The ingest path also skips `rotate()` within the current slot
+   while nothing is held. A tight-loop microbenchmark (65 536 B chunks, three branches, load
+   about 4.4) measured about 190 ns per chunk before and about 74 ns after. At 3 000 chunks/s
+   that is about 0.0002 core, within the < 0.001 budget. The repository bench timer uses one
+   `performance.now()` pair per chunk (about 114 ns per pair on this host). At load 3.4–5.1 it
+   gave 513–854 ns before and 495–1 011 ns after, so it cannot resolve this change. A
+   batch-timed variant is needed to confirm.
+5. **Driver.** The host scenario fails when consumer is more than 10 % of the aggregate
+   host-or-consumer increases. A new `upstream-host` scenario combines upstream drop-mode
+   stalls with the host CPU quota and stress. It requires a poll in which both core loss and
+   upstream loss rose, an `unknown` increase within three polls of it, and no `link` increase.
+6. **Batch-timed pass-through (item 6 confirmation).** The bench now reports
+   `passThroughBatchedNsPerChunk`: steady-state pass-through with no branch congested, timed in
+   batches of 1 000 chunks (4 096, 16 384 and 65 536 B in rotation, three branches) per
+   `performance.now()` pair, minus a batched direct-fanout baseline, median of 50 batch pairs
+   after 5 discarded. "Before" is the parent of the host-evidence commit with the new bench
+   harness copied in (absorber unchanged); "after" is this branch. Runs alternated
+   before/after, `--seconds 30`, on a heavily loaded host (1-minute load averages 10–22):
+
+   | Rate (sps) | Build  | Load avg (1/5/15 min) | ns/chunk | Core at 3 000 chunks/s |
+   | ---------- | ------ | --------------------- | -------- | ---------------------- |
+   | 2 048 000  | before | 22.49 / 12.53 / 9.20  | 565      | 0.0017                 |
+   | 2 048 000  | after  | 22.12 / 14.95 / 10.38 | 367      | 0.0011                 |
+   | 2 048 000  | before | 12.76 / 13.56 / 10.17 | 828      | 0.0025                 |
+   | 2 048 000  | after  | 17.72 / 15.02 / 10.97 | 184      | 0.0006                 |
+   | 2 400 000  | before | 10.26 / 13.41 / 10.65 | 557      | 0.0017                 |
+   | 2 400 000  | after  | 15.56 / 13.92 / 11.00 | 262      | 0.0008                 |
+   | 2 400 000  | before | 15.80 / 14.58 / 11.46 | 809      | 0.0024                 |
+   | 2 400 000  | after  | 14.00 / 14.51 / 11.66 | 164      | 0.0005                 |
+
+   The fast path cuts batched pass-through cost by roughly 2–5x. Before exceeds the < 0.001
+   budget in every run; after is within it in three of four runs and at 0.0011 in the run with
+   the highest load. These numbers include scheduler contention from the loaded host; a quiet
+   host rerun is still needed for a clean budget figure.
+
+7. **`upstream-host` matrix rows (2026-10-23).** Both rows failed on a run of this branch's image
+   with link-burst code unchanged. Neither failure is an attribution gap.
+   - **2.4 Msps: driver window.** Polls were 2.03–2.48 s apart (monitor sample 2 s). Core and
+     upstream loss shared polls 64 and 106. The core-side attribution read `unknown` in the next
+     two polls while the stall's gap loss was held. The held loss resolved `unknown` (+2) in
+     polls 69 and 111, 10.8 s and 10.9 s later, and both of those polls bore core loss. The monitor
+     resolves a held loss when its pending wait expires (`MAX_PENDING_WAIT_MS` = 10 000 + 200 +
+     2 000 = 12.2 s). The driver had assumed two polls and paired only within three. The host
+     increases in those polls (+1 at 64, +2 at 69 and 111) are intervals sampled without upstream
+     delta: in `attributeInterval` the upstream rule (`unknown`) precedes `host`; only a
+     strict subset of dropping branches on a healthy host can be `consumer` before it, and none
+     was (consumer +0). The driver now pairs an `unknown` when the poll before it is less than
+     20.2 s after the coinciding poll: 12.2 s, one monitor tick, the longest stall (4 s, counted
+     upstream when it starts) and one more tick. The `unknown` poll itself must follow its
+     previous poll by at most 4 s (two samples; recorded gaps were 2.0–3.3 s), so a late poll
+     cannot pair an increase it cannot localise. Replaying the kept samples passes, with 2
+     coinciding polls.
+   - **2.048 Msps: not applicable.** A drop-mode stall withholds input, so the core is relieved
+     while it lasts. All seven polls with an upstream rise (4, 63, 86, 105, 137, 212 and 216)
+     had zero core loss. Core loss was bursty: 63 of 275 polls, in runs at polls 1–35, 111–125
+     and 235–275. It was mostly absorber overflow (64 MB, sink drop 0 %). No stall started just
+     after host loss within one poll. At 2.4 Msps loss was nearly continuous, so two stalls
+     shared a poll with it. The fixture can produce coincidence only by such a straddle, so the
+     driver now reports `not-applicable` (exit 3, not a pass) when that is the only failure and
+     both core and upstream loss were exercised. Replaying the kept samples gives
+     `not-applicable`.

@@ -8,6 +8,9 @@
  * loopMaxAddedMs is the baseline-subtracted histogram max, a paced-step proxy
  * that includes scheduler noise; maxDrainMs times individual synchronous wakes.
  * Per-chunk costs are medians of five passes after a discarded warmup pass.
+ * passThroughBatchedNsPerChunk times steady-state pass-through (nothing congested)
+ * in batches of PASS_BATCH chunks per performance.now() pair, minus a batched
+ * direct-fanout baseline, so per-chunk costs below the timer overhead resolve.
  *
  *   pnpm exec esbuild scripts/bench/burst-absorber.ts --bundle \
  *     --platform=node --format=esm --packages=external \
@@ -32,6 +35,7 @@ import { WaveKitError } from "../../src/utils/errors.js"
 export interface BenchResult {
 	rate: number
 	passThroughNsPerChunk: number
+	passThroughBatchedNsPerChunk: number
 	recorderNsPerChunk: number
 	holdCoreFraction: number
 	releaseCoreFraction: number
@@ -49,6 +53,68 @@ export interface BenchResult {
 }
 
 type BenchOptions = { rate: number; seconds: number }
+
+const PASS_BATCH = 1000
+const PASS_BATCHES = 50
+
+/** Batched steady-state pass-through cost; never congested, so nothing is held. */
+function passThroughBatched(rate: number): number {
+	const buffers = [4096, 16384, 65536].map(size => Buffer.alloc(size))
+	const branches = [0, 0, 0]
+	const ids = ["0", "1", "2"]
+	const events = new EventEmitter()
+	let now = 0
+	const fanout: AbsorberFanoutPort = {
+		distribute(chunk) {
+			for (let i = 0; i < branches.length; i++)
+				branches[i] = branches[i]! + chunk.length
+		},
+		activeBranchIds(out) {
+			out.clear()
+			for (const id of ids) out.add(id)
+		},
+		congestedBranchIds(out) {
+			out.clear()
+		},
+		on: (event, fn) => {
+			events.on(event, fn)
+		},
+		off: (event, fn) => {
+			events.off(event, fn)
+		},
+	}
+	const recorder = createIngestRecorder()
+	recorder.configure(rate, 2)
+	const absorber = createBurstAbsorber({
+		fanout,
+		recorder,
+		monoNow: () => now,
+		frameBytes: 2,
+		log: pino({ enabled: false }),
+	})
+	absorber.configure(2 * rate * 2)
+	// Advance the injected clock by each chunk's sample duration.
+	const steps = buffers.map(buffer => (buffer.length / (rate * 2)) * 1000)
+	const timeBatch = (direct: boolean) => {
+		const start = performance.now()
+		for (let i = 0; i < PASS_BATCH; i++) {
+			const k = i % buffers.length
+			now += steps[k]!
+			if (direct) fanout.distribute(buffers[k]!)
+			else absorber.ingest(buffers[k]!)
+		}
+		return (performance.now() - start) / PASS_BATCH
+	}
+	const costs: number[] = []
+	for (let batch = 0; batch < PASS_BATCHES + 5; batch++) {
+		const direct = timeBatch(true)
+		const absorbed = timeBatch(false)
+		if (batch >= 5) costs.push(Math.max(0, absorbed - direct) * 1e6)
+	}
+	absorber.dispose()
+	costs.sort((a, b) => a - b)
+	return costs[costs.length >> 1]!
+}
 
 /** Each yield precedes an arrival, letting the CLI pace the same workload. */
 function* pass(
@@ -182,6 +248,7 @@ function* pass(
 	absorber.dispose()
 	return {
 		rate,
+		passThroughBatchedNsPerChunk: 0,
 		passThroughNsPerChunk:
 			Math.max(0, passMs / Math.max(1, passChunks) - baselineMs / chunks) * 1e6,
 		recorderNsPerChunk: (recorderMs / chunks) * 1e6,
@@ -216,6 +283,7 @@ export function runBench(opts: BenchOptions): BenchResult {
 	return {
 		...results[2]!,
 		passThroughNsPerChunk: median("passThroughNsPerChunk"),
+		passThroughBatchedNsPerChunk: passThroughBatched(opts.rate),
 		recorderNsPerChunk: median("recorderNsPerChunk"),
 		maxDrainMs: Math.max(...results.map(result => result.maxDrainMs)),
 	}

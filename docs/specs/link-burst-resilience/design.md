@@ -234,16 +234,20 @@ and reads use the monitor's monotonic clock.
 
 Rules are evaluated in this precedence order (superseding the link-before-host order in requirements 3.4–3.5):
 
-| Priority | Evidence                                                                                          | Attribution |
-| -------- | ------------------------------------------------------------------------------------------------- | ----------- |
-| 1        | Incomplete or malformed evidence                                                                  | `unknown`   |
-| 2        | No positive delta anywhere                                                                        | `none`      |
-| 3        | Strict non-empty subset of branches rose, no overflow                                             | `consumer`  |
-| 4        | Upstream delta above 0                                                                            | `unknown`   |
-| 5        | Loop delay ≥ `HOST_LOOP_DELAY_MS` or CPU ≥ guard                                                  | `host`      |
-| 6        | Gap, loop delay and shortfall known; gap − loop delay ≥ `LINK_GAP_MS`; no shortfall               | `link`      |
-| 7        | Complete healthy-host evidence, sole branch dropping, no overflow or qualifying gap, no shortfall | `consumer`  |
-| 8        | Otherwise                                                                                         | `unknown`   |
+| Priority | Evidence                                                                                                                                                                                                                  | Attribution |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| 1        | Incomplete or malformed evidence                                                                                                                                                                                          | `unknown`   |
+| 2        | No positive delta anywhere                                                                                                                                                                                                | `none`      |
+| 3        | Strict non-empty subset of branches rose, no overflow, and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence) | `consumer`  |
+| 4        | Upstream delta above 0                                                                                                                                                                                                    | `unknown`   |
+| 5        | Loop delay ≥ `HOST_LOOP_DELAY_MS` or CPU ≥ guard                                                                                                                                                                          | `host`      |
+| 6        | Gap, loop delay and shortfall known; gap − loop delay ≥ `LINK_GAP_MS`; no shortfall                                                                                                                                       | `link`      |
+| 7        | Complete healthy-host evidence, sole branch dropping, no overflow or qualifying gap, no shortfall                                                                                                                         | `consumer`  |
+| 8        | Otherwise                                                                                                                                                                                                                 | `unknown`   |
+
+> Amended 2026-10-23: row 3 gains "and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence)". A subset with host evidence falls through to row 4: with upstream loss it
+> resolves `unknown` (condemns a probationer, does not count toward a late shed), otherwise
+> row 5 gives `host`.
 
 Host overload makes ingest gaps unreliable link evidence. Missing host evidence retains the
 existing fail-closed rules. Deferred intervals use the loop delay and CPU captured when each
@@ -376,7 +380,9 @@ monotonic clocks.
    congested; afterwards siblings receive every byte with no added delay beyond the release of
    what was held; lone and all-congested branches obey the same deadline. _Validates 1.5, 9.2._
 7. **Attribution rules.** `attributeInterval` is total and deterministic; incomplete evidence is
-   `unknown`; a strict subset with no overflow is `consumer`; `link` implies every rule of 3.4
+   `unknown`; a strict subset with no overflow and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence) is `consumer` (amended 2026-10-23; a subset with host
+   evidence and upstream loss is `unknown`, which condemns but does not count toward a late
+   shed); `link` implies every rule of 3.4
    holds; a positive upstream delta with drops is never `link`; any null among gap, loop delay or
    shortfall never yields `link`; no drops is `none`. _Validates 3.1 to 3.7._
 8. **Link neither condemns nor credits.** For any sample sequence, a probationer is never

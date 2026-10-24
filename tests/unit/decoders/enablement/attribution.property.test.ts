@@ -67,17 +67,21 @@ describe("attributeInterval", () => {
 						upstreamDropDelta: upstream,
 					})
 					const positive = drops.filter(n => n > 0).length
+					const host =
+						(loop !== null && loop >= HOST_LOOP_DELAY_MS) ||
+						(cpu !== null && cpu >= 90)
 					let expected = "unknown"
 					if (complete) {
 						if (positive === 0 && overflow === 0) expected = "none"
-						else if (positive > 0 && positive < drops.length && overflow === 0)
+						else if (
+							positive > 0 &&
+							positive < drops.length &&
+							overflow === 0 &&
+							!host
+						)
 							expected = "consumer"
 						else if (upstream !== null && upstream > 0) expected = "unknown"
-						else if (
-							(loop !== null && loop >= HOST_LOOP_DELAY_MS) ||
-							(cpu !== null && cpu >= 90)
-						)
-							expected = "host"
+						else if (host) expected = "host"
 						else if (
 							gap !== null &&
 							loop !== null &&
@@ -185,12 +189,15 @@ it("never attributes host evidence to link", () => {
 	)
 })
 
+// The 2424832-byte row is the recorded host-overload subset (acceptance open
+// item 3): a light branch survived CPU at 100 %, so the subset is host loss.
 it.each([
-	[1179648, 216, false, "host"],
-	[2424832, 24, true, "consumer"],
+	[1179648, 216, false, 100, "host"],
+	[2424832, 24, true, 100, "host"],
+	[2424832, 24, true, 89, "consumer"],
 ] as const)(
-	"attributes stressed interval with %i dropped bytes",
-	(bytes, loop, subset, expected) => {
+	"attributes stressed interval with %i dropped bytes (subset %s, CPU %i)",
+	(bytes, loop, subset, cpu, expected) => {
 		expect(
 			attributeInterval(
 				evidence({
@@ -200,7 +207,7 @@ it.each([
 					]),
 					maxGapMs: 337,
 					loopDelayMaxMs: loop,
-					cpuPercent: 100,
+					cpuPercent: cpu,
 				}),
 			),
 		).toBe(expected)

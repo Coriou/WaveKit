@@ -1,7 +1,7 @@
 # Link burst resilience requirements
 
-Status: implemented; fake-link acceptance and instrumentation recorded (2026-10-23).
-Live soak (9.5) and Pi 4-class measurement (9.4) remain open. See [design](design.md)
+Status: implemented; fake-link acceptance, instrumentation and live soak (9.5) recorded
+(2026-10-24). Pi 4-class measurement (9.4) remains open. See [design](design.md)
 and [tasks](tasks.md).
 
 ## What changes for the user
@@ -127,8 +127,15 @@ decoder's fault, and I want the core to refuse to guess.
 overflow delta, the ingest record (2.1), the event-loop delay (2.2), the normalised host CPU,
 the received byte rate and the upstream drop delta.
 3.2 `none`: every counter was read completely and no branch or absorber counter rose.
-3.3 `consumer`: drops rose on a non-empty strict subset of the active branches and the absorber
-did not overflow.
+3.3 `consumer`: drops rose on a non-empty strict subset of the active branches, the absorber
+did not overflow, and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence).
+A subset with host evidence falls through: with upstream loss it is `unknown` (condemns a
+probationer, does not count toward a late shed), otherwise `host` (3.5).
+
+> Amended 2026-10-23: 3.3 gains "and no host evidence (neither known measurement reaches its threshold: loop delay >= `HOST_LOOP_DELAY_MS` or CPU >= guard; an unknown measurement is not evidence)". Superseded wording: "drops rose on a non-empty strict subset of the active
+> branches and the absorber did not overflow". See the
+> [acceptance record](../../engineering/LINK-BURST-2026-10-ACCEPTANCE.md) follow-ups.
+
 3.4 `link`: drops rose on every active branch or the absorber overflowed, and all of: (a) the
 interval or the one before it contains an arrival gap whose part not explained by the
 event-loop delay maximum (gap minus that maximum) is at least `LINK_GAP_MS`; (b) the received

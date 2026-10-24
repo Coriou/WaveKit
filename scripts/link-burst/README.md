@@ -17,10 +17,10 @@ python3 scripts/link-burst/run_acceptance.py --rate 2048000 --scenario lossless 
 ```
 
 Run each scenario at both 2048000 and 2400000 samples/s. Scenarios are `lossless`,
-`overflow`, `consumer`, `host`, `upstream`, and `late-shed`. The driver uses a unique
+`overflow`, `consumer`, `host`, `upstream`, `upstream-host` and `late-shed`. The driver uses a unique
 `wkburst-<pid>` project, discovers its API port, polls every two seconds, and removes
 its containers, network and volumes on completion. Exit codes: 0 pass, 1 failed
-acceptance, 2 invalid experiment. Raw observations are in `samples.jsonl` and
+acceptance, 2 invalid experiment, 3 not applicable (`upstream-host` only, below). Raw observations are in `samples.jsonl` and
 aggregates, verdicts and invalid reasons are in `summary.json`.
 `run_acceptance.py --replay <out>` recomputes the verdicts from the kept samples,
 keeping the first summary as `summary.original.json`; invalid results decided by
@@ -32,6 +32,25 @@ upstream lengths cycle through 2500 and 4000 ms. Upstream uses drop mode and its
 private statistics endpoint; other stall scenarios use catch-up mode. The upstream
 counter must increase; core overflow is not required. If core branches drop,
 `unknown` attribution must also be observed.
+
+In the host scenario at most 10 % of the aggregate host-or-consumer
+classifications may be `consumer` (`HOST_CONSUMER_SHARE_MAX`): a strict subset
+of dropping branches is host loss whenever its interval shows host evidence.
+`upstream-host` combines the upstream stall schedule and drop mode with the host
+scenario's CPU pinning, quota and stress, so core loss coincides with upstream
+loss. It requires at least one poll in which both core loss (branch drops or
+absorber overflow) and the upstream counter rose (`coincidentLossPolls`), an
+increase of `unknown` in a poll that itself bears core loss, and no `link` increase.
+The monitor holds a stall's gap loss and resolves it when its pending wait expires
+(`LINK_RECOVERY_WAIT_MS + LINK_GAP_MS + EFFICIENCY_SAMPLE_MS`, 12.2 s), so the
+`unknown` pairs when the poll before it is less than 20.2 s after the coinciding
+poll (the pending wait, one monitor tick, the longest stall of 4 s, counted upstream
+when it starts, and one more tick) and the `unknown` poll follows its previous poll
+by at most 4 s, so its increase is localised. A drop-mode stall withholds input, so the core
+is relieved while it lasts and the two losses share a poll only when host loss
+happens just before a stall starts. A run whose only failure is that they never
+shared a poll, with both core and upstream loss exercised, is `not-applicable`
+(exit 3): the attribution of coinciding loss was not tested.
 
 The current link-quality API exposes live absorber totals and the latest monitor
 attribution, without a shared completed-interval identity. Its `at` field is the
