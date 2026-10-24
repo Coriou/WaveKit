@@ -637,6 +637,15 @@ collected by the root suite, which takes only `tests/**/*.test.ts`; run with
 both IQ rates and at 200 kHz, including the shadow alone (no client), coverage recomputes at
 10 generations per second and `status()` at 20 per second; Pi figures stay estimates until measured.
 
+**Adopted (2026-10-24, quiet-host re-run).** Same host, load average 5.4 (no other lanes). Means
+per audio second: resampler 25 kHz in 3.2–3.35 ms (about 2.0 ns per multiply-add), 8 kHz in
+3.2 ms, 200 kHz in 14.1 ms; route analog NFM 3.7 ms; NFM plus one DMR decoder 7.1 ms; worst case
+(200 kHz, two decoders) 21.5 ms; shadow alone 0.005 ms. One 20 ms 200 kHz chunk plus its tick:
+p99 0.79 ms (requirement 8.2: under 1 ms). The proposed desktop rows above are adopted: NFM
+resample ≤ 0.005 core, 200 kHz ≤ 0.02, voice per decoder ≤ 0.005, NFM plus one decoder ≤ 0.015,
+worst case ≤ 0.04; all measured values are within them. Costs apply only while an `/auto` client
+is connected; without one, only the shadow runs. Pi 4-class figures remain estimates.
+
 ## Correctness properties
 
 Tests carry `// Feature: auto-listen-route, Property N: <name>` and `numRuns ≥ 100`, with
