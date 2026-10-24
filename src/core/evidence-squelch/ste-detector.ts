@@ -20,9 +20,11 @@
  * Measured on the live STE segments (runs 2, 3, 4, 6): harmonics at most 0.006 (110 Hz) and
  * 0.0016 (165 Hz), voice band -18.5 to -28.7 dB in steady blocks, quarters 0.86-0.89.
  *
- * Four block phases run 25 ms apart, so a tone of at least 125 ms always fills one block, and
- * the first qualifying block starts at most 25 ms after the tone's onset. A tone under 90 ms
- * never qualifies (its last quarter holds under 0.6 of a full one), whatever follows it.
+ * Four block phases run 25 ms apart, so the first qualifying block starts at most 25 ms after
+ * the tone's onset. Exact bounds (swept over every alignment, 1-sample steps, silence or noise
+ * padding): a tone of 623 samples (77.9 ms) or less never qualifies, 624 samples qualifies at
+ * some alignments, and 847 samples (105.9 ms) or more always qualifies. (The quarter test is on
+ * phasor magnitudes, so a tone can straddle a block with partial first and last quarters.)
  *
  * Allocation free after construction: shared cos/sin tables, two biquads, four phases of scalar
  * accumulators.

@@ -352,6 +352,17 @@ own input-sample count), whatever the chunking. (5) Split samples are faded too:
 sample that arrive in a later chunk carry the scaled value (s16: its first byte keeps its value,
 at most 255 LSB).
 
+**Note (2026-10-24, A17 review round 2).** (1) Known limitation, accepted: a near-pure low voiced
+sound can pass the STE rule, for example 58 Hz with its 2nd and 3rd harmonics at 0.14 amplitude
+(0.02 power, the bound) and a 0.05 8th harmonic, or a 55 Hz tone under speech at level 0.01. The
+thresholds stay as measured (live STE harmonics reach 0.006 power). The cost is bounded and not
+terminal: the audio from the detected onset to the detecting sample is dropped (one STE block,
+100 ms, plus at most one 10 ms slice, with a 10 ms fade before it), the rest is held, and fresh
+evidence resumes the over. Both repros are pinned as tests. (2) The detection bound of the
+revision above is corrected: swept over every block alignment in 1-sample steps with silence or
+noise padding, a 55 Hz tone of 623 samples at 8 kHz (77.9 ms) or less never qualifies, 624
+samples qualifies at some alignments, and 847 samples (105.9 ms) or more always qualifies.
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

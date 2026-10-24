@@ -26,6 +26,10 @@ export class WiredGate {
 	private readonly wiring: EvidenceWiring
 	private phase = 0
 	private wasOpen = false
+	private bytesIn = 0
+	private chunkStart = 0
+	/** Input-sample index of the first latch (from the gate's `push` result), or -1. */
+	latchSample = -1
 	readonly out: Buffer[] = []
 
 	constructor(
@@ -38,6 +42,14 @@ export class WiredGate {
 			deviationHz: options.deviationHz ?? 2_500,
 			drainLagSamples: options.drainLagSamples ?? 1,
 		})
+		const gate = this.gate
+		const push = gate.push.bind(gate)
+		gate.push = (pcm, format, start, end): number => {
+			const k = push(pcm, format, start, end)
+			if (k >= 0 && this.latchSample < 0)
+				this.latchSample = Math.floor((this.chunkStart + k) / 2)
+			return k
+		}
 		this.wiring = {
 			gate: this.gate,
 			preRoll: this.preRoll,
@@ -65,6 +77,8 @@ export class WiredGate {
 			bytes.length,
 		]) {
 			const chunk = Buffer.from(bytes.subarray(from, to))
+			this.chunkStart = this.bytesIn
+			this.bytesIn += chunk.length
 			processEvidenceChunk(
 				this.wiring,
 				chunk,
@@ -107,12 +121,58 @@ export class WiredGate {
 	}
 }
 
-/** Non-zero s16 samples of `bytes`, in order. */
-export function nonZero(bytes: Buffer, min = 1): number[] {
+export type ModelTag = "pending" | "pass" | "drop"
+
+/**
+ * Reference pre-roll (design, PreRoll output rule), per sample: append with its tag, discard
+ * leading drops while more than one sample is held, then emit the head if it plays, zero for a
+ * drop head (removed) or a pending head (kept); overflow drops the oldest pending. `events[i]`
+ * (applied before sample i): "latch" retags the pending suffix pass, "abandon" retags it drop.
+ */
+export function referencePreRoll(
+	values: readonly number[],
+	tags: readonly ModelTag[],
+	events: ReadonlyMap<number, "latch" | "abandon">,
+	capacity: number,
+): number[] {
+	const fifo: { v: number; t: ModelTag }[] = []
+	let head = 0
 	const out: number[] = []
-	for (let i = 0; i + 1 < bytes.length; i += 2) {
-		const v = bytes.readInt16LE(i)
-		if (Math.abs(v) >= min) out.push(v)
+	const retag = (to: ModelTag): void => {
+		for (let i = fifo.length - 1; i >= head && fifo[i]?.t === "pending"; i--) {
+			const item = fifo[i]
+			if (item !== undefined) item.t = to
+		}
 	}
+	for (let i = 0; i < values.length; i++) {
+		const event = events.get(i)
+		if (event === "latch") retag("pass")
+		if (event === "abandon") retag("drop")
+		const t = tags[i] ?? "drop"
+		if (t !== "pending") retag("drop")
+		while (fifo.length - head > 0 && fifo[head]?.t === "drop") head++
+		fifo.push({ v: values[i] ?? 0, t })
+		const first = fifo[head]
+		if (first === undefined) out.push(0)
+		else if (first.t === "pass") {
+			out.push(first.v)
+			head++
+		} else if (first.t === "drop") {
+			out.push(0)
+			head++
+		} else out.push(0)
+		while (fifo.length - head > capacity && fifo[head]?.t === "pending") head++
+		if (head > 4_096) {
+			fifo.splice(0, head)
+			head = 0
+		}
+	}
+	return out
+}
+
+/** All s16 samples of `bytes`. */
+export function samples(bytes: Buffer): number[] {
+	const out: number[] = []
+	for (let i = 0; i + 1 < bytes.length; i += 2) out.push(bytes.readInt16LE(i))
 	return out
 }

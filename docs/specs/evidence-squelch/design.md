@@ -434,6 +434,18 @@ client output; Property 6 (chunk-split invariance) is now byte identity of the c
 under random sample-aligned splits, on the wiring directly (about 5 s for 100 cases on a loaded
 machine, from 250 s through the harness; one end-to-end run through the demodulator stays).
 
+**Note (2026-10-24, A17 review round 2): recorded STE evidence.** Detector runs over the live
+recordings (25 kHz client streams: runs 2, 4 and 6 gated, run3 ungated; read locally, not in the repository), STE onsets in seconds of each stream: run2 40.58, 60.88, 80.68 and 87.80 (all four
+over ends, 50 qualifying blocks); run3 31.95 and 43.10 (both over ends, 25 blocks); run4 897.30
+(its one STE over end, 13 blocks); run6 36.95, 48.28, 81.85 and 88.40 (all four over ends, 44
+blocks); run5 none; no detection inside any over's speech. Per block on those segments:
+110 Hz at most 0.006 and 165 Hz at most 0.0016 of the 55 Hz power, voice band -18.5 to -28.7 dB in
+steady blocks (edge blocks up to -9.9 dB, rejected without losing an over end), quarter agreement
+0.86-0.89. No detection in any repository fixture, synthetic voice or the private live clips.
+Properties 18 and 19 now compare the complete client sample sequence, zeros and positions
+included, against the gate model fed through a reference pre-roll (the design's output rule,
+`referencePreRoll` in the test harness).
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
@@ -749,8 +761,9 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     (split samples within 255 LSB). _Validates 1.5._
 19. **Nothing after an STE tone (A17, 2026-10-24; review revision).** For any over followed by an
     STE tone of 0.13-0.4 s, then noise, and any chunking (an odd first chunk and 0-3 random cuts per
-    block), the client output is exactly the over's samples before the STE onset, the last 10 ms
-    faded by `j / (F + 1)`, and nothing after it; the onset lies within 25 ms after the tone's.
+    block), the complete client output (zeros and positions included) equals the reference
+    pre-roll fed the over's samples before the STE onset, the last 10 ms faded by `j / (F + 1)`,
+    and nothing that plays after it; the onset lies within 25 ms after the tone's.
     _Validates 1.5._
 
 ## Fake-link acceptance plan (requirement 8.2, run early)
