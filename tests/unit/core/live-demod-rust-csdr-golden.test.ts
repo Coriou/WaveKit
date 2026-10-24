@@ -155,6 +155,7 @@ describe("csdr live demod goldens", () => {
 			    },
 			    "keys": [
 			      "agc",
+			      "autoRoute",
 			      "autoSquelch",
 			      "bytesStreamed",
 			      "clientCount",
@@ -197,6 +198,7 @@ describe("csdr live demod goldens", () => {
 			    },
 			    "keys": [
 			      "agc",
+			      "autoRoute",
 			      "autoSquelch",
 			      "bytesStreamed",
 			      "clientCount",
@@ -239,6 +241,7 @@ describe("csdr live demod goldens", () => {
 			    },
 			    "keys": [
 			      "agc",
+			      "autoRoute",
 			      "autoSquelch",
 			      "bytesStreamed",
 			      "clientCount",
