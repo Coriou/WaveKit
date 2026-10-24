@@ -98,7 +98,10 @@ type Pending<T> = { value: T; coreNow: number; receivedAt: number } | null
 
 const TRAIL_MIN_M = 25
 
-function metres(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+function metres(
+	a: { lat: number; lon: number },
+	b: { lat: number; lon: number },
+): number {
 	const rad = Math.PI / 180
 	const dLat = (b.lat - a.lat) * rad
 	const dLon = (b.lon - a.lon) * rad
@@ -201,7 +204,12 @@ export class FleetStore<T> implements ReadableStore<FleetState<T>> {
 			else
 				entries.set(
 					key,
-					this.entryOf(change.value, change.coreNow, change.receivedAt, entries.get(key)),
+					this.entryOf(
+						change.value,
+						change.coreNow,
+						change.receivedAt,
+						entries.get(key),
+					),
 				)
 		}
 		this.pending.clear()
@@ -309,7 +317,8 @@ export class FleetStore<T> implements ReadableStore<FleetState<T>> {
 		const cutoff = receivedAt - this.trailMs
 		let start = 0
 		while (start < trail.length && (trail[start]?.at ?? 0) < cutoff) start += 1
-		if (trail.length - start > this.trailPoints) start = trail.length - this.trailPoints
+		if (trail.length - start > this.trailPoints)
+			start = trail.length - this.trailPoints
 		if (start > 0) trail = trail.slice(start)
 		return { value, heardAt, posAt, trail, trailFromCore: false }
 	}

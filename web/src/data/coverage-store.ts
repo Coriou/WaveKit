@@ -42,9 +42,8 @@ export const coverageSchema = z.object({
 export type Coverage = z.infer<typeof coverageSchema>
 
 // the schema accepts the DTO
-export type CoverageCheck = CoverageResponse extends z.input<typeof coverageSchema>
-	? true
-	: never
+export type CoverageCheck =
+	CoverageResponse extends z.input<typeof coverageSchema> ? true : never
 
 export interface CoverageState {
 	/** `unavailable`: the core has no coverage route (404). */

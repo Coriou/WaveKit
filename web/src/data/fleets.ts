@@ -63,9 +63,7 @@ export const aircraftSchema = z.object({
 	icao: z.string(),
 	callsign: z.string().optional(),
 	squawk: z.string().optional(),
-	position: z
-		.object({ lat: num, lon: num, seenPos: optNum })
-		.optional(),
+	position: z.object({ lat: num, lon: num, seenPos: optNum }).optional(),
 	velocity: z
 		.object({
 			gs: optNum,

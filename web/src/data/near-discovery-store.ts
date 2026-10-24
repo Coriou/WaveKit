@@ -180,7 +180,10 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 			this.api
 				.get<{
 					items: Observation[]
-				}>(`/api/scanner/discoveries/${encodeURIComponent(id)}/observations`, { query: { limit: 1 }, signal: abort.signal })
+				}>(`/api/scanner/discoveries/${encodeURIComponent(id)}/observations`, {
+					query: { limit: 1 },
+					signal: abort.signal,
+				})
 				.then(
 					page => {
 						if (abort.signal.aborted || this.get().discovery?.id !== id) return

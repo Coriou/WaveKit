@@ -147,9 +147,7 @@ describe("device words", () => {
 	})
 
 	it("lists this browser first in the Settings row", () => {
-		expect(devicesSummary(LIST)).toBe(
-			"This browser, Ben's iPhone and 1 more",
-		)
+		expect(devicesSummary(LIST)).toBe("This browser, Ben's iPhone and 1 more")
 		expect(devicesSummary(LIST.slice(0, 2))).toBe(
 			"This browser and Ben's iPhone",
 		)

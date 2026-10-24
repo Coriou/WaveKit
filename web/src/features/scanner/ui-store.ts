@@ -22,7 +22,11 @@ export const scannerUi = new Store<ScannerUiState>({
 })
 
 export function openPlan(prefill: FreqRange | null = null): void {
-	scannerUi.update(s => ({ ...s, planOpen: true, prefill: prefill ?? s.prefill }))
+	scannerUi.update(s => ({
+		...s,
+		planOpen: true,
+		prefill: prefill ?? s.prefill,
+	}))
 }
 
 export function closePlan(): void {

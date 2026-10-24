@@ -35,9 +35,13 @@ class PcmProcessor extends AudioWorkletProcessor {
 		const out = outputs[0]?.[0]
 		if (!out) return true
 		this.ring.render(out, this.ring.sampleRate / sampleRate)
-		for (let c = 1; c < (outputs[0]?.length ?? 0); c++) outputs[0]?.[c]?.set(out)
+		for (let c = 1; c < (outputs[0]?.length ?? 0); c++)
+			outputs[0]?.[c]?.set(out)
 		const playing = this.ring.playing
-		if (playing !== this.wasPlaying || currentTime - this.lastStats >= STATS_EVERY_S) {
+		if (
+			playing !== this.wasPlaying ||
+			currentTime - this.lastStats >= STATS_EVERY_S
+		) {
 			this.wasPlaying = playing
 			this.lastStats = currentTime
 			const msg: FromWorklet = { type: "stats", ...this.ring.stats() }

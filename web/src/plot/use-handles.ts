@@ -137,9 +137,7 @@ export function useHandles(
 			const f = frameRef.current
 			const { x, y, w } = local(e)
 			if (d.kind === "vfo") {
-				handles.dragVfo(
-					vfoDragHz(d.startHz, e.clientX - d.x, w, d.spanHz),
-				)
+				handles.dragVfo(vfoDragHz(d.startHz, e.clientX - d.x, w, d.spanHz))
 			} else if (d.kind === "squelch") {
 				handles.setSquelch(squelchAtY(y, f.levels, f.traceCss))
 			} else if (f.view && f.vfoHz !== null && f.bandwidthRange) {
