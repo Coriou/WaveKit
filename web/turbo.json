@@ -4,13 +4,28 @@
 	"tasks": {
 		"build": {
 			"outputs": ["dist/**"],
-			"inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/tsconfig.base.json"]
+			"inputs": [
+				"$TURBO_DEFAULT$",
+				"$TURBO_ROOT$/tsconfig.base.json",
+				"$TURBO_ROOT$/packages/brand/**",
+				"!$TURBO_ROOT$/packages/brand/node_modules/**"
+			]
 		},
 		"typecheck": {
-			"inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/tsconfig.base.json"]
+			"inputs": [
+				"$TURBO_DEFAULT$",
+				"$TURBO_ROOT$/tsconfig.base.json",
+				"$TURBO_ROOT$/packages/brand/**",
+				"!$TURBO_ROOT$/packages/brand/node_modules/**"
+			]
 		},
 		"test": {
-			"inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/tsconfig.base.json"]
+			"inputs": [
+				"$TURBO_DEFAULT$",
+				"$TURBO_ROOT$/tsconfig.base.json",
+				"$TURBO_ROOT$/packages/brand/**",
+				"!$TURBO_ROOT$/packages/brand/node_modules/**"
+			]
 		},
 		"lint": {
 			"inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/eslint.config.js"]
