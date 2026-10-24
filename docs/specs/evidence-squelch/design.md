@@ -51,6 +51,8 @@ has races that cannot be closed there: close events that arrive early or late ag
 native audio drops that shift the events' `atOutputSample` indices, and input-gap resets that
 produce no gate event. The follow-up is in-band stage-1 gate markers on the Rust audio socket
 (see the Rust-engine onset finding).
+Superseded by A18 (2026-10-24) for framed Rust runs (Rust in-band gate markers, A18); it stands for
+unframed runs.
 
 ## Options weighed
 
@@ -543,7 +545,7 @@ alignment), plus the back chain's own latency as today.
 
 - **Applies when** `squelchMode === "auto"`, the modulation is in
   `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`, `configuredTone(config) === null`, the run is on the
-  csdr engine (amendment A12: `run.rust` unset) and the run has a pre-roll (allocated at run start
+  csdr engine (amendment A12: `run.rust` unset; A18: or a framed Rust run) and the run has a pre-roll (allocated at run start
   for csdr NFM streams only, amendments A8 and A12). The predicate is `evidenceAppliesTo(run)`; a
   flip of it resets the gate and clears the pre-roll. An engine change always builds a new run,
   so a Rust fallback onto csdr starts with a fresh gate. Otherwise `handleAudioData` takes its
@@ -597,7 +599,7 @@ squelch is a possible follow-up, not part of this spec.
 ### Interaction with modulation changes
 
 Only `nfm` runs on the csdr engine allocate a gate and pre-roll (amendment A8, 2026-10-23: AM and
-every other modulation allocate none; amendment A12: Rust runs allocate none). On the csdr engine a modulation change restarts the pipeline (rule 5 allows a restart
+every other modulation allocate none; amendment A12: Rust runs allocate none; A18: framed Rust runs allocate them). On the csdr engine a modulation change restarts the pipeline (rule 5 allows a restart
 because the stream changes), so the old run's FIFO and gate are dropped with the run and nothing
 queued is played; the new run allocates its own gate and FIFO, at its own rate and format, only if
 its modulation is `nfm`. The standalone gate class still supports `am` (voice evidence only), but
@@ -906,6 +908,10 @@ align the stdout gate events with the socket audio in TypeScript was not merged:
 close events, native audio drops that shift indices, and input-gap resets with no gate event
 leave races it cannot close. The fix is in-band stage-1 gate markers on the Rust audio socket.
 
+**Status (2026-10-24, amendment A18): fix specified.** Rust in-band gate markers (A18) give the
+gate stage-1 state at each sample; the defect is fixed for framed runs when the differential test
+and the fake-link Rust leg pass (requirements 9.8 and 9.11).
+
 - **Measured on `nfm-ctcss-670-voice`.** The manual (stage-1 only) Rust stream starts every over
   0.4 ms from the reference onset. Auto loses 31.9-35.9 ms on even overs and 4.1-6.4 ms on odd
   overs. The other fixtures show the same alternation, 4-8 ms and 26-48 ms.
@@ -921,6 +927,202 @@ leave races it cannot close. The fix is in-band stage-1 gate markers on the Rust
   loosened either.
 - **AM.** AM sample identity is not checkable on Rust, because the resampler phase differs per
   run. The driver marks that check INVALID per fixture.
+
+## Rust in-band gate markers (A18, 2026-10-24)
+
+**Amendment (2026-10-24, A18).** Requirements section 9. The Rust demod channel writes stage-1
+markers into its audio socket stream, between the PCM samples they apply to, and a TypeScript
+consumer splits the stream back into PCM and markers. The evidence gate and pre-roll then run on
+framed Rust NFM runs with the csdr verdicts. Unframed runs keep A12.
+
+### Why a framed stream, negotiated on `open`
+
+Today the demod socket is raw PCM (`encode` in `native/wavekit-chan/src/demod_channel.rs`, s16le
+or f32le at 48 kHz, no header), written by one writer thread from a byte `ChannelQueue` that drops
+the tail of a push on overflow (`queue.rs`). Stage-1 changes are stdout `gate` events with
+`atOutputSample`, read in `rust-engine.ts` on a different stream. Options weighed:
+
+- **Out-of-band index alignment in TypeScript** (A12's rejected attempt): races on early and late
+  close events, queue drops that shift indices, and input-gap resets with no gate event.
+- **In-band escape bytes inside raw PCM**: every PCM value is legal, so any escape needs byte
+  stuffing over the whole stream and a per-byte scan in TypeScript. Rejected (performance rule 1).
+- **Typed frames for the whole socket stream** (chosen): one length-prefixed record per PCM run or
+  marker. The parser touches only headers; PCM is forwarded as views. The decision is made once,
+  on `open`, through the existing control protocol, which already carries a version (`v: 1`) and
+  a binary protocol number (`--version`, `args.rs` `VERSION_LINE`, `DEMOD_PROTOCOL` in
+  `select-engine.ts`). A stream preamble then checks that both ends agree before any PCM.
+
+### Negotiation
+
+- `args.rs` `VERSION_LINE` reports `protocol 3`. `DEMOD_PROTOCOL` stays 2 (the minimum for
+  the Rust engine); a new `DEMOD_FRAMING_PROTOCOL = 3` decides the request.
+- With a probe of protocol 3 or later, `encodeDemodOpen` adds `audioFraming: "wkaf1"` to every
+  Rust `open` (any modulation and squelch mode, so a later in-place switch into `auto` keeps the
+  run). With protocol 2 the `open` is byte-identical to today's (a strict protocol-2 parser would
+  reject the unknown key).
+- Rust accepts `audioFraming` only with the value `"wkaf1"` (other values: `open` rejected as
+  `channel-request-invalid`, so the existing `open-rejected` fallback applies) and echoes it in
+  `opened`. The `OpenedDemodEvent` schema gains optional `audioFraming: "wkaf1"`.
+- TypeScript sets `run.rust.framing` to `"active"` only when it requested framing and `opened`
+  echoed it; otherwise `"none"` and the socket is read as raw PCM, as today. A request without an
+  echo is logged once at `debug` (no fallback: an unframed run is the A12 path).
+
+### Byte layout (little-endian, framing version 1)
+
+Preamble, once, the first 16 bytes on the socket:
+
+| Offset | Size | Field        | Value                                                 |
+| ------ | ---- | ------------ | ----------------------------------------------------- |
+| 0      | 4    | magic        | `57 4B 41 46` ("WKAF")                                |
+| 4      | 2    | version      | 1                                                     |
+| 6      | 2    | preambleLen  | 16                                                    |
+| 8      | 4    | sampleRateHz | 48 000 (`DEMOD_OUTPUT_RATE_HZ`)                       |
+| 12     | 1    | format       | 1 = s16le, 2 = f32le; must match `opened.format`      |
+| 13     | 1    | flags        | bit 0: stage-1 gate open at sample 0; other bits zero |
+| 14     | 2    | reserved     | 0                                                     |
+
+Frame header, 8 bytes, then `payloadLen` bytes of payload:
+
+| Offset | Size | Field      | Value                                                                                |
+| ------ | ---- | ---------- | ------------------------------------------------------------------------------------ |
+| 0      | 2    | type       | below; 0x8000 and above are ignorable                                                |
+| 2      | 2    | reserved   | 0                                                                                    |
+| 4      | 4    | payloadLen | PCM: 1..65 536 and a multiple of the sample size; marker: exact per type, at most 64 |
+
+Frame types (`atSample` is u64, the absolute output-sample index since `open`, counting
+delivered and queue-dropped samples, equal to Rust's `out_samples` and `audio_emitted`):
+
+| Type | Name       | Payload (bytes)                                                                                                                                                                                               |
+| ---- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | PCM        | samples in the run's format, exactly the bytes the unframed run writes                                                                                                                                        |
+| 2    | GATE_OPEN  | 8: `atSample`                                                                                                                                                                                                 |
+| 3    | GATE_CLOSE | 8: `atSample`                                                                                                                                                                                                 |
+| 4    | RESET      | 24: `atSample`, u64 `droppedInputSamples` (as the `input-gap` event), u8 flags (bit 0 gate open after), 7 zero                                                                                                |
+| 5    | DROP       | 24: `atSample` (first dropped sample), u64 `droppedSamples`, u8 flags (bit 0 gate open at the end, bit 1 a reset inside the run), 7 zero                                                                      |
+| 6    | BLOCK      | 16: `atSample` (the block's end, the boundary it is written at; the block is the 480 samples before it), f32 `powerDbfs`, f32 `quietingDb` (NaN unusable, +∞ silent discriminator, as `QUIETING_DB_INFINITE`) |
+
+Type 0 and types 7 to 0x7FFF are unknown and not ignorable. Alignment rule: a marker applies at
+the boundary between the PCM before and after it; its `atSample` must equal the consumer's
+running sample position (delivered PCM samples plus the `droppedSamples` of earlier DROP frames).
+A RESET does not advance the position (`out_samples` is kept over `DemodChannel::reset`); a DROP
+advances it by `droppedSamples`. A BLOCK marker is written when its block completes and describes the 480 samples before it; a
+gate marker for the decision at the end of that block follows it at the same boundary. A run
+that starts mid-block (after a RESET) has its first BLOCK after the first full block.
+
+### Rust emission
+
+- `DemodChannel` keeps writing PCM into `out`; in framed mode `process` writes records instead: a
+  PCM header before each run of samples (patched with its length when the run ends), and a marker
+  record wherever `gate_open` changes (`finish_block`, `apply_pending_squelch`, `retune_gate`), with
+  `atSample = audio_emitted` at that point, and a BLOCK record per finished block. Runs longer
+  than 65 536 bytes are split. `encode` and the zeroing of closed-gate samples are unchanged.
+- `Runtime::input_gap` writes a RESET record into the channel's queue after `dsp.reset()`, with
+  the gate state the fresh gate starts with. The stdout `discontinuity` event is unchanged.
+- **Overflow.** `ChannelQueue` gains a record-aware push for framed channels: it accepts whole
+  marker records and the longest whole-sample prefix of a PCM record (its length rewritten), and
+  never splits a header. What does not fit (PCM tail and any markers after it) is folded into one
+  pending DROP held by the channel (first sample, count, last gate state, reset seen), and written
+  ahead of the next accepted record once 32 bytes plus that record fit. The queue keeps 32 bytes
+  of its capacity for that DROP, so a DROP can always be written once the writer frees room. The
+  stdout `queue-overflow` discontinuity is unchanged.
+- The preamble is the first record queued at `open`.
+
+### TypeScript consumer (`src/core/live-demod/rust-audio-framing.ts`)
+
+- A push parser: `push(chunk)` calls `onPcm(view, atSample)` and `onMarker(marker)` in stream
+  order. State: a 16-byte scratch for a split preamble, header or marker payload, the bytes still
+  owed to the current PCM payload, the running sample position and the gate state. PCM payloads are
+  forwarded as `chunk.subarray` views, split wherever the chunk splits them (including inside a
+  sample, which the client path already handles, A17 revision (5)). No per-byte work, no copy of
+  PCM, no allocation besides the views and one small marker object per marker (at most about 110
+  per second, below).
+- Hot-path rules (`docs/PERFORMANCE.md` rules 1 and 2): constant work per frame; one pass per
+  chunk; the views are consumed synchronously in `handleAudioData` and never retained beyond the
+  pre-roll's own copy.
+- Errors: the parser returns an enumerated reason (`preamble`, `header-bound`, `pcm-partial`,
+  `reserved`, `unknown-critical`, `index-mismatch`, `gate-repeat`, `payload-length`) with the
+  stream offset and the type number. Framing reasons stop the parser (requirement 9.6 (b)); marker
+  reasons (`unknown-critical`, `index-mismatch`, `gate-repeat`) mark the run failed safe and keep
+  parsing for PCM (9.6 (a)). One `warn` per run, fields `{ reason, frameType, offset }`.
+
+### Gate and pre-roll on framed runs
+
+- `evidenceAppliesTo(run)` becomes `(run.rust === undefined || run.rust.framing === "active") &&
+run.tone === null && evidenceGateApplies(this.config)`, and `buildEvidence` builds for framed
+  Rust runs too, at 48 kHz in the run's format. A failed-safe run sets `framing` to `"failed"`,
+  which flips the predicate and so resets the gate and clears the pre-roll (existing flip path).
+- The drain lag for the A16 guard on Rust is `opened.groupDelaySamples` (the Rust chain's own lag in output
+  samples), in place of `backChainDrainSamples(run.backCommand)`.
+- `processEvidence` on a framed run takes stage-1 state per slice from the parser (the state
+  after the last marker before the slice) instead of `runGateOpen(run)` at chunk arrival, and
+  slices are cut at every marker as well as every 10 ms. GATE_OPEN and GATE_CLOSE drive the same
+  gate calls as the csdr stage-1 edges (`publishSquelchChange`: close without a latch resets and
+  abandons; with a latch starts the guard and hang). BLOCK calls `gate.noteBlock(carrier)` with
+  `carrier = metricsQuieted(config, quietingDb)` while stage 1 is open, so for framed runs
+  `measureRun` no longer calls `noteBlock` from the stdout metrics. RESET and DROP reset the gate
+  and abandon the pre-roll (held audio is dropped, as on a retune), then take the flagged state:
+  an over still open after them starts waiting afresh. This is fail-safe (it can only mute).
+- Everything else keeps the stdout events: `squelchOpen`, transmissions, Activity, the stage-1
+  floor and margin, tone results and recordings (requirement 1.6).
+- Status: `autoSquelch` follows the gate as on csdr; `off` for unframed and failed-safe runs. No
+  contract field changes; `docs/API.md` and a `docs/CLI-COORDINATION.md` note say that Rust NFM
+  `auto` now reports `waiting` and `open` with a protocol-3 binary.
+
+Why verdicts equal: on csdr the gate sees, per sample, the PCM, the stage-1 state and the carrier
+evidence of each 10 ms block; on a framed Rust run the markers give the same three inputs at the
+same sample positions. With identical inputs the gate and pre-roll are deterministic in their
+sample counts (A17 revision (4): the gate dates by its own input-sample count, whatever the
+chunking), so latch, onset, pre-roll start, tail end and STE verdicts match.
+
+### Budget (A18)
+
+- PCM at 48 kHz: s16 96 000 B/s, f32 192 000 B/s.
+- BLOCK: 100 per second × 24 bytes = 2 400 B/s, always.
+- Gate markers: at most one per 10 ms block (`finish_block` decides once per block) = 100/s ×
+  16 bytes = 1 600 B/s hard bound. In practice the 250 ms hang allows at most one open-close pair
+  per 260 ms, about 7.7 markers/s = 123 B/s.
+- PCM headers: one per run between markers plus one per `feed`. Input reads of 16 KiB at
+  2.4 Msps cu8 are about 293 feeds/s; with 100 BLOCK and up to 100 gate boundaries that is at most
+  about 500 PCM headers × 8 = 4 000 B/s.
+- Worst case 2 400 + 1 600 + 4 000 = 8 000 B/s: 8.3 % of s16 PCM, 4.2 % of f32; typical (about
+  400 headers, few gate markers) 5 700 B/s, 5.9 % of s16. RESET and DROP are rare and add 32 bytes
+  each. The 96 000-byte demod queue therefore holds about 0.94 s of s16 audio instead of 1 s.
+- Parser: at most about 700 frames/s (worst case above), constant work each, estimated 0.1 to
+  0.2 ms per second of audio on the desktop (under 0.001 core; Pi 4-class estimate 4×). PCM bytes
+  are never read by the parser.
+- Frame bounds: largest frame 8 + 65 536 bytes (0.68 s of s16 PCM, 0.34 s of f32); largest marker
+  8 + 24 bytes (64 allowed); parser state 16 bytes of scratch, so a malformed length can never make
+  the core buffer more than one socket chunk.
+- Rust: one header per run and one record per marker, appended to the existing `out` buffer; no
+  allocation per sample.
+
+### Tests (A18)
+
+- Rust, `demod_channel.rs` and `runtime.rs`: markers at the exact `atSample` of each stage-1
+  change for changes at a block's first and last sample, across input buffers split at every
+  offset of a block, with one-sample `process` calls, after `squelch`, retune and reset; RESET
+  after `mark-gap` at the A2 seam; DROP folding under a full queue (count, first sample, last gate
+  state) and its write once room returns; PCM split at 65 536 bytes; property: stripping frames
+  equals the unframed stream minus dropped samples, and marker replay equals the stdout gate
+  history (`proptest`, as the existing runtime properties).
+- TypeScript parser: fast-check property (`numRuns` at least 100) over random framed streams and
+  random chunk splits, including 1-byte chunks and splits inside the preamble, a header, a marker
+  payload and a sample, against a one-chunk parse; bounds at and one past each limit (PCM 65 536 /
+  65 538 bytes, 0 bytes, partial sample; marker 64 / 65 bytes; known types at length ± 1);
+  ignorable unknown types skipped; each error reason classified, logged once with only the safe
+  fields (the log record contains no received byte).
+- Differential: one synthetic over timeline (PCM, stage-1 edges, block carrier flags) is fed
+  through the csdr path and, framed by a test encoder that mirrors Rust's layout, through the
+  framed-Rust path, under random chunkings: latch sample and evidence, first played sample (the
+  over's onset), pre-roll start, tail end, STE mute start and the tagged client bytes are equal.
+  Overs: CTCSS voice, DCS voice, plain voice, bare carrier, data-like, STE tail, two overs inside
+  the hang, a DROP and a RESET inside an over.
+- Fail safe: a marker error mid-over drops the held pre-roll and continues with Rust PCM and
+  `autoSquelch` `off`; a framing error writes no client byte after its offset and ends the run
+  through the existing failure path.
+- Negotiation: protocol-2 fake gets today's `open`; protocol-3 fake with and without the echo.
+- Fake-link (8.2): the Rust leg with a protocol-3 binary asserts the csdr verdicts; one leg with a
+  protocol-2 binary asserts the A12 path.
 
 ## Live acceptance plan (requirement 8.3, Main with the user)
 

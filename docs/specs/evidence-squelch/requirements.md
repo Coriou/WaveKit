@@ -5,7 +5,7 @@ Status: design, not implemented (2026-10-23). See [design](design.md) and [tasks
 ## What changes for the user
 
 - **Auto squelch opens on a voice or a tone, not on every burst.** In `squelchMode: "auto"` on
-  NFM (AM removed by amendment A8, 2026-10-23; csdr engine only, amendment A12), live audio passes only once the over shows analog voice, or any standard
+  NFM (AM removed by amendment A8, 2026-10-23; csdr engine only, amendment A12; framed Rust runs too, superseded by A18), live audio passes only once the over shows analog voice, or any standard
   CTCSS tone or DCS code. A bare carrier, interference, clicks, impulse noise, data-like audio
   (POCSAG, APRS-like FSK) and digital bursts (DMR and similar) stay silent.
 - **Each over plays from its start.** The core keeps the last moments of audio while it waits
@@ -45,7 +45,7 @@ audio.
 
 Out of scope: any change to stage 1 (the floor-and-margin power gate, its 250 ms hang, the WG7
 noise-tail rule, the WG10 carrier observer); the tone squelch gate's behaviour; the Rust demod
-kernel (it keeps only stage 1); new config keys (the evidence constants are pinned); pre-roll for
+kernel (it keeps only stage 1; A18 adds in-band stage-1 markers); new config keys (the evidence constants are pinned); pre-roll for
 the manual, noise or tone squelch; the digital voice stream; the web UI and the CLI (coordination
 note only); the transmission tracker, Activity, identify, recording and decoder paths; new npm or
 Rust dependencies.
@@ -56,7 +56,7 @@ and injected clocks; the fake-link scenario uses a fake `rtl_tcp` inside a scrat
 and never a live receiver or its ports. Live acceptance is run by Main with the user.
 
 Defaults stay byte-identical except where a requirement here changes them on purpose (1.1 to 1.5
-and 2.x evidence gating and pre-roll in auto on NFM (NFM only, amendment A8; csdr engine only, amendment A12), 3.1 the default flip, 4.1 the
+and 2.x evidence gating and pre-roll in auto on NFM (NFM only, amendment A8; csdr engine only, amendment A12, superseded by A18 for framed Rust runs), 3.1 the default flip, 4.1 the
 additive status field). Lanes prove the rest against goldens recorded from the frozen code and
 list every golden they change with the requirement that changes it.
 
@@ -96,6 +96,7 @@ Aligning the two in TypeScript has races that cannot be closed there: a close ev
 early or late against the audio, native audio drops that shift the event's output-sample index,
 and input-gap resets that produce no gate event. Follow-up: in-band stage-1 gate markers on the
 Rust audio socket, after which this amendment can be lifted.
+Superseded by A18 (2026-10-24) for framed Rust runs; it stands for unframed runs (section 9).
 
 1.3 **Voice evidence** uses the scanner's pinned judgement over the last
 `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES` (20) frames of `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS` (50 ms)
@@ -385,6 +386,7 @@ for both the csdr (default) and the Rust engine; the Rust engine keeps stage 1 o
 4.5 unchanged).
 Amendment A12 (2026-10-23): superseded. The evidence gate and pre-roll run on csdr runs only;
 Rust runs in `auto` keep the stage-1 auto squelch, byte-identical (see the amendment after 1.2).
+Amendment A18 (2026-10-24): superseded for framed Rust runs, which run the gate and pre-roll (9.8).
 
 1.11 **In-place changes.** Switching `squelchMode` to or from `auto`, setting or clearing
 `toneSquelch`, and changing `autoMarginDb` apply without a pipeline restart; only a modulation
@@ -526,6 +528,7 @@ identical to a manual-mode run, event-loop p99 within 6.1.
 Amendment A12 (2026-10-23): on Rust, the NFM auto runs assert the stage-1 auto path (as AM
 under A8): `autoSquelch` `off` and an auto stream equal to the stage-1 stream. The open, no-open,
 onset and delay verdicts apply on csdr only until the Rust audio carries in-band gate markers.
+Amendment A18 (2026-10-24): superseded for framed Rust runs (9.11).
 
 8.3 **Live (Main with the user).** On a real PMR handheld: overs with CTCSS, DCS and no tone are
 heard from their first syllable; a short key-up with no speech and no tone, a silent held carrier
@@ -537,3 +540,115 @@ thresholds, the lane reports the measured statistics and Main decides between a 
 threshold and leaving AM on stage 1 only; the decision is recorded here as an amendment.
 
 **Resolved (2026-10-23, A8): AM stays on stage 1 only.** See the amendment after 1.2.
+
+## 9. Rust in-band gate markers (amendment A18, 2026-10-24)
+
+**Amendment (2026-10-24, A18): the evidence gate and pre-roll run on framed Rust runs.** A12 kept
+Rust NFM `auto` on the stage-1 auto squelch because the Rust audio socket carries raw PCM and the
+stage-1 gate changes arrive on stdout, out of step with it. A18 adds in-band stage-1 markers to
+the Rust audio socket, negotiated per run, so that the evidence gate and pre-roll see stage 1 at
+the audio's own sample position. A framed Rust NFM run in `auto` then gives the same verdicts as
+csdr for the same audio and the same stage-1 timeline. An unframed run (an older binary, or a run
+whose framing failed safe) keeps the A12 behaviour exactly. The wire format and the TypeScript
+consumer are in the design (Rust in-band gate markers, A18). This amendment supersedes, for
+framed runs only: the A12 amendment after 1.2, the A12 amendment under 1.10, the A12 amendment
+under 8.2, the "csdr engine only" qualifiers in "What changes for the user" and Scope, and the
+Scope's "the Rust demod kernel (it keeps only stage 1)" (the kernel still has stage 1 only; it
+gains marker emission). For unframed runs every A12 statement stands.
+
+9.1 **Negotiation.** A binary that supports markers reports `protocol 3` on `--version`. The core
+requests framing (`audioFraming: "wkaf1"` on the demod `open`) only when the probe reported
+protocol 3 or later, and on every such Rust run regardless of modulation and squelch mode, so a
+later in-place switch into `auto` (1.11) needs no restart. The run is framed only when the
+`opened` event echoes `audioFraming: "wkaf1"`. A binary reporting protocol 2 gets the
+protocol-2 `open`, byte for byte, and the run is unframed.
+Acceptance: a protocol-2 fake binary receives an `open` byte-identical to today's and its run
+reports `autoSquelch` `off`; a protocol-3 fake that omits the echo gives an unframed run that
+parses the socket as raw PCM; a protocol-3 fake that echoes gives a framed run.
+
+9.2 **Wire format.** A framed socket starts with a 16-byte preamble and then carries only frames
+(8-byte header, then payload), little-endian, as specified in the design. Frame types: PCM, gate
+open, gate close, input-gap reset, queue drop, block metrics; type values 0x8000 and above are
+ignorable. Every marker carries the absolute output-sample index it applies at. A marker applies
+at the sample boundary between the PCM before it and the PCM after it in the stream; its index
+equals the number of output samples (delivered plus dropped) before that boundary.
+Acceptance: Rust unit tests decode emitted streams and find each marker at the exact sample index
+of its stage-1 change, for changes at the first and last sample of a block, at an input-buffer
+boundary, inside a single-sample `process` call, after a `squelch` request, after a retune and
+after a reset.
+
+9.3 **Completeness.** In a framed run every change of the Rust stage-1 gate state, from any
+cause (block decision, `squelch` request, retune, reset, mode change), is marked; every input-gap
+reset is marked with the gate state after it; every queue-overflow drop run is marked with its
+first sample, its length and the gate state at its end; every completed 10 ms block is marked with
+its power and quieting figures. PCM payload bytes are those the unframed run would write, byte for
+byte, for every accepted sample.
+Acceptance: for random input, squelch and drop schedules (Rust property test), stripping the
+frames gives the unframed run's bytes with dropped samples removed, and replaying the markers
+gives the gate history of the stdout `gate` events.
+
+9.4 **Bounds.** The preamble is 16 bytes. A PCM payload is 1 to 65 536 bytes and a whole number of
+samples. A marker payload is at most 64 bytes, and a known marker type has exactly its specified
+length. Rust never writes a frame past a bound; the consumer holds at most 16 bytes of header or
+marker state across chunks and never allocates per byte.
+Acceptance: tests at each bound and one past it (PCM 65 536 and 65 538 bytes, PCM 0 bytes, PCM of a
+partial sample, marker payload 64 and 65 bytes, a known type at its length plus and minus one).
+
+9.5 **Unknown types.** A well-formed frame of an unknown type with a payload of at most 64 bytes
+is skipped. If the type is ignorable (0x8000 or above) nothing else happens. If it is below
+0x8000 the run fails safe (9.6, marker error) because the marker may change the gate.
+Acceptance: an ignorable unknown frame between PCM frames leaves the client bytes and verdicts
+unchanged; an unknown type below 0x8000 fails safe at its position.
+
+9.6 **Fail safe.** Two classes of error, each logged once per run at `warn` with safe fields only
+(an enumerated reason, the numeric frame type when known, and the stream byte offset), never any
+received bytes:
+(a) Marker error: framing intact but a marker cannot be trusted (index not equal to the stream
+position, a gate open while open or close while closed, an unknown type below 0x8000). From that
+position the gate counts as closed: the evidence gate is reset, the pre-roll is cleared (held
+audio is dropped, never played), and the rest of the run is the A12 stage-1 auto path (the Rust
+PCM as delivered), with `autoSquelch` `off`. Later markers are parsed for framing only.
+(b) Framing error: the preamble is wrong (magic, version, length, rate, format or reserved
+bytes), or a header breaks 9.4, or a reserved field is not zero. No later byte is trusted: the
+run writes no further Rust bytes to clients (the silence fill runs as for a stalled source), the
+evidence state is reset and cleared as in (a), and the run ends through the existing Rust failure
+path, as a closed socket does today.
+Acceptance: each listed malformation, injected at a random position and chunking, produces the
+class above, at most one log line with only the safe fields, no played byte from the pre-roll
+after the error, and (b) no client byte after the error offset.
+
+9.7 **Chunk independence.** The consumer gives the same PCM bytes, markers and marker positions
+for any split of the socket stream into chunks, including splits inside the preamble, a header, a
+marker payload and a sample.
+Acceptance: fast-check property, `numRuns` at least 100, over random framed streams and random
+chunk splits (including 1-byte chunks), compared with a one-chunk parse.
+
+9.8 **Same verdicts as csdr.** On a framed Rust NFM run in `auto` with no tone squelch, the
+evidence gate and pre-roll take stage-1 state per sample from the markers, block carrier evidence
+from the block markers, and stage-1 edges from the gate markers, in stream order. For the same
+PCM, the same stage-1 open and close samples and the same per-block carrier evidence, the
+framed-Rust path and the csdr path give the same verdicts: latch sample and evidence, first played
+sample (the over's onset, requirement 2.1), pre-roll start, tail end (guard and fade, A16), STE
+detection and mute start (A17), and the same tagged output bytes.
+Acceptance: a differential test feeds synthetic overs (CTCSS voice, DCS voice, plain voice, bare
+carrier, data-like, an STE tail, two overs inside the hang, a drop and a reset inside an over)
+through both paths and asserts equal verdicts and equal client bytes.
+
+9.9 **Status and contract.** `autoSquelch` on a framed Rust NFM `auto` run reports `waiting` and
+`open` as on csdr; on an unframed or failed-safe run it reports `off`. No field is added or
+renamed in the status, the level event, `packages/api-types`, the web UI or the CLI.
+`squelchOpen`, transmissions, Activity, tone results, recordings and decoders keep following the
+stdout events exactly as today (1.6).
+Acceptance: status tests for framed, unframed and failed-safe runs; the existing contract tests
+pass unchanged.
+
+9.10 **Performance.** Marker overhead stays within the design's A18 budget: at most 9 % of the
+PCM byte rate at s16 (worst case) and under 0.001 core for parsing on the desktop; the PCM payload
+is forwarded as views, never copied by the parser.
+Acceptance: the bench of 6.2 reports parse cost per second of audio and the framing overhead
+bytes per second on a framed run.
+
+9.11 **Acceptance updates.** 8.2's open, no-open, onset and delay verdicts apply on Rust for
+framed runs (superseding the A12 amendment under 8.2 for them), and the fake-link scenario runs
+the Rust leg with a protocol-3 binary; one Rust leg with a protocol-2 binary asserts the A12 path.
+The Rust-engine onset finding (design) is fixed for framed runs when 9.8 passes.
