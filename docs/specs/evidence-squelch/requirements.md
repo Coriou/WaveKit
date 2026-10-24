@@ -781,7 +781,8 @@ has the alignment sweep, the corpus, the study table and the arithmetic. (Revise
 after review: mixed-block onset, retained-latch drain, tracker restart on reopen, enforceable
 false-alarm corpus, bounded properties.)
 
-A20.1 **When the tracker runs.** On `nfm`, on the csdr engine, in `auto` with no configured tone
+A20.1 **When the tracker runs.** On `nfm`, on the csdr engine or a framed Rust run (section 9,
+A18; unframed and failed-safe Rust runs keep stage 1 alone), in `auto` with no configured tone
 squelch (1.9 stands), exactly one reverse-burst tracker per evidence gate runs, and only while the
 gate is latched (open, not held after an STE) on a CTCSS tone: the latched tone key is a CTCSS
 table index. It is armed at the latched tone's standard frequency (`CTCSS_HZ`) when a latch or a
