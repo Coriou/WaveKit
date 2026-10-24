@@ -84,17 +84,17 @@ produce no gate event. The follow-up is in-band stage-1 gate markers on the Rust
 
 Constants added to `packages/api-types/src/live-audio.ts` (requirement 4.3):
 
-| Constant                                      | Value     | Basis                                                                                 |
-| --------------------------------------------- | --------- | ------------------------------------------------------------------------------------- |
-| `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`         | `["nfm"]` | requirement 1.1 (amendment A8, 2026-10-23: AM removed)                                |
-| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS`    | `["nfm"]` | requirement 1.2 (AM: voice only)                                                      |
-| `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`            | 50        | `ANALOG_TRIAL_FRAME_MS`                                                               |
-| `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES`        | 20        | `SYLLABIC_WINDOW` in `analyze.rs`: 1 s                                                |
-| `LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS` | 100       | 10 ms IQ blocks in the 1 s voice window                                               |
-| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS`         | 750       | `DCS_MIN_AUDIO_SECONDS` × 1 000                                                       |
-| `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS`             | 1 500     | `ANALOG_TRANSMISSION_MERGE_GAP_MS`                                                    |
-| `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`      | 1 500     | voice window 1 000 ms + up to 500 ms late speech after key-up                         |
-| `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS`      | 10        | one 10 ms block, plus the back chain's computed lag (A16 review, 2026-10-24; was 200) |
+| Constant                                      | Value     | Basis                                                                                   |
+| --------------------------------------------- | --------- | --------------------------------------------------------------------------------------- |
+| `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS`         | `["nfm"]` | requirement 1.1 (amendment A8, 2026-10-23: AM removed)                                  |
+| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MODULATIONS`    | `["nfm"]` | requirement 1.2 (AM: voice only)                                                        |
+| `LIVE_AUDIO_AUTO_SQUELCH_FRAME_MS`            | 50        | `ANALOG_TRIAL_FRAME_MS`                                                                 |
+| `LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES`        | 20        | `SYLLABIC_WINDOW` in `analyze.rs`: 1 s                                                  |
+| `LIVE_AUDIO_AUTO_SQUELCH_QUIET_WINDOW_BLOCKS` | 100       | 10 ms IQ blocks in the 1 s voice window                                                 |
+| `LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS`         | 750       | `DCS_MIN_AUDIO_SECONDS` × 1 000                                                         |
+| `LIVE_AUDIO_AUTO_SQUELCH_HANG_MS`             | 1 500     | `ANALOG_TRANSMISSION_MERGE_GAP_MS`                                                      |
+| `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`      | 1 500     | voice window 1 000 ms + up to 500 ms late speech after key-up                           |
+| `LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS`      | 10        | one 10 ms block, plus the back chain's computed lag (A16 revision, 2026-10-24; was 200) |
 
 Type: `LiveAudioAutoSquelch = { state: "off" | "waiting" | "open"; evidence?: "voice" | "ctcss" | "dcs" }`,
 added as optional `autoSquelch` to `LiveAudioStatus` and `LiveAudioLevel`. The core contract
@@ -315,7 +315,7 @@ the latch (93.8 s) the longest muted stretch is 0.74 s (stage 1 closed beyond th
 so no close reached the 1.5 s hang, and 69.7 % of that time played interference as full-scale
 noise (about -3 dBFS RMS).
 
-**Amendment (2026-10-24, A14 revised after review): tone continuity.** The continuous "latched tone
+**Amendment (2026-10-24, A14 revised): tone continuity.** The continuous "latched tone
 current" refresh is replaced by sightings: `ToneEvidence` counts every completed CTCSS block with
 a winner and every new DCS word hit (`sightingCount`, `sightingKey` in the gate's tone-key form);
 the gate resets `sinceCarrier` when a new sighting has the latched key. On a re-open within the
@@ -328,7 +328,7 @@ overs with no quieted block, a different tone after a fade (latch ends, the new 
 its own), and flicker after an unquieted tone over (expires within hang + grace + one block).
 Property 16 checks the open-side limit `HANG_MS + grace` for a tone latch.
 
-**Amendment (2026-10-24, A14 review round 2): dated sightings.** The re-open path resets the tone
+**Amendment (2026-10-24, A14 revision 2): dated sightings.** The re-open path resets the tone
 stage again for every latch (the retained stage dated pre-close tone as fresh), so a sighting's
 block lies inside one stage-1-open stretch. `EVIDENCE_TONE_HANG_GRACE_MS` is 500 ms (the reset
 stage's first block). `ToneEvidence` counts a DCS sighting only for a word chain of at least
@@ -376,7 +376,7 @@ delay, and `drop` samples behind the queued `pass` audio are skipped by catch-up
 catches up during the tail instead of playing it). Property 18 pins the pass rule against a
 model for any pattern of quieted, unquieted and closed blocks after a voice latch.
 
-**Amendment (2026-10-24, A16 review): sample-accurate guard and fade.** Live run6 (image with
+**Amendment (2026-10-24, A16 revision): sample-accurate guard and fade.** Live run6 (image with
 A13-A16) still played a loud burst about half a second after each unkey. Each over ended with
 speech, about 0.4 s of a steady tone (the radio's STE tone, A17), then 20-21 blocks of 10 ms at
 RMS 16 000-26 000 (full-scale FM noise, the old 200 ms tail guard plus the block in which the
@@ -393,9 +393,9 @@ samples = 30 ms at 25 kHz including the harness's one-block note lag, against 5 
 before). The gate decides per sample: `audibleEnd` is the byte offset of the last audible sample
 of the push, muted samples are zeroed in place and fade samples scaled in place before the
 pre-roll copies them, and the wiring tags `[start, audibleEnd)` `pass` and the rest `drop`, so
-the expiry no longer drops the slice that holds it (review MINOR). A stage-1 close carries what
+the expiry no longer drops the slice that holds it. A stage-1 close carries what
 is left of the guard and fade (`guardBytesLeft` from the counters, full only when the close
-follows carrier evidence) and fades in place; it never restarts the guard (review MAJOR: the old
+follows carrier evidence) and fades in place; it never restarts the guard (the old
 close returned a fresh 200 ms guard after a muted tail). Property 18 now checks the samples each
 pushed and closed block delivers against a guard-and-fade model, and that muted pushed samples
 are zeros.
@@ -415,7 +415,7 @@ in place. The pre-roll delay (about 1 s after a voice latch, 0.75 s after a tone
 `ste: true` while held. Note for lane TB (transmission boundaries, another branch): the STE onset
 is a reliable transmission end on radios that send it; `analog-transmission.ts` is unchanged here.
 
-**Amendment (2026-10-24, A17 review revision).** `SteDetector` blocks qualify on: 55 Hz power
+**Amendment (2026-10-24, A17 revision).** `SteDetector` blocks qualify on: 55 Hz power
 ≥ 0.65 of the block's AC energy; ≥ 3x the 45 and 67 Hz bins; the 110 and 165 Hz bins ≤ 0.02 of it;
 the 300-3 000 Hz energy (RBJ high-pass 300 Hz, low-pass 3 kHz, shared by the phases) ≤ -15 dB of
 the tone's energy; and the four quarters' 55 Hz phasor magnitudes (correlation with a shared
@@ -434,7 +434,7 @@ client output; Property 6 (chunk-split invariance) is now byte identity of the c
 under random sample-aligned splits, on the wiring directly (about 5 s for 100 cases on a loaded
 machine, from 250 s through the harness; one end-to-end run through the demodulator stays).
 
-**Note (2026-10-24, A17 review round 2): recorded STE evidence.** Detector runs over the live
+**Note (2026-10-24, A17 revision 2): recorded STE evidence.** Detector runs over the live
 recordings (25 kHz client streams: runs 2, 4 and 6 gated, run3 ungated; read locally, not in the repository), STE onsets in seconds of each stream: run2 40.58, 60.88, 80.68 and 87.80 (all four
 over ends, 50 qualifying blocks); run3 31.95 and 43.10 (both over ends, 25 blocks); run4 897.30
 (its one STE over end, 13 blocks); run6 36.95, 48.28, 81.85 and 88.40 (all four over ends, 44
@@ -753,13 +753,13 @@ schedules (stage 1 state per sample index) and scripted carrier evidence.
     syllable-level frames come only in stretches of at most 2, `syllableRuns` is 0, `voicePath`
     never returns `runs`, and the judge says voice exactly when the pinned median rule does.
     _Validates 1.3, 1.4._
-18. **Tail mute (A16, 2026-10-24; review revision).** After a voice latch, for any pattern of
+18. **Tail mute (A16, 2026-10-24).** After a voice latch, for any pattern of
     quieted, unquieted and closed blocks, with whole-sample or odd byte chunking, the complete
     client output (real wiring and pre-roll) is the over and then exactly the model's samples: all
     of a quieted block; otherwise what is left of the guard (`CLOSE_GUARD_MS` + lag) and then the
     10 ms fade, counted across closes and never restarted by one, until the hang ends the latch
     (split samples within 255 LSB). _Validates 1.5._
-19. **Nothing after an STE tone (A17, 2026-10-24; review revision).** For any over followed by an
+19. **Nothing after an STE tone (A17, 2026-10-24).** For any over followed by an
     STE tone of 0.13-0.4 s, then noise, and any chunking (an odd first chunk and 0-3 random cuts per
     block), the complete client output (zeros and positions included) equals the reference
     pre-roll fed the over's samples before the STE onset, the last 10 ms faded by `j / (F + 1)`,

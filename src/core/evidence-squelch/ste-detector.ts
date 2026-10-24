@@ -1,5 +1,5 @@
 /**
- * Squelch-tail elimination (STE) tone detector (amendment A17, 2026-10-24; review revision). Many
+ * Squelch-tail elimination (STE) tone detector (amendment A17, 2026-10-24). Many
  * analog radios key a 55 Hz tone for about 0.4 s after PTT release, with the microphone muted and
  * the carrier still up, so a receiver can close before the discriminator noise burst. Live
  * run6: a 55 Hz peak with about 99 % of the audio energy, 0.38-0.40 s, at the end of every over,
@@ -21,10 +21,11 @@
  * 0.0016 (165 Hz), voice band -18.5 to -28.7 dB in steady blocks, quarters 0.86-0.89.
  *
  * Four block phases run 25 ms apart, so the first qualifying block starts at most 25 ms after
- * the tone's onset. Exact bounds (swept over every alignment, 1-sample steps, silence or noise
- * padding): a tone of 623 samples (77.9 ms) or less never qualifies, 624 samples qualifies at
- * some alignments, and 847 samples (105.9 ms) or more always qualifies. (The quarter test is on
- * phasor magnitudes, so a tone can straddle a block with partial first and last quarters.)
+ * the tone's onset. Duration bounds are approximate: for a zero-phase tone swept over every
+ * alignment, 623 samples (77.9 ms) or less never qualifies and 847 samples (105.9 ms) or more
+ * always qualifies, but the starting phase moves both, so treat the boundary as a 75-110 ms band.
+ * (The quarter test is on phasor magnitudes, so a tone can straddle a block with partial first
+ * and last quarters.) Real STE tails are about 0.4 s.
  *
  * Allocation free after construction: shared cos/sin tables, two biquads, four phases of scalar
  * accumulators.

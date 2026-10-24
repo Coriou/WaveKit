@@ -2056,7 +2056,7 @@ export class LiveDemodulator extends EventEmitter {
 				rate,
 				modulation,
 				gain: this.config.gain,
-				// A16 review: the guard is the back chain's lag plus one 10 ms block.
+				// A16 revision: the guard is the back chain's lag plus one 10 ms block.
 				drainLagSamples: backChainDrainSamples(run.backCommand),
 				...(modulation === "nfm"
 					? { deviationHz: evidenceDeviationHz(this.config.bandwidth) }

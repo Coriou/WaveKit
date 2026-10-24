@@ -888,7 +888,7 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 	})
 
 	/**
-	 * Review of A15 (2026-10-24), accepted as a known limitation: periodic 150 ms audio bursts on a
+	 * A15 (2026-10-24), accepted as a known limitation: periodic 150 ms audio bursts on a
 	 * fully quieted carrier latch through the run path. A quieted carrier carrying periodic audio
 	 * is a real transmission, not the weak interference the evidence squelch targets.
 	 */
@@ -913,7 +913,7 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 				0.3 * Math.sin((2 * Math.PI * 1_000 * i) / RATE),
 		],
 	] as const)
-		it(`known limitation (A15 review): 150 ms ${name} once a second on a quieted carrier latch via runs at 1.15 s`, () => {
+		it(`known limitation (A15 revision): 150 ms ${name} once a second on a quieted carrier latch via runs at 1.15 s`, () => {
 			const out = floor(5)
 			for (let at = 0; at + 0.15 <= 5; at += 1) {
 				const start = Math.round(RATE * at)
@@ -1056,7 +1056,7 @@ describe("A15: sparse syllables and the diagnostic status", () => {
 })
 
 /**
- * Amendment A16 (2026-10-24), with its review: tail mute. While latched, the gate passes PCM only
+ * Amendment A16 (2026-10-24): tail mute. While latched, the gate passes PCM only
  * with current carrier evidence: the last noted block quieted, then the guard (back-chain lag +
  * one 10 ms block), then a 10 ms linear fade to zero, or (tone latches) a sighting of the latched
  * tone within 300 ms. Sample-accurate (`audibleEnd`); a stage-1 close carries what is left of the
@@ -1190,7 +1190,7 @@ describe("A16: tail mute", () => {
 		)
 	}, 120_000)
 
-	it("review repro (MAJOR): a stage-1 close after the muted tail returns no fresh guard", () => {
+	it("a stage-1 close after the muted tail returns no fresh guard", () => {
 		const g = gate()
 		drive(g, [
 			{
@@ -1236,7 +1236,7 @@ describe("A16: tail mute", () => {
 			expect(block.readInt16LE(2 * i)).toBe(0)
 	})
 
-	it("review repro (MINOR 4): byte-by-byte pushes fade the same samples as whole-sample pushes (within the split's low byte)", () => {
+	it("byte-by-byte pushes fade the same samples as whole-sample pushes (within the split's low byte)", () => {
 		const run = (bytesPerPush: number): Buffer => {
 			const g = gate()
 			drive(g, [
@@ -1450,7 +1450,7 @@ describe("A17: STE tone", () => {
 							out.push(1 + Math.floor(rand() * (BLOCK_BYTES - 1)))
 						return out.sort((a, b) => a - b)
 					}
-					// A first chunk of an odd size moves every later cut (review MINOR 3).
+					// A first chunk of an odd size moves every later cut.
 					const over = toPcm(
 						voiceLike({ rate: RATE, seconds: 1.5, seed, level: 0.8 }),
 						"s16le",
@@ -1522,7 +1522,7 @@ describe("A17: STE tone", () => {
 		)
 	}, 120_000)
 
-	it("review repro (MAJOR 1): a voiced 55 Hz fundamental with harmonics after a CTCSS latch is not an STE; a false STE would recover on fresh evidence", () => {
+	it("a voiced 55 Hz fundamental with harmonics after a CTCSS latch is not an STE; a false STE would recover on fresh evidence", () => {
 		const voiced = (seconds: number): Buffer => {
 			const out = new Float32Array(Math.round(RATE * seconds))
 			for (let i = 0; i < out.length; i++) {
@@ -1556,7 +1556,7 @@ describe("A17: STE tone", () => {
 	})
 
 	for (const hz of [67, 71.9, 79.7])
-		it(`review repro (MAJOR 2): CTCSS ${hz} Hz continuing through the STE (0.2 of its amplitude) still ends the over`, () => {
+		it(`CTCSS ${hz} Hz continuing through the STE (0.2 of its amplitude) still ends the over`, () => {
 			const w = new WiredGate()
 			const over = toPcm(
 				mix(
@@ -1589,7 +1589,7 @@ describe("A17: STE tone", () => {
 			expect(w.received().indexOf(noise.subarray(400, 800))).toBe(-1)
 		})
 
-	it("review round 2 (MINOR 2): the exact bounds: a 55 Hz tone of 623 samples (77.9 ms) or less never fires, 624 fires at some phase, 847 (105.9 ms) or more always fires, padded with silence or noise", () => {
+	it("the exact bounds: a 55 Hz tone of 623 samples (77.9 ms) or less never fires, 624 fires at some phase, 847 (105.9 ms) or more always fires, padded with silence or noise", () => {
 		const fires = (len: number, offset: number, noise: boolean): boolean => {
 			const ste = new SteDetector()
 			let x = 7
@@ -1619,12 +1619,12 @@ describe("A17: STE tone", () => {
 	})
 
 	/**
-	 * Known limitation (A17 review round 2, accepted 2026-10-24): a near-pure low voiced sound can
+	 * Known limitation (A17 revision 2, accepted 2026-10-24): a near-pure low voiced sound can
 	 * pass the STE rule (harmonics at the -17 dB bound; a 55 Hz tone under very quiet speech). The
 	 * cost is bounded and not terminal: the audio from the detected onset is held (at most one STE
 	 * block, 100-125 ms, is lost) and fresh evidence resumes the over.
 	 */
-	it("known limitation (review round 2): 58 Hz with harmonics at 0.14 amplitude and a 0.05 8th harmonic fires after a CTCSS latch; CTCSS then resumes", () => {
+	it("known limitation: 58 Hz with harmonics at 0.14 amplitude and a 0.05 8th harmonic fires after a CTCSS latch; CTCSS then resumes", () => {
 		const voiced = new Float32Array(Math.round(RATE * 0.4))
 		for (let i = 0; i < voiced.length; i++) {
 			const t = (2 * Math.PI * 58 * i) / RATE
@@ -1655,7 +1655,7 @@ describe("A17: STE tone", () => {
 		expect([g.state, g.evidence, g.muted]).toEqual(["open", "ctcss", false])
 	})
 
-	it("known limitation (review round 2): a 55 Hz tone under voice at level 0.01 fires", () => {
+	it("known limitation: a 55 Hz tone under voice at level 0.01 fires", () => {
 		const tone = steTone(0.4)
 		const voice = voiceLike({ rate: RATE, seconds: 0.4, seed: 3, level: 0.01 })
 		const g = gate()

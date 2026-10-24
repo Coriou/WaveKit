@@ -190,7 +190,7 @@ describe("EvidenceGate", () => {
 		expect(gate.evidence).toBeNull()
 	})
 
-	// A16 review (2026-10-24): the guard is one 10 ms block (+ the back-chain lag, 0 here) and the
+	// A16 revision (2026-10-24): the guard is one 10 ms block (+ the back-chain lag, 0 here) and the
 	// 10 ms fade after it.
 	it("close guard", () => {
 		const gate = latched()

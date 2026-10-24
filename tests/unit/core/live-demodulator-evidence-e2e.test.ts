@@ -50,7 +50,7 @@ const OVER_SECONDS = 3
 const TAIL_SECONDS = 2
 const AM_FLOOR_DBFS = -60
 /**
- * A16 tail bound (review 2026-10-24): the guard (one 10 ms block + the back chain's 1-sample
+ * A16 tail bound (2026-10-24): the guard (one 10 ms block + the back chain's 1-sample
  * lag), the 10 ms fade, and one 10 ms block (this harness notes a block after its PCM).
  */
 const TAIL_BYTES = (0.01 * RATE + 1 + 0.01 * RATE + 250) * 2
@@ -370,7 +370,7 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 			),
 			"s16le",
 		)
-	/** The STE with the over's CTCSS continuing under it at 0.2 of its amplitude (review MAJOR 2). */
+	/** The STE with the over's CTCSS continuing under it at 0.2 of its amplitude. */
 	const steThrough = (hz: number): Buffer => {
 		const out = new Float32Array(Math.round(RATE * 0.4))
 		for (let i = 0; i < out.length; i++)

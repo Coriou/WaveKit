@@ -360,21 +360,21 @@ export class EvidenceGate implements EvidenceGatePort {
 	private sinceSighting = Number.MAX_SAFE_INTEGER
 	/** `msToSamples(TONE_PASS_MS, rate)`. */
 	private readonly tonePassSamples: number
-	/** Close-guard bytes left in this closing episode (A2; A16 review: never restarted). */
+	/** Close-guard bytes left in this closing episode (A2; A16 revision: never restarted). */
 	private guardBytesLeft = 0
-	/** A16 review: fade-out samples after the guard (`EVIDENCE_FADE_OUT_MS`). */
+	/** A16 revision: fade-out samples after the guard (`EVIDENCE_FADE_OUT_MS`). */
 	private readonly fadeSamples: number
-	/** A16 review: fade samples left after the tail guard (counts down like the guard). */
+	/** A16 revision: fade samples left after the tail guard (counts down like the guard). */
 	private fadeLeft = 0
 	/** A17: STE tone detector (NFM only). */
 	private readonly ste: SteDetector | null
-	/** A17 review: input samples taken since construction (monotonic; dates the STE onset). */
+	/** A17 revision: input samples taken since construction (monotonic; dates the STE onset). */
 	private inputCount = 0
 	/** Input-sample index where the current decimation group began. */
 	private groupStart = 0
-	/** A17 review: input-sample index of the STE onset (the qualifying block's start). */
+	/** A17 revision: input-sample index of the STE onset (the qualifying block's start). */
 	private steOnsetIndex = 0
-	/** A16 review: scratch for a split sample's scaled bytes, and a straddling sample's bytes. */
+	/** A16 revision: scratch for a split sample's scaled bytes, and a straddling sample's bytes. */
 	private readonly splitScratch = Buffer.alloc(4)
 	private readonly straddle = Buffer.alloc(4)
 	/** Bytes of the current sample that lie in this `push` (< width for a split sample). */
@@ -415,7 +415,7 @@ export class EvidenceGate implements EvidenceGatePort {
 						deviationHz: options.deviationHz,
 					})
 		this.tone = this.modulation === "nfm" ? new ToneEvidence() : null
-		// A16 review (2026-10-24): the back-chain lag plus one 10 ms block.
+		// A16 revision (2026-10-24): the back-chain lag plus one 10 ms block.
 		const lag = options.drainLagSamples
 		this.guardSamples =
 			msToSamples(LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS, rate) +
@@ -663,7 +663,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		const heldBefore = this.holdLen
 		const total = heldBefore + bytes
 		const completed = Math.floor(total / width)
-		// A straddling sample's first bytes, kept for the fade of a split sample (A16 review);
+		// A straddling sample's first bytes, kept for the fade of a split sample (A16 revision);
 		// without `pcm` the bytes are not inspected and a straddling sample reads zeros.
 		const from = typeof start === "number" ? start : 0
 		const straddle = this.straddle
@@ -691,7 +691,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		if (this.internal !== "open") return 0
 		if (!this.closing) {
 			this.closing = true
-			// A16 review (2026-10-24): the guard on a close is what is left of the carrier guard
+			// A16 revision (2026-10-24): the guard on a close is what is left of the carrier guard
 			// and its fade, never a fresh one (full only when the close follows carrier evidence).
 			// A sample whose first bytes arrived while open is the first closed sample.
 			if (wasCarrier) this.refreshGuard()
@@ -911,7 +911,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				if (this.curSampleBytes >= width)
 					scaleSample(pcm, after - width, this.curFormat, gain)
 				else {
-					// A16 review: a split sample; its earlier bytes are already queued, so only the
+					// A16 revision: a split sample; its earlier bytes are already queued, so only the
 					// bytes in this push get the scaled value (s16: the low byte keeps its value,
 					// at most 255 LSB of error).
 					this.writeSplit(pcm, after, this.curSampleBytes, sample, gain)
@@ -941,7 +941,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		const nonFinite = this.nonFiniteGroup
 		this.nonFiniteGroup = false
 		// A17: an STE tone ends the over: retroactive mute from its onset, the latch ends. While
-		// held, a further STE changes nothing; fresh evidence still latches (review: not terminal).
+		// held, a further STE changes nothing; fresh evidence still latches (not terminal).
 		if (
 			this.ste !== null &&
 			this.ste.push(value, groupFirst) &&
@@ -1034,7 +1034,7 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.internal = "open"
 		this.latchedEvidence = evidence
 		this.latchedToneKey = key
-		// A17 review: fresh evidence after a (possibly false) STE ends the hold.
+		// A17 revision: fresh evidence after a (possibly false) STE ends the hold.
 		this.steHold = false
 		this.sinceCarrier = 0
 		// A16: the latch is evidence at this sample (a voice latch needed quieted blocks).

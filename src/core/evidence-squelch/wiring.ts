@@ -1,7 +1,6 @@
 /**
  * Evidence squelch wiring (design, Wiring): how one PCM chunk of a run on the evidence path goes
- * through the gate and is tagged for the pre-roll. Extracted from the live demodulator (review of
- * A16/A17, 2026-10-24) so tests can run the exact client path; nothing here allocates per chunk
+ * through the gate and is tagged for the pre-roll. Extracted from the live demodulator (A16/A17, 2026-10-24) so tests can run the exact client path; nothing here allocates per chunk
  * or per slice.
  */
 import type {
@@ -97,7 +96,7 @@ function evidenceSpan(
 			if (k >= 0) preRoll.latch()
 			return
 		}
-		// A16 (sample-accurate, review 2026-10-24): while latched, the gate's audible prefix of the
+		// A16 (sample-accurate, 2026-10-24): while latched, the gate's audible prefix of the
 		// slice passes and the rest is dropped (the latch memory stays; the tags apply to these
 		// input samples, whatever the pre-roll delay).
 		const reported = gate.audibleEnd ?? end

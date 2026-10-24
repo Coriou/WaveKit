@@ -42,7 +42,7 @@ export interface EvidenceGatePort {
 	): number
 	/**
 	 * Stage-1-closed bytes: advances hang and guard; returns leading bytes inside the close guard
-	 * (A2). A16 review (2026-10-24): the guard is what is left of the carrier guard and its fade
+	 * (A2). A16 revision (2026-10-24): the guard is what is left of the carrier guard and its fade
 	 * at the close, never a fresh one; with `pcm` and `start` the fade is applied in place.
 	 */
 	closed(
@@ -71,7 +71,7 @@ export interface EvidenceGatePort {
 	diagnostics?(): LiveAudioAutoSquelchDiagnostics
 }
 
-/** A16 review: fade-out at a mute boundary (10 ms, linear to zero), so the cut does not click. */
+/** A16 revision: fade-out at a mute boundary (10 ms, linear to zero), so the cut does not click. */
 export const EVIDENCE_FADE_OUT_MS = 10
 
 /** `noteBlock` flag: the voice window was reset on a carrier onset. */
@@ -97,7 +97,7 @@ export interface EvidenceGateOptions {
 	modulation: "nfm" | "am"
 	gain: number
 	/**
-	 * A16 review (2026-10-24): samples of back-chain lag between a measured IQ block and its PCM
+	 * A16 revision (2026-10-24): samples of back-chain lag between a measured IQ block and its PCM
 	 * (`backChainDrainSamples`); the carrier and close guard is this plus one 10 ms block.
 	 * Absent: 0.
 	 */
