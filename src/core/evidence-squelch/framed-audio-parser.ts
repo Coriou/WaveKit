@@ -244,7 +244,7 @@ export class FramedAudioParser {
 				this.framing("pcm-partial", type, this.frameOffset)
 				return
 			}
-			this.pos += length / this.width
+			this.advance(length / this.width, type, this.frameOffset)
 			this.phase = Phase.Pcm
 			this.need = length
 			return
@@ -287,12 +287,12 @@ export class FramedAudioParser {
 				}
 			const count = readU64(b, o + 8)
 			const flags = b[o + 16] ?? 0
-			if (mismatch) {
+			// Any u64 field past MAX_SAFE_INTEGER (read as -1) cannot be trusted.
+			if (mismatch || (!this.markerFailed && count < 0)) {
 				this.markerFault("index-mismatch", type, frameOffset)
-				if (type === WKAF_T_DROP) this.pos += count
 				return
 			}
-			if (type === WKAF_T_DROP) this.pos += count
+			if (type === WKAF_T_DROP) this.advance(count, type, frameOffset)
 			if (this.markerFailed) return
 			this.gate = (flags & WKAF_FLAG_GATE_OPEN) !== 0
 			this.burst = (flags & WKAF_FLAG_BURST_START) !== 0
@@ -325,6 +325,21 @@ export class FramedAudioParser {
 		}
 		this.gate = open
 		this.sink.marker({ type: "gate", open, at })
+	}
+
+	/**
+	 * Advances the running position. A count past `Number.MAX_SAFE_INTEGER` (unreadable, -1) or a
+	 * sum past it cannot be tracked exactly: a marker fault (framing stays intact, as in
+	 * `decode_stream`, which tracks u64 and would report the next marker as `index-mismatch`).
+	 * After a marker fault positions are no longer checked or advanced.
+	 */
+	private advance(count: number, type: number, offset: number): void {
+		if (this.markerFailed) return
+		if (count < 0 || count > Number.MAX_SAFE_INTEGER - this.pos) {
+			this.markerFault("index-mismatch", type, offset)
+			return
+		}
+		this.pos += count
 	}
 
 	private markerFault(
@@ -366,11 +381,11 @@ function markerLength(type: number): number | null {
 }
 
 /**
- * u64 LE as a number. Positions stay far below 2^53; a larger value is returned as +Infinity so
- * it can never equal a position (an index mismatch, never a wrong match).
+ * u64 LE as a number, exact up to `Number.MAX_SAFE_INTEGER`; a larger value is -1, which never
+ * equals a position (always an index mismatch) and is rejected as a count.
  */
 function readU64(b: Buffer, o: number): number {
 	const high = b.readUInt32LE(o + 4)
-	if (high >= 0x200000) return Number.POSITIVE_INFINITY
+	if (high >= 0x200000) return -1
 	return high * 0x1_0000_0000 + b.readUInt32LE(o)
 }

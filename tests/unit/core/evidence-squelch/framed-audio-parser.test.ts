@@ -512,6 +512,96 @@ describe("A18 framed audio parser", () => {
 			expect(parser.position).toBe(8)
 		})
 
+		describe("u64 fields past Number.MAX_SAFE_INTEGER (marker fault)", () => {
+			const MAX = 2n ** 53n - 1n
+			const u64 = (v: bigint): Buffer => {
+				const b = Buffer.alloc(8)
+				b.writeBigUInt64LE(v)
+				return b
+			}
+			const drop = (at: bigint, count: bigint): Buffer => {
+				const p = Buffer.alloc(24)
+				u64(at).copy(p, 0)
+				u64(count).copy(p, 8)
+				return Buffer.concat([header(WKAF_T_DROP, 24), p])
+			}
+			const gateOpen = (at: bigint): Buffer =>
+				Buffer.concat([header(WKAF_T_GATE_OPEN, 8), u64(at)])
+			const run = (records: Buffer[]) => {
+				const r = parse([Buffer.concat([preamble("s16le", false), ...records])])
+				return {
+					...r,
+					markers: r.entries.filter(e => "type" in e),
+					faults: faults(r.entries),
+				}
+			}
+
+			it("2^53-1 is exact: DROP to it and a gate marker there pass", () => {
+				const r = run([drop(0n, MAX), gateOpen(MAX)])
+				expect(r.faults).toEqual([])
+				expect(r.parser.position).toBe(Number.MAX_SAFE_INTEGER)
+				expect(r.parser.stage1Open).toBe(true)
+			})
+
+			it("a DROP count of 2^53 fails safe; a later gate open at 2^53+1 does not open stage 1", () => {
+				const r = run([
+					drop(0n, MAX + 1n),
+					gateOpen(MAX + 2n),
+					header(WKAF_T_PCM, 2),
+					Buffer.alloc(2, 9),
+				])
+				expect(r.faults).toEqual([
+					{
+						kind: "marker",
+						reason: "index-mismatch",
+						frameType: WKAF_T_DROP,
+						offset: 16,
+					},
+				])
+				expect(r.markers).toEqual([])
+				expect(r.parser.stage1Open).toBe(false)
+				expect(r.parser.failed).toBe("marker")
+				// PCM still flows (A12 path).
+				expect(r.entries.at(-1)).toEqual({ pcm: "0909" })
+			})
+
+			it("an at of 2^53 is an index mismatch", () => {
+				const r = run([gateOpen(MAX + 1n)])
+				expect(r.faults.map(f => f.reason)).toEqual(["index-mismatch"])
+				expect(r.parser.stage1Open).toBe(false)
+			})
+
+			it("cumulative overflow across DROPs, and PCM past the limit, fail safe", () => {
+				const half = 2n ** 52n
+				const a = run([drop(0n, half), drop(half, half), gateOpen(2n * half)])
+				expect(a.faults).toEqual([
+					{
+						kind: "marker",
+						reason: "index-mismatch",
+						frameType: WKAF_T_DROP,
+						offset: 48,
+					},
+				])
+				expect(a.markers).toHaveLength(1)
+				expect(a.parser.stage1Open).toBe(false)
+				const b = run([
+					drop(0n, MAX),
+					header(WKAF_T_PCM, 2),
+					Buffer.alloc(2),
+					gateOpen(MAX + 1n),
+				])
+				expect(b.faults).toEqual([
+					{
+						kind: "marker",
+						reason: "index-mismatch",
+						frameType: WKAF_T_PCM,
+						offset: 48,
+					},
+				])
+				expect(b.parser.stage1Open).toBe(false)
+			})
+		})
+
 		it("RESET does not advance the position; DROP advances it by its count (0 allowed)", () => {
 			const { entries } = parse([
 				encodeFramed([

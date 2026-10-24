@@ -59,6 +59,12 @@ const over = (pcm: Float32Array, quietingDb = 30): OverSegment => ({
 	quietingDb,
 })
 
+/**
+ * Trailing stage-1-closed time: longer than the pre-roll delay (up to 1 s) plus the close guard,
+ * so the whole tail reaches the client and `lastPlayed` is the tail end, not the stream cut.
+ */
+const TAIL = 1.5
+
 /** Voice-over start sample after 0.3 s closed (stage 1 opens here). */
 const ONSET = Math.round(0.3 * FRAMED_RATE)
 
@@ -68,7 +74,7 @@ const OVERS: Record<string, Step[]> = {
 		over(
 			mix(voice(2, 3), ctcssMix({ rate: FRAMED_RATE, seconds: 2, hz: 88.5 })),
 		),
-		closed(0.5),
+		closed(TAIL),
 	]),
 	"dcs voice": overSteps([
 		closed(0.3),
@@ -83,13 +89,13 @@ const OVERS: Record<string, Step[]> = {
 				}),
 			),
 		),
-		closed(0.5),
+		closed(TAIL),
 	]),
-	"plain voice": overSteps([closed(0.3), over(voice(2, 7)), closed(0.5)]),
+	"plain voice": overSteps([closed(0.3), over(voice(2, 7)), closed(TAIL)]),
 	"bare carrier": overSteps([
 		closed(0.3),
 		over(carrierSilence({ rate: FRAMED_RATE, seconds: 2 })),
-		closed(0.5),
+		closed(TAIL),
 	]),
 	"data-like": overSteps([
 		closed(0.3),
@@ -104,23 +110,23 @@ const OVERS: Record<string, Step[]> = {
 				seed: 9,
 			}),
 		),
-		closed(0.5),
+		closed(TAIL),
 	]),
 	"ste tail": overSteps([
 		closed(0.3),
 		over(voice(2, 11)),
 		over(ste(0.3)),
-		closed(0.5),
+		closed(TAIL),
 	]),
 	"two overs inside the hang": overSteps([
 		closed(0.3),
 		over(voice(1.5, 13)),
 		closed(0.1),
 		over(voice(1.5, 17)),
-		closed(0.5),
+		closed(TAIL),
 	]),
 	"drop and reset inside an over": overSteps(
-		[closed(0.3), over(voice(2.5, 19)), closed(0.5)],
+		[closed(0.3), over(voice(2.5, 19)), closed(TAIL)],
 		[
 			{
 				at: ONSET + 7_001,
@@ -133,7 +139,7 @@ const OVERS: Record<string, Step[]> = {
 		],
 	),
 	"drop after a latch": overSteps(
-		[closed(0.3), over(voice(2.5, 23)), closed(0.5)],
+		[closed(0.3), over(voice(2.5, 23)), closed(TAIL)],
 		[
 			{
 				at: ONSET + 72_000,
@@ -142,7 +148,7 @@ const OVERS: Record<string, Step[]> = {
 		],
 	),
 	"reset after a latch": overSteps(
-		[closed(0.3), over(voice(2.5, 29)), closed(0.5)],
+		[closed(0.3), over(voice(2.5, 29)), closed(TAIL)],
 		[
 			{
 				at: ONSET + 72_000,
@@ -248,14 +254,9 @@ describe("A18 framed consumer equals the ordered reference", () => {
 				skew,
 			)
 			const tail = Math.abs(csdr.lastPlayed - ref.lastPlayed)
-			// Known csdr limitation (A18 changes nothing there): with two overs inside the hang,
-			// chunk-late stage-1 edges and block notes shift the A16 tail by several chunks in this
-			// model (8 192 samples observed), so only single overs bound the tail to the skew.
-			if (name === "two overs inside the hang")
-				console.info(
-					`csdr tail skew, two overs inside the hang: ${tail} samples`,
-				)
-			else expect([name, tail <= skew]).toEqual([name, true])
+			expect([name, tail <= skew]).toEqual([name, true])
+			// The tail ends inside the stream (not cut by it).
+			expect(ref.lastPlayed).toBeLessThan(ref.client.length / 2 - 4_800)
 		}
 		expect(
 			csdrConsumer(OVERS["bare carrier"] ?? [], OPTIONS, chunk).firstPlayed,
