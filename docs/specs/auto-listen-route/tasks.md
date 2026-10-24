@@ -1,6 +1,6 @@
 # Auto listen route tasks
 
-Status: not started (2026-10-24). See [requirements](requirements.md) and [design](design.md).
+Status: implemented (2026-10-24); live acceptance and the `src/index.ts` seam pending. See [requirements](requirements.md) and [design](design.md).
 
 Tasks run in order; each lands with its tests, `pnpm run typecheck` and `pnpm run lint`.
 Property tests carry `// Feature: auto-listen-route, Property N: <name>` and `numRuns ≥ 100`.
@@ -8,7 +8,7 @@ No task edits `src/core/evidence-squelch/**`, `src/core/analog-transmission.ts`,
 `src/config.ts`, `src/api/server.ts` or `config/*.yaml`; the `src/index.ts` seam is applied by the
 maintainer from the design (MAIN-NEEDED). Tests are in-process only.
 
-- [ ] 1. Contract, resampler and FIFO
+- [x] 1. Contract, resampler and FIFO
   - `packages/api-types/src/live-audio.ts`: `LIVE_AUDIO_AUTO_ROUTE_*` constants,
     `LiveAudioAutoRouteSource`, `LiveAudioAutoRoute`, `LiveAudioAutoRouteLevel`, optional
     `autoRoute` on `LiveDemodStatus` and `LiveAudioLevel`
@@ -28,7 +28,7 @@ maintainer from the design (MAIN-NEEDED). Tests are in-process only.
   - **Property 2: Resampler response**
   - **Property 9: Pre-roll shadow equivalence**, **Property 15: Shadow from any start**
 
-- [ ] 2. Router
+- [x] 2. Router
   - `src/core/auto-listen/inputs.ts` (`AnalogInput`, `VoiceInput`),
     `src/core/auto-listen/router.ts` (`AutoListenRouter`: pacer, selection, release, preemption,
     catch-up, bounded pacing and rebase, admission versus drain, invalidation, fresh output
@@ -46,7 +46,7 @@ maintainer from the design (MAIN-NEEDED). Tests are in-process only.
     Coverage**, **Property 14: Output blocks are immutable**, **Property 16: Digital
     tail**
 
-- [ ] 3. Wiring and API
+- [x] 3. Wiring and API
   - `src/core/live-demodulator.ts`: router construction, `/auto` in `resolveRoute`, sample-aligned
     analog spans at the three client-write sites, `PreRollShadow` calls next to each pre-roll
     call with the shadow built, cleared and dropped with the pre-roll (tracking with or
@@ -68,7 +68,7 @@ maintainer from the design (MAIN-NEEDED). Tests are in-process only.
   - **Property 8: Analog equals `/stream`, sample-aligned**, **Property 13: Existing streams
     unchanged**
 
-- [ ] 4. Acceptance (checkpoint)
+- [x] 4. Acceptance (checkpoint)
   - `tests/unit/core/auto-listen/acceptance.test.ts`: the in-process fake-link fixture of
     design "Fake-link acceptance plan" (analog over, then DMR over, on one channel; plus 9.2)
   - Report the MAIN-NEEDED `src/index.ts` seam from the design for the maintainer to apply, then
