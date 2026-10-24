@@ -160,8 +160,8 @@ export class SourceFifo {
 			const c = resampler.consumed
 			if (p > 0) {
 				this.size += p
-				// Output flags follow the filter centre, so count them rather than `f`.
-				this.countQualified(tail, p)
+				// Output flags follow the filter centre; the resampler counts them as it writes.
+				this.qualified += resampler.producedFlagged
 				wrote += p
 			}
 			i += c
@@ -187,17 +187,22 @@ export class SourceFifo {
 		const cap = this.capacity
 		const ring = this.ring
 		const flags = this.flagRing
+		// One pass copies samples and flags and counts the qualified ones removed.
 		let p = this.head
+		let q = 0
 		for (let j = 0; j < take; j++) {
-			out[o + j] = ring[p] ?? 0
-			if (flagsOut !== null) flagsOut[o + j] = flags[p] ?? FLAG_SILENT
+			out[o + j] = ring[p]!
+			const fl = flags[p]!
+			if (fl !== FLAG_SILENT) q++
+			if (flagsOut !== null) flagsOut[o + j] = fl
 			p = p + 1 === cap ? 0 : p + 1
 		}
 		if (want > take) {
 			out.fill(0, o + take, o + want)
 			if (flagsOut !== null) flagsOut.fill(FLAG_SILENT, o + take, o + want)
 		}
-		this.removeHead(take)
+		this.qualified -= q
+		this.advance(take)
 		return take
 	}
 
@@ -230,11 +235,6 @@ export class SourceFifo {
 
 	// --- internals ---
 
-	private removeHead(n: number): void {
-		this.countRemoved(n)
-		this.advance(n)
-	}
-
 	private dropHead(n: number): void {
 		const k = Math.min(n, this.size)
 		this.countRemoved(k)
@@ -252,11 +252,6 @@ export class SourceFifo {
 			p = p + 1 === cap ? 0 : p + 1
 		}
 		this.qualified -= q
-	}
-
-	private countQualified(from: number, n: number): void {
-		for (let j = from; j < from + n; j++)
-			if (this.flagRing[j] !== FLAG_SILENT) this.qualified++
 	}
 
 	/** Removes `n` samples known to be silent or already counted. */

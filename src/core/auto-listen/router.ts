@@ -433,6 +433,9 @@ export class AutoListenRouter extends EventEmitter {
 
 	private select(next: Selected, now: number): void {
 		if (next === this.selected) return
+		// 4.3: a switch starts the new source at its oldest queued audible sample, so silence
+		// queued before it (between blocks, or before the first tick) is not played.
+		if (next !== null) next.out.discardUntilAudible()
 		this.selected = next
 		this.selectedAt = now
 		this.sinceWall = this.wallClock()

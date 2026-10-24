@@ -19,6 +19,7 @@ import type {
 	VoiceTapSource,
 } from "../../src/core/auto-listen/contract.js"
 import { PreRollShadow } from "../../src/core/auto-listen/preroll-shadow.js"
+import { PolyphaseResampler } from "../../src/core/auto-listen/resampler.js"
 import { AutoListenRouter } from "../../src/core/auto-listen/router.js"
 import type { StreamFormat } from "../../src/core/audio-stream-server.js"
 import { createLogger } from "../../src/utils/logger.js"
@@ -125,6 +126,33 @@ function analogSecond(rate: number, format: "s16le" | "f32le") {
 		}
 	}
 }
+
+function resampleSecond(rate: number, format: "s16le" | "f32le") {
+	const res = new PolyphaseResampler(rate, 48_000)
+	const chunk = analogChunk(rate, format)
+	const view =
+		format === "s16le"
+			? new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2)
+			: new Float32Array(chunk.buffer, chunk.byteOffset, chunk.length / 4)
+	const out = new Int16Array(4_096)
+	const flags = new Uint8Array(4_096)
+	return () => {
+		for (let k = 0; k < 50; k++) {
+			let i = 0
+			while (i < view.length) {
+				res.process(view, i, view.length, out, 0, out.length, 1, flags)
+				i += res.consumed
+			}
+		}
+	}
+}
+
+describe("resampler alone, 1 s of audio per iteration (mean ms / 1 000 = core)", () => {
+	bench("resample 8 000 Hz voice → 48 kHz", resampleSecond(8_000, "s16le"))
+	bench("resample 25 600 Hz s16le → 48 kHz", resampleSecond(25_600, "s16le"))
+	bench("resample 25 000 Hz s16le → 48 kHz", resampleSecond(25_000, "s16le"))
+	bench("resample 200 000 Hz f32le → 48 kHz", resampleSecond(200_000, "f32le"))
+})
 
 describe("auto listen route, 1 s of audio per iteration (mean ms / 1 000 = core)", () => {
 	bench(

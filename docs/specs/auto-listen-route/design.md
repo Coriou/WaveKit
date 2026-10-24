@@ -191,7 +191,7 @@ phases and the phase step lands on table points (8 k → 48 k: `L = 6`; 25 k →
 `L`) the table holds 512 phases and adjacent phases are linearly interpolated; the
 interpolation error is bounded by `(π × 0.5 / 512)² / 8 ≈ 1.2 × 10⁻⁶` (about −118 dB), far
 below the stopband. The phase accumulator is the integer pair (`k mod L`, input index), so long
-runs never drift. Tables (`Float32Array(phases × N)`, at most 512 × 138 × 4 B ≈ 283 kB) and an
+runs never drift. Tables (`Float64Array(phases × N)`, Float64 so the dot product needs no float32 conversion; at most 513 × 138 × 8 B ≈ 566 kB) and an
 `N`-sample history ring are allocated in the constructor only, and only when the rate changes.
 
 ```ts
@@ -575,6 +575,28 @@ inner loops are taken at about 1 ns per MAC on the desktop reference host and 5 
 | Total, NFM + one decoder, one client       |                                     | ≤ 0.01       | ≤ 0.035                    |
 | Total, worst case (200 kHz + two decoders) |                                     | ≤ 0.025      | ≤ 0.1                      |
 | No `/auto` client                          | shadow tags plus one branch/chunk   | ≤ 0.0005     | ≤ 0.002                    |
+
+**Measured and proposed revision (not yet adopted; pending a quiet-host re-run).** The first
+bench run (Intel i5-1038NG7, 4 cores / 8 threads, node darwin-x64, load average 50 to 63 during
+the run) measured the resampler alone, after the inner-loop optimisation (contiguous double-ring
+window, Float64 history and taps, 4-way unrolled dot product, fused FIFO copy and flag count),
+at a best-of-run 4.3 ms per audio second at 25 kHz in, 3.0 ms at 8 kHz in and 16 ms at
+200 kHz in. That is 4.3 ms / (48 000 × 34) ≈ 2.6 ns per multiply-add, not the 1 ns taken above,
+on an oversubscribed host (about 7 runnable threads per hardware thread), so the true
+quiet-host figure is likely lower. If a quiet re-run confirms about 2.6 ns per MAC, the
+desktop rows become:
+
+| Stage                                  | Arithmetic                         | Proposed desktop core |
+| -------------------------------------- | ---------------------------------- | --------------------- |
+| Analog NFM resample                    | 48 000 × 34 × 2.6 ns ≈ 4.3 ms/s    | ≤ 0.005               |
+| Analog 200 kHz (exact 6/25 phases)     | 48 000 × 138 × 2.6 ns ≈ 17 ms/s    | ≤ 0.02                |
+| Voice 8 k → 48 k, per decoder          | 48 000 × 34 × 2.6 ns ≈ 4.3 ms/s    | ≤ 0.005               |
+| Total, NFM + one decoder, one client   | 2 × 0.005 + routing ≈ 0.003        | ≤ 0.015               |
+| Total, worst case (200 kHz + two dec.) | 0.02 + 2 × 0.005 + routing ≈ 0.005 | ≤ 0.04                |
+
+Pi 4-class estimates scale by the same factor (about × 5 per MAC): NFM plus one decoder about
+0.07, worst case about 0.2 core, still under the 0.3-core floor but no longer negligible; the
+Pi figures need a measurement before the 200 kHz worst case is accepted there.
 
 All below the 0.3-core noise floor. The bench `tests/bench/auto-listen-route.bench.ts` (not
 collected by the root suite, which takes only `tests/**/*.test.ts`; run with

@@ -112,7 +112,9 @@ the analog audio heard on `/auto` equals `/stream` resampled.
 3.2 **Digital admission.** A decoder's voice frame is admitted when, at its arrival, the
 decoder covers the tuned channel (3.4) and has an active call that is not wholly muted for
 encryption. A decoder qualifies while it has admitted a frame within
-`LIVE_AUDIO_AUTO_ROUTE_DIGITAL_HOLD_MS` (300 ms). Datagrams are taken after the service's
+`LIVE_AUDIO_AUTO_ROUTE_DIGITAL_HOLD_MS` (300 ms); the hold ends the call's resampler tail (4.11)
+and runs concurrently with the release window of 4.4, both measured from the last admission, so
+release is not delayed by hold plus release. Datagrams are taken after the service's
 encryption muting, so encrypted audio is never routed.
 
 3.3 **Voice frames reach the router without a digital voice client.** The digital voice service
@@ -164,8 +166,9 @@ only on FIFO overflow (oldest first, counted in `autoRoute.droppedMs`) or on a r
 
 4.4 **Release before handover.** The selected source keeps playing until it releases:
 analog releases after it has been inaudible for `LIVE_AUDIO_AUTO_ROUTE_ANALOG_RELEASE_MS` (300 ms)
-and its FIFO holds no audible sample; digital releases after it has stopped qualifying for
-`LIVE_AUDIO_AUTO_ROUTE_DIGITAL_RELEASE_MS` (300 ms) and its FIFO is empty.
+and its FIFO holds no audible sample; digital releases once it has admitted no frame for `LIVE_AUDIO_AUTO_ROUTE_DIGITAL_RELEASE_MS`
+(300 ms, measured from its last admission, not added to the 3.2 hold) and its FIFO holds no
+admitted sample.
 
 4.5 **Preemption bound.** When digital qualifies while analog is selected and analog has not
 released within `LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS` (1 500 ms, equal to

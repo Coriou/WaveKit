@@ -98,9 +98,9 @@ export class PolyphaseResampler {
 	/** Table phases: `up` when exact, else 512 (plus one row for interpolation). */
 	readonly phases: number
 	readonly interpolated: boolean
-	private readonly table: Float32Array
+	private readonly table: Float64Array
 	/** History double ring: sample i stored at pos and pos + taps, so a window is contiguous. */
-	private readonly hist: Float32Array
+	private readonly hist: Float64Array
 	private readonly flags: Uint8Array
 	private pos = 0
 	/** Input samples received since the last reset. */
@@ -110,6 +110,7 @@ export class PolyphaseResampler {
 	private ph = 0
 	private lastConsumed = 0
 	private lastProduced = 0
+	private lastFlagged = 0
 
 	constructor(inRate: number, outRate: number) {
 		if (!validRate(inRate) || !validRate(outRate))
@@ -127,7 +128,7 @@ export class PolyphaseResampler {
 		this.interpolated = this.up > RESAMPLER_MAX_EXACT_PHASES
 		this.phases = this.interpolated ? RESAMPLER_MAX_EXACT_PHASES : this.up
 		const rows = this.interpolated ? this.phases + 1 : this.phases
-		this.table = new Float32Array(rows * n)
+		this.table = new Float64Array(rows * n)
 		const fc = (CUTOFF * Math.min(inRate, outRate)) / inRate
 		const i0b = besselI0(KAISER_BETA)
 		const half = n / 2
@@ -150,13 +151,18 @@ export class PolyphaseResampler {
 			for (let i = 0; i < n; i++)
 				this.table[base + i] = (this.table[base + i] ?? 0) / sum
 		}
-		this.hist = new Float32Array(2 * n)
+		this.hist = new Float64Array(2 * n)
 		this.flags = new Uint8Array(2 * n)
 	}
 
 	/** Input samples consumed by the last `process` call. */
 	get consumed(): number {
 		return this.lastConsumed
+	}
+
+	/** Output samples of the last `process` call with a non-zero flag (when `outFlags` given). */
+	get producedFlagged(): number {
+		return this.lastFlagged
 	}
 
 	/** Output samples written by the last `process` call. */
@@ -211,18 +217,44 @@ export class PolyphaseResampler {
 		const table = this.table
 		const up = this.up
 		const down = this.down
+		const interpolated = this.interpolated
+		const phases = this.phases
+		// Hot state in locals (written back below); the window hist[w .. w + n) is contiguous
+		// (double ring), so the dot product has no modulo, branch or bounds fallback.
+		let pos = this.pos
+		let inCount = this.inCount
+		let idx = this.idx
+		let ph = this.ph
+		let flagged = 0
+		// n is even (resamplerTaps): the exact path unrolls by 4 with a final pair.
 		for (;;) {
-			if (this.inCount - 1 >= this.idx + half) {
+			if (inCount - 1 >= idx + half) {
 				if (o >= oEnd) break
-				// Window = the last N inputs, oldest first, at hist[pos .. pos + N).
-				const w = this.pos
-				let acc = 0
-				if (!this.interpolated) {
-					const base = this.ph * n
-					for (let k = 0; k < n; k++)
-						acc += (hist[w + k] ?? 0) * (table[base + k] ?? 0)
+				const w = pos
+				let acc: number
+				if (!interpolated) {
+					const base = ph * n
+					let a0 = 0
+					let a1 = 0
+					let a2 = 0
+					let a3 = 0
+					let k = 0
+					for (; k + 4 <= n; k += 4) {
+						const h = w + k
+						const c = base + k
+						a0 += hist[h]! * table[c]!
+						a1 += hist[h + 1]! * table[c + 1]!
+						a2 += hist[h + 2]! * table[c + 2]!
+						a3 += hist[h + 3]! * table[c + 3]!
+					}
+					// n is even: at most one pair is left.
+					if (k < n) {
+						a0 += hist[w + k]! * table[base + k]!
+						a1 += hist[w + k + 1]! * table[base + k + 1]!
+					}
+					acc = a0 + a1 + (a2 + a3)
 				} else {
-					const at = (this.ph * this.phases) / up
+					const at = (ph * phases) / up
 					const p0 = Math.floor(at)
 					const t = at - p0
 					const b0 = p0 * n
@@ -230,37 +262,45 @@ export class PolyphaseResampler {
 					let a0 = 0
 					let a1 = 0
 					for (let k = 0; k < n; k++) {
-						const x = hist[w + k] ?? 0
-						a0 += x * (table[b0 + k] ?? 0)
-						a1 += x * (table[b1 + k] ?? 0)
+						const x = hist[w + k]!
+						a0 += x * table[b0 + k]!
+						a1 += x * table[b1 + k]!
 					}
 					acc = a0 + (a1 - a0) * t
 				}
 				out[o] = toInt16(acc)
-				if (outFlags !== null) outFlags[o] = flags[w + half - 1] ?? 0
+				if (outFlags !== null) {
+					const of = flags[w + half - 1]!
+					outFlags[o] = of
+					if (of !== 0) flagged++
+				}
 				o++
-				this.ph += down
-				if (this.ph >= up) {
-					const q = Math.floor(this.ph / up)
-					this.idx += q
-					this.ph -= q * up
+				ph += down
+				if (ph >= up) {
+					const q = Math.floor(ph / up)
+					idx += q
+					ph -= q * up
 				}
 				continue
 			}
 			if (i >= iEnd) break
-			const raw = input[i] ?? 0
+			const raw = input[i]!
 			const v = isFloat ? f32ToInt16(raw) : raw
-			const p = this.pos
-			hist[p] = v
-			hist[p + n] = v
-			flags[p] = f
-			flags[p + n] = f
-			this.pos = p + 1 === n ? 0 : p + 1
-			this.inCount++
+			hist[pos] = v
+			hist[pos + n] = v
+			flags[pos] = f
+			flags[pos + n] = f
+			pos = pos + 1 === n ? 0 : pos + 1
+			inCount++
 			i++
 		}
+		this.pos = pos
+		this.inCount = inCount
+		this.idx = idx
+		this.ph = ph
 		this.lastConsumed = i - i0
 		this.lastProduced = o - o0
+		this.lastFlagged = flagged
 		// Keep counters small: shift the input origin once the index passes a large bound.
 		if (this.idx > 1_000_000_000) {
 			this.inCount -= this.idx
@@ -278,5 +318,6 @@ export class PolyphaseResampler {
 		this.ph = 0
 		this.lastConsumed = 0
 		this.lastProduced = 0
+		this.lastFlagged = 0
 	}
 }

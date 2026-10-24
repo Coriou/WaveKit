@@ -834,6 +834,58 @@ describe("AutoListenRouter", () => {
 		expect(sim.router.wanted).toBe(false)
 	})
 
+	it("starts a newly selected source at its first audible sample (4.3 regression)", () => {
+		const sim = new Sim()
+		sim.connect()
+		// Before the first tick: 480 silent then 960 audible samples at 48 kHz.
+		sim.analog(new Int16Array(480), false)
+		sim.analog(noise(960, lcg(30)), true)
+		sim.step()
+		const ref = sim.analogRef()
+		const firstAudible = ref.flags.findIndex(f => f !== 0)
+		const first = sim.of("analog", "read")[0]
+		expect(first?.block).toBe(0)
+		expect(first?.from).toBe(firstAudible)
+		expect(sim.produced[0]?.readInt16LE(0)).toBe(ref.samples[firstAudible])
+		sim.expectReadsMatch("analog", ref)
+	})
+
+	it.each([
+		[1, 900, "a"],
+		[19, 920, "b"],
+	])(
+		"digital releases 300 ms after the last admission, not hold + release (offset %i ms)",
+		(offset, checkAt, expected) => {
+			const sim = new Sim()
+			const rand = lcg(31)
+			sim.connect()
+			for (let i = 0; i < 30; i++) {
+				sim.frame("a", noise(160, rand))
+				if (i < 3) sim.frame("b", noise(160, rand))
+				sim.step()
+			}
+			// Last admission of "a" at T = 600 + offset, its call ends at once (tail flushed).
+			sim.clock.tick(offset)
+			const lastAt = sim.clock.t
+			sim.frame("a", noise(160, rand))
+			sim.callEvent("a", call({ active: false }))
+			sim.clock.tick(20 - offset)
+			const at = new Map<number, string | undefined>()
+			while (sim.clock.t < 1_000) {
+				sim.step()
+				at.set(
+					sim.clock.t,
+					sim.router.status({ httpUrl: "", wavUrl: "" }).decoderId,
+				)
+			}
+			// offset 1: the block at T + 299 ms still plays "a" (nothing queued, not released);
+			// offset 19: the block at T + 301 ms has switched to "b".
+			expect(checkAt - lastAt).toBe(expected === "a" ? 299 : 301)
+			expect(at.get(checkAt)).toBe(expected)
+			expect(at.get(checkAt + 20)).toBe("b")
+		},
+	)
+
 	// Feature: auto-listen-route, Property 14: Output blocks are immutable
 	// Validates: Requirements 2.8
 	it("keeps every block intact while a socket withholds drain for seconds (delayed-drain regression)", () => {
