@@ -120,17 +120,17 @@ Follow-up 2026-10-24:
       `tests/unit/core/live-demod-rust-fallback.test.ts`,
       `tests/unit/core/live-demod-rust-protocol-discontinuity.test.ts`.
   - _Requirements: 3.8.1, 3.8.7, 3.8.13_
-- [x] A1.8 Review round: positional discontinuity queue with cause semantics
+- [x] A1.8 positional discontinuity queue with cause semantics
       (`CarrierBlockLog.noteDiscontinuity`, tracker `readGaps`, `invalidateBlocks`, `lateMask`,
       `carrierPcm`), startup replay order (`rust-run.ts` `applyStartup`), cause passthrough
       (`rust-protocol.ts`, `rust-engine.ts`), window-only STE skip (`steDecide`); the review's
       repro cases ported into `tests/unit/core/analog-transmission-carrier.test.ts`.
   - _Requirements: 3.8.1, 3.8.13_
-- [x] A1.9 Review round 2: immediate late-gap masking (`readGaps`), fail-closed desynchronized
+- [x] A1.9 immediate late-gap masking (`readGaps`), fail-closed desynchronized
       run past `CARRIER_LOG_GAPS` (`CarrierBlockLog.desynced`, `droppedTotal`, tracker
       `enterDesync`, `desyncedRuns()`), startup notice cap (`rust-run.ts`); tests at 16 and 17.
   - _Requirements: 3.8.1_
-- [x] A1.10 Review round 3 (2026-10-24): desync discards the held STE window (`enterDesync`,
+- [x] A1.10 desync discards the held STE window (`enterDesync`,
       `steFlush`); startup dropped-sample sum past the kept notices (`rust-run.ts`
       `applyStartup`); tests for 15 blocks + 17 gaps and 18 startup notices.
   - _Requirements: 3.8.1, 3.8.13_

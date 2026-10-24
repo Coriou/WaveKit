@@ -547,7 +547,7 @@ alone.
   Goertzel step, one square and one copy into the preallocated window (allocated once per PCM
   format); the tone results arrive up to 200 ms later.
 
-### Follow-up 2026-10-24 (review round): positional discontinuities, recoverable STE
+### Follow-up 2026-10-24: positional discontinuities, recoverable STE
 
 - **Causes (read in `native/wavekit-chan/src/runtime.rs`).** `queue-overflow`: the writer queue
   was full, `droppedSamples` output samples from `sampleIndex` never reach the socket (the
@@ -570,7 +570,7 @@ alone.
 - **STE.** `steDecide` skips an STE-dominated window only; the next window feeds again. A real
   tail is followed by the carrier drop, so it is still removed.
 
-### Follow-up 2026-10-24 (review round 2): fail-closed gap accounting
+### Follow-up 2026-10-24: fail-closed gap accounting
 
 Native reports a `queue-overflow` only when the writer's one-second queue is full, so a healthy
 run sees none and a stalled client a few; 16 per run is far above that. Bound: 16 masks of two
@@ -586,7 +586,7 @@ notices, enough to trigger the same fail-closed state. Tests: 16 and 17 gaps for
 output offset and the fed audio; 16 and 17 startup notices; the late notice with metrics
 draining before the next chunk.
 
-Follow-up 2026-10-24 (review round 3): entering the desynchronized state also discards the held
+Follow-up 2026-10-24: entering the desynchronized state also discards the held
 200 ms STE window (it is never fed), and the STE flush is a no-op while desynchronized.
 `rust-run.ts` sums the queue-overflow dropped samples of startup notices past its kept list and
 replays the sum as one more notice, so `droppedTotal` stays exact (the list is already past the
