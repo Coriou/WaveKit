@@ -1478,13 +1478,17 @@ async function main(): Promise<void> {
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
 
 		// auto-listen-route 3.4: coverage only on a verified, settled frequency that matches.
-		for (const event of [
+		const coverageEvents = [
 			"decoder:started",
 			"decoder:stopped",
 			"decoder:removed",
 			"decoder:status-changed",
-		] as const)
-			decoderManager.on(event, bumpCoverage)
+		] as const
+		for (const event of coverageEvents) decoderManager.on(event, bumpCoverage)
+		own(20, () => {
+			for (const event of coverageEvents)
+				decoderManager.off(event, bumpCoverage)
+		})
 		const liveVfo = () =>
 			vfoFromLiveDemod({
 				sourceId: () =>
