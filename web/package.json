@@ -13,7 +13,8 @@
 		"lint": "eslint -c ../eslint.config.js .",
 		"test": "vitest run --passWithNoTests",
 		"typecheck": "pnpm -w exec tsc -p web/tsconfig.json --noEmit",
-		"perf": "node --experimental-strip-types --no-warnings ./perf/bench.ts"
+		"perf": "node --experimental-strip-types --no-warnings ./perf/bench.ts",
+		"docs:shots": "node --experimental-strip-types --no-warnings ./docs-shots/shoot.ts"
 	},
 	"dependencies": {
 		"@wavekit/api-types": "workspace:*",
