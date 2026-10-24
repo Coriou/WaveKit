@@ -1,6 +1,7 @@
 //! Version-1 control requests (addendum §11; fd 3 per plan A1, `mark-gap` fields per A2).
 //! Protocol 2 adds `open` with `kind: "demod"`, plus `retune` and `squelch`. A `kind`-less
-//! `open` is still the version-1 IQ request, parsed by the same arm as before.
+//! `open` is still the version-1 IQ request, parsed by the same arm as before. Protocol 3 adds
+//! the optional demod `audioFraming: "wkaf1"` (evidence-squelch A18).
 
 use crate::channel::Format;
 use crate::demod::Modulation;
@@ -178,6 +179,8 @@ pub struct DemodOpen {
     pub audio: AudioOpts,
     pub squelch: SquelchOpts,
     pub metrics: bool,
+    /// `audioFraming: "wkaf1"` was requested (A18): the socket carries framed records.
+    pub audio_framing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -486,6 +489,7 @@ fn parse_demod_open(obj: &Map<String, Value>, id: String) -> Result<Request, (St
             "audio",
             "squelch",
             "metrics",
+            "audioFraming",
         ],
     )
     .map_err(err)?;
@@ -527,6 +531,11 @@ fn parse_demod_open(obj: &Map<String, Value>, id: String) -> Result<Request, (St
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err(err("metrics must be a boolean".into())),
     };
+    let audio_framing = match obj.get("audioFraming") {
+        None => false,
+        Some(Value::String(v)) if v == crate::framing::AUDIO_FRAMING => true,
+        Some(_) => return Err(err("audioFraming must be \"wkaf1\"".into())),
+    };
     check_audio_vs_modulation(modulation, &audio).map_err(err)?;
     Ok(Request::OpenDemod(DemodOpen {
         id: id.clone(),
@@ -538,6 +547,7 @@ fn parse_demod_open(obj: &Map<String, Value>, id: String) -> Result<Request, (St
         audio,
         squelch,
         metrics,
+        audio_framing,
     }))
 }
 
@@ -950,6 +960,34 @@ mod tests {
                 .0,
             "x"
         );
+    }
+
+    // Validates: evidence-squelch Requirement 9.1 (audioFraming accepts only "wkaf1")
+    #[test]
+    fn demod_audio_framing_accepts_only_wkaf1() {
+        let line = |extra: &str| {
+            format!(
+                r#"{{"v":1,"type":"open","id":"d","kind":"demod","centerHz":1e8,"bandwidthHz":12500,"modulation":"nfm","format":"s16le","queueBytes":4096{extra}}}"#
+            )
+        };
+        let framing = |extra: &str| match parse_request(&line(extra)) {
+            Ok(Request::OpenDemod(o)) => Ok(o.audio_framing),
+            Ok(_) => panic!("not a demod open"),
+            Err(e) => Err(e.1),
+        };
+        assert_eq!(framing(""), Ok(false));
+        assert_eq!(framing(r#","audioFraming":"wkaf1""#), Ok(true));
+        for bad in [
+            r#","audioFraming":"wkaf2""#,
+            r#","audioFraming":1"#,
+            r#","audioFraming":null"#,
+        ] {
+            assert_eq!(
+                framing(bad),
+                Err("audioFraming must be \"wkaf1\"".into()),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

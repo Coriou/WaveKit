@@ -23,6 +23,7 @@ fn open_nfm(bandwidth_hz: f64, squelch: SquelchOpts, metrics: bool) -> DemodOpen
         audio: AudioOpts::default(),
         squelch,
         metrics,
+        audio_framing: false,
     }
 }
 

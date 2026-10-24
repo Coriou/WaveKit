@@ -20,6 +20,28 @@ struct State {
     high_water: usize,
 }
 
+/// Locked view of a queue for [`ChannelQueue::append`]. Never grows the queue past capacity.
+pub struct Appender<'a> {
+    buf: &'a mut VecDeque<u8>,
+    capacity: usize,
+}
+
+impl Appender<'_> {
+    pub fn room(&self) -> usize {
+        self.capacity - self.buf.len()
+    }
+
+    /// Appends all of `bytes`, or nothing when they do not fit. Callers check [`Self::room`].
+    pub fn extend(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() > self.room() {
+            debug_assert!(false, "append past capacity");
+            return false;
+        }
+        self.buf.extend(bytes);
+        true
+    }
+}
+
 pub struct ChannelQueue {
     state: Mutex<State>,
     cv: Condvar,
@@ -76,6 +98,28 @@ impl ChannelQueue {
         }
     }
 
+    /// Runs `f` with the queue locked so a framed channel (A18) can place whole records against the
+    /// free room. Returns `None`, without calling `f`, when the queue is closed.
+    pub fn append<R>(&self, f: impl FnOnce(&mut Appender) -> R) -> Option<R> {
+        let mut s = self.state.lock().unwrap();
+        if s.closed {
+            return None;
+        }
+        let before = s.buf.len();
+        let mut a = Appender {
+            buf: &mut s.buf,
+            capacity: self.capacity,
+        };
+        let r = f(&mut a);
+        let grew = s.buf.len() > before;
+        s.high_water = s.high_water.max(s.buf.len());
+        drop(s);
+        if grew {
+            self.cv.notify_one();
+        }
+        Some(r)
+    }
+
     /// Blocks until bytes are queued or the queue is closed, then appends up to `max` bytes to
     /// `out`. Returns false only once the queue is closed and fully drained.
     pub fn pop_blocking(&self, max: usize, out: &mut Vec<u8>) -> bool {
@@ -97,7 +141,7 @@ impl ChannelQueue {
     }
 
     /// Non-blocking drain of everything queued (tests stand in for a reader that caught up).
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn try_pop_for_test(&self, out: &mut Vec<u8>) -> usize {
         let mut s = self.state.lock().unwrap();
         let n = s.buf.len();

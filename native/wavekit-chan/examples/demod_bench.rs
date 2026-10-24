@@ -86,6 +86,7 @@ fn open_channel(id: &str) -> DemodChannel {
                 ..SquelchOpts::default()
             },
             metrics: false,
+            audio_framing: false,
         },
     )
     .expect("demod channel")

@@ -14,6 +14,7 @@ use crate::{
         self, Admission, AttemptPermits, Disposal, PayloadPublisher, RuntimePermits,
         WriterPublisher, SLOTS,
     },
+    framing::{self, FrameSink},
     preparation::{Planner, Prepared, SubmitError},
     protocol::{
         parse_observed_request, parse_request, DemodOpen, ObservedRequest, OpenReq, Request,
@@ -121,6 +122,27 @@ struct Open {
     opened_at_byte: u64,
     payload: Option<PayloadPublisher>,
     observed: Option<RuntimePermits>,
+    /// Framed demod output (A18): record-aware queue writes. `None` writes raw bytes as before.
+    framer: Option<FrameSink>,
+}
+
+impl Open {
+    /// Framed only: pushes the staged record and any pending DROP before a close or EOF.
+    fn flush_framed(&mut self, id: &str, events: &mut Vec<Value>) {
+        if self.framer.is_none() {
+            return;
+        }
+        let Engine::Demod(dsp) = &mut self.dsp else {
+            return;
+        };
+        let mut out = Vec::new();
+        dsp.flush_framed(&mut out);
+        let start = self.out_samples;
+        push_output(id, self, &out, start, events);
+        if let Some(sink) = &mut self.framer {
+            sink.finish(&self.queue);
+        }
+    }
 }
 
 struct Pending {
@@ -511,6 +533,7 @@ impl Runtime {
                 opened_at_byte: self.received_bytes(),
                 payload,
                 observed,
+                framer: None,
             },
         );
         self.emit(json!({
@@ -547,11 +570,24 @@ impl Runtime {
                 "channel serial exhausted".into(),
             );
         };
+        if o.audio_framing && o.queue_bytes < framing::min_framed_queue_bytes(o.format) {
+            let detail = format!(
+                "queueBytes below the framed minimum {}",
+                framing::min_framed_queue_bytes(o.format)
+            );
+            return self.reject(&o.id, "channel-request-invalid", detail);
+        }
         let dsp = match DemodChannel::new(self.args.input_rate, self.args.input_center, &o) {
             Ok(dsp) => dsp,
             Err(detail) => return self.reject(&o.id, "channel-request-invalid", detail),
         };
         let queue = Arc::new(ChannelQueue::new(o.queue_bytes, sample_bytes));
+        // A18: the preamble is the first record, queued before the writer can take a client.
+        let framer = dsp.is_framed().then(|| {
+            let sink = FrameSink::new(o.format, dsp.gate_open());
+            sink.start(&queue, o.format);
+            sink
+        });
         let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
         let _ = std::fs::remove_file(&socket);
         let listener = match UnixListener::bind(&socket).and_then(|l| {
@@ -593,9 +629,10 @@ impl Runtime {
                 opened_at_byte: self.received_bytes(),
                 payload: None,
                 observed: None,
+                framer,
             },
         );
-        self.emit(json!({
+        let mut opened = json!({
             "type": "opened",
             "id": o.id,
             "socket": socket.to_string_lossy(),
@@ -604,7 +641,12 @@ impl Runtime {
             "kind": "demod",
             "filterTaps": taps,
             "groupDelaySamples": delay,
-        }));
+        });
+        if o.audio_framing {
+            // The echo: the only signal that the socket is framed (A18 negotiation).
+            opened["audioFraming"] = json!(framing::AUDIO_FRAMING);
+        }
+        self.emit(opened);
     }
 
     fn retune_iq(&mut self, channel_id: String, center_hz: f64) {
@@ -673,6 +715,11 @@ impl Runtime {
         let Some(mut ch) = self.channels.remove(id) else {
             return;
         };
+        let mut flushed = Vec::new();
+        ch.flush_framed(id, &mut flushed);
+        for e in flushed {
+            self.emit(e);
+        }
         if let Some(e) = overflow_event(id, &mut ch) {
             self.emit(e); // A13: an open run is reported before `closed`
         }
@@ -800,6 +847,13 @@ impl Runtime {
                 // Opened at or after the marked byte (a late mark): no input before the gap, no seam.
                 continue;
             }
+            if let (Some(_), Engine::Demod(dsp)) = (&ch.framer, &mut ch.dsp) {
+                // A18: no staged sample may cross the RESET record.
+                let mut out = Vec::new();
+                dsp.flush_framed(&mut out);
+                let start = ch.out_samples;
+                push_output(id, ch, &out, start, &mut events);
+            }
             events.extend(overflow_event(id, ch)); // A13: an open run is reported before the gap
             ch.dsp.reset(); // NCO index, filter history, polyphase phase and the A12 schedule
             let dropped = (dropped_in / 2) as u128 * ch.dsp.output_rate() as u128 / fs as u128;
@@ -810,6 +864,9 @@ impl Runtime {
                 "droppedSamples": dropped as u64,
                 "cause": "input-gap",
             }));
+            if let (Some(sink), Engine::Demod(dsp)) = (&mut ch.framer, &ch.dsp) {
+                sink.on_reset(&ch.queue, dropped as u64, dsp.gate_open());
+            }
         }
         for e in events {
             self.emit(e);
@@ -828,21 +885,7 @@ impl Runtime {
             ch.saturated += r.saturated;
             let first = ch.out_samples;
             ch.out_samples += r.samples;
-            let p = ch.queue.push(&out);
-            if p.closed {
-                // Only the writer closes a queue while its channel is open: the client is gone and
-                // `closed: client-gone` follows at the next poll. Not an overflow.
-                continue;
-            }
-            // A13: any accepted sample ends the open run; within a push accepted samples precede dropped ones.
-            if p.accepted_samples > 0 {
-                events.extend(overflow_event(id, ch));
-            }
-            if p.dropped_samples > 0 {
-                let first = first + p.accepted_samples;
-                ch.run.get_or_insert((first, 0)).1 += p.dropped_samples;
-                ch.dropped += p.dropped_samples;
-            }
+            push_output(id, ch, &out, first, &mut events);
         }
         for e in events {
             self.emit(e);
@@ -886,6 +929,7 @@ impl Runtime {
         let mut writers = Vec::new();
         let mut events = Vec::new();
         for (id, mut ch) in std::mem::take(&mut self.channels) {
+            ch.flush_framed(&id, &mut events);
             // A13: an open run is reported before input-eof.
             events.extend(overflow_event(&id, &mut ch));
             // A connected writer (or one whose client is already in the backlog) drains the queue
@@ -966,6 +1010,40 @@ impl Runtime {
     fn on_eof_no_exit_for_test(&mut self) {
         self.cancel_preparations();
         self.drain_all(EOF_DRAIN_BUDGET);
+    }
+}
+
+/// Queues one DSP output batch (raw bytes, or whole records on a framed channel) and keeps the
+/// A13 drop run. `start` is the output index of the batch's first sample when unframed.
+fn push_output(id: &str, ch: &mut Open, out: &[u8], start: u64, events: &mut Vec<Value>) {
+    let (accepted, dropped, first_dropped, closed) = match &mut ch.framer {
+        Some(sink) => {
+            let r = sink.push(&ch.queue, out);
+            (
+                r.accepted_samples,
+                r.dropped_samples,
+                r.first_dropped,
+                r.closed,
+            )
+        }
+        None => {
+            let p = ch.queue.push(out);
+            let first = start + p.accepted_samples;
+            (p.accepted_samples, p.dropped_samples, first, p.closed)
+        }
+    };
+    if closed {
+        // Only the writer closes a queue while its channel is open: the client is gone and
+        // `closed: client-gone` follows at the next poll. Not an overflow.
+        return;
+    }
+    // A13: any accepted sample ends the open run; within a push accepted samples precede dropped ones.
+    if accepted > 0 {
+        events.extend(overflow_event(id, ch));
+    }
+    if dropped > 0 {
+        ch.run.get_or_insert((first_dropped, 0)).1 += dropped;
+        ch.dropped += dropped;
     }
 }
 
@@ -2481,5 +2559,161 @@ mod tests {
             panic!("out-of-range bandwidth must fail parse");
         };
         assert_eq!(retune_reason, "channel-request-invalid");
+    }
+
+    fn demod_open(id: &str, queue: usize, framing: bool) -> Request {
+        let extra = if framing {
+            r#","audioFraming":"wkaf1""#
+        } else {
+            ""
+        };
+        parse_request(&format!(
+            r#"{{"v":1,"type":"open","id":"{id}","kind":"demod","centerHz":162000000,"bandwidthHz":12500,"modulation":"nfm","format":"s16le","queueBytes":{queue},"squelch":{{"mode":"off"}},"metrics":false{extra}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn take_queue(r: &Runtime, id: &str) -> Vec<u8> {
+        let mut v = Vec::new();
+        r.channels[id].queue.try_pop_for_test(&mut v);
+        v
+    }
+
+    fn iq_bytes(n: usize) -> Vec<u8> {
+        (0..n as u32)
+            .map(|k| (128 + ((k * 7) % 40) as i32 - 20) as u8)
+            .collect()
+    }
+
+    // Feature: evidence-squelch, Property A18-4: negotiation
+    // Validates: Requirement 9.1 (echo only when requested; raw PCM unless echoed; preamble first)
+    #[test]
+    fn framing_is_echoed_only_when_requested_and_the_payload_matches_raw() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(demod_open("raw", 1 << 20, false));
+        assert!(
+            last(&ev).get("audioFraming").is_none(),
+            "no echo without a request"
+        );
+        r.request_and_wait(demod_open("fr", 1 << 20, true));
+        assert_eq!(last(&ev)["audioFraming"], "wkaf1");
+        let input = iq_bytes(2 * 204_800);
+        for chunk in input.chunks(4_093) {
+            r.on_input(chunk);
+        }
+        let raw = take_queue(&r, "raw");
+        assert_eq!(raw.len() as u64, r.channels["raw"].out_samples * 2);
+        let mut flushed = Vec::new();
+        let mut ch = r.channels.remove("fr").unwrap();
+        ch.flush_framed("fr", &mut flushed);
+        let mut framed = Vec::new();
+        ch.queue.try_pop_for_test(&mut framed);
+        assert_eq!(
+            &framed[..16],
+            &framing::preamble(crate::protocol::AudioFormat::S16Le, true)
+        );
+        let (pre, frames) = framing::decode_stream(&framed, 2).unwrap();
+        assert!(pre.gate_open);
+        let mut pcm = Vec::new();
+        for f in &frames {
+            if let framing::Frame::Pcm(p) = f {
+                pcm.extend_from_slice(p);
+            }
+        }
+        assert!(pcm == raw, "framed PCM equals the raw stream");
+        assert!(flushed.is_empty(), "no overflow");
+        r.channels.insert("fr".into(), ch);
+        r.on_eof_no_exit_for_test();
+    }
+
+    // Validates: Requirement 9.4 (framed queue minimum at and one below its bound)
+    #[test]
+    fn framed_queue_minimum_is_enforced() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let min = framing::min_framed_queue_bytes(crate::protocol::AudioFormat::S16Le);
+        r.request_and_wait(demod_open("small", min - 1, true));
+        assert_eq!(last(&ev)["type"], "rejected");
+        r.request_and_wait(demod_open("small", min - 1, false));
+        assert_eq!(
+            last(&ev)["type"],
+            "opened",
+            "unframed keeps its old minimum"
+        );
+        r.request_and_wait(demod_open("edge", min, true));
+        assert_eq!(last(&ev)["type"], "opened");
+        r.on_input(&iq_bytes(2 * 40_960));
+        r.on_eof_no_exit_for_test();
+    }
+
+    // Validates: Requirements 9.2, 9.3 (RESET at the A2 seam, at the stdout sampleIndex; DROP at
+    // the stdout queue-overflow sampleIndex)
+    #[test]
+    fn reset_and_drop_records_sit_at_the_stdout_sample_indices() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(demod_open("g", 1 << 20, true));
+        r.request_and_wait(demod_open("s", 2_000, true));
+        let pre = iq_bytes(2 * 20_011);
+        r.request_and_wait(Request::MarkGap {
+            at_input_byte: Some(pre.len() as u64),
+            dropped_input_bytes: Some(2 * 4_800),
+        });
+        let mut input = pre.clone();
+        input.extend(iq_bytes(2 * 60_000));
+        for chunk in input.chunks(1_001) {
+            r.on_input(chunk);
+        }
+        let gap = of_cause(&ev, "input-gap");
+        let gap_g = gap.iter().find(|e| e["id"] == "g").unwrap();
+        let (qg, qs) = (r.channels["g"].queue.clone(), r.channels["s"].queue.clone());
+        r.on_eof_no_exit_for_test(); // flushes staged records and reports the open drop run
+        let (mut g, mut s) = (Vec::new(), Vec::new());
+        qg.try_pop_for_test(&mut g);
+        qs.try_pop_for_test(&mut s);
+        let (_, frames) = framing::decode_stream(&g, 2).unwrap();
+        let resets: Vec<_> = frames
+            .iter()
+            .filter_map(|f| match f {
+                framing::Frame::Reset {
+                    at, dropped_input, ..
+                } => Some((*at, *dropped_input)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resets,
+            [(
+                gap_g["sampleIndex"].as_u64().unwrap(),
+                gap_g["droppedSamples"].as_u64().unwrap()
+            )]
+        );
+        let (_, frames) = framing::decode_stream(&s, 2).unwrap();
+        let first_drop = frames.iter().find_map(|f| match f {
+            framing::Frame::Drop { at, .. } => Some(*at),
+            _ => None,
+        });
+        let overflow = of_cause(&ev, "queue-overflow");
+        let first_overflow = overflow.iter().find(|e| e["id"] == "s").unwrap();
+        assert_eq!(first_drop, first_overflow["sampleIndex"].as_u64());
+    }
+
+    // Validates: Requirement 9.3 (the staged record reaches the client at close)
+    #[test]
+    fn close_flushes_the_staged_record() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.request_and_wait(demod_open("c", 1 << 20, true));
+        r.on_input(&iq_bytes(2 * 10_000)); // ~234 samples: less than one block, all staged
+        let q = r.channels["c"].queue.clone();
+        let samples = r.channels["c"].out_samples;
+        assert!(samples > 0 && samples < 480);
+        r.close("c", "requested");
+        let mut v = Vec::new();
+        q.try_pop_for_test(&mut v);
+        let (_, frames) = framing::decode_stream(&v, 2).unwrap();
+        assert_eq!(frames, [framing::Frame::Pcm(v[24..].to_vec())]);
+        assert_eq!(v.len() as u64, 24 + samples * 2);
     }
 }
