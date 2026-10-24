@@ -586,7 +586,7 @@ describe("decoder enablement composition", () => {
 		for (const seam of [
 			"bandplanRangeContains",
 			"getResolved: () => bandPlanService?.resolved()",
-			"onSettled: value => decoderManager.notifyVfoSettled(value)",
+			"decoderManager.notifyVfoSettled(value)",
 			"sourceRouting.branchDropCounters(id)",
 			"sourceRouting.branchTopology(id)",
 			"composeDecoderEfficiencyGate(",
