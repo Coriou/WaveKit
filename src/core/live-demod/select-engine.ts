@@ -9,6 +9,8 @@
  */
 
 export const DEMOD_PROTOCOL = 2
+/** A18: binaries at this protocol or later frame the audio socket on request. */
+export const DEMOD_FRAMING_PROTOCOL = 3
 export const RUST_AUDIO_RATE_HZ = 48_000
 export const DEMOD_MIN_BANDWIDTH_HZ = 2_500
 export const DEMOD_MAX_BANDWIDTH_HZ = 40_000

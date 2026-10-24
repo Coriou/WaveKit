@@ -11,9 +11,11 @@ import type {
 } from "./contract.js"
 import {
 	EVIDENCE_FADE_OUT_MS,
+	EVIDENCE_NOTE_DISCARD,
 	msToSamples,
 	pcmSampleBytes,
 } from "./contract.js"
+import type { BlockMarker, FramedMarker } from "./framed-audio-parser.js"
 
 /** Gate state applies per slice of at most this many ms that starts on a sample boundary. */
 export const EVIDENCE_SLICE_MS = 10
@@ -188,4 +190,40 @@ function latch(wiring: EvidenceWiring): void {
 function abandon(wiring: EvidenceWiring): void {
 	wiring.preRoll.abandon()
 	wiring.tap?.abandoned()
+}
+
+/**
+ * A18: one in-band marker of a framed Rust run, applied to the evidence path at its exact sample
+ * boundary (all PCM before it has been through `processEvidenceChunk`). `stage1Open` is the
+ * parser's stage-1 state after the marker; `held` is a held gate (A4: counts as closed).
+ * GATE_CLOSE without a latch resets the gate and abandons held audio (the csdr close edge);
+ * BLOCK notes carrier evidence while stage 1 is open; RESET and DROP call `reset`, the full
+ * retune-style clear (requirement 9.13). GATE_OPEN needs no call: the next slices push.
+ */
+export function applyFramedMarker(
+	wiring: EvidenceWiring,
+	marker: FramedMarker,
+	stage1Open: boolean,
+	held: boolean,
+	carrier: (block: BlockMarker) => boolean,
+	reset: () => void,
+): void {
+	switch (marker.type) {
+		case "gate":
+			if (!marker.open && !held && wiring.gate.state === "waiting") {
+				wiring.gate.reset()
+				abandon(wiring)
+			}
+			return
+		case "block":
+			if (stage1Open && !held) {
+				const flags = wiring.gate.noteBlock(carrier(marker))
+				if ((flags & EVIDENCE_NOTE_DISCARD) !== 0) abandon(wiring)
+			}
+			return
+		case "reset":
+		case "drop":
+			reset()
+			return
+	}
 }

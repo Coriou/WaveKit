@@ -16,6 +16,12 @@ import type { Logger } from "../../utils/logger.js"
 import type { LiveDemodConfig, SourceCaps } from "../../config.js"
 import type { DemodRetune, DemodSquelch, LiveDemodEngine } from "./engine.js"
 import {
+	FramedAudioParser,
+	type FramedAudioFault,
+	type FramedMarker,
+} from "../evidence-squelch/framed-audio-parser.js"
+import {
+	DEMOD_FRAMING_PROTOCOL,
 	DEMOD_PROTOCOL,
 	RUST_AUDIO_RATE_HZ,
 	type EngineFallbackReason,
@@ -23,6 +29,7 @@ import {
 	selectEngine,
 } from "./select-engine.js"
 import {
+	DEMOD_AUDIO_FRAMING,
 	DEMOD_CHANNEL_ID,
 	createDemodEventPump,
 	encodeOpen,
@@ -60,6 +67,11 @@ const DEFAULT_STOP_KILL_MS = 2000
  */
 export const HANDSHAKE_EARLY_MAX = 8
 
+/** A18: the run ends through the Rust failure path after a framing error (9.6 (b)). */
+export const RUST_FRAMING_FAILED_REASON =
+	"Live demodulation Rust engine audio framing error"
+const FRAMING_FAULT_LOG = "Live demodulation Rust audio framing failed safe"
+
 export interface RustEngineOptions {
 	binaryPath: string
 	logger: Logger
@@ -84,6 +96,16 @@ export interface RustEngineHandlers {
 		gateOpen: ReadonlyArray<boolean>,
 	) => void
 	onDown: (reason: string) => void
+	/**
+	 * A18: one in-band marker of a framed run, in stream order with `onAudio`. `stage1Open` is
+	 * the stage-1 state after it.
+	 */
+	onAudioMarker?: (marker: FramedMarker, stage1Open: boolean) => void
+	/**
+	 * A18: the framed run failed safe (`framing` is now `"failed"`). A framing fault also ends
+	 * the run through `onDown`, once.
+	 */
+	onAudioFault?: (kind: FramedAudioFault["kind"]) => void
 	/** First output sample of an applied retune (`retuned.atOutputSample`). */
 	onRetuned?: (atOutputSample: number) => void
 	/** WG10 req 3.8.1: native dropped output samples from `sampleIndex` (`discontinuity`). */
@@ -151,6 +173,18 @@ export class RustEngine implements LiveDemodEngine {
 	private unexpectedExit = false
 	/** `input_center` passed to native at spawn. Null before the channel spawn. */
 	private capturedInputCenterHz: number | null = null
+	/**
+	 * A18: `"active"` when `open` requested framing and `opened` echoed it; `"failed"` after a
+	 * marker or framing fault; `"none"` for raw PCM (A12).
+	 */
+	framing: "none" | "active" | "failed" = "none"
+	/** A18: `opened.groupDelaySamples`, the Rust chain's lag in output samples. */
+	groupDelaySamples = 0
+	private parser: FramedAudioParser | null = null
+	private loggedFault: { marker: boolean; framing: boolean } = {
+		marker: false,
+		framing: false,
+	}
 
 	constructor(options: RustEngineOptions) {
 		this.binaryPath = options.binaryPath
@@ -203,6 +237,10 @@ export class RustEngine implements LiveDemodEngine {
 		this.spawnFailure = undefined
 		this.unexpectedExit = false
 		this.capturedInputCenterHz = null
+		this.framing = "none"
+		this.groupDelaySamples = 0
+		this.parser = null
+		this.loggedFault = { marker: false, framing: false }
 		const selectionConfig = {
 			engine: "rust" as const,
 			modulation: input.config.modulation,
@@ -234,7 +272,15 @@ export class RustEngine implements LiveDemodEngine {
 				...(probe.error !== undefined ? { error: probe.error } : {}),
 			}
 		}
-		return this.spawnChannel(input)
+		return this.spawnChannel(
+			input,
+			probe.protocol !== null && probe.protocol >= DEMOD_FRAMING_PROTOCOL,
+		)
+	}
+
+	/** A18: stage 1 for the PCM just delivered on a framed run (false otherwise). */
+	get audioStage1Open(): boolean {
+		return this.framing === "active" && (this.parser?.stage1Open ?? false)
 	}
 
 	applyRetune(update: DemodRetune): void {
@@ -343,7 +389,10 @@ export class RustEngine implements LiveDemodEngine {
 			this.killGroup(child, "SIGKILL")
 	}
 
-	private async spawnChannel(input: RustEngineStart): Promise<RustStartResult> {
+	private async spawnChannel(
+		input: RustEngineStart,
+		requestFraming: boolean,
+	): Promise<RustStartResult> {
 		let socketDir: string
 		try {
 			// Short prefix: macOS rejects unix socket paths longer than 104 bytes.
@@ -425,6 +474,7 @@ export class RustEngine implements LiveDemodEngine {
 				config: input.config,
 				centerHz: center + (input.config.offsetHz ?? 0),
 				squelch: input.squelch,
+				...(requestFraming ? { audioFraming: DEMOD_AUDIO_FRAMING } : {}),
 			}),
 		)
 		const opened = await this.waitEvent(child, this.openTimeoutMs, event => {
@@ -443,10 +493,21 @@ export class RustEngine implements LiveDemodEngine {
 				return failure
 			return { ok: false, fallback: "open-rejected" }
 		}
-		if (opened.outputRateHz !== RUST_AUDIO_RATE_HZ) {
+		const echoed = opened.audioFraming === DEMOD_AUDIO_FRAMING
+		// An echo of a request never made: the stream layout is unknown (fail safe, fall back).
+		if (
+			opened.outputRateHz !== RUST_AUDIO_RATE_HZ ||
+			(echoed && !requestFraming)
+		) {
 			await this.stop()
 			return { ok: false, fallback: "protocol-unsupported" }
 		}
+		if (requestFraming && !echoed)
+			this.log.debug(
+				"Live demodulation Rust engine did not accept audio framing; raw PCM",
+			)
+		this.framing = echoed ? "active" : "none"
+		this.groupDelaySamples = opened.groupDelaySamples
 		this.attachAudio(opened)
 		this.opened = true
 		this.early = []
@@ -570,9 +631,25 @@ export class RustEngine implements LiveDemodEngine {
 	private attachAudio(opened: OpenedDemodEvent): void {
 		const socket = createConnection(opened.socket)
 		this.audio = socket
-		socket.on("data", (chunk: Buffer) => {
-			if (!this.stopping) this.handlers?.onAudio(chunk)
-		})
+		if (this.framing === "active") {
+			const parser = new FramedAudioParser(opened.format, {
+				pcm: view => {
+					if (!this.stopping) this.handlers?.onAudio(view)
+				},
+				marker: marker => {
+					if (!this.stopping)
+						this.handlers?.onAudioMarker?.(marker, parser.stage1Open)
+				},
+				fault: fault => this.audioFault(fault),
+			})
+			this.parser = parser
+			socket.on("data", (chunk: Buffer) => {
+				if (!this.stopping) parser.push(chunk)
+			})
+		} else
+			socket.on("data", (chunk: Buffer) => {
+				if (!this.stopping) this.handlers?.onAudio(chunk)
+			})
 		socket.on("error", (error: Error) => {
 			this.log.debug(
 				{ err: safeErrorFields(error) },
@@ -583,6 +660,28 @@ export class RustEngine implements LiveDemodEngine {
 		socket.on("close", () => {
 			this.fail("Live demodulation Rust engine socket closed")
 		})
+	}
+
+	/**
+	 * A18 fail safe (requirement 9.6): one `warn` per fault class with safe fields only (an
+	 * enumerated reason, the frame type number, the byte offset; never received bytes). A
+	 * framing fault ends the run through the existing failure path; `fail` reports once.
+	 */
+	private audioFault(fault: FramedAudioFault): void {
+		if (!this.loggedFault[fault.kind]) {
+			this.loggedFault[fault.kind] = true
+			this.log.warn(
+				{
+					reason: fault.reason,
+					frameType: fault.frameType,
+					offset: fault.offset,
+				},
+				FRAMING_FAULT_LOG,
+			)
+		}
+		this.framing = "failed"
+		if (!this.stopping) this.handlers?.onAudioFault?.(fault.kind)
+		if (fault.kind === "framing") this.fail(RUST_FRAMING_FAILED_REASON)
 	}
 
 	private rememberGate(at: number, open: boolean): void {

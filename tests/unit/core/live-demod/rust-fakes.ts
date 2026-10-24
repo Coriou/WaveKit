@@ -43,7 +43,8 @@ export class VersionFake extends EventEmitter implements FakeExit {
 	exitCode: number | null = null
 	signalCode: NodeJS.Signals | null = null
 
-	constructor(mode: "current" | "old" | "enoent") {
+	/** `framing`: an A18 binary (`protocol 3`). */
+	constructor(mode: "current" | "old" | "enoent" | "framing") {
 		super()
 		process.nextTick(() => {
 			if (this.exitCode !== null || this.signalCode !== null) return
@@ -58,7 +59,9 @@ export class VersionFake extends EventEmitter implements FakeExit {
 			const line =
 				mode === "old"
 					? "wavekit-chan 0.1.0 protocol 1\n"
-					: "wavekit-chan 0.2.0 protocol 2\n"
+					: mode === "framing"
+						? "wavekit-chan 0.3.0 protocol 3\n"
+						: "wavekit-chan 0.2.0 protocol 2\n"
 			this.stdout.write(line)
 			this.exit(0, null)
 		})
@@ -101,6 +104,8 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 	private readonly holdReady: boolean
 	private readonly readyRepeat: number
 	private readonly openedChunkSuffix: string
+	private readonly echoFraming: boolean
+	private readonly groupDelaySamples: number
 
 	constructor(options?: {
 		exitOnShutdown?: boolean
@@ -120,6 +125,9 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 		 * or metrics event here arrives before the run is adopted.
 		 */
 		openedChunkSuffix?: string
+		/** A18: echo `audioFraming: "wkaf1"` in `opened` (when the open requested it). */
+		echoFraming?: boolean
+		groupDelaySamples?: number
 	}) {
 		super()
 		this.exitOnShutdown = options?.exitOnShutdown ?? true
@@ -129,6 +137,8 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 		this.holdReady = options?.holdReady ?? false
 		this.readyRepeat = Math.max(1, options?.readyRepeat ?? 1)
 		this.openedChunkSuffix = options?.openedChunkSuffix ?? ""
+		this.echoFraming = options?.echoFraming ?? false
+		this.groupDelaySamples = options?.groupDelaySamples ?? 0
 		this.stdio = [this.stdin, this.stdout, this.stderr, this.control]
 		this.stdin.resume()
 		this.stderr.resume()
@@ -210,7 +220,11 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 				format: "s16le",
 				kind: "demod",
 				filterTaps: 1,
-				groupDelaySamples: 0,
+				groupDelaySamples: this.groupDelaySamples,
+				...(this.echoFraming &&
+				this.controlText.includes('"audioFraming":"wkaf1"')
+					? { audioFraming: "wkaf1" }
+					: {}),
 			}),
 		)
 		this.stdout.write(`${opened}\n${this.openedChunkSuffix}`)

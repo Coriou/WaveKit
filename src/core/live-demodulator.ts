@@ -79,7 +79,12 @@ import {
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
-import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
+import {
+	RustLiveRun,
+	metricsQuieted,
+	rustEngineRequested,
+} from "./live-demod/rust-run.js"
+import type { FramedMarker } from "./evidence-squelch/framed-audio-parser.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
 import {
@@ -92,6 +97,7 @@ import {
 } from "./evidence-squelch/contract.js"
 import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
 import {
+	applyFramedMarker,
 	processEvidenceChunk,
 	type EvidencePreRollTap,
 	type EvidenceWiring,
@@ -544,6 +550,12 @@ export class LiveDemodulator extends EventEmitter {
 			effectiveThreshold: run => this.effectiveThreshold(run),
 			currentRun: () => this.run,
 			handleAudioData: chunk => this.handleAudioData(chunk),
+			handleAudioMarker: (run, marker, stage1Open) =>
+				this.handleFramedMarker(run, marker, stage1Open),
+			handleAudioFault: run => {
+				// A18 fail safe: `framing` is "failed", so the predicate flips; drop held audio now.
+				this.resetEvidence(run)
+			},
 			publishSquelchChange: () => this.publishSquelchChange(),
 			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
 			measureRun: (run, sample) => this.measureRun(run, sample),
@@ -1036,7 +1048,13 @@ export class LiveDemodulator extends EventEmitter {
 		// A close before a latch discards the over's evidence and its held audio. A held gate
 		// (offset swap, Rust identity retune) is cleared by whoever held it.
 		const run = this.run
-		if (!open && run !== null && !run.gateHeld) {
+		// A18 (9.12): on a framed Rust run only the in-band markers write evidence state.
+		if (
+			!open &&
+			run !== null &&
+			!run.gateHeld &&
+			run.rust?.framing !== "active"
+		) {
 			const evidence = this.activeEvidence(run)
 			if (evidence !== null && evidence.gate.state === "waiting") {
 				evidence.gate.reset()
@@ -1156,7 +1174,9 @@ export class LiveDemodulator extends EventEmitter {
 			}
 		}
 		// Evidence squelch: one measured block while stage 1 is open (A4: a held gate is closed).
-		const evidence = this.activeEvidence(run)
+		// A18: a framed Rust run notes its blocks from the in-band BLOCK markers instead.
+		const evidence =
+			run.rust?.framing === "active" ? null : this.activeEvidence(run)
 		if (evidence !== null && runGateOpen(run) && !run.gateHeld) {
 			// A carrier onset while waiting reset the gate's voice window: the held noise lead-in
 			// stage 1 was open on is not the over (amendment 2026-10-23; the gate decides).
@@ -2211,9 +2231,10 @@ export class LiveDemodulator extends EventEmitter {
 	): RunEvidence | null {
 		const modulation = this.config.modulation
 		// Amendment A8: no instances outside the evidence modulations (AM included).
-		// Amendment A12: none on the Rust engine (stage-1 auto squelch only).
+		// Amendment A12: none on an unframed Rust run (stage-1 auto squelch only); A18: framed
+		// Rust runs build it.
 		if (
-			run.rust !== undefined ||
+			(run.rust !== undefined && run.rust.framing !== "active") ||
 			!LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS.includes(modulation) ||
 			(modulation !== "nfm" && modulation !== "am")
 		)
@@ -2226,7 +2247,11 @@ export class LiveDemodulator extends EventEmitter {
 				modulation,
 				gain: this.config.gain,
 				// A16 revision: the guard is the back chain's lag plus one 10 ms block.
-				drainLagSamples: backChainDrainSamples(run.backCommand),
+				// A18: on Rust, the Rust chain's own lag in output samples.
+				drainLagSamples:
+					run.rust !== undefined
+						? run.rust.groupDelaySamples
+						: backChainDrainSamples(run.backCommand),
 				...(modulation === "nfm"
 					? { deviationHz: evidenceDeviationHz(this.config.bandwidth) }
 					: {}),
@@ -2270,15 +2295,46 @@ export class LiveDemodulator extends EventEmitter {
 
 	/**
 	 * True when the evidence gate governs this run's client audio: `evidenceGateApplies` for
-	 * the config, no tone squelch, and the csdr engine. Amendment A12: Rust sends gate events
-	 * and audio on separate channels, so its runs keep the stage-1 auto squelch until the
-	 * gate state rides in-band with the audio.
+	 * the config, no tone squelch, and the csdr engine or a framed Rust run (A18: stage 1 rides
+	 * in-band with the audio). Amendment A12 stands for unframed and failed-safe Rust runs: they
+	 * keep the stage-1 auto squelch.
 	 */
 	private evidenceAppliesTo(run: PipelineRun): boolean {
 		return (
-			run.rust === undefined &&
+			(run.rust === undefined || run.rust.framing === "active") &&
 			run.tone === null &&
 			evidenceGateApplies(this.config)
+		)
+	}
+
+	/**
+	 * A18: one in-band marker of a framed Rust run, at its exact sample boundary
+	 * (`applyFramedMarker`): gate close, block carrier evidence, and the full clear on RESET
+	 * and DROP (9.13).
+	 */
+	private handleFramedMarker(
+		run: PipelineRun,
+		marker: FramedMarker,
+		stage1Open: boolean,
+	): void {
+		if (this.run !== run || run.stopping || run.tone !== null) return
+		const evidence = this.syncEvidence(run)
+		if (evidence === null) return
+		applyFramedMarker(
+			evidence,
+			marker,
+			stage1Open,
+			run.gateHeld,
+			block => {
+				const power = Number.isFinite(block.powerDbfs) ? block.powerDbfs : null
+				const quieting = Number.isNaN(block.quietingDb)
+					? null
+					: block.quietingDb
+				return this.evidenceCarrier(run, power, {
+					quieted: metricsQuieted(this.config, quieting),
+				})
+			},
+			() => this.resetEvidence(run),
 		)
 	}
 
@@ -2309,9 +2365,8 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	/**
-	 * Per-block carrier evidence for the gate's quieting window. Only Rust metrics pass a
-	 * `sample`, and amendment A12 keeps Rust runs off the evidence path; the branch stays for
-	 * the in-band follow-up.
+	 * Per-block carrier evidence for the gate's quieting window. Only framed Rust BLOCK markers
+	 * pass a `sample` (A18); csdr measures its own blocks.
 	 */
 	private evidenceCarrier(
 		run: PipelineRun,
@@ -2337,11 +2392,17 @@ export class LiveDemodulator extends EventEmitter {
 		chunk: Buffer,
 		phase: number,
 	): void {
+		// A18: a framed Rust run takes stage 1 from the markers before this PCM (the parser's
+		// state), never from stdout timing; views are cut at every marker.
+		const stage1 =
+			run.rust?.framing === "active"
+				? run.rust.audioStage1Open
+				: runGateOpen(run)
 		processEvidenceChunk(
 			evidence,
 			chunk,
 			phase,
-			runGateOpen(run) && !run.gateHeld,
+			stage1 && !run.gateHeld,
 			run.stream.format,
 			run.stream.rate,
 		)

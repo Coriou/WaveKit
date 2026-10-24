@@ -19,6 +19,7 @@ import { ChannelSquelch } from "../channel-squelch.js"
 import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
 import type { DemodRetune, DemodSquelch } from "./engine.js"
+import type { FramedMarker } from "../evidence-squelch/framed-audio-parser.js"
 import {
 	HANDSHAKE_EARLY_MAX,
 	RUST_METRIC_BLOCK_SAMPLES,
@@ -115,6 +116,14 @@ export interface RustRunHost {
 	effectiveThreshold(run: PipelineRun): number
 	currentRun(): PipelineRun | null
 	handleAudioData(chunk: Buffer): void
+	/** A18: an in-band marker of a framed run, in order with `handleAudioData`. */
+	handleAudioMarker(
+		run: PipelineRun,
+		marker: FramedMarker,
+		stage1Open: boolean,
+	): void
+	/** A18: the framed run failed safe; the evidence state is reset and cleared. */
+	handleAudioFault(run: PipelineRun): void
 	publishSquelchChange(): void
 	handleRunFailure(run: PipelineRun, reason: string): void
 	measureRun(run: PipelineRun, sample: RustPowerSample): void
@@ -379,6 +388,20 @@ export class RustLiveRun {
 							!current.stopping
 						)
 							this.host.handleAudioData(chunk)
+					},
+					onAudioMarker: (marker, stage1Open) => {
+						const current = slot.run
+						if (
+							current &&
+							this.host.currentRun() === current &&
+							!current.stopping
+						)
+							this.host.handleAudioMarker(current, marker, stage1Open)
+					},
+					onAudioFault: () => {
+						const current = slot.run
+						if (current && this.host.currentRun() === current)
+							this.host.handleAudioFault(current)
 					},
 					onGate: open => {
 						if (!live) {
@@ -803,7 +826,7 @@ function asQuietingNumber(quieting: QuietingDb): number | null {
  * noise-mode gate, not this floor predicate. `+∞` is the silent-discriminator
  * token and counts as quieted.
  */
-function metricsQuieted(
+export function metricsQuieted(
 	config: LiveDemodConfig,
 	quietingDb: number | null,
 ): boolean {
