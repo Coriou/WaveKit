@@ -5,555 +5,126 @@
 
 # WaveKit
 
-**Multi-protocol SDR signal decoder with real-time streaming**
+[![CI](https://github.com/Coriou/WaveKit/actions/workflows/ci.yml/badge.svg)](https://github.com/Coriou/WaveKit/actions/workflows/ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
-WaveKit connects to Software Defined Radio sources and decodes multiple signal types within the captured frequency window. Different bands require retuning or additional dongles. Aircraft tracking, ship positions, pager messages, digital voice, weather sensors—all decoded in parallel and streamed via WebSocket.
-It can also expose the internal IQ stream as an RTL-TCP endpoint so SDR++ can tune locally without opening a second upstream connection.
+**See, hear and decode the radio spectrum around you, from your browser.**
 
-```
-┌─────────────────┐     ┌──────────────────────────────────────┐     ┌─────────────────┐
-│  RTL-SDR        │     │  WaveKit Container                   │     │  Your Apps      │
-│  on Raspberry Pi│────▶│                                      │────▶│                 │
-│  rtl_tcp :1234  │ IQ  │  9 Decoders running in parallel:     │ WS  │  CLI Dashboard  │
-│                 │     │  ✈️ ADS-B  🚢 AIS  📟 Pagers  📻 DMR │     │  Web UI         │
-└─────────────────┘     └──────────────────────────────────────┘     └─────────────────┘
-```
+WaveKit turns a cheap RTL-SDR dongle into a live window on the airwaves. It decodes aircraft,
+ships, pagers, digital voice, APRS, weather sensors and Meshtastic in parallel, and shows all of it
+in a fast web app: a live spectrum and waterfall, a map, an activity log and a scanner.
 
-## Quick Start
+<picture>
+	<source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/spectrum-light.png">
+	<img src="docs/assets/screenshots/spectrum-dark.png" alt="The WaveKit web app: live spectrum and waterfall over the marine VHF band, with decoded signals labelled on their peaks and the tuned DMR channel in a card">
+</picture>
 
-Run WaveKit and its decoder tools in Docker. From the repository root:
+## What you get
+
+- **A live spectrum and waterfall.** Drag to tune, click a peak to open it. Signals are labelled
+  with what WaveKit identified: `DMR · CC 1`, `AIS · MMSI 228237700`, and so on.
+- **Everything decoded at once.** Every decoder whose band falls inside the captured window runs
+  in parallel, from one dongle.
+- **Listen and record.** Analog demodulation with squelch and tone squelch, decoded digital voice,
+  recordings you can play back from the browser.
+- **Activity.** A searchable log of everything heard: talkgroups, capcodes, MMSIs, callsigns,
+  frequencies.
+- **Map.** Aircraft, vessels, APRS stations and mesh nodes around your station, with their trails.
+- **Scanner.** Watch a band, find what is active, jump back to it later.
+- **Works anywhere.** Light and dark themes, a ⌘K palette, and a layout that works on a phone. You
+  can install it as an app (PWA).
+
+| Activity                                                                                              | Map                                                                                               |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| ![Activity log with category filters and recent decoded events](docs/assets/screenshots/activity.png) | ![Map with aircraft, vessels and the station's coverage](docs/assets/screenshots/map.png)         |
+| **Messages**                                                                                          | **Scanner**                                                                                       |
+| ![Decoded messages as cards](docs/assets/screenshots/messages.png)                                    | ![Scanner drawer listing the signals found in the last hour](docs/assets/screenshots/scanner.png) |
+
+## Quick start
+
+### Try the web app without a radio
+
+The web app ships with a mock server that plays a realistic station, so you can try it in two
+minutes. You need Node.js 24 and Corepack.
 
 ```bash
-make app-up
+corepack enable
+pnpm install --frozen-lockfile
+pnpm --filter @wavekit/web mock    # terminal 1: mock station on :3101
+pnpm --filter @wavekit/web dev     # terminal 2: web app on http://localhost:5173
+```
+
+### Run WaveKit with Docker
+
+The core and every decoder run in one image. No hardware is needed for a first run.
+
+```bash
+make app-up        # starts the core on http://127.0.0.1:9000
 make app-status
-# Follow logs:
 make app-logs
 ```
 
-The standalone app runs at http://127.0.0.1:9000 with no hardware required and
-no dependency on SDR++. Compose uses `wavekit:local-core` and builds the
-`final-core` image if it is missing. The image contains Node and the decoder
-binaries; no host decoder installation is needed.
-
-See [Docker runtime](docs/DOCKER-RUNTIME.md) to select the Pi source or a USB
-bridge and [fresh-card Pi setup](packages/sdr-host/README.md) for the bundled
-SDR host installer. Stop the app with `make app-down`.
-
-With Raspberry Pi Imager 2 installed and a built WaveKit SD image in
-`output/pi-image/`, run `make sdr-host-imager` to open the dedicated WaveKit
-catalog. Configure Wi-Fi and SSH in Imager, write the card and boot the Pi.
-See the fresh-card guide for image build prerequisites and acceptance status.
-
-Native scripts are optional development tools: `pnpm install --frozen-lockfile`,
-`pnpm run doctor`, and `pnpm dev:local`. The terminal dashboard can be launched
-with `make dev-dashboard` against the Docker API. See [native development](docs/LOCAL-SETUP.md).
-
-## CLI Dashboard
-
-WaveKit's primary interface is an interactive terminal dashboard built with Ink/React:
-
-```
-┌─ WaveKit Dashboard ─────────────────────────────────────────────────────────┐
-│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Audio  [7] Resources  [8] Tuner │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ DECODERS                                                                    │
-│ Running: 5/9    Healthy: 5/5    Total Events: 12,847                        │
-│ ● dsd-fme       ● multimon-ng       ● readsb       ● ais-catcher            │
-│                                                                             │
-│ BACKPRESSURE                                                                │
-│ Status: All flowing    Drop Rate: 0 B/s    Flowed: 847 MB    Dropped: 0 B   │
-│                                                                             │
-│ SOURCES                                                                     │
-│ Connected: 1/1    Fanout Consumers: 5                                       │
-│ ● sdrpp-main @ tcp://192.168.1.69:5555                                      │
-│                                                                             │
-│ RECENT MESSAGES                                                             │
-│ 14:23:45 [readsb]    aircraft  ICAO:A4B2C1 ALT:35000 SPD:450                │
-│ 14:23:44 [ais]       ship      MMSI:123456789 LAT:37.77 LON:-122.41         │
-│ 14:23:43 [multimon]  message   POCSAG1200 ADDR:1234567 "Test message"       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ [q] Quit  [r] Reconnect  [1-7] Switch tabs                                  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**Keyboard shortcuts:**
-
-- `1-8` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources, Audio, Resources, Tuner)
-- `r` — Reconnect WebSocket
-- `q` — Quit
-
-**Environment variables:**
+Then point the web app at it:
 
 ```bash
-WAVEKIT_WS_URLS=ws://localhost:9000/ws   # WebSocket endpoints (comma-separated)
-WAVEKIT_API_URL=http://localhost:9000    # REST API endpoint
+WAVEKIT_WEB_API=http://127.0.0.1:9000 pnpm --filter @wavekit/web dev
 ```
 
-## Supported Decoders
+> The core does not serve the web app itself yet; until it does, run it with the command above.
 
-| Decoder             | Signals               | Use Case                |
-| ------------------- | --------------------- | ----------------------- |
-| **readsb**          | ADS-B 1090 MHz        | Aircraft tracking       |
-| **AIS-catcher**     | AIS 162 MHz           | Ship tracking           |
-| **acarsdec**        | ACARS VHF             | Aircraft data link      |
-| **dumpvdl2**        | VDL2 136 MHz          | Aviation data link      |
-| **dsd-fme**         | DMR, P25, YSF, D-Star | Digital voice           |
-| **multimon-ng**     | POCSAG, FLEX, DTMF    | Pagers, tones           |
-| **direwolf**        | APRS 144 MHz          | Amateur radio           |
-| **rtl_433**         | ISM 433/915 MHz       | Weather sensors, IoT    |
-| **lora-meshtastic** | LoRa 868/915 MHz      | Meshtastic mesh packets |
+To use a real receiver, follow [Docker runtime](docs/DOCKER-RUNTIME.md) for a Raspberry Pi or a USB
+dongle, and the [fresh-card Pi setup](packages/sdr-host/README.md) to prepare a Pi as an SDR host.
 
-All decoders are pre-built in the Docker image. Enable/disable via configuration.
+## Hardware
 
-## Architecture
+- An **RTL-SDR** dongle (RTL2832U), plugged into a Raspberry Pi on your network or directly into the
+  machine running WaveKit.
+- Any machine that runs Docker for the core: a Pi 5, a mini PC, a laptop.
+
+## Decoders
+
+| Decoder         | Signals                     | Use                  |
+| --------------- | --------------------------- | -------------------- |
+| readsb          | ADS-B, 1090 MHz             | Aircraft             |
+| AIS-catcher     | AIS, 162 MHz                | Ships                |
+| acarsdec        | ACARS, VHF                  | Aircraft data link   |
+| dumpvdl2        | VDL Mode 2, 136 MHz         | Aircraft data link   |
+| dsd-fme         | DMR, P25, YSF, D-Star, NXDN | Digital voice        |
+| multimon-ng     | POCSAG, FLEX, DTMF          | Pagers, tones        |
+| direwolf        | APRS, 144 MHz               | Amateur radio        |
+| rtl_433         | ISM, 433 / 868 / 915 MHz    | Weather sensors, IoT |
+| lora-meshtastic | LoRa, 868 / 915 MHz         | Meshtastic mesh      |
+
+All of them are built into the Docker image. Each one can start automatically when its band is in
+view, always, or never (Settings › Decoders).
+
+## How it works
 
 ```
-SDR Source (rtl_tcp/SDR++)
-         │
-         ▼
-   SourceManager ──────────────────────────────────────────┐
-         │                                                 │
-         ▼                                                 │
-   FanoutManager ─────┬─────┬─────┬─────┬─────┐           │
-         │            │     │     │     │     │           │
-         ▼            ▼     ▼     ▼     ▼     ▼           │
-      dsd-fme   multimon readsb ais acars vdl2 mesh       │
-         │            │     │     │     │     │           │
-         └────────────┴─────┴─────┴─────┴─────┘           │
-                            │                             │
-                            ▼                             │
-                    DecoderManager ◀──────────────────────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-         REST API      WebSocket     Audio TCP     Tuner Relay
-        :9000/api      :9000/ws       :8080        :1234
+RTL-SDR ──IQ──▶ WaveKit core ──▶ decoders (one process each)
+ (Pi or USB)        │
+                    ├── REST API and WebSocket  ──▶ web app, CLI dashboard, your scripts
+                    ├── live audio (HTTP)
+                    └── RTL-TCP relay           ──▶ SDR++
 ```
 
-**Key components:**
-
-- **SourceManager** — TCP connections to SDR sources with auto-reconnect
-- **FanoutManager** — Multiplexes audio to all decoders with backpressure handling
-- **DecoderManager** — Spawns/monitors decoder processes, handles restarts
-- **API Server** — Fastify REST + WebSocket for control and real-time events
-- **Tuner Controller** — Primary RTL-TCP tuner control with internal/external handoff
-- **Tuner Relay** — Optional RTL-TCP server for local tuner clients (SDR++)
-
-## API Reference
-
-### REST Endpoints
-
-```bash
-# Health check
-curl http://localhost:9000/health
-
-# Full system status
-curl http://localhost:9000/api/status
-
-# List decoders
-curl http://localhost:9000/api/decoders
-
-# Start/stop a decoder
-curl -X POST http://localhost:9000/api/decoders/readsb/start
-curl -X POST http://localhost:9000/api/decoders/readsb/stop
-
-# List sources
-curl http://localhost:9000/api/sources
-
-# List tuner states
-curl http://localhost:9000/api/tuner
-
-# Set tuner frequency
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \\
-  -H "Content-Type: application/json" -d '{"hz":144800000}'
-```
-
-### WebSocket Events
-
-Connect to `ws://localhost:9000/ws` and subscribe to channels:
-
-```javascript
-const ws = new WebSocket("ws://localhost:9000/ws")
-
-ws.send(
-	JSON.stringify({
-		type: "subscribe",
-		channels: [
-			"decoders",
-			"sources",
-			"metrics",
-			"health",
-			"fanout",
-			"live-audio",
-		],
-	}),
-)
-
-ws.onmessage = event => {
-	const msg = JSON.parse(event.data)
-	// msg.type: 'decoder:output', 'decoder:health', 'source:connected', etc.
-	// msg.data: event payload
-}
-```
-
-**Channels:**
-
-- `decoders` — Decoder output, start/stop events
-- `sources` — Source connection events
-- `metrics` — Data rate metrics (~5s intervals)
-- `health` — Decoder health state changes
-- `fanout` — Backpressure snapshots
-- `live-audio` — Live demod status/config events
-- `resources` — Container, SDR host, and backpressure metrics
-- `tuner` — RTL-TCP tuner state/command events
-
-### Audio Streaming
-
-Decoded audio streams over TCP port 8080:
-
-```bash
-# Play with sox
-nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -
-
-# Play with ffplay
-nc localhost 8080 | ffplay -f s16le -ar 48000 -ac 1 -nodisp -
-```
-
-### Tuner Control (WaveKit)
-
-WaveKit can directly control RTL-TCP sources without SDR++. Use the CLI Tuner tab
-or the REST API to tune frequency, gain, and other settings.
-
-**CLI keys (Tuner tab):**
-
-- `up/down` — Tune frequency
-- `left/right` — Change tuning step (also supports `[ ] , . /`)
-- `g` — Toggle gain mode (AGC/manual)
-- `+/-` — Adjust gain (manual only)
-- `s` — Edit sample rate
-- `p` — Edit PPM correction
-- `a` — Toggle RTL AGC
-- `b` — Toggle bias-tee
-- `d` — Cycle direct sampling (off/I/Q)
-- `o` — Toggle offset tuning
-- `c` — Release/reclaim control (internal/external)
-
-```bash
-# List tuner states
-curl http://localhost:9000/api/tuner
-
-# Set frequency
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \\
-  -H "Content-Type: application/json" -d '{\"hz\":144800000}'
-
-# Release control to SDR++
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \\
-  -H "Content-Type: application/json" -d '{\"mode\":\"external\"}'
-
-# Reclaim control
-curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \\
-  -H "Content-Type: application/json" -d '{\"mode\":\"internal\"}'
-```
-
-### Tuner Relay (SDR++)
-
-Expose the internal IQ stream as an RTL-TCP compatible endpoint for SDR++ (or any RTL-TCP client).
-Control commands are forwarded upstream so you only keep a single connection to the remote RTL-SDR.
-
-```yaml
-tunerRelay:
-  enabled: true
-  host: "0.0.0.0"
-  port: 1234
-  sourceId: "rtl-pi"
-  controlPolicy: "exclusive" # or "shared"
-  commandHistoryLimit: 200 # 0 disables command history
-```
-
-**Usage:**
-
-1. Start WaveKit with the relay enabled.
-2. In SDR++, select **RTL-TCP** and connect to `tcp://<wavekit-host>:1234`.
-3. Tune as usual — SDR++ commands are forwarded to the upstream `rtl_tcp`/`rtlmux`.
-
-**Notes:**
-
-- The relay expects an IQ source in `U8_IQ` format (standard RTL-TCP/rtlmux output).
-- In `exclusive` mode, the first client gets control and others are read-only.
-- The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
-- RTL-TCP commands are tracked and available via `GET /api/tuner-relay`.
-- Relay commands update the internal tuner state and will switch control mode to
-  `external` while a relay control client is active. When the relay becomes idle,
-  control returns to `internal` unless you explicitly released control.
-
-**Dynamic Sample Rate:**
-
-When SDR++ changes the sample rate, WaveKit automatically:
-
-- Updates source capabilities
-- Restarts the LiveDemodulator with new decimation rates
-- Restarts affected decoders to maintain optimal decoding
-- Broadcasts `source:caps-changed` to WebSocket clients
-
-This enables seamless tuning without manual reconfiguration.
-
-### Live Demodulator (HTTP Audio)
-
-Live demodulates IQ in real time and serves mono audio over HTTP.
-Ideal for quick monitoring with ffplay/VLC without touching decoder configs.
-
-**Quick start:**
-
-```yaml
-liveDemod:
-  enabled: true
-  sourceId: "rtl-pi"
-  httpPort: 8081
-  modulation: "nfm"
-  bandwidth: 12500
-  squelch: 0
-  noiseReduction: "off"
-  lowPass: 0
-  highPass: 0
-  gain: 2.0
-  deEmphasis: false
-  deEmphasisTau: 50
-  audioFormat: "s16le"
-  offsetHz: 0
-```
-
-```bash
-# Start demodulation (if not auto-started)
-curl -X POST http://localhost:9000/api/live-audio/start
-
-# Play the self-describing WAV stream (no format flags needed)
-ffplay -nodisp -autoexit http://localhost:8081/stream.wav
-
-# Or the raw stream: format and exact rate are in the X-Audio-Format and
-# X-Sample-Rate response headers (round the rate for ffplay)
-ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:8081/stream
-```
-
-**Configuration reference:**
-
-- `sourceId` — IQ source to demodulate (defaults to first source)
-- `modulation` — `nfm` | `wfm` | `am` | `usb` | `lsb` | `dsb` | `cw` | `raw`
-- `bandwidth` — Target audio bandwidth in Hz (0 allowed only for `raw`)
-- `squelch` — channel power threshold before demodulation, dBFS (-160 to 0);
-  `0` keeps squelch open. `channelPowerDbfs` in `/api/live-audio/status` shows the
-  current level (noise is typically -55 to -65 dBFS, a nearby carrier -10 to -30)
-- `noiseReduction` — `off` | `voice` | `noaa-apt` | `narrow-band`
-- `lowPass` / `highPass` — Optional audio filters in Hz
-- `gain` — Audio gain multiplier (default 2: ±5 kHz FM deviation at 0.8 full scale)
-- `offsetHz` — Channel offset from the tuned centre; a carrier at centre + offsetHz
-  is shifted to DC before filtering. Tune the dongle a few kHz off the carrier and
-  set this, so the receiver's DC spike stays out of the channel
-- `deEmphasis` / `deEmphasisTau` — FM de-emphasis (50 or 75 microseconds)
-- `audioFormat` — `s16le` or `f32le`
-- `iqDcBlock` — Deprecated and ignored (it corrupted I/Q); use `offsetHz`
-
-**API examples:**
-
-```bash
-# Status
-curl http://localhost:9000/api/live-audio/status
-
-# Update modulation on the fly
-curl -X PATCH http://localhost:9000/api/live-audio/config \
-  -H "Content-Type: application/json" \
-  -d '{"modulation":"am","bandwidth":10000}'
-
-# Presets
-curl http://localhost:9000/api/live-audio/presets
-```
-
-## Configuration
-
-Configuration via YAML (`config/default.yaml`) or environment variables:
-
-```yaml
-# Sources
-sources:
-  - id: "sdrpp-main"
-    type: "sdrpp-network"
-    host: "192.168.1.69"
-    port: 5555
-    caps:
-      kind: "audio_pcm"
-      sampleRate: 48000
-      format: "FLOAT32LE"
-
-# Decoders
-decoders:
-  - id: "dsd"
-    type: "dsd-fme"
-    enabled: true
-    sourceId: "sdrpp-main"
-    options:
-      mode: "auto"
-
-# API
-api:
-  host: "0.0.0.0"
-  port: 3000
-
-# Audio output
-audio:
-  tcpPort: 8080
-  format: "S16LE"
-  sampleRate: 48000
-
-# Tuner relay (RTL-TCP)
-tunerRelay:
-  enabled: true
-  host: "0.0.0.0"
-  port: 1234
-  sourceId: "sdrpp-main"
-  controlPolicy: "exclusive"
-```
-
-**Environment overrides:**
-
-```bash
-WAVEKIT_API_PORT=9000
-WAVEKIT_LOG_LEVEL=debug
-WAVEKIT_SOURCES_0_HOST=192.168.1.100
-WAVEKIT_TUNER_RELAY__ENABLED=true
-WAVEKIT_TUNER_RELAY__PORT=1234
-```
-
-## Development
-
-### Prerequisites
-
-- Node.js 24 LTS or newer (`.nvmrc` pins v24.20.0; Dockerfiles use `node:24-bookworm-slim`)
-- pnpm 10 via Corepack (`corepack enable && corepack prepare pnpm@10.28.0 --activate`)
-- Docker with BuildKit + buildx (run `make docker-init` once)
-- RTL-SDR dongle (or rtl_tcp server)
-
-### Commands
-
-```bash
-# Native dev loop (no Docker — headline iteration loop)
-pnpm dev                        # esbuild watch + node --watch against src/index.ts
-make dev-dashboard              # Build and launch the Ink/React CLI dashboard
-make dev-configs                # List configs in config/
-
-# Full container stack (dev profile of compose.yaml)
-make dev-stack                  # Build + start sdrpp-server + wavekit-api
-make dev-stack-logs             # Follow logs from both services
-make dev-stack-down             # Stop and remove containers
-make dev-shell                  # Shell into the running wavekit-api container
-make dev-status                 # ps + curl /health
-
-# Monorepo Tasks (pnpm + Turborepo)
-pnpm run build                  # Build all packages + bundle src/
-pnpm run typecheck              # Type check workspaces + root
-pnpm run lint                   # eslint .
-pnpm test                       # Test all packages + root vitest
-pnpm run test:coverage          # With coverage (v8)
-
-# Docker Images
-make docker-build               # Bake the default group (final, final-core, final-sdrpp)
-make docker-push                # Multi-arch push to GHCR with mode=max cache
-```
-
-### Project Structure
-
-WaveKit uses a pnpm monorepo with Turborepo for task orchestration:
-
-```
-wavekit/
-├── packages/                 # Internal packages
-│   ├── shared/                  # @wavekit/shared — Logger, errors
-│   ├── api-types/               # @wavekit/api-types — Shared API types
-│   └── sdr-host/                # @wavekit/sdr-host — Remote dongle host
-│
-├── src/                      # Core WaveKit
-│   ├── index.ts                 # Entry point
-│   ├── config.ts                # Zod schemas + config loading
-│   ├── core/                    # Stream infrastructure
-│   │   ├── source-manager.ts
-│   │   ├── fanout-manager.ts
-│   │   └── audio-output.ts
-│   ├── decoders/                # Decoder plugin system
-│   │   ├── base-decoder.ts
-│   │   ├── manager.ts
-│   │   └── builtin/             # 9 decoder adapters
-│   ├── api/                     # Fastify REST/WebSocket
-│   └── utils/
-│
-└── cli/                      # @wavekit/cli — Terminal dashboard (Ink/React)
-    └── source/
-        ├── app.tsx
-        ├── components/
-        └── hooks/
-```
-
-### Adding a Decoder
-
-1. Create `src/decoders/builtin/my-decoder.ts` extending `BaseDecoder`
-2. Implement `getCommand()`, `getArgs()`, `parseOutput()`
-3. Register in `src/decoders/registry.ts`
-4. Add config schema to `src/config.ts`
-
-See [docs/DECODER-GUIDE.md](docs/DECODER-GUIDE.md) for detailed instructions.
-
-## Docker
-
-Three build targets, all produced by a single `docker buildx bake` invocation:
-
-| Target                 | Contents               | Use Case           |
-| ---------------------- | ---------------------- | ------------------ |
-| `wavekit:latest`       | SDR++ + API + Decoders | All-in-one         |
-| `wavekit:latest-core`  | API + Decoders         | External SDR++     |
-| `wavekit:latest-sdrpp` | SDR++ only             | Dedicated SDR host |
-
-```bash
-# Build the default group (all three images)
-make docker-build
-
-# Single-arch local build (skip multi-arch when you don't need it)
-docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64" --load
-
-# Run with external SDR++
-docker run -p 9000:3000 -p 8080:8080 \
-  -p 1234:1234 \
-  -e WAVEKIT_SOURCES_0_HOST=192.168.1.69 \
-  -e WAVEKIT_SOURCES_0_PORT=5555 \
-  -e WAVEKIT_TUNER_RELAY__ENABLED=true \
-  wavekit:latest-core
-```
-
-See `docs/DOCKER-SETUP.md` for the compose profiles (`dev`, `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.
-
-## RTL-SDR Setup
-
-For optimal reception:
-
-```bash
-# On Raspberry Pi - start rtl_tcp with AGC
-rtl_tcp -a 0.0.0.0 -p 1234 -f 446524920 -s 2048000 -g 0
-
-# Key settings:
-#   -g 0        AGC mode (critical for weak signals)
-#   -s 2048000  Sample rate 2.048 Msps (not 2.4!)
-```
-
-For multiple clients, use [rtlmux](https://github.com/slepp/rtlmux):
-
-```bash
-rtlmux -a 0.0.0.0 -p 5555 -s 5556 127.0.0.1 1234
-```
+The core reads one IQ stream, channelises it, and feeds each decoder the slice it needs. Events,
+spectrum frames and audio go out over a documented API. See [Architecture](docs/ARCHITECTURE.md).
 
 ## Documentation
 
-- [API Reference](docs/API.md) — Full REST/WebSocket documentation
-- [Docker Setup](docs/DOCKER-SETUP.md) — Container deployment guide
-- [SDR Host Setup](docs/SDR-HOST-SETUP.md) — Remote dongle hosting with rtlmux
-- [Decoder Guide](docs/DECODER-GUIDE.md) — Adding new decoders
-- [Architecture](docs/ARCHITECTURE.md) — System design deep dive
-- [Security](docs/SECURITY.md) — Version pinning, CVE tracking
+Start with the [documentation index](docs/README.md). The most useful pages:
+
+- [Using the web app](docs/WEB-APP.md)
+- [Docker runtime](docs/DOCKER-RUNTIME.md) and [native development](docs/LOCAL-SETUP.md)
+- [API reference](docs/API.md) and [core reference](docs/CORE-REFERENCE.md) (tuner, relay, live audio, configuration)
+- [CLI dashboard](docs/CLI.md)
+- [Adding a decoder](docs/DECODER-GUIDE.md)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks to run, and the rule
+that keeps this documentation in step with the code.
 
 ## License
 
