@@ -20,19 +20,27 @@ export type SampleFlag =
 	| typeof FLAG_ADMITTED
 
 /**
- * Write times (`oldestQueuedAt`). The ring holds entries (end position, time) whose times are
- * strictly more than `AUTO_ROUTE_TIME_TOLERANCE_MS` apart: a write within the tolerance of the
- * newest entry's time (or earlier, or untimed) extends that entry, keeping its earlier time.
- * Consumed entries are retired before each append. When the ring is full, the two oldest entries
- * merge under the older time.
+ * Write times (`oldestQueuedAt`). The ring holds entries (end position, time). A write within
+ * the tolerance of the newest entry's time, earlier than it, or untimed extends that entry; the
+ * entry keeps the minimum of its time and the write's time (a backward clock step lowers it).
+ * Otherwise the write appends a new entry, so with nondecreasing write times the entries are
+ * strictly more than `AUTO_ROUTE_TIME_TOLERANCE_MS` apart. Consumed entries are retired before
+ * each append. When the ring is full, the two oldest entries merge under the earlier time.
  *
- * Bound (enforced): every reported time is ≤ the true write time of the oldest queued sample
- * (errors are only early), and the error is ≤ 1 ms whenever that sample's true age is at most
- * (4 096 − 1) × 1 ms = 4 095 ms. Proof: tolerance merging moves a time by ≤ 1 ms. A full-ring
- * merge happens only when 4 096 entries, each > 1 ms apart, are queued, so the entries it
- * touches were written more than 4 095 ms before the newest write; their samples are older than
- * that bound. 4 095 ms > `LIVE_AUDIO_AUTO_ROUTE_FIFO_MS` (3 000 ms), the longest age the router
- * acts on.
+ * Never late (enforced for any finite input): every entry's time is ≤ the true write time of
+ * each timed sample in it, because an entry starts at its first write's time, is only extended
+ * by writes at or after (time − ∞, time + 1 ms] with the minimum kept, and merges keep the
+ * minimum. Non-finite write times are treated as untimed.
+ *
+ * Error bound (for nondecreasing write times): the error is ≤ 1 ms whenever the oldest queued
+ * sample's true age, measured from the newest write, is at most (4 096 − 2) × 1 ms = 4 094 ms.
+ * Proof: tolerance merging alone moves a sample's time by ≤ 1 ms. A full-ring merge happens when
+ * a write at W meets 4 096 entries t1 < t2 < … < t4096, each > 1 ms apart, with W > t4096 + 1 ms.
+ * It gives the samples of the second-oldest entry the time t1; those samples were written at
+ * most t2 + 1 ms, so their age W − (t2 + 1) > (4 096 − 1) − 1 = 4 094 ms, and ages only grow.
+ * (4 096 − 1 is not a bound: a sample extending t2 by up to 1 ms is that much younger; see the
+ * regression test.) 4 094 ms > `LIVE_AUDIO_AUTO_ROUTE_FIFO_MS` (3 000 ms), the longest age the
+ * router acts on.
  *
  * Why early is the safe direction for the router (design, AutoListenRouter and admission versus
  * drain): age invalidation (> FIFO_MS) never keeps audio past its age; the preemption wait
@@ -64,7 +72,7 @@ export class SourceFifo {
 
 	/**
 	 * `timeEntries` (≥ 2) sizes the write-time ring; the age bound above becomes
-	 * (timeEntries − 1) × 1 ms. Tests use small rings to reach saturation.
+	 * (timeEntries − 2) × 1 ms. Tests use small rings to reach saturation.
 	 */
 	constructor(
 		capacity: number = AUTO_ROUTE_FIFO_SAMPLES,
@@ -264,26 +272,31 @@ export class SourceFifo {
 		}
 	}
 
-	private noteTime(at: number): void {
+	private noteTime(time: number): void {
+		const at = Number.isFinite(time) ? time : Number.NaN
 		this.trimTimes()
 		const n = this.timeEntries
 		const end = this.headPos + this.size
 		if (this.timeCount > 0) {
 			const last = (this.timeHead + this.timeCount - 1) % n
 			const lastAt = this.timeAt[last] ?? Number.NaN
-			// Within the tolerance, earlier (clock step) or untimed: extend under the earlier time.
+			// Within the tolerance, earlier (clock step) or untimed: extend, keeping the minimum.
 			if (
 				Number.isNaN(at) ||
 				(!Number.isNaN(lastAt) && at - lastAt <= AUTO_ROUTE_TIME_TOLERANCE_MS)
 			) {
 				this.timeEnd[last] = end
+				if (!Number.isNaN(at) && at < lastAt) this.timeAt[last] = at
 				return
 			}
 		}
 		if (this.timeCount === n) {
-			// Full: merge the two oldest under the older time (see the bound above).
+			// Full: merge the two oldest under the earlier time (see the bound above).
 			const next = (this.timeHead + 1) % n
-			this.timeAt[next] = this.timeAt[this.timeHead] ?? Number.NaN
+			const a = this.timeAt[this.timeHead] ?? Number.NaN
+			const b = this.timeAt[next] ?? Number.NaN
+			this.timeAt[next] =
+				Number.isNaN(a) || Number.isNaN(b) ? a : Math.min(a, b)
 			this.timeHead = next
 			this.timeCount--
 		}

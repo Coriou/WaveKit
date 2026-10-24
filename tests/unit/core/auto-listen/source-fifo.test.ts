@@ -276,10 +276,62 @@ describe("SourceFifo", () => {
 		g.writeFrom(r2, input, 18, 19, FLAG_AUDIBLE, 11)
 		g.read(new Int16Array(1), 0, 1)
 		expect(g.oldestQueuedAt).toBe(10)
-		// A clock step back extends the newest entry (earlier time kept).
+		// A clock step back extends the newest entry and lowers it to the step's time, so the
+		// sample written at 5 is never reported late.
 		g.writeFrom(r2, input, 19, 20, FLAG_AUDIBLE, 5)
 		g.read(new Int16Array(1), 0, 1)
-		expect(g.oldestQueuedAt).toBe(10)
+		expect(g.oldestQueuedAt).toBe(5)
+	})
+
+	it("is never late after backward and non-finite write times", () => {
+		const fifo = new SourceFifo(1_000, 4)
+		const res = new PolyphaseResampler(48_000, OUT)
+		const input = ramp(200, 21)
+		fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, 0)
+		const times = [100, 50, 200, 199.5, Number.POSITIVE_INFINITY, 300, 10, 400]
+		const truth: number[] = []
+		let pos = 17
+		for (const t of times) {
+			fifo.writeFrom(res, input, pos, pos + 1, FLAG_AUDIBLE, t)
+			pos++
+			truth.push(t)
+		}
+		const one = new Int16Array(1)
+		for (let k = 0; k < truth.length; k++) {
+			const reported = fifo.oldestQueuedAt
+			const t = truth[k] ?? Number.NaN
+			// Untimed samples have no truth; timed ones are never reported late.
+			if (Number.isFinite(t) && reported !== null)
+				expect(reported).toBeLessThanOrEqual(t)
+			fifo.read(one, 0, 1)
+		}
+	})
+
+	it("bound is 4 094 ms, not 4 095 ms: tolerance-extended entry merged at saturation (regression)", () => {
+		const fifo = new SourceFifo()
+		const res = new PolyphaseResampler(48_000, OUT)
+		const input = ramp(5_000, 22)
+		fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, 0)
+		const s = 1 + 1 / 8_192
+		const times = [0, s, s + 0.75]
+		for (let j = 2; j <= 4_096; j++) times.push(j * s)
+		let pos = 17
+		for (const t of times) {
+			fifo.writeFrom(res, input, pos, pos + 1, FLAG_AUDIBLE, t)
+			pos++
+		}
+		fifo.read(new Int16Array(2), 0, 2)
+		const truth = s + 0.75
+		const age = 4_096 * s - truth
+		expect(fifo.oldestQueuedAt).toBe(0)
+		// The merge error exceeds 1 ms at an age above 4 094 ms but below 4 095 ms.
+		expect(truth - 0).toBeGreaterThan(AUTO_ROUTE_TIME_TOLERANCE_MS)
+		expect(age).toBeGreaterThan(
+			(AUTO_ROUTE_TIME_ENTRIES - 2) * AUTO_ROUTE_TIME_TOLERANCE_MS,
+		)
+		expect(age).toBeLessThan(
+			(AUTO_ROUTE_TIME_ENTRIES - 1) * AUTO_ROUTE_TIME_TOLERANCE_MS,
+		)
 	})
 
 	it("reaches the bound at saturation of the default ring", () => {
@@ -296,7 +348,7 @@ describe("SourceFifo", () => {
 			const truth = k * 2
 			const age = (5_000 - 1) * 2 - truth
 			expect(reported).toBeLessThanOrEqual(truth)
-			if (age <= (AUTO_ROUTE_TIME_ENTRIES - 1) * AUTO_ROUTE_TIME_TOLERANCE_MS)
+			if (age <= (AUTO_ROUTE_TIME_ENTRIES - 2) * AUTO_ROUTE_TIME_TOLERANCE_MS)
 				expect(truth - reported).toBeLessThanOrEqual(
 					AUTO_ROUTE_TIME_TOLERANCE_MS,
 				)
@@ -319,6 +371,7 @@ describe("SourceFifo", () => {
 								fc.constant(0),
 								fc.double({ min: 0, max: 3, noNaN: true }),
 								fc.integer({ min: 0, max: 400 }),
+								fc.double({ min: -5, max: 0, noNaN: true }),
 							),
 						}),
 						fc.record({
@@ -340,11 +393,14 @@ describe("SourceFifo", () => {
 					let pos = 17
 					let now = 0
 					let dropped = 0
+					// The 1 ms bound is stated for nondecreasing times; "never late" always holds.
+					let backward = false
 					const out = new Int16Array(80)
-					const bound = (entries - 1) * AUTO_ROUTE_TIME_TOLERANCE_MS
+					const bound = (entries - 2) * AUTO_ROUTE_TIME_TOLERANCE_MS
 					for (const op of ops) {
 						if (op.kind === "write") {
 							now += op.dt
+							if (op.dt < 0) backward = true
 							fifo.writeFrom(
 								res,
 								input,
@@ -370,7 +426,7 @@ describe("SourceFifo", () => {
 						expect(reported).not.toBeNull()
 						const r = reported ?? Number.NaN
 						expect(r).toBeLessThanOrEqual(t)
-						if (now - t <= bound)
+						if (!backward && now - t <= bound)
 							expect(t - r).toBeLessThanOrEqual(
 								AUTO_ROUTE_TIME_TOLERANCE_MS + 1e-9,
 							)
