@@ -8,6 +8,7 @@ import { EventEmitter } from "node:events"
 import { PassThrough, Writable } from "node:stream"
 import pino from "pino"
 import type { Logger } from "../../../src/utils/logger.js"
+import type { AutoRouteClock } from "../../../src/core/auto-listen/contract.js"
 
 let nextPid = 7_000_000
 
@@ -174,6 +175,10 @@ export interface DemodHarnessOptions {
 	restartBaseDelayMs?: number
 	/** Called with each fake stage as it is spawned. */
 	onSpawn?: (proc: FakeProcess) => void
+	/** IQ rate the fake source reports (default 2.4 Msps). */
+	sourceSampleRate?: number
+	/** Pacing clock of the `/auto` router (default: the real clock). */
+	autoRouteClock?: AutoRouteClock
 }
 
 /**
@@ -187,7 +192,7 @@ export async function createDemodHarness(options: DemodHarnessOptions = {}) {
 	const { createLogger } = await import("../../../src/utils/logger.js")
 	const processes: FakeProcess[] = []
 	const clock = options.clock ?? new ManualClock()
-	const sourceManager = createFakeSourceManager()
+	const sourceManager = createFakeSourceManager(options.sourceSampleRate)
 	const fanout = createFakeFanout()
 	const realKill = process.kill.bind(process)
 	const killSpy = (pid: number, signal?: string | number): true => {
@@ -216,6 +221,9 @@ export async function createDemodHarness(options: DemodHarnessOptions = {}) {
 			httpHost: "127.0.0.1",
 			clock,
 			restartBaseDelayMs: options.restartBaseDelayMs ?? 1,
+			...(options.autoRouteClock !== undefined
+				? { autoRouteClock: options.autoRouteClock }
+				: {}),
 			spawnStage: (command: string) => {
 				const proc = new FakeProcess(command)
 				processes.push(proc)

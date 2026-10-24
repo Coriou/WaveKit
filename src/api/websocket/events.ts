@@ -1030,7 +1030,9 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
-	 * Broadcasts the live audio meter (10–20 Hz while running).
+	 * Broadcasts the live audio meter (10–20 Hz while running). The level passes through
+	 * unchanged, including `autoSquelch` (`{ state, evidence? }`, evidence squelch
+	 * requirement 4.1: stage 2 of auto squelch; `squelchOpen` stays stage 1).
 	 */
 	broadcastLiveAudioLevel(level: LiveAudioLevel): void {
 		this.broadcast("live-audio", {

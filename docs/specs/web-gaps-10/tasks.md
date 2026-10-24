@@ -70,3 +70,67 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
   - **Property 11: Hygiene output is sound**, **Property 12: A qualifying opening is exactly one row**
 - [ ] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
   - _Requirements: 6.1, 6.2_
+
+## Amendment 2026-10-24: carrier-bounded transmissions
+
+Requirement 3.8, design section "Amendment 2026-10-24". Paths: `src/core/analog-transmission.ts`,
+the hook lines in `src/core/live-demodulator.ts` named below, tests. No change to
+`src/core/evidence-squelch/**`, `src/core/channel-squelch.ts`, `src/core/live-demod/**`,
+`packages/**` or `src/index.ts`.
+
+- [x] A1.1 Block log. `src/core/analog-transmission.ts`: `CarrierBlockLog` (fixed ring,
+      `note(run, rate, open, carried)`, `notePcm(run, rate, bytes)`, epoch per run).
+      `src/core/live-demodulator.ts`: field `carrierLog`, one `note` at the existing
+      `carrierBlockCount` increment in `measureRun`, one `notePcm` at the top of
+      `handleAudioData`, getter `carrierBlockLog()` with the `carrierBlocks()` null rule.
+  - _Requirements: 3.8.1, 3.8.8_
+- [x] A1.2 Tracker carrier path. `AnalogTransmissionTracker`: `drainCarrier()` consumes the log in
+      block order (`carrierBlock(k, flags)`: run, span, merge, provisional finalisation), called
+      from `handlePcm`, `handleLevel`, `handleSquelch`, `handleStopped`, `handleConfig` and
+      `stop`; `audioSoFar`, `close` and `pending()` honour spans; `discardedRuns()`.
+  - _Requirements: 3.8.2–3.8.6, 3.8.9_
+- [x] A1.3 Tone input. Per-block feed decisions ring and PCM ring (`CarrierPcmRing`, sized once
+      per PCM format), drained by output-sample position with cuts at block boundaries.
+  - _Requirements: 3.8.7_
+- [x] A1.4 Tests. `tests/unit/core/analog-transmission-carrier.test.ts` (3.8.10 cases with real
+      `ToneDetector`, CTCSS and D031N synthesis from `tests/unit/core/audio-tones/dcs-synth.ts`,
+      repeated fades, batched, delayed and split delivery, run2 boundary regression, fallback),
+      `tests/unit/core/analog-transmission-carrier.property.test.ts` (Properties 13, 14), the
+      `CarrierBlockLog` unit test in the carrier suite, STE tests (3.8.12), and the deliberate
+      `tests/unit/core/live-demodulator-wg7.test.ts` changes (carrier blocks matching PCM).
+  - _Requirements: 3.8.10, 3.8.12_
+  - **Property 13: Spans bound transmissions**, **Property 14: Tone hears only carrier**
+- [x] A1.6 Review fixes: Rust gate history by position and per-block gate state with metrics
+      (`src/core/live-demod/rust-engine.ts`, `src/core/live-demod/rust-run.ts`), positional block
+      log, span reset on a closing config change,
+      deferred span-end snapshot, whole-sample PCM eviction; tests in
+      `tests/unit/core/analog-transmission-carrier.test.ts` and
+      `tests/unit/core/live-demod-rust-fallback.test.ts`.
+  - _Requirements: 3.8.1, 3.8.5, 3.8.7_
+- [ ] A1.5 Live acceptance (Main): the design's acceptance plan.
+  - _Requirements: 3.8.11_
+
+Follow-up 2026-10-24:
+
+- [x] A1.7 Retune hold in the block log (`src/core/live-demodulator.ts` `measureRun`), pending
+      snapshot across a merge (`startSpan`, `settleSnapshot`, `drainPcm`), `discontinuity` parsing
+      (`src/core/live-demod/rust-protocol.ts`, `rust-engine.ts`, `rust-run.ts`,
+      `CarrierBlockLog.noteDiscontinuity`), STE hold-back (`steFeed`, `steDecide`); tests in
+      `tests/unit/core/analog-transmission-carrier.test.ts`,
+      `tests/unit/core/live-demod-rust-fallback.test.ts`,
+      `tests/unit/core/live-demod-rust-protocol-discontinuity.test.ts`.
+  - _Requirements: 3.8.1, 3.8.7, 3.8.13_
+- [x] A1.8 positional discontinuity queue with cause semantics
+      (`CarrierBlockLog.noteDiscontinuity`, tracker `readGaps`, `invalidateBlocks`, `lateMask`,
+      `carrierPcm`), startup replay order (`rust-run.ts` `applyStartup`), cause passthrough
+      (`rust-protocol.ts`, `rust-engine.ts`), window-only STE skip (`steDecide`); the review's
+      repro cases ported into `tests/unit/core/analog-transmission-carrier.test.ts`.
+  - _Requirements: 3.8.1, 3.8.13_
+- [x] A1.9 immediate late-gap masking (`readGaps`), fail-closed desynchronized
+      run past `CARRIER_LOG_GAPS` (`CarrierBlockLog.desynced`, `droppedTotal`, tracker
+      `enterDesync`, `desyncedRuns()`), startup notice cap (`rust-run.ts`); tests at 16 and 17.
+  - _Requirements: 3.8.1_
+- [x] A1.10 desync discards the held STE window (`enterDesync`,
+      `steFlush`); startup dropped-sample sum past the kept notices (`rust-run.ts`
+      `applyStartup`); tests for 15 blocks + 17 gaps and 18 startup notices.
+  - _Requirements: 3.8.1, 3.8.13_

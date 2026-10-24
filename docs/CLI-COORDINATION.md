@@ -1504,3 +1504,26 @@ Explicit frequency options retain fixed behavior; YAML decoders remain gate-exem
 Parent targets include worker channels; centre-reach decoders report capture centre.
 Raw wideband declared-frequency semantics and the optional DTO remain unchanged.
 The web tuned card needs no change.
+
+### Evidence auto squelch — 2026-10-23
+
+Spec: [evidence-squelch](specs/evidence-squelch/requirements.md). Details in [API.md](API.md).
+The contract additions are optional and additive; older cores omit the new fields.
+
+1. `squelchMode: "auto"` on `nfm` only is two-stage: stage 1 (channel-power floor + `autoMarginDb`) still delimits transmissions; stage 2 passes client audio only on voice or a CTCSS/DCS tone heard for at least 750 ms. `am` and other modulations keep stage 1 alone (`am` by decision A8); `manual` and `noise` keep "any carrier opens"; a configured `toneSquelch` is unchanged.
+2. Default flip: the runtime default `squelchMode` becomes `auto` (lands with checkpoint 8.4, task M.3). Status and config responses report `auto` when unset.
+3. `LiveAudioStatus.autoSquelch?` and `LiveAudioLevel.autoSquelch?` (`live-audio:level`) are `LiveAudioAutoSquelch` `{ state: "off" | "waiting" | "open", evidence?: "voice" | "ctcss" | "dcs" }`. `off` while running outside the evidence path (including on `am`); absent while stopped and from older cores.
+4. `squelchOpen` is unchanged: it is stage 1, not whether audio passes. `autoMarginDb` tunes stage 1 only.
+5. While an over waits for evidence its audio is held in a pre-roll and replayed when the gate latches, so the stream runs up to 1.5 s behind during an over and catches up by dropping the silence after it. Overs under about one second with no tone are not heard.
+6. Known limitations: syllable-timed audio-frequency FSK bursts open as `voice` (the gate equals the pinned scanner judge); voice whose medians sit within about 1 dB of the -30 dB audio threshold may latch after the pre-roll limit, clipping the start of the over.
+7. CLI hits (`rg -n "squelchMode|squelchOpen|autoMarginDb" cli/source`), none assume a `manual` default: `cli/source/data/guards.ts:1557` (`live-audio:level` guard requires boolean `squelchOpen`; the extra `autoSquelch` passes and is dropped); `cli/source/data/live-audio-transmission.test.tsx:42` (fixture value `squelchMode: "manual"`); `cli/source/data/live-audio-level.test.tsx:35` (fixture value `squelchOpen: false`). No CLI change required.
+
+### Auto listen route — 2026-10-24
+
+Spec: [auto-listen-route](specs/auto-listen-route/requirements.md). Details in [API.md](API.md).
+The contract additions are optional and additive; older cores omit the new fields. Existing streams are unchanged.
+
+1. `GET /auto` and `/auto.wav` on the live-audio HTTP server (same access rules, stream leases and CORS as `/stream`) play one source at a time, always 48 000 Hz `s16le` mono: the `/stream` analog samples while the squelch that governs `/stream` lets them through (the evidence gate when `squelchMode` is `auto`), decoded digital voice while a digital voice decoder covering the tuned channel produces clear voice, exact silence otherwise. Digital wins after the analog over releases (300 ms) or after at most 1.5 s; encrypted calls never play. Clients stay connected across restarts, retunes and rate changes.
+2. `LiveAudioStatus.autoRoute?` (`LiveAudioAutoRoute`: `active` `analog` | `digital` | `none`, `protocol?`, `decoderId?`, `slot?`, `since`, `httpUrl`, `wavUrl`, `clientCount`, `digitalAvailable`, `underruns`, `droppedMs`, `clockRebases`, `latencyMs`) is present whenever the server listens. `LiveAudioLevel.autoRoute?` (`{ active, protocol? }`) rides `live-audio:level` while `/auto` has a client. Constants `LIVE_AUDIO_AUTO_ROUTE_*` in `@wavekit/api-types`.
+3. Web "What you hear: Auto" should play `autoRoute.httpUrl` (fetch PCM, 48 kHz from the headers) instead of choosing between `/stream` and the decoded voice stream itself, and label the source from `autoRoute.active` / `protocol` (level event for live updates, status as fallback). `digitalAvailable: false` means the core routes analog only. The explicit analog and decoded-voice choices keep their existing streams.
+4. CLI hits: `cli/source/data/guards.ts:1551` (`live-audio:level` guard checks only the existing fields, so the extra `autoRoute` passes and is dropped); `guardLiveAudioStatus` reads named fields only. No CLI change required.

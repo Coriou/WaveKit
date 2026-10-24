@@ -36,6 +36,15 @@ import {
 } from "./rust-protocol.js"
 
 const CONTROL_FD = 3
+/** Native measures 10 ms blocks of output audio (480 samples at 48 kHz). */
+export const RUST_METRIC_BLOCK_SAMPLES = RUST_AUDIO_RATE_HZ / 100
+/**
+ * WG10 req 3.8.1: gate changes remembered by output position. Native sends at most one change
+ * per block, so 256 entries cover at least 256 blocks (2.56 s): more than the downstream
+ * startup buffer (8 batches, 80 blocks) plus one batch of metrics lag. An evicted change
+ * becomes the base state of the window.
+ */
+export const GATE_HISTORY_MAX = 256
 const USABLE_FRACTION = 0.8
 const BLOCK_SAMPLES = 1024
 const VERSION_LIMIT_BYTES = 4096
@@ -64,13 +73,25 @@ export interface RustEngineOptions {
 export interface RustEngineHandlers {
 	onAudio: (chunk: Buffer) => void
 	onGate: (open: boolean) => void
+	/**
+	 * One metrics batch. WG10 req 3.8.1: `atOutputSample` is the first block's output sample and
+	 * `gateOpen[i]` the gate state block `i` was decided with (from the gate history).
+	 */
 	onMetrics: (
 		powerDbfs: Array<number | null>,
 		quietingDb: ReadonlyArray<QuietingDb>,
+		atOutputSample: number,
+		gateOpen: ReadonlyArray<boolean>,
 	) => void
 	onDown: (reason: string) => void
 	/** First output sample of an applied retune (`retuned.atOutputSample`). */
 	onRetuned?: (atOutputSample: number) => void
+	/** WG10 req 3.8.1: native dropped output samples from `sampleIndex` (`discontinuity`). */
+	onDiscontinuity?: (
+		sampleIndex: number,
+		droppedSamples: number,
+		cause: string,
+	) => void
 	/** Control line the process refused (`rejected.reasonCode`). */
 	onRejected?: (reasonCode: string) => void
 }
@@ -121,6 +142,9 @@ export class RustEngine implements LiveDemodEngine {
 	private pendingMatch: ((event: DemodEvent) => void) | undefined
 	/** Handshake events that arrived before their waiter was installed. */
 	private early: DemodEvent[] = []
+	private gateHistory: Array<{ at: number; open: boolean }> = []
+	/** Gate state before the oldest remembered change (native starts closed). */
+	private gateBase = false
 	/** Async spawn failure (ENOENT / EACCES / no pid). Not an unexpected crash. */
 	private spawnFailure: unknown = undefined
 	/** Child exited on its own before start finished. */
@@ -173,6 +197,8 @@ export class RustEngine implements LiveDemodEngine {
 		this.exited = false
 		this.dropCount = 0
 		this.early = []
+		this.gateHistory = []
+		this.gateBase = false
 		this.pendingMatch = undefined
 		this.spawnFailure = undefined
 		this.unexpectedExit = false
@@ -505,16 +531,33 @@ export class RustEngine implements LiveDemodEngine {
 			this.handlers?.onRejected?.(event.reasonCode)
 			return
 		}
+		if (event.type === "discontinuity" && event.id === DEMOD_CHANNEL_ID) {
+			this.handlers?.onDiscontinuity?.(
+				event.sampleIndex,
+				event.droppedSamples,
+				event.cause,
+			)
+			return
+		}
 		if (event.type === "retuned" && event.id === DEMOD_CHANNEL_ID) {
 			this.handlers?.onRetuned?.(event.atOutputSample)
 			return
 		}
 		if (event.type === "gate" && event.id === DEMOD_CHANNEL_ID) {
+			this.rememberGate(event.atOutputSample, event.open)
 			this.handlers?.onGate(event.open)
 			return
 		}
 		if (event.type === "metrics" && event.id === DEMOD_CHANNEL_ID) {
-			this.handlers?.onMetrics(event.powerDbfs, event.quietingDb)
+			this.handlers?.onMetrics(
+				event.powerDbfs,
+				event.quietingDb,
+				event.atOutputSample,
+				this.gatesFor(
+					event.atOutputSample,
+					Math.max(event.powerDbfs.length, event.quietingDb.length),
+				),
+			)
 			return
 		}
 		if (
@@ -540,6 +583,36 @@ export class RustEngine implements LiveDemodEngine {
 		socket.on("close", () => {
 			this.fail("Live demodulation Rust engine socket closed")
 		})
+	}
+
+	private rememberGate(at: number, open: boolean): void {
+		this.gateHistory.push({ at, open })
+		if (this.gateHistory.length > GATE_HISTORY_MAX) {
+			const evicted = this.gateHistory.shift()
+			if (evicted !== undefined) this.gateBase = evicted.open
+		}
+	}
+
+	/**
+	 * Gate state of each block of a batch: native stamps a change with the end of the block that
+	 * decided it, so block `i` takes the latest change at or before its end.
+	 */
+	private gatesFor(at: number, count: number): boolean[] {
+		const gates = new Array<boolean>(count)
+		const history = this.gateHistory
+		let state = this.gateBase
+		let next = 0
+		for (let i = 0; i < count; i++) {
+			const end = at + (i + 1) * RUST_METRIC_BLOCK_SAMPLES
+			while (next < history.length) {
+				const change = history[next]
+				if (change === undefined || change.at > end) break
+				state = change.open
+				next += 1
+			}
+			gates[i] = state
+		}
+		return gates
 	}
 
 	private fail(reason: string): void {

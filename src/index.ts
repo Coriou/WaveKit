@@ -1384,10 +1384,15 @@ async function main(): Promise<void> {
 			monitor,
 			createComponentLogger(logger, "EfficiencyGate"),
 		)
+		// auto-listen-route 3.4: bumped at every event that can change voice coverage.
+		let coverageGeneration = 0
 		const vfo = createVfoTracker({
 			now: () => performance.now(),
 			setTimer: decoderPolicyTimer,
-			onSettled: value => decoderManager.notifyVfoSettled(value),
+			onSettled: value => {
+				decoderManager.notifyVfoSettled(value)
+				coverageGeneration++
+			},
 		})
 		const updateVfo = () =>
 			vfo.update(
@@ -1403,11 +1408,18 @@ async function main(): Promise<void> {
 		liveDemod.on("config-changed", updateVfo)
 		sourceManager.on("caps-changed", updateVfo)
 		sourceManager.on("connected", updateVfo)
+		const bumpCoverage = () => {
+			coverageGeneration++
+		}
+		liveDemod.on("config-changed", bumpCoverage)
+		sourceManager.on("caps-changed", bumpCoverage)
 		const closeVfo = () => {
 			vfo.dispose()
 			liveDemod.off("config-changed", updateVfo)
 			sourceManager.off("caps-changed", updateVfo)
 			sourceManager.off("connected", updateVfo)
+			liveDemod.off("config-changed", bumpCoverage)
+			sourceManager.off("caps-changed", bumpCoverage)
 		}
 		own(20, closeVfo)
 		const modeBinding = composeDecoderModes(
@@ -1468,6 +1480,65 @@ async function main(): Promise<void> {
 
 		// Wire DecoderManager to SourceManager for dynamic sample rate handling
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
+
+		// auto-listen-route 3.4: coverage only on a verified, settled frequency that matches.
+		const coverageEvents = [
+			"decoder:started",
+			"decoder:stopped",
+			"decoder:removed",
+			"decoder:status-changed",
+		] as const
+		for (const event of coverageEvents) decoderManager.on(event, bumpCoverage)
+		own(20, () => {
+			for (const event of coverageEvents)
+				decoderManager.off(event, bumpCoverage)
+		})
+		const liveVfo = () =>
+			vfoFromLiveDemod({
+				sourceId: () =>
+					liveDemod.getStatus().sourceId ||
+					defaultSourceIdFor(config.sources) ||
+					null,
+				offsetHz: () => liveDemod.getStatus().config.offsetHz,
+				centreHz: id => sourceManager.getCaps(id)?.centerFreq ?? null,
+			})
+		liveDemod.attachAutoRouteVoice(digitalVoice, {
+			get generation() {
+				return coverageGeneration
+			},
+			covers: decoderId => {
+				try {
+					const live = liveVfo()
+					const settled = vfo.current()
+					const status = decoderManager.getStatus(decoderId)
+					if (!live || !settled || !status) return "unknown"
+					if (
+						settled.sourceId !== live.sourceId ||
+						settled.frequencyHz !== live.frequencyHz
+					)
+						return "unknown"
+					if (!status.running) return "no"
+					const half = liveDemod.getStatus().config.bandwidth / 2
+					const near = (hz: number | undefined) =>
+						hz !== undefined && Math.abs(hz - live.frequencyHz) <= half
+					const placements = status.placements ?? []
+					if (placements.length > 0)
+						return placements.some(
+							p =>
+								p.running && p.sourceId === live.sourceId && near(p.channelHz),
+						)
+							? "yes"
+							: "no"
+					if (status.sourceId === undefined) return "unknown"
+					if (status.sourceId !== live.sourceId) return "no"
+					return (status.targetFrequenciesHz ?? []).some(hz => near(hz))
+						? "yes"
+						: "no"
+				} catch {
+					return "unknown"
+				}
+			},
+		})
 
 		// Core channelizer (addendum §4): one wavekit-chan per source, spawned on the
 		// first channel request. Without `channelizer.enabled` it is composed only

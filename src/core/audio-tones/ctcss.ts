@@ -24,6 +24,8 @@ const RAW_POWER_FRACTION = 0.01
 const MIN_VOTE_FRACTION = 0.6
 /** Ignore numerical dust so a silent band cannot win on a ratio of zeros. */
 const MIN_POWER = 1e-12
+/** Tones evaluated together in one Goertzel pass (see `CtcssBank.goertzel`). */
+const GOERTZEL_LANES = 10
 
 /** The 50 EIA/TIA-603 CTCSS tones, 67.0–254.1 Hz, low to high. */
 export const CTCSS_HZ = [
@@ -235,21 +237,8 @@ export class CtcssBank {
 			aboveEnergy += above * above
 		}
 		const bandEnergy = Math.max(0, rawEnergy - belowEnergy - aboveEnergy)
+		this.goertzel()
 		const powers = this.powers
-		const coeffs = this.coeffs
-		const block = this.block
-		for (let tone = 0; tone < CTCSS_HZ.length; tone++) {
-			const coeff = coeffs[tone] ?? 0
-			let s1 = 0
-			let s2 = 0
-			for (let n = 0; n < BLOCK_SAMPLES; n++) {
-				const s0 = (block[n] ?? 0) + coeff * s1 - s2
-				s2 = s1
-				s1 = s0
-			}
-			const power = s1 * s1 + s2 * s2 - coeff * s1 * s2
-			powers[tone] = power > 0 ? power : 0
-		}
 		let best = 0
 		let second = 1
 		if ((powers[1] ?? 0) > (powers[0] ?? 0)) {
@@ -295,4 +284,110 @@ export class CtcssBank {
 		}
 		this.blockIndex += 1
 	}
+
+	/**
+	 * Goertzel power of every tone over `block`. Each tone's recurrence is a serial dependency
+	 * chain, so one tone per pass is latency-bound; GOERTZEL_LANES independent tones share one
+	 * pass instead. Every tone keeps its own operations in the same order, so the powers are
+	 * bit-identical to one tone per pass.
+	 */
+	private goertzel(): void {
+		const powers = this.powers
+		const coeffs = this.coeffs
+		const block = this.block
+		const tones = CTCSS_HZ.length
+		let tone = 0
+		for (; tone + GOERTZEL_LANES <= tones; tone += GOERTZEL_LANES) {
+			const c0 = coeffs[tone] ?? 0
+			const c1 = coeffs[tone + 1] ?? 0
+			const c2 = coeffs[tone + 2] ?? 0
+			const c3 = coeffs[tone + 3] ?? 0
+			const c4 = coeffs[tone + 4] ?? 0
+			const c5 = coeffs[tone + 5] ?? 0
+			const c6 = coeffs[tone + 6] ?? 0
+			const c7 = coeffs[tone + 7] ?? 0
+			const c8 = coeffs[tone + 8] ?? 0
+			const c9 = coeffs[tone + 9] ?? 0
+			let p0 = 0
+			let q0 = 0
+			let p1 = 0
+			let q1 = 0
+			let p2 = 0
+			let q2 = 0
+			let p3 = 0
+			let q3 = 0
+			let p4 = 0
+			let q4 = 0
+			let p5 = 0
+			let q5 = 0
+			let p6 = 0
+			let q6 = 0
+			let p7 = 0
+			let q7 = 0
+			let p8 = 0
+			let q8 = 0
+			let p9 = 0
+			let q9 = 0
+			for (let n = 0; n < BLOCK_SAMPLES; n++) {
+				const x = block[n] ?? 0
+				const r0 = x + c0 * p0 - q0
+				const r1 = x + c1 * p1 - q1
+				const r2 = x + c2 * p2 - q2
+				const r3 = x + c3 * p3 - q3
+				const r4 = x + c4 * p4 - q4
+				const r5 = x + c5 * p5 - q5
+				const r6 = x + c6 * p6 - q6
+				const r7 = x + c7 * p7 - q7
+				const r8 = x + c8 * p8 - q8
+				const r9 = x + c9 * p9 - q9
+				q0 = p0
+				p0 = r0
+				q1 = p1
+				p1 = r1
+				q2 = p2
+				p2 = r2
+				q3 = p3
+				p3 = r3
+				q4 = p4
+				p4 = r4
+				q5 = p5
+				p5 = r5
+				q6 = p6
+				p6 = r6
+				q7 = p7
+				p7 = r7
+				q8 = p8
+				p8 = r8
+				q9 = p9
+				p9 = r9
+			}
+			powers[tone] = goertzelPower(c0, p0, q0)
+			powers[tone + 1] = goertzelPower(c1, p1, q1)
+			powers[tone + 2] = goertzelPower(c2, p2, q2)
+			powers[tone + 3] = goertzelPower(c3, p3, q3)
+			powers[tone + 4] = goertzelPower(c4, p4, q4)
+			powers[tone + 5] = goertzelPower(c5, p5, q5)
+			powers[tone + 6] = goertzelPower(c6, p6, q6)
+			powers[tone + 7] = goertzelPower(c7, p7, q7)
+			powers[tone + 8] = goertzelPower(c8, p8, q8)
+			powers[tone + 9] = goertzelPower(c9, p9, q9)
+		}
+		for (; tone < tones; tone++) {
+			const coeff = coeffs[tone] ?? 0
+			let s1 = 0
+			let s2 = 0
+			for (let n = 0; n < BLOCK_SAMPLES; n++) {
+				const s0 = (block[n] ?? 0) + coeff * s1 - s2
+				s2 = s1
+				s1 = s0
+			}
+			powers[tone] = goertzelPower(coeff, s1, s2)
+		}
+	}
+}
+
+/** Final Goertzel power from the last two states, clamped at 0. */
+function goertzelPower(coeff: number, s1: number, s2: number): number {
+	const power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+	return power > 0 ? power : 0
 }

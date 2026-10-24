@@ -1,0 +1,108 @@
+/**
+ * Evidence squelch wiring property (docs/specs/evidence-squelch, plan W.2) against fake ports.
+ */
+import * as fc from "fast-check"
+import { describe, expect, it } from "vitest"
+import { LiveDemodRuntimeConfigSchema } from "../../../src/core/live-demodulator.js"
+import { startEvidenceHarness } from "./live-demodulator-evidence-fakes.js"
+
+interface Observed {
+	squelchOpen: boolean | undefined
+	autoSquelch: string | undefined
+}
+
+async function observe(
+	schedule: ReadonlyArray<{ open: boolean; bytes: number }>,
+	latchAtByte: number,
+	delaySamples: number,
+): Promise<Observed[]> {
+	const t = await startEvidenceHarness(
+		{ modulation: "nfm", squelchMode: "auto" },
+		{ latchAtByte, guardBytes: 64, delaySamples, rewrite: delaySamples > 0 },
+	)
+	try {
+		const seen: Observed[] = []
+		for (const step of schedule) {
+			t.stage.open = step.open
+			t.internals.publishSquelchChange()
+			t.feed(Buffer.alloc(step.bytes, 0x55))
+			const status = t.h.demod.getStatus()
+			seen.push({
+				squelchOpen: status.squelchOpen,
+				autoSquelch: status.autoSquelch?.state,
+			})
+		}
+		return seen
+	} finally {
+		await t.h.dispose()
+	}
+}
+
+describe("live demodulator evidence wiring properties", () => {
+	// Feature: evidence-squelch, Property 5: Status at received time
+	// Validates: Requirements 2.7, 4.1, 4.2
+	it("squelchOpen and autoSquelch.state per chunk are independent of the pre-roll delay", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.record({
+						open: fc.boolean(),
+						bytes: fc.integer({ min: 1, max: 3_000 }),
+					}),
+					{ minLength: 1, maxLength: 12 },
+				),
+				fc.integer({ min: 0, max: 8_000 }),
+				fc.integer({ min: 1, max: 37_500 }),
+				async (schedule, latchSample, delay) => {
+					const latchAtByte = latchSample * 2
+					const base = await observe(schedule, latchAtByte, 0)
+					const delayed = await observe(schedule, latchAtByte, delay)
+					expect(delayed).toEqual(base)
+					for (const [i, step] of schedule.entries())
+						expect(base[i]?.squelchOpen).toBe(step.open)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
+
+	// Feature: evidence-squelch, Property 14: Default
+	// Validates: Requirements 3.1
+	it("squelchMode defaults to auto and an explicit value is kept", () => {
+		const modulations = ["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"]
+		fc.assert(
+			fc.property(
+				fc.record({
+					modulation: fc.constantFrom(...modulations),
+					squelch: fc.integer({ min: -120, max: 0 }),
+					gain: fc.integer({ min: 1, max: 40 }),
+					audioFormat: fc.constantFrom("s16le", "f32le"),
+					autoMarginDb: fc.integer({ min: 0, max: 40 }),
+				}),
+				fc.option(fc.constantFrom("manual", "auto", "noise"), {
+					nil: undefined,
+				}),
+				(base, explicit) => {
+					const config = { enabled: true, httpPort: 18_999, ...base }
+					expect(LiveDemodRuntimeConfigSchema.parse(config).squelchMode).toBe(
+						"auto",
+					)
+					if (explicit === undefined) return
+					if (
+						explicit === "noise" &&
+						base.modulation !== "nfm" &&
+						base.modulation !== "wfm"
+					)
+						return
+					expect(
+						LiveDemodRuntimeConfigSchema.parse({
+							...config,
+							squelchMode: explicit,
+						}).squelchMode,
+					).toBe(explicit)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+})

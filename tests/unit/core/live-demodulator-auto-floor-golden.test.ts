@@ -131,6 +131,7 @@ describe("LiveDemodulator squelch traces (frozen behaviour, WG10 req 2.6)", () =
 				enabled: true,
 				sourceId: "rtl-pi",
 				httpPort: await findFreePort(),
+				squelchMode: "manual",
 				...config,
 			}),
 			{ httpHost: "127.0.0.1" },

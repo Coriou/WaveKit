@@ -1348,7 +1348,7 @@ curl http://localhost:9000/api/live-audio/status
 		"modulation": "nfm",
 		"bandwidth": 12500,
 		"squelch": -40,
-		"squelchMode": "manual",
+		"squelchMode": "auto",
 		"autoMarginDb": 6,
 		"noiseQuietingDb": 6,
 		"noiseReduction": "off",
@@ -1371,7 +1371,8 @@ curl http://localhost:9000/api/live-audio/status
 	"pipelineRestarts": 0,
 	"channelPowerDbfs": -61.3,
 	"squelchOpen": false,
-	"toneSquelch": { "state": "off" }
+	"toneSquelch": { "state": "off" },
+	"autoSquelch": { "state": "waiting" }
 }
 ```
 
@@ -1402,7 +1403,8 @@ Fields:
   full-scale IQ sample (present while the pipeline runs). This is the level the
   `squelch` threshold compares against.
 - `squelchOpen` — squelch gate state while the pipeline runs (`true` with squelch
-  off).
+  off). In `auto` mode this is still stage 1 (the carrier gate), not whether audio
+  passes; see `autoSquelch`.
 - `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
   threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
 - `agc` (WG4) — the effective AGC mode of the chain after the modulation
@@ -1412,14 +1414,62 @@ Fields:
   with `off` (no tone set), `waiting` (squelch closed or the tone not heard yet: the
   stream carries silence) or `open` (tone heard: audio passes). Absent while stopped
   and from older cores.
+- `autoSquelch` — the evidence (stage 2) gate of `auto` squelch while the pipeline
+  runs: `{ state, evidence? }` with `state` `off` (not evidence-gated: `manual` or
+  `noise` mode, a configured `toneSquelch`, a modulation other than `nfm`,
+  including `am`, or a run on the Rust engine), `waiting` (no evidence yet: audio is held and the stream carries silence)
+  or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
+  `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
+- `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
+  audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
+httpUrl, wavUrl, clientCount, digitalAvailable, underruns, droppedMs,
+clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
+  `protocol` (when the call reports one), `decoderId` and `slot` (a number or
+  `null`) are present only while `active` is `digital`. `since` is the ISO time of
+  the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
+  (public origin, legacy `Host` rewrite). `digitalAvailable` is `false` when the
+  core routes analog only. `underruns` counts output blocks short of audio,
+  `droppedMs` the audio dropped on overflow, preemption or invalidation,
+  `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
+  selected source's backlog plus one 20 ms block. Optional in `@wavekit/api-types`;
+  absent from older cores.
+- `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
+  `GET /api/live-audio/status?diagnostics=true` while the evidence gate runs, never on
+  level events; it may change or disappear without notice. The gate's current voice
+  window: `verdict` (`window-filling`, `non-finite`, `data-like`, `not-quiet`,
+  `low-syllabic`, then `voice-median`, `voice-runs` or `low-audio` when neither voice
+  path passes, or `latched`, in the judge's order), `path` while latched (`median`,
+  `runs` or `tone`), `syllableRuns` (syllable runs in the last 2 s, A15), `frames`
+  (0-20), the window medians `audioDb`, `syllabic` and `cluster` (null when empty),
+  `quietBlocks` and `notedBlocks` (10 ms blocks in the quiet window), `windowResets`
+  (carrier-onset resets this episode), `audioMs` and `deviationHz` (the voice meter's
+  reference), and `ste: true` after a squelch-tail-elimination tone ended the over.
+  Computed per request.
 - `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
-  are always present in config and status responses, with their defaults (`manual`,
+  are always present in config and status responses, with their defaults (`auto`,
   6 and 6) when not set. `config.toneSquelch` is present only when it is set.
 
 Configuration notes:
 
-- `squelchMode` — `manual` (default: `squelch` is the threshold) or `auto` (an
-  estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB, default 6). The
+- `squelchMode` — `auto` (default) or `manual` (`squelch` is the threshold). `auto`
+  stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
+  default 6, and delimits transmissions. On `nfm` on the csdr engine (the default)
+  only, `auto` adds stage 2, an evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
+  or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
+  to 1.5 s and played when the gate latches. During an over the stream can run up
+  to 1.5 s behind; it catches up by dropping the silence after the over. An over
+  shorter than about one second with no tone is not heard. Once latched, audio passes
+  only while the carrier is FM-quieted (plus 10 ms and a 10 ms fade for the demodulator's
+  drain), or on a tone latch while the tone is still heard: the noise after an unkey is
+  muted at once (amendment A16, 2026-10-24). A 55 Hz squelch-tail-elimination tone at the
+  end of an over mutes from its onset and ends the latch (amendment A17). `manual` and `noise`
+  keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
+  replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
+  keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine
+  (`engine: "rust"`), `auto` on `nfm` is stage 1 alone too, byte-identical to the
+  stage-1 auto squelch, with `autoSquelch` state `off` (amendment A12, 2026-10-23),
+  until the Rust audio carries its gate state in-band; a fallback to csdr starts
+  the evidence gate fresh. The stage 1
   floor is a constant-memory running lower envelope: falls are immediate; rises
   are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
   stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within
@@ -1437,7 +1487,8 @@ Configuration notes:
   default (6 dB, a carrier is present) never seeds the floor and never raises it
   (falls still apply); until the first unquieted block seeds the floor, the gate
   follows the quieting decision, as in `noise` mode, so a strong carrier already
-  present at start or after a retune is heard at once instead of becoming the floor.
+  present at start or after a retune opens stage 1 at once instead of becoming the
+  floor (on `nfm` on csdr listeners still need stage 2 evidence to hear it).
   `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
@@ -1551,10 +1602,29 @@ server ends existing streams; reconnect to get the new parameters. A client that
 falls behind keeps at most about one second of queued audio (the oldest audio is
 dropped); a client that accepts nothing for 30 s is disconnected.
 
+#### GET http://localhost:8081/auto and /auto.wav
+
+One stream that plays whatever is on the tuned channel: the analog audio while the
+squelch that governs `/stream` lets it through (exactly the `/stream` samples,
+resampled), decoded digital voice while a digital voice decoder covering the tuned
+channel produces voice (never an encrypted call), and exact silence otherwise. One
+source plays at a time; digital wins over analog after the analog over releases
+(300 ms), or after at most 1.5 s.
+
+- Always 48 000 Hz, `s16le`, mono (`X-Audio-Format: s16le`, `X-Sample-Rate: 48000`,
+  `X-Channels: 1`); `/auto.wav` adds the streaming WAV header.
+- Clients stay connected across pipeline restarts, retunes, modulation, squelch
+  and source rate changes; only the stall timeout, a server stop or shutdown
+  closes them. The per-client queue bound and the 30 s stall disconnect of
+  `/stream` apply.
+- Same server, access rules, stream leases and CORS as `/stream` (below).
+- Status: `autoRoute` on [GET /api/live-audio/status](#get-apilive-audiostatus) and
+  on `live-audio:level`.
+
 Cross-origin use (WG7). In legacy access mode, every response of the audio HTTP
 servers carries `Access-Control-Allow-Origin: *` beside
 `Access-Control-Expose-Headers`, and never `Access-Control-Allow-Credentials`.
-The servers are the live demodulator (`/stream`, `/stream.wav`) and digital
+The servers are the live demodulator (`/stream`, `/stream.wav`, `/auto`, `/auto.wav`) and digital
 voice (`/decoders/<id>/stream[.wav]`). Their 404 and 503 answers carry the
 header too, so a web app on another origin can `fetch()` the stream. `OPTIONS`
 on a stream path answers 204 with `Access-Control-Allow-Origin: *`,
@@ -5756,7 +5826,11 @@ Backpressure status snapshot.
 
 On the `live-audio` channel while the live demodulator runs, published at
 10 Hz. `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
-first complete IQ block; `thresholdDbfs` is the threshold in effect.
+first complete IQ block; `thresholdDbfs` is the threshold in effect. `squelchOpen`
+is stage 1; the optional `autoSquelch` is the evidence gate at the measured block,
+as in [GET /api/live-audio/status](#get-apilive-audiostatus). While `/auto` has a
+client, the optional `autoRoute` is `{ active, protocol? }` (`protocol` only while
+`active` is `digital` and the call reports one).
 
 ```json
 {
@@ -5767,7 +5841,8 @@ first complete IQ block; `thresholdDbfs` is the threshold in effect.
 		"channelPowerDbfs": -52.3,
 		"noiseFloorDbfs": -61.8,
 		"squelchOpen": true,
-		"thresholdDbfs": -55.8
+		"thresholdDbfs": -55.8,
+		"autoSquelch": { "state": "open", "evidence": "voice" }
 	}
 }
 ```
@@ -5839,7 +5914,7 @@ shape is unchanged.
 		"frequency": { "hz": 446006250, "tuningTrust": "commanded" },
 		"modulation": "nfm",
 		"bandwidthHz": 12500,
-		"squelchMode": "manual",
+		"squelchMode": "auto",
 		"thresholdDbfs": -40,
 		"peakChannelPowerDbfs": -11.2,
 		"meanChannelPowerDbfs": -16.4,

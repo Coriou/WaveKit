@@ -27,11 +27,15 @@ import { Transform, type Readable } from "node:stream"
 import { z } from "zod"
 import {
 	DCS_STANDARD_CODES,
+	LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_SQUELCH_MODES,
 	type AnalogTransmissionDcs,
+	type LiveAudioAutoRoute,
+	type LiveAudioAutoRouteLevel,
+	type LiveAudioAutoSquelch,
 	type LiveAudioSquelchMode,
 } from "@wavekit/api-types"
 import {
@@ -65,17 +69,43 @@ import {
 	ToneSquelchGate,
 	type ToneSquelchTone,
 } from "./audio-tones/tone-squelch.js"
+import { CarrierBlockLog } from "./analog-transmission.js"
 import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
 import {
 	DEFAULT_IQ_SAMPLE_RATE,
 	liveDemodRates,
 	effectiveAgc,
+	backChainDrainSamples,
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
 import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
+import {
+	EVIDENCE_NOTE_DISCARD,
+	evidenceDeviationHz,
+	evidenceGateApplies,
+	pcmSampleBytes,
+	type EvidenceSquelchFactory,
+	type PreRollTag,
+} from "./evidence-squelch/contract.js"
+import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
+import {
+	processEvidenceChunk,
+	type EvidencePreRollTap,
+	type EvidenceWiring,
+} from "./evidence-squelch/wiring.js"
+import { PreRoll } from "./evidence-squelch/pre-roll.js"
+import { AutoListenRouter } from "./auto-listen/router.js"
+import { AUTO_ROUTE_STREAM } from "./auto-listen/contract.js"
+import type {
+	AutoRouteClock,
+	VoiceCoveragePort,
+	VoiceTapSource,
+} from "./auto-listen/contract.js"
+import { PreRollShadow } from "./auto-listen/preroll-shadow.js"
+import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
@@ -89,7 +119,7 @@ export const LiveDemodRuntimeConfigSchema = LiveDemodConfigSchema.and(
 	z.object({
 		squelchMode: z
 			.enum(LIVE_AUDIO_SQUELCH_MODES as [LiveAudioSquelchMode])
-			.default("manual"),
+			.default("auto"),
 		autoMarginDb: z.number().finite().min(0).max(40).default(6),
 		noiseQuietingDb: z
 			.number()
@@ -111,6 +141,10 @@ export interface LiveAudioLevel {
 	noiseFloorDbfs: number | null
 	squelchOpen: boolean
 	thresholdDbfs: number
+	/** Evidence squelch gate state (a fresh object per level). */
+	autoSquelch?: LiveAudioAutoSquelch
+	/** Auto listen route selection while `/auto` has a client (a fresh object per level). */
+	autoRoute?: LiveAudioAutoRouteLevel
 }
 
 export interface LiveDemodStatus {
@@ -145,6 +179,8 @@ export interface LiveDemodStatus {
 	agc?: "off" | "slow" | "fast"
 	/** WG7 req 3.4: tone squelch gate state, while running. */
 	toneSquelch?: { state: "off" | "waiting" | "open" }
+	/** Evidence squelch gate state, while running (`off` when not evidence-gated). */
+	autoSquelch?: LiveAudioAutoSquelch
 	/**
 	 * WG12 req 6.4: current or last closed transmission's tone, while running.
 	 * Absent until one is reported; cleared on retune and stop.
@@ -154,6 +190,8 @@ export interface LiveDemodStatus {
 		dcs: AnalogTransmissionDcs | null
 		at: string
 	}
+	/** Auto listen route (`/auto`), present whenever the HTTP server listens. */
+	autoRoute?: LiveAudioAutoRoute
 }
 
 /** reconfigure() input; `agc: null` deletes the key (modulation default). */
@@ -171,6 +209,8 @@ export interface LiveDemodEvents {
 	"config-changed": (config: LiveDemodConfig) => void
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
+	/** Auto listen route: once per change of the active source or digital decoder. */
+	"auto-route-changed": (level: LiveAudioAutoRouteLevel) => void
 	/**
 	 * Demodulated PCM, only while something is listening (WG2 req 7.6).
 	 * The chunk is the buffer written to audio clients; with a tone squelch
@@ -206,9 +246,18 @@ export interface LiveDemodulatorOptions {
 	spawnStage?: (command: string) => ChildProcess
 	/** WG10: clock and timers of the silence fill and the front swap timeout. */
 	clock?: SilenceFillClock
+	/**
+	 * Evidence squelch ports (A5). Absent: the real `EvidenceGate` and `PreRoll`
+	 * (`DEFAULT_EVIDENCE_SQUELCH`); tests inject fakes.
+	 */
+	evidenceSquelch?: EvidenceSquelchFactory
+	/** Auto listen route pacer clock (tests inject one; default monotonic). */
+	autoRouteClock?: AutoRouteClock
 }
 
 type InjectedOptionKeys =
+	| "evidenceSquelch"
+	| "autoRouteClock"
 	| "httpAccess"
 	| "publicOrigin"
 	| "httpHost"
@@ -218,6 +267,20 @@ type ResolvedOptions = Required<
 	Omit<LiveDemodulatorOptions, InjectedOptionKeys>
 > &
 	Pick<LiveDemodulatorOptions, InjectedOptionKeys>
+
+/** Evidence squelch state of one run (streams in `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` only). */
+interface RunEvidence extends EvidenceWiring {
+	/**
+	 * Tag-only replay of `preRoll` for `/auto` qualification (auto-listen-route 3.6, 3.7),
+	 * built, cleared and dropped with it; null when it could not be built (analog on `/auto`
+	 * stays silent on the evidence path: fail closed).
+	 */
+	shadow: PreRollShadow | null
+	/** Mirrors every wiring pre-roll call on `shadow` and feeds `/auto` (set at build). */
+	tap: EvidencePreRollTap | null
+	/** `evidenceAppliesTo` when last synced; a flip resets the gate and clears the pre-roll. */
+	active: boolean
+}
 
 /** WG10 req 2.3: a new front started by an offset change, not yet switched in. */
 interface PendingFrontSwap {
@@ -294,6 +357,17 @@ export interface PipelineRun {
 	externalGate?: boolean
 	/** Latest Rust metrics power. Absent on the csdr path. */
 	externalPowerDbfs?: number | null
+	/**
+	 * Evidence squelch gate and pre-roll, built at run start for streams whose modulation is in
+	 * `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` (NFM only, amendment A8) in every squelch mode when a factory is configured; null otherwise or when the factory failed.
+	 * Absent until first synced (a Rust run is built by its controller).
+	 */
+	evidence?: RunEvidence | null
+	/** Modulation and gain `evidence` was built for (rebuilt when either changes in place). */
+	evidenceModulation?: LiveDemodConfig["modulation"]
+	evidenceGain?: number
+	/** Channel bandwidth `evidence` was built for (A13: sets the voice meter's reference). */
+	evidenceBandwidth?: number
 }
 
 /**
@@ -352,6 +426,7 @@ export class LiveDemodulator extends EventEmitter {
 	private reportedSquelchOpen = false
 	/** WG10 activity hygiene: blocks with carrier evidence, monotonic (see carrierBlocks()). */
 	private carrierBlockCount = 0
+	private readonly carrierLog = new CarrierBlockLog()
 	/**
 	 * Set only while `stop()` or a transmission-closing `reconfigure()` is in
 	 * progress. `stopRun` emits `squelch-changed(false)` before `stopped` or
@@ -381,6 +456,16 @@ export class LiveDemodulator extends EventEmitter {
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
+	/** `/auto`: one stream that plays the analog over or covering digital voice. */
+	private readonly autoRoute: AutoListenRouter
+	private autoShadowMismatchLogged = false
+	/** Stream byte phase (mod 4) of the chunk being handled, for `/auto` sample alignment. */
+	private autoPhase = 0
+	/**
+	 * False after a connect from zero clients or an analog reset: the next `/auto` span is cut
+	 * to the run's next sample boundary, so the router never starts mid-sample.
+	 */
+	private autoAligned = false
 	private run: PipelineRun | null = null
 	private branchId: string | null = null
 	private branchStream: Readable | null = null
@@ -425,6 +510,19 @@ export class LiveDemodulator extends EventEmitter {
 		this.audio.on("client-disconnected", (id: string) =>
 			this.emit("client-disconnected", id),
 		)
+		this.autoRoute = new AutoListenRouter(this.log, {
+			stallTimeoutMs: this.options.clientStallTimeoutMs,
+			...(options.autoRouteClock !== undefined
+				? { clock: options.autoRouteClock }
+				: {}),
+		})
+		// A first client (connect or reconnect) re-aligns the next analog span.
+		this.autoRoute.registry.on("client-connected", () => {
+			if (this.autoRoute.registry.size === 1) this.autoAligned = false
+		})
+		this.autoRoute.on("auto-route-changed", (level: LiveAudioAutoRouteLevel) =>
+			this.emit("auto-route-changed", level),
+		)
 		this.clock = options.clock ?? systemSilenceClock
 		this.silence = new SilenceFill(this.audio, this.clock)
 		this.http = new AudioHttpServer(
@@ -449,7 +547,21 @@ export class LiveDemodulator extends EventEmitter {
 			publishSquelchChange: () => this.publishSquelchChange(),
 			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
 			measureRun: (run, sample) => this.measureRun(run, sample),
-			resetFloorForRetune: run => this.resetFloorForRetune(run),
+			noteDiscontinuity: (run, sampleIndex, dropped, cause) => {
+				if (this.run === run && run.squelch.hasCarrierEvidence)
+					this.carrierLog.noteDiscontinuity(
+						run,
+						run.stream.rate,
+						sampleIndex,
+						dropped,
+						cause,
+					)
+			},
+			resetFloorForRetune: run => {
+				this.resetFloorForRetune(run)
+				this.resetEvidence(run)
+				this.resetAutoAnalog()
+			},
 			clearCloseOverride: () => {
 				this.closeOverride = null
 			},
@@ -463,6 +575,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.applySquelchConfig(this.run)
 					this.applySquelchThreshold(this.run)
 					this.applyToneSquelch(this.run)
+					this.syncEvidence(this.run)
 				}
 				this.publishSquelchChange()
 				this.emit("config-changed", this.config)
@@ -547,6 +660,8 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.closeOverride = "stopped"
 		try {
+			if (this.run) this.resetEvidence(this.run)
+			this.resetAutoAnalog()
 			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
@@ -556,6 +671,7 @@ export class LiveDemodulator extends EventEmitter {
 			this.detachBranch()
 			this.activeSourceId = null
 			this.audio.closeAll("stop", true)
+			this.autoRoute.registry.closeAll("stop", true)
 			await this.closeHttpServer()
 			// A failure that was still being cleaned up may have scheduled a restart.
 			this.clearRestartTimer()
@@ -652,6 +768,8 @@ export class LiveDemodulator extends EventEmitter {
 				this.applySquelchConfig(this.run)
 				this.applySquelchThreshold(this.run)
 				this.applyToneSquelch(this.run)
+				// A restarted run builds its own evidence path at start.
+				if (!restarting) this.syncEvidence(this.run)
 			}
 			this.publishSquelchChange()
 
@@ -678,6 +796,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.rustRuns.canRetune(changedPipelineKeys, validated)
 				) {
 					this.rustRuns.retune(run, previous, validated)
+					this.syncEvidence(run)
 				} else if (
 					swapPlan !== null &&
 					run !== null &&
@@ -686,6 +805,9 @@ export class LiveDemodulator extends EventEmitter {
 					// The transmission closes as "config", as on a full restart.
 					run.gateHeld = true
 					this.publishSquelchChange()
+					// Requirement 2.9: the swap start clears the gate and the pre-roll.
+					this.resetEvidence(run)
+					this.resetAutoAnalog()
 					this.closeOverride = null
 					const outcome = await this.swapFront(run, swapPlan.front)
 					if (outcome === "timeout" || outcome === "failed") {
@@ -713,7 +835,11 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
-	getStatus(): LiveDemodStatus {
+	/**
+	 * `diagnostics` (DIAGNOSTIC AND UNSTABLE, 2026-10-24) adds the evidence gate's current voice
+	 * window to `autoSquelch`; computed on demand, never on level events.
+	 */
+	getStatus(options: { diagnostics?: boolean } = {}): LiveDemodStatus {
 		const sourceId = this.activeSourceId ?? this.config.sourceId ?? ""
 		const sourceStatus = sourceId
 			? this.sourceManager.getStatus(sourceId)
@@ -760,9 +886,23 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		if (this.lastError) status.lastError = this.lastError
 		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
-		if (run) status.toneSquelch = { state: toneSquelchState(run) }
+		if (run) {
+			status.toneSquelch = { state: toneSquelchState(run) }
+			status.autoSquelch = this.autoSquelchState(
+				run,
+				options.diagnostics === true,
+			)
+		}
 		if (this.http.listening && this.channelTone !== null)
 			status.tone = copyChannelTone(this.channelTone)
+		if (this.http.listening) {
+			const origin =
+				this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`
+			status.autoRoute = this.autoRoute.status({
+				httpUrl: `${origin}/auto`,
+				wavUrl: `${origin}/auto.wav`,
+			})
+		}
 
 		return status
 	}
@@ -868,6 +1008,11 @@ export class LiveDemodulator extends EventEmitter {
 		return this.carrierBlockCount
 	}
 
+	/** WG10 req 3.8.1: the per-block carrier log; null exactly when `carrierBlocks()` is. */
+	carrierBlockLog(): CarrierBlockLog | null {
+		return this.carrierBlocks() === null ? null : this.carrierLog
+	}
+
 	/** Channel-squelch hang in use, in milliseconds. */
 	squelchHangMs(): number {
 		return SQUELCH_HANG_MS
@@ -888,6 +1033,17 @@ export class LiveDemodulator extends EventEmitter {
 		this.reportedSquelchOpen = open
 		// WG7 req 3.2: the tone gate closes at once with the squelch.
 		if (!open) this.run?.tone?.gate?.reset()
+		// A close before a latch discards the over's evidence and its held audio. A held gate
+		// (offset swap, Rust identity retune) is cleared by whoever held it.
+		const run = this.run
+		if (!open && run !== null && !run.gateHeld) {
+			const evidence = this.activeEvidence(run)
+			if (evidence !== null && evidence.gate.state === "waiting") {
+				evidence.gate.reset()
+				evidence.preRoll.abandon()
+				evidence.shadow?.abandon()
+			}
+		}
 		this.emit("squelch-changed", open)
 	}
 
@@ -959,6 +1115,8 @@ export class LiveDemodulator extends EventEmitter {
 			powerDbfs: number | null
 			quieted: boolean
 			quietingDb?: number | null
+			blockIndex?: number
+			gateOpen?: boolean
 		},
 	): void {
 		if (this.run !== run || run.stopping) return
@@ -997,6 +1155,19 @@ export class LiveDemodulator extends EventEmitter {
 				)
 			}
 		}
+		// Evidence squelch: one measured block while stage 1 is open (A4: a held gate is closed).
+		const evidence = this.activeEvidence(run)
+		if (evidence !== null && runGateOpen(run) && !run.gateHeld) {
+			// A carrier onset while waiting reset the gate's voice window: the held noise lead-in
+			// stage 1 was open on is not the over (amendment 2026-10-23; the gate decides).
+			const flags = evidence.gate.noteBlock(
+				this.evidenceCarrier(run, power, sample),
+			)
+			if ((flags & EVIDENCE_NOTE_DISCARD) !== 0) {
+				evidence.preRoll.abandon()
+				evidence.shadow?.abandon()
+			}
+		}
 		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
 		// The squelch samples this estimate only while closed (it rises while
 		// open), so a held carrier is never judged against its own level.
@@ -1007,10 +1178,22 @@ export class LiveDemodulator extends EventEmitter {
 		// block (its tracker snapshot taken inside publishSquelchChange) includes it.
 		// Rust reports quieting directly, so the sampled path uses the same rule as
 		// ChannelSquelch.blockCarrier instead of the IQ meter.
-		if (sampled) {
-			if (this.sampledBlockCarrier(run, sample.quietingDb ?? null))
-				this.carrierBlockCount += 1
-		} else if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
+		const carried = sampled
+			? this.sampledBlockCarrier(run, sample.quietingDb ?? null)
+			: run.squelch.blockCarrier()
+		if (carried) this.carrierBlockCount += 1
+		// WG10 req 3.8.1: the per-block record the transmission tracker consumes in order.
+		if (run.squelch.hasCarrierEvidence)
+			this.carrierLog.note(
+				run,
+				run.stream.rate,
+				// A held gate (unacknowledged retune, offset swap) is closed whatever native says.
+				(sample?.gateOpen ?? this.reportedSquelchOpen) &&
+					!run.gateHeld &&
+					!run.stopping,
+				carried,
+				sample?.blockIndex,
+			)
 	}
 
 	/**
@@ -1098,6 +1281,8 @@ export class LiveDemodulator extends EventEmitter {
 				squelchOpen: runGateOpen(run),
 				thresholdDbfs: this.effectiveThreshold(run),
 			}
+			level.autoSquelch = this.autoSquelchState(run)
+			if (this.autoRoute.wanted) level.autoRoute = this.autoRoute.level()
 			this.emit("level", level)
 		}, 1000 / this.options.levelHz)
 		this.levelTimer.unref()
@@ -1193,7 +1378,11 @@ export class LiveDemodulator extends EventEmitter {
 			// A second retune before any block keeps the first remembered floor.
 			// Auto squelch only (its threshold derives from the floor); manual and
 			// noise modes reset as before.
-			if (this.run) this.resetFloorForRetune(this.run)
+			if (this.run) {
+				this.resetFloorForRetune(this.run)
+				this.resetEvidence(this.run)
+			}
+			this.resetAutoAnalog()
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -1340,6 +1529,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.run = run
 		this.lastRunStream = run.stream
 		this.applyToneSquelch(run)
+		this.syncEvidence(run)
 		this.audio.configure(run.stream)
 		this.pipelineHealth = "running"
 		this.lastError = null
@@ -1436,6 +1626,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.run = run
 		this.lastRunStream = stream
 		this.applyToneSquelch(run)
+		this.syncEvidence(run)
 		this.audio.configure(stream)
 
 		this.wireRun(run)
@@ -1746,6 +1937,7 @@ export class LiveDemodulator extends EventEmitter {
 		run.stopping = true
 		if (this.run === run) {
 			this.run = null
+			this.resetAutoAnalog()
 			this.stopLevelPublishing()
 			this.publishSquelchChange()
 		}
@@ -1825,6 +2017,7 @@ export class LiveDemodulator extends EventEmitter {
 	private async closeHttpServer(): Promise<void> {
 		if (!this.http.listening) return
 		this.audio.closeAll("server closing", true)
+		this.autoRoute.registry.closeAll("server closing", true)
 		await this.http.close()
 	}
 
@@ -1836,8 +2029,56 @@ export class LiveDemodulator extends EventEmitter {
 
 	private resolveRoute(req: http.IncomingMessage): AudioRoute | null {
 		const { base, wav } = parseStreamPath(req.url)
+		// auto-listen-route 1.1, 1.2: same server, access adapter, leases and CORS as /stream.
+		if (base === "/auto")
+			return {
+				registry: this.autoRoute.registry,
+				stream: AUTO_ROUTE_STREAM,
+				wav,
+			}
 		if (base !== "/stream") return null
 		return { registry: this.audio, stream: this.plannedStream(), wav }
+	}
+
+	/**
+	 * Digital voice for `/auto` (auto-listen-route 3.3, 3.4): the voice taps and the coverage
+	 * port (its `generation` bumps on every event that can change coverage; `covers` is called
+	 * only on a generation change). Without it `/auto` is analog only.
+	 */
+	attachAutoRouteVoice(
+		source: VoiceTapSource,
+		coverage: VoiceCoveragePort,
+	): void {
+		this.autoRoute.attachVoice(source, coverage)
+	}
+
+	/** One sample-aligned `/auto` span of the client bytes (requirement 3.6). */
+	private pushAuto(
+		chunk: Buffer,
+		start: number,
+		end: number,
+		audible: boolean,
+		stream: StreamFormat,
+	): void {
+		if (end <= start) return
+		if (!this.autoAligned) {
+			// Bytes finishing a sample the router never saw the start of are skipped.
+			const width = pcmSampleBytes(stream.format)
+			const skip = (width - ((this.autoPhase + start) % width)) % width
+			if (end - start <= skip) {
+				if (end - start === skip) this.autoAligned = true
+				return
+			}
+			start += skip
+			this.autoAligned = true
+		}
+		this.autoRoute.pushAnalog(chunk, start, end, audible, stream)
+	}
+
+	/** Clears `/auto` analog (FIFO, resampler, split sample) and re-aligns the next span. */
+	private resetAutoAnalog(): void {
+		this.autoRoute.resetAnalog()
+		this.autoAligned = false
 	}
 
 	/** Registers a streaming response (also used by tests with a stand-in). */
@@ -1855,13 +2096,32 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		const run = this.run
+		// WG10 req 3.8.1: output-sample position of the run's PCM for the tracker.
+		if (run !== null)
+			this.carrierLog.notePcm(run, run.stream.rate, chunk.length)
 		// WG10 req 2.2: the new run's first audio ends the silence fill.
 		if (run !== null) this.silence.disarm("audio")
 		const phase = run?.pcmPhase ?? 0
+		this.autoPhase = phase
+		if (!this.autoRoute.wanted) this.autoAligned = false
 		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
 		const tone = run?.tone ?? null
+		const evidence =
+			run !== null && tone === null ? this.syncEvidence(run) : null
+		if (run !== null && evidence !== null) {
+			run.pcmTailMuted = false
+			// Decode regardless of listening: pcm listeners see the chunk before any rewrite.
+			this.emitPcm(chunk)
+			this.processEvidence(run, evidence, chunk, phase)
+			this.audio.write(chunk)
+			return
+		}
 		if (run === null || tone === null) {
-			if (run !== null) run.pcmTailMuted = false
+			if (run !== null) {
+				run.pcmTailMuted = false
+				if (this.autoRoute.wanted)
+					this.pushAuto(chunk, 0, chunk.length, runGateOpen(run), run.stream)
+			}
 			this.audio.write(chunk)
 			this.emitPcm(chunk)
 			return
@@ -1887,13 +2147,20 @@ export class LiveDemodulator extends EventEmitter {
 				chunk.fill(0, lead)
 				run.pcmTailMuted = true
 			}
+			if (this.autoRoute.wanted) {
+				// The lead keeps its sample's decision (an unmuted lead is the end of an open slice).
+				this.pushAuto(chunk, 0, lead, !leadMuted, run.stream)
+				this.pushAuto(chunk, lead, chunk.length, false, run.stream)
+			}
 		} else {
+			const wanted = this.autoRoute.wanted
 			// The gate's state applies per slice of at most TONE_SLICE_MS that
 			// starts on a sample boundary, so a large chunk is not passed or
 			// muted whole by its final state.
 			if (lead > 0) {
 				gate.push(chunk, format, 0, lead)
 				if (leadMuted) chunk.fill(0, 0, lead)
+				if (wanted) this.pushAuto(chunk, 0, lead, !leadMuted, run.stream)
 			}
 			const slice =
 				Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) *
@@ -1904,9 +2171,244 @@ export class LiveDemodulator extends EventEmitter {
 				const muted = !gate.open()
 				if (muted) chunk.fill(0, start, end)
 				run.pcmTailMuted = muted
+				if (wanted) this.pushAuto(chunk, start, end, !muted, run.stream)
 			}
 		}
 		this.audio.write(chunk)
+	}
+
+	/**
+	 * Builds the run's evidence path when missing or stale (modulation or gain changed in
+	 * place), resets it on any flip of `evidenceAppliesTo`, and returns it while it governs
+	 * client audio (csdr engine, no tone squelch), else null.
+	 */
+	private syncEvidence(run: PipelineRun): RunEvidence | null {
+		const factory = this.options.evidenceSquelch ?? DEFAULT_EVIDENCE_SQUELCH
+		const { modulation, gain, bandwidth } = this.config
+		if (
+			run.evidenceModulation !== modulation ||
+			run.evidenceGain !== gain ||
+			run.evidenceBandwidth !== bandwidth
+		) {
+			run.evidenceModulation = modulation
+			run.evidenceGain = gain
+			run.evidenceBandwidth = bandwidth
+			run.evidence = this.buildEvidence(factory, run)
+		}
+		const evidence = run.evidence ?? null
+		if (evidence === null) return null
+		const applies = this.evidenceAppliesTo(run)
+		if (applies !== evidence.active) {
+			evidence.active = applies
+			this.resetEvidence(run)
+		}
+		return applies ? evidence : null
+	}
+
+	private buildEvidence(
+		factory: EvidenceSquelchFactory,
+		run: PipelineRun,
+	): RunEvidence | null {
+		const modulation = this.config.modulation
+		// Amendment A8: no instances outside the evidence modulations (AM included).
+		// Amendment A12: none on the Rust engine (stage-1 auto squelch only).
+		if (
+			run.rust !== undefined ||
+			!LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS.includes(modulation) ||
+			(modulation !== "nfm" && modulation !== "am")
+		)
+			return null
+		const { rate, format } = run.stream
+		try {
+			// A13: the voice meter's audio reference follows the channel plan (NFM only).
+			const gate = factory.createGate({
+				rate,
+				modulation,
+				gain: this.config.gain,
+				// A16 revision: the guard is the back chain's lag plus one 10 ms block.
+				drainLagSamples: backChainDrainSamples(run.backCommand),
+				...(modulation === "nfm"
+					? { deviationHz: evidenceDeviationHz(this.config.bandwidth) }
+					: {}),
+			})
+			const preRoll = factory.createPreRoll({ rate, format })
+			let shadow: PreRollShadow | null = null
+			try {
+				shadow = new PreRollShadow({ rate, format })
+			} catch {
+				// Fail closed: evidence-path analog never qualifies on /auto for this run.
+				shadow = null
+			}
+			const evidence: RunEvidence = {
+				gate,
+				preRoll,
+				shadow,
+				tap: null,
+				tailTag: "drop",
+				active: this.evidenceAppliesTo(run),
+				// Resolved against the next chunk's phase (processEvidence).
+				aligned: false,
+			}
+			evidence.tap = this.autoTap(run, evidence)
+			return evidence
+		} catch (err) {
+			// A5: the run keeps the frozen stage-1 path.
+			this.log.warn(
+				{ err: safeErrorFields(err), rate, modulation },
+				"Evidence squelch unavailable for this pipeline; stage-1 squelch only",
+			)
+			return null
+		}
+	}
+
+	/** The evidence path when it governs client audio now (no build, no reset). */
+	private activeEvidence(run: PipelineRun): RunEvidence | null {
+		const evidence = run.evidence ?? null
+		if (evidence === null || !evidence.active) return null
+		return this.evidenceAppliesTo(run) ? evidence : null
+	}
+
+	/**
+	 * True when the evidence gate governs this run's client audio: `evidenceGateApplies` for
+	 * the config, no tone squelch, and the csdr engine. Amendment A12: Rust sends gate events
+	 * and audio on separate channels, so its runs keep the stage-1 auto squelch until the
+	 * gate state rides in-band with the audio.
+	 */
+	private evidenceAppliesTo(run: PipelineRun): boolean {
+		return (
+			run.rust === undefined &&
+			run.tone === null &&
+			evidenceGateApplies(this.config)
+		)
+	}
+
+	/** Drops evidence, the latch and every held byte (flip, swap start, retune, stop). */
+	private resetEvidence(run: PipelineRun): void {
+		const evidence = run.evidence ?? null
+		if (evidence === null) return
+		evidence.gate.reset()
+		evidence.preRoll.clear()
+		evidence.shadow?.clear()
+		evidence.tailTag = "drop"
+		evidence.aligned = false
+	}
+
+	/** Requirement 4.1: present while the pipeline runs; `off` outside the evidence path. */
+	private autoSquelchState(
+		run: PipelineRun,
+		diagnostics = false,
+	): LiveAudioAutoSquelch {
+		const evidence = this.activeEvidence(run)
+		if (evidence === null) return { state: "off" }
+		const { state, evidence: kind } = evidence.gate
+		const out: LiveAudioAutoSquelch =
+			kind !== null ? { state, evidence: kind } : { state }
+		if (diagnostics && evidence.gate.diagnostics !== undefined)
+			out.diagnostics = evidence.gate.diagnostics()
+		return out
+	}
+
+	/**
+	 * Per-block carrier evidence for the gate's quieting window. Only Rust metrics pass a
+	 * `sample`, and amendment A12 keeps Rust runs off the evidence path; the branch stays for
+	 * the in-band follow-up.
+	 */
+	private evidenceCarrier(
+		run: PipelineRun,
+		power: number | null,
+		sample: { quieted: boolean } | undefined,
+	): boolean {
+		if (this.config.modulation === "am")
+			return (
+				power !== null &&
+				run.noiseFloorDbfs !== null &&
+				power >= run.noiseFloorDbfs + ANALOG_TRIAL_AM_CARRIER_DB
+			)
+		return sample !== undefined ? sample.quieted : run.squelch.blockQuieted()
+	}
+
+	/**
+	 * Tags the chunk for the pre-roll (`processEvidenceChunk`, evidence-squelch/wiring.ts) with
+	 * stage 1 as reported (A4: a held gate is closed), sampled at chunk arrival.
+	 */
+	private processEvidence(
+		run: PipelineRun,
+		evidence: RunEvidence,
+		chunk: Buffer,
+		phase: number,
+	): void {
+		processEvidenceChunk(
+			evidence,
+			chunk,
+			phase,
+			runGateOpen(run) && !run.gateHeld,
+			run.stream.format,
+			run.stream.rate,
+		)
+	}
+
+	/**
+	 * The run's wiring tap (auto-listen-route 3.6, 3.7): every pre-roll call of
+	 * `processEvidenceChunk` (tags, latch, abandon, the A17 retroactive `muteTail`) is mirrored
+	 * on the shadow, tracked with or without `/auto` clients. Built once per evidence path.
+	 */
+	private autoTap(run: PipelineRun, evidence: RunEvidence): EvidencePreRollTap {
+		return {
+			processed: (chunk, start, end, tag) =>
+				this.mirrorPreRoll(evidence, chunk, start, end, tag, run.stream),
+			latched: () => evidence.shadow?.latch(),
+			abandoned: () => evidence.shadow?.abandon(),
+			mutedTail: samples => evidence.shadow?.muteTail(samples),
+			skipped: (chunk, start, end) => {
+				if (this.autoRoute.wanted)
+					this.pushAuto(chunk, start, end, false, run.stream)
+			},
+		}
+	}
+
+	/**
+	 * After one real pre-roll call (`chunk[start, end)` holds its output, fades included): the
+	 * same call on the shadow, then the shadow's output runs as `/auto` spans: a byte qualifies
+	 * only when the pre-roll plays it (3.1 a). Out of sync (a defect): silent until it resyncs.
+	 */
+	private mirrorPreRoll(
+		evidence: RunEvidence,
+		chunk: Buffer,
+		start: number,
+		end: number,
+		tag: PreRollTag,
+		stream: StreamFormat,
+	): void {
+		const shadow = evidence.shadow
+		let inSync = false
+		if (shadow !== null) {
+			const failedBefore = shadow.failed
+			shadow.process(end - start, tag)
+			inSync = shadow.sync(evidence.preRoll.delaySamples)
+			// A new mismatch drops queued /auto analog (it may be wrongly qualified) and a resync
+			// starts clean, so no audio decided while out of sync ever plays (fail closed).
+			if ((!failedBefore && !inSync) || (failedBefore && !shadow.failed))
+				this.resetAutoAnalog()
+			if (!inSync && !this.autoShadowMismatchLogged && shadow.mismatches > 0) {
+				this.autoShadowMismatchLogged = true
+				this.log.warn(
+					"Auto listen pre-roll shadow out of sync; analog on /auto muted until it resyncs",
+				)
+			}
+		}
+		if (!this.autoRoute.wanted) return
+		if (shadow === null || !inSync) {
+			this.pushAuto(chunk, start, end, false, stream)
+			return
+		}
+		let at = start
+		const runs = shadow.runCountOut
+		for (let i = 0; i < runs && at < end; i++) {
+			const next = Math.min(end, at + shadow.runBytes(i))
+			this.pushAuto(chunk, at, next, shadow.runPlays(i), stream)
+			at = next
+		}
+		this.pushAuto(chunk, at, end, false, stream)
 	}
 
 	private emitPcm(chunk: Buffer): void {
@@ -1923,6 +2425,12 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		this.emit("pcm", chunk, announced)
 	}
+}
+
+/** The production evidence squelch ports (A5, plan W.3). */
+const DEFAULT_EVIDENCE_SQUELCH: EvidenceSquelchFactory = {
+	createGate: options => new EvidenceGate(options),
+	createPreRoll: options => new PreRoll(options),
 }
 
 /** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */

@@ -1,0 +1,566 @@
+{
+	"event": "analysis",
+	"frames": [
+		{
+			"carrierDb": -47.4,
+			"hfNoiseDb": 0.3,
+			"audioDb": -0.7,
+			"syllabic": 0.0,
+			"cluster": 0.3
+		},
+		{
+			"carrierDb": -47.5,
+			"hfNoiseDb": -0.1,
+			"audioDb": -0.8,
+			"syllabic": 0.0,
+			"cluster": 0.3
+		},
+		{
+			"carrierDb": -47.5,
+			"hfNoiseDb": 0.0,
+			"audioDb": -0.6,
+			"syllabic": 0.0,
+			"cluster": 0.3
+		},
+		{
+			"carrierDb": -47.5,
+			"hfNoiseDb": 0.0,
+			"audioDb": -0.4,
+			"syllabic": 0.0,
+			"cluster": 0.3
+		},
+		{
+			"carrierDb": -47.4,
+			"hfNoiseDb": -0.1,
+			"audioDb": -0.6,
+			"syllabic": 0.0,
+			"cluster": 0.3
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -20.5,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.2,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -22.7,
+			"audioDb": -3.3,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.1,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.4,
+			"audioDb": -5.4,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.2,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.8,
+			"audioDb": -4.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.1,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.5,
+			"audioDb": -5.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.4,
+			"audioDb": -5.4,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.2,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.8,
+			"audioDb": -4.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.1,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.4,
+			"audioDb": -5.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.5,
+			"audioDb": -5.4,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.2,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.2,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.0,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.3,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -25.2,
+			"audioDb": -6.9,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.1,
+			"syllabic": 0.2,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.8,
+			"audioDb": -4.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.1,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.8,
+			"audioDb": -4.8,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.2,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.2,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.3,
+			"audioDb": -1.7,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -21.1,
+			"audioDb": -1.6,
+			"syllabic": 0.0,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.5,
+			"audioDb": -4.4,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.2,
+			"audioDb": -3.9,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -25.7,
+			"audioDb": -7.2,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.8,
+			"audioDb": -4.9,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -23.5,
+			"audioDb": -4.5,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.2,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.1,
+			"audioDb": -5.1,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.4,
+			"audioDb": -5.7,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		},
+		{
+			"carrierDb": -6.0,
+			"hfNoiseDb": -24.5,
+			"audioDb": -5.4,
+			"syllabic": 0.1,
+			"cluster": 1.0
+		}
+	],
+	"gapSamples": 0
+}

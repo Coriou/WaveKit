@@ -328,3 +328,266 @@ has no caps, via an exact Main diff; a test shows the `connected` retry builds i
     blocks while open and while closed, gaps inside and past the merge gap), the published rows are
     exactly the oracle's merge groups with summed audio ≥ 500 ms and (nfm/wfm) one segment with ≥ 3
     quieted blocks, in order and by start; every other group is counted suppressed. _Validates 3.7._
+
+## Amendment 2026-10-24: carrier-bounded transmissions (requirement 3.8)
+
+Additive to "Identify for analog voice" and Properties 11 and 12; the 3.7 text records what
+landed and stays. Pipeline position unchanged: the tracker listens to the live demodulator's
+`squelch-changed`, `level`, `config-changed`, `stopped` and `pcm` events and now also reads a
+block log the demodulator fills.
+
+### Why
+
+3.7 qualifies a transmission by carrier but delimits it by power: any squelch re-open within
+1500 ms of the previous segment's audio end resumes it and re-arms the gap timer. Live timeline
+(status samples about every 0.55 s, nfm, auto squelch, floor about -55 dBFS, threshold about
+-49 dBFS): interference near -45 dBFS opened the squelch every 0.52 to 1.1 s for 214 s; overs
+near 0 dBFS ran at about 19.1-26.0, 33.7-41.0, 54.9-61.6, 75.9-81.0 and 84.4-88.8 s, and after
+each over the interference held the power squelch open. Every gap was under 1500 ms, so the
+chain never ended; the only tone report (at 214.5 s) was null.
+
+### Why a block log, not a snapshot
+
+PCM reaches the tracker asynchronously (`handleAudioData`), several measured blocks can pass
+between two tracker observations, and the Rust engine reports metrics in batches of ten 10 ms
+blocks, possibly after the matching audio. A latest-value snapshot would lose runs (10 carrier
+blocks followed by one noise block before the next observation reads as run 0) and would accept
+a whole chunk that mixes noise and carrier blocks. So the demodulator logs every block, the
+tracker consumes the log in order, and PCM is matched to blocks by output-sample position.
+
+### Hook (live demodulator, three lines)
+
+`CarrierBlockLog` lives in `src/core/analog-transmission.ts`: a fixed `Uint8Array` ring of
+`CARRIER_LOG_CAPACITY` (2048 blocks, 20.48 s) flags (bit 0 squelch open, bit 1 carried), the
+run's block count, its PCM byte count, the block length `B = max(1, round(rate × 10 / 1000))`
+samples (the same rounding as `ChannelSquelch`), `blockMs = B / rate × 1000` and an epoch that
+increments when the run object changes. `LiveDemodulator` holds one instance and calls
+`note(run, run.stream.rate, reportedOpen, carried)` where it already counts `carrierBlockCount`,
+`notePcm(run, run.stream.rate, chunk.length)` first in `handleAudioData`, and exposes
+`carrierBlockLog()` (null exactly when `carrierBlocks()` is null). After each noted block the log calls its
+`onBlock` listener (set by the tracker), so the tracker consumes blocks as they are measured and
+samples config and frequency at block time; a batch is consumed in order. The block-time anchor
+is `clock - blocks × blockMs` at first sight, lowered to the least such estimate while no run,
+span or transmission is held (a logged block is never earlier than its stream time). Both engines emit output PCM
+at the squelch rate (csdr: channel rate; Rust: 48 kHz with 480-sample blocks), so block `k`
+covers output samples `[k × B, (k + 1) × B)`. Known offsets, not compensated: the csdr back
+chain's filter delay (a few samples) and Rust startup metrics dropped beyond the handshake
+buffer (the log then lags; a resync at the next run). No `src/core/live-demod/**` change.
+
+### Rust event order (amendment 2026-10-24, review fixes)
+
+Native sends a `gate` change at once with `atOutputSample` at the end of the block that decided
+it, and `metrics` in batches of ten blocks later. Gate notifications are not delayed:
+`squelch-changed`, the tone squelch and every other listener see a change when it arrives, as
+before 3.8. Instead `RustEngine` keeps a position-indexed gate history (`GATE_HISTORY_MAX`, 256
+changes; native sends at most one per block, so it covers at least 2.56 s, more than the 8-batch
+startup buffer's 80 blocks plus one batch of lag; an evicted change becomes the window's base
+state, native starting closed) and hands each metrics batch its `atOutputSample` and the gate
+state of every block (the latest change at or before the block's end). `rust-run.ts` passes both
+to `measureRun` as `blockIndex` (`atOutputSample / 480 + i`) and `gateOpen`, and the block log
+notes block `blockIndex`: blocks never reported (startup batches beyond the buffer's 8, dropped
+lines) are filled closed and uncarried, so block `k` of the log is always output samples
+`[480 k, 480 (k + 1))`. The startup buffer is unchanged (last gate, newest 8 batches); no
+position is lost because every batch carries its own. Audio alignment (checked in
+`native/wavekit-chan`): the channel counts `atOutputSample` from its first output sample, and the
+runtime queues output from that sample until the client connects, so socket byte `n` is output
+sample `n / width`. The exception is a full queue: native then drops samples and reports a
+`discontinuity` event (`sampleIndex`, `droppedSamples`, `queue-overflow`), which the TypeScript
+protocol does not parse today; after one, the mapping is off by the dropped count until the next
+run (open item). No existing Rust test changed.
+
+### Tracker carrier path
+
+`drainCarrier()` processes every new block `k` once, in order (block time
+`t(k) = anchor + k × blockMs`, anchor set when an epoch is first seen):
+
+- `open && carried`: the run grows (start remembered). In a span the block is fed and the
+  span's carrier end becomes `t(k + 1)`. Outside a span, the run's blocks stay undecided until
+  it reaches 10 blocks (span start = run start: merge or open, the 10 blocks fed) or breaks
+  (the blocks are dropped and counted in `discardedRuns()`).
+- otherwise: the run breaks; the block is dropped; in a span, a closed block or the 25th
+  uncarried block in a row ends the span at its carrier end (audio += carrier end - span start).
+- finalisation, outside a span: once `t(k + 1) - carrierEnd > 1500 ms` and no run that started
+  at most 1500 ms after the carrier end is pending, close with reason `squelch` at the carrier
+  end. A run that starts at 1490 ms and qualifies at 1590 ms therefore merges; the 3.7 gap timer
+  is not used on this path, so a timer firing early cannot finalise.
+
+Merge test: `t(spanStart) - carrierEnd ≤ 1500 ms` plus the 3.7 identity checks. Retune and
+max-duration closes inside a span reopen at once (max-duration as an exempt continuation);
+stop and config close at the event time. A new epoch ends an open span at its carrier end.
+
+### Tone input
+
+Span end and delayed PCM: the segment stays open for a tone split, and the span-end tone snapshot
+(the split reference) and the split detector wait, until the PCM up to the span's carrier end has been consumed, at most
+`CARRIER_SNAPSHOT_WAIT_BLOCKS` (50 blocks, 500 ms), and are settled at once when a new span
+merges. Late PCM of an ended span is still fed to its transmission until finalisation (1500 ms
+later); later PCM is dropped. A closing config change or teardown edge also clears the run and
+span, so blocks after it need a new 10-block run. PCM ring overflow evicts whole samples only
+(the head stays on a sample boundary; dropped bytes count in `droppedPcm()`); dropped audio is
+treated like a fade (removed, never misframed).
+
+Feed decisions are a per-block ring (undecided, feed, drop). PCM is copied into a ring sized
+once per PCM format (`CARRIER_PCM_RING_MS` 2000 ms: at most 48 kHz × 4 B × 2 s = 384 kB) and
+drained while the oldest buffered sample's block is decided; each piece ends at a block boundary,
+so a mixed chunk is cut there. Fed pieces go to the transmission's detector (and the split
+detector) if the block is at or after its start. PCM older than the decision ring, or beyond the
+PCM ring, is dropped unfed. Considered and rejected: per-segment detectors (run the banks on
+every interference segment, cannot join continuity across segments of one over, still need a
+carrier gate since interference holds the squelch open after the over).
+
+Fades: uncarried blocks inside a span are removed, not replaced, so they lower no vote by
+noise; the cost is a phase splice per fade. A CTCSS analysis block (500 ms, hop 250 ms) holding a
+splice may lose its vote, so one splice can cost 2 of the 4 votes per second; 60 % continuity
+then survives at most one splice per 1.25 s of fed audio. The requirement states the weaker
+"one fade per 2 s" and the tests check CTCSS and D031N with a 50 ms fade every 2 s; no guarantee
+is claimed beyond it.
+
+Cost: per block one byte write in the demodulator and a few integer operations in the tracker
+(100 blocks/s); per chunk one `Buffer.copy` into the ring and at most two `subarray` views per
+fed piece (no buffer allocation). Interference audio runs no detector (3.7 fed it all).
+
+### Squelch tail elimination (3.8.12)
+
+An over on the user's PMR446 radios is speech with CTCSS, then about 0.4 s of 55 Hz STE with the
+carrier still up, then the carrier drop. The STE blocks are carried, so the span, and the
+transmission, end at the carrier drop. CTCSS safety: the bank holds only the 50 standard tones,
+67.0-254.1 Hz (no lower entry). A 500 ms Goertzel block has its first null at 1 / 0.5 s = 2 Hz,
+so 55 Hz lies 12 Hz = 6 bins below the lowest tone, where a rectangular window leaks about
+1 / (π × 6)² ≈ -35 dB; 55 Hz is inside the 50-300 Hz reference band, so a 55 Hz-only block puts
+under 0.1 % of the band in any tone bin, far under the 0.65 vote fraction. Continuity: blocks hop
+250 ms, so a 0.4 s tail touches at most ceil(0.4 / 0.25) + 1 = 3 blocks; with N completed blocks
+the tone keeps 60 % if (N - 3) / N ≥ 0.6, so N ≥ 8, i.e. at least 0.5 + 7 × 0.25 - 0.4 = 1.85 s
+of CTCSS before the tail. Shorter overs may lose their tone (stated, not guaranteed). A phase
+reversal (120° or 180°) instead of a tone lowers the magnitude of the blocks that straddle it
+(at most 2, plus the reversed tail if it is longer than one hop); the same bound applies and the
+transmission still ends at the carrier drop. Tests: 5 s CTCSS 79.7 + 0.4 s 55 Hz is one
+transmission ending at the drop with 79.7; 55 Hz alone for 0.6 s and 3 s reports no CTCSS; a
+180° reversal for the last 0.2 s keeps 79.7.
+
+### Consumers
+
+No contract change (REST, WS `transmission`/`closed` events, Activity rows, identify
+`result.analog`). Activity: fewer rows, one per over, `startedAt` at the carrier, `endedAt` at
+the last carrier, tone filled; aggregates follow. Identify: evidence from carrier transmissions
+only; `pending()` is non-null only with a qualified span, so interference no longer triggers the
+1750 ms settle wait (`no-sync` instead of `timeout`). Scanner hits (WG12 6.3 live-audio
+evidence): same stream. Recordings: unaffected.
+
+### Deliberate test changes
+
+Existing tracker suites use fakes without `carrierBlockLog`, so they take the fallback and stay
+as they are. Changed deliberately in `live-demodulator-wg7.test.ts`: the noise-mode transmission
+and mode-switch tests feed 60 carrier blocks (600 ms) instead of 20 and 10, because span audio
+now counts blocks, not the test clock; the tone-gate integration test feeds one carrier block per
+10 ms of PCM, because PCM is matched to blocks by position. A teardown squelch edge (stop or a
+transmission-closing reconfigure) still closes at once on the carrier path. Suites with a real `LiveDemodulator` and a tracker (`live-demodulator-wg7`) and the
+identify and Activity consumers (`scanner/identify-analog`, `scanner/live-audio-evidence`,
+`activity/runtime-transmission`) are run unchanged; any change is listed with 3.8.
+
+### Synthetic boundary regression (shaped on the live timeline)
+
+The live status log has about one sample per 0.55 s and no per-block quieting, so it fixes the
+shape, not the evidence. The test script, at 10 ms blocks: floor closed; interference opens of
+500 ms every 1000 ms with carried blocks only in runs of at most 3; five overs of 6.9, 7.3, 6.7,
+5.1 and 4.4 s from 19.1, 33.7, 54.9, 75.9 and 84.4 s, every block carried, each opened by an
+interference open 300 ms earlier and followed by 1 s of interference holding the squelch open;
+PCM is CTCSS 79.7 Hz during overs and noise otherwise. Expected: five transmissions at the
+over bounds (± 10 ms), CTCSS 79.7 each. It proves the boundary logic only.
+
+### Live acceptance plan (Main)
+
+On the live receiver, PMR446 ch5 with the interference present: (1) log, for a test build or a
+debug probe, the longest carried run in each interference opening for 10 minutes and confirm none
+reaches 10 blocks (if any does, raise the bound or add a power or deviation condition by a new
+amendment); (2) key five 5 s overs with CTCSS 79.7 and five with D031N and confirm ten Activity
+rows of about 5 s with the tones; (3) confirm no Activity row during 10 minutes of interference
+alone.
+
+### Properties
+
+13. **Spans bound transmissions.** For random block scripts (squelch, carrier, fades, gaps)
+    delivered in random batches, published transmissions are exactly the oracle's span groups
+    (runs of ≥ 10 open carried blocks, merged within 1500 ms of the last carrier end, ≥ 500 ms of
+    span audio), start at the first span start and end at the last carrier end; a script without
+    a 10-block run publishes nothing. _Validates 3.8.2-3.8.6._
+14. **Tone hears only carrier.** For the same scripts with PCM split at random byte offsets, the
+    samples pushed to the detector are exactly those of fed blocks, in order. _Validates 3.8.7._
+
+### Follow-up 2026-10-24: retune hold, pending snapshots, discontinuities, STE
+
+- **Retune hold.** `measureRun` logs `gateOpen && !run.gateHeld && !run.stopping`: per-block
+  native gate state cannot open a block the host holds closed (a retune before its `retuned`).
+- **Pending snapshot across a merge.** `startSpan` no longer forces the previous span's snapshot:
+  it closes only that span's gap books, resumes with a split detector whose reference tone is
+  pending, and `drainPcm` settles the snapshot exactly when the PCM through the previous span's
+  last carrier block is consumed, before any later block reaches the main detector (cap 50
+  blocks).
+- **Discontinuities.** `rust-protocol.ts` parses `discontinuity` (`sampleIndex`, `droppedSamples`
+  positive safe integers, `cause` a short lower-case token; anything else is dropped as a bad
+  line and never logged). The engine forwards it, `rust-run.ts` (startup: at most 16 buffered)
+  passes it to the host, and `CarrierBlockLog.noteDiscontinuity` advances `pcmBytes` by the
+  dropped samples and masks blocks `[sampleIndex / 480, (current position + dropped) / 480)`
+  (at most 8 masks). The tracker fills the position gap with silence that is never fed. Residual:
+  blocks the tracker already decided before the event arrives keep their decision.
+- **STE (3.8.13).** Chosen: end the tone window at STE onset by a one-window hold-back, rather
+  than excluding STE blocks from the CTCSS continuity denominator, which would need a change
+  inside the shared CTCSS bank. The tracker runs one 55 Hz Goertzel over each 200 ms window of
+  transmission-detector audio (`CARRIER_STE_WINDOW_MS`; 200 ms is 11 whole cycles of 55 Hz, so
+  DC and the bin are orthogonal; 67 Hz lies 2.4 bins away and leaks about
+  (sin(2.4 π) / (2.4 π))² ≈ 1.6 % of its power, far under `CARRIER_STE_FRACTION` 0.5). A window
+  is STE when `2 |X|² / (N E) ≥ 0.5`; it and the rest of the span are not fed. A partial window
+  under half a window is never judged STE. Minimum: CTCSS needs 0.75 s of fed tone (two agreeing
+  500 ms blocks); at worst the onset window, up to 200 ms of tone, is dropped with the tail, so
+  0.75 + 0.2 = 0.95 s of CTCSS before the tail is guaranteed. Tests: 1.2 s and 0.95 s report
+  79.7 Hz with a tail six times the CTCSS amplitude (0.95 s fails without the hold-back), 0.7 s
+  reports none; 55 Hz alone for 0.6 s and 3 s reports none; 67.0 Hz for 3 s and 1.2 s plus a tail
+  reports 67.0. Measured: with a moderate tail (twice the CTCSS amplitude) 1.2 s already reported
+  the tone before this change; the earlier 1.85 s bound was pessimistic. Cost: per fed sample one
+  Goertzel step, one square and one copy into the preallocated window (allocated once per PCM
+  format); the tone results arrive up to 200 ms later.
+
+### Follow-up 2026-10-24: positional discontinuities, recoverable STE
+
+- **Causes (read in `native/wavekit-chan/src/runtime.rs`).** `queue-overflow`: the writer queue
+  was full, `droppedSamples` output samples from `sampleIndex` never reach the socket (the
+  channel's output count advanced). `input-gap`: input bytes were lost upstream; the channel's
+  DSP is reset and `sampleIndex` is its current output count, which does not advance by
+  `droppedSamples` (that figure is input loss scaled to the output rate and may be 0). The
+  protocol now accepts `droppedSamples` ≥ 0 and keeps `cause`; the engine, `rust-run.ts` (startup
+  discontinuities replayed before startup metrics) and the host pass it to
+  `CarrierBlockLog.noteDiscontinuity`.
+- **Log.** The socket count `pcmBytes` never jumps. Each discontinuity masks blocks (overflow:
+  `[sampleIndex / B, (sampleIndex + dropped) / B)`; any other cause: the one block at
+  `sampleIndex`, a closed block that ends a run or span) and is kept in a 16-entry gap ring.
+- **Tracker.** It reads new gaps on every drain: overflow gaps wait in a queue until the PCM
+  cursor (true sample positions = socket bytes plus re-inserted gaps) reaches `sampleIndex`, then
+  silence of `dropped` samples is inserted there; a gap already passed is inserted at once and
+  the samples since (placed up to `dropped` early) are masked tracker-side. Blocks of a gap that
+  the tracker already decided become dropped, an open span ends at the gap start, a provisional
+  run is discarded; `drainPcm` also refuses any masked block. Residual: audio already pushed to
+  the detector before a late notice cannot be taken back.
+- **STE.** `steDecide` skips an STE-dominated window only; the next window feeds again. A real
+  tail is followed by the carrier drop, so it is still removed.
+
+### Follow-up 2026-10-24: fail-closed gap accounting
+
+Native reports a `queue-overflow` only when the writer's one-second queue is full, so a healthy
+run sees none and a stalled client a few; 16 per run is far above that. Bound: 16 masks of two
+numbers and 16 gap ring entries per run, plus 16 tracker late masks (one per tracked gap). The
+17th discontinuity sets `CarrierBlockLog.desynced`: `note` writes every later block closed, the
+tracker (on its next read, before any drain) ends the open span, drops the provisional run and
+every decision and its buffered audio, and from then on feeds nothing; its PCM position stays
+`socket bytes + droppedTotal × width`, exact once the cursor is past the gaps, though no audio
+depends on it any more. A new run clears it. Late overflow notices are handled where the gap is
+read (`readGaps`, called on every drain and every chunk): the misplaced buffered samples are
+masked and the silence inserted immediately. `rust-run.ts` keeps `CARRIER_LOG_GAPS + 1` startup
+notices, enough to trigger the same fail-closed state. Tests: 16 and 17 gaps for the masks, the
+output offset and the fed audio; 16 and 17 startup notices; the late notice with metrics
+draining before the next chunk.
+
+Follow-up 2026-10-24: entering the desynchronized state also discards the held
+200 ms STE window (it is never fed), and the STE flush is a no-op while desynchronized.
+`rust-run.ts` sums the queue-overflow dropped samples of startup notices past its kept list and
+replays the sum as one more notice, so `droppedTotal` stays exact (the list is already past the
+cap there, so the run fails closed either way).
