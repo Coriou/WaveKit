@@ -6,7 +6,12 @@
  * (RBJ biquads, a one-pole syllabic high-pass, histogram k-means). Not a port of that code.
  *
  * Scale: the analyzer demodulates with gain 2, so samples are divided by `gain / 2` first; a
- * full-deviation sine (amplitude 0.8 at gain 2) reads 0 dB.
+ * full-deviation sine (amplitude 0.8 at gain 2, 5 kHz deviation) reads 0 dB. `deviationHz`
+ * (amendment 2026-10-24, A13) is the channel's nominal peak deviation: samples are also
+ * multiplied by 5 000 / deviationHz, so the channel's own full deviation maps onto the
+ * analyzer's 5 kHz reference, exactly as the gain is normalised. At 2 500 Hz (12.5 kHz channels)
+ * `audioDb` reads 6.02 dB higher and the cluster span test sees twice the span; `syllabic` is
+ * scale free. Default 5 000 Hz: unchanged (meter equivalence, requirement 5).
  *
  * All state is allocated in the constructor; `push` allocates nothing. A non-finite input
  * marks the frame non-finite (its statistics become NaN, the envelope ring is not fed) and is
@@ -33,6 +38,8 @@ export interface VoiceFrame {
 /** Mean square of a full-deviation sine at gain 2 (0.8² / 2). */
 const FULL_DEVIATION_MEAN_SQUARE = 0.32
 const SILENCE_DB = -160
+/** Peak deviation of the 0 dB reference (the analyzer's full-deviation sine). */
+export const VOICE_METER_REFERENCE_DEVIATION_HZ = 5_000
 const SYLLABIC_MAX = 160
 const HIST_BINS = 256
 const KMEANS_ITERS = 6
@@ -131,14 +138,24 @@ export class VoiceFrameMeter {
 	private frameFinite = true
 	private frames = 0
 
-	constructor(options: { gain: number }) {
+	constructor(options: { gain: number; deviationHz?: number }) {
 		const gain = options.gain
 		if (typeof gain !== "number" || !Number.isFinite(gain) || gain <= 0)
 			throw new WaveKitError(
 				"Evidence squelch gain must be finite and positive",
 				"EVIDENCE_GAIN",
 			)
-		this.scale = 2 / gain
+		const deviation = options.deviationHz ?? VOICE_METER_REFERENCE_DEVIATION_HZ
+		if (
+			typeof deviation !== "number" ||
+			!Number.isFinite(deviation) ||
+			deviation <= 0
+		)
+			throw new WaveKitError(
+				"Evidence squelch deviation must be finite and positive",
+				"EVIDENCE_DEVIATION",
+			)
+		this.scale = (2 / gain) * (VOICE_METER_REFERENCE_DEVIATION_HZ / deviation)
 	}
 
 	/** The last completed frame (a reused record). */

@@ -203,15 +203,30 @@ describe("EvidenceGate", () => {
 		expect(guard).toBe(bytesOf(200))
 	})
 
-	it("reopen within the hang keeps the latch", () => {
+	it("reopen within the hang with carrier evidence keeps the latch", () => {
 		const gate = latched()
 		gate.closed(bytesOf(1_000), "s16le")
+		gate.noteBlock(true)
 		const at = gate.push(Buffer.alloc(bytesOf(10)), "s16le", 0, bytesOf(10))
 		expect(at).toBe(-1)
 		expect(gate.state).toBe("open")
-		// The hang restarts from the next closure.
+		// A quieted block restarted the hang (A14): it runs from the next closure.
 		gate.closed(bytesOf(1_000), "s16le")
 		expect(gate.state).toBe("open")
+	})
+
+	it("A14: a reopen without carrier evidence does not restart the hang", () => {
+		const gate = latched()
+		gate.closed(bytesOf(1_000), "s16le")
+		gate.noteBlock(false)
+		gate.push(Buffer.alloc(bytesOf(10)), "s16le", 0, bytesOf(10))
+		expect(gate.state).toBe("open")
+		// 1 000 + 10 ms counted; the latch ends 490 ms later.
+		gate.closed(bytesOf(489), "s16le")
+		expect(gate.state).toBe("open")
+		gate.closed(bytesOf(1), "s16le")
+		expect(gate.state).toBe("waiting")
+		expect(gate.evidence).toBeNull()
 	})
 
 	it("renewal", () => {

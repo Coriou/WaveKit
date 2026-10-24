@@ -518,7 +518,8 @@ describe("evidence gate stream properties", () => {
 					"s16le",
 					[{ samples: latchRun, open: true }],
 					chunks,
-					() => false,
+					// The over carries a carrier (A14: the hang runs from its last quieted block).
+					() => true,
 				)
 				expect(first.latches.length).toBe(1)
 				expect(first.latches[0]).toBeLessThanOrEqual(latchRun)
@@ -538,6 +539,8 @@ describe("evidence gate stream properties", () => {
 				}
 				expect(gate.state).toBe(gap < HANG ? "open" : "waiting")
 				if (gap >= HANG) expect(gate.evidence).toBeNull()
+				// The reopen is the same transmission: a quieted block (A14).
+				gate.noteBlock(true)
 				const latch = gate.push(Buffer.from(tail), "s16le", 0, tail.length)
 				// No new evidence window: a reopen within the hang stays open, never re-latching;
 				// after the hang a fresh 300 ms over cannot fill a window.

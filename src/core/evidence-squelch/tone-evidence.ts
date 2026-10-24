@@ -65,6 +65,15 @@ export class ToneEvidence {
 	private lastHits = 0
 	/** The kind qualified most recently (preferred by `current()` while both are current). */
 	private latest: "ctcss" | "dcs" | null = null
+	/**
+	 * Single-observation sightings (amendment A14 revised, 2026-10-24): counts every completed
+	 * 500 ms CTCSS block with a winning tone and every new DCS word hit (any hit count), and
+	 * keeps the identity of the latest one (`sightingKey`: CTCSS table index, or 1 000 + packed
+	 * DCS reading, as the gate's tone key). Not qualification: the gate uses a sighting only to
+	 * refresh the carrier hang of a latch on that same tone.
+	 */
+	private sightings = 0
+	private sightingId = -1
 
 	/** One 8 kHz sample. */
 	push(sample: number): void {
@@ -73,7 +82,9 @@ export class ToneEvidence {
 		const blocks = ctcss.blockCount()
 		if (blocks !== this.lastBlock) {
 			this.lastBlock = blocks
-			this.observeBlock(ctcss.lastBlockToneIndex())
+			const index = ctcss.lastBlockToneIndex()
+			if (index >= 0) this.sight(index)
+			this.observeBlock(index)
 		}
 		const dcs = this.dcs
 		dcs.pushSample(sample)
@@ -82,6 +93,16 @@ export class ToneEvidence {
 			this.lastBit = bits
 			this.observeBit(bits, dcs.wordReading(), dcs.wordHits())
 		}
+	}
+
+	/** Sightings so far (see the field); compare with an earlier value to detect a new one. */
+	get sightingCount(): number {
+		return this.sightings
+	}
+
+	/** Tone key of the latest sighting, or -1. */
+	get sightingKey(): number {
+		return this.sightingId
 	}
 
 	/** Latest qualified tone (reused records), or null. */
@@ -105,9 +126,15 @@ export class ToneEvidence {
 		this.lastReading = -1
 		this.lastHits = 0
 		this.latest = null
+		this.sightingId = -1
 		this.ctcssRecord.index = -1
 		this.ctcssRecord.hz = 0
 		this.dcsRecord.packed = -1
+	}
+
+	private sight(key: number): void {
+		this.sightings += 1
+		this.sightingId = key
 	}
 
 	private observeBlock(index: number): void {
@@ -130,9 +157,9 @@ export class ToneEvidence {
 				: undefined
 		// A new qualifying word: the chain's reading or hit count changed on this bit. Between
 		// word boundaries `wordHits()` keeps its value, which must not refresh the hold.
-		const newWord =
-			standard !== undefined &&
-			(reading !== this.lastReading || hits !== this.lastHits)
+		const changed = reading !== this.lastReading || hits !== this.lastHits
+		if (hits >= 1 && reading >= 0 && changed) this.sight(1_000 + reading)
+		const newWord = standard !== undefined && changed
 		this.lastReading = reading
 		this.lastHits = hits
 		if (standard !== undefined && newWord) {

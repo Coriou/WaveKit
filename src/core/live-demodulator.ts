@@ -80,6 +80,7 @@ import type { EngineFallbackReason } from "./live-demod/index.js"
 import type { RustEngine } from "./live-demod/rust-engine.js"
 import {
 	EVIDENCE_NOTE_DISCARD,
+	evidenceDeviationHz,
 	evidenceGateApplies,
 	pcmSampleBytes,
 	type EvidenceGatePort,
@@ -340,6 +341,8 @@ export interface PipelineRun {
 	/** Modulation and gain `evidence` was built for (rebuilt when either changes in place). */
 	evidenceModulation?: LiveDemodConfig["modulation"]
 	evidenceGain?: number
+	/** Channel bandwidth `evidence` was built for (A13: sets the voice meter's reference). */
+	evidenceBandwidth?: number
 }
 
 /**
@@ -2011,10 +2014,15 @@ export class LiveDemodulator extends EventEmitter {
 	 */
 	private syncEvidence(run: PipelineRun): RunEvidence | null {
 		const factory = this.options.evidenceSquelch ?? DEFAULT_EVIDENCE_SQUELCH
-		const { modulation, gain } = this.config
-		if (run.evidenceModulation !== modulation || run.evidenceGain !== gain) {
+		const { modulation, gain, bandwidth } = this.config
+		if (
+			run.evidenceModulation !== modulation ||
+			run.evidenceGain !== gain ||
+			run.evidenceBandwidth !== bandwidth
+		) {
 			run.evidenceModulation = modulation
 			run.evidenceGain = gain
+			run.evidenceBandwidth = bandwidth
 			run.evidence = this.buildEvidence(factory, run)
 		}
 		const evidence = run.evidence ?? null
@@ -2042,10 +2050,14 @@ export class LiveDemodulator extends EventEmitter {
 			return null
 		const { rate, format } = run.stream
 		try {
+			// A13: the voice meter's audio reference follows the channel plan (NFM only).
 			const gate = factory.createGate({
 				rate,
 				modulation,
 				gain: this.config.gain,
+				...(modulation === "nfm"
+					? { deviationHz: evidenceDeviationHz(this.config.bandwidth) }
+					: {}),
 			})
 			const preRoll = factory.createPreRoll({ rate, format })
 			return {

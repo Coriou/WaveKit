@@ -16,7 +16,7 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import fc from "fast-check"
-import { describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { z } from "zod"
 import {
 	EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS,
@@ -24,7 +24,11 @@ import {
 	EvidenceGate,
 } from "../../../../src/core/evidence-squelch/evidence-gate.js"
 import { PreRoll } from "../../../../src/core/evidence-squelch/pre-roll.js"
-import { EVIDENCE_NOTE_DISCARD } from "../../../../src/core/evidence-squelch/contract.js"
+import {
+	EVIDENCE_NARROW_DEVIATION_HZ,
+	EVIDENCE_NOTE_DISCARD,
+	EVIDENCE_WIDE_DEVIATION_HZ,
+} from "../../../../src/core/evidence-squelch/contract.js"
 import { VoiceFrameMeter } from "../../../../src/core/evidence-squelch/voice-meter.js"
 import { dataLike, isVoice } from "../../../../src/core/scanner/analog-trial.js"
 import {
@@ -295,6 +299,21 @@ describe("meter equivalence: cross path (analyzer 48 kHz statistics)", () => {
 	})
 })
 
+/**
+ * Deviation reference of every gate below (amendment A13, 2026-10-24): 5 000 Hz is the frozen
+ * 25 kHz plan; the narrow-plan section at the end reruns the never-open checks at 2 500 Hz.
+ */
+let gateDeviationHz = EVIDENCE_WIDE_DEVIATION_HZ
+
+function gateOf(rate: number, modulation: "nfm" | "am"): EvidenceGate {
+	return new EvidenceGate({
+		rate,
+		modulation,
+		gain: 2,
+		deviationHz: gateDeviationHz,
+	})
+}
+
 interface Replay {
 	latched: boolean
 	atS: number | null
@@ -337,7 +356,7 @@ function replay(name: string, preOpen = false): Replay {
 		frames.slice(0, Math.floor(onset / FRAME_SAMPLES)).map(f => f.carrierDb),
 	)
 	const unquieted = name === "nfm-noise" || name === "nfm-impulse"
-	const gate = new EvidenceGate({ rate: RATE, modulation: entry.mode, gain: 2 })
+	const gate = gateOf(RATE, entry.mode)
 	// preOpen: stage 1 already open on the unquieted pre-over noise (its power gate or 250 ms
 	// hang, src/core/channel-squelch.ts), so those blocks are pushed and noted unquieted.
 	if (!preOpen) gate.closed(onset * 2, "s16le")
@@ -432,7 +451,7 @@ function continuous4fsk(
 
 /** Quieted NFM drive; the first `leadBytes` are a noise lead-in noted unquieted. */
 function driveQuieted(pcm: Buffer, rate: number, leadBytes = 0): boolean {
-	const gate = new EvidenceGate({ rate, modulation: "nfm", gain: 2 })
+	const gate = gateOf(rate, "nfm")
 	const block = Math.round(rate / 100) * 2
 	for (let s = 0; s < pcm.length; s += block) {
 		gate.noteBlock(s >= leadBytes)
@@ -537,7 +556,7 @@ function leadInRun(
 	const input = pcmOf(composed)
 	const buf = Buffer.from(input)
 	const unquieted = name === "nfm-noise" || name === "nfm-impulse"
-	const gate = new EvidenceGate({ rate: RATE, modulation: "nfm", gain: 2 })
+	const gate = gateOf(RATE, "nfm")
 	const preRoll = new PreRoll({ rate: RATE, format: "s16le" })
 	let latchS: number | null = null
 	for (let s = 0; s < composed.length; s += BLOCK_SAMPLES) {
@@ -823,4 +842,115 @@ describe("a real over after a noisy lead-in still latches from the over", () => 
 				expect(r.playedFrom ?? Infinity).toBeLessThanOrEqual(RATE * 0.02)
 			})
 		}
+})
+
+/**
+ * Amendment A13 (2026-10-24): on a 12.5 kHz channel the meter normalises the ±2.5 kHz plan onto
+ * the 5 kHz reference (samples × 2). The never-open NFM fixtures must stay closed there too.
+ */
+describe("A13 narrow channel plan (2 500 Hz): never-open NFM fixtures stay closed", () => {
+	beforeAll(() => {
+		gateDeviationHz = EVIDENCE_NARROW_DEVIATION_HZ
+	})
+	afterAll(() => {
+		gateDeviationHz = EVIDENCE_WIDE_DEVIATION_HZ
+	})
+
+	for (const name of neverOpenNfm)
+		it(`${name}: closed with ideal onset and with the 250 ms pre-over noise open`, () => {
+			expect(replay(name).latched).toBe(false)
+			expect(replay(name, true).latched).toBe(false)
+		})
+
+	it("no never-open NFM fixture latches for any lead-in of 0-500 ms in 10 ms steps", () => {
+		const hits: string[] = []
+		for (const name of neverOpenNfm)
+			for (let ms = 0; ms <= LEAD_IN_MAX_MS; ms += 10)
+				if (leadInRun(name, ms).latchS !== null) hits.push(`${name}@${ms}ms`)
+		expect(hits).toEqual([])
+	}, 120_000)
+
+	// Feature: evidence-squelch, Property 3: Bare carrier and data never open
+	// Validates: Requirements 1.4
+	it("Property 3 (flicker, narrow plan): quieted flickers of 1-4 blocks inside a 10-500 ms lead-in never open a never-open NFM fixture", () => {
+		fc.assert(
+			fc.property(
+				fc.constantFrom(...neverOpenNfm),
+				flickerArb,
+				(name, { blocks, quiet }) =>
+					leadInRun(name, blocks * 10, b => quiet.has(b)).latchS === null,
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	for (const seed of [1, 2, 3, 4, 5])
+		it(`synthetic continuous 4FSK at 25 kHz, seed ${seed}: never latches`, () => {
+			expect(driveQuieted(pcmOf(continuous4fsk(25_000, 4, seed)), 25_000)).toBe(
+				false,
+			)
+		})
+
+	it("documented limits (pending decision): the residual cases of 1.4 at the narrow plan", () => {
+		// Cases (a) and (b) of the known limitation after 1.4 gain one row each at 2 500 Hz
+		// (nfm-clicks with 3 blocks), and case (c) gains the 30 and 80 ms alignments: a click is a
+		// 2π phase step whatever the channel, so on the narrow plan it is twice as large relative to
+		// the channel's deviation. Pinned so a change is visible.
+		const clicksAt: number[] = []
+		for (let k = 1; k <= 10; k++)
+			if (
+				leadInRun(
+					"nfm-clicks",
+					k * 10,
+					() => true,
+					() => true,
+				).latchS !== null
+			)
+				clicksAt.push(k * 10)
+		const armLimit: string[] = []
+		const atOnset: string[] = []
+		for (const name of neverOpenNfm) {
+			for (
+				let noise = 1;
+				noise < EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS;
+				noise++
+			) {
+				const q = (b: number): boolean => b >= 20 && b < 25
+				if (leadInRun(name, 250 + noise * 10, q, q).latchS !== null)
+					armLimit.push(`${name}+${noise}`)
+			}
+			for (let len = 1; len < EVIDENCE_ONSET_DISARM_QUIETED_BLOCKS; len++)
+				if (leadInRun(name, 250, b => b >= 25 - len).latchS !== null)
+					atOnset.push(`${name}+${len}`)
+		}
+		console.info(
+			`EVIDENCE-SQUELCH A13 limits: arm=${armLimit.join(" ") || "none"} onset=${atOnset.join(" ") || "none"}`,
+		)
+		expect(armLimit).toEqual([
+			"nfm-dmr-4fsk-continuous+1",
+			"nfm-dmr-4fsk-continuous+2",
+			"nfm-dmr-4fsk-continuous+3",
+			"nfm-dmr-4fsk-continuous+4",
+			"nfm-clicks+1",
+			"nfm-clicks+3",
+		])
+		expect(atOnset).toEqual([
+			"nfm-dmr-4fsk-continuous+2",
+			"nfm-dmr-4fsk-continuous+3",
+			"nfm-dmr-4fsk-continuous+4",
+			"nfm-clicks+1",
+			"nfm-clicks+3",
+		])
+		console.info(`EVIDENCE-SQUELCH A13 clicks alignment: ${clicksAt.join(" ")}`)
+		expect(clicksAt).toEqual([10, 30, 60, 80])
+	})
+
+	for (const name of ["nfm-voice", "nfm-ctcss-670-voice", "nfm-dcs-023n-voice"])
+		it(`${name} still latches by onset + 1.0 s after 0-500 ms of noise`, () => {
+			for (const leadMs of [0, 50, 250, LEAD_IN_MAX_MS]) {
+				const r = leadInRun(name, leadMs)
+				expect(r.latchS ?? Infinity).toBeLessThanOrEqual(1.0)
+				expect(r.playedFrom ?? -1).toBeGreaterThanOrEqual(0)
+			}
+		})
 })

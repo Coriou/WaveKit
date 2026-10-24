@@ -57,6 +57,31 @@ export interface EvidenceGateOptions {
 	rate: number
 	modulation: "nfm" | "am"
 	gain: number
+	/**
+	 * Nominal peak deviation of the channel (amendment 2026-10-24, A13; `evidenceDeviationHz`):
+	 * the voice meter normalises it onto the analyzer's 5 kHz scale. Absent: 5 000 Hz.
+	 */
+	deviationHz?: number
+}
+
+/** Peak deviation of the 25 kHz channel plan, the analyzer's 0 dB reference (A13). */
+export const EVIDENCE_WIDE_DEVIATION_HZ = 5_000
+/** Peak deviation of the 12.5 kHz channel plan (PMR446, narrowband PMR) (A13). */
+export const EVIDENCE_NARROW_DEVIATION_HZ = 2_500
+/** Widest configured channel bandwidth judged on the 12.5 kHz plan (A13). */
+export const EVIDENCE_NARROW_MAX_BANDWIDTH_HZ = 12_500
+
+/**
+ * Nominal peak deviation for a configured NFM channel bandwidth (A13): channels of at most
+ * 12.5 kHz follow the 12.5 kHz plan (±2.5 kHz), wider ones the 25 kHz plan (±5 kHz). A
+ * non-finite or non-positive bandwidth takes the 25 kHz reference (the frozen judgement).
+ */
+export function evidenceDeviationHz(bandwidthHz: number): number {
+	return Number.isFinite(bandwidthHz) &&
+		bandwidthHz > 0 &&
+		bandwidthHz <= EVIDENCE_NARROW_MAX_BANDWIDTH_HZ
+		? EVIDENCE_NARROW_DEVIATION_HZ
+		: EVIDENCE_WIDE_DEVIATION_HZ
 }
 
 export interface PreRollOptions {
