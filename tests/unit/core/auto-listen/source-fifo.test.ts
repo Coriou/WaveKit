@@ -4,6 +4,8 @@ import { PolyphaseResampler } from "../../../../src/core/auto-listen/resampler.j
 import {
 	FLAG_ADMITTED,
 	FLAG_AUDIBLE,
+	AUTO_ROUTE_TIME_ENTRIES,
+	AUTO_ROUTE_TIME_TOLERANCE_MS,
 	FLAG_SILENT,
 	SourceFifo,
 } from "../../../../src/core/auto-listen/source-fifo.js"
@@ -245,25 +247,138 @@ describe("SourceFifo", () => {
 		}
 	})
 
-	it("never reports a later time than the truth when the time ring saturates", () => {
+	it("keeps oldestQueuedAt exact over 1 000 undrained writes (regression)", () => {
 		const fifo = new SourceFifo()
 		const res = new PolyphaseResampler(48_000, OUT)
-		const input = ramp(1_000, 14)
-		fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, -1)
-		// 400 one-sample writes stay queued: more than the 256 entries.
-		for (let k = 0; k < 400; k++)
-			fifo.writeFrom(res, input, 17 + k, 18 + k, FLAG_AUDIBLE, k)
-		expect(fifo.queuedSamples).toBe(400)
+		const input = ramp(2_000, 14)
+		// Prime with 17 inputs (the delay): no output yet.
+		fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, 0)
+		for (let k = 0; k < 1_000; k++)
+			fifo.writeFrom(res, input, 17 + k, 18 + k, FLAG_AUDIBLE, k * 20)
+		expect(fifo.queuedSamples).toBe(1_000)
+		fifo.read(new Int16Array(999), 0, 999)
+		expect(fifo.oldestQueuedAt).toBe(19_980)
+	})
+
+	it("merges writes within 1 ms and keeps the earlier time", () => {
+		const fifo = new SourceFifo()
+		const res = new PolyphaseResampler(48_000, OUT)
+		const input = ramp(100, 15)
+		fifo.writeFrom(res, input, 0, 18, FLAG_AUDIBLE, 10)
+		fifo.writeFrom(res, input, 18, 19, FLAG_AUDIBLE, 11)
+		fifo.writeFrom(res, input, 19, 20, FLAG_AUDIBLE, 11.5)
+		fifo.read(new Int16Array(2), 0, 2)
+		// 11 − 10 ≤ 1 ms merges into the entry at 10; 11.5 − 10 > 1 ms starts a new entry.
+		expect(fifo.oldestQueuedAt).toBe(11.5)
+		const g = new SourceFifo()
+		const r2 = new PolyphaseResampler(48_000, OUT)
+		g.writeFrom(r2, input, 0, 18, FLAG_AUDIBLE, 10)
+		g.writeFrom(r2, input, 18, 19, FLAG_AUDIBLE, 11)
+		g.read(new Int16Array(1), 0, 1)
+		expect(g.oldestQueuedAt).toBe(10)
+		// A clock step back extends the newest entry (earlier time kept).
+		g.writeFrom(r2, input, 19, 20, FLAG_AUDIBLE, 5)
+		g.read(new Int16Array(1), 0, 1)
+		expect(g.oldestQueuedAt).toBe(10)
+	})
+
+	it("reaches the bound at saturation of the default ring", () => {
+		const fifo = new SourceFifo()
+		const res = new PolyphaseResampler(48_000, OUT)
+		const input = ramp(6_000, 16)
+		fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, 0)
+		// 5 000 one-sample writes 2 ms apart, undrained: 4 096 entries saturate.
+		for (let k = 0; k < 5_000; k++)
+			fifo.writeFrom(res, input, 17 + k, 18 + k, FLAG_AUDIBLE, k * 2)
 		const one = new Int16Array(1)
-		for (let k = 0; k < 400; k++) {
-			const at = fifo.oldestQueuedAt
-			expect(at).not.toBeNull()
-			// Exact while the head is in the first 255 entries, never later than the truth.
-			if (k < 255) expect(at).toBe(k)
-			else expect(at ?? Infinity).toBeLessThanOrEqual(k)
+		for (let k = 0; k < 5_000; k++) {
+			const reported = fifo.oldestQueuedAt ?? Number.NaN
+			const truth = k * 2
+			const age = (5_000 - 1) * 2 - truth
+			expect(reported).toBeLessThanOrEqual(truth)
+			if (age <= (AUTO_ROUTE_TIME_ENTRIES - 1) * AUTO_ROUTE_TIME_TOLERANCE_MS)
+				expect(truth - reported).toBeLessThanOrEqual(
+					AUTO_ROUTE_TIME_TOLERANCE_MS,
+				)
 			fifo.read(one, 0, 1)
 		}
-		expect(fifo.oldestQueuedAt).toBeNull()
+	})
+
+	// Feature: auto-listen-route, Property 6: Priority and bound (write-time support)
+	// Validates: Requirements 2.4, 4.5, 4.10
+	it("oldestQueuedAt is never late and within 1 ms inside the age bound", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 2, max: 40 }),
+				fc.array(
+					fc.oneof(
+						fc.record({
+							kind: fc.constant("write" as const),
+							inputs: fc.integer({ min: 0, max: 60 }),
+							dt: fc.oneof(
+								fc.constant(0),
+								fc.double({ min: 0, max: 3, noNaN: true }),
+								fc.integer({ min: 0, max: 400 }),
+							),
+						}),
+						fc.record({
+							kind: fc.constant("read" as const),
+							n: fc.integer({ min: 0, max: 80 }),
+						}),
+					),
+					{ maxLength: 300 },
+				),
+				fc.integer({ min: 50, max: 3_000 }),
+				(entries, ops, cap) => {
+					const fifo = new SourceFifo(cap, entries)
+					const res = new PolyphaseResampler(48_000, OUT)
+					const input = ramp(20_000, 17)
+					// Prime the delay so every input yields one output at the write's time.
+					fifo.writeFrom(res, input, 0, 17, FLAG_AUDIBLE, 0)
+					const truth: number[] = []
+					let head = 0
+					let pos = 17
+					let now = 0
+					let dropped = 0
+					const out = new Int16Array(80)
+					const bound = (entries - 1) * AUTO_ROUTE_TIME_TOLERANCE_MS
+					for (const op of ops) {
+						if (op.kind === "write") {
+							now += op.dt
+							fifo.writeFrom(
+								res,
+								input,
+								pos,
+								pos + op.inputs,
+								FLAG_AUDIBLE,
+								now,
+							)
+							pos += op.inputs
+							for (let k = 0; k < op.inputs; k++) truth.push(now)
+							head += fifo.overflowDroppedSamples - dropped
+							dropped = fifo.overflowDroppedSamples
+						} else {
+							head += fifo.read(out, 0, op.n)
+						}
+						expect(fifo.queuedSamples).toBe(truth.length - head)
+						const reported = fifo.oldestQueuedAt
+						if (fifo.queuedSamples === 0) {
+							expect(reported).toBeNull()
+							continue
+						}
+						const t = truth[head] ?? Number.NaN
+						expect(reported).not.toBeNull()
+						const r = reported ?? Number.NaN
+						expect(r).toBeLessThanOrEqual(t)
+						if (now - t <= bound)
+							expect(t - r).toBeLessThanOrEqual(
+								AUTO_ROUTE_TIME_TOLERANCE_MS + 1e-9,
+							)
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
 	})
 
 	// Feature: auto-listen-route, Property 1: Chunk-split invariance

@@ -20,21 +20,39 @@ export type SampleFlag =
 	| typeof FLAG_ADMITTED
 
 /**
- * Write-time entries (end position, time), one per write; consumed entries are retired before
- * each append. Only when 256 writes are still queued does the newest entry absorb later writes
- * (keeping its earlier time). Bound: `oldestQueuedAt` is exact while fewer than 256 queued writes
- * exist and is never later than the truth; once the head reaches a coalesced entry it is early
- * by at most that entry's time span, which is under the FIFO's own span (3 s). At 50 writes/s
- * the 3 s FIFO holds at most 150 writes (< 256), so the wiring always stays exact.
+ * Write times (`oldestQueuedAt`). The ring holds entries (end position, time) whose times are
+ * strictly more than `AUTO_ROUTE_TIME_TOLERANCE_MS` apart: a write within the tolerance of the
+ * newest entry's time (or earlier, or untimed) extends that entry, keeping its earlier time.
+ * Consumed entries are retired before each append. When the ring is full, the two oldest entries
+ * merge under the older time.
+ *
+ * Bound (enforced): every reported time is ≤ the true write time of the oldest queued sample
+ * (errors are only early), and the error is ≤ 1 ms whenever that sample's true age is at most
+ * (4 096 − 1) × 1 ms = 4 095 ms. Proof: tolerance merging moves a time by ≤ 1 ms. A full-ring
+ * merge happens only when 4 096 entries, each > 1 ms apart, are queued, so the entries it
+ * touches were written more than 4 095 ms before the newest write; their samples are older than
+ * that bound. 4 095 ms > `LIVE_AUDIO_AUTO_ROUTE_FIFO_MS` (3 000 ms), the longest age the router
+ * acts on.
+ *
+ * Why early is the safe direction for the router (design, AutoListenRouter and admission versus
+ * drain): age invalidation (> FIFO_MS) never keeps audio past its age; the preemption wait
+ * (PREEMPT_MAX_MS) and the digital start wait (DIGITAL_START_MS) are never extended, so
+ * Property 6's bound holds; and selection by oldest queued voice can only change for two inputs
+ * within 1 ms of each other. A late error could hold stale audio or delay preemption past its
+ * bound. The early error (≤ 1 ms) is below the 20 ms block on which decisions are taken.
+ *
+ * Size: 4 096 × 2 × 8 B = 64 kB per FIFO, allocated once.
  */
-const TIME_ENTRIES = 256
+export const AUTO_ROUTE_TIME_TOLERANCE_MS = 1
+export const AUTO_ROUTE_TIME_ENTRIES = 4_096
 
 export class SourceFifo {
 	readonly capacity: number
 	private readonly ring: Int16Array
 	private readonly flagRing: Uint8Array
-	private readonly timeEnd = new Float64Array(TIME_ENTRIES)
-	private readonly timeAt = new Float64Array(TIME_ENTRIES)
+	private readonly timeEntries: number
+	private readonly timeEnd: Float64Array
+	private readonly timeAt: Float64Array
 	private timeHead = 0
 	private timeCount = 0
 	private head = 0
@@ -44,7 +62,19 @@ export class SourceFifo {
 	private headPos = 0
 	private dropped = 0
 
-	constructor(capacity: number = AUTO_ROUTE_FIFO_SAMPLES) {
+	/**
+	 * `timeEntries` (≥ 2) sizes the write-time ring; the age bound above becomes
+	 * (timeEntries − 1) × 1 ms. Tests use small rings to reach saturation.
+	 */
+	constructor(
+		capacity: number = AUTO_ROUTE_FIFO_SAMPLES,
+		timeEntries: number = AUTO_ROUTE_TIME_ENTRIES,
+	) {
+		const t = Math.trunc(timeEntries)
+		this.timeEntries =
+			Number.isFinite(t) && t >= 2 ? t : AUTO_ROUTE_TIME_ENTRIES
+		this.timeEnd = new Float64Array(this.timeEntries)
+		this.timeAt = new Float64Array(this.timeEntries)
 		const c = Math.trunc(capacity)
 		this.capacity = Number.isFinite(c) && c > 0 ? c : AUTO_ROUTE_FIFO_SAMPLES
 		this.ring = new Int16Array(this.capacity)
@@ -235,15 +265,29 @@ export class SourceFifo {
 	}
 
 	private noteTime(at: number): void {
-		// Retire consumed entries first, so the ring only coalesces while 256 writes are queued.
 		this.trimTimes()
+		const n = this.timeEntries
 		const end = this.headPos + this.size
-		if (this.timeCount === TIME_ENTRIES) {
-			const last = (this.timeHead + this.timeCount - 1) % TIME_ENTRIES
-			this.timeEnd[last] = end
-			return
+		if (this.timeCount > 0) {
+			const last = (this.timeHead + this.timeCount - 1) % n
+			const lastAt = this.timeAt[last] ?? Number.NaN
+			// Within the tolerance, earlier (clock step) or untimed: extend under the earlier time.
+			if (
+				Number.isNaN(at) ||
+				(!Number.isNaN(lastAt) && at - lastAt <= AUTO_ROUTE_TIME_TOLERANCE_MS)
+			) {
+				this.timeEnd[last] = end
+				return
+			}
 		}
-		const idx = (this.timeHead + this.timeCount) % TIME_ENTRIES
+		if (this.timeCount === n) {
+			// Full: merge the two oldest under the older time (see the bound above).
+			const next = (this.timeHead + 1) % n
+			this.timeAt[next] = this.timeAt[this.timeHead] ?? Number.NaN
+			this.timeHead = next
+			this.timeCount--
+		}
+		const idx = (this.timeHead + this.timeCount) % n
 		this.timeEnd[idx] = end
 		this.timeAt[idx] = at
 		this.timeCount++
@@ -254,7 +298,7 @@ export class SourceFifo {
 			this.timeCount > 0 &&
 			(this.timeEnd[this.timeHead] ?? 0) <= this.headPos
 		) {
-			this.timeHead = (this.timeHead + 1) % TIME_ENTRIES
+			this.timeHead = (this.timeHead + 1) % this.timeEntries
 			this.timeCount--
 		}
 	}
