@@ -1,7 +1,7 @@
 # Link burst resilience requirements
 
-Status: implemented; fake-link acceptance and instrumentation recorded (2026-10-23).
-Live soak (9.5) and Pi 4-class measurement (9.4) remain open. See [design](design.md)
+Status: implemented; fake-link acceptance, instrumentation and live soak (9.5) recorded
+(2026-10-24). Pi 4-class measurement (9.4) remains open. See [design](design.md)
 and [tasks](tasks.md).
 
 ## What changes for the user

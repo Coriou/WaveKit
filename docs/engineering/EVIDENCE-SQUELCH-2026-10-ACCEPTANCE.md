@@ -58,16 +58,64 @@ over's onset; delay per over at most 1.5 s; stream byte rate within 0.5 % of nom
 transmission events equal to a manual-mode run; event-loop p99 within 2 ms of manual mode; close
 guard covers the measured back-chain drain.
 
-## Fake-link results (to fill)
+## Fake-link results (2026-10-24)
+
+Result: **accepted** for the csdr engine. The Rust engine and the CPU-quota variant were
+dropped from the record: evidence gating is csdr-only (A12), and the quota run invalidated the
+ungated AM control in the same way, so it does not measure the gate.
+
+One core image built from the integration head, scratch Compose project with the in-process fake
+receiver (`scripts/evidence-squelch/run_acceptance.py`), csdr engine, 17 fixtures per rate, each
+recorded once with auto and once with manual squelch. Fixtures hit by a container clock step were
+re-recorded (2.048 Msps: 1 fixture; 2.4 Msps: 3); every discarded attempt was invalid on the clock
+check alone, with no clock-free failure.
+
+| Check                                                                                | 2.048 Msps             | 2.4 Msps               |
+| ------------------------------------------------------------------------------------ | ---------------------- | ---------------------- |
+| Voice and CTCSS/DCS overs open, play from the over start, within the pre-roll bound  | pass (6 fixtures)      | pass (6 fixtures)      |
+| Bare carrier, noise and impulse stay closed                                          | pass                   | pass                   |
+| DMR 4FSK (bursts and continuous) and POCSAG 512/1200 stay closed                     | pass                   | pass                   |
+| AM stays ungated (`autoSquelch` off, stage-1 audio)                                  | pass                   | pass                   |
+| Clicks on a quieted carrier stay closed                                              | fail (known limit)     | fail (known limit)     |
+| Stage-1 edge comparison auto vs manual (empirical smoke, design note on edge limits) | 7 single-over outliers | 3 single-over outliers |
+| AM arrival-time alignment auto vs manual                                             | 9.1 ms vs 7.8 ms tol.  | 14.9 ms vs 7.3 ms tol. |
+| Byte rate within tolerance                                                           | pass                   | 1 fixture at +0.5 %    |
+| p99 smoke (steady median within 2 ms; tail rule)                                     | 1 fixture over tail    | pass                   |
+
+Assessment:
+
+- Every functional verdict passes: what opens and what stays closed matches the requirements on
+  both rates.
+- The stage-1 edge comparison is the documented empirical smoke check: auto and manual use
+  different stage-1 thresholds, and one over per affected fixture differed by 40–230 ms. Stage-1
+  timing is unchanged by this feature; that is proven by the unit goldens, not by this check.
+- The AM arrival-time misses are a few milliseconds of alignment jitter on an ungated stream; the
+  sample-identity part of the AM check passed.
+- Clicks on a quieted carrier opening is an accepted limitation (requirements 1.4 notes, A15).
+- Requirement 6.1 (added event-loop p99) rests on the per-chunk bench (A16/A17 notes); the p99
+  smoke flagged one fixture on the tail rule only (the clicks fixture, where the gate is open).
 
 ## Checkpoint 8.4
 
 Resolved 2026-10-23 as amendment A8 (requirements, after 1.2): evidence gating is NFM only. Replay evidence: gate replay of the `am-carrier` fixture latched voice 1.65 s after onset (the AM chain's envelope, DC removal and fast AGC raise the carrier noise envelope over about 1.5 s; rolling 20-frame windows 13-22 medians `audioDb` -29.0 to -20.1 dB, `syllabic` 1.9 to 0.3, `cluster` 0.0). Checkpoint line: `EVIDENCE-SQUELCH 8.4: am-voice agc=voice audioDb=-14.52 syllabic=0.45 cluster=0.21; am-carrier agc=neither audioDb=-12.94 syllabic=0.11 cluster=0.29`.
 
-## Live results (to fill)
+## Live results (2026-10-24)
 
-- Real interference opening the gate (known limitation after requirement 1.4): record every case
-  (source, frequency, `autoSquelch.evidence`, frame medians). Any such case makes the stage-2 data
-  test the next squelch task.
+PMR446 channel 5, csdr engine, 12.5 kHz NFM, weak interference about 10 dB above the floor
+re-opening stage 1 every 0.5–1 s, handheld close to the antenna (about +1 dBFS):
 
-- Quiet or low-deviation NFM over: record the real `audioDb`, `syllabic` and `cluster` medians.
+- Before the fixes, the interference flicker latched the gate open after any tone over, and real
+  conversational voice never qualified (sparse syllables, and a 12.5 kHz channel read 6 dB low).
+  Amendments A13–A17 address these.
+- Final image: voice overs and CTCSS overs open; the interference stays muted; a bare key-up stays
+  silent; the radio's 55 Hz squelch-tail tone is detected at every over end and the noise burst
+  after unkey no longer plays (A16/A17). The operator confirmed the behaviour by ear.
+
+Recorded per the plan above:
+
+- Real interference opening the gate: none observed. The weak interference (about −45 dBFS,
+  unquieted) never latched in any session; the stage-2 data test stays a follow-up.
+- Real NFM voice medians (12.5 kHz channel, 5 kHz analyzer reference, 1 s windows): continuous
+  speech `audioDb` −32.9 to −20.8 dB, `syllabic` 0.28–0.76, `cluster` 0.00; conversational speech
+  with syllables of 200–250 ms about once a second (about 17 % of frames) sat at a −33 dB median.
+  These led to A13 (deviation reference) and A15 (syllable runs).
