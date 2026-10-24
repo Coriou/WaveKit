@@ -1527,3 +1527,11 @@ The contract additions are optional and additive; older cores omit the new field
 2. `LiveAudioStatus.autoRoute?` (`LiveAudioAutoRoute`: `active` `analog` | `digital` | `none`, `protocol?`, `decoderId?`, `slot?`, `since`, `httpUrl`, `wavUrl`, `clientCount`, `digitalAvailable`, `underruns`, `droppedMs`, `clockRebases`, `latencyMs`) is present whenever the server listens. `LiveAudioLevel.autoRoute?` (`{ active, protocol? }`) rides `live-audio:level` while `/auto` has a client. Constants `LIVE_AUDIO_AUTO_ROUTE_*` in `@wavekit/api-types`.
 3. Web "What you hear: Auto" should play `autoRoute.httpUrl` (fetch PCM, 48 kHz from the headers) instead of choosing between `/stream` and the decoded voice stream itself, and label the source from `autoRoute.active` / `protocol` (level event for live updates, status as fallback). `digitalAvailable: false` means the core routes analog only. The explicit analog and decoded-voice choices keep their existing streams.
 4. CLI hits: `cli/source/data/guards.ts:1551` (`live-audio:level` guard checks only the existing fields, so the extra `autoRoute` passes and is dropped); `guardLiveAudioStatus` reads named fields only. No CLI change required.
+
+### Evidence squelch on the Rust engine — 2026-10-25
+
+Spec: [evidence-squelch](specs/evidence-squelch/requirements.md) amendment A18. Details in [API.md](API.md).
+No field is added or renamed.
+
+1. On `engine: "rust"` with `squelchMode: "auto"` on `nfm`, `LiveAudioStatus.autoSquelch` and `LiveAudioLevel.autoSquelch` now report `waiting` / `open` (with `evidence`) as on csdr, when the Rust demodulator carries its gate state in-band. Rust runs without framing, or whose framing failed safe, still report `off`.
+2. CLI hits: none beyond the evidence-squelch entry above (the `live-audio:level` guard drops the optional `autoSquelch`). No CLI or web change required.

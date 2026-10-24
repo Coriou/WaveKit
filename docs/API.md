@@ -1469,10 +1469,12 @@ Configuration notes:
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
   replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
   keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine
-  (`engine: "rust"`), `auto` on `nfm` is stage 1 alone too, byte-identical to the
-  stage-1 auto squelch, with `autoSquelch` state `off` (amendment A12, 2026-10-23),
-  until the Rust audio carries its gate state in-band; a fallback to csdr starts
-  the evidence gate fresh. The stage 1
+  (`engine: "rust"`), `auto` on `nfm` runs the same evidence gate and pre-roll when
+  the demodulator carries its stage-1 gate state in-band (framed audio, amendment
+  A18, 2026-10-25), so `autoSquelch` reports `waiting` / `open` as on csdr. A Rust
+  binary without framing, or a run whose framing failed safe, keeps stage 1 alone
+  with `autoSquelch` state `off` (amendment A12, 2026-10-23); a fallback to csdr
+  starts the evidence gate fresh. The stage 1
   floor is a constant-memory running lower envelope: falls are immediate; rises
   are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
   stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within
