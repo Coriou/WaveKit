@@ -2567,13 +2567,17 @@ mod tests {
     }
 
     fn demod_open(id: &str, queue: usize, framing: bool) -> Request {
+        demod_open_as(id, queue, framing, "s16le")
+    }
+
+    fn demod_open_as(id: &str, queue: usize, framing: bool, format: &str) -> Request {
         let extra = if framing {
             r#","audioFraming":"wkaf1""#
         } else {
             ""
         };
         parse_request(&format!(
-            r#"{{"v":1,"type":"open","id":"{id}","kind":"demod","centerHz":162000000,"bandwidthHz":12500,"modulation":"nfm","format":"s16le","queueBytes":{queue},"squelch":{{"mode":"off"}},"metrics":false{extra}}}"#
+            r#"{{"v":1,"type":"open","id":"{id}","kind":"demod","centerHz":162000000,"bandwidthHz":12500,"modulation":"nfm","format":"{format}","queueBytes":{queue},"squelch":{{"mode":"off"}},"metrics":false{extra}}}"#
         ))
         .unwrap()
     }
@@ -2635,21 +2639,29 @@ mod tests {
     // Validates: Requirement 9.4 (framed queue minimum at and one below its bound)
     #[test]
     fn framed_queue_minimum_is_enforced() {
-        let dir = TempDir::new();
-        let (mut r, ev) = rt(&dir.0);
-        let min = framing::min_framed_queue_bytes(crate::protocol::AudioFormat::S16Le);
-        r.request_and_wait(demod_open("small", min - 1, true));
-        assert_eq!(last(&ev)["type"], "rejected");
-        r.request_and_wait(demod_open("small", min - 1, false));
-        assert_eq!(
-            last(&ev)["type"],
-            "opened",
-            "unframed keeps its old minimum"
-        );
-        r.request_and_wait(demod_open("edge", min, true));
-        assert_eq!(last(&ev)["type"], "opened");
-        r.on_input(&iq_bytes(2 * 40_960));
-        r.on_eof_no_exit_for_test();
+        use crate::protocol::AudioFormat;
+        for (format, name, want) in [
+            (AudioFormat::S16Le, "s16le", 74),
+            (AudioFormat::F32Le, "f32le", 76),
+        ] {
+            let dir = TempDir::new();
+            let (mut r, ev) = rt(&dir.0);
+            let min = framing::min_framed_queue_bytes(format);
+            assert_eq!(min, want, "{name}");
+            r.request_and_wait(demod_open_as("small", min - 1, true, name));
+            assert_eq!(last(&ev)["type"], "rejected", "{name}");
+            r.request_and_wait(demod_open_as("small", min - 1, false, name));
+            assert_eq!(
+                last(&ev)["type"],
+                "opened",
+                "{name}: unframed keeps its old minimum"
+            );
+            r.request_and_wait(demod_open_as("edge", min, true, name));
+            assert_eq!(last(&ev)["type"], "opened", "{name}");
+            assert_eq!(last(&ev)["format"], name);
+            r.on_input(&iq_bytes(2 * 40_960));
+            r.on_eof_no_exit_for_test();
+        }
     }
 
     // Validates: Requirements 9.2, 9.3 (RESET at the A2 seam, at the stdout sampleIndex; DROP at

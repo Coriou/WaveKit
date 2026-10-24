@@ -832,35 +832,53 @@ mod tests {
     // one sample plus the reserve); one byte below it, it cannot, which is why open rejects it.
     #[test]
     fn the_minimum_queue_recovers_after_overflow_and_one_below_does_not() {
-        for (cap, recovers) in [
-            (min_framed_queue_bytes(AudioFormat::S16Le), true),
-            (min_framed_queue_bytes(AudioFormat::S16Le) - 1, false),
-        ] {
-            let q = ChannelQueue::new(cap, 2);
-            let mut sink = FrameSink::new(AudioFormat::S16Le, false);
-            sink.start(&q, AudioFormat::S16Le);
-            let first = sink.push(&q, &pcm(100));
-            assert!(first.dropped_samples > 0);
-            let mut all = drain(&q);
-            let r = sink.push(&q, &pcm(1));
-            assert_eq!(r.accepted_samples, u64::from(recovers), "cap {cap}");
-            all.extend(drain(&q));
-            if recovers {
-                let (_, frames) = decode_stream(&all, 2).unwrap();
-                let n = frames.len();
+        // Whole-sample PCM records for either format; tag bytes count up from 0.
+        let pcm_as = |n: usize, sb: usize| {
+            let mut v = header(T_PCM, n * sb).to_vec();
+            v.extend((0..n * sb).map(|k| k as u8));
+            v
+        };
+        for (format, want) in [(AudioFormat::S16Le, 74), (AudioFormat::F32Le, 76)] {
+            let sb = format.sample_bytes();
+            let min = min_framed_queue_bytes(format);
+            assert_eq!(min, want, "{format:?}");
+            for (cap, recovers) in [(min, true), (min - 1, false)] {
+                let q = ChannelQueue::new(cap, sb);
+                let mut sink = FrameSink::new(format, false);
+                sink.start(&q, format);
+                let first = sink.push(&q, &pcm_as(100, sb));
+                assert!(first.dropped_samples > 0);
+                let mut all = drain(&q);
+                let r = sink.push(&q, &pcm_as(1, sb));
                 assert_eq!(
-                    frames[n - 2],
-                    Frame::Drop {
-                        at: first.accepted_samples,
-                        dropped: first.dropped_samples,
-                        flags: 0
-                    }
+                    r.accepted_samples,
+                    u64::from(recovers),
+                    "{format:?} cap {cap}"
                 );
-                assert_eq!(frames[n - 1], Frame::Pcm(vec![0, 1]));
-                // And again: recovery is repeatable, not a one-off.
-                sink.push(&q, &pcm(200));
-                drain(&q);
-                assert_eq!(sink.push(&q, &pcm(1)).accepted_samples, 1);
+                all.extend(drain(&q));
+                if recovers {
+                    let (_, frames) = decode_stream(&all, sb).unwrap();
+                    let n = frames.len();
+                    assert_eq!(
+                        frames[n - 2],
+                        Frame::Drop {
+                            at: first.accepted_samples,
+                            dropped: first.dropped_samples,
+                            flags: 0
+                        }
+                    );
+                    assert_eq!(frames[n - 1], Frame::Pcm((0..sb as u8).collect()));
+                    // And again: recovery is repeatable, not a one-off.
+                    sink.push(&q, &pcm_as(200, sb));
+                    drain(&q);
+                    assert_eq!(sink.push(&q, &pcm_as(1, sb)).accepted_samples, 1);
+                } else {
+                    // Stuck: every later push drops too, however often the reader drains.
+                    for _ in 0..3 {
+                        drain(&q);
+                        assert_eq!(sink.push(&q, &pcm_as(1, sb)).accepted_samples, 0);
+                    }
+                }
             }
         }
     }
