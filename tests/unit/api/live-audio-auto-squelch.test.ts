@@ -51,11 +51,34 @@ function baseStatus(): LiveDemodStatus {
 describe("live audio auto squelch (REST)", () => {
 	let app: FastifyInstance
 	let status: LiveDemodStatus
+	let getStatus: ReturnType<typeof vi.fn>
 
 	beforeEach(async () => {
 		status = baseStatus()
+		getStatus = vi.fn((options?: { diagnostics?: boolean }) =>
+			options?.diagnostics === true
+				? {
+						...status,
+						autoSquelch: {
+							state: "waiting" as const,
+							diagnostics: {
+								verdict: "low-audio" as const,
+								frames: 20,
+								audioDb: -33.2,
+								syllabic: 1.29,
+								cluster: 0.33,
+								quietBlocks: 100,
+								notedBlocks: 100,
+								windowResets: 1,
+								audioMs: 4_000,
+								deviationHz: 2_500,
+							},
+						},
+					}
+				: status,
+		)
 		const liveDemod = Object.assign(new EventEmitter(), {
-			getStatus: vi.fn(() => status),
+			getStatus,
 			start: vi.fn(),
 			stop: vi.fn(),
 			reconfigure: vi.fn(),
@@ -94,6 +117,35 @@ describe("live audio auto squelch (REST)", () => {
 		expect(Object.keys(waiting as object)).not.toContain("evidence")
 		delete status.autoSquelch
 		expect(Object.keys(await getStatusBody())).not.toContain("autoSquelch")
+	})
+
+	// Diagnostic and unstable (2026-10-24): opt-in only.
+	it("?diagnostics=true adds autoSquelch.diagnostics; the default status has none", async () => {
+		status.autoSquelch = { state: "waiting" }
+		expect((await getStatusBody())["autoSquelch"]).toEqual({ state: "waiting" })
+		expect(getStatus).toHaveBeenLastCalledWith()
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/live-audio/status?diagnostics=true",
+		})
+		expect(response.statusCode).toBe(200)
+		const body = JSON.parse(response.body) as Record<string, unknown>
+		expect(getStatus).toHaveBeenLastCalledWith({ diagnostics: true })
+		expect(body["autoSquelch"]).toEqual({
+			state: "waiting",
+			diagnostics: {
+				verdict: "low-audio",
+				frames: 20,
+				audioDb: -33.2,
+				syllabic: 1.29,
+				cluster: 0.33,
+				quietBlocks: 100,
+				notedBlocks: 100,
+				windowResets: 1,
+				audioMs: 4_000,
+				deviationHz: 2_500,
+			},
+		})
 	})
 
 	// Validates: Requirements 3.1

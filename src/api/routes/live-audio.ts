@@ -128,6 +128,22 @@ const liveDemodStatusSchema = {
 			properties: {
 				state: { type: "string", enum: ["off", "waiting", "open"] },
 				evidence: { type: "string", enum: ["voice", "ctcss", "dcs"] },
+				// DIAGNOSTIC AND UNSTABLE: only with ?diagnostics=true.
+				diagnostics: {
+					type: "object",
+					properties: {
+						verdict: { type: "string" },
+						frames: { type: "number" },
+						audioDb: { type: ["number", "null"] },
+						syllabic: { type: ["number", "null"] },
+						cluster: { type: ["number", "null"] },
+						quietBlocks: { type: "number" },
+						notedBlocks: { type: "number" },
+						windowResets: { type: "number" },
+						audioMs: { type: "number" },
+						deviationHz: { type: "number" },
+					},
+				},
 			},
 			required: ["state"],
 		},
@@ -324,6 +340,9 @@ export const liveAudioRoutes: FastifyPluginAsync<
 							...(status.autoSquelch.evidence !== undefined
 								? { evidence: status.autoSquelch.evidence }
 								: {}),
+							...(status.autoSquelch.diagnostics !== undefined
+								? { diagnostics: { ...status.autoSquelch.diagnostics } }
+								: {}),
 						},
 					}
 				: {}),
@@ -337,20 +356,32 @@ export const liveAudioRoutes: FastifyPluginAsync<
 		}
 	}
 
-	fastify.get<{ Reply: LiveDemodStatus }>(
+	fastify.get<{
+		Reply: LiveDemodStatus
+		Querystring: { diagnostics?: boolean }
+	}>(
 		"/api/live-audio/status",
 		{
 			schema: {
 				tags: ["live-audio"],
 				summary: "Get live audio status",
-				description: "Returns live demodulator status and configuration",
+				description:
+					"Returns live demodulator status and configuration. `diagnostics=true` adds the evidence gate's voice window to `autoSquelch` (diagnostic and unstable).",
+				querystring: {
+					type: "object",
+					properties: { diagnostics: { type: "boolean" } },
+				},
 				response: {
 					200: liveDemodStatusSchema,
 				},
 			},
 		},
 		async (request, reply) => {
-			const status = toApiLiveDemodStatus(liveDemod.getStatus())
+			const status = toApiLiveDemodStatus(
+				request.query.diagnostics === true
+					? liveDemod.getStatus({ diagnostics: true })
+					: liveDemod.getStatus(),
+			)
 			if (options.legacyAudioHost !== true) return status
 			// Per response only: never stored, logged or broadcast.
 			const host = requestHostHeader(request)

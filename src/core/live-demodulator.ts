@@ -772,7 +772,11 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
-	getStatus(): LiveDemodStatus {
+	/**
+	 * `diagnostics` (DIAGNOSTIC AND UNSTABLE, 2026-10-24) adds the evidence gate's current voice
+	 * window to `autoSquelch`; computed on demand, never on level events.
+	 */
+	getStatus(options: { diagnostics?: boolean } = {}): LiveDemodStatus {
 		const sourceId = this.activeSourceId ?? this.config.sourceId ?? ""
 		const sourceStatus = sourceId
 			? this.sourceManager.getStatus(sourceId)
@@ -821,7 +825,10 @@ export class LiveDemodulator extends EventEmitter {
 		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
 		if (run) {
 			status.toneSquelch = { state: toneSquelchState(run) }
-			status.autoSquelch = this.autoSquelchState(run)
+			status.autoSquelch = this.autoSquelchState(
+				run,
+				options.diagnostics === true,
+			)
 		}
 		if (this.http.listening && this.channelTone !== null)
 			status.tone = copyChannelTone(this.channelTone)
@@ -2110,11 +2117,18 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	/** Requirement 4.1: present while the pipeline runs; `off` outside the evidence path. */
-	private autoSquelchState(run: PipelineRun): LiveAudioAutoSquelch {
+	private autoSquelchState(
+		run: PipelineRun,
+		diagnostics = false,
+	): LiveAudioAutoSquelch {
 		const evidence = this.activeEvidence(run)
 		if (evidence === null) return { state: "off" }
 		const { state, evidence: kind } = evidence.gate
-		return kind !== null ? { state, evidence: kind } : { state }
+		const out: LiveAudioAutoSquelch =
+			kind !== null ? { state, evidence: kind } : { state }
+		if (diagnostics && evidence.gate.diagnostics !== undefined)
+			out.diagnostics = evidence.gate.diagnostics()
+		return out
 	}
 
 	/**

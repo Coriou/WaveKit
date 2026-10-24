@@ -221,6 +221,29 @@ most 2.5 s after the tone's last sample while stage 1 stays open, and at most 2.
 that ended the tone (measured on the review repro across eight block phases and noise at 100 to
 3 000: 1.75 to 1.96 s).
 
+**Amendment (2026-10-24, live retest run4): sparse speech; diagnostic status.** On an image with
+A13 and A14, two strong plain-voice overs (+1 dBFS, about 5 s) stayed `waiting`; a CTCSS over
+latched and released and interference stayed muted. Findings: (1) carrier evidence is not the
+cause: the FM quieting of the live saturated CTCSS over, measured on its played PCM, is 30 to 58 dB
+per 10 ms block (median 50, none under the observer's 6 dB), and run3's ungated overs replayed
+through the real `LiveDemodulator` csdr path (real `ChannelSquelch` power gate and carrier observer
+on IQ rebuilt from the PCM phase at +1 dBFS, weak interference re-opens before the over, PCM lag
+0 to 500 ms, PCM chunks of 500 to 65 536 bytes) latch voice 1.0 to 2.0 s after onset; (2) the only
+live voice in run4 (in the CTCSS over) is sparse: 4 to 5 frames (200 to 250 ms) at -7 to -16 dB
+about once a second over a -33 dB floor (speech in about 17 % of frames), so the median audioDb of
+every 1 s window is -33 dB at the 2.5 kHz reference and 0 of 109 windows pass the -30 dB audio rule
+(syllabic and cluster pass in 86). The voice rule needs speech in at least half of the frames of a
+1 s window. The plain overs' audio is not recorded (muted), so this is the leading explanation, not
+a confirmation. A 75th-percentile audio rule would pass that speech (36 of 109 windows) but opens
+`nfm-clicks` (59 of 61) and bare-carrier windows, so it is rejected; a stage-2 rule for sparse
+syllables (for example sustained voice-level runs of at least 150 ms) is the pending decision.
+Pinned as a known limitation: 250 ms syllables once a second on a quieted carrier never latch.
+Diagnostic (unstable, additive): `GET /api/live-audio/status?diagnostics=true` adds
+`autoSquelch.diagnostics` with the verdict in the judge's order, the window medians, the quiet
+and noted block counts, the window-reset count, the audio time and the meter's deviation; it is
+computed per request from the gate's state (no per-sample or per-chunk work, never on level
+events), so the next live test shows which criterion fails.
+
 1.6 **Audio only.** Stage 2 mutes client audio only. The `pcm` event (transmission tracking,
 tone results, recordings), transmission open and close times, Activity rows, identify and
 decoders see exactly what they see today.

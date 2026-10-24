@@ -752,3 +752,100 @@ describe("A14: the latch survives only the same transmission", () => {
 		)
 	}, 120_000)
 })
+
+/**
+ * Live retest 2026-10-24 (run4): the only voice the gated stream holds (a CTCSS over, played once
+ * the tone latched) is sparse speech: 4-5 frames (200-250 ms) at -7 to -16 dB about once a second
+ * over a -33 dB floor, so the median audioDb of every 1 s window stays near -33 dB at the 2.5 kHz
+ * reference and the voice rule fails on audio level while FM quieting (30-58 dB per block, none
+ * under 6 dB), syllabic (median 0.10-1.49) and cluster (0.33) pass. Synthetic stand-in below;
+ * pinned as a known limitation (pending decision), with the diagnostic naming the criterion.
+ */
+describe("live retest: sparse speech and the diagnostic status", () => {
+	function sparseSpeech(seconds: number): Buffer {
+		const base = carrierSilence({ rate: RATE, seconds })
+		const burst = voiceLike({ rate: RATE, seconds: 0.25, seed: 77, level: 0.8 })
+		for (let start = 0.5; start + 0.25 <= seconds; start += 1) {
+			const at = Math.round(start * RATE)
+			for (let i = 0; i < burst.length; i++)
+				base[at + i] = (base[at + i] ?? 0) + (burst[i] ?? 0)
+		}
+		return toPcm(base, "s16le")
+	}
+
+	it("known limitation (pending decision): 250 ms syllables once a second on a quieted carrier never latch; the diagnostic says low-audio", () => {
+		const g = gate()
+		const t = drive(g, [{ pcm: sparseSpeech(6), open: true, quieted: true }])
+		expect(t.states.every(s => s === "waiting")).toBe(true)
+		const d = g.diagnostics()
+		expect(d.verdict).toBe("low-audio")
+		expect(d.frames).toBe(20)
+		expect(d.audioDb ?? 0).toBeLessThan(-30)
+		expect(d.syllabic ?? 0).toBeGreaterThanOrEqual(0.3)
+		expect(d.cluster ?? 1).toBeLessThan(0.6)
+		expect(d.quietBlocks).toBe(d.notedBlocks)
+		expect(d.deviationHz).toBe(EVIDENCE_NARROW_DEVIATION_HZ)
+	})
+
+	it("the diagnostic verdict follows the judge's order", () => {
+		const filling = gate()
+		drive(filling, [
+			{
+				pcm: toPcm(voiceLike({ rate: RATE, seconds: 0.5, seed: 3 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(filling.diagnostics().verdict).toBe("window-filling")
+		const notQuiet = gate()
+		drive(notQuiet, [
+			{
+				pcm: toPcm(
+					voiceLike({ rate: RATE, seconds: 2, seed: 3, level: 0.8 }),
+					"s16le",
+				),
+				open: true,
+				quieted: false,
+			},
+		])
+		expect(notQuiet.diagnostics().verdict).toBe("not-quiet")
+		const silent = gate()
+		drive(silent, [
+			{
+				pcm: toPcm(carrierSilence({ rate: RATE, seconds: 2 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(silent.diagnostics().verdict).toBe("low-audio")
+		const latched = gate()
+		drive(latched, [
+			{
+				pcm: toPcm(
+					voiceLike({ rate: RATE, seconds: 2, seed: 3, level: 0.8 }),
+					"s16le",
+				),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(latched.diagnostics().verdict).toBe("latched")
+		// A noise lead-in, then the over: one window reset at the onset.
+		const lead = gate()
+		drive(lead, [
+			flicker(300, 9),
+			{
+				pcm: toPcm(carrierSilence({ rate: RATE, seconds: 0.5 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		expect(lead.diagnostics().windowResets).toBe(1)
+		lead.reset()
+		expect(lead.diagnostics()).toMatchObject({
+			frames: 0,
+			windowResets: 0,
+			audioDb: null,
+		})
+	})
+})

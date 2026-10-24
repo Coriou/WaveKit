@@ -82,6 +82,49 @@ export type LiveAudioAutoSquelchEvidence = "voice" | "ctcss" | "dcs"
 export interface LiveAudioAutoSquelch {
 	state: "off" | "waiting" | "open"
 	evidence?: LiveAudioAutoSquelchEvidence
+	/**
+	 * DIAGNOSTIC AND UNSTABLE (2026-10-24): present only on `GET /api/live-audio/status?diagnostics=true`
+	 * while the evidence gate runs; never on level events. Its shape may change or disappear
+	 * without notice; clients must not depend on it.
+	 */
+	diagnostics?: LiveAudioAutoSquelchDiagnostics
+}
+
+/**
+ * Why the evidence gate is waiting, in the judge's order: `window-filling` (fewer than 20
+ * frames since the window started), `non-finite` (a frame failed closed), `data-like` (median
+ * cluster ≥ 0.6), `not-quiet` (quieted blocks under half of the noted blocks), `low-audio`
+ * (median audioDb under -30), `low-syllabic` (median syllabic index under 0.3), `voice` (the
+ * window passes; the next frame latches); `latched` while open.
+ */
+export type LiveAudioAutoSquelchVerdict =
+	| "window-filling"
+	| "non-finite"
+	| "data-like"
+	| "not-quiet"
+	| "low-audio"
+	| "low-syllabic"
+	| "voice"
+	| "latched"
+
+/** DIAGNOSTIC AND UNSTABLE: the evidence gate's current voice window (see `diagnostics`). */
+export interface LiveAudioAutoSquelchDiagnostics {
+	verdict: LiveAudioAutoSquelchVerdict
+	/** Frames in the voice window (0-20). */
+	frames: number
+	/** Medians over the window (null when empty or not finite). */
+	audioDb: number | null
+	syllabic: number | null
+	cluster: number | null
+	/** Quieted and noted 10 ms blocks in the quiet window (at most 100). */
+	quietBlocks: number
+	notedBlocks: number
+	/** Window resets on carrier onsets since the episode started. */
+	windowResets: number
+	/** Audio since the episode (or the last re-open) started, ms. */
+	audioMs: number
+	/** Deviation the voice meter normalises to (2 500 or 5 000 Hz). */
+	deviationHz: number
 }
 
 export interface LiveAudioConfig {

@@ -19,14 +19,22 @@ import {
 	LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS,
 	LIVE_AUDIO_AUTO_SQUELCH_VOICE_FRAMES,
 } from "@wavekit/api-types"
-import type { LiveAudioAutoSquelchEvidence } from "@wavekit/api-types"
+import type {
+	LiveAudioAutoSquelchDiagnostics,
+	LiveAudioAutoSquelchEvidence,
+} from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
 import {
 	AUDIO_TONE_RATE_HZ,
 	PcmDecimator,
 } from "../audio-tones/tone-detector.js"
 import { dataLike, isVoice, toneQualified } from "../scanner/analog-trial.js"
-import { ANALOG_TRIAL_MIN_QUIET_FRACTION } from "../scanner/scanner-redesign-contract.js"
+import {
+	ANALOG_TRIAL_AUDIO_MIN_DB,
+	ANALOG_TRIAL_DATA_SCORE,
+	ANALOG_TRIAL_MIN_QUIET_FRACTION,
+	ANALOG_TRIAL_VOICE_INDEX,
+} from "../scanner/scanner-redesign-contract.js"
 import type {
 	AnalogTrialFrame,
 	AnalogTrialStats,
@@ -176,6 +184,9 @@ function toneKey(tone: Readonly<ToneReading>): number {
 
 export class EvidenceGate implements EvidenceGatePort {
 	private readonly rate: number
+	private readonly deviationHz: number
+	/** Window resets on carrier onsets since the episode started (diagnostics only). */
+	private windowResets = 0
 	private readonly modulation: "nfm" | "am"
 	private readonly decimator = new PcmDecimator()
 	private readonly meter: VoiceFrameMeter
@@ -251,6 +262,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				"EVIDENCE_RATE",
 			)
 		this.rate = rate
+		this.deviationHz = options.deviationHz ?? 5_000
 		this.modulation = options.modulation === "am" ? "am" : "nfm"
 		this.meter =
 			options.deviationHz === undefined
@@ -310,6 +322,7 @@ export class EvidenceGate implements EvidenceGatePort {
 				this.internal === "waiting"
 			) {
 				this.resetVoiceWindow()
+				this.windowResets += 1
 				flags =
 					this.unquietedRun >= EVIDENCE_ONSET_ARM_UNQUIETED_BLOCKS
 						? EVIDENCE_NOTE_RESET | EVIDENCE_NOTE_DISCARD
@@ -456,7 +469,67 @@ export class EvidenceGate implements EvidenceGatePort {
 		this.quietCount = 0
 	}
 
+	/**
+	 * The current voice window for the diagnostic status (DIAGNOSTIC AND UNSTABLE). Computed on
+	 * demand (it allocates its medians); nothing is recorded per sample for it except the reset
+	 * count. The verdict follows `judgeEvidence`'s order on the window as it stands.
+	 */
+	diagnostics(): LiveAudioAutoSquelchDiagnostics {
+		const frames = this.frames.slice(0, this.frameLen)
+		const median = (
+			pick: (frame: AnalogTrialFrame) => number,
+		): number | null => {
+			const values = frames.map(pick)
+			if (values.length === 0 || values.some(v => !Number.isFinite(v)))
+				return null
+			values.sort((a, b) => a - b)
+			const mid = values.length >> 1
+			return values.length % 2 === 1
+				? (values[mid] ?? null)
+				: ((values[mid - 1] ?? 0) + (values[mid] ?? 0)) / 2
+		}
+		const audioDb = median(f => f.audioDb)
+		const syllabic = median(f => f.syllabic)
+		const cluster = median(f => f.cluster)
+		let finite = true
+		for (let i = 0; i < this.frameLen; i++)
+			if (this.frameFinite[i] !== 1) finite = false
+		const noted = this.quietLen
+		const quiet = this.quietCount
+		const verdict: LiveAudioAutoSquelchDiagnostics["verdict"] =
+			this.internal === "open"
+				? "latched"
+				: this.frameLen < this.frames.length
+					? "window-filling"
+					: !finite || audioDb === null || syllabic === null || cluster === null
+						? "non-finite"
+						: cluster >= ANALOG_TRIAL_DATA_SCORE
+							? "data-like"
+							: !(noted > 0 && quiet >= ANALOG_TRIAL_MIN_QUIET_FRACTION * noted)
+								? "not-quiet"
+								: audioDb < ANALOG_TRIAL_AUDIO_MIN_DB
+									? "low-audio"
+									: syllabic < ANALOG_TRIAL_VOICE_INDEX
+										? "low-syllabic"
+										: "voice"
+		const round = (v: number | null, step: number): number | null =>
+			v === null ? null : Math.round(v / step) * step
+		return {
+			verdict,
+			frames: this.frameLen,
+			audioDb: round(audioDb, 0.1),
+			syllabic: round(syllabic, 0.001),
+			cluster: round(cluster, 0.001),
+			quietBlocks: quiet,
+			notedBlocks: noted,
+			windowResets: this.windowResets,
+			audioMs: Math.round((this.audioSamples * 1_000) / this.rate),
+			deviationHz: this.deviationHz,
+		}
+	}
+
 	reset(): void {
+		this.windowResets = 0
 		this.onsetArmed = true
 		this.prevUnquieted = false
 		this.unquietedRun = 0

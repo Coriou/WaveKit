@@ -258,6 +258,28 @@ describe("live demodulator evidence squelch end to end (real gate and pre-roll)"
 		})
 	}
 
+	// Diagnostic and unstable (2026-10-24): opt-in on getStatus only, from the real gate.
+	it("getStatus({ diagnostics: true }) carries the gate's voice window; the default status does not", async () => {
+		await drive("nfm", [
+			{
+				pcm: toPcm(carrierSilence({ rate: RATE, seconds: 1.5 }), "s16le"),
+				open: true,
+				quieted: true,
+			},
+		])
+		if (h === null) throw new Error("no harness")
+		expect(h.demod.getStatus().autoSquelch).toEqual({ state: "waiting" })
+		const diagnostics = h.demod.getStatus({ diagnostics: true }).autoSquelch
+			?.diagnostics
+		expect(diagnostics).toMatchObject({
+			verdict: "low-audio",
+			frames: 20,
+			quietBlocks: 100,
+			notedBlocks: 100,
+			deviationHz: 2_500,
+		})
+	})
+
 	// Amendment A14 (2026-10-24), live run2: weak interference re-opens stage 1 every 0.5 s after
 	// a CTCSS over. Only carrier evidence keeps the latch; the flicker plays nothing once the hang
 	// after the over's last quieted block has run out.

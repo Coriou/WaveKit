@@ -7,6 +7,7 @@ import {
 	LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS,
 } from "@wavekit/api-types"
 import type {
+	LiveAudioAutoSquelchDiagnostics,
 	LiveAudioAutoSquelchEvidence,
 	LiveAudioConfig,
 	LiveAudioSquelchMode,
@@ -38,6 +39,8 @@ export interface EvidenceGatePort {
 	closed(byteCount: number, format: EvidencePcmFormat): number
 	/** Drop all evidence and the latch (close without latch, retune, mode change). */
 	reset(): void
+	/** DIAGNOSTIC AND UNSTABLE: the current voice window, computed on demand (optional). */
+	diagnostics?(): LiveAudioAutoSquelchDiagnostics
 }
 
 /** `noteBlock` flag: the voice window was reset on a carrier onset. */

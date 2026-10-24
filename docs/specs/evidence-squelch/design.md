@@ -340,6 +340,16 @@ tone + voice, quieted or not, and noise at 100 to 20 000, plus the repro as expl
 (it fails on the retained-stage gate). The different-tone regression uses a 1.3 s fade, so the
 latch ends before the other tone can qualify.
 
+**Amendment (2026-10-24, live retest run4): diagnostic status.** `EvidenceGatePort` gains an
+optional `diagnostics()` (`EvidenceGate` implements it): medians of the current frame window,
+quiet and noted counts, `windowResets` (counted in `noteBlock`, cleared by `reset()`), audio
+time, deviation, and the verdict in `judgeEvidence`'s order (`window-filling`, `non-finite`,
+`data-like`, `not-quiet`, `low-audio`, `low-syllabic`, `voice`, or `latched`). It allocates its
+medians when called; `LiveDemodulator.getStatus({ diagnostics: true })` calls it, the REST route
+passes `?diagnostics=true`, level events never do. Type `LiveAudioAutoSquelchDiagnostics` in
+`packages/api-types`, documented as diagnostic and unstable. Findings and the pending sparse-speech
+decision: requirements, amendment after 1.5.
+
 Samples go through one `PcmDecimator` (as `ToneSquelchGate`, with its split-sample hold) to the
 meter and, on NFM, to `ToneEvidence`. While closed or idle nothing is analysed (`closed()` only
 counts samples and keeps framing).
