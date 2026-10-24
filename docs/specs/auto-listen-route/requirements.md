@@ -63,7 +63,9 @@ closed only by the existing stall timeout, server stop or shutdown admission.
 2.1 The output is 48 000 Hz, s16le, mono, fixed (`LIVE_AUDIO_AUTO_ROUTE_RATE`,
 `LIVE_AUDIO_AUTO_ROUTE_FORMAT`), independent of `audioFormat` and of the analog rate.
 
-2.2 Analog audio (s16le or f32le at the pipeline rate, any rate from 8 000 to 200 000 Hz) and
+2.2 Analog audio (s16le or f32le at the pipeline rate, any rate from 8 000 to 200 000 Hz,
+fractional included, such as csdr's IQ rate / decimation 1 024 000 / 41 Hz; the ratio to 48 000 Hz is
+kept exact so the output never drifts from the input) and
 decoded voice (8 000 Hz s16le mono) are resampled to 48 000 Hz. f32le is clamped to [-1, 1] and
 scaled by 32 767 with round-half-away-from-zero.
 

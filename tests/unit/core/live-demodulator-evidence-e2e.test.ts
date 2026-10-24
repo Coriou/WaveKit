@@ -9,8 +9,12 @@ import http from "node:http"
 import { LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS } from "@wavekit/api-types"
 import fc from "fast-check"
 import { afterEach, describe, expect, it } from "vitest"
+import { AUTO_ROUTE_STREAM } from "../../../src/core/auto-listen/contract.js"
+import type { AutoRouteClock } from "../../../src/core/auto-listen/contract.js"
+import type { AutoListenRouter } from "../../../src/core/auto-listen/router.js"
 import { wavStreamHeader } from "../../../src/core/live-demodulator.js"
 import {
+	ClientTransport,
 	createDemodHarness,
 	waitFor,
 } from "./live-demodulator-continuity-fakes.js"
@@ -854,3 +858,125 @@ async function openWavClient(
 		},
 	}
 }
+
+/** Manual `/auto` pacer: `tick` advances the clock and runs the router's interval. */
+class StepClock implements AutoRouteClock {
+	t = 0
+	private fn: (() => void) | null = null
+	now(): number {
+		return this.t
+	}
+	setInterval(fn: () => void): unknown {
+		this.fn = fn
+		return 1
+	}
+	clearInterval(): void {
+		this.fn = null
+	}
+	tick(ms: number): void {
+		this.t += ms
+		this.fn?.()
+	}
+}
+
+describe("/auto on the real evidence wiring at a fractional csdr rate", () => {
+	let h: Harness | null = null
+	afterEach(async () => {
+		await h?.dispose()
+		h = null
+	})
+
+	// Live defect (2026-10-24): 1 024 000 Hz IQ, NFM 12.5 kHz, decimation 41, so the PCM runs at
+	// 1 024 000 / 41 = 24 975.61 Hz. Analog overs played on /stream; /auto stayed "none" and silent
+	// because its analog input rejected every span at a non-integer rate.
+	it("an NFM CTCSS 79.7 Hz over at 24 975.61 Hz switches /auto to analog and plays", async () => {
+		const routeClock = new StepClock()
+		h = await createDemodHarness({
+			config: { modulation: "nfm", bandwidth: 12_500, squelchMode: "auto" },
+			sourceSampleRate: 1_024_000,
+			autoRouteClock: routeClock,
+		})
+		const internals = h.demod as unknown as E2eInternals & {
+			autoRoute: AutoListenRouter
+		}
+		await h.demod.start()
+		const run = internals.run
+		if (run === null) throw new Error("no run")
+		const rate = run.stream.rate
+		expect(rate).toBeCloseTo(1_024_000 / 41, 9)
+		expect(Number.isInteger(rate)).toBe(false)
+		const control = { open: false, quieted: false }
+		Object.defineProperty(run.squelch, "open", {
+			configurable: true,
+			get: () => control.open,
+		})
+		Object.defineProperty(run.squelch, "blockQuieted", {
+			configurable: true,
+			value: () => control.quieted,
+		})
+		const stream = h.addClient().transport
+		const auto = new ClientTransport()
+		internals.autoRoute.registry.register(
+			auto as never,
+			"auto",
+			AUTO_ROUTE_STREAM,
+		)
+		const over = mix(
+			voiceLike({ rate, seconds: 3, seed: 21 }),
+			ctcssMix({ rate, seconds: 3, hz: 79.7 }),
+		)
+		const segments: Segment[] = [
+			{
+				pcm: toPcm(whiteNoise({ rate, seconds: 0.5, seed: 3 }), "s16le"),
+				open: false,
+				quieted: false,
+			},
+			{ pcm: toPcm(over, "s16le"), open: true, quieted: true },
+			{
+				pcm: toPcm(whiteNoise({ rate, seconds: 2, seed: 5 }), "s16le"),
+				open: false,
+				quieted: false,
+			},
+		]
+		const actives = new Set<string>()
+		let gateOpened = false
+		let elapsedMs = 0
+		let fedSamples = 0
+		for (const segment of segments) {
+			control.open = segment.open
+			control.quieted = segment.quieted
+			// One 10 ms chunk per tick at the true rate: the samples due by the cumulative elapsed
+			// time, floor(elapsed ms × 1 024 000 / 41 000), so chunks are 249 or 250 samples.
+			let at = 0
+			while (at < segment.pcm.length) {
+				elapsedMs += 10
+				const due = Math.floor((elapsedMs * 1_024_000) / 41_000)
+				const bytes = Math.min(segment.pcm.length - at, 2 * (due - fedSamples))
+				fedSamples += bytes / 2
+				internals.handleAudioData(
+					Buffer.from(segment.pcm.subarray(at, at + bytes)),
+				)
+				at += bytes
+				internals.measureRun(run)
+				routeClock.tick(10)
+				const status = h.demod.getStatus()
+				if (status.autoSquelch?.state === "open") gateOpened = true
+				actives.add(status.autoRoute?.active ?? "absent")
+			}
+		}
+		// /stream played the over (the gate latched and released it).
+		expect(gateOpened).toBe(true)
+		expect(stream.received().some(b => b !== 0)).toBe(true)
+		// /auto switched to analog and wrote non-silent audio.
+		expect(actives.has("analog")).toBe(true)
+		const autoBytes = auto.received()
+		const samples = new Int16Array(
+			autoBytes.buffer,
+			autoBytes.byteOffset,
+			autoBytes.length >> 1,
+		)
+		let energy = 0
+		for (const v of samples) energy += v * v
+		expect(energy / Math.max(1, samples.length)).toBeGreaterThan(1_000)
+	})
+})

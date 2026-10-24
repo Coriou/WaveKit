@@ -7,7 +7,7 @@
 import type { PcmFormat, StreamFormat } from "../audio-stream-server.js"
 import type { VoiceCoverage, VoiceTapCall } from "./contract.js"
 import { LIVE_AUDIO_AUTO_ROUTE_RATE } from "@wavekit/api-types"
-import { PolyphaseResampler } from "./resampler.js"
+import { PolyphaseResampler, rationalRate } from "./resampler.js"
 import { FLAG_ADMITTED, FLAG_SILENT, SourceFifo } from "./source-fifo.js"
 import type { SampleFlag } from "./source-fifo.js"
 
@@ -175,10 +175,15 @@ class Scratch {
 	}
 }
 
+/**
+ * Requirement 2.2: any pipeline rate from 8 000 to 200 000 Hz, fractional included (csdr's
+ * channel rate is the IQ rate over the decimation: 1 024 000 / 41 = 24 975.61 Hz).
+ */
 function validStream(stream: StreamFormat): boolean {
 	return (
 		(stream.format === "s16le" || stream.format === "f32le") &&
-		Number.isInteger(stream.rate) &&
+		typeof stream.rate === "number" &&
+		Number.isFinite(stream.rate) &&
 		stream.rate >= 8_000 &&
 		stream.rate <= 200_000
 	)
@@ -297,7 +302,22 @@ export class AnalogInput {
 			this.rate = 0
 			return false
 		}
-		this.res = new PolyphaseResampler(stream.rate, LIVE_AUDIO_AUTO_ROUTE_RATE)
+		// The exact fraction (rationalRate: csdr's IQ rate / decimation is recovered exactly), so
+		// the 48 kHz output never drifts from the input; a rejected fraction rejects the stream.
+		const exact = rationalRate(stream.rate)
+		let res: PolyphaseResampler | null = null
+		if (exact !== null) {
+			try {
+				res = new PolyphaseResampler(exact, LIVE_AUDIO_AUTO_ROUTE_RATE)
+			} catch {
+				res = null
+			}
+		}
+		this.res = res
+		if (res === null) {
+			this.rate = 0
+			return false
+		}
 		this.rate = stream.rate
 		this.format = stream.format
 		this.frameBytes = stream.format === "f32le" ? 4 : 2
