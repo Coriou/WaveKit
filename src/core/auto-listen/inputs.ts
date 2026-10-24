@@ -175,13 +175,28 @@ class Scratch {
 	}
 }
 
+/**
+ * Requirement 2.2: any pipeline rate from 8 000 to 200 000 Hz, fractional included (csdr's
+ * channel rate is the IQ rate over the decimation: 1 024 000 / 41 = 24 975.61 Hz).
+ */
 function validStream(stream: StreamFormat): boolean {
 	return (
 		(stream.format === "s16le" || stream.format === "f32le") &&
-		Number.isInteger(stream.rate) &&
+		typeof stream.rate === "number" &&
+		Number.isFinite(stream.rate) &&
 		stream.rate >= 8_000 &&
 		stream.rate <= 200_000
 	)
+}
+
+/**
+ * The resampler's integer input rate for a pipeline rate: the nearest integer. The error is at
+ * most 0.5 Hz, so at most 0.5 / 8 000 = 62.5 ppm (24 975.61 Hz: 0.39 / 24 975.61 = 15.6 ppm).
+ * The pacer absorbs it: at 62.5 ppm a continuous source is 48 000 × 62.5e-6 = 3 samples/s off,
+ * one 960-sample block in 960 / 3 = 320 s (one underrun or a silent catch-up), no drift kept.
+ */
+export function resamplerInputRate(rate: number): number {
+	return Math.round(rate)
 }
 
 /**
@@ -297,7 +312,10 @@ export class AnalogInput {
 			this.rate = 0
 			return false
 		}
-		this.res = new PolyphaseResampler(stream.rate, LIVE_AUDIO_AUTO_ROUTE_RATE)
+		this.res = new PolyphaseResampler(
+			resamplerInputRate(stream.rate),
+			LIVE_AUDIO_AUTO_ROUTE_RATE,
+		)
 		this.rate = stream.rate
 		this.format = stream.format
 		this.frameBytes = stream.format === "f32le" ? 4 : 2
