@@ -136,9 +136,10 @@ export class CarrierBlockLog {
 				this.flags[(index - fill + i) % CARRIER_LOG_CAPACITY] = 0
 			this.blocks = index
 		}
-		this.flags[this.blocks % CARRIER_LOG_CAPACITY] = this.masked(this.blocks)
-			? 0
-			: (open ? CARRIER_FLAG_OPEN : 0) | (carried ? CARRIER_FLAG_CARRIED : 0)
+		this.flags[this.blocks % CARRIER_LOG_CAPACITY] =
+			this.desynced || this.masked(this.blocks)
+				? 0
+				: (open ? CARRIER_FLAG_OPEN : 0) | (carried ? CARRIER_FLAG_CARRIED : 0)
 		this.blocks += 1
 		const listener = this.onBlock
 		if (listener === null) return
@@ -172,6 +173,13 @@ export class CarrierBlockLog {
 		if (!Number.isSafeInteger(sampleIndex) || sampleIndex < 0) return
 		const overflow = cause === "queue-overflow"
 		if (overflow && !(dropped > 0)) return
+		if (overflow) this.droppedTotal += dropped
+		if (this.gapCount >= CARRIER_LOG_GAPS) {
+			// More gaps than the run can track: fail closed until the next run (3.8.1).
+			this.desynced = true
+			this.gapCount += 1
+			return
+		}
 		const from = Math.floor(sampleIndex / this.blockSamples)
 		const to = overflow
 			? Math.ceil((sampleIndex + dropped) / this.blockSamples)
@@ -180,7 +188,6 @@ export class CarrierBlockLog {
 		for (let k = first; k < Math.min(to, this.blocks); k++)
 			this.flags[k % CARRIER_LOG_CAPACITY] = 0
 		this.masks.push(from, to)
-		if (this.masks.length > 16) this.masks.splice(0, 2)
 		const slot = this.gapCount % CARRIER_LOG_GAPS
 		this.gapFrom[slot] = from
 		this.gapTo[slot] = to
@@ -189,8 +196,12 @@ export class CarrierBlockLog {
 		this.gapCount += 1
 	}
 
-	/** Discontinuities noted this epoch (the tracker reads the last CARRIER_LOG_GAPS). */
+	/** Discontinuities noted this epoch (at most CARRIER_LOG_GAPS are kept). */
 	gapCount = 0
+	/** Output samples dropped by queue overflows this epoch, all of them. */
+	droppedTotal = 0
+	/** More than CARRIER_LOG_GAPS discontinuities this epoch: every block is closed. */
+	desynced = false
 	readonly gapFrom = new Float64Array(CARRIER_LOG_GAPS)
 	readonly gapTo = new Float64Array(CARRIER_LOG_GAPS)
 	readonly gapAt = new Float64Array(CARRIER_LOG_GAPS)
@@ -212,6 +223,8 @@ export class CarrierBlockLog {
 		this.pcmBytes = 0
 		this.masks.length = 0
 		this.gapCount = 0
+		this.droppedTotal = 0
+		this.desynced = false
 		const r = Number.isFinite(rate) && rate > 0 ? rate : 1
 		// Same rounding as ChannelSquelch (10 ms blocks).
 		this.blockSamples = Math.max(1, Math.round((r * 10) / 1000))
@@ -559,6 +572,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private readonly pendingGaps: Array<{ at: number; dropped: number }> = []
 	private readonly lateMasks: number[] = []
 	private log: CarrierBlockLog | null = null
+	/** WG10 req 3.8.1: this run lost track of its gaps; nothing is fed until the next run. */
+	private desynced = false
+	private desyncCount = 0
 	// WG10 req 3.8.13: one held window of transmission-detector audio and its 55 Hz Goertzel.
 	private steBuf: Buffer | null = null
 	private steLen = 0
@@ -607,6 +623,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** WG10 req 3.8: carried runs shorter than a span that were dropped, since construction. */
 	discardedRuns(): number {
 		return this.discardedRunCount
+	}
+
+	/** WG10 req 3.8.1: runs that saw more discontinuities than tracked (fail closed). */
+	desyncedRuns(): number {
+		return this.desyncCount
 	}
 
 	/** WG10 req 3.8.7: PCM bytes dropped unfed (ring overflow or resync), since construction. */
@@ -1202,6 +1223,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.gapsRead = 0
 		this.pendingGaps.length = 0
 		this.lateMasks.length = 0
+		this.desynced = false
 		this.pcmHead = this.pcmEnd
 		this.pcmHeadOff = 0
 		this.pcmLen = 0
@@ -1443,6 +1465,14 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.pcmLen = 0
 		}
 		this.socketEnd = log.pcmBytes
+		if (this.desynced) {
+			// Positions stay exact by the cumulative count; nothing is buffered or fed.
+			this.pcmEnd = this.socketEnd + log.droppedTotal * width
+			this.pcmHead = this.pcmEnd
+			this.pcmLen = 0
+			this.drainCarrier()
+			return
+		}
 		// Output samples native dropped re-enter as silence at their own position (3.8.1).
 		let from = 0
 		while (this.pendingGaps.length > 0) {
@@ -1457,7 +1487,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				this.pcmEnd += cut
 				from += cut
 			} else if (cut < 0) {
-				// Announced after its PCM passed: the bytes since sit up to the gap too early.
+				// Queued before the ring's width was known and since passed (as readGaps).
 				this.lateMask(gap.at, this.pcmEnd / width + gap.dropped)
 			}
 			this.appendPcm(null, gap.dropped * width)
@@ -1473,18 +1503,46 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	/** Takes new discontinuities: queues overflow gaps and invalidates decided blocks they cover. */
 	private readGaps(log: CarrierBlockLog): void {
-		if (log.gapCount - this.gapsRead > CARRIER_LOG_GAPS)
-			this.gapsRead = log.gapCount - CARRIER_LOG_GAPS
+		if (this.desynced) return
+		if (log.desynced) {
+			this.enterDesync()
+			return
+		}
+		const width = this.pcmRingWidth
 		while (this.gapsRead < log.gapCount) {
 			const slot = this.gapsRead % CARRIER_LOG_GAPS
 			this.gapsRead += 1
 			const from = log.gapFrom[slot] ?? 0
 			const to = log.gapTo[slot] ?? 0
 			const dropped = log.gapDropped[slot] ?? 0
-			if (dropped > 0)
-				this.pendingGaps.push({ at: log.gapAt[slot] ?? 0, dropped })
+			const at = log.gapAt[slot] ?? 0
 			this.invalidateBlocks(from, to)
+			if (dropped <= 0) continue
+			if (width > 0 && at * width < this.pcmEnd) {
+				// Announced after its PCM passed: mask the samples since (placed up to `dropped`
+				// early) at once, before any later drain, and insert the gap here.
+				this.lateMask(at, this.pcmEnd / width + dropped)
+				this.appendPcm(null, dropped * width)
+				this.pcmEnd += dropped * width
+			} else this.pendingGaps.push({ at, dropped })
 		}
+	}
+
+	/**
+	 * Fail closed (3.8.1): the open span ends, a provisional run is dropped, no block counts as
+	 * carried and no audio is fed until the next run, where positions start again.
+	 */
+	private enterDesync(): void {
+		this.desynced = true
+		this.desyncCount += 1
+		this.runLen = 0
+		if (this.inSpan) this.endSpan()
+		this.decisions.fill(DROP)
+		this.pendingGaps.length = 0
+		this.droppedPcmBytes += this.pcmLen
+		this.pcmHead = this.pcmEnd
+		this.pcmHeadOff = 0
+		this.pcmLen = 0
 	}
 
 	/** Already consumed blocks in [from, to) become not carried: no feed, and a break. */
@@ -1519,8 +1577,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const b = Math.max(1, this.carrierBlockSamples)
 		const from = Math.floor(fromSample / b)
 		const to = Math.ceil(toSample / b)
+		// At most one per tracked gap (CARRIER_LOG_GAPS), then the run is desynchronized.
 		this.lateMasks.push(from, to)
-		if (this.lateMasks.length > 16) this.lateMasks.splice(0, 2)
 		this.invalidateBlocks(from, to)
 	}
 
@@ -1589,6 +1647,13 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const ring = this.pcmRing
 		const format = this.pcmFormat
 		if (ring === null || format === null || this.pcmLen === 0) return
+		if (this.desynced) {
+			this.droppedPcmBytes += this.pcmLen
+			this.pcmHead += this.pcmLen
+			this.pcmHeadOff = 0
+			this.pcmLen = 0
+			return
+		}
 		const width = this.pcmRingWidth
 		const blockBytes = this.carrierBlockSamples * width
 		const decidedEnd =

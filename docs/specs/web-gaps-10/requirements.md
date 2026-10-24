@@ -359,3 +359,11 @@ misplaced samples), invalidates blocks already decided in the gap, and never fee
 nothing and close the block at `sampleIndex`, ending a carrier run or span there. STE windows
 are skipped one by one; a later non-STE window feeds again, so a mid-over burst of a low tone
 never hides the tone after it. The 0.95 s minimum of 3.8.13 is unchanged.
+
+Follow-up 2026-10-24 (review round 2): a late overflow notice masks the already buffered
+misplaced samples at once, before any later drain. A run tracks at most `CARRIER_LOG_GAPS` (16)
+discontinuities with exact masks; the cumulative dropped-sample count stays exact always. The
+17th fails the run closed ("desynchronized"): the open span ends, a provisional run is dropped,
+every later block counts as closed and uncarried and no audio is fed until the next run, where
+positions start again; the tracker counts such runs (`desyncedRuns()`, no DTO field). Startup
+keeps one notice past the cap, so the same rule applies there.

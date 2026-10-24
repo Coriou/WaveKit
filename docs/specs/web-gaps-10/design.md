@@ -569,3 +569,19 @@ alone.
   the detector before a late notice cannot be taken back.
 - **STE.** `steDecide` skips an STE-dominated window only; the next window feeds again. A real
   tail is followed by the carrier drop, so it is still removed.
+
+### Follow-up 2026-10-24 (review round 2): fail-closed gap accounting
+
+Native reports a `queue-overflow` only when the writer's one-second queue is full, so a healthy
+run sees none and a stalled client a few; 16 per run is far above that. Bound: 16 masks of two
+numbers and 16 gap ring entries per run, plus 16 tracker late masks (one per tracked gap). The
+17th discontinuity sets `CarrierBlockLog.desynced`: `note` writes every later block closed, the
+tracker (on its next read, before any drain) ends the open span, drops the provisional run and
+every decision and its buffered audio, and from then on feeds nothing; its PCM position stays
+`socket bytes + droppedTotal × width`, exact once the cursor is past the gaps, though no audio
+depends on it any more. A new run clears it. Late overflow notices are handled where the gap is
+read (`readGaps`, called on every drain and every chunk): the misplaced buffered samples are
+masked and the silence inserted immediately. `rust-run.ts` keeps `CARRIER_LOG_GAPS + 1` startup
+notices, enough to trigger the same fail-closed state. Tests: 16 and 17 gaps for the masks, the
+output offset and the fed audio; 16 and 17 startup notices; the late notice with metrics
+draining before the next chunk.

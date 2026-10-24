@@ -6,6 +6,7 @@ import {
 	ANALOG_TRANSMISSION_CARRIER_RUN_BLOCKS,
 	AnalogTransmissionTracker,
 	CARRIER_LOG_CAPACITY,
+	CARRIER_LOG_GAPS,
 	CARRIER_PCM_RING_MS,
 	CarrierBlockLog,
 } from "../../../src/core/analog-transmission.js"
@@ -486,6 +487,109 @@ describe("WG10 req 3.8 review fixes", () => {
 		const want: number[] = []
 		for (let v = 0; v < 24_000; v++) if (v < 8000 || v >= 9600) want.push(v + 1)
 		expect(pushed).toEqual(want)
+	})
+
+	it("a late notice masks buffered early samples before later metrics drain them", () => {
+		const pushed = gapRun(
+			[
+				["notes", 100],
+				["pcm", 10_400],
+				["event"],
+				["notes", 300],
+				["pcm", 24_000],
+			],
+			8000,
+			800,
+			"queue-overflow",
+		)
+		expect(pushed.filter(v => v >= 9601 && v <= 10_400)).toHaveLength(0)
+		expect(pushed.filter(x => x === 0)).toHaveLength(0)
+	})
+
+	it.each([CARRIER_LOG_GAPS, CARRIER_LOG_GAPS + 1])(
+		"%i gaps: masks are kept up to the cap, past it the run fails closed",
+		gaps => {
+			const log = new CarrierBlockLog()
+			const run = {}
+			for (let k = 0; k < gaps; k++)
+				log.noteDiscontinuity(run, RATE, k * 160, 80, "queue-overflow")
+			log.note(run, RATE, true, true, 0)
+			log.note(run, RATE, true, true, 1)
+			// Block 0 is the first gap; block 1 lies between gaps (open and carried unless failed closed).
+			expect(log.flags[0]).toBe(0)
+			expect(log.flags[1]).toBe(gaps > CARRIER_LOG_GAPS ? 0 : 3)
+			expect(log.desynced).toBe(gaps > CARRIER_LOG_GAPS)
+			expect(log.droppedTotal).toBe(gaps * 80)
+		},
+	)
+
+	it.each([CARRIER_LOG_GAPS, CARRIER_LOG_GAPS + 1])(
+		"%i gaps keep the output offset exact; past the cap nothing is fed",
+		gaps => {
+			const source = new CarrierSource()
+			const run = {}
+			let now = T0
+			const pushed: number[] = []
+			const tracker = new AnalogTransmissionTracker({
+				source,
+				frequencyAt: () => ({ hz: 446_068_750, tuningTrust: "commanded" }),
+				now: () => now,
+				setTimer: () => () => undefined,
+				createToneDetector: () => ({
+					push(pcm) {
+						for (let i = 0; i + 4 <= pcm.length; i += 4)
+							pushed.push(pcm.readFloatLE(i))
+					},
+					result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
+					reset() {},
+				}),
+			})
+			tracker.start()
+			source.gate(true)
+			source.log.note(run, RATE, false, false, 0)
+			for (let k = 0; k < gaps; k++)
+				source.log.noteDiscontinuity(
+					run,
+					RATE,
+					80 + k * 160,
+					80,
+					"queue-overflow",
+				)
+			const socket = 1600
+			const pcm = Buffer.alloc(socket * 4, 0)
+			for (let i = 0; i < socket; i++) pcm.writeFloatLE(1, i * 4)
+			source.log.notePcm(run, RATE, pcm.length)
+			source.emit("pcm", pcm, { rate: RATE, format: "f32le" })
+			for (let k = 1; k < 200; k++) {
+				now += 10
+				source.log.note(run, RATE, true, true, k)
+			}
+			const end = (tracker as unknown as { pcmEnd: number }).pcmEnd
+			expect(end).toBe((socket + gaps * 80) * 4)
+			expect(tracker.desyncedRuns()).toBe(gaps > CARRIER_LOG_GAPS ? 1 : 0)
+			tracker.stop()
+			if (gaps > CARRIER_LOG_GAPS) expect(pushed).toEqual([])
+			else expect(pushed.length).toBeGreaterThan(0)
+		},
+	)
+
+	it("voice-like harmonics from 65 Hz up never look like STE", () => {
+		for (const f of [65, 70, 80, 90, 100, 120]) {
+			const s = emptyScript()
+			addBlocks(
+				s,
+				200,
+				true,
+				true,
+				i =>
+					0.3 * Math.sin((2 * Math.PI * f * i) / RATE) +
+					0.15 * Math.sin((4 * Math.PI * f * i) / RATE) +
+					0.08 * Math.sin((6 * Math.PI * f * i) / RATE),
+			)
+			addBlocks(s, 200, false, false, () => 0)
+			const { pushed } = runScript(s, { format: "f32le", recordPushes: true })
+			expect(pushed.length).toBe(16_000)
+		}
 	})
 
 	it.each(["input-gap", "some-future-cause"])(

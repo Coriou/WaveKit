@@ -126,3 +126,7 @@ Follow-up 2026-10-24:
       (`rust-protocol.ts`, `rust-engine.ts`), window-only STE skip (`steDecide`); the review's
       repro cases ported into `tests/unit/core/analog-transmission-carrier.test.ts`.
   - _Requirements: 3.8.1, 3.8.13_
+- [x] A1.9 Review round 2: immediate late-gap masking (`readGaps`), fail-closed desynchronized
+      run past `CARRIER_LOG_GAPS` (`CarrierBlockLog.desynced`, `droppedTotal`, tracker
+      `enterDesync`, `desyncedRuns()`), startup notice cap (`rust-run.ts`); tests at 16 and 17.
+  - _Requirements: 3.8.1_

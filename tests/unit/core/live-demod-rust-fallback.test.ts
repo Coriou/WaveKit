@@ -548,6 +548,29 @@ describe("live demod rust fallback and retune", () => {
 		},
 	)
 
+	it.each([16, 17])(
+		"%i startup discontinuities: all reach the block log, past its cap it fails closed (WG10 req 3.8.1)",
+		async count => {
+			const lines: string[] = []
+			for (let k = 0; k < count; k++)
+				lines.push(
+					JSON.stringify(
+						demodEvent("discontinuity", {
+							sampleIndex: 480 * k,
+							droppedSamples: 10,
+							cause: "queue-overflow",
+						}),
+					),
+				)
+			openedChunkSuffix = `${lines.join("\n")}\n`
+			await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+			const log = demod?.carrierBlockLog()
+			expect(log?.gapCount).toBe(count)
+			expect(log?.droppedTotal).toBe(count * 10)
+			expect(log?.desynced).toBe(count > 16)
+		},
+	)
+
 	it("does not seed the auto floor from a quieted carrier and sends the floor", async () => {
 		await boot({ squelchMode: "auto", autoMarginDb: 6, modulation: "nfm" })
 		expect(demod?.carrierBlocks()).toBe(0)

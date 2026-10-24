@@ -14,6 +14,7 @@ import type { SourceCaps } from "../../config.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import type { Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { CARRIER_LOG_GAPS } from "../analog-transmission.js"
 import { ChannelSquelch } from "../channel-squelch.js"
 import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
@@ -392,7 +393,8 @@ export class RustLiveRun {
 					},
 					onDiscontinuity: (sampleIndex, dropped, cause) => {
 						if (!live) {
-							if (startup.discontinuities.length < 16)
+							// One past the block log's cap is enough: the log then fails closed.
+							if (startup.discontinuities.length <= CARRIER_LOG_GAPS)
 								startup.discontinuities.push({ sampleIndex, dropped, cause })
 							return
 						}
@@ -660,7 +662,7 @@ export class RustLiveRun {
 	private applyStartup(run: PipelineRun, startup: StartupBuffer): void {
 		if (startup.gate !== null) this.onGate(run, startup.gate)
 		// Discontinuities first: they mask their blocks before the startup metrics log them.
-		for (const gap of startup.discontinuities.splice(0, 16))
+		for (const gap of startup.discontinuities)
 			this.host.noteDiscontinuity(run, gap.sampleIndex, gap.dropped, gap.cause)
 		startup.discontinuities.length = 0
 		for (const sample of startup.metrics)
