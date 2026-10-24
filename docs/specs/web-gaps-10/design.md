@@ -513,3 +513,36 @@ alone.
     a 10-block run publishes nothing. _Validates 3.8.2-3.8.6._
 14. **Tone hears only carrier.** For the same scripts with PCM split at random byte offsets, the
     samples pushed to the detector are exactly those of fed blocks, in order. _Validates 3.8.7._
+
+### Follow-up 2026-10-24: retune hold, pending snapshots, discontinuities, STE
+
+- **Retune hold.** `measureRun` logs `gateOpen && !run.gateHeld && !run.stopping`: per-block
+  native gate state cannot open a block the host holds closed (a retune before its `retuned`).
+- **Pending snapshot across a merge.** `startSpan` no longer forces the previous span's snapshot:
+  it closes only that span's gap books, resumes with a split detector whose reference tone is
+  pending, and `drainPcm` settles the snapshot exactly when the PCM through the previous span's
+  last carrier block is consumed, before any later block reaches the main detector (cap 50
+  blocks).
+- **Discontinuities.** `rust-protocol.ts` parses `discontinuity` (`sampleIndex`, `droppedSamples`
+  positive safe integers, `cause` a short lower-case token; anything else is dropped as a bad
+  line and never logged). The engine forwards it, `rust-run.ts` (startup: at most 16 buffered)
+  passes it to the host, and `CarrierBlockLog.noteDiscontinuity` advances `pcmBytes` by the
+  dropped samples and masks blocks `[sampleIndex / 480, (current position + dropped) / 480)`
+  (at most 8 masks). The tracker fills the position gap with silence that is never fed. Residual:
+  blocks the tracker already decided before the event arrives keep their decision.
+- **STE (3.8.13).** Chosen: end the tone window at STE onset by a one-window hold-back, rather
+  than excluding STE blocks from the CTCSS continuity denominator, which would need a change
+  inside the shared CTCSS bank. The tracker runs one 55 Hz Goertzel over each 200 ms window of
+  transmission-detector audio (`CARRIER_STE_WINDOW_MS`; 200 ms is 11 whole cycles of 55 Hz, so
+  DC and the bin are orthogonal; 67 Hz lies 2.4 bins away and leaks about
+  (sin(2.4 π) / (2.4 π))² ≈ 1.6 % of its power, far under `CARRIER_STE_FRACTION` 0.5). A window
+  is STE when `2 |X|² / (N E) ≥ 0.5`; it and the rest of the span are not fed. A partial window
+  under half a window is never judged STE. Minimum: CTCSS needs 0.75 s of fed tone (two agreeing
+  500 ms blocks); at worst the onset window, up to 200 ms of tone, is dropped with the tail, so
+  0.75 + 0.2 = 0.95 s of CTCSS before the tail is guaranteed. Tests: 1.2 s and 0.95 s report
+  79.7 Hz with a tail six times the CTCSS amplitude (0.95 s fails without the hold-back), 0.7 s
+  reports none; 55 Hz alone for 0.6 s and 3 s reports none; 67.0 Hz for 3 s and 1.2 s plus a tail
+  reports 67.0. Measured: with a moderate tail (twice the CTCSS amplitude) 1.2 s already reported
+  the tone before this change; the earlier 1.85 s bound was pessimistic. Cost: per fed sample one
+  Goertzel step, one square and one copy into the preallocated window (allocated once per PCM
+  format); the tone results arrive up to 200 ms later.

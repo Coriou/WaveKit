@@ -117,6 +117,12 @@ export interface RustRunHost {
 	publishSquelchChange(): void
 	handleRunFailure(run: PipelineRun, reason: string): void
 	measureRun(run: PipelineRun, sample: RustPowerSample): void
+	/** WG10 req 3.8.1: native dropped output samples (the block log keeps positions). */
+	noteDiscontinuity(
+		run: PipelineRun,
+		sampleIndex: number,
+		droppedSamples: number,
+	): void
 	resetFloorForRetune(run: PipelineRun): void
 	clearCloseOverride(): void
 	/**
@@ -345,7 +351,11 @@ export class RustLiveRun {
 			clock: this.host.clock,
 		})
 		const slot: { run: PipelineRun | null } = { run: null }
-		const startup: StartupBuffer = { gate: null, metrics: [] }
+		const startup: StartupBuffer = {
+			gate: null,
+			metrics: [],
+			discontinuities: [],
+		}
 		let live = false
 		const epoch = this.startEpoch
 		this.starting = engine
@@ -378,6 +388,16 @@ export class RustLiveRun {
 						if (!live) return
 						const current = slot.run
 						if (current) this.onRetuned(current)
+					},
+					onDiscontinuity: (sampleIndex, dropped) => {
+						if (!live) {
+							if (startup.discontinuities.length < 16)
+								startup.discontinuities.push({ sampleIndex, dropped })
+							return
+						}
+						const current = slot.run
+						if (current)
+							this.host.noteDiscontinuity(current, sampleIndex, dropped)
 					},
 					onRejected: reasonCode => {
 						const current = slot.run
@@ -647,6 +667,9 @@ export class RustLiveRun {
 				sample.gates,
 			)
 		startup.metrics.length = 0
+		for (const gap of startup.discontinuities.splice(0, 16))
+			this.host.noteDiscontinuity(run, gap.sampleIndex, gap.dropped)
+		startup.discontinuities.length = 0
 	}
 
 	private onMetrics(
@@ -733,6 +756,7 @@ export class RustLiveRun {
 
 interface StartupBuffer {
 	gate: boolean | null
+	discontinuities: Array<{ sampleIndex: number; dropped: number }>
 	metrics: Array<{
 		power: Array<number | null>
 		quieting: Array<number | null>

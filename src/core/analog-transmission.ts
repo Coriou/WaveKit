@@ -84,6 +84,10 @@ export const CARRIER_LOG_CAPACITY = 2048
 export const CARRIER_PCM_RING_MS = 2000
 /** WG10 req 3.8.7: longest wait of a span-end tone snapshot for its PCM (500 ms). */
 export const CARRIER_SNAPSHOT_WAIT_BLOCKS = 50
+/** WG10 req 3.8.13: squelch tail elimination tone, analysis window and dominance. */
+export const CARRIER_STE_HZ = 55
+export const CARRIER_STE_WINDOW_MS = 200
+export const CARRIER_STE_FRACTION = 0.5
 export const CARRIER_FLAG_OPEN = 1
 export const CARRIER_FLAG_CARRIED = 2
 
@@ -106,6 +110,8 @@ export class CarrierBlockLog {
 	/** Called after every noted block (the tracker consumes it at once). */
 	onBlock: (() => void) | null = null
 	private owner: object | null = null
+	/** Block ranges [from, to) of native discontinuities: never open or carried. */
+	private readonly masks: number[] = []
 
 	/**
 	 * `index` (block position in the run, when the engine reports one): blocks never reported
@@ -128,8 +134,9 @@ export class CarrierBlockLog {
 				this.flags[(index - fill + i) % CARRIER_LOG_CAPACITY] = 0
 			this.blocks = index
 		}
-		this.flags[this.blocks % CARRIER_LOG_CAPACITY] =
-			(open ? CARRIER_FLAG_OPEN : 0) | (carried ? CARRIER_FLAG_CARRIED : 0)
+		this.flags[this.blocks % CARRIER_LOG_CAPACITY] = this.masked(this.blocks)
+			? 0
+			: (open ? CARRIER_FLAG_OPEN : 0) | (carried ? CARRIER_FLAG_CARRIED : 0)
 		this.blocks += 1
 		const listener = this.onBlock
 		if (listener === null) return
@@ -145,12 +152,48 @@ export class CarrierBlockLog {
 		this.pcmBytes += bytes
 	}
 
+	/**
+	 * WG10 req 3.8.1: native dropped `dropped` output samples from `sampleIndex` (a full queue).
+	 * The PCM position skips them, so later socket bytes keep their sample positions, and every
+	 * block from the drop to the current position plus the gap counts as closed and uncarried
+	 * (bytes that arrived before this event may sit up to `dropped` samples early).
+	 */
+	noteDiscontinuity(
+		run: object,
+		rate: number,
+		sampleIndex: number,
+		dropped: number,
+		width: number,
+	): void {
+		this.sync(run, rate)
+		if (!(dropped > 0) || !(width > 0)) return
+		const nowSample = Math.floor(this.pcmBytes / width)
+		this.pcmBytes += dropped * width
+		const from = Math.floor(sampleIndex / this.blockSamples)
+		const to = Math.ceil(
+			(Math.max(nowSample, sampleIndex) + dropped) / this.blockSamples,
+		)
+		const first = Math.max(from, this.blocks - CARRIER_LOG_CAPACITY)
+		for (let k = first; k < Math.min(to, this.blocks); k++)
+			this.flags[k % CARRIER_LOG_CAPACITY] = 0
+		this.masks.push(from, to)
+		if (this.masks.length > 16) this.masks.splice(0, 2)
+	}
+
+	private masked(block: number): boolean {
+		for (let i = 0; i + 1 < this.masks.length; i += 2)
+			if (block >= (this.masks[i] ?? 0) && block < (this.masks[i + 1] ?? 0))
+				return true
+		return false
+	}
+
 	private sync(run: object, rate: number): void {
 		if (run === this.owner) return
 		this.owner = run
 		this.epoch += 1
 		this.blocks = 0
 		this.pcmBytes = 0
+		this.masks.length = 0
 		const r = Number.isFinite(rate) && rate > 0 ? rate : 1
 		// Same rounding as ChannelSquelch (10 ms blocks).
 		this.blockSamples = Math.max(1, Math.round((r * 10) / 1000))
@@ -316,12 +359,19 @@ interface OpenTransmission {
 	 * block (3.8.7); null when settled.
 	 */
 	snapshotDueBlock: number | null
+	/** A span merged while the previous span's snapshot was pending (its split waits for it). */
+	snapshotResumed: boolean
+	/** WG10 req 3.8.13: this span reached its squelch tail; no more detector audio. */
+	steSeen: boolean
 }
 
 /** The held part of a transmission while a resumed segment may split off (WG10 R2). */
 interface SegmentSplit {
-	/** The transmission's tone at the last segment end: the held part's tone on a split. */
-	heldTone: AnalogTransmissionTone
+	/**
+	 * The transmission's tone at the last segment end: the held part's tone on a split. Null
+	 * while that span's PCM is still arriving (3.8.7); no split decision until it is known.
+	 */
+	heldTone: AnalogTransmissionTone | null
 	heldGapEndMs: number
 	heldAudioMs: number
 	heldBestSegmentCarrier: number
@@ -486,6 +536,16 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** Epoch byte position after the last accepted chunk. */
 	private pcmEnd = 0
 	private hookedLog: CarrierBlockLog | null = null
+	// WG10 req 3.8.13: one held window of transmission-detector audio and its 55 Hz Goertzel.
+	private steBuf: Buffer | null = null
+	private steLen = 0
+	private steRate = 0
+	private steWidth = 0
+	private steCoeff = 0
+	private steS1 = 0
+	private steS2 = 0
+	private steEnergy = 0
+	private steOwner: OpenTransmission | null = null
 	/** Block after the last carried block of the open span. */
 	private spanEndBlock = 0
 	/** PCM bytes dropped unfed (ring overflow or resync), since construction. */
@@ -842,6 +902,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			spanEndMs: carrier?.endMs ?? now,
 			feedFromBlock: carrier?.startBlock ?? 0,
 			snapshotDueBlock: null,
+			snapshotResumed: false,
+			steSeen: false,
 		}
 		// WG10 req 3.8.6: on the carrier path the span rule implies the 3.7 carrier rule.
 		const base = carrier === null ? this.readCarrierBlocks() : null
@@ -962,7 +1024,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		return !this.frequencyDrifted(open)
 	}
 
-	private resumeSegment(open: OpenTransmission, now: number): void {
+	private resumeSegment(
+		open: OpenTransmission,
+		now: number,
+		tonePending = false,
+	): void {
 		this.cancelGapTimer(open)
 		open.segmentOpen = true
 		open.segmentStartMs = now
@@ -970,8 +1036,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		if (open.carrierRequired)
 			open.carrierBase = this.readCarrierBlocks() ?? open.carrierBase
 		open.split = null
-		const heldTone = open.segmentEndTone
-		if (heldTone !== null && toneKeys(heldTone).length > 0) {
+		const heldTone = tonePending ? null : open.segmentEndTone
+		if (tonePending || (heldTone !== null && toneKeys(heldTone).length > 0)) {
 			const detector = this.makeSegmentDetector()
 			if (detector !== null)
 				open.split = {
@@ -1005,8 +1071,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		if (split === null || this.transmission !== open || !open.segmentOpen)
 			return
 		const segmentTone = gatedTone(split.detector, split.audioSeconds)
-		if (segmentTone === null || !tonesDiffer(split.heldTone, segmentTone))
-			return
+		const heldTone = split.heldTone
+		if (heldTone === null) return
+		if (segmentTone === null || !tonesDiffer(heldTone, segmentTone)) return
+		this.steFlush(open)
 		const held: OpenTransmission = {
 			...open,
 			segmentOpen: false,
@@ -1041,7 +1109,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			feedFromBlock: split.feedFromBlock,
 		}
 		this.transmission = next
-		this.finalise(held, "squelch", split.heldGapEndMs, split.heldTone)
+		this.finalise(held, "squelch", split.heldGapEndMs, heldTone)
 		if (this.transmission === next) this.announceIfQualified(next, now)
 	}
 
@@ -1193,23 +1261,44 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.carrierCursor - due < CARRIER_SNAPSHOT_WAIT_BLOCKS
 		)
 			return
-		// The segment ends now, once its PCM is in: until here it stayed open for a tone split.
 		open.snapshotDueBlock = null
-		open.segmentOpen = false
-		open.gapEndMs = open.spanEndMs
-		open.audioMs += Math.max(0, open.spanEndMs - open.segmentStartMs)
+		if (open.snapshotResumed) {
+			// A later span already merged: its split detector now learns the earlier tone. The
+			// main detector holds exactly the earlier span's audio when settled on time.
+			open.snapshotResumed = false
+			const tone = this.snapshotTone(open)
+			open.segmentEndTone = tone
+			const split = open.split
+			if (split !== null) {
+				if (tone === null || toneKeys(tone).length === 0) open.split = null
+				else split.heldTone = tone
+			}
+			return
+		}
+		// The segment ends now, once its PCM is in: until here it stayed open for a tone split.
+		if (open.segmentOpen) this.closeSegmentBooks(open)
 		open.segmentEndTone = this.snapshotTone(open)
 		open.split = null
 	}
 
+	/** Gap bookkeeping of a span end (the snapshot may still wait for its PCM). */
+	private closeSegmentBooks(open: OpenTransmission): void {
+		open.segmentOpen = false
+		open.gapEndMs = open.spanEndMs
+		open.audioMs += Math.max(0, open.spanEndMs - open.segmentStartMs)
+	}
+
 	/** A span qualified: merge into the held transmission or open a new one at its start. */
 	private startSpan(startBlock: number, endMs: number): void {
-		this.settleSnapshot(true)
 		this.inSpan = true
 		this.uncarried = 0
 		const startMs = this.blockTime(startBlock)
 		const held = this.transmission
 		if (held !== null) {
+			// The previous span's snapshot keeps waiting for its PCM (3.8.7); only its gap books close.
+			if (held.snapshotResumed) this.settleSnapshot(true)
+			if (held.snapshotDueBlock !== null && held.segmentOpen)
+				this.closeSegmentBooks(held)
 			if (
 				held.carrierSpans &&
 				!held.segmentOpen &&
@@ -1217,9 +1306,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				this.canMerge(held, startMs)
 			) {
 				held.spanEndMs = endMs
-				this.settleSnapshot(true)
-				this.resumeSegment(held, startMs)
+				held.steSeen = false
+				const pending = held.snapshotDueBlock !== null
+				this.resumeSegment(held, startMs, pending)
 				if (held.split !== null) held.split.feedFromBlock = startBlock
+				held.snapshotResumed = pending
+				if (pending) this.settleSnapshot(false)
 				return
 			}
 			this.close("squelch", startMs)
@@ -1243,6 +1335,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.uncarried = 0
 		const open = this.transmission
 		if (open === null || !open.carrierSpans || !open.segmentOpen) return
+		if (open.snapshotResumed) this.settleSnapshot(true)
 		// The span's last PCM may still be on its way: the segment stays open (for a tone split)
 		// until its PCM through the last carrier block is consumed, bounded (3.8.7).
 		open.snapshotDueBlock = this.spanEndBlock
@@ -1310,6 +1403,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.pcmLen = 0
 		}
 		const start = log.pcmBytes - chunk.length
+		const ringBytes = this.pcmRing?.length ?? 0
+		if (start > this.pcmEnd && start - this.pcmEnd <= ringBytes) {
+			// Samples native dropped (a discontinuity): keep positions with silence.
+			this.appendPcm(null, start - this.pcmEnd)
+			this.pcmEnd = start
+		}
 		if (start !== this.pcmEnd) {
 			// Not counted by the log (not this run's audio): ignore it.
 			if (log.pcmBytes === this.pcmEnd) return
@@ -1320,7 +1419,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.pcmLen = 0
 		}
 		this.pcmEnd = log.pcmBytes
-		this.appendPcm(chunk)
+		this.appendPcm(chunk, chunk.length)
 		this.drainCarrier()
 	}
 
@@ -1328,7 +1427,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	 * Appends a chunk; on overflow the oldest whole samples leave unfed (counted in
 	 * `droppedPcm()`), so the ring head stays on a sample boundary (3.8.7).
 	 */
-	private appendPcm(chunk: Buffer): void {
+	private appendPcm(chunk: Buffer | null, length: number): void {
 		const ring = this.pcmRing
 		if (ring === null) return
 		const cap = ring.length
@@ -1336,12 +1435,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		let from = 0
 		if (this.pcmLen === 0 && this.pcmHead % width !== 0) {
 			// After a resync the head may sit inside a sample: skip to the next boundary.
-			const skip = Math.min(chunk.length, width - (this.pcmHead % width))
+			const skip = Math.min(length, width - (this.pcmHead % width))
 			from = skip
 			this.pcmHead += skip
 			this.droppedPcmBytes += skip
 		}
-		const total = this.pcmLen + chunk.length - from
+		const total = this.pcmLen + length - from
 		if (total > cap) {
 			const start = this.pcmHead + this.pcmLen
 			const head = Math.ceil((this.pcmHead + total - cap) / width) * width
@@ -1358,12 +1457,18 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				this.pcmLen -= drop
 			}
 		}
-		const n = chunk.length - from
+		const n = length - from
 		if (n <= 0) return
 		const write = (this.pcmHeadOff + this.pcmLen) % cap
 		const first = Math.min(n, cap - write)
-		chunk.copy(ring, write, from, from + first)
-		if (first < n) chunk.copy(ring, 0, from + first, chunk.length)
+		if (chunk === null) {
+			// A native gap (discontinuity): silence that is never fed (its blocks are not carried).
+			ring.fill(0, write, write + first)
+			if (first < n) ring.fill(0, 0, n - first)
+		} else {
+			chunk.copy(ring, write, from, from + first)
+			if (first < n) chunk.copy(ring, 0, from + first, length)
+		}
 		this.pcmLen += n
 	}
 
@@ -1384,6 +1489,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			const held = this.pcmLen - ((this.pcmHead + this.pcmLen) % width)
 			const n = Math.min(held, (block + 1) * blockBytes - this.pcmHead)
 			if (n <= 0) return
+			// A pending span-end snapshot settles exactly when its PCM is consumed, before any
+			// later block reaches the detector.
+			const due = this.transmission?.snapshotDueBlock ?? null
+			if (due !== null && block >= due) this.settleSnapshot(false)
 			if (
 				block >= oldest &&
 				this.decisions[block % CARRIER_LOG_CAPACITY] === FEED
@@ -1417,16 +1526,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		piece: Buffer,
 		format: TonePcmFormat,
 	): void {
-		if (block >= open.feedFromBlock) {
-			this.noteAudio(open, piece, format)
-			try {
-				open.detector.push(piece, format)
-			} catch {
-				this.toneErrorCount += 1
-				this.toneBroken = true
-				return
-			}
-		}
+		if (block >= open.feedFromBlock) this.steFeed(open, piece, format)
+		if (this.toneBroken) return
 		const split = open.split
 		if (split === null || block < split.feedFromBlock) return
 		this.noteAudio(split, piece, format)
@@ -1434,6 +1535,107 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			split.detector.push(piece, format)
 		} catch {
 			open.split = null
+		}
+	}
+
+	/**
+	 * WG10 req 3.8.13 (STE): the transmission detector hears its audio one
+	 * `CARRIER_STE_WINDOW_MS` window late. A window whose power is mostly 55 Hz
+	 * (`CARRIER_STE_FRACTION`) is a squelch tail: it and the rest of the span are never fed.
+	 */
+	private steFeed(
+		open: OpenTransmission,
+		piece: Buffer,
+		format: TonePcmFormat,
+	): void {
+		if (open.steSeen) return
+		const width = format.format === "s16le" ? 2 : 4
+		if (
+			this.steOwner !== open ||
+			this.steRate !== format.rate ||
+			this.steWidth !== width
+		)
+			this.steReset(open, format, width)
+		const buf = this.steBuf
+		if (buf === null) return
+		const coeff = this.steCoeff
+		for (let at = 0; at + width <= piece.length; at += width) {
+			const x =
+				width === 2 ? piece.readInt16LE(at) / 32_768 : piece.readFloatLE(at)
+			const s0 = x + coeff * this.steS1 - this.steS2
+			this.steS2 = this.steS1
+			this.steS1 = s0
+			this.steEnergy += x * x
+			piece.copy(buf, this.steLen, at, at + width)
+			this.steLen += width
+			if (this.steLen === buf.length) {
+				this.steDecide(open, format)
+				if (open.steSeen || this.toneBroken) return
+			}
+		}
+	}
+
+	/** Pushes the held window to the detector, or drops it (and the span's rest) as STE. */
+	private steDecide(open: OpenTransmission, format: TonePcmFormat): void {
+		const buf = this.steBuf
+		const bytes = this.steLen
+		const samples = bytes / Math.max(1, this.steWidth)
+		const power =
+			this.steS1 * this.steS1 +
+			this.steS2 * this.steS2 -
+			this.steCoeff * this.steS1 * this.steS2
+		const energy = this.steEnergy
+		this.steLen = 0
+		this.steS1 = 0
+		this.steS2 = 0
+		this.steEnergy = 0
+		if (buf === null || bytes === 0) return
+		// A partial window shorter than half (under 5.5 cycles of 55 Hz) is never judged STE.
+		const full = Math.max(1, buf === null ? 1 : buf.length / this.steWidth)
+		if (
+			samples * 2 >= full &&
+			energy > 1e-9 &&
+			(2 * power) / (samples * energy) >= CARRIER_STE_FRACTION
+		) {
+			open.steSeen = true
+			return
+		}
+		const piece = buf.subarray(0, bytes)
+		this.noteAudio(open, piece, format)
+		try {
+			open.detector.push(piece, format)
+		} catch {
+			this.toneErrorCount += 1
+			this.toneBroken = true
+		}
+	}
+
+	/** Decides a partial window before a tone is read. */
+	private steFlush(open: OpenTransmission): void {
+		const format = this.pcmFormat
+		if (this.steOwner !== open || format === null) return
+		this.steDecide(open, format)
+	}
+
+	private steReset(
+		open: OpenTransmission,
+		format: TonePcmFormat,
+		width: number,
+	): void {
+		this.steOwner = open
+		this.steLen = 0
+		this.steS1 = 0
+		this.steS2 = 0
+		this.steEnergy = 0
+		if (this.steRate !== format.rate || this.steWidth !== width) {
+			const samples = Math.max(
+				1,
+				Math.round((format.rate * CARRIER_STE_WINDOW_MS) / 1000),
+			)
+			this.steBuf = Buffer.alloc(samples * width)
+			this.steRate = format.rate
+			this.steWidth = width
+			this.steCoeff = 2 * Math.cos((2 * Math.PI * CARRIER_STE_HZ) / format.rate)
 		}
 	}
 
@@ -1692,6 +1894,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private finishTone(open: OpenTransmission): AnalogTransmissionTone {
+		this.steFlush(open)
 		if (this.toneBroken) return { ctcssHz: null, dtmf: null, dcs: null }
 		try {
 			return gateTone(open.detector.result(), open.audioSeconds)
@@ -1703,6 +1906,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	/** The transmission's tone at a segment end (split reference); a failure is no tone. */
 	private snapshotTone(open: OpenTransmission): AnalogTransmissionTone | null {
+		this.steFlush(open)
 		if (this.toneBroken) return null
 		return gatedTone(open.detector, open.audioSeconds)
 	}

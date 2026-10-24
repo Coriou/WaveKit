@@ -104,6 +104,19 @@ const MetricsEventSchema = z
 	})
 	.strict()
 
+/** WG10 req 3.8.1: native dropped output samples (a full audio queue). */
+const DiscontinuityEventSchema = z
+	.object({
+		v,
+		type: z.literal("discontinuity"),
+		id,
+		generation,
+		sampleIndex: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+		droppedSamples: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+		cause: z.string().regex(/^[a-z][a-z-]{0,31}$/),
+	})
+	.strict()
+
 const ClosedEventSchema = z
 	.object({
 		v,
@@ -131,6 +144,7 @@ export const DemodEventSchema = z.discriminatedUnion("type", [
 	RetunedEventSchema,
 	GateEventSchema,
 	MetricsEventSchema,
+	DiscontinuityEventSchema,
 	ClosedEventSchema,
 	InputEofEventSchema,
 ])

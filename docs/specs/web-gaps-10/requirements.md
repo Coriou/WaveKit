@@ -336,3 +336,18 @@ a latest-value snapshot, so batched, delayed or split delivery gives the same re
   0.4 s is under the 1500 ms merge gap and never splits an over. The 55 Hz tail never becomes a
   CTCSS tone, and a 120° or 180° CTCSS phase reversal at PTT release (the other STE form) still
   ends at the carrier drop and costs at most the analysis blocks that hold it (design bound).
+
+Follow-up 2026-10-24 (3.8 hardening):
+
+- 3.8.1 also: a block measured while the host holds the gate (unacknowledged retune, offset swap)
+  or while the run stops is logged closed, whatever native reports; a native `discontinuity`
+  (dropped output samples) advances the PCM position by the dropped samples and logs the blocks
+  from the drop to the current position as closed and uncarried.
+- 3.8.7 also: a span that merges while the previous span's snapshot still waits for its PCM keeps
+  that snapshot and the split detector pending (within the 500 ms cap); the split reference is
+  set when that PCM is consumed.
+- 3.8.13 **STE excluded from tone qualification.** The transmission's tone detector hears its
+  audio one 200 ms window late; a window whose power is at least half 55 Hz (a squelch tail) is
+  dropped with the rest of the span, so the tail never enters CTCSS, DCS or DTMF votes. A tone is
+  guaranteed with at least 0.95 s of CTCSS before the tail (design); 55 Hz alone never reports a
+  CTCSS tone, and 67.0 Hz is not taken for STE.

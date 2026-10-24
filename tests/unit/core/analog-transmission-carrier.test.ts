@@ -262,6 +262,41 @@ describe("WG10 req 3.8.12 squelch tail elimination", () => {
 		expect(rows[0]?.tone?.ctcssHz).toBe(79.7)
 	})
 
+	it.each([
+		[1200, 79.7],
+		[950, 79.7],
+		[700, null],
+	])(
+		"a short over: %i ms of CTCSS then a loud 0.4 s 55 Hz tail reports %s (STE is never fed)",
+		(ms, expected) => {
+			const s = emptyScript()
+			addBlocks(s, 50, false, false, noise(401, 0.3))
+			const start = s.open.length
+			// A tail six times the CTCSS amplitude: fed to the detector it spoils the last votes.
+			over(s, ms, tone(79.7, 0.1))
+			over(s, 400, tone(55, 0.6))
+			const end = s.open.length
+			addBlocks(s, 200, false, false, noise(402, 0.3))
+			const { rows } = runScript(s, { delivery: "split" })
+			expect(rows).toHaveLength(ms + 400 >= 500 ? 1 : 0)
+			expect(rows[0]?.durationMs).toBe((end - start) * 10)
+			expect(rows[0]?.tone?.ctcssHz ?? null).toBe(expected)
+		},
+	)
+
+	it.each([3000, 1200])(
+		"a genuine 67.0 Hz tone for %i ms is not mistaken for STE",
+		ms => {
+			const s = emptyScript()
+			addBlocks(s, 50, false, false, noise(411, 0.3))
+			over(s, ms, tone(67))
+			over(s, 400, tone(55, 0.3))
+			addBlocks(s, 200, false, false, noise(412, 0.3))
+			const { rows } = runScript(s)
+			expect(rows[0]?.tone?.ctcssHz).toBe(67)
+		},
+	)
+
 	it.each([600, 3000])(
 		"a carrier with only a 55 Hz tone for %i ms reports no CTCSS",
 		ms => {
@@ -359,6 +394,17 @@ describe("WG10 req 3.8 review fixes", () => {
 		expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7, 88.5])
 	})
 
+	it("delayed PCM: a span merging 100 ms after a 900 ms over keeps the earlier tone pending", () => {
+		const s = emptyScript()
+		addBlocks(s, 50, false, false, noise(341, 0.3))
+		over(s, 900, tone(79.7))
+		addBlocks(s, 10, false, false, noise(342, 0.3))
+		over(s, 2000, tone(88.5))
+		addBlocks(s, 300, false, false, noise(343, 0.3))
+		const { rows } = runScript(s, { pcmLagBlocks: 40 })
+		expect(rows.map(r => r.tone?.ctcssHz ?? null)).toEqual([79.7, 88.5])
+	})
+
 	it("delayed PCM is still fed before finalisation", () => {
 		const s = emptyScript()
 		addBlocks(s, 50, false, false, noise(321, 0.3))
@@ -367,6 +413,61 @@ describe("WG10 req 3.8 review fixes", () => {
 		const { rows } = runScript(s, { pcmLagBlocks: 40 })
 		expect(rows).toHaveLength(1)
 		expect(rows[0]?.tone?.ctcssHz).toBe(79.7)
+	})
+
+	it("a native discontinuity keeps sample positions: the gap is never fed", () => {
+		const source = new CarrierSource()
+		const run = {}
+		const pushed: number[] = []
+		let now = T0
+		const tracker = new AnalogTransmissionTracker({
+			source,
+			frequencyAt: () => ({ hz: 446_068_750, tuningTrust: "commanded" }),
+			now: () => now,
+			setTimer: () => () => undefined,
+			createToneDetector: () => ({
+				push(pcm) {
+					for (let i = 0; i + 4 <= pcm.length; i += 4)
+						pushed.push(pcm.readFloatLE(i))
+				},
+				result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
+				reset() {},
+			}),
+		})
+		tracker.start()
+		source.gate(true)
+		const blocks = 300
+		const gapFrom = 8000
+		const gapSamples = 800
+		for (let k = 0; k < blocks; k++) {
+			now += 10
+			// Native reports the drop before the metrics of the dropped blocks arrive.
+			if (k === 100)
+				source.log.noteDiscontinuity(run, RATE, gapFrom, gapSamples, 4)
+			source.log.note(run, RATE, true, true, k)
+			const pcm = Buffer.alloc(80 * 4)
+			let n = 0
+			for (let i = 0; i < 80; i++) {
+				const sample = k * 80 + i
+				if (sample >= gapFrom && sample < gapFrom + gapSamples) continue
+				pcm.writeFloatLE(sample, n * 4)
+				n += 1
+			}
+			if (n === 0) continue
+			const chunk = Buffer.from(pcm.subarray(0, n * 4))
+			source.log.notePcm(run, RATE, chunk.length)
+			source.emit("pcm", chunk, { rate: RATE, format: "f32le" })
+		}
+		source.gate(false)
+		for (let k = blocks; k < blocks + 200; k++) {
+			now += 10
+			source.log.note(run, RATE, false, false, k)
+		}
+		const want: number[] = []
+		for (let sample = 0; sample < blocks * 80; sample++)
+			if (sample < gapFrom || sample >= gapFrom + gapSamples) want.push(sample)
+		expect(pushed).toEqual(want)
+		tracker.stop()
 	})
 
 	it.each([
@@ -415,6 +516,8 @@ describe("WG10 req 3.8 review fixes", () => {
 				source.log.note(run, RATE, true, true)
 			}
 			const dropped = extra === 0 ? 0 : 1
+			// The detector hears its audio one STE window late: stop flushes it.
+			tracker.stop()
 			expect(tracker.droppedPcm()).toBe(dropped * width)
 			const want = Array.from(
 				{ length: capSamples - dropped },

@@ -500,6 +500,16 @@ export class LiveDemodulator extends EventEmitter {
 			publishSquelchChange: () => this.publishSquelchChange(),
 			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
 			measureRun: (run, sample) => this.measureRun(run, sample),
+			noteDiscontinuity: (run, sampleIndex, dropped) => {
+				if (this.run === run && run.squelch.hasCarrierEvidence)
+					this.carrierLog.noteDiscontinuity(
+						run,
+						run.stream.rate,
+						sampleIndex,
+						dropped,
+						pcmSampleBytes(run.stream.format),
+					)
+			},
 			resetFloorForRetune: run => {
 				this.resetFloorForRetune(run)
 				this.resetEvidence(run)
@@ -1114,7 +1124,10 @@ export class LiveDemodulator extends EventEmitter {
 			this.carrierLog.note(
 				run,
 				run.stream.rate,
-				sample?.gateOpen ?? this.reportedSquelchOpen,
+				// A held gate (unacknowledged retune, offset swap) is closed whatever native says.
+				(sample?.gateOpen ?? this.reportedSquelchOpen) &&
+					!run.gateHeld &&
+					!run.stopping,
 				carried,
 				sample?.blockIndex,
 			)

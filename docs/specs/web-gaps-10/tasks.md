@@ -109,3 +109,14 @@ the hook lines in `src/core/live-demodulator.ts` named below, tests. No change t
   - _Requirements: 3.8.1, 3.8.5, 3.8.7_
 - [ ] A1.5 Live acceptance (Main): the design's acceptance plan.
   - _Requirements: 3.8.11_
+
+Follow-up 2026-10-24:
+
+- [x] A1.7 Retune hold in the block log (`src/core/live-demodulator.ts` `measureRun`), pending
+      snapshot across a merge (`startSpan`, `settleSnapshot`, `drainPcm`), `discontinuity` parsing
+      (`src/core/live-demod/rust-protocol.ts`, `rust-engine.ts`, `rust-run.ts`,
+      `CarrierBlockLog.noteDiscontinuity`), STE hold-back (`steFeed`, `steDecide`); tests in
+      `tests/unit/core/analog-transmission-carrier.test.ts`,
+      `tests/unit/core/live-demod-rust-fallback.test.ts`,
+      `tests/unit/core/live-demod-rust-protocol-discontinuity.test.ts`.
+  - _Requirements: 3.8.1, 3.8.7, 3.8.13_

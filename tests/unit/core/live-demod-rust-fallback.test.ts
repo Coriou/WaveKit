@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { MockInstance } from "vitest"
 import * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
+import type { AnalogTransmissionEventData } from "@wavekit/api-types"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
+import { wireAnalogTransmissions } from "../../../src/core/analog-transmission.js"
+import type { AnalogTransmissionSource } from "../../../src/core/analog-transmission.js"
 import {
 	GATE_HISTORY_MAX,
 	HANDSHAKE_EARLY_MAX,
@@ -483,6 +486,53 @@ describe("live demod rust fallback and retune", () => {
 		expect(demod?.isSquelchOpen()).toBe(false)
 		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
 		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	it("logs no open block and no transmission while a retune is unacknowledged (WG10 req 3.8.1)", async () => {
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const tracker = wireAnalogTransmissions({
+			source: demod as unknown as AnalogTransmissionSource,
+			frequencyAt: (_id, offsetHz) => ({
+				hz: 446_000_000 + offsetHz,
+				tuningTrust: "commanded",
+			}),
+			broadcast: () => undefined,
+			sink: () => null,
+		})
+		const events: AnalogTransmissionEventData[] = []
+		tracker.on("transmission", event => events.push(event))
+		await demod?.reconfigure({ offsetHz: 2_500 })
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: true, atOutputSample: 480 }),
+		)
+		for (let b = 0; b < 6; b++)
+			channels[0]?.emitLine(
+				demodEvent("metrics", {
+					atOutputSample: 4800 * b,
+					powerDbfs: new Array<number>(10).fill(-30),
+					quietingDb: new Array<number>(10).fill(30),
+				}),
+			)
+		const log = demod?.carrierBlockLog()
+		expect(log?.blocks).toBe(60)
+		expect(
+			Array.from(log?.flags.subarray(0, 60) ?? []).every(f => f === 2),
+		).toBe(true)
+		expect(events).toEqual([])
+		tracker.stop()
+	})
+
+	it("a discontinuity advances the block log's PCM position (WG10 req 3.8.1)", async () => {
+		await boot({ squelch: -40, modulation: "nfm", squelchMode: "manual" })
+		const before = demod?.carrierBlockLog()?.pcmBytes ?? -1
+		channels[0]?.emitLine(
+			demodEvent("discontinuity", {
+				sampleIndex: 0,
+				droppedSamples: 480,
+				cause: "queue-overflow",
+			}),
+		)
+		expect(demod?.carrierBlockLog()?.pcmBytes).toBe(before + 480 * 2)
 	})
 
 	it("does not seed the auto floor from a quieted carrier and sends the floor", async () => {
