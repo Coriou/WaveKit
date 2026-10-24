@@ -830,11 +830,15 @@ export class DiscoveryStore
 			return this.commit("observation", op =>
 				this.addObservation(op, into, input),
 			)
-		if (!decodeProvesSignal(input, opts.decode) && !this.admits(input))
-			return TRANSIENT
-		// Any create (threshold, overload, decode or promotion) consumes the bucket's entry.
+		const admission = decodeProvesSignal(input, opts.decode)
+			? "create"
+			: this.admits(input)
+		if (admission === "refuse") return TRANSIENT
 		const created = this.createFrom(input, label, target.coChannel)
-		if (created.discoveryId !== null) this.pending.consume(input)
+		// A threshold, overload or decode create consumes the bucket's entry. A promotion
+		// already deleted the one entry it selected; consuming again could take a neighbour.
+		if (created.discoveryId !== null && admission === "create")
+			this.pending.consume(input)
 		return created
 	}
 
@@ -843,7 +847,7 @@ export class DiscoveryStore
 	 * input is rejected (1.7); overload needs 25 dB and never pends (1.2); otherwise 18 dB, or
 	 * promotion from pending (1.3, 1.4).
 	 */
-	private admits(input: ObservationInput): boolean {
+	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
 		const track = input.track
 		const snr = admissionSnrOf(track)
 		const overload: unknown = (
@@ -854,10 +858,10 @@ export class DiscoveryStore
 			!Number.isFinite(snr) ||
 			typeof overload !== "boolean"
 		)
-			return false
-		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB
-		if (snr >= DQ_CREATE_SNR_DB) return true
-		return this.pending.note(input)
+			return "refuse"
+		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : "refuse"
+		if (snr >= DQ_CREATE_SNR_DB) return "create"
+		return this.pending.note(input) ? "promoted" : "refuse"
 	}
 
 	/** Refresh-cadence sweep of expired pending entries (at most every 10 s, from ingest). */

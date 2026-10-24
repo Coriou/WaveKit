@@ -5,7 +5,10 @@ import {
 	DQ_PENDING_SAMPLES,
 	DQ_PENDING_WINDOW_MS,
 } from "../../../../src/core/scanner/detection-quality-contract.js"
-import { PendingAdmission } from "../../../../src/core/scanner/store/pending-admission.js"
+import {
+	PENDING_IDS_MAX,
+	PendingAdmission,
+} from "../../../../src/core/scanner/store/pending-admission.js"
 import { makeObs } from "../../../mocks/scanner/observations.js"
 
 const CH = 446_006_250
@@ -57,7 +60,7 @@ describe("PendingAdmission (DQ 1.4 to 1.6)", () => {
 		p.note(obs("a", 17))
 		const [e] = p.entries("src-1")
 		expect(e?.samples).toEqual([{ id: "a", at: T0, snr: 17 }])
-		expect(e?.distinct).toBe(1)
+		expect(e?.ids.size).toBe(1)
 	})
 
 	it("one id re-ingested 3 times at 16 dB never promotes", () => {
@@ -102,7 +105,7 @@ describe("PendingAdmission (DQ 1.4 to 1.6)", () => {
 		p.note(obs("mid", 10, { centreHz: 11 * 2500 }))
 		const entries = p.entries("src-1")
 		expect(entries).toHaveLength(2)
-		expect(entries.find(e => e.bucket === 10)?.distinct).toBe(2)
+		expect(entries.find(e => e.bucket === 10)?.ids.size).toBe(2)
 	})
 
 	it("keeps the highest 5 samples and counts distinct ids separately", () => {
@@ -113,7 +116,7 @@ describe("PendingAdmission (DQ 1.4 to 1.6)", () => {
 		expect(e?.samples.map(s => s.snr).sort((a, b) => a - b)).toEqual([
 			6, 7, 8, 9, 14,
 		])
-		expect(e?.distinct).toBe(7)
+		expect(e?.ids.size).toBe(7)
 	})
 
 	it("evicts the oldest first sample when a source holds 512 entries", () => {
@@ -152,9 +155,32 @@ describe("PendingAdmission (DQ 1.4 to 1.6)", () => {
 		expect(p.size()).toBe(0)
 	})
 
+	it("retracting replaced low samples leaves them uncounted (review repro)", () => {
+		const { p } = holder()
+		for (let i = 0; i < 5; i++) p.note(obs(`low${i}`, 10))
+		p.note(obs("h1", 16))
+		p.note(obs("h2", 16))
+		for (let i = 0; i < 5; i++) p.forget("src-1", `low${i}`)
+		const [e] = p.entries("src-1")
+		expect(e?.ids.size).toBe(2)
+		expect(e?.samples.map(x => x.id).sort()).toEqual(["h1", "h2"])
+		// Re-ingesting a 16 dB id is no new id: 2 valid ids, no promotion.
+		expect(p.note(obs("h1", 16))).toBe(false)
+		expect(p.note(obs("h3", 16))).toBe(true)
+	})
+
+	it("caps ids at 8 and drops the oldest non-retained id first", () => {
+		const { p } = holder()
+		for (let i = 0; i < 10; i++) p.note(obs(`o${i}`, i))
+		const [e] = p.entries("src-1")
+		expect(e?.ids.size).toBe(PENDING_IDS_MAX)
+		for (const x of e?.samples ?? []) expect(e?.ids.has(x.id)).toBe(true)
+		expect(e?.ids.has("o0")).toBe(false)
+	})
+
 	// Feature: detection-quality, Property 3: Pending bound
 	// Validates: Requirements 1.5
-	it("never exceeds 512 entries per source or 5 samples per entry; no entry outlives its window at a sweep", () => {
+	it("never exceeds 512 entries per source, 5 samples or 8 ids per entry; retracted ids never count; no entry outlives its window at a sweep", () => {
 		fc.assert(
 			fc.property(
 				fc.array(
@@ -165,23 +191,36 @@ describe("PendingAdmission (DQ 1.4 to 1.6)", () => {
 						snr: fc.double({ min: 0, max: 17.99, noNaN: true }),
 						src: fc.constantFrom("s1", "s2"),
 						sweep: fc.boolean(),
+						retract: fc.integer({ min: 0, max: 4 }),
 					}),
 					{ minLength: 1, maxLength: 900 },
 				),
 				ops => {
 					const { clock, p } = holder()
+					const retracted = { s1: new Set<string>(), s2: new Set<string>() }
 					for (const op of ops) {
 						clock.now += op.step
-						p.note(
-							obs(`o${op.idx}`, op.snr, {
-								centreHz: op.bucket * 2500,
-								sourceId: op.src,
-							}),
-						)
-						for (const s of ["s1", "s2"]) {
+						const id = `o${op.idx}`
+						if (op.retract === 0) {
+							// The store never re-notes a retracted id (sticky flags).
+							p.forget(op.src, id)
+							retracted[op.src].add(id)
+						} else if (!retracted[op.src].has(id)) {
+							p.note(
+								obs(id, op.snr, {
+									centreHz: op.bucket * 2500,
+									sourceId: op.src,
+								}),
+							)
+						}
+						for (const s of ["s1", "s2"] as const) {
 							expect(p.size(s)).toBeLessThanOrEqual(DQ_PENDING_PER_SOURCE)
-							for (const e of p.entries(s))
+							for (const e of p.entries(s)) {
 								expect(e.samples.length).toBeLessThanOrEqual(DQ_PENDING_SAMPLES)
+								expect(e.ids.size).toBeLessThanOrEqual(PENDING_IDS_MAX)
+								for (const x of e.samples) expect(e.ids.has(x.id)).toBe(true)
+								for (const x of e.ids) expect(retracted[s].has(x)).toBe(false)
+							}
 						}
 						if (op.sweep) {
 							p.sweep(clock.now)

@@ -30,11 +30,20 @@ export interface PendingEntry {
 	/** At most `DQ_PENDING_SAMPLES`, the highest SNRs seen. */
 	samples: PendingSample[]
 	/**
-	 * Distinct ids seen. A re-ingest of an id whose sample was replaced counts again, but
-	 * replacement only happens once 5 distinct ids were seen, past the 3 promotion needs.
+	 * Distinct valid (not retracted) ids, insertion order, at most `PENDING_IDS_MAX`. Every
+	 * retained sample's id is in it; an id whose sample was replaced stays counted until it is
+	 * retracted or pushed out by the cap (oldest non-retained id first). The set never holds a
+	 * retracted id, so it can under-count but never over-count.
 	 */
-	distinct: number
+	ids: Set<string>
 }
+
+/**
+ * Distinct ids tracked per entry: 5 retained samples + 3 needed for promotion = 8. About 8 ×
+ * (40 B id + 16 B slot) ≈ 450 B per entry, × 512 entries ≈ 230 kB per source on top of the
+ * samples (about 150 kB).
+ */
+export const PENDING_IDS_MAX = 8
 
 /**
  * The SNR the creation gate reads: the WG12 channel SNR when the engine has a channel plan,
@@ -88,12 +97,13 @@ export class PendingAdmission {
 				if (oldest.done === true) break
 				map.delete(oldest.value)
 			}
-			entry = { firstAt: now, bucket, samples: [], distinct: 0 }
+			entry = { firstAt: now, bucket, samples: [], ids: new Set() }
 			map.set(bucket, entry)
 		}
 		this.add(entry, obs.id, now, snr)
 		if (
-			entry.distinct >= DQ_PENDING_MIN_OBS &&
+			entry.ids.size >= DQ_PENDING_MIN_OBS &&
+			entry.samples.length >= DQ_PENDING_MIN_OBS &&
 			median(entry.samples.map(s => s.snr)) >= DQ_PENDING_MEDIAN_SNR_DB
 		) {
 			map.delete(entry.bucket)
@@ -117,16 +127,15 @@ export class PendingAdmission {
 
 	/**
 	 * A retracted observation (spur, IQ image, truncation raised late): its sample stops
-	 * counting. The distinct count drops with it; an emptied entry is deleted.
+	 * counting, retained or already replaced. An entry left with no samples is deleted.
 	 */
 	forget(sourceId: string, id: string): void {
 		const map = this.bySource.get(sourceId)
 		if (map === undefined) return
 		for (const [bucket, e] of map) {
+			if (!e.ids.delete(id)) continue
 			const i = e.samples.findIndex(x => x.id === id)
-			if (i < 0) continue
-			e.samples.splice(i, 1)
-			e.distinct = Math.max(0, e.distinct - 1)
+			if (i >= 0) e.samples.splice(i, 1)
 			if (e.samples.length === 0) map.delete(bucket)
 		}
 		if (map.size === 0) this.bySource.delete(sourceId)
@@ -186,7 +195,16 @@ export class PendingAdmission {
 			if (snr > same.snr) same.snr = snr // 1.6: the larger SNR, time unchanged
 			return
 		}
-		e.distinct++
+		if (!e.ids.has(id)) {
+			if (e.ids.size >= PENDING_IDS_MAX) {
+				for (const old of e.ids)
+					if (!e.samples.some(x => x.id === old)) {
+						e.ids.delete(old)
+						break
+					}
+			}
+			e.ids.add(id)
+		}
 		if (e.samples.length < DQ_PENDING_SAMPLES) {
 			e.samples.push({ id, at, snr })
 			return
@@ -194,6 +212,7 @@ export class PendingAdmission {
 		let low = 0
 		for (let i = 1; i < e.samples.length; i++)
 			if (e.samples[i]!.snr < e.samples[low]!.snr) low = i
+		// A replaced id stays in `ids`: it was seen and not retracted.
 		if (snr > e.samples[low]!.snr) e.samples[low] = { id, at, snr }
 	}
 }

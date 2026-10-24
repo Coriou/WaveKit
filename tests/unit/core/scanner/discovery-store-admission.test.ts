@@ -395,6 +395,21 @@ describe("DiscoveryStore pending hygiene (review fixes)", () => {
 		expect(count(store)).toBe(0)
 	})
 
+	it("a promotion removes only the entry it selected, not a neighbour", () => {
+		const { clock, store } = setup()
+		const at = (b: number) => b * 2500
+		store.ingest(obs("a", 16, { centreHz: at(10) }))
+		store.ingest(obs("b", 16, { centreHz: at(10) }))
+		clock.now += 10
+		store.ingest(obs("c", 16, { centreHz: at(12) }))
+		expect(store.pendingCount()).toBe(2)
+		// Bucket 11: 10 and 12 are equally near; 10 is older and promotes.
+		expect(store.ingest(obs("d", 16, { centreHz: at(11) })).change).toBe(
+			"created",
+		)
+		expect(store.pendingCount()).toBe(1)
+	})
+
 	it("overload and decode creates consume the bucket's pending entry", () => {
 		const a = setup()
 		a.store.ingest(obs("a", 16))
