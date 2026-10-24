@@ -115,6 +115,34 @@ export class PendingAdmission {
 		}
 	}
 
+	/**
+	 * A retracted observation (spur, IQ image, truncation raised late): its sample stops
+	 * counting. The distinct count drops with it; an emptied entry is deleted.
+	 */
+	forget(sourceId: string, id: string): void {
+		const map = this.bySource.get(sourceId)
+		if (map === undefined) return
+		for (const [bucket, e] of map) {
+			const i = e.samples.findIndex(x => x.id === id)
+			if (i < 0) continue
+			e.samples.splice(i, 1)
+			e.distinct = Math.max(0, e.distinct - 1)
+			if (e.samples.length === 0) map.delete(bucket)
+		}
+		if (map.size === 0) this.bySource.delete(sourceId)
+	}
+
+	/** Any create at this centre consumes the matching entry (nearest of b - 1, b, b + 1). */
+	consume(obs: ObservationInput): void {
+		const map = this.bySource.get(obs.sourceId)
+		if (map === undefined) return
+		const centre = obs.track.centreHz
+		if (!Number.isFinite(centre)) return
+		const e = this.nearest(map, Math.round(centre / DQ_PENDING_BUCKET_HZ))
+		if (e !== undefined) map.delete(e.bucket)
+		if (map.size === 0) this.bySource.delete(obs.sourceId)
+	}
+
 	/** Source removal or retune: drops that source; no argument drops all. */
 	clear(sourceId?: string): void {
 		if (sourceId === undefined) {

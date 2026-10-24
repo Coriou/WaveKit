@@ -364,3 +364,78 @@ describe("DiscoveryStore creation gate (DQ 1.2 to 1.7)", () => {
 		)
 	})
 })
+
+describe("DiscoveryStore pending hygiene (review fixes)", () => {
+	const flags = ["spur", "iqImage", "truncated"] as const
+	for (const flag of flags)
+		it(`a pending observation re-ingested with ${flag} stops counting toward admission`, () => {
+			const { store } = setup()
+			expect(store.ingest(obs("a", 16))).toEqual(TRANSIENT)
+			const flagged = obs("a", 16)
+			flagged.track.flags[flag] = true
+			expect(store.ingest(flagged)).toEqual(TRANSIENT)
+			expect(store.pendingCount()).toBe(0)
+			expect(store.ingest(obs("b", 16))).toEqual(TRANSIENT)
+			expect(store.ingest(obs("c", 10))).toEqual(TRANSIENT)
+			expect(count(store)).toBe(0)
+			// The sticky flag holds: a later clean re-ingest of a stays out.
+			expect(store.ingest(obs("a", 16))).toEqual(TRANSIENT)
+			expect(count(store)).toBe(0)
+		})
+
+	it("a threshold create consumes the bucket's pending entry", () => {
+		const { store } = setup()
+		store.ingest(obs("a", 16))
+		store.ingest(obs("b", 16))
+		const id = store.ingest(obs("c", 18)).discoveryId
+		expect(id).not.toBeNull()
+		expect(store.pendingCount()).toBe(0)
+		expect(store.delete(id ?? "")).toBe(true)
+		expect(store.ingest(obs("d", 10))).toEqual(TRANSIENT)
+		expect(count(store)).toBe(0)
+	})
+
+	it("overload and decode creates consume the bucket's pending entry", () => {
+		const a = setup()
+		a.store.ingest(obs("a", 16))
+		expect(a.store.ingest(obs("o", 30, { overload: true })).change).toBe(
+			"created",
+		)
+		expect(a.store.pendingCount()).toBe(0)
+		const b = setup()
+		b.store.ingest(obs("a", 16))
+		const placed = b.store.ingest(obs("p", 9), {
+			decode: {
+				...evidence("ais", T0 + 10, {
+					identity: { kind: "ais-mmsi", value: "211234567" },
+				}),
+				origin: "ambient",
+			},
+		})
+		expect(placed.change).toBe("created")
+		expect(b.store.pendingCount()).toBe(0)
+	})
+
+	it("sweeps expired entries on ingest of an existing record", () => {
+		const { clock, store } = setup()
+		const id = store.ingest(
+			obs("s", 30, { centreHz: CH + 500_000 }),
+		).discoveryId
+		store.ingest(obs("w", 10))
+		expect(store.pendingCount()).toBe(1)
+		clock.now += DQ_PENDING_WINDOW_MS
+		const joined = store.ingest(
+			obs("s2", 30, { centreHz: CH + 500_000, at: clock.now }),
+		)
+		expect(joined.discoveryId).toBe(id)
+		expect(store.pendingCount()).toBe(0)
+	})
+
+	it("the maintenance prune also sweeps pending", () => {
+		const { clock, store } = setup()
+		store.ingest(obs("w", 10))
+		clock.now += DQ_PENDING_WINDOW_MS
+		store.pruneInactive(30)
+		expect(store.pendingCount()).toBe(0)
+	})
+})

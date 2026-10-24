@@ -2567,6 +2567,7 @@ export class ScannerService extends EventEmitter {
 		switch (ev.kind) {
 			case "epoch-started":
 				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
+				this.store.clearPending(sourceId) // DQ 1.5: a retune drops pending evidence
 				this.syncIqCapture(sourceId, epoch)
 				this.probes
 					.onEpoch(sourceId, ev.epoch, epoch.centreHz)

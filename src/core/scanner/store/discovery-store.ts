@@ -792,7 +792,10 @@ export class DiscoveryStore
 	 * says, so evidence that follows still finds its discovery.
 	 */
 	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
+		this.sweepPendingIfDue()
 		const flagged = this.rememberStickyFlags(input) // may be raised late (P3, § 4.9)
+		// DQ 1.4: a flagged observation's pending evidence stops counting.
+		if (flagged) this.pending.forget(input.sourceId, input.id)
 		const known = this.observationIndex.get(input.id)
 		if (known !== undefined) {
 			if (flagged) return this.retract(known)
@@ -829,7 +832,10 @@ export class DiscoveryStore
 			)
 		if (!decodeProvesSignal(input, opts.decode) && !this.admits(input))
 			return TRANSIENT
-		return this.createFrom(input, label, target.coChannel)
+		// Any create (threshold, overload, decode or promotion) consumes the bucket's entry.
+		const created = this.createFrom(input, label, target.coChannel)
+		if (created.discoveryId !== null) this.pending.consume(input)
+		return created
 	}
 
 	/**
@@ -838,7 +844,6 @@ export class DiscoveryStore
 	 * promotion from pending (1.3, 1.4).
 	 */
 	private admits(input: ObservationInput): boolean {
-		this.sweepPendingIfDue()
 		const track = input.track
 		const snr = admissionSnrOf(track)
 		const overload: unknown = (
@@ -1486,6 +1491,7 @@ export class DiscoveryStore
 	}
 
 	pruneInactive(maxAgeDays: number): string[] {
+		this.sweepPending() // DQ 1.5: the maintenance cadence also sweeps pending
 		const cutoff = iso(this.now() - maxAgeDays * DAY_MS)
 		const op = newOp()
 		const removed: string[] = []
