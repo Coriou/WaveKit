@@ -153,9 +153,10 @@ export interface VoiceTapSource {
 /** "unknown" is treated exactly like "no". */
 export type VoiceCoverage = "yes" | "no" | "unknown"
 export interface VoiceCoveragePort {
+	/** Called only when `generation` changed since the caller's cached answer. */
 	covers(decoderId: string): VoiceCoverage
-	/** Bumps on every retune, offset or source change seen by the port. */
-	readonly epoch: number
+	/** Incremented at every event that can change coverage (retune, settle, placement). */
+	readonly generation: number
 }
 export interface AutoRouteClock {
 	now(): number
@@ -184,7 +185,7 @@ interpolation), Kaiser window. The filter is sized from requirement 2.3, not fix
 | 96 000                                    | down 2    | 66                                 |
 | 200 000 (WFM ceiling)                     | down 4.17 | 138                                |
 
-Phases: when the reduced ratio `out / in = L / M` has `L ≤ 1 024`, the table holds exactly `L`
+Phases: when the reduced ratio `out / in = L / M` has `L ≤ 512`, the table holds exactly `L`
 phases and the phase step lands on table points (8 k → 48 k: `L = 6`; 25 k → 48 k: `L = 48`;
 25.6 k → 48 k: `L = 15`), so no interpolation is used. Otherwise (rates with a large reduced
 `L`) the table holds 512 phases and adjacent phases are linearly interpolated; the
@@ -246,12 +247,25 @@ therefore pushes one span per decision, sample-aligned, after the chunk is rewri
   `pending` / `pass` / `guard` / `drop` codes, `latch` retags pending to play, `abandon` retags
   pending to drop, catch-up removes a leading drop run, overflow only while all pending) on tag
   runs only, no audio: the live demodulator calls `shadow.process(n, tag)`, `shadow.latch()`,
-  `shadow.abandon()` and `shadow.clear()` next to each call on the real pre-roll, and after each
-  `process` asserts `shadow.delaySamples === preRoll.delaySamples` (on mismatch: log once, clear
-  the shadow and mark the analog source silent until the next `clear()`, fail closed). The
-  shadow returns the output runs of that call (`play` or `mute`), which become spans: a sample
+  `shadow.abandon()` and `shadow.clear()` next to each call on the real pre-roll. The shadow
+  returns the output runs of that call (`play` or `mute`), which become spans: a sample
   qualifies only when the pre-roll plays it, so delayed but unqualified audio
   (`delaySamples > 0` while pending) never qualifies.
+- **Continuous tracking.** The shadow is created, cleared and dropped together with the run's
+  pre-roll (`buildEvidence`, `resetEvidence`) and tracks every pre-roll call whether or not
+  `/auto` has a client, so a first connect or a reconnect at any moment (pending, playback,
+  final drain) finds it already in sync; there is no mid-stream start. Its idle cost is tag
+  bookkeeping only: at most two `process` calls per `TONE_SLICE_MS` slice, each an O(1) run
+  append plus a head trim on a fixed `Int32Array` run ring (the pre-roll's 160-run bound), no
+  audio copy and no allocation, under 0.0005 core (budget table). Output runs are only turned
+  into router spans while `/auto` has a client.
+- **Self-check and resync.** After each `process` the live demodulator compares
+  `shadow.delaySamples` with `preRoll.delaySamples`. On a mismatch (a defect, never expected)
+  it logs once and marks the analog source silent (fail closed). Resync is concrete: at the
+  first `process` after which `preRoll.delaySamples === 0`, the real pre-roll holds no sample,
+  so the shadow is cleared to the empty state, which is then exact, and analog qualification
+  resumes. A delay of zero is reached in every silence after catch-up, so a mismatch costs at
+  most the rest of the current over. `/stream` is never touched by the shadow.
 - Split-sample lead bytes take the previous span's flag, as the pre-roll and tone path do.
 
 No file under `src/core/evidence-squelch/**` changes; the shadow imports only its contract
@@ -260,18 +274,34 @@ the shadow's `play` samples are exactly the non-zero output samples.
 
 ### Inputs (`src/core/auto-listen/inputs.ts`)
 
-- `AnalogInput`: carries a 4-byte split-sample remainder (as `pcmPhase`), converts f32le or
-  s16le chunk views (`Int16Array`/`Float32Array` over the aligned region; only the remainder is
-  copied into fixed scratch), rebuilds its resampler on rate or format change (5.2).
-- `VoiceInput` per decoder: resampler 8 k → 48 k, `lastFrameAt`, `call` snapshot, `admitted`
-  (3.2 evaluated per frame and per call event), `coverageEpoch`.
+- `AnalogInput`: carries a 4-byte split-sample remainder (as `pcmPhase`) and copies each span's
+  aligned bytes with `chunk.copy(scratch, ...)` into a preallocated scratch `Buffer` (sized for
+  the largest chunk seen, grown only on a new maximum) read through `Int16Array` /
+  `Float32Array` views created once over that scratch, so no view or buffer object is created
+  per chunk. It rebuilds its resampler and views on rate or format change (5.2).
+- `VoiceInput` per decoder: the same scratch-copy path (8 k s16le), resampler 8 k → 48 k,
+  `lastFrameAt`, `call` snapshot, `admitted` (3.2 evaluated per frame and per call event),
+  cached coverage (below).
+
+### Digital resampler tail (requirement 4.11)
+
+The resampler holds `delayInputSamples` (about `N / 2`, 17 samples, about 2 ms at 8 kHz) of
+input whose effect has not reached its output, so the last syllable of a call would never
+appear when no further datagram arrives. A voice input **flushes** when its call ends (`call`
+with `active: false`) or when it has admitted no frame for `DIGITAL_HOLD_MS`, whichever comes
+first: it feeds `delayInputSamples` zero samples from a preallocated zero scratch, writes the
+produced output with the flag of the last real input sample (`admitted` if the last frame was
+admitted), then `reset()`s the resampler so the next call starts from an empty history. A flush
+happens at most once per call; a frame after a flush simply starts a new history. `detach` and
+invalidation do not flush: they clear the FIFO and reset the resampler. Analog needs no flush:
+its stream is continuous (muted audio arrives as zeros) and `resetAnalog` discards on purpose.
 
 ### Digital admission versus drain (requirements 3.2, 4.3, 4.10)
 
 Admission and eligibility to play are separate:
 
 - **Admission** is decided per datagram: a frame is written as `admitted` only while the
-  decoder covers the channel (`"yes"` at the current epoch), its call is active and not wholly
+  decoder covers the channel (cached `"yes"` at the current generation), its call is active and not wholly
   encrypted. Other frames are written as `silent` (or not written at all when the source is not
   selected).
 - **Drain eligibility** does not require the call to still be active: a voice input with queued
@@ -279,7 +309,7 @@ Admission and eligibility to play are separate:
   ended and the hold expired. So a 0.5 s DMR over that starts and ends entirely while the
   analog tail drains is queued, then plays in full once analog releases.
 - **Invalidation** clears a voice FIFO: an encrypted update of its call (`call` with
-  `encrypted: true`, even with no further datagram), `detach`, a coverage epoch change, coverage
+  `encrypted: true`, even with no further datagram), `detach`, a coverage generation change, coverage
   turning `"no"` or `"unknown"`, or queued audio older than `FIFO_MS` (it is dropped and counted;
   it can no longer be in time). A cleared selected source plays zeros from the next sample and
   releases at once.
@@ -301,70 +331,95 @@ Coverage is `"yes"` only when the tuned frequency is verified and agrees:
   its origin (a `vfo` placement that has not moved yet does not cover).
 - Without placements, a configured target covers only when the decoder's `sourceId` is present
   and equals the live source, and the target is within half the bandwidth.
-- Anything missing or throwing is `"unknown"`. `epoch` increments whenever the live frequency
-  key (`sourceId:frequencyHz`) changes, which invalidates queued digital audio.
+- Anything missing or throwing is `"unknown"`.
 
-Insert after `liveDemod.on("config-changed", updateVfo)`:
+**Generation, not sampling.** `generation` is a counter incremented at each event that can
+change coverage, not derived from a sampled frequency, so A → B → A between two pacer ticks, or
+an offset and centre change that keep the sum, still invalidates. It increments on: live-audio
+`config-changed` (offset, source, bandwidth, modulation), source `caps-changed` (centre, rate),
+every VFO settle (`onSettled`), and decoder `decoder:started`, `decoder:stopped`,
+`decoder:removed` and `decoder:status-changed` (placement moves). The router compares each voice
+input's stored generation once per block and per frame; any difference clears the input's queued
+audio and cached coverage. In the window between a real retune and its first event, frames are
+still admitted under the old coverage; the retune's `config-changed` or `caps-changed` then
+invalidates them before they can play unless they were already played.
+
+**Cached, allocation-free in steady state.** `covers()` builds status and VFO objects (Zod
+parse in `vfoFromLiveDemod`, `getStatus` objects), so the router calls it only when an input's
+cached generation differs from the port's, at most once per input per generation, and otherwise
+reads the cached answer. Recompute cost is bounded by the event rate (retunes, decoder status
+changes, a few per second at most), not by blocks or frames; the bench measures it.
+
+Insert after `liveDemod.on("config-changed", updateVfo)` (the diff is indented with spaces
+here; apply it with the file's tabs), and extend the VFO tracker's `onSettled` above it:
 
 ```diff
- 		liveDemod.on("config-changed", updateVfo)
- 		sourceManager.on("caps-changed", updateVfo)
-+		// auto-listen-route 3.4: coverage only on a verified, settled frequency that matches.
-+		let coverageKey = ""
-+		let coverageEpoch = 0
-+		const liveVfo = () =>
-+			vfoFromLiveDemod({
-+				sourceId: () =>
-+					liveDemod.getStatus().sourceId || defaultSourceIdFor(config.sources) || null,
-+				offsetHz: () => liveDemod.getStatus().config.offsetHz,
-+				centreHz: id => sourceManager.getCaps(id)?.centerFreq ?? null,
-+			})
-+		liveDemod.attachAutoRouteVoice(digitalVoice, {
-+			get epoch() {
-+				const live = liveVfo()
-+				const key = live ? `${live.sourceId}:${live.frequencyHz}` : ""
-+				if (key !== coverageKey) {
-+					coverageKey = key
-+					coverageEpoch++
-+				}
-+				return coverageEpoch
-+			},
-+			covers: decoderId => {
-+				try {
-+					const live = liveVfo()
-+					const settled = vfo.current()
-+					const status = decoderManager.getStatus(decoderId)
-+					if (!live || !settled || !status) return "unknown"
-+					if (
-+						settled.sourceId !== live.sourceId ||
-+						settled.frequencyHz !== live.frequencyHz
-+					)
-+						return "unknown"
-+					if (!status.running) return "no"
-+					const half = liveDemod.getStatus().config.bandwidth / 2
-+					const near = (hz: number | undefined) =>
-+						hz !== undefined && Math.abs(hz - live.frequencyHz) <= half
-+					const placements = status.placements ?? []
-+					if (placements.length > 0)
-+						return placements.some(
-+							p => p.running && p.sourceId === live.sourceId && near(p.channelHz),
-+						)
-+							? "yes"
-+							: "no"
-+					if (status.sourceId === undefined) return "unknown"
-+					if (status.sourceId !== live.sourceId) return "no"
-+					return (status.targetFrequenciesHz ?? []).some(hz => near(hz))
-+						? "yes"
-+						: "no"
-+				} catch {
-+					return "unknown"
-+				}
-+			},
-+		})
+   onSettled: value => {
+     decoderManager.notifyVfoSettled(value)
++    coverageGeneration++
+   },
+ ...
+ liveDemod.on("config-changed", updateVfo)
+ sourceManager.on("caps-changed", updateVfo)
++// auto-listen-route 3.4: coverage only on a verified, settled frequency that matches.
++const bumpCoverage = () => {
++  coverageGeneration++
++}
++liveDemod.on("config-changed", bumpCoverage)
++sourceManager.on("caps-changed", bumpCoverage)
++for (const event of [
++  "decoder:started",
++  "decoder:stopped",
++  "decoder:removed",
++  "decoder:status-changed",
++] as const)
++  decoderManager.on(event, bumpCoverage)
++const liveVfo = () =>
++  vfoFromLiveDemod({
++    sourceId: () =>
++      liveDemod.getStatus().sourceId || defaultSourceIdFor(config.sources) || null,
++    offsetHz: () => liveDemod.getStatus().config.offsetHz,
++    centreHz: id => sourceManager.getCaps(id)?.centerFreq ?? null,
++  })
++liveDemod.attachAutoRouteVoice(digitalVoice, {
++  get generation() {
++    return coverageGeneration
++  },
++  covers: decoderId => {
++    try {
++      const live = liveVfo()
++      const settled = vfo.current()
++      const status = decoderManager.getStatus(decoderId)
++      if (!live || !settled || !status) return "unknown"
++      if (
++        settled.sourceId !== live.sourceId ||
++        settled.frequencyHz !== live.frequencyHz
++      )
++        return "unknown"
++      if (!status.running) return "no"
++      const half = liveDemod.getStatus().config.bandwidth / 2
++      const near = (hz: number | undefined) =>
++        hz !== undefined && Math.abs(hz - live.frequencyHz) <= half
++      const placements = status.placements ?? []
++      if (placements.length > 0)
++        return placements.some(
++          p => p.running && p.sourceId === live.sourceId && near(p.channelHz),
++        )
++          ? "yes"
++          : "no"
++      if (status.sourceId === undefined) return "unknown"
++      if (status.sourceId !== live.sourceId) return "no"
++      return (status.targetFrequenciesHz ?? []).some(hz => near(hz)) ? "yes" : "no"
++    } catch {
++      return "unknown"
++    }
++  },
++})
 ```
 
-`covers` and `epoch` run once per 20 ms block per voice input with an `/auto` client and once
-per admitted-frame decision is cached for that block, never per sample.
+`let coverageGeneration = 0` is declared before `createVfoTracker`. A pending VFO settle answers
+`"unknown"`, and the settle itself bumps the generation, so coverage is recomputed right after
+it.
 
 ### Pacing, backlog and discontinuities (requirements 2.6, 2.7)
 
@@ -410,7 +465,8 @@ class AutoListenRouter extends EventEmitter {
 Per block:
 
 1. Refresh state: analog release timer from its last audible span; per voice input, the
-   coverage epoch (a change invalidates) and `covers` (anything but `"yes"` invalidates).
+   coverage generation (a change invalidates and recomputes `covers`; anything but `"yes"`
+   invalidates) and the tail flush (4.11).
 2. Choose: if the selected source has not released (4.4), keep it, unless it is analog and a
    drain-eligible digital input has waited `PREEMPT_MAX_MS` (4.5). Otherwise pick a
    drain-eligible digital input (sticky first, else oldest queued admitted voice, ties by id)
@@ -440,8 +496,23 @@ retention outlives the queue bound. Arithmetic: 50 allocations per second of 1 9
 allocations per second; at most `30 s × 96 kB/s ≈ 2.9 MB` can be retained per stalled client
 before it is disconnected. This is an output-side cost per output block, independent of input
 chunking, and equals what `/stream` already pays when its pipeline hands each chunk to the
-registry. It is the one stated exception to "no per-chunk allocation"; resampling, FIFOs and
-qualification allocate nothing in steady state. A delayed-drain regression test holds a fake
+registry.
+
+**Allocation guarantee, narrowed (requirement 2.4).** Allocation-free in steady state: the
+router's own per-chunk, per-datagram and per-block paths (scratch copy, resampling, FIFO writes
+and reads, shadow runs, selection, cached coverage reads). Bounded exceptions, with arithmetic:
+
+| Allocation                                                                                                                                                  | Rate                                                                  | Bytes per second                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------- |
+| Output block (above)                                                                                                                                        | 50/s                                                                  | 96 000                                 |
+| Existing `downmixDsdFmeDatagram` copy per datagram (`Buffer.from` / `Buffer.alloc`, not new; the service already pays it while its own stream has a client) | about 50/s per decoder in a call, now also while only `/auto` listens | about 16 000 per decoder (8 kHz × 2 B) |
+| Coverage recompute (`getStatus`, `vfoFromLiveDemod` Zod parse)                                                                                              | once per input per generation change, a few per second at most        | under 10 000                           |
+| `status()` / `level()` objects                                                                                                                              | per REST poll and per level event (10 to 20/s)                        | under 4 000                            |
+| Scratch growth on a new largest chunk                                                                                                                       | rare, then never                                                      | 0 in steady state                      |
+
+All are small objects or short buffers from Node's slab; none is audio-sized storage that
+grows with run time. The downmix copy stays as is because changing it alters the digital voice
+module beyond the minimal tap. A delayed-drain regression test holds a fake
 client's socket write pending for several seconds, keeps the router emitting distinct ramps, then
 drains and checks every queued block still holds its original bytes.
 
@@ -505,7 +576,8 @@ inner loops are taken at about 1 ns per MAC on the desktop reference host and 5 
 All below the 0.3-core noise floor. The bench `tests/bench/auto-listen-route.bench.ts` (not
 collected by the root suite, which takes only `tests/**/*.test.ts`; run with
 `pnpm exec vitest bench tests/bench/auto-listen-route.bench.ts`) records the desktop figures at
-both IQ rates and at 200 kHz; Pi figures stay estimates until measured.
+both IQ rates and at 200 kHz, including the shadow alone (no client), coverage recomputes at
+10 generations per second and `status()` at 20 per second; Pi figures stay estimates until measured.
 
 ## Correctness properties
 
@@ -519,7 +591,8 @@ synthetic PCM, a fake voice source, a fake coverage port and an injected clock.
    2.3._
 3. **Bounded pacing.** For random tick schedules: emitted never exceeds due; after every tick
    `due − emitted < 960` or a rebase was counted; with no tick later than 100 ms the long-run
-   count equals `floor(elapsed × 48)` within one block and `clockRebases` is 0; across a rebase no
+   count equals `floor(elapsed × 48)` within one block and `clockRebases` is 0; one tick emits at
+   most `CATCHUP_MAX_BLOCKS` blocks; across a rebase no
    source sample is lost or repeated. _Validates 2.6, 2.7._
 4. **No doubled audio.** Tag every input sample with a unique ramp; across random schedules,
    no tag is emitted twice and the tags of one source are emitted in increasing order.
@@ -546,13 +619,22 @@ synthetic PCM, a fake voice source, a fake coverage port and an injected clock.
 11. **Several decoders.** For random overlapping calls on up to four decoders, the selected
     decoder changes only on release or invalidation, and the choice follows stickiness, age,
     id. _Validates 3.5._
-12. **Coverage.** For random retunes, pending retunes and coverage answers, no admitted voice
-    queued before an epoch change or under `"unknown"` / `"no"` is emitted. _Validates 3.4,
+12. **Coverage.** For random retunes, pending retunes, A → B → A and offset-plus-centre changes
+    that keep the frequency, several of them between two pacer ticks with no frames, no admitted
+    voice queued before a generation change or under `"unknown"` / `"no"` is emitted, and
+    `covers` runs at most once per input per generation. _Validates 3.4,
     4.10._
 13. **Existing streams unchanged.** With random `/auto` connect and disconnect, `/stream` and
     the digital voice streams are byte-identical to a run without `/auto`. _Validates 7.1, 7.2._
 14. **Output blocks are immutable.** Under a delayed drain, every block a client finally
     receives equals the bytes the router produced for it. _Validates 2.8._
+15. **Shadow from any start.** For random first-connect and reconnect instants (pending,
+    playback, final drain), `/auto` analog qualification equals that of a client connected from
+    the start for every sample after the connect; after an injected mismatch, qualification is
+    silent until the first zero delay and exact after it. _Validates 3.6, 3.7._
+16. **Digital tail.** For random calls ending in a non-zero impulse followed by no datagram,
+    the impulse's full resampled response is emitted once (at call end or hold expiry), and the
+    next call starts from an empty history. _Validates 4.11._
 
 ## Fake-link acceptance plan (requirement 9.1, in-process)
 
@@ -582,8 +664,11 @@ fake coverage port, and an injected clock. It registers an in-memory `/auto` cli
 - HTTP, not WebSocket, because the web player is HTTP; WS can reuse the registry later.
 - Manual and noise squelch qualify analog by the open gate; a wide-open manual squelch delays
   digital by at most 1.5 s.
-- Evidence-path qualification comes from a shadow of the pre-roll's run model, checked against
-  its `delaySamples`, so the evidence squelch itself is not edited; a mismatch fails closed.
+- Evidence-path qualification comes from a shadow of the pre-roll's run model that tracks
+  continuously (also with no `/auto` client), checked against its `delaySamples`, so the
+  evidence squelch itself is not edited; a mismatch fails closed until the next zero delay.
+- Coverage is invalidated by an event-driven generation and cached between generations.
+- The digital resampler tail is flushed at call end or hold expiry.
 - One fresh 1 920 B output block per 20 ms, because the registry and sockets retain buffers
   beyond the queue bound.
 - Short digital overs queued during an analog handover still play; queued digital audio is

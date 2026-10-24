@@ -21,11 +21,12 @@ maintainer from the design (MAIN-NEEDED). Tests are in-process only.
     `PREEMPT_MAX_MS === LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS`),
     `tests/unit/core/auto-listen/resampler.test.ts`, `tests/unit/core/auto-listen/source-fifo.test.ts`,
     `tests/unit/core/auto-listen/preroll-shadow.test.ts` (against the real `PreRoll`),
-    allocation check (no new `Buffer`/typed arrays after warm-up)
-  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.6, 6.1, 6.2, 7.3_
+    allocation check (no new `Buffer`, typed array or view in the DSP paths after warm-up;
+    the budgeted exceptions of design "Allocation guarantee" excluded)
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.6, 3.7, 6.1, 6.2, 7.3_
   - **Property 1: Chunk-split invariance** (resampler, FIFO)
   - **Property 2: Resampler response**
-  - **Property 9: Pre-roll shadow equivalence**
+  - **Property 9: Pre-roll shadow equivalence**, **Property 15: Shadow from any start**
 
 - [ ] 2. Router
   - `src/core/auto-listen/inputs.ts` (`AnalogInput`, `VoiceInput`),
@@ -38,17 +39,19 @@ maintainer from the design (MAIN-NEEDED). Tests are in-process only.
     `tests/unit/core/auto-listen/router.property.test.ts` with a fake voice source, fake coverage
     and injected clock
     including a delayed-drain regression test (a fake socket that withholds drain for seconds)
-  - _Requirements: 2.6, 2.7, 2.8, 3.2, 3.4, 3.5, 4.1 to 4.10, 5.1, 5.2, 6.4, 8.1, 8.2_
+  - _Requirements: 2.6, 2.7, 2.8, 3.2, 3.4, 3.5, 4.1 to 4.11, 5.1, 5.2, 6.4, 8.1, 8.2_
   - **Property 3: Bounded pacing**, **Property 4: No doubled audio**, **Property 5: No loss
     inside an over**, **Property 6: Priority and bound**, **Property 7: Catch-up only on
     silence**, **Property 10: Encryption**, **Property 11: Several decoders**, **Property 12:
-    Coverage**, **Property 14: Output blocks are immutable**
+    Coverage**, **Property 14: Output blocks are immutable**, **Property 16: Digital
+    tail**
 
 - [ ] 3. Wiring and API
   - `src/core/live-demodulator.ts`: router construction, `/auto` in `resolveRoute`, sample-aligned
     analog spans at the three client-write sites, `PreRollShadow` calls next to each pre-roll
-    call, `resetAnalog` next to the evidence resets, `autoRoute` on status and level,
-    `attachAutoRouteVoice`
+    call with the shadow built, cleared and dropped with the pre-roll (tracking with or
+    without `/auto` clients), `resetAnalog` next to the evidence resets, `autoRoute` on status and level,
+    `attachAutoRouteVoice` (coverage `generation` port, cached `covers`)
   - `src/core/digital-voice.ts`: `addVoiceTap`, `voiceSampleRate`, ingest condition and
     `frame` call, `call` notifications from `handleVoiceCall`, `detach` from `removeChannel`,
     `stop` and `destroy` (own stream unchanged)

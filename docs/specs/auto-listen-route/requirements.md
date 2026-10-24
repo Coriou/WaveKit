@@ -70,10 +70,12 @@ scaled by 32 767 with round-half-away-from-zero.
 2.3 Resampling has a passband to at least 0.4 × min(input, output) rate with ripple within
 ±0.5 dB, and attenuates images and aliases above 0.5 × min(input, output) by at least 50 dB.
 
-2.4 No per-chunk allocation in steady state: resampler state, filter tables, FIFOs and
-qualification runs are preallocated when the route is created or the input rate changes;
-chunk-split remainders are carried in fixed scratch buffers. The only steady-state allocation is
-the output block of 2.8.
+2.4 **Allocation.** The router's DSP backing storage (filter tables, resampler history, input
+scratch and the typed-array views over it, FIFOs, flag and shadow run rings) is allocated when
+the route is created or an input rate or format changes, never per chunk, datagram or block.
+Bounded steady-state exceptions, each budgeted in the design: the output block of 2.8, the
+digital voice service's existing per-datagram downmix copy, coverage recomputes (once per input
+per coverage generation, 3.4) and status or level objects.
 
 2.5 Resampled output is chunk-split invariant: for any split of one input into chunks, the
 emitted samples are identical.
@@ -122,7 +124,11 @@ application answers `yes`: the live tuned frequency and the settled VFO agree (n
 pending), and a running placement on the live source has its channel within half the channel
 bandwidth of it, or, without placements, a configured target is within it and the decoder's
 source is the live source. `unknown` (missing data, pending retune, error) is treated as not
-covered. Without a coverage port or a digital voice service, `/auto` routes analog only and
+covered. Coverage carries a generation counter incremented at every event that can change it
+(live-audio config change, source caps change, VFO settle, decoder start, stop, removal and
+status change); a generation change invalidates queued digital audio and the cached answer,
+however many changes happen between two pacer ticks. Coverage is recomputed only on a
+generation change. Without a coverage port or a digital voice service, `/auto` routes analog only and
 `autoRoute.digitalAvailable` is `false`.
 
 3.5 **Several decoders and slots.** dsd-fme's stereo slots are already mixed to one mono
@@ -135,6 +141,13 @@ sources are never mixed.
 spans, one per decision of the governing squelch, so a chunk spanning an open, a close, a tone
 slice change or the final pre-roll drain qualifies exactly its playing samples. This is derived
 without changing `src/core/evidence-squelch/**`.
+
+3.7 **Continuous shadow.** The pre-roll shadow that yields evidence-path qualification tracks
+every pre-roll call for the life of the run, with or without `/auto` clients, at a tag-only cost
+stated in the design. A first connect or reconnect at any moment (pending, playback, final
+drain) qualifies exactly what a client connected from the start would. A shadow mismatch
+silences analog on `/auto` until the pre-roll next holds no sample, then the shadow resyncs.
+`/stream` is unaffected.
 
 ## 4. Switching rules
 
@@ -180,9 +193,15 @@ time before another switch, except a preemption under 4.5.
 ends and its hold expires, until it is played or invalidated, so a short digital over that
 starts and ends while the analog source is still releasing plays in full afterwards. Queued
 digital audio of a decoder is invalidated (cleared, counted in `droppedMs`) when its call turns
-encrypted (even with no further datagram), its voice channel detaches, the coverage epoch
-changes (retune, offset or source change), coverage stops being `yes`, or it is older than
+encrypted (even with no further datagram), its voice channel detaches, the coverage
+generation changes (3.4), coverage stops being `yes`, or it is older than
 `FIFO_MS`. The digital voice service notifies the router of every call change and detach.
+
+4.11 **Digital tail flush.** When a call ends, or a decoder has admitted no frame for
+`DIGITAL_HOLD_MS`, its resampler is flushed through its group delay with zeros, the flushed
+output keeps the last frame's admission, and the resampler is reset; so the final samples of a
+call are emitted even when no further datagram arrives. Detach and invalidation reset without
+flushing.
 
 ## 5. Resets
 
@@ -227,9 +246,11 @@ headers and timing are byte-identical with and without `/auto` clients (golden t
 ## 8. Performance
 
 8.1 Steady-state cost with one `/auto` client stays within the budget table in the design and
-is proven by a bench under `scripts/bench/` before landing.
+is proven by the bench `tests/bench/auto-listen-route.bench.ts` (shadow, coverage and status
+work included) before landing.
 
-8.2 Router work runs on the event loop in at most one 20 ms block per timer tick plus per-chunk
+8.2 Router work runs on the event loop in at most `CATCHUP_MAX_BLOCKS` 20 ms blocks per timer
+tick (2.7) plus per-chunk
 resampling; no single call exceeds 1 ms at 200 kHz analog input on the desktop reference host.
 
 ## 9. Acceptance
@@ -245,7 +266,9 @@ repeated sample and zeros elsewhere; status reports `analog`, then `digital` wit
 9.2 The fixture also covers: digital arriving while the analog tail drains (handover without
 loss), a stuck-open manual squelch (preemption at 1.5 s, drop counted), an encrypted call (never
 routed), two covering decoders (stickiness), and a pipeline restart with a connected client
-(client kept, rate unchanged), a short (0.5 s) digital over wholly inside the analog handover
+(client kept, rate unchanged), first connect and reconnect during pending, playback and the
+final pre-roll drain, several coverage changes between two pacer ticks with no frames, a call
+ending in a non-zero impulse with no further datagram, a short (0.5 s) digital over wholly inside the analog handover
 delay (played in full afterwards), clear then encrypted with audio queued and no further
 datagram (nothing more routed), a retune with digital audio queued (dropped), chunks spanning
 open, close and the final pre-roll drain (sample-exact), an event-loop stall (one rebase, no
