@@ -80,6 +80,60 @@ export const LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS = 1_500
  */
 export const LIVE_AUDIO_AUTO_SQUELCH_CLOSE_GUARD_MS = 10
 
+/**
+ * Auto listen route (docs/specs/auto-listen-route): `/auto` plays the analog channel or a decoded
+ * digital voice call, one source at a time, at a fixed output format.
+ */
+export const LIVE_AUDIO_AUTO_ROUTE_RATE = 48_000
+export const LIVE_AUDIO_AUTO_ROUTE_FORMAT = "s16le"
+/** Output block: 20 ms = 48 000 × 0.02 = 960 samples = 1 920 bytes. */
+export const LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS = 20
+/** Per-source FIFO: 3 000 ms = 144 000 samples at 48 kHz (288 000 bytes). */
+export const LIVE_AUDIO_AUTO_ROUTE_FIFO_MS = 3_000
+/** A digital source stays admitted this long after its last admitted frame. */
+export const LIVE_AUDIO_AUTO_ROUTE_DIGITAL_HOLD_MS = 300
+/** Digital audio queued before a digital source starts playing. */
+export const LIVE_AUDIO_AUTO_ROUTE_DIGITAL_START_MS = 200
+/** Silence after an analog over before the route releases it. */
+export const LIVE_AUDIO_AUTO_ROUTE_ANALOG_RELEASE_MS = 300
+/** Silence after a digital over before the route releases it. */
+export const LIVE_AUDIO_AUTO_ROUTE_DIGITAL_RELEASE_MS = 300
+/** Longest wait before digital preempts analog (equals the evidence pre-roll capacity). */
+export const LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS =
+	LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS
+/** Backlog the route keeps when catching up on silence. */
+export const LIVE_AUDIO_AUTO_ROUTE_TARGET_MS = 60
+/** Most blocks one pacer tick emits: 5 × 20 ms = 100 ms. */
+export const LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS = 5
+
+export type LiveAudioAutoRouteSource = "analog" | "digital" | "none"
+
+export interface LiveAudioAutoRoute {
+	active: LiveAudioAutoRouteSource
+	/** Present only while `active` is `digital` and the call reports a protocol. */
+	protocol?: string
+	/** Present only while `active` is `digital`. */
+	decoderId?: string
+	/** Present only while `active` is `digital`. */
+	slot?: number | null
+	/** ISO time of the last change of `active`. */
+	since: string
+	httpUrl: string
+	wavUrl: string
+	clientCount: number
+	digitalAvailable: boolean
+	underruns: number
+	droppedMs: number
+	clockRebases: number
+	/** Selected source's backlog plus one block, ms. */
+	latencyMs: number
+}
+
+export interface LiveAudioAutoRouteLevel {
+	active: LiveAudioAutoRouteSource
+	protocol?: string
+}
+
 export type LiveAudioAutoSquelchEvidence = "voice" | "ctcss" | "dcs"
 /**
  * Evidence gate state: `off` (not evidence-gated), `waiting` (no evidence yet, audio held),
@@ -233,6 +287,8 @@ export interface LiveAudioStatus {
 	}
 	/** Evidence squelch gate while running; `off` when the evidence path is inactive (any non-NFM modulation). */
 	autoSquelch?: LiveAudioAutoSquelch
+	/** Auto listen route (`/auto`), present whenever the HTTP server listens. */
+	autoRoute?: LiveAudioAutoRoute
 }
 
 export type LiveDemodConfig = LiveAudioConfig
@@ -247,6 +303,8 @@ export interface LiveAudioLevel {
 	thresholdDbfs: number
 	/** Evidence squelch gate state at the measured block. */
 	autoSquelch?: LiveAudioAutoSquelch
+	/** Auto listen route selection while `/auto` has a client (a fresh object per level). */
+	autoRoute?: LiveAudioAutoRouteLevel
 }
 
 /** Why an analog transmission ended (WG1). */

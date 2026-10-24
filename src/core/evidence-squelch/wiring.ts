@@ -25,6 +25,25 @@ export interface EvidenceWiring {
 	tailTag: PreRollTag
 	/** False after a build or clear: bytes completing a split sample are skipped (muted) once. */
 	aligned: boolean
+	/**
+	 * Mirror of every pre-roll call this wiring makes, each right after the call (the `/auto`
+	 * pre-roll shadow, auto-listen-route 3.6, 3.7). It must not modify the chunk.
+	 */
+	tap?: EvidencePreRollTap | null
+}
+
+/**
+ * Observer of the wiring's pre-roll calls, in call order. `processed` sees the chunk range
+ * already rewritten with the pre-roll's output (fades included); `skipped` is a range zeroed
+ * without a pre-roll call (an unaligned split-sample lead).
+ */
+export interface EvidencePreRollTap {
+	processed(chunk: Buffer, start: number, end: number, tag: PreRollTag): void
+	latched(): void
+	abandoned(): void
+	/** After `preRoll.muteTail(samples, fadeSamples)` (A17). */
+	mutedTail(samples: number, fadeSamples: number): void
+	skipped(chunk: Buffer, start: number, end: number): void
 }
 
 /**
@@ -45,8 +64,10 @@ export function processEvidenceChunk(
 	const lead = Math.min(chunk.length, toBoundary)
 	if (lead > 0) {
 		// A partial sample the pre-roll never saw the start of is muted, not framed.
-		if (!wiring.aligned) chunk.fill(0, 0, lead)
-		else evidenceSpan(wiring, chunk, 0, lead, open, format, rate, true)
+		if (!wiring.aligned) {
+			chunk.fill(0, 0, lead)
+			wiring.tap?.skipped(chunk, 0, lead)
+		} else evidenceSpan(wiring, chunk, 0, lead, open, format, rate, true)
 	}
 	// Unaligned until the stream reaches a sample boundary (a short chunk may not).
 	if (chunk.length >= toBoundary) wiring.aligned = true
@@ -84,16 +105,20 @@ function evidenceSpan(
 			// A17: an STE tone ended the over. Everything from its onset is dropped: this slice,
 			// and (retroactively, while still held by the pre-roll delay) the queued tail, with a
 			// fade-out before the onset; pending audio is abandoned. No close guard follows.
-			if (k >= 0) preRoll.latch()
-			preRoll.process(chunk, start, end, completing ? wiring.tailTag : "drop")
-			preRoll.abandon()
-			preRoll.muteTail?.(steBack, msToSamples(EVIDENCE_FADE_OUT_MS, rate))
+			if (k >= 0) latch(wiring)
+			tagSpan(wiring, chunk, start, end, completing ? wiring.tailTag : "drop")
+			abandon(wiring)
+			if (preRoll.muteTail !== undefined) {
+				const fade = msToSamples(EVIDENCE_FADE_OUT_MS, rate)
+				preRoll.muteTail(steBack, fade)
+				wiring.tap?.mutedTail(steBack, fade)
+			}
 			wiring.tailTag = "drop"
 			return
 		}
 		if (completing) {
-			preRoll.process(chunk, start, end, wiring.tailTag)
-			if (k >= 0) preRoll.latch()
+			tagSpan(wiring, chunk, start, end, wiring.tailTag)
+			if (k >= 0) latch(wiring)
 			return
 		}
 		// A16 (sample-accurate, 2026-10-24): while latched, the gate's audible prefix of the
@@ -101,8 +126,8 @@ function evidenceSpan(
 		// input samples, whatever the pre-roll delay).
 		const reported = gate.audibleEnd ?? end
 		if (k >= 0) {
-			if (k > start) preRoll.process(chunk, start, k, "pending")
-			preRoll.latch()
+			if (k > start) tagSpan(wiring, chunk, start, k, "pending")
+			latch(wiring)
 			if (end > k) splitTag(wiring, chunk, k, end, reported)
 			return
 		}
@@ -111,21 +136,21 @@ function evidenceSpan(
 			return
 		}
 		// Waiting (also after an STE: held audio waits for fresh evidence or the close, A17).
-		preRoll.process(chunk, start, end, "pending")
+		tagSpan(wiring, chunk, start, end, "pending")
 		wiring.tailTag = "pending"
 		return
 	}
-	if (gate.state === "waiting") preRoll.abandon()
+	if (gate.state === "waiting") abandon(wiring)
 	const guard = Math.min(
 		end - start,
 		gate.closed(end - start, format, chunk, start),
 	)
 	if (completing) {
-		preRoll.process(chunk, start, end, wiring.tailTag)
+		tagSpan(wiring, chunk, start, end, wiring.tailTag)
 		return
 	}
-	if (guard > 0) preRoll.process(chunk, start, start + guard, "guard")
-	if (end > start + guard) preRoll.process(chunk, start + guard, end, "drop")
+	if (guard > 0) tagSpan(wiring, chunk, start, start + guard, "guard")
+	if (end > start + guard) tagSpan(wiring, chunk, start + guard, end, "drop")
 	wiring.tailTag = end > start + guard ? "drop" : "guard"
 }
 
@@ -138,7 +163,29 @@ function splitTag(
 	reported: number,
 ): void {
 	const cut = reported < from ? from : reported > end ? end : reported
-	if (cut > from) wiring.preRoll.process(chunk, from, cut, "pass")
-	if (end > cut) wiring.preRoll.process(chunk, cut, end, "drop")
+	if (cut > from) tagSpan(wiring, chunk, from, cut, "pass")
+	if (end > cut) tagSpan(wiring, chunk, cut, end, "drop")
 	wiring.tailTag = end > cut ? "drop" : "pass"
+}
+
+/** One pre-roll call, then its tap mirror. */
+function tagSpan(
+	wiring: EvidenceWiring,
+	chunk: Buffer,
+	start: number,
+	end: number,
+	tag: PreRollTag,
+): void {
+	wiring.preRoll.process(chunk, start, end, tag)
+	wiring.tap?.processed(chunk, start, end, tag)
+}
+
+function latch(wiring: EvidenceWiring): void {
+	wiring.preRoll.latch()
+	wiring.tap?.latched()
+}
+
+function abandon(wiring: EvidenceWiring): void {
+	wiring.preRoll.abandon()
+	wiring.tap?.abandoned()
 }

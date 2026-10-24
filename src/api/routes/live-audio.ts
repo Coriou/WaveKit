@@ -176,6 +176,36 @@ const liveDemodStatusSchema = {
 				at: { type: "string", maxLength: 64 },
 			},
 		},
+		autoRoute: {
+			type: "object",
+			properties: {
+				active: { type: "string", enum: ["analog", "digital", "none"] },
+				protocol: { type: "string" },
+				decoderId: { type: "string" },
+				slot: { type: ["number", "null"] },
+				since: { type: "string" },
+				httpUrl: { type: "string" },
+				wavUrl: { type: "string" },
+				clientCount: { type: "number" },
+				digitalAvailable: { type: "boolean" },
+				underruns: { type: "number" },
+				droppedMs: { type: "number" },
+				clockRebases: { type: "number" },
+				latencyMs: { type: "number" },
+			},
+			required: [
+				"active",
+				"since",
+				"httpUrl",
+				"wavUrl",
+				"clientCount",
+				"digitalAvailable",
+				"underruns",
+				"droppedMs",
+				"clockRebases",
+				"latencyMs",
+			],
+		},
 		engine: { type: "string", enum: ["csdr", "rust"] },
 		engineFallback: {
 			type: "string",
@@ -352,6 +382,9 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			...(status.tone !== undefined
 				? { tone: copyStatusTone(status.tone) }
 				: {}),
+			...(status.autoRoute !== undefined
+				? { autoRoute: { ...status.autoRoute } }
+				: {}),
 			engine: status.engine ?? "csdr",
 			...(status.engineFallback !== undefined
 				? { engineFallback: status.engineFallback }
@@ -394,12 +427,29 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				status.wavUrl === undefined
 					? undefined
 					: deriveLegacyAudioUrl(status.wavUrl, host, port)
-			if (httpUrl === status.httpUrl && wavUrl === status.wavUrl) return status
+			const auto = status.autoRoute
+			const autoRoute =
+				auto === undefined
+					? undefined
+					: {
+							...auto,
+							httpUrl: deriveLegacyAudioUrl(auto.httpUrl, host, port),
+							wavUrl: deriveLegacyAudioUrl(auto.wavUrl, host, port),
+						}
+			if (
+				httpUrl === status.httpUrl &&
+				wavUrl === status.wavUrl &&
+				(auto === undefined ||
+					(autoRoute?.httpUrl === auto.httpUrl &&
+						autoRoute.wavUrl === auto.wavUrl))
+			)
+				return status
 			void reply.header("Cache-Control", "no-store")
 			return {
 				...status,
 				httpUrl,
 				...(wavUrl === undefined ? {} : { wavUrl }),
+				...(autoRoute === undefined ? {} : { autoRoute }),
 			}
 		},
 	)

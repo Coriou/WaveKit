@@ -253,6 +253,18 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
 {
   "afterOffset": {
     "agc": "off",
+    "autoRoute": {
+      "active": "none",
+      "clientCount": 0,
+      "clockRebases": 0,
+      "digitalAvailable": false,
+      "droppedMs": 0,
+      "httpUrl": "http://localhost:45678/auto",
+      "latencyMs": 20,
+      "since": "<iso>",
+      "underruns": 0,
+      "wavUrl": "http://localhost:45678/auto.wav",
+    },
     "autoSquelch": {
       "state": "off",
     },
@@ -298,6 +310,18 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
   },
   "running": {
     "agc": "off",
+    "autoRoute": {
+      "active": "none",
+      "clientCount": 0,
+      "clockRebases": 0,
+      "digitalAvailable": false,
+      "droppedMs": 0,
+      "httpUrl": "http://localhost:45678/auto",
+      "latencyMs": 20,
+      "since": "<iso>",
+      "underruns": 0,
+      "wavUrl": "http://localhost:45678/auto.wav",
+    },
     "autoSquelch": {
       "state": "off",
     },

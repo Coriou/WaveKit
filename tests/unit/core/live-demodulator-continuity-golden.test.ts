@@ -144,10 +144,16 @@ describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
 		await liveDemod.reconfigure({ offsetHz: 6000 })
 		const afterOffset = liveDemod.getStatus()
 		await liveDemod.stop()
+		// autoRoute.since is wall-clock time (auto-listen-route 6.1): pinned to its shape only.
+		const stable = (status: ReturnType<typeof liveDemod.getStatus>) => {
+			if (status.autoRoute === undefined) return status
+			expect(Number.isNaN(Date.parse(status.autoRoute.since))).toBe(false)
+			return { ...status, autoRoute: { ...status.autoRoute, since: "<iso>" } }
+		}
 		expect({
-			running,
-			afterOffset,
-			stopped: liveDemod.getStatus(),
+			running: stable(running),
+			afterOffset: stable(afterOffset),
+			stopped: stable(liveDemod.getStatus()),
 		}).toMatchSnapshot()
 	})
 

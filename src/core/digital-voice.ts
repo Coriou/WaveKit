@@ -50,6 +50,7 @@ import {
 	type VoiceChannels,
 } from "./dsd-fme-voice-format.js"
 import { PacedPcmStream } from "./paced-pcm-stream.js"
+import type { VoiceTap, VoiceTapSource } from "./auto-listen/contract.js"
 
 export type { DigitalVoiceConfig } from "../config.js"
 
@@ -234,7 +235,10 @@ function isDsdFmeMode(value: unknown): value is DsdFmeMode {
 	return DSD_FME_MODES.includes(value as DsdFmeMode)
 }
 
-export class DigitalVoiceService extends EventEmitter {
+export class DigitalVoiceService
+	extends EventEmitter
+	implements VoiceTapSource
+{
 	private readonly log: Logger
 	private readonly config: DigitalVoiceConfig
 	private readonly options: Required<
@@ -249,6 +253,9 @@ export class DigitalVoiceService extends EventEmitter {
 	/** Optional voice-call fields dropped because they failed validation. */
 	private metadataDrops = 0
 	private metadataDropLogged = false
+	/** Auto listen route taps (auto-listen-route 3.3); empty unless `/auto` has a client. */
+	private readonly voiceTaps = new Set<VoiceTap>()
+	private voiceTapFailureLogged = false
 
 	constructor(
 		logger: Logger,
@@ -272,6 +279,40 @@ export class DigitalVoiceService extends EventEmitter {
 			err => this.emitError(err),
 			options.httpAccess,
 		)
+	}
+
+	/** Rate of the mono voice handed to taps (8 kHz s16le). */
+	get voiceSampleRate(): number {
+		return STREAM.rate
+	}
+
+	/**
+	 * Registers an auto listen route tap: decoded, encryption-muted mono voice per datagram
+	 * (even with no client on this service's own streams), every call event and every detach.
+	 * Returns its remover. This service's own streams, pacing and counters are unchanged.
+	 */
+	addVoiceTap(tap: VoiceTap): () => void {
+		this.voiceTaps.add(tap)
+		return () => {
+			this.voiceTaps.delete(tap)
+		}
+	}
+
+	private notifyTaps(fn: (tap: VoiceTap) => void): void {
+		for (const tap of this.voiceTaps) {
+			try {
+				fn(tap)
+			} catch {
+				this.noteTapFailure()
+			}
+		}
+	}
+
+	/** A fixed message: no property of the thrown value is read (it is untrusted). */
+	private noteTapFailure(): void {
+		if (this.voiceTapFailureLogged) return
+		this.voiceTapFailureLogged = true
+		this.log.warn("Auto listen voice tap failed")
 	}
 
 	/** Invalid optional call-metadata fields dropped so far. */
@@ -352,6 +393,7 @@ export class DigitalVoiceService extends EventEmitter {
 		channel.paced.stop()
 		channel.registry.closeAll("removed", true)
 		channel.socket.close()
+		this.notifyTaps(tap => tap.detach(decoderId))
 		this.emit("clients-changed")
 		this.log.info({ decoderId }, "Digital voice channel removed")
 	}
@@ -462,6 +504,7 @@ export class DigitalVoiceService extends EventEmitter {
 		for (const channel of this.channels.values()) {
 			channel.paced.stop()
 			channel.registry.closeAll("stop", true)
+			this.notifyTaps(tap => tap.detach(channel.decoderId))
 		}
 		await this.http.close()
 		this.emit("stopped")
@@ -474,6 +517,7 @@ export class DigitalVoiceService extends EventEmitter {
 		for (const channel of this.channels.values()) {
 			channel.detach?.()
 			channel.socket.close()
+			this.notifyTaps(tap => tap.detach(channel.decoderId))
 		}
 		this.channels.clear()
 	}
@@ -580,13 +624,15 @@ export class DigitalVoiceService extends EventEmitter {
 	private ingest(channel: VoiceChannel, datagram: Buffer): void {
 		channel.datagrams++
 		channel.lastDatagramAt = new Date()
-		if (!this.running || !channel.paced.running) return
+		// `own`: this service's stream is paced. Taps alone never move its counters (7.2).
+		const own = channel.paced.running
+		if (!this.running || (!own && this.voiceTaps.size === 0)) return
 		const call = channel.call
 		const encrypted = call?.active === true && call.encrypted
 		const slot = call?.slot
 		if (encrypted && (channel.channels === 1 || (slot !== 1 && slot !== 2))) {
 			// Mono, or the slot is unknown: the whole datagram may be that call.
-			channel.encryptedDropped++
+			if (own) channel.encryptedDropped++
 			return
 		}
 		const mono = downmixDsdFmeDatagram(
@@ -596,7 +642,11 @@ export class DigitalVoiceService extends EventEmitter {
 			// other slot keeps playing (dsd-fme zero-fills the muted slot too).
 			encrypted && (slot === 1 || slot === 2) ? { muteSlot: slot } : {},
 		)
-		if (mono && datagram.length % dsdFmeDatagramBytes(channel.channels) !== 0) {
+		if (
+			own &&
+			mono &&
+			datagram.length % dsdFmeDatagramBytes(channel.channels) !== 0
+		) {
 			if (channel.oddSized === 0) {
 				this.log.warn(
 					{
@@ -611,6 +661,7 @@ export class DigitalVoiceService extends EventEmitter {
 			channel.oddSized++
 		}
 		if (!mono) {
+			if (!own) return
 			if (channel.rejected === 0) {
 				this.log.warn(
 					{
@@ -624,6 +675,15 @@ export class DigitalVoiceService extends EventEmitter {
 			channel.rejected++
 			return
 		}
+		// Inline loop: no closure per datagram.
+		for (const tap of this.voiceTaps) {
+			try {
+				tap.frame(channel.decoderId, mono, channel.call)
+			} catch {
+				this.noteTapFailure()
+			}
+		}
+		if (!own) return
 		if (encrypted) channel.encryptedDropped++
 		channel.paced.push(mono)
 	}
@@ -671,6 +731,8 @@ export class DigitalVoiceService extends EventEmitter {
 			channel.call = null
 			channel.lastCall = call
 		}
+		if (this.voiceTaps.size > 0)
+			this.notifyTaps(tap => tap.call(channel.decoderId, call))
 		this.emit("call", call)
 	}
 

@@ -1415,6 +1415,19 @@ Fields:
   including `am`, or a run on the Rust engine), `waiting` (no evidence yet: audio is held and the stream carries silence)
   or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
+- `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
+  audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
+httpUrl, wavUrl, clientCount, digitalAvailable, underruns, droppedMs,
+clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
+  `protocol` (when the call reports one), `decoderId` and `slot` (a number or
+  `null`) are present only while `active` is `digital`. `since` is the ISO time of
+  the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
+  (public origin, legacy `Host` rewrite). `digitalAvailable` is `false` when the
+  core routes analog only. `underruns` counts output blocks short of audio,
+  `droppedMs` the audio dropped on overflow, preemption or invalidation,
+  `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
+  selected source's backlog plus one 20 ms block. Optional in `@wavekit/api-types`;
+  absent from older cores.
 - `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
   `GET /api/live-audio/status?diagnostics=true` while the evidence gate runs, never on
   level events; it may change or disappear without notice. The gate's current voice
@@ -1584,10 +1597,29 @@ server ends existing streams; reconnect to get the new parameters. A client that
 falls behind keeps at most about one second of queued audio (the oldest audio is
 dropped); a client that accepts nothing for 30 s is disconnected.
 
+#### GET http://localhost:8081/auto and /auto.wav
+
+One stream that plays whatever is on the tuned channel: the analog audio while the
+squelch that governs `/stream` lets it through (exactly the `/stream` samples,
+resampled), decoded digital voice while a digital voice decoder covering the tuned
+channel produces voice (never an encrypted call), and exact silence otherwise. One
+source plays at a time; digital wins over analog after the analog over releases
+(300 ms), or after at most 1.5 s.
+
+- Always 48 000 Hz, `s16le`, mono (`X-Audio-Format: s16le`, `X-Sample-Rate: 48000`,
+  `X-Channels: 1`); `/auto.wav` adds the streaming WAV header.
+- Clients stay connected across pipeline restarts, retunes, modulation, squelch
+  and source rate changes; only the stall timeout, a server stop or shutdown
+  closes them. The per-client queue bound and the 30 s stall disconnect of
+  `/stream` apply.
+- Same server, access rules, stream leases and CORS as `/stream` (below).
+- Status: `autoRoute` on [GET /api/live-audio/status](#get-apilive-audiostatus) and
+  on `live-audio:level`.
+
 Cross-origin use (WG7). In legacy access mode, every response of the audio HTTP
 servers carries `Access-Control-Allow-Origin: *` beside
 `Access-Control-Expose-Headers`, and never `Access-Control-Allow-Credentials`.
-The servers are the live demodulator (`/stream`, `/stream.wav`) and digital
+The servers are the live demodulator (`/stream`, `/stream.wav`, `/auto`, `/auto.wav`) and digital
 voice (`/decoders/<id>/stream[.wav]`). Their 404 and 503 answers carry the
 header too, so a web app on another origin can `fetch()` the stream. `OPTIONS`
 on a stream path answers 204 with `Access-Control-Allow-Origin: *`,
@@ -5791,7 +5823,9 @@ On the `live-audio` channel while the live demodulator runs, published at
 10 Hz. `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
 first complete IQ block; `thresholdDbfs` is the threshold in effect. `squelchOpen`
 is stage 1; the optional `autoSquelch` is the evidence gate at the measured block,
-as in [GET /api/live-audio/status](#get-apilive-audiostatus).
+as in [GET /api/live-audio/status](#get-apilive-audiostatus). While `/auto` has a
+client, the optional `autoRoute` is `{ active, protocol? }` (`protocol` only while
+`active` is `digital` and the call reports one).
 
 ```json
 {

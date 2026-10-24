@@ -33,6 +33,8 @@ import {
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_SQUELCH_MODES,
 	type AnalogTransmissionDcs,
+	type LiveAudioAutoRoute,
+	type LiveAudioAutoRouteLevel,
 	type LiveAudioAutoSquelch,
 	type LiveAudioSquelchMode,
 } from "@wavekit/api-types"
@@ -84,14 +86,25 @@ import {
 	EVIDENCE_NOTE_DISCARD,
 	evidenceDeviationHz,
 	evidenceGateApplies,
+	pcmSampleBytes,
 	type EvidenceSquelchFactory,
+	type PreRollTag,
 } from "./evidence-squelch/contract.js"
 import { EvidenceGate } from "./evidence-squelch/evidence-gate.js"
 import {
 	processEvidenceChunk,
+	type EvidencePreRollTap,
 	type EvidenceWiring,
 } from "./evidence-squelch/wiring.js"
 import { PreRoll } from "./evidence-squelch/pre-roll.js"
+import { AutoListenRouter } from "./auto-listen/router.js"
+import { AUTO_ROUTE_STREAM } from "./auto-listen/contract.js"
+import type {
+	AutoRouteClock,
+	VoiceCoveragePort,
+	VoiceTapSource,
+} from "./auto-listen/contract.js"
+import { PreRollShadow } from "./auto-listen/preroll-shadow.js"
 import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
@@ -130,6 +143,8 @@ export interface LiveAudioLevel {
 	thresholdDbfs: number
 	/** Evidence squelch gate state (a fresh object per level). */
 	autoSquelch?: LiveAudioAutoSquelch
+	/** Auto listen route selection while `/auto` has a client (a fresh object per level). */
+	autoRoute?: LiveAudioAutoRouteLevel
 }
 
 export interface LiveDemodStatus {
@@ -175,6 +190,8 @@ export interface LiveDemodStatus {
 		dcs: AnalogTransmissionDcs | null
 		at: string
 	}
+	/** Auto listen route (`/auto`), present whenever the HTTP server listens. */
+	autoRoute?: LiveAudioAutoRoute
 }
 
 /** reconfigure() input; `agc: null` deletes the key (modulation default). */
@@ -192,6 +209,8 @@ export interface LiveDemodEvents {
 	"config-changed": (config: LiveDemodConfig) => void
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
+	/** Auto listen route: once per change of the active source or digital decoder. */
+	"auto-route-changed": (level: LiveAudioAutoRouteLevel) => void
 	/**
 	 * Demodulated PCM, only while something is listening (WG2 req 7.6).
 	 * The chunk is the buffer written to audio clients; with a tone squelch
@@ -232,10 +251,13 @@ export interface LiveDemodulatorOptions {
 	 * (`DEFAULT_EVIDENCE_SQUELCH`); tests inject fakes.
 	 */
 	evidenceSquelch?: EvidenceSquelchFactory
+	/** Auto listen route pacer clock (tests inject one; default monotonic). */
+	autoRouteClock?: AutoRouteClock
 }
 
 type InjectedOptionKeys =
 	| "evidenceSquelch"
+	| "autoRouteClock"
 	| "httpAccess"
 	| "publicOrigin"
 	| "httpHost"
@@ -248,6 +270,14 @@ type ResolvedOptions = Required<
 
 /** Evidence squelch state of one run (streams in `LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS` only). */
 interface RunEvidence extends EvidenceWiring {
+	/**
+	 * Tag-only replay of `preRoll` for `/auto` qualification (auto-listen-route 3.6, 3.7),
+	 * built, cleared and dropped with it; null when it could not be built (analog on `/auto`
+	 * stays silent on the evidence path: fail closed).
+	 */
+	shadow: PreRollShadow | null
+	/** Mirrors every wiring pre-roll call on `shadow` and feeds `/auto` (set at build). */
+	tap: EvidencePreRollTap | null
 	/** `evidenceAppliesTo` when last synced; a flip resets the gate and clears the pre-roll. */
 	active: boolean
 }
@@ -426,6 +456,16 @@ export class LiveDemodulator extends EventEmitter {
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
+	/** `/auto`: one stream that plays the analog over or covering digital voice. */
+	private readonly autoRoute: AutoListenRouter
+	private autoShadowMismatchLogged = false
+	/** Stream byte phase (mod 4) of the chunk being handled, for `/auto` sample alignment. */
+	private autoPhase = 0
+	/**
+	 * False after a connect from zero clients or an analog reset: the next `/auto` span is cut
+	 * to the run's next sample boundary, so the router never starts mid-sample.
+	 */
+	private autoAligned = false
 	private run: PipelineRun | null = null
 	private branchId: string | null = null
 	private branchStream: Readable | null = null
@@ -470,6 +510,19 @@ export class LiveDemodulator extends EventEmitter {
 		this.audio.on("client-disconnected", (id: string) =>
 			this.emit("client-disconnected", id),
 		)
+		this.autoRoute = new AutoListenRouter(this.log, {
+			stallTimeoutMs: this.options.clientStallTimeoutMs,
+			...(options.autoRouteClock !== undefined
+				? { clock: options.autoRouteClock }
+				: {}),
+		})
+		// A first client (connect or reconnect) re-aligns the next analog span.
+		this.autoRoute.registry.on("client-connected", () => {
+			if (this.autoRoute.registry.size === 1) this.autoAligned = false
+		})
+		this.autoRoute.on("auto-route-changed", (level: LiveAudioAutoRouteLevel) =>
+			this.emit("auto-route-changed", level),
+		)
 		this.clock = options.clock ?? systemSilenceClock
 		this.silence = new SilenceFill(this.audio, this.clock)
 		this.http = new AudioHttpServer(
@@ -507,6 +560,7 @@ export class LiveDemodulator extends EventEmitter {
 			resetFloorForRetune: run => {
 				this.resetFloorForRetune(run)
 				this.resetEvidence(run)
+				this.resetAutoAnalog()
 			},
 			clearCloseOverride: () => {
 				this.closeOverride = null
@@ -607,6 +661,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.closeOverride = "stopped"
 		try {
 			if (this.run) this.resetEvidence(this.run)
+			this.resetAutoAnalog()
 			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
@@ -616,6 +671,7 @@ export class LiveDemodulator extends EventEmitter {
 			this.detachBranch()
 			this.activeSourceId = null
 			this.audio.closeAll("stop", true)
+			this.autoRoute.registry.closeAll("stop", true)
 			await this.closeHttpServer()
 			// A failure that was still being cleaned up may have scheduled a restart.
 			this.clearRestartTimer()
@@ -751,6 +807,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.publishSquelchChange()
 					// Requirement 2.9: the swap start clears the gate and the pre-roll.
 					this.resetEvidence(run)
+					this.resetAutoAnalog()
 					this.closeOverride = null
 					const outcome = await this.swapFront(run, swapPlan.front)
 					if (outcome === "timeout" || outcome === "failed") {
@@ -838,6 +895,14 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		if (this.http.listening && this.channelTone !== null)
 			status.tone = copyChannelTone(this.channelTone)
+		if (this.http.listening) {
+			const origin =
+				this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`
+			status.autoRoute = this.autoRoute.status({
+				httpUrl: `${origin}/auto`,
+				wavUrl: `${origin}/auto.wav`,
+			})
+		}
 
 		return status
 	}
@@ -976,6 +1041,7 @@ export class LiveDemodulator extends EventEmitter {
 			if (evidence !== null && evidence.gate.state === "waiting") {
 				evidence.gate.reset()
 				evidence.preRoll.abandon()
+				evidence.shadow?.abandon()
 			}
 		}
 		this.emit("squelch-changed", open)
@@ -1097,7 +1163,10 @@ export class LiveDemodulator extends EventEmitter {
 			const flags = evidence.gate.noteBlock(
 				this.evidenceCarrier(run, power, sample),
 			)
-			if ((flags & EVIDENCE_NOTE_DISCARD) !== 0) evidence.preRoll.abandon()
+			if ((flags & EVIDENCE_NOTE_DISCARD) !== 0) {
+				evidence.preRoll.abandon()
+				evidence.shadow?.abandon()
+			}
 		}
 		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
 		// The squelch samples this estimate only while closed (it rises while
@@ -1213,6 +1282,7 @@ export class LiveDemodulator extends EventEmitter {
 				thresholdDbfs: this.effectiveThreshold(run),
 			}
 			level.autoSquelch = this.autoSquelchState(run)
+			if (this.autoRoute.wanted) level.autoRoute = this.autoRoute.level()
 			this.emit("level", level)
 		}, 1000 / this.options.levelHz)
 		this.levelTimer.unref()
@@ -1312,6 +1382,7 @@ export class LiveDemodulator extends EventEmitter {
 				this.resetFloorForRetune(this.run)
 				this.resetEvidence(this.run)
 			}
+			this.resetAutoAnalog()
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -1866,6 +1937,7 @@ export class LiveDemodulator extends EventEmitter {
 		run.stopping = true
 		if (this.run === run) {
 			this.run = null
+			this.resetAutoAnalog()
 			this.stopLevelPublishing()
 			this.publishSquelchChange()
 		}
@@ -1945,6 +2017,7 @@ export class LiveDemodulator extends EventEmitter {
 	private async closeHttpServer(): Promise<void> {
 		if (!this.http.listening) return
 		this.audio.closeAll("server closing", true)
+		this.autoRoute.registry.closeAll("server closing", true)
 		await this.http.close()
 	}
 
@@ -1956,8 +2029,56 @@ export class LiveDemodulator extends EventEmitter {
 
 	private resolveRoute(req: http.IncomingMessage): AudioRoute | null {
 		const { base, wav } = parseStreamPath(req.url)
+		// auto-listen-route 1.1, 1.2: same server, access adapter, leases and CORS as /stream.
+		if (base === "/auto")
+			return {
+				registry: this.autoRoute.registry,
+				stream: AUTO_ROUTE_STREAM,
+				wav,
+			}
 		if (base !== "/stream") return null
 		return { registry: this.audio, stream: this.plannedStream(), wav }
+	}
+
+	/**
+	 * Digital voice for `/auto` (auto-listen-route 3.3, 3.4): the voice taps and the coverage
+	 * port (its `generation` bumps on every event that can change coverage; `covers` is called
+	 * only on a generation change). Without it `/auto` is analog only.
+	 */
+	attachAutoRouteVoice(
+		source: VoiceTapSource,
+		coverage: VoiceCoveragePort,
+	): void {
+		this.autoRoute.attachVoice(source, coverage)
+	}
+
+	/** One sample-aligned `/auto` span of the client bytes (requirement 3.6). */
+	private pushAuto(
+		chunk: Buffer,
+		start: number,
+		end: number,
+		audible: boolean,
+		stream: StreamFormat,
+	): void {
+		if (end <= start) return
+		if (!this.autoAligned) {
+			// Bytes finishing a sample the router never saw the start of are skipped.
+			const width = pcmSampleBytes(stream.format)
+			const skip = (width - ((this.autoPhase + start) % width)) % width
+			if (end - start <= skip) {
+				if (end - start === skip) this.autoAligned = true
+				return
+			}
+			start += skip
+			this.autoAligned = true
+		}
+		this.autoRoute.pushAnalog(chunk, start, end, audible, stream)
+	}
+
+	/** Clears `/auto` analog (FIFO, resampler, split sample) and re-aligns the next span. */
+	private resetAutoAnalog(): void {
+		this.autoRoute.resetAnalog()
+		this.autoAligned = false
 	}
 
 	/** Registers a streaming response (also used by tests with a stand-in). */
@@ -1981,6 +2102,8 @@ export class LiveDemodulator extends EventEmitter {
 		// WG10 req 2.2: the new run's first audio ends the silence fill.
 		if (run !== null) this.silence.disarm("audio")
 		const phase = run?.pcmPhase ?? 0
+		this.autoPhase = phase
+		if (!this.autoRoute.wanted) this.autoAligned = false
 		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
 		const tone = run?.tone ?? null
 		const evidence =
@@ -1994,7 +2117,11 @@ export class LiveDemodulator extends EventEmitter {
 			return
 		}
 		if (run === null || tone === null) {
-			if (run !== null) run.pcmTailMuted = false
+			if (run !== null) {
+				run.pcmTailMuted = false
+				if (this.autoRoute.wanted)
+					this.pushAuto(chunk, 0, chunk.length, runGateOpen(run), run.stream)
+			}
 			this.audio.write(chunk)
 			this.emitPcm(chunk)
 			return
@@ -2020,13 +2147,20 @@ export class LiveDemodulator extends EventEmitter {
 				chunk.fill(0, lead)
 				run.pcmTailMuted = true
 			}
+			if (this.autoRoute.wanted) {
+				// The lead keeps its sample's decision (an unmuted lead is the end of an open slice).
+				this.pushAuto(chunk, 0, lead, !leadMuted, run.stream)
+				this.pushAuto(chunk, lead, chunk.length, false, run.stream)
+			}
 		} else {
+			const wanted = this.autoRoute.wanted
 			// The gate's state applies per slice of at most TONE_SLICE_MS that
 			// starts on a sample boundary, so a large chunk is not passed or
 			// muted whole by its final state.
 			if (lead > 0) {
 				gate.push(chunk, format, 0, lead)
 				if (leadMuted) chunk.fill(0, 0, lead)
+				if (wanted) this.pushAuto(chunk, 0, lead, !leadMuted, run.stream)
 			}
 			const slice =
 				Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) *
@@ -2037,6 +2171,7 @@ export class LiveDemodulator extends EventEmitter {
 				const muted = !gate.open()
 				if (muted) chunk.fill(0, start, end)
 				run.pcmTailMuted = muted
+				if (wanted) this.pushAuto(chunk, start, end, !muted, run.stream)
 			}
 		}
 		this.audio.write(chunk)
@@ -2097,14 +2232,25 @@ export class LiveDemodulator extends EventEmitter {
 					: {}),
 			})
 			const preRoll = factory.createPreRoll({ rate, format })
-			return {
+			let shadow: PreRollShadow | null = null
+			try {
+				shadow = new PreRollShadow({ rate, format })
+			} catch {
+				// Fail closed: evidence-path analog never qualifies on /auto for this run.
+				shadow = null
+			}
+			const evidence: RunEvidence = {
 				gate,
 				preRoll,
+				shadow,
+				tap: null,
 				tailTag: "drop",
 				active: this.evidenceAppliesTo(run),
 				// Resolved against the next chunk's phase (processEvidence).
 				aligned: false,
 			}
+			evidence.tap = this.autoTap(run, evidence)
+			return evidence
 		} catch (err) {
 			// A5: the run keeps the frozen stage-1 path.
 			this.log.warn(
@@ -2142,6 +2288,7 @@ export class LiveDemodulator extends EventEmitter {
 		if (evidence === null) return
 		evidence.gate.reset()
 		evidence.preRoll.clear()
+		evidence.shadow?.clear()
 		evidence.tailTag = "drop"
 		evidence.aligned = false
 	}
@@ -2198,6 +2345,70 @@ export class LiveDemodulator extends EventEmitter {
 			run.stream.format,
 			run.stream.rate,
 		)
+	}
+
+	/**
+	 * The run's wiring tap (auto-listen-route 3.6, 3.7): every pre-roll call of
+	 * `processEvidenceChunk` (tags, latch, abandon, the A17 retroactive `muteTail`) is mirrored
+	 * on the shadow, tracked with or without `/auto` clients. Built once per evidence path.
+	 */
+	private autoTap(run: PipelineRun, evidence: RunEvidence): EvidencePreRollTap {
+		return {
+			processed: (chunk, start, end, tag) =>
+				this.mirrorPreRoll(evidence, chunk, start, end, tag, run.stream),
+			latched: () => evidence.shadow?.latch(),
+			abandoned: () => evidence.shadow?.abandon(),
+			mutedTail: samples => evidence.shadow?.muteTail(samples),
+			skipped: (chunk, start, end) => {
+				if (this.autoRoute.wanted)
+					this.pushAuto(chunk, start, end, false, run.stream)
+			},
+		}
+	}
+
+	/**
+	 * After one real pre-roll call (`chunk[start, end)` holds its output, fades included): the
+	 * same call on the shadow, then the shadow's output runs as `/auto` spans: a byte qualifies
+	 * only when the pre-roll plays it (3.1 a). Out of sync (a defect): silent until it resyncs.
+	 */
+	private mirrorPreRoll(
+		evidence: RunEvidence,
+		chunk: Buffer,
+		start: number,
+		end: number,
+		tag: PreRollTag,
+		stream: StreamFormat,
+	): void {
+		const shadow = evidence.shadow
+		let inSync = false
+		if (shadow !== null) {
+			const failedBefore = shadow.failed
+			shadow.process(end - start, tag)
+			inSync = shadow.sync(evidence.preRoll.delaySamples)
+			// A new mismatch drops queued /auto analog (it may be wrongly qualified) and a resync
+			// starts clean, so no audio decided while out of sync ever plays (fail closed).
+			if ((!failedBefore && !inSync) || (failedBefore && !shadow.failed))
+				this.resetAutoAnalog()
+			if (!inSync && !this.autoShadowMismatchLogged && shadow.mismatches > 0) {
+				this.autoShadowMismatchLogged = true
+				this.log.warn(
+					"Auto listen pre-roll shadow out of sync; analog on /auto muted until it resyncs",
+				)
+			}
+		}
+		if (!this.autoRoute.wanted) return
+		if (shadow === null || !inSync) {
+			this.pushAuto(chunk, start, end, false, stream)
+			return
+		}
+		let at = start
+		const runs = shadow.runCountOut
+		for (let i = 0; i < runs && at < end; i++) {
+			const next = Math.min(end, at + shadow.runBytes(i))
+			this.pushAuto(chunk, at, next, shadow.runPlays(i), stream)
+			at = next
+		}
+		this.pushAuto(chunk, at, end, false, stream)
 	}
 
 	private emitPcm(chunk: Buffer): void {
