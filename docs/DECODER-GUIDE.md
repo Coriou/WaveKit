@@ -570,6 +570,13 @@ describe("HfdlDecoder", () => {
 1. Run decoder manually: `docker exec <container> my-decoder --help`
 2. Check output format matches parser
 3. Add debug logging to parseOutput
+4. rtl_433 runs with `-Y autolevel` by default, so it sets its pulse detection
+   level from the noise it measures: its fixed default level misses bursts
+   weaker than about -17 dBFS that are plain on a waterfall. To set the level
+   yourself, pass one of these in `extraArgs`; WaveKit then adds no level of
+   its own: `["-Y", "level=<dB>"]` sets a fixed detection level,
+   `["-Y", "minlevel=<dB>"]` sets the lowest level rtl_433 may use, and
+   `["-Y", "autolevel"]` keeps the automatic level.
 
 ### High CPU usage
 

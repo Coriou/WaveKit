@@ -9,7 +9,10 @@
 import { describe, it, expect } from "vitest"
 import * as fc from "fast-check"
 import pino from "pino"
-import { Rtl433Decoder } from "../../../src/decoders/builtin/rtl433.js"
+import {
+	Rtl433Decoder,
+	rtl433DetectionLevelConfigured,
+} from "../../../src/decoders/builtin/rtl433.js"
 import type {
 	DecoderConfig,
 	DecoderOutput,
@@ -390,5 +393,94 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 			expect(args).toContain("-f")
 			expect(args).toContain("433920000")
 		})
+	})
+})
+
+describe("rtl_433 detection level", () => {
+	const argsWith = (extraArgs?: string[]) =>
+		new TestRtl433Decoder(
+			{
+				id: "level",
+				type: "rtl_433",
+				enabled: true,
+				options: { outputFormat: "json", ...(extraArgs ? { extraArgs } : {}) },
+			},
+			testLogger,
+		).testGetDecoderArgs()
+
+	it("asks rtl_433 for a noise-derived level by default", () => {
+		expect(argsWith()).toEqual([
+			"-r",
+			"cu8:-",
+			"-s",
+			"1024000",
+			"-F",
+			"json",
+			"-Y",
+			"autolevel",
+		])
+	})
+
+	it("leaves an operator level in extraArgs alone", () => {
+		for (const extra of [
+			["-Y", "minlevel=-30"],
+			["-Y", "level=-20"],
+			["-Y", "autolevel"],
+			["-Yminlevel=-25"],
+		]) {
+			const args = argsWith(extra)
+			expect(args.filter(a => a === "autolevel").length).toBe(
+				extra.includes("autolevel") ? 1 : 0,
+			)
+			expect(args.slice(-extra.length)).toEqual(extra)
+		}
+	})
+
+	it("keeps autolevel when extraArgs set other -Y options", () => {
+		expect(argsWith(["-Y", "classic"])).toEqual([
+			"-r",
+			"cu8:-",
+			"-s",
+			"1024000",
+			"-F",
+			"json",
+			"-Y",
+			"autolevel",
+			"-Y",
+			"classic",
+		])
+	})
+
+	// Feature: rtl433-detection-level, Property 1: a level is configured exactly when a -Y value sets one
+	// Validates: operator detection level wins over the default
+	it("detects a level setting anywhere in extraArgs", () => {
+		const other = fc.constantFrom(
+			"-f",
+			"433920000",
+			"-Y",
+			"classic",
+			"-M",
+			"level",
+			"-R",
+			"40",
+		)
+		const setting = fc.constantFrom("level=-20", "minlevel=-30", "autolevel")
+		fc.assert(
+			fc.property(
+				fc.array(other, { maxLength: 8 }),
+				fc.option(setting, { nil: undefined }),
+				fc.boolean(),
+				(rest, level, joined) => {
+					const extra =
+						level === undefined
+							? rest
+							: [...rest, ...(joined ? [`-Y${level}`] : ["-Y", level])]
+					expect(rtl433DetectionLevelConfigured(extra)).toBe(
+						level !== undefined,
+					)
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 })

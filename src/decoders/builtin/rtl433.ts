@@ -81,6 +81,25 @@ export function rtl433TargetRateHz(options: Record<string, unknown>): number {
 		: DEFAULT_TARGET_SAMPLE_RATE
 }
 
+/** `-Y` values that set rtl_433's pulse detection level. */
+const DETECTION_LEVEL_SETTINGS = /^(?:level=|minlevel=|autolevel$)/
+
+/**
+ * True when `extraArgs` already sets rtl_433's detection level
+ * (`-Y level=`, `-Y minlevel=` or `-Y autolevel`, also as `-Y<value>`);
+ * the decoder then leaves the level to the operator. Pure.
+ */
+export function rtl433DetectionLevelConfigured(
+	extraArgs: readonly string[] | undefined,
+): boolean {
+	if (!extraArgs) return false
+	return extraArgs.some((arg, i) => {
+		if (arg === "-Y")
+			return DETECTION_LEVEL_SETTINGS.test(extraArgs[i + 1] ?? "")
+		return arg.startsWith("-Y") && DETECTION_LEVEL_SETTINGS.test(arg.slice(2))
+	})
+}
+
 /**
  * RTL_433 Decoder - Decodes ISM band signals.
  *
@@ -239,6 +258,17 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 			args.push("-F", "json")
 		} else if (this.options.outputFormat === "csv") {
 			args.push("-F", "csv")
+		}
+
+		// rtl_433's fixed default level drops OOK pulses weaker than about
+		// -17 dBFS: rtl_433 25.12 decodes a PWM remote at 0.2 of full scale
+		// (-14 dBFS) but nothing at 0.1 (-20 dBFS) over 0.01 noise, through the
+		// raw capture and the channel alike. A real receiver at a moderate gain
+		// shows such bursts at -20 to -40 dBFS, plainly on a waterfall.
+		// autolevel sets the level from rtl_433's own noise estimate (the same
+		// 0.1 burst decodes 6 of 6 frames). An operator `-Y` level wins.
+		if (!rtl433DetectionLevelConfigured(this.options.extraArgs)) {
+			args.push("-Y", "autolevel")
 		}
 
 		// Enable analyze mode for unknown signals (Requirement 8.3)
