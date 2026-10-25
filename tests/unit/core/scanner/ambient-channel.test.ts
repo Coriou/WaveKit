@@ -8,8 +8,11 @@ import {
 } from "../../../../src/core/scanner/probes/ambient.js"
 import {
 	AMBIENT_CHANNEL_MAX_HALF_HZ,
+	RTL433_FREQ_TOLERANCE_HZ,
 	channelPassbandOf,
 	pickChannelObservation,
+	rtl433FreqHz,
+	windowPassbandOf,
 	type ChannelCandidate,
 } from "../../../../src/core/scanner/probes/ambient-channel.js"
 import { createInterpreterState } from "../../../../src/core/scanner/probes/confirm/double-match.js"
@@ -32,7 +35,7 @@ const obs = (
 	sourceId: "rtl",
 	startedAt: 1_000,
 	endedAt: 2_000,
-	lastTrack: { centreHz: hz },
+	lastTrack: { centreHz: hz, obwHz: 10_000 },
 	...extra,
 })
 const pick = (list: ChannelCandidate[], at = 1_500) =>
@@ -299,4 +302,169 @@ describe("AmbientEvidence rtl433 channel", () => {
 			expect(got).toHaveLength(1)
 		}
 	})
+})
+
+describe("rtl_433 frequency estimate", () => {
+	const at = (freqHz: number | undefined, list: ChannelCandidate[]) =>
+		pickChannelObservation(
+			list,
+			{ sourceId: "rtl", passband, at: 1_500, freqHz },
+			10_000,
+			2_000,
+		)
+	// Track bandwidth 10 kHz: the tolerance is 60 kHz + 5 kHz.
+	const tol = RTL433_FREQ_TOLERANCE_HZ + 5_000
+
+	it("names the one track within tolerance of the estimate among several in the passband", () => {
+		const list = [obs("a", CENTRE - 100_000), obs("b", CENTRE + 100_000)]
+		expect(at(undefined, list)).toBeNull()
+		expect(at(CENTRE + 100_000 + tol, list)?.observationId).toBe("b")
+		expect(at(CENTRE - 100_000 - tol, list)?.observationId).toBe("a")
+	})
+
+	it("ignores the estimate while any candidate could be an edge emitter", () => {
+		// 1 MHz window at 100 MHz: tracks at 100.46 MHz (past 0.8 of the
+		// 500 kHz half width) and 100.25 MHz; an edge device reports 100.25 MHz.
+		const window = { centreHz: 100_000_000, halfHz: 500_000 }
+		const list = [obs("edge", 100_460_000), obs("inner", 100_250_000)]
+		const got = pickChannelObservation(
+			list,
+			{ sourceId: "rtl", passband: window, at: 1_500, freqHz: 100_250_000 },
+			10_000,
+			2_000,
+		)
+		expect(got).toBeNull()
+	})
+
+	it("names nothing out of tolerance or when two tracks are within it", () => {
+		expect(at(CENTRE + tol + 1, [obs("a", CENTRE)])).toBeNull()
+		expect(
+			at(CENTRE, [obs("a", CENTRE - 20_000), obs("b", CENTRE + 20_000)]),
+		).toBeNull()
+	})
+
+	it("reads a usable estimate and ignores a malformed or edge one", () => {
+		const usable = HALF * 0.8
+		expect(rtl433FreqHz({ freq: (CENTRE + usable) / 1e6 }, passband)).toBe(
+			CENTRE + usable,
+		)
+		for (const data of [
+			{ freq: (CENTRE + usable + 1_000) / 1e6 },
+			{ freq: "433.7" },
+			{ freq: Number.NaN },
+			{ freq: -1 },
+			{ freq: 7_000 },
+			{},
+			null,
+			"x",
+		])
+			expect(rtl433FreqHz(data, passband)).toBeUndefined()
+	})
+})
+
+describe("windowPassbandOf", () => {
+	const binding = { sourceId: "rtl", channelHz: null }
+	it("is the whole capture", () => {
+		expect(
+			windowPassbandOf(binding, { centreHz: CENTRE, sampleRateHz: 960_000 }),
+		).toEqual({ sourceId: "rtl", centreHz: CENTRE, halfHz: 480_000 })
+	})
+	it("refuses malformed captures and bindings, and a half width past the bound", () => {
+		for (const capture of [
+			{ centreHz: undefined, sampleRateHz: 960_000 },
+			{ centreHz: CENTRE, sampleRateHz: 0 },
+			{ centreHz: CENTRE, sampleRateHz: Number.NaN },
+			{ centreHz: CENTRE, sampleRateHz: 2 * AMBIENT_CHANNEL_MAX_HALF_HZ + 2 },
+		])
+			expect(windowPassbandOf(binding, capture)).toBeNull()
+		expect(
+			windowPassbandOf(
+				{ sourceId: "rtl", channelHz: CENTRE },
+				{ centreHz: CENTRE, sampleRateHz: 960_000 },
+			),
+		).toBeNull()
+		expect(
+			windowPassbandOf(binding, {
+				centreHz: CENTRE,
+				sampleRateHz: 2 * AMBIENT_CHANNEL_MAX_HALF_HZ,
+			}),
+		).not.toBeNull()
+	})
+})
+
+describe("AmbientEvidence rtl433 window reach", () => {
+	it("stamps the capture passband and rtl_433's estimate for a window placement", () => {
+		const decoders = Object.assign(new EventEmitter(), {
+			getAllStatus: () => [
+				{ id: "rtl433", type: "rtl433", sourceId: "rtl", owner: "config" },
+			],
+			getDecoder: () => new EventEmitter(),
+		})
+		const ambient = new AmbientEvidence({
+			decoders: decoders as never,
+			targetOf: () => ({
+				sourceId: "rtl",
+				hz: CENTRE,
+				targetsHz: [CENTRE],
+				external: false,
+			}),
+			epochOf: () => 1,
+			logger: pino({ level: "silent" }),
+			sampleRateOf: () => 960_000,
+			centreOf: () => CENTRE,
+		})
+		const got: AmbientEvidenceEvent[] = []
+		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
+		ambient.start()
+		for (let i = 0; i < 2; i++) {
+			const out = device("Acurite-Tower", { freq: (CENTRE + 120_000) / 1e6 })
+			Object.defineProperty(out, "provenanceBinding", {
+				value: { sourceId: "rtl", channelHz: null },
+			})
+			decoders.emit("decoder:output", "rtl433", out)
+		}
+		ambient.stop()
+		expect(got).toHaveLength(1)
+		expect(got[0]).toMatchObject({
+			hz: CENTRE,
+			passband: { centreHz: CENTRE, halfHz: 480_000 },
+			freqHz: CENTRE + 120_000,
+		})
+	})
+})
+
+// Feature: rtl433-channel-association, Property 2: with an estimate, the pick is never a track out of tolerance, and is the plain exactly-one pick whenever an edge candidate exists
+// Validates: rtl433 channel association, conservative estimate rule
+it("never lets an estimate pick a wrong track", () => {
+	const window = { centreHz: 100_000_000, halfHz: 500_000 }
+	fc.assert(
+		fc.property(
+			fc.array(fc.integer({ min: -500_000, max: 500_000 }), {
+				minLength: 0,
+				maxLength: 5,
+			}),
+			fc.integer({ min: -400_000, max: 400_000 }),
+			(offs, freqOff) => {
+				const list = offs.map((o, i) => obs(`o${i}`, window.centreHz + o))
+				const freqHz = window.centreHz + freqOff
+				const pick = (f: number | undefined) =>
+					pickChannelObservation(
+						list,
+						{ sourceId: "rtl", passband: window, at: 1_500, freqHz: f },
+						10_000,
+						2_000,
+					)
+				const got = pick(freqHz)
+				const plain = pick(undefined)
+				const edge = offs.some(o => Math.abs(o) > window.halfHz * 0.8)
+				if (edge) expect(got).toBe(plain)
+				else if (got)
+					expect(
+						Math.abs(got.lastTrack!.centreHz - freqHz),
+					).toBeLessThanOrEqual(RTL433_FREQ_TOLERANCE_HZ + 5_000)
+				if (list.length === 0) expect(got).toBeNull()
+			},
+		),
+		{ numRuns: 200 },
+	)
 })

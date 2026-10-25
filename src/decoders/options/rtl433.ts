@@ -37,6 +37,14 @@ export const rtl433OptionsSchema = z
 			.nullable()
 			.optional(),
 		outputFormat: z.enum(["json", "csv"]).nullable().optional(),
+		// The manager sets it; out of 1 kHz to 6 GHz the adapter leaves -f out.
+		inputCenterFreq: z
+			.number()
+			.finite()
+			.min(1_000)
+			.max(6_000_000_000)
+			.nullable()
+			.optional(),
 		// Rate bounds: the adapter clamps to them (constants above).
 		inputSampleRate: z
 			.number()
@@ -113,6 +121,17 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		secret: false,
 		effect: "restart",
 		description: "Single target frequency (used when frequencies is absent).",
+	},
+	{
+		key: "inputCenterFreq",
+		type: "number",
+		min: 1_000,
+		max: 6_000_000_000,
+		unit: "Hz",
+		default: null,
+		secret: false,
+		effect: "restart",
+		description: "Centre of the input IQ, passed as -f (the manager sets it).",
 	},
 	{
 		key: "inputSampleRate",

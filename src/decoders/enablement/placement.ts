@@ -2,6 +2,7 @@ import {
 	DECODER_MAX_BANDPLAN_CHANNELS,
 	RTL433_CHANNEL_MIN_RATE_HZ,
 	RTL433_CHANNEL_TARGET_RATE_HZ,
+	RTL433_WINDOW_MAX_RATE_HZ,
 	placementCostCores,
 	placementKey,
 } from "./contract.js"
@@ -181,6 +182,18 @@ function bandFits(d: PlannerDecoder, hz: number, halfWidth = 0): boolean {
  * around the overlap of each range with the window. Ranges in order; largest
  * rate wins, ties by order. `overlap` is true when some range overlaps.
  */
+/**
+ * True when rtl_433 can read a capture at `rateHz` whole (window reach):
+ * at least the narrowest rate it accepts, at most RTL433_WINDOW_MAX_RATE_HZ.
+ */
+export function rtl433WindowFits(rateHz: number): boolean {
+	return (
+		Number.isFinite(rateHz) &&
+		rateHz >= RTL433_CHANNEL_MIN_RATE_HZ &&
+		rateHz <= RTL433_WINDOW_MAX_RATE_HZ
+	)
+}
+
 export function rtl433ChannelCandidate(
 	source: {
 		centreHz: number | null
@@ -328,6 +341,23 @@ export const planPlacements: PlacementPlanner = input => {
 						reach: s.channelizerAvailable ? "channel" : "raw",
 						origin: vfo ? "vfo" : "configured",
 						index: 0,
+					})
+			} else if (
+				d.type === "rtl433" &&
+				d.origin === "catalogue" &&
+				rtl433WindowFits(s.sampleRateHz!)
+			) {
+				// A wideband ISM decoder sees the whole capture: the band plan
+				// decides whether it runs here, never which part it hears. The raw
+				// stream reaches rtl_433 unresampled, edges included.
+				if (bandFree(d) || bandOverlapsWindow)
+					local.push({
+						source: s,
+						hz: null,
+						reach: "raw",
+						origin: "band",
+						index: 0,
+						options: { targetSampleRate: s.sampleRateHz! },
 					})
 			} else if (
 				d.reach === "channel" &&

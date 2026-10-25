@@ -89,7 +89,8 @@ it("every planned placement satisfies reach; fitting configured channels are ret
 			})
 			for (const p of plan.wanted) {
 				const s = ss.find(s => s.id === p.sourceId)!
-				expect(fitsReach(d, s, p.channelHz)).toBe(true)
+				// Judged at the reach the placement uses (rtl_433 window reach is raw).
+				expect(fitsReach({ ...d, reach: p.reach }, s, p.channelHz)).toBe(true)
 			}
 			if (d.mode !== "off" && d.type === "acarsdec") {
 				for (const hz of d.configuredChannelsHz) {

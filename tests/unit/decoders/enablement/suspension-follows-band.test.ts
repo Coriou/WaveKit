@@ -298,33 +298,38 @@ describe("rtl_433 channel arithmetic", () => {
 			basis: "configured" as const,
 			rangesHz: [{ minHz: 433_050_000, maxHz: 434_790_000 }],
 		}
-		// h = 125 kHz: exactly one 250 kHz channel at the centre.
-		const at = planPlacements(
-			input(decoder({ type: "rtl433", band: ism }), [
-				source({ centreHz: c, sampleRateHz: 312_500 }),
-			]),
-		)
-		expect(at.wanted).toMatchObject([
-			{ channelHz: c, options: { targetSampleRate: 250_000 } },
-		])
-		// h = 124.8 kHz: the band overlaps but no 250 kHz channel fits.
+		// Window reach from 250 ksps (rtl_433's narrowest rate) to 2.4 Msps.
+		for (const rate of [250_000, 312_000, 2_400_000]) {
+			const at = planPlacements(
+				input(decoder({ type: "rtl433", band: ism }), [
+					source({ centreHz: c, sampleRateHz: rate }),
+				]),
+			)
+			expect(at.wanted).toMatchObject([
+				{ reach: "raw", channelHz: null, options: { targetSampleRate: rate } },
+			])
+		}
+		// Below 250 ksps no channel fits either (h < 125 kHz).
 		const past = planPlacements(
 			input(decoder({ type: "rtl433", band: ism }), [
-				source({ centreHz: c, sampleRateHz: 312_000 }),
+				source({ centreHz: c, sampleRateHz: 249_999 }),
 			]),
 		)
 		expect(past.wanted).toEqual([])
 		expect(past.unplaced.get("test")).toBe("capture-too-narrow")
-		// The overlap at the window edge clamps the centre inwards to fit 250 kHz.
+		// Past 2.4 Msps the channel path places one exactly 250 kHz channel at the
+		// window edge: h = 3.2 Msps * 0.8 / 2 = 1.28 MHz, overlap 125 kHz wide.
 		const edge = planPlacements(
 			input(decoder({ type: "rtl433", band: ism }), [
-				source({ centreHz: 434_790_000 + 409_000, sampleRateHz: RATE }),
+				source({
+					centreHz: 434_790_000 + 1_280_000 - 125_000,
+					sampleRateHz: 3_200_000,
+				}),
 			]),
 		)
 		expect(edge.wanted).toMatchObject([
-			{ channelHz: 434_790_000 + 409_000 - 284_600 },
+			{ reach: "channel", options: { targetSampleRate: 250_000 } },
 		])
-		expect(edge.wanted[0]?.options?.["targetSampleRate"]).toBe(250_000)
 		const away = planPlacements(
 			input(decoder({ type: "rtl433", band: ism }), [
 				source({ centreHz: OUT, sampleRateHz: RATE }),
@@ -468,20 +473,18 @@ describe("suspension follows the band", () => {
 			const placed = view(f, "rtl433")
 			expect(placed.verdict).toBe("in-band")
 			expect(placed.reason).toBeUndefined()
-			expect(placed.placements).toMatchObject([
-				{ reach: "channel", channelHz: 434_410_200, running: true },
+			// The whole capture, no channel.
+			expect(placed.placements).toEqual([
+				expect.objectContaining({ reach: "raw", running: true }),
 			])
-			expect(f.requests.at(-1)).toMatchObject({
-				centerHz: 434_410_200,
-				outputRateHz: 759_000,
-			})
+			expect(placed.placements[0]?.channelHz).toBeUndefined()
+			expect(f.requests).toEqual([])
 			await tune(f, OUT)
 		}
 	})
 
 	it("start at 446.52 MHz, retune after 3 s to 434.5125 MHz: rtl433 runs", async () => {
-		// h = 409.6 kHz; overlap 434.1029-434.79 MHz, hz 434.44645 MHz,
-		// r = 2(409.6 - 66.05) kHz = 687.1 kHz, floored to 687 kHz.
+		// The band overlaps the window, so rtl_433 reads the whole 1.024 Msps capture.
 		const f = setup(["rtl433"], 446_520_000)
 		await f.manager.startAll()
 		await vi.advanceTimersByTimeAsync(3_000)
@@ -491,11 +494,9 @@ describe("suspension follows the band", () => {
 		expect(v.verdict).toBe("in-band")
 		expect(v.reason).toBeUndefined()
 		expect(f.manager.getStatus("rtl433")?.suspended).toBe(false)
-		expect(v.placements).toMatchObject([
-			{ reach: "channel", channelHz: 434_446_450, running: true },
-		])
-		expect(f.requests.at(-1)).toMatchObject({ outputRateHz: 687_000 })
-		expect(f.applied.get("rtl433")?.["targetSampleRate"]).toBe(687_000)
+		expect(v.placements).toMatchObject([{ reach: "raw", running: true }])
+		expect(f.requests).toEqual([])
+		expect(f.applied.get("rtl433")?.["targetSampleRate"]).toBe(RATE)
 		// The same after a manager restart already tuned there.
 		await f.restart()
 		expect(view(f, "rtl433").reason).toBeUndefined()
@@ -547,8 +548,8 @@ describe("suspension follows the band", () => {
 		// Another out-of-band centre: the same uninterrupted suspension.
 		await tune(f, OUT + 1_000_000)
 		expect(view(f, "rtl433").since).toBe(first)
-		// 250 kHz capture beside the band: capture-too-narrow, a new interval.
-		f.sources.setRate("rtl", 250_000)
+		// 200 kHz capture beside the band: capture-too-narrow, a new interval.
+		f.sources.setRate("rtl", 200_000)
 		await tune(f, 434_000_000)
 		expect(view(f, "rtl433").reason).toBe("capture-too-narrow")
 		const narrow = view(f, "rtl433").since
@@ -565,26 +566,130 @@ describe("suspension follows the band", () => {
 		expect(again).not.toBe(narrow)
 	})
 
-	it("a moved centre at the same rate retunes in place; a new rate restarts once", async () => {
+	it("a moved rtl433 channel restarts with the new -f reference; a new rate restarts once", async () => {
 		const f = setup(["rtl433"], IN)
 		await f.manager.startAll()
 		await settle()
 		const d = f.instances.get("rtl433")!
 		const starts = d.starts
 		const requests = f.provider.requestChannel.mock.calls.length
-		// 2.048 Msps at 433.5 MHz and 433.6 MHz: both give a 1 MHz channel.
-		f.sources.setRate("rtl", 2_048_000)
+		// 3.2 Msps (past window reach) at 433.5 MHz and 433.6 MHz: both give a
+		// 1 MHz channel; h = 1.28 MHz, overlap 433.05-434.78 MHz then
+		// 433.05-434.79 MHz, centres 433.915 and 433.92 MHz.
+		f.sources.setRate("rtl", 3_200_000)
 		await tune(f, 433_500_000)
 		expect(f.applied.get("rtl433")?.["targetSampleRate"]).toBe(1_000_000)
 		expect(d.starts).toBe(starts + 1)
 		expect(f.provider.requestChannel.mock.calls.length).toBe(requests + 1)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_915_000)
 		await tune(f, 433_600_000)
-		expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
-		expect(d.starts).toBe(starts + 1)
-		expect(f.provider.requestChannel.mock.calls.length).toBe(requests + 1)
+		// No in-place retune: the running process gets the new centre.
+		expect(f.provider.retuneChannel).not.toHaveBeenCalled()
+		expect(d.starts).toBe(starts + 2)
+		expect(f.provider.requestChannel.mock.calls.length).toBe(requests + 2)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_920_000)
+		expect(d.running).toBe(true)
 		expect(view(f, "rtl433").placements).toMatchObject([
-			{ channelHz: 433_734_600, running: true },
+			{ channelHz: 433_920_000, running: true },
 		])
+	})
+
+	it("a raw rtl433 centre move keeps crash accounting, and a later crash counts on top", async () => {
+		const f = setup(["rtl433"], 433_600_000)
+		await f.manager.startAll()
+		await settle()
+		const d = f.instances.get("rtl433")!
+		d.crash()
+		// The 2 s backoff restarts it once.
+		await settle()
+		expect(d.running).toBe(true)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		const starts = d.starts
+		await tune(f, 433_601_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_601_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		d.crash()
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(2)
+		expect(d.running).toBe(true)
+	})
+
+	it("a raw rtl433 centre move during a crash backoff waits for the retry", async () => {
+		const f = setup(["rtl433"], 433_600_000)
+		await f.manager.startAll()
+		await settle()
+		const d = f.instances.get("rtl433")!
+		const starts = d.starts
+		d.crash()
+		f.sources.setCenter("rtl", 433_601_000)
+		await vi.advanceTimersByTimeAsync(400)
+		expect(d.starts).toBe(starts)
+		await vi.advanceTimersByTimeAsync(3_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(d.running).toBe(true)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_601_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+	})
+
+	it("a moved rtl433 channel during a crash backoff waits for the retry", async () => {
+		const f = setup(["rtl433"], IN)
+		await f.manager.startAll()
+		await settle()
+		f.sources.setRate("rtl", 3_200_000)
+		await tune(f, 433_500_000)
+		const d = f.instances.get("rtl433")!
+		const starts = d.starts
+		d.crash()
+		f.sources.setCenter("rtl", 433_600_000)
+		await vi.advanceTimersByTimeAsync(400)
+		expect(d.starts).toBe(starts)
+		await vi.advanceTimersByTimeAsync(3_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(d.running).toBe(true)
+		// The retry started it on the moved channel, with its centre as -f.
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_920_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		expect(view(f, "rtl433").placements).toMatchObject([
+			{ channelHz: 433_920_000, running: true },
+		])
+	})
+
+	it("a moved rtl433 channel without a pending crash restarts at once and keeps accounting", async () => {
+		const f = setup(["rtl433"], IN)
+		await f.manager.startAll()
+		await settle()
+		f.sources.setRate("rtl", 3_200_000)
+		await tune(f, 433_500_000)
+		const d = f.instances.get("rtl433")!
+		d.crash()
+		await settle()
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		const starts = d.starts
+		await tune(f, 433_600_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_920_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		d.crash()
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(2)
+	})
+
+	it("a raw rtl433 restarts when only the capture centre moves", async () => {
+		const f = setup(["rtl433"], 433_600_000)
+		await f.manager.startAll()
+		await settle()
+		const d = f.instances.get("rtl433")!
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_600_000)
+		const starts = d.starts
+		await tune(f, 433_700_000)
+		expect(view(f, "rtl433").placements).toMatchObject([
+			{ reach: "raw", running: true },
+		])
+		// The process was restarted after the reference changed.
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_700_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(d.running).toBe(true)
 	})
 
 	it("Property 16: after each settle the suspension equals the band verdict", async () => {
@@ -776,9 +881,9 @@ describe("band reasons and opt-outs", () => {
 			const v = view(f, "rtl433")
 			expect(v.verdict).toBe("out-of-band")
 			expect(v.reason).not.toBe("frequency-out-of-band")
-			// The planner skips the band: a window channel runs.
+			// The planner skips the band: rtl_433 reads the whole window.
 			expect(v.reason).toBeUndefined()
-			expect(v.placements).toMatchObject([{ reach: "channel", running: true }])
+			expect(v.placements).toMatchObject([{ reach: "raw", running: true }])
 		},
 	)
 })

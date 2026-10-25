@@ -91,6 +91,7 @@ describe("buildDecoderSettingsView", () => {
 			"extraArgs",
 			"frequencies",
 			"frequency",
+			"inputCenterFreq",
 			"inputSampleRate",
 			"outputFormat",
 			"protocols",
