@@ -77,9 +77,33 @@ function stateOf(p: Record<string, unknown>): {
 	return { state: "stopped" }
 }
 
+/** Most covering intervals one lookup examines per source; past it the result is unknown. */
+export const COVERAGE_SCAN_MAX = 256
+/** Most of a discovery's `sourceIds` one lookup examines; past it the result is unknown. */
+export const COVERAGE_SOURCES_MAX = 16
+
+interface SourceIndex {
+	/** Sorted by `lo`. */
+	intervals: Interval[]
+	/** maxHi[i]: the largest `hi` among intervals[0..i]; a backward scan stops once it is below f. */
+	maxHi: number[]
+}
+
 /**
  * Builds the per-request index. Returns null when decoder status is unavailable (not an array,
  * or no decoder reports placements): every discovery then omits the field.
+ *
+ * A raw or centre placement covers its decoder's OWN band-assessment window (an assessment is
+ * per decoder: a channel decoder's window is its channel, not the capture), and only when that
+ * decoder's `sourceId` is the placement's source. Otherwise the window is not established and
+ * every discovery on that source is unknown.
+ *
+ * Cost. Build: O(P log P) for P placements (one sort per source). Lookup: at most
+ * COVERAGE_SOURCES_MAX sources, each a binary search (O(log P)) plus a backward scan that
+ * examines at most COVERAGE_SCAN_MAX intervals reaching past the previous ones' lows (the
+ * prefix-max stop), then a top-3 selection over at most COVERAGE_SCAN_MAX decoders (3 passes).
+ * So per discovery <= 16 x (log2 P + 256) interval visits + 3 x 256 comparisons, independent of
+ * how many placements sit on other sources. A scan that would pass the bound returns unknown.
  */
 export function buildCoverageIndex(
 	statuses: unknown,
@@ -87,23 +111,13 @@ export function buildCoverageIndex(
 ): CoverageIndex | null {
 	if (!Array.isArray(statuses)) return null
 	const list = statuses as readonly unknown[]
-	// Capture window per source from the band assessments that carry both figures.
-	const windows = new Map<string, { lo: number; hi: number }>()
 	let reported = false
 	for (const raw of list) {
 		const s = record(raw)
-		if (s === null) continue
-		if (Array.isArray(s["placements"])) reported = true
-		const band = record(s["bandAssessment"])
-		const sourceId = s["sourceId"]
-		if (band === null || typeof sourceId !== "string") continue
-		const c = band["captureCenterHz"]
-		const w = band["windowHalfWidthHz"]
-		if (isFreq(c) && isFreq(w) && w >= 0 && !windows.has(sourceId))
-			windows.set(sourceId, { lo: c - w, hi: c + w })
+		if (s !== null && Array.isArray(s["placements"])) reported = true
 	}
 	if (!reported) return null
-	const intervals: Interval[] = []
+	const bySource = new Map<string, Interval[]>()
 	/** Sources with a placement whose figures are missing: their discoveries are unknown. */
 	const unresolved = new Set<string>()
 	const skipped = new Set<string>()
@@ -127,6 +141,15 @@ export function buildCoverageIndex(
 			isFreq(declared) && declared > 0
 				? declared
 				: DISCOVERY_COVERAGE_DEFAULT_CHANNEL_WIDTH_HZ
+		// This decoder's own window, valid only on its own source.
+		const band = record(s["bandAssessment"])
+		const ownSource = s["sourceId"]
+		const c = band?.["captureCenterHz"]
+		const w = band?.["windowHalfWidthHz"]
+		const own =
+			typeof ownSource === "string" && isFreq(c) && isFreq(w) && w >= 0
+				? { sourceId: ownSource, lo: c - w, hi: c + w }
+				: undefined
 		for (const rawPlacement of s["placements"] as readonly unknown[]) {
 			const p = record(rawPlacement)
 			if (p === null) continue
@@ -144,19 +167,23 @@ export function buildCoverageIndex(
 				lo = ch - width / 2
 				hi = ch + width / 2
 			} else if (reach === "raw" || reach === "centre") {
-				const window = windows.get(sourceId)
-				if (window === undefined) {
+				if (own === undefined || own.sourceId !== sourceId) {
 					unresolved.add(sourceId)
 					continue
 				}
-				lo = window.lo
-				hi = window.hi
+				lo = own.lo
+				hi = own.hi
 			} else {
 				unresolved.add(sourceId)
 				continue
 			}
 			const { state, reason } = stateOf(p)
-			intervals.push({
+			let bucket = bySource.get(sourceId)
+			if (bucket === undefined) {
+				bucket = []
+				bySource.set(sourceId, bucket)
+			}
+			bucket.push({
 				lo,
 				hi,
 				sourceId,
@@ -166,62 +193,78 @@ export function buildCoverageIndex(
 			})
 		}
 	}
-	intervals.sort((a, b) => a.lo - b.lo)
-	// maxHi[i]: the largest `hi` among intervals[0..i]; a backward scan stops once it is below f.
-	const maxHi: number[] = []
-	let running = Number.NEGATIVE_INFINITY
-	for (const iv of intervals) {
-		running = Math.max(running, iv.hi)
-		maxHi.push(running)
+	const index = new Map<string, SourceIndex>()
+	for (const [sourceId, intervals] of bySource) {
+		intervals.sort((x, y) => x.lo - y.lo)
+		const maxHi: number[] = []
+		let top = Number.NEGATIVE_INFINITY
+		for (const iv of intervals) {
+			top = Math.max(top, iv.hi)
+			maxHi.push(top)
+		}
+		index.set(sourceId, { intervals, maxHi })
 	}
+	const better = (x: Interval, y: Interval): boolean =>
+		STATE_RANK[x.state] < STATE_RANK[y.state] ||
+		(STATE_RANK[x.state] === STATE_RANK[y.state] && x.decoderId < y.decoderId)
 	return {
 		coverageOf(discovery) {
 			const f = discovery.frequencyHz
-			const sources = Array.isArray(discovery.sourceIds)
-				? discovery.sourceIds
-				: []
-			if (!isFreq(f)) return undefined
+			if (!isFreq(f) || !Array.isArray(discovery.sourceIds)) return undefined
+			const sources = [...new Set(discovery.sourceIds)]
+			if (sources.length > COVERAGE_SOURCES_MAX) return undefined
 			for (const id of sources) if (unresolved.has(id)) return undefined
-			// Last interval with lo <= f.
-			let low = 0
-			let high = intervals.length
-			while (low < high) {
-				const mid = (low + high) >>> 1
-				if (intervals[mid]!.lo <= f) low = mid + 1
-				else high = mid
-			}
 			const best = new Map<string, Interval>()
-			for (let i = low - 1; i >= 0; i--) {
-				if (maxHi[i]! < f) break
-				const iv = intervals[i]!
-				if (iv.hi < f || !sources.includes(iv.sourceId)) continue
-				const prior = best.get(iv.decoderId)
-				if (
-					prior === undefined ||
-					STATE_RANK[iv.state] < STATE_RANK[prior.state]
-				)
-					best.set(iv.decoderId, iv)
+			for (const sourceId of sources) {
+				const at = index.get(sourceId)
+				if (at === undefined) continue
+				const { intervals, maxHi } = at
+				// Last interval with lo <= f.
+				let low = 0
+				let high = intervals.length
+				while (low < high) {
+					const mid = (low + high) >>> 1
+					if (intervals[mid]!.lo <= f) low = mid + 1
+					else high = mid
+				}
+				let visited = 0
+				for (let i = low - 1; i >= 0; i--) {
+					if (maxHi[i]! < f) break
+					if (++visited > COVERAGE_SCAN_MAX) return undefined
+					const iv = intervals[i]!
+					if (iv.hi < f) continue
+					const prior = best.get(iv.decoderId)
+					if (
+						prior === undefined ||
+						STATE_RANK[iv.state] < STATE_RANK[prior.state]
+					)
+						best.set(iv.decoderId, iv)
+				}
 			}
-			return [...best.values()]
-				.sort(
-					(a, b) =>
-						STATE_RANK[a.state] - STATE_RANK[b.state] ||
-						(a.decoderId < b.decoderId
-							? -1
-							: a.decoderId > b.decoderId
-								? 1
-								: 0),
-				)
-				.slice(0, DISCOVERY_COVERAGE_MAX)
-				.map(iv => ({
-					decoderId: iv.decoderId,
-					state: iv.state,
-					...(iv.state === "suspended" && iv.reason !== undefined
-						? {
-								suspensionReason: iv.reason as DecoderSuspensionReasonCode,
-							}
-						: {}),
-				}))
+			// Top DISCOVERY_COVERAGE_MAX by (state rank, decoderId): 3 linear passes, no sort.
+			const out: Interval[] = []
+			const taken = new Set<string>()
+			for (let k = 0; k < DISCOVERY_COVERAGE_MAX; k++) {
+				let pick: Interval | undefined
+				for (const iv of best.values())
+					if (
+						!taken.has(iv.decoderId) &&
+						(pick === undefined || better(iv, pick))
+					)
+						pick = iv
+				if (pick === undefined) break
+				taken.add(pick.decoderId)
+				out.push(pick)
+			}
+			return out.map(iv => ({
+				decoderId: iv.decoderId,
+				state: iv.state,
+				...(iv.state === "suspended" && iv.reason !== undefined
+					? {
+							suspensionReason: iv.reason as DecoderSuspensionReasonCode,
+						}
+					: {}),
+			}))
 		},
 	}
 }

@@ -29,6 +29,7 @@ export class WsLimiter<T> {
 		ms: number,
 	) => { cancel(): void }
 	private readonly pending = new Map<string, Pending<T>>()
+	private readonly coalesce: ((pending: T, next: T) => T) | undefined
 	private readonly lastEmit = new Map<string, number>()
 	private readonly window: number[] = []
 	private timer: { cancel(): void } | null = null
@@ -46,7 +47,13 @@ export class WsLimiter<T> {
 		now: () => number
 		emit: (msg: T) => void
 		schedule: (fn: () => void, ms: number) => { cancel(): void }
+		/**
+		 * Band inspection UX req 3.2: combines a still-pending message with its replacement for the
+		 * same key. Absent: the replacement wins (latest state per key).
+		 */
+		coalesce?: (pending: T, next: T) => T
 	}) {
+		this.coalesce = opts.coalesce
 		this.maxPerSecond = Math.max(1, Math.floor(opts.maxPerSecond))
 		const base = Math.max(0, opts.perKeyMinIntervalMs)
 		const override = (p: Priority) => {
@@ -68,7 +75,7 @@ export class WsLimiter<T> {
 		if (this.destroyed) return
 		const existing = this.pending.get(key)
 		if (existing !== undefined) {
-			existing.msg = msg
+			existing.msg = this.coalesce ? this.coalesce(existing.msg, msg) : msg
 			if (RANK[priority] < RANK[existing.priority]) existing.priority = priority
 		} else {
 			this.pending.set(key, { msg, priority, seq: this.seq++ })

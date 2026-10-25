@@ -2,6 +2,7 @@
 import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import {
+	COVERAGE_SCAN_MAX,
 	buildCoverageIndex,
 	withCoverage,
 } from "../../../../src/core/scanner/discovery-coverage.js"
@@ -95,16 +96,105 @@ describe("discovery coverage projection", () => {
 		expect(index?.coverageOf(disc(F + 12_501))).toEqual([])
 	})
 
-	it("raw and centre reach use the source capture window", () => {
+	it("raw and centre reach use the decoder's own window; none established is unknown", () => {
 		const index = buildCoverageIndex([
 			{ ...status("r", [{ reach: "raw" }]), ...band("rtl", F, 1000) },
-			status("c", [{ reach: "centre", running: true }]),
+			{
+				...status("c", [{ reach: "centre", running: true }]),
+				...band("rtl", F, 500),
+			},
 		])
-		expect(index?.coverageOf(disc(F + 1000))).toEqual([
+		expect(index?.coverageOf(disc(F + 500))).toEqual([
 			{ decoderId: "c", state: "running" },
 			{ decoderId: "r", state: "stopped" },
 		])
+		expect(index?.coverageOf(disc(F + 1000))).toEqual([
+			{ decoderId: "r", state: "stopped" },
+		])
 		expect(index?.coverageOf(disc(F + 1001))).toEqual([])
+		// No own window: another decoder's assessment is never borrowed.
+		const borrowed = buildCoverageIndex([
+			{ ...status("r", [{ reach: "raw" }]), ...band("rtl", F, 1000) },
+			status("c", [{ reach: "centre", running: true }]),
+		])
+		expect(borrowed?.coverageOf(disc(F))).toBeUndefined()
+		// Own window on another source than the placement's: unknown.
+		const elsewhere = buildCoverageIndex([
+			{
+				...status("c", [{ reach: "raw", running: true }]),
+				...band("two", F, 1000),
+			},
+		])
+		expect(elsewhere?.coverageOf(disc(F))).toBeUndefined()
+	})
+
+	it("review repro: a channel decoder's window never extends a raw decoder (both orders)", () => {
+		const channel = {
+			...status("chan", [{ reach: "channel", channelHz: 100_000 }]),
+			...band("rtl", 100_000, 10_000),
+		}
+		const raw = {
+			...status("raw", [{ reach: "raw", running: true }]),
+			...band("rtl", 200_000, 10_000),
+		}
+		for (const order of [
+			[channel, raw],
+			[raw, channel],
+		]) {
+			const index = buildCoverageIndex(order)
+			expect(index?.coverageOf(disc(100_000))).toEqual([
+				{ decoderId: "chan", state: "stopped" },
+			])
+			expect(index?.coverageOf(disc(200_000))).toEqual([
+				{ decoderId: "raw", state: "running" },
+			])
+		}
+	})
+
+	it("adversarial: many non-matching-source intervals do not change the answer", () => {
+		const others = Array.from({ length: 5000 }, (_, i) =>
+			status(`o${i}`, [{ sourceId: "other", channelHz: F, running: true }]),
+		)
+		const index = buildCoverageIndex([
+			...others,
+			status("mine", [{ channelHz: F, running: true }]),
+		])
+		expect(index?.coverageOf(disc())).toEqual([
+			{ decoderId: "mine", state: "running" },
+		])
+	})
+
+	it("adversarial: up to 256 overlapping placements answer; past the scan bound is unknown", () => {
+		const many = (n: number) =>
+			Array.from({ length: n }, (_, i) =>
+				status(`d${String(i).padStart(4, "0")}`, [
+					{ channelHz: F, running: i % 2 === 0 },
+				]),
+			)
+		expect(COVERAGE_SCAN_MAX).toBe(256)
+		expect(buildCoverageIndex(many(256))?.coverageOf(disc())).toEqual([
+			{ decoderId: "d0000", state: "running" },
+			{ decoderId: "d0002", state: "running" },
+			{ decoderId: "d0004", state: "running" },
+		])
+		expect(buildCoverageIndex(many(257))?.coverageOf(disc())).toBeUndefined()
+		// Overlaps far below f stop the scan early (prefix max), whatever their number.
+		const below = Array.from({ length: 5000 }, (_, i) =>
+			status(`b${i}`, [{ channelHz: F - 1_000_000 + i }]),
+		)
+		expect(
+			buildCoverageIndex([
+				...below,
+				status("top", [{ channelHz: F }]),
+			])?.coverageOf(disc()),
+		).toEqual([{ decoderId: "top", state: "stopped" }])
+	})
+
+	it("more than 16 sources on one discovery is unknown", () => {
+		const index = buildCoverageIndex([status("a", [{ channelHz: F }])])
+		const ids = Array.from({ length: 17 }, (_, i) => `s${i}`)
+		expect(index?.coverageOf(disc(F, ids.slice(0, 16)))).toEqual([])
+		expect(index?.coverageOf(disc(F, ids))).toBeUndefined()
 	})
 
 	it("a placement missing its figures makes the result unknown for its source only", () => {
@@ -278,9 +368,8 @@ describe("discovery coverage projection", () => {
 											p.channelHz !== undefined &&
 											Math.abs(f - p.channelHz) <= 6250
 										)
-									const w = statuses.find(
-										o => o.sourceId === p.sourceId && o.bandAssessment,
-									)?.bandAssessment
+									const w =
+										s.sourceId === p.sourceId ? s.bandAssessment : undefined
 									return (
 										w !== undefined &&
 										Math.abs(f - w.captureCenterHz) <= w.windowHalfWidthHz

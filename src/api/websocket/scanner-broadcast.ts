@@ -3,6 +3,7 @@
  * waterfall feed is the separate `spectrum` channel (Task 37a).
  */
 import type { EventEmitter } from "node:events"
+import { DISCOVERY_MERGED_IDS_MAX } from "@wavekit/api-types"
 import type {
 	ScanJob,
 	ScannerActivityEventData,
@@ -45,6 +46,40 @@ export interface ScannerBroadcastSource extends Pick<EventEmitter, "off"> {
 	settings(): ScannerSettings
 }
 
+/**
+ * Band inspection UX req 3.2: a pending `merged` discovery message replaced before delivery
+ * (merge A<-B, then an update of A) keeps its absorbed ids: the replacement is sent as `merged`
+ * with the union of both `mergedIds` (sorted, at most DISCOVERY_MERGED_IDS_MAX, `mergedTruncated`
+ * past that or when either side was truncated). A `deleted` replacement wins as is (the survivor
+ * is gone; clients refetch). Every other message: the replacement wins.
+ */
+export function coalesceDiscoveryMessages(
+	pending: ServerMessage,
+	next: ServerMessage,
+): ServerMessage {
+	if (pending.type !== "scanner:discovery" || next.type !== "scanner:discovery")
+		return next
+	const a = pending.data as ScannerDiscoveryEventData
+	const b = next.data as ScannerDiscoveryEventData
+	if (a.change !== "merged" || b.change === "deleted") return next
+	const ids = [...new Set([...(a.mergedIds ?? []), ...(b.mergedIds ?? [])])]
+		.filter(id => id !== b.discovery.id)
+		.sort()
+	const truncated =
+		ids.length > DISCOVERY_MERGED_IDS_MAX ||
+		a.mergedTruncated === true ||
+		b.mergedTruncated === true
+	if (ids.length > DISCOVERY_MERGED_IDS_MAX)
+		ids.length = DISCOVERY_MERGED_IDS_MAX
+	const data: ScannerDiscoveryEventData = {
+		...b,
+		change: "merged",
+		mergedIds: ids,
+		...(truncated ? { mergedTruncated: true as const } : {}),
+	}
+	return { ...next, data } as ServerMessage
+}
+
 export function wireScannerBroadcasts(
 	scanner: ScannerBroadcastSource,
 	broadcaster: WebSocketEventBroadcaster,
@@ -58,6 +93,7 @@ export function wireScannerBroadcasts(
 		// Monotonic: a wall-clock step must not stall or burst the limiter.
 		now: opts.now ?? (() => performance.now()),
 		emit: message => broadcaster.broadcast("scanner", message),
+		coalesce: coalesceDiscoveryMessages,
 		schedule: (fn, ms) => {
 			const timer = setTimeout(fn, ms)
 			timer.unref()
