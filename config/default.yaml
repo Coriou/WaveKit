@@ -668,16 +668,19 @@ csdr:
 #       lon: -122.4194
 #     minVersion: "3.14.1"
 #
-#   # ACARS (audio-demod base: one instance decodes ONE AM channel, which
-#   # WaveKit demodulates from the source's IQ; the source must cover it).
-#   # For a second channel, add a second instance with its own id.
+#   # ACARS (audio-demod base: one instance decodes ONE AM channel). With
+#   # `useChannelizer: true` (and `channelizer.enabled: true`, see below) the channel is `frequencies[0]` (or `channelHz`),
+#   # cut from the source's IQ, so a second instance can take a second channel.
+#   # Without the channelizer the instance demodulates the source centre plus
+#   # `offsetHz` (default 0): tune the source, or set offsetHz, to the channel.
 #   - id: "acars-decoder"
 #     type: "acarsdec"
 #     enabled: true
 #     sourceId: "rtl-pi"
+#     useChannelizer: true
 #     options:
 #       frequencies:
-#         - 131550000  # Primary ACARS (or set channelHz explicitly)
+#         - 131550000  # Primary ACARS
 #     minVersion: "3.7"
 #
 #   # VDL2 (IQ-decimate base: WaveKit decimates the source's IQ to the VDL2

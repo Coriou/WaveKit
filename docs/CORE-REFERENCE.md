@@ -259,7 +259,8 @@ Auto squelch has two stages:
 On NFM with stage 2:
 
 - **Pre-roll.** While it waits for evidence the core holds up to 1.5 s of audio, then
-  plays the over from the moment the carrier came up. During an over the stream can run
+  plays the over from the start of that window: from the moment the carrier came up when
+  the evidence arrives within 1.5 s, otherwise only the last 1.5 s before the latch. During an over the stream can run
   up to 1.5 s behind; it catches up by dropping the silence after the over. An over
   shorter than about one second with no tone is not heard.
 - **Tail mute.** Once open, audio passes only while the carrier is FM-quieted (or, when a
