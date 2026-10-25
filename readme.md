@@ -144,10 +144,12 @@ are welcome.
 ## Credits
 
 WaveKit stands on the work of the open-source radio community. Every decoder above is its own
-project, run as a separate process with its own license, and
-[SDR++](https://github.com/AlexandreRouma/SDRPlusPlus), [csdr](https://github.com/jketterl/csdr)
-and [mbelib](https://github.com/szechyjs/mbelib) do much of the heavy lifting. Thank you to their
-authors.
+project, run as a separate process with its own license.
+[csdr](https://github.com/jketterl/csdr) demodulates the audio you listen to by default, and
+[mbelib](https://github.com/szechyjs/mbelib) decodes digital voice inside dsd-fme. The channelizer
+and the spectrum are WaveKit's own (a Rust engine and TypeScript). WaveKit also works with
+[SDR++](https://github.com/AlexandreRouma/SDRPlusPlus): as an optional source, and through the
+RTL-TCP relay, which lets SDR++ tune and watch the same receiver. Thank you to their authors.
 
 ## License
 
