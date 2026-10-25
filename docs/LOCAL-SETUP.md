@@ -99,8 +99,10 @@ point it at WaveKit's RTL-TCP relay on `127.0.0.1:4713` instead. Port 4713 carri
 the corresponding source fields in your selected config as well. API tuner
 commands can retune a live source. Ctrl-C stops each foreground service.
 
-`config/local-rtl.yaml` enables the source and relay; decoders and live audio
-start disabled so missing optional tools do not prevent startup. For audio,
+`config/local-rtl.yaml` enables the source and relay and starts live audio
+disabled. It lists `decoders: []`, but WaveKit still adds the built-in decoders from
+its catalogue; one whose binary is missing is left out instead of
+stopping startup. Set `decoderPolicy.catalogue: false` to run only listed decoders. For audio,
 install the compatible `csdr` described below, then enable `liveDemod` in a copy
 of the config or through the web app or the live audio API.
 

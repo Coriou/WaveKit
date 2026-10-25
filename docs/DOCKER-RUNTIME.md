@@ -49,9 +49,11 @@ the Linux container/VM even when they work on the Mac. Wi-Fi and Ethernet use
 the same application configuration; use the Pi's current address.
 
 The Pi acquires and relays IQ; the laptop's WaveKit container runs DSP and
-configured decoders. The example profile has `decoders: []`, so no decoder runs
-until you add entries to that profile. Bundled decoder executables do not start automatically.
-Choose decoders compatible with the receiver's current frequency and sample rate.
+decoders. The example profile has `decoders: []`, but an empty list does not mean no
+decoders: WaveKit adds every built-in decoder from its catalogue, enabled, and each one
+starts when its band falls inside the tuned window. Set `decoderPolicy.catalogue: false` to
+turn that off and run only the decoders you list, or switch single decoders off in
+Settings › Decoders.
 
 Source REST status includes `activity`: `waiting`, `streaming`, `stale`, `paused`,
 `disconnected`, or `ended`. It reflects payload delivered into the core, excluding

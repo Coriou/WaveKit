@@ -14,8 +14,12 @@ To simply run WaveKit with a Raspberry Pi or a USB dongle, start with
 - `make docker-build` — produce the three default images via `docker buildx
 bake --file docker/bake.hcl default`.
 
-The `dev`, `prod-*` and `demod-test` profiles below are optional; the `dev`
-and `prod-*` profiles pair the core with an SDR++ server as the IQ source.
+The `dev`, `prod-*` and `demod-test` profiles below are optional. The `dev`
+and `prod-*` profiles start an SDR++ server next to the core, but they do not wire
+it up: the core reads `config/default.yaml`, which has `sources: []`, and nothing
+reads the `SDR_SOURCE` variable they set. To use that server, add a source for it
+(host `sdrpp-server` or `wavekit-sdrpp-prod`, port 5259, IQ caps) to a config file and
+point `WAVEKIT_CONFIG` at it.
 
 ## Native dev loop
 
@@ -523,7 +527,7 @@ credentials, so the site needs no proxy to the API. The scheme and hostname must
 match the API origin: the session cookie is host-only and `SameSite=Strict`, so
 another hostname or site is unsupported, and the configuration check refuses
 it. The pairing flow and the CORS rules are in
-[API.md](API.md#browser-pairing-for-a-web-origin-wg9).
+[API.md](API.md#browser-pairing-for-a-web-origin).
 
 Behind this proxy, per-address limits collapse to one shared loopback bucket.
 Caddy dials `127.0.0.1` in the shared network namespace, and the core ignores

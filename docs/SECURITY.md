@@ -2,11 +2,16 @@
 
 ## Access and pairing
 
-By default the core listens on loopback only, and the Docker `app` profile
-publishes its ports on `127.0.0.1`. To let other devices reach WaveKit, run it in
-**protected mode**: every browser is paired once with a one-time code, and every
+Run natively, the core binds `api.host`, which defaults to `0.0.0.0`: every
+network interface. Set `api.host: "127.0.0.1"` (or `WAVEKIT_API__HOST`) to keep it on
+this machine. The Docker `app` profile publishes its ports on `127.0.0.1` only, so
+there the host's loopback is the boundary. To let other devices reach WaveKit, run it
+in **protected mode**: every browser is paired once with a one-time code, and every
 route, WebSocket and audio stream then needs that paired session (or the machine
-credential). Raw audio TCP and the RTL-TCP relay are disabled in protected mode.
+credential). The exceptions are the public liveness probes (`/health` and
+`/health/live`), `GET /api/access/bootstrap`, which tells a browser it must pair,
+and `POST /api/access/pair`, which exchanges the one-time code. Raw audio TCP and
+the RTL-TCP relay are disabled in protected mode.
 
 - Try it locally: [Protected mode locally](LOCAL-SETUP.md#protected-mode-locally).
 - One container with loopback-published ports:

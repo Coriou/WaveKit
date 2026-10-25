@@ -2,7 +2,8 @@
 
 WaveKit is a self-hosted software-defined radio station: one RTL-SDR dongle, on your computer or a
 Raspberry Pi, feeds a web app that shows the spectrum and decodes ADS-B, AIS, DMR, POCSAG, APRS,
-Meshtastic and more at once. These pages are plain Markdown, written to be read on GitHub. Start at
+Meshtastic and more at once, for every decoder whose band falls inside the captured
+window. These pages are plain Markdown, written to be read on GitHub. Start at
 the top.
 
 ## Use WaveKit
