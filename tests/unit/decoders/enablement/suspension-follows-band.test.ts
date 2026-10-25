@@ -824,6 +824,40 @@ describe("fit failures are capture-too-narrow", () => {
 		])
 	})
 
+	it.each([
+		["always", { mode: "always" }],
+		["operator start", { startMode: "operator" }],
+		["band opt-out", { bandSuspension: false }],
+	] as const)(
+		"%s: dsd-fme at 446.52 MHz, 250 ksps, VFO 446.615 MHz that cannot fit",
+		(_name, bypass) => {
+			const dsd = decoder({
+				type: "dsd-fme",
+				channelBandwidthHz: 20_000,
+				channelTransitionHz: 10_000,
+				band: {
+					basis: "region-default",
+					rangesHz: [{ minHz: 446_000_000, maxHz: 446_700_000 }],
+				},
+				...bypass,
+			})
+			const capture = source({ centreHz: 446_520_000, sampleRateHz: 250_000 })
+			const plan = planPlacements({
+				...input(dsd, [capture]),
+				vfo: { sourceId: "s", frequencyHz: 446_615_000 },
+			})
+			expect(plan.wanted).toEqual([])
+			expect(plan.unplaced.get("test")).toBe("capture-too-narrow")
+			// A VFO channel that fits is placed.
+			const fits = planPlacements({
+				...input(dsd, [capture]),
+				vfo: { sourceId: "s", frequencyHz: 446_575_000 },
+			})
+			expect(fits.wanted).toMatchObject([{ channelHz: 446_575_000 }])
+			expect(fits.unplaced.has("test")).toBe(false)
+		},
+	)
+
 	it("EU catalogue LoRa always at 434.2 MHz, 1.024 Msps: the 433 slot cannot fit", async () => {
 		const f = setup(["lora-meshtastic"], 434_200_000, {
 			modes: { "lora-meshtastic": "always" },

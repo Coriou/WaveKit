@@ -127,6 +127,24 @@ export function fitsReach(
 	)
 }
 
+/**
+ * 3.14: a band-free channel decoder whose channel centre lies in the usable window but whose
+ * channel does not fit: a fit failure the band policy cannot excuse.
+ */
+function channelInWindow(
+	d: PlannerDecoder,
+	s: PlannerSource,
+	hz: number | null,
+): boolean {
+	return (
+		bandFree(d) &&
+		d.reach === "channel" &&
+		positive(hz) &&
+		windowValid(s) &&
+		Math.abs(hz - s.centreHz!) <= (s.sampleRateHz! * s.usableFraction) / 2
+	)
+}
+
 /** `always`, an operator start or a band-suspension opt-out skip the band policy. */
 const bandFree = (d: PlannerDecoder): boolean =>
 	d.mode === "always" ||
@@ -276,6 +294,12 @@ export const planPlacements: PlacementPlanner = input => {
 					: half
 			// 3.14: "too narrow" only when the band reaches this capture window.
 			const bandOverlapsWindow = !bandFree(d) && bandFits(d, centre, bandHalf)
+			// 3.14: a fit failure is physical. It counts when the band reaches this window, and,
+			// when `always`, an operator start or an opt-out bypasses the band policy, for a
+			// channel whose centre lies in the window (a wider capture would hold it). Raw
+			// reach (readsb) is a centre position, never a width, so it never counts there.
+			const fitFailureCounts = (hz: number | null): boolean =>
+				bandOverlapsWindow || channelInWindow(d, s, hz)
 			const add = (
 				hz: number | null,
 				origin: Candidate["origin"],
@@ -288,7 +312,7 @@ export const planPlacements: PlacementPlanner = input => {
 				if (!band) return
 				if (fitsReach(d, s, hz))
 					local.push({ source: s, hz, reach: d.reach, origin, index })
-				else if (bandOverlapsWindow) tooNarrow = true
+				else if (fitFailureCounts(hz)) tooNarrow = true
 			}
 			const followsVfo =
 				d.origin === "config" &&
@@ -305,7 +329,7 @@ export const planPlacements: PlacementPlanner = input => {
 				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				const hz = vfo ? vfo.frequencyHz : centre
 				if (bandFits(d, hz, vfo ? 0 : bandHalf) && !fitsReach(d, s, hz)) {
-					if (bandOverlapsWindow) tooNarrow = true
+					if (fitFailureCounts(hz)) tooNarrow = true
 				} else if (bandFits(d, hz, vfo ? 0 : bandHalf))
 					local.push({
 						source: s,
@@ -428,7 +452,7 @@ export const planPlacements: PlacementPlanner = input => {
 							if (fitsReach(d, s, hz)) return true
 							// 3.14: a band-plan channel in the band whose passband the window
 							// cannot hold is a fit failure, not an absent channel.
-							if (bandOverlapsWindow) tooNarrow = true
+							if (fitFailureCounts(hz)) tooNarrow = true
 							return false
 						})
 						.sort(
@@ -488,7 +512,10 @@ export const planPlacements: PlacementPlanner = input => {
 					input.vfo?.sourceId === s.id
 						? input.vfo.frequencyHz
 						: s.centreHz!
-				if (!fitsReach(d, s, hz)) continue
+				if (!fitsReach(d, s, hz)) {
+					if (channelInWindow(d, s, hz)) tooNarrow = true
+					continue
+				}
 				candidates.push({
 					source: s,
 					hz,
