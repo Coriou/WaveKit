@@ -4,10 +4,13 @@
 //   node scripts/check-docs.mjs                 relative links and images in the user docs resolve
 //   node scripts/check-docs.mjs --since=<ref>   also: code changed since <ref> without its page
 //                                               (docs/doc-map.json) changing too
+//   --fallback=<ref>                            base used when <ref> is empty, all zeros or not in
+//                                               this history (default origin/main)
 //
-// Broken links fail. A stale page is a warning (a GitHub annotation in CI), unless every
-// commit that touched the code carries the trailer `Docs: none` (the change is invisible to users)
-// or names the page in `Docs: <path>`. Pass --strict to make stale pages fail as well.
+// Both fail: a broken link, and mapped code that changed without its page unless every commit
+// that touched the code carries the trailer `Docs: none` (the change is invisible to users) or
+// names the page in `Docs: <path>`. When no base can be found (a shallow clone without
+// origin/main), freshness is skipped with a warning rather than failing on a git error.
 
 import { execFileSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
@@ -73,63 +76,184 @@ export function brokenLinks(file, repo = root) {
 	return broken
 }
 
+/** The longest prefix in `prefixes` that `file` starts with, or -1. */
+function matchLength(file, prefixes) {
+	let best = -1
+	for (const p of prefixes)
+		if (file.startsWith(p) && p.length > best) best = p.length
+	return best
+}
+
+/** True when a `Docs:` trailer value is `none`, in any case. */
+function isNone(trailer) {
+	return trailer.toLowerCase() === "none"
+}
+
 /**
- * Pages whose code changed in `changed` while the page did not. `commits` lists each commit in
- * the range with its files and its `Docs:` trailers: a code file is covered when every commit
- * that touched it says `Docs: none` or names one of the entry's pages, so one commit's trailer
- * never excuses another commit's change.
+ * Pages whose code changed in `changed` while the page did not. A file belongs to the entry (or
+ * entries) with the longest matching code prefix, so a narrow entry such as `src/core/scanner/`
+ * takes its files away from a broad one such as `src/core/`.
+ *
+ * `commits` lists each commit in the range with its files and its `Docs:` trailers: a code file
+ * is covered when every commit that touched it says `Docs: none` or names one of the entry's
+ * pages (`Docs: docs/API.md`: the change is described by that page as it already stands, or the
+ * page was updated in another commit). One commit's trailer never excuses another commit's change.
  */
 export function stalePages(changed, map, commits = []) {
 	const touched = new Set(changed)
+	const longest = new Map(
+		changed.map(f => [
+			f,
+			Math.max(-1, ...map.entries.map(e => matchLength(f, e.code))),
+		]),
+	)
 	const stale = []
 	for (const entry of map.entries) {
 		const excused = file => {
 			const by = commits.filter(c => c.files.includes(file))
 			return (
 				by.length > 0 &&
-				by.every(c =>
-					c.trailers.some(
-						t => t.toLowerCase() === "none" || entry.docs.includes(t),
-					),
-				)
+				by.every(c => c.trailers.some(t => isNone(t) || entry.docs.includes(t)))
 			)
 		}
 		if (entry.docs.some(d => touched.has(d))) continue
-		const hits = changed.filter(
-			f => entry.code.some(prefix => f.startsWith(prefix)) && !excused(f),
-		)
+		const hits = changed.filter(f => {
+			const len = matchLength(f, entry.code)
+			return len >= 0 && len === longest.get(f) && !excused(f)
+		})
 		if (hits.length > 0) stale.push({ docs: entry.docs, code: hits })
 	}
 	return stale
 }
 
-/** `git log --name-only` output with a `@@<trailers>` header per commit, parsed. */
-export function parseCommits(log) {
-	const commits = []
-	for (const line of log.split("\n")) {
-		if (line.startsWith("@@")) {
-			const trailers = line
-				.slice(2)
-				.split("|")
-				.map(t => t.trim())
-				.filter(Boolean)
-			commits.push({ trailers, files: [] })
-		} else if (line.trim() !== "" && commits.length > 0) {
-			commits[commits.length - 1]?.files.push(line.trim())
-		}
-	}
-	return commits
+/** NUL-delimited git output (`-z`) split losslessly: names keep every space they have. */
+export function splitZ(out) {
+	return out.split("\0").filter(f => f !== "")
 }
 
-function git(...args) {
-	return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim()
+/** `Docs:` trailer values, NUL separated, split further on commas and trimmed. */
+export function parseTrailers(out) {
+	return out
+		.split(/[\0\n,]/)
+		.map(t => t.trim())
+		.filter(Boolean)
+}
+
+function gitIn(repo, ...args) {
+	return execFileSync("git", args, {
+		cwd: repo,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	})
+}
+
+function tryGit(repo, ...args) {
+	try {
+		return gitIn(repo, ...args).trim()
+	} catch {
+		return undefined
+	}
+}
+
+/**
+ * Every commit in `base..HEAD` with its `Docs:` trailers and the files it changed.
+ *
+ * Ordinary commits list the files they changed against their parent. A merge lists only the
+ * files whose merged content differs from every parent (`git diff-tree --cc`): conflict
+ * resolutions and changes made in the merge itself. A clean merge lists nothing, so the commits
+ * it brings in are judged on their own trailers and are not failed a second time; an evil merge
+ * is judged on its own `Docs:` trailer.
+ */
+export function commitsInRange(base, repo = root) {
+	const shas = gitIn(repo, "rev-list", "--reverse", `${base}..HEAD`)
+		.split("\n")
+		.filter(Boolean)
+	return shas.map(sha => {
+		const parents = gitIn(repo, "rev-list", "--parents", "-n", "1", sha)
+			.trim()
+			.split(" ")
+		const merge = parents.length > 2
+		const files = splitZ(
+			merge
+				? gitIn(
+						repo,
+						"diff-tree",
+						"--cc",
+						"--name-only",
+						"-z",
+						"--no-commit-id",
+						sha,
+					)
+				: gitIn(
+						repo,
+						"diff-tree",
+						"-r",
+						"--root",
+						"--name-only",
+						"-z",
+						"--no-commit-id",
+						sha,
+					),
+		)
+		const trailers = parseTrailers(
+			gitIn(
+				repo,
+				"log",
+				"-1",
+				"--format=%(trailers:key=Docs,valueonly,separator=%x00)",
+				sha,
+			),
+		)
+		return { sha, merge, trailers, files }
+	})
+}
+
+/**
+ * The commit to compare HEAD with. `since` is the last checked commit (the pull request base,
+ * or the commit before a push). It is unusable on the first push of a branch (all zeros or
+ * empty), after a force push (not in this history) and in a shallow clone; then the merge base
+ * with `fallback` (origin/main) stands in. Returns `{ base }`, or `{ reason }` when neither works.
+ */
+export function resolveBase(since, repo = root, fallback = "origin/main") {
+	const usable =
+		since !== "" &&
+		!/^0+$/.test(since) &&
+		tryGit(repo, "cat-file", "-e", `${since}^{commit}`) !== undefined
+	const from = usable ? since : fallback
+	const base = tryGit(repo, "merge-base", from, "HEAD")
+	if (base) return { base, via: usable ? since : fallback }
+	const shallow =
+		tryGit(repo, "rev-parse", "--is-shallow-repository") === "true"
+	const what =
+		since === "" || /^0+$/.test(since)
+			? "no base commit was given (first push of a branch)"
+			: `${since} is not in this history`
+	return {
+		reason: `${what} and ${fallback} has no common ancestor here${shallow ? " (shallow clone: fetch with fetch-depth: 0)" : ""}`,
+	}
+}
+
+/** Stale pages for the range since `since`, or the reason the range could not be checked. */
+export function checkFreshness(
+	since,
+	map,
+	repo = root,
+	fallback = "origin/main",
+) {
+	const r = resolveBase(since, repo, fallback)
+	if (!r.base) return { stale: [], skipped: r.reason ?? "no base" }
+	const changed = splitZ(
+		gitIn(repo, "diff", "--name-only", "-z", r.base, "HEAD"),
+	)
+	const commits = changed.length > 0 ? commitsInRange(r.base, repo) : []
+	return { stale: stalePages(changed, map, commits), base: r.base, via: r.via }
 }
 
 function main() {
 	const args = new Map(
 		process.argv.slice(2).map(a => {
-			const [k, v] = a.replace(/^--/, "").split("=")
-			return [k ?? "", v ?? "true"]
+			const [k, ...v] = a.replace(/^--/, "").split("=")
+			return [k ?? "", v.length > 0 ? v.join("=") : "true"]
 		}),
 	)
 	const ci = process.env["GITHUB_ACTIONS"] === "true"
@@ -146,43 +270,26 @@ function main() {
 		}
 	}
 
-	const since = args.get("since")
-	if (since && !/^0+$/.test(since)) {
+	if (args.has("since")) {
 		const map = JSON.parse(
 			readFileSync(join(root, "docs/doc-map.json"), "utf8"),
 		)
-		let changed
-		try {
-			changed = git("diff", "--name-only", `${since}...HEAD`)
-				.split("\n")
-				.filter(Boolean)
-		} catch {
-			// A force push or a shallow clone: the base is not in the history.
-			console.log(
-				`docs: ${since} is not in this history, page freshness not checked`,
-			)
-			changed = []
+		const result = checkFreshness(
+			args.get("since") ?? "",
+			map,
+			root,
+			args.get("fallback") ?? "origin/main",
+		)
+		if (result.skipped) {
+			const msg = `page freshness not checked: ${result.skipped}`
+			console.log(ci ? `::warning::${msg}` : `docs: ${msg}`)
+		} else if (result.via !== args.get("since")) {
+			console.log(`docs: checking page freshness against ${result.via}`)
 		}
-		// Merges are left out: their files come from the commits they bring in.
-		const commits =
-			changed.length > 0
-				? parseCommits(
-						git(
-							"log",
-							"--no-merges",
-							"--name-only",
-							"--format=@@%(trailers:key=Docs,valueonly,separator=|)",
-							`${since}..HEAD`,
-						),
-					)
-				: []
-		for (const s of stalePages(changed, map, commits)) {
-			const msg = `${s.code.length} file(s) changed under ${s.code[0]}${s.code.length > 1 ? " and others" : ""} without ${s.docs.join(" or ")}. Update the page, or add a "Docs: none" trailer if users see no change.`
-			if (args.has("strict")) failed = true
-			const level = args.has("strict") ? "error" : "warning"
-			console.log(
-				ci ? `::${level} file=${s.docs[0]}::${msg}` : `${level}: ${msg}`,
-			)
+		for (const s of result.stale) {
+			failed = true
+			const msg = `${s.code.length} file(s) changed under ${s.code[0]}${s.code.length > 1 ? " and others" : ""} without ${s.docs.join(" or ")}. Update the page, or end each commit message with "Docs: none" (users see no change) or "Docs: <page>" (the page already covers it).`
+			console.log(ci ? `::error file=${s.docs[0]}::${msg}` : `error: ${msg}`)
 		}
 	}
 

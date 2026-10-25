@@ -1,5 +1,5 @@
 {
-	"$comment": "Which documentation page describes which code. scripts/check-docs.mjs flags a change to the code without a change to its page. Paths are prefixes from the repository root.",
+	"$comment": "Which documentation page describes which code. scripts/check-docs.mjs fails when code changes without its page, unless each commit that touched it carries a 'Docs: none' or 'Docs: <page>' trailer. Paths are prefixes from the repository root; a file belongs to the entry with the longest matching prefix, and any one page of that entry satisfies it. tests/unit/repo/doc-map-coverage.test.ts fails when a code area has no entry.",
 	"entries": [
 		{
 			"code": [
@@ -12,7 +12,7 @@
 		},
 		{ "code": ["web/mock/"], "docs": ["web/mock/README.md"] },
 		{
-			"code": ["src/api/routes/", "packages/api-types/src/"],
+			"code": ["src/api/", "src/operator-data/", "packages/api-types/"],
 			"docs": ["docs/API.md"]
 		},
 		{
@@ -20,17 +20,61 @@
 			"docs": ["docs/CORE-REFERENCE.md", "docs/DOCKER-RUNTIME.md"]
 		},
 		{
-			"code": ["src/decoders/builtin/"],
+			"code": ["src/decoders/"],
 			"docs": ["readme.md", "docs/DECODER-GUIDE.md"]
+		},
+		{
+			"code": ["src/access/", "src/access-command.ts"],
+			"docs": ["docs/DOCKER-SETUP.md", "docs/LOCAL-SETUP.md"]
+		},
+		{
+			"code": [
+				"src/core/scanner/",
+				"src/core/spectrum/",
+				"src/core/bandplans/",
+				"src/core/bandplan-url/",
+				"src/core/auto-listen/",
+				"src/core/evidence-squelch/",
+				"src/core/audio-tones/",
+				"src/core/iq-capture/",
+				"src/core/link-burst/"
+			],
+			"docs": ["docs/SCANNER.md"]
+		},
+		{
+			"code": ["src/core/digital-voice.ts", "src/core/dsd-fme-voice-format.ts"],
+			"docs": ["docs/DIGITAL-VOICE.md"]
+		},
+		{
+			"code": ["src/core/aircraft-", "src/services/", "src/data/"],
+			"docs": ["docs/ADSB.md"]
+		},
+		{
+			"code": [
+				"src/core/",
+				"src/utils/",
+				"src/index.ts",
+				"src/bootstrap.ts",
+				"packages/shared/",
+				"native/"
+			],
+			"docs": ["docs/ARCHITECTURE.md"]
 		},
 		{ "code": ["cli/source/"], "docs": ["docs/CLI.md"] },
 		{
-			"code": ["compose.yaml", "compose.usb.yaml", "Makefile"],
+			"code": [
+				"compose.yaml",
+				"compose.usb.yaml",
+				"Dockerfile",
+				"docker/",
+				"Makefile"
+			],
 			"docs": ["docs/DOCKER-RUNTIME.md", "docs/DOCKER-SETUP.md"]
 		},
 		{
-			"code": ["packages/sdr-host/src/", "packages/sdr-host/scripts/"],
+			"code": ["packages/sdr-host/"],
 			"docs": ["packages/sdr-host/README.md", "docs/SDR-HOST-SETUP.md"]
-		}
+		},
+		{ "code": ["packages/brand/"], "docs": ["packages/brand/README.md"] }
 	]
 }

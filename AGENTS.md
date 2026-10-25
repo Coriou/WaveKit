@@ -146,7 +146,9 @@ User docs are plain GitHub Markdown, indexed in [`docs/README.md`](docs/README.m
 change alters what a user sees or does (a web app feature, an API route, a config key, a
 decoder, a command), update the page that describes it in the same commit;
 [`docs/doc-map.json`](docs/doc-map.json) says which page covers which code. If mapped code
-changes with nothing to document, end the commit message with the trailer `Docs: none`.
+changes with nothing to document, end the commit message with the trailer `Docs: none`
+(or `Docs: <page>` when that page already covers it); `node scripts/check-docs.mjs` fails CI
+otherwise, and a new code area needs a map entry.
 Refresh screenshots with `pnpm --filter @wavekit/web docs:shots` when the UI changes visibly.
 Rules and style: [`CONTRIBUTING.md`](CONTRIBUTING.md#documentation).
 

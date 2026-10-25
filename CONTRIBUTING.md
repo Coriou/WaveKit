@@ -53,14 +53,21 @@ code they describe.
 
 1. **Change what users see, change its page.** [`docs/doc-map.json`](docs/doc-map.json) lists which
    page covers which code: the web app's features in [`docs/WEB-APP.md`](docs/WEB-APP.md), the API
-   in [`docs/API.md`](docs/API.md), the decoders in the README, and so on. Add an entry when you add
-   an area.
+   in [`docs/API.md`](docs/API.md), the decoders in the README, and so on. A file belongs to the
+   entry with the longest matching prefix, and any one page of that entry will do. Add an entry
+   when you add an area: a repository test fails when a directory under `src/`, `src/core/`,
+   `web/src/features/`, `packages/` or `native/` has none.
 2. **Say when there is nothing to document.** If a commit changes mapped code without changing
    anything a user sees (a refactor, a test, a fix that restores documented behaviour), end the
-   commit message with the trailer `Docs: none`. The trailer covers that commit's own files only.
-3. **Keep links working.** `node scripts/check-docs.mjs` fails on a broken relative link or image.
-   With `--since=<ref>` it also lists mapped code that changed without its page; CI runs it on
-   every push and pull request and shows the result as a warning.
+   commit message with the trailer `Docs: none`. If the page already describes the change, or
+   another commit updated it, name it instead: `Docs: docs/API.md`. A trailer covers that commit's
+   own files only. A merge is checked on what it changes itself (conflict resolutions, edits made
+   while merging), and its own trailer excuses those; a clean merge needs nothing.
+3. **Run the checker.** `node scripts/check-docs.mjs` fails on a broken relative link or image.
+   With `--since=<ref>` it also fails on mapped code that changed without its page or a trailer.
+   CI runs it on every push and pull request. On the first push of a branch, or when `<ref>` is
+   not in the history, it compares with the merge base of `origin/main`; if that is missing too
+   (a shallow clone), it says so and skips the freshness check.
 4. **Refresh screenshots** when the UI changes visibly: `pnpm --filter @wavekit/web docs:shots`
    rebuilds the web app, runs it against the mock (the same data on every run) and rewrites
    `docs/assets/screenshots/`. Commit the images that changed.
