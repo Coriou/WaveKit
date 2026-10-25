@@ -1035,3 +1035,81 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 		store.dispose()
 	})
 })
+
+describe("ScannerStore: reconcile never drops what changed after the request (review round 2)", () => {
+	const flush = () => new Promise(r => setTimeout(r, 0))
+	function deferred() {
+		const pending: ((body: unknown) => void)[] = []
+		const calls: string[] = []
+		const api = new ApiClient({
+			fetch: url =>
+				new Promise<Response>(resolve => {
+					calls.push(url)
+					pending.push(body => resolve(new Response(JSON.stringify(body))))
+				}),
+		})
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		const frames: (() => void)[] = []
+		const store = new ScannerStore(api, events, {
+			frame: { request: cb => frames.push(cb), cancel: () => undefined },
+		})
+		const send = (type: string, data: unknown) =>
+			sockets.last().receive({ type, channel: "scanner", data })
+		const tick = () => {
+			for (const f of frames.splice(0)) f()
+		}
+		return { store, pending, calls, send, tick }
+	}
+	const span = { freqMinHz: 446e6, freqMaxHz: 446.1e6 }
+
+	it("a span fetch that answers empty keeps a discovery created live while it was in flight", async () => {
+		const { store, pending, send, tick } = deferred()
+		const p = store.fetchDiscoveries(span)
+		await flush()
+		send("scanner:discovery", {
+			change: "created",
+			discovery: discovery("live"),
+		})
+		tick()
+		pending[0]!({ items: [], nextCursor: null })
+		await p
+		expect(store.get().discoveries.byId.has("live")).toBe(true)
+		store.dispose()
+	})
+
+	it("an older span answer arriving last removes nothing; the newest still reconciles", async () => {
+		const { store, pending } = deferred()
+		const first = store.fetchDiscoveries(span)
+		const second = store.fetchDiscoveries(span)
+		await flush()
+		// the newer request answers first with a record, then the older one answers empty
+		pending[1]!({ items: [discovery("a")], nextCursor: null })
+		await second
+		pending[0]!({ items: [], nextCursor: null })
+		await first
+		expect(store.get().discoveries.byId.has("a")).toBe(true)
+		// a later, newest fetch that no longer has it does remove it
+		const third = store.fetchDiscoveries(span)
+		await flush()
+		pending[2]!({ items: [], nextCursor: null })
+		await third
+		expect(store.get().discoveries.byId.has("a")).toBe(false)
+		store.dispose()
+	})
+
+	it("a list refresh keeps what a span fetch wrote after the refresh started", async () => {
+		const { store, pending } = deferred()
+		const refresh = store.refreshDiscoveries({})
+		const spanFetch = store.fetchDiscoveries(span)
+		await flush()
+		pending[1]!({ items: [discovery("b")], nextCursor: null })
+		await spanFetch
+		pending[0]!({ items: [], nextCursor: null })
+		await refresh
+		expect(store.get().discoveries.byId.has("b")).toBe(true)
+		store.dispose()
+	})
+})

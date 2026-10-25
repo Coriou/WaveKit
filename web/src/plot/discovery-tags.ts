@@ -33,6 +33,8 @@ export interface PlacedDiscoveryTag {
 	hz: number
 	/** "DMR · CC 1", "Maybe FM voice", "Heard"; a group adds " +n-1". */
 	label: string
+	/** The representative's name alone (the label without the count): the part that may ellipsise. */
+	name: string
 	tier: DiscoveryTier
 	/** Decoded: the dot is filled (else a ring). */
 	solid: boolean
@@ -278,6 +280,7 @@ export function placeDiscoveryTags(
 			id: rep.id,
 			hz: first.frequencyHz,
 			label,
+			name,
 			tier,
 			solid: rep.confidence === "decoded",
 			heard: rep.confidence === "activity" || rep.protocol === "unknown",
@@ -320,8 +323,11 @@ export function placeDiscoveryTags(
 		if (t) placed.push(t)
 	}
 	placed.forEach((t, i) => {
+		// the count never shrinks: its room comes on top of the (capped) name
 		const full = Math.round(
-			chrome + Math.min(maxLabel, [...t.label].length * charPx),
+			chrome +
+				Math.min(maxLabel, [...t.name].length * charPx) +
+				(t.count ? 4 + t.count.length * COUNT_CHAR_PX : 0),
 		)
 		const next = placed[i + 1]
 		if (t.x + full <= maxX && (!next || t.x + full + gap <= next.x)) {

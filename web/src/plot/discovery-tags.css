@@ -17,7 +17,6 @@
 		position: absolute;
 		top: 2px;
 		height: 16px;
-		max-width: 160px;
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -55,7 +54,8 @@
 	.wk-plot-disc > i[data-solid] {
 		background: var(--disc-c);
 	}
-	.wk-plot-disc > span {
+	.wk-plot-disc > .wk-plot-disc-name {
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
@@ -76,6 +76,7 @@
 	}
 	/* a group too tight for its label still says how many: "+5" */
 	.wk-plot-disc-count {
+		flex: none;
 		font-weight: 700;
 		font-variant-numeric: tabular-nums;
 	}

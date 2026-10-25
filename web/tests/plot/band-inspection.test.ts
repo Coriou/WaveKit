@@ -106,6 +106,19 @@ describe("clusterDiscoveries", () => {
 		expect(tags[0]!.x).toBe(0)
 	})
 
+	it("a long label keeps its count: the name is capped, the count's room comes on top", () => {
+		const long = "A very long operator label that runs on and on and on"
+		const ds = [
+			disc("a", xHz(100), { operator: { label: long } }),
+			disc("b", xHz(101)),
+		]
+		const [t] = placeDiscoveryTags(ds, view, opts)
+		expect(t!.labelled).toBe(true)
+		expect(t!.name).toBe(long)
+		expect(t!.count).toBe("+1")
+		expect(t!.width).toBe(Math.round(22 + 140 + 4 + 2 * 6.6))
+	})
+
 	it("a group without room for its label still shows its count", () => {
 		const ds = [disc("a", xHz(100)), disc("b", xHz(101)), disc("c", xHz(112))]
 		const [t] = placeDiscoveryTags(ds, view, {

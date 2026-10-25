@@ -231,11 +231,8 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 						onClick={e => toggle({ kind: "tag", id: t.id }, e.currentTarget)}
 					>
 						<i data-solid={t.solid || undefined} aria-hidden="true" />
-						{t.labelled ? (
-							<span>{t.label}</span>
-						) : (
-							t.count && <span className="wk-plot-disc-count">{t.count}</span>
-						)}
+						{t.labelled && <span className="wk-plot-disc-name">{t.name}</span>}
+						{t.count && <span className="wk-plot-disc-count">{t.count}</span>}
 					</button>
 				)
 			})}
