@@ -98,9 +98,21 @@ import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
 import { PendingAdmission, admissionSnrOf } from "./pending-admission.js"
 import {
+	DQ_CO_CHANNEL_MAX,
 	DQ_CREATE_SNR_DB,
+	DQ_CROSS_FAMILY_HZ,
+	DQ_IDENTITY_OVERLAP_MS,
+	DQ_IDENTITY_PROTOCOLS,
+	DQ_IDENTITY_SPLIT_MAX_HZ,
+	DQ_IDENTITY_SPLIT_MIN_HZ,
+	DQ_IDENTITY_WEAKER_DB,
+	DQ_MIN_HISTORY_OBS,
+	DQ_OBW_RATIO_MAX,
+	DQ_OBW_RATIO_MIN,
 	DQ_OVERLOAD_CREATE_SNR_DB,
 } from "../detection-quality-contract.js"
+import { compatible, recordsCompatible } from "./compatibility.js"
+import type { CompatibilitySide } from "./compatibility.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -669,6 +681,36 @@ interface IndexedDiscovery {
  */
 const DECODED_CENTRE_FAMILY = "\u0001"
 
+/** DQ 2.1: every effective family a centre list can hold (fixed, under 16). */
+const CENTRE_FAMILIES: readonly ProtocolFamily[] = [
+	"analog",
+	"digital-voice",
+	"pager",
+	"packet",
+	"ism",
+	"carrier",
+	"unknown",
+]
+
+/**
+ * WG11 req 3.2 and DQ 3.1, 3.4: one pass over a discovery's last 64 observations. `count` is the
+ * window length; `majority` is the majority non-edge, non-unknown class (ties: the most recent
+ * of the tied classes), undefined when nothing voted.
+ */
+interface Medians {
+	centre: number
+	obw: number
+	peak: number
+	count: number
+	majority: ScannerClass | undefined
+}
+
+const sideOf = (m: Medians): CompatibilitySide => ({
+	peakDbfs: m.peak,
+	obwHz: m.obw,
+	count: m.count,
+})
+
 export class DiscoveryStore
 	extends EventEmitter
 	implements ObservationEvidenceSink, DiscoveryNearQuery
@@ -714,7 +756,16 @@ export class DiscoveryStore
 	 */
 	private readonly revisions = new WeakMap<Discovery, number>()
 	/** Median centre and OBW over a discovery's last 64 observations (only while it has one). */
-	private readonly medians = new Map<string, { centre: number; obw: number }>()
+	private readonly medians = new Map<string, Medians>()
+	/** DQ 2.3: partners pruned for distance, per record (memory only), for the re-link. */
+	private readonly unlinked = new Map<string, Set<string>>()
+	/** DQ 2.3: ids whose `coChannel` a prune changed; `finish` journals them. */
+	private readonly linkTouched = new Set<string>()
+	/**
+	 * DQ 3.4: the classifier class each observation arrived with (memory only; edge observations
+	 * have none). Records restored from disk carry none and do not vote.
+	 */
+	private readonly observationClass = new WeakMap<Observation, ScannerClass>()
 	private readonly members = new Map<string, Set<string>>()
 	private readonly centres = new CentreIndex()
 	/**
@@ -809,7 +860,11 @@ export class DiscoveryStore
 		)
 			return TRANSIENT
 		const label = labelFromEvidence(emptyProof(input))
-		const sticky = this.stickyMatch(input, label.family)
+		const sticky = this.stickyMatch(
+			input,
+			label.family,
+			opts.decode === undefined,
+		)
 		if (sticky !== undefined)
 			return this.commit("observation", op =>
 				this.addObservation(op, sticky, input),
@@ -824,6 +879,7 @@ export class DiscoveryStore
 			place.key,
 			label.family,
 			input.classification.class,
+			input,
 		)
 		const into = target.merge
 		if (into !== null)
@@ -909,6 +965,7 @@ export class DiscoveryStore
 			!identityFitsProtocol(ev.protocol, ev.identity)
 		)
 			return null
+		if (this.adjacentIdentityCopy(d, ev)) return null
 		if (
 			ev.identity !== undefined &&
 			d.identity !== undefined &&
@@ -959,6 +1016,68 @@ export class DiscoveryStore
 		const id = this.settle(op, d)
 		this.finish("evidence", op)
 		return op.changes.get(id) ?? "updated"
+	}
+
+	/**
+	 * DQ 2.4: true only when `ev` is a digital-voice source-id decode on `d` that another decoded
+	 * record of the same source already holds, 6 to 30 kHz away (median centres), overlapping in
+	 * time within 2 s, and `d` is at least 10 dB weaker (median peaks). Any missing or non-finite
+	 * input is false, so the decode applies as before. Per decode, not per frame.
+	 */
+	private adjacentIdentityCopy(d: Discovery, ev: DecodeEvidence): boolean {
+		const identity = ev.identity
+		if (identity === undefined || !DQ_IDENTITY_PROTOCOLS.includes(ev.protocol))
+			return false
+		const sourceId = d.sourceIds[0]
+		const own = this.mediansOf(d.id)
+		const carry = this.carryingObservation(d, ev)
+		if (sourceId === undefined || own === undefined || carry === undefined)
+			return false
+		const start = Date.parse(carry.startedAt)
+		const end = Date.parse(carry.endedAt ?? carry.startedAt)
+		if (
+			!Number.isFinite(own.centre) ||
+			!Number.isFinite(own.peak) ||
+			!Number.isFinite(start) ||
+			!Number.isFinite(end)
+		)
+			return false
+		const lo = start - DQ_IDENTITY_OVERLAP_MS
+		const hi = end + DQ_IDENTITY_OVERLAP_MS
+		let refused = false
+		this.syncIndex()
+		this.decodedCentres.range(
+			sourceId,
+			DECODED_CENTRE_FAMILY,
+			own.centre - DQ_IDENTITY_SPLIT_MAX_HZ - 1,
+			own.centre + DQ_IDENTITY_SPLIT_MAX_HZ + 1,
+			e => {
+				if (refused || e.id === d.id) return
+				const o = this.discoveries.get(e.id)
+				if (o === undefined || !sameIdentity(o.identity, identity)) return
+				if (this.effectiveLabel(o).protocol !== ev.protocol) return
+				const other = this.mediansOf(o.id)
+				if (
+					other === undefined ||
+					!Number.isFinite(other.centre) ||
+					!Number.isFinite(other.peak)
+				)
+					return
+				const dist = Math.abs(other.centre - own.centre)
+				if (dist < DQ_IDENTITY_SPLIT_MIN_HZ || dist > DQ_IDENTITY_SPLIT_MAX_HZ)
+					return
+				if (other.peak - own.peak < DQ_IDENTITY_WEAKER_DB) return
+				for (const x of this.byDiscovery.get(o.id) ?? []) {
+					const xs = Date.parse(x.startedAt)
+					const xe = Date.parse(x.endedAt ?? x.startedAt)
+					if (xs <= hi && xe >= lo) {
+						refused = true
+						return
+					}
+				}
+			},
+		)
+		return refused
 	}
 
 	applyClassification(
@@ -1778,6 +1897,8 @@ export class DiscoveryStore
 		this.corrections.clear()
 		this.appliedSeq = 0
 		this.medians.clear()
+		this.unlinked.clear()
+		this.linkTouched.clear()
 		this.members.clear()
 		this.centres.clear()
 		this.decodedCentres.clear()
@@ -1837,6 +1958,7 @@ export class DiscoveryStore
 	private stickyMatch(
 		obs: ObservationInput,
 		family: ProtocolFamily,
+		evidenceLess: boolean,
 	): Discovery | undefined {
 		const ids = this.bySource.get(obs.sourceId)
 		if (ids === undefined) return undefined
@@ -1857,11 +1979,16 @@ export class DiscoveryStore
 		// discovery of any family; those sit in one extra list.
 		const lowHz = centre - tol - 1
 		const highHz = centre + tol + 1
+		let radius = tol
+		let crossFamily = false
 		const consider = (e: IndexedCentre): void => {
 			const d = this.discoveries.get(e.id)
 			if (d === undefined) return
 			const dist = Math.abs(e.centreHz - centre)
-			if (dist > tol) return
+			if (dist > radius) return
+			// DQ 3.2: never stick to a record whose medians refuse this observation.
+			if (this.obsCompatible(d, obs) === false) return
+			if (crossFamily && !this.bandwidthJoins(d, obs.track.obwHz)) return
 			const better =
 				best === undefined ||
 				dist < bestDist ||
@@ -1882,7 +2009,37 @@ export class DiscoveryStore
 				highHz,
 				consider,
 			)
+		// DQ 2.1, 2.2: an evidence-less observation also sticks to a record of any other family
+		// (carrier included) within min(tol, 1 kHz) at a bandwidth ratio in [0.5, 2]. Nearest wins.
+		if (evidenceLess) {
+			radius = Math.min(tol, DQ_CROSS_FAMILY_HZ)
+			crossFamily = true
+			for (const other of CENTRE_FAMILIES) {
+				if (other === family) continue
+				this.centres.range(
+					obs.sourceId,
+					other,
+					centre - radius - 1,
+					centre + radius + 1,
+					consider,
+				)
+			}
+		}
 		return best
+	}
+
+	/** DQ 2.1, 2.5: observation OBW over the record's median OBW within [0.5, 2]; finite only. */
+	private bandwidthJoins(d: Discovery, obwHz: number): boolean {
+		const recordObw = this.mediansOf(d.id)?.obw
+		if (
+			recordObw === undefined ||
+			!Number.isFinite(recordObw) ||
+			recordObw <= 0 ||
+			!Number.isFinite(obwHz)
+		)
+			return false
+		const ratio = obwHz / recordObw
+		return ratio >= DQ_OBW_RATIO_MIN && ratio <= DQ_OBW_RATIO_MAX
 	}
 
 	private keyTarget(
@@ -1890,8 +2047,12 @@ export class DiscoveryStore
 		key: string,
 		family: ProtocolFamily,
 		cls: ScannerClass,
+		obs: ObservationInput,
 	): { merge: Discovery | null; coChannel: string[] } {
-		const atKey = this.atKey(sourceId, key)
+		const linked = this.atKey(sourceId, key)
+		// DQ 3.2: a record whose medians refuse the observation is never a merge target; it stays
+		// a co-channel partner of whatever the observation creates.
+		const atKey = linked.filter(d => this.obsCompatible(d, obs) !== false)
 		const familyOfDiscovery = (d: Discovery): ProtocolFamily =>
 			this.effectiveLabel(d).family
 		const same = atKey.filter(d => familyOfDiscovery(d) === family)
@@ -1920,7 +2081,7 @@ export class DiscoveryStore
 			)
 				return { merge: lone, coChannel: [] }
 		}
-		return { merge: null, coChannel: atKey.map(d => d.id) }
+		return { merge: null, coChannel: linked.map(d => d.id) }
 	}
 
 	private createFrom(
@@ -1931,7 +2092,15 @@ export class DiscoveryStore
 		if (!this.makeRoom()) return TRANSIENT
 		return this.commit("observation", op => {
 			const d = this.newDiscovery(op, obs, label, coChannel)
-			return this.addObservation(op, d, obs)
+			const partners = [...d.coChannel]
+			const id = this.addObservation(op, d, obs)
+			// DQ 2.3: the same cap as refresh (the new record's ran there), reciprocal, on each
+			// partner once the new record has its first median.
+			for (const otherId of partners) {
+				const other = this.discoveries.get(otherId)
+				if (other !== undefined) this.pruneLinks(other)
+			}
+			return id
 		})
 	}
 
@@ -1989,6 +2158,7 @@ export class DiscoveryStore
 
 	private addObservation(op: Op, d: Discovery, obs: ObservationInput): string {
 		const beforeRank = rank(d.confidence)
+		const raise = this.raisesBest(d, obs)
 		const record = this.toRecord(obs, d.id)
 		this.putObservation(record)
 		op.observations.add(record.id)
@@ -1998,7 +2168,7 @@ export class DiscoveryStore
 		})
 		d.observationCount += 1
 		d.airtimeMs += durationOf(obs)
-		this.absorbStats(d, obs, true)
+		this.absorbStats(d, obs, true, raise)
 		this.refresh(d)
 		op.discoveries.add(d.id)
 		mark(op, d.id, rank(d.confidence) > beforeRank ? "upgraded" : "updated")
@@ -2010,6 +2180,7 @@ export class DiscoveryStore
 		if (d === undefined) return TRANSIENT
 		const beforeD = this.revision(d)
 		const beforeRank = rank(d.confidence)
+		const raise = this.raisesBest(d, obs)
 		const record = this.toRecord(obs, d.id)
 		record.jobIds = appendMissing(known.jobIds, obs.jobIds) // a job that ended while the track was open keeps its credit
 		record.recordingIds = known.recordingIds
@@ -2027,7 +2198,7 @@ export class DiscoveryStore
 			jsonEqual(record.hypotheses, known.hypotheses) &&
 			record.flags.adjacentLeak === known.flags.adjacentLeak &&
 			record.flags.suspectedIntermod === known.flags.suspectedIntermod
-		this.absorbStats(d, obs, !sameClassification)
+		this.absorbStats(d, obs, !sameClassification, raise)
 		this.refresh(d)
 		if (this.revision(d) === beforeD && jsonEqual(record, known)) {
 			this.flushRemoval()
@@ -2097,6 +2268,7 @@ export class DiscoveryStore
 		d: Discovery,
 		obs: ObservationInput,
 		applyClassification: boolean,
+		raiseBest: boolean,
 	): void {
 		this.markDirty(d.id)
 		const startedAt = iso(obs.startedAt)
@@ -2117,7 +2289,8 @@ export class DiscoveryStore
 			d.signal.last = stats
 			d.tuningTrust = obs.track.tuningTrust
 		}
-		if (stats.snrDb > d.signal.best.snrDb) {
+		// DQ 3.3: only a compatible, not overload-flagged observation raises best.
+		if (raiseBest && stats.snrDb > d.signal.best.snrDb) {
 			d.signal.best = { ...stats }
 			this.touch(d)
 		}
@@ -2127,11 +2300,31 @@ export class DiscoveryStore
 			this.touch(d)
 		d.jobIds = jobIds
 		d.sourceIds = sourceIds
-		if (applyClassification && !obs.track.flags.edge)
-			this.applyClassificationTo(d, obs.classification)
+		if (!applyClassification) return
+		const majority = this.mediansOf(d.id)?.majority
+		if (!obs.track.flags.edge)
+			this.applyClassificationTo(d, obs.classification, majority)
+		else if (
+			majority !== undefined &&
+			d.confidence !== "decoded" &&
+			d.class !== majority
+		) {
+			// DQ 3.4: an edge observation does not vote, but the window it entered may have moved.
+			this.markDirty(d.id)
+			this.touch(d)
+			d.class = majority
+		}
 	}
 
-	private applyClassificationTo(d: Discovery, c: Classification): void {
+	/**
+	 * `majority` (DQ 3.4) is the class tally of the last 64 observations; without one (nothing
+	 * voted, or a refinement not tied to an observation) the classification's own class applies.
+	 */
+	private applyClassificationTo(
+		d: Discovery,
+		c: Classification,
+		majority?: ScannerClass,
+	): void {
 		this.markDirty(d.id)
 		const decoded = d.confidence === "decoded"
 		// The cached DTO label ceilings confidence from this cap. Drop it with the
@@ -2150,9 +2343,10 @@ export class DiscoveryStore
 				labelChanged = true
 			}
 		}
-		if (!decoded && c.class !== "unknown") {
-			if (d.class !== c.class) this.touch(d)
-			d.class = c.class
+		const cls = majority ?? c.class
+		if (!decoded && cls !== "unknown") {
+			if (d.class !== cls) this.touch(d)
+			d.class = cls
 		}
 		if (labelChanged) this.invalidateLabel(d.id)
 	}
@@ -2639,17 +2833,102 @@ export class DiscoveryStore
 	 * WG11 req 3.2: medians over the last 64 observations, cached until that discovery's observation
 	 * list changes (`putObservation`, `unlinkObservation`, `removeDiscovery` drop the entry).
 	 */
-	private mediansOf(id: string): { centre: number; obw: number } | undefined {
+	private mediansOf(id: string): Medians | undefined {
 		const cached = this.medians.get(id)
 		if (cached !== undefined) return cached
 		const recent = (this.byDiscovery.get(id) ?? []).slice(-MEDIAN_WINDOW)
 		if (recent.length === 0) return undefined
-		const fresh = {
+		const votes = new Map<ScannerClass, { n: number; last: number }>()
+		for (let i = 0; i < recent.length; i++) {
+			const o = recent[i]
+			if (o === undefined || o.flags.edge) continue
+			const cls = this.observationClass.get(o)
+			if (cls === undefined || cls === "unknown") continue
+			const v = votes.get(cls)
+			if (v === undefined) votes.set(cls, { n: 1, last: i })
+			else {
+				v.n += 1
+				v.last = i
+			}
+		}
+		let majority: ScannerClass | undefined
+		let top = { n: 0, last: -1 }
+		for (const [cls, v] of votes)
+			if (v.n > top.n || (v.n === top.n && v.last > top.last)) {
+				majority = cls
+				top = v
+			}
+		const fresh: Medians = {
 			centre: median(recent.map(o => o.centerHz)),
 			obw: median(recent.map(o => o.obwHz)),
+			peak: median(recent.map(o => o.peakDbfs)),
+			count: recent.length,
+			majority,
 		}
 		this.medians.set(id, fresh)
 		return fresh
+	}
+
+	/** DQ 3.1: an observation against a record's medians; null when undecided (3.5). */
+	private obsCompatible(d: Discovery, obs: ObservationInput): boolean | null {
+		const m = this.mediansOf(d.id)
+		if (m === undefined) return null
+		const self: CompatibilitySide = {
+			peakDbfs: obs.track.peakDbfs,
+			obwHz: obs.track.obwHz,
+			count: Number.POSITIVE_INFINITY,
+		}
+		if (m.count >= DQ_MIN_HISTORY_OBS) return compatible(sideOf(m), self)
+		// A young record (1 or 2): each of its observations (see `recordsCompatible`).
+		return recordsCompatible(
+			{ medians: sideOf(m), observations: this.recentOf(d.id) },
+			{ medians: self, observations: [] },
+		)
+	}
+
+	private recentOf(id: string): readonly Observation[] {
+		return (this.byDiscovery.get(id) ?? []).slice(-MEDIAN_WINDOW)
+	}
+
+	/** True when an overload-flagged stored observation carries exactly `d`'s best (a creation seed). */
+	private bestFromOverload(d: Discovery): boolean {
+		const best = d.signal.best
+		for (const o of this.byDiscovery.get(d.id) ?? [])
+			if (
+				o.flags.overload &&
+				o.snrDb === best.snrDb &&
+				o.peakDbfs === best.peakDbfs
+			)
+				return true
+		return false
+	}
+
+	/** DQ 3.1, 3.2: two records' medians (see `recordsCompatible`). */
+	private pairCompatible(a: Discovery, b: Discovery): boolean | null {
+		const ma = this.mediansOf(a.id)
+		const mb = this.mediansOf(b.id)
+		if (ma === undefined || mb === undefined) return null
+		const young = (id: string, m: Medians): readonly Observation[] =>
+			m.count >= DQ_MIN_HISTORY_OBS ? [] : this.recentOf(id)
+		return recordsCompatible(
+			{ medians: sideOf(ma), observations: young(a.id, ma) },
+			{ medians: sideOf(mb), observations: young(b.id, mb) },
+		)
+	}
+
+	/**
+	 * DQ 3.3, 3.5: may `obs` raise `signal.best`? Judged against the medians before it joined.
+	 * Never when overload-flagged or non-finite; with 3 or more observations only when 3.1 says
+	 * compatible (not refused, not undecided).
+	 */
+	private raisesBest(d: Discovery, obs: ObservationInput): boolean {
+		const overload: unknown = (
+			obs.track.flags as { overload?: unknown } | undefined
+		)?.overload
+		if (overload !== false || !Number.isFinite(obs.track.snrDb)) return false
+		const m = this.mediansOf(d.id)
+		if (m === undefined || m.count < DQ_MIN_HISTORY_OBS) return true
+		return this.obsCompatible(d, obs) === true
 	}
 
 	private medianCentre(d: Discovery): number {
@@ -2678,6 +2957,147 @@ export class DiscoveryStore
 		d.frequencyKey = place.key
 		d.measuredOffsetHz = measuredOffsetHz
 		d.bandwidthHz = bandwidthHz
+		this.pruneLinks(d)
+	}
+
+	/** DQ 2.3: `d`'s association tolerance around its median centre. */
+	private linkWindow(d: Discovery): { centre: number; tol: number } {
+		const m = this.mediansOf(d.id)
+		const centre = m?.centre ?? d.frequencyHz + d.measuredOffsetHz
+		const tol = this.toleranceHz(
+			d.sourceIds[0] ?? "",
+			centre,
+			m?.obw ?? d.bandwidthHz,
+		)
+		return { centre, tol }
+	}
+
+	/** Remembers a distance-pruned pair both ways (memory only, at most LINKS_MAX per record). */
+	private rememberUnlinked(a: string, b: string): void {
+		for (const [x, y] of [
+			[a, b],
+			[b, a],
+		] as const) {
+			let set = this.unlinked.get(x)
+			if (set === undefined) {
+				set = new Set()
+				this.unlinked.set(x, set)
+			}
+			set.delete(y)
+			set.add(y)
+			if (set.size > LINKS_MAX) {
+				const oldest = set.values().next()
+				if (oldest.done !== true) set.delete(oldest.value)
+			}
+		}
+	}
+
+	private forgetUnlinked(a: string, b: string): void {
+		this.unlinked.get(a)?.delete(b)
+		this.unlinked.get(b)?.delete(a)
+	}
+
+	/**
+	 * DQ 2.3: keeps partners that exist and whose median centre lies within `d`'s association
+	 * tolerance, nearest first (ties: the more recently seen first), at most `DQ_CO_CHANNEL_MAX`.
+	 * Every dropped partner forgets `d` too (reciprocal); both proof watches follow. A partner
+	 * pruned for distance is re-linked (both ways) once both records' tolerances hold again.
+	 */
+	private pruneLinks(d: Discovery, relink = true): void {
+		const links = Array.isArray(d.coChannel) ? d.coChannel : NO_LINKS
+		const away = relink ? this.unlinked.get(d.id) : undefined
+		if (links.length === 0 && (away === undefined || away.size === 0)) return
+		const { centre, tol } = this.linkWindow(d)
+		const rows: { id: string; seen: string; dist: number }[] = []
+		const far: string[] = []
+		const seen = new Set<string>()
+		for (const id of links) {
+			if (id === d.id || seen.has(id)) continue
+			seen.add(id)
+			const p = this.discoveries.get(id)
+			if (p === undefined) continue
+			const dist = Math.abs(this.medianCentre(p) - centre)
+			if (!(dist <= tol)) {
+				far.push(id)
+				continue
+			}
+			rows.push({ id, seen: p.lastSeenAt, dist })
+		}
+		for (const id of away ?? []) {
+			if (id === d.id || seen.has(id)) continue
+			const p = this.discoveries.get(id)
+			if (p === undefined || p.sourceIds[0] !== d.sourceIds[0]) continue
+			const back = this.linkWindow(p)
+			const dist = Math.abs(back.centre - centre)
+			if (!(dist <= tol) || !(dist <= back.tol)) continue
+			rows.push({ id, seen: p.lastSeenAt, dist })
+		}
+		rows.sort(
+			(a, b) =>
+				a.dist - b.dist ||
+				compareText(b.seen, a.seen) ||
+				compareText(a.id, b.id),
+		)
+		const kept = rows.slice(0, DQ_CO_CHANNEL_MAX).map(r => r.id)
+		if (sameList(kept, links)) return
+		const keptSet = new Set(kept)
+		const before = new Set(links)
+		// A link is a proof read both ways: arm both sides' readers, then drop their caches.
+		this.armWatchers(d.id)
+		for (const id of new Set([...links, ...kept]))
+			if (id !== d.id && this.discoveries.has(id)) this.armWatchers(id)
+		this.invalidateLabel(d.id)
+		d.coChannel = kept
+		this.touch(d)
+		this.markDirty(d.id)
+		this.syncProofWatch(d)
+		this.linkTouched.add(d.id)
+		for (const id of far) this.rememberUnlinked(d.id, id)
+		const relinked: Discovery[] = []
+		for (const id of new Set([...links, ...kept])) {
+			if (id === d.id) continue
+			const p = this.discoveries.get(id)
+			if (p === undefined) continue
+			const keep = keptSet.has(id)
+			const has = p.coChannel.includes(d.id)
+			if (keep && before.has(id) && has) continue
+			if (!keep && !has) continue
+			if (keep) {
+				this.forgetUnlinked(d.id, id)
+				p.coChannel = appendMissing(p.coChannel, [d.id])
+				relinked.push(p)
+			} else p.coChannel = p.coChannel.filter(x => x !== d.id)
+			this.invalidateLabel(p.id)
+			this.touch(p)
+			this.markDirty(p.id)
+			this.syncProofWatch(p)
+			this.linkTouched.add(p.id)
+		}
+		// A re-linked partner keeps its own cap (no further re-link from inside this call).
+		for (const p of relinked) this.pruneLinks(p, false)
+	}
+
+	/**
+	 * DQ 3.2: a settle refused on compatibility lists both records as co-channel partners (bounded
+	 * by 2.3 through `pruneLinks`).
+	 */
+	private linkPair(op: Op, a: Discovery, b: Discovery): void {
+		if (a.coChannel.includes(b.id) && b.coChannel.includes(a.id)) return
+		this.armWatchers(a.id)
+		this.armWatchers(b.id)
+		this.invalidateLabel(a.id)
+		this.invalidateLabel(b.id)
+		a.coChannel = appendMissing(a.coChannel, [b.id])
+		b.coChannel = appendMissing(b.coChannel, [a.id])
+		for (const d of [a, b]) {
+			this.touch(d)
+			this.markDirty(d.id)
+			this.syncProofWatch(d)
+			op.discoveries.add(d.id)
+			mark(op, d.id, "updated")
+		}
+		this.pruneLinks(a)
+		this.pruneLinks(b)
 	}
 
 	private atKey(sourceId: string, key: string): Discovery[] {
@@ -2697,12 +3117,22 @@ export class DiscoveryStore
 	private settle(op: Op, start: Discovery): string {
 		let d = start
 		for (;;) {
-			const other = this.atKey(d.sourceIds[0] ?? "", d.frequencyKey).find(
-				o =>
-					o.id !== d.id &&
-					this.effectiveLabel(o).family === this.effectiveLabel(d).family &&
-					sameIdentity(o.identity, d.identity),
-			)
+			let other: Discovery | undefined
+			for (const o of this.atKey(d.sourceIds[0] ?? "", d.frequencyKey)) {
+				if (
+					o.id === d.id ||
+					this.effectiveLabel(o).family !== this.effectiveLabel(d).family ||
+					!sameIdentity(o.identity, d.identity)
+				)
+					continue
+				// DQ 3.2: an incompatible pair stays apart and is linked as co-channel.
+				if (this.pairCompatible(d, o) === false) {
+					this.linkPair(op, d, o)
+					continue
+				}
+				other = o
+				break
+			}
 			if (other === undefined) return d.id
 			const [keep, drop] =
 				compareText(d.firstSeenAt, other.firstSeenAt) < 0 ||
@@ -2715,6 +3145,11 @@ export class DiscoveryStore
 	}
 
 	private absorb(op: Op, keep: Discovery, drop: Discovery): void {
+		// DQ 3.2: any caller is covered; an incompatible pair is never merged.
+		if (this.pairCompatible(keep, drop) === false) return
+		// DQ 3.3: the better of the two bests, but never one an overload observation set.
+		const keepBestOk = !this.bestFromOverload(keep)
+		const dropBestOk = !this.bestFromOverload(drop)
 		const readers = [...this.watcherIds(keep.id), ...this.watcherIds(drop.id)]
 		this.armWatchers(keep.id)
 		this.armWatchers(drop.id)
@@ -2737,7 +3172,10 @@ export class DiscoveryStore
 			keep.signal.last = drop.signal.last
 			keep.tuningTrust = drop.tuningTrust
 		}
-		if (drop.signal.best.snrDb > keep.signal.best.snrDb)
+		if (
+			dropBestOk &&
+			(!keepBestOk || drop.signal.best.snrDb > keep.signal.best.snrDb)
+		)
 			keep.signal.best = drop.signal.best
 		const km = keep.metadata
 		const dm = drop.metadata
@@ -3000,6 +3438,8 @@ export class DiscoveryStore
 			record.sampleRange.end = t.lastSample
 		}
 		if (obs.endReason !== undefined) record.endReason = obs.endReason
+		if (!t.flags.edge)
+			this.observationClass.set(record, obs.classification.class)
 		if (t.acf30 !== undefined) record.acf30 = t.acf30
 		if (t.acf60 !== undefined) record.acf60 = t.acf60
 		if (obs.hopIndex !== undefined) record.hopIndex = obs.hopIndex
@@ -3676,6 +4116,7 @@ export class DiscoveryStore
 		this.invalidateLabel(id)
 		this.clearProofWatch(id)
 		this.medians.delete(id)
+		this.unlinked.delete(id)
 		this.aliasTable.detach(id)
 		this.markDirty(id)
 	}
@@ -3948,6 +4389,16 @@ export class DiscoveryStore
 	}
 
 	private finish(kind: JournalEntry["op"], op: Op): void {
+		// DQ 2.3: records whose co-channel list a prune or cap changed outside the op's own marks.
+		if (this.linkTouched.size > 0) {
+			const deleted = new Set(op.deleted)
+			for (const id of this.linkTouched) {
+				if (deleted.has(id) || !this.discoveries.has(id)) continue
+				op.discoveries.add(id)
+				mark(op, id, "updated")
+			}
+			this.linkTouched.clear()
+		}
 		const pending = this.pendingProof
 		this.pendingProof = new Map()
 		const notified = new Set(op.changes.keys())
