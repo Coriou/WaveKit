@@ -17,6 +17,7 @@ import { DQ_CO_CHANNEL_MAX } from "../../../../src/core/scanner/detection-qualit
 import { gridToleranceHz } from "../../../../src/core/scanner/bandplan/index.js"
 import type { ProofAnalogInput } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import type {
+	DecodeEvidence,
 	Discovery,
 	Observation,
 	ObservationInput,
@@ -370,6 +371,127 @@ describe("DQ 2: one emitter, one discovery fixtures", () => {
 	})
 })
 
+describe("review repros", () => {
+	it("keeps the class history across snapshot/restore and journal replay", () => {
+		const { store, entries } = newStore()
+		for (let i = 0; i < 10; i++)
+			store.ingest(
+				obs({ id: `c${i}`, centreHz: F, at: T0 + i * 2_000, cls: "carrier" }),
+			)
+		const id = store.discoveryIdOf("c0") ?? ""
+		const snap = store.snapshot()
+		expect(
+			(snap.observations[0] as { classVote?: string } | undefined)?.classVote,
+		).toBe("carrier")
+		// the DTO does not carry the vote
+		expect(
+			"classVote" in (store.observations(id, null, 10).items[0] ?? {}),
+		).toBe(false)
+		const restored = newStore().store
+		restored.restore(JSON.parse(JSON.stringify(snap)) as StoreSnapshot)
+		const replayed = newStore().store
+		for (const e of entries)
+			replayed.replay(JSON.parse(JSON.stringify(e)) as JournalEntry)
+		for (const s of [restored, replayed]) {
+			s.ingest(
+				obs({ id: "fm", centreHz: F, at: T0 + 60_000, cls: "analog-fm" }),
+			)
+			expect(s.discoveryIdOf("fm")).toBe(id)
+			expect(s.get(id)?.class).toBe("carrier")
+		}
+	})
+
+	it("treats an old snapshot without votes as no votes", () => {
+		const { store } = newStore()
+		for (let i = 0; i < 3; i++)
+			store.ingest(
+				obs({ id: `c${i}`, centreHz: F, at: T0 + i * 2_000, cls: "carrier" }),
+			)
+		const snap = JSON.parse(JSON.stringify(store.snapshot())) as StoreSnapshot
+		for (const o of snap.observations)
+			delete (o as { classVote?: string }).classVote
+		const restored = newStore().store
+		restored.restore(snap)
+		restored.ingest(
+			obs({ id: "fm", centreHz: F, at: T0 + 60_000, cls: "analog-fm" }),
+		)
+		expect(restored.get(restored.discoveryIdOf("fm") ?? "")?.class).toBe(
+			"analog-fm",
+		)
+	})
+
+	it("recomputes and journals the class when a re-ingest changes only the vote", () => {
+		const { store, entries } = newStore()
+		const first = obs({ id: "x", centreHz: F, at: T0, cls: "carrier" })
+		const id = store.ingest(first).discoveryId ?? ""
+		expect(store.get(id)?.class).toBe("carrier")
+		const again = obs({ id: "x", centreHz: F, at: T0, cls: "analog-fm" })
+		store.ingest(again)
+		expect(store.get(id)?.class).toBe("analog-fm")
+		expectReplayEqual(store, entries)
+	})
+
+	it("an unknown observation with a failed decode still joins the carrier record", () => {
+		const { store } = newStore()
+		const id = store.ingest(
+			obs({ id: "c", centreHz: F, at: T0, obwHz: 5_000 }),
+		).discoveryId
+		store.recordAnalog("c", analog("carrier-only", T0 + 1))
+		const failed: DecodeEvidence = {
+			protocol: "dmr",
+			metadata: {},
+			crcClean: false,
+			at: T0 + 10_100,
+			epoch: 1,
+			origin: "probe",
+		}
+		// 600 Hz away: inside the 1 kHz cross-family radius; the failed decode proves nothing
+		const r = store.ingest(
+			obs({ id: "u", centreHz: F + 600, at: T0 + 10_000, obwHz: 5_000 }),
+			{ decode: failed },
+		)
+		expect(r.discoveryId).toBe(id)
+		expect(store.snapshot().discoveries).toHaveLength(1)
+	})
+
+	it("two young records are not split by level (3.5)", () => {
+		const { store } = newStore()
+		const loud = store.ingest(
+			obs({
+				id: "l",
+				centreHz: F,
+				at: T0,
+				obwHz: 4_000,
+				peakDbfs: -10,
+				snrDb: 45,
+			}),
+		).discoveryId
+		const quiet = store.ingest(
+			obs({
+				id: "q",
+				centreHz: F + 300,
+				at: T0 + 1_000,
+				obwHz: 9_000,
+				peakDbfs: -45,
+				snrDb: 25,
+			}),
+		).discoveryId
+		expect(quiet).toBe(loud)
+		expect(
+			recordsCompatible(
+				{
+					medians: { peakDbfs: -10, obwHz: 4_000, count: 1 },
+					observations: [{ peakDbfs: -10, obwHz: 4_000 }],
+				},
+				{
+					medians: { peakDbfs: -45, obwHz: 9_000, count: 1 },
+					observations: [{ peakDbfs: -45, obwHz: 9_000 }],
+				},
+			),
+		).toBeNull()
+	})
+})
+
 describe("DQ 2.3: co-channel cap and pruning", () => {
 	/** Twelve records within one window, every one listing all others (pre-DQ state). */
 	function crowded(): { store: DiscoveryStore; ids: string[] } {
@@ -720,12 +842,7 @@ describe("DQ properties", () => {
 						) {
 							const rec = pre.get(r.discoveryId)
 							if (rec !== undefined)
-								expect(
-									recordsCompatible(recordOf(rec), {
-										medians: self,
-										observations: [],
-									}),
-								).not.toBe(false)
+								expect(compatible(recordOf(rec).medians, self)).not.toBe(false)
 						}
 						// A merge is judged after the new observation joined one side (or formed one).
 						const sample: Sample = {

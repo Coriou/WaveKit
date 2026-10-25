@@ -45,8 +45,11 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_DATA_RING`              | 256                            | 4.5         |
 | `DQ_DATA_RATE_PER_S`        | 16                             | 4.5         |
 
-No change to `packages/api-types`, the persisted store schema, the REST or WebSocket shapes,
-or `docs/CLI-COORDINATION.md`. Pending entries are memory-only.
+No change to `packages/api-types`, the REST or WebSocket shapes, or
+`docs/CLI-COORDINATION.md`. Pending entries are memory-only. The persisted and journaled
+observation form (`StoredObservation`, core only) gains one optional field, `classVote`
+(3.4); it is stripped from the DTO, and an observation without it does not vote, so old
+snapshots and journals load unchanged.
 
 ## 1. Admission
 
@@ -163,10 +166,11 @@ returning within tolerance is re-linked at the next refresh.
 
 ### Identity split
 
-In `applyEvidence`, before applying identity evidence with protocol in
-`DQ_IDENTITY_PROTOCOLS` to record `d`: scan the source's records with confidence `decoded`
-(a small subset of `maxDiscoveries`). For a record `o` with the same protocol and
-`sameIdentity`, compute the distance between median centres; if it is in [6 000, 30 000] Hz,
+In `applyEvidence`, before applying evidence with protocol in `DQ_IDENTITY_PROTOCOLS` and at
+least one radio source id in `metadata.sources` to record `d` (no source id: apply as
+today): scan the source's records. For a record `o` with the same effective protocol whose
+`metadata.sources` lists one of those ids (the channel identity, colour code, NAC or DG-ID,
+is not used: every radio on a system shares it), compute the distance between median centres; if it is in [6 000, 30 000] Hz,
 an observation of `o` overlaps the decode's observation interval widened by 2 000 ms on each
 side, and `d`'s median peak is at least 10 dB below `o`'s, return `null` (no change, no
 journal entry). Any non-finite median or missing observation interval → apply as today.
@@ -185,22 +189,28 @@ function compatible(a: Side, b: Side): boolean | null
 ```
 
 returns null when either side has count < 3 or a non-finite value (3.5), false when both 3.1
-conditions hold, true otherwise.
+conditions hold, true otherwise. `recordsCompatible(a, b)` takes each record's medians and,
+for a record with fewer than 3 observations, its observations: both established → medians;
+one established → each young observation against the established medians (false if any is
+refused); both young → null.
 
 Merge paths that consult it (3.2):
 
 - `stickyMatch` `consider` and `keyTarget` merge candidates skip a record that is
   incompatible with the observation.
-- `settle` skips a colliding record `other` when `compatible(medians(d), medians(other))` is
-  false, and links the two as co-channel partners instead (bounded by 2.3). `absorb` asserts
+- `settle` skips a colliding record `other` when `recordsCompatible(d, other)` is false, and links the two as co-channel partners instead (bounded by 2.3). `absorb` asserts
   the same predicate and returns without merging if false, so any future caller is covered.
 - `absorbStats` takes `raiseBest = compatible !== false && compatible !== null &&
 !overload`; for a record with fewer than 3 observations, `raiseBest = !overload &&
 isFinite(snr)`.
-- `absorb` of two compatible records keeps the better `signal.best`.
+- `absorb` of two compatible records keeps the better `signal.best`, skipping a best set by an
+  overload-flagged observation and an absorbed best its stored observation fails against the
+  survivor's medians. `rehome` (an observation moved by a decode split) applies the same
+  overload rule.
 
-Class majority: `applyClassificationTo` sets `class` from the tally (edge observations
-excluded; ties to the most recent). Protocol refinement from classification is unchanged.
+Class majority: `applyClassificationTo` sets `class` from the tally (edge and `unknown`
+observations excluded; ties to the most recent). The tally reads each observation's persisted
+`classVote`; a re-ingest that changes only the vote recomputes and journals the class. Protocol refinement from classification is unchanged.
 
 ## 4. Data is not voice
 

@@ -158,13 +158,15 @@ its median centre lies within the record's association tolerance. A record shall
 most `DQ_CO_CHANNEL_MAX` = 8 partners, nearest first; on overflow the farthest are dropped
 (ties: the least recently seen) and the drop is reciprocal. Justification in the design.
 
-2.4 Applying decode evidence with an identity to record `d` shall be refused (no change)
-only when all hold:
+2.4 Applying decode evidence to record `d` shall be refused (no change) only when all hold:
 
 - the protocol is a digital-voice radio protocol (`dmr`, `p25p1`, `p25p2`, `ysf`) and the
-  identity is its radio source id; pager capcodes, ISM ids and every other protocol are never
-  refused by this rule;
-- another record `o` of the same source holds the same protocol and identity as `decoded`;
+  decode carries a radio source id (the talker id, `metadata.sources`); channel identities
+  (DMR colour code, P25 NAC, YSF DG-ID) are shared by every radio on a system and never
+  count; pager capcodes, ISM ids and every other protocol are never refused by this rule; a
+  decode without a source id is never refused;
+- another record `o` of the same source lists one of the decode's source ids for the same
+  protocol;
 - the median centres of `d` and `o` are `DQ_IDENTITY_SPLIT_MIN_HZ` = 6 000 Hz to
   `DQ_IDENTITY_SPLIT_MAX_HZ` = 30 000 Hz apart (inclusive);
 - the decode's observation on `d` and an observation of `o` overlap in time within
@@ -189,10 +191,12 @@ non-finite record centre is never a match.
 - **Carrier.** Twelve sightings within 50 Hz, OBW 4 to 8 kHz, SNR 21 to 32 dB, gaps 13 to 98
   min, with carrier-only analog evidence after the first. Expect one discovery with no
   co-channel partners.
-- **Adjacent leak.** Record A decoded DMR source id X at f, median peak -20 dBFS; a decode of
-  X on record B at f + 9.4 kHz, median peak -45 dBFS, overlapping A within 1 s. Expect B
-  unchanged. Controls: B 5 dB weaker, B 35 kHz away, overlap 3 s apart, the same capcode on
-  POCSAG records, and B stronger than A: each applies the decode.
+- **Adjacent leak.** Record A decoded DMR talker (source id) X at f, median peak -20 dBFS; a
+  decode of X on record B at f + 9.4 kHz, median peak -45 dBFS, overlapping A within 1 s.
+  Expect B unchanged. Controls: a different talker on the same colour code (including two
+  simultaneous radios 12.5 kHz apart), a decode without a talker id, B 5 dB weaker, B 35 kHz
+  away, overlap 3 s apart, the same capcode on POCSAG records, and B stronger than A: each
+  applies the decode.
 - **Co-channel overflow.** Twelve records in one key window; expect at most 8 links each,
   nearest kept, reciprocal, and a pruned partner re-linked if it comes back within tolerance.
 
@@ -206,7 +210,11 @@ next to it to keep its own level and class.
 `max(obw_a, obw_b) >= DQ_OBW_SPLIT_RATIO` = 1.5 × `min(obw_a, obw_b)`. For an observation
 against a record, the record side uses the median peak and median OBW over its last 64
 observations, and the rule applies only when the record has at least 3 of them. For two
-records, both sides use their medians under the same 3-observation condition.
+records: when both have at least 3 observations, both sides use their medians; when exactly
+one has at least 3, each observation of the other (young) record is tested against the
+established record's medians, and the pair is incompatible if any of them is (so `settle`
+cannot fold back an observation the sticky test refused); when neither has 3, the pair is
+undecided (3.5).
 
 AND, not OR (measured): the ambient carrier varied 7 dB (-23 to -30 dBFS) with OBW ratio at
 most 1.33, and the strong transmission differed by 27 dB with ratio 1.5 to 2.0, so either
@@ -221,14 +229,23 @@ identity today). A refused settle leaves both records and lists them as co-chann
 
 3.3 `signal.best` shall be updated only from an observation that 3.1 does not refuse and is
 not flagged `overload`. `signal.last` keeps today's rule. When `absorb` merges two
-compatible records, the surviving best is the better of the two bests.
+compatible records, the surviving best is the better of the two bests, counting a best only
+when the observation that set it is not overload-flagged and, for the absorbed record's best,
+is not refused by (and, with 3 or more observations, is found compatible with) the
+survivor's medians. The same overload rule applies when an observation moves between records.
 
 3.4 A record's `class` shall be the majority class of its last 64 observations (ties go to
-the most recent of the tied classes; edge-flagged observations do not vote), not the latest
-observation's class.
+the most recent of the tied classes; edge-flagged observations and observations classed
+`unknown` do not vote, as `unknown` never overwrote a class before), not the latest
+observation's class. Each observation's vote is persisted with it (an optional field of the
+store's persisted and journaled observation form, never in the DTO); an observation without
+the field (written before this change) does not vote. Without any vote the classification's
+own class applies as before.
 
 3.5 Safe defaults: fewer than 3 observations, or a non-finite median or observation peak or
 OBW, skips 3.1 for merging (merge as today) but the observation cannot raise `signal.best`.
+The one exception is the two-record case of 3.1 with exactly one established record, whose
+young side is tested observation by observation; two young records are never split.
 
 3.6 Regression fixtures:
 

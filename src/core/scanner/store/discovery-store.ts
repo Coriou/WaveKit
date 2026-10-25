@@ -74,6 +74,7 @@ import type {
 	ScannerProof,
 	ScannerProtocol,
 	SignalStats,
+	StoredObservation,
 } from "../types.js"
 import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
@@ -705,6 +706,9 @@ interface Medians {
 	majority: ScannerClass | undefined
 }
 
+const voteOf = (o: Observation): ScannerClass | undefined =>
+	(o as StoredObservation).classVote
+
 const sideOf = (m: Medians): CompatibilitySide => ({
 	peakDbfs: m.peak,
 	obwHz: m.obw,
@@ -761,11 +765,7 @@ export class DiscoveryStore
 	private readonly unlinked = new Map<string, Set<string>>()
 	/** DQ 2.3: ids whose `coChannel` a prune changed; `finish` journals them. */
 	private readonly linkTouched = new Set<string>()
-	/**
-	 * DQ 3.4: the classifier class each observation arrived with (memory only; edge observations
-	 * have none). Records restored from disk carry none and do not vote.
-	 */
-	private readonly observationClass = new WeakMap<Observation, ScannerClass>()
+
 	private readonly members = new Map<string, Set<string>>()
 	private readonly centres = new CentreIndex()
 	/**
@@ -863,7 +863,7 @@ export class DiscoveryStore
 		const sticky = this.stickyMatch(
 			input,
 			label.family,
-			opts.decode === undefined,
+			!decodeProvesSignal(input, opts.decode),
 		)
 		if (sticky !== undefined)
 			return this.commit("observation", op =>
@@ -1019,15 +1019,19 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * DQ 2.4: true only when `ev` is a digital-voice source-id decode on `d` that another decoded
-	 * record of the same source already holds, 6 to 30 kHz away (median centres), overlapping in
-	 * time within 2 s, and `d` is at least 10 dB weaker (median peaks). Any missing or non-finite
-	 * input is false, so the decode applies as before. Per decode, not per frame.
+	 * DQ 2.4: true only when `ev` is a digital-voice decode carrying a radio source id (talker id,
+	 * `metadata.sources`) that another record of the same source already lists for the same
+	 * protocol, 6 to 30 kHz away (median centres), overlapping in time within 2 s, and `d` is at
+	 * least 10 dB weaker (median peaks). Channel identities (colour code, NAC, DG-ID) are shared
+	 * by every radio on a system and never count. A decode without a source id, or any missing or
+	 * non-finite input, is false, so the decode applies as before. Per decode, not per frame.
 	 */
 	private adjacentIdentityCopy(d: Discovery, ev: DecodeEvidence): boolean {
-		const identity = ev.identity
-		if (identity === undefined || !DQ_IDENTITY_PROTOCOLS.includes(ev.protocol))
-			return false
+		if (!DQ_IDENTITY_PROTOCOLS.includes(ev.protocol)) return false
+		const talkers = (ev.metadata.sources ?? []).filter(
+			x => typeof x === "string" && x.length > 0,
+		)
+		if (talkers.length === 0) return false
 		const sourceId = d.sourceIds[0]
 		const own = this.mediansOf(d.id)
 		const carry = this.carryingObservation(d, ev)
@@ -1044,40 +1048,30 @@ export class DiscoveryStore
 			return false
 		const lo = start - DQ_IDENTITY_OVERLAP_MS
 		const hi = end + DQ_IDENTITY_OVERLAP_MS
-		let refused = false
-		this.syncIndex()
-		this.decodedCentres.range(
-			sourceId,
-			DECODED_CENTRE_FAMILY,
-			own.centre - DQ_IDENTITY_SPLIT_MAX_HZ - 1,
-			own.centre + DQ_IDENTITY_SPLIT_MAX_HZ + 1,
-			e => {
-				if (refused || e.id === d.id) return
-				const o = this.discoveries.get(e.id)
-				if (o === undefined || !sameIdentity(o.identity, identity)) return
-				if (this.effectiveLabel(o).protocol !== ev.protocol) return
-				const other = this.mediansOf(o.id)
-				if (
-					other === undefined ||
-					!Number.isFinite(other.centre) ||
-					!Number.isFinite(other.peak)
-				)
-					return
-				const dist = Math.abs(other.centre - own.centre)
-				if (dist < DQ_IDENTITY_SPLIT_MIN_HZ || dist > DQ_IDENTITY_SPLIT_MAX_HZ)
-					return
-				if (other.peak - own.peak < DQ_IDENTITY_WEAKER_DB) return
-				for (const x of this.byDiscovery.get(o.id) ?? []) {
-					const xs = Date.parse(x.startedAt)
-					const xe = Date.parse(x.endedAt ?? x.startedAt)
-					if (xs <= hi && xe >= lo) {
-						refused = true
-						return
-					}
-				}
-			},
-		)
-		return refused
+		for (const id of this.bySource.get(sourceId) ?? []) {
+			if (id === d.id) continue
+			const o = this.discoveries.get(id)
+			if (o === undefined || o.sourceIds[0] !== sourceId) continue
+			if (!o.metadata.sources.some(x => talkers.includes(x))) continue
+			if (this.effectiveLabel(o).protocol !== ev.protocol) continue
+			const other = this.mediansOf(o.id)
+			if (
+				other === undefined ||
+				!Number.isFinite(other.centre) ||
+				!Number.isFinite(other.peak)
+			)
+				continue
+			const dist = Math.abs(other.centre - own.centre)
+			if (dist < DQ_IDENTITY_SPLIT_MIN_HZ || dist > DQ_IDENTITY_SPLIT_MAX_HZ)
+				continue
+			if (other.peak - own.peak < DQ_IDENTITY_WEAKER_DB) continue
+			for (const x of this.byDiscovery.get(o.id) ?? []) {
+				const xs = Date.parse(x.startedAt)
+				const xe = Date.parse(x.endedAt ?? x.startedAt)
+				if (xs <= hi && xe >= lo) return true
+			}
+		}
+		return false
 	}
 
 	applyClassification(
@@ -2197,7 +2191,8 @@ export class DiscoveryStore
 		const sameClassification =
 			jsonEqual(record.hypotheses, known.hypotheses) &&
 			record.flags.adjacentLeak === known.flags.adjacentLeak &&
-			record.flags.suspectedIntermod === known.flags.suspectedIntermod
+			record.flags.suspectedIntermod === known.flags.suspectedIntermod &&
+			voteOf(record) === voteOf(known)
 		this.absorbStats(d, obs, !sameClassification, raise)
 		this.refresh(d)
 		if (this.revision(d) === beforeD && jsonEqual(record, known)) {
@@ -2603,7 +2598,8 @@ export class DiscoveryStore
 			d.signal.last = stats
 			d.tuningTrust = o.tuningTrust
 		}
-		if (stats.snrDb > d.signal.best.snrDb) {
+		// DQ 3.3: an overload-flagged observation never raises best, moved or not.
+		if (!o.flags.overload && stats.snrDb > d.signal.best.snrDb) {
 			d.signal.best = { ...stats }
 			this.touch(d)
 		}
@@ -2631,9 +2627,10 @@ export class DiscoveryStore
 				last = o
 			}
 			const stats = signalOf(o)
+			if (o.flags.overload) continue
 			if (best === undefined || stats.snrDb > best.snrDb) best = stats
 		}
-		if (last === undefined || best === undefined) return
+		if (last === undefined) return
 		if (d.firstSeenAt === moved.startedAt && first !== d.firstSeenAt) {
 			d.firstSeenAt = first
 			this.touch(d)
@@ -2652,6 +2649,7 @@ export class DiscoveryStore
 			}
 		}
 		if (
+			best !== undefined &&
 			jsonEqual(d.signal.best, movedStats) &&
 			!jsonEqual(d.signal.best, best)
 		) {
@@ -2842,7 +2840,7 @@ export class DiscoveryStore
 		for (let i = 0; i < recent.length; i++) {
 			const o = recent[i]
 			if (o === undefined || o.flags.edge) continue
-			const cls = this.observationClass.get(o)
+			const cls = voteOf(o)
 			if (cls === undefined || cls === "unknown") continue
 			const v = votes.get(cls)
 			if (v === undefined) votes.set(cls, { n: 1, last: i })
@@ -2878,29 +2876,36 @@ export class DiscoveryStore
 			obwHz: obs.track.obwHz,
 			count: Number.POSITIVE_INFINITY,
 		}
-		if (m.count >= DQ_MIN_HISTORY_OBS) return compatible(sideOf(m), self)
-		// A young record (1 or 2): each of its observations (see `recordsCompatible`).
-		return recordsCompatible(
-			{ medians: sideOf(m), observations: this.recentOf(d.id) },
-			{ medians: self, observations: [] },
-		)
+		// 3.5: a young record (1 or 2) is undecided against an observation.
+		return compatible(sideOf(m), self)
 	}
 
 	private recentOf(id: string): readonly Observation[] {
 		return (this.byDiscovery.get(id) ?? []).slice(-MEDIAN_WINDOW)
 	}
 
-	/** True when an overload-flagged stored observation carries exactly `d`'s best (a creation seed). */
-	private bestFromOverload(d: Discovery): boolean {
-		const best = d.signal.best
-		for (const o of this.byDiscovery.get(d.id) ?? [])
-			if (
-				o.flags.overload &&
-				o.snrDb === best.snrDb &&
-				o.peakDbfs === best.peakDbfs
-			)
-				return true
-		return false
+	/**
+	 * DQ 3.3 at a merge: may `from`'s best stand? Not when the stored observation carrying it is
+	 * overload-flagged, nor (with `into` established) when `into`'s medians do not find it
+	 * compatible. A best no stored observation carries (trimmed) stands as before.
+	 */
+	private bestEligible(from: Discovery, into?: Discovery): boolean {
+		const best = from.signal.best
+		const carrier = (this.byDiscovery.get(from.id) ?? []).find(
+			o => o.snrDb === best.snrDb && o.peakDbfs === best.peakDbfs,
+		)
+		if (carrier === undefined) return true
+		if (carrier.flags.overload) return false
+		if (into === undefined) return true
+		const m = this.mediansOf(into.id)
+		if (m === undefined || m.count < DQ_MIN_HISTORY_OBS) return true
+		return (
+			compatible(sideOf(m), {
+				peakDbfs: carrier.peakDbfs,
+				obwHz: carrier.obwHz,
+				count: Number.POSITIVE_INFINITY,
+			}) === true
+		)
 	}
 
 	/** DQ 3.1, 3.2: two records' medians (see `recordsCompatible`). */
@@ -3148,8 +3153,9 @@ export class DiscoveryStore
 		// DQ 3.2: any caller is covered; an incompatible pair is never merged.
 		if (this.pairCompatible(keep, drop) === false) return
 		// DQ 3.3: the better of the two bests, but never one an overload observation set.
-		const keepBestOk = !this.bestFromOverload(keep)
-		const dropBestOk = !this.bestFromOverload(drop)
+		// The dropped record's best must also pass 3.3 against the survivor's medians.
+		const keepBestOk = this.bestEligible(keep)
+		const dropBestOk = this.bestEligible(drop, keep)
 		const readers = [...this.watcherIds(keep.id), ...this.watcherIds(drop.id)]
 		this.armWatchers(keep.id)
 		this.armWatchers(drop.id)
@@ -3438,8 +3444,9 @@ export class DiscoveryStore
 			record.sampleRange.end = t.lastSample
 		}
 		if (obs.endReason !== undefined) record.endReason = obs.endReason
+		// DQ 3.4: persisted vote; absent on edge observations and on records written before DQ.
 		if (!t.flags.edge)
-			this.observationClass.set(record, obs.classification.class)
+			(record as StoredObservation).classVote = obs.classification.class
 		if (t.acf30 !== undefined) record.acf30 = t.acf30
 		if (t.acf60 !== undefined) record.acf60 = t.acf60
 		if (obs.hopIndex !== undefined) record.hopIndex = obs.hopIndex
@@ -4092,6 +4099,7 @@ export class DiscoveryStore
 		const proof = this.observationAssessment(observation).proof
 		if (proof !== null) copy.proof = clone(proof)
 		else delete copy.proof
+		delete (copy as StoredObservation).classVote // store-internal (DQ 3.4), not part of the DTO
 		return copy
 	}
 

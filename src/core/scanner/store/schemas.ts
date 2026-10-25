@@ -15,6 +15,7 @@ import type {
 	DecodeEvidence,
 	Discovery,
 	Observation,
+	StoredObservation,
 	ProtocolFamily,
 	ScannerClass,
 	ScannerConfidence,
@@ -244,10 +245,11 @@ export const ObservationSchema = z.object({
 	jobIds: z.array(z.string()),
 	hopIndex: z.number().int().optional(),
 	tuningTrust: TuningTrustSchema,
+	classVote: ScannerClassSchema.optional(),
 })
 /** `proof` is a derived DTO field (A12). It is not a journal key. */
 export type ObservationCheck = Assert<
-	SchemaMatches<Omit<Observation, "proof">, typeof ObservationSchema>
+	SchemaMatches<Omit<StoredObservation, "proof">, typeof ObservationSchema>
 >
 
 /** One journal payload: the resulting records of one store mutation (spec § 8). */

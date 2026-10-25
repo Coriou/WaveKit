@@ -47,7 +47,8 @@ const sha = (text: string): string =>
 // creation bar). Same op stream and structure (byte lengths unchanged); only the SNR fields moved.
 // Re-baselined again for DQ.4-DQ.6: `class` is now the majority of the last 64 observations (3.4),
 // cross-family sticky joins (2.1) and co-channel pruning (2.3) apply; the seeded ops use one
-// OBW, so 3.1 never refuses. Byte lengths are unchanged except seed 4 (2 bytes shorter).
+// OBW, so 3.1 never refuses. Each observation now also persists its `classVote` (DQ 3.4), which
+// is why seeds 2 to 6 grew (seed 1 holds no observations).
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -62,40 +63,40 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		40,
 		false,
-		19206,
-		"dc5d2293117036af7f4458296807485bf892358cdf6d34aa7ac5126f1eb2aad3",
+		19622,
+		"2ec9a832d39f60e2181dd01f2a959fb511c9e7ad17fb699841ae4e8a4cc464bc",
 	],
 	[
 		3,
 		400,
 		40,
 		false,
-		38639,
-		"1289d6247a027c03d8e9762217055dc6ec96965b959ef566b3ce64255879d55d",
+		39441,
+		"efa8d121ca7d2df6c991f2d3816286ce72be6a3984ddf73ce0f75255861ff96a",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		62237,
-		"4e3f059f177fcaa0a78f06d5c37829d738112e83d7f43fb57f636a7c7f47b5b0",
+		63739,
+		"31b962b5d1c3b9c036296c15b9466a9cd4c7285092b3de15cda458c1768353fd",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		70343,
-		"19b7659cd975031e7316f022ee4b742ad58c8e6cd7f5fc0785d2889be502a198",
+		72029,
+		"bb889a364e707766fcedf4a7a71775d9d1a76b8418da4de8ed3ae1b70433c8a1",
 	],
 	[
 		6,
 		700,
 		40,
 		true,
-		334528,
-		"b3acb9bf12709cfccae7e51c420a000d4936d57148ef75a2045abf256b92486c",
+		346330,
+		"312dc292f6c0687440ecd446a041f73c5d8f2c9f0ef92eb21ccc5eedc80bd48b",
 	],
 ]
 

@@ -53,30 +53,26 @@ const asObservation = (o: {
 	count: Number.POSITIVE_INFINITY,
 })
 
-/** The sides that stand for a record: its medians when established, else each observation. */
-function sidesOf(r: CompatibilityRecord): readonly CompatibilitySide[] {
-	return r.medians.count >= DQ_MIN_HISTORY_OBS
-		? [r.medians]
-		: r.observations.map(asObservation)
-}
-
 /**
- * Two records (3.2), or an observation against a record (pass the observation as a record with
- * `count` Infinity). An established record (3 or more) is its medians; a young one (1 or 2) is
- * each of its observations, judged as the sticky test judges an observation, so neither sticky
- * nor settle can put two observations together that 3.1 separates (Property 9). False when any
- * pair is refused; null when no pair could be decided (3.5: merge as before); true otherwise.
+ * Two records (3.2). Both established (3 or more observations): their medians. One established
+ * and the other young (1 or 2): each young observation against the established medians, as the
+ * sticky test judged them, so settle cannot fold back what sticky refused; false when any is
+ * refused. Both young: null (3.5, merge as before).
  */
 export function recordsCompatible(
 	a: CompatibilityRecord,
 	b: CompatibilityRecord,
 ): boolean | null {
+	const aOld = a.medians.count >= DQ_MIN_HISTORY_OBS
+	const bOld = b.medians.count >= DQ_MIN_HISTORY_OBS
+	if (aOld && bOld) return compatible(a.medians, b.medians)
+	if (!aOld && !bOld) return null
+	const [old, young] = aOld ? [a, b] : [b, a]
 	let decided = false
-	for (const x of sidesOf(a))
-		for (const y of sidesOf(b)) {
-			const c = compatible(x, y)
-			if (c === false) return false
-			if (c === true) decided = true
-		}
+	for (const o of young.observations) {
+		const c = compatible(old.medians, asObservation(o))
+		if (c === false) return false
+		if (c === true) decided = true
+	}
 	return decided ? true : null
 }
