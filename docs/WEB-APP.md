@@ -65,8 +65,10 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
-  If the core rate-limits a request, Activity retries by itself (up to 3 times, waiting at most
-  10 s) and, if retrying stops, shows `rate limited, retry in N s` (or `rate limited, retry later`).
+  If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
+  for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
+  when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying
+  stops, Activity shows `rate limited, retry in N s` (or `rate limited, retry later`).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
 - **Recordings:** recordings kept by the core, to play, search and keep.
