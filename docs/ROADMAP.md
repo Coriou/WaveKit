@@ -144,7 +144,7 @@ Landed in the 2026-10-18 web-gap batch 11 (WG11, core only, [spec](specs/web-gap
   about 10.6 s in, inside the default 15 s); a discovery's known decoded protocol is
   tried first and forgotten after 2 full-hold misses; a cancel of an ended job is a
   200 no-op.
-- **Band-scan DMR root cause** (see [SCANNER.md](SCANNER.md#why-a-dmr-band-scan-found-only-heard-signals-wg11)):
+- **Band-scan DMR root cause** (see [SCANNER.md](SCANNER.md#why-a-dmr-band-scan-found-only-heard-signals)):
   young sweep tracks were classified as OOK bursts (no probe mode) because sweeps
   saw no band ISM prior; the dsd-fme `auto` hold was 600 ms, under a DMR late
   entry. Both fixed (band prior outside the OOK SRD allocations; 1 800 ms hold).

@@ -34,12 +34,15 @@
 				"src/core/bandplans/",
 				"src/core/bandplan-url/",
 				"src/core/auto-listen/",
-				"src/core/evidence-squelch/",
 				"src/core/audio-tones/",
 				"src/core/iq-capture/",
 				"src/core/link-burst/"
 			],
 			"docs": ["docs/SCANNER.md"]
+		},
+		{
+			"code": ["src/core/evidence-squelch/"],
+			"docs": ["docs/CORE-REFERENCE.md", "docs/WEB-APP.md"]
 		},
 		{
 			"code": ["src/core/digital-voice.ts", "src/core/dsd-fme-voice-format.ts"],

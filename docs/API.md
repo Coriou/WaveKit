@@ -1486,7 +1486,7 @@ Fields:
 - `autoSquelch` — the evidence (stage 2) gate of `auto` squelch while the pipeline
   runs: `{ state, evidence? }` with `state` `off` (not evidence-gated: `manual` or
   `noise` mode, a configured `toneSquelch`, a modulation other than `nfm`,
-  including `am`, or a run on the Rust engine), `waiting` (no evidence yet: audio is held and the stream carries silence)
+  including `am`, or a Rust run without framed audio), `waiting` (no evidence yet: audio is held and the stream carries silence)
   or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
 - `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
@@ -3027,7 +3027,7 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
 `offset`, `channel` or `replay`: a probe fed from an IQ capture rather than
-the live stream ([IQ capture on detection](#iq-capture-on-detection-wg11)). Its
+the live stream ([IQ capture on detection](#iq-capture-on-detection)). Its
 `trackId` is the full tracker id, `<sourceId>-<suffix>`; a `spectrum:frame` track
 carries only the suffix (see [spectrum:frame](#spectrumframe)).
 
@@ -3672,7 +3672,7 @@ decodes the same way, except that a protocol covered only by a probe's last mode
 count misses (a hop cut cannot be told from an expired hold).
 
 **Replay trials (IQ capture on).** With `scanner.iqCapture` on (see
-[IQ capture on detection](#iq-capture-on-detection-wg11) below), identify takes over
+[IQ capture on detection](#iq-capture-on-detection) below), identify takes over
 up to 2 (`IDENTIFY_REPLAY_MAX_CAPTURES`) stored captures near the target (same
 source, frequency within the tolerance and trust `commanded` or `relay`, or the same
 observation), newest first; when the resolved track has none, it requests one and
@@ -3683,7 +3683,7 @@ like a live one (the same acceptance rule, in the capture's epoch). The captures
 discarded when the target reaches its result, on every path. A live decode of the
 observation before its replay started discards the capture unreplayed.
 
-#### IQ capture on detection (WG11)
+#### IQ capture on detection
 
 On by default in protected access mode. A transmission is identified even when
 it ended before a decoder could run: the core keeps up to about 4 s of narrowband IQ
@@ -6699,7 +6699,7 @@ api:
     origins: ["*"]
 ```
 
-### Scanner evidence and activity (WG12)
+### Scanner evidence and activity
 
 The existing scanner REST responses and `scanner:discovery` events carry optional
 `Discovery.proof` and `evidenceLevel` (`proven` when a proof exists, otherwise `weak`).
@@ -6754,7 +6754,7 @@ in legacy mode in the future. Capture is on by default in protected mode.
 Trial, analog and unavailable evidence is currently
 in memory; persisted decode evidence can rebuild decoded proofs after restart.
 
-### Live audio engine and tone (WG12)
+### Live audio engine and tone
 
 `LiveAudioConfig.engine` and PATCH `/api/live-audio/config` accept `csdr|rust`; absent
 means `csdr`. Changing it restarts the pipeline. Rust is opt-in for NFM/AM;

@@ -238,6 +238,48 @@ ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:808
 - `deEmphasis` / `deEmphasisTau` — FM de-emphasis (50 or 75 microseconds)
 - `audioFormat` — `s16le` or `f32le`
 - `iqDcBlock` — Deprecated and ignored (it corrupted I/Q); use `offsetHz`
+- `squelchMode` — `auto` (default, below), `manual` (the `squelch` threshold) or
+  `noise` (an FM quieting squelch, NFM and WFM only)
+- `engine` — `csdr` (default) or `rust` (opt-in for NFM and AM; falls back to csdr
+  when the configuration is not supported)
+
+#### Auto squelch
+
+Auto squelch has two stages:
+
+- **Stage 1, the carrier gate**, on every modulation: an estimate of the channel-power
+  floor plus `autoMarginDb` (default 6 dB). It marks where each transmission starts and
+  ends. Transmission events, Activity rows, recordings, identify and decoders follow it
+  and are never delayed by stage 2.
+- **Stage 2, the evidence gate**, on NFM only: a carrier alone does not open the audio.
+  Audio passes once the over carries voice, or a CTCSS tone or DCS code heard for at
+  least 750 ms. A bare carrier, noise, clicks, data bursts (POCSAG, APRS-like FSK) and
+  digital bursts (DMR and similar) stay silent.
+
+On NFM with stage 2:
+
+- **Pre-roll.** While it waits for evidence the core holds up to 1.5 s of audio, then
+  plays the over from the moment the carrier came up. During an over the stream can run
+  up to 1.5 s behind; it catches up by dropping the silence after the over. An over
+  shorter than about one second with no tone is not heard.
+- **Tail mute.** Once open, audio passes only while the carrier is FM-quieted (or, when a
+  tone opened it, while the tone is still heard), so the noise after an unkey is muted at
+  once.
+- **Squelch tail elimination.** A 55 Hz STE tone, or a CTCSS reverse burst (the radio
+  shifts its tone's phase by 120° or 180° just before it drops the carrier), ends the
+  over from its onset.
+- **Engines.** The csdr engine runs stage 2. The Rust engine (`engine: "rust"`) runs it
+  too when its demodulator sends the stage 1 gate state in band with the audio (framed
+  audio); a Rust binary without framing, or a run whose framing failed, keeps stage 1
+  alone. A fallback to csdr starts the evidence gate fresh.
+
+`manual` and `noise` keep "any carrier opens the audio", and a configured `toneSquelch`
+replaces stage 2. AM, WFM, USB, LSB, DSB, CW and raw keep stage 1 alone. On AM, DSB and
+CW on the csdr engine a closed squelch is exact silence in every squelch mode (no AGC
+hum). `GET /api/live-audio/status` reports the gate as `autoSquelch`: `off`, `waiting`
+(audio held) or `open` with the evidence (`voice`, `ctcss` or `dcs`); see
+[API.md](API.md#get-apilive-audiostatus). The web app's Listen bar shows what opened
+the audio ([web app guide](WEB-APP.md#listen)).
 
 **API examples:**
 
