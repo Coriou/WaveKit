@@ -14,7 +14,9 @@ import {
 } from "../../../../src/core/scanner/passive-cost-contract.js"
 import {
 	MEASURING_REASON,
+	OFF_SAMPLE_CAP,
 	PassiveGuard,
+	strictUtilization,
 } from "../../../../src/core/scanner/passive-guard.js"
 import type { PassiveGuardView } from "../../../../src/core/scanner/passive-guard.js"
 
@@ -474,5 +476,79 @@ describe("guard review regressions (DQ 8.2, 8.5, 8.7)", () => {
 		s.tick()
 		expect(s.actions[1]).toBe("restore:trial")
 		expect(s.state.t).toBe(1_000_000)
+	})
+	it("a counter rollback in a baseline window records no baseline and restores nothing (8.2, 8.5)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.4 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["measure"])
+		while (s.state.t < 120_000) s.tick()
+		s.state.frozen = { idle: 10, active: 10, generation: 1 }
+		const a = s.tick() // 121 000: the window opened at 61 000 would complete here
+		expect(a.kind).toBe("none")
+		expect(s.guard.baselineOf("s", s.state.t)).toBeNull()
+		expect(s.actions).toEqual(["measure"])
+		s.state.frozen = null
+		// the restarted window cannot complete before the 8.5 deadline (measuring since 60 000)
+		while (s.actions.length < 2) s.tick()
+		expect(s.actions[1]).toBe("restore:abandon")
+		expect(s.state.t).toBe(180_000)
+		expect(s.guard.baselineOf("s", s.state.t)).toBeNull()
+	})
+
+	it("a counter rollback in a shared window gives no decision from that window (8.2)", () => {
+		const s = sim()
+		s.state.rate = () => 0.97
+		s.run(W - 1000)
+		s.state.frozen = { idle: 10, active: 10, generation: 1 }
+		s.tick() // 60 000: the open window would complete here (saturated: disable)
+		expect(s.actions).toEqual([])
+		s.state.frozen = null
+		while (s.state.t < 119_000) s.tick()
+		expect(s.actions).toEqual([])
+		s.tick() // a full window after the rollback
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		expect(s.state.t).toBe(120_000)
+	})
+
+	it("the off history stays within its cap at any tick cadence (8.2, 8.7)", () => {
+		expect(OFF_SAMPLE_CAP).toBe(62)
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		// 1 s ticks: one window of samples plus the reference, just under the cap
+		while (s.state.t < 300_000) s.tick()
+		expect(s.guard.offHistorySize("s")).toBe(61)
+		// 250 ms ticks: 240 ticks per window, past the cap, yet the history does not grow
+		let max = 0
+		while (s.state.t < 959_750) {
+			s.tick(250)
+			max = Math.max(max, s.guard.offHistorySize("s"))
+		}
+		expect(max).toBeLessThanOrEqual(OFF_SAMPLE_CAP)
+		expect(s.actions).toHaveLength(1)
+		s.tick(250) // 960 000: the deadline still finds a full window
+		expect(s.actions[1]).toBe("restore:trial")
+	})
+
+	it("strictUtilization has no whole-life fallback", () => {
+		const a = { idle: 100, active: 100, generation: 1 }
+		expect(
+			strictUtilization({ idle: 130, active: 110, generation: 1 }, a, W),
+		).toBe(0.25)
+		expect(
+			strictUtilization({ idle: 130, active: 110, generation: 1 }, a, W - 1),
+		).toBeNull()
+		expect(
+			strictUtilization({ idle: 10, active: 10, generation: 1 }, a, W),
+		).toBeNull()
+		expect(
+			strictUtilization({ idle: 130, active: 110, generation: 2 }, a, W),
+		).toBeNull()
+		expect(strictUtilization(a, a, W)).toBeNull()
+		expect(
+			strictUtilization({ idle: Number.NaN, active: 110, generation: 1 }, a, W),
+		).toBeNull()
 	})
 })

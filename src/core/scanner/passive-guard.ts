@@ -9,11 +9,7 @@ import {
 	PASSIVE_COST_RECHECK_MS,
 	PASSIVE_COST_WINDOW_MS,
 } from "./passive-cost-contract.js"
-import {
-	PASSIVE_PROBATION_MS,
-	passiveGuardDecision,
-	windowedUtilization,
-} from "./passive-cost.js"
+import { PASSIVE_PROBATION_MS, passiveGuardDecision } from "./passive-cost.js"
 import type {
 	EluSample,
 	PassiveGuardResult,
@@ -81,6 +77,8 @@ interface SourceState {
 	previousBaselineWindowAt: number | null
 	measuringSince: number | null
 	trialing: boolean
+	/** The last finite sample seen, to detect a counter rollback within a generation (8.2). */
+	lastSample: EluSample | null
 	/**
 	 * Samples seen while the guard holds passive off, oldest first, trimmed to the newest one at
 	 * least a window old: the trial start measures against it (8.2, 8.7). Cleared when the worker
@@ -97,6 +95,39 @@ export interface PassiveGuardStatus {
 }
 
 const passiveConsumer = (sourceId: string): string => `job:passive-${sourceId}`
+
+/** The off-sample history keeps at most one sample per guard tick interval (1 s). */
+const OFF_SAMPLE_SPACING_MS = 1000
+/**
+ * History bound: after trimming it holds one sample at least a window old plus the samples of the
+ * last window, at most 60 000 / 1000 = 60 at the 1 s spacing: 61; one spare gives 62. The cap
+ * holds whatever the tick cadence, since closer samples are not recorded.
+ */
+export const OFF_SAMPLE_CAP = PASSIVE_COST_WINDOW_MS / OFF_SAMPLE_SPACING_MS + 2
+
+const finite = (s: EluSample): boolean =>
+	Number.isFinite(s.idle) && Number.isFinite(s.active)
+
+/**
+ * 8.2, the only measurement the guard decides on: utilization between two samples of the same
+ * worker generation at least `PASSIVE_COST_WINDOW_MS` apart whose counters did not go back and
+ * advanced. Anything else is no measurement (null); there is no whole-life fallback.
+ */
+export function strictUtilization(
+	current: EluSample,
+	start: EluSample,
+	elapsedMs: number,
+): number | null {
+	if (!(elapsedMs >= PASSIVE_COST_WINDOW_MS)) return null
+	if (!finite(current) || !finite(start)) return null
+	if (current.generation !== start.generation) return null
+	const active = current.active - start.active
+	const idle = current.idle - start.idle
+	if (active < 0 || idle < 0) return null
+	const total = active + idle
+	if (!Number.isFinite(total) || total <= 0) return null
+	return active / total
+}
 
 export class PassiveGuard {
 	private readonly states = new Map<string, SourceState>()
@@ -117,6 +148,11 @@ export class PassiveGuard {
 		this.states.delete(sourceId)
 		this.disabledAt.delete(sourceId)
 		this.measuring.delete(sourceId)
+	}
+
+	/** Test and diagnostics: the number of samples in the off-sample history. */
+	offHistorySize(sourceId: string): number {
+		return this.states.get(sourceId)?.offSamples.length ?? 0
 	}
 
 	/** Test and diagnostics: the current baseline, if valid. */
@@ -191,6 +227,7 @@ export class PassiveGuard {
 				previousBaselineWindowAt: null,
 				measuringSince: null,
 				trialing: false,
+				lastSample: null,
 				offSamples: [],
 			}
 			this.states.set(sourceId, st)
@@ -204,6 +241,24 @@ export class PassiveGuard {
 			generation !== st.generation
 		) {
 			if (!st.toggling) st.baseline = null
+			st.offSamples = []
+			if (st.window !== null)
+				st.window = {
+					kind: st.window.kind,
+					startedAt: now,
+					sample: view.sample,
+				}
+		} else if (
+			view.sample !== null &&
+			st.lastSample !== null &&
+			finite(view.sample) &&
+			view.sample.generation === st.lastSample.generation &&
+			(view.sample.idle < st.lastSample.idle ||
+				view.sample.active < st.lastSample.active)
+		) {
+			// 8.2: a counter went back: the window and the off history give no measurement and
+			// restart at this tick (the 8.5 abandonment deadline is unchanged).
+			st.offSamples = []
 			if (st.window !== null)
 				st.window = {
 					kind: st.window.kind,
@@ -212,6 +267,7 @@ export class PassiveGuard {
 				}
 		}
 		st.generation = generation ?? st.generation
+		if (view.sample !== null && finite(view.sample)) st.lastSample = view.sample
 		if (others !== st.others) {
 			// 8.3: the other consumers changed: the baseline no longer describes this workload.
 			st.others = others
@@ -254,7 +310,7 @@ export class PassiveGuard {
 		const w = st.window
 		if (w === null || st.pending !== null) return { kind: "none" }
 		const done = this.complete(w, now)
-		const u = done ? this.measure(w, view) : null
+		const u = done ? this.measure(w, view, now) : null
 		if (!disabled && st.offSamples.length > 0) st.offSamples = []
 		if (measuring) {
 			if (w.kind !== "baseline" || !done) return { kind: "none" }
@@ -269,8 +325,8 @@ export class PassiveGuard {
 			// 8.7: the trial starts on the first tick at or after its deadline that has a valid 8.2
 			// measurement (8.4 row 1: no measurement keeps the current state), not when an off window
 			// ends. The history is kept on every off tick so the deadline tick can measure; a counter
-			// rollback or a new generation restarts it and the off window, and keeps the state.
-			if (this.recordOff(st, view.sample, now)) return { kind: "none" }
+			// rollback or a new generation restarts it (above) and keeps the state.
+			this.recordOff(st, view.sample, now)
 			const measured = this.offMeasurement(st, view.sample, now)
 			if (
 				since >= PASSIVE_PROBATION_MS &&
@@ -385,68 +441,55 @@ export class PassiveGuard {
 		return now - w.startedAt >= PASSIVE_COST_WINDOW_MS
 	}
 
-	private measure(w: Window, view: PassiveGuardView): number | null {
+	private measure(
+		w: Window,
+		view: PassiveGuardView,
+		now: number,
+	): number | null {
 		// 8.2: no sample is no measurement (never the engine's whole-life average).
 		if (view.sample === null) return null
-		if (w.sample === null && w.kind !== "open") return null
-		return windowedUtilization(view.sample, w.sample)
+		// Only the window from the engine's open spans the worker's whole life (counters from zero).
+		const start =
+			w.sample ??
+			(w.kind === "open"
+				? { idle: 0, active: 0, generation: view.sample.generation }
+				: null)
+		if (start === null) return null
+		return strictUtilization(view.sample, start, now - w.startedAt)
 	}
 
 	/**
-	 * Adds an off tick's sample to the history, trimmed to the newest sample at least a window old.
-	 * A sample of another generation or with a counter below the last one restarts the history and
-	 * the off window at this tick (no whole-life fallback, 8.2); returns true when it did.
+	 * Adds an off tick's finite sample to the history (at most one per `OFF_SAMPLE_SPACING_MS`),
+	 * trimmed to the newest sample at least a window old and capped at `OFF_SAMPLE_CAP`.
 	 */
 	private recordOff(
 		st: SourceState,
 		sample: EluSample | null,
 		now: number,
-	): boolean {
-		if (
-			sample === null ||
-			!Number.isFinite(sample.idle) ||
-			!Number.isFinite(sample.active)
-		)
-			return false
+	): void {
 		const h = st.offSamples
-		const last = h.at(-1)?.sample
-		const restart =
-			last !== undefined &&
-			(sample.generation !== last.generation ||
-				sample.idle < last.idle ||
-				sample.active < last.active)
-		if (restart) {
-			h.length = 0
-			st.window = { kind: "off", startedAt: now, sample }
-		}
-		h.push({ at: now, sample })
+		const last = h.at(-1)
+		if (
+			sample !== null &&
+			finite(sample) &&
+			(last === undefined || now - last.at >= OFF_SAMPLE_SPACING_MS)
+		)
+			h.push({ at: now, sample })
 		while (h.length > 1 && (h[1]?.at ?? now) <= now - PASSIVE_COST_WINDOW_MS)
 			h.shift()
-		return restart
+		// Defensive: the spacing keeps the history within the cap; dropping the oldest only delays.
+		if (h.length > OFF_SAMPLE_CAP) h.splice(0, h.length - OFF_SAMPLE_CAP)
 	}
 
-	/**
-	 * 8.2 at the trial start: utilization between the current sample and the history's sample of
-	 * the same generation at least a window older; counters that did not advance are no measurement.
-	 */
+	/** 8.2 at the trial start: the current sample against the history's oldest sample. */
 	private offMeasurement(
 		st: SourceState,
 		sample: EluSample | null,
 		now: number,
 	): number | null {
 		const ref = st.offSamples[0]
-		// the current sample must be the history's newest (null or non-finite ones are not recorded)
-		if (
-			sample === null ||
-			ref === undefined ||
-			st.offSamples.at(-1)?.sample !== sample ||
-			now - ref.at < PASSIVE_COST_WINDOW_MS
-		)
-			return null
-		const active = sample.active - ref.sample.active
-		const total = active + (sample.idle - ref.sample.idle)
-		if (!Number.isFinite(total) || total <= 0) return null
-		return active / total
+		if (sample === null || ref === undefined) return null
+		return strictUtilization(sample, ref.sample, now - ref.at)
 	}
 
 	private validBaseline(st: SourceState, now: number): number | null {
