@@ -443,9 +443,12 @@ a decoder whose band I tune to to start, at any receiver rate the decoder can us
 
 3.13 **One verdict.** After every settled caps change (retune, rate change, source reconnect,
 core restart), a wanted decoder's suspension is decided from the same caps its band assessment
-uses. When the band assessment is `in-band` and every other gate passes, the decoder is placed
-and running; it is never suspended with `frequency-out-of-band`. When the assessment is
-`out-of-band`, an `auto` decoder without an operator start is suspended with
+uses, in the 11.3 precedence: a hold, a rate reason, `decoder-unavailable` or
+`channelizer-unavailable` wins first; unknown caps give `source-rate-unknown`. When those pass,
+band suspension is enabled and the decoder is `auto` without an operator start, it is
+suspended with `frequency-out-of-band` exactly when the band assessment is `out-of-band`; when
+`in-band` it is placed and running unless `capture-too-narrow` (3.14) or `efficiency-budget`
+applies. With band suspension disabled, `always` or an operator start, the reason is never
 `frequency-out-of-band`. This holds for every sequence of retunes (out, in, out, in) and for
 every catalogue and YAML decoder kind.
 3.14 **Honest reason.** When the band fits but no placement does (the decoder's channel or
@@ -453,11 +456,14 @@ centre slot cannot fit the usable window at the current rate), the reason is
 `capture-too-narrow`, not `frequency-out-of-band`. `DecoderSuspensionReasonCode`, the Fastify
 schemas, the CLI guards and the web reason words gain it; Main announces it in
 `docs/CLI-COORDINATION.md`. Precedence (11.3) places it directly after `frequency-out-of-band`.
-3.15 **Fresh `since`.** `suspension.since` is the time the current `reasonCode` began. A change
-of reason code resets it; a re-evaluation with the same reason keeps it.
+3.15 **Fresh `since`.** `suspension.since` is the start of the current uninterrupted
+suspension with the current `reasonCode`. A change of reason code resets it; a re-evaluation
+with the same reason while still suspended keeps it; suspend, run, suspend with the same
+reason starts a new interval.
 3.16 **rtl_433 fits the window.** The rtl_433 channel is the widest one that fits the usable
-window around the band and window overlap, at most its 1 MHz target and at least 250 kHz, and
-`-s` is that channel's output rate. At 1.024 Msps centred anywhere in 433.05–434.79 MHz rtl_433
+window around the band and window overlap, at most its 1 MHz target and at least 250 kHz, by
+the arithmetic in the design; `-s` equals the realised stdin rate. A changed rate restarts the
+placement once; a moved centre at the same rate retunes in place. At 1.024 Msps centred anywhere in 433.05–434.79 MHz rtl_433
 is placed. Below a 250 kHz fit the reason is `capture-too-narrow`. The channel stays a
 channelizer channel (no full-rate raw fallback, PERFORMANCE rule 6).
 3.17 **LoRa follows the regional band.** The catalogue LoRa decoder in an EU region declares both

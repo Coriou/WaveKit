@@ -167,16 +167,20 @@ merged lanes. ID-F tasks wait for the identify work that owns `src/core/scanner/
 
 ## Suspension follows the band amendment — 2026-10-25
 
-- [ ] SB.1 Planner `capture-too-narrow` reason; manager passes planner reasons through; `since`
-      resets on a reason change; new reason in `packages/api-types`, the Fastify schemas, the CLI
-      guards and the web reason words; coordination note (Main).
+- [ ] SB.0 (Main, prerequisite of SB.1) Widen `DecoderSuspensionReasonCode` in
+      `packages/api-types` with `capture-too-narrow` (shared seam, Main only), with the Fastify
+      schemas, the CLI guards, the web reason words and the coordination note.
+  - _Requirements: 3.14, 11.2_
+- [ ] SB.1 (after SB.0) Planner `capture-too-narrow` reason; manager keeps the 11.3 precedence
+      and passes planner reasons through; `since` per 3.15. SB.1 is not complete until SB.0 has
+      landed.
   - _Requirements: 3.13, 3.14, 3.15, 11.3_
-  - **Property 17: Suspension equals the band verdict after settle**
+  - **Property 16: Suspension equals the band verdict after settle**
   - Live (Main): none alone (verified in SB.4).
-- [ ] SB.2 rtl_433 channel sized to the usable window and centred on the band overlap; `-s` from
-      the placement.
+- [ ] SB.2 rtl_433 channel by the design arithmetic; `-s` equals the realised rate; restart on a
+      rate change, in-place retune on a centre move (deterministic tests for both).
   - _Requirements: 3.16_
-  - **Property 18: rtl_433 channel fits**
+  - **Property 17: The rtl_433 channel fits**
 - [ ] SB.3 LoRa regional slots (EU 868 and 433) as centre-reach candidates with placement options.
   - _Requirements: 3.17_
   - Live (Main): L, tune near the EU 433 LoRa default channel: the LoRa placement appears.
