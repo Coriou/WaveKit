@@ -12,6 +12,11 @@
  *   the earlier time so a real repeat still measures from it.
  * - A paired or fresh occurrence records its own time (a repeat refreshes the window).
  * - At most CONFIRM_MAX_ENTRIES entries; the least recently recorded is evicted first.
+ * - Acceptance is kept per scope too (isAccepted / markAccepted): an identity accepted on one
+ *   discovery is never accepted on another through the same decoder. At most
+ *   CONFIRM_MAX_ENTRIES accepted entries, least recently used evicted first.
+ * - Every pairing decision of an instance with a scope goes through here, repeats inside one
+ *   probe or decoder included, so the separation and window bounds always apply.
  * - Invalid scope, key, value or clock reading: no pairing (the safe answer).
  */
 
@@ -41,6 +46,8 @@ export const CONFIRM_MAX_PART_CHARS = 256
 export class ConfirmMemory {
 	/** Entry id → time recorded, least recently recorded first. */
 	private readonly seen = new Map<string, number>()
+	/** Accepted entry ids, least recently used first. */
+	private readonly accepted = new Set<string>()
 
 	constructor(private readonly now: () => number) {}
 
@@ -74,8 +81,35 @@ export class ConfirmMemory {
 		return paired
 	}
 
+	/** Whether `value` under `key` is accepted in `scope` (refreshes its recency). */
+	isAccepted(scope: string, key: string, value: string): boolean {
+		if (!validPart(scope) || !validPart(key) || !validPart(value)) return false
+		const id = `${scope}\u0000${key}\u0000${value}`
+		if (!this.accepted.has(id)) return false
+		this.accepted.delete(id)
+		this.accepted.add(id)
+		return true
+	}
+
+	markAccepted(scope: string, key: string, value: string): void {
+		if (!validPart(scope) || !validPart(key) || !validPart(value)) return
+		const id = `${scope}\u0000${key}\u0000${value}`
+		this.accepted.delete(id)
+		this.accepted.add(id)
+		while (this.accepted.size > CONFIRM_MAX_ENTRIES) {
+			const oldest = this.accepted.values().next()
+			if (oldest.done === true) break
+			this.accepted.delete(oldest.value)
+		}
+	}
+
+	get acceptedSize(): number {
+		return this.accepted.size
+	}
+
 	clear(): void {
 		this.seen.clear()
+		this.accepted.clear()
 	}
 
 	/** Drops entries older than the window, oldest first (insertion order is recording order). */

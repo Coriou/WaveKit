@@ -8,6 +8,7 @@ import {
 	type AmbientEvidenceEvent,
 	type AmbientTrustBinding,
 } from "../../../../src/core/scanner/probes/ambient.js"
+import { CONFIRM_MIN_SEPARATION_MS } from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
 import type { TuningTrust } from "../../../../src/core/spectrum/types.js"
 import type {
 	DecoderConfig,
@@ -190,6 +191,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 				}),
 			])
 			r.h.decoders.emitOutput("ais", ship("244123456"))
+			// WG16 SC 3a: two decodes of one MMSI pair only 2 s or more apart.
+			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			const target = firstTarget(r, jobId)
@@ -248,6 +251,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 				),
 			)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
+			// WG16 SC 3a: two decodes of one MMSI pair only 2 s or more apart.
+			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")
 			const target = firstTarget(r, job.id)

@@ -1144,8 +1144,10 @@ export class ScannerService extends EventEmitter {
 				allocatePort: () => this.allocatePort(),
 				logger: deps.logger,
 				now: this.now,
-				confirmPair: (req, key, value) =>
-					this.probeConfirmPair(req, key, value),
+				confirm: {
+					memory: this.confirmMemory,
+					scopeOf: req => this.probeConfirmScope(req),
+				},
 			})
 			this.ambient = new AmbientEvidence({
 				decoders: deps.decoders,
@@ -1157,8 +1159,10 @@ export class ScannerService extends EventEmitter {
 				sampleRateOf: sourceId => deps.sources.getCaps(sourceId)?.sampleRate,
 				centreOf: sourceId => deps.sources.getCaps(sourceId)?.centerFreq,
 				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
-				confirmPair: (ctx, key, value) =>
-					this.ambientConfirmPair(ctx, key, value),
+				confirm: {
+					memory: this.confirmMemory,
+					scopeOf: ctx => this.ambientConfirmScope(ctx),
+				},
 			})
 			this.channelTaps = deps.channelOwnership
 				? new ChannelTaps({
@@ -3871,29 +3875,17 @@ export class ScannerService extends EventEmitter {
 		return discoveryId ? `d:${discoveryId}` : `o:${observationId}`
 	}
 
-	/** WG16 SC 3a: a live probe's identity pairs across probes and ambient decoders of its discovery. */
-	private probeConfirmPair(
-		req: ProbeRequest,
-		key: string,
-		value: string,
-	): boolean {
-		if (req.replay) return false
-		return this.confirmMemory.pair(
-			this.confirmScopeOf(req.observationId),
-			key,
-			value,
-		)
+	/** WG16 SC 3a: a live probe's decodes share acceptance with its discovery; a replay keeps its own. */
+	private probeConfirmScope(req: ProbeRequest): string | null {
+		if (req.replay) return null
+		return this.confirmScopeOf(req.observationId)
 	}
 
 	/**
-	 * WG16 SC 3a: an ambient identity pairs on the discovery its decode would be placed on
-	 * (placeAmbient). No single placement (none, or a tie): it pairs only in its own decoder.
+	 * WG16 SC 3a: an ambient decode shares acceptance with the discovery it would be placed on
+	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone.
 	 */
-	private ambientConfirmPair(
-		ctx: AmbientPairContext,
-		key: string,
-		value: string,
-	): boolean {
+	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
 		const placed = this.placeAmbient({
 			sourceId: ctx.sourceId,
 			hz: ctx.hz,
@@ -3905,9 +3897,9 @@ export class ScannerService extends EventEmitter {
 		const scopes = new Set(
 			placed.map(o => this.confirmScopeOf(o.observationId)),
 		)
-		if (scopes.size !== 1) return false
+		if (scopes.size !== 1) return null
 		const [scope] = scopes
-		return scope !== undefined && this.confirmMemory.pair(scope, key, value)
+		return scope ?? null
 	}
 
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {

@@ -30,8 +30,9 @@ import {
 	type AmbientParsed,
 } from "./confirm/ambient-decode.js"
 import {
-	type ConfirmPair,
 	createInterpreterState,
+	type SharedConfirm,
+	type SharedConfirmMemory,
 	type DecoderOutputLike,
 	type InterpreterState,
 } from "./confirm/double-match.js"
@@ -115,10 +116,13 @@ export interface AmbientDeps {
 		sourceId: string,
 	) => TuningTrust | undefined
 	/**
-	 * WG16 SC 3a: shared per-discovery confirm pairing (ConfirmMemory) for a decode's first
-	 * occurrence of an identity in this decoder's memory; absent: each decoder pairs alone.
+	 * WG16 SC 3a: shared per-discovery acceptance (ConfirmMemory) and the scope (discovery)
+	 * a decode lies on; null scope or absent: the decoder's own memory decides.
 	 */
-	confirmPair?: (ctx: AmbientPairContext, key: string, value: string) => boolean
+	confirm?: {
+		memory: SharedConfirmMemory
+		scopeOf: (ctx: AmbientPairContext) => string | null
+	}
 }
 
 /** Acceptance memory of one decoder for one epoch; multimon keeps it per capcode (interp null). */
@@ -341,13 +345,16 @@ export class AmbientEvidence extends EventEmitter {
 	}
 
 	/** The shared pairing of `entry`'s interpreter states: asked with the decode in hand. */
-	private pairing(entry: AmbientState): { pair?: ConfirmPair } {
-		const confirmPair = this.deps.confirmPair
-		if (!confirmPair) return {}
+	private pairing(entry: AmbientState): { shared?: SharedConfirm } {
+		const confirm = this.deps.confirm
+		if (!confirm) return {}
 		return {
-			pair: (key, value) => {
-				const ctx = entry.pairCtx
-				return ctx !== null && confirmPair(ctx, key, value)
+			shared: {
+				memory: confirm.memory,
+				scope: () => {
+					const ctx = entry.pairCtx
+					return ctx === null ? null : confirm.scopeOf(ctx)
+				},
 			},
 		}
 	}

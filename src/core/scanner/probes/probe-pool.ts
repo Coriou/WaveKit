@@ -50,8 +50,9 @@ import type {
 	ScannerSettings,
 } from "../types.js"
 import {
-	type ConfirmPair,
 	createInterpreterState,
+	type SharedConfirm,
+	type SharedConfirmMemory,
 	type DecoderOutputLike,
 	type InterpreterState,
 } from "./confirm/double-match.js"
@@ -170,11 +171,14 @@ export interface ProbePoolDeps {
 	/** Own the exact remover before the sole external constructor listener effect. */
 	ownConstructorListener?: (removeExact: () => void) => boolean
 	/**
-	 * WG16 SC 3a: shared per-discovery confirm pairing (ConfirmMemory) for a live probe's
-	 * first occurrence of an identity. Never asked for a replay probe: a replay re-decodes a
-	 * captured transmission, so it could pair one transmission with itself.
+	 * WG16 SC 3a: shared per-discovery acceptance (ConfirmMemory) and the scope of a probe's
+	 * decodes. Never used for a replay probe: a replay re-decodes a captured transmission, so
+	 * it could pair one transmission with itself; it keeps its own memory.
 	 */
-	confirmPair?: (req: ProbeRequest, key: string, value: string) => boolean
+	confirm?: {
+		memory: SharedConfirmMemory
+		scopeOf: (req: ProbeRequest) => string | null
+	}
 }
 
 export interface ProbeStatus {
@@ -1434,10 +1438,15 @@ export class ProbePool extends EventEmitter {
 				this.serviceRounds.delete(oldest)
 			}
 		}
-		const confirmPair = this.deps.confirmPair
-		const pairing: { pair?: ConfirmPair } =
-			confirmPair && !req.replay
-				? { pair: (key, value) => confirmPair(req, key, value) }
+		const confirm = this.deps.confirm
+		const pairing: { shared?: SharedConfirm } =
+			confirm && !req.replay
+				? {
+						shared: {
+							memory: confirm.memory,
+							scope: () => confirm.scopeOf(req),
+						},
+					}
 				: {}
 		const rec: ProbeRecord = {
 			probeId,
