@@ -76,4 +76,11 @@ dedicated user-defined network or the default bridge with no other
 workloads). Publishing to `0.0.0.0` exposes plaintext session cookies to the
 LAN; use `tls-termination` for that.
 
+Cookie scope, inherited from `local-http`: the session cookie is host-only,
+and browsers do not isolate cookies by port. Any other service the browser
+visits on the same loopback hostname, on any port, can read and overwrite the
+session cookie and act as the paired user. The operator must not run untrusted
+web services on that hostname in the same browser profile, or must use
+`tls-termination` with a dedicated hostname.
+
 Design: [design.md](design.md). Tasks: [tasks.md](tasks.md).

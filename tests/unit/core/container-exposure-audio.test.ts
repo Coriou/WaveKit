@@ -1,8 +1,11 @@
 /**
- * Container loopback exposure: both protected HTTP audio listeners bound on
- * 0.0.0.0 (ports this test reserves) still reject a forged Host and a missing
- * credential. The policy inputs mirror what validateProtectedRuntimeMapping
- * accepts for container-loopback: one 127.0.0.1 authority per listener.
+ * Container loopback exposure: the shared protected AudioHttpServer (the class
+ * behind both the analog and digital audio listeners) bound on 0.0.0.0 still
+ * rejects a forged Host and a missing credential. This does not exercise the
+ * live-demod or digital-voice service wiring; it runs two independently
+ * configured instances of the shared server with hand-built policy inputs that
+ * mirror what validateProtectedRuntimeMapping accepts for container-loopback:
+ * one 127.0.0.1 authority per listener.
  */
 import { createServer, request } from "node:http"
 import type { IncomingMessage } from "node:http"
@@ -108,7 +111,7 @@ async function get(port: number, headers: Record<string, string>) {
 }
 
 describe.each(["Analog audio", "Digital audio"])(
-	"%s on 0.0.0.0 under container-loopback",
+	"shared audio server policy labelled %s on 0.0.0.0 wildcard bind",
 	label => {
 		it("rejects a forged Host even with a valid token", async () => {
 			const env = await listener(label)

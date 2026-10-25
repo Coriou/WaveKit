@@ -457,6 +457,12 @@ What you must guarantee:
   access.
 - Keep untrusted containers off the core's network: a dedicated user-defined
   network, or the default bridge with no other workloads.
+- Run no untrusted web service on the same loopback hostname in the same
+  browser profile. The session cookie is host-only and browsers do not isolate
+  cookies by port, so a service on any other port of that hostname can read and
+  overwrite the session cookie and act as the paired user. This is inherited
+  from `local-http`; use `tls-termination` with a dedicated hostname to avoid
+  it.
 
 At startup the core logs a warning that its listeners accept connections on
 every container interface and that the ports must be published to

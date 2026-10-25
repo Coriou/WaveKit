@@ -1,8 +1,14 @@
 /**
  * Container loopback exposure against the real built core: every listener binds
- * 0.0.0.0 on ports this test reserves, and a direct client connects over
- * 127.0.0.1 and (when present) a non-loopback local IPv4 interface with forged
- * and genuine Host values.
+ * 0.0.0.0 on ports this test reserves, and a direct client connects only over
+ * 127.0.0.1 with forged and genuine Host values.
+ *
+ * A peer on the container network is indistinguishable from this client at the
+ * policy layer: AccessPolicy (src/access/policy.ts) admits on Host, Origin,
+ * cookie, CSRF and bearer only and never reads the peer address. The peer
+ * address is used only as the pairing attempt rate-limit key
+ * (src/access/pairing.ts) and in audio client logs, never for trust. The
+ * forged-Host and no-credential cases over loopback therefore cover it.
  */
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
@@ -11,7 +17,7 @@ import { request } from "node:http"
 import type { IncomingHttpHeaders } from "node:http"
 import { connect, createServer } from "node:net"
 import type { Server } from "node:net"
-import { networkInterfaces, tmpdir } from "node:os"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
@@ -30,37 +36,6 @@ const held: Server[] = []
 let ports: number[] = []
 let token = ""
 let origin = ""
-
-function lanAddress(): string | undefined {
-	for (const entries of Object.values(networkInterfaces()))
-		for (const entry of entries ?? [])
-			if (entry.family === "IPv4" && !entry.internal) return entry.address
-	return undefined
-}
-// Some hosts (sandboxes, application firewalls) drop self-connections to a
-// non-loopback address; probe with a plain listener this test owns first.
-async function reachable(address: string): Promise<boolean> {
-	const { createServer: createHttp, get } = await import("node:http")
-	const server = createHttp((_req, res) => res.end())
-	await new Promise<void>(resolve => server.listen(0, "0.0.0.0", resolve))
-	const address_ = server.address()
-	const port = typeof address_ === "object" && address_ ? address_.port : 0
-	const ok = await new Promise<boolean>(resolve => {
-		const req = get({ host: address, port, timeout: 1000 }, res => {
-			res.resume()
-			resolve(res.statusCode === 200)
-		})
-		req.on("timeout", () => req.destroy())
-		req.on("error", () => resolve(false))
-	})
-	server.closeAllConnections()
-	await new Promise<void>(resolve => server.close(() => resolve()))
-	return ok
-}
-const lan = lanAddress()
-const lanReachable = lan !== undefined && (await reachable(lan))
-const peers = ["127.0.0.1", ...(lan === undefined ? [] : [lan])]
-const usable = (host: string) => host === "127.0.0.1" || lanReachable
 
 async function bound(port: number, host: string): Promise<Server | null> {
 	const server = createServer()
@@ -324,17 +299,16 @@ describe("container-loopback built core on 0.0.0.0", () => {
 			number,
 			number,
 		]
-		for (const host of peers.filter(usable)) {
+		for (const host of ["127.0.0.1"]) {
 			expect(await listening(host, api)).toBe(true)
 			expect(await listening(host, raw)).toBe(false)
 			expect(await listening(host, relay)).toBe(false)
 		}
 	})
 
-	it.for(peers)(
+	it.for(["127.0.0.1"])(
 		"via %s: wrong Host rejected, genuine Host only reaches public exceptions",
-		async (host, context) => {
-			if (!usable(host)) return context.skip()
+		async host => {
 			const api = ports[0]!
 			const genuine = `127.0.0.1:${api}`
 			for (const forged of [
@@ -367,10 +341,9 @@ describe("container-loopback built core on 0.0.0.0", () => {
 		},
 	)
 
-	it.for(peers)(
+	it.for(["127.0.0.1"])(
 		"via %s: session needs an allowed Origin, CSRF and a matching WebSocket Origin",
-		async (host, context) => {
-			if (!usable(host)) return context.skip()
+		async host => {
 			const api = ports[0]!
 			const browser = await pairedBrowser(host)
 			const session = await http(host, api, "/api/access/session", browser)
