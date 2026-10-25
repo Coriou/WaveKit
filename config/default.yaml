@@ -669,8 +669,11 @@ csdr:
 #     minVersion: "3.14.1"
 #
 #   # ACARS (audio-demod base: one instance decodes ONE AM channel). With
-#   # `useChannelizer: true` (and `channelizer.enabled: true`, see below) the channel is `frequencies[0]` (or `channelHz`),
-#   # cut from the source's IQ, so a second instance can take a second channel.
+#   # `useChannelizer: true` and a channelizer for the source (`channelizer.enabled:
+#   # true`, or the automatic one on x86-64, see below) the channel is
+#   # `options.channelHz`, else the only entry of `frequencies` (several entries
+#   # need channelHz), cut from the source's IQ; a second instance can take a
+#   # second channel.
 #   # Without the channelizer the instance demodulates the source centre plus
 #   # `offsetHz` (default 0): tune the source, or set offsetHz, to the channel.
 #   - id: "acars-decoder"
