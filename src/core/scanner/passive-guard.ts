@@ -258,9 +258,13 @@ export class PassiveGuard {
 		if (disabled) {
 			if (holdsPassive) return { kind: "none" } // a restore in flight
 			const since = now - (this.disabledAt.get(sourceId) ?? now)
-			// 8.7: the trial deadline is met on the tick it falls due, not when an off window ends.
+			// 8.7: the trial starts on the first tick at or after its deadline that has a valid sample
+			// (8.4 row 1: no measurement keeps the current state), not when an off window ends.
 			if (
 				since >= PASSIVE_PROBATION_MS &&
+				view.sample !== null &&
+				Number.isFinite(view.sample.idle) &&
+				Number.isFinite(view.sample.active) &&
 				this.validBaseline(st, now) !== null
 			) {
 				this.disabledAt.delete(sourceId)

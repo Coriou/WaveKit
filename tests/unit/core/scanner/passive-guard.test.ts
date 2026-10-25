@@ -376,4 +376,25 @@ describe("guard review regressions (DQ 8.2, 8.5, 8.7)", () => {
 		s.run(3 * W)
 		expect(s.actions[2]).toBe("measure")
 	})
+
+	it("a due trial waits for a valid sample (8.4 row 1, review round 2)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		while (s.state.t < 958_000) s.tick()
+		expect(s.guard.baselineOf("s", s.state.t)).toBeCloseTo(0.3, 5)
+		s.state.nullSample = true
+		s.tick() // 959 000
+		s.tick() // 960 000: due, but no sample
+		expect(s.state.t).toBe(960_000)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		s.tick()
+		s.tick()
+		expect(s.actions).toHaveLength(1)
+		s.state.nullSample = false
+		s.tick() // first tick with a valid sample after the deadline
+		expect(s.actions[1]).toBe("restore:trial")
+		expect(s.state.t).toBe(963_000)
+	})
 })
