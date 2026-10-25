@@ -231,6 +231,26 @@ export function matchesDiscoveryQuery(
 }
 
 /**
+ * `byId` after a page for `query`: the page's records set; when the page is complete (no cursor), a
+ * cached record the query covers but the page no longer has is gone (merged, deleted or evicted), so it
+ * leaves the cache (band inspection UX req 3.2: an absorbed id a truncated merge did not name).
+ */
+export function reconciled(
+	byId: ReadonlyMap<string, Discovery>,
+	query: DiscoveryQuery,
+	page: { items: readonly Discovery[]; nextCursor: string | null },
+): Map<string, Discovery> {
+	const out = new Map(byId)
+	if (page.nextCursor === null) {
+		const have = new Set(page.items.map(d => d.id))
+		for (const [id, d] of byId)
+			if (!have.has(id) && matchesDiscoveryQuery(d, query)) out.delete(id)
+	}
+	for (const d of page.items) out.set(d.id, d)
+	return out
+}
+
+/**
  * The discoveries a `merged` survivor most likely absorbed: the core merges discoveries with the
  * same first source, frequency key, family and identity, and its event names only the survivor.
  */
@@ -562,8 +582,7 @@ export class ScannerStore extends Store<ScannerState> {
 				page => {
 					if (generation !== this.discoveryGeneration) return
 					this.commit(s => {
-						const byId = new Map(s.discoveries.byId)
-						for (const d of page.items) byId.set(d.id, d)
+						const byId = reconciled(s.discoveries.byId, q, page)
 						return {
 							...s,
 							discoveries: {
@@ -707,8 +726,7 @@ export class ScannerStore extends Store<ScannerState> {
 				: { query: queryParams(query) },
 		)
 		this.commit(s => {
-			const byId = new Map(s.discoveries.byId)
-			for (const d of page.items) byId.set(d.id, d)
+			const byId = reconciled(s.discoveries.byId, query, page)
 			return { ...s, discoveries: { ...s.discoveries, byId } }
 		})
 		return page.items

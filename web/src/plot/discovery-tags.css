@@ -74,8 +74,10 @@
 			3px 0 0 -1.25px var(--wk-plot-bg),
 			3px 0 0 0 var(--disc-c);
 	}
-	.wk-plot-disc[data-group] {
-		padding-right: 8px;
+	/* a group too tight for its label still says how many: "+5" */
+	.wk-plot-disc-count {
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
 	}
 	.wk-plot-disc[aria-expanded="true"] {
 		background: rgba(var(--wk-accent-rgb), 0.16);
@@ -103,11 +105,9 @@
 		cursor: pointer;
 		z-index: 1;
 	}
-	.wk-plot-disc-edge[data-side="left"] {
-		left: 2px;
-	}
-	.wk-plot-disc-edge[data-side="right"] {
-		right: 2px;
+	.wk-plot-disc-edge {
+		box-sizing: border-box;
+		justify-content: center;
 	}
 	.wk-plot-disc-edge:hover,
 	.wk-plot-disc-edge[aria-expanded="true"] {
@@ -142,10 +142,20 @@
 		overscroll-behavior: contain;
 	}
 	.wk-plot-disc-member {
-		height: auto;
-		min-height: var(--wk-h-lg);
-		padding: 6px 10px;
+		display: flex;
 		align-items: flex-start;
+		gap: 10px;
+		padding: 6px 10px;
+		border-radius: var(--wk-r-3);
+	}
+	.wk-plot-disc-member:hover {
+		background: rgba(var(--wk-accent-rgb), 0.06);
+	}
+	.wk-plot-disc-member-what {
+		flex: 1;
+	}
+	.wk-plot-disc-tune {
+		flex: none;
 	}
 	.wk-plot-disc-member-freq {
 		flex: none;

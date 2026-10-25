@@ -922,6 +922,60 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 		store.dispose()
 	})
 
+	it("a truncated merge's refetch removes an absorbed id the event did not name", async () => {
+		let list = [discovery("s"), discovery("hidden"), discovery("named")]
+		const { store, send, tick } = await ready([], call =>
+			call.url.split("?")[0] === "/api/scanner/discoveries"
+				? { body: { items: list, nextCursor: null } }
+				: call.url === "/api/scanner/discoveries/s"
+					? { body: discovery("s") }
+					: undefined,
+		)
+		await store.refreshDiscoveries({})
+		expect(store.get().discoveries.byId.has("hidden")).toBe(true)
+		list = [discovery("s")]
+		send("scanner:discovery", {
+			change: "merged",
+			discovery: discovery("s"),
+			mergedIds: ["named"],
+			mergedTruncated: true,
+		})
+		tick()
+		await flush()
+		await flush()
+		const d = store.get().discoveries
+		expect([...d.byId.keys()]).toEqual(["s"])
+		expect(d.items.map(x => x.id)).toEqual(["s"])
+		store.dispose()
+	})
+
+	it("a span fetch reconciles its window only, and only when complete", async () => {
+		let page: { items: Discovery[]; nextCursor: string | null } = {
+			items: [
+				discovery("in", { frequencyHz: 160e6 }),
+				discovery("gone", { frequencyHz: 160.5e6 }),
+				discovery("far", { frequencyHz: 433e6 }),
+			],
+			nextCursor: null,
+		}
+		const { store } = await ready([], call =>
+			call.url.startsWith("/api/scanner/discoveries?")
+				? { body: page }
+				: undefined,
+		)
+		await store.fetchDiscoveries({ freqMinHz: 0, freqMaxHz: 1e9 })
+		page = { items: [discovery("in", { frequencyHz: 160e6 })], nextCursor: "c" }
+		await store.fetchDiscoveries({ freqMinHz: 159e6, freqMaxHz: 161e6 })
+		expect(store.get().discoveries.byId.has("gone")).toBe(true)
+		page = { ...page, nextCursor: null }
+		await store.fetchDiscoveries({ freqMinHz: 159e6, freqMaxHz: 161e6 })
+		expect([...store.get().discoveries.byId.keys()].sort()).toEqual([
+			"far",
+			"in",
+		])
+		store.dispose()
+	})
+
 	it("a truncated deleted event refetches only the list", async () => {
 		const { store, send, tick, calls } = await ready([discovery("s")])
 		const before = calls.length

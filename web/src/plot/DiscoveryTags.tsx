@@ -17,15 +17,16 @@ import {
 import type { DataLayer } from "../data/index.ts"
 import { useStore } from "../data/index.ts"
 import type { ScannerStore } from "../data/scanner-store.ts"
-import { isVerified, whatIsThis } from "../data/scanner-format.ts"
+import { whatIsThis } from "../data/scanner-format.ts"
 import { useNow } from "../features/hooks.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import {
 	discoveryFetchSpan,
 	type DiscoveryTagFilter,
+	discoveryRowLayout,
 	hasTaggable,
-	outsideView,
-	placeDiscoveryTags,
+	tagPopoverRows,
+	TriggerFocus,
 	type FetchedSpan,
 	type OutsideSide,
 	type PlacedDiscoveryTag,
@@ -121,7 +122,7 @@ export interface DiscoveryTagsProps {
 }
 
 type Open =
-	| { kind: "group"; id: string }
+	| { kind: "tag"; id: string }
 	| { kind: "edge"; side: "left" | "right" }
 	| null
 
@@ -138,9 +139,9 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 	// the last-hour tier moves on slowly: a minute is fine
 	const now = useNow(true, 60_000)
 	const savedHz = useMemo(() => saved.map(f => f.frequencyHz), [saved])
-	const placed = useMemo(
+	const row = useMemo(
 		() =>
-			placeDiscoveryTags(byId.values(), view, {
+			discoveryRowLayout(byId.values(), view, {
 				widthPx,
 				activeNow,
 				now,
@@ -149,11 +150,9 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 			}),
 		[byId, activeNow, now, savedHz, view.startHz, view.endHz, widthPx, only],
 	)
-	const outside = useMemo(
-		() => outsideView(byId.values(), view, { only, savedHz }),
-		[byId, savedHz, view.startHz, view.endHz, only],
-	)
+	const { tags: placed, outside, markers } = row
 	const [open, setOpen] = useState<Open>(null)
+	const focus = useMemo(() => new TriggerFocus(), [])
 	// a retune or a pan moves everything: an open popover would point at nothing
 	useEffect(() => setOpen(null), [view.startHz, view.endHz])
 	const rootRef = useRef<HTMLDivElement>(null)
@@ -167,18 +166,43 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 				t.closest(`.${DISCOVERY_POP_CLASS}, .wk-plot-disc, .wk-plot-disc-edge`)
 			)
 				return
+			focus.forget()
 			setOpen(null)
 		}
 		document.addEventListener("pointerdown", onDown, true)
 		return () => document.removeEventListener("pointerdown", onDown, true)
-	}, [open])
+	}, [open, focus])
+	/** Closes the popover; from the keyboard or Cancel, focus goes back to what opened it. */
+	const close = (restore: boolean) => {
+		setOpen(null)
+		if (restore) focus.restore()
+		else focus.forget()
+	}
 	const onKey = (e: KeyboardEvent<HTMLElement>) => {
 		if (e.key !== "Escape" || open === null) return
 		e.stopPropagation()
-		setOpen(null)
+		close(true)
 	}
-	const group =
-		open?.kind === "group" ? placed.find(t => t.id === open.id) : undefined
+	const toggle = (next: Exclude<Open, null>, trigger: HTMLElement) => {
+		const same =
+			open !== null &&
+			open.kind === next.kind &&
+			(open.kind === "tag"
+				? next.kind === "tag" && open.id === next.id
+				: next.kind === "edge" && open.side === next.side)
+		if (same) {
+			close(false)
+			return
+		}
+		focus.remember(trigger)
+		setOpen(next)
+	}
+	const tune = (hz: number) => {
+		close(false)
+		void controller.tuneTo(hz)
+	}
+	const shown =
+		open?.kind === "tag" ? placed.find(t => t.id === open.id) : undefined
 	const edge =
 		open?.kind === "edge" ? { side: open.side, at: outside[open.side] } : null
 	return (
@@ -193,35 +217,32 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 						data-tier={t.tier}
 						data-heard={t.heard || undefined}
 						data-group={n > 1 || undefined}
-						style={{ left: t.x }}
+						style={{ left: t.x, maxWidth: t.width }}
 						aria-label={
 							n > 1 ? t.title : `Discovery: ${t.title}${likelySuffix(t.rep)}`
 						}
-						aria-haspopup={n > 1 ? "dialog" : undefined}
-						aria-expanded={n > 1 ? group?.id === t.id : undefined}
+						aria-haspopup="dialog"
+						aria-expanded={shown?.id === t.id}
 						title={
 							n > 1
 								? `${t.title} · ${t.label}`
 								: `${t.title}${likelySuffix(t.rep)}`
 						}
-						onClick={() => {
-							if (n > 1)
-								setOpen(o =>
-									o?.kind === "group" && o.id === t.id
-										? null
-										: { kind: "group", id: t.id },
-								)
-							else void controller.tuneTo(t.hz)
-						}}
+						onClick={e => toggle({ kind: "tag", id: t.id }, e.currentTarget)}
 					>
 						<i data-solid={t.solid || undefined} aria-hidden="true" />
-						{t.labelled && <span>{t.label}</span>}
+						{t.labelled ? (
+							<span>{t.label}</span>
+						) : (
+							t.count && <span className="wk-plot-disc-count">{t.count}</span>
+						)}
 					</button>
 				)
 			})}
 			{(["left", "right"] as const).map(side => {
 				const at = outside[side]
-				if (!at) return null
+				const m = markers[side]
+				if (!at || !m) return null
 				const text = `${at.count} ${at.count === 1 ? "signal" : "signals"} outside view ${side === "left" ? "←" : "→"}`
 				return (
 					<button
@@ -229,17 +250,12 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 						type="button"
 						className="wk-plot-disc-edge"
 						data-side={side}
+						style={{ left: m.x, width: m.width }}
 						aria-label={`${text}, nearby`}
 						aria-haspopup="dialog"
 						aria-expanded={edge?.side === side}
 						title={`${text} (nearby)`}
-						onClick={() =>
-							setOpen(o =>
-								o?.kind === "edge" && o.side === side
-									? null
-									: { kind: "edge", side },
-							)
-						}
+						onClick={e => toggle({ kind: "edge", side }, e.currentTarget)}
 					>
 						{side === "left" && <span aria-hidden="true">←</span>}
 						{at.count}
@@ -247,25 +263,13 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 					</button>
 				)
 			})}
-			{group && (
-				<GroupPopover
-					tag={group}
-					widthPx={widthPx}
-					onPick={hz => {
-						setOpen(null)
-						void controller.tuneTo(hz)
-					}}
-				/>
-			)}
+			{shown && <TagPopover tag={shown} widthPx={widthPx} onTune={tune} />}
 			{edge?.at && (
 				<EdgeConfirm
 					side={edge.side}
 					at={edge.at}
-					onConfirm={hz => {
-						setOpen(null)
-						void controller.tuneTo(hz)
-					}}
-					onCancel={() => setOpen(null)}
+					onConfirm={tune}
+					onCancel={() => close(true)}
 				/>
 			)}
 		</div>
@@ -277,58 +281,59 @@ function likelySuffix(d: Discovery): string {
 	return what.likely ? ` · ${what.likely}` : ""
 }
 
-const POP_W = 280
+const POP_W = 300
 
-/** Every member of a group tag, frequency order, each with its "what is this" (req 1.1, 1.3); a click tunes. */
-function GroupPopover({
+/**
+ * A tag's "what is this" (req 1.1, 1.3), for one discovery or every member of a group in frequency order:
+ * protocol or label, the muted hint, the next step, and a Tune action (nothing tunes on the tag's click).
+ */
+function TagPopover({
 	tag,
 	widthPx,
-	onPick,
+	onTune,
 }: {
 	tag: PlacedDiscoveryTag
 	widthPx: number
-	onPick: (hz: number) => void
+	onTune: (hz: number) => void
 }) {
 	const left = Math.max(4, Math.min(widthPx - POP_W - 4, tag.x))
 	const first = useRef<HTMLButtonElement>(null)
 	useEffect(() => first.current?.focus({ preventScroll: true }), [tag.id])
+	const rows = tagPopoverRows(tag)
 	return (
 		<div
 			className={`${DISCOVERY_POP_CLASS} wk-menu`}
 			role="dialog"
-			aria-label={tag.title}
+			aria-label={
+				tag.members.length > 1 ? tag.title : `What is this: ${tag.title}`
+			}
 			style={{ left, width: POP_W }}
 		>
 			<div className="wk-plot-disc-pop-head">{tag.title}</div>
 			<ul className="wk-plot-disc-pop-list">
-				{tag.members.map((d, i) => {
-					const what = whatIsThis(d)
-					const label = d.operator?.label?.trim()
-					return (
-						<li key={d.id}>
-							<button
-								ref={i === 0 ? first : undefined}
-								type="button"
-								className="wk-option wk-plot-disc-member"
-								onClick={() => onPick(d.frequencyHz)}
-							>
-								<span className="wk-plot-disc-member-freq">
-									{formatMHz(d.frequencyHz, 4)}
-								</span>
-								<span className="wk-plot-disc-member-what">
-									<b>{label || what.protocol}</b>
-									{label && <span>{what.protocol}</span>}
-									{what.likely && (
-										<span className="wk-plot-disc-likely">{what.likely}</span>
-									)}
-									{!isVerified(d) && (
-										<span className="wk-plot-disc-next">{what.next}</span>
-									)}
-								</span>
-							</button>
-						</li>
-					)
-				})}
+				{rows.map((r, i) => (
+					<li key={r.id} className="wk-plot-disc-member">
+						<span className="wk-plot-disc-member-freq">{r.freq}</span>
+						<span className="wk-plot-disc-member-what">
+							<b>{r.name}</b>
+							{r.protocol && <span>{r.protocol}</span>}
+							{r.likely && (
+								<span className="wk-plot-disc-likely">{r.likely}</span>
+							)}
+							{r.next && <span className="wk-plot-disc-next">{r.next}</span>}
+						</span>
+						<button
+							ref={i === 0 ? first : undefined}
+							type="button"
+							className="wk-btn wk-plot-disc-tune"
+							data-size="sm"
+							aria-label={`Tune to ${r.freq} MHz`}
+							onClick={() => onTune(r.tuneHz)}
+						>
+							Tune
+						</button>
+					</li>
+				))}
 			</ul>
 		</div>
 	)

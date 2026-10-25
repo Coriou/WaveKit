@@ -140,7 +140,7 @@ describe("discovery tag tiers", () => {
 		const placed = placeDiscoveryTags(
 			[
 				disc("old", 100, { lastSeenAt: ago(RECENT_MS * 2) }),
-				disc("live", 130),
+				disc("live", 140),
 				disc("onTop", 101, { lastSeenAt: ago(RECENT_MS * 3) }),
 			],
 			view,

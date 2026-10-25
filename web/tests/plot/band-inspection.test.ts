@@ -4,7 +4,19 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type { Discovery } from "@wavekit/api-types"
 
+import { placeSavedTags } from "../../src/plot/saved-tags.ts"
+import { withWhatIsThis } from "../../src/plot/signal-menu.ts"
 import {
+	AXIS_CSS,
+	DISCOVERY_ROW_CSS,
+	LANES_CSS,
+	plotLayout,
+	RULER_CSS,
+} from "../../src/plot/layout.ts"
+import {
+	discoveryRowLayout,
+	tagPopoverRows,
+	TriggerFocus,
 	clusterDiscoveries,
 	outsideView,
 	placeDiscoveryTags,
@@ -91,6 +103,20 @@ describe("clusterDiscoveries", () => {
 		expect(tags[0]!.members).toHaveLength(6)
 		expect(tags[0]!.title).toBe("6 signals, 433.0000-433.1540 MHz")
 		expect(tags[0]!.label).toBe("Heard +5")
+		expect(tags[0]!.x).toBe(0)
+	})
+
+	it("a group without room for its label still shows its count", () => {
+		const ds = [disc("a", xHz(100)), disc("b", xHz(101)), disc("c", xHz(112))]
+		const [t] = placeDiscoveryTags(ds, view, {
+			...opts,
+			widthPx: W,
+			maxLabelPx: 0,
+			chromePx: 1000,
+		})
+		expect(t!.labelled).toBe(false)
+		expect(t!.count).toBe("+2")
+		expect(t!.width).toBeGreaterThan(15)
 	})
 
 	it("the bandwidth rule joins neighbours of a wide emitter", () => {
@@ -157,10 +183,11 @@ describe("band view properties", () => {
 				for (const t of tags) {
 					const first = Math.min(...t.members.map(d => d.frequencyHz))
 					expect(t.hz).toBe(first)
-					expect(t.x).toBeCloseTo(
-						((first - view.startHz) / 1_200_000) * w - 7,
-						6,
-					)
+					// at x(first), moved inside the row when it would be clipped
+					const ideal = ((first - view.startHz) / 1_200_000) * w - 7
+					expect(t.x).toBeCloseTo(Math.min(w - t.width, Math.max(0, ideal)), 6)
+					expect(t.x).toBeGreaterThanOrEqual(0)
+					expect(t.x + t.width).toBeLessThanOrEqual(w + 1e-9)
 				}
 			}),
 			{ numRuns: 200 },
@@ -323,6 +350,174 @@ describe("signal chips over the trace (one layout across live and leaving chips)
 					for (let j = i + 1; j < rects.length; j++)
 						expect(overlap(rects[i]!, rects[j]!)).toBe(false)
 			}),
+			{ numRuns: 150 },
+		)
+	})
+})
+
+type Rect = [number, number, number, number]
+const hits = (a: Rect, b: Rect) =>
+	a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+
+describe("discovery row edges (review round 1)", () => {
+	it("discoveries exactly at both boundaries plus one outside: inside the row, never under a marker", () => {
+		const ds = [
+			disc("lo", view.startHz),
+			disc("hi", view.endHz),
+			disc("out-l", view.startHz - 100_000),
+			disc("out-r", view.endHz + 100_000),
+		]
+		const row = discoveryRowLayout(ds, view, opts)
+		expect(row.tags.map(t => t.members.map(d => d.id))).toEqual([
+			["lo"],
+			["hi"],
+		])
+		const l = row.markers.left!
+		const r = row.markers.right!
+		const rects: Rect[] = [
+			[l.x, 0, l.x + l.width, 1],
+			[r.x, 0, r.x + r.width, 1],
+			...row.tags.map((t): Rect => [t.x, 0, t.x + t.width, 1]),
+		]
+		for (const [a, b, c] of rects) {
+			expect(a).toBeGreaterThanOrEqual(0)
+			expect(c).toBeLessThanOrEqual(W)
+			void b
+		}
+		for (let i = 0; i < rects.length; i++)
+			for (let j = i + 1; j < rects.length; j++)
+				expect(hits(rects[i]!, rects[j]!)).toBe(false)
+	})
+
+	it("a single discovery's popover has its next step and a Tune action (capture-too-narrow)", () => {
+		const d = disc("one", xHz(300), {
+			hint: "lora",
+			coverage: [
+				{
+					decoderId: "lora-meshtastic",
+					state: "suspended",
+					suspensionReason: "capture-too-narrow",
+				},
+			],
+		})
+		const [t] = placeDiscoveryTags([d], view, opts)
+		expect(tagPopoverRows(t!)).toEqual([
+			{
+				id: "one",
+				freq: "433.6000",
+				name: "Heard",
+				protocol: null,
+				likely: "likely LoRa",
+				next: "Widen the capture so lora-meshtastic fits",
+				tuneHz: xHz(300),
+			},
+		])
+		expect(withWhatIsThis("433.6000 MHz", [d], xHz(300) + 500)).toBe(
+			"433.6000 MHz · likely LoRa · Widen the capture so lora-meshtastic fits",
+		)
+		expect(
+			withWhatIsThis(
+				"x",
+				[disc("v", xHz(300), { confidence: "decoded", protocol: "dmr" })],
+				xHz(300),
+			),
+		).toBe("x")
+	})
+
+	it("Escape or Cancel gives focus back to the trigger, once; an outside click does not", () => {
+		const calls: string[] = []
+		const trigger = { focus: () => calls.push("focus") }
+		const f = new TriggerFocus()
+		f.remember(trigger)
+		f.restore()
+		f.restore()
+		expect(calls).toEqual(["focus"])
+		f.remember(trigger)
+		f.forget()
+		f.restore()
+		expect(calls).toEqual(["focus"])
+	})
+})
+
+// Feature: band-inspection-ux, Property 1: clusters cover and do not overlap (every chip layer)
+// Validates: Requirements 1.1, 1.2
+describe("all chip layers together", () => {
+	it("trace chips, saved tags, discovery tags and edge markers: no rectangle overlaps, all inside the plot", () => {
+		const PW = 1000
+		const v = { startHz: 434_000_000, endHz: 435_000_000 }
+		const hzArb = fc.integer({ min: 433_400_000, max: 435_600_000 })
+		fc.assert(
+			fc.property(
+				fc.array(hzArb, { maxLength: 30 }),
+				fc.array(fc.record({ hz: hzArb, name: fc.string({ maxLength: 20 }) }), {
+					maxLength: 10,
+				}),
+				fc.array(
+					fc.record({
+						hz: fc.integer({ min: v.startHz, max: v.endHz }),
+						w: fc.integer({ min: 500, max: 30_000 }),
+						peak: fc.integer({ min: -100, max: -30 }),
+					}),
+					{ maxLength: 30 },
+				),
+				fc.integer({ min: 300, max: 1200 }),
+				(dHz, savedIn, sigs, heightCss) => {
+					const layout = plotLayout(heightCss, DISCOVERY_ROW_CSS + RULER_CSS)
+					const lanesTop = layout.traceCss + AXIS_CSS
+					const rowTop = lanesTop + LANES_CSS
+					const rects: Rect[] = []
+					// trace band
+					const info: SignalInfo[] = sigs.map(x => ({
+						hz: x.hz,
+						widthHz: x.w,
+						label: "Test cluster",
+						sub: "434.700",
+						burst: true,
+						known: true,
+						peakDb: x.peak,
+					}))
+					const placed = placeLabels(clusterSignals(info, v, PW), v, {
+						widthPx: PW,
+						traceCss: layout.traceCss,
+						levels: { minDb: -110, maxDb: -20 },
+						tunedHz: null,
+					})
+					for (const l of layoutChips(placed, []).placed)
+						rects.push(chipRect(l))
+					// lanes band: saved tags, 18 px chips
+					const saved = placeSavedTags(
+						savedIn.map((f, i) => ({
+							id: `f${i}`,
+							frequencyHz: f.hz,
+							name: f.name || "x",
+						})),
+						v,
+						{ widthPx: PW, showLabels: true },
+					)
+					for (const t of saved)
+						rects.push([t.x, lanesTop + 3, t.x + t.width, lanesTop + 21])
+					// discovery row: tags and markers, 16 px chips at top 2 px
+					const row = discoveryRowLayout(
+						dHz.map((hz, i) => disc(`d${i}`, hz)),
+						v,
+						{ ...opts, widthPx: PW },
+					)
+					for (const t of row.tags)
+						rects.push([t.x, rowTop + 2, t.x + t.width, rowTop + 18])
+					for (const m of [row.markers.left, row.markers.right])
+						if (m) rects.push([m.x, rowTop + 2, m.x + m.width, rowTop + 18])
+					const bottom = rowTop + DISCOVERY_ROW_CSS
+					for (const r of rects) {
+						expect(r[0]).toBeGreaterThanOrEqual(0)
+						expect(r[2]).toBeLessThanOrEqual(PW + 1e-9)
+						expect(r[1]).toBeGreaterThanOrEqual(0)
+						expect(r[3]).toBeLessThanOrEqual(bottom)
+					}
+					for (let i = 0; i < rects.length; i++)
+						for (let j = i + 1; j < rects.length; j++)
+							expect(hits(rects[i]!, rects[j]!)).toBe(false)
+				},
+			),
 			{ numRuns: 150 },
 		)
 	})

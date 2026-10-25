@@ -10,6 +10,8 @@ import {
 	discoveryTitle,
 	formatWait,
 	identityText,
+	isVerified,
+	whatIsThis,
 } from "../data/scanner-format.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import type { SignalLabelsMode } from "./label-gate.ts"
@@ -36,12 +38,17 @@ export interface PlacedDiscoveryTag {
 	solid: boolean
 	/** Only heard (activity): grey instead of the accent while not active. */
 	heard: boolean
-	/** Left edge in CSS px: the dot sits on the frequency, 7 px into the chip (board). */
+	/**
+	 * Left edge in CSS px: the dot sits on the frequency, 7 px into the chip (board); a tag at the very
+	 * edge of the view (or under an edge marker) is moved inside, so it is never clipped.
+	 */
 	x: number
 	/** Width used for collisions, CSS px. */
 	width: number
-	/** The label is drawn (else the dot alone: no room before the next tag). */
+	/** The label is drawn (else the dot alone, and a group's "+n-1": no room before the next tag). */
 	labelled: boolean
+	/** A group's count text ("+5") shown beside the dot even without the label; null for one discovery. */
+	count: string | null
 	/** Tooltip and accessible name: label · frequency · when; a group "n signals, low-high MHz". */
 	title: string
 	/** Every member in frequency order (one for a single tag); the group popover lists them all. */
@@ -66,6 +73,9 @@ export interface DiscoveryTagOptions {
 	bareWidthPx?: number
 	gapPx?: number
 	maxLabelPx?: number
+	/** Room kept free at the left / right edge (an edge marker plus its gap), CSS px. Default 0. */
+	reserveLeftPx?: number
+	reserveRightPx?: number
 }
 
 export const RECENT_MS = 60 * 60 * 1000
@@ -147,6 +157,9 @@ export interface ClusterOptions {
 	bareWidthPx?: number
 	/** Room kept between two tags, CSS px (4). */
 	gapPx?: number
+	/** Dot positions are clamped into [minDotPx, maxDotPx] before grouping (tags stay inside the row). */
+	minDotPx?: number
+	maxDotPx?: number
 }
 
 /**
@@ -164,7 +177,10 @@ export function clusterDiscoveries(
 	const w = options.widthPx
 	if (!(span > 0) || !(w > 0)) return []
 	const reach = (options.bareWidthPx ?? 15) + (options.gapPx ?? 4)
-	const x = (hz: number) => ((hz - view.startHz) / span) * w
+	const lo = options.minDotPx ?? -Infinity
+	const hi = options.maxDotPx ?? Infinity
+	const x = (hz: number) =>
+		Math.min(hi, Math.max(lo, ((hz - view.startHz) / span) * w))
 	const inView = [...items]
 		.filter(
 			d =>
@@ -198,11 +214,17 @@ function mhz(hz: number, digits = 4): string {
 	return (hz / 1e6).toFixed(digits)
 }
 
+/** A group's count beside its dot: about 6.6 px a character of "+n" at 11 px bold, plus 6 px. */
+const COUNT_CHAR_PX = 6.6
+
 /**
- * Places the discovery tags in view (band inspection UX req 1.1). Co-located discoveries form one group
- * tag at the cluster's lowest member, named by its representative (active first, then by confidence, then
- * the most recent) with "+n-1"; clusters never overlap, so every discovery in view is on exactly one tag.
- * Then each label where it fits before the next tag, as the saved tags do.
+ * Places the discovery tags in view (band inspection UX req 1.1, 1.2). Co-located discoveries form one
+ * group tag at the cluster's lowest member, named by its representative (active first, then by
+ * confidence, then the most recent) with "+n-1"; a group too tight for its label still shows "+n-1".
+ * Every tag lies inside [reserveLeftPx, widthPx - reserveRightPx] (a tag at the view's edge moves in, so
+ * it is never clipped or under an edge marker), and tags never overlap: a tag that would touch the one
+ * before it joins that group. So every discovery in view is on exactly one tag. Then each label where it
+ * fits before the next tag, as the saved tags do.
  */
 export function placeDiscoveryTags(
 	items: Iterable<Discovery>,
@@ -219,6 +241,9 @@ export function placeDiscoveryTags(
 	const maxLabel = options.maxLabelPx ?? DISCOVERY_TAG_MAX_LABEL_PX
 	const only = options.only ?? "all"
 	const saved = options.savedHz ?? []
+	const minX = Math.max(0, options.reserveLeftPx ?? 0)
+	const maxX = w - Math.max(0, options.reserveRightPx ?? 0)
+	if (maxX - minX < bare) return []
 	const candidates = new Map<string, Candidate>()
 	for (const d of items) {
 		if (!counted(d, only, saved)) continue
@@ -228,56 +253,185 @@ export function placeDiscoveryTags(
 			seen: Date.parse(d.lastSeenAt) || 0,
 		})
 	}
-	const clusters = clusterDiscoveries(
-		[...candidates.values()].map(c => c.d),
-		view,
-		{ widthPx: w, bareWidthPx: bare, gapPx: gap },
-	)
-	const placed: PlacedDiscoveryTag[] = []
-	for (const members of clusters) {
+	const dotX = (hz: number) =>
+		Math.min(
+			maxX - bare + DISCOVERY_DOT_PX,
+			Math.max(minX + DISCOVERY_DOT_PX, ((hz - view.startHz) / span) * w),
+		)
+	const build = (members: Discovery[]): PlacedDiscoveryTag | null => {
 		const first = members[0]
-		if (!first) continue
-		const ranked = members
+		const top = members
 			.map(d => candidates.get(d.id))
 			.filter((c): c is Candidate => c !== undefined)
-			.sort(byRank)
-		const top = ranked[0]
-		if (!top) continue
+			.sort(byRank)[0]
+		if (!first || !top) return null
 		const { d: rep, tier } = top
 		const n = members.length
 		const name = discoveryTitle(rep)
-		const label = n > 1 ? `${name} +${n - 1}` : name
+		const count = n > 1 ? `+${n - 1}` : null
+		const label = count ? `${name} ${count}` : name
 		const last = members[n - 1] ?? first
-		placed.push({
+		const width = count
+			? Math.round(bare + 6 + count.length * COUNT_CHAR_PX)
+			: bare
+		return {
 			id: rep.id,
 			hz: first.frequencyHz,
 			label,
 			tier,
 			solid: rep.confidence === "decoded",
 			heard: rep.confidence === "activity" || rep.protocol === "unknown",
-			x: ((first.frequencyHz - view.startHz) / span) * w - DISCOVERY_DOT_PX,
-			width: bare,
+			x: Math.min(
+				maxX - width,
+				Math.max(minX, dotX(first.frequencyHz) - DISCOVERY_DOT_PX),
+			),
+			width,
 			labelled: false,
+			count,
 			title:
 				n > 1
 					? `${n} signals, ${mhz(first.frequencyHz)}-${mhz(last.frequencyHz)} MHz`
 					: `${label} · ${mhz(rep.frequencyHz)} MHz · ${whenText(tier, rep, options.now)}`,
 			members,
 			rep,
-		})
+		}
 	}
-	placed.sort((a, b) => a.x - b.x)
+	const clusters = clusterDiscoveries(
+		[...candidates.values()].map(c => c.d),
+		view,
+		{
+			widthPx: w,
+			bareWidthPx: bare,
+			gapPx: gap,
+			minDotPx: minX + DISCOVERY_DOT_PX,
+			maxDotPx: maxX - bare + DISCOVERY_DOT_PX,
+		},
+	)
+	// A group's count widens its chip: a tag that would now touch the one before joins it (repeat).
+	const placed: PlacedDiscoveryTag[] = []
+	for (const members of clusters) {
+		let t = build(members)
+		while (t) {
+			const prev = placed[placed.length - 1]
+			if (!prev || prev.x + prev.width + gap <= t.x) break
+			placed.pop()
+			t = build([...prev.members, ...t.members])
+		}
+		if (t) placed.push(t)
+	}
 	placed.forEach((t, i) => {
 		const full = Math.round(
 			chrome + Math.min(maxLabel, [...t.label].length * charPx),
 		)
 		const next = placed[i + 1]
-		if (t.x + full <= w && (!next || t.x + full + gap <= next.x)) {
+		if (t.x + full <= maxX && (!next || t.x + full + gap <= next.x)) {
 			t.width = full
 			t.labelled = true
 		}
 	})
 	return placed
+}
+
+export interface TagPopoverRow {
+	id: string
+	/** "433.9200". */
+	freq: string
+	/** The operator's label, else the protocol slot ("Maybe ISM", "Heard"). */
+	name: string
+	/** The protocol slot under a label (null without a label). */
+	protocol: string | null
+	/** "likely ISM device" (muted), or null. */
+	likely: string | null
+	/** The next step (req 1.3 table); null once verified. */
+	next: string | null
+	tuneHz: number
+}
+
+/** What a tag's popover lists, one row per member (a single discovery too): "what is this" and a Tune action. */
+export function tagPopoverRows(
+	tag: Pick<PlacedDiscoveryTag, "members">,
+): TagPopoverRow[] {
+	return tag.members.map(d => {
+		const what = whatIsThis(d)
+		const label = d.operator?.label?.trim() ?? ""
+		return {
+			id: d.id,
+			freq: mhz(d.frequencyHz),
+			name: label || what.protocol,
+			protocol: label ? what.protocol : null,
+			likely: what.likely,
+			next: isVerified(d) ? null : what.next,
+			tuneHz: d.frequencyHz,
+		}
+	})
+}
+
+/** Where focus goes back when a popover closes from the keyboard or Cancel: the control that opened it. */
+export class TriggerFocus {
+	private trigger: { focus(options?: FocusOptions): void } | null = null
+
+	remember(trigger: { focus(options?: FocusOptions): void } | null): void {
+		this.trigger = trigger
+	}
+
+	/** Focuses the remembered trigger (once) and forgets it. */
+	restore(): void {
+		const t = this.trigger
+		this.trigger = null
+		t?.focus({ preventScroll: true })
+	}
+
+	forget(): void {
+		this.trigger = null
+	}
+}
+
+/** An edge marker's width for `count`: border, padding, arrow, gap and the digits at 11 px. */
+export function edgeMarkerWidth(count: number): number {
+	return 27 + 7 * String(count).length
+}
+
+/** The edge markers sit this far from the row's ends. */
+export const EDGE_MARKER_INSET_PX = 2
+
+export interface DiscoveryRowLayout {
+	tags: PlacedDiscoveryTag[]
+	outside: OutsideView
+	/** Where each marker is drawn (CSS px), null without one on that side. */
+	markers: {
+		left: { x: number; width: number } | null
+		right: { x: number; width: number } | null
+	}
+}
+
+/**
+ * The whole discovery row (req 1.1, 1.2): edge markers first, then the tags in the room between them, so
+ * no tag is ever under a marker.
+ */
+export function discoveryRowLayout(
+	items: Iterable<Discovery>,
+	view: SpectrumViewSpan,
+	options: DiscoveryTagOptions,
+): DiscoveryRowLayout {
+	const all = [...items]
+	const outside = outsideView(all, view, options)
+	const gap = options.gapPx ?? 4
+	const w = options.widthPx
+	const left = outside.left
+		? { x: EDGE_MARKER_INSET_PX, width: edgeMarkerWidth(outside.left.count) }
+		: null
+	const right = outside.right
+		? {
+				x: w - EDGE_MARKER_INSET_PX - edgeMarkerWidth(outside.right.count),
+				width: edgeMarkerWidth(outside.right.count),
+			}
+		: null
+	const tags = placeDiscoveryTags(all, view, {
+		...options,
+		reserveLeftPx: left ? left.x + left.width + gap : 0,
+		reserveRightPx: right ? w - right.x + gap : 0,
+	})
+	return { tags, outside, markers: { left, right } }
 }
 
 export interface OutsideSide {
