@@ -1,5 +1,7 @@
 import {
 	DECODER_MAX_BANDPLAN_CHANNELS,
+	RTL433_CHANNEL_MIN_RATE_HZ,
+	RTL433_CHANNEL_TARGET_RATE_HZ,
 	placementCostCores,
 	placementKey,
 } from "./contract.js"
@@ -125,9 +127,22 @@ export function fitsReach(
 	)
 }
 
+/** `always`, an operator start or a band-suspension opt-out skip the band policy. */
+const bandFree = (d: PlannerDecoder): boolean =>
+	d.mode === "always" ||
+	d.startMode === "operator" ||
+	d.bandSuspension === false
+
+/** The band has at least one target or range (otherwise unknown). */
+function bandKnown(d: PlannerDecoder): boolean {
+	return (
+		(Array.isArray(d.band?.targetsHz) && d.band.targetsHz.length > 0) ||
+		(Array.isArray(d.band?.rangesHz) && d.band.rangesHz.length > 0)
+	)
+}
+
 function bandFits(d: PlannerDecoder, hz: number, halfWidth = 0): boolean {
-	if (d.mode === "always" || d.startMode === "operator" || d.band === undefined)
-		return true
+	if (bandFree(d) || d.band === undefined) return true
 	const targets = Array.isArray(d.band?.targetsHz) ? d.band.targetsHz : []
 	const ranges = Array.isArray(d.band?.rangesHz) ? d.band.rangesHz : []
 	if (targets.some(f => positive(f) && Math.abs(f - hz) <= halfWidth))
@@ -151,8 +166,58 @@ function bandFits(d: PlannerDecoder, hz: number, halfWidth = 0): boolean {
 	)
 }
 
+/**
+ * rtl_433 channel arithmetic (design 2026-10-25, Property 17): the widest
+ * channel, at most `target` and at least 250 kHz, that fits the usable window
+ * around the overlap of each range with the window. Ranges in order; largest
+ * rate wins, ties by order. `overlap` is true when some range overlaps.
+ */
+export function rtl433ChannelCandidate(
+	source: {
+		centreHz: number | null
+		sampleRateHz: number | null
+		usableFraction: number
+	},
+	ranges: readonly ({ minHz: number; maxHz: number } | null | undefined)[],
+	target: number = RTL433_CHANNEL_TARGET_RATE_HZ,
+): { hz: number; rateHz: number } | { overlap: boolean } {
+	const c = source.centreHz
+	const fs = source.sampleRateHz
+	const u = source.usableFraction
+	if (!positive(c) || !positive(fs) || !positive(u) || !positive(target))
+		return { overlap: false }
+	const h = (fs * u) / 2
+	const rMin = RTL433_CHANNEL_MIN_RATE_HZ
+	let best: { hz: number; rateHz: number } | null = null
+	let overlap = false
+	for (const range of ranges) {
+		if (
+			!range ||
+			!Number.isFinite(range.minHz) ||
+			!Number.isFinite(range.maxHz) ||
+			range.minHz > range.maxHz
+		)
+			continue
+		const lo = Math.max(range.minHz, c - h)
+		const hi = Math.min(range.maxHz, c + h)
+		if (lo > hi) continue
+		overlap = true
+		if (h < rMin / 2) continue
+		const hz = Math.min(
+			Math.max((lo + hi) / 2, c - h + rMin / 2),
+			c + h - rMin / 2,
+		)
+		const rateHz =
+			Math.floor(Math.min(target, 2 * (h - Math.abs(hz - c))) / 1000) * 1000
+		if (rateHz < rMin) continue
+		if (!best || rateHz > best.rateHz) best = { hz, rateHz }
+	}
+	return best ?? { overlap }
+}
+
 type Candidate = {
 	source: PlannerSource
+	options?: Readonly<Record<string, unknown>>
 	hz: number | null
 	reach: WantedPlacement["reach"]
 	origin: WantedPlacement["origin"]
@@ -166,7 +231,11 @@ export const planPlacements: PlacementPlanner = input => {
 	const wanted: WantedPlacement[] = []
 	const unplaced = new Map<
 		string,
-		"decoder-unavailable" | "channelizer-unavailable" | "frequency-out-of-band"
+		| "decoder-unavailable"
+		| "channelizer-unavailable"
+		| "frequency-out-of-band"
+		| "capture-too-narrow"
+		| "no-channel-selected"
 	>()
 	const decoders = input.decoders
 		.filter(validDecoder)
@@ -189,23 +258,37 @@ export const planPlacements: PlacementPlanner = input => {
 		)
 		const candidates: Candidate[] = []
 		let channelizerMissing = false
+		// 3.14: the band fits some candidate but no placement fits the window.
+		let tooNarrow = false
+		// A band-plan decoder with its band in view but no channel chosen yet.
+		let noChannel = false
 		for (const s of sources) {
 			const centre = s.centreHz!
 			const half = (s.sampleRateHz! * s.usableFraction) / 2
 			const local: Candidate[] = []
+			// The band window assessBand uses (the pipeline's real frontend).
+			// Centre reach (LoRa) is bounded by its own passband instead.
+			const bandHalf =
+				d.reach !== "centre" &&
+				positive(d.bandHalfWidthHz) &&
+				d.bandHalfWidthHz < half
+					? d.bandHalfWidthHz
+					: half
+			// 3.14: "too narrow" only when the band reaches this capture window.
+			const bandOverlapsWindow = !bandFree(d) && bandFits(d, centre, bandHalf)
 			const add = (
 				hz: number | null,
 				origin: Candidate["origin"],
 				index = 0,
 				bandChannels?: readonly number[],
 			) => {
-				if (
-					fitsReach(d, s, hz) &&
-					(bandChannels
-						? bandChannels.every(f => bandFits(d, f))
-						: bandFits(d, hz ?? centre, d.reach === "channel" ? 0 : half))
-				)
+				const band = bandChannels
+					? bandChannels.every(f => bandFits(d, f))
+					: bandFits(d, hz ?? centre, d.reach === "channel" ? 0 : bandHalf)
+				if (!band) return
+				if (fitsReach(d, s, hz))
 					local.push({ source: s, hz, reach: d.reach, origin, index })
+				else if (bandOverlapsWindow) tooNarrow = true
 			}
 			const followsVfo =
 				d.origin === "config" &&
@@ -221,7 +304,9 @@ export const planPlacements: PlacementPlanner = input => {
 				if (s !== selected) continue
 				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				const hz = vfo ? vfo.frequencyHz : centre
-				if (fitsReach(d, s, hz) && bandFits(d, hz, vfo ? 0 : half))
+				if (bandFits(d, hz, vfo ? 0 : bandHalf) && !fitsReach(d, s, hz)) {
+					if (bandOverlapsWindow) tooNarrow = true
+				} else if (bandFits(d, hz, vfo ? 0 : bandHalf))
 					local.push({
 						source: s,
 						hz,
@@ -234,7 +319,7 @@ export const planPlacements: PlacementPlanner = input => {
 				(d.channelPlacements !== true || s.channelizerAvailable !== true)
 			) {
 				if (d.origin === "config") {
-					if (bandFits(d, centre, half))
+					if (bandFits(d, centre, bandHalf))
 						local.push({
 							source: s,
 							hz: null,
@@ -243,6 +328,23 @@ export const planPlacements: PlacementPlanner = input => {
 							index: 0,
 						})
 				} else channelizerMissing = true
+			} else if (d.reach === "centre" && d.centreSlots?.length) {
+				// 3.17: each regional slot is a centre-reach candidate.
+				d.centreSlots.forEach((slot, index) => {
+					const one = { ...d, centreSlotHz: slot.slotHz }
+					const mid = (slot.slotHz.minHz + slot.slotHz.maxHz) / 2
+					if (!bandFits(d, centre, bandHalf)) return
+					if (fitsReach(one, s, null))
+						local.push({
+							source: s,
+							hz: null,
+							reach: "centre",
+							origin: "band",
+							index,
+							options: slot.options,
+						})
+					else if (Math.abs(mid - centre) <= half) tooNarrow = true
+				})
 			} else if (d.reach !== "channel") {
 				add(null, "band")
 			} else {
@@ -258,12 +360,7 @@ export const planPlacements: PlacementPlanner = input => {
 					).filter(positive)
 					// `always` and operator starts skip the band policy (as bandFits
 					// does) and keep the 162.000 MHz channel.
-					if (
-						d.mode === "always" ||
-						d.startMode === "operator" ||
-						targets.length === 0
-					)
-						add(hz, "band")
+					if (bandFree(d) || targets.length === 0) add(hz, "band")
 					else if (
 						targets.every(f => Math.abs(f - hz) <= d.channelBandwidthHz / 2)
 					)
@@ -276,20 +373,28 @@ export const planPlacements: PlacementPlanner = input => {
 						configured,
 					)
 				else if (d.type === "rtl433") {
-					for (const r of Array.isArray(d.band?.rangesHz)
-						? d.band.rangesHz
-						: []) {
-						if (
-							!r ||
-							!positive(r.minHz) ||
-							!positive(r.maxHz) ||
-							r.minHz > r.maxHz
+					let found = rtl433ChannelCandidate(
+						s,
+						Array.isArray(d.band?.rangesHz) ? d.band.rangesHz : [],
+						d.channelTargetRateHz,
+					)
+					// `always` and operator starts skip the band: the window itself.
+					if (!("hz" in found) && bandFree(d))
+						found = rtl433ChannelCandidate(
+							s,
+							[{ minHz: centre - half, maxHz: centre + half }],
+							d.channelTargetRateHz,
 						)
-							continue
-						const min = Math.max(r.minHz, centre - half)
-						const max = Math.min(r.maxHz, centre + half)
-						if (min <= max) add((min + max) / 2, "band")
-					}
+					if ("hz" in found)
+						local.push({
+							source: s,
+							hz: found.hz,
+							reach: "channel",
+							origin: "band",
+							index: 0,
+							options: { targetSampleRate: found.rateHz },
+						})
+					else if (found.overlap) tooNarrow = true
 				} else if (d.type === "direwolf") {
 					configured.forEach((hz, i) => add(hz, "configured", i))
 					for (const hz of Array.isArray(d.band?.targetsHz)
@@ -352,17 +457,26 @@ export const planPlacements: PlacementPlanner = input => {
 					channels.slice(0, cap).forEach((hz, i) => add(hz, "bandplan", i))
 				}
 			}
+			// A band-plan decoder with no channel here (no VFO, no band-plan
+			// channel): nothing was tried, so it is not too narrow (3.14).
+			if (
+				!local.length &&
+				bandOverlapsWindow &&
+				d.origin === "catalogue" &&
+				(d.type === "dsd-fme" || d.type === "multimon-ng")
+			)
+				noChannel = true
 			candidates.push(...local)
 		}
-		if (
-			!candidates.length &&
-			d.reach === "channel" &&
-			(d.mode === "always" || d.startMode === "operator")
-		) {
+		if (!candidates.length && d.reach === "channel" && bandFree(d)) {
 			for (const s of [...sources].sort(
 				(a, b) => Number(a.held) - Number(b.held) || a.order - b.order,
 			)) {
-				if (s.channelizerAvailable !== true || d.channelPlacements !== true)
+				if (
+					s.channelizerAvailable !== true ||
+					d.channelPlacements !== true ||
+					d.type === "rtl433"
+				)
 					continue
 				const hz =
 					(d.type === "dsd-fme" || d.type === "multimon-ng") &&
@@ -434,16 +548,17 @@ export const planPlacements: PlacementPlanner = input => {
 				primary: i === 0,
 				costCores: placementCostCores(d.type, c.reach),
 				sampleRateHz: c.source.sampleRateHz!,
+				...(c.options ? { options: c.options } : {}),
 			}),
 		)
 		if (!sorted.length) {
 			if (channelizerMissing) unplaced.set(d.id, "channelizer-unavailable")
-			else if (
-				sources.length &&
-				d.mode !== "always" &&
-				d.startMode !== "operator"
-			)
-				unplaced.set(d.id, "frequency-out-of-band")
+			else if (sources.length && !bandFree(d)) {
+				// Only an empty candidate set of a known band is out of band (3.13, 3.14).
+				if (tooNarrow) unplaced.set(d.id, "capture-too-narrow")
+				else if (noChannel) unplaced.set(d.id, "no-channel-selected")
+				else if (bandKnown(d)) unplaced.set(d.id, "frequency-out-of-band")
+			}
 		}
 	}
 	return { wanted, unplaced }

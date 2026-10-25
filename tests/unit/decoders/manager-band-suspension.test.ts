@@ -230,7 +230,8 @@ describe("retunes", () => {
 			suspended: true,
 			suspension: { reasonCode: "frequency-out-of-band" },
 		})
-		expect(status().suspension?.since).toBe(since)
+		// Requirement 3.15: a changed reason starts a new interval.
+		expect(status().suspension?.since).not.toBe(since)
 
 		sources.setCenter("rtl", POCSAG)
 		await settle()

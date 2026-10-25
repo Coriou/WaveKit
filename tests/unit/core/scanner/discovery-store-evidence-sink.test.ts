@@ -24,6 +24,11 @@ import {
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
 
+/** The stored record (scanner-redesign 3.10: a weak record's published label is unknown/activity). */
+function storedOf(store: DiscoveryStore, id: string) {
+	return store.snapshot().discoveries.find(d => d.id === id)
+}
+
 const CH = 446_006_250
 const PMR: Raster[] = [{ spacingHz: 12_500, firstChannelHz: CH }]
 const T0 = Date.UTC(2026, 9, 9, 12, 0, 0)
@@ -386,7 +391,7 @@ describe("DiscoveryStore evidence sink", () => {
 			),
 		).toBe(true)
 		expect(decoded.store.get(decoded.id)?.proof).toBeUndefined()
-		expect(decoded.store.get(decoded.id)?.confidence).toBe("activity")
+		expect(storedOf(decoded.store, decoded.id)?.confidence).toBe("activity")
 		expect(decoded.store.get(decoded.id)?.identity).toBeUndefined()
 		expect(
 			decoded.store.applyEvidence(
@@ -413,7 +418,7 @@ describe("DiscoveryStore evidence sink", () => {
 				evidence("dmr", T0 + 20, { identity: dmrCc(1) }),
 			),
 		).toBe("upgraded")
-		expect(labeled.store.get(labeled.id)?.confidence).toBe("decoded")
+		expect(storedOf(labeled.store, labeled.id)?.confidence).toBe("decoded")
 		expect(labeled.store.get(labeled.id)?.proof).toBeUndefined()
 
 		const ambient = planted()
@@ -642,9 +647,9 @@ describe("DiscoveryStore evidence sink", () => {
 				evidence("dmr", T0 + 2, { identity: dmrCc(1) }),
 			),
 		).toBeNull()
-		expect(held.store.get(held.id)?.protocol).toBe("dmr")
+		expect(storedOf(held.store, held.id)?.protocol).toBe("dmr")
 		expect(held.store.get(held.id)?.identity).toEqual(dmrCc(1))
-		expect(held.store.get(held.id)?.confidence).toBe("decoded")
+		expect(storedOf(held.store, held.id)?.confidence).toBe("decoded")
 		const kept = held.store.snapshot().discoveries.find(d => d.id === held.id)
 		expect(kept?.protocol).toBe("dmr")
 		expect(kept?.identity).toEqual(dmrCc(1))

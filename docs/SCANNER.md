@@ -409,6 +409,18 @@ with `+<n> more`. `evidence=proven` lists proofs; `weak` lists unproven activity
 After restart, only persisted decode evidence rebuilds proofs; other discoveries
 read `weak` until new evidence arrives.
 
+A weak discovery (no proof) reads `unknown` / `activity`, whatever an older
+guess stored on the record said; the stored fields are kept. It may carry a
+display-only `hint`: `lora` (a short 100 to 150 kHz burst inside an EU LoRa
+slot), `ism-device` (a short or OOK burst up to 25 kHz wide in an ISM band; try
+rtl_433), `analog-voice` (a longer signal within 3 kHz of the LPD433 25 kHz
+raster, 433.075 to 434.775 MHz), otherwise its spectral class. A hint is never
+a protocol label. Band-plan priors come from the narrowest covering range that
+lists protocols. Inside the EU `ism-433` band the scanner also treats
+433.075–434.775 MHz (LPD433, 25 kHz channels, analog FM and ISM) as a narrower
+range for trial order and hints, so there analog FM is tried before DMR; it is
+not a separate band-plan entry.
+
 Capture starts at gate pass. Scans replay captured IQ before taking a live hold.
 Every planned trial is recorded as `pending` first, so skipped or unavailable
 work remains visible. A known protocol runs first; otherwise one analog trial

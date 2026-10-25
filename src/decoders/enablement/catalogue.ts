@@ -31,6 +31,31 @@ const loraPrimaryFrequencies: Readonly<
 	CN: 478_875_000,
 }
 
+/**
+ * Requirement 3.17: regions whose catalogue LoRa decoder declares more than
+ * one slot (the region's default LongFast channel in each). EU_433:
+ * 433.0 MHz / N 4 / slot 3 → 433.875 MHz.
+ */
+const loraCatalogueSlots: Readonly<
+	Partial<
+		Record<LoraRegion, readonly { region: LoraRegion; frequency: number }[]>
+	>
+> = {
+	EU_868: [
+		{ region: "EU_868", frequency: 869_525_000 },
+		{ region: "EU_433", frequency: 433_875_000 },
+	],
+}
+
+/** The catalogue LoRa slots for its derived region option; undefined: one fixed slot. */
+export function catalogueLoraSlots(
+	region: unknown,
+): readonly { region: LoraRegion; frequency: number }[] | undefined {
+	return typeof region === "string" && Object.hasOwn(loraCatalogueSlots, region)
+		? loraCatalogueSlots[region as LoraRegion]
+		: undefined
+}
+
 /** Fresh options keep mutations of one derived config isolated from later builds. */
 export function CATALOGUE_DEFAULT_OPTIONS(
 	region: BandRegion,

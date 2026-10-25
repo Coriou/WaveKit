@@ -33,13 +33,15 @@ const AIS_A = 161_975_000
 const AIS_B = 162_025_000
 /** Source centre 100 kHz below AIS channel A: both AIS channels lie in the 1.024 Msps window. */
 // WG11 req 1.3: the 446/162 MHz test band plans list 6.25 kHz rasters, so identify first adds the
-// narrow digital trials (nxdn48, dpmr, dstar) ahead of the ambient one. Their outcome is timing
-// dependent (pending, running, no-sync), so only their identity is asserted.
+// narrow digital trials (dpmr, dstar, nxdn48) ahead of the ambient one. Their outcome is timing
+// dependent (pending, running, no-sync), so only their identity is asserted. Scanner-redesign
+// 3.12: the narrowest covering range (marine VHF) sets the priors, so the broader land-mobile
+// range no longer lifts nxdn48.
 const NARROW_TRIALS = [
 	expect.objectContaining({ protocol: "analog-fm", outcome: "unsupported" }),
-	expect.objectContaining({ protocol: "nxdn48", transport: "offset" }),
 	expect.objectContaining({ protocol: "dpmr", transport: "offset" }),
 	expect.objectContaining({ protocol: "dstar", transport: "offset" }),
+	expect.objectContaining({ protocol: "nxdn48", transport: "offset" }),
 ]
 
 const CENTRE_AIS = AIS_A - 100_000
@@ -389,8 +391,9 @@ describe("ScannerService ambient identify (WG7)", () => {
 			expect(evidence.map(e => e.hz)).toEqual([AIS_A, AIS_A])
 			const target = firstTarget(r, job.id)
 			expect(target.state).not.toBe("identified")
+			// Scanner-redesign 3.12: the wideband class now lists analog-fm, so its trial leads.
 			expect(target.trials).toEqual([
-				...NARROW_TRIALS.slice(1),
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",

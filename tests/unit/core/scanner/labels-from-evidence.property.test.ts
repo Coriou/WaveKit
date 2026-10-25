@@ -1007,8 +1007,12 @@ describe("labelFromEvidence", () => {
 					const label = labelFromEvidence(
 						proof({ observationId: id, decodes, trust: "commanded" }),
 					)
-					expect(store.get(id)?.protocol).toBe(label.protocol)
-					expect(store.get(id)?.confidence).toBe(label.confidence)
+					// Scanner-redesign 3.10: the stored ladder matches; without a proof it publishes unknown.
+					const stored = store.snapshot().discoveries.find(d => d.id === id)
+					expect(stored?.protocol).toBe(label.protocol)
+					expect(stored?.confidence).toBe(label.confidence)
+					expect(store.get(id)?.protocol).toBe("unknown")
+					expect(store.get(id)?.confidence).toBe("activity")
 					expect(store.get(id)?.proof).toBeUndefined()
 				},
 			),

@@ -42,7 +42,11 @@ import {
 	DECODER_BRANCH_STARTUP_BUFFER_S,
 	DECODER_BRANCH_STARTUP_MS,
 	DECODER_PROTOCOLS,
+	placementOptionsKey,
 } from "./enablement/contract.js"
+import type { PlannerCentreSlot } from "./enablement/contract.js"
+import { catalogueLoraSlots } from "./enablement/catalogue.js"
+import { rtl433TargetRateHz } from "./builtin/rtl433.js"
 import {
 	ADSB_FREQUENCY_HZ,
 	READSB_REACH_HZ,
@@ -346,6 +350,28 @@ type WireOutcome =
 	| { wired: true; scannerChannel?: OpenChannelRef }
 	| { wired: false; superseded: true }
 	| ({ wired: false; superseded: false } & ChannelHold)
+
+/**
+ * Requirement 3.15: a suspension interval starts when a decoder becomes
+ * suspended or its reason changes; the prior `since` is kept only for the
+ * same reason with no run in between (a run clears the suspension).
+ */
+function suspensionSince(
+	prior: DecoderSuspension | null | undefined,
+	reasonCode: CoreSuspensionReason,
+): Date {
+	return prior && prior.reasonCode === reasonCode ? prior.since : new Date()
+}
+
+/** The assessment's window half-width as a planner field (3.13: one window). */
+function bandWindow(assessment: DecoderBandAssessment): {
+	bandHalfWidthHz?: number
+} {
+	const half = assessment.windowHalfWidthHz
+	return half !== undefined && Number.isFinite(half) && half > 0
+		? { bandHalfWidthHz: half }
+		: {}
+}
 
 /** Plan A3: channel reasons are not in the shared rate union yet; omit the object rather than emit a false code. */
 function publicSuspension(s: DecoderSuspension | null): {
@@ -997,6 +1023,59 @@ export class DecoderManager extends EventEmitter {
 		return resolveDecoderTargetFrequencies(config) ?? []
 	}
 
+	/**
+	 * 3.13/3.15: a suspended parent without a placement takes the reason and
+	 * band verdict of this plan; a changed reason starts a new interval.
+	 */
+	private refreshUnplacedSuspension(state: DecoderState): void {
+		const prior = state.suspension
+		if (
+			state.placement ||
+			!prior ||
+			!state.desiredRunning ||
+			isChannelAdmissionReason(prior.reasonCode)
+		)
+			return
+		const eligibility = this.assessEligibility(state)
+		state.ratePlan = eligibility.rate
+		state.bandPlan = eligibility.band
+		if (
+			eligibility.blockedBy !== null &&
+			eligibility.blockedBy !== prior.reasonCode
+		) {
+			state.suspension = {
+				reasonCode: eligibility.blockedBy,
+				since: suspensionSince(prior, eligibility.blockedBy),
+			}
+			this.emitStatusChanged(state)
+		}
+	}
+
+	/**
+	 * 3.13: a removed placement's channel and adapter options leave the
+	 * parent, so its band is assessed from the capture again, not from a
+	 * stale channel centre.
+	 */
+	private restorePlacementOptions(state: DecoderState): void {
+		const placement = state.placement
+		if (!placement) return
+		const original =
+			state.effectiveConfig ?? state.originalConfig ?? state.config
+		const keys = [
+			...Object.keys(placement.options ?? {}),
+			...(placement.channelHz !== null ? ["channelHz", "offsetHz"] : []),
+		]
+		const restored: Record<string, unknown> = {}
+		for (const key of keys) restored[key] = original.options[key]
+		const options = { ...state.config.options }
+		for (const key of keys)
+			if (Object.hasOwn(original.options, key))
+				options[key] = original.options[key]
+			else delete options[key]
+		state.config = { ...state.config, options }
+		state.decoder.updateOptions(restored)
+	}
+
 	private logPlacement(
 		placement: WantedPlacement,
 		reasonCode: "started" | "moved" | "removed",
@@ -1038,6 +1117,16 @@ export class DecoderManager extends EventEmitter {
 						config.type === "lora-meshtastic"
 							? loraCentreReach(config.options, caps)
 							: null
+					const loraSlots = this.catalogueLoraSlotsOf(state)
+					const centreSlots: PlannerCentreSlot[] = []
+					for (const slot of loraSlots ?? []) {
+						const options = { region: slot.region, frequency: slot.frequency }
+						const reach = loraCentreReach(
+							{ ...config.options, ...options },
+							caps,
+						)
+						if (reach) centreSlots.push({ slotHz: reach.slotHz, options })
+					}
 					const channelCapable = (
 						CHANNEL_CAPABLE_TYPES as readonly string[]
 					).includes(config.type)
@@ -1050,6 +1139,11 @@ export class DecoderManager extends EventEmitter {
 						startMode: state.startMode,
 						configuredSourceId: config.sourceId ?? null,
 						band: this.resolveBand(state).requirements,
+						...bandWindow(this.assessBand(state)),
+						// 3.13: either opt-out lifts the band policy in planning too.
+						...(this.config.bandSuspension && this.decoderBandSuspension(state)
+							? {}
+							: { bandSuspension: false }),
 						followVfo:
 							![
 								"channelHz",
@@ -1090,6 +1184,10 @@ export class DecoderManager extends EventEmitter {
 									}
 								: (lora?.slotHz ?? null),
 						centrePassbandHz: lora?.passbandHz ?? null,
+						...(centreSlots.length ? { centreSlots } : {}),
+						...(config.type === "rtl433"
+							? { channelTargetRateHz: rtl433TargetRateHz(config.options) }
+							: {}),
 					}
 				}),
 			sources: (this.sourceManager?.getAllStatus() ?? []).map(
@@ -1198,6 +1296,7 @@ export class DecoderManager extends EventEmitter {
 				const reason = plan.unplaced.get(parent.config.id)
 				if (reason !== undefined) parent.unplaced = reason
 				else delete parent.unplaced
+				if (!primary) this.refreshUnplacedSuspension(parent)
 				if (
 					!primary &&
 					parent.placement &&
@@ -1211,6 +1310,7 @@ export class DecoderManager extends EventEmitter {
 					}
 					enablement.gate?.forget(parent.placement.key)
 					this.logPlacement(parent.placement, "removed")
+					this.restorePlacementOptions(parent)
 					delete parent.efficiencyBackoffMs
 					delete parent.admission
 					delete parent.admittedAtMs
@@ -1245,6 +1345,7 @@ export class DecoderManager extends EventEmitter {
 							useChannelizer: placement.reach === "channel",
 							options: {
 								...config.options,
+								...placement.options,
 								...(placement.channelHz !== null
 									? { channelHz: placement.channelHz }
 									: {}),
@@ -1263,20 +1364,35 @@ export class DecoderManager extends EventEmitter {
 							(this.sourceManager?.getCaps(placement.sourceId)?.centerFreq ??
 								placement.channelHz)
 						: undefined
+				const optionsChanged =
+					state.placement !== undefined &&
+					placementOptionsKey(state.placement.options) !==
+						placementOptionsKey(placement.options)
 				let moved =
 					state.placement !== undefined &&
 					(state.placement.key !== placement.key ||
+						optionsChanged ||
 						(rawOffsetHz !== undefined &&
 							state.config.options["offsetHz"] !== rawOffsetHz))
+				// A configured VFO move, or (3.16) a band channel whose centre moved at
+				// the same rate, retunes in place; a changed rate restarts once.
+				const sameRateMove =
+					state.placement?.origin === "band" &&
+					placement.origin === "band" &&
+					state.placement.reach === "channel" &&
+					placement.reach === "channel" &&
+					!optionsChanged &&
+					placement.options !== undefined
 				if (
 					moved &&
-					this.gateExempt(state) &&
-					state.placement?.origin === "vfo" &&
-					placement.origin === "vfo" &&
+					((this.gateExempt(state) &&
+						state.placement?.origin === "vfo" &&
+						placement.origin === "vfo") ||
+						sameRateMove) &&
 					state.channel &&
 					state.decoder.getStatus().running &&
 					placement.channelHz !== null &&
-					state.placement.sourceId === placement.sourceId
+					state.placement?.sourceId === placement.sourceId
 				) {
 					const provider = state.channel.provider as ChannelProvider & {
 						retuneChannel?: (
@@ -1296,6 +1412,8 @@ export class DecoderManager extends EventEmitter {
 							if (parent.parentIntent !== parentIntent || this.destroying)
 								continue
 							this.logPlacement(placement, "moved")
+							if (state.placement && state.placement.key !== placement.key)
+								enablement.gate?.forget(state.placement.key)
 							state.placement = placement
 							moved = false
 						}
@@ -1331,6 +1449,7 @@ export class DecoderManager extends EventEmitter {
 					useChannelizer: placement.reach === "channel",
 					options: {
 						...original.options,
+						...placement.options,
 						...(placement.channelHz !== null
 							? {
 									channelHz: placement.channelHz,
@@ -2161,7 +2280,7 @@ export class DecoderManager extends EventEmitter {
 			if (eligibility.blockedBy !== null) {
 				state.suspension = {
 					reasonCode: eligibility.blockedBy,
-					since: state.suspension?.since ?? new Date(),
+					since: suspensionSince(state.suspension, eligibility.blockedBy),
 				}
 				state.transition = null
 				try {
@@ -2690,7 +2809,8 @@ export class DecoderManager extends EventEmitter {
 									? "decoder-unavailable"
 									: state.suspension.reasonCode === "channelizer-unavailable"
 										? "channelizer-unavailable"
-										: (state.unplaced ?? state.suspension.reasonCode)),
+										: // Kept current by refreshUnplacedSuspension (3.13).
+											state.suspension.reasonCode),
 					}
 				: state.suspension
 		return {
@@ -3839,19 +3959,19 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * A rejected channel is a suspension, never a failure (addendum §5,
 	 * Property 11): no restart budget, no backoff, no lastError, `enabled`
-	 * untouched. The source reservation from wiring is kept. `heldSince`
-	 * carries the since of a suspension that a resume attempt cleared.
+	 * untouched. The source reservation from wiring is kept. `heldPrior`
+	 * is a suspension that a resume attempt cleared (no run in between).
 	 */
 	private holdForChannel(
 		state: DecoderState,
 		outcome: ChannelHold,
-		heldSince?: Date,
+		heldPrior?: DecoderSuspension | null,
 	): void {
 		if (state.admission?.admit) delete state.admission
 		delete state.admittedAtMs
 		state.suspension = {
 			reasonCode: outcome.reasonCode,
-			since: state.suspension?.since ?? heldSince ?? new Date(),
+			since: suspensionSince(state.suspension ?? heldPrior, outcome.reasonCode),
 		}
 		state.transition = null
 		if (state.lastHealth === "restarting")
@@ -4361,7 +4481,10 @@ export class DecoderManager extends EventEmitter {
 				await this.suspend(state, eligibility) // retry a failed stop
 			} else {
 				state.ratePlan = plan
-				state.suspension.reasonCode = eligibility.blockedBy
+				state.suspension = {
+					reasonCode: eligibility.blockedBy,
+					since: suspensionSince(state.suspension, eligibility.blockedBy),
+				}
 				// Removal drops assignments; a returning source is held again.
 				this.ensureReservation(state)
 				this.publishIfRateChanged(state, before)
@@ -4412,9 +4535,10 @@ export class DecoderManager extends EventEmitter {
 		if (state.admission?.admit) delete state.admission
 		delete state.admittedAtMs
 		state.rateGeneration++
+		const reasonCode = eligibility.blockedBy ?? "unsupported-sample-rate"
 		state.suspension = {
-			reasonCode: eligibility.blockedBy ?? "unsupported-sample-rate",
-			since: state.suspension?.since ?? new Date(),
+			reasonCode,
+			since: suspensionSince(state.suspension, reasonCode),
 		}
 		state.transition = "suspending"
 		state.ratePlan = eligibility.rate
@@ -4535,9 +4659,10 @@ export class DecoderManager extends EventEmitter {
 				if (blocked) {
 					// Still ineligible with the rebuilt config: stay suspended.
 					state.transition = null
+					const reasonCode = blocked.blockedBy ?? "unsupported-sample-rate"
 					state.suspension = {
-						reasonCode: blocked.blockedBy ?? "unsupported-sample-rate",
-						since: prior?.since ?? new Date(),
+						reasonCode,
+						since: suspensionSince(prior, reasonCode),
 					}
 					await this.suspend(state, blocked)
 					return
@@ -4550,7 +4675,7 @@ export class DecoderManager extends EventEmitter {
 				return await abandon(outcome.wired)
 			if (!outcome.wired) {
 				if (outcome.superseded) return await abandon(false)
-				this.holdForChannel(state, outcome, prior?.since)
+				this.holdForChannel(state, outcome, prior)
 				return
 			}
 		} catch (err) {
@@ -5021,11 +5146,24 @@ export class DecoderManager extends EventEmitter {
 			this.config.bandSuspension &&
 			this.decoderBandSuspension(state) &&
 			state.startMode !== "operator"
+		const bandFree =
+			this.modeFor(state).mode === "always" ||
+			state.startMode === "operator" ||
+			!this.config.bandSuspension ||
+			!this.decoderBandSuspension(state)
 		const unplaced =
-			state.unplaced === "frequency-out-of-band" &&
-			(this.modeFor(state).mode === "always" || state.startMode === "operator")
+			state.unplaced === "frequency-out-of-band" && bandFree
 				? undefined
 				: state.unplaced
+		// 3.13/3.14: an unplaced decoder's band reason never contradicts the
+		// assessment: out of band only when assessBand says so; a planner
+		// out-of-band with the band in view (or unknown) means no channel yet.
+		const plannedReason: CoreSuspensionReason =
+			!bandFree && band.verdict === "out-of-band"
+				? "frequency-out-of-band"
+				: unplaced === undefined || unplaced === "frequency-out-of-band"
+					? "no-channel-selected"
+					: unplaced
 		const channelizerUnavailable =
 			!this.channelizer &&
 			(state.placement?.reach === "channel" ||
@@ -5060,17 +5198,21 @@ export class DecoderManager extends EventEmitter {
 			sourceCaps?.centerFreq !== undefined
 		const blockedBy =
 			this.heldReason(state) ??
-			(this.isUnavailable(state) ? "decoder-unavailable" : null) ??
+			// 11.3: rate reasons, then decoder-unavailable (as getStatus reports).
 			(rate.verdict === "unusable"
 				? (rate.reasonCode ?? "unsupported-sample-rate")
-				: !state.placement && channelizerUnavailable
-					? "channelizer-unavailable"
-					: builtinUnplaced
-						? sourceKnown
-							? (unplaced ?? "frequency-out-of-band")
-							: "source-rate-unknown"
-						: bandSuspends && band.verdict === "out-of-band"
-							? "frequency-out-of-band"
+				: null) ??
+			(this.isUnavailable(state) ? "decoder-unavailable" : null) ??
+			(!state.placement && channelizerUnavailable
+				? "channelizer-unavailable"
+				: builtinUnplaced
+					? sourceKnown
+						? plannedReason
+						: "source-rate-unknown"
+					: bandSuspends && band.verdict === "out-of-band"
+						? "frequency-out-of-band"
+						: unplaced !== undefined
+							? plannedReason
 							: (unplaced ??
 								(channelizerUnavailable
 									? "channelizer-unavailable"
@@ -5085,13 +5227,34 @@ export class DecoderManager extends EventEmitter {
 	 * overrides, the region and the built-in table.
 	 */
 	private resolveBand(state: DecoderState): ResolvedBand {
+		const slots = this.catalogueLoraSlotsOf(state)
 		return resolveBandRequirements({
 			type: state.config.type,
-			declaration: state.decoder.getBandDeclaration?.(),
+			// 3.17: the catalogue LoRa decoder declares every regional slot.
+			declaration: slots
+				? {
+						configured: {
+							targetsHz: slots.map(slot => slot.frequency),
+							basis: "configured",
+						},
+					}
+				: state.decoder.getBandDeclaration?.(),
 			configOverride: state.config.band,
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
 		})
+	}
+
+	/** Regional slots of a catalogue LoRa decoder (or its placement); undefined otherwise. */
+	private catalogueLoraSlotsOf(
+		state: DecoderState,
+	): ReturnType<typeof catalogueLoraSlots> {
+		if (state.config.type !== "lora-meshtastic") return undefined
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		const config = parent?.originalConfig ?? parent?.config
+		if (!config || this.config.enablement?.isCatalogue(config) !== true)
+			return undefined
+		return catalogueLoraSlots(config.options["region"])
 	}
 
 	/** Per-decoder `band.bandSuspension` (API over config); true when unset. */

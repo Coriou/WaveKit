@@ -638,3 +638,36 @@ Main appends this by hand to `docs/CLI-COORDINATION.md` (no Prettier) when the l
     (trust, frequency, tone, DCS) and stores, evidence attaches only on `commanded` or `relay`
     frequencies within the tolerance of an existing discovery, never creates one, and gives
     `decoded` iff a tone or code was heard. _Validates 6.3, 6.5._
+
+## Weak labels and band hints amendment — 2026-10-25
+
+`discoveryView` and `presentDiscovery` in `src/core/scanner/store/discovery-store.ts` return
+the stored protocol, family and confidence when the evidence level is `weak`; they return
+`UNKNOWN_LABEL` instead, so 3.10 holds for every path that reads a label: `get`, list,
+`identityOf`, the merge-family test in `keyTarget`, and the `discovery` events the scanner
+service emits (they read the presented view). `presentObservation` keeps its shape (no label
+field) and is covered by a test that no stored discovery protocol leaks into an observation
+view or the `activity` event (whose `hypothesis` is a measurement).
+
+The optional `hint` (`ScannerHint`: the spectral classes plus `ism-device`, `analog-voice` and
+`lora`) is a pure function `hintOf(input)` in `src/core/scanner/classify/`, computed on read
+from the requirement 3.11 inputs and never stored; it returns `undefined` for any invalid input.
+Region slots are read from the same table the decoders use (`src/decoders/band-defaults.ts`).
+
+The legacy `priorsFor` and built-in plan (`src/core/scanner/bandplan/`) are pinned by the
+band-plans authority isolation and stay unchanged. `src/core/scanner/classify/priors.ts` adds
+`narrowestPriors` (the narrowest covering range that lists protocols, ties: stack order, per
+3.12, passed to the legacy `priorsFor`) and an LPD433 overlay range, added by
+`withScannerOverlays` only when an `ism-433` range is in effect; identify, burst capture and the
+hint scope use them, and plan previews do not show the overlay; `CLASS_HYPOTHESES` in
+`src/core/scanner/classify/classifier.ts` gains `analog-fm` 0.3 for `fsk4-12k5` and `wideband`.
+The DTO change is additive (`packages/api-types`); the web shows the hint in the weak row.
+
+17. **Weak records publish no guess.** For random stored discoveries (any stored protocol and
+    confidence) without proof, every published discovery view and event is `unknown`/`activity`
+    and no observation view carries a protocol; `hintOf` returns at most one value, in the 3.11
+    union, `undefined` for random malformed inputs, and names a digital voice protocol only
+    where a covering range lists it. _Validates 3.10, 3.11._
+18. **Narrowest range orders.** For random overlapping range stacks and frequencies, the priors
+    equal those of the narrowest covering range that lists protocols, and no prior is 0.
+    _Validates 3.12, decoder-enablement 9.1._

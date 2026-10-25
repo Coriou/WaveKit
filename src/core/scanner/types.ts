@@ -56,6 +56,9 @@ export type ScannerClass =
 	| "wideband"
 	| "unknown"
 
+/** Scanner-redesign 3.11: a display-only likely kind of a weak discovery; never a label. */
+export type ScannerHint = ScannerClass | "ism-device" | "analog-voice" | "lora"
+
 export type ProtocolFamily =
 	| "analog"
 	| "digital-voice"
@@ -296,6 +299,8 @@ export interface Discovery {
 	proof?: ScannerProof
 	/** WG12: `proven` when `proof` is set, otherwise `weak`. Absent on cores before the redesign. */
 	evidenceLevel?: ScannerEvidenceLevel
+	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
+	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
 }
 
 export interface Observation {
@@ -346,6 +351,8 @@ export interface Observation {
  */
 export interface StoredObservation extends Observation {
 	classVote?: ScannerClass
+	/** Scanner-redesign 3.11: the track was a burst or at most 4 blocks (the hint's `short`). */
+	short?: boolean
 }
 
 // ---------------------------------------------------------------- jobs and plans (§ 10, § 5)

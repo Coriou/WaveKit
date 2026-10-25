@@ -92,6 +92,7 @@ describe("classifySpectral", () => {
 		})
 		expect(c.hypotheses.map(h => h.protocol)).toEqual([
 			"dmr",
+			"analog-fm",
 			"nxdn96",
 			"p25p1",
 			"ysf",

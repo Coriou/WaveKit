@@ -446,3 +446,66 @@ users, identifiers, addresses or job ids in tracked files.
 comment (`// Feature: scanner-redesign, Property N: <name>` / `// Validates: Requirements X.Y`);
 Rust properties use proptest.
 12.2 The root suite, typecheck, lint and the native crate tests pass at every merge.
+
+## Weak labels and band hints amendment — 2026-10-25
+
+Found live: discoveries in the 433 MHz ISM band (an `fsk4-12k5` track, an `ook-burst` track)
+were shown as "DMR candidate" with no proof. These records were created before 3.2 removed the
+prior-only `candidate` (the `fsk4-12k5` class lists DMR first at 0.55); 3.3 keeps their stored
+fields, and the store still publishes the stored protocol and confidence of a `weak` record, so
+new observations merging into them keep the old guess on screen.
+
+As a web user I want a weak discovery to read as what was measured, with a band-aware hint of
+what it probably is, never as a protocol the core did not prove.
+
+3.10 **Weak records publish no protocol.** A discovery without a proof is published with
+`protocol: "unknown"`, `family: "unknown"` and `confidence: "activity"`, whatever its stored
+fields, on every read and event path: `GET` list and item, the `scanner:discovery` events,
+`identityOf` and the merge-family test. An observation has no label field; its published view
+keeps `hypotheses` as measurements and never gains a protocol from a stored discovery field.
+Stored fields are not rewritten (3.3 stands). A proof, when one exists, decides the label (3.5).
+3.11 **Band hint.** A weak discovery may carry `hint`, a likely kind shown as a hint and never as
+a label or filterable protocol. Inputs: frequency `f` (the discovery's `frequencyHz`), occupied
+width `w` (`bandwidthHz`), class, `short` (the latest observation's track has `flags.burst` or
+at most 4 blocks, the classifier's burst limit) and the resolved region and band plan. Rules, in
+this order, first match wins:
+
+1. Any input missing, non-finite, non-positive (`f`, `w`), an unknown class, or no resolved
+   region: no hint.
+2. `lora`: region EU, `100 kHz ≤ w ≤ 150 kHz`, `short`, and `[f − w/2, f + w/2]` lies inside a
+   LoRa regional slot of that region (`EU_433` 433.0–434.0 MHz, `EU_868` 869.4–869.65 MHz, the
+   ranges in `src/decoders/band-defaults.ts`).
+3. `ism-device`: region EU, `w ≤ 25 kHz`, class `ook-burst` or `short`, and `f` inside
+   433.05–434.79 MHz or 863–870 MHz (closed intervals).
+4. `analog-voice`: region EU, `w ≤ 25 kHz`, class `analog-fm`, `fsk4-12k5` or `wideband`, not
+   `short`, and `f` within 3 kHz of a raster point `433.075 MHz + n × 25 kHz`, `n` integer
+   0 to 68 (433.075–434.775 MHz).
+5. Otherwise the spectral class, as the identify result's `hint` already is, except that a
+   class whose first hypothesis is a digital voice protocol gives no hint unless a band plan
+   range covering `f` lists that protocol.
+
+Rules 2 and 3 cannot both match (their widths are disjoint); rule 3 precedes 4, so a short
+narrow track on the raster is `ism-device`.
+3.12 **LPD433 and trial order.** Wherever the EU `ism-433` range is in effect, identify and hints
+also see an LPD433 range (433.075–434.775 MHz, 25 kHz raster, protocols `analog-fm` and `ism`);
+it is a scanner overlay, not a band-plan entry.
+Overlapping ranges: priors at `f` come from the narrowest range covering `f` that lists any
+protocol (ties: the first in stack order); its listed protocols get 1, every other specific
+protocol `SOFT_PRIOR` (0.25), as `priorsFor` does today for the union. A broader range listing
+digital voice (an amateur or land-mobile range) therefore does not lift DMR inside LPD433. The
+classifier's `fsk4-12k5` and `wideband` hypothesis lists gain `analog-fm` at 0.3 (a narrow FM
+voice often measures as either), so with the LPD433 priors the identify order at a track there
+is `analog-fm` (0.3) and `ism` before `dmr` (0.55 × 0.25 ≈ 0.14). Priors still never exclude a
+trial (decoder-enablement 9.1); outside such a range today's order is unchanged except for the
+added `analog-fm` hypothesis.
+
+Acceptance:
+
+- A store restored with a pre-3.2 weak record labelled `dmr`/`candidate` publishes it as
+  `unknown`/`activity` on the list, item and event paths, with a hint; adding a decoded proof
+  publishes the proof's label. Observation views carry no protocol.
+- Each rule in 3.11 has boundary tests (at, just inside and just outside every width,
+  frequency and raster bound), a test that one track cannot get two hints, and tests that
+  missing or malformed inputs give no hint.
+- Ordering tests: inside LPD433 with a covering amateur range listing DMR, an `fsk4-12k5` track
+  orders `analog-fm` before `dmr`; outside it the order is today's plus `analog-fm` last.

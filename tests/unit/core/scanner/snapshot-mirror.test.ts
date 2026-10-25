@@ -54,6 +54,10 @@ const sha = (text: string): string =>
 // Seeds 3 to 5 re-baselined again for DQ 9.3: an evidence-less sighting reaches a decoded record of
 // another family only within 1 000 Hz and inside its band, so a few sightings land on the nearest
 // same-family record instead (seed 5 text 4 293 bytes shorter, seeds 3 and 4 by 2 and 3 bytes).
+// Scanner-redesign 3.11 adds the persisted `short` hint input on each observation: seeds 2 to 6
+// grew again. With both, seeds 3 to 5 carry the DQ 9.1/9.3 association and the `short` input: each
+// length is the DQ length plus the `short` bytes of the observations it keeps (seeds 3 and 4 the
+// same +461 and +859 bytes as without DQ 9.3, seed 5 +912 instead of +964 as it keeps fewer).
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -68,40 +72,40 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		40,
 		false,
-		19622,
-		"2ec9a832d39f60e2181dd01f2a959fb511c9e7ad17fb699841ae4e8a4cc464bc",
+		19860,
+		"a75d40733bcafec93815f678f0ae7c9e1d490181fc7cd07e695c4b10a65e49e9",
 	],
 	[
 		3,
 		400,
 		40,
 		false,
-		39439,
-		"ffa09a7c59f0a27ace956d52c6200c60cb2bdfc33e2448e5fff104736a402400",
+		39900,
+		"b23b2e4219617ea3842f6e79b4f3a868f51494949cbb277c9bc17a8e4422dddd",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		63736,
-		"7a33812471982049b18d4de913317afe65bc70b6d34fb6c58b9be24c188499f0",
+		64595,
+		"28f7dd7d1c797a886287992d36fbc53fa499af6213f603f00c241481a4ab0d25",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		67736,
-		"3bb3a6c36a3eef494f170d6e1f97aa666eb63ee8cb30020b688c179543d30f9f",
+		68648,
+		"4e124573513250f8de7bb3558d2e3bef7367d7a7b0cf3201d3abd03343b2b3f0",
 	],
 	[
 		6,
 		700,
 		40,
 		true,
-		346330,
-		"312dc292f6c0687440ecd446a041f73c5d8f2c9f0ef92eb21ccc5eedc80bd48b",
+		353110,
+		"94e63c3bacc3d4eec6fe66c34dca1f12168147e60c487734c4bf19d6975c211b",
 	],
 ]
 

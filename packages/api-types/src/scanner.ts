@@ -327,6 +327,8 @@ export interface Discovery {
 	proof?: ScannerProof
 	/** WG12: `proven` when `proof` is set, otherwise `weak`. Absent on cores before the redesign. */
 	evidenceLevel?: ScannerEvidenceLevel
+	/** Weak discoveries only: a display hint of the likely kind, never a label or filter. */
+	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
 }
 
 export interface Observation {

@@ -185,6 +185,8 @@ export interface DecoderBandAssessment {
 export type DecoderSuspensionReasonCode =
 	| NonNullable<DecoderRateAssessment["reasonCode"]>
 	| "frequency-out-of-band"
+	| "capture-too-narrow"
+	| "no-channel-selected"
 	| "tuner-scanning"
 	| "efficiency-budget"
 	| "decoder-unavailable"

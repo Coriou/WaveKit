@@ -199,7 +199,8 @@ describe("discovery identity filter", () => {
 		}
 		const page1 = store.list(filter)
 		expect(page1.items).toHaveLength(1)
-		expect(page1.items[0]!.protocol).toBe("dmr")
+		// Scanner-redesign 3.10: the seeded records hold no proof, so the list publishes unknown.
+		expect(page1.items[0]!.protocol).toBe("unknown")
 		expect(page1.items[0]!.jobIds).toEqual(["job-a"])
 		expect(page1.nextCursor).toBe("1")
 		const page2 = store.list({ ...filter, cursor: page1.nextCursor })

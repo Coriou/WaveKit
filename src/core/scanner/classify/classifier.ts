@@ -36,6 +36,8 @@ export const CLASS_HYPOTHESES: Readonly<
 		{ protocol: "ysf", score: 0.45 },
 		{ protocol: "p25p1", score: 0.4 },
 		{ protocol: "nxdn96", score: 0.3 },
+		// Scanner-redesign 3.12: narrow FM voice often measures as fsk4-12k5.
+		{ protocol: "analog-fm", score: 0.3 },
 	],
 	"fsk4-6k25": [
 		{ protocol: "nxdn48", score: 0.5 },
@@ -62,7 +64,10 @@ export const CLASS_HYPOTHESES: Readonly<
 		{ protocol: "digital-unknown", score: 0.1 },
 	],
 	carrier: [{ protocol: "carrier", score: 0.8 }],
-	wideband: [{ protocol: "unknown", score: 0.3 }],
+	wideband: [
+		{ protocol: "unknown", score: 0.3 },
+		{ protocol: "analog-fm", score: 0.3 },
+	],
 	unknown: [
 		{ protocol: "unknown", score: 0.3 },
 		{ protocol: "digital-unknown", score: 0.2 },

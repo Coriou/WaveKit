@@ -193,10 +193,10 @@ export const DiscoverySchema = z.object({
 		iq: z.boolean(),
 	}),
 })
-/** `proof` and `evidenceLevel` are derived DTO fields (A12). They are not journal keys. */
+/** `proof`, `evidenceLevel` and `hint` are derived DTO fields (A12). They are not journal keys. */
 export type DiscoveryCheck = Assert<
 	SchemaMatches<
-		Omit<Discovery, "proof" | "evidenceLevel">,
+		Omit<Discovery, "proof" | "evidenceLevel" | "hint">,
 		typeof DiscoverySchema
 	>
 >
@@ -246,6 +246,7 @@ export const ObservationSchema = z.object({
 	hopIndex: z.number().int().optional(),
 	tuningTrust: TuningTrustSchema,
 	classVote: ScannerClassSchema.optional(),
+	short: z.boolean().optional(),
 })
 /** `proof` is a derived DTO field (A12). It is not a journal key. */
 export type ObservationCheck = Assert<

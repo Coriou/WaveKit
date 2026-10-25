@@ -186,3 +186,17 @@ RP, ID.
   memory only (design § Contract › Amendments, A12), so after a restart only decoded proofs
   survive and other proven discoveries read `weak` until new evidence arrives. Main adds this
   follow-up to docs/ROADMAP.md in MA.2.
+
+## Weak labels and band hints amendment — 2026-10-25
+
+- [ ] WL.1 Weak views publish `UNKNOWN_LABEL` on every discovery read and event path; observation
+      views tested label-free; `hintOf` with the 3.11 rules and boundary tests; additive DTO
+      field; web weak-row hint.
+  - _Requirements: 3.10, 3.11_
+  - **Property 17: Weak records publish no guess**
+- [ ] WL.2 LPD433 built-in range; `priorsFor` narrowest-range rule; classifier `analog-fm`
+      hypothesis for `fsk4-12k5` and `wideband`; ordering tests of 3.12.
+  - _Requirements: 3.12_
+  - **Property 18: Narrowest range orders**
+  - Live (Main): L, a 433 MHz ISM centre: no weak discovery reads as a digital voice protocol;
+    an OOK sensor burst shows the ISM hint; identify on an LPD433 voice runs analog first.

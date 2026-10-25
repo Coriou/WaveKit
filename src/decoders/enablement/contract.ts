@@ -155,7 +155,26 @@ export interface PlannerDecoder {
 	ownDevice: boolean
 	centreSlotHz: { minHz: number; maxHz: number } | null
 	centrePassbandHz: number | null // lora only
+	/**
+	 * Requirement 3.17: alternative centre slots (the catalogue LoRa decoder in
+	 * a multi-slot region); each is tried as a centre-reach candidate and the
+	 * chosen one's options go to the adapter. Absent: `centreSlotHz` alone.
+	 */
+	centreSlots?: readonly PlannerCentreSlot[]
+	/** False when global or per-decoder band suspension is off (3.13): band policy skipped. */
+	bandSuspension?: boolean
+	/** Half-width of the window the band assessment uses (narrower frontends); absent: usable window. */
+	bandHalfWidthHz?: number
+	/** rtl_433 (3.16): the widest channel output rate it wants; absent 1 MHz. */
+	channelTargetRateHz?: number
 }
+export interface PlannerCentreSlot {
+	slotHz: { minHz: number; maxHz: number }
+	options: Readonly<Record<string, unknown>>
+}
+/** rtl_433 channel bounds (design 2026-10-25): narrowest accepted and target rate. */
+export const RTL433_CHANNEL_MIN_RATE_HZ = 250_000
+export const RTL433_CHANNEL_TARGET_RATE_HZ = 1_000_000
 export interface PlannerSource {
 	id: string
 	centreHz: number | null
@@ -200,6 +219,22 @@ export interface WantedPlacement {
 	primary: boolean
 	costCores: number
 	sampleRateHz: number
+	/**
+	 * Adapter options of this placement, applied over the decoder's own
+	 * (rtl_433 `targetSampleRate`, LoRa `region` and `frequency`). A change
+	 * restarts the placement; absent means none.
+	 */
+	options?: Readonly<Record<string, unknown>>
+}
+/** Stable comparison key of placement options (absent and empty are equal). */
+export function placementOptionsKey(
+	options: Readonly<Record<string, unknown>> | undefined,
+): string {
+	if (!options) return ""
+	const keys = Object.keys(options).sort()
+	return keys.length === 0
+		? ""
+		: JSON.stringify(keys.map(key => [key, options[key]]))
 }
 export interface PlacementPlan {
 	wanted: readonly WantedPlacement[] // admission order (4.2, 3.7)

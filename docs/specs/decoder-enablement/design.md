@@ -382,3 +382,91 @@ existing declared targets for raw wideband adapters.
 15. **Configured VFO target.** For any admissible VFO in a source's usable span, an
     unpinned configured channel decoder reports exactly that frequency, with or without
     a channelizer. _Validates 3.11, 3.12, 4.9, 5.5._
+
+## Suspension follows the band amendment — 2026-10-25
+
+Cause. `assessBand` (`src/decoders/band-resolver.ts`) tests the capture centre against the
+band with the usable half-width. The planner (`src/decoders/enablement/placement.ts`) also
+requires the channel to fit (`fitsReach`): the rtl_433 channel request
+(`iqChannelRequest` in `src/decoders/iq-decimate-decoder.ts`) is its 1 MHz target rate
+(950 kHz passband plus 25 kHz transition each side), wider than the 819 kHz usable span at
+1.024 Msps. With no candidate the planner falls back to `frequency-out-of-band`, and
+`assessEligibility` in `src/decoders/manager.ts` reports that reason for a built-in parent with
+no placement. `suspension.since` is carried over from the earlier suspension in
+`startDecoder`, `suspend` and the rebuild path.
+
+Fix.
+
+- Planner: when band candidates exist for a decoder but `fitsReach` rejects them all, record
+  `capture-too-narrow` in `unplaced`; only an empty band candidate set gives
+  `frequency-out-of-band`. `assessEligibility` keeps the 11.3 precedence and passes the
+  planner reason through in its slot.
+- `since`: a suspension interval starts when a decoder becomes suspended or its `reasonCode`
+  changes, and ends when it runs. An assignment of `state.suspension` keeps the prior `since`
+  only when a suspension is already in force (no run between) with the same `reasonCode`;
+  suspend, run, suspend with the same reason starts a new interval.
+- LoRa: `loraCentreReach` and the catalogue band declaration take the region's slots; the
+  planner tries each slot as a centre-reach candidate and the adapter receives the chosen
+  `region` and `frequency` as placement options (original options copied first, as for VFO).
+
+rtl_433 channel arithmetic (`src/decoders/builtin/rtl433.ts`, planner rtl_433 branch). All
+values in Hz; `t = 0.05` (the existing `filterTransition`). For a source with centre `c` and
+rate `fs`, usable half-width `h = fs × usableFraction / 2`. Today's `fitsReach` for a channel of
+output rate `r` at `hz` reads `|hz − c| + r(1 − t)/2 + r·t/2 ≤ h`, that is
+`r ≤ 2(h − |hz − c|)`.
+
+1. Inputs are checked first: `c`, `fs` and `usableFraction` must be finite and positive, the
+   range finite with `minHz ≤ maxHz`. Otherwise the decoder gets no candidate from that source
+   and the reason is `source-rate-unknown` (unknown caps, as today), never a channel.
+2. For each configured range, `lo = max(minHz, c − h)`, `hi = min(maxHz, c + h)`. An empty
+   overlap (`lo > hi`) gives no candidate.
+3. Centre: `hz = clamp((lo + hi) / 2, c − h + R_MIN/2, c + h − R_MIN/2)` with
+   `R_MIN = 250 000`; when `h < R_MIN/2` there is no candidate.
+4. Rate: `r = min(target, 2(h − |hz − c|))`, then rounded down to a multiple of 1 kHz. If
+   `r < R_MIN` the candidate is rejected. Every accepted candidate satisfies `fitsReach` by
+   construction.
+5. Ranges are tried in configured order; the candidate with the largest `r` wins, ties by order.
+   With no accepted candidate and a non-empty overlap the reason is `capture-too-narrow`;
+   with no overlap it is `frequency-out-of-band`.
+
+The channel request carries `outputRateHz = r`, `bandwidthHz = r(1 − t)`, `transitionHz = r·t/2`.
+At 1.024 Msps and 434.44 MHz (h = 409.6 kHz) the overlap is 434.03–434.79 MHz, `hz` 434.41 MHz,
+`r` = 759 kHz.
+
+Rate lifecycle (PERFORMANCE rule 5: no per-sample work changes, no restart storms). The realised
+stdin rate is the channel output rate `r` (channelizer channel, `exactSampleRate`), and the
+adapter's `-s` argument equals it; the adapter receives `targetSampleRate = r` as a placement
+option. On a re-plan of an existing placement: if `r` changes, the placement restarts once
+through the existing placement restart path (after the VFO settle and caps-work debounce); if
+only `hz` changes and `r` is unchanged, the channel is retuned in place through the provider's
+`retuneChannel` (offset and bandwidth updated, no process restart), falling back to
+close/reopen when the provider refuses, as for VFO channels.
+
+No IQ, DSP or audio loop changes; the extra planner work is constant per range and one more
+candidate per LoRa decoder per evaluation.
+
+Property 16 is the next free number in this design (1–15 are above).
+
+16. **Suspension equals the band verdict after settle.** For random decoder sets (every kind,
+    catalogue and YAML, `auto`/`always`/operator), random source rates (250 kHz to 3.2 Msps)
+    and random sequences of retunes, disconnects, reconnects and manager restarts, after each
+    settle every wanted decoder satisfies, in 11.3 precedence: (a) when a higher-priority
+    gate fails (`tuner-scanning` or another hold, a rate reason, `decoder-unavailable`,
+    `channelizer-unavailable`), that reason wins whatever the band says; (b) with unknown caps
+    (no centre or rate, or the source disconnected) the reason is `source-rate-unknown` and
+    the band assessment is `unknown`; (c) with band suspension disabled (config
+    `bandSuspension: false` or the per-decoder opt-out), `always`, or an operator start, the
+    reason is never `frequency-out-of-band`; (d) otherwise the decoder is suspended with
+    `frequency-out-of-band` iff its band assessment is `out-of-band`, and when `in-band` it is
+    placed or suspended with `capture-too-narrow`, `no-channel-selected` (2026-10-25, second
+    amendment: band in view, no channel chosen) or `efficiency-budget`; with an `unknown`
+    assessment the reason is never `frequency-out-of-band`. `since` keeps its
+    value iff the decoder stayed suspended with the same reason since the previous settle.
+    _Validates 3.13, 3.14, 3.15, 11.3._
+17. **The `rtl_433` channel fits.** For random finite centres and rates with `h ≥ 125 kHz` and
+    random ranges, the planner's `rtl_433` candidate, when it exists, satisfies `fitsReach`, has
+    `250 kHz ≤ r ≤ target` and `-s` equal to `r`; no candidate exists exactly when step 2 gives
+    no overlap or step 4 rejects every range; non-finite or missing caps give no candidate. A
+    re-plan with a changed `r` restarts the placement once; one with the same `r` and a new
+    `hz` retunes in place without a restart (deterministic tests for both).
+    _Validates 3.16._

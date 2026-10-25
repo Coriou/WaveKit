@@ -73,6 +73,7 @@ describe("conservative channel refinement", () => {
 			"dmr",
 			"ysf",
 			"p25p1",
+			"analog-fm",
 			"nxdn96",
 		])
 		expect(result.classification.hypotheses.every(h => h.score < 1)).toBe(true)
