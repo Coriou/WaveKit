@@ -3363,12 +3363,20 @@ and additive; older cores omit them.
   `x-wavekit-store-revision` (the store revision as the answer leaves, at or after the
   removal).
 
-To apply an answer or event, keep per id the highest revision seen: apply a record only
-when its revision is higher. A deletion (DELETE, `deleted`, an id in `mergedIds`) is
-final, since ids are never reused. A complete page (`nextCursor: null`) taken at
-`storeRevision` R speaks for every record its query matches: a record it did not list
-whose revision is R or lower is stale. The counter never runs out in practice: at a
-million changes a second it reaches `Number.MAX_SAFE_INTEGER` after about 285 years.
+To apply an answer or event, order it on two keys: the record's `revision`, then the
+revision it was read at (the answer's `storeRevision`; an event's own `revision`). Keep
+per id the highest pair seen and apply a record when its pair is at least that high. An
+equal pair is the same record read again: apply it, since `coverage` is added when a
+record is read (never on events) and can change without a new revision, so keep the
+`coverage` you hold when an event arrives without one. A deletion (DELETE, `deleted`, an
+id in `mergedIds`) is final, since ids are never reused.
+
+A page is complete only when it is the first page (asked without `cursor`) and its
+`nextCursor` is `null`; the last page of a longer list has `nextCursor: null` too but
+says nothing about the earlier pages. A complete page read at `storeRevision` R speaks
+for every record its query matches: a record it did not list, from an answer read before
+R, is stale. The counter never runs out in practice: at a million changes a second it
+reaches `Number.MAX_SAFE_INTEGER` after about 285 years.
 
 #### GET /api/scanner/discoveries/:id
 
