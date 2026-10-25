@@ -106,9 +106,12 @@ sources: []
 #   rtl433      - ISM band signals (weather sensors, remotes, etc.)
 #
 # Decoder Integration Patterns:
-#   pure_consumer   - Receives audio via stdin (dsd-fme, multimon-ng)
+#   pure_consumer   - Reads the shared source on stdin: audio (dsd-fme, multimon-ng),
+#                     audio WaveKit demodulates from IQ (acarsdec, audio-demod base) or
+#                     IQ WaveKit decimates to the channel (dumpvdl2, IQ-decimate base)
 #   network_producer - Runs as service with network output (readsb, AIS-catcher)
-#   external_sdr    - Manages own SDR hardware (acarsdec, dumpvdl2)
+#   external_sdr    - Manages its own SDR hardware (base for custom adapters; no
+#                     built-in decoder uses it)
 #
 # Each decoder requires:
 #   id        - Unique identifier for the decoder
@@ -126,7 +129,7 @@ sources: []
 # acarsdec, the bandwidth for LoRa) is suspended instead of crash-looping and
 # resumes when the rate is usable (see docs/API.md).
 #
-# For external SDR decoders (external_sdr pattern):
+# For custom external SDR decoders (external_sdr pattern):
 #   deviceSerial - RTL-SDR device serial number
 #   frequencies  - Array of frequencies to monitor (Hz)
 #   gain         - Gain setting (optional)
@@ -665,31 +668,28 @@ csdr:
 #       lon: -122.4194
 #     minVersion: "3.14.1"
 #
-#   # ACARS (external_sdr pattern - manages own RTL-SDR)
+#   # ACARS (audio-demod base: WaveKit demodulates each channel from the
+#   # source's IQ and feeds acarsdec audio; the source must cover the band)
 #   - id: "acars-decoder"
 #     type: "acarsdec"
 #     enabled: true
-#     deviceSerial: "00000003"
-#     frequencies:
-#       - 131550000  # Primary ACARS
-#       - 131725000  # Secondary ACARS
-#       - 131825000  # Additional frequency
-#     gain: 40
+#     sourceId: "rtl-pi"
 #     options:
-#       outputFormat: "json"
+#       frequencies:
+#         - 131550000  # Primary ACARS
+#         - 131725000  # Secondary ACARS
 #     minVersion: "3.7"
 #
-#   # VDL2 (external_sdr pattern - shares SDR with ACARS via time-slicing)
+#   # VDL2 (IQ-decimate base: WaveKit decimates the source's IQ to the VDL2
+#   # channels and feeds dumpvdl2 on stdin; the source must cover the band)
 #   - id: "vdl2-decoder"
 #     type: "dumpvdl2"
 #     enabled: true
-#     deviceSerial: "00000003"
-#     frequencies:
-#       - 136650000  # VDL2 frequency 1
-#       - 136700000  # VDL2 frequency 2
-#       - 136975000  # VDL2 frequency 3
-#     gain: 40
+#     sourceId: "rtl-pi"
 #     options:
+#       frequencies:
+#         - 136650000  # VDL2 frequency 1
+#         - 136975000  # VDL2 frequency 2
 #       outputFormat: "json"
 #     minVersion: "2.3.0"
 #
