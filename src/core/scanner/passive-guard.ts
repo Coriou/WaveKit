@@ -81,6 +81,8 @@ interface SourceState {
 	previousBaselineWindowAt: number | null
 	measuringSince: number | null
 	trialing: boolean
+	/** The last non-null ELU sample seen on a tick (8.7 trial start needs counters that moved). */
+	lastSample: EluSample | null
 }
 
 export interface PassiveGuardStatus {
@@ -185,9 +187,12 @@ export class PassiveGuard {
 				previousBaselineWindowAt: null,
 				measuringSince: null,
 				trialing: false,
+				lastSample: null,
 			}
 			this.states.set(sourceId, st)
 		}
+		const previousSample = st.lastSample
+		if (view.sample !== null) st.lastSample = view.sample
 		const generation = view.sample?.generation ?? null
 		// 8.2, 8.3: a new worker generation discards the window; unless the guard's own toggle
 		// explains it, the baseline too.
@@ -258,13 +263,17 @@ export class PassiveGuard {
 		if (disabled) {
 			if (holdsPassive) return { kind: "none" } // a restore in flight
 			const since = now - (this.disabledAt.get(sourceId) ?? now)
-			// 8.7: the trial starts on the first tick at or after its deadline that has a valid sample
-			// (8.4 row 1: no measurement keeps the current state), not when an off window ends.
+			// 8.7: the trial starts on the first tick at or after its deadline that has a valid
+			// measurement (8.4 row 1: no measurement keeps the current state), not when an off window
+			// ends. Finite but stalled counters (unchanged since the last sample) are no measurement.
+			const live =
+				view.sample === null || previousSample === null
+					? null
+					: windowedUtilization(view.sample, previousSample)
 			if (
 				since >= PASSIVE_PROBATION_MS &&
-				view.sample !== null &&
-				Number.isFinite(view.sample.idle) &&
-				Number.isFinite(view.sample.active) &&
+				live !== null &&
+				Number.isFinite(live) &&
 				this.validBaseline(st, now) !== null
 			) {
 				this.disabledAt.delete(sourceId)

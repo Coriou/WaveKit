@@ -166,6 +166,8 @@ function sim(opts: { displays?: string[] } = {}) {
 		displays: opts.displays ?? ["ws:a"],
 		rate: (_passive: boolean) => 0.3,
 		nullSample: false,
+		/** Counters reported while set (a stalled worker), regardless of the real ones. */
+		frozen: null as PassiveGuardView["sample"],
 	}
 	const guard = new PassiveGuard()
 	const actions: string[] = []
@@ -178,11 +180,11 @@ function sim(opts: { displays?: string[] } = {}) {
 		},
 		sample: state.nullSample
 			? null
-			: {
+			: (state.frozen ?? {
 					idle: state.t - state.active,
 					active: state.active,
 					generation: state.generation,
-				},
+				}),
 		tracked: state.passive,
 	})
 	const tick = (ms = 1000) => {
@@ -396,5 +398,28 @@ describe("guard review regressions (DQ 8.2, 8.5, 8.7)", () => {
 		s.tick() // first tick with a valid sample after the deadline
 		expect(s.actions[1]).toBe("restore:trial")
 		expect(s.state.t).toBe(963_000)
+	})
+	it("a due trial waits for a real measurement when engine counters stall (8.4 row 1, 8.7)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		expect(s.state.t).toBe(60_000)
+		while (s.state.t < 841_000) s.tick()
+		s.state.frozen = {
+			idle: s.state.t - s.state.active,
+			active: s.state.active,
+			generation: s.state.generation,
+		}
+		while (s.state.t < 960_000) s.tick()
+		expect(s.guard.baselineOf("s", s.state.t)).toBeCloseTo(0.3, 5)
+		// 960 000: due, finite samples but the counters have not moved: no measurement
+		expect(s.actions).toHaveLength(1)
+		s.tick() // 961 000: same counters
+		expect(s.actions).toHaveLength(1)
+		s.state.frozen = null
+		s.tick() // the counters advance: the first tick with a valid measurement
+		expect(s.actions[1]).toBe("restore:trial")
+		expect(s.state.t).toBe(962_000)
 	})
 })
