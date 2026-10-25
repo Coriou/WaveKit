@@ -1,8 +1,8 @@
 # Detection quality requirements (WG15 DQ)
 
 Status: reviewed design, not implemented (2026-10-24; revised after spec review the same
-day). Amendment (reviewed 2026-10-25): sections 7 and 8. See
-[design](design.md) and [tasks](tasks.md).
+day). Amendment (reviewed 2026-10-25): sections 7 and 8. Amendment (draft 2026-10-25):
+section 9. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -36,7 +36,8 @@ Measured background (rounded, synthetic descriptions):
 In scope: requirements 1 to 4 (behaviour changes) and 5 (finding, acceptance item).
 Amendment: requirement 7 (consolidation of records the store already holds) and
 requirement 8 (passive cost guard judged on passive's marginal cost), which replace
-follow-up 6.3's guard part.
+follow-up 6.3's guard part. Amendment: requirement 9 (young records and weak protocol
+guesses), which amends 2.1, 3.1, 3.2, 3.5 (young records), the family test of `keyTarget` and `settle`, and 7.1.
 
 Out of scope (follow-ups, section 6): band-plan rasters for passive placement; a fixed
 2.5 kHz grid key independent of OBW (needs a stored-record key migration); any change to
@@ -597,3 +598,158 @@ of a core` (row 2 or 3), `passive-cpu N % of a core` (row 4).
 - **Trial.** Disabled with display open, `B` 0.30: after 15 min passive restarts; `U` 0.40
   keeps it, `U` 0.70 disables it again; a trial or baseline end is judged within 1 s of its
   deadline, not at the next 300 s check.
+
+## 9. Young records and weak protocol guesses (amendment)
+
+As an operator I want a new emitter to get one record from its first sighting, and I do
+not want a guess that no decode confirmed to keep one emitter apart in several records.
+
+Measured background (rounded) from a 60-minute watch with requirement 7 live:
+
+- **Fan-out.** One emitter, keyed every 2.5 to 5 min, peak steady near -34 dBFS, SNR 21 to
+  25 dB, centre mostly within 700 Hz of its median (outliers to 1.3 kHz), OBW swinging
+  13 to 39 kHz (often a 13 to 17 kHz and a 25 to 39 kHz track in one burst), class
+  alternating analog-fm, wideband and carrier. It created 9 records with one observation
+  each in the hour, up to three on one placement key with three different classes. Each
+  lived 0.2 to 5 min until the emitter's next burst stuck to the established record beside
+  it and the lazy path (7.7) folded it in: list churn, and a trial spent on every young
+  record.
+- **Weak split.** Three records on one key, within 200 Hz, same class and OBW (15 kHz), each
+  labelled by a different candidate guess (pocsag, dmr, analog-fm; confidence candidate, no
+  decode, no identity), were all updated during the hour (about 50, 150 and 100 new
+  observations). A second channel showed the same with pocsag, analog-fm and dpmr.
+
+Root cause (design, section 9): the young-record rule of 3.1 and 3.5 is not the cause (an
+observation against a young record, and two young records, are undecided and never
+refused). (a) The 2.1 OBW gate compares an observation with the record's **median** OBW:
+the 13 to 14 kHz first snapshot of a burst against the 29 to 31 kHz record beside it gives
+a ratio of 0.42 to 0.48, below 0.5; the key fallback misses because the `g:` key depends on
+OBW; the observation passes the 18 dB admission (1.3) and creates a record. A young record
+whose sink proof turned it `carrier` refuses the other half of the same emitter the same
+way (13 over 33 kHz is 0.39). (b) The centre index, `keyTarget`, `settle` and 7.1 compare
+**effective** families, and the effective family of a record without proof is the
+persisted label of its candidate guess.
+
+9.1 **Association family.** A record's association family is its effective family when at
+least one holds: its effective confidence is `decoded`; it carries an identity; its shown
+evidence level is `proven` (a decode, analog audio heard, or carrier-only evidence).
+Otherwise it is `unknown`. The association family replaces the effective family in the
+sticky centre lists (2.1), the key match (`keyTarget`), `settle` (3.2) and 7.1 (and so the
+7.7 lazy path). Unchanged: the label shown to the operator, the decode-driven co-channel
+split and relocation, the 2.4 identity rule, and the 7.1 identity and decoded-protocol
+tests. So a weak guess never keeps records apart; a decoded protocol, a proven analog or
+digital family, and an identity (colour code, NAC, talker id, capcode) still do.
+
+9.2 **OBW band.** For an evidence-less observation and a record `r`, the band of `r` is
+`[obwMin / f, obwMax x f]`, where `obwMin` and `obwMax` are the smallest and largest OBW
+of `r`'s last 64 observations. `f = DQ_OBW_RATIO_MAX` = 2 when `r` is decoded or carries an
+identity, and `f = DQ_YOUNG_OBW_RATIO` = 3 otherwise, whatever its observation count or
+proven analog or carrier evidence (so reaching 3 observations or a carrier-only proof never
+narrows the band). The observation passes when its OBW lies in the band. This replaces the
+2.1 test "observation OBW over median OBW in [0.5, 2]". Arithmetic: the measured emitter
+spans 13 to 39 kHz, a ratio of 3.0, so a record holding any one of its observations `x`
+accepts every other `y` (`y / x` lies in [1/3, 3]); three 13 kHz observations give
+[4.3, 39] kHz, so a following 39 kHz one joins; a history of 16 to 39 kHz accepts 5.3 to
+117 kHz. A record whose history is narrow keeps a narrow band (a 4 to 8 kHz carrier accepts
+1.3 to 24 kHz); 3.1 still refuses a strong signal beside a weak one.
+
+9.3 **Join rule and precedence.** An evidence-less observation may join a record of the
+same source by one of two routes:
+
+- **same association family** (today's same-family route, now keyed by 9.1): within
+  today's tolerance, with **no** OBW band;
+- **cross-family or young** (2.1 amended): any association family, within
+  `min(tolerance, DQ_CROSS_FAMILY_HZ)` = at most 1 000 Hz, and only when the observation
+  passes 9.2. A record with fewer than 3 observations is reachable by this route whatever its
+  family.
+
+On both routes the 9.4 refusal applies; it wins over every other rule. The nearest
+candidate across both routes wins (today's tie-break). So the band gates only the
+cross-family and young route; a same-family candidate is never band-gated, but is never
+joined against a 9.4 refusal. Arithmetic: with centre jitter of +-300 Hz, two observations
+of one emitter are at most 600 Hz apart and a record's median centre lies within the span
+of its observations, so every later observation is within 600 Hz of it, inside 1 000 Hz.
+Outliers beyond 1 000 Hz may still create a record; the lazy path and the next load fold
+it (9.6).
+
+9.4 **Young refusal, on every path.** 3.1 and 3.5 are amended. A young record (fewer than 3
+observations) is no longer undecided: its observations are tested one by one, both sides as
+single observations (`count` treated as enough history):
+
+- observation against record: refused when 3.1 refuses the observation against the
+  record's medians (3 or more observations) or against **any** observation of a young
+  record;
+- record against record: refused when both are established and their medians are
+  incompatible (3.1 as today), when one is young and any of its observations is refused by
+  the other's medians (as today), or when both are young and **any** pair of their
+  observations (at most 2 x 2) is refused.
+
+The refusal applies on every merge path: sticky match (both routes of 9.3), key match
+(`keyTarget`), `settle`, `absorb`, the load plan and the lazy path (7.1). A refused pair in
+`settle` is linked as co-channel partners (3.2). Only non-finite peaks or OBWs make a test
+undecided, which does not refuse.
+
+9.5 **Decoded protocol guard.** Two records whose effective confidence is `decoded` with
+different decoded protocols shall never merge on any path: key match, `settle`, `absorb`
+(an unplanned call), the load plan and the lazy path (7.1 already has this test), and an
+observation carrying a decode of protocol P never sticks to or key-matches a record decoded
+as another protocol. This holds within one family (DMR against P25, POCSAG against FLEX).
+
+9.6 **Consolidation.** 7.1 is amended: the family test uses the association family (9.1),
+the compatibility test is 9.4, and the OBW test is that each record's median OBW lies in
+the other record's band (9.2, with each record's own `f`). Every other 7.1 condition
+stays, including 9.5. So the next load's plan folds the existing weak-guess splits (records
+apart only by candidate labels) and the young records left by fan-out, and the lazy path
+folds new ones.
+
+9.7 **Bounds.** 9.1 reads the cached proof label (no new proof read). 9.2 adds the OBW
+minimum and maximum to the existing 64-observation medians pass. 9.4 adds at most 4
+compatibility checks per young pair (2 per young candidate for an observation) and no index
+query. Per observation the added work is O(1) per candidate, inside the section 2 budget.
+
+9.8 Safe defaults: a non-finite or missing OBW minimum, maximum or median, or a non-finite
+observation OBW, fails 9.2 for that pair (no cross-family or young join; the same-family
+route is unchanged); a non-finite centre never matches; a non-finite peak or OBW on either
+side makes a 9.4 test undecided, which does not refuse (as 3.5). An unreadable evidence
+level or confidence counts as not proven and not decoded (and so takes `f` = 3 only when
+it also has no identity). A malformed identity counts as present and different from every
+other identity, so it never merges two records.
+
+9.9 Measurements (report, not tests): the per-observation ingest cost before and after on
+the existing store bench (desktop, with the Pi 4-class factor stated); an offline replay of
+a store copy giving, per cluster within 1 kHz, the record count before and after the load
+plan and after replaying its observations through ingest. No wall-clock assertion in tests.
+
+9.10 Regression fixtures:
+
+- **New emitter.** Empty store; 40 evidence-less observations 3 to 5 s apart, centres
+  `f +- 300 Hz` (fixed pseudo-random sequence), OBW cycling 13, 17, 33 and 39 kHz, class
+  cycling analog-fm, wideband and carrier, peak -34 +- 1 dBFS, SNR 24 to 25 dB, with
+  carrier-only analog evidence after the first. Expect exactly one record holding all 40.
+- **Narrow first.** Empty store; three 13 kHz observations at one centre, carrier-only
+  evidence after the first, then a 39 kHz observation 300 Hz away at a centre where the
+  3 500 Hz and 10 000 Hz grids give different keys. Expect one record.
+- **Established neighbour.** A `carrier` record with 64 observations at `f`, OBW alternating
+  16 to 17 and 25 to 39 kHz (median about 29 kHz); then observations at `f + 700 Hz`, OBW
+  13 kHz. Expect no new record.
+- **Weak trio.** Three records on one key within 200 Hz, OBW 15 kHz, 20 observations each,
+  stored candidate labels pocsag, dmr and analog-fm, no decode, no identity. Expect one
+  record after load (plan), and one record when the same trio is built by ingest (settle).
+- **Kept apart.** Two decoded DMR records 150 Hz apart with colour codes 1 and 2; a decoded
+  DMR record beside a decoded POCSAG record; a proven analog record beside a decoded pager
+  record. Each pair stays two, by ingest and by consolidation.
+- **Same family, different decoded protocol.** A decoded DMR record and a decoded P25
+  record, no identity, same key, 200 Hz apart, compatible levels and OBW. Expect two after
+  `settle`, after the load plan, after the lazy path and after an observation decoded as
+  P25 at the shared key.
+- **Young refusal, per path.** A young record of one observation at -60 dBFS, 4 kHz, and a
+  -30 dBFS, 12 kHz, SNR 30 dB signal 300 Hz away on the same key (3.1 refuses). Expect two
+  records when the signal arrives as an observation via the sticky route, via the key
+  match (sticky disabled by distance through a forced placement), as a second young record
+  passed to `settle`, through the load plan (both stored young) and through the lazy path.
+  The same pair with the second signal at -45 dBFS (15 dB, not refused) gives one record on
+  every path.
+- **Same-family precedence.** An `unknown` record with 64 observations at 8 kHz and an
+  evidence-less 30 kHz observation 1 500 Hz away at the same level: joins by the same-family
+  route (no band); the same observation at 1 500 Hz from a `carrier` record does not.
+- The 3.6 fixtures and the 7.10 fixtures keep their expectations.

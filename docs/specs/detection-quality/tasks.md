@@ -89,3 +89,36 @@ with each diff explained in the report.
 - [ ] DQ.12 (Main) Full root suite, docs (`docs/SCANNER.md` admission and association
       sections), spec status, and the live acceptance run with passive status recorded.
   - _Requirements: 5.1, 5.2_
+
+Amendment 9 (young records and weak protocol guesses):
+
+- [ ] DQ.13 Contract, medians and compatibility: `DQ_YOUNG_OBW_RATIO` = 3 with its
+      arithmetic and the contract test; `obwMin` / `obwMax` in the medians pass;
+      `bandwidthJoins` becomes the 9.2 band (factor from decode or identity, not count);
+      9.4 in `compatibility.ts` (`observationCompatible`, two-young pairwise test) with
+      unit tests.
+  - _Requirements: 9.2, 9.4, 9.7, 9.8_
+
+- [ ] DQ.14 Store paths in `discovery-store.ts`: `associationFamily` (centre-list key,
+      `keyTarget`, `settle`, `frozenOf`); `stickyMatch` routes and precedence (9.3); 9.4
+      through `obsCompatible` and `pairCompatible` on every path; the 9.5 decoded-protocol
+      guard in `stickyMatch`, `keyTarget`, `settle` and `absorb`. New emitter, narrow
+      first, established neighbour, weak trio (ingest), kept apart, same-family
+      different-protocol, young refusal per path and same-family precedence fixtures;
+      update the evidence-family and store-index tests.
+  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.8, 9.10_
+  - **Property 19: Young convergence**, **Property 21: Proof, protocol and identity still
+    split**, **Property 22: Refusal wins**
+
+- [ ] DQ.15 Consolidation: `ConsolidationRecord` `obwMin` / `obwMax` / `bandFactor`,
+      `joinable` band test, 9.4 and association family; weak trio, young refusal and
+      same-family different-protocol through the load plan and the lazy path; update the
+      consolidation property and fixture tests.
+  - _Requirements: 9.4, 9.5, 9.6, 9.10_
+  - **Property 20: Weak guesses do not split**
+
+- [ ] DQ.16 Measurements (report only): per-observation ingest cost before and after on the
+      store bench (desktop, Pi 4-class factor stated); offline replay of a store copy with
+      record counts per cluster before and after the plan and after re-ingest. Nothing
+      from the store copy is committed.
+  - _Requirements: 9.7, 9.9_
