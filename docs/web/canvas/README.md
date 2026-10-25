@@ -1,8 +1,9 @@
 # Design canvas snapshot
 
-A copy of every board on the [design canvas](https://claude.ai/artifact/Mr2W34vvZxc8tGFCdMvZHE),
-committed after each canvas update so the design has history, a backup and a reference for the
-dev team. The canvas is the source of truth; edit there, never here.
+A copy of every board on the design canvas, committed after each canvas update so the design has
+history, a backup and a reference for the dev team. The maintainers keep the canvas privately and
+it stays the source of truth; this folder is its committed snapshot, so edit the canvas, never
+these files.
 
 - `canvas.json` is the canvas index: board positions, titles and the sticky notes (including the
   orange core-gaps sticky).

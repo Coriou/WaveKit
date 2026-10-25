@@ -7,8 +7,8 @@
   C = web app foundation (stack, performance architecture, mock data server, canvas ↔ app
   mapping). Order agreed with the owner: A, then B, then C. B and C get their own specs.
 - **Context:** [docs/web/DESIGN.md](../../web/DESIGN.md), [docs/web/THEME-TOKENS.md](../../web/THEME-TOKENS.md),
-  [packages/brand/AGENTS.md](../../../packages/brand/AGENTS.md), the design canvas
-  (https://claude.ai/artifact/Mr2W34vvZxc8tGFCdMvZHE, snapshot in `docs/web/canvas/`).
+  [packages/brand/AGENTS.md](../../../packages/brand/AGENTS.md), the design canvas (kept
+  privately by the maintainers; committed snapshot in `docs/web/canvas/`).
 
 ## 1. Goal
 
