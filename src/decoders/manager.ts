@@ -1474,16 +1474,28 @@ export class DecoderManager extends EventEmitter {
 					!parent.intentionallyStopped
 				) {
 					this.clearExpiredAdmission(state)
+					// A moved placement with a crash retry pending waits for that retry,
+					// which starts it with the options set above (backoff honoured).
+					const retryPending = moved && state.restartTimer !== null
 					if (
-						(state.owner === "placement" && (!wasWanted || !state.lifecycle)) ||
-						moved
-					)
-						await this.startDecoderNow(
-							state.config.id,
-							{ startMode: parent.startMode },
-							() =>
-								parent.parentIntent === parentIntent && parent.desiredRunning,
-						)
+						!retryPending &&
+						((state.owner === "placement" &&
+							(!wasWanted || !state.lifecycle)) ||
+							moved)
+					) {
+						// A move is not a new start: crash accounting survives it.
+						if (moved) state.keepFailureAccounting = true
+						try {
+							await this.startDecoderNow(
+								state.config.id,
+								{ startMode: parent.startMode },
+								() =>
+									parent.parentIntent === parentIntent && parent.desiredRunning,
+							)
+						} finally {
+							state.keepFailureAccounting = false
+						}
+					}
 				}
 			}
 		} finally {
@@ -4296,6 +4308,7 @@ export class DecoderManager extends EventEmitter {
 		)
 
 		const restartDecoders = new Set<string>()
+		const referenceRestarts = new Set<string>()
 		// Update each decoder's inputSampleRate option BEFORE restart
 		// This ensures the decoder rebuilds its pipeline with the correct sample rate
 		for (const decoderId of affectedDecoders) {
@@ -4328,8 +4341,16 @@ export class DecoderManager extends EventEmitter {
 				state.config.type === "rtl433" &&
 				!state.channel &&
 				previous?.centerFreq !== caps.centerFreq
-			if (inputChanged || !passive || state.channelStale || referenceMoved)
+			if (inputChanged || !passive || state.channelStale)
 				restartDecoders.add(decoderId)
+			else if (referenceMoved) {
+				// A reference move is not a new start: crash accounting survives it,
+				// and a pending crash retry starts the process with the new centre.
+				if (!state.restartTimer) {
+					restartDecoders.add(decoderId)
+					referenceRestarts.add(decoderId)
+				}
+			}
 			state.inputCaps = { ...caps }
 			// An open channel keeps feeding the channel's rate and centre.
 			if (state.channel) continue
@@ -4362,7 +4383,8 @@ export class DecoderManager extends EventEmitter {
 			if (!this.capsChangedHandler || this.destroying) break
 			const state = this.decoders.get(decoderId)
 			if (state?.intentionallyStopped) continue
-			if (state?.channelStale) state.keepFailureAccounting = true
+			if (state?.channelStale || referenceRestarts.has(decoderId))
+				state!.keepFailureAccounting = true
 			try {
 				await this.restartDecoder(decoderId)
 			} catch (err) {

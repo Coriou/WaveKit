@@ -594,6 +594,87 @@ describe("suspension follows the band", () => {
 		])
 	})
 
+	it("a raw rtl433 centre move keeps crash accounting, and a later crash counts on top", async () => {
+		const f = setup(["rtl433"], 433_600_000)
+		await f.manager.startAll()
+		await settle()
+		const d = f.instances.get("rtl433")!
+		d.crash()
+		// The 2 s backoff restarts it once.
+		await settle()
+		expect(d.running).toBe(true)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		const starts = d.starts
+		await tune(f, 433_601_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_601_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		d.crash()
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(2)
+		expect(d.running).toBe(true)
+	})
+
+	it("a raw rtl433 centre move during a crash backoff waits for the retry", async () => {
+		const f = setup(["rtl433"], 433_600_000)
+		await f.manager.startAll()
+		await settle()
+		const d = f.instances.get("rtl433")!
+		const starts = d.starts
+		d.crash()
+		f.sources.setCenter("rtl", 433_601_000)
+		await vi.advanceTimersByTimeAsync(400)
+		expect(d.starts).toBe(starts)
+		await vi.advanceTimersByTimeAsync(3_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(d.running).toBe(true)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_601_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+	})
+
+	it("a moved rtl433 channel during a crash backoff waits for the retry", async () => {
+		const f = setup(["rtl433"], IN)
+		await f.manager.startAll()
+		await settle()
+		f.sources.setRate("rtl", 3_200_000)
+		await tune(f, 433_500_000)
+		const d = f.instances.get("rtl433")!
+		const starts = d.starts
+		d.crash()
+		f.sources.setCenter("rtl", 433_600_000)
+		await vi.advanceTimersByTimeAsync(400)
+		expect(d.starts).toBe(starts)
+		await vi.advanceTimersByTimeAsync(3_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(d.running).toBe(true)
+		// The retry started it on the moved channel, with its centre as -f.
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_920_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		expect(view(f, "rtl433").placements).toMatchObject([
+			{ channelHz: 433_920_000, running: true },
+		])
+	})
+
+	it("a moved rtl433 channel without a pending crash restarts at once and keeps accounting", async () => {
+		const f = setup(["rtl433"], IN)
+		await f.manager.startAll()
+		await settle()
+		f.sources.setRate("rtl", 3_200_000)
+		await tune(f, 433_500_000)
+		const d = f.instances.get("rtl433")!
+		d.crash()
+		await settle()
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		const starts = d.starts
+		await tune(f, 433_600_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_920_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(1)
+		d.crash()
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(f.manager.getStatus("rtl433")?.restartCount).toBe(2)
+	})
+
 	it("a raw rtl433 restarts when only the capture centre moves", async () => {
 		const f = setup(["rtl433"], 433_600_000)
 		await f.manager.startAll()
