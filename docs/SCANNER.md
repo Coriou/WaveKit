@@ -237,6 +237,8 @@ A decoded observation is admitted as before. The channel gate counts only blocks
 
 To find discoveries by what a decoder reported, `GET /api/scanner/discoveries?identity=<kind>:<value>` (for example `identity=dmr-cc:1` or `identity=pocsag-capcode:1234567`) keeps those whose identity has that kind and value, ignoring case and surrounding spaces. The free-text `q` matches the operator label or the identity value; talkgroups, callsigns and other metadata are not searched. See [API.md](API.md#get-apiscannerdiscoveries).
 
+Discoveries read through `GET /api/scanner/discoveries` carry `coverage` when decoder status is known: up to 3 decoders whose placements cover the discovery's frequency on one of its sources, with their state (`running`, `suspended` with its reason, or `stopped`). A channel placement covers its channel centre plus or minus half the channel width the decoder is placed with (`channelWidthHz` on the decoder status placement), or 12.5 kHz when it reports none. See [API.md](API.md#discovery-coverage).
+
 Storage layout under `scanner.storage.dir`:
 
 - `discoveries.json` (snapshot), `journal/` (daily observation journals), `jobs.json`, `settings.json`;
