@@ -230,10 +230,11 @@ replans). So the core orders them:
   so the band view records it as fetched only then. Any other floor refusal (an event, a PATCH
   answer, a list page) marks the store dirty: one coalesced resync reads again the spans the
   band view holds (the last 4 asked) and the list from its first page. At most one resync waits
-  or runs; a refusal during one runs exactly one more. The first waits 250 ms, each further one
-  in a row that still saw refusals doubles it up to 4 s (250, 500, 1 000, 2 000, 4 000 ms: at
-  most 5 resyncs and 7.75 s of waiting per burst), then it gives up until the next refusal or a
-  new span. A per-id refusal is final and reads nothing. A new epoch clears the cache and resyncs; late answers from a retired epoch are
+  or runs; a refusal during one runs exactly one more. A resync recovers only when every read it
+  asked was admitted; a refused or failed read keeps the store dirty. The first waits 250 ms,
+  each further one in a row doubles it up to 4 s (250, 500, 1 000, 2 000, 4 000 ms: at most 5
+  resyncs and 7.75 s of waiting per burst), then it gives up until the next refusal, a new span
+  or a WebSocket reconnect (which marks the store dirty too). A per-id refusal is final and reads nothing. A new epoch clears the cache and resyncs; late answers from a retired epoch are
   dropped, and a DELETE asked before an epoch change applies nothing. The tuned card's
   nearest-discovery store orders its one record the same way. Without `storeEpoch` (an older
   core) the same rules run on the client sequence alone.

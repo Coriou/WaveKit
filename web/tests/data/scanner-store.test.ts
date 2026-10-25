@@ -10,6 +10,7 @@ import type {
 import { ApiClient, isApiError } from "../../src/data/api-client.ts"
 import { EventsClient } from "../../src/data/events-client.ts"
 import {
+	RESYNC_TRIES,
 	ScannerStore,
 	absorbedBy,
 	deriveJobs,
@@ -1838,6 +1839,56 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			await settle()
 			// nothing refused since: no more
 			expect(calls.length - base).toBe(4)
+			store.dispose()
+		})
+
+		it("a resync whose span read fails (500) tries again and the label recovers with no event", async () => {
+			const { store, refuse, settle, pending, calls } = await floored()
+			const base = calls.length
+			refuse(1)
+			await settle()
+			expect(calls.length - base).toBe(2)
+			// the held span answers 500, the other one normally
+			for (const [k, u] of calls.slice(base).entries())
+				pending[base + k]!(
+					u.includes("freqMinHz=446000000")
+						? { code: "INTERNAL", message: "boom" }
+						: pageAt(12),
+					u.includes("freqMinHz=446000000") ? 500 : 200,
+				)
+			await settle()
+			// not recovered: one more resync
+			expect(calls.length - base).toBe(4)
+			for (const [k, u] of calls.slice(base + 2).entries())
+				pending[base + 2 + k]!(
+					u.includes("freqMinHz=446000000")
+						? pageAt(13, at("x0", 5, "recovered"))
+						: pageAt(13),
+				)
+			await settle()
+			expect(labelOf(store, "x0")).toBe("recovered")
+			await settle()
+			expect(calls.length - base).toBe(4)
+			store.dispose()
+		})
+
+		it("gives up after 5 failed resyncs in a row, until the next refusal", async () => {
+			const { store, refuse, settle, pending, calls } = await floored()
+			const base = calls.length
+			refuse(1)
+			for (let i = 0; i < RESYNC_TRIES; i++) {
+				await settle()
+				expect(calls.length - base).toBe(2 * (i + 1))
+				for (let k = calls.length - 2; k < calls.length; k++)
+					pending[k]!({ code: "INTERNAL", message: "boom" }, 500)
+			}
+			await settle()
+			await settle()
+			expect(calls.length - base).toBe(2 * RESYNC_TRIES)
+			// a new refusal starts again
+			refuse(1, 1)
+			await settle()
+			expect(calls.length - base).toBe(2 * RESYNC_TRIES + 2)
 			store.dispose()
 		})
 

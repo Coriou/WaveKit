@@ -89,14 +89,16 @@ interface Stamp {
  * Band inspection UX req 3.3: recovery after writes the floor refused (write-order.ts). A refusal
  * marks the store dirty; one coalesced resync then reads again the spans the band view holds (the
  * last RESYNC_SPANS_MAX asked) and the list from its first page. At most one resync is waiting or
- * running; a refusal during one runs exactly one more after it. The first waits RESYNC_DEBOUNCE_MS;
- * each further one in a row that still saw refusals doubles it up to RESYNC_MAX_MS (250, 500,
- * 1 000, 2 000, 4 000 ms: at most 5 resyncs and 7.75 s of waiting per burst), then it gives up
- * until the next refusal or a new span is asked for.
+ * running; a refusal during one runs exactly one more after it. A resync recovers only when every
+ * read it asked was admitted; a refused or failed read keeps the store dirty. The first waits
+ * RESYNC_DEBOUNCE_MS; each further one in a row doubles it up to RESYNC_MAX_MS (250, 500, 1 000,
+ * 2 000, 4 000 ms: RESYNC_TRIES resyncs and 7.75 s of waiting per burst), then it gives up until
+ * the next refusal, a new span or a WebSocket reconnect.
  */
 export const RESYNC_DEBOUNCE_MS = 250
 export const RESYNC_MAX_MS = 4000
 export const RESYNC_SPANS_MAX = 4
+export const RESYNC_TRIES = 5
 
 /** POST /api/scanner/discoveries/:id/listen (core src/core/scanner/listen.ts ListenResult). */
 export interface ScannerListenResult {
@@ -537,7 +539,11 @@ export class ScannerStore extends Store<ScannerState> {
 					statusErrorCode: null,
 				})),
 			),
-			events.onReconnected(() => void this.resync()),
+			events.onReconnected(() => {
+				void this.resync()
+				// events may have been missed while disconnected: the held spans are read again
+				this.markDirty()
+			}),
 		]
 	}
 
@@ -1152,12 +1158,24 @@ export class ScannerStore extends Store<ScannerState> {
 		this.resyncState = "running"
 		this.dirty = false
 		const d = this.current().discoveries
+		// a resync recovers only when every read it asked was admitted: a refusal or a failure
+		// keeps the store dirty
 		const reads: Promise<unknown>[] = [...this.heldSpans.values()].map(q =>
-			this.fetchSpan(q, {}).then(r => {
-				if (r.floored) this.dirty = true
-			}),
+			this.fetchSpan(q, {}).then(
+				r => {
+					if (r.floored) this.dirty = true
+				},
+				() => {
+					this.dirty = true
+				},
+			),
 		)
-		if (d.loaded) reads.push(this.refreshList(d.query, d.items.length))
+		if (d.loaded)
+			reads.push(
+				this.refreshList(d.query, d.items.length).then(() => {
+					if (this.current().discoveries.error !== null) this.dirty = true
+				}),
+			)
 		await Promise.allSettled(reads)
 		this.resyncState = "idle"
 		if (this.disposed) return
@@ -1165,8 +1183,9 @@ export class ScannerStore extends Store<ScannerState> {
 			this.resyncAttempt = 0
 			return
 		}
-		// refused again: one more, later; past RESYNC_MAX_MS give up until the next refusal
-		if (this.resyncDelayMs(this.resyncAttempt) >= RESYNC_MAX_MS) {
+		// not recovered: one more, later; after RESYNC_TRIES in a row give up until the next
+		// refusal, a new span or a reconnect
+		if (this.resyncAttempt + 1 >= RESYNC_TRIES) {
 			this.dirty = false
 			this.resyncAttempt = 0
 			return
