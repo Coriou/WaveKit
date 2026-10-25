@@ -162,25 +162,31 @@ describe("IQ adapters", () => {
 		})
 	})
 
-	it.each(RATES)("dumpvdl2 resamples exactly to its target from %i Hz", fs => {
-		const decoder = new Dumpvdl2Decoder(
-			config("dumpvdl2", { frequencies: [136_975_000] }),
-			logger,
-		)
-		expect(decoder.getRateAdapter?.({ sampleRateHz: fs })).toEqual({
-			adaptation: "resample",
-			frontendRateHz: 1_050_000,
-			decoderInputKind: "iq",
-			decoderInputRateHz: 1_050_000,
-			decoderInputFormat: "u8",
-		})
-		decoder.updateOptions({ inputSampleRate: fs })
-		expect(pipeline(decoder)).toContain(`-r ${fs} -`)
-		expect(pipeline(decoder)).toContain("rate -h 1050000")
-		expect(pipeline(decoder)).toContain("--oversample 10")
-		expect(assess(decoder, fs).verdict).toBe("unknown")
-		expect(assess(decoder, fs).decoderInputRateHz).toBe(1_050_000)
-	})
+	it.each(RATES)(
+		"dumpvdl2 resamples exactly to 105 kHz × N from %i Hz (3.19)",
+		fs => {
+			const decoder = new Dumpvdl2Decoder(
+				config("dumpvdl2", { frequencies: [136_975_000] }),
+				logger,
+			)
+			// At or above the 1.05 MHz target: the target; below it the smallest
+			// 105 kHz multiple at or above the input (no needless upsampling).
+			const rate = Math.min(1_050_000, Math.ceil(fs / 105_000) * 105_000)
+			expect(decoder.getRateAdapter?.({ sampleRateHz: fs })).toEqual({
+				adaptation: "resample",
+				frontendRateHz: rate,
+				decoderInputKind: "iq",
+				decoderInputRateHz: rate,
+				decoderInputFormat: "u8",
+			})
+			decoder.updateOptions({ inputSampleRate: fs })
+			expect(pipeline(decoder)).toContain(`-r ${fs} -`)
+			expect(pipeline(decoder)).toContain(`rate -h ${rate}`)
+			expect(pipeline(decoder)).toContain(`--oversample ${rate / 105_000}`)
+			expect(assess(decoder, fs).verdict).toBe("unknown")
+			expect(assess(decoder, fs).decoderInputRateHz).toBe(rate)
+		},
+	)
 
 	it.each(RATES)("rtl_433 decimates by an integer from %i Hz", fs => {
 		const decoder = new Rtl433Decoder(config("rtl433", {}), logger)

@@ -456,16 +456,17 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(
 			wide.getChannelRequest({ sampleRateHz: 2_048_000, centerHz: 136.5e6 }),
 		).toEqual({
-			invalid: "frequency span 1000000 Hz needs targetSampleRate > 1050000",
+			invalid:
+				"frequency span 1000000 Hz needs a channel rate > 1050000 Hz (have 1050000)",
 		})
-		// The default VDL2 list (325 kHz span) keeps the §2 default passband.
+		// The default VDL2 list (325 kHz span) narrows to 325 + 50 kHz (3.19).
 		const defaults = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
 		expect(
 			defaults.getChannelRequest({
 				sampleRateHz: 2_048_000,
 				centerHz: 136.8e6,
 			}),
-		).toMatchObject({ bandwidthHz: 997_500, transitionHz: 26_250 })
+		).toMatchObject({ bandwidthHz: 375_000, transitionHz: 26_250 })
 		const follow = new Dumpvdl2Decoder(
 			config("dumpvdl2", { followCenter: true }),
 			logger,
@@ -525,7 +526,7 @@ describe("channel requests (addendum §1, §2)", () => {
 			d.getChannelRequest?.({ sampleRateHz: 2_048_000, centerHz: 136.8e6 }),
 		).toEqual({
 			centerHz: 136_812_500,
-			bandwidthHz: 997_500,
+			bandwidthHz: 375_000,
 			transitionHz: 26_250,
 			outputRateHz: 1_050_000,
 			format: "cu8",

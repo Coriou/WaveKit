@@ -546,3 +546,38 @@ config-origin with and without channels, gated secondaries refused by a
 closed gate) and a property test; with a synthetic POCSAG1200 burst on a 6.25 kHz offset
 channel (`scripts/fixtures/pocsag-iq.mjs`) through wavekit-chan and multimon-ng's channel
 command line, and through an independent reference filter, it decodes on that channel only.
+
+3.19 **dumpvdl2 requests only the channel its targets need.** dumpvdl2 channelises
+internally, so it asks for one channel centred on its target midpoint (or `channelHz`).
+
+- _Passband._ 2 × (farthest target from the channel centre) + 50 kHz (one 25 kHz VDL2
+  channel plus a 12.5 kHz guard each side), transition rate × 0.025, instead of the full
+  rate × 0.95. It widens only past rate × 0.95 (transition shrunk so bw/2 + tr ≤ rate/2)
+  and is invalid when it reaches the rate.
+- _Channel rate._ A capture at or above `targetSampleRate` (default 1.05 MHz) gets the
+  target, as before (2.048 and 2.4 Msps to 1.05 MHz plan natively). Below it the channelizer
+  cannot upsample, and 105 kHz × N is no cheap ratio of the usual capture rates (factors 3
+  and 7: 1.024 Msps to 945 kHz has no feasible native plan), so the channel is the capture
+  divided by the largest integer D giving an integer rate of at least 105 kHz that holds
+  the passband at rate × 0.95; with none, D = 1 (the capture itself). A capture below
+  105 kHz is invalid.
+- _Decoder rate._ dumpvdl2 runs at the smallest 105 kHz × N at or above the delivered rate,
+  capped at the target, and `--oversample` is that N. Its existing SoX resample step (the
+  raw path's) converts when the two differ; no new chain is added.
+- _followCenter._ The default passband stays, but it is still widened or rejected by the
+  list span, as before this amendment.
+- _Arithmetic._ The default EU list (325 kHz span) at 1.024 Msps needs 375 kHz: D = 3 gives
+  a non-integer 341 333 Hz, D = 2 gives 512 kHz (375 kHz ≤ 486.4 kHz), transition 12.8 kHz,
+  reach 187.5 + 12.8 = 200.3 kHz inside the ± 409.6 kHz window (0.8); SoX lifts 512 kHz to
+  525 kHz (N = 5). The full 997.5 kHz passband at 1.05 MHz (reach 525 kHz, and above the
+  capture rate) was `capture-too-narrow`. A centred span fits a 1.024 Msps window up to
+  718 kHz (D = 1).
+- _Cost._ The 512 to 525 kHz SoX step (`rate -h`) took 7 to 7.5 % of a core on a Mac (load
+  average 7 to 10). Raspberry Pi figures are still to be measured.
+
+Acceptance: unit tests through placement reach and channelizer admission at 1.024 and
+2.4 Msps, at and just past the bound, a capture where no rate fits, off-midpoint
+`channelHz` at the narrowing, widening and invalid bounds, the command line rate against
+the request, and a property test that a placed request is admitted, lies in the window,
+covers every target channel, and that every target set that fits is placed. An integration
+test opens the request on the real wavekit-chan at 1.024, 2.048 and 2.4 Msps.
