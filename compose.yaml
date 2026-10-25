@@ -93,13 +93,8 @@ services:
       SDR_SOURCE: "tcp://sdrpp-server:5259"
       # Runtime state (API band overrides); config/ stays read-only.
       WAVEKIT_STATE_DIR: /app/data
-    # config/default.yaml has api.port=3000 (the historical container-internal
-    # port); host port 9000 is mapped to container 3000 to match the previous
-    # `make dev-up -p 9000:3000` workflow. The same translation applies to the
-    # tuner port 1234 (mapped to host 4713 via the WebSocket convention).
-    # When the API config is updated to bind 9000 directly, simplify to 9000:9000.
     ports:
-      - "9000:3000"
+      - "9000:9000"
       - "8080:8080"
       - "8081:8081"
       - "8082:8082"
@@ -110,11 +105,8 @@ services:
       - ./logs:/var/log/wavekit
       - ./decoded_calls:/app/decoded_calls
       - ./data:/app/data
-    # Container-internal port is 3000 (config/default.yaml api.port); host port
-    # 9000 is mapped above. The healthcheck runs inside the container, so probe
-    # localhost:3000. The user-facing curl http://localhost:9000/health works.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 10s
       timeout: 5s
       retries: 3

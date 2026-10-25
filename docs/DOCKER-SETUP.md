@@ -72,7 +72,7 @@ make dev-status        # docker compose --profile dev ps + curl /health
 The dev profile builds `wavekit:dev-sdrpp` (target `final-sdrpp`) and
 `wavekit:dev-core` (target `final-core`) locally with `cache_from` pointing
 at the GHCR registry cache (see below). Ports exposed on the host: `9000`
-(API, container port 3000), `8080` (audio TCP), `8081` (live audio HTTP),
+(API), `8080` (audio TCP), `8081` (live audio HTTP),
 `8082` (digital-voice audio HTTP), `4713` (RTL-TCP relay), `5259` (SDR++
 binary protocol).
 
@@ -315,7 +315,7 @@ back to `EU`; set `WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
 ## Health checks
 
 The `wavekit-api` HTTP health endpoint is `/health`. Compose healthchecks
-probe it on the container-internal port; the host-mapped port is `9000`.
+probe it inside the container on port 9000, the same port the host maps.
 
 ```bash
 curl http://localhost:9000/health

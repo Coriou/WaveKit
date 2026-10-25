@@ -11,9 +11,8 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **Digital voice audio**: `http://localhost:8082/stream` and `/stream.wav`
 - **Interactive API explorer** (OpenAPI): `http://localhost:9000/docs`
 
-Port 9000 is the API port in the shipped Docker and local configurations
-(`config/docker.yaml`, `config/local.yaml`). The schema default, used when a config file
-sets no `api.port`, is 3000.
+Port 9000 is the API port: the schema default, `config/default.yaml` and every shipped Docker
+and local configuration (`config/docker.yaml`, `config/local.yaml`) use it.
 
 In the examples, `<pi-address>` stands for your own receiver's address (an `rtl_tcp` or
 rtlmux host), and

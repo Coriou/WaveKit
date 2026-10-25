@@ -167,7 +167,7 @@ describe("config export classifies decoder options by meaning", () => {
 			string,
 			unknown
 		>
-		expect(r["api"]).toMatchObject({ host: R, port: 3000 })
+		expect(r["api"]).toMatchObject({ host: R, port: 9000 })
 	})
 })
 

@@ -474,7 +474,7 @@ export const DigitalVoiceConfigSchema = z
  */
 export const ApiConfigSchema = z.object({
 	host: z.string().default("0.0.0.0"),
-	port: z.number().int().min(1).max(65535).default(3000),
+	port: z.number().int().min(1).max(65535).default(9000),
 })
 
 /**

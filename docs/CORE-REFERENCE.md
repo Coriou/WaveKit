@@ -276,7 +276,7 @@ decoders: []
 # API
 api:
   host: "0.0.0.0"
-  port: 3000
+  port: 9000
 
 # Audio output
 audio:

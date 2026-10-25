@@ -193,7 +193,7 @@ logging:
 			expect(config.audio.format).toBe("S16LE")
 			expect(config.audio.sampleRate).toBe(48000)
 			expect(config.api.host).toBe("0.0.0.0")
-			expect(config.api.port).toBe(3000)
+			expect(config.api.port).toBe(9000)
 			expect(config.logging.level).toBe("info")
 		})
 
@@ -347,7 +347,7 @@ liveDemod:
 
 			// Should use defaults
 			expect(config.sources).toEqual([])
-			expect(config.api.port).toBe(3000)
+			expect(config.api.port).toBe(9000)
 		})
 
 		it("should throw error for malformed YAML", () => {
@@ -448,7 +448,7 @@ liveDemod:
 			// Should not throw, but use default
 			const config = loadConfig(path.join(tempDir, "nonexistent.yaml"))
 
-			expect(config.api.port).toBe(3000)
+			expect(config.api.port).toBe(9000)
 		})
 	})
 })

@@ -7,7 +7,7 @@
 #
 # Configuration values can be overridden using environment variables:
 #   WAVEKIT_API_HOST        - API server host (default: 0.0.0.0)
-#   WAVEKIT_API_PORT        - API server port (default: 3000)
+#   WAVEKIT_API_PORT        - API server port (default: 9000)
 #   WAVEKIT_AUDIO_TCP_PORT  - Audio output TCP port (default: 8080)
 #   WAVEKIT_AUDIO_FORMAT    - Audio format: S16LE or FLOAT32LE (default: S16LE)
 #   WAVEKIT_AUDIO_SAMPLE_RATE - Audio sample rate in Hz (default: 48000)
@@ -393,11 +393,11 @@ digitalVoice:
 #
 # Options:
 #   host - Bind address (default: 0.0.0.0 for all interfaces)
-#   port - HTTP port (default: 3000)
+#   port - HTTP port (default: 9000)
 
 api:
   host: "0.0.0.0"
-  port: 3000
+  port: 9000
 
 # -----------------------------------------------------------------------------
 # Logging
