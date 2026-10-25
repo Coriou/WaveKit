@@ -89,19 +89,6 @@ describe("legacy consolidation (DQ 7.10)", () => {
 			],
 		],
 		[
-			"analog beside its decoded digital twin",
-			[
-				{ id: "d_a", centreHz: F, family: "analog", protocol: "analog-fm" },
-				{
-					id: "d_b",
-					centreHz: F + 100,
-					family: "digital-voice",
-					protocol: "dmr",
-					confidence: "decoded",
-				},
-			],
-		],
-		[
 			"an operator lockout",
 			[
 				{ id: "d_a", centreHz: F, operator: { lockout: true } },
@@ -131,6 +118,34 @@ describe("legacy consolidation (DQ 7.10)", () => {
 		],
 	])("kept apart: %s", (_name, specs) => {
 		const { store } = storeOf(specs)
+		const plan = store.consolidationPlan()
+		expect(plan.groups).toEqual([])
+		store.applyConsolidation(plan)
+		expect(Object.keys(shape(store))).toEqual(["d_a", "d_b"])
+	})
+
+	it("kept apart: analog (proven by heard audio) beside its decoded digital twin", () => {
+		const { store } = storeOf([
+			{ id: "d_a", centreHz: F, family: "analog", protocol: "analog-fm" },
+			{
+				id: "d_b",
+				centreHz: F + 100,
+				family: "digital-voice",
+				protocol: "dmr",
+				confidence: "decoded",
+			},
+		])
+		// DQ 9.1: a stored analog guess alone is a weak label; the heard tone proves the family.
+		expect(
+			store.recordAnalog("d_a-o0", {
+				outcome: "decoded",
+				mode: "nfm",
+				voice: true,
+				tone: { ctcssHz: 88.5, dcs: null },
+				transport: "live",
+				at: T0,
+			}),
+		).toBe(true)
 		const plan = store.consolidationPlan()
 		expect(plan.groups).toEqual([])
 		store.applyConsolidation(plan)
@@ -185,6 +200,9 @@ describe("legacy consolidation (DQ 7.10)", () => {
 				sourceId: "src-1",
 				centreHz: F + (i % 1000),
 				obwHz: 8000,
+				obwMin: 8000,
+				obwMax: 8000,
+				bandFactor: 2,
 				peakDbfs: -50,
 				count: 10,
 				young: [],
@@ -213,6 +231,9 @@ describe("legacy consolidation (DQ 7.10)", () => {
 			sourceId: "src-1",
 			centreHz,
 			obwHz: 8000,
+			obwMin: 8000,
+			obwMax: 8000,
+			bandFactor: conflict ? 2 : 3,
 			peakDbfs: -50,
 			count: 10,
 			young: [],

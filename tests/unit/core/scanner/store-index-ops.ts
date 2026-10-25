@@ -259,15 +259,23 @@ function acceptsFamily(
 	d: Discovery,
 	family: ProtocolFamily,
 ): boolean {
-	const label = (
+	const view = (
 		s as unknown as {
-			effectiveLabel(discovery: Discovery): {
-				family: ProtocolFamily
-				confidence: ScannerConfidence
+			discoveryView(discovery: Discovery): {
+				evidence: string
+				label: { family: ProtocolFamily; confidence: ScannerConfidence }
 			}
 		}
-	).effectiveLabel(d)
-	if (label.family === family) return true
+	).discoveryView(d)
+	const label = view.label
+	// DQ 9.1: the association family (a weak guess counts as unknown).
+	const association =
+		label.confidence === "decoded" ||
+		d.identity !== undefined ||
+		view.evidence === "proven"
+			? label.family
+			: "unknown"
+	if (association === family) return true
 	return family === "unknown" && label.confidence === "decoded"
 }
 

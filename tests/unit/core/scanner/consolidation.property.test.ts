@@ -29,29 +29,36 @@ const FAMILIES: ProtocolFamily[] = [
 ]
 
 const recordArb = (i: number): fc.Arbitrary<ConsolidationRecord> =>
-	fc.record({
-		id: fc.constant(`d_${String(i).padStart(3, "0")}`),
-		sourceId: fc.constantFrom("s1", "s2"),
-		centreHz: fc.integer({ min: 0, max: 4000 }).map(x => F + x),
-		obwHz: fc.constantFrom(4000, 8000, 12_000, 20_000),
-		peakDbfs: fc.constantFrom(-50, -45, -20),
-		count: fc.integer({ min: 1, max: 10 }),
-		young: fc.constant([{ peakDbfs: -50, obwHz: 8000 }]),
-		identity: fc.option(
-			fc.record({
-				kind: fc.constant("dmr-cc"),
-				value: fc.constantFrom("1", "2"),
-			}),
-			{ nil: undefined },
-		),
-		family: fc.constantFrom(...FAMILIES),
-		decoded: fc.boolean(),
-		protocol: fc.constantFrom("dmr", "pocsag", "unknown"),
-		firstSeenAt: fc
-			.integer({ min: 0, max: 20 })
-			.map(x => new Date(T0 + x * 1000).toISOString()),
-		hasOperator: fc.boolean(),
-	})
+	fc
+		.record({
+			id: fc.constant(`d_${String(i).padStart(3, "0")}`),
+			sourceId: fc.constantFrom("s1", "s2"),
+			centreHz: fc.integer({ min: 0, max: 4000 }).map(x => F + x),
+			obwHz: fc.constantFrom(4000, 8000, 12_000, 20_000),
+			peakDbfs: fc.constantFrom(-50, -45, -20),
+			count: fc.integer({ min: 1, max: 10 }),
+			young: fc.constant([{ peakDbfs: -50, obwHz: 8000 }]),
+			identity: fc.option(
+				fc.record({
+					kind: fc.constant("dmr-cc"),
+					value: fc.constantFrom("1", "2"),
+				}),
+				{ nil: undefined },
+			),
+			family: fc.constantFrom(...FAMILIES),
+			decoded: fc.boolean(),
+			protocol: fc.constantFrom("dmr", "pocsag", "unknown"),
+			firstSeenAt: fc
+				.integer({ min: 0, max: 20 })
+				.map(x => new Date(T0 + x * 1000).toISOString()),
+			hasOperator: fc.boolean(),
+		})
+		.map(r => ({
+			...r,
+			obwMin: r.obwHz,
+			obwMax: r.obwHz,
+			bandFactor: r.decoded || r.identity !== undefined ? 2 : 3,
+		}))
 
 const recordsArb = fc
 	.integer({ min: 0, max: 40 })

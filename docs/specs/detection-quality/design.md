@@ -1,7 +1,8 @@
 # Detection quality design (WG15 DQ)
 
 Status: reviewed design, not implemented (2026-10-24; revised after spec review the same
-day). Amendment (reviewed 2026-10-25): sections 7 and 8. Requirements in
+day). Amendment (reviewed 2026-10-25): sections 7 and 8. Amendment (draft 2026-10-25):
+section 9. Requirements in
 [requirements](requirements.md), tasks in [tasks](tasks.md).
 Background: the [scanner redesign](../scanner-redesign/design.md) channel gate and evidence
 labels, `docs/SCANNER.md`, and the hot-path rules in `docs/PERFORMANCE.md`.
@@ -47,6 +48,7 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_DATA_RATE_PER_S`        | 16                             | 4.5         |
 | `DQ_CONSOLIDATE_GROUP_MAX`  | 16 (survivor plus 15)          | 7.3, 7.8    |
 | `DQ_CONSOLIDATE_SCAN_MAX`   | 32                             | 7.3, 7.7    |
+| `DQ_YOUNG_OBW_RATIO`        | 3                              | 9.2, 9.6    |
 
 No change to `packages/api-types`, the REST or WebSocket shapes, or
 `docs/CLI-COORDINATION.md`. Pending entries are memory-only. The persisted and journaled
@@ -463,6 +465,91 @@ Pi protection: a headless receiver has only passive on the engine (row 2, today'
 0.99 core disables at open + 60 s). With a display open on such a host `U` saturates and
 row 3 disables passive whether or not a baseline exists.
 
+## 9. Young records and weak protocol guesses (amendment)
+
+### Root cause (code as of the amendment base)
+
+All in `src/core/scanner/store/discovery-store.ts` unless named.
+
+- `ingest` (about lines 865 to 922) labels every evidence-less observation `unknown`
+  (`labelFromEvidence(emptyProof(..))`), calls `stickyMatch`, then `keyTarget`, then
+  `admits` (18 dB, line 940) and `createFrom`.
+- `stickyMatch` (about lines 2112 to 2182) searches the `unknown` list with the full
+  tolerance, then (2.1) every other family list within `min(tol, 1 000)` where `consider`
+  (line 2145) requires `bandwidthJoins` (lines 2184 to 2198): observation OBW over the
+  record's **median** OBW in [0.5, 2]. Measured: once the lazy path had folded the
+  emitter's `unknown` records into the established `carrier` record beside it (median OBW
+  29 to 31 kHz), the burst's first snapshot (13 to 14 kHz, ratio 0.42 to 0.48) matched
+  nothing. An offline check on the store copy reproduced it: a 13 kHz observation 660 Hz
+  from that record created a record, a 17 kHz one then joined the young record (same
+  `unknown` list), and a 33 kHz one stuck to the carrier record and the lazy path absorbed
+  the young record, which is the live pattern (each young record vanished at the
+  emitter's next burst while the carrier record gained two observations).
+- `keyTarget` (about lines 2200 to 2242) works only on the observation's key, and the `g:`
+  key is OBW-dependent (`frequencyKey`, `src/core/scanner/bandplan/index.ts` lines 112 to
+  120, grid `gridToleranceHz` lines 78 to 80): 13 kHz keys on a 3 500 Hz grid, 31 kHz on an
+  8 000 Hz grid, so the fallback misses.
+- The young-record rule (`recordsCompatible`, `src/core/scanner/store/compatibility.ts`;
+  `obsCompatible` line 3033) returns undecided for a young record, which never refuses: it
+  is not the cause. A young record whose effective family later turns `carrier` (sink
+  proof) does refuse the other half of the emitter through `bandwidthJoins` (13 over
+  33 kHz).
+- Weak split: the centre lists are keyed by the effective family (`reindex`, line 4744,
+  re-run after `invalidateLabel`), `keyTarget` filters by it (line 2210), `settle` (lines 3284 to 3309) merges only
+  equal effective families (line 3291), and `frozenOf` (line 1365) feeds it to `joinable`
+  (`consolidation.ts` lines 88 to 93), whose OBW test is the median ratio (line 79). A
+  record without proof shows its persisted candidate label (`discoveryView`), so pocsag,
+  dmr and analog-fm guesses are three families everywhere.
+
+### Design
+
+- `associationFamily(d)`: from `discoveryView(d)` (cached with the label, so no new proof
+  read): the label's family when the label confidence is `decoded`, `d.identity` is
+  defined, or the view's evidence is `proven`; otherwise `unknown`. Replaces
+  `effectiveLabel(d).family` in the centre-list key (`reindex`; it keeps its persisted-family
+  fallback when evidence cannot name a proof, mapped the same way), `keyTarget`, `settle` and `frozenOf`. Decode-driven paths
+  (`coChannelEvidence`, `relocateIncompatible`, `establishedFamily`) keep the effective
+  family.
+- `Medians` gains `obwMin` and `obwMax`, computed in the existing pass over the last 64
+  observations (two compares per observation, invalidated with the medians); non-finite OBWs
+  are skipped and a window with none finite gives NaN (9.8).
+  `bandwidthJoins(d, obw)` becomes the 9.2 band with `f` = `DQ_OBW_RATIO_MAX` when the
+  record's effective confidence is `decoded` or it carries an identity, else
+  `DQ_YOUNG_OBW_RATIO` (not from the observation count, so the count-3 transition and a
+  carrier-only proof never narrow the band); any non-finite input returns false.
+- 9.4 in `compatibility.ts`: `compatible` keeps its signature; `recordsCompatible` tests
+  every pair of young observations when both records are young (at most 4 calls, false if
+  any is false, null only when every pair is undecided), and a new
+  `observationCompatible(record, obs)` tests the observation against the medians
+  (established) or against each young observation. The store's `obsCompatible` calls it, so
+  `stickyMatch` (both routes), `keyTarget`, `raisesBest` and the lazy survivor choice all
+  refuse the same pairs; `pairCompatible` (settle, absorb) and `joinable` (plan, lazy)
+  call `recordsCompatible`. `frozenOf` already passes the young observations.
+- 9.5: `decodedConflict(a, b)` = both effective confidences `decoded` and protocols
+  differ. `settle` skips (and links as co-channel) such a pair, `absorb` refuses it unless
+  `planned`, `keyTarget` filters such records out of its merge targets, and `stickyMatch`
+  skips them for an observation whose ingest decode names another protocol. `joinable`
+  keeps its existing test, now on the effective protocol.
+- `stickyMatch`: the same-family route (association family list, full tolerance, no band)
+  and the cross-family or young route (every other list plus young records of any list,
+  `min(tol, 1 000)`, 9.2 band) as 9.3; both routes apply 9.4 and 9.5. Nearest wins.
+- `consolidation.ts`: `ConsolidationRecord` gains `obwMin`, `obwMax` and `bandFactor`;
+  `joinable` checks each median against the other's band instead of the median ratio, and
+  its family test reads the association family the store passes in `family`.
+- Contract: `DQ_YOUNG_OBW_RATIO` = 3 in `src/core/scanner/detection-quality-contract.ts`.
+
+Interaction: a weak-guess record now sits in the `unknown` list, so evidence-less
+observations reach it with the full same-family tolerance and no OBW gate, exactly as a
+record labelled `unknown` today. 9.4 refuses strong-next-to-weak pairs on every path,
+young or established.
+
+### CPU
+
+As 9.7: no new index query; `associationFamily` is a field read on the cached view; at most
+2 extra `compatible` calls per young candidate for an observation and 4 per young pair
+(O(1)); two compares per observation in the medians pass. Ingest cost is measured on the
+store bench before and after and reported (9.9), not asserted.
+
 ## CPU and hot path (`docs/PERFORMANCE.md`)
 
 | Change                              | Rate                      | Cost                                             |
@@ -606,6 +693,29 @@ utilizations, passive is off for baseline windows at most 61 s in any 1 800 s, a
 disabled source with a valid baseline starts at most one trial per 900 s. _Validates 8.5
 to 8.8._
 
+**Property 19: Young convergence.** For any sequence of evidence-less observations of one
+emitter with centres within +-300 Hz of `f`, OBW in [13, 39] kHz in any order (including
+any run of narrow observations before the first wide one), peaks within 3 dB, SNR at least
+18 dB, any class order and any interleaving of carrier-only sink proofs, exactly one record
+results. _Validates 9.2, 9.3._
+
+**Property 20: Weak guesses do not split.** For any set of at most 16 records within
+1 000 Hz, not refused by 9.4 and within each other's bands, with arbitrary candidate labels
+and no decode, identity or proven evidence, the load plan gives one group and `settle` on a
+shared key leaves one record. _Validates 9.1, 9.6._
+
+**Property 21: Proof, protocol and identity still split.** For any two records with
+different identities, different decoded protocols (same family included), or incompatible
+proven families (analog against a digital family), whatever their candidate labels, no path
+(sticky, key match, `settle`, `absorb`, plan, lazy) merges them. _Validates 9.1, 9.5,
+9.6, 9.8._
+
+**Property 22: Refusal wins.** For any store state, an observation or record that 9.4
+refuses against a record (young or established) is never merged with it on any path; an
+observation whose OBW is outside a record's band never joins it by the cross-family or young
+route, and joins it only by the same-family route within today's tolerance.
+_Validates 9.3, 9.4, 9.8._
+
 All fast-check properties run with `numRuns: 100` or more and carry the trace comment
 (`// Feature: detection-quality, Property N: ...`).
 
@@ -614,3 +724,10 @@ Properties 12 to 16), `tests/unit/core/scanner/discovery-store-consolidate.test.
 the 7.10 fixtures including the old-reader replay), `tests/unit/core/scanner/passive-guard.test.ts`
 and `passive-guard.property.test.ts` (new, the 8.10 table and Properties 17 and 18). Expected
 to change: persistence tests for the plan file; scanner-service passive guard wiring tests.
+
+Tests for amendment 9: `tests/unit/core/scanner/discovery-store-young.test.ts` (new, the
+9.10 fixtures), `tests/unit/core/scanner/discovery-store-young.property.test.ts` (new,
+Properties 19 to 22). Expected to change: `consolidation.property.test.ts` and
+`discovery-store-consolidate.test.ts` (band test, association family),
+`discovery-store-evidence-family.test.ts` and `store-index.property.test.ts` (list key),
+and any 2.6 fixture that relied on the median ratio.

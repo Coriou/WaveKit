@@ -32,6 +32,7 @@ describe("detection-quality contract (frozen)", () => {
 			DQ_DATA_RATE_PER_S: 16,
 			DQ_CONSOLIDATE_GROUP_MAX: 16,
 			DQ_CONSOLIDATE_SCAN_MAX: 32,
+			DQ_YOUNG_OBW_RATIO: 3,
 		})
 		expect(Object.isFrozen(dq.DQ_IDENTITY_PROTOCOLS)).toBe(true)
 	})
@@ -49,5 +50,8 @@ describe("detection-quality contract (frozen)", () => {
 		// data: half a 2.5 kHz raster; 256 / 16 per s = 16 s of one busy source
 		expect(dq.DQ_DATA_FREQ_HZ * 2).toBe(dq.DQ_PENDING_BUCKET_HZ)
 		expect(dq.DQ_DATA_RING / dq.DQ_DATA_RATE_PER_S).toBe(16)
+		// 9.2: one emitter spans 13 to 39 kHz, so a band of 3 each way holds it from any one value
+		expect(39_000 / 13_000).toBeLessThanOrEqual(dq.DQ_YOUNG_OBW_RATIO)
+		expect(dq.DQ_YOUNG_OBW_RATIO).toBeGreaterThan(dq.DQ_OBW_RATIO_MAX)
 	})
 })

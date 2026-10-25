@@ -32,9 +32,29 @@ export function compatible(
 		!Number.isFinite(b.obwHz)
 	)
 		return null
-	const level = Math.abs(a.peakDbfs - b.peakDbfs) >= DQ_LEVEL_SPLIT_DB
-	const wide = Math.max(a.obwHz, b.obwHz)
-	const narrow = Math.min(a.obwHz, b.obwHz)
+	return compatibleValues(a.peakDbfs, a.obwHz, b.peakDbfs, b.obwHz)
+}
+
+/**
+ * 3.1 on two single signals given as plain values (no allocation): null when any value is
+ * non-finite (3.5), false when 3.1 refuses, true otherwise.
+ */
+export function compatibleValues(
+	peakA: number,
+	obwA: number,
+	peakB: number,
+	obwB: number,
+): boolean | null {
+	if (
+		!Number.isFinite(peakA) ||
+		!Number.isFinite(peakB) ||
+		!Number.isFinite(obwA) ||
+		!Number.isFinite(obwB)
+	)
+		return null
+	const level = Math.abs(peakA - peakB) >= DQ_LEVEL_SPLIT_DB
+	const wide = obwA > obwB ? obwA : obwB
+	const narrow = obwA > obwB ? obwB : obwA
 	return !(level && wide >= DQ_OBW_SPLIT_RATIO * narrow)
 }
 
@@ -44,20 +64,36 @@ export interface CompatibilityRecord {
 	observations: readonly { peakDbfs: number; obwHz: number }[]
 }
 
-const asObservation = (o: {
-	peakDbfs: number
-	obwHz: number
-}): CompatibilitySide => ({
-	peakDbfs: o.peakDbfs,
-	obwHz: o.obwHz,
-	count: Number.POSITIVE_INFINITY,
-})
+/**
+ * Req 9.4: an observation against a record. Established (3 or more): its medians. Young (1 or 2):
+ * each of its observations as a single observation; false when any refuses, null only when every
+ * test is undecided (non-finite values, 3.5), true otherwise. At most 2 `compatible` calls.
+ */
+export function observationCompatible(
+	record: CompatibilityRecord,
+	obs: { peakDbfs: number; obwHz: number },
+): boolean | null {
+	const m = record.medians
+	if (m.count >= DQ_MIN_HISTORY_OBS)
+		return compatibleValues(m.peakDbfs, m.obwHz, obs.peakDbfs, obs.obwHz)
+	const list = record.observations
+	let decided = false
+	for (let i = 0; i < list.length; i++) {
+		const o = list[i]
+		if (o === undefined) continue
+		const c = compatibleValues(o.peakDbfs, o.obwHz, obs.peakDbfs, obs.obwHz)
+		if (c === false) return false
+		if (c === true) decided = true
+	}
+	return decided ? true : null
+}
 
 /**
- * Two records (3.2). Both established (3 or more observations): their medians. One established
- * and the other young (1 or 2): each young observation against the established medians, as the
- * sticky test judged them, so settle cannot fold back what sticky refused; false when any is
- * refused. Both young: null (3.5, merge as before).
+ * Two records (3.2, 9.4). Both established (3 or more observations): their medians. One
+ * established and the other young (1 or 2): each young observation against the established
+ * medians, as the sticky test judged them, so settle cannot fold back what sticky refused. Both
+ * young: every pair of their observations (at most 2 x 2). False when any test refuses; null only
+ * when every test is undecided.
  */
 export function recordsCompatible(
 	a: CompatibilityRecord,
@@ -66,11 +102,25 @@ export function recordsCompatible(
 	const aOld = a.medians.count >= DQ_MIN_HISTORY_OBS
 	const bOld = b.medians.count >= DQ_MIN_HISTORY_OBS
 	if (aOld && bOld) return compatible(a.medians, b.medians)
-	if (!aOld && !bOld) return null
-	const [old, young] = aOld ? [a, b] : [b, a]
+	if (!aOld && !bOld) {
+		let decided = false
+		for (const o of a.observations) {
+			const c = observationCompatible(b, o)
+			if (c === false) return false
+			if (c === true) decided = true
+		}
+		return decided ? true : null
+	}
+	const old = aOld ? a : b
+	const young = aOld ? b : a
 	let decided = false
 	for (const o of young.observations) {
-		const c = compatible(old.medians, asObservation(o))
+		const c = compatibleValues(
+			old.medians.peakDbfs,
+			old.medians.obwHz,
+			o.peakDbfs,
+			o.obwHz,
+		)
 		if (c === false) return false
 		if (c === true) decided = true
 	}

@@ -118,3 +118,11 @@ export const DQ_CONSOLIDATE_GROUP_MAX = 16
  * a dense colocated set costs at most 32 checks per record.
  */
 export const DQ_CONSOLIDATE_SCAN_MAX = 32
+
+/**
+ * Req 9.2, 9.6: OBW band factor of a record neither decoded nor carrying an identity:
+ * `[obwMin / 3, obwMax x 3]`. 3 = the measured span of one emitter, 13 to 39 kHz (39 / 13 = 3.0),
+ * so a record holding any one of its observations accepts every other. Decoded or identified
+ * records keep `DQ_OBW_RATIO_MAX` (2).
+ */
+export const DQ_YOUNG_OBW_RATIO = 3

@@ -500,7 +500,7 @@ describe("review repros", () => {
 		expect(store.snapshot().discoveries).toHaveLength(1)
 	})
 
-	it("two young records are not split by level (3.5)", () => {
+	it("two young records are split by level, observation by observation (9.4)", () => {
 		const { store } = newStore()
 		const loud = store.ingest(
 			obs({
@@ -522,7 +522,8 @@ describe("review repros", () => {
 				snrDb: 25,
 			}),
 		).discoveryId
-		expect(quiet).toBe(loud)
+		expect(quiet).not.toBe(loud)
+		expect(store.snapshot().discoveries).toHaveLength(2)
 		expect(
 			recordsCompatible(
 				{
@@ -534,7 +535,7 @@ describe("review repros", () => {
 					observations: [{ peakDbfs: -45, obwHz: 9_000 }],
 				},
 			),
-		).toBeNull()
+		).toBe(false)
 	})
 })
 
