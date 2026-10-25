@@ -105,23 +105,36 @@ const DTMF_PATTERN = /DTMF:\s*([0-9*#A-D]+)/i
 const EAS_PATTERN = /EAS:\s*(ZCZC-[A-Z]{3}-[A-Z]{3}-.+)/i
 
 // AX.25 modes (AFSK1200, FSK9600): multimon-ng's hdlc display prints
-// "<MODE>: fm SRC to DEST[ via DIGI[,DIGI...]] <frame>[ pid=XX]" and the
-// information field on the next line. The whole header must match.
+// "<MODE>: fm SRC to DEST[ via DIGI[,DIGI...]] <frame> pid=XX" and the
+// information field on the next line.
 const AX25_MODE_PATTERN = /(AFSK1200|FSK9600):\s*(.*)$/i
 
 /**
- * Frame-type token of the hdlc display: I frames `I<nr><ns>`, S frames
- * RR/RNR/REJ/SREJ `<nr>`, U frames SABM(E)/DISC/DM/UA/FRMR/UI/XID/TEST, each
- * with an optional poll/final or command/response mark (`^`, `!`, `v`), which
- * some builds print as a separate token.
+ * Address part, single-space separated as multimon-ng prints it, then
+ * either the end of the line or one space and the frame tail.
  */
-const AX25_FRAME =
-	"(?:I[0-7]{2}|(?:RR|RNR|REJ|SREJ)[0-7]|SABME?|DISC|DM|UA|FRMR|UI|XID|TEST)[!^v]?(?:\\s+[!^v])?"
+const AX25_ADDRESSES = /^fm (\S+) to (\S+)(?: via (\S+))?(?: (.*))?$/
 
-const AX25_HEADER = new RegExp(
-	`^fm\\s+(\\S+)\\s+to\\s+(\\S+)(?:\\s+via\\s+(\\S+))?(?:\\s+${AX25_FRAME}(?:\\s+pid=[0-9A-F]{2})?)?\\s*$`,
-	"i",
-)
+/**
+ * Start of the frame tail. multimon-ng 1.x prints the frame type as one of
+ * these words, then digits (I `<nr><ns>`, S `<nr>`), a parenthesised hex
+ * control byte for "unknown U"/"unknown S", and one command/response or
+ * poll/final mark (`^`, `v`, `+`, `-`, `!` or a space), e.g. "UI^ pid=F0",
+ * "I21- pid=F0", "RR3v pid=3E", "unknown U (0x6f)! pid=3E". The tail must
+ * begin with a word from this list followed by a digit, mark, space, `(`
+ * or the end of the line; the rest of it is taken as is.
+ */
+const AX25_TAIL_START =
+	/^(?:I|RR|RNR|REJ|SREJ|SABME?|DISC|DM|UA|FRMR|UI|XID|TEST|unknown)(?=[0-9 (^v+\-!]|$)/
+
+/**
+ * Longest frame tail accepted, printable ASCII only. The longest form
+ * multimon-ng prints is "unknown U (0xff)! pid=FF" (24 characters); 64
+ * leaves room for other builds.
+ */
+export const AX25_TAIL_MAX_CHARS = 64
+
+const PRINTABLE = /^[\x20-\x7e]*$/
 
 /** Addresses of an AX.25 header line that parsed completely and validly. */
 export interface Ax25HeaderAddresses {
@@ -132,17 +145,30 @@ export interface Ax25HeaderAddresses {
 
 /**
  * The addresses of a multimon-ng AX.25 header (the text after "<MODE>:"),
- * or null unless the whole header matches the hdlc display grammar and
- * every address is an AX.25 callsign (digipeaters may end in `*`). Pure.
+ * or null. The address part is strict: `fm`, `to` and the optional
+ * comma-separated `via` list must each hold an AX.25 callsign (digipeaters
+ * may end in `*`), single-space separated. What follows is either nothing or
+ * one space and a frame tail that starts as AX25_TAIL_START describes and is
+ * at most AX25_TAIL_MAX_CHARS printable ASCII characters. A stray token after
+ * an address (such as "to AP RS") is neither an address nor a tail start, so
+ * the header is refused. Pure.
  */
 export function parseAx25Header(text: string): Ax25HeaderAddresses | null {
-	const m = AX25_HEADER.exec(text.trim())
+	const m = AX25_ADDRESSES.exec(text.trim())
 	if (!m) return null
 	const from = m[1] ?? ""
 	const to = m[2] ?? ""
 	const via = m[3]
+	const tail = m[4]
 	if (!isAx25CallsignText(from) || !isAx25CallsignText(to)) return null
 	if (via !== undefined && !via.split(",").every(isAx25PathEntryText))
+		return null
+	if (
+		tail !== undefined &&
+		(tail.length > AX25_TAIL_MAX_CHARS ||
+			!PRINTABLE.test(tail) ||
+			!AX25_TAIL_START.test(tail))
+	)
 		return null
 	return via !== undefined ? { from, to, via } : { from, to }
 }

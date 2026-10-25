@@ -124,3 +124,12 @@ The sample data represents realistic APRS packets with:
 - Multiple digipeater paths (WIDE1-1, WIDE2-2)
 - Mix of position, status, and message packets
 - Both compressed and uncompressed position formats
+
+## multimon-ax25-headers.txt
+
+AX.25 header lines as multimon-ng prints them for AFSK1200, one per synthetic
+frame: every frame type (I, RR, RNR, REJ, SREJ, SABM, SABME, DISC, DM, UA,
+FRMR, UI, XID, TEST), command/response and poll/final combinations, with and
+without a digipeater path. Callsigns are synthetic (N0CALL-3, APRS, WIDE1-1,
+WIDE2-2). Regenerate with `gen-multimon-ax25-headers.py` and a local
+multimon-ng; the test suite only reads the text file.

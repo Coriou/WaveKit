@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import fc from "fast-check"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
@@ -9,7 +10,10 @@ import {
 	parseAx25Address,
 	parseAx25Frame,
 } from "../../../src/decoders/builtin/direwolf.js"
-import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
+import {
+	AX25_TAIL_MAX_CHARS,
+	MultimonDecoder,
+} from "../../../src/decoders/builtin/multimon-ng.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 
 const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".split("")
@@ -100,6 +104,37 @@ describe("AX.25 callsign text", () => {
 })
 
 describe("multimon-ng AX.25 headers", () => {
+	it("passes every header line the real multimon-ng printed", () => {
+		// Synthetic frames decoded by multimon-ng; see fixtures/aprs/README.md.
+		const lines = readFileSync(
+			new URL(
+				"../../mocks/fixtures/aprs/multimon-ax25-headers.txt",
+				import.meta.url,
+			),
+			"utf8",
+		)
+			.split("\n")
+			.filter(l => l.startsWith("AFSK1200: "))
+		expect(lines.length).toBeGreaterThan(100)
+		const d = multimon()
+		for (const line of lines) {
+			expect(d.parse(line)).toMatchObject({
+				data: { protocol: "AFSK1200", from: "N0CALL-3", to: "APRS-0" },
+			})
+			expect(d.parse(line.replace("AFSK1200", "FSK9600"))).toMatchObject({
+				data: { protocol: "FSK9600", from: "N0CALL-3" },
+			})
+		}
+		expect(d.getRejectedPackets()).toBe(0)
+	})
+
+	it("accepts a tail at the length bound and refuses one past it", () => {
+		const d = multimon()
+		const at = `UI ${"x".repeat(AX25_TAIL_MAX_CHARS - 3)}`
+		expect(d.parse(`AFSK1200: fm N0CALL to APRS ${at}`)).not.toBeNull()
+		expect(d.parse(`AFSK1200: fm N0CALL to APRS ${at}x`)).toBeNull()
+	})
+
 	it("passes the hdlc display variants in both modes and counts nothing", () => {
 		const d = multimon()
 		const good: [string, Record<string, unknown>][] = [
@@ -109,7 +144,14 @@ describe("multimon-ng AX.25 headers", () => {
 			],
 			["AFSK1200: fm N0CALL to APRS UI^ pid=F0", { to: "APRS" }],
 			["AFSK1200: fm N0CALL to APRS UI! pid=F0", { to: "APRS" }],
-			["AFSK1200: fm N0CALL to APRS UI v pid=F0", { to: "APRS" }],
+			["AFSK1200: fm N0CALL to APRS UI+ pid=F0", { to: "APRS" }],
+			["AFSK1200: fm N0CALL to APRS UI- pid=F0", { to: "APRS" }],
+			["AFSK1200: fm N0CALL to APRS UI  pid=F0", { to: "APRS" }],
+			[
+				"AFSK1200: fm N0CALL-0 to APRS-0 unknown U (0x6f)^ pid=F0",
+				{ to: "APRS-0" },
+			],
+			["AFSK1200: fm N0CALL to APRS unknown S (0xd)0v pid=3E", { to: "APRS" }],
 			["AFSK1200: fm N0CALL-0 to APRS-0 I05^ pid=F0", { from: "N0CALL-0" }],
 			["AFSK1200: fm N0CALL to K1ABC RR3v", { to: "K1ABC" }],
 			["AFSK1200: fm N0CALL to K1ABC SABM^", { to: "K1ABC" }],
@@ -136,8 +178,14 @@ describe("multimon-ng AX.25 headers", () => {
 			"AFSK1200: fm N0CALL to AP RS via BAD! UI pid=F0",
 			// a second space-separated digipeater list
 			"AFSK1200: fm N0CALL to APRS via WIDE1-1 BAD! UI pid=F0",
-			"AFSK1200: fm N0CALL to APRS UI pid=F0 trailing",
-			"AFSK1200: fm N0CALL to APRS UI pid=XYZ",
+			// a tail that does not start with a frame-type word
+			"AFSK1200: fm N0CALL to APRS pid=F0",
+			"AFSK1200: fm N0CALL to APRS UIX pid=F0",
+			"AFSK1200: fm N0CALL to APRS uI pid=F0",
+			// two spaces before the tail, a non-printable or an oversized tail
+			"AFSK1200: fm N0CALL to APRS  UI pid=F0",
+			"AFSK1200: fm N0CALL to APRS UI\u0007 pid=F0",
+			`AFSK1200: fm N0CALL to APRS UI ${"x".repeat(62)}`,
 			"AFSK1200: garbage",
 			"FSK9600: fm N0@ALL to APRS via W!DE UI pid=F0",
 			"FSK9600: fm N0CALL to APRS via W!DE UI pid=F0",
@@ -151,13 +199,22 @@ describe("multimon-ng AX.25 headers", () => {
 	// Validates: AX.25 address rule for packet decoders
 	it("keeps well-formed headers and rejects a corrupted address or stray token", () => {
 		const badChar = fc.constantFrom(..."!#$%&()+/:;<=>?@[]_{|}~abc".split(""))
+		// Tails as the real binary prints them (fixtures/aprs/multimon-ax25-headers.txt).
 		const frame = fc.constantFrom(
 			"",
 			" UI^ pid=F0",
+			" UI+ pid=F0",
+			" UI- pid=F0",
+			" UI  pid=F0",
 			" UI! pid=F0",
-			" UI v pid=F0",
-			" I05^ pid=F0",
-			" RR3v",
+			" I21- pid=F0",
+			" I00v pid=F0",
+			" RR3  pid=3E",
+			" RNR0! pid=3E",
+			" SABM- pid=3E",
+			" DISC! pid=3E",
+			" unknown U (0x6f)v pid=3E",
+			" unknown S (0xd)0  pid=3E",
 		)
 		fc.assert(
 			fc.property(
