@@ -423,9 +423,14 @@ export const planPlacements: PlacementPlanner = input => {
 							),
 						),
 					]
-						.filter(
-							hz => positive(hz) && fitsReach(d, s, hz) && bandFits(d, hz),
-						)
+						.filter(hz => {
+							if (!positive(hz) || !bandFits(d, hz)) return false
+							if (fitsReach(d, s, hz)) return true
+							// 3.14: a band-plan channel in the band whose passband the window
+							// cannot hold is a fit failure, not an absent channel.
+							if (bandOverlapsWindow) tooNarrow = true
+							return false
+						})
 						.sort(
 							(a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b,
 						)
@@ -553,10 +558,13 @@ export const planPlacements: PlacementPlanner = input => {
 		)
 		if (!sorted.length) {
 			if (channelizerMissing) unplaced.set(d.id, "channelizer-unavailable")
+			// 3.14: a fit failure is physical, so it holds when `always`, an operator start or an
+			// opt-out bypasses the band policy too.
+			else if (sources.length && tooNarrow)
+				unplaced.set(d.id, "capture-too-narrow")
 			else if (sources.length && !bandFree(d)) {
 				// Only an empty candidate set of a known band is out of band (3.13, 3.14).
-				if (tooNarrow) unplaced.set(d.id, "capture-too-narrow")
-				else if (noChannel) unplaced.set(d.id, "no-channel-selected")
+				if (noChannel) unplaced.set(d.id, "no-channel-selected")
 				else if (bandKnown(d)) unplaced.set(d.id, "frequency-out-of-band")
 			}
 		}

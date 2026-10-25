@@ -2004,7 +2004,10 @@ A wanted decoder whose band is out of band is suspended with reason
 when a retune brings it back. When the band overlaps the capture window but
 the decoder's channel cannot fit inside it, the reason is
 `"capture-too-narrow"` instead; rtl_433 narrows its channel (1 MHz down to
-250 kHz) to fit, so at 1.024 Msps it is placed. When the band is in view but
+250 kHz) to fit, so at 1.024 Msps it is placed. A band-plan channel inside the
+window whose passband the window cannot hold is a fit failure too. A fit failure
+is physical: it is reported for `always`, operator starts and band opt-outs as
+well (a LoRa `always` decoder whose regional slot cannot fit the capture). When the band is in view but
 no channel is chosen yet (a band-plan decoder such as DMR or POCSAG with no
 VFO and no band-plan channel), the reason is `"no-channel-selected"`. The
 reason always agrees with `bandAssessment`. `since` restarts whenever the

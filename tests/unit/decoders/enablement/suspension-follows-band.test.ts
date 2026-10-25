@@ -783,6 +783,58 @@ describe("band reasons and opt-outs", () => {
 	)
 })
 
+describe("fit failures are capture-too-narrow", () => {
+	it("catalogue dsd-fme at 446.52 MHz, 250 ksps, band-plan channel 446.615 MHz that cannot fit", () => {
+		const plan = planPlacements({
+			...input(
+				decoder({
+					type: "dsd-fme",
+					channelBandwidthHz: 20_000,
+					channelTransitionHz: 10_000,
+					band: {
+						basis: "region-default",
+						rangesHz: [{ minHz: 446_000_000, maxHz: 446_700_000 }],
+					},
+				}),
+				[source({ centreHz: 446_520_000, sampleRateHz: 250_000 })],
+			),
+			bandplanChannels: () => [446_615_000],
+		})
+		// 95 kHz off centre + 10 kHz half channel + 10 kHz transition > 100 kHz usable half.
+		expect(plan.wanted).toEqual([])
+		expect(plan.unplaced.get("test")).toBe("capture-too-narrow")
+		// A channel that fits is placed.
+		const fits = planPlacements({
+			...input(
+				decoder({
+					type: "dsd-fme",
+					channelBandwidthHz: 20_000,
+					channelTransitionHz: 10_000,
+					band: {
+						basis: "region-default",
+						rangesHz: [{ minHz: 446_000_000, maxHz: 446_700_000 }],
+					},
+				}),
+				[source({ centreHz: 446_520_000, sampleRateHz: 250_000 })],
+			),
+			bandplanChannels: () => [446_575_000],
+		})
+		expect(fits.wanted).toMatchObject([
+			{ channelHz: 446_575_000, origin: "bandplan" },
+		])
+	})
+
+	it("EU catalogue LoRa always at 434.2 MHz, 1.024 Msps: the 433 slot cannot fit", async () => {
+		const f = setup(["lora-meshtastic"], 434_200_000, {
+			modes: { "lora-meshtastic": "always" },
+		})
+		await f.begin()
+		const v = view(f, "lora-meshtastic")
+		expect(v.placements).toEqual([])
+		expect(v.reason).toBe("capture-too-narrow")
+	})
+})
+
 describe("no channel selected", () => {
 	it("catalogue dsd-fme at 446.52 MHz, 2.4 Msps, no VFO or band-plan channel", async () => {
 		const f = setup(["dsd-fme"], 446_520_000)

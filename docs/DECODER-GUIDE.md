@@ -560,6 +560,10 @@ describe("HfdlDecoder", () => {
 1. Check if binary exists: `docker exec <container> which my-decoder`
 2. Check permissions: `docker exec <container> ls -la /usr/local/bin/my-decoder`
 3. Check logs: `make app-logs | grep my-decoder`
+4. Check why core suspended it: `curl -s localhost:9000/api/decoders | jq '.[] | {id, suspension}'`.
+   `frequency-out-of-band` means the capture does not cover its band, `capture-too-narrow` that the
+   band is in view but its channel does not fit the capture, `no-channel-selected` that no VFO or
+   band-plan channel is chosen yet ([API](API.md) lists every reason).
 
 ### No output being parsed
 
