@@ -954,6 +954,7 @@ export class DiscoveryStore
 			input.classification.class,
 			input,
 			decodedAs,
+			!decodeProvesSignal(input, opts.decode),
 		)
 		const into = target.merge
 		if (into !== null)
@@ -2200,7 +2201,6 @@ export class DiscoveryStore
 		const highHz = centre + tol + 1
 		let radius = tol
 		let crossFamily = false
-		let decodedRoute = false
 		const consider = (e: IndexedCentre): void => {
 			const d = this.discoveries.get(e.id)
 			if (d === undefined) return
@@ -2212,14 +2212,6 @@ export class DiscoveryStore
 			if (this.obsCompatible(d, obs) === false) return
 			// DQ 9.3: only the cross-family or young route is band-gated (9.2).
 			if (crossFamily && !this.bandwidthJoins(d, obs.track.obwHz)) return
-			// The decoded-record shortcut also takes the band; a decoded record holding no
-			// observation (all trimmed or moved) has no window and keeps today's join.
-			if (
-				decodedRoute &&
-				this.mediansOf(d.id) !== undefined &&
-				!this.bandwidthJoins(d, obs.track.obwHz)
-			)
-				return
 			const better =
 				best === undefined ||
 				dist < bestDist ||
@@ -2232,12 +2224,10 @@ export class DiscoveryStore
 			}
 		}
 		this.centres.range(obs.sourceId, family, lowHz, highHz, consider)
-		// The decoded-record shortcut (scanner redesign: an evidence-less observation sticks to a
-		// decoded record of any family within today's tolerance) keeps its radius but, being a
-		// cross-family join, takes the 9.2 band for an evidence-less observation. Its radius is not
-		// cut to 1 000 Hz: that would undo the older rule across a raster key edge.
-		if (family === "unknown") {
-			decodedRoute = evidenceLess
+		// The decoded-record shortcut serves an observation that carries a decode. An evidence-less
+		// one reaches a decoded record of another family only by the 9.3 cross-family route below
+		// (1 000 Hz, 9.2 band).
+		if (family === "unknown" && !evidenceLess)
 			this.decodedCentres.range(
 				obs.sourceId,
 				DECODED_CENTRE_FAMILY,
@@ -2245,8 +2235,6 @@ export class DiscoveryStore
 				highHz,
 				consider,
 			)
-			decodedRoute = false
-		}
 		// DQ 9.3: the cross-family or young route. An evidence-less observation also sticks to a
 		// record of any other association family (carrier included) within min(tol, 1 kHz) when its
 		// OBW lies in the record's band (9.2). Young records of the observation's own list are
@@ -2274,8 +2262,20 @@ export class DiscoveryStore
 	 */
 	private bandwidthJoins(d: Discovery, obwHz: number): boolean {
 		const m = this.mediansOf(d.id)
-		if (m === undefined) return false
+		// 9.8: a missing window or a non-finite median width fails.
+		if (m === undefined || !Number.isFinite(m.obw)) return false
 		return inObwBand(obwHz, m.obwMin, m.obwMax, this.bandFactor(d))
+	}
+
+	/** DQ 9.3: the cross-family route's distance and band for an evidence-less observation. */
+	private crossJoins(d: Discovery, obs: ObservationInput): boolean {
+		const c = obs.track.centreHz
+		const tol = this.toleranceHz(obs.sourceId, c, obs.track.obwHz)
+		const dist = Math.abs(this.medianCentre(d) - c)
+		return (
+			dist <= Math.min(tol, DQ_CROSS_FAMILY_HZ) &&
+			this.bandwidthJoins(d, obs.track.obwHz)
+		)
 	}
 
 	/** DQ 9.2: 2 for a decoded or identified record, 3 otherwise. */
@@ -2320,6 +2320,7 @@ export class DiscoveryStore
 		cls: ScannerClass,
 		obs: ObservationInput,
 		decodedAs?: string,
+		evidenceLess = false,
 	): { merge: Discovery | null; coChannel: string[] } {
 		const linked = this.atKey(sourceId, key)
 		// DQ 3.2, 9.4, 9.5: a record that refuses the observation, or is decoded as another protocol
@@ -2348,7 +2349,13 @@ export class DiscoveryStore
 		if (family === "unknown") {
 			const others = atKey.filter(d => familyOfDiscovery(d) !== "carrier")
 			const [single] = others
-			if (others.length === 1 && single !== undefined)
+			// DQ 9.3: another association family is a cross-family join for an evidence-less
+			// observation: within min(tolerance, 1 000 Hz) of its median and inside its band.
+			if (
+				others.length === 1 &&
+				single !== undefined &&
+				(!evidenceLess || this.crossJoins(single, obs))
+			)
 				return { merge: single, coChannel: [] }
 		} else {
 			const [lone] = atKey

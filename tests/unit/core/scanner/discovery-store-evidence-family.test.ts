@@ -211,7 +211,7 @@ describe("effective family association", () => {
 		)
 	})
 
-	it("sticky-matches evidence-less observations onto a decoded discovery across a key edge", () => {
+	it("sticky-matches evidence-less observations onto a decoded discovery only within the cross-family limits", () => {
 		const { store } = newStore()
 		const id =
 			store.ingest(makeObs({ id: "a", centreHz: CH + 3_000, startedAt: T0 }))
@@ -229,29 +229,20 @@ describe("effective family association", () => {
 		expect(same.change).not.toBe("created")
 		expect(same.discoveryId).toBe(id)
 
+		// DQ 9.3: a decoded record of another family is reached by an evidence-less sighting only
+		// within 1 000 Hz and inside its band; 3 kHz across the key edge is a new record.
 		const edge = store.ingest(
 			makeObs({ id: "c", centreHz: CH + 6_000, startedAt: T0 + 2_000 }),
 		)
-		expect(edge.change).not.toBe("created")
-		expect(edge.discoveryId).toBe(id)
-		expect(store.snapshot().discoveries).toHaveLength(1)
-		expect(store.get(id)?.frequencyKey).toBe(`r:${CH}`)
-
-		expect(store.rekey("src-1", 3_000)).toEqual({ merged: [] })
-		expect(store.snapshot().discoveries).toHaveLength(1)
-		expect(store.discoveryIdOf("a")).toBe(id)
+		expect(edge.change).toBe("created")
+		expect(edge.discoveryId).not.toBe(id)
 		expect(store.discoveryIdOf("b")).toBe(id)
-		expect(store.discoveryIdOf("c")).toBe(id)
+		const near = store.ingest(
+			makeObs({ id: "d", centreHz: CH + 3_800, startedAt: T0 + 3_000 }),
+		)
+		expect(near.discoveryId).toBe(id)
 		expect(store.get(id)?.protocol).toBe("dmr")
 		expect(store.get(id)?.confidence).toBe("decoded")
-		expect(store.get(id)?.proof?.summary).toBe("DMR decoded (CC1)")
-
-		const again = store.ingest(
-			makeObs({ id: "d", centreHz: CH + 6_000, startedAt: T0 + 3_000 }),
-		)
-		expect(again.change).not.toBe("created")
-		expect(again.discoveryId).toBe(id)
-		expect(store.snapshot().discoveries).toHaveLength(1)
 	})
 
 	// Feature: scanner-redesign, Property: analog and digital proofs stay apart

@@ -109,6 +109,7 @@ export interface StoreInternals {
 		cls: ScannerClass,
 		obs: ObservationInput,
 		decodedAs?: string,
+		evidenceLess?: boolean,
 	): { merge: Discovery | null; coChannel: string[] }
 	bandwidthJoins(d: Discovery, obwHz: number): boolean
 	discoveries: Map<string, Discovery>

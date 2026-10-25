@@ -51,6 +51,9 @@ const sha = (text: string): string =>
 // is why seeds 2 to 6 grew (seed 1 holds no observations). Seed 3 re-baselined for DQ 9.1: at entry 22
 // an observation now joins the record on its key whose analog-fm label is an unconfirmed guess
 // (association family unknown) instead of creating one beside it; byte length unchanged.
+// Seeds 3 to 5 re-baselined again for DQ 9.3: an evidence-less sighting reaches a decoded record of
+// another family only within 1 000 Hz and inside its band, so a few sightings land on the nearest
+// same-family record instead (seed 5 text 4 293 bytes shorter, seeds 3 and 4 by 2 and 3 bytes).
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -73,24 +76,24 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		400,
 		40,
 		false,
-		39441,
-		"15fe0c46d9a638de82fdedd13d3dd7414e27f3d2c1e27f1ead7cacfbc7d672f4",
+		39439,
+		"ffa09a7c59f0a27ace956d52c6200c60cb2bdfc33e2448e5fff104736a402400",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		63739,
-		"31b962b5d1c3b9c036296c15b9466a9cd4c7285092b3de15cda458c1768353fd",
+		63736,
+		"7a33812471982049b18d4de913317afe65bc70b6d34fb6c58b9be24c188499f0",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		72029,
-		"bb889a364e707766fcedf4a7a71775d9d1a76b8418da4de8ed3ae1b70433c8a1",
+		67736,
+		"3bb3a6c36a3eef494f170d6e1f97aa666eb63ee8cb30020b688c179543d30f9f",
 	],
 	[
 		6,

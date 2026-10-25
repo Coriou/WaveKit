@@ -756,31 +756,73 @@ describe("DQ 9.3: decoded records reached by an evidence-less observation", () =
 		confidence: "decoded",
 	}
 
-	it("is the cross-family route: takes the band: a 30 kHz sighting 3 800 Hz from a 4 kHz decoded record stays apart", () => {
-		const far = restored([DMR])
-		expect(
-			far.ingest(
+	const at = (store: DiscoveryStore, centreHz: number, obwHz: number) =>
+		store.ingest(
+			obs({ id: "x", centreHz, at: T0 + 100_000, obwHz, peakDbfs: -50 }),
+		).discoveryId
+
+	it("is the cross-family route: a 30 kHz sighting 3 800 Hz away on another key stays apart", () => {
+		expect(at(restored([DMR]), F + 3_800, 30_000)).not.toBe("d_a")
+	})
+
+	it("an 8 kHz sighting 1 500 Hz from an 8 kHz decoded record stays apart (distance)", () => {
+		expect(at(restored([{ ...DMR, obwHz: 8_000 }]), F + 1_500, 8_000)).not.toBe(
+			"d_a",
+		)
+	})
+
+	it("a 30 kHz sighting 1 500 Hz away on the shared key is not taken by the key match", () => {
+		const store = restored([DMR])
+		store.rekey(SRC, 0)
+		expect(store.get("d_a")?.frequencyKey).toBe(
+			frequencyKey(F + 1_500, false, 30_000),
+		)
+		expect(at(store, F + 1_500, 30_000)).not.toBe("d_a")
+		expect(ids(store)).toHaveLength(2)
+	})
+
+	it("key match, within 1 000 Hz: only inside the band (factor 2)", () => {
+		const store = restored([DMR])
+		store.rekey(SRC, 0)
+		const key = store.get("d_a")?.frequencyKey ?? ""
+		const target = (obwHz: number) =>
+			internals(store).keyTarget(
+				SRC,
+				key,
+				"unknown",
+				"unknown",
 				obs({
-					id: "x",
-					centreHz: F + 3_800,
+					id: "y",
+					centreHz: F + 900,
 					at: T0 + 100_000,
-					obwHz: 30_000,
+					obwHz,
 					peakDbfs: -50,
 				}),
-			).discoveryId,
-		).not.toBe("d_a")
-		const near = restored([DMR])
-		expect(
-			near.ingest(
-				obs({
-					id: "x",
-					centreHz: F + 500,
-					at: T0 + 100_000,
-					obwHz: 8_000,
-					peakDbfs: -50,
-				}),
-			).discoveryId,
-		).toBe("d_a")
+				undefined,
+				true,
+			).merge?.id
+		expect(target(8_000)).toBe("d_a")
+		expect(target(8_001)).toBeUndefined()
+	})
+
+	it("control: within 1 000 Hz and inside the band it joins", () => {
+		expect(at(restored([DMR]), F + 500, 8_000)).toBe("d_a")
+	})
+})
+
+describe("DQ 9.8: non-finite median width", () => {
+	it("a window [8000, NaN, 8000] has no band", () => {
+		const snap = legacySnapshot([
+			{ id: "d_a", centreHz: F, count: 3, obwHz: 8_000 },
+		])
+		for (const o of snap.observations)
+			if (o.id === "d_a-o1") o.obwHz = Number.NaN
+		const { store } = newStore()
+		store.restore(snap)
+		const i = internals(store)
+		const d = i.discoveries.get("d_a")
+		if (d === undefined) throw new Error("missing")
+		expect(i.bandwidthJoins(d, 8_000)).toBe(false)
 	})
 })
 
@@ -812,7 +854,7 @@ describe("DQ 9.8: one-sided malformed identity", () => {
 })
 
 describe("DQ 9.2, 9.8: non-finite widths in the window", () => {
-	it("are left out of the band; a window with none finite has no band", () => {
+	it("are left out of the minimum and maximum; a window with none finite has no band", () => {
 		const snap = legacySnapshot([
 			{ id: "d_a", centreHz: F, count: 5, obwHz: 10_000 },
 			{ id: "d_b", centreHz: F + 50_000, count: 2, obwHz: 10_000 },
@@ -825,7 +867,14 @@ describe("DQ 9.2, 9.8: non-finite widths in the window", () => {
 		const a = i.discoveries.get("d_a")
 		const b = i.discoveries.get("d_b")
 		if (a === undefined || b === undefined) throw new Error("missing")
-		expect(i.bandwidthJoins(a, 30_000)).toBe(true)
+		const m = (
+			store as unknown as {
+				mediansOf(id: string): { obwMin: number; obwMax: number; obw: number }
+			}
+		).mediansOf("d_a")
+		expect([m.obwMin, m.obwMax]).toEqual([10_000, 10_000])
+		// the band then holds only while the median width is finite (9.8)
+		expect(i.bandwidthJoins(a, 30_000)).toBe(Number.isFinite(m.obw))
 		expect(i.bandwidthJoins(a, 30_001)).toBe(false)
 		expect(i.bandwidthJoins(b, 10_000)).toBe(false)
 	})

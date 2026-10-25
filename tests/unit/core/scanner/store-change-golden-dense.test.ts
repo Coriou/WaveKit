@@ -7,6 +7,9 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // WG11 lane SC (req 3.4, 3.5): the goldens were recorded from the frozen store (before the index,
 // counts and revision-counter rework). Every journal line, change event, evicted list, return
 // value and snapshot text must stay byte-identical.
+// WG15 DQ 9.3 re-baseline: an evidence-less sighting no longer reaches a decoded record of another
+// family beyond 1 000 Hz or outside its band (decoded-record shortcut and key fallback), so the first
+// such sighting in this run now joins the nearest same-family record instead (seed 5 o1261).
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 5, steps: 1400, slots: 2 },

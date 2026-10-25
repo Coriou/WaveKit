@@ -711,7 +711,7 @@ query. Per observation the added work is O(1) per candidate, inside the section 
 observation OBW, fails 9.2 for that pair (no cross-family or young join; the same-family
 route is unchanged); a non-finite OBW inside the window is left out of the minimum and maximum
 (otherwise one bad measurement would close the band for the next 64 observations), and a
-window with no finite OBW has none, which fails; a non-finite centre never matches; a non-finite peak or OBW on either
+window with no finite OBW has none, which fails, as does a non-finite median OBW; a non-finite centre never matches; a non-finite peak or OBW on either
 side makes a 9.4 test undecided, which does not refuse (as 3.5). An unreadable evidence
 level or confidence counts as not proven and not decoded (and so takes `f` = 3 only when
 it also has no identity). A malformed identity counts as present and different from every
