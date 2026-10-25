@@ -16,8 +16,15 @@ export interface StalePage {
 export function userDocs(repo?: string): string[]
 export function linkTargets(text: string): string[]
 export function brokenLinks(file: string, repo?: string): string[]
+/** One commit of a `git log` range: its `Docs:` trailers and the files it touched. */
+export interface CommitDocs {
+	trailers: string[]
+	files: string[]
+}
+
 export function stalePages(
 	changed: string[],
 	map: DocMap,
-	trailers?: string[],
+	commits?: CommitDocs[],
 ): StalePage[]
+export function parseCommits(log: string): CommitDocs[]
