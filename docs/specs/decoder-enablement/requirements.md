@@ -458,7 +458,10 @@ schemas, the CLI guards and the web reason words gain it; Main announces it in
 `docs/CLI-COORDINATION.md`. Precedence (11.3) places it directly after `frequency-out-of-band`.
 (2026-10-25, second amendment) When the band is in view but no channel is selected (no
 VFO, no band-plan channel, so no candidate was tried) the reason is `no-channel-selected`,
-not `capture-too-narrow`; it ranks with `capture-too-narrow`. An unplaced decoder's band
+not `capture-too-narrow`; it ranks with `capture-too-narrow`. When `always`, an operator start or a band
+opt-out bypasses the band policy, a channelised decoder whose selected channel (configured,
+VFO, band-plan or the fallback) was tried and does not fit reports `capture-too-narrow`
+wherever that channel lies; raw-reach decoders report no reason. An unplaced decoder's band
 reason never contradicts its band assessment: `frequency-out-of-band` only when the
 assessment is `out-of-band`, judged on the pipeline's real window.
 3.15 **Fresh `since`.** `suspension.since` is the start of the current uninterrupted

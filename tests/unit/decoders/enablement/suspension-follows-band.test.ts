@@ -848,6 +848,17 @@ describe("fit failures are capture-too-narrow", () => {
 			})
 			expect(plan.wanted).toEqual([])
 			expect(plan.unplaced.get("test")).toBe("capture-too-narrow")
+			// Centre just outside the usable window (446.62 MHz is its edge), and far away.
+			for (const frequencyHz of [446_620_001, 460_000_000]) {
+				const outside = planPlacements({
+					...input(dsd, [capture]),
+					vfo: { sourceId: "s", frequencyHz },
+				})
+				expect(outside.wanted, `${frequencyHz}`).toEqual([])
+				expect(outside.unplaced.get("test"), `${frequencyHz}`).toBe(
+					"capture-too-narrow",
+				)
+			}
 			// A VFO channel that fits is placed.
 			const fits = planPlacements({
 				...input(dsd, [capture]),

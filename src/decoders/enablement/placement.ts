@@ -128,21 +128,12 @@ export function fitsReach(
 }
 
 /**
- * 3.14: a band-free channel decoder whose channel centre lies in the usable window but whose
- * channel does not fit: a fit failure the band policy cannot excuse.
+ * 3.14: a band-free channelised decoder tried a selected channel (configured, VFO, band-plan or
+ * the fallback) that does not fit: a fit failure the band policy cannot excuse, wherever the
+ * channel lies (a retune or a wider capture would hold it). Raw reach never counts.
  */
-function channelInWindow(
-	d: PlannerDecoder,
-	s: PlannerSource,
-	hz: number | null,
-): boolean {
-	return (
-		bandFree(d) &&
-		d.reach === "channel" &&
-		positive(hz) &&
-		windowValid(s) &&
-		Math.abs(hz - s.centreHz!) <= (s.sampleRateHz! * s.usableFraction) / 2
-	)
+function bypassedChannel(d: PlannerDecoder, hz: number | null): boolean {
+	return bandFree(d) && d.reach === "channel" && positive(hz)
 }
 
 /** `always`, an operator start or a band-suspension opt-out skip the band policy. */
@@ -295,11 +286,11 @@ export const planPlacements: PlacementPlanner = input => {
 			// 3.14: "too narrow" only when the band reaches this capture window.
 			const bandOverlapsWindow = !bandFree(d) && bandFits(d, centre, bandHalf)
 			// 3.14: a fit failure is physical. It counts when the band reaches this window, and,
-			// when `always`, an operator start or an opt-out bypasses the band policy, for a
-			// channel whose centre lies in the window (a wider capture would hold it). Raw
-			// reach (readsb) is a centre position, never a width, so it never counts there.
+			// when `always`, an operator start or an opt-out bypasses the band policy, for any
+			// selected channel that was tried. Raw reach (readsb) is a centre position, never a
+			// width, so it never counts there.
 			const fitFailureCounts = (hz: number | null): boolean =>
-				bandOverlapsWindow || channelInWindow(d, s, hz)
+				bandOverlapsWindow || bypassedChannel(d, hz)
 			const add = (
 				hz: number | null,
 				origin: Candidate["origin"],
@@ -513,7 +504,7 @@ export const planPlacements: PlacementPlanner = input => {
 						? input.vfo.frequencyHz
 						: s.centreHz!
 				if (!fitsReach(d, s, hz)) {
-					if (channelInWindow(d, s, hz)) tooNarrow = true
+					if (bypassedChannel(d, hz)) tooNarrow = true
 					continue
 				}
 				candidates.push({
