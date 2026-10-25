@@ -81,8 +81,12 @@ interface SourceState {
 	previousBaselineWindowAt: number | null
 	measuringSince: number | null
 	trialing: boolean
-	/** The last non-null ELU sample seen on a tick (8.7 trial start needs counters that moved). */
-	lastSample: EluSample | null
+	/**
+	 * Samples seen while the guard holds passive off, oldest first, trimmed to the newest one at
+	 * least a window old: the trial start measures against it (8.2, 8.7). Cleared when the worker
+	 * generation changes or a counter goes back.
+	 */
+	offSamples: { at: number; sample: EluSample }[]
 }
 
 export interface PassiveGuardStatus {
@@ -187,12 +191,10 @@ export class PassiveGuard {
 				previousBaselineWindowAt: null,
 				measuringSince: null,
 				trialing: false,
-				lastSample: null,
+				offSamples: [],
 			}
 			this.states.set(sourceId, st)
 		}
-		const previousSample = st.lastSample
-		if (view.sample !== null) st.lastSample = view.sample
 		const generation = view.sample?.generation ?? null
 		// 8.2, 8.3: a new worker generation discards the window; unless the guard's own toggle
 		// explains it, the baseline too.
@@ -253,6 +255,7 @@ export class PassiveGuard {
 		if (w === null || st.pending !== null) return { kind: "none" }
 		const done = this.complete(w, now)
 		const u = done ? this.measure(w, view) : null
+		if (!disabled && st.offSamples.length > 0) st.offSamples = []
 		if (measuring) {
 			if (w.kind !== "baseline" || !done) return { kind: "none" }
 			// 8.5: no measurement yet: keep waiting until the two-window deadline above.
@@ -263,17 +266,15 @@ export class PassiveGuard {
 		if (disabled) {
 			if (holdsPassive) return { kind: "none" } // a restore in flight
 			const since = now - (this.disabledAt.get(sourceId) ?? now)
-			// 8.7: the trial starts on the first tick at or after its deadline that has a valid
+			// 8.7: the trial starts on the first tick at or after its deadline that has a valid 8.2
 			// measurement (8.4 row 1: no measurement keeps the current state), not when an off window
-			// ends. Finite but stalled counters (unchanged since the last sample) are no measurement.
-			const live =
-				view.sample === null || previousSample === null
-					? null
-					: windowedUtilization(view.sample, previousSample)
+			// ends. The history is kept on every off tick so the deadline tick can measure; a counter
+			// rollback or a new generation restarts it and the off window, and keeps the state.
+			if (this.recordOff(st, view.sample, now)) return { kind: "none" }
+			const measured = this.offMeasurement(st, view.sample, now)
 			if (
 				since >= PASSIVE_PROBATION_MS &&
-				live !== null &&
-				Number.isFinite(live) &&
+				measured !== null &&
 				this.validBaseline(st, now) !== null
 			) {
 				this.disabledAt.delete(sourceId)
@@ -389,6 +390,63 @@ export class PassiveGuard {
 		if (view.sample === null) return null
 		if (w.sample === null && w.kind !== "open") return null
 		return windowedUtilization(view.sample, w.sample)
+	}
+
+	/**
+	 * Adds an off tick's sample to the history, trimmed to the newest sample at least a window old.
+	 * A sample of another generation or with a counter below the last one restarts the history and
+	 * the off window at this tick (no whole-life fallback, 8.2); returns true when it did.
+	 */
+	private recordOff(
+		st: SourceState,
+		sample: EluSample | null,
+		now: number,
+	): boolean {
+		if (
+			sample === null ||
+			!Number.isFinite(sample.idle) ||
+			!Number.isFinite(sample.active)
+		)
+			return false
+		const h = st.offSamples
+		const last = h.at(-1)?.sample
+		const restart =
+			last !== undefined &&
+			(sample.generation !== last.generation ||
+				sample.idle < last.idle ||
+				sample.active < last.active)
+		if (restart) {
+			h.length = 0
+			st.window = { kind: "off", startedAt: now, sample }
+		}
+		h.push({ at: now, sample })
+		while (h.length > 1 && (h[1]?.at ?? now) <= now - PASSIVE_COST_WINDOW_MS)
+			h.shift()
+		return restart
+	}
+
+	/**
+	 * 8.2 at the trial start: utilization between the current sample and the history's sample of
+	 * the same generation at least a window older; counters that did not advance are no measurement.
+	 */
+	private offMeasurement(
+		st: SourceState,
+		sample: EluSample | null,
+		now: number,
+	): number | null {
+		const ref = st.offSamples[0]
+		// the current sample must be the history's newest (null or non-finite ones are not recorded)
+		if (
+			sample === null ||
+			ref === undefined ||
+			st.offSamples.at(-1)?.sample !== sample ||
+			now - ref.at < PASSIVE_COST_WINDOW_MS
+		)
+			return null
+		const active = sample.active - ref.sample.active
+		const total = active + (sample.idle - ref.sample.idle)
+		if (!Number.isFinite(total) || total <= 0) return null
+		return active / total
 	}
 
 	private validBaseline(st: SourceState, now: number): number | null {

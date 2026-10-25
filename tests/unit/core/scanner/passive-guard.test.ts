@@ -422,4 +422,57 @@ describe("guard review regressions (DQ 8.2, 8.5, 8.7)", () => {
 		expect(s.actions[1]).toBe("restore:trial")
 		expect(s.state.t).toBe(962_000)
 	})
+	it("a due trial needs a full window after a counter rollback (8.2, 8.7)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		while (s.state.t < 959_000) s.tick()
+		// 960 000: due, but the counters went back (no whole-life fallback)
+		s.state.frozen = { idle: 10, active: 10, generation: 1 }
+		s.tick()
+		expect(s.state.t).toBe(960_000)
+		expect(s.actions).toHaveLength(1)
+		s.state.frozen = null
+		while (s.state.t < 965_000) s.tick()
+		expect(s.actions).toHaveLength(1) // a 5 s delta is no measurement
+		while (s.state.t < 1_019_000) s.tick()
+		expect(s.actions).toHaveLength(1) // nor is a 59 s one
+		s.tick() // 60 s after the rollback: a full window
+		expect(s.actions[1]).toBe("restore:trial")
+		expect(s.state.t).toBe(1_020_000)
+	})
+
+	it("a due trial needs a full window of the new worker generation (8.2, 8.3, 8.7)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		while (s.state.t < 959_000) s.tick()
+		s.state.generation = 2
+		s.tick() // 960 000: due, but a new generation: history and baseline discarded
+		expect(s.actions).toHaveLength(1)
+		expect(s.guard.baselineOf("s", s.state.t)).toBeNull()
+		while (s.state.t < 1_019_000) s.tick()
+		expect(s.actions).toHaveLength(1) // 59 s of the new generation is no measurement
+		s.tick() // the off window restarted at 960 000 completes: new baseline, trial
+		expect(s.actions[1]).toBe("restore:trial")
+		expect(s.state.t).toBe(1_020_000)
+	})
+	it("a short delta at the deadline is no measurement (8.2: samples a window apart)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		while (s.state.t < 939_000) s.tick()
+		s.state.frozen = { idle: 10, active: 10, generation: 1 }
+		s.tick() // 940 000: the counters go back, 20 s before the deadline
+		s.state.frozen = null
+		while (s.state.t < 999_000) s.tick()
+		// at 960 000 only 20 s of monotonic counters exist, at 999 000 only 59 s
+		expect(s.actions).toHaveLength(1)
+		s.tick()
+		expect(s.actions[1]).toBe("restore:trial")
+		expect(s.state.t).toBe(1_000_000)
+	})
 })
