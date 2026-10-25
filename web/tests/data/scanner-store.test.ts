@@ -1042,14 +1042,18 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 describe("ScannerStore: reconcile never drops what changed after the request", () => {
 	const flush = () => new Promise(r => setTimeout(r, 0))
 	function deferred(writeOrderLimits?: WriteOrderLimits) {
-		const pending: ((body: unknown, status?: number) => void)[] = []
+		const pending: ((
+			body: unknown,
+			status?: number,
+			headers?: Record<string, string>,
+		) => void)[] = []
 		const calls: string[] = []
 		const api = new ApiClient({
 			fetch: url =>
 				new Promise<Response>(resolve => {
 					calls.push(url)
-					pending.push((body, status = 200) =>
-						resolve(new Response(JSON.stringify(body), { status })),
+					pending.push((body, status = 200, headers = {}) =>
+						resolve(new Response(JSON.stringify(body), { status, headers })),
 					)
 				}),
 		})
@@ -1060,6 +1064,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		const frames: (() => void)[] = []
 		const store = new ScannerStore(api, events, {
 			frame: { request: cb => frames.push(cb), cancel: () => undefined },
+			recoveryDelayMs: () => 0,
 			...(writeOrderLimits ? { writeOrderLimits } : {}),
 		})
 		const send = (type: string, data: unknown) =>
@@ -1428,6 +1433,11 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			label: string,
 			over: Partial<Discovery> = {},
 		) => discovery(id, { revision, operator: { label }, ...over })
+		/** The headers of a successful DELETE from a current core, at store revision `revision`. */
+		const deleted = (revision: number) => ({
+			"x-wavekit-store-epoch": E,
+			"x-wavekit-store-revision": String(revision),
+		})
 		const pageAt = (storeRevision: number, ...items: Discovery[]) => ({
 			items,
 			nextCursor: null,
@@ -1621,29 +1631,50 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			store.dispose()
 		})
 
-		it("coverage a read added survives an event of the same or a newer revision, in either order", async () => {
-			const covered = [{ decoderId: "dmr", state: "running" as const }]
+		it("two reads of the same revision at the same store revision: the later-started one's coverage wins, in either order", async () => {
+			const running = [{ decoderId: "dmr", state: "running" as const }]
+			const stopped = [{ decoderId: "dmr", state: "stopped" as const }]
 			for (const reverse of both) {
-				const { store, pending, send, tick } = deferred()
-				const get = store.fetchDiscovery("x")
+				const { store, pending } = deferred()
+				const a = store.fetchDiscovery("x")
+				const b = store.fetchDiscovery("x")
 				await flush()
 				await answer(
 					pending,
 					[
-						() => pending[0]!(one(at("x", 5, "x", { coverage: covered }), 5)),
-						() => {
-							send("scanner:discovery", event("updated", at("x", 5, "x"), 5))
-							tick()
-						},
+						() => pending[0]!(one(at("x", 5, "x", { coverage: running }), 5)),
+						() => pending[1]!(one(at("x", 5, "x", { coverage: stopped }), 5)),
 					],
 					reverse,
 				)
+				await Promise.all([a, b])
+				expect(store.get().discoveries.byId.get("x")?.coverage).toEqual(stopped)
+				store.dispose()
+			}
+		})
+
+		it("a hint tie: the later of an equal read and event wins; an event keeps the held coverage", async () => {
+			const covered = [{ decoderId: "rtl433", state: "running" as const }]
+			for (const getFirst of both) {
+				const { store, pending, send, tick } = deferred()
+				const ev = () => {
+					send(
+						"scanner:discovery",
+						event("updated", at("x", 5, "x", { hint: "lora" }), 5),
+					)
+					tick()
+				}
+				if (!getFirst) ev()
+				const get = store.fetchDiscovery("x")
+				await flush()
+				pending[0]!(
+					one(at("x", 5, "x", { hint: "ism-device", coverage: covered }), 5),
+				)
 				await get
-				expect(store.get().discoveries.byId.get("x")?.coverage).toEqual(covered)
-				send("scanner:discovery", event("updated", at("x", 6, "newer"), 6))
-				tick()
+				if (getFirst) ev()
 				const d = store.get().discoveries.byId.get("x")
-				expect(d?.operator?.label).toBe("newer")
+				// the event arrived after the GET started (getFirst) or before it
+				expect(d?.hint).toBe(getFirst ? "lora" : "ism-device")
 				expect(d?.coverage).toEqual(covered)
 				store.dispose()
 			}
@@ -1688,9 +1719,66 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			store.dispose()
 		})
 
+		it("a deletion the core stamped is remembered at its own revision: past the cap, a held GET of it stays out", async () => {
+			const { store, pending, calls } = deferred({ tombstones: 2 })
+			const seed = store.fetchDiscoveries(span)
+			await flush()
+			pending[0]!(pageAt(4, at("x", 2, "x"), at("y", 3, "y"), at("z", 4, "z")))
+			await seed
+			const held = store.fetchDiscovery("x")
+			// the client's high-water is 4; the core deletes x, y and z at revisions 5, 6 and 7
+			for (const [i, id] of (["x", "y", "z"] as const).entries()) {
+				const del = store.deleteDiscovery(id)
+				await flush()
+				pending[calls.length - 1]!(null, 200, deleted(5 + i))
+				await del
+			}
+			// x's tombstone left (cap 2): the floor is its revision 5, so the GET read at 4 is refused
+			pending[1]!(one(at("x", 2, "x"), 4))
+			await flush()
+			expect(has(store, "x")).toBe(false)
+			// the refusal asks again; the core answers 404 (x is gone)
+			await flush()
+			await flush()
+			expect(calls.length).toBe(6)
+			pending[5]!({ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404)
+			await held.catch(() => undefined)
+			expect(has(store, "x")).toBe(false)
+			store.dispose()
+		})
+
+		it("a span the floor refused is read again and x appears with no event", async () => {
+			const { store, pending, calls } = deferred({ coverages: 1 })
+			const other = { freqMinHz: 450e6, freqMaxHz: 451e6 }
+			const stale = store.fetchDiscoveries(span)
+			// two pages elsewhere read at 6: the first coverage leaves, the floor rises to 6
+			for (const n of [1, 2]) {
+				const p = store.fetchDiscoveries(other)
+				await flush()
+				pending[n]!(pageAt(6))
+				await p
+			}
+			let recorded = false
+			const done = stale.then(() => {
+				recorded = true
+			})
+			pending[0]!(pageAt(5, at("x", 1, "unchanged")))
+			await flush()
+			expect(has(store, "x")).toBe(false)
+			expect(recorded).toBe(false)
+			await flush()
+			await flush()
+			expect(calls.length).toBe(4)
+			pending[3]!(pageAt(6, at("x", 1, "unchanged")))
+			await done
+			expect(recorded).toBe(true)
+			expect(labelOf(store, "x")).toBe("unchanged")
+			store.dispose()
+		})
+
 		// Feature: band-inspection-ux, Property 9: the client ends at the server's state
 		// Validates: Requirements 3.2, 3.3
-		it("property: any delivery order of answers and events ends at the server's final state", async () => {
+		it("property: any delivery order of answers, events and the store's own recovery reads ends at the server's final state", async () => {
 			const ids = ["a", "b", "c"] as const
 			const id = fc.constantFrom(...ids)
 			const step = fc.oneof(
@@ -1703,6 +1791,8 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 				fc.record({ kind: fc.constant("remove" as const), id }),
 			)
 			type Step = typeof step extends fc.Arbitrary<infer S> ? S : never
+			type Answer = [unknown, number?, Record<string, string>?]
+			const missing: Answer = [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404]
 			/** The server: runs `steps`, returning what each request answers and every event. */
 			function serve(steps: readonly Step[]) {
 				let revision = 1
@@ -1714,7 +1804,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 				const gone = new Map<string, string>() // absorbed id -> survivor
 				const record = (i: string) =>
 					at(i, live.get(i)!.revision, live.get(i)!.label)
-				const answers: (() => [unknown, number?])[] = []
+				const answers: (() => Answer)[] = []
 				const events: unknown[] = []
 				const write = (i: string, label: string) => {
 					if (!live.has(i)) return false
@@ -1729,6 +1819,21 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 					events.push(event("deleted", last, ++revision))
 					return true
 				}
+				const readOf = (i: string): Answer => {
+					let target: string | undefined = i
+					while (target !== undefined && !live.has(target))
+						target = gone.get(target)
+					if (target === undefined) return missing
+					return [
+						{
+							...one(record(target), revision),
+							...(target !== i ? { absorbedInto: target, requestedId: i } : {}),
+						},
+					]
+				}
+				const spanOf = (): Answer => [
+					pageAt(revision, ...[...live.keys()].sort().map(record)),
+				]
 				for (const [k, s] of steps.entries()) {
 					if (s.kind === "update") write(s.id, `u${k}`)
 					else if (s.kind === "delete") remove(s.id)
@@ -1741,43 +1846,27 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 						live.get(s.into)!.revision = r
 						events.push(event("merged", record(s.into), r, [s.id]))
 					} else if (s.kind === "span") {
-						const page = pageAt(
-							revision,
-							...[...live.keys()].sort().map(record),
-						)
-						answers.push(() => [page])
+						const a = spanOf()
+						answers.push(() => a)
 					} else if (s.kind === "read") {
-						const target = live.has(s.id) ? s.id : gone.get(s.id)
-						const body =
-							target !== undefined && live.has(target)
-								? {
-										...one(record(target), revision),
-										...(target !== s.id
-											? { absorbedInto: target, requestedId: s.id }
-											: {}),
-									}
-								: null
-						answers.push(() =>
-							body ? [body] : [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404],
-						)
+						const a = readOf(s.id)
+						answers.push(() => a)
 					} else if (s.kind === "patch") {
-						const ok = live.has(s.id) && write(s.id, `p${k}`)
-						const body = ok ? one(record(s.id), revision) : null
-						answers.push(() =>
-							body ? [body] : [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404],
-						)
+						const a = write(s.id, `p${k}`) ? readOf(s.id) : missing
+						answers.push(() => a)
 					} else {
-						const ok = remove(s.id)
-						answers.push(() =>
-							ok ? [null] : [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404],
-						)
+						const a: Answer = remove(s.id)
+							? [null, 200, deleted(revision)]
+							: missing
+						answers.push(() => a)
 					}
 				}
-				// a fresh read at the end (delivered at a random place like the rest): a write the
-				// floor refused waits for the next read, never shows stale
-				const last = pageAt(revision, ...[...live.keys()].sort().map(record))
-				answers.push(() => [last])
-				return { live, answers, events }
+				// a recovery read the store asks for later is served from the final state
+				const now = (url: string): Answer => {
+					const m = /\/api\/scanner\/discoveries\/([^?]+)/.exec(url)
+					return m ? readOf(decodeURIComponent(m[1]!)) : spanOf()
+				}
+				return { live, answers, events, now }
 			}
 			const scenario = fc
 				.array(step, { minLength: 40, maxLength: 60 })
@@ -1790,16 +1879,25 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 							Array.from({ length: n }, (_, i) => i),
 							{ minLength: n, maxLength: n },
 						),
+						seed: fc.integer(),
 					})
 				})
 			await fc.assert(
-				fc.asyncProperty(scenario, async ({ steps, order }) => {
-					const { live, answers, events } = serve(steps)
+				fc.asyncProperty(scenario, async ({ steps, order, seed }) => {
+					const { live, answers, events, now } = serve(steps)
 					// small bounds so long runs cross the eviction of removals and pages
 					const { store, pending, calls, send, tick } = deferred({
-						tombstones: 2,
-						coverages: 2,
+						tombstones: 1,
+						coverages: 1,
 					})
+					let rnd = seed >>> 0
+					const random = () => {
+						rnd = (rnd + 0x6d2b79f5) >>> 0
+						let t = rnd
+						t = Math.imul(t ^ (t >>> 15), t | 1)
+						t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+						return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+					}
 					const quiet = (p: Promise<unknown>) =>
 						p.then(
 							() => undefined,
@@ -1815,7 +1913,6 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 							done.push(quiet(store.patchDiscovery(s.id, { label: "edit" })))
 						else if (s.kind === "remove")
 							done.push(quiet(store.deleteDiscovery(s.id)))
-					done.push(quiet(store.fetchDiscoveries(span)))
 					await flush()
 					expect(calls).toHaveLength(answers.length)
 					// the ids the client has seen: named in an answer, an event or its own request
@@ -1836,19 +1933,38 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 						if (b.discovery) seen.add(b.discovery.id)
 						for (const m of b.mergedIds ?? []) seen.add(m)
 					}
-					// every answer and event, delivered in a random order (random delays)
-					for (const i of order) {
-						if (i < answers.length) {
-							const [body, status] = answers[i]!()
-							if (status === undefined) note(body)
-							pending[i]!(body, status)
-							await done[i]
+					type Message = { call: number } | { event: unknown }
+					const queue: Message[] = order.map(i =>
+						i < answers.length
+							? { call: i }
+							: { event: events[i - answers.length] },
+					)
+					let known = calls.length
+					// every answer, event and recovery read, in a random order (random delays)
+					for (;;) {
+						const m = queue.shift()
+						if (m === undefined) {
+							for (let i = 0; i < 4 && known === calls.length; i++)
+								await flush()
+							if (known === calls.length) break
+						} else if ("call" in m) {
+							const [body, status, headers] =
+								m.call < answers.length
+									? answers[m.call]!()
+									: now(calls[m.call]!)
+							if (status === undefined || status === 200) note(body)
+							pending[m.call]!(body, status, headers)
 						} else {
-							const e = events[i - answers.length]
-							note(e)
-							send("scanner:discovery", e)
+							note(m.event)
+							send("scanner:discovery", m.event)
 							tick()
 						}
+						await flush()
+						await flush()
+						for (; known < calls.length; known++)
+							queue.splice(Math.floor(random() * (queue.length + 1)), 0, {
+								call: known,
+							})
 					}
 					await Promise.all(done)
 					const byId = store.get().discoveries.byId
@@ -1860,6 +1976,6 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 				}),
 				{ numRuns: 200 },
 			)
-		})
+		}, 120_000)
 	})
 })

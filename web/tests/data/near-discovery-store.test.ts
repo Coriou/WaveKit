@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import type { Discovery, ScannerProof } from "@wavekit/api-types"
+import { ApiClient } from "../../src/data/api-client.ts"
 import { EventsClient } from "../../src/data/events-client.ts"
 import {
 	NearDiscoveryStore,
@@ -158,6 +159,77 @@ describe("NearDiscoveryStore", () => {
 			},
 		})
 		expect(store.get().discovery?.id).toBe("d2")
+		store.dispose()
+	})
+})
+
+describe("NearDiscoveryStore ordering (band inspection UX req 3.3)", () => {
+	/** A store whose discovery GET answers wait until `release` is called. */
+	function held() {
+		const waiting: ((r: Response) => void)[] = []
+		const api = new ApiClient({
+			fetch: url =>
+				url.includes("/observations")
+					? Promise.resolve(json(200, { items: [], nextCursor: null }))
+					: new Promise<Response>(resolve => waiting.push(resolve)),
+		})
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		const store = new NearDiscoveryStore(api, events)
+		const send = (data: unknown) =>
+			sockets
+				.last()
+				.receive({ type: "scanner:discovery", channel: "scanner", data })
+		const release = async (body: unknown) => {
+			waiting.shift()!(json(200, body))
+			await flush()
+			await flush()
+		}
+		return { store, send, release }
+	}
+	const page = (d: Discovery, storeRevision: number, storeEpoch = "e1") => ({
+		items: [d],
+		nextCursor: null,
+		storeEpoch,
+		storeRevision,
+	})
+	const ev = (d: Discovery, revision: number, storeEpoch = "e1") => ({
+		change: "updated",
+		discovery: d,
+		revision,
+		storeEpoch,
+	})
+
+	it("a held GET answer never overwrites a newer update event of the same record", async () => {
+		const { store, send, release } = held()
+		store.follow(446_006_000, 6250)
+		await flush()
+		send(ev(discovery("d1", { revision: 6 }), 6))
+		expect(store.get().discovery?.revision).toBe(6)
+		await release(page(discovery("d1", { revision: 5 }), 5))
+		expect(store.get().discovery?.revision).toBe(6)
+		expect(store.get().status).toBe("ready")
+		// an older event changes nothing either; a newer one applies
+		send(ev(discovery("d1", { revision: 4 }), 4))
+		expect(store.get().discovery?.revision).toBe(6)
+		send(ev(discovery("d1", { revision: 7 }), 7))
+		expect(store.get().discovery?.revision).toBe(7)
+		store.dispose()
+	})
+
+	it("drops answers and events from a store epoch left behind", async () => {
+		const { store, send, release } = held()
+		store.follow(446_006_000, 6250)
+		await release(page(discovery("d1", { revision: 3 }), 3, "e1"))
+		expect(store.get().discovery?.revision).toBe(3)
+		// the core restarted: revisions restart under a new epoch
+		send(ev(discovery("d1", { revision: 1 }), 1, "e2"))
+		expect(store.get().discovery?.revision).toBe(1)
+		// a late event of the old epoch: dropped
+		send(ev(discovery("d1", { revision: 9 }), 9, "e1"))
+		expect(store.get().discovery?.revision).toBe(1)
 		store.dispose()
 	})
 })

@@ -211,21 +211,28 @@ replans). So the core orders them:
   and `storeRevision` (the store revision the answer was taken at; for PATCH, right after the
   edit). Events carry `revision` (the removal's for `deleted`; for `merged` also the removal
   revision of every id in `mergedIds`) and `storeEpoch`. DELETE (204) sends both as headers.
-- The web store orders every write on (record revision, read revision), the read revision
-  being the answer's `storeRevision` (an event's own revision), and applies one when its pair
-  is at least the held pair. An equal pair is accepted, so a later read refreshes `coverage`
-  (added by the routes at read time, never on events, and changing without a new revision);
-  an event without `coverage` keeps the held one. A deletion is final (ids are never reused).
-  A complete page (the first page, asked without a cursor, with `nextCursor` null) read at R
-  covers its query: a matching record it did not list, from an answer read before R, is stale,
-  which also handles records the cache never saw. A page that drops a cached record removes it
-  without making that final (the record may have moved). Bounds: 2 048 remembered removals and
-  32 covered pages; evicting one raises a floor to its read revision, and an answer read before
-  the floor is refused (missing until the next read, never stale); a fresh read is never below
-  it. A new epoch clears the cache and resyncs; late answers from a retired epoch are dropped,
-  and a DELETE asked before an epoch change applies nothing. Without `storeEpoch` (an older
-  core) the same rules run on a client sequence: a read's request start, a live event's or a
-  successful mutation's arrival.
+- The web store orders every write on (record revision, read revision, client sequence): the
+  read revision is the answer's `storeRevision` (an event's own revision), the client sequence
+  is taken when a read's request starts and when an event or a mutation's answer arrives. The
+  winner's fields all apply, `coverage` and `hint` included (worked out at read time, they can
+  change without a new revision, and the later-started read is the fresher view); an event,
+  which never carries `coverage`, keeps the held one. A deletion is final (ids are never
+  reused); a DELETE takes its revision from the `x-wavekit-store-*` headers (ApiClient exposes
+  the headers of that one call), and without them (a 404, an older core) is remembered at
+  +Infinity, which never raises the floor. A complete page (the first page, asked without a
+  cursor, with `nextCursor` null) read at R covers its query: a matching record it did not
+  list, from an answer read before R, is stale, which also handles records the cache never
+  saw. A page that drops a cached record removes it without making that final (the record may
+  have moved). Bounds: 2 048 remembered removals and 32 covered pages; evicting one raises a
+  floor to its read revision. A write the floor refuses (and only the floor: a per-id refusal
+  is final) is read again: a span or single read retries itself, an event or a later page
+  schedules one re-read per id (at most 64 waiting, past that the list), at most 3 times,
+  250 ms × 2^attempt apart (250, 500, 1 000 ms: 1.75 s in all). A span fetch resolves only once
+  a read landed, so the band view records it as fetched only then. A fresh read is never below
+  the floor. A new epoch clears the cache and resyncs; late answers from a retired epoch are
+  dropped, and a DELETE asked before an epoch change applies nothing. The tuned card's
+  nearest-discovery store orders its one record the same way. Without `storeEpoch` (an older
+  core) the same rules run on the client sequence alone.
 
 ### Requirement 4: documentation
 
@@ -268,8 +275,9 @@ replans). So the core orders them:
    index size <= 16 384; per-owner recording aliases <= 64. (3.1)
 8. Per start: merge events <= 256 or exactly one resync; each `mergedIds.length <= 64`. (3.2)
 9. For any sequence of server changes (edits, deletions, merges) with reads, PATCHes and
-   DELETEs taken between them, delivered to the web store with their events in any order, the
-   store ends at the server's final state for every id it has seen. (3.2, 3.3)
+   DELETEs taken between them, delivered to the web store with their events and the store's own
+   recovery reads in any order, under small bounds that force evictions, the store ends at the
+   server's final state for every id it has seen. (3.2, 3.3)
 
 All with `fast-check`, `numRuns: 100` or more.
 

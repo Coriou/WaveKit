@@ -9,6 +9,10 @@
  *
  * A core before WG12 refuses the query (400): the store says `unsupported` and stops asking, and the card
  * keeps what Identify named this session only.
+ *
+ * Band inspection UX req 3.3: the shown record is ordered like the scanner store's cache (write-order.ts):
+ * an answer or event for the same id applies only when its (revision, read revision, client sequence) is
+ * at least the held one, and answers and events from a store epoch left behind (a restart) are dropped.
  */
 import type {
 	Discovery,
@@ -17,6 +21,8 @@ import type {
 	ScannerProof,
 } from "@wavekit/api-types"
 import type { ApiClient } from "./api-client.ts"
+import { keysBefore } from "./write-order.ts"
+import type { WriteKeys } from "./write-order.ts"
 import { isApiError } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import { Store } from "./store.ts"
@@ -65,6 +71,12 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 	private supported = true
 	private proofAbort: AbortController | null = null
 	private proofTimer: ReturnType<typeof setTimeout> | null = null
+	/** The order of the shown record (null when none is shown). */
+	private held: WriteKeys | null = null
+	private seq = 0
+	/** The core's store epoch: undefined until the first answer, null for an older core. */
+	private epoch: string | null | undefined = undefined
+	private readonly retired: (string | null)[] = []
 
 	constructor(api: ApiClient, events: EventsClient) {
 		super(INITIAL)
@@ -83,6 +95,7 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 		if (s.hz === hz && s.toleranceHz === toleranceHz) return
 		this.abort?.abort()
 		this.cancelProof()
+		this.held = null
 		this.set({
 			hz,
 			toleranceHz,
@@ -97,12 +110,17 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 	load(): Promise<void> {
 		const { hz, toleranceHz } = this.get()
 		if (hz === null || !this.supported) return Promise.resolve()
+		const seq = ++this.seq
 		this.abort?.abort()
 		const abort = new AbortController()
 		this.abort = abort
 		this.update(s => ({ ...s, status: "loading" }))
 		return this.api
-			.get<{ items: Discovery[] }>("/api/scanner/discoveries", {
+			.get<{
+				items: Discovery[]
+				storeEpoch?: string
+				storeRevision?: number
+			}>("/api/scanner/discoveries", {
 				query: {
 					nearHz: Math.round(hz),
 					toleranceHz: Math.round(toleranceHz),
@@ -113,12 +131,31 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 			})
 			.then(
 				page => {
-					if (abort.signal.aborted) return
+					if (abort.signal.aborted || !this.admit(page.storeEpoch)) return
 					const d = page.items[0]
-					const near =
+					const found =
 						d && Math.abs(d.frequencyHz - hz) <= toleranceHz && isProven(d)
 							? d
 							: null
+					const read = this.epoch === null ? seq : (page.storeRevision ?? 0)
+					const keys = found ? this.keysOf(found, read, seq) : null
+					const shown = this.get().discovery
+					const held = this.held
+					// something newer about the shown record arrived while this was asked
+					const stale =
+						shown !== null &&
+						held !== null &&
+						(found === null || found.id === shown.id
+							? keys === null
+								? held.rev > read
+								: keysBefore(keys, held)
+							: false)
+					if (stale) {
+						this.update(s => ({ ...s, status: "ready" }))
+						return
+					}
+					const near = found
+					this.held = keys
 					this.update(s => ({
 						...s,
 						discovery: near,
@@ -142,7 +179,8 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 
 	private onDiscovery(e: ScannerDiscoveryEventData): void {
 		const s = this.get()
-		if (s.hz === null || !this.supported) return
+		if (s.hz === null || !this.supported || !this.admit(e.storeEpoch)) return
+		const seq = ++this.seq
 		const d = e.discovery
 		const mine = s.discovery !== null && s.discovery.id === d.id
 		const absorbed =
@@ -163,12 +201,20 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 			return
 		}
 		const current = s.discovery
+		const keys = this.keysOf(
+			d,
+			this.epoch === null ? seq : (e.revision ?? 0),
+			seq,
+		)
+		// an older word on the shown record (a delayed event) changes nothing
+		if (mine && this.held !== null && keysBefore(keys, this.held)) return
 		if (
 			mine ||
 			absorbed ||
 			current === null ||
 			near <= Math.abs(current.frequencyHz - s.hz)
 		) {
+			this.held = keys
 			this.update(x => ({ ...x, discovery: d, status: "ready" }))
 			this.loadProof(PROOF_DELAY_MS)
 		}
@@ -200,6 +246,29 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 					() => undefined,
 				)
 		}, delayMs)
+	}
+
+	/** The keys of `d` read at `read`: an older core (no epoch) orders by the client sequence only. */
+	private keysOf(d: Discovery, read: number, seq: number): WriteKeys {
+		return this.epoch === null
+			? { rev: seq, read: seq, seq }
+			: { rev: d.revision ?? 0, read, seq }
+	}
+
+	/** False for an answer or event from an epoch left behind; a new epoch forgets the held order. */
+	private admit(epoch: string | undefined): boolean {
+		const e = epoch ?? null
+		if (this.epoch === undefined) {
+			this.epoch = e
+			return true
+		}
+		if (e === this.epoch) return true
+		if (this.retired.includes(e)) return false
+		this.retired.push(this.epoch)
+		if (this.retired.length > 8) this.retired.shift()
+		this.epoch = e
+		this.held = null
+		return true
 	}
 
 	private cancelProof(): void {

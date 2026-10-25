@@ -8,6 +8,10 @@
  * load() (status, jobs, band plans) runs at start; the discoveries list loads on the first
  * refreshDiscoveries(). A reconnect refetches what was loaded (the core replays nothing).
  */
+import {
+	DISCOVERY_STORE_EPOCH_HEADER,
+	DISCOVERY_STORE_REVISION_HEADER,
+} from "@wavekit/api-types"
 import type {
 	Bandplan,
 	Discovery,
@@ -31,7 +35,7 @@ import type {
 import type { ApiClient, QueryValue } from "./api-client.ts"
 import { WriteOrder } from "./write-order.ts"
 import type { WriteOrderLimits } from "./write-order.ts"
-import { errorMessage, isApiError } from "./api-client.ts"
+import { ApiError, errorMessage, isApiError } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import { confidenceRank, isJobActive } from "./scanner-format.ts"
 import { Store } from "./store.ts"
@@ -72,12 +76,23 @@ export interface DiscoveryPage extends Partial<DiscoveryStoreMeta> {
 /**
  * How one answer or event is ordered (band inspection UX req 3.3, see write-order.ts): with a
  * current core a record's `rev` is its server revision and `read` the store revision the answer
- * was served at (an event's own revision); with an older core both are one client sequence.
+ * was served at (an event's own revision); `seq` is the client sequence (a read's request start,
+ * an event's or a mutation answer's arrival). With an older core all three are that sequence.
  */
 interface Stamp {
 	rev(d: Discovery): number
 	read: number
+	seq: number
 }
+
+/**
+ * Band inspection UX req 3.3: recovery after a write the floor refused (write-order.ts). At most
+ * RECOVERY_RETRIES re-reads, RECOVERY_BASE_MS × 2^attempt apart (250, 500 and 1 000 ms: 1.75 s in
+ * all); at most RECOVERY_IDS_MAX ids wait for a re-read at once, past that the list is read again.
+ */
+export const RECOVERY_RETRIES = 3
+export const RECOVERY_BASE_MS = 250
+export const RECOVERY_IDS_MAX = 64
 
 /** POST /api/scanner/discoveries/:id/listen (core src/core/scanner/listen.ts ListenResult). */
 export interface ScannerListenResult {
@@ -166,6 +181,8 @@ export interface ScannerStoreOptions {
 	activityStaleMs?: number
 	/** Bounds of the discovery write order (tests); default 2 048 removals and 32 pages. */
 	writeOrderLimits?: WriteOrderLimits
+	/** Delay before recovery re-read number `attempt` (tests); default RECOVERY_BASE_MS × 2^attempt. */
+	recoveryDelayMs?: (attempt: number) => number
 }
 
 // ---- pure helpers
@@ -449,6 +466,12 @@ export class ScannerStore extends Store<ScannerState> {
 	 */
 	private order: WriteOrder<Discovery>
 	private readonly orderLimits: WriteOrderLimits
+	private readonly recoveryDelayMs: (attempt: number) => number
+	/** Ids applyWrites() saw refused by the floor since the last takeFloored(). */
+	private flooredIds: string[] = []
+	/** Ids waiting for a recovery re-read (one each). */
+	private readonly rereads = new Map<string, ReturnType<typeof setTimeout>>()
+	private readonly recoveryTimers = new Set<ReturnType<typeof setTimeout>>()
 	/** The core's store epoch: undefined until the first answer, null for an older core. */
 	private storeEpoch: string | null | undefined = undefined
 	/** Epochs left behind (a restart): their late answers and events are dropped. */
@@ -476,6 +499,8 @@ export class ScannerStore extends Store<ScannerState> {
 		this.now = options.now ?? (() => Date.now())
 		this.staleMs = options.activityStaleMs ?? 10_000
 		this.orderLimits = options.writeOrderLimits ?? {}
+		this.recoveryDelayMs =
+			options.recoveryDelayMs ?? (attempt => RECOVERY_BASE_MS * 2 ** attempt)
 		this.order = new WriteOrder<Discovery>(this.orderLimits)
 		this.cleanup = [
 			events.subscribe(["scanner"]),
@@ -485,6 +510,7 @@ export class ScannerStore extends Store<ScannerState> {
 				const stamp = this.stampOf(d.storeEpoch, this.nextSeq(), d.revision)
 				if (stamp === null) return
 				this.live(s => this.withDiscoveryEvent(s, d, stamp))
+				this.recoverIds(this.takeFloored())
 				// band inspection UX req 3.2: mergedIds was cut at 64, so some absorbed ids are unknown here
 				if (d.mergedTruncated === true)
 					this.resyncDiscoveries(d.change === "deleted" ? null : d.discovery.id)
@@ -584,6 +610,14 @@ export class ScannerStore extends Store<ScannerState> {
 	 * call aborts an older one. Never rejects; a failure lands in `discoveries.error`.
 	 */
 	refreshDiscoveries(query?: DiscoveryQuery, keepCount = 0): Promise<void> {
+		return this.refreshList(query, keepCount, 0)
+	}
+
+	private refreshList(
+		query: DiscoveryQuery | undefined,
+		keepCount: number,
+		attempt: number,
+	): Promise<void> {
 		const q = query ?? this.current().discoveries.query
 		const generation = ++this.discoveryGeneration
 		const started = this.requestStart()
@@ -639,6 +673,8 @@ export class ScannerStore extends Store<ScannerState> {
 							},
 						}
 					})
+					if (this.takeFloored().length > 0)
+						this.recoverList(q, keepCount, attempt, generation)
 				},
 				(error: unknown) => {
 					if (generation !== this.discoveryGeneration) return
@@ -653,7 +689,7 @@ export class ScannerStore extends Store<ScannerState> {
 							...s,
 							discoveries: { ...s.discoveries, evidenceSupported: false },
 						}))
-						void this.refreshDiscoveries(older, keepCount)
+						void this.refreshList(older, keepCount, attempt)
 						return
 					}
 					this.commit(s => ({
@@ -717,6 +753,14 @@ export class ScannerStore extends Store<ScannerState> {
 					},
 				}
 			})
+			// a refused record of a later page: the list is read again (it comes back in its place)
+			if (this.takeFloored().length > 0)
+				this.recoverList(
+					d.query,
+					this.current().discoveries.items.length,
+					0,
+					generation,
+				)
 		} catch (error) {
 			if (generation !== this.discoveryGeneration) return
 			this.commit(s => ({
@@ -734,7 +778,11 @@ export class ScannerStore extends Store<ScannerState> {
 	 * GET /api/scanner/discoveries/:id into `byId` (e.g. a hit-log row outside the list). An id a merge
 	 * absorbed answers with the survivor (`absorbedInto`): the old id leaves the state, the survivor takes it.
 	 */
-	async fetchDiscovery(id: string): Promise<Discovery> {
+	fetchDiscovery(id: string): Promise<Discovery> {
+		return this.readDiscovery(id, 0)
+	}
+
+	private async readDiscovery(id: string, attempt: number): Promise<Discovery> {
 		const started = this.requestStart()
 		const d = await this.api.get<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
@@ -748,6 +796,11 @@ export class ScannerStore extends Store<ScannerState> {
 				absorbed === null ? s : this.withoutDiscovery(s, absorbed, stamp)
 			return this.withDiscovery(base, d, "updated", undefined, stamp)
 		})
+		// refused by the floor: read it again, later (a fresh read is never below the floor)
+		if (this.takeFloored().length > 0 && attempt < RECOVERY_RETRIES) {
+			await this.recoveryWait(attempt)
+			if (!this.disposed) return this.readDiscovery(id, attempt + 1)
+		}
 		return d
 	}
 
@@ -775,6 +828,27 @@ export class ScannerStore extends Store<ScannerState> {
 		query: DiscoveryQuery,
 		options: { signal?: AbortSignal } = {},
 	): Promise<readonly Discovery[]> {
+		for (let attempt = 0; ; attempt++) {
+			const { items, floored } = await this.fetchSpan(query, options)
+			// resolves only once a read landed whole: the caller records the span as fetched then
+			if (!floored) return items
+			if (attempt >= RECOVERY_RETRIES)
+				throw new ApiError({
+					status: 0,
+					code: "DISCOVERIES_STALE",
+					message: "The discovery answer was too old to apply; ask again",
+					body: null,
+					method: "GET",
+					path: "/api/scanner/discoveries",
+				})
+			await this.recoveryWait(attempt, options.signal)
+		}
+	}
+
+	private async fetchSpan(
+		query: DiscoveryQuery,
+		options: { signal?: AbortSignal },
+	): Promise<{ items: readonly Discovery[]; floored: boolean }> {
 		const started = this.requestStart()
 		const page = await this.api.get<DiscoveryPage>(
 			"/api/scanner/discoveries",
@@ -784,14 +858,14 @@ export class ScannerStore extends Store<ScannerState> {
 		)
 		// an answer that arrives after a newer one changes only the ids nothing newer spoke for
 		const stamp = this.stampOf(page.storeEpoch, started, page.storeRevision)
-		if (stamp === null) return page.items
+		if (stamp === null) return { items: page.items, floored: false }
 		this.commit(s => {
 			const byId = this.reconcile(s.discoveries.byId, query, page, stamp, {
 				cursor: null,
 			})
 			return { ...s, discoveries: { ...s.discoveries, byId } }
 		})
-		return page.items
+		return { items: page.items, floored: this.takeFloored().length > 0 }
 	}
 
 	// ---- actions (reject with the core's ApiError)
@@ -916,22 +990,39 @@ export class ScannerStore extends Store<ScannerState> {
 		const stamp = this.stampOf(d.storeEpoch, this.nextSeq(), d.storeRevision)
 		if (stamp !== null)
 			this.commit(s => this.withDiscovery(s, d, "updated", undefined, stamp))
+		this.recoverIds(this.takeFloored())
 		return d
 	}
 
 	/** DELETE /api/scanner/discoveries/:id; one the core no longer has counts as deleted. */
 	async deleteDiscovery(id: string): Promise<void> {
-		// the answer carries no body (the epoch headers are not read): it applies only in the epoch
-		// it was asked in, so a core that restarted meanwhile keeps what it restored
-		const epoch = this.epochSwitches
+		// a 204 has no body: the core's epoch and revision come as headers (band inspection UX
+		// req 3.3); an answer without them (a 404, an older core) applies only in the epoch it was
+		// asked in, so a core that restarted meanwhile keeps what it restored
+		const switches = this.epochSwitches
+		const seen: { epoch: string | null; revision: number | null } = {
+			epoch: null,
+			revision: null,
+		}
 		try {
-			await this.api.delete<unknown>(`/api/scanner/discoveries/${encode(id)}`)
+			await this.api.delete<unknown>(`/api/scanner/discoveries/${encode(id)}`, {
+				onHeaders: h => {
+					seen.epoch = h.get(DISCOVERY_STORE_EPOCH_HEADER)
+					const r = h.get(DISCOVERY_STORE_REVISION_HEADER)
+					seen.revision = r !== null && /^\d+$/.test(r) ? Number(r) : null
+				},
+			})
 		} catch (error) {
 			if (!isApiError(error) || error.status !== 404) throw error
 		}
-		if (this.epochSwitches !== epoch) return
-		// a deletion is final; with an older core it is ordered by its arrival (see patchDiscovery)
-		const stamp = this.currentStamp(this.nextSeq())
+		let read = Infinity
+		if (seen.epoch !== null && seen.revision !== null) {
+			if (!this.admitEpoch(seen.epoch)) return
+			read = seen.revision
+			this.storeHighWater = Math.max(this.storeHighWater, read)
+		} else if (this.epochSwitches !== switches) return
+		// final either way; a tombstone without the core's revision never raises the floor
+		const stamp: Stamp = { rev: () => Infinity, read, seq: this.nextSeq() }
 		this.commit(s => this.withoutDiscovery(s, id, stamp))
 	}
 
@@ -955,6 +1046,10 @@ export class ScannerStore extends Store<ScannerState> {
 		this.frameScheduled = false
 		if (this.staleTimer) clearTimeout(this.staleTimer)
 		this.staleTimer = null
+		for (const t of this.recoveryTimers) clearTimeout(t)
+		this.recoveryTimers.clear()
+		for (const t of this.rereads.values()) clearTimeout(t)
+		this.rereads.clear()
 	}
 
 	// ---- internals: publishing
@@ -1025,6 +1120,65 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.derive({ ...s, jobs })
 	}
 
+	/** The ids refused by the floor since the last call (and forgets them). */
+	private takeFloored(): string[] {
+		const ids = this.flooredIds
+		this.flooredIds = []
+		return ids
+	}
+
+	/** Waits before recovery re-read `attempt`; rejects with an AbortError when `signal` aborts. */
+	private recoveryWait(attempt: number, signal?: AbortSignal): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.recoveryTimers.delete(timer)
+				signal?.removeEventListener("abort", onAbort)
+				resolve()
+			}, this.recoveryDelayMs(attempt))
+			this.recoveryTimers.add(timer)
+			const onAbort = () => {
+				clearTimeout(timer)
+				this.recoveryTimers.delete(timer)
+				reject(new DOMException("The operation was aborted.", "AbortError"))
+			}
+			if (signal?.aborted) onAbort()
+			else signal?.addEventListener("abort", onAbort, { once: true })
+		})
+	}
+
+	/** Events or answers the floor refused: one re-read per id (past RECOVERY_IDS_MAX, the list). */
+	private recoverIds(ids: readonly string[]): void {
+		for (const id of ids) {
+			if (this.disposed || this.rereads.has(id)) continue
+			if (this.rereads.size >= RECOVERY_IDS_MAX) {
+				const d = this.current().discoveries
+				this.recoverList(d.query, d.items.length, 0, this.discoveryGeneration)
+				continue
+			}
+			const timer = setTimeout(() => {
+				this.rereads.delete(id)
+				this.fetchDiscovery(id).catch(() => undefined)
+			}, this.recoveryDelayMs(0))
+			this.rereads.set(id, timer)
+		}
+	}
+
+	/** A list page the floor refused: read the list again, unless a newer refresh started. */
+	private recoverList(
+		query: DiscoveryQuery,
+		keepCount: number,
+		attempt: number,
+		generation: number,
+	): void {
+		if (this.disposed || attempt >= RECOVERY_RETRIES) return
+		const timer = setTimeout(() => {
+			this.recoveryTimers.delete(timer)
+			if (generation === this.discoveryGeneration && !this.disposed)
+				void this.refreshList(query, keepCount, attempt + 1)
+		}, this.recoveryDelayMs(attempt))
+		this.recoveryTimers.add(timer)
+	}
+
 	/** The client sequence of a request starting now (an older core's read order). */
 	private requestStart(): number {
 		return this.nextSeq()
@@ -1046,17 +1200,10 @@ export class ScannerStore extends Store<ScannerState> {
 		storeRevision: number | undefined,
 	): Stamp | null {
 		if (!this.admitEpoch(epoch ?? null)) return null
-		if (this.storeEpoch === null) return { rev: () => seq, read: seq }
+		if (this.storeEpoch === null) return { rev: () => seq, read: seq, seq }
 		const read = storeRevision ?? this.storeHighWater
 		this.storeHighWater = Math.max(this.storeHighWater, read)
-		return { rev: d => d.revision ?? 0, read }
-	}
-
-	/** A Stamp for an answer without epoch or revision (a DELETE): the current mode, nothing newer. */
-	private currentStamp(seq: number): Stamp {
-		return typeof this.storeEpoch === "string"
-			? { rev: d => d.revision ?? 0, read: this.storeHighWater }
-			: { rev: () => seq, read: seq }
+		return { rev: d => d.revision ?? 0, read, seq }
 	}
 
 	private admitEpoch(epoch: string | null): boolean {
@@ -1102,16 +1249,23 @@ export class ScannerStore extends Store<ScannerState> {
 			this.order.removeHard(id, stamp.read)
 			if (byId.delete(id)) applied.add(id)
 		}
+		const keys = { rev: stamp.read, read: stamp.read, seq: stamp.seq }
 		for (const id of writes.removeSoft ?? [])
-			if (this.order.removeSoft(id, stamp.read)) {
+			if (this.order.removeSoft(id, keys)) {
 				byId.delete(id)
 				applied.add(id)
 			}
-		for (const d of writes.upsert ?? [])
-			if (this.order.upsert(d.id, d, stamp.rev(d), stamp.read)) {
+		for (const d of writes.upsert ?? []) {
+			const outcome = this.order.upsert(d.id, d, {
+				rev: stamp.rev(d),
+				read: stamp.read,
+				seq: stamp.seq,
+			})
+			if (outcome === "applied") {
 				byId.set(d.id, withReadFields(d, byId.get(d.id)))
 				applied.add(d.id)
-			}
+			} else if (outcome === "floor") this.flooredIds.push(d.id)
+		}
 		const q = writes.covers
 		if (q !== undefined)
 			this.order.cover(

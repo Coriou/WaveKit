@@ -48,6 +48,8 @@ export interface RequestOptions {
 	headers?: Readonly<Record<string, string>>
 	/** Retry on 429 (rateLimitWait); default: the Activity reads (retriesOn429). */
 	retry429?: boolean
+	/** Called with the response headers of a successful answer (a 204 has nothing else). */
+	onHeaders?: (headers: Headers) => void
 }
 
 // ---- 429 (docs/specs/2026-10-25-band-inspection-ux.md req 2.1)
@@ -590,6 +592,7 @@ export class ApiClient {
 			})
 		}
 		const text = await response.text()
+		if (response.ok) options.onHeaders?.(response.headers)
 		let parsed: unknown = null
 		if (text.length > 0) {
 			try {
