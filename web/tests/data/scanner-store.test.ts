@@ -1112,4 +1112,75 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		expect(store.get().discoveries.byId.has("b")).toBe(true)
 		store.dispose()
 	})
+
+	it("an older span answer never protects its record from a newer complete page", async () => {
+		const { store, pending } = deferred()
+		const a = store.fetchDiscoveries(span)
+		const b = store.fetchDiscoveries(span)
+		await flush()
+		// A answers after B started; B then answers with an empty complete page
+		pending[0]!({ items: [discovery("x")], nextCursor: null })
+		await a
+		expect(store.get().discoveries.byId.has("x")).toBe(true)
+		pending[1]!({ items: [], nextCursor: null })
+		await b
+		expect(store.get().discoveries.byId.has("x")).toBe(false)
+		store.dispose()
+	})
+
+	it("an older list refresh answer never protects its record from a newer span page", async () => {
+		const { store, pending } = deferred()
+		const refresh = store.refreshDiscoveries({})
+		const spanFetch = store.fetchDiscoveries(span)
+		await flush()
+		pending[0]!({ items: [discovery("x")], nextCursor: null })
+		await refresh
+		pending[1]!({ items: [], nextCursor: null })
+		await spanFetch
+		expect(store.get().discoveries.byId.has("x")).toBe(false)
+		store.dispose()
+	})
+
+	it("an older next page never protects its record from a newer span page", async () => {
+		const { store, pending } = deferred()
+		const refresh = store.refreshDiscoveries({})
+		await flush()
+		pending[0]!({ items: [discovery("first")], nextCursor: "c1" })
+		await refresh
+		const more = store.loadMore()
+		const spanFetch = store.fetchDiscoveries(span)
+		await flush()
+		pending[1]!({ items: [discovery("x")], nextCursor: null })
+		await more
+		pending[2]!({ items: [], nextCursor: null })
+		await spanFetch
+		expect(store.get().discoveries.byId.has("x")).toBe(false)
+		store.dispose()
+	})
+
+	it("an older single-record answer never protects it from a newer span page", async () => {
+		const { store, pending } = deferred()
+		const one = store.fetchDiscovery("x")
+		const spanFetch = store.fetchDiscoveries(span)
+		await flush()
+		pending[0]!(discovery("x"))
+		await one
+		pending[1]!({ items: [], nextCursor: null })
+		await spanFetch
+		expect(store.get().discoveries.byId.has("x")).toBe(false)
+		store.dispose()
+	})
+
+	it("a span page that started before an operator edit answered keeps the edited record", async () => {
+		const { store, pending } = deferred()
+		const spanFetch = store.fetchDiscoveries(span)
+		const patch = store.patchDiscovery("x", { label: "kept" })
+		await flush()
+		pending[1]!(discovery("x", { label: "kept" }))
+		await patch
+		pending[0]!({ items: [], nextCursor: null })
+		await spanFetch
+		expect(store.get().discoveries.byId.has("x")).toBe(true)
+		store.dispose()
+	})
 })

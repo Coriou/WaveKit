@@ -445,7 +445,11 @@ export class ScannerStore extends Store<ScannerState> {
 	private discoveryGeneration = 0
 	/** Span fetches (fetchDiscoveries): only the newest may remove records (an older answer is stale). */
 	private spanGeneration = 0
-	/** Write order: `touched` holds, per id, the sequence of its last write to `byId`. */
+	/**
+	 * Write order: `touched` holds, per id, the sequence of its last write to `byId`. A live event
+	 * takes the next sequence; a write from a response takes its request's start sequence, so an older
+	 * answer never looks newer than a request that started after it.
+	 */
 	private writeSeq = 0
 	private readonly touched = new Map<string, number>()
 	private discoveryAbort: AbortController | null = null
@@ -571,7 +575,7 @@ export class ScannerStore extends Store<ScannerState> {
 	refreshDiscoveries(query?: DiscoveryQuery, keepCount = 0): Promise<void> {
 		const q = query ?? this.current().discoveries.query
 		const generation = ++this.discoveryGeneration
-		const started = this.writeSeq
+		const started = this.requestStart()
 		this.discoveryAbort?.abort()
 		const abort = new AbortController()
 		this.discoveryAbort = abort
@@ -654,6 +658,7 @@ export class ScannerStore extends Store<ScannerState> {
 		if (d.nextCursor === null || d.loading || d.loadingMore) return
 		const generation = this.discoveryGeneration
 		const cursor = d.nextCursor
+		const started = this.requestStart()
 		this.commit(s => ({
 			...s,
 			discoveries: { ...s.discoveries, loadingMore: true },
@@ -670,7 +675,7 @@ export class ScannerStore extends Store<ScannerState> {
 				const items = [...s.discoveries.items]
 				for (const x of page.items) {
 					byId.set(x.id, x)
-					this.touch(x.id)
+					this.touch(x.id, started)
 					// offset cursors shift when live discoveries arrive: drop repeats
 					if (!have.has(x.id)) items.push(x)
 				}
@@ -704,6 +709,7 @@ export class ScannerStore extends Store<ScannerState> {
 	 * absorbed answers with the survivor (`absorbedInto`): the old id leaves the state, the survivor takes it.
 	 */
 	async fetchDiscovery(id: string): Promise<Discovery> {
+		const started = this.requestStart()
 		const d = await this.api.get<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
 		)
@@ -711,7 +717,7 @@ export class ScannerStore extends Store<ScannerState> {
 			const absorbed =
 				typeof d.absorbedInto === "string" && d.id !== id ? id : null
 			const base = absorbed === null ? s : this.withoutDiscovery(s, absorbed)
-			return this.withDiscovery(base, d, "updated")
+			return this.withDiscovery(base, d, "updated", undefined, started)
 		})
 		return d
 	}
@@ -740,7 +746,7 @@ export class ScannerStore extends Store<ScannerState> {
 		query: DiscoveryQuery,
 		options: { signal?: AbortSignal } = {},
 	): Promise<readonly Discovery[]> {
-		const started = this.writeSeq
+		const started = this.requestStart()
 		const generation = ++this.spanGeneration
 		const page = await this.api.get<DiscoveryPage>(
 			"/api/scanner/discoveries",
@@ -876,11 +882,12 @@ export class ScannerStore extends Store<ScannerState> {
 		id: string,
 		patch: DiscoveryOperatorPatch,
 	): Promise<Discovery> {
+		const started = this.requestStart()
 		const d = await this.api.patch<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
 			patch,
 		)
-		this.commit(s => this.withDiscovery(s, d, "updated"))
+		this.commit(s => this.withDiscovery(s, d, "updated", undefined, started))
 		return d
 	}
 
@@ -984,14 +991,27 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.derive({ ...s, jobs })
 	}
 
-	/** Notes a write of `id` to `byId` (live event, patch, fetch) in write order. */
-	private touch(id: string): void {
-		this.touched.set(id, ++this.writeSeq)
+	/** The start sequence of a request whose answer will write to `byId` (pass it to touch()). */
+	private requestStart(): number {
+		return ++this.writeSeq
+	}
+
+	/**
+	 * Notes a write of `id` to `byId`: a live event without `startedAt` takes the next sequence; a write
+	 * from a response passes its request's requestStart(), and never lowers a newer stamp.
+	 */
+	private touch(id: string, startedAt?: number): void {
+		if (startedAt === undefined) {
+			this.touched.set(id, ++this.writeSeq)
+			return
+		}
+		this.touched.set(id, Math.max(this.touched.get(id) ?? 0, startedAt))
 	}
 
 	/**
 	 * reconciled() for an answer to a request that started at write `started`: records written since are
-	 * kept; `destructive` false (a superseded request) removes nothing.
+	 * kept; `destructive` false (a superseded request) removes nothing. The page's records are stamped
+	 * with `started`, so a request that started later may still remove them.
 	 */
 	private reconcile(
 		byId: ReadonlyMap<string, Discovery>,
@@ -1005,7 +1025,7 @@ export class ScannerStore extends Store<ScannerState> {
 			keep: id => (this.touched.get(id) ?? 0) > started,
 		})
 		for (const id of byId.keys()) if (!out.has(id)) this.touched.delete(id)
-		for (const d of page.items) this.touch(d.id)
+		for (const d of page.items) this.touch(d.id, started)
 		return out
 	}
 
@@ -1014,11 +1034,12 @@ export class ScannerStore extends Store<ScannerState> {
 		d: Discovery,
 		change: ScannerDiscoveryEventData["change"],
 		mergedIds?: readonly string[],
+		startedAt?: number,
 	): ScannerState {
 		const list = s.discoveries
 		const byId = new Map(list.byId)
 		byId.set(d.id, d)
-		this.touch(d.id)
+		this.touch(d.id, startedAt)
 		let items = list.items.filter(x => x.id !== d.id)
 		if (change === "merged") {
 			// WG12 cores name what the merge absorbed; older ones are guessed
