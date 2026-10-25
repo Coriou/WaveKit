@@ -445,6 +445,22 @@ export class AmbientEvidence extends EventEmitter {
 			}
 			this.states.set(decoderId, entry)
 		}
+		// A placed rtl433 output (it carries a binding) names its channel; an
+		// invalid binding, another source or an unusable channel request drops
+		// the output BEFORE the interpreter sees it, so a dropped output never
+		// primes acceptance. Only an unplaced instance keeps the point target.
+		const placed =
+			type === "rtl433" &&
+			(input as DecoderOutputLike).provenanceBinding !== undefined
+		const passband = placed
+			? this.channelPassband(
+					decoderId,
+					input as DecoderOutputLike,
+					target.sourceId,
+				)
+			: null
+		const onSource = passband?.sourceId === target.sourceId ? passband : null
+		if (placed && !onSource) return
 		const state = entry.interp
 		let evs: DecodeEvidence[] = []
 		if (entry.capcodes)
@@ -459,22 +475,6 @@ export class AmbientEvidence extends EventEmitter {
 			evs = interpretDirewolf(input as DecoderOutputLike, state)
 		else if (type === "rtl433")
 			evs = interpretRtl433(input as DecoderOutputLike, state)
-		// A placed rtl433 output (it carries a binding) names its channel; an
-		// invalid binding, another source or an unusable channel request drops
-		// the decode. Only an unplaced instance keeps the point target.
-		const placed =
-			type === "rtl433" &&
-			(input as DecoderOutputLike).provenanceBinding !== undefined
-		const passband =
-			placed && evs.length > 0
-				? this.channelPassband(
-						decoderId,
-						input as DecoderOutputLike,
-						target.sourceId,
-					)
-				: null
-		const onSource = passband?.sourceId === target.sourceId ? passband : null
-		if (placed && !onSource) return
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,

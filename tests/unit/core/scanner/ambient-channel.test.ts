@@ -251,7 +251,7 @@ describe("AmbientEvidence rtl433 channel", () => {
 		expect(got).toHaveLength(1)
 		expect(got[0]).toMatchObject({ hz: CENTRE, passband })
 		// The channel request sees the capture rate of the source.
-		expect(rates).toEqual([960_000])
+		expect(rates).toEqual([960_000, 960_000])
 	})
 
 	it("keeps the point target only for an unplaced instance", () => {
@@ -280,6 +280,23 @@ describe("AmbientEvidence rtl433 channel", () => {
 			emit(binding)
 			ambient.stop()
 			expect(got).toEqual([])
+		}
+	})
+
+	it("a dropped placed output never primes acceptance", () => {
+		const good = { sourceId: "rtl", channelHz: CENTRE }
+		for (const rejected of [
+			{ sourceId: "other", channelHz: CENTRE },
+			{ sourceId: "rtl", channelHz: "x" },
+		]) {
+			const { got, emit, ambient } = setup(2 * HALF)
+			emit(rejected)
+			// One valid decode alone is not the second checksummed occurrence.
+			emit(good)
+			expect(got).toEqual([])
+			emit(good)
+			ambient.stop()
+			expect(got).toHaveLength(1)
 		}
 	})
 })
