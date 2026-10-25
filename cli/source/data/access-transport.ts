@@ -322,17 +322,21 @@ function createFetch(
 					if (!response.ok) {
 						const body = await boundedErrorBody(response)
 						// Legacy discovery accepts 503 /health as an answered core.
-						// Only the credential-free probe projects this one public fact.
+						// Only the credential-free probe projects this one public fact:
+						// the status word ("unhealthy", or "ok" from older cores).
 						const url = new URL(target.url)
+						const health = z
+							.object({ status: z.enum(["ok", "unhealthy"]) })
+							.safeParse(body)
 						if (
 							probe &&
 							response.status === 503 &&
 							(init?.method ?? "GET") === "GET" &&
 							url.pathname === "/health" &&
 							url.search === "" &&
-							z.object({ status: z.literal("ok") }).safeParse(body).success
+							health.success
 						)
-							return { status: "ok" }
+							return { status: health.data.status }
 						const parsed = denialCodeSchema.safeParse(body)
 						const code = parsed.success ? parsed.data.code : undefined
 						return {

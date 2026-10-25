@@ -325,20 +325,26 @@ await call("/api/access/session/logout", { method: "POST" })
 
 #### GET /health, /health/ready and /health/live
 
-Three probes, all answering `{ "status": "ok", "timestamp": "<ISO 8601>" }`. Only the
-HTTP status code carries the result.
+Three probes. A 200 always answers `{ "status": "ok", "timestamp": "<ISO 8601>" }`; a 503 says
+what is wrong in its body as well as its status code.
 
 | Route           | 200                     | 503                                                                                                                   |
 | --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `/health`       | The core is healthy     | The overall health check is `unhealthy`                                                                               |
+| `/health`       | Healthy or `degraded`   | The overall health check is `unhealthy`                                                                               |
 | `/health/ready` | Ready to accept traffic | Sources are configured but none is connected, or decoders are configured (and not deliberately stopped) but none runs |
 | `/health/live`  | The process answers     | Never                                                                                                                 |
+
+A 503 from `/health` answers `{ "status": "unhealthy", "reason": "<code>", "timestamp": "..." }`
+with `reason` `all_decoders_down` (every configured decoder is down) or `api_down`. A 503 from
+`/health/ready` answers `{ "status": "not_ready", "reason": "<code>", "timestamp": "..." }` with
+`reason` `no_source_connected`, `no_decoder_running` or `api_down`. The reasons are fixed codes,
+never error messages, because `/health` is public even in protected mode.
 
 ```bash
 curl -i http://localhost:9000/health
 ```
 
-For the reason behind a 503, read [`GET /api/status`](#get-apistatus).
+For the component details behind a 503, read [`GET /api/status`](#get-apistatus).
 
 #### GET /api/status
 

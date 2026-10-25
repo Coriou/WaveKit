@@ -231,6 +231,26 @@ describe("CLI destination-bound transports", () => {
 			"headers.Authorization",
 		)
 	})
+	it("discovers a core whose 503 health probe says unhealthy, projecting only the status", async () => {
+		const request = vi.fn(
+			async (_url: Parameters<typeof fetch>[0], _init?: RequestInit) =>
+				new Response(
+					JSON.stringify({
+						status: "unhealthy",
+						reason: "all_decoders_down",
+						details: token,
+					}),
+					{ status: 503 },
+				),
+		)
+		const probe = createCliProbeFetch(request)
+		expect(
+			(await discover(probe, ["http://127.0.0.1:9000"])).target?.base,
+		).toBe("http://127.0.0.1:9000")
+		const response = await probe("http://127.0.0.1:9000/health")
+		expect(response.status).toBe(503)
+		expect(await response.json()).toEqual({ status: "unhealthy" })
+	})
 	it("does not expose failed health details through the protected transport or other probe paths", async () => {
 		const request = async () =>
 			new Response(JSON.stringify({ status: "ok", details: token }), {

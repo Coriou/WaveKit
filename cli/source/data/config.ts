@@ -129,7 +129,11 @@ export function resolveExplicit(
 	return null
 }
 
-/** Probe each candidate's /health; the first JSON body with status "ok" wins (200 or 503 both mean core answered). */
+/**
+ * Probe each candidate's /health; the first WaveKit health body wins: status "ok" (200), or
+ * "unhealthy" (503, the core answered but reports itself unhealthy). Cores before the
+ * reason-carrying 503 body answered "ok" with 503, which also counts.
+ */
 export async function discover(
 	fetchFn: FetchLike,
 	candidates: readonly string[] = DISCOVERY_CANDIDATES,
@@ -143,7 +147,10 @@ export async function discover(
 				signal: AbortSignal.timeout(timeoutMs),
 			})
 			const body = await res.json()
-			if (isObj(body) && body["status"] === "ok") {
+			if (
+				isObj(body) &&
+				(body["status"] === "ok" || body["status"] === "unhealthy")
+			) {
 				return { target: { base, ws: deriveWs(base), explicit: false }, tried }
 			}
 		} catch {

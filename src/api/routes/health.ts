@@ -24,9 +24,12 @@ import type { AudioOutput } from "../../core/audio-output.js"
 import type { TunerRelay, TunerRelayStatus } from "../../core/tuner-relay.js"
 import {
 	performHealthCheck,
-	isReady,
+	checkReadiness,
+	unhealthyReason,
 	getUptime,
 	type HealthStatus,
+	type NotReadyReason,
+	type UnhealthyReason,
 	type HealthStatusLevel,
 	type ComponentHealth,
 } from "../../utils/health-check.js"
@@ -51,6 +54,35 @@ const livenessResponseSchema = {
 		timestamp: { type: "string", format: "date-time" },
 	},
 	required: ["status", "timestamp"],
+} as const
+
+/**
+ * GET /health 503 body: the health check is unhealthy, with a fixed reason code
+ */
+const unhealthyResponseSchema = {
+	type: "object",
+	properties: {
+		status: { type: "string", enum: ["unhealthy"] },
+		reason: { type: "string", enum: ["api_down", "all_decoders_down"] },
+		timestamp: { type: "string", format: "date-time" },
+	},
+	required: ["status", "reason", "timestamp"],
+} as const
+
+/**
+ * GET /health/ready 503 body: not ready, with a fixed reason code
+ */
+const notReadyResponseSchema = {
+	type: "object",
+	properties: {
+		status: { type: "string", enum: ["not_ready"] },
+		reason: {
+			type: "string",
+			enum: ["api_down", "no_source_connected", "no_decoder_running"],
+		},
+		timestamp: { type: "string", format: "date-time" },
+	},
+	required: ["status", "reason", "timestamp"],
 } as const
 
 /**
@@ -273,6 +305,20 @@ export interface LivenessResponse {
 	timestamp: string
 }
 
+/** GET /health 503 body */
+export interface UnhealthyResponse {
+	status: "unhealthy"
+	reason: UnhealthyReason
+	timestamp: string
+}
+
+/** GET /health/ready 503 body */
+export interface NotReadyResponse {
+	status: "not_ready"
+	reason: NotReadyReason
+	timestamp: string
+}
+
 /**
  * System status response interface (extended with health)
  */
@@ -335,17 +381,17 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 	 * Requirements: 4.1, 4.2
 	 * Returns 200 OK when healthy, 503 Service Unavailable when unhealthy
 	 */
-	fastify.get<{ Reply: LivenessResponse }>(
+	fastify.get<{ Reply: LivenessResponse | UnhealthyResponse }>(
 		"/health",
 		{
 			schema: {
 				tags: ["health"],
 				summary: "Health check",
 				description:
-					"Returns quick liveness status. Returns 200 OK when healthy, 503 when unhealthy.",
+					"Returns quick liveness status. Returns 200 OK when healthy, 503 with the reason when unhealthy.",
 				response: {
 					200: livenessResponseSchema,
-					503: livenessResponseSchema,
+					503: unhealthyResponseSchema,
 				},
 			},
 		},
@@ -354,17 +400,20 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 				sdrppEnabled,
 			})
 
-			const response: LivenessResponse = {
-				status: "ok",
-				timestamp: new Date().toISOString(),
-			}
+			const timestamp = new Date().toISOString()
 
 			// Return 503 if unhealthy (Requirement 4.2)
 			if (healthStatus.status === "unhealthy") {
-				return reply.status(503).send(response)
+				const body: UnhealthyResponse = {
+					status: "unhealthy",
+					reason: unhealthyReason(healthStatus),
+					timestamp,
+				}
+				return reply.status(503).send(body)
 			}
 
-			return response
+			const body: LivenessResponse = { status: "ok", timestamp }
+			return body
 		},
 	)
 
@@ -373,33 +422,35 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 	 * Requirements: 4.5
 	 * Returns 200 when ready to accept traffic, 503 when not ready
 	 */
-	fastify.get<{ Reply: LivenessResponse }>(
+	fastify.get<{ Reply: LivenessResponse | NotReadyResponse }>(
 		"/health/ready",
 		{
 			schema: {
 				tags: ["health"],
 				summary: "Readiness probe",
 				description:
-					"Returns 200 when ready to accept traffic, 503 when not ready.",
+					"Returns 200 when ready to accept traffic, 503 with the reason when not ready.",
 				response: {
 					200: livenessResponseSchema,
-					503: livenessResponseSchema,
+					503: notReadyResponseSchema,
 				},
 			},
 		},
 		async (request, reply) => {
-			const ready = isReady(decoderManager, sourceManager)
+			const readiness = checkReadiness(decoderManager, sourceManager)
+			const timestamp = new Date().toISOString()
 
-			const response: LivenessResponse = {
-				status: "ok",
-				timestamp: new Date().toISOString(),
+			if (!readiness.ready) {
+				const body: NotReadyResponse = {
+					status: "not_ready",
+					reason: readiness.reason,
+					timestamp,
+				}
+				return reply.status(503).send(body)
 			}
 
-			if (!ready) {
-				return reply.status(503).send(response)
-			}
-
-			return response
+			const body: LivenessResponse = { status: "ok", timestamp }
+			return body
 		},
 	)
 

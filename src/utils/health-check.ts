@@ -388,31 +388,41 @@ export function performHealthCheck(
 	}
 }
 
+/** Why the readiness probe answers 503: fixed codes, never component messages. */
+export type NotReadyReason =
+	| "api_down"
+	| "no_source_connected"
+	| "no_decoder_running"
+
+/** Why the liveness health check is unhealthy: fixed codes, never component messages. */
+export type UnhealthyReason = "api_down" | "all_decoders_down"
+
+export type Readiness =
+	| { ready: true }
+	| { ready: false; reason: NotReadyReason }
+
 /**
- * Checks if the system is ready to accept traffic.
- * Ready means the API is up and at least one decoder is running.
+ * Checks if the system is ready to accept traffic, with the reason when it is not.
+ * Ready means the API is up, a source is connected (when any is configured) and a
+ * decoder runs (when any is configured and not deliberately stopped).
  *
  * Requirements: 4.5 (readiness probe)
- *
- * @param decoderManager - The DecoderManager instance
- * @param sourceManager - The SourceManager instance
- * @returns true if ready, false otherwise
  */
-export function isReady(
+export function checkReadiness(
 	decoderManager: DecoderManager,
 	sourceManager: SourceManager,
-): boolean {
+): Readiness {
 	// API must be responding (if we're here, it is)
 	const apiHealth = checkApiHealth()
 	if (apiHealth.status === "down") {
-		return false
+		return { ready: false, reason: "api_down" }
 	}
 
 	// At least one source should be connected (or no sources configured is OK)
 	const sourceHealth = checkSourceHealth(sourceManager)
 	const allStatus = sourceManager.getAllStatus()
 	if (allStatus.length > 0 && sourceHealth.status === "down") {
-		return false
+		return { ready: false, reason: "no_source_connected" }
 	}
 
 	// At least one decoder should be running (or no decoders configured is OK)
@@ -429,11 +439,33 @@ export function isReady(
 	if (decoderStatuses.length > 0) {
 		const hasRunningDecoder = decoderStatuses.some(d => d.running)
 		if (!hasRunningDecoder) {
-			return false
+			return { ready: false, reason: "no_decoder_running" }
 		}
 	}
 
-	return true
+	return { ready: true }
+}
+
+/**
+ * Checks if the system is ready to accept traffic.
+ *
+ * @returns true if ready, false otherwise
+ */
+export function isReady(
+	decoderManager: DecoderManager,
+	sourceManager: SourceManager,
+): boolean {
+	return checkReadiness(decoderManager, sourceManager).ready
+}
+
+/**
+ * The reason an `unhealthy` health status is unhealthy, mirroring the rules of
+ * determineOverallHealth: the API is down, or every configured decoder is down.
+ */
+export function unhealthyReason(health: HealthStatus): UnhealthyReason {
+	return health.components.api.status === "down"
+		? "api_down"
+		: "all_decoders_down"
 }
 
 /**
