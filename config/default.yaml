@@ -668,16 +668,16 @@ csdr:
 #       lon: -122.4194
 #     minVersion: "3.14.1"
 #
-#   # ACARS (audio-demod base: WaveKit demodulates each channel from the
-#   # source's IQ and feeds acarsdec audio; the source must cover the band)
+#   # ACARS (audio-demod base: one instance decodes ONE AM channel, which
+#   # WaveKit demodulates from the source's IQ; the source must cover it).
+#   # For a second channel, add a second instance with its own id.
 #   - id: "acars-decoder"
 #     type: "acarsdec"
 #     enabled: true
 #     sourceId: "rtl-pi"
 #     options:
 #       frequencies:
-#         - 131550000  # Primary ACARS
-#         - 131725000  # Secondary ACARS
+#         - 131550000  # Primary ACARS (or set channelHz explicitly)
 #     minVersion: "3.7"
 #
 #   # VDL2 (IQ-decimate base: WaveKit decimates the source's IQ to the VDL2
