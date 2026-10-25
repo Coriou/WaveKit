@@ -206,15 +206,11 @@ before the WebSocket server is up are queued (<= 256, else resync).
   are both valid; no config change. Document the distinction in `docs/DOCKER-SETUP.md` and
   `docs/CORE-REFERENCE.md`: 1234 when the key is omitted, 4713 in the Docker images so it does
   not collide with an rtl_tcp server on 1234.
-- Needs the compose owner (not in this change): `compose.yaml` sets `RTL_TCP_HOST` /
-  `RTL_TCP_PORT`, which nothing reads. Fix:
-
-```diff
--      RTL_TCP_HOST: "${RTL_TCP_HOST:-127.0.0.1}"
--      RTL_TCP_PORT: "${RTL_TCP_PORT:-1234}"
-+      WAVEKIT_SOURCES_0_HOST: "${RTL_TCP_HOST:-127.0.0.1}"
-+      WAVEKIT_SOURCES_0_PORT: "${RTL_TCP_PORT:-1234}"
-```
+- `compose.yaml` set `RTL_TCP_HOST` / `RTL_TCP_PORT` on the `prod-single-host` service, which
+  nothing in the image reads. Resolved by deleting the two lines rather than renaming them to
+  `WAVEKIT_SOURCES_0_*` (that would change behaviour); the source is set in the mounted config,
+  whose existing `sources[0]` can be overridden with `WAVEKIT_SOURCES_0_HOST` /
+  `WAVEKIT_SOURCES_0_PORT`.
 
 ## Properties
 

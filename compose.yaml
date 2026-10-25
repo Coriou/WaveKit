@@ -126,8 +126,6 @@ services:
     environment:
       WAVEKIT_LOG_LEVEL: info
       NODE_ENV: production
-      RTL_TCP_HOST: "${RTL_TCP_HOST:-127.0.0.1}"
-      RTL_TCP_PORT: "${RTL_TCP_PORT:-1234}"
       # Runtime state on a volume: Activity, scanner jobs and discoveries,
       # band plans, operator data and API band overrides.
       WAVEKIT_STATE_DIR: /app/data
