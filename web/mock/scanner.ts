@@ -57,6 +57,7 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import { SCANNER_PROOF_PROTOCOL_LABEL } from "@wavekit/api-types"
+import { bandFixtureDiscoveries } from "./band-fixtures.ts"
 import {
 	DISCOVERY_SEEDS,
 	MOCK_SIGNALS,
@@ -2097,6 +2098,8 @@ export interface ScannerMockContext {
 	liveStatus: () => LiveAudioStatus
 	/** Retargets live audio to `offsetHz` in the current window and starts it. */
 	liveListen: (offsetHz: number) => void
+	/** Seeds the band inspection UX fixtures too (./band-fixtures.ts). */
+	bandFixtures?: boolean
 }
 
 export interface ScannerMock {
@@ -2475,6 +2478,9 @@ export function registerScannerMock(
 		})
 	}
 	seed()
+	if (ctx.bandFixtures)
+		for (const d of bandFixtureDiscoveries(sourceId, Date.now()))
+			discoveries.set(d.id, { d, observations: [] })
 
 	const findDiscoveryAt = (
 		hz: number,

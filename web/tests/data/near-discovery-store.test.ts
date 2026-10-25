@@ -180,3 +180,45 @@ describe("proofKind", () => {
 		).toBe("digital")
 	})
 })
+
+describe("NearDiscoveryStore: band inspection UX merges (req 3.2)", () => {
+	const ok = (call: Call) =>
+		call.url.includes("/observations")
+			? json(200, { items: [], nextCursor: null })
+			: json(200, { items: [discovery("d1")], nextCursor: null })
+
+	it("reloads when the shown id is in a deleted event's mergedIds", async () => {
+		const { store, calls, send } = setup(ok)
+		store.follow(446_006_250, 6250)
+		await flush()
+		const before = calls.filter(c => !c.url.includes("/observations")).length
+		send({
+			change: "deleted",
+			discovery: discovery("s"),
+			mergedIds: ["d1"],
+		})
+		await flush()
+		expect(calls.filter(c => !c.url.includes("/observations")).length).toBe(
+			before + 1,
+		)
+		store.dispose()
+	})
+
+	it("reloads on mergedTruncated and on a resync", async () => {
+		const { store, calls, send } = setup(ok)
+		store.follow(446_006_250, 6250)
+		await flush()
+		const lists = () =>
+			calls.filter(c => !c.url.includes("/observations")).length
+		const before = lists()
+		send({
+			change: "merged",
+			discovery: discovery("far", { frequencyHz: 100e6 }),
+			mergedIds: ["x"],
+			mergedTruncated: true,
+		})
+		await flush()
+		expect(lists()).toBe(before + 1)
+		store.dispose()
+	})
+})

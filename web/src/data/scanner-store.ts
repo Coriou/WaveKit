@@ -107,6 +107,11 @@ export interface ScannerDiscoveriesState {
 	error: string | null
 	/** False once the core refused the `evidence` filter (a core before WG12): the list asks without it. */
 	evidenceSupported: boolean
+	/**
+	 * Bumped when the core says what is loaded may be stale (a truncated merge, `scanner:discoveries-resync`):
+	 * span fetches (the spectrum's tags) ask again.
+	 */
+	epoch: number
 }
 
 export interface ScannerState {
@@ -349,6 +354,7 @@ const INITIAL_DISCOVERIES: ScannerDiscoveriesState = {
 	loadingMore: false,
 	error: null,
 	evidenceSupported: true,
+	epoch: 0,
 }
 
 const INITIAL: ScannerState = {
@@ -429,8 +435,14 @@ export class ScannerStore extends Store<ScannerState> {
 			events.subscribe(["scanner"]),
 			events.on("scanner:job", job => this.live(s => this.withJob(s, job))),
 			events.on("scanner:progress", p => this.onProgress(p)),
-			events.on("scanner:discovery", d =>
-				this.live(s => this.withDiscoveryEvent(s, d)),
+			events.on("scanner:discovery", d => {
+				this.live(s => this.withDiscoveryEvent(s, d))
+				// band inspection UX req 3.2: mergedIds was cut at 64, so some absorbed ids are unknown here
+				if (d.mergedTruncated === true)
+					this.resyncDiscoveries(d.change === "deleted" ? null : d.discovery.id)
+			}),
+			events.on("scanner:discoveries-resync", () =>
+				this.resyncDiscoveries(null),
 			),
 			events.on("scanner:activity", a => this.onActivity(a)),
 			events.on("scanner:status", status =>
@@ -647,13 +659,37 @@ export class ScannerStore extends Store<ScannerState> {
 		}
 	}
 
-	/** GET /api/scanner/discoveries/:id into `byId` (e.g. a hit-log row outside the list). */
+	/**
+	 * GET /api/scanner/discoveries/:id into `byId` (e.g. a hit-log row outside the list). An id a merge
+	 * absorbed answers with the survivor (`absorbedInto`): the old id leaves the state, the survivor takes it.
+	 */
 	async fetchDiscovery(id: string): Promise<Discovery> {
 		const d = await this.api.get<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
 		)
-		this.commit(s => this.withDiscovery(s, d, "updated"))
+		this.commit(s => {
+			const absorbed =
+				typeof d.absorbedInto === "string" && d.id !== id ? id : null
+			const base = absorbed === null ? s : this.withoutDiscovery(s, absorbed)
+			return this.withDiscovery(base, d, "updated")
+		})
 		return d
+	}
+
+	/**
+	 * What is loaded may be stale (a merge whose ids were truncated, a startup consolidation): refetch
+	 * `survivorId` (when given), the list when one is loaded, and bump `epoch` so span fetches ask again.
+	 */
+	private resyncDiscoveries(survivorId: string | null): void {
+		if (this.disposed) return
+		this.commit(s => ({
+			...s,
+			discoveries: { ...s.discoveries, epoch: s.discoveries.epoch + 1 },
+		}))
+		if (survivorId !== null)
+			this.fetchDiscovery(survivorId).catch(() => undefined)
+		const d = this.current().discoveries
+		if (d.loaded) void this.refreshDiscoveries(d.query, d.items.length)
 	}
 
 	/**
@@ -947,10 +983,12 @@ export class ScannerStore extends Store<ScannerState> {
 		s: ScannerState,
 		e: ScannerDiscoveryEventData,
 	): ScannerState {
-		let next =
-			e.change === "deleted"
-				? this.withoutDiscovery(s, e.discovery.id)
-				: this.withDiscovery(s, e.discovery, e.change, e.mergedIds)
+		let next: ScannerState
+		if (e.change === "deleted") {
+			// band inspection UX req 3.2: a merge into the deleted survivor may ride along: drop those too
+			next = this.withoutDiscovery(s, e.discovery.id)
+			for (const id of e.mergedIds ?? []) next = this.withoutDiscovery(next, id)
+		} else next = this.withDiscovery(s, e.discovery, e.change, e.mergedIds)
 		if (e.jobHits && e.jobHits.length > 0) {
 			const jobHits = new Map(next.jobHits)
 			for (const hit of e.jobHits) {

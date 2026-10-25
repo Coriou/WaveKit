@@ -1,11 +1,12 @@
 // The spectrum's right-click menu (signal-menu.ts): opened by a right-click (or a long press, or the menu key on the
 // focused plot) at the signal under the pointer. Its rows run palette actions and confirm with the app toast. Its
 // own tiny store, so opening it re-renders this only.
+import type { Discovery } from "@wavekit/api-types"
 import { useState } from "react"
 
 import { useReadOnly, useServices } from "../app/context.ts"
 import type { Store } from "../data/index.ts"
-import { useStore } from "../data/index.ts"
+import { likelyText, useStore } from "../data/index.ts"
 import { ActionMenu, type ActionMenuItem } from "../features/ActionMenu.tsx"
 import { runAction } from "../features/palette/actions.ts"
 import { showAppToast } from "../shell/toast.ts"
@@ -51,6 +52,7 @@ export function SignalMenu({
 	const listening = useStore(listen, s => s.wanted)
 	const plan = useStore(data.bandplan, s => s.view)
 	const saved = useStore(data.savedFrequencies, s => s.items)
+	const discoveries = useStore(data.scanner, s => s.discoveries.byId)
 	const [decode, setDecode] = useState<number | null>(null)
 	if (!at) return null
 	const c: SignalMenuContext = {
@@ -98,7 +100,7 @@ export function SignalMenu({
 			<ActionMenu
 				items={items}
 				label={inDecode ? "Decode as" : "Signal actions"}
-				head={signalMenuHead(c)}
+				head={withLikely(signalMenuHead(c), discoveries.values(), at.hz)}
 				className="wk-plot-sigmenu-list"
 				style={{
 					...(left ? { right: 0 } : { left: 0 }),
@@ -109,6 +111,22 @@ export function SignalMenu({
 			/>
 		</div>
 	)
+}
+
+/** "433.9200 MHz · ISM 433 · likely ISM device": the nearest unverified discovery's hint (never a protocol). */
+function withLikely(
+	head: string,
+	items: Iterable<Discovery>,
+	hz: number,
+): string {
+	let best: Discovery | null = null
+	for (const d of items) {
+		const off = Math.abs(d.frequencyHz - hz)
+		if (off > Math.max(3000, (d.bandwidthHz || 12_500) / 2)) continue
+		if (!best || off < Math.abs(best.frequencyHz - hz)) best = d
+	}
+	const likely = best ? likelyText(best) : null
+	return likely ? `${head} · ${likely}` : head
 }
 
 /** Runs a row's actions in order; the first refusal stops it. The last step's toast (and Undo) confirms. */

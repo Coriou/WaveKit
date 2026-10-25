@@ -868,3 +868,116 @@ describe("scanner store helpers", () => {
 		expect(passive?.id).toBe("p")
 	})
 })
+
+describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
+	async function ready(items: Discovery[], route: Route = () => undefined) {
+		const ctx = setup(
+			call =>
+				route(call) ??
+				(call.url.startsWith("/api/scanner/discoveries")
+					? { body: { items, nextCursor: null } }
+					: undefined),
+		)
+		await ctx.store.load()
+		await ctx.store.refreshDiscoveries({})
+		return ctx
+	}
+	const flush = () => new Promise(r => setTimeout(r, 0))
+
+	it("a deleted survivor drops every id in mergedIds too", async () => {
+		const { store, send, tick } = await ready([
+			discovery("s"),
+			discovery("a"),
+			discovery("b"),
+			discovery("keep"),
+		])
+		send("scanner:discovery", {
+			change: "deleted",
+			discovery: discovery("s"),
+			mergedIds: ["a", "b"],
+		})
+		tick()
+		const d = store.get().discoveries
+		expect([...d.byId.keys()]).toEqual(["keep"])
+		expect(d.items.map(x => x.id)).toEqual(["keep"])
+		store.dispose()
+	})
+
+	it("mergedTruncated refetches the survivor and the list and bumps the epoch", async () => {
+		const { store, send, tick, calls } = await ready([discovery("s")])
+		const before = calls.length
+		const epoch = store.get().discoveries.epoch
+		send("scanner:discovery", {
+			change: "merged",
+			discovery: discovery("s"),
+			mergedIds: Array.from({ length: 64 }, (_, i) => `m${i}`),
+			mergedTruncated: true,
+		})
+		tick()
+		await flush()
+		const urls = calls.slice(before).map(c => c.url.split("?")[0])
+		expect(urls).toContain("/api/scanner/discoveries/s")
+		expect(urls).toContain("/api/scanner/discoveries")
+		expect(store.get().discoveries.epoch).toBe(epoch + 1)
+		store.dispose()
+	})
+
+	it("a truncated deleted event refetches only the list", async () => {
+		const { store, send, tick, calls } = await ready([discovery("s")])
+		const before = calls.length
+		send("scanner:discovery", {
+			change: "deleted",
+			discovery: discovery("s"),
+			mergedIds: ["x"],
+			mergedTruncated: true,
+		})
+		tick()
+		await flush()
+		const urls = calls.slice(before).map(c => c.url.split("?")[0])
+		expect(urls).toEqual(["/api/scanner/discoveries"])
+		store.dispose()
+	})
+
+	it("scanner:discoveries-resync refetches the list", async () => {
+		const { store, send, calls } = await ready([discovery("a")])
+		const before = calls.length
+		send("scanner:discoveries-resync", { reason: "consolidation", groups: 300 })
+		await flush()
+		expect(calls.slice(before).map(c => c.url.split("?")[0])).toEqual([
+			"/api/scanner/discoveries",
+		])
+		expect(store.get().discoveries.epoch).toBe(1)
+		store.dispose()
+	})
+
+	it("an unknown event type changes nothing (old clients ignore the resync)", async () => {
+		const { store, send, calls } = await ready([discovery("a")])
+		const before = calls.length
+		const snapshot = store.get()
+		send("scanner:something-new", { reason: "x" })
+		await flush()
+		expect(calls.length).toBe(before)
+		expect(store.get()).toBe(snapshot)
+		store.dispose()
+	})
+
+	it("reading an absorbed id replaces it with the survivor", async () => {
+		const { store } = await ready([discovery("old")], call =>
+			call.url === "/api/scanner/discoveries/old"
+				? {
+						body: discovery("new", {
+							absorbedInto: "new",
+							requestedId: "old",
+						}),
+					}
+				: undefined,
+		)
+		const d = await store.fetchDiscovery("old")
+		expect(d.id).toBe("new")
+		const s = store.get().discoveries
+		expect(s.byId.has("old")).toBe(false)
+		expect(s.byId.has("new")).toBe(true)
+		expect(s.items.some(x => x.id === "old")).toBe(false)
+		store.dispose()
+	})
+})

@@ -25,9 +25,11 @@ export function discoveryTagFilter(mode: SignalLabelsMode): DiscoveryTagFilter {
 }
 
 export interface PlacedDiscoveryTag {
+	/** The representative's id (a group's key). */
 	id: string
+	/** Where the tag sits: the cluster's lowest member's frequency (a group tag sits at its first member). */
 	hz: number
-	/** "DMR · CC 1", "Maybe FM voice", "Heard". */
+	/** "DMR · CC 1", "Maybe FM voice", "Heard"; a group adds " +n-1". */
 	label: string
 	tier: DiscoveryTier
 	/** Decoded: the dot is filled (else a ring). */
@@ -38,10 +40,14 @@ export interface PlacedDiscoveryTag {
 	x: number
 	/** Width used for collisions, CSS px. */
 	width: number
-	/** The label is drawn (else the dot alone: it lost its room to a tag placed before it). */
+	/** The label is drawn (else the dot alone: no room before the next tag). */
 	labelled: boolean
-	/** Tooltip and accessible name: label · frequency · when. */
+	/** Tooltip and accessible name: label · frequency · when; a group "n signals, low-high MHz". */
 	title: string
+	/** Every member in frequency order (one for a single tag); the group popover lists them all. */
+	members: Discovery[]
+	/** The representative (first by tier, confidence, recency, id). */
+	rep: Discovery
 }
 
 export interface DiscoveryTagOptions {
@@ -101,10 +107,102 @@ function whenText(tier: DiscoveryTier, d: Discovery, now: number): string {
 		: "heard earlier"
 }
 
+interface Candidate {
+	d: Discovery
+	tier: DiscoveryTier
+	seen: number
+}
+
+/** The existing tag order: active first, then by confidence, then the most recent, then id. */
+function byRank(a: Candidate, b: Candidate): number {
+	return (
+		TIER_RANK[b.tier] - TIER_RANK[a.tier] ||
+		confidenceRank(b.d.confidence) - confidenceRank(a.d.confidence) ||
+		b.seen - a.seen ||
+		(a.d.id < b.d.id ? -1 : a.d.id > b.d.id ? 1 : 0)
+	)
+}
+
+function byFrequency(a: Discovery, b: Discovery): number {
+	return (
+		a.frequencyHz - b.frequencyHz || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+	)
+}
+
+/** Whether a discovery counts for the tags at all (taggable and not already a saved frequency). */
+function counted(
+	d: Discovery,
+	only: DiscoveryTagFilter,
+	saved: readonly number[],
+): boolean {
+	if (!Number.isFinite(d.frequencyHz)) return false
+	if (!taggable(d, only)) return false
+	const half = Math.max(1000, (d.bandwidthHz || 12_500) / 2)
+	return !saved.some(hz => Math.abs(hz - d.frequencyHz) <= half)
+}
+
+export interface ClusterOptions {
+	widthPx: number
+	/** A dot-only chip, CSS px (15). */
+	bareWidthPx?: number
+	/** Room kept between two tags, CSS px (4). */
+	gapPx?: number
+}
+
 /**
- * Places the discovery tags in view. Order: active first, then by confidence, then the most recent;
- * first every dot that fits (a clashing one is not drawn), then each label where it fits before the next
- * tag, as the saved tags do. Two discoveries on the same Hz share one tag (the first in that order).
+ * Groups discoveries in view into emitter clusters (band inspection UX req 1.1): in frequency order, one
+ * joins the current cluster when it lies less than bare + gap px after the cluster's last member, or within
+ * max(1 kHz, half the wider bandwidth) of it. Chaining is unbounded, which is what keeps tags apart. Out of
+ * view (or a non-finite frequency): left out. Each cluster's members are in frequency order.
+ */
+export function clusterDiscoveries(
+	items: Iterable<Discovery>,
+	view: SpectrumViewSpan,
+	options: ClusterOptions,
+): Discovery[][] {
+	const span = view.endHz - view.startHz
+	const w = options.widthPx
+	if (!(span > 0) || !(w > 0)) return []
+	const reach = (options.bareWidthPx ?? 15) + (options.gapPx ?? 4)
+	const x = (hz: number) => ((hz - view.startHz) / span) * w
+	const inView = [...items]
+		.filter(
+			d =>
+				Number.isFinite(d.frequencyHz) &&
+				d.frequencyHz >= view.startHz &&
+				d.frequencyHz <= view.endHz,
+		)
+		.sort(byFrequency)
+	const out: Discovery[][] = []
+	let current: Discovery[] | null = null
+	for (const d of inView) {
+		const p = current?.[current.length - 1]
+		if (current && p) {
+			const bw = (q: Discovery) => q.bandwidthHz || 12_500
+			const near =
+				x(d.frequencyHz) - x(p.frequencyHz) < reach ||
+				d.frequencyHz - p.frequencyHz <=
+					Math.max(1000, Math.max(bw(d), bw(p)) / 2)
+			if (near) {
+				current.push(d)
+				continue
+			}
+		}
+		current = [d]
+		out.push(current)
+	}
+	return out
+}
+
+function mhz(hz: number, digits = 4): string {
+	return (hz / 1e6).toFixed(digits)
+}
+
+/**
+ * Places the discovery tags in view (band inspection UX req 1.1). Co-located discoveries form one group
+ * tag at the cluster's lowest member, named by its representative (active first, then by confidence, then
+ * the most recent) with "+n-1"; clusters never overlap, so every discovery in view is on exactly one tag.
+ * Then each label where it fits before the next tag, as the saved tags do.
  */
 export function placeDiscoveryTags(
 	items: Iterable<Discovery>,
@@ -121,67 +219,112 @@ export function placeDiscoveryTags(
 	const maxLabel = options.maxLabelPx ?? DISCOVERY_TAG_MAX_LABEL_PX
 	const only = options.only ?? "all"
 	const saved = options.savedHz ?? []
-	const candidates: {
-		d: Discovery
-		tier: DiscoveryTier
-		seen: number
-	}[] = []
+	const candidates = new Map<string, Candidate>()
 	for (const d of items) {
-		if (d.frequencyHz < view.startHz || d.frequencyHz > view.endHz) continue
-		if (!taggable(d, only)) continue
-		const half = Math.max(1000, (d.bandwidthHz || 12_500) / 2)
-		if (saved.some(hz => Math.abs(hz - d.frequencyHz) <= half)) continue
-		candidates.push({
+		if (!counted(d, only, saved)) continue
+		candidates.set(d.id, {
 			d,
 			tier: discoveryTier(d, options.activeNow, options.now),
 			seen: Date.parse(d.lastSeenAt) || 0,
 		})
 	}
-	candidates.sort(
-		(a, b) =>
-			TIER_RANK[b.tier] - TIER_RANK[a.tier] ||
-			confidenceRank(b.d.confidence) - confidenceRank(a.d.confidence) ||
-			b.seen - a.seen ||
-			(a.d.id < b.d.id ? -1 : a.d.id > b.d.id ? 1 : 0),
+	const clusters = clusterDiscoveries(
+		[...candidates.values()].map(c => c.d),
+		view,
+		{ widthPx: w, bareWidthPx: bare, gapPx: gap },
 	)
-	const clash = (
-		tags: readonly PlacedDiscoveryTag[],
-		self: PlacedDiscoveryTag | null,
-		a: number,
-		b: number,
-	) => tags.some(t => t !== self && a < t.x + t.width + gap && b > t.x - gap)
-	const seenHz = new Set<number>()
 	const placed: PlacedDiscoveryTag[] = []
-	for (const { d, tier } of candidates) {
-		const hz = Math.round(d.frequencyHz)
-		if (seenHz.has(hz)) continue
-		seenHz.add(hz)
-		const x = ((d.frequencyHz - view.startHz) / span) * w - DISCOVERY_DOT_PX
-		if (clash(placed, null, x, x + bare)) continue
-		const label = discoveryTitle(d)
+	for (const members of clusters) {
+		const first = members[0]
+		if (!first) continue
+		const ranked = members
+			.map(d => candidates.get(d.id))
+			.filter((c): c is Candidate => c !== undefined)
+			.sort(byRank)
+		const top = ranked[0]
+		if (!top) continue
+		const { d: rep, tier } = top
+		const n = members.length
+		const name = discoveryTitle(rep)
+		const label = n > 1 ? `${name} +${n - 1}` : name
+		const last = members[n - 1] ?? first
 		placed.push({
-			id: d.id,
-			hz: d.frequencyHz,
+			id: rep.id,
+			hz: first.frequencyHz,
 			label,
 			tier,
-			solid: d.confidence === "decoded",
-			heard: d.confidence === "activity" || d.protocol === "unknown",
-			x,
+			solid: rep.confidence === "decoded",
+			heard: rep.confidence === "activity" || rep.protocol === "unknown",
+			x: ((first.frequencyHz - view.startHz) / span) * w - DISCOVERY_DOT_PX,
 			width: bare,
 			labelled: false,
-			title: `${label} · ${(d.frequencyHz / 1e6).toFixed(4)} MHz · ${whenText(tier, d, options.now)}`,
+			title:
+				n > 1
+					? `${n} signals, ${mhz(first.frequencyHz)}-${mhz(last.frequencyHz)} MHz`
+					: `${label} · ${mhz(rep.frequencyHz)} MHz · ${whenText(tier, rep, options.now)}`,
+			members,
+			rep,
 		})
 	}
-	for (const t of placed) {
+	placed.sort((a, b) => a.x - b.x)
+	placed.forEach((t, i) => {
 		const full = Math.round(
 			chrome + Math.min(maxLabel, [...t.label].length * charPx),
 		)
-		if (t.x + full <= w && !clash(placed, t, t.x, t.x + full)) {
+		const next = placed[i + 1]
+		if (t.x + full <= w && (!next || t.x + full + gap <= next.x)) {
 			t.width = full
 			t.labelled = true
 		}
+	})
+	return placed
+}
+
+export interface OutsideSide {
+	/** Taggable discoveries on this side within the fetched span. */
+	count: number
+	/** The one closest to the view. */
+	nearestHz: number
+}
+
+export interface OutsideView {
+	left: OutsideSide | null
+	right: OutsideSide | null
+}
+
+/**
+ * Discoveries just outside the view (band inspection UX req 1.2), counted per side among those the
+ * fetch could have loaded (the view plus half a view each side, discoveryFetchSpan): never drawn,
+ * one edge marker per side. Anything beyond that span (a stale cache from another band) is not counted.
+ */
+export function outsideView(
+	items: Iterable<Discovery>,
+	view: SpectrumViewSpan,
+	options: Pick<DiscoveryTagOptions, "only" | "savedHz">,
+): OutsideView {
+	const span = view.endHz - view.startHz
+	if (!(span > 0)) return { left: null, right: null }
+	const only = options.only ?? "all"
+	const saved = options.savedHz ?? []
+	const lo = view.startHz - span / 2
+	const hi = view.endHz + span / 2
+	const left = { count: 0, nearestHz: -Infinity }
+	const right = { count: 0, nearestHz: Infinity }
+	for (const d of items) {
+		if (!counted(d, only, saved)) continue
+		const f = d.frequencyHz
+		if (f < view.startHz && f >= lo) {
+			left.count += 1
+			left.nearestHz = Math.max(left.nearestHz, f)
+		} else if (f > view.endHz && f <= hi) {
+			right.count += 1
+			right.nearestHz = Math.min(right.nearestHz, f)
+		}
 	}
-	return placed.sort((a, b) => a.x - b.x)
+	return {
+		left: left.count > 0 ? left : null,
+		right: right.count > 0 ? right : null,
+	}
 }
 
 /** Whether any discovery in `byId` could be tagged (the row shows, so the layout keeps it while panning). */

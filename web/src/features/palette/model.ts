@@ -11,7 +11,11 @@ import type {
 } from "@wavekit/api-types"
 
 import { bandAt, channelAt } from "../../data/bandplan-store.ts"
-import { discoveryTitle, protocolName } from "../../data/scanner-format.ts"
+import {
+	discoveryTitle,
+	likelyText,
+	protocolName,
+} from "../../data/scanner-format.ts"
 import type { DrawerId, ShellState, ViewId } from "../../shell/store.ts"
 import {
 	ACCENTS,
@@ -505,7 +509,11 @@ export class PaletteModel {
 			...this.tuneItem(d.frequencyHz, {
 				id: `disc:${d.id}`,
 				title: discoveryTitle(d),
-				sub: `${mhz(d.frequencyHz)} · Found by the scanner · ${protocolName(d.protocol)}`,
+				sub: [
+					mhz(d.frequencyHz),
+					"Found by the scanner",
+					likelyText(d) ?? protocolName(d.protocol),
+				].join(" · "),
 				glyph: "scan",
 			}),
 			keys: [formatMHz(d.frequencyHz), protocolName(d.protocol), "discovery"],

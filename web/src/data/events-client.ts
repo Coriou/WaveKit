@@ -22,6 +22,7 @@ import type {
 	ResourceAlert,
 	ScanJob,
 	ScannerActivityEventData,
+	ScannerDiscoveriesResyncEventData,
 	ScannerDiscoveryEventData,
 	ScannerIdentifyEventData,
 	ScannerProgressEventData,
@@ -94,6 +95,8 @@ export interface EventMap {
 	"scanner:identify": ScannerIdentifyEventData
 	"scanner:progress": ScannerProgressEventData
 	"scanner:discovery": ScannerDiscoveryEventData
+	/** Band inspection UX req 3.2: many merges at once; refetch the discovery list. */
+	"scanner:discoveries-resync": ScannerDiscoveriesResyncEventData
 	"scanner:activity": ScannerActivityEventData
 	"scanner:status": ScannerStatus
 	"spectrum:profile": SpectrumProfileEventData

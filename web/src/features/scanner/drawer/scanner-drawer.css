@@ -433,6 +433,13 @@
 		text-overflow: ellipsis;
 		font-variant-numeric: tabular-nums;
 	}
+	/* "What is this": the hint stays muted, the next step one step brighter */
+	.wks-likely {
+		color: var(--wk-text-4);
+	}
+	.wks-next {
+		color: var(--wk-text-2);
+	}
 	.wks-ign-wrap {
 		padding-top: 6px;
 	}

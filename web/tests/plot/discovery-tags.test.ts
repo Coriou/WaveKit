@@ -136,7 +136,7 @@ describe("discovery tag tiers", () => {
 		expect(placed.map(t => t.id)).toEqual(["d"])
 	})
 
-	it("an active tag wins a clash; the loser keeps its dot, then is dropped when even that clashes", () => {
+	it("co-located discoveries share one group tag; a label only where it fits before the next tag", () => {
 		const placed = placeDiscoveryTags(
 			[
 				disc("old", 100, { lastSeenAt: ago(RECENT_MS * 2) }),
@@ -146,8 +146,8 @@ describe("discovery tag tiers", () => {
 			view,
 			opts({ activeNow: new Set(["live"]) }),
 		)
-		// live (active) placed first with its label; old keeps a dot (its label would run into live);
-		// onTop sits on old's dot and is not drawn
+		// old and onTop (1 px apart) form one group named by old (more recent); its label would run
+		// into live, so it keeps the dot; live (active) has its label
 		expect(placed.map(t => [t.id, t.tier, t.labelled])).toEqual([
 			["old", "older", false],
 			["live", "active", true],

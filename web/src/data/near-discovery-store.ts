@@ -72,6 +72,7 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 		this.cleanup = [
 			events.subscribe(["scanner"]),
 			events.on("scanner:discovery", e => this.onDiscovery(e)),
+			events.on("scanner:discoveries-resync", () => void this.load()),
 			events.onReconnected(() => void this.load()),
 		]
 	}
@@ -146,8 +147,14 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 		const mine = s.discovery !== null && s.discovery.id === d.id
 		const absorbed =
 			s.discovery !== null && (e.mergedIds ?? []).includes(s.discovery.id)
+		// band inspection UX req 3.2: a truncated merge may have absorbed the shown one unnamed
+		const truncated = e.mergedTruncated === true && s.discovery !== null
 		if (e.change === "deleted") {
-			if (mine) void this.load()
+			if (mine || absorbed || truncated) void this.load()
+			return
+		}
+		if (truncated && !mine && !absorbed) {
+			void this.load()
 			return
 		}
 		const near = Math.abs(d.frequencyHz - s.hz)

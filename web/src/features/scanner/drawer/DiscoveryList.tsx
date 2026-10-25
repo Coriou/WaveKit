@@ -311,12 +311,25 @@ const DiscoveryItem = memo(function DiscoveryItem({
 							</span>
 						)}
 						{v.reason && <span className="wks-reason">{v.reason}</span>}
+						<HintLine v={v} />
 					</span>
 				</button>
 			)}
 		</article>
 	)
 })
+
+/** "likely ISM device · Run identify": the hint (muted, never the protocol) and the next step; unverified rows only. */
+function HintLine({ v }: { v: DiscoveryRowView }) {
+	if (v.next === null) return null
+	return (
+		<span className="wks-reason wks-hint">
+			{v.likely && <span className="wks-likely">{v.likely}</span>}
+			{v.likely && " · "}
+			<span className="wks-next">{v.next}</span>
+		</span>
+	)
+}
 
 function Tile({ v }: { v: DiscoveryRowView }) {
 	return (
@@ -443,6 +456,7 @@ function DiscoveryDetail({
 						<span role="status">{whyText(d)}</span>
 						<span className="wks-measured">{measuredText(d)}</span>
 						{v.reason && <span className="wks-measured">{v.reason}</span>}
+						<HintLine v={v} />
 					</span>
 				</div>
 				{chips.length > 0 && (

@@ -218,6 +218,13 @@ const HitRow = memo(function HitRow({
 						)}
 					</span>
 					<span className="wks-reason">{hitMeta(e)}</span>
+					{row && row.next !== null && (
+						<span className="wks-reason wks-hint">
+							{row.likely && <span className="wks-likely">{row.likely}</span>}
+							{row.likely && " · "}
+							<span className="wks-next">{row.next}</span>
+						</span>
+					)}
 				</span>
 			</button>
 			{open && d && (

@@ -78,6 +78,7 @@ import { useHandles, type HandleFrame } from "./use-handles.ts"
 import type { SpectrumProbe } from "../spectrum/index.ts"
 import { SavedTags } from "./SavedTags.tsx"
 import {
+	DISCOVERY_POP_CLASS,
 	DiscoveryTags,
 	useDiscoveryFetch,
 	useDiscoveryRow,
@@ -87,6 +88,7 @@ import {
 	identifiedAt,
 	identifiedLabel,
 } from "./discovery-tags.ts"
+import { clusterSignals, layoutChips } from "./signal-chips.ts"
 import {
 	dragRange,
 	finishRange,
@@ -779,7 +781,14 @@ function SignalLabels({
 			// what was identified there names the signal first, then a saved frequency, then the band plan;
 			// the core's own identity of the emission (WG11 frame tracks) wins over a match by frequency
 			const scanner = byHz.get(s.hz)?.scanner ?? null
-			const own = scanner ? discoveries.get(scanner.discoveryId) : undefined
+			const linked = scanner ? discoveries.get(scanner.discoveryId) : undefined
+			// band inspection UX req 1.2: a track's link to a discovery elsewhere (a stale link right after a
+			// retune: 145.5 MHz named on a 433.9 MHz track at the capture's edge) never names it
+			const own =
+				linked &&
+				Math.abs(linked.frequencyHz - s.hz) <= Math.max(3000, s.widthHz / 2)
+					? linked
+					: undefined
 			const d =
 				own && own.confidence === "decoded" && !own.operator?.lockout
 					? own
@@ -791,15 +800,14 @@ function SignalLabels({
 					: null
 			if (label !== null)
 				return { ...s, label, sub: formatMHz(s.hz, 3), known: true }
-			const f = savedNear(saved, s.hz, s.widthHz)
-			return f
-				? { ...s, label: f.name, sub: formatMHz(s.hz, 3), known: true }
-				: s
+			// band inspection UX: a saved frequency's name shows once, on its own tag (lanes, ruler), never
+			// repeated on every signal near it; the chip says it is known there
+			return savedNear(saved, s.hz, s.widthHz) ? { ...s, known: true } : s
 		})
 	}, [shown, plan, saved, discoveries])
 	const placed: PlacedLabel[] = useMemo(
 		() =>
-			placeLabels(signals, view, {
+			placeLabels(clusterSignals(signals, view, widthPx), view, {
 				widthPx,
 				traceCss,
 				levels,
@@ -815,18 +823,27 @@ function SignalLabels({
 		leaving: boolean
 	})[] = []
 	const byHz = new Map(shown.map(g => [g.hz, g]))
+	const current: (PlacedLabel & {
+		id: number
+		burst: boolean
+		leaving: boolean
+	})[] = []
 	for (const l of placed) {
 		const g = byHz.get(l.hz)
 		if (!g) continue
 		lastAt.current.set(g.id, { ...l, burst: g.burst })
-		chips.push({ ...l, id: g.id, burst: g.burst, leaving: false })
+		current.push({ ...l, id: g.id, burst: g.burst, leaving: false })
 	}
 	const live = new Set(gated.map(g => g.id))
+	const fading: typeof current = []
 	for (const g of gated) {
 		if (!g.leaving) continue
 		const last = lastAt.current.get(g.id)
-		if (last) chips.push({ ...last, id: g.id, leaving: true })
+		if (last) fading.push({ ...last, id: g.id, leaving: true })
 	}
+	// one layout across live and leaving chips: capped, and a fading chip never lands on another
+	const laid = layoutChips(current, fading)
+	chips.push(...laid.placed, ...laid.leaving)
 	for (const id of lastAt.current.keys())
 		if (!live.has(id)) lastAt.current.delete(id)
 	return (
@@ -915,7 +932,9 @@ function useInteraction(
 			// Chips, the zoom control and the range offer handle their own presses.
 			if (
 				e.button !== 0 ||
-				(e.target as Element).closest(`button, .${RANGE_OFFER_CLASS}`)
+				(e.target as Element).closest(
+					`button, .${RANGE_OFFER_CLASS}, .${DISCOVERY_POP_CLASS}`,
+				)
 			)
 				return
 			const view = viewRef.current
@@ -1010,7 +1029,12 @@ function useInteraction(
 			if (!drag && !rangeDrag) hover.set(null)
 		}
 		const onWheel = (e: WheelEvent) => {
-			if ((e.target as Element).closest(`.${SIGNAL_MENU_CLASS}`)) return
+			if (
+				(e.target as Element).closest(
+					`.${SIGNAL_MENU_CLASS}, .${DISCOVERY_POP_CLASS}`,
+				)
+			)
+				return
 			e.preventDefault()
 			sig.menu.set(null)
 			const dy = wheelPixels(e.deltaY, e.deltaMode)
@@ -1064,7 +1088,12 @@ function useInteraction(
 		}
 		const onMenu = (e: MouseEvent) => {
 			const target = e.target as Element
-			if (target.closest(`.${SIGNAL_MENU_CLASS}, .${RANGE_OFFER_CLASS}`)) return
+			if (
+				target.closest(
+					`.${SIGNAL_MENU_CLASS}, .${RANGE_OFFER_CLASS}, .${DISCOVERY_POP_CLASS}`,
+				)
+			)
+				return
 			e.preventDefault()
 			// the menu key already opened it (its keydown came first)
 			if (performance.now() - keyedAt < 500) return
