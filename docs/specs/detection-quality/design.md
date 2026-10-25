@@ -511,7 +511,8 @@ All in `src/core/scanner/store/discovery-store.ts` unless named.
   (`coChannelEvidence`, `relocateIncompatible`, `establishedFamily`) keep the effective
   family.
 - `Medians` gains `obwMin` and `obwMax`, computed in the existing pass over the last 64
-  observations (two compares per observation, invalidated with the medians).
+  observations (two compares per observation, invalidated with the medians); non-finite OBWs
+  are skipped and a window with none finite gives NaN (9.8).
   `bandwidthJoins(d, obw)` becomes the 9.2 band with `f` = `DQ_OBW_RATIO_MAX` when the
   record's effective confidence is `decoded` or it carries an identity, else
   `DQ_YOUNG_OBW_RATIO` (not from the observation count, so the count-3 transition and a

@@ -641,8 +641,8 @@ tests. So a weak guess never keeps records apart; a decoded protocol, a proven a
 digital family, and an identity (colour code, NAC, talker id, capcode) still do.
 
 9.2 **OBW band.** For an evidence-less observation and a record `r`, the band of `r` is
-`[obwMin / f, obwMax x f]`, where `obwMin` and `obwMax` are the smallest and largest OBW
-of `r`'s last 64 observations. `f = DQ_OBW_RATIO_MAX` = 2 when `r` is decoded or carries an
+`[obwMin / f, obwMax x f]`, where `obwMin` and `obwMax` are the smallest and largest finite
+OBW of `r`'s last 64 observations (a non-finite OBW is left out, see 9.8). `f = DQ_OBW_RATIO_MAX` = 2 when `r` is decoded or carries an
 identity, and `f = DQ_YOUNG_OBW_RATIO` = 3 otherwise, whatever its observation count or
 proven analog or carrier evidence (so reaching 3 observations or a carrier-only proof never
 narrows the band). The observation passes when its OBW lies in the band. This replaces the
@@ -709,7 +709,9 @@ query. Per observation the added work is O(1) per candidate, inside the section 
 
 9.8 Safe defaults: a non-finite or missing OBW minimum, maximum or median, or a non-finite
 observation OBW, fails 9.2 for that pair (no cross-family or young join; the same-family
-route is unchanged); a non-finite centre never matches; a non-finite peak or OBW on either
+route is unchanged); a non-finite OBW inside the window is left out of the minimum and maximum
+(otherwise one bad measurement would close the band for the next 64 observations), and a
+window with no finite OBW has none, which fails; a non-finite centre never matches; a non-finite peak or OBW on either
 side makes a 9.4 test undecided, which does not refuse (as 3.5). An unreadable evidence
 level or confidence counts as not proven and not decoded (and so takes `f` = 3 only when
 it also has no identity). A malformed identity counts as present and different from every

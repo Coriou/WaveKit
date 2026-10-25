@@ -81,6 +81,14 @@ function sameWellFormedIdentity(
 	return x.kind === y.kind && x.value === y.value
 }
 
+function malformedIdentity(
+	x: { kind: string; value: string } | undefined,
+): boolean {
+	if (x === undefined) return false
+	const v = x as { kind?: unknown; value?: unknown } | null
+	return v === null || typeof v.kind !== "string" || typeof v.value !== "string"
+}
+
 const finitePositive = (x: number): boolean => Number.isFinite(x) && x > 0
 
 /**
@@ -116,6 +124,9 @@ export function joinable(
 	if (!inObwBand(a.obwHz, b.obwMin, b.obwMax, b.bandFactor)) return false
 	if (!inObwBand(b.obwHz, a.obwMin, a.obwMax, a.bandFactor)) return false
 	if (!Number.isFinite(a.peakDbfs) || !Number.isFinite(b.peakDbfs)) return false
+	// 9.8: a malformed identity is present and differs from every identity, and from none.
+	if (malformedIdentity(a.identity) || malformedIdentity(b.identity))
+		return false
 	if (
 		a.identity !== undefined &&
 		b.identity !== undefined &&

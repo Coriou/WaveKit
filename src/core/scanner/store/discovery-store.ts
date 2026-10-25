@@ -116,7 +116,7 @@ import {
 } from "../detection-quality-contract.js"
 import {
 	compatible,
-	observationCompatible,
+	compatibleValues,
 	recordsCompatible,
 } from "./compatibility.js"
 import {
@@ -936,7 +936,11 @@ export class DiscoveryStore
 		)
 		if (sticky !== undefined)
 			return this.commit("observation", op =>
-				this.addObservation(op, this.lazyConsolidate(op, sticky, input), input),
+				this.addObservation(
+					op,
+					this.lazyConsolidate(op, sticky, input, decodedAs),
+					input,
+				),
 			)
 		const place = this.placement(
 			input.sourceId,
@@ -1432,6 +1436,7 @@ export class DiscoveryStore
 		op: Op,
 		m: Discovery,
 		obs: ObservationInput,
+		decodedAs?: string,
 	): Discovery {
 		const sourceId = m.sourceIds[0] ?? ""
 		const centre = this.medianCentre(m)
@@ -1465,7 +1470,11 @@ export class DiscoveryStore
 			const d = this.discoveries.get(e.id)
 			if (d !== undefined) scanned.push(this.frozenOf(d))
 		}
-		const toM = scanned.filter(c => joinable(fm, c))
+		// DQ 9.5: a record decoded as another protocol than this observation's decode never joins
+		// the group the observation lands in.
+		const otherDecode = (c: ConsolidationRecord): boolean =>
+			decodedAs !== undefined && c.decoded && c.protocol !== decodedAs
+		const toM = scanned.filter(c => !otherDecode(c) && joinable(fm, c))
 		if (toM.length === 0) return m
 		// The survivor: the highest-ranked of m and the records joinable to m that the observation
 		// itself may join (3.1), so the observation never lands on a record that refuses it.
@@ -1484,6 +1493,7 @@ export class DiscoveryStore
 			.filter(
 				c =>
 					c.id !== fs.id &&
+					!otherDecode(c) &&
 					Math.abs(c.centreHz - centre) <= DQ_CROSS_FAMILY_HZ &&
 					joinable(fs, c),
 			)
@@ -2190,6 +2200,7 @@ export class DiscoveryStore
 		const highHz = centre + tol + 1
 		let radius = tol
 		let crossFamily = false
+		let decodedRoute = false
 		const consider = (e: IndexedCentre): void => {
 			const d = this.discoveries.get(e.id)
 			if (d === undefined) return
@@ -2201,6 +2212,14 @@ export class DiscoveryStore
 			if (this.obsCompatible(d, obs) === false) return
 			// DQ 9.3: only the cross-family or young route is band-gated (9.2).
 			if (crossFamily && !this.bandwidthJoins(d, obs.track.obwHz)) return
+			// The decoded-record shortcut also takes the band; a decoded record holding no
+			// observation (all trimmed or moved) has no window and keeps today's join.
+			if (
+				decodedRoute &&
+				this.mediansOf(d.id) !== undefined &&
+				!this.bandwidthJoins(d, obs.track.obwHz)
+			)
+				return
 			const better =
 				best === undefined ||
 				dist < bestDist ||
@@ -2213,7 +2232,12 @@ export class DiscoveryStore
 			}
 		}
 		this.centres.range(obs.sourceId, family, lowHz, highHz, consider)
-		if (family === "unknown")
+		// The decoded-record shortcut (scanner redesign: an evidence-less observation sticks to a
+		// decoded record of any family within today's tolerance) keeps its radius but, being a
+		// cross-family join, takes the 9.2 band for an evidence-less observation. Its radius is not
+		// cut to 1 000 Hz: that would undo the older rule across a raster key edge.
+		if (family === "unknown") {
+			decodedRoute = evidenceLess
 			this.decodedCentres.range(
 				obs.sourceId,
 				DECODED_CENTRE_FAMILY,
@@ -2221,6 +2245,8 @@ export class DiscoveryStore
 				highHz,
 				consider,
 			)
+			decodedRoute = false
+		}
 		// DQ 9.3: the cross-family or young route. An evidence-less observation also sticks to a
 		// record of any other association family (carrier included) within min(tol, 1 kHz) when its
 		// OBW lies in the record's band (9.2). Young records of the observation's own list are
@@ -3141,14 +3167,26 @@ export class DiscoveryStore
 	private obsCompatible(d: Discovery, obs: ObservationInput): boolean | null {
 		const m = this.mediansOf(d.id)
 		if (m === undefined) return null
-		// 9.4: a young record (1 or 2) is tested observation by observation.
-		return observationCompatible(
-			{
-				medians: sideOf(m),
-				observations: m.count >= DQ_MIN_HISTORY_OBS ? [] : this.recentOf(d.id),
-			},
-			{ peakDbfs: obs.track.peakDbfs, obwHz: obs.track.obwHz },
-		)
+		const peak = obs.track.peakDbfs
+		const obw = obs.track.obwHz
+		if (m.count >= DQ_MIN_HISTORY_OBS)
+			return compatibleValues(m.peak, m.obw, peak, obw)
+		// 9.4: a young record (1 or 2) is tested observation by observation, in place.
+		const list = this.byDiscovery.get(d.id)
+		if (list === undefined) return null
+		let decided = false
+		for (
+			let i = Math.max(0, list.length - MEDIAN_WINDOW);
+			i < list.length;
+			i++
+		) {
+			const o = list[i]
+			if (o === undefined) continue
+			const c = compatibleValues(o.peakDbfs, o.obwHz, peak, obw)
+			if (c === false) return false
+			if (c === true) decided = true
+		}
+		return decided ? true : null
 	}
 
 	private recentOf(id: string): readonly Observation[] {

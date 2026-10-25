@@ -17,6 +17,7 @@ import type {
 	ScannerClass,
 } from "../../../../src/core/scanner/types.js"
 import { evidence } from "../../../mocks/scanner/observations.js"
+import { legacySnapshot } from "./consolidation-fixtures.js"
 import {
 	F,
 	SRC,
@@ -685,5 +686,147 @@ describe("DQ 9.8: malformed identity", () => {
 		expect(store.consolidationPlan().groups).toEqual([])
 		store.rekey(SRC, 0)
 		expect(ids(store)).toEqual(["d_a", "d_b"])
+	})
+})
+
+describe("DQ 9.5: an incoming decode on the lazy path", () => {
+	it("a DMR-decoded observation joining an unknown record never pulls in a decoded P25 neighbour", () => {
+		const store = restored([
+			{ id: "d_u", centreHz: F },
+			{
+				id: "d_p",
+				centreHz: F + 500,
+				family: "digital-voice",
+				protocol: "p25p1",
+				confidence: "decoded",
+				firstSeenMs: T0 + 1,
+			},
+		])
+		const r = store.ingest(
+			obs({
+				id: "x",
+				centreHz: F,
+				at: T0 + 100_000,
+				obwHz: 8_000,
+				peakDbfs: -50,
+			}),
+			{
+				decode: evidence("dmr", T0 + 100_000, {
+					identity: { kind: "dmr-cc", value: "1" },
+				}),
+			},
+		)
+		expect(r.discoveryId).toBe("d_u")
+		expect(store.get("d_p")?.observationCount).toBe(5)
+		expect(ids(store)).toEqual(["d_p", "d_u"])
+	})
+
+	it("control: an evidence-less observation still folds the pair", () => {
+		const store = restored([
+			{ id: "d_u", centreHz: F },
+			{
+				id: "d_p",
+				centreHz: F + 500,
+				family: "digital-voice",
+				protocol: "p25p1",
+				confidence: "decoded",
+				firstSeenMs: T0 + 1,
+			},
+		])
+		store.ingest(
+			obs({
+				id: "x",
+				centreHz: F,
+				at: T0 + 100_000,
+				obwHz: 8_000,
+				peakDbfs: -50,
+			}),
+		)
+		expect(ids(store)).toHaveLength(1)
+	})
+})
+
+describe("DQ 9.3: decoded records reached by an evidence-less observation", () => {
+	const DMR: LegacySpec = {
+		id: "d_a",
+		centreHz: F,
+		obwHz: 4_000,
+		family: "digital-voice",
+		protocol: "dmr",
+		confidence: "decoded",
+	}
+
+	it("is the cross-family route: takes the band: a 30 kHz sighting 3 800 Hz from a 4 kHz decoded record stays apart", () => {
+		const far = restored([DMR])
+		expect(
+			far.ingest(
+				obs({
+					id: "x",
+					centreHz: F + 3_800,
+					at: T0 + 100_000,
+					obwHz: 30_000,
+					peakDbfs: -50,
+				}),
+			).discoveryId,
+		).not.toBe("d_a")
+		const near = restored([DMR])
+		expect(
+			near.ingest(
+				obs({
+					id: "x",
+					centreHz: F + 500,
+					at: T0 + 100_000,
+					obwHz: 8_000,
+					peakDbfs: -50,
+				}),
+			).discoveryId,
+		).toBe("d_a")
+	})
+})
+
+describe("DQ 9.8: one-sided malformed identity", () => {
+	const bad = { kind: 7, value: null } as unknown as Identity
+	const specs = (): LegacySpec[] => [
+		{ id: "d_a", centreHz: F, identity: bad },
+		{ id: "d_b", centreHz: F + 100, firstSeenMs: T0 + 1 },
+	]
+
+	it("never merges with an unidentified record: plan, settle and lazy path", () => {
+		const store = restored(specs())
+		expect(store.consolidationPlan().groups).toEqual([])
+		store.rekey(SRC, 0)
+		expect(ids(store)).toEqual(["d_a", "d_b"])
+		store.ingest(
+			obs({
+				id: "x",
+				centreHz: F + 50,
+				at: T0 + 100_000,
+				obwHz: 8_000,
+				peakDbfs: -50,
+			}),
+		)
+		expect(ids(store)).toEqual(expect.arrayContaining(["d_a", "d_b"]))
+		const reversed = restored(specs().reverse())
+		expect(reversed.consolidationPlan().groups).toEqual([])
+	})
+})
+
+describe("DQ 9.2, 9.8: non-finite widths in the window", () => {
+	it("are left out of the band; a window with none finite has no band", () => {
+		const snap = legacySnapshot([
+			{ id: "d_a", centreHz: F, count: 5, obwHz: 10_000 },
+			{ id: "d_b", centreHz: F + 50_000, count: 2, obwHz: 10_000 },
+		])
+		for (const o of snap.observations)
+			if (o.id === "d_a-o2" || o.discoveryId === "d_b") o.obwHz = Number.NaN
+		const { store } = newStore()
+		store.restore(snap)
+		const i = internals(store)
+		const a = i.discoveries.get("d_a")
+		const b = i.discoveries.get("d_b")
+		if (a === undefined || b === undefined) throw new Error("missing")
+		expect(i.bandwidthJoins(a, 30_000)).toBe(true)
+		expect(i.bandwidthJoins(a, 30_001)).toBe(false)
+		expect(i.bandwidthJoins(b, 10_000)).toBe(false)
 	})
 })
