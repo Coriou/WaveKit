@@ -992,6 +992,12 @@ export class ScannerService extends EventEmitter {
 				newId: () => ulid(this.now()),
 				minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
 				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
+				hintScope: () => ({
+					region: this.deps.region,
+					ranges: (
+						this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
+					).flatMap(p => p.ranges),
+				}),
 				logger: this.log,
 				...(deps.recordingProtection
 					? {

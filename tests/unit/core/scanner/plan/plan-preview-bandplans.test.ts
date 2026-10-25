@@ -279,12 +279,15 @@ describe("previewPlan effective bandplans", () => {
 		}
 		const hosted = previewPlan(spec, ctx({ bandplans: visible }))
 		const unhosted = previewPlan(spec, ctx({ bandplans: hidden }))
+		// Scanner-redesign 3.12: the LPD433 range of the ism-433 plan covers 433.2-433.3 MHz.
 		expect(hosted.spec.ranges[0]).toMatchObject({
 			bandplanId: "ism-433",
-			protocols: ["ism"],
+			protocols: ["analog-fm", "ism"],
 			obwHz: [],
 		})
-		expect(hosted.spec.ranges[0]?.rasters).toBeUndefined()
+		expect(hosted.spec.ranges[0]?.rasters).toEqual([
+			{ spacingHz: 25_000, firstChannelHz: 433_075_000 },
+		])
 		expect(unhosted.spec.ranges[0]?.bandplanId).toBe("amateur-70cm")
 		expect(unhosted.spec.ranges[0]?.protocols).not.toEqual(["ism"])
 		expect(unhosted.spec.ranges[0]?.rasters?.length).toBeGreaterThan(0)

@@ -12,6 +12,11 @@ import {
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
 
+/** The stored record (scanner-redesign 3.10: a weak record's published label is unknown/activity). */
+function storedOf(store: DiscoveryStore, id: string) {
+	return store.snapshot().discoveries.find(d => d.id === id)
+}
+
 const CH = 446_006_250
 const T0 = Date.UTC(2026, 9, 9, 12, 0, 0)
 
@@ -84,7 +89,7 @@ describe("DiscoveryStore identity guard", () => {
 			),
 		).toBe("upgraded")
 		expect(store.snapshot().discoveries).toHaveLength(1)
-		const d = store.get(id)
+		const d = storedOf(store, id)
 		expect(d?.protocol).toBe("dmr")
 		expect(d?.confidence).toBe("decoded")
 		expect(d?.identity).toEqual({ kind: "dmr-cc", value: "1" })
@@ -123,7 +128,7 @@ describe("DiscoveryStore identity guard", () => {
 		expect(
 			store.applyEvidence(id, evidence("dmr", T0 + 10, { talkgroups: ["9"] })),
 		).toBe("updated")
-		const d = store.get(id)
+		const d = storedOf(store, id)
 		expect(d?.protocol).toBe("dmr")
 		expect(d?.confidence).toBe("activity")
 		expect(d?.identity).toBeUndefined()

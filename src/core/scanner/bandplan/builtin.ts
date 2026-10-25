@@ -236,6 +236,12 @@ export const BUILTIN_BANDPLANS: readonly Bandplan[] = [
 		name: "ISM 433 MHz",
 		ranges: [
 			range("ism-433", 433.05, 434.79, { obwHz: [], protocols: ["ism"] }),
+			// LPD433 (ERC/REC 70-03 Annex 1): 69 channels of 25 kHz, 433.075–434.775 MHz, analog FM voice.
+			range("ism-433", 433.075, 434.775, {
+				rasters: [raster(25_000, 433.075)],
+				obwHz: [],
+				protocols: ["analog-fm", "ism"],
+			}),
 		],
 	},
 	{

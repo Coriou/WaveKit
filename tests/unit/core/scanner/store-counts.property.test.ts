@@ -12,6 +12,11 @@ import {
 import { newCtx, recount, step } from "./store-index-ops.js"
 import type { Ctx } from "./store-index-ops.js"
 
+/** The stored record (scanner-redesign 3.10: a weak record's published label is unknown/activity). */
+function storedOf(store: DiscoveryStore, id: string) {
+	return store.snapshot().discoveries.find(d => d.id === id)
+}
+
 describe("discovery store job counts (WG11 SC)", () => {
 	// Feature: web-gaps-11, Property 7: Incremental counts equal a recount
 	// Validates: Requirements 3.3
@@ -66,19 +71,21 @@ describe("discovery store job counts (WG11 SC)", () => {
 		)
 		const id = r.discoveryId ?? ""
 		// A prior-only hypothesis leaves the ladder at activity.
-		expect(store.get(id)?.protocol).toBe("unknown")
-		expect(store.get(id)?.confidence).toBe("activity")
+		expect(storedOf(store, id)?.protocol).toBe("unknown")
+		expect(storedOf(store, id)?.confidence).toBe("activity")
 		const copy = store.countsByJob("j")
 		expect(copy.activity).toBe(1)
 		copy.activity = 99
 		expect(store.countsByJob("j").activity).toBe(1)
 		store.applyEvidence(id, evidence("dmr", 2_000, { identity: dmrCc(1) }))
-		expect(store.get(id)?.confidence).toBe("decoded")
+		expect(storedOf(store, id)?.confidence).toBe("decoded")
+		// Scanner-redesign 3.10: without a proof the record publishes activity, and counts follow it.
+		expect(store.get(id)?.confidence).toBe("activity")
 		expect(store.countsByJob("j")).toEqual({
-			activity: 0,
+			activity: 1,
 			candidate: 0,
 			classified: 0,
-			decoded: 1,
+			decoded: 0,
 		})
 		// A stored classified record still drops to candidate when a cap is recorded.
 		const snap = store.snapshot()
@@ -86,7 +93,8 @@ describe("discovery store job counts (WG11 SC)", () => {
 		expect(saved).toBeDefined()
 		if (saved !== undefined) saved.confidence = "classified"
 		store.restore(snap)
-		expect(store.countsByJob("j").classified).toBe(1)
+		expect(storedOf(store, id)?.confidence).toBe("classified")
+		expect(store.countsByJob("j").activity).toBe(1)
 		store.applyClassification(
 			id,
 			classification(
@@ -96,16 +104,16 @@ describe("discovery store job counts (WG11 SC)", () => {
 				"channel",
 			),
 		)
-		expect(store.get(id)?.confidence).toBe("candidate")
+		expect(storedOf(store, id)?.confidence).toBe("candidate")
 		expect(store.get(id)?.confidenceCap).toBe("adjacent-leak")
 		expect(store.countsByJob("j")).toEqual({
-			activity: 0,
-			candidate: 1,
+			activity: 1,
+			candidate: 0,
 			classified: 0,
 			decoded: 0,
 		})
 		store.delete(id)
-		expect(store.countsByJob("j").candidate).toBe(0)
+		expect(store.countsByJob("j").activity).toBe(0)
 		// bound: a job no discovery carries any more holds no entry
 		expect(
 			(store as unknown as { jobCounts: { jobs(): number } }).jobCounts.jobs(),

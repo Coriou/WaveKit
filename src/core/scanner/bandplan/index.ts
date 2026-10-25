@@ -123,12 +123,21 @@ export function priorsFor(
 	ranges: ScanRange[],
 	hz: number,
 ): Partial<Record<ScannerProtocol, number>> {
-	const listed = new Set<ScannerProtocol>()
+	// Scanner-redesign 3.12: the narrowest covering range that lists protocols decides (ties: stack order).
+	let chosen: readonly ScannerProtocol[] | null = null
+	let width = Infinity
 	for (const r of ranges) {
 		if (hz < r.startHz || hz > r.endHz) continue
-		for (const p of r.protocols ?? []) listed.add(p)
+		const list = r.protocols
+		if (list === undefined || list.length === 0) continue
+		const w = r.endHz - r.startHz
+		if (w < width) {
+			width = w
+			chosen = list
+		}
 	}
-	if (listed.size === 0) return {}
+	if (chosen === null) return {}
+	const listed = new Set<ScannerProtocol>(chosen)
 	const out: Partial<Record<ScannerProtocol, number>> = {
 		carrier: 1,
 		unknown: 1,

@@ -56,6 +56,9 @@ export type ScannerClass =
 	| "wideband"
 	| "unknown"
 
+/** Scanner-redesign 3.11: a display-only likely kind of a weak discovery; never a label. */
+export type ScannerHint = ScannerClass | "ism-device" | "analog-voice" | "lora"
+
 export type ProtocolFamily =
 	| "analog"
 	| "digital-voice"
@@ -296,6 +299,8 @@ export interface Discovery {
 	proof?: ScannerProof
 	/** WG12: `proven` when `proof` is set, otherwise `weak`. Absent on cores before the redesign. */
 	evidenceLevel?: ScannerEvidenceLevel
+	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
+	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
 }
 
 export interface Observation {

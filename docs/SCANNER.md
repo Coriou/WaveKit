@@ -149,6 +149,7 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 | `amateur-70cm`    | EU/US  | 430–440 / 420–450 | 12.5 and 25 kHz       | 9, 11, 16         | analog-fm, dstar, dmr, ysf, p25p1     |
 | `aprs`            | EU/US  | 144.800 / 144.390 | one channel           | 16                | aprs                                  |
 | `ism-433`         | EU     | 433.05–434.79     | none                  | none              | ism                                   |
+| `ism-433` LPD433  | EU     | 433.075–434.775   | 25 kHz                | none              | analog-fm, ism                        |
 | `ism-868`         | EU     | 863–870           | none                  | none              | ism                                   |
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
@@ -406,6 +407,15 @@ with `+<n> more`. `evidence=proven` lists proofs; `weak` lists unproven activity
 `all` is the default. Trial, analog and unavailable evidence is in memory only.
 After restart, only persisted decode evidence rebuilds proofs; other discoveries
 read `weak` until new evidence arrives.
+
+A weak discovery (no proof) reads `unknown` / `activity`, whatever an older
+guess stored on the record said; the stored fields are kept. It may carry a
+display-only `hint`: `lora` (a short 100 to 150 kHz burst inside an EU LoRa
+slot), `ism-device` (a short or OOK burst up to 25 kHz wide in an ISM band; try
+rtl_433), `analog-voice` (a longer signal within 3 kHz of the LPD433 25 kHz
+raster, 433.075 to 434.775 MHz), otherwise its spectral class. A hint is never
+a protocol label. Band-plan priors come from the narrowest covering range that
+lists protocols, so inside LPD433 analog FM is tried before DMR.
 
 Capture starts at gate pass. Scans replay captured IQ before taking a live hold.
 Every planned trial is recorded as `pending` first, so skipped or unavailable

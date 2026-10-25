@@ -19,6 +19,11 @@ import {
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
 
+/** The stored record (scanner-redesign 3.10: a weak record's published label is unknown/activity). */
+function storedOf(store: DiscoveryStore, id: string) {
+	return store.snapshot().discoveries.find(d => d.id === id)
+}
+
 const CH = 446_006_250
 const PMR: Raster[] = [{ spacingHz: 12_500, firstChannelHz: CH }]
 const T0 = Date.UTC(2026, 9, 9, 12, 0, 0)
@@ -224,7 +229,7 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		)
 		store.ingest(dmrObs("o4", CH + 200_000, T0, { truncated: true }))
 		expect(store.get(decoded)?.observationCount).toBe(0)
-		expect(store.get(decoded)?.confidence).toBe("decoded")
+		expect(storedOf(store, decoded)?.confidence).toBe("decoded")
 		expect(store.snapshot().observations.map(o => o.id)).toEqual(["o2"])
 
 		const replica = newStore().store
@@ -475,21 +480,21 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			makeObs({ id: "o1", centreHz: CH, startedAt: T0, cls: "fsk4-12k5" }),
 		)
 		const id = r.discoveryId ?? ""
-		expect(store.get(id)?.protocol).toBe("unknown")
-		expect(store.get(id)?.confidence).toBe("activity")
+		expect(storedOf(store, id)?.protocol).toBe("unknown")
+		expect(storedOf(store, id)?.confidence).toBe("activity")
 		store.applyClassification(id, classification("fsk4-12k5", [["dmr", 0.7]]))
 		store.applyClassification(
 			id,
 			classification("fsk4-12k5", [["nxdn96", 0.9]]),
 		)
-		expect(store.get(id)?.protocol).toBe("unknown")
-		expect(store.get(id)?.confidence).toBe("activity")
+		expect(storedOf(store, id)?.protocol).toBe("unknown")
+		expect(storedOf(store, id)?.confidence).toBe("activity")
 		expect(
 			store.applyEvidence(id, evidence("dmr", T0 + 10, { identity: dmrCc(1) })),
 		).toBe("upgraded")
 		expect(store.applyEvidence(id, evidence("nxdn96", T0 + 20))).toBeNull()
-		expect(store.get(id)?.protocol).toBe("dmr")
-		expect(store.get(id)?.confidence).toBe("decoded")
+		expect(storedOf(store, id)?.protocol).toBe("dmr")
+		expect(storedOf(store, id)?.confidence).toBe("decoded")
 	})
 
 	it("keeps encrypted once accepted", () => {
@@ -515,7 +520,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 				evidence("dmr", T0 + 10, { talkgroups: ["9"], encrypted: true }),
 			),
 		).toBe("updated")
-		const d = store.get(id)
+		const d = storedOf(store, id)
 		expect(d?.protocol).toBe("dmr")
 		expect(d?.confidence).toBe("activity")
 		expect(d?.identity).toBeUndefined()
@@ -524,7 +529,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 		expect(
 			store.applyEvidence(id, evidence("dmr", T0 + 20, { identity: dmrCc(1) })),
 		).toBe("upgraded")
-		expect(store.get(id)?.confidence).toBe("decoded")
+		expect(storedOf(store, id)?.confidence).toBe("decoded")
 	})
 
 	it("lets evidence without an identity only refine the protocol: an analog discovery keeps its family", () => {
@@ -540,17 +545,17 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 		expect(store.applyEvidence(fm, evidence("analog-fm", T0 + 100))).toBe(
 			"updated",
 		)
-		expect(store.get(fm)?.protocol).toBe("analog-fm")
-		expect(store.get(fm)?.family).toBe("analog")
-		expect(store.get(fm)?.confidence).toBe("activity")
+		expect(storedOf(store, fm)?.protocol).toBe("analog-fm")
+		expect(storedOf(store, fm)?.family).toBe("analog")
+		expect(storedOf(store, fm)?.confidence).toBe("activity")
 		expect(
 			store.applyEvidence(
 				fm,
 				evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }),
 			),
 		).toBeNull()
-		expect(store.get(fm)?.protocol).toBe("analog-fm")
-		expect(store.get(fm)?.family).toBe("analog")
+		expect(storedOf(store, fm)?.protocol).toBe("analog-fm")
+		expect(storedOf(store, fm)?.family).toBe("analog")
 		expect(store.discoveryIdOf("o1")).toBe(fm)
 
 		const unk =
@@ -563,8 +568,8 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 				}),
 			).discoveryId ?? ""
 		store.applyEvidence(unk, evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }))
-		expect(store.get(unk)?.protocol).toBe("dmr")
-		expect(store.get(unk)?.confidence).toBe("activity")
+		expect(storedOf(store, unk)?.protocol).toBe("dmr")
+		expect(storedOf(store, unk)?.confidence).toBe("activity")
 	})
 
 	it("applies nothing from identity-less evidence of another family: no metadata, no encrypted flag", () => {
@@ -600,8 +605,8 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 				evidence("nxdn48", T0 + 2_000, { talkgroups: ["9"], encrypted: true }),
 			),
 		).toBe("updated")
-		expect(store.get(dmr)?.protocol).toBe("dmr")
-		expect(store.get(dmr)?.confidence).toBe("activity")
+		expect(storedOf(store, dmr)?.protocol).toBe("dmr")
+		expect(storedOf(store, dmr)?.confidence).toBe("activity")
 		expect(store.get(dmr)?.metadata.talkgroups).toEqual(["9"])
 		expect(store.get(dmr)?.encrypted).toBe(true)
 
@@ -614,19 +619,19 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 					hypotheses: [["digital-unknown", 0.8]],
 				}),
 			).discoveryId ?? ""
-		expect(store.get(unk)?.protocol).toBe("unknown")
+		expect(storedOf(store, unk)?.protocol).toBe("unknown")
 		expect(
 			store.applyEvidence(unk, evidence("digital-unknown", T0 + 100)),
 		).toBe("updated")
-		expect(store.get(unk)?.protocol).toBe("digital-unknown")
-		expect(store.get(unk)?.family).toBe("unknown")
+		expect(storedOf(store, unk)?.protocol).toBe("digital-unknown")
+		expect(storedOf(store, unk)?.family).toBe("unknown")
 		expect(
 			store.applyEvidence(
 				unk,
 				evidence("pocsag", T0 + 2_000, { talkgroups: ["7"] }),
 			),
 		).toBe("updated")
-		expect(store.get(unk)?.protocol).toBe("digital-unknown")
+		expect(storedOf(store, unk)?.protocol).toBe("digital-unknown")
 		expect(store.get(unk)?.metadata.talkgroups).toEqual(["7"])
 	})
 
@@ -649,16 +654,16 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			a,
 			classification("fsk4-12k5", [["dmr", 0.8]], undefined, "channel"),
 		)
-		expect(store.get(a)?.protocol).toBe("unknown")
-		expect(store.get(a)?.confidence).toBe("activity")
+		expect(storedOf(store, a)?.protocol).toBe("unknown")
+		expect(storedOf(store, a)?.confidence).toBe("activity")
 		store.applyClassification(
 			a,
 			classification("fsk4-12k5", [["dmr", 0.8]], "adjacent-leak", "channel"),
 		)
-		expect(store.get(a)?.confidence).toBe("activity")
+		expect(storedOf(store, a)?.confidence).toBe("activity")
 		expect(store.get(a)?.confidenceCap).toBe("adjacent-leak")
 		store.applyEvidence(a, evidence("dmr", T0 + 10, { identity: dmrCc(1) }))
-		expect(store.get(a)?.confidence).toBe("candidate")
+		expect(storedOf(store, a)?.confidence).toBe("candidate")
 		expect(store.get(a)?.identity).toEqual(dmrCc(1))
 
 		const b = store.ingest(dmrObs("o2", CH + 1_000_000, T0)).discoveryId ?? ""
@@ -667,7 +672,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			b,
 			classification("fsk4-12k5", [["dmr", 0.8]], "suspected-intermod"),
 		)
-		expect(store.get(b)?.confidence).toBe("decoded")
+		expect(storedOf(store, b)?.confidence).toBe("decoded")
 		expect(store.get(b)?.confidenceCap).toBeUndefined()
 	})
 
@@ -681,13 +686,13 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 				{ cap: "suspected-intermod" },
 			),
 		).toBe("upgraded")
-		const d = store.get(id)
+		const d = storedOf(store, id)
 		expect(d?.confidence).toBe("candidate")
 		expect(d?.confidenceCap).toBe("suspected-intermod")
 		expect(d?.identity).toEqual(dmrCc(1))
 		expect(d?.metadata.talkgroups).toEqual(["9"])
 		store.applyEvidence(id, evidence("dmr", T0 + 20, { identity: dmrCc(1) }))
-		expect(store.get(id)?.confidence).toBe("candidate")
+		expect(storedOf(store, id)?.confidence).toBe("candidate")
 
 		const twin =
 			store.ingest(dmrObs("o2", CH + 1_000_000, T0)).discoveryId ?? ""
@@ -697,7 +702,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			evidence("dmr", T0 + 20, { identity: dmrCc(2) }),
 			{ cap: "adjacent-leak" },
 		)
-		expect(store.get(twin)?.confidence).toBe("decoded")
+		expect(storedOf(store, twin)?.confidence).toBe("decoded")
 		expect(store.get(twin)?.confidenceCap).toBeUndefined()
 	})
 
@@ -767,8 +772,10 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 			makeObs({ id: "o4", centreHz: CH + 300_000, startedAt: T0 + 3_000 }),
 		)
 		expect(next.change).toBe("created")
-		expect(store.get(act)).toBeUndefined()
-		expect(store.get(cand)).toBeDefined()
+		// Scanner-redesign 3.10: without a proof every record ranks as published activity, so the
+		// oldest goes first; the stored ladder no longer protects a record from eviction.
+		expect(store.get(cand)).toBeUndefined()
+		expect(store.get(act)).toBeDefined()
 
 		const small = newStore({ max: 2 })
 		const k = small.store.ingest(dmrObs("p1", CH, T0)).discoveryId ?? ""
@@ -776,6 +783,7 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 		const d =
 			small.store.ingest(dmrObs("p2", CH + 100_000, T0)).discoveryId ?? ""
 		small.store.applyEvidence(d, evidence("dmr", T0, { identity: dmrCc(1) }))
+		small.store.setOperator(d, { keep: true })
 		expect(small.store.ingest(dmrObs("p3", CH + 200_000, T0)).change).toBe(
 			"transient",
 		)
@@ -952,19 +960,16 @@ describe("DiscoveryStore queries and replay", () => {
 			store.ingest(dmrObs("o3", CH + 100_000, T0 + 2_000)).discoveryId ?? ""
 		store.applyEvidence(o2, evidence("dmr", T0 + 1_000, { identity: dmrCc(1) }))
 		store.applyEvidence(o3, evidence("dmr", T0 + 2_000, { identity: dmrCc(2) }))
-		const page1 = store.list({
-			minConfidence: "candidate",
-			sort: "frequency",
-			limit: 1,
-		})
-		expect(page1.items.map(d => d.frequencyHz)).toEqual([CH])
+		// Scanner-redesign 3.10: these decodes leave no proof, so no record publishes above activity.
+		expect(store.list({ minConfidence: "candidate" }).items).toEqual([])
+		const page1 = store.list({ sort: "frequency", limit: 2 })
+		expect(page1.items.map(d => d.frequencyHz)).toEqual([CH, CH + 100_000])
 		const page2 = store.list({
-			minConfidence: "candidate",
 			sort: "frequency",
-			limit: 1,
+			limit: 2,
 			cursor: page1.nextCursor,
 		})
-		expect(page2.items.map(d => d.frequencyHz)).toEqual([CH + 100_000])
+		expect(page2.items.map(d => d.frequencyHz)).toEqual([CH + 200_000])
 		expect(page2.nextCursor).toBeNull()
 		expect(store.list({}).items.map(d => d.frequencyHz)).toEqual([
 			CH + 100_000,

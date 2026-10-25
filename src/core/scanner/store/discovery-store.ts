@@ -25,9 +25,11 @@ import {
 import {
 	DISCOVERY_MERGED_IDS_MAX,
 	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
+	type BandRegion,
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf } from "../classify/classifier.js"
+import { hintOf } from "../classify/hint.js"
 import {
 	UNKNOWN_LABEL,
 	acceptedAnalogEvidence,
@@ -71,8 +73,10 @@ import type {
 	ScannerClass,
 	ScannerConfidence,
 	ScannerEvidenceLevel,
+	ScannerHint,
 	ScannerProof,
 	ScannerProtocol,
+	ScanRange,
 	SignalStats,
 	StoredObservation,
 } from "../types.js"
@@ -207,6 +211,10 @@ export interface DiscoveryStoreOptions {
 	discoveryHoldsKept?: (discoveryId: string) => boolean
 	/** WG9 R2: the eviction-blocked-by-kept warning; a module-level fallback logger without one. */
 	logger?: Logger
+	/** Scanner-redesign 3.11: region and effective ranges read when a weak record is presented. */
+	hintScope?: () =>
+		| { region: BandRegion; ranges: readonly ScanRange[] }
+		| undefined
 }
 
 /** Created on first need only, so a store that never logs creates no logger. */
@@ -253,6 +261,14 @@ type Ingested = {
 }
 
 const METADATA_MAX = 64
+/** Scanner-redesign 3.10: a weak view publishes `UNKNOWN_LABEL`; only a proof names a label. */
+function publishedOf(view: DiscoveryProofView): EvidenceLabel {
+	return view.evidence === "proven" && view.proof !== null
+		? view.label
+		: UNKNOWN_LABEL
+}
+/** The classifier's burst limit (scanner-redesign 3.11 `short`). */
+const SHORT_TRACK_BLOCKS = 4
 const LINKS_MAX = 64
 const NO_LINKS: readonly string[] = []
 /** Per-discovery observation window (WG11: exported for the snapshot mirror). */
@@ -834,8 +850,13 @@ export class DiscoveryStore
 	/** Replay and restore drop caches without publishing a sink change. */
 	private proofQuiet = 0
 
+	/** Scanner-redesign 3.11 inputs, in memory only: never stored or journaled. */
+	private readonly latestShort = new Map<string, boolean>()
+	private readonly hintScope: DiscoveryStoreOptions["hintScope"]
+
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
+		this.hintScope = opts.hintScope
 		this.injectedLog = opts.logger
 			? createComponentLogger(opts.logger, "DiscoveryStore")
 			: undefined
@@ -1131,7 +1152,7 @@ export class DiscoveryStore
 		| undefined {
 		const d = this.discoveries.get(discoveryId)
 		if (d === undefined) return undefined
-		const label = this.effectiveLabel(d)
+		const label = this.publishedLabel(d)
 		return { id: d.id, protocol: label.protocol, confidence: label.confidence }
 	}
 
@@ -1878,31 +1899,30 @@ export class DiscoveryStore
 			const cached = this.proofCache.get(d.id)
 			if (cached !== undefined) {
 				if (evidenceOn && cached.evidence !== evidence) return false
-				if (
-					filter.protocol !== undefined &&
-					cached.label.protocol !== filter.protocol
-				)
+				const label = publishedOf(cached)
+				if (filter.protocol !== undefined && label.protocol !== filter.protocol)
 					return false
-				if (min !== undefined && rank(cached.label.confidence) < rank(min))
+				if (min !== undefined && rank(label.confidence) < rank(min))
 					return false
 				return true
 			}
-			// No proof inputs: the stored record is the DTO, and the level is weak.
+			// No proof inputs: the level is weak and the DTO label is UNKNOWN_LABEL (3.10).
 			if (!this.evidenceCanNameProof(d)) {
-				if (filter.protocol !== undefined && d.protocol !== filter.protocol)
+				if (
+					filter.protocol !== undefined &&
+					UNKNOWN_LABEL.protocol !== filter.protocol
+				)
 					return false
-				if (min !== undefined && rank(d.confidence) < rank(min)) return false
+				if (min !== undefined && rank(UNKNOWN_LABEL.confidence) < rank(min))
+					return false
 				return !evidenceOn || evidence === "weak"
 			}
 			const view = this.discoveryView(d)
 			if (evidenceOn && view.evidence !== evidence) return false
-			if (
-				filter.protocol !== undefined &&
-				view.label.protocol !== filter.protocol
-			)
+			const label = publishedOf(view)
+			if (filter.protocol !== undefined && label.protocol !== filter.protocol)
 				return false
-			if (min !== undefined && rank(view.label.confidence) < rank(min))
-				return false
+			if (min !== undefined && rank(label.confidence) < rank(min)) return false
 			return true
 		})
 		const byLastSeen = (a: Discovery, b: Discovery): number =>
@@ -1918,8 +1938,8 @@ export class DiscoveryStore
 					? (a, b) => a.frequencyHz - b.frequencyHz || compareText(a.id, b.id)
 					: sort === "confidence"
 						? (a, b) =>
-								rank(this.effectiveLabel(b).confidence) -
-									rank(this.effectiveLabel(a).confidence) || byLastSeen(a, b)
+								rank(this.publishedLabel(b).confidence) -
+									rank(this.publishedLabel(a).confidence) || byLastSeen(a, b)
 						: byLastSeen,
 		)
 		const page = items
@@ -2208,7 +2228,7 @@ export class DiscoveryStore
 		// a co-channel partner of whatever the observation creates.
 		const atKey = linked.filter(d => this.obsCompatible(d, obs) !== false)
 		const familyOfDiscovery = (d: Discovery): ProtocolFamily =>
-			this.effectiveLabel(d).family
+			this.publishedLabel(d).family
 		const same = atKey.filter(d => familyOfDiscovery(d) === family)
 		const [only] = same
 		if (same.length === 1 && only !== undefined)
@@ -2443,6 +2463,10 @@ export class DiscoveryStore
 			d.lastSeenAt = endedAt
 			d.signal.last = stats
 			d.tuningTrust = obs.track.tuningTrust
+			this.latestShort.set(
+				d.id,
+				obs.track.flags.burst || obs.track.blocks <= SHORT_TRACK_BLOCKS,
+			)
 		}
 		// DQ 3.3: only a compatible, not overload-flagged observation raises best.
 		if (raiseBest && stats.snrDb > d.signal.best.snrDb) {
@@ -3534,7 +3558,7 @@ export class DiscoveryStore
 			d.operator?.lockout === true
 		)
 			return undefined
-		const confidence = this.effectiveLabel(d).confidence
+		const confidence = this.publishedLabel(d).confidence
 		if (confidence === "decoded") return undefined
 		return rank(confidence)
 	}
@@ -4266,6 +4290,14 @@ export class DiscoveryStore
 		return this.discoveryView(d).label
 	}
 
+	/**
+	 * Scanner-redesign 3.10: the label every read and event path publishes. A weak record
+	 * publishes `UNKNOWN_LABEL` whatever it stores; its stored fields are not rewritten.
+	 */
+	private publishedLabel(d: Discovery): EvidenceLabel {
+		return publishedOf(this.discoveryView(d))
+	}
+
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
 		const view = this.discoveryView(d)
@@ -4274,9 +4306,30 @@ export class DiscoveryStore
 			copy.protocol = view.label.protocol
 			copy.family = view.label.family
 			copy.confidence = view.label.confidence
-		} else delete copy.proof
+		} else {
+			delete copy.proof
+			copy.protocol = UNKNOWN_LABEL.protocol
+			copy.family = UNKNOWN_LABEL.family
+			copy.confidence = UNKNOWN_LABEL.confidence
+			const hint = this.hintFor(d)
+			if (hint !== undefined) copy.hint = hint
+		}
 		copy.evidenceLevel = view.evidence
 		return copy
+	}
+
+	/** Scanner-redesign 3.11: display hint of a weak record, from the read-time scope. */
+	private hintFor(d: Discovery): ScannerHint | undefined {
+		const scope = this.hintScope?.()
+		if (scope === undefined) return undefined
+		return hintOf({
+			frequencyHz: d.frequencyHz,
+			bandwidthHz: d.bandwidthHz,
+			class: d.class,
+			short: this.latestShort.get(d.id),
+			region: scope.region,
+			ranges: scope.ranges,
+		})
 	}
 
 	private presentObservation(observation: Observation): Observation {
@@ -4292,6 +4345,7 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		this.discoveries.delete(id)
+		this.latestShort.delete(id)
 		const members = this.members.get(id)
 		for (const s of d.sourceIds) {
 			this.bySource.get(s)?.delete(id)
@@ -4717,7 +4771,7 @@ export class DiscoveryStore
 				discovery === undefined
 					? undefined
 					: {
-							confidence: this.effectiveLabel(discovery).confidence,
+							confidence: this.publishedLabel(discovery).confidence,
 							jobIds: discovery.jobIds,
 						},
 			)
