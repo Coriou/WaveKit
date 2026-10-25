@@ -1176,7 +1176,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		const spanFetch = store.fetchDiscoveries(span)
 		const patch = store.patchDiscovery("x", { label: "kept" })
 		await flush()
-		pending[1]!(discovery("x", { label: "kept" }))
+		pending[1]!(discovery("x", { operator: { label: "kept" } }))
 		await patch
 		pending[0]!({ items: [], nextCursor: null })
 		await spanFetch

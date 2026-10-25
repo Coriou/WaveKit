@@ -205,7 +205,8 @@ it("a channel placement whose decoder makes no valid request omits its width", a
 	f.create("dec")
 	f.plan([f.place("dec", 162_000_000)])
 	await f.manager.startAll()
-	f.instances.get("dec")!.getChannelRequest = () => ({ invalid: "no centre" })
+	const decoder = f.instances.get("dec") as Pick<Decoder, "getChannelRequest">
+	decoder.getChannelRequest = () => ({ invalid: "no centre" })
 	const placement = f.manager.getStatus("dec")?.placements?.[0]
 	expect(placement?.reach).toBe("channel")
 	expect(placement).not.toHaveProperty("channelWidthHz")
