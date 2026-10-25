@@ -243,8 +243,10 @@ export interface DataDecodeGate {
   `hold`. A close with a null frequency or source, or with 8 already held, is delivered at
   once as not-data. Otherwise one `unref`'d timer of 1 000 ms; on expiry the gate scans the
   ring for an entry with the same source id, `|hz - tx.hz| <= 1 250` and
-  `startedAt - 1 000 <= at <= endedAt + 1 000`. If none matches and the ring has wrapped with
-  its oldest entry newer than `startedAt - 1 000`, the result is not-data (unknown → publish).
+  `startedAt - 1 000 <= at <= endedAt + 1 000`. Coverage is checked first (R4.5, revised
+  2026-10-25): once the ring has overwritten an entry, a window whose start `startedAt - 1 000`
+  is before the oldest retained entry, or at or before any overwritten entry's time, is
+  not-data (unknown → publish) whether or not a retained entry matches.
   `stop()` delivers every held close immediately as not-data, so shutdown ordering holds.
 - Live evidence: `feedAnalogEvidence` routes closed events through the same gate before
   `log.record`, adding a core-only `data: true` field on the evidence log entry
