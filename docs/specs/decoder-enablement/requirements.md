@@ -427,3 +427,53 @@ fallbacks), or the source centre for centre reach. Parent status includes its wo
 channels. Raw wideband decoders retain declared-frequency semantics. The field stays
 optional when no target is known. VFO movement uses the existing settle and caps-work
 debounce; channelizer VFO channels retune in place when supported.
+
+## Suspension follows the band amendment — 2026-10-25
+
+Found live: with the receiver at 1.024 Msps, rtl_433 stayed suspended with
+`frequency-out-of-band` after a retune into the 433 MHz ISM band, while its own
+`bandAssessment` read `in-band`. Two sources disagreed: the band assessment checks the
+capture centre against the band, and the planner also needs the decoder's 1 MHz channel to
+fit the usable window, which a 1.024 Msps capture (819 kHz usable) never allows. The
+planner then reports its generic `frequency-out-of-band`, and the suspension keeps the
+`since` of the first, genuine out-of-band suspension, so it reads as stuck since start.
+
+As an operator I want a decoder's suspension to say what is true about the current tune, and
+a decoder whose band I tune to to start, at any receiver rate the decoder can use.
+
+3.13 **One verdict.** After every settled caps change (retune, rate change, source reconnect,
+core restart), a wanted decoder's suspension is decided from the same caps its band assessment
+uses. When the band assessment is `in-band` and every other gate passes, the decoder is placed
+and running; it is never suspended with `frequency-out-of-band`. When the assessment is
+`out-of-band`, an `auto` decoder without an operator start is suspended with
+`frequency-out-of-band`. This holds for every sequence of retunes (out, in, out, in) and for
+every catalogue and YAML decoder kind.
+3.14 **Honest reason.** When the band fits but no placement does (the decoder's channel or
+centre slot cannot fit the usable window at the current rate), the reason is
+`capture-too-narrow`, not `frequency-out-of-band`. `DecoderSuspensionReasonCode`, the Fastify
+schemas, the CLI guards and the web reason words gain it; Main announces it in
+`docs/CLI-COORDINATION.md`. Precedence (11.3) places it directly after `frequency-out-of-band`.
+3.15 **Fresh `since`.** `suspension.since` is the time the current `reasonCode` began. A change
+of reason code resets it; a re-evaluation with the same reason keeps it.
+3.16 **rtl_433 fits the window.** The rtl_433 channel is the widest one that fits the usable
+window around the band and window overlap, at most its 1 MHz target and at least 250 kHz, and
+`-s` is that channel's output rate. At 1.024 Msps centred anywhere in 433.05–434.79 MHz rtl_433
+is placed. Below a 250 kHz fit the reason is `capture-too-narrow`. The channel stays a
+channelizer channel (no full-rate raw fallback, PERFORMANCE rule 6).
+3.17 **LoRa follows the regional band.** The catalogue LoRa decoder in an EU region declares both
+EU slots (`EU_868` and `EU_433`, the region's default channel in each), and the planner places it
+on whichever slot fits the usable window, passing the matching `--region` and frequency. An
+explicit configured frequency or region keeps today's fixed placement.
+
+Acceptance:
+
+- With a fake source, a scripted retune sequence out, in, out, in of each decoder's band, the
+  status after each settle shows `suspended` exactly when `bandAssessment.verdict` is
+  `out-of-band` or a placement cannot fit (`capture-too-narrow`), for every decoder kind.
+- The same holds after a fake source disconnect and reconnect at a new centre, and after a
+  manager restart with the source already tuned in band.
+- rtl_433 at 1.024 Msps centred at 434.44 MHz: one placement, running, `-s` within
+  250 kHz to 1 MHz, bytes flowing within 5 s of the settle.
+- A decoder moving from `frequency-out-of-band` to `capture-too-narrow` shows a new `since`.
+- Live (Main): tune the receiver to a 433 MHz ISM centre at 1.024 Msps; rtl_433 runs and decodes
+  a local sensor or remote; tune away and back twice; it suspends and resumes each time.

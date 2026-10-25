@@ -638,3 +638,20 @@ Main appends this by hand to `docs/CLI-COORDINATION.md` (no Prettier) when the l
     (trust, frequency, tone, DCS) and stores, evidence attaches only on `commanded` or `relay`
     frequencies within the tolerance of an existing discovery, never creates one, and gives
     `decoded` iff a tone or code was heard. _Validates 6.3, 6.5._
+
+## Weak labels and band hints amendment — 2026-10-25
+
+`discoveryView` and `presentDiscovery` in `src/core/scanner/store/discovery-store.ts` return
+the stored protocol, family and confidence when the evidence level is `weak`; they return
+`UNKNOWN_LABEL` instead, so 3.10 holds for every read path (`get`, list, `identityOf`, the
+merge-family test in `keyTarget`). The optional `hint` (`ScannerHint`, a closed union of the
+spectral classes plus `ism-device`, `analog-voice` and `lora`) is computed on read from the
+discovery's class, median width and the resolved band plan (`src/core/scanner/bandplan/`),
+never stored. The built-in EU plan (`src/core/scanner/bandplan/builtin.ts`) gains the LPD433
+range. The DTO change is additive (`packages/api-types`); the web shows the hint in the weak
+row.
+
+17. **Weak records publish no guess.** For random stored discoveries (any stored protocol and
+    confidence) without proof, every published view is `unknown`/`activity`; the hint is in the
+    3.11 union and names a digital voice protocol only where a covering range lists it.
+    _Validates 3.10, 3.11._

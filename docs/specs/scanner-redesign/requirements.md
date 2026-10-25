@@ -446,3 +446,40 @@ users, identifiers, addresses or job ids in tracked files.
 comment (`// Feature: scanner-redesign, Property N: <name>` / `// Validates: Requirements X.Y`);
 Rust properties use proptest.
 12.2 The root suite, typecheck, lint and the native crate tests pass at every merge.
+
+## Weak labels and band hints amendment — 2026-10-25
+
+Found live: discoveries in the 433 MHz ISM band (an `fsk4-12k5` track, an `ook-burst` track)
+were shown as "DMR candidate" with no proof. These records were created before 3.2 removed the
+prior-only `candidate` (the `fsk4-12k5` class lists DMR first at 0.55); 3.3 keeps their stored
+fields, and the store still publishes the stored protocol and confidence of a `weak` record, so
+new observations merging into them keep the old guess on screen.
+
+As a web user I want a weak discovery to read as what was measured, with a band-aware hint of
+what it probably is, never as a protocol the core did not prove.
+
+3.10 **Weak records publish no protocol.** A discovery or observation without a proof is
+published with `protocol: "unknown"`, `family: "unknown"` and `confidence: "activity"`, whatever
+its stored fields. Stored fields are not rewritten (3.3 stands); only the published view
+changes. A proof, when one exists, still decides the label (3.5).
+3.11 **Band hint.** A weak discovery may carry `hint`: a likely kind from its class, width and the
+resolved band plan, shown as a hint and never as a label or filterable protocol. In an EU
+region: an `ook-burst` or short burst in 433.05–434.79 MHz or 863–870 MHz gives `ism-device`
+(rtl_433 is the decoder to try); a narrow FM-shaped track (`analog-fm`, `fsk4-12k5` or
+`wideband` up to 25 kHz) on the LPD433 25 kHz raster 433.075–434.775 MHz gives `analog-voice`;
+a bursty track of 100–150 kHz occupied width in a LoRa regional slot gives `lora`. No hint
+names a digital voice protocol unless the band plan range covering the track lists that
+protocol. Outside these rules the hint is the spectral class, as the identify result's `hint`
+already is.
+3.12 **LPD433 in the built-in plan.** The built-in EU band plan gains an LPD433 range
+(433.075–434.775 MHz, 25 kHz raster, `analog-fm`) beside the existing `ism-433` range, so
+priors at 433 MHz order the analog and ISM trials ahead of digital voice. Priors still never
+exclude a trial (decoder-enablement 9.1).
+
+Acceptance:
+
+- A store restored with a pre-3.2 weak record labelled `dmr`/`candidate` publishes it as
+  `unknown`/`activity` with a hint; adding a decoded proof publishes the proof's label.
+- For each rule in 3.11 a synthetic track in the band gets the stated hint, and the same track
+  outside the band gets its spectral class.
+- Identify on an LPD433 analog transmission runs the analog trial first.

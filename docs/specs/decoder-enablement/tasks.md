@@ -164,3 +164,22 @@ merged lanes. ID-F tasks wait for the identify work that owns `src/core/scanner/
   - Live (Main): L, identify an AIS burst with ais-catcher `off`: identify names AIS.
 - [ ] ID-F.3 Scanner status `channelizerAvailable` reports a running auto-started engine.
   - _Requirements: 5.2_
+
+## Suspension follows the band amendment — 2026-10-25
+
+- [ ] SB.1 Planner `capture-too-narrow` reason; manager passes planner reasons through; `since`
+      resets on a reason change; new reason in `packages/api-types`, the Fastify schemas, the CLI
+      guards and the web reason words; coordination note (Main).
+  - _Requirements: 3.13, 3.14, 3.15, 11.3_
+  - **Property 17: Suspension equals the band verdict after settle**
+  - Live (Main): none alone (verified in SB.4).
+- [ ] SB.2 rtl_433 channel sized to the usable window and centred on the band overlap; `-s` from
+      the placement.
+  - _Requirements: 3.16_
+  - **Property 18: rtl_433 channel fits**
+- [ ] SB.3 LoRa regional slots (EU 868 and 433) as centre-reach candidates with placement options.
+  - _Requirements: 3.17_
+  - Live (Main): L, tune near the EU 433 LoRa default channel: the LoRa placement appears.
+- [ ] SB.4 Scripted acceptance with a fake source: out, in, out, in for every decoder kind,
+      reconnect at a new centre, manager restart while in band; then the live step of 3.17 on W.
+  - _Requirements: 3.13 to 3.17, 12.1_

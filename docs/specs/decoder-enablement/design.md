@@ -382,3 +382,45 @@ existing declared targets for raw wideband adapters.
 15. **Configured VFO target.** For any admissible VFO in a source's usable span, an
     unpinned configured channel decoder reports exactly that frequency, with or without
     a channelizer. _Validates 3.11, 3.12, 4.9, 5.5._
+
+## Suspension follows the band amendment — 2026-10-25
+
+Cause. `assessBand` (`src/decoders/band-resolver.ts`) tests the capture centre against the
+band with the usable half-width. The planner (`src/decoders/enablement/placement.ts`) also
+requires the channel to fit (`fitsReach`): the rtl_433 channel request
+(`iqChannelRequest` in `src/decoders/iq-decimate-decoder.ts`) is its 1 MHz target rate
+(950 kHz passband plus 25 kHz transition each side), wider than the 819 kHz usable span at
+1.024 Msps. With no candidate the planner falls back to `frequency-out-of-band`, and
+`assessEligibility` in `src/decoders/manager.ts` reports that reason for a built-in parent with
+no placement. `suspension.since` is carried over from the earlier suspension in
+`startDecoder`, `suspend` and the rebuild path.
+
+Fix.
+
+- Planner: when band candidates exist for a decoder but `fitsReach` rejects them all, record
+  `capture-too-narrow` in `unplaced`; only an empty band candidate set gives
+  `frequency-out-of-band`. `assessEligibility` passes the planner reason through unchanged.
+- rtl_433 (`src/decoders/builtin/rtl433.ts`): `getChannelRequest` sizes the channel from the
+  source's usable span (`min(target, usable span - |offset| guard)`, floored at 250 kHz) and the
+  planner centres it on the band and window overlap, clamped so the channel fits; the adapter's
+  `targetSampleRate` for that placement is the channel output rate, so `-s` matches.
+- `since`: every assignment of `state.suspension` keeps the prior `since` only when the prior
+  `reasonCode` equals the new one.
+- LoRa: `loraCentreReach` and the catalogue band declaration take the region's slots; the
+  planner tries each slot as a centre-reach candidate and the adapter receives the chosen
+  `region` and `frequency` as placement options (original options copied first, as for VFO).
+
+No IQ, DSP or audio loop changes; the extra planner work is one more candidate per LoRa decoder
+per evaluation.
+
+17. **Suspension equals the band verdict after settle.** For random decoder sets (every kind,
+    catalogue and YAML, `auto`/`always`/operator), random source rates (250 kHz to 3.2 Msps)
+    and random sequences of retunes, disconnects, reconnects and manager restarts, after each
+    settle every wanted decoder satisfies: `suspended` with `frequency-out-of-band` iff its band
+    assessment is `out-of-band` and it is `auto` without an operator start; when the band is
+    `in-band` it is either placed or suspended with a non-band reason (`capture-too-narrow`,
+    rate, availability, channelizer, efficiency); `since` changes iff the reason changes.
+    _Validates 3.13, 3.14, 3.15, 11.3._
+18. **rtl_433 channel fits.** For random usable spans of at least 250 kHz and centres overlapping
+    a configured ISM range, the rtl*433 request fits the window (`fitsReach` true) and its output
+    rate equals the `-s` argument. \_Validates 3.16.*
