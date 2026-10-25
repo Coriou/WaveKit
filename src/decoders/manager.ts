@@ -723,6 +723,7 @@ export class DecoderManager extends EventEmitter {
 							reach: state.placement.reach,
 							costCores: state.placement.costCores,
 							sampleRateHz: state.placement.sampleRateHz,
+							...(state.placement.gated ? { gated: true as const } : {}),
 							admittedAtMs: state.stopping
 								? performance.now() - EFFICIENCY_PROBATION_MS
 								: (state.admittedAtMs ?? performance.now()),
@@ -5141,9 +5142,95 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
+	 * 3.21: an ungated placement admitted over running gated secondaries
+	 * suspends them for budget (`efficiency-budget`, `budget`), newest first as
+	 * the gate listed them; they retry with the normal backoff. `released` is
+	 * false when one of them is still running (its stop failed), so the
+	 * capacity it holds was not freed.
+	 */
+	private async displaceSecondaries(
+		keys: readonly string[] | undefined,
+	): Promise<{ displaced: DecoderState[]; released: boolean }> {
+		const gate = this.config.enablement?.gate
+		const displaced: DecoderState[] = []
+		if (!gate || !keys?.length) return { displaced, released: true }
+		for (const key of keys) {
+			const state = [...this.decoders.values()].find(
+				item => item.placement?.key === key,
+			)
+			if (!state?.placement?.gated || this.destroying) continue
+			if (state.stopping) {
+				// An earlier stop did not complete: ask again; the capacity counts
+				// as held until it does.
+				if (state.decoder.getStatus().running)
+					await this.stopPlacement(state).catch((error: unknown) => {
+						this.log.warn(
+							{ err: safeErrorFields(error), placement: key },
+							"Secondary channel stop failed",
+						)
+					})
+				continue
+			}
+			const now = performance.now()
+			gate.noteSuspended(key, "budget", now)
+			state.efficiencyBackoffMs ??= EFFICIENCY_RETRY_MS
+			state.admission = {
+				admit: false,
+				detail: "budget",
+				retryAtMs: now + state.efficiencyBackoffMs,
+			}
+			delete state.admittedAtMs
+			this.log.info(
+				{
+					reasonCode: "efficiency-budget",
+					detail: "budget",
+					decoderId: state.placement.decoderId,
+					placement: key,
+				},
+				"Secondary channel yields to a primary placement",
+			)
+			displaced.push(state)
+			await this.suspend(state, this.assessEligibility(state))
+		}
+		// Every listed secondary must have let go, including one skipped above
+		// because it is still stopping.
+		const released = keys.every(key =>
+			[...this.decoders.values()].every(
+				state =>
+					state.placement?.key !== key ||
+					(!state.decoder.getStatus().running && !state.processStartPending),
+			),
+		)
+		return { displaced, released }
+	}
+
+	/**
+	 * Secondaries displaced for a start that did not happen retry at once:
+	 * their backoff is cancelled and the next evaluation re-plans them.
+	 */
+	private restoreDisplaced(displaced: readonly DecoderState[]): void {
+		const gate = this.config.enablement?.gate
+		if (!gate || !displaced.length) return
+		const now = performance.now()
+		for (const state of displaced) {
+			if (
+				!state.placement ||
+				state.admission?.admit !== false ||
+				state.admission.detail !== "budget"
+			)
+				continue
+			gate.forget(state.placement.key)
+			delete state.efficiencyBackoffMs
+			state.admission = { admit: false, detail: "budget", retryAtMs: now }
+		}
+		this.scheduleEfficiencyEvaluation()
+	}
+
+	/**
 	 * Preflight admission avoids allocating a channel for a blocked placement.
 	 * Wiring can await a channel, so only the fresh decision immediately before
-	 * start establishes the run's admission and probation clock.
+	 * start establishes the run's admission and probation clock; displacement
+	 * (3.21) follows that decision only, never the preflight one.
 	 */
 	private async startPlacementNow(
 		state: DecoderState,
@@ -5170,6 +5257,7 @@ export class DecoderManager extends EventEmitter {
 				return { wired: false, superseded: true }
 			}
 		}
+		let displaced: DecoderState[] = []
 		try {
 			const outcome = await this.wireDecoderToFanout(state)
 			if (
@@ -5194,6 +5282,37 @@ export class DecoderManager extends EventEmitter {
 					this.scheduleEfficiencyEvaluation()
 					return { wired: false, superseded: true }
 				}
+				const admission = state.admission
+				const yielded = await this.displaceSecondaries(
+					exempt
+						? gate.yieldTo?.(state.placement, this.runningPlacements())
+						: admission.displace,
+				)
+				displaced = yielded.displaced
+				if (
+					state.admission !== admission ||
+					!canStart() ||
+					!this.stillWanted(state, generation)
+				) {
+					this.unwireDecoderFromFanout(state)
+					if (state.admission?.admit) delete state.admission
+					this.restoreDisplaced(displaced)
+					return { wired: false, superseded: true }
+				}
+				// A secondary whose stop failed still holds its capacity: a catalogue
+				// newcomer waits for a confirmed release (a YAML one starts, 4.9).
+				if (!yielded.released && !exempt) {
+					this.unwireDecoderFromFanout(state)
+					gate.forget(state.placement.key)
+					state.admission = {
+						admit: false,
+						detail: "budget",
+						retryAtMs: performance.now() + EFFICIENCY_SAMPLE_MS,
+					}
+					await this.suspend(state, this.assessEligibility(state))
+					this.scheduleEfficiencyEvaluation()
+					return { wired: false, superseded: true }
+				}
 				state.admittedAtMs = now
 			}
 			this.scheduleEfficiencyEvaluation()
@@ -5203,12 +5322,19 @@ export class DecoderManager extends EventEmitter {
 			} finally {
 				delete state.processStartPending
 			}
+			// Stopped or removed while starting: the room it took is free again.
+			if (
+				displaced.length &&
+				(!canStart() || !this.stillWanted(state, generation))
+			)
+				this.restoreDisplaced(displaced)
 
 			this.scheduleEfficiencyEvaluation()
 			return outcome
 		} catch (error) {
 			if (state.admission?.admit) delete state.admission
 			delete state.admittedAtMs
+			this.restoreDisplaced(displaced)
 			throw error
 		}
 	}

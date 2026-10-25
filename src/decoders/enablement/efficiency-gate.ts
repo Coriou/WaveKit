@@ -259,6 +259,45 @@ export function createEfficiencyGate(
 		return at !== null && evidence(p, admittedMono.get(p.key)!, at) === null
 	}
 	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
+	/**
+	 * 3.21: the running gated secondaries an ungated newcomer displaces, newest
+	 * first out: those that no longer fit the budget beside the firm placements,
+	 * and (when `probationers`) one on probation on the newcomer's source, whose
+	 * evidence the newcomer would blur.
+	 */
+	const displacement = (
+		newcomer: WantedPlacement,
+		running: readonly RunningPlacement[],
+		firm: readonly (RunningPlacement | WantedPlacement)[],
+		mono: number,
+		probationers: boolean,
+	): string[] => {
+		if (newcomer.gated === true) return []
+		const displace: string[] = []
+		const kept = [...firm, newcomer]
+		const secondaries = running
+			.filter(p => p.gated === true && p.key !== newcomer.key)
+			.sort(
+				(a, b) =>
+					(admittedMono.get(a.key) ?? 0) - (admittedMono.get(b.key) ?? 0),
+			)
+		for (const p of secondaries) {
+			const probationer =
+				probationers &&
+				p.sourceId === newcomer.sourceId &&
+				gated.has(p.key) &&
+				onProbation(p, mono)
+			if (
+				!probationer &&
+				valid(inputs.budgetCores) &&
+				total([...kept, p]) <= inputs.budgetCores
+			)
+				kept.push(p)
+			else displace.push(p.key)
+		}
+		// Newest first: the stop order 3.21 names.
+		return displace.reverse()
+	}
 
 	const lateState = (
 		sourceId: string,
@@ -371,16 +410,23 @@ export function createEfficiencyGate(
 				const previous = placementEpochs.get(key)
 				if (previous && !present.has(key)) reserved.push(previous.placement)
 			}
+			// 3.21: gated secondaries yield to an ungated newcomer. They hold no
+			// budget or probation slot against it; running ones that no longer fit
+			// are displaced (newest first) instead of starving it.
+			const primary = newcomer.gated !== true
+			const yields = (p: RunningPlacement | WantedPlacement) =>
+				primary && p.gated === true && p.key !== newcomer.key
+			// The newcomer's own running entry or reservation is replaced by it.
+			const firm = [...running, ...reserved].filter(
+				p => p.key !== newcomer.key && !yields(p),
+			)
 			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key)) {
-				const resumedCost = total([
-					...running.filter(p => p.key !== newcomer.key),
-					...reserved.filter(p => p.key !== newcomer.key),
-					newcomer,
-				])
+				const resumedCost = total([...firm, newcomer])
 				if (valid(inputs.budgetCores) && resumedCost <= inputs.budgetCores) {
 					const previous = placementEpochs.get(newcomer.key)
 					if (previous) previous.placement = { ...newcomer }
-					return { admit: true }
+					const displace = displacement(newcomer, running, firm, mono, false)
+					return displace.length ? { admit: true, displace } : { admit: true }
 				}
 			}
 			const attribution = latestAttribution(newcomer.sourceId)
@@ -405,8 +451,8 @@ export function createEfficiencyGate(
 			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) detail = "cpu"
 			else if (
 				!valid(inputs.budgetCores) ||
-				!Number.isFinite(total([...running, ...reserved, newcomer])) ||
-				total([...running, ...reserved, newcomer]) > inputs.budgetCores
+				!Number.isFinite(total([...firm, newcomer])) ||
+				total([...firm, newcomer]) > inputs.budgetCores
 			)
 				detail = "budget"
 			// Otherwise admissible: one gated probationer per source, so probation
@@ -418,6 +464,7 @@ export function createEfficiencyGate(
 				running.some(
 					p =>
 						p.key !== newcomer.key &&
+						!yields(p) &&
 						p.sourceId === newcomer.sourceId &&
 						gated.has(p.key) &&
 						onProbation(p, mono),
@@ -444,7 +491,8 @@ export function createEfficiencyGate(
 				} catch {
 					/* Optional lifecycle evidence. */
 				}
-				return { admit: true }
+				const displace = displacement(newcomer, running, firm, mono, true)
+				return displace.length ? { admit: true, displace } : { admit: true }
 			}
 			// Missing evidence is not a rejection: no backoff is recorded and the
 			// placement is re-evaluated when the source's clean run earns its clear
@@ -474,6 +522,14 @@ export function createEfficiencyGate(
 				delay: retry?.delay ?? EFFICIENCY_RETRY_MS,
 			})
 			return { admit: false, detail, retryAtMs: at }
+		},
+		yieldTo(newcomer, running) {
+			const mono = monoNow()
+			observeRunning(running, mono)
+			const firm = running.filter(
+				p => p.gated !== true && p.key !== newcomer.key,
+			)
+			return displacement(newcomer, running, firm, mono, false)
 		},
 		// Probation suspends only on positive drops observed after admission or on
 		// CPU over the limit; missing evidence closes the gate to newcomers only.

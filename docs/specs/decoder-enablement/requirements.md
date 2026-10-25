@@ -227,7 +227,7 @@ none for `EFFICIENCY_CLEAR_MS` (60 s) after the last drop.
 
 4.2 Admission order: operator-pinned, then `always`, then `auto`; within a class, YAML order,
 then catalogue order; within a decoder, placement order (3.7).
-4.3 A newcomer never evicts a running placement. A placement that does not fit is suspended with
+4.3 A newcomer never evicts a running placement (except gated secondaries, 3.21). A placement that does not fit is suspended with
 reason `efficiency-budget` and a detail (`budget`, `cpu`, `drops` or `unknown`), retried in order
 whenever capacity frees and at least every `EFFICIENCY_RETRY_MS` (5 min, doubling to 30 min after
 probation failures). `unknown` is no rejection and takes no backoff: the placement is re-evaluated
@@ -640,3 +640,70 @@ the gated secondaries while the primary runs, and where moving the primary onto 
 secondary (acarsdec and paging multimon-ng) keeps one worker per channel and the cost
 bound; the VFO primary across identical captures; each placement's channel request is on
 its frequency.
+
+## Secondaries yield amendment — 2026-10-26
+
+The 3.18 and 3.20 promise that gated secondaries are "admitted after every other decoder's
+placements" held only for the order of one planning pass. Admission was first come, first
+served: a decoder's secondary workers can start inside a re-plan before other decoders'
+placements, and every later retry raced on equal terms, so a capture holding a paging range
+and a catalogue decoder's own band could fill the budget with paging secondaries and leave
+the in-band decoder (AIS at 161.975 and 162.025 MHz inside the 137–174 MHz VHF paging
+range) suspended with `efficiency-budget` (`budget`) for good.
+
+3.21 **Gated secondaries yield to every ungated placement.** It amends 4.3 ("a newcomer
+never evicts a running placement") for gated secondaries only.
+
+- _Rule._ A placement is firm when it is not `gated`: a primary of any decoder, a catalogue
+  placement of any origin (`band`, `bandplan`, `vfo`, `fallback`), and every YAML placement
+  (4.9). A firm newcomer is judged on the firm placements alone: running and
+  reconnect-retained gated secondaries count neither in its budget term 4.1 (a) nor as the
+  source's single probationer (4.4). When it is admitted, the running gated secondaries
+  that no longer fit beside the firm placements and the newcomer, kept oldest-admitted
+  first, are suspended with `efficiency-budget` (`budget`) and retried with the normal
+  4.3 backoff; so is a gated secondary on probation on the newcomer's source, whose
+  evidence the newcomer would blur. The CPU (b) and drop (c) terms are unchanged: a
+  firm newcomer the host cannot carry is refused and displaces nothing.
+- _When._ Displacement follows only the final decision taken immediately before the
+  start, after the channel is wired, never the preflight one: a newcomer refused there
+  (CPU, drops, budget) or whose channel allocation fails displaces nothing. When the start
+  is superseded or fails after displacement, the displaced secondaries lose their backoff
+  and retry at the next evaluation. A catalogue newcomer starts only once every
+  displaced secondary has stopped: one whose stop fails or is incomplete still holds its
+  cost, so the newcomer is refused for `budget` and retried at the next sample, which
+  asks for that stop again. A YAML newcomer starts regardless (4.9), so until that stop
+  succeeds the declared cost may exceed the budget for a while. Displaced secondaries are
+  stopped newest first. A newcomer stopped or removed while its process is starting
+  returns their room the same way as a superseded start.
+- _Reconnect._ A reconnecting placement's own reservation is replaced by it, never
+  counted twice, and on that path too gated secondaries yield to a firm placement.
+- _YAML placements._ A gate-exempt placement (4.9) still starts without a verdict and is
+  never suspended; when it starts, the running gated secondaries that no longer fit the
+  budget beside the firm placements are suspended the same way. 4.9 is otherwise
+  unchanged: a YAML decoder that only follows the VFO keeps its exemption. Its declared
+  cost still counts for catalogue newcomers, and on the default budgets it leaves room
+  for an in-band catalogue decoder (arithmetic below).
+- _Between secondaries._ A gated newcomer is judged on everything running, as before;
+  gated secondaries never displace each other or a firm placement.
+- _Arithmetic._ At 1.024 Msps the channelizer base is 0.22 core and each channel adds
+  0.11. A YAML multimon-ng primary (0.03 + 0.11 = 0.14) and a YAML dsd-fme VFO channel
+  (0.045 + 0.11 = 0.155) make 0.515 firm cores; catalogue ais-catcher on its channel
+  (0.10 + 0.11 = 0.21) brings it to 0.725. On the 1.5-core x86-64 budget that leaves
+  0.775 for paging secondaries at 0.14 each: 5 run (0.70), where 7 (0.98) filled the
+  budget before AIS was admitted; the 2 newest yield. On the 0.75-core arm64 budget AIS
+  fits (0.725) and no secondary does. AIS is refused only when the firm placements
+  alone exceed the budget (0.725 > budget), when no displacement could make room.
+- _Not changed._ Placement (3.18, 3.20), the gated mark, 4.2 ordering of a planning pass,
+  probation verdicts and late-drop shedding.
+
+Acceptance: manager tests with the real gate at 161.975 MHz and 1.024 Msps (YAML
+multimon-ng with its paging raster, YAML dsd-fme on the VFO, catalogue ais-catcher):
+AIS admitted in plan order; AIS admitted after secondaries filled the x86-64 budget,
+with the newest yielding and the budget held; the arm64 budget; at and just past the
+bound, with the surviving secondary's identity and stop count; the newest-first stop
+order; a newcomer stopped while starting returns the room; CPU over the limit while
+the channel is pending and a refused channel allocation displace nothing; a failed
+secondary stop keeps the newcomer out until the stop succeeds; a gate test of the
+reconnect path. A property test: across secondary counts and budgets, the in-band primary runs
+exactly when it fits beside the firm placements, YAML placements are never displaced,
+and the budget holds whenever it covers the YAML placements.

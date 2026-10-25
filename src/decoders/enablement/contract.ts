@@ -312,9 +312,16 @@ export interface RunningPlacement {
 	costCores: number
 	sampleRateHz: number
 	admittedAtMs: number
+	/** 3.18/3.20: a generated secondary channel; it yields to primaries (3.21). */
+	gated?: true
+}
+/** 3.21: an admission may list running gated secondaries to suspend for budget. */
+export interface Admitted {
+	admit: true
+	displace?: readonly string[]
 }
 export type AdmissionDecision =
-	| { admit: true }
+	| Admitted
 	| { admit: false; detail: DecoderEfficiencyDetail; retryAtMs: number }
 export interface ProbationVerdict {
 	key: string
@@ -327,6 +334,14 @@ export interface EfficiencyGate {
 		running: readonly RunningPlacement[],
 		now: number,
 	): AdmissionDecision
+	/**
+	 * 3.21: the running gated secondaries a gate-exempt (4.9) placement
+	 * displaces when it starts, so they never hold budget against it.
+	 */
+	yieldTo?(
+		newcomer: WantedPlacement,
+		running: readonly RunningPlacement[],
+	): readonly string[]
 	probation(
 		running: readonly RunningPlacement[],
 		now: number,

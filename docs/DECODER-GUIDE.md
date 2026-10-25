@@ -577,6 +577,11 @@ describe("HfdlDecoder", () => {
    only when the CPU budget admits them, so some may show as suspended. It never falls back
    to the capture centre. A YAML acarsdec with `frequencies` keeps one process per listed
    frequency.
+7. These extra paging and ACARS channels (all but each decoder's first) always come last in
+   the CPU budget. When another decoder needs room, for example AIS with 161.975 and
+   162.025 MHz in the capture, that decoder starts and the newest extra channels stop with
+   `efficiency-budget`; they retry later. A decoder you configured in YAML is never stopped
+   for them.
 
 ### No output being parsed
 
