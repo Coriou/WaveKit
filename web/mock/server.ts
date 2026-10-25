@@ -42,6 +42,12 @@ import { createAudioServer } from "./audio.ts"
 import { registerReceiverMock } from "./receiver.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
+import {
+	type Activity429Mode,
+	activity429RetryAfter,
+	BAND_FIXTURE_BOOKMARK,
+	isActivity429Mode,
+} from "./band-fixtures.ts"
 import type { ScannerMock } from "./scanner.ts"
 import {
 	MOCK_VERSION,
@@ -104,6 +110,13 @@ export interface MockServerOptions {
 	 * 300 is what the core measured from a retune to the first frame at the new centre (ROADMAP §8).
 	 */
 	retuneMs?: number
+	/** Seeds the band inspection UX discoveries (./band-fixtures.ts; WAVEKIT_MOCK_BAND_FIXTURES=1). */
+	bandFixtures?: boolean
+	/**
+	 * Every other Activity read (GET /api/activity…, POST /api/activity/facets) answers 429 with this
+	 * Retry-After: "1", "30", an HTTP date 2 s ahead ("date") or a malformed value (WAVEKIT_MOCK_ACTIVITY_429).
+	 */
+	activity429?: Activity429Mode
 }
 
 export interface MockServer {
@@ -1351,7 +1364,9 @@ export async function buildMockServer(
 	app.get("/health", async () => ok())
 	// Operator data as a protected core serves it (core mounts it in protected mode only).
 	const operatorData = registerOperatorData(app, {
-		seeds: MOCK_SAVED_FREQUENCIES,
+		seeds: options.bandFixtures
+			? [...MOCK_SAVED_FREQUENCIES, BAND_FIXTURE_BOOKMARK]
+			: MOCK_SAVED_FREQUENCIES,
 		onCommit: dto => broadcast("operator-data", "operator-data:updated", dto),
 	})
 	app.get("/health/live", async () => ok())
@@ -1477,6 +1492,7 @@ export async function buildMockServer(
 		retune: hz => applyFrequency(hz, "scanner"),
 		decoders,
 		liveStatus,
+		...(options.bandFixtures ? { bandFixtures: true } : {}),
 		liveListen: offsetHz => {
 			live.config = { ...live.config, offsetHz, sourceId: MOCK_SOURCE_ID }
 			broadcast("live-audio", "live-audio:config", liveStatus().config)
@@ -1856,6 +1872,29 @@ export async function buildMockServer(
 				)
 		},
 	)
+	// Band inspection UX req 2.1: rate-limited Activity reads (every other one answers 429)
+	let activityReads = 0
+	const activity429 = options.activity429
+	if (activity429 !== undefined)
+		app.addHook("onRequest", async (request, reply) => {
+			const path = request.url.split("?")[0] ?? ""
+			const read =
+				(request.method === "GET" &&
+					(path === "/api/activity" || path.startsWith("/api/activity/"))) ||
+				(request.method === "POST" && path === "/api/activity/facets")
+			if (!read) return
+			activityReads += 1
+			if (activityReads % 2 === 0) return
+			return reply
+				.code(429)
+				.header("Retry-After", activity429RetryAfter(activity429, Date.now()))
+				.send({
+					error: "TooManyRequests",
+					code: "RATE_LIMITED",
+					message: "Rate limit exceeded",
+				})
+		})
+
 	app.get("/api/activity", async (request, reply) => {
 		const params = (request.query ?? {}) as Record<string, unknown>
 		let query: ActivityQuery
@@ -2254,6 +2293,7 @@ async function main(): Promise<void> {
 	const adsbEnv = env["WAVEKIT_MOCK_ADSB_RATE"]
 	const spectrumBinsEnv = env["WAVEKIT_MOCK_SPECTRUM_BINS"]
 	const retuneEnv = env["WAVEKIT_MOCK_RETUNE_MS"]
+	const activity429Env = env["WAVEKIT_MOCK_ACTIVITY_429"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2265,6 +2305,12 @@ async function main(): Promise<void> {
 			? { spectrumBins: Number(spectrumBinsEnv) }
 			: {}),
 		...(retuneEnv !== undefined ? { retuneMs: Number(retuneEnv) } : {}),
+		...(env["WAVEKIT_MOCK_BAND_FIXTURES"] === "1"
+			? { bandFixtures: true }
+			: {}),
+		...(isActivity429Mode(activity429Env)
+			? { activity429: activity429Env }
+			: {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)

@@ -3,7 +3,7 @@
  * § 7.1, § 10, § 12). Copies of src/core/scanner/types.ts; the contract test
  * tests/unit/api/scanner-dto-contract.test.ts keeps them identical.
  */
-import type { BandRegion } from "./decoders.js"
+import type { BandRegion, DecoderSuspensionReasonCode } from "./decoders.js"
 import type { AnalogTransmissionDcs } from "./live-audio.js"
 
 export type ScannerProtocol =
@@ -329,6 +329,32 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Weak discoveries only: a display hint of the likely kind, never a label or filter. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
+	/**
+	 * Band inspection UX req 1.4: decoders whose placements cover `frequencyHz` on one of
+	 * `sourceIds`, projected at read time (never stored). Absent: unknown (no claim). `[]`:
+	 * verified no placement covers it. At most DISCOVERY_COVERAGE_MAX, running first.
+	 */
+	coverage?: DiscoveryCoverage[]
+	/**
+	 * Band inspection UX req 3.1: set on a detail read by an id a merge absorbed; this record is
+	 * the survivor, `requestedId` the id asked for.
+	 */
+	absorbedInto?: string
+	requestedId?: string
+}
+
+/** Band inspection UX req 1.4: at most this many coverage entries per discovery. */
+export const DISCOVERY_COVERAGE_MAX = 3
+/** Band inspection UX req 1.4: decoder ids longer than this are never reported. */
+export const DISCOVERY_COVERAGE_DECODER_ID_MAX = 64
+/** Band inspection UX req 1.4: channel width when a decoder declares none. */
+export const DISCOVERY_COVERAGE_DEFAULT_CHANNEL_WIDTH_HZ = 12_500
+
+export interface DiscoveryCoverage {
+	/** 1-64 chars. */
+	decoderId: string
+	state: "running" | "suspended" | "stopped"
+	suspensionReason?: DecoderSuspensionReasonCode
 }
 
 export interface Observation {
@@ -941,9 +967,28 @@ export interface ScannerDiscoveryEventData {
 	discovery: Discovery
 	/** WG2: present when a job's observation caused the event; one entry per such job. */
 	jobHits?: ScanJobHit[]
-	/** WG12: discovery ids absorbed by a merge. Absent when the change is not a merge. */
+	/**
+	 * Discovery ids absorbed by a merge. Present on `merged`; band inspection UX req 3.2: a
+	 * `deleted` may carry it too (a merge into the deleted survivor was coalesced into this event),
+	 * and clients drop those ids as well. Absent on every other change.
+	 */
 	mergedIds?: string[]
+	/**
+	 * Band inspection UX req 3.2: `mergedIds` was cut at 64; refetch the survivor (unless
+	 * `deleted`) and the discovery list.
+	 */
+	mergedTruncated?: true
 }
+/**
+ * Band inspection UX req 3.2: `scanner:discoveries-resync` payload. Sent instead of per-group
+ * `merged` events when a start applies more than SCANNER_CONSOLIDATION_EVENT_GROUPS_MAX groups;
+ * clients refetch the discovery list.
+ */
+export interface ScannerDiscoveriesResyncEventData {
+	reason: "consolidation"
+	groups: number
+}
+export const SCANNER_CONSOLIDATION_EVENT_GROUPS_MAX = 256
 export interface ScannerActivityEventData {
 	sourceId: string
 	observationId: string

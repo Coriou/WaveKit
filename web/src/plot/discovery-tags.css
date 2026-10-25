@@ -6,7 +6,8 @@
 		height: 20px;
 		border-bottom: 1px solid rgba(var(--wk-line-rgb), 0.08);
 		background: var(--wk-plot-bg);
-		overflow: hidden;
+		/* the group popover and the edge confirm open above the row */
+		overflow: visible;
 	}
 	.wk-plot-discs[data-unverified] {
 		opacity: 0.45;
@@ -16,7 +17,6 @@
 		position: absolute;
 		top: 2px;
 		height: 16px;
-		max-width: 160px;
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -54,7 +54,8 @@
 	.wk-plot-disc > i[data-solid] {
 		background: var(--disc-c);
 	}
-	.wk-plot-disc > span {
+	.wk-plot-disc > .wk-plot-disc-name {
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
@@ -62,9 +63,142 @@
 		background: rgba(var(--wk-accent-rgb), 0.16);
 		color: var(--wk-text);
 	}
-	.wk-plot-disc:focus-visible {
+	.wk-plot-disc:focus-visible,
+	.wk-plot-disc-edge:focus-visible {
 		outline: none;
 		box-shadow: 0 0 0 2px rgba(var(--wk-accent-rgb), 0.55);
+	}
+	/* A group tag (band inspection UX req 1.1): a second ring behind the dot says "more than one here" */
+	.wk-plot-disc[data-group] > i {
+		box-shadow:
+			3px 0 0 -1.25px var(--wk-plot-bg),
+			3px 0 0 0 var(--disc-c);
+	}
+	/* a group too tight for its label still says how many: "+5" */
+	.wk-plot-disc-count {
+		flex: none;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-disc[aria-expanded="true"] {
+		background: rgba(var(--wk-accent-rgb), 0.16);
+		color: var(--wk-text);
+	}
+
+	/* "3 signals outside view →": one quiet marker per side, opaque so a tag under it never shows through */
+	.wk-plot-disc-edge {
+		position: absolute;
+		top: 2px;
+		height: 16px;
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		padding: 0 6px;
+		border: 1px solid var(--wk-line-14);
+		border-radius: 4px;
+		background: var(--wk-plot-bg);
+		color: var(--wk-text-3);
+		font: inherit;
+		font-size: 11px;
+		line-height: 14px;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		cursor: pointer;
+		z-index: 1;
+	}
+	.wk-plot-disc-edge {
+		box-sizing: border-box;
+		justify-content: center;
+	}
+	.wk-plot-disc-edge:hover,
+	.wk-plot-disc-edge[aria-expanded="true"] {
+		color: var(--wk-text);
+		background: var(--wk-fill);
+	}
+
+	/* The group popover and the edge confirm: solid menus above the row (no blur) */
+	.wk-plot-disc-pop {
+		position: absolute;
+		bottom: calc(100% + 4px);
+		z-index: 32;
+		max-height: 280px;
+		display: flex;
+		background: var(--wk-surface);
+		flex-direction: column;
+		cursor: default;
+		font-size: 12px;
+	}
+	.wk-plot-disc-pop-head {
+		flex: none;
+		padding: 4px 10px 6px;
+		font-size: 11px;
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-disc-pop-list {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+	.wk-plot-disc-member {
+		display: flex;
+		align-items: flex-start;
+		gap: 10px;
+		padding: 6px 10px;
+		border-radius: var(--wk-r-3);
+	}
+	.wk-plot-disc-member:hover {
+		background: rgba(var(--wk-accent-rgb), 0.06);
+	}
+	.wk-plot-disc-member-what {
+		flex: 1;
+	}
+	.wk-plot-disc-tune {
+		flex: none;
+	}
+	.wk-plot-disc-member-freq {
+		flex: none;
+		width: 64px;
+		color: var(--wk-text-2);
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-disc-member-what {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+	.wk-plot-disc-member-what > b {
+		font-weight: 600;
+		color: var(--wk-text);
+	}
+	.wk-plot-disc-member-what > span {
+		font-size: 11px;
+		color: var(--wk-text-2);
+		overflow-wrap: anywhere;
+	}
+	.wk-plot-disc-member-what > .wk-plot-disc-likely {
+		color: var(--wk-text-4);
+	}
+	.wk-plot-disc-confirm {
+		min-width: 0;
+		gap: 8px;
+		padding: 8px 10px;
+		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-disc-confirm[data-side="left"] {
+		left: 2px;
+	}
+	.wk-plot-disc-confirm[data-side="right"] {
+		right: 2px;
+	}
+	.wk-plot-disc-confirm-row {
+		display: flex;
+		gap: 6px;
+		justify-content: flex-end;
 	}
 
 	/* Shift-drag range: dashed edges over trace and waterfall, then the "Scan this range" offer (solid, no blur) */

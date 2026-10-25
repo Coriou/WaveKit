@@ -13,6 +13,7 @@ import {
 	decodeAsRows,
 	signalMenuHead,
 	signalMenuRows,
+	withWhatIsThis,
 	type SignalMenuContext,
 	type SignalMenuRow,
 } from "./signal-menu.ts"
@@ -51,6 +52,7 @@ export function SignalMenu({
 	const listening = useStore(listen, s => s.wanted)
 	const plan = useStore(data.bandplan, s => s.view)
 	const saved = useStore(data.savedFrequencies, s => s.items)
+	const discoveries = useStore(data.scanner, s => s.discoveries.byId)
 	const [decode, setDecode] = useState<number | null>(null)
 	if (!at) return null
 	const c: SignalMenuContext = {
@@ -98,7 +100,7 @@ export function SignalMenu({
 			<ActionMenu
 				items={items}
 				label={inDecode ? "Decode as" : "Signal actions"}
-				head={signalMenuHead(c)}
+				head={withWhatIsThis(signalMenuHead(c), discoveries.values(), at.hz)}
 				className="wk-plot-sigmenu-list"
 				style={{
 					...(left ? { right: 0 } : { left: 0 }),

@@ -455,24 +455,32 @@ export type {
 	ScannerStoreOptions,
 } from "./scanner-store.ts"
 export {
+	CLASS_WORDS,
 	confidenceCapText,
 	confidenceRank,
 	confidenceText,
 	discoveryTitle,
 	formatWait,
 	heldFrequencyHz,
+	hintText,
 	identityQuery,
 	identityText,
 	isJobActive,
+	isVerified,
 	jobStateLine,
 	jobTone,
+	likelyText,
+	nextStepText,
 	protocolName,
+	protocolSlotText,
 	sweepProgress,
 	trialOutcomeText,
 	undecodedReasonText,
+	whatIsThis,
 } from "./scanner-format.ts"
 export type {
 	JobStateLineOptions,
+	WhatIsThis,
 	JobTone,
 	SweepProgress,
 } from "./scanner-format.ts"

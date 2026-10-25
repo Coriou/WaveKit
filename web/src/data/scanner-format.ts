@@ -9,6 +9,7 @@ import type {
 	JobState,
 	ScanJob,
 	ScanJobProgress,
+	ScannerClass,
 	ScannerConfidence,
 	ScannerProtocol,
 	ScannerTrialOutcome,
@@ -380,5 +381,129 @@ export function sweepProgress(p: {
 		percent: Math.round(fraction * 100),
 		text:
 			hopCount > 0 ? `Pass ${pass} · hop ${hop}/${hopCount}` : `Pass ${pass}`,
+	}
+}
+
+// ---- "what is this" (docs/specs/2026-10-25-band-inspection-ux.md req 1.3)
+
+/** A signal class in words ("4FSK 12.5 kHz", "OOK bursts"); null for `unknown`. */
+export const CLASS_WORDS: Readonly<Record<ScannerClass, string | null>> = {
+	"fsk4-12k5": "4FSK 12.5 kHz",
+	"fsk4-6k25": "4FSK 6.25 kHz",
+	"tdma-ms": "TDMA",
+	"fsk2-wide": "wide 2FSK",
+	"gmsk-narrow": "narrow GMSK",
+	"afsk-fm": "AFSK on FM",
+	"analog-fm": "FM with speech pauses",
+	"ook-burst": "OOK bursts",
+	carrier: "a steady carrier",
+	wideband: "a wideband signal",
+	unknown: null,
+}
+
+const HINT_WORDS: Readonly<Record<string, string>> = {
+	"ism-device": "ISM device",
+	"analog-voice": "analog voice",
+	lora: "LoRa",
+}
+
+/**
+ * A weak discovery's `hint` in words: "ISM device", "analog voice", "LoRa", a class's words; any other
+ * string (a newer core's value, a malformed one) reads "unclassified". Null without a hint.
+ */
+export function hintText(hint: unknown): string | null {
+	if (hint === undefined || hint === null) return null
+	if (typeof hint !== "string") return "unclassified"
+	if (Object.hasOwn(HINT_WORDS, hint)) return HINT_WORDS[hint] ?? null
+	if (Object.hasOwn(CLASS_WORDS, hint))
+		return CLASS_WORDS[hint as ScannerClass] ?? "unclassified"
+	return "unclassified"
+}
+
+/** Whether the protocol is backed by verified evidence: decoded, or proven. */
+export function isVerified(
+	d: Pick<Discovery, "confidence" | "evidenceLevel">,
+): boolean {
+	return d.confidence === "decoded" || d.evidenceLevel === "proven"
+}
+
+/**
+ * The protocol slot of "what is this": the protocol unqualified only when verified ("DMR"), else the
+ * qualified words of confidenceText ("Maybe DMR", "Heard"). Never filled from `hint`.
+ */
+export function protocolSlotText(
+	d: Pick<Discovery, "confidence" | "protocol" | "evidenceLevel">,
+): string {
+	if (isVerified(d) && d.protocol !== "unknown") return protocolName(d.protocol)
+	return confidenceText(d)
+}
+
+/** "likely ISM device" for a discovery whose protocol is not verified and that carries a hint; else null. */
+export function likelyText(
+	d: Pick<Discovery, "confidence" | "evidenceLevel" | "hint">,
+): string | null {
+	if (isVerified(d)) return null
+	const words = hintText(d.hint)
+	return words === null ? null : `likely ${words}`
+}
+
+/** One line of what to do next for a discovery, from its coverage (req 1.3 table). */
+export function nextStepText(d: Pick<Discovery, "coverage" | "hint">): string {
+	const coverage: unknown = d.coverage
+	const voice = d.hint === "analog-voice"
+	if (!Array.isArray(coverage)) return "Run identify"
+	const entries = coverage.filter(
+		(
+			e,
+		): e is { decoderId: string; state: unknown; suspensionReason?: unknown } =>
+			typeof e === "object" &&
+			e !== null &&
+			typeof (e as { decoderId?: unknown }).decoderId === "string" &&
+			(e as { decoderId: string }).decoderId.length > 0,
+	)
+	if (entries.length === 0)
+		return coverage.length === 0
+			? voice
+				? "Listen to check"
+				: "No decoder covers this frequency; run identify"
+			: "Run identify"
+	const listen = voice ? " · Listen to check" : ""
+	const running = entries.find(e => e.state === "running")
+	if (running)
+		return `${running.decoderId} is listening; wait for a transmission${listen}`
+	const suspended = entries.find(e => e.state === "suspended")
+	if (suspended) {
+		const id = suspended.decoderId
+		switch (suspended.suspensionReason) {
+			case "frequency-out-of-band":
+				return `${id} covers this band only when tuned to it${listen}`
+			case "capture-too-narrow":
+				return `Widen the capture so ${id} fits${listen}`
+			case "no-channel-selected":
+				return `Select a channel for ${id}${listen}`
+			default:
+				return `${id} is suspended${listen}`
+		}
+	}
+	const stopped = entries.find(e => e.state === "stopped")
+	if (stopped) return `Start ${stopped.decoderId} to identify${listen}`
+	const other = entries[0]
+	return other
+		? `${other.decoderId} may cover this; run identify${listen}`
+		: "Run identify"
+}
+
+/** The three lines of "what is this": protocol slot, the muted "likely …" (or null), the next step. */
+export interface WhatIsThis {
+	protocol: string
+	likely: string | null
+	next: string
+}
+
+export function whatIsThis(d: Discovery): WhatIsThis {
+	return {
+		protocol: protocolSlotText(d),
+		likely: likelyText(d),
+		next: nextStepText(d),
 	}
 }

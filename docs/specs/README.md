@@ -19,6 +19,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [auto-listen-route](auto-listen-route/requirements.md): one fixed 48 kHz `/auto` live
   stream that plays analog audio while the squelch passes it and decoded digital voice while a
   covering decoder produces it, with the active source on status (WG14)
+- [band-inspection-ux](2026-10-25-band-inspection-ux.md): grouped discovery tags per emitter,
+  edge markers for out-of-view signals, hint and next identify step per signal, 429 retry,
+  absorbed discovery reads and startup merge events
 - [band-plans](band-plans/requirements.md)
 - [build-devx-overhaul](build-devx-overhaul/requirements.md)
 - [core-access-policy](core-access-policy/requirements.md)

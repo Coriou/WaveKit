@@ -46,6 +46,100 @@ export interface RequestOptions {
 	query?: Readonly<Record<string, QueryValue>>
 	signal?: AbortSignal
 	headers?: Readonly<Record<string, string>>
+	/** Retry on 429 (rateLimitWait); default: the Activity reads (retriesOn429). */
+	retry429?: boolean
+}
+
+// ---- 429 (docs/specs/2026-10-25-band-inspection-ux.md req 2.1)
+
+/** At most this many retries after a 429. */
+export const RATE_LIMIT_RETRIES = 3
+/** A server wait longer than this is not waited for: the error says when to try again. */
+export const RATE_LIMIT_MAX_WAIT_MS = 10_000
+/** No retry sooner than this, whatever the header says. */
+export const RATE_LIMIT_MIN_WAIT_MS = 250
+/** Fallback delay without a usable Retry-After: 500 × 2^attempt ms. */
+export const RATE_LIMIT_BASE_MS = 500
+/** Additive jitter: up to this share of the delay on top, never earlier. */
+export const RATE_LIMIT_JITTER = 0.2
+
+/** Activity reads (GET /api/activity…, the facets query) retry on 429; nothing else does by default. */
+export function retriesOn429(method: string, path: string): boolean {
+	if (method === "GET")
+		return path === "/api/activity" || path.startsWith("/api/activity/")
+	return method === "POST" && path === "/api/activity/facets"
+}
+
+/**
+ * The delay a `Retry-After` value asks for, in ms: whole seconds (non-negative integer) or an HTTP
+ * date minus `now` (a past date: 0). Null when absent or malformed.
+ */
+export function retryAfterMs(
+	header: string | null | undefined,
+	now: number,
+): number | null {
+	if (header === null || header === undefined) return null
+	const text = header.trim()
+	if (text === "") return null
+	if (/^\d+$/.test(text)) {
+		const seconds = Number(text)
+		return Number.isSafeInteger(seconds) ? seconds * 1000 : null
+	}
+	// an HTTP date names a weekday and a month ("Wed, 21 Oct 2026 07:28:00 GMT"); refuse bare numbers
+	if (!/[a-z]/i.test(text)) return null
+	const at = Date.parse(text)
+	return Number.isFinite(at) ? Math.max(0, at - now) : null
+}
+
+export type RateLimitDecision =
+	| { retry: true; waitMs: number }
+	| { retry: false; retryInS: number | null }
+
+/**
+ * What to do after a 429 on retry number `attempt` (0 for the first 429): wait
+ * max(d, 250) × (1 + j), j in [0, 0.2] (`random` in [0, 1)), never earlier than the server asked;
+ * no retry when d exceeds 10 s or after RATE_LIMIT_RETRIES retries.
+ */
+export function rateLimitWait(
+	header: string | null | undefined,
+	attempt: number,
+	now: number,
+	random: number,
+): RateLimitDecision {
+	const asked = retryAfterMs(header, now)
+	const d = asked ?? RATE_LIMIT_BASE_MS * 2 ** Math.max(0, attempt)
+	if (d > RATE_LIMIT_MAX_WAIT_MS)
+		return { retry: false, retryInS: Math.ceil(d / 1000) }
+	if (attempt >= RATE_LIMIT_RETRIES)
+		return {
+			retry: false,
+			retryInS: asked === null ? null : Math.ceil(d / 1000),
+		}
+	const j = Math.min(1, Math.max(0, random)) * RATE_LIMIT_JITTER
+	return { retry: true, waitMs: Math.max(d, RATE_LIMIT_MIN_WAIT_MS) * (1 + j) }
+}
+
+function abortError(): DOMException {
+	return new DOMException("The operation was aborted.", "AbortError")
+}
+
+/** Resolves after `ms`, or rejects with an AbortError as soon as `signal` aborts. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(abortError())
+			return
+		}
+		const onAbort = () => {
+			clearTimeout(timer)
+			reject(abortError())
+		}
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort)
+			resolve()
+		}, ms)
+		signal?.addEventListener("abort", onAbort, { once: true })
+	})
 }
 
 /** `legacy`: no access layer (the bootstrap route is not mounted). */
@@ -60,6 +154,8 @@ export class ApiError extends Error {
 	readonly body: unknown
 	readonly method: string
 	readonly path: string
+	/** A 429's Retry-After header (null when absent); undefined on other answers. */
+	retryAfter?: string | null
 
 	constructor(init: {
 		status: number
@@ -87,6 +183,12 @@ export interface ApiClientOptions {
 	/** Prefix for every path; "" means same origin. */
 	baseUrl?: string
 	fetch?: FetchLike
+	/** Waits between 429 retries (tests); default a timer that an abort cuts short. */
+	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+	/** Clock for HTTP-date Retry-After values, ms since the epoch. */
+	now?: () => number
+	/** Jitter source in [0, 1). */
+	random?: () => number
 }
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"])
@@ -137,6 +239,12 @@ export function buildQuery(
 export class ApiClient {
 	private readonly baseUrl: string
 	private readonly fetchImpl: FetchLike
+	private readonly sleepImpl: (
+		ms: number,
+		signal?: AbortSignal,
+	) => Promise<void>
+	private readonly now: () => number
+	private readonly random: () => number
 	private csrfToken: string | null = null
 	private accessState: AccessState | null = null
 
@@ -144,6 +252,9 @@ export class ApiClient {
 		this.baseUrl = (options.baseUrl ?? "").replace(/\/$/, "")
 		this.fetchImpl =
 			options.fetch ?? ((input, init) => globalThis.fetch(input, init))
+		this.sleepImpl = options.sleep ?? sleep
+		this.now = options.now ?? (() => Date.now())
+		this.random = options.random ?? (() => Math.random())
 	}
 
 	/** The CSRF token of the current browser session (protected mode); null clears it. */
@@ -424,6 +535,32 @@ export class ApiClient {
 		body: unknown,
 		options: RequestOptions = {},
 	): Promise<T> {
+		const retry = options.retry429 ?? retriesOn429(method, path)
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await this.send<T>(method, path, body, options)
+			} catch (error) {
+				if (!retry || !(error instanceof ApiError) || error.status !== 429)
+					throw error
+				const header = error.retryAfter === undefined ? null : error.retryAfter
+				const decision = rateLimitWait(
+					header,
+					attempt,
+					this.now(),
+					this.random(),
+				)
+				if (!decision.retry) throw rateLimited(error, decision.retryInS)
+				await this.sleepImpl(decision.waitMs, options.signal)
+			}
+		}
+	}
+
+	private async send<T>(
+		method: string,
+		path: string,
+		body: unknown,
+		options: RequestOptions,
+	): Promise<T> {
 		const headers: Record<string, string> = {
 			Accept: "application/json",
 			...options.headers,
@@ -467,7 +604,7 @@ export class ApiClient {
 				for (const handler of this.sessionLostHandlers) handler()
 			}
 			const fields = errorFields(parsed)
-			throw new ApiError({
+			const error = new ApiError({
 				status: response.status,
 				code: fields.code,
 				message:
@@ -476,9 +613,29 @@ export class ApiClient {
 				method,
 				path,
 			})
+			if (response.status === 429)
+				error.retryAfter = response.headers.get("Retry-After")
+			throw error
 		}
 		return parsed as T
 	}
+}
+
+/** The 429 the caller sees once retrying stops: "rate limited, retry in N s". */
+function rateLimited(error: ApiError, retryInS: number | null): ApiError {
+	const out = new ApiError({
+		status: 429,
+		code: error.code ?? "RATE_LIMITED",
+		message:
+			retryInS === null
+				? "rate limited, retry later"
+				: `rate limited, retry in ${retryInS} s`,
+		body: error.body,
+		method: error.method,
+		path: error.path,
+	})
+	out.retryAfter = error.retryAfter ?? null
+	return out
 }
 
 interface SafeParser<T> {

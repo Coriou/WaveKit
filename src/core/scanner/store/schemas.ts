@@ -193,10 +193,21 @@ export const DiscoverySchema = z.object({
 		iq: z.boolean(),
 	}),
 })
-/** `proof`, `evidenceLevel` and `hint` are derived DTO fields (A12). They are not journal keys. */
+/**
+ * `proof`, `evidenceLevel`, `hint`, `coverage`, `absorbedInto` and `requestedId` are derived DTO
+ * fields (A12; band inspection UX 1.4, 3.1). They are not journal keys.
+ */
 export type DiscoveryCheck = Assert<
 	SchemaMatches<
-		Omit<Discovery, "proof" | "evidenceLevel" | "hint">,
+		Omit<
+			Discovery,
+			| "proof"
+			| "evidenceLevel"
+			| "hint"
+			| "coverage"
+			| "absorbedInto"
+			| "requestedId"
+		>,
 		typeof DiscoverySchema
 	>
 >

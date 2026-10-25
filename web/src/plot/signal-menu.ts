@@ -1,9 +1,14 @@
 // The spectrum's right-click menu on a signal (DESIGN.md open question "Right-click menus on signals", Scanner
 // decisions: Identify first). Its rows are palette actions (features/palette/actions.ts) so both run the same code:
 // a row is the actions it runs in order (tune there first, then identify, listen or decode).
-import type { ResolvedBandPlanView, SavedFrequency } from "@wavekit/api-types"
+import type {
+	Discovery,
+	ResolvedBandPlanView,
+	SavedFrequency,
+} from "@wavekit/api-types"
 
 import { bandAt, channelAt } from "../data/bandplan-store.ts"
+import { isVerified, likelyText, nextStepText } from "../data/scanner-format.ts"
 import { formatMHz } from "../features/format.ts"
 import type { PaletteAction } from "../features/palette/model.ts"
 import { DECODE_AS } from "../features/tuned/identify-view.ts"
@@ -181,4 +186,26 @@ export function decodeAsRows(c: SignalMenuContext): SignalMenuRow[] {
 			},
 		],
 	}))
+}
+
+/**
+ * The menu's head with "what is this" for the nearest discovery here that is not verified (req 1.3):
+ * "433.9200 MHz · ISM 433 · likely ISM device · Widen the capture so rtl433 fits". The hint is never the
+ * protocol; a verified discovery adds nothing (the chips already name it).
+ */
+export function withWhatIsThis(
+	head: string,
+	items: Iterable<Discovery>,
+	hz: number,
+): string {
+	let best: Discovery | null = null
+	for (const d of items) {
+		if (d.operator?.lockout) continue
+		const off = Math.abs(d.frequencyHz - hz)
+		if (off > Math.max(3000, (d.bandwidthHz || 12_500) / 2)) continue
+		if (!best || off < Math.abs(best.frequencyHz - hz)) best = d
+	}
+	if (!best || isVerified(best)) return head
+	const likely = likelyText(best)
+	return [head, likely, nextStepText(best)].filter(Boolean).join(" · ")
 }

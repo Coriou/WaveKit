@@ -868,3 +868,248 @@ describe("scanner store helpers", () => {
 		expect(passive?.id).toBe("p")
 	})
 })
+
+describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
+	async function ready(items: Discovery[], route: Route = () => undefined) {
+		const ctx = setup(
+			call =>
+				route(call) ??
+				(call.url.startsWith("/api/scanner/discoveries")
+					? { body: { items, nextCursor: null } }
+					: undefined),
+		)
+		await ctx.store.load()
+		await ctx.store.refreshDiscoveries({})
+		return ctx
+	}
+	const flush = () => new Promise(r => setTimeout(r, 0))
+
+	it("a deleted survivor drops every id in mergedIds too", async () => {
+		const { store, send, tick } = await ready([
+			discovery("s"),
+			discovery("a"),
+			discovery("b"),
+			discovery("keep"),
+		])
+		send("scanner:discovery", {
+			change: "deleted",
+			discovery: discovery("s"),
+			mergedIds: ["a", "b"],
+		})
+		tick()
+		const d = store.get().discoveries
+		expect([...d.byId.keys()]).toEqual(["keep"])
+		expect(d.items.map(x => x.id)).toEqual(["keep"])
+		store.dispose()
+	})
+
+	it("mergedTruncated refetches the survivor and the list and bumps the epoch", async () => {
+		const { store, send, tick, calls } = await ready([discovery("s")])
+		const before = calls.length
+		const epoch = store.get().discoveries.epoch
+		send("scanner:discovery", {
+			change: "merged",
+			discovery: discovery("s"),
+			mergedIds: Array.from({ length: 64 }, (_, i) => `m${i}`),
+			mergedTruncated: true,
+		})
+		tick()
+		await flush()
+		const urls = calls.slice(before).map(c => c.url.split("?")[0])
+		expect(urls).toContain("/api/scanner/discoveries/s")
+		expect(urls).toContain("/api/scanner/discoveries")
+		expect(store.get().discoveries.epoch).toBe(epoch + 1)
+		store.dispose()
+	})
+
+	it("a truncated merge's refetch removes an absorbed id the event did not name", async () => {
+		let list = [discovery("s"), discovery("hidden"), discovery("named")]
+		const { store, send, tick } = await ready([], call =>
+			call.url.split("?")[0] === "/api/scanner/discoveries"
+				? { body: { items: list, nextCursor: null } }
+				: call.url === "/api/scanner/discoveries/s"
+					? { body: discovery("s") }
+					: undefined,
+		)
+		await store.refreshDiscoveries({})
+		expect(store.get().discoveries.byId.has("hidden")).toBe(true)
+		list = [discovery("s")]
+		send("scanner:discovery", {
+			change: "merged",
+			discovery: discovery("s"),
+			mergedIds: ["named"],
+			mergedTruncated: true,
+		})
+		tick()
+		await flush()
+		await flush()
+		const d = store.get().discoveries
+		expect([...d.byId.keys()]).toEqual(["s"])
+		expect(d.items.map(x => x.id)).toEqual(["s"])
+		store.dispose()
+	})
+
+	it("a span fetch reconciles its window only, and only when complete", async () => {
+		let page: { items: Discovery[]; nextCursor: string | null } = {
+			items: [
+				discovery("in", { frequencyHz: 160e6 }),
+				discovery("gone", { frequencyHz: 160.5e6 }),
+				discovery("far", { frequencyHz: 433e6 }),
+			],
+			nextCursor: null,
+		}
+		const { store } = await ready([], call =>
+			call.url.startsWith("/api/scanner/discoveries?")
+				? { body: page }
+				: undefined,
+		)
+		await store.fetchDiscoveries({ freqMinHz: 0, freqMaxHz: 1e9 })
+		page = { items: [discovery("in", { frequencyHz: 160e6 })], nextCursor: "c" }
+		await store.fetchDiscoveries({ freqMinHz: 159e6, freqMaxHz: 161e6 })
+		expect(store.get().discoveries.byId.has("gone")).toBe(true)
+		page = { ...page, nextCursor: null }
+		await store.fetchDiscoveries({ freqMinHz: 159e6, freqMaxHz: 161e6 })
+		expect([...store.get().discoveries.byId.keys()].sort()).toEqual([
+			"far",
+			"in",
+		])
+		store.dispose()
+	})
+
+	it("a truncated deleted event refetches only the list", async () => {
+		const { store, send, tick, calls } = await ready([discovery("s")])
+		const before = calls.length
+		send("scanner:discovery", {
+			change: "deleted",
+			discovery: discovery("s"),
+			mergedIds: ["x"],
+			mergedTruncated: true,
+		})
+		tick()
+		await flush()
+		const urls = calls.slice(before).map(c => c.url.split("?")[0])
+		expect(urls).toEqual(["/api/scanner/discoveries"])
+		store.dispose()
+	})
+
+	it("scanner:discoveries-resync refetches the list", async () => {
+		const { store, send, calls } = await ready([discovery("a")])
+		const before = calls.length
+		send("scanner:discoveries-resync", { reason: "consolidation", groups: 300 })
+		await flush()
+		expect(calls.slice(before).map(c => c.url.split("?")[0])).toEqual([
+			"/api/scanner/discoveries",
+		])
+		expect(store.get().discoveries.epoch).toBe(1)
+		store.dispose()
+	})
+
+	it("an unknown event type changes nothing (old clients ignore the resync)", async () => {
+		const { store, send, calls } = await ready([discovery("a")])
+		const before = calls.length
+		const snapshot = store.get()
+		send("scanner:something-new", { reason: "x" })
+		await flush()
+		expect(calls.length).toBe(before)
+		expect(store.get()).toBe(snapshot)
+		store.dispose()
+	})
+
+	it("reading an absorbed id replaces it with the survivor", async () => {
+		const { store } = await ready([discovery("old")], call =>
+			call.url === "/api/scanner/discoveries/old"
+				? {
+						body: discovery("new", {
+							absorbedInto: "new",
+							requestedId: "old",
+						}),
+					}
+				: undefined,
+		)
+		const d = await store.fetchDiscovery("old")
+		expect(d.id).toBe("new")
+		const s = store.get().discoveries
+		expect(s.byId.has("old")).toBe(false)
+		expect(s.byId.has("new")).toBe(true)
+		expect(s.items.some(x => x.id === "old")).toBe(false)
+		store.dispose()
+	})
+})
+
+describe("ScannerStore: reconcile never drops what changed after the request", () => {
+	const flush = () => new Promise(r => setTimeout(r, 0))
+	function deferred() {
+		const pending: ((body: unknown) => void)[] = []
+		const calls: string[] = []
+		const api = new ApiClient({
+			fetch: url =>
+				new Promise<Response>(resolve => {
+					calls.push(url)
+					pending.push(body => resolve(new Response(JSON.stringify(body))))
+				}),
+		})
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		const frames: (() => void)[] = []
+		const store = new ScannerStore(api, events, {
+			frame: { request: cb => frames.push(cb), cancel: () => undefined },
+		})
+		const send = (type: string, data: unknown) =>
+			sockets.last().receive({ type, channel: "scanner", data })
+		const tick = () => {
+			for (const f of frames.splice(0)) f()
+		}
+		return { store, pending, calls, send, tick }
+	}
+	const span = { freqMinHz: 446e6, freqMaxHz: 446.1e6 }
+
+	it("a span fetch that answers empty keeps a discovery created live while it was in flight", async () => {
+		const { store, pending, send, tick } = deferred()
+		const p = store.fetchDiscoveries(span)
+		await flush()
+		send("scanner:discovery", {
+			change: "created",
+			discovery: discovery("live"),
+		})
+		tick()
+		pending[0]!({ items: [], nextCursor: null })
+		await p
+		expect(store.get().discoveries.byId.has("live")).toBe(true)
+		store.dispose()
+	})
+
+	it("an older span answer arriving last removes nothing; the newest still reconciles", async () => {
+		const { store, pending } = deferred()
+		const first = store.fetchDiscoveries(span)
+		const second = store.fetchDiscoveries(span)
+		await flush()
+		// the newer request answers first with a record, then the older one answers empty
+		pending[1]!({ items: [discovery("a")], nextCursor: null })
+		await second
+		pending[0]!({ items: [], nextCursor: null })
+		await first
+		expect(store.get().discoveries.byId.has("a")).toBe(true)
+		// a later, newest fetch that no longer has it does remove it
+		const third = store.fetchDiscoveries(span)
+		await flush()
+		pending[2]!({ items: [], nextCursor: null })
+		await third
+		expect(store.get().discoveries.byId.has("a")).toBe(false)
+		store.dispose()
+	})
+
+	it("a list refresh keeps what a span fetch wrote after the refresh started", async () => {
+		const { store, pending } = deferred()
+		const refresh = store.refreshDiscoveries({})
+		const spanFetch = store.fetchDiscoveries(span)
+		await flush()
+		pending[1]!({ items: [discovery("b")], nextCursor: null })
+		await spanFetch
+		pending[0]!({ items: [], nextCursor: null })
+		await refresh
+		expect(store.get().discoveries.byId.has("b")).toBe(true)
+		store.dispose()
+	})
+})

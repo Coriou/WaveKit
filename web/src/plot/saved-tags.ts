@@ -98,7 +98,8 @@ export function placeSavedTags(
 	// Pass 1: every tag that can show at least its bookmark, in priority order (the tuned one wins a clash).
 	const placed: PlacedSavedTag[] = []
 	for (const f of order) {
-		const x = ((f.frequencyHz - view.startHz) / span) * w
+		// a bookmark at the view's right edge moves in, never clipped (band inspection UX)
+		const x = Math.min(w - bare, ((f.frequencyHz - view.startHz) / span) * w)
 		if (clash(placed, null, x, x + bare)) continue
 		placed.push({
 			id: f.id,

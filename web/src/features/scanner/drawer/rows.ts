@@ -4,7 +4,6 @@ import type {
 	Discovery,
 	ScanJob,
 	ScanJobHit,
-	ScannerClass,
 	ScannerIqCaptureStatus,
 	ScannerProgressEventData,
 	ScannerProtocol,
@@ -13,12 +12,16 @@ import type { CategoryName } from "@wavekit/brand/react"
 
 import type { DiscoverySort } from "../../../data/index.ts"
 import {
+	CLASS_WORDS,
 	confidenceCapText,
 	confidenceRank,
-	confidenceText,
 	identityText,
 	isJobActive,
+	isVerified,
+	likelyText,
+	nextStepText,
 	protocolName,
+	protocolSlotText,
 	undecodedReasonText,
 } from "../../../data/index.ts"
 import { clockText as clock, dateText } from "../../display.ts"
@@ -106,8 +109,12 @@ export interface DiscoveryRowView {
 	tone: RowTone
 	freqMain: string
 	freqTail: string
-	/** "DMR", "Maybe DMR", "Heard". */
+	/** "DMR", "Maybe DMR", "Heard": the protocol slot, unqualified only when verified (never the hint). */
 	confidence: string
+	/** "likely ISM device" (muted) for a weak discovery with a hint, else null. */
+	likely: string | null
+	/** What to do next, from the discovery's decoder coverage ("Run identify"); null once verified. */
+	next: string | null
 	decoded: boolean
 	/** Label, else identity and what it carries ("CC 1 · TG 2081, TG 9 · slot 1"), else width. */
 	title: string
@@ -168,7 +175,8 @@ export function reasonText(d: Discovery): string | null {
 
 export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
 	const { main, tail } = frequencyParts(d.frequencyHz)
-	const confidence = confidenceText(d)
+	const confidence = protocolSlotText(d)
+	const likely = likelyText(d)
 	const label = d.operator?.label?.trim() ?? ""
 	const ident = identityLine(d)
 	// WG12 cores say how it was proven ("DMR decoded (CC1, TG 9)", "Analog FM voice, CTCSS 88.5")
@@ -186,6 +194,7 @@ export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
 	const aria = [
 		`${formatMHz(d.frequencyHz)} MHz`,
 		confidence,
+		likely,
 		label || identityText(d.identity),
 	]
 		.filter(Boolean)
@@ -197,6 +206,8 @@ export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
 		freqMain: main,
 		freqTail: tail,
 		confidence,
+		likely,
+		next: isVerified(d) ? null : nextStepText(d),
 		decoded: d.confidence === "decoded" && d.protocol !== "carrier",
 		title,
 		labelled: label !== "",
@@ -329,24 +340,12 @@ export function estimateHeight(e: ListEntry, open: boolean): number {
 	if (e.type === "group") return 34
 	if (e.type === "ignored" || e.type === "weak") return 52
 	if (open) return 360
-	return e.discovery.undecodedReason || e.discovery.confidenceCap ? 78 : 62
+	const d = e.discovery
+	const hint = isVerified(d) ? 0 : 16
+	return (d.undecodedReason || d.confidenceCap ? 78 : 62) + hint
 }
 
 // ---- the open row
-
-const CLASS_WORDS: Readonly<Record<ScannerClass, string | null>> = {
-	"fsk4-12k5": "4FSK 12.5 kHz",
-	"fsk4-6k25": "4FSK 6.25 kHz",
-	"tdma-ms": "TDMA",
-	"fsk2-wide": "wide 2FSK",
-	"gmsk-narrow": "narrow GMSK",
-	"afsk-fm": "AFSK on FM",
-	"analog-fm": "FM with speech pauses",
-	"ook-burst": "OOK bursts",
-	carrier: "a steady carrier",
-	wideband: "a wideband signal",
-	unknown: null,
-}
 
 /** Why it has that confidence, in one sentence, from what the core keeps. */
 export function whyText(d: Discovery): string {

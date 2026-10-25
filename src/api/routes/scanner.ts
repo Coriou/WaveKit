@@ -47,6 +47,8 @@ import { RECORDING_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
 import { JOB_HITS_LIMIT_DEFAULT } from "../../core/scanner/job-hits.js"
 import { ConfigValidationError } from "../../utils/errors.js"
+import { withCoverage } from "../../core/scanner/discovery-coverage.js"
+import type { CoverageIndex } from "../../core/scanner/discovery-coverage.js"
 import {
 	captureIdParamsSchema,
 	discoveryIdParamsSchema,
@@ -92,7 +94,9 @@ export type ScannerRouteService = Pick<
 	| "listCaptures"
 	| "capturePath"
 	| "deleteCapture"
->
+> &
+	// Band inspection UX req 1.4 / 3.1: optional so an older service shape still serves.
+	Partial<Pick<ScannerService, "resolveDiscovery" | "discoveryCoverage">>
 
 export interface ScannerRoutesOptions {
 	scanner: ScannerRouteService
@@ -370,6 +374,57 @@ async function sendDownload(
 }
 
 const tags = ["scanner"]
+/** Band inspection UX req 1.4: one entry of `Discovery.coverage`. */
+const discoveryCoverageSchema = {
+	type: "array",
+	maxItems: 3,
+	items: {
+		type: "object",
+		properties: {
+			decoderId: { type: "string", minLength: 1, maxLength: 64 },
+			state: { type: "string" },
+			suspensionReason: { type: "string" },
+		},
+		required: ["decoderId", "state"],
+	},
+} as const
+
+/**
+ * A discovery record. Only the band inspection UX fields are listed (all optional); every other
+ * field passes through unchanged (`additionalProperties`).
+ */
+const discoveryResponseSchema = {
+	type: "object",
+	additionalProperties: true,
+	properties: {
+		coverage: discoveryCoverageSchema,
+		absorbedInto: { type: "string" },
+		requestedId: { type: "string" },
+	},
+} as const
+
+const discoveryListResponseSchema = {
+	type: "object",
+	additionalProperties: true,
+	properties: {
+		items: { type: "array", items: discoveryResponseSchema },
+		nextCursor: { anyOf: [{ type: "string" }, { type: "null" }] },
+	},
+} as const
+
+/** Band inspection UX req 1.4: decoder status read once per request; null when unavailable. */
+function coverageIndexOf(scanner: ScannerRouteService): CoverageIndex | null {
+	return typeof scanner.discoveryCoverage === "function"
+		? scanner.discoveryCoverage()
+		: null
+}
+
+/** Band inspection UX req 3.1: the live id an absorbed id resolves to (itself otherwise). */
+function liveIdOf(scanner: ScannerRouteService, id: string): string {
+	if (typeof scanner.resolveDiscovery !== "function") return id
+	return scanner.resolveDiscovery(id)?.absorbedInto ?? id
+}
+
 const errors = {
 	400: errorResponseSchema,
 	404: errorResponseSchema,
@@ -599,7 +654,10 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				tags,
 				summary: "List discoveries",
 				querystring: discoveryQuerySchema,
-				response: { 400: errorResponseSchema },
+				response: {
+					200: discoveryListResponseSchema,
+					400: errorResponseSchema,
+				},
 			},
 		},
 		async (request, reply) => {
@@ -611,7 +669,11 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 					message: invalid,
 				})
 			try {
-				return scanner.listDiscoveries(toFilter(request.query))
+				const page = scanner.listDiscoveries(toFilter(request.query))
+				const index = coverageIndexOf(scanner)
+				return index === null
+					? page
+					: { ...page, items: page.items.map(d => withCoverage(d, index)) }
 			} catch (err) {
 				return sendError(reply, err)
 			}
@@ -625,12 +687,19 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				tags,
 				summary: "Discovery detail",
 				params: jobIdParamsSchema,
-				response: { 404: errorResponseSchema },
+				response: { 200: discoveryResponseSchema, 404: errorResponseSchema },
 			},
 		},
-		async (request, reply) =>
-			scanner.getDiscovery(request.params.id) ??
-			notFound(reply, "Discovery", request.params.id),
+		async (request, reply) => {
+			const { id } = request.params
+			const found =
+				typeof scanner.resolveDiscovery === "function"
+					? scanner.resolveDiscovery(id)
+					: scanner.getDiscovery(id)
+			return found
+				? withCoverage(found, coverageIndexOf(scanner))
+				: notFound(reply, "Discovery", id)
+		},
 	)
 
 	fastify.get<{
@@ -650,7 +719,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		async (request, reply) => {
 			try {
 				return scanner.discoveryObservations(
-					request.params.id,
+					liveIdOf(scanner, request.params.id),
 					request.query.cursor ?? null,
 					request.query.limit ?? 100,
 				)
@@ -760,7 +829,8 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 					request,
 					reply,
 					options.access,
-					() => scanner.evidencePath(request.params.id, kind),
+					() =>
+						scanner.evidencePath(liveIdOf(scanner, request.params.id), kind),
 					kind === "psd" ? "application/json" : "application/octet-stream",
 					() =>
 						notFound(reply, `${kind} evidence of discovery`, request.params.id),

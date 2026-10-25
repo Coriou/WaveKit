@@ -159,6 +159,7 @@ interface ExistingServerMessage {
 		| "scanner:job"
 		| "scanner:progress"
 		| "scanner:discovery"
+		| "scanner:discoveries-resync"
 		| "scanner:activity"
 		| "scanner:monitor"
 		| "scanner:identify"

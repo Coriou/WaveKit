@@ -107,6 +107,11 @@ export interface ScannerDiscoveriesState {
 	error: string | null
 	/** False once the core refused the `evidence` filter (a core before WG12): the list asks without it. */
 	evidenceSupported: boolean
+	/**
+	 * Bumped when the core says what is loaded may be stale (a truncated merge, `scanner:discoveries-resync`):
+	 * span fetches (the spectrum's tags) ask again.
+	 */
+	epoch: number
 }
 
 export interface ScannerState {
@@ -223,6 +228,34 @@ export function matchesDiscoveryQuery(
 			return false
 	}
 	return true
+}
+
+/**
+ * `byId` after a page for `query`: the page's records set; when the page is complete (no cursor) and
+ * `destructive`, a cached record the query covers but the page no longer has is gone (merged, deleted or
+ * evicted), so it leaves the cache (band inspection UX req 3.2: an absorbed id a truncated merge did not
+ * name) — unless `keep(id)`: written after the request started (a live event, another fetch), the page
+ * cannot speak for it.
+ */
+export function reconciled(
+	byId: ReadonlyMap<string, Discovery>,
+	query: DiscoveryQuery,
+	page: { items: readonly Discovery[]; nextCursor: string | null },
+	options: { destructive?: boolean; keep?: (id: string) => boolean } = {},
+): Map<string, Discovery> {
+	const out = new Map(byId)
+	if (page.nextCursor === null && options.destructive !== false) {
+		const have = new Set(page.items.map(d => d.id))
+		for (const [id, d] of byId)
+			if (
+				!have.has(id) &&
+				matchesDiscoveryQuery(d, query) &&
+				!(options.keep?.(id) ?? false)
+			)
+				out.delete(id)
+	}
+	for (const d of page.items) out.set(d.id, d)
+	return out
 }
 
 /**
@@ -349,6 +382,7 @@ const INITIAL_DISCOVERIES: ScannerDiscoveriesState = {
 	loadingMore: false,
 	error: null,
 	evidenceSupported: true,
+	epoch: 0,
 }
 
 const INITIAL: ScannerState = {
@@ -409,6 +443,11 @@ export class ScannerStore extends Store<ScannerState> {
 	private readonly activitySeen = new Map<string, number>()
 	private staleTimer: ReturnType<typeof setTimeout> | null = null
 	private discoveryGeneration = 0
+	/** Span fetches (fetchDiscoveries): only the newest may remove records (an older answer is stale). */
+	private spanGeneration = 0
+	/** Write order: `touched` holds, per id, the sequence of its last write to `byId`. */
+	private writeSeq = 0
+	private readonly touched = new Map<string, number>()
 	private discoveryAbort: AbortController | null = null
 	private loading: Promise<void> | null = null
 	private bandplansLoading: Promise<void> | null = null
@@ -429,8 +468,14 @@ export class ScannerStore extends Store<ScannerState> {
 			events.subscribe(["scanner"]),
 			events.on("scanner:job", job => this.live(s => this.withJob(s, job))),
 			events.on("scanner:progress", p => this.onProgress(p)),
-			events.on("scanner:discovery", d =>
-				this.live(s => this.withDiscoveryEvent(s, d)),
+			events.on("scanner:discovery", d => {
+				this.live(s => this.withDiscoveryEvent(s, d))
+				// band inspection UX req 3.2: mergedIds was cut at 64, so some absorbed ids are unknown here
+				if (d.mergedTruncated === true)
+					this.resyncDiscoveries(d.change === "deleted" ? null : d.discovery.id)
+			}),
+			events.on("scanner:discoveries-resync", () =>
+				this.resyncDiscoveries(null),
 			),
 			events.on("scanner:activity", a => this.onActivity(a)),
 			events.on("scanner:status", status =>
@@ -526,6 +571,7 @@ export class ScannerStore extends Store<ScannerState> {
 	refreshDiscoveries(query?: DiscoveryQuery, keepCount = 0): Promise<void> {
 		const q = query ?? this.current().discoveries.query
 		const generation = ++this.discoveryGeneration
+		const started = this.writeSeq
 		this.discoveryAbort?.abort()
 		const abort = new AbortController()
 		this.discoveryAbort = abort
@@ -550,8 +596,13 @@ export class ScannerStore extends Store<ScannerState> {
 				page => {
 					if (generation !== this.discoveryGeneration) return
 					this.commit(s => {
-						const byId = new Map(s.discoveries.byId)
-						for (const d of page.items) byId.set(d.id, d)
+						const byId = this.reconcile(
+							s.discoveries.byId,
+							q,
+							page,
+							started,
+							true,
+						)
 						return {
 							...s,
 							discoveries: {
@@ -619,6 +670,7 @@ export class ScannerStore extends Store<ScannerState> {
 				const items = [...s.discoveries.items]
 				for (const x of page.items) {
 					byId.set(x.id, x)
+					this.touch(x.id)
 					// offset cursors shift when live discoveries arrive: drop repeats
 					if (!have.has(x.id)) items.push(x)
 				}
@@ -647,13 +699,37 @@ export class ScannerStore extends Store<ScannerState> {
 		}
 	}
 
-	/** GET /api/scanner/discoveries/:id into `byId` (e.g. a hit-log row outside the list). */
+	/**
+	 * GET /api/scanner/discoveries/:id into `byId` (e.g. a hit-log row outside the list). An id a merge
+	 * absorbed answers with the survivor (`absorbedInto`): the old id leaves the state, the survivor takes it.
+	 */
 	async fetchDiscovery(id: string): Promise<Discovery> {
 		const d = await this.api.get<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
 		)
-		this.commit(s => this.withDiscovery(s, d, "updated"))
+		this.commit(s => {
+			const absorbed =
+				typeof d.absorbedInto === "string" && d.id !== id ? id : null
+			const base = absorbed === null ? s : this.withoutDiscovery(s, absorbed)
+			return this.withDiscovery(base, d, "updated")
+		})
 		return d
+	}
+
+	/**
+	 * What is loaded may be stale (a merge whose ids were truncated, a startup consolidation): refetch
+	 * `survivorId` (when given), the list when one is loaded, and bump `epoch` so span fetches ask again.
+	 */
+	private resyncDiscoveries(survivorId: string | null): void {
+		if (this.disposed) return
+		this.commit(s => ({
+			...s,
+			discoveries: { ...s.discoveries, epoch: s.discoveries.epoch + 1 },
+		}))
+		if (survivorId !== null)
+			this.fetchDiscovery(survivorId).catch(() => undefined)
+		const d = this.current().discoveries
+		if (d.loaded) void this.refreshDiscoveries(d.query, d.items.length)
 	}
 
 	/**
@@ -664,15 +740,24 @@ export class ScannerStore extends Store<ScannerState> {
 		query: DiscoveryQuery,
 		options: { signal?: AbortSignal } = {},
 	): Promise<readonly Discovery[]> {
+		const started = this.writeSeq
+		const generation = ++this.spanGeneration
 		const page = await this.api.get<DiscoveryPage>(
 			"/api/scanner/discoveries",
 			options.signal
 				? { query: queryParams(query), signal: options.signal }
 				: { query: queryParams(query) },
 		)
+		// a newer span fetch started meanwhile: this answer still adds what it has, but removes nothing
+		const newest = generation === this.spanGeneration
 		this.commit(s => {
-			const byId = new Map(s.discoveries.byId)
-			for (const d of page.items) byId.set(d.id, d)
+			const byId = this.reconcile(
+				s.discoveries.byId,
+				query,
+				page,
+				started,
+				newest,
+			)
 			return { ...s, discoveries: { ...s.discoveries, byId } }
 		})
 		return page.items
@@ -899,6 +984,31 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.derive({ ...s, jobs })
 	}
 
+	/** Notes a write of `id` to `byId` (live event, patch, fetch) in write order. */
+	private touch(id: string): void {
+		this.touched.set(id, ++this.writeSeq)
+	}
+
+	/**
+	 * reconciled() for an answer to a request that started at write `started`: records written since are
+	 * kept; `destructive` false (a superseded request) removes nothing.
+	 */
+	private reconcile(
+		byId: ReadonlyMap<string, Discovery>,
+		query: DiscoveryQuery,
+		page: DiscoveryPage,
+		started: number,
+		destructive: boolean,
+	): Map<string, Discovery> {
+		const out = reconciled(byId, query, page, {
+			destructive,
+			keep: id => (this.touched.get(id) ?? 0) > started,
+		})
+		for (const id of byId.keys()) if (!out.has(id)) this.touched.delete(id)
+		for (const d of page.items) this.touch(d.id)
+		return out
+	}
+
 	private withDiscovery(
 		s: ScannerState,
 		d: Discovery,
@@ -908,6 +1018,7 @@ export class ScannerStore extends Store<ScannerState> {
 		const list = s.discoveries
 		const byId = new Map(list.byId)
 		byId.set(d.id, d)
+		this.touch(d.id)
 		let items = list.items.filter(x => x.id !== d.id)
 		if (change === "merged") {
 			// WG12 cores name what the merge absorbed; older ones are guessed
@@ -947,10 +1058,12 @@ export class ScannerStore extends Store<ScannerState> {
 		s: ScannerState,
 		e: ScannerDiscoveryEventData,
 	): ScannerState {
-		let next =
-			e.change === "deleted"
-				? this.withoutDiscovery(s, e.discovery.id)
-				: this.withDiscovery(s, e.discovery, e.change, e.mergedIds)
+		let next: ScannerState
+		if (e.change === "deleted") {
+			// band inspection UX req 3.2: a merge into the deleted survivor may ride along: drop those too
+			next = this.withoutDiscovery(s, e.discovery.id)
+			for (const id of e.mergedIds ?? []) next = this.withoutDiscovery(next, id)
+		} else next = this.withDiscovery(s, e.discovery, e.change, e.mergedIds)
 		if (e.jobHits && e.jobHits.length > 0) {
 			const jobHits = new Map(next.jobHits)
 			for (const hit of e.jobHits) {

@@ -16,6 +16,7 @@ import type {
 	TrackSnapshot,
 	TuningTrust,
 } from "../spectrum/types.js"
+import type { DiscoveryCoverage } from "@wavekit/api-types"
 
 // ---------------------------------------------------------------- vocabulary (§ 6.1)
 
@@ -301,6 +302,11 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
+	/** Band inspection UX req 1.4: projected at read time by the routes, never stored. */
+	coverage?: DiscoveryCoverage[]
+	/** Band inspection UX req 3.1: detail read by an absorbed id (never stored). */
+	absorbedInto?: string
+	requestedId?: string
 }
 
 export interface Observation {

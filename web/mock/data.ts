@@ -209,6 +209,12 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 		name: "ISM sensors",
 		sub: "rtl_433 · 3 devices",
 	}),
+	// band inspection UX: a bookmarked cluster of short bursts within 5 kHz (band-fixtures.ts "bookmark")
+	sig(434.7015, 1.5e3, -64, "burst", { on: 0.4, per: 3, ph: 0 }),
+	sig(434.7035, 1.5e3, -61, "burst", { on: 0.5, per: 4, ph: 1 }),
+	sig(434.7055, 1.5e3, -66, "burst", { on: 0.3, per: 2, ph: 0.5 }),
+	sig(434.7075, 1.5e3, -63, "burst", { on: 0.6, per: 5, ph: 2 }),
+	sig(434.7095, 1.5e3, -68, "burst", { on: 0.4, per: 3.5, ph: 1.5 }),
 	sig(446.00625, 11e3, -60, "voice", {
 		on: 6,
 		per: 20,
