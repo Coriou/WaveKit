@@ -245,9 +245,14 @@ describe("decoder provenance index (WG3 req 5.2)", () => {
 		await manager.removeDecoder("adsb")
 		create({ id: "adsb", frequencies: [1_089_000_000, 1_090_000_000] })
 		ingress.publish("adsb", "readsb", reception)
+		// WG16 SC 3b: two targets name no single one, but a bound readsb is 1090 MHz.
 		expect(seen.at(-1)?.provenance).toEqual({
 			sourceId: "sdr-main",
-			frequency: null,
+			frequency: {
+				hz: 1_090_000_000,
+				basis: "channel",
+				tuningTrust: "unverified",
+			},
 		})
 		expect(ingress.counters().provenanceFailures).toBe(0)
 	})

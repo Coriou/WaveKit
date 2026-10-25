@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest"
 import {
 	AIS_CHANNEL_A_HZ,
 	AIS_CHANNEL_B_HZ,
+	ADSB_CARRIER_HZ,
 	MAX_PROVENANCE_HZ,
+	RTL433_FREQ_MAX_HZ,
+	RTL433_FREQ_MAX_OFFSET_HZ,
+	RTL433_FREQ_MIN_HZ,
 	resolveProvenance,
 	validHz,
 } from "../../../../../src/core/activity/provenance/resolve.js"
@@ -122,6 +126,77 @@ describe("resolveProvenance table", () => {
 		expect(resolveProvenance(out("acars", { frequency: 5 }), hostile)).toEqual({
 			sourceId: null,
 			frequency: chan(5),
+		})
+	})
+
+	describe("WG16 SC 3b: readsb and rtl_433 frequencies", () => {
+		it("a bound readsb is the 1090 MHz carrier, whatever its targets", () => {
+			expect(ADSB_CARRIER_HZ).toBe(1_090_000_000)
+			expect(
+				resolveProvenance(
+					out("aircraft", { icao: "x" }),
+					bind([], "rtl", "relay"),
+				),
+			).toEqual({ sourceId: "rtl", frequency: chan(1_090_000_000, "relay") })
+			expect(
+				resolveProvenance(
+					out("aircraft", {}),
+					bind([1_089_000_000, 1_091_000_000]),
+				),
+			).toEqual({ sourceId: "rtl-0", frequency: chan(1_090_000_000) })
+			// an unbound reception stays unknown
+			expect(resolveProvenance(out("aircraft", {}), null)).toEqual({
+				sourceId: null,
+				frequency: null,
+			})
+		})
+
+		it("rtl_433 uses its freq (MHz) inside the plausible range, bounds included", () => {
+			const sig = (freq: unknown) => out("signal", { model: "m", freq })
+			expect(resolveProvenance(sig(868.3), bind([]))).toEqual({
+				sourceId: "rtl-0",
+				frequency: chan(868_300_000),
+			})
+			expect(resolveProvenance(sig(RTL433_FREQ_MIN_HZ / 1e6), null)).toEqual({
+				sourceId: null,
+				frequency: chan(24_000_000),
+			})
+			expect(resolveProvenance(sig(RTL433_FREQ_MAX_HZ / 1e6), null)).toEqual({
+				sourceId: null,
+				frequency: chan(1_766_000_000),
+			})
+			for (const bad of [
+				23.999999,
+				1766.000001,
+				Number.NaN,
+				Infinity,
+				-433.92,
+				"433.92",
+				null,
+				undefined,
+			])
+				expect(resolveProvenance(sig(bad), null)).toEqual({
+					sourceId: null,
+					frequency: null,
+				})
+		})
+
+		it("rtl_433's freq is used within 1.6 MHz of the single target, else the target", () => {
+			expect(RTL433_FREQ_MAX_OFFSET_HZ).toBe(1_600_000)
+			const target = 868_000_000
+			const sig = (hz: number) => out("signal", { freq: hz / 1e6 })
+			expect(
+				resolveProvenance(sig(target + 1_600_000), bind([target])),
+			).toEqual({
+				sourceId: "rtl-0",
+				frequency: chan(869_600_000),
+			})
+			expect(
+				resolveProvenance(sig(target - 1_600_001), bind([target])),
+			).toEqual({
+				sourceId: "rtl-0",
+				frequency: chan(target),
+			})
 		})
 	})
 })

@@ -16,9 +16,27 @@ export interface DecoderOutputLike {
 const MAX_VALUES_PER_KEY = 256
 const MAX_ACCEPTED = 4096
 
+/**
+ * Cross-instance pairing (confirm-memory.ts): asked on the first CRC-clean occurrence of
+ * `value` under `key` in this memory; true when another instance on the same discovery
+ * already saw it, so this occurrence is the second. Must not throw (a throw counts as false).
+ */
+export type ConfirmPair = (key: string, value: string) => boolean
+
 export class DoubleMatch {
 	private readonly counts = new Map<string, Map<string, number>>()
 	private readonly accepted = new Set<string>()
+
+	constructor(private readonly pair?: ConfirmPair) {}
+
+	private paired(key: string, value: string): boolean {
+		if (!this.pair) return false
+		try {
+			return this.pair(key, value) === true
+		} catch {
+			return false
+		}
+	}
 
 	/** True exactly once: on the second CRC-clean occurrence of `value` under `key`. */
 	accept(key: string, value: string, crcClean: boolean): boolean {
@@ -30,7 +48,7 @@ export class DoubleMatch {
 		}
 		const seen = (values.get(value) ?? 0) + 1
 		values.delete(value)
-		if (seen >= 2) {
+		if (seen >= 2 || (seen === 1 && this.paired(key, value))) {
 			this.markAccepted(key, value)
 			return true
 		}
@@ -73,12 +91,14 @@ export function createInterpreterState(opts: {
 	probeId?: string
 	decoderId?: string
 	nxdn?: "nxdn48" | "nxdn96"
+	/** Shared per-discovery pairing (confirm-memory.ts); absent: this state pairs alone. */
+	pair?: ConfirmPair
 }): InterpreterState {
 	const state: InterpreterState = {
 		epoch: opts.epoch,
 		origin: opts.origin,
 		nxdn: opts.nxdn ?? "nxdn96",
-		match: new DoubleMatch(),
+		match: new DoubleMatch(opts.pair),
 		accepted: new Map(),
 	}
 	if (opts.probeId !== undefined) state.probeId = opts.probeId

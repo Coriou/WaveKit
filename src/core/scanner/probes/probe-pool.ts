@@ -50,6 +50,7 @@ import type {
 	ScannerSettings,
 } from "../types.js"
 import {
+	type ConfirmPair,
 	createInterpreterState,
 	type DecoderOutputLike,
 	type InterpreterState,
@@ -168,6 +169,12 @@ export interface ProbePoolDeps {
 	now?: () => number
 	/** Own the exact remover before the sole external constructor listener effect. */
 	ownConstructorListener?: (removeExact: () => void) => boolean
+	/**
+	 * WG16 SC 3a: shared per-discovery confirm pairing (ConfirmMemory) for a live probe's
+	 * first occurrence of an identity. Never asked for a replay probe: a replay re-decodes a
+	 * captured transmission, so it could pair one transmission with itself.
+	 */
+	confirmPair?: (req: ProbeRequest, key: string, value: string) => boolean
 }
 
 export interface ProbeStatus {
@@ -524,6 +531,11 @@ export function buildProbeConfig(input: {
 		type: input.mode.decoderType,
 		enabled: true,
 		sourceId: input.req.sourceId,
+		// The probe's channel is its one target: the decoder's Activity provenance
+		// binding then carries this frequency (resolveDecoderTargetFrequencies).
+		...(Number.isFinite(input.req.targetHz) && input.req.targetHz > 0
+			? { frequencies: [input.req.targetHz] }
+			: {}),
 		options,
 	}
 	return input.transport.configure(base, input.ctx)
@@ -1422,6 +1434,11 @@ export class ProbePool extends EventEmitter {
 				this.serviceRounds.delete(oldest)
 			}
 		}
+		const confirmPair = this.deps.confirmPair
+		const pairing: { pair?: ConfirmPair } =
+			confirmPair && !req.replay
+				? { pair: (key, value) => confirmPair(req, key, value) }
+				: {}
 		const rec: ProbeRecord = {
 			probeId,
 			decoderId,
@@ -1445,6 +1462,7 @@ export class ProbePool extends EventEmitter {
 				probeId,
 				decoderId,
 				nxdn: mode.options["mode"] === "nxdn48" ? "nxdn48" : "nxdn96",
+				...pairing,
 			}),
 			input: null,
 			untap: null,
@@ -1473,6 +1491,7 @@ export class ProbePool extends EventEmitter {
 					origin: "probe",
 					probeId,
 					decoderId,
+					...pairing,
 				}),
 			)
 		}

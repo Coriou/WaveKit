@@ -55,11 +55,7 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
-import {
-	SCANNER_AMBIENT_PROTOCOLS,
-	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
-	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
-} from "@wavekit/api-types"
+import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -185,6 +181,9 @@ import {
 } from "./probes/ambient.js"
 import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import { pickChannelObservation } from "./probes/ambient-channel.js"
+import { placeAmbientDecode } from "./probes/ambient-placement.js"
+import { ConfirmMemory } from "./probes/confirm/confirm-memory.js"
+import type { AmbientPairContext } from "./probes/ambient.js"
 import {
 	ProbePool,
 	REPLAY_PROBE_PRIORITY,
@@ -763,6 +762,8 @@ export class ScannerService extends EventEmitter {
 		{ startHz: number; binHz: number; bins: number[]; snrDb: number }
 	>()
 	private readonly lastConfirm = new Map<string, number>()
+	/** WG16 SC 3a: identity pairing shared by every probe and ambient decoder, per discovery. */
+	private readonly confirmMemory = new ConfirmMemory(() => this.now())
 	/** WG11 req 1.7: the known protocol is the store's decoded protocol (`get` clones: no cheaper read). */
 	private readonly knownProtocols = createKnownProtocolMemory({
 		discovery: id => {
@@ -1143,6 +1144,8 @@ export class ScannerService extends EventEmitter {
 				allocatePort: () => this.allocatePort(),
 				logger: deps.logger,
 				now: this.now,
+				confirmPair: (req, key, value) =>
+					this.probeConfirmPair(req, key, value),
 			})
 			this.ambient = new AmbientEvidence({
 				decoders: deps.decoders,
@@ -1154,6 +1157,8 @@ export class ScannerService extends EventEmitter {
 				sampleRateOf: sourceId => deps.sources.getCaps(sourceId)?.sampleRate,
 				centreOf: sourceId => deps.sources.getCaps(sourceId)?.centerFreq,
 				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
+				confirmPair: (ctx, key, value) =>
+					this.ambientConfirmPair(ctx, key, value),
 			})
 			this.channelTaps = deps.channelOwnership
 				? new ChannelTaps({
@@ -3819,42 +3824,101 @@ export class ScannerService extends EventEmitter {
 			this.drivers.get(jobId)?.onEvidence(probeId, ev)
 	}
 
-	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
+	/**
+	 * The observations an ambient decode names. A channel decode (rtl433) names the one
+	 * observation inside its passband (pickChannelObservation). A point decode names the
+	 * nearest observation whose track reaches it (placeAmbientDecode): half the decoder's
+	 * channel width for an ambient-only protocol (AIS, ACARS, VDL2, LoRa), else
+	 * max(1.5 kHz, OBW / 2); a tie between two signals names nothing.
+	 */
+	private placeAmbient(e: {
+		sourceId: string
+		hz: number
+		at: number
+		protocol: DecodeEvidence["protocol"] | null
+		passband?: AmbientEvidenceEvent["passband"]
+		freqHz?: number | undefined
+	}): LiveObservation[] {
 		const now = this.now()
-		const ambientOnly = SCANNER_AMBIENT_PROTOCOLS.includes(e.ev.protocol)
 		const observations = [...this.live.values(), ...this.recent]
-		// A channel decode (rtl433) names one observation inside its passband.
-		const picked = e.passband
-			? pickChannelObservation(
-					observations,
-					{
-						sourceId: e.sourceId,
-						passband: e.passband,
-						at: e.ev.at,
-						freqHz: e.freqHz,
-					},
-					now,
-					AMBIENT_PAIR_MS,
-				)
-			: null
-		const candidates = e.passband
-			? picked
-				? [picked]
-				: []
-			: observations.filter(o => {
-					const t = o.lastTrack
-					if (o.sourceId !== e.sourceId || !t) return false
-					// WG7: an ambient-only decode (AIS, ACARS, VDL2, LoRa) names only a track within the
-					// 1 kHz decode tolerance, so a wide track near its channel is never named by it.
-					const tolHz = ambientOnly
-						? SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
-						: Math.max(1500, t.obwHz / 2)
-					if (Math.abs(t.centreHz - e.hz) > tolHz) return false
-					return (
-						e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
-						e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
-					)
-				})
+		if (e.passband) {
+			const picked = pickChannelObservation(
+				observations,
+				{
+					sourceId: e.sourceId,
+					passband: e.passband,
+					at: e.at,
+					freqHz: e.freqHz,
+				},
+				now,
+				AMBIENT_PAIR_MS,
+			)
+			return picked ? [picked] : []
+		}
+		return placeAmbientDecode(
+			observations,
+			{ sourceId: e.sourceId, hz: e.hz, at: e.at, protocol: e.protocol },
+			now,
+			AMBIENT_PAIR_MS,
+		)
+	}
+
+	/** Confirm-memory scope of an observation: its discovery, else the observation itself. */
+	private confirmScopeOf(observationId: string): string {
+		const discoveryId =
+			this.findObservation(observationId)?.discoveryId ??
+			this.store.discoveryIdOf(observationId)
+		return discoveryId ? `d:${discoveryId}` : `o:${observationId}`
+	}
+
+	/** WG16 SC 3a: a live probe's identity pairs across probes and ambient decoders of its discovery. */
+	private probeConfirmPair(
+		req: ProbeRequest,
+		key: string,
+		value: string,
+	): boolean {
+		if (req.replay) return false
+		return this.confirmMemory.pair(
+			this.confirmScopeOf(req.observationId),
+			key,
+			value,
+		)
+	}
+
+	/**
+	 * WG16 SC 3a: an ambient identity pairs on the discovery its decode would be placed on
+	 * (placeAmbient). No single placement (none, or a tie): it pairs only in its own decoder.
+	 */
+	private ambientConfirmPair(
+		ctx: AmbientPairContext,
+		key: string,
+		value: string,
+	): boolean {
+		const placed = this.placeAmbient({
+			sourceId: ctx.sourceId,
+			hz: ctx.hz,
+			at: ctx.at,
+			protocol: ctx.protocol ?? null,
+			...(ctx.passband ? { passband: ctx.passband } : {}),
+			...(ctx.freqHz !== undefined ? { freqHz: ctx.freqHz } : {}),
+		})
+		const scopes = new Set(
+			placed.map(o => this.confirmScopeOf(o.observationId)),
+		)
+		if (scopes.size !== 1) return false
+		const [scope] = scopes
+		return scope !== undefined && this.confirmMemory.pair(scope, key, value)
+	}
+
+	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
+		const candidates = this.placeAmbient({
+			sourceId: e.sourceId,
+			hz: e.hz,
+			at: e.ev.at,
+			protocol: e.ev.protocol,
+			...(e.passband ? { passband: e.passband } : {}),
+			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
+		})
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
 		// trials leave the count to this path).
