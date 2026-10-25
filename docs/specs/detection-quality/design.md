@@ -1,7 +1,8 @@
 # Detection quality design (WG15 DQ)
 
 Status: reviewed design, not implemented (2026-10-24; revised after spec review the same
-day). Requirements in [requirements](requirements.md), tasks in [tasks](tasks.md).
+day). Amendment (2026-10-25, draft, not reviewed): sections 7 and 8. Requirements in
+[requirements](requirements.md), tasks in [tasks](tasks.md).
 Background: the [scanner redesign](../scanner-redesign/design.md) channel gate and evidence
 labels, `docs/SCANNER.md`, and the hot-path rules in `docs/PERFORMANCE.md`.
 
@@ -44,6 +45,8 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_DATA_HELD_MAX`          | 8                              | 4.5         |
 | `DQ_DATA_RING`              | 256                            | 4.5         |
 | `DQ_DATA_RATE_PER_S`        | 16                             | 4.5         |
+| `DQ_CONSOLIDATE_GROUP_MAX`  | 16                             | 7.2, 7.6    |
+| `DQ_CONSOLIDATE_PASSES`     | 3                              | 7.4, 7.6    |
 
 No change to `packages/api-types`, the REST or WebSocket shapes, or
 `docs/CLI-COORDINATION.md`. Pending entries are memory-only. The persisted and journaled
@@ -268,6 +271,163 @@ The WebSocket `transmission` closed event is broadcast at close as today, withou
 
 No code. The acceptance plan records passive status.
 
+## 7. Legacy consolidation (amendment)
+
+### Root cause (code as of the amendment base)
+
+- `stickyMatch` (`src/core/scanner/store/discovery-store.ts`, about lines 1952 to 2026)
+  picks the **nearest** record within tolerance (cross-family within 1 kHz for an
+  evidence-less observation), tie-break `lastSeenAt` then id. It ignores identity and never
+  looks at a second candidate. With two records 100 to 600 Hz apart and observation centres
+  jittering about +-440 Hz, each observation goes to whichever record is nearer, so both
+  are updated indefinitely.
+- `settle` (about line 3124) merges only records returned by `atKey(source, key)` that have
+  the same **effective** family (`effectiveLabel`, evidence-derived, not the persisted
+  `family`) and the same identity, and it runs only for the record an operation touched.
+  Records on different keys, or one labelled `unknown` and one `analog` by evidence, are
+  never compared. Nothing walks the store to fold pairs created before 2.1.
+- The `g:` key is bandwidth-dependent: `frequencyKey` (`src/core/scanner/bandplan/index.ts`
+  line 112) rounds to `gridToleranceHz(obw)` = round(max(2 000, obw / 4) / 500) x 500
+  (line 78), so one emitter whose median OBW is 11 kHz on one record and 14 kHz on another
+  lands on 3 000 Hz and 3 500 Hz grids and on different keys. This is a contributor, not
+  the main cause: in the offline replay about 29 % of joinable pairs differed in key, about
+  62 % shared the key but differed in effective family, about 9 % shared key, family and
+  identity (an older duplicate `settle` never revisited after a refresh moved it).
+  Follow-ups 6.1 and 6.2 remove the key cause; requirement 7 does not depend on keys.
+- Existing merges are state-based in the journal: `absorb` (about line 3154) writes the
+  survivor, the moved observations, `deleted` and the alias entries through the op's
+  `StoreMutation` (`src/core/scanner/store/schemas.ts` line 289); `replay` applies the
+  mutation (about line 1922). No merge function is re-run at replay. `rekey` (about line 1286) is the one existing whole-source pass (refresh every record, then `settle` each).
+
+### Store facts used
+
+- Merge function: `absorb(op, keep, drop)` already sums `observationCount` and `airtimeMs`,
+  widens first/last seen, picks `signal.best` by 3.3 (`bestEligible`), takes
+  `signal.last`/`tuningTrust` from the later record, LRU-merges metadata, unions `jobIds`,
+  `sourceIds`, evidence flags and recording counts, ORs operator flags, re-points and
+  prunes `coChannel` (2.3), adopts aliases, deletes `drop`, refreshes and re-applies the
+  majority class (3.4, `classVote` per stored observation). Requirement 7 reuses it
+  unchanged.
+- Aliases: `RecordingAliasTable` (`src/core/scanner/recording-aliases.ts`) maps an absorbed
+  id to its survivor (O(1) `aliasOwner`, at most `DISCOVERY_RECORDING_ALIASES_MAX` 64 per
+  owner, oldest released), persisted in the snapshot `aliases` and in each mutation's
+  `aliases`. It is read only by the evidence store for recording folders. The REST route
+  `GET /api/scanner/discoveries/:id` (`src/api/routes/scanner.ts` line 621) calls
+  `store.get(id)`, which does not consult aliases: an absorbed id answers 404. Requirement 7
+  keeps that (follow-up 6.5).
+
+### Algorithm
+
+`consolidate(op?: Op): number` on `DiscoveryStore`, called by `ScannerService` after
+`restore` and `replay` and before the first ingest (next to the existing load path in
+`scanner-service.ts`, about line 1287), and from `stickyMatch`'s caller after a match.
+
+1. Order: sort live ids by the survivor order (7.2): rank `decoded` first, then
+   `firstSeenAt`, then id (`compareText`). O(n log n), n <= `maxDiscoveries`.
+2. For each id `s` in order, skip it if absorbed in this pass. Query the centre index of
+   `s`'s first source over [median centre - 1 000, + 1 000] across all centre families
+   (the same `centres.range` the cross-family sticky uses, plus `decodedCentres`). Keep
+   candidates `c` with `joinable(s, c)` (7.1); sort by distance then id; take at most 16.
+3. If any: one `commit("consolidate", op => ...)` that calls `absorb(op, s, c)` for each,
+   in that order, re-checking `joinable` against `s`'s refreshed medians before each (a
+   member that stopped being joinable stays). Mark absorbed ids.
+4. Repeat the pass while it merged something, at most 3 passes.
+
+`joinable` is a pure function in `src/core/scanner/store/consolidation.ts` (new) over
+`{ sourceId, centre, obw, peak, count, young observations, identity, effective family,
+confidence, protocol, hasOperator }`; the store builds the inputs from cached medians
+(`mediansOf`) and `effectiveLabel`.
+
+Lazy path: after `stickyMatch` returns `best`, the same candidates the scan visited (already
+within `min(tol, 1 kHz)`) are filtered with `joinable(survivor(best, c), ...)`; at most 16
+are absorbed into the group's survivor (which may be a candidate, not `best`, if it is
+earlier in the order) inside the observation's operation, before `addObservation`.
+
+Determinism and order independence: the survivor order is a total order on record fields
+that do not depend on insertion; groups are formed in that order; candidate order is by
+distance then id. So two stores holding the same records give the same result. Idempotent:
+after the last pass no survivor has a joinable live candidate, and the pass merges nothing.
+
+Crash safety: each group is one journal line (`op: "consolidate"`, `StoreMutation`
+payload, added to `JournalLineSchema`'s enum in `src/core/scanner/store/persistence.ts`
+line 389 and to the `JournalEntry` op union). A line is appended atomically or not at all;
+a lost line means the group was never durable and the next load forms it again. An older
+binary reading a journal with `consolidate` lines rejects the unknown op today
+(`parseJournalLine`); that is the existing forward-compatibility rule for new ops (as for
+`evict`), stated in the task report.
+
+### CPU
+
+As requirement 7.6. The load pass is synchronous in the store; at 10 000 records it is
+bounded by 30 000 range queries and 480 000 O(1) checks (three passes). If the measured
+desktop time exceeds 50 ms for the reference store, the pass yields between groups
+(`setImmediate`) while ingest waits on a `consolidated` promise. The lazy path adds at most
+16 checks per sticky match, under the per-observation budget of this spec.
+
+## 8. Passive marginal cost guard (amendment)
+
+### Current logic
+
+`checkPassiveCost` (`src/core/scanner/scanner-service.ts` about lines 6619 to 6715): for each
+source with an open engine and a passive job (or a guard-disabled one), at open + 60 s then
+every 300 s, it computes the engine worker's windowed event-loop utilization
+(`windowedUtilization`, `src/core/scanner/passive-cost.ts`) and feeds
+`passiveCostDecision`: disable above the limit, clear at or below 0.8 x limit. A
+guard-disabled source whose engine closed is re-enabled after `PASSIVE_PROBATION_MS`
+(`passiveProbationDue`). The engine is shared: `SpectrumService` keeps per-source
+`jobs` (`job:<id>`) and `displays` (`ws:<clientId>`) consumer sets
+(`src/core/spectrum/spectrum-service.ts`, `Entry` about line 382; `allocation().consumers`
+about line 718) and closes the engine only when both are empty (`release`, about line 562).
+So with a display open the utilization is the display's cost plus passive's, and passive
+can be disabled for cost it did not cause; and once disabled, it comes back only if the
+whole engine (display alone) falls under 0.2 or the display closes.
+
+What passive adds to a shared engine: its job's masks and CFAR ranges (`updateMasks`), the
+lease holder's tuning when passive holds the arbiter lease (`engineTuning`, about line
+2438; a different FFT size or integration reconfigures the worker and bumps its
+generation), and the tracker and observation work in the worker. A display-only engine runs
+the FFT and summaries regardless.
+
+### Design
+
+New pure function in `src/core/scanner/passive-cost.ts`:
+
+```ts
+passiveMarginalDecision(input: {
+  holders: "sole" | "shared" | "none"
+  utilization: number | null      // U, windowed
+  baseline: number | null         // valid B or null (8.3)
+  limit: number
+  disabled: boolean
+  sinceOpenMs: number | null
+  sinceLastCheckMs: number | null
+  baselineWindowAllowed: boolean  // none run in the last PASSIVE_BASELINE_MAX_AGE_MS
+}): "disable" | "clear" | "keep" | "measure-baseline"
+```
+
+- `sole`: returns `passiveCostDecision(...)` (identical behaviour).
+- `shared`, enabled: with `baseline` -> `passiveCostDecision` on `max(0, U - B)`; without
+  -> keep if `U <= limit`, disable if `U >= 0.95`, else `measure-baseline` when allowed,
+  else keep.
+- `none` (disabled or baseline window): never disables; the service records `B`.
+
+Service wiring: classify holders from `spectrum.allocation().consumers[sourceId]` (O(jobs +
+displays)); store `{ engine, others: sorted consumer ids minus passive, at, value }` per
+source as the baseline; invalidate on a different engine object, a different `others`
+list, or age over 1 800 000 ms. `measure-baseline` sets a `baselineUntil` mark, removes
+the passive job through the existing `refreshPassive` path with reason `measuring`, and the
+next check after 60 s records `B` and rebuilds passive. Shared trial (8.5) reuses
+`passiveProbationDue` with `engineOpen` true allowed when a valid baseline exists.
+
+Constants (contract, `src/core/scanner/passive-cost-contract.ts`):
+`PASSIVE_BASELINE_MAX_AGE_MS` 1 800 000, `PASSIVE_SATURATION` 0.95. No new config key.
+
+Pi protection: on a headless receiver only passive holds the engine, so `sole` applies and
+a measured 0.99 core disables passive at open + 60 s as today. With a display open on such
+a host, `U` saturates (>= 0.95) and passive is disabled without a baseline; with a baseline
+showing the display alone near 0.95, `M` is small but the saturation rule still applies
+first when `U >= 0.95` (the design keeps that ordering: saturation beats a baseline).
+
 ## CPU and hot path (`docs/PERFORMANCE.md`)
 
 | Change                              | Rate                      | Cost                                             |
@@ -379,3 +539,40 @@ the last 64 non-edge classes with the recency tie-break. _Validates 3.4._
 from Activity iff it was held and a reception with the same source, channel basis, trusted
 tuning, within 1 250 Hz and the time window was retained; every close is delivered exactly
 once. _Validates 4.1, 4.3, 4.5, 4.6._
+
+**Property 12: Consolidation fixpoint.** For any store, after `consolidate` no two live
+records are joinable (7.1) where one is a survivor and the other within 16 nearest, unless
+the pass bound was reached; running it again merges nothing. _Validates 7.4, 7.5._
+
+**Property 13: Order independence.** For any set of records inserted in any two orders (and
+any journal split of the same history), the consolidated stores hold the same ids with the
+same observation sets. _Validates 7.2, 7.5._
+
+**Property 14: Conservation and safety.** For any store, consolidation preserves the total
+observation count and total airtime per source, never merges a pair that 7.1 excludes
+(identity conflict, specific family conflict, decoded protocol conflict, operator state,
+3.1 refusal, over 1 kHz, OBW ratio over 2), never merges members more than 1 kHz from their
+survivor, and every absorbed id resolves through `aliasOwner` to a live survivor (until the
+64-alias bound releases it). _Validates 7.1, 7.3, 7.7._
+
+**Property 15: Crash equivalence.** For any store and any prefix of its `consolidate`
+journal lines, restore plus replay of the prefix plus a fresh `consolidate` yields the same
+store as the uninterrupted run. _Validates 7.5._
+
+**Property 16: Marginal guard.** For any holders, `U`, `B`, limit and timing:
+`sole` returns exactly `passiveCostDecision`; `shared` with a baseline never disables when
+`max(0, U - B) <= limit` and `U < 0.95`; it always disables when `U >= 0.95` and passive is
+enabled; `none` never disables; `measure-baseline` is returned only when allowed and
+`limit < U < 0.95` without a baseline. Non-finite inputs keep. _Validates 8.2 to 8.5, 8.7._
+
+All fast-check properties run with `numRuns: 100` or more and carry the trace comment
+(`// Feature: detection-quality, Property N: ...`).
+
+Tests for the amendment: `tests/unit/core/scanner/consolidation.property.test.ts` (new,
+Properties 12 to 15 on the pure `joinable` and a store built from generated records),
+`tests/unit/core/scanner/discovery-store-consolidate.test.ts` (new, the 7.8 fixtures),
+`tests/unit/core/scanner/passive-cost.test.ts` and a new
+`passive-marginal.property.test.ts` (Property 16 and the 8.8 table),
+`scanner-service` passive guard wiring tests (baseline window, trial). Expected to change:
+the store goldens (`store-change-golden*.test.ts`) where fixtures hold joinable records,
+`merge-alias-*` tests (new `consolidate` op), and the persistence journal schema test.
