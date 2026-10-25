@@ -1,3 +1,4 @@
+import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
@@ -994,9 +995,11 @@ export class ScannerService extends EventEmitter {
 				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
 				hintScope: () => ({
 					region: this.deps.region,
-					ranges: (
-						this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
-					).flatMap(p => p.ranges),
+					ranges: withScannerOverlays(
+						(this.deps.bandplans?.() ?? bandplansFor(this.deps.region)).flatMap(
+							p => p.ranges,
+						),
+					),
 				}),
 				logger: this.log,
 				...(deps.recordingProtection
@@ -4757,7 +4760,7 @@ export class ScannerService extends EventEmitter {
 			knownProtocol: discoveryId
 				? this.knownProtocols.known(discoveryId)
 				: null,
-			priors: priorsFor(ranges, capture.rfHz),
+			priors: narrowestPriors(withScannerOverlays(ranges), capture.rfHz),
 			narrowRaster: narrowRasterAt(ranges, capture.rfHz),
 		}
 	}
@@ -5469,7 +5472,7 @@ export class ScannerService extends EventEmitter {
 				const id = this.store.discoveryIdOf(observationId)
 				return id ? this.store.get(id) : undefined
 			},
-			priorsAt: hz => priorsFor(ranges, hz),
+			priorsAt: hz => narrowestPriors(withScannerOverlays(ranges), hz),
 			narrowRasterAt: hz => narrowRasterAt(ranges, hz),
 			knownProtocols: this.knownProtocols,
 			format: sourceId =>

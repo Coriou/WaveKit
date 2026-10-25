@@ -149,7 +149,6 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 | `amateur-70cm`    | EU/US  | 430–440 / 420–450 | 12.5 and 25 kHz       | 9, 11, 16         | analog-fm, dstar, dmr, ysf, p25p1     |
 | `aprs`            | EU/US  | 144.800 / 144.390 | one channel           | 16                | aprs                                  |
 | `ism-433`         | EU     | 433.05–434.79     | none                  | none              | ism                                   |
-| `ism-433` LPD433  | EU     | 433.075–434.775   | 25 kHz                | none              | analog-fm, ism                        |
 | `ism-868`         | EU     | 863–870           | none                  | none              | ism                                   |
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
@@ -415,7 +414,10 @@ slot), `ism-device` (a short or OOK burst up to 25 kHz wide in an ISM band; try
 rtl_433), `analog-voice` (a longer signal within 3 kHz of the LPD433 25 kHz
 raster, 433.075 to 434.775 MHz), otherwise its spectral class. A hint is never
 a protocol label. Band-plan priors come from the narrowest covering range that
-lists protocols, so inside LPD433 analog FM is tried before DMR.
+lists protocols. Inside the EU `ism-433` band the scanner also treats
+433.075–434.775 MHz (LPD433, 25 kHz channels, analog FM and ISM) as a narrower
+range for trial order and hints, so there analog FM is tried before DMR; it is
+not a separate band-plan entry.
 
 Capture starts at gate pass. Scans replay captured IQ before taking a live hold.
 Every planned trial is recorded as `pending` first, so skipped or unavailable

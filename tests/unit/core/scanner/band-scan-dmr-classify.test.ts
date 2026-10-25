@@ -349,8 +349,6 @@ describe("withBandBurstPrior: OOK short-range-device allocations", () => {
 		const builtIn = bandplansFor("EU")
 			.filter(p => p.id === "ism-433" || p.id === "ism-868")
 			.flatMap(p => p.ranges)
-			// Scanner-redesign 3.12: the LPD433 voice range nests inside ism-433 and is not an OOK entry.
-			.filter(r => !(r.protocols ?? []).includes("analog-fm"))
 			.map(r => [r.startHz, r.endHz])
 		expect(builtIn).toEqual([
 			[433_050_000, 434_790_000],

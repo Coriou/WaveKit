@@ -1,9 +1,10 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
+import { bandplansFor } from "../../../../../src/core/scanner/bandplan/index.js"
 import {
-	bandplansFor,
-	priorsFor,
-} from "../../../../../src/core/scanner/bandplan/index.js"
+	narrowestPriors as priorsFor,
+	withScannerOverlays,
+} from "../../../../../src/core/scanner/classify/priors.js"
 import {
 	classOf,
 	classifySpectral,
@@ -15,7 +16,9 @@ import type {
 import { makeTrack } from "../../../../mocks/scanner/observations.js"
 
 const MHz = (x: number): number => Math.round(x * 1e6)
-const EU_RANGES: ScanRange[] = bandplansFor("EU").flatMap(p => p.ranges)
+const EU_RANGES: ScanRange[] = withScannerOverlays(
+	bandplansFor("EU").flatMap(p => p.ranges),
+)
 const SPECIFIC: ScannerProtocol[] = [
 	"analog-fm",
 	"analog-am",
@@ -47,12 +50,17 @@ function order(hz: number, obwHz: number, ranges: ScanRange[]): string[] {
 	}).hypotheses.map(h => h.protocol)
 }
 
-describe("built-in LPD433 range", () => {
+describe("scanner LPD433 overlay", () => {
 	it("lists analog-fm and ism on a 25 kHz raster from 433.075 to 434.775 MHz", () => {
 		const lpd = EU_RANGES.find(
 			r => r.startHz === MHz(433.075) && r.endHz === MHz(434.775),
 		)
 		expect(lpd?.protocols).toEqual(["analog-fm", "ism"])
+		expect(lpd?.bandplanId).toBe("ism-433")
+		const hidden = bandplansFor("EU")
+			.filter(p => p.id !== "ism-433")
+			.flatMap(p => p.ranges)
+		expect(withScannerOverlays(hidden)).toEqual(hidden)
 		expect(lpd?.rasters).toEqual([
 			{ spacingHz: 25_000, firstChannelHz: MHz(433.075) },
 		])
