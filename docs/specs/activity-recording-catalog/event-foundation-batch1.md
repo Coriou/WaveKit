@@ -119,8 +119,7 @@ age.
 
 As design.md "Search and replay protocol" (filters, 16 terms, 256-byte text,
 8 quoted tokens, page 100/200/512 KiB, keyset by seq, 250 ms reader deadline,
-one in-flight request per admitted access principal, or per request IP when
-the request has no principal, four queued and one executing globally, 429
+per-client and global admission as amended below, 429
 `ACTIVITY_QUERY_BUSY` / `ACTIVITY_QUERY_TIMEOUT`), with one reader worker that
 is terminated and recreated on deadline. The key is that principal's id:
 the device id for a session, otherwise the machine id. A client-chosen
@@ -135,6 +134,29 @@ Facets: `dimensions` from category, protocol, decoderId, sourceId, kind, at most
 at most 50,000 rows in descending seq; when the cap is hit, `truncated: true` and
 counts are lower bounds. At most 32 values per dimension. Same deadline and
 admission as search.
+
+### Admission amendment (2026-10-25)
+
+The original batch-1 limits (one in-flight request per client, four queued and
+one executing globally) refused the web app's normal burst: one browser opens
+the Activity list, the facet counts and the Messages query at once, and every
+read after the first answered 429. Admission now queues instead:
+
+- At most 1 read executes and at most 8 wait, across all clients.
+- One client (the same key as before: access principal, else request IP) holds
+  at most 4 requests, executing plus queued. Its excess waits in the shared
+  queue instead of being refused.
+- A client's own requests run in arrival order. Across clients the queue is
+  served round robin, so one client's burst cannot starve another, and with 4
+  of 8 slots no single client fills the queue.
+- 429 `ACTIVITY_QUERY_BUSY` is returned only when the client is at its cap of
+  4 or the shared queue is full. The reply carries `Retry-After: 1`.
+  `ACTIVITY_QUERY_TIMEOUT` carries no `Retry-After`: repeating an expensive
+  query does not help.
+- The reader deadline starts at admission, not on arrival. A queued read waits
+  at most about `maxQueued x deadline` before it runs: 8 x 250 ms = 2 s behind
+  search, detail and facet reads, and up to 8 x 1 s = 8 s behind trails, band
+  map and timeline reads.
 
 ## Cursor and replay
 

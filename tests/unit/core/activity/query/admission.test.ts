@@ -8,40 +8,69 @@ import type { ReaderHostEvent } from "../../../../../src/core/activity/query/rea
 import { createFixture, openQueryService } from "./fixture.js"
 
 describe("activity query admission", () => {
-	it("refuses a second in-flight read from the same client", async () => {
+	it("serves a burst of three reads from one client in order", async () => {
 		const fixture = await createFixture()
-		let calls = 0
-		const service = openQueryService(fixture, {
-			readerDelayMs: () => {
-				calls += 1
-				return calls === 1 ? 80 : 0
-			},
-		})
+		const service = openQueryService(fixture, { readerDelayMs: 20 })
 		try {
-			const first = withActivityClient("same", () => service.search({ query: {} }))
-			await expect(
-				withActivityClient("same", () => service.search({ query: {} })),
-			).rejects.toBeInstanceOf(ActivityQueryBusyError)
-			await first
+			const order: number[] = []
+			const jobs = [0, 1, 2].map(index =>
+				withActivityClient("same", () =>
+					service.search({ query: {} }).then(page => {
+						order.push(index)
+						return page
+					}),
+				),
+			)
+			const settled = await Promise.allSettled(jobs)
+			expect(settled.map(result => result.status)).toEqual([
+				"fulfilled",
+				"fulfilled",
+				"fulfilled",
+			])
+			expect(order).toEqual([0, 1, 2])
 		} finally {
 			await service.close()
 			await fixture.close()
 		}
 	})
 
-	it("keeps one executing reader and four queued readers", async () => {
+	it("refuses a read past the per-client cap", async () => {
 		const fixture = await createFixture()
 		const service = openQueryService(fixture, {
 			readerDelayMs: 40,
+			limits: { maxInFlightPerClient: 2 },
+		})
+		try {
+			const jobs = [
+				withActivityClient("same", () => service.search({ query: {} })),
+				withActivityClient("same", () => service.search({ query: {} })),
+			]
+			await expect(
+				withActivityClient("same", () => service.search({ query: {} })),
+			).rejects.toBeInstanceOf(ActivityQueryBusyError)
+			const settled = await Promise.allSettled(jobs)
+			expect(settled.every(result => result.status === "fulfilled")).toBe(true)
+		} finally {
+			await service.close()
+			await fixture.close()
+		}
+	})
+
+	it("keeps one executing reader and eight queued readers", async () => {
+		const fixture = await createFixture()
+		const service = openQueryService(fixture, {
+			readerDelayMs: 20,
 			limits: { deadlineMs: 2_000 },
 		})
 		try {
 			const jobs = []
-			for (let index = 0; index < 5; index += 1) {
-				jobs.push(withActivityClient(`c${index}`, () => service.search({ query: {} })))
+			for (let index = 0; index < 9; index += 1) {
+				jobs.push(
+					withActivityClient(`c${index}`, () => service.search({ query: {} })),
+				)
 			}
 			await expect(
-				withActivityClient("c5", () => service.search({ query: {} })),
+				withActivityClient("c9", () => service.search({ query: {} })),
 			).rejects.toBeInstanceOf(ActivityQueryBusyError)
 			const settled = await Promise.allSettled(jobs)
 			expect(settled.every(result => result.status === "fulfilled")).toBe(true)
@@ -71,7 +100,9 @@ describe("activity query admission", () => {
 				withActivityClient("one", () => service.search({ query: {} })),
 			).rejects.toBeInstanceOf(ActivityQueryTimeoutError)
 			expect(events.some(event => event.type === "terminate")).toBe(true)
-			const page = await withActivityClient("two", () => service.search({ query: {} }))
+			const page = await withActivityClient("two", () =>
+				service.search({ query: {} }),
+			)
 			expect(page.items.map(item => item.eventId)).toEqual(["kept"])
 		} finally {
 			await service.close()

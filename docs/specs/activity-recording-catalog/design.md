@@ -325,8 +325,10 @@ return `searchCoverage: bounded-projection`. Raw JSON is detail-only.
 Pages default100, max200 summaries and 512 KiB; details fetched independently.
 Default sort is commitSeq descending; optional ascending uses a distinct cursor.
 No relevance/time sort in v1. An indexed producedAt predicate is a filter, not
-chronology authority. Queries have 250 ms worker deadline, global four queued/one
-executing reader admission ceiling and per-client one request; worker termination after
+chronology authority. Queries have 250 ms worker deadline, global eight queued/one
+executing reader admission ceiling and per-client four requests that queue rather than
+being refused (amended 2026-10-25, see
+[event-foundation-batch1.md](event-foundation-batch1.md#admission-amendment-2026-10-25)); worker termination after
 deadline cancels stuck read work and recreates only the reader. Repeated expensive
 queries return 429, not progressively larger budgets. No total COUNT by default.
 

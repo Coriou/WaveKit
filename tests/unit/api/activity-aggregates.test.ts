@@ -303,6 +303,7 @@ describe("GET /api/activity/bandmap and /timeline", () => {
 			expect([first.statusCode, second.statusCode].sort()).toEqual([200, 429])
 			const busy = first.statusCode === 429 ? first : second
 			expect(busy.json()).toMatchObject({ code: "ACTIVITY_QUERY_BUSY" })
+			expect(busy.headers["retry-after"]).toBe("1")
 			await app.close()
 			await service?.close()
 			await fixture?.close()

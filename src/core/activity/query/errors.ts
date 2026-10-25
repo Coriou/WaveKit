@@ -32,9 +32,29 @@ export class ActivityQueryError extends WaveKitError {
 	}
 }
 
+/** Seconds a client should wait before retrying a busy Activity read. */
+export const ACTIVITY_BUSY_RETRY_AFTER_SECONDS = 1
+
 export class ActivityQueryBusyError extends ActivityQueryError {
+	/** HTTP replies send this as `Retry-After`. */
+	readonly retryAfterSeconds = ACTIVITY_BUSY_RETRY_AFTER_SECONDS
+
 	constructor(message = "Activity query admission is full") {
 		super(message, "ACTIVITY_QUERY_BUSY", 429)
+	}
+}
+
+/**
+ * Sets `Retry-After` on an HTTP reply when the error carries a retry hint.
+ * Every Activity route and the process error handler call this, so a busy
+ * 429 always says when to retry.
+ */
+export function applyRetryAfter(
+	reply: { header: (name: string, value: string) => unknown },
+	error: unknown,
+): void {
+	if (error instanceof ActivityQueryBusyError) {
+		reply.header("Retry-After", String(error.retryAfterSeconds))
 	}
 }
 

@@ -17,7 +17,10 @@ import type {
 	ActivityTimelineQuery,
 	ActivityTrailsQuery,
 } from "../../core/activity/storage/contract.js"
-import { ActivityQueryError } from "../../core/activity/query/errors.js"
+import {
+	ActivityQueryError,
+	applyRetryAfter,
+} from "../../core/activity/query/errors.js"
 import { parseDecimalInteger } from "../../core/activity/query/validate.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
 import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
@@ -453,6 +456,7 @@ function sendError(
 	if (error.reason !== undefined) body.reason = error.reason
 	const correlationId = correlationOf(request)
 	if (correlationId !== undefined) body.correlationId = correlationId
+	applyRetryAfter(reply, error)
 	return reply.code(error.statusCode).send(body)
 }
 
@@ -894,6 +898,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 					...disabledReply,
 					400: errorResponseSchema,
 					404: errorResponseSchema,
+					429: errorResponseSchema,
 				},
 			},
 		},

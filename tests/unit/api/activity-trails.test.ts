@@ -323,6 +323,7 @@ describe("GET /api/activity/trails", () => {
 		expect(codes).toEqual([200, 429])
 		const busy = first.statusCode === 429 ? first : second
 		expect(busy.json()).toMatchObject({ code: "ACTIVITY_QUERY_BUSY" })
+		expect(busy.headers["retry-after"]).toBe("1")
 		await app.close()
 	})
 

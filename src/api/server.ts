@@ -47,7 +47,10 @@ import type { TunerController } from "../core/tuner-controller.js"
 import type { LiveDemodulator } from "../core/live-demodulator.js"
 import type { DigitalVoiceService } from "../core/digital-voice.js"
 import { WaveKitError } from "../utils/errors.js"
-import { ActivityQueryError } from "../core/activity/query/errors.js"
+import {
+	ActivityQueryError,
+	applyRetryAfter,
+} from "../core/activity/query/errors.js"
 import {
 	inertActivityService,
 	type ActivityRuntime,
@@ -1201,6 +1204,7 @@ export class ApiServer {
 					error instanceof ActivityQueryError ? error.statusCode : 400
 				const reason =
 					error instanceof ActivityQueryError ? error.reason : undefined
+				applyRetryAfter(reply, error)
 				return reply.status(status).send({
 					error: error.name,
 					code: error.code,

@@ -102,8 +102,19 @@ export interface ActivityQueryLimits {
 	aggregatesDeadlineMs: number
 	/** WG5: cooperative wall budget of an aggregate walk; past it `time-limit`. */
 	aggregatesWallBudgetMs: number
+	/**
+	 * Requests waiting behind the executing reader, across all clients. The
+	 * deadline starts at admission, so a queued read waits at most about
+	 * `maxQueued x deadline` (8 x 250 ms = 2 s for search, detail and facets;
+	 * 8 x 1 s for trails, band map and timeline) before its own deadline.
+	 */
 	maxQueued: number
 	maxExecuting: number
+	/**
+	 * Executing plus queued requests one client may hold. Its excess waits
+	 * in the shared queue instead of being refused; with 4 of 8 queue slots
+	 * one client can never fill the queue alone.
+	 */
 	maxInFlightPerClient: number
 	snapshotTtlMs: number
 	replayPage: number
@@ -124,9 +135,9 @@ export const DEFAULT_ACTIVITY_QUERY_LIMITS: ActivityQueryLimits = {
 	trailsWallBudgetMs: TRAILS_WALL_BUDGET_MS,
 	aggregatesDeadlineMs: 1_000,
 	aggregatesWallBudgetMs: 600,
-	maxQueued: 4,
+	maxQueued: 8,
 	maxExecuting: 1,
-	maxInFlightPerClient: 1,
+	maxInFlightPerClient: 4,
 	snapshotTtlMs: 5 * 60 * 1000,
 	replayPage: 100,
 }

@@ -627,6 +627,7 @@ describe("API Server", () => {
 					error: string
 				}
 				expect(body.code).toBe("ACTIVITY_QUERY_BUSY")
+				expect(response.headers["retry-after"]).toBe("1")
 				expect(body.error).toBe("ActivityQueryBusyError")
 			} finally {
 				await testServer.stop()

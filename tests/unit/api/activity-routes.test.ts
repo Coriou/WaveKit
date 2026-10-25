@@ -348,4 +348,52 @@ describe("activity routes", () => {
 		})
 		await app.close()
 	})
+
+	it("serves a burst of three Activity reads from one browser", async () => {
+		const store = await createFixture()
+		fixture = store
+		store.insert({ eventId: "evt-1" })
+		service = openQueryService(store, { readerDelayMs: 30 })
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, { service, enabled: true })
+		const responses = await Promise.all([
+			app.inject({ method: "GET", url: "/api/activity" }),
+			app.inject({ method: "GET", url: "/api/activity" }),
+			app.inject({
+				method: "POST",
+				url: "/api/activity/facets",
+				payload: { query: {}, dimensions: ["kind"] },
+			}),
+		])
+		expect(responses.map(response => response.statusCode)).toEqual([
+			200, 200, 200,
+		])
+		await app.close()
+	})
+
+	it("answers 429 with Retry-After when the bounded queue overflows", async () => {
+		const store = await createFixture()
+		fixture = store
+		service = openQueryService(store, {
+			readerDelayMs: 60,
+			limits: { maxQueued: 1 },
+		})
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, { service, enabled: true })
+		const responses = await Promise.all([
+			app.inject({ method: "GET", url: "/api/activity" }),
+			app.inject({ method: "GET", url: "/api/activity" }),
+			app.inject({ method: "GET", url: "/api/activity" }),
+		])
+		expect(responses.map(response => response.statusCode)).toEqual([
+			200, 200, 429,
+		])
+		const busy = responses[2]
+		expect(busy?.headers["retry-after"]).toBe("1")
+		expect(busy?.json()).toMatchObject({ code: "ACTIVITY_QUERY_BUSY" })
+		for (const ok of responses.slice(0, 2)) {
+			expect(ok.headers["retry-after"]).toBeUndefined()
+		}
+		await app.close()
+	})
 })

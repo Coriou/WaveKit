@@ -4868,12 +4868,22 @@ string, numeric and boolean field values, and string leaves of the decoded
 JSON. Whitespace- or punctuation-only text applies no text filter. The
 search is a bounded projection
 (`searchCoverage: "bounded-projection"`), not a search of every raw byte.
-One search, detail or facet request may be in flight per caller. The caller
-is the admitted access principal (a session's device id, or the machine
-principal), or else the request IP. Without an access controller, admission
-keys on `request.ip`. A reverse proxy without `trustProxy` shares that one
-key, so every client shares one in-flight slot. `x-activity-client` is
-ignored.
+Activity reads (search, detail, facets, trails, band map and timeline) share
+one reader. One read runs at a time and up to 8 more wait in a shared queue.
+A caller may hold up to 4 reads, running plus waiting, so a page that opens
+the list, facets and messages at once is queued, not refused. A caller's
+reads run in the order they arrived, and waiting callers take turns, so one
+caller's burst does not hold up another. The reader deadline starts when a
+read runs, so a waiting read can take up to about 2 s behind other searches
+(8 x 250 ms), or up to 8 s behind trails, band map or timeline
+reads, before its own deadline. The caller is the admitted access
+principal (a session's device id, or the machine principal), or else the
+request IP. Without an access controller, admission keys on `request.ip`. A
+reverse proxy without `trustProxy` shares that one key, so every client shares
+one caller's 4 slots. `x-activity-client` is ignored.
+
+A fifth read from one caller, or any read while the queue is full, gets 429
+`ACTIVITY_QUERY_BUSY` with `Retry-After: 1`. Retry after that many seconds.
 
 **Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
 `snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
@@ -5198,7 +5208,7 @@ for trails) starts only after the reader is ready. A reader that cannot start is
 | `ACTIVITY_CURSOR_INVALID`     | 400  | Cursor does not verify. `reason`: `invalid-cursor`                                                                      |
 | `ACTIVITY_SNAPSHOT_RESET`     | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset`                                       |
 | `ACTIVITY_CURSOR_GAP`         | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
-| `ACTIVITY_QUERY_BUSY`         | 429  | Reader admission is full                                                                                                |
+| `ACTIVITY_QUERY_BUSY`         | 429  | The caller holds 4 reads or the shared queue of 8 is full. Sends `Retry-After: 1`                                       |
 | `ACTIVITY_QUERY_TIMEOUT`      | 429  | The read passed its deadline (250 ms; 1,000 ms for trails, band map and timeline) after the reader was ready            |
 | `ACTIVITY_QUERY_FAILED`       | 500  | The reader did not start, the reader failed, or the store read failed                                                   |
 | `ACTIVITY_QUERY_CLOSED`       | 503  | The query service is closed                                                                                             |
