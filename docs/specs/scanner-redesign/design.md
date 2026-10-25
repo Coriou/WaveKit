@@ -654,9 +654,12 @@ The optional `hint` (`ScannerHint`: the spectral classes plus `ism-device`, `ana
 from the requirement 3.11 inputs and never stored; it returns `undefined` for any invalid input.
 Region slots are read from the same table the decoders use (`src/decoders/band-defaults.ts`).
 
-`priorsFor` (`src/core/scanner/bandplan/index.ts`) changes from the union of covering ranges to
-the narrowest covering range that lists protocols (ties: stack order), per 3.12. The built-in EU
-plan (`src/core/scanner/bandplan/builtin.ts`) gains the LPD433 range; `CLASS_HYPOTHESES` in
+The legacy `priorsFor` and built-in plan (`src/core/scanner/bandplan/`) are pinned by the
+band-plans authority isolation and stay unchanged. `src/core/scanner/classify/priors.ts` adds
+`narrowestPriors` (the narrowest covering range that lists protocols, ties: stack order, per
+3.12, passed to the legacy `priorsFor`) and an LPD433 overlay range, added by
+`withScannerOverlays` only when an `ism-433` range is in effect; identify, burst capture and the
+hint scope use them, and plan previews do not show the overlay; `CLASS_HYPOTHESES` in
 `src/core/scanner/classify/classifier.ts` gains `analog-fm` 0.3 for `fsk4-12k5` and `wideband`.
 The DTO change is additive (`packages/api-types`); the web shows the hint in the weak row.
 

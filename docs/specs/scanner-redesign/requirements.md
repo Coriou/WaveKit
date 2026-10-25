@@ -486,8 +486,9 @@ this order, first match wins:
 
 Rules 2 and 3 cannot both match (their widths are disjoint); rule 3 precedes 4, so a short
 narrow track on the raster is `ism-device`.
-3.12 **LPD433 in the built-in plan and trial order.** The built-in EU plan gains an LPD433 range
-(433.075–434.775 MHz, 25 kHz raster, protocols `analog-fm` and `ism`) beside `ism-433`.
+3.12 **LPD433 and trial order.** Wherever the EU `ism-433` range is in effect, identify and hints
+also see an LPD433 range (433.075–434.775 MHz, 25 kHz raster, protocols `analog-fm` and `ism`);
+it is a scanner overlay, not a band-plan entry.
 Overlapping ranges: priors at `f` come from the narrowest range covering `f` that lists any
 protocol (ties: the first in stack order); its listed protocols get 1, every other specific
 protocol `SOFT_PRIOR` (0.25), as `priorsFor` does today for the union. A broader range listing
