@@ -18,7 +18,10 @@ import { openAccessRuntime } from "./access/runtime-context.js"
 import { createAnalogLiveRunner } from "./core/iq-capture/analog-live.js"
 import type { NamedAccessRuntimeContext } from "./access/runtime-context.js"
 import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
-import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
+import {
+	containerExposureWarning,
+	validateProtectedRuntimeMapping,
+} from "./access/runtime-config.js"
 import { WaveKitError } from "./utils/errors.js"
 import { arch, cpus } from "node:os"
 import { performance } from "node:perf_hooks"
@@ -1099,6 +1102,8 @@ async function main(): Promise<void> {
 						.httpPort,
 				},
 			)
+			const exposureWarning = containerExposureWarning(config.access)
+			if (exposureWarning !== null) log.warn(exposureWarning)
 			access = await openAccessRuntime({
 				bootstrap: accessBootstrap,
 				audio: {
