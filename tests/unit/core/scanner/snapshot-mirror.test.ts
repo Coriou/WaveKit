@@ -43,6 +43,12 @@ const sha = (text: string): string =>
 	createHash("sha256").update(text).digest("hex")
 
 /** Seed, ops, maxDiscoveries, dense, then the frozen base's byte length and sha256. */
+// WG15 DQ: re-baselined after the seeded ops moved undecoded SNR from 10..29 to 18..37 dB (DQ 1.3
+// creation bar). Same op stream and structure (byte lengths unchanged); only the SNR fields moved.
+// Re-baselined again for DQ.4-DQ.6: `class` is now the majority of the last 64 observations (3.4),
+// cross-family sticky joins (2.1) and co-channel pruning (2.3) apply; the seeded ops use one
+// OBW, so 3.1 never refuses. Each observation now also persists its `classVote` (DQ 3.4), which
+// is why seeds 2 to 6 grew (seed 1 holds no observations).
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -57,40 +63,40 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		40,
 		false,
-		19206,
-		"3808cd5a0780ce380aeff91c73439657d4635fc012325ec23177e60161a09e6f",
+		19622,
+		"2ec9a832d39f60e2181dd01f2a959fb511c9e7ad17fb699841ae4e8a4cc464bc",
 	],
 	[
 		3,
 		400,
 		40,
 		false,
-		38639,
-		"80cbd879621005f655bdaf7bb38eaba4e987f6f6d4b4d46b68f1b626556b669b",
+		39441,
+		"efa8d121ca7d2df6c991f2d3816286ce72be6a3984ddf73ce0f75255861ff96a",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		62239,
-		"a685e257d2642314ec49b38946b367efe76766f54aa767293d6840a4c7875235",
+		63739,
+		"31b962b5d1c3b9c036296c15b9466a9cd4c7285092b3de15cda458c1768353fd",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		70343,
-		"529cc556c1d68254a8e57efb2c0c1e1c43e18889887babac80d38dc634cf1e4f",
+		72029,
+		"bb889a364e707766fcedf4a7a71775d9d1a76b8418da4de8ed3ae1b70433c8a1",
 	],
 	[
 		6,
 		700,
 		40,
 		true,
-		334528,
-		"54bd406ee10982e82367375235bcca6924d878e652b23af47cb9306e27406950",
+		346330,
+		"312dc292f6c0687440ecd446a041f73c5d8f2c9f0ef92eb21ccc5eedc80bd48b",
 	],
 ]
 

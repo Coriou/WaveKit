@@ -8,6 +8,7 @@
  * IdentifyRunner decorates the job's in-window JobRunner, which keeps the lifecycle (transition
  * table), the engine reference and the teardown.
  */
+import { DQ_DATA_HOLD_MS } from "./data-decode-gate.js"
 import type {
 	DiscoveryMetadata,
 	ScanJobProgress,
@@ -765,8 +766,13 @@ export function identifyDigitalProof(
  * for that transmission's closed event: the tracker's merge gap (1500 ms) plus the squelch hang
  * (250 ms), since a transmission whose audio ended by the deadline is final at most that late. Fixed
  * from the deadline, so the wait is bounded whatever the evidence does.
+ *
+ * Detection quality R4.3: the data decode gate holds each closed event DQ_DATA_HOLD_MS before the
+ * evidence log sees it, so 1 750 + 1 000 = 2 750 ms. Applied unconditionally: identify does not know
+ * whether the composition wires a gate, the extra second only applies to a trial that still has an
+ * open match at its deadline, and a closed match decides at once, so it never delays a decided trial.
  */
-export const IDENTIFY_ANALOG_SETTLE_MS = 1_750
+export const IDENTIFY_ANALOG_SETTLE_MS = 1_500 + 250 + DQ_DATA_HOLD_MS
 
 /** WG10 req 3.2: the analog protocols live-audio evidence answers, and the modulations that answer each. */
 export const IDENTIFY_ANALOG_PROTOCOLS: readonly ScannerProtocol[] = [
@@ -812,6 +818,8 @@ export function analogMatches(
 		if (
 			typeof x !== "object" ||
 			x === null ||
+			// Detection quality R4.2: a data burst (pager, APRS) is not analog evidence.
+			x.data === true ||
 			x.sourceId !== target.sourceId ||
 			typeof x.hz !== "number" ||
 			!Number.isFinite(x.hz) ||

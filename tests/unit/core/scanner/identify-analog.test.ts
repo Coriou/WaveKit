@@ -362,7 +362,7 @@ describe("identify analog trials (WG10 3.2)", () => {
 	})
 
 	it("review WG10 R2 m3: the settle wait is bounded: a match still open ends timeout IDENTIFY_ANALOG_SETTLE_MS past the deadline", async () => {
-		expect(IDENTIFY_ANALOG_SETTLE_MS).toBe(1_500 + 250)
+		expect(IDENTIFY_ANALOG_SETTLE_MS).toBe(1_500 + 250 + 1_000)
 		const h = harness()
 		h.port.list = [tx({ endedAtMs: null, ctcssHz: null })]
 		await h.start()
@@ -381,6 +381,55 @@ describe("identify analog trials (WG10 3.2)", () => {
 			deadline + IDENTIFY_ANALOG_SETTLE_MS + 100,
 		)
 		expect(ENDED).toContain(h.record.state)
+	})
+
+	it("detection quality R4.3: a close held by the data gate (1 000 ms) for an over ending at the deadline still decodes", async () => {
+		// 1 750 ms (merge gap + squelch hang) + 1 000 ms (gate hold) = 2 750 ms.
+		expect(IDENTIFY_ANALOG_SETTLE_MS).toBe(2_750)
+		const h = harness()
+		h.port.list = [tx({ endedAtMs: null })]
+		await h.start()
+		const deadline = (h.record.startedAt ?? START) + 15_000
+		while (h.clock.now < deadline + 2_500) await h.advance(100)
+		expect(h.trials()["analog-fm"]).toBe("running")
+		h.port.list = [tx({ endedAtMs: deadline })]
+		await h.advance(100)
+		expect(h.trials()["analog-fm"]).toBe("decoded")
+	})
+
+	it("detection quality R4.2: a data-flagged close gives no analog result and no heard trial", async () => {
+		const h = harness()
+		h.port.list = [tx({ data: true }), tx({ data: true, ctcssHz: null })]
+		await h.start()
+		await h.settle()
+		expect(h.trials()).toEqual({
+			"analog-fm": "no-sync",
+			"analog-am": "no-sync",
+		})
+		expect(h.last()?.result).not.toHaveProperty("analog")
+		const voice = harness()
+		voice.port.list = [tx()]
+		await voice.start()
+		await voice.settle()
+		expect(voice.trials()["analog-fm"]).toBe("decoded")
+	})
+
+	it("detection quality R4.2: the evidence log does not return data-flagged closes", () => {
+		const log = createAnalogEvidenceLog({ monitoring: () => false })
+		const event = (id: string, data: boolean) => ({
+			transmissionId: id,
+			sourceId: "rtl",
+			state: "closed",
+			startedAt: new Date(START - 3000).toISOString(),
+			endedAt: new Date(START - 1000).toISOString(),
+			frequency: { hz: TARGET_HZ, tuningTrust: "commanded" },
+			modulation: "nfm",
+			...(data ? { data: true } : {}),
+		})
+		log.record(event("d", true) as unknown as Parameters<typeof log.record>[0])
+		log.record(event("v", false) as unknown as Parameters<typeof log.record>[0])
+		const near = log.transmissionsNear("rtl", TARGET_HZ, 1_000, 0)
+		expect(near.map(t => t.transmissionId)).toEqual(["v"])
 	})
 
 	it("review WG10 R2 m3: a pending opening started near the deadline is timeout, not no-sync", async () => {

@@ -200,6 +200,11 @@ interface OpenTrack {
 	/** Tolerated offs in this run. The next off ends it. */
 	gateOffs: number
 	gateOnBlocks: number
+	/**
+	 * Blocks of this run measured at snr >= k. Only these count toward the
+	 * minimum on-time (DQ 1.8); hysteresis and tolerated-off blocks do not.
+	 */
+	gateStrongBlocks: number
 	gateBest: number
 	/** Latched once this run meets duration and margin. Cleared when the run ends. */
 	gateQualified: boolean
@@ -794,6 +799,7 @@ export class Tracker {
 			gateRun: false,
 			gateOffs: 0,
 			gateOnBlocks: 0,
+			gateStrongBlocks: 0,
 			gateBest: Number.NEGATIVE_INFINITY,
 			gateQualified: false,
 			gateQualifiedSample: Number.NaN,
@@ -942,6 +948,7 @@ export class Tracker {
 		t.gateRun = false
 		t.gateOffs = 0
 		t.gateOnBlocks = 0
+		t.gateStrongBlocks = 0
 		t.gateBest = Number.NEGATIVE_INFINITY
 		t.gateQualified = false
 		t.gateQualifiedSample = Number.NaN
@@ -1068,12 +1075,14 @@ export class Tracker {
 				t.gateRun = true
 				t.gateOffs = 0
 				t.gateOnBlocks = 0
+				t.gateStrongBlocks = 0
 				t.gateBest = Number.NEGATIVE_INFINITY
 				t.gateQualified = false
 				t.gateQualifiedSample = Number.NaN
 			}
 			t.gateOn = true
 			t.gateOnBlocks++
+			if (snr >= k) t.gateStrongBlocks++
 			if (snr > t.gateBest) t.gateBest = snr
 			t.gateK = k
 			t.gateMargin = margin
@@ -1112,7 +1121,7 @@ export class Tracker {
 	/** Latches `gateQualified` for this run. A later block does not clear it. */
 	private noteQualified(t: OpenTrack, endSample: number): void {
 		if (!t.gateRun || t.gateQualified) return
-		if (t.gateOnBlocks * this.opts.blockMs < t.gateMinMs) return
+		if (t.gateStrongBlocks * this.opts.blockMs < t.gateMinMs) return
 		if (t.gateBest + Tracker.MARGIN_SLACK_DB < t.gateK + t.gateMargin) return
 		t.gateQualified = true
 		t.gateQualifiedSample = endSample
@@ -1141,6 +1150,7 @@ export class Tracker {
 		next.gateRun = prev.gateRun
 		next.gateOffs = prev.gateOffs
 		next.gateOnBlocks = prev.gateOnBlocks
+		next.gateStrongBlocks = prev.gateStrongBlocks
 		next.gateBest = prev.gateBest
 		next.gateK = prev.gateK
 		next.gateMargin = prev.gateMargin

@@ -437,7 +437,8 @@ describe("tracker channel gate", () => {
 		}
 	})
 
-	it("a tolerated off block can complete the pass", () => {
+	it("a tolerated off block keeps the run but does not count toward the duration", () => {
+		// DQ 1.8 changed this: the tolerated off used to complete the 300 ms pass.
 		const t = tracker({ hangBlocks: 4 })
 		t.setGatePlan(true)
 		let id = ""
@@ -447,8 +448,7 @@ describe("tracker channel gate", () => {
 			t.publishGate(() => meas(20), ev, 0)
 		}
 		expect(t.snapshotOf(id)?.gate).toBe("pending")
-		// 5 × 50 ms is 250 ms. The miss is the one tolerated off and reaches 300 ms.
-		// The off reads the measurement first: a valid block can complete the pass.
+		// 5 strong × 50 ms is 250 ms. The miss is the one tolerated off: the run lives on.
 		const off = run(t, 5, [])
 		let calls = 0
 		t.publishGate(
@@ -460,9 +460,12 @@ describe("tracker channel gate", () => {
 			0,
 		)
 		expect(calls).toBe(1)
+		expect(t.snapshotOf(id)?.gate).toBe("pending")
+		// The sixth strong block reaches 300 ms and passes.
+		t.publishGate(() => meas(20), run(t, 6, [[140, 149, -20]]), 0)
 		expect(t.snapshotOf(id)).toMatchObject({
 			gate: "passed",
-			gatePassedSample: 6 * BLOCK,
+			gatePassedSample: 7 * BLOCK,
 		})
 	})
 

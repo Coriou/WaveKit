@@ -151,7 +151,9 @@ export function applySeededOps(
 						200,
 					startedAt: clock.now - 900,
 					blocks: 2 + Math.floor(rand() * 4),
-					snrDb: 10 + Math.floor(rand() * 20),
+					// DQ 1.3: undecoded traffic is admitted at >= 18 dB; keep every
+					// generated create admitted so the mirror sees the same op mix.
+					snrDb: 18 + Math.floor(rand() * 20),
 					cls,
 					hypotheses:
 						cls === "unknown" ? [] : [[pick(PROTOCOLS), 0.5 + rand() / 2]],

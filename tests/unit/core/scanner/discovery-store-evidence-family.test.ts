@@ -7,6 +7,7 @@ import type {
 	ProofTrialInput,
 } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import type { Raster } from "../../../../src/core/spectrum/types.js"
+import { DQ_CO_CHANNEL_MAX } from "../../../../src/core/scanner/detection-quality-contract.js"
 import type {
 	Identity,
 	ScannerProtocol,
@@ -617,10 +618,11 @@ describe("observation moves between co-channel discoveries", () => {
 		return { c, mainId, twins }
 	}
 
-	it("pins one proof per linked partner at the 64-link bound and keeps the window at 256", () => {
-		const { c, mainId, twins } = linkedPartners(64)
+	// DQ 2.3: the co-channel cap (8) is now the link bound; LINKS_MAX (64) only bounds storage.
+	it("pins one proof per linked partner at the co-channel bound and keeps the window at 256", () => {
+		const { c, mainId, twins } = linkedPartners(DQ_CO_CHANNEL_MAX)
 		const { store } = c
-		expect(store.get(mainId)?.coChannel).toHaveLength(64)
+		expect(store.get(mainId)?.coChannel).toHaveLength(DQ_CO_CHANNEL_MAX)
 		expect(
 			store.snapshot().observations.filter(o => o.discoveryId === mainId),
 		).toHaveLength(256)
@@ -631,10 +633,11 @@ describe("observation moves between co-channel discoveries", () => {
 	}, 60_000)
 
 	it("stops pinning a partner whose link fell off one past the bound", () => {
-		const { c, mainId, twins } = linkedPartners(65)
+		const { c, mainId, twins } = linkedPartners(DQ_CO_CHANNEL_MAX + 1)
 		const { store } = c
 		const links = store.get(mainId)?.coChannel ?? []
-		expect(links).toHaveLength(64)
+		expect(links).toHaveLength(DQ_CO_CHANNEL_MAX)
+		expect(store.get(twins[0] ?? "")?.coChannel).not.toContain(mainId)
 		expect(links).not.toContain(twins[0])
 		expect(
 			store.snapshot().observations.filter(o => o.discoveryId === mainId),

@@ -339,6 +339,15 @@ export interface Observation {
 	proof?: ScannerProof
 }
 
+/**
+ * WG15 DQ 3.4: the store's persisted and journaled observation form. `classVote` is the class the
+ * observation voted with; absent means no vote (edge, or written before DQ). Core only: the DTO
+ * (`Observation`) never carries it.
+ */
+export interface StoredObservation extends Observation {
+	classVote?: ScannerClass
+}
+
 // ---------------------------------------------------------------- jobs and plans (§ 10, § 5)
 
 export type ScanMode = "in-window" | "sweep"

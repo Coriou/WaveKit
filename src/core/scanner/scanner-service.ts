@@ -2567,6 +2567,7 @@ export class ScannerService extends EventEmitter {
 		switch (ev.kind) {
 			case "epoch-started":
 				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
+				this.store.clearPending(sourceId) // DQ 1.5: a retune drops pending evidence
 				this.syncIqCapture(sourceId, epoch)
 				this.probes
 					.onEpoch(sourceId, ev.epoch, epoch.centreHz)
@@ -5027,6 +5028,7 @@ export class ScannerService extends EventEmitter {
 	private readonly onSourceRemoved = (sourceId: string): void => {
 		this.cancelChannelSource(sourceId)
 		this.detachIqEngine(sourceId)
+		this.store.clearPending(sourceId) // DQ 1.5
 		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (!isTerminal(d.record.state))

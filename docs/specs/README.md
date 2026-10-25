@@ -27,6 +27,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
   an auto/always/off mode, off-centre placements on channelizer channels (VFO and band-plan
   channels for dsd-fme and multimon-ng), a drop-free efficiency gate, the 1090 MHz rate raise
   with a link advisory, multi-source binding rules (WG13)
+- [detection-quality](detection-quality/requirements.md): no discovery without signal
+  (overload and weak-SNR admission), one discovery per emitter across families and carriers,
+  no strong-into-ambient merges, pager bursts not published as voice (WG15)
 - [evidence-squelch](evidence-squelch/requirements.md): the auto squelch opens only on analog
   voice or a CTCSS/DCS tone, on by default, and plays each over from its start with a bounded
   pre-roll delay that catches up in the silence after the over
