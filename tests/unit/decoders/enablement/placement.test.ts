@@ -261,13 +261,22 @@ describe("placement planner", () => {
 				{ minHz: 100_100_000, maxHz: 100_200_000 },
 			],
 		}
-		// One rtl_433 channel: the widest fit wins (99.27 MHz fits 460 kHz).
+		// rtl_433 at 2.4 Msps reads the whole capture: the band only enables it.
 		expect(
 			planPlacements(input(decoder({ type: "rtl433", band }))).wanted.map(p => [
+				p.reach,
 				p.channelHz,
 				p.options,
 			]),
-		).toEqual([[100_150_000, { targetSampleRate: 1_000_000 }]])
+		).toEqual([["raw", null, { targetSampleRate: 2_400_000 }]])
+		// Past 2.4 Msps it falls back to one channel: the widest fit wins.
+		expect(
+			planPlacements(
+				input(decoder({ type: "rtl433", band }), [
+					source({ sampleRateHz: 2_400_004 }),
+				]),
+			).wanted.map(p => [p.reach, p.channelHz, p.options]),
+		).toEqual([["channel", 100_150_000, { targetSampleRate: 1_000_000 }]])
 		expect(
 			planPlacements(
 				input(

@@ -1140,6 +1140,7 @@ export class ScannerService extends EventEmitter {
 				logger: deps.logger,
 				now: this.now,
 				sampleRateOf: sourceId => deps.sources.getCaps(sourceId)?.sampleRate,
+				centreOf: sourceId => deps.sources.getCaps(sourceId)?.centerFreq,
 				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
 			})
 			this.channelTaps = deps.channelOwnership
@@ -3746,7 +3747,12 @@ export class ScannerService extends EventEmitter {
 		const picked = e.passband
 			? pickChannelObservation(
 					observations,
-					{ sourceId: e.sourceId, passband: e.passband, at: e.ev.at },
+					{
+						sourceId: e.sourceId,
+						passband: e.passband,
+						at: e.ev.at,
+						freqHz: e.freqHz,
+					},
 					now,
 					AMBIENT_PAIR_MS,
 				)

@@ -175,6 +175,13 @@ export interface PlannerCentreSlot {
 /** rtl_433 channel bounds (design 2026-10-25): narrowest accepted and target rate. */
 export const RTL433_CHANNEL_MIN_RATE_HZ = 250_000
 export const RTL433_CHANNEL_TARGET_RATE_HZ = 1_000_000
+/**
+ * Widest capture rtl_433 reads whole (window reach): 2.4 Msps, the highest
+ * rate an RTL-SDR streams without drops and well inside rtl_433's own
+ * 3.2 Msps limit. Its CPU is linear in the rate: 2.6% of one core measured at
+ * 1.024 Msps, so about 6% at 2.4 Msps. Faster captures use a channel.
+ */
+export const RTL433_WINDOW_MAX_RATE_HZ = 2_400_000
 export interface PlannerSource {
 	id: string
 	centreHz: number | null

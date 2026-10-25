@@ -59,7 +59,24 @@ export interface Rtl433Options {
 	targetSampleRate?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
+	/** RF centre of the IQ on stdin (capture or channel centre), injected by the manager */
+	inputCenterFreq?: number | undefined
 }
+
+/**
+ * Bounds of the stdin centre passed as `-f`: 1 kHz to 6 GHz covers every
+ * SDR front end WaveKit reads (an RTL-SDR tops out near 1.8 GHz).
+ */
+export const RTL433_CENTRE_MIN_HZ = 1_000
+export const RTL433_CENTRE_MAX_HZ = 6_000_000_000
+
+const centreOption = (v: unknown): number | undefined =>
+	typeof v === "number" &&
+	Number.isFinite(v) &&
+	v >= RTL433_CENTRE_MIN_HZ &&
+	v <= RTL433_CENTRE_MAX_HZ
+		? v
+		: undefined
 
 /** Default target sample rate for rtl_433 (1 MHz provides good protocol coverage) */
 const DEFAULT_TARGET_SAMPLE_RATE = 1_000_000
@@ -206,6 +223,9 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 				warn,
 			),
 			extraArgs: readExtraArgsOption(options["extraArgs"], warn),
+			// Injected by the manager, never clamped: a wrong centre would make
+			// rtl_433's freq wrong, so an out-of-bounds one is left out.
+			inputCenterFreq: centreOption(options["inputCenterFreq"]),
 		}
 	}
 
@@ -270,6 +290,21 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 		if (!rtl433DetectionLevelConfigured(this.options.extraArgs)) {
 			args.push("-Y", "autolevel")
 		}
+
+		// The stdin centre makes rtl_433's `freq` estimate absolute (MHz), and
+		// `-M level` adds it (with rssi/snr/noise) to every event; the scanner
+		// uses it to tell signals in one channel apart. In file mode `-f` is
+		// metadata only: it changes no demodulation.
+		// An operator `-f` in extraArgs wins (two would form a hop list).
+		if (
+			this.options.inputCenterFreq !== undefined &&
+			!(this.options.extraArgs ?? []).some(
+				a => a === "-f" || a.startsWith("-f"),
+			)
+		) {
+			args.push("-f", String(Math.round(this.options.inputCenterFreq)))
+		}
+		args.push("-M", "level")
 
 		// Enable analyze mode for unknown signals (Requirement 8.3)
 		if (this.options.analyze) {

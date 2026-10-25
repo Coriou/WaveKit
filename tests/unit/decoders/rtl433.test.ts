@@ -418,6 +418,8 @@ describe("rtl_433 detection level", () => {
 			"json",
 			"-Y",
 			"autolevel",
+			"-M",
+			"level",
 		])
 	})
 
@@ -446,6 +448,8 @@ describe("rtl_433 detection level", () => {
 			"json",
 			"-Y",
 			"autolevel",
+			"-M",
+			"level",
 			"-Y",
 			"classic",
 		])
@@ -482,5 +486,32 @@ describe("rtl_433 detection level", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+describe("rtl_433 stdin centre", () => {
+	const args = (options: Record<string, unknown>) =>
+		new TestRtl433Decoder(
+			{ id: "c", type: "rtl_433", enabled: true, options },
+			testLogger,
+		).testGetDecoderArgs()
+
+	it("passes the stdin centre as -f so freq is absolute, and asks for -M level", () => {
+		const a = args({ inputCenterFreq: 433_600_000 })
+		expect(a.slice(a.indexOf("-f"), a.indexOf("-f") + 2)).toEqual([
+			"-f",
+			"433600000",
+		])
+		expect(a).toContain("level")
+	})
+
+	it("leaves -f to the operator and drops an out-of-bounds centre", () => {
+		const op = args({ inputCenterFreq: 433_600_000, extraArgs: ["-f", "1"] })
+		expect(op.filter(x => x === "-f")).toHaveLength(1)
+		expect(op.slice(-2)).toEqual(["-f", "1"])
+		expect(args({ inputCenterFreq: 999 })).not.toContain("-f")
+		expect(args({ inputCenterFreq: 1_000 })).toContain("-f")
+		expect(args({ inputCenterFreq: 6_000_000_000 })).toContain("-f")
+		expect(args({ inputCenterFreq: 6_000_000_001 })).not.toContain("-f")
 	})
 })

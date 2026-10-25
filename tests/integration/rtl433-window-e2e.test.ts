@@ -1,9 +1,11 @@
 /**
- * rtl_433 on a core channel, end to end: a fake rtl_tcp (ephemeral port)
- * streams a synthetic OOK remote at 960 ksps, the catalogue rtl433 decoder
- * is placed by the real planner on a resampled channel of the real
- * wavekit-chan process, and a PATH shim tees the exact bytes rtl_433 reads
- * on stdin into a file.
+ * rtl_433 on the whole capture, end to end: a fake rtl_tcp (ephemeral port)
+ * streams a synthetic OOK remote at 960 ksps placed just past the ISM band
+ * plan's upper edge but inside the capture. The real planner gives the
+ * catalogue rtl433 decoder window reach (the raw stream, no channel), a PATH
+ * shim tees the exact bytes rtl_433 reads on stdin into a file, and the same
+ * capture through the old band-clipped channel of the real wavekit-chan
+ * process decodes nothing.
  *
  * Opt in against a host build of the channelizer (`make chan-build`):
  * WAVEKIT_CHAN_BIN=native/wavekit-chan/target/release/wavekit-chan
@@ -28,6 +30,8 @@ import pino from "pino"
 import { afterAll, describe, expect, it } from "vitest"
 import { ChannelizerConfigSchema } from "../../src/config.js"
 import { ChannelizerManager } from "../../src/core/channelizer/channelizer-manager.js"
+import { ChannelizerProcess } from "../../src/core/channelizer/channelizer-process.js"
+import type { ChannelizerEvent } from "../../src/core/channelizer/protocol.js"
 import { FanoutManager } from "../../src/core/fanout-manager.js"
 import { SourceFanoutRouter } from "../../src/core/source-fanout-router.js"
 import { SourceManager } from "../../src/core/source-manager.js"
@@ -36,7 +40,10 @@ import {
 	RTL433_CAPS,
 	createRtl433Decoder,
 } from "../../src/decoders/builtin/rtl433.js"
-import { planPlacements } from "../../src/decoders/enablement/placement.js"
+import {
+	planPlacements,
+	rtl433ChannelCandidate,
+} from "../../src/decoders/enablement/placement.js"
 import { DecoderManager } from "../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../src/decoders/registry.js"
 import type { DecoderOutput } from "../../src/decoders/types.js"
@@ -44,8 +51,11 @@ import { ookPwmCu8 } from "../mocks/ook-pwm.js"
 
 const FS = 960_000
 const CENTRE = 434_600_000
-/** The burst sits 40 kHz below the capture centre, inside the planned channel. */
-const OFFSET = -40_000
+/**
+ * The burst sits 250 kHz above the capture centre: 434.85 MHz, 60 kHz past the
+ * EU band plan's 434.79 MHz edge, inside the usable window (+/- 384 kHz).
+ */
+const OFFSET = 250_000
 /** Copies of the capture the fake sends once rtl_433 has started. */
 const LOOPS = 3
 
@@ -152,7 +162,7 @@ function burstFrequency(tap: Buffer, rate: number): number {
 	}
 	let best = 0
 	let bestHz = 0
-	for (let hz = -150_000; hz <= 150_000; hz += 500) {
+	for (let hz = -400_000; hz <= 400_000; hz += 1_000) {
 		let sr = 0
 		let si = 0
 		for (const i of loud) {
@@ -171,8 +181,69 @@ function burstFrequency(tap: Buffer, rate: number): number {
 	return bestHz
 }
 
-describe.skipIf(!chanBin || !rtl433)("rtl433 on a core channel", () => {
-	it("decodes an OOK remote through the planned, resampled channel", async () => {
+/** `capture` through one cu8 channel of the real wavekit-chan process. */
+async function throughChannel(
+	capture: Buffer,
+	channel: { hz: number; rateHz: number },
+): Promise<Buffer> {
+	const socketDir = join("/tmp", `wkr-old-${process.pid}`)
+	execFileSync("/bin/mkdir", ["-p", socketDir])
+	const p = new ChannelizerProcess(
+		{
+			binaryPath: resolve(chanBin!),
+			generation: 1,
+			inputRateHz: FS,
+			inputCenterHz: CENTRE,
+			usableFraction: 0.8,
+			blockSamples: 16384,
+			socketDir,
+			readyTimeoutMs: 5000,
+			stopTimeoutMs: 2000,
+		},
+		pino({ level: "silent" }),
+	)
+	const events: ChannelizerEvent[] = []
+	p.on("event", (e: ChannelizerEvent) => events.push(e))
+	await p.start()
+	try {
+		const t = 0.05
+		p.send({
+			v: 1,
+			type: "open",
+			id: "old",
+			centerHz: channel.hz,
+			bandwidthHz: channel.rateHz * (1 - t),
+			transitionHz: (channel.rateHz * t) / 2,
+			outputRateHz: channel.rateHz,
+			format: "cu8",
+			queueBytes: 1 << 24,
+		})
+		const deadline = Date.now() + 5_000
+		let opened: Extract<ChannelizerEvent, { type: "opened" }> | undefined
+		while (!opened && Date.now() < deadline) {
+			opened = events.find(
+				(e): e is Extract<ChannelizerEvent, { type: "opened" }> =>
+					e.type === "opened",
+			)
+			await new Promise(r => setTimeout(r, 10))
+		}
+		if (!opened) throw new Error("old channel did not open")
+		const socket = net.createConnection(opened.socket)
+		const chunks: Buffer[] = []
+		socket.on("data", (b: Buffer) => chunks.push(b))
+		const closed = new Promise(r => socket.once("close", r))
+		await new Promise(r => setTimeout(r, 100))
+		p.input.end(capture)
+		await closed
+		return Buffer.concat(chunks)
+	} finally {
+		await p.stop()
+		rmSync(socketDir, { recursive: true, force: true })
+	}
+}
+
+describe.skipIf(!chanBin || !rtl433)("rtl433 on the whole capture", () => {
+	it("decodes a remote past the band-plan edge only with window reach", async () => {
 		// Lead and tail noise make 1.5 s of capture.
 		const capture = ookPwmCu8({
 			fs: FS,
@@ -187,6 +258,19 @@ describe.skipIf(!chanBin || !rtl433)("rtl433 on a core channel", () => {
 		writeFileSync(original, capture)
 		const defaultLevel = rtl433Json(original, FS)
 		const before = rtl433Json(original, FS, ["-Y", "autolevel"])
+
+		// The old policy: one channel clipped to the band plan and the window.
+		// h = 384 kHz, overlap 434.216-434.79 MHz, centre 434.503 MHz, rate
+		// floor(2 * (384 - 97) kHz) = 574 kHz, passband +/- 272.65 kHz.
+		const old = rtl433ChannelCandidate(
+			{ centreHz: CENTRE, sampleRateHz: FS, usableFraction: 0.8 },
+			[{ minHz: 433_050_000, maxHz: 434_790_000 }],
+		)
+		if (!("hz" in old)) throw new Error("no old channel")
+		expect(old).toEqual({ hz: 434_503_000, rateHz: 574_000 })
+		const oldFile = join(dir, "old-channel.cu8")
+		writeFileSync(oldFile, await throughChannel(capture, old))
+		const oldDecodes = rtl433Json(oldFile, old.rateHz, ["-Y", "autolevel"])
 
 		const tapFile = join(dir, "stdin.cu8")
 		const argsFile = join(dir, "args.txt")
@@ -289,6 +373,7 @@ describe.skipIf(!chanBin || !rtl433)("rtl433 on a core channel", () => {
 			peak,
 			channelOffset,
 			defaultLevel: defaultLevel.map(e => e["model"]),
+			oldChannel: oldDecodes.length,
 			before: before.map(e => e["model"]),
 			after: after.map(e => e["model"]),
 			live: outputs.length,
@@ -300,26 +385,27 @@ describe.skipIf(!chanBin || !rtl433)("rtl433 on a core channel", () => {
 		expect(defaultLevel).toHaveLength(0)
 		expect(before.length).toBeGreaterThan(0)
 		expect(before.every(e => e["model"] === model)).toBe(true)
-		// Planner: half window h = 960 kHz * 0.8 / 2 = 384 kHz, so 434.216-434.984
-		// MHz; the EU range 433.05-434.79 MHz clips it to 434.216-434.79 MHz,
-		// centre 434.503 MHz (-97 kHz); rate = floor(2 * (384 - 97) kHz) = 574 kHz.
+		// The band-clipped channel filters the device out.
+		expect(oldDecodes).toHaveLength(0)
+		// Window reach: the raw capture at its own rate, centre passed as -f.
 		expect(args).toEqual([
 			"-r",
 			"cu8:-",
 			"-s",
-			"574000",
+			"960000",
 			"-F",
 			"json",
 			"-Y",
 			"autolevel",
+			"-f",
+			"434600000",
+			"-M",
+			"level",
 		])
-		// The -40 kHz burst sits +57 kHz from the channel centre: no inversion.
-		expect(Math.abs(channelOffset - 57_000)).toBeLessThanOrEqual(1_000)
-		// Bytes: LOOPS * capture samples * 574/960 output samples, 2 bytes each.
-		// 1% covers the filter's group delay still held in the channel (well
-		// under 1% of the ~2.6 M output samples) and per-block rounding.
-		const expected = ((LOOPS * capture.length) / 2) * (574_000 / FS) * 2
-		expect(Math.abs(tap.length - expected) / expected).toBeLessThan(0.01)
+		// The burst stays at +250 kHz: the stream is the capture itself.
+		expect(Math.abs(channelOffset - OFFSET)).toBeLessThanOrEqual(1_000)
+		// Bytes: exactly what the fake sent (LOOPS copies), the raw stream 1:1.
+		expect(tap.length).toBe(LOOPS * capture.length)
 		expect(Math.abs(mean - 127.5)).toBeLessThan(2)
 		// 0.1 of full scale is 12.75 counts; noise adds up to a few more.
 		expect(peak).toBeGreaterThan(10)

@@ -38,7 +38,12 @@ import { interpretDirewolf } from "./confirm/direwolf.js"
 import { interpretDsdFme, toDsdFmeScannerEvent } from "./confirm/dsd-fme.js"
 import { parseMeshtastic } from "./confirm/meshtastic.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
-import { channelPassbandOf, type ChannelPassband } from "./ambient-channel.js"
+import {
+	channelPassbandOf,
+	rtl433FreqHz,
+	windowPassbandOf,
+	type ChannelPassband,
+} from "./ambient-channel.js"
 import { parseVdl2 } from "./confirm/vdl2.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
 
@@ -70,6 +75,8 @@ export interface AmbientEvidenceEvent {
 	 * centre and the decode belongs to one observation inside this passband.
 	 */
 	passband?: ChannelPassband
+	/** rtl_433's own usable frequency estimate inside the passband (Hz). */
+	freqHz?: number
 }
 
 export interface AmbientDeps {
@@ -83,6 +90,8 @@ export interface AmbientDeps {
 	now?: () => number
 	/** Capture sample rate of a source (its caps); the channel request's input. */
 	sampleRateOf?: (sourceId: string) => number | undefined
+	/** Capture centre of a source (its caps); the window reach passband. */
+	centreOf?: (sourceId: string) => number | undefined
 	/**
 	 * Reception trust of a decoder at a frequency on the source its target names (WG7 req 1.3);
 	 * absent → no new-type evidence.
@@ -375,8 +384,14 @@ export class AmbientEvidence extends EventEmitter {
 				binding && typeof binding === "object"
 					? (binding as { channelHz?: unknown }).channelHz
 					: undefined
-			if (typeof channelHz !== "number") return null
 			const sampleRateHz = this.deps.sampleRateOf?.(sourceId)
+			// Window reach (no channel): the whole capture.
+			if (channelHz === null)
+				return windowPassbandOf(binding, {
+					centreHz: this.deps.centreOf?.(sourceId),
+					sampleRateHz,
+				})
+			if (typeof channelHz !== "number") return null
 			if (
 				typeof sampleRateHz !== "number" ||
 				!Number.isFinite(sampleRateHz) ||
@@ -475,6 +490,9 @@ export class AmbientEvidence extends EventEmitter {
 			evs = interpretDirewolf(input as DecoderOutputLike, state)
 		else if (type === "rtl433")
 			evs = interpretRtl433(input as DecoderOutputLike, state)
+		const freqHz = onSource
+			? rtl433FreqHz((input as DecoderOutputLike).data, onSource)
+			: undefined
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,
@@ -487,6 +505,7 @@ export class AmbientEvidence extends EventEmitter {
 								centreHz: onSource.centreHz,
 								halfHz: onSource.halfHz,
 							},
+							...(freqHz !== undefined ? { freqHz } : {}),
 						}
 					: {}),
 			}
