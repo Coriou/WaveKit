@@ -235,6 +235,10 @@ before the WebSocket server is up are queued (<= 256, else resync).
 7. For any merge sequence: GET of a merged id resolves to its current survivor while indexed;
    index size <= 16 384; per-owner recording aliases <= 64. (3.1)
 8. Per start: merge events <= 256 or exactly one resync; each `mergedIds.length <= 64`. (3.2)
+9. For any interleaving of overlapping discovery answers (span pages, single reads) and live
+   events in the web store, each id ends as the last live event for it says, else as the
+   newest-started answer that speaks for it says (a complete page speaks for every id its query
+   matches). (3.2)
 
 All with `fast-check`, `numRuns: 100` or more.
 

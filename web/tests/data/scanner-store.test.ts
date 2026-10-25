@@ -1,3 +1,4 @@
+import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
 	Discovery,
@@ -1182,5 +1183,218 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		await spanFetch
 		expect(store.get().discoveries.byId.has("x")).toBe(true)
 		store.dispose()
+	})
+
+	const page = (...items: Discovery[]) => ({ items, nextCursor: null })
+	const labelled = (id: string, label: string) =>
+		discovery(id, { operator: { label } })
+	const labelOf = (store: ScannerStore, id: string) =>
+		store.get().discoveries.byId.get(id)?.operator?.label
+
+	it("adds, newer answers first: an older page cannot bring back what a newer complete page left out", async () => {
+		const { store, pending } = deferred()
+		const a = store.fetchDiscoveries(span)
+		const b = store.fetchDiscoveries(span)
+		await flush()
+		pending[1]!(page())
+		await b
+		pending[0]!(page(discovery("x")))
+		await a
+		expect(store.get().discoveries.byId.has("x")).toBe(false)
+		store.dispose()
+	})
+
+	it("deletes, older answer first: the newer page that still has the record restores it", async () => {
+		const { store, pending } = deferred()
+		const seed = store.fetchDiscoveries(span)
+		await flush()
+		pending[0]!(page(discovery("x")))
+		await seed
+		const a = store.fetchDiscoveries(span)
+		const b = store.fetchDiscoveries(span)
+		await flush()
+		pending[1]!(page())
+		await a
+		expect(store.get().discoveries.byId.has("x")).toBe(false)
+		pending[2]!(page(discovery("x")))
+		await b
+		expect(store.get().discoveries.byId.has("x")).toBe(true)
+		store.dispose()
+	})
+
+	it("deletes, newer answer first: an older empty page removes nothing the newer one kept", async () => {
+		const { store, pending } = deferred()
+		const a = store.fetchDiscoveries(span)
+		const b = store.fetchDiscoveries(span)
+		await flush()
+		pending[1]!(page(discovery("x")))
+		await b
+		pending[0]!(page())
+		await a
+		expect(store.get().discoveries.byId.has("x")).toBe(true)
+		store.dispose()
+	})
+
+	it("same-id payloads: the newer-started answer's content wins in either arrival order", async () => {
+		for (const newerFirst of [false, true]) {
+			const { store, pending } = deferred()
+			const a = store.fetchDiscoveries(span)
+			const b = store.fetchDiscoveries(span)
+			await flush()
+			const answers = [
+				() => pending[0]!(page(labelled("x", "older"))),
+				() => pending[1]!(page(labelled("x", "newer"))),
+			]
+			if (newerFirst) answers.reverse()
+			for (const answer of answers) {
+				answer()
+				await flush()
+			}
+			await Promise.all([a, b])
+			expect(labelOf(store, "x")).toBe("newer")
+			store.dispose()
+		}
+	})
+
+	it("a GET that started before a PATCH never overwrites the edit, in either arrival order", async () => {
+		for (const patchFirst of [true, false]) {
+			const { store, pending } = deferred()
+			const get = store.fetchDiscovery("x")
+			const patch = store.patchDiscovery("x", { label: "kept" })
+			await flush()
+			const answers = [
+				() => pending[0]!(labelled("x", "old")),
+				() => pending[1]!(labelled("x", "kept")),
+			]
+			if (patchFirst) answers.reverse()
+			for (const answer of answers) {
+				answer()
+				await flush()
+			}
+			await Promise.all([get, patch])
+			expect(labelOf(store, "x")).toBe("kept")
+			store.dispose()
+		}
+	})
+
+	it("a next page in flight never overwrites a live update, nor brings back a live deletion", async () => {
+		const { store, pending, send, tick } = deferred()
+		const refresh = store.refreshDiscoveries({})
+		await flush()
+		pending[0]!({ items: [labelled("x", "first")], nextCursor: "c1" })
+		await refresh
+		const more = store.loadMore()
+		await flush()
+		send("scanner:discovery", {
+			change: "updated",
+			discovery: labelled("x", "live"),
+		})
+		send("scanner:discovery", {
+			change: "deleted",
+			discovery: discovery("y"),
+		})
+		tick()
+		pending[1]!({
+			items: [labelled("x", "stale"), discovery("y")],
+			nextCursor: null,
+		})
+		await more
+		const d = store.get().discoveries
+		expect(d.byId.get("x")?.operator?.label).toBe("live")
+		expect(d.items.find(i => i.id === "x")?.operator?.label).toBe("live")
+		expect(d.byId.has("y")).toBe(false)
+		expect(d.items.some(i => i.id === "y")).toBe(false)
+		store.dispose()
+	})
+
+	// Feature: band-inspection-ux, Property 9: the newest-started answer decides each cached id
+	// Validates: Requirements 3.2
+	it("property: any interleaving leaves each id as the newest-started answer or the last live event says", async () => {
+		const ids = ["a", "b", "c"] as const
+		const request = fc.oneof(
+			fc.record({
+				kind: fc.constant("span" as const),
+				has: fc.subarray([...ids]),
+			}),
+			fc.record({
+				kind: fc.constant("one" as const),
+				id: fc.constantFrom(...ids),
+			}),
+		)
+		const live = fc.record({
+			id: fc.constantFrom(...ids),
+			deleted: fc.boolean(),
+		})
+		const scenario = fc
+			.array(request, { minLength: 1, maxLength: 6 })
+			.chain(requests =>
+				fc.record({
+					requests: fc.constant(requests),
+					// resolution order, with live events slotted between answers
+					steps: fc
+						.shuffledSubarray(
+							requests.map((_, i) => i),
+							{ minLength: requests.length, maxLength: requests.length },
+						)
+						.chain(order =>
+							fc
+								.array(fc.option(live, { nil: undefined }), {
+									minLength: order.length,
+									maxLength: order.length,
+								})
+								.map(lives => order.map((i, k) => ({ i, live: lives[k] }))),
+						),
+				}),
+			)
+		await fc.assert(
+			fc.asyncProperty(scenario, async ({ requests, steps }) => {
+				const { store, pending, calls, send, tick } = deferred()
+				const done = requests.map(r =>
+					r.kind === "span"
+						? store.fetchDiscoveries(span)
+						: store.fetchDiscovery(r.id).then(
+								() => undefined,
+								() => undefined,
+							),
+				)
+				await flush()
+				expect(calls).toHaveLength(requests.length)
+				const lastLive = new Map<string, { deleted: boolean; label: string }>()
+				for (const [k, { i, live: ev }] of steps.entries()) {
+					if (ev) {
+						const label = `live${k}`
+						send("scanner:discovery", {
+							change: ev.deleted ? "deleted" : "updated",
+							discovery: labelled(ev.id, label),
+						})
+						tick()
+						lastLive.set(ev.id, { deleted: ev.deleted, label })
+					}
+					const r = requests[i]!
+					pending[i]!(
+						r.kind === "span"
+							? page(...r.has.map(id => labelled(id, `r${i}`)))
+							: labelled(r.id, `r${i}`),
+					)
+					await done[i]
+				}
+				for (const id of ids) {
+					const l = lastLive.get(id)
+					let want: string | undefined
+					if (l) want = l.deleted ? undefined : l.label
+					else
+						for (let i = requests.length - 1; i >= 0; i--) {
+							const r = requests[i]!
+							if (r.kind === "one" && r.id !== id) continue
+							const has = r.kind === "one" || r.has.includes(id)
+							want = has ? `r${i}` : undefined
+							break
+						}
+					expect(labelOf(store, id)).toBe(want)
+				}
+				store.dispose()
+			}),
+			{ numRuns: 200 },
+		)
 	})
 })

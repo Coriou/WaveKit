@@ -28,6 +28,7 @@ import type {
 	ScannerStatus,
 } from "@wavekit/api-types"
 import type { ApiClient, QueryValue } from "./api-client.ts"
+import { WriteOrder } from "./write-order.ts"
 import { errorMessage, isApiError } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import { confidenceRank, isJobActive } from "./scanner-format.ts"
@@ -231,34 +232,6 @@ export function matchesDiscoveryQuery(
 }
 
 /**
- * `byId` after a page for `query`: the page's records set; when the page is complete (no cursor) and
- * `destructive`, a cached record the query covers but the page no longer has is gone (merged, deleted or
- * evicted), so it leaves the cache (band inspection UX req 3.2: an absorbed id a truncated merge did not
- * name) — unless `keep(id)`: written after the request started (a live event, another fetch), the page
- * cannot speak for it.
- */
-export function reconciled(
-	byId: ReadonlyMap<string, Discovery>,
-	query: DiscoveryQuery,
-	page: { items: readonly Discovery[]; nextCursor: string | null },
-	options: { destructive?: boolean; keep?: (id: string) => boolean } = {},
-): Map<string, Discovery> {
-	const out = new Map(byId)
-	if (page.nextCursor === null && options.destructive !== false) {
-		const have = new Set(page.items.map(d => d.id))
-		for (const [id, d] of byId)
-			if (
-				!have.has(id) &&
-				matchesDiscoveryQuery(d, query) &&
-				!(options.keep?.(id) ?? false)
-			)
-				out.delete(id)
-	}
-	for (const d of page.items) out.set(d.id, d)
-	return out
-}
-
-/**
  * The discoveries a `merged` survivor most likely absorbed: the core merges discoveries with the
  * same first source, frequency key, family and identity, and its event names only the survivor.
  */
@@ -443,15 +416,12 @@ export class ScannerStore extends Store<ScannerState> {
 	private readonly activitySeen = new Map<string, number>()
 	private staleTimer: ReturnType<typeof setTimeout> | null = null
 	private discoveryGeneration = 0
-	/** Span fetches (fetchDiscoveries): only the newest may remove records (an older answer is stale). */
-	private spanGeneration = 0
 	/**
-	 * Write order: `touched` holds, per id, the sequence of its last write to `byId`. A live event
-	 * takes the next sequence; a write from a response takes its request's start sequence, so an older
-	 * answer never looks newer than a request that started after it.
+	 * Write order of `byId`: a live event writes at the next sequence, a response at its request's
+	 * start; every write goes through applyWrites(), which applies it only when it is newer than
+	 * what that id last saw (see write-order.ts).
 	 */
-	private writeSeq = 0
-	private readonly touched = new Map<string, number>()
+	private readonly order = new WriteOrder<Discovery>()
 	private discoveryAbort: AbortController | null = null
 	private loading: Promise<void> | null = null
 	private bandplansLoading: Promise<void> | null = null
@@ -600,18 +570,17 @@ export class ScannerStore extends Store<ScannerState> {
 				page => {
 					if (generation !== this.discoveryGeneration) return
 					this.commit(s => {
-						const byId = this.reconcile(
-							s.discoveries.byId,
-							q,
-							page,
-							started,
-							true,
-						)
+						const byId = this.reconcile(s.discoveries.byId, q, page, started)
+						// the page's order, with what is newer than the page in its place
+						const items = page.items.flatMap(d => {
+							const have = byId.get(d.id)
+							return have ? [have] : []
+						})
 						return {
 							...s,
 							discoveries: {
 								...s.discoveries,
-								items: page.items,
+								items,
 								byId,
 								nextCursor: page.nextCursor,
 								loaded: true,
@@ -671,13 +640,18 @@ export class ScannerStore extends Store<ScannerState> {
 			if (generation !== this.discoveryGeneration) return
 			this.commit(s => {
 				const byId = new Map(s.discoveries.byId)
+				const applied = this.applyWrites(byId, started, { upsert: page.items })
 				const have = new Set(s.discoveries.items.map(x => x.id))
-				const items = [...s.discoveries.items]
+				const items = s.discoveries.items.map(x =>
+					applied.has(x.id) ? (byId.get(x.id) ?? x) : x,
+				)
 				for (const x of page.items) {
-					byId.set(x.id, x)
-					this.touch(x.id, started)
+					const now = byId.get(x.id)
 					// offset cursors shift when live discoveries arrive: drop repeats
-					if (!have.has(x.id)) items.push(x)
+					if (now && !have.has(x.id)) {
+						have.add(x.id)
+						items.push(now)
+					}
 				}
 				return {
 					...s,
@@ -716,7 +690,8 @@ export class ScannerStore extends Store<ScannerState> {
 		this.commit(s => {
 			const absorbed =
 				typeof d.absorbedInto === "string" && d.id !== id ? id : null
-			const base = absorbed === null ? s : this.withoutDiscovery(s, absorbed)
+			const base =
+				absorbed === null ? s : this.withoutDiscovery(s, absorbed, started)
 			return this.withDiscovery(base, d, "updated", undefined, started)
 		})
 		return d
@@ -747,23 +722,15 @@ export class ScannerStore extends Store<ScannerState> {
 		options: { signal?: AbortSignal } = {},
 	): Promise<readonly Discovery[]> {
 		const started = this.requestStart()
-		const generation = ++this.spanGeneration
 		const page = await this.api.get<DiscoveryPage>(
 			"/api/scanner/discoveries",
 			options.signal
 				? { query: queryParams(query), signal: options.signal }
 				: { query: queryParams(query) },
 		)
-		// a newer span fetch started meanwhile: this answer still adds what it has, but removes nothing
-		const newest = generation === this.spanGeneration
+		// an answer that arrives after a newer one changes only the ids nothing newer spoke for
 		this.commit(s => {
-			const byId = this.reconcile(
-				s.discoveries.byId,
-				query,
-				page,
-				started,
-				newest,
-			)
+			const byId = this.reconcile(s.discoveries.byId, query, page, started)
 			return { ...s, discoveries: { ...s.discoveries, byId } }
 		})
 		return page.items
@@ -893,12 +860,13 @@ export class ScannerStore extends Store<ScannerState> {
 
 	/** DELETE /api/scanner/discoveries/:id; one the core no longer has counts as deleted. */
 	async deleteDiscovery(id: string): Promise<void> {
+		const started = this.requestStart()
 		try {
 			await this.api.delete<unknown>(`/api/scanner/discoveries/${encode(id)}`)
 		} catch (error) {
 			if (!isApiError(error) || error.status !== 404) throw error
 		}
-		this.commit(s => this.withoutDiscovery(s, id))
+		this.commit(s => this.withoutDiscovery(s, id, started))
 	}
 
 	/** POST /api/scanner/discoveries/:id/listen: where to hear it in the current window. */
@@ -991,80 +959,113 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.derive({ ...s, jobs })
 	}
 
-	/** The start sequence of a request whose answer will write to `byId` (pass it to touch()). */
+	/** The start sequence of a request whose answer will write to `byId`. */
 	private requestStart(): number {
-		return ++this.writeSeq
+		return this.order.next()
 	}
 
 	/**
-	 * Notes a write of `id` to `byId`: a live event without `startedAt` takes the next sequence; a write
-	 * from a response passes its request's requestStart(), and never lowers a newer stamp.
+	 * The one way records enter or leave `byId` (mutated in place): each removal, then each upsert,
+	 * applies only when `at` is newer than everything that id last saw; `covers` records a complete
+	 * answer for that query at `at` (after its own writes). Returns the ids whose write applied.
 	 */
-	private touch(id: string, startedAt?: number): void {
-		if (startedAt === undefined) {
-			this.touched.set(id, ++this.writeSeq)
-			return
-		}
-		this.touched.set(id, Math.max(this.touched.get(id) ?? 0, startedAt))
+	private applyWrites(
+		byId: Map<string, Discovery>,
+		at: number,
+		writes: {
+			upsert?: readonly Discovery[]
+			remove?: Iterable<string>
+			covers?: DiscoveryQuery
+		},
+	): Set<string> {
+		const applied = new Set<string>()
+		for (const id of writes.remove ?? [])
+			if (this.order.remove(id, at)) {
+				byId.delete(id)
+				applied.add(id)
+			}
+		for (const d of writes.upsert ?? [])
+			if (this.order.upsert(d.id, d, at)) {
+				byId.set(d.id, d)
+				applied.add(d.id)
+			}
+		const q = writes.covers
+		if (q !== undefined) this.order.cover(d => matchesDiscoveryQuery(d, q), at)
+		return applied
 	}
 
 	/**
-	 * reconciled() for an answer to a request that started at write `started`: records written since are
-	 * kept; `destructive` false (a superseded request) removes nothing. The page's records are stamped
-	 * with `started`, so a request that started later may still remove them.
+	 * An answer for `query` from a request that started at `started`: its records go in; when the page
+	 * is complete, a cached record the query covers but the page no longer has is gone (merged, deleted
+	 * or evicted: band inspection UX req 3.2), and the query is covered so an older answer cannot bring
+	 * one back. Whatever something newer already said about an id stays.
 	 */
 	private reconcile(
 		byId: ReadonlyMap<string, Discovery>,
 		query: DiscoveryQuery,
 		page: DiscoveryPage,
 		started: number,
-		destructive: boolean,
 	): Map<string, Discovery> {
-		const out = reconciled(byId, query, page, {
-			destructive,
-			keep: id => (this.touched.get(id) ?? 0) > started,
+		const out = new Map(byId)
+		const complete = page.nextCursor === null
+		const have = new Set(page.items.map(d => d.id))
+		const remove = complete
+			? [...byId.values()]
+					.filter(d => !have.has(d.id) && matchesDiscoveryQuery(d, query))
+					.map(d => d.id)
+			: []
+		this.applyWrites(out, started, {
+			upsert: page.items,
+			remove,
+			...(complete ? { covers: query } : {}),
 		})
-		for (const id of byId.keys()) if (!out.has(id)) this.touched.delete(id)
-		for (const d of page.items) this.touch(d.id, started)
 		return out
 	}
 
+	/** Upserts `d` at `at` (a live event: the next sequence); refused when something newer spoke for it. */
 	private withDiscovery(
 		s: ScannerState,
 		d: Discovery,
 		change: ScannerDiscoveryEventData["change"],
 		mergedIds?: readonly string[],
-		startedAt?: number,
+		at: number = this.order.next(),
 	): ScannerState {
 		const list = s.discoveries
 		const byId = new Map(list.byId)
-		byId.set(d.id, d)
-		this.touch(d.id, startedAt)
-		let items = list.items.filter(x => x.id !== d.id)
-		if (change === "merged") {
-			// WG12 cores name what the merge absorbed; older ones are guessed
-			const gone = new Set(mergedIds ?? absorbedBy(d, items))
-			if (gone.size > 0) {
-				items = items.filter(x => !gone.has(x.id))
-				for (const id of gone) byId.delete(id)
-			}
-		}
-		if (list.loaded && matchesDiscoveryQuery(d, list.query)) {
+		let items = list.items
+		const gone =
+			change === "merged"
+				? // current cores name what the merge absorbed; older ones are guessed
+					new Set(mergedIds ?? absorbedBy(d, items))
+				: new Set<string>()
+		gone.delete(d.id)
+		const applied = this.applyWrites(byId, at, { upsert: [d], remove: gone })
+		if (applied.size === 0) return s
+		items = items.filter(x => !applied.has(x.id))
+		if (
+			applied.has(d.id) &&
+			list.loaded &&
+			matchesDiscoveryQuery(d, list.query)
+		) {
 			const compare = discoveryComparator(list.query.sort)
-			let at = items.findIndex(x => compare(d, x) < 0)
-			if (at < 0) at = items.length
+			let i = items.findIndex(x => compare(d, x) < 0)
+			if (i < 0) i = items.length
 			// past the loaded pages: loadMore() brings it in its place
-			if (at < items.length || list.nextCursor === null)
-				items = [...items.slice(0, at), d, ...items.slice(at)]
+			if (i < items.length || list.nextCursor === null)
+				items = [...items.slice(0, i), d, ...items.slice(i)]
 		}
 		return { ...s, discoveries: { ...list, items, byId } }
 	}
 
-	private withoutDiscovery(s: ScannerState, id: string): ScannerState {
+	/** Removes `id` at `at` (a live event: the next sequence); refused when something newer spoke for it. */
+	private withoutDiscovery(
+		s: ScannerState,
+		id: string,
+		at: number = this.order.next(),
+	): ScannerState {
 		const list = s.discoveries
-		if (!list.byId.has(id) && !list.items.some(x => x.id === id)) return s
 		const byId = new Map(list.byId)
-		byId.delete(id)
+		if (this.applyWrites(byId, at, { remove: [id] }).size === 0) return s
 		return {
 			...s,
 			discoveries: {
