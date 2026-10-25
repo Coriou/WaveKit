@@ -38,8 +38,15 @@ export interface RangeCommit extends CommitDocs {
 
 export function commitsInRange(base: string, repo?: string): RangeCommit[]
 
+export const EMPTY_TREE: string
+export function mergeOwnFiles(
+	sha: string,
+	parents: string[],
+	repo?: string,
+): string[]
+
 export type BaseResult =
-	| { base: string; via: string; reason?: undefined }
+	| { base: string; via: string; warning?: string; reason?: undefined }
 	| { base?: undefined; via?: undefined; reason: string }
 
 export function resolveBase(
@@ -53,6 +60,7 @@ export interface FreshnessResult {
 	skipped?: string
 	base?: string
 	via?: string
+	warning?: string
 }
 
 export function checkFreshness(

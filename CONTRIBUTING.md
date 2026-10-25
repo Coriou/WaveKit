@@ -61,13 +61,16 @@ code they describe.
    anything a user sees (a refactor, a test, a fix that restores documented behaviour), end the
    commit message with the trailer `Docs: none`. If the page already describes the change, or
    another commit updated it, name it instead: `Docs: docs/API.md`. A trailer covers that commit's
-   own files only. A merge is checked on what it changes itself (conflict resolutions, edits made
-   while merging), and its own trailer excuses those; a clean merge needs nothing.
+   own files only. A merge is checked on what it decided itself: files that conflicted, and files
+   that differ from git's automatic merge of its parents. Its own trailer excuses those; a clean
+   merge needs nothing. This needs git 2.38 or newer.
 3. **Run the checker.** `node scripts/check-docs.mjs` fails on a broken relative link or image.
    With `--since=<ref>` it also fails on mapped code that changed without its page or a trailer.
    CI runs it on every push and pull request. On the first push of a branch, or when `<ref>` is
-   not in the history, it compares with the merge base of `origin/main`; if that is missing too
-   (a shallow clone), it says so and skips the freshness check.
+   not in the history or shares none with `HEAD`, it compares with the merge base of
+   `origin/main`. If that merge base is `HEAD` itself (a force push of a commit already on main),
+   it checks `HEAD`'s own commit rather than an empty range. If `origin/main` is missing too (a
+   shallow clone), it says so and skips the freshness check.
 4. **Refresh screenshots** when the UI changes visibly: `pnpm --filter @wavekit/web docs:shots`
    rebuilds the web app, runs it against the mock (the same data on every run) and rewrites
    `docs/assets/screenshots/`. Commit the images that changed.

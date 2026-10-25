@@ -12,7 +12,7 @@
 // names the page in `Docs: <path>`. When no base can be found (a shallow clone without
 // origin/main), freshness is skipped with a warning rather than failing on a git error.
 
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { dirname, join, normalize, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -155,46 +155,86 @@ function tryGit(repo, ...args) {
 	}
 }
 
+/** The empty tree: the base used when the commit to check is a root commit. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 /**
- * Every commit in `base..HEAD` with its `Docs:` trailers and the files it changed.
+ * The files a two-parent merge changed itself: files that conflicted when git merged the parents
+ * automatically, plus files whose committed content differs from that automatic merge. Needs
+ * `git merge-tree --write-tree` (git 2.38 or newer); throws a clear error otherwise,
+ * which fails the check rather than passing a merge unchecked.
+ */
+export function mergeOwnFiles(sha, parents, repo = root) {
+	const r = spawnSync(
+		"git",
+		["merge-tree", "--write-tree", "--name-only", "-z", ...parents],
+		{ cwd: repo, encoding: "utf8" },
+	)
+	// Exit 0: clean; 1: conflicts (still writes a tree); anything else: unsupported or broken.
+	if (r.status !== 0 && r.status !== 1)
+		throw new Error(
+			`git merge-tree --write-tree failed for merge ${sha} (git 2.38 or newer is needed): ${(r.stderr || "").trim()}`,
+		)
+	// Output: <tree>\0<conflicted path>\0...\0\0<messages>
+	const [head = ""] = r.stdout.split("\0\0")
+	const [tree = "", ...conflicted] = head.split("\0")
+	const differs = splitZ(
+		gitIn(repo, "diff", "--name-only", "-z", "--no-renames", tree, sha),
+	)
+	return [...new Set([...conflicted.filter(f => f !== ""), ...differs])]
+}
+
+/**
+ * Every commit in `base..HEAD` (or HEAD's whole history when `base` is the empty tree) with its
+ * `Docs:` trailers and the files it changed.
  *
- * Ordinary commits list the files they changed against their parent. A merge lists only the
- * files whose merged content differs from every parent (`git diff-tree --cc`): conflict
- * resolutions and changes made in the merge itself. A clean merge lists nothing, so the commits
- * it brings in are judged on their own trailers and are not failed a second time; an evil merge
- * is judged on its own `Docs:` trailer.
+ * Ordinary commits list the files they changed against their parent. A two-parent merge lists
+ * only what the merge itself decided (`mergeOwnFiles`): git's automatic merge of the parents is
+ * recomputed, and files that conflicted or whose committed content differs from it are the
+ * merge's own, judged on its `Docs:` trailer. Everything else is inherited from the merged
+ * commits, judged on their own trailers, so a clean merge needs no trailer and is not failed a
+ * second time, while a conflict resolved by taking one side wholesale still counts. An octopus
+ * merge is treated conservatively: every file it changed against its first parent is its own.
  */
 export function commitsInRange(base, repo = root) {
-	const shas = gitIn(repo, "rev-list", "--reverse", `${base}..HEAD`)
+	const range = base === EMPTY_TREE ? ["HEAD"] : [`${base}..HEAD`]
+	const shas = gitIn(repo, "rev-list", "--reverse", ...range)
 		.split("\n")
 		.filter(Boolean)
 	return shas.map(sha => {
 		const parents = gitIn(repo, "rev-list", "--parents", "-n", "1", sha)
 			.trim()
 			.split(" ")
-		const merge = parents.length > 2
-		const files = splitZ(
-			merge
-				? gitIn(
-						repo,
-						"diff-tree",
-						"--cc",
-						"--name-only",
-						"-z",
-						"--no-commit-id",
-						sha,
-					)
-				: gitIn(
-						repo,
-						"diff-tree",
-						"-r",
-						"--root",
-						"--name-only",
-						"-z",
-						"--no-commit-id",
-						sha,
-					),
-		)
+			.slice(1)
+		const merge = parents.length > 1
+		let files
+		if (parents.length === 2) files = mergeOwnFiles(sha, parents, repo)
+		else if (merge)
+			files = splitZ(
+				gitIn(
+					repo,
+					"diff",
+					"--name-only",
+					"-z",
+					"--no-renames",
+					`${sha}^1`,
+					sha,
+				),
+			)
+		else
+			files = splitZ(
+				gitIn(
+					repo,
+					"diff-tree",
+					"-r",
+					"--root",
+					"--no-renames",
+					"--name-only",
+					"-z",
+					"--no-commit-id",
+					sha,
+				),
+			)
 		const trailers = parseTrailers(
 			gitIn(
 				repo,
@@ -211,25 +251,47 @@ export function commitsInRange(base, repo = root) {
 /**
  * The commit to compare HEAD with. `since` is the last checked commit (the pull request base,
  * or the commit before a push). It is unusable on the first push of a branch (all zeros or
- * empty), after a force push (not in this history) and in a shallow clone; then the merge base
- * with `fallback` (origin/main) stands in. Returns `{ base }`, or `{ reason }` when neither works.
+ * empty), after a force push (not in this history), in a shallow clone, or when it shares no
+ * history with HEAD; then the merge base with `fallback` (origin/main) stands in.
+ *
+ * A fallback must never turn an unverifiable push into an empty range that passes silently: when
+ * the fallback's merge base is HEAD itself (a force push of a commit already on main, say), HEAD's
+ * own commit is checked instead (`HEAD^1..HEAD`, or the whole of a root commit) with a `warning`.
+ * Returns `{ base, via, warning? }`, or `{ reason }` when nothing works.
  */
 export function resolveBase(since, repo = root, fallback = "origin/main") {
-	const usable =
-		since !== "" &&
-		!/^0+$/.test(since) &&
-		tryGit(repo, "cat-file", "-e", `${since}^{commit}`) !== undefined
-	const from = usable ? since : fallback
-	const base = tryGit(repo, "merge-base", from, "HEAD")
-	if (base) return { base, via: usable ? since : fallback }
+	const given = since !== "" && !/^0+$/.test(since)
+	const exists =
+		given && tryGit(repo, "cat-file", "-e", `${since}^{commit}`) !== undefined
+	if (exists) {
+		const base = tryGit(repo, "merge-base", since, "HEAD")
+		if (base) return { base, via: since }
+	}
+	const what = !given
+		? "no base commit was given (first push of a branch)"
+		: exists
+			? `${since} shares no history with HEAD`
+			: `${since} is not in this history`
+	const base = tryGit(repo, "merge-base", fallback, "HEAD")
+	if (base) {
+		const head = tryGit(repo, "rev-parse", "HEAD")
+		if (base !== head)
+			return {
+				base,
+				via: fallback,
+				warning: `${what}; checking against ${fallback}`,
+			}
+		const parent = tryGit(repo, "rev-parse", "--verify", "-q", "HEAD^1")
+		return {
+			base: parent ?? EMPTY_TREE,
+			via: parent ? "HEAD^1" : "the root commit",
+			warning: `${what} and HEAD is already on ${fallback}; checking HEAD's own commit only`,
+		}
+	}
 	const shallow =
 		tryGit(repo, "rev-parse", "--is-shallow-repository") === "true"
-	const what =
-		since === "" || /^0+$/.test(since)
-			? "no base commit was given (first push of a branch)"
-			: `${since} is not in this history`
 	return {
-		reason: `${what} and ${fallback} has no common ancestor here${shallow ? " (shallow clone: fetch with fetch-depth: 0)" : ""}`,
+		reason: `${what}, and ${fallback} has no common ancestor with HEAD${shallow ? " (shallow clone: fetch with fetch-depth: 0)" : ""}`,
 	}
 }
 
@@ -243,10 +305,15 @@ export function checkFreshness(
 	const r = resolveBase(since, repo, fallback)
 	if (!r.base) return { stale: [], skipped: r.reason ?? "no base" }
 	const changed = splitZ(
-		gitIn(repo, "diff", "--name-only", "-z", r.base, "HEAD"),
+		gitIn(repo, "diff", "--name-only", "-z", "--no-renames", r.base, "HEAD"),
 	)
 	const commits = changed.length > 0 ? commitsInRange(r.base, repo) : []
-	return { stale: stalePages(changed, map, commits), base: r.base, via: r.via }
+	return {
+		stale: stalePages(changed, map, commits),
+		base: r.base,
+		via: r.via,
+		...(r.warning ? { warning: r.warning } : {}),
+	}
 }
 
 function main() {
@@ -274,17 +341,26 @@ function main() {
 		const map = JSON.parse(
 			readFileSync(join(root, "docs/doc-map.json"), "utf8"),
 		)
-		const result = checkFreshness(
-			args.get("since") ?? "",
-			map,
-			root,
-			args.get("fallback") ?? "origin/main",
-		)
+		let result
+		try {
+			result = checkFreshness(
+				args.get("since") ?? "",
+				map,
+				root,
+				args.get("fallback") ?? "origin/main",
+			)
+		} catch (err) {
+			const msg = `page freshness could not be checked: ${err instanceof Error ? err.message : String(err)}`
+			console.log(ci ? `::error::${msg}` : `error: ${msg}`)
+			process.exit(1)
+		}
 		if (result.skipped) {
 			const msg = `page freshness not checked: ${result.skipped}`
 			console.log(ci ? `::warning::${msg}` : `docs: ${msg}`)
-		} else if (result.via !== args.get("since")) {
-			console.log(`docs: checking page freshness against ${result.via}`)
+		} else if (result.warning) {
+			console.log(
+				ci ? `::warning::${result.warning}` : `docs: ${result.warning}`,
+			)
 		}
 		for (const s of result.stale) {
 			failed = true

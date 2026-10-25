@@ -41,7 +41,8 @@ jobs:
           node-version: "24"
       # Fails on a broken link, and on mapped code changed without its page unless each commit
       # carries "Docs: none" or "Docs: <page>" (CONTRIBUTING.md). A first push of a branch has no
-      # "before" commit: the checker then compares with the merge base of origin/main.
+      # "before" commit and a force push may lose it: the checker then compares with the merge
+      # base of origin/main, or checks HEAD's own commit when that merge base is HEAD.
       - name: Check docs
         run: node scripts/check-docs.mjs --since="${{ github.event.pull_request.base.sha || github.event.before }}" --fallback=origin/main
 
