@@ -233,17 +233,19 @@ Open after the evidence squelch batch:
 - Marginal-level voice (medians within about 1 dB of -30 dB) latches after the pre-roll
   limit and loses the start of the over: revisit the pre-roll length or the threshold
   after the live measurements (M.4).
-- AM evidence gating needs an AGC-aware voice test (for example pre-AGC envelope
-  modulation, or a measured AM threshold) before AM can be evidence-gated.
-- Rust engine: in-band stage-1 gate markers so the evidence squelch can apply
-  (amendment A12, 2026-10-23: until then the evidence gate runs on csdr only and
-  Rust `auto` is the stage-1 auto squelch).
+- AM evidence gating (amendment A19, 2026-10-24): a pre-AGC envelope voice test was studied and
+  left off; it misses weak voice (8 of 20 overs at 10 dB carrier-to-noise, none at 6 dB) and a
+  lower threshold opens on flutter. A future enable needs recorded AM IQ (A19.6). A closed AM
+  squelch on csdr is now exact silence; the fast AGC still limit-cycles at about 81 Hz on an
+  unmodulated carrier while open, and SSB's closed squelch is not measured yet.
+- Done (amendment A18, 2026-10-25): the Rust engine carries its stage-1 gate in-band, so the
+  evidence squelch runs on framed Rust runs too.
 - Live acceptance on a PMR handheld (M.4) and Pi 4-class CPU (M.5).
-- Squelch-tail elimination, the second common form (amendment A17, 2026-10-24): a CTCSS
-  phase reversal of 120 or 180 degrees (a "reverse burst") for about 150-200 ms before the
-  carrier drops. The 55 Hz STE tone is detected; the reverse burst is not yet. It needs a
-  phase tracker on the latched CTCSS tone (the CTCSS bank reports power, not phase) and a
-  false-alarm study on fades, so it is a follow-up, not part of A17.
+- Done (amendment A20, 2026-10-24): the CTCSS reverse burst ends the over. Validated on
+  synthetic signals only; a recorded reverse burst from a radio is still wanted.
+- A synthetic 48 kHz 2-FSK test signal latches the evidence gate after 1.35 s on csdr and
+  framed Rust alike; study it with the stage-2 data test above.
+- The NFM back-chain drain assumes 81 lowpass taps (lag 120); csdr's default is 79 (lag 118).
 
 ### Performance and native DSP plan (2026-10-17)
 
