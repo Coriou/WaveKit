@@ -441,8 +441,12 @@ reads `spectrum.allocation().consumers[sourceId]` (holders, others), the engine'
 - a generation that differs from the window's discards the window and starts a new one at
   this tick (8.2); if the guard did not add or remove passive within the previous tick, the
   baseline is invalidated too (8.3);
-- a window is complete when `now - startedAt >= 60 000`; its `U` is `windowedUtilization`
-  between `startSample` and the current sample;
+- a window is complete when `now - startedAt >= 60 000`; its `U` is `strictUtilization`
+  between `startSample` and the current sample: same generation, neither counter going back,
+  the total advancing, at least 60 s apart, never a whole-life fallback (null otherwise; the
+  engine-open window starts from zero counters, 8.2). A counter that goes back within a
+  generation restarts the window at this tick and clears the off-sample history (revised
+  2026-10-25);
 - `baseline` and `restore` windows, trial start and trial windows are evaluated at their
   deadline on this tick (8.7); `open` windows of rows 2 to 4 are judged at their first
   completion and then every 300 s, as today.
