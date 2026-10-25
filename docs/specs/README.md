@@ -22,6 +22,8 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [band-plans](band-plans/requirements.md)
 - [build-devx-overhaul](build-devx-overhaul/requirements.md)
 - [core-access-policy](core-access-policy/requirements.md)
+- [container-exposure](container-exposure/requirements.md): a protected core in a container
+  whose ports are published to the host loopback only
 - [decode-envelope](decode-envelope/requirements.md)
 - [decoder-enablement](decoder-enablement/requirements.md): every shipped decoder built in with
   an auto/always/off mode, off-centre placements on channelizer channels (VFO and band-plan
@@ -41,6 +43,8 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [receiver-endpoints](receiver-endpoints/requirements.md): a receiver's ranked addresses and
   DNS-SD advertisement; core moves IQ to the best verified endpoint (opt-in)
 - [regional-display-registry](regional-display-registry/requirements.md)
+- [rust-demod-a](rust-demod-a/requirements.md): opt-in Rust NFM/AM live demodulator, with csdr
+  the default and fallback
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)
 - [scanner-redesign](scanner-redesign/requirements.md): a fitting window stays tuned, a

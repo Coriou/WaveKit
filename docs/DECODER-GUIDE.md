@@ -4,13 +4,20 @@ This guide explains how to add new signal decoders to WaveKit.
 
 ## Decoder Integration Patterns
 
-WaveKit supports three integration patterns:
+Every decoder extends one of five bases in `src/decoders/`. Read the base you extend for its
+required hooks before you start.
 
-| Pattern              | Description                         | Examples             |
-| -------------------- | ----------------------------------- | -------------------- |
-| **Pure Consumer**    | Receives audio via stdin            | dsd-fme, multimon-ng |
-| **Network Producer** | Runs as service with network output | readsb, AIS-catcher  |
-| **External SDR**     | Controls its own SDR hardware       | acarsdec, dumpvdl2   |
+| Base                                                     | What the decoder receives                                | Built-in examples                               |
+| -------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- |
+| `AudioDemodDecoder` (`audio-demod-decoder.ts`)           | Demodulated audio on stdin, from a channel WaveKit tunes | dsd-fme, multimon-ng, acarsdec, direwolf        |
+| `IqDecimateDecoder` (`iq-decimate-decoder.ts`)           | Decimated IQ for its band, cut from the shared stream    | AIS-catcher, rtl_433, dumpvdl2, lora-meshtastic |
+| `NetworkProducerDecoder` (`network-producer-decoder.ts`) | Runs as a service and publishes on a network port        | readsb                                          |
+| `ExternalSdrDecoder` (`external-sdr-decoder.ts`)         | Opens its own SDR hardware                               | none built in                                   |
+| `BaseDecoder` (`base-decoder.ts`)                        | Raw stdin; the common lifecycle the others build on      | (base of all of the above)                      |
+
+The three walkthroughs below show the older, simpler patterns (pure consumer, network producer,
+external SDR). New decoders that share the receiver should normally use `AudioDemodDecoder` or
+`IqDecimateDecoder`; model them on the built-ins in `src/decoders/builtin/`.
 
 Choose the pattern that matches how your decoder works.
 
@@ -106,13 +113,12 @@ export class MyDecoder extends BaseDecoder {
 
 ### Step 2: Register the Decoder
 
-Add to `src/decoders/registry.ts`:
+Built-ins are registered in `src/index.ts` (step 6 of startup), next to the others:
 
 ```typescript
-import { MyDecoder, MY_DECODER_CAPS } from "./builtin/my-decoder.js"
+import { MyDecoder, MY_DECODER_CAPS } from "./decoders/builtin/my-decoder.js"
 
-// In the registerBuiltinDecoders function:
-registry.register(
+decoderRegistry.register(
 	"my-decoder",
 	(config, logger) => new MyDecoder(config, logger),
 	MY_DECODER_CAPS,
@@ -121,15 +127,15 @@ registry.register(
 
 ### Step 3: Add Configuration Schema
 
-Add to `src/config.ts`:
+A decoder's `options` are a free-form record in `DecoderConfigSchema` (`src/config.ts`). Validate
+them with a Zod schema in `src/decoders/options/<name>.ts` and export it from
+`src/decoders/options/index.ts`, like the built-ins:
 
 ```typescript
-const MyDecoderOptionsSchema = z.object({
+export const MyDecoderOptionsSchema = z.object({
 	mode: z.enum(["auto", "mode1", "mode2"]).default("auto"),
 	verbosity: z.number().int().min(0).max(3).optional(),
 })
-
-// Add to DecoderConfigSchema union
 ```
 
 ### Step 4: Add to Docker Image
@@ -382,7 +388,8 @@ WaveKit defines standard output types for decoded data:
 
 ### Dynamic Sample Rate Handling
 
-WaveKit automatically restarts decoders when the source sample rate changes (via TunerRelay). Your decoder does not need special handling—it will be gracefully stopped and restarted with the new rate.
+WaveKit automatically restarts decoders when the source sample rate changes (from the web app,
+the API or an RTL-TCP relay client). Your decoder does not need special handling—it will be gracefully stopped and restarted with the new rate.
 
 If your decoder has specific sample rate requirements, declare them in `preferredSampleRates`. WaveKit will log warnings when running at non-optimal rates but will not prevent operation.
 
@@ -489,10 +496,10 @@ export class HfdlDecoder extends ExternalSdrDecoder {
 ### 2. Register it
 
 ```typescript
-// In src/decoders/registry.ts
-import { HfdlDecoder, HFDL_DECODER_CAPS } from "./builtin/hfdl.js"
+// In src/index.ts
+import { HfdlDecoder, HFDL_DECODER_CAPS } from "./decoders/builtin/hfdl.js"
 
-registry.register(
+decoderRegistry.register(
 	"hfdl",
 	(config, logger) => new HfdlDecoder(config, logger),
 	HFDL_DECODER_CAPS,
@@ -550,13 +557,13 @@ describe("HfdlDecoder", () => {
 
 ### Decoder not starting
 
-1. Check if binary exists: `docker exec wavekit which my-decoder`
-2. Check permissions: `docker exec wavekit ls -la /usr/local/bin/my-decoder`
-3. Check logs: `make dev-stack-logs | grep my-decoder`
+1. Check if binary exists: `docker exec <container> which my-decoder`
+2. Check permissions: `docker exec <container> ls -la /usr/local/bin/my-decoder`
+3. Check logs: `make app-logs | grep my-decoder`
 
 ### No output being parsed
 
-1. Run decoder manually: `docker exec wavekit my-decoder --help`
+1. Run decoder manually: `docker exec <container> my-decoder --help`
 2. Check output format matches parser
 3. Add debug logging to parseOutput
 

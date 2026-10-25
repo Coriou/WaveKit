@@ -8,8 +8,15 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **WebSocket**: `ws://localhost:9000/ws`
 - **Audio Stream**: `tcp://localhost:8080`
 - **Live Audio Stream**: `http://localhost:8081/stream` (raw PCM) and `http://localhost:8081/stream.wav` (WAV-wrapped)
+- **Digital voice audio**: `http://localhost:8082/stream` and `/stream.wav`
+- **Interactive API explorer** (OpenAPI): `http://localhost:9000/docs`
 
-In the examples, `<sdrpp-host>` and `<pi-address>` stand for your own receiver addresses, and
+Port 9000 is the API port in the shipped Docker and local configurations
+(`config/docker.yaml`, `config/local.yaml`). The schema default, used when a config file
+sets no `api.port`, is 3000.
+
+In the examples, `<pi-address>` stands for your own receiver's address (an `rtl_tcp` or
+rtlmux host), and
 `192.0.2.x` addresses are from the range reserved for documentation.
 
 ## Protected runtime (opt-in)
@@ -170,6 +177,10 @@ the answer. The answer is `{ "updated": true | false }` (false for an unknown or
 device). A label queued behind the revocation of the requester's own session answers
 401 `AUTH_REQUIRED`. Machine routes do not label.
 
+`POST /api/access/devices/revoke-all` (no body) signs out every paired browser, including the
+one that asks, with the same session, CSRF and Origin admission. It answers
+`{ "revoked": true }` and clears the session cookie; each browser must pair again.
+
 The inventory reauthorizes the original request immediately before a synchronous,
 one-clock committed-map snapshot and rechecks availability after the clock callback.
 Pending create/refresh/revoke persistence remains invisible until commit. Reads do
@@ -312,52 +323,22 @@ await call("/api/access/session/logout", { method: "POST" })
 
 ### Health & Status
 
-#### GET /health
+#### GET /health, /health/ready and /health/live
 
-Quick liveness check.
+Three probes, all answering `{ "status": "ok", "timestamp": "<ISO 8601>" }`. Only the
+HTTP status code carries the result.
 
-```bash
-curl http://localhost:9000/health
-```
-
-**Response** (200 OK):
-
-```json
-{
-	"status": "ok",
-	"uptime": 3600
-}
-```
-
-**Response** (503 Service Unavailable):
-
-```json
-{
-	"status": "unhealthy",
-	"error": "No sources connected"
-}
-```
-
-#### GET /health/ready
-
-Readiness probe for orchestration systems.
+| Route           | 200                     | 503                                                                                                                   |
+| --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `/health`       | The core is healthy     | The overall health check is `unhealthy`                                                                               |
+| `/health/ready` | Ready to accept traffic | Sources are configured but none is connected, or decoders are configured (and not deliberately stopped) but none runs |
+| `/health/live`  | The process answers     | Never                                                                                                                 |
 
 ```bash
-curl http://localhost:9000/health/ready
+curl -i http://localhost:9000/health
 ```
 
-**Response** (200 OK):
-
-```json
-{
-	"ready": true,
-	"components": {
-		"api": "up",
-		"sources": "up",
-		"decoders": "up"
-	}
-}
-```
+For the reason behind a 503, read [`GET /api/status`](#get-apistatus).
 
 #### GET /api/status
 
@@ -379,11 +360,11 @@ curl http://localhost:9000/api/status
 	"version": "1.0.0",
 	"sources": [
 		{
-			"id": "sdrpp-main",
-			"type": "sdrpp-network",
+			"id": "rtl-pi",
+			"type": "rtl_tcp",
 			"connected": true,
 			"bytesReceived": 847000000,
-			"dataRate": 192000,
+			"dataRate": 4096000,
 			"reconnectAttempts": 0
 		}
 	],
@@ -446,6 +427,20 @@ curl http://localhost:9000/api/status
 	}
 }
 ```
+
+#### GET /api/resources, /api/resources/container and /api/resources/backpressure
+
+`GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
+one status per SDR host, and per-source backpressure. `/api/resources/container` and
+`/api/resources/backpressure` return just one of those parts. The `resources` WebSocket
+channel pushes the same data as it changes.
+
+#### GET /api/telemetry/fanout
+
+Fanout telemetry: global drop counters, how many branches are under backpressure, and
+per-branch detail. `GET /api/telemetry/fanout/branches` lists the branches and
+`/api/telemetry/fanout/branches/:branchId` reads one. The `fanout` WebSocket channel pushes
+snapshots.
 
 #### GET /api/resources/sdr-hosts
 
@@ -519,9 +514,9 @@ curl http://localhost:9000/api/sources
 ```json
 [
 	{
-		"id": "sdrpp-main",
-		"type": "sdrpp-network",
-		"host": "<sdrpp-host>",
+		"id": "rtl-pi",
+		"type": "rtl_tcp",
+		"host": "<pi-address>",
 		"port": 5555,
 		"connected": true,
 		"activity": {
@@ -531,11 +526,11 @@ curl http://localhost:9000/api/sources
 			"timeoutMs": 10000
 		},
 		"bytesReceived": 847000000,
-		"dataRate": 192000,
+		"dataRate": 4096000,
 		"caps": {
-			"kind": "audio_pcm",
-			"sampleRate": 48000,
-			"format": "FLOAT32LE",
+			"kind": "iq",
+			"sampleRate": 2048000,
+			"format": "U8_IQ",
 			"exclusive": false
 		}
 	}
@@ -1249,7 +1244,8 @@ both paths write the same value at most once per connection.
 
 #### POST /api/tuner/:sourceId/control-mode
 
-Release control to SDR++ (`external`) or reclaim (`internal`).
+Release control to an external RTL-TCP client, such as SDR++ through the tuner relay
+(`external`), or reclaim it (`internal`).
 
 ```bash
 curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
@@ -1767,9 +1763,9 @@ curl -X POST http://localhost:9000/api/sources \
     "host": "<pi-address>",
     "port": 1234,
     "caps": {
-      "kind": "audio_pcm",
-      "sampleRate": 48000,
-      "format": "S16LE",
+      "kind": "iq",
+      "sampleRate": 2048000,
+      "format": "U8_IQ",
       "exclusive": false
     }
   }'
@@ -1825,7 +1821,7 @@ curl http://localhost:9000/api/decoders
 		"health": "running",
 		"pid": 1234,
 		"uptime": 3590,
-		"sourceId": "sdrpp-main",
+		"sourceId": "rtl-pi",
 		"stats": {
 			"bytesIn": 423000000,
 			"eventsOut": 847,
@@ -2066,6 +2062,19 @@ for every decoder selecting that source. 404 for an unknown source; 400 for a
 non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
 librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
 
+#### GET /api/decoders/health
+
+The health state of every decoder (the same states the `health` WebSocket channel pushes as
+`decoder:health`).
+
+#### GET /api/decoders/efficiency
+
+How the decoder CPU budget is spent, per source. The body is a `DecoderEfficiencyView` from
+`@wavekit/api-types`: `budgetCores` and `cpuGuardPercent`, then one entry per source with the
+cores in use, CPU percent, the drop state (`ok`, `dropping`, `clearing`, `unknown`), and the
+`admitted` and `blocked` decoder placements with their cost in cores and, for a blocked one,
+why (`budget`, `cpu`, `drops`, `late-drops`, `unknown`) and when it is retried.
+
 #### GET /api/decoders/types
 
 Registered decoder types: `[{ type, caps, options? }]`. `options` (WG6) lists
@@ -2162,7 +2171,7 @@ curl http://localhost:9000/api/decoders/dsd-main
 	"health": "running",
 	"pid": 1234,
 	"uptime": 3590,
-	"sourceId": "sdrpp-main",
+	"sourceId": "rtl-pi",
 	"stats": {
 		"bytesIn": 423000000,
 		"eventsOut": 847,
@@ -3942,6 +3951,19 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 schema violations (a missing or unknown parameter, a negative Hz, `sinceMs`
 below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
+### Aircraft
+
+ADS-B aircraft that readsb currently tracks, enriched with registration and type where known.
+Field meanings are in [ADS-B](ADSB.md#field-reference).
+
+- `GET /api/aircraft`: `{ aircraft, stats, timestamp }` for every tracked aircraft.
+- `GET /api/aircraft/stats`: the tracker statistics only.
+- `GET /api/aircraft/:icao`: one aircraft by its 24-bit ICAO address in hex (`4B1808`); 404
+  when it is not tracked.
+
+The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
+and `aircraft:stats`.
+
 ### Vessels
 
 AIS vessel current state (WG1). In memory only: no position history, cleared
@@ -4251,6 +4273,24 @@ that threshold in bytes (null without a scanner) and `state` is `low` when
 `filesystem.availableBytes` is below it, `ok` when not, `unknown` without either.
 WaveKit does not shorten any retention because space is low; the report only
 states the configured caps and retention.
+
+### Operator data
+
+Protected mode only (404 in legacy mode). Saved frequencies, shared preferences and command
+usage that every paired browser shares, stored in the state directory.
+
+- `GET /api/operator-data`: the whole store.
+- `POST /api/operator-data/saved-frequencies`, `PUT` and `DELETE
+/api/operator-data/saved-frequencies/:id`: manage saved frequencies.
+- `PATCH /api/operator-data/preferences`: change preferences.
+- `POST` and `DELETE /api/operator-data/command-usage`: record or reset command-palette
+  usage.
+
+Writes take the normal protected mutation admission (session, CSRF, Origin). The
+`operator-data` WebSocket channel sends `operator-data:snapshot` on subscribe and
+`operator-data:updated` after each change. The DTOs are in
+`packages/api-types/src/operator-data.ts`; the design is in the
+[operator data specification](specs/operator-data/design.md).
 
 ### Config export
 
@@ -5362,10 +5402,11 @@ ws.onmessage = event => {
 Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
 [SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in),
-`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel))
+`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel)),
 `vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)), `aprs`
-(APRS stations, objects and items, see [APRS channel](#aprs-channel)) and `mesh`
-(Meshtastic nodes, see [Mesh channel](#mesh-channel)).
+(APRS stations, objects and items, see [APRS channel](#aprs-channel)), `mesh`
+(Meshtastic nodes, see [Mesh channel](#mesh-channel)), `aircraft` (ADS-B aircraft, see
+[Aircraft](#aircraft)) and `operator-data` (see [Operator data](#operator-data)).
 `activity` is not one of these channels. It uses `activity:subscribe` and
 `activity:unsubscribe`. See [Activity](#activity).
 
@@ -5652,7 +5693,7 @@ any cached `decoder:status`.
 	"type": "source:connected",
 	"channel": "sources",
 	"data": {
-		"sourceId": "sdrpp-main"
+		"sourceId": "rtl-pi"
 	}
 }
 ```
@@ -5664,7 +5705,7 @@ any cached `decoder:status`.
 	"type": "source:disconnected",
 	"channel": "sources",
 	"data": {
-		"sourceId": "sdrpp-main",
+		"sourceId": "rtl-pi",
 		"error": "Connection reset by peer"
 	}
 }
@@ -5796,9 +5837,9 @@ Emitted every ~5 seconds.
 	"data": {
 		"timestamp": "2026-01-09T14:23:45.123Z",
 		"sources": {
-			"sdrpp-main": {
+			"rtl-pi": {
 				"bytesReceived": 847000000,
-				"dataRate": 192000
+				"dataRate": 4096000
 			}
 		},
 		"decoders": {

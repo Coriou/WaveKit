@@ -1,13 +1,24 @@
 # WaveKit Security Guide
 
-> **Document Type**: Security Best Practices & Advisory Tracking
-> **Audience**: System Operators, Developers, Security Teams
-> **Status**: Active
-> **Last Updated**: 2026-01-01
+## Access and pairing
 
-## Overview
+By default the core listens on loopback only, and the Docker `app` profile
+publishes its ports on `127.0.0.1`. To let other devices reach WaveKit, run it in
+**protected mode**: every browser is paired once with a one-time code, and every
+route, WebSocket and audio stream then needs that paired session (or the machine
+credential). Raw audio TCP and the RTL-TCP relay are disabled in protected mode.
 
-WaveKit integrates multiple third-party decoder binaries (dsd-fme, multimon-ng, rtl_433, readsb, acarsdec, dumpvdl2, AIS-catcher, direwolf). These external dependencies require careful version management and security monitoring to maintain a secure deployment.
+- Try it locally: [Protected mode locally](LOCAL-SETUP.md#protected-mode-locally).
+- One container with loopback-published ports:
+  [Protected mode in Docker without a forwarder](DOCKER-SETUP.md#protected-mode-in-docker-without-a-forwarder).
+- LAN access over HTTPS behind Caddy:
+  [Protected reference profile](DOCKER-SETUP.md#protected-reference-profile).
+- Configuration fields and the pairing API:
+  [Protected runtime](API.md#protected-runtime-opt-in).
+
+## Decoder versions
+
+WaveKit integrates multiple third-party decoder binaries (dsd-fme, multimon-ng, rtl_433, readsb, acarsdec, dumpvdl2, AIS-catcher, Dire Wolf, gr-lora_sdr). These external dependencies require careful version management and security monitoring to maintain a secure deployment.
 
 This document covers:
 
@@ -40,7 +51,7 @@ Version pinning ensures:
 WaveKit supports version constraints via the `minVersion` and `maxVersion` fields in decoder configuration:
 
 ```yaml
-# config/default.yaml
+# your config, e.g. config/custom.yaml
 decoders:
   - id: direwolf
     type: direwolf
@@ -258,7 +269,7 @@ done
 
 Maintain a list of contacts for security incidents:
 
-- WaveKit maintainers: [GitHub Issues](https://github.com/your-org/wavekit/issues)
+- WaveKit maintainers: [GitHub Issues](https://github.com/Coriou/WaveKit/issues)
 - Decoder maintainers: See GitHub repositories above
 - Your organization's security team
 

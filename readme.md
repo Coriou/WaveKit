@@ -16,9 +16,13 @@
 
 </div>
 
-WaveKit turns a cheap RTL-SDR dongle into a live window on the airwaves. It decodes aircraft,
-ships, pagers, digital voice, APRS, weather sensors and Meshtastic in parallel, and shows all of it
-in a fast web app: a live spectrum and waterfall, a map, an activity log and a scanner.
+WaveKit is a self-hosted, open-source software-defined radio (SDR) station for the RTL-SDR. It turns
+one cheap dongle, plugged into your computer or into a Raspberry Pi on your network, into a live
+window on the airwaves. It decodes aircraft (ADS-B, ACARS, VDL2), ships (AIS), pagers (POCSAG,
+FLEX), digital voice (DMR, P25, YSF), APRS, weather sensors and Meshtastic in parallel, and shows all
+of it in a fast web SDR app in your browser: a live spectrum and waterfall, a map, an activity log
+and a scanner. It is for radio hobbyists, scanner listeners and plane and ship spotters who want
+everything their antenna hears in one place.
 
 <picture>
 	<source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/spectrum-light.png">
@@ -82,7 +86,7 @@ To use a real receiver, follow [Docker runtime](docs/DOCKER-RUNTIME.md) for a Ra
 dongle, and the [fresh-card Pi setup](packages/sdr-host/README.md) to prepare a Pi as an SDR host.
 
 To open WaveKit to other devices on your network, run it in protected mode, where each browser is
-paired once: see [Protected mode in Docker](docs/DOCKER-SETUP.md#protected-mode-in-docker-without-a-forwarder).
+paired once: see [Access and pairing](docs/SECURITY.md#access-and-pairing).
 
 ## Hardware
 
@@ -114,7 +118,7 @@ RTL-SDR ──IQ──▶ WaveKit core ──▶ decoders (one process each)
  (Pi or USB)        │
                     ├── REST API and WebSocket  ──▶ web app, CLI dashboard, your scripts
                     ├── live audio (HTTP)
-                    └── RTL-TCP relay           ──▶ SDR++
+                    └── RTL-TCP relay           ──▶ other SDR apps (optional)
 ```
 
 The core reads one IQ stream, channelises it, and feeds each decoder the slice it needs. Events,

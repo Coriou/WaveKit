@@ -304,44 +304,11 @@ version from GitHub.
 
 ## Quick Start
 
-Choose **one** of the two options below.
-
-### Option A — Managed (Recommended)
-
-Run this on the SDR host (Pi), not your build machine.
-
-```bash
-mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/sdr-host.sh -o ~/.local/bin/wavekit-sdr-host
-chmod +x ~/.local/bin/wavekit-sdr-host
-
-~/.local/bin/wavekit-sdr-host install
-~/.local/bin/wavekit-sdr-host update
-```
-
-From the repo, `make sdr-host-install` and `make sdr-host-update` run the same pipeline.
-
-The script stores config in `~/.config/wavekit-sdr-host/` and creates a `.env` file you can edit.
-
-The installer will offer to blacklist DVB drivers and recommend a reboot.
-
-To update the manager script later:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/sdr-host.sh -o ~/.local/bin/wavekit-sdr-host
-chmod +x ~/.local/bin/wavekit-sdr-host
-```
-
-### Option B — DIY (Manual)
-
-Run these steps on the SDR host (Pi), not your build machine.
-
-Do these steps yourself (this is what the scripts automate):
-
-1. Install Docker + Compose and add your user to the `docker` group.
-2. Blacklist DVB drivers so the dongle is free.
-3. Create a `docker-compose.yml` and run `docker compose up -d`.
-4. Point WaveKit to `tcp://<this-host-ip>:5555`.
+On an existing Raspberry Pi OS or Linux host, install with the managed
+`wavekit-sdr-host` script (or the manual steps it automates): see
+[SDR host setup › Deployment](../../docs/SDR-HOST-SETUP.md#deployment), the
+canonical guide. From the repository, `make sdr-host-install` and
+`make sdr-host-update` run the same pipeline.
 
 ## Configuration
 

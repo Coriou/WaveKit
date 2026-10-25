@@ -1,8 +1,12 @@
 # Core reference: API, tuner, relay, live audio and configuration
 
-This page gathers the reference material that used to live in the README. For the full
-REST and WebSocket contract, see [API.md](API.md); for the Docker runtime, see
-[DOCKER-RUNTIME.md](DOCKER-RUNTIME.md).
+Quick reference for the WaveKit core: the most used API calls, tuner control, the RTL-TCP
+relay, live audio and configuration. The web app does all of this from the browser; this page
+is for scripts and for running the core by hand. For the full REST and WebSocket contract, see
+[API.md](API.md); for the Docker runtime, see [DOCKER-RUNTIME.md](DOCKER-RUNTIME.md).
+
+The examples use port 9000, the API port in the shipped configurations, and a source named
+`rtl-pi`; use your own source id (`GET /api/sources` lists them).
 
 ## API Reference
 
@@ -72,12 +76,24 @@ ws.onmessage = event => {
 - `health` — Decoder health state changes
 - `fanout` — Backpressure snapshots
 - `live-audio` — Live demod status/config events
+- `digital-voice` — Digital voice stream status and calls
 - `resources` — Container, SDR host, and backpressure metrics
 - `tuner` — RTL-TCP tuner state/command events
+- `scanner` — Scanner jobs, discoveries and identification
+- `spectrum` — Spectrum and waterfall frames (opt-in, with per-client options)
+- `bandplans` — Band plan change notices
+- `aircraft`, `vessels`, `aprs`, `mesh` — Tracked aircraft, ships, APRS stations and
+  Meshtastic nodes
+- `operator-data` — Shared saved frequencies and preferences (protected mode)
+
+Activity has its own replayable subscription (`activity:subscribe`); see
+[API.md](API.md#websocket-api) for every channel's messages.
 
 ### Audio Streaming
 
-Decoded audio streams over TCP port 8080:
+For listening, use the [live audio HTTP stream](#live-demodulator-http-audio) below. The raw
+TCP audio port (8080) carries the audio of decoders that produce it, as headerless PCM in the
+`audio.format` and `audio.sampleRate` of the configuration:
 
 ```bash
 # Play with sox
@@ -89,8 +105,9 @@ nc localhost 8080 | ffplay -f s16le -ar 48000 -ac 1 -nodisp -
 
 ### Tuner Control (WaveKit)
 
-WaveKit can directly control RTL-TCP sources without SDR++. Use the CLI Tuner tab
-or the REST API to tune frequency, gain, and other settings.
+WaveKit controls `rtl_tcp` sources directly: frequency, gain, sample rate and the other
+dongle settings. The web app tunes from the spectrum (see [Using the web app](WEB-APP.md));
+scripts use the REST API below, and the [CLI dashboard](CLI.md) has a Tuner tab.
 
 **CLI keys (Tuner tab):**
 
@@ -114,7 +131,7 @@ curl http://localhost:9000/api/tuner
 curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \
   -H "Content-Type: application/json" -d '{"hz":144800000}'
 
-# Release control to SDR++
+# Release control to an external RTL-TCP client (for example SDR++ on the relay)
 curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
   -H "Content-Type: application/json" -d '{"mode":"external"}'
 
@@ -123,9 +140,10 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
   -H "Content-Type: application/json" -d '{"mode":"internal"}'
 ```
 
-### Tuner Relay (SDR++)
+### RTL-TCP relay
 
-Expose the internal IQ stream as an RTL-TCP compatible endpoint for SDR++ (or any RTL-TCP client).
+Optional. Expose the receiver's IQ stream as an RTL-TCP compatible endpoint, so another
+RTL-TCP client (SDR++, GQRX, SDR# and others) can watch and tune the same dongle WaveKit uses.
 Control commands are forwarded upstream so you only keep a single connection to the remote RTL-SDR.
 
 ```yaml
@@ -141,8 +159,8 @@ tunerRelay:
 **Usage:**
 
 1. Start WaveKit with the relay enabled.
-2. In SDR++, select **RTL-TCP** and connect to `tcp://<wavekit-host>:1234`.
-3. Tune as usual — SDR++ commands are forwarded to the upstream `rtl_tcp`/`rtlmux`.
+2. In your client (in SDR++: the **RTL-TCP** source), connect to `<wavekit-host>:1234`.
+3. Tune as usual — the client's commands are forwarded to the upstream `rtl_tcp`/`rtlmux`.
 
 **Notes:**
 
@@ -157,7 +175,7 @@ tunerRelay:
 
 **Dynamic Sample Rate:**
 
-When SDR++ changes the sample rate, WaveKit automatically:
+When a relay client changes the sample rate, WaveKit automatically:
 
 - Updates source capabilities
 - Restarts the LiveDemodulator with new decimation rates
@@ -275,10 +293,12 @@ tunerRelay:
   controlPolicy: "exclusive"
 ```
 
-**Environment overrides:**
+**Environment overrides:** `WAVEKIT_` plus the key path, with `__` between nested keys and
+`_<index>_` for list entries. A few common keys also have short aliases (`WAVEKIT_API_PORT`,
+`WAVEKIT_API_HOST`, `WAVEKIT_LOG_LEVEL`, `WAVEKIT_STATE_DIR`).
 
 ```bash
-WAVEKIT_API_PORT=9000
+WAVEKIT_API__PORT=9000
 WAVEKIT_LOG_LEVEL=debug
 WAVEKIT_SOURCES_0_HOST="<pi-address>"
 WAVEKIT_TUNER_RELAY__ENABLED=true
@@ -290,16 +310,21 @@ YAML file already defines; they cannot add one. Startup fails if the index does 
 
 ## RTL-SDR Setup
 
-For optimal reception:
+WaveKit reads IQ from `rtl_tcp` (or rtlmux in front of it). On a Raspberry Pi, the
+[fresh-card Pi setup](../packages/sdr-host/README.md) installs and supervises all of this for
+you. By hand:
 
 ```bash
-# On Raspberry Pi - start rtl_tcp with AGC
-rtl_tcp -a 0.0.0.0 -p 1234 -f 446524920 -s 2048000 -g 0
+# On the machine with the dongle: serve it on the network
+rtl_tcp -a 0.0.0.0 -p 1234 -s 2048000 -g 0
 
-# Key settings:
-#   -g 0        AGC mode (critical for weak signals)
-#   -s 2048000  Sample rate 2.048 Msps (not 2.4!)
+#   -g 0        tuner AGC; set a manual gain later from WaveKit
+#   -s 2048000  2.048 Msps; WaveKit changes the rate when a decoder needs it
+#               (ADS-B at 1090 MHz uses 2.4 Msps)
 ```
+
+With the dongle plugged into the machine that runs WaveKit, see the USB setup in
+[Docker runtime](DOCKER-RUNTIME.md) and [native development](LOCAL-SETUP.md).
 
 For multiple clients, use [rtlmux](https://github.com/slepp/rtlmux):
 
@@ -309,58 +334,65 @@ rtlmux -a 0.0.0.0 -p 5555 -s 5556 127.0.0.1 1234
 
 ## Docker
 
-Three build targets, all produced by a single `docker buildx bake` invocation:
+`docker/bake.hcl` defines the images. `make docker-build` builds the default group (the first
+three rows); the demod tooling image is a separate `demod` group.
 
-| Image                                 | Bake target   | Contents               | Use Case           |
-| ------------------------------------- | ------------- | ---------------------- | ------------------ |
-| `ghcr.io/coriou/wavekit:latest`       | `final`       | SDR++ + API + Decoders | All-in-one         |
-| `ghcr.io/coriou/wavekit:latest-core`  | `final-core`  | API + Decoders         | External SDR++     |
-| `ghcr.io/coriou/wavekit:latest-sdrpp` | `final-sdrpp` | SDR++ only             | Dedicated SDR host |
+| Image                                 | Bake target   | Contents                                  | Use                                                         |
+| ------------------------------------- | ------------- | ----------------------------------------- | ----------------------------------------------------------- |
+| `ghcr.io/coriou/wavekit:latest-core`  | `final-core`  | Core, API and every decoder               | The usual image, with an `rtl_tcp` receiver or a USB dongle |
+| `ghcr.io/coriou/wavekit:latest`       | `final`       | The same, plus SDR++                      | Optional: SDR++ in the same container                       |
+| `ghcr.io/coriou/wavekit:latest-sdrpp` | `final-sdrpp` | SDR++ only                                | Optional: a standalone SDR++ server                         |
+| `ghcr.io/coriou/wavekit:latest-demod` | `final-demod` | dsd-fme, multimon-ng, csdr, rtl-sdr tools | Interactive demodulation tooling                            |
 
 The registry and tag come from the `REGISTRY` and `TAG` variables in `docker/bake.hcl`.
 
 ```bash
-# Build the default group (all three images)
+# Build the default group
 make docker-build
 
 # Single-arch local build (skip multi-arch when you don't need it)
 docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64" --load
 ```
 
-To run the core image against an external SDR++, write a config file with a complete source
-entry. The image's built-in configuration has no sources, and environment overrides cannot
-add one. Save this as `wavekit.yaml`, replacing `<sdrpp-host>` with the address of the machine
-running SDR++ (an IP address is safest; `.local` names may not resolve inside a container):
+`make app-up` builds and runs the core image with Docker Compose; that is the easiest start,
+described in [Docker runtime](DOCKER-RUNTIME.md). To run the core image by hand against a
+network receiver, write a config file with a complete source entry. The image's built-in
+configuration has no sources, and environment overrides cannot add one. Save this as
+`wavekit.yaml`, replacing `<pi-address>` with the address of the machine running `rtl_tcp` or
+rtlmux (an IP address is safest; `.local` names may not resolve inside a container):
 
 ```yaml
 sources:
-  - id: "sdrpp-main"
-    type: "sdrpp-network"
-    host: "<sdrpp-host>"
+  - id: "rtl-pi"
+    type: "rtl_tcp"
+    host: "<pi-address>"
     port: 5555
     caps:
-      kind: "audio_pcm"
-      sampleRate: 48000
-      format: "FLOAT32LE"
+      kind: "iq"
+      format: "U8_IQ"
+      sampleRate: 2048000
 decoders: []
 api:
   host: "0.0.0.0"
   port: 9000
-audio:
-  tcpPort: 8080
 ```
 
 Then mount it and point `WAVEKIT_CONFIG` at it:
 
 ```bash
-docker run -p 9000:9000 -p 8080:8080 \
+docker run -p 127.0.0.1:9000:9000 \
   -v "$PWD/wavekit.yaml:/config/wavekit.yaml:ro" \
   -e WAVEKIT_CONFIG=/config/wavekit.yaml \
   ghcr.io/coriou/wavekit:latest-core
 ```
 
 `WAVEKIT_CONFIG` selects that one file instead of `/app/config/default.yaml`; settings it
-leaves out take their schema defaults. The tuner relay needs an `rtl_tcp` source with `U8_IQ`
-IQ, so it is not enabled for this SDR++ audio source.
+leaves out take their schema defaults. Publishing the port on `127.0.0.1` keeps the API on
+your machine; to open it to your network, use protected mode
+([Docker setup](DOCKER-SETUP.md#protected-mode-in-docker-without-a-forwarder)).
 
-See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`dev`, `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.
+WaveKit can also take audio from an SDR++ network sink (`type: "sdrpp-network"`), but an
+`rtl_tcp` IQ source is what the spectrum, scanner, tuner and relay need.
+
+See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protected`, `dev`,
+`prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.

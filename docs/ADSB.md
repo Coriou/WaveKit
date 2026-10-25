@@ -4,7 +4,7 @@ WaveKit includes a comprehensive ADS-B (Automatic Dependent Surveillance–Broad
 
 ## Overview
 
-ADS-B is a surveillance technology where aircraft automatically broadcast their GPS position, altitude, speed, and identity on **1090 MHz**. WaveKit decodes these signals using **readsb** and presents enriched aircraft data through the REST API, WebSocket, and CLI dashboard.
+ADS-B is a surveillance technology where aircraft automatically broadcast their GPS position, altitude, speed, and identity on **1090 MHz**. WaveKit decodes these signals using **readsb** and presents enriched aircraft data on the web app's Map, and through the REST API, WebSocket and the CLI dashboard.
 
 > **Note**: ADS-B tracking is just one of WaveKit's many decoder capabilities. See the main README for the full list of supported protocols (AIS, ACARS, DMR, P25, APRS, etc.).
 
@@ -29,12 +29,12 @@ ADS-B is a surveillance technology where aircraft automatically broadcast their 
    └────────────────────────┘
             │
             ▼
-     REST API + WebSocket + CLI Display
+     REST API + WebSocket → web app Map, CLI dashboard
 ```
 
 ## Why Different Rows Show Different Data
 
-When viewing the CLI output, you'll notice that **not all aircraft rows contain the same fields**. This is normal and expected:
+Whether on the web app's Map or in the CLI dashboard, you'll notice that **not all aircraft rows contain the same fields**. This is normal and expected:
 
 ### ADS-B Message Types
 
@@ -58,7 +58,7 @@ A single aircraft may send **different message types** at different intervals:
 
 ### Why Some Fields Are Missing
 
-| Observation in CLI               | Explanation                                            |
+| Observation                      | Explanation                                            |
 | -------------------------------- | ------------------------------------------------------ |
 | No registration (yellow)         | hexdb.io lookup pending or aircraft not in database    |
 | No callsign (white)              | Aircraft hasn't broadcast DF17/18 identification yet   |
@@ -73,9 +73,9 @@ A single aircraft may send **different message types** at different intervals:
 
 The AircraftTracker **accumulates data over time**. A newly-seen aircraft will initially show minimal data, then fill in as more message types are received. After 10-30 seconds, most fields should be populated (if the aircraft broadcasts them).
 
-## CLI Display Format
+## CLI dashboard format
 
-The CLI displays aircraft in a compact, information-dense format:
+The [CLI dashboard](CLI.md) displays aircraft in a compact, information-dense format:
 
 ```
 16:22:45 adsb   ADS  4B1808 │ D-AMAB │ SWR8YB │ B38M │ FL380 │ 481kt │ 43.51,1.07 │ NE │ 2244 │ 📷
@@ -328,15 +328,13 @@ ADS-B decoding requires adequate sample rate:
 
 ADS-B operates on **1090 MHz**. Tune your SDR to this frequency:
 
-```bash
-# Via tuner interface
-Set frequency: 1090000000 Hz
-Set sample rate: 2400000 Hz
-```
+Tune to 1090 MHz in the web app, or through the API (`/api/tuner/:sourceId/frequency`, see
+[API](API.md)). WaveKit raises the sample rate to 2.4 Msps for readsb on its own when 1090 MHz is
+tuned, and restores the previous rate when you tune away.
 
 ## Signal Quality
 
-The CLI shows signal quality indicators when available:
+The CLI dashboard shows signal quality indicators when available:
 
 | Indicator | RSSI (dBFS) | Meaning |
 | --------- | ----------- | ------- |

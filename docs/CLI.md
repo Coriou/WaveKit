@@ -1,6 +1,6 @@
 # WaveKit CLI dashboard
 
-`wavekit` is the terminal dashboard for a running WaveKit core. It reads the core's REST API and WebSocket feed. It shows the receive chain in the order an operator checks it:
+`wavekit` is the terminal dashboard for a running WaveKit core. The main interface is the [web app](WEB-APP.md); the dashboard is a lighter companion for a terminal or an SSH session. It reads the core's REST API and WebSocket feed. It shows the receive chain in the order an operator checks it:
 
 1. Is the API reachable?
 2. Is IQ arriving?
@@ -21,7 +21,7 @@ node cli/dist/cli.js --api http://192.0.2.10:9000
 node cli/dist/cli.js --help
 ```
 
-The views are `overview`, `decoders`, `messages`, `receiver` and `system`. The old view names still work as aliases: `dashboard`, `output`, `backpressure`, `sources`, `tuner`, `live-audio` and `resources`. An unknown view prints the valid names and exits with status 2.
+The views are `overview`, `decoders`, `messages`, `receiver`, `system` and `scan`. The old view names still work as aliases: `dashboard`, `output`, `backpressure`, `sources`, `tuner`, `live-audio` and `resources`. An unknown view prints the valid names and exits with status 2.
 
 | Variable                             | Meaning                                                                                                                                                                                             |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

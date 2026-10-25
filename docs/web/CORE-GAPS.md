@@ -1,7 +1,7 @@
 # Web dashboard — core gaps
 
 Features the web dashboard design relies on that WaveKit core does not provide yet.
-Maintained on the `design/web-dashboard` branch alongside [DESIGN.md](DESIGN.md) and
+Maintained alongside [DESIGN.md](DESIGN.md) and
 the design canvas. Core team: pick items into `docs/ROADMAP.md`; when one lands,
 note it here (or tell the design session) so the item can be ticked.
 
