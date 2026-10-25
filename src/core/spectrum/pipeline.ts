@@ -13,6 +13,7 @@ import type {
 	BlockSummary,
 	EngineState,
 	FreqRange,
+	MaskRaster,
 	PendingEpoch,
 	PipelineConfig,
 	PipelineEvent,
@@ -71,6 +72,31 @@ const SKIRT_DB = 30
 /** Far skirts (§6.2, P18): regrowth and phase noise sit ≥ 50 dB down one or two channels out; intermod products (≈ 40 dBc) stay. */
 const FAR_SKIRT_DB = 50
 const FAR_SKIRT_REACH_HZ = 31_250 // ±2 channels of a 12.5 kHz raster plus half a channel
+/**
+ * WG16 SC dip split smoothing: 2 kHz, under a third of the narrowest 6.25 kHz raster so the gap
+ * between two adjacent narrow channels survives, and wide enough (3 bins at a 1 kHz bin) that one
+ * bin of 50 ms FFT scatter (about ±1.5 dB) cannot fake a 6 dB dip.
+ */
+export const DIP_SMOOTH_HZ = 2_000
+/**
+ * WG16 SC sidebands: a split piece more than 10 dB below a neighbour peaking within
+ * `FAR_SKIRT_REACH_HZ` (31.25 kHz) stays with it. AM voice sidebands sit 10 to 20 dB under the
+ * carrier (30 to 60 % modulation: 20·log10(m / 2)), and adjacent-channel splatter lower still;
+ * two emitters of similar level (within 10 dB) still split.
+ */
+export const SIDEBAND_DB = 10
+/**
+ * WG16 SC one-channel rule: peaks closer than 0.8 of the coarsest raster channel are one emitter
+ * unless a deep valley parts them. 0.8 × 12.5 kHz = 10 kHz holds the two lobes of a ±4.5 kHz
+ * POCSAG carrier (9 kHz apart); channel neighbours sit a full channel (12.5 kHz) apart, which
+ * leaves 2.5 kHz for drift.
+ */
+export const CHANNEL_PEAK_FRACTION = 0.8
+/**
+ * WG16 SC local floor: a track's local floor is the median of 12.5 kHz (one land-mobile channel)
+ * of bins each side of its segment, so a raised plateau of busy channels is its own floor.
+ */
+export const LOCAL_FLOOR_HZ = 12_500
 const STATS_INTERVAL_S = 5
 const STALE_MAX_MS = 1000
 const STUCK_TEST_MODE_S = 0.5
@@ -208,6 +234,8 @@ export class SpectrumPipeline {
 	private readonly blockMs: number
 	private readonly bytesPerSample: number
 	private readonly gapBins: number
+	/** WG16 SC: `DIP_SMOOTH_HZ` in bins, odd, at least 1. */
+	private readonly dipSmoothBins: number
 	private readonly edgeBins: number
 	private readonly dcBins: number
 	private readonly dcGuardHz: number
@@ -269,6 +297,10 @@ export class SpectrumPipeline {
 	private readonly alarmWaitBlocks: number
 	private exclusionEdges: number[] = []
 	private rasterEdges: number[] = []
+	/** WG16 SC: channel-edge bins of the coarsest raster in the window (sorted). */
+	private channelEdges: number[] = []
+	/** WG16 SC: `CHANNEL_PEAK_FRACTION` of the coarsest raster in bins; 0 = no raster. */
+	private channelPeakBins = 0
 	private masks: MasksInput = {
 		exclusions: [],
 		cfarRanges: [],
@@ -406,6 +438,9 @@ export class SpectrumPipeline {
 		this.blockMs = (this.blockSamples / this.fs) * 1000
 		this.bytesPerSample = bytesPerSample(cfg.format)
 		this.gapBins = Math.max(1, Math.round(GAP_TOLERANCE_HZ / this.binHz))
+		this.dipSmoothBins =
+			2 * Math.floor(Math.max(1, Math.round(DIP_SMOOTH_HZ / this.binHz)) / 2) +
+			1
 		this.edgeBins = usableEdgeBins(this.n, cfg.usableFraction)
 		this.dcBins = dcGuardBins(cfg.dcGuardHz, this.binHz, this.binHz)
 		this.dcGuardHz = Math.max(cfg.dcGuardHz, 2 * this.binHz)
@@ -463,6 +498,7 @@ export class SpectrumPipeline {
 			maxTracks: Math.max(1, cfg.maxTracks - 1), // one slot is the wideband tracker's (P11)
 			maxTrackBlocks,
 			idPrefix: idPrefix.main,
+			localBins: Math.max(1, Math.round(LOCAL_FLOOR_HZ / this.binHz)),
 		})
 		this.wideband = new Tracker({
 			sourceId: cfg.sourceId,
@@ -1197,6 +1233,15 @@ export class SpectrumPipeline {
 			usableEndBin: this.n - this.edgeBins + 1,
 			exclusionEdges: this.exclusionEdges,
 			rasterBinEdges: this.rasterEdges,
+			dipSplit: { smoothBins: this.dipSmoothBins },
+			channelEdges: this.channelEdges,
+			sideband: {
+				db: SIDEBAND_DB,
+				reachBins: Math.floor(FAR_SKIRT_REACH_HZ / this.binHz),
+			},
+			...(this.channelPeakBins > 0
+				? { channel: { minPeakBins: this.channelPeakBins } }
+				: {}),
 			skirtDb: SKIRT_DB,
 			inWindow: this.masks.inWindow,
 			farSkirt: {
@@ -2032,16 +2077,41 @@ export class SpectrumPipeline {
 		const hi = n - this.edgeBins + 1
 		const edges = new Set<number>()
 		const half = this.fs / 2
+		let coarsest = 0
+		// WG16 SC: per range, the coarsest raster's edges bound prominence merges.
+		const widest = new Map<string, number>()
+		const keyOf = (r: MaskRaster): string =>
+			`${r.startHz ?? ""}:${r.endHz ?? ""}`
+		for (const r of this.masks.rasters)
+			if (r.spacingHz > (widest.get(keyOf(r)) ?? 0))
+				widest.set(keyOf(r), r.spacingHz)
+		const channel = new Set<number>()
 		for (const r of this.masks.rasters) {
 			if (r.spacingHz <= 0) continue
-			const kFirst = Math.floor((c - half - r.firstChannelHz) / r.spacingHz) - 1
-			const kLast = Math.ceil((c + half - r.firstChannelHz) / r.spacingHz) + 1
+			// WG16 SC: a bounded raster cuts only inside its range.
+			const from = Math.max(c - half, r.startHz ?? -Infinity)
+			const to = Math.min(c + half, r.endHz ?? Infinity)
+			if (!(from < to)) continue
+			if (r.spacingHz > coarsest) coarsest = r.spacingHz
+			const isWidest = widest.get(keyOf(r)) === r.spacingHz
+			const kFirst = Math.floor((from - r.firstChannelHz) / r.spacingHz) - 1
+			const kLast = Math.ceil((to - r.firstChannelHz) / r.spacingHz) + 1
 			for (let k = kFirst; k <= kLast; k++) {
-				const b = Math.ceil(binOf(r.firstChannelHz + (k + 0.5) * r.spacingHz))
-				if (b > lo && b < hi) edges.add(b)
+				const hz = r.firstChannelHz + (k + 0.5) * r.spacingHz
+				if (hz < from || hz > to) continue
+				const b = Math.ceil(binOf(hz))
+				if (b > lo && b < hi) {
+					edges.add(b)
+					if (isWidest) channel.add(b)
+				}
 			}
 		}
 		this.rasterEdges = [...edges].sort((a, b) => a - b)
+		this.channelEdges = [...channel].sort((a, b) => a - b)
+		this.channelPeakBins =
+			coarsest > 0
+				? Math.round((CHANNEL_PEAK_FRACTION * coarsest) / this.binHz)
+				: 0
 		this.detector.setMasks({
 			dcGuardBins: this.dcBins,
 			edgeBins: this.edgeBins,

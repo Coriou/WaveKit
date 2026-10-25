@@ -114,6 +114,7 @@ import {
 	DQ_IDENTITY_SPLIT_MAX_HZ,
 	DQ_IDENTITY_SPLIT_MIN_HZ,
 	DQ_IDENTITY_WEAKER_DB,
+	DQ_LOCAL_SNR_DB,
 	DQ_MIN_HISTORY_OBS,
 	DQ_OBW_RATIO_MAX,
 	DQ_OVERLOAD_CREATE_SNR_DB,
@@ -218,6 +219,12 @@ export interface DiscoveryStoreOptions {
 	newId: () => string
 	minSurfaceBlocks?: number
 	rasters?: (sourceId: string, centreHz: number) => Raster[]
+	/**
+	 * WG16 SC (DQ 1.16): channel rasters at a centre (the band plans' coarsest while passive
+	 * runs). An observation off every `rasters` tolerance keys to the nearest of these
+	 * channels instead of a grid key. Absent: grid keys, as before.
+	 */
+	channelRasters?: (sourceId: string, centreHz: number) => Raster[]
 	/** WG9 req 2.6: inactive prune and capacity eviction skip a discovery holding kept recordings. */
 	discoveryHoldsKept?: (discoveryId: string) => boolean
 	/** WG9 R2: the eviction-blocked-by-kept warning; a module-level fallback logger without one. */
@@ -818,6 +825,10 @@ export class DiscoveryStore
 	/** Accepted for the frame display role (R 2.5). Creation follows `track.gate`. */
 	private minSurfaceBlocks: number
 	private readonly rastersFor: (sourceId: string, centreHz: number) => Raster[]
+	private readonly channelRastersFor: (
+		sourceId: string,
+		centreHz: number,
+	) => Raster[]
 	private readonly discoveries = new Map<string, Discovery>()
 	private readonly observationIndex = new Map<string, Observation>()
 	private readonly byDiscovery = new Map<string, Observation[]>()
@@ -931,6 +942,7 @@ export class DiscoveryStore
 		this.newId = opts.newId
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.rastersFor = opts.rasters ?? (() => [])
+		this.channelRastersFor = opts.channelRasters ?? (() => [])
 		const holds = opts.discoveryHoldsKept
 		// Fail closed: a throwing port answers "holds kept".
 		this.holdsKept = holds
@@ -1016,7 +1028,8 @@ export class DiscoveryStore
 	/**
 	 * DQ 1.2 to 1.7: may an undecoded observation that matched nothing create a record? Invalid
 	 * input is rejected (1.7); overload needs 25 dB and never pends (1.2); otherwise 18 dB, or
-	 * promotion from pending (1.3, 1.4).
+	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, WG16 SC), which consumes the
+	 * bucket's pending entry like a threshold create.
 	 */
 	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
 		const track = input.track
@@ -1030,9 +1043,22 @@ export class DiscoveryStore
 			typeof overload !== "boolean"
 		)
 			return "refuse"
+		// DQ 1.15 (WG16 SC): the DC pedestal and plateaus without local contrast never create.
+		if (input.dcCentred === true) return "refuse"
+		const local = track.localSnrDb
+		if (
+			local !== undefined &&
+			Number.isFinite(local) &&
+			local < DQ_LOCAL_SNR_DB
+		)
+			return "refuse"
 		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : "refuse"
 		if (snr >= DQ_CREATE_SNR_DB) return "create"
-		return this.pending.note(input) ? "promoted" : "refuse"
+		if (this.pending.note(input)) {
+			this.pending.dropRun(input.sourceId, input.id)
+			return "promoted"
+		}
+		return this.pending.sustained(input) ? "create" : "refuse"
 	}
 
 	/** Refresh-cadence sweep of expired pending entries (at most every 10 s, from ingest). */
@@ -3173,11 +3199,23 @@ export class DiscoveryStore
 		obwHz: number,
 	): { frequencyHz: number; key: string; offRaster: boolean } {
 		const rasters = this.rastersFor(sourceId, centreHz)
-		const snap = snapToRaster(
-			centreHz,
-			rasters,
-			this.corrections.get(sourceId) ?? 0,
-		)
+		const correction = this.corrections.get(sourceId) ?? 0
+		const snap = snapToRaster(centreHz, rasters, correction)
+		if (!snap.snapped) {
+			// WG16 SC (DQ 1.16): off every raster's tolerance, the observation keys to the
+			// nearest channel of the coarsest channel raster, so one emitter whose measured
+			// centre drifts within its channel stays one record.
+			const ch = channelOf(
+				centreHz - correction,
+				this.channelRastersFor(sourceId, centreHz),
+			)
+			if (ch !== null)
+				return {
+					frequencyHz: ch,
+					key: frequencyKey(ch, true, obwHz),
+					offRaster: true,
+				}
+		}
 		return {
 			frequencyHz: snap.hz,
 			key: frequencyKey(snap.hz, snap.snapped, obwHz),
@@ -5166,4 +5204,16 @@ export function estimateFrequencyError(
 	const hz = median(best.map(d => d.measuredOffsetHz))
 	const centreHz = median(best.map(d => d.frequencyHz))
 	return { hz, ppm: centreHz > 0 ? (hz / centreHz) * 1e6 : 0, n: best.length }
+}
+
+/** WG16 SC: the nearest channel of the coarsest positive raster (ties: the lower), or null. */
+function channelOf(hz: number, rasters: readonly Raster[]): number | null {
+	let r: Raster | undefined
+	for (const x of rasters)
+		if (x.spacingHz > 0 && (r === undefined || x.spacingHz > r.spacingHz)) r = x
+	if (r === undefined || !Number.isFinite(hz)) return null
+	return Math.round(
+		r.firstChannelHz +
+			Math.round((hz - r.firstChannelHz) / r.spacingHz) * r.spacingHz,
+	)
 }

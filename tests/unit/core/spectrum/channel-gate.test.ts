@@ -740,6 +740,13 @@ describe("channel gate", () => {
 		expect(wide.passedSample).toBe(low.passedSample)
 		expect(wide.channelSnrDb).toBeGreaterThan(high.channelSnrDb)
 		expect(wide.channelSnrDb).toBeLessThan(low.channelSnrDb)
+		// WG16 SC: admission reads the best covering slot of a wide track, not the sum.
+		expect(wide.peakChannelSnrDb).toBeCloseTo(low.channelSnrDb, 9)
+		expect(low.peakChannelSnrDb).toBe(low.channelSnrDb)
+		expect(high.peakChannelSnrDb).toBe(high.channelSnrDb)
+		// An idle query carries the sentinel in both fields.
+		const idle = gate.gateOf(Number.NaN, 1)
+		expect(idle.peakChannelSnrDb).toBe(Number.NEGATIVE_INFINITY)
 	})
 
 	it("a non-finite power or floor does not pass and does not count a false alarm", () => {

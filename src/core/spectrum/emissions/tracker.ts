@@ -31,6 +31,11 @@ export interface TrackerOptions {
 	maxTracks: number
 	maxTrackBlocks: number
 	idPrefix: string
+	/**
+	 * WG16 SC local floor: bins each side of a segment (after a 1-bin gap) whose median power
+	 * is the segment's local floor. Absent or 0: no local SNR.
+	 */
+	localBins?: number
 }
 
 export interface TrackerBlock {
@@ -122,6 +127,8 @@ interface Features {
  */
 interface GateReading {
 	channelSnrDb: number
+	/** WG16 SC: best single covering slot (absent: same as `channelSnrDb`). */
+	peakChannelSnrDb?: number
 	kDb: number
 	marginDb: number
 	minDurationMs: number
@@ -166,6 +173,9 @@ interface OpenTrack {
 	peakDbfs: number
 	maxBlockSnrDb: number
 	bandLinSum: number
+	/** WG16 SC: sum and count of per-block local SNRs (dB). */
+	localSnrSum: number
+	localSnrBlocks: number
 	floorLinSum: number
 	floorDbSum: number
 	centroidNum: number
@@ -192,6 +202,8 @@ interface OpenTrack {
 	 */
 	gate?: "pending" | "passed" | "below"
 	channelSnrDb?: number
+	/** WG16 SC: best single covering slot of the last measurement. */
+	peakChannelSnrDb?: number
 	gatePassedSample?: number
 	/** Last measured step was on. The next on-test uses `gateRun`, not this. */
 	gateOn: boolean
@@ -344,6 +356,7 @@ export class Tracker {
 			for (const t of this.open) {
 				delete t.gate
 				delete t.channelSnrDb
+				delete t.peakChannelSnrDb
 				delete t.gatePassedSample
 				this.clearGateRun(t)
 				t.rolloverFrom = null
@@ -765,6 +778,8 @@ export class Tracker {
 			peakDbfs: -Infinity,
 			maxBlockSnrDb: -Infinity,
 			bandLinSum: 0,
+			localSnrSum: 0,
+			localSnrBlocks: 0,
 			floorLinSum: 0,
 			floorDbSum: 0,
 			centroidNum: 0,
@@ -837,6 +852,11 @@ export class Tracker {
 			maxSnr = Math.max(maxSnr, p - f)
 		}
 		t.bandLinSum += band
+		const local = this.localSnr(s, b.powerDb, band)
+		if (local !== null) {
+			t.localSnrSum += local
+			t.localSnrBlocks++
+		}
 		t.floorLinSum += floor
 		t.floorDbSum += b.blockFloorDb
 		t.peakDbfs = Math.max(t.peakDbfs, s.peakDb)
@@ -1004,6 +1024,9 @@ export class Tracker {
 			return
 		}
 		t.channelSnrDb = snr
+		const peak = reading.peakChannelSnrDb
+		t.peakChannelSnrDb =
+			peak !== undefined && Number.isFinite(peak) && peak > snr ? peak : snr
 		if (t.gate === undefined) t.gate = "pending"
 		this.stepAlive(t, snr, k, margin, minMs, true, endSample)
 	}
@@ -1160,6 +1183,11 @@ export class Tracker {
 		next.gateStamp = this.blockNo
 		if (prev.channelSnrDb !== undefined && Number.isFinite(prev.channelSnrDb))
 			next.channelSnrDb = prev.channelSnrDb
+		if (
+			prev.peakChannelSnrDb !== undefined &&
+			Number.isFinite(prev.peakChannelSnrDb)
+		)
+			next.peakChannelSnrDb = prev.peakChannelSnrDb
 		if (next.gateQualified) {
 			const qualifiedAt = next.gateQualifiedSample
 			const end = Number.isFinite(qualifiedAt) ? qualifiedAt : next.lastSample
@@ -1223,6 +1251,13 @@ export class Tracker {
 		if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
 			track.channelSnrDb = t.channelSnrDb
 		else delete track.channelSnrDb
+		if (
+			t.peakChannelSnrDb !== undefined &&
+			Number.isFinite(t.peakChannelSnrDb) &&
+			t.peakChannelSnrDb !== t.channelSnrDb
+		)
+			track.peakChannelSnrDb = t.peakChannelSnrDb
+		else delete track.peakChannelSnrDb
 		if (t.gate === "passed" && t.gatePassedSample !== undefined)
 			track.gatePassedSample = t.gatePassedSample
 		else delete track.gatePassedSample
@@ -1244,6 +1279,52 @@ export class Tracker {
 		delete track.gatePassedSample
 	}
 
+	/** Reused by `localSnr`. */
+	private localScratch = new Float32Array(0)
+
+	/**
+	 * WG16 SC: this block's mean segment power over the median of `localBins` bins each side
+	 * (skipping the bin next to each edge), in dB. Null without the option or neighbours.
+	 */
+	private localSnr(
+		s: Segment,
+		powerDb: Float32Array,
+		bandLin: number,
+	): number | null {
+		const w = this.opts.localBins ?? 0
+		const width = s.endBin - s.startBin
+		if (w <= 0 || width <= 0) return null
+		if (this.localScratch.length < 2 * w)
+			this.localScratch = new Float32Array(2 * w)
+		let k = 0
+		for (let i = s.startBin - 1 - w; i < s.startBin - 1; i++) {
+			const v = powerDb[i]
+			if (v !== undefined && Number.isFinite(v)) this.localScratch[k++] = v
+		}
+		for (let i = s.endBin + 1; i < s.endBin + 1 + w; i++) {
+			const v = powerDb[i]
+			if (v !== undefined && Number.isFinite(v)) this.localScratch[k++] = v
+		}
+		if (k === 0) return null
+		const sorted = this.localScratch.subarray(0, k).sort()
+		const mid = k >> 1
+		const median =
+			k % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+		const mean = 10 * Math.log10(Math.max(bandLin / width, 1e-30))
+		return mean - median
+	}
+
+	/**
+	 * WG16 SC: the -20 dB OBW never exceeds the widest single-block segment. On a weak track
+	 * (peak under 20 dB above the floor in the mean) -20 dB reaches the floor, so the width would
+	 * be the union of every span the track drifted over, not one emission's width. A strong
+	 * track's -20 dB width sits inside its on-bins and is unchanged.
+	 */
+	private cappedObw(t: OpenTrack, obwHz: number): number {
+		const widest = t.maxWidthBins * this.opts.binHz
+		return widest > 0 && obwHz > widest ? widest : obwHz
+	}
+
 	/** Centre and OBW for this block, computed once and reused by `snapshot`. */
 	private ensureGeometry(t: OpenTrack): void {
 		if (t.geomBlock === this.blockNo) return
@@ -1252,7 +1333,7 @@ export class Tracker {
 		const { a, e } = this.obwWindow(t, mean)
 		const obwHz =
 			t.maxBlockSnrDb >= OBW_MIN_SNR_DB
-				? obwAtDb(mean, a, e, this.opts.binHz, 20)
+				? this.cappedObw(t, obwAtDb(mean, a, e, this.opts.binHz, 20))
 				: t.maxWidthBins * this.opts.binHz
 		t.geomBlock = this.blockNo
 		t.geomCentre = centreHz
@@ -1269,7 +1350,7 @@ export class Tracker {
 		const bandMean = t.bandLinSum / blocks
 		const centreHz = this.rf(this.centroidBin(t), n, t.epoch.centreHz)
 		const obwHz = useDb
-			? obwAtDb(mean, a, e, binHz, 20)
+			? this.cappedObw(t, obwAtDb(mean, a, e, binHz, 20))
 			: t.maxWidthBins * binHz
 		t.geomBlock = this.blockNo
 		t.geomCentre = centreHz
@@ -1302,9 +1383,18 @@ export class Tracker {
 			),
 		}
 		if (this.planActive && t.gate !== undefined) {
+			// WG16 SC: a gate field like the others; absent without a channel plan.
+			if (t.localSnrBlocks > 0)
+				snap.localSnrDb = t.localSnrSum / t.localSnrBlocks
 			snap.gate = t.gate
 			if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
 				snap.channelSnrDb = t.channelSnrDb
+			if (
+				t.peakChannelSnrDb !== undefined &&
+				Number.isFinite(t.peakChannelSnrDb) &&
+				t.peakChannelSnrDb !== t.channelSnrDb
+			)
+				snap.peakChannelSnrDb = t.peakChannelSnrDb
 			if (
 				t.gate === "passed" &&
 				t.gatePassedSample !== undefined &&

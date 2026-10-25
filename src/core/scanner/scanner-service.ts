@@ -245,6 +245,7 @@ import type {
 	BlockSummary,
 	EngineState,
 	FreqRange,
+	MaskRaster,
 	ObservationEndReason,
 	PipelineEvent,
 	TrackSnapshot,
@@ -274,6 +275,7 @@ import type {
 	UndecodedReason,
 } from "./types.js"
 import { AMBIENT_PAIR_MS } from "./types.js"
+import { DQ_DC_ADMIT_HZ } from "./detection-quality-contract.js"
 import {
 	coverageFingerprint,
 	createCoverageRefresh,
@@ -1007,6 +1009,7 @@ export class ScannerService extends EventEmitter {
 				newId: () => ulid(this.now()),
 				minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
 				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
+				channelRasters: (sourceId, hz) => this.channelRastersAt(sourceId, hz),
 				hintScope: () => ({
 					region: this.deps.region,
 					ranges: withScannerOverlays(
@@ -2613,7 +2616,7 @@ export class ScannerService extends EventEmitter {
 			burstRanges: ranges
 				.filter(r => (r.protocols ?? []).some(p => BURST_PROTOCOLS.has(p)))
 				.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
-			rasters: ranges.flatMap(r => r.rasters ?? []),
+			rasters: this.maskRasters(sourceId, ranges),
 			obwHz: [...new Set(ranges.flatMap(r => r.obwHz ?? []))],
 			// § 6.2: in-window while no sweep lease holds the source (truncated segments → `edge`).
 			inWindow: this.arbiter.holder(sourceId) === undefined,
@@ -2638,7 +2641,7 @@ export class ScannerService extends EventEmitter {
 			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
 				ranges.push(...b.ranges.filter(isRangeEnabled))
 		const entries = ranges.map((r): ChannelPlanEntry => {
-			const raster = r.rasters?.[0]
+			const raster = slotRasterOf(r)
 			const width =
 				r.obwHz?.[0] ?? raster?.spacingHz ?? CHANNEL_GATE_DEFAULT_WIDTH_HZ
 			return {
@@ -2693,12 +2696,72 @@ export class ScannerService extends EventEmitter {
 		return out
 	}
 
+	/**
+	 * WG16 SC: segment-split rasters, each bounded to its range. The passive job adds the band
+	 * plans' rasters, as `channelPlanOf` adds their channel slots, so busy bands split at
+	 * channel edges even though the passive job's own range has no raster.
+	 */
+	private maskRasters(
+		sourceId: string,
+		ranges: readonly ScanRange[],
+	): MaskRaster[] {
+		const all = [...ranges]
+		const passive = [...this.jobs.values()].some(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state) && j.passive,
+		)
+		if (passive)
+			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+				all.push(...b.ranges.filter(isRangeEnabled))
+		const out: MaskRaster[] = []
+		const seen = new Set<string>()
+		for (const r of all)
+			for (const x of r.rasters ?? []) {
+				const key = `${x.spacingHz}:${x.firstChannelHz}:${r.startHz}:${r.endHz}`
+				if (seen.has(key)) continue
+				seen.add(key)
+				out.push({ ...x, startHz: r.startHz, endHz: r.endHz })
+			}
+		return out
+	}
+
+	/**
+	 * Placement rasters at `hz`: the running jobs' ranges, plus (WG16 SC, follow-up 6.1) the band
+	 * plans' ranges while the source's passive job runs, so a passive record keys to its channel.
+	 */
 	private rastersAt(sourceId: string, hz: number) {
-		return [...this.jobs.values()]
-			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
+		const jobs = [...this.jobs.values()].filter(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state),
+		)
+		const out = jobs
 			.flatMap(j => j.spec.ranges)
 			.filter(r => isRangeEnabled(r) && hz >= r.startHz && hz <= r.endHz)
 			.flatMap(r => r.rasters ?? [])
+		if (jobs.some(j => j.passive))
+			out.push(...this.channelRastersAt(sourceId, hz))
+		return out
+	}
+
+	/**
+	 * WG16 SC (DQ 1.16): while the source's passive job runs, the coarsest raster of each band
+	 * plan range at `hz`. Only the coarsest, so every passive observation of one emitter keys
+	 * to the same channel whichever finer channel its measured centre is nearest.
+	 */
+	private channelRastersAt(sourceId: string, hz: number) {
+		const passive = [...this.jobs.values()].some(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state) && j.passive,
+		)
+		if (!passive) return []
+		const out: NonNullable<ScanRange["rasters"]> = []
+		for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+			for (const r of b.ranges) {
+				if (!isRangeEnabled(r) || hz < r.startHz || hz > r.endHz) continue
+				let widest: (typeof out)[number] | undefined
+				for (const x of r.rasters ?? [])
+					if (x.spacingHz > 0 && x.spacingHz > (widest?.spacingHz ?? 0))
+						widest = x
+				if (widest !== undefined) out.push(widest)
+			}
+		return out
 	}
 
 	// === pipeline events → observations ===
@@ -2965,8 +3028,14 @@ export class ScannerService extends EventEmitter {
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
 		)
+		const tuned = this.lastSummaries.get(live.sourceId)
+		const dcCentred =
+			tuned !== undefined &&
+			tuned.epoch === track.epoch &&
+			Math.abs(track.centreHz - tuned.centreHz) <= DQ_DC_ADMIT_HZ
 		const res = this.store.ingest(
 			{
+				...(dcCentred ? { dcCentred: true } : {}),
 				id: live.observationId,
 				sourceId: live.sourceId,
 				jobIds: live.jobIds,
@@ -3129,8 +3198,14 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private classify(track: TrackSnapshot, sourceId: string): Classification {
+		// WG16 SC: on a rastered band a piece is at most its channel, never "wideband".
+		let widest = 0
+		for (const r of this.rastersAt(sourceId, track.centreHz))
+			if (r.spacingHz > widest) widest = r.spacingHz
+		const seen =
+			widest > 0 && track.obwHz > widest ? { ...track, obwHz: widest } : track
 		const c = classifySpectral(
-			track,
+			seen,
 			this.classifierContext(sourceId, track.centreHz),
 		)
 		// § 4.7: unverified RF: spectral evidence alone never lifts a discovery past `candidate`.
@@ -7161,3 +7236,23 @@ const probeProtocols: readonly ScannerProtocol[] = [
 	"aprs",
 	"ism",
 ]
+
+/**
+ * WG16 SC: the raster that sizes a range's channel slots. An analog-am range with several
+ * rasters uses its finest (airband 25 kHz and 8.33 kHz → 8.33 kHz): an AM voice channel occupies
+ * about 6 kHz (2 × 3 kHz audio), so a 25 kHz slot adds 25 / 8.33 = 3 × the noise, 4.8 dB, and
+ * a 4 to 6.5 dB carrier never reaches the 6 dB pass. Every 25 kHz channel sits on the 8.33 kHz
+ * grid (exact thirds), so no channel loses its slot. Any other range keeps its first raster.
+ */
+export function slotRasterOf(
+	r: ScanRange,
+): NonNullable<ScanRange["rasters"]>[number] | undefined {
+	const rasters = r.rasters ?? []
+	const first = rasters[0]
+	if (first === undefined || !(r.protocols ?? []).includes("analog-am"))
+		return first
+	let finest = first
+	for (const x of rasters)
+		if (x.spacingHz > 0 && x.spacingHz < finest.spacingHz) finest = x
+	return finest
+}

@@ -33,6 +33,11 @@ export interface ActivityDecoderBinding {
 	targetFrequenciesHz: readonly number[]
 	/** `commanded` only when WaveKit itself commands the tuning the decoder hears. */
 	tuningTrust: "commanded" | "relay" | "unverified"
+	/**
+	 * IQ input rate in Hz the decoder hears around its single target, when known (a decoder on
+	 * the full source capture: the observed tuner rate). Absent: unknown.
+	 */
+	inputSampleRateHz?: number
 }
 
 /**

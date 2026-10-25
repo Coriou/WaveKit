@@ -33,6 +33,15 @@ export interface Raster {
 	firstChannelHz: number
 }
 
+/**
+ * WG16 SC: a mask raster that may name the range it applies to. Absent bounds: the whole tuned
+ * window (the pre-WG16 behaviour).
+ */
+export interface MaskRaster extends Raster {
+	startHz?: number
+	endHz?: number
+}
+
 // ---------------------------------------------------------------- spectrum pipeline (§ 4)
 
 export interface PendingEpoch {
@@ -112,6 +121,16 @@ export interface TrackSnapshot {
 	gate?: "pending" | "passed" | "below"
 	/** WG12: SNR summed over the covering channel slots. */
 	channelSnrDb?: number
+	/**
+	 * WG16 SC: SNR of the best single covering slot, present only when it differs from
+	 * `channelSnrDb` (a track wider than one slot). Admission reads the higher of the two.
+	 */
+	peakChannelSnrDb?: number
+	/**
+	 * WG16 SC: mean over the track's blocks of its segment power above the local floor (median
+	 * of the neighbouring bins), dB. Absent without neighbours or without a channel plan.
+	 */
+	localSnrDb?: number
 	/** WG12: engine sample when the gate first passed. */
 	gatePassedSample?: number
 }
@@ -198,7 +217,7 @@ export type PipelineInput =
 	| { kind: "pending-epoch"; pending: PendingEpoch }
 	| { kind: "new-stream"; stream: number; centreHz: number; sampleRateHz: number; gainKey: string; tuningTrust: TuningTrust }
 	/** inWindow: true while no sweep lease holds the source; truncated segments then report as `edge` (§ 6.2). */
-	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: CfarMaskRange[]; burstRanges: FreqRange[]; rasters: Raster[]; obwHz: number[]; inWindow: boolean }
+	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: CfarMaskRange[]; burstRanges: FreqRange[]; rasters: MaskRaster[]; obwHz: number[]; inWindow: boolean }
 	| { kind: "spectrum-feed"; enabled: boolean }
 
 export type ObservationEndReason =

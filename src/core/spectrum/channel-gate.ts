@@ -73,6 +73,12 @@ import {
 export interface ChannelGateReading {
 	state: ChannelGateState
 	channelSnrDb: number
+	/**
+	 * WG16 SC: SNR of the best single covering slot this block (admission judges the peak
+	 * channel, not the wide-track sum). Equals `channelSnrDb` for a track inside one slot;
+	 * −Infinity when invalid. Absent on readings built outside the gate.
+	 */
+	peakChannelSnrDb?: number
 	passedSample: number | null
 	runStartSample: number | null
 	minDurationMs: number
@@ -535,6 +541,9 @@ class ChannelGateImpl implements ChannelGate {
 		let allValid = true
 		let allBurst = true
 		let maxK = Number.NEGATIVE_INFINITY
+		// Best single-slot p / f; compared linearly so only the winner pays a log10.
+		let bestP = 0
+		let bestF = 0
 		let passed = false
 		let passedSample = Infinity
 		let runStart = Number.NaN
@@ -545,8 +554,14 @@ class ChannelGateImpl implements ChannelGate {
 			if (this.slotHi[s]! <= trackLo) continue
 			any = true
 			if (this.slotBlockValid[s] === 1) {
-				p += this.slotP[s]!
-				f += this.slotF[s]!
+				const sp = this.slotP[s]!
+				const sf = this.slotF[s]!
+				p += sp
+				f += sf
+				if (sf > 0 && (bestF === 0 || sp * bestF > bestP * sf)) {
+					bestP = sp
+					bestF = sf
+				}
 			} else allValid = false
 			const k = this.kOfSlot(s)
 			if (k > maxK) maxK = k
@@ -565,6 +580,10 @@ class ChannelGateImpl implements ChannelGate {
 		const snr = allValid ? finiteSnr(p, f) : null
 		out.state = passed ? "passed" : "pending"
 		out.channelSnrDb = snr ?? Number.NEGATIVE_INFINITY
+		const peak = snr !== null ? finiteSnr(bestP, bestF) : null
+		// max(p_i / f_i) ≥ Σp / Σf, so the peak is never below the sum; keep the sum on a tie.
+		out.peakChannelSnrDb =
+			peak !== null && snr !== null && peak > snr ? peak : out.channelSnrDb
 		out.passedSample = passed ? passedSample : null
 		out.runStartSample = passed && Number.isFinite(runStart) ? runStart : null
 		out.minDurationMs = burst
@@ -979,6 +998,7 @@ class ChannelGateImpl implements ChannelGate {
 		const burst = this.slotBurst[s] === 1
 		out.state = passed ? "passed" : "pending"
 		out.channelSnrDb = measured ? snr : Number.NEGATIVE_INFINITY
+		out.peakChannelSnrDb = out.channelSnrDb
 		out.passedSample = passed ? this.slotPassedSample[s]! : null
 		out.runStartSample = passed && Number.isFinite(runStart) ? runStart : null
 		out.minDurationMs = burst
@@ -994,6 +1014,7 @@ class ChannelGateImpl implements ChannelGate {
 	private writeIdle(out: ChannelGateReading): ChannelGateReading {
 		out.state = "pending"
 		out.channelSnrDb = Number.NEGATIVE_INFINITY
+		out.peakChannelSnrDb = Number.NEGATIVE_INFINITY
 		out.passedSample = null
 		out.runStartSample = null
 		out.minDurationMs = CHANNEL_GATE_MIN_DURATION_MS

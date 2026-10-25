@@ -35,7 +35,7 @@ import type {
 	PipelineConfig,
 	PipelineEvent,
 	PipelineStats,
-	Raster,
+	MaskRaster,
 	SpectrumSettings,
 	SettleMode,
 	TuningTrust,
@@ -118,7 +118,7 @@ export interface EngineMasks {
 	/** SF1: per-range false-alarm target optional (CfarMaskRange). */
 	cfarRanges: CfarMaskRange[]
 	burstRanges: FreqRange[]
-	rasters: Raster[]
+	rasters: MaskRaster[]
 	obwHz: number[]
 	/** True while no sweep lease holds the source (§ 6.2: truncated segments report as `edge`). */
 	inWindow: boolean

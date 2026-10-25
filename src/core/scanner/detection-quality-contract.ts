@@ -28,6 +28,61 @@ export const DQ_PENDING_MIN_OBS = 3
  */
 export const DQ_PENDING_MEDIAN_SNR_DB = 15
 
+/**
+ * Req 1.4b (WG16 SC): a sustained observation promotes on duration. The median channel SNR of
+ * its run must reach 12 dB = the channel gate pass level (k 3 dB + margin 3 dB = 6 dB) + 6 dB,
+ * four times the pass power. Measured: FM broadcast tracks at 11 to 13 dB held 30 s, real narrow
+ * emitters at 7 to 17 dB; one continuous emitter is one observation, so 1.4 alone never fires.
+ */
+export const DQ_SUSTAIN_MEDIAN_SNR_DB = 12
+
+/**
+ * Req 1.4b: a run sample under 9 dB ends the run. 9 = the gate's burst pass level (k 3 + burst
+ * margin 6): below it the channel is back near the noise the gate already rejects.
+ */
+export const DQ_SUSTAIN_FLOOR_SNR_DB = 9
+
+/**
+ * Req 1.4b: the run must span 3 000 ms from its first sample. 3 s = 60 blocks of 50 ms, ten times
+ * the 300 ms gate minimum; the store re-ingests a live observation every 1 000 ms, so a 3 s run
+ * holds 4 samples (3 s / 1 s + 1).
+ */
+export const DQ_SUSTAIN_MS = 3_000
+
+/** Req 1.4b: samples a run needs (3 of the 4 a 3 s run holds, so one skipped ingest still counts). */
+export const DQ_SUSTAIN_MIN_SAMPLES = 3
+
+/**
+ * Req 1.4b: a gap above 2 500 ms between samples restarts the run: two 1 000 ms ingest periods
+ * plus 500 ms of slack, so one missed ingest keeps it and a closed-then-reopened track does not.
+ */
+export const DQ_SUSTAIN_MAX_GAP_MS = 2_500
+
+/** Req 1.4b: newest samples a run keeps for its median (2 × the 4 a 3 s run needs). */
+export const DQ_SUSTAIN_SAMPLES = 8
+
+/**
+ * Req 1.4b: runs per source, the same budget as pending entries. 512 × (40 B id + 8 × 8 B + 32 B)
+ * ≈ 70 kB per source; the oldest run is evicted first.
+ */
+export const DQ_SUSTAIN_PER_SOURCE = 512
+
+/**
+ * Req 1.15 (WG16 SC): an evidence-less observation creates a record only when its segment
+ * stands at least 6 dB over its local floor (median of the neighbouring 12.5 kHz each side):
+ * the gate's own pass margin (k 3 + margin 3), now against the neighbourhood, so a raised
+ * plateau of busy channels or splatter is not an emitter of its own.
+ */
+export const DQ_LOCAL_SNR_DB = 6
+
+/**
+ * Req 1.15 (WG16 SC): no evidence-less create within 12 500 Hz of the tuned centre. The
+ * receiver's DC pedestal (LO leakage, 1/f noise) peaked 5.5 kHz from DC in the hunt captures;
+ * 12.5 kHz = about twice that, one land-mobile channel. A decode still creates there (ADS-B on
+ * its centre is decode-proven).
+ */
+export const DQ_DC_ADMIT_HZ = 12_500
+
 /** Req 1.5: fixed pending window from the first sample, 10 min = 10 × 60 000 ms. */
 export const DQ_PENDING_WINDOW_MS = 600_000
 

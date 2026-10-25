@@ -1,6 +1,6 @@
 /**
  * Turns one block's on-bins into emission segments (spec §6.2): joins runs across small holes,
- * splits them at raster channel edges, merges pieces that have no peak of their own (or sit more
+ * splits them at internal dips (WG16 SC) and at raster channel edges, merges pieces that have no peak of their own (or sit more
  * than skirtDb below their neighbour) back into the parent as skirt, drops far skirts (below), and
  * flags segments that touch the usable span or an exclusion. Bin ranges are half-open: [startBin, endBin).
  */
@@ -31,12 +31,50 @@ export interface SegmentOptions {
 	 * Absent: off.
 	 */
 	farSkirt?: { reachBins: number; minDb: number; dcBin: number }
+	/**
+	 * WG16 SC dip split: a run is also cut at an internal valley at least `DIP_SPLIT_DB` below
+	 * the peaks on both sides, measured on the power smoothed over `smoothBins` (odd, ≥ 1).
+	 * Absent: off.
+	 */
+	dipSplit?: { smoothBins: number }
+	/**
+	 * WG16 SC channel boundaries: sorted bin edges of the coarsest raster's channels. A
+	 * prominence merge (no 6 dB valley, neighbour within `skirtDb`) never joins pieces across
+	 * one, so a plateau of busy channels splits per channel. A sideband, a far-weaker skirt
+	 * (more than `skirtDb` down) or a one-channel pair still merges across. Absent: no limit.
+	 */
+	channelEdges?: number[]
+	/**
+	 * WG16 SC sidebands: a piece more than `db` below a neighbour whose peak is within
+	 * `reachBins` merges into it whatever the valley between them (modulation sidebands and
+	 * close splatter of one carrier stay with it; the raster cap does not apply). Absent: off.
+	 */
+	sideband?: { db: number; reachBins: number }
+	/**
+	 * WG16 SC one-channel rule: two pieces whose peaks are closer than `minPeakBins` (a fraction
+	 * of the coarsest raster channel) are one emitter whatever the valley between them, such as
+	 * the two lobes of an FSK carrier cut by a raster edge it does not follow. Absent: off.
+	 */
+	channel?: { minPeakBins: number }
 }
 
 /** A raster piece keeps its identity only if its peak rises this far above the valley to its neighbour. */
 export const PROMINENCE_DB = 6
 /** Peak bins this close to mirror positions about DC count as an IQ-image pair, which far-skirt dropping leaves alone. */
 const MIRROR_SLACK_BINS = 2
+/**
+ * WG16 SC: a valley this far below the peaks on both sides splits a run. 6 dB = `PROMINENCE_DB`,
+ * the same depth that already keeps a raster piece apart, so a dip cut is never merged back as a
+ * prominence skirt (the raw valley is at least as deep as the smoothed one).
+ */
+export const DIP_SPLIT_DB = PROMINENCE_DB
+/**
+ * WG16 SC: a dip splits only when the valley lies in the lower half (in dB) of the smaller
+ * peak's height above the floor. Two lobes of one FSK carrier (a 47 dB POCSAG pair with a
+ * valley 10 to 20 dB down) keep their valley high above the floor; the guard gap between two
+ * channels falls toward it.
+ */
+export const DIP_FLOOR_FRACTION = 0.5
 
 interface Piece {
 	start: number
@@ -54,9 +92,25 @@ export function segment(
 ): Segment[] {
 	const edges = [...opts.rasterBinEdges].sort((a, b) => a - b)
 	const out: Segment[] = []
+	const rules: MergeRules | undefined =
+		opts.channelEdges !== undefined ||
+		opts.sideband !== undefined ||
+		opts.channel !== undefined
+			? {
+					edges: opts.channelEdges ?? [],
+					...(opts.sideband ? { sideband: opts.sideband } : {}),
+					...(opts.channel ? { channel: opts.channel } : {}),
+				}
+			: undefined
 	for (const [start, end] of findRuns(on, opts)) {
-		const pieces = splitAtEdges(start, end, edges, on, powerDb)
-		for (const piece of mergeSkirts(pieces, powerDb, opts.skirtDb)) {
+		const cuts = opts.dipSplit
+			? mergeCuts(
+					edges,
+					dipCuts(start, end, powerDb, floorDb, opts.dipSplit.smoothBins),
+				)
+			: edges
+		const pieces = splitAtEdges(start, end, cuts, on, powerDb)
+		for (const piece of mergeSkirts(pieces, powerDb, opts.skirtDb, rules)) {
 			out.push(finish(piece, powerDb, floorDb, opts))
 		}
 	}
@@ -155,6 +209,91 @@ function findRuns(on: Uint8Array, opts: SegmentOptions): [number, number][] {
 	return runs
 }
 
+/** Sorted union of two sorted cut lists (the dip list is usually empty). */
+function mergeCuts(a: number[], b: number[]): number[] {
+	if (b.length === 0) return a
+	if (a.length === 0) return b
+	const out: number[] = []
+	let i = 0
+	let j = 0
+	while (i < a.length || j < b.length) {
+		const x = a[i] ?? Infinity
+		const y = b[j] ?? Infinity
+		if (x <= y) {
+			out.push(x)
+			i++
+			if (x === y) j++
+		} else {
+			out.push(y)
+			j++
+		}
+	}
+	return out
+}
+
+/**
+ * WG16 SC: valley bins of [start, end) that sit at least `DIP_SPLIT_DB` below the highest
+ * smoothed level on each side since the previous cut, in the lower `DIP_FLOOR_FRACTION` of the
+ * smaller side's height above the floor. One pass, O(end - start); the box mean over
+ * `smoothBins` is a running sum in dB, so one FFT bin of scatter cannot fake a dip.
+ */
+function dipCuts(
+	start: number,
+	end: number,
+	powerDb: Float32Array,
+	floorDb: Float32Array,
+	smoothBins: number,
+): number[] {
+	const cuts: number[] = []
+	const half = Math.max(0, (smoothBins - 1) >> 1)
+	if (end - start < 2 * half + 3) return cuts
+	const at = (i: number): number => {
+		const v = powerDb[i]
+		return v !== undefined && Number.isFinite(v) ? v : -200
+	}
+	// Box over [i - half, i + half], clipped to the run.
+	let sum = 0
+	let lo = start
+	let hi = start
+	const smoothAt = (i: number): number => {
+		const a = Math.max(start, i - half)
+		const b = Math.min(end, i + half + 1)
+		while (hi < b) sum += at(hi++)
+		while (lo < a) sum -= at(lo++)
+		return sum / (b - a)
+	}
+	let peak = smoothAt(start)
+	let valley = Infinity
+	let valleyAt = -1
+	const deep = (lowerPeak: number): boolean => {
+		const f = floorDb[valleyAt]
+		const floor = f !== undefined && Number.isFinite(f) ? f : -200
+		return valley - floor <= (lowerPeak - floor) * DIP_FLOOR_FRACTION
+	}
+	for (let i = start + 1; i < end; i++) {
+		const v = smoothAt(i)
+		if (
+			valleyAt >= 0 &&
+			peak - valley >= DIP_SPLIT_DB &&
+			v - valley >= DIP_SPLIT_DB &&
+			deep(Math.min(peak, v))
+		) {
+			cuts.push(valleyAt)
+			peak = v
+			valley = Infinity
+			valleyAt = -1
+		} else if (v > peak) {
+			peak = v
+			valley = Infinity
+			valleyAt = -1
+		} else if (v < valley) {
+			valley = v
+			valleyAt = i
+		}
+	}
+	return cuts
+}
+
 function peakOf(
 	start: number,
 	end: number,
@@ -203,22 +342,88 @@ function valleyBetween(a: number, b: number, powerDb: Float32Array): number {
 	return v
 }
 
+/** WG16 SC split rules for `mergeSkirts` (all optional; absent = the pre-WG16 merge). */
+interface MergeRules {
+	edges: readonly number[]
+	sideband?: SegmentOptions["sideband"]
+	channel?: SegmentOptions["channel"]
+}
+
 /** True when `p` cannot stand on its own next to the stronger neighbour `q`. */
 function isSkirtOf(
 	p: Piece,
 	q: Piece,
 	powerDb: Float32Array,
 	skirtDb: number,
+	rules?: MergeRules,
 ): boolean {
+	// WG16 SC one-channel rule: equal peaks join too (two FSK lobes are usually within 1 dB).
+	if (isSameChannel(p, q, rules?.channel)) return true
 	if (q.peakDb <= p.peakDb) return false
+	if (isSidebandOf(p, q, rules?.sideband)) return true
 	const prominence = p.peakDb - valleyBetween(p.peakBin, q.peakBin, powerDb)
 	return prominence < PROMINENCE_DB || q.peakDb - p.peakDb > skirtDb
+}
+
+/** WG16 SC: `p` peaks within one channel of the not weaker `q` (`SegmentOptions.channel`). */
+function isSameChannel(
+	p: Piece,
+	q: Piece,
+	channel: SegmentOptions["channel"],
+): boolean {
+	return (
+		channel !== undefined &&
+		q.peakDb >= p.peakDb &&
+		Math.abs(p.peakBin - q.peakBin) < channel.minPeakBins
+	)
+}
+
+/** WG16 SC: `p` is a sideband of the much stronger, close `q` (see `SegmentOptions.sideband`). */
+function isSidebandOf(
+	p: Piece,
+	q: Piece,
+	sideband: SegmentOptions["sideband"],
+): boolean {
+	return (
+		sideband !== undefined &&
+		q.peakDb - p.peakDb > sideband.db &&
+		Math.abs(p.peakBin - q.peakBin) <= sideband.reachBins
+	)
+}
+
+/**
+ * WG16 SC: a merge of `p` into `q` that the channel boundaries refuse: a prominence merge
+ * (`p` within `skirtDb` of `q`, neither its sideband nor in its channel) whose merged span
+ * would hold a coarse channel edge.
+ */
+function capped(
+	p: Piece,
+	q: Piece,
+	skirtDb: number,
+	rules?: MergeRules,
+): boolean {
+	const edges = rules?.edges ?? []
+	if (edges.length === 0 || q.peakDb - p.peakDb > skirtDb) return false
+	if (isSidebandOf(p, q, rules?.sideband)) return false
+	if (isSameChannel(p, q, rules?.channel)) return false
+	const lo = Math.min(p.start, q.start)
+	const hi = Math.max(p.end, q.end)
+	// First edge > lo (sorted): binary search.
+	let a = 0
+	let b = edges.length
+	while (a < b) {
+		const m = (a + b) >>> 1
+		if (edges[m]! <= lo) a = m + 1
+		else b = m
+	}
+	return a < edges.length && edges[a]! < hi
 }
 
 function mergeSkirts(
 	pieces: Piece[],
 	powerDb: Float32Array,
 	skirtDb: number,
+	rules?: MergeRules,
 ): Piece[] {
 	const list = [...pieces]
 	for (;;) {
@@ -231,9 +436,13 @@ function mergeSkirts(
 			const left = list[i - 1]
 			const right = list[i + 1]
 			const failsLeft =
-				left !== undefined && isSkirtOf(p, left, powerDb, skirtDb)
+				left !== undefined &&
+				isSkirtOf(p, left, powerDb, skirtDb, rules) &&
+				!capped(p, left, skirtDb, rules)
 			const failsRight =
-				right !== undefined && isSkirtOf(p, right, powerDb, skirtDb)
+				right !== undefined &&
+				isSkirtOf(p, right, powerDb, skirtDb, rules) &&
+				!capped(p, right, skirtDb, rules)
 			if (!failsLeft && !failsRight) continue
 			weakest = p.peakDb
 			mergeAt = i

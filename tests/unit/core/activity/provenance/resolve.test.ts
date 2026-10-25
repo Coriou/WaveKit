@@ -5,7 +5,7 @@ import {
 	ADSB_CARRIER_HZ,
 	MAX_PROVENANCE_HZ,
 	RTL433_FREQ_MAX_HZ,
-	RTL433_FREQ_MAX_OFFSET_HZ,
+	RTL433_FREQ_USABLE_FRACTION,
 	RTL433_FREQ_MIN_HZ,
 	resolveProvenance,
 	validHz,
@@ -151,20 +151,28 @@ describe("resolveProvenance table", () => {
 			})
 		})
 
+		const rated = (target: number, rate: number): ActivityDecoderBinding => ({
+			...bind([target]),
+			inputSampleRateHz: rate,
+		})
+
 		it("rtl_433 uses its freq (MHz) inside the plausible range, bounds included", () => {
 			const sig = (freq: unknown) => out("signal", { model: "m", freq })
-			expect(resolveProvenance(sig(868.3), bind([]))).toEqual({
-				sourceId: "rtl-0",
-				frequency: chan(868_300_000),
-			})
-			expect(resolveProvenance(sig(RTL433_FREQ_MIN_HZ / 1e6), null)).toEqual({
-				sourceId: null,
-				frequency: chan(24_000_000),
-			})
-			expect(resolveProvenance(sig(RTL433_FREQ_MAX_HZ / 1e6), null)).toEqual({
-				sourceId: null,
-				frequency: chan(1_766_000_000),
-			})
+			expect(
+				resolveProvenance(sig(868.3), rated(868_000_000, 1_024_000)),
+			).toEqual({ sourceId: "rtl-0", frequency: chan(868_300_000) })
+			expect(
+				resolveProvenance(
+					sig(RTL433_FREQ_MIN_HZ / 1e6),
+					rated(24_100_000, 1_024_000),
+				),
+			).toEqual({ sourceId: "rtl-0", frequency: chan(24_000_000) })
+			expect(
+				resolveProvenance(
+					sig(RTL433_FREQ_MAX_HZ / 1e6),
+					rated(1_765_900_000, 1_024_000),
+				),
+			).toEqual({ sourceId: "rtl-0", frequency: chan(1_766_000_000) })
 			for (const bad of [
 				23.999999,
 				1766.000001,
@@ -181,21 +189,43 @@ describe("resolveProvenance table", () => {
 				})
 		})
 
-		it("rtl_433's freq is used within 1.6 MHz of the single target, else the target", () => {
-			expect(RTL433_FREQ_MAX_OFFSET_HZ).toBe(1_600_000)
-			const target = 868_000_000
+		it("rtl_433's freq is used within 0.8 x rate / 2 of the target, else the target", () => {
+			expect(RTL433_FREQ_USABLE_FRACTION).toBe(0.8)
+			const target = 434_000_000
+			const rate = 1_024_000 // usable reach 0.8 x 1 024 000 / 2 = 409 600 Hz
 			const sig = (hz: number) => out("signal", { freq: hz / 1e6 })
-			expect(
-				resolveProvenance(sig(target + 1_600_000), bind([target])),
-			).toEqual({
-				sourceId: "rtl-0",
-				frequency: chan(869_600_000),
-			})
-			expect(
-				resolveProvenance(sig(target - 1_600_001), bind([target])),
-			).toEqual({
+			// Review repro: 434.5 MHz on a 1.024 Msps input centred at 434 MHz is the target.
+			expect(resolveProvenance(sig(434_500_000), rated(target, rate))).toEqual({
 				sourceId: "rtl-0",
 				frequency: chan(target),
+			})
+			for (const d of [409_600, -409_600])
+				expect(resolveProvenance(sig(target + d), rated(target, rate))).toEqual(
+					{ sourceId: "rtl-0", frequency: chan(target + d) },
+				)
+			for (const d of [409_601, -409_601])
+				expect(resolveProvenance(sig(target + d), rated(target, rate))).toEqual(
+					{ sourceId: "rtl-0", frequency: chan(target) },
+				)
+		})
+
+		it("rtl_433's freq falls back to the target when the input rate is unknown", () => {
+			const sig = out("signal", { freq: 434.1 })
+			expect(resolveProvenance(sig, bind([434_000_000]))).toEqual({
+				sourceId: "rtl-0",
+				frequency: chan(434_000_000),
+			})
+			for (const bad of [0, -1, Number.NaN, Infinity])
+				expect(
+					resolveProvenance(sig, {
+						...bind([434_000_000]),
+						inputSampleRateHz: bad,
+					}),
+				).toEqual({ sourceId: "rtl-0", frequency: chan(434_000_000) })
+			// No single target: nothing to bound the estimate by.
+			expect(resolveProvenance(sig, null)).toEqual({
+				sourceId: null,
+				frequency: null,
 			})
 		})
 	})
