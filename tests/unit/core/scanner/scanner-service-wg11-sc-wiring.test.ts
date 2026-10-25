@@ -9,6 +9,7 @@ import {
 	PASSIVE_COST_WINDOW_MS,
 } from "../../../../src/core/scanner/passive-cost-contract.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
+import { meteredCheck } from "./passive-elu-fixture.js"
 
 type Harness = ReturnType<typeof serviceHarness>
 const WAIT = { timeout: 5_000, interval: 5 }
@@ -34,56 +35,60 @@ describe("passive cost guard wiring (WG11 req 2)", () => {
 			s.passive.maxEngineUtilization = 0.5
 		})
 		a.engine.utilization = () => 0.4
-		await internalsOf(a.h).checkPassiveCost(a.openedAt + PASSIVE_COST_WINDOW_MS)
+		await meteredCheck(a.h.service)(a.openedAt + PASSIVE_COST_WINDOW_MS)
 		expect(a.reason()).toBeUndefined()
 		await a.h.service.stop()
 		const b = await started()
 		b.engine.utilization = () => 0.4
-		await internalsOf(b.h).checkPassiveCost(b.openedAt + PASSIVE_COST_WINDOW_MS)
+		await meteredCheck(b.h.service)(b.openedAt + PASSIVE_COST_WINDOW_MS)
 		expect(b.reason()).toMatch(/engine-cpu 40 %/)
 		await b.h.service.stop()
 	})
 
-	it("rechecks every five minutes and clears at or below 0.8 x limit", async () => {
+	it("a shared engine: saturation disables, then a quiet engine without passive clears it (DQ 8.4 rows 3, 8)", async () => {
 		const { h, engine, openedAt, reason } = await started()
+		const check = meteredCheck(h.service)
 		// another consumer (a display) keeps the engine running once passive lets go of it
 		await h.service.spectrum.acquire("rtl", "ws:wg11-sc")
 		const t1 = openedAt + PASSIVE_COST_WINDOW_MS
-		engine.utilization = () => 0.9
-		await internalsOf(h).checkPassiveCost(t1)
-		expect(reason()).toMatch(/engine-cpu 90 %/)
-		expect(h.service.getJob("passive-rtl")).toBeUndefined()
-		// not due yet: a low reading is ignored
-		engine.utilization = () => 0.05
-		await internalsOf(h).checkPassiveCost(t1 + PASSIVE_COST_RECHECK_MS - 1)
-		expect(reason()).toMatch(/engine-cpu/)
-		// due but inside the hysteresis band (0.2 < 0.22 <= limit): stays disabled
+		engine.utilization = () => 0.97
+		await check(t1)
+		expect(reason()).toMatch(/engine-cpu 97 %/)
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")).toBeUndefined(),
+			WAIT,
+		)
+		// the first tick without passive opens the baseline window (DQ 8.2)
+		await check(t1 + 1_000)
+		// the window runs at 0.22: one millisecond short of complete, nothing is judged
 		engine.utilization = () => 0.22
-		await internalsOf(h).checkPassiveCost(t1 + PASSIVE_COST_RECHECK_MS)
+		await check(t1 + 1_000 + PASSIVE_COST_WINDOW_MS - 1)
 		expect(reason()).toMatch(/engine-cpu/)
-		// due again and at or below 0.8 x 0.25
+		// a complete window inside the hysteresis band (0.2 < 0.22 <= limit): stays disabled
+		engine.utilization = () => 0.22
+		await check(t1 + 1_000 + PASSIVE_COST_WINDOW_MS)
+		expect(reason()).toMatch(/engine-cpu/)
+		// the next complete window at or below 0.8 x 0.25 clears
 		engine.utilization = () => 0.2
-		await internalsOf(h).checkPassiveCost(t1 + 2 * PASSIVE_COST_RECHECK_MS)
+		await check(t1 + 1_000 + 2 * PASSIVE_COST_WINDOW_MS)
 		expect(reason()).toBeUndefined()
-		await (async () => {
-			const { vi } = await import("vitest")
-			await vi.waitFor(
-				() => expect(h.service.getJob("passive-rtl")).toBeDefined(),
-				WAIT,
-			)
-		})()
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")).toBeDefined(),
+			WAIT,
+		)
 		await h.service.stop()
 	})
 
 	it("an enabled source is re-judged too and disabled when the engine got costly", async () => {
 		const { h, engine, openedAt, reason } = await started()
+		const check = meteredCheck(h.service)
 		const t1 = openedAt + PASSIVE_COST_WINDOW_MS
 		engine.utilization = () => 0.1
-		await internalsOf(h).checkPassiveCost(t1)
+		await check(t1)
 		engine.utilization = () => 0.9
-		await internalsOf(h).checkPassiveCost(t1 + PASSIVE_COST_RECHECK_MS - 1)
+		await check(t1 + PASSIVE_COST_RECHECK_MS - 1)
 		expect(reason()).toBeUndefined()
-		await internalsOf(h).checkPassiveCost(t1 + PASSIVE_COST_RECHECK_MS)
+		await check(t1 + PASSIVE_COST_RECHECK_MS)
 		expect(reason()).toMatch(/engine-cpu 90 %/)
 		await h.service.stop()
 	})
@@ -110,25 +115,31 @@ function fakeElu(engine: SpectrumEngine, profile: (tMs: number) => number) {
 	return clock
 }
 
-describe("passive cost guard: windowed utilization (WG11 review M1)", () => {
-	it("disables on a first-minute spike, clears at the first recheck once quiet, and catches a late spike", async () => {
+describe("passive cost guard: no ELU sample (review regression, DQ 8.2)", () => {
+	it("a sole engine without a sample is not judged on its whole-life average", async () => {
 		const { h, engine, openedAt, reason } = await started()
-		await h.service.spectrum.acquire("rtl", "ws:wg11-sc-m1")
+		engine.utilization = () => 0.99
+		engine.eluSample = () => null
+		await internalsOf(h).checkPassiveCost(openedAt + PASSIVE_COST_WINDOW_MS)
+		expect(reason()).toBeUndefined()
+		expect(h.service.getJob("passive-rtl")).toBeDefined()
+		await h.service.stop()
+	})
+})
+
+describe("passive cost guard: windowed utilization (WG11 review M1)", () => {
+	it("judges a sole engine over the window since the last check, not its whole life", async () => {
+		const { h, engine, openedAt, reason } = await started()
 		// about three hours in, on a recheck boundary
 		const LATE = PASSIVE_COST_WINDOW_MS + 36 * PASSIVE_COST_RECHECK_MS
-		const clock = fakeElu(engine, t =>
-			t < PASSIVE_COST_WINDOW_MS ? 0.9 : t >= LATE ? 0.9 : 0.1,
-		)
+		const clock = fakeElu(engine, t => (t >= LATE ? 0.9 : 0.1))
 		const check = async (t: number) => {
 			clock.t = t
 			await internalsOf(h).checkPassiveCost(openedAt + t)
 		}
 		await check(PASSIVE_COST_WINDOW_MS)
-		expect(reason()).toMatch(/engine-cpu 90 %/)
-		// whole life at 360 s is 0.233 (above the 0.2 clear line); the last five minutes are 0.1
-		await check(PASSIVE_COST_WINDOW_MS + PASSIVE_COST_RECHECK_MS)
 		expect(reason()).toBeUndefined()
-		let t = PASSIVE_COST_WINDOW_MS + PASSIVE_COST_RECHECK_MS
+		let t = PASSIVE_COST_WINDOW_MS
 		while (t + PASSIVE_COST_RECHECK_MS <= LATE) {
 			t += PASSIVE_COST_RECHECK_MS
 			await check(t)
@@ -142,25 +153,33 @@ describe("passive cost guard: windowed utilization (WG11 review M1)", () => {
 	})
 })
 
-describe("passive cost guard: worker replacement (WG11 review MAJOR)", () => {
-	it("judges a replacement worker on its own whole life even when its counters exceed the old worker's", async () => {
+describe("passive cost guard: worker replacement (WG11 review MAJOR, DQ 8.2)", () => {
+	it("discards the window at a new worker generation and never clears on the old worker's counters", async () => {
 		const { h, engine, openedAt, reason } = await started()
 		await h.service.spectrum.acquire("rtl", "ws:wg11-sc-gen")
-		const elu = { idle: 6000, active: 54000, generation: 1 }
+		const elu = { idle: 2400, active: 57600, generation: 1 }
 		engine.eluSample = () => ({
 			generation: elu.generation,
 			elu: { idle: elu.idle, active: elu.active, utilization: 0 },
 		})
 		await internalsOf(h).checkPassiveCost(openedAt + PASSIVE_COST_WINDOW_MS)
-		expect(reason()).toMatch(/engine-cpu 90 %/)
-		// the same engine reconfigured: a new worker whose whole life is 25 % (above the 20 % clear
-		// line); subtracting the old worker's counters would give 8.75 % and wrongly clear
-		elu.idle = 225000
-		elu.active = 75000
-		elu.generation = 2
-		await internalsOf(h).checkPassiveCost(
-			openedAt + PASSIVE_COST_WINDOW_MS + PASSIVE_COST_RECHECK_MS,
+		expect(reason()).toMatch(/engine-cpu 96 %/)
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")).toBeUndefined(),
+			WAIT,
 		)
+		const t0 = openedAt + PASSIVE_COST_WINDOW_MS + 1_000
+		await internalsOf(h).checkPassiveCost(t0)
+		// the same engine reconfigured: a new worker whose life so far is 25 % (above the 20 % clear
+		// line); subtracting the old worker's counters would give a small figure and wrongly clear
+		elu.idle = 45000
+		elu.active = 15000
+		elu.generation = 2
+		await internalsOf(h).checkPassiveCost(t0 + PASSIVE_COST_WINDOW_MS)
+		expect(reason()).toMatch(/engine-cpu/)
+		elu.idle = 90000
+		elu.active = 30000
+		await internalsOf(h).checkPassiveCost(t0 + 2 * PASSIVE_COST_WINDOW_MS)
 		expect(reason()).toMatch(/engine-cpu/)
 		await h.service.stop()
 	})

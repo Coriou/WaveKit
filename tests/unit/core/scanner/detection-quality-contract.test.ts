@@ -30,6 +30,8 @@ describe("detection-quality contract (frozen)", () => {
 			DQ_DATA_HELD_MAX: 8,
 			DQ_DATA_RING: 256,
 			DQ_DATA_RATE_PER_S: 16,
+			DQ_CONSOLIDATE_GROUP_MAX: 16,
+			DQ_CONSOLIDATE_SCAN_MAX: 32,
 		})
 		expect(Object.isFrozen(dq.DQ_IDENTITY_PROTOCOLS)).toBe(true)
 	})

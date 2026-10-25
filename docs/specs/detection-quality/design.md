@@ -1,7 +1,8 @@
 # Detection quality design (WG15 DQ)
 
 Status: reviewed design, not implemented (2026-10-24; revised after spec review the same
-day). Requirements in [requirements](requirements.md), tasks in [tasks](tasks.md).
+day). Amendment (reviewed 2026-10-25): sections 7 and 8. Requirements in
+[requirements](requirements.md), tasks in [tasks](tasks.md).
 Background: the [scanner redesign](../scanner-redesign/design.md) channel gate and evidence
 labels, `docs/SCANNER.md`, and the hot-path rules in `docs/PERFORMANCE.md`.
 
@@ -44,6 +45,8 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_DATA_HELD_MAX`          | 8                              | 4.5         |
 | `DQ_DATA_RING`              | 256                            | 4.5         |
 | `DQ_DATA_RATE_PER_S`        | 16                             | 4.5         |
+| `DQ_CONSOLIDATE_GROUP_MAX`  | 16 (survivor plus 15)          | 7.3, 7.8    |
+| `DQ_CONSOLIDATE_SCAN_MAX`   | 32                             | 7.3, 7.7    |
 
 No change to `packages/api-types`, the REST or WebSocket shapes, or
 `docs/CLI-COORDINATION.md`. Pending entries are memory-only. The persisted and journaled
@@ -268,6 +271,194 @@ The WebSocket `transmission` closed event is broadcast at close as today, withou
 
 No code. The acceptance plan records passive status.
 
+## 7. Legacy consolidation (amendment)
+
+### Root cause (code as of the amendment base)
+
+- `stickyMatch` (`src/core/scanner/store/discovery-store.ts`, about lines 1952 to 2026)
+  picks the **nearest** record within tolerance (cross-family within 1 kHz for an
+  evidence-less observation), tie-break `lastSeenAt` then id. It ignores identity and never
+  looks at a second candidate. With two records 100 to 600 Hz apart and observation centres
+  jittering about +-440 Hz, each observation goes to whichever record is nearer, so both
+  are updated indefinitely.
+- `settle` (about line 3124) merges only records returned by `atKey(source, key)` that have
+  the same **effective** family (`effectiveLabel`, evidence-derived, not the persisted
+  `family`) and the same identity, and it runs only for the record an operation touched.
+  Records on different keys, or one labelled `unknown` and one `analog` by evidence, are
+  never compared. Nothing walks the store to fold pairs created before 2.1.
+- The `g:` key is bandwidth-dependent: `frequencyKey` (`src/core/scanner/bandplan/index.ts`
+  line 112) rounds to `gridToleranceHz(obw)` = round(max(2 000, obw / 4) / 500) x 500
+  (line 78), so one emitter whose median OBW is 11 kHz on one record and 14 kHz on another
+  lands on 3 000 Hz and 3 500 Hz grids and on different keys. This is a contributor, not
+  the main cause: in the offline replay about 29 % of joinable pairs differed in key, about
+  62 % shared the key but differed in effective family, about 9 % shared key, family and
+  identity (an older duplicate `settle` never revisited after a refresh moved it).
+  Follow-ups 6.1 and 6.2 remove the key cause; requirement 7 does not depend on keys.
+- Existing merges are state-based in the journal: `absorb` (about line 3154) writes the
+  survivor, the moved observations, `deleted` and the alias entries through the op's
+  `StoreMutation` (`src/core/scanner/store/schemas.ts` line 289); `replay` applies the
+  mutation (about line 1922). No merge function is re-run at replay. `rekey` (about line 1286) is the one existing whole-source pass (refresh every record, then `settle` each).
+
+### Store facts used
+
+- Merge function: `absorb(op, keep, drop)` already sums `observationCount` and `airtimeMs`,
+  widens first/last seen, picks `signal.best` by 3.3 (`bestEligible`), takes
+  `signal.last`/`tuningTrust` from the later record, LRU-merges metadata, unions `jobIds`,
+  `sourceIds`, evidence flags and recording counts, ORs operator flags, re-points and
+  prunes `coChannel` (2.3), adopts aliases, deletes `drop`, refreshes and re-applies the
+  majority class (3.4, `classVote` per stored observation). Requirement 7 reuses it
+  unchanged.
+- Aliases: `RecordingAliasTable` (`src/core/scanner/recording-aliases.ts`) maps an absorbed
+  id to its survivor (O(1) `aliasOwner`, at most `DISCOVERY_RECORDING_ALIASES_MAX` 64 per
+  owner, oldest released), persisted in the snapshot `aliases` and in each mutation's
+  `aliases`. It is read only by the evidence store for recording folders. The REST route
+  `GET /api/scanner/discoveries/:id` (`src/api/routes/scanner.ts` line 621) calls
+  `store.get(id)`, which does not consult aliases: an absorbed id answers 404. Requirement 7
+  keeps that (follow-up 6.5).
+
+### Algorithm
+
+New pure module `src/core/scanner/store/consolidation.ts`:
+
+```ts
+interface ConsolidationRecord {
+  id: string; sourceId: string; centreHz: number; obwHz: number; peakDbfs: number
+  count: number; young: { peakDbfs: number; obwHz: number }[]
+  identity?: { kind: string; value: string }; family: ProtocolFamily
+  decoded: boolean; protocol: string; firstSeenAt: string; hasOperator: boolean
+}
+joinable(a, b): boolean                      // 7.1, pure, O(1) (young <= 2 entries)
+rankCompare(a, b): number                    // 7.2
+nearest(sorted, centreHz, radiusHz, k): ConsolidationRecord[]   // 7.3 step 2
+planConsolidation(records): { groups: { survivor: string; members: string[] }[];
+                              truncated: number }               // 7.3, 7.4
+```
+
+`nearest` binary-searches the per-source array sorted by (centre, id) and walks outward
+with two pointers, taking the nearer side each step (ties: smaller id), stopping after `k`
+entries or past the radius: O(log n + k), independent of density. `planConsolidation` builds
+the frozen records once (the store fills them from `mediansOf`, `recentOf`,
+`effectiveLabel`), sorts by rank, and for each unowned survivor takes `nearest(.., 1000,
+32)`, skips owned and higher-ranked entries (they still count toward 32), selects joinable
+ones until 16, then marks the group owned. Pure, so order independence and the ownership
+rules are property-tested on the function without a store.
+
+Store: `consolidatePlan(): Plan` (builds records, calls the planner) and
+`applyConsolidation(plan): { groups, absorbed }`. Each group runs `commit("rekey", op =>
+...)`, absorbing each still-live member into the still-live survivor with `absorb` (`planned`: the pair was checked on frozen values, so the 3.2 re-check against medians
+earlier members moved is skipped, requirement 7.5), so the journal line is the ordinary merge
+mutation. `rekey` is a journal op every existing reader accepts (`JournalLineSchema`,
+`src/core/scanner/store/persistence.ts` line 389); `replay` applies the payload whatever
+the op name (about line 1922), so an older reader replays a group as an ordinary merge. A
+new op name would be skipped by an older reader as an invalid line (`readJournal`, about
+lines 1228 to 1235) and resurrect the absorbed records with their observations moved away.
+
+Lazy path: `stickyMatch` returns `best`; the observation's commit then calls
+`lazyConsolidate(op, best)`, which builds frozen records for `best` and its 32 nearest
+(`CentreIndex.nearest`, a new bounded outward walk over each centre family list of the
+source plus the decoded list, merged nearest-first, cut at 32), picks the survivor and
+members by 7.7, absorbs them, and returns the survivor that `addObservation` then uses.
+
+Service (`ScannerService.startUp`, after the journal replay and after the mutation listener
+is attached, before the change listener and before any job starts):
+
+1. `persistence.readConsolidationPlan()`: a valid file is resumed with `applyConsolidation`;
+   an invalid one is logged and treated as none (no new plan this load).
+2. Otherwise `store.consolidatePlan()`; if it has groups, `writeConsolidationPlan(plan)`
+   (atomic: tmp, fsync, rename) and then `applyConsolidation(plan)`.
+3. If any plan file existed or was written: `writeSnapshotOf(store)` and, once it resolves,
+   `removeConsolidationPlan()`. A failed snapshot leaves the file; the next load resumes it
+   (every group already applied is a no-op: its members are gone).
+
+Crash equivalence: the plan is fixed before any group runs and is reused on resume, groups
+are disjoint (ownership), each group is one journal line, and a group already applied has
+no live members. So the end state is the same for any crash point. Without the plan file,
+a resume would recompute from refreshed survivor medians and could choose differently;
+that is why the file exists.
+
+Plan file: `consolidation-plan.json` beside the snapshot, Zod-validated
+`{ version: 1, createdAt, groups: { survivor, members[] }[] }`, at most 10 000 groups.
+
+### CPU
+
+As requirement 7.8. Planning: two sorts plus at most 32 visits and 32 O(1) checks per
+record. Execution dominated by `absorb` (observation moves). The load path is synchronous;
+if a measured run on the reference store exceeds the 50 ms desktop target, groups are
+applied in slices with `setImmediate` between slices while the start-up awaits them (ingest
+has not started). Lazy path: at most 32 visits and checks per sticky match, inside this
+spec's per-observation budget.
+
+## 8. Passive marginal cost guard (amendment)
+
+### Current logic
+
+`checkPassiveCost` (`src/core/scanner/scanner-service.ts` about lines 6619 to 6715): for each
+source with an open engine and a passive job (or a guard-disabled one), at open + 60 s then
+every 300 s, it computes the engine worker's windowed event-loop utilization
+(`windowedUtilization`, `src/core/scanner/passive-cost.ts`) and feeds
+`passiveCostDecision`: disable above the limit, clear at or below 0.8 x limit. A
+guard-disabled source whose engine closed is re-enabled after `PASSIVE_PROBATION_MS`
+(`passiveProbationDue`). The engine is shared: `SpectrumService` keeps per-source
+`jobs` (`job:<id>`) and `displays` (`ws:<clientId>`) consumer sets
+(`src/core/spectrum/spectrum-service.ts`, `Entry` about line 382; `allocation().consumers`
+about line 718) and closes the engine only when both are empty (`release`, about line 562).
+So with a display open the utilization is the display's cost plus passive's, and passive
+can be disabled for cost it did not cause; and once disabled, it comes back only if the
+whole engine (display alone) falls under 0.2 or the display closes.
+
+What passive adds to a shared engine: its job's masks and CFAR ranges (`updateMasks`), the
+lease holder's tuning when passive holds the arbiter lease (`engineTuning`, about line
+2438; a different FFT size or integration reconfigures the worker and bumps its
+generation), and the tracker and observation work in the worker. A display-only engine runs
+the FFT and summaries regardless.
+
+### Design
+
+New pure function in `src/core/scanner/passive-cost.ts`, implementing the 8.4 table row by
+row:
+
+```ts
+passiveGuardDecision(input: {
+  passive: "enabled" | "disabled"
+  holders: "sole" | "shared" | "off" | "closed"
+  measurement: number | null      // U over a completed window (8.2), else null
+  baseline: number | null         // valid B (8.3), else null
+  limit: number
+  recheckDue: boolean             // 300 s since the last judgement of rows 2 to 4
+  baselineWindowAllowed: boolean
+  trialDue: boolean
+  probationDue: boolean           // engine shut, WG11 rule
+}): { decision: "keep" | "disable" | "clear" | "baseline" | "trial"; row: number;
+      figure: "engine" | "passive" | null }
+```
+
+Service state per source (`ScannerService`): `window` `{ kind: "open" | "baseline" |
+"trial" | "restore", engine, generation, startSample, startedAt }`, `baseline` `{ value,
+engine, generation, others, at }`, `lastBaselineWindowAt`, `disabledAt`. Each 1 s guard tick
+reads `spectrum.allocation().consumers[sourceId]` (holders, others), the engine's
+`eluSample()` (generation), and:
+
+- a generation that differs from the window's discards the window and starts a new one at
+  this tick (8.2); if the guard did not add or remove passive within the previous tick, the
+  baseline is invalidated too (8.3);
+- a window is complete when `now - startedAt >= 60 000`; its `U` is `windowedUtilization`
+  between `startSample` and the current sample;
+- `baseline` and `restore` windows, trial start and trial windows are evaluated at their
+  deadline on this tick (8.7); `open` windows of rows 2 to 4 are judged at their first
+  completion and then every 300 s, as today.
+
+Passive removal and restore reuse `passiveDisabled` plus `refreshPassive()` with reasons
+`measuring baseline` (row 6) and the `engine-cpu` / `passive-cpu` figures (rows 2 to 4).
+The existing `passiveCostDecision`, `windowedUtilization` and `passiveProbationDue` stay
+and are called by the new function (row 2 and 11 are exactly them).
+
+Constants (`src/core/scanner/passive-cost-contract.ts`): `PASSIVE_BASELINE_MAX_AGE_MS`
+1 800 000, `PASSIVE_SATURATION` 0.95. No new config key.
+
+Pi protection: a headless receiver has only passive on the engine (row 2, today's rule;
+0.99 core disables at open + 60 s). With a display open on such a host `U` saturates and
+row 3 disables passive whether or not a baseline exists.
+
 ## CPU and hot path (`docs/PERFORMANCE.md`)
 
 | Change                              | Rate                      | Cost                                             |
@@ -379,3 +570,43 @@ the last 64 non-edge classes with the recency tie-break. _Validates 3.4._
 from Activity iff it was held and a reception with the same source, channel basis, trusted
 tuning, within 1 250 Hz and the time window was retained; every close is delivered exactly
 once. _Validates 4.1, 4.3, 4.5, 4.6._
+
+**Property 12: Plan ownership and bound.** For any record set, `planConsolidation` gives
+disjoint groups of at most 16; every member is joinable to its survivor on frozen values,
+ranked below it and within 1 000 Hz of its frozen centre; no survivor is a member of
+another group; `joinable` is called at most 32 times per record. _Validates 7.3, 7.4, 7.8._
+
+**Property 13: Order independence.** For any record set given in any two orders, the plan
+is identical; two stores restored from the same records in different orders end with the
+same ids and observation sets after consolidation. _Validates 7.2, 7.3._
+
+**Property 14: Idempotence.** Applying a plan twice equals applying it once; resuming a
+plan after it completed changes nothing. _Validates 7.6._
+
+**Property 15: Crash equivalence.** For any record set and any crash point k (groups 1..k
+journaled, plan file present), restore plus replay of the journal prefix plus resume of the
+plan gives the same store as the uninterrupted run, including over-cap clusters (18
+joinable records). _Validates 7.5, 7.6._
+
+**Property 16: Conservation and safety.** Consolidation preserves total observations and
+airtime per source, never merges a pair 7.1 excludes, and every absorbed id resolves
+through `aliasOwner` to a live survivor (until the 64-alias bound). _Validates 7.1, 7.5._
+
+**Property 17: Guard precedence.** For any input, `passiveGuardDecision` returns the
+decision of the first matching 8.4 row; row 2 equals `passiveCostDecision`; a shared
+enabled source with `U >= 0.95` is disabled with or without a baseline; a null measurement
+always keeps. _Validates 8.4, 8.9._
+
+**Property 18: Guard duty bounds.** For any tick sequence of consumers, generations and
+utilizations, passive is off for baseline windows at most 61 s in any 1 800 s, and a
+disabled source with a valid baseline starts at most one trial per 900 s. _Validates 8.5
+to 8.8._
+
+All fast-check properties run with `numRuns: 100` or more and carry the trace comment
+(`// Feature: detection-quality, Property N: ...`).
+
+Tests for the amendment: `tests/unit/core/scanner/consolidation.property.test.ts` (new,
+Properties 12 to 16), `tests/unit/core/scanner/discovery-store-consolidate.test.ts` (new,
+the 7.10 fixtures including the old-reader replay), `tests/unit/core/scanner/passive-guard.test.ts`
+and `passive-guard.property.test.ts` (new, the 8.10 table and Properties 17 and 18). Expected
+to change: persistence tests for the plan file; scanner-service passive guard wiring tests.

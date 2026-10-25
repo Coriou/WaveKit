@@ -1,7 +1,8 @@
 # Detection quality requirements (WG15 DQ)
 
 Status: reviewed design, not implemented (2026-10-24; revised after spec review the same
-day). See [design](design.md) and [tasks](tasks.md).
+day). Amendment (reviewed 2026-10-25): sections 7 and 8. See
+[design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -33,10 +34,13 @@ Measured background (rounded, synthetic descriptions):
   same frequency and source.
 
 In scope: requirements 1 to 4 (behaviour changes) and 5 (finding, acceptance item).
+Amendment: requirement 7 (consolidation of records the store already holds) and
+requirement 8 (passive cost guard judged on passive's marginal cost), which replace
+follow-up 6.3's guard part.
 
 Out of scope (follow-ups, section 6): band-plan rasters for passive placement; a fixed
-2.5 kHz grid key independent of OBW (needs a stored-record key migration); a redesign of
-the passive cost guard; any change to `packages/api-types`.
+2.5 kHz grid key independent of OBW (needs a stored-record key migration); any change to
+`packages/api-types`.
 
 Safe-default rule for the whole spec: when an input a rule needs is unknown, non-finite or
 malformed, the store rules fall back to the behaviour that **does not create** a new record
@@ -329,7 +333,7 @@ open and was not rebuilt, and Activity rows cannot update discoveries by design.
 60 s after engine open, limit 0.25 core, clear at 0.20, and the display kept the engine
 open). Alternatives the capture could not exclude: a scanner settings change that disabled
 passive, a source capability change that ended the job, and a retune-path ending of the job.
-Changing the guard is out of scope (follow-up 6.3).
+The guard change is requirement 8 (amendment).
 
 5.2 Every detection-quality acceptance run shall record `/api/scanner/status`
 `sources[].passive` (`enabled`, `disabledReason`) alongside its discovery snapshots, at the
@@ -342,9 +346,254 @@ passive channel plan already uses), so one PMR emitter keys to one raster key at
 
 6.2 A fixed 2.5 kHz grid key independent of OBW, with a migration of stored `g:` keys.
 
-6.3 Passive cost guard: judge passive-attributable cost or degrade before disabling, and
-allow a clear while the engine is shared. Optional ingest of trusted decoder receptions as
-discovery updates when no job runs.
+6.3 Passive cost guard: now requirement 8. Still a follow-up: optional ingest of trusted
+decoder receptions as discovery updates when no job runs.
+
+6.5 REST resolution of an absorbed discovery id (`GET /api/scanner/discoveries/:id` for an
+id merged away answering with, or redirecting to, its survivor). Needs an API decision;
+requirement 7 behaves like every existing merge (the absorbed id is gone).
 
 6.4 An optional data hint on the analog-transmission WebSocket event (Main-owned DTO change
 in `packages/api-types`).
+
+## 7. Legacy consolidation
+
+As an operator I want the duplicates the store already holds folded into one record, so
+that a record I watch is the one that updates.
+
+Measured background (rounded): in a 60-minute watch with passive on, several pairs of
+records 100 to 600 Hz apart, of compatible bandwidth and on the same placement key, were
+both updated during the run (a DMR pair, an unknown/analog pair, and clusters of three or
+four records on two PMR channels). An offline replay of a store copy (about 4 200 records)
+found about 160 groups that requirement 7.1 joins, absorbing about 190 records (4.5 %); most
+groups have two members, one has twelve.
+
+Root cause (design, section 7): requirement 2.1 joins an _observation_ to the nearest record
+within 1 kHz, but nothing joins two _records_. `settle` merges only records on the same
+key with the same effective family and identity, and only the record an operation touched.
+So two records created before 2.1 (or on different OBW-dependent grid keys, or with
+different effective families) both stay, and centre jitter larger than their separation
+sends each new observation to whichever is nearer: both keep updating.
+
+7.1 Two records `a` and `b` are **joinable** when all hold:
+
+- same first source id;
+- finite median centres at most `DQ_CROSS_FAMILY_HZ` = 1 000 Hz apart (the key is not
+  consulted);
+- finite, positive median OBWs whose ratio (wider over narrower) is at most
+  `DQ_OBW_RATIO_MAX` = 2 (the 2.1 range [0.5, 2] seen from either side);
+- `recordsCompatible(a, b)` (3.1) is not false, and not null when either side has 3 or more
+  observations;
+- their identities do not conflict: not both defined and different (`sameIdentity`);
+- their effective families are equal, or at least one is `unknown` or `carrier`;
+- not both `decoded` with different protocols;
+- neither carries operator state (`operator.label`, `notes`, `lockout` or `keep`).
+
+Why each: the first four are the 2.1 and 3.1 predicates an observation already passes to
+join either record, so a record pair that each observation could join is one emitter.
+Identity and family keep the co-channel split the store makes on purpose (an analog record
+and its decoded digital twin on one channel, two colour codes on one channel). Operator
+state is never merged silently (a lockout on a duplicate would lock out the real emitter).
+
+7.2 **Rank.** Records are totally ordered by: `decoded` before any other confidence, then
+the earliest `firstSeenAt`, then the smaller id. "Ranked above" means earlier in this order.
+
+7.3 **Load plan.** Once per load, after the snapshot is restored and the journal replayed
+and before the first ingest, the store computes a plan from the restored records as they
+are at that moment (the **frozen** state: centres, OBWs, peaks, counts and labels are read
+once and never re-read while planning):
+
+1. Records are visited in rank order; each visited record not yet **owned** is a possible
+   survivor `s`.
+2. **Enumeration (bounded before any predicate).** Among the records of `s`'s source, the
+   `DQ_CONSOLIDATE_SCAN_MAX` = 32 nearest to `s`'s frozen centre (by absolute distance,
+   ties by smaller id) with a distance of at most 1 000 Hz are the **scanned set**. Owned
+   records and records ranked above `s` count toward the 32 and are skipped.
+3. **Selection.** Of the scanned set in nearest-first order, a record is a member when it is
+   joinable to `s` (7.1, on frozen values), until `DQ_CONSOLIDATE_GROUP_MAX` = 16 records
+   (the survivor plus at most 15 members) are in the group.
+4. If the group has a member, it is added to the plan, and `s` and every member become
+   owned. **Ownership is immutable**: an owned record is never a survivor or a candidate
+   again in this plan.
+
+Because every distance is measured from the survivor's frozen centre and owned records are
+never revisited, a group's members are all within 1 000 Hz of the survivor's pre-plan
+centre: no chaining (records at f, f + 900 Hz and f + 1 800 Hz give one group of two and
+leave f + 1 800 Hz alone in that plan).
+
+7.4 **Incomplete-result contract.** The plan is complete only for the scanned sets. A
+survivor whose scanned set held 32 records, or whose group filled at 16 while another
+scanned record was joinable, is counted as **truncated**; the store logs one info line
+with the group count, the absorbed count and the truncated count. Joinable pairs left by
+truncation, by a member that 7.5 refuses, or by the next load's changed medians are left
+for the next load's plan or the lazy path (7.7); there is no second pass in the same load.
+
+7.5 **Execution.** Each group is one store operation: the members are absorbed into `s` in
+selection order with today's `absorb` (observations moved, `observationCount` and
+`airtimeMs` summed, `firstSeenAt`/`lastSeenAt` widened, `signal.best` by 3.3,
+`signal.last` from the later record, metadata, job ids, source ids and evidence unioned,
+majority class by 3.4, co-channel links re-pointed and pruned by 2.3, the absorbed id's
+recording folder adopted as an alias). The 3.2 guard for a planned pair is the plan's
+frozen 7.1 check (3.1 included); it is not re-run against medians the group's earlier
+members already moved, because that would make the result depend on the apply order and a
+resumed plan differ from an uninterrupted one. A survivor or member that carries operator
+state when the group runs (set after the plan was written) is skipped. The absorbed ids are
+deleted as in every existing merge.
+
+7.6 **Durability.** The plan is written atomically to a plan file before the first group
+runs. Each group is journaled with an existing journal op name (`rekey`) and the existing
+mutation payload (discoveries, observations, `deleted`, `aliases`), exactly the shape a
+`settle` merge writes, so a reader without this change replays it unchanged. On load, a
+plan file left by an interrupted load is resumed (each group: absorb the members that still
+exist into its survivor if the survivor exists) instead of computing a new plan. The plan
+file is deleted only after a snapshot written after the last group is durable. So a crash
+at any point gives the same end state as an uninterrupted run, and a downgrade to a reader
+without this change sees ordinary merges (and ignores the plan file).
+
+7.7 **Lazy path.** On every sticky match (2.1) to record `m`, the store scans the 32
+records nearest to `m`'s current median centre within 1 000 Hz (the same bounded
+enumeration as 7.3, centred on `m`, not on the observation). The group's survivor is the
+highest-ranked of `m` and the scanned records joinable to `m`; members are the scanned
+records (and `m`) joinable to that survivor and within 1 000 Hz of `m`, at most 15. They are
+absorbed in the observation's operation before the observation is added, so the
+observation lands on the survivor. Lazy merges emit `deleted` and `merged` changes as every
+merge does.
+
+7.8 **Bounds.** At the default `maxDiscoveries` 10 000: planning sorts the records twice
+(rank, and centre per source: O(n log n)) and visits at most 32 index entries per record,
+so at most 320 000 entry visits and at most 320 000 predicate checks, whatever the density
+(10 000 colocated records that are mutually not joinable cost 320 000 checks, not 10^8).
+Execution is at most 9 999 absorbs, each bounded by `OBSERVATIONS_PER_DISCOVERY` 256 moved
+observations, so a group's journal line holds at most 16 x 256 = 4 096 observations. The
+lazy path adds at most 32 entry visits and 32 checks per sticky match. Targets: the load
+plan and execution under 0.5 s on a Pi 4-class core and under 50 ms on a desktop for the
+measured store size (measured, not a test gate).
+
+7.9 Safe defaults: a non-finite or missing median centre, OBW or peak makes a pair not
+joinable; an undecided compatibility where either side has 3 or more observations is not
+joinable; two young records (fewer than 3 observations each) follow 3.5 and may join. An
+unreadable or invalid plan file is ignored with a warning (no resume, no new plan this
+load) and removed after the next durable snapshot.
+
+7.10 Regression fixtures:
+
+- **Legacy pair.** Two records 270 Hz apart, both 8 kHz, both 40 observations at -52 dBFS,
+  one effective family `unknown`, one `analog`. After load: one record, counts and airtime
+  summed, the absorbed id adopted as an alias; then 50 observations with centres uniform in
+  +-440 Hz update only the survivor.
+- **Grid split.** Two records 400 Hz apart, median OBW 11 kHz and 14 kHz (different `g:`
+  keys). Expect one record.
+- **Kept apart.** A DMR pair with colour codes 11 and 15; an analog record with its decoded
+  digital twin; a record with an operator lockout; a 0 dBFS record beside a -45 dBFS record
+  (3.1 refuses); records 1 200 Hz apart. Each pair stays two.
+- **No chaining.** Records at f, f + 900 Hz and f + 1 800 Hz with f ranked first: one group
+  {f, f + 900}; f + 1 800 stays.
+- **Over cap.** 18 joinable records within 500 Hz: the first plan holds one group of 16
+  (survivor plus 15); the 2 left over are not absorbed in that load and form their own
+  group (or join the survivor on the next load). A preferred (higher-ranked) survivor is
+  never absorbed by a later group.
+- **Dense, not joinable.** 10 000 records within 1 000 Hz of each other, pairwise
+  identity-conflicting: no group, and the predicate is evaluated at most 32 times per record.
+- **Crash.** Stop after the first of two groups is journaled (plan file present); reload;
+  expect the same end state as an uninterrupted run, the plan file gone after the snapshot.
+- **Old reader.** The journal lines a plan writes, replayed by the existing `replay` (no
+  consolidation code involved) onto the pre-plan snapshot, give the consolidated store.
+
+## 8. Passive marginal cost guard
+
+As an operator I want passive discovery to stay on while I watch the waterfall on a host
+that can afford it, and still be turned off on a host where passive itself costs too much.
+
+Measured background: the WG11 guard judges the whole spectrum-engine utilization against
+`scanner.passive.maxEngineUtilization` (default 0.25 of a core). When a display holds the
+engine, the display's own FFT and summary cost counts against passive, so passive is turned
+off while the operator is watching, and a guard-disabled source is only re-enabled after
+the engine closes (probation) or when the whole engine falls to 0.2 of a core. On a Pi
+3B-class receiver the engine alone measured about 0.99 of a core: the guard must still turn
+passive off there.
+
+8.1 **Holders.** The guard reads the source's engine consumers from the spectrum service:
+**sole** when the only consumer is the source's passive job (`job:passive-<sourceId>`),
+**shared** when passive and any display or other job hold it, **off** when passive does
+not hold it. An unreadable consumer set counts as sole.
+
+8.2 **Windows.** A measurement is the engine worker's windowed utilization between two
+samples of the same worker generation at least `PASSIVE_COST_WINDOW_MS` = 60 000 ms apart.
+A window starts:
+
+- at engine open (today);
+- for a baseline, at the first guard tick (1 s cadence) at which passive no longer holds
+  the engine after the guard removed it;
+- for a trial, at the first tick at which passive holds the engine again;
+- after a worker generation change (restart or reconfigure), at the first tick that sees
+  the new generation (the old window is discarded).
+
+A window shorter than 60 000 ms, or one whose samples are null or non-finite, is **no
+measurement**.
+
+8.3 **Baseline.** While the engine is open and passive is off, every completed window gives
+the baseline `B`, stamped with the engine instance, the worker generation and the sorted
+list of the other consumers. `B` is **valid** while the engine instance and the other
+consumers are unchanged, the generation is unchanged except for changes that follow the
+guard's own passive removal or restore within one tick, and it is at most
+`PASSIVE_BASELINE_MAX_AGE_MS` = 1 800 000 ms old. Otherwise it is **unavailable**.
+
+8.4 **Precedence.** The first matching row decides. `U` is the current measurement, `M =
+max(0, U - B)`, `limit` is `scanner.passive.maxEngineUtilization ?? 0.25`.
+
+| #   | State (passive)       | Condition                                | Decision                         |
+| --- | --------------------- | ---------------------------------------- | -------------------------------- |
+| 1   | any                   | no measurement (8.2)                     | keep                             |
+| 2   | enabled, sole         | -                                        | WG11 rule on `U` (unchanged)     |
+| 3   | enabled, shared       | `U >= PASSIVE_SATURATION` (0.95)         | disable (baseline irrelevant)    |
+| 4   | enabled, shared       | `B` valid                                | WG11 rule on `M`                 |
+| 5   | enabled, shared       | `B` unavailable, `U <= limit`            | keep                             |
+| 6   | enabled, shared       | `B` unavailable, baseline window allowed | start a baseline window          |
+| 7   | enabled, shared       | `B` unavailable, window not allowed      | keep                             |
+| 8   | disabled, engine open | `U <= limit x 0.8` (WG11 clear rule)     | clear                            |
+| 9   | disabled, engine open | trial due (8.6) and `B` valid            | start a trial (passive restored) |
+| 10  | disabled, engine open | otherwise                                | keep (record `B`)                |
+| 11  | disabled, engine shut | WG11 probation due                       | clear (today)                    |
+
+A malformed `B` (non-finite) is discarded and counts as unavailable; a malformed `U` is row
+
+1. A trial is judged by rows 3 and 4 when its window completes; a disable there restarts
+   the trial clock.
+
+8.5 **Baseline window.** Row 6 removes the passive job (status `enabled: false`,
+`disabledReason` `measuring baseline`), measures one window (8.2), records `B`, restores
+passive and judges by row 4 after the next completed window. At most one baseline window
+starts per source per `PASSIVE_BASELINE_MAX_AGE_MS`. A window that cannot complete within
+`2 x PASSIVE_COST_WINDOW_MS` (no measurement) is abandoned and passive restored.
+
+8.6 **Trial.** A guard-disabled source with its engine open is due a trial every
+`PASSIVE_PROBATION_MS` (900 000 ms, today's constant) since it was disabled.
+
+8.7 **Deadlines.** The baseline window end, the window after restoring passive, the trial
+start and the trial window end are checked on every guard tick (1 s), not on the 300 s
+recheck interval; the 300 s interval applies only to rows 2 to 4 on an engine with no
+pending window.
+
+8.8 **Bounds.** A baseline window keeps passive off for at most 61 s (one window plus one
+tick) per 1 800 000 ms, at most 3.4 % of the time; an abandoned window at most 121 s, 6.7 %.
+A source whose passive cost stays over the limit runs passive at most 61 s per 900 000 ms
+(6.8 %). The guard adds one consumer-set read and one subtraction per tick per source: no
+measurable cost.
+
+8.9 Safe defaults: as the table. No new config key: the limit stays
+`scanner.passive.maxEngineUtilization`. `disabledReason` names the figure: `engine-cpu N %
+of a core` (row 2 or 3), `passive-cpu N % of a core` (row 4).
+
+8.10 Regression fixtures (pure decision function, plus service wiring with fake engines):
+
+- **Sole over limit.** Only passive holds, `U` 0.99, limit 0.25: disable at open + 60 s.
+- **Shared, cheap passive.** Display plus passive, `B` 0.30, `U` 0.38: keep.
+- **Shared, costly passive.** `B` 0.30, `U` 0.62: disable with `passive-cpu 32 %`.
+- **No baseline.** Display plus passive, `U` 0.40: one baseline window, then judged on `M`;
+  a second window is refused within 30 min.
+- **Saturated.** `U` 0.97 with no baseline, and `U` 0.96 with a valid `B` 0.94: disable both.
+- **Invalidation.** A display joins, the generation changes without a guard toggle, or `B`
+  is 31 min old: `B` unavailable.
+- **Trial.** Disabled with display open, `B` 0.30: after 15 min passive restarts; `U` 0.40
+  keeps it, `U` 0.70 disables it again; a trial or baseline end is judged within 1 s of its
+  deadline, not at the next 300 s check.

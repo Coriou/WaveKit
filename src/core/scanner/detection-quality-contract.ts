@@ -109,3 +109,12 @@ export const DQ_DATA_RING = 256
 
 /** Req 4.5: accepted receptions per source per 1 s bucket; the 17th and later are dropped. */
 export const DQ_DATA_RATE_PER_S = 16
+
+/** Req 7.3, 7.8: records per consolidation group, the survivor included (at most 15 absorbed). */
+export const DQ_CONSOLIDATE_GROUP_MAX = 16
+
+/**
+ * Req 7.3, 7.7, 7.8: index entries visited per survivor (nearest first) before any predicate, so
+ * a dense colocated set costs at most 32 checks per record.
+ */
+export const DQ_CONSOLIDATE_SCAN_MAX = 32
