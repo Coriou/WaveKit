@@ -5,9 +5,9 @@
 //   node scripts/check-docs.mjs --since=<ref>   also: code changed since <ref> without its page
 //                                               (docs/doc-map.json) changing too
 //
-// Broken links fail. A stale page is a warning (a GitHub annotation in CI), unless a commit in the
-// range carries the trailer `Docs: none` (the change is invisible to users) or names the page in
-// `Docs: <path>`. Pass --strict to make stale pages fail as well.
+// Broken links fail. A stale page is a warning (a GitHub annotation in CI), unless every
+// commit that touched the code carries the trailer `Docs: none` (the change is invisible to users)
+// or names the page in `Docs: <path>`. Pass --strict to make stale pages fail as well.
 
 import { execFileSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
@@ -73,21 +73,52 @@ export function brokenLinks(file, repo = root) {
 	return broken
 }
 
-/** Pages whose code changed in `changed` while the page did not, minus the ones a trailer covers. */
-export function stalePages(changed, map, trailers = []) {
+/**
+ * Pages whose code changed in `changed` while the page did not. `commits` lists each commit in
+ * the range with its files and its `Docs:` trailers: a code file is covered when every commit
+ * that touched it says `Docs: none` or names one of the entry's pages, so one commit's trailer
+ * never excuses another commit's change.
+ */
+export function stalePages(changed, map, commits = []) {
 	const touched = new Set(changed)
-	if (trailers.some(t => t.trim().toLowerCase() === "none")) return []
-	const covered = new Set(trailers.map(t => t.trim()))
 	const stale = []
 	for (const entry of map.entries) {
-		const hits = changed.filter(f =>
-			entry.code.some(prefix => f.startsWith(prefix)),
+		const excused = file => {
+			const by = commits.filter(c => c.files.includes(file))
+			return (
+				by.length > 0 &&
+				by.every(c =>
+					c.trailers.some(
+						t => t.toLowerCase() === "none" || entry.docs.includes(t),
+					),
+				)
+			)
+		}
+		if (entry.docs.some(d => touched.has(d))) continue
+		const hits = changed.filter(
+			f => entry.code.some(prefix => f.startsWith(prefix)) && !excused(f),
 		)
-		if (hits.length === 0) continue
-		if (entry.docs.some(d => touched.has(d) || covered.has(d))) continue
-		stale.push({ docs: entry.docs, code: hits })
+		if (hits.length > 0) stale.push({ docs: entry.docs, code: hits })
 	}
 	return stale
+}
+
+/** `git log --name-only` output with a `@@<trailers>` header per commit, parsed. */
+export function parseCommits(log) {
+	const commits = []
+	for (const line of log.split("\n")) {
+		if (line.startsWith("@@")) {
+			const trailers = line
+				.slice(2)
+				.split("|")
+				.map(t => t.trim())
+				.filter(Boolean)
+			commits.push({ trailers, files: [] })
+		} else if (line.trim() !== "" && commits.length > 0) {
+			commits[commits.length - 1]?.files.push(line.trim())
+		}
+	}
+	return commits
 }
 
 function git(...args) {
@@ -132,16 +163,20 @@ function main() {
 			)
 			changed = []
 		}
-		const log =
+		// Merges are left out: their files come from the commits they bring in.
+		const commits =
 			changed.length > 0
-				? git(
-						"log",
-						"--format=%(trailers:key=Docs,valueonly)",
-						`${since}..HEAD`,
+				? parseCommits(
+						git(
+							"log",
+							"--no-merges",
+							"--name-only",
+							"--format=@@%(trailers:key=Docs,valueonly,separator=|)",
+							`${since}..HEAD`,
+						),
 					)
-				: ""
-		const trailers = log.split("\n").filter(Boolean)
-		for (const s of stalePages(changed, map, trailers)) {
+				: []
+		for (const s of stalePages(changed, map, commits)) {
 			const msg = `${s.code.length} file(s) changed under ${s.code[0]}${s.code.length > 1 ? " and others" : ""} without ${s.docs.join(" or ")}. Update the page, or add a "Docs: none" trailer if users see no change.`
 			if (args.has("strict")) failed = true
 			const level = args.has("strict") ? "error" : "warning"

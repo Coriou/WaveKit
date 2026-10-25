@@ -3,7 +3,7 @@
 //
 // The mock serves the same seeded data on every run, so a shot changes only when the app does.
 // Each shot loads the app fresh with its theme and blank map tiles in localStorage, refuses every
-// request that is not to the local preview or mock, presses its dock buttons, waits
+// request and WebSocket that is not to the local preview or mock, presses its dock buttons, waits
 // for the waterfall and live data to settle, then captures the viewport at 2x.
 // Chromium: PLAYWRIGHT_CHROMIUM_PATH, else /opt/pw-browsers, else playwright-core's own lookup.
 
@@ -185,6 +185,11 @@ async function main(): Promise<void> {
 			// Only the local preview and mock: anything else, such as map tiles, is refused.
 			await context.route("**/*", route =>
 				isLoopback(route.request().url()) ? route.continue() : route.abort(),
+			)
+			// context.route does not see WebSockets: refuse those off loopback too.
+			await context.routeWebSocket(
+				url => !isLoopback(url.href),
+				ws => ws.close(),
 			)
 			await context.addInitScript(
 				entries => {

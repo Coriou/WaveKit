@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest"
 import {
 	brokenLinks,
 	linkTargets,
+	parseCommits,
 	stalePages,
 	userDocs,
 } from "../../../scripts/check-docs.mjs"
@@ -54,9 +55,37 @@ describe("check-docs", () => {
 	})
 
 	it("accepts a Docs: none trailer, or one that names the page", () => {
-		const changed = ["web/src/features/map/engine.ts"]
-		expect(stalePages(changed, MAP, ["none"])).toEqual([])
-		expect(stalePages(changed, MAP, ["docs/WEB-APP.md"])).toEqual([])
+		const file = "web/src/features/map/engine.ts"
+		const none = [{ files: [file], trailers: ["none"] }]
+		const named = [{ files: [file], trailers: ["docs/WEB-APP.md"] }]
+		expect(stalePages([file], MAP, none)).toEqual([])
+		expect(stalePages([file], MAP, named)).toEqual([])
+	})
+
+	it("lets a trailer excuse only its own commit's files", () => {
+		const a = "web/src/features/map/engine.ts"
+		const b = "web/src/features/activity/rows.ts"
+		const commits = [
+			{ files: [a], trailers: ["none"] },
+			{ files: [a, b], trailers: [] },
+		]
+		expect(stalePages([a, b], MAP, commits)).toEqual([
+			{ docs: ["docs/WEB-APP.md"], code: [a, b] },
+		])
+		expect(
+			stalePages([a], MAP, [
+				{ files: [a], trailers: ["none"] },
+				{ files: [b], trailers: [] },
+			]),
+		).toEqual([])
+	})
+
+	it("parses git log output into commits", () => {
+		const log = "@@none\n\nweb/a.ts\n@@\n\nweb/b.ts\nweb/c.ts\n"
+		expect(parseCommits(log)).toEqual([
+			{ trailers: ["none"], files: ["web/a.ts"] },
+			{ trailers: [], files: ["web/b.ts", "web/c.ts"] },
+		])
 	})
 
 	it("maps only paths that exist", () => {

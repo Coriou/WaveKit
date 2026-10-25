@@ -57,7 +57,7 @@ code they describe.
    an area.
 2. **Say when there is nothing to document.** If a commit changes mapped code without changing
    anything a user sees (a refactor, a test, a fix that restores documented behaviour), end the
-   commit message with the trailer `Docs: none`.
+   commit message with the trailer `Docs: none`. The trailer covers that commit's own files only.
 3. **Keep links working.** `node scripts/check-docs.mjs` fails on a broken relative link or image.
    With `--since=<ref>` it also lists mapped code that changed without its page; CI runs it on
    every push and pull request and shows the result as a warning.
