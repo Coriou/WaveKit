@@ -104,28 +104,47 @@ const DTMF_PATTERN = /DTMF:\s*([0-9*#A-D]+)/i
 // EAS format: "EAS: ZCZC-ORG-EEE-PSSCCC+TTTT-JJJHHMM-LLLLLLLL-"
 const EAS_PATTERN = /EAS:\s*(ZCZC-[A-Z]{3}-[A-Z]{3}-.+)/i
 
-// AFSK1200 format: "AFSK1200: fm CALL-1 to CALL-2 via CALL-3 ..."
-const AFSK1200_PATTERN =
-	/AFSK1200:\s*fm\s+(\S+)\s+to\s+(\S+)(?:\s+via\s+(.+))?/i
-
-// FSK9600 format: Similar to AFSK1200
-const FSK9600_PATTERN = /FSK9600:\s*(.+)/i
+// AX.25 modes (AFSK1200, FSK9600): multimon-ng's hdlc display prints
+// "<MODE>: fm SRC to DEST[ via DIGI[,DIGI...]] <frame>[ pid=XX]" and the
+// information field on the next line. The whole header must match.
+const AX25_MODE_PATTERN = /(AFSK1200|FSK9600):\s*(.*)$/i
 
 /**
- * True when every address of an AFSK1200 line is an AX.25 callsign: `from`
- * and `to` as CALL[-SSID], and the digipeaters (`via`, comma separated, the
- * first space-separated token; multimon-ng prints the frame type after it)
- * as CALL[-SSID] with an optional `*`. Pure.
+ * Frame-type token of the hdlc display: I frames `I<nr><ns>`, S frames
+ * RR/RNR/REJ/SREJ `<nr>`, U frames SABM(E)/DISC/DM/UA/FRMR/UI/XID/TEST, each
+ * with an optional poll/final or command/response mark (`^`, `!`, `v`), which
+ * some builds print as a separate token.
  */
-export function afsk1200AddressesValid(
-	from: string,
-	to: string,
-	via: string | undefined,
-): boolean {
-	if (!isAx25CallsignText(from) || !isAx25CallsignText(to)) return false
-	if (via === undefined || via === "") return true
-	const path = via.split(/\s+/)[0] ?? ""
-	return path.split(",").every(isAx25PathEntryText)
+const AX25_FRAME =
+	"(?:I[0-7]{2}|(?:RR|RNR|REJ|SREJ)[0-7]|SABME?|DISC|DM|UA|FRMR|UI|XID|TEST)[!^v]?(?:\\s+[!^v])?"
+
+const AX25_HEADER = new RegExp(
+	`^fm\\s+(\\S+)\\s+to\\s+(\\S+)(?:\\s+via\\s+(\\S+))?(?:\\s+${AX25_FRAME}(?:\\s+pid=[0-9A-F]{2})?)?\\s*$`,
+	"i",
+)
+
+/** Addresses of an AX.25 header line that parsed completely and validly. */
+export interface Ax25HeaderAddresses {
+	from: string
+	to: string
+	via?: string
+}
+
+/**
+ * The addresses of a multimon-ng AX.25 header (the text after "<MODE>:"),
+ * or null unless the whole header matches the hdlc display grammar and
+ * every address is an AX.25 callsign (digipeaters may end in `*`). Pure.
+ */
+export function parseAx25Header(text: string): Ax25HeaderAddresses | null {
+	const m = AX25_HEADER.exec(text.trim())
+	if (!m) return null
+	const from = m[1] ?? ""
+	const to = m[2] ?? ""
+	const via = m[3]
+	if (!isAx25CallsignText(from) || !isAx25CallsignText(to)) return null
+	if (via !== undefined && !via.split(",").every(isAx25PathEntryText))
+		return null
+	return via !== undefined ? { from, to, via } : { from, to }
 }
 
 /**
@@ -446,16 +465,10 @@ export class MultimonDecoder extends AudioDemodDecoder {
 			return this.parseEasOutput(easMatch)
 		}
 
-		// Check for AFSK1200 packets
-		const afsk1200Match = AFSK1200_PATTERN.exec(line)
-		if (afsk1200Match) {
-			return this.parseAfsk1200Output(afsk1200Match)
-		}
-
-		// Check for FSK9600 packets
-		const fsk9600Match = FSK9600_PATTERN.exec(line)
-		if (fsk9600Match) {
-			return this.parseFsk9600Output(fsk9600Match)
+		// AFSK1200 / FSK9600 AX.25 packets
+		const ax25Match = AX25_MODE_PATTERN.exec(line)
+		if (ax25Match) {
+			return this.parseAx25Output(ax25Match)
 		}
 
 		// Line didn't match any known pattern - skip it
@@ -548,50 +561,34 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	/**
 	 * Parses AFSK1200 output into a decode event.
 	 */
-	/** AFSK1200 lines dropped because an address was not an AX.25 callsign. */
+	/** AX.25 lines (AFSK1200, FSK9600) dropped as malformed or not callsigns. */
 	getRejectedPackets(): number {
 		return this.rejectedPackets
 	}
 
-	private parseAfsk1200Output(match: RegExpExecArray): DecoderOutput | null {
-		const from = match[1] ?? ""
-		const to = match[2] ?? ""
-		const via = match[3]?.trim() ?? undefined
-		// multimon-ng checks the FCS, but noise passes a 16-bit FCS about once in
-		// 65 536 frames; an address that is not a callsign marks such a frame.
-		// It is counted, never logged (untrusted text), and emits nothing.
-		if (!afsk1200AddressesValid(from, to, via)) {
+	/**
+	 * Parses an AFSK1200 or FSK9600 header into a decode event. multimon-ng
+	 * checks the FCS, but noise passes a 16-bit FCS about once in 65 536
+	 * frames; a header that is not the hdlc grammar or names a non-callsign
+	 * marks such a frame. It is counted, never logged (untrusted text), and
+	 * emits nothing.
+	 */
+	private parseAx25Output(match: RegExpExecArray): DecoderOutput | null {
+		const mode = (match[1] ?? "").toUpperCase()
+		const text = match[2] ?? ""
+		const header = parseAx25Header(text)
+		if (!header) {
 			this.rejectedPackets++
 			return null
 		}
-
 		return {
 			timestamp: new Date(),
 			decoder: this.id,
 			type: "decode",
-			data: {
-				protocol: "AFSK1200",
-				from,
-				to,
-				via,
-			},
-		}
-	}
-
-	/**
-	 * Parses FSK9600 output into a decode event.
-	 */
-	private parseFsk9600Output(match: RegExpExecArray): DecoderOutput {
-		const rawData = match[1]?.trim() ?? ""
-
-		return {
-			timestamp: new Date(),
-			decoder: this.id,
-			type: "decode",
-			data: {
-				protocol: "FSK9600",
-				rawData,
-			},
+			data:
+				mode === "FSK9600"
+					? { protocol: "FSK9600", rawData: text.trim(), ...header }
+					: { protocol: "AFSK1200", ...header },
 		}
 	}
 }

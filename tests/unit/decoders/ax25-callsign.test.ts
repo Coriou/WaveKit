@@ -9,10 +9,7 @@ import {
 	parseAx25Address,
 	parseAx25Frame,
 } from "../../../src/decoders/builtin/direwolf.js"
-import {
-	MultimonDecoder,
-	afsk1200AddressesValid,
-} from "../../../src/decoders/builtin/multimon-ng.js"
+import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 
 const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".split("")
@@ -102,19 +99,32 @@ describe("AX.25 callsign text", () => {
 	})
 })
 
-describe("multimon-ng AFSK1200 addresses", () => {
-	it("passes good frames and counts nothing", () => {
+describe("multimon-ng AX.25 headers", () => {
+	it("passes the hdlc display variants in both modes and counts nothing", () => {
 		const d = multimon()
-		const out = d.parse(
-			"AFSK1200: fm DL1ABC-9 to APRS via WIDE1-1,WIDE2-1* UI  pid=F0",
-		)
-		expect(out).toMatchObject({
-			data: { protocol: "AFSK1200", from: "DL1ABC-9", to: "APRS" },
-		})
+		const good: [string, Record<string, unknown>][] = [
+			[
+				"AFSK1200: fm DL1ABC-9 to APRS via WIDE1-1,WIDE2-1* UI  pid=F0",
+				{ from: "DL1ABC-9", to: "APRS", via: "WIDE1-1,WIDE2-1*" },
+			],
+			["AFSK1200: fm N0CALL to APRS UI^ pid=F0", { to: "APRS" }],
+			["AFSK1200: fm N0CALL to APRS UI! pid=F0", { to: "APRS" }],
+			["AFSK1200: fm N0CALL to APRS UI v pid=F0", { to: "APRS" }],
+			["AFSK1200: fm N0CALL-0 to APRS-0 I05^ pid=F0", { from: "N0CALL-0" }],
+			["AFSK1200: fm N0CALL to K1ABC RR3v", { to: "K1ABC" }],
+			["AFSK1200: fm N0CALL to K1ABC SABM^", { to: "K1ABC" }],
+			["AFSK1200: fm N0CALL to APRS", { to: "APRS" }],
+			[
+				"FSK9600: fm N0CALL-1 to APRS via WIDE2-2 UI^ pid=F0",
+				{ protocol: "FSK9600", from: "N0CALL-1", via: "WIDE2-2" },
+			],
+		]
+		for (const [line, data] of good)
+			expect(d.parse(line)).toMatchObject({ type: "decode", data })
 		expect(d.getRejectedPackets()).toBe(0)
 	})
 
-	it("drops and counts bad addresses without emitting", () => {
+	it("drops and counts malformed headers and bad addresses in both modes", () => {
 		const d = multimon()
 		const bad = [
 			"AFSK1200: fm }{|~@[-5 to APRS",
@@ -122,32 +132,60 @@ describe("multimon-ng AFSK1200 addresses", () => {
 			"AFSK1200: fm TOOLONG1 to APRS",
 			"AFSK1200: fm N0CALL to ap&rs",
 			"AFSK1200: fm N0CALL to APRS via WIDE1-1,W!DE UI",
+			// truncated destination and a stray token in place of the frame type
+			"AFSK1200: fm N0CALL to AP RS via BAD! UI pid=F0",
+			// a second space-separated digipeater list
+			"AFSK1200: fm N0CALL to APRS via WIDE1-1 BAD! UI pid=F0",
+			"AFSK1200: fm N0CALL to APRS UI pid=F0 trailing",
+			"AFSK1200: fm N0CALL to APRS UI pid=XYZ",
+			"AFSK1200: garbage",
+			"FSK9600: fm N0@ALL to APRS via W!DE UI pid=F0",
+			"FSK9600: fm N0CALL to APRS via W!DE UI pid=F0",
+			"FSK9600: 1A2B3C",
 		]
 		for (const line of bad) expect(d.parse(line)).toBeNull()
 		expect(d.getRejectedPackets()).toBe(bad.length)
 	})
 
-	// Feature: ax25-callsign-validation, Property 2: a valid AFSK1200 address set always passes, one corrupted character always fails
+	// Feature: ax25-callsign-validation, Property 2: a well-formed AX.25 header passes in both modes; one corrupted address or one stray token fails
 	// Validates: AX.25 address rule for packet decoders
-	it("keeps valid lines and rejects a corrupted address", () => {
-		const bad = fc.constantFrom(..."!#$%&()+/:;<=>?@[]^_{|}~ abc".split(""))
+	it("keeps well-formed headers and rejects a corrupted address or stray token", () => {
+		const badChar = fc.constantFrom(..."!#$%&()+/:;<=>?@[]_{|}~abc".split(""))
+		const frame = fc.constantFrom(
+			"",
+			" UI^ pid=F0",
+			" UI! pid=F0",
+			" UI v pid=F0",
+			" I05^ pid=F0",
+			" RR3v",
+		)
 		fc.assert(
 			fc.property(
-				callArb,
-				ssidArb,
-				callArb,
-				bad,
+				fc.constantFrom("AFSK1200", "FSK9600"),
+				fc.array(fc.tuple(callArb, ssidArb), { minLength: 2, maxLength: 4 }),
+				frame,
+				badChar,
+				fc.nat(),
 				fc.nat(5),
-				(c1, s1, c2, ch, at) => {
-					const from = addressText(c1, s1)
-					const to = c2
-					expect(afsk1200AddressesValid(from, to, undefined)).toBe(true)
-					const i = Math.min(at, c1.length - 1)
-					const broken = c1.slice(0, i) + ch + c1.slice(i + 1)
-					expect(afsk1200AddressesValid(broken, to, undefined)).toBe(false)
+				fc.boolean(),
+				(mode, calls, tail, ch, which, at, stray) => {
+					const addrs = calls.map(([c, s]) => addressText(c, s))
+					const line = (a: string[]) =>
+						`${mode}: fm ${a[0]} to ${a[1]}${a.length > 2 ? ` via ${a.slice(2).join(",")}` : ""}${tail}`
+					const d = multimon()
+					expect(d.parse(line(addrs))).not.toBeNull()
+					const k = which % addrs.length
+					const [call] = calls[k]!
+					const i = Math.min(at, call.length - 1)
+					const broken = [...addrs]
+					broken[k] = stray
+						? `${addrs[k]} ${ch}`
+						: call.slice(0, i) + ch + call.slice(i + 1)
+					expect(d.parse(line(broken))).toBeNull()
+					expect(d.getRejectedPackets()).toBe(1)
 				},
 			),
-			{ numRuns: 100 },
+			{ numRuns: 200 },
 		)
 	})
 })
