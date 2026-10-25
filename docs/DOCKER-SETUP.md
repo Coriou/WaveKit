@@ -375,6 +375,93 @@ playback, revocation/recovery and the connected spectrum → tune → identify �
 inspect → listen milestone require external acceptance before protected mode is
 advertised as client-ready.
 
+### Protected mode in Docker without a forwarder
+
+`exposure: local-http` binds every listener to a loopback address inside the
+container, which Docker port publishing cannot reach. `exposure:
+container-loopback` lets one protected container bind the container's IPv4
+interfaces (`0.0.0.0`) while the operator publishes each port to the host's
+`127.0.0.1` only. It is never inferred; you select it explicitly. Run one
+container and publish the API and both audio ports on the same port numbers:
+
+```bash
+docker run ... \
+  -p 127.0.0.1:9000:9000 \
+  -p 127.0.0.1:8081:8081 \
+  -p 127.0.0.1:8082:8082 \
+  wavekit:local-core
+```
+
+```yaml
+api:
+  host: "0.0.0.0"
+  port: 9000
+liveDemod: { httpPort: 8081 }
+digitalVoice: { httpPort: 8082 }
+access:
+  mode: protected
+  listenerScheme: http
+  exposure: container-loopback
+  allowedAuthorities: ["127.0.0.1:9000"]
+  allowedOrigins: ["http://127.0.0.1:9000"]
+  audio:
+    analog:
+      allowedAuthorities: ["127.0.0.1:8081"]
+      bindHost: "0.0.0.0"
+    digital:
+      allowedAuthorities: ["127.0.0.1:8082"]
+      bindHost: "0.0.0.0"
+  publicOrigins:
+    api: "http://127.0.0.1:9000"
+    analogAudio: "http://127.0.0.1:8081"
+    digitalAudio: "http://127.0.0.1:8082"
+  healthProbe:
+    target: "http://127.0.0.1:9000"
+    host: "127.0.0.1:9000"
+```
+
+Validation rules: `listenerScheme` must be `http`; `api.host` and both audio
+`bindHost` values must be exactly `0.0.0.0` (`::`, interface addresses,
+hostnames and mixed values are rejected); every public and allowed origin is
+`http` on one hostname, `127.0.0.1` or `localhost` (`[::1]` is rejected); the
+three origins are distinct and their ports equal the in-container listener
+ports; the health probe target is exactly `http://127.0.0.1:<api.port>` and
+its Host uses the public API hostname. Anything else fails at startup with
+`ACCESS_CONFIG_INVALID` before a listener opens. Under `local-http` and
+`tls-termination`, `0.0.0.0` stays rejected. Raw audio TCP and the RTL-TCP
+relay stay disabled, as in every protected mode.
+
+A same-host proxy, such as the Vite preview of the web app, may front a
+different published host port as long as it forwards to the listener port and
+preserves the `Host` header the core expects.
+
+What the core checks: its own bind address and each request's Host, Origin,
+cookies and credentials. Browsers (including DNS-rebinding pages) send the
+page's own authority as Host, and only the configured loopback authorities are
+accepted. A client without credentials gets only the public exceptions
+(health, bootstrap metadata, validated CORS preflights and pairing-code
+redemption); every other route, WebSocket and audio stream needs a paired
+session cookie, the machine bearer credential or a short-lived audio token.
+
+What the core cannot verify: the host-side publish address, other members of
+the container network, or whether a connection came through port publishing
+or straight over the container network. Peer addresses are not a trust signal
+in this mode. Another container on the same network can forge Host and Origin,
+like any local process can under `local-http`, and is still limited to the
+public exceptions.
+
+What you must guarantee:
+
+- Publish every listener port to `127.0.0.1` only. Publishing to `0.0.0.0`
+  sends plaintext session cookies over the LAN; use `tls-termination` for LAN
+  access.
+- Keep untrusted containers off the core's network: a dedicated user-defined
+  network, or the default bridge with no other workloads.
+
+At startup the core logs a warning that its listeners accept connections on
+every container interface and that the ports must be published to
+`127.0.0.1` only.
+
 ### Protected reference profile
 
 Opt-in Compose profile `protected`. It is separate from the dev and prod

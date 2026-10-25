@@ -63,6 +63,11 @@ matching loopback address families and configured ports; `localhost` requires
 IPv4 backend bindings. LAN origins require `listenerScheme: https` and
 `exposure: tls-termination`, with independently configured loopback HTTP backends.
 The process does not implement TLS or infer proxy trust from forwarded headers.
+`exposure: container-loopback` (explicit, `listenerScheme: http` only) binds the
+API and both audio listeners on `0.0.0.0` inside a container whose ports are
+published to the host's `127.0.0.1`; every origin and authority stays loopback
+as under `local-http`. See
+[Protected mode in Docker without a forwarder](DOCKER-SETUP.md#protected-mode-in-docker-without-a-forwarder).
 See [protected deployment constraints](DOCKER-SETUP.md#protected-runtime-deployment)
 for required proxy, private-volume and probe checks.
 

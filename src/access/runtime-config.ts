@@ -8,7 +8,7 @@ const authorities = z.array(z.string().min(1).max(300)).min(1).max(64)
 const audioBoundary = z
 	.object({
 		allowedAuthorities: authorities,
-		bindHost: z.enum(["127.0.0.1", "::1"]),
+		bindHost: z.enum(["127.0.0.1", "::1", "0.0.0.0"]),
 	})
 	.strict()
 
@@ -20,7 +20,11 @@ export const AccessRuntimeConfigSchema = z
 			.object({
 				mode: z.literal("protected"),
 				listenerScheme: z.enum(["http", "https"]),
-				exposure: z.enum(["local-http", "tls-termination"]),
+				exposure: z.enum([
+					"local-http",
+					"tls-termination",
+					"container-loopback",
+				]),
 				allowedAuthorities: authorities,
 				allowedOrigins: z.array(z.string().min(1).max(320)).min(1).max(64),
 				audio: z
@@ -77,6 +81,13 @@ export function validateProtectedRuntimeMapping(
 	api: { host: string; port: number },
 	ports: { analog: number; digital: number },
 ): ProtectedAccessBootstrap {
+	if (access.exposure === "container-loopback")
+		return validateContainerLoopback(access, api, ports)
+	if (
+		access.audio.analog.bindHost === "0.0.0.0" ||
+		access.audio.digital.bindHost === "0.0.0.0"
+	)
+		return invalid()
 	const publicApi = canonicalOrigin(access.publicOrigins.api)
 	const analog = canonicalOrigin(access.publicOrigins.analogAudio)
 	const digital = canonicalOrigin(access.publicOrigins.digitalAudio)
@@ -158,4 +169,96 @@ export function validateProtectedRuntimeMapping(
 	)
 		return invalid()
 	return plan
+}
+
+/**
+ * Container loopback: listeners bind the container's IPv4 wildcard and the
+ * operator publishes them to host loopback only. Every advertised fact stays as
+ * strict as local HTTP; only the bind address and probe rules differ.
+ */
+function validateContainerLoopback(
+	access: ProtectedRuntimeAccessConfig,
+	api: { host: string; port: number },
+	ports: { analog: number; digital: number },
+): ProtectedAccessBootstrap {
+	const publicApi = canonicalOrigin(access.publicOrigins.api)
+	const analog = canonicalOrigin(access.publicOrigins.analogAudio)
+	const digital = canonicalOrigin(access.publicOrigins.digitalAudio)
+	const origins = [
+		publicApi,
+		analog,
+		digital,
+		...access.allowedOrigins.map(canonicalOrigin),
+	]
+	if (
+		access.listenerScheme !== "http" ||
+		api.host !== "0.0.0.0" ||
+		access.audio.analog.bindHost !== "0.0.0.0" ||
+		access.audio.digital.bindHost !== "0.0.0.0" ||
+		(publicApi.hostname !== "127.0.0.1" &&
+			publicApi.hostname !== "localhost") ||
+		origins.some(
+			origin =>
+				origin.protocol !== "http:" || origin.hostname !== publicApi.hostname,
+		) ||
+		analog.origin === digital.origin ||
+		publicApi.origin === analog.origin ||
+		publicApi.origin === digital.origin ||
+		new Set([api.port, ports.analog, ports.digital]).size !== 3
+	)
+		return invalid()
+	const probe = canonicalOrigin(access.healthProbe.target)
+	if (
+		probe.protocol !== "http:" ||
+		probe.hostname !== "127.0.0.1" ||
+		Number(probe.port || 80) !== api.port
+	)
+		return invalid()
+	const probeAuthority = normalizeAuthority(access.healthProbe.host, "http")
+	if (
+		!probeAuthority ||
+		new URL(`http://${probeAuthority}`).hostname !== publicApi.hostname
+	)
+		return invalid()
+	const plan = resolveAccessBootstrap({
+		mode: "protected",
+		listenerScheme: "http",
+		allowedAuthorities: access.allowedAuthorities,
+		allowedOrigins: access.allowedOrigins,
+		externalAudioOrigins: [analog.origin, digital.origin],
+	})
+	if (plan.mode !== "protected") return invalid()
+	const apiAuthorities = new Set([authority(publicApi, "http"), probeAuthority])
+	if (
+		plan.allowedAuthorities.length !== apiAuthorities.size ||
+		plan.allowedAuthorities.some(value => !apiAuthorities.has(value))
+	)
+		return invalid()
+	for (const [origin, boundary] of [
+		[analog, access.audio.analog],
+		[digital, access.audio.digital],
+	] as const) {
+		const expected = authority(origin, "http")
+		if (
+			boundary.allowedAuthorities.length !== 1 ||
+			normalizeAuthority(boundary.allowedAuthorities[0]!, "http") !== expected
+		)
+			return invalid()
+	}
+	if (
+		Number(publicApi.port || 80) !== api.port ||
+		Number(analog.port || 80) !== ports.analog ||
+		Number(digital.port || 80) !== ports.digital
+	)
+		return invalid()
+	return plan
+}
+
+/** Fixed startup warning for container-loopback exposure; carries no configured value. */
+export function containerExposureWarning(
+	access: RuntimeAccessConfig,
+): string | null {
+	if (access.mode !== "protected" || access.exposure !== "container-loopback")
+		return null
+	return "Access exposure container-loopback: listeners accept connections on every container interface; publish the API and audio ports to 127.0.0.1 only"
 }
