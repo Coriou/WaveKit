@@ -89,6 +89,10 @@ function suspensionText(d: DecoderInfo): string {
 			return "needs the channelizer"
 		case "tuner-scanning":
 			return "the scanner has the receiver"
+		case "capture-too-narrow":
+			return "the capture is too narrow here"
+		case "no-channel-selected":
+			return "no channel selected yet"
 		default:
 			return "outside the capture"
 	}

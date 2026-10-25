@@ -58,7 +58,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   not care about, save presets.
 - **Recordings:** recordings kept by the core, to play, search and keep.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
-  plans, spectrum and waterfall, map, units and time, theme, density and motion.
+  plans, spectrum and waterfall, map, units and time, theme, density and motion. A paused decoder
+  says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.
 
 ## Map and Messages
 

@@ -231,6 +231,9 @@ function countdown(f: DecoderFacts): string | null {
 function suspendedWords(code: string | undefined, sep: string): string {
 	if (code === "tuner-scanning") return "suspended: tuner scanning"
 	if (code === "frequency-out-of-band") return `suspended${sep}out of band`
+	if (code === "capture-too-narrow") return `suspended${sep}capture too narrow`
+	if (code === "no-channel-selected")
+		return `suspended${sep}no channel selected`
 	if (code !== undefined && isRateReason(code)) return `suspended${sep}rate`
 	return "suspended"
 }

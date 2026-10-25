@@ -142,6 +142,18 @@ describe("decoder enablement in Settings", () => {
 			suspension: { reasonCode: "efficiency-budget" },
 		} as unknown as DecoderInfo
 		expect(decoderStatusText(d)).toBe("Paused · over the efficiency budget")
+		const paused = (reasonCode: string) =>
+			decoderStatusText({
+				...base,
+				suspended: true,
+				suspension: { reasonCode },
+			} as unknown as DecoderInfo)
+		expect(paused("capture-too-narrow")).toBe(
+			"Paused · the capture is too narrow here",
+		)
+		expect(paused("no-channel-selected")).toBe(
+			"Paused · no channel selected yet",
+		)
 		expect(efficiencyText(base)).toBeNull()
 		expect(efficiencyText({ ...base, efficiency: { detail: "drops" } })).toBe(
 			"Waiting: it dropped samples",

@@ -14,6 +14,7 @@ import {
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
+	processWords,
 	type DecoderFacts,
 } from "../../../cli/source/view-models/decoder-rows.js"
 
@@ -559,6 +560,24 @@ describe("decoder rows (live fixture)", () => {
 				lineText(decoderTable(facts, "decoders", 119, 20, null, s.now).header),
 			).toBe(
 				"  DECODERS          process     restarts  errors  decodes          events      iq in  drop now  lifetime  window",
+			)
+		})
+		it("names the capture-too-narrow and no-channel-selected suspensions", () => {
+			const suspended = (reasonCode: string): DecoderFacts => ({
+				...by("rtl433"),
+				proc: "suspended",
+				row: {
+					...by("rtl433").row,
+					running: false,
+					suspended: true,
+					suspension: { reasonCode, since: new Date(s.now).toISOString() },
+				},
+			})
+			expect(processWords(suspended("capture-too-narrow"))).toBe(
+				"suspended · capture too narrow",
+			)
+			expect(processWords(suspended("no-channel-selected"))).toBe(
+				"suspended · no channel selected",
 			)
 		})
 		it("S10: the ultra Overview's left column adds restarts and errors and keeps the band", () => {
