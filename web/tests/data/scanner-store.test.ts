@@ -1064,7 +1064,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		const frames: (() => void)[] = []
 		const store = new ScannerStore(api, events, {
 			frame: { request: cb => frames.push(cb), cancel: () => undefined },
-			recoveryDelayMs: () => 0,
+			resyncDelayMs: () => 0,
 			...(writeOrderLimits ? { writeOrderLimits } : {}),
 		})
 		const send = (type: string, data: unknown) =>
@@ -1773,6 +1773,101 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			await done
 			expect(recorded).toBe(true)
 			expect(labelOf(store, "x")).toBe("unchanged")
+			store.dispose()
+		})
+
+		const elsewhere = { freqMinHz: 450e6, freqMaxHz: 451e6 }
+		/**
+		 * Two held spans answered empty at revision 10, with room for one covered page: the first
+		 * page's coverage left, so the floor is 10 and a stale event in `span` meets only the floor.
+		 */
+		async function floored() {
+			const h = deferred({ coverages: 1 })
+			for (const [n, q] of [span, elsewhere].entries()) {
+				const p = h.store.fetchDiscoveries(q)
+				await flush()
+				h.pending[n]!(pageAt(10))
+				await p
+			}
+			const refuse = (n: number, from = 0) => {
+				for (let i = from; i < from + n; i++)
+					h.send(
+						"scanner:discovery",
+						event("updated", at(`x${i}`, 5, "old"), 5),
+					)
+				h.tick()
+			}
+			const settle = async () => {
+				for (let i = 0; i < 3; i++) await flush()
+			}
+			/** Answers every call from `from` on with an empty page at 12. */
+			const answerAll = (from: number) => {
+				for (let i = from; i < h.calls.length; i++) h.pending[i]!(pageAt(12))
+			}
+			return { ...h, refuse, settle, answerAll }
+		}
+
+		it("65 and more refused events produce one resync", async () => {
+			const { store, refuse, settle, calls } = await floored()
+			const before = calls.length
+			refuse(70)
+			expect(has(store, "x0")).toBe(false)
+			await settle()
+			// one resync: the two held spans read once each
+			expect(calls.length - before).toBe(2)
+			await settle()
+			expect(calls.length - before).toBe(2)
+			store.dispose()
+		})
+
+		it("refusals while a resync waits or runs never start a second one, and run exactly one more", async () => {
+			const { store, refuse, settle, calls, answerAll } = await floored()
+			const base = calls.length
+			refuse(1)
+			await settle()
+			expect(calls.length - base).toBe(2)
+			// refused again while the resync's reads are in flight: nothing new starts
+			refuse(3, 1)
+			await settle()
+			expect(calls.length - base).toBe(2)
+			answerAll(base)
+			await settle()
+			// exactly one follow-up for the refusals seen during the run
+			expect(calls.length - base).toBe(4)
+			answerAll(base + 2)
+			await settle()
+			// nothing refused since: no more
+			expect(calls.length - base).toBe(4)
+			store.dispose()
+		})
+
+		it("a refused id outside the list's query but inside a held span is recovered", async () => {
+			const { store, refuse, settle, pending, calls } = await floored()
+			const list = store.refreshDiscoveries({
+				freqMinHz: 1e9,
+				freqMaxHz: 1.1e9,
+			})
+			await flush()
+			pending[calls.length - 1]!(pageAt(11))
+			await list
+			const base = calls.length
+			refuse(1)
+			expect(has(store, "x0")).toBe(false)
+			await settle()
+			// the resync reads both held spans and the list from its first page
+			const asked = calls.slice(base)
+			expect(asked).toHaveLength(3)
+			expect(
+				asked.filter(u => u.includes("freqMinHz=1000000000")),
+			).toHaveLength(1)
+			for (const [k, u] of asked.entries())
+				pending[base + k]!(
+					u.includes("freqMinHz=446000000")
+						? pageAt(12, at("x0", 5, "recovered"))
+						: pageAt(12),
+				)
+			await settle()
+			expect(labelOf(store, "x0")).toBe("recovered")
 			store.dispose()
 		})
 

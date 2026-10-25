@@ -218,18 +218,22 @@ replans). So the core orders them:
   change without a new revision, and the later-started read is the fresher view); an event,
   which never carries `coverage`, keeps the held one. A deletion is final (ids are never
   reused); a DELETE takes its revision from the `x-wavekit-store-*` headers (ApiClient exposes
-  the headers of that one call), and without them (a 404, an older core) is remembered at
-  +Infinity, which never raises the floor. A complete page (the first page, asked without a
+  the headers of that one call; CORS exposes them wherever it exposes `Retry-After`), and
+  without them (a 404, an older core) is remembered at +Infinity: evicting such a tombstone
+  raises the floor to the highest read seen, which a fresh read always reaches. A complete page (the first page, asked without a
   cursor, with `nextCursor` null) read at R covers its query: a matching record it did not
   list, from an answer read before R, is stale, which also handles records the cache never
   saw. A page that drops a cached record removes it without making that final (the record may
   have moved). Bounds: 2 048 remembered removals and 32 covered pages; evicting one raises a
-  floor to its read revision. A write the floor refuses (and only the floor: a per-id refusal
-  is final) is read again: a span or single read retries itself, an event or a later page
-  schedules one re-read per id (at most 64 waiting, past that the list), at most 3 times,
-  250 ms × 2^attempt apart (250, 500, 1 000 ms: 1.75 s in all). A span fetch resolves only once
-  a read landed, so the band view records it as fetched only then. A fresh read is never below
-  the floor. A new epoch clears the cache and resyncs; late answers from a retired epoch are
+  floor to its read revision. A span or single read the floor refuses is read once more at
+  once (a fresh read is never below the floor); a span fetch resolves only once a read landed,
+  so the band view records it as fetched only then. Any other floor refusal (an event, a PATCH
+  answer, a list page) marks the store dirty: one coalesced resync reads again the spans the
+  band view holds (the last 4 asked) and the list from its first page. At most one resync waits
+  or runs; a refusal during one runs exactly one more. The first waits 250 ms, each further one
+  in a row that still saw refusals doubles it up to 4 s (250, 500, 1 000, 2 000, 4 000 ms: at
+  most 5 resyncs and 7.75 s of waiting per burst), then it gives up until the next refusal or a
+  new span. A per-id refusal is final and reads nothing. A new epoch clears the cache and resyncs; late answers from a retired epoch are
   dropped, and a DELETE asked before an epoch change applies nothing. The tuned card's
   nearest-discovery store orders its one record the same way. Without `storeEpoch` (an older
   core) the same rules run on the client sequence alone.

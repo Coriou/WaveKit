@@ -255,7 +255,10 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 			: { rev: d.revision ?? 0, read, seq }
 	}
 
-	/** False for an answer or event from an epoch left behind; a new epoch forgets the held order. */
+	/**
+	 * False for an answer or event from an epoch left behind. A new epoch (the core restarted)
+	 * clears the shown record and its proof and asks again.
+	 */
 	private admit(epoch: string | undefined): boolean {
 		const e = epoch ?? null
 		if (this.epoch === undefined) {
@@ -268,6 +271,9 @@ export class NearDiscoveryStore extends Store<NearDiscoveryState> {
 		if (this.retired.length > 8) this.retired.shift()
 		this.epoch = e
 		this.held = null
+		this.cancelProof()
+		this.update(x => ({ ...x, discovery: null, lastProof: null }))
+		void this.load()
 		return true
 	}
 

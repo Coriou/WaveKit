@@ -86,13 +86,17 @@ interface Stamp {
 }
 
 /**
- * Band inspection UX req 3.3: recovery after a write the floor refused (write-order.ts). At most
- * RECOVERY_RETRIES re-reads, RECOVERY_BASE_MS × 2^attempt apart (250, 500 and 1 000 ms: 1.75 s in
- * all); at most RECOVERY_IDS_MAX ids wait for a re-read at once, past that the list is read again.
+ * Band inspection UX req 3.3: recovery after writes the floor refused (write-order.ts). A refusal
+ * marks the store dirty; one coalesced resync then reads again the spans the band view holds (the
+ * last RESYNC_SPANS_MAX asked) and the list from its first page. At most one resync is waiting or
+ * running; a refusal during one runs exactly one more after it. The first waits RESYNC_DEBOUNCE_MS;
+ * each further one in a row that still saw refusals doubles it up to RESYNC_MAX_MS (250, 500,
+ * 1 000, 2 000, 4 000 ms: at most 5 resyncs and 7.75 s of waiting per burst), then it gives up
+ * until the next refusal or a new span is asked for.
  */
-export const RECOVERY_RETRIES = 3
-export const RECOVERY_BASE_MS = 250
-export const RECOVERY_IDS_MAX = 64
+export const RESYNC_DEBOUNCE_MS = 250
+export const RESYNC_MAX_MS = 4000
+export const RESYNC_SPANS_MAX = 4
 
 /** POST /api/scanner/discoveries/:id/listen (core src/core/scanner/listen.ts ListenResult). */
 export interface ScannerListenResult {
@@ -181,8 +185,8 @@ export interface ScannerStoreOptions {
 	activityStaleMs?: number
 	/** Bounds of the discovery write order (tests); default 2 048 removals and 32 pages. */
 	writeOrderLimits?: WriteOrderLimits
-	/** Delay before recovery re-read number `attempt` (tests); default RECOVERY_BASE_MS × 2^attempt. */
-	recoveryDelayMs?: (attempt: number) => number
+	/** Delay before resync number `attempt` in a row (tests); default 250 ms × 2^attempt, at most 4 s. */
+	resyncDelayMs?: (attempt: number) => number
 }
 
 // ---- pure helpers
@@ -466,12 +470,17 @@ export class ScannerStore extends Store<ScannerState> {
 	 */
 	private order: WriteOrder<Discovery>
 	private readonly orderLimits: WriteOrderLimits
-	private readonly recoveryDelayMs: (attempt: number) => number
-	/** Ids applyWrites() saw refused by the floor since the last takeFloored(). */
-	private flooredIds: string[] = []
-	/** Ids waiting for a recovery re-read (one each). */
-	private readonly rereads = new Map<string, ReturnType<typeof setTimeout>>()
-	private readonly recoveryTimers = new Set<ReturnType<typeof setTimeout>>()
+	private readonly resyncDelayMs: (attempt: number) => number
+	/** applyWrites() saw a write refused by the floor since the last takeFloored(). */
+	private floored = false
+	/** A refused write waits for the resync (see RESYNC_DEBOUNCE_MS). */
+	private dirty = false
+	private resyncState: "idle" | "waiting" | "running" = "idle"
+	private resyncTimer: ReturnType<typeof setTimeout> | null = null
+	/** Resyncs in a row that still saw refusals. */
+	private resyncAttempt = 0
+	/** The spans asked by fetchDiscoveries(), most recent last (at most RESYNC_SPANS_MAX). */
+	private readonly heldSpans = new Map<string, DiscoveryQuery>()
 	/** The core's store epoch: undefined until the first answer, null for an older core. */
 	private storeEpoch: string | null | undefined = undefined
 	/** Epochs left behind (a restart): their late answers and events are dropped. */
@@ -499,8 +508,9 @@ export class ScannerStore extends Store<ScannerState> {
 		this.now = options.now ?? (() => Date.now())
 		this.staleMs = options.activityStaleMs ?? 10_000
 		this.orderLimits = options.writeOrderLimits ?? {}
-		this.recoveryDelayMs =
-			options.recoveryDelayMs ?? (attempt => RECOVERY_BASE_MS * 2 ** attempt)
+		this.resyncDelayMs =
+			options.resyncDelayMs ??
+			(attempt => Math.min(RESYNC_MAX_MS, RESYNC_DEBOUNCE_MS * 2 ** attempt))
 		this.order = new WriteOrder<Discovery>(this.orderLimits)
 		this.cleanup = [
 			events.subscribe(["scanner"]),
@@ -510,7 +520,7 @@ export class ScannerStore extends Store<ScannerState> {
 				const stamp = this.stampOf(d.storeEpoch, this.nextSeq(), d.revision)
 				if (stamp === null) return
 				this.live(s => this.withDiscoveryEvent(s, d, stamp))
-				this.recoverIds(this.takeFloored())
+				if (this.takeFloored()) this.markDirty()
 				// band inspection UX req 3.2: mergedIds was cut at 64, so some absorbed ids are unknown here
 				if (d.mergedTruncated === true)
 					this.resyncDiscoveries(d.change === "deleted" ? null : d.discovery.id)
@@ -610,13 +620,12 @@ export class ScannerStore extends Store<ScannerState> {
 	 * call aborts an older one. Never rejects; a failure lands in `discoveries.error`.
 	 */
 	refreshDiscoveries(query?: DiscoveryQuery, keepCount = 0): Promise<void> {
-		return this.refreshList(query, keepCount, 0)
+		return this.refreshList(query, keepCount)
 	}
 
 	private refreshList(
 		query: DiscoveryQuery | undefined,
 		keepCount: number,
-		attempt: number,
 	): Promise<void> {
 		const q = query ?? this.current().discoveries.query
 		const generation = ++this.discoveryGeneration
@@ -673,8 +682,7 @@ export class ScannerStore extends Store<ScannerState> {
 							},
 						}
 					})
-					if (this.takeFloored().length > 0)
-						this.recoverList(q, keepCount, attempt, generation)
+					if (this.takeFloored()) this.markDirty()
 				},
 				(error: unknown) => {
 					if (generation !== this.discoveryGeneration) return
@@ -689,7 +697,7 @@ export class ScannerStore extends Store<ScannerState> {
 							...s,
 							discoveries: { ...s.discoveries, evidenceSupported: false },
 						}))
-						void this.refreshList(older, keepCount, attempt)
+						void this.refreshList(older, keepCount)
 						return
 					}
 					this.commit(s => ({
@@ -753,14 +761,8 @@ export class ScannerStore extends Store<ScannerState> {
 					},
 				}
 			})
-			// a refused record of a later page: the list is read again (it comes back in its place)
-			if (this.takeFloored().length > 0)
-				this.recoverList(
-					d.query,
-					this.current().discoveries.items.length,
-					0,
-					generation,
-				)
+			// a refused record of a later page: the resync reads the list again
+			if (this.takeFloored()) this.markDirty()
 		} catch (error) {
 			if (generation !== this.discoveryGeneration) return
 			this.commit(s => ({
@@ -796,10 +798,10 @@ export class ScannerStore extends Store<ScannerState> {
 				absorbed === null ? s : this.withoutDiscovery(s, absorbed, stamp)
 			return this.withDiscovery(base, d, "updated", undefined, stamp)
 		})
-		// refused by the floor: read it again, later (a fresh read is never below the floor)
-		if (this.takeFloored().length > 0 && attempt < RECOVERY_RETRIES) {
-			await this.recoveryWait(attempt)
-			if (!this.disposed) return this.readDiscovery(id, attempt + 1)
+		// refused by the floor: one fresh read at once lands at or above it
+		if (this.takeFloored()) {
+			if (attempt === 0 && !this.disposed) return this.readDiscovery(id, 1)
+			this.markDirty()
 		}
 		return d
 	}
@@ -828,21 +830,27 @@ export class ScannerStore extends Store<ScannerState> {
 		query: DiscoveryQuery,
 		options: { signal?: AbortSignal } = {},
 	): Promise<readonly Discovery[]> {
-		for (let attempt = 0; ; attempt++) {
+		const key = JSON.stringify(query)
+		if (!this.heldSpans.has(key)) this.resyncAttempt = 0
+		this.heldSpans.delete(key)
+		this.heldSpans.set(key, query)
+		if (this.heldSpans.size > RESYNC_SPANS_MAX)
+			this.heldSpans.delete(this.heldSpans.keys().next().value!)
+		// refused by the floor: one fresh read at once lands at or above it
+		for (let attempt = 0; attempt < 2; attempt++) {
 			const { items, floored } = await this.fetchSpan(query, options)
 			// resolves only once a read landed whole: the caller records the span as fetched then
 			if (!floored) return items
-			if (attempt >= RECOVERY_RETRIES)
-				throw new ApiError({
-					status: 0,
-					code: "DISCOVERIES_STALE",
-					message: "The discovery answer was too old to apply; ask again",
-					body: null,
-					method: "GET",
-					path: "/api/scanner/discoveries",
-				})
-			await this.recoveryWait(attempt, options.signal)
 		}
+		this.markDirty()
+		throw new ApiError({
+			status: 0,
+			code: "DISCOVERIES_STALE",
+			message: "The discovery answer was too old to apply; ask again",
+			body: null,
+			method: "GET",
+			path: "/api/scanner/discoveries",
+		})
 	}
 
 	private async fetchSpan(
@@ -865,7 +873,7 @@ export class ScannerStore extends Store<ScannerState> {
 			})
 			return { ...s, discoveries: { ...s.discoveries, byId } }
 		})
-		return { items: page.items, floored: this.takeFloored().length > 0 }
+		return { items: page.items, floored: this.takeFloored() }
 	}
 
 	// ---- actions (reject with the core's ApiError)
@@ -990,7 +998,7 @@ export class ScannerStore extends Store<ScannerState> {
 		const stamp = this.stampOf(d.storeEpoch, this.nextSeq(), d.storeRevision)
 		if (stamp !== null)
 			this.commit(s => this.withDiscovery(s, d, "updated", undefined, stamp))
-		this.recoverIds(this.takeFloored())
+		if (this.takeFloored()) this.markDirty()
 		return d
 	}
 
@@ -1046,10 +1054,8 @@ export class ScannerStore extends Store<ScannerState> {
 		this.frameScheduled = false
 		if (this.staleTimer) clearTimeout(this.staleTimer)
 		this.staleTimer = null
-		for (const t of this.recoveryTimers) clearTimeout(t)
-		this.recoveryTimers.clear()
-		for (const t of this.rereads.values()) clearTimeout(t)
-		this.rereads.clear()
+		if (this.resyncTimer) clearTimeout(this.resyncTimer)
+		this.resyncTimer = null
 	}
 
 	// ---- internals: publishing
@@ -1120,63 +1126,53 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.derive({ ...s, jobs })
 	}
 
-	/** The ids refused by the floor since the last call (and forgets them). */
-	private takeFloored(): string[] {
-		const ids = this.flooredIds
-		this.flooredIds = []
-		return ids
+	/** Whether a write was refused by the floor since the last call (and forgets it). */
+	private takeFloored(): boolean {
+		const floored = this.floored
+		this.floored = false
+		return floored
 	}
 
-	/** Waits before recovery re-read `attempt`; rejects with an AbortError when `signal` aborts. */
-	private recoveryWait(attempt: number, signal?: AbortSignal): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
-				this.recoveryTimers.delete(timer)
-				signal?.removeEventListener("abort", onAbort)
-				resolve()
-			}, this.recoveryDelayMs(attempt))
-			this.recoveryTimers.add(timer)
-			const onAbort = () => {
-				clearTimeout(timer)
-				this.recoveryTimers.delete(timer)
-				reject(new DOMException("The operation was aborted.", "AbortError"))
-			}
-			if (signal?.aborted) onAbort()
-			else signal?.addEventListener("abort", onAbort, { once: true })
-		})
+	/** A write the floor refused: one resync (see RESYNC_DEBOUNCE_MS) reads the held views again. */
+	private markDirty(): void {
+		this.dirty = true
+		if (this.resyncState === "idle" && !this.disposed) this.scheduleResync()
 	}
 
-	/** Events or answers the floor refused: one re-read per id (past RECOVERY_IDS_MAX, the list). */
-	private recoverIds(ids: readonly string[]): void {
-		for (const id of ids) {
-			if (this.disposed || this.rereads.has(id)) continue
-			if (this.rereads.size >= RECOVERY_IDS_MAX) {
-				const d = this.current().discoveries
-				this.recoverList(d.query, d.items.length, 0, this.discoveryGeneration)
-				continue
-			}
-			const timer = setTimeout(() => {
-				this.rereads.delete(id)
-				this.fetchDiscovery(id).catch(() => undefined)
-			}, this.recoveryDelayMs(0))
-			this.rereads.set(id, timer)
+	private scheduleResync(): void {
+		this.resyncState = "waiting"
+		this.resyncTimer = setTimeout(() => {
+			this.resyncTimer = null
+			void this.runResync()
+		}, this.resyncDelayMs(this.resyncAttempt))
+	}
+
+	private async runResync(): Promise<void> {
+		if (this.disposed) return
+		this.resyncState = "running"
+		this.dirty = false
+		const d = this.current().discoveries
+		const reads: Promise<unknown>[] = [...this.heldSpans.values()].map(q =>
+			this.fetchSpan(q, {}).then(r => {
+				if (r.floored) this.dirty = true
+			}),
+		)
+		if (d.loaded) reads.push(this.refreshList(d.query, d.items.length))
+		await Promise.allSettled(reads)
+		this.resyncState = "idle"
+		if (this.disposed) return
+		if (!this.dirty) {
+			this.resyncAttempt = 0
+			return
 		}
-	}
-
-	/** A list page the floor refused: read the list again, unless a newer refresh started. */
-	private recoverList(
-		query: DiscoveryQuery,
-		keepCount: number,
-		attempt: number,
-		generation: number,
-	): void {
-		if (this.disposed || attempt >= RECOVERY_RETRIES) return
-		const timer = setTimeout(() => {
-			this.recoveryTimers.delete(timer)
-			if (generation === this.discoveryGeneration && !this.disposed)
-				void this.refreshList(query, keepCount, attempt + 1)
-		}, this.recoveryDelayMs(attempt))
-		this.recoveryTimers.add(timer)
+		// refused again: one more, later; past RESYNC_MAX_MS give up until the next refusal
+		if (this.resyncDelayMs(this.resyncAttempt) >= RESYNC_MAX_MS) {
+			this.dirty = false
+			this.resyncAttempt = 0
+			return
+		}
+		this.resyncAttempt += 1
+		this.scheduleResync()
 	}
 
 	/** The client sequence of a request starting now (an older core's read order). */
@@ -1264,7 +1260,7 @@ export class ScannerStore extends Store<ScannerState> {
 			if (outcome === "applied") {
 				byId.set(d.id, withReadFields(d, byId.get(d.id)))
 				applied.add(d.id)
-			} else if (outcome === "floor") this.flooredIds.push(d.id)
+			} else if (outcome === "floor") this.floored = true
 		}
 		const q = writes.covers
 		if (q !== undefined)

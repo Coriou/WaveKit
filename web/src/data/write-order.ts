@@ -31,7 +31,8 @@
  * is evicted (the oldest remembered first), `floor` rises to its read, and any upsert read before
  * the floor is refused with "floor": one served that early can no longer be told from a stale
  * one, so the caller reads again (a fresh read is never below the floor). A deletion seen without
- * a store revision (an older core) is remembered at read +Infinity and never raises the floor.
+ * a store revision (an older core) is remembered at read +Infinity; when it is evicted the floor
+ * rises to the highest read seen so far, which a fresh read always reaches.
  * With the defaults (2 048 removed ids of one id string and four fields each, about 130 B per Map
  * entry, so about 270 KB; 32 coverages, each holding up to 500 listed ids), an upsert checks at
  * most 32 coverage predicates, so a 500-record page costs at most 16 000 checks.
@@ -76,6 +77,8 @@ export function keysBefore(k: WriteKeys, held: WriteKeys): boolean {
 export class WriteOrder<T> {
 	/** Raised to the read of each evicted tombstone or coverage; applies to every id. */
 	private floor = 0
+	/** The highest finite read any write carried. */
+	private highWater = 0
 	private readonly present = new Map<string, WriteKeys>()
 	/** Removed ids, oldest remembered first. */
 	private readonly removed = new Map<string, Removed>()
@@ -96,6 +99,7 @@ export class WriteOrder<T> {
 
 	/** Applies an upsert of `id` at `keys`, or says why it was refused. */
 	upsert(id: string, record: T, keys: WriteKeys): UpsertOutcome {
+		this.saw(keys.read)
 		const gone = this.removed.get(id)
 		if (gone !== undefined && (gone.hard || keysBefore(keys, gone)))
 			return "order"
@@ -115,6 +119,7 @@ export class WriteOrder<T> {
 	 * revision is newer than the page's read, or it is not cached.
 	 */
 	removeSoft(id: string, keys: WriteKeys): boolean {
+		this.saw(keys.read)
 		const have = this.present.get(id)
 		if (have === undefined || have.rev > keys.read) return false
 		this.present.delete(id)
@@ -129,6 +134,7 @@ export class WriteOrder<T> {
 
 	/** `id` was deleted, seen at store revision `read` (Infinity when unknown): final. */
 	removeHard(id: string, read: number): void {
+		this.saw(read)
 		this.present.delete(id)
 		this.remember(id, { rev: Infinity, read, seq: Infinity, hard: true })
 	}
@@ -139,6 +145,7 @@ export class WriteOrder<T> {
 		read: number,
 		ids: ReadonlySet<string>,
 	) {
+		this.saw(read)
 		this.covered.push({ read, covers, ids })
 		if (this.covered.length > this.coveragesMax) {
 			const oldest = this.covered.shift()
@@ -158,11 +165,17 @@ export class WriteOrder<T> {
 		const oldest = this.removed.entries().next().value
 		if (oldest === undefined) return
 		this.removed.delete(oldest[0])
-		this.raiseFloor(oldest[1].read)
+		// a deletion without the core's revision: anything read so far may predate it
+		this.raiseFloor(
+			Number.isFinite(oldest[1].read) ? oldest[1].read : this.highWater,
+		)
 	}
 
-	/** A removal or page seen without a store revision (Infinity) never raises the floor. */
 	private raiseFloor(read: number): void {
-		if (Number.isFinite(read)) this.floor = Math.max(this.floor, read)
+		this.floor = Math.max(this.floor, read)
+	}
+
+	private saw(read: number): void {
+		if (Number.isFinite(read)) this.highWater = Math.max(this.highWater, read)
 	}
 }

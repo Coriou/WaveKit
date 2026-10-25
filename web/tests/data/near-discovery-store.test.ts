@@ -171,7 +171,10 @@ describe("NearDiscoveryStore ordering (band inspection UX req 3.3)", () => {
 			fetch: url =>
 				url.includes("/observations")
 					? Promise.resolve(json(200, { items: [], nextCursor: null }))
-					: new Promise<Response>(resolve => waiting.push(resolve)),
+					: new Promise<Response>(resolve => {
+							count += 1
+							waiting.push(resolve)
+						}),
 		})
 		const sockets = fakeSockets()
 		const events = new EventsClient({ createSocket: sockets.factory })
@@ -182,12 +185,13 @@ describe("NearDiscoveryStore ordering (band inspection UX req 3.3)", () => {
 			sockets
 				.last()
 				.receive({ type: "scanner:discovery", channel: "scanner", data })
+		let count = 0
 		const release = async (body: unknown) => {
 			waiting.shift()!(json(200, body))
 			await flush()
 			await flush()
 		}
-		return { store, send, release }
+		return { store, send, release, asked: () => count }
 	}
 	const page = (d: Discovery, storeRevision: number, storeEpoch = "e1") => ({
 		items: [d],
@@ -230,6 +234,23 @@ describe("NearDiscoveryStore ordering (band inspection UX req 3.3)", () => {
 		// a late event of the old epoch: dropped
 		send(ev(discovery("d1", { revision: 9 }), 9, "e1"))
 		expect(store.get().discovery?.revision).toBe(1)
+		store.dispose()
+	})
+
+	it("a new epoch clears the shown record and its proof and asks again, even on an unrelated event", async () => {
+		const { store, send, release, asked } = held()
+		store.follow(446_006_000, 6250)
+		await release(page(discovery("d1", { revision: 3 }), 3, "e1"))
+		expect(store.get().discovery?.id).toBe("d1")
+		const before = asked()
+		// a far-away event of the restarted core
+		send(ev(discovery("far", { frequencyHz: 450e6, revision: 1 }), 1, "e2"))
+		expect(store.get().discovery).toBeNull()
+		expect(store.get().lastProof).toBeNull()
+		await flush()
+		expect(asked()).toBe(before + 1)
+		await release(page(discovery("d1", { revision: 2 }), 2, "e2"))
+		expect(store.get().discovery?.revision).toBe(2)
 		store.dispose()
 	})
 })

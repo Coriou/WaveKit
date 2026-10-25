@@ -71,11 +71,16 @@ describe("WriteOrder", () => {
 		expect(o.upsert("unseen", { hz: 1 }, k(1, 10))).toBe("applied")
 	})
 
-	it("a deletion without the core's revision never raises the floor when it is evicted", () => {
+	it("evicting a deletion without the core's revision raises the floor to the highest read seen", () => {
 		const o = new WriteOrder<R>({ tombstones: 1 })
+		o.upsert("a", { hz: 1 }, k(3, 3))
+		o.upsert("other", { hz: 1 }, k(4, 8))
 		o.removeHard("a", Infinity)
 		o.removeHard("b", Infinity)
-		expect(o.upsert("fresh", { hz: 1 }, k(1, 1))).toBe("applied")
+		// a's tombstone left: a held read of a from before its deletion (read 3) stays out
+		expect(o.upsert("a", { hz: 1 }, k(3, 3, 1))).toBe("floor")
+		// a fresh read reaches the highest read seen
+		expect(o.upsert("fresh", { hz: 1 }, k(1, 8))).toBe("applied")
 	})
 
 	it("keeps coverages up to the cap; past it the oldest leaves and the floor rises to its read", () => {
