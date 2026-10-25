@@ -1,7 +1,7 @@
 # Detection quality design (WG15 DQ)
 
 Status: reviewed design, not implemented (2026-10-24; revised after spec review the same
-day). Amendment (2026-10-25, draft, not reviewed): sections 7 and 8. Requirements in
+day). Amendment (reviewed 2026-10-25): sections 7 and 8. Requirements in
 [requirements](requirements.md), tasks in [tasks](tasks.md).
 Background: the [scanner redesign](../scanner-redesign/design.md) channel gate and evidence
 labels, `docs/SCANNER.md`, and the hot-path rules in `docs/PERFORMANCE.md`.
@@ -45,8 +45,8 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_DATA_HELD_MAX`          | 8                              | 4.5         |
 | `DQ_DATA_RING`              | 256                            | 4.5         |
 | `DQ_DATA_RATE_PER_S`        | 16                             | 4.5         |
-| `DQ_CONSOLIDATE_GROUP_MAX`  | 16                             | 7.2, 7.6    |
-| `DQ_CONSOLIDATE_PASSES`     | 3                              | 7.4, 7.6    |
+| `DQ_CONSOLIDATE_GROUP_MAX`  | 16 (survivor plus 15)          | 7.3, 7.8    |
+| `DQ_CONSOLIDATE_SCAN_MAX`   | 32                             | 7.3, 7.7    |
 
 No change to `packages/api-types`, the REST or WebSocket shapes, or
 `docs/CLI-COORDINATION.md`. Pending entries are memory-only. The persisted and journaled
@@ -318,51 +318,75 @@ No code. The acceptance plan records passive status.
 
 ### Algorithm
 
-`consolidate(op?: Op): number` on `DiscoveryStore`, called by `ScannerService` after
-`restore` and `replay` and before the first ingest (next to the existing load path in
-`scanner-service.ts`, about line 1287), and from `stickyMatch`'s caller after a match.
+New pure module `src/core/scanner/store/consolidation.ts`:
 
-1. Order: sort live ids by the survivor order (7.2): rank `decoded` first, then
-   `firstSeenAt`, then id (`compareText`). O(n log n), n <= `maxDiscoveries`.
-2. For each id `s` in order, skip it if absorbed in this pass. Query the centre index of
-   `s`'s first source over [median centre - 1 000, + 1 000] across all centre families
-   (the same `centres.range` the cross-family sticky uses, plus `decodedCentres`). Keep
-   candidates `c` with `joinable(s, c)` (7.1); sort by distance then id; take at most 16.
-3. If any: one `commit("consolidate", op => ...)` that calls `absorb(op, s, c)` for each,
-   in that order, re-checking `joinable` against `s`'s refreshed medians before each (a
-   member that stopped being joinable stays). Mark absorbed ids.
-4. Repeat the pass while it merged something, at most 3 passes.
+```ts
+interface ConsolidationRecord {
+  id: string; sourceId: string; centreHz: number; obwHz: number; peakDbfs: number
+  count: number; young: { peakDbfs: number; obwHz: number }[]
+  identity?: { kind: string; value: string }; family: ProtocolFamily
+  decoded: boolean; protocol: string; firstSeenAt: string; hasOperator: boolean
+}
+joinable(a, b): boolean                      // 7.1, pure, O(1) (young <= 2 entries)
+rankCompare(a, b): number                    // 7.2
+nearest(sorted, centreHz, radiusHz, k): ConsolidationRecord[]   // 7.3 step 2
+planConsolidation(records): { groups: { survivor: string; members: string[] }[];
+                              truncated: number }               // 7.3, 7.4
+```
 
-`joinable` is a pure function in `src/core/scanner/store/consolidation.ts` (new) over
-`{ sourceId, centre, obw, peak, count, young observations, identity, effective family,
-confidence, protocol, hasOperator }`; the store builds the inputs from cached medians
-(`mediansOf`) and `effectiveLabel`.
+`nearest` binary-searches the per-source array sorted by (centre, id) and walks outward
+with two pointers, taking the nearer side each step (ties: smaller id), stopping after `k`
+entries or past the radius: O(log n + k), independent of density. `planConsolidation` builds
+the frozen records once (the store fills them from `mediansOf`, `recentOf`,
+`effectiveLabel`), sorts by rank, and for each unowned survivor takes `nearest(.., 1000,
+32)`, skips owned and higher-ranked entries (they still count toward 32), selects joinable
+ones until 16, then marks the group owned. Pure, so order independence and the ownership
+rules are property-tested on the function without a store.
 
-Lazy path: after `stickyMatch` returns `best`, the same candidates the scan visited (already
-within `min(tol, 1 kHz)`) are filtered with `joinable(survivor(best, c), ...)`; at most 16
-are absorbed into the group's survivor (which may be a candidate, not `best`, if it is
-earlier in the order) inside the observation's operation, before `addObservation`.
+Store: `consolidatePlan(): Plan` (builds records, calls the planner) and
+`applyConsolidation(plan): { groups, absorbed }`. Each group runs `commit("rekey", op =>
+...)`, absorbing each still-live member into the still-live survivor with `absorb` (whose
+3.2 guard sees the survivor's current medians), so the journal line is the ordinary merge
+mutation. `rekey` is a journal op every existing reader accepts (`JournalLineSchema`,
+`src/core/scanner/store/persistence.ts` line 389); `replay` applies the payload whatever
+the op name (about line 1922), so an older reader replays a group as an ordinary merge. A
+new op name would be skipped by an older reader as an invalid line (`readJournal`, about
+lines 1228 to 1235) and resurrect the absorbed records with their observations moved away.
 
-Determinism and order independence: the survivor order is a total order on record fields
-that do not depend on insertion; groups are formed in that order; candidate order is by
-distance then id. So two stores holding the same records give the same result. Idempotent:
-after the last pass no survivor has a joinable live candidate, and the pass merges nothing.
+Lazy path: `stickyMatch` returns `best`; the observation's commit then calls
+`lazyConsolidate(op, best)`, which builds frozen records for `best` and its 32 nearest
+(`CentreIndex.nearest`, a new bounded outward walk over each centre family list of the
+source plus the decoded list, merged nearest-first, cut at 32), picks the survivor and
+members by 7.7, absorbs them, and returns the survivor that `addObservation` then uses.
 
-Crash safety: each group is one journal line (`op: "consolidate"`, `StoreMutation`
-payload, added to `JournalLineSchema`'s enum in `src/core/scanner/store/persistence.ts`
-line 389 and to the `JournalEntry` op union). A line is appended atomically or not at all;
-a lost line means the group was never durable and the next load forms it again. An older
-binary reading a journal with `consolidate` lines rejects the unknown op today
-(`parseJournalLine`); that is the existing forward-compatibility rule for new ops (as for
-`evict`), stated in the task report.
+Service (`ScannerService.startUp`, after the journal replay and after the mutation listener
+is attached, before the change listener and before any job starts):
+
+1. `persistence.readConsolidationPlan()`: a valid file is resumed with `applyConsolidation`;
+   an invalid one is logged and treated as none (no new plan this load).
+2. Otherwise `store.consolidatePlan()`; if it has groups, `writeConsolidationPlan(plan)`
+   (atomic: tmp, fsync, rename) and then `applyConsolidation(plan)`.
+3. If any plan file existed or was written: `writeSnapshotOf(store)` and, once it resolves,
+   `removeConsolidationPlan()`. A failed snapshot leaves the file; the next load resumes it
+   (every group already applied is a no-op: its members are gone).
+
+Crash equivalence: the plan is fixed before any group runs and is reused on resume, groups
+are disjoint (ownership), each group is one journal line, and a group already applied has
+no live members. So the end state is the same for any crash point. Without the plan file,
+a resume would recompute from refreshed survivor medians and could choose differently;
+that is why the file exists.
+
+Plan file: `consolidation-plan.json` beside the snapshot, Zod-validated
+`{ version: 1, createdAt, groups: { survivor, members[] }[] }`, at most 10 000 groups.
 
 ### CPU
 
-As requirement 7.6. The load pass is synchronous in the store; at 10 000 records it is
-bounded by 30 000 range queries and 480 000 O(1) checks (three passes). If the measured
-desktop time exceeds 50 ms for the reference store, the pass yields between groups
-(`setImmediate`) while ingest waits on a `consolidated` promise. The lazy path adds at most
-16 checks per sticky match, under the per-observation budget of this spec.
+As requirement 7.8. Planning: two sorts plus at most 32 visits and 32 O(1) checks per
+record. Execution dominated by `absorb` (observation moves). The load path is synchronous;
+if a measured run on the reference store exceeds the 50 ms desktop target, groups are
+applied in slices with `setImmediate` between slices while the start-up awaits them (ingest
+has not started). Lazy path: at most 32 visits and checks per sticky match, inside this
+spec's per-observation budget.
 
 ## 8. Passive marginal cost guard (amendment)
 
@@ -390,43 +414,50 @@ the FFT and summaries regardless.
 
 ### Design
 
-New pure function in `src/core/scanner/passive-cost.ts`:
+New pure function in `src/core/scanner/passive-cost.ts`, implementing the 8.4 table row by
+row:
 
 ```ts
-passiveMarginalDecision(input: {
-  holders: "sole" | "shared" | "none"
-  utilization: number | null      // U, windowed
-  baseline: number | null         // valid B or null (8.3)
+passiveGuardDecision(input: {
+  passive: "enabled" | "disabled"
+  holders: "sole" | "shared" | "off" | "closed"
+  measurement: number | null      // U over a completed window (8.2), else null
+  baseline: number | null         // valid B (8.3), else null
   limit: number
-  disabled: boolean
-  sinceOpenMs: number | null
-  sinceLastCheckMs: number | null
-  baselineWindowAllowed: boolean  // none run in the last PASSIVE_BASELINE_MAX_AGE_MS
-}): "disable" | "clear" | "keep" | "measure-baseline"
+  recheckDue: boolean             // 300 s since the last judgement of rows 2 to 4
+  baselineWindowAllowed: boolean
+  trialDue: boolean
+  probationDue: boolean           // engine shut, WG11 rule
+}): { decision: "keep" | "disable" | "clear" | "baseline" | "trial"; row: number;
+      figure: "engine" | "passive" | null }
 ```
 
-- `sole`: returns `passiveCostDecision(...)` (identical behaviour).
-- `shared`, enabled: with `baseline` -> `passiveCostDecision` on `max(0, U - B)`; without
-  -> keep if `U <= limit`, disable if `U >= 0.95`, else `measure-baseline` when allowed,
-  else keep.
-- `none` (disabled or baseline window): never disables; the service records `B`.
+Service state per source (`ScannerService`): `window` `{ kind: "open" | "baseline" |
+"trial" | "restore", engine, generation, startSample, startedAt }`, `baseline` `{ value,
+engine, generation, others, at }`, `lastBaselineWindowAt`, `disabledAt`. Each 1 s guard tick
+reads `spectrum.allocation().consumers[sourceId]` (holders, others), the engine's
+`eluSample()` (generation), and:
 
-Service wiring: classify holders from `spectrum.allocation().consumers[sourceId]` (O(jobs +
-displays)); store `{ engine, others: sorted consumer ids minus passive, at, value }` per
-source as the baseline; invalidate on a different engine object, a different `others`
-list, or age over 1 800 000 ms. `measure-baseline` sets a `baselineUntil` mark, removes
-the passive job through the existing `refreshPassive` path with reason `measuring`, and the
-next check after 60 s records `B` and rebuilds passive. Shared trial (8.5) reuses
-`passiveProbationDue` with `engineOpen` true allowed when a valid baseline exists.
+- a generation that differs from the window's discards the window and starts a new one at
+  this tick (8.2); if the guard did not add or remove passive within the previous tick, the
+  baseline is invalidated too (8.3);
+- a window is complete when `now - startedAt >= 60 000`; its `U` is `windowedUtilization`
+  between `startSample` and the current sample;
+- `baseline` and `restore` windows, trial start and trial windows are evaluated at their
+  deadline on this tick (8.7); `open` windows of rows 2 to 4 are judged at their first
+  completion and then every 300 s, as today.
 
-Constants (contract, `src/core/scanner/passive-cost-contract.ts`):
-`PASSIVE_BASELINE_MAX_AGE_MS` 1 800 000, `PASSIVE_SATURATION` 0.95. No new config key.
+Passive removal and restore reuse `passiveDisabled` plus `refreshPassive()` with reasons
+`measuring baseline` (row 6) and the `engine-cpu` / `passive-cpu` figures (rows 2 to 4).
+The existing `passiveCostDecision`, `windowedUtilization` and `passiveProbationDue` stay
+and are called by the new function (row 2 and 11 are exactly them).
 
-Pi protection: on a headless receiver only passive holds the engine, so `sole` applies and
-a measured 0.99 core disables passive at open + 60 s as today. With a display open on such
-a host, `U` saturates (>= 0.95) and passive is disabled without a baseline; with a baseline
-showing the display alone near 0.95, `M` is small but the saturation rule still applies
-first when `U >= 0.95` (the design keeps that ordering: saturation beats a baseline).
+Constants (`src/core/scanner/passive-cost-contract.ts`): `PASSIVE_BASELINE_MAX_AGE_MS`
+1 800 000, `PASSIVE_SATURATION` 0.95. No new config key.
+
+Pi protection: a headless receiver has only passive on the engine (row 2, today's rule;
+0.99 core disables at open + 60 s). With a display open on such a host `U` saturates and
+row 3 disables passive whether or not a baseline exists.
 
 ## CPU and hot path (`docs/PERFORMANCE.md`)
 
@@ -540,39 +571,42 @@ from Activity iff it was held and a reception with the same source, channel basi
 tuning, within 1 250 Hz and the time window was retained; every close is delivered exactly
 once. _Validates 4.1, 4.3, 4.5, 4.6._
 
-**Property 12: Consolidation fixpoint.** For any store, after `consolidate` no two live
-records are joinable (7.1) where one is a survivor and the other within 16 nearest, unless
-the pass bound was reached; running it again merges nothing. _Validates 7.4, 7.5._
+**Property 12: Plan ownership and bound.** For any record set, `planConsolidation` gives
+disjoint groups of at most 16; every member is joinable to its survivor on frozen values,
+ranked below it and within 1 000 Hz of its frozen centre; no survivor is a member of
+another group; `joinable` is called at most 32 times per record. _Validates 7.3, 7.4, 7.8._
 
-**Property 13: Order independence.** For any set of records inserted in any two orders (and
-any journal split of the same history), the consolidated stores hold the same ids with the
-same observation sets. _Validates 7.2, 7.5._
+**Property 13: Order independence.** For any record set given in any two orders, the plan
+is identical; two stores restored from the same records in different orders end with the
+same ids and observation sets after consolidation. _Validates 7.2, 7.3._
 
-**Property 14: Conservation and safety.** For any store, consolidation preserves the total
-observation count and total airtime per source, never merges a pair that 7.1 excludes
-(identity conflict, specific family conflict, decoded protocol conflict, operator state,
-3.1 refusal, over 1 kHz, OBW ratio over 2), never merges members more than 1 kHz from their
-survivor, and every absorbed id resolves through `aliasOwner` to a live survivor (until the
-64-alias bound releases it). _Validates 7.1, 7.3, 7.7._
+**Property 14: Idempotence.** Applying a plan twice equals applying it once; resuming a
+plan after it completed changes nothing. _Validates 7.6._
 
-**Property 15: Crash equivalence.** For any store and any prefix of its `consolidate`
-journal lines, restore plus replay of the prefix plus a fresh `consolidate` yields the same
-store as the uninterrupted run. _Validates 7.5._
+**Property 15: Crash equivalence.** For any record set and any crash point k (groups 1..k
+journaled, plan file present), restore plus replay of the journal prefix plus resume of the
+plan gives the same store as the uninterrupted run, including over-cap clusters (18
+joinable records). _Validates 7.5, 7.6._
 
-**Property 16: Marginal guard.** For any holders, `U`, `B`, limit and timing:
-`sole` returns exactly `passiveCostDecision`; `shared` with a baseline never disables when
-`max(0, U - B) <= limit` and `U < 0.95`; it always disables when `U >= 0.95` and passive is
-enabled; `none` never disables; `measure-baseline` is returned only when allowed and
-`limit < U < 0.95` without a baseline. Non-finite inputs keep. _Validates 8.2 to 8.5, 8.7._
+**Property 16: Conservation and safety.** Consolidation preserves total observations and
+airtime per source, never merges a pair 7.1 excludes, and every absorbed id resolves
+through `aliasOwner` to a live survivor (until the 64-alias bound). _Validates 7.1, 7.5._
+
+**Property 17: Guard precedence.** For any input, `passiveGuardDecision` returns the
+decision of the first matching 8.4 row; row 2 equals `passiveCostDecision`; a shared
+enabled source with `U >= 0.95` is disabled with or without a baseline; a null measurement
+always keeps. _Validates 8.4, 8.9._
+
+**Property 18: Guard duty bounds.** For any tick sequence of consumers, generations and
+utilizations, passive is off for baseline windows at most 61 s in any 1 800 s, and a
+disabled source with a valid baseline starts at most one trial per 900 s. _Validates 8.5
+to 8.8._
 
 All fast-check properties run with `numRuns: 100` or more and carry the trace comment
 (`// Feature: detection-quality, Property N: ...`).
 
 Tests for the amendment: `tests/unit/core/scanner/consolidation.property.test.ts` (new,
-Properties 12 to 15 on the pure `joinable` and a store built from generated records),
-`tests/unit/core/scanner/discovery-store-consolidate.test.ts` (new, the 7.8 fixtures),
-`tests/unit/core/scanner/passive-cost.test.ts` and a new
-`passive-marginal.property.test.ts` (Property 16 and the 8.8 table),
-`scanner-service` passive guard wiring tests (baseline window, trial). Expected to change:
-the store goldens (`store-change-golden*.test.ts`) where fixtures hold joinable records,
-`merge-alias-*` tests (new `consolidate` op), and the persistence journal schema test.
+Properties 12 to 16), `tests/unit/core/scanner/discovery-store-consolidate.test.ts` (new,
+the 7.10 fixtures including the old-reader replay), `tests/unit/core/scanner/passive-guard.test.ts`
+and `passive-guard.property.test.ts` (new, the 8.10 table and Properties 17 and 18). Expected
+to change: persistence tests for the plan file; scanner-service passive guard wiring tests.
