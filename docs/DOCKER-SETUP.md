@@ -16,10 +16,9 @@ bake --file docker/bake.hcl default`.
 
 The `dev`, `prod-*` and `demod-test` profiles below are optional. The `dev`
 and `prod-*` profiles start an SDR++ server next to the core, but they do not wire
-it up: the core reads `config/default.yaml`, which has `sources: []`, and nothing
-reads the `SDR_SOURCE` variable they set. To use that server, add a source for it
-(host `sdrpp-server` or `wavekit-sdrpp-prod`, port 5259, IQ caps) to a config file and
-point `WAVEKIT_CONFIG` at it.
+it up: the core reads `config/default.yaml`, which has `sources: []`. To use that
+server, add a source for it (host `sdrpp-server` or `wavekit-sdrpp-prod`, port 5259,
+IQ caps) to a config file and point `WAVEKIT_CONFIG` at it.
 
 ## Native dev loop
 

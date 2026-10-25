@@ -90,9 +90,11 @@ services:
     environment:
       WAVEKIT_LOG_LEVEL: debug
       NODE_ENV: development
-      SDR_SOURCE: "tcp://sdrpp-server:5259"
       # Runtime state (API band overrides); config/ stays read-only.
       WAVEKIT_STATE_DIR: /app/data
+    # 4713 is the RTL-TCP relay port of the shipped configs (tunerRelay.port: 4713).
+    # config/default.yaml leaves the relay disabled on the schema default 1234, so a
+    # config used here needs tunerRelay.enabled: true and port: 4713 to reach it.
     ports:
       - "9000:9000"
       - "8080:8080"
@@ -188,7 +190,6 @@ services:
     environment:
       WAVEKIT_LOG_LEVEL: info
       NODE_ENV: production
-      SDR_SOURCE: "tcp://wavekit-sdrpp-prod:5259"
       # Runtime state on a volume: Activity, scanner jobs and discoveries,
       # band plans, operator data and API band overrides.
       WAVEKIT_STATE_DIR: /app/data
