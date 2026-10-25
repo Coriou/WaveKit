@@ -363,6 +363,16 @@ function suspensionSince(
 	return prior && prior.reasonCode === reasonCode ? prior.since : new Date()
 }
 
+/** The assessment's window half-width as a planner field (3.13: one window). */
+function bandWindow(assessment: DecoderBandAssessment): {
+	bandHalfWidthHz?: number
+} {
+	const half = assessment.windowHalfWidthHz
+	return half !== undefined && Number.isFinite(half) && half > 0
+		? { bandHalfWidthHz: half }
+		: {}
+}
+
 /** Plan A3: channel reasons are not in the shared rate union yet; omit the object rather than emit a false code. */
 function publicSuspension(s: DecoderSuspension | null): {
 	suspension?: DecoderSuspensionStatus
@@ -1129,6 +1139,7 @@ export class DecoderManager extends EventEmitter {
 						startMode: state.startMode,
 						configuredSourceId: config.sourceId ?? null,
 						band: this.resolveBand(state).requirements,
+						...bandWindow(this.assessBand(state)),
 						// 3.13: either opt-out lifts the band policy in planning too.
 						...(this.config.bandSuspension && this.decoderBandSuspension(state)
 							? {}
@@ -2798,7 +2809,8 @@ export class DecoderManager extends EventEmitter {
 									? "decoder-unavailable"
 									: state.suspension.reasonCode === "channelizer-unavailable"
 										? "channelizer-unavailable"
-										: (state.unplaced ?? state.suspension.reasonCode)),
+										: // Kept current by refreshUnplacedSuspension (3.13).
+											state.suspension.reasonCode),
 					}
 				: state.suspension
 		return {
@@ -5143,6 +5155,15 @@ export class DecoderManager extends EventEmitter {
 			state.unplaced === "frequency-out-of-band" && bandFree
 				? undefined
 				: state.unplaced
+		// 3.13/3.14: an unplaced decoder's band reason never contradicts the
+		// assessment: out of band only when assessBand says so; a planner
+		// out-of-band with the band in view (or unknown) means no channel yet.
+		const plannedReason: CoreSuspensionReason =
+			!bandFree && band.verdict === "out-of-band"
+				? "frequency-out-of-band"
+				: unplaced === undefined || unplaced === "frequency-out-of-band"
+					? "no-channel-selected"
+					: unplaced
 		const channelizerUnavailable =
 			!this.channelizer &&
 			(state.placement?.reach === "channel" ||
@@ -5186,19 +5207,18 @@ export class DecoderManager extends EventEmitter {
 				? "channelizer-unavailable"
 				: builtinUnplaced
 					? sourceKnown
-						? (unplaced ??
-							// 3.13: `always` and operator starts skip the band, so
-							// an unreachable placement is the capture's limit.
-							(bandFree ? "capture-too-narrow" : "frequency-out-of-band"))
+						? plannedReason
 						: "source-rate-unknown"
 					: bandSuspends && band.verdict === "out-of-band"
 						? "frequency-out-of-band"
-						: (unplaced ??
-							(channelizerUnavailable
-								? "channelizer-unavailable"
-								: state.admission?.admit === false
-									? "efficiency-budget"
-									: null)))
+						: unplaced !== undefined
+							? plannedReason
+							: (unplaced ??
+								(channelizerUnavailable
+									? "channelizer-unavailable"
+									: state.admission?.admit === false
+										? "efficiency-budget"
+										: null)))
 		return { rate, band, blockedBy }
 	}
 

@@ -235,6 +235,7 @@ export const planPlacements: PlacementPlanner = input => {
 		| "channelizer-unavailable"
 		| "frequency-out-of-band"
 		| "capture-too-narrow"
+		| "no-channel-selected"
 	>()
 	const decoders = input.decoders
 		.filter(validDecoder)
@@ -259,12 +260,22 @@ export const planPlacements: PlacementPlanner = input => {
 		let channelizerMissing = false
 		// 3.14: the band fits some candidate but no placement fits the window.
 		let tooNarrow = false
+		// A band-plan decoder with its band in view but no channel chosen yet.
+		let noChannel = false
 		for (const s of sources) {
 			const centre = s.centreHz!
 			const half = (s.sampleRateHz! * s.usableFraction) / 2
 			const local: Candidate[] = []
+			// The band window assessBand uses (the pipeline's real frontend).
+			// Centre reach (LoRa) is bounded by its own passband instead.
+			const bandHalf =
+				d.reach !== "centre" &&
+				positive(d.bandHalfWidthHz) &&
+				d.bandHalfWidthHz < half
+					? d.bandHalfWidthHz
+					: half
 			// 3.14: "too narrow" only when the band reaches this capture window.
-			const bandOverlapsWindow = !bandFree(d) && bandFits(d, centre, half)
+			const bandOverlapsWindow = !bandFree(d) && bandFits(d, centre, bandHalf)
 			const add = (
 				hz: number | null,
 				origin: Candidate["origin"],
@@ -273,7 +284,7 @@ export const planPlacements: PlacementPlanner = input => {
 			) => {
 				const band = bandChannels
 					? bandChannels.every(f => bandFits(d, f))
-					: bandFits(d, hz ?? centre, d.reach === "channel" ? 0 : half)
+					: bandFits(d, hz ?? centre, d.reach === "channel" ? 0 : bandHalf)
 				if (!band) return
 				if (fitsReach(d, s, hz))
 					local.push({ source: s, hz, reach: d.reach, origin, index })
@@ -293,9 +304,9 @@ export const planPlacements: PlacementPlanner = input => {
 				if (s !== selected) continue
 				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				const hz = vfo ? vfo.frequencyHz : centre
-				if (bandFits(d, hz, vfo ? 0 : half) && !fitsReach(d, s, hz)) {
+				if (bandFits(d, hz, vfo ? 0 : bandHalf) && !fitsReach(d, s, hz)) {
 					if (bandOverlapsWindow) tooNarrow = true
-				} else if (bandFits(d, hz, vfo ? 0 : half))
+				} else if (bandFits(d, hz, vfo ? 0 : bandHalf))
 					local.push({
 						source: s,
 						hz,
@@ -308,7 +319,7 @@ export const planPlacements: PlacementPlanner = input => {
 				(d.channelPlacements !== true || s.channelizerAvailable !== true)
 			) {
 				if (d.origin === "config") {
-					if (bandFits(d, centre, half))
+					if (bandFits(d, centre, bandHalf))
 						local.push({
 							source: s,
 							hz: null,
@@ -322,7 +333,7 @@ export const planPlacements: PlacementPlanner = input => {
 				d.centreSlots.forEach((slot, index) => {
 					const one = { ...d, centreSlotHz: slot.slotHz }
 					const mid = (slot.slotHz.minHz + slot.slotHz.maxHz) / 2
-					if (!bandFits(d, centre, half)) return
+					if (!bandFits(d, centre, bandHalf)) return
 					if (fitsReach(one, s, null))
 						local.push({
 							source: s,
@@ -446,15 +457,15 @@ export const planPlacements: PlacementPlanner = input => {
 					channels.slice(0, cap).forEach((hz, i) => add(hz, "bandplan", i))
 				}
 			}
-			// A band-plan decoder whose band reaches this window but which has no
-			// channel here (no VFO, no band-plan channel) cannot be placed (3.14).
+			// A band-plan decoder with no channel here (no VFO, no band-plan
+			// channel): nothing was tried, so it is not too narrow (3.14).
 			if (
 				!local.length &&
 				bandOverlapsWindow &&
 				d.origin === "catalogue" &&
 				(d.type === "dsd-fme" || d.type === "multimon-ng")
 			)
-				tooNarrow = true
+				noChannel = true
 			candidates.push(...local)
 		}
 		if (!candidates.length && d.reach === "channel" && bandFree(d)) {
@@ -545,6 +556,7 @@ export const planPlacements: PlacementPlanner = input => {
 			else if (sources.length && !bandFree(d)) {
 				// Only an empty candidate set of a known band is out of band (3.13, 3.14).
 				if (tooNarrow) unplaced.set(d.id, "capture-too-narrow")
+				else if (noChannel) unplaced.set(d.id, "no-channel-selected")
 				else if (bandKnown(d)) unplaced.set(d.id, "frequency-out-of-band")
 			}
 		}

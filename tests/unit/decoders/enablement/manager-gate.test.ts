@@ -1881,14 +1881,16 @@ it("a built-in decoder without a placement never starts, whatever its source sta
 	)
 	// YAML decoders keep today's behaviour.
 	expect(f.instances.get("yaml")?.running).toBe(true)
-	// Connected with a centre but still unplaced: the planner's reason, no start.
+	// Connected with a centre but still unplaced: no start. The fake has no
+	// band (assessment unknown), so a planner out-of-band reads as no channel
+	// selected (3.13: the reason never contradicts the assessment).
 	connected = true
 	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 162_000_000 })
 	f.unplaced(new Map([["dec", "frequency-out-of-band"]]))
 	await f.settle()
 	expect(f.instances.get("dec")?.running).toBe(false)
 	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(
-		"frequency-out-of-band",
+		"no-channel-selected",
 	)
 	// Placed in band: admitted through the gate and started.
 	f.unplaced(new Map())

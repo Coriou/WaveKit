@@ -302,7 +302,10 @@ it.each([
 		f.manager.setChannelizer(null)
 	} else f.unplaced(new Map([["dec", reason]]))
 	await f.manager.startAll()
-	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(reason)
+	// The fake's band is unknown: a planner out-of-band never contradicts it (3.13).
+	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(
+		reason === "frequency-out-of-band" ? "no-channel-selected" : reason,
+	)
 	expect(f.instances.get("dec")?.starts).toBe(0)
 })
 

@@ -102,6 +102,8 @@ function setup(
 		optOut?: readonly string[]
 		/** Operator starts after startAll. */
 		operator?: readonly string[]
+		/** Keep the fake's ~48 kHz audio frontend (default: the full capture). */
+		audio?: readonly string[]
 	} = {},
 ) {
 	vi.useFakeTimers()
@@ -123,10 +125,11 @@ function setup(
 				const d: Fake = new RateDecoder(config.id, caps)
 				// IQ adapters keep the capture span (no audio frontend).
 				const adapter = d.getRateAdapter.bind(d)
-				d.getRateAdapter = input => ({
-					...adapter(input),
-					frontendRateHz: input.sampleRateHz,
-				})
+				if (!(opts.audio ?? []).includes(type))
+					d.getRateAdapter = input => ({
+						...adapter(input),
+						frontendRateHz: input.sampleRateHz,
+					})
 				let options = { ...config.options }
 				applied.set(config.id, options)
 				d.updateOptions = updates => {
@@ -610,6 +613,7 @@ describe("suspension follows the band", () => {
 				kind: fc.constant("tune" as const),
 				hz: fc.constantFrom(
 					OUT,
+					135_800_000,
 					IN,
 					433_920_000,
 					869_525_000,
@@ -649,6 +653,8 @@ describe("suspension follows the band", () => {
 						unavailable: having("unavailable"),
 						optOut: having("opt-out"),
 						operator: having("operator"),
+						// Audio demodulators keep their ~48 kHz frontend.
+						audio: ["dsd-fme", "multimon-ng"],
 					})
 					await f.begin()
 					let previous = new Map<string, { reason?: string; since?: unknown }>()
@@ -694,14 +700,12 @@ describe("suspension follows the band", () => {
 									v.reason === undefined
 										? v.placements.length > 0 || r === "yaml"
 										: v.reason === "capture-too-narrow" ||
+												v.reason === "no-channel-selected" ||
 												v.reason === "efficiency-budget",
 								).toBe(true)
 							}
-							// Unknown band (multimon-ng): placed only on band-plan channels;
-							// with none the planner keeps its no-candidate reason.
-							else if (id !== "multimon-ng") {
-								expect(v.reason).not.toBe("frequency-out-of-band")
-							}
+							// Unknown band (multimon-ng): never out of band.
+							else expect(v.reason).not.toBe("frequency-out-of-band")
 							const before = previous.get(id)
 							// A reconnect or restart passes through other states.
 							if (
@@ -777,4 +781,40 @@ describe("band reasons and opt-outs", () => {
 			expect(v.placements).toMatchObject([{ reach: "channel", running: true }])
 		},
 	)
+})
+
+describe("no channel selected", () => {
+	it("catalogue dsd-fme at 446.52 MHz, 2.4 Msps, no VFO or band-plan channel", async () => {
+		const f = setup(["dsd-fme"], 446_520_000)
+		f.sources.setRate("rtl", 2_400_000)
+		await f.begin()
+		await settle()
+		const v = view(f, "dsd-fme")
+		expect(v.verdict).toBe("in-band")
+		expect(v.reason).toBe("no-channel-selected")
+	})
+
+	it("catalogue dsd-fme at 135.8 MHz, 1.024 Msps follows assessBand: out of band", async () => {
+		const f = setup(["dsd-fme"], 135_800_000, { audio: ["dsd-fme"] })
+		await f.begin()
+		const v = view(f, "dsd-fme")
+		// The audio frontend keeps ~48 kHz around the centre: 136 MHz is out of view.
+		expect(v.verdict).toBe("out-of-band")
+		expect(v.reason).toBe("frequency-out-of-band")
+		// The planner alone sees 136 MHz in its ±409.6 kHz window.
+		expect(
+			planPlacements(
+				input(
+					decoder({
+						type: "dsd-fme",
+						band: {
+							basis: "region-default",
+							rangesHz: [{ minHz: 136_000_000, maxHz: 174_000_000 }],
+						},
+					}),
+					[source({ centreHz: 135_800_000, sampleRateHz: RATE })],
+				),
+			).unplaced.get("test"),
+		).toBe("no-channel-selected")
+	})
 })

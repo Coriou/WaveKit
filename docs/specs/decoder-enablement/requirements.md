@@ -456,6 +456,11 @@ centre slot cannot fit the usable window at the current rate), the reason is
 `capture-too-narrow`, not `frequency-out-of-band`. `DecoderSuspensionReasonCode`, the Fastify
 schemas, the CLI guards and the web reason words gain it; Main announces it in
 `docs/CLI-COORDINATION.md`. Precedence (11.3) places it directly after `frequency-out-of-band`.
+(2026-10-25, second amendment) When the band is in view but no channel is selected (no
+VFO, no band-plan channel, so no candidate was tried) the reason is `no-channel-selected`,
+not `capture-too-narrow`; it ranks with `capture-too-narrow`. An unplaced decoder's band
+reason never contradicts its band assessment: `frequency-out-of-band` only when the
+assessment is `out-of-band`, judged on the pipeline's real window.
 3.15 **Fresh `since`.** `suspension.since` is the start of the current uninterrupted
 suspension with the current `reasonCode`. A change of reason code resets it; a re-evaluation
 with the same reason while still suspended keeps it; suspend, run, suspend with the same

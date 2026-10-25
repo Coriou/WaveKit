@@ -458,7 +458,9 @@ Property 16 is the next free number in this design (1–15 are above).
     `bandSuspension: false` or the per-decoder opt-out), `always`, or an operator start, the
     reason is never `frequency-out-of-band`; (d) otherwise the decoder is suspended with
     `frequency-out-of-band` iff its band assessment is `out-of-band`, and when `in-band` it is
-    placed or suspended with `capture-too-narrow` or `efficiency-budget`. `since` keeps its
+    placed or suspended with `capture-too-narrow`, `no-channel-selected` (2026-10-25, second
+    amendment: band in view, no channel chosen) or `efficiency-budget`; with an `unknown`
+    assessment the reason is never `frequency-out-of-band`. `since` keeps its
     value iff the decoder stayed suspended with the same reason since the previous settle.
     _Validates 3.13, 3.14, 3.15, 11.3._
 17. **The `rtl_433` channel fits.** For random finite centres and rates with `h ≥ 125 kHz` and

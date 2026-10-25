@@ -163,6 +163,8 @@ export interface PlannerDecoder {
 	centreSlots?: readonly PlannerCentreSlot[]
 	/** False when global or per-decoder band suspension is off (3.13): band policy skipped. */
 	bandSuspension?: boolean
+	/** Half-width of the window the band assessment uses (narrower frontends); absent: usable window. */
+	bandHalfWidthHz?: number
 	/** rtl_433 (3.16): the widest channel output rate it wants; absent 1 MHz. */
 	channelTargetRateHz?: number
 }

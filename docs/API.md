@@ -1915,7 +1915,7 @@ until fixture-verified requirements exist; external-input decoders report
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                                                                                                                                           |
 | `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source.                                               |
-| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, `"capture-too-narrow"` (the band is in view but no channel of at least 250 kHz fits the capture window), or `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends). |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, `"capture-too-narrow"` (the band is in view but no channel of at least 250 kHz fits the capture window), `"no-channel-selected"` (the band is in view but no channel is chosen yet: no VFO and no band-plan channel), or `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends). |
 | `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).                                                                                                                                 |
 | `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`.    |
 
@@ -1992,7 +1992,10 @@ A wanted decoder whose band is out of band is suspended with reason
 when a retune brings it back. When the band overlaps the capture window but
 the decoder's channel cannot fit inside it, the reason is
 `"capture-too-narrow"` instead; rtl_433 narrows its channel (1 MHz down to
-250 kHz) to fit, so at 1.024 Msps it is placed. `since` restarts whenever the
+250 kHz) to fit, so at 1.024 Msps it is placed. When the band is in view but
+no channel is chosen yet (a band-plan decoder such as DMR or POCSAG with no
+VFO and no band-plan channel), the reason is `"no-channel-selected"`. The
+reason always agrees with `bandAssessment`. `since` restarts whenever the
 reason changes or the decoder ran in between. An unusable rate takes
 precedence as the reason. `unknown` (no band, a source without `centerFreq`, external input)
 never suspends. A decoder started by hand (`startMode: "operator"`) is never
