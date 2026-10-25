@@ -156,10 +156,19 @@ tunerRelay:
   commandHistoryLimit: 200 # 0 disables command history
 ```
 
+The schema default for `tunerRelay.port` is `1234`, the usual rtl_tcp port, and
+`config/default.yaml` keeps it (with the relay disabled), as does the development config
+`config/dev_test.yaml`. The setup configs that enable the relay set `4713` instead
+(`config/docker-usb.yaml`, `config/docker-usb-bridge.yaml`, `config/docker-pi.example.yaml`,
+`config/pi.yaml` and the native `config/local-rtl.yaml`), so the relay does not collide with an
+rtl_tcp server on the same host; the Docker Compose profiles publish `4713`. Point your client at
+whichever port your config sets.
+
 **Usage:**
 
 1. Start WaveKit with the relay enabled.
-2. In your client (in SDR++: the **RTL-TCP** source), connect to `<wavekit-host>:1234`.
+2. In your client (in SDR++: the **RTL-TCP** source), connect to `<wavekit-host>:<port>`, the
+   `tunerRelay.port` your config sets.
 3. Tune as usual — the client's commands are forwarded to the upstream `rtl_tcp`/`rtlmux`.
 
 **Notes:**
