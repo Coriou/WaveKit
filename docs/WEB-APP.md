@@ -32,6 +32,17 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 - Labels on the peaks say what WaveKit identified there (`DMR · CC 1`, `AIS · MMSI …`). Settings ›
   Spectrum › Signal labels chooses how many you see.
 - Right-click a signal for its menu, which includes **Decode as…** to try a decoder on it.
+- Signals close together share one tag with a count (`DMR · CC 1 +2`). Click it for a list of the
+  grouped signals; each row has a **Tune** button.
+- When found signals lie outside the visible span, a marker at that edge shows how many, with an
+  arrow (its tooltip reads `3 signals outside view →`). Clicking it asks "Tune to … MHz?" for the
+  nearest of them first; it never retunes on its own.
+- Click a tag to see what it is: the protocol (`DMR` once verified; before that `Likely DMR`,
+  `Maybe DMR` or `Heard`), a muted `likely <kind>` hint (for example `likely ISM device`) when nothing has been verified
+  yet, the next step from the decoders that cover its frequency (for example "Listen to check",
+  "Widen the capture so … fits" or "No decoder covers this frequency; run identify") and a
+  **Tune** button. Clicking a tag never tunes by itself. The same `likely …` hint and next step
+  appear beside unverified rows in the Scanner lists.
 
 ### The tuned card
 
@@ -54,6 +65,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
+  If the core rate-limits a request, Activity retries by itself (up to 3 times, waiting at most
+  10 s) and, if retrying stops, shows `rate limited, retry in N s` (or `rate limited, retry later`).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
 - **Recordings:** recordings kept by the core, to play, search and keep.

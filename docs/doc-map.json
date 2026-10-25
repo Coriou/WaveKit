@@ -6,7 +6,9 @@
 				"web/src/features/",
 				"web/src/shell/",
 				"web/src/spectrum/",
-				"web/src/pwa/"
+				"web/src/pwa/",
+				"web/src/plot/",
+				"web/src/data/"
 			],
 			"docs": ["docs/WEB-APP.md"]
 		},
