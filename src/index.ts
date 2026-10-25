@@ -231,6 +231,8 @@ import {
 	liveAudioMonitoring,
 } from "./core/scanner/analog-evidence.js"
 import type { AnalogEvidenceLog } from "./core/scanner/analog-evidence.js"
+import { createDataDecodeGate } from "./core/scanner/data-decode-gate.js"
+import type { DataDecodeGate } from "./core/scanner/data-decode-gate.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder, DecoderConfig } from "./decoders/types.js"
@@ -673,13 +675,36 @@ export function feedAnalogEvidence(
 		Partial<Pick<AnalogTransmissionTracker, "pending">>,
 	log: Pick<AnalogEvidenceLog, "record"> &
 		Partial<Pick<AnalogEvidenceLog, "setPending">>,
+	dataGate?: Pick<DataDecodeGate, "hold">,
 ): void {
 	tracker.on("transmission", event => {
-		log.record(event)
+		if (event.state !== "closed" || dataGate === undefined) {
+			log.record(event)
+			return
+		}
+		// Detection quality R4.2: a close the gate marks as data carries `data: true`.
+		dataGate.hold(event, isData => {
+			log.record(isData ? { ...event, data: true } : event)
+		})
 	})
 	// WG10 R2: identify counts a not yet published opening at its deadline as `timeout`.
 	if (typeof tracker.pending === "function")
 		log.setPending?.(() => tracker.pending?.() ?? null)
+}
+
+/**
+ * Detection quality R4: stops the tracker first (its final close is held by the gate),
+ * then the gate, which delivers every held close at once as not-data.
+ */
+export function stopAnalogTransmissions(
+	tracker: Pick<AnalogTransmissionTracker, "stop">,
+	dataGate: Pick<DataDecodeGate, "stop">,
+): void {
+	try {
+		tracker.stop()
+	} finally {
+		dataGate.stop()
+	}
 }
 
 /**
@@ -2247,6 +2272,9 @@ async function main(): Promise<void> {
 
 		// Activity runs when config.activity.enabled (the default). A failed probe or open
 		// logs and leaves the rest of WaveKit running.
+		// Detection quality R4: admitted paging/APRS receptions feed the data-decode gate, so a
+		// pager burst on the live channel is not stored as an analog voice transmission.
+		const dataGate = createDataDecodeGate()
 		const activity = await startActivityRuntime({
 			...activityConfigOptions(config.activity),
 			stateDir: config.stateDir,
@@ -2256,6 +2284,9 @@ async function main(): Promise<void> {
 			},
 			discloseErrors: !protectedMode,
 			resolveProvenance: decoderProvenance.lookup,
+			onEnvelope: env => {
+				dataGate.noteEnvelope(env)
+			},
 		})
 		// Own before checkpoint: a stop during open must still close the workers.
 		own(8, () => activity.close())
@@ -2655,6 +2686,7 @@ async function main(): Promise<void> {
 				wsBroadcaster.broadcastLiveAudioTransmission(event)
 			},
 			sink: () => activity.transmissionSink(),
+			dataGate,
 			// WG10 activity hygiene: short or carrier-less squelch openings are not published.
 			onSuppressed: (reason, event) => {
 				log.debug(
@@ -2668,14 +2700,16 @@ async function main(): Promise<void> {
 				)
 			},
 		})
-		feedAnalogEvidence(transmissions, analogEvidence)
+		feedAnalogEvidence(transmissions, analogEvidence, dataGate)
 		feedLiveChannelTone(transmissions, liveDemod)
-		own(7, () => transmissions.stop())
+		// The final close is held by the gate; stopping the gate delivers it as not-data
+		// before Activity (own 8) and the scanner (own 40 and later) close.
+		own(7, () => stopAnalogTransmissions(transmissions, dataGate))
 		shutdown.register({
 			name: "analog-transmissions",
 			handler: async () => {
 				log.info("Shutting down analog transmissions")
-				transmissions.stop()
+				stopAnalogTransmissions(transmissions, dataGate)
 			},
 			timeout: 1000,
 		})

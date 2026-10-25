@@ -13,7 +13,7 @@ import type {
 	AnalogTransmissionPayload,
 } from "./storage/contract.js"
 import type { ActivityLimits } from "./storage/limits.js"
-import type { ActivityProvenanceLookup } from "./types.js"
+import type { ActivityProvenanceLookup, DecodeEnvelope } from "./types.js"
 
 export type ActivityFailureCode =
 	| "ACTIVITY_UNAVAILABLE"
@@ -103,6 +103,12 @@ export interface StartActivityRuntimeOptions {
 	 * the ingress unchanged. Null or omitted keeps null provenance (pre-WG3 behaviour).
 	 */
 	resolveProvenance?: ActivityProvenanceLookup | null
+	/**
+	 * Detection quality R4: called with the presented envelope of each reception the
+	 * store admitted (after coalescing, rate and queue admission), never for a dropped
+	 * one. A throwing callback is ignored; it never reaches the decoder path.
+	 */
+	onEnvelope?: (envelope: DecodeEnvelope) => void
 }
 
 /** Service that routes never call while Activity is disabled or unavailable. */
@@ -324,7 +330,21 @@ export async function startActivityRuntime(
 		}
 		const ingress = ingressMod.createActivityIngress({
 			sink: (envelope, present) => {
-				store.admit(envelope, present)
+				const onEnvelope = options.onEnvelope
+				if (onEnvelope === undefined) {
+					store.admit(envelope, present)
+					return
+				}
+				// The store presents only a kept reception; the callback reuses that result.
+				let presented: DecodeEnvelope | undefined
+				const lazy = (): DecodeEnvelope => (presented ??= present())
+				const result = store.admit(envelope, lazy)
+				if (!result.admitted) return
+				try {
+					onEnvelope(presented ?? lazy())
+				} catch {
+					// Never into the decoder path.
+				}
 			},
 			logger: options.logger,
 			resolveProvenance: options.resolveProvenance ?? null,
