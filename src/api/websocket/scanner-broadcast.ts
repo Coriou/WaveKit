@@ -6,6 +6,7 @@ import type { EventEmitter } from "node:events"
 import type {
 	ScanJob,
 	ScannerActivityEventData,
+	ScannerDiscoveriesResyncEventData,
 	ScannerDiscoveryEventData,
 	ScannerIdentifyEventData,
 	ScannerProgressEventData,
@@ -32,6 +33,11 @@ export interface ScannerBroadcastSource extends Pick<EventEmitter, "off"> {
 		listener: (a: ScannerActivityEventData) => void,
 	): unknown
 	on(event: "status", listener: (s: ScannerStatus) => void): unknown
+	/** Band inspection UX req 3.2: startup consolidation past 256 groups. */
+	on(
+		event: "discoveries-resync",
+		listener: (d: ScannerDiscoveriesResyncEventData) => void,
+	): unknown
 	on(
 		event: "identify",
 		listener: (d: ScannerIdentifyEventData) => void,
@@ -72,6 +78,12 @@ export function wireScannerBroadcasts(
 			{ type: "scanner:discovery", data: d },
 			"state",
 		)
+	const onResync = (d: ScannerDiscoveriesResyncEventData) =>
+		limiter.offer(
+			"discoveries-resync",
+			{ type: "scanner:discoveries-resync", data: d },
+			"state",
+		)
 	const onActivity = (a: ScannerActivityEventData) =>
 		limiter.offer(
 			`activity:${a.observationId}`,
@@ -93,6 +105,7 @@ export function wireScannerBroadcasts(
 	scanner.on("job", onJob)
 	scanner.on("progress", onProgress)
 	scanner.on("discovery", onDiscovery)
+	scanner.on("discoveries-resync", onResync)
 	scanner.on("activity", onActivity)
 	scanner.on("status", onStatus)
 	scanner.on("identify", onIdentify)
@@ -102,6 +115,7 @@ export function wireScannerBroadcasts(
 			scanner.off("job", onJob)
 			scanner.off("progress", onProgress)
 			scanner.off("discovery", onDiscovery)
+			scanner.off("discoveries-resync", onResync)
 			scanner.off("activity", onActivity)
 			scanner.off("status", onStatus)
 			scanner.off("identify", onIdentify)

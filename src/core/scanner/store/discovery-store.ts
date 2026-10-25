@@ -136,6 +136,7 @@ import type {
 	PlanProbe,
 } from "./consolidation.js"
 import type { CompatibilitySide } from "./compatibility.js"
+import { AbsorbedIdIndex } from "./absorbed-id-index.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -833,6 +834,8 @@ export class DiscoveryStore
 	private keptBlockedWarned = 0
 	/** WG10 req 1.5: merge aliases (O(1) owner lookup). */
 	private readonly aliasTable = new RecordingAliasTable()
+	/** Band inspection UX req 3.1: absorbed id -> survivor, in memory only. */
+	private readonly absorbedIndex = new AbsorbedIdIndex()
 	/**
 	 * WG11 req 3.1-3.4 (lane SC). `revisions`: bumped by the mutating helpers only when a value the
 	 * record's JSON holds changes, so "no change" needs no before/after stringify. `members` mirrors
@@ -1395,9 +1398,12 @@ export class DiscoveryStore
 	applyConsolidation(plan: { groups: readonly ConsolidationGroup[] }): {
 		groups: number
 		absorbed: number
+		/** Per applied group: the survivor and every id it absorbed, sorted (not capped). */
+		merges: { survivor: string; mergedIds: string[] }[]
 	} {
 		let groups = 0
 		let absorbed = 0
+		const merges: { survivor: string; mergedIds: string[] }[] = []
 		for (const g of plan.groups) {
 			const keep = this.discoveries.get(g.survivor)
 			if (keep === undefined || hasOperatorState(keep)) continue
@@ -1415,10 +1421,14 @@ export class DiscoveryStore
 			if (op.merged.length > 0) {
 				groups += 1
 				absorbed += op.merged.length
+				merges.push({
+					survivor: keep.id,
+					mergedIds: op.merged.map(([, drop]) => drop).sort(compareText),
+				})
 			}
 			this.finish("rekey", op)
 		}
-		return { groups, absorbed }
+		return { groups, absorbed, merges }
 	}
 
 	/** DQ 7.1: a record's frozen values for the consolidation predicate. */
@@ -1798,6 +1808,20 @@ export class DiscoveryStore
 			return true
 		}
 		return false
+	}
+
+	/**
+	 * Band inspection UX req 3.1: the live discovery `discoveryId` was merged into, by the recording
+	 * aliases first, then the bounded absorbed-id index. Undefined for a live, unknown or evicted id.
+	 */
+	survivorOf(discoveryId: string): string | undefined {
+		if (this.discoveries.has(discoveryId)) return undefined
+		const owner =
+			this.aliasTable.aliasOwner(discoveryId) ??
+			this.absorbedIndex.resolve(discoveryId)
+		return owner !== undefined && this.discoveries.has(owner)
+			? owner
+			: undefined
 	}
 
 	/** WG10 req 1.5: the live discovery that adopted `discoveryId`'s folder in a merge. */
@@ -3597,6 +3621,7 @@ export class DiscoveryStore
 			mark(op, partner.id, "updated")
 		}
 		this.adoptAliases(op, keep.id, drop.id)
+		this.absorbedIndex.record(drop.id, keep.id)
 		this.removeDiscovery(drop.id)
 		op.discoveries.delete(drop.id)
 		op.deleted.push(drop.id)

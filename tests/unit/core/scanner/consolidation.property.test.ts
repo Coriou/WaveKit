@@ -175,6 +175,7 @@ describe("consolidation properties", () => {
 				expect(store.applyConsolidation(plan)).toEqual({
 					groups: 0,
 					absorbed: 0,
+					merges: [],
 				})
 				expect(shape(store)).toEqual(once)
 			}),

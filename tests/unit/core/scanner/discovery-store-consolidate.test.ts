@@ -38,7 +38,11 @@ describe("legacy consolidation (DQ 7.10)", () => {
 		])
 		const plan = store.consolidationPlan()
 		expect(plan.groups).toEqual([{ survivor: "d_a", members: ["d_b"] }])
-		expect(store.applyConsolidation(plan)).toEqual({ groups: 1, absorbed: 1 })
+		expect(store.applyConsolidation(plan)).toEqual({
+			groups: 1,
+			absorbed: 1,
+			merges: [{ survivor: "d_a", mergedIds: ["d_b"] }],
+		})
 		const a = store.get("d_a")
 		expect(store.get("d_b")).toBeUndefined()
 		expect(a?.observationCount).toBe(80)
@@ -321,7 +325,11 @@ describe("consolidation at load through ScannerPersistence (DQ 7.6)", () => {
 			if (read.kind === "ok") again.applyConsolidation(read.plan)
 			expect(shape(again)).toEqual(shape(reference))
 			// applying the plan again is a no-op
-			expect(again.applyConsolidation(plan)).toEqual({ groups: 0, absorbed: 0 })
+			expect(again.applyConsolidation(plan)).toEqual({
+				groups: 0,
+				absorbed: 0,
+				merges: [],
+			})
 			await q.writeSnapshotOf(again)
 			await q.removeConsolidationPlan()
 			expect(await readdir(dir)).not.toContain("consolidation-plan.json")

@@ -1,6 +1,13 @@
 import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
+import { buildCoverageIndex } from "./discovery-coverage.js"
+import type { CoverageIndex } from "./discovery-coverage.js"
+import {
+	ConsolidationEventQueue,
+	applyConsolidationSlices,
+	emitWhenListened,
+} from "./consolidation-events.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
 import { applyRangePatch } from "./plan/range-edits.js"
 import {
@@ -550,6 +557,10 @@ export class ScannerService extends EventEmitter {
 	}
 	private readonly channelTier: ScannerChannelTier
 	private readonly log: Logger
+	/** Band inspection UX req 3.2: consolidation events raised before a listener attached. */
+	private readonly consolidationEvents = new ConsolidationEventQueue()
+	/** Band inspection UX req 1.4: over-long decoder ids already logged (bounded). */
+	private readonly coverageSkipLogged = new Set<string>()
 	private readonly now: () => number
 	private readonly storageDir: string
 	private readonly persistence: ScannerPersistence
@@ -1430,17 +1441,16 @@ export class ScannerService extends EventEmitter {
 					groups,
 				})
 			}
-			// DQ 7.8: slices of 16 groups, yielding between them (no ingest runs yet).
-			const applied = { groups: 0, absorbed: 0 }
-			for (let i = 0; i < groups.length; i += CONSOLIDATE_SLICE_GROUPS) {
-				const part = this.store.applyConsolidation({
-					groups: groups.slice(i, i + CONSOLIDATE_SLICE_GROUPS),
-				})
-				applied.groups += part.groups
-				applied.absorbed += part.absorbed
-				if (i + CONSOLIDATE_SLICE_GROUPS < groups.length)
-					await new Promise<void>(resolve => setImmediate(resolve))
-			}
+			// DQ 7.8: slices of 16 groups, yielding between them (no ingest runs yet). Band inspection
+			// UX req 3.2: per-group merged events, or one resync past 256 groups.
+			const applied = await applyConsolidationSlices({
+				groups,
+				sliceGroups: CONSOLIDATE_SLICE_GROUPS,
+				apply: slice => this.store.applyConsolidation({ groups: slice }),
+				survivor: id => this.store.get(id),
+				emit: e => emitWhenListened(this, this.consolidationEvents, e),
+				yieldTurn: () => new Promise<void>(resolve => setImmediate(resolve)),
+			})
 			this.log.info(
 				{
 					resumed,
@@ -2110,6 +2120,50 @@ export class ScannerService extends EventEmitter {
 
 	getDiscovery(id: string): Discovery | undefined {
 		return this.store.get(id)
+	}
+
+	/**
+	 * Band inspection UX req 3.1: the live record of `id`, or of the survivor a merge absorbed
+	 * `id` into (recording aliases first, then the bounded absorbed-id index), with
+	 * `absorbedInto`/`requestedId`. Undefined for an unknown or evicted id.
+	 */
+	resolveDiscovery(id: string): Discovery | undefined {
+		const live = this.store.get(id)
+		if (live) return live
+		const survivor = this.store.survivorOf(id)
+		if (survivor === undefined) return undefined
+		const record = this.store.get(survivor)
+		return record
+			? { ...record, absorbedInto: survivor, requestedId: id }
+			: undefined
+	}
+
+	/**
+	 * Band inspection UX req 1.4: one coverage index over every decoder placement, built per
+	 * request. Null when decoder status is unavailable (the field is then omitted).
+	 */
+	discoveryCoverage(): CoverageIndex | null {
+		let statuses: unknown
+		try {
+			statuses = this.deps.decoders.getAllStatus()
+		} catch (err: unknown) {
+			this.log.debug(
+				{ err },
+				"Decoder status unavailable for discovery coverage",
+			)
+			return null
+		}
+		return buildCoverageIndex(statuses, {
+			onSkippedDecoderId: decoderId => {
+				if (this.coverageSkipLogged.has(decoderId)) return
+				if (this.coverageSkipLogged.size >= 64) return
+				this.coverageSkipLogged.add(decoderId)
+				this.log.warn(
+					{ decoderIdLength: decoderId.length },
+					"Decoder id is not 1-64 characters; left out of discovery coverage",
+				)
+			},
+		})
 	}
 
 	discoveryObservations(
