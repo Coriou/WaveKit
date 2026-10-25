@@ -241,25 +241,19 @@ curl http://localhost:9000/api/live-audio/presets
 Configuration via YAML (`config/default.yaml`) or environment variables:
 
 ```yaml
-# Sources
+# Sources: an rtl_tcp or rtlmux receiver, such as the Pi SDR host
 sources:
-  - id: "sdrpp-main"
-    type: "sdrpp-network"
-    host: "<sdrpp-host>" # address of the machine running SDR++
+  - id: "rtl-pi"
+    type: "rtl_tcp"
+    host: "<pi-address>"
     port: 5555
     caps:
-      kind: "audio_pcm"
-      sampleRate: 48000
-      format: "FLOAT32LE"
+      kind: "iq"
+      format: "U8_IQ"
+      sampleRate: 2048000
 
-# Decoders
-decoders:
-  - id: "dsd"
-    type: "dsd-fme"
-    enabled: true
-    sourceId: "sdrpp-main"
-    options:
-      mode: "auto"
+# Decoders: see config/default.yaml for every type and its options
+decoders: []
 
 # API
 api:
@@ -272,12 +266,12 @@ audio:
   format: "S16LE"
   sampleRate: 48000
 
-# Tuner relay (RTL-TCP)
+# Tuner relay (RTL-TCP): needs an rtl_tcp source with U8_IQ IQ, like the one above
 tunerRelay:
   enabled: true
   host: "0.0.0.0"
   port: 1234
-  sourceId: "sdrpp-main"
+  sourceId: "rtl-pi"
   controlPolicy: "exclusive"
 ```
 
@@ -286,7 +280,7 @@ tunerRelay:
 ```bash
 WAVEKIT_API_PORT=9000
 WAVEKIT_LOG_LEVEL=debug
-WAVEKIT_SOURCES_0_HOST="<sdrpp-host>"
+WAVEKIT_SOURCES_0_HOST="<pi-address>"
 WAVEKIT_TUNER_RELAY__ENABLED=true
 WAVEKIT_TUNER_RELAY__PORT=1234
 ```

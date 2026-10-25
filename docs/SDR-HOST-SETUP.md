@@ -114,7 +114,7 @@ In WaveKit's `config/custom.yaml`:
 sources:
   - id: "pi-sdr"
     type: "rtl_tcp"
-    host: "192.168.1.50" # IP of sdr-host
+    host: "<sdr-host-address>" # address of the sdr-host
     port: 5555
     caps:
       kind: "iq"
