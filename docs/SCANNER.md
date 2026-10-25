@@ -204,6 +204,28 @@ Env overrides: `WAVEKIT_SCANNER__CPU_BUDGET_CORES=0.5`, `WAVEKIT_SCANNER__PASSIV
 
 One discovery per emitter: same frequency key, protocol family and identity. Two DMR networks on one channel are two discoveries, cross-linked as co-channel. An observation surfaces after its channel gate passes, or after an accepted identity decode places a short burst. Observations are kept per transmission with signal statistics and the decode evidence.
 
+### Detection quality: admission, association and data bursts
+
+A discovery means something transmitted there. These rules keep intermod products, noise and pager bursts out of the list and keep one emitter on one record. Full rules, fixtures and measurements: [detection quality spec](specs/detection-quality/requirements.md).
+
+**Admission.** An observation that no decode proves creates a discovery only with evidence of a signal:
+
+- a channel SNR of at least 18 dB, or at least 25 dB when the front end was overloaded (`overload` flag; intermod products of a clipping carrier stay below it);
+- otherwise (not overloaded, under 18 dB) it is held as pending, not stored or shown. It is promoted when a later sighting reaches 18 dB, or when 3 distinct observations within 10 min of the first have a median SNR of at least 15 dB. Overloaded weak sightings never enter pending;
+- an observation with a missing or non-finite centre or SNR is dropped.
+
+A decoded observation is admitted as before. The channel gate counts only blocks at least 3 dB over the floor toward its minimum on-time (300 ms, 100 ms for a burst).
+
+**Association.** One record per emitter:
+
+- a sighting within 1 kHz of a record on the same source, with an occupied bandwidth 0.5 to 2 times the record's median, joins it whatever family the classifier gave it, so a DMR signal classed analog-fm one time and fsk4 the next stays one discovery; a plain carrier joins its own record the same way;
+- a record lists at most 8 co-channel partners, nearest first; partners that no longer exist or have drifted out of tolerance are dropped on both sides;
+- a DMR, P25 or YSF talker id decoded on a record 6 to 30 kHz from the record that already holds it, at the same time and at least 10 dB weaker, is an adjacent-channel copy and stays on the stronger record.
+
+**Strong overs next to ambient carriers.** A sighting at least 20 dB stronger or weaker than a record and at least 1.5 times wider or narrower does not attach to it; it gets its own record. Both differences are needed, so a fading mobile or a noise record whose width swings stays one record. This applies once the record has 3 observations, to every merge path. An overloaded sighting never raises a record's best level, and a record's class is the majority of its last 64 observations, not the latest one.
+
+**Pager data is not voice.** A closed live-audio transmission is not stored as an analog voice (`analog-transmission`) Activity row when Activity accepted a paging or APRS decode from the same source within 1 250 Hz of its frequency, during the transmission or up to 1 s before or after it, on a channel whose tuning WaveKit commands or relays. The pager decode is the record of that burst, and identify attaches no analog proof for it (no `analog-fm` candidate). The decision waits 1 s after the close, so voice rows appear about 1 s after the transmission ends. The `live-audio:transmission` WebSocket events are unchanged. When anything is unknown (no provenance, unverified tuning, more than 8 closes waiting) or at shutdown, the transmission is stored as voice, as before.
+
 To find discoveries by what a decoder reported, `GET /api/scanner/discoveries?identity=<kind>:<value>` (for example `identity=dmr-cc:1` or `identity=pocsag-capcode:1234567`) keeps those whose identity has that kind and value, ignoring case and surrounding spaces. The free-text `q` matches the operator label or the identity value; talkgroups, callsigns and other metadata are not searched. See [API.md](API.md#get-apiscannerdiscoveries).
 
 Storage layout under `scanner.storage.dir`:

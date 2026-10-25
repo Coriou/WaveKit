@@ -4540,7 +4540,10 @@ The store holds three kinds:
   searchable text, and a DCS code is indexed under both spellings
   (`DCS 023N` and its twin `DCS 047I`), so a search for either finds the row.
   Older rows have no `tone` (or no `tone.dcs`). A WG7 `noise`-mode row carries
-  `squelchMode: "noise"` and `noiseQuietingDb`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
+  `squelchMode: "noise"` and `noiseQuietingDb`. A close is stored 1 s after it ends,
+  and not at all when an accepted paging or APRS reception matches it (pager data is
+  not voice; see [SCANNER.md](SCANNER.md#detection-quality-admission-association-and-data-bursts)).
+  Search with `kinds=analog-transmission`, by source or frequency. Admission is
   non-blocking and counted like decoder receptions, with one per-decoder
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
