@@ -367,6 +367,10 @@ export interface DiscoveryStoreMeta {
 	storeRevision: number
 }
 
+/** Band inspection UX req 3.3: headers of a successful DELETE of a discovery (204, no body). */
+export const DISCOVERY_STORE_EPOCH_HEADER = "x-wavekit-store-epoch"
+export const DISCOVERY_STORE_REVISION_HEADER = "x-wavekit-store-revision"
+
 /** Band inspection UX req 1.4: at most this many coverage entries per discovery. */
 export const DISCOVERY_COVERAGE_MAX = 3
 /** Band inspection UX req 1.4: decoder ids longer than this are never reported. */

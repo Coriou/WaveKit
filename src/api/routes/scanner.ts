@@ -22,6 +22,10 @@ import {
 } from "./legacy-audio-host.js"
 import { createReadStream } from "node:fs"
 import type { ScannerIdentifyRequest } from "@wavekit/api-types"
+import {
+	DISCOVERY_STORE_EPOCH_HEADER,
+	DISCOVERY_STORE_REVISION_HEADER,
+} from "@wavekit/api-types"
 import type {
 	FastifyInstance,
 	FastifyPluginAsync,
@@ -67,8 +71,8 @@ import {
 } from "./scanner-schemas.js"
 
 /** Band inspection UX req 3.3: on a successful DELETE of a discovery (204, no body). */
-export const DISCOVERY_EPOCH_HEADER = "x-wavekit-store-epoch"
-export const DISCOVERY_REVISION_HEADER = "x-wavekit-store-revision"
+export const DISCOVERY_EPOCH_HEADER = DISCOVERY_STORE_EPOCH_HEADER
+export const DISCOVERY_REVISION_HEADER = DISCOVERY_STORE_REVISION_HEADER
 
 export type ScannerRouteService = Pick<
 	ScannerService,

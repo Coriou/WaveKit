@@ -3363,13 +3363,16 @@ and additive; older cores omit them.
   `x-wavekit-store-revision` (the store revision as the answer leaves, at or after the
   removal).
 
-To apply an answer or event, order it on two keys: the record's `revision`, then the
-revision it was read at (the answer's `storeRevision`; an event's own `revision`). Keep
-per id the highest pair seen and apply a record when its pair is at least that high. An
-equal pair is the same record read again: apply it, since `coverage` is added when a
-record is read (never on events) and can change without a new revision, so keep the
-`coverage` you hold when an event arrives without one. A deletion (DELETE, `deleted`, an
-id in `mergedIds`) is final, since ids are never reused.
+To apply an answer or event, order it on the record's `revision`, then the revision it
+was read at (the answer's `storeRevision`; an event's own `revision`), then your own
+order of requests: when the request started for a read, when it arrived for an event or a
+mutation's answer. Keep per id the highest seen and apply a record, all its fields, when
+it is at least that high. Two reads equal on both revisions are the same record, but
+`coverage` and `hint` are worked out when it is read and can change without a new
+revision: the later-started read is the fresher view. An event carries no `coverage`:
+keep the one you hold. A deletion (DELETE, `deleted`, an id in `mergedIds`) is final,
+since ids are never reused; take its revision from the DELETE headers, and when they are
+missing (a 404, an older core) treat the deletion as final without a revision.
 
 A page is complete only when it is the first page (asked without `cursor`) and its
 `nextCursor` is `null`; the last page of a longer list has `nextCursor: null` too but
