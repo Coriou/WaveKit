@@ -3361,7 +3361,7 @@ and additive; older cores omit them.
   same revision) and `storeEpoch`.
 - `DELETE` answers 204 with the headers `x-wavekit-store-epoch` and
   `x-wavekit-store-revision` (the store revision as the answer leaves, at or after the
-  removal).
+  removal). CORS exposes both to browsers on another origin.
 
 To apply an answer or event, order it on the record's `revision`, then the revision it
 was read at (the answer's `storeRevision`; an event's own `revision`), then your own

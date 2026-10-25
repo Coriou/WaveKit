@@ -626,8 +626,9 @@ describe("API Server", () => {
 				expect(response.headers["access-control-allow-origin"]).toBe(
 					"http://web.example:5173",
 				)
+				// band inspection UX req 3.3: a discovery DELETE's store headers too
 				expect(response.headers["access-control-expose-headers"]).toBe(
-					"Retry-After",
+					"Retry-After, x-wavekit-store-epoch, x-wavekit-store-revision",
 				)
 				const body = JSON.parse(response.body) as {
 					code: string

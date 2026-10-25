@@ -13,6 +13,10 @@
 
 import type { StationIdentity } from "@wavekit/api-types"
 import {
+	DISCOVERY_STORE_EPOCH_HEADER,
+	DISCOVERY_STORE_REVISION_HEADER,
+} from "@wavekit/api-types"
+import {
 	CONFIG_EXPORT_REQUIRES_ACCESS,
 	DECODER_SETTINGS_REQUIRES_ACCESS,
 	RECORDING_KEEPS_REQUIRES_ACCESS,
@@ -142,6 +146,13 @@ import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/ty
 const CORRELATION_ID_HEADER = "x-correlation-id"
 /** WG2 req 9: vessel, APRS and mesh `*:update` messages, at most one per entity per 2 s. */
 const ENTITY_UPDATE_WINDOW_MS = 2000
+
+/** Response headers a browser on another origin may read (CORS `Access-Control-Expose-Headers`). */
+const EXPOSED_HEADERS = [
+	"Retry-After",
+	DISCOVERY_STORE_EPOCH_HEADER,
+	DISCOVERY_STORE_REVISION_HEADER,
+] as const
 
 /**
  * WG2 req 9.2 identities: a change is sent at once. JSON tuples, so field text containing a
@@ -412,11 +423,11 @@ export class ApiServer {
 			: undefined
 		if (this.access)
 			this.app.addHook("onSend", async (_request, reply, payload) => {
-				if (
-					reply.hasHeader("Retry-After") &&
-					reply.hasHeader("Access-Control-Allow-Origin")
-				)
-					reply.header("Access-Control-Expose-Headers", "Retry-After")
+				if (reply.hasHeader("Access-Control-Allow-Origin")) {
+					const exposed = EXPOSED_HEADERS.filter(h => reply.hasHeader(h))
+					if (exposed.length > 0)
+						reply.header("Access-Control-Expose-Headers", exposed.join(", "))
+				}
 				return payload
 			})
 
@@ -1083,8 +1094,9 @@ export class ApiServer {
 				origin: true, // Allow all origins (can be restricted in production)
 				methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 				allowedHeaders: ["Content-Type", "Authorization"],
-				// Browsers on another origin read a 429's retry hint only when exposed.
-				exposedHeaders: ["Retry-After"],
+				// Browsers on another origin read a 429's retry hint and a discovery DELETE's
+				// store revision (band inspection UX req 3.3) only when exposed.
+				exposedHeaders: [...EXPOSED_HEADERS],
 				credentials: true,
 			})
 

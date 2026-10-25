@@ -266,6 +266,25 @@ describe("actual protected ApiServer mount", () => {
 		)
 	})
 
+	it("exposes a discovery DELETE's store epoch and revision to the allowed browser origin", async () => {
+		const env = await setup()
+		env.app.get("/api/test-store-headers", async (_request, reply) => {
+			void reply
+				.header("x-wavekit-store-epoch", "e1")
+				.header("x-wavekit-store-revision", "9")
+			return reply.code(204).send()
+		})
+		await env.server.start()
+		const response = await env.app.inject({
+			url: "/api/test-store-headers",
+			headers: { ...env.machine, origin },
+		})
+		expect(response.headers["access-control-allow-origin"]).toBe(origin)
+		expect(response.headers["access-control-expose-headers"]).toBe(
+			"x-wavekit-store-epoch, x-wavekit-store-revision",
+		)
+	})
+
 	it("validates health Host and protects real status/source/docs/unknown handlers before side effects", async () => {
 		const env = await setup()
 		await env.server.start()
