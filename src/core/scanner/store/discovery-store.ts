@@ -2567,6 +2567,8 @@ export class DiscoveryStore
 		this.touch(to)
 		this.refresh(from)
 		this.refresh(to)
+		this.applyMajority(from)
+		this.applyMajority(to)
 		if (!this.observationIndex.has(o.id)) {
 			op.removedObservations.push(o.id)
 			op.trimmedMoves.push(plainCopy(o))
@@ -3257,8 +3259,23 @@ export class DiscoveryStore
 		mark(op, keep.id, "merged")
 		op.discoveries.add(keep.id)
 		this.refresh(keep)
+		this.applyMajority(keep)
 		this.dropReaders(readers)
 		this.invalidateLabel(keep.id)
+	}
+
+	/** DQ 3.4: re-applies the majority class after observations moved (merge, rehome). */
+	private applyMajority(d: Discovery): void {
+		const majority = this.mediansOf(d.id)?.majority
+		if (
+			majority === undefined ||
+			d.confidence === "decoded" ||
+			d.class === majority
+		)
+			return
+		this.markDirty(d.id)
+		this.touch(d)
+		d.class = majority
 	}
 
 	/**

@@ -227,8 +227,11 @@ the measured strong-next-to-ambient case from both.
 observation, and `settle` and `absorb` for two records (same source, key, family and
 identity today). A refused settle leaves both records and lists them as co-channel partners.
 
-3.3 `signal.best` shall be updated only from an observation that 3.1 does not refuse and is
-not flagged `overload`. `signal.last` keeps today's rule. When `absorb` merges two
+3.3 `signal.best` shall be updated only from an observation that is not flagged `overload`
+and that 3.1 does not refuse: on a record with 3 or more observations it must be found
+compatible; on a record with fewer than 3 (compatibility undecided) any non-overload
+observation with a finite SNR may raise it, so a young real signal that gets stronger raises
+its best. `signal.last` keeps today's rule. When `absorb` merges two
 compatible records, the surviving best is the better of the two bests, counting a best only
 when the observation that set it is not overload-flagged and, for the absorbed record's best,
 is not refused by (and, with 3 or more observations, is found compatible with) the
@@ -240,10 +243,14 @@ the most recent of the tied classes; edge-flagged observations and observations 
 observation's class. Each observation's vote is persisted with it (an optional field of the
 store's persisted and journaled observation form, never in the DTO); an observation without
 the field (written before this change) does not vote. Without any vote the classification's
-own class applies as before.
+own class applies as before. The majority is re-applied (and journaled) whenever observations
+change records: every merge (`settle`, `absorb`) and every move (`rehome`).
 
 3.5 Safe defaults: fewer than 3 observations, or a non-finite median or observation peak or
-OBW, skips 3.1 for merging (merge as today) but the observation cannot raise `signal.best`.
+OBW, skips 3.1 for merging (merge as today). For `signal.best` (3.3): on a record with fewer
+than 3 observations an undecided result allows the update from a non-overload observation
+with a finite SNR; on a record with 3 or more, a non-finite median or observation value means
+the observation cannot raise `signal.best`.
 The one exception is the two-record case of 3.1 with exactly one established record, whose
 young side is tested observation by observation; two young records are never split.
 

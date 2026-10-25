@@ -372,6 +372,52 @@ describe("DQ 2: one emitter, one discovery fixtures", () => {
 })
 
 describe("review repros", () => {
+	it("a young record's best rises from a stronger non-overload observation (3.3, 3.5)", () => {
+		const { store } = newStore()
+		const id = store.ingest(
+			obs({ id: "a", centreHz: F, at: T0, snrDb: 20 }),
+		).discoveryId
+		store.ingest(obs({ id: "b", centreHz: F, at: T0 + 2_000, snrDb: 40 }))
+		expect(store.get(id ?? "")?.signal.best.snrDb).toBe(40)
+	})
+
+	it("a young record's best does not rise from an overload observation", () => {
+		const { store } = newStore()
+		const id = store.ingest(
+			obs({ id: "a", centreHz: F, at: T0, snrDb: 20 }),
+		).discoveryId
+		store.ingest(
+			obs({ id: "b", centreHz: F, at: T0 + 2_000, snrDb: 40, overload: true }),
+		)
+		expect(store.discoveryIdOf("b")).toBe(id)
+		expect(store.get(id ?? "")?.signal.best.snrDb).toBe(20)
+	})
+
+	it("recomputes and journals the majority class after a merge", () => {
+		const { store, entries } = newStore()
+		for (let i = 0; i < 3; i++)
+			store.ingest(
+				obs({ id: `c${i}`, centreHz: F, at: T0 + i * 1_000, cls: "carrier" }),
+			)
+		const carrier = store.discoveryIdOf("c0") ?? ""
+		const fm = (i: number, centreHz: number): ObservationInput =>
+			obs({
+				id: `f${i}`,
+				centreHz,
+				at: T0 + 10_000 + i * 1_000,
+				cls: "analog-fm",
+			})
+		for (let i = 0; i < 5; i++) store.ingest(fm(i, F + 10_000))
+		expect(store.discoveryIdOf("f0")).not.toBe(carrier)
+		for (let i = 0; i < 5; i++) store.ingest(fm(i, F))
+		const survivor = store.discoveryIdOf("f0") ?? ""
+		expect(store.discoveryIdOf("c0")).toBe(survivor)
+		expect(store.snapshot().discoveries).toHaveLength(1)
+		expect(store.get(survivor)?.observationCount).toBe(8)
+		expect(store.get(survivor)?.class).toBe("analog-fm")
+		expectReplayEqual(store, entries)
+	})
+
 	it("keeps the class history across snapshot/restore and journal replay", () => {
 		const { store, entries } = newStore()
 		for (let i = 0; i < 10; i++)

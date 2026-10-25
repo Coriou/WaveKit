@@ -202,7 +202,8 @@ Merge paths that consult it (3.2):
   the same predicate and returns without merging if false, so any future caller is covered.
 - `absorbStats` takes `raiseBest = compatible !== false && compatible !== null &&
 !overload`; for a record with fewer than 3 observations, `raiseBest = !overload &&
-isFinite(snr)`.
+isFinite(snr)`: undecided compatibility on a young record allows a best update from a
+  non-overload observation; overload never raises best.
 - `absorb` of two compatible records keeps the better `signal.best`, skipping a best set by an
   overload-flagged observation and an absorbed best its stored observation fails against the
   survivor's medians. `rehome` (an observation moved by a decode split) applies the same
@@ -210,7 +211,9 @@ isFinite(snr)`.
 
 Class majority: `applyClassificationTo` sets `class` from the tally (edge and `unknown`
 observations excluded; ties to the most recent). The tally reads each observation's persisted
-`classVote`; a re-ingest that changes only the vote recomputes and journals the class. Protocol refinement from classification is unchanged.
+`classVote`; a re-ingest that changes only the vote recomputes and journals the class, and
+`absorb` (so every `settle` merge) and `rehome` re-apply the majority to the records whose
+observations changed. Protocol refinement from classification is unchanged.
 
 ## 4. Data is not voice
 
