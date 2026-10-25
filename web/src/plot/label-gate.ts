@@ -52,7 +52,7 @@ export interface LabelGateState {
 	readonly followed: readonly Followed[]
 	readonly nextId: number
 	/** The axis (source, epoch, span) of the newest frame; null before the first one or after a reset. */
-	readonly axis?: string | null
+	readonly axis: string | null
 }
 
 export const EMPTY_LABEL_GATE: LabelGateState = {
@@ -75,15 +75,14 @@ export interface LabelGateFrame {
 	floorDbfs: number
 	binHz: number
 	/** The frame's epoch and span: a new epoch, rate or span is a new axis (band view retune correctness). */
-	epoch?: number
-	startHz?: number
-	binCount?: number
+	epoch: number
+	startHz: number
+	binCount: number
 }
 
 /** The axis key of a frame: source, epoch, bin width, span. */
-export function frameAxisKey(frame: LabelGateFrame): string | null {
-	if (frame.epoch === undefined || frame.startHz === undefined) return null
-	return `${frame.sourceId}|${frame.epoch}|${frame.binHz}|${frame.startHz}|${frame.binCount ?? ""}`
+export function frameAxisKey(frame: LabelGateFrame): string {
+	return `${frame.sourceId}|${frame.epoch}|${frame.binHz}|${frame.startHz}|${frame.binCount}`
 }
 
 export interface LabelGateContext {
@@ -142,15 +141,10 @@ export function stepLabelGate(
 	// A retune or rate change (a new axis): what was followed on the old one is gone at once, with no
 	// fading chip, and a signal outside the frame's span is never followed (it cannot be heard there).
 	const axis = frameAxisKey(frame)
-	const fresh =
-		axis !== null && (state.axis ?? null) !== null && state.axis !== axis
+	const fresh = (state.axis ?? null) !== null && state.axis !== axis
 	const lo = frame.startHz
-	const hi =
-		frame.startHz === undefined || frame.binCount === undefined
-			? undefined
-			: frame.startHz + frame.binCount * frame.binHz
-	const inSpan = (hz: number) =>
-		lo === undefined || hi === undefined || (hz >= lo && hz <= hi)
+	const hi = frame.startHz + frame.binCount * frame.binHz
+	const inSpan = (hz: number) => hz >= lo && hz <= hi
 	const followed = (fresh ? [] : state.followed)
 		.filter(f => inSpan(f.hz))
 		.map(f => ({ ...f }))
@@ -281,7 +275,7 @@ export function stepLabelGate(
 		}
 	}
 	kept.sort((a, b) => a.hz - b.hz)
-	return { followed: kept, nextId, axis: axis ?? state.axis ?? null }
+	return { followed: kept, nextId, axis }
 }
 
 function wanted(

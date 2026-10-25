@@ -57,8 +57,7 @@ function frame(w: Window, mhz: readonly number[]): LabelGateFrame {
 }
 
 function spanOf(f: LabelGateFrame): { startHz: number; endHz: number } {
-	const start = f.startHz ?? 0
-	return { startHz: start, endHz: start + (f.binCount ?? 0) * f.binHz }
+	return { startHz: f.startHz, endHz: f.startHz + f.binCount * f.binHz }
 }
 
 /** Feeds `f` every 100 ms for `ms`. */
@@ -87,15 +86,50 @@ describe("label gate across a retune", () => {
 		expect(gatedSignals(s).some(g => g.leaving)).toBe(false)
 	})
 
-	it("treats a retune at the same rate and epoch-less span change as a new window", () => {
+	it("treats a retune at the same rate and the same epoch (only the span moves) as a new window", () => {
 		let s = feed(EMPTY_LABEL_GATE, frame(AT_155, [154.975]), 0, 1000)
 		s = stepLabelGate(
 			s,
-			frame({ centreHz: 162e6, rateHz: 2.4e6, epoch: 11 }, [162.328]),
+			frame({ centreHz: 162e6, rateHz: 2.4e6, epoch: AT_155.epoch }, [162.328]),
 			1100,
 			ALL,
 		)
 		expect(gatedSignals(s).map(g => g.hz)).toEqual([162.328e6])
+	})
+
+	it("removes old persistent and already-fading chips on the first new-axis frame", () => {
+		// 154.2 persists, 154.975 has ended and is fading when the retune comes
+		let s = feed(EMPTY_LABEL_GATE, frame(AT_155, [154.2, 154.975]), 0, 1000)
+		s = feed(s, frame(AT_155, [154.2]), 1100, 1500)
+		const before = gatedSignals(s)
+		expect(before.find(g => g.hz === 154.975e6)?.leaving).toBe(true)
+		expect(before.find(g => g.hz === 154.2e6)?.leaving).toBe(false)
+		const old = new Set(before.map(g => g.id))
+		s = stepLabelGate(s, frame(AT_466, [466.2]), 2700, ALL)
+		expect(gatedSignals(s).some(g => old.has(g.id))).toBe(false)
+	})
+
+	it("drops the old window's chips on an overlapping retune, even for a signal in both windows", () => {
+		const a: Window = { centreHz: 466.1e6, rateHz: 2.4e6, epoch: 5 }
+		const b: Window = { centreHz: 466.078e6, rateHz: 1.024e6, epoch: 6 }
+		let s = feed(EMPTY_LABEL_GATE, frame(a, [465.8, 466.2, 467]), 0, 1000)
+		const old = new Set(gatedSignals(s).map(g => g.id))
+		s = stepLabelGate(s, frame(b, [465.8, 466.2]), 1100, ALL)
+		const now = gatedSignals(s)
+		expect(now.some(g => old.has(g.id))).toBe(false)
+		expect(now.some(g => g.leaving)).toBe(false)
+	})
+
+	it("drops the old window's chips on an epoch-only change (same centre and rate)", () => {
+		let s = feed(EMPTY_LABEL_GATE, frame(AT_466, [465.8, 466.2]), 0, 1000)
+		const old = new Set(gatedSignals(s).map(g => g.id))
+		s = stepLabelGate(
+			s,
+			frame({ ...AT_466, epoch: AT_466.epoch + 1 }, [465.8, 466.2]),
+			1100,
+			ALL,
+		)
+		expect(gatedSignals(s).some(g => old.has(g.id))).toBe(false)
 	})
 
 	it("never follows a track outside the frame's span (a stale track on the payload)", () => {
@@ -172,15 +206,22 @@ describe("retune correctness properties", () => {
 					for (const w of windows) {
 						const f = frame(w, signalsIn(w, offsets))
 						const key = frameAxisKey(f)
-						s = feed(s, f, t, 1200)
-						t += 1300
-						if (key === prev) continue
-						prev = key
-						const span = spanOf(f)
-						for (const g of gatedSignals(s)) {
-							expect(g.hz).toBeGreaterThanOrEqual(span.startHz)
-							expect(g.hz).toBeLessThanOrEqual(span.endHz)
+						const old = new Set(gatedSignals(s).map(g => g.id))
+						// the FIRST frame of the new axis already carries no old id
+						s = stepLabelGate(s, f, t, ALL)
+						if (key !== prev) {
+							const first = gatedSignals(s)
+							if (prev !== null)
+								expect(first.some(g => old.has(g.id))).toBe(false)
+							const span = spanOf(f)
+							for (const g of first) {
+								expect(g.hz).toBeGreaterThanOrEqual(span.startHz)
+								expect(g.hz).toBeLessThanOrEqual(span.endHz)
+							}
 						}
+						prev = key
+						s = feed(s, f, t + 100, 1100)
+						t += 1300
 					}
 				},
 			),
@@ -305,6 +346,89 @@ describe("retune correctness properties", () => {
 				},
 			),
 			{ numRuns: 150 },
+		)
+	})
+})
+
+describe("tag anchors", () => {
+	const view = { startHz: 160e6, endHz: 162e6 }
+
+	it("keeps a saved tag's anchor on its frequency at the view's right edge", () => {
+		const [t] = placeSavedTags(
+			[{ id: "a", name: "Edge", frequencyHz: view.endHz }],
+			view,
+			{ widthPx: 1000, showLabels: true },
+		)
+		expect(t?.anchorX).toBe(1000)
+		expect(t?.x).toBeLessThan(1000)
+	})
+
+	it("keeps a discovery tag's anchor on its frequency under a reserved margin", () => {
+		const [t] = placeDiscoveryTags([discovery("d", view.startHz)], view, {
+			widthPx: 1000,
+			activeNow: new Set(),
+			now: Date.now(),
+			reserveLeftPx: 40,
+		})
+		expect(t?.anchorX).toBe(0)
+		expect(t?.x).toBeGreaterThanOrEqual(40)
+	})
+
+	it("anchors every saved and discovery tag at x = f(hz) within 1 px, edges and margins included", () => {
+		// Feature: band-view-retune-correctness, Property 5: tag anchors on their frequency
+		// Validates: Requirements WB.1, WB.4
+		fc.assert(
+			fc.property(
+				windowArb,
+				fc.integer({ min: 120, max: 2400 }),
+				fc.integer({ min: 0, max: 60 }),
+				fc.integer({ min: 0, max: 60 }),
+				fc.array(
+					fc.oneof(
+						fc.double({ min: 0, max: 1, noNaN: true }),
+						fc.constantFrom(0, 1, 1e-9, 1 - 1e-9),
+					),
+					{ maxLength: 25 },
+				),
+				(w, widthPx, left, right, fractions) => {
+					const view = {
+						startHz: w.centreHz - w.rateHz * 0.4,
+						endHz: w.centreHz + w.rateHz * 0.4,
+					}
+					const span = view.endHz - view.startHz
+					const freqs = fractions.map(f =>
+						Math.min(view.endHz, view.startHz + f * span),
+					)
+					const fx = (hz: number) => ((hz - view.startHz) / span) * widthPx
+					for (const t of placeSavedTags(
+						freqs.map((hz, i) => ({
+							id: `s${i}`,
+							name: `S${i}`,
+							frequencyHz: hz,
+						})),
+						view,
+						{ widthPx, showLabels: true },
+					)) {
+						expect(Math.abs(t.anchorX - fx(t.hz))).toBeLessThanOrEqual(1)
+						expect(t.anchorX >= -1 && t.anchorX <= widthPx + 1).toBe(true)
+					}
+					for (const t of placeDiscoveryTags(
+						freqs.map((hz, i) => discovery(`d${i}`, hz)),
+						view,
+						{
+							widthPx,
+							activeNow: new Set(),
+							now: Date.now(),
+							reserveLeftPx: left,
+							reserveRightPx: right,
+						},
+					)) {
+						expect(Math.abs(t.anchorX - fx(t.hz))).toBeLessThanOrEqual(1)
+						expect(t.anchorX >= -1 && t.anchorX <= widthPx + 1).toBe(true)
+					}
+				},
+			),
+			{ numRuns: 200 },
 		)
 	})
 })

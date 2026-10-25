@@ -72,6 +72,17 @@
 		pointer-events: none;
 	}
 
+	/* A tag's anchor: a 1 px tick on its frequency; only the tag body moves in at an edge */
+	.wk-plot-tag-anchor {
+		position: absolute;
+		top: 0;
+		width: 1px;
+		height: 4px;
+		margin-left: -0.5px;
+		background: rgba(var(--wk-accent-rgb), 0.7);
+		pointer-events: none;
+	}
+
 	/* Signal chips: solid, never blurred */
 	.wk-plot-sig {
 		position: absolute;
