@@ -8,66 +8,74 @@ import {
 interface R {
 	hz: number
 }
+const none = new Set<string>()
 
 describe("WriteOrder", () => {
-	it("applies a write only when it is strictly newer than the id's last", () => {
+	it("an upsert applies only when its version is newer than the cached one", () => {
 		const o = new WriteOrder<R>()
-		const a = o.next()
-		const b = o.next()
-		expect(o.upsert("x", { hz: 1 }, b)).toBe(true)
-		expect(o.upsert("x", { hz: 1 }, a)).toBe(false)
-		expect(o.upsert("x", { hz: 1 }, b)).toBe(false)
-		expect(o.remove("x", a)).toBe(false)
-		const c = o.next()
-		expect(o.remove("x", c)).toBe(true)
-		expect(o.upsert("x", { hz: 1 }, b)).toBe(false)
-		expect(o.upsert("x", { hz: 1 }, o.next())).toBe(true)
+		expect(o.upsert("x", { hz: 1 }, 2)).toBe(true)
+		expect(o.upsert("x", { hz: 1 }, 1)).toBe(false)
+		expect(o.upsert("x", { hz: 1 }, 2)).toBe(false)
+		expect(o.upsert("x", { hz: 1 }, 3)).toBe(true)
 	})
 
-	it("a covered query refuses older upserts of records it matches, seen or not", () => {
+	it("a deletion is final: no version brings the id back", () => {
 		const o = new WriteOrder<R>()
-		const a = o.next()
-		const b = o.next()
-		o.cover(r => r.hz < 10, b)
-		expect(o.upsert("new", { hz: 5 }, a)).toBe(false)
-		expect(o.upsert("elsewhere", { hz: 50 }, a)).toBe(true)
-		expect(o.upsert("new", { hz: 5 }, o.next())).toBe(true)
+		o.upsert("x", { hz: 1 }, 2)
+		o.removeHard("x", 3)
+		expect(o.upsert("x", { hz: 1 }, 2)).toBe(false)
+		expect(o.upsert("x", { hz: 1 }, 99)).toBe(false)
+		// also for an id never cached
+		o.removeHard("y", 4)
+		expect(o.upsert("y", { hz: 1 }, 1)).toBe(false)
 	})
 
-	it("keeps tombstones up to the cap; past it the oldest leaves and the floor rises to it", () => {
+	it("a page removal keeps a newer cached record, and a later upsert at or above it returns", () => {
+		const o = new WriteOrder<R>()
+		o.upsert("x", { hz: 1 }, 5)
+		expect(o.removeSoft("x", 4)).toBe(false)
+		expect(o.removeSoft("x", 6)).toBe(true)
+		expect(o.upsert("x", { hz: 50 }, 4)).toBe(false)
+		expect(o.upsert("x", { hz: 50 }, 5)).toBe(true)
+		expect(o.removeSoft("never", 9)).toBe(false)
+	})
+
+	it("a covered query refuses older upserts of records it matches but did not list", () => {
+		const o = new WriteOrder<R>()
+		o.cover(r => r.hz < 10, 5, new Set(["listed"]))
+		expect(o.upsert("new", { hz: 5 }, 5)).toBe(false)
+		expect(o.upsert("listed", { hz: 5 }, 5)).toBe(true)
+		expect(o.upsert("elsewhere", { hz: 50 }, 1)).toBe(true)
+		expect(o.upsert("new", { hz: 5 }, 6)).toBe(true)
+	})
+
+	it("keeps tombstones up to the cap; past it the oldest leaves and the floor rises to its seenAt", () => {
 		const o = new WriteOrder<R>({ tombstones: 3 })
-		const before = o.next()
-		const at = [o.next(), o.next(), o.next()]
-		for (const [i, s] of at.entries()) expect(o.remove(`g${i}`, s)).toBe(true)
-		// at the cap: all three remembered, unknown ids still open to the oldest request
+		for (const [i, at] of [10, 20, 30].entries()) o.removeHard(`g${i}`, at)
+		// at the cap: all three remembered, anything seen after 0 may still write
 		expect(o.tombstoneCount).toBe(3)
-		expect(o.upsert("g0", { hz: 1 }, before)).toBe(false)
-		expect(o.upsert("other", { hz: 1 }, before)).toBe(true)
-		// one past the cap: g0 is forgotten, but nothing started at or before it may write
-		const d = o.next()
-		expect(o.remove("g3", d)).toBe(true)
+		expect(o.upsert("g0", { hz: 1 }, 1, 40)).toBe(false)
+		expect(o.upsert("other", { hz: 1 }, 1, 1)).toBe(true)
+		// one past the cap: g0 is forgotten; nothing seen at or before its removal may write
+		o.removeHard("g3", 40)
 		expect(o.tombstoneCount).toBe(3)
-		expect(o.last("g0")).toBe(at[0])
-		expect(o.upsert("g0", { hz: 1 }, at[0]!)).toBe(false)
-		expect(o.upsert("unseen", { hz: 1 }, before)).toBe(false)
-		expect(o.upsert("g0", { hz: 1 }, at[1]!)).toBe(true)
+		expect(o.upsert("g0", { hz: 1 }, 1, 10)).toBe(false)
+		expect(o.upsert("unseen", { hz: 1 }, 1, 10)).toBe(false)
+		expect(o.upsert("unseen", { hz: 1 }, 1, 11)).toBe(true)
+		// the forgotten deletion no longer guards g0 against an answer seen later
+		expect(o.upsert("g0", { hz: 1 }, 1, 11)).toBe(true)
 	})
 
-	it("keeps coverages up to the cap; past it the oldest leaves and the floor rises to it", () => {
+	it("keeps coverages up to the cap; past it the oldest leaves and the floor rises to its seenAt", () => {
 		const o = new WriteOrder<R>({ coverages: 2 })
-		const before = o.next()
-		const c1 = o.next()
-		const c2 = o.next()
-		o.cover(r => r.hz === 1, c1)
-		o.cover(r => r.hz === 2, c2)
-		expect(o.upsert("a", { hz: 3 }, before)).toBe(true)
-		expect(o.upsert("b", { hz: 1 }, before)).toBe(false)
-		const c3 = o.next()
-		o.cover(r => r.hz === 3, c3)
-		// c1 left: its range is now guarded by the floor (c1) instead
-		expect(o.last("b", { hz: 1 })).toBe(c1)
-		expect(o.upsert("b", { hz: 1 }, c1)).toBe(false)
-		expect(o.upsert("b", { hz: 1 }, c2)).toBe(true)
+		o.cover(r => r.hz === 1, 10, none)
+		o.cover(r => r.hz === 2, 20, none)
+		expect(o.upsert("a", { hz: 1 }, 10, 15)).toBe(false)
+		expect(o.upsert("b", { hz: 3 }, 1, 1)).toBe(true)
+		o.cover(r => r.hz === 3, 30, none)
+		// the first left: its range is guarded by the floor (10) instead
+		expect(o.upsert("a", { hz: 1 }, 10, 10)).toBe(false)
+		expect(o.upsert("a", { hz: 1 }, 10, 11)).toBe(true)
 	})
 
 	it("defaults stay bounded", () => {
@@ -75,7 +83,7 @@ describe("WriteOrder", () => {
 		expect(WRITE_ORDER_COVERAGES_MAX).toBe(32)
 		const o = new WriteOrder<R>()
 		for (let i = 0; i <= WRITE_ORDER_TOMBSTONES_MAX; i++)
-			o.remove(`g${i}`, o.next())
+			o.removeHard(`g${i}`, i + 1)
 		expect(o.tombstoneCount).toBe(WRITE_ORDER_TOMBSTONES_MAX)
 	})
 })

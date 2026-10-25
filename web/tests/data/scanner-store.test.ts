@@ -2,6 +2,7 @@ import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
 	Discovery,
+	ScannerDiscoveryEventData,
 	ScanJob,
 	ScanJobHit,
 	ScannerStatus,
@@ -1416,107 +1417,354 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		store.dispose()
 	})
 
-	// Feature: band-inspection-ux, Property 9: the newest write decides each cached id
-	// Validates: Requirements 3.2
-	it("property: any interleaving leaves each id as the newest write for it says", async () => {
-		const ids = ["a", "b", "c"] as const
-		const one = <K extends string>(kind: K) =>
-			fc.record({ kind: fc.constant(kind), id: fc.constantFrom(...ids) })
-		const request = fc.oneof(
-			fc.record({
-				kind: fc.constant("span" as const),
-				has: fc.subarray([...ids]),
-			}),
-			one("read" as const),
-			one("patch" as const),
-			one("delete" as const),
-		)
-		const live = fc.record({
-			id: fc.constantFrom(...ids),
-			deleted: fc.boolean(),
+	describe("with store revisions (req 3.3)", () => {
+		const E = "epoch-1"
+		/** A record of a current core: its revision and label. */
+		const at = (
+			id: string,
+			revision: number,
+			label: string,
+			over: Partial<Discovery> = {},
+		) => discovery(id, { revision, operator: { label }, ...over })
+		const pageAt = (storeRevision: number, ...items: Discovery[]) => ({
+			items,
+			nextCursor: null,
+			storeEpoch: E,
+			storeRevision,
 		})
-		const scenario = fc
-			.array(request, { minLength: 1, maxLength: 6 })
-			.chain(requests =>
-				fc.record({
-					requests: fc.constant(requests),
-					// answer order, with live events slotted between answers
-					steps: fc
-						.shuffledSubarray(
-							requests.map((_, i) => i),
-							{ minLength: requests.length, maxLength: requests.length },
-						)
-						.chain(order =>
-							fc
-								.array(fc.option(live, { nil: undefined }), {
-									minLength: order.length,
-									maxLength: order.length,
-								})
-								.map(lives => order.map((i, k) => ({ i, live: lives[k] }))),
-						),
-				}),
-			)
-		await fc.assert(
-			fc.asyncProperty(scenario, async ({ requests, steps }) => {
-				const { store, pending, calls, send, tick } = deferred()
-				const quiet = (p: Promise<unknown>) =>
-					p.then(
-						() => undefined,
-						() => undefined,
-					)
-				const done = requests.map(r =>
-					r.kind === "span"
-						? quiet(store.fetchDiscoveries(span))
-						: r.kind === "read"
-							? quiet(store.fetchDiscovery(r.id))
-							: r.kind === "patch"
-								? quiet(store.patchDiscovery(r.id, { label: "edit" }))
-								: quiet(store.deleteDiscovery(r.id)),
-				)
+		const one = (d: Discovery, storeRevision = d.revision!) => ({
+			...d,
+			storeEpoch: E,
+			storeRevision,
+		})
+		const event = (
+			change: ScannerDiscoveryEventData["change"],
+			d: Discovery,
+			revision: number,
+			mergedIds?: string[],
+		) => ({
+			change,
+			discovery: d,
+			revision,
+			storeEpoch: E,
+			...(mergedIds ? { mergedIds } : {}),
+		})
+		const has = (store: ScannerStore, id: string) =>
+			store.get().discoveries.byId.has(id)
+
+		it("an older page never brings back what a newer complete page left out, in either order", async () => {
+			for (const reverse of both) {
+				const { store, pending } = deferred()
+				const a = store.fetchDiscoveries(span)
+				const b = store.fetchDiscoveries(span)
 				await flush()
-				expect(calls).toHaveLength(requests.length)
-				// the model: every write has a sequence (a read: its start; a live event or a
-				// mutation's answer: its arrival, after every start); per id the newest one wins
-				const newest = new Map<string, { seq: number; label?: string }>()
-				const write = (id: string, seq: number, label?: string) => {
-					const have = newest.get(id)
-					if (!have || seq > have.seq)
-						newest.set(id, label === undefined ? { seq } : { seq, label })
-				}
-				let clock = requests.length
-				for (const [k, { i, live: ev }] of steps.entries()) {
-					if (ev) {
-						const label = `live${k}`
-						send("scanner:discovery", {
-							change: ev.deleted ? "deleted" : "updated",
-							discovery: labelled(ev.id, label),
-						})
-						tick()
-						write(ev.id, ++clock, ev.deleted ? undefined : label)
-					}
-					const r = requests[i]!
-					const label = `r${i}`
-					if (r.kind === "span") {
-						pending[i]!(page(...r.has.map(id => labelled(id, label))))
-						for (const id of ids)
-							write(id, i, r.has.includes(id) ? label : undefined)
-					} else if (r.kind === "read") {
-						pending[i]!(labelled(r.id, label))
-						write(r.id, i, label)
-					} else if (r.kind === "patch") {
-						pending[i]!(labelled(r.id, label))
-						write(r.id, ++clock, label)
-					} else {
-						pending[i]!(null)
-						write(r.id, ++clock)
-					}
-					await done[i]
-				}
-				for (const id of ids)
-					expect(labelOf(store, id)).toBe(newest.get(id)?.label)
+				await answer(
+					pending,
+					[
+						() => pending[0]!(pageAt(1, at("x", 1, "x"))),
+						() => pending[1]!(pageAt(2)),
+					],
+					reverse,
+				)
+				await Promise.all([a, b])
+				expect(has(store, "x")).toBe(false)
 				store.dispose()
-			}),
-			{ numRuns: 200 },
-		)
+			}
+		})
+
+		it("same-id payloads: the higher revision wins in either order", async () => {
+			for (const reverse of both) {
+				const { store, pending } = deferred()
+				const a = store.fetchDiscoveries(span)
+				const b = store.fetchDiscovery("x")
+				await flush()
+				await answer(
+					pending,
+					[
+						() => pending[0]!(pageAt(3, at("x", 3, "newer"))),
+						() => pending[1]!(one(at("x", 1, "older"))),
+					],
+					reverse,
+				)
+				await Promise.all([a, b])
+				expect(labelOf(store, "x")).toBe("newer")
+				store.dispose()
+			}
+		})
+
+		it("a GET taken before a PATCH never overwrites the edit, in either order", async () => {
+			for (const reverse of both) {
+				const { store, pending } = deferred()
+				const patch = store.patchDiscovery("x", { label: "new" })
+				const get = store.fetchDiscovery("x")
+				await flush()
+				await answer(
+					pending,
+					[
+						() => pending[0]!(one(at("x", 2, "new"))),
+						() => pending[1]!(one(at("x", 1, "old"))),
+					],
+					reverse,
+				)
+				await Promise.all([patch, get])
+				expect(labelOf(store, "x")).toBe("new")
+				store.dispose()
+			}
+		})
+
+		for (const [what, later] of [
+			["updated", event("updated", at("x", 3, "event"), 3)],
+			["deleted", event("deleted", at("x", 2, "p"), 3)],
+			["merged into y", event("merged", at("y", 3, "y"), 3, ["x"])],
+		] as const)
+			it(`a delayed PATCH answer never undoes a newer ${what} event, in either order`, async () => {
+				for (const reverse of both) {
+					const { store, pending, send, tick } = deferred()
+					const patch = store.patchDiscovery("x", { label: "p" })
+					await flush()
+					await answer(
+						pending,
+						[
+							() => pending[0]!(one(at("x", 2, "p"))),
+							() => {
+								send("scanner:discovery", later)
+								tick()
+							},
+						],
+						reverse,
+					)
+					await patch
+					if (what === "updated") expect(labelOf(store, "x")).toBe("event")
+					else expect(has(store, "x")).toBe(false)
+					if (what === "merged into y") expect(labelOf(store, "y")).toBe("y")
+					store.dispose()
+				}
+			})
+
+		it("a delayed PATCH answer never brings back a completed DELETE, in either order", async () => {
+			for (const reverse of both) {
+				const { store, pending } = deferred()
+				const patch = store.patchDiscovery("x", { label: "p" })
+				const del = store.deleteDiscovery("x")
+				await flush()
+				await answer(
+					pending,
+					[() => pending[1]!(null), () => pending[0]!(one(at("x", 2, "p")))],
+					reverse,
+				)
+				await Promise.all([patch, del])
+				expect(has(store, "x")).toBe(false)
+				store.dispose()
+			}
+		})
+
+		it("a record a page no longer lists comes back when read at its newer place", async () => {
+			const { store, pending } = deferred()
+			const first = store.fetchDiscoveries(span)
+			await flush()
+			pending[0]!(pageAt(1, at("x", 1, "here")))
+			await first
+			// x moved out of the span at revision 4; the next page (taken at 5) no longer lists it
+			const second = store.fetchDiscoveries(span)
+			await flush()
+			pending[1]!(pageAt(5))
+			await second
+			expect(has(store, "x")).toBe(false)
+			const get = store.fetchDiscovery("x")
+			await flush()
+			pending[2]!(one(at("x", 4, "moved", { frequencyHz: 450e6 }), 5))
+			await get
+			expect(labelOf(store, "x")).toBe("moved")
+			store.dispose()
+		})
+
+		it("a new epoch clears the cache and resyncs; late answers of the old epoch are dropped", async () => {
+			const { store, pending, calls, send, tick } = deferred()
+			const seed = store.fetchDiscoveries(span)
+			const late = store.fetchDiscovery("x")
+			await flush()
+			pending[0]!(pageAt(9, at("x", 9, "old epoch")))
+			await seed
+			const epochBefore = store.get().discoveries.epoch
+			// the core restarted: revisions restart at 1 under a new epoch
+			send("scanner:discovery", {
+				...event("updated", at("y", 2, "new epoch"), 2),
+				storeEpoch: "epoch-2",
+			})
+			tick()
+			expect(has(store, "x")).toBe(false)
+			expect(labelOf(store, "y")).toBe("new epoch")
+			expect(store.get().discoveries.epoch).toBe(epochBefore + 1)
+			pending[1]!(one(at("x", 10, "late")))
+			await late
+			expect(has(store, "x")).toBe(false)
+			expect(calls).toHaveLength(2)
+			store.dispose()
+		})
+
+		// Feature: band-inspection-ux, Property 9: the client ends at the server's state
+		// Validates: Requirements 3.2, 3.3
+		it("property: any delivery order of answers and events ends at the server's final state", async () => {
+			const ids = ["a", "b", "c"] as const
+			const id = fc.constantFrom(...ids)
+			const step = fc.oneof(
+				fc.record({ kind: fc.constant("update" as const), id }),
+				fc.record({ kind: fc.constant("delete" as const), id }),
+				fc.record({ kind: fc.constant("merge" as const), id, into: id }),
+				fc.record({ kind: fc.constant("span" as const) }),
+				fc.record({ kind: fc.constant("read" as const), id }),
+				fc.record({ kind: fc.constant("patch" as const), id }),
+				fc.record({ kind: fc.constant("remove" as const), id }),
+			)
+			type Step = typeof step extends fc.Arbitrary<infer S> ? S : never
+			/** The server: runs `steps`, returning what each request answers and every event. */
+			function serve(steps: readonly Step[]) {
+				let revision = 1
+				// ids are unique and made by the server: all exist (unchanged, revision 1) from the
+				// start, and a deleted or absorbed id never comes back
+				const live = new Map<string, { revision: number; label: string }>(
+					ids.map(i => [i, { revision: 1, label: `init-${i}` }]),
+				)
+				const gone = new Map<string, string>() // absorbed id -> survivor
+				const record = (i: string) =>
+					at(i, live.get(i)!.revision, live.get(i)!.label)
+				const answers: (() => [unknown, number?])[] = []
+				const events: unknown[] = []
+				const write = (i: string, label: string) => {
+					if (!live.has(i)) return false
+					live.set(i, { revision: ++revision, label })
+					events.push(event("updated", record(i), revision))
+					return true
+				}
+				const remove = (i: string) => {
+					if (!live.has(i)) return false
+					const last = record(i)
+					live.delete(i)
+					events.push(event("deleted", last, ++revision))
+					return true
+				}
+				for (const [k, s] of steps.entries()) {
+					if (s.kind === "update") write(s.id, `u${k}`)
+					else if (s.kind === "delete") remove(s.id)
+					else if (s.kind === "merge") {
+						if (s.id === s.into || !live.has(s.id) || !live.has(s.into))
+							continue
+						const r = ++revision
+						live.delete(s.id)
+						gone.set(s.id, s.into)
+						live.get(s.into)!.revision = r
+						events.push(event("merged", record(s.into), r, [s.id]))
+					} else if (s.kind === "span") {
+						const page = pageAt(
+							revision,
+							...[...live.keys()].sort().map(record),
+						)
+						answers.push(() => [page])
+					} else if (s.kind === "read") {
+						const target = live.has(s.id) ? s.id : gone.get(s.id)
+						const body =
+							target !== undefined && live.has(target)
+								? {
+										...one(record(target), revision),
+										...(target !== s.id
+											? { absorbedInto: target, requestedId: s.id }
+											: {}),
+									}
+								: null
+						answers.push(() =>
+							body ? [body] : [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404],
+						)
+					} else if (s.kind === "patch") {
+						const ok = live.has(s.id) && write(s.id, `p${k}`)
+						const body = ok ? one(record(s.id), revision) : null
+						answers.push(() =>
+							body ? [body] : [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404],
+						)
+					} else {
+						const ok = remove(s.id)
+						answers.push(() =>
+							ok ? [null] : [{ code: "SCANNER_DISCOVERY_NOT_FOUND" }, 404],
+						)
+					}
+				}
+				return { live, answers, events }
+			}
+			const scenario = fc
+				.array(step, { minLength: 1, maxLength: 10 })
+				.chain(steps => {
+					const { answers, events } = serve(steps)
+					const n = answers.length + events.length
+					return fc.record({
+						steps: fc.constant(steps),
+						order: fc.shuffledSubarray(
+							Array.from({ length: n }, (_, i) => i),
+							{ minLength: n, maxLength: n },
+						),
+					})
+				})
+			await fc.assert(
+				fc.asyncProperty(scenario, async ({ steps, order }) => {
+					const { live, answers, events } = serve(steps)
+					const { store, pending, calls, send, tick } = deferred()
+					const quiet = (p: Promise<unknown>) =>
+						p.then(
+							() => undefined,
+							() => undefined,
+						)
+					const done: Promise<unknown>[] = []
+					for (const s of steps)
+						if (s.kind === "span")
+							done.push(quiet(store.fetchDiscoveries(span)))
+						else if (s.kind === "read")
+							done.push(quiet(store.fetchDiscovery(s.id)))
+						else if (s.kind === "patch")
+							done.push(quiet(store.patchDiscovery(s.id, { label: "edit" })))
+						else if (s.kind === "remove")
+							done.push(quiet(store.deleteDiscovery(s.id)))
+					await flush()
+					expect(calls).toHaveLength(answers.length)
+					// the ids the client has seen: named in an answer, an event or its own request
+					const seen = new Set<string>()
+					for (const s of steps)
+						if (s.kind === "read" || s.kind === "patch" || s.kind === "remove")
+							seen.add(s.id)
+					const note = (body: unknown) => {
+						const b = body as {
+							id?: string
+							items?: { id: string }[]
+							discovery?: { id: string }
+							mergedIds?: string[]
+						} | null
+						if (!b) return
+						if (b.id) seen.add(b.id)
+						for (const d of b.items ?? []) seen.add(d.id)
+						if (b.discovery) seen.add(b.discovery.id)
+						for (const m of b.mergedIds ?? []) seen.add(m)
+					}
+					// every answer and event, delivered in a random order (random delays)
+					for (const i of order) {
+						if (i < answers.length) {
+							const [body, status] = answers[i]!()
+							if (status === undefined) note(body)
+							pending[i]!(body, status)
+							await done[i]
+						} else {
+							const e = events[i - answers.length]
+							note(e)
+							send("scanner:discovery", e)
+							tick()
+						}
+					}
+					await Promise.all(done)
+					const byId = store.get().discoveries.byId
+					for (const i of ids)
+						expect(byId.get(i)?.operator?.label).toBe(
+							seen.has(i) ? live.get(i)?.label : undefined,
+						)
+					store.dispose()
+				}),
+				{ numRuns: 300 },
+			)
+		})
 	})
 })

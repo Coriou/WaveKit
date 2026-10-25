@@ -195,6 +195,33 @@ Old clients ignore unknown event types (the implementer verifies `events-client.
 do); new clients refetch the discovery list. So <= 256 merge events per start. Events applied
 before the WebSocket server is up are queued (<= 256, else resync).
 
+**3.3 Store revision.** HTTP answers and WebSocket events share no ordering, and a client
+cannot guess one (a PATCH answer is a snapshot the core may hold while it releases probes and
+replans). So the core orders them:
+
+- `DiscoveryStore` keeps one store-wide counter, bumped once per published change (an
+  operation, a proof change, a recording commit). Every record that change touched takes the
+  new value as its `revision`, so a record's revision strictly increases; removed records
+  leave at that revision. Memory only, never journaled or snapshotted; a record unchanged since
+  the start reads 1.
+- `storeEpoch` is new on every start and restore, so revisions are never compared across
+  restarts and the counter needs no persistence. At 1e6 changes/s a JS safe integer
+  (about 9.0e15) lasts some 285 years.
+- Reads carry `revision` per record; list pages, detail and PATCH answers carry `storeEpoch`
+  and `storeRevision` (the store revision the answer was taken at; for PATCH, right after the
+  edit). Events carry `revision` (the removal's for `deleted`; for `merged` also the removal
+  revision of every id in `mergedIds`) and `storeEpoch`. DELETE (204) sends both as headers.
+- The web store applies a record only when its revision is higher than the one it holds. A
+  deletion is final (ids are never reused). A complete page taken at `storeRevision` R covers
+  its query: a matching record it did not list at revision <= R is stale, which also handles
+  records the cache never saw. A page that drops a cached record removes it without making
+  that final (the record may have moved). Bounds: 2 048 remembered removals and 32 covered
+  pages; evicting one raises a floor, and anything taken at or before the floor is refused
+  (missing until the next read, never stale). A new epoch clears the cache and resyncs; late
+  answers from a retired epoch are dropped. Without `storeEpoch` (an older core) the same
+  rules run on a client sequence: a read's request start, a live event's or a successful
+  mutation's arrival.
+
 ### Requirement 4: documentation
 
 - `docs/API.md`, `docs/ROADMAP.md`: replace internal batch codes (`WG[0-9]+`, "lane …") with
@@ -235,11 +262,9 @@ before the WebSocket server is up are queued (<= 256, else resync).
 7. For any merge sequence: GET of a merged id resolves to its current survivor while indexed;
    index size <= 16 384; per-owner recording aliases <= 64. (3.1)
 8. Per start: merge events <= 256 or exactly one resync; each `mergedIds.length <= 64`. (3.2)
-9. For any interleaving of overlapping discovery reads (span pages, single reads), successful
-   mutations (edit, delete) and live events in the web store, each id ends as the newest write
-   that speaks for it says. A read is ordered by when its request started, a live event or a
-   mutation's answer by when it arrived; a complete page speaks for every id its query matches.
-   (3.2)
+9. For any sequence of server changes (edits, deletions, merges) with reads, PATCHes and
+   DELETEs taken between them, delivered to the web store with their events in any order, the
+   store ends at the server's final state for every id it has seen. (3.2, 3.3)
 
 All with `fast-check`, `numRuns: 100` or more.
 
