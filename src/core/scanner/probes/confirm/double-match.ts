@@ -9,6 +9,8 @@ export interface DecoderOutputLike {
 	type: string
 	data: unknown
 	timestamp: Date
+	/** Placement binding of a channel decoder's output (validated where read). */
+	provenanceBinding?: unknown
 }
 
 const MAX_VALUES_PER_KEY = 256

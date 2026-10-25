@@ -38,6 +38,7 @@ import { interpretDirewolf } from "./confirm/direwolf.js"
 import { interpretDsdFme, toDsdFmeScannerEvent } from "./confirm/dsd-fme.js"
 import { parseMeshtastic } from "./confirm/meshtastic.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
+import { channelPassbandOf, type ChannelPassband } from "./ambient-channel.js"
 import { parseVdl2 } from "./confirm/vdl2.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
 
@@ -64,6 +65,11 @@ export interface AmbientEvidenceEvent {
 	sourceId: string
 	hz: number
 	ev: DecodeEvidence
+	/**
+	 * A channel decoder (rtl433) names its whole channel: `hz` is the channel
+	 * centre and the decode belongs to one observation inside this passband.
+	 */
+	passband?: ChannelPassband
 }
 
 export interface AmbientDeps {
@@ -351,6 +357,32 @@ export class AmbientEvidence extends EventEmitter {
 		}
 	}
 
+	/**
+	 * The passband of the channel that produced `out`: its placement binding and
+	 * the decoder's channel bandwidth. Any failure is no passband (the decode
+	 * then keeps the decoder's target frequency, as before).
+	 */
+	private channelPassband(
+		decoderId: string,
+		out: DecoderOutputLike,
+	): ReturnType<typeof channelPassbandOf> {
+		try {
+			const binding = out.provenanceBinding
+			const channelHz =
+				binding && typeof binding === "object"
+					? (binding as { channelHz?: unknown }).channelHz
+					: undefined
+			if (typeof channelHz !== "number") return null
+			const request = this.deps.decoders
+				.getDecoder(decoderId)
+				?.getChannelRequest?.({ sampleRateHz: channelHz, centerHz: channelHz })
+			if (!request || "invalid" in request) return null
+			return channelPassbandOf(binding, request.bandwidthHz)
+		} catch {
+			return null
+		}
+	}
+
 	private readonly onOutput = (
 		decoderId: string,
 		out: DecoderOutputLike,
@@ -417,12 +449,25 @@ export class AmbientEvidence extends EventEmitter {
 			evs = interpretDirewolf(input as DecoderOutputLike, state)
 		else if (type === "rtl433")
 			evs = interpretRtl433(input as DecoderOutputLike, state)
+		const passband =
+			type === "rtl433" && evs.length > 0
+				? this.channelPassband(decoderId, input as DecoderOutputLike)
+				: null
+		const onSource = passband?.sourceId === target.sourceId ? passband : null
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,
 				sourceId: target.sourceId,
-				hz: target.hz,
+				hz: onSource ? onSource.centreHz : target.hz,
 				ev,
+				...(onSource
+					? {
+							passband: {
+								centreHz: onSource.centreHz,
+								halfHz: onSource.halfHz,
+							},
+						}
+					: {}),
 			}
 			this.emit("evidence", event)
 		}

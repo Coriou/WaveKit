@@ -176,6 +176,7 @@ import {
 	type AmbientTarget,
 } from "./probes/ambient.js"
 import { resolveAmbientTargets } from "./probes/ambient-target.js"
+import { pickChannelObservation } from "./probes/ambient-channel.js"
 import {
 	ProbePool,
 	REPLAY_PROBE_PRIORITY,
@@ -3739,20 +3740,34 @@ export class ScannerService extends EventEmitter {
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
 		const now = this.now()
 		const ambientOnly = SCANNER_AMBIENT_PROTOCOLS.includes(e.ev.protocol)
-		const candidates = [...this.live.values(), ...this.recent].filter(o => {
-			const t = o.lastTrack
-			if (o.sourceId !== e.sourceId || !t) return false
-			// WG7: an ambient-only decode (AIS, ACARS, VDL2, LoRa) names only a track within the
-			// 1 kHz decode tolerance, so a wide track near its channel is never named by it.
-			const tolHz = ambientOnly
-				? SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
-				: Math.max(1500, t.obwHz / 2)
-			if (Math.abs(t.centreHz - e.hz) > tolHz) return false
-			return (
-				e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
-				e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
-			)
-		})
+		const observations = [...this.live.values(), ...this.recent]
+		// A channel decode (rtl433) names one observation inside its passband.
+		const picked = e.passband
+			? pickChannelObservation(
+					observations,
+					{ sourceId: e.sourceId, passband: e.passband, at: e.ev.at },
+					now,
+					AMBIENT_PAIR_MS,
+				)
+			: null
+		const candidates = e.passband
+			? picked
+				? [picked]
+				: []
+			: observations.filter(o => {
+					const t = o.lastTrack
+					if (o.sourceId !== e.sourceId || !t) return false
+					// WG7: an ambient-only decode (AIS, ACARS, VDL2, LoRa) names only a track within the
+					// 1 kHz decode tolerance, so a wide track near its channel is never named by it.
+					const tolHz = ambientOnly
+						? SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
+						: Math.max(1500, t.obwHz / 2)
+					if (Math.abs(t.centreHz - e.hz) > tolHz) return false
+					return (
+						e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
+						e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
+					)
+				})
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
 		// trials leave the count to this path).

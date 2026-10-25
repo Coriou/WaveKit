@@ -4,11 +4,29 @@ import type { DecodeEvidence } from "../../types.js"
 import { evidenceBase } from "./double-match.js"
 import type { DecoderOutputLike, InterpreterState } from "./double-match.js"
 
+/**
+ * Longest model name accepted. rtl_433 25.12 model names are at most about
+ * 40 characters; 128 leaves headroom for future names while keeping the
+ * identity value (model + ":" + id) at most 128 + 1 + 64 = 193 characters.
+ * Anything longer is not an rtl_433 model: no evidence, the discovery stays
+ * unidentified.
+ */
+export const RTL433_MODEL_MAX_CHARS = 128
+/** Longest string id or mic accepted (rtl_433 ids are short numbers or hex). */
+export const RTL433_FIELD_MAX_CHARS = 64
+
 const DeviceSchema = z
 	.object({
-		model: z.string().min(1),
-		id: z.union([z.number(), z.string().min(1)]),
-		mic: z.string().min(1),
+		model: z
+			.string()
+			.min(1)
+			.max(RTL433_MODEL_MAX_CHARS)
+			.regex(/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/),
+		id: z.union([
+			z.number().finite(),
+			z.string().min(1).max(RTL433_FIELD_MAX_CHARS),
+		]),
+		mic: z.string().min(1).max(RTL433_FIELD_MAX_CHARS),
 	})
 	.passthrough()
 
