@@ -28,8 +28,11 @@ export const ANALOG_EVIDENCE_WARN_INTERVAL_MS = 60_000
 export const ANALOG_EVIDENCE_MAX_ID_LENGTH = 128
 
 export interface AnalogEvidenceLog extends IdentifyAnalogEvidence {
-	/** Records one tracker event; a malformed event is dropped. Never throws. */
-	record(event: AnalogTransmissionEventData): void
+	/**
+	 * Records one tracker event; a malformed event is dropped. Never throws. A closed
+	 * event with `data: true` (detection quality R4) is kept with the core-only flag.
+	 */
+	record(event: AnalogTransmissionEventData & { data?: boolean }): void
 	/** WG10 R2: binds the tracker's pending opening (late: the tracker is built after the log). */
 	setPending(pending: (() => AnalogTransmissionEventData | null) | null): void
 	pendingNear(
@@ -144,6 +147,9 @@ export function evidenceOf(event: unknown): AnalogEvidenceTransmission | null {
 		modulation: modulation as AnalogEvidenceTransmission["modulation"],
 		ctcssHz,
 		dcs,
+		...(state === "closed" && event["data"] === true
+			? { data: true as const }
+			: {}),
 	}
 }
 
@@ -204,7 +210,7 @@ export function createAnalogEvidenceLog(
 				return []
 			}
 		},
-		record(event: AnalogTransmissionEventData): void {
+		record(event: AnalogTransmissionEventData & { data?: boolean }): void {
 			try {
 				const t = evidenceOf(event)
 				if (!t) return

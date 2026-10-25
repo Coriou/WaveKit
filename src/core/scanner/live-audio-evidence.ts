@@ -91,6 +91,8 @@ export function createLiveAudioEvidence(
 	}
 
 	const attach = (tx: AnalogEvidenceTransmission): void => {
+		// Detection quality R4.2: a data burst is not voice; attach no analog proof.
+		if (tx.data === true) return
 		const mode = analogMode(tx.modulation)
 		if (mode === null) return
 		const endedAt = tx.endedAtMs

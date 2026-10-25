@@ -60,6 +60,7 @@ import {
 	liveDemodTransmissionConfigChanged,
 } from "./live-demod-activity.js"
 import type { TransmissionConfigIdentity } from "./live-demod-activity.js"
+import type { DataDecodeGate } from "./scanner/data-decode-gate.js"
 import type {
 	LiveAudioLevel,
 	LiveDemodConfig,
@@ -2233,6 +2234,11 @@ export interface AnalogTransmissionWiring {
 	randomUUID?: () => string
 	/** WG10 activity hygiene: one call per suppressed transmission (Main logs at debug). */
 	onSuppressed?: AnalogTransmissionTrackerOptions["onSuppressed"]
+	/**
+	 * Detection quality R4: each close waits in the data decode gate and is not
+	 * published to Activity when it matched a data decode. The WS event is not held.
+	 */
+	dataGate?: Pick<DataDecodeGate, "hold">
 }
 
 /**
@@ -2253,8 +2259,15 @@ export function wireAnalogTransmissions(
 	tracker.on("transmission", event => {
 		wiring.broadcast(event)
 	})
+	const dataGate = wiring.dataGate
 	tracker.on("closed", payload => {
-		wiring.sink()?.(payload)
+		if (dataGate === undefined) {
+			wiring.sink()?.(payload)
+			return
+		}
+		dataGate.hold(payload, isData => {
+			if (!isData) wiring.sink()?.(payload)
+		})
 	})
 	tracker.start()
 	return tracker

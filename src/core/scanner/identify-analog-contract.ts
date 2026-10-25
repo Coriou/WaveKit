@@ -19,6 +19,11 @@ export interface AnalogEvidenceTransmission {
 	/** Closed events only; null when none qualified. */
 	ctcssHz: number | null
 	dcs: { code: string; polarity: "normal" | "inverted" } | null
+	/**
+	 * Detection quality R4 (core only): the data decode gate matched a pager or APRS
+	 * decode to this closed transmission. No analog proof is attached for it.
+	 */
+	data?: true
 }
 
 /**
