@@ -88,7 +88,12 @@ import {
 	identifiedAt,
 	identifiedLabel,
 } from "./discovery-tags.ts"
-import { clusterSignals, layoutChips } from "./signal-chips.ts"
+import {
+	chipX,
+	clusterSignals,
+	fadingChips,
+	layoutChips,
+} from "./signal-chips.ts"
 import {
 	dragRange,
 	finishRange,
@@ -104,6 +109,7 @@ import {
 import {
 	EMPTY_LABEL_GATE,
 	gatedSignals,
+	resetLabelGate,
 	stepLabelGate,
 	type GatedSignal,
 	type LabelGateState,
@@ -313,7 +319,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		if (status.type === "reset" && status.reason !== "profile") {
 			heldRef.current = []
 			setTracks([])
-			gateRef.current = EMPTY_LABEL_GATE
+			gateRef.current = resetLabelGate(gateRef.current)
 			setLabelled([])
 		}
 	}
@@ -830,17 +836,19 @@ function SignalLabels({
 	})[] = []
 	for (const l of placed) {
 		const g = byHz.get(l.hz)
-		if (!g) continue
+		// every chip drawn is inside the view, at x = f(hz)
+		if (!g || chipX(l.hz, view, widthPx) === null) continue
 		lastAt.current.set(g.id, { ...l, burst: g.burst })
 		current.push({ ...l, id: g.id, burst: g.burst, leaving: false })
 	}
 	const live = new Set(gated.map(g => g.id))
-	const fading: typeof current = []
-	for (const g of gated) {
-		if (!g.leaving) continue
-		const last = lastAt.current.get(g.id)
-		if (last) fading.push({ ...last, id: g.id, leaving: true })
-	}
+	// a leaving chip fades at its frequency in this view, never at a stored screen position
+	const fading: typeof current = fadingChips(
+		gated.filter(g => g.leaving),
+		lastAt.current,
+		view,
+		widthPx,
+	).map(l => ({ ...l, leaving: true }))
 	// one layout across live and leaving chips: capped, and a fading chip never lands on another
 	const laid = layoutChips(current, fading)
 	chips.push(...laid.placed, ...laid.leaving)

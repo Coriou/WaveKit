@@ -50,6 +50,12 @@ import {
 } from "./band-fixtures.ts"
 import type { ScannerMock } from "./scanner.ts"
 import {
+	RETUNE_SWEEP_BOOKMARK,
+	RETUNE_SWEEP_SIGNALS,
+	RETUNE_SWEEP_STEP_MS,
+	RETUNE_SWEEP_STEPS,
+} from "./retune-sweep.ts"
+import {
 	MOCK_VERSION,
 	createDecoderLifecycle,
 	registerSettingsMock,
@@ -112,6 +118,11 @@ export interface MockServerOptions {
 	retuneMs?: number
 	/** Seeds the band inspection UX discoveries (./band-fixtures.ts; WAVEKIT_MOCK_BAND_FIXTURES=1). */
 	bandFixtures?: boolean
+	/**
+	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 466.078 MHz at
+	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
+	 */
+	retuneSweep?: boolean
 	/**
 	 * Every other Activity read (GET /api/activity…, POST /api/activity/facets) answers 429 with this
 	 * Retry-After: "1", "30", an HTTP date 2 s ahead ("date") or a malformed value (WAVEKIT_MOCK_ACTIVITY_429).
@@ -466,6 +477,13 @@ export async function buildMockServer(
 		commandCount: 3,
 	}
 	let epoch = 1
+	/** Starts the retune sweep scenario (once; a no-op without it). */
+	let startSweep: () => void = () => undefined
+	/** The retune sweep scenario: frames follow the tuner's rate and draw its signals. */
+	const sweepFrame = () =>
+		options.retuneSweep
+			? { sampleRateHz: tuner.sampleRate, signals: RETUNE_SWEEP_SIGNALS }
+			: {}
 	/** When the current epoch began (backfill never crosses an epoch). */
 	let epochStartedAt = Date.now()
 	const decoderStats = new Map<string, number>()
@@ -1067,6 +1085,7 @@ export async function buildMockServer(
 						hz,
 						epoch,
 						nowMs: now - k * periodMs,
+						...sweepFrame(),
 					}),
 					backfill: true,
 				},
@@ -1084,9 +1103,11 @@ export async function buildMockServer(
 					epoch,
 					nowMs: Date.now(),
 					snapshot,
+					...sweepFrame(),
 				}),
 			})
 		frame(true)
+		startSweep()
 		client.spectrum = {
 			sourceId: MOCK_SOURCE_ID,
 			hz,
@@ -1364,9 +1385,11 @@ export async function buildMockServer(
 	app.get("/health", async () => ok())
 	// Operator data as a protected core serves it (core mounts it in protected mode only).
 	const operatorData = registerOperatorData(app, {
-		seeds: options.bandFixtures
-			? [...MOCK_SAVED_FREQUENCIES, BAND_FIXTURE_BOOKMARK]
-			: MOCK_SAVED_FREQUENCIES,
+		seeds: [
+			...MOCK_SAVED_FREQUENCIES,
+			...(options.bandFixtures ? [BAND_FIXTURE_BOOKMARK] : []),
+			...(options.retuneSweep ? [RETUNE_SWEEP_BOOKMARK] : []),
+		],
 		onCommit: dto => broadcast("operator-data", "operator-data:updated", dto),
 	})
 	app.get("/health/live", async () => ok())
@@ -1493,6 +1516,7 @@ export async function buildMockServer(
 		decoders,
 		liveStatus,
 		...(options.bandFixtures ? { bandFixtures: true } : {}),
+		...(options.retuneSweep ? { retuneSweep: true } : {}),
 		liveListen: offsetHz => {
 			live.config = { ...live.config, offsetHz, sourceId: MOCK_SOURCE_ID }
 			broadcast("live-audio", "live-audio:config", liveStatus().config)
@@ -1573,6 +1597,43 @@ export async function buildMockServer(
 		},
 	})
 	// --- Receiver controls. End. ---
+
+	// --- Retune sweep scenario (./retune-sweep.ts): through the bands, then park. ---
+	let sweepTimer: ReturnType<typeof setTimeout> | null = null
+	// the sweep starts with the first spectrum subscription, so a page loaded late still sees it
+	if (options.retuneSweep) {
+		const tunerUrl = `/api/tuner/${encodeURIComponent(MOCK_SOURCE_ID)}`
+		const step = (i: number) => {
+			const s = RETUNE_SWEEP_STEPS[i]
+			if (!s) {
+				sweepTimer = null
+				return
+			}
+			void (async () => {
+				if (s.sampleRateHz !== tuner.sampleRate)
+					await app.inject({
+						method: "POST",
+						url: `${tunerUrl}/sample-rate`,
+						payload: { hz: s.sampleRateHz },
+					})
+				await app.inject({
+					method: "POST",
+					url: `${tunerUrl}/frequency`,
+					payload: { hz: s.hz },
+				})
+			})().then(
+				() => {
+					sweepTimer = setTimeout(() => step(i + 1), RETUNE_SWEEP_STEP_MS)
+				},
+				() => undefined,
+			)
+		}
+		startSweep = () => {
+			startSweep = () => undefined
+			sweepTimer = setTimeout(() => step(0), RETUNE_SWEEP_STEP_MS)
+		}
+	}
+	// --- Retune sweep scenario. End. ---
 
 	app.get("/api/digital-voice/status", async () => digitalVoiceStatus())
 	app.post("/api/digital-voice/start", async () => {
@@ -2279,6 +2340,7 @@ export async function buildMockServer(
 			}
 		},
 		async close() {
+			if (sweepTimer !== null) clearTimeout(sweepTimer)
 			await app.close()
 		},
 	}
@@ -2308,6 +2370,7 @@ async function main(): Promise<void> {
 		...(env["WAVEKIT_MOCK_BAND_FIXTURES"] === "1"
 			? { bandFixtures: true }
 			: {}),
+		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
 		...(isActivity429Mode(activity429Env)
 			? { activity429: activity429Env }
 			: {}),

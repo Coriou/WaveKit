@@ -31,6 +31,9 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
   `−` `+` buttons.
 - Labels on the peaks say what WaveKit identified there (`DMR · CC 1`, `AIS · MMSI …`). Settings ›
   Spectrum › Signal labels chooses how many you see.
+- Labels and tags always sit at their own frequency inside the visible span. After a retune or a
+  sample-rate change, the labels from the previous window disappear at once; only signals heard in
+  the new window are labelled.
 - Right-click a signal for its menu, which includes **Decode as…** to try a decoder on it.
 - Signals close together share one tag with a count (`DMR · CC 1 +2`). Click it for a list of the
   grouped signals; each row has a **Tune** button.

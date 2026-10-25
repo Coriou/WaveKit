@@ -16,6 +16,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Retune latency: `WAVEKIT_MOCK_RETUNE_MS=<ms>` delays each `POST /api/tuner/:sourceId/frequency`
   before it takes effect and answers (`retuneMs`), to try dragging the spectrum past the capture
   as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
+- Retune sweep: `WAVEKIT_MOCK_RETUNE_SWEEP=1` (`retuneSweep` in `buildMockServer()`, `retune-sweep.ts`)
+  retunes, from the first spectrum subscription, through 1090, 131, 136, 119.7, 144.6, 98, 438.9,
+  446.1, 466.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 466.078 MHz at 1.024 MS/s. Each window
+  has its own steady signals and discoveries, a saved frequency sits at 434.502 MHz, and frames follow
+  the tuner's sample rate. Parked, only four signals may be labelled in the plot.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

@@ -58,6 +58,7 @@ import type {
 } from "@wavekit/api-types"
 import { SCANNER_PROOF_PROTOCOL_LABEL } from "@wavekit/api-types"
 import { bandFixtureDiscoveries } from "./band-fixtures.ts"
+import { retuneSweepDiscoveries } from "./retune-sweep.ts"
 import {
 	DISCOVERY_SEEDS,
 	MOCK_SIGNALS,
@@ -2100,6 +2101,8 @@ export interface ScannerMockContext {
 	liveListen: (offsetHz: number) => void
 	/** Seeds the band inspection UX fixtures too (./band-fixtures.ts). */
 	bandFixtures?: boolean
+	/** Seeds the retune sweep scenario's discoveries too (./retune-sweep.ts). */
+	retuneSweep?: boolean
 }
 
 export interface ScannerMock {
@@ -2480,6 +2483,9 @@ export function registerScannerMock(
 	seed()
 	if (ctx.bandFixtures)
 		for (const d of bandFixtureDiscoveries(sourceId, Date.now()))
+			discoveries.set(d.id, { d, observations: [] })
+	if (ctx.retuneSweep)
+		for (const d of retuneSweepDiscoveries(sourceId, Date.now()))
 			discoveries.set(d.id, { d, observations: [] })
 
 	const findDiscoveryAt = (
