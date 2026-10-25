@@ -2,32 +2,35 @@
  * Per-id write order for a client-side cache filled by overlapping reads, mutations and live
  * events (band inspection UX req 3.3).
  *
- * Every write carries a `version` and a `seenAt`:
+ * Every write carries two keys, compared as a pair (record first):
  *
- * - with a current core, `version` is the record's server revision (one store-wide counter that
- *   strictly increases on every change to a record) and `seenAt` the store revision when the
- *   answer or event was taken (a page's or answer's `storeRevision`, an event's `revision`);
- * - with an older core (no revisions), both are a client sequence: a read's is taken when its
- *   request starts, a live event's or a successful mutation's when it arrives.
+ * - `rev`, the record's version: with a current core its server revision (one store-wide counter
+ *   that strictly increases on every change to a record);
+ * - `read`, when the answer was served: with a current core the answer's `storeRevision` (an
+ *   event's own `revision`).
+ *
+ * With an older core (no revisions) both are one client sequence: a read's is taken when its
+ * request starts, a live event's or a successful mutation's when it arrives.
  *
  * Rules, per id:
  *
- * - an upsert applies only when its version is newer than the cached one;
- * - a complete page for a query (`cover`) speaks, at its `seenAt`, for every record the query
- *   matches: an upsert at or below that version of a record it matches but did not list is stale;
+ * - an upsert applies when (rev, read) is at least the held pair. An equal pair is accepted, so
+ *   a later read of the same revision refreshes what the core adds at read time (coverage);
+ * - a complete page for a query (`cover`, read at R) makes inadmissible any upsert read before R
+ *   of a record the query matches but the page did not list;
  * - a page that no longer lists a cached record removes it (`removeSoft`) unless the cached
- *   version is newer than the page; that is not a deletion (the record may only have moved), so a
- *   later upsert at or above the removed version may bring it back;
+ *   revision is newer than the page; that is not a deletion (the record may only have moved), so
+ *   a later upsert at or above the removed pair may bring it back;
  * - a deletion (`removeHard`: a DELETE, a `deleted` event, an id a merge absorbed) is final: ids
  *   are never reused, so nothing brings that id back.
  *
  * Bounds. At most `tombstones` removed ids and `coverages` complete pages are remembered. When one
- * is evicted (the oldest remembered first), `floor` rises to its `seenAt`, and every write taken
- * at or before the floor is refused: a write seen that early cannot be told from a stale one any
- * more. Refusing is the safe side (a record may be missing until the next read, never stale).
- * With the defaults (2 048 removed ids of one id string and three numbers each, about 120 B per
- * Map entry, so about 250 KB; 32 coverages, each holding up to 500 listed ids), an upsert checks
- * at most 32 coverage predicates, so a 500-record page costs at most 16 000 checks.
+ * is evicted (the oldest remembered first), `floor` rises to its read, and any upsert read before
+ * the floor is refused: one served that early can no longer be told from a stale one. A fresh
+ * read is never below the floor, so refusing only delays a record until the next read and never
+ * shows a stale one. With the defaults (2 048 removed ids of one id string and three fields each,
+ * about 120 B per Map entry, so about 250 KB; 32 coverages, each holding up to 500 listed ids), an
+ * upsert checks at most 32 coverage predicates, so a 500-record page costs at most 16 000 checks.
  */
 
 export const WRITE_ORDER_TOMBSTONES_MAX = 2048
@@ -38,23 +41,31 @@ export interface WriteOrderLimits {
 	coverages?: number
 }
 
-interface Removed {
-	/** The cached version at removal (soft), or Infinity (hard: final). */
-	version: number
-	seenAt: number
+interface Pair {
+	rev: number
+	read: number
+}
+
+interface Removed extends Pair {
+	/** Final: no upsert brings the id back. */
 	hard: boolean
 }
 
 interface Coverage<T> {
-	at: number
+	read: number
 	covers: (record: T) => boolean
 	ids: ReadonlySet<string>
 }
 
+/** (rev, read) is lower than `held`. */
+function below(rev: number, read: number, held: Pair): boolean {
+	return rev < held.rev || (rev === held.rev && read < held.read)
+}
+
 export class WriteOrder<T> {
-	/** Raised to the `seenAt` of each evicted tombstone or coverage; applies to every id. */
+	/** Raised to the read of each evicted tombstone or coverage; applies to every id. */
 	private floor = 0
-	private readonly present = new Map<string, number>()
+	private readonly present = new Map<string, Pair>()
 	/** Removed ids, oldest remembered first. */
 	private readonly removed = new Map<string, Removed>()
 	private readonly covered: Coverage<T>[] = []
@@ -72,45 +83,49 @@ export class WriteOrder<T> {
 		)
 	}
 
-	/** Applies an upsert of `id` at `version` (taken at `seenAt`) and returns true, or refuses it. */
-	upsert(id: string, record: T, version: number, seenAt = version): boolean {
-		if (seenAt <= this.floor) return false
+	/** Applies an upsert of `id` at (rev, read) and returns true, or refuses it. */
+	upsert(id: string, record: T, rev: number, read = rev): boolean {
+		if (read < this.floor) return false
 		const gone = this.removed.get(id)
-		if (gone !== undefined && (gone.hard || version < gone.version))
+		if (gone !== undefined && (gone.hard || below(rev, read, gone)))
 			return false
 		const have = this.present.get(id)
-		if (have !== undefined && version <= have) return false
+		if (have !== undefined && below(rev, read, have)) return false
 		for (const c of this.covered)
-			if (version <= c.at && !c.ids.has(id) && c.covers(record)) return false
+			if (read < c.read && !c.ids.has(id) && c.covers(record)) return false
 		this.removed.delete(id)
-		this.present.set(id, version)
+		this.present.set(id, { rev, read })
 		return true
 	}
 
 	/**
-	 * A complete page taken at `at` no longer lists cached `id`: removes it (true) unless the cached
-	 * version is newer than the page, or it is not cached.
+	 * A complete page read at `read` no longer lists cached `id`: removes it (true) unless the
+	 * cached revision is newer than the page, or it is not cached.
 	 */
-	removeSoft(id: string, at: number): boolean {
+	removeSoft(id: string, read: number): boolean {
 		const have = this.present.get(id)
-		if (have === undefined || have > at) return false
+		if (have === undefined || have.rev > read) return false
 		this.present.delete(id)
-		this.remember(id, { version: have, seenAt: at, hard: false })
+		this.remember(id, { rev: have.rev, read, hard: false })
 		return true
 	}
 
-	/** `id` was deleted (taken at `seenAt`): final, whatever was cached. */
-	removeHard(id: string, seenAt: number): void {
+	/** `id` was deleted (seen at `read`): final, whatever was cached. */
+	removeHard(id: string, read: number): void {
 		this.present.delete(id)
-		this.remember(id, { version: Infinity, seenAt, hard: true })
+		this.remember(id, { rev: Infinity, read, hard: true })
 	}
 
-	/** A complete page taken at `at` for a query: `covers` matches its records, `ids` lists them. */
-	cover(covers: (record: T) => boolean, at: number, ids: ReadonlySet<string>) {
-		this.covered.push({ at, covers, ids })
+	/** A complete page read at `read` for a query: `covers` matches its records, `ids` lists them. */
+	cover(
+		covers: (record: T) => boolean,
+		read: number,
+		ids: ReadonlySet<string>,
+	) {
+		this.covered.push({ read, covers, ids })
 		if (this.covered.length > this.coveragesMax) {
 			const oldest = this.covered.shift()
-			if (oldest !== undefined) this.raiseFloor(oldest.at)
+			if (oldest !== undefined) this.raiseFloor(oldest.read)
 		}
 	}
 
@@ -126,10 +141,10 @@ export class WriteOrder<T> {
 		const oldest = this.removed.entries().next().value
 		if (oldest === undefined) return
 		this.removed.delete(oldest[0])
-		this.raiseFloor(oldest[1].seenAt)
+		this.raiseFloor(oldest[1].read)
 	}
 
-	private raiseFloor(at: number): void {
-		if (Number.isFinite(at)) this.floor = Math.max(this.floor, at)
+	private raiseFloor(read: number): void {
+		if (Number.isFinite(read)) this.floor = Math.max(this.floor, read)
 	}
 }

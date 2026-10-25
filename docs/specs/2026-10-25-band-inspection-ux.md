@@ -211,16 +211,21 @@ replans). So the core orders them:
   and `storeRevision` (the store revision the answer was taken at; for PATCH, right after the
   edit). Events carry `revision` (the removal's for `deleted`; for `merged` also the removal
   revision of every id in `mergedIds`) and `storeEpoch`. DELETE (204) sends both as headers.
-- The web store applies a record only when its revision is higher than the one it holds. A
-  deletion is final (ids are never reused). A complete page taken at `storeRevision` R covers
-  its query: a matching record it did not list at revision <= R is stale, which also handles
-  records the cache never saw. A page that drops a cached record removes it without making
-  that final (the record may have moved). Bounds: 2 048 remembered removals and 32 covered
-  pages; evicting one raises a floor, and anything taken at or before the floor is refused
-  (missing until the next read, never stale). A new epoch clears the cache and resyncs; late
-  answers from a retired epoch are dropped. Without `storeEpoch` (an older core) the same
-  rules run on a client sequence: a read's request start, a live event's or a successful
-  mutation's arrival.
+- The web store orders every write on (record revision, read revision), the read revision
+  being the answer's `storeRevision` (an event's own revision), and applies one when its pair
+  is at least the held pair. An equal pair is accepted, so a later read refreshes `coverage`
+  (added by the routes at read time, never on events, and changing without a new revision);
+  an event without `coverage` keeps the held one. A deletion is final (ids are never reused).
+  A complete page (the first page, asked without a cursor, with `nextCursor` null) read at R
+  covers its query: a matching record it did not list, from an answer read before R, is stale,
+  which also handles records the cache never saw. A page that drops a cached record removes it
+  without making that final (the record may have moved). Bounds: 2 048 remembered removals and
+  32 covered pages; evicting one raises a floor to its read revision, and an answer read before
+  the floor is refused (missing until the next read, never stale); a fresh read is never below
+  it. A new epoch clears the cache and resyncs; late answers from a retired epoch are dropped,
+  and a DELETE asked before an epoch change applies nothing. Without `storeEpoch` (an older
+  core) the same rules run on a client sequence: a read's request start, a live event's or a
+  successful mutation's arrival.
 
 ### Requirement 4: documentation
 

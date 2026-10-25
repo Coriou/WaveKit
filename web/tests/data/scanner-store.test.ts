@@ -17,6 +17,7 @@ import {
 	matchesDiscoveryQuery,
 	takeoverImpact,
 } from "../../src/data/scanner-store.ts"
+import type { WriteOrderLimits } from "../../src/data/write-order.ts"
 import { fakeSockets } from "./fake-socket.ts"
 
 const T0 = Date.parse("2026-10-17T08:00:00.000Z")
@@ -1040,7 +1041,7 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 
 describe("ScannerStore: reconcile never drops what changed after the request", () => {
 	const flush = () => new Promise(r => setTimeout(r, 0))
-	function deferred() {
+	function deferred(writeOrderLimits?: WriteOrderLimits) {
 		const pending: ((body: unknown, status?: number) => void)[] = []
 		const calls: string[] = []
 		const api = new ApiClient({
@@ -1059,6 +1060,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		const frames: (() => void)[] = []
 		const store = new ScannerStore(api, events, {
 			frame: { request: cb => frames.push(cb), cancel: () => undefined },
+			...(writeOrderLimits ? { writeOrderLimits } : {}),
 		})
 		const send = (type: string, data: unknown) =>
 			sockets.last().receive({ type, channel: "scanner", data })
@@ -1602,6 +1604,90 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			store.dispose()
 		})
 
+		it("an idle store past 32 complete pages still applies a fresh read of a new span", async () => {
+			const { store, pending } = deferred()
+			for (let i = 0; i < 33; i++) {
+				const p = store.fetchDiscoveries(span)
+				await flush()
+				pending[i]!(pageAt(7))
+				await p
+			}
+			const other = { freqMinHz: 450e6, freqMaxHz: 451e6 }
+			const p = store.fetchDiscoveries(other)
+			await flush()
+			pending[33]!(pageAt(7, at("x", 7, "fresh", { frequencyHz: 450.5e6 })))
+			await p
+			expect(labelOf(store, "x")).toBe("fresh")
+			store.dispose()
+		})
+
+		it("coverage a read added survives an event of the same or a newer revision, in either order", async () => {
+			const covered = [{ decoderId: "dmr", state: "running" as const }]
+			for (const reverse of both) {
+				const { store, pending, send, tick } = deferred()
+				const get = store.fetchDiscovery("x")
+				await flush()
+				await answer(
+					pending,
+					[
+						() => pending[0]!(one(at("x", 5, "x", { coverage: covered }), 5)),
+						() => {
+							send("scanner:discovery", event("updated", at("x", 5, "x"), 5))
+							tick()
+						},
+					],
+					reverse,
+				)
+				await get
+				expect(store.get().discoveries.byId.get("x")?.coverage).toEqual(covered)
+				send("scanner:discovery", event("updated", at("x", 6, "newer"), 6))
+				tick()
+				const d = store.get().discoveries.byId.get("x")
+				expect(d?.operator?.label).toBe("newer")
+				expect(d?.coverage).toEqual(covered)
+				store.dispose()
+			}
+		})
+
+		it("a DELETE asked before a restart never removes what the new epoch restored (204 or 404)", async () => {
+			for (const status of [200, 404]) {
+				const { store, pending, send, tick } = deferred()
+				const seed = store.fetchDiscoveries(span)
+				await flush()
+				pending[0]!(pageAt(3, at("x", 3, "epoch A")))
+				await seed
+				const del = store.deleteDiscovery("x")
+				await flush()
+				send("scanner:discovery", {
+					...event("updated", at("x", 2, "epoch B"), 2),
+					storeEpoch: "epoch-2",
+				})
+				tick()
+				pending[1]!(
+					status === 200 ? null : { code: "SCANNER_NOT_FOUND" },
+					status,
+				)
+				await del
+				expect(labelOf(store, "x")).toBe("epoch B")
+				store.dispose()
+			}
+		})
+
+		it("only a first page ending the list is complete: the last page of several removes nothing", async () => {
+			const { store, pending } = deferred()
+			const refresh = store.refreshDiscoveries({})
+			await flush()
+			pending[0]!({ ...pageAt(4, at("a", 4, "a")), nextCursor: "c1" })
+			await refresh
+			const more = store.loadMore()
+			await flush()
+			pending[1]!(pageAt(4, at("b", 2, "b")))
+			await more
+			expect(has(store, "a")).toBe(true)
+			expect(has(store, "b")).toBe(true)
+			store.dispose()
+		})
+
 		// Feature: band-inspection-ux, Property 9: the client ends at the server's state
 		// Validates: Requirements 3.2, 3.3
 		it("property: any delivery order of answers and events ends at the server's final state", async () => {
@@ -1687,10 +1773,14 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 						)
 					}
 				}
+				// a fresh read at the end (delivered at a random place like the rest): a write the
+				// floor refused waits for the next read, never shows stale
+				const last = pageAt(revision, ...[...live.keys()].sort().map(record))
+				answers.push(() => [last])
 				return { live, answers, events }
 			}
 			const scenario = fc
-				.array(step, { minLength: 1, maxLength: 10 })
+				.array(step, { minLength: 40, maxLength: 60 })
 				.chain(steps => {
 					const { answers, events } = serve(steps)
 					const n = answers.length + events.length
@@ -1705,7 +1795,11 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			await fc.assert(
 				fc.asyncProperty(scenario, async ({ steps, order }) => {
 					const { live, answers, events } = serve(steps)
-					const { store, pending, calls, send, tick } = deferred()
+					// small bounds so long runs cross the eviction of removals and pages
+					const { store, pending, calls, send, tick } = deferred({
+						tombstones: 2,
+						coverages: 2,
+					})
 					const quiet = (p: Promise<unknown>) =>
 						p.then(
 							() => undefined,
@@ -1721,6 +1815,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 							done.push(quiet(store.patchDiscovery(s.id, { label: "edit" })))
 						else if (s.kind === "remove")
 							done.push(quiet(store.deleteDiscovery(s.id)))
+					done.push(quiet(store.fetchDiscoveries(span)))
 					await flush()
 					expect(calls).toHaveLength(answers.length)
 					// the ids the client has seen: named in an answer, an event or its own request
@@ -1763,7 +1858,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 						)
 					store.dispose()
 				}),
-				{ numRuns: 300 },
+				{ numRuns: 200 },
 			)
 		})
 	})

@@ -30,6 +30,7 @@ import type {
 } from "@wavekit/api-types"
 import type { ApiClient, QueryValue } from "./api-client.ts"
 import { WriteOrder } from "./write-order.ts"
+import type { WriteOrderLimits } from "./write-order.ts"
 import { errorMessage, isApiError } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import { confidenceRank, isJobActive } from "./scanner-format.ts"
@@ -70,12 +71,12 @@ export interface DiscoveryPage extends Partial<DiscoveryStoreMeta> {
 
 /**
  * How one answer or event is ordered (band inspection UX req 3.3, see write-order.ts): with a
- * current core a record's version is its server revision and `seenAt` the store revision the
- * answer was taken at; with an older core both are one client sequence.
+ * current core a record's `rev` is its server revision and `read` the store revision the answer
+ * was served at (an event's own revision); with an older core both are one client sequence.
  */
 interface Stamp {
-	version(d: Discovery): number
-	seenAt: number
+	rev(d: Discovery): number
+	read: number
 }
 
 /** POST /api/scanner/discoveries/:id/listen (core src/core/scanner/listen.ts ListenResult). */
@@ -163,9 +164,22 @@ export interface ScannerStoreOptions {
 	now?: () => number
 	/** An active observation with no update for this long is dropped. Default 10 000. */
 	activityStaleMs?: number
+	/** Bounds of the discovery write order (tests); default 2 048 removals and 32 pages. */
+	writeOrderLimits?: WriteOrderLimits
 }
 
 // ---- pure helpers
+
+/**
+ * Band inspection UX req 1.4, 3.3: `coverage` is added by the core's routes when a record is
+ * read, never on events, and changes without a new revision. An upsert without it keeps the one
+ * the held record got from its newest read.
+ */
+function withReadFields(d: Discovery, held: Discovery | undefined): Discovery {
+	return d.coverage === undefined && held?.coverage !== undefined
+		? { ...d, coverage: held.coverage }
+		: d
+}
 
 function compareText(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0
@@ -433,11 +447,14 @@ export class ScannerStore extends Store<ScannerState> {
 	 * `storeEpoch`) by a client sequence: a read's request start, a live event's or a successful
 	 * mutation's arrival.
 	 */
-	private order = new WriteOrder<Discovery>()
+	private order: WriteOrder<Discovery>
+	private readonly orderLimits: WriteOrderLimits
 	/** The core's store epoch: undefined until the first answer, null for an older core. */
 	private storeEpoch: string | null | undefined = undefined
 	/** Epochs left behind (a restart): their late answers and events are dropped. */
 	private readonly retiredEpochs: (string | null)[] = []
+	/** How many times the epoch changed (a restart; not the first answer naming it). */
+	private epochSwitches = 0
 	/** The newest store revision any answer or event of this epoch was taken at. */
 	private storeHighWater = 0
 	/** The client sequence of an older core's ordering. */
@@ -458,6 +475,8 @@ export class ScannerStore extends Store<ScannerState> {
 		this.frame = options.frame ?? defaultFrame()
 		this.now = options.now ?? (() => Date.now())
 		this.staleMs = options.activityStaleMs ?? 10_000
+		this.orderLimits = options.writeOrderLimits ?? {}
+		this.order = new WriteOrder<Discovery>(this.orderLimits)
 		this.cleanup = [
 			events.subscribe(["scanner"]),
 			events.on("scanner:job", job => this.live(s => this.withJob(s, job))),
@@ -599,7 +618,9 @@ export class ScannerStore extends Store<ScannerState> {
 					// a restart found here started its own refresh
 					if (stamp === null || generation !== this.discoveryGeneration) return
 					this.commit(s => {
-						const byId = this.reconcile(s.discoveries.byId, q, page, stamp)
+						const byId = this.reconcile(s.discoveries.byId, q, page, stamp, {
+							cursor: null,
+						})
 						// the page's order, with what is newer than the page in its place
 						const items = page.items.flatMap(d => {
 							const have = byId.get(d.id)
@@ -765,7 +786,9 @@ export class ScannerStore extends Store<ScannerState> {
 		const stamp = this.stampOf(page.storeEpoch, started, page.storeRevision)
 		if (stamp === null) return page.items
 		this.commit(s => {
-			const byId = this.reconcile(s.discoveries.byId, query, page, stamp)
+			const byId = this.reconcile(s.discoveries.byId, query, page, stamp, {
+				cursor: null,
+			})
 			return { ...s, discoveries: { ...s.discoveries, byId } }
 		})
 		return page.items
@@ -898,11 +921,15 @@ export class ScannerStore extends Store<ScannerState> {
 
 	/** DELETE /api/scanner/discoveries/:id; one the core no longer has counts as deleted. */
 	async deleteDiscovery(id: string): Promise<void> {
+		// the answer carries no body (the epoch headers are not read): it applies only in the epoch
+		// it was asked in, so a core that restarted meanwhile keeps what it restored
+		const epoch = this.epochSwitches
 		try {
 			await this.api.delete<unknown>(`/api/scanner/discoveries/${encode(id)}`)
 		} catch (error) {
 			if (!isApiError(error) || error.status !== 404) throw error
 		}
+		if (this.epochSwitches !== epoch) return
 		// a deletion is final; with an older core it is ordered by its arrival (see patchDiscovery)
 		const stamp = this.currentStamp(this.nextSeq())
 		this.commit(s => this.withoutDiscovery(s, id, stamp))
@@ -1019,17 +1046,17 @@ export class ScannerStore extends Store<ScannerState> {
 		storeRevision: number | undefined,
 	): Stamp | null {
 		if (!this.admitEpoch(epoch ?? null)) return null
-		if (this.storeEpoch === null) return { version: () => seq, seenAt: seq }
-		const seenAt = storeRevision ?? this.storeHighWater
-		this.storeHighWater = Math.max(this.storeHighWater, seenAt)
-		return { version: d => d.revision ?? 0, seenAt }
+		if (this.storeEpoch === null) return { rev: () => seq, read: seq }
+		const read = storeRevision ?? this.storeHighWater
+		this.storeHighWater = Math.max(this.storeHighWater, read)
+		return { rev: d => d.revision ?? 0, read }
 	}
 
 	/** A Stamp for an answer without epoch or revision (a DELETE): the current mode, nothing newer. */
 	private currentStamp(seq: number): Stamp {
 		return typeof this.storeEpoch === "string"
-			? { version: d => d.revision ?? 0, seenAt: this.storeHighWater }
-			: { version: () => seq, seenAt: seq }
+			? { rev: d => d.revision ?? 0, read: this.storeHighWater }
+			: { rev: () => seq, read: seq }
 	}
 
 	private admitEpoch(epoch: string | null): boolean {
@@ -1042,7 +1069,8 @@ export class ScannerStore extends Store<ScannerState> {
 		this.retiredEpochs.push(this.storeEpoch)
 		if (this.retiredEpochs.length > 8) this.retiredEpochs.shift()
 		this.storeEpoch = epoch
-		this.order = new WriteOrder<Discovery>()
+		this.epochSwitches += 1
+		this.order = new WriteOrder<Discovery>(this.orderLimits)
 		this.storeHighWater = 0
 		// revisions restart with the epoch: nothing cached can be compared any more
 		this.commit(s => ({
@@ -1071,43 +1099,45 @@ export class ScannerStore extends Store<ScannerState> {
 	): Set<string> {
 		const applied = new Set<string>()
 		for (const id of writes.removeHard ?? []) {
-			this.order.removeHard(id, stamp.seenAt)
+			this.order.removeHard(id, stamp.read)
 			if (byId.delete(id)) applied.add(id)
 		}
 		for (const id of writes.removeSoft ?? [])
-			if (this.order.removeSoft(id, stamp.seenAt)) {
+			if (this.order.removeSoft(id, stamp.read)) {
 				byId.delete(id)
 				applied.add(id)
 			}
 		for (const d of writes.upsert ?? [])
-			if (this.order.upsert(d.id, d, stamp.version(d), stamp.seenAt)) {
-				byId.set(d.id, d)
+			if (this.order.upsert(d.id, d, stamp.rev(d), stamp.read)) {
+				byId.set(d.id, withReadFields(d, byId.get(d.id)))
 				applied.add(d.id)
 			}
 		const q = writes.covers
 		if (q !== undefined)
 			this.order.cover(
 				d => matchesDiscoveryQuery(d, q),
-				stamp.seenAt,
+				stamp.read,
 				new Set((writes.upsert ?? []).map(d => d.id)),
 			)
 		return applied
 	}
 
 	/**
-	 * A page for `query`: its records go in; when it is complete, a cached record the query covers
-	 * but the page no longer has leaves (merged, deleted, evicted or moved: band inspection UX req
-	 * 3.2), and the query is covered so an older answer cannot bring one back. Whatever something
-	 * newer already said about an id stays.
+	 * The FIRST page for `query` (asked without a cursor): its records go in; when it is also the
+	 * last (`nextCursor` null), it is the complete answer, so a cached record the query covers but
+	 * the page no longer has leaves (merged, deleted, evicted or moved: band inspection UX req 3.2)
+	 * and the query is covered so an older answer cannot bring one back. A later page ending the
+	 * list is never complete (loadMore() adds only). Whatever something newer said about an id stays.
 	 */
 	private reconcile(
 		byId: ReadonlyMap<string, Discovery>,
 		query: DiscoveryQuery,
 		page: DiscoveryPage,
 		stamp: Stamp,
+		asked: { cursor: string | null },
 	): Map<string, Discovery> {
 		const out = new Map(byId)
-		const complete = page.nextCursor === null
+		const complete = asked.cursor === null && page.nextCursor === null
 		const have = new Set(page.items.map(d => d.id))
 		const removeSoft = complete
 			? [...byId.values()]
@@ -1150,12 +1180,13 @@ export class ScannerStore extends Store<ScannerState> {
 			list.loaded &&
 			matchesDiscoveryQuery(d, list.query)
 		) {
+			const stored = byId.get(d.id) ?? d
 			const compare = discoveryComparator(list.query.sort)
-			let i = items.findIndex(x => compare(d, x) < 0)
+			let i = items.findIndex(x => compare(stored, x) < 0)
 			if (i < 0) i = items.length
 			// past the loaded pages: loadMore() brings it in its place
 			if (i < items.length || list.nextCursor === null)
-				items = [...items.slice(0, i), d, ...items.slice(i)]
+				items = [...items.slice(0, i), stored, ...items.slice(i)]
 		}
 		return { ...s, discoveries: { ...list, items, byId } }
 	}
