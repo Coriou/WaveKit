@@ -165,6 +165,7 @@ function sim(opts: { displays?: string[] } = {}) {
 		passive: true,
 		displays: opts.displays ?? ["ws:a"],
 		rate: (_passive: boolean) => 0.3,
+		nullSample: false,
 	}
 	const guard = new PassiveGuard()
 	const actions: string[] = []
@@ -175,12 +176,13 @@ function sim(opts: { displays?: string[] } = {}) {
 			jobs: state.passive ? ["job:passive-s"] : [],
 			displays: state.displays,
 		},
-		sample: {
-			idle: state.t - state.active,
-			active: state.active,
-			generation: state.generation,
-		},
-		utilization: null,
+		sample: state.nullSample
+			? null
+			: {
+					idle: state.t - state.active,
+					active: state.active,
+					generation: state.generation,
+				},
 		tracked: state.passive,
 	})
 	const tick = (ms = 1000) => {
@@ -321,5 +323,57 @@ describe("PassiveGuard state machine (DQ 8.2 to 8.8)", () => {
 		s.state.displays = []
 		s.tick()
 		expect(s.actions).toEqual(["measure", "restore:abandon"])
+	})
+})
+
+describe("guard review regressions (DQ 8.2, 8.5, 8.7)", () => {
+	it("a trial starts on the tick it falls due, even mid off-window (8.7)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.97 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["disable:engine-cpu 97 % of a core"])
+		const disabledAt = s.state.t
+		expect(disabledAt).toBe(60_000)
+		while (s.state.t < 500_000) s.tick()
+		s.state.generation = 2
+		while (s.actions.length < 2) s.tick()
+		expect(s.actions[1]).toBe("restore:trial")
+		expect(s.state.t).toBeLessThanOrEqual(
+			disabledAt + PASSIVE_PROBATION_MS + 1000,
+		)
+	})
+
+	it("a sole engine with no ELU sample is not judged on the whole-life average (8.2)", () => {
+		const guard = new PassiveGuard()
+		const a = guard.tick(
+			"s",
+			{
+				engine: {},
+				openedAt: 0,
+				consumers: { jobs: ["job:passive-s"], displays: [] },
+				sample: null,
+				tracked: true,
+			},
+			60_000,
+			0.25,
+		)
+		expect(a.kind).toBe("none")
+	})
+
+	it("a baseline window without a measurement waits, abandons at two windows and keeps the opportunity (8.5)", () => {
+		const s = sim()
+		s.state.rate = p => (p ? 0.4 : 0.3)
+		s.run(W)
+		expect(s.actions).toEqual(["measure"])
+		s.state.nullSample = true
+		s.run(W + 1000)
+		expect(s.actions).toEqual(["measure"])
+		while (s.actions.length < 2) s.tick()
+		expect(s.actions[1]).toBe("restore:abandon")
+		expect(s.guard.baselineOf("s", s.state.t)).toBeNull()
+		s.state.nullSample = false
+		// the opportunity was not used: a new window starts after the next judgement, not 30 min later
+		s.run(3 * W)
+		expect(s.actions[2]).toBe("measure")
 	})
 })

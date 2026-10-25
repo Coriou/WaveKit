@@ -8,6 +8,7 @@ import {
 } from "../../../../src/core/scanner/detection-quality-contract.js"
 import {
 	joinable,
+	nearest,
 	planConsolidation,
 	rankCompare,
 } from "../../../../src/core/scanner/store/consolidation.js"
@@ -236,6 +237,37 @@ describe("consolidation properties", () => {
 						expect(live.has(store.aliasOwner(d.id) ?? "")).toBe(true)
 			}),
 			{ numRuns: 100 },
+		)
+	})
+
+	it("nearest equals the brute-force (distance, id) order", () => {
+		// Feature: detection-quality, Property 12: Plan ownership and bound
+		// Validates: Requirements 7.3
+		fc.assert(
+			fc.property(
+				fc.array(fc.integer({ min: 0, max: 30 }), { maxLength: 60 }),
+				fc.integer({ min: -5, max: 35 }),
+				fc.integer({ min: 0, max: 20 }),
+				fc.integer({ min: 0, max: 10 }),
+				(centres, at, radius, k) => {
+					const list = centres
+						.map((c, i) => ({
+							id: `e${String(i).padStart(2, "0")}`,
+							centreHz: c,
+						}))
+						.sort((x, y) => x.centreHz - y.centreHz || (x.id < y.id ? -1 : 1))
+					const want = list
+						.filter(e => Math.abs(e.centreHz - at) <= radius)
+						.sort(
+							(x, y) =>
+								Math.abs(x.centreHz - at) - Math.abs(y.centreHz - at) ||
+								(x.id < y.id ? -1 : 1),
+						)
+						.slice(0, k)
+					expect(nearest(list, at, radius, k)).toEqual(want)
+				},
+			),
+			{ numRuns: 300 },
 		)
 	})
 })

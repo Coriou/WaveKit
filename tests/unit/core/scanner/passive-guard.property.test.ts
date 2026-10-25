@@ -137,7 +137,6 @@ describe("passive guard properties", () => {
 									displays: ["ws:a"],
 								},
 								sample: { idle: t - active, active, generation },
-								utilization: null,
 								tracked: true,
 							},
 							t,

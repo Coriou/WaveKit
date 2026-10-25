@@ -9,6 +9,7 @@ import {
 	PASSIVE_COST_WINDOW_MS,
 } from "../../../../src/core/scanner/passive-cost-contract.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
+import { meteredCheck } from "./passive-elu-fixture.js"
 
 type Harness = ReturnType<typeof serviceHarness>
 const WAIT = { timeout: 5_000, interval: 5 }
@@ -34,44 +35,42 @@ describe("passive cost guard wiring (WG11 req 2)", () => {
 			s.passive.maxEngineUtilization = 0.5
 		})
 		a.engine.utilization = () => 0.4
-		await internalsOf(a.h).checkPassiveCost(a.openedAt + PASSIVE_COST_WINDOW_MS)
+		await meteredCheck(a.h.service)(a.openedAt + PASSIVE_COST_WINDOW_MS)
 		expect(a.reason()).toBeUndefined()
 		await a.h.service.stop()
 		const b = await started()
 		b.engine.utilization = () => 0.4
-		await internalsOf(b.h).checkPassiveCost(b.openedAt + PASSIVE_COST_WINDOW_MS)
+		await meteredCheck(b.h.service)(b.openedAt + PASSIVE_COST_WINDOW_MS)
 		expect(b.reason()).toMatch(/engine-cpu 40 %/)
 		await b.h.service.stop()
 	})
 
 	it("a shared engine: saturation disables, then a quiet engine without passive clears it (DQ 8.4 rows 3, 8)", async () => {
 		const { h, engine, openedAt, reason } = await started()
+		const check = meteredCheck(h.service)
 		// another consumer (a display) keeps the engine running once passive lets go of it
 		await h.service.spectrum.acquire("rtl", "ws:wg11-sc")
 		const t1 = openedAt + PASSIVE_COST_WINDOW_MS
 		engine.utilization = () => 0.97
-		await internalsOf(h).checkPassiveCost(t1)
+		await check(t1)
 		expect(reason()).toMatch(/engine-cpu 97 %/)
 		await vi.waitFor(
 			() => expect(h.service.getJob("passive-rtl")).toBeUndefined(),
 			WAIT,
 		)
 		// the first tick without passive opens the baseline window (DQ 8.2)
-		await internalsOf(h).checkPassiveCost(t1 + 1_000)
-		engine.utilization = () => 0.05
-		await internalsOf(h).checkPassiveCost(
-			t1 + 1_000 + PASSIVE_COST_WINDOW_MS - 1,
-		)
+		await check(t1 + 1_000)
+		// the window runs at 0.22: one millisecond short of complete, nothing is judged
+		engine.utilization = () => 0.22
+		await check(t1 + 1_000 + PASSIVE_COST_WINDOW_MS - 1)
 		expect(reason()).toMatch(/engine-cpu/)
 		// a complete window inside the hysteresis band (0.2 < 0.22 <= limit): stays disabled
 		engine.utilization = () => 0.22
-		await internalsOf(h).checkPassiveCost(t1 + 1_000 + PASSIVE_COST_WINDOW_MS)
+		await check(t1 + 1_000 + PASSIVE_COST_WINDOW_MS)
 		expect(reason()).toMatch(/engine-cpu/)
 		// the next complete window at or below 0.8 x 0.25 clears
 		engine.utilization = () => 0.2
-		await internalsOf(h).checkPassiveCost(
-			t1 + 1_000 + 2 * PASSIVE_COST_WINDOW_MS,
-		)
+		await check(t1 + 1_000 + 2 * PASSIVE_COST_WINDOW_MS)
 		expect(reason()).toBeUndefined()
 		await vi.waitFor(
 			() => expect(h.service.getJob("passive-rtl")).toBeDefined(),
@@ -82,13 +81,14 @@ describe("passive cost guard wiring (WG11 req 2)", () => {
 
 	it("an enabled source is re-judged too and disabled when the engine got costly", async () => {
 		const { h, engine, openedAt, reason } = await started()
+		const check = meteredCheck(h.service)
 		const t1 = openedAt + PASSIVE_COST_WINDOW_MS
 		engine.utilization = () => 0.1
-		await internalsOf(h).checkPassiveCost(t1)
+		await check(t1)
 		engine.utilization = () => 0.9
-		await internalsOf(h).checkPassiveCost(t1 + PASSIVE_COST_RECHECK_MS - 1)
+		await check(t1 + PASSIVE_COST_RECHECK_MS - 1)
 		expect(reason()).toBeUndefined()
-		await internalsOf(h).checkPassiveCost(t1 + PASSIVE_COST_RECHECK_MS)
+		await check(t1 + PASSIVE_COST_RECHECK_MS)
 		expect(reason()).toMatch(/engine-cpu 90 %/)
 		await h.service.stop()
 	})
@@ -114,6 +114,18 @@ function fakeElu(engine: SpectrumEngine, profile: (tMs: number) => number) {
 	}
 	return clock
 }
+
+describe("passive cost guard: no ELU sample (review regression, DQ 8.2)", () => {
+	it("a sole engine without a sample is not judged on its whole-life average", async () => {
+		const { h, engine, openedAt, reason } = await started()
+		engine.utilization = () => 0.99
+		engine.eluSample = () => null
+		await internalsOf(h).checkPassiveCost(openedAt + PASSIVE_COST_WINDOW_MS)
+		expect(reason()).toBeUndefined()
+		expect(h.service.getJob("passive-rtl")).toBeDefined()
+		await h.service.stop()
+	})
+})
 
 describe("passive cost guard: windowed utilization (WG11 review M1)", () => {
 	it("judges a sole engine over the window since the last check, not its whole life", async () => {

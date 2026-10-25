@@ -6682,7 +6682,6 @@ export class ScannerService extends EventEmitter {
 									active: worker.elu.active,
 									generation: worker.generation,
 								},
-					utilization: engine?.utilization() ?? null,
 					tracked: this.jobs.has(`passive-${sourceId}`),
 				},
 				now,

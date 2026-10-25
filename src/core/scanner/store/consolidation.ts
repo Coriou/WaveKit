@@ -129,30 +129,57 @@ export function nearest<T extends { centreHz: number; id: string }>(
 ): T[] {
 	const out: T[] = []
 	if (!Number.isFinite(centreHz) || k <= 0) return out
-	let lo = 0
-	let hi = sorted.length
-	while (lo < hi) {
-		const mid = (lo + hi) >> 1
-		const e = sorted[mid]
-		if (e !== undefined && e.centreHz < centreHz) lo = mid + 1
-		else hi = mid
+	// First index whose centre is >= c (strict = false) or > c (strict = true).
+	const bound = (c: number, strict: boolean): number => {
+		let lo = 0
+		let hi = sorted.length
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1
+			const e = sorted[mid]
+			if (e !== undefined && (e.centreHz < c || (strict && e.centreHz === c)))
+				lo = mid + 1
+			else hi = mid
+		}
+		return lo
 	}
-	let left = lo - 1
-	let right = lo
+	let left = bound(centreHz, false) - 1
+	let right = left + 1
+	// Each step takes the entries at the next smallest distance: a run of equal centres on each
+	// side (ascending ids within a run), merged in id order, so ties go to the smaller id on
+	// either side. Runs are located by binary search: O(log n + k) whatever the density.
 	while (out.length < k) {
 		const l = left >= 0 ? sorted[left] : undefined
 		const r = right < sorted.length ? sorted[right] : undefined
 		const dl = l === undefined ? Infinity : centreHz - l.centreHz
 		const dr = r === undefined ? Infinity : r.centreHz - centreHz
-		const takeLeft =
-			l !== undefined &&
-			(dl < dr || (dl === dr && r !== undefined && l.id < r.id))
-		const pick = takeLeft ? l : r
-		const d = takeLeft ? dl : dr
-		if (pick === undefined || !(d <= radiusHz)) break
-		out.push(pick)
-		if (takeLeft) left--
-		else right++
+		const d = Math.min(dl, dr)
+		if (!(d <= radiusHz)) break
+		let li = -1
+		let lEnd = -1
+		if (l !== undefined && dl === d) {
+			li = bound(l.centreHz, false)
+			lEnd = left
+			left = li - 1
+		}
+		let ri = -1
+		let rEnd = -1
+		if (r !== undefined && dr === d) {
+			ri = right
+			rEnd = bound(r.centreHz, true) - 1
+			right = rEnd + 1
+		}
+		while (out.length < k) {
+			const x = li >= 0 && li <= lEnd ? sorted[li] : undefined
+			const y = ri >= 0 && ri <= rEnd ? sorted[ri] : undefined
+			if (x === undefined && y === undefined) break
+			if (y === undefined || (x !== undefined && x.id < y.id)) {
+				if (x !== undefined) out.push(x)
+				li++
+			} else {
+				out.push(y)
+				ri++
+			}
+		}
 	}
 	return out
 }

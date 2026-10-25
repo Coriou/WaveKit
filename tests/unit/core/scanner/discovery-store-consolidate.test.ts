@@ -11,6 +11,7 @@ import {
 } from "../../../../src/core/scanner/detection-quality-contract.js"
 import {
 	joinable,
+	nearest,
 	planConsolidation,
 } from "../../../../src/core/scanner/store/consolidation.js"
 import type { ConsolidationRecord } from "../../../../src/core/scanner/store/consolidation.js"
@@ -366,5 +367,28 @@ describe("consolidation at service start (DQ 7.6)", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true })
 		}
+	})
+})
+
+describe("nearest tie order (review regression, DQ 7.3)", () => {
+	it("equal centres on the left resolve to the smaller id", () => {
+		const list = [
+			{ id: "a", centreHz: 100 },
+			{ id: "b", centreHz: 100 },
+		]
+		expect(nearest(list, 200, 1000, 1).map(e => e.id)).toEqual(["a"])
+		expect(nearest(list, 0, 1000, 1).map(e => e.id)).toEqual(["a"])
+		const both = [
+			{ id: "c", centreHz: 100 },
+			{ id: "d", centreHz: 100 },
+			{ id: "a", centreHz: 300 },
+			{ id: "b", centreHz: 300 },
+		].sort((x, y) => x.centreHz - y.centreHz || (x.id < y.id ? -1 : 1))
+		expect(nearest(both, 200, 1000, 4).map(e => e.id)).toEqual([
+			"a",
+			"b",
+			"c",
+			"d",
+		])
 	})
 })

@@ -27,9 +27,8 @@ export interface PassiveGuardView {
 	openedAt: number | null
 	/** Consumers of the engine; null when unreadable (counts as sole, 8.1). */
 	consumers: { jobs: readonly string[]; displays: readonly string[] } | null
+	/** The worker's cumulative ELU sample; null = no measurement (8.2). */
 	sample: EluSample | null
-	/** Whole-life utilization, used only when the engine has no ELU sample. */
-	utilization: number | null
 	/** The source has a passive job (enabled) or the guard disabled it. */
 	tracked: boolean
 }
@@ -78,6 +77,8 @@ interface SourceState {
 	lastJudgedAt: number | null
 	baseline: { value: number; others: string; at: number } | null
 	lastBaselineWindowAt: number | null
+	/** Restored when a baseline window is abandoned without a measurement (8.5). */
+	previousBaselineWindowAt: number | null
 	measuringSince: number | null
 	trialing: boolean
 }
@@ -181,6 +182,7 @@ export class PassiveGuard {
 				lastJudgedAt: null,
 				baseline: null,
 				lastBaselineWindowAt: null,
+				previousBaselineWindowAt: null,
 				measuringSince: null,
 				trialing: false,
 			}
@@ -224,31 +226,52 @@ export class PassiveGuard {
 			}
 		}
 		// 8.5: a baseline window that cannot complete in two windows is abandoned.
+		// It gave no measurement (a valid one restores at once), so the opportunity is not used up.
 		if (
 			measuring &&
 			st.measuringSince !== null &&
-			now - st.measuringSince >= 2 * PASSIVE_COST_WINDOW_MS &&
-			(st.window?.kind !== "baseline" || !this.complete(st.window, now))
+			now - st.measuringSince >= 2 * PASSIVE_COST_WINDOW_MS
 		) {
+			st.lastBaselineWindowAt = st.previousBaselineWindowAt
 			return this.restoreAfterBaseline(sourceId, st, "abandon")
 		}
+		// 8.2: a window opened without a start sample is re-seeded at the first sample; only the
+		// window from the engine's open may span the worker's whole life.
+		if (
+			st.window !== null &&
+			st.window.kind !== "open" &&
+			st.window.sample === null &&
+			view.sample !== null
+		)
+			st.window = { kind: st.window.kind, startedAt: now, sample: view.sample }
 		const w = st.window
 		if (w === null || st.pending !== null) return { kind: "none" }
 		const done = this.complete(w, now)
 		const u = done ? this.measure(w, view) : null
 		if (measuring) {
 			if (w.kind !== "baseline" || !done) return { kind: "none" }
-			if (u !== null && Number.isFinite(u))
-				st.baseline = { value: u, others: st.others, at: now }
+			// 8.5: no measurement yet: keep waiting until the two-window deadline above.
+			if (u === null || !Number.isFinite(u)) return { kind: "none" }
+			st.baseline = { value: u, others: st.others, at: now }
 			return this.restoreAfterBaseline(sourceId, st, "baseline")
 		}
 		if (disabled) {
 			if (holdsPassive) return { kind: "none" } // a restore in flight
+			const since = now - (this.disabledAt.get(sourceId) ?? now)
+			// 8.7: the trial deadline is met on the tick it falls due, not when an off window ends.
+			if (
+				since >= PASSIVE_PROBATION_MS &&
+				this.validBaseline(st, now) !== null
+			) {
+				this.disabledAt.delete(sourceId)
+				st.trialing = true
+				this.expect(st, "trial")
+				return { kind: "restore", why: "trial" }
+			}
 			if (!done) return { kind: "none" }
 			if (u !== null && Number.isFinite(u))
 				st.baseline = { value: u, others: st.others, at: now }
 			st.window = { kind: "off", startedAt: now, sample: view.sample }
-			const since = now - (this.disabledAt.get(sourceId) ?? now)
 			const r = passiveGuardDecision({
 				enabled: false,
 				holders: "off",
@@ -315,6 +338,7 @@ export class PassiveGuard {
 		}
 		if (r.decision === "baseline") {
 			this.measuring.add(sourceId)
+			st.previousBaselineWindowAt = st.lastBaselineWindowAt
 			st.lastBaselineWindowAt = now
 			st.measuringSince = now
 			this.expect(st, "baseline")
@@ -348,7 +372,9 @@ export class PassiveGuard {
 	}
 
 	private measure(w: Window, view: PassiveGuardView): number | null {
-		if (view.sample === null) return view.utilization
+		// 8.2: no sample is no measurement (never the engine's whole-life average).
+		if (view.sample === null) return null
+		if (w.sample === null && w.kind !== "open") return null
 		return windowedUtilization(view.sample, w.sample)
 	}
 

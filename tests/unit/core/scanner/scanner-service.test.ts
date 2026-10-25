@@ -20,6 +20,7 @@ import {
 	settled,
 	tick,
 } from "../../../mocks/scanner/service-fakes.js"
+import { meteredCheck } from "./passive-elu-fixture.js"
 
 type Harness = ReturnType<typeof serviceHarness>
 /** Bound for state reached through I/O or the arbiter (vi.waitFor), never a fixed sleep. */
@@ -1143,21 +1144,21 @@ describe("ScannerService", () => {
 	it("judges an engine's passive cost over its first minute, then every five minutes (finding 10, WG11 req 2)", async () => {
 		const h = serviceHarness()
 		await h.service.start()
-		const internals = internalsOf(h)
+		const check = meteredCheck(h.service)
 		const engine = h.service.spectrum.engine("rtl")!
 		const openedAt = h.service.spectrum.openedAt("rtl")!
 		engine.utilization = () => 0.1
-		await internals.checkPassiveCost(openedAt + 61_000)
+		await check(openedAt + 61_000)
 		// WG11 req 2: no check is due before the five minute recheck, so a spike in between is ignored
 		engine.utilization = () => 0.9
-		await internals.checkPassiveCost(openedAt + 61_000 + 299_000)
+		await check(openedAt + 61_000 + 299_000)
 		expect(h.service.getJob("passive-rtl")).toBeDefined()
 		await h.service.stop()
 		const costly = serviceHarness()
 		await costly.service.start()
 		const e2 = costly.service.spectrum.engine("rtl")!
 		e2.utilization = () => 0.9
-		await internalsOf(costly).checkPassiveCost(
+		await meteredCheck(costly.service)(
 			costly.service.spectrum.openedAt("rtl")! + 61_000,
 		)
 		expect(costly.service.getJob("passive-rtl")).toBeUndefined()
