@@ -17,6 +17,15 @@ export interface HintInput {
 	ranges: readonly ScanRange[] | undefined
 }
 
+const REGIONS: ReadonlySet<string> = new Set<BandRegion>([
+	"EU",
+	"US",
+	"CA",
+	"AU",
+	"NZ",
+	"JP",
+	"CN",
+])
 const NARROW_MAX_HZ = 25_000
 const LORA_MIN_HZ = 100_000
 const LORA_MAX_HZ = 150_000
@@ -75,9 +84,10 @@ export function hintOf(input: HintInput): ScannerHint | undefined {
 	const { frequencyHz: f, bandwidthHz: w, class: cls, short } = input
 	if (!finitePositive(f) || !finitePositive(w)) return undefined
 	if (!isClass(cls) || typeof short !== "boolean") return undefined
-	if (typeof input.region !== "string" || input.region.length === 0)
+	if (typeof input.region !== "string" || !REGIONS.has(input.region))
 		return undefined
-	const ranges = Array.isArray(input.ranges) ? input.ranges : []
+	if (!Array.isArray(input.ranges)) return undefined
+	const ranges = input.ranges
 	if (input.region === "EU") {
 		if (w >= LORA_MIN_HZ && w <= LORA_MAX_HZ && short) {
 			const lo = f - w / 2

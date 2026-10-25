@@ -246,6 +246,7 @@ export const ObservationSchema = z.object({
 	hopIndex: z.number().int().optional(),
 	tuningTrust: TuningTrustSchema,
 	classVote: ScannerClassSchema.optional(),
+	short: z.boolean().optional(),
 })
 /** `proof` is a derived DTO field (A12). It is not a journal key. */
 export type ObservationCheck = Assert<

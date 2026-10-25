@@ -236,3 +236,54 @@ describe("weak label property", () => {
 		)
 	})
 })
+
+describe("hint inputs across restore", () => {
+	const voice = (id: string, at: number, blocks: number) =>
+		makeObs({
+			id,
+			centreHz: 434_450_000,
+			startedAt: at,
+			obwHz: 12_000,
+			blocks,
+			cls: "analog-fm",
+			hypotheses: [["analog-fm", 0.6]],
+			gate: "passed",
+		})
+
+	it("a restored long analog-fm record on the LPD raster keeps the analog-voice hint", () => {
+		const store = newStore()
+		const id = store.ingest(voice("o1", T0, 8)).discoveryId ?? ""
+		expect(store.get(id)?.hint).toBe("analog-voice")
+		const replica = newStore()
+		replica.restore(JSON.parse(JSON.stringify(store.snapshot())))
+		expect(replica.get(id)?.hint).toBe("analog-voice")
+		for (const o of replica.observations(id, null, 10).items)
+			expect(o).not.toHaveProperty("short")
+	})
+
+	it("restore replaces the short input with the restored observations", () => {
+		const long = newStore()
+		const id = long.ingest(voice("o1", T0, 8)).discoveryId ?? ""
+		const snap = JSON.parse(JSON.stringify(long.snapshot())) as ReturnType<
+			DiscoveryStore["snapshot"]
+		>
+		const store = newStore()
+		expect(store.ingest(voice("o1", T0, 2)).discoveryId).toBe(id)
+		expect(store.get(id)?.hint).toBe("ism-device")
+		store.restore(snap)
+		expect(store.get(id)?.hint).toBe("analog-voice")
+	})
+
+	it("a record whose observations predate the short input has no hint", () => {
+		const store = newStore()
+		const id = store.ingest(voice("o1", T0, 8)).discoveryId ?? ""
+		const snap = JSON.parse(JSON.stringify(store.snapshot())) as ReturnType<
+			DiscoveryStore["snapshot"]
+		>
+		for (const o of snap.observations) delete (o as { short?: boolean }).short
+		const replica = newStore()
+		replica.restore(snap)
+		expect(replica.get(id)?.protocol).toBe("unknown")
+		expect(replica.get(id)).not.toHaveProperty("hint")
+	})
+})

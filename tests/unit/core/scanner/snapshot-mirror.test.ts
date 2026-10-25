@@ -48,7 +48,8 @@ const sha = (text: string): string =>
 // Re-baselined again for DQ.4-DQ.6: `class` is now the majority of the last 64 observations (3.4),
 // cross-family sticky joins (2.1) and co-channel pruning (2.3) apply; the seeded ops use one
 // OBW, so 3.1 never refuses. Each observation now also persists its `classVote` (DQ 3.4), which
-// is why seeds 2 to 6 grew (seed 1 holds no observations).
+// is why seeds 2 to 6 grew (seed 1 holds no observations). Scanner-redesign 3.11 adds the
+// persisted `short` hint input on each observation: seeds 2 to 6 grew again.
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -63,40 +64,40 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		40,
 		false,
-		19622,
-		"2ec9a832d39f60e2181dd01f2a959fb511c9e7ad17fb699841ae4e8a4cc464bc",
+		19860,
+		"a75d40733bcafec93815f678f0ae7c9e1d490181fc7cd07e695c4b10a65e49e9",
 	],
 	[
 		3,
 		400,
 		40,
 		false,
-		39441,
-		"efa8d121ca7d2df6c991f2d3816286ce72be6a3984ddf73ce0f75255861ff96a",
+		39902,
+		"6ad1359ed926636cfc7186670680c79599c6dbeb419df6191f16be7c6d570879",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		63739,
-		"31b962b5d1c3b9c036296c15b9466a9cd4c7285092b3de15cda458c1768353fd",
+		64598,
+		"766415221218df2c1969e4de31bcd5fbac12330817afb29f63166f7a212df7ff",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		72029,
-		"bb889a364e707766fcedf4a7a71775d9d1a76b8418da4de8ed3ae1b70433c8a1",
+		72993,
+		"06f773d48ae0e969da9703bda1cd6228c3b8892a14732e01a6e0c5f3330acff6",
 	],
 	[
 		6,
 		700,
 		40,
 		true,
-		346330,
-		"312dc292f6c0687440ecd446a041f73c5d8f2c9f0ef92eb21ccc5eedc80bd48b",
+		353110,
+		"94e63c3bacc3d4eec6fe66c34dca1f12168147e60c487734c4bf19d6975c211b",
 	],
 ]
 

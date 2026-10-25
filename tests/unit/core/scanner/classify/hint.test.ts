@@ -51,8 +51,11 @@ describe("hintOf: rule 1, invalid input", () => {
 		expect(hintOf(input(over))).toBeUndefined()
 	})
 
-	it("missing ranges still allow the region rules", () => {
-		expect(hintOf(input({ ranges: undefined }))).toBe("ism-device")
+	it("missing ranges or an unknown region give no hint", () => {
+		expect(hintOf(input({ ranges: undefined }))).toBeUndefined()
+		expect(
+			hintOf(input({ region: "bogus" as unknown as HintInput["region"] })),
+		).toBeUndefined()
 	})
 })
 
@@ -235,7 +238,8 @@ describe("hintOf properties", () => {
 					!CLASSES.includes(x.class as ScannerClass) ||
 					x.class === "unknown" ||
 					x.short === undefined ||
-					x.region === undefined
+					x.region === undefined ||
+					x.ranges === undefined
 				if (malformed) {
 					expect(h).toBeUndefined()
 					return

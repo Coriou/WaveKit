@@ -850,8 +850,6 @@ export class DiscoveryStore
 	/** Replay and restore drop caches without publishing a sink change. */
 	private proofQuiet = 0
 
-	/** Scanner-redesign 3.11 inputs, in memory only: never stored or journaled. */
-	private readonly latestShort = new Map<string, boolean>()
 	private readonly hintScope: DiscoveryStoreOptions["hintScope"]
 
 	constructor(opts: DiscoveryStoreOptions) {
@@ -2463,10 +2461,6 @@ export class DiscoveryStore
 			d.lastSeenAt = endedAt
 			d.signal.last = stats
 			d.tuningTrust = obs.track.tuningTrust
-			this.latestShort.set(
-				d.id,
-				obs.track.flags.burst || obs.track.blocks <= SHORT_TRACK_BLOCKS,
-			)
 		}
 		// DQ 3.3: only a compatible, not overload-flagged observation raises best.
 		if (raiseBest && stats.snrDb > d.signal.best.snrDb) {
@@ -3656,6 +3650,9 @@ export class DiscoveryStore
 		// DQ 3.4: persisted vote; absent on edge observations and on records written before DQ.
 		if (!t.flags.edge)
 			(record as StoredObservation).classVote = obs.classification.class
+			// Scanner-redesign 3.11: persisted `short` input of the hint (absent on older records).
+		;(record as StoredObservation).short =
+			t.flags.burst || t.blocks <= SHORT_TRACK_BLOCKS
 		if (t.acf30 !== undefined) record.acf30 = t.acf30
 		if (t.acf60 !== undefined) record.acf60 = t.acf60
 		if (obs.hopIndex !== undefined) record.hopIndex = obs.hopIndex
@@ -4318,6 +4315,20 @@ export class DiscoveryStore
 		return copy
 	}
 
+	/** Scanner-redesign 3.11 `short`: the persisted flag of the latest observation; undefined when absent. */
+	private latestShort(discoveryId: string): boolean | undefined {
+		let latest: Observation | undefined
+		for (const o of this.byDiscovery.get(discoveryId) ?? []) {
+			if (
+				latest === undefined ||
+				(o.endedAt ?? o.startedAt) >= (latest.endedAt ?? latest.startedAt)
+			)
+				latest = o
+		}
+		const short = (latest as StoredObservation | undefined)?.short
+		return typeof short === "boolean" ? short : undefined
+	}
+
 	/** Scanner-redesign 3.11: display hint of a weak record, from the read-time scope. */
 	private hintFor(d: Discovery): ScannerHint | undefined {
 		const scope = this.hintScope?.()
@@ -4326,7 +4337,7 @@ export class DiscoveryStore
 			frequencyHz: d.frequencyHz,
 			bandwidthHz: d.bandwidthHz,
 			class: d.class,
-			short: this.latestShort.get(d.id),
+			short: this.latestShort(d.id),
 			region: scope.region,
 			ranges: scope.ranges,
 		})
@@ -4338,6 +4349,7 @@ export class DiscoveryStore
 		if (proof !== null) copy.proof = clone(proof)
 		else delete copy.proof
 		delete (copy as StoredObservation).classVote // store-internal (DQ 3.4), not part of the DTO
+		delete (copy as StoredObservation).short // store-internal (scanner-redesign 3.11)
 		return copy
 	}
 
@@ -4345,7 +4357,6 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		this.discoveries.delete(id)
-		this.latestShort.delete(id)
 		const members = this.members.get(id)
 		for (const s of d.sourceIds) {
 			this.bySource.get(s)?.delete(id)

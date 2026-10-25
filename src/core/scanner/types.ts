@@ -351,6 +351,8 @@ export interface Observation {
  */
 export interface StoredObservation extends Observation {
 	classVote?: ScannerClass
+	/** Scanner-redesign 3.11: the track was a burst or at most 4 blocks (the hint's `short`). */
+	short?: boolean
 }
 
 // ---------------------------------------------------------------- jobs and plans (§ 10, § 5)
