@@ -105,6 +105,32 @@ describe("discovery routes: coverage and absorbed ids", () => {
 		})
 	})
 
+	it("coverage follows the placement's reported channel width at its edges", async () => {
+		const at = (channelHz: number) => [
+			{
+				id: "nfm",
+				placements: [
+					{
+						sourceId: "rtl",
+						reach: "channel",
+						channelHz,
+						channelWidthHz: 8_000,
+						running: true,
+					},
+				],
+			},
+		]
+		await build(at(F - 4_000))
+		const edge = await app.inject({ url: "/api/scanner/discoveries/d_a" })
+		expect(edge.json().coverage).toEqual([
+			{ decoderId: "nfm", state: "running" },
+		])
+		await app.close()
+		await build(at(F + 4_001))
+		const past = await app.inject({ url: "/api/scanner/discoveries/d_a" })
+		expect(past.json().coverage).toEqual([])
+	})
+
 	it("[] and absent survive serialisation distinctly", async () => {
 		await build([{ id: "ais", placements: [] }])
 		const none = await app.inject({ url: "/api/scanner/discoveries/d_a" })

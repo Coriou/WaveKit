@@ -41,6 +41,7 @@ export const decoderStatusExtensionProperties = {
 			properties: {
 				sourceId: { type: "string" },
 				channelHz: { type: "number" },
+				channelWidthHz: { type: "number" },
 				reach: { type: "string", enum: ["channel", "raw", "centre"] },
 				origin: {
 					type: "string",

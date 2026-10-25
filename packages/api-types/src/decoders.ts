@@ -399,6 +399,8 @@ export type DecoderEfficiencyDetail =
 export interface DecoderPlacementView {
 	sourceId: string
 	channelHz?: number
+	/** A channel placement's two-sided channel width; absent when unknown. */
+	channelWidthHz?: number
 	reach: DecoderReachKind
 	origin: "configured" | "band" | "vfo" | "bandplan" | "fallback"
 	primary: boolean

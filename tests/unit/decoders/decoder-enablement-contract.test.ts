@@ -398,6 +398,7 @@ describe("decoder enablement contract", () => {
 				{
 					sourceId: "fake",
 					channelHz: 100,
+					channelWidthHz: 12_500,
 					reach: "channel",
 					origin: "vfo",
 					primary: true,

@@ -13,6 +13,7 @@ const F = 433_920_000
 interface P {
 	sourceId?: unknown
 	channelHz?: unknown
+	channelWidthHz?: unknown
 	reach?: unknown
 	running?: unknown
 	suspension?: unknown
@@ -94,6 +95,45 @@ describe("discovery coverage projection", () => {
 		)
 		expect(index?.coverageOf(disc(F + 12_500))).toHaveLength(1)
 		expect(index?.coverageOf(disc(F + 12_501))).toEqual([])
+	})
+
+	it("uses the placement's reported channel width: exactly half covers, 1 Hz past does not", () => {
+		const index = buildCoverageIndex(
+			[status("a", [{ channelHz: F, channelWidthHz: 25_000, running: true }])],
+			{ channelWidthHz: () => 6_250 },
+		)
+		expect(index?.coverageOf(disc(F + 12_500))).toHaveLength(1)
+		expect(index?.coverageOf(disc(F - 12_500))).toHaveLength(1)
+		expect(index?.coverageOf(disc(F + 12_501))).toEqual([])
+		expect(index?.coverageOf(disc(F - 12_501))).toEqual([])
+	})
+
+	it("a narrow reported channel width narrows coverage below the default", () => {
+		const index = buildCoverageIndex([
+			status("a", [{ channelHz: F, channelWidthHz: 8_000, running: true }]),
+		])
+		expect(index?.coverageOf(disc(F + 4_000))).toHaveLength(1)
+		expect(index?.coverageOf(disc(F - 4_000))).toHaveLength(1)
+		expect(index?.coverageOf(disc(F + 4_001))).toEqual([])
+		expect(index?.coverageOf(disc(F - 6_250))).toEqual([])
+	})
+
+	it("an absent or invalid reported width falls back to the declared, then the default width", () => {
+		for (const channelWidthHz of [undefined, 0, -1, Number.NaN, "25000"]) {
+			const placement = {
+				channelHz: F,
+				running: true,
+				...(channelWidthHz !== undefined ? { channelWidthHz } : {}),
+			}
+			const declared = buildCoverageIndex([status("a", [placement])], {
+				channelWidthHz: () => 25_000,
+			})
+			expect(declared?.coverageOf(disc(F + 12_500))).toHaveLength(1)
+			expect(declared?.coverageOf(disc(F + 12_501))).toEqual([])
+			const fallback = buildCoverageIndex([status("a", [placement])])
+			expect(fallback?.coverageOf(disc(F - 6_250))).toHaveLength(1)
+			expect(fallback?.coverageOf(disc(F - 6_251))).toEqual([])
+		}
 	})
 
 	it("raw and centre reach use the decoder's own window; none established is unknown", () => {

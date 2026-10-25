@@ -3377,7 +3377,10 @@ interface DiscoveryCoverage {
 At most 3 entries, running decoders first. An absent `coverage` means unknown
 (the core makes no claim, for example when decoder status is unavailable); an
 empty array means verified that no decoder placement covers the frequency.
-A decoder that declares no channel width is assumed to cover 12.5 kHz.
+A channel placement covers its `channelHz` plus or minus half its channel width. Each
+channel entry in a decoder status's `placements` reports that width as `channelWidthHz`
+(the two-sided width the decoder is placed with, optional and additive); a placement
+without one is assumed to cover 12.5 kHz.
 
 #### PATCH /api/scanner/discoveries/:id
 

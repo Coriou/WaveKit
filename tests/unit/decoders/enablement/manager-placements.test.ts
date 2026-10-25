@@ -61,7 +61,7 @@ function setup(
 			}
 			decoder.getChannelRequest = () => ({
 				centerHz: options["channelHz"] as number,
-				bandwidthHz: 12_500,
+				bandwidthHz: (options["bandwidthHz"] as number | undefined) ?? 12_500,
 				transitionHz: 2_500,
 				outputRateHz: 48_000,
 				format: "cu8" as const,
@@ -181,6 +181,34 @@ it("162.0 MHz with channelizer: AIS, dsd-fme VFO and multimon-ng VFO run; GET li
 	expect(f.manager.getAllStatus()).toHaveLength(3)
 	expect(f.manager.getAllStatus().every(status => status.running)).toBe(true)
 	expect(f.provider.requestChannel).toHaveBeenCalledTimes(3)
+})
+
+it("each channel placement reports its decoder's channel width", async () => {
+	const f = setup()
+	f.create("narrow")
+	f.create("wide", { bandwidthHz: 25_000 })
+	f.plan([
+		f.place("narrow", 162_000_000),
+		f.place("narrow", 162_025_000, false),
+		f.place("wide", 162_050_000),
+		f.place("wide", 162_100_000, false),
+	])
+	await f.manager.startAll()
+	const widths = (id: string) =>
+		f.manager.getStatus(id)?.placements?.map(p => p.channelWidthHz)
+	expect(widths("narrow")).toEqual([12_500, 12_500])
+	expect(widths("wide")).toEqual([25_000, 25_000])
+})
+
+it("a channel placement whose decoder makes no valid request omits its width", async () => {
+	const f = setup()
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000)])
+	await f.manager.startAll()
+	f.instances.get("dec")!.getChannelRequest = () => ({ invalid: "no centre" })
+	const placement = f.manager.getStatus("dec")?.placements?.[0]
+	expect(placement?.reach).toBe("channel")
+	expect(placement).not.toHaveProperty("channelWidthHz")
 })
 
 it("worker output is emitted under the parent id with the placement frequency", async () => {

@@ -37,7 +37,10 @@ interface Interval {
 }
 
 export interface CoverageProjectionOptions {
-	/** Declared channel width of a decoder; absent or invalid: DISCOVERY_COVERAGE_DEFAULT_CHANNEL_WIDTH_HZ. */
+	/**
+	 * Declared channel width of a decoder, used when a channel placement reports no valid
+	 * `channelWidthHz`; absent or invalid too: DISCOVERY_COVERAGE_DEFAULT_CHANNEL_WIDTH_HZ.
+	 */
 	channelWidthHz?: (decoderId: string) => number | undefined
 	/** Called once per index build for each decoder id skipped as too long or empty. */
 	onSkippedDecoderId?: (decoderId: string) => void
@@ -167,8 +170,10 @@ export function buildCoverageIndex(
 					unresolved.add(sourceId)
 					continue
 				}
-				lo = ch - width / 2
-				hi = ch + width / 2
+				const reported = p["channelWidthHz"]
+				const placed = isFreq(reported) && reported > 0 ? reported : width
+				lo = ch - placed / 2
+				hi = ch + placed / 2
 			} else if (reach === "raw" || reach === "centre") {
 				if (own === undefined || own.sourceId !== sourceId) {
 					unresolved.add(sourceId)

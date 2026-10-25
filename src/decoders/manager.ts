@@ -962,6 +962,30 @@ export class DecoderManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * The channel bandwidth the planner places this decoder with (its channel request for the
+	 * source's capture); undefined when it makes no valid request or throws.
+	 */
+	private plannedChannelWidthHz(
+		state: DecoderState,
+		caps: SourceCaps | undefined,
+	): number | undefined {
+		let request: DecoderChannelRequestResult | undefined
+		try {
+			request = state.decoder.getChannelRequest?.({
+				sampleRateHz: caps?.sampleRate ?? 2_400_000,
+				...(caps?.centerFreq !== undefined
+					? { centerHz: caps.centerFreq }
+					: {}),
+			})
+		} catch {
+			return undefined
+		}
+		if (!request || "invalid" in request) return undefined
+		const width = request.bandwidthHz
+		return Number.isFinite(width) && width > 0 ? width : undefined
+	}
+
 	private placementViews(parent: DecoderState): DecoderPlacementView[] {
 		return [...this.decoders.values()].flatMap(state => {
 			const placement = state.placement
@@ -970,12 +994,22 @@ export class DecoderManager extends EventEmitter {
 				(state !== parent && state.parentId !== parent.config.id)
 			)
 				return []
+			let channelWidthHz: number | undefined
+			if (placement.reach === "channel") {
+				const caps = this.sourceManager?.getCaps(placement.sourceId)
+				channelWidthHz =
+					this.plannedChannelWidthHz(state, caps) ??
+					(state === parent
+						? undefined
+						: this.plannedChannelWidthHz(parent, caps))
+			}
 			return [
 				{
 					sourceId: placement.sourceId,
 					...(placement.channelHz !== null
 						? { channelHz: placement.channelHz }
 						: {}),
+					...(channelWidthHz !== undefined ? { channelWidthHz } : {}),
 					reach: placement.reach,
 					origin: placement.origin,
 					primary: placement.primary,
