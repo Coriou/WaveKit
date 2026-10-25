@@ -8,7 +8,6 @@ import {
 	DQ_CONSOLIDATE_SCAN_MAX,
 	DQ_CROSS_FAMILY_HZ,
 	DQ_MIN_HISTORY_OBS,
-	DQ_OBW_RATIO_MAX,
 } from "../detection-quality-contract.js"
 import type { ProtocolFamily } from "../types.js"
 import { recordsCompatible } from "./compatibility.js"
@@ -20,15 +19,22 @@ export interface ConsolidationRecord {
 	/** Median centre over the last 64 observations. */
 	centreHz: number
 	obwHz: number
+	/** Req 9.2: smallest and largest finite OBW of the last 64 observations (NaN when none). */
+	obwMin: number
+	obwMax: number
+	/** Req 9.2: `DQ_OBW_RATIO_MAX` when decoded or identified, else `DQ_YOUNG_OBW_RATIO`. */
+	bandFactor: number
 	peakDbfs: number
 	/** Observations in the median window. */
 	count: number
 	/** The young record's own observations (fewer than 3), for the 3.1 two-record test. */
 	young: readonly { peakDbfs: number; obwHz: number }[]
 	identity?: { kind: string; value: string } | undefined
-	/** Effective (evidence) family. */
+	/** Req 9.1: association family (the effective family only when decoded, identified or proven). */
 	family: ProtocolFamily
+	/** Effective confidence is `decoded`. */
 	decoded: boolean
+	/** Effective protocol. */
 	protocol: string
 	firstSeenAt: string
 	hasOperator: boolean
@@ -63,9 +69,41 @@ export function rankCompare(
 	return compareText(a.firstSeenAt, b.firstSeenAt) || compareText(a.id, b.id)
 }
 
+/** DQ 9.8: a malformed identity is different from every other identity. */
+function sameWellFormedIdentity(
+	a: { kind: string; value: string },
+	b: { kind: string; value: string },
+): boolean {
+	const x = a as { kind?: unknown; value?: unknown } | null
+	const y = b as { kind?: unknown; value?: unknown } | null
+	if (x === null || y === null) return false
+	if (typeof x.kind !== "string" || typeof x.value !== "string") return false
+	return x.kind === y.kind && x.value === y.value
+}
+
 const finitePositive = (x: number): boolean => Number.isFinite(x) && x > 0
 
-/** Req 7.1, 7.9: are two records one emitter? Pure, O(1). */
+/**
+ * Req 9.2: does `obwHz` lie in the band `[obwMin / f, obwMax x f]`? False on any non-finite or
+ * non-positive input (9.8).
+ */
+export function inObwBand(
+	obwHz: number,
+	obwMin: number,
+	obwMax: number,
+	factor: number,
+): boolean {
+	if (
+		!finitePositive(obwHz) ||
+		!finitePositive(obwMin) ||
+		!finitePositive(obwMax) ||
+		!finitePositive(factor)
+	)
+		return false
+	return obwHz >= obwMin / factor && obwHz <= obwMax * factor
+}
+
+/** Req 7.1, 7.9, 9.6: are two records one emitter? Pure, O(1). */
 export function joinable(
 	a: ConsolidationRecord,
 	b: ConsolidationRecord,
@@ -74,15 +112,14 @@ export function joinable(
 	if (a.hasOperator || b.hasOperator) return false
 	if (!Number.isFinite(a.centreHz) || !Number.isFinite(b.centreHz)) return false
 	if (Math.abs(a.centreHz - b.centreHz) > DQ_CROSS_FAMILY_HZ) return false
-	if (!finitePositive(a.obwHz) || !finitePositive(b.obwHz)) return false
-	const ratio = Math.max(a.obwHz, b.obwHz) / Math.min(a.obwHz, b.obwHz)
-	if (!(ratio <= DQ_OBW_RATIO_MAX)) return false
+	// 9.6: each median OBW in the other's band (9.2, each record's own factor).
+	if (!inObwBand(a.obwHz, b.obwMin, b.obwMax, b.bandFactor)) return false
+	if (!inObwBand(b.obwHz, a.obwMin, a.obwMax, a.bandFactor)) return false
 	if (!Number.isFinite(a.peakDbfs) || !Number.isFinite(b.peakDbfs)) return false
 	if (
 		a.identity !== undefined &&
 		b.identity !== undefined &&
-		(a.identity.kind !== b.identity.kind ||
-			a.identity.value !== b.identity.value)
+		!sameWellFormedIdentity(a.identity, b.identity)
 	)
 		return false
 	if (

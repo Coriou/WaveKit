@@ -48,7 +48,9 @@ const sha = (text: string): string =>
 // Re-baselined again for DQ.4-DQ.6: `class` is now the majority of the last 64 observations (3.4),
 // cross-family sticky joins (2.1) and co-channel pruning (2.3) apply; the seeded ops use one
 // OBW, so 3.1 never refuses. Each observation now also persists its `classVote` (DQ 3.4), which
-// is why seeds 2 to 6 grew (seed 1 holds no observations).
+// is why seeds 2 to 6 grew (seed 1 holds no observations). Seed 3 re-baselined for DQ 9.1: at entry 22
+// an observation now joins the record on its key whose analog-fm label is an unconfirmed guess
+// (association family unknown) instead of creating one beside it; byte length unchanged.
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -72,7 +74,7 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		false,
 		39441,
-		"efa8d121ca7d2df6c991f2d3816286ce72be6a3984ddf73ce0f75255861ff96a",
+		"15fe0c46d9a638de82fdedd13d3dd7414e27f3d2c1e27f1ead7cacfbc7d672f4",
 	],
 	[
 		4,

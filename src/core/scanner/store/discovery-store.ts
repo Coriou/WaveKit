@@ -111,11 +111,20 @@ import {
 	DQ_IDENTITY_WEAKER_DB,
 	DQ_MIN_HISTORY_OBS,
 	DQ_OBW_RATIO_MAX,
-	DQ_OBW_RATIO_MIN,
 	DQ_OVERLOAD_CREATE_SNR_DB,
+	DQ_YOUNG_OBW_RATIO,
 } from "../detection-quality-contract.js"
-import { compatible, recordsCompatible } from "./compatibility.js"
-import { joinable, planConsolidation, rankCompare } from "./consolidation.js"
+import {
+	compatible,
+	observationCompatible,
+	recordsCompatible,
+} from "./compatibility.js"
+import {
+	inObwBand,
+	joinable,
+	planConsolidation,
+	rankCompare,
+} from "./consolidation.js"
 import type {
 	ConsolidationGroup,
 	ConsolidationPlan,
@@ -454,7 +463,25 @@ function sameIdentity(
 	b: Identity | undefined,
 ): boolean {
 	if (a === undefined || b === undefined) return a === b
+	// DQ 9.8: a malformed identity is different from every other identity.
+	if (!wellFormedIdentity(a) || !wellFormedIdentity(b)) return false
 	return a.kind === b.kind && a.value === b.value
+}
+
+function wellFormedIdentity(x: Identity): boolean {
+	const v = x as { kind?: unknown; value?: unknown } | null
+	return v !== null && typeof v.kind === "string" && typeof v.value === "string"
+}
+
+/** DQ 9.5: the protocol an ingest decode names, or undefined (malformed or not CRC-clean). */
+function decodeProtocolOf(ev: DecodeEvidence | undefined): string | undefined {
+	try {
+		if (ev === undefined || ev.crcClean !== true) return undefined
+		const p: unknown = ev.protocol
+		return typeof p === "string" ? p : undefined
+	} catch {
+		return undefined
+	}
 }
 
 /** No trial evidence yet. Analog and the digital plan arrive with the evidence sink. */
@@ -609,6 +636,22 @@ function familiesIncompatible(a: ProtocolFamily, b: ProtocolFamily): boolean {
 	)
 }
 
+/**
+ * DQ 9.1, 9.8: the association family of a label. Its family when decoded, identified or proven;
+ * `unknown` otherwise (an unreadable level or confidence is neither proven nor decoded).
+ */
+function associationOf(
+	label: EvidenceLabel,
+	identity: Discovery["identity"],
+	evidence: ScannerEvidenceLevel,
+): ProtocolFamily {
+	return label.confidence === "decoded" ||
+		identity !== undefined ||
+		evidence === "proven"
+		? label.family
+		: "unknown"
+}
+
 function moreSpecific(
 	current: ScannerProtocol,
 	next: ScannerProtocol,
@@ -722,6 +765,9 @@ const CENTRE_FAMILIES: readonly ProtocolFamily[] = [
 interface Medians {
 	centre: number
 	obw: number
+	/** DQ 9.2: smallest and largest finite OBW of the window; NaN when none is finite. */
+	obwMin: number
+	obwMax: number
 	peak: number
 	count: number
 	majority: ScannerClass | undefined
@@ -881,10 +927,12 @@ export class DiscoveryStore
 		)
 			return TRANSIENT
 		const label = labelFromEvidence(emptyProof(input))
+		const decodedAs = decodeProtocolOf(opts.decode)
 		const sticky = this.stickyMatch(
 			input,
 			label.family,
 			!decodeProvesSignal(input, opts.decode),
+			decodedAs,
 		)
 		if (sticky !== undefined)
 			return this.commit("observation", op =>
@@ -901,6 +949,7 @@ export class DiscoveryStore
 			label.family,
 			input.classification.class,
 			input,
+			decodedAs,
 		)
 		const into = target.merge
 		if (into !== null)
@@ -1353,18 +1402,22 @@ export class DiscoveryStore
 		const m = this.mediansOf(d.id)
 		const count = m?.count ?? 0
 		const recent = count < DQ_MIN_HISTORY_OBS ? this.recentOf(d.id) : []
+		const label = this.effectiveLabel(d)
 		return {
 			id: d.id,
 			sourceId: d.sourceIds[0] ?? "",
 			centreHz: m?.centre ?? d.frequencyHz + d.measuredOffsetHz,
 			obwHz: m?.obw ?? d.bandwidthHz,
+			obwMin: m?.obwMin ?? Number.NaN,
+			obwMax: m?.obwMax ?? Number.NaN,
+			bandFactor: this.bandFactor(d),
 			peakDbfs: m?.peak ?? Number.NaN,
 			count,
 			young: recent.map(o => ({ peakDbfs: o.peakDbfs, obwHz: o.obwHz })),
 			identity: d.identity,
-			family: this.effectiveLabel(d).family,
-			decoded: d.confidence === "decoded",
-			protocol: d.protocol,
+			family: this.associationFamily(d),
+			decoded: label.confidence === "decoded",
+			protocol: label.protocol,
 			firstSeenAt: d.firstSeenAt,
 			hasOperator: hasOperatorState(d),
 		}
@@ -2113,6 +2166,7 @@ export class DiscoveryStore
 		obs: ObservationInput,
 		family: ProtocolFamily,
 		evidenceLess: boolean,
+		decodedAs?: string,
 	): Discovery | undefined {
 		const ids = this.bySource.get(obs.sourceId)
 		if (ids === undefined) return undefined
@@ -2128,7 +2182,8 @@ export class DiscoveryStore
 		if (!Number.isFinite(centre)) return undefined
 		this.syncIndex()
 		// WG11 req 3.1: the window is widened by 1 Hz so float rounding of centre ± tol cannot drop a
-		// hit; the exact distance test below is today's. The centre lists are the effective family,
+		// hit; the exact distance test below is today's. The centre lists are the association family
+		// (DQ 9.1),
 		// so a hit needs no proof read. An evidence-less observation also sticks to a decoded
 		// discovery of any family; those sit in one extra list.
 		const lowHz = centre - tol - 1
@@ -2140,8 +2195,11 @@ export class DiscoveryStore
 			if (d === undefined) return
 			const dist = Math.abs(e.centreHz - centre)
 			if (dist > radius) return
-			// DQ 3.2: never stick to a record whose medians refuse this observation.
+			// DQ 9.5: never to a record decoded as another protocol than this observation's decode.
+			if (this.decodedOther(d, decodedAs)) return
+			// DQ 3.2, 9.4: never stick to a record that refuses this observation (young included).
 			if (this.obsCompatible(d, obs) === false) return
+			// DQ 9.3: only the cross-family or young route is band-gated (9.2).
 			if (crossFamily && !this.bandwidthJoins(d, obs.track.obwHz)) return
 			const better =
 				best === undefined ||
@@ -2163,8 +2221,10 @@ export class DiscoveryStore
 				highHz,
 				consider,
 			)
-		// DQ 2.1, 2.2: an evidence-less observation also sticks to a record of any other family
-		// (carrier included) within min(tol, 1 kHz) at a bandwidth ratio in [0.5, 2]. Nearest wins.
+		// DQ 9.3: the cross-family or young route. An evidence-less observation also sticks to a
+		// record of any other association family (carrier included) within min(tol, 1 kHz) when its
+		// OBW lies in the record's band (9.2). Young records of the observation's own list are
+		// already reached by the same-family route (full tolerance, no band). Nearest wins.
 		if (evidenceLess) {
 			radius = Math.min(tol, DQ_CROSS_FAMILY_HZ)
 			crossFamily = true
@@ -2182,18 +2242,49 @@ export class DiscoveryStore
 		return best
 	}
 
-	/** DQ 2.1, 2.5: observation OBW over the record's median OBW within [0.5, 2]; finite only. */
+	/**
+	 * DQ 9.2: the observation OBW lies in the record's band `[obwMin / f, obwMax x f]`, `f` from
+	 * decode or identity (never the observation count). Non-finite or missing values fail (9.8).
+	 */
 	private bandwidthJoins(d: Discovery, obwHz: number): boolean {
-		const recordObw = this.mediansOf(d.id)?.obw
-		if (
-			recordObw === undefined ||
-			!Number.isFinite(recordObw) ||
-			recordObw <= 0 ||
-			!Number.isFinite(obwHz)
+		const m = this.mediansOf(d.id)
+		if (m === undefined) return false
+		return inObwBand(obwHz, m.obwMin, m.obwMax, this.bandFactor(d))
+	}
+
+	/** DQ 9.2: 2 for a decoded or identified record, 3 otherwise. */
+	private bandFactor(d: Discovery): number {
+		return this.effectiveLabel(d).confidence === "decoded" ||
+			d.identity !== undefined
+			? DQ_OBW_RATIO_MAX
+			: DQ_YOUNG_OBW_RATIO
+	}
+
+	/**
+	 * DQ 9.1: the effective family when the record is decoded, carries an identity or shows proven
+	 * evidence; otherwise `unknown`, so a weak guess never keeps records apart.
+	 */
+	private associationFamily(d: Discovery): ProtocolFamily {
+		const view = this.discoveryView(d)
+		return associationOf(view.label, d.identity, view.evidence)
+	}
+
+	/** DQ 9.5: both decoded with different (effective) protocols. */
+	private decodedConflict(a: Discovery, b: Discovery): boolean {
+		const la = this.effectiveLabel(a)
+		const lb = this.effectiveLabel(b)
+		return (
+			la.confidence === "decoded" &&
+			lb.confidence === "decoded" &&
+			la.protocol !== lb.protocol
 		)
-			return false
-		const ratio = obwHz / recordObw
-		return ratio >= DQ_OBW_RATIO_MIN && ratio <= DQ_OBW_RATIO_MAX
+	}
+
+	/** DQ 9.5: a record decoded as another protocol than the observation's decode. */
+	private decodedOther(d: Discovery, protocol: string | undefined): boolean {
+		if (protocol === undefined) return false
+		const l = this.effectiveLabel(d)
+		return l.confidence === "decoded" && l.protocol !== protocol
 	}
 
 	private keyTarget(
@@ -2202,13 +2293,20 @@ export class DiscoveryStore
 		family: ProtocolFamily,
 		cls: ScannerClass,
 		obs: ObservationInput,
+		decodedAs?: string,
 	): { merge: Discovery | null; coChannel: string[] } {
 		const linked = this.atKey(sourceId, key)
-		// DQ 3.2: a record whose medians refuse the observation is never a merge target; it stays
-		// a co-channel partner of whatever the observation creates.
-		const atKey = linked.filter(d => this.obsCompatible(d, obs) !== false)
+		// DQ 3.2, 9.4, 9.5: a record that refuses the observation, or is decoded as another protocol
+		// than its decode, is never a merge target; it stays a co-channel partner of whatever the
+		// observation creates.
+		const atKey = linked.filter(
+			d =>
+				!this.decodedOther(d, decodedAs) &&
+				this.obsCompatible(d, obs) !== false,
+		)
+		// DQ 9.1: the association family.
 		const familyOfDiscovery = (d: Discovery): ProtocolFamily =>
-			this.effectiveLabel(d).family
+			this.associationFamily(d)
 		const same = atKey.filter(d => familyOfDiscovery(d) === family)
 		const [only] = same
 		if (same.length === 1 && only !== undefined)
@@ -3018,9 +3116,19 @@ export class DiscoveryStore
 				majority = cls
 				top = v
 			}
+		let obwMin = Number.POSITIVE_INFINITY
+		let obwMax = Number.NEGATIVE_INFINITY
+		for (const o of recent) {
+			const w = o.obwHz
+			if (!Number.isFinite(w)) continue
+			if (w < obwMin) obwMin = w
+			if (w > obwMax) obwMax = w
+		}
 		const fresh: Medians = {
 			centre: median(recent.map(o => o.centerHz)),
 			obw: median(recent.map(o => o.obwHz)),
+			obwMin: Number.isFinite(obwMin) ? obwMin : Number.NaN,
+			obwMax: Number.isFinite(obwMax) ? obwMax : Number.NaN,
 			peak: median(recent.map(o => o.peakDbfs)),
 			count: recent.length,
 			majority,
@@ -3029,17 +3137,18 @@ export class DiscoveryStore
 		return fresh
 	}
 
-	/** DQ 3.1: an observation against a record's medians; null when undecided (3.5). */
+	/** DQ 3.1, 9.4: an observation against a record; null when undecided (3.5). */
 	private obsCompatible(d: Discovery, obs: ObservationInput): boolean | null {
 		const m = this.mediansOf(d.id)
 		if (m === undefined) return null
-		const self: CompatibilitySide = {
-			peakDbfs: obs.track.peakDbfs,
-			obwHz: obs.track.obwHz,
-			count: Number.POSITIVE_INFINITY,
-		}
-		// 3.5: a young record (1 or 2) is undecided against an observation.
-		return compatible(sideOf(m), self)
+		// 9.4: a young record (1 or 2) is tested observation by observation.
+		return observationCompatible(
+			{
+				medians: sideOf(m),
+				observations: m.count >= DQ_MIN_HISTORY_OBS ? [] : this.recentOf(d.id),
+			},
+			{ peakDbfs: obs.track.peakDbfs, obwHz: obs.track.obwHz },
+		)
 	}
 
 	private recentOf(id: string): readonly Observation[] {
@@ -3288,12 +3397,13 @@ export class DiscoveryStore
 			for (const o of this.atKey(d.sourceIds[0] ?? "", d.frequencyKey)) {
 				if (
 					o.id === d.id ||
-					this.effectiveLabel(o).family !== this.effectiveLabel(d).family ||
+					this.associationFamily(o) !== this.associationFamily(d) ||
 					!sameIdentity(o.identity, d.identity)
 				)
 					continue
-				// DQ 3.2: an incompatible pair stays apart and is linked as co-channel.
-				if (this.pairCompatible(d, o) === false) {
+				// DQ 3.2, 9.4, 9.5: an incompatible or differently decoded pair stays apart and is
+				// linked as co-channel.
+				if (this.decodedConflict(d, o) || this.pairCompatible(d, o) === false) {
 					this.linkPair(op, d, o)
 					continue
 				}
@@ -3321,7 +3431,12 @@ export class DiscoveryStore
 		// consolidation pair was checked on the frozen values (3.1 included) when the plan was made;
 		// re-checking against medians the group's earlier members already moved would make the
 		// result depend on the apply order and a resumed plan differ from an uninterrupted one.
-		if (!planned && this.pairCompatible(keep, drop) === false) return
+		if (
+			!planned &&
+			(this.decodedConflict(keep, drop) ||
+				this.pairCompatible(keep, drop) === false)
+		)
+			return
 		// DQ 3.3: the better of the two bests, but never one an overload observation set.
 		// The dropped record's best must also pass 3.3 against the survivor's medians.
 		const keepBestOk = this.bestEligible(keep)
@@ -4741,7 +4856,14 @@ export class DiscoveryStore
 		}
 		const centre = this.medianCentre(d)
 		const named = this.evidenceCanNameProof(d)
-		const family = named ? this.effectiveLabel(d).family : d.family
+		// DQ 9.1: the centre lists are keyed by the association family.
+		const family = named
+			? this.associationFamily(d)
+			: associationOf(
+					{ protocol: d.protocol, family: d.family, confidence: d.confidence },
+					d.identity,
+					"weak",
+				)
 		const decoded = named
 			? this.effectiveLabel(d).confidence === "decoded"
 			: d.confidence === "decoded"

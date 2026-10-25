@@ -54,10 +54,32 @@ const asObservation = (o: {
 })
 
 /**
- * Two records (3.2). Both established (3 or more observations): their medians. One established
- * and the other young (1 or 2): each young observation against the established medians, as the
- * sticky test judged them, so settle cannot fold back what sticky refused; false when any is
- * refused. Both young: null (3.5, merge as before).
+ * Req 9.4: an observation against a record. Established (3 or more): its medians. Young (1 or 2):
+ * each of its observations as a single observation; false when any refuses, null only when every
+ * test is undecided (non-finite values, 3.5), true otherwise. At most 2 `compatible` calls.
+ */
+export function observationCompatible(
+	record: CompatibilityRecord,
+	obs: { peakDbfs: number; obwHz: number },
+): boolean | null {
+	const self = asObservation(obs)
+	if (record.medians.count >= DQ_MIN_HISTORY_OBS)
+		return compatible(record.medians, self)
+	let decided = false
+	for (const o of record.observations) {
+		const c = compatible(asObservation(o), self)
+		if (c === false) return false
+		if (c === true) decided = true
+	}
+	return decided ? true : null
+}
+
+/**
+ * Two records (3.2, 9.4). Both established (3 or more observations): their medians. One
+ * established and the other young (1 or 2): each young observation against the established
+ * medians, as the sticky test judged them, so settle cannot fold back what sticky refused. Both
+ * young: every pair of their observations (at most 2 x 2). False when any test refuses; null only
+ * when every test is undecided.
  */
 export function recordsCompatible(
 	a: CompatibilityRecord,
@@ -66,7 +88,15 @@ export function recordsCompatible(
 	const aOld = a.medians.count >= DQ_MIN_HISTORY_OBS
 	const bOld = b.medians.count >= DQ_MIN_HISTORY_OBS
 	if (aOld && bOld) return compatible(a.medians, b.medians)
-	if (!aOld && !bOld) return null
+	if (!aOld && !bOld) {
+		let decided = false
+		for (const o of a.observations) {
+			const c = observationCompatible(b, o)
+			if (c === false) return false
+			if (c === true) decided = true
+		}
+		return decided ? true : null
+	}
 	const [old, young] = aOld ? [a, b] : [b, a]
 	let decided = false
 	for (const o of young.observations) {
