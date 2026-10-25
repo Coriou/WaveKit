@@ -30,7 +30,7 @@ export function stalePages(
 export function splitZ(out: string): string[]
 export function parseTrailers(out: string): string[]
 
-/** A commit of the checked range; a merge lists only the files it changed against every parent. */
+/** A commit of the checked range; a merge lists only its own changes: files that conflicted and files that differ from the automatic merge of its parents. */
 export interface RangeCommit extends CommitDocs {
 	sha: string
 	merge: boolean
