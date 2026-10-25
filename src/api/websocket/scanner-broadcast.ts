@@ -50,8 +50,9 @@ export interface ScannerBroadcastSource extends Pick<EventEmitter, "off"> {
  * Band inspection UX req 3.2: a pending `merged` discovery message replaced before delivery
  * (merge A<-B, then an update of A) keeps its absorbed ids: the replacement is sent as `merged`
  * with the union of both `mergedIds` (sorted, at most DISCOVERY_MERGED_IDS_MAX, `mergedTruncated`
- * past that or when either side was truncated). A `deleted` replacement wins as is (the survivor
- * is gone; clients refetch). Every other message: the replacement wins.
+ * past that or when either side was truncated). A `deleted` replacement stays `deleted` but keeps
+ * the union too (merge A<-B then delete A: clients drop A and B). Every other message: the
+ * replacement wins.
  */
 export function coalesceDiscoveryMessages(
 	pending: ServerMessage,
@@ -61,7 +62,8 @@ export function coalesceDiscoveryMessages(
 		return next
 	const a = pending.data as ScannerDiscoveryEventData
 	const b = next.data as ScannerDiscoveryEventData
-	if (a.change !== "merged" || b.change === "deleted") return next
+	// A pending `merged` (or a `deleted` that already inherited absorbed ids) carries ids.
+	if (a.mergedIds === undefined && a.change !== "merged") return next
 	const ids = [...new Set([...(a.mergedIds ?? []), ...(b.mergedIds ?? [])])]
 		.filter(id => id !== b.discovery.id)
 		.sort()
@@ -73,7 +75,7 @@ export function coalesceDiscoveryMessages(
 		ids.length = DISCOVERY_MERGED_IDS_MAX
 	const data: ScannerDiscoveryEventData = {
 		...b,
-		change: "merged",
+		change: b.change === "deleted" ? "deleted" : "merged",
 		mergedIds: ids,
 		...(truncated ? { mergedTruncated: true as const } : {}),
 	}

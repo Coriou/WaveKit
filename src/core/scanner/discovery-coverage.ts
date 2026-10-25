@@ -101,9 +101,12 @@ interface SourceIndex {
  * Cost. Build: O(P log P) for P placements (one sort per source). Lookup: at most
  * COVERAGE_SOURCES_MAX sources, each a binary search (O(log P)) plus a backward scan that
  * examines at most COVERAGE_SCAN_MAX intervals reaching past the previous ones' lows (the
- * prefix-max stop), then a top-3 selection over at most COVERAGE_SCAN_MAX decoders (3 passes).
- * So per discovery <= 16 x (log2 P + 256) interval visits + 3 x 256 comparisons, independent of
- * how many placements sit on other sources. A scan that would pass the bound returns unknown.
+ * prefix-max stop). The candidates are distinct decoders across all scanned sources, so at most
+ * 16 x 256 = 4 096; the top-3 selection makes 3 passes over them, <= 3 x 4 096 = 12 288
+ * comparisons. So per discovery <= 16 x (log2 P + 256) interval visits + 12 288 comparisons,
+ * independent of how many placements sit on other sources. A discovery listing more than 16
+ * source ids (duplicates included) is unknown before any traversal or allocation; a scan that
+ * would pass the bound returns unknown.
  */
 export function buildCoverageIndex(
 	statuses: unknown,
@@ -211,8 +214,9 @@ export function buildCoverageIndex(
 		coverageOf(discovery) {
 			const f = discovery.frequencyHz
 			if (!isFreq(f) || !Array.isArray(discovery.sourceIds)) return undefined
+			// Bail before traversing or copying an over-long list.
+			if (discovery.sourceIds.length > COVERAGE_SOURCES_MAX) return undefined
 			const sources = [...new Set(discovery.sourceIds)]
-			if (sources.length > COVERAGE_SOURCES_MAX) return undefined
 			for (const id of sources) if (unresolved.has(id)) return undefined
 			const best = new Map<string, Interval>()
 			for (const sourceId of sources) {

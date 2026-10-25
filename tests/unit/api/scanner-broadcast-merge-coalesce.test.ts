@@ -105,11 +105,33 @@ describe("scanner broadcast: merged ids through coalescing", () => {
 		})
 	})
 
-	it("a deleted replacement and other message types win as is", () => {
+	it("update A, merge A<-B, delete A before delivery: deleted carries B", () => {
+		const { scanner, sent, wiring } = wire()
+		scanner.emit("discovery", ev("updated"))
+		scanner.emit("discovery", ev("merged", ["d_b"]))
+		scanner.emit("discovery", ev("deleted"))
+		vi.advanceTimersByTime(2000)
+		expect(sent).toHaveLength(2)
+		expect(sent[1]?.data).toMatchObject({
+			change: "deleted",
+			mergedIds: ["d_b"],
+		})
+		wiring.dispose()
+	})
+
+	it("a deleted that carries ids keeps them through a later replacement", () => {
+		const out = coalesceDiscoveryMessages(
+			{ type: "scanner:discovery", data: ev("deleted", ["d_b"]) },
+			{ type: "scanner:discovery", data: ev("deleted") },
+		)
+		expect(out.data).toMatchObject({ change: "deleted", mergedIds: ["d_b"] })
+	})
+
+	it("a plain deleted replacement and other message types win as is", () => {
 		const deleted = { type: "scanner:discovery" as const, data: ev("deleted") }
 		expect(
 			coalesceDiscoveryMessages(
-				{ type: "scanner:discovery", data: ev("merged", ["d_b"]) },
+				{ type: "scanner:discovery", data: ev("updated") },
 				deleted,
 			),
 		).toBe(deleted)
@@ -127,5 +149,18 @@ describe("scanner broadcast: merged ids through coalescing", () => {
 		expect(
 			coalesceDiscoveryMessages({ type: "scanner:status", data: {} }, status),
 		).toBe(status)
+	})
+
+	it("a deleted replacing a merge past 64 ids is truncated", () => {
+		const ids = Array.from(
+			{ length: 65 },
+			(_, i) => `d_${String(i).padStart(3, "0")}`,
+		)
+		const out = coalesceDiscoveryMessages(
+			{ type: "scanner:discovery", data: ev("merged", ids) },
+			{ type: "scanner:discovery", data: ev("deleted") },
+		)
+		expect(out.data).toMatchObject({ change: "deleted", mergedTruncated: true })
+		expect((out.data as { mergedIds: string[] }).mergedIds).toHaveLength(64)
 	})
 })

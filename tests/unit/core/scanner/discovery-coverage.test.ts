@@ -195,6 +195,8 @@ describe("discovery coverage projection", () => {
 		const ids = Array.from({ length: 17 }, (_, i) => `s${i}`)
 		expect(index?.coverageOf(disc(F, ids.slice(0, 16)))).toEqual([])
 		expect(index?.coverageOf(disc(F, ids))).toBeUndefined()
+		// Duplicates count toward the cap: no traversal of an over-long list.
+		expect(index?.coverageOf(disc(F, Array(17).fill("rtl")))).toBeUndefined()
 	})
 
 	it("a placement missing its figures makes the result unknown for its source only", () => {
