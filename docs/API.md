@@ -627,16 +627,25 @@ curl -X POST http://localhost:9000/api/sources \
   }'
 ```
 
-**Response** (201 Created):
+The core waits for the first connection attempt before it answers.
+
+**Response** (201 Created): `source` is the source's status, the same shape as one entry of
+[`GET /api/sources`](#get-apisources).
 
 ```json
 {
-	"id": "rtl-pi",
-	"type": "rtl_tcp",
-	"connected": false,
-	"message": "Source added, connecting..."
+	"message": "Source 'rtl-pi' added successfully",
+	"source": {
+		"id": "rtl-pi",
+		"type": "rtl_tcp",
+		"connected": true,
+		"...": "..."
+	}
 }
 ```
+
+A source with the same `id` answers `409 SOURCE_EXISTS`; a failed connection answers
+`400 SOURCE_CONNECTION_ERROR` with the reason in `message`.
 
 #### DELETE /api/sources/:id
 
@@ -650,8 +659,8 @@ curl -X DELETE http://localhost:9000/api/sources/rtl-pi
 
 ```json
 {
-	"id": "rtl-pi",
-	"message": "Source removed"
+	"message": "Source 'rtl-pi' removed successfully",
+	"id": "rtl-pi"
 }
 ```
 

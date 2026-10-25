@@ -358,5 +358,5 @@ mode mounts no access route. `tests/unit/access/preflight-max-age.test.ts` (Prop
 `Access-Control-Max-Age: 600` to the allowed preflight only, and the Fastify and Node HTTP
 adapter tests hold it off shutdown 503 preflights. `tests/unit/access/pair-label.test.ts`
 (Property 2) covers the strict pair body and the single committed write. The contract and
-example flow are in [API.md](../../API.md#browser-pairing-for-a-web-origin-wg9). No real TLS,
+example flow are in [API.md](../../API.md#browser-pairing-for-a-web-origin). No real TLS,
 proxy, browser or deployment acceptance follows: task 14 stays open.

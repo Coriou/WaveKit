@@ -332,9 +332,11 @@ Tune to 1090 MHz in the web app, or through the API (`/api/tuner/:sourceId/frequ
 [API](API.md)). When you retune near 1090 MHz,
 WaveKit can raise the sample rate to the 2.4 Msps readsb needs on its own. It does so only
 when WaveKit controls the tuner itself (internal control mode), the policy is on
-(`decoderPolicy.rateRaise`, default on), readsb is not switched off, and the rate is
-below 2.4 Msps; it never lowers a higher rate. It restores the previous rate when you tune
-out of readsb's reach or turn readsb off. Otherwise set 2.4 Msps yourself
+(`decoderPolicy.rateRaise`, default on), readsb is not switched off and does not have a
+dongle of its own, and the rate is below 2.4 Msps; it never lowers a higher rate. The
+previous rate comes back at your next retune once you tune out of readsb's reach, or after
+you turn readsb off; turning readsb off does not change the rate by itself. Otherwise set
+2.4 Msps yourself
 (`/api/tuner/:sourceId/sample-rate`).
 
 ## Signal Quality
