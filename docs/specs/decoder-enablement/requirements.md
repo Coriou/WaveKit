@@ -495,3 +495,54 @@ Acceptance:
 - A decoder moving from `frequency-out-of-band` to `capture-too-narrow` shows a new `since`.
 - Live (Main): tune the receiver to a 433 MHz ISM centre at 1.024 Msps; rtl_433 runs and decodes
   a local sensor or remote; tune away and back twice; it suspends and resumes each time.
+
+## Paging raster amendment — 2026-10-25
+
+Found live: a capture centred off-raster in a UHF paging band, with pagers on several raster
+channels (some on the 6.25 kHz offsets), and the configured multimon-ng with one VFO
+placement and a 47 kHz channel decoded nothing. Demodulating the same bursts a few kHz off
+their raster frequency, or on the neighbouring 6.25 kHz point, also gives nothing.
+
+3.18 **A pager decoder hears the whole paging band in view.**
+
+- _Band._ The paging ranges are the band catalogue's ranges whose protocols are paging only
+  (`pocsag`, `flex`), plus paging bands the catalogue lacks (EU: 466.025–466.230 MHz,
+  France). Pending: multimon-ng still has no built-in band (`src/decoders/band-defaults.ts` is
+  a preserved legacy file), so outside a paging range it keeps 3.11 and follows the VFO on
+  every band. Gating it to its paging ranges (`frequency-out-of-band` at 1090 MHz) is open.
+- _Channels._ With a channelizer and no `channelHz`, `channelsHz`, `offsetHz`, `frequency`
+  or `frequencies`, config-origin and catalogue-origin multimon-ng place one channel on every
+  raster frequency (the range's finest raster, exactly on it) of a paging range inside the
+  usable window (`sampleRate × usableFraction`, not Nyquist) whose passband fits the window,
+  origin `bandplan`, nearest the capture centre first, at most `MULTIMON_PAGING_MAX_CHANNELS`
+  (33: the French band at 6.25 kHz). The VFO alone no longer selects the channel. A raster
+  channel in the window that cannot fit is a fit failure (3.14). Explicit channels, and the
+  case with no channelizer, keep 3.11. Catalogue band-plan channels (3.5) follow the raster channels.
+- _Filter._ Each channel asks for 12 kHz bandwidth and 2.5 kHz transition at 48 kHz: flat
+  to ±6 kHz (POCSAG1200 Carson width 2 × (4.5 + 1.2) = 11.4 kHz), 66 dB down from ±8.5 kHz,
+  so a 12.5 kHz neighbour (tones at 8.0 and 17.0 kHz) is rejected. The old request was
+  48 000 × (1 − 0.012) = 47 424 Hz.
+- _Primary._ With the paging raster in view, the settled VFO counts only when it is one of
+  the raster channels; it is then the primary. An off-raster VFO is dropped, on both the
+  config and the catalogue path. Otherwise the nearest raster channel is the primary; then
+  the other raster channels, then catalogue band-plan channels. Raster channels in the
+  window that all fail to fit are `capture-too-narrow` (3.14), never a fallback to an
+  off-raster centre or VFO channel.
+- _Admission._ Besides the primary, every other generated paging channel is
+  marked `gated`: it goes through the efficiency gate and probation even for a YAML decoder
+  (an exception to 4.9), and it is admitted after every other decoder's placements, so a wide
+  paging band never starves them. The cap applies after the VFO, band-plan and raster
+  channels are combined and deduplicated, keeping the higher-priority ones.
+- _Cost._ At 1.024 Msps the window is 819.2 kHz: at most 129 fitting points at 6.25 kHz,
+  65 at 12.5 kHz, hence the bound. Measured on a Mac (load average 9 to 15): wavekit-chan
+  1.0 % of a core idle, 4.4 % with one 12 kHz channel, 29 % with 8, 83 % with 33 (about
+  2.5 % per channel); multimon-ng with POCSAG512/1200/2400 and FLEX 1.8 % per channel, sox
+  0.2 %. csdr was not measured. The planner's estimate (0.14 core per channel) makes the
+  efficiency gate admit about ten channels within the 1.5-core budget.
+- _Not changed._ dsd-fme, direwolf and acarsdec keep 3.11.
+
+Acceptance: unit tests on the planner (in and out of the window, the bound after combining,
+config-origin with and without channels, gated secondaries refused by a
+closed gate) and a property test; with a synthetic POCSAG1200 burst on a 6.25 kHz offset
+channel (`scripts/fixtures/pocsag-iq.mjs`) through wavekit-chan and multimon-ng's channel
+command line, and through an independent reference filter, it decodes on that channel only.

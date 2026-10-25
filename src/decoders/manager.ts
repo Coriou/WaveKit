@@ -91,6 +91,7 @@ import {
 	type ResolvedBand,
 } from "./band-defaults.js"
 import { BandOverrideStore } from "./band-override-store.js"
+import { pagingRasterRanges } from "./enablement/paging-plan.js"
 import {
 	createDecoderExitError,
 	createDecoderLastError,
@@ -686,10 +687,12 @@ export class DecoderManager extends EventEmitter {
 	 * decoder's placements (origin "config", whatever mode an operator set) are
 	 * admitted without a gate verdict and never suspended by probation; their
 	 * declared cost still counts in the budget and the efficiency view.
+	 * Exception (3.18): generated secondary paging channels (`gated`) are
+	 * admitted and probated like catalogue placements.
 	 */
 	private gateExempt(state: DecoderState): boolean {
 		const enablement = this.config.enablement
-		if (!enablement || !state.placement) return false
+		if (!enablement || !state.placement || state.placement.gated) return false
 		const parent = state.parentId ? this.decoders.get(state.parentId) : state
 		return (
 			parent?.owner === "config" &&
@@ -1221,6 +1224,14 @@ export class DecoderManager extends EventEmitter {
 						...(centreSlots.length ? { centreSlots } : {}),
 						...(config.type === "rtl433"
 							? { channelTargetRateHz: rtl433TargetRateHz(config.options) }
+							: {}),
+						// 3.18: the pager decoder's paging raster for its region.
+						...(config.type === "multimon-ng"
+							? {
+									pagingRaster: pagingRasterRanges(
+										this.resolveBand(state).region.code,
+									),
+								}
 							: {}),
 					}
 				}),

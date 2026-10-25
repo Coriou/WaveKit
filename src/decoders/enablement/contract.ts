@@ -1,3 +1,4 @@
+import type { PagingRasterRange } from "./paging-plan.js"
 import type {
 	DecoderReachKind,
 	DropAttribution,
@@ -21,6 +22,18 @@ export function channelizerAutoAccepted(arch: string): boolean {
 	return arch === "x64"
 }
 export const DECODER_MAX_BANDPLAN_CHANNELS = 4
+/**
+ * 3.18: most paging raster channels one pager decoder places per source.
+ * A 1.024 Msps capture has a usable window of 1.024 MHz x 0.8 = 819.2 kHz:
+ * at most floor(819.2 / 6.25) + 1 = 132 raster points, fewer once each
+ * channel's 6 kHz half-passband plus 2.5 kHz transition must fit inside
+ * (floor((819.2 - 17) / 6.25) + 1 = 129). 33 holds the whole French UHF
+ * paging band (466.025-466.230 MHz at 6.25 kHz) and 412.5 kHz of a 12.5 kHz
+ * band; nearest the capture centre first. Each channel is one channelizer
+ * output plus one multimon-ng pipeline at 48 kHz (see paging-plan.ts and the
+ * amendment for the measured cost); the efficiency gate admits what fits.
+ */
+export const MULTIMON_PAGING_MAX_CHANNELS = 33
 export const VFO_SETTLE_MS = 1_000
 export const EFFICIENCY_SAMPLE_MS = 2_000
 // 3 × 2000 ms = 6000 ms: tolerates one missed tick plus jitter.
@@ -167,6 +180,12 @@ export interface PlannerDecoder {
 	bandHalfWidthHz?: number
 	/** rtl_433 (3.16): the widest channel output rate it wants; absent 1 MHz. */
 	channelTargetRateHz?: number
+	/**
+	 * 3.18: the paging raster of the effective region (pager decoder only).
+	 * Present and non-empty: without configured channels the decoder takes
+	 * every raster channel of the band inside the usable window.
+	 */
+	pagingRaster?: readonly PagingRasterRange[]
 }
 export interface PlannerCentreSlot {
 	slotHz: { minHz: number; maxHz: number }
@@ -232,6 +251,11 @@ export interface WantedPlacement {
 	 * restarts the placement; absent means none.
 	 */
 	options?: Readonly<Record<string, unknown>>
+	/**
+	 * 3.18: an automatically generated secondary paging channel. It goes
+	 * through the efficiency gate and probation even for a YAML decoder.
+	 */
+	gated?: true
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(

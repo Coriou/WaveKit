@@ -223,8 +223,9 @@ describe("channel requests (addendum §1, §2)", () => {
 			outputRateHz: 48_000,
 			format: "cf32",
 		})
-		expect(r.bandwidthHz).toBeCloseTo(47_424, 6)
-		expect(r.transitionHz).toBeCloseTo(288, 6)
+		// 3.18: a 12 kHz paging channel (flat to 6 kHz, stopband at 8.5 kHz).
+		expect(r.bandwidthHz).toBe(12_000)
+		expect(r.transitionHz).toBe(2500)
 		const chan = pipelineOf(
 			make("multimon-ng", { inputSampleRate: 48_000, inputIqFormat: "cf32" }),
 		)

@@ -1,5 +1,6 @@
 import {
 	DECODER_MAX_BANDPLAN_CHANNELS,
+	MULTIMON_PAGING_MAX_CHANNELS,
 	RTL433_CHANNEL_MIN_RATE_HZ,
 	RTL433_CHANNEL_TARGET_RATE_HZ,
 	RTL433_WINDOW_MAX_RATE_HZ,
@@ -17,6 +18,7 @@ import {
 	ADSB_FREQUENCY_HZ,
 	READSB_REACH_HZ,
 } from "../../core/rate-policy-contract.js"
+import { rasterChannelsBetween } from "./paging-plan.js"
 
 /** Single-channel audio adapters; AIS/VDL2 and rtl433 retain their protocol windows. */
 export const VFO_CHANNEL_TYPES: readonly string[] = [
@@ -237,6 +239,49 @@ export function rtl433ChannelCandidate(
 	return best ?? { overlap }
 }
 
+/**
+ * 3.18: the pager decoder's paging raster channels in this capture's usable
+ * window (the channelizer's, `sampleRate x usableFraction`, not Nyquist),
+ * inside its band, each passband (`fitsReach`) inside the window, nearest
+ * the capture centre first (ties: lower first), at most
+ * MULTIMON_PAGING_MAX_CHANNELS. `misfit`: a raster channel of the band lies
+ * in the window but its passband does not fit (a fit failure, 3.14).
+ * Empty unless the decoder is multimon-ng with channel reach, no configured
+ * channels and a paging raster, and the source has a channelizer.
+ */
+export function pagingChannels(
+	d: PlannerDecoder,
+	s: PlannerSource,
+): { channels: number[]; misfit: boolean } {
+	const none = { channels: [], misfit: false }
+	if (
+		!d ||
+		d.type !== "multimon-ng" ||
+		d.reach !== "channel" ||
+		!Array.isArray(d.pagingRaster) ||
+		d.pagingRaster.length === 0 ||
+		d.configuredChannelsHz.length > 0 ||
+		(d.origin === "config" && d.followVfo === false) ||
+		!windowValid(s) ||
+		s.channelizerAvailable !== true
+	)
+		return none
+	const centre = s.centreHz!
+	const half = (s.sampleRateHz! * s.usableFraction) / 2
+	const inBand = rasterChannelsBetween(
+		d.pagingRaster,
+		centre - half,
+		centre + half,
+	).filter(hz => bandFits(d, hz))
+	const fit = inBand.filter(hz => fitsReach(d, s, hz))
+	return {
+		channels: fit
+			.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b)
+			.slice(0, MULTIMON_PAGING_MAX_CHANNELS),
+		misfit: fit.length < inBand.length,
+	}
+}
+
 type Candidate = {
 	source: PlannerSource
 	options?: Readonly<Record<string, unknown>>
@@ -244,6 +289,8 @@ type Candidate = {
 	reach: WantedPlacement["reach"]
 	origin: WantedPlacement["origin"]
 	index: number
+	/** 3.18: a paging raster channel (secondary ones are admitted last). */
+	paging?: true
 }
 const originOrder = { configured: 0, band: 1, vfo: 2, bandplan: 3, fallback: 4 }
 const decoderClass = (d: PlannerDecoder) =>
@@ -251,6 +298,8 @@ const decoderClass = (d: PlannerDecoder) =>
 
 export const planPlacements: PlacementPlanner = input => {
 	const wanted: WantedPlacement[] = []
+	// 3.18: secondary paging raster placements, admitted after every decoder.
+	const deferred: WantedPlacement[] = []
 	const unplaced = new Map<
 		string,
 		| "decoder-unavailable"
@@ -330,6 +379,28 @@ export const planPlacements: PlacementPlanner = input => {
 					sources.find(source => source.id === input.vfo?.sourceId) ??
 					sources[0]
 				if (s !== selected) continue
+				// 3.18: a pager decoder takes every paging raster channel in view.
+				const paging = pagingChannels(d, s)
+				// 3.14/3.18: raster channels in the window that all fail to fit are a
+				// fit failure, never a fallback to an off-raster centre or VFO.
+				if (paging.misfit && !paging.channels.length) {
+					tooNarrow = true
+					continue
+				}
+				if (paging.channels.length) {
+					paging.channels.forEach((hz, index) =>
+						local.push({
+							source: s,
+							hz,
+							reach: "channel",
+							origin: "bandplan",
+							index,
+							paging: true,
+						}),
+					)
+					candidates.push(...local)
+					continue
+				}
 				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				const hz = vfo ? vfo.frequencyHz : centre
 				if (bandFits(d, hz, vfo ? 0 : bandHalf) && !fitsReach(d, s, hz)) {
@@ -479,7 +550,29 @@ export const planPlacements: PlacementPlanner = input => {
 						.sort(
 							(a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b,
 						)
-					if (input.vfo?.sourceId === s.id) {
+					const paging = pagingChannels(d, s)
+					if (paging.misfit && !paging.channels.length) tooNarrow = true
+					const listed = channels.slice(0, cap)
+					// 3.18: with the paging raster in view the VFO counts only when it is a
+					// raster channel (then it goes first); the nearest raster channel is
+					// primary otherwise, then the rest of the raster, then band-plan ones.
+					const rasterInView = paging.channels.length > 0 || paging.misfit
+					if (rasterInView) {
+						const vfoHz =
+							input.vfo?.sourceId === s.id ? input.vfo.frequencyHz : null
+						if (vfoHz !== null && paging.channels.includes(vfoHz))
+							add(vfoHz, "vfo")
+						paging.channels.forEach((hz, i) => {
+							const before = local.length
+							add(hz, "bandplan", i)
+							if (local.length > before) local[local.length - 1]!.paging = true
+						})
+						listed
+							.filter(hz => !paging.channels.includes(hz))
+							.forEach((hz, i) =>
+								add(hz, "bandplan", paging.channels.length + i),
+							)
+					} else if (input.vfo?.sourceId === s.id) {
 						const hz = input.vfo.frequencyHz
 						let inRange = false
 						if (
@@ -504,7 +597,19 @@ export const planPlacements: PlacementPlanner = input => {
 						)
 							add(hz, "vfo")
 					}
-					channels.slice(0, cap).forEach((hz, i) => add(hz, "bandplan", i))
+					if (!rasterInView) listed.forEach((hz, i) => add(hz, "bandplan", i))
+					// 3.18: the cap holds after the VFO, band-plan and raster channels are
+					// combined and deduplicated; earlier ones (higher priority) are kept.
+					if (d.type === "multimon-ng") {
+						const kept = new Set<number | null>()
+						for (let i = 0; i < local.length; ) {
+							const hz = local[i]!.hz
+							if (kept.has(hz) || kept.size < MULTIMON_PAGING_MAX_CHANNELS) {
+								kept.add(hz)
+								i++
+							} else local.splice(i, 1)
+						}
+					}
 				}
 			}
 			// A band-plan decoder with no channel here (no VFO, no band-plan
@@ -591,7 +696,7 @@ export const planPlacements: PlacementPlanner = input => {
 				a.source.order - b.source.order,
 		)
 		sorted.forEach((c, i) =>
-			wanted.push({
+			(c.paging && i > 0 ? deferred : wanted).push({
 				key: placementKey(d.id, c.source.id, c.reach, c.hz),
 				decoderId: d.id,
 				sourceId: c.source.id,
@@ -602,6 +707,7 @@ export const planPlacements: PlacementPlanner = input => {
 				costCores: placementCostCores(d.type, c.reach),
 				sampleRateHz: c.source.sampleRateHz!,
 				...(c.options ? { options: c.options } : {}),
+				...(c.paging && i > 0 ? { gated: true as const } : {}),
 			}),
 		)
 		if (!sorted.length) {
@@ -617,5 +723,5 @@ export const planPlacements: PlacementPlanner = input => {
 			}
 		}
 	}
-	return { wanted, unplaced }
+	return { wanted: [...wanted, ...deferred], unplaced }
 }

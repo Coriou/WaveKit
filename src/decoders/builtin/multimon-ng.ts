@@ -30,6 +30,28 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import type { DecoderChannelRequestResult } from "../../core/channelizer/types.js"
+
+/**
+ * Channel filter of a multimon-ng channel (decoder-enablement 3.18): flat
+ * to +-6 kHz, stopband (66 dB, wavekit-chan's Kaiser design) at
+ * +-(6 + 2.5) = +-8.5 kHz.
+ *
+ * - Wanted signal: POCSAG FSK deviates +-4.5 kHz; at 1200 baud Carson's
+ *   rule gives 2 x (4.5 + 1.2) = 11.4 kHz <= 12 kHz, so it is passed flat
+ *   (FLEX 1600 baud: 2 x (4.8 + 0.8) = 11.2 kHz; POCSAG2400 at 13.8 kHz loses
+ *   only its outer skirt).
+ * - Neighbour on the 12.5 kHz raster: its carrier sits 12.5 kHz away, its
+ *   +-4.5 kHz tones at 8.0 and 17.0 kHz, its Carson edge at
+ *   12.5 - 5.7 = 6.8 kHz. Everything past 8.5 kHz is 66 dB down, so only its
+ *   inner skirt (6.8-8.5 kHz, in the transition band) reaches the
+ *   discriminator.
+ * - Before: the 48 kHz request with filterTransition 0.012 asked for
+ *   48 000 x (1 - 0.012) = 47 424 Hz, i.e. +-23.7 kHz: both 12.5 kHz
+ *   neighbours, and the 25 kHz ones partly, entered every channel.
+ */
+export const MULTIMON_CHANNEL_BANDWIDTH_HZ = 12_000
+export const MULTIMON_CHANNEL_TRANSITION_HZ = 2500
 
 /** Supported Multimon-ng decoder modes (Requirement 7.3) */
 export type MultimonMode =
@@ -376,6 +398,20 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	 */
 	protected override channelizerSupported(): boolean {
 		return true
+	}
+
+	/** The 12 kHz paging channel filter (see MULTIMON_CHANNEL_BANDWIDTH_HZ). */
+	override getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		const request = super.getChannelRequest(input)
+		if (!request || "invalid" in request) return request
+		return {
+			...request,
+			bandwidthHz: MULTIMON_CHANNEL_BANDWIDTH_HZ,
+			transitionHz: MULTIMON_CHANNEL_TRANSITION_HZ,
+		}
 	}
 
 	/**
