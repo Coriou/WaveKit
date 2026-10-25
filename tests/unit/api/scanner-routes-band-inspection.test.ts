@@ -2,6 +2,8 @@
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+	DISCOVERY_EPOCH_HEADER,
+	DISCOVERY_REVISION_HEADER,
 	scannerRoutes,
 	type ScannerRouteService,
 } from "../../../src/api/routes/scanner.js"
@@ -129,6 +131,38 @@ describe("discovery routes: coverage and absorbed ids", () => {
 		await build(at(F + 4_001))
 		const past = await app.inject({ url: "/api/scanner/discoveries/d_a" })
 		expect(past.json().coverage).toEqual([])
+	})
+
+	it("revision, epoch and store revision pass the list and detail schemas; DELETE sends them as headers", async () => {
+		await build(running)
+		const meta = { storeEpoch: "e1", storeRevision: 9 }
+		const rev = { ...survivor, revision: 7 }
+		service.listDiscoveries.mockReturnValue({
+			items: [rev],
+			nextCursor: null,
+			...meta,
+		} as never)
+		service.resolveDiscovery.mockReturnValue({ ...rev, ...meta } as never)
+		const list = await app.inject({ url: "/api/scanner/discoveries" })
+		expect(list.json()).toMatchObject({ ...meta, items: [{ revision: 7 }] })
+		const one = await app.inject({ url: "/api/scanner/discoveries/d_a" })
+		expect(one.json()).toMatchObject({ revision: 7, ...meta })
+		await app.close()
+		app = Fastify({ logger: false })
+		await app.register(scannerRoutes, {
+			scanner: {
+				...service,
+				deleteDiscovery: vi.fn(() => Promise.resolve(true)),
+				storeMeta: () => meta,
+			} as unknown as ScannerRouteService,
+		})
+		const del = await app.inject({
+			method: "DELETE",
+			url: "/api/scanner/discoveries/d_0123456789abcdefghjkmnpqrs",
+		})
+		expect(del.statusCode).toBe(204)
+		expect(del.headers[DISCOVERY_EPOCH_HEADER]).toBe("e1")
+		expect(del.headers[DISCOVERY_REVISION_HEADER]).toBe("9")
 	})
 
 	it("[] and absent survive serialisation distinctly", async () => {

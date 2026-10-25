@@ -42,6 +42,7 @@ import type {
 	ScanJobHitsResponse,
 	ScannerActivityEventData,
 	ScannerCapture,
+	DiscoveryStoreMeta,
 	ScannerDiscoveryEventData,
 	ScannerEngineStatus,
 	ScannerIdentifyRequest,
@@ -1450,7 +1451,14 @@ export class ScannerService extends EventEmitter {
 				sliceGroups: CONSOLIDATE_SLICE_GROUPS,
 				apply: slice => this.store.applyConsolidation({ groups: slice }),
 				survivor: id => this.store.get(id),
-				emit: e => emitWhenListened(this, this.consolidationEvents, e),
+				emit: e =>
+					emitWhenListened(
+						this,
+						this.consolidationEvents,
+						e.event === "discovery"
+							? { ...e, data: this.stampDiscoveryEvent(e.data) }
+							: e,
+					),
 				yieldTurn: () => new Promise<void>(resolve => setImmediate(resolve)),
 			})
 			this.log.info(
@@ -2116,12 +2124,21 @@ export class ScannerService extends EventEmitter {
 	listDiscoveries(filter: DiscoveryFilter): {
 		items: Discovery[]
 		nextCursor: string | null
-	} {
-		return this.store.list(filter)
+	} & DiscoveryStoreMeta {
+		return { ...this.store.list(filter), ...this.storeMeta() }
+	}
+
+	/** Band inspection UX req 3.3: the store's epoch and its revision now. */
+	storeMeta(): DiscoveryStoreMeta {
+		return {
+			storeEpoch: this.store.storeEpoch,
+			storeRevision: this.store.currentRevision(),
+		}
 	}
 
 	getDiscovery(id: string): Discovery | undefined {
-		return this.store.get(id)
+		const d = this.store.get(id)
+		return d ? { ...d, ...this.storeMeta() } : undefined
 	}
 
 	/**
@@ -2131,12 +2148,17 @@ export class ScannerService extends EventEmitter {
 	 */
 	resolveDiscovery(id: string): Discovery | undefined {
 		const live = this.store.get(id)
-		if (live) return live
+		if (live) return { ...live, ...this.storeMeta() }
 		const survivor = this.store.survivorOf(id)
 		if (survivor === undefined) return undefined
 		const record = this.store.get(survivor)
 		return record
-			? { ...record, absorbedInto: survivor, requestedId: id }
+			? {
+					...record,
+					absorbedInto: survivor,
+					requestedId: id,
+					...this.storeMeta(),
+				}
 			: undefined
 	}
 
@@ -2192,7 +2214,11 @@ export class ScannerService extends EventEmitter {
 				"SCANNER_DISCOVERY_NOT_FOUND",
 				404,
 			)
-		const d = this.store.setOperator(id, patch)
+		// band inspection UX req 3.3: the answer carries the revision of this edit, taken now
+		const d: Discovery = {
+			...this.store.setOperator(id, patch),
+			...this.storeMeta(),
+		}
 		if (patch.lockout) {
 			for (const trial of this.analogJobs.values())
 				if (trial.discoveryId === id) trial.controller.abort()
@@ -2348,10 +2374,10 @@ export class ScannerService extends EventEmitter {
 		}
 		if (!this.store.delete(id)) return false
 		this.lastConfirm.delete(id)
-		this.emit("discovery", {
-			change: "deleted",
-			discovery,
-		} satisfies ScannerDiscoveryEventData)
+		this.emitDiscovery(
+			{ change: "deleted", discovery },
+			this.store.currentRevision(),
+		)
 		for (const o of [...this.live.values(), ...this.recent])
 			if (o.discoveryId === id) {
 				o.discoveryId = null
@@ -6478,10 +6504,8 @@ export class ScannerService extends EventEmitter {
 		for (const discovery of evicted) {
 			this.lastConfirm.delete(discovery.id)
 			this.knownProtocols.forget(discovery.id)
-			this.emit("discovery", {
-				change: "deleted",
-				discovery,
-			} satisfies ScannerDiscoveryEventData)
+			// the store stamped each copy with the revision of its removal
+			this.emitDiscovery({ change: "deleted", discovery })
 		}
 		this.dirty = true
 		this.track(
@@ -6528,14 +6552,37 @@ export class ScannerService extends EventEmitter {
 		if (change === "transient") return
 		const discovery = this.store.get(id)
 		if (!discovery) return
-		this.emit("discovery", {
+		this.emitDiscovery({
 			change,
 			discovery,
 			...(jobHits.length > 0 ? { jobHits } : {}),
 			...(change === "merged" && mergedIds !== undefined
 				? { mergedIds: [...mergedIds] }
 				: {}),
-		} satisfies ScannerDiscoveryEventData)
+		})
+	}
+
+	/**
+	 * Band inspection UX req 3.3: every `discovery` event carries the store's epoch and the
+	 * revision of its change: `revision` when given (a removal), else the record's own.
+	 */
+	private stampDiscoveryEvent(
+		data: ScannerDiscoveryEventData,
+		revision?: number,
+	): ScannerDiscoveryEventData {
+		return {
+			...data,
+			revision:
+				revision ?? data.discovery.revision ?? this.store.currentRevision(),
+			storeEpoch: this.store.storeEpoch,
+		}
+	}
+
+	private emitDiscovery(
+		data: ScannerDiscoveryEventData,
+		revision?: number,
+	): void {
+		this.emit("discovery", this.stampDiscoveryEvent(data, revision))
 	}
 
 	/** Never rejects (a failed write is logged). */
@@ -6683,15 +6730,14 @@ export class ScannerService extends EventEmitter {
 		// § 8 storage.discoveryMaxAgeDays (never operator `keep` or `lockout`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
 		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays)
+		// band inspection UX req 3.3: one operation removed them all, at this revision
+		const prunedAt = this.store.currentRevision()
 		for (const id of pruned) {
 			const discovery = all.get(id)
 			all.delete(id)
 			this.lastConfirm.delete(id)
 			if (discovery)
-				this.emit("discovery", {
-					change: "deleted",
-					discovery,
-				} satisfies ScannerDiscoveryEventData)
+				this.emitDiscovery({ change: "deleted", discovery }, prunedAt)
 			await this.evidence
 				.removeDiscovery(id)
 				.catch((err: unknown) =>

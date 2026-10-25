@@ -307,6 +307,14 @@ export interface Discovery {
 	/** Band inspection UX req 3.1: detail read by an absorbed id (never stored). */
 	absorbedInto?: string
 	requestedId?: string
+	/**
+	 * Band inspection UX req 3.3: the store revision of this record's last change, set on every
+	 * read and event (never stored). Strictly increases on each change within one `storeEpoch`.
+	 */
+	revision?: number
+	/** Band inspection UX req 3.3: single-record answers only (DiscoveryStoreMeta in api-types). */
+	storeEpoch?: string
+	storeRevision?: number
 }
 
 export interface Observation {

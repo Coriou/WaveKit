@@ -66,6 +66,10 @@ import {
 	scanJobSpecSchema,
 } from "./scanner-schemas.js"
 
+/** Band inspection UX req 3.3: on a successful DELETE of a discovery (204, no body). */
+export const DISCOVERY_EPOCH_HEADER = "x-wavekit-store-epoch"
+export const DISCOVERY_REVISION_HEADER = "x-wavekit-store-revision"
+
 export type ScannerRouteService = Pick<
 	ScannerService,
 	| "status"
@@ -96,7 +100,9 @@ export type ScannerRouteService = Pick<
 	| "deleteCapture"
 > &
 	// Band inspection UX req 1.4 / 3.1: optional so an older service shape still serves.
-	Partial<Pick<ScannerService, "resolveDiscovery" | "discoveryCoverage">>
+	Partial<
+		Pick<ScannerService, "resolveDiscovery" | "discoveryCoverage" | "storeMeta">
+	>
 
 export interface ScannerRoutesOptions {
 	scanner: ScannerRouteService
@@ -400,6 +406,9 @@ const discoveryResponseSchema = {
 		coverage: discoveryCoverageSchema,
 		absorbedInto: { type: "string" },
 		requestedId: { type: "string" },
+		revision: { type: "integer" },
+		storeEpoch: { type: "string" },
+		storeRevision: { type: "integer" },
 	},
 } as const
 
@@ -409,6 +418,8 @@ const discoveryListResponseSchema = {
 	properties: {
 		items: { type: "array", items: discoveryResponseSchema },
 		nextCursor: { anyOf: [{ type: "string" }, { type: "null" }] },
+		storeEpoch: { type: "string" },
+		storeRevision: { type: "integer" },
 	},
 } as const
 
@@ -764,9 +775,15 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			try {
-				return (await scanner.deleteDiscovery(request.params.id))
-					? reply.code(204).send()
-					: notFound(reply, "Discovery", request.params.id)
+				if (!(await scanner.deleteDiscovery(request.params.id)))
+					return notFound(reply, "Discovery", request.params.id)
+				// band inspection UX req 3.3: the store revision as the answer leaves (at or after the removal)
+				const meta = scanner.storeMeta?.()
+				if (meta)
+					void reply
+						.header(DISCOVERY_EPOCH_HEADER, meta.storeEpoch)
+						.header(DISCOVERY_REVISION_HEADER, String(meta.storeRevision))
+				return reply.code(204).send()
 			} catch (err) {
 				return sendError(reply, err)
 			}

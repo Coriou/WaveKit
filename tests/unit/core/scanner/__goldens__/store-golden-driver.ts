@@ -65,6 +65,15 @@ const classOf = (p: ScannerProtocol): ScannerClass =>
 					? "fsk4-6k25"
 					: "unknown"
 
+/**
+ * Band inspection UX req 3.3: `revision` is a derived DTO field (never journaled or snapshotted);
+ * the goldens predate it, so returned values and evicted copies are recorded without it. The
+ * journal (M) and snapshot (S) lines are recorded as they are and must not contain it.
+ */
+function withoutRevision(key: string, value: unknown): unknown {
+	return key === "revision" ? undefined : value
+}
+
 export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 	const r = rng(seed)
 	const int = (n: number): number => Math.floor(r() * n)
@@ -84,7 +93,9 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 		s.on("change", (id: string, change: string) =>
 			lines.push(`C ${id} ${change}`),
 		)
-		s.on("evicted", (list: unknown) => lines.push(`E ${JSON.stringify(list)}`))
+		s.on("evicted", (list: unknown) =>
+			lines.push(`E ${JSON.stringify(list, withoutRevision)}`),
+		)
 	}
 	const make = (): DiscoveryStore => {
 		const s = new DiscoveryStore({
@@ -132,7 +143,7 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 				truncated: r() < 0.03,
 			})
 			inputs.push(obs)
-			lines.push(`R ${JSON.stringify(store.ingest(obs))}`)
+			lines.push(`R ${JSON.stringify(store.ingest(obs), withoutRevision)}`)
 		} else if (roll < 55 && inputs.length > 0) {
 			// re-ingest (same or changed snapshot of a known track)
 			const prev = pick(inputs)
@@ -155,7 +166,7 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 								},
 							},
 						}
-			lines.push(`R ${JSON.stringify(store.ingest(next))}`)
+			lines.push(`R ${JSON.stringify(store.ingest(next), withoutRevision)}`)
 		} else if (roll < 67) {
 			const all = discoveryIds()
 			if (all.length === 0) continue
@@ -180,6 +191,7 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 						ev,
 						r() < 0.2 ? { cap: "suspected-intermod" } : {},
 					),
+					withoutRevision,
 				)}`,
 			)
 		} else if (roll < 72 && inputs.length > 0) {
@@ -188,7 +200,7 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 				identity: dmrCc(1 + int(2)),
 			})
 			lines.push(
-				`R ${JSON.stringify(store.appendObservationEvidence(o.id, r() < 0.3 ? { ...ev, at: o.startedAt + 10 } : ev))}`,
+				`R ${JSON.stringify(store.appendObservationEvidence(o.id, r() < 0.3 ? { ...ev, at: o.startedAt + 10 } : ev), withoutRevision)}`,
 			)
 		} else if (roll < 80) {
 			const all = discoveryIds()
@@ -205,6 +217,7 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 							r() < 0.5 ? "channel" : "spectral",
 						),
 					),
+					withoutRevision,
 				)}`,
 			)
 		} else if (roll < 84) {
@@ -222,19 +235,24 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 								? { lockout: r() < 0.3 }
 								: { label: `L${int(5)}` },
 					),
+					withoutRevision,
 				)}`,
 			)
 		} else if (roll < 87) {
 			const all = discoveryIds()
 			if (all.length === 0) continue
-			lines.push(`R ${JSON.stringify(store.delete(pick(all)))}`)
+			lines.push(
+				`R ${JSON.stringify(store.delete(pick(all)), withoutRevision)}`,
+			)
 		} else if (roll < 89) {
 			lines.push(
-				`R ${JSON.stringify(store.rekey(pick(["src-1", "src-3"]), int(3_000) - 1_500))}`,
+				`R ${JSON.stringify(store.rekey(pick(["src-1", "src-3"]), int(3_000) - 1_500), withoutRevision)}`,
 			)
 		} else if (roll < 91) {
 			clock += 2 * 86_400_000
-			lines.push(`R ${JSON.stringify(store.pruneInactive(1 + int(3)))}`)
+			lines.push(
+				`R ${JSON.stringify(store.pruneInactive(1 + int(3)), withoutRevision)}`,
+			)
 		} else if (roll < 93) {
 			store.setLimits({ maxDiscoveries: 10 + int(40), minSurfaceBlocks: 2 })
 		} else if (roll < 96) {
@@ -244,15 +262,15 @@ export function runGolden(seed: number, steps: number, slots = 14): GoldenRun {
 			const v = int(3)
 			if (v === 0)
 				lines.push(
-					`R ${JSON.stringify(store.setEvidenceFlags(id, { psd: true }))}`,
+					`R ${JSON.stringify(store.setEvidenceFlags(id, { psd: true }), withoutRevision)}`,
 				)
 			else if (v === 1)
 				lines.push(
-					`R ${JSON.stringify(store.setUndecodedReason(id, "timeout"))}`,
+					`R ${JSON.stringify(store.setUndecodedReason(id, "timeout"), withoutRevision)}`,
 				)
 			else if (inputs.length > 0)
 				lines.push(
-					`R ${JSON.stringify(store.attachRecordings(pick(inputs).id, [`rec${i}`], "linked"))}`,
+					`R ${JSON.stringify(store.attachRecordings(pick(inputs).id, [`rec${i}`], "linked"), withoutRevision)}`,
 				)
 		} else if (roll < 98) {
 			if (checkpoint === null) {

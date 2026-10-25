@@ -3336,6 +3336,40 @@ curl 'http://localhost:9000/api/scanner/discoveries?identity=dmr-cc:1'
 
 Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
 
+Current cores add `storeEpoch` and `storeRevision` to the page and `revision` to each
+item; see [Discovery revisions](#discovery-revisions).
+
+#### Discovery revisions
+
+Answers and events can arrive out of order (an HTTP answer held while the core works, a
+WebSocket event sent first). A current core orders them with one store-wide revision
+counter, so a client can keep the newest state of each discovery. All fields are optional
+and additive; older cores omit them.
+
+- `revision` on every discovery (lists, detail, PATCH answers, events): the revision of
+  the record's last change. Every change to a record (an observation, an operator edit, a
+  merge into it) takes a new revision from one counter, so a record's revision strictly
+  increases. A record unchanged since the core started reads `1`.
+- `storeEpoch`: an opaque string, new each time the core starts. Revisions restart with
+  it and are never compared across epochs: on a new epoch, drop what you cached and read
+  again.
+- `storeRevision`: the store-wide revision when the answer was taken; no record in it has
+  a newer one. On list pages, and on the detail and PATCH answers (PATCH: the revision
+  of that edit, taken when it was applied).
+- On `scanner:discovery` events: `revision` (the record's new revision, or for `deleted`
+  the revision of the removal; for `merged`, every id in `mergedIds` was removed at that
+  same revision) and `storeEpoch`.
+- `DELETE` answers 204 with the headers `x-wavekit-store-epoch` and
+  `x-wavekit-store-revision` (the store revision as the answer leaves, at or after the
+  removal).
+
+To apply an answer or event, keep per id the highest revision seen: apply a record only
+when its revision is higher. A deletion (DELETE, `deleted`, an id in `mergedIds`) is
+final, since ids are never reused. A complete page (`nextCursor: null`) taken at
+`storeRevision` R speaks for every record its query matches: a record it did not list
+whose revision is R or lower is stale. The counter never runs out in practice: at a
+million changes a second it reaches `Number.MAX_SAFE_INTEGER` after about 285 years.
+
 #### GET /api/scanner/discoveries/:id
 
 The `Discovery` (metadata, co-channel links, operator fields). 404
@@ -6209,6 +6243,9 @@ survivor and those ids. When an update replaces a pending `merged` before it is
 sent, the event stays `merged` and keeps the union of the absorbed ids.
 `mergedTruncated: true` means `mergedIds` was cut at 64: refetch the survivor
 (unless the change is `deleted`) and the discovery list.
+
+Current cores add `revision` and `storeEpoch`; see
+[Discovery revisions](#discovery-revisions).
 
 #### scanner:discoveries-resync
 

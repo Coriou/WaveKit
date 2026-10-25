@@ -11,6 +11,7 @@
  * monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one journal
  * entry whose payload holds the resulting records, so replay is an idempotent upsert.
  */
+import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger, createLogger } from "../../../utils/logger.js"
@@ -320,6 +321,11 @@ interface Op {
 	 * Recorded at placement, so neither observation retention nor a later listener can lose it.
 	 */
 	credited: Map<string, { discoveryId: string; jobIds: string[] }>
+}
+
+/** Band inspection UX req 3.3: an opaque epoch, unique per store start (time plus 32 random bits). */
+function newStoreEpoch(): string {
+	return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`
 }
 
 function newOp(): Op {
@@ -836,6 +842,18 @@ export class DiscoveryStore
 	private readonly aliasTable = new RecordingAliasTable()
 	/** Band inspection UX req 3.1: absorbed id -> survivor, in memory only. */
 	private readonly absorbedIndex = new AbsorbedIdIndex()
+	/**
+	 * Band inspection UX req 3.3: the public revision. One store-wide counter, bumped once per
+	 * published change (an operation, a proof change, a recording commit); every record that
+	 * change touched takes the new value, so a record's revision strictly increases. Memory only:
+	 * the epoch is new on every start (and restore), so a client never compares across restarts.
+	 * A record unchanged since the start reads revision 1. The counter is a JS number: at a
+	 * million changes a second it reaches Number.MAX_SAFE_INTEGER (about 9.0e15) after some 285
+	 * years.
+	 */
+	private revisionSeq = 1
+	private readonly published = new Map<string, number>()
+	private epoch = newStoreEpoch()
 	/**
 	 * WG11 req 3.1-3.4 (lane SC). `revisions`: bumped by the mutating helpers only when a value the
 	 * record's JSON holds changes, so "no change" needs no before/after stringify. `members` mirrors
@@ -1741,6 +1759,7 @@ export class DiscoveryStore
 		} catch (err) {
 			failure = err
 		}
+		this.publish([plan.discovery.id])
 		try {
 			this.emit("change", plan.discovery.id, "updated")
 		} catch (err) {
@@ -2128,6 +2147,10 @@ export class DiscoveryStore
 	}
 
 	restore(s: StoreSnapshot): void {
+		// band inspection UX req 3.3: restored records are a new store; revisions restart with it
+		this.epoch = newStoreEpoch()
+		this.revisionSeq = 1
+		this.published.clear()
 		const recordings = PreparedRecordingOperationsSchema.safeParse(
 			s.recordingOperations ?? [],
 		)
@@ -3692,6 +3715,8 @@ export class DiscoveryStore
 			this.deleteInto(op, victim)
 		}
 		this.finish("evict", op)
+		// band inspection UX req 3.3: the copies leave at the revision of their removal
+		for (const d of evicted) d.revision = this.revisionSeq
 		if (evicted.length > 0) this.emit("evicted", evicted)
 		if (fits) this.keptBlockedWarned = 0
 		else this.warnKeptBlocked()
@@ -4118,6 +4143,7 @@ export class DiscoveryStore
 				: this.proofLevel(after)
 		const beforeLevel = this.proofLevel(before)
 		if (jsonEqual(before, after) && beforeLevel === afterLevel) return
+		this.publish([id])
 		this.emit("change", id, "updated")
 	}
 
@@ -4497,6 +4523,7 @@ export class DiscoveryStore
 			if (hint !== undefined) copy.hint = hint
 		}
 		copy.evidenceLevel = view.evidence
+		copy.revision = this.published.get(d.id) ?? 1
 		return copy
 	}
 
@@ -4542,6 +4569,7 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		this.discoveries.delete(id)
+		this.published.delete(id)
 		const members = this.members.get(id)
 		for (const s of d.sourceIds) {
 			this.bySource.get(s)?.delete(id)
@@ -4893,6 +4921,7 @@ export class DiscoveryStore
 			op: kind,
 			payload,
 		}
+		this.publish([...op.discoveries, ...op.deleted, ...op.changes.keys()])
 		this.emit("mutation", entry)
 		this.flushRemoval()
 		for (const [id, change] of op.changes) {
@@ -4930,6 +4959,25 @@ export class DiscoveryStore
 
 	private revision(d: Discovery): number {
 		return this.revisions.get(d) ?? 0
+	}
+
+	/** Band inspection UX req 3.3: the store's epoch (new on every start and restore). */
+	get storeEpoch(): string {
+		return this.epoch
+	}
+
+	/** Band inspection UX req 3.3: the newest revision any change was published at. */
+	currentRevision(): number {
+		return this.revisionSeq
+	}
+
+	/** One published change: a new revision for every id it touched (a removed id forgets its own). */
+	private publish(ids: Iterable<string>): number {
+		const revision = ++this.revisionSeq
+		for (const id of ids)
+			if (this.discoveries.has(id)) this.published.set(id, revision)
+			else this.published.delete(id)
+		return revision
 	}
 
 	/** A value in `d`'s JSON changed: bump its revision (and catch the indexes up). */

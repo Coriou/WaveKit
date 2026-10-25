@@ -341,6 +341,30 @@ export interface Discovery {
 	 */
 	absorbedInto?: string
 	requestedId?: string
+	/**
+	 * Band inspection UX req 3.3: the store revision of this record's last change. Every change to
+	 * a record (an observation, an operator edit, a merge into it) gives it a new revision from
+	 * one store-wide counter, so within one `storeEpoch` a record's revision strictly increases.
+	 * Present on every read and event of a current core; absent on older cores.
+	 */
+	revision?: number
+	/** Band inspection UX req 3.3: on single-record answers (GET, PATCH): the store's epoch. */
+	storeEpoch?: string
+	/**
+	 * Band inspection UX req 3.3: on single-record answers: the store-wide revision when the answer
+	 * was taken (at least `revision`).
+	 */
+	storeRevision?: number
+}
+
+/**
+ * Band inspection UX req 3.3: on a discovery list answer (`GET /api/scanner/discoveries`). The
+ * epoch is new each time the core starts (revisions restart with it); the revision is the
+ * store-wide revision when the page was taken, so no record on it has a newer one.
+ */
+export interface DiscoveryStoreMeta {
+	storeEpoch: string
+	storeRevision: number
 }
 
 /** Band inspection UX req 1.4: at most this many coverage entries per discovery. */
@@ -978,6 +1002,14 @@ export interface ScannerDiscoveryEventData {
 	 * `deleted`) and the discovery list.
 	 */
 	mergedTruncated?: true
+	/**
+	 * Band inspection UX req 3.3: the store revision of this change: the record's new revision,
+	 * or for `deleted` the revision of the removal. For `merged`, every id in `mergedIds` was
+	 * removed at this same revision.
+	 */
+	revision?: number
+	/** Band inspection UX req 3.3: the store's epoch; a new one means the core restarted. */
+	storeEpoch?: string
 }
 /**
  * Band inspection UX req 3.2: `scanner:discoveries-resync` payload. Sent instead of per-group
