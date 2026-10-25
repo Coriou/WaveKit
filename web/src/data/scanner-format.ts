@@ -420,7 +420,7 @@ export function hintText(hint: unknown): string | null {
 	return "unclassified"
 }
 
-/** Whether the protocol is backed by verified evidence: decoded, or proven (WG12). */
+/** Whether the protocol is backed by verified evidence: decoded, or proven. */
 export function isVerified(
 	d: Pick<Discovery, "confidence" | "evidenceLevel">,
 ): boolean {

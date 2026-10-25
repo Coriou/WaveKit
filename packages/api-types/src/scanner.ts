@@ -968,7 +968,7 @@ export interface ScannerDiscoveryEventData {
 	/** WG2: present when a job's observation caused the event; one entry per such job. */
 	jobHits?: ScanJobHit[]
 	/**
-	 * WG12: discovery ids absorbed by a merge. Present on `merged`; band inspection UX req 3.2: a
+	 * Discovery ids absorbed by a merge. Present on `merged`; band inspection UX req 3.2: a
 	 * `deleted` may carry it too (a merge into the deleted survivor was coalesced into this event),
 	 * and clients drop those ids as well. Absent on every other change.
 	 */

@@ -372,7 +372,7 @@ type Rect = [number, number, number, number]
 const hits = (a: Rect, b: Rect) =>
 	a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
 
-describe("discovery row edges (review round 1)", () => {
+describe("discovery row edges", () => {
 	it("discoveries exactly at both boundaries plus one outside: inside the row, never under a marker", () => {
 		const ds = [
 			disc("lo", view.startHz),

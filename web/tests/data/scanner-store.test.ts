@@ -1036,7 +1036,7 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 	})
 })
 
-describe("ScannerStore: reconcile never drops what changed after the request (review round 2)", () => {
+describe("ScannerStore: reconcile never drops what changed after the request", () => {
 	const flush = () => new Promise(r => setTimeout(r, 0))
 	function deferred() {
 		const pending: ((body: unknown) => void)[] = []
