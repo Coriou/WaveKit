@@ -1,10 +1,12 @@
 /**
  * Per-id write order for a client-side cache filled by overlapping requests and live events.
  *
- * Every write carries a sequence: a live event takes `next()` when it arrives, a response takes the
- * `next()` its request took when it started. A write to an id applies only when its sequence is
- * strictly newer than everything already applied to that id, so the newest-started answer always
- * wins, whatever order the answers arrive in:
+ * Every write carries a sequence. A live event, and the answer to a successful mutation (it shows the
+ * server after the change), takes `next()` when it arrives. A read's answer takes the `next()` its
+ * request took when it started, since the server may have served it at any time after that. A write
+ * to an id applies only when its sequence is strictly newer than everything already applied to that
+ * id, so the newest-started read, or anything that arrived after it started, wins whatever order
+ * the answers arrive in; a failed request writes nothing:
  *
  * - an upsert or removal leaves the id's sequence behind (a removal as a tombstone);
  * - a complete answer for a query (`cover`) speaks for every record that query matches, including

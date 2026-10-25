@@ -417,8 +417,8 @@ export class ScannerStore extends Store<ScannerState> {
 	private staleTimer: ReturnType<typeof setTimeout> | null = null
 	private discoveryGeneration = 0
 	/**
-	 * Write order of `byId`: a live event writes at the next sequence, a response at its request's
-	 * start; every write goes through applyWrites(), which applies it only when it is newer than
+	 * Write order of `byId`: a live event or a successful mutation's answer writes at the next
+	 * sequence when it arrives, a read's answer at its request's start; every write goes through applyWrites(), which applies it only when it is newer than
 	 * what that id last saw (see write-order.ts).
 	 */
 	private readonly order = new WriteOrder<Discovery>()
@@ -849,24 +849,25 @@ export class ScannerStore extends Store<ScannerState> {
 		id: string,
 		patch: DiscoveryOperatorPatch,
 	): Promise<Discovery> {
-		const started = this.requestStart()
 		const d = await this.api.patch<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
 			patch,
 		)
-		this.commit(s => this.withDiscovery(s, d, "updated", undefined, started))
+		// a successful mutation is ordered by its arrival, like a live event: the server state now
+		// includes it, and a read that started before may have been served without it
+		this.commit(s => this.withDiscovery(s, d, "updated"))
 		return d
 	}
 
 	/** DELETE /api/scanner/discoveries/:id; one the core no longer has counts as deleted. */
 	async deleteDiscovery(id: string): Promise<void> {
-		const started = this.requestStart()
 		try {
 			await this.api.delete<unknown>(`/api/scanner/discoveries/${encode(id)}`)
 		} catch (error) {
 			if (!isApiError(error) || error.status !== 404) throw error
 		}
-		this.commit(s => this.withoutDiscovery(s, id, started))
+		// ordered by its arrival, like a live event (see patchDiscovery)
+		this.commit(s => this.withoutDiscovery(s, id))
 	}
 
 	/** POST /api/scanner/discoveries/:id/listen: where to hear it in the current window. */
@@ -1022,7 +1023,10 @@ export class ScannerStore extends Store<ScannerState> {
 		return out
 	}
 
-	/** Upserts `d` at `at` (a live event: the next sequence); refused when something newer spoke for it. */
+	/**
+	 * Upserts `d` at `at` (default: the next sequence, for a live event or a mutation's answer); refused
+	 * when something newer spoke for it.
+	 */
 	private withDiscovery(
 		s: ScannerState,
 		d: Discovery,
@@ -1057,7 +1061,10 @@ export class ScannerStore extends Store<ScannerState> {
 		return { ...s, discoveries: { ...list, items, byId } }
 	}
 
-	/** Removes `id` at `at` (a live event: the next sequence); refused when something newer spoke for it. */
+	/**
+	 * Removes `id` at `at` (default: the next sequence, for a live event or a mutation's answer); refused
+	 * when something newer spoke for it.
+	 */
 	private withoutDiscovery(
 		s: ScannerState,
 		id: string,

@@ -1040,13 +1040,15 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 describe("ScannerStore: reconcile never drops what changed after the request", () => {
 	const flush = () => new Promise(r => setTimeout(r, 0))
 	function deferred() {
-		const pending: ((body: unknown) => void)[] = []
+		const pending: ((body: unknown, status?: number) => void)[] = []
 		const calls: string[] = []
 		const api = new ApiClient({
 			fetch: url =>
 				new Promise<Response>(resolve => {
 					calls.push(url)
-					pending.push(body => resolve(new Response(JSON.stringify(body))))
+					pending.push((body, status = 200) =>
+						resolve(new Response(JSON.stringify(body), { status })),
+					)
 				}),
 		})
 		const sockets = fakeSockets()
@@ -1307,19 +1309,127 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		store.dispose()
 	})
 
-	// Feature: band-inspection-ux, Property 9: the newest-started answer decides each cached id
+	const both = [false, true]
+	/** Answers pending[first] then pending[second], or the reverse, letting each settle. */
+	async function answer(
+		pending: ((body: unknown, status?: number) => void)[],
+		order: readonly [() => void, () => void],
+		reverse: boolean,
+	) {
+		const steps = reverse ? [order[1], order[0]] : [order[0], order[1]]
+		for (const step of steps) {
+			step()
+			await flush()
+		}
+	}
+
+	it("a PATCH that started before a GET keeps its saved label, in either arrival order", async () => {
+		for (const reverse of both) {
+			const { store, pending } = deferred()
+			const patch = store.patchDiscovery("x", { label: "new" })
+			const get = store.fetchDiscovery("x")
+			await flush()
+			await answer(
+				pending,
+				[
+					() => pending[1]!(labelled("x", "old")),
+					() => pending[0]!(labelled("x", "new")),
+				],
+				reverse,
+			)
+			await Promise.all([patch, get])
+			expect(labelOf(store, "x")).toBe("new")
+			store.dispose()
+		}
+	})
+
+	it("a DELETE that started before a GET keeps the record gone, in either arrival order", async () => {
+		for (const reverse of both) {
+			const { store, pending } = deferred()
+			const del = store.deleteDiscovery("x")
+			const get = store.fetchDiscovery("x")
+			await flush()
+			await answer(
+				pending,
+				[() => pending[1]!(discovery("x")), () => pending[0]!(null)],
+				reverse,
+			)
+			await Promise.all([del, get])
+			expect(store.get().discoveries.byId.has("x")).toBe(false)
+			store.dispose()
+		}
+	})
+
+	it("a GET that started before a DELETE never brings the record back, in either arrival order", async () => {
+		for (const reverse of both) {
+			const { store, pending } = deferred()
+			const get = store.fetchDiscovery("x")
+			const del = store.deleteDiscovery("x")
+			await flush()
+			await answer(
+				pending,
+				[() => pending[0]!(discovery("x")), () => pending[1]!(null)],
+				reverse,
+			)
+			await Promise.all([get, del])
+			expect(store.get().discoveries.byId.has("x")).toBe(false)
+			store.dispose()
+		}
+	})
+
+	it("after a PATCH answer, a newer live event or a later read still wins", async () => {
+		const { store, pending, send, tick } = deferred()
+		const patch = store.patchDiscovery("x", { label: "new" })
+		await flush()
+		pending[0]!(labelled("x", "new"))
+		await patch
+		send("scanner:discovery", {
+			change: "updated",
+			discovery: labelled("x", "live"),
+		})
+		tick()
+		expect(labelOf(store, "x")).toBe("live")
+		const get = store.fetchDiscovery("x")
+		await flush()
+		pending[1]!(labelled("x", "later"))
+		await get
+		expect(labelOf(store, "x")).toBe("later")
+		store.dispose()
+	})
+
+	it("a failed PATCH or DELETE changes nothing", async () => {
+		const { store, pending } = deferred()
+		const seed = store.fetchDiscovery("x")
+		await flush()
+		pending[0]!(labelled("x", "old"))
+		await seed
+		const failure = { code: "SCANNER_INTERNAL", message: "nope" }
+		const patch = store.patchDiscovery("x", { label: "new" })
+		await flush()
+		pending[1]!(failure, 500)
+		await expect(patch).rejects.toSatisfy(isApiError)
+		const del = store.deleteDiscovery("x")
+		await flush()
+		pending[2]!(failure, 500)
+		await expect(del).rejects.toSatisfy(isApiError)
+		expect(labelOf(store, "x")).toBe("old")
+		store.dispose()
+	})
+
+	// Feature: band-inspection-ux, Property 9: the newest write decides each cached id
 	// Validates: Requirements 3.2
-	it("property: any interleaving leaves each id as the newest-started answer or the last live event says", async () => {
+	it("property: any interleaving leaves each id as the newest write for it says", async () => {
 		const ids = ["a", "b", "c"] as const
+		const one = <K extends string>(kind: K) =>
+			fc.record({ kind: fc.constant(kind), id: fc.constantFrom(...ids) })
 		const request = fc.oneof(
 			fc.record({
 				kind: fc.constant("span" as const),
 				has: fc.subarray([...ids]),
 			}),
-			fc.record({
-				kind: fc.constant("one" as const),
-				id: fc.constantFrom(...ids),
-			}),
+			one("read" as const),
+			one("patch" as const),
+			one("delete" as const),
 		)
 		const live = fc.record({
 			id: fc.constantFrom(...ids),
@@ -1330,7 +1440,7 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 			.chain(requests =>
 				fc.record({
 					requests: fc.constant(requests),
-					// resolution order, with live events slotted between answers
+					// answer order, with live events slotted between answers
 					steps: fc
 						.shuffledSubarray(
 							requests.map((_, i) => i),
@@ -1349,17 +1459,31 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 		await fc.assert(
 			fc.asyncProperty(scenario, async ({ requests, steps }) => {
 				const { store, pending, calls, send, tick } = deferred()
+				const quiet = (p: Promise<unknown>) =>
+					p.then(
+						() => undefined,
+						() => undefined,
+					)
 				const done = requests.map(r =>
 					r.kind === "span"
-						? store.fetchDiscoveries(span)
-						: store.fetchDiscovery(r.id).then(
-								() => undefined,
-								() => undefined,
-							),
+						? quiet(store.fetchDiscoveries(span))
+						: r.kind === "read"
+							? quiet(store.fetchDiscovery(r.id))
+							: r.kind === "patch"
+								? quiet(store.patchDiscovery(r.id, { label: "edit" }))
+								: quiet(store.deleteDiscovery(r.id)),
 				)
 				await flush()
 				expect(calls).toHaveLength(requests.length)
-				const lastLive = new Map<string, { deleted: boolean; label: string }>()
+				// the model: every write has a sequence (a read: its start; a live event or a
+				// mutation's answer: its arrival, after every start); per id the newest one wins
+				const newest = new Map<string, { seq: number; label?: string }>()
+				const write = (id: string, seq: number, label?: string) => {
+					const have = newest.get(id)
+					if (!have || seq > have.seq)
+						newest.set(id, label === undefined ? { seq } : { seq, label })
+				}
+				let clock = requests.length
 				for (const [k, { i, live: ev }] of steps.entries()) {
 					if (ev) {
 						const label = `live${k}`
@@ -1368,30 +1492,28 @@ describe("ScannerStore: reconcile never drops what changed after the request", (
 							discovery: labelled(ev.id, label),
 						})
 						tick()
-						lastLive.set(ev.id, { deleted: ev.deleted, label })
+						write(ev.id, ++clock, ev.deleted ? undefined : label)
 					}
 					const r = requests[i]!
-					pending[i]!(
-						r.kind === "span"
-							? page(...r.has.map(id => labelled(id, `r${i}`)))
-							: labelled(r.id, `r${i}`),
-					)
+					const label = `r${i}`
+					if (r.kind === "span") {
+						pending[i]!(page(...r.has.map(id => labelled(id, label))))
+						for (const id of ids)
+							write(id, i, r.has.includes(id) ? label : undefined)
+					} else if (r.kind === "read") {
+						pending[i]!(labelled(r.id, label))
+						write(r.id, i, label)
+					} else if (r.kind === "patch") {
+						pending[i]!(labelled(r.id, label))
+						write(r.id, ++clock, label)
+					} else {
+						pending[i]!(null)
+						write(r.id, ++clock)
+					}
 					await done[i]
 				}
-				for (const id of ids) {
-					const l = lastLive.get(id)
-					let want: string | undefined
-					if (l) want = l.deleted ? undefined : l.label
-					else
-						for (let i = requests.length - 1; i >= 0; i--) {
-							const r = requests[i]!
-							if (r.kind === "one" && r.id !== id) continue
-							const has = r.kind === "one" || r.has.includes(id)
-							want = has ? `r${i}` : undefined
-							break
-						}
-					expect(labelOf(store, id)).toBe(want)
-				}
+				for (const id of ids)
+					expect(labelOf(store, id)).toBe(newest.get(id)?.label)
 				store.dispose()
 			}),
 			{ numRuns: 200 },
