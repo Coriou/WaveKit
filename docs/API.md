@@ -629,8 +629,10 @@ curl -X POST http://localhost:9000/api/sources \
 
 The core waits for the first connection attempt before it answers.
 
-**Response** (201 Created): `source` is the source's status, the same shape as one entry of
-[`GET /api/sources`](#get-apisources).
+**Response** (201 Created): `source` is the new source's basic status (`id`, `type`, `url`,
+`connected`, `bytesReceived`, `dataRate`, `reconnectAttempts`, `caps` and the optional activity,
+signal and endpoint fields). It omits the `consumers`, `assignments` and `available` fields that
+each [`GET /api/sources`](#get-apisources) entry adds.
 
 ```json
 {
