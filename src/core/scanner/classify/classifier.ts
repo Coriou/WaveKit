@@ -74,6 +74,63 @@ export const CLASS_HYPOTHESES: Readonly<
 	],
 }
 
+/**
+ * (pager classification): inside a paging range (the covering band plan lists `pocsag`
+ * or `flex`, so its prior is at least 1) the classes a pager burst measures as get pager
+ * hypotheses ahead of the class's digital-voice ones. A 1200/2400 Bd POCSAG or FLEX burst with
+ * ±4.5 kHz deviation (about 9 kHz tone spacing) measures as `fsk2-wide`, as `fsk4-12k5` when its
+ * occupied bandwidth reads at or below 10.5 kHz, or as `analog-fm` when its spectrum is not flat.
+ * Scores: each pager score is above the class's first non-pager score (`fsk4-12k5`: pocsag 0.6 and flex
+ * 0.56 > dmr 0.55; `analog-fm`: pocsag 0.65 and flex 0.62 >
+ * analog-fm 0.6), so under equal priors (a range listing
+ * both) the pager trial still comes first; outside a paging range nothing is added.
+ */
+export const PAGER_RANGE_HYPOTHESES: Readonly<
+	Partial<Record<ScannerClass, readonly Hypothesis[]>>
+> = {
+	"fsk2-wide": [
+		{ protocol: "pocsag", score: 0.6 },
+		{ protocol: "flex", score: 0.4 },
+	],
+	"fsk4-12k5": [
+		{ protocol: "pocsag", score: 0.6 },
+		{ protocol: "flex", score: 0.56 },
+	],
+	"analog-fm": [
+		{ protocol: "pocsag", score: 0.65 },
+		{ protocol: "flex", score: 0.62 },
+	],
+}
+
+/** True when the priors come from a range that lists a pager protocol (prior at least 1). */
+export function inPagerRange(
+	priors: Partial<Record<ScannerProtocol, number>>,
+): boolean {
+	const listed = (p: ScannerProtocol): boolean => {
+		const v = priors[p]
+		return typeof v === "number" && Number.isFinite(v) && v >= 1
+	}
+	return listed("pocsag") || listed("flex")
+}
+
+/**
+ * The class's hypotheses, plus the pager ones inside a paging range (a pager score replaces a
+ * lower score of the same protocol). Unknown or malformed priors add nothing (the safe answer:
+ * today's list).
+ */
+export function classHypotheses(
+	cls: ScannerClass,
+	priors: Partial<Record<ScannerProtocol, number>>,
+): readonly Hypothesis[] {
+	const base = CLASS_HYPOTHESES[cls]
+	const pager = PAGER_RANGE_HYPOTHESES[cls]
+	if (pager === undefined || !inPagerRange(priors)) return base
+	const out = new Map<ScannerProtocol, number>()
+	for (const h of [...pager, ...base])
+		out.set(h.protocol, Math.max(out.get(h.protocol) ?? 0, h.score))
+	return [...out].map(([protocol, score]) => ({ protocol, score }))
+}
+
 const FAMILY: Readonly<Record<ScannerProtocol, ProtocolFamily>> = {
 	"analog-fm": "analog",
 	"analog-am": "analog",
@@ -176,7 +233,7 @@ export function classifySpectral(
 	const cls = classOf(track, { allowBurst: (ctx.priors.ism ?? 1) >= 1 })
 	return {
 		class: cls,
-		hypotheses: applyPriors(CLASS_HYPOTHESES[cls], ctx),
+		hypotheses: applyPriors(classHypotheses(cls, ctx.priors), ctx),
 		tier: "spectral",
 	}
 }

@@ -1,6 +1,10 @@
 /** WG12 Property 12, planner half: known first, one analog, digital by score, at most 8. */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
+import {
+	familyOf,
+	inPagerRange,
+} from "../../../../src/core/scanner/classify/classifier.js"
 import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
 import type { BandRegionCode } from "../../../../src/core/scanner/bandplan/index.js"
 import { identifyScores } from "../../../../src/core/scanner/identify.js"
@@ -169,7 +173,16 @@ describe("planReplayTrials analog order", () => {
 								c.known === "analog-am" ? "am" : "nfm",
 							)
 						} else {
-							expect(out.indexOf(analog)).toBe(out.filter(t => t.known).length)
+							// in a paging range the analog trial follows the pager trials.
+							expect(out.indexOf(analog)).toBe(
+								out.filter(
+									t =>
+										t.known ||
+										(inPagerRange(c.priors) &&
+											t.kind !== "analog" &&
+											familyOf(t.protocol) === "pager"),
+								).length,
+							)
 							const amBand = listsAm(rfHz)
 							const fmPos = typeof fm === "number" && fm > 0
 							const amPos = typeof amPrior === "number" && amPrior > 0
@@ -188,6 +201,14 @@ describe("planReplayTrials analog order", () => {
 						const cur = digital[i]!
 						const ds =
 							(scores.get(prev.protocol) ?? 0) - (scores.get(cur.protocol) ?? 0)
+						// in a paging range the pager trials lead the digital ones.
+						const group = (p: ScannerProtocol): number =>
+							inPagerRange(c.priors) && familyOf(p) === "pager" ? 0 : 1
+						const dg = group(cur.protocol) - group(prev.protocol)
+						if (dg !== 0) {
+							expect(dg).toBeGreaterThan(0)
+							continue
+						}
 						expect(
 							ds > 0 ||
 								(ds === 0 && prev.protocol.localeCompare(cur.protocol) <= 0),

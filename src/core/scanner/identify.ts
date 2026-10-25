@@ -45,7 +45,7 @@ import {
 } from "../spectrum/spectrum-engine.js"
 import type { BlockSummary, TrackSnapshot } from "../spectrum/types.js"
 import {
-	CLASS_HYPOTHESES,
+	classHypotheses,
 	classOf,
 	classifySpectral,
 	protocolPrior,
@@ -364,7 +364,7 @@ export function identifyScores(
 	const best = new Map<ScannerProtocol, number>()
 	for (const cls of classes) {
 		const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
-		for (const h of CLASS_HYPOTHESES[cls]) {
+		for (const h of classHypotheses(cls, ctx.priors)) {
 			if (
 				(own === "carrier" && h.protocol !== "analog-fm") ||
 				!IDENTIFY_PROTOCOLS.includes(h.protocol) ||
@@ -382,7 +382,7 @@ export function identifyScores(
 	if (ctx.narrow === true) {
 		for (const cls of NARROW_DIGITAL_CLASSES) {
 			const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
-			for (const h of CLASS_HYPOTHESES[cls]) {
+			for (const h of classHypotheses(cls, ctx.priors)) {
 				if (
 					!NARROW_DIGITAL_PROTOCOLS.has(h.protocol) ||
 					(only && !only.has(h.protocol))

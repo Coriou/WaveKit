@@ -15,6 +15,7 @@ import type {
 	AnalogTrialResult,
 	AnalyzeEvent,
 } from "./scanner-redesign-contract.js"
+import type { TrialMemoryEntry } from "./trial-memory.js"
 import type { Identity, ScannerProtocol } from "./types.js"
 
 /** Capture output rate: the probe decoders' channel rate (48 kHz audio family). */
@@ -54,6 +55,17 @@ export const IQ_REPLAY_PROBE_CORES = 0.15
 export const IDENTIFY_REPLAY_MAX_CAPTURES = 2
 /** Replay trials per capture at most (known protocol first). */
 export const IQ_REPLAY_MAX_TRIALS = 8
+/**
+ * the probe decoder types that have a replay input path (the capture service filters a
+ * capture to their probe channel shape and the decoder reads cf32 at 48 kHz). `rtl433` has none:
+ * the capture service refuses it and the rtl_433 adapter reads cu8 only. The replay planner and
+ * the replay transport skip any decoder not listed here.
+ */
+export const REPLAY_INPUT_DECODERS: ReadonlySet<string> = new Set([
+	"dsd-fme",
+	"multimon-ng",
+	"direwolf",
+])
 
 /** A finished capture as identify and the replay transport see it. */
 export interface IqCaptureView {
@@ -158,6 +170,13 @@ export interface IqReplayPlanInput {
 	priors: Partial<Record<ScannerProtocol, number>>
 	/** `narrowRasterAt(ranges, capture.rfHz)` (requirement 1.3). */
 	narrowRaster: boolean
+	/**
+	 * the discovery's remembered trial outcomes (`TrialMemory.view`); absent or null
+	 * keeps the prior order.
+	 */
+	trialMemory?: readonly TrialMemoryEntry[] | null
+	/** the clock the memory's backoff is measured against; absent = the capture time. */
+	nowMs?: number
 }
 
 /** One replay trial; at most IQ_REPLAY_MAX_TRIALS per capture, `known` ones first. */

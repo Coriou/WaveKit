@@ -2,6 +2,10 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	familyOf,
+	inPagerRange,
+} from "../../../../src/core/scanner/classify/classifier.js"
+import {
 	IQ_REPLAY_MAX_TRIALS,
 	type IqCaptureView,
 	type IqReplayPlanInput,
@@ -456,8 +460,15 @@ describe("planReplayTrials", () => {
 					if (analogs.length === 1) {
 						if (analogs[0]!.known) expect(out.indexOf(analogs[0]!)).toBe(0)
 						else
+							// in a paging range the analog trial follows the pager trials.
 							expect(out.indexOf(analogs[0]!)).toBe(
-								out.filter(t => t.known).length,
+								out.filter(
+									t =>
+										t.known ||
+										(inPagerRange(c.priors) &&
+											t.kind !== "analog" &&
+											familyOf(t.protocol) === "pager"),
+								).length,
 							)
 					}
 					const replayable =

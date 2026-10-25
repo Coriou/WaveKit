@@ -134,6 +134,8 @@ import { replayMissEligible } from "../iq-capture/replay-miss.js"
 import { createKnownProtocolMemory } from "./known-protocol.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
+import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
+import { PendingCaptureLimiter } from "./pending-capture.js"
 import type { AnalogEvidenceLog } from "./analog-evidence.js"
 import {
 	createLiveAudioEvidence,
@@ -764,7 +766,7 @@ export class ScannerService extends EventEmitter {
 		{ startHz: number; binHz: number; bins: number[]; snrDb: number }
 	>()
 	private readonly lastConfirm = new Map<string, number>()
-	/** WG16 SC 3a: identity pairing shared by every probe and ambient decoder, per discovery. */
+	/** trial choice 3a: identity pairing shared by every probe and ambient decoder, per discovery. */
 	private readonly confirmMemory = new ConfirmMemory(() => this.now())
 	/** WG11 req 1.7: the known protocol is the store's decoded protocol (`get` clones: no cheaper read). */
 	private readonly knownProtocols = createKnownProtocolMemory({
@@ -773,6 +775,10 @@ export class ScannerService extends EventEmitter {
 			return d ? { protocol: d.protocol, confidence: d.confidence } : undefined
 		},
 	})
+	/** per-discovery replay trial outcomes, persisted; orders the replay trials. */
+	private trialMemory: TrialMemory = new TrialMemory({ now: () => Date.now() })
+	/** the bounded share of detection captures for not-yet-admitted tracks. */
+	private readonly pendingCaptures = new PendingCaptureLimiter(() => this.now())
 	/** WG11 req 1.4: the band-plan ranges of the sweep ISM fill, rebuilt only when the plans change. */
 	private readonly bandBurstRanges = createBandRangeCache()
 	private readonly persistedLeases = new Map<string, PersistedLease>()
@@ -950,6 +956,11 @@ export class ScannerService extends EventEmitter {
 			this.now = deps.now ?? Date.now
 			this.storageDir =
 				deps.settings.storage.dir || join(deps.stateDir, "scanner")
+			this.trialMemory = new TrialMemory({
+				dir: this.storageDir,
+				logger: this.log,
+				now: () => this.now(),
+			})
 			this.effective = mergeScannerSettings({
 				config: deps.settings,
 				sources: deps.sourceConfigs,
@@ -1276,6 +1287,8 @@ export class ScannerService extends EventEmitter {
 		// A restarted service must not publish during its new recovery barrier.
 		this.store.off("change", this.onStoreChange)
 		let loaded: LoadedState
+		// corrupt or missing trial memory is ignored inside `load` (never throws).
+		await this.trialMemory.load()
 		try {
 			loaded = await this.persistence.load()
 			this.stateLoaded = true
@@ -1579,6 +1592,7 @@ export class ScannerService extends EventEmitter {
 			attempt(() => this.ambient?.stop()),
 			attempt(() => this.deps.cpuMeter?.stop()),
 			attempt(() => this.recorder?.stop()),
+			attempt(() => this.trialMemory.flush()),
 		]
 		for (const registration of this.constructorListeners) {
 			if (registration.settled) continue
@@ -2697,7 +2711,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * WG16 SC: segment-split rasters, each bounded to its range. The passive job adds the band
+	 * trial choice: segment-split rasters, each bounded to its range. The passive job adds the band
 	 * plans' rasters, as `channelPlanOf` adds their channel slots, so busy bands split at
 	 * channel edges even though the passive job's own range has no raster.
 	 */
@@ -2725,7 +2739,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Placement rasters at `hz`: the running jobs' ranges, plus (WG16 SC, follow-up 6.1) the band
+	 * Placement rasters at `hz`: the running jobs' ranges, plus (trial choice, follow-up 6.1) the band
 	 * plans' ranges while the source's passive job runs, so a passive record keys to its channel.
 	 */
 	private rastersAt(sourceId: string, hz: number) {
@@ -2742,7 +2756,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * WG16 SC (DQ 1.16): while the source's passive job runs, the coarsest raster of each band
+	 * trial choice (DQ 1.16): while the source's passive job runs, the coarsest raster of each band
 	 * plan range at `hz`. Only the coarsest, so every passive observation of one emitter keys
 	 * to the same channel whichever finer channel its measured centre is nearest.
 	 */
@@ -3198,7 +3212,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private classify(track: TrackSnapshot, sourceId: string): Classification {
-		// WG16 SC: on a rastered band a piece is at most its channel, never "wideband".
+		// trial choice: on a rastered band a piece is at most its channel, never "wideband".
 		let widest = 0
 		for (const r of this.rastersAt(sourceId, track.centreHz))
 			if (r.spacingHz > widest) widest = r.spacingHz
@@ -3950,14 +3964,14 @@ export class ScannerService extends EventEmitter {
 		return discoveryId ? `d:${discoveryId}` : `o:${observationId}`
 	}
 
-	/** WG16 SC 3a: a live probe's decodes share acceptance with its discovery; a replay keeps its own. */
+	/** trial choice 3a: a live probe's decodes share acceptance with its discovery; a replay keeps its own. */
 	private probeConfirmScope(req: ProbeRequest): string | null {
 		if (req.replay) return null
 		return this.confirmScopeOf(req.observationId)
 	}
 
 	/**
-	 * WG16 SC 3a: an ambient decode shares acceptance with the discovery it would be placed on
+	 * trial choice 3a: an ambient decode shares acceptance with the discovery it would be placed on
 	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone.
 	 */
 	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
@@ -4541,13 +4555,16 @@ export class ScannerService extends EventEmitter {
 		const port = this.deps.iqCapture
 		if (
 			!port ||
-			live.discoveryId === null ||
 			live.acceptedIdentity !== undefined ||
 			track.flags.iqImage ||
 			track.flags.spur ||
 			this.iqTried.has(live.observationId)
 		)
 			return
+		// a gate-passed track the store has not admitted yet is captured too (bounded share
+		// of the per-source budget), so its first transmission can still be replayed and decoded.
+		const pending = live.discoveryId === null
+		if (pending && track.gate !== "passed") return
 		const epoch = this.spectrum.engine(live.sourceId)?.currentEpoch()
 		if (
 			!epoch ||
@@ -4555,6 +4572,7 @@ export class ScannerService extends EventEmitter {
 			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
 		)
 			return
+		if (pending && !this.pendingCaptures.take(live.sourceId)) return
 		this.iqTried.add(live.observationId)
 		try {
 			const res = port.capture({
@@ -4575,8 +4593,12 @@ export class ScannerService extends EventEmitter {
 					captureId: res.captureId,
 					sourceId: live.sourceId,
 				})
-			} else this.giveUpIqCapture(live.observationId)
+			} else {
+				if (pending) this.pendingCaptures.release(live.sourceId)
+				this.giveUpIqCapture(live.observationId)
+			}
 		} catch (err: unknown) {
+			if (pending) this.pendingCaptures.release(live.sourceId)
 			this.giveUpIqCapture(live.observationId)
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
 		}
@@ -4995,7 +5017,14 @@ export class ScannerService extends EventEmitter {
 				: null,
 			priors: narrowestPriors(withScannerOverlays(ranges), capture.rfHz),
 			narrowRaster: narrowRasterAt(ranges, capture.rfHz),
+			trialMemory: discoveryId ? this.trialMemory.view(discoveryId) : null,
+			nowMs: this.now(),
 		}
+	}
+
+	/** the discovery's remembered replay trial outcomes (internal; no DTO field yet). */
+	trialMemoryOf(discoveryId: string): readonly TrialMemoryEntry[] {
+		return this.trialMemory.view(discoveryId)
 	}
 
 	applyReplayResult(result: IqReplayResult): void {
@@ -5030,6 +5059,15 @@ export class ScannerService extends EventEmitter {
 				? this.store.discoveryIdOf(result.observationId)
 				: undefined) ??
 			null
+		// every replay trial outcome is remembered on the discovery (non-attempts ignored).
+		if (discoveryId)
+			for (const t of result.trials)
+				this.trialMemory.record(
+					discoveryId,
+					t.protocol,
+					t.mode !== undefined ? "analog-demod" : t.decoderType,
+					t.outcome,
+				)
 		if (result.decoded) {
 			const ev: DecodeEvidence = {
 				protocol: result.decoded.protocol,
@@ -6641,6 +6679,7 @@ export class ScannerService extends EventEmitter {
 		for (const discovery of evicted) {
 			this.lastConfirm.delete(discovery.id)
 			this.knownProtocols.forget(discovery.id)
+			this.trialMemory.forget(discovery.id)
 			// the store stamped each copy with the revision of its removal
 			this.emitDiscovery({ change: "deleted", discovery })
 		}
@@ -6666,7 +6705,10 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		// WG11 req 1.7: a deleted discovery drops its known-protocol miss count. A merge reports
 		// the merged-away discovery as `deleted` and the survivor (which keeps its count) as `merged`.
-		if (change === "deleted") this.knownProtocols.forget(id)
+		if (change === "deleted") {
+			this.knownProtocols.forget(id)
+			this.trialMemory.forget(id)
+		}
 		// WG2: eviction and age pruning never remove a lockout, and operator deletion
 		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
 		// locked survivor schedules a replan (no-op when no job's lockout list changes).
@@ -7238,7 +7280,7 @@ const probeProtocols: readonly ScannerProtocol[] = [
 ]
 
 /**
- * WG16 SC: the raster that sizes a range's channel slots. An analog-am range with several
+ * trial choice: the raster that sizes a range's channel slots. An analog-am range with several
  * rasters uses its finest (airband 25 kHz and 8.33 kHz → 8.33 kHz): an AM voice channel occupies
  * about 6 kHz (2 × 3 kHz audio), so a 25 kHz slot adds 25 / 8.33 = 3 × the noise, 4.8 dB, and
  * a 4 to 6.5 dB carrier never reaches the 6 dB pass. Every 25 kHz channel sits on the 8.33 kHz

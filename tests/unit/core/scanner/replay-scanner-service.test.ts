@@ -231,7 +231,11 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 	})
 
 	it.each([
-		["not surfaced", { discoveryId: null }, {}],
+		[
+			"not surfaced and not gate-passed",
+			{ discoveryId: null },
+			{ gate: "pending" },
+		],
 		[
 			"confirmed on this observation",
 			{
@@ -268,6 +272,36 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 			}
 		},
 	)
+
+	// capture before admission, bounded to PENDING_CAPTURES_PER_SOURCE_PER_MINUTE (2).
+	it("captures a gate-passed track that is not admitted yet, at most 2 per source per minute", async () => {
+		const { h, port, internals, live } = setup()
+		await h.service.start()
+		try {
+			internals.spectrum.engine = () => ({
+				currentEpoch: () => ({
+					epoch: 1,
+					centreHz: CENTRE,
+					sampleRateHz: 1_024_000,
+				}),
+			})
+			const t = trackOf({
+				centreHz: CENTRE + 50_000,
+				gate: "passed",
+			} as never)
+			for (const id of ["o_a", "o_b", "o_c"])
+				internals.requestIqCapture(
+					live({ observationId: id, discoveryId: null }),
+					t,
+				)
+			expect(port.capture).toHaveBeenCalledTimes(2)
+			// an admitted track still gets its capture past the pending share
+			internals.requestIqCapture(live({ observationId: "o_d" }), t)
+			expect(port.capture).toHaveBeenCalledTimes(3)
+		} finally {
+			await h.service.stop()
+		}
+	})
 
 	it("attaches the source at its first epoch, flushes later ones with the new epoch, and forgets open captures", async () => {
 		const { h, port, internals, track, live } = setup()
@@ -585,6 +619,31 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 			expect(known.known).toHaveBeenCalledWith("d_1")
 			expect(input.knownProtocol).toBe("dmr")
 			expect(typeof input.narrowRaster).toBe("boolean")
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	// every replay trial outcome is remembered on the discovery and feeds the plan input.
+	it("remembers the replay outcomes on the discovery and hands them to the next plan", async () => {
+		const { h, internals, live } = setup()
+		await h.service.start()
+		try {
+			internals.live.set("t1", live())
+			internals.replayPlans.set("cap-1", plan)
+			h.service.applyReplayResult(result())
+			const memory = h.service.trialMemoryOf("d_1")
+			expect(
+				memory.map(e => [e.protocol, e.decoder, e.attempts, e.lastOutcome]),
+			).toEqual([
+				["dmr", "dsd-fme", 1, "no-sync"],
+				["pocsag", "multimon-ng", 1, "crc-errors"],
+			])
+			const input = h.service.replayPlanInput({
+				observationId: "o_1",
+				rfHz: CENTRE + 50_000,
+			} as unknown as IqCaptureView)
+			expect(input.trialMemory).toEqual(memory)
 		} finally {
 			await h.service.stop()
 		}

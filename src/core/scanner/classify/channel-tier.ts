@@ -1,10 +1,32 @@
 import type { Classification, ScannerClass, ScannerProtocol } from "../types.js"
-import { applyPriors, CLASS_HYPOTHESES } from "./classifier.js"
+import { applyPriors, classHypotheses } from "./classifier.js"
 import type { ChannelFeatureResult } from "./channel-features.js"
 import {
 	MAX_CHANNEL_FEATURE_SAMPLES,
 	MIN_CHANNEL_FEATURE_MS,
 } from "./channel-features.js"
+
+/**
+ * a 2-tone FSK pager burst (POCSAG/FLEX, 1200/2400 Bd, ±4.5 kHz deviation: 9 kHz
+ * tone spacing). Spacing 9 000 ± 1 500 Hz (7 500 to 10 500 Hz, inclusive) and a tone midpoint
+ * within ±1 500 Hz of the channel centre (a residual tuning error up to 1.5 kHz, about 3 ppm at
+ * 466 MHz). The previous fixed windows (−5 000..−4 000 and 4 000..5 000 Hz) are a subset. Such a
+ * pair is `fsk2-wide` (pager hypotheses), never a digital-voice class.
+ */
+export const PAGER_TONE_SPACING_HZ = 9000
+export const PAGER_TONE_SPACING_TOLERANCE_HZ = 1500
+export const PAGER_TONE_MIDPOINT_MAX_HZ = 1500
+
+export function isPagerTonePair(lowHz: number, highHz: number): boolean {
+	if (!Number.isFinite(lowHz) || !Number.isFinite(highHz)) return false
+	const spacing = highHz - lowHz
+	const midpoint = (highHz + lowHz) / 2
+	return (
+		Math.abs(spacing - PAGER_TONE_SPACING_HZ) <=
+			PAGER_TONE_SPACING_TOLERANCE_HZ &&
+		Math.abs(midpoint) <= PAGER_TONE_MIDPOINT_MAX_HZ
+	)
+}
 
 export interface ChannelTierContext {
 	readonly priors: Partial<Record<ScannerProtocol, number>>
@@ -127,10 +149,7 @@ export function refineChannelClassification(
 		cls = context.obwHz <= 5500 ? "fsk4-6k25" : "fsk4-12k5"
 	} else if (
 		d.peaksHz.length === 2 &&
-		d.peaksHz[0]! >= -5000 &&
-		d.peaksHz[0]! <= -4000 &&
-		d.peaksHz[1]! >= 4000 &&
-		d.peaksHz[1]! <= 5000 &&
+		isPagerTonePair(d.peaksHz[0]!, d.peaksHz[1]!) &&
 		d.peakStdHz.every(std => std < 500)
 	) {
 		cls = "fsk2-wide"
@@ -144,7 +163,7 @@ export function refineChannelClassification(
 		cls = "analog-fm"
 	}
 	if (!cls) return fallback("unsupported-waveform")
-	const hypotheses = applyPriors(CLASS_HYPOTHESES[cls], context)
+	const hypotheses = applyPriors(classHypotheses(cls, context.priors), context)
 	if (hypotheses.length === 0) return fallback("protocol-filtered")
 	return {
 		kind: "refined",

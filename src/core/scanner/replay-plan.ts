@@ -14,6 +14,14 @@
  * is above 0, else none. Modulation follows the protocol (`am` or `nfm`). Never a protocol whose
  * prior is 0. `replayModeOf` keeps analog out of probe modes. Never `rtl433`, never an
  * ambient-only protocol as a probe.
+ *
+ * (a) the decoders a discovery's class and band call for beyond the probe modes
+ * (`REPLAY_EXTRA_TRIALS`: rtl433 for ISM, acarsdec for ACARS, dumpvdl2 for VDL2, readsb at
+ * 1090 MHz, ais-catcher for AIS, the LoRa decoder) are planned only behind a capability check: a
+ * trial runs only when its decoder has a probe mode and a replay input path
+ * (`REPLAY_INPUT_DECODERS`); otherwise it is reported in `skipped` and never run. (b) The
+ * discovery's trial memory reorders the candidates before the dedup and the bound
+ * (`orderTrialsByMemory`): remembered success, prior order, untried, failures with backoff.
  */
 import { SCANNER_AMBIENT_PROTOCOLS } from "@wavekit/api-types"
 import { bandplansFor } from "./bandplan/index.js"
@@ -24,13 +32,16 @@ import {
 	identifyModeFor,
 	identifyScores,
 } from "./identify.js"
+import { classOf, familyOf, inPagerRange } from "./classify/classifier.js"
+import { orderTrialsByMemory } from "./trial-memory.js"
 import {
 	IQ_REPLAY_MAX_TRIALS,
+	REPLAY_INPUT_DECODERS,
 	type IqReplayPlanInput,
 	type IqReplayPlanner,
 	type IqReplayTrial,
 } from "./iq-capture-contract.js"
-import type { ProbeMode } from "./probes/probe-pool.js"
+import { probeModesFor, type ProbeMode } from "./probes/probe-pool.js"
 import type { AnalogTrialMode } from "./scanner-redesign-contract.js"
 import type { ScannerProtocol } from "./types.js"
 
@@ -150,11 +161,95 @@ export function boundReplayTrials(
 	return out
 }
 
-export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
+/** A trial the plan wanted but could not run (no probe mode or no replay input for its decoder). */
+export interface SkippedReplayTrial {
+	protocol: ScannerProtocol | "adsb"
+	decoder: string
+	reason: "no-probe-mode" | "no-replay-input"
+}
+
+/** 1090 MHz Mode S/ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive). */
+export const ADSB_REPLAY_LOW_HZ = 1_089_000_000
+export const ADSB_REPLAY_HIGH_HZ = 1_091_000_000
+
+/**
+ * The decoders the class and band call for beyond the probe-mode table. `protocol` null = called
+ * by frequency only (readsb at 1090 MHz has no scanner protocol).
+ */
+export const REPLAY_EXTRA_TRIALS: readonly {
+	protocol: ScannerProtocol | "adsb"
+	decoder: string
+}[] = [
+	{ protocol: "ism", decoder: "rtl433" },
+	{ protocol: "acars", decoder: "acarsdec" },
+	{ protocol: "vdl2", decoder: "dumpvdl2" },
+	{ protocol: "ais", decoder: "ais-catcher" },
+	{ protocol: "lora", decoder: "lora-meshtastic" },
+	{ protocol: "adsb", decoder: "readsb" },
+]
+
+/** True when the band plan lists the protocol at the capture (prior at least 1). */
+function listed(
+	priors: Partial<Record<ScannerProtocol, number>>,
+	protocol: ScannerProtocol,
+): boolean {
+	const value = finitePrior(priors, protocol)
+	return value !== undefined && value >= 1
+}
+
+/** Whether the discovery's class, band or known protocol calls for this extra trial. */
+function extraCalled(
+	input: IqReplayPlanInput,
+	protocol: ScannerProtocol | "adsb",
+): boolean {
+	if (protocol === "adsb") {
+		const hz = input.capture.rfHz
+		return (
+			Number.isFinite(hz) &&
+			hz >= ADSB_REPLAY_LOW_HZ &&
+			hz <= ADSB_REPLAY_HIGH_HZ
+		)
+	}
+	if (input.priors[protocol] === 0) return false
+	if (input.knownProtocol === protocol) return true
+	if (listed(input.priors, protocol)) return true
+	return (
+		protocol === "ism" &&
+		input.track !== null &&
+		classOf(input.track) === "ook-burst"
+	)
+}
+
+/** The extra trial's probe mode when the decoder has one; null otherwise. */
+function extraModeOf(
+	protocol: ScannerProtocol | "adsb",
+	decoder: string,
+): ProbeMode | null {
+	if (protocol === "adsb" || !IDENTIFY_PROTOCOLS.includes(protocol)) return null
+	// ISM has no identify mode (identifyModeFor answers null); its probe mode is the ook-burst one.
+	const mode =
+		protocol === "ism"
+			? (probeModesFor("ook-burst", ["ism"]).find(
+					m => m.decoderType === decoder,
+				) ?? null)
+			: identifyModeFor(protocol)
+	return mode && mode.decoderType === decoder ? mode : null
+}
+
+/**
+ * The plan and the trials it skipped. `replayInput` is the capability set (default: the decoders
+ * with a replay input path); a decoder outside it is never planned.
+ */
+export function planReplayTrialsDetailed(
+	input: IqReplayPlanInput,
+	replayInput: ReadonlySet<string> = REPLAY_INPUT_DECODERS,
+): { trials: IqReplayTrial[]; skipped: SkippedReplayTrial[] } {
 	const candidates: IqReplayTrial[] = []
+	const skipped: SkippedReplayTrial[] = []
 	const add = (protocol: ScannerProtocol, known: boolean): void => {
 		const mode = replayModeOf(protocol)
-		if (mode) candidates.push({ protocol, mode, known })
+		if (mode && replayInput.has(mode.decoderType))
+			candidates.push({ protocol, mode, known })
 	}
 	// A prior of 0 removes a protocol (requirement 1.3), the known one included.
 	// A known analog protocol is the one analog trial, placed first.
@@ -187,7 +282,66 @@ export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
 			.sort(([a, pa], [b, pb]) => (pb ?? 0) - (pa ?? 0) || a.localeCompare(b))
 		for (const [protocol] of named) add(protocol, false)
 	}
-	return boundReplayTrials(candidates)
+	for (const extra of REPLAY_EXTRA_TRIALS) {
+		if (!extraCalled(input, extra.protocol)) continue
+		const mode = extraModeOf(extra.protocol, extra.decoder)
+		if (mode === null) {
+			skipped.push({ ...extra, reason: "no-probe-mode" })
+			continue
+		}
+		if (!replayInput.has(mode.decoderType)) {
+			skipped.push({ ...extra, reason: "no-replay-input" })
+			continue
+		}
+		candidates.push({
+			protocol: extra.protocol as ScannerProtocol,
+			mode,
+			known: input.knownProtocol === extra.protocol,
+		})
+	}
+	// In a paging range the pager trials run right after the known trial, ahead of the (not
+	// known) analog trial: an analog `heard` ends the later digital trials `not-needed`, which
+	// would skip POCSAG/FLEX. Order: known, pager trials, analog, the rest (each stable).
+	if (inPagerRange(input.priors)) {
+		const rank = (c: IqReplayTrial): number =>
+			c.known
+				? 0
+				: c.kind !== "analog" && familyOf(c.protocol) === "pager"
+					? 1
+					: c.kind === "analog"
+						? 2
+						: 3
+		const ranked = candidates.map((c, i) => ({ c, i, r: rank(c) }))
+		ranked.sort((x, y) => x.r - y.r || x.i - y.i)
+		candidates.splice(0, candidates.length, ...ranked.map(x => x.c))
+	}
+	// One decoder run per mode key (the dedup below): the memory of any protocol planned on the
+	// same run applies to every candidate of that run, so a backoff cannot be dodged by a sibling.
+	const runCovers = new Map<string, Set<string>>()
+	for (const c of candidates) {
+		const k = modeKey(c.mode)
+		const set = runCovers.get(k) ?? new Set<string>()
+		set.add(c.protocol)
+		for (const p of c.mode.covers) set.add(p)
+		runCovers.set(k, set)
+	}
+	const ordered = orderTrialsByMemory(
+		candidates.map(trial => ({
+			trial,
+			protocol: trial.protocol,
+			decoder:
+				trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
+			known: trial.known,
+			covers: [...(runCovers.get(modeKey(trial.mode)) ?? [])],
+		})),
+		input.trialMemory,
+		input.nowMs ?? input.capture.capturedAtMs,
+	).map(x => x.trial)
+	return { trials: boundReplayTrials(ordered), skipped }
+}
+
+export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
+	return planReplayTrialsDetailed(input).trials
 }
 
 /** Type check: the planner satisfies the frozen contract's port. */

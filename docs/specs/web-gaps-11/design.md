@@ -357,3 +357,48 @@ runtime stage copies it next to `wavekit-chan` and the verification step runs `w
     outcomes, deferrals and clocks, each capture goes capture → queue → trials (known first, one
     replay probe at a time) → exactly one result → discard, stops at the first accepted decode,
     and a claimed capture is never replayed by the queue. _Validates 6.4, 6.5, 6.8._
+
+## Design amendment: trial choice and memory
+
+Requirements 9.1 to 9.6. All of it lives in `src/core/scanner/**`.
+
+- **Pager range.** `bandplan/builtin.ts` is a frozen legacy blob (the isolation tests pin it), so
+  the EU UHF paging range is a scanner overlay next to LPD433: `PAGER_UHF_RANGE` in
+  `classify/priors.ts`, added by `withScannerOverlays` when the effective plans hold an EU-only plan
+  (`ism-433` or `pmr446`). At 575 kHz wide it is the narrowest range at its frequencies, so
+  `narrowestPriors` gives POCSAG, FLEX and DMR 1 and the other specific protocols 0.25.
+- **Pager hypotheses.** `classHypotheses(cls, priors)` in `classify/classifier.ts` adds
+  `PAGER_RANGE_HYPOTHESES` when `inPagerRange(priors)` (pocsag or flex prior at least 1):
+  fsk4-12k5 pocsag 0.6 and flex 0.56 (DMR 0.55), analog-fm pocsag 0.65 and flex 0.62
+  (analog-fm 0.6), fsk2-wide unchanged. The spectral classifier, the channel tier and
+  `identifyScores` all read it. `isPagerTonePair` in `classify/channel-tier.ts` replaces the
+  fixed ±4 to 5 kHz tone windows with spacing 9 000 ± 1 500 Hz and a midpoint within 1 500 Hz.
+- **Replay plan.** `planReplayTrialsDetailed(input, replayInput)` in `replay-plan.ts` returns the
+  trials and the skipped extras. `REPLAY_INPUT_DECODERS` (iq-capture-contract) is the capability
+  set (dsd-fme, multimon-ng, direwolf) and also gates the replay transport. In a paging range the
+  candidates are stably regrouped known, pager, analog, rest. Then `orderTrialsByMemory` reorders
+  before the mode-key dedup and the bound of 8. Each candidate carries the protocols of every
+  candidate with the same mode key, so a sibling protocol cannot bring a backed-off run back.
+- **Trial memory.** `trial-memory.ts` (`TrialMemory`): a Map in least-recently-updated order,
+  Zod-checked rows (`parseTrialMemory`), a 5 s debounced atomic write of
+  `<scanner storage>/trial-memory.json`, a flush on stop, no write before the load. The service
+  records every `IqReplayResult` trial in `applyReplayResult`, forgets deleted, merged-away and
+  evicted discoveries, and passes `trialMemory` and `nowMs` in the plan input (optional fields of
+  `IqReplayPlanInput`). `trialMemoryOf(id)` reads it; no DTO field yet.
+- **Pending capture.** `requestIqCapture` no longer needs a discovery when the track's gate passed;
+  `PendingCaptureLimiter` (`pending-capture.ts`) allows 2 per source per rolling 60 s for such
+  tracks (at most 64 sources, 2 timestamps each) and gives a slot back when the port refuses. The
+  port keeps its own pre-roll, rate, concurrency and disk caps. A replay decode of a pending
+  observation still live or in `recent` admits it through `applyEvidence`; one that left both
+  before its replay ended is lost (gap).
+- **Gaps.** rtl433 has no probe mode and no replay input (the capture service refuses it, the
+  adapter reads cu8 only); acarsdec, dumpvdl2, ais-catcher, the LoRa decoder and readsb are no
+  probe decoder types, and the 48 kHz capture is too narrow for VDL2 (dumpvdl2 needs multiples of
+  105 kHz), LoRa (125 kHz) and 1090 MHz (2 Msps). These stay skipped until Main adds the inputs.
+
+### Properties
+
+- Property TC-1: any pager-class track inside the paging range ranks a pager protocol first.
+- Property TC-2: every ISM 868 plan names rtl433 (planned or skipped) and never runs it
+  without the capability; at most 8 trials.
+- Property TC-3: parsing any persisted value never throws and stays within the bounds.

@@ -60,7 +60,10 @@ describe("scanner LPD433 overlay", () => {
 		const hidden = bandplansFor("EU")
 			.filter(p => p.id !== "ism-433")
 			.flatMap(p => p.ranges)
-		expect(withScannerOverlays(hidden)).toEqual(hidden)
+		// the EU UHF paging overlay follows any EU-only plan, not ism-433 alone.
+		expect(
+			withScannerOverlays(hidden).filter(r => r.bandplanId !== "pager-uhf"),
+		).toEqual(hidden)
 		expect(lpd?.rasters).toEqual([
 			{ spacingHz: 25_000, firstChannelHz: MHz(433.075) },
 		])

@@ -4,6 +4,7 @@ import {
 	IQ_CAPTURE_RATE_HZ,
 	IQ_REPLAY_MAX_PROBES,
 	IQ_REPLAY_PROBE_CORES,
+	REPLAY_INPUT_DECODERS,
 	type IqCapturePort,
 } from "../iq-capture-contract.js"
 import { createChannelTransport } from "./channel-transport.js"
@@ -53,7 +54,8 @@ export function createReplayTransport(
 		maxProbes: () => IQ_REPLAY_MAX_PROBES,
 		cores: () => IQ_REPLAY_PROBE_CORES,
 		supports: (mode, ctx) =>
-			replayCaptureOf(ctx.req) !== null && mode.decoderType !== "rtl433",
+			replayCaptureOf(ctx.req) !== null &&
+			REPLAY_INPUT_DECODERS.has(mode.decoderType),
 		configure: (base, ctx): DecoderConfig => {
 			const configured = channel.configure(base, ctx)
 			return {
@@ -67,7 +69,8 @@ export function createReplayTransport(
 		},
 		openInput: (mode, ctx) => {
 			const captureId = replayCaptureOf(ctx.req)
-			if (captureId === null || mode.decoderType === "rtl433") return null
+			if (captureId === null || !REPLAY_INPUT_DECODERS.has(mode.decoderType))
+				return null
 			return port.openReplay(captureId, mode.decoderType)
 		},
 	}

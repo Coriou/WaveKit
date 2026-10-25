@@ -296,3 +296,35 @@ page states the performance rules.
 8.1 Each property in the design has a fast-check test with `numRuns >= 100` and the trace
 comment.
 8.2 The root suite, typecheck, lint and the native crate tests pass at every merge.
+
+## 9. Amendment: trial choice and memory
+
+9.1 **Pager classification.** Inside a paging range (the narrowest covering range lists `pocsag`
+or `flex`) the classes `fsk2-wide`, `fsk4-12k5` and `analog-fm` give POCSAG and FLEX hypotheses
+ahead of DMR and every other digital-voice protocol. The scanner adds an EU UHF paging range,
+465.975 to 466.550 MHz on a 12.5 kHz raster (plus the 6.25 kHz split raster), listing POCSAG,
+FLEX and DMR. A two-tone FSK whose tones are 9 000 ± 1 500 Hz apart with a midpoint within
+1 500 Hz of the centre is `fsk2-wide`, never a digital-voice class.
+9.2 **Pager trials before the analog trial.** In a paging range the replay order is the known
+trial, the pager trials, the analog trial, then the rest, so an analog `heard` cannot end a
+POCSAG or FLEX trial as `not-needed`. This amends 6.4 (analog trial right after the known one)
+for paging ranges only.
+9.3 **Extra replay trials behind a capability check.** The plan names rtl433 for ISM (a listed
+ISM range or an `ook-burst` track), acarsdec for ACARS, dumpvdl2 for VDL2, ais-catcher for AIS,
+the LoRa decoder for LoRa, and readsb within 1 089 to 1 091 MHz. A trial runs only when its
+decoder has a probe mode and a replay input path; every other one is reported as skipped
+(`no-probe-mode` or `no-replay-input`) and never run.
+9.4 **Trial memory.** Each replay trial outcome is remembered on its discovery: protocol,
+decoder, attempts, successes, consecutive failures, last outcome and time. Outcomes that are no
+attempt (pending, running, cancelled, skipped-budget, unsupported, not-needed) are not counted.
+It is persisted, validated on load, and a corrupt or oversized file, or a malformed row, is
+ignored. Bounds: 16 trials per discovery and 2 048 discoveries (least recently updated goes),
+counters saturate at 1 000 000, the file is refused above 8 MiB.
+9.5 **Memory order.** Replay trials are ordered: remembered successes (fewer than 2 failures
+since, most recent first), the known trial, trials that ran without a failure streak, untried
+trials (each in prior order), then remembered failures out of backoff (fewest first). A failure
+after k consecutive failures backs off 60 s × 2^(k−1), at most 1 h; a trial still in backoff is
+left out unless every trial is. Trials that share one decoder run share their memory.
+9.6 **Capture before admission.** A gate-passed track the store has not admitted yet gets a
+detection capture too, at most 2 per source per rolling minute (of the 6 per source), so the first
+transmission can be replayed; a replay decode then admits it through the evidence path.
