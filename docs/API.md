@@ -8,8 +8,15 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **WebSocket**: `ws://localhost:9000/ws`
 - **Audio Stream**: `tcp://localhost:8080`
 - **Live Audio Stream**: `http://localhost:8081/stream` (raw PCM) and `http://localhost:8081/stream.wav` (WAV-wrapped)
+- **Digital voice audio**: `http://localhost:8082/stream` and `/stream.wav`
+- **Interactive API explorer** (OpenAPI): `http://localhost:9000/docs`
 
-In the examples, `<sdrpp-host>` and `<pi-address>` stand for your own receiver addresses, and
+Port 9000 is the API port in the shipped Docker and local configurations
+(`config/docker.yaml`, `config/local.yaml`). The schema default, used when a config file
+sets no `api.port`, is 3000.
+
+In the examples, `<pi-address>` stands for your own receiver's address (an `rtl_tcp` or
+rtlmux host), and
 `192.0.2.x` addresses are from the range reserved for documentation.
 
 ## Protected runtime (opt-in)
@@ -126,7 +133,7 @@ credentials are rejected with 403, including when accompanied by a session cooki
 missing/expired/revoked sessions return 401 and unavailable storage/clock authority
 returns safe 503. The closed `AccessDevicesDto` is `{ devices: AccessDeviceDto[] }`:
 each row contains only `deviceId`, `createdAt`, `renewedAt`, `expiresAt` (integer
-milliseconds), `current`, and (WG2) `name`, `kind` and `lastSeenAt`, each null until
+milliseconds), `current`, and `name`, `kind` and `lastSeenAt`, each null until
 set. It lists unexpired remembered sessions, not online presence, with exactly one
 current requester and at most the configured cap (maximum 32). Rows sort by creation
 time, then ASCII device ID. No credentials or private session records are exposed.
@@ -169,6 +176,10 @@ the body is parsed before the mutation is queued, and the label is persisted bef
 the answer. The answer is `{ "updated": true | false }` (false for an unknown or expired
 device). A label queued behind the revocation of the requester's own session answers
 401 `AUTH_REQUIRED`. Machine routes do not label.
+
+`POST /api/access/devices/revoke-all` (no body) signs out every paired browser, including the
+one that asks, with the same session, CSRF and Origin admission. It answers
+`{ "revoked": true }` and clears the session cookie; each browser must pair again.
 
 The inventory reauthorizes the original request immediately before a synchronous,
 one-clock committed-map snapshot and rechecks availability after the clock callback.
@@ -216,7 +227,7 @@ kept and to run `devices list` after restart. It prints no credential. Restart t
 core before the new credential is used. A running server's old persistence hook
 cannot write the previous binding.
 
-### Browser pairing for a web origin (WG9)
+### Browser pairing for a web origin
 
 A web app served on the same scheme and hostname as `access.publicOrigins.api`, on
 another port, pairs and uses the API directly. Add its exact origin to
@@ -312,52 +323,22 @@ await call("/api/access/session/logout", { method: "POST" })
 
 ### Health & Status
 
-#### GET /health
+#### GET /health, /health/ready and /health/live
 
-Quick liveness check.
+Three probes, all answering `{ "status": "ok", "timestamp": "<ISO 8601>" }`. Only the
+HTTP status code carries the result.
 
-```bash
-curl http://localhost:9000/health
-```
-
-**Response** (200 OK):
-
-```json
-{
-	"status": "ok",
-	"uptime": 3600
-}
-```
-
-**Response** (503 Service Unavailable):
-
-```json
-{
-	"status": "unhealthy",
-	"error": "No sources connected"
-}
-```
-
-#### GET /health/ready
-
-Readiness probe for orchestration systems.
+| Route           | 200                     | 503                                                                                                                   |
+| --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `/health`       | The core is healthy     | The overall health check is `unhealthy`                                                                               |
+| `/health/ready` | Ready to accept traffic | Sources are configured but none is connected, or decoders are configured (and not deliberately stopped) but none runs |
+| `/health/live`  | The process answers     | Never                                                                                                                 |
 
 ```bash
-curl http://localhost:9000/health/ready
+curl -i http://localhost:9000/health
 ```
 
-**Response** (200 OK):
-
-```json
-{
-	"ready": true,
-	"components": {
-		"api": "up",
-		"sources": "up",
-		"decoders": "up"
-	}
-}
-```
+For the reason behind a 503, read [`GET /api/status`](#get-apistatus).
 
 #### GET /api/status
 
@@ -379,11 +360,11 @@ curl http://localhost:9000/api/status
 	"version": "1.0.0",
 	"sources": [
 		{
-			"id": "sdrpp-main",
-			"type": "sdrpp-network",
+			"id": "rtl-pi",
+			"type": "rtl_tcp",
 			"connected": true,
 			"bytesReceived": 847000000,
-			"dataRate": 192000,
+			"dataRate": 4096000,
 			"reconnectAttempts": 0
 		}
 	],
@@ -446,6 +427,20 @@ curl http://localhost:9000/api/status
 	}
 }
 ```
+
+#### GET /api/resources, /api/resources/container and /api/resources/backpressure
+
+`GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
+one status per SDR host, and per-source backpressure. `/api/resources/container` and
+`/api/resources/backpressure` return just one of those parts. The `resources` WebSocket
+channel pushes the same data as it changes.
+
+#### GET /api/telemetry/fanout
+
+Fanout telemetry: global drop counters, how many branches are under backpressure, and
+per-branch detail. `GET /api/telemetry/fanout/branches` lists the branches and
+`/api/telemetry/fanout/branches/:branchId` reads one. The `fanout` WebSocket channel pushes
+snapshots.
 
 #### GET /api/resources/sdr-hosts
 
@@ -519,9 +514,9 @@ curl http://localhost:9000/api/sources
 ```json
 [
 	{
-		"id": "sdrpp-main",
-		"type": "sdrpp-network",
-		"host": "<sdrpp-host>",
+		"id": "rtl-pi",
+		"type": "rtl_tcp",
+		"host": "<pi-address>",
 		"port": 5555,
 		"connected": true,
 		"activity": {
@@ -531,11 +526,11 @@ curl http://localhost:9000/api/sources
 			"timeoutMs": 10000
 		},
 		"bytesReceived": 847000000,
-		"dataRate": 192000,
+		"dataRate": 4096000,
 		"caps": {
-			"kind": "audio_pcm",
-			"sampleRate": 48000,
-			"format": "FLOAT32LE",
+			"kind": "iq",
+			"sampleRate": 2048000,
+			"format": "U8_IQ",
 			"exclusive": false
 		}
 	}
@@ -611,6 +606,64 @@ live rtlmux with a dead upstream. The watchdog does not apply to recordings,
 accepts `stallTimeoutMs` (integer, `0` or 1000–600000) and validates the whole
 body with the config schema (`400 VALIDATION_ERROR` on failure).
 
+#### POST /api/sources
+
+Add a new source.
+
+```bash
+curl -X POST http://localhost:9000/api/sources \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "rtl-pi",
+    "type": "rtl_tcp",
+    "host": "<pi-address>",
+    "port": 1234,
+    "caps": {
+      "kind": "iq",
+      "sampleRate": 2048000,
+      "format": "U8_IQ",
+      "exclusive": false
+    }
+  }'
+```
+
+The core waits for the first connection attempt before it answers.
+
+**Response** (201 Created): `source` is the source's status, the same shape as one entry of
+[`GET /api/sources`](#get-apisources).
+
+```json
+{
+	"message": "Source 'rtl-pi' added successfully",
+	"source": {
+		"id": "rtl-pi",
+		"type": "rtl_tcp",
+		"connected": true,
+		"...": "..."
+	}
+}
+```
+
+A source with the same `id` answers `409 SOURCE_EXISTS`; a failed connection answers
+`400 SOURCE_CONNECTION_ERROR` with the reason in `message`.
+
+#### DELETE /api/sources/:id
+
+Remove a source.
+
+```bash
+curl -X DELETE http://localhost:9000/api/sources/rtl-pi
+```
+
+**Response** (200 OK):
+
+```json
+{
+	"message": "Source 'rtl-pi' removed successfully",
+	"id": "rtl-pi"
+}
+```
+
 ### Regional display registry
 
 Read-only display metadata uses normal API admission in protected mode and is
@@ -660,7 +713,7 @@ keeps its existing code-only body and headers. Full contract and evidence gates:
 
 #### GET /api/station
 
-The live station identity (WG4). Values come from four layers, highest first:
+The live station identity. Values come from four layers, highest first:
 environment (`WAVEKIT_STATION__*`; `WAVEKIT_COUNTRY` sets `station.country`) >
 YAML (`station.*`) > UI (written by [`PATCH /api/station`](#patch-apistation)) >
 default (unset). Every field carries `{ value, provenance }` with provenance
@@ -698,7 +751,7 @@ data.
 
 #### PATCH /api/station
 
-Sets or clears UI values of the station (WG4). Mounted only in protected access
+Sets or clears UI values of the station. Mounted only in protected access
 mode: in legacy mode the route is absent (404) and `GET /api/station` reports
 `writable: false`. A request needs an authenticated session or device, checked
 before the body is parsed; a denial keeps the access code-only body and headers.
@@ -771,7 +824,7 @@ When a change applies:
 #### GET /api/station/estimate
 
 A visibly approximate receiver location derived from the positions the
-aircraft, vessel, APRS and mesh trackers currently hold (WG4). It is never
+aircraft, vessel, APRS and mesh trackers currently hold. It is never
 authoritative (`authoritative: false`): coverage, decoders, band plans and the
 station layer never use it, and it is computed whether or not a station location
 is configured. `HEAD` is supported; `Cache-Control: no-store`.
@@ -876,8 +929,8 @@ access code-only body and headers.
 | `DELETE` | `/api/bandplans/operator-bands/:bandId`           | Delete an operator band                                                                                     |
 | `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++, SDR# or Gqrx file; persists nothing                                                         |
 | `POST`   | `/api/bandplans/imports`                          | Commit a previewed import; 201                                                                              |
-| `POST`   | `/api/bandplans/imports/preview-url`              | WG6: fetch an allowlisted https URL once and preview it; persists nothing                                   |
-| `POST`   | `/api/bandplans/packs/:packId/check-update`       | WG6: re-fetch a URL-imported pack and diff it against the committed pack; persists nothing                  |
+| `POST`   | `/api/bandplans/imports/preview-url`              | Fetch an allowlisted https URL once and preview it; persists nothing                                        |
+| `POST`   | `/api/bandplans/packs/:packId/check-update`       | Re-fetch a URL-imported pack and diff it against the committed pack; persists nothing                       |
 | `POST`   | `/api/bandplans/presets`                          | Create an operator scan preset (`preset`); 201                                                              |
 | `PUT`    | `/api/bandplans/presets/:presetId`                | Replace an operator preset (`preset`)                                                                       |
 | `DELETE` | `/api/bandplans/presets/:presetId`                | Delete an operator preset                                                                                   |
@@ -909,11 +962,11 @@ Limits: JSON bodies 64 KiB, import bodies 1.5 MiB, decoded import files 1 MiB an
 4096 rows, 512 bands per pack, 256 operator bands, 1024 edits, 64 presets. All
 limits are returned in the stack view under `limits`.
 
-Import formats (WG5): `capabilities.importFormats` lists the formats this core
+Import formats: `capabilities.importFormats` lists the formats this core
 parses: `sdrpp-json` (SDR++ band plan JSON), `sdrsharp-xml` (SDR# `BandPlan.xml`) and
 `gqrx-csv` (Gqrx `bandplan.csv`). A format the core does not parse is 422
 `BANDPLANS_IMPORT_INVALID`. Files are uploaded in the request body, or fetched by
-core from an allowlisted URL (WG6, below). Imports, like every band-plan write,
+core from an allowlisted URL (below). Imports, like every band-plan write,
 need protected mode. The
 imported pack's provenance records the file's `format`; state written before WG5
 reads as `sdrpp-json`.
@@ -953,7 +1006,7 @@ trimmed; anything else is no mode):
 Parsing a 1 MiB, 4,096-row file takes about 27 ms (SDR#) and 11 ms (Gqrx) on the
 development Mac.
 
-Import by URL (WG6). Protected mode only, mounted with the other writes and
+Import by URL. Protected mode only, mounted with the other writes and
 re-authorized before any fetch. `capabilities.urlImportHosts` lists the host
 allowlist (`raw.githubusercontent.com`) when URL import is on and `[]`
 otherwise (legacy mode, or no fetcher). `POST /api/bandplans/imports/preview-url`
@@ -967,7 +1020,7 @@ digest, URL and bytes, and uses it up; otherwise it is 409
 `BANDPLANS_IMPORT_MISMATCH` (a client cannot claim a URL it did not fetch
 through core). A commit without `sourceUrl` computes exactly the earlier digest.
 
-Group overrides (WG7). A commit stores its `groupOverrides` in the pack's
+Group overrides. A commit stores its `groupOverrides` in the pack's
 provenance (`provenance.groupOverrides`, sorted by `sourceType` as the digest
 sorts them, at most 64; absent when there are none). This applies to uploads
 and URL imports. A re-import with `replacesPackId` takes the overrides of the
@@ -1083,7 +1136,7 @@ Unexpected response encoding/serialization failure uses 500 `FAILED`.
 Root denial envelopes and headers remain unchanged. Full contract:
 [receiver capabilities specification](specs/receiver-capabilities/design.md).
 
-`sampleRatePresets` (WG6) suggests sample rates worth offering: on `rtl_tcp`
+`sampleRatePresets` suggests sample rates worth offering: on `rtl_tcp`
 sources `{ state: "suggested", provenance: "wavekit-rtl-rate-presets", valuesHz }`
 with the fixed list 250000, 1024000, 1536000, 1792000, 1920000, 2048000,
 2160000, 2400000, 2560000, 2880000 and 3200000 Hz (the CLI's list, each inside
@@ -1091,7 +1144,7 @@ the accepted sample-rate ranges); elsewhere `{ state: "not-applicable", reason:
 "non-rtl-transport" }`. These are WaveKit suggestions, not receiver evidence:
 they say nothing about the device or its model.
 
-`gainTable` (WG7, always sent) suggests the gain steps of an RTL-SDR tuner.
+`gainTable` (always sent) suggests the gain steps of an RTL-SDR tuner.
 It is `{ state: "suggested", provenance: "librtlsdr-tuner-gains", tuner,
 valuesTenthsDb }` when three conditions hold: the session's current peer header
 is `advertised`, its `tunerType` has a table, and its `gainCount` equals that
@@ -1134,7 +1187,7 @@ receiver's startup arguments). A relay rate the controller rejects never
 changes source caps. Combine with the source `connected` flag to tell sent from
 pending.
 
-**Configured gain and AGC on connect (WG11).** An `rtl_tcp` source may carry
+**Configured gain and AGC on connect.** An `rtl_tcp` source may carry
 `tuner: { gainMode, gainDb?, agcMode? }` in its config (`sources[].tuner`, also
 accepted by `POST /api/sources`): `gainMode` `manual` needs `gainDb` (0 to 50 dB
 in 0.1 dB steps), `agc` refuses it; `agcMode` is the RTL2832 digital AGC flag. An
@@ -1177,7 +1230,7 @@ was commanded through this API, no relay client was seen commanding it, and
 declare it. A `frequency` or `sampleRate` a relay client set to a value the
 controller ignored is also listed until the next accepted value (the relay
 forwards the raw command upstream, so the receiver may be there).
-**`declaredOnlyFields`** (WG5) lists `frequency`/`sampleRate` whose value comes
+**`declaredOnlyFields`** lists `frequency`/`sampleRate` whose value comes
 only from that declared baseline: nothing wrote or observed it since the start or
 the last reset reconnect. Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
 `["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
@@ -1233,7 +1286,7 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \
   -H "Content-Type: application/json" -d '{"hz":144800000}'
 ```
 
-**Rate proof (WG10, deliberate behaviour change).** In internal control mode, the
+**Rate proof (deliberate behaviour change).** In internal control mode, the
 first operator frequency command on a connection first writes the sample rate the
 core already holds, when that rate is declared only or was not written on the current
 connection. `PATCH /api/tuner/:sourceId/config` with a frequency and no sample rate
@@ -1244,12 +1297,13 @@ operator tune instead of staying `unverified`. At most one extra rtl_tcp
 command per connection; concurrent requests share one write. Never written when the
 rate is unknown (placeholder), under external or relay control, or when the rate is
 already written on this connection. A failed rate write fails the request with the
-usual tuner error and no frequency write. The scanner's hop rule (WG9) is unchanged:
+usual tuner error and no frequency write. The scanner's hop rule is unchanged:
 both paths write the same value at most once per connection.
 
 #### POST /api/tuner/:sourceId/control-mode
 
-Release control to SDR++ (`external`) or reclaim (`internal`).
+Release control to an external RTL-TCP client, such as SDR++ through the tuner relay
+(`external`), or reclaim it (`internal`).
 
 ```bash
 curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
@@ -1394,7 +1448,7 @@ Fields:
 - `effectiveSampleRate` — demodulation and audio sample rate in Hz (source rate /
   `decimationFactor`; usually fractional).
 - `wavUrl` — the audio stream behind a streaming WAV header.
-- `httpUrl`, `wavUrl` host (WG9) — with `access.publicOrigins.analogAudio` set
+- `httpUrl`, `wavUrl` host — with `access.publicOrigins.analogAudio` set
   they use that origin. Otherwise the stored value is
   `http://localhost:<httpPort>/...`; in legacy mode this route rewrites that host
   per response from the request's own `Host` header (an ASCII DNS name, a dotted
@@ -1415,10 +1469,10 @@ Fields:
   passes; see `autoSquelch`.
 - `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
   threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
-- `agc` (WG4) — the effective AGC mode of the chain after the modulation
+- `agc` — the effective AGC mode of the chain after the modulation
   default: `off`, `slow` or `fast` (always `off` for `raw`), on every status.
   `config.agc` is present only when it is set. Optional in `@wavekit/api-types`; older cores omit both.
-- `toneSquelch` (WG7) — the tone squelch gate while the pipeline runs: `{ state }`
+- `toneSquelch` — the tone squelch gate while the pipeline runs: `{ state }`
   with `off` (no tone set), `waiting` (squelch closed or the tone not heard yet: the
   stream carries silence) or `open` (tone heard: audio passes). Absent while stopped
   and from older cores.
@@ -1453,7 +1507,7 @@ clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
   (carrier-onset resets this episode), `audioMs` and `deviationHz` (the voice meter's
   reference), and `ste: true` after a squelch-tail-elimination tone ended the over.
   Computed per request.
-- `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
+- `config.squelchMode`, `config.autoMarginDb` and `config.noiseQuietingDb`
   are always present in config and status responses, with their defaults (`auto`,
   6 and 6) when not set. `config.toneSquelch` is present only when it is set.
 
@@ -1488,7 +1542,7 @@ Configuration notes:
   rebuilds, source capability changes (including retained-pipeline retunes), and
   mode changes reset the estimate. After a retained-pipeline retune
   the first block seeds the floor at the lower of the previous floor and its own
-  power (WG9), so a carrier already on the new frequency does not become its own
+  power, so a carrier already on the new frequency does not become its own
   floor; a retune onto a noisier band then opens on noise until the open rise
   (0.4 dB/s) catches up, about 15 s for a 10 dB step with margin 6 dB. Cold
   starts, rebuilds and mode changes seed from the first block alone. This is not
@@ -1500,7 +1554,7 @@ Configuration notes:
   present at start or after a retune opens stage 1 at once instead of becoming the
   floor (on `nfm` on csdr listeners still need stage 2 evidence to hear it).
   `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
-- `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
+- `squelchMode: "noise"` (NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
   (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
   with the noise-only reference of the same chain. The gate opens on a block at
@@ -1521,9 +1575,9 @@ Configuration notes:
   50 ms. At 12 dB the median quieting is about 6.9 dB, close to the default, so a
   lower default may follow the real-RF acceptance. CPU about 8 ns per channel IQ
   sample on the Mac (budget 50 ns).
-- `noiseQuietingDb` (WG7) — the noise squelch threshold, 1–30 dB (default 6); used
+- `noiseQuietingDb` — the noise squelch threshold, 1–30 dB (default 6); used
   in `noise` mode only.
-- `toneSquelch` (WG7, NFM only) — a CTCSS or DCS tone squelch gate, in the
+- `toneSquelch` (NFM only) — a CTCSS or DCS tone squelch gate, in the
   saved-frequency tone shape: `{ "kind": "none" }`,
   `{ "kind": "ctcss", "frequencyTenthsHz": 885 }` or
   `{ "kind": "dcs", "code": "023", "polarity": "normal" }`. Absent or `none` means
@@ -1548,7 +1602,7 @@ Configuration notes:
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
-  Noise tail (WG7): with a threshold just above the channel noise, the 2 dB band
+  Noise tail: with a threshold just above the channel noise, the 2 dB band
   below it used to reach into the noise, so noise blocks kept the gate open for a
   random time after the carrier stopped (measured about 0.26 s to over 1.6 s in a
   synthetic pipeline, the "~0.75 s noise tail"). Now a block inside that band that
@@ -1573,7 +1627,7 @@ Configuration notes:
   gain directly: `raw` is about 5× (14 dB) quieter than before unless `gain` is set
   explicitly. AM/SSB use an AGC whose reference dropped from 0.8 to 0.4, so with the
   default gain they peak around 0.8 instead of hard-clipping.
-- `agc` (WG4, `liveDemod.agc`) — post-demodulation AGC: `off`, `slow` or `fast`.
+- `agc` (`liveDemod.agc`) — post-demodulation AGC: `off`, `slow` or `fast`.
   Absent keeps the per-modulation behaviour unchanged (AM, CW, DSB, USB and LSB
   `fast`; NFM, WFM and `raw` none), with the same chain as before WG4. An explicit
   mode applies to every modulation except `raw`, which never gets AGC: `off`
@@ -1631,7 +1685,7 @@ source plays at a time; digital wins over analog after the analog over releases
 - Status: `autoRoute` on [GET /api/live-audio/status](#get-apilive-audiostatus) and
   on `live-audio:level`.
 
-Cross-origin use (WG7). In legacy access mode, every response of the audio HTTP
+Cross-origin use. In legacy access mode, every response of the audio HTTP
 servers carries `Access-Control-Allow-Origin: *` beside
 `Access-Control-Expose-Headers`, and never `Access-Control-Allow-Credentials`.
 The servers are the live demodulator (`/stream`, `/stream.wav`, `/auto`, `/auto.wav`) and digital
@@ -1693,13 +1747,13 @@ Update live demodulator configuration. DSP changes restart the pipeline; `squelc
 `squelchMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
-The 400 body (WG9) is `{ "error": "Bad Request", "code", "message" }`: `code` is
+The 400 body is `{ "error": "Bad Request", "code", "message" }`: `code` is
 `VALIDATION_ERROR` for a value the configuration schema refuses and
 `CHANNEL_OFFSET_OUT_OF_RANGE` for an offset outside the capture. The submitted
 value is never echoed. With access configured, `message` is `Request failed`, as for
 the other protected errors.
 
-**Continuity (WG10).** Stream clients are disconnected only when the stream's sample
+**Continuity.** Stream clients are disconnected only when the stream's sample
 rate or sample format changes (or `httpPort` moves). A restart that keeps the format
 (a DSP change, a source caps change) keeps every client attached
 and sends silence in the stream format, in 20 ms chunks, until the new pipeline's
@@ -1754,55 +1808,6 @@ curl http://localhost:9000/api/live-audio/presets
 }
 ```
 
-#### POST /api/sources
-
-Add a new source.
-
-```bash
-curl -X POST http://localhost:9000/api/sources \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "rtl-pi",
-    "type": "rtl_tcp",
-    "host": "<pi-address>",
-    "port": 1234,
-    "caps": {
-      "kind": "audio_pcm",
-      "sampleRate": 48000,
-      "format": "S16LE",
-      "exclusive": false
-    }
-  }'
-```
-
-**Response** (201 Created):
-
-```json
-{
-	"id": "rtl-pi",
-	"type": "rtl_tcp",
-	"connected": false,
-	"message": "Source added, connecting..."
-}
-```
-
-#### DELETE /api/sources/:id
-
-Remove a source.
-
-```bash
-curl -X DELETE http://localhost:9000/api/sources/rtl-pi
-```
-
-**Response** (200 OK):
-
-```json
-{
-	"id": "rtl-pi",
-	"message": "Source removed"
-}
-```
-
 ### Decoders
 
 #### GET /api/decoders
@@ -1825,7 +1830,7 @@ curl http://localhost:9000/api/decoders
 		"health": "running",
 		"pid": 1234,
 		"uptime": 3590,
-		"sourceId": "sdrpp-main",
+		"sourceId": "rtl-pi",
 		"stats": {
 			"bytesIn": 423000000,
 			"eventsOut": 847,
@@ -1875,7 +1880,7 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `owner`               | `"config"` or `"scanner"`: who created the instance. Scanner probes are `"scanner"`; their start/stop/restart and band routes answer 409 `DECODER_OWNED_BY_SCANNER`. Sent by current cores.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `scannerJobId`        | The scanner job that owns a probe; present only with `owner: "scanner"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `optionIssues`        | WG6, report only: problems with the instance's `options` found when it was created (config, API create and scanner probes), `[{ path, code, message }]` with `code` `unknown-key`, `invalid-value` or `truncated`. `[]` when valid; absent for a type without an option schema. At most 32 entries (the 32nd is a `truncated` entry counting the rest); `path` and `message` ≤ 256 UTF-16 code units; messages never echo option values. The decoder is created and started exactly as before (`DECODER_OPTIONS_ENFORCE` is false); one warn log per decoder lists the issue paths.                                   |
+| `optionIssues`        | Report only: problems with the instance's `options` found when it was created (config, API create and scanner probes), `[{ path, code, message }]` with `code` `unknown-key`, `invalid-value` or `truncated`. `[]` when valid; absent for a type without an option schema. At most 32 entries (the 32nd is a `truncated` entry counting the rest); `path` and `message` ≤ 256 UTF-16 code units; messages never echo option values. The decoder is created and started exactly as before (`DECODER_OPTIONS_ENFORCE` is false); one warn log per decoder lists the issue paths.                                        |
 | `ephemeral`           | `true` for runtime-only instances (scanner probes: not in config, never persisted, announced by `decoder:created` / `decoder:removed`). Hide or group them in decoder lists.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 `health` after an unexpected exit:
@@ -2066,9 +2071,22 @@ for every decoder selecting that source. 404 for an unknown source; 400 for a
 non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
 librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
 
+#### GET /api/decoders/health
+
+The health state of every decoder (the same states the `health` WebSocket channel pushes as
+`decoder:health`).
+
+#### GET /api/decoders/efficiency
+
+How the decoder CPU budget is spent, per source. The body is a `DecoderEfficiencyView` from
+`@wavekit/api-types`: `budgetCores` and `cpuGuardPercent`, then one entry per source with the
+cores in use, CPU percent, the drop state (`ok`, `dropping`, `clearing`, `unknown`), and the
+`admitted` and `blocked` decoder placements with their cost in cores and, for a blocked one,
+why (`budget`, `cpu`, `drops`, `late-drops`, `unknown`) and when it is retried.
+
 #### GET /api/decoders/types
 
-Registered decoder types: `[{ type, caps, options? }]`. `options` (WG6) lists
+Registered decoder types: `[{ type, caps, options? }]`. `options` lists
 one descriptor per documented option key of the type, sorted by key: `{ key,
 type, enumValues?, min?, max?, unit?, default, secret, effect: "restart",
 description }`. It is absent for a type without an option schema. Keys whose
@@ -2105,7 +2123,7 @@ dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
 stay false. The core re-checks these rules at runtime, not only through the
 descriptors.
 
-Bounded options (WG7). Every built-in adapter reads its numeric options through
+Bounded options. Every built-in adapter reads its numeric options through
 one helper. The helper coerces numeric text as the option schema does. A
 non-finite or non-numeric value counts as absent, so the adapter default
 applies. A value out of range is clamped to the option's bounds. One warning
@@ -2162,7 +2180,7 @@ curl http://localhost:9000/api/decoders/dsd-main
 	"health": "running",
 	"pid": 1234,
 	"uptime": 3590,
-	"sourceId": "sdrpp-main",
+	"sourceId": "rtl-pi",
 	"stats": {
 		"bytesIn": 423000000,
 		"eventsOut": 847,
@@ -2264,7 +2282,7 @@ producers such as readsb are not turned into log lines. 404 for an unknown id.
 
 #### GET /api/decoders/:id/settings
 
-Decoder settings (WG8, [spec](specs/web-gaps-8/requirements.md)). A persisted
+Decoder settings ([spec](specs/web-gaps-8/requirements.md)). A persisted
 override layer, `<stateDir>/decoder-settings.json`, holds per decoder id and
 type an optional `enabled` and a map of option values. Precedence: override >
 configuration (YAML with `WAVEKIT_` environment overrides) > adapter default.
@@ -2489,7 +2507,7 @@ curl http://localhost:9000/api/digital-voice/status
 reports `lastCall` once a call has ended. Counters are cumulative since startup.
 
 The top-level and per-decoder `httpUrl` and `wavUrl` follow the same host rule as
-[`GET /api/live-audio/status`](#get-apilive-audiostatus) (WG9): with
+[`GET /api/live-audio/status`](#get-apilive-audiostatus): with
 `access.publicOrigins.digitalAudio` unset, legacy mode rewrites the `localhost`
 fallback per response from the request's `Host`.
 
@@ -2572,7 +2590,7 @@ curl http://localhost:9000/api/scanner
 `passive.disabledReason` explains a passive job switched off by the cost rule
 (for example `engine-cpu 31 % of a core`).
 
-**Passive cost rule (WG11).** The limit is `scanner.passive.maxEngineUtilization`
+**Passive cost rule.** The limit is `scanner.passive.maxEngineUtilization`
 (config only, 0.05 to 1; absent means 0.25 of one core, the earlier fixed value;
 not a settings PATCH key). The first check runs 60 s after the source's spectrum
 engine opened; after it the guard re-checks every 300 s
@@ -2765,7 +2783,7 @@ curl -X POST http://localhost:9000/api/scanner/plan \
 }
 ```
 
-Sweep plans skip locked-out discoveries (WG2, "Ignore skips sweeps"). A
+Sweep plans skip locked-out discoveries ("Ignore skips sweeps"). A
 discovery with `operator.lockout` heard on the spec's source adds a runtime
 exclusion `[centre − w/2, centre + w/2]`, w = max(the discovery's bandwidth,
 the narrowest raster step there, 1 kHz), clipped to the enabled ranges. The
@@ -2801,7 +2819,7 @@ never dropped for them). If that would leave no hop, none applies (all
 warning. In-window jobs report the entries but never apply them. Without the
 flag the hops are exactly today's. Coverage is read when a plan is computed
 (preview, create, PATCH, restore and the lockout replans). It is also read
-after decoder changes (WG7; this replaces the WG6 "plan-time only" rule). Each
+after decoder changes (this replaces the WG6 "plan-time only" rule). Each
 decoder change triggers a refresh: created, started, stopped, error,
 restarting, max-restarts, removed, health or status change. The refresh runs
 2 s after the last change, at most once per 30 s, and no later than 30 s after
@@ -2812,7 +2830,7 @@ through the lockout path: `scanner:job` is sent only when a job's list
 changed, and hops change only for a job with `skipDecodedElsewhere`. A
 throwing view counts as no coverage.
 
-Band-plan skips (WG7): `skipBandPlanSkips: true` (optional, absent = false,
+Band-plan skips: `skipBandPlanSkips: true` (optional, absent = false,
 live-editable) turns the band-plan bands marked `skip` into exclusions of a
 sweep plan. The sources are the resolved band-plan view: the operator layer
 and every enabled pack, built-in or imported. Each band whose effective
@@ -3001,7 +3019,7 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
-`offset`, `channel` or (WG11) `replay`: a probe fed from an IQ capture rather than
+`offset`, `channel` or `replay`: a probe fed from an IQ capture rather than
 the live stream ([IQ capture on detection](#iq-capture-on-detection-wg11)). Its
 `trackId` is the full tracker id, `<sourceId>-<suffix>`; a `spectrum:frame` track
 carries only the suffix (see [spectrum:frame](#spectrumframe)).
@@ -3032,12 +3050,12 @@ is created, edited or restored). Setting, clearing or deleting a lockout
 replans every live sweep job on the discovery's sources whose list changes and
 sends `scanner:job`.
 
-Jobs also carry the `decodedElsewhere` entries of their current plan (WG6; see
+Jobs also carry the `decodedElsewhere` entries of their current plan (see
 `POST /api/scanner/plan`), runtime only like `lockoutExclusions`. They are
-recomputed at the same points and after decoder changes (WG7 refresh). WG7
+recomputed at the same points and after decoder changes. WG7
 `bandPlanSkips` entries are carried the same way.
 
-`progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
+`progress.hitStats` is `{ discoveries, hits, newDiscoveries, truncated }`
 since the job started: see `GET /api/scanner/jobs/:id/hits`.
 
 #### PATCH /api/scanner/jobs/:id
@@ -3164,7 +3182,7 @@ current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
 identify job.
 
 `cancel` of a job that already ended (`completed`, `cancelled` or `failed`,
-identify jobs included) answers **200** with the unchanged job (WG11): no state
+identify jobs included) answers **200** with the unchanged job: no state
 change, no end action, no event and no persistence write, so a client may cancel
 without first checking the state. (Before WG11 it answered 409
 `SCANNER_INVALID_TRANSITION`.) A cancel racing a natural completion ends in
@@ -3178,7 +3196,7 @@ curl -X POST http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 
 #### GET /api/scanner/jobs/:id/hits
 
-Per-job hit statistics (WG2): a hit is one observation of the job attributed
+Per-job hit statistics: a hit is one observation of the job attributed
 to a discovery, counted once per observation and job (a job that joins an open
 track is credited once too). `?limit=n` (1–500, default 100). 404
 `SCANNER_JOB_NOT_FOUND` for an unknown job.
@@ -3207,7 +3225,7 @@ track is credited once too). `?limit=n` (1–500, default 100). 404
 ```
 
 `hits` is most recent hit first. `firstSeenInJob` means an observation of this
-job created the discovery. `lastDurationMs` (WG6) is the length in ms of the
+job created the discovery. `lastDurationMs` is the length in ms of the
 most recent ended observation credited to the discovery in this job: null
 until one has ended, and while a newer observation is open it keeps the
 previous value; the same
@@ -3329,7 +3347,7 @@ curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ
 
 Deletes the discovery with its evidence and recordings (`scanner:discovery`
 `change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`; 409
-`SCANNER_DISCOVERY_HOLDS_KEPT_RECORDINGS` (WG9) when one of its recordings is kept
+`SCANNER_DISCOVERY_HOLDS_KEPT_RECORDINGS` when one of its recordings is kept
 (see [Recordings](#recordings)): nothing changes; unkeep first. The check runs
 before any change and again before each recording file is unlinked: if a Keep
 commits while the delete runs, the discovery is already gone but the kept file and
@@ -3377,7 +3395,7 @@ audio if it was idle.
 ```
 
 `httpUrl` and `wavUrl` are the live-audio stream URLs, with the same host rule as
-[`GET /api/live-audio/status`](#get-apilive-audiostatus) (WG9): in legacy mode the
+[`GET /api/live-audio/status`](#get-apilive-audiostatus): in legacy mode the
 `localhost` fallback follows the request's `Host` per response.
 
 409 `OUT_OF_WINDOW` with `details` saying why:
@@ -3515,7 +3533,7 @@ earlier) or `unidentified`, with `result`: `protocol?`, `confidence`,
 signal) and `ended?: "window-moved"` (the window moved off the target; open
 trials are `cancelled`).
 
-**Ambient identify (WG7).** `ais`, `acars`, `vdl2` and `lora` have no probe
+**Ambient identify.** `ais`, `acars`, `vdl2` and `lora` have no probe
 decoder: identify names them from a decoder that already runs there
 (`ais-catcher`, `acarsdec`, `dumpvdl2`, `lora-meshtastic`). Identify never
 starts, stops or retunes such a decoder. When a running, healthy, config-owned,
@@ -3531,7 +3549,7 @@ engine epoch before the deadline. Otherwise it ends `timeout`, `not-needed` or
 decoder is `unsupported` with reason `no-ambient-decoder`. An accepted ambient
 identity makes the target `identified`, with the same rule as a probe decode.
 
-A probe trial whose decoder cannot run (WG9) ends `unsupported` with reason
+A probe trial whose decoder cannot run ends `unsupported` with reason
 `decoder-unavailable`: the binary fails to spawn (`ENOENT` or `EACCES`) or exits
 with code 126 or 127, without a signal, before any output. Every other exit keeps
 its previous outcome. No outcome value was added; `reason` is free text.
@@ -3542,7 +3560,7 @@ type clears it. `result.decodersUnavailable` lists the probe decoder types (`dsd
 `multimon-ng`, `direwolf`, `rtl433`; sorted, unique) that could not run during this
 job; absent when none. A decoder that ran and heard nothing stays `no-sync`.
 
-**Analog voice (WG10).** Identify reads the live demodulator's analog transmissions
+**Analog voice.** Identify reads the live demodulator's analog transmissions
 (`live-audio:transmission`). The `analog-fm` and `analog-am` trials are ambient trials
 of decoder `live-audio` (`transport: "ambient"` while they run, `mode`: the
 transmission's modulation once matched). Without a protocol list in the request, both are planned
@@ -3552,7 +3570,7 @@ frequency lies within the target's tolerance (`max(1 kHz, bandwidth/2)`) and it 
 open or ended no earlier than 30 s (`IDENTIFY_ANALOG_LOOKBACK_MS`) before the job
 started; the core keeps the latest 32 (`IDENTIFY_ANALOG_MAX_TRANSMISSIONS`). `nfm` or
 `wfm` answers `analog-fm`, `am` or `dsb` answers `analog-am`; other modulations are
-no evidence. Outcomes (WG11): `decoded` once a matching closed transmission exists
+no evidence. Outcomes: `decoded` once a matching closed transmission exists
 and the newest one carried a CTCSS tone or a DCS code; `heard` when the matching
 closed transmissions carried neither (a squelch opening was heard, nothing was
 decoded; before WG11 this was `decoded`). `heard` is final and no other trial uses
@@ -3622,7 +3640,7 @@ Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
 (`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
 of these types, or without tuning trust, identify behaves as before WG7.
 
-**Narrow digital trials (WG11).** When the target lies in a band-plan range of the
+**Narrow digital trials.** When the target lies in a band-plan range of the
 active region that lists a channel raster of at most 6 250 Hz, the plan includes
 `nxdn48`, `dpmr` and `dstar` (unless `protocols` excludes them) even when the
 track's width does not suggest them, each scored at least 0.3
@@ -3631,7 +3649,7 @@ removes a protocol. That is at most 3 more trials and 2 more runs (`dstar` share
 dsd-fme `auto` run). For an analog-looking 12.5 kHz track on a 6.25 kHz raster the
 last narrow run ends about 10.6 s after the start, inside the default 15 s.
 
-**Known protocol first (WG11).** A discovery's known protocol is its `protocol`
+**Known protocol first.** A discovery's known protocol is its `protocol`
 while its confidence is `decoded` and it has fewer than 2
 (`KNOWN_PROTOCOL_MAX_MISSES`) consecutive misses. When identify resolves the target
 to such a discovery, that protocol's run goes first (added as a trial when the track
@@ -3646,7 +3664,7 @@ decodes the same way, except that a protocol covered only by a probe's last mode
 (`nxdn96` in dsd-fme `auto`) never takes a miss from a job, and sweep probes never
 count misses (a hop cut cannot be told from an expired hold).
 
-**Replay trials (WG11, IQ capture on).** With `scanner.iqCapture` on (see
+**Replay trials (IQ capture on).** With `scanner.iqCapture` on (see
 [IQ capture on detection](#iq-capture-on-detection-wg11) below), identify takes over
 up to 2 (`IDENTIFY_REPLAY_MAX_CAPTURES`) stored captures near the target (same
 source, frequency within the tolerance and trust `commanded` or `relay`, or the same
@@ -3852,7 +3870,7 @@ the network settle), `warnings`
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
 
-Untracked-retune warnings (WG10) carry two optional fields, absent on
+Untracked-retune warnings carry two optional fields, absent on
 `host-centre-mismatch`. `suspected`: `iq-byte-slip` (the vanished features reappear
 mirrored about the centre: I and Q swapped; a label only: on U8 IQ the engine no
 longer re-aligns the stream, it only reports the suspicion), `signal-change` (a
@@ -3866,7 +3884,7 @@ warning list keeps every warning; the warn log line is limited to one per source
 60 s (`SPECTRUM_WARNING_LOG_INTERVAL_MS`) with a suppressed count. A strong
 transmission ending no longer raises an `untracked-retune` with `deltaHz` null.
 
-Spectrum detail above 2 048 bins (WG8). `scanner.ws.spectrumBinsCap` (config
+Spectrum detail above 2 048 bins. `scanner.ws.spectrumBinsCap` (config
 only: `"auto"`, 2048, 4096 or 8192; absent means `"auto"`, so the parsed config
 and its export are unchanged) caps the summary and client bins of every source.
 `"auto"` runs one startup micro-benchmark (at most 200 ms wall, logged once as
@@ -3942,14 +3960,27 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 schema violations (a missing or unknown parameter, a negative Hz, `sinceMs`
 below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
+### Aircraft
+
+ADS-B aircraft that readsb currently tracks, enriched with registration and type where known.
+Field meanings are in [ADS-B](ADSB.md#field-reference).
+
+- `GET /api/aircraft`: `{ aircraft, stats, timestamp }` for every tracked aircraft.
+- `GET /api/aircraft/stats`: the tracker statistics only.
+- `GET /api/aircraft/:icao`: one aircraft by its 24-bit ICAO address in hex (`4B1808`); 404
+  when it is not tracked.
+
+The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
+and `aircraft:stats`.
+
 ### Vessels
 
-AIS vessel current state (WG1). In memory only: no position history, cleared
+AIS vessel current state. In memory only: no position history, cleared
 on restart. DTOs in `packages/api-types/src/vessels.ts`. Vessels unheard for
 15 minutes expire; at 5,000 vessels the least recently heard is evicted. Live
 updates on the [`vessels` channel](#vessels-channel).
 
-AIS NMEA input is checksum-checked (WG2): a sentence is accepted only when the
+AIS NMEA input is checksum-checked: a sentence is accepted only when the
 XOR of the characters between `!` (or `$`) and `*` equals the two hex digits
 after `*` (either case) and nothing follows them. A failing sentence, fragment
 or not, is dropped before reassembly, counted in the decoder's `stats.errors`
@@ -3958,7 +3989,7 @@ a good copy of a dropped fragment still completes its group within 2 s.
 AIS-catcher's JSON output is not affected. The checksum count is not a separate
 field of the decoder status (only `stats.errors`); it appears in the debug log.
 
-AIS radio channel (WG4): a `ship` decoder output (`decoder:output` and the stored
+AIS radio channel: a `ship` decoder output (`decoder:output` and the stored
 Activity reception) carries `channel`, `A` or `B`, from NMEA field 4 or
 AIS-catcher's JSON `channel`; a multi-sentence message takes it from its first
 fragment, and the key is absent when the channel is unknown. It sets the
@@ -3966,7 +3997,7 @@ reception's provenance frequency: A is 161.975 MHz, B 162.025 MHz (see
 [Provenance](#provenance)). From WG5 `VesselState.channel` carries it too (see
 below).
 
-AIS types 4, 9 and 21 (WG5): on the NMEA path a base station report (type 4), a
+AIS types 4, 9 and 21: on the NMEA path a base station report (type 4), a
 SAR aircraft report (type 9) and an aid-to-navigation report (type 21) decode to
 a position; a longitude of 181 or a latitude of 91 means no position. A short
 payload drops only the fields whose bits are missing. Type 9 also gives
@@ -4019,7 +4050,7 @@ vessel is not tracked.
 
 ### APRS
 
-APRS station, object and item current state (WG2) from the `direwolf`
+APRS station, object and item current state from the `direwolf`
 decoders. In memory only: no position history, cleared on restart. DTOs in
 `packages/api-types/src/aprs.ts`. A digipeated copy (same source, destination
 and info within 30 s) only raises `digipeatedCopies`. Entities unheard for
@@ -4062,7 +4093,7 @@ One `AprsStation` by its exact key (`callsign:N0CALL-9`). 400
 
 ### Mesh
 
-Meshtastic node current state (WG2) from the `meshtastic` decoder output. In
+Meshtastic node current state from the `meshtastic` decoder output. In
 memory only: no position history, cleared on restart. DTOs
 in `packages/api-types/src/mesh.ts`. Nodes are keyed by the packet's `from`
 (never `to` or the broadcast address). Copies of an already heard
@@ -4070,7 +4101,7 @@ in `packages/api-types/src/mesh.ts`. Nodes are keyed by the packet's `from`
 `duplicateCopies`. Nodes unheard for 4 hours expire; at 1,000 nodes the least
 recently heard is evicted. Live updates on the [`mesh` channel](#mesh-channel).
 
-Device telemetry and neighbour links (WG3) are decoded from unique packets only
+Device telemetry and neighbour links are decoded from unique packets only
 (after the `(from, id)` dedupe). TELEMETRY_APP (port 67) `device_metrics` set the
 sending node's `telemetry`; other telemetry variants are recognised and ignored.
 NEIGHBORINFO_APP (port 71) reports replace the sending node's `neighbours` when the
@@ -4089,7 +4120,7 @@ first. A `MeshNode` has `nodeId` (`!` plus 8 lowercase hex digits), `key`
 `longName`, `shortName`, `hwModel`, `role`, `isLicensed` (null until
 received) and `lastNodeInfoAt`, `position` (`{ lat, lon, altitudeM, at, fixAt }`
 from the latest valid POSITION, or null; `at` is the receive time, and `fixAt`
-(WG4, optional, absent on older cores) is the sender's GPS fix time
+(optional, absent on older cores) is the sender's GPS fix time
 (`Position.time`) as ISO when it lies between 7 days before and 60 s after `at`,
 else null), `snrDb`, `rssiDbm` and `hopsAway` of the
 last unique packet (null when unknown), `viaMqtt`, `packetCount` (unique
@@ -4128,7 +4159,7 @@ node is not tracked.
 
 ### Coverage
 
-Receiver coverage per bearing (WG3): the farthest ADS-B and AIS position heard
+Receiver coverage per bearing: the farthest ADS-B and AIS position heard
 in each 1° bearing bucket from the station location (`station.lat`/`station.lon`,
 see [Station](#station)) over the last 24 hours. In memory only: it starts empty
 after a restart. DTOs in `packages/api-types/src/coverage.ts`. Inputs are the
@@ -4183,7 +4214,7 @@ Access is the same as the other read routes (`GET /api/vessels`,
 
 #### GET /api/storage
 
-Sizes of the directories and files WaveKit writes (WG4), without their paths:
+Sizes of the directories and files WaveKit writes, without their paths:
 no response field carries a filesystem path. DTOs in
 `packages/api-types/src/storage.ts`. `HEAD` is supported; `Cache-Control:
 no-store`. Access is the same as the other read routes. A report is cached for
@@ -4240,7 +4271,7 @@ bytes, 0 files and the same reason. The first reason wins. A permission error is
 path is `exists: false` and not partial. A partial area's `bytes` and `files` are
 lower bounds.
 
-`kept` (WG10) reports the recording keep store in protected mode:
+`kept` reports the recording keep store in protected mode:
 `{ "state": "ready", "recordings", "bytes", "maxRecordings": 2000, "maxBytes": 536870912 }`
 (each file counted at its size when kept; no filesystem access), `{ "state": "loading" }`
 or `{ "state": "failed" }` (every recording protected, no counts). Legacy mode reports
@@ -4252,9 +4283,27 @@ that threshold in bytes (null without a scanner) and `state` is `low` when
 WaveKit does not shorten any retention because space is low; the report only
 states the configured caps and retention.
 
+### Operator data
+
+Protected mode only (404 in legacy mode). Saved frequencies, shared preferences and command
+usage that every paired browser shares, stored in the state directory.
+
+- `GET /api/operator-data`: the whole store.
+- `POST /api/operator-data/saved-frequencies`, `PUT` and `DELETE
+/api/operator-data/saved-frequencies/:id`: manage saved frequencies.
+- `PATCH /api/operator-data/preferences`: change preferences.
+- `POST` and `DELETE /api/operator-data/command-usage`: record or reset command-palette
+  usage.
+
+Writes take the normal protected mutation admission (session, CSRF, Origin). The
+`operator-data` WebSocket channel sends `operator-data:snapshot` on subscribe and
+`operator-data:updated` after each change. The DTOs are in
+`packages/api-types/src/operator-data.ts`; the design is in the
+[operator data specification](specs/operator-data/design.md).
+
 ### Config export
 
-`GET /api/config/export` (WG6) downloads the effective configuration (the YAML
+`GET /api/config/export` downloads the effective configuration (the YAML
 file, `WAVEKIT_` environment overrides and defaults, as validated at startup)
 as redacted YAML: `Content-Type: application/yaml; charset=utf-8`,
 `Content-Disposition: attachment`, `Cache-Control: no-store`, with a first
@@ -4344,7 +4393,7 @@ keys, `limit=10abc` or a malformed cursor answer 400
 
 - Order: newest `modifiedAt` first, ties by id; follow `nextCursor` (null on
   the last page). Each item appears exactly once across pages.
-- `kept` (WG9, optional in `@wavekit/api-types`; older cores omit it): true when
+- `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.
 - `id` is opaque and never a path: `dsd:<n>~<basename>` (n = the position of
@@ -4391,7 +4440,7 @@ pruner, scanner evidence retention, discovery removal and analog retention)
 until it is unkept. `PUT` keeps, `DELETE` on `/keep` unkeeps; both are
 idempotent and answer 200 `{ "id", "kept", "changed" }` (`changed: false` when it
 already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording
-or (WG10) a scanner digital voice recording (`scan:` id, a file under
+or a scanner digital voice recording (`scan:` id, a file under
 `recordings/dv/<discovery>/`): 200 `{ "id", "deleted": true }`. A scanner delete
 follows the same rules and also updates the scanner's bookkeeping: the id leaves its
 observation, the discovery's `evidence.recordings` drops by one (never below zero),
@@ -4426,7 +4475,7 @@ for example `chmod go-w <dir>` (or `chmod +t <dir>` for a shared directory), the
 retry. The delete records its progress by name inside the private directory: the
 moved file keeps its own name until its identity check passed, then is renamed
 `verified` just before the unlink. A crash leaves a `.wavekit-delete-*` directory
-that is never listed; at the next start in protected mode (WG10), before any
+that is never listed; at the next start in protected mode, before any
 decoder or the scanner runs, a bounded sweep (at most 64 directories) visits the
 dsd-fme recording directories with their `WAV`/`wav` folders and every scanner
 `recordings/dv/<discovery>` folder. It acts only on a directory that is provably
@@ -4437,7 +4486,7 @@ is put back under its name, never replacing a file; an empty directory is remove
 anything else (including WG9-format `recording` entries) is left and counted. One
 info line with counts, never a name or path. Legacy mode does not sweep.
 
-Discovery merges (WG10, both modes): the dropped discovery's recording and evidence
+Discovery merges (both modes): the dropped discovery's recording and evidence
 folders stay where they are and the survivor adopts them as aliases (persisted, at
 most 64 per discovery; past that the oldest is released and its folder becomes an
 orphan, warned as a count). Alias folders count as the survivor's: its Keep protects
@@ -4528,7 +4577,7 @@ The store holds three kinds:
 
 - `decoder-reception`: decoder output envelopes. Output types `sync`,
   `rates`, `stats`, `status` and `error` are counted as excluded telemetry and
-  are not stored. Provenance (WG3) names the source and channel frequency
+  are not stored. Provenance names the source and channel frequency
   when WaveKit knows them; see [Provenance](#provenance).
 - `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
@@ -4583,7 +4632,7 @@ per entity) the admission limits (50/s global) would fill the row cap in about
 
 Receipts, recordings and transcripts are not written.
 
-APRS and Meshtastic positions are coalesced the same way (WG2): an `aprs`
+APRS and Meshtastic positions are coalesced the same way: an `aprs`
 output per source callsign and decoder when its `dataType` is `Position`,
 `Position with messaging`, `Position with timestamp`, `Position with timestamp
 and messaging`, `Mic-E` or `Mic-E (old)`, it has a finite `lat` and `lon`,
@@ -4595,7 +4644,7 @@ metadata alone. Every other APRS data type (objects, items, messages, status,
 weather, telemetry), any packet with weather or a message, and every other
 Meshtastic port are always stored.
 
-Meshtastic flood copies (WG3): a `meshtastic` reception with the same `from`,
+Meshtastic flood copies: a `meshtastic` reception with the same `from`,
 `id` and `portnum` and the same payload hash (32-bit FNV-1a over `portnum` and
 `payloadB64`; two different payloads collide with probability about 2^-32, so a
 distinct packet is dropped that rarely) as a reception queued at most 30 s
@@ -4624,7 +4673,7 @@ its own device (external input, for example readsb with `rtlTcpHost`) has
 `sourceId: null`. `hz` is rounded to an integer in (0, 10^12]; anything else
 means no frequency.
 
-`tuningTrust` (WG5, superseding WG3's "unverified for every decoder") is
+`tuningTrust` (superseding WG3's "unverified for every decoder") is
 `commanded` (the source is under WaveKit's internal control) or `relay` (it is
 under external control through the RTL-TCP relay) when the observed tuner state
 proves the decoder hears its targets, and `unverified` otherwise. All of these
@@ -4898,7 +4947,7 @@ the same query and expires with the snapshot (5 minutes).
 
 ### GET /api/activity/trails
 
-Bulk position trails (WG4): one trail per entity, built from the stored decoder
+Bulk position trails: one trail per entity, built from the stored decoder
 receptions (`kind` `decoder-reception` with an `entityKey`) whose summary carries
 a valid position, inside a `producedAt` window. One snapshot read: no cursor, no
 paging. It covers what Activity stores, so aircraft and ship positions arrive at
@@ -5004,7 +5053,7 @@ Errors are those of [Query and cursor errors](#query-and-cursor-errors).
 
 ### GET /api/activity/bandmap
 
-Automatic band map (WG5): stored Activity rows counted per frequency bucket over a
+Automatic band map: stored Activity rows counted per frequency bucket over a
 `producedAt` window, from the rows' provenance frequency (see
 [Provenance](#provenance)). One snapshot read: no cursor, no paging. Counts are
 stored rows, not receptions: coalesced and dropped receptions are not counted, so
@@ -5043,7 +5092,7 @@ order `scan-rows`, `time-limit`, `buckets`), `coveredFrom`, `retentionFloor` and
 
 ### GET /api/activity/timeline
 
-Activity timeline (WG5): stored rows per time bucket and category over a window,
+Activity timeline: stored rows per time bucket and category over a window,
 every kind included. Query parameters: `producedFrom`, `producedTo` (default the
 last hour, at most 72 hours), `bucketMs` (10,000 to 3,600,000, default 60,000),
 `categories`, `protocols` (comma-separated or repeated) and `entityKey` (repeated,
@@ -5228,7 +5277,7 @@ harmless; losing one is not.
 
 #### Retention holes
 
-Holes (WG3): a retention step can delete rows that are not the oldest (fair-share
+Holes: a retention step can delete rows that are not the oldest (fair-share
 retention removes rows from the largest share). Paging and replay never skip such
 a row silently:
 
@@ -5378,10 +5427,11 @@ ws.onmessage = event => {
 Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
 [SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in),
-`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel))
+`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel)),
 `vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)), `aprs`
-(APRS stations, objects and items, see [APRS channel](#aprs-channel)) and `mesh`
-(Meshtastic nodes, see [Mesh channel](#mesh-channel)).
+(APRS stations, objects and items, see [APRS channel](#aprs-channel)), `mesh`
+(Meshtastic nodes, see [Mesh channel](#mesh-channel)), `aircraft` (ADS-B aircraft, see
+[Aircraft](#aircraft)) and `operator-data` (see [Operator data](#operator-data)).
 `activity` is not one of these channels. It uses `activity:subscribe` and
 `activity:unsubscribe`. See [Activity](#activity).
 
@@ -5668,7 +5718,7 @@ any cached `decoder:status`.
 	"type": "source:connected",
 	"channel": "sources",
 	"data": {
-		"sourceId": "sdrpp-main"
+		"sourceId": "rtl-pi"
 	}
 }
 ```
@@ -5680,7 +5730,7 @@ any cached `decoder:status`.
 	"type": "source:disconnected",
 	"channel": "sources",
 	"data": {
-		"sourceId": "sdrpp-main",
+		"sourceId": "rtl-pi",
 		"error": "Connection reset by peer"
 	}
 }
@@ -5784,7 +5834,7 @@ further `source:status` or `source:disconnected` follows for that `sourceId`
 On the `tuner` channel after a tuner command was written to an rtl_tcp source.
 `origin` (optional) says who issued it: `"rest"` (the REST API), `"scanner"`
 (a sweep through the scanner's lease), `"replay"` (desired state re-sent on
-reconnect) or (WG11) `"config"` (the source's configured gain mode, gain or AGC
+reconnect) or `"config"` (the source's configured gain mode, gain or AGC
 flag written on a new connection; see [Tuner](#tuner)). It is absent for writes whose origin is not tagged. Relay (SDR++)
 commands do not pass through here.
 
@@ -5812,9 +5862,9 @@ Emitted every ~5 seconds.
 	"data": {
 		"timestamp": "2026-01-09T14:23:45.123Z",
 		"sources": {
-			"sdrpp-main": {
+			"rtl-pi": {
 				"bytesReceived": 847000000,
-				"dataRate": 192000
+				"dataRate": 4096000
 			}
 		},
 		"decoders": {
@@ -5888,7 +5938,7 @@ change these events. Sent whether Activity is enabled or not; when it is
 ready, each closed transmission is also stored as an `analog-transmission`
 [Activity](#activity) record.
 
-Activity hygiene (WG10, a deliberate behaviour change). A weak far signal or noise
+Activity hygiene (a deliberate behaviour change). A weak far signal or noise
 flapping across the squelch used to produce one transmission per crossing (hundreds
 of 0–1 s Voice rows). The tracker now applies three rules, in every squelch mode, to
 everything it publishes (these events, Activity rows and identify's analog evidence
@@ -5956,7 +6006,7 @@ shape is unchanged.
 - `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
   when the transmission opened. `tuningTrust` is `commanded` under WaveKit
   control and `relay` under external (SDR++) control, with the same strict rule
-  as spectrum frames (WG9): both the centre and the sample rate must have been
+  as spectrum frames: both the centre and the sample rate must have been
   written or relayed on the current connection, else `unverified` (declared-only
   values, a failed reconnect replay). Null when the source has no tuner state or
   its centre is an unconfirmed placeholder.
@@ -5967,7 +6017,7 @@ shape is unchanged.
   blocks just below the threshold no longer hold the squelch open (see `squelch`
   under [GET /api/live-audio/status](#get-apilive-audiostatus)); start times are
   unchanged.
-- `squelchMode` is `manual`, `auto` or (WG7) `noise`; `noiseQuietingDb` (WG7) is
+- `squelchMode` is `manual`, `auto` or `noise`; `noiseQuietingDb` is
   the quieting threshold in effect when the transmission opened, present in
   `noise` mode only. `thresholdDbfs` is the configured `squelch` in noise mode. `endedAt`, `durationMs` and `closeReason` are null
   while open.
@@ -5980,7 +6030,7 @@ shape is unchanged.
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
   one closed event, also on shutdown (WG10: only published transmissions send an open).
-- `tone` (WG2): `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
+- `tone`: `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
   three keys from WG6 cores; `dcs` is absent from older cores; absent on open
   events). `ctcssHz` is one of the 50 standard CTCSS tones
   (67.0–254.1 Hz) heard through the transmission, null when none qualified or
@@ -5991,7 +6041,7 @@ shape is unchanged.
   open; it is always on and has no config key. Tones need a
   demodulated audio rate of at least 8 kHz; below that `tone` is
   `{ ctcssHz: null, dtmf: null, dcs: null }`.
-  `dcs` (WG6) is `{ code, polarity }` or null: `code` is three octal digits of
+  `dcs` is `{ code, polarity }` or null: `code` is three octal digits of
   the 104-code standard table, `polarity` `normal` or `inverted`. DCS is
   134.4 bit/s sub-audible data in 23-bit Golay(23,12) words; a code is
   reported only after at least 3 consecutive identical valid words and only for
@@ -6028,7 +6078,7 @@ ended (`DigitalVoiceCall`). Published in the same tick as the decoder's
 }
 ```
 
-Optional call metadata (WG2), present only when dsd-fme reported it:
+Optional call metadata, present only when dsd-fme reported it:
 `colourCode` (DMR, 0–15), `nac` (P25, 1–4 upper-case hex digits),
 `algorithmId` (P25, only for an encrypted call or a non-clear algorithm) and
 `keyId` (1–8 upper-case hex digits), `ran` (NXDN, 0–63) and `errors`
@@ -6071,7 +6121,7 @@ state change and after every edit.
 
 `{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes, hits?, newDiscoveries?}`;
 `probes` is a count (the probe list is in the job detail, `progress.probes[]`).
-`hits` and `newDiscoveries` (WG2) are the job's hit totals since it started.
+`hits` and `newDiscoveries` are the job's hit totals since it started.
 Up to 2 Hz per job (at most one per 500 ms); progress changes on every hop
 tune and sweep end, and at least once a second while the job runs. It still
 counts toward the channel's global budget.
@@ -6097,7 +6147,7 @@ counts toward the channel's global budget.
 
 `{change: "created" | "updated" | "upgraded" | "merged" | "deleted", discovery, jobHits?}`,
 coalesced to at most 1/s per discovery (the latest change wins). `jobHits`
-(WG2) is present when a job's observation caused the change: one `ScanJobHit`
+is present when a job's observation caused the change: one `ScanJobHit`
 per such job that tracks the discovery.
 
 #### scanner:activity
@@ -6116,17 +6166,17 @@ most 1/s per (job, target); the latest state is always delivered.
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
-  `decoder-unavailable` (WG9), `no-live-audio` (WG10); `mode` and `transport` null),
+  `decoder-unavailable`, `no-live-audio`; `mode` and `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
-  match no longer causes it, WG11), `cancelled` and (WG11) `heard` (a `live-audio`
+  match no longer causes it, WG11), `cancelled` and `heard` (a `live-audio`
   trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`
   on a `live-audio` trial now means a tone or code was heard). `transport` is
   `offset`, `channel`, `ambient` (WG7: an already-running AIS, ACARS, VDL2 or LoRa
-  decoder; WG10: decoder `live-audio` for `analog-fm` / `analog-am`) or (WG11)
+  decoder; WG10: decoder `live-audio` for `analog-fm` / `analog-am`) or
   `replay` (a probe decoder fed from an IQ capture of the target, after the
   transmission ended); see `POST /api/scanner/identify`.
 - `result`: see `POST /api/scanner/identify`, including `artefact?`,
-  `ended?: "window-moved"`, and (WG10) `analog?` and `decodersUnavailable?`.
+  `ended?: "window-moved"`, and `analog?` and `decodersUnavailable?`.
 
 If `all: true` finds nothing within `timeoutMs`, no `scanner:identify` is sent;
 the job completes with `identify.targets: []` (`scanner:job`).
@@ -6436,7 +6486,7 @@ reconnect.
 }
 ```
 
-Entity updates are throttled (WG2): per entity at most one `vessel:update`
+Entity updates are throttled: per entity at most one `vessel:update`
 per 2 s. The first update after a quiet window is sent at once; later ones in
 the window are coalesced and the latest is sent when the window ends. An
 identity change (`name`, `callsign`, `navStatus`, `shipType` or
@@ -6626,7 +6676,7 @@ The API does not currently implement rate limiting. For production deployments, 
 
 ## CORS
 
-The audio stream ports have their own rule (WG7): legacy mode sends
+The audio stream ports have their own rule: legacy mode sends
 `Access-Control-Allow-Origin: *` without credentials, and protected mode allows
 only the access layer's allowed origins. See
 [GET /stream](#get-httplocalhost8081stream-and-streamwav).

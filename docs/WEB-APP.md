@@ -3,7 +3,7 @@
 The web app is WaveKit's main interface. It runs in any recent browser, on a desktop or a phone,
 and talks to the core over its REST API and WebSocket. The code lives in [`web/`](../web/).
 
-![The spectrum view](assets/screenshots/spectrum-dark.png)
+![The spectrum view: live spectrum and waterfall over marine VHF, decoded DMR and AIS signals labelled on their peaks, and the tuned DMR channel's card with its recent calls](assets/screenshots/spectrum-dark.png)
 
 ## Open it
 
@@ -43,9 +43,14 @@ transmissions, decoded content, and the actions (Activity, save, Identify, Open 
 The bar under the tuned card plays the demodulated audio in the browser: analog modes with squelch
 and tone squelch, and decoded digital voice. **Record** saves a WAV file from the browser.
 
+On NFM with auto squelch, a carrier alone does not open the audio: the core waits for evidence
+that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what opened it, for example
+**Open on CTCSS**. The `autoSquelch` field of
+[`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) reports the gate.
+
 ## Drawers
 
-![Activity](assets/screenshots/activity.png)
+![Activity: a searchable log of decoded events, with category filters along the top](assets/screenshots/activity.png)
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
@@ -57,7 +62,7 @@ and tone squelch, and decoded digital voice. **Record** saves a WAV file from th
 
 ## Map and Messages
 
-![Map](assets/screenshots/map.png)
+![Map: aircraft, vessels and APRS stations around the station, with their trails and the receiver's coverage](assets/screenshots/map.png)
 
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
 trails and the station's coverage. **Messages** shows decoded messages as cards; open one to see its

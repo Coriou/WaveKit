@@ -1,5 +1,9 @@
 # WaveKit Decoder Status & Matrix
 
+> **Dated (2026-01), not kept current.** This is a historical fixture-verification snapshot. For the
+> decoders WaveKit ships today see the [README](../readme.md#decoders); for live status use
+> `GET /api/decoders` or Settings › Decoders in the web app.
+
 **Last Updated:** 2026-01-09
 **Context:** Verification of end-to-end IQ processing pipeline using real-world reference recordings.
 

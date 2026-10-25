@@ -39,9 +39,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      # Links fail the job; mapped code changed without its page is a warning (CONTRIBUTING.md).
+      # Fails on a broken link, and on mapped code changed without its page unless each commit
+      # carries "Docs: none" or "Docs: <page>" (CONTRIBUTING.md). A first push of a branch has no
+      # "before" commit and a force push may lose it: the checker then compares with the merge
+      # base of origin/main, or checks HEAD's own commit when that merge base is HEAD.
       - name: Check docs
-        run: node scripts/check-docs.mjs --since="${{ github.event.pull_request.base.sha || github.event.before }}"
+        run: node scripts/check-docs.mjs --since="${{ github.event.pull_request.base.sha || github.event.before }}" --fallback=origin/main
 
   docker-build:
     needs: lint-typecheck-test

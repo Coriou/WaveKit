@@ -4,8 +4,8 @@ Living record of the web dashboard design phase. The design itself lives on the
 canvas; this file holds the why, the open questions and the core gaps, so every
 session and every machine can pick the work up.
 
-- **Canvas:** https://claude.ai/artifact/Mr2W34vvZxc8tGFCdMvZHE (private to the owner until shared)
-- **Status:** design phase, nothing implemented. The old local web dashboard was discarded.
+- **Canvas:** the design canvases are in [`canvas/`](canvas/README.md).
+- **Status:** implemented in [`web/`](../../web/); the user guide is [Using the web app](../WEB-APP.md). Entries below are dated decisions and may describe earlier states.
 - **Started:** 2026-10-10
 
 ## How we work

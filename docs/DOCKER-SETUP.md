@@ -1,20 +1,25 @@
 # Docker Setup
 
-Canonical reference for WaveKit's containerized build and runtime workflow.
-For native (non-Docker) iteration see the "Native dev loop" section below
-and `AGENTS.md`.
+Reference for WaveKit's Compose profiles, image builds and protected mode.
+To simply run WaveKit with a Raspberry Pi or a USB dongle, start with
+[Docker runtime](DOCKER-RUNTIME.md). For native (non-Docker) iteration see
+[native development](LOCAL-SETUP.md).
 
 ## TL;DR
 
-- `pnpm dev` — headline iteration loop. Native esbuild watch + node --watch
-  against `src/index.ts`. No Docker required.
-- `make dev-stack` — full container stack (sdrpp-server + wavekit-api on the
-  `dev` profile). Use when verifying decoder pipelines end-to-end.
+- `make app-up` — the normal runtime: the `app` profile, one `final-core`
+  container, ports published on `127.0.0.1`. See [Docker runtime](DOCKER-RUNTIME.md).
+- `pnpm dev` — native esbuild watch + node --watch against `src/index.ts`.
+  No Docker required.
 - `make docker-build` — produce the three default images via `docker buildx
-  bake --file docker/bake.hcl default`.
+bake --file docker/bake.hcl default`.
 
-Everything else in this document is reference. 95% of work needs only the
-three commands above.
+The `dev`, `prod-*` and `demod-test` profiles below are optional. The `dev`
+and `prod-*` profiles start an SDR++ server next to the core, but they do not wire
+it up: the core reads `config/default.yaml`, which has `sources: []`, and nothing
+reads the `SDR_SOURCE` variable they set. To use that server, add a source for it
+(host `sdrpp-server` or `wavekit-sdrpp-prod`, port 5259, IQ caps) to a config file and
+point `WAVEKIT_CONFIG` at it.
 
 ## Native dev loop
 
@@ -33,20 +38,24 @@ under `src/decoders/`.
 Prerequisite: an SDR source reachable from the host. Configure via
 `config/<active>.yaml` (`default.yaml`, `dev_test.yaml`, etc.) or via
 `WAVEKIT_SOURCES_*` env vars. `pnpm dev` does NOT start an SDR source — it
-expects rtl_tcp or SDR++ to already be listening, locally or remotely.
+expects an `rtl_tcp` server (a USB dongle, or a Raspberry Pi SDR host) to be
+listening, locally or remotely. `make dev-rtl` and `make dev-local` in
+[native development](LOCAL-SETUP.md) cover the common cases.
 
 ## Container integration via compose profiles
 
-One file: `compose.yaml` at the repo root. Five profiles, mutually
-exclusive. `protected` is the opt-in TLS reference deployment.
+One file: `compose.yaml` at the repo root (plus the `compose.usb.yaml`
+override for a USB dongle). Six profiles, mutually exclusive. `app` is the
+normal runtime; `protected` is the opt-in TLS reference deployment.
 
-| Profile             | Services                                  | Purpose                                           |
-| ------------------- | ----------------------------------------- | ------------------------------------------------- |
-| `dev`               | `sdrpp-server` + `wavekit-api`            | Local full-stack integration testing              |
-| `prod-single-host`  | `wavekit-full`                            | Single-container production (e.g. Raspberry Pi)   |
-| `prod-distributed`  | `wavekit-sdrpp-prod` + `wavekit-core-prod`| Two-host production: dedicated SDR host + core    |
-| `demod-test`        | `demod-test`                              | Interactive shell with decoder + audio tooling    |
-| `protected`         | `wavekit-protected` + `wavekit-protected-caddy` | Opt-in protected mode behind Caddy TLS ([reference](#protected-reference-profile)) |
+| Profile            | Services                                        | Purpose                                                                            |
+| ------------------ | ----------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `app`              | `wavekit-app`                                   | Normal runtime (`make app-up`), see [Docker runtime](DOCKER-RUNTIME.md)            |
+| `dev`              | `sdrpp-server` + `wavekit-api`                  | Integration testing against an SDR++ server                                        |
+| `prod-single-host` | `wavekit-full`                                  | Single-container production (e.g. Raspberry Pi)                                    |
+| `prod-distributed` | `wavekit-sdrpp-prod` + `wavekit-core-prod`      | Two-host production: dedicated SDR host + core                                     |
+| `demod-test`       | `demod-test`                                    | Interactive shell with decoder + audio tooling                                     |
+| `protected`        | `wavekit-protected` + `wavekit-protected-caddy` | Opt-in protected mode behind Caddy TLS ([reference](#protected-reference-profile)) |
 
 ### dev profile
 
@@ -63,8 +72,9 @@ make dev-status        # docker compose --profile dev ps + curl /health
 The dev profile builds `wavekit:dev-sdrpp` (target `final-sdrpp`) and
 `wavekit:dev-core` (target `final-core`) locally with `cache_from` pointing
 at the GHCR registry cache (see below). Ports exposed on the host: `9000`
-(API), `8080` (audio TCP), `8081` (live demod HTTP), `4713` (WebSocket
-WAS-style), `5259` (SDR++ binary protocol).
+(API, container port 3000), `8080` (audio TCP), `8081` (live audio HTTP),
+`8082` (digital-voice audio HTTP), `4713` (RTL-TCP relay), `5259` (SDR++
+binary protocol).
 
 ### prod profiles
 
@@ -121,7 +131,7 @@ network/volume. Idempotent; run once after cloning.
 
 Every Dockerfile stage has a corresponding cache ref under
 `ghcr.io/coriou/wavekit:cache-<stage>`. The full list is in
-`docker/bake.hcl` and `design.md §4.1`. Highlights:
+`docker/bake.hcl`. Highlights:
 
 - `cache-base-build`, `cache-runtime-base` — toolchain commons.
 - `cache-<decoder>-build` — one ref per decoder (`readsb-build`,
@@ -173,12 +183,12 @@ Working directory inside the container is `/workspace`.
 
 ## First-run log noise is expected
 
-When the `final` image boots, `wavekit-api` may print one or two
-`SourceConnectionError` lines before `sdrpp-server` binds its 5259 port.
-This is intentional, not a regression.
+When a source is not reachable yet (for example the `final` image, where
+`wavekit-api` can start before `sdrpp-server` binds 5259, or a Pi still
+booting), the core prints a few `SourceConnectionError` lines. This is
+intentional, not a regression.
 
-The s6-overlay hard dependency `wavekit-api → sdrpp-server` was removed
-in the Phase A/B refactor (see `design.md §5`). `SourceManager`'s
+`wavekit-api` has no s6-overlay dependency on `sdrpp-server`. `SourceManager`'s
 exponential backoff is now the single authoritative source-availability
 mechanism, matching the contract already used for transient SDR
 disconnects mid-run. Reconnect lines in the first ~10 seconds post-boot
@@ -191,7 +201,8 @@ threshold to ignore the first 10 seconds after `wavekit-api` start.
 
 ### Port conflicts
 
-The dev profile binds host ports 5259, 9000, 8080, 8081, 4713. If any is
+The `app` profile binds `127.0.0.1` ports 9000, 8080, 8081, 8082 and 4713;
+the dev profile binds 5259, 9000, 8080, 8081, 8082 and 4713. If any is
 in use (`lsof -nP -iTCP:9000 -sTCP:LISTEN`), free it or edit
 `compose.yaml`'s port mapping.
 
@@ -233,8 +244,9 @@ saves more time than it costs.
 
 `packages/sdr-host/docker-compose.yml` deploys to the Raspberry Pi hosting
 the SDR dongle. It is NOT part of the root `compose.yaml` and uses its own
-`Dockerfile` plus the `make sdr-host-*` Makefile targets. See `packages/
-sdr-host/scripts/` for deployment helpers. Out of scope for this document.
+`Dockerfile` plus the `make sdr-host-*` Makefile targets. See
+[SDR host setup](SDR-HOST-SETUP.md) and the
+[fresh-card Pi guide](../packages/sdr-host/README.md).
 
 ## Service architecture
 
@@ -267,21 +279,22 @@ docker run --rm wavekit:dev find /etc/s6-overlay -name 'sdrpp-server' -type d
 
 Common runtime env vars consumed by the wavekit-api container:
 
-| Variable                         | Default | Purpose                                |
-| -------------------------------- | ------- | -------------------------------------- |
-| `WAVEKIT_LOG_LEVEL`              | info    | debug / info / warn / error            |
-| `WAVEKIT_SOURCES_0_HOST`         | -       | First SDR source hostname              |
-| `WAVEKIT_SOURCES_0_PORT`         | -       | First SDR source port                  |
-| `WAVEKIT_TUNER_RELAY__ENABLED`   | false   | Expose RTL-TCP relay                   |
-| `SDR_SOURCE`                     | -       | Convenience: `tcp://host:port` URL     |
-| `NODE_ENV`                       | -       | `development` or `production`          |
-| `WAVEKIT_REGION`                 | guessed | Band plan region (EU, US, CA, AU, NZ, JP, CN) |
-| `WAVEKIT_STATE_DIR`              | data    | Runtime state directory (`/app/data` in compose) |
-| `WAVEKIT_ACTIVITY__ENABLED`      | false   | Persistent activity store (Node 24 and SQLite FTS5) |
+| Variable                       | Default | Purpose                                             |
+| ------------------------------ | ------- | --------------------------------------------------- |
+| `WAVEKIT_LOG_LEVEL`            | info    | debug / info / warn / error                         |
+| `WAVEKIT_SOURCES_0_HOST`       | -       | First SDR source hostname                           |
+| `WAVEKIT_SOURCES_0_PORT`       | -       | First SDR source port                               |
+| `WAVEKIT_TUNER_RELAY__ENABLED` | false   | Expose RTL-TCP relay                                |
+| `NODE_ENV`                     | -       | `development` or `production`                       |
+| `WAVEKIT_REGION`               | guessed | Band plan region (EU, US, CA, AU, NZ, JP, CN)       |
+| `WAVEKIT_STATE_DIR`            | data    | Runtime state directory (`/app/data` in compose)    |
+| `WAVEKIT_ACTIVITY__ENABLED`    | true    | Persistent activity store (Node 24 and SQLite FTS5) |
 
 YAML config under `config/` is the canonical source of truth; env vars
 override per-key via the `WAVEKIT_` prefix with `__` as nested separator
-(see `AGENTS.md` "Architecture essentials").
+(`WAVEKIT_API__PORT`); array entries take an index,
+`WAVEKIT_SOURCES__0__HOST` or the older `WAVEKIT_SOURCES_0_HOST`. See
+[Docker runtime](DOCKER-RUNTIME.md#connect-to-the-pi).
 
 ### State volume
 
@@ -292,19 +305,17 @@ band overrides from `PUT /api/decoders/:id/band`, file
 so overrides survive a container restart (`data/` is git-ignored). If the
 directory is missing or not writable (read-only mount, permissions), core keeps
 running: overrides apply in memory only, a warning is logged and
-`GET /api/decoders/:id/band` reports `persisted: false`. When
-`activity.enabled` is true, the same directory holds `activity/activity.db`.
-Activity stays off unless that flag is set. Opening the store needs Node 24
+`GET /api/decoders/:id/band` reports `persisted: false`. The same
+directory holds `activity/activity.db` (activity is on by default;
+`activity.enabled: false` turns it off). Opening the store needs Node 24
 with SQLite FTS5; a failed open leaves the API up and the activity routes
-answer 503. This batch does not re-verify the image's Node base for that
-builtin. Inside a container without `TZ` or a locale, the region guess falls
+answer 503. Inside a container without `TZ` or a locale, the region guess falls
 back to `EU`; set `WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
 
 ## Health checks
 
 The `wavekit-api` HTTP health endpoint is `/health`. Compose healthchecks
-probe it on the container-internal port; the host-mapped port is `9000`
-in the dev profile.
+probe it on the container-internal port; the host-mapped port is `9000`.
 
 ```bash
 curl http://localhost:9000/health
@@ -492,11 +503,11 @@ holds the same public mapping as the
 the slots those environment overrides update; leave the arrays in place when
 you change the hostname.
 
-| Public origin | Published TLS | Loopback upstream |
-| --- | --- | --- |
-| API and WebSocket `https://<host>:9443` | `9443` | `127.0.0.1:9000` |
-| Analog audio `https://<host>:9444` | `9444` | `127.0.0.1:8081` |
-| Digital audio `https://<host>:9445` | `9445` | `127.0.0.1:8082` |
+| Public origin                           | Published TLS | Loopback upstream |
+| --------------------------------------- | ------------- | ----------------- |
+| API and WebSocket `https://<host>:9443` | `9443`        | `127.0.0.1:9000`  |
+| Analog audio `https://<host>:9444`      | `9444`        | `127.0.0.1:8081`  |
+| Digital audio `https://<host>:9445`     | `9445`        | `127.0.0.1:8082`  |
 
 Caddy uses `network_mode: service:wavekit-protected`, so the three TLS ports
 are published on `wavekit-protected`. Caddy binds `0.0.0.0` in that namespace,
@@ -506,7 +517,7 @@ loopback upstream. Each site sets `Host` from the incoming host and port
 The core image is the existing `final-core` build (`WAVEKIT_APP_IMAGE`,
 default `wavekit:local-core`). The sidecar image is `caddy:2`.
 
-A web app can run on its own port of the same hostname (WG9). The Caddyfile has
+A web app can run on its own port of the same hostname. The Caddyfile has
 a commented `https://<host>:9446` site that serves a built web app as static
 files, and `protected-runtime.yaml` has the matching commented
 `https://receiver.example:9446` entry under `access.allowedOrigins`. To use it,
@@ -516,13 +527,11 @@ credentials, so the site needs no proxy to the API. The scheme and hostname must
 match the API origin: the session cookie is host-only and `SameSite=Strict`, so
 another hostname or site is unsupported, and the configuration check refuses
 it. The pairing flow and the CORS rules are in
-[API.md](API.md#browser-pairing-for-a-web-origin-wg9).
+[API.md](API.md#browser-pairing-for-a-web-origin).
 
 Behind this proxy, per-address limits collapse to one shared loopback bucket.
 Caddy dials `127.0.0.1` in the shared network namespace, and the core ignores
 forwarded headers, so every LAN client shares that bucket.
-A trusted-proxy address source is a task 14 question. This profile does not
-add one.
 
 The core healthcheck runs the image copy of `docker/scripts/healthcheck.sh`
 (`/etc/s6-overlay/scripts/healthcheck.sh`) with the probe environment from
@@ -572,8 +581,7 @@ docker compose -f compose.yaml --profile protected run --rm --no-deps \
 Setup prints a public access plan. It does not print the machine credential.
 Run setup again only while the core is stopped.
 
-Starting the profile, installing the CA and pairing in a browser are
-deployment acceptance (task 14). The operator commands are:
+Start the profile:
 
 ```bash
 docker compose -f compose.yaml --profile protected up -d
@@ -678,8 +686,7 @@ linked above. Live reachability stays with deployment acceptance.
    has no `trusted_proxies` entry. Forwarded headers do not select the scheme
    or the listener role. Per-address limits are one shared loopback bucket,
    because every client is seen as `127.0.0.1`.
-   A trusted-proxy address source is a task 14 question. This profile does
-   not add one.
+   This profile does not add a trusted-proxy address source.
 4. Private-volume writers. `wavekit-protected-access` is mounted only by
    `wavekit-protected`, at the absolute `WAVEKIT_ACCESS_PRIVATE_DIRECTORY`.
    The sidecar does not mount it. Setup is a one-off of that same service

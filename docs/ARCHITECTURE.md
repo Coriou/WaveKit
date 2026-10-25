@@ -6,12 +6,16 @@ This document describes WaveKit's internal architecture, component design, and d
 
 WaveKit is a TypeScript-based SDR stream processing framework that:
 
-1. Connects to SDR sources over TCP (rtl_tcp, SDR++ network sink)
+1. Connects to an RTL-SDR over TCP (`rtl_tcp`, e.g. a Raspberry Pi running the SDR host or a local
+   USB dongle behind `rtl_tcp`); an SDR++ network sink and recordings also work as sources
 2. Multiplexes audio streams to multiple decoders in parallel
 3. Manages decoder process lifecycles with auto-restart
 4. Exposes decoded data via REST API and WebSocket
 5. Streams decoded audio over TCP
 6. Demodulates IQ to live audio over HTTP
+
+The web app (`web/`) is the main user interface; the CLI dashboard (`cli/`) and your own scripts
+use the same API.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -36,7 +40,7 @@ WaveKit is a TypeScript-based SDR stream processing framework that:
 │         │       ┌──────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
 │         │       │LiveDemod │  │ Tuner Relay │  │        External         │ │
 │         │       │HTTP :8081│  │  TCP :1234  │  │        Clients          │ │
-│         │       └──────────┘  └─────────────┘  │  CLI, Web UI, Players   │ │
+│         │       └──────────┘  └─────────────┘  │  Web app, CLI, Players  │ │
 │         │                                      └─────────────────────────┘ │
 │         ▼                                                                   │
 │  ┌─────────────┐                                                            │
@@ -57,7 +61,7 @@ Manages TCP connections to SDR sources with automatic reconnection.
 
 **Responsibilities**:
 
-- Establish TCP connections to rtl_tcp, SDR++ network sink, or recording files
+- Establish TCP connections to rtl_tcp (or an SDR++ network sink), or read recording files
 - Auto-reconnect with exponential backoff (2s → 4s → 8s → max 30s)
 - Emit connection events and data rate metrics
 - Track source capabilities (sample rate, format, exclusivity)
@@ -276,7 +280,8 @@ TCP server for streaming decoded audio.
 
 ### TunerController
 
-Primary RTL-TCP tuner control for internal tuning (with optional handoff to SDR++).
+RTL-TCP tuner control used by the web app and the API (with an optional handoff to an external
+client such as SDR++).
 
 **Location**: `src/core/tuner-controller.ts`
 
@@ -284,8 +289,8 @@ Primary RTL-TCP tuner control for internal tuning (with optional handoff to SDR+
 
 - Maintain per-source tuner state (frequency, gain, PPM, etc.)
 - Send RTL-TCP control commands upstream via `SourceManager.writeToSource()`
-- Toggle control mode (internal/external) for SDR++ handoff
-- Apply relay command updates to keep CLI/API state in sync with SDR++
+- Toggle control mode (internal/external) for an external tuner client
+- Apply relay command updates so the API state stays in sync with relay clients
 
 ### TunerRelay
 
@@ -352,10 +357,11 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 
 ### Dynamic Sample Rate Handling
 
-When connected via the TunerRelay, sample rate changes from SDR++ are propagated through the system automatically:
+Sample rate changes, whether made through the API (the web app) or by a TunerRelay client such
+as SDR++, are propagated through the system automatically:
 
 ```
-SDR++ → TunerRelay → SourceManager → caps-changed event
+API / TunerRelay → SourceManager → caps-changed event
                                           │
                     ┌─────────────────────┼─────────────────────┐
                     ▼                     ▼                     ▼
@@ -370,8 +376,6 @@ SDR++ → TunerRelay → SourceManager → caps-changed event
 - **LiveDemodulator** restarts its csdr pipeline with new decimation rates
 - **DecoderManager** gracefully restarts affected decoders
 - **WebSocket** broadcasts `source:caps-changed` to connected clients
-
-> **Note**: Dynamic sample rate only works for sources with an active TunerRelay connection.
 
 ## Data Flow
 
@@ -635,7 +639,7 @@ WaveKit uses s6-overlay as PID 1 for proper process supervision.
 ```
 wavekit-init (oneshot)
        │
-       ├── sdrpp-server (longrun) ─────┐
+       ├── sdrpp-server (longrun, `final` and `final-sdrpp` only) ─┐
        │                               │
        └── wavekit-api (longrun) ──────┤
                                        │
@@ -645,11 +649,14 @@ wavekit-init (oneshot)
 
 ### Build Targets
 
-| Target        | Contents               | Image Size |
-| ------------- | ---------------------- | ---------- |
-| `final`       | SDR++ + API + Decoders | ~1.5 GB    |
-| `final-core`  | API + Decoders         | ~800 MB    |
-| `final-sdrpp` | SDR++ only             | ~450 MB    |
+| Target        | Contents                                       | Image Size |
+| ------------- | ---------------------------------------------- | ---------- |
+| `final-core`  | API + Decoders                                 | ~800 MB    |
+| `final`       | `final-core` + SDR++ server (optional)         | ~1.5 GB    |
+| `final-sdrpp` | SDR++ only                                     | ~450 MB    |
+| `final-demod` | Interactive demod tools (opt-in `demod` group) | n/a        |
+
+Targets and tags are defined in `docker/bake.hcl`; see [Docker setup](DOCKER-SETUP.md).
 
 ## Testing Strategy
 

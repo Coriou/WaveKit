@@ -2,8 +2,8 @@
 
 The normal WaveKit runtime is the `final-core` Docker image. It bundles Node,
 the compatible DSP tools, and decoder binaries; you do not need to install
-decoder software on macOS. The standalone `app` profile runs independently of
-SDR++ and starts even when the Pi or dongle is unavailable.
+decoder software on macOS. The `app` profile starts even when the Pi or dongle
+is unavailable.
 
 ## Start without hardware
 
@@ -26,8 +26,9 @@ The API is at <http://127.0.0.1:9000>, with Swagger at `/docs` and WebSocket at
 expected; the binary tools are already inside the image. Stop the app with
 `make app-down`, which removes only this app container.
 
-The API, audio ports 8080/8081, and tuner relay 4713 are published on the host's
-loopback interface. Port 4713 carries RTL-TCP IQ when enabled. The app reads
+The API (9000), the raw audio TCP port (8080), live audio over HTTP (8081),
+digital-voice audio (8082) and the tuner relay (4713) are published on the
+host's loopback interface. Port 4713 carries RTL-TCP IQ when enabled. The app reads
 the selected config from `/app/config`; the repository's `config/` directory
 is mounted read-only, and `decoded_calls/` is writable for recordings.
 
@@ -48,10 +49,11 @@ the Linux container/VM even when they work on the Mac. Wi-Fi and Ethernet use
 the same application configuration; use the Pi's current address.
 
 The Pi acquires and relays IQ; the laptop's WaveKit container runs DSP and
-configured decoders. The example profile has `decoders: []`, so the dashboard's
-"No decoders configured in the server profile" is expected until entries are
-added to that profile. Bundled decoder executables do not start automatically.
-Choose decoders compatible with the receiver's current frequency and sample rate.
+decoders. The example profile has `decoders: []`, but an empty list does not mean no
+decoders: WaveKit adds every built-in decoder from its catalogue, enabled, and each one
+starts when its band falls inside the tuned window. Set `decoderPolicy.catalogue: false` to
+turn that off and run only the decoders you list, or switch single decoders off in
+Settings › Decoders.
 
 Source REST status includes `activity`: `waiting`, `streaming`, `stale`, `paused`,
 `disconnected`, or `ended`. It reflects payload delivered into the core, excluding
@@ -62,10 +64,7 @@ Neither implies sampling. `bytesReceived` is cumulative transport traffic; it
 includes headers and survives automatic reconnects. Activity freshness resets on
 reconnect. Fresh samples do not prove loss-free delivery or correct RF decoding.
 
-The CLI labels API connectivity separately and shows `status stale` after 15
-seconds without a successful source snapshot. It falls back to transport labels
-when an older core does not provide activity. These fields do not change health
-probe semantics; SDR-host sampling evidence remains a separate follow-up.
+These fields do not change health probe semantics.
 
 `WAVEKIT_APP_CONFIG` selects the full configuration. Use an absolute container
 path such as `/app/config/your-radio.local.yaml`; a Mac filesystem path is not
@@ -151,10 +150,10 @@ bridge. A working USB attachment and live RF decoding require hardware testing.
 
 ## Optional native development
 
-Native Node/watch scripts and the terminal dashboard remain available for
-development in [local setup](LOCAL-SETUP.md). The terminal dashboard is not
-bundled in `final-core`; that optional client currently runs with Node/pnpm
-on the host. The API, DSP tools, and decoders run in Docker.
+Native Node/watch scripts are described in [local setup](LOCAL-SETUP.md). The
+web app and the optional terminal dashboard are not bundled in `final-core`; run
+them with Node/pnpm on the host (see [Using the web app](WEB-APP.md)). The API,
+DSP tools, and decoders run in Docker.
 `pnpm run doctor` inventories
 executables on the machine where you run it; it is not a requirement to install
 those tools on macOS for Docker operation. The separate

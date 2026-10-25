@@ -1,8 +1,9 @@
 # Optional native development
 
-TypeScript SDR stream processing, decoder supervision, a REST/WebSocket API,
-and a terminal dashboard. IQ can come from a local USB dongle, a remote
-`rtl_tcp`/rtlmux host such as a Raspberry Pi, or a recording.
+Run the WaveKit core with Node on your own machine, without Docker. IQ can come
+from a local USB RTL-SDR dongle, a remote `rtl_tcp`/rtlmux host such as a
+Raspberry Pi, or a recording. The [web app](WEB-APP.md) connects to the core's
+API; the [terminal dashboard](CLI.md) is an optional second client.
 
 The normal runtime uses the [Docker application](DOCKER-RUNTIME.md), which
 bundles its decoder tools and requires no host decoder installation. The
@@ -24,9 +25,12 @@ dongle, Docker, or native decoder binaries. An empty source/message list is
 expected. Check `http://127.0.0.1:9000/health` and `/api/status`; Swagger UI is
 available at `/docs`.
 
-In a second terminal, run `pnpm dashboard`. Use `pnpm dev:local` for source
-watching, or `make dev-local`. The dashboard also supports
-`WAVEKIT_API_URL=http://127.0.0.1:3000 pnpm dashboard` for a different API port.
+In a second terminal, start the web app against it:
+`WAVEKIT_WEB_API=http://127.0.0.1:9000 pnpm --filter @wavekit/web dev` (see
+[Using the web app](WEB-APP.md)). Use `pnpm dev:local`, or `make dev-local`, to
+rebuild and restart on source changes. The optional terminal dashboard runs
+with `pnpm dashboard`; `WAVEKIT_API_URL=http://127.0.0.1:9001 pnpm dashboard`
+points it at a different API port.
 
 ## Protected mode locally
 
@@ -80,14 +84,14 @@ brew install librtlsdr
 pnpm rtl:serve
 # In another terminal:
 pnpm start:rtl
-# In a third terminal (optional):
-pnpm dashboard
+# In a third terminal, the web app:
+WAVEKIT_WEB_API=http://127.0.0.1:9000 pnpm --filter @wavekit/web dev
 ```
 
 The source is `127.0.0.1:1234`, and the API stays on port 9000. WaveKit connects
-to `rtl_tcp` once and fans out IQ internally. Connect SDR++ to WaveKit's RTL-TCP
-relay on `127.0.0.1:4713` if you want a tuner client; `rtl_tcp` itself supports
-one client at a time. Port 4713 carries binary IQ, not HTTP or WebSocket data.
+to `rtl_tcp` once and fans out IQ internally. `rtl_tcp` itself supports one
+client at a time; if you also want a desktop SDR client such as SDR++ or GQRX,
+point it at WaveKit's RTL-TCP relay on `127.0.0.1:4713` instead. Port 4713 carries binary IQ, not HTTP or WebSocket data.
 
 `pnpm rtl:serve --help` lists settings. For example,
 `RTL_TCP_FREQUENCY=433920000 RTL_TCP_GAIN=30 pnpm rtl:serve` starts on
@@ -95,10 +99,12 @@ one client at a time. Port 4713 carries binary IQ, not HTTP or WebSocket data.
 the corresponding source fields in your selected config as well. API tuner
 commands can retune a live source. Ctrl-C stops each foreground service.
 
-`config/local-rtl.yaml` enables the source and relay; decoders and live audio
-start disabled so missing optional tools do not prevent startup. For audio,
+`config/local-rtl.yaml` enables the source and relay and starts live audio
+disabled. It lists `decoders: []`, but WaveKit still adds the built-in decoders from
+its catalogue; one whose binary is missing is left out instead of
+stopping startup. Set `decoderPolicy.catalogue: false` to run only listed decoders. For audio,
 install the compatible `csdr` described below, then enable `liveDemod` in a copy
-of the config or through the live audio API/dashboard.
+of the config or through the web app or the live audio API.
 
 Docker Desktop runs Linux in a VM and
 [does not support direct USB passthrough](https://docs.docker.com/desktop/troubleshoot-and-support/faqs/general/).
@@ -108,12 +114,12 @@ also an optional bridge; Docker decoders can connect to a reachable source via
 `host.docker.internal`. See [Docker runtime](DOCKER-RUNTIME.md) for the normal
 container flow.
 
-## Connect to the recovered Pi
+## Connect to a Raspberry Pi
 
 After the Pi installer finishes, stop the local API and run `pnpm start:pi`.
 This uses `config/pi.yaml`, connects to `wavekit-pi.local:5555`, and polls the
-Pi's status API. The local API stays on port 9000; `pnpm dashboard` works with
-all three profiles. Use `pnpm dev:pi` for development.
+Pi's status API. The local API stays on port 9000, so the web app command above
+works with all three profiles. Use `pnpm dev:pi` for development.
 
 If the Pi has a different hostname, edit a copy of `config/pi.yaml` and select
 it with `WAVEKIT_CONFIG`; update both the source host and monitoring URLs.
@@ -137,10 +143,10 @@ Without an explicit selection, WaveKit loads `config/default.yaml` then
 contains the historical Pi address and container paths; it is an example for
 that setup and is not selected automatically.
 
-Activity recording stays off unless `activity.enabled` is true (or
-`WAVEKIT_ACTIVITY__ENABLED=true`). The database is
+Activity recording is on by default; set `activity.enabled: false` (or
+`WAVEKIT_ACTIVITY__ENABLED=false`) to turn it off. The database is
 `<stateDir>/activity/activity.db` (`stateDir` defaults to `data`, override
-`WAVEKIT_STATE_DIR`) and needs Node 24 with SQLite FTS5. See `docs/API.md`.
+`WAVEKIT_STATE_DIR`) and needs Node 24 with SQLite FTS5. See [API](API.md).
 
 ## Decoder capabilities
 
