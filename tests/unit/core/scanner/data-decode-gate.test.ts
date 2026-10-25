@@ -275,6 +275,58 @@ describe("data decode gate caps", () => {
 		expect(decide(kept, burst(T0, 1_600), [])).toEqual([true])
 	})
 
+	/** Notes `n` non-matching decodes, one per second from T0 + 1 s, each in its own rate bucket. */
+	function fill(gate: DataDecodeGate, n: number): void {
+		for (let i = 1; i <= n; i++) {
+			vi.setSystemTime(T0 + i * 1_000)
+			gate.noteEnvelope(pagingDecode(T0 + i * 1_000, { hz: HZ + 50_000 }))
+		}
+	}
+
+	it("after a wrap, a window starting before the oldest retained reception publishes despite a retained match", () => {
+		const gate = createDataDecodeGate()
+		fill(gate, DQ_DATA_RING)
+		// The match is retained and evicts the filler at T0 + 1 s; the oldest retained is T0 + 2 s.
+		gate.noteEnvelope(pagingDecode(T0 + 299_000))
+		expect(decide(gate, burst(T0, 300_000), [])).toEqual([false])
+	})
+
+	it("without a wrap the same long transmission with a retained match is data", () => {
+		const gate = createDataDecodeGate()
+		fill(gate, DQ_DATA_RING - 1)
+		gate.noteEnvelope(pagingDecode(T0 + 299_000))
+		expect(decide(gate, burst(T0, 300_000), [])).toEqual([true])
+	})
+
+	it("after a wrap, a window inside the retained coverage is still data", () => {
+		const gate = createDataDecodeGate()
+		fill(gate, DQ_DATA_RING)
+		gate.noteEnvelope(pagingDecode(T0 + 201_700))
+		expect(decide(gate, burst(T0 + 200_000, 1_600), [])).toEqual([true])
+		// A window starting 1 ms before the oldest retained reception (T0 + 2 s) falls back.
+		const edge = createDataDecodeGate()
+		fill(edge, DQ_DATA_RING)
+		edge.noteEnvelope(pagingDecode(T0 + 3_500))
+		expect(
+			decide(edge, burst(T0 + 2_000 + DQ_DATA_WINDOW_MS - 1, 1_600), []),
+		).toEqual([false])
+		const inside = createDataDecodeGate()
+		fill(inside, DQ_DATA_RING)
+		inside.noteEnvelope(pagingDecode(T0 + 3_500))
+		expect(
+			decide(inside, burst(T0 + 2_000 + DQ_DATA_WINDOW_MS, 1_600), []),
+		).toEqual([true])
+	})
+
+	it("after a wrap, a window at or before an overwritten out-of-order reception publishes", () => {
+		const gate = createDataDecodeGate()
+		// The first reception is produced late (T0 + 500 s) and is the first overwritten.
+		gate.noteEnvelope(pagingDecode(T0 + 500_000, { hz: HZ + 50_000 }))
+		fill(gate, DQ_DATA_RING)
+		gate.noteEnvelope(pagingDecode(T0 + 401_700))
+		expect(decide(gate, burst(T0 + 400_000, 1_600), [])).toEqual([false])
+	})
+
 	it("stop delivers held closes as not-data, once; later holds deliver at once", () => {
 		const gate = createDataDecodeGate()
 		const out: boolean[] = []
@@ -395,6 +447,37 @@ describe("data decode gate property", () => {
 				},
 			),
 			{ numRuns: 200 },
+		)
+	})
+})
+
+describe("data decode gate ring coverage property", () => {
+	it("after a wrap, only a window inside the retained coverage can be data", () => {
+		// Feature: detection-quality, Property 11: Data suppression
+		// Validates: Requirements 4.5
+		fc.assert(
+			fc.property(
+				fc.integer({ min: DQ_DATA_RING - 40, max: DQ_DATA_RING + 80 }),
+				fc.integer({ min: 0, max: 400_000 }),
+				fc.integer({ min: 500, max: 300_000 }),
+				fc.integer({ min: -DQ_DATA_WINDOW_MS, max: DQ_DATA_WINDOW_MS }),
+				(n, start, dur, offset) => {
+					const gate = createDataDecodeGate()
+					for (let i = 1; i <= n; i++) {
+						vi.setSystemTime(T0 + i * 1_000)
+						gate.noteEnvelope(pagingDecode(T0 + i * 1_000, { hz: HZ + 50_000 }))
+					}
+					// The matching decode is the newest entry, so it is always retained.
+					vi.setSystemTime(T0 + (n + 1) * 1_000)
+					gate.noteEnvelope(pagingDecode(T0 + start + dur + offset))
+					const evicted = n + 1 - DQ_DATA_RING
+					const from = T0 + start - DQ_DATA_WINDOW_MS
+					// Fillers are monotonic: the oldest retained is filler number evicted + 1.
+					const covered = evicted <= 0 || from >= T0 + (evicted + 1) * 1_000
+					expect(decide(gate, burst(T0 + start, dur), [])).toEqual([covered])
+				},
+			),
+			{ numRuns: 100 },
 		)
 	})
 })

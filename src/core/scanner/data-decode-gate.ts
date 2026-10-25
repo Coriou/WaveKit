@@ -76,6 +76,10 @@ export function createDataDecodeGate(
 		DQ_DATA_RING,
 	)
 	let next = 0
+	/** True once the ring has overwritten an entry. */
+	let wrapped = false
+	/** Latest produced time among overwritten receptions (they may arrive out of order). */
+	let evictedMaxAt = Number.NEGATIVE_INFINITY
 	const rate = new Map<string, { start: number; count: number }>()
 	const held = new Set<Held>()
 	let stopped = false
@@ -104,7 +108,20 @@ export function createDataDecodeGate(
 		return true
 	}
 
+	/**
+	 * After the ring has wrapped, a window that starts before the oldest retained
+	 * reception (or at or before any overwritten one) may have lost its match, so the
+	 * close publishes as today (4.5) whatever the retained entries say.
+	 */
+	const covered = (h: Held): boolean => {
+		if (!wrapped) return true
+		if (h.from <= evictedMaxAt) return false
+		const oldest = ring[next]
+		return oldest === undefined || h.from >= oldest.at
+	}
+
 	const matches = (h: Held): boolean => {
+		if (!covered(h)) return false
 		for (const r of ring) {
 			if (
 				r !== undefined &&
@@ -115,8 +132,6 @@ export function createDataDecodeGate(
 			)
 				return true
 		}
-		// No retained match. A wrapped ring may have overwritten one: unknown, so the
-		// close publishes as today (4.5) without a separate wrap check.
 		return false
 	}
 
@@ -156,6 +171,11 @@ export function createDataDecodeGate(
 				if (!admit(sourceId, now())) {
 					dropped++
 					return
+				}
+				const evicted = ring[next]
+				if (evicted !== undefined) {
+					wrapped = true
+					if (evicted.at > evictedMaxAt) evictedMaxAt = evicted.at
 				}
 				ring[next] = { sourceId, hz: f.hz, at }
 				next = (next + 1) % DQ_DATA_RING
