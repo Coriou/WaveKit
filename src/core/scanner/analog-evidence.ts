@@ -245,6 +245,7 @@ export function createAnalogEvidenceLog(
 				return out
 			for (const t of ring.values()) {
 				if (
+					t.data !== true &&
 					t.sourceId === sourceId &&
 					Math.abs(t.hz - hz) <= toleranceHz &&
 					(t.endedAtMs === null || t.endedAtMs >= sinceMs)

@@ -160,20 +160,26 @@ describe("data decode gate fixtures", () => {
 		).toEqual([false])
 	})
 
-	it.each<[string, EnvOpts, number]>([
-		["2 kHz away", { hz: HZ + 2_000 }, 1_800],
-		["1.5 s after close", {}, 1_600 + 1_500],
-		["probe basis", { basis: "probe" }, 1_800],
-		["unverified trust", { trust: "unverified" }, 1_800],
-		["missing source", { sourceId: null }, 1_800],
-		["no frequency", { noFrequency: true }, 1_800],
-		["no provenance", { noProvenance: true }, 1_800],
-		["voice category", { category: "voice" }, 1_800],
-	])("control: %s publishes", (_name, o, at) => {
+	// Each control differs from a matching decode in exactly one condition: with that
+	// condition removed (`{}` at `goodAt`) the same decode is data, so the control isolates it.
+	it.each<[string, EnvOpts, number, number]>([
+		["2 kHz away", { hz: HZ + 2_000 }, 1_800, 1_800],
+		["1.5 s after close", {}, 1_600 + 1_500, 1_600 + 1_000],
+		["probe basis", { basis: "probe" }, 1_800, 1_800],
+		["unverified trust", { trust: "unverified" }, 1_800, 1_800],
+		["missing source", { sourceId: null }, 1_800, 1_800],
+		["no frequency", { noFrequency: true }, 1_800, 1_800],
+		["no provenance", { noProvenance: true }, 1_800, 1_800],
+		["voice category", { category: "voice" }, 1_800, 1_800],
+	])("control: %s publishes", (_name, o, at, goodAt) => {
 		const gate = createDataDecodeGate()
-		expect(decide(gate, burst(T0, 1_600), [pagingDecode(at, o)])).toEqual([
+		expect(decide(gate, burst(T0, 1_600), [pagingDecode(T0 + at, o)])).toEqual([
 			false,
 		])
+		const twin = createDataDecodeGate()
+		expect(decide(twin, burst(T0, 1_600), [pagingDecode(T0 + goodAt)])).toEqual(
+			[true],
+		)
 	})
 
 	it("relay trust and aprs category match", () => {
