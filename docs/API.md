@@ -4872,11 +4872,15 @@ Activity reads (search, detail, facets, trails, band map and timeline) share
 one reader. One read runs at a time and up to 8 more wait in a shared queue.
 A caller may hold up to 4 reads, running plus waiting, so a page that opens
 the list, facets and messages at once is queued, not refused. A caller's
-reads run in the order they arrived, and waiting callers take turns, so one
-caller's burst does not hold up another. The reader deadline starts when a
-read runs, so a waiting read can take up to about 2 s behind other searches
-(8 x 250 ms), or up to 8 s behind trails, band map or timeline
-reads, before its own deadline. The caller is the admitted access
+reads start in the order they arrived, and waiting callers take one turn
+each in rotation, so one caller's burst delays another caller by at most one
+read per turn. A caller's first waiting read has at most 8 reads ahead of
+it; a later one is passed by at most 32 other reads (4 x 8), even while new
+callers keep arriving. Each read ends within its deadline (250 ms for
+search, detail and facets, 1 s for trails, band map and timeline), so that
+is about 2 s or 8 s behind searches and up to 8 s or 32 s behind the
+slower reads. Starting or restarting the reader (up to 5 s) happens before
+the deadline begins and comes on top. The caller is the admitted access
 principal (a session's device id, or the machine principal), or else the
 request IP. Without an access controller, admission keys on `request.ip`. A
 reverse proxy without `trustProxy` shares that one key, so every client shares
@@ -4884,6 +4888,8 @@ one caller's 4 slots. `x-activity-client` is ignored.
 
 A fifth read from one caller, or any read while the queue is full, gets 429
 `ACTIVITY_QUERY_BUSY` with `Retry-After: 1`. Retry after that many seconds.
+`Retry-After` is readable by cross-origin browsers in both access modes
+(`Access-Control-Expose-Headers: Retry-After`).
 
 **Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
 `snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
@@ -6625,7 +6631,9 @@ The audio stream ports have their own rule (WG7): legacy mode sends
 only the access layer's allowed origins. See
 [GET /stream](#get-httplocalhost8081stream-and-streamwav).
 
-CORS is enabled by default, allowing requests from any origin. Configure via:
+CORS is enabled by default, allowing requests from any origin. In legacy
+mode REST responses expose `Retry-After` to the browser
+(`Access-Control-Expose-Headers: Retry-After`). Configure via:
 
 ```yaml
 api:

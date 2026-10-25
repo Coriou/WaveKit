@@ -1083,6 +1083,8 @@ export class ApiServer {
 				origin: true, // Allow all origins (can be restricted in production)
 				methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 				allowedHeaders: ["Content-Type", "Authorization"],
+				// Browsers on another origin read a 429's retry hint only when exposed.
+				exposedHeaders: ["Retry-After"],
 				credentials: true,
 			})
 

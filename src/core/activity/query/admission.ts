@@ -19,10 +19,12 @@ export interface QueryAdmissionSnapshot {
 /**
  * Bounded reader admission. At most `maxExecuting` reads run, at most
  * `maxQueued` wait, and one client holds at most `maxInFlightPerClient`
- * of those (executing plus queued). A client's own requests run in arrival
- * order; across clients the queue is served round robin, so one client's
- * burst cannot starve another. A request is refused only when its client is
- * at its cap or the shared queue is full.
+ * of those (executing plus queued). A client's own requests start in
+ * arrival order; across clients the queue is served round robin (one turn
+ * per waiting client, newcomers join the end), so a waiting request is
+ * overtaken by at most `maxInFlightPerClient x maxQueued` others even under
+ * continuous arrivals. A request is refused only when its client is at its
+ * cap or the shared queue is full.
  */
 export class QueryAdmission {
 	private executing = 0

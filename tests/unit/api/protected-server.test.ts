@@ -13,6 +13,7 @@ import type {
 } from "../../../src/access/runtime-context.js"
 import { ApiServer } from "../../../src/api/server.js"
 import type { ApiServerDependencies } from "../../../src/api/server.js"
+import { ActivityQueryBusyError } from "../../../src/core/activity/query/errors.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
 
 const origin = "http://receiver.lan:9000"
@@ -245,6 +246,24 @@ describe("actual protected ApiServer mount", () => {
 				operatorDataAvailable: false,
 			},
 		})
+	})
+
+	it("exposes Retry-After on a busy Activity 429 to the allowed browser origin", async () => {
+		const env = await setup()
+		env.app.get("/api/test-activity-busy", async () => {
+			throw new ActivityQueryBusyError()
+		})
+		await env.server.start()
+		const response = await env.app.inject({
+			url: "/api/test-activity-busy",
+			headers: { ...env.machine, origin },
+		})
+		expect(response.statusCode).toBe(429)
+		expect(response.headers["retry-after"]).toBe("1")
+		expect(response.headers["access-control-allow-origin"]).toBe(origin)
+		expect(response.headers["access-control-expose-headers"]).toBe(
+			"Retry-After",
+		)
 	})
 
 	it("validates health Host and protects real status/source/docs/unknown handlers before side effects", async () => {

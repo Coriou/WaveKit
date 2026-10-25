@@ -595,7 +595,7 @@ describe("API Server", () => {
 			}
 		})
 
-		it("keeps an Activity query error status instead of rewriting it to 400", async () => {
+		it("keeps an Activity query error status and exposes Retry-After cross-origin", async () => {
 			const testDependencies: ApiServerDependencies = {
 				sourceManager:
 					mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -620,8 +620,15 @@ describe("API Server", () => {
 				const response = await app.inject({
 					method: "GET",
 					url: "/test-activity-busy",
+					headers: { origin: "http://web.example:5173" },
 				})
 				expect(response.statusCode).toBe(429)
+				expect(response.headers["access-control-allow-origin"]).toBe(
+					"http://web.example:5173",
+				)
+				expect(response.headers["access-control-expose-headers"]).toBe(
+					"Retry-After",
+				)
 				const body = JSON.parse(response.body) as {
 					code: string
 					error: string

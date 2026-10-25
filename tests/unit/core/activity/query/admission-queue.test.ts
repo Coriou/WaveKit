@@ -14,13 +14,26 @@ type Outcome =
 interface Tracked {
 	client: string
 	outcome: Outcome
+	/** Grants made by any admission before this request arrived. */
+	arrivedAfter: number
+	/** Grants made before this one, once granted. */
+	grantedAfter?: number
 }
+
+/** Grants observed across every tracked request, in resolution order. */
+let grantsSeen = 0
 
 /** Starts an acquire and records how it settles. */
 function track(admission: QueryAdmission, client: string): Tracked {
-	const tracked: Tracked = { client, outcome: { state: "pending" } }
+	const tracked: Tracked = {
+		client,
+		outcome: { state: "pending" },
+		arrivedAfter: grantsSeen,
+	}
 	admission.acquire(client).then(
 		release => {
+			tracked.grantedAfter = grantsSeen
+			grantsSeen += 1
 			tracked.outcome = { state: "granted", release }
 		},
 		(error: unknown) => {
@@ -106,7 +119,7 @@ describe("QueryAdmission queueing", () => {
 		}
 	})
 
-	it("serves queued clients round robin so one burst cannot starve another", async () => {
+	it("serves queued clients round robin so a burst takes one turn per rotation", async () => {
 		const admission = new QueryAdmission(1, 8, 4)
 		const all = [
 			track(admission, "a"),
@@ -129,6 +142,59 @@ describe("QueryAdmission queueing", () => {
 		}
 		// Request 0 ran at once; b's only request is served right after a's next one.
 		expect(served).toEqual([0, 1, 4, 2, 3])
+	})
+
+	it("under continuous arrivals a client's later queued reads wait one turn per waiting client", async () => {
+		// A runs; B queues 4 reads; C-F queue one each, so the queue of 8 is
+		// full. Each time a read finishes a new single-read client arrives.
+		const admission = new QueryAdmission(1, 8, 4)
+		const all: Tracked[] = [track(admission, "A")]
+		for (let index = 0; index < 4; index += 1) all.push(track(admission, "B"))
+		for (const client of ["C", "D", "E", "F"])
+			all.push(track(admission, client))
+		const served: string[] = []
+		const done = new Set<Tracked>()
+		let arrivals = 0
+		await flush()
+		while (served.filter(client => client === "B").length < 4) {
+			const running = all.find(
+				item => item.outcome.state === "granted" && !done.has(item),
+			)
+			if (!running) throw new Error("nothing running")
+			served.push(running.client)
+			done.add(running)
+			releaseGranted(running)
+			all.push(track(admission, `n${arrivals}`))
+			arrivals += 1
+			await flush()
+		}
+		expect(all.every(item => item.outcome.state !== "refused")).toBe(true)
+		expect(served).toEqual([
+			"A",
+			"B",
+			"C",
+			"D",
+			"E",
+			"F",
+			"B",
+			"n0",
+			"n1",
+			"n2",
+			"n3",
+			"n4",
+			"B",
+			"n5",
+			"n6",
+			"n7",
+			"n8",
+			"n9",
+			"n10",
+			"B",
+		])
+		// B's fourth read starts after 19 other executions: more than the 8
+		// queue slots, within the 4 x 8 turn bound.
+		expect(served.length - 1).toBe(19)
+		expect(served.length - 1).toBeLessThanOrEqual(4 * 8)
 	})
 
 	it("rejects queued requests on close and refuses later ones", async () => {
@@ -227,7 +293,7 @@ const stepArb: fc.Arbitrary<Step> = fc.oneof(
 describe("QueryAdmission invariants", () => {
 	// Feature: activity-recording-catalog, Property 5: Bounded failure
 	// Validates: Requirements 2.3, 7.2
-	it("keeps executing, queued and per-client counts bounded and consistent", async () => {
+	it("keeps counts bounded and consistent and every read within its turn bound", async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				fc.integer({ min: 1, max: 3 }),
@@ -291,6 +357,15 @@ describe("QueryAdmission invariants", () => {
 						expect(queuedSum).toBe(snap.queued)
 						// Work-conserving: nothing waits while a reader slot is free.
 						if (snap.queued > 0) expect(snap.executing).toBe(maxExecuting)
+						// Turn bound: a read is overtaken by at most
+						// maxPerClient x maxQueued other grants (round robin, bounded queue).
+						const bound = maxPerClient * maxQueued
+						for (const item of all) {
+							if (item.outcome.state === "refused") continue
+							const overtaken =
+								(item.grantedAfter ?? grantsSeen) - item.arrivedAfter
+							expect(overtaken).toBeLessThanOrEqual(bound)
+						}
 						// A client's requests are granted in arrival order.
 						for (const list of grantOrderByClient.values()) {
 							const states = list

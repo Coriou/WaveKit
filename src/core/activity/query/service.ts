@@ -103,10 +103,15 @@ export interface ActivityQueryLimits {
 	/** WG5: cooperative wall budget of an aggregate walk; past it `time-limit`. */
 	aggregatesWallBudgetMs: number
 	/**
-	 * Requests waiting behind the executing reader, across all clients. The
-	 * deadline starts at admission, so a queued read waits at most about
-	 * `maxQueued x deadline` (8 x 250 ms = 2 s for search, detail and facets;
-	 * 8 x 1 s for trails, band map and timeline) before its own deadline.
+	 * Requests waiting behind the executing reader, across all clients.
+	 * Guarantee: a client's reads start in arrival order and clients take
+	 * turns round robin, so a queued read is overtaken by at most
+	 * `maxInFlightPerClient x maxQueued` (32) other reads, however many new
+	 * clients keep arriving; a client's first waiting read has at most
+	 * `maxQueued` (8) turns ahead of it. Each turn ends within one deadline
+	 * (250 ms search, detail, facets; 1 s trails, band map, timeline), but
+	 * reader startup or restart (up to `READER_READY_TIMEOUT_MS`, 5 s) runs
+	 * before the deadline starts and is not bounded by it.
 	 */
 	maxQueued: number
 	maxExecuting: number

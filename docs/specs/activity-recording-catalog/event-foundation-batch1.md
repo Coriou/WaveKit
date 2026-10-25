@@ -146,17 +146,30 @@ read after the first answered 429. Admission now queues instead:
 - One client (the same key as before: access principal, else request IP) holds
   at most 4 requests, executing plus queued. Its excess waits in the shared
   queue instead of being refused.
-- A client's own requests run in arrival order. Across clients the queue is
-  served round robin, so one client's burst cannot starve another, and with 4
-  of 8 slots no single client fills the queue.
+- A client's own requests start in arrival order. Across clients the queue is
+  served round robin: each waiting client gets one turn per rotation, and a
+  client that arrives later joins the end. One client's burst therefore delays
+  another by at most one read per rotation, and with 4 of 8 slots no single
+  client fills the queue.
 - 429 `ACTIVITY_QUERY_BUSY` is returned only when the client is at its cap of
-  4 or the shared queue is full. The reply carries `Retry-After: 1`.
+  4 or the shared queue is full. The reply carries `Retry-After: 1`, exposed
+  to cross-origin browsers in legacy and protected access modes.
   `ACTIVITY_QUERY_TIMEOUT` carries no `Retry-After`: repeating an expensive
   query does not help.
-- The reader deadline starts at admission, not on arrival. A queued read waits
-  at most about `maxQueued x deadline` before it runs: 8 x 250 ms = 2 s behind
-  search, detail and facet reads, and up to 8 x 1 s = 8 s behind trails, band
-  map and timeline reads.
+- Wait guarantee, counted in turns. With 8 queued at most, at most 7 other
+  clients are ahead of a client in the rotation, so a client's first waiting
+  read has at most 8 turns ahead of it (the running read plus 7), and its
+  i-th waiting read is passed by at most i x 7 + (i - 1) others: at most 31,
+  32 turns with the running one, i.e. `maxInFlightPerClient x maxQueued`.
+  This holds under continuous arrivals of new clients; it is not a FIFO
+  position across clients (a client's 2nd to 4th reads can start after later
+  arrivals from other clients).
+- In time, each turn ends within one reader deadline (250 ms for search,
+  detail and facets; 1 s for trails, band map and timeline), so the worst
+  case is 32 x 250 ms = 8 s behind searches and 32 x 1 s = 32 s behind the
+  slower reads. Reader readiness is outside that bound: `perform()` waits for
+  reader startup or restart (its own 5 s budget) before the deadline timer
+  starts.
 
 ## Cursor and replay
 
