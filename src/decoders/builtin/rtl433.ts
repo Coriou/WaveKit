@@ -68,6 +68,20 @@ const DEFAULT_TARGET_SAMPLE_RATE = 1_000_000
 const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
 
 /**
+ * The rtl_433 channel rate the planner aims for (3.16): a valid configured
+ * `targetSampleRate`, else 1 MHz. The planner never widens past it.
+ */
+export function rtl433TargetRateHz(options: Record<string, unknown>): number {
+	const raw = options["targetSampleRate"]
+	return typeof raw === "number" &&
+		Number.isFinite(raw) &&
+		raw >= RTL433_TARGET_SAMPLE_RATE_MIN_HZ &&
+		raw <= RTL433_TARGET_SAMPLE_RATE_MAX_HZ
+		? raw
+		: DEFAULT_TARGET_SAMPLE_RATE
+}
+
+/**
  * RTL_433 Decoder - Decodes ISM band signals.
  *
  * Supports weather sensors, tire pressure monitors, and other ISM band devices.

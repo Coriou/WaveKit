@@ -88,6 +88,7 @@ export const decoderRateReasonCodes = [
 export const decoderSuspensionReasonCodes = [
 	...decoderRateReasonCodes,
 	"frequency-out-of-band",
+	"capture-too-narrow",
 	"tuner-scanning",
 	"efficiency-budget",
 	"decoder-unavailable",
