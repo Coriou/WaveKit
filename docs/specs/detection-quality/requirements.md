@@ -433,9 +433,12 @@ selection order with today's `absorb` (observations moved, `observationCount` an
 `airtimeMs` summed, `firstSeenAt`/`lastSeenAt` widened, `signal.best` by 3.3,
 `signal.last` from the later record, metadata, job ids, source ids and evidence unioned,
 majority class by 3.4, co-channel links re-pointed and pruned by 2.3, the absorbed id's
-recording folder adopted as an alias). `absorb`'s own compatibility guard (3.2) on the
-survivor's current medians still applies; a member it refuses stays a record. The absorbed
-ids are deleted as in every existing merge.
+recording folder adopted as an alias). The 3.2 guard for a planned pair is the plan's
+frozen 7.1 check (3.1 included); it is not re-run against medians the group's earlier
+members already moved, because that would make the result depend on the apply order and a
+resumed plan differ from an uninterrupted one. A survivor or member that carries operator
+state when the group runs (set after the plan was written) is skipped. The absorbed ids are
+deleted as in every existing merge.
 
 7.6 **Durability.** The plan is written atomically to a plan file before the first group
 runs. Each group is journaled with an existing journal op name (`rekey`) and the existing

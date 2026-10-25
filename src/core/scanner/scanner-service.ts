@@ -213,22 +213,14 @@ import {
 import {
 	SCANNER_JOURNAL_BACKLOG_CODE,
 	ScannerPersistence,
+	type ConsolidationPlanFile,
 	type LoadedState,
 	type PersistedJob,
 	type PersistedLease,
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
-import {
-	passiveCostDecision,
-	passiveProbationDue,
-	windowedUtilization,
-	type EluSample,
-} from "./passive-cost.js"
-import {
-	PASSIVE_COST_LIMIT_DEFAULT,
-	PASSIVE_COST_RECHECK_MS,
-	PASSIVE_COST_WINDOW_MS,
-} from "./passive-cost-contract.js"
+import { PassiveGuard } from "./passive-guard.js"
+import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
 	SCANNER_SETTINGS_BOUNDS,
 	applySettingsPatch,
@@ -453,6 +445,8 @@ const SNAPSHOT_EVERY_MS = 10_000
 const SNAPSHOT_REQUEST_MIN_MS = 1_000
 const MAINTENANCE_EVERY_MS = 5 * 60_000
 const STATUS_EVERY_MS = 1_000
+/** WG15 DQ 7.8: consolidation groups applied per event-loop turn at start-up. */
+const CONSOLIDATE_SLICE_GROUPS = 16
 const RECENT_KEEP_MS = 10_000
 const RECONFIRM_AFTER_MS = 15 * 60_000
 /** Task 29 review, finding 6: bound on waiting for the source caps to show a restored tuning. */
@@ -746,16 +740,8 @@ export class ScannerService extends EventEmitter {
 	private ingestChanges:
 		| [string, StoreChange, readonly string[] | undefined][]
 		| null = null
-	/**
-	 * § 10.7 / WG11 req 2: when the passive guard last judged each source's running engine. An entry
-	 * for another (replaced) engine counts as never checked, so the first window applies again.
-	 */
-	private readonly costCheckedAt = new Map<
-		string,
-		{ engine: SpectrumEngine; at: number; sample: EluSample | null }
-	>()
-	/** WG11 review M2: when the passive guard disabled each source (for the probation re-enable). */
-	private readonly passiveDisabledAt = new Map<string, number>()
+	/** WG15 DQ 8: the passive guard's windows, baselines and trials per source. */
+	private readonly passiveGuard = new PassiveGuard()
 	private readonly live = new Map<string, LiveObservation>()
 	private recent: LiveObservation[] = []
 	private readonly bestPsd = new Map<
@@ -1313,6 +1299,8 @@ export class ScannerService extends EventEmitter {
 		// Recovery inverses need the sole append writer before any public change listener.
 		this.store.off("mutation", this.onStoreMutation)
 		this.store.on("mutation", this.onStoreMutation)
+		// WG15 DQ 7.3 to 7.6: consolidate legacy duplicates before any ingest (journaled, resumable).
+		if (this.stateLoaded) await this.consolidateAtLoad()
 		if (loaded.droppedLines > 0)
 			this.log.warn(
 				{ droppedLines: loaded.droppedLines },
@@ -1406,6 +1394,62 @@ export class ScannerService extends EventEmitter {
 			},
 			"Scanner started",
 		)
+	}
+
+	/**
+	 * WG15 DQ 7.6: resumes an interrupted plan, or plans and applies a new one; the plan file is
+	 * removed only after a snapshot written after the last group is durable. Never throws.
+	 */
+	private async consolidateAtLoad(): Promise<void> {
+		try {
+			const read = await this.persistence.readConsolidationPlan()
+			// An invalid file was moved aside by the reader: no resume and no new plan this load (7.9).
+			if (read.kind === "invalid") return
+			let groups: ConsolidationPlanFile["groups"]
+			let resumed = false
+			let truncated = 0
+			if (read.kind === "ok") {
+				groups = read.plan.groups
+				resumed = true
+			} else {
+				const plan = this.store.consolidationPlan()
+				truncated = plan.truncated
+				if (plan.groups.length === 0) return
+				groups = plan.groups
+				await this.persistence.writeConsolidationPlan({
+					createdAt: new Date(this.now()).toISOString(),
+					groups,
+				})
+			}
+			// DQ 7.8: slices of 16 groups, yielding between them (no ingest runs yet).
+			const applied = { groups: 0, absorbed: 0 }
+			for (let i = 0; i < groups.length; i += CONSOLIDATE_SLICE_GROUPS) {
+				const part = this.store.applyConsolidation({
+					groups: groups.slice(i, i + CONSOLIDATE_SLICE_GROUPS),
+				})
+				applied.groups += part.groups
+				applied.absorbed += part.absorbed
+				if (i + CONSOLIDATE_SLICE_GROUPS < groups.length)
+					await new Promise<void>(resolve => setImmediate(resolve))
+			}
+			this.log.info(
+				{
+					resumed,
+					planned: groups.length,
+					groups: applied.groups,
+					absorbed: applied.absorbed,
+					truncated,
+				},
+				"Consolidated duplicate discoveries",
+			)
+			await this.persistence.writeSnapshotOf(this.store)
+			await this.persistence.removeConsolidationPlan()
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err },
+				"Discovery consolidation did not complete; the plan resumes at the next start",
+			)
+		}
 	}
 
 	sealAdmission(
@@ -6611,105 +6655,60 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * § 10.7 / WG11 req 2: passive off for a source whose spectrum engine costs more than the limit
-	 * (`scanner.passive.maxEngineUtilization`, default 0.25 of a core). Judged `PASSIVE_COST_WINDOW_MS`
-	 * after the engine opened, then every `PASSIVE_COST_RECHECK_MS`; a disabled source comes back at
-	 * or below `limit × PASSIVE_COST_CLEAR_RATIO`.
+	 * § 10.7 / WG11 req 2 / WG15 DQ 8: the passive cost guard, on every status tick (1 s). A sole
+	 * passive engine is judged on its whole utilization (WG11); a shared one on passive's marginal
+	 * cost over a measured baseline, with the saturation and baseline-window rules of DQ 8.4.
 	 */
 	private async checkPassiveCost(now: number): Promise<void> {
 		const limit =
 			this.settings().passive.maxEngineUtilization ?? PASSIVE_COST_LIMIT_DEFAULT
-		// WG11 review M2: a disabled source whose engine closed (no display holds it) gets probation.
-		for (const [sourceId, disabledAt] of [...this.passiveDisabledAt]) {
-			const engineOpen = this.spectrum.engine(sourceId) !== undefined
-			if (engineOpen) continue
-			this.costCheckedAt.delete(sourceId)
-			if (
-				!passiveProbationDue({
-					disabled: this.passiveDisabled.has(sourceId),
-					engineOpen,
-					sinceDisabledMs: now - disabledAt,
-				})
-			)
-				continue
-			this.passiveDisabled.delete(sourceId)
-			this.passiveDisabledAt.delete(sourceId)
-			this.log.info(
-				{ sourceId },
-				"Passive scanning on probation: re-enabling to re-measure the spectrum engine",
-			)
-			await this.refreshPassive()
-		}
-		for (const sourceId of this.spectrum.sourceIds()) {
-			const openedAt = this.spectrum.openedAt(sourceId)
+		const sources = new Set<string>(this.spectrum.sourceIds())
+		for (const sourceId of this.passiveDisabled.keys()) sources.add(sourceId)
+		const consumers = this.spectrum.allocation().consumers
+		for (const sourceId of sources) {
 			const engine = this.spectrum.engine(sourceId)
-			if (!engine || openedAt === null) {
-				this.costCheckedAt.delete(sourceId)
-				continue
-			}
-			const previous = this.costCheckedAt.get(sourceId)
-			const sameEngine = previous?.engine === engine
-			const lastCheck = sameEngine ? previous.at : null
-			const disabled = this.passiveDisabled.has(sourceId)
-			// Only a source with a passive job to turn off, or one this guard disabled, is judged.
-			if (!disabled && !this.jobs.has(`passive-${sourceId}`)) continue
-			const sinceOpenMs = now - openedAt
-			const sinceLastCheckMs = lastCheck === null ? null : now - lastCheck
-			const due =
-				sinceLastCheckMs === null
-					? sinceOpenMs >= PASSIVE_COST_WINDOW_MS
-					: sinceLastCheckMs >= PASSIVE_COST_RECHECK_MS
-			if (!due) continue
-			// WG11 review M1: utilization over the window since the previous check of this engine (the
-			// first check: since the worker started at open), never the engine's whole life.
-			// WG11 review: the sample carries its worker generation; a replaced worker (reconfigure) is a
-			// fresh window even when its counters exceed the previous worker's.
-			const worker = engine.eluSample()
-			const sample: EluSample | null =
-				worker === null
-					? null
-					: {
-							idle: worker.elu.idle,
-							active: worker.elu.active,
-							generation: worker.generation,
-						}
-			const utilization =
-				sample === null
-					? engine.utilization()
-					: windowedUtilization(
-							sample,
-							sameEngine ? (previous.sample ?? null) : null,
-						)
-			// An unknown reading is no judgement: the window keeps running until one is measurable.
-			if (utilization === null) continue
-			this.costCheckedAt.set(sourceId, { engine, at: now, sample })
-			const decision = passiveCostDecision({
-				utilization,
+			const worker = engine?.eluSample() ?? null
+			const action = this.passiveGuard.tick(
+				sourceId,
+				{
+					engine: engine ?? null,
+					openedAt: engine ? this.spectrum.openedAt(sourceId) : null,
+					consumers: consumers[sourceId] ?? null,
+					sample:
+						worker === null
+							? null
+							: {
+									idle: worker.elu.idle,
+									active: worker.elu.active,
+									generation: worker.generation,
+								},
+					utilization: engine?.utilization() ?? null,
+					tracked: this.jobs.has(`passive-${sourceId}`),
+				},
+				now,
 				limit,
-				disabled,
-				sinceOpenMs,
-				sinceLastCheckMs,
-			})
-			if (decision === "disable") {
-				this.passiveDisabled.set(
-					sourceId,
-					`engine-cpu ${(utilization * 100).toFixed(0)} % of a core`,
-				)
-				this.passiveDisabledAt.set(sourceId, now)
+			)
+			if (action.kind === "none") continue
+			if (action.kind === "disable") {
+				this.passiveDisabled.set(sourceId, action.reason)
 				this.log.warn(
-					{ sourceId, utilization },
-					"Passive scanning disabled: spectrum engine too costly on this host",
+					{ sourceId, row: action.result.row, value: action.result.value },
+					"Passive scanning disabled: passive costs too much of the spectrum engine on this host",
 				)
-				await this.refreshPassive()
-			} else if (decision === "clear") {
-				this.passiveDisabled.delete(sourceId)
-				this.passiveDisabledAt.delete(sourceId)
+			} else if (action.kind === "measure") {
+				this.passiveDisabled.set(sourceId, action.reason)
 				this.log.info(
-					{ sourceId, utilization },
-					"Passive scanning re-enabled: spectrum engine within budget",
+					{ sourceId },
+					"Passive scanning paused for one minute to measure the spectrum engine without it",
 				)
-				await this.refreshPassive()
+			} else {
+				this.passiveDisabled.delete(sourceId)
+				this.log.info(
+					{ sourceId, why: action.why },
+					"Passive scanning re-enabled",
+				)
 			}
+			await this.refreshPassive()
 		}
 	}
 

@@ -28,3 +28,8 @@ export interface PassiveCostInput {
 
 /** `disable` / `clear` change the source's passive state; `keep` changes nothing. */
 export type PassiveCostDecision = "disable" | "clear" | "keep"
+
+/** WG15 DQ 8.3: a baseline (engine cost without passive) is valid at most this long. */
+export const PASSIVE_BASELINE_MAX_AGE_MS = 1_800_000
+/** WG15 DQ 8.4 row 3: a shared engine at or above this utilization is saturated. */
+export const PASSIVE_SATURATION = 0.95

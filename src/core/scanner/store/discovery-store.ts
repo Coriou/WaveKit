@@ -100,6 +100,8 @@ import type { StoreMirrorRemoval } from "./mirror-sink.js"
 import { PendingAdmission, admissionSnrOf } from "./pending-admission.js"
 import {
 	DQ_CO_CHANNEL_MAX,
+	DQ_CONSOLIDATE_GROUP_MAX,
+	DQ_CONSOLIDATE_SCAN_MAX,
 	DQ_CREATE_SNR_DB,
 	DQ_CROSS_FAMILY_HZ,
 	DQ_IDENTITY_OVERLAP_MS,
@@ -113,6 +115,13 @@ import {
 	DQ_OVERLOAD_CREATE_SNR_DB,
 } from "../detection-quality-contract.js"
 import { compatible, recordsCompatible } from "./compatibility.js"
+import { joinable, planConsolidation, rankCompare } from "./consolidation.js"
+import type {
+	ConsolidationGroup,
+	ConsolidationPlan,
+	ConsolidationRecord,
+	PlanProbe,
+} from "./consolidation.js"
 import type { CompatibilitySide } from "./compatibility.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
@@ -426,6 +435,18 @@ function lruMerge<T>(
 		out.push(v)
 	}
 	return out.length > max ? out.slice(out.length - max) : out
+}
+
+/** DQ 7.1: any operator field set (label, notes, lockout, keep). */
+function hasOperatorState(d: Discovery): boolean {
+	const op = d.operator
+	return (
+		op !== undefined &&
+		(op.label !== undefined ||
+			op.notes !== undefined ||
+			op.lockout !== undefined ||
+			op.keep !== undefined)
+	)
 }
 
 function sameIdentity(
@@ -867,7 +888,7 @@ export class DiscoveryStore
 		)
 		if (sticky !== undefined)
 			return this.commit("observation", op =>
-				this.addObservation(op, sticky, input),
+				this.addObservation(op, this.lazyConsolidate(op, sticky, input), input),
 			)
 		const place = this.placement(
 			input.sourceId,
@@ -1281,6 +1302,145 @@ export class DiscoveryStore
 		this.deleteInto(op, d)
 		this.finish("delete", op)
 		return true
+	}
+
+	/**
+	 * DQ 7.3: the load plan over the records as they are now (frozen once). Pure apart from the
+	 * reads; nothing changes until `applyConsolidation`.
+	 */
+	consolidationPlan(probe?: PlanProbe): ConsolidationPlan {
+		const frozen: ConsolidationRecord[] = []
+		for (const d of this.discoveries.values()) frozen.push(this.frozenOf(d))
+		return planConsolidation(frozen, probe)
+	}
+
+	/**
+	 * DQ 7.5, 7.6: applies (or resumes) a plan. Each group is one operation journaled as `rekey`
+	 * with the ordinary merge mutation, so any reader replays it. A gone survivor skips its group;
+	 * gone members (already applied) are skipped, so a resumed or repeated plan is a no-op.
+	 */
+	applyConsolidation(plan: { groups: readonly ConsolidationGroup[] }): {
+		groups: number
+		absorbed: number
+	} {
+		let groups = 0
+		let absorbed = 0
+		for (const g of plan.groups) {
+			const keep = this.discoveries.get(g.survivor)
+			if (keep === undefined || hasOperatorState(keep)) continue
+			// 7.1: operator state set since the plan was written (a resume) is never merged.
+			const live = g.members.filter(id => {
+				const d = this.discoveries.get(id)
+				return id !== keep.id && d !== undefined && !hasOperatorState(d)
+			})
+			if (live.length === 0) continue
+			const op = newOp()
+			for (const id of live) {
+				const drop = this.discoveries.get(id)
+				if (drop !== undefined) this.absorb(op, keep, drop, true)
+			}
+			if (op.merged.length > 0) {
+				groups += 1
+				absorbed += op.merged.length
+			}
+			this.finish("rekey", op)
+		}
+		return { groups, absorbed }
+	}
+
+	/** DQ 7.1: a record's frozen values for the consolidation predicate. */
+	private frozenOf(d: Discovery): ConsolidationRecord {
+		const m = this.mediansOf(d.id)
+		const count = m?.count ?? 0
+		const recent = count < DQ_MIN_HISTORY_OBS ? this.recentOf(d.id) : []
+		return {
+			id: d.id,
+			sourceId: d.sourceIds[0] ?? "",
+			centreHz: m?.centre ?? d.frequencyHz + d.measuredOffsetHz,
+			obwHz: m?.obw ?? d.bandwidthHz,
+			peakDbfs: m?.peak ?? Number.NaN,
+			count,
+			young: recent.map(o => ({ peakDbfs: o.peakDbfs, obwHz: o.obwHz })),
+			identity: d.identity,
+			family: this.effectiveLabel(d).family,
+			decoded: d.confidence === "decoded",
+			protocol: d.protocol,
+			firstSeenAt: d.firstSeenAt,
+			hasOperator: hasOperatorState(d),
+		}
+	}
+
+	/**
+	 * DQ 7.7: on a sticky match to `m`, absorbs the records joinable to the group's survivor among
+	 * the 32 nearest to `m`'s median centre (within 1 kHz); returns the survivor the observation
+	 * goes to. Bounded: 7 lists x 33 entries visited, at most 32 candidates checked.
+	 */
+	private lazyConsolidate(
+		op: Op,
+		m: Discovery,
+		obs: ObservationInput,
+	): Discovery {
+		const sourceId = m.sourceIds[0] ?? ""
+		const centre = this.medianCentre(m)
+		if (!Number.isFinite(centre)) return m
+		this.syncIndex()
+		const seen = new Set<string>([m.id])
+		const hits: IndexedCentre[] = []
+		for (const family of CENTRE_FAMILIES)
+			for (const e of this.centres.nearest(
+				sourceId,
+				family,
+				centre,
+				DQ_CROSS_FAMILY_HZ,
+				DQ_CONSOLIDATE_SCAN_MAX + 1,
+			))
+				if (!seen.has(e.id)) {
+					seen.add(e.id)
+					hits.push(e)
+				}
+		if (hits.length === 0) return m
+		hits.sort(
+			(a, b) =>
+				Math.abs(a.centreHz - centre) - Math.abs(b.centreHz - centre) ||
+				compareText(a.id, b.id),
+		)
+		if (hits.length > DQ_CONSOLIDATE_SCAN_MAX)
+			hits.length = DQ_CONSOLIDATE_SCAN_MAX
+		const fm = this.frozenOf(m)
+		const scanned: ConsolidationRecord[] = []
+		for (const e of hits) {
+			const d = this.discoveries.get(e.id)
+			if (d !== undefined) scanned.push(this.frozenOf(d))
+		}
+		const toM = scanned.filter(c => joinable(fm, c))
+		if (toM.length === 0) return m
+		// The survivor: the highest-ranked of m and the records joinable to m that the observation
+		// itself may join (3.1), so the observation never lands on a record that refuses it.
+		const pool = [fm, ...toM].sort(rankCompare)
+		let survivor = m
+		let fs = fm
+		for (const c of pool) {
+			const d = this.discoveries.get(c.id)
+			if (d !== undefined && this.obsCompatible(d, obs) !== false) {
+				survivor = d
+				fs = c
+				break
+			}
+		}
+		const members = [fm, ...scanned]
+			.filter(
+				c =>
+					c.id !== fs.id &&
+					Math.abs(c.centreHz - centre) <= DQ_CROSS_FAMILY_HZ &&
+					joinable(fs, c),
+			)
+			.slice(0, DQ_CONSOLIDATE_GROUP_MAX - 1)
+		for (const c of members) {
+			const drop = this.discoveries.get(c.id)
+			if (drop !== undefined && drop.id !== survivor.id)
+				this.absorb(op, survivor, drop)
+		}
+		return survivor
 	}
 
 	rekey(
@@ -3151,9 +3311,17 @@ export class DiscoveryStore
 		}
 	}
 
-	private absorb(op: Op, keep: Discovery, drop: Discovery): void {
-		// DQ 3.2: any caller is covered; an incompatible pair is never merged.
-		if (this.pairCompatible(keep, drop) === false) return
+	private absorb(
+		op: Op,
+		keep: Discovery,
+		drop: Discovery,
+		planned = false,
+	): void {
+		// DQ 3.2: any caller is covered; an incompatible pair is never merged. DQ 7.5: a planned
+		// consolidation pair was checked on the frozen values (3.1 included) when the plan was made;
+		// re-checking against medians the group's earlier members already moved would make the
+		// result depend on the apply order and a resumed plan differ from an uninterrupted one.
+		if (!planned && this.pairCompatible(keep, drop) === false) return
 		// DQ 3.3: the better of the two bests, but never one an overload observation set.
 		// The dropped record's best must also pass 3.3 against the survivor's medians.
 		const keepBestOk = this.bestEligible(keep)

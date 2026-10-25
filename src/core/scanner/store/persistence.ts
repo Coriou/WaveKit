@@ -21,6 +21,7 @@ import {
 	rm,
 	truncate,
 } from "node:fs/promises"
+import { DQ_CONSOLIDATE_GROUP_MAX } from "../detection-quality-contract.js"
 import { join, resolve } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -73,6 +74,9 @@ const FILE_VERSION = 1
 const SNAPSHOT_FILE = "discoveries.json"
 const JOBS_FILE = "jobs.json"
 const SETTINGS_FILE = "settings.json"
+/** WG15 DQ 7.6: an in-flight consolidation plan, kept until a snapshot after it is durable. */
+const CONSOLIDATION_PLAN_FILE = "consolidation-plan.json"
+const CONSOLIDATION_PLAN_MAX_GROUPS = 1_000_000
 const JOURNAL_DIR = "journal"
 const ENGINE_DIR = "engine"
 /** A subdirectory, so readEngines (direct `engine/*.json` only) never sees these files. */
@@ -383,6 +387,31 @@ const SettingsFileSchema = z.object({
 	version: z.literal(FILE_VERSION),
 	settings: RuntimeSettingsOverridesSchema,
 })
+const ConsolidationPlanFileSchema = z
+	.object({
+		version: z.literal(FILE_VERSION),
+		createdAt: z.string(),
+		groups: z
+			.array(
+				z
+					.object({
+						survivor: z.string().min(1),
+						members: z
+							.array(z.string().min(1))
+							.max(DQ_CONSOLIDATE_GROUP_MAX - 1),
+					})
+					.strict(),
+			)
+			.max(CONSOLIDATION_PLAN_MAX_GROUPS),
+	})
+	.strict()
+
+/** WG15 DQ 7.6: the persisted consolidation plan (group order is the apply order). */
+export interface ConsolidationPlanFile {
+	createdAt: string
+	groups: { survivor: string; members: string[] }[]
+}
+
 const JournalLineSchema = z.object({
 	seq: z.number().int().positive(),
 	at: z.string(),
@@ -1052,6 +1081,60 @@ export class ScannerPersistence {
 			"\t",
 		)
 		return this.enqueue(() => atomicWrite(join(this.root, SETTINGS_FILE), text))
+	}
+
+	/**
+	 * WG15 DQ 7.6: the plan file. `missing` when absent; `invalid` (logged, moved aside) when it
+	 * cannot be used: the caller then neither resumes nor plans this load.
+	 */
+	async readConsolidationPlan(): Promise<
+		| { kind: "missing" }
+		| { kind: "invalid" }
+		| { kind: "ok"; plan: ConsolidationPlanFile }
+	> {
+		const file = join(this.root, CONSOLIDATION_PLAN_FILE)
+		const read = await readJson(file)
+		if (read.kind === "missing") return { kind: "missing" }
+		const parsed =
+			read.kind === "ok"
+				? ConsolidationPlanFileSchema.safeParse(read.value)
+				: null
+		if (parsed === null || !parsed.success) {
+			const aside = await this.moveAside(file)
+			this.log.warn(
+				{
+					file,
+					movedTo: aside,
+					issues: parsed?.success === false ? parsed.error.issues : undefined,
+					err: read.kind === "invalid" ? read.reason : undefined,
+				},
+				"Scanner consolidation plan is invalid; not resumed",
+			)
+			return { kind: "invalid" }
+		}
+		return {
+			kind: "ok",
+			plan: { createdAt: parsed.data.createdAt, groups: parsed.data.groups },
+		}
+	}
+
+	/** Atomic (tmp, fsync, rename), queued behind earlier writes. */
+	writeConsolidationPlan(plan: ConsolidationPlanFile): Promise<void> {
+		const text = JSON.stringify({
+			version: FILE_VERSION,
+			createdAt: plan.createdAt,
+			groups: plan.groups,
+		})
+		return this.enqueue(() =>
+			atomicWrite(join(this.root, CONSOLIDATION_PLAN_FILE), text),
+		)
+	}
+
+	/** Removes the plan file (no error when absent). Call only after a durable snapshot. */
+	removeConsolidationPlan(): Promise<void> {
+		return this.enqueue(() =>
+			rm(join(this.root, CONSOLIDATION_PLAN_FILE), { force: true }),
+		)
 	}
 
 	writeEngine(sourceId: string, s: EngineState): Promise<void> {

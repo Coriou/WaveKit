@@ -2,6 +2,7 @@ import {
 	PASSIVE_COST_CLEAR_RATIO,
 	PASSIVE_COST_RECHECK_MS,
 	PASSIVE_COST_WINDOW_MS,
+	PASSIVE_SATURATION,
 	type PassiveCostDecision,
 	type PassiveCostInput,
 } from "./passive-cost-contract.js"
@@ -83,4 +84,96 @@ export function windowedUtilization(
 	const total = active + idle
 	if (!Number.isFinite(total) || total <= 0) return null
 	return active / total
+}
+
+/** WG15 DQ 8.1: who holds the source's engine. `closed`: no engine open. */
+export type PassiveHolders = "sole" | "shared" | "off" | "closed"
+
+export interface PassiveGuardInput {
+	/** Passive is enabled (not disabled by this guard). */
+	enabled: boolean
+	holders: PassiveHolders
+	/** U over a completed window (8.2); null when there is no measurement. */
+	measurement: number | null
+	/** A valid baseline B (8.3); null when unavailable. */
+	baseline: number | null
+	limit: number
+	/** Rows 2 to 4 are judged at a window's first completion, then every 300 s. */
+	judgementDue: boolean
+	baselineWindowAllowed: boolean
+	/** 8.6: a disabled source's trial is due. */
+	trialDue: boolean
+	/** WG11 probation (engine closed). */
+	probationDue: boolean
+}
+
+export type PassiveGuardDecision =
+	| "keep"
+	| "disable"
+	| "clear"
+	| "baseline"
+	| "trial"
+
+export interface PassiveGuardResult {
+	decision: PassiveGuardDecision
+	/** The 8.4 row that decided. */
+	row: number
+	/** `disabledReason` figure: whole engine (rows 2, 3) or marginal (row 4). */
+	figure: "engine" | "passive" | null
+	/** The figure's value (U or M) when it disables. */
+	value: number | null
+}
+
+const finite = (x: number | null): x is number =>
+	x !== null && Number.isFinite(x)
+
+/**
+ * WG15 DQ 8.4: the passive guard precedence table, first matching row wins. Pure. Row 2 is
+ * exactly the WG11 rule (`passiveCostDecision`) on the whole engine.
+ */
+export function passiveGuardDecision(
+	input: PassiveGuardInput,
+): PassiveGuardResult {
+	const keep = (row: number): PassiveGuardResult => ({
+		decision: "keep",
+		row,
+		figure: null,
+		value: null,
+	})
+	const { enabled, holders, measurement: u, limit } = input
+	if (!enabled && holders === "closed")
+		return input.probationDue
+			? { decision: "clear", row: 11, figure: null, value: null }
+			: keep(11)
+	if (!finite(u) || !Number.isFinite(limit)) return keep(1)
+	if (enabled) {
+		// Enabled but not on the engine (a restore in flight): nothing of passive to judge.
+		if (holders === "off" || holders === "closed") return keep(1)
+		if (holders === "sole") {
+			if (!input.judgementDue) return keep(2)
+			const over = u > limit
+			return over
+				? { decision: "disable", row: 2, figure: "engine", value: u }
+				: keep(2)
+		}
+		if (u >= PASSIVE_SATURATION)
+			return { decision: "disable", row: 3, figure: "engine", value: u }
+		const b = input.baseline
+		if (finite(b)) {
+			if (!input.judgementDue) return keep(4)
+			const m = Math.max(0, u - b)
+			return m > limit
+				? { decision: "disable", row: 4, figure: "passive", value: m }
+				: keep(4)
+		}
+		if (u <= limit) return keep(5)
+		if (input.baselineWindowAllowed)
+			return { decision: "baseline", row: 6, figure: null, value: null }
+		return keep(7)
+	}
+	if (u <= limit * PASSIVE_COST_CLEAR_RATIO)
+		return { decision: "clear", row: 8, figure: null, value: null }
+	if (input.trialDue && finite(input.baseline))
+		return { decision: "trial", row: 9, figure: null, value: null }
+	return keep(10)
 }

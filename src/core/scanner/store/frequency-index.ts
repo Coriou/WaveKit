@@ -3,6 +3,8 @@
  * centre (ties by id), so sticky association binary-searches its tolerance window instead of
  * scanning every discovery of the source.
  */
+import { nearest } from "./consolidation.js"
+
 export interface IndexedCentre {
 	readonly centreHz: number
 	readonly id: string
@@ -96,6 +98,22 @@ export class CentreIndex {
 			if (e === undefined || e.centreHz > highHz) break
 			visit(e)
 		}
+	}
+
+	/**
+	 * DQ 7.7: the `k` entries of one list nearest to `centreHz` within `radiusHz`, nearest first
+	 * (ties: smaller id). O(log n + k), independent of how many entries share the window.
+	 */
+	nearest(
+		sourceId: string,
+		family: string,
+		centreHz: number,
+		radiusHz: number,
+		k: number,
+	): IndexedCentre[] {
+		const list = this.lists.get(CentreIndex.key(sourceId, family))
+		if (list === undefined) return []
+		return nearest(list, centreHz, radiusHz, k)
 	}
 
 	/** Non-finite centres refused since construction (tests). */

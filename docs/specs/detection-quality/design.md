@@ -345,8 +345,8 @@ rules are property-tested on the function without a store.
 
 Store: `consolidatePlan(): Plan` (builds records, calls the planner) and
 `applyConsolidation(plan): { groups, absorbed }`. Each group runs `commit("rekey", op =>
-...)`, absorbing each still-live member into the still-live survivor with `absorb` (whose
-3.2 guard sees the survivor's current medians), so the journal line is the ordinary merge
+...)`, absorbing each still-live member into the still-live survivor with `absorb` (`planned`: the pair was checked on frozen values, so the 3.2 re-check against medians
+earlier members moved is skipped, requirement 7.5), so the journal line is the ordinary merge
 mutation. `rekey` is a journal op every existing reader accepts (`JournalLineSchema`,
 `src/core/scanner/store/persistence.ts` line 389); `replay` applies the payload whatever
 the op name (about line 1922), so an older reader replays a group as an ordinary merge. A
