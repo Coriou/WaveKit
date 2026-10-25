@@ -28,6 +28,12 @@ signal processing. The plan that follows from them is in
    sample format changes.
 6. **Read IQ once per source.** A new consumer asks the per-source engine for a
    channel or an output. It does not add another full-rate fanout branch.
+   Exception: the catalogue rtl_433 at capture rates up to 2.4 Msps takes one
+   full-rate raw branch. Measured on a Mac (load average 9 to 12), the branch adds
+   about 1.5 to 1.8 points of Node CPU and about 0.6 ms event-loop p99 at 1.024 and
+   2.4 Msps, with no drops; rtl_433 itself takes 2.6 % of a core at 1.024 Msps. The
+   channelizer path it replaces took 13 to 19 % of a core plus 3 to 5 points of
+   Node CPU. Raspberry Pi figures are still to be measured.
 7. **Measure, then claim.** Each optimisation lands with a bench (`scripts/bench/`
    or `native/*/examples/`), a before/after table in its pull request, and tests
    for chunk-split invariance and equivalence with the implementation it

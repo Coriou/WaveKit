@@ -468,12 +468,16 @@ assessment is `out-of-band`, judged on the pipeline's real window.
 suspension with the current `reasonCode`. A change of reason code resets it; a re-evaluation
 with the same reason while still suspended keeps it; suspend, run, suspend with the same
 reason starts a new interval.
-3.16 **rtl_433 fits the window.** The rtl_433 channel is the widest one that fits the usable
-window around the band and window overlap, at most its 1 MHz target and at least 250 kHz, by
-the arithmetic in the design; `-s` equals the realised stdin rate. A changed rate restarts the
-placement once; a moved centre at the same rate retunes in place. At 1.024 Msps centred anywhere in 433.05–434.79 MHz rtl_433
-is placed. Below a 250 kHz fit the reason is `capture-too-narrow`. The channel stays a
-channelizer channel (no full-rate raw fallback, PERFORMANCE rule 6).
+3.16 **rtl_433 sees the whole capture.** When the band overlaps the usable window and the
+capture rate is 250 ksps to 2.4 Msps, the catalogue rtl_433 decoder reads the raw source stream
+(reach `raw`, no channel, no resampling, `-s` = the capture rate, `-f` = the capture centre);
+band plans enable and order it, never narrow what it hears. A moved capture centre restarts it
+so `-f` stays current. Above 2.4 Msps its channel is the widest one that fits the usable window
+around the band and window overlap, at most its 1 MHz target and at least 250 kHz; a changed
+rate or a moved channel restarts the placement (no in-place retune, `-f` is the channel
+centre). Below 250 ksps the reason is `capture-too-narrow`. Rationale: a sensor near the window
+edge (about 0.93 of Nyquist) lies outside every channelizer channel and decodes only from the
+raw stream.
 3.17 **LoRa follows the regional band.** The catalogue LoRa decoder in an EU region declares both
 EU slots (`EU_868` and `EU_433`, the region's default channel in each), and the planner places it
 on whichever slot fits the usable window, passing the matching `--region` and frequency. An
