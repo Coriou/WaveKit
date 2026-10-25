@@ -1042,7 +1042,7 @@ const R = [
 	S('sys.health', 'system', 'Check decoders every', { kind: 'sel', opts: [[2, '2 s'], [5, '5 s'], [10, '10 s']], def: 5, more: true }),
 	S('sys.fault', 'system', 'Stop retrying a decoder after', { kind: 'step', def: 5, min: 1, max: 20, step: 1, unit: ' failures', more: true, sub: 'Used by Decoders › Restart a failed decoder' }), // polish 2026-10-11
 	S('sys.flat', 'system', 'Silence threshold', { kind: 'step', def: -40, min: -80, max: -10, step: 5, unit: ' dBFS', more: true, sub: 'Below this the antenna hears nothing, so decoders pause', alias: 'flat signal' }), // polish 2026-10-11
-	S('sys.ports', 'system', 'Ports', { kind: 'read', text: 'API 3000 · audio 8080', more: true, lock: 'compose.yaml', lockNote: 'Set at deploy in compose.yaml' }),
+	S('sys.ports', 'system', 'Ports', { kind: 'read', text: 'API 9000 · audio 8080', more: true, lock: 'compose.yaml', lockNote: 'Set at deploy in compose.yaml' }),
 	S('sys.data', 'system', 'Data folder', { kind: 'read', text: 'data/', more: true, lock: 'WAVEKIT_STATE_DIR' })
 ];
 const BY = {};

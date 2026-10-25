@@ -151,7 +151,7 @@ already queued. The private session snapshot is version 2; a version 1 snapshot 
 with null labels and is written as version 2 on the next commit. An older WaveKit
 refuses a version 2 snapshot and fails closed.
 
-Rolling back to a core older than WG2: the older core refuses the state file and
+Rolling back to a core older than the web-gaps-2 release: the older core refuses the state file and
 protected access stays unavailable until it is fixed. The machine token is in the
 unchanged outer envelope (`machineToken`), so it survives if only the inner `sessions`
 object is rewritten as version 1. With the core stopped, in the private directory:
@@ -160,7 +160,7 @@ access-state.json > access-state.json.v1`, then `chmod 600 access-state.json.v1`
 `mv access-state.json.v1 access-state.json`. Device labels and last-seen hours are
 lost; remembered browsers and the machine token are kept. Without that rewrite the
 alternative is re-provisioning, which issues a new machine token. Update the CLI with
-the core: a CLI from before WG2 reading the credential with `--credential-format
+the core: a CLI from before the web-gaps-2 release reading the credential with `--credential-format
 access-state` (the default) refuses a version 2 snapshot (`ACCESS_CREDENTIAL_UNAVAILABLE`);
 `--credential-format token` with an exported token file is not affected.
 
@@ -450,7 +450,7 @@ snapshots.
 #### GET /api/resources/sdr-hosts
 
 `SdrHostStatus[]`, one per configured SDR host (also `sdrHosts` in
-`GET /api/resources` and one host at `/api/resources/sdr-hosts/:sourceId`). WG4
+`GET /api/resources` and one host at `/api/resources/sdr-hosts/:sourceId`). The web-gaps-4 release
 adds optional `version`: the version the SDR host reports in its own
 `GET /api/status` (the `@wavekit/sdr-host` package version), kept only when it is
 1–64 printable ASCII characters, otherwise null; null while the host is
@@ -735,7 +735,7 @@ and legacy composition under the normal API admission.
 
 `lat` and `lon` form a pair. When the environment or YAML sets either of them,
 both are pinned and the configured values are used as they are (a configured
-half pair stays a half pair, as before WG4); otherwise a UI pair applies only
+half pair stays a half pair, as before the web-gaps-4 release); otherwise a UI pair applies only
 when both halves are stored. The effective pair (when both are set) is passed to
 readsb as `--lat`/`--lon` (a complete valid readsb option pair still wins) and is
 the origin of [`GET /api/coverage`](#coverage); no other decoder receives station
@@ -975,7 +975,7 @@ parses: `sdrpp-json` (SDR++ band plan JSON), `sdrsharp-xml` (SDR# `BandPlan.xml`
 `BANDPLANS_IMPORT_INVALID`. Files are uploaded in the request body, or fetched by
 core from an allowlisted URL (below). Imports, like every band-plan write,
 need protected mode. The
-imported pack's provenance records the file's `format`; state written before WG5
+imported pack's provenance records the file's `format`; state written before the web-gaps-5 release
 reads as `sdrpp-json`.
 
 - `sdrsharp-xml`: strict UTF-8 (a BOM is stripped; UTF-16 is rejected). The root
@@ -1032,12 +1032,12 @@ provenance (`provenance.groupOverrides`, sorted by `sourceType` as the digest
 sorts them, at most 64; absent when there are none). This applies to uploads
 and URL imports. A re-import with `replacesPackId` takes the overrides of the
 new commit. `check-update` applies the stored overrides to the fresh file, so
-the diff compares like with like. Packs stored before WG7 load unchanged and
+the diff compares like with like. Packs stored before the web-gaps-7 release load unchanged and
 are checked without overrides.
 
 URL and fetch rules: `https:` only, no user info, no explicit port (also not
 `:443`), no fragment (also not an empty `#`), at most 2,048 characters, and an
-exact lower-case host from the allowlist (no IP literal). Since WG7 the request
+exact lower-case host from the allowlist (no IP literal). Since the web-gaps-7 release the request
 schema judges the raw string as the fetcher does. A control character, space,
 DEL, backslash or `#` is refused, and the authority must have no `:` or `@`.
 One known difference fails safe. The schema still accepts a percent-encoded or
@@ -1212,7 +1212,7 @@ stay in `unknownFields` until written on the current connection, and `reset`
 returns to them. A failed write is a restore failure (`lastError`, retried on the
 next connection). A `config` write is not operator activity: it never preempts a
 scanner lease. Without `tuner` every connect writes exactly what it wrote before
-WG11. Through a shared rtlmux every core (re)connect rewrites the configured gain,
+the web-gaps-11 release. Through a shared rtlmux every core (re)connect rewrites the configured gain,
 overwriting a gain another client (SDR++) set there; a gain set through this API
 still wins.
 
@@ -1298,7 +1298,7 @@ first operator frequency command on a connection first writes the sample rate th
 core already holds, when that rate is declared only or was not written on the current
 connection. `PATCH /api/tuner/:sourceId/config` with a frequency and no sample rate
 does the same. The value never changes; the write is a command of origin `rest`, so
-labels that need both frequency and rate written on the current connection (WG9,
+labels that need both frequency and rate written on the current connection (web-gaps-9,
 for example `live-audio:transmission` frequencies) turn `commanded` after the first
 operator tune instead of staying `unverified`. At most one extra rtl_tcp
 command per connection; concurrent requests share one write. Never written when the
@@ -1554,7 +1554,7 @@ Configuration notes:
   (0.4 dB/s) catches up, about 15 s for a 10 dB step with margin 6 dB. Cold
   starts, rebuilds and mode changes seed from the first block alone. This is not
   calibrated noise measurement.
-  WG10, `nfm` and `wfm` only: a block whose FM quieting is at least the noise-squelch
+  web-gaps-10, `nfm` and `wfm` only: a block whose FM quieting is at least the noise-squelch
   default (6 dB, a carrier is present) never seeds the floor and never raises it
   (falls still apply); until the first unquieted block seeds the floor, the gate
   follows the quieting decision, as in `noise` mode, so a strong carrier already
@@ -1636,7 +1636,7 @@ Configuration notes:
   default gain they peak around 0.8 instead of hard-clipping.
 - `agc` (`liveDemod.agc`) — post-demodulation AGC: `off`, `slow` or `fast`.
   Absent keeps the per-modulation behaviour unchanged (AM, CW, DSB, USB and LSB
-  `fast`; NFM, WFM and `raw` none), with the same chain as before WG4. An explicit
+  `fast`; NFM, WFM and `raw` none), with the same chain as before the web-gaps-4 release. An explicit
   mode applies to every modulation except `raw`, which never gets AGC: `off`
   removes the AGC stage from AM/SSB, and `slow` or `fast` adds one to NFM/WFM after
   de-emphasis. The stage is one `csdr agc` process at the audio rate. Support for
@@ -2111,7 +2111,7 @@ value is key material or may carry it (Meshtastic `channelKey`, dsd-fme
 `extraArgs`) have `secret: true`; the config export redacts them. Every option
 takes effect on the next start (`effect: "restart"`).
 
-WG8 adds `patchable` to a descriptor: `true` when the protected
+The web-gaps-8 release adds `patchable` to a descriptor: `true` when the protected
 `PATCH /api/decoders/:id` may set the key (see
 [decoder settings](#get-apidecodersidsettings)). Absent means false, so an
 older core reads as not patchable. Patchable keys are receive tuning and
@@ -2811,7 +2811,7 @@ When applying them would leave no hop, none applies and all have
 falls inside the ranges. Lockout exclusions are never written into the spec.
 
 Plans also say which parts of the ranges decoders elsewhere already decode
-(WG6): `decodedElsewhere: [{ startHz, endHz, sourceId, decoderIds, applied }]`.
+(web-gaps-6): `decodedElsewhere: [{ startHz, endHz, sourceId, decoderIds, applied }]`.
 A decoder counts only when its own state proves the coverage (fail closed):
 it is running, healthy (`running` or `idle`), not suspended, configured (scanner
 probes never count) and on a different source than the job (a job retunes its
@@ -2836,7 +2836,7 @@ never dropped for them). If that would leave no hop, none applies (all
 warning. In-window jobs report the entries but never apply them. Without the
 flag the hops are exactly today's. Coverage is read when a plan is computed
 (preview, create, PATCH, restore and the lockout replans). It is also read
-after decoder changes (this replaces the WG6 "plan-time only" rule). Each
+after decoder changes (this replaces the web-gaps-6 "plan-time only" rule). Each
 decoder change triggers a refresh: created, started, stopped, error,
 restarting, max-restarts, removed, health or status change. The refresh runs
 2 s after the last change, at most once per 30 s, and no later than 30 s after
@@ -3069,7 +3069,7 @@ sends `scanner:job`.
 
 Jobs also carry the `decodedElsewhere` entries of their current plan (see
 `POST /api/scanner/plan`), runtime only like `lockoutExclusions`. They are
-recomputed at the same points and after decoder changes. WG7
+recomputed at the same points and after decoder changes. The web-gaps-7
 `bandPlanSkips` entries are carried the same way.
 
 `progress.hitStats` is `{ discoveries, hits, newDiscoveries, truncated }`
@@ -3201,7 +3201,7 @@ identify job.
 `cancel` of a job that already ended (`completed`, `cancelled` or `failed`,
 identify jobs included) answers **200** with the unchanged job: no state
 change, no end action, no event and no persistence write, so a client may cancel
-without first checking the state. (Before WG11 it answered 409
+without first checking the state. (Before the web-gaps-11 release it answered 409
 `SCANNER_INVALID_TRANSITION`.) A cancel racing a natural completion ends in
 exactly one terminal state. An unknown id stays 404; `pause` and `resume` of an
 ended job keep the 409 `SCANNER_INVALID_TRANSITION`.
@@ -3341,16 +3341,43 @@ Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
 The `Discovery` (metadata, co-channel links, operator fields). 404
 `SCANNER_NOT_FOUND`.
 
+When the requested id was absorbed by a merge, the response is the surviving
+discovery with two extra fields: `absorbedInto` (the survivor's id, equal to its
+`id`) and `requestedId` (the id you asked for). Update any stored link to the
+survivor's id. The observations and evidence routes below resolve an absorbed id
+the same way and serve the survivor's data.
+
 #### GET /api/scanner/discoveries/:id/observations
 
 `{ items: Observation[], nextCursor }`; `cursor` and `limit` (1–500, default
 100). Each observation has the sample range, centre, OBW, levels, duty,
 hypotheses, the decode evidence and flags. 404 `SCANNER_DISCOVERY_NOT_FOUND`.
 
+#### Discovery coverage
+
+Discovery records from `GET /api/scanner/discoveries` and
+`GET /api/scanner/discoveries/:id` may carry optional `coverage`: the decoders
+whose placements cover the discovery's `frequencyHz` on one of its `sourceIds`,
+computed when the record is read (never stored). Each entry is a
+`DiscoveryCoverage`:
+
+```ts
+interface DiscoveryCoverage {
+	decoderId: string // 1-64 characters
+	state: "running" | "suspended" | "stopped"
+	suspensionReason?: DecoderSuspensionReasonCode // when suspended
+}
+```
+
+At most 3 entries, running decoders first. An absent `coverage` means unknown
+(the core makes no claim, for example when decoder status is unavailable); an
+empty array means verified that no decoder placement covers the frequency.
+A decoder that declares no channel width is assumed to cover 12.5 kHz.
+
 #### PATCH /api/scanner/discoveries/:id
 
 Operator fields: `label` (≤ 100 chars), `notes` (≤ 2000), `lockout`
-(boolean; stops its probes, blocks listen and, from WG2, skips the frequency
+(boolean; stops its probes, blocks listen and, from the web-gaps-2 release, skips the frequency
 in sweeps on the discovery's sources: see `POST /api/scanner/plan`; a locked
 discovery is never evicted or pruned by age), `keep`
 (boolean; never pruned by age). At least one key. Returns the `Discovery`.
@@ -3570,7 +3597,7 @@ A probe trial whose decoder cannot run ends `unsupported` with reason
 `decoder-unavailable`: the binary fails to spawn (`ENOENT` or `EACCES`) or exits
 with code 126 or 127, without a signal, before any output. Every other exit keeps
 its previous outcome. No outcome value was added; `reason` is free text.
-WG10: the probe pool remembers a decoder type found unavailable for 300 s
+web-gaps-10: the probe pool remembers a decoder type found unavailable for 300 s
 (`PROBE_UNAVAILABLE_MEMO_MS`); meanwhile identify plans that type's trials as
 `unsupported`/`decoder-unavailable` without spawning, and a successful start of the
 type clears it. `result.decodersUnavailable` lists the probe decoder types (`dsd-fme`,
@@ -3590,12 +3617,12 @@ started; the core keeps the latest 32 (`IDENTIFY_ANALOG_MAX_TRANSMISSIONS`). `nf
 no evidence. Outcomes: `decoded` once a matching closed transmission exists
 and the newest one carried a CTCSS tone or a DCS code; `heard` when the matching
 closed transmissions carried neither (a squelch opening was heard, nothing was
-decoded; before WG11 this was `decoded`). `heard` is final and no other trial uses
+decoded; before the web-gaps-11 release this was `decoded`). `heard` is final and no other trial uses
 it.
 `timeout` when only a matching open one is present at the target's deadline;
 `no-sync` when live audio was on the target during the window but nothing matched;
 `unsupported` with reason `no-live-audio` when live audio was not running on the
-job's source, or not tuned within the tolerance, for the whole window. Since WG11 a
+job's source, or not tuned within the tolerance, for the whole window. Since the web-gaps-11 release a
 match ends only the target's other waiting `live-audio` trials: probe runs, pending
 runs and ambient trials of other decoders keep running to their own end (an analog
 match no longer marks them `not-needed`), and the target finishes when every trial
@@ -3632,9 +3659,9 @@ the transmission tracker reported are used. `result.analog`:
 ```
 
 Identify never starts or retunes live audio: to identify analog voice, listen on the
-target (or have listened in the last 30 s). WG10 left the outcome and state lists
+target (or have listened in the last 30 s). The web-gaps-10 release left the outcome and state lists
 unchanged (`live-audio` and `no-live-audio` are values of the free-text `decoder` and
-`reason`); WG11 adds the trial outcome `heard`. A client with a closed outcome map must
+`reason`); the web-gaps-11 release adds the trial outcome `heard`. A client with a closed outcome map must
 add it.
 
 A decode counts only when all of these hold (fail closed):
@@ -3655,7 +3682,7 @@ A decode counts only when all of these hold (fail closed):
 The identity is attached on its second clean decode within one engine epoch.
 Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
 (`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
-of these types, or without tuning trust, identify behaves as before WG7.
+of these types, or without tuning trust, identify behaves as before the web-gaps-7 release.
 
 **Narrow digital trials.** When the target lies in a band-plan range of the
 active region that lists a channel raster of at most 6 250 Hz, the plan includes
@@ -3880,7 +3907,7 @@ curl http://localhost:9000/api/spectrum
 `profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
-floor, `k` per range, `settleMode`, `tuningTrust` (WG9: `unverified` while an
+floor, `k` per range, `settleMode`, `tuningTrust` (web-gaps-9: `unverified` while an
 operator retune's frames are still `unverified`, until the first block at or past
 the network settle), `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz` and `at`), the summary
@@ -4011,7 +4038,7 @@ Activity reception) carries `channel`, `A` or `B`, from NMEA field 4 or
 AIS-catcher's JSON `channel`; a multi-sentence message takes it from its first
 fragment, and the key is absent when the channel is unknown. It sets the
 reception's provenance frequency: A is 161.975 MHz, B 162.025 MHz (see
-[Provenance](#provenance)). From WG5 `VesselState.channel` carries it too (see
+[Provenance](#provenance)). From the web-gaps-5 release `VesselState.channel` carries it too (see
 below).
 
 AIS types 4, 9 and 21: on the NMEA path a base station report (type 4), a
@@ -4040,7 +4067,7 @@ fields (`name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
 values), `messageTypes`, `messageCount`, `decoderId`, `firstSeen`, `lastSeen`
 and `lastStaticAt`.
 
-Optional WG5 fields, always set by the WG5 tracker (null when unknown):
+Optional web-gaps-5 fields, always set by the web-gaps-5 tracker (null when unknown):
 
 - `channel` — `A` or `B`, from the newest message that carried a channel; a
   message without one keeps the last.
@@ -4089,7 +4116,7 @@ only), `weather` (`temperatureF`, `humidityPct`, `pressureMbar`,
 `decoderId`, `firstSeen` and `lastSeen`. Fields a report does not carry are
 never cleared.
 
-`path` is in TNC2 text form. From WG4 the direwolf adapter keeps the AX.25
+`path` is in TNC2 text form. From the web-gaps-4 release the direwolf adapter keeps the AX.25
 has-been-repeated bit: the last digipeater that repeated the packet ends with
 `*` (`["W1AW*", "WIDE2-1"]`), as direwolf prints it; source and destination never
 carry it. A path without `*` was heard directly, which the
@@ -4143,7 +4170,7 @@ else null), `snrDb`, `rssiDbm` and `hopsAway` of the
 last unique packet (null when unknown), `viaMqtt`, `packetCount` (unique
 packets), `duplicateCopies`, `portnums` (unique packets per port, at most 64
 keys, later ports count under `other`), `lastPortnum`, `decoderId`,
-`firstSeen` and `lastSeen`, and from WG3:
+`firstSeen` and `lastSeen`, and from the web-gaps-3 release:
 
 - `telemetry`: `{ batteryPct, powered, voltageV, channelUtilizationPct,
 airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
@@ -4166,7 +4193,7 @@ airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
 `packetsProcessed`, `duplicatesDropped`, `invalidPackets`, `decodeErrors`,
 `packetsPerSecond` (60 s average of unique packets), `lastPacketAt`,
 `latestNodeId`, `expiredTotal`, `telemetryPackets` and `neighbourReports`
-(WG3: applied telemetry and NeighborInfo packets) and `timestamp`.
+(web-gaps-3: applied telemetry and NeighborInfo packets) and `timestamp`.
 
 #### GET /api/mesh/nodes/:nodeId
 
@@ -4335,7 +4362,7 @@ legacy mode it is not mounted (404).
 Redaction fails closed. `access` is reduced to `{ mode }`. A value whose key
 (any path segment) matches `/(key|psk|secret|passw|token|cred|auth|cookie|cert|salt)/i`
 becomes `"<redacted>"` whatever its type or depth (numbers too: dsd-fme numeric
-keys). WG7 exempts six exact paths outside decoder options that the pattern
+keys). The web-gaps-7 release exempts six exact paths outside decoder options that the pattern
 matches only by accident. Each is a number (or number array) in the schema
 whose meaning is a frequency, margin or limit:
 `decoders.*.band.targetsHz`, `tunerRelay.commandHistoryLimit`,
@@ -4363,14 +4390,14 @@ code, message }`. The redaction defaults (decision E2) were confirmed on
 
 ### Recordings
 
-A read-only inventory of the WAV recordings WaveKit already writes (WG8,
+A read-only inventory of the WAV recordings WaveKit already writes (web-gaps-8,
 [spec](specs/web-gaps-8/requirements.md)): the per-call recordings of the
 dsd-fme decoders that record, and the scanner recordings
 (`recordings/{dv,analog}/<discoveryId>/` under the scanner storage directory;
 none when no scanner runs). DTOs in `packages/api-types/src/recordings.ts`.
 While `RECORDINGS_REQUIRES_ACCESS` is true both routes exist only in protected
 mode; nothing is mounted in legacy mode (404). The inventory never writes,
-renames, deletes or trims a file. Keep, unkeep and delete (WG9,
+renames, deletes or trims a file. Keep, unkeep and delete (web-gaps-9,
 [spec](specs/web-gaps-9/requirements.md)) are described below; trim and export
 belong to the recording catalog, which stays gated.
 
@@ -4500,7 +4527,7 @@ WaveKit's (the exact name pattern, a real directory with no symbolic link from t
 configured root, owned by the core's user, mode exactly `0700`): a lone `verified`
 file is unlinked while the keep store is ready; a lone entry named like a recording
 is put back under its name, never replacing a file; an empty directory is removed;
-anything else (including WG9-format `recording` entries) is left and counted. One
+anything else (including web-gaps-9-format `recording` entries) is left and counted. One
 info line with counts, never a name or path. Legacy mode does not sweep.
 
 Discovery merges (both modes): the dropped discovery's recording and evidence
@@ -4512,7 +4539,7 @@ the survivor hold kept recordings (409 on its removal), and removing the survivo
 removes the alias folders too, file by file through the keep decision. A capacity
 eviction now removes the evicted discovery's folders and aliases like an inactive
 prune (a discovery holding kept recordings is still never evicted, and kept files
-stay). Merges and evictions made before WG10 keep their orphan folders, which follow
+stay). Merges and evictions made before the web-gaps-10 release keep their orphan folders, which follow
 the normal age and size caps.
 
 A configured recording root that is itself a symbolic link (a dsd-fme recording
@@ -4598,7 +4625,7 @@ The store holds three kinds:
   when WaveKit knows them; see [Provenance](#provenance).
 - `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
-  demodulator (WG10: merged, at least 500 ms of audio, carrier evidence on nfm/wfm; see
+  demodulator (web-gaps-10: merged, at least 500 ms of audio, carrier evidence on nfm/wfm; see
   activity hygiene there). `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
   and `payload` is `AnalogTransmissionPayload` (the closed event without
   `state`). The summary has `category: "voice"`, `protocol: "analog"`, the
@@ -4607,10 +4634,10 @@ The store holds three kinds:
   `NFM transmission` without a frequency) and fields `durationMs` (ms),
   `modulation` and `peakChannelPowerDbfs` (dBFS, when known), plus `ctcssHz`
   (label `CTCSS`, Hz), `dtmf` (label `DTMF`) and `dcs` (label `DCS`, such as
-  `023N`; WG6) when the closed event's `tone` has them; those values are also
+  `023N`; web-gaps-6) when the closed event's `tone` has them; those values are also
   searchable text, and a DCS code is indexed under both spellings
   (`DCS 023N` and its twin `DCS 047I`), so a search for either finds the row.
-  Older rows have no `tone` (or no `tone.dcs`). A WG7 `noise`-mode row carries
+  Older rows have no `tone` (or no `tone.dcs`). A web-gaps-7 `noise`-mode row carries
   `squelchMode: "noise"` and `noiseQuietingDb`. A close is stored one second after
   the final close is published (about 2.5 s after the audio ends for an ordinary
   squelch close, which first waits the 1.5 s merge gap), and not at all when an accepted paging or APRS reception matches it (pager data is
@@ -4679,7 +4706,7 @@ The live mesh tracker and `decoder:output` still see every copy.
 
 ### Provenance
 
-From WG3 a decoder reception's `provenance` carries `sourceId` and
+From the web-gaps-3 release a decoder reception's `provenance` carries `sourceId` and
 `frequency: { hz, basis: "channel", tuningTrust }` when WaveKit can resolve them;
 otherwise both stay null, as before. Provenance comes only from the decoder's
 binding (its configured `sourceId`, or the default source; and its configured
@@ -4690,7 +4717,7 @@ its own device (external input, for example readsb with `rtlTcpHost`) has
 `sourceId: null`. `hz` is rounded to an integer in (0, 10^12]; anything else
 means no frequency.
 
-`tuningTrust` (superseding WG3's "unverified for every decoder") is
+`tuningTrust` (superseding the web-gaps-3 release's "unverified for every decoder") is
 `commanded` (the source is under WaveKit's internal control) or `relay` (it is
 under external control through the RTL-TCP relay) when the observed tuner state
 proves the decoder hears its targets, and `unverified` otherwise. All of these
@@ -4727,7 +4754,7 @@ WaveKit wrote without accepting it (it is not replayed), returning it to the
 baseline. A client that tunes the dongle host directly, bypassing
 WaveKit and the relay, is not observed, so trust can claim a centre the dongle
 no longer has. A removed tuner source drops its state: receptions on it are
-`unverified` until it is added again and reports state. Rows stored before WG5
+`unverified` until it is added again and reports state. Rows stored before the web-gaps-5 release
 keep `unverified`.
 
 | Output                                                   | `frequency.hz`                                                                        |
@@ -4739,22 +4766,22 @@ keep `unverified`.
 | others (readsb, direwolf, multimon-ng, dsd-fme, rtl_433) | the binding's target when it has exactly one, else null                               |
 
 A payload frequency that is missing or invalid falls back to the binding's single
-target. From WG4 the AIS adapter emits `channel` on `ship` output, so a
+target. From the web-gaps-4 release the AIS adapter emits `channel` on `ship` output, so a
 dual-channel AIS decoder (two targets) stores 161,975,000 or 162,025,000 Hz; a
 ship message whose channel is unknown still gets `frequency: null` there. multimon-ng's string `frequency` is
 not used (its unit is not verified). A lookup or provenance that fails never
 loses the reception: it is stored with null provenance. Provenance does not
 change `decodedData`, the presentation, coalescing or admission. Search by
 `sourceIds`, `frequencyMin` and `frequencyMax` now matches decoder receptions
-that carry provenance; rows stored before WG3 keep null provenance.
+that carry provenance; rows stored before the web-gaps-3 release keep null provenance.
 
 ### Presentation
 
-Decoder receptions stored from WG2 on carry a presentation beside the
+Decoder receptions stored from the web-gaps-2 release on carry a presentation beside the
 unchanged `decodedData`: `protocol`, `category`, `entityKey`, `title`,
 `fields` and `position`. It is derived only from the output's own validated
 payload, never from RF context, and never converts units (except `altM`,
-below). `position` is `lat`/`lon` and is omitted for `(0, 0)`. From WG5 it may
+below). `position` is `lat`/`lon` and is omitted for `(0, 0)`. From the web-gaps-5 release it may
 also carry `altM`, whole metres in −500..50,000 (anything else is omitted):
 ADS-B barometric altitude converted from feet (omitted for `ground`, whose
 elevation is unknown, and for an undecodable altitude), APRS `altitude` in feet,
@@ -4767,7 +4794,7 @@ identifier is missing, malformed, or contains a control character
 80 characters; long text is cut on a UTF-8 boundary with a trailing `…`. A
 position-only row (one that coalescing could drop) has a title, key, position,
 category and protocol but no fields. A presentation that fails never loses the
-reception: the row is stored without it. Rows stored before WG2 keep category
+reception: the row is stored without it. Rows stored before the web-gaps-2 release keep category
 `other` and no entity key; nothing is backfilled, and old and new rows parse.
 
 | Output                                    | entityKey                                                      |
@@ -4788,11 +4815,11 @@ The keys match the live trackers: `icao:` aircraft, `mmsi:` vessels, the APRS
 `key` and the Meshtastic node `key`.
 
 Presentation is computed only for receptions the store keeps: coalesced and
-rate-limited receptions cost what they did before WG2, and the internal
+rate-limited receptions cost what they did before the web-gaps-2 release, and the internal
 `presentationFailures` counter counts kept receptions only.
 
 Row growth and retention: built-row growth from presentation is at most 240
-bytes for a position-only row (160 bytes before WG5; raised so a typical fix
+bytes for a position-only row (160 bytes before the web-gaps-5 release; raised so a typical fix
 keeps a five-digit `altM` and a mesh `!abcdef12 Position` title, 226 bytes at
 seven decimals, without rounding) and at most 1,100 bytes for any row. The raise
 costs at most 80 bytes per coalesced row, so at most 250,000 × 80 = 20 MB (about
@@ -4820,8 +4847,8 @@ comments, grow more.
 
 ### Retention
 
-From WG3, `activity.retention.policy` decides which rows the row and byte caps
-remove. It is `fair-share` (the default) or `oldest-first` (the pre-WG3
+From the web-gaps-3 release, `activity.retention.policy` decides which rows the row and byte caps
+remove. It is `fair-share` (the default) or `oldest-first` (the pre-web-gaps-3
 behaviour). Age pruning (`maxAgeMs`) is the same under both: it removes the
 oldest rows of every feed. The caps, the start-above-cap trigger, the run down to
 95% of the cap, the batch size per transaction and the time bound per write are
@@ -5016,9 +5043,9 @@ start earlier; null when the store is empty) and `generatedAt`. Trails are sorte
 by their newest point descending, then `entityKey`. A trail is `{ entityKey,
 category, protocol, points, truncated }`; `category` and `protocol` are those of
 its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending time
-(`altM` null when the stored position has none). From WG5 new rows carry `altM`
+(`altM` null when the stored position has none). From the web-gaps-5 release new rows carry `altM`
 (see [Presentation](#presentation)); older rows are not backfilled and keep null.
-Mesh trails were empty before WG5, because Meshtastic receptions had no
+Mesh trails were empty before the web-gaps-5 release, because Meshtastic receptions had no
 position; new POSITION receptions now fill them.
 
 ```json
@@ -5130,7 +5157,7 @@ trails. Two bounds can cut a read, and either gives a normal 200 with
 `truncated: true`:
 
 - `scan-rows`: at most 250,000 index rows of the window are examined. The store
-  holds at most 250,000 rows (about 11.5 hours of the WG3 docs mix of about
+  holds at most 250,000 rows (about 11.5 hours of the web-gaps-3 docs mix of about
   520,000 rows a day), so this binds only when the store is above its cap between
   prune passes.
 - `time-limit`: a 600 ms wall-time budget, checked before every statement.
@@ -5154,7 +5181,7 @@ every other read). A client should poll them at most every 30 s or so: they are
 snapshots, not live feeds, and each read occupies the single reader.
 
 Measured on the development Mac with 250,000 rows scanned (load average 8 to 14,
-WG5 R1): band map about 370 to 490 ms (earlier runs 355 to 470 ms), timeline about
+web-gaps-5 R1): band map about 370 to 490 ms (earlier runs 355 to 470 ms), timeline about
 220 to 245 ms for 72 h in 180 s buckets and 225 to 230 ms for 24 h in 60 s buckets
 (1,440 buckets; about 384 ms in an earlier loaded run). Budgets are restated as
 measured, not optimised: on the worst row packing a band map stops at the 600 ms
@@ -5191,7 +5218,7 @@ admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
 `ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no stats provider.
 
-From WG3 `stats` also has two optional fields (older cores omit them):
+From the web-gaps-3 release `stats` also has two optional fields (older cores omit them):
 
 - `floodCopies`: Meshtastic flood copies not stored (see Meshtastic flood copies
   above). They are not losses and are not in `dropped`.
@@ -5306,7 +5333,7 @@ a row silently:
   deleted. A hole only at or below its position is adopted and the replay
   continues. A live follower at the committed head is never reset by holes.
 - A page or replay started after a reset is not reset again unless a new hole
-  opens. Tokens and cursors issued before WG3 read as "no holes seen". Facets and
+  opens. Tokens and cursors issued before the web-gaps-3 release read as "no holes seen". Facets and
   detail lookups are unaffected; no frame, reason or DTO changed.
 
 Under the `oldest-first` policy no holes open, so these resets do not happen.
@@ -5468,7 +5495,7 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
 - `hz` is snapped to 0.5 and clamped to 0.5–25; `bins` is rounded and
   clamped to 128..`limits.bins.max` (2048 with the default summary budget;
   up to 8192 where the host bins cap and `scanner.ws.spectrumSummaryBins`
-  allow, WG8); omitted fields take the default's values.
+  allow, web-gaps-8); omitted fields take the default's values.
 - One source and one profile per client. Subscribing again switches without a
   gap; subscribing without options returns to the default selection.
   `unsubscribe` or a disconnect releases the demand.
@@ -5476,7 +5503,7 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
   ones get no reply.
 - The answer is a `spectrum:profile` ack, then one `snapshot: true` frame per
   source (current state, not a replay of missed messages), then live frames.
-- `averaging` (optional, WG1): exponential average over n frames of the
+- `averaging` (optional, web-gaps-1): exponential average over n frames of the
   profile, per bin in dBFS after each frame's max-hold:
   `avg = avg + (frame − avg) / n`, seeded with the first frame and restarted
   on a new epoch, stream or bin layout. Rounded and clamped to 1–32; absent or
@@ -5484,13 +5511,13 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
   `averaging` share one frame build, and an averaged profile counts against
   `scanner.ws.spectrumMaxProfiles`. A subscribe that omits `averaging` is
   never served an averaged profile.
-- `backfillMs` (optional, WG1, opt-in): replay up to this many ms of recent
+- `backfillMs` (optional, web-gaps-1, opt-in): replay up to this many ms of recent
   frames after the ack. Rounded and clamped to 0–10000; absent or 0 means no
   backfill and the subscribe behaves exactly as before. It is per subscribe
   and not part of the profile. See [spectrum:frame](#spectrumframe) for the
   delivery order and bounds.
 - A client that sends neither option receives exactly the messages it did
-  before WG1.
+  before the web-gaps-1 release.
 
 #### Unsubscribe
 
@@ -6029,7 +6056,7 @@ shape is unchanged.
   its centre is an unconfirmed placeholder.
 - `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
   the last quieted block; the close time minus the squelch hang, 250 ms, never
-  before `startedAt`); for every other reason, the close time. Since the WG7 noise
+  before `startedAt`); for every other reason, the close time. Since the web-gaps-7 noise
   tail fix a transmission that the tail used to prolong ends earlier, because noise
   blocks just below the threshold no longer hold the squelch open (see `squelch`
   under [GET /api/live-audio/status](#get-apilive-audiostatus)); start times are
@@ -6046,9 +6073,9 @@ shape is unchanged.
   once if the squelch is still open.
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
-  one closed event, also on shutdown (WG10: only published transmissions send an open).
+  one closed event, also on shutdown (web-gaps-10: only published transmissions send an open).
 - `tone`: `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
-  three keys from WG6 cores; `dcs` is absent from older cores; absent on open
+  three keys from web-gaps-6 cores; `dcs` is absent from older cores; absent on open
   events). `ctcssHz` is one of the 50 standard CTCSS tones
   (67.0–254.1 Hz) heard through the transmission, null when none qualified or
   the transmission was shorter than 750 ms. `dtmf` is the DTMF symbols
@@ -6167,6 +6194,20 @@ coalesced to at most 1/s per discovery (the latest change wins). `jobHits`
 is present when a job's observation caused the change: one `ScanJobHit`
 per such job that tracks the discovery.
 
+`merged` carries `mergedIds`, the absorbed discovery ids (sorted, at most 64);
+drop those ids from any local list. A `deleted` may carry `mergedIds` too, when a
+merge into the deleted survivor was coalesced into the same event: drop the
+survivor and those ids. When an update replaces a pending `merged` before it is
+sent, the event stays `merged` and keeps the union of the absorbed ids.
+`mergedTruncated: true` means `mergedIds` was cut at 64: refetch the survivor
+(unless the change is `deleted`) and the discovery list.
+
+#### scanner:discoveries-resync
+
+`{reason: "consolidation", groups}`. Sent instead of one `merged` event per group
+when consolidation at startup merges more than 256 groups. Refetch the discovery
+list.
+
 #### scanner:activity
 
 `{sourceId, observationId, discoveryId?, jobIds, frequencyHz, active, peakDbfs, hypothesis?: {protocol, score}}`
@@ -6185,11 +6226,11 @@ most 1/s per (job, target); the latest state is always delivered.
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
   `decoder-unavailable`, `no-live-audio`; `mode` and `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
-  match no longer causes it, WG11), `cancelled` and `heard` (a `live-audio`
+  match no longer causes it, web-gaps-11), `cancelled` and `heard` (a `live-audio`
   trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`
   on a `live-audio` trial now means a tone or code was heard). `transport` is
-  `offset`, `channel`, `ambient` (WG7: an already-running AIS, ACARS, VDL2 or LoRa
-  decoder; WG10: decoder `live-audio` for `analog-fm` / `analog-am`) or
+  `offset`, `channel`, `ambient` (web-gaps-7: an already-running AIS, ACARS, VDL2 or LoRa
+  decoder; web-gaps-10: decoder `live-audio` for `analog-fm` / `analog-am`) or
   `replay` (a probe decoder fed from an IQ capture of the target, after the
   transmission ended); see `POST /api/scanner/identify`.
 - `result`: see `POST /api/scanner/identify`, including `artefact?`,
@@ -6285,7 +6326,7 @@ that remapped the client.
 - `selection`: `none` (no frames), `default` (the default profile on every
   eligible source) or `source`.
 - `outcome`: `default` (no options), `exact`, `nearest` (see `adjusted`:
-  `hz`, `bins`, `profile-limit`, and with the WG1 options `averaging` and
+  `hz`, `bins`, `profile-limit`, and with the web-gaps-1 options `averaging` and
   `backfillMs` when the requested value was rounded, clamped or, for
   `averaging`, mapped to another profile), `rejected` (the previous selection is kept;
   `code` and `message` say why) or `removed` (notice: `removedSourceId` was
@@ -6365,7 +6406,7 @@ One frame per source and profile:
 ```
 
 - `tracks[]` (`SpectrumFrameTrack`, at most 256 per frame): the segments of the
-  frame's newest block summary, `{startHz, endHz, flags}`. Since WG11 a segment the
+  frame's newest block summary, `{startHz, endHz, flags}`. Since the web-gaps-11 release a segment the
   tracker associated with an open track also carries that track's fields, all taken
   from the same block (no look-ahead; backfill and averaged frames carry the values
   recorded with their block). A segment without a track carries none of them. All
@@ -6416,7 +6457,7 @@ host bins cap)`, 2048 by default) caps the detail.
   upper bound across sweep settles and gaps.
 - The max-hold restarts when the epoch changes, so a frame never mixes two
   centres. `tuningTrust: "unverified"` means the frequency axis may be wrong
-  (grey it out). From WG9 the label follows the same strict rule as receptions:
+  (grey it out). From the web-gaps-9 release the label follows the same strict rule as receptions:
   `commanded` (internal control) or `relay` (external control) only when both the
   centre and the sample rate were written by WaveKit or seen in an accepted relay
   command on the current connection. A value only declared by the configuration or
@@ -6447,7 +6488,7 @@ host bins cap)`, 2048 by default) caps the detail.
   and backfill never causes a disconnect the ack and snapshot alone would not;
   the oldest are dropped first and `backfillFrames` counts the frames actually
   sent. A client already at the queue caps can still be disconnected by the
-  ack or snapshot, as before WG1.
+  ack or snapshot, as before the web-gaps-1 release.
 - Client rules: never merge or accumulate rows across a change of `sourceId`,
   epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
   epochs for equality only (they restart with the engine).
@@ -6720,7 +6761,8 @@ Each observation also has its own optional `proof`. `ScannerProof` contains `kin
 `unavailable`, `encrypted` and `summary`. The summary is fixed English, at most
 160 characters; `tried` holds at most 16 unique protocols in trial order.
 `DecodeEvidence.transport?: "live" | "replay"` is additive and persisted.
-A `scanner:discovery` merge carries optional `mergedIds`, the absorbed discovery ids.
+A `scanner:discovery` merge carries optional `mergedIds`, the absorbed discovery ids
+(see [scanner:discovery](#scannerdiscovery) for `mergedTruncated` and `deleted`).
 
 `GET /api/scanner/discoveries` accepts `evidence=proven|weak|all` (absent means
 `all`), and `nearHz` with optional `toleranceHz` (default 6 250 Hz, inclusive,
