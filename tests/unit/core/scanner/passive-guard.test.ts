@@ -381,7 +381,7 @@ describe("guard review regressions (DQ 8.2, 8.5, 8.7)", () => {
 		expect(s.actions[2]).toBe("measure")
 	})
 
-	it("a due trial waits for a valid sample (8.4 row 1, review round 2)", () => {
+	it("a due trial waits for a valid sample (8.4 row 1)", () => {
 		const s = sim()
 		s.state.rate = p => (p ? 0.97 : 0.3)
 		s.run(W)
