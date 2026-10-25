@@ -13,6 +13,7 @@
 
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
 import { readNumericOption } from "../option-values.js"
+import { isAx25CallsignText, isAx25PathEntryText } from "../ax25-callsign.js"
 import {
 	MULTIMON_FILTER_GAIN_DB_MAX,
 	MULTIMON_FILTER_HZ_MAX,
@@ -111,6 +112,23 @@ const AFSK1200_PATTERN =
 const FSK9600_PATTERN = /FSK9600:\s*(.+)/i
 
 /**
+ * True when every address of an AFSK1200 line is an AX.25 callsign: `from`
+ * and `to` as CALL[-SSID], and the digipeaters (`via`, comma separated, the
+ * first space-separated token; multimon-ng prints the frame type after it)
+ * as CALL[-SSID] with an optional `*`. Pure.
+ */
+export function afsk1200AddressesValid(
+	from: string,
+	to: string,
+	via: string | undefined,
+): boolean {
+	if (!isAx25CallsignText(from) || !isAx25CallsignText(to)) return false
+	if (via === undefined || via === "") return true
+	const path = via.split(/\s+/)[0] ?? ""
+	return path.split(",").every(isAx25PathEntryText)
+}
+
+/**
  * Multimon-ng Decoder - Decodes pager and data protocols.
  *
  * Supports POCSAG, FLEX, EAS, AFSK1200, FSK9600, and DTMF protocols.
@@ -123,6 +141,7 @@ const FSK9600_PATTERN = /FSK9600:\s*(.+)/i
  */
 export class MultimonDecoder extends AudioDemodDecoder {
 	private options: MultimonOptions
+	private rejectedPackets = 0
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -529,10 +548,22 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	/**
 	 * Parses AFSK1200 output into a decode event.
 	 */
-	private parseAfsk1200Output(match: RegExpExecArray): DecoderOutput {
+	/** AFSK1200 lines dropped because an address was not an AX.25 callsign. */
+	getRejectedPackets(): number {
+		return this.rejectedPackets
+	}
+
+	private parseAfsk1200Output(match: RegExpExecArray): DecoderOutput | null {
 		const from = match[1] ?? ""
 		const to = match[2] ?? ""
 		const via = match[3]?.trim() ?? undefined
+		// multimon-ng checks the FCS, but noise passes a 16-bit FCS about once in
+		// 65 536 frames; an address that is not a callsign marks such a frame.
+		// It is counted, never logged (untrusted text), and emits nothing.
+		if (!afsk1200AddressesValid(from, to, via)) {
+			this.rejectedPackets++
+			return null
+		}
 
 		return {
 			timestamp: new Date(),

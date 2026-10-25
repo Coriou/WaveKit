@@ -643,14 +643,11 @@ describe("AX.25 digipeater H bit", () => {
 		expect(viaKiss(frame([], { destCommandBit: true }))!.path).toEqual([])
 	})
 
-	it("still skips a malformed digipeater address as before", () => {
+	it("drops a frame with a digipeater address that is not a callsign", () => {
 		const blank = Buffer.alloc(7, 0x40)
 		blank[6] = 0x60 | H
-		const result = viaKiss(frame([digi("W1AW", 0, true), blank]))
-		expect(result).not.toBeNull()
-		expect(result!.path).toEqual(["W1AW*"])
-		const onlyBlank = viaKiss(frame([blank]))
-		expect(onlyBlank!.path).toEqual([])
+		expect(viaKiss(frame([digi("W1AW", 0, true), blank]))).toBeNull()
+		expect(viaKiss(frame([blank]))).toBeNull()
 		expect(parseAx25Address(Buffer.from([0x82, 0x84]))).toBeNull()
 	})
 })

@@ -27,6 +27,7 @@ import {
 import { DIREWOLF_BOUNDS } from "../options/direwolf.js"
 import { NetworkConnectionError } from "../../utils/errors.js"
 import { safeErrorFields } from "../safe-error-fields.js"
+import { isAx25CallsignChar } from "../ax25-callsign.js"
 
 /** Default KISS TCP port for direwolf */
 const DEFAULT_KISS_PORT = 8001
@@ -153,6 +154,8 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	private options: DirewolfOptions
 	private readonly warnOption: NumericOptionWarn
 	private kissBuffer: Buffer = Buffer.alloc(0)
+	/** KISS frames that did not parse to an AX.25 UI frame with valid addresses. */
+	private droppedFrames = 0
 
 	// Network Consumer State (from NetworkProducerDecoder)
 	protected tcpClient: Socket | null = null
@@ -409,6 +412,11 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		}
 	}
 
+	/** KISS frames dropped so far (malformed, or an address that is not a callsign). */
+	getDroppedFrames(): number {
+		return this.droppedFrames
+	}
+
 	private handleNetworkData(data: Buffer): void {
 		this.stats.bytesIn += data.length
 
@@ -421,6 +429,8 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 
 		for (const frame of frames.frames) {
 			const aprs = parseKissFrame(frame)
+			// Malformed or non-callsign frames are counted, never logged (untrusted bytes).
+			if (!aprs) this.droppedFrames++
 			if (aprs) {
 				const output: DecoderOutput = {
 					timestamp: new Date(),
@@ -618,10 +628,10 @@ export function parseAx25Frame(frame: Buffer): APRSData | null {
 	while (offset < frame.length - 2 && (frame[offset - 1]! & 0x01) === 0) {
 		const address = frame.subarray(offset, offset + 7)
 		const digi = parseAx25Address(address)
-		if (digi) {
-			if ((address[6]! & AX25_H_BIT) !== 0) lastRepeated = path.length
-			path.push(digi)
-		}
+		// An address that is not a callsign is noise that passed the FCS.
+		if (!digi) return null
+		if ((address[6]! & AX25_H_BIT) !== 0) lastRepeated = path.length
+		path.push(digi)
 		offset += 7
 	}
 	// TNC2 text marks the last repeated digipeater with `*`, as direwolf prints
@@ -657,14 +667,21 @@ export function parseAx25Address(data: Buffer): string | null {
 		return null
 	}
 
-	// Extract callsign (6 bytes, each shifted right by 1)
+	// Extract callsign (6 bytes, each shifted right by 1): 1-6 characters
+	// A-Z/0-9, left-aligned and space padded; bit 0 (address extension) is
+	// only ever set on the SSID byte. Anything else is not an AX.25 address.
 	let callsign = ""
+	let padded = false
 	for (let i = 0; i < 6; i++) {
-		const char = (data[i]! >> 1) & 0x7f
-		if (char !== 0x20) {
-			// Not a space
-			callsign += String.fromCharCode(char)
+		const byte = data[i]!
+		if ((byte & 0x01) !== 0) return null
+		const char = byte >> 1
+		if (char === 0x20) {
+			padded = true
+			continue
 		}
+		if (padded || !isAx25CallsignChar(char)) return null
+		callsign += String.fromCharCode(char)
 	}
 
 	if (callsign.length === 0) {
