@@ -27,14 +27,12 @@ const obs = (
 	id: string,
 	hz: number,
 	extra: Partial<ChannelCandidate> = {},
-	peakDbfs = -30,
 ): ChannelCandidate => ({
 	observationId: id,
 	sourceId: "rtl",
 	startedAt: 1_000,
 	endedAt: 2_000,
-	lastActivityAt: 2_000,
-	lastTrack: { centreHz: hz, peakDbfs },
+	lastTrack: { centreHz: hz },
 	...extra,
 })
 const pick = (list: ChannelCandidate[], at = 1_500) =>
@@ -64,50 +62,60 @@ describe("pickChannelObservation", () => {
 		expect(pick([{ ...obs("a", CENTRE), lastTrack: null }])).toBeNull()
 	})
 
-	it("prefers the most recent, then the strongest, then the smaller id", () => {
+	it("names nothing when two observations qualify", () => {
+		// A burst at +40 kHz that ended and a carrier at +100 kHz still active both
+		// overlap the decode: either could be the device, so neither is named.
 		expect(
-			pick([
-				obs("old", CENTRE, { lastActivityAt: 1_800 }, -10),
-				obs("new", CENTRE + 1_000, { lastActivityAt: 1_900 }, -40),
-			])?.observationId,
-		).toBe("new")
-		expect(
-			pick([obs("weak", CENTRE, {}, -40), obs("strong", CENTRE, {}, -20)])
-				?.observationId,
-		).toBe("strong")
-		expect(pick([obs("b", CENTRE), obs("a", CENTRE)])?.observationId).toBe("a")
+			pick(
+				[
+					obs("burst", CENTRE + 40_000, { endedAt: 1_800 }),
+					obs("carrier", CENTRE + 100_000, { endedAt: undefined }),
+				],
+				1_850,
+			),
+		).toBeNull()
 	})
 
-	// Feature: rtl433-channel-association, Property 1: a pick lies in the passband and beats every other in-passband candidate
-	// Validates: channel-granular association rule
-	it("picks only in-passband candidates and the best of them", () => {
+	it("names the single qualifying one when others are out of passband or time", () => {
+		expect(
+			pick([
+				obs("in", CENTRE + 40_000),
+				obs("out", CENTRE + HALF + 1),
+				obs("late", CENTRE, { startedAt: 9_000, endedAt: 9_500 }),
+				obs("other", CENTRE, { sourceId: "x" }),
+			])?.observationId,
+		).toBe("in")
+	})
+
+	// Feature: rtl433-channel-association, Property 1: a channel decode names an observation exactly when one qualifies, and then that one
+	// Validates: rtl433 channel association, exactly-one rule
+	it("names an observation exactly when one qualifies", () => {
 		const cand = fc.record({
 			off: fc.integer({ min: -2 * HALF, max: 2 * HALF }),
-			act: fc.integer({ min: 1_000, max: 2_000 }),
-			peak: fc.integer({ min: -90, max: 0 }),
+			start: fc.integer({ min: -3_000, max: 6_000 }),
+			len: fc.integer({ min: 0, max: 2_000 }),
+			other: fc.boolean(),
 		})
 		fc.assert(
-			fc.property(fc.array(cand, { maxLength: 8 }), cs => {
+			fc.property(fc.array(cand, { maxLength: 6 }), cs => {
 				const list = cs.map((c, i) =>
-					obs(`o${i}`, CENTRE + c.off, { lastActivityAt: c.act }, c.peak),
+					obs(`o${i}`, CENTRE + c.off, {
+						startedAt: c.start,
+						endedAt: c.start + c.len,
+						sourceId: c.other ? "x" : "rtl",
+					}),
 				)
-				const inside = list.filter(
-					o => Math.abs(o.lastTrack!.centreHz - CENTRE) <= HALF,
+				const qualifying = list.filter(
+					o =>
+						o.sourceId === "rtl" &&
+						Math.abs(o.lastTrack!.centreHz - CENTRE) <= HALF &&
+						1_500 >= o.startedAt - 2_000 &&
+						1_500 <= o.endedAt! + 2_000,
 				)
 				const got = pick(list)
-				if (inside.length === 0) {
-					expect(got).toBeNull()
-					return
-				}
-				expect(got).not.toBeNull()
-				expect(inside).toContain(got)
-				for (const o of inside) {
-					expect(o.lastActivityAt <= got!.lastActivityAt).toBe(true)
-					if (o.lastActivityAt === got!.lastActivityAt)
-						expect(o.lastTrack!.peakDbfs <= got!.lastTrack!.peakDbfs).toBe(true)
-				}
+				expect(got).toBe(qualifying.length === 1 ? qualifying[0] : null)
 			}),
-			{ numRuns: 100 },
+			{ numRuns: 200 },
 		)
 	})
 })
@@ -189,10 +197,14 @@ describe("interpretRtl433 model validation", () => {
 })
 
 describe("AmbientEvidence rtl433 channel", () => {
-	const setup = (bandwidthHz: number | undefined) => {
+	const setup = (
+		bandwidthHz: number | undefined,
+		sampleRateHz: number | undefined = 960_000,
+	) => {
+		const rates: number[] = []
 		const dec = Object.assign(new EventEmitter(), {
-			getChannelRequest: () =>
-				bandwidthHz === undefined
+			getChannelRequest: (input: { sampleRateHz: number }) =>
+				rates.push(input.sampleRateHz) && bandwidthHz === undefined
 					? { invalid: "none" }
 					: {
 							centerHz: CENTRE,
@@ -218,6 +230,7 @@ describe("AmbientEvidence rtl433 channel", () => {
 			}),
 			epochOf: () => 1,
 			logger: pino({ level: "silent" }),
+			sampleRateOf: () => sampleRateHz,
 		})
 		const got: AmbientEvidenceEvent[] = []
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
@@ -227,35 +240,46 @@ describe("AmbientEvidence rtl433 channel", () => {
 			Object.defineProperty(out, "provenanceBinding", { value: binding })
 			decoders.emit("decoder:output", "rtl433", out)
 		}
-		return { got, emit, ambient }
+		return { got, emit, ambient, rates }
 	}
 
 	it("stamps the channel centre and passband from the placement binding", () => {
-		const { got, emit, ambient } = setup(2 * HALF)
+		const { got, emit, ambient, rates } = setup(2 * HALF)
 		emit({ sourceId: "rtl", channelHz: CENTRE })
 		emit({ sourceId: "rtl", channelHz: CENTRE })
 		ambient.stop()
 		expect(got).toHaveLength(1)
 		expect(got[0]).toMatchObject({ hz: CENTRE, passband })
+		// The channel request sees the capture rate of the source.
+		expect(rates).toEqual([960_000])
 	})
 
-	it("keeps the decoder target without a usable binding", () => {
-		for (const binding of [
-			undefined,
-			{ sourceId: "other", channelHz: CENTRE },
-		]) {
-			const { got, emit, ambient } = setup(2 * HALF)
+	it("keeps the point target only for an unplaced instance", () => {
+		const { got, emit, ambient } = setup(2 * HALF)
+		emit(undefined)
+		emit(undefined)
+		ambient.stop()
+		expect(got).toHaveLength(1)
+		expect(got[0]!.hz).toBe(433_900_000)
+		expect(got[0]!.passband).toBeUndefined()
+	})
+
+	it("drops a placed decode whose binding or channel is unusable", () => {
+		const good = { sourceId: "rtl", channelHz: CENTRE }
+		for (const [binding, bw, rate] of [
+			[{ sourceId: "other", channelHz: CENTRE }, 2 * HALF, 960_000],
+			[{ sourceId: "rtl", channelHz: "x" }, 2 * HALF, 960_000],
+			[null, 2 * HALF, 960_000],
+			[good, undefined, 960_000],
+			[good, 2 * HALF, Number.NaN],
+			[good, 2 * HALF, 0],
+		] as const) {
+			const { got, emit, ambient } = setup(bw, rate)
+			emit(binding)
 			emit(binding)
 			emit(binding)
 			ambient.stop()
-			expect(got).toHaveLength(1)
-			expect(got[0]!.hz).toBe(433_900_000)
-			expect(got[0]!.passband).toBeUndefined()
+			expect(got).toEqual([])
 		}
-		const { got, emit, ambient } = setup(undefined)
-		emit({ sourceId: "rtl", channelHz: CENTRE })
-		emit({ sourceId: "rtl", channelHz: CENTRE })
-		ambient.stop()
-		expect(got[0]!.passband).toBeUndefined()
 	})
 })

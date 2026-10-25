@@ -81,6 +81,8 @@ export interface AmbientDeps {
 	epochOf: (sourceId: string) => number | null
 	logger: Logger
 	now?: () => number
+	/** Capture sample rate of a source (its caps); the channel request's input. */
+	sampleRateOf?: (sourceId: string) => number | undefined
 	/**
 	 * Reception trust of a decoder at a frequency on the source its target names (WG7 req 1.3);
 	 * absent → no new-type evidence.
@@ -359,12 +361,13 @@ export class AmbientEvidence extends EventEmitter {
 
 	/**
 	 * The passband of the channel that produced `out`: its placement binding and
-	 * the decoder's channel bandwidth. Any failure is no passband (the decode
-	 * then keeps the decoder's target frequency, as before).
+	 * the decoder's channel request for the capture it reads. Any failure is
+	 * null; the caller then drops the decode.
 	 */
 	private channelPassband(
 		decoderId: string,
 		out: DecoderOutputLike,
+		sourceId: string,
 	): ReturnType<typeof channelPassbandOf> {
 		try {
 			const binding = out.provenanceBinding
@@ -373,9 +376,16 @@ export class AmbientEvidence extends EventEmitter {
 					? (binding as { channelHz?: unknown }).channelHz
 					: undefined
 			if (typeof channelHz !== "number") return null
+			const sampleRateHz = this.deps.sampleRateOf?.(sourceId)
+			if (
+				typeof sampleRateHz !== "number" ||
+				!Number.isFinite(sampleRateHz) ||
+				sampleRateHz <= 0
+			)
+				return null
 			const request = this.deps.decoders
 				.getDecoder(decoderId)
-				?.getChannelRequest?.({ sampleRateHz: channelHz, centerHz: channelHz })
+				?.getChannelRequest?.({ sampleRateHz, centerHz: channelHz })
 			if (!request || "invalid" in request) return null
 			return channelPassbandOf(binding, request.bandwidthHz)
 		} catch {
@@ -449,11 +459,22 @@ export class AmbientEvidence extends EventEmitter {
 			evs = interpretDirewolf(input as DecoderOutputLike, state)
 		else if (type === "rtl433")
 			evs = interpretRtl433(input as DecoderOutputLike, state)
+		// A placed rtl433 output (it carries a binding) names its channel; an
+		// invalid binding, another source or an unusable channel request drops
+		// the decode. Only an unplaced instance keeps the point target.
+		const placed =
+			type === "rtl433" &&
+			(input as DecoderOutputLike).provenanceBinding !== undefined
 		const passband =
-			type === "rtl433" && evs.length > 0
-				? this.channelPassband(decoderId, input as DecoderOutputLike)
+			placed && evs.length > 0
+				? this.channelPassband(
+						decoderId,
+						input as DecoderOutputLike,
+						target.sourceId,
+					)
 				: null
 		const onSource = passband?.sourceId === target.sourceId ? passband : null
+		if (placed && !onSource) return
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,

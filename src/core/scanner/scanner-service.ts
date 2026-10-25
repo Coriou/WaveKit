@@ -1139,6 +1139,7 @@ export class ScannerService extends EventEmitter {
 					this.spectrum.engine(sourceId)?.currentEpoch().epoch ?? null,
 				logger: deps.logger,
 				now: this.now,
+				sampleRateOf: sourceId => deps.sources.getCaps(sourceId)?.sampleRate,
 				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
 			})
 			this.channelTaps = deps.channelOwnership

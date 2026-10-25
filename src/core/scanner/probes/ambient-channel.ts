@@ -1,11 +1,11 @@
 /**
  * Channel-granular ambient association. rtl_433 reads a whole channel on
  * stdin and its JSON carries no frequency, so its decode names the channel's
- * passband, not a point: the decode is credited to ONE observation whose
- * track centre lies inside the passband (edges included) and whose lifetime
- * pairs with the decode time. Rule: the most recently active observation
- * wins; a tie goes to the stronger track (peakDbfs), then the smaller
- * observation id (deterministic).
+ * passband, not a point. Rule (exactly one): the decode is credited only when
+ * exactly one observation qualifies (same source, track centre inside the
+ * passband with edges included, lifetime paired with the decode time). With
+ * none or several there is no way to tell which signal the device was, so
+ * nothing is identified.
  */
 import { z } from "zod"
 import type { TrackSnapshot } from "../../spectrum/types.js"
@@ -60,12 +60,12 @@ export interface ChannelCandidate {
 	sourceId: string
 	startedAt: number
 	endedAt?: number | undefined
-	lastActivityAt: number
-	lastTrack: Pick<TrackSnapshot, "centreHz" | "peakDbfs"> | null
+	lastTrack: Pick<TrackSnapshot, "centreHz"> | null
 }
 
 /**
- * The one observation a channel decode at `at` names, or null. `pairMs`
+ * The only observation a channel decode at `at` can name, or null when none
+ * or more than one qualifies. `pairMs`
  * widens each observation's lifetime on both sides; an open observation
  * ends at `now`. Pure.
  */
@@ -75,25 +75,15 @@ export function pickChannelObservation<T extends ChannelCandidate>(
 	now: number,
 	pairMs: number,
 ): T | null {
-	let best: T | null = null
+	let only: T | null = null
 	for (const o of candidates) {
 		const t = o.lastTrack
 		if (o.sourceId !== e.sourceId || !t) continue
 		if (Math.abs(t.centreHz - e.passband.centreHz) > e.passband.halfHz) continue
 		if (e.at < o.startedAt - pairMs || e.at > (o.endedAt ?? now) + pairMs)
 			continue
-		if (!best) {
-			best = o
-			continue
-		}
-		const b = best.lastTrack!
-		if (
-			o.lastActivityAt > best.lastActivityAt ||
-			(o.lastActivityAt === best.lastActivityAt &&
-				(t.peakDbfs > b.peakDbfs ||
-					(t.peakDbfs === b.peakDbfs && o.observationId < best.observationId)))
-		)
-			best = o
+		if (only) return null
+		only = o
 	}
-	return best
+	return only
 }
