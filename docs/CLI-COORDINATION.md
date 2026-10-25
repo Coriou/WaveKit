@@ -1535,3 +1535,11 @@ No field is added or renamed.
 
 1. On `engine: "rust"` with `squelchMode: "auto"` on `nfm`, `LiveAudioStatus.autoSquelch` and `LiveAudioLevel.autoSquelch` now report `waiting` / `open` (with `evidence`) as on csdr, when the Rust demodulator carries its gate state in-band. Rust runs without framing, or whose framing failed safe, still report `off`.
 2. CLI hits: none beyond the evidence-squelch entry above (the `live-audio:level` guard drops the optional `autoSquelch`). No CLI or web change required.
+
+### Activity reads queue instead of refusing; retry on 429 — 2026-10-25
+
+Details in [API.md](API.md) (Activity errors). No field is added or renamed.
+
+1. The core now queues concurrent Activity reads from one client (up to 4 per client, 8 waiting in total, one executing) instead of refusing the second with 429. Bursts of 2-3 parallel reads from one page (list, facets, messages) return 200.
+2. Web: Activity and Messages reads (`GET /api/activity`, `POST /api/activity/facets`, `GET /api/activity/:eventId`, `/trails`, `/bandmap`, `/timeline`) can still answer 429 `ACTIVITY_QUERY_BUSY` when the bounded queue is full. The response carries `Retry-After` (seconds, currently 1; exposed to cross-origin browsers in both access modes). Treat it as transient: wait `Retry-After` (fallback 1 s), retry the same request up to about 3 times with the wait doubling, keep current content or a loading state meanwhile, and show "Could not load" only after the retries; cancel pending retries when the view unmounts or the query changes. Do not retry `ACTIVITY_QUERY_TIMEOUT` (also 429, no `Retry-After`): suggest narrowing the filter instead.
+3. CLI hits: the CLI does not read Activity. No CLI change required.
