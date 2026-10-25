@@ -570,6 +570,13 @@ describe("HfdlDecoder", () => {
    paging raster channel inside the usable window (80 % of the sample rate), nearest the centre first and
    at most 33, each through its own 12 kHz channel filter; with one of those options it keeps
    your channels. Outside a paging band it still follows the VFO on every band.
+6. The built-in acarsdec (no YAML entry) runs one process per ACARS channel of your region
+   inside the usable window, nearest the centre first and at most 5 (EU: 131.525, 131.550,
+   131.725, 131.825 and 131.850 MHz; other regions 131.550 and 131.725 MHz). The nearest
+   channel, or the VFO when it sits exactly on one of them, starts first; the others start
+   only when the CPU budget admits them, so some may show as suspended. It never falls back
+   to the capture centre. A YAML acarsdec with `frequencies` keeps one process per listed
+   frequency.
 
 ### No output being parsed
 

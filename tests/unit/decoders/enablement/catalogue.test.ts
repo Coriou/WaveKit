@@ -91,6 +91,11 @@ it("default options use frozen frequencies and regional LoRa defaults with indep
 		}),
 	)
 	expect(CATALOGUE_DEFAULT_OPTIONS("EU").acarsdec).toEqual({
+		frequencies: [
+			131_525_000, 131_550_000, 131_725_000, 131_825_000, 131_850_000,
+		],
+	})
+	expect(CATALOGUE_DEFAULT_OPTIONS("US").acarsdec).toEqual({
 		frequencies: [131_550_000, 131_725_000],
 	})
 	expect(CATALOGUE_DEFAULT_OPTIONS("EU").dumpvdl2).toEqual({
@@ -99,7 +104,9 @@ it("default options use frozen frequencies and regional LoRa defaults with indep
 	const first = build()
 	first[2]!.options["frequencies"] = []
 	expect(build()[2]!.options).toEqual({
-		frequencies: [131_550_000, 131_725_000],
+		frequencies: [
+			131_525_000, 131_550_000, 131_725_000, 131_825_000, 131_850_000,
+		],
 	})
 })
 

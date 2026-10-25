@@ -1275,7 +1275,12 @@ export class DecoderManager extends EventEmitter {
 			for (const worker of [...this.decoders.values()]) {
 				if (
 					worker.owner !== "placement" ||
-					wanted.some(placement => placement.key === worker.placement?.key) ||
+					// A worker holds only a secondary: when its channel becomes the
+					// primary (the parent's), it goes, so no channel is decoded twice.
+					wanted.some(
+						placement =>
+							!placement.primary && placement.key === worker.placement?.key,
+					) ||
 					(worker.placement !== undefined &&
 						this.isSourceHeld(worker.placement.sourceId))
 				)

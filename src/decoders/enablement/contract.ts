@@ -34,6 +34,15 @@ export const DECODER_MAX_BANDPLAN_CHANNELS = 4
  * amendment for the measured cost); the efficiency gate admits what fits.
  */
 export const MULTIMON_PAGING_MAX_CHANNELS = 33
+/**
+ * 3.20: catalogue acarsdec places at most this many channels, one process
+ * each: the five EU catalogue channels (131.525-131.850 MHz, a 325 kHz span)
+ * all fit one 1.024 Msps window (0.8 usable: +-409.6 kHz) when the capture
+ * centre lies within 235.1 kHz of the span midpoint (409.6 - 12 kHz reach
+ * - 162.5 kHz half span). Five placements cost at most
+ * 5 x 0.16 = 0.80 core; the four secondaries are gated.
+ */
+export const ACARSDEC_CATALOGUE_MAX_CHANNELS = 5
 export const VFO_SETTLE_MS = 1_000
 export const EFFICIENCY_SAMPLE_MS = 2_000
 // 3 × 2000 ms = 6000 ms: tolerates one missed tick plus jitter.

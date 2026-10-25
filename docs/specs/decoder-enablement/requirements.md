@@ -206,7 +206,7 @@ and `sourceId` exactly as today; further placements are internal processes repor
 provenance; Activity, trackers and receptions see one decoder.
 3.9 An `always` decoder with no in-window placement runs one fallback placement: the VFO channel
 for dsd-fme and multimon-ng, the centre channel for other channel types, the raw or centre path
-for readsb and lora-meshtastic.
+for readsb and lora-meshtastic. Exception (3.20): catalogue acarsdec has no fallback.
 3.10 Band-plan reads now select decoder channels: band-plans requirement 1.2 is amended so that a
 band-plan read may add or remove a dsd-fme or multimon-ng placement; it still never tunes,
 starts or stops audio, scan jobs or any other decoder.
@@ -581,3 +581,62 @@ Acceptance: unit tests through placement reach and channelizer admission at 1.02
 the request, and a property test that a placed request is admitted, lies in the window,
 covers every target channel, and that every target set that fits is placed. An integration
 test opens the request on the real wavekit-chan at 1.024, 2.048 and 2.4 Msps.
+
+## Catalogue ACARS channels amendment — 2026-10-25
+
+A narrow capture over the European ACARS channels placed the catalogue acarsdec on only
+the two channels the catalogue listed, each one process with its own cost, so the budget
+could suspend the second, and channels in use elsewhere in the window were never decoded.
+
+3.20 **Catalogue acarsdec covers every listed ACARS channel in view.** It replaces 3.3's
+"one channel per configured frequency" for the catalogue decoder only.
+
+- _List._ EU: 131.525, 131.550, 131.725, 131.825 and 131.850 MHz (131.550 the worldwide
+  primary, 131.725 the European primary, the others published European secondaries). The
+  136.7–136.975 MHz channels are VDL Mode 2 (dumpvdl2) in Europe, not ACARS, and stay out.
+  Other regions keep the adapter default (131.550, 131.725 MHz). Only the EU gains frequencies;
+  the placement, ordering and gating below apply to catalogue acarsdec in every region.
+- _Channels._ With a channelizer, catalogue acarsdec places one channel (one process) on
+  each listed frequency inside the usable window (`sampleRate × usableFraction`) and its
+  band whose passband fits the window, origin `bandplan`, nearest the capture centre first
+  (ties: lower first), at most `ACARSDEC_CATALOGUE_MAX_CHANNELS` (5). Listed channels
+  outside the window are not candidates. A listed channel in the window whose passband
+  cannot fit is a fit failure (3.14) when nothing else places; there is no fallback to
+  the capture centre, even when `always` or an operator start bypasses the band. With the
+  band in view but no listed channel in the window the decoder is `no-channel-selected`.
+- _Primary._ The settled VFO is primary when it is exactly one of the placed channels,
+  origin `vfo`. Between two captures holding that channel at the same distance from their
+  centres, the one on the VFO's source wins (a tie break for these generated channels only;
+  it never overrides distance, and configured channels keep 3.3); otherwise the nearest channel is.
+- _Swaps._ A channel is never decoded twice. A secondary worker survives a re-plan only
+  while its channel is still a secondary; when the primary moves onto it (a VFO or centre
+  change), that worker is removed before the decoder's own process moves there, and the
+  former primary channel gets a new secondary. This holds for the 3.18 paging channels too.
+- _Admission._ Every placement but the primary is `gated`, the 3.18 mechanism made
+  generic: it goes through the efficiency gate and probation and is admitted after every
+  other decoder's placements, so the ACARS secondaries never starve another decoder.
+- _Bound._ The EU list spans 325 kHz. Each channel reaches bandwidth/2 + transition =
+  6 + 6 = 12 kHz from its frequency, so at 1.024 Msps (window ± 409.6 kHz) all five fit
+  while the capture centre lies within 409.6 − 12 − 162.5 = 235.1 kHz of the 131.6875 MHz
+  midpoint. Each placement costs 0.05 + 0.11 = 0.16 core in the planner, five at most
+  0.80 core; the primary alone is ungated.
+- _Limitation._ A listed channel inside the window whose passband does not fit (at the
+  window edge) is reported only when no channel places (`capture-too-narrow`). When other
+  channels place, it is silently not covered: suspension reasons are per decoder, not per
+  channel.
+- _Not changed._ Configured (YAML) acarsdec with explicit frequencies keeps one ungated
+  placement per frequency; configured acarsdec without them keeps 3.11.
+- _Open._ The intended follow-up is one acarsdec process for every channel in view:
+  acarsdec's sndfile input takes an interleaved N-channel stream (`channels=N`), fed by one
+  wide channel request and N AM chains, costed once. It needs a 24 kHz-multiple channel
+  rate (no integer divisor of 1.024 Msps gives one), the fan-out pipeline, and a channel
+  index to frequency mapping for provenance.
+
+Acceptance: unit tests on the planner (in and out of the window, the edge misfit without
+fallback, the bound, ordering, VFO primary, config and catalogue paths, gated secondaries
+admitted last) and a property test that every in-window channel that fits is placed, none that misfits is,
+and a decoder with no placement carries a reason; manager tests where a closed gate refuses
+the gated secondaries while the primary runs, and where moving the primary onto a running
+secondary (acarsdec and paging multimon-ng) keeps one worker per channel and the cost
+bound; the VFO primary across identical captures; each placement's channel request is on
+its frequency.

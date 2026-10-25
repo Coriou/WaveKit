@@ -56,6 +56,20 @@ export function catalogueLoraSlots(
 		: undefined
 }
 
+/**
+ * Requirement 3.20: VHF ACARS channels per band-plan region. EU: the
+ * commonly published European ACARS channels (131.550 worldwide primary,
+ * 131.725 European primary, 131.525, 131.825 and 131.850). The 136.7-136.975
+ * MHz channels are VDL Mode 2 (dumpvdl2), not ACARS. Other regions keep the
+ * adapter default.
+ */
+const acarsCatalogueFrequencies: Readonly<
+	Partial<Record<BandRegion, readonly number[]>>
+> = {
+	EU: [131_525_000, 131_550_000, 131_725_000, 131_825_000, 131_850_000],
+}
+const ACARS_DEFAULT_FREQUENCIES: readonly number[] = [131_550_000, 131_725_000]
+
 /** Fresh options keep mutations of one derived config isolated from later builds. */
 export function CATALOGUE_DEFAULT_OPTIONS(
 	region: BandRegion,
@@ -63,7 +77,11 @@ export function CATALOGUE_DEFAULT_OPTIONS(
 	return {
 		readsb: {},
 		"ais-catcher": {},
-		acarsdec: { frequencies: [131_550_000, 131_725_000] },
+		acarsdec: {
+			frequencies: [
+				...(acarsCatalogueFrequencies[region] ?? ACARS_DEFAULT_FREQUENCIES),
+			],
+		},
 		dumpvdl2: { frequencies: [136_650_000, 136_700_000, 136_975_000] },
 		rtl433: {},
 		direwolf: {},

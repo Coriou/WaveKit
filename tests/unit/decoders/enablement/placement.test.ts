@@ -191,6 +191,8 @@ describe("placement planner", () => {
 				input(
 					decoder({
 						...overrides,
+						// 3.20: catalogue acarsdec never falls back; a generic channel type does.
+						type: "direwolf",
 						configuredChannelsHz: [200_000_000],
 						band: { basis: "configured", targetsHz: [200_000_000] },
 					}),
@@ -251,7 +253,13 @@ describe("placement planner", () => {
 		).toBe(100_000_000)
 		expect(
 			planPlacements(
-				input(decoder({ configuredChannelsHz: [100_100_000, 100_000_000] })),
+				// 3.20: explicit (config) ACARS frequencies keep their configured order.
+				input(
+					decoder({
+						origin: "config",
+						configuredChannelsHz: [100_100_000, 100_000_000],
+					}),
+				),
 			).wanted.map(p => p.channelHz),
 		).toEqual([100_100_000, 100_000_000])
 		const band = {
@@ -397,6 +405,7 @@ describe("placement planner", () => {
 	})
 	it("auto band term includes endpoints and excludes one Hz past; unknown band does not suspend", () => {
 		const d = decoder({
+			type: "direwolf",
 			band: {
 				basis: "configured",
 				rangesHz: [{ minHz: 100_000_000, maxHz: 100_100_000 }],
@@ -457,7 +466,11 @@ describe("placement planner", () => {
 		])
 	})
 	it("fallback is global: one fallback across sources, none when any real channel fits", () => {
-		const d = decoder({ mode: "always", configuredChannelsHz: [200_000_000] })
+		const d = decoder({
+			type: "direwolf",
+			mode: "always",
+			configuredChannelsHz: [200_000_000],
+		})
 		const ss = [
 			source(),
 			source({ id: "second", centreHz: 200_000_000, order: 1 }),
