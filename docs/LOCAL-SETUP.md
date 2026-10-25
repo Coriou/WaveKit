@@ -206,8 +206,10 @@ RTL_TCP_FREQUENCY=433920000 RTL_TCP_SAMPLE_RATE=2048000 pnpm rtl:serve
 WAVEKIT_CONFIG=./config/my-radio.yaml pnpm start
 ```
 
-The decoder command is `rtl_433 -r cu8:- -s 2048000 -F json`; it processes the
-full IQ stream without resampling. This example sets up the processing path;
+The decoder command is `rtl_433 -r cu8:- -s 2048000 -F json -Y autolevel`; it
+processes the full IQ stream without resampling, and `-Y autolevel` sets the
+detection level from the measured noise so weak bursts still decode (see
+[DECODER-GUIDE.md](DECODER-GUIDE.md) to set a level of your own). This example sets up the processing path;
 receiving sensor messages depends on the actual signals and enabled protocols.
 A Pi source can use the same decoder options with its matching source ID and
 sample rate.
