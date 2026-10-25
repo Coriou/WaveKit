@@ -91,7 +91,18 @@ type Fake = RateDecoder & Pick<Decoder, "getChannelRequest">
 function setup(
 	types: string[] = ["rtl433"],
 	centre = OUT,
-	opts: { modes?: Record<string, "auto" | "always"> } = {},
+	opts: {
+		modes?: Record<string, "auto" | "always">
+		/** Global `bandSuspension` (default true). */
+		bandSuspension?: boolean
+		/** YAML-configured ids (sourceId rtl, useChannelizer). */
+		yaml?: readonly string[]
+		unavailable?: readonly string[]
+		/** Per-decoder `band.bandSuspension: false`. */
+		optOut?: readonly string[]
+		/** Operator starts after startAll. */
+		operator?: readonly string[]
+	} = {},
 ) {
 	vi.useFakeTimers()
 	const logger = pino({ level: "silent" })
@@ -123,6 +134,24 @@ function setup(
 					config.options = options
 					applied.set(config.id, options)
 				}
+				if (
+					type !== "rtl433" &&
+					type !== "readsb" &&
+					type !== "lora-meshtastic"
+				)
+					d.getChannelRequest = input => {
+						const wide = type === "ais-catcher"
+						return {
+							centerHz:
+								(options["channelHz"] as number | undefined) ??
+								input.centerHz ??
+								0,
+							bandwidthHz: wide ? 384_000 : 12_500,
+							transitionHz: wide ? 8_000 : 2_500,
+							outputRateHz: wide ? 288_000 : 48_000,
+							format: "cu8",
+						}
+					}
 				if (type === "rtl433")
 					d.getChannelRequest = input =>
 						iqChannelRequest(
@@ -174,6 +203,7 @@ function setup(
 	const make = () => {
 		const m = new DecoderManager(registry, new FanoutManager(logger), logger, {
 			validateVersions: false,
+			...(opts.bandSuspension === false ? { bandSuspension: false } : {}),
 			enablement: {
 				planner: planPlacements,
 				gate,
@@ -181,8 +211,8 @@ function setup(
 					mode: opts.modes?.[id] ?? "auto",
 					source: "default",
 				}),
-				isCatalogue: () => true,
-				unavailable: () => false,
+				isCatalogue: config => !(opts.yaml ?? []).includes(config.id),
+				unavailable: id => (opts.unavailable ?? []).includes(id),
 				recheckAvailable: async () => true,
 				vfo: () => null,
 				bandplanChannels: () => [],
@@ -197,8 +227,13 @@ function setup(
 				id: type,
 				type,
 				enabled: true,
-				useChannelizer: false,
 				options: { ...defaults[type as keyof typeof defaults] },
+				...((opts.yaml ?? []).includes(type)
+					? { sourceId: "rtl", useChannelizer: true }
+					: { useChannelizer: false }),
+				...((opts.optOut ?? []).includes(type)
+					? { band: { bandSuspension: false } }
+					: {}),
 			})
 		return m
 	}
@@ -215,7 +250,12 @@ function setup(
 		async restart() {
 			await manager?.destroy()
 			manager = make()
-			await manager.startAll()
+			await this.begin()
+		},
+		async begin() {
+			await manager!.startAll()
+			for (const id of opts.operator ?? [])
+				await manager!.startDecoder(id, { startMode: "operator" })
 			await settle()
 		},
 	}
@@ -547,6 +587,24 @@ describe("suspension follows the band", () => {
 	it("Property 16: after each settle the suspension equals the band verdict", async () => {
 		// Feature: decoder-enablement, Property 16: Suspension equals the band verdict after settle
 		// Validates: Requirements 3.13, 3.14, 3.15, 11.3
+		// rtl433 (adaptive channel), ais-catcher (fixed IQ channel), readsb (raw),
+		// dsd-fme (audio demodulator), multimon-ng (no band: unknown), LoRa (centre).
+		const KINDS = [
+			"rtl433",
+			"ais-catcher",
+			"readsb",
+			"dsd-fme",
+			"multimon-ng",
+			"lora-meshtastic",
+		] as const
+		const role = fc.constantFrom(
+			"auto",
+			"always",
+			"yaml",
+			"operator",
+			"opt-out",
+			"unavailable",
+		)
 		const step = fc.oneof(
 			fc.record({
 				kind: fc.constant("tune" as const),
@@ -555,13 +613,14 @@ describe("suspension follows the band", () => {
 					IN,
 					433_920_000,
 					869_525_000,
-					868_000_000,
 					162_000_000,
+					1_090_000_000,
 				),
 			}),
 			fc.record({
 				kind: fc.constant("rate" as const),
-				hz: fc.constantFrom(250_000, 1_024_000, 2_048_000, 3_200_000),
+				// 20 kHz is below the fakes' 48 kHz minimum: a rate reason.
+				hz: fc.constantFrom(20_000, 250_000, 1_024_000, 2_048_000, 3_200_000),
 			}),
 			fc.record({
 				kind: fc.constant("reconnect" as const),
@@ -571,14 +630,27 @@ describe("suspension follows the band", () => {
 		)
 		await fc.assert(
 			fc.asyncProperty(
-				fc.array(step, { minLength: 1, maxLength: 5 }),
-				fc.constantFrom<"auto" | "always">("auto", "always"),
-				async (steps, mode) => {
-					const f = setup(["rtl433", "lora-meshtastic"], OUT, {
-						modes: { rtl433: mode },
+				fc.array(fc.tuple(fc.constantFrom(...KINDS), role), {
+					minLength: 1,
+					maxLength: 4,
+				}),
+				fc.array(step, { minLength: 1, maxLength: 4 }),
+				fc.boolean(),
+				async (picked, steps, globalBand) => {
+					const roles = new Map(picked)
+					const ids = [...roles.keys()]
+					const having = (r: string) => ids.filter(id => roles.get(id) === r)
+					const f = setup(ids, OUT, {
+						modes: Object.fromEntries(
+							having("always").map(id => [id, "always"]),
+						),
+						bandSuspension: globalBand,
+						yaml: having("yaml"),
+						unavailable: having("unavailable"),
+						optOut: having("opt-out"),
+						operator: having("operator"),
 					})
-					await f.manager.startAll()
-					await settle()
+					await f.begin()
 					let previous = new Map<string, { reason?: string; since?: unknown }>()
 					for (const s of steps) {
 						if (s.kind === "tune") await tune(f, s.hz)
@@ -595,19 +667,41 @@ describe("suspension follows the band", () => {
 							await settle()
 						} else await f.restart()
 						const next = new Map<string, { reason?: string; since?: unknown }>()
-						for (const id of ["rtl433", "lora-meshtastic"]) {
+						for (const id of ids) {
+							const status = f.manager.getStatus(id)!
 							const v = view(f, id)
-							const always = id === "rtl433" && mode === "always"
-							if (always) expect(v.reason).not.toBe("frequency-out-of-band")
+							const r = roles.get(id)
+							const bandFree =
+								!globalBand ||
+								r === "always" ||
+								r === "operator" ||
+								r === "opt-out"
+							const rate = status.rateAssessment
+							// (a) higher-priority gates win whatever the band says.
+							// 11.3 order: a rate reason, then decoder-unavailable.
+							if (rate?.verdict === "unusable")
+								expect(v.reason).toBe(rate.reasonCode)
+							else if (r === "unavailable")
+								expect(v.reason).toBe("decoder-unavailable")
+							// (c) opt-outs, always and operator starts.
+							else if (bandFree)
+								expect(v.reason).not.toBe("frequency-out-of-band")
+							// (d) the band verdict decides.
 							else if (v.verdict === "out-of-band")
 								expect(v.reason).toBe("frequency-out-of-band")
-							else if (v.verdict === "in-band")
+							else if (v.verdict === "in-band") {
 								expect(
 									v.reason === undefined
-										? v.placements.length > 0
+										? v.placements.length > 0 || r === "yaml"
 										: v.reason === "capture-too-narrow" ||
 												v.reason === "efficiency-budget",
 								).toBe(true)
+							}
+							// Unknown band (multimon-ng): placed only on band-plan channels;
+							// with none the planner keeps its no-candidate reason.
+							else if (id !== "multimon-ng") {
+								expect(v.reason).not.toBe("frequency-out-of-band")
+							}
 							const before = previous.get(id)
 							// A reconnect or restart passes through other states.
 							if (
@@ -636,5 +730,51 @@ describe("suspension follows the band", () => {
 			),
 			{ numRuns: 100 },
 		)
-	}, 120_000)
+	}, 300_000)
+})
+
+describe("band reasons and opt-outs", () => {
+	const away = source({ centreHz: 446_520_000, sampleRateHz: RATE })
+	it("AIS and ADS-B at 446.52 MHz are out of band, not capture-too-narrow", () => {
+		const ais = planPlacements(
+			input(
+				decoder({
+					type: "ais-catcher",
+					channelBandwidthHz: 384_000,
+					channelTransitionHz: 8_000,
+					band: { basis: "protocol", targetsHz: [161_975_000, 162_025_000] },
+				}),
+				[away],
+			),
+		)
+		expect(ais.unplaced.get("test")).toBe("frequency-out-of-band")
+		const adsb = planPlacements(
+			input(
+				decoder({
+					type: "readsb",
+					reach: "raw",
+					band: { basis: "protocol", targetsHz: [1_090_000_000] },
+				}),
+				[away],
+			),
+		)
+		expect(adsb.unplaced.get("test")).toBe("frequency-out-of-band")
+	})
+
+	it.each([
+		["global", { bandSuspension: false }],
+		["per-decoder", { optOut: ["rtl433"] }],
+	] as const)(
+		"%s band-suspension opt-out never reports frequency-out-of-band",
+		async (_name, opts) => {
+			const f = setup(["rtl433"], 446_520_000, opts)
+			await f.begin()
+			const v = view(f, "rtl433")
+			expect(v.verdict).toBe("out-of-band")
+			expect(v.reason).not.toBe("frequency-out-of-band")
+			// The planner skips the band: a window channel runs.
+			expect(v.reason).toBeUndefined()
+			expect(v.placements).toMatchObject([{ reach: "channel", running: true }])
+		},
+	)
 })

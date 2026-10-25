@@ -123,12 +123,13 @@ it("always skips only the band", async () => {
 						)
 					if (facts.held)
 						expect(always.suspension?.reasonCode).toBe("tuner-scanning")
-					else if (facts.unavailable)
-						expect(always.suspension?.reasonCode).toBe("decoder-unavailable")
+					// 11.3: rate reasons rank above decoder-unavailable.
 					else if (facts.rate < 48_000)
 						expect(always.suspension?.reasonCode).toBe(
 							"insufficient-sample-rate",
 						)
+					else if (facts.unavailable)
+						expect(always.suspension?.reasonCode).toBe("decoder-unavailable")
 					else if (facts.gate)
 						expect(always.suspension?.reasonCode).toBe("efficiency-budget")
 				} finally {

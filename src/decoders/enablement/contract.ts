@@ -161,6 +161,8 @@ export interface PlannerDecoder {
 	 * chosen one's options go to the adapter. Absent: `centreSlotHz` alone.
 	 */
 	centreSlots?: readonly PlannerCentreSlot[]
+	/** False when global or per-decoder band suspension is off (3.13): band policy skipped. */
+	bandSuspension?: boolean
 	/** rtl_433 (3.16): the widest channel output rate it wants; absent 1 MHz. */
 	channelTargetRateHz?: number
 }

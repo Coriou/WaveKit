@@ -1129,6 +1129,10 @@ export class DecoderManager extends EventEmitter {
 						startMode: state.startMode,
 						configuredSourceId: config.sourceId ?? null,
 						band: this.resolveBand(state).requirements,
+						// 3.13: either opt-out lifts the band policy in planning too.
+						...(this.config.bandSuspension && this.decoderBandSuspension(state)
+							? {}
+							: { bandSuspension: false }),
 						followVfo:
 							![
 								"channelHz",
@@ -5130,9 +5134,13 @@ export class DecoderManager extends EventEmitter {
 			this.config.bandSuspension &&
 			this.decoderBandSuspension(state) &&
 			state.startMode !== "operator"
+		const bandFree =
+			this.modeFor(state).mode === "always" ||
+			state.startMode === "operator" ||
+			!this.config.bandSuspension ||
+			!this.decoderBandSuspension(state)
 		const unplaced =
-			state.unplaced === "frequency-out-of-band" &&
-			(this.modeFor(state).mode === "always" || state.startMode === "operator")
+			state.unplaced === "frequency-out-of-band" && bandFree
 				? undefined
 				: state.unplaced
 		const channelizerUnavailable =
@@ -5169,29 +5177,28 @@ export class DecoderManager extends EventEmitter {
 			sourceCaps?.centerFreq !== undefined
 		const blockedBy =
 			this.heldReason(state) ??
-			(this.isUnavailable(state) ? "decoder-unavailable" : null) ??
+			// 11.3: rate reasons, then decoder-unavailable (as getStatus reports).
 			(rate.verdict === "unusable"
 				? (rate.reasonCode ?? "unsupported-sample-rate")
-				: !state.placement && channelizerUnavailable
-					? "channelizer-unavailable"
-					: builtinUnplaced
-						? sourceKnown
-							? (unplaced ??
-								// 3.13: `always` and operator starts skip the band, so
-								// an unreachable placement is the capture's limit.
-								(this.modeFor(state).mode === "always" ||
-								state.startMode === "operator"
-									? "capture-too-narrow"
-									: "frequency-out-of-band"))
-							: "source-rate-unknown"
-						: bandSuspends && band.verdict === "out-of-band"
-							? "frequency-out-of-band"
-							: (unplaced ??
-								(channelizerUnavailable
-									? "channelizer-unavailable"
-									: state.admission?.admit === false
-										? "efficiency-budget"
-										: null)))
+				: null) ??
+			(this.isUnavailable(state) ? "decoder-unavailable" : null) ??
+			(!state.placement && channelizerUnavailable
+				? "channelizer-unavailable"
+				: builtinUnplaced
+					? sourceKnown
+						? (unplaced ??
+							// 3.13: `always` and operator starts skip the band, so
+							// an unreachable placement is the capture's limit.
+							(bandFree ? "capture-too-narrow" : "frequency-out-of-band"))
+						: "source-rate-unknown"
+					: bandSuspends && band.verdict === "out-of-band"
+						? "frequency-out-of-band"
+						: (unplaced ??
+							(channelizerUnavailable
+								? "channelizer-unavailable"
+								: state.admission?.admit === false
+									? "efficiency-budget"
+									: null)))
 		return { rate, band, blockedBy }
 	}
 

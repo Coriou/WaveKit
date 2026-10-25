@@ -127,9 +127,22 @@ export function fitsReach(
 	)
 }
 
+/** `always`, an operator start or a band-suspension opt-out skip the band policy. */
+const bandFree = (d: PlannerDecoder): boolean =>
+	d.mode === "always" ||
+	d.startMode === "operator" ||
+	d.bandSuspension === false
+
+/** The band has at least one target or range (otherwise unknown). */
+function bandKnown(d: PlannerDecoder): boolean {
+	return (
+		(Array.isArray(d.band?.targetsHz) && d.band.targetsHz.length > 0) ||
+		(Array.isArray(d.band?.rangesHz) && d.band.rangesHz.length > 0)
+	)
+}
+
 function bandFits(d: PlannerDecoder, hz: number, halfWidth = 0): boolean {
-	if (d.mode === "always" || d.startMode === "operator" || d.band === undefined)
-		return true
+	if (bandFree(d) || d.band === undefined) return true
 	const targets = Array.isArray(d.band?.targetsHz) ? d.band.targetsHz : []
 	const ranges = Array.isArray(d.band?.rangesHz) ? d.band.rangesHz : []
 	if (targets.some(f => positive(f) && Math.abs(f - hz) <= halfWidth))
@@ -250,6 +263,8 @@ export const planPlacements: PlacementPlanner = input => {
 			const centre = s.centreHz!
 			const half = (s.sampleRateHz! * s.usableFraction) / 2
 			const local: Candidate[] = []
+			// 3.14: "too narrow" only when the band reaches this capture window.
+			const bandOverlapsWindow = !bandFree(d) && bandFits(d, centre, half)
 			const add = (
 				hz: number | null,
 				origin: Candidate["origin"],
@@ -262,7 +277,7 @@ export const planPlacements: PlacementPlanner = input => {
 				if (!band) return
 				if (fitsReach(d, s, hz))
 					local.push({ source: s, hz, reach: d.reach, origin, index })
-				else tooNarrow = true
+				else if (bandOverlapsWindow) tooNarrow = true
 			}
 			const followsVfo =
 				d.origin === "config" &&
@@ -278,9 +293,9 @@ export const planPlacements: PlacementPlanner = input => {
 				if (s !== selected) continue
 				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				const hz = vfo ? vfo.frequencyHz : centre
-				if (bandFits(d, hz, vfo ? 0 : half) && !fitsReach(d, s, hz))
-					tooNarrow = true
-				else if (bandFits(d, hz, vfo ? 0 : half))
+				if (bandFits(d, hz, vfo ? 0 : half) && !fitsReach(d, s, hz)) {
+					if (bandOverlapsWindow) tooNarrow = true
+				} else if (bandFits(d, hz, vfo ? 0 : half))
 					local.push({
 						source: s,
 						hz,
@@ -334,12 +349,7 @@ export const planPlacements: PlacementPlanner = input => {
 					).filter(positive)
 					// `always` and operator starts skip the band policy (as bandFits
 					// does) and keep the 162.000 MHz channel.
-					if (
-						d.mode === "always" ||
-						d.startMode === "operator" ||
-						targets.length === 0
-					)
-						add(hz, "band")
+					if (bandFree(d) || targets.length === 0) add(hz, "band")
 					else if (
 						targets.every(f => Math.abs(f - hz) <= d.channelBandwidthHz / 2)
 					)
@@ -358,10 +368,7 @@ export const planPlacements: PlacementPlanner = input => {
 						d.channelTargetRateHz,
 					)
 					// `always` and operator starts skip the band: the window itself.
-					if (
-						!("hz" in found) &&
-						(d.mode === "always" || d.startMode === "operator")
-					)
+					if (!("hz" in found) && bandFree(d))
 						found = rtl433ChannelCandidate(
 							s,
 							[{ minHz: centre - half, maxHz: centre + half }],
@@ -439,13 +446,18 @@ export const planPlacements: PlacementPlanner = input => {
 					channels.slice(0, cap).forEach((hz, i) => add(hz, "bandplan", i))
 				}
 			}
+			// A band-plan decoder whose band reaches this window but which has no
+			// channel here (no VFO, no band-plan channel) cannot be placed (3.14).
+			if (
+				!local.length &&
+				bandOverlapsWindow &&
+				d.origin === "catalogue" &&
+				(d.type === "dsd-fme" || d.type === "multimon-ng")
+			)
+				tooNarrow = true
 			candidates.push(...local)
 		}
-		if (
-			!candidates.length &&
-			d.reach === "channel" &&
-			(d.mode === "always" || d.startMode === "operator")
-		) {
+		if (!candidates.length && d.reach === "channel" && bandFree(d)) {
 			for (const s of [...sources].sort(
 				(a, b) => Number(a.held) - Number(b.held) || a.order - b.order,
 			)) {
@@ -530,16 +542,11 @@ export const planPlacements: PlacementPlanner = input => {
 		)
 		if (!sorted.length) {
 			if (channelizerMissing) unplaced.set(d.id, "channelizer-unavailable")
-			else if (
-				sources.length &&
-				d.mode !== "always" &&
-				d.startMode !== "operator"
-			)
-				// Only an empty band candidate set is out of band (3.14).
-				unplaced.set(
-					d.id,
-					tooNarrow ? "capture-too-narrow" : "frequency-out-of-band",
-				)
+			else if (sources.length && !bandFree(d)) {
+				// Only an empty candidate set of a known band is out of band (3.13, 3.14).
+				if (tooNarrow) unplaced.set(d.id, "capture-too-narrow")
+				else if (bandKnown(d)) unplaced.set(d.id, "frequency-out-of-band")
+			}
 		}
 	}
 	return { wanted, unplaced }
