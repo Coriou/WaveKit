@@ -150,17 +150,35 @@ export function pickChannelObservation<T extends ChannelCandidate>(
 	now: number,
 	pairMs: number,
 ): T | null {
-	let only: T | null = null
+	const qualifying: T[] = []
 	for (const o of candidates) {
 		const t = o.lastTrack
 		if (o.sourceId !== e.sourceId || !t) continue
 		if (Math.abs(t.centreHz - e.passband.centreHz) > e.passband.halfHz) continue
 		if (e.at < o.startedAt - pairMs || e.at > (o.endedAt ?? now) + pairMs)
 			continue
+		qualifying.push(o)
+	}
+	// rtl_433's estimate narrows the choice only when no candidate could be an
+	// edge emitter: a device past RTL433_FREQ_USABLE_FRACTION of the half
+	// width may report a frequency far from where it is, onto another track.
+	// Then (or without an estimate) the plain exactly-one rule decides.
+	const freqHz = e.freqHz
+	if (
+		freqHz === undefined ||
+		qualifying.some(
+			o =>
+				Math.abs(o.lastTrack!.centreHz - e.passband.centreHz) >
+				e.passband.halfHz * RTL433_FREQ_USABLE_FRACTION,
+		)
+	)
+		return qualifying.length === 1 ? qualifying[0]! : null
+	let only: T | null = null
+	for (const o of qualifying) {
+		const t = o.lastTrack!
 		if (
-			e.freqHz !== undefined &&
-			Math.abs(t.centreHz - e.freqHz) >
-				RTL433_FREQ_TOLERANCE_HZ + Math.max(0, t.obwHz) / 2
+			Math.abs(t.centreHz - freqHz) >
+			RTL433_FREQ_TOLERANCE_HZ + Math.max(0, t.obwHz) / 2
 		)
 			continue
 		if (only) return null

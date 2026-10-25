@@ -566,7 +566,7 @@ describe("suspension follows the band", () => {
 		expect(again).not.toBe(narrow)
 	})
 
-	it("a moved centre at the same rate retunes in place; a new rate restarts once", async () => {
+	it("a moved rtl433 channel restarts with the new -f reference; a new rate restarts once", async () => {
 		const f = setup(["rtl433"], IN)
 		await f.manager.startAll()
 		await settle()
@@ -574,20 +574,41 @@ describe("suspension follows the band", () => {
 		const starts = d.starts
 		const requests = f.provider.requestChannel.mock.calls.length
 		// 3.2 Msps (past window reach) at 433.5 MHz and 433.6 MHz: both give a
-		// 1 MHz channel.
+		// 1 MHz channel; h = 1.28 MHz, overlap 433.05-434.78 MHz then
+		// 433.05-434.79 MHz, centres 433.915 and 433.92 MHz.
 		f.sources.setRate("rtl", 3_200_000)
 		await tune(f, 433_500_000)
 		expect(f.applied.get("rtl433")?.["targetSampleRate"]).toBe(1_000_000)
 		expect(d.starts).toBe(starts + 1)
 		expect(f.provider.requestChannel.mock.calls.length).toBe(requests + 1)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_915_000)
 		await tune(f, 433_600_000)
-		expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
-		expect(d.starts).toBe(starts + 1)
-		expect(f.provider.requestChannel.mock.calls.length).toBe(requests + 1)
-		// h = 1.28 MHz: overlap 433.05-434.79 MHz, centre 433.92 MHz.
+		// No in-place retune: the running process gets the new centre.
+		expect(f.provider.retuneChannel).not.toHaveBeenCalled()
+		expect(d.starts).toBe(starts + 2)
+		expect(f.provider.requestChannel.mock.calls.length).toBe(requests + 2)
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_920_000)
+		expect(d.running).toBe(true)
 		expect(view(f, "rtl433").placements).toMatchObject([
 			{ channelHz: 433_920_000, running: true },
 		])
+	})
+
+	it("a raw rtl433 restarts when only the capture centre moves", async () => {
+		const f = setup(["rtl433"], 433_600_000)
+		await f.manager.startAll()
+		await settle()
+		const d = f.instances.get("rtl433")!
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_600_000)
+		const starts = d.starts
+		await tune(f, 433_700_000)
+		expect(view(f, "rtl433").placements).toMatchObject([
+			{ reach: "raw", running: true },
+		])
+		// The process was restarted after the reference changed.
+		expect(f.applied.get("rtl433")?.["inputCenterFreq"]).toBe(433_700_000)
+		expect(d.starts).toBe(starts + 1)
+		expect(d.running).toBe(true)
 	})
 
 	it("Property 16: after each settle the suspension equals the band verdict", async () => {

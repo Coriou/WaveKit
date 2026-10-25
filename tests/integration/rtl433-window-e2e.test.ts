@@ -47,6 +47,10 @@ import {
 import { DecoderManager } from "../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../src/decoders/registry.js"
 import type { DecoderOutput } from "../../src/decoders/types.js"
+import {
+	pickChannelObservation,
+	rtl433FreqHz,
+} from "../../src/core/scanner/probes/ambient-channel.js"
 import { ookPwmCu8 } from "../mocks/ook-pwm.js"
 
 const FS = 960_000
@@ -418,5 +422,65 @@ describe.skipIf(!chanBin || !rtl433)("rtl433 on the whole capture", () => {
 				o => (o.data as Record<string, unknown>)["model"] === model,
 			),
 		).toBe(true)
+	}, 40_000)
+
+	it("decodes an emitter at 0.93 of Nyquist only from the raw window, with no wrong identity", async () => {
+		// +446.4 kHz = 0.93 * 480 kHz: outside the usable window (+/- 384 kHz),
+		// so no channel can carry it. The raw window stream is the capture
+		// itself (the test above shows rtl_433's stdin equals what was sent).
+		const edgeOffset = 446_400
+		const capture = ookPwmCu8({
+			fs: FS,
+			offsetHz: edgeOffset,
+			amp: 0.3,
+			noise: 0.02,
+			leadS: 0.5,
+			tailS: 0.5,
+			seed: 11,
+		})
+		const raw = join(dir, "edge.cu8")
+		writeFileSync(raw, capture)
+		const decodes = rtl433Json(raw, FS, [
+			"-Y",
+			"autolevel",
+			"-f",
+			String(CENTRE),
+			"-M",
+			"level",
+		])
+		expect(decodes.length).toBeGreaterThan(0)
+		// The widest channel the capture allows: the whole usable window,
+		// 768 kHz at the centre (h = 384 kHz = bw/2 + tr).
+		const widest = join(dir, "edge-channel.cu8")
+		writeFileSync(
+			widest,
+			await throughChannel(capture, { hz: CENTRE, rateHz: 768_000 }),
+		)
+		expect(rtl433Json(widest, 768_000, ["-Y", "autolevel"])).toHaveLength(0)
+		// Association over the window passband: an inner track and the edge
+		// track are both in view; whatever rtl_433 estimates, the inner one is
+		// never named.
+		const window = { centreHz: CENTRE, halfHz: FS / 2 }
+		const track = (id: string, hz: number) => ({
+			observationId: id,
+			sourceId: "rtl",
+			startedAt: 0,
+			endedAt: 10,
+			lastTrack: { centreHz: hz, obwHz: 10_000 },
+		})
+		const inner = track("inner", CENTRE - 100_000)
+		const edge = track("edge", CENTRE + edgeOffset)
+		for (const d of decodes) {
+			const freqHz = rtl433FreqHz(d, window)
+			const pick = (list: (typeof inner)[]) =>
+				pickChannelObservation(
+					list,
+					{ sourceId: "rtl", passband: window, at: 5, freqHz },
+					10,
+					0,
+				)
+			expect(pick([inner, edge])).toBeNull()
+			expect(pick([edge])?.observationId).toBe("edge")
+		}
 	}, 40_000)
 })

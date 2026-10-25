@@ -1376,7 +1376,10 @@ export class DecoderManager extends EventEmitter {
 							state.config.options["offsetHz"] !== rawOffsetHz))
 				// A configured VFO move, or (3.16) a band channel whose centre moved at
 				// the same rate, retunes in place; a changed rate restarts once.
+				// rtl433 is excluded: its `-f` is the channel centre, so a moved
+				// channel restarts it with the new reference instead.
 				const sameRateMove =
+					state.config.type !== "rtl433" &&
 					state.placement?.origin === "band" &&
 					placement.origin === "band" &&
 					state.placement.reach === "channel" &&
@@ -4318,7 +4321,14 @@ export class DecoderManager extends EventEmitter {
 				].includes(state.config.type) ||
 				(state.config.type === "lora-meshtastic" &&
 					!state.config.options["followCenter"])
-			if (inputChanged || !passive || state.channelStale)
+			// rtl_433 holds the stdin centre as `-f` (its `freq` reference): a raw
+			// placement restarts when the capture centre moves, so the running
+			// process always reports frequencies against the current centre.
+			const referenceMoved =
+				state.config.type === "rtl433" &&
+				!state.channel &&
+				previous?.centerFreq !== caps.centerFreq
+			if (inputChanged || !passive || state.channelStale || referenceMoved)
 				restartDecoders.add(decoderId)
 			state.inputCaps = { ...caps }
 			// An open channel keeps feeding the channel's rate and centre.

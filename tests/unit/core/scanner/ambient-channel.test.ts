@@ -322,6 +322,20 @@ describe("rtl_433 frequency estimate", () => {
 		expect(at(CENTRE - 100_000 - tol, list)?.observationId).toBe("a")
 	})
 
+	it("ignores the estimate while any candidate could be an edge emitter", () => {
+		// 1 MHz window at 100 MHz: tracks at 100.46 MHz (past 0.8 of the
+		// 500 kHz half width) and 100.25 MHz; an edge device reports 100.25 MHz.
+		const window = { centreHz: 100_000_000, halfHz: 500_000 }
+		const list = [obs("edge", 100_460_000), obs("inner", 100_250_000)]
+		const got = pickChannelObservation(
+			list,
+			{ sourceId: "rtl", passband: window, at: 1_500, freqHz: 100_250_000 },
+			10_000,
+			2_000,
+		)
+		expect(got).toBeNull()
+	})
+
 	it("names nothing out of tolerance or when two tracks are within it", () => {
 		expect(at(CENTRE + tol + 1, [obs("a", CENTRE)])).toBeNull()
 		expect(
@@ -417,4 +431,40 @@ describe("AmbientEvidence rtl433 window reach", () => {
 			freqHz: CENTRE + 120_000,
 		})
 	})
+})
+
+// Feature: rtl433-channel-association, Property 2: with an estimate, the pick is never a track out of tolerance, and is the plain exactly-one pick whenever an edge candidate exists
+// Validates: rtl433 channel association, conservative estimate rule
+it("never lets an estimate pick a wrong track", () => {
+	const window = { centreHz: 100_000_000, halfHz: 500_000 }
+	fc.assert(
+		fc.property(
+			fc.array(fc.integer({ min: -500_000, max: 500_000 }), {
+				minLength: 0,
+				maxLength: 5,
+			}),
+			fc.integer({ min: -400_000, max: 400_000 }),
+			(offs, freqOff) => {
+				const list = offs.map((o, i) => obs(`o${i}`, window.centreHz + o))
+				const freqHz = window.centreHz + freqOff
+				const pick = (f: number | undefined) =>
+					pickChannelObservation(
+						list,
+						{ sourceId: "rtl", passband: window, at: 1_500, freqHz: f },
+						10_000,
+						2_000,
+					)
+				const got = pick(freqHz)
+				const plain = pick(undefined)
+				const edge = offs.some(o => Math.abs(o) > window.halfHz * 0.8)
+				if (edge) expect(got).toBe(plain)
+				else if (got)
+					expect(
+						Math.abs(got.lastTrack!.centreHz - freqHz),
+					).toBeLessThanOrEqual(RTL433_FREQ_TOLERANCE_HZ + 5_000)
+				if (list.length === 0) expect(got).toBeNull()
+			},
+		),
+		{ numRuns: 200 },
+	)
 })
