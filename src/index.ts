@@ -471,11 +471,13 @@ export function wireDecoderLinkFeed(
 	sources.on("connected", connected)
 	sources.on("disconnected", resetPolicy)
 	sources.on("source-removed", removed)
+	sources.on("commanded-recovery-failed", removed)
 	return () => {
 		sources.off("metrics", metrics)
 		sources.off("connected", connected)
 		sources.off("disconnected", resetPolicy)
 		sources.off("source-removed", removed)
+		sources.off("commanded-recovery-failed", removed)
 	}
 }
 

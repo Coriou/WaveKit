@@ -183,6 +183,7 @@ function formatSourceUrl(config: SourceConfig): string {
 export interface SourceManagerEvents {
 	connected: (sourceId: string) => void
 	disconnected: (sourceId: string, error?: Error) => void
+	"commanded-recovery-failed": (sourceId: string) => void
 	error: (sourceId: string, error: Error) => void
 	data: (sourceId: string, chunk: Buffer) => void
 	metrics: (
@@ -882,7 +883,10 @@ export class SourceManager extends EventEmitter {
 			if (attempt) attempt.lastSampleAt = state.lastSampleAt
 			const recovery = this.rateRecovery.get(id)
 			if (recovery && state.socket !== recovery.socket)
-				this.rateRecovery.delete(id)
+				this.finishRateRecovery(
+					id,
+					recovery.deadline > Date.now() && !recovery.owner.aborted,
+				)
 		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -1640,11 +1644,6 @@ export class SourceManager extends EventEmitter {
 					state.socket === socket
 				const wasConnected = state.connected
 				if (owns) this.noteEndpointClose(id, state)
-				// A failed replacement connection is an unplanned disconnect, even
-				// if the original socket closed during commanded rate recovery.
-				const recovery = this.rateRecovery.get(id)
-				if (owns && recovery && recovery.socket !== socket)
-					recovery.failed = true
 				if (owns) {
 					attempt.phase = "closed"
 					attempt.sessionId = null
@@ -1678,6 +1677,9 @@ export class SourceManager extends EventEmitter {
 									: undefined,
 							)
 					}
+					const recovery = this.rateRecovery.get(id)
+					if (owns && recovery && recovery.socket !== socket)
+						this.finishRateRecovery(id, false)
 					if (closedCurrent()) this.scheduleReconnect(id, state, attempt)
 				} finally {
 					if (!wasConnected && isInitialAttempt)
@@ -2079,7 +2081,7 @@ export class SourceManager extends EventEmitter {
 		// "disconnected" for an id clients have already dropped.
 		const state = this.sources.get(id)
 		if (state) state.connected = false
-		this.rateRecovery.delete(id)
+		this.finishRateRecovery(id, false)
 		for (const controller of this.tunerCommandControllers.get(id) ?? [])
 			controller.abort(
 				new WaveKitError("Source was removed", "SOURCE_NOT_FOUND"),
@@ -2097,6 +2099,7 @@ export class SourceManager extends EventEmitter {
 	private teardown(id: string): boolean {
 		const state = this.sources.get(id)
 		if (!state) return false
+		this.finishRateRecovery(id, false)
 
 		state.stopping = true
 		if (state.attempt) {
@@ -2580,7 +2583,6 @@ export class SourceManager extends EventEmitter {
 			deadline: number
 			socket: net.Socket
 			owner: AbortSignal
-			failed?: boolean
 		}
 	>()
 
@@ -2609,7 +2611,6 @@ export class SourceManager extends EventEmitter {
 		const recovery = this.rateRecovery.get(id)
 		return (
 			recovery !== undefined &&
-			!recovery.failed &&
 			!recovery.owner.aborted &&
 			recovery.deadline > Date.now()
 		)
@@ -2693,7 +2694,7 @@ export class SourceManager extends EventEmitter {
 			clearTimeout(timer)
 			const recovery = this.rateRecovery.get(id)
 			if (signal.aborted && recovery?.owner === signal) {
-				this.rateRecovery.delete(id)
+				this.finishRateRecovery(id, false)
 				if (
 					this.sources.get(id)?.socket === recovery.socket &&
 					this.sources.get(id)?.connected
@@ -2724,7 +2725,7 @@ export class SourceManager extends EventEmitter {
 			state.lastSampleAt !== null &&
 			state.lastSampleAt >= recovery.deadline
 		) {
-			this.rateRecovery.delete(id)
+			this.finishRateRecovery(id, false)
 			return
 		}
 		// Drain the complete API command (including bulk writes), then reopen.
@@ -2740,11 +2741,17 @@ export class SourceManager extends EventEmitter {
 			this.sources.get(id)?.socket?.writable &&
 			this.sources.get(id)?.lastSampleAt !== null
 		) {
-			this.rateRecovery.delete(id)
+			this.finishRateRecovery(
+				id,
+				recovery.deadline > Date.now() && !recovery.owner.aborted,
+			)
 			return
 		}
 		const remaining = recovery.deadline - Date.now()
-		if (remaining <= 0) throw this.sourceReconnecting()
+		if (remaining <= 0) {
+			this.finishRateRecovery(id, false)
+			throw this.sourceReconnecting()
+		}
 		await new Promise<void>((resolve, reject) => {
 			const cleanup = () => {
 				clearTimeout(timer)
@@ -2760,22 +2767,34 @@ export class SourceManager extends EventEmitter {
 				)
 					return
 				cleanup()
-				this.rateRecovery.delete(id)
+				this.finishRateRecovery(
+					id,
+					recovery.deadline > Date.now() && !recovery.owner.aborted,
+				)
 				resolve()
 			}
 			const removed = (sourceId: string) => {
 				if (sourceId !== id) return
 				cleanup()
-				this.rateRecovery.delete(id)
+				this.finishRateRecovery(id, false)
 				reject(new WaveKitError("Source was removed", "SOURCE_NOT_FOUND"))
 			}
 			const timer = setTimeout(() => {
 				cleanup()
+				this.finishRateRecovery(id, false)
 				reject(this.sourceReconnecting())
 			}, remaining)
 			this.on("payload-started", connected)
 			this.on("source-removed", removed)
 		})
+	}
+
+	/** End each recovery once, before notifying consumers that preservation ended. */
+	private finishRateRecovery(id: string, succeeded: boolean): void {
+		const recovery = this.rateRecovery.get(id)
+		if (!recovery) return
+		this.rateRecovery.delete(id)
+		if (!succeeded) this.emit("commanded-recovery-failed", id)
 	}
 
 	private sourceReconnecting(): WaveKitError {

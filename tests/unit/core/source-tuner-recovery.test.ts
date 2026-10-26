@@ -153,8 +153,10 @@ it("fails at the recovery bound and past it with a typed retry error", async () 
 	await rejected
 	await vi.advanceTimersByTimeAsync(1)
 	await expect(
-		manager.runTunerCommand("source", async () => {}),
-	).rejects.toBeInstanceOf(WaveKitError)
+		manager.runTunerCommand("source", async () => {
+			manager.writeToSource("source", frame(4, 42))
+		}),
+	).rejects.toMatchObject({ code: "SOURCE_DISCONNECTED" })
 })
 
 it("keeps unrelated disconnects fast and typed", async () => {
@@ -361,6 +363,8 @@ it("recovers a rate write even when the rest of the command fails", async () => 
 
 it("cleans up a hung rate writer when its command times out", async () => {
 	const { manager } = await setup()
+	const failed = vi.fn()
+	manager.on("commanded-recovery-failed", failed)
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
 	vi.setSystemTime(6_543_219)
 	vi.spyOn(Math, "random").mockReturnValue(0)
@@ -378,6 +382,7 @@ it("cleans up a hung rate writer when its command times out", async () => {
 	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS)
 	await checked
 	await lost
+	expect(failed).toHaveBeenCalledExactlyOnceWith("source")
 	const payload = once(manager, "payload-started")
 	await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
 	await payload
@@ -591,8 +596,8 @@ it("maps the real rate recovery deadline to a retryable HTTP response", async ()
 	expect(result.headers["retry-after"]).toBe("1")
 })
 
-async function policyApp() {
-	const { manager, sockets } = await setup()
+async function policyApp(payloadOnReconnect = true) {
+	const { manager, sockets, server } = await setup(payloadOnReconnect)
 	const log = createLogger({ level: "fatal" })
 	const tuner = new TunerController(log, manager)
 	tuner.initializeSource("source", manager.getCaps("source"), "rtl_tcp")
@@ -643,12 +648,14 @@ async function policyApp() {
 		await payload
 		expect((await request).statusCode).toBe(200)
 	}
-	return { manager, sockets, tuner, policy, tune }
+	return { manager, sockets, server, app, tuner, policy, tune }
 }
 
 it("restores the original rate after a policy raise and commanded recovery", async () => {
 	const { tuner, policy, tune } = await policyApp()
+	const reset = vi.spyOn(policy, "reset")
 	await tune(ADSB_FREQUENCY_HZ)
+	expect(reset).not.toHaveBeenCalled()
 	expect(tuner.getState("source")?.sampleRate).toBe(READSB_SAMPLE_RATE)
 	expect(policy.recordFor("source")).toMatchObject({ raisedFromHz: 1_000_000 })
 	await tune(ADSB_FREQUENCY_HZ + READSB_REACH_HZ + 137)
@@ -751,4 +758,98 @@ it("queues a retained continuation after its parent has completed", async () => 
 	release.resolve()
 	await Promise.all([blocker, continuation])
 	expect(work).toHaveBeenCalledOnce()
+})
+
+// Replacement sockets use an isolated loopback listener with the stall watchdog disabled.
+it.each([137, 419])(
+	"clears a raised policy once when a silent replacement expires at offset %s",
+	async offset => {
+		const { manager, sockets, app, policy } = await policyApp(false)
+		vi.setSystemTime(5_432_109 + offset)
+		const reset = vi.spyOn(policy, "reset")
+		const failed = vi.fn()
+		manager.on("commanded-recovery-failed", failed)
+		const lost = once(manager, "disconnected")
+		const request = app
+			.inject({
+				method: "POST",
+				url: "/api/tuner/source/frequency",
+				payload: { hz: ADSB_FREQUENCY_HZ },
+			})
+			.then(result => result)
+		await lost
+		expect(policy.recordFor("source")).toMatchObject({
+			raisedFromHz: 1_000_000,
+		})
+		const connected = once(manager, "connected")
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+		await connected
+		expect(reset).not.toHaveBeenCalled()
+		await vi.advanceTimersByTimeAsync(SOURCE_CONNECT_TIMEOUT_MS + offset)
+		expect((await request).json()).toMatchObject({
+			code: "SOURCE_RECONNECTING",
+		})
+		expect(manager.isCommandedRecovery("source")).toBe(false)
+		expect(failed).toHaveBeenCalledExactlyOnceWith("source")
+		expect(reset).toHaveBeenCalledExactlyOnceWith("source")
+		expect(policy.recordFor("source")).toBeUndefined()
+		const payload = once(manager, "payload-started")
+		for (const socket of sockets) socket.write(Buffer.alloc(8))
+		await payload
+		expect(policy.recordFor("source")).toBeUndefined()
+		expect(reset).toHaveBeenCalledExactlyOnceWith("source")
+		expect(failed).toHaveBeenCalledExactlyOnceWith("source")
+	},
+)
+
+it("clears a raised policy once when the replacement fails before connecting", async () => {
+	const { manager, server, app, policy } = await policyApp()
+	vi.setSystemTime(7_654_321)
+	const reset = vi.spyOn(policy, "reset")
+	const failed = vi.fn()
+	manager.on("commanded-recovery-failed", failed)
+	server.close()
+	const lost = once(manager, "disconnected")
+	const request = app
+		.inject({
+			method: "POST",
+			url: "/api/tuner/source/frequency",
+			payload: { hz: ADSB_FREQUENCY_HZ },
+		})
+		.then(result => result)
+	await lost
+	const failure = new Promise<void>(resolve =>
+		manager.once("commanded-recovery-failed", () => resolve()),
+	)
+	await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1) + 137)
+	await failure
+	expect(manager.isCommandedRecovery("source")).toBe(false)
+	expect(policy.recordFor("source")).toBeUndefined()
+	expect(reset).toHaveBeenCalledExactlyOnceWith("source")
+	await vi.advanceTimersByTimeAsync(SOURCE_CONNECT_TIMEOUT_MS + 419)
+	expect((await request).statusCode).toBe(503)
+	expect(failed).toHaveBeenCalledExactlyOnceWith("source")
+	expect(reset).toHaveBeenCalledExactlyOnceWith("source")
+})
+
+it("reports a removed commanded recovery only once", async () => {
+	const { manager } = await setup(false)
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(4_321_987)
+	const failed = vi.fn()
+	manager.on("commanded-recovery-failed", failed)
+	const lost = once(manager, "disconnected")
+	const pending = manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(2, 1_200_000))
+	})
+	const rejected = expect(pending).rejects.toMatchObject({
+		code: "SOURCE_NOT_FOUND",
+	})
+	await lost
+	await vi.advanceTimersByTimeAsync(137)
+	await manager.disconnect("source")
+	await rejected
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS + 419)
+	expect(failed).toHaveBeenCalledExactlyOnceWith("source")
+	expect(manager.isCommandedRecovery("source")).toBe(false)
 })

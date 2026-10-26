@@ -49,7 +49,9 @@ not applied later. A 503 after a sample-rate change does not mean the rate was r
 write may already have reached the receiver. Reconnect restoration retains
 accepted tuner state. A decoder policy's original sample rate also survives a
 commanded recovery, so leaving its required tuning range restores that rate.
-An unplanned disconnect or source removal clears the policy record.
+An unplanned disconnect, source removal, or failed commanded recovery clears the
+policy record. Recovery expiry clears it even if the replacement connects without
+supplying IQ; later IQ does not restore the expired record.
 
 Command execution has a separate 9-second deadline (`TUNER_COMMAND_TIMEOUT`,
 503 with `Retry-After: 1`); expired commands cannot apply late writes. Hooks that
