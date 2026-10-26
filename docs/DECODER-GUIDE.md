@@ -632,7 +632,10 @@ After a source reconnect, probation requires fresh coverage; drops recorded in t
 source epoch do not condemn a resumed decoder. New drops still trigger probation backoff
 for suspendable decoders. Decoders protected by `always` mode or an operator start stay
 running; after loss, a fresh 60-second clean run with complete evidence lets them graduate
-and frees the source's probation slot. Continued loss keeps newcomers waiting.
+and frees the source's probation slot. CPU over the guard restarts this recovery interval
+at the following sample; a full 60 seconds of complete evidence must follow the latest
+spike. Continued loss or CPU spikes keep newcomers waiting. Graduation remains earned
+when a later CPU spike occurs.
 Late-drop shedding uses only completed windows ending within the last 30 seconds
 (3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
 The budget defaults to half the available CPU capacity, with process and cgroup limits;

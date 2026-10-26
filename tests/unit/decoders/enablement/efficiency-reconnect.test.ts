@@ -206,3 +206,82 @@ it.each([
 		}
 	},
 )
+
+it.each([
+	{ mode: "always", startMode: "auto", repeated: false },
+	{ mode: "auto", startMode: "operator", repeated: false },
+	{ mode: "always", startMode: "auto", repeated: true },
+	{ mode: "auto", startMode: "operator", repeated: true },
+] as const)(
+	"protected CPU recovery is bounded with mode=$mode, startMode=$startMode, repeated=$repeated",
+	({ mode, startMode, repeated }) => {
+		const events = new EventEmitter()
+		let mono = 0
+		const cpu = { normalisedPercent: 10 }
+		const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+		const monitor = createEfficiencyMonitor({
+			sourceEvents: events,
+			sources: () => ["s"],
+			branchCounters: () => new Map([["raw", counters]]),
+			topology: () => "raw",
+			cpu,
+			now: () => mono,
+			monoNow: () => mono,
+			setInterval: () => ({ cancel() {} }),
+		})
+		const gate = createEfficiencyGate(
+			{ budgetCores: 3, cpuGuardPercent: 90 },
+			{ drops: monitor },
+		)
+		const tick = (at: number) => {
+			mono = at
+			gate.record(monitor.sampleNow())
+		}
+		monitor.start()
+		try {
+			for (let at = 2000; at <= 66000; at += 2000) tick(at)
+			const old = placement("old", 2_048_000)
+			expect(gate.admit(old, [], mono)).toEqual({ admit: true })
+			const running: RunningPlacement[] = [
+				{ ...old, admittedAtMs: mono, mode, startMode },
+			]
+			tick(68000)
+			events.emit("disconnected", "s")
+			events.emit("data", "s", Buffer.alloc(1))
+			const wanted = placement("needed", 2_048_000)
+			const lastSpike = repeated ? 200000 : 80000
+			// Start after the latest spike's sample, then earn a full 60 s:
+			// the single 80 s spike must release the slot at 142 s, not 140 s.
+			const recoveredAt = lastSpike + 2000 + 60000
+			for (let at = 70000; at <= 3600000; at += 2000) {
+				if (at === 76000) counters.droppedBytesTotal++
+				cpu.normalisedPercent =
+					at === 80000 ||
+					(repeated && at > 80000 && at <= lastSpike && at % 20000 === 0) ||
+					at === recoveredAt + 2000
+						? 95
+						: 10
+				tick(at)
+				expect(gate.probation(running, mono)).toEqual([])
+				expect(
+					gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
+				).toBe(at < recoveredAt)
+				if (at >= 138000) expect(monitor.dropState("s").state).toBe("ok")
+				if (at >= recoveredAt && cpu.normalisedPercent === 10)
+					expect(gate.admit(wanted, running, mono)).toEqual({ admit: true })
+				else if (at < recoveredAt)
+					expect(
+						gate.admit(
+							cpu.normalisedPercent === 10
+								? wanted
+								: placement(`waiting-${at}`, 2_048_000),
+							running,
+							mono,
+						).admit,
+					).toBe(false)
+			}
+		} finally {
+			monitor.stop()
+		}
+	},
+)

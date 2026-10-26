@@ -265,12 +265,18 @@ export function createEfficiencyGate(
 		// Protected probationers cannot be suspended after loss. Let a fresh
 		// clean run release their slot: cleanAt - 30 × 2000 ms is its first
 		// clean point; require all 60000 ms of coverage, including the endpoint.
-		// No retry state or growing recovery history is needed. Further loss or
-		// unknown evidence restarts the monitor's clean run instead of admitting.
+		// CPU does not restart the monitor's drop-clean run. Start after its
+		// latest disqualifying sample too, then require a full clear window.
 		try {
 			const cleanAt = deps.drops?.cleanAtMono?.(p.sourceId)
 			if (!valid(cleanAt) || cleanAt > mono) return false
-			const since = cleanAt - EFFICIENCY_CLEAR_MS
+			const lastHighCpu = highCpu.findLast(t => t >= admitted && t <= mono)
+			const since = Math.max(
+				cleanAt - EFFICIENCY_CLEAR_MS,
+				lastHighCpu === undefined
+					? admitted
+					: lastHighCpu + EFFICIENCY_SAMPLE_MS,
+			)
 			return (
 				since > admitted &&
 				readDrops(p.sourceId).state === "ok" &&
@@ -398,18 +404,26 @@ export function createEfficiencyGate(
 				return
 			}
 			const at = sample.atMs
+			// Prune on healthy samples too. Unfinished original probation still
+			// needs its admission evidence; recovery needs only the recent window.
+			let mono = NaN
+			try {
+				mono = deps.drops?.lastSampleMono?.() ?? monoNow()
+			} catch {
+				mono = monoNow()
+			}
+			if (valid(mono)) {
+				let since = mono - EFFICIENCY_CLEAR_MS - EFFICIENCY_SAMPLE_MS
+				for (const [key, admitted] of admittedMono)
+					if (!graduated.has(key)) since = Math.min(since, admitted)
+				while (highCpu.length && highCpu[0]! < since) highCpu.shift()
+			}
 			if (
 				valid(sample.cpuPercent) &&
 				sample.cpuPercent > inputs.cpuGuardPercent
 			) {
 				// CPU evidence carries the evidence time of the sample it came with,
 				// so the sample that completes coverage includes its CPU reading.
-				let mono = NaN
-				try {
-					mono = deps.drops?.lastSampleMono?.() ?? monoNow()
-				} catch {
-					mono = monoNow()
-				}
 				if (Number.isFinite(mono)) {
 					highCpu.push(mono)
 					if (highCpu.length > 1024) highCpu.shift()
