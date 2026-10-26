@@ -2990,10 +2990,42 @@ async function main(): Promise<void> {
 		if (protectedMode) {
 			const watchdog = setTimeout(() => process.exit(1), 10_000)
 			try {
-				await closeProtected().catch(cleanupError => {
-					// Rejected operator acquisition already retains private ownership.
-					// Keep its concrete startup code/reason instead of the cleanup sentinel.
-					if (!(error instanceof OperatorDataError)) throw cleanupError
+				// closeProtected reduces independent failures to one shutdown sentinel.
+				// Retain their causes here so only the acquisition sentinel is suppressed.
+				const cleanupErrors: unknown[] = []
+				for (const entry of cleanup) {
+					const run = entry.run
+					entry.run = async () => {
+						try {
+							await run()
+						} catch (cleanupError) {
+							cleanupErrors.push(cleanupError)
+							throw cleanupError
+						}
+					}
+				}
+				await closeProtected().catch(async cleanupError => {
+					const { safeErrorFields } =
+						await import("./decoders/safe-error-fields.js")
+					const unexpected = cleanupErrors.filter(
+						cause =>
+							!(
+								error instanceof OperatorDataError &&
+								cause instanceof WaveKitError &&
+								cause.code === "ACCESS_UNAVAILABLE" &&
+								cause.message === "Operator acquisition cleanup unknown"
+							),
+					)
+					// Admission and final access-close failures are outside the cleanup list.
+					if (admissionFailed || cleanupErrors.length === 0)
+						unexpected.push(cleanupError)
+					for (const cause of unexpected) {
+						const { type, code } = safeErrorFields(cause)
+						log.error(
+							{ err: { type, ...(code ? { code } : {}) } },
+							"Startup cleanup failed",
+						)
+					}
 				})
 			} finally {
 				clearTimeout(watchdog)

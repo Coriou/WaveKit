@@ -208,10 +208,11 @@ is still alive in the same container. A lock whose heartbeat stays fresh
 (another live core using the same state) is never taken. A recent heartbeat from
 an owner with a matching local PID and start time fails immediately; an old
 wall-clock timestamp selects observation and can wait up to 40 seconds. Wall
-clock age alone never proves expiry. Startup shows the public error code and,
-for band-plan and operator-data storage, a safe reason, such as
-`ACCESS_STORAGE_FOREIGN_OWNER`, `ACCESS_STORAGE_BUSY`,
-`BANDPLANS_UNAVAILABLE/lock-held`, or `OPERATOR_DATA_UNAVAILABLE/lock-held`.
+clock age alone never proves expiry. Startup failures show the public error code,
+such as `ACCESS_STORAGE_FOREIGN_OWNER`, `ACCESS_STORAGE_BUSY`, or
+`OPERATOR_DATA_UNAVAILABLE/lock-held` (including the safe operator-data reason).
+Band-plan storage failures instead warn and fall back to built-in plans; they do
+not stop startup.
 
 ### Port conflicts
 

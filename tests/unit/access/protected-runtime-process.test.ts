@@ -33,6 +33,7 @@ let failedScannerEntry: string
 let failedOperatorEntry: string
 let pausedOperatorEntry: string
 let failedOperatorCloseEntry: string
+let failedApiCleanupEntry: string
 let scannerPhasesEntry: string
 let metadataLifecycleEntry: string
 const roots: string[] = []
@@ -456,12 +457,19 @@ beforeAll(async () => {
 			},
 		],
 	})
-	for (const kind of ["failed", "paused", "close-failed"] as const) {
+	for (const kind of [
+		"failed",
+		"paused",
+		"close-failed",
+		"cleanup-failed",
+	] as const) {
 		const directory = join(buildDirectory, kind + "-operator")
 		if (kind === "failed") failedOperatorEntry = join(directory, "index.js")
 		else if (kind === "paused")
 			pausedOperatorEntry = join(directory, "index.js")
-		else failedOperatorCloseEntry = join(directory, "index.js")
+		else if (kind === "close-failed")
+			failedOperatorCloseEntry = join(directory, "index.js")
+		else failedApiCleanupEntry = join(directory, "index.js")
 		await build({
 			absWorkingDir: repository,
 			entryPoints: [{ in: "src/index.ts", out: "index" }],
@@ -474,6 +482,31 @@ beforeAll(async () => {
 				{
 					name: kind + "-operator-acquisition",
 					setup(builder) {
+						if (kind === "cleanup-failed") {
+							builder.onLoad(
+								{ filter: /[/\\]api[/\\]server\.ts$/ },
+								async args => {
+									const source = await readFile(args.path, "utf8")
+									const original = "this.stopResult = this.finishStop(failed)"
+									if (!source.includes(original))
+										throw new Error("API cleanup fixture seam missing")
+									return {
+										loader: "ts",
+										contents: source.replace(
+											original,
+											original +
+												`
+.then(() => {
+											throw Object.assign(new TypeError("SECRET cleanup message"), {
+												code: "EIO", errno: -5, syscall: "close", path: "SECRET cleanup path"
+											})
+										})`,
+										),
+									}
+								},
+							)
+							return
+						}
 						builder.onLoad(
 							{ filter: /[/\\]operator-data[/\\]service\.ts$/ },
 							async args => {
@@ -802,31 +835,58 @@ async function stop(core: RunningCore) {
 }
 
 describe("built protected runtime process", () => {
-	it("retains the operator lock code and reason through startup cleanup", async () => {
-		const env = await fixture()
-		const provision = await PrivateAccessStorage.open({
-			directory: env.directory,
-			mode: "provision",
-			ownership: "single-host-pid-namespace",
-		})
-		await provision.close()
-		const holder = await OperatorDataStorage.open({
-			stateDir: env.config.stateDir,
-		})
-		try {
-			await env.releasePorts()
-			const core = run(env.configFile, env.directory)
-			expect(await core.exited).toEqual({ code: 1, signal: null })
-			expect(core.stderr()).toBe(
-				"WaveKit startup failed: WaveKitError [OPERATOR_DATA_UNAVAILABLE/lock-held]: startup could not complete\n",
-			)
-			expect(core.stdout() + core.stderr()).not.toContain(env.directory)
-			for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
-				expect(await listening(port)).toBe(false)
-		} finally {
-			await holder.close()
-		}
-	}, 15_000)
+	it.each([false, true])(
+		"retains the operator lock code and reason with rejecting API cleanup: %s",
+		async rejectingCleanup => {
+			const env = await fixture()
+			const provision = await PrivateAccessStorage.open({
+				directory: env.directory,
+				mode: "provision",
+				ownership: "single-host-pid-namespace",
+			})
+			await provision.close()
+			const holder = await OperatorDataStorage.open({
+				stateDir: env.config.stateDir,
+			})
+			try {
+				await env.releasePorts()
+				const core = run(
+					env.configFile,
+					env.directory,
+					rejectingCleanup ? failedApiCleanupEntry : entry,
+				)
+				expect(await core.exited).toEqual({ code: 1, signal: null })
+				const cleanupLines = core
+					.stdout()
+					.split("\n")
+					.filter(line => line.includes('"msg":"Startup cleanup failed"'))
+				if (rejectingCleanup) {
+					expect(cleanupLines.length).toBeGreaterThan(0)
+					expect(
+						cleanupLines.map(
+							line => (JSON.parse(line) as { err: unknown }).err,
+						),
+					).toContainEqual({ type: "TypeError", code: "EIO" })
+				} else expect(cleanupLines).toEqual([])
+				expect(core.stdout() + core.stderr()).not.toContain("SECRET cleanup")
+				expect(core.stderr()).toBe(
+					"WaveKit startup failed: WaveKitError [OPERATOR_DATA_UNAVAILABLE/lock-held]: startup could not complete\n",
+				)
+				expect(core.stdout() + core.stderr()).not.toContain(env.directory)
+				for (const port of [
+					env.api,
+					env.analog,
+					env.digital,
+					env.raw,
+					env.relay,
+				])
+					expect(await listening(port)).toBe(false)
+			} finally {
+				await holder.close()
+			}
+		},
+		15_000,
+	)
 
 	it("names the concrete access lock code on the startup line", async () => {
 		const env = await fixture()
@@ -1115,8 +1175,9 @@ describe("built protected runtime process", () => {
 		const core = run(env.configFile, env.directory, failedScannerEntry)
 		expect(await core.exited).toEqual({ code: 1, signal: null })
 		expect(core.stderr()).toBe(
-			"WaveKit startup failed: WaveKitError [ACCESS_UNAVAILABLE]: startup could not complete\n",
+			"WaveKit startup failed: Error [UNKNOWN]: startup could not complete\n",
 		)
+		expect(core.stdout()).toContain('"msg":"Startup cleanup failed"')
 		expect(core.stdout()).not.toContain("WaveKit started successfully")
 		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
 		expect(core.stdout()).not.toContain("scanner-stop-noop")
@@ -1213,8 +1274,9 @@ describe("built protected runtime process", () => {
 		)
 		expect(await core.exited).toEqual({ code: 1, signal: null })
 		expect(core.stderr()).toBe(
-			"WaveKit startup failed: WaveKitError [ACCESS_UNAVAILABLE]: startup could not complete\n",
+			"WaveKit startup failed: Error [UNKNOWN]: startup could not complete\n",
 		)
+		expect(core.stdout()).toContain('"msg":"Startup cleanup failed"')
 		expect(core.stdout()).not.toContain("WaveKit started successfully")
 		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
 		expect(core.stdout()).toContain("scanner-probes-cleaned")

@@ -14,8 +14,9 @@ import type { Logger } from "./logger.js"
  * PID evidence is local to boot/hostname/PID namespace. Across scopes, a fresh
  * heartbeat holds ownership regardless of what local PID probing reports.
  * No fencing tokens: a holder paused after its last ownership check can lose
- * ownership before its temp-plus-rename write lands. At worst one update from
- * the already-dead holder is lost; subsequent checks stop further writes.
+ * ownership, then resume its pending rename after a successor reclaims the lock.
+ * That one in-flight write may overwrite the successor's newer committed state.
+ * The holder detects ownership loss within H = 10 s and stops further writes.
  */
 export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
