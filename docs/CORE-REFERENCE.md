@@ -310,6 +310,8 @@ curl http://localhost:9000/api/live-audio/presets
 
 Configuration via YAML (`config/default.yaml`) or environment variables:
 
+Decoders without a configured frequency get a built-in band per `region` and are suspended while it is out of view (see [API.md, Band check and band suspension](API.md#band-check-and-band-suspension)). multimon-ng gets the region's paging bands only when all its modes are paging modes (POCSAG, FLEX); with EAS, AFSK1200, FSK9600 or DTMF among them its band stays unknown and it follows the VFO.
+
 ```yaml
 # Sources: an rtl_tcp or rtlmux receiver, such as the Pi SDR host
 sources:
