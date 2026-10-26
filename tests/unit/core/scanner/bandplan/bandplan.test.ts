@@ -211,6 +211,8 @@ describe("built-in bandplans (spec § 5.1)", () => {
 			"ism-433",
 			"ism-868",
 			"marine-vhf",
+			// WG16 SC: Main added the French paging plan (EU variant).
+			"pager-fr",
 			"pager-vhf",
 			"pmr446",
 			"uhf-land-mobile",
