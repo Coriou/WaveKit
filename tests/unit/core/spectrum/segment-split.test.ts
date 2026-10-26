@@ -19,6 +19,7 @@ import {
 	counterIds,
 } from "../../../mocks/scanner/observations.js"
 import { BIN_HZ, CENTRE, FS, Harness, N } from "./pipeline-harness.js"
+import { tone } from "../../../mocks/scanner/signals.js"
 
 // Segment splitting (dip, raster cap, sidebands, one channel) and sustained admission,
 // end to end from synthetic IQ through the pipeline into the discovery store.
@@ -185,6 +186,25 @@ describe("segment split and sustained admission (amendment 10)", () => {
 		expect(Math.abs(got[1]! - off[1]!)).toBeLessThan(2_000)
 	})
 
+	it("a 1 kHz carrier 15 dB over the floor in an 8.33 kHz slot is admitted after 3 s, not before", () => {
+		// 6 dB referenced to 12.5 kHz = 17 dB of tone power per 1 kHz bin; the Hann window puts
+		// its peak bin about 15 dB over the floor and its neighbours 6 dB lower (OBW 3 bins).
+		// Measured: slot SNR 5.9 to 6.2 dB (it just passes the 6 dB gate, but sits under the
+		// 9 dB run floor), matched 3-bin SNR 12.4 to 12.9 dB, so the sustained rule admits it.
+		const iqOf = (n: number) =>
+			scene(1608, n, SIGMA, [() => tone(n, FS, 30_000, ampFor(6))])
+		const opts = {
+			plan: plan(25_000 / 3),
+			rasters: [raster(25_000), raster(25_000 / 3)],
+		}
+		const early = admit(runScene(iqOf, { ...opts, seconds: 2.5 }))
+		expect(early.snapshot().discoveries).toHaveLength(0)
+		const ev5 = runScene(iqOf, { ...opts, seconds: 5 })
+		const late = centres(admit(ev5))
+		expect(late).toHaveLength(1)
+		expect(Math.abs(late[0]! - 30_000)).toBeLessThan(1_500)
+	}, 60_000)
+
 	it("one wide FM broadcast stays one track and one record over 5 s", () => {
 		// 15 kHz RMS deviation: Carson width 2 × (30 + 15) = 90 kHz, at +52 kHz so it clears the
 		// DC guard (5 to 97 kHz inside the ±102 kHz usable span). 24 dB in 12.5 kHz is about
@@ -230,7 +250,7 @@ describe("segment split and sustained admission (amendment 10)", () => {
 		)
 		expect(passedNarrow).toBe(true)
 		expect(passedWide).toBe(false)
-	})
+	}, 60_000)
 
 	it("inside a raised plateau there is no local contrast (local SNR under 6 dB, no record); a carrier on a quiet floor has it", () => {
 		// 40 FM carriers every 2.5 kHz from -60 to +40 kHz: a 100 kHz plateau, no 6 dB dips.

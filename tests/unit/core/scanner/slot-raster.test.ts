@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
-import { slotRasterOf } from "../../../../src/core/scanner/scanner-service.js"
+import {
+	dcCentredOf,
+	slotRasterOf,
+} from "../../../../src/core/scanner/scanner-service.js"
 import type { ScanRange } from "../../../../src/core/scanner/types.js"
 
 // An analog-am range with several rasters sizes its channel slots by the finest.
@@ -50,5 +53,17 @@ describe("slotRasterOf (amendment 10)", () => {
 			const n = (hz - 118_000_000) / (25_000 / 3)
 			expect(Math.abs(n - Math.round(n))).toBeLessThan(1e-6)
 		}
+	})
+})
+
+describe("dcCentredOf (DQ 1.15)", () => {
+	it("measures from the track's nearer edge: within 12 500 Hz of DC is refused, 1 Hz more is not", () => {
+		const dc = 131_637_500
+		// A 50 kHz piece centred 37.5 kHz off: its edge is exactly 12.5 kHz from DC.
+		expect(dcCentredOf(dc + 37_500, 50_000, dc)).toBe(true)
+		expect(dcCentredOf(dc - 37_501, 50_000, dc)).toBe(false)
+		// Zero or invalid width: the centre itself.
+		expect(dcCentredOf(dc + 12_500, 0, dc)).toBe(true)
+		expect(dcCentredOf(dc + 12_501, Number.NaN, dc)).toBe(false)
 	})
 })

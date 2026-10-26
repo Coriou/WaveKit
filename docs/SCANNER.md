@@ -217,7 +217,7 @@ A discovery means something transmitted there. These rules keep intermod product
 - a channel SNR of at least 18 dB, or at least 25 dB when the front end was overloaded (`overload` flag; intermod products of a clipping carrier stay below it);
 - otherwise (not overloaded, under 18 dB) it is held as pending, not stored or shown. It is promoted when a later sighting reaches 18 dB, or when 3 distinct observations within 10 min of the first have a median SNR of at least 15 dB. Overloaded weak sightings never enter pending;
 - a signal that stays on is promoted by duration: one sighting whose channel SNR has a median of at least 12 dB over at least 3 s, with no reading under 9 dB and no gap over 2.5 s between readings, creates a discovery. This is how a broadcast FM station or a steady carrier at 10 to 17 dB gets a record, since it is one long sighting rather than several short ones. Noise does not stay at 12 dB for 3 s;
-- a signal wider than one channel is judged by its strongest channel, not by its average over the whole width;
+- a signal is judged in a bandwidth that matches its own width: a signal wider than one channel by its strongest channel, and a narrow carrier by its own few kHz rather than diluted across a whole 8.33 or 25 kHz channel;
 - an observation with a missing or non-finite centre or SNR is dropped.
 
 A decoded observation is admitted as before. The channel gate counts only blocks at least 3 dB over the floor toward its minimum on-time (300 ms, 100 ms for a burst). On airband, the gate measures 8.33 kHz channels, so an AM voice carrier is judged in its own channel and not diluted by a 25 kHz one (about 4.8 dB better).
@@ -231,7 +231,7 @@ A decoded observation is admitted as before. The channel gate counts only blocks
 
 A track's reported bandwidth never exceeds its widest single block, so a weak track that drifts does not grow into its neighbours.
 
-**One channel, one record.** During the background scan, a discovery on a band with a channel plan is placed on its channel: sightings whose measured centre wanders inside one channel join one record, and such a signal is never labelled `wideband`. A sighting creates no record when it does not stand at least 6 dB above the neighbouring 12.5 kHz on each side (a raised stretch of busy channels or splatter), or when it sits within 12.5 kHz of the tuned centre, where the receiver's own DC pedestal shows. A decode still creates a record in both cases.
+**One channel, one record.** During the background scan, a discovery on a band with a channel plan is placed on its channel (the finest channel spacing of the band plan that is at least half the signal's width: 8.33 kHz for an airband voice carrier, 25 kHz for a wider data burst): sightings whose measured centre wanders inside one channel join one record, adjacent channels stay separate records, and such a signal is never labelled `wideband`. A sighting creates no record when it does not stand at least 6 dB above the neighbouring 12.5 kHz on each side (a raised stretch of busy channels or splatter), or when its nearer edge sits within 12.5 kHz of the tuned centre, where the receiver's own DC pedestal shows. A decode still creates a record in both cases.
 
 **Association.** One record per emitter:
 

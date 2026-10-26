@@ -447,7 +447,7 @@ describe("DiscoveryStore local floor, DC and channel keys (DQ 1.15, 1.16)", () =
 		expect(count(store)).toBe(0)
 	})
 
-	it("off every raster tolerance, observations key to the coarsest channel raster's channel", () => {
+	it("off every raster tolerance, observations key to the nearest channel of the finest channel raster", () => {
 		const clock = { now: T0 }
 		const raster = { spacingHz: 25_000, firstChannelHz: 136_000_000 }
 		const store = new DiscoveryStore({
@@ -455,19 +455,14 @@ describe("DiscoveryStore local floor, DC and channel keys (DQ 1.15, 1.16)", () =
 			now: () => clock.now,
 			newId: counterIds(),
 			rasters: () => [raster],
-			channelRasters: () => [
-				{ spacingHz: 12_500, firstChannelHz: 136_000_000 },
-				raster,
-			],
+			channelRasters: () => [raster],
 		})
 		// 136.875 MHz channel: measured centres drift 9 to 12 kHz off (beyond 25 000 / 4).
 		for (const [i, off] of [9_000, -11_000, 12_000, -9_500].entries()) {
 			clock.now = T0 + i * 1_000
-			const o = live(`c${i}`, 20, {
-				centreHz: 136_875_000 + off,
-				obwHz: 20_000,
-			})
-			store.ingest(o)
+			store.ingest(
+				live(`c${i}`, 20, { centreHz: 136_875_000 + off, obwHz: 20_000 }),
+			)
 		}
 		const ds = store.snapshot().discoveries
 		expect(ds).toHaveLength(1)
@@ -483,5 +478,66 @@ describe("DiscoveryStore local floor, DC and channel keys (DQ 1.15, 1.16)", () =
 				.discoveries.map(d => d.frequencyHz)
 				.sort(),
 		).toEqual([136_875_000, 136_900_000])
+	})
+
+	it("passive airband placement keeps the 8.33 kHz raster: adjacent fine channels are two records", () => {
+		// Review repro: a 25 kHz raster anchored at 119 MHz with its 8.33 kHz companion.
+		const rasters = [
+			{ spacingHz: 25_000, firstChannelHz: 119_000_000 },
+			{ spacingHz: 25_000 / 3, firstChannelHz: 119_000_000 },
+		]
+		const clock = { now: T0 }
+		const store = new DiscoveryStore({
+			maxDiscoveries: 1000,
+			now: () => clock.now,
+			newId: counterIds(),
+			rasters: () => rasters,
+			channelRasters: () => rasters,
+		})
+		const at = (id: string, hz: number) => {
+			clock.now += 1_000
+			store.ingest(live(id, 20, { centreHz: hz, obwHz: 3_000 }))
+		}
+		at("a", 119_000_000)
+		at("b", 119_000_000 + 25_000 / 3)
+		expect(store.snapshot().discoveries).toHaveLength(2)
+		// Off every tolerance (3 kHz from the 8.33 kHz channel): still the nearest fine channel.
+		at("c", 119_000_000 + 25_000 / 3 + 3_000)
+		expect(store.snapshot().discoveries).toHaveLength(2)
+		expect(
+			store
+				.snapshot()
+				.discoveries.map(d => d.frequencyHz)
+				.sort(),
+		).toEqual([119_000_000, 119_008_333])
+		// A 50 kHz burst keys to the 25 kHz grid (rasters at least half its OBW): sightings
+		// 4 kHz either side of 119.075 MHz, nearer different 8.33 kHz channels, are one record.
+		clock.now += 1_000
+		store.ingest(
+			live("w1", 20, { centreHz: 119_075_000 - 4_000, obwHz: 50_000 }),
+		)
+		clock.now += 1_000
+		store.ingest(
+			live("w2", 20, { centreHz: 119_075_000 + 4_000, obwHz: 50_000 }),
+		)
+		const wide = store
+			.snapshot()
+			.discoveries.filter(d => Math.abs(d.frequencyHz - 119_075_000) < 10_000)
+		expect(wide.map(d => d.frequencyHz)).toEqual([119_075_000])
+		// At exactly twice the fine spacing the fine grid still applies; just past, it does not.
+		clock.now += 1_000
+		store.ingest(
+			live("n1", 20, { centreHz: 119_150_000 + 25_000 / 3, obwHz: 50_000 / 3 }),
+		)
+		clock.now += 1_000
+		store.ingest(
+			live("n2", 20, {
+				centreHz: 119_250_000 + 25_000 / 3,
+				obwHz: 50_000 / 3 + 1,
+			}),
+		)
+		const fz = store.snapshot().discoveries.map(d => d.frequencyHz)
+		expect(fz).toContain(119_158_333)
+		expect(fz).toContain(119_250_000)
 	})
 })

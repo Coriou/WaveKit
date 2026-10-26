@@ -220,7 +220,7 @@ export interface DiscoveryStoreOptions {
 	minSurfaceBlocks?: number
 	rasters?: (sourceId: string, centreHz: number) => Raster[]
 	/**
-	 * (DQ 1.16): channel rasters at a centre (the band plans' coarsest while passive
+	 * (DQ 1.16): channel rasters at a centre (the band plans' rasters while passive
 	 * runs). An observation off every `rasters` tolerance keys to the nearest of these
 	 * channels instead of a grid key. Absent: grid keys, as before.
 	 */
@@ -3205,16 +3205,16 @@ export class DiscoveryStore
 		centreHz: number,
 		obwHz: number,
 	): { frequencyHz: number; key: string; offRaster: boolean } {
-		const rasters = this.rastersFor(sourceId, centreHz)
+		const rasters = gridFor(this.rastersFor(sourceId, centreHz), obwHz)
 		const correction = this.corrections.get(sourceId) ?? 0
 		const snap = snapToRaster(centreHz, rasters, correction)
 		if (!snap.snapped) {
 			// (DQ 1.16): off every raster's tolerance, the observation keys to the
-			// nearest channel of the coarsest channel raster, so one emitter whose measured
+			// nearest channel of the finest channel raster, so one emitter whose measured
 			// centre drifts within its channel stays one record.
 			const ch = channelOf(
 				centreHz - correction,
-				this.channelRastersFor(sourceId, centreHz),
+				gridFor(this.channelRastersFor(sourceId, centreHz), obwHz),
 			)
 			if (ch !== null)
 				return {
@@ -5213,14 +5213,30 @@ export function estimateFrequencyError(
 	return { hz, ppm: centreHz > 0 ? (hz / centreHz) * 1e6 : 0, n: best.length }
 }
 
-/** The nearest channel of the coarsest positive raster (ties: the lower), or null. */
+/** The nearest channel of the finest positive raster (ties: the lower), or null. */
 function channelOf(hz: number, rasters: readonly Raster[]): number | null {
 	let r: Raster | undefined
 	for (const x of rasters)
-		if (x.spacingHz > 0 && (r === undefined || x.spacingHz > r.spacingHz)) r = x
+		if (x.spacingHz > 0 && (r === undefined || x.spacingHz < r.spacingHz)) r = x
 	if (r === undefined || !Number.isFinite(hz)) return null
 	return Math.round(
 		r.firstChannelHz +
 			Math.round((hz - r.firstChannelHz) / r.spacingHz) * r.spacingHz,
 	)
+}
+
+/**
+ * DQ 1.16: the rasters fit to key an emission of `obwHz`: those at least half its OBW wide (a
+ * channel holds its emitter), or the coarsest when none is. A 3 kHz carrier keeps the 8.33 kHz
+ * airband grid; a 50 kHz burst keys to 25 kHz, so it is not split across fine channels.
+ * A non-finite or non-positive OBW keeps every raster.
+ */
+function gridFor(rasters: Raster[], obwHz: number): Raster[] {
+	if (rasters.length < 2 || !(obwHz > 0) || !Number.isFinite(obwHz))
+		return rasters
+	const fit = rasters.filter(r => r.spacingHz >= obwHz / 2)
+	if (fit.length > 0) return fit
+	let widest = rasters[0]!
+	for (const r of rasters) if (r.spacingHz > widest.spacingHz) widest = r
+	return [widest]
 }

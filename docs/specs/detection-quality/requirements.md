@@ -168,11 +168,20 @@ its median reaches 15 dB).
   12 blocks hold 6 strong blocks = 300 ms with best 6.5 >= 6 dB and pass. A run split by
   `inheritRun` after block 6 passes at the same block as an unsplit run.
 
-  1.11 (amendment 10) **Peak channel.** The creation SNR of a track wider than one channel slot is
-  the higher of the wide-track channel SNR (the covering slots' power summed, scanner redesign A9) and the
-  SNR of its best single covering slot (`peakChannelSnrDb` on the track snapshot). The gate's
-  own pass rule still reads the sum. max(p_i / f_i) >= sum(p) / sum(f), so this never lowers a
-  track's admission SNR.
+  1.11 (amendment 10) **Peak channel.** The creation SNR (`peakChannelSnrDb`, admission only)
+  is the highest of: the track's channel SNR; its best single covering slot when it is wider
+  than one slot (max(p_i / f_i) >= sum(p) / sum(f), the summed reading is unchanged for the gate);
+  and, for a narrow carrier only (matched width at most one 6.25 kHz slot,
+  `CHANNEL_GATE_MIN_WIDTH_HZ`), its **matched-window SNR**: the highest mean power of W contiguous segment bins over
+  the local floor of 1.15 (median of 12.5 kHz each side), W = the track's OBW in bins, at
+  least `MATCHED_MIN_BINS` = 2 and at most the segment. The gate's own pass rule still reads
+  the slot SNR. A slot spreads a narrow carrier over the whole slot: a 1 kHz carrier 15 dB
+  over the floor in an 8.33 kHz slot reads 10·log10((31.6 + 7.33) / 8.33) = 6.7 dB, under the
+  9 dB run floor of 1.4b, so the hunt captures' VDL2 and airband carriers never sustained.
+  Matched to its width it reads 12 to 15 dB. The 2-bin minimum halves a single hot bin (a
+  15 dB spike reads 10·log10((31.6 + 1) / 2) = 12.1 dB), and spur lines are dropped before
+  tracking anyway. Fixture: a tone whose slot SNR is 5.9 to 6.2 dB and whose matched SNR is
+  12.4 to 12.9 dB is not admitted at 2.5 s and is admitted by 5 s.
 
   1.12 (amendment 10) **Airband slots.** A range whose protocols include `analog-am` and which has
   more than one raster sizes its channel slots by its finest raster (`slotRasterOf`): airband
@@ -242,22 +251,34 @@ its median reaches 15 dB).
 
 - its track's mean local SNR (`localSnrDb`: per block, the segment's mean power over the median
   of `LOCAL_FLOOR_HZ` = 12.5 kHz of bins each side, skipping the adjacent bin; averaged over the
-  track's blocks) is under `DQ_LOCAL_SNR_DB` = 6 dB, the gate's own pass margin (k 3 +
+  track's blocks; for a narrow carrier whose matched width fits one 6.25 kHz slot, the higher of
+  that and its matched-window contrast, so a carrier with wide weak sidebands merged into its
+  segment still counts) is under `DQ_LOCAL_SNR_DB` = 6 dB, the gate's own pass margin (k 3 +
   margin 3) against the neighbourhood instead of the global floor. A raised plateau of busy
   channels or splatter is then not an emitter of its own; or
 - its centre lies within `DQ_DC_ADMIT_HZ` = 12 500 Hz of the tuned centre of its epoch
-  (`dcCentred`): the receiver's DC pedestal peaked 5.5 kHz from DC in the hunt captures,
+  (`dcCentred`), measured from the track's nearer edge (centre ± OBW/2, `dcCentredOf`): the
+  receiver's DC pedestal peaked 5.5 kHz from DC in the hunt captures, and its neighbouring
+  pieces lean on it,
   12.5 kHz is about twice that. A decode still creates there.
 
   1.16 (amendment 10) **Channel keys.** While the passive job runs, the store's placement rasters
-  also hold each band plan range's coarsest raster, and an observation outside every raster's
-  snap tolerance keys to the nearest channel of that coarsest raster (`channelRasters`)
-  instead of a grid key: one emitter whose measured centre drifts inside its channel stays one
-  record, placed at its channel. On a rastered band the classifier sees at most one coarse
-  channel of OBW, so no `wideband` class appears there. Fixtures: a local SNR of 6.0 dB
-  creates and 5.99 dB does not; a DC-centred observation never creates, sustained or at
-  30 dB; four drifting sightings 9 to 12 kHz off a 25 kHz channel make one record at the
-  channel, and 12 501 Hz off keys to the next channel; inside a synthetic 100 kHz plateau of
+  also hold every raster of each band plan range covering the centre. Per observation only
+  the rasters at least half its OBW wide are used (`gridFor`; the coarsest when none is): a
+  channel holds its emitter, so a 3 kHz airband carrier keeps the 8.33 kHz grid while a 50 kHz
+  VDL2 burst keys to 25 kHz and is not split across fine channels. The observation snaps to
+  the nearest of those rasters within tolerance; off every tolerance it keys to the nearest
+  channel of the finest of them (`channelRasters`) instead of a grid key. One emitter whose
+  measured centre drifts inside its channel stays one record, placed at its channel, and
+  adjacent fine channels stay apart. On a rastered band the classifier sees at most one
+  coarse channel of OBW, so no `wideband` class appears there. Fixtures: a local SNR
+  of 6.0 dB creates and 5.99 dB does not; a DC-centred observation never creates, sustained or
+  at 30 dB; four drifting sightings 9 to 12 kHz off a 25 kHz channel make one record at the
+  channel, and 12 501 Hz off keys to the next channel; with a 25 kHz raster anchored at
+  119 MHz and its 8.33 kHz companion, sightings at 119 MHz and 119 MHz + 8 333 Hz are two
+  records, and one 3 kHz past the second joins it; 50 kHz sightings 4 kHz either side of a
+  25 kHz channel are one record; an OBW of exactly 2 x 8 333 Hz keeps the 8.33 kHz grid and
+  1 Hz more keys to 25 kHz; inside a synthetic 100 kHz plateau of
   carriers every track's local SNR is under 6 dB and no record is created, while a lone
   carrier's is above.
 

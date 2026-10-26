@@ -2756,9 +2756,10 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * trial choice (DQ 1.16): while the source's passive job runs, the coarsest raster of each band
-	 * plan range at `hz`. Only the coarsest, so every passive observation of one emitter keys
-	 * to the same channel whichever finer channel its measured centre is nearest.
+	 * Amendment 10 (DQ 1.16): while the source's passive job runs, every raster of each band plan
+	 * range at `hz`. The store keeps, per observation, only the rasters at least half its OBW
+	 * wide, then snaps to the nearest and otherwise keys to the nearest channel of the finest:
+	 * a 3 kHz airband carrier keys to its 8.33 kHz channel, a 50 kHz VDL2 burst to its 25 kHz one.
 	 */
 	private channelRastersAt(sourceId: string, hz: number) {
 		const passive = [...this.jobs.values()].some(
@@ -2769,11 +2770,7 @@ export class ScannerService extends EventEmitter {
 		for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
 			for (const r of b.ranges) {
 				if (!isRangeEnabled(r) || hz < r.startHz || hz > r.endHz) continue
-				let widest: (typeof out)[number] | undefined
-				for (const x of r.rasters ?? [])
-					if (x.spacingHz > 0 && x.spacingHz > (widest?.spacingHz ?? 0))
-						widest = x
-				if (widest !== undefined) out.push(widest)
+				for (const x of r.rasters ?? []) if (x.spacingHz > 0) out.push(x)
 			}
 		return out
 	}
@@ -3046,7 +3043,7 @@ export class ScannerService extends EventEmitter {
 		const dcCentred =
 			tuned !== undefined &&
 			tuned.epoch === track.epoch &&
-			Math.abs(track.centreHz - tuned.centreHz) <= DQ_DC_ADMIT_HZ
+			dcCentredOf(track.centreHz, track.obwHz, tuned.centreHz)
 		const res = this.store.ingest(
 			{
 				...(dcCentred ? { dcCentred: true } : {}),
@@ -7316,4 +7313,17 @@ export function slotRasterOf(
 	for (const x of rasters)
 		if (x.spacingHz > 0 && x.spacingHz < finest.spacingHz) finest = x
 	return finest
+}
+
+/**
+ * DQ 1.15: the track's nearer edge (centre ± OBW / 2) lies within `DQ_DC_ADMIT_HZ` of the tuned
+ * centre. A non-finite or non-positive OBW counts as zero width.
+ */
+export function dcCentredOf(
+	centreHz: number,
+	obwHz: number,
+	tunedHz: number,
+): boolean {
+	const half = Number.isFinite(obwHz) && obwHz > 0 ? obwHz / 2 : 0
+	return Math.abs(centreHz - tunedHz) - half <= DQ_DC_ADMIT_HZ
 }

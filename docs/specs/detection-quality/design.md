@@ -602,9 +602,10 @@ plans' rasters.
 The main tracker gets `localBins` (12.5 kHz of bins) and, per extended block, sorts at most
 2 x localBins neighbour powers in a reused scratch array for their median; the snapshot
 carries the mean (`localSnrDb`). The scanner sets `dcCentred` from the last block summary of
-the same epoch. `channelRastersAt` gives the store the coarsest raster of each band-plan
-range while passive runs, and `rastersAt` includes it, so passive observations snap to, or
-fall back to, one channel per emitter. `classify` clamps the OBW it shows the classifier to
+the same epoch. `channelRastersAt` gives the store every raster of each band-plan range while passive runs,
+and `rastersAt` includes them; `gridFor` keeps those at least half the observation's OBW wide,
+and an observation off every tolerance falls back to the nearest channel of the finest kept. The tracker's `localSnr` also stores the matched-window SNR
+(1.11), which feeds `peakChannelSnrDb` in `stepReading`. `classify` clamps the OBW it shows the classifier to
 that channel width.
 
 ### CPU
