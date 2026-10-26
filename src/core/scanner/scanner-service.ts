@@ -867,6 +867,11 @@ export class ScannerService extends EventEmitter {
 	private applyingReplay = false
 	/** Review m3: each queued capture's planned trials until its result (bounded, oldest evicted). */
 	private readonly replayPlans = new Map<string, readonly IqReplayTrial[]>()
+	/**
+	 * DQ 1.4e: captures discarded because their track turned edge. A replay already running when
+	 * the discard lands still ends with a result; it is dropped (bounded, oldest evicted).
+	 */
+	private readonly edgeFencedReplays = new Set<string>()
 	/** The engine each source is attached to in the capture service. */
 	private readonly iqEngines = new Map<string, SpectrumEngine>()
 	/** Engine identity for the activity ranker: one id per engine object (weak, no bound needed). */
@@ -4922,7 +4927,8 @@ export class ScannerService extends EventEmitter {
 				const holder = port.holderOf(captureId)
 				if (holder === undefined) continue
 				if (holder !== null && holder !== IQ_REPLAY_QUEUE_HOLDER) continue
-				port.discard(captureId, "invalid", holder ?? undefined)
+				if (port.discard(captureId, "invalid", holder ?? undefined))
+					this.fenceEdgeReplay(captureId)
 			} catch (err: unknown) {
 				this.log.warn(
 					{ err: safeErrorFields(err) },
@@ -4930,6 +4936,50 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 		}
+	}
+
+	private fenceEdgeReplay(captureId: string): void {
+		this.edgeFencedReplays.delete(captureId)
+		this.edgeFencedReplays.add(captureId)
+		while (this.edgeFencedReplays.size > REPLAY_PLANS_MAX) {
+			const oldest = this.edgeFencedReplays.values().next().value
+			if (oldest === undefined) break
+			this.edgeFencedReplays.delete(oldest)
+		}
+	}
+
+	/**
+	 * DQ 1.4e: a replay result whose track turned edge while it ran (the observation's track is
+	 * edge now, or the scanner discarded the capture for it) is dropped whole: no identity, no
+	 * trial memory, no miss, no keep. Its progress rows read cancelled.
+	 */
+	private dropEdgeReplayResult(
+		result: IqReplayResult,
+		live: LiveObservation | undefined,
+	): boolean {
+		const fenced = this.edgeFencedReplays.delete(result.captureId)
+		if (!fenced && live?.lastTrack?.flags.edge !== true) return false
+		const orders = this.replayOrders.get(result.captureId)
+		const plan = this.replayPlans.get(result.captureId)
+		if (result.observationId && orders && plan) {
+			const at = this.now()
+			this.store.recordTrials(
+				result.observationId,
+				plan.map((trial, index) => ({
+					protocol: trial.protocol,
+					decoder:
+						trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
+					order: orders[index]!,
+					at,
+					outcome: "cancelled",
+				})),
+			)
+		}
+		if (result.observationId)
+			this.noteReplaySettled(result.observationId, false)
+		this.replayPlans.delete(result.captureId)
+		this.replayOrders.delete(result.captureId)
+		return true
 	}
 
 	/** The captured track closed: the capture finishes now. */
@@ -5103,6 +5153,7 @@ export class ScannerService extends EventEmitter {
 			probes?.dispose()
 			this.replayPlans.clear()
 			this.replayOrders.clear()
+			this.edgeFencedReplays.clear()
 		}
 	}
 
@@ -5433,10 +5484,11 @@ export class ScannerService extends EventEmitter {
 	}
 
 	applyReplayResult(result: IqReplayResult): void {
-		const summary = replayOutcomeSummary(result)
 		const live = result.observationId
 			? this.findObservation(result.observationId)
 			: undefined
+		if (this.dropEdgeReplayResult(result, live)) return
+		const summary = replayOutcomeSummary(result)
 		const rfHz = this.replayRfHz(result)
 		this.feedReplayTrials(result, rfHz)
 		if (result.observationId) {
