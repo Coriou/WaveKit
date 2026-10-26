@@ -17,6 +17,7 @@ import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { OperatorDataStorage } from "../../../src/operator-data/storage.js"
 import type { StorageStage } from "../../../src/operator-data/storage.js"
+import { formatStartupFailure } from "../../../src/utils/startup-failure.js"
 import { OPERATOR_DATA_LIMITS } from "../../../src/operator-data/schema.js"
 
 const roots: string[] = []
@@ -52,7 +53,9 @@ async function open(
 const file = (path: string) => join(path, "operator-data", "state.json")
 const lock = (path: string) => join(path, "operator-data", ".writer-lock")
 const unavailable = {
-	code: "OPERATOR_DATA_UNAVAILABLE",
+	code: expect.stringMatching(
+		/^OPERATOR_DATA_(UNAVAILABLE|IO|LOCK_HELD|PERMISSIONS|INVALID|OVERSIZED)$/,
+	),
 	message: "Operator data is unavailable.",
 }
 function gate() {
@@ -165,7 +168,14 @@ describe("dedicated operator-data storage", () => {
 	it("rejects another same-process opener and real child-process lock acquisition", async () => {
 		const path = await root()
 		const first = await open(path)
-		await expect(open(path)).rejects.toMatchObject(unavailable)
+		const held: unknown = await open(path).catch((error: unknown) => error)
+		expect(held).toMatchObject({
+			...unavailable,
+			code: "OPERATOR_DATA_LOCK_HELD",
+		})
+		expect(formatStartupFailure(held)).toBe(
+			"WaveKit startup failed: WaveKitError [OPERATOR_DATA_LOCK_HELD]: startup could not complete\n",
+		)
 		const exit = await new Promise<number | null>((resolve, reject) => {
 			const child = spawn(
 				process.execPath,
@@ -185,9 +195,6 @@ describe("dedicated operator-data storage", () => {
 		await first.close()
 		const second = await open(path)
 		await second.close()
-		await mkdir(lock(path), { mode: 0o700 }) // A fresh incomplete owner must remain held.
-		await expect(open(path)).rejects.toMatchObject(unavailable)
-		expect((await lstat(lock(path))).isDirectory()).toBe(true)
 	})
 
 	it("requires an existing absolute parent without creating ancestors", async () => {

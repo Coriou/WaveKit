@@ -200,11 +200,14 @@ threshold to ignore the first 10 seconds after `wavekit-api` start.
 
 ### After a crash or power cut
 
-State-directory locks from a dead process are reclaimed automatically on restart,
-including locks left by a previous boot or a reused process ID. Incomplete writer
-locks are held for 30 seconds before reclamation. If startup still fails, the
-startup failure line names the error class and code; use that code to diagnose
-the failure.
+A lock from a dead process in the same container is reclaimed at once. After a
+container kill, the new core waits up to about 40 seconds for the old lock's
+heartbeat to go stale, then reclaims it. Holders refresh every 10 seconds; a
+heartbeat older than 30 seconds expires. A lock whose heartbeat stays fresh
+(another live core using the same state) is never taken, and startup fails with
+the error code shown in the startup failure line, such as
+`ACCESS_STORAGE_FOREIGN_OWNER`, `ACCESS_STORAGE_BUSY`, `BANDPLANS_LOCK_HELD`, or
+`OPERATOR_DATA_LOCK_HELD`.
 
 ### Port conflicts
 

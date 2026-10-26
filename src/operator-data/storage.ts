@@ -38,7 +38,14 @@ export interface OperatorDataStorageOptions {
 		phase: "before" | "after",
 	) => void | Promise<void>
 }
-const unavailable = () => new OperatorDataError("OPERATOR_DATA_UNAVAILABLE")
+class StorageUnavailable extends OperatorDataError {
+	override readonly code: string
+	constructor(reason: "lock-held" | "io") {
+		super("OPERATOR_DATA_UNAVAILABLE")
+		this.code = `OPERATOR_DATA_${reason.replaceAll("-", "_").toUpperCase()}`
+	}
+}
+const unavailable = () => new StorageUnavailable("io")
 function missing(error: unknown): boolean {
 	return (
 		typeof error === "object" &&
@@ -49,7 +56,7 @@ function missing(error: unknown): boolean {
 }
 
 /** Local Unix only: stateDir must already be durable, with trustworthy stable parents.
- * Crash locks require offline repair. Filesystem sync success is not a hardware guarantee.
+ * Crash locks use heartbeat recovery. Filesystem sync success is not a hardware guarantee.
  * Service owns CAS/transaction admission/publication; storage rejects overlapping writes.
  */
 export class OperatorDataStorage {
@@ -77,9 +84,9 @@ export class OperatorDataStorage {
 			await storage.initialize()
 			storage.available = true
 			return storage
-		} catch {
+		} catch (error) {
 			await storage.cleanup().catch(() => undefined)
-			throw unavailable()
+			throw error instanceof StorageUnavailable ? error : unavailable()
 		}
 	}
 	isAvailable(): boolean {
@@ -235,7 +242,8 @@ export class OperatorDataStorage {
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
 				throw unavailable()
-			if (!(await acquireWriterLock(this.lock))) throw unavailable()
+			if (!(await acquireWriterLock(this.lock)))
+				throw new StorageUnavailable("lock-held")
 			this.ownsLock = true
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {

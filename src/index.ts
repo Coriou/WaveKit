@@ -14,6 +14,8 @@
 
 import "./bootstrap.js"
 
+import { formatStartupFailure } from "./utils/startup-failure.js"
+
 import { openAccessRuntime } from "./access/runtime-context.js"
 import { createAnalogLiveRunner } from "./core/iq-capture/analog-live.js"
 import type { NamedAccessRuntimeContext } from "./access/runtime-context.js"
@@ -2991,8 +2993,7 @@ if (
 	process.argv[1] &&
 	pathToFileURL(resolve(process.argv[1])).href === import.meta.url
 )
-	void main().catch(async error => {
-		const { formatStartupFailure } = await import("./utils/startup-failure.js")
+	void main().catch(error => {
 		process.stderr.write(formatStartupFailure(error))
 		process.exit(1)
 	})

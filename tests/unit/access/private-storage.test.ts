@@ -4,7 +4,11 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { LockOwner } from "../../../src/utils/lock-owner.js"
-import { bootTime } from "../../../src/utils/lock-owner.js"
+import {
+	bootTime,
+	LOCK_WAIT_MS,
+	HEARTBEAT_MS,
+} from "../../../src/utils/lock-owner.js"
 import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import {
@@ -381,21 +385,61 @@ describe("private single-operator persistence", () => {
 			JSON.stringify({ ...owner, pid: 99999999, scope: "a".repeat(64) }),
 			{ mode: 0o600 },
 		)
-		await expect(open(directory, "load")).rejects.toMatchObject({
-			code: "ACCESS_STORAGE_FOREIGN_OWNER",
-		})
+		let clock = Date.now()
+		await expect(
+			PrivateAccessStorage.open({
+				directory,
+				mode: "load",
+				ownership,
+				lockWait: {
+					now: () => clock,
+					sleep: async ms => {
+						clock += ms
+						await fs.utimes(
+							join(directory, deadName),
+							new Date(clock),
+							new Date(clock),
+						)
+					},
+				},
+			}),
+		).rejects.toMatchObject({ code: "ACCESS_STORAGE_FOREIGN_OWNER" })
 		expect((await fs.readdir(directory)).includes(deadName)).toBe(true)
 	})
 
-	it.each(["same-linux-boot", "different-linux-boot", "time-boot"])(
-		"checks foreign scope for new-format owners: %s",
-		async kind => {
-			const readFile = fs.readFile
-			vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
-				path === "/proc/sys/kernel/random/boot_id"
-					? Promise.resolve("11111111-1111-4111-8111-111111111111")
-					: readFile(path, options),
-			)
+	it("holds a fresh legacy owner without borrowing the contender's start time", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const name = (await fs.readdir(directory)).find(entry =>
+			entry.startsWith("owner-"),
+		)!
+		const record = JSON.parse(
+			await fs.readFile(join(directory, name), "utf8"),
+		) as { identity?: LockOwner; pid: number; nonce: string }
+		await storage.close()
+		delete record.identity
+		record.pid = 99999999
+		const legacyName = `owner-${record.pid}-${record.nonce}.lock`
+		await fs.writeFile(join(directory, legacyName), JSON.stringify(record), {
+			mode: 0o600,
+		})
+		vi.spyOn(process, "kill").mockReturnValue(true)
+		const readFile = fs.readFile
+		vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
+			path === `/proc/${record.pid}/stat`
+				? Promise.resolve(
+						`99999999 (legacy) ${["S", ...Array<string>(18).fill("0"), "1"].join(" ")}`,
+					)
+				: readFile(path, options),
+		)
+		await expect(open(directory, "load")).rejects.toMatchObject({
+			code: "ACCESS_STORAGE_BUSY",
+		})
+		expect(await fs.readdir(directory)).toContain(legacyName)
+	})
+	it.each([false, true])(
+		"handles a foreign container heartbeat, continued refresh=%s",
+		async refresh => {
 			const { directory } = await location()
 			const storage = await open(directory)
 			const name = (await fs.readdir(directory)).find(entry =>
@@ -408,30 +452,64 @@ describe("private single-operator persistence", () => {
 			}
 			await storage.close()
 			record.scope = "a".repeat(64)
-			record.identity.bootId =
-				kind === "time-boot"
-					? { kind: "time", value: "0" }
-					: {
-							kind: "linux",
-							value:
-								kind === "different-linux-boot"
-									? "22222222-2222-4222-8222-222222222222"
-									: "11111111-1111-4111-8111-111111111111",
-						}
-			// Even evidence of a reused PID cannot bypass the same-boot scope guard.
-			record.identity.startTime = { kind: "linux", value: "0" }
+			record.identity.hostname = "other-container"
+			record.identity.pidNamespace = "other-namespace"
 			await fs.writeFile(path, JSON.stringify(record), { mode: 0o600 })
-			if (kind === "different-linux-boot") {
-				await open(directory, "load")
-				expect(await fs.readdir(directory)).not.toContain(name)
-			} else {
-				await expect(open(directory, "load")).rejects.toMatchObject({
+			let clock = Date.now()
+			const started = clock
+			await fs.utimes(path, new Date(clock), new Date(clock))
+			const result = PrivateAccessStorage.open({
+				directory,
+				mode: "load",
+				ownership,
+				lockWait: {
+					now: () => clock,
+					sleep: async ms => {
+						clock += ms
+						if (refresh) await fs.utimes(path, new Date(clock), new Date(clock))
+					},
+				},
+			})
+			if (refresh) {
+				await expect(result).rejects.toMatchObject({
 					code: "ACCESS_STORAGE_FOREIGN_OWNER",
 				})
 				expect(await fs.readdir(directory)).toContain(name)
+			} else {
+				const recovered = await result
+				expect(await fs.readdir(directory)).not.toContain(name)
+				await recovered.close()
 			}
+			expect(clock - started).toBe(LOCK_WAIT_MS)
 		},
 	)
+
+	it("refreshes the access owner mtime and stops on close", async () => {
+		const { directory } = await location()
+		vi.useFakeTimers()
+		try {
+			const storage = await open(directory)
+			const name = (await fs.readdir(directory)).find(entry =>
+				entry.startsWith("owner-"),
+			)!
+			const path = join(directory, name)
+			await fs.utimes(path, new Date(0), new Date(0))
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			let refreshed = 0
+			const lstat = fs.lstat
+			vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+				const stat = await lstat(...args)
+				if (args[0] === path) refreshed = Number(stat.mtimeMs)
+				return stat
+			})
+			await storage.close()
+			expect(refreshed).toBe(Date.now())
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			expect(await fs.readdir(directory)).not.toContain(name)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 
 	it.each(["legacy-before-boot", "different-boot", "different-start"])(
 		"recovers a reused live PID: %s",

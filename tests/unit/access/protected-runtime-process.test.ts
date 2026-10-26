@@ -19,9 +19,6 @@ import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { build } from "esbuild"
 
-// The startup failure line names the error class and code but never the message.
-const STARTUP_FAILURE_LINE =
-	/^WaveKit startup failed: \w+ \[[A-Z0-9_]+\]: startup could not complete\n$/
 import type { Plugin } from "esbuild"
 import { WebSocket } from "ws"
 import { z } from "zod"
@@ -1035,7 +1032,9 @@ describe("built protected runtime process", () => {
 		await env.releasePorts(true)
 		const core = run(env.configFile, env.directory)
 		expect(await core.exited).toEqual({ code: 1, signal: null })
-		expect(core.stderr()).toMatch(STARTUP_FAILURE_LINE)
+		expect(core.stderr()).toBe(
+			"WaveKit startup failed: Error [EADDRINUSE]: startup could not complete\n",
+		)
 		expect(core.stdout()).not.toContain("WaveKit started successfully")
 		expect(core.stdout() + core.stderr()).not.toContain(env.directory)
 		expect(core.stdout() + core.stderr()).toContain(
@@ -1066,7 +1065,9 @@ describe("built protected runtime process", () => {
 		await env.releasePorts()
 		const core = run(env.configFile, env.directory, failedScannerEntry)
 		expect(await core.exited).toEqual({ code: 1, signal: null })
-		expect(core.stderr()).toMatch(STARTUP_FAILURE_LINE)
+		expect(core.stderr()).toBe(
+			"WaveKit startup failed: WaveKitError [ACCESS_UNAVAILABLE]: startup could not complete\n",
+		)
 		expect(core.stdout()).not.toContain("WaveKit started successfully")
 		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
 		expect(core.stdout()).not.toContain("scanner-stop-noop")
@@ -1162,7 +1163,9 @@ describe("built protected runtime process", () => {
 			"constructor-failure",
 		)
 		expect(await core.exited).toEqual({ code: 1, signal: null })
-		expect(core.stderr()).toMatch(STARTUP_FAILURE_LINE)
+		expect(core.stderr()).toBe(
+			"WaveKit startup failed: WaveKitError [ACCESS_UNAVAILABLE]: startup could not complete\n",
+		)
 		expect(core.stdout()).not.toContain("WaveKit started successfully")
 		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
 		expect(core.stdout()).toContain("scanner-probes-cleaned")
@@ -1269,7 +1272,13 @@ describe("built protected runtime process", () => {
 			const core = run(env.configFile)
 			const result = await core.exited
 			expect(result).toEqual({ code: 1, signal: null })
-			expect(core.stderr()).toMatch(STARTUP_FAILURE_LINE)
+			expect(core.stderr()).toBe(
+				kind === "implicit relay"
+					? "WaveKit startup failed: ConfigValidationError [CONFIG_VALIDATION_ERROR]: startup could not complete\n"
+					: kind === "missing private authority"
+						? "WaveKit startup failed: WaveKitError [ACCESS_RUNTIME_UNAVAILABLE]: startup could not complete\n"
+						: "WaveKit startup failed: WaveKitError [ACCESS_CONFIG_INVALID]: startup could not complete\n",
+			)
 			expect(core.stdout()).not.toContain("WaveKit started successfully")
 			expect(core.stdout() + core.stderr()).not.toContain("SECRET")
 			for (const port of [env.api, env.raw, env.relay])

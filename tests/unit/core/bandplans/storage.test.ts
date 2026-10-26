@@ -33,6 +33,7 @@ import {
 	BandPlanStorage,
 	bandPlanStorageFailureReason,
 } from "../../../../src/core/bandplans/storage.js"
+import { formatStartupFailure } from "../../../../src/utils/startup-failure.js"
 import type { StorageStage } from "../../../../src/core/bandplans/storage.js"
 
 const roots: string[] = []
@@ -96,7 +97,9 @@ function waitExit(child: ChildProcess): Promise<void> {
 const file = (path: string) => join(path, "bandplans", "state.json")
 const lock = (path: string) => join(path, "bandplans", ".writer-lock")
 const unavailable = {
-	code: "BANDPLANS_UNAVAILABLE",
+	code: expect.stringMatching(
+		/^BANDPLANS_(UNAVAILABLE|IO|LOCK_HELD|PERMISSIONS|INVALID|OVERSIZED)$/,
+	),
 	message: "Band-plan storage is unavailable.",
 }
 function gate() {
@@ -218,10 +221,14 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		},
 	)
 
-	it("rejects another opener and a crash lock without stealing it", async () => {
+	it("rejects another opener without stealing its fresh lock", async () => {
 		const path = await root()
 		const first = await open(path)
-		await expect(open(path)).rejects.toMatchObject(unavailable)
+		const held = await rejectionOf(open(path))
+		expect(held).toMatchObject({ ...unavailable, code: "BANDPLANS_LOCK_HELD" })
+		expect(formatStartupFailure(held)).toBe(
+			"WaveKit startup failed: WaveKitError [BANDPLANS_LOCK_HELD]: startup could not complete\n",
+		)
 		const exit = await new Promise<number | null>((resolve, reject) => {
 			const child = spawn(
 				process.execPath,
@@ -241,11 +248,6 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		await first.close()
 		const second = await open(path)
 		await second.close()
-		await mkdir(lock(path), { mode: 0o700 })
-		const error = await rejectionOf(open(path))
-		expect(error).toMatchObject(unavailable)
-		expect(bandPlanStorageFailureReason(error)).toBe("lock-held")
-		expect((await lstat(lock(path))).isDirectory()).toBe(true)
 	})
 
 	it("requires an existing absolute parent without creating ancestors", async () => {

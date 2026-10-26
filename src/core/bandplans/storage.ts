@@ -56,11 +56,13 @@ const READ_FLAGS =
 	constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
 
 class StorageUnavailable extends BandPlansError {
+	override readonly code: string
 	readonly reason: BandPlanStoreUnavailableReason
 	constructor(reason: BandPlanStoreUnavailableReason) {
 		super("BANDPLANS_UNAVAILABLE")
 		this.name = "StorageUnavailable"
 		this.reason = reason
+		this.code = `BANDPLANS_${reason.replaceAll("-", "_").toUpperCase()}`
 	}
 }
 
