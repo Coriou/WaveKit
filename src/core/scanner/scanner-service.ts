@@ -1873,6 +1873,9 @@ export class ScannerService extends EventEmitter {
 								? { trialCaptures: captureCounters.trialCaptures }
 								: {}),
 							toolFailures: captureCounters.toolFailures,
+							...(typeof captureCounters.rateFallbacks === "number"
+								? { rateFallbacks: captureCounters.rateFallbacks }
+								: {}),
 							lastToolFailure: captureCounters.lastToolFailure,
 						},
 					}

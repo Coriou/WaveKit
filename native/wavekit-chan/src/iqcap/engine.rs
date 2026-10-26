@@ -32,6 +32,9 @@ pub struct Config {
     pub anchor: PathBuf,
     pub max_ms: u64,
     pub bandwidth_hz: f64,
+    /// `--rate-ack`: `captured` events echo the capture's rate (`rateHz`). Off: the legacy event,
+    /// byte for byte (an older bridge parses events strictly).
+    pub rate_ack: bool,
 }
 
 /// Full-rate CU8 ring of whole samples; `oldest()` is the first tool sample still held.
@@ -397,10 +400,16 @@ impl Engine {
 
     fn finish(&mut self, mut c: Capture, events: &mut Vec<Value>) {
         match c.finalize() {
-            Ok(()) => events.push(json!({
-                "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out,
-                "rateHz": self.designs[c.design].out
-            })),
+            Ok(()) => events.push(if self.cfg.rate_ack {
+                json!({
+                    "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out,
+                    "rateHz": self.designs[c.design].out
+                })
+            } else {
+                json!({
+                    "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out
+                })
+            }),
             Err(_) => {
                 c.discard();
                 events.push(json!({"type": "aborted", "id": c.id, "reason": "io"}));

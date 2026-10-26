@@ -856,6 +856,11 @@ export interface ScannerIqCaptureStatus {
 		swept: number
 	}
 	toolFailures: number
+	/**
+	 * Captures asked for at a rate the running tool did not acknowledge (an older tool), made at
+	 * 48 kHz instead. Absent from older cores.
+	 */
+	rateFallbacks?: number
 	lastToolFailure: {
 		exitCode: number | null
 		signal: string | null

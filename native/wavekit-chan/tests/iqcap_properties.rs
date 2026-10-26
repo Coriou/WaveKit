@@ -98,6 +98,7 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
             anchor: dir.clone(),
             max_ms: 4000,
             bandwidth_hz: BW,
+            rate_ack: false,
         },
         design(fs).clone(),
     )
@@ -141,6 +142,7 @@ fn capture_at(rate: u64, ms: u64) -> Result<usize, String> {
         anchor: dir.clone(),
         max_ms: 4000,
         bandwidth_hz: 47_424.0,
+        rate_ack: false,
     })
     .unwrap();
     let mut ev: Vec<Value> = Vec::new();
@@ -275,6 +277,13 @@ fn faster_rates_reject_what_would_alias_into_the_passband() {
 
 #[test]
 fn the_tool_advertises_its_rates_and_echoes_each_capture_rate() {
+    for rate_ack in [true, false] {
+        echo_case(rate_ack);
+    }
+}
+
+/// With `--rate-ack` the `captured` event carries `rateHz`; without, it is the legacy event.
+fn echo_case(rate_ack: bool) {
     let fs = 1_024_000u64;
     let dir = tmp_dir();
     let mut e = Engine::new(Config {
@@ -284,6 +293,7 @@ fn the_tool_advertises_its_rates_and_echoes_each_capture_rate() {
         anchor: dir.clone(),
         max_ms: 4000,
         bandwidth_hz: 47_424.0,
+        rate_ack,
     })
     .unwrap();
     assert_eq!(e.rates(), vec![48_000, 96_000, 192_000]);
@@ -300,7 +310,12 @@ fn the_tool_advertises_its_rates_and_echoes_each_capture_rate() {
     );
     e.input(&tone(fs, 1_000.0, fs as usize / 4, 5), &mut ev);
     let done = ev.iter().find(|v| v["type"] == "captured").unwrap();
-    assert_eq!(done["rateHz"], 96_000);
     assert_eq!(done["samples"], 19_200);
+    if rate_ack {
+        assert_eq!(done["rateHz"], 96_000);
+    } else {
+        let keys: Vec<&String> = done.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["gapSamples", "id", "samples", "type"]);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

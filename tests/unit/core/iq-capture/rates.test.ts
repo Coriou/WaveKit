@@ -84,6 +84,8 @@ describe("capture rates", () => {
 			{ ...burst, blocks: undefined },
 			{ ...burst, obwHz: Number.NaN },
 			{ ...burst, spectralShape: undefined },
+			{ ...burst, spectralShape: "wobbly" },
+			{ ...burst, spectralShape: "" },
 			undefined,
 			"track",
 		])

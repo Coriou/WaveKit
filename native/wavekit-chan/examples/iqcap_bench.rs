@@ -24,6 +24,7 @@ fn bench(fs: u64, captures: usize, bw: f64, rate: u64) -> f64 {
         anchor: dir.clone(),
         max_ms: 4000,
         bandwidth_hz: bw,
+        rate_ack: false,
     })
     .unwrap();
     let chunk: Vec<u8> = (0..65_536).map(|k| (k * 31 % 251) as u8).collect();

@@ -82,6 +82,11 @@ export interface IqToolProcessOptions {
 	anchor: string
 	maxMs: number
 	bandwidthHz: number
+	/**
+	 * Pass `--rate-ack`: the tool then lists its rates in `ready` and echoes each capture's rate.
+	 * An older tool refuses the flag (a usage error before ready); the service retries without it.
+	 */
+	rateAck?: boolean
 	spawn: SpawnFn
 	env: NodeJS.ProcessEnv
 	timers: IqToolTimers
@@ -112,6 +117,7 @@ export function buildRunArgs(o: IqToolProcessOptions): string[] {
 		String(o.bandwidthHz),
 		"--anchor",
 		o.anchor,
+		...(o.rateAck === true ? ["--rate-ack"] : []),
 	]
 }
 

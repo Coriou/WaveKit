@@ -244,6 +244,11 @@ const RING_MARGIN_S = 0.25
 const PIPE_BUFFER_BYTES = 64 * 1024
 
 interface SourceSlot {
+	/**
+	 * Start the tool with `--rate-ack`. Cleared for good when a tool refused the flag (a usage
+	 * error before ready): that tool is older and captures at 48 kHz only.
+	 */
+	rateAck: boolean
 	sourceId: string
 	sampleRateHz: number
 	centerHz: number
@@ -557,6 +562,7 @@ class Service implements IqCaptureService {
 			failures: [],
 			restartTimer: null,
 			givenUp: false,
+			rateAck: true,
 			ids: new Set(),
 		}
 		this.slots.set(sourceId, slot)
@@ -1421,6 +1427,7 @@ class Service implements IqCaptureService {
 			anchor,
 			maxMs: Math.min(IQ_CAPTURE_MAX_MS, cfg.maxCaptureMs),
 			bandwidthHz: this.bandwidthHz,
+			rateAck: slot.rateAck,
 			spawn: this.spawn,
 			env: this.o.env ?? childAccessEnvironment(process.env),
 			timers: this.timers,
@@ -1487,6 +1494,18 @@ class Service implements IqCaptureService {
 				return
 			}
 			if (!failed) return
+			// An older tool refuses `--rate-ack`: restart once without it (48 kHz only); not a failure.
+			const f = proc.lastFailure
+			if (
+				slot.rateAck &&
+				f?.phase === "exit-before-ready" &&
+				f.reason === "usage"
+			) {
+				slot.rateAck = false
+				this.toolFailures--
+				this.spawnTool(slot)
+				return
+			}
 			this.onToolFailure(slot)
 		})
 		proc.start()

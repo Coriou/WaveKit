@@ -218,6 +218,34 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 		})
 	})
 
+	it("status reports the capture rate fallbacks next to the tool counters", async () => {
+		const { h, port, internals } = setup()
+		const counters = {
+			toolFailures: 1,
+			lastToolFailure: null,
+			rateFallbacks: 2,
+		}
+		internals.deps = {
+			...internals.deps,
+			iqCapture: { ...port, counters: () => counters } as never,
+		}
+		await h.service.start()
+		try {
+			expect(h.service.status().iqCapture).toMatchObject({
+				toolFailures: 1,
+				rateFallbacks: 2,
+			})
+			const { rateFallbacks: _omit, ...older } = counters
+			internals.deps = {
+				...internals.deps,
+				iqCapture: { ...port, counters: () => older } as never,
+			}
+			expect(h.service.status().iqCapture).not.toHaveProperty("rateFallbacks")
+		} finally {
+			await h.service.stop()
+		}
+	})
+
 	it("requests one detection capture for a surfaced, unconfirmed track in the usable span", async () => {
 		const { h, port, internals, track, live } = setup()
 		await h.service.start()

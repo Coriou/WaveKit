@@ -38,6 +38,11 @@ export function wholeCaptureShapeAt(
 	return { bandwidthHz: bw, transitionHz: (rateHz - bw) / 2 }
 }
 
+/** The spectral shapes a track may carry (`TrackSnapshot.spectralShape`). */
+const SPECTRAL_SHAPES: ReadonlySet<unknown> = new Set<
+	TrackSnapshot["spectralShape"]
+>(["flat", "peaked", "narrow"])
+
 /** A track the classifier can read: finite positive OBW, at least one whole block, a shape. */
 function wellFormed(track: unknown): track is TrackSnapshot {
 	if (typeof track !== "object" || track === null) return false
@@ -49,7 +54,7 @@ function wellFormed(track: unknown): track is TrackSnapshot {
 		typeof t.obwHz === "number" &&
 		Number.isFinite(t.obwHz) &&
 		t.obwHz > 0 &&
-		typeof t.spectralShape === "string"
+		SPECTRAL_SHAPES.has(t.spectralShape)
 	)
 }
 

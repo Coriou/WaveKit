@@ -26,7 +26,7 @@ use std::thread;
 
 pub const VERSION_LINE: &str = concat!("wavekit-iqcap ", env!("CARGO_PKG_VERSION"));
 
-const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> | replay --in <abs file> --bandwidth <hz> --transition <hz> [--rate 48000|96000|192000] | analyze --in <abs file> --mode nfm|am [--rate 48000|96000|192000]";
+const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> [--rate-ack] | replay --in <abs file> --bandwidth <hz> --transition <hz> [--rate 48000|96000|192000] | analyze --in <abs file> --mode nfm|am [--rate 48000|96000|192000]";
 
 /// Process entry; returns the exit code.
 pub fn main_entry(argv: &[String]) -> i32 {
@@ -91,8 +91,18 @@ fn hz(s: &str, name: &str) -> Result<f64, String> {
 }
 
 pub fn parse_run(args: &[String]) -> Result<Config, String> {
+    // `--rate-ack` takes no value: the bridge opts in to the extended events.
+    let rate_ack = args.iter().filter(|a| *a == "--rate-ack").count();
+    if rate_ack > 1 {
+        return Err("--rate-ack given twice".into());
+    }
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--rate-ack")
+        .cloned()
+        .collect();
     let v = flags(
-        args,
+        &args,
         &[
             "sample-rate",
             "ring-ms",
@@ -109,6 +119,7 @@ pub fn parse_run(args: &[String]) -> Result<Config, String> {
         max_ms: num(v[3], "max-ms")?,
         bandwidth_hz: hz(v[4], "bandwidth")?,
         anchor: PathBuf::from(v[5]),
+        rate_ack: rate_ack == 1,
     })
 }
 
@@ -303,7 +314,17 @@ fn open_control_fd() -> Result<std::fs::File, ()> {
     file.metadata().map(|_| file).map_err(|_| ())
 }
 
+/// The `ready` event: with `--rate-ack` it lists the accepted rates; without, the legacy line.
+pub fn ready_event(rate_ack: bool, rates: &[u64]) -> Value {
+    if rate_ack {
+        json!({"type": "ready", "rates": rates})
+    } else {
+        json!({"type": "ready"})
+    }
+}
+
 pub fn run(cfg: Config) -> i32 {
+    let rate_ack = cfg.rate_ack;
     let mut engine = match Engine::new(cfg) {
         Ok(e) => e,
         Err(e) => return usage_error(&e),
@@ -349,7 +370,7 @@ pub fn run(cfg: Config) -> i32 {
     });
     // `rates`: the output rates this tool accepts for this source rate (the capability the bridge
     // must see before it asks for any rate but 48 kHz; an older tool sends no list).
-    let mut events = vec![json!({"type": "ready", "rates": engine.rates()})];
+    let mut events = vec![ready_event(rate_ack, &engine.rates())];
     emit(&mut events);
     for msg in rx {
         match msg {
@@ -427,6 +448,38 @@ mod replay_rate_tests {
         ]))
         .is_err());
         assert!(parse_replay(&args(&["--transition", "288", "--out-rate", "96000"])).is_err());
+    }
+
+    #[test]
+    fn rate_ack_is_opt_in_and_legacy_ready_is_unchanged() {
+        let base = [
+            "--sample-rate",
+            "1024000",
+            "--ring-ms",
+            "100",
+            "--out-dir",
+            "/a/b",
+            "--max-ms",
+            "4000",
+            "--bandwidth",
+            "47424",
+            "--anchor",
+            "/a",
+        ];
+        let v = |extra: &[&str]| -> Vec<String> {
+            base.iter().chain(extra).map(|s| s.to_string()).collect()
+        };
+        assert!(!super::parse_run(&v(&[])).unwrap().rate_ack);
+        assert!(super::parse_run(&v(&["--rate-ack"])).unwrap().rate_ack);
+        assert!(super::parse_run(&v(&["--rate-ack", "--rate-ack"])).is_err());
+        assert_eq!(
+            serde_json::to_string(&super::ready_event(false, &[48_000, 96_000])).unwrap(),
+            r#"{"type":"ready"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::ready_event(true, &[48_000, 96_000])).unwrap(),
+            r#"{"rates":[48000,96000],"type":"ready"}"#
+        );
     }
 
     #[test]

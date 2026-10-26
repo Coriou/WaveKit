@@ -3839,7 +3839,10 @@ scanner:
   at 48 kHz (4 s × 48 000 × 8 B) and 3 072 000 B at 96 kHz; the tool also accepts
   192 000 Hz (6 144 000 B), which no protocol uses yet. A rate is asked for only when the
   running tool lists it in its `ready` event and must come back in its `captured`
-  event; an older tool gets an honest 48 kHz capture (counted as `rateFallbacks`),
+  event. The core starts the tool with `--rate-ack` (only then does it add those
+  fields) and, if the tool refuses the flag, once more without it. An older tool
+  gets an honest 48 kHz capture (counted in `GET /api/scanner/status` as
+  `iqCapture.rateFallbacks`),
   and a file whose rate is not confirmed is dropped. A 48 kHz decoder and the
   analog trial get a faster capture brought to 48 kHz. Gaps are counted, never
   filled; a capture shorter than 100 ms is discarded.

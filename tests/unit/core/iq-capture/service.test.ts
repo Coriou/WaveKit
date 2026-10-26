@@ -105,6 +105,8 @@ async function setup(
 		rates?: number[]
 		/** Advertise the rates but never echo a capture's rate (a broken tool). */
 		noEcho?: boolean
+		/** An older tool: refuses `--rate-ack` as an unknown flag (usage error, exit 2). */
+		oldTool?: boolean
 	} = {},
 ) {
 	const root = path.join(base, `r${n++}`)
@@ -118,6 +120,16 @@ async function setup(
 		...(opts.enoent ? { enoent: true } : {}),
 		onSpawn: child => {
 			if (child.args[0] !== "run") return
+			if (opts.oldTool && child.args.includes("--rate-ack")) {
+				queueMicrotask(() => {
+					child.stderr.write("wavekit-iqcap: unknown flag\nusage: ...")
+					queueMicrotask(() => {
+						child.exit(2)
+						child.emit("close", 2, null)
+					})
+				})
+				return
+			}
 			queueMicrotask(() =>
 				child.event(
 					opts.rates ? { type: "ready", rates: opts.rates } : { type: "ready" },
@@ -665,6 +677,8 @@ describe("IqCaptureService supervision", () => {
 				"16000",
 				"--anchor",
 				s.root,
+				// the extended (rate) protocol is opt-in
+				"--rate-ack",
 			])
 			child.stderr.write("control fd 3 is not open; secret-native-output")
 			await flush()
@@ -681,6 +695,37 @@ describe("IqCaptureService supervision", () => {
 				s.lines.filter(line => line.args[1] === "IQ capture tool failed"),
 			).toHaveLength(1)
 			expect(logText(s.lines)).not.toContain("secret-native-output")
+		} finally {
+			await s.svc.stop()
+		}
+	})
+
+	it("an older tool that refuses --rate-ack is restarted once without it and captures at 48 kHz", async () => {
+		const s = await setup({}, { oldTool: true })
+		try {
+			s.svc.attachSource("src", {
+				sampleRateHz: FS,
+				centerHz: CENTER,
+				epoch: 3,
+				engine: s.engine,
+			})
+			await s.svc.start()
+			await flush(20)
+			const runs = () => s.sp.children.filter(c => c.args[0] === "run")
+			expect(runs()[0]?.args).toContain("--rate-ack")
+			const plain = runs()[1] as FakeChild
+			expect(plain).toBeDefined()
+			expect(plain.args).not.toContain("--rate-ack")
+			expect(s.svc.counters().toolFailures).toBe(0)
+			await flush()
+			s.engine.push(FS)
+			const got = s.svc.capture(req({ rateHz: 96_000 }))
+			expect("captureId" in got).toBe(true)
+			await flush(10)
+			expect(
+				plain.commands().find(c => c["type"] === "capture"),
+			).not.toHaveProperty("rateHz")
+			expect(s.svc.counters().rateFallbacks).toBe(1)
 		} finally {
 			await s.svc.stop()
 		}
