@@ -8,6 +8,7 @@
  * frequency and time is done by ScannerService.
  */
 import { EventEmitter } from "node:events"
+import { z } from "zod"
 import {
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
 	type ScannerAmbientDecoderType,
@@ -48,6 +49,12 @@ import {
 } from "./ambient-channel.js"
 import { parseVdl2 } from "./confirm/vdl2.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
+
+/** The manager's placement binding on an output (sourceId, channel or null for centre reach). */
+const PlacedBindingSchema = z.object({
+	sourceId: z.string().min(1),
+	channelHz: z.number().finite().positive().nullable(),
+})
 
 export interface AmbientTarget {
 	sourceId: string
@@ -535,6 +542,22 @@ export class AmbientEvidence extends EventEmitter {
 			: null
 		const onSource = passband?.sourceId === target.sourceId ? passband : null
 		if (placed && !onSource) return
+		// A placed point decoder (a multimon-ng or dsd-fme channel the planner put on a band-plan
+		// channel) hears its own channel, not the parent's target: its binding names it. A binding
+		// on another source drops the output (fail closed); a centre-reach binding keeps the target.
+		const raw =
+			type !== "rtl433"
+				? (input as DecoderOutputLike).provenanceBinding
+				: undefined
+		const binding =
+			raw === undefined ? undefined : PlacedBindingSchema.safeParse(raw)
+		if (binding !== undefined && !binding.success) return
+		if (
+			binding?.data.sourceId !== undefined &&
+			binding.data.sourceId !== target.sourceId
+		)
+			return
+		const placedHz = binding?.data.channelHz ?? undefined
 		const state = entry.interp
 		const freqHz = onSource
 			? rtl433FreqHz((input as DecoderOutputLike).data, onSource)
@@ -542,7 +565,7 @@ export class AmbientEvidence extends EventEmitter {
 		const at = decodeTime(input, this.now())
 		entry.pairCtx = {
 			sourceId: target.sourceId,
-			hz: onSource ? onSource.centreHz : target.hz,
+			hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
 			at,
 			...(onSource
 				? {
@@ -572,7 +595,7 @@ export class AmbientEvidence extends EventEmitter {
 			const event: AmbientEvidenceEvent = {
 				decoderId,
 				sourceId: target.sourceId,
-				hz: onSource ? onSource.centreHz : target.hz,
+				hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
 				ev,
 				...(onSource
 					? {

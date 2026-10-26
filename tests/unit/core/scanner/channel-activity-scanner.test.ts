@@ -6,9 +6,7 @@ import type {
 } from "../../../../src/core/scanner/iq-capture-contract.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
-	COVERAGE_MAX_PIPELINE_LATENCY_MS,
 	trackWithinPassband,
-	type ChannelLiveCoverage,
 	type ScannerServiceDeps,
 } from "../../../../src/core/scanner/scanner-service.js"
 import { createChannelActivityRanker } from "../../../../src/core/scanner/channel-activity.js"
@@ -71,6 +69,7 @@ function setup(extra: Partial<ScannerServiceDeps> = {}) {
 			centreHz: CENTRE,
 			sampleRateHz: 1_024_000,
 		}),
+		config: () => ({ sampleRateHz: 1_024_000, fftSize: 1024 }),
 	})
 	const track = trackOf({
 		trackId: "t1",
@@ -119,51 +118,24 @@ const pocsagResult = (over: Partial<IqReplayResult> = {}): IqReplayResult => ({
 	...over,
 })
 
-describe("replay capture by live coverage from onset", () => {
-	it.each([
-		["no coverage predicate", undefined, 1],
-		["uncovered", (() => "uncovered") as ChannelLiveCoverage, 1],
-		["uncertain", (() => "uncertain") as ChannelLiveCoverage, 1],
-		[
-			"a throwing predicate",
-			(() => {
-				throw new Error("x")
-			}) as ChannelLiveCoverage,
-			1,
-		],
-		["covered since before onset", (() => "covered") as ChannelLiveCoverage, 0],
-	])("%s: %i capture(s)", async (_n, coverage, captures) => {
-		const { h, port, internals, track, live } = setup(
-			coverage ? { channelCoverage: coverage, monoNow: () => 100_000 } : {},
-		)
+describe("Stage 1 capture: no trustworthy onset, so never covered", () => {
+	it("a gate-passed track in a decoder's channel is always captured (burst at 0, decoder at 1 s, samples processed at 12 s)", async () => {
+		// Whatever a placement reports, Stage 1 has no sample-arrival time to compare with.
+		const { h, port, internals, live } = setup()
 		await h.service.start()
 		try {
-			internals.requestIqCapture(live(), track)
-			internals.requestIqCapture(live(), track)
-			expect(port.capture).toHaveBeenCalledTimes(captures)
-		} finally {
-			await h.service.stop()
-		}
-	})
-
-	it("asks with the onset on the monotonic clock, moved earlier by the latency bound", async () => {
-		const coverage = vi.fn<ChannelLiveCoverage>(() => "uncovered")
-		const { h, internals, track, live } = setup({
-			channelCoverage: coverage,
-			monoNow: () => 100_000,
-		})
-		await h.service.start()
-		try {
-			internals.requestIqCapture(live(), track)
-			const spanMs = ((track.lastSample - track.startSample) / 1_024_000) * 1000
-			expect(coverage).toHaveBeenCalledWith(
-				expect.objectContaining({
-					sourceId: "rtl",
-					hz: RF,
-					earliestOnsetMonoMs:
-						100_000 - spanMs - COVERAGE_MAX_PIPELINE_LATENCY_MS,
-				}),
-			)
+			const t = trackOf({
+				trackId: "t1",
+				centreHz: RF,
+				obwHz: 9000,
+				epoch: 1,
+				gate: "passed",
+				startSample: 0,
+				lastSample: 102_400,
+			} as never)
+			internals.requestIqCapture(live(), t)
+			expect(port.capture).toHaveBeenCalledTimes(1)
+			expect("channelCoverage" in internals.deps).toBe(false)
 		} finally {
 			await h.service.stop()
 		}
@@ -281,36 +253,7 @@ describe("replay attribution to the discovery and the ranker", () => {
 })
 
 describe("review regressions (scanner side)", () => {
-	it("an onset before the decoder start is never covered: buffered samples cannot shift it later", async () => {
-		// Burst at 0; its first 100 ms processed at 2 000 ms; decoder started at 1 000 ms.
-		const decoderStartMono = 1_000
-		const reference: ChannelLiveCoverage = q =>
-			decoderStartMono <= q.earliestOnsetMonoMs ? "covered" : "uncertain"
-		const { h, port, internals, live } = setup({
-			channelCoverage: reference,
-			monoNow: () => 2_000,
-		})
-		await h.service.start()
-		try {
-			const t = trackOf({
-				trackId: "t1",
-				centreHz: RF,
-				obwHz: 9000,
-				epoch: 1,
-				gate: "passed",
-				startSample: 0,
-				lastSample: 102_400, // 100 ms at 1.024 Msps
-			} as never)
-			internals.requestIqCapture(live(), t)
-			expect(port.capture).toHaveBeenCalledTimes(1)
-			// earliest onset = 2 000 − 100 − 10 000 < 1 000: uncertain, captured
-			expect(COVERAGE_MAX_PIPELINE_LATENCY_MS).toBe(10_000)
-		} finally {
-			await h.service.stop()
-		}
-	})
-
-	it("the coverage contract is containment of the whole track in the passband", async () => {
+	it("the Stage 2 coverage contract is containment of the whole track in the passband", () => {
 		// 12 kHz multimon-ng passband: a 9 kHz track 6 kHz off sticks out, a centred one fits.
 		expect(trackWithinPassband(RF, 12_000, RF + 6_000, 9_000)).toBe(false)
 		expect(trackWithinPassband(RF, 12_000, RF, 9_000)).toBe(true)
@@ -318,21 +261,6 @@ describe("review regressions (scanner side)", () => {
 		expect(trackWithinPassband(RF, 12_000, RF + 1_501, 9_000)).toBe(false)
 		expect(trackWithinPassband(RF, 0, RF, 0)).toBe(false)
 		expect(trackWithinPassband(RF, 12_000, Number.NaN, 0)).toBe(false)
-		// the scanner asks with the track's own width
-		const coverage = vi.fn<ChannelLiveCoverage>(() => "uncovered")
-		const { h, internals, track, live } = setup({
-			channelCoverage: coverage,
-			monoNow: () => 100_000,
-		})
-		await h.service.start()
-		try {
-			internals.requestIqCapture(live(), track)
-			expect(coverage).toHaveBeenCalledWith(
-				expect.objectContaining({ hz: RF, widthHz: track.obwHz }),
-			)
-		} finally {
-			await h.service.stop()
-		}
 	})
 
 	it("a conflicting decoded discovery in reach blocks the fallback: no neighbour match", async () => {
@@ -401,6 +329,63 @@ describe("review regressions (scanner side)", () => {
 			expect(svc.activityHistory("rtl", w).decodes).toEqual([
 				expect.objectContaining({ hz: RF, ageMs: 7 * 3_600_000 }),
 			])
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	it("rejected evidence never refreshes the decode history", async () => {
+		const { h, internals, live } = setup()
+		await h.service.start()
+		try {
+			let clock = 1_000_000
+			const svc = h.service as unknown as {
+				now: () => number
+				applyEvidence(l: LiveObservation, ev: unknown): boolean
+				decodeTimes: Map<string, number>
+			}
+			svc.now = () => clock
+			const d = {
+				id: "d_1",
+				protocol: "pocsag",
+				confidence: "decoded",
+				frequencyHz: RF,
+				sourceIds: ["rtl"],
+			}
+			vi.spyOn(internals.store, "get" as never).mockReturnValue(d as never)
+			vi.spyOn(internals.store, "discoveryIdOf" as never).mockReturnValue(
+				"d_1" as never,
+			)
+			vi.spyOn(
+				internals.store,
+				"appendObservationEvidence" as never,
+			).mockReturnValue(true as never)
+			const apply = vi
+				.spyOn(internals.store, "applyEvidence" as never)
+				.mockReturnValue("updated" as never)
+			const ev = (crcClean: boolean) => ({
+				protocol: "pocsag",
+				identity: { kind: "pocsag-capcode", value: "1234567" },
+				metadata: {},
+				crcClean,
+				at: clock,
+				epoch: 1,
+				origin: "probe",
+			})
+			svc.applyEvidence(live(), ev(true))
+			expect(svc.decodeTimes.get("d_1")).toBe(1_000_000)
+			clock += 3_600_000
+			// the store rejects it (CRC failure): no refresh
+			apply.mockReturnValue(null as never)
+			svc.applyEvidence(live(), ev(false))
+			expect(svc.decodeTimes.get("d_1")).toBe(1_000_000)
+			// rejected for another reason: no refresh either
+			svc.applyEvidence(live(), ev(true))
+			expect(svc.decodeTimes.get("d_1")).toBe(1_000_000)
+			// accepted again: refreshed
+			apply.mockReturnValue("updated" as never)
+			svc.applyEvidence(live(), ev(true))
+			expect(svc.decodeTimes.get("d_1")).toBe(clock)
 		} finally {
 			await h.service.stop()
 		}

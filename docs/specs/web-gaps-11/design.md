@@ -434,7 +434,6 @@ and `dispose`. All times are on the planner's monotonic clock.
   (weighted by `replayTrialWeight`, complete = whole hold without a gap). Its history provider
   reads decoded discoveries and remembered replay successes in the tuned window and the
   rolling-hour occupancy.
-- `ScannerServiceDeps` gains `channelActivity`, `channelCoverage` (`ChannelLiveCoverage`) and
-  `monoNow`. `requestIqCapture` skips the capture only on `covered`.
+- `ScannerServiceDeps` gains `channelActivity`. `ChannelLiveCoverage` is a Stage 2 type only.
 - `IqReplayResult` gains an optional `rfHz`; the scanner falls back to the capture view.
-  `discoveryOnChannel` gives frequency attribution (exactly one discovery within 6 250 Hz, then a compatible protocol). `trackWithinPassband` states the coverage containment rule; the predicate gets `earliestOnsetMonoMs` (span and `COVERAGE_MAX_PIPELINE_LATENCY_MS` 10 000 ms subtracted). Decode history reads per-discovery decode times (at most 2 048). Live energy expires 1 000 ms after the last accepted block; overloaded blocks clear it and are no frame.
+  `discoveryOnChannel` gives frequency attribution (exactly one discovery within 6 250 Hz, then a compatible protocol). `trackWithinPassband` states the Stage 2 coverage containment rule; Stage 1 never consults coverage (no sample-arrival time) and always captures. `AmbientEvidence` reads the manager's placement binding (`{ sourceId, channelHz }`, Zod-checked) and places a point decoder's evidence at its channel. Decode times are recorded only when the store accepted the decode. Decode history reads per-discovery decode times (at most 2 048). Live energy expires 1 000 ms after the last accepted block; overloaded blocks clear it and are no frame.

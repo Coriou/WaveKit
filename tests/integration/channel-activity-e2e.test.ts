@@ -1,10 +1,10 @@
 /**
- * End to end, in process: the scanner's channel activity ranker wired into a real DecoderManager
- * and planner exactly as the index wiring does (`enablement.activity = { port, epochOf, policy,
- * monoNow }`). The fake source is the rate fakes (no network); spectrum blocks are synthetic block
- * summaries fed the way the scanner feeds them. Mocked multimon-ng children emit a POCSAG decode
- * only while their channel equals the burst channel; the decode's provenance frequency feeds a real
- * DiscoveryStore observation on that channel.
+ * End to end, in process, on a fake monotonic clock: the scanner's channel activity ranker wired
+ * into a real DecoderManager and planner exactly as the index wiring does (`enablement.activity =
+ * { port, epochOf, policy, monoNow }`). Covers the dwell, the move limit, live incumbents and the
+ * stale fallback. Spectrum blocks are synthetic block summaries fed the way the scanner feeds them.
+ * The decode path (multimon-ng stdout → manager → provenance → scanner discovery) is covered by
+ * channel-activity-production-path.test.ts.
  */
 import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
@@ -31,10 +31,6 @@ import {
 	createChannelActivityRanker,
 	type ActivityBlock,
 } from "../../src/core/scanner/channel-activity.js"
-import { resolveProvenance } from "../../src/core/activity/provenance/resolve.js"
-import type { DecoderOutput } from "../../src/decoders/types.js"
-import { DiscoveryStore } from "../../src/core/scanner/store/discovery-store.js"
-import { counterIds, evidence, makeObs } from "../mocks/scanner/observations.js"
 import { FakeSources, RateDecoder, iqCaps } from "../mocks/rate-fakes.js"
 
 const RATE = 1_024_000
@@ -166,27 +162,6 @@ function setup() {
 			gate: "passed" as const,
 		})),
 	})
-	/** A POCSAG decode from every running child whose channel carries a burst. */
-	const decodes: { hz: number | null; output: DecoderOutput }[] = []
-	const emitDecodes = (bursts: readonly number[]): void => {
-		for (const { decoder, channelHz } of children.values()) {
-			const hz = channelHz()
-			if (!decoder.running || hz === undefined || !bursts.includes(hz)) continue
-			const output: DecoderOutput = {
-				type: "pager",
-				decoderId: decoder.id,
-				timestamp: new Date(0),
-				data: { protocol: "POCSAG1200", address: "1234567", message: "test" },
-			} as unknown as DecoderOutput
-			// The child's provenance binding: its channel is its single target.
-			const prov = resolveProvenance(output, {
-				sourceId: "rtl",
-				targetFrequenciesHz: [hz],
-				tuningTrust: "commanded",
-			})
-			decodes.push({ hz: prov.frequency?.hz ?? null, output })
-		}
-	}
 	/** Runs `ms` in 250 ms spectrum blocks (frames keep the ranker fresh unless `frames` is false). */
 	const run = async (
 		ms: number,
@@ -196,7 +171,6 @@ function setup() {
 	): Promise<void> => {
 		for (let t = 0; t < ms; t += STEP_MS) {
 			if (frames) ranker.ingestBlock("rtl", ENGINE, block(bursts))
-			emitDecodes(bursts)
 			mono += STEP_MS
 			await vi.advanceTimersByTimeAsync(STEP_MS)
 			onStep?.()
@@ -215,7 +189,6 @@ function setup() {
 		ranker,
 		run,
 		runningHz,
-		decodes,
 		nearestFive,
 		now: () => mono,
 	}
@@ -224,7 +197,7 @@ function setup() {
 const sorted = (xs: readonly number[]) => [...xs].sort((a, b) => a - b)
 
 describe("activity-ranked channels end to end (ranker + manager + planner)", () => {
-	it("the slot follows a burst on a far raster channel after the dwell; the decode lands on that channel's discovery", async () => {
+	it("the slot follows a burst on a far raster channel after the dwell, one slot at a time", async () => {
 		const f = setup()
 		f.ranker.ingestEpoch("rtl", ENGINE, 1)
 		await f.m.startAll()
@@ -236,7 +209,6 @@ describe("activity-ranked channels end to end (ranker + manager + planner)", () 
 		// Activity appears far away; no move before the 20 s dwell of the incumbents.
 		await f.run(ACTIVITY_DWELL_MS - 2_000, [FAR])
 		expect(f.runningHz()).not.toContain(FAR)
-		expect(f.decodes).toHaveLength(0)
 		// Within the dwell plus a few passes the lowest-ranked slot moves there.
 		let movedAt: number | null = null
 		await f.run(6_000, [FAR], true, () => {
@@ -247,29 +219,6 @@ describe("activity-ranked channels end to end (ranker + manager + planner)", () 
 		const after = f.runningHz()
 		expect(after).toHaveLength(5)
 		expect(before.filter(hz => !after.includes(hz))).toHaveLength(1)
-		// The child on the far channel decoded the burst, attributed to that channel.
-		expect(f.decodes.length).toBeGreaterThan(0)
-		expect(f.decodes.every(d => d.hz === FAR)).toBe(true)
-		// The decode lands on the discovery of that channel.
-		const store = new DiscoveryStore({
-			maxDiscoveries: 100,
-			now: () => 1_000_000,
-			newId: counterIds(),
-			rasters: () => [{ spacingHz: RASTER_HZ, firstChannelHz: FIRST }],
-		})
-		const ingested = store.ingest(
-			makeObs({ id: "o1", centreHz: f.decodes[0]!.hz!, startedAt: 1_000_000 }),
-		)
-		const id = ingested.discoveryId!
-		const ev = evidence("pocsag", 1_000_000, {
-			identity: { kind: "pocsag-capcode", value: "1234567" },
-		})
-		expect(store.appendObservationEvidence("o1", ev)).toBe(true)
-		store.applyEvidence(id, ev)
-		expect(store.get(id)).toMatchObject({
-			frequencyHz: FAR,
-			confidence: "decoded",
-		})
 	})
 
 	it("never more than 6 moves per minute, and a live incumbent is never displaced", async () => {

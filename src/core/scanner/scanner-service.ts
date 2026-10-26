@@ -374,7 +374,12 @@ const REPLAY_PLANS_MAX = 64
 /** closed observation spans kept for late replay results. */
 const REPLAY_SPANS_MAX = 1024
 
-/** The question asked of the decoder placements before a detection capture. */
+/**
+ * Stage 2 (not consulted in Stage 1): the question a detection capture will ask the decoder
+ * placements. Stage 1 has no trustworthy onset time (blocks are stamped when processed, not when
+ * their samples arrived), so a track is never treated as covered and is always captured within
+ * the existing capture budget. Stage 2 needs engine sample-arrival timestamps to fill `onsetMonoMs`.
+ */
 export interface ChannelLiveCoverageQuery {
 	sourceId: string
 	hz: number
@@ -382,25 +387,16 @@ export interface ChannelLiveCoverageQuery {
 	widthHz: number
 	protocols: readonly ScannerProtocol[]
 	/**
-	 * The earliest the track's onset can have been on the monotonic clock: processing time minus
-	 * the track's sample span minus COVERAGE_MAX_PIPELINE_LATENCY_MS. `covered` only when the
-	 * decoder ran from at or before this time.
+	 * The track's onset on the monotonic clock, from a sample-arrival timestamp of the engine
+	 * (Stage 2). Never a processing time minus a span: queued samples would place it too late.
 	 */
-	earliestOnsetMonoMs: number
+	onsetMonoMs: number
 }
 export type ChannelLiveCoverage = (
 	q: ChannelLiveCoverageQuery,
 ) => "covered" | "uncovered" | "uncertain"
 /** Frequency attribution of a replay decode: half a 12.5 kHz paging/DMR raster. */
 export const REPLAY_ATTRIBUTION_HALF_RASTER_HZ = 6_250
-/**
- * The scanner has no sample-to-monotonic mapping (blocks are stamped when processed, not when
- * their samples arrived), so the onset is bounded from below: samples may wait in the source,
- * fanout and spectrum host queues before processing. Bound: 10 000 ms, the ranker's staleness
- * window (ACTIVITY_STALE_MS); a pipeline lagging longer is not trusted for anything and a live
- * decoder that started within it is `uncertain` (the track is captured).
- */
-export const COVERAGE_MAX_PIPELINE_LATENCY_MS = 10_000
 
 /**
  * The coverage predicate's containment rule: the track's [hz ± widthHz/2] lies inside the decoder
@@ -434,13 +430,6 @@ export interface ScannerServiceDeps {
 	 * decodes, replay outcomes, history). Absent: nothing is fed and the planner keeps its order.
 	 */
 	readonly channelActivity?: ChannelActivityRanker
-	/**
-	 * Whether a running decoder placement covered the channel live since before the track's
-	 * onset. Absent, a throw or `uncertain`: the track is captured (the safe answer).
-	 */
-	readonly channelCoverage?: ChannelLiveCoverage
-	/** The planner's monotonic clock (performance.now() by default). */
-	readonly monoNow?: () => number
 	/** WG10 req 3: the live demodulator's transmission evidence for identify; absent keeps today's behaviour. */
 	readonly analogEvidence?: IdentifyAnalogEvidence
 	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
@@ -4242,7 +4231,7 @@ export class ScannerService extends EventEmitter {
 		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
 		const wasLiveDecoded = live.decoded
-		this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
+		const change = this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
 		// The decode may have merged the discovery (identity key): follow the survivor.
 		const survivor = this.store.discoveryIdOf(live.observationId) ?? discoveryId
 		live.discoveryId = survivor
@@ -4250,7 +4239,9 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return accepted
 		live.decoded = true
-		this.noteDecoded(survivor, live.sourceId, ev.protocol)
+		// Only a decode this application accepted dates the decode history.
+		if (change !== null && ev.crcClean)
+			this.noteDecoded(survivor, live.sourceId, ev.protocol)
 		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
 			live.acceptedIdentity = {
@@ -4766,12 +4757,6 @@ export class ScannerService extends EventEmitter {
 			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
 		)
 			return
-		// A channel a running decoder placement covered live since before onset needs no replay.
-		if (this.coveredLiveFromOnset(live, track, epoch.sampleRateHz)) {
-			this.iqTried.add(live.observationId)
-			this.giveUpIqCapture(live.observationId)
-			return
-		}
 		if (pending && !this.pendingCaptures.take(live.sourceId)) return
 		this.iqTried.add(live.observationId)
 		try {
@@ -4801,37 +4786,6 @@ export class ScannerService extends EventEmitter {
 			if (pending) this.pendingCaptures.release(live.sourceId)
 			this.giveUpIqCapture(live.observationId)
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
-		}
-	}
-
-	/**
-	 * Stage 1 coverage: only an explicit `covered` skips the capture; no predicate, a throw,
-	 * `uncertain`, `uncovered` or an onset that cannot be placed on the monotonic clock capture.
-	 */
-	private coveredLiveFromOnset(
-		live: LiveObservation,
-		track: TrackSnapshot,
-		sampleRateHz: number,
-	): boolean {
-		const coverage = this.deps.channelCoverage
-		if (!coverage) return false
-		const spanMs =
-			((track.lastSample - track.startSample) / sampleRateHz) * 1000
-		const mono = (this.deps.monoNow ?? (() => performance.now()))()
-		if (!Number.isFinite(spanMs) || spanMs < 0 || !Number.isFinite(mono))
-			return false
-		try {
-			return (
-				coverage({
-					sourceId: live.sourceId,
-					hz: track.centreHz,
-					widthHz: track.obwHz,
-					protocols: this.protocolsFor(live, track.centreHz),
-					earliestOnsetMonoMs: mono - spanMs - COVERAGE_MAX_PIPELINE_LATENCY_MS,
-				}) === "covered"
-			)
-		} catch {
-			return false
 		}
 	}
 
@@ -5375,11 +5329,13 @@ export class ScannerService extends EventEmitter {
 				}
 			} else if (byFrequency !== null) {
 				if (this.store.get(byFrequency)) {
-					this.store.applyEvidence(byFrequency, ev, {})
+					const change = this.store.applyEvidence(byFrequency, ev, {})
 					this.dirty = true
 					applied = true
 					if (
+						change !== null &&
 						ev.identity &&
+						ev.crcClean &&
 						this.store.get(byFrequency)?.confidence === "decoded"
 					)
 						this.noteDecoded(byFrequency, result.sourceId, ev.protocol)
@@ -5497,11 +5453,17 @@ export class ScannerService extends EventEmitter {
 		if (!this.store.get(discoveryId)) return false
 		// The observation's own rules decide (epoch, not after a retune/hop end): refused, nothing lands.
 		if (!this.store.appendObservationEvidence(observationId, ev)) return false
-		this.store.applyEvidence(discoveryId, ev, {})
+		const change = this.store.applyEvidence(discoveryId, ev, {})
 		this.dirty = true
 		const d = this.store.get(discoveryId)
 		const sourceId = Array.isArray(d?.sourceIds) ? d.sourceIds[0] : undefined
-		if (ev.identity && d?.confidence === "decoded" && sourceId !== undefined)
+		if (
+			change !== null &&
+			ev.identity &&
+			ev.crcClean &&
+			d?.confidence === "decoded" &&
+			sourceId !== undefined
+		)
 			this.noteDecoded(discoveryId, sourceId, ev.protocol)
 		return true
 	}
