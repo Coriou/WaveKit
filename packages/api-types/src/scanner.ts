@@ -336,6 +336,12 @@ export interface Discovery {
 	 */
 	coverage?: DiscoveryCoverage[]
 	/**
+	 * Detail reads (`GET /api/scanner/discoveries/:id`) only: the replay trials remembered for this
+	 * discovery, at most DISCOVERY_TRIAL_MEMORY_MAX. Absent when nothing is remembered or on cores
+	 * without a trial memory.
+	 */
+	trialMemory?: DiscoveryTrialMemory[]
+	/**
 	 * Band inspection UX req 3.1: set on a detail read by an id a merge absorbed; this record is
 	 * the survivor, `requestedId` the id asked for.
 	 */
@@ -377,6 +383,32 @@ export const DISCOVERY_COVERAGE_MAX = 3
 export const DISCOVERY_COVERAGE_DECODER_ID_MAX = 64
 /** Band inspection UX req 1.4: channel width when a decoder declares none. */
 export const DISCOVERY_COVERAGE_DEFAULT_CHANNEL_WIDTH_HZ = 12_500
+
+/** At most this many remembered replay trials per discovery. */
+export const DISCOVERY_TRIAL_MEMORY_MAX = 16
+
+/** One remembered replay trial (protocol + decoder) of a discovery. */
+export interface DiscoveryTrialMemory {
+	protocol: ScannerProtocol
+	/** Decoder type that ran the trial (`analog-demod` for an analog trial). */
+	decoder: string
+	attempts: number
+	decoded: number
+	/** Failed attempts since the last success. */
+	consecutiveFailures: number
+	lastOutcome:
+		| "decoded"
+		| "heard"
+		| "no-sync"
+		| "crc-errors"
+		| "timeout"
+		| "data-like"
+		| "carrier-only"
+	/** ISO 8601. */
+	lastAt: string
+	/** ISO 8601; absent when the trial never succeeded. */
+	lastDecodedAt?: string
+}
 
 export interface DiscoveryCoverage {
 	/** 1-64 chars. */

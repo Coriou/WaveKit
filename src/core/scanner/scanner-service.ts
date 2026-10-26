@@ -54,6 +54,7 @@ import type {
 	SpectrumSourceStatus,
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
+	DiscoveryTrialMemory,
 } from "@wavekit/api-types"
 import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type {
@@ -5255,9 +5256,35 @@ export class ScannerService extends EventEmitter {
 			)
 	}
 
-	/** the discovery's remembered replay trial outcomes (internal; no DTO field yet). */
+	/** the discovery's remembered replay trial outcomes. */
 	trialMemoryOf(discoveryId: string): readonly TrialMemoryEntry[] {
 		return this.trialMemory.view(discoveryId)
+	}
+
+	/** `Discovery.trialMemory` of a detail read: `trialMemoryOf` with ISO times; [] when none. */
+	discoveryTrialMemory(discoveryId: string): DiscoveryTrialMemory[] {
+		const iso = (ms: number): string | undefined => {
+			const d = new Date(ms)
+			return Number.isFinite(d.getTime()) ? d.toISOString() : undefined
+		}
+		const out: DiscoveryTrialMemory[] = []
+		for (const e of this.trialMemoryOf(discoveryId)) {
+			const lastAt = iso(e.lastAt)
+			if (lastAt === undefined) continue
+			const lastDecodedAt =
+				e.lastDecodedAt !== undefined ? iso(e.lastDecodedAt) : undefined
+			out.push({
+				protocol: e.protocol,
+				decoder: e.decoder,
+				attempts: e.attempts,
+				decoded: e.decoded,
+				consecutiveFailures: e.consecutiveFailures,
+				lastOutcome: e.lastOutcome,
+				lastAt,
+				...(lastDecodedAt !== undefined ? { lastDecodedAt } : {}),
+			})
+		}
+		return out
 	}
 
 	applyReplayResult(result: IqReplayResult): void {

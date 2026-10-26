@@ -16,7 +16,10 @@ import type {
 	TrackSnapshot,
 	TuningTrust,
 } from "../spectrum/types.js"
-import type { DiscoveryCoverage } from "@wavekit/api-types"
+import type {
+	DiscoveryCoverage,
+	DiscoveryTrialMemory,
+} from "@wavekit/api-types"
 
 // ---------------------------------------------------------------- vocabulary (§ 6.1)
 
@@ -309,6 +312,8 @@ export interface Discovery {
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
 	/** Band inspection UX req 1.4: projected at read time by the routes, never stored. */
 	coverage?: DiscoveryCoverage[]
+	/** Detail reads only: the remembered replay trials, projected by the routes (never stored). */
+	trialMemory?: DiscoveryTrialMemory[]
 	/** Band inspection UX req 3.1: detail read by an absorbed id (never stored). */
 	absorbedInto?: string
 	requestedId?: string

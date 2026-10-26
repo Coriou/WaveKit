@@ -3404,6 +3404,20 @@ exists. The mapping comes from a recording alias, or from an in-memory index of 
 latest 16 384 merges (oldest evicted first, lost on restart). Otherwise the absorbed
 id answers 404 like any unknown id.
 
+The detail answer may also carry `trialMemory`: the replay trials the scanner remembers
+for this discovery (at most 16, kept across restarts), which it uses to try the trial
+that worked first next time. Absent when nothing is remembered; never on list pages or
+events. Each entry is a `DiscoveryTrialMemory`:
+
+- `protocol` and `decoder` (the decoder type that ran it, `analog-demod` for an analog
+  trial);
+- `attempts` and `decoded`: how often it ran to the end and how often it identified the
+  signal;
+- `consecutiveFailures`: failed attempts since the last success;
+- `lastOutcome`: `decoded`, `heard`, `no-sync`, `crc-errors`, `timeout`, `data-like` or
+  `carrier-only`;
+- `lastAt` and, when it ever succeeded, `lastDecodedAt` (ISO 8601).
+
 #### GET /api/scanner/discoveries/:id/observations
 
 `{ items: Observation[], nextCursor }`; `cursor` and `limit` (1–500, default

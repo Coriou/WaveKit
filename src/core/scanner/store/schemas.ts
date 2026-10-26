@@ -194,9 +194,9 @@ export const DiscoverySchema = z.object({
 	}),
 })
 /**
- * `proof`, `evidenceLevel`, `hint`, `coverage`, `absorbedInto`, `requestedId`, `revision`,
- * `storeEpoch` and `storeRevision` are derived DTO fields (A12; band inspection UX 1.4, 3.1,
- * 3.3). They are not journal keys.
+ * `proof`, `evidenceLevel`, `hint`, `coverage`, `trialMemory`, `absorbedInto`, `requestedId`,
+ * `revision`, `storeEpoch` and `storeRevision` are derived DTO fields (A12; band inspection UX
+ * 1.4, 3.1, 3.3; trial memory on detail reads). They are not journal keys.
  */
 export type DiscoveryCheck = Assert<
 	SchemaMatches<
@@ -206,6 +206,7 @@ export type DiscoveryCheck = Assert<
 			| "evidenceLevel"
 			| "hint"
 			| "coverage"
+			| "trialMemory"
 			| "absorbedInto"
 			| "requestedId"
 			| "revision"

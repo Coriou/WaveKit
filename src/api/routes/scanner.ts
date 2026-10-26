@@ -105,7 +105,13 @@ export type ScannerRouteService = Pick<
 > &
 	// Band inspection UX req 1.4 / 3.1: optional so an older service shape still serves.
 	Partial<
-		Pick<ScannerService, "resolveDiscovery" | "discoveryCoverage" | "storeMeta">
+		Pick<
+			ScannerService,
+			| "resolveDiscovery"
+			| "discoveryCoverage"
+			| "storeMeta"
+			| "discoveryTrialMemory"
+		>
 	>
 
 export interface ScannerRoutesOptions {
@@ -399,6 +405,34 @@ const discoveryCoverageSchema = {
 	},
 } as const
 
+/** One remembered replay trial of `Discovery.trialMemory` (detail reads). */
+const discoveryTrialMemorySchema = {
+	type: "array",
+	maxItems: 16,
+	items: {
+		type: "object",
+		properties: {
+			protocol: { type: "string" },
+			decoder: { type: "string" },
+			attempts: { type: "integer" },
+			decoded: { type: "integer" },
+			consecutiveFailures: { type: "integer" },
+			lastOutcome: { type: "string" },
+			lastAt: { type: "string" },
+			lastDecodedAt: { type: "string" },
+		},
+		required: [
+			"protocol",
+			"decoder",
+			"attempts",
+			"decoded",
+			"consecutiveFailures",
+			"lastOutcome",
+			"lastAt",
+		],
+	},
+} as const
+
 /**
  * A discovery record. Only the band inspection UX fields are listed (all optional); every other
  * field passes through unchanged (`additionalProperties`).
@@ -408,6 +442,7 @@ const discoveryResponseSchema = {
 	additionalProperties: true,
 	properties: {
 		coverage: discoveryCoverageSchema,
+		trialMemory: discoveryTrialMemorySchema,
 		absorbedInto: { type: "string" },
 		requestedId: { type: "string" },
 		revision: { type: "integer" },
@@ -711,9 +746,13 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				typeof scanner.resolveDiscovery === "function"
 					? scanner.resolveDiscovery(id)
 					: scanner.getDiscovery(id)
-			return found
-				? withCoverage(found, coverageIndexOf(scanner))
-				: notFound(reply, "Discovery", id)
+			if (!found) return notFound(reply, "Discovery", id)
+			const shown = withCoverage(found, coverageIndexOf(scanner))
+			const trials =
+				typeof scanner.discoveryTrialMemory === "function"
+					? scanner.discoveryTrialMemory(shown.id)
+					: []
+			return trials.length > 0 ? { ...shown, trialMemory: trials } : shown
 		},
 	)
 
