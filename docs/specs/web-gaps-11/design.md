@@ -408,3 +408,33 @@ Requirements 9.1 to 9.6. All of it lives in `src/core/scanner/**`.
 - Property TC-2: every ISM 868 plan names rtl433 (planned or skipped) and never runs it
   without the capability; at most 8 trials.
 - Property TC-3: parsing any persisted value never throws and stays within the bounds.
+
+## Design amendment: activity-ranked decoder channels (scanner side)
+
+`src/core/scanner/channel-activity.ts` implements the planner's `ChannelActivityPort`
+(`src/decoders/enablement/activity-contract.ts`) with `createChannelActivityRanker({ monoNow,
+timers?, history? })`. It returns the port, `epochOf`, the ingest hooks (`ingestEpoch`,
+`ingestBlock`, `ingestTrack`, `stop`, `noteDecode`, `noteReplayTrial`), `setHistory`, `sizes`
+and `dispose`. All times are on the planner's monotonic clock.
+
+- Per source it keeps the current epoch (source, engine, epoch), the last frame time, energy
+  segments keyed by track id (least recently seen dropped), ended gated tracks, pushed decodes and
+  replay notes, and the last pulled history. A block updates segments in O(tracks) and marks a live
+  edge when a segment appears or goes.
+- A snapshot evaluates each query on its own: candidates are sorted once, each evidence item is
+  associated by binary search (nearest within half the width, ambiguous when a second candidate is
+  in reach), and the score is `100·live + 2·f(energy, 15 min) + 0.5·min(4, Σ f(track, 15 min)) +
+3·f(decode, 6 h) + 2·f(success, 6 h) + 0.5·duty − 1·backoff`, with `f(a, W) = max(0, 1 − a/W)`.
+  The non-live part is at most 9.5, so live comes first.
+- A snapshot records its query as an interest (at most 128). A dirty source evaluates its
+  interests in a coalesced pass and sends one notice when any channel's live flag, state or order
+  changed, or its health changed. The pass also arms one timer at the earliest deadline.
+- The scanner feeds the ranker from its pipeline handler (epoch starts, blocks, track closes),
+  from engine stops, failures and source removal, from applied decodes and from replay results
+  (weighted by `replayTrialWeight`, complete = whole hold without a gap). Its history provider
+  reads decoded discoveries and remembered replay successes in the tuned window and the
+  rolling-hour occupancy.
+- `ScannerServiceDeps` gains `channelActivity`, `channelCoverage` (`ChannelLiveCoverage`) and
+  `monoNow`. `requestIqCapture` skips the capture only on `covered`.
+- `IqReplayResult` gains an optional `rfHz`; the scanner falls back to the capture view.
+  `discoveryOnChannel` gives frequency attribution (unique within 6 250 Hz, compatible protocol).

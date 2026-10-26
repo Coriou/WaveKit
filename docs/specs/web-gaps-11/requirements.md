@@ -335,3 +335,40 @@ so the replay decode that admits a pending observation is remembered on the new 
 9.6 **Capture before admission.** A gate-passed track the store has not admitted yet gets a
 detection capture too, at most 2 per source per rolling minute (of the 6 per source), so the first
 transmission can be replayed; a replay decode then admits it through the evidence path.
+
+## Amendment: activity-ranked decoder channels (scanner side)
+
+10.1 **Ranker port.** The scanner provides the channel activity port of the decoder planner. A
+snapshot answers each query in order, echoes the query itself, and holds exactly one channel per
+candidate in candidate order. It never refreshes history or changes evidence. A malformed query
+(duplicate or non-integer candidates, more than 1 024 candidates, a bad width) answers
+`unavailable` with cold channels.
+10.2 **Health.** A source with no spectrum block for 10 s is `stale`; a retune or a new engine
+drops the old window's live evidence and answers `retuning` until its first block; a stopped
+source is `unavailable` and has no epoch. Anything but `ready` makes the planner use its
+nearest-first order. A ready snapshot carries a finite next evaluation time (the earliest stale
+or decay deadline).
+10.3 **Cadence.** Every accepted block and gated track is ingested with its engine identity, at
+O(tracks) per block. History (stored decodes, remembered replay successes, occupancy) is pulled
+at most every 2 s per source, never inside a snapshot. Changes are noticed at most 250 ms late
+(leading edge, not trailing; at most 4 notices per second per source).
+10.4 **Ranking.** A channel with energy in the latest block outranks every other channel. Energy
+within 2 min, or a decode or replay success within 15 min, is hot; energy or a gated track within
+15 min, or a decode or success within 6 h, is warm; otherwise cold. Decode and success memory
+expires after 6 h. Occupancy adds score only and never sets a state. An item credits the nearest
+candidate within half the channel width; when two candidates are within that reach it credits none.
+10.5 **Replay outcomes.** A replay counts against a channel only when it covered the decoder's
+whole hold without a gap and failed; cancelled, budget-skipped, unsupported, not-needed or
+incomplete replays count for nothing. The penalty lasts 60 s.
+10.6 **Bounds.** 64 sources; per source 512 energy segments, 256 ended tracks, 256 notes of each
+kind and 512 history items of each kind; 128 remembered queries; 1 024 candidates per query.
+10.7 **Capture by coverage.** A gate-passed track is captured at once unless a running decoder
+channel that decodes one of its protocols has covered its channel since before its onset (with a
+500 ms onset slack). No answer, an uncertain answer or a failure means capture, within the
+existing capture budgets.
+10.8 **Replay attribution.** A replay result names its captured frequency. A replay decode whose
+observation is gone and never became a discovery lands on the single stored discovery of that
+source within 6.25 kHz that has the decoded protocol or is not decoded yet; with none or several
+it is dropped. Replay outcomes also reach the ranker at the captured frequency.
+10.9 **Capture size.** Captures are cf32 (8 B per sample): 48 000 × 4 × 8 = 1 536 000 B per
+full 4 s capture.

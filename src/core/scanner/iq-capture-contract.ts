@@ -226,6 +226,11 @@ export interface IqReplayResult {
 	sourceId: string
 	observationId: string | null
 	epoch: number
+	/**
+	 * The captured channel (the capture's `rfHz`), so a decode is attributed to its channel even
+	 * when the observation is gone. Absent on older queues: the scanner reads the capture's view.
+	 */
+	rfHz?: number
 	trials: readonly {
 		protocol: ScannerProtocol
 		decoderType: ProbeDecoderType

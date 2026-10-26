@@ -136,6 +136,10 @@ import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
 import { PendingCaptureLimiter } from "./pending-capture.js"
+import {
+	replayTrialWeight,
+	type ChannelActivityRanker,
+} from "./channel-activity.js"
 import type { AnalogEvidenceLog } from "./analog-evidence.js"
 import {
 	createLiveAudioEvidence,
@@ -370,11 +374,41 @@ const REPLAY_PLANS_MAX = 64
 /** closed observation spans kept for late replay results. */
 const REPLAY_SPANS_MAX = 1024
 
+/** The question asked of the decoder placements before a detection capture. */
+export interface ChannelLiveCoverageQuery {
+	sourceId: string
+	hz: number
+	/** The track's occupied bandwidth. */
+	widthHz: number
+	protocols: readonly ScannerProtocol[]
+	/** Track onset on the monotonic clock, already moved earlier by ONSET_SLACK_MS. */
+	onsetMonoMs: number
+}
+export type ChannelLiveCoverage = (
+	q: ChannelLiveCoverageQuery,
+) => "covered" | "uncovered" | "uncertain"
+/** Frequency attribution of a replay decode: half a 12.5 kHz paging/DMR raster. */
+export const REPLAY_ATTRIBUTION_HALF_RASTER_HZ = 6_250
+/** Onset uncertainty added before a coverage check: the track surfaces some blocks after its energy. */
+export const COVERAGE_ONSET_SLACK_MS = 500
+
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
+	/**
+	 * Activity-ranked decoder channels: the ranker this service feeds (blocks, gated tracks,
+	 * decodes, replay outcomes, history). Absent: nothing is fed and the planner keeps its order.
+	 */
+	readonly channelActivity?: ChannelActivityRanker
+	/**
+	 * Whether a running decoder placement covered the channel live since before the track's
+	 * onset. Absent, a throw or `uncertain`: the track is captured (the safe answer).
+	 */
+	readonly channelCoverage?: ChannelLiveCoverage
+	/** The planner's monotonic clock (performance.now() by default). */
+	readonly monoNow?: () => number
 	/** WG10 req 3: the live demodulator's transmission evidence for identify; absent keeps today's behaviour. */
 	readonly analogEvidence?: IdentifyAnalogEvidence
 	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
@@ -805,6 +839,91 @@ export class ScannerService extends EventEmitter {
 	private readonly replayPlans = new Map<string, readonly IqReplayTrial[]>()
 	/** The engine each source is attached to in the capture service. */
 	private readonly iqEngines = new Map<string, SpectrumEngine>()
+	/** Engine identity for the activity ranker: one id per engine object (weak, no bound needed). */
+	private readonly activityEngineIds = new WeakMap<object, string>()
+	private activityEngineSeq = 0
+
+	private activityEngineId(sourceId: string): string | null {
+		const engine = this.spectrum.engine(sourceId)
+		if (!engine) return null
+		let id = this.activityEngineIds.get(engine)
+		if (id === undefined) {
+			id = `e${++this.activityEngineSeq}`
+			this.activityEngineIds.set(engine, id)
+		}
+		return id
+	}
+
+	/** Feeds the ranker; a ranker failure never disturbs the pipeline. */
+	private feedActivity(fn: (r: ChannelActivityRanker) => void): void {
+		const r = this.deps.channelActivity
+		if (!r) return
+		try {
+			fn(r)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"Channel activity feed failed",
+			)
+		}
+	}
+
+	/**
+	 * History for the ranker (pulled at most every 2 s per source by the ranker): decoded
+	 * discoveries and remembered replay successes in the tuned window, and the rolling-hour
+	 * occupancy duty. Ages are on this service's clock.
+	 */
+	private activityHistory(
+		sourceId: string,
+		window: { lowHz: number; highHz: number },
+	): {
+		decodes: { hz: number; protocol: string; ageMs: number }[]
+		successes: { hz: number; protocol: string; ageMs: number }[]
+		occupancy: { hz: number; duty: number }[]
+	} {
+		const now = this.now()
+		const decodes: { hz: number; protocol: string; ageMs: number }[] = []
+		const successes: { hz: number; protocol: string; ageMs: number }[] = []
+		const mid = (window.lowHz + window.highHz) / 2
+		for (const d of this.store.near(
+			mid,
+			(window.highHz - window.lowHz) / 2,
+			sourceId,
+		)) {
+			if (decodes.length >= 512) break
+			if (d.confidence === "decoded") {
+				const seen = Date.parse(d.lastSeenAt)
+				if (Number.isFinite(seen))
+					decodes.push({
+						hz: d.frequencyHz,
+						protocol: d.protocol,
+						ageMs: Math.max(0, now - seen),
+					})
+			}
+			for (const t of this.trialMemory.view(d.id))
+				if (t.lastDecodedAt !== undefined && successes.length < 512)
+					successes.push({
+						hz: d.frequencyHz,
+						protocol: t.protocol,
+						ageMs: Math.max(0, now - t.lastDecodedAt),
+					})
+		}
+		const occupancy: { hz: number; duty: number }[] = []
+		const occ = this.spectrum.occupancyQuery(
+			sourceId,
+			{ startHz: window.lowHz, endHz: window.highHz },
+			3_600_000,
+		)
+		for (const b of occ?.buckets ?? []) {
+			if (occupancy.length >= 512) break
+			if (b.observedMs > 0)
+				occupancy.push({
+					hz: b.startHz + occ!.bucketHz / 2,
+					duty: b.activeMs / b.observedMs,
+				})
+		}
+		return { decodes, successes, occupancy }
+	}
 	private readonly frequencyErrors = new Map<
 		string,
 		{ hz: number; ppm: number; n: number }
@@ -866,6 +985,9 @@ export class ScannerService extends EventEmitter {
 
 	constructor(private readonly deps: ScannerServiceDeps) {
 		super()
+		deps.channelActivity?.setHistory((sourceId, window) =>
+			this.started ? this.activityHistory(sourceId, window) : null,
+		)
 		// WG11 req 6.7: the replay shapes come from the probe channel requests this module owns.
 		deps.iqCapture?.setShapes(probeReplayShapes())
 		if (
@@ -2562,7 +2684,10 @@ export class ScannerService extends EventEmitter {
 		reason: EngineStreamReason,
 	): void => {
 		this.cancelChannelSource(sourceId)
-		if (reason === "stop") this.detachIqEngine(sourceId)
+		if (reason === "stop") {
+			this.detachIqEngine(sourceId)
+			this.feedActivity(r => r.stop(sourceId))
+		}
 		this.streamFloor.set(sourceId, reason === "stop" ? stream + 1 : stream)
 		// A summary of an ended stream never measures for identify.
 		this.lastSummaries.delete(sourceId)
@@ -2777,12 +2902,33 @@ export class ScannerService extends EventEmitter {
 
 	// === pipeline events → observations ===
 
+	/** O(1) per event plus O(tracks) per block inside the ranker. */
+	private feedPipeline(sourceId: string, ev: PipelineEvent): void {
+		if (!this.deps.channelActivity) return
+		if (
+			ev.kind !== "epoch-started" &&
+			ev.kind !== "block-summary" &&
+			ev.kind !== "track-close"
+		)
+			return
+		const engineId = this.activityEngineId(sourceId)
+		if (engineId === null) return
+		this.feedActivity(r => {
+			if (ev.kind === "epoch-started")
+				r.ingestEpoch(sourceId, engineId, ev.epoch)
+			else if (ev.kind === "block-summary")
+				r.ingestBlock(sourceId, engineId, ev.summary)
+			else r.ingestTrack(sourceId, engineId, ev.track)
+		})
+	}
+
 	private onPipelineEvent(
 		sourceId: string,
 		ev: PipelineEvent,
 		epoch: EngineEpoch,
 	): void {
 		const drivers = this.driversOn(sourceId)
+		this.feedPipeline(sourceId, ev)
 		switch (ev.kind) {
 			case "epoch-started":
 				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
@@ -4054,6 +4200,11 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return accepted
 		live.decoded = true
+		const decodedAt = this.store.get(survivor)?.frequencyHz
+		if (decodedAt !== undefined)
+			this.feedActivity(r =>
+				r.noteDecode(live.sourceId, decodedAt, ev.protocol),
+			)
 		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
 			live.acceptedIdentity = {
@@ -4569,6 +4720,12 @@ export class ScannerService extends EventEmitter {
 			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
 		)
 			return
+		// A channel a running decoder placement covered live since before onset needs no replay.
+		if (this.coveredLiveFromOnset(live, track, epoch.sampleRateHz)) {
+			this.iqTried.add(live.observationId)
+			this.giveUpIqCapture(live.observationId)
+			return
+		}
 		if (pending && !this.pendingCaptures.take(live.sourceId)) return
 		this.iqTried.add(live.observationId)
 		try {
@@ -4598,6 +4755,37 @@ export class ScannerService extends EventEmitter {
 			if (pending) this.pendingCaptures.release(live.sourceId)
 			this.giveUpIqCapture(live.observationId)
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
+		}
+	}
+
+	/**
+	 * Stage 1 coverage: only an explicit `covered` skips the capture; no predicate, a throw,
+	 * `uncertain`, `uncovered` or an onset that cannot be placed on the monotonic clock capture.
+	 */
+	private coveredLiveFromOnset(
+		live: LiveObservation,
+		track: TrackSnapshot,
+		sampleRateHz: number,
+	): boolean {
+		const coverage = this.deps.channelCoverage
+		if (!coverage) return false
+		const spanMs =
+			((track.lastSample - track.startSample) / sampleRateHz) * 1000
+		const mono = (this.deps.monoNow ?? (() => performance.now()))()
+		if (!Number.isFinite(spanMs) || spanMs < 0 || !Number.isFinite(mono))
+			return false
+		try {
+			return (
+				coverage({
+					sourceId: live.sourceId,
+					hz: track.centreHz,
+					widthHz: track.obwHz,
+					protocols: this.protocolsFor(live, track.centreHz),
+					onsetMonoMs: mono - spanMs - COVERAGE_ONSET_SLACK_MS,
+				}) === "covered"
+			)
+		} catch {
+			return false
 		}
 	}
 
@@ -5072,6 +5260,8 @@ export class ScannerService extends EventEmitter {
 		const live = result.observationId
 			? this.findObservation(result.observationId)
 			: undefined
+		const rfHz = this.replayRfHz(result)
+		this.feedReplayTrials(result, rfHz)
 		if (result.observationId) {
 			this.noteReplaySettled(result.observationId, summary.replayDecoded)
 			try {
@@ -5093,12 +5283,23 @@ export class ScannerService extends EventEmitter {
 				this.log.warn({ err: safeErrorFields(err) }, "Replay evidence failed")
 			}
 		}
-		const discoveryId =
+		const ownDiscovery =
 			live?.discoveryId ??
 			(result.observationId
 				? this.store.discoveryIdOf(result.observationId)
 				: undefined) ??
 			null
+		// Attribution by frequency: an observation that left live/recent without a discovery
+		// (a pending capture) gives its decode to the one stored discovery on its channel.
+		const byFrequency =
+			!live && ownDiscovery === null && result.decoded && rfHz !== null
+				? this.discoveryOnChannel(
+						result.sourceId,
+						rfHz,
+						result.decoded.protocol,
+					)
+				: null
+		const discoveryId = ownDiscovery ?? byFrequency
 		if (result.decoded) {
 			const ev: DecodeEvidence = {
 				protocol: result.decoded.protocol,
@@ -5125,6 +5326,12 @@ export class ScannerService extends EventEmitter {
 					} finally {
 						this.applyingReplay = false
 					}
+				}
+			} else if (byFrequency !== null) {
+				if (this.store.get(byFrequency)) {
+					this.store.applyEvidence(byFrequency, ev, {})
+					this.dirty = true
+					applied = true
 				}
 			} else if (result.observationId && discoveryId)
 				// the observation closed and left `recent` (10 s) before its replay
@@ -5163,6 +5370,62 @@ export class ScannerService extends EventEmitter {
 					: "no-sync"
 			this.markUndecoded(live, reason)
 		}
+	}
+
+	/** The captured channel: the result's own frequency, else the capture's view. */
+	private replayRfHz(result: IqReplayResult): number | null {
+		if (typeof result.rfHz === "number" && Number.isFinite(result.rfHz))
+			return result.rfHz
+		try {
+			const hz = this.deps.iqCapture?.view(result.captureId)?.rfHz
+			return typeof hz === "number" && Number.isFinite(hz) ? hz : null
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * Replay outcomes for the activity ranker, at the captured channel. A failure counts only when
+	 * the capture held the trial's whole hold without a gap; cancelled, skipped, unsupported and
+	 * not-needed trials count for nothing.
+	 */
+	private feedReplayTrials(result: IqReplayResult, rfHz: number | null): void {
+		if (!this.deps.channelActivity || rfHz === null) return
+		let view: IqCaptureView | null | undefined
+		try {
+			view = this.deps.iqCapture?.view(result.captureId)
+		} catch {
+			view = null
+		}
+		const plan = this.replayPlans.get(result.captureId)
+		for (const t of result.trials) {
+			if (t.mode !== undefined) continue
+			const hold = plan?.find(
+				p => p.protocol === t.protocol && p.mode.decoderType === t.decoderType,
+			)?.mode.holdMs
+			const weight = replayTrialWeight(
+				t.outcome,
+				replayMissEligible(view, hold),
+			)
+			this.feedActivity(r =>
+				r.noteReplayTrial(result.sourceId, rfHz, t.protocol, weight),
+			)
+		}
+	}
+
+	/**
+	 * The one stored discovery of `sourceId` within half a 12.5 kHz raster (6 250 Hz) of `hz`
+	 * that can take a `protocol` decode (same protocol, or not decoded yet). Two or more: none.
+	 */
+	private discoveryOnChannel(
+		sourceId: string,
+		hz: number,
+		protocol: ScannerProtocol,
+	): string | null {
+		const hits = this.store
+			.near(hz, REPLAY_ATTRIBUTION_HALF_RASTER_HZ, sourceId)
+			.filter(d => d.protocol === protocol || d.confidence !== "decoded")
+		return hits.length === 1 ? hits[0]!.id : null
 	}
 
 	/**
@@ -5298,6 +5561,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onEngineFatal = (sourceId: string, err: Error): void => {
+		this.feedActivity(r => r.stop(sourceId))
 		if (this.iqEngines.delete(sourceId))
 			this.deps.iqCapture?.detachSource(sourceId)
 		this.cancelChannelSource(sourceId, "engine-failed")
@@ -5317,6 +5581,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onSourceDown = (sourceId: string): void => {
+		this.feedActivity(r => r.stop(sourceId))
 		this.cancelChannelSource(sourceId)
 		if (!this.started) return
 		for (const o of this.live.values())
@@ -5387,6 +5652,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onSourceRemoved = (sourceId: string): void => {
+		this.feedActivity(r => r.stop(sourceId))
 		this.cancelChannelSource(sourceId)
 		this.detachIqEngine(sourceId)
 		this.store.clearPending(sourceId) // DQ 1.5
