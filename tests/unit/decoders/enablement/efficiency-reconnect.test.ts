@@ -20,6 +20,82 @@ const placement = (key: string, sampleRateHz: number): WantedPlacement => ({
 })
 
 it.each([
+	{ mode: "always", startMode: "auto", continued: false },
+	{ mode: "auto", startMode: "operator", continued: false },
+	{ mode: "always", startMode: "auto", continued: true },
+	{ mode: "auto", startMode: "operator", continued: true },
+	{ mode: "auto", startMode: "auto", continued: false },
+] as const)(
+	"new-epoch loss recovers or suspends with mode=$mode, startMode=$startMode, continued=$continued",
+	({ mode, startMode, continued }) => {
+		const events = new EventEmitter()
+		let mono = 0
+		const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+		const monitor = createEfficiencyMonitor({
+			sourceEvents: events,
+			sources: () => ["s"],
+			branchCounters: () => new Map([["raw", counters]]),
+			topology: () => "raw",
+			cpu: { normalisedPercent: 10 },
+			now: () => mono,
+			monoNow: () => mono,
+			setInterval: () => ({ cancel() {} }),
+		})
+		const gate = createEfficiencyGate(
+			{ budgetCores: 3, cpuGuardPercent: 90 },
+			{ drops: monitor },
+		)
+		const tick = (at: number) => {
+			mono = at
+			gate.record(monitor.sampleNow())
+		}
+		monitor.start()
+		try {
+			for (let at = 2000; at <= 66000; at += 2000) tick(at)
+			const old = placement("old", 2_048_000)
+			expect(gate.admit(old, [], mono)).toEqual({ admit: true })
+			let running: RunningPlacement[] = [
+				{ ...old, admittedAtMs: mono, mode, startMode },
+			]
+			tick(68000)
+			events.emit("disconnected", "s")
+			events.emit("data", "s", Buffer.alloc(1))
+			const wanted = placement("needed", 2_048_000)
+			const protectedPlacement = mode === "always" || startMode === "operator"
+			for (let at = 70000; at <= 200000; at += 2000) {
+				if (at === 76000 || (continued && at > 76000))
+					counters.droppedBytesTotal++
+				tick(at)
+				const verdict = gate.probation(running, mono)
+				if (!protectedPlacement && at === 76000) {
+					expect(verdict).toEqual([{ key: "old", detail: "drops" }])
+					gate.noteSuspended("old", "drops", mono)
+					running = []
+				} else expect(verdict).toEqual([])
+				if (protectedPlacement)
+					expect(
+						gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
+					).toBe(continued || at < 138000)
+				// Loss at 76 s, next clean point at 78 s, then 30 × 2000 ms:
+				// the newcomer must be admitted at 138 s and beyond, not at 136 s.
+				if (!continued && at >= 138000) {
+					expect(monitor.dropState("s").state).toBe("ok")
+					expect(gate.admit(wanted, running, mono)).toEqual({ admit: true })
+				} else expect(gate.admit(wanted, running, mono).admit).toBe(false)
+			}
+			if (!protectedPlacement)
+				expect(gate.admit(old, [], mono)).toMatchObject({
+					admit: false,
+					detail: "drops",
+					retryAtMs: 376000,
+				})
+		} finally {
+			monitor.stop()
+		}
+	},
+)
+
+it.each([
 	{ continued: false, mode: "auto" },
 	{ continued: false, mode: "always" },
 	{ continued: true, mode: "auto" },

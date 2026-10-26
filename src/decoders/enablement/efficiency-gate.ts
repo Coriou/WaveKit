@@ -231,41 +231,55 @@ export function createEfficiencyGate(
 		if (dropped) return "drops"
 		return highCpu.some(t => t >= admitted && t <= until) ? "cpu" : null
 	}
-	// Probation is earned: with a coverage reader a placement needs
+	// Normal probation is earned: with a coverage reader a placement needs
 	// EFFICIENCY_PROBATION_MS of complete evidence since admission (unknown
 	// intervals do not count), else that much time. Evidence is judged before
 	// graduation over everything observed up to and including the sample that
-	// completes it: a placement with evidence in that window never graduates.
-	const graduationAt = (p: RunningPlacement, mono: number): number | null => {
-		const admitted = admittedMono.get(p.key) ?? NaN
+	// completes it; evidence in that window prevents normal graduation.
+	const graduationAt = (
+		p: RunningPlacement,
+		mono: number,
+		admitted = admittedMono.get(p.key) ?? NaN,
+		duration = EFFICIENCY_PROBATION_MS,
+	): number | null => {
 		if (!Number.isFinite(mono) || !Number.isFinite(admitted)) return null
 		const reader = deps.drops
 		if (reader?.coverageCompleteAtMono !== undefined) {
 			if (typeof reader.coverageCompleteAtMono !== "function") return null
 			try {
-				const at = reader.coverageCompleteAtMono(
-					p.sourceId,
-					admitted,
-					EFFICIENCY_PROBATION_MS,
-				)
-				return valid(at) &&
-					at >= admitted + EFFICIENCY_PROBATION_MS &&
-					at <= mono
-					? at
-					: null
+				const at = reader.coverageCompleteAtMono(p.sourceId, admitted, duration)
+				return valid(at) && at >= admitted + duration && at <= mono ? at : null
 			} catch {
 				return null
 			}
 		}
 		if (reader?.latestAttribution !== undefined) return null
-		return mono - admitted >= EFFICIENCY_PROBATION_MS
-			? admitted + EFFICIENCY_PROBATION_MS
-			: null
+		return mono - admitted >= duration ? admitted + duration : null
 	}
 	const graduates = (p: RunningPlacement, mono: number) => {
 		if (graduated.has(p.key)) return true
 		const at = graduationAt(p, mono)
-		return at !== null && evidence(p, admittedMono.get(p.key)!, at) === null
+		const admitted = admittedMono.get(p.key)!
+		if (at !== null && evidence(p, admitted, at) === null) return true
+		if (p.mode !== "always" && p.startMode !== "operator") return false
+		// Protected probationers cannot be suspended after loss. Let a fresh
+		// clean run release their slot: cleanAt - 30 × 2000 ms is its first
+		// clean point; require all 60000 ms of coverage, including the endpoint.
+		// No retry state or growing recovery history is needed. Further loss or
+		// unknown evidence restarts the monitor's clean run instead of admitting.
+		try {
+			const cleanAt = deps.drops?.cleanAtMono?.(p.sourceId)
+			if (!valid(cleanAt) || cleanAt > mono) return false
+			const since = cleanAt - EFFICIENCY_CLEAR_MS
+			return (
+				since > admitted &&
+				readDrops(p.sourceId).state === "ok" &&
+				graduationAt(p, mono, since, EFFICIENCY_CLEAR_MS) !== null &&
+				evidence(p, since, mono) === null
+			)
+		} catch {
+			return false
+		}
 	}
 	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
 	/**
