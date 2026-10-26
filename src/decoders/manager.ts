@@ -434,6 +434,16 @@ export interface DecoderManagerEvents {
 	) => void
 	/** Emitted when a decoder produces output */
 	"decoder:output": (decoderId: string, output: DecoderOutput) => void
+	/**
+	 * A placed channel worker's `link` line (dsd-fme link control), under its parent's id with the
+	 * placement binding. The parent decoder's own lines stay on the decoder (`getDecoder(id)`),
+	 * with the binding as a non-enumerable `provenanceBinding` while it is placed.
+	 */
+	"decoder:placed-link": (
+		decoderId: string,
+		line: unknown,
+		binding: { sourceId: string; channelHz: number | null },
+	) => void
 	/** Emitted when a decoder encounters an error */
 	"decoder:error": (decoderId: string, error: Error) => void
 	/** Emitted when a decoder starts */
@@ -3483,6 +3493,31 @@ export class DecoderManager extends EventEmitter {
 		// The manager consumes output via events. Drain the parallel stream so
 		// unattended decoders do not retain every event for the lifetime of the app.
 		decoder.getOutput().resume()
+
+		// Link lines (dsd-fme link control) of a placed decoder carry its binding like its outputs
+		// (non-enumerable, set before any other listener reads the line). A placed worker is never
+		// `decoder:created`, so its lines are also forwarded under the parent's id.
+		decoder.prependListener("link", (line: unknown) => {
+			const placement = state.placement
+			if (!placement || line === null || typeof line !== "object") return
+			const binding = {
+				sourceId: placement.sourceId,
+				channelHz: placement.channelHz,
+			}
+			try {
+				Object.defineProperty(line, "provenanceBinding", {
+					value: binding,
+					configurable: true,
+				})
+				if (state.parentId)
+					this.emit("decoder:placed-link", state.parentId, line, binding)
+			} catch (err) {
+				this.log.error(
+					{ err: safeErrorFields(err), decoderId: decoder.id },
+					"Error forwarding placed link line, continuing operation",
+				)
+			}
+		})
 
 		// Forward output events (Requirement 4.4, 4.6)
 		// Also track last output time for health checks (Requirement 20.1, 20.2)

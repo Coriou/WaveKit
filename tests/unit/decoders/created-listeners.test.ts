@@ -81,19 +81,23 @@ describe("decoder:created listeners after a rebuild", () => {
 			logger,
 		})
 		ambient.start()
+		// Every instance also holds the manager's own listener (it binds placed lines).
+		const ambientLinks = (d: { listenerCount(e: string): number }) =>
+			d.listenerCount("link") - 1
 		const old = instances[0]!
-		expect(old.listenerCount("link")).toBe(1)
+		expect(ambientLinks(old)).toBe(1)
 		manager.stageDecoderOptions("dec", { frequencies: [446_100_000] })
 		await manager.startDecoder("dec")
 		const fresh = instances[1]!
+		// a discarded instance keeps no listener at all
 		expect(old.listenerCount("link")).toBe(0)
-		expect(fresh.listenerCount("link")).toBe(1)
+		expect(ambientLinks(fresh)).toBe(1)
 		expect(ambient.watchedDecoderIds).toEqual(["dec"])
 		manager.stageDecoderOptions("dec", { frequencies: [446_200_000] })
 		await manager.restartDecoder("dec")
 		expect(fresh.listenerCount("link")).toBe(0)
-		expect(instances[2]!.listenerCount("link")).toBe(1)
+		expect(ambientLinks(instances[2]!)).toBe(1)
 		ambient.stop()
-		expect(instances[2]!.listenerCount("link")).toBe(0)
+		expect(ambientLinks(instances[2]!)).toBe(0)
 	})
 })

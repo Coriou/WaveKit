@@ -236,6 +236,39 @@ it("worker output is emitted under the parent id with the placement frequency", 
 	)
 })
 
+it("link lines carry each placement's binding; a worker's are forwarded under the parent id", async () => {
+	const f = setup()
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000), f.place("dec", 162_025_000, false)])
+	await f.manager.startAll()
+	const forwarded = vi.fn()
+	f.manager.on("decoder:placed-link", forwarded)
+	const parent = f.instances.get("dec")!
+	const worker = f.instances.get(
+		placementKey("dec", "rtl", "channel", 162_025_000),
+	)!
+	const seen: unknown[] = []
+	parent.on("link", (line: { provenanceBinding?: unknown }) =>
+		seen.push(line.provenanceBinding),
+	)
+	const own = { protocol: "dmr", colorCode: 1 }
+	parent.emit("link", own)
+	// the parent's line is bound to its own channel for its direct listeners, never forwarded
+	expect(seen).toEqual([{ sourceId: "rtl", channelHz: 162_000_000 }])
+	expect(Object.keys(own)).toEqual(["protocol", "colorCode"])
+	expect(forwarded).not.toHaveBeenCalled()
+	const line = { protocol: "dmr", colorCode: 2 }
+	worker.emit("link", line)
+	expect(forwarded).toHaveBeenCalledExactlyOnceWith("dec", line, {
+		sourceId: "rtl",
+		channelHz: 162_025_000,
+	})
+	expect((line as { provenanceBinding?: unknown }).provenanceBinding).toEqual({
+		sourceId: "rtl",
+		channelHz: 162_025_000,
+	})
+})
+
 it("worker never appears in decoder:created or the list", async () => {
 	const f = setup()
 	const created = vi.fn()

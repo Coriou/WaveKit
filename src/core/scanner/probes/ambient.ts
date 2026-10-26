@@ -38,7 +38,11 @@ import {
 	type InterpreterState,
 } from "./confirm/double-match.js"
 import { interpretDirewolf } from "./confirm/direwolf.js"
-import { interpretDsdFme, toDsdFmeScannerEvent } from "./confirm/dsd-fme.js"
+import {
+	interpretDsdFme,
+	toDsdFmeScannerEvent,
+	type DsdFmeScannerEvent,
+} from "./confirm/dsd-fme.js"
 import { parseMeshtastic } from "./confirm/meshtastic.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import {
@@ -55,6 +59,21 @@ const PlacedBindingSchema = z.object({
 	sourceId: z.string().min(1),
 	channelHz: z.number().finite().positive().nullable(),
 })
+
+/** Channel states kept per placed decoder (its activity slots are at most a few channels). */
+export const AMBIENT_PLACED_STATES_MAX = 8
+
+function placedKey(decoderId: string, channelHz: number | string): string {
+	return `${decoderId}\u0000${channelHz}`
+}
+
+/** A dsd-fme event carrying its output's placement binding (validated in `handle`). */
+function withBinding(
+	ev: DsdFmeScannerEvent,
+	binding: unknown,
+): DsdFmeScannerEvent & { provenanceBinding?: unknown } {
+	return binding === undefined ? ev : { ...ev, provenanceBinding: binding }
+}
 
 export interface AmbientTarget {
 	sourceId: string
@@ -188,6 +207,7 @@ export class AmbientEvidence extends EventEmitter {
 		this.running = true
 		for (const status of this.deps.decoders.getAllStatus()) this.watch(status)
 		this.deps.decoders.on("decoder:output", this.onOutput)
+		this.deps.decoders.on("decoder:placed-link", this.onPlacedLink)
 		// Decoders created or removed after start (API, config reload) join or leave the watched set.
 		this.deps.decoders.on("decoder:created", this.onCreated)
 		this.deps.decoders.on("decoder:removed", this.onRemoved)
@@ -201,6 +221,7 @@ export class AmbientEvidence extends EventEmitter {
 		if (!this.running) return
 		this.running = false
 		this.deps.decoders.off("decoder:output", this.onOutput)
+		this.deps.decoders.off("decoder:placed-link", this.onPlacedLink)
 		this.deps.decoders.off("decoder:created", this.onCreated)
 		this.deps.decoders.off("decoder:removed", this.onRemoved)
 		for (const off of this.detach.values()) off()
@@ -234,8 +255,15 @@ export class AmbientEvidence extends EventEmitter {
 			| undefined
 		if (!decoder) return
 		const id = status.id
+		// A placed decoder's line carries its binding (set by the manager), like its outputs.
 		const onLink = (line: DsdFmeLinkLine): void =>
-			this.handle(id, { kind: "link", line })
+			this.handle(
+				id,
+				withBinding(
+					{ kind: "link", line },
+					(line as { provenanceBinding?: unknown }).provenanceBinding,
+				),
+			)
 		decoder.on("link", onLink)
 		this.detach.set(id, () => decoder.off("link", onLink))
 	}
@@ -246,7 +274,21 @@ export class AmbientEvidence extends EventEmitter {
 		off?.()
 		this.types.delete(decoderId)
 		this.states.delete(decoderId)
+		const prefix = placedKey(decoderId, "")
+		for (const key of [...this.states.keys()])
+			if (key.startsWith(prefix)) this.states.delete(key)
 		this.trustErrorLogged.delete(decoderId)
+	}
+
+	/** At most AMBIENT_PLACED_STATES_MAX channel states per decoder; the least recently heard go. */
+	private boundPlaced(decoderId: string, added: string): void {
+		const prefix = placedKey(decoderId, "")
+		const mine = [...this.states.keys()].filter(k => k.startsWith(prefix))
+		for (const key of mine.slice(
+			0,
+			Math.max(0, mine.length - AMBIENT_PLACED_STATES_MAX),
+		))
+			if (key !== added) this.states.delete(key)
 	}
 
 	private readonly onCreated = (decoderId: unknown): void => {
@@ -488,10 +530,27 @@ export class AmbientEvidence extends EventEmitter {
 		}
 		if (type === "dsd-fme") {
 			const ev = toDsdFmeScannerEvent(out)
-			if (ev) this.handle(decoderId, ev)
+			// A placed channel's call keeps its binding, so it lands on that channel.
+			if (ev) this.handle(decoderId, withBinding(ev, out.provenanceBinding))
 			return
 		}
 		this.handle(decoderId, out)
+	}
+
+	/** A placed dsd-fme channel's link line (the manager forwards it with the binding). */
+	private readonly onPlacedLink = (
+		decoderId: unknown,
+		line: unknown,
+		binding: unknown,
+	): void => {
+		if (typeof decoderId !== "string") return
+		if (this.types.get(decoderId) !== "dsd-fme") return
+		if (binding === undefined || line === null || typeof line !== "object")
+			return
+		this.handle(
+			decoderId,
+			withBinding({ kind: "link", line: line as DsdFmeLinkLine }, binding),
+		)
 	}
 
 	private handle(
@@ -504,7 +563,27 @@ export class AmbientEvidence extends EventEmitter {
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		const type = this.types.get(decoderId)
-		let entry = this.states.get(decoderId)
+		// A placed point decoder (a multimon-ng or dsd-fme channel the planner put on a band-plan
+		// channel) hears its own channel, not the parent's target: its binding names it. A binding
+		// on another source drops the output (fail closed); a centre-reach binding keeps the target.
+		const raw =
+			type !== "rtl433"
+				? (input as DecoderOutputLike).provenanceBinding
+				: undefined
+		const binding =
+			raw === undefined ? undefined : PlacedBindingSchema.safeParse(raw)
+		if (binding !== undefined && !binding.success) return
+		if (
+			binding?.data.sourceId !== undefined &&
+			binding.data.sourceId !== target.sourceId
+		)
+			return
+		const placedHz = binding?.data.channelHz ?? undefined
+		// Each placed channel keeps its own acceptance memory: a colour code or capcode heard on
+		// one channel never confirms a decode on another.
+		const key =
+			placedHz === undefined ? decoderId : placedKey(decoderId, placedHz)
+		let entry = this.states.get(key)
 		if (!entry || entry.epoch !== epoch) {
 			const fresh: AmbientState = {
 				epoch,
@@ -524,7 +603,12 @@ export class AmbientEvidence extends EventEmitter {
 				fresh.capcodes = new CapcodeWindows(MULTIMON_HOLD_MS, create)
 			else fresh.interp = create()
 			entry = fresh
-			this.states.set(decoderId, entry)
+			this.states.set(key, entry)
+			if (placedHz !== undefined) this.boundPlaced(decoderId, key)
+		} else if (placedHz !== undefined) {
+			// most recently used last: the bound evicts the channel heard longest ago
+			this.states.delete(key)
+			this.states.set(key, entry)
 		}
 		// A placed rtl433 output (it carries a binding) names its channel; an
 		// invalid binding, another source or an unusable channel request drops
@@ -542,22 +626,6 @@ export class AmbientEvidence extends EventEmitter {
 			: null
 		const onSource = passband?.sourceId === target.sourceId ? passband : null
 		if (placed && !onSource) return
-		// A placed point decoder (a multimon-ng or dsd-fme channel the planner put on a band-plan
-		// channel) hears its own channel, not the parent's target: its binding names it. A binding
-		// on another source drops the output (fail closed); a centre-reach binding keeps the target.
-		const raw =
-			type !== "rtl433"
-				? (input as DecoderOutputLike).provenanceBinding
-				: undefined
-		const binding =
-			raw === undefined ? undefined : PlacedBindingSchema.safeParse(raw)
-		if (binding !== undefined && !binding.success) return
-		if (
-			binding?.data.sourceId !== undefined &&
-			binding.data.sourceId !== target.sourceId
-		)
-			return
-		const placedHz = binding?.data.channelHz ?? undefined
 		const state = entry.interp
 		const freqHz = onSource
 			? rtl433FreqHz((input as DecoderOutputLike).data, onSource)

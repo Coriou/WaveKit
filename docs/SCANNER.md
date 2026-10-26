@@ -313,7 +313,7 @@ On by default in protected access mode (`scanner.iqCapture.enabled: true`; in le
 
 **Capture size.** A capture is complex float32 at 48 kHz: 8 bytes per sample, so a full 4 s capture is 48 000 × 4 × 8 = 1 536 000 bytes (about 1.5 MB), and the 256 MiB cap holds about 174 full captures. At 6 captures per source per minute that is at most about 9.2 MB per source per minute.
 
-**Decodes from busy-channel decoders land on their channel.** A paging decoder that the planner moved to a band-plan channel reports its decodes at that channel, so they land on that channel's discovery (not at the tuned centre).
+**Decodes from busy-channel decoders land on their channel.** A paging or digital-voice decoder that the planner moved to a band-plan channel reports its decodes at that channel, so they land on that channel's discovery (not at the tuned centre). Each such channel confirms its own identities: a colour code or capcode heard on one channel never confirms a decode on another.
 
 **Busy channels get the decoders.** Paging (POCSAG/FLEX) and digital-voice (DMR and similar) decoders can only run on a few channels of a band at once. The scanner ranks every channel those decoders could use by recent activity, and the decoder planner puts its spare channel slots on the busiest ones instead of only the ones nearest the tuned centre:
 
