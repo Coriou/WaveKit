@@ -18,6 +18,7 @@ import {
 	LOCK_WAIT_MS,
 	startLockHeartbeat,
 	lockWait,
+	ownerHasRecentHeartbeat,
 } from "../../../src/utils/lock-owner.js"
 import type {
 	LockOwner,
@@ -850,3 +851,30 @@ it.each(["recent", "stopped", "forward-step"] as const)(
 		}
 	},
 )
+
+describe("same-scope fail-fast refusal", () => {
+	const alive = { alive: true, startTime: owner.startTime }
+	it("refuses a live owner whose heartbeat is under 30 s old", () => {
+		vi.spyOn(Date, "now").mockReturnValue(100_000)
+		const fresh = 100_000 - HEARTBEAT_STALE_MS + 1
+		expect(ownerHasRecentHeartbeat(owner, owner, alive, fresh)).toBe(true)
+	})
+	it("observes instead once the heartbeat is 30 s old", () => {
+		vi.spyOn(Date, "now").mockReturnValue(100_000)
+		const old = 100_000 - HEARTBEAT_STALE_MS
+		expect(ownerHasRecentHeartbeat(owner, owner, alive, old)).toBe(false)
+	})
+	it("refuses when the owner's start time cannot be read", () => {
+		vi.spyOn(Date, "now").mockReturnValue(100_000)
+		const unknown = { alive: true, startTime: null }
+		expect(ownerHasRecentHeartbeat(owner, owner, unknown, 100_000)).toBe(true)
+	})
+	it("observes a reused pid whose start time differs", () => {
+		vi.spyOn(Date, "now").mockReturnValue(100_000)
+		const reused = {
+			alive: true,
+			startTime: { kind: "linux" as const, value: "999" },
+		}
+		expect(ownerHasRecentHeartbeat(owner, owner, reused, 100_000)).toBe(false)
+	})
+})

@@ -157,22 +157,30 @@ export function sameScope(recorded: LockOwner, current: LockOwner): boolean {
 				current.platform !== "linux")
 	)
 }
-/** Wall time only selects fail-fast; an old timestamp never proves lease expiry. */
+/**
+ * Wall time only selects fail-fast; an old timestamp never proves lease expiry.
+ * Refusing is always safe, so an unreadable start time (macOS has no /proc for
+ * other PIDs) still refuses a live same-scope owner with a heartbeat under 30 s
+ * old; only a known, different start time sends it to observation.
+ */
 export function ownerHasRecentHeartbeat(
 	recorded: LockOwner,
 	current: LockOwner,
 	probe: OwnerProbe,
 	mtimeMs: number,
 ): boolean {
+	const startKnown =
+		recorded.startTime !== null &&
+		probe.startTime !== null &&
+		recorded.startTime.kind === probe.startTime.kind
 	return (
 		sameScope(recorded, current) &&
 		probe.alive &&
-		recorded.startTime !== null &&
-		probe.startTime !== null &&
-		recorded.startTime.kind === probe.startTime.kind &&
-		!identityDiffers(recorded.startTime, probe.startTime) &&
-		Math.abs(Date.now() - mtimeMs) <=
-			HEARTBEAT_STALE_MS + TIME_IDENTITY_TOLERANCE_MS
+		(!startKnown ||
+			(recorded.startTime !== null &&
+				probe.startTime !== null &&
+				!identityDiffers(recorded.startTime, probe.startTime))) &&
+		Math.abs(Date.now() - mtimeMs) < HEARTBEAT_STALE_MS
 	)
 }
 export function isStale(
