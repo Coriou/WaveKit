@@ -124,28 +124,31 @@ interface AcarsdecJsonOutput {
 /** Longest line the non-finite rewrite scans (an ACARS block is at most 220 characters of text). */
 export const NON_FINITE_SCAN_MAX_CHARS = 8_192
 
-/** A frequency key is present with something other than a finite number. */
+/** Either frequency alias is present with something other than a finite number. */
 function frequencyMalformed(json: Record<string, unknown>): boolean {
-	for (const key of ["freq", "frequency"]) {
-		if (!Object.hasOwn(json, key)) continue
+	return ["freq", "frequency"].some(key => {
+		if (!Object.hasOwn(json, key)) return false
 		const v = json[key]
 		return !(typeof v === "number" && Number.isFinite(v))
-	}
-	return false
+	})
 }
 
 /**
- * acarsdec prints C's `-inf`/`inf`/`nan` for a level it could not measure (`"noise":-inf` when it
- * reads audio from a file or stdin), which is not JSON. A bare non-finite number right after an
- * object key becomes `null`; string contents are not touched (their quotes are escaped).
+ * Diagnostic keys acarsdec may print as C's `-inf`/`inf`/`nan` (signal `level` and `noise` in dB,
+ * `-inf` for `noise` when it reads audio from a file or stdin): only these become `null`. Any other
+ * key with a non-finite value (`error`, `freq`, …) keeps the line invalid JSON, so it is rejected
+ * as before. String contents are not touched (their quotes are escaped).
+ */
+const NON_FINITE_DIAGNOSTIC =
+	/((?:^|[,{])\s*"(?:level|noise)"\s*:\s*)[-+]?(?:inf(?:inity)?|nan)(?=\s*[,}])/gi
+/**
+ * acarsdec's JSON line with a non-finite `level` or `noise` made parseable
+ * (`NON_FINITE_DIAGNOSTIC`); everything else unchanged.
  */
 export function nonFiniteToNull(line: string): string {
 	// Bounded: a longer line is left as it is (and then fails JSON parsing, as before).
 	if (line.length > NON_FINITE_SCAN_MAX_CHARS) return line
-	return line.replace(
-		/((?:^|[,{])\s*"[A-Za-z_][A-Za-z0-9_]*"\s*:\s*)[-+]?(?:inf(?:inity)?|nan)(?=\s*[,}])/gi,
-		"$1null",
-	)
+	return line.replace(NON_FINITE_DIAGNOSTIC, "$1null")
 }
 
 /**

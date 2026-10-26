@@ -116,8 +116,8 @@ async function replayThroughPool(lines: string[], end: "clean" | "cut") {
 			acarsdec as unknown as { parseOutput(l: string): DecoderOutput | null }
 		).parseOutput(l)
 	for (const l of lines) {
+		// a line the adapter rejects never reaches the pool
 		const out = parse(l)
-		expect(out).not.toBeNull()
 		if (out) h.decoders.emitOutput(id, out)
 	}
 	if (end === "cut") input.destroy(new Error("replay failed"))
@@ -225,9 +225,12 @@ describe("interpretAcarsReplay", () => {
 describe("acarsdec replay chain (synthetic ACARS)", () => {
 	it("the fixture is one capture file; acarsdec's -inf is read as no value", () => {
 		expect(acarsCf32().length).toBeLessThanOrEqual(IQ_CAPTURE_MAX_BYTES)
-		expect(nonFiniteToNull('{"level":-8.0,"noise":-inf,"x":nan}')).toBe(
-			'{"level":-8.0,"noise":null,"x":null}',
+		// only the diagnostic keys (level, noise); any other non-finite value stays invalid JSON
+		expect(nonFiniteToNull('{"level":nan,"noise":-inf,"x":nan}')).toBe(
+			'{"level":null,"noise":null,"x":nan}',
 		)
+		expect(nonFiniteToNull('{"error":nan}')).toBe('{"error":nan}')
+		expect(nonFiniteToNull('{"freq":-inf}')).toBe('{"freq":-inf}')
 		// a line past the bound is not scanned (it then fails JSON parsing, as before)
 		const long = `{"noise":-inf,"pad":"${"x".repeat(NON_FINITE_SCAN_MAX_CHARS)}"}`
 		expect(nonFiniteToNull(long)).toBe(long)
@@ -284,6 +287,37 @@ describe("acarsdec replay chain (synthetic ACARS)", () => {
 		} finally {
 			await h.service.stop()
 		}
+	})
+
+	it("the adapter (live and replay alike) rejects a line with a non-finite error or frequency, and reads noise -inf", () => {
+		const decoder = createAcarsdecDecoder(
+			{ id: "a", type: "acarsdec", enabled: true, options: {} } as never,
+			pino({ level: "silent" }),
+		)
+		const parse = (l: string): DecoderOutput | null =>
+			(
+				decoder as unknown as { parseOutput(l: string): DecoderOutput | null }
+			).parseOutput(l)
+		expect(parse(line(0).replace('"error":0', '"error":nan'))).toBeNull()
+		expect(parse(line(0).replace('"freq":0.000', '"freq":-inf'))).toBeNull()
+		const ok = parse(line(0))
+		expect(ok?.data).toMatchObject({ error: 0, errorKnown: true })
+	})
+
+	it("a valid freq does not hide a malformed frequency alias", async () => {
+		const both = line(0).replace('"freq":0.000', '"freq":0,"frequency":false')
+		const answer = await replayThroughPool([both], "clean")
+		expect(answer.decoded).toBeNull()
+		const swapped = line(0).replace('"freq":0.000', '"frequency":0,"freq":"x"')
+		expect((await replayThroughPool([swapped], "clean")).decoded).toBeNull()
+	})
+
+	it("a line with error nan is no decode", async () => {
+		const answer = await replayThroughPool(
+			[line(0).replace('"error":0', '"error":nan')],
+			"clean",
+		)
+		expect(answer.decoded).toBeNull()
 	})
 
 	it.each([
