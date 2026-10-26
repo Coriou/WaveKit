@@ -287,6 +287,36 @@ it("finishes an undrained final HTTP chunk despite later source chunks", async (
 		download.client.destroy()
 	}
 })
+it.each([
+	[0.1, 100],
+	[0.37, 370],
+])(
+	"frees the slot when a completed tail stalls: %s s, deadline %s ms",
+	async (seconds, deadline) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { pending } = await start({ seconds, format: "cu8" })
+		const rejected = pending.catch(() => undefined)
+		const raw = response!
+		vi.spyOn(raw, "write").mockReturnValue(false)
+		// The transport never flushes: no finish or close until destroyed.
+		vi.spyOn(raw, "end").mockImplementation(() => raw)
+		input.write(Buffer.alloc(Math.round(seconds * rate) * 2))
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		await vi.advanceTimersByTimeAsync(deadline - 1)
+		expect(raw.destroyed).toBe(false)
+		expect(
+			(await app.inject({ method: "POST", url, payload })).statusCode,
+		).toBe(429)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(raw.destroyed).toBe(true)
+		expect(release).toHaveBeenCalledOnce()
+		await rejected
+		vi.useRealTimers()
+		const next = await start()
+		input.write(Buffer.alloc(200))
+		expect((await next.pending).statusCode).toBe(200)
+	},
+)
 it("aborts a paused HTTP client on the next source chunk and admits a follow-up", async () => {
 	rate = 2_400_000
 	const download = await startHttp({ seconds: 10, format: "cu8" }, true)

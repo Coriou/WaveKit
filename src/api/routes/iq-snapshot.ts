@@ -124,6 +124,17 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 				let drainTimer: ReturnType<typeof setTimeout> | undefined
 				const complete = () => {
 					cleanup()
+					// A stalled tail keeps the slot for at most one more requested
+					// duration (seconds × 1000 ms, at most 10 s), then the transport goes.
+					const tail = setTimeout(() => {
+						releaseSlot()
+						lease.release()
+						reply.raw.destroy()
+					}, parsed.data.seconds * 1000)
+					tail.unref()
+					const settled = () => clearTimeout(tail)
+					reply.raw.once("finish", settled)
+					reply.raw.once("close", settled)
 					reply.raw.end()
 				}
 				const drained = () => {
