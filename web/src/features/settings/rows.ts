@@ -4,6 +4,7 @@
 import type {
 	AccessDeviceDto,
 	DecoderInfo,
+	EfficiencyBudgetValue,
 	DecoderSettingsUpdate,
 	DecoderSettingsView,
 	DecoderTypeInfo,
@@ -63,6 +64,7 @@ import {
 } from "../receiver/gain.ts"
 import { sourceTitle } from "../receiver/summary.ts"
 import { STEPS } from "../tuner/prefs.ts"
+import type { EfficiencyBudgetState } from "./efficiency-budget.ts"
 import { decoderRows } from "./decoder-rows.ts"
 import { ratePolicyNote } from "../receiver/notices.ts"
 import { devicesCount, devicesSummary } from "./devices.ts"
@@ -107,6 +109,7 @@ export interface SettingsSnapshot {
 	readonly decoderViews: Readonly<Record<string, DecoderSettingsView>>
 	/** False: this core keeps no decoder settings (legacy access mode). */
 	readonly decoderSettings: boolean
+	readonly efficiencyBudget: EfficiencyBudgetState
 	readonly version: string | null
 	readonly accessMode: "legacy" | "protected" | null
 	/** Remembered devices (protected core, this browser paired); null until loaded or without a session. */
@@ -131,6 +134,7 @@ export interface SettingsActions {
 		value: Preferences[PreferenceKey],
 	): Promise<SettingWriteResult>
 	decoder(id: string, patch: DecoderSettingsUpdate): Promise<SettingWriteResult>
+	efficiencyBudget(value: EfficiencyBudgetValue): Promise<SettingWriteResult>
 	openTuner(): void
 	openShortcuts(): void
 	openBandPlans(): void
@@ -1552,10 +1556,74 @@ export function buildRows(
 		...stationRows(s, a),
 		...receiverRows(s, a),
 		...audioRows(s, a),
+		efficiencyBudgetRow(s, a),
 		...decoderRows(s, a),
 		...storageRows(s),
 		...mapRows(s, a),
 		...displayRows(s, a),
 		...systemRows(s, a),
 	]
+}
+
+/** Auto and fractional core counts share the existing validated text control. */
+function efficiencyBudgetRow(
+	s: SettingsSnapshot,
+	a: SettingsActions,
+): SettingRow {
+	const state = s.efficiencyBudget
+	const budget = state.settings
+	const disabled = state.unavailable
+		? "Not available"
+		: !s.decoderSettings || s.accessMode === "legacy"
+			? "This deployment sets the budget in YAML config: decoderPolicy.efficiency.cpuBudgetCores"
+			: s.readOnly
+				? "Read-only access: sign in on this WaveKit to change it"
+				: (state.denied ??
+					(state.busy
+						? "Saving…"
+						: budget
+							? undefined
+							: "CPU budget is unavailable"))
+	const label = budget?.resolved.label.replace(/^auto\b/i, "Auto")
+	const note =
+		budget?.source === "saved" ? " Saved setting overrides config." : ""
+	const usage =
+		state.used === null
+			? "Usage unavailable"
+			: `${Number(state.used.toFixed(2))} / ${budget?.resolved.cores ?? "—"} cores used`
+	return {
+		id: "dec.cpuBudgetCores",
+		group: "decoders",
+		label: "Decoder CPU budget",
+		help: state.unavailable
+			? "Not available"
+			: `${usage}${label ? ` · ${label}` : ""}. Enter Auto or a core count greater than 0 and up to 64.${note}`,
+		keys: words("decoder cpu budget cores efficiency auto configured"),
+		widget: {
+			kind: "text",
+			placeholder: "Auto or cores",
+			parse: text => {
+				if (text.trim().toLowerCase() === "auto") return { value: "auto" }
+				const value = Number(text.trim())
+				return Number.isFinite(value) && value > 0 && value <= 64
+					? { value }
+					: { error: "Enter Auto or a number greater than 0 and up to 64" }
+			},
+			format: value =>
+				value === "auto" ? "Auto" : value === null ? "" : String(value),
+		},
+		value: budget?.cpuBudgetCores ?? null,
+		text: budget
+			? budget.cpuBudgetCores === "auto"
+				? "Auto"
+				: String(budget.cpuBudgetCores)
+			: "Not available",
+		def: { value: "auto", text: "Auto" },
+		...(disabled ? { disabled } : {}),
+		...(!state.unavailable && (state.error ?? state.usageError)
+			? { error: state.error ?? state.usageError ?? "" }
+			: {}),
+		busy: state.busy,
+		write: value => a.efficiencyBudget(value as EfficiencyBudgetValue),
+	}
 }

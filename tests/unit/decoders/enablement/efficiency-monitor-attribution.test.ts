@@ -224,7 +224,7 @@ it("late windows retain three complete windows, and discard incomplete windows",
 	h.broken(false)
 	for (let at = 54000; at <= 60000; at += 2000) h.tick(at)
 	expect(h.monitor.lateWindows("s").map(w => w.startMono)).toEqual([
-		20000, 30000, 40000,
+		30000, 40000,
 	])
 	const copy = h.monitor.lateWindows("s")
 	if (copy[0]) copy[0].condemning = true
@@ -642,3 +642,16 @@ it.each([false, true])(
 		expect(h.monitor.sampleNow().sources.get("b")?.attribution).toBe("link")
 	},
 )
+
+it("incomplete windows cannot preserve old late evidence beyond three window periods", () => {
+	const h = setupAttribution()
+	for (let at = 0; at <= 20000; at += 2000) h.tick(at)
+	h.broken(true)
+	for (let at = 22000; at <= 48000; at += 2000) h.tick(at)
+	expect(h.monitor.lateWindows("s").map(w => w.endMono)).toEqual([20000])
+	// end 20000 + 3 × 10000 = 50000: excluded at the bound and past it.
+	for (const at of [50000, 52000]) {
+		h.tick(at)
+		expect(h.monitor.lateWindows("s")).toEqual([])
+	}
+})

@@ -241,7 +241,14 @@ export function createEfficiencyMonitor(deps: {
 	}
 	const sourceDown = (id: string) => {
 		const s = states.get(id)
-		if (s) resetSource(s)
+		if (s) {
+			resetSource(s)
+			// Probation and coverage resume in a new source epoch. Old-rate
+			// transition loss must not condemn a retained admission indefinitely.
+			// New-epoch deltas still condemn it, including before the gate polls.
+			s.lastDropMono = null
+			s.drops = []
+		}
 		recoveries.set(id, {
 			epoch: ++nextSourceEpoch,
 			readyAt: null,
@@ -869,20 +876,30 @@ export function createEfficiencyMonitor(deps: {
 			at < s.lastTickMono
 		)
 			return { state: "unknown", dropBytesPerSecond: null }
-		let state: "ok" | "dropping" | "unknown" = "unknown"
+		let state: "ok" | "dropping" | "clearing" | "unknown" = "unknown"
 		if (
 			s.pending === null &&
 			s.cleanSinceMono !== null &&
-			at - s.cleanSinceMono >= EFFICIENCY_CLEAR_MS &&
+			s.lastTickMono - s.cleanSinceMono >= EFFICIENCY_CLEAR_MS &&
 			at - s.lastTickMono <= EFFICIENCY_STALE_MS
 		)
 			state = "ok"
 		else if (
 			s.lastDropMono !== null &&
 			at >= s.lastDropMono &&
-			at - s.lastDropMono < EFFICIENCY_CLEAR_MS
+			// Recent loss occupies [lastDrop, lastDrop + 5 × 2000 ms).
+			// The separate 30 × 2000 ms clean run prevents admission flapping.
+			at - s.lastDropMono < EFFICIENCY_DROP_WINDOW_MS &&
+			at - s.lastTickMono <= EFFICIENCY_STALE_MS
 		)
 			state = "dropping"
+		else if (
+			s.lastDropMono !== null &&
+			s.pending === null &&
+			s.cleanSinceMono !== null &&
+			at - s.lastTickMono <= EFFICIENCY_STALE_MS
+		)
+			state = "clearing"
 		return {
 			state,
 			dropBytesPerSecond:
@@ -963,7 +980,13 @@ export function createEfficiencyMonitor(deps: {
 				at - s.lastTickMono > EFFICIENCY_STALE_MS
 			)
 				return []
-			return s.windows.map(w => ({ ...w }))
+			// Incomplete later windows do not replace history: expire it by time
+			// as well as count, over (now - 3 × 10000 ms, now].
+			return s.windows
+				.filter(
+					w => w.endMono > at - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+				)
+				.map(w => ({ ...w }))
 		},
 		linkDropsSince(id, since) {
 			const at = clock()
@@ -1027,7 +1050,7 @@ export function createEfficiencyMonitor(deps: {
 					t => t !== null && (at < t || at - t <= ms),
 				) ||
 				s.cleanSinceMono === null ||
-				at - s.cleanSinceMono < EFFICIENCY_CLEAR_MS + ms
+				s.lastTickMono - s.cleanSinceMono < EFFICIENCY_CLEAR_MS + ms
 			)
 		},
 		start() {

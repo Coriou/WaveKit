@@ -202,3 +202,42 @@ describe("repeated late-drop shedding", () => {
 		)
 	})
 })
+
+// Validates: link-burst-resilience Requirement 5.3
+it("preserves late-shed escalation across repeated graduated readmissions up to the cap", () => {
+	const h = harness()
+	h.start("a", "auto")
+	for (const delay of [300_000, 600_000, 1_200_000, 1_800_000, 1_800_000]) {
+		const shedAt = h.mono + 20_000
+		h.condemn(shedAt)
+		expect(h.step(shedAt)).toEqual([{ key: "a", detail: "late-drops" }])
+		expect(h.gate.admit(wanted("a"), [], shedAt + 1)).toMatchObject({
+			admit: false,
+			detail: "late-drops",
+			retryAtMs: shedAt + delay,
+		})
+		h.step(shedAt + delay)
+		h.start("a", "auto")
+	}
+})
+
+it.each([1_799_999, 1_800_000, 1_800_001, 7_200_000])(
+	"decays late-shed history after 30 minutes since readmission: %s ms",
+	elapsed => {
+		const h = harness()
+		h.start("a", "auto")
+		h.condemn(50_000)
+		expect(h.step(50_000)).toEqual([{ key: "a", detail: "late-drops" }])
+		h.step(350_000)
+		h.start("a", "auto")
+		const shedAt = 350_000 + elapsed
+		// Observe clean running at the exact boundary, independently of sampling cadence.
+		expect(h.step(shedAt)).toEqual([])
+		h.condemn(shedAt)
+		expect(h.step(shedAt)).toEqual([{ key: "a", detail: "late-drops" }])
+		expect(h.gate.admit(wanted("a"), [], shedAt + 1)).toMatchObject({
+			admit: false,
+			retryAtMs: shedAt + (elapsed < 1_800_000 ? 600_000 : 300_000),
+		})
+	},
+)

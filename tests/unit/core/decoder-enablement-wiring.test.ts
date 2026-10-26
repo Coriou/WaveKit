@@ -50,6 +50,7 @@ import type { TunerController } from "../../../src/core/tuner-controller.js"
 import {
 	ACTIVITY_SLOTS_ARM64,
 	ACTIVITY_SLOTS_X64,
+	allocateActivitySlots,
 } from "../../../src/decoders/enablement/activity-plan.js"
 import { DigitalVoiceService } from "../../../src/core/digital-voice.js"
 import { AudioHttpServer } from "../../../src/core/audio-stream-server.js"
@@ -658,13 +659,45 @@ describe("decoder enablement composition", () => {
 		).not.toThrow()
 		const source = await entry()
 		for (const seam of [
-			"composeDecoderActivity(\n\t\t\tconfig.decoderPolicy?.efficiency?.activity,\n\t\t\tbudgetCores,",
+			"composeDecoderActivity(\n\t\t\tconfig.decoderPolicy?.efficiency?.activity,\n\t\t\t() => budget.cores(),",
 			"activity: decoderActivity.options,",
 			"\t\t\t\tchannelActivity,\n",
 			"own(44, () => channelActivity.dispose())",
 		])
 			expect(source.includes(seam), seam).toBe(true)
 	})
+	it("allocates secondary slots from the current live budget", () => {
+		let budget = 0.1
+		const { ranker, options } = composeDecoderActivity(
+			undefined,
+			() => budget,
+			{ arch: "x64", cpuCount: 8 },
+		)
+		const allocate = () =>
+			allocateActivitySlots({
+				budgetCores: options.policy.budgetCores,
+				replayAllowanceCores: options.policy.replayAllowanceCores,
+				mandatory: [],
+				pending: [],
+				plannedKeys: new Set(),
+				groups: [
+					{
+						sourceId: "s",
+						sampleRateHz: 1_024_000,
+						perChannelCores: 0.14,
+						want: options.policy.slots["multimon-ng"],
+					},
+				],
+			})
+		try {
+			expect(allocate().given).toEqual([0])
+			budget = 1.5
+			expect(allocate().given).toEqual([4])
+		} finally {
+			ranker.dispose()
+		}
+	})
+
 	it("disposes the channel activity ranker on shutdown in legacy and protected mode", async () => {
 		const { ranker, options } = composeDecoderActivity(undefined, 1, {
 			arch: "x64",
@@ -700,6 +733,7 @@ describe("decoder enablement composition", () => {
 			"sourceRouting.branchTopology(id)",
 			"composeDecoderEfficiencyGate(",
 			"decoderManager.notifyBandplansChanged()",
+			"onChanged: () => decoderManager.notifyEfficiencyBudgetChanged()",
 			"closeRatePolicy()",
 			"monitor.stop()",
 		])

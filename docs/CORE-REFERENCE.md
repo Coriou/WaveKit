@@ -450,3 +450,29 @@ WaveKit can also take audio from an SDR++ network sink (`type: "sdrpp-network"`)
 
 See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protected`, `dev`,
 `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.
+
+### Decoder efficiency CPU budget
+
+`decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. An omitted value
+reports budget source `"default"`; an explicit `"auto"` or number reports `"config"`
+unless a saved override applies. Automatic sizing takes
+50% of CPUs available to the process (`os.availableParallelism()`), limited further by
+the smallest cgroup quota divided by its period across the process's cgroup and
+its ancestors. Both v2 `cpu.max` and v1 CPU controller quotas are supported, including
+hybrid hierarchies. V1 reads `cpu.cfs_quota_us` and `cpu.cfs_period_us` beneath
+`/sys/fs/cgroup/cpu,cpuacct` and `/sys/fs/cgroup/cpu`; quota `-1` is unlimited.
+With `capacity = min(available CPUs, effective quota / period)`, the budget is
+`min(64, capacity, max(0.75, capacity / 2))`. When quota is below 0.75 cores,
+the automatic floor is `min(0.75, quota)`, so the budget never exceeds quota.
+Missing, unreadable, unlimited or malformed quotas are skipped at each level.
+The path from `/proc/self/cgroup` supports at most 31 components plus the mount root
+(32 levels); an unreadable, malformed, traversal-containing or deeper path falls back
+to the mount root quota alone. Without a valid quota, the process CPU count applies.
+Fractional quotas are preserved. Explicit finite numbers in `(0, 64]` retain their exact
+value, including values below the automatic floor.
+
+`GET /api/decoders/efficiency` reports the resolved numeric budget and its `budget`
+metadata (`mode`, `cores`, `label`, plus `cpus` for auto). The protected
+`PUT /api/decoders/efficiency/budget` saves a live override in
+`<stateDir>/decoder-efficiency.json`; it wins over startup config after restart.
+See [budget settings](API.md#get-apidecodersefficiencybudget) for request and access rules.

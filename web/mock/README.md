@@ -85,3 +85,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   out (rtl_433 extras, APRS weather, an unknown `Generic-Remote` model). Entity keys follow the
   core's formats (`talkgroup:`, `capcode:`, `callsign:`, `sensor:<model>-<id>`, `reg:`, `node:`,
   `icao:`, `mmsi:`), and AFR1234 and F4ABC-9 sit where the Map's fleets put them.
+
+The settings mock also serves `GET`/`PUT /api/decoders/efficiency/budget`: Auto resolves to
+4 cores from 8 CPUs, and numeric budgets accept values greater than 0 and up to 64.
+Its `source` starts as `default` and becomes `saved` after a successful `PUT`, so the Settings
+row shows its saved-override note.
+`GET /api/decoders/efficiency` includes the resolved `budget` and illustrative per-source
+core usage (0.25 cores per running, unpaused decoder).

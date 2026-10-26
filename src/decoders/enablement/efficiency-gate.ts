@@ -1,3 +1,4 @@
+import { z } from "zod"
 import type { Logger } from "../../utils/logger.js"
 import type {
 	DecoderEfficiencyDetail,
@@ -25,6 +26,11 @@ import type {
 	WantedPlacement,
 } from "./contract.js"
 
+const DropStateSchema = z.object({
+	state: z.enum(["ok", "dropping", "clearing", "unknown"]),
+	dropBytesPerSecond: z.number().finite().nonnegative().nullable(),
+})
+
 const valid = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0
 
@@ -35,7 +41,7 @@ export interface DropReader {
 	lateWindows?(id: string): readonly LateDropWindow[]
 	linkDropsSince?(id: string, sinceMono: number): boolean
 	dropState(id: string): {
-		state: "ok" | "dropping" | "unknown"
+		state: "ok" | "dropping" | "clearing" | "unknown"
 		dropBytesPerSecond: number | null
 	}
 	monoNow(): number
@@ -63,6 +69,7 @@ export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
 	deps: { drops?: DropReader; log?: Logger } = {},
 ): EfficiencyGate {
+	const budgetCores = () => inputs.budget?.cores() ?? inputs.budgetCores
 	const placementEpochs = new Map<
 		string,
 		{ sourceId: string; epoch: number; placement: WantedPlacement }
@@ -91,15 +98,12 @@ export function createEfficiencyGate(
 	}
 	const readDrops = (id: string) => {
 		try {
-			return (
-				deps.drops?.dropState(id) ?? {
-					state: "unknown" as const,
-					dropBytesPerSecond: null,
-				}
-			)
+			const parsed = DropStateSchema.safeParse(deps.drops?.dropState(id))
+			if (parsed.success) return parsed.data
 		} catch {
-			return { state: "unknown" as const, dropBytesPerSecond: null }
+			// Unreadable and malformed snapshots close admission as unknown.
 		}
+		return { state: "unknown" as const, dropBytesPerSecond: null }
 	}
 	const latestAttribution = (id: string): DropAttribution | undefined => {
 		try {
@@ -131,7 +135,9 @@ export function createEfficiencyGate(
 			pending?: boolean
 		}
 	>()
+	let lastBudget = budgetCores()
 	const failures = new Set<string>()
+	const lateRetries = new Set<string>()
 	let cpu: number | null = null
 	/** Monotonic times of samples with CPU over the limit, oldest first. */
 	const highCpu: number[] = []
@@ -172,12 +178,22 @@ export function createEfficiencyGate(
 	// or view() is called with a partial or earlier list.
 	// Placements that completed probation with no evidence against them.
 	const graduated = new Set<string>()
+	// CPU evidence evicted from bounded history must not erase a failed probation.
+	// One flag per admitted placement, reset with its admission mark or removal.
+	const originalFailed = new Set<string>()
+	const evictHighCpu = () => {
+		const t = highCpu.shift()
+		if (t === undefined) return
+		for (const [key, admitted] of admittedMono)
+			if (!graduated.has(key) && admitted <= t) originalFailed.add(key)
+	}
 	/** Placements this gate admitted (YAML and pre-gate runs never are). */
 	const gated = new Set<string>()
 	/** Activity moves whose next admission inherits a graduated probation. */
 	const earned = new Set<string>()
 	const mark = (key: string, mono: number) => {
 		admittedMono.set(key, mono)
+		originalFailed.delete(key)
 		graduated.delete(key)
 	}
 	const observeRunning = (
@@ -193,6 +209,7 @@ export function createEfficiencyGate(
 					earned.delete(key)
 					placementEpochs.delete(key)
 					admittedMono.delete(key)
+					originalFailed.delete(key)
 					graduated.delete(key)
 					gated.delete(key)
 				}
@@ -225,41 +242,73 @@ export function createEfficiencyGate(
 		if (dropped) return "drops"
 		return highCpu.some(t => t >= admitted && t <= until) ? "cpu" : null
 	}
-	// Probation is earned: with a coverage reader a placement needs
+	// Normal probation is earned: with a coverage reader a placement needs
 	// EFFICIENCY_PROBATION_MS of complete evidence since admission (unknown
 	// intervals do not count), else that much time. Evidence is judged before
 	// graduation over everything observed up to and including the sample that
-	// completes it: a placement with evidence in that window never graduates.
-	const graduationAt = (p: RunningPlacement, mono: number): number | null => {
-		const admitted = admittedMono.get(p.key) ?? NaN
+	// completes it; evidence in that window prevents normal graduation.
+	const graduationAt = (
+		p: RunningPlacement,
+		mono: number,
+		admitted = admittedMono.get(p.key) ?? NaN,
+		duration = EFFICIENCY_PROBATION_MS,
+	): number | null => {
 		if (!Number.isFinite(mono) || !Number.isFinite(admitted)) return null
 		const reader = deps.drops
 		if (reader?.coverageCompleteAtMono !== undefined) {
 			if (typeof reader.coverageCompleteAtMono !== "function") return null
 			try {
-				const at = reader.coverageCompleteAtMono(
-					p.sourceId,
-					admitted,
-					EFFICIENCY_PROBATION_MS,
-				)
-				return valid(at) &&
-					at >= admitted + EFFICIENCY_PROBATION_MS &&
-					at <= mono
-					? at
-					: null
+				const at = reader.coverageCompleteAtMono(p.sourceId, admitted, duration)
+				return valid(at) && at >= admitted + duration && at <= mono ? at : null
 			} catch {
 				return null
 			}
 		}
 		if (reader?.latestAttribution !== undefined) return null
-		return mono - admitted >= EFFICIENCY_PROBATION_MS
-			? admitted + EFFICIENCY_PROBATION_MS
-			: null
+		return mono - admitted >= duration ? admitted + duration : null
 	}
 	const graduates = (p: RunningPlacement, mono: number) => {
 		if (graduated.has(p.key)) return true
 		const at = graduationAt(p, mono)
-		return at !== null && evidence(p, admittedMono.get(p.key)!, at) === null
+		const admitted = admittedMono.get(p.key)!
+		if (
+			at !== null &&
+			!originalFailed.has(p.key) &&
+			evidence(p, admitted, at) === null
+		)
+			return true
+		if (p.mode !== "always" && p.startMode !== "operator") return false
+		// Protected probationers cannot be suspended after loss. Let a fresh
+		// clean run release their slot: cleanAt - 30 × 2000 ms is its first
+		// clean point; require all 60000 ms of coverage, including the endpoint.
+		// CPU does not restart the monitor's drop-clean run. Start after its
+		// latest disqualifying sample too, then require a full clear window.
+		try {
+			const cleanAt = deps.drops?.cleanAtMono?.(p.sourceId)
+			if (!valid(cleanAt) || cleanAt > mono) return false
+			const lastHighCpu = highCpu.findLast(t => t >= admitted && t <= mono)
+			// Recovery needs only the last 60 s plus one sample: at 2 s per
+			// sample that is at most 32 timestamps, well below the 1024 cap.
+			// Older original evidence is retained separately in originalFailed.
+			// Coverage ends at the latest sample, even when reconciliation polls later.
+			const sampled = deps.drops?.lastSampleMono?.() ?? mono
+			if (!valid(sampled)) return false
+			const since = Math.max(
+				Math.min(sampled, mono) - EFFICIENCY_CLEAR_MS,
+				cleanAt - EFFICIENCY_CLEAR_MS,
+				lastHighCpu === undefined
+					? admitted
+					: lastHighCpu + EFFICIENCY_SAMPLE_MS,
+			)
+			return (
+				since > admitted &&
+				readDrops(p.sourceId).state === "ok" &&
+				graduationAt(p, mono, since, EFFICIENCY_CLEAR_MS) !== null &&
+				evidence(p, since, mono) === null
+			)
+		} catch {
+			return false
+		}
 	}
 	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
 	/**
@@ -292,8 +341,8 @@ export function createEfficiencyGate(
 				onProbation(p, mono)
 			if (
 				!probationer &&
-				valid(inputs.budgetCores) &&
-				total([...kept, p]) <= inputs.budgetCores
+				valid(budgetCores()) &&
+				total([...kept, p]) <= budgetCores()
 			)
 				kept.push(p)
 			else displace.push(p.key)
@@ -336,7 +385,12 @@ export function createEfficiencyGate(
 					)
 				)
 					windows = value
-						.filter(w => w.startMono >= (lateSince.get(sourceId) ?? mono))
+						.filter(
+							w =>
+								w.startMono >= (lateSince.get(sourceId) ?? mono) &&
+								w.endMono >
+									mono - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+						)
 						.slice(-LATE_SHED_WINDOWS)
 			}
 		} catch {
@@ -373,21 +427,33 @@ export function createEfficiencyGate(
 				return
 			}
 			const at = sample.atMs
+			// Prune on healthy samples too, retaining the recovery interval:
+			// 60000 ms + one 2000 ms sample = at most 32 timestamps.
+			// Normal graduation may still need anything since admission, so
+			// lower the cutoff to the oldest ungraduated admission. Any forced
+			// eviction preserves CPU failure for admissions <= that timestamp;
+			// drops stay with the monitor, which clears them on a new epoch.
+			let mono = NaN
+			try {
+				mono = deps.drops?.lastSampleMono?.() ?? monoNow()
+			} catch {
+				mono = monoNow()
+			}
+			if (valid(mono)) {
+				let since = mono - EFFICIENCY_CLEAR_MS - EFFICIENCY_SAMPLE_MS
+				for (const [key, admitted] of admittedMono)
+					if (!graduated.has(key)) since = Math.min(since, admitted)
+				while (highCpu.length && highCpu[0]! < since) evictHighCpu()
+			}
 			if (
 				valid(sample.cpuPercent) &&
 				sample.cpuPercent > inputs.cpuGuardPercent
 			) {
 				// CPU evidence carries the evidence time of the sample it came with,
 				// so the sample that completes coverage includes its CPU reading.
-				let mono = NaN
-				try {
-					mono = deps.drops?.lastSampleMono?.() ?? monoNow()
-				} catch {
-					mono = monoNow()
-				}
 				if (Number.isFinite(mono)) {
 					highCpu.push(mono)
-					if (highCpu.length > 1024) highCpu.shift()
+					if (highCpu.length > 1024) evictHighCpu()
 				}
 			}
 			cpuAt = at
@@ -397,6 +463,13 @@ export function createEfficiencyGate(
 			const mono = monoNow()
 			observeRunning(running, mono)
 			if (!valid(now)) return { admit: false, detail: "unknown", retryAtMs: 0 }
+			// A live budget change rechecks capacity immediately, keeping loss backoff.
+			const currentBudget = budgetCores()
+			if (currentBudget !== lastBudget) {
+				for (const [key, retry] of retries)
+					if (retry.detail === "budget") retries.delete(key)
+				lastBudget = currentBudget
+			}
 			const retry = retries.get(newcomer.key)
 			if (retry?.pending) {
 				retry.at = Math.max(retry.at, now + retry.delay)
@@ -425,7 +498,7 @@ export function createEfficiencyGate(
 			)
 			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key)) {
 				const resumedCost = total([...firm, newcomer])
-				if (valid(inputs.budgetCores) && resumedCost <= inputs.budgetCores) {
+				if (valid(budgetCores()) && resumedCost <= budgetCores()) {
 					const previous = placementEpochs.get(newcomer.key)
 					if (previous) previous.placement = { ...newcomer }
 					const displace = displacement(newcomer, running, firm, mono, false)
@@ -445,6 +518,7 @@ export function createEfficiencyGate(
 			if (
 				!valid(now) ||
 				state === "unknown" ||
+				state === "clearing" ||
 				attribution === "unknown" ||
 				(attribution !== undefined && !valid(mono))
 			)
@@ -453,9 +527,9 @@ export function createEfficiencyGate(
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
 			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) detail = "cpu"
 			else if (
-				!valid(inputs.budgetCores) ||
+				!valid(budgetCores()) ||
 				!Number.isFinite(total([...firm, newcomer])) ||
-				total([...firm, newcomer]) > inputs.budgetCores
+				total([...firm, newcomer]) > budgetCores()
 			)
 				detail = "budget"
 			// Otherwise admissible: one gated probationer per source, so probation
@@ -505,7 +579,9 @@ export function createEfficiencyGate(
 			// placement is re-evaluated when the source's clean run earns its clear
 			// window (one clear window from now while it has no clean run; the next
 			// sample when the window is earned but the reading is stale).
-			if (detail === "unknown") {
+			// Admission waits for source recovery without caching a drop rejection
+			// for the five-minute backoff reserved for suspended probationers.
+			if (detail === "unknown" || detail === "drops") {
 				let cleanAt: number | null = null
 				try {
 					cleanAt = deps.drops?.cleanAtMono?.(newcomer.sourceId) ?? null
@@ -517,8 +593,8 @@ export function createEfficiencyGate(
 					admit: false,
 					detail,
 					retryAtMs:
-						cleanAt !== null && Number.isFinite(cleanAt)
-							? Math.max(cleanAt, base + EFFICIENCY_SAMPLE_MS)
+						valid(cleanAt) && valid(mono)
+							? Math.max(base + cleanAt - mono, base + EFFICIENCY_SAMPLE_MS)
 							: base + EFFICIENCY_CLEAR_MS,
 				}
 			}
@@ -560,8 +636,22 @@ export function createEfficiencyGate(
 
 			// Graduation is sticky: a later discontinuity that discards coverage
 			// restarts only the placements still on probation.
-			for (const placement of running)
-				if (graduates(placement, mono)) graduated.add(placement.key)
+			for (const placement of running) {
+				if (!graduated.has(placement.key) && graduates(placement, mono))
+					graduated.add(placement.key)
+				// Normal retries reset on graduation. Late-shed retries retain their
+				// doubling history until readmission + the 1,800,000 ms cap.
+				if (
+					gated.has(placement.key) &&
+					graduated.has(placement.key) &&
+					(!lateRetries.has(placement.key) ||
+						mono - admittedMono.get(placement.key)! >= EFFICIENCY_RETRY_MAX_MS)
+				) {
+					retries.delete(placement.key)
+					failures.delete(placement.key)
+					lateRetries.delete(placement.key)
+				}
+			}
 			const newest = new Map<
 				string,
 				{ placement: RunningPlacement; admitted: number }
@@ -640,9 +730,11 @@ export function createEfficiencyGate(
 			return verdicts
 		},
 		noteSuspended(key, detail, now) {
+			originalFailed.delete(key)
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			gated.delete(key)
+			if (detail === "late-drops") lateRetries.add(key)
 			const previous = retries.get(key)
 			const delay =
 				failures.delete(key) && previous
@@ -667,10 +759,12 @@ export function createEfficiencyGate(
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			admittedMono.delete(key)
+			originalFailed.delete(key)
 			graduated.delete(key)
 			gated.delete(key)
 			retries.delete(key)
 			failures.delete(key)
+			lateRetries.delete(key)
 		},
 		view(running, blocked, now) {
 			const mono = monoNow()
@@ -687,7 +781,8 @@ export function createEfficiencyGate(
 				...blocked.map(b => b.placement.sourceId),
 			])
 			return {
-				budgetCores: inputs.budgetCores,
+				budgetCores: budgetCores(),
+				...(inputs.budget ? { budget: inputs.budget.view().resolved } : {}),
 				cpuGuardPercent: inputs.cpuGuardPercent,
 				sources: [...ids].map(sourceId => {
 					const attribution = latestAttribution(sourceId)

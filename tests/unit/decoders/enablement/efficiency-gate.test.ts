@@ -414,15 +414,16 @@ it("admit and view with partial running lists never prune marks", () => {
 	)
 })
 
-it("unknown evidence retries when the clean window is earned, without backoff; drops back off", () => {
+it("waiting admissions retry after clean evidence without caching drop rejections", () => {
 	let state: "ok" | "dropping" | "unknown" = "unknown"
 	let cleanAt: number | null = null
+	let mono = 0
 	const gate = createEfficiencyGate(
 		{ budgetCores: 1.5, cpuGuardPercent: 90 },
 		{
 			drops: {
 				sources: () => ["s"],
-				monoNow: () => 0,
+				monoNow: () => mono,
 				dropState: () => ({ state, dropBytesPerSecond: null }),
 				droppedSinceMono: () => false,
 				droppedWithinMs: () => false,
@@ -437,12 +438,15 @@ it("unknown evidence retries when the clean window is earned, without backoff; d
 		retryAtMs: 61_000,
 	})
 	cleanAt = 64_000
-	for (const now of [2000, 30_000])
+	for (const now of [2000, 30_000]) {
+		mono = now
 		expect(gate.admit(placement(), [], now)).toEqual({
 			admit: false,
 			detail: "unknown",
 			retryAtMs: 64_000,
 		})
+	}
+	mono = 63000
 	// Never sooner than the next sample.
 	expect(gate.admit(placement(), [], 63_000)).toMatchObject({
 		retryAtMs: 65_000,
@@ -450,15 +454,15 @@ it("unknown evidence retries when the clean window is earned, without backoff; d
 	// No retry hold was recorded: the first read after the window admits.
 	state = "ok"
 	expect(gate.admit(placement(), [], 64_000)).toEqual({ admit: true })
-	// A drop rejection keeps the backoff.
+	// A waiting candidate is distinct from a failed probationer.
 	state = "dropping"
 	expect(gate.admit(placement("q"), [], 70_000)).toEqual({
 		admit: false,
 		detail: "drops",
-		retryAtMs: 370_000,
+		retryAtMs: 72_000,
 	})
 	state = "ok"
-	expect(gate.admit(placement("q"), [], 100_000).admit).toBe(false)
+	expect(gate.admit(placement("q"), [], 100_000).admit).toBe(true)
 })
 
 it("admits one gated probationer per source at a time", () => {
@@ -476,5 +480,49 @@ it("admits one gated probationer per source at a time", () => {
 	gate.record(sample(30_000))
 	expect(gate.admit(placement("second"), active, 30_000)).toEqual({
 		admit: true,
+	})
+})
+
+it("resets retry escalation after a clean probation between isolated failures", () => {
+	const gate = setup()
+	const p = placement()
+	for (let cycle = 0; cycle < 4; cycle++) {
+		const now = cycle * 3600000 + 100000
+		gate.record(sample(now))
+		expect(gate.admit(p, [], now).admit).toBe(true)
+		gate.record(sample(now + 30000))
+		expect(gate.probation([running(p, now)], now + 30000)).toEqual([])
+		// A later admission has its own probation and fails immediately.
+		gate.probation([], now + 30000)
+		gate.record(sample(now + 32000))
+		expect(gate.admit(p, [], now + 32000).admit).toBe(true)
+		gate.record(sample(now + 32001, null, 1))
+		expect(gate.probation([running(p, now + 32000)], now + 32001)).toEqual([
+			{ key: p.key, detail: "drops" },
+		])
+		gate.noteSuspended(p.key, "drops", now + 32001)
+		expect(gate.admit(p, [], now + 32002)).toMatchObject({
+			admit: false,
+			retryAtMs: now + 32001 + 300000,
+		})
+	}
+})
+
+it("translates a monotonic clean deadline into a wall-clock retry", () => {
+	const gate = createEfficiencyGate(
+		{ budgetCores: 1, cpuGuardPercent: 90 },
+		{
+			drops: {
+				sources: () => ["s"],
+				monoNow: () => 1000,
+				dropState: () => ({ state: "clearing", dropBytesPerSecond: 0 }),
+				droppedSinceMono: () => false,
+				droppedWithinMs: () => false,
+				cleanAtMono: () => 61000,
+			},
+		},
+	)
+	expect(gate.admit(placement(), [], 1000000)).toMatchObject({
+		retryAtMs: 1060000,
 	})
 })

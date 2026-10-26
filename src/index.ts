@@ -38,6 +38,7 @@ import {
 	createVfoTracker,
 	vfoFromLiveDemod,
 } from "./decoders/enablement/channel-sources.js"
+import { openEfficiencyBudget } from "./decoders/enablement/budget-settings.js"
 import { createEfficiencyGate } from "./decoders/enablement/efficiency-gate.js"
 import { createEfficiencyMonitor } from "./decoders/enablement/efficiency-monitor.js"
 import {
@@ -47,7 +48,6 @@ import {
 	EFFICIENCY_SAMPLE_MS,
 	EFFICIENCY_CPU_GUARD_PERCENT,
 	channelizerComposition,
-	defaultCpuBudgetCores,
 } from "./decoders/enablement/contract.js"
 import { createRatePolicy } from "./core/rate-policy.js"
 import { composeLinkBurst } from "./core/link-burst/compose.js"
@@ -531,7 +531,7 @@ export function composeDecoderEfficiencyGate(
  */
 export function composeDecoderActivity(
 	config: ActivityPolicyConfig | undefined,
-	budgetCores: number,
+	budgetCores: number | (() => number),
 	host: { arch: string; cpuCount: number },
 	monoNow: () => number = () => performance.now(),
 ): { ranker: ChannelActivityRanker; options: DecoderActivityOptions } {
@@ -541,12 +541,14 @@ export function composeDecoderActivity(
 		options: {
 			port: ranker.port,
 			epochOf: sourceId => ranker.epochOf(sourceId),
-			policy: resolveActivityPolicy(
-				config,
-				budgetCores,
-				host.arch,
-				host.cpuCount,
-			),
+			get policy() {
+				return resolveActivityPolicy(
+					config,
+					typeof budgetCores === "function" ? budgetCores() : budgetCores,
+					host.arch,
+					host.cpuCount,
+				)
+			},
 			monoNow,
 		},
 	}
@@ -1446,21 +1448,26 @@ async function main(): Promise<void> {
 				return { cancel: () => clearInterval(timer) }
 			},
 		})
-		monitor.start()
-		own(20, () => monitor.stop())
-		const budgetCores =
-			config.decoderPolicy?.efficiency?.cpuBudgetCores ??
-			defaultCpuBudgetCores(arch(), cpus().length)
+		const budget = await openEfficiencyBudget({
+			stateDir: config.stateDir,
+			log: logger,
+			...(config.decoderPolicy?.efficiency?.cpuBudgetCores !== undefined
+				? { configured: config.decoderPolicy.efficiency.cpuBudgetCores }
+				: {}),
+			onChanged: () => decoderManager.notifyEfficiencyBudgetChanged(),
+		})
+		const budgetCores = budget.cores()
 		// Activity-ranked channels: the ScannerService feeds the ranker, the planner reads it.
 		const decoderActivity = composeDecoderActivity(
 			config.decoderPolicy?.efficiency?.activity,
-			budgetCores,
+			() => budget.cores(),
 			{ arch: arch(), cpuCount: cpus().length },
 		)
 		const channelActivity = decoderActivity.ranker
 		own(44, () => channelActivity.dispose())
 		const gate = composeDecoderEfficiencyGate(
 			{
+				budget,
 				budgetCores,
 				cpuGuardPercent:
 					config.decoderPolicy?.efficiency?.cpuGuardPercent ??
@@ -1469,6 +1476,8 @@ async function main(): Promise<void> {
 			monitor,
 			createComponentLogger(logger, "EfficiencyGate"),
 		)
+		monitor.start()
+		own(20, () => monitor.stop())
 		// auto-listen-route 3.4: bumped at every event that can change voice coverage.
 		let coverageGeneration = 0
 		const vfo = createVfoTracker({
@@ -1559,6 +1568,7 @@ async function main(): Promise<void> {
 			},
 			bandOverrides,
 		)
+		decoderManager.setEfficiencyBudgetService(budget)
 
 		runtimeDecoders = decoderManager
 		// WG8 req 2.4: PATCH stages effective option values on the manager (next start)

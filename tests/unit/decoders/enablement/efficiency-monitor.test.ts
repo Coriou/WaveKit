@@ -592,3 +592,71 @@ it("a clock rollback closes admission until a fresh clean window", () => {
 	f.clockAt(1000)
 	expect(f.admit()).toMatchObject({ admit: false, detail: "unknown" })
 })
+
+// One positive sample must age out; unchanged cumulative totals are not new loss.
+it("ages positive drops out and admits after clean hysteresis without cached rejection", () => {
+	const h = setup()
+	h.tick(0)
+	h.clean()
+	const gate = createEfficiencyGate(
+		{ budgetCores: 3, cpuGuardPercent: 90 },
+		{ drops: h.monitor },
+	)
+	const placement: WantedPlacement = {
+		key: "candidate",
+		decoderId: "candidate",
+		sourceId: "s",
+		reach: "channel",
+		costCores: 0.1,
+		sampleRateHz: 2400000,
+		channelHz: 100,
+		origin: "band",
+		primary: false,
+	}
+	h.bytes(100)
+	h.tick(64000)
+	expect(gate.admit(placement, [], 64000)).toMatchObject({
+		admit: false,
+		detail: "drops",
+	})
+	for (let at = 66000; at <= 72000; at += 2000) h.tick(at)
+	h.advance(1999)
+	expect(h.monitor.dropState("s")).toEqual({
+		state: "dropping",
+		dropBytesPerSecond: 0,
+	})
+	h.tick(74000)
+	expect(h.monitor.dropState("s").state).toBe("clearing")
+	h.advance(1)
+	expect(h.monitor.dropState("s").state).toBe("clearing")
+	for (let at = 76000; at <= 124000; at += 2000) h.tick(at)
+	expect(gate.admit(placement, [], 124000).admit).toBe(false)
+	h.tick(126000)
+	expect(h.monitor.dropState("s").state).toBe("ok")
+	expect(gate.admit(placement, [], 126000).admit).toBe(true)
+	h.advance(1)
+	expect(h.monitor.dropState("s").state).toBe("ok")
+	h.bytes(101)
+	h.tick(128000)
+	expect(h.monitor.dropState("s").state).toBe("dropping")
+})
+
+it("requires sampled coverage at the clean deadline despite an off-sample read", () => {
+	const h = setup()
+	try {
+		h.tick(0)
+		for (let at = 2000; at <= 60000; at += 2000) h.tick(at)
+		expect(h.monitor.cleanAtMono("s")).toBe(62000)
+		h.advance(2000)
+		expect(h.monitor.dropState("s").state).not.toBe("ok")
+		expect(h.monitor.droppedWithinMs("s", 0)).toBe(true)
+		h.tick(62000)
+		for (const offset of [0, 1, 999, 999]) {
+			h.advance(offset)
+			expect(h.monitor.dropState("s").state).toBe("ok")
+			expect(h.monitor.droppedWithinMs("s", 0)).toBe(false)
+		}
+	} finally {
+		h.monitor.stop()
+	}
+})

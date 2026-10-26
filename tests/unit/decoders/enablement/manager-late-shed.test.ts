@@ -16,6 +16,7 @@ import type {
 } from "../../../../src/core/channelizer/types.js"
 import type {
 	EfficiencyGate,
+	LateDropWindow,
 	PlacementPlan,
 	PlacementPlanner,
 	WantedPlacement,
@@ -281,21 +282,28 @@ it("late-drops verdict suspends with efficiency-budget and detail late-drops", a
 	])
 })
 
-it.each(["late-drops", "drops", "cpu"] as const)(
-	"second late shed doubles the retry delay and further %s failures stop at the cap",
-	async detail => {
+it.each(
+	(["late-drops", "drops", "cpu"] as const).flatMap(detail =>
+		[false, true].map(clean => ({ detail, clean })),
+	),
+)(
+	"late shed retries after $detail failures with a clean run=$clean",
+	async ({ detail, clean }) => {
 		const gate = fakeGate()
 		const f = setup("rate-test", gate)
 		f.create("dec")
 		const placement = f.place("dec", 162_000_000)
 		f.plan([placement])
 		await f.manager.startAll()
-		for (const delay of [300_000, 600_000, 1_200_000, 1_800_000, 1_800_000]) {
-			await vi.advanceTimersByTimeAsync(35_000)
+		for (const escalated of [
+			300_000, 600_000, 1_200_000, 1_800_000, 1_800_000,
+		]) {
+			const delay = escalated
+			await vi.advanceTimersByTimeAsync(clean ? 35_000 : 1000)
 			gate.probation = vi.fn(() => [
 				{
 					key: placement.key,
-					detail: delay === 300_000 ? ("late-drops" as const) : detail,
+					detail: escalated === 300_000 ? ("late-drops" as const) : detail,
 				},
 			])
 			await vi.advanceTimersByTimeAsync(2000)
@@ -308,6 +316,152 @@ it.each(["late-drops", "drops", "cpu"] as const)(
 			await vi.advanceTimersByTimeAsync(delay + 2500)
 			expect(f.instances.get("dec")?.running).toBe(true)
 		}
+	},
+)
+
+it.each([
+	...[1_799_999, 1_800_000, 1_800_001, 7_200_000].map(elapsed => ({
+		detail: "late-drops" as const,
+		elapsed,
+		resetAfter: 1_800_000,
+	})),
+	...[29_999, 30_000, 30_001].map(elapsed => ({
+		detail: "drops" as const,
+		elapsed,
+		resetAfter: 30_000,
+	})),
+])(
+	"resets $detail backoff after $resetAfter ms of clean running: $elapsed ms",
+	async ({ detail, elapsed, resetAfter }) => {
+		const gate = fakeGate()
+		const f = setup("rate-test", gate)
+		f.create("dec")
+		const placement = f.place("dec", f.sources.caps.get("rtl")!.centerFreq!)
+		f.plan([placement])
+		await f.manager.startAll()
+		const fail = () => [{ key: placement.key, detail }]
+		gate.probation = vi.fn(fail)
+		await vi.advanceTimersByTimeAsync(2000)
+		const first = f.manager.getAllStatus()[0]!
+		gate.probation = vi.fn(() => [])
+		await vi.advanceTimersByTimeAsync(
+			Date.parse(first.efficiency!.retryAt!) - Date.now() + 2500,
+		)
+		expect(f.instances.get("dec")?.running).toBe(true)
+		await f.manager["applyProbation"]()
+		const running = vi.mocked(gate.probation).mock.calls.at(-1)![0][0]!
+		await vi.advanceTimersByTimeAsync(
+			running.admittedAtMs + elapsed - performance.now() - 1,
+		)
+		if (detail === "late-drops") {
+			// The verdict itself may be the first sample at the decay boundary.
+			gate.probation = vi.fn(fail)
+			await vi.advanceTimersByTimeAsync(1)
+		} else {
+			await vi.advanceTimersByTimeAsync(1)
+			await f.manager["applyProbation"]()
+			gate.probation = vi.fn(fail)
+		}
+		await f.manager["applyProbation"]()
+		const status = f.manager.getAllStatus()[0]!
+		expect(status.running).toBe(false)
+		expect(Date.parse(status.efficiency!.retryAt!) - Date.now()).toBe(
+			elapsed < resetAfter ? 600_000 : 300_000,
+		)
+	},
+)
+
+it.each(["move", "remove and re-add"] as const)(
+	"resets late-shed history after a configured placement %s and normal probation failure",
+	async change => {
+		let windows: LateDropWindow[] = []
+		let droppedAt: number | undefined
+		const gate = createEfficiencyGate(
+			{ budgetCores: 10, cpuGuardPercent: 90 },
+			{
+				drops: {
+					monoNow: () => performance.now(),
+					sources: () => ["rtl"],
+					dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+					droppedSinceMono: (_id, since) =>
+						droppedAt !== undefined && droppedAt >= since,
+					droppedWithinMs: () => false,
+					latestAttribution: () => "none",
+					lateWindows: () => windows,
+					coverageCompleteAtMono: (_id, since, amount) =>
+						performance.now() >= since + amount ? since + amount : null,
+				},
+			},
+		)
+		const forget = vi.spyOn(gate, "forget")
+		const f = setup("rate-test", gate)
+		// Synthetic channels and in-process streams keep the scenario isolated.
+		f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_000_000 })
+		f.create("dec")
+		const original = f.place("dec", 1_000_000)
+		f.plan([original])
+		await f.manager.startAll()
+		const lateShed = async () => {
+			const start = performance.now()
+			await vi.advanceTimersByTimeAsync(20_000)
+			windows = [0, 1].map(index => ({
+				startMono: start + index * 10_000,
+				endMono: start + (index + 1) * 10_000,
+				condemning: true,
+				linkOrUnknownDrops: false,
+			}))
+			await f.manager["applyProbation"]()
+			await f.settle()
+			expect(f.manager.getAllStatus()[0]).toMatchObject({
+				running: false,
+				efficiency: { detail: "late-drops" },
+			})
+			windows = []
+		}
+		await vi.advanceTimersByTimeAsync(65_000)
+		await lateShed()
+		const replacement = change === "move" ? f.place("dec", 1_025_000) : original
+		if (change === "remove and re-add") {
+			f.plan([])
+			await f.settle()
+		}
+		f.plan([replacement])
+		await f.settle()
+		expect(forget).toHaveBeenCalledWith(original.key)
+		expect(f.instances.get("dec")?.running).toBe(true)
+		expect(f.configs.get("dec")?.["channelHz"]).toBe(replacement.channelHz)
+		expect(f.manager.efficiencyView().sources[0]?.admitted[0]?.probation).toBe(
+			true,
+		)
+
+		// Fail the new placement's normal probation before it can graduate.
+		droppedAt = performance.now()
+		await f.manager["applyProbation"]()
+		const failed = f.manager.getAllStatus()[0]!
+		expect(failed).toMatchObject({
+			running: false,
+			efficiency: { detail: "drops" },
+		})
+		expect(Date.parse(failed.efficiency!.retryAt!) - Date.now()).toBe(300_000)
+		droppedAt = undefined
+		await vi.advanceTimersByTimeAsync(
+			Date.parse(failed.efficiency!.retryAt!) - Date.now() + 2500,
+		)
+		await f.settle()
+		expect(f.instances.get("dec")?.running).toBe(true)
+		await vi.advanceTimersByTimeAsync(35_000)
+		expect(f.manager.efficiencyView().sources[0]?.admitted[0]?.probation).toBe(
+			false,
+		)
+		await lateShed()
+
+		const decision = gate.admit(replacement, [], performance.now())
+		expect(decision.admit).toBe(false)
+		if (decision.admit) return
+		expect(decision.detail).toBe("late-drops")
+		expect(decision.retryAtMs - performance.now()).toBe(299_650)
+		const status = f.manager.getAllStatus()[0]!
+		expect(Date.parse(status.efficiency!.retryAt!) - Date.now()).toBe(299_650)
 	},
 )
 

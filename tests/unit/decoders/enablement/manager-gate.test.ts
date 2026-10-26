@@ -32,6 +32,7 @@ import {
 } from "../../../../src/decoders/enablement/contract.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
 import { planPlacements } from "../../../../src/decoders/enablement/placement.js"
+import { openEfficiencyBudget } from "../../../../src/decoders/enablement/budget-settings.js"
 import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/efficiency-monitor.js"
 import { CATALOGUE_DEFAULT_OPTIONS } from "../../../../src/decoders/enablement/catalogue.js"
 import {
@@ -275,6 +276,77 @@ it("blocked placement is retried no more than once per retry period", async () =
 	expect(gate.admit).toHaveBeenCalledTimes(2)
 	expect(f.provider.requestChannel).not.toHaveBeenCalled()
 })
+
+it("retries budget refusals promptly after a saved increase and keeps running decoders on a decrease", async () => {
+	const budget = await openEfficiencyBudget({
+		stateDir: "unused",
+		configured: 0.1,
+		read: async () => undefined,
+		write: async () => {},
+		onChanged: () => manager!.notifyEfficiencyBudgetChanged(),
+	})
+	const gate = createEfficiencyGate(
+		{ budget, budgetCores: 0.1, cpuGuardPercent: 90 },
+		{
+			drops: {
+				sources: () => ["rtl"],
+				monoNow: () => performance.now(),
+				dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+				droppedSinceMono: () => false,
+				droppedWithinMs: () => false,
+			},
+		},
+	)
+	const f = setup("rate-test", gate)
+	gate.record({
+		atMs: performance.now(),
+		cpuPercent: 10,
+		sources: new Map([
+			["rtl", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
+		]),
+	})
+	f.create("dec")
+	f.plan([f.place("dec", f.sources.getCaps("rtl")!.centerFreq!)])
+	await f.manager.startAll()
+	const decoder = f.instances.get("dec")!
+	expect(decoder.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.efficiency?.detail).toBe("budget")
+	const stop = vi.spyOn(decoder, "stop")
+	const start = vi.mocked(decoder.start)
+	await budget.update(2)
+	await vi.advanceTimersByTimeAsync(350)
+	expect(decoder.running).toBe(true)
+	expect(start).toHaveBeenCalledTimes(1)
+	await budget.update(0.1)
+	await vi.advanceTimersByTimeAsync(350)
+	expect(decoder.running).toBe(true)
+	expect(start).toHaveBeenCalledTimes(1)
+	expect(stop).not.toHaveBeenCalled()
+})
+
+it.each(["drops", "cpu", "unknown", "late-drops"] as const)(
+	"keeps a cached %s refusal when the budget changes",
+	async detail => {
+		const gate = fakeGate()
+		gate.admit = vi.fn<EfficiencyGate["admit"]>(
+			(_placement, _running, now) => ({
+				admit: false,
+				detail,
+				retryAtMs: now + 300_000,
+			}),
+		)
+		const f = setup("rate-test", gate)
+		f.create("dec")
+		f.plan([f.place("dec", f.sources.getCaps("rtl")!.centerFreq!)])
+		await f.manager.startAll()
+		const retryAt = f.manager.getStatus("dec")?.efficiency?.retryAt
+		f.manager.notifyEfficiencyBudgetChanged()
+		await vi.advanceTimersByTimeAsync(350)
+		expect(gate.admit).toHaveBeenCalledTimes(1)
+		expect(f.manager.getStatus("dec")?.efficiency?.retryAt).toBe(retryAt)
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
 
 it("reconsiders a five-minute rejection after five monotonic minutes when wall time moves back an hour", async () => {
 	const gate = fakeGate()

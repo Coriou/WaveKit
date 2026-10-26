@@ -32,6 +32,8 @@ import {
 	type SettingsSnapshot,
 } from "../../src/features/settings/rows.ts"
 
+import { EMPTY_BUDGET } from "../../src/features/settings/efficiency-budget.ts"
+
 const ok = () => Promise.resolve({ ok: true as const })
 
 function actions(): SettingsActions & { calls: unknown[][] } {
@@ -56,6 +58,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		station: rec("station"),
 		preference: rec("preference"),
 		decoder: rec("decoder"),
+		efficiencyBudget: rec("efficiencyBudget"),
 		openTuner: () => void calls.push(["openTuner"]),
 		openShortcuts: () => void calls.push(["openShortcuts"]),
 		openBandPlans: () => void calls.push(["openBandPlans"]),
@@ -254,6 +257,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 		decoderTypes: TYPES,
 		decoderViews: { "pocsag-1": VIEW },
 		decoderSettings: true,
+		efficiencyBudget: EMPTY_BUDGET,
 		version: "0.14.2",
 		accessMode: "protected",
 		devices: null,
@@ -861,6 +865,149 @@ describe("Apply", () => {
 		expect(yamlLine(byId(rows, "rx.ppm"))).toBe("rx.ppm: 3")
 		expect(yamlLine(byId(rows, "station.name"))).toBe(
 			'station.name: "Roscoff station"',
+		)
+	})
+})
+
+describe("Decoder CPU budget row", () => {
+	const state = {
+		...EMPTY_BUDGET,
+		settings: {
+			cpuBudgetCores: "auto" as const,
+			resolved: {
+				mode: "auto" as const,
+				cpus: 8,
+				cores: 4,
+				label: "auto (8 CPUs → 4 cores)",
+			},
+		},
+		used: 1.25,
+	}
+	it("shows usage and resolution, validates Auto and fractional cores, and saves immediately", async () => {
+		const a = actions()
+		const row = byId(
+			buildRows(snapshot({ efficiencyBudget: state }), a),
+			"dec.cpuBudgetCores",
+		)
+		expect(row.help).toContain("1.25 / 4 cores used · Auto (8 CPUs → 4 cores)")
+		expect(row.text).toBe("Auto")
+		expect(row.def?.text).toBe("Auto")
+		expect(row.effect).toBeUndefined()
+		expect(row.widget.kind).toBe("text")
+		if (row.widget.kind !== "text") return
+		for (const text of ["0", "-1", "64.01", "NaN", "Infinity", "", "junk"])
+			expect(row.widget.parse(text)).toHaveProperty("error")
+		expect(row.widget.parse(" Auto ")).toEqual({ value: "auto" })
+		expect(row.widget.format("auto")).toBe("Auto")
+		expect(row.widget.placeholder).toBe("Auto or cores")
+		for (const value of [0.01, 2.5, 64]) {
+			expect(row.widget.parse(String(value))).toEqual({ value })
+			await row.write?.(value)
+		}
+		await row.write?.("auto")
+		expect(a.calls).toEqual([
+			["efficiencyBudget", 0.01],
+			["efficiencyBudget", 2.5],
+			["efficiencyBudget", 64],
+			["efficiencyBudget", "auto"],
+		])
+	})
+	it.each(["saved", "config", "default", undefined] as const)(
+		"shows the override note only for saved provenance: %s",
+		source => {
+			const row = byId(
+				buildRows(
+					snapshot({
+						efficiencyBudget: {
+							...state,
+							settings: {
+								...state.settings,
+								...(source === undefined ? {} : { source }),
+							},
+						},
+					}),
+					actions(),
+				),
+				"dec.cpuBudgetCores",
+			)
+			expect(row.help?.includes("Saved setting overrides config")).toBe(
+				source === "saved",
+			)
+		},
+	)
+	it.each([
+		{},
+		{ decoderSettings: false, accessMode: "legacy" as const },
+		{ readOnly: true },
+	])(
+		"disables an unavailable budget without a validation error: %o",
+		capability => {
+			const row = byId(
+				buildRows(
+					snapshot({
+						...capability,
+						efficiencyBudget: { ...EMPTY_BUDGET, unavailable: true },
+					}),
+					actions(),
+				),
+				"dec.cpuBudgetCores",
+			)
+			expect(row.text).toBe("Not available")
+			expect(row.disabled).toBe("Not available")
+			expect(row.error).toBeUndefined()
+		},
+	)
+	it.each([{ decoderSettings: false }, { accessMode: "legacy" as const }])(
+		"shows the budget as configured in YAML when writes are unavailable: %o",
+		capability => {
+			const row = byId(
+				buildRows(
+					snapshot({ ...capability, efficiencyBudget: state }),
+					actions(),
+				),
+				"dec.cpuBudgetCores",
+			)
+			expect(row.value).toBe("auto")
+			expect(row.help).toContain("1.25 / 4 cores used")
+			expect(row.disabled).toContain(
+				"YAML config: decoderPolicy.efficiency.cpuBudgetCores",
+			)
+		},
+	)
+	it("shows configured values, errors, unavailability and write protection", () => {
+		const rowOf = (over: Partial<SettingsSnapshot>) =>
+			byId(buildRows(snapshot(over), actions()), "dec.cpuBudgetCores")
+		const configured = rowOf({
+			efficiencyBudget: {
+				...state,
+				settings: {
+					cpuBudgetCores: 2.5,
+					resolved: { mode: "configured", cores: 2.5, label: "configured" },
+				},
+			},
+		})
+		expect(configured.value).toBe(2.5)
+		expect(configured.help).toContain("1.25 / 2.5 cores used · configured")
+		expect(rowOf({ readOnly: true, efficiencyBudget: state }).disabled).toMatch(
+			/Read-only/,
+		)
+		expect(
+			rowOf({
+				efficiencyBudget: {
+					...state,
+					denied: "Settings write denied",
+					error: "Settings write denied",
+				},
+			}),
+		).toMatchObject({
+			disabled: "Settings write denied",
+			error: "Settings write denied",
+		})
+		expect(rowOf({ efficiencyBudget: EMPTY_BUDGET }).disabled).toMatch(
+			/unavailable/,
+		)
+		expect(rowOf({ efficiencyBudget: { ...state, busy: true } }).disabled).toBe(
+			"Saving…",
 		)
 	})
 })

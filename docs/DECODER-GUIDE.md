@@ -619,3 +619,34 @@ describe("HfdlDecoder", () => {
 1. Check if decoder is in a restart loop
 2. Verify input format matches decoder expectations
 3. Consider adding rate limiting
+
+### Efficiency recovery
+
+Automatic decoder admission uses a recent 10-second positive-drop window and a separate
+60-second clean-evidence window to prevent repeated stop/start cycles. Unchanged cumulative
+counters do not extend the drop window. A zero current drop rate can coexist with a recent
+`dropping` state; after 10 seconds it becomes `clearing` while the clean window completes.
+Missing or stale samples block admission as `unknown`. A waiting candidate is checked again
+when clean evidence is sufficient, without the additional backoff used for a failed probation.
+After a source reconnect, probation requires fresh coverage; drops recorded in the previous
+source epoch do not condemn a resumed decoder. New drops still trigger probation backoff
+for suspendable decoders. Decoders protected by `always` mode or an operator start stay
+running; after loss, a fresh 60-second clean run with complete evidence lets them graduate
+and frees the source's probation slot. CPU over the guard restarts this recovery interval
+at the following sample; a full 60 seconds of complete evidence must follow the latest
+spike. CPU evidence against an original probation stays failed even after it is evicted
+from bounded history; only a fresh clean run can release that protected probation slot.
+Drop evidence resets on reconnect, so previous-epoch loss does not condemn a resumed
+placement. Continued loss or CPU spikes keep newcomers waiting. Graduation remains
+earned when a later CPU spike occurs, including while link recovery delays reconciliation.
+Late-drop shedding uses only completed windows ending within the last 30 seconds
+(3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
+The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
+The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
+see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).
+
+A clean completed 30-second probation resets normal consecutive-failure retry backoff
+in both admission and the decoder manager. After late-drop shedding, retry history
+resets only after a clean run of at least 30 minutes since readmission. A shed or
+probation failure before then doubles the delay from 5 to 10 to 20 minutes, capped
+at 30 minutes. After that sustained clean run, the next failure starts at 5 minutes.

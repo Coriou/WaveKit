@@ -111,6 +111,7 @@ it("nothing sheddable warns at the minute bound and one past it", () => {
 		[110001, 2],
 	]) {
 		s.time(time!)
+		if (time! > 50000) s.windows([window(80000), window(90000)])
 		expect(s.gate.probation(running, 0)).toEqual([])
 		expect(s.warn).toHaveBeenCalledTimes(count!)
 	}
@@ -186,30 +187,38 @@ it("sheds newest admission, clears history and honors cooldown at its bound", ()
 	}
 })
 
-it("late failures double retry delays up to the cap", () => {
-	const s = setup()
-	const p = placement()
-	let at = 0
-	for (const delay of [300000, 600000, 1200000, 1800000, 1800000]) {
-		s.time(at)
-		expect(s.gate.admit(p, [], at).admit).toBe(true)
-		const active = [s.running(p)]
-		s.gate.probation(active, at)
-		s.time(at + 30000)
-		s.gate.probation(active, at)
-		s.windows([window(at + 30000), window(at + 40000)])
-		s.time(at + 50000)
-		expect(s.gate.probation(active, at)).toEqual([
-			{ key: p.key, detail: "late-drops" },
-		])
-		s.gate.noteSuspended(p.key, "late-drops", at + 50000)
-		expect(s.gate.admit(p, [], at + 50001)).toMatchObject({
-			retryAtMs: at + 50000 + delay,
-		})
-		s.gate.probation([], at)
-		at += 50000 + delay
-	}
-})
+it.each([30_000, 1_800_000])(
+	"late retries decay after a clean run of %s ms",
+	cleanRun => {
+		const s = setup()
+		const p = placement()
+		let at = 0
+		for (const escalated of [
+			300_000, 600_000, 1_200_000, 1_800_000, 1_800_000,
+		]) {
+			const delay = cleanRun < 1_800_000 ? escalated : 300_000
+			s.time(at)
+			expect(s.gate.admit(p, [], at).admit).toBe(true)
+			const active = [s.running(p)]
+			s.gate.probation(active, at)
+			s.time(at + cleanRun)
+			s.gate.probation(active, at)
+			s.windows([window(at + cleanRun), window(at + cleanRun + 10_000)])
+			s.time(at + cleanRun + 20_000)
+			expect(s.gate.probation(active, at)).toEqual([
+				{ key: p.key, detail: "late-drops" },
+			])
+			s.gate.noteSuspended(p.key, "late-drops", at + cleanRun + 20_000)
+			// While stopping, an already graduated placement cannot erase its new retry.
+			expect(s.gate.probation(active, at + cleanRun + 20_001)).toEqual([])
+			expect(s.gate.admit(p, [], at + cleanRun + 20_001)).toMatchObject({
+				retryAtMs: at + cleanRun + 20_000 + delay,
+			})
+			s.gate.probation([], at)
+			at += cleanRun + 20_000 + delay
+		}
+	},
+)
 it("probation on another source remains independent of late shedding", () => {
 	const s = setup()
 	const old = s.running()
@@ -388,5 +397,25 @@ it.each([31000, 61000])(
 		expect(s.gate.probation(active, 0)).toEqual([
 			{ key: p.key, detail: "late-drops" },
 		])
+	},
+)
+
+it.each([69999, 70000, 70001])(
+	"late windows expire by elapsed evidence time at %i",
+	at => {
+		const s = setup()
+		const p = placement()
+		s.gate.admit(p, [], 0)
+		const running = [s.running(p)]
+		s.gate.probation(running, 0)
+		s.time(30000)
+		s.gate.probation(running, 0)
+		s.windows([window(30000), window(40000)])
+		// Three 10 s windows cover (now - 30000, now]; the first window
+		// ends at 40000, so it expires exactly at 70000, and remains expired.
+		s.time(at)
+		expect(s.gate.probation(running, at)).toEqual(
+			at < 70000 ? [{ key: p.key, detail: "late-drops" }] : [],
+		)
 	},
 )

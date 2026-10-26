@@ -1453,6 +1453,7 @@ export class ApiServer {
 			decoderManager: this.decoderManager,
 		})
 		await this.app.register(decoderRoutes, {
+			efficiencyBudget: this.decoderManager.efficiencyBudget?.(),
 			decoderManager: this.decoderManager,
 			decoderRegistry: this.decoderRegistry,
 			...(this.decoderSettings &&

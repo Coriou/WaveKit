@@ -54,6 +54,7 @@ import {
 	type SettingsActions,
 	type SettingsSnapshot,
 } from "./rows.ts"
+import { EfficiencyBudgetStore } from "./efficiency-budget.ts"
 import { SettingRowView } from "./SettingRowView.tsx"
 import "./settings.css"
 import "./bandplans/bandplans.css"
@@ -79,7 +80,7 @@ const OK: SettingWriteResult = { ok: true }
 const toResult = (ok: boolean, message: string): SettingWriteResult =>
 	ok ? OK : { ok: false, message }
 
-function useSnapshot(): SettingsSnapshot {
+function useSnapshot(budgetStore: EfficiencyBudgetStore): SettingsSnapshot {
 	const services = useServices()
 	const { data } = services
 	const readOnly = useReadOnly()
@@ -108,6 +109,7 @@ function useSnapshot(): SettingsSnapshot {
 	)
 	const decoders = useStore(services.decoders, s => s.decoders)
 	const decoderSettings = useStore(data.decoderSettings)
+	const efficiencyBudget = useStore(budgetStore)
 	const system = useStore(data.system)
 	const binsMax = useStore(data.spectrumLimits, s => s.binsMax)
 	const binsCap = useStore(data.spectrumLimits, s => s.binsCap)
@@ -144,6 +146,7 @@ function useSnapshot(): SettingsSnapshot {
 			decoderTypes: decoderSettings.types,
 			decoderViews: decoderSettings.views,
 			decoderSettings: decoderSettings.available !== false,
+			efficiencyBudget,
 			version: system.version,
 			accessMode: access ? access.mode : null,
 			devices,
@@ -170,6 +173,7 @@ function useSnapshot(): SettingsSnapshot {
 		binsCap,
 		decoders,
 		decoderSettings,
+		efficiencyBudget,
 		system,
 		access,
 		devices,
@@ -177,7 +181,10 @@ function useSnapshot(): SettingsSnapshot {
 	])
 }
 
-function useActions(openPage: (page: string) => void): SettingsActions {
+function useActions(
+	openPage: (page: string) => void,
+	budgetStore: EfficiencyBudgetStore,
+): SettingsActions {
 	const services = useServices()
 	const cards = useContext(CardPlaceContext)
 	return useMemo(() => {
@@ -236,19 +243,33 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 			station: patch => data.station.update(patch),
 			preference: (key, value) => data.preferences.set(key, value),
 			decoder: (id, patch) => data.decoderSettings.update(id, patch),
+			efficiencyBudget: value => budgetStore.save(value),
 			openTuner: () => shellStore.openPanel("tuner"),
 			openShortcuts: () => openPalette("keys"),
 			openBandPlans: () => openPage(BANDPLANS),
 			openDevices: () => openPage(DEVICES),
 			...(canLocate() ? { locate: () => locate() } : {}),
 		}
-	}, [services, cards, openPage])
+	}, [services, cards, openPage, budgetStore])
 }
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
 	const services = useServices()
 	const { data } = services
-	const snapshot = useSnapshot()
+	const budgetStore = useMemo(
+		() => new EfficiencyBudgetStore(data.api),
+		[data.api],
+	)
+	const snapshot = useSnapshot(budgetStore)
+	useEffect(() => {
+		const unfollow = budgetStore.followAccess(data.access)
+		void budgetStore.load()
+		const timer = setInterval(() => void budgetStore.load(), 5000)
+		return () => {
+			clearInterval(timer)
+			unfollow()
+		}
+	}, [budgetStore, data.access])
 	const [page, setPage] = useState<string | null>(null)
 	/** The band open in Band plans' editor (`packId/bandId`). */
 	const [band, setBand] = useState<string | null>(null)
@@ -256,7 +277,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		setBand(null)
 		setPage(p)
 	}, [])
-	const actions = useActions(openPage)
+	const actions = useActions(openPage, budgetStore)
 	const rows = useMemo(() => buildRows(snapshot, actions), [snapshot, actions])
 	const byId = useMemo(() => new Map(rows.map(r => [r.id, r])), [rows])
 

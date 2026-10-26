@@ -1,3 +1,4 @@
+import type { EfficiencyBudgetResolution } from "./efficiency-budget.js"
 import type { DropAttribution } from "./resources.js"
 
 export interface DecoderStats {
@@ -453,6 +454,7 @@ export interface DecoderEfficiencySourceView {
 	blocked: DecoderEfficiencyPlacement[]
 }
 export interface DecoderEfficiencyView {
+	budget?: EfficiencyBudgetResolution
 	budgetCores: number
 	cpuGuardPercent: number
 	sources: DecoderEfficiencySourceView[]

@@ -207,3 +207,30 @@ export const decoderStatusSchema = {
 		"restartCount",
 	],
 } as const
+
+/** Resolution metadata shared with the efficiency settings and status output. */
+export const efficiencyBudgetResolutionSchema = {
+	type: "object",
+	required: ["mode", "cores", "label"],
+	properties: {
+		mode: { type: "string", enum: ["auto", "configured"] },
+		cpus: { type: "number" },
+		cores: { type: "number" },
+		label: { type: "string" },
+	},
+} as const
+
+export const efficiencyBudgetSettingsSchema = {
+	type: "object",
+	required: ["source", "cpuBudgetCores", "resolved"],
+	properties: {
+		source: { type: "string", enum: ["saved", "config", "default"] },
+		cpuBudgetCores: {
+			anyOf: [
+				{ type: "string", enum: ["auto"] },
+				{ type: "number", exclusiveMinimum: 0, maximum: 64 },
+			],
+		},
+		resolved: efficiencyBudgetResolutionSchema,
+	},
+} as const

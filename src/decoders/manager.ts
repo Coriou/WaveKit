@@ -17,6 +17,7 @@
  * - 27.3: THE Configuration SHALL support specifying minimum and maximum versions per decoder type
  */
 
+import type { EfficiencyBudgetService } from "./enablement/budget-settings.js"
 import { EventEmitter } from "node:events"
 import {
 	PlacementLifecycle,
@@ -701,6 +702,20 @@ export class DecoderManager extends EventEmitter {
 		this.notifyBandplansChanged()
 	}
 
+	/** Recheck capacity after a live budget change without clearing loss backoff. */
+	notifyEfficiencyBudgetChanged(): void {
+		if (!this.config.enablement || this.destroying) return
+		const now = performance.now()
+		for (const state of this.decoders.values()) {
+			if (
+				state.admission?.admit === false &&
+				state.admission.detail === "budget"
+			)
+				state.admission = { ...state.admission, retryAtMs: now }
+		}
+		this.notifyBandplansChanged()
+	}
+
 	notifyBandplansChanged(): void {
 		if (!this.config.enablement || this.destroying) return
 		for (const source of this.sourceManager?.getAllStatus() ?? [])
@@ -773,6 +788,16 @@ export class DecoderManager extends EventEmitter {
 					]
 				: []
 		})
+	}
+
+	private budgetSettings: EfficiencyBudgetService | undefined
+
+	setEfficiencyBudgetService(service: EfficiencyBudgetService): void {
+		this.budgetSettings = service
+	}
+
+	efficiencyBudget(): EfficiencyBudgetService | undefined {
+		return this.budgetSettings
 	}
 
 	efficiencyView(): DecoderEfficiencyView {
@@ -918,11 +943,18 @@ export class DecoderManager extends EventEmitter {
 			if (
 				state.decoder.getStatus().running &&
 				state.admittedAtMs !== undefined &&
-				!state.efficiencyLateShed &&
-				!(state.placement && condemned.has(state.placement.key)) &&
-				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
-			)
+				(state.efficiencyLateShed ||
+					!(state.placement && condemned.has(state.placement.key))) &&
+				now - state.admittedAtMs >=
+					(state.efficiencyLateShed
+						? EFFICIENCY_RETRY_MAX_MS
+						: EFFICIENCY_PROBATION_MS)
+			) {
+				// Normal failures reset after 30 s; late-shed history needs 1,800,000 ms
+				// since readmission. Earlier failures double 300k -> 600k -> 1.2M -> 1.8M.
+				delete state.efficiencyLateShed
 				delete state.efficiencyBackoffMs
+			}
 		}
 		// Each verdict belongs to the run the gate judged; a suspension awaited
 		// below may let another placement stop or restart, so its verdict is
@@ -1471,6 +1503,7 @@ export class DecoderManager extends EventEmitter {
 					this.logPlacement(parent.placement, "removed")
 					this.restorePlacementOptions(parent)
 					delete parent.efficiencyBackoffMs
+					delete parent.efficiencyLateShed
 					delete parent.admission
 					delete parent.admittedAtMs
 					delete parent.placement
@@ -1591,6 +1624,7 @@ export class DecoderManager extends EventEmitter {
 				if (moved && state.placement) {
 					enablement.gate?.forget(state.placement.key)
 					delete state.efficiencyBackoffMs
+					delete state.efficiencyLateShed
 					delete state.admission
 					delete state.admittedAtMs
 				}
@@ -5579,6 +5613,7 @@ export class DecoderManager extends EventEmitter {
 				continue
 			gate.forget(state.placement.key)
 			delete state.efficiencyBackoffMs
+			delete state.efficiencyLateShed
 			state.admission = { admit: false, detail: "budget", retryAtMs: now }
 		}
 		this.scheduleEfficiencyEvaluation()
