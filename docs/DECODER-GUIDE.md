@@ -645,4 +645,7 @@ The budget defaults to half the available CPU capacity, with process and cgroup 
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).
 
-A clean completed probation resets the gate's consecutive-failure retry backoff.
+A clean completed 30-second probation resets the consecutive-failure retry backoff
+in both admission and the decoder manager, including after late-drop shedding. The
+next failure starts at the 5-minute base delay. Failures without a clean run between
+them double the delay up to the 30-minute cap.

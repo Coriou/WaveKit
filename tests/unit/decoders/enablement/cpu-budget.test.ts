@@ -168,7 +168,7 @@ it("preserves explicit numbers including below the auto floor and at the cap", (
 	for (const invalid of [0, -1, 64.001, Infinity, NaN, "3", null, {}])
 		expect(CpuBudgetSchema.safeParse(invalid).success).toBe(false)
 })
-it("accepts auto in configuration and defaults an empty efficiency policy to auto", () => {
+it("accepts auto in configuration and preserves an omitted efficiency budget", () => {
 	for (const value of ["auto", 0.001, 64]) {
 		expect(
 			ConfigSchema.parse({
@@ -179,7 +179,7 @@ it("accepts auto in configuration and defaults an empty efficiency policy to aut
 	expect(
 		ConfigSchema.parse({ decoderPolicy: { efficiency: {} } }).decoderPolicy
 			?.efficiency?.cpuBudgetCores,
-	).toBe("auto")
+	).toBeUndefined()
 	for (const value of [0, 64.001, "unknown"])
 		expect(
 			ConfigSchema.safeParse({

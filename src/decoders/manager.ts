@@ -943,11 +943,13 @@ export class DecoderManager extends EventEmitter {
 			if (
 				state.decoder.getStatus().running &&
 				state.admittedAtMs !== undefined &&
-				!state.efficiencyLateShed &&
 				!(state.placement && condemned.has(state.placement.key)) &&
 				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
-			)
+			) {
+				// A clean run ends consecutive failures, including late shedding.
+				delete state.efficiencyLateShed
 				delete state.efficiencyBackoffMs
+			}
 		}
 		// Each verdict belongs to the run the gate judged; a suspension awaited
 		// below may let another placement stop or restart, so its verdict is

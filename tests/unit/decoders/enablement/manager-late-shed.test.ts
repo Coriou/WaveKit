@@ -281,21 +281,28 @@ it("late-drops verdict suspends with efficiency-budget and detail late-drops", a
 	])
 })
 
-it.each(["late-drops", "drops", "cpu"] as const)(
-	"second late shed doubles the retry delay and further %s failures stop at the cap",
-	async detail => {
+it.each(
+	(["late-drops", "drops", "cpu"] as const).flatMap(detail =>
+		[false, true].map(clean => ({ detail, clean })),
+	),
+)(
+	"late shed retries after $detail failures with a clean run=$clean",
+	async ({ detail, clean }) => {
 		const gate = fakeGate()
 		const f = setup("rate-test", gate)
 		f.create("dec")
 		const placement = f.place("dec", 162_000_000)
 		f.plan([placement])
 		await f.manager.startAll()
-		for (const delay of [300_000, 600_000, 1_200_000, 1_800_000, 1_800_000]) {
-			await vi.advanceTimersByTimeAsync(35_000)
+		for (const escalated of [
+			300_000, 600_000, 1_200_000, 1_800_000, 1_800_000,
+		]) {
+			const delay = clean ? 300_000 : escalated
+			await vi.advanceTimersByTimeAsync(clean ? 35_000 : 1000)
 			gate.probation = vi.fn(() => [
 				{
 					key: placement.key,
-					detail: delay === 300_000 ? ("late-drops" as const) : detail,
+					detail: escalated === 300_000 ? ("late-drops" as const) : detail,
 				},
 			])
 			await vi.advanceTimersByTimeAsync(2000)
@@ -308,6 +315,41 @@ it.each(["late-drops", "drops", "cpu"] as const)(
 			await vi.advanceTimersByTimeAsync(delay + 2500)
 			expect(f.instances.get("dec")?.running).toBe(true)
 		}
+	},
+)
+
+it.each([29_999, 30_000, 30_001])(
+	"resets late-shed backoff only after a clean run reaches 30 seconds: %s ms",
+	async elapsed => {
+		const gate = fakeGate()
+		const f = setup("rate-test", gate)
+		f.create("dec")
+		const placement = f.place("dec", f.sources.caps.get("rtl")!.centerFreq!)
+		f.plan([placement])
+		await f.manager.startAll()
+		const fail = () => [{ key: placement.key, detail: "late-drops" as const }]
+		gate.probation = vi.fn(fail)
+		await vi.advanceTimersByTimeAsync(2000)
+		const first = f.manager.getAllStatus()[0]!
+		gate.probation = vi.fn(() => [])
+		await vi.advanceTimersByTimeAsync(
+			Date.parse(first.efficiency!.retryAt!) - Date.now() + 2500,
+		)
+		expect(f.instances.get("dec")?.running).toBe(true)
+		await f.manager["applyProbation"]()
+		const running = vi.mocked(gate.probation).mock.calls.at(-1)![0][0]!
+		await vi.advanceTimersByTimeAsync(
+			running.admittedAtMs + elapsed - performance.now(),
+		)
+		// Sample exactly at the boundary rather than waiting for the periodic pass.
+		await f.manager["applyProbation"]()
+		gate.probation = vi.fn(fail)
+		await f.manager["applyProbation"]()
+		const status = f.manager.getAllStatus()[0]!
+		expect(status.running).toBe(false)
+		expect(Date.parse(status.efficiency!.retryAt!) - Date.now()).toBe(
+			elapsed < 30_000 ? 600_000 : 300_000,
+		)
 	},
 )
 

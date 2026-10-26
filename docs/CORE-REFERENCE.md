@@ -453,7 +453,9 @@ See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protect
 
 ### Decoder efficiency CPU budget
 
-`decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. Automatic sizing takes
+`decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. An omitted value
+reports budget source `"default"`; an explicit `"auto"` or number reports `"config"`
+unless a saved override applies. Automatic sizing takes
 50% of CPUs available to the process (`os.availableParallelism()`), limited further by
 the smallest cgroup quota divided by its period across the process's cgroup and
 its ancestors. Both v2 `cpu.max` and v1 CPU controller quotas are supported, including

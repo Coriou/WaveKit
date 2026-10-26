@@ -869,7 +869,7 @@ export const ConfigSchema = z
 								z.literal("auto"),
 								z.number().finite().positive().max(64),
 							])
-							.default("auto"),
+							.optional(),
 						cpuGuardPercent: z.number().min(1).max(100).optional(),
 						maxBandplanChannels: z
 							.number()

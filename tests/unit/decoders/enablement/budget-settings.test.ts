@@ -7,6 +7,7 @@ import {
 	openEfficiencyBudget,
 	readBudgetSettings,
 } from "../../../../src/decoders/enablement/budget-settings.js"
+import { ConfigSchema } from "../../../../src/config.js"
 import type { Logger } from "../../../../src/utils/logger.js"
 import { resolveCpuBudget } from "../../../../src/decoders/enablement/cpu-budget.js"
 
@@ -155,3 +156,24 @@ it("logs a saved override once and a failed notification without external conten
 	)
 	expect(info).toHaveBeenCalledOnce()
 })
+
+it.each([
+	{ efficiency: { cpuGuardPercent: 90 }, source: "default" },
+	{
+		efficiency: { cpuGuardPercent: 90, cpuBudgetCores: "auto" },
+		source: "config",
+	},
+])(
+	"reports $source for a parsed efficiency policy",
+	async ({ efficiency, source }) => {
+		const config = ConfigSchema.parse({ decoderPolicy: { efficiency } })
+		const configured = config.decoderPolicy?.efficiency?.cpuBudgetCores
+		const service = await openEfficiencyBudget({
+			stateDir: "unused",
+			resolve,
+			...(configured === undefined ? {} : { configured }),
+			read: async () => undefined,
+		})
+		expect(service.view()).toMatchObject({ source, cpuBudgetCores: "auto" })
+	},
+)
