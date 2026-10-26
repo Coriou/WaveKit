@@ -88,5 +88,7 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 
 The settings mock also serves `GET`/`PUT /api/decoders/efficiency/budget`: Auto resolves to
 4 cores from 8 CPUs, and numeric budgets accept values greater than 0 and up to 64.
+Its `source` starts as `default` and becomes `saved` after a successful `PUT`, so the Settings
+row shows its saved-override note.
 `GET /api/decoders/efficiency` includes the resolved `budget` and illustrative per-source
 core usage (0.25 cores per running, unpaused decoder).
