@@ -89,9 +89,10 @@ export const DQ_SUSTAIN_PER_SOURCE = 512
  * Req 1.4d: push-to-talk airtime. Sustained runs on one channel (the pending bucket, nearest of
  * b - 1, b, b + 1) add up for 60 000 ms from the first credited sample: an exchange of three
  * 2 s transmissions with 25 s gaps (2 + 25 + 2 + 25 + 2 = 56 s) fits. A transmission that ends
- * banks its duration from its first gated snapshot, once its run was sampled twice (it lived past
- * the 1 000 ms re-ingest, so a flicker banks nothing); the channel promotes like one run: banked
- * plus live airtime 3 000 ms, 3 samples, median 12 dB.
+ * banks the span of its unbroken run, first to latest accepted sample (the store samples at gate
+ * pass, 1 000 ms later and at the close, so a 2 s over banks about 2 s and a flicker sampled once
+ * banks nothing); the channel promotes like one run: banked plus live run 3 000 ms, 3 samples,
+ * median 12 dB.
  */
 export const DQ_PTT_WINDOW_MS = 60_000
 

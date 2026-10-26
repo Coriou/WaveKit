@@ -87,7 +87,8 @@ function runScene(
 
 /**
  * ScannerService's ingest cadence (scanner-service.ts onTrack): a track becomes an observation at
- * its first passed snapshot, re-ingests every 1 000 ms after its first second, and on close; each
+ * its first passed snapshot and is ingested there (`gatePassCapture` materialize), re-ingests
+ * every 1 000 ms after its first second, and on close; each
  * ingest carries the spectral classification of that snapshot.
  */
 function admit(events: readonly PipelineEvent[]): DiscoveryStore {
@@ -108,13 +109,16 @@ function admit(events: readonly PipelineEvent[]): DiscoveryStore {
 		const t = ev.track
 		clock.now = T0 + Math.round((t.lastSample / FS) * 1000)
 		let l = live.get(t.trackId)
+		let gatePass = false
 		if (l === undefined) {
 			if (t.gate !== "passed") continue
 			l = { startedAt: clock.now, lastIngest: 0 }
 			live.set(t.trackId, l)
+			gatePass = true
 		}
 		const closing = ev.kind === "track-close"
 		if (
+			gatePass ||
 			closing ||
 			(clock.now - l.startedAt >= 1000 && clock.now - l.lastIngest >= 1000)
 		) {

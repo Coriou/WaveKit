@@ -116,21 +116,21 @@ pending entry is promoted, creating a discovery from the promoting observation, 
 
   1.4d **Push-to-talk airtime.** Separate transmissions are separate observations, so a
   channel used in 2 to 10 s overs never forms a 3 s run (1.4b). A transmission that ends
-  without promoting, and whose run was sampled at least twice (it lived past its first
-  1 000 ms re-ingest), banks its duration (from its first gated snapshot) and its run's
+  without promoting, and whose run was sampled at least twice, banks its run's span and
   samples on its channel (the pending bucket, nearest of b - 1, b, b + 1, so adjacent
   8.33 kHz channels bank apart). A later sample on that channel promotes when the banked
-  airtime plus the live transmission's duration reaches `DQ_SUSTAIN_MS` = 3 000 ms, with at
+  airtime plus the live run's span reaches `DQ_SUSTAIN_MS` = 3 000 ms, with at
   least 3 samples whose median (banked and live, newest 8 banked) is at least 12 dB. An entry
   lives `DQ_PTT_WINDOW_MS` = 60 000 ms from its first banking (three 2 s overs with 25 s gaps
   fit), at most `DQ_PTT_PER_SOURCE` = 512 entries per source and `DQ_PTT_IDS_MAX` = 8 ids per
   entry; memory only. A create there, a retune or source removal drops it; a retraction of
   any banked id drops the whole entry, and a ninth id restarts the entry empty (so every id
-  holding credit stays retractable). A transmission claims airtime from its first gated
-  snapshot only for its first run; after a reset (a sample under 9 dB or a gap over 2 500 ms)
-  it claims from its next accepted sample. A duration that is non-finite, negative or longer
+  holding credit stays retractable). A run's span only ever runs from an accepted
+  sample through its latest accepted sample: a sample under 9 dB or a gap over 2 500 ms ends
+  the run (a closing sample under 9 dB banks the run through its last accepted sample), and
+  the time before the first accepted sample never counts. A duration that is non-finite, negative or longer
   than the window counts 0. Fixtures: 1 500 ms banked plus a 1 500 ms over promotes and 1 ms less
-  does not; a median of 12 dB promotes and 11.99 dB does not; banked airtime counts
+  does not; a below-floor first sample or close adds no time; a median of 12 dB promotes and 11.99 dB does not; banked airtime counts
   59 999 ms after banking and not 60 000 ms; a transmission sampled once banks nothing; three
   synthetic 2 s AM voice overs at about 13.5 dB best-slot SNR make one record, one over none;
   two adjacent 8.33 kHz channels taking turns make two records; 20 s of noise makes none.

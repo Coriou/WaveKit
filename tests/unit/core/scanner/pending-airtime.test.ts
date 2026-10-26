@@ -67,8 +67,9 @@ function holder() {
 }
 
 /**
- * One transmission through `PendingAdmission.sustained` at the store's cadence: a sample at
- * start + 1 000 ms and the closing sample at start + `durMs`. True when either promoted.
+ * One transmission through `PendingAdmission.sustained` at the store's cadence: the gate-pass
+ * sample at its start, one at start + 1 000 ms (when it lasts longer) and the closing sample at
+ * start + `durMs`, all accepted, so it credits `durMs`. True when any promoted.
  */
 function key(
 	h: ReturnType<typeof holder>,
@@ -78,8 +79,12 @@ function key(
 	snr: number,
 	over: { centreHz?: number; sourceId?: string } = {},
 ): boolean {
-	h.clock.now = T0 + startMs + 1_000
+	h.clock.now = T0 + startMs
 	if (h.p.sustained(tx(id, startMs, snr, over))) return true
+	if (durMs > 1_000) {
+		h.clock.now = T0 + startMs + 1_000
+		if (h.p.sustained(tx(id, startMs, snr, over))) return true
+	}
 	h.clock.now = T0 + startMs + durMs
 	return h.p.sustained(tx(id, startMs, snr, { ...over, closing: true }))
 }
@@ -119,10 +124,12 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 	})
 
 	it("boundary: banked airtime counts 59 999 ms after it was banked, not 60 000 ms", () => {
-		// t1 banks 2 000 ms at 2 000 ms; t2's first sample, 1 000 ms into it, makes 3 000 ms.
+		// t1 banks 2 000 ms at 2 000 ms; t2 accepted at atMs - 1 000 and atMs makes 3 000 ms.
 		const sample = (atMs: number): [boolean, number] => {
 			const h = holder()
 			key(h, "t1", 0, 2_000, 13)
+			h.clock.now = T0 + atMs - 1_000
+			h.p.sustained(tx("t2", atMs - 1_000, 13))
 			h.clock.now = T0 + atMs
 			const promoted = h.p.sustained(tx("t2", atMs - 1_000, 13))
 			return [promoted, h.p.airtimeEntries("src-1").length]
@@ -196,7 +203,7 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 		const [fresh] = past.p.airtimeEntries("src-1")
 		expect([...(fresh?.ids ?? [])]).toEqual([`i${DQ_PTT_IDS_MAX}`])
 		expect(fresh?.onMs).toBe(1_100)
-		expect(fresh?.snrs).toEqual([9, 9])
+		expect(fresh?.snrs).toEqual([9, 9, 9])
 		// The first id's credit went with the restart; forgetting it changes nothing.
 		past.p.forget("src-1", "i0")
 		expect(past.p.airtimeEntries("src-1")).toHaveLength(1)
@@ -212,7 +219,7 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 			return h.p.sustained(tx("t2", 5_000, 13))
 		}
 		expect(at(6_000)).toBe(false)
-		// A 3 000 ms gap resets the run: the 4 000 ms since t2 started must not count.
+		// A 3 000 ms gap resets the run: neither the gap nor the time since t2 started counts.
 		expect(at(9_000)).toBe(false)
 		expect(at(10_499)).toBe(false) // 1 500 + 1 499
 		expect(at(10_500)).toBe(true) // 1 500 + 1 500
@@ -232,13 +239,44 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 		expect(at(9_500, 13)).toBe(true) // 1 500 + 1 500
 	})
 
-	it("eligibleMs: malformed or out-of-window durations give 0", () => {
-		const run = { firstAt: T0, lastAt: T0, snrs: [13], eligibleFrom: T0 }
-		expect(eligibleMs(run, T0 + 1_000)).toBe(1_000)
-		expect(eligibleMs(run, T0 - 1)).toBe(0)
-		expect(eligibleMs(run, T0 + DQ_PTT_WINDOW_MS)).toBe(DQ_PTT_WINDOW_MS)
-		expect(eligibleMs(run, T0 + DQ_PTT_WINDOW_MS + 1)).toBe(0)
-		expect(eligibleMs({ ...run, eligibleFrom: Number.NaN }, T0)).toBe(0)
+	it("a below-floor first sample starts nothing: counting starts at the first accepted sample", () => {
+		const h = holder()
+		key(h, "t1", 0, 1_500, 13) // banks 1 500 ms
+		const at = (ms: number, snr: number) => {
+			h.clock.now = T0 + ms
+			return h.p.sustained(tx("t2", 5_000, snr))
+		}
+		expect(at(6_000, 8)).toBe(false)
+		expect(at(7_000, 13)).toBe(false) // eligible 0 ms, not 2 000 since t2 started
+		expect(at(8_499, 13)).toBe(false) // 1 500 + 1 499
+		expect(at(8_500, 13)).toBe(true) // 1 500 + 1 500
+	})
+
+	it("a below-floor close banks only through the last accepted sample, never a gap", () => {
+		const h = holder()
+		const at = (ms: number, snr: number, closing = false) => {
+			h.clock.now = T0 + ms
+			return h.p.sustained(tx("t1", 0, snr, { closing }))
+		}
+		expect(at(1_000, 13)).toBe(false)
+		expect(at(2_000, 13)).toBe(false)
+		expect(at(5_000, 8, true)).toBe(false) // 3 000 ms gap, under the floor
+		const [e] = h.p.airtimeEntries("src-1")
+		expect(e?.onMs).toBe(1_000) // 1 000 to 2 000 ms, not 5 000
+		expect(e?.snrs).toEqual([13, 13])
+	})
+
+	it("eligibleMs: first to latest accepted sample; malformed or out-of-window gives 0", () => {
+		const run = (firstAt: number, lastAt: number) => ({
+			firstAt,
+			lastAt,
+			snrs: [13],
+		})
+		expect(eligibleMs(run(T0, T0 + 1_000))).toBe(1_000)
+		expect(eligibleMs(run(T0, T0 - 1))).toBe(0)
+		expect(eligibleMs(run(T0, T0 + DQ_PTT_WINDOW_MS))).toBe(DQ_PTT_WINDOW_MS)
+		expect(eligibleMs(run(T0, T0 + DQ_PTT_WINDOW_MS + 1))).toBe(0)
+		expect(eligibleMs(run(Number.NaN, T0))).toBe(0)
 	})
 
 	// Feature: detection-quality, Property 27: Push-to-talk airtime promotion
@@ -273,8 +311,11 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 					txs.forEach((x, i) => {
 						const start = t + x.gap
 						t = start + x.dur
+						// The store's cadence: the gate-pass ingest, one at 1 000 ms, the close.
 						const samples =
-							x.dur >= 1_000 ? [start + 1_000, start + x.dur] : [start + x.dur]
+							x.dur > 1_000
+								? [start, start + 1_000, start + x.dur]
+								: [start, start + x.dur]
 						const run: number[] = []
 						samples.forEach((at, k) => {
 							const closing = k === samples.length - 1
