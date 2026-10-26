@@ -28,7 +28,7 @@ do not send a browser cookie alongside the bearer credential.
 
 ### Tuner commands during a sample-rate restart
 
-With the source command gate mounted, tuner mutations for each source are FIFO,
+Tuner mutations for each source are FIFO,
 including frequency proof writes and bulk updates. A changed sample rate is flushed
 to the receiver, then its connection is deliberately reopened using the existing
 reconnect path. `POST /api/tuner/:sourceId/sample-rate` returns success only after the
@@ -45,8 +45,17 @@ bound the response is 503 with code `SOURCE_RECONNECTING`, a retry message and
 succeed once connected; while still disconnected it receives the same retry error.
 Other disconnects continue to fail immediately (`SOURCE_DISCONNECTED`); they do
 not authorize delayed commands. Queued commands whose recovery wait times out are
-not applied later. A rate write may already have reached the receiver before a
-timeout; reconnect restoration retains accepted tuner state.
+not applied later. A 503 after a sample-rate change does not mean the rate was rejected: the
+write may already have reached the receiver. Reconnect restoration retains
+accepted tuner state.
+
+Command execution has a separate 9-second deadline (`TUNER_COMMAND_TIMEOUT`,
+503 with `Retry-After: 1`); expired commands cannot apply late writes. Each source
+retains at most 16 commands (one executing plus 15 waiting). Overflow returns
+503 `TUNER_QUEUE_FULL` with `Retry-After: 1`. Missing or removed tuner sources
+return 404 `TUNER_SOURCE_NOT_FOUND`; disconnected sources return 503
+`SOURCE_DISCONNECTED`. Commanded reconnects return 503 `SOURCE_RECONNECTING`
+with `Retry-After: 1` when recovery exceeds its deadline.
 
 ### Current-window IQ snapshot
 
@@ -74,19 +83,22 @@ unsigned 8-bit I and Q. Length is `round(seconds × sampleRate) × 2`, capped at
 `10 × 2,400,000 × 2 = 48,000,000` bytes; at higher rates the cap shortens the window.
 Only one snapshot can run per process; another receives 429 `IQ_SNAPSHOT_BUSY`.
 
-The fanout never waits for a snapshot client. A write that fills the response
-buffer may drain before the next source chunk arrives. Otherwise the download
-aborts and detaches the branch, retaining at most one source chunk. The drain
-deadline is twice the written chunk duration: `ceil(bytes / (sampleRate × 2) ×
-2 × 1000)` milliseconds, at least 1 ms and subject to the overall capture deadline.
+The fanout never waits for a snapshot client. Response buffering is capped at
+2,000,000 bytes (approximately `2,000,000 / (2,400,000 × 2) = 417 ms` at
+2.4 Msps); exceeding the cap aborts and detaches the branch. During capture, a
+continuously undrained response also aborts after one second (twice that buffer duration,
+rounded up to a whole second). Additional source chunks do not reset that timer. A completed capture detaches
+immediately; its buffered tail gets at most the requested duration (up to 10 seconds)
+to finish before the transport closes and releases the slot.
 Fanout congestion also aborts the download. Source removal, disconnect,
 tuning/capability change, lease revocation or client closure also aborts it.
 Silent input times out after twice the
 requested duration (at most 20 seconds). An aborted download may already have 200
 headers: clients must reject incomplete bodies against `Content-Length`.
 
-The snapshot plugin and tuner gate require server composition wiring; deployments
-without that wiring do not expose the endpoint or enable recovery waiting.
+The snapshot endpoint is mounted when protected access and source fanout routing
+are configured. An already aborted download request returns `REQUEST_ABORTED`
+(status 499 when a response is still possible), rather than an authentication error.
 
 ## Base URL
 

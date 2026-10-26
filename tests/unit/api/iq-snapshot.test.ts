@@ -7,6 +7,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import {
 	iqSnapshotRoutes,
 	IQ_SNAPSHOT_MAX_BYTES,
+	IQ_SNAPSHOT_MAX_BUFFERED_BYTES,
+	IQ_SNAPSHOT_DRAIN_TIMEOUT_MS,
 	type IqSnapshotOptions,
 } from "../../../src/api/routes/iq-snapshot.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
@@ -31,6 +33,7 @@ let denial: DeniedAdmission | undefined
 let response: ServerResponse | undefined
 let invalidate: (() => void) | undefined
 let release: ReturnType<typeof vi.fn>
+let rejectAborted = false
 const url = "/api/sources/source/iq-snapshot"
 const payload = { seconds: 0.1, format: "cu8" }
 const start = async (body = payload) => {
@@ -80,6 +83,7 @@ const startHttp = async (body = payload, paused = false) => {
 }
 beforeEach(async () => {
 	rate = 1000
+	rejectAborted = false
 	denial = undefined
 	response = undefined
 	release = vi.fn()
@@ -105,6 +109,10 @@ beforeEach(async () => {
 		access: {
 			authorizeMetadataMutation: () => denial,
 			leaseDownload: (_request, raw, cancel) => {
+				if (rejectAborted) {
+					Object.defineProperty(_request.raw, "aborted", { value: true })
+					return { kind: "rejected", reason: "invalidated" }
+				}
 				response = raw
 				let released = false
 				const finish = () => {
@@ -317,7 +325,7 @@ it.each([
 		expect((await next.pending).statusCode).toBe(200)
 	},
 )
-it("aborts a paused HTTP client on the next source chunk and admits a follow-up", async () => {
+it("aborts a paused HTTP client over the byte cap and admits a follow-up", async () => {
 	rate = 2_400_000
 	const download = await startHttp({ seconds: 10, format: "cu8" }, true)
 	try {
@@ -328,10 +336,6 @@ it("aborts a paused HTTP client on the next source chunk and admits a follow-up"
 		// 8 MiB exceeds socket buffering even with the client no longer reading.
 		input.write(Buffer.alloc(8 * 1024 * 1024))
 		await nextTurn()
-		expect(response!.writableNeedDrain).toBe(true)
-		expect(response!.destroyed).toBe(false)
-		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(1)
-		input.write(Buffer.alloc(1))
 		expect(response!.destroyed).toBe(true)
 		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
 		expect(release).toHaveBeenCalledOnce()
@@ -355,30 +359,71 @@ it("aborts a paused HTTP client on the next source chunk and admits a follow-up"
 		next.client.destroy()
 	}
 })
-it.each([
-	[1000, 100, 100],
-	[10_000, 1, 1],
-])(
-	"aborts an undrained chunk at and past its deadline: rate %s, bytes %s, ms %s",
-	async (sampleRate, size, deadline) => {
-		rate = sampleRate
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const { pending } = await start()
-		const rejected = pending.catch(() => undefined)
-		vi.spyOn(response!, "write").mockReturnValue(false)
-		input.write(Buffer.alloc(size))
-		// max(1, ceil(bytes / (rate × 2) × 2 × 1000)) tests the duration
-		// and the 1 ms minimum, immediately before, at, and past expiry.
-		await vi.advanceTimersByTimeAsync(deadline - 1)
-		expect(response!.destroyed).toBe(false)
-		await vi.advanceTimersByTimeAsync(1)
-		expect(response!.destroyed).toBe(true)
-		await vi.advanceTimersByTimeAsync(1)
-		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
-		expect(release).toHaveBeenCalledOnce()
-		await rejected
-	},
-)
+it("aborts a continuously undrained HTTP response at and past the grace", async () => {
+	rate = 2_400_000
+	const download = await startHttp({ seconds: 10, format: "cu8" })
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(7_654_321)
+	vi.spyOn(response!, "write").mockReturnValue(false)
+	input.write(Buffer.alloc(137))
+	await vi.advanceTimersByTimeAsync(IQ_SNAPSHOT_DRAIN_TIMEOUT_MS - 1)
+	expect(response!.destroyed).toBe(false)
+	// Another source block cannot extend the original drain deadline.
+	input.write(Buffer.alloc(139))
+	await vi.advanceTimersByTimeAsync(1)
+	expect(response!.destroyed).toBe(true)
+	await vi.advanceTimersByTimeAsync(137)
+	expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+	expect(release).toHaveBeenCalledOnce()
+	download.client.destroy()
+	await download.result
+})
+
+it("accepts the exact byte cap and aborts past it on real HTTP", async () => {
+	rate = 2_400_000
+	const download = await startHttp({ seconds: 10, format: "cu8" })
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+	vi.spyOn(response!, "write").mockReturnValue(false)
+	const buffered = vi.spyOn(response!, "writableLength", "get")
+	buffered.mockReturnValue(IQ_SNAPSHOT_MAX_BUFFERED_BYTES)
+	input.write(Buffer.alloc(137))
+	expect(response!.destroyed).toBe(false)
+	await vi.advanceTimersByTimeAsync(137)
+	buffered.mockReturnValue(IQ_SNAPSHOT_MAX_BUFFERED_BYTES + 1)
+	input.write(Buffer.alloc(139))
+	expect(response!.destroyed).toBe(true)
+	expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+	download.client.destroy()
+	await download.result
+})
+
+it("completes a slow steady HTTP reader within the byte cap", async () => {
+	rate = 2_400_000
+	const download = await startHttp({ seconds: 0.37, format: "cu8" }, true)
+	try {
+		input.write(Buffer.alloc(65_536))
+		const message = await download.incoming
+		// Source blocks can arrive while the reader is paused without aborting.
+		input.write(Buffer.alloc(65_536))
+		await new Promise(resolve => setTimeout(resolve, 37))
+		message.resume()
+		let remaining = Math.round(0.37 * rate) * 2 - 2 * 65_536
+		while (remaining > 0) {
+			const bytes = Math.min(65_536, remaining)
+			input.write(Buffer.alloc(bytes))
+			remaining -= bytes
+			await nextTurn()
+		}
+		expect(await download.result).toEqual({
+			bytes: 1_776_000,
+			complete: true,
+			status: 200,
+		})
+	} finally {
+		download.client.destroy()
+	}
+})
+
 it.each(["caps-changed", "disconnected", "invalidate"])(
 	"detaches on %s",
 	async reason => {
@@ -507,4 +552,15 @@ it("keeps the process slot until the binary response finishes", async () => {
 	end.mockRestore()
 	response!.end()
 	expect((await pending).statusCode).toBe(200)
+})
+
+it("reports an aborted lease request without an authentication error", async () => {
+	rejectAborted = true
+	const result = await app.inject({ method: "POST", url, payload })
+	expect(result.statusCode).toBe(499)
+	expect(result.json()).toEqual({ code: "REQUEST_ABORTED" })
+	rejectAborted = false
+	const next = await start()
+	input.write(Buffer.alloc(200))
+	expect((await next.pending).statusCode).toBe(200)
 })

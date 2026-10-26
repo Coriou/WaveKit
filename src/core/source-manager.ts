@@ -62,6 +62,8 @@ export const SOURCE_CONNECT_TIMEOUT_MS = 5000
 // 2^1 × 2 s backoff + 5 s connect timeout = 9 s, excluding FIFO/recovery waits.
 export const TUNER_COMMAND_TIMEOUT_MS =
 	2 ** 1 * 2000 + SOURCE_CONNECT_TIMEOUT_MS
+// 1 executing command + 15 waiting commands = at most 16 retained requests per source.
+export const TUNER_COMMAND_QUEUE_LIMIT = 16
 // Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
 export const SOURCE_STALL_TIMEOUT_MS = 15_000
 // TCP keepalive is defence in depth for a dead peer (Node 21+ on Linux probes
@@ -598,6 +600,7 @@ export class SourceManager extends EventEmitter {
 		const paused =
 			type === "recording" ? state.evidencePaused : (attempt?.paused ?? false)
 		const age = sample === null ? null : Math.max(0, now - sample)
+		const sinceSample = now - Math.max(sample ?? 0, expectedSince)
 		const delivery =
 			phase === "ended"
 				? "ended"
@@ -609,8 +612,7 @@ export class SourceManager extends EventEmitter {
 							? "paused"
 							: age !== null && age < SAMPLE_TIMEOUT_MS
 								? "streaming"
-								: now - Math.max(sample ?? 0, expectedSince) >=
-									SAMPLE_TIMEOUT_MS
+								: sinceSample >= SAMPLE_TIMEOUT_MS
 									? "stale"
 									: "waiting"
 		const headerApplicable =
@@ -2561,11 +2563,15 @@ export class SourceManager extends EventEmitter {
 		return state?.rtlTcpHeaderInfo ?? undefined
 	}
 
+	override emit(event: string | symbol, ...args: unknown[]): boolean {
+		return this.tunerCommandContext.exit(() => super.emit(event, ...args))
+	}
+
 	// One FIFO per source; only commanded rate changes authorize reconnect waits.
 	private readonly tunerCommands = new Map<string, Promise<void>>()
 	private readonly rateRecovery = new Map<
 		string,
-		{ deadline: number; socket: net.Socket }
+		{ deadline: number; socket: net.Socket; owner: AbortSignal }
 	>()
 
 	private readonly tunerCommandContext = new AsyncLocalStorage<AbortSignal>()
@@ -2573,6 +2579,11 @@ export class SourceManager extends EventEmitter {
 		string,
 		Set<AbortController>
 	>()
+
+	/** Keep work started by hooks and listeners independent of the caller lifetime. */
+	withoutTunerCommand<T>(work: () => T): T {
+		return this.tunerCommandContext.exit(work)
+	}
 
 	/** Reject late writes and state changes from a cancelled tuner command. */
 	assertTunerCommandActive(): void {
@@ -2586,6 +2597,14 @@ export class SourceManager extends EventEmitter {
 	): Promise<T> {
 		if (!this.sources.has(id))
 			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
+		if (
+			(this.tunerCommandControllers.get(id)?.size ?? 0) >=
+			TUNER_COMMAND_QUEUE_LIMIT
+		)
+			throw new WaveKitError(
+				"Tuner command queue is full; retry",
+				"TUNER_QUEUE_FULL",
+			)
 		const controller = new AbortController()
 		const { signal } = controller
 		const controllers =
@@ -2618,9 +2637,9 @@ export class SourceManager extends EventEmitter {
 				)
 			} finally {
 				clearTimeout(timer)
+				if (this.rateRecovery.get(id)?.owner === signal)
+					await this.waitForTunerReady(id)
 			}
-			signal.throwIfAborted()
-			await this.waitForTunerReady(id)
 			signal.throwIfAborted()
 			return result
 		})
@@ -2634,6 +2653,15 @@ export class SourceManager extends EventEmitter {
 			return await pending
 		} finally {
 			clearTimeout(timer)
+			const recovery = this.rateRecovery.get(id)
+			if (signal.aborted && recovery?.owner === signal) {
+				this.rateRecovery.delete(id)
+				if (
+					this.sources.get(id)?.socket === recovery.socket &&
+					this.sources.get(id)?.connected
+				)
+					recovery.socket.destroySoon()
+			}
 			signal.removeEventListener("abort", onAbort)
 			controllers.delete(controller)
 			if (
@@ -2648,6 +2676,19 @@ export class SourceManager extends EventEmitter {
 	private async waitForTunerReady(id: string): Promise<void> {
 		const recovery = this.rateRecovery.get(id)
 		if (recovery === undefined) return
+		// An expired unchanged connection still supplying IQ needs no late restart.
+		const state = this.sources.get(id)
+		if (
+			recovery.deadline <= Date.now() &&
+			state?.socket === recovery.socket &&
+			state.connected &&
+			state.socket.writable &&
+			state.lastSampleAt !== null &&
+			state.lastSampleAt >= recovery.deadline
+		) {
+			this.rateRecovery.delete(id)
+			return
+		}
 		// Drain the complete API command (including bulk writes), then reopen.
 		// Keeping the registration preserves the source stream and assignments.
 		if (
@@ -2742,10 +2783,11 @@ export class SourceManager extends EventEmitter {
 
 		const socket = state.socket
 		const rateChange =
-			this.tunerCommands.has(id) &&
+			this.tunerCommandContext.getStore() !== undefined &&
 			payload.length === 5 &&
 			payload[0] === 0x02 &&
 			payload.readUInt32BE(1) !== state.config.caps.sampleRate
+		const accepted = socket.write(payload)
 		if (rateChange) {
 			// First retry: <= 4 s equal-jitter backoff (2^1 × 2 s) + 5 s
 			// connect timeout = 9 s. A later retry needs a new caller request.
@@ -2753,9 +2795,9 @@ export class SourceManager extends EventEmitter {
 				deadline:
 					Date.now() + calculateBackoffDelay(1) + SOURCE_CONNECT_TIMEOUT_MS,
 				socket,
+				owner: this.tunerCommandContext.getStore()!,
 			})
 		}
-		const accepted = socket.write(payload)
 		return accepted
 	}
 

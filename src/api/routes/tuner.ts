@@ -139,7 +139,8 @@ function handleTunerError(reply: FastifyReply, err: unknown): unknown {
 	const maybeStatus = err as { statusCode?: number; code?: string }
 	if (
 		maybeStatus?.code === "SOURCE_RECONNECTING" ||
-		maybeStatus?.code === "TUNER_COMMAND_TIMEOUT"
+		maybeStatus?.code === "TUNER_COMMAND_TIMEOUT" ||
+		maybeStatus?.code === "TUNER_QUEUE_FULL"
 	) {
 		reply.header("Retry-After", "1")
 		return reply.status(503).send({
@@ -149,9 +150,19 @@ function handleTunerError(reply: FastifyReply, err: unknown): unknown {
 		})
 	}
 	const statusCode =
-		typeof maybeStatus?.statusCode === "number" ? maybeStatus.statusCode : 500
+		maybeStatus?.code === "SOURCE_NOT_FOUND"
+			? 404
+			: maybeStatus?.code === "SOURCE_DISCONNECTED"
+				? 503
+				: typeof maybeStatus?.statusCode === "number"
+					? maybeStatus.statusCode
+					: 500
 	const code =
-		typeof maybeStatus?.code === "string" ? maybeStatus.code : "TUNER_ERROR"
+		maybeStatus?.code === "SOURCE_NOT_FOUND"
+			? "TUNER_SOURCE_NOT_FOUND"
+			: typeof maybeStatus?.code === "string"
+				? maybeStatus.code
+				: "TUNER_ERROR"
 
 	return reply.status(statusCode).send({
 		error: error.name || "TunerError",

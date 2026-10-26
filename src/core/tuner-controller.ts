@@ -391,6 +391,17 @@ function stateFieldOf(cmd: number): TunerStateField | undefined {
 }
 
 export class TunerController extends EventEmitter {
+	private withoutCommand<T>(work: () => T): T {
+		// Small transport fakes need only implement the write boundary.
+		return this.sourceManager?.withoutTunerCommand
+			? this.sourceManager.withoutTunerCommand(work)
+			: work()
+	}
+
+	override emit(event: string | symbol, ...args: unknown[]): boolean {
+		return this.withoutCommand(() => super.emit(event, ...args))
+	}
+
 	private beforeOperatorRetune: RatePolicy["beforeOperatorRetune"] | null = null
 	private onOperatorSampleRate: RatePolicy["onOperatorSampleRate"] | null = null
 	private onRelayRetune: RatePolicy["onRelayRetune"] | null = null
@@ -645,7 +656,9 @@ export class TunerController extends EventEmitter {
 		state.controlMode = mode
 		if (mode === "internal" && this.onRelayRetune) {
 			try {
-				this.onRelayRetune(sourceId, state.frequency)
+				this.withoutCommand(() =>
+					this.onRelayRetune?.(sourceId, state.frequency),
+				)
 			} catch (err) {
 				this.log.warn(
 					{ sourceId, err: safeErrorFields(err) },
@@ -891,9 +904,9 @@ export class TunerController extends EventEmitter {
 		if (updated) {
 			try {
 				if (command === RTL_TCP_COMMANDS.SET_FREQUENCY)
-					this.onRelayRetune?.(sourceId, value)
+					this.withoutCommand(() => this.onRelayRetune?.(sourceId, value))
 				if (command === RTL_TCP_COMMANDS.SET_SAMPLE_RATE)
-					this.onOperatorSampleRate?.(sourceId)
+					this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 			} catch (err) {
 				this.log.warn(
 					{ sourceId, err: safeErrorFields(err) },
@@ -933,7 +946,9 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("frequency", hz, VALIDATION.frequency)
 		if (opts.origin === "rest" && this.beforeOperatorRetune) {
-			await this.beforeOperatorRetune(sourceId, hz, opts)
+			await this.withoutCommand(() =>
+				this.beforeOperatorRetune?.(sourceId, hz, opts),
+			)
 			await this.proveSampleRateForFrequency(sourceId, opts, hz)
 		}
 		await this.writeFrequency(sourceId, hz, opts, state)
@@ -1005,7 +1020,7 @@ export class TunerController extends EventEmitter {
 			await pending.promise
 			return false
 		}
-		const promise = (async () => {
+		const promise = this.withoutCommand(async () => {
 			try {
 				await this.setSampleRate(sourceId, hz, opts)
 				this.sourceManager.assertTunerCommandActive()
@@ -1016,7 +1031,7 @@ export class TunerController extends EventEmitter {
 				if (this.rateProofInFlight.get(sourceId)?.epoch === epoch)
 					this.rateProofInFlight.delete(sourceId)
 			}
-		})()
+		})
 		this.rateProofInFlight.set(sourceId, { epoch, promise })
 		return promise
 	}
@@ -1036,7 +1051,8 @@ export class TunerController extends EventEmitter {
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.sampleRate = hz
-		if (opts.origin === "rest") this.onOperatorSampleRate?.(sourceId)
+		if (opts.origin === "rest")
+			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 		try {
 			this.sourceManager.updateSourceCaps(sourceId, { sampleRate: hz })
 		} catch (err) {
@@ -1293,7 +1309,9 @@ export class TunerController extends EventEmitter {
 			opts.origin === "rest" && this.beforeOperatorRetune !== null
 		if (updates.frequency !== undefined && updates.sampleRate === undefined) {
 			if (policyBulk) {
-				await this.beforeOperatorRetune?.(sourceId, updates.frequency, opts)
+				await this.withoutCommand(() =>
+					this.beforeOperatorRetune?.(sourceId, updates.frequency!, opts),
+				)
 				this.sourceManager.assertTunerCommandActive()
 				this.emitStateChanged(sourceId)
 			}
@@ -1324,7 +1342,7 @@ export class TunerController extends EventEmitter {
 			this.onOperatorSampleRate
 		) {
 			this.sourceManager.assertTunerCommandActive()
-			this.onOperatorSampleRate(sourceId)
+			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 			this.emitStateChanged(sourceId)
 		}
 		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {

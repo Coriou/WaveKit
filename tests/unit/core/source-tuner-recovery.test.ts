@@ -6,6 +6,7 @@ import {
 	calculateBackoffDelay,
 	SOURCE_CONNECT_TIMEOUT_MS,
 	TUNER_COMMAND_TIMEOUT_MS,
+	TUNER_COMMAND_QUEUE_LIMIT,
 } from "../../../src/core/source-manager.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import Fastify from "fastify"
@@ -303,4 +304,281 @@ it("clears expired recovery when background reconnect finally supplies IQ", asyn
 			manager.writeToSource("source", frame(4, 42))
 		}),
 	).rejects.toMatchObject({ code: "SOURCE_DISCONNECTED" })
+})
+
+it("does not restart for an independent rate write while a command is queued", async () => {
+	const { manager } = await setup()
+	const gate = Promise.withResolvers<void>()
+	const entered = Promise.withResolvers<void>()
+	const first = manager.runTunerCommand("source", async () => {
+		entered.resolve()
+		await gate.promise
+	})
+	await entered.promise
+	const gain = manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(4, 42))
+	})
+	const disconnected = vi.fn()
+	manager.on("disconnected", disconnected)
+	manager.writeToSource("source", frame(2, 1_200_000))
+	gate.resolve()
+	await Promise.all([first, gain])
+	expect(disconnected).not.toHaveBeenCalled()
+})
+
+it("recovers a rate write even when the rest of the command fails", async () => {
+	const { manager } = await setup()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(6_543_219)
+	vi.spyOn(Math, "random").mockReturnValue(0)
+	const lost = once(manager, "disconnected")
+	const failed = manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(2, 1_200_000))
+		throw new WaveKitError("Command failed", "TEST_FAILURE")
+	})
+	const checked = expect(failed).rejects.toMatchObject({ code: "TEST_FAILURE" })
+	await lost
+	const payload = once(manager, "payload-started")
+	await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+	await payload
+	await checked
+	await vi.advanceTimersByTimeAsync(123_137)
+	const disconnected = vi.fn()
+	manager.on("disconnected", disconnected)
+	await manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(4, 42))
+	})
+	expect(disconnected).not.toHaveBeenCalled()
+})
+
+it("cleans up a hung rate writer when its command times out", async () => {
+	const { manager } = await setup()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(6_543_219)
+	vi.spyOn(Math, "random").mockReturnValue(0)
+	const entered = Promise.withResolvers<void>()
+	const hung = manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(2, 1_200_000))
+		entered.resolve()
+		await new Promise<void>(() => {})
+	})
+	const checked = expect(hung).rejects.toMatchObject({
+		code: "TUNER_COMMAND_TIMEOUT",
+	})
+	await entered.promise
+	const lost = once(manager, "disconnected")
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS)
+	await checked
+	await lost
+	const payload = once(manager, "payload-started")
+	await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+	await payload
+	await vi.advanceTimersByTimeAsync(123_137)
+	await manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(4, 42))
+	})
+})
+
+it.each([0, 137])(
+	"drops an expired recovery on the same socket still delivering IQ at offset %s",
+	async offset => {
+		const { manager, sockets } = await setup()
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+		vi.setSystemTime(8_765_431)
+		const gate = Promise.withResolvers<void>()
+		const entered = Promise.withResolvers<void>()
+		const pending = manager.runTunerCommand("source", async () => {
+			manager.writeToSource("source", frame(2, 1_200_000))
+			entered.resolve()
+			await gate.promise
+		})
+		await entered.promise
+		// Move the clock without firing the command timer, simulating a delayed loop.
+		vi.setSystemTime(Date.now() + TUNER_COMMAND_TIMEOUT_MS + offset)
+		const stream = manager.getStream("source")!
+		const data = once(stream, "data")
+		for (const socket of sockets) socket.write(Buffer.alloc(8))
+		await data
+		const disconnected = vi.fn()
+		manager.on("disconnected", disconnected)
+		gate.resolve()
+		await pending
+		await manager.runTunerCommand("source", async () => {})
+		expect(disconnected).not.toHaveBeenCalled()
+	},
+)
+
+it("bounds retained commands at the queue limit and rejects the next request", async () => {
+	const { manager } = await setup()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(9_876_543)
+	const gate = Promise.withResolvers<void>()
+	const first = manager.runTunerCommand("source", () => gate.promise)
+	const queued = Array.from({ length: TUNER_COMMAND_QUEUE_LIMIT - 1 }, () =>
+		manager.runTunerCommand("source", async () => {}),
+	)
+	await vi.advanceTimersByTimeAsync(137)
+	await expect(
+		manager.runTunerCommand("source", async () => {}),
+	).rejects.toMatchObject({ code: "TUNER_QUEUE_FULL" })
+	gate.resolve()
+	await Promise.all([first, ...queued])
+	await vi.advanceTimersByTimeAsync(139)
+	await manager.runTunerCommand("source", async () => {})
+})
+
+it("keeps scanner work started by a control listener outside the command fence", async () => {
+	const { manager } = await setup()
+	const tuner = new TunerController(createLogger({ level: "fatal" }), manager)
+	tuner.initializeSource("source", manager.getCaps("source"), "rtl_tcp")
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(3_456_789)
+	const entered = Promise.withResolvers<void>()
+	const resume = Promise.withResolvers<void>()
+	let scanner = Promise.resolve()
+	tuner.on("control-mode-changed", () => {
+		scanner = (async () => {
+			await resume.promise
+			await tuner.setGain("source", 42)
+		})()
+		entered.resolve()
+	})
+	const hung = manager.runTunerCommand("source", async () => {
+		tuner.setControlMode("source", "external")
+		await new Promise<void>(() => {})
+	})
+	const checked = expect(hung).rejects.toMatchObject({
+		code: "TUNER_COMMAND_TIMEOUT",
+	})
+	await entered.promise
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS + 137)
+	await checked
+	// Restore control before the independently running scanner writes.
+	tuner.removeAllListeners("control-mode-changed")
+	tuner.setControlMode("source", "internal")
+	resume.resolve()
+	await scanner
+})
+
+async function routeApp(manager: SourceManager) {
+	const controller = new TunerController(
+		createLogger({ level: "fatal" }),
+		manager,
+	)
+	controller.initializeSource("source", manager.getCaps("source"), "rtl_tcp")
+	controller.on("error", () => {})
+	const app = Fastify()
+	await app.register(tunerRoutes, {
+		tunerController: controller,
+		sourceManager: manager,
+	})
+	await app.ready()
+	cleanup.push(() => app.close())
+	return app
+}
+
+it("maps missing and removed sources to the compatible tuner not-found response", async () => {
+	const { manager } = await setup()
+	const app = await routeApp(manager)
+	const missing = await app.inject({
+		method: "POST",
+		url: "/api/tuner/nope/gain",
+		payload: { tenthsDb: 42 },
+	})
+	expect(missing.statusCode).toBe(404)
+	expect(missing.json()).toMatchObject({ code: "TUNER_SOURCE_NOT_FOUND" })
+	await manager.disconnect("source")
+	const removed = await app.inject({
+		method: "POST",
+		url: "/api/tuner/source/gain",
+		payload: { tenthsDb: 42 },
+	})
+	expect(removed.statusCode).toBe(404)
+	expect(removed.json()).toMatchObject({ code: "TUNER_SOURCE_NOT_FOUND" })
+})
+
+it("maps a disconnected real transport to service unavailable", async () => {
+	const { manager, sockets } = await setup()
+	const app = await routeApp(manager)
+	const lost = once(manager, "disconnected")
+	for (const socket of sockets) socket.destroy()
+	await lost
+	const result = await app.inject({
+		method: "POST",
+		url: "/api/tuner/source/gain",
+		payload: { tenthsDb: 42 },
+	})
+	expect(result.statusCode).toBe(503)
+	expect(result.json()).toMatchObject({ code: "SOURCE_DISCONNECTED" })
+})
+
+it("maps command timeout and queue overflow to retryable HTTP errors", async () => {
+	const { manager } = await setup()
+	const app = await routeApp(manager)
+	const tuner = new TunerController(createLogger({ level: "fatal" }), manager)
+	tuner.initializeSource("source", manager.getCaps("source"), "rtl_tcp")
+	const entered = Promise.withResolvers<void>()
+	tuner.setBeforeOperatorRetune(() => {
+		entered.resolve()
+		return new Promise<void>(() => {})
+	})
+	const delayedApp = Fastify()
+	await delayedApp.register(tunerRoutes, {
+		tunerController: tuner,
+		sourceManager: manager,
+	})
+	await delayedApp.ready()
+	cleanup.push(() => delayedApp.close())
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(6_543_219)
+	const request = delayedApp
+		.inject({
+			method: "POST",
+			url: "/api/tuner/source/frequency",
+			payload: { hz: 2 ** 25 + 137 },
+		})
+		.then(result => result)
+	await entered.promise
+	await vi.advanceTimersByTimeAsync(137)
+	const queued = Array.from({ length: TUNER_COMMAND_QUEUE_LIMIT - 1 }, () =>
+		manager.runTunerCommand("source", async () => {}),
+	)
+	const overflow = await app.inject({
+		method: "POST",
+		url: "/api/tuner/source/gain",
+		payload: { tenthsDb: 42 },
+	})
+	expect(overflow.statusCode).toBe(503)
+	expect(overflow.json()).toMatchObject({ code: "TUNER_QUEUE_FULL" })
+	expect(overflow.headers["retry-after"]).toBe("1")
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS)
+	const result = await request
+	expect(result.statusCode).toBe(503)
+	expect(result.json()).toMatchObject({ code: "TUNER_COMMAND_TIMEOUT" })
+	expect(result.headers["retry-after"]).toBe("1")
+	await Promise.all(queued)
+})
+
+it("maps the real rate recovery deadline to a retryable HTTP response", async () => {
+	const { manager, server } = await setup()
+	const app = await routeApp(manager)
+	server.close()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(7_654_321)
+	const lost = once(manager, "disconnected")
+	const pending = app
+		.inject({
+			method: "POST",
+			url: "/api/tuner/source/sample-rate",
+			payload: { hz: 1_200_000 },
+		})
+		.then(result => result)
+	await lost
+	await vi.advanceTimersByTimeAsync(
+		calculateBackoffDelay(1) + SOURCE_CONNECT_TIMEOUT_MS,
+	)
+	const result = await pending
+	expect(result.statusCode).toBe(503)
+	expect(result.json()).toMatchObject({ code: "SOURCE_RECONNECTING" })
+	expect(result.headers["retry-after"]).toBe("1")
 })

@@ -2427,6 +2427,7 @@ async function main(): Promise<void> {
 				sourceManager,
 				fanoutManager,
 				fanoutTelemetry: sourceRouting,
+				iqSnapshotFanoutFor: sourceId => sourceRouting.getFanout(sourceId),
 				decoderManager,
 				decoderRegistry,
 				audioOutput,

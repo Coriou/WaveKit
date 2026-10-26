@@ -8,6 +8,10 @@ import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 
 // 10 seconds × 2,400,000 complex samples/second × 2 CU8 bytes = 48 MB.
 export const IQ_SNAPSHOT_MAX_BYTES = 10 * 2_400_000 * 2
+// 2,000,000 / (2,400,000 × 2 CU8 bytes/s) ≈ 417 ms of IQ buffering.
+export const IQ_SNAPSHOT_MAX_BUFFERED_BYTES = 2_000_000
+// Twice that buffer duration, rounded up to a whole second: ceil(2 × 417 / 1000) × 1000.
+export const IQ_SNAPSHOT_DRAIN_TIMEOUT_MS = 1000
 // Capture windows are 1/10 second through 10 seconds, inclusive.
 const bodySchema = z
 	.object({
@@ -80,6 +84,8 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 			)
 			if (lease.kind === "rejected") {
 				capturing = false
+				if (request.raw.aborted || reply.raw.destroyed)
+					return reply.code(499).send({ code: "REQUEST_ABORTED" })
 				const status =
 					lease.reason === "capacity"
 						? 429
@@ -140,7 +146,6 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 				const drained = () => {
 					waitingForDrain = false
 					clearTimeout(drainTimer)
-					if (remaining === 0) complete()
 				}
 				const closed = () => abort()
 				const changed = (id: string) => {
@@ -151,7 +156,7 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 				}
 				const onData = (chunk: Buffer) => {
 					if (finished) return
-					if (waitingForDrain) return abort()
+
 					if (!started) {
 						started = true
 						reply.raw.setHeader(
@@ -162,24 +167,19 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 					const output = chunk.subarray(0, remaining)
 					remaining -= output.length
 					const accepted = reply.raw.write(output)
+					if (reply.raw.writableLength > IQ_SNAPSHOT_MAX_BUFFERED_BYTES)
+						return abort()
 					// The last chunk detaches from the source at once; end() lets the
 					// buffered tail drain without later source chunks aborting it.
 					if (remaining === 0) return complete()
-					if (!accepted) {
+					if (!accepted && !waitingForDrain) {
 						waitingForDrain = true
 						reply.raw.once("drain", drained)
-						// Allow 2 chunk durations: bytes / (sampleRate × 2 CU8 bytes)
-						// × 2 × 1000 ms, rounded up to at least 1 ms. The capture
-						// deadline still caps the entire request at 2 × seconds.
-						const drainMs = Math.max(
-							1,
-							Math.ceil((output.length * 2 * 1000) / (caps.sampleRate * 2)),
-						)
-						drainTimer = setTimeout(abort, drainMs)
+						// A continuous undrained interval gets at most the buffer grace;
+						// new chunks never reset it or pause the source.
+						drainTimer = setTimeout(abort, IQ_SNAPSHOT_DRAIN_TIMEOUT_MS)
 						drainTimer.unref()
-						return
 					}
-					if (remaining === 0) complete()
 				}
 				cleanup = () => {
 					if (finished) return
@@ -221,7 +221,10 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 				reply.raw.on("error", closed)
 				if (!lease.active()) {
 					cleanup()
-					return reply.code(401).send({ code: "AUTH_REQUIRED" })
+					releaseSlot()
+					return request.raw.aborted || reply.raw.destroyed
+						? reply.code(499).send({ code: "REQUEST_ABORTED" })
+						: reply.code(401).send({ code: "AUTH_REQUIRED" })
 				}
 				for (const [name, value] of Object.entries(reply.getHeaders())) {
 					if (value !== undefined) reply.raw.setHeader(name, value)
