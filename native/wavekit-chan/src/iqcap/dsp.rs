@@ -466,4 +466,23 @@ mod tests {
         assert!(!replay_shape_ok(40_000.0, 5_000.0));
         assert!(replay_shape_ok(12_500.0, 576.0));
     }
+
+    #[test]
+    fn out_rate_length_is_ceil_of_samples_over_factor() {
+        // The core's replay completion check (`replayOutputBytes`) relies on this exact count:
+        // no filter tail, the first sample kept, ceil(N / D) complex samples out.
+        for (rate, n) in [
+            (96_000u64, 9_600usize),
+            (96_000, 9_601),
+            (192_000, 19_201),
+            (192_000, 19_202),
+            (192_000, 19_203),
+            (192_000, 19_204),
+        ] {
+            let x: Vec<f32> = (0..n * 2).map(|k| (k as f32 * 0.01).sin()).collect();
+            let d = (rate / CAPTURE_RATE_HZ) as usize;
+            let y = to_capture_rate(&x, rate, 16_000.0, 576.0);
+            assert_eq!(y.len() / 2, n.div_ceil(d), "rate {rate}, {n} samples");
+        }
+    }
 }

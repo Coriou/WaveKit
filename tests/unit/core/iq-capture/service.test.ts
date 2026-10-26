@@ -931,6 +931,41 @@ describe("IqCaptureService openReplay", () => {
 		await s.svc.stop()
 	})
 
+	it.each([
+		// wavekit-iqcap replay --out-rate 48000 filters at the capture rate (same length), then
+		// keeps every D-th complex sample from the first: ceil(samples / D) samples out.
+		{ rateHz: 96_000, samples: 9_601, out: 4_801 },
+		{ rateHz: 192_000, samples: 19_202, out: 4_801 },
+		{ rateHz: 192_000, samples: 19_204, out: 4_801 },
+	])(
+		"a $rateHz Hz capture of $samples samples brought to 48 kHz completes with exactly $out samples",
+		async ({ rateHz, samples, out }) => {
+			const s = await setup({}, { samples, rates: [48_000, 96_000, 192_000] })
+			await running(s)
+			const got = s.svc.capture(req({ rateHz: rateHz as 96_000 | 192_000 }))
+			await flush(10)
+			const id = "captureId" in got ? got.captureId : ""
+			// Exactly the derived count ends cleanly.
+			const ok = s.svc.openReplay(id, "multimon-ng") as Readable
+			expect(lastReplay(s).args.slice(-2)).toEqual(["--out-rate", "48000"])
+			const done = readAll(ok)
+			lastReplay(s).stdout.write(Buffer.alloc(out * 8))
+			lastReplay(s).exit(0)
+			expect(await done).toEqual({ bytes: out * 8, error: null })
+			// One sample short is a failure, never an accepted short read.
+			const short = readAll(s.svc.openReplay(id, "multimon-ng") as Readable)
+			lastReplay(s).stdout.write(Buffer.alloc((out - 1) * 8))
+			lastReplay(s).exit(0)
+			expect((await short).error).toBeInstanceOf(Error)
+			// One sample over the derived count is a failure.
+			const over = readAll(s.svc.openReplay(id, "multimon-ng") as Readable)
+			lastReplay(s).stdout.write(Buffer.alloc((out + 1) * 8))
+			expect((await over).error).toBeInstanceOf(Error)
+			expect(s.svc.counters().replayFailures).toBe(2)
+			await s.svc.stop()
+		},
+	)
+
 	it("an older tool (no rates advertised): a 96 kHz request is an honest 48 kHz capture, replayed without --rate", async () => {
 		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
 		const s = await setup(

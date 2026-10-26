@@ -278,6 +278,27 @@ export function captureBandwidthHz(shapes: IqReplayShapes): number {
 	)
 }
 
+/**
+ * The exact byte count `wavekit-iqcap replay --rate R --out-rate O` writes for a cf32 capture of
+ * `fileBytes` at R. The tool low-passes at R with the group delay flushed and trimmed, so the
+ * filtered signal has exactly the input's N complex samples (no filter tail), then keeps every
+ * D = R / O-th sample starting with the first: ceil(N / D) samples, 8 bytes each
+ * (native/wavekit-chan/src/iqcap/dsp.rs `to_capture_rate`). With R = O this is the file size.
+ */
+export function replayOutputBytes(
+	fileBytes: number,
+	rateHz: number,
+	outRateHz: number,
+): number {
+	const factor = rateHz / outRateHz
+	if (!Number.isInteger(factor) || factor < 1 || fileBytes % 8 !== 0)
+		throw new WaveKitError(
+			"IQ replay output size is undefined for this capture",
+			"IQ_REPLAY_FAILED",
+		)
+	return Math.ceil(fileBytes / 8 / factor) * 8
+}
+
 export function createIqCaptureService(
 	options: IqCaptureServiceOptions,
 ): IqCaptureService {
@@ -1084,6 +1105,7 @@ class Service implements IqCaptureService {
 		// rtl433 reads the capture at its own rate with the whole passband up to its Nyquist edge;
 		// a 48 kHz decoder of a faster capture gets it brought down to 48 kHz (`--out-rate`).
 		const native = decoderType === "rtl433" && e.rateHz !== IQ_CAPTURE_RATE_HZ
+		const downsampled = !native && e.rateHz !== IQ_CAPTURE_RATE_HZ
 		const shape = native
 			? wholeCaptureShapeAt(given.bandwidthHz, e.rateHz)
 			: given
@@ -1105,6 +1127,16 @@ class Service implements IqCaptureService {
 		if (!verified) {
 			store.discard(captureId, "invalid")
 			return null
+		}
+		// The exact output size: the whole file, or for `--out-rate` its decimated length.
+		let limit: number
+		try {
+			limit = downsampled
+				? replayOutputBytes(verified.size, e.rateHz, IQ_CAPTURE_RATE_HZ)
+				: verified.size
+		} catch (err: unknown) {
+			fs.closeSync(verified.fd)
+			throw err
 		}
 		if (!store.beginReplay(captureId)) {
 			fs.closeSync(verified.fd)
@@ -1145,7 +1177,6 @@ class Service implements IqCaptureService {
 		set.add(child)
 		const out = new PassThrough()
 		out.on("error", () => {})
-		const limit = verified.size
 		let bytes = 0
 		let failed = false
 		const fail = () => {
