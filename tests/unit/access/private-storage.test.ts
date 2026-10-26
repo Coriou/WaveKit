@@ -393,7 +393,7 @@ describe("private single-operator persistence", () => {
 			const readFile = fs.readFile
 			vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
 				path === "/proc/sys/kernel/random/boot_id"
-					? Promise.resolve("current-linux-boot")
+					? Promise.resolve("11111111-1111-4111-8111-111111111111")
 					: readFile(path, options),
 			)
 			const { directory } = await location()
@@ -415,8 +415,8 @@ describe("private single-operator persistence", () => {
 							kind: "linux",
 							value:
 								kind === "different-linux-boot"
-									? "previous-linux-boot"
-									: "current-linux-boot",
+									? "22222222-2222-4222-8222-222222222222"
+									: "11111111-1111-4111-8111-111111111111",
 						}
 			// Even evidence of a reused PID cannot bypass the same-boot scope guard.
 			record.identity.startTime = { kind: "linux", value: "0" }
@@ -439,7 +439,7 @@ describe("private single-operator persistence", () => {
 			const readFile = fs.readFile
 			vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
 				path === "/proc/sys/kernel/random/boot_id"
-					? Promise.resolve("current-linux-boot")
+					? Promise.resolve("11111111-1111-4111-8111-111111111111")
 					: readFile(path, options),
 			)
 			const { directory } = await location()
@@ -455,7 +455,7 @@ describe("private single-operator persistence", () => {
 			await storage.close()
 			if (kind === "legacy-before-boot") delete record.identity
 			else if (kind === "different-boot")
-				record.identity!.bootId.value = "previous-boot"
+				record.identity!.bootId.value = "22222222-2222-4222-8222-222222222222"
 			else record.identity!.startTime.value = "0"
 			if (kind !== "different-start") record.scope = "a".repeat(64)
 			await fs.writeFile(path, JSON.stringify(record), { mode: 0o600 })
