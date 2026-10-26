@@ -23,6 +23,7 @@ describe("tuner REST writes carry origin rest (spec § 10.3)", () => {
 			exclusive: false,
 		}
 		const transport = {
+			assertTunerCommandActive: () => {},
 			writeToSource: () => true,
 			isRtlTcpSource: () => true,
 			updateSourceCaps: (_id: string, updates: Partial<SourceCaps>) =>

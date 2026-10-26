@@ -78,6 +78,7 @@ async function setup() {
 		exclusive: false,
 	}
 	const sourceManager = Object.assign(new EventEmitter(), {
+		assertTunerCommandActive: () => {},
 		writeToSource: () => true,
 		isRtlTcpSource: () => true,
 		getCaps: () => ({ ...caps }),

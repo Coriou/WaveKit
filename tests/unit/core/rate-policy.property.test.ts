@@ -31,6 +31,7 @@ async function harness(enabled = true) {
 	const commands: Array<[number, number]> = []
 	let fail = false
 	const source = {
+		assertTunerCommandActive() {},
 		writeToSource(_id: string, frame: Buffer) {
 			if (fail && frame[0] === 2)
 				throw new WaveKitError("rate failed", "TEST_RATE_FAILED")

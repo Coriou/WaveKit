@@ -188,6 +188,7 @@ function makeController(
 	const sources = new FakeSources("rtl", caps)
 	let failWrites = false
 	const manager = Object.assign(sources, {
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn(() => {
 			if (failWrites) throw new Error("socket closed")
 			return true

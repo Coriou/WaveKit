@@ -488,6 +488,7 @@ describe("trust from a real TunerController (WG5 R1)", () => {
 			exclusive: false,
 		}
 		const sources = {
+			assertTunerCommandActive: () => {},
 			writeToSource: () => true,
 			isRtlTcpSource: () => true,
 			getCaps: () => ({ ...caps }),

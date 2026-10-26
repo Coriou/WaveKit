@@ -2,6 +2,110 @@
 
 WaveKit exposes a REST API and WebSocket endpoint for control and real-time monitoring.
 
+## Automation and agents
+
+Protected APIs accept the machine credential in `Authorization: Bearer <token>`.
+An administrator obtains it from `machineToken` in the private directory's
+`access-state.json`, provisioned by the existing local
+`node dist/access-command.js setup` command with the core stopped. See
+[protected local setup](LOCAL-SETUP.md#protected-mode-locally). Use the host's private
+state directory (or the host directory mounted as private state); no container shell
+is needed. Keep this file private and never put the credential into URLs or logs.
+For example, with `PRIVATE_DIRECTORY` and `API_ORIGIN` set for your installation:
+
+```sh
+jq -r '.machineToken | "Authorization: Bearer \(.)"' "$PRIVATE_DIRECTORY/access-state.json" |
+  curl --fail --header @- "$API_ORIGIN/api/status"
+```
+
+There is no HTTP route that issues or exports a machine credential. Browser pairing
+issues a browser session, not a machine token. The existing local
+`node dist/access-command.js rotate-credential --private-directory ABS` command
+rotates it with the core stopped; pass `--keep-sessions` to retain remembered browsers.
+An agent without access to private host state must receive a credential securely
+from the administrator. Machine requests need the configured Host/Origin policy;
+do not send a browser cookie alongside the bearer credential.
+
+### Tuner commands during a sample-rate restart
+
+Tuner mutations for each source are FIFO,
+including frequency proof writes and bulk updates. A changed sample rate is flushed
+to the receiver, then its connection is deliberately reopened using the existing
+reconnect path. `POST /api/tuner/:sourceId/sample-rate` returns success only after the
+source is writable and delivering IQ again; queued commands then run in order.
+An unchanged rate needs no restart. Recovery requires the new connection’s first
+IQ payload so reconnect tuning
+restoration runs before queued commands. It does not prove the receiver has
+achieved a measured sample rate.
+
+Recovery waits at most 9 seconds from the rate write: first-retry equal-jitter
+backoff is at most `2^1 × 2 s = 4 s`, plus the 5-second connection timeout. At the
+bound the response is 503 with code `SOURCE_RECONNECTING`, a retry message and
+`Retry-After: 1`. The normal reconnect loop continues. A subsequent request can
+succeed once connected; while still disconnected it receives the same retry error.
+Other disconnects continue to fail immediately (`SOURCE_DISCONNECTED`); they do
+not authorize delayed commands. Queued commands whose recovery wait times out are
+not applied later. A 503 after a sample-rate change does not mean the rate was rejected: the
+write may already have reached the receiver. Reconnect restoration retains
+accepted tuner state. A decoder policy's original sample rate also survives a
+commanded recovery, so leaving its required tuning range restores that rate.
+An unplanned disconnect, source removal, or failed commanded recovery clears the
+policy record. Recovery expiry clears it even if the replacement connects without
+supplying IQ; later IQ does not restore the expired record.
+
+Command execution has a separate 9-second deadline (`TUNER_COMMAND_TIMEOUT`,
+503 with `Retry-After: 1`); expired commands cannot apply late writes. Hooks that
+await a nested command for the same source run it within the parent's cancellation
+signal and deadline, without adding another queue entry or timeout. Each source
+retains at most 16 commands (one executing plus 15 waiting). Overflow returns
+503 `TUNER_QUEUE_FULL` with `Retry-After: 1`. Missing or removed tuner sources
+return 404 `TUNER_SOURCE_NOT_FOUND`; disconnected sources return 503
+`SOURCE_DISCONNECTED`. Commanded reconnects return 503 `SOURCE_RECONNECTING`
+with `Retry-After: 1` when recovery exceeds its deadline.
+
+### Current-window IQ snapshot
+
+`POST /api/sources/:sourceId/iq-snapshot` accepts:
+
+```json
+{ "seconds": 1, "format": "cu8" }
+```
+
+`seconds` is 0.1 through 10 inclusive. Optional `centerHz` must equal the source's
+current center frequency; otherwise the response is 409
+`IQ_SNAPSHOT_CENTER_MISMATCH`. This captures the next arriving IQ window without
+retuning. The source must be connected with known center, IQ kind and `U8_IQ`
+format. Unsupported sources return 409; missing sources 404; disconnected sources
+503; invalid bodies 400. Authorization matches recording downloads and scanner
+captures: protected admission, mutation authorization for this POST (including
+browser CSRF), and a revocable download lease. Missing credentials return 401;
+forbidden requests return 403.
+
+The binary response is `application/octet-stream` with
+`Content-Disposition: attachment; filename="snapshot.cu8"`, `Content-Length`,
+`Cache-Control: no-store`, `X-WaveKit-Center-Hz`, `X-WaveKit-Sample-Rate`, and
+`X-WaveKit-Start-Time` (UTC time of the first delivered chunk). Bytes are interleaved
+unsigned 8-bit I and Q. Length is `round(seconds × sampleRate) × 2`, capped at
+`10 × 2,400,000 × 2 = 48,000,000` bytes; at higher rates the cap shortens the window.
+Only one snapshot can run per process; another receives 429 `IQ_SNAPSHOT_BUSY`.
+
+The fanout never waits for a snapshot client. Response buffering is capped at
+2,000,000 bytes (approximately `2,000,000 / (2,400,000 × 2) = 417 ms` at
+2.4 Msps); exceeding the cap aborts and detaches the branch. During capture, a
+continuously undrained response also aborts after one second (twice that buffer duration,
+rounded up to a whole second). Additional source chunks do not reset that timer. A completed capture detaches
+immediately; its buffered tail gets at most the requested duration (up to 10 seconds)
+to finish before the transport closes and releases the slot.
+Fanout congestion also aborts the download. Source removal, disconnect,
+tuning/capability change, lease revocation or client closure also aborts it.
+Silent input times out after twice the
+requested duration (at most 20 seconds). An aborted download may already have 200
+headers: clients must reject incomplete bodies against `Content-Length`.
+
+The snapshot endpoint is mounted when protected access and source fanout routing
+are configured. An already aborted download request returns `REQUEST_ABORTED`
+(status 499 when a response is still possible), rather than an authentication error.
+
 ## Base URL
 
 - **REST API**: `http://localhost:9000`

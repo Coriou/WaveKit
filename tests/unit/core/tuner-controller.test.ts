@@ -18,6 +18,7 @@ const testLogger = createLogger({ level: "fatal" })
 
 function createMockSourceManager() {
 	return {
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn<(id: string, payload: Buffer) => boolean>(),
 		isRtlTcpSource: vi.fn<(id: string) => boolean>().mockReturnValue(true),
 		updateSourceCaps:

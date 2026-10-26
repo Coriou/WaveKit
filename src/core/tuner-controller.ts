@@ -391,6 +391,17 @@ function stateFieldOf(cmd: number): TunerStateField | undefined {
 }
 
 export class TunerController extends EventEmitter {
+	private withoutCommand<T>(work: () => T): T {
+		// Small transport fakes need only implement the write boundary.
+		return this.sourceManager?.withoutTunerCommand
+			? this.sourceManager.withoutTunerCommand(work)
+			: work()
+	}
+
+	override emit(event: string | symbol, ...args: unknown[]): boolean {
+		return this.withoutCommand(() => super.emit(event, ...args))
+	}
+
 	private beforeOperatorRetune: RatePolicy["beforeOperatorRetune"] | null = null
 	private onOperatorSampleRate: RatePolicy["onOperatorSampleRate"] | null = null
 	private onRelayRetune: RatePolicy["onRelayRetune"] | null = null
@@ -645,7 +656,9 @@ export class TunerController extends EventEmitter {
 		state.controlMode = mode
 		if (mode === "internal" && this.onRelayRetune) {
 			try {
-				this.onRelayRetune(sourceId, state.frequency)
+				this.withoutCommand(() =>
+					this.onRelayRetune?.(sourceId, state.frequency),
+				)
 			} catch (err) {
 				this.log.warn(
 					{ sourceId, err: safeErrorFields(err) },
@@ -891,9 +904,9 @@ export class TunerController extends EventEmitter {
 		if (updated) {
 			try {
 				if (command === RTL_TCP_COMMANDS.SET_FREQUENCY)
-					this.onRelayRetune?.(sourceId, value)
+					this.withoutCommand(() => this.onRelayRetune?.(sourceId, value))
 				if (command === RTL_TCP_COMMANDS.SET_SAMPLE_RATE)
-					this.onOperatorSampleRate?.(sourceId)
+					this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 			} catch (err) {
 				this.log.warn(
 					{ sourceId, err: safeErrorFields(err) },
@@ -933,6 +946,7 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("frequency", hz, VALIDATION.frequency)
 		if (opts.origin === "rest" && this.beforeOperatorRetune) {
+			// Awaited hook work belongs to this command, including its continuations.
 			await this.beforeOperatorRetune(sourceId, hz, opts)
 			await this.proveSampleRateForFrequency(sourceId, opts, hz)
 		}
@@ -946,6 +960,7 @@ export class TunerController extends EventEmitter {
 		state: TunerState,
 	): Promise<void> {
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
+		this.sourceManager.assertTunerCommandActive()
 		state.frequency = hz
 		this.sourceManager.updateSourceCaps(sourceId, { centerFreq: hz })
 		this.emitStateChanged(sourceId)
@@ -968,6 +983,7 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 		frequencyHz?: number,
 	): Promise<boolean> {
+		this.sourceManager.assertTunerCommandActive()
 		const state = this.tunerStates.get(sourceId)
 		if (!state || state.controlMode !== "internal") return false
 		if (
@@ -1003,9 +1019,10 @@ export class TunerController extends EventEmitter {
 			await pending.promise
 			return false
 		}
-		const promise = (async () => {
+		const promise = this.withoutCommand(async () => {
 			try {
 				await this.setSampleRate(sourceId, hz, opts)
+				this.sourceManager.assertTunerCommandActive()
 				if ((this.rateProofEpoch.get(sourceId) ?? 0) === epoch)
 					this.rateProvedOnConnection.add(sourceId)
 				return true
@@ -1013,7 +1030,7 @@ export class TunerController extends EventEmitter {
 				if (this.rateProofInFlight.get(sourceId)?.epoch === epoch)
 					this.rateProofInFlight.delete(sourceId)
 			}
-		})()
+		})
 		this.rateProofInFlight.set(sourceId, { epoch, promise })
 		return promise
 	}
@@ -1031,8 +1048,10 @@ export class TunerController extends EventEmitter {
 			)
 		}
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, opts)
+		this.sourceManager.assertTunerCommandActive()
 		state.sampleRate = hz
-		if (opts.origin === "rest") this.onOperatorSampleRate?.(sourceId)
+		if (opts.origin === "rest")
+			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 		try {
 			this.sourceManager.updateSourceCaps(sourceId, { sampleRate: hz })
 		} catch (err) {
@@ -1054,6 +1073,7 @@ export class TunerController extends EventEmitter {
 			value,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.gainMode = mode
 		this.emitStateChanged(sourceId)
 	}
@@ -1066,6 +1086,7 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("gain", tenthsDb, VALIDATION.gain)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts)
+		this.sourceManager.assertTunerCommandActive()
 		state.gain = tenthsDb
 		this.emitStateChanged(sourceId)
 	}
@@ -1084,6 +1105,7 @@ export class TunerController extends EventEmitter {
 			value,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.ppm = ppm
 		this.emitStateChanged(sourceId)
 	}
@@ -1096,6 +1118,7 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("ifGain", gain)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_IF_GAIN, gain, opts)
+		this.sourceManager.assertTunerCommandActive()
 		state.ifGain = gain
 		this.emitStateChanged(sourceId)
 	}
@@ -1117,6 +1140,7 @@ export class TunerController extends EventEmitter {
 			enabled ? 1 : 0,
 			{ ...opts, accept: false },
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.testMode = enabled
 		this.emitStateChanged(sourceId)
 	}
@@ -1133,6 +1157,7 @@ export class TunerController extends EventEmitter {
 			enabled ? 1 : 0,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.agcMode = enabled
 		this.emitStateChanged(sourceId)
 	}
@@ -1150,6 +1175,7 @@ export class TunerController extends EventEmitter {
 			value,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.directSampling = mode
 		this.emitStateChanged(sourceId)
 	}
@@ -1166,6 +1192,7 @@ export class TunerController extends EventEmitter {
 			enabled ? 1 : 0,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.offsetTuning = enabled
 		this.emitStateChanged(sourceId)
 	}
@@ -1178,6 +1205,7 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("rtlXtal", hz)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_RTL_XTAL, hz, opts)
+		this.sourceManager.assertTunerCommandActive()
 		state.rtlXtal = hz
 		this.emitStateChanged(sourceId)
 	}
@@ -1190,6 +1218,7 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("tunerXtal", hz)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_TUNER_XTAL, hz, opts)
+		this.sourceManager.assertTunerCommandActive()
 		state.tunerXtal = hz
 		this.emitStateChanged(sourceId)
 	}
@@ -1207,6 +1236,7 @@ export class TunerController extends EventEmitter {
 			index,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.tunerGainIndex = index
 		this.emitStateChanged(sourceId)
 	}
@@ -1223,6 +1253,7 @@ export class TunerController extends EventEmitter {
 			enabled ? 1 : 0,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.biasTee = enabled
 		this.emitStateChanged(sourceId)
 	}
@@ -1243,6 +1274,7 @@ export class TunerController extends EventEmitter {
 			value,
 			opts,
 		)
+		this.sourceManager.assertTunerCommandActive()
 		state.tunerIfGain = { stage, gain }
 		this.emitStateChanged(sourceId)
 	}
@@ -1268,6 +1300,7 @@ export class TunerController extends EventEmitter {
 		this.validateUpdates(updates)
 
 		if (updates.controlMode === "internal") {
+			this.sourceManager.assertTunerCommandActive()
 			this.setControlMode(sourceId, "internal")
 		}
 
@@ -1276,6 +1309,7 @@ export class TunerController extends EventEmitter {
 		if (updates.frequency !== undefined && updates.sampleRate === undefined) {
 			if (policyBulk) {
 				await this.beforeOperatorRetune?.(sourceId, updates.frequency, opts)
+				this.sourceManager.assertTunerCommandActive()
 				this.emitStateChanged(sourceId)
 			}
 			await this.proveSampleRateForFrequency(sourceId, opts, updates.frequency)
@@ -1304,7 +1338,8 @@ export class TunerController extends EventEmitter {
 			opts.origin === "rest" &&
 			this.onOperatorSampleRate
 		) {
-			this.onOperatorSampleRate(sourceId)
+			this.sourceManager.assertTunerCommandActive()
+			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 			this.emitStateChanged(sourceId)
 		}
 		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {
@@ -1360,6 +1395,7 @@ export class TunerController extends EventEmitter {
 			!this.isSameTunerIfGain(updates.tunerIfGain, state.tunerIfGain)
 		) {
 			if (updates.tunerIfGain === null) {
+				this.sourceManager.assertTunerCommandActive()
 				state.tunerIfGain = null
 				this.desiredFields.get(sourceId)?.delete("tunerIfGain")
 				this.emitStateChanged(sourceId)
@@ -1374,6 +1410,7 @@ export class TunerController extends EventEmitter {
 		}
 
 		if (updates.controlMode === "external") {
+			this.sourceManager.assertTunerCommandActive()
 			this.setControlMode(sourceId, "external")
 		}
 	}
@@ -2066,6 +2103,7 @@ export class TunerController extends EventEmitter {
 		value: number,
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
+		this.sourceManager.assertTunerCommandActive()
 		try {
 			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)

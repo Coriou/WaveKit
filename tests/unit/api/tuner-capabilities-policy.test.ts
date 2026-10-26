@@ -13,6 +13,7 @@ const apps: FastifyInstance[] = []
 async function setup() {
 	const write = vi.fn((_id: string, _buffer: Buffer) => true)
 	const source = {
+		assertTunerCommandActive: () => {},
 		writeToSource: write,
 		isRtlTcpSource: () => true,
 		updateSourceCaps: vi.fn(),

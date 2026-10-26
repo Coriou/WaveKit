@@ -22,6 +22,7 @@
  */
 
 import { EventEmitter } from "node:events"
+import { AsyncLocalStorage } from "node:async_hooks"
 import * as net from "node:net"
 import * as fs from "node:fs"
 import { types as utilTypes } from "node:util"
@@ -57,6 +58,12 @@ import type {
 
 // Bound startup/reconnect waits without treating quiet connected sources as failures.
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
+// One command gets the same budget as one maximum first reconnect attempt:
+// 2^1 × 2 s backoff + 5 s connect timeout = 9 s, excluding FIFO/recovery waits.
+export const TUNER_COMMAND_TIMEOUT_MS =
+	2 ** 1 * 2000 + SOURCE_CONNECT_TIMEOUT_MS
+// 1 executing command + 15 waiting commands = at most 16 retained requests per source.
+export const TUNER_COMMAND_QUEUE_LIMIT = 16
 // Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
 export const SOURCE_STALL_TIMEOUT_MS = 15_000
 // TCP keepalive is defence in depth for a dead peer (Node 21+ on Linux probes
@@ -176,6 +183,7 @@ function formatSourceUrl(config: SourceConfig): string {
 export interface SourceManagerEvents {
 	connected: (sourceId: string) => void
 	disconnected: (sourceId: string, error?: Error) => void
+	"commanded-recovery-failed": (sourceId: string) => void
 	error: (sourceId: string, error: Error) => void
 	data: (sourceId: string, chunk: Buffer) => void
 	metrics: (
@@ -593,6 +601,7 @@ export class SourceManager extends EventEmitter {
 		const paused =
 			type === "recording" ? state.evidencePaused : (attempt?.paused ?? false)
 		const age = sample === null ? null : Math.max(0, now - sample)
+		const sinceSample = now - Math.max(sample ?? 0, expectedSince)
 		const delivery =
 			phase === "ended"
 				? "ended"
@@ -604,8 +613,7 @@ export class SourceManager extends EventEmitter {
 							? "paused"
 							: age !== null && age < SAMPLE_TIMEOUT_MS
 								? "streaming"
-								: now - Math.max(sample ?? 0, expectedSince) >=
-									SAMPLE_TIMEOUT_MS
+								: sinceSample >= SAMPLE_TIMEOUT_MS
 									? "stale"
 									: "waiting"
 		const headerApplicable =
@@ -873,6 +881,12 @@ export class SourceManager extends EventEmitter {
 		if (chunk.length > 0) {
 			state.lastSampleAt = Date.now()
 			if (attempt) attempt.lastSampleAt = state.lastSampleAt
+			const recovery = this.rateRecovery.get(id)
+			if (recovery && state.socket !== recovery.socket)
+				this.finishRateRecovery(
+					id,
+					recovery.deadline > Date.now() && !recovery.owner.aborted,
+				)
 		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -1663,6 +1677,9 @@ export class SourceManager extends EventEmitter {
 									: undefined,
 							)
 					}
+					const recovery = this.rateRecovery.get(id)
+					if (owns && recovery && recovery.socket !== socket)
+						this.finishRateRecovery(id, false)
 					if (closedCurrent()) this.scheduleReconnect(id, state, attempt)
 				} finally {
 					if (!wasConnected && isInitialAttempt)
@@ -2064,6 +2081,13 @@ export class SourceManager extends EventEmitter {
 		// "disconnected" for an id clients have already dropped.
 		const state = this.sources.get(id)
 		if (state) state.connected = false
+		this.finishRateRecovery(id, false)
+		for (const controller of this.tunerCommandControllers.get(id) ?? [])
+			controller.abort(
+				new WaveKitError("Source was removed", "SOURCE_NOT_FOUND"),
+			)
+		this.tunerCommandControllers.delete(id)
+		this.tunerCommands.delete(id)
 		if (!this.teardown(id)) return
 		this.emit("source-removed", id, new Date())
 	}
@@ -2075,6 +2099,7 @@ export class SourceManager extends EventEmitter {
 	private teardown(id: string): boolean {
 		const state = this.sources.get(id)
 		if (!state) return false
+		this.finishRateRecovery(id, false)
 
 		state.stopping = true
 		if (state.attempt) {
@@ -2546,6 +2571,239 @@ export class SourceManager extends EventEmitter {
 		return state?.rtlTcpHeaderInfo ?? undefined
 	}
 
+	override emit(event: string | symbol, ...args: unknown[]): boolean {
+		return this.tunerCommandContext.exit(() => super.emit(event, ...args))
+	}
+
+	// One FIFO per source; only commanded rate changes authorize reconnect waits.
+	private readonly tunerCommands = new Map<string, Promise<void>>()
+	private readonly rateRecovery = new Map<
+		string,
+		{
+			deadline: number
+			socket: net.Socket
+			owner: AbortSignal
+		}
+	>()
+
+	private readonly tunerCommandContext = new AsyncLocalStorage<{
+		id: string
+		signal: AbortSignal
+		active: boolean
+	}>()
+	private readonly tunerCommandControllers = new Map<
+		string,
+		Set<AbortController>
+	>()
+
+	/** Detach independently spawned background work from the caller lifetime. */
+	withoutTunerCommand<T>(work: () => T): T {
+		return this.tunerCommandContext.exit(work)
+	}
+
+	/** Reject late writes and state changes from a cancelled tuner command. */
+	assertTunerCommandActive(): void {
+		this.tunerCommandContext.getStore()?.signal.throwIfAborted()
+	}
+
+	/** Whether this source is still in its commanded rate-change recovery window. */
+	isCommandedRecovery(id: string): boolean {
+		const recovery = this.rateRecovery.get(id)
+		return (
+			recovery !== undefined &&
+			!recovery.owner.aborted &&
+			recovery.deadline > Date.now()
+		)
+	}
+
+	/**
+	 * Serialize API commands, including the receiver's rate-change restart.
+	 * Same-source nested commands share the parent's signal and deadline; queueing
+	 * them would deadlock an awaited hook behind its own command.
+	 */
+	async runTunerCommand<T>(
+		id: string,
+		command: (signal: AbortSignal) => Promise<T>,
+	): Promise<T> {
+		const parent = this.tunerCommandContext.getStore()
+		parent?.signal.throwIfAborted()
+		if (parent?.id === id && parent.active) {
+			const result = await command(parent.signal)
+			parent.signal.throwIfAborted()
+			return result
+		}
+		if (!this.sources.has(id))
+			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
+		if (
+			(this.tunerCommandControllers.get(id)?.size ?? 0) >=
+			TUNER_COMMAND_QUEUE_LIMIT
+		)
+			throw new WaveKitError(
+				"Tuner command queue is full; retry",
+				"TUNER_QUEUE_FULL",
+			)
+		const controller = new AbortController()
+		const { signal } = controller
+		const controllers =
+			this.tunerCommandControllers.get(id) ?? new Set<AbortController>()
+		controllers.add(controller)
+		this.tunerCommandControllers.set(id, controllers)
+		let onAbort: () => void = () => {}
+		const cancelled = new Promise<never>((_resolve, reject) => {
+			onAbort = () => reject(signal.reason)
+			signal.addEventListener("abort", onAbort, { once: true })
+		})
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const previous = this.tunerCommands.get(id) ?? Promise.resolve()
+		const execution = previous.then(async () => {
+			signal.throwIfAborted()
+			await this.waitForTunerReady(id)
+			signal.throwIfAborted()
+			timer = setTimeout(() => {
+				controller.abort(
+					new WaveKitError(
+						"Tuner command timed out; retry the command",
+						"TUNER_COMMAND_TIMEOUT",
+					),
+				)
+			}, TUNER_COMMAND_TIMEOUT_MS)
+			let result: T
+			const context = { id, signal, active: true }
+			try {
+				result = await this.tunerCommandContext.run(context, () =>
+					command(signal),
+				)
+			} finally {
+				context.active = false
+				clearTimeout(timer)
+				if (this.rateRecovery.get(id)?.owner === signal)
+					await this.waitForTunerReady(id)
+			}
+			signal.throwIfAborted()
+			return result
+		})
+		const pending = Promise.race([execution, cancelled])
+		const tail = pending.then(
+			() => {},
+			() => {},
+		)
+		this.tunerCommands.set(id, tail)
+		try {
+			return await pending
+		} finally {
+			clearTimeout(timer)
+			const recovery = this.rateRecovery.get(id)
+			if (signal.aborted && recovery?.owner === signal) {
+				this.finishRateRecovery(id, false)
+				if (
+					this.sources.get(id)?.socket === recovery.socket &&
+					this.sources.get(id)?.connected
+				)
+					recovery.socket.destroySoon()
+			}
+			signal.removeEventListener("abort", onAbort)
+			controllers.delete(controller)
+			if (
+				controllers.size === 0 &&
+				this.tunerCommandControllers.get(id) === controllers
+			)
+				this.tunerCommandControllers.delete(id)
+			if (this.tunerCommands.get(id) === tail) this.tunerCommands.delete(id)
+		}
+	}
+
+	private async waitForTunerReady(id: string): Promise<void> {
+		const recovery = this.rateRecovery.get(id)
+		if (recovery === undefined) return
+		// An expired unchanged connection still supplying IQ needs no late restart.
+		const state = this.sources.get(id)
+		if (
+			recovery.deadline <= Date.now() &&
+			state?.socket === recovery.socket &&
+			state.connected &&
+			state.socket.writable &&
+			state.lastSampleAt !== null &&
+			state.lastSampleAt >= recovery.deadline
+		) {
+			this.finishRateRecovery(id, false)
+			return
+		}
+		// Drain the complete API command (including bulk writes), then reopen.
+		// Keeping the registration preserves the source stream and assignments.
+		if (
+			this.sources.get(id)?.socket === recovery.socket &&
+			this.sources.get(id)?.connected
+		)
+			recovery.socket.destroySoon()
+		if (
+			this.sources.get(id)?.socket !== recovery.socket &&
+			this.sources.get(id)?.connected &&
+			this.sources.get(id)?.socket?.writable &&
+			this.sources.get(id)?.lastSampleAt !== null
+		) {
+			this.finishRateRecovery(
+				id,
+				recovery.deadline > Date.now() && !recovery.owner.aborted,
+			)
+			return
+		}
+		const remaining = recovery.deadline - Date.now()
+		if (remaining <= 0) {
+			this.finishRateRecovery(id, false)
+			throw this.sourceReconnecting()
+		}
+		await new Promise<void>((resolve, reject) => {
+			const cleanup = () => {
+				clearTimeout(timer)
+				this.off("payload-started", connected)
+				this.off("source-removed", removed)
+			}
+			const connected = (sourceId: string) => {
+				if (
+					sourceId !== id ||
+					this.sources.get(id)?.socket === recovery.socket ||
+					!this.sources.get(id)?.connected ||
+					!this.sources.get(id)?.socket?.writable
+				)
+					return
+				cleanup()
+				this.finishRateRecovery(
+					id,
+					recovery.deadline > Date.now() && !recovery.owner.aborted,
+				)
+				resolve()
+			}
+			const removed = (sourceId: string) => {
+				if (sourceId !== id) return
+				cleanup()
+				this.finishRateRecovery(id, false)
+				reject(new WaveKitError("Source was removed", "SOURCE_NOT_FOUND"))
+			}
+			const timer = setTimeout(() => {
+				cleanup()
+				this.finishRateRecovery(id, false)
+				reject(this.sourceReconnecting())
+			}, remaining)
+			this.on("payload-started", connected)
+			this.on("source-removed", removed)
+		})
+	}
+
+	/** End each recovery once, before notifying consumers that preservation ended. */
+	private finishRateRecovery(id: string, succeeded: boolean): void {
+		const recovery = this.rateRecovery.get(id)
+		if (!recovery) return
+		this.rateRecovery.delete(id)
+		if (!succeeded) this.emit("commanded-recovery-failed", id)
+	}
+
+	private sourceReconnecting(): WaveKitError {
+		return new WaveKitError(
+			"Source is reconnecting after a sample-rate change; retry the command",
+			"SOURCE_RECONNECTING",
+		)
+	}
+
 	/**
 	 * Sends control data upstream to a network source (e.g., RTL-TCP commands).
 	 *
@@ -2554,21 +2812,50 @@ export class SourceManager extends EventEmitter {
 	 * @returns true if write buffer accepted the data
 	 */
 	writeToSource(id: string, payload: Buffer): boolean {
+		// Async context follows controller awaits, so cancelled callbacks cannot
+		// write later, even after a replacement source registers the same id.
+		this.assertTunerCommandActive()
 		const state = this.sources.get(id)
 		if (!state) {
-			throw new Error(`Source ${id} not found`)
+			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
 		}
 		if (state.config.type === "recording") {
-			throw new Error(`Source ${id} does not accept control commands`)
+			throw new WaveKitError(
+				"Source does not accept control commands",
+				"SOURCE_CONTROL_UNSUPPORTED",
+			)
 		}
 		if (!state.socket || !state.connected) {
-			throw new Error(`Source ${id} is not connected`)
+			throw new WaveKitError(
+				`Source ${id} is not connected`,
+				"SOURCE_DISCONNECTED",
+			)
 		}
 		if (!state.socket.writable) {
-			throw new Error(`Source ${id} socket is not writable`)
+			throw new WaveKitError(
+				"Source socket is not writable",
+				"SOURCE_DISCONNECTED",
+			)
 		}
 
-		return state.socket.write(payload)
+		const socket = state.socket
+		const rateChange =
+			this.tunerCommandContext.getStore() !== undefined &&
+			payload.length === 5 &&
+			payload[0] === 0x02 &&
+			payload.readUInt32BE(1) !== state.config.caps.sampleRate
+		const accepted = socket.write(payload)
+		if (rateChange) {
+			// First retry: <= 4 s equal-jitter backoff (2^1 × 2 s) + 5 s
+			// connect timeout = 9 s. A later retry needs a new caller request.
+			this.rateRecovery.set(id, {
+				deadline:
+					Date.now() + calculateBackoffDelay(1) + SOURCE_CONNECT_TIMEOUT_MS,
+				socket,
+				owner: this.tunerCommandContext.getStore()!.signal,
+			})
+		}
+		return accepted
 	}
 
 	/**

@@ -32,6 +32,7 @@ function createFakeTransport() {
 		failAfterWrites(count: number | null) {
 			failAfter = count
 		},
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn((_id: string, payload: Buffer) => {
 			if (failAfter !== null && failAfter <= 0) {
 				throw new Error("Source rtl-1 socket is not writable")

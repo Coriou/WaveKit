@@ -71,6 +71,10 @@ import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { registerRouteIndex } from "./routes/route-index.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
+import {
+	iqSnapshotRoutes,
+	type IqSnapshotOptions,
+} from "./routes/iq-snapshot.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { decoderBandRoutes } from "./routes/decoder-band.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
@@ -190,6 +194,7 @@ export interface ApiServerDependencies {
 	sourceManager: SourceManager
 	fanoutManager: FanoutManager
 	fanoutTelemetry?: FanoutTelemetryProvider
+	iqSnapshotFanoutFor?: IqSnapshotOptions["fanoutFor"]
 	decoderManager: DecoderManager
 	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
@@ -282,6 +287,9 @@ export class ApiServer {
 	private readonly config: ApiServerConfig
 	private readonly sourceManager: SourceManager
 	private readonly fanoutManager: FanoutManager
+	private readonly iqSnapshotFanoutFor:
+		| IqSnapshotOptions["fanoutFor"]
+		| undefined
 	private readonly fanoutTelemetry: FanoutTelemetryProvider
 	private readonly decoderManager: DecoderManager
 	private readonly decoderRegistry?: DecoderRegistry | undefined
@@ -344,6 +352,7 @@ export class ApiServer {
 		this.access = dependencies.access
 		this.sourceManager = dependencies.sourceManager
 		this.fanoutManager = dependencies.fanoutManager
+		this.iqSnapshotFanoutFor = dependencies.iqSnapshotFanoutFor
 		this.fanoutTelemetry =
 			dependencies.fanoutTelemetry ?? dependencies.fanoutManager
 		this.decoderManager = dependencies.decoderManager
@@ -1448,6 +1457,13 @@ export class ApiServer {
 			fanoutManager: this.fanoutTelemetry,
 		})
 
+		if (this.accessController && this.iqSnapshotFanoutFor)
+			await this.app.register(iqSnapshotRoutes, {
+				sourceManager: this.sourceManager,
+				fanoutFor: this.iqSnapshotFanoutFor,
+				access: this.accessController,
+			})
+
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
 		await this.app.register(decoderSummaryRoutes, {
 			decoderManager: this.decoderManager,
@@ -1505,6 +1521,7 @@ export class ApiServer {
 		if (this.tunerController) {
 			await this.app.register(tunerRoutes, {
 				tunerController: this.tunerController,
+				sourceManager: this.sourceManager,
 			})
 		}
 

@@ -10,6 +10,7 @@ import { createLogger } from "../../../src/utils/logger.js"
 
 function controller() {
 	const transport = {
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn((_id: string, _buffer: Buffer) => true),
 		isRtlTcpSource: () => true,
 		updateSourceCaps: vi.fn(),
