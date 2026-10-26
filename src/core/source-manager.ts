@@ -2839,8 +2839,12 @@ export class SourceManager extends EventEmitter {
 		}
 
 		const socket = state.socket
+		// Only a live REST command for this source owns a restart; a timer it left behind does not.
+		const command = this.tunerCommandContext.getStore()
 		const rateChange =
-			this.tunerCommandContext.getStore() !== undefined &&
+			command !== undefined &&
+			command.active &&
+			command.id === id &&
 			payload.length === 5 &&
 			payload[0] === 0x02 &&
 			payload.readUInt32BE(1) !== state.config.caps.sampleRate
@@ -2852,7 +2856,7 @@ export class SourceManager extends EventEmitter {
 				deadline:
 					Date.now() + calculateBackoffDelay(1) + SOURCE_CONNECT_TIMEOUT_MS,
 				socket,
-				owner: this.tunerCommandContext.getStore()!.signal,
+				owner: command.signal,
 			})
 		}
 		return accepted

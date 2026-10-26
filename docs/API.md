@@ -28,7 +28,8 @@ do not send a browser cookie alongside the bearer credential.
 
 ### Tuner commands during a sample-rate restart
 
-Tuner mutations for each source are FIFO,
+REST tuner mutations for each source are FIFO (scanner, relay and live-demod
+retunes are not queued),
 including frequency proof writes and bulk updates. A changed sample rate is flushed
 to the receiver, then its connection is deliberately reopened using the existing
 reconnect path. `POST /api/tuner/:sourceId/sample-rate` returns success only after the
