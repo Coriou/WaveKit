@@ -971,9 +971,16 @@ export const planPlacements: PlacementPlanner = input => {
 	const mandatory = [...wanted, ...deferred]
 	const keyOf = (g: ActivityGroup, hz: number) =>
 		placementKey(g.d.id, g.source.id, "channel", hz)
+	// Pending starts are capacity in use: deduplicated only against the
+	// mandatory placements; a group's own pending candidates are prepaid slots.
 	const plannedKeys = new Set(mandatory.map(p => p.key))
-	for (const g of groups)
-		for (const hz of g.candidatesHz) plannedKeys.add(keyOf(g, hz))
+	const pendingKeys = new Set(
+		(Array.isArray(act.pendingStarts) ? act.pendingStarts : []).map(
+			p => p?.key,
+		),
+	)
+	const prepaidOf = (g: ActivityGroup) =>
+		g.order.filter(hz => pendingKeys.has(keyOf(g, hz))).length
 	const slotsOf = (type: string) => {
 		const n = isActivityDecoder(type) ? act.policy?.slots?.[type] : 0
 		return Number.isInteger(n) && n! > 0 ? Math.min(n!, ACTIVITY_MAX_SLOTS) : 0
@@ -989,6 +996,7 @@ export const planPlacements: PlacementPlanner = input => {
 			sampleRateHz: g.source.sampleRateHz!,
 			perChannelCores: placementCostCores(g.d.type, "channel"),
 			want: Math.min(slotsOf(g.d.type), g.order.length),
+			prepaid: prepaidOf(g),
 		})),
 	})
 	const now = act.nowMonoMs
@@ -1040,6 +1048,7 @@ export const planPlacements: PlacementPlanner = input => {
 					key: inc.key,
 					hz: inc.hz,
 					dwellSinceMonoMs: inc.dwellSinceMonoMs,
+					...(pendingKeys.has(inc.key) ? { pinned: true } : {}),
 				})),
 			nowMonoMs: now,
 			dwellMs,

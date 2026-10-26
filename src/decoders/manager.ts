@@ -571,6 +571,9 @@ export class DecoderManager extends EventEmitter {
 	private activityUnsubscribe: (() => void) | null = null
 	private activityTimer: ReturnType<typeof setTimeout> | null = null
 	private activityTimerAt: number | null = null
+	private activityPassTimer: ReturnType<typeof setTimeout> | null = null
+	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
+	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
 	/** Per placement key: when it was first planned and when it was first seen running. */
 	private readonly activitySince = new Map<
@@ -1717,7 +1720,7 @@ export class DecoderManager extends EventEmitter {
 		if (activity) {
 			try {
 				this.activityUnsubscribe = activity.port.subscribe(() => {
-					if (!this.destroying) this.notifyBandplansChanged()
+					this.requestActivityPass()
 				})
 			} catch (error) {
 				this.log.warn(
@@ -1869,9 +1872,33 @@ export class DecoderManager extends EventEmitter {
 		this.activityTimer = setTimeout(() => {
 			this.activityTimer = null
 			this.activityTimerAt = null
-			if (!this.destroying) this.notifyBandplansChanged()
+			this.requestActivityPass()
 		}, delay)
 		this.activityTimer.unref?.()
+	}
+
+	/**
+	 * Stage 1: bounded coalescing of activity notices and deadlines. The first
+	 * request schedules one pass ACTIVITY_PASS_COALESCE_MS later; requests
+	 * arriving before it runs join it and never postpone it (a trailing
+	 * debounce would starve under notices faster than its delay).
+	 */
+	private requestActivityPass(): void {
+		if (this.activityPassTimer || this.destroying) return
+		this.activityPassTimer = setTimeout(() => {
+			this.activityPassTimer = null
+			if (this.destroying) return
+			const work = this.capsWork.then(() =>
+				this.destroying ? undefined : this.reconcilePlacements(),
+			)
+			this.capsWork = work.catch(error => {
+				this.log.warn(
+					{ err: safeErrorFields(error) },
+					"Activity placement pass failed",
+				)
+			})
+		}, DecoderManager.ACTIVITY_PASS_COALESCE_MS)
+		this.activityPassTimer.unref?.()
 	}
 
 	/**
@@ -3359,6 +3386,8 @@ export class DecoderManager extends EventEmitter {
 		this.efficiencyTimer = null
 		if (this.activityTimer) clearTimeout(this.activityTimer)
 		this.activityTimer = null
+		if (this.activityPassTimer) clearTimeout(this.activityPassTimer)
+		this.activityPassTimer = null
 		try {
 			this.activityUnsubscribe?.()
 		} catch {

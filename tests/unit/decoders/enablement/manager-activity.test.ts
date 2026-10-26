@@ -82,10 +82,12 @@ function setup(withActivity = true) {
 		{ state: "hot" | "warm" | "cold"; score: number; live: boolean }
 	>()
 	const batches: ActivityQuery[][] = []
+	const batchTimes: number[] = []
 	const listeners = new Set<(change: ActivityChange) => void>()
 	const port: ChannelActivityPort = {
 		snapshot: (queries, nowMonoMs): ActivitySnapshot[] => {
 			batches.push([...queries])
+			batchTimes.push(nowMonoMs)
 			return queries.map(query => ({
 				query,
 				revision: 1,
@@ -186,6 +188,7 @@ function setup(withActivity = true) {
 		hooks,
 		heat,
 		batches,
+		batchTimes,
 		inputs,
 		notify: () => {
 			for (const l of listeners) l({ epoch: EPOCH, revision: 2 })
@@ -291,4 +294,29 @@ it("a reconciliation asked for during a pass runs after it (no dropped pass)", a
 	await nested
 	// The nested request returned at once and the running call ran one more pass.
 	expect(f.inputs.length).toBe(passes + 2)
+})
+
+it("notices every 100 ms never starve reconciliation (bounded coalescing)", async () => {
+	const f = setup()
+	await f.m.startAll()
+	await f.advance(1_000)
+	const start = 1_000
+	for (let t = 0; t < 5_000; t += 100) {
+		f.notify()
+		await f.advance(100)
+	}
+	const times = f.batchTimes.filter(t => t >= start)
+	for (let from = start; from + 250 <= start + 5_000; from += 250)
+		expect(times.some(t => t >= from && t < from + 250)).toBe(true)
+	// Never more than one pass per notice.
+	expect(times.length).toBeLessThanOrEqual(51)
+	// A burst of notices joins one pass, at most 250 ms after the first.
+	await f.advance(1_000)
+	const before = f.batches.length
+	for (let i = 0; i < 10; i++) {
+		f.notify()
+		await f.advance(5)
+	}
+	await f.advance(250 - 50)
+	expect(f.batches.length).toBe(before + 1)
 })

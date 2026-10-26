@@ -343,6 +343,84 @@ describe("activity ranking: slots and order", () => {
 	})
 })
 
+describe("activity ranking: pending starts", () => {
+	it("counts a pending start that keeps no slot (review repro, planner level)", () => {
+		// Pager primary 0.14, dsd-fme VFO 0.155, base 0.22: 0.515 mandatory. A
+		// pager secondary still starting holds 0.14 more (0.655), so one
+		// dsd-fme slot (0.155) does not fit in 0.67 even with no pager slots.
+		const input = base([pager(), dsd()], [source()], {
+			vfo: { sourceId: "s", frequencyHz: CENTRE },
+			bandplanChannels: () => [466_060_000, 466_140_000],
+		})
+		const policy = {
+			...activity().policy,
+			budgetCores: 0.67,
+			replayAllowanceCores: 0,
+			slots: { "multimon-ng": 0, "dsd-fme": 1 },
+		}
+		const pendingKey = `pager#${todayHz[1]}@s`
+		const run = (pending: boolean) =>
+			planWith(
+				input,
+				activity({
+					policy,
+					pendingStarts: pending
+						? [
+								{
+									key: pendingKey,
+									sourceId: "s",
+									reach: "channel",
+									costCores: 0.14,
+									sampleRateHz: RATE,
+								},
+							]
+						: [],
+				}),
+				new Map(),
+			)
+		expect(run(false).wanted.filter(p => p.origin === "activity")).toHaveLength(
+			1,
+		)
+		expect(run(true).wanted.filter(p => p.origin === "activity")).toHaveLength(
+			0,
+		)
+	})
+
+	it("keeps a pending activity slot it prepaid and never moves it", () => {
+		const far = todayHz[todayHz.length - 1]!
+		const pendingKey = `pager#${todayHz[4]}@s`
+		const plan = planWith(
+			base(),
+			activity({
+				nowMonoMs: 100_000,
+				incumbents: todayHz.slice(0, 5).map((hz, i) => ({
+					key: `pager#${hz}@s`,
+					decoderId: "pager",
+					sourceId: "s",
+					hz,
+					primary: i === 0,
+					dwellSinceMonoMs: 0,
+				})),
+				pendingStarts: [
+					{
+						key: pendingKey,
+						sourceId: "s",
+						reach: "channel",
+						costCores: 0.14,
+						sampleRateHz: RATE,
+					},
+				],
+			}),
+			new Map([[far, { state: "hot" as const, score: 4 }]]),
+		)
+		const hz = channels(plan)
+		expect(hz).toContain(todayHz[4])
+		expect(hz).toContain(far)
+		// The lowest-ranked unpinned slot moved instead.
+		expect(hz).not.toContain(todayHz[3])
+	})
+})
+
 /** Runs planning passes like the manager: incumbents start at once, moves are recorded. */
 function simulate(
 	input: PlannerInput,

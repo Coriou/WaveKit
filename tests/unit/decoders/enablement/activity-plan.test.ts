@@ -14,6 +14,8 @@ import {
 	ACTIVITY_SLOTS_X64,
 	activityOrder,
 	allocateActivitySlots,
+	placementActivity,
+	roundScore,
 	readySnapshot,
 	resolveActivityPolicy,
 	selectChannels,
@@ -268,6 +270,53 @@ describe("allocateActivitySlots", () => {
 		expect(out.remainingCores).toBeCloseTo(0, 9)
 	})
 
+	it("charges a pending start that gets no slot (review repro)", () => {
+		// Mandatory 0.14 + base 0.22, a pending multimon-ng channel at 0.14 with
+		// no multimon-ng slot, one dsd-fme slot, budget 0.515: the true load is
+		// already 0.50, so the 0.155 dsd-fme slot does not fit.
+		const out = allocateActivitySlots({
+			budgetCores: 0.515,
+			replayAllowanceCores: 0,
+			mandatory: [charge("mm-primary", mm)],
+			pending: [charge("pager#466112500@s", mm)],
+			plannedKeys: new Set(["mm-primary"]),
+			groups: [
+				{
+					sourceId: "s",
+					sampleRateHz: RATE,
+					perChannelCores: mm,
+					want: 0,
+					prepaid: 1,
+				},
+				{ sourceId: "s", sampleRateHz: RATE, perChannelCores: dsd, want: 1 },
+			],
+		})
+		expect(out.given).toEqual([0, 0])
+		expect(out.committedCores).toBeCloseTo(mm + 0.22 + mm, 9)
+	})
+
+	it("a pending candidate holds its own slot at no further cost", () => {
+		const out = allocateActivitySlots({
+			budgetCores: 0.22 + 3 * mm,
+			replayAllowanceCores: 0,
+			mandatory: [charge("primary", mm)],
+			pending: [charge("slot-a", mm)],
+			plannedKeys: new Set(["primary"]),
+			groups: [
+				{
+					sourceId: "s",
+					sampleRateHz: RATE,
+					perChannelCores: mm,
+					want: 4,
+					prepaid: 1,
+				},
+			],
+		})
+		// 0.22 + 0.14 primary + 0.14 pending (its slot) + one more 0.14 slot.
+		expect(out.given).toEqual([2])
+		expect(out.remainingCores).toBeCloseTo(0, 9)
+	})
+
 	it("charges pending starts the plan does not count, once", () => {
 		const groups = [
 			{ sourceId: "s", sampleRateHz: RATE, perChannelCores: mm, want: 8 },
@@ -301,6 +350,85 @@ describe("allocateActivitySlots", () => {
 			],
 		})
 		expect(out.given).toEqual([0])
+	})
+
+	// Feature: activity-ranked channels, Property 5: pending starts are counted once, never skipped
+	// Validates: Requirements 3.22
+	it("committed + uncounted pending + bases + replay stays within the budget", () => {
+		fc.assert(
+			fc.property(
+				fc.double({ min: 0, max: 3, noNaN: true }),
+				fc.double({ min: 0, max: 0.3, noNaN: true }),
+				fc.array(fc.constantFrom("s", "t"), { maxLength: 3 }),
+				fc.array(
+					fc.record({
+						key: fc.constantFrom("m0", "m1", "p0", "p1", "p2", "p3"),
+						source: fc.constantFrom("s", "t"),
+					}),
+					{ maxLength: 6 },
+				),
+				fc.array(
+					fc.record({
+						source: fc.constantFrom("s", "t"),
+						cost: fc.constantFrom(mm, dsd),
+						want: fc.integer({ min: 0, max: 6 }),
+						prepaid: fc.integer({ min: 0, max: 3 }),
+					}),
+					{ maxLength: 4 },
+				),
+				(budgetCores, replay, mandatorySources, pending, groups) => {
+					const mandatory = mandatorySources.map((source, i) =>
+						charge(`m${i}`, mm, source),
+					)
+					const plannedKeys = new Set(mandatory.map(m => m.key))
+					const out = allocateActivitySlots({
+						budgetCores,
+						replayAllowanceCores: replay,
+						mandatory,
+						pending: pending.map(p => charge(p.key, mm, p.source)),
+						plannedKeys,
+						groups: groups.map(g => ({
+							sourceId: g.source,
+							sampleRateHz: RATE,
+							perChannelCores: g.cost,
+							want: g.want,
+							prepaid: g.prepaid,
+						})),
+					})
+					// committed = mandatory + distinct pending not mandatory + their bases.
+					const uncounted = new Map<string, string>()
+					for (const p of pending)
+						if (!plannedKeys.has(p.key) && !uncounted.has(p.key))
+							uncounted.set(p.key, p.source)
+					const committedBases = new Set([
+						...mandatory.map(m => m.sourceId),
+						...uncounted.values(),
+					])
+					const committed =
+						(mandatory.length + uncounted.size) * mm +
+						committedBases.size * channelizerBaseCores(RATE)
+					expect(out.committedCores).toBeCloseTo(committed, 9)
+					// Then every unpaid slot, and the base of a source it opens.
+					let total = committed + replay
+					const bases = new Set(committedBases)
+					let unpaid = 0
+					groups.forEach((g, i) => {
+						const paid = Math.min(g.want, g.prepaid)
+						expect(out.given[i]).toBeGreaterThanOrEqual(paid)
+						expect(out.given[i]).toBeLessThanOrEqual(g.want)
+						const extra = out.given[i]! - paid
+						unpaid += extra
+						total += extra * g.cost
+						if (extra > 0 && !bases.has(g.source)) {
+							bases.add(g.source)
+							total += channelizerBaseCores(RATE)
+						}
+					})
+					if (unpaid > 0) expect(total).toBeLessThanOrEqual(budgetCores + 1e-6)
+				},
+			),
+			{ numRuns: 300 },
+		)
 	})
 
 	// Feature: activity-ranked channels, Property 3: the budget is never exceeded or double-spent
@@ -506,5 +634,18 @@ describe("resolveActivityPolicy", () => {
 			dwellMs: 1_000,
 			maxMovesPerMinute: 2,
 		})
+	})
+})
+
+describe("status score", () => {
+	it("rounds to three decimals without overflowing", () => {
+		expect(roundScore(1.23456)).toBe(1.235)
+		expect(roundScore(Number.MAX_VALUE)).toBe(Number.MAX_VALUE)
+		expect(Number.isFinite(roundScore(Number.MAX_VALUE / 10))).toBe(true)
+		expect(
+			placementActivity(channel(1, { state: "hot", score: Number.MAX_VALUE }))
+				.score,
+		).toBe(Number.MAX_VALUE)
+		expect(roundScore(NaN)).toBe(0)
 	})
 })

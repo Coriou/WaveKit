@@ -239,10 +239,17 @@ export function placementActivity(
 	return {
 		ranking: "activity",
 		state: channel.state,
-		score: Math.round(channel.score * 1000) / 1000,
+		score: roundScore(channel.score),
 		live: channel.live,
 		reasons: REASONS.filter(r => channel.reasons.includes(r)),
 	}
+}
+
+/** Three decimals without overflow: a score too large to scale is kept as is. */
+export function roundScore(score: number): number {
+	if (!Number.isFinite(score) || score < 0) return 0
+	const scaled = score * 1000
+	return Number.isFinite(scaled) ? Math.round(scaled) / 1000 : score
 }
 
 export interface SlotCharge {
@@ -259,6 +266,12 @@ export interface SlotGroup {
 	perChannelCores: number
 	/** Slots asked for. */
 	want: number
+	/**
+	 * Pending starts of this group's own candidates. They are charged as
+	 * pending starts, so up to `want` of them hold a slot at no further cost;
+	 * the selection must keep them (`pinned`).
+	 */
+	prepaid?: number
 }
 export interface SlotAllocation {
 	given: number[]
@@ -277,24 +290,29 @@ const finiteNonNegative = (n: unknown): n is number =>
  *   committed = sum(cost of every mandatory placement)
  *             + sum(channelizer base of each source holding a mandatory
  *                   channel placement: 0.22, 0.26 above 2.048 Msps)
- *             + sum(cost of each pending start whose key the plan does not
- *                   already count, plus its source's base when uncharged)
+ *             + sum(cost of each distinct pending start that is not a
+ *                   mandatory placement, plus its source's base when
+ *                   uncharged)
  *   remaining = budget - committed - replay allowance
  *
- * Slots then go round-robin over the groups in plan order (one slot per
+ * A pending start is capacity in use whether or not the plan keeps it, so it
+ * is deduplicated only against the mandatory placements, never against
+ * eligibility. A group's own pending candidates (`prepaid`, at most `want`)
+ * then hold slots at no further cost, and the selection keeps them. The
+ * other slots go round-robin over the groups in plan order (one slot per
  * group per round), each costing the decoder's channel cost plus the
  * channelizer base when its source is not charged yet; a group whose next
- * slot does not fit stops. Every core is spent once: sum(given slot costs)
- * <= remaining before allocation, so when committed + replay <= budget the
- * total stays within the budget, and when it already exceeds the budget no
- * slot is given.
+ * slot does not fit stops. Every core is spent once:
+ * committed + replay + sum(unpaid slot costs) <= budget whenever a slot was
+ * paid for, and when committed + replay already exceeds the budget no slot
+ * is paid for.
  */
 export function allocateActivitySlots(args: {
 	budgetCores: number
 	replayAllowanceCores: number
 	mandatory: readonly SlotCharge[]
 	pending: readonly SlotCharge[]
-	/** Keys the plan already counts (mandatory and every activity candidate). */
+	/** Keys of the mandatory placements (already counted in `mandatory`). */
 	plannedKeys: ReadonlySet<string>
 	groups: readonly SlotGroup[]
 }): SlotAllocation {
@@ -333,6 +351,12 @@ export function allocateActivitySlots(args: {
 			remainingCores: -Infinity,
 		}
 	let remaining = budget - committed - replay
+	args.groups.forEach((g, i) => {
+		const want = Number.isInteger(g.want) && g.want > 0 ? g.want : 0
+		const prepaid =
+			Number.isInteger(g.prepaid) && g.prepaid! > 0 ? g.prepaid! : 0
+		given[i] = Math.min(want, prepaid)
+	})
 	const open = args.groups.map(
 		g =>
 			Number.isInteger(g.want) &&
@@ -367,6 +391,8 @@ export interface SelectionIncumbent {
 	key: string
 	hz: number
 	dwellSinceMonoMs: number
+	/** A prepaid pending start: always kept, never a victim. */
+	pinned?: boolean
 }
 export interface SelectionResult {
 	chosen: { hz: number; movedFrom?: { key: string; hz: number } }[]
@@ -380,8 +406,9 @@ export interface SelectionResult {
  * order (activity or nearest; the primary excluded) and the running
  * incumbents:
  *
- * 1. Incumbents still in the order are kept, lowest-ranked dropped only when
- *    the slot count shrank (budget or eligibility, not a move).
+ * 1. Incumbents still in the order are kept, pinned ones first, then by
+ *    rank; the lowest-ranked unpinned are dropped only when the slot count
+ *    shrank (budget or eligibility, not a move).
  * 2. Free slots take the best-ranked channels not chosen (a new slot, not a
  *    move).
  * 3. Ranked only: a hot or warm channel outranking an incumbent replaces the
@@ -407,7 +434,11 @@ export function selectChannels(args: {
 	const seen = new Set<number>()
 	const incumbents = args.incumbents
 		.filter(i => rank.has(i.hz) && !seen.has(i.hz) && seen.add(i.hz))
-		.sort((a, b) => rank.get(a.hz)! - rank.get(b.hz)!)
+		.sort(
+			(a, b) =>
+				Number(b.pinned === true) - Number(a.pinned === true) ||
+				rank.get(a.hz)! - rank.get(b.hz)!,
+		)
 		.slice(0, count)
 	type Entry = {
 		hz: number
@@ -434,6 +465,7 @@ export function selectChannels(args: {
 				.filter(
 					e =>
 						e.incumbent !== undefined &&
+						e.incumbent.pinned !== true &&
 						rank.get(e.hz)! > rank.get(hz)! &&
 						args.activity!.get(e.hz)?.live !== true,
 				)

@@ -755,13 +755,15 @@ unchanged: same channels, same order, same caps.
   x86-64, 1 and 0 on arm64 hosts with at most 4 cores
   (`decoderPolicy.efficiency.activity.slots`, 0 to 32).
 - _Allocator._ One allocator per pass spends the budget once:
-  `committed = Σ mandatory placement costs + Σ channelizer base of each source holding a
-mandatory channel (0.22 core, 0.26 above 2.048 Msps) + Σ pending starts the plan does not
-already count`, `remaining = cpuBudgetCores − committed − replayAllowanceCores`
-  (default 0.1 core, 0.05 on arm64). Slots go round-robin over the groups in plan order,
-  one per group per round, each costing the decoder's channel cost (0.14 multimon-ng,
-  0.155 dsd-fme) plus its source's base when not yet charged; a group whose next slot does
-  not fit stops. When mandatory placements and the allowance already exceed the budget no
+  `committed = Σ mandatory placement costs + Σ distinct pending starts that are not
+mandatory placements + Σ channelizer base of each source holding either (0.22 core, 0.26
+above 2.048 Msps)`, `remaining = cpuBudgetCores − committed − replayAllowanceCores`
+  (default 0.1 core, 0.05 on arm64). A pending start is capacity in use whether or not the
+  plan keeps it, so it is never skipped for being merely eligible. A group's own pending
+  channels hold its first slots at no further cost and are kept (never moved) in this pass.
+  The other slots go round-robin over the groups in plan order, one per group per round,
+  each costing the decoder's channel cost (0.14 multimon-ng, 0.155 dsd-fme) plus its
+  source's base when not yet charged; a group whose next slot does not fit stops. When mandatory placements and the allowance already exceed the budget no
   slot is given; mandatory placements are still planned and the gate decides (4.1).
   x86-64 at 1.024 Msps: 0.22 + 5 × 0.14 + 3 × 0.155 + 0.1 = 1.485 ≤ 1.5. arm64:
   0.22 + 2 × 0.14 + 0.155 + 0.05 = 0.705 ≤ 0.75 (two paging slots with the dsd-fme VFO
@@ -785,11 +787,13 @@ already count`, `remaining = cpuBudgetCores − committed − replayAllowanceCor
 - _Reconciliation._ A pass asked for while one runs is run after it (bounded, then queued),
   never dropped. The core re-plans on the ranking's change notices and at the earliest of
   the snapshots' `nextEvaluationMonoMs`, a blocked move's dwell end and the move window's
-  expiry, on one monotonic clock. A placement whose channel frequency differs is moved even
+  expiry, on one monotonic clock. Notices and deadlines are coalesced, not debounced: the
+  first schedules a pass 100 ms later and later ones join it without postponing it, so
+  notices at any rate still give a pass at least every 250 ms. A placement whose channel frequency differs is moved even
   when its key is unchanged.
 - _Status._ Each placement of a ranked decoder reports `activity`: `ranking` (`activity` or
   `nearest`) and, when ranked, `state`, `score` (three decimals), `live` and `reasons`
-  (at most the six known values).
+  (at most the six known values); a score too large to scale is reported unrounded.
 
 Acceptance: unit and property tests on the planner (a permutation of the eligible set with
 any ranking, the eligible VFO first, the off-raster VFO excluded, malformed snapshots
