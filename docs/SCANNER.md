@@ -549,7 +549,7 @@ half-span, reach extends at most 4 kHz beyond the measured half-width. This appl
 APRS, digital voice, 25 kHz AIS/ACARS/VDL2 and wide LoRa alike: channel width
 alone cannot attach a decode to a narrow neighbouring signal. A merged wide
 track can contain several channels. ADS-B retains its separate nominal-frequency
-centre tolerance of 500 kHz, also exclusive.
+centre tolerance of 500 kHz, inclusive.
 The observation lifetime must include the decode time, with two seconds of
 pairing margin on either side.
 
@@ -565,9 +565,10 @@ When reaching candidates belong to different discoveries, a channel fragment
 nested inside every other reaching track span takes precedence. Thus a merged
 wide track covering two ACARS channels yields to each channel's own fragment;
 without that fragment it receives the decode itself. A fragment on the other
-channel cannot contain the decode. For ADS-B's broad nominal-frequency reach,
-the unique enclosing discovery still resolves nested fragments. Other
-multi-discovery cases receive no decode. Point ambiguity is logged at most once
+channel cannot contain the decode. ADS-B instead keeps nearest-wins: the
+nearest reaching track is named, and tracks of different discoveries tied
+within 1 Hz of that distance receive nothing. Other point multi-discovery
+cases receive no decode. Point ambiguity is logged at most once
 per decode, after interpretation; shared-confirmation lookups do not log.
 Multiple observations of one discovery can receive point evidence. rtl_433
 requires exactly one qualifying observation. Ambiguous evidence cannot prime
