@@ -8,7 +8,10 @@ export default function setup(): (() => void) | undefined {
 	if (process.env["WAVEKIT_TEST_TMP_GUARD"] === "0") return
 	const keys = ["TMPDIR", "TMP", "TEMP", "WAVEKIT_TEST_TMP_ROOT"] as const
 	const previous = keys.map(key => [key, process.env[key]] as const)
-	const root = mkdtempSync(join(tmpdir(), "wk-test-"))
+	// A short base keeps Unix socket paths built under os.tmpdir() inside their limits
+	// (macOS's per-user tmpdir alone is about 50 bytes; sockets allow 104).
+	const base = process.platform === "win32" ? tmpdir() : "/tmp"
+	const root = mkdtempSync(join(base, "wk-test-"))
 	const keep = process.env["WAVEKIT_TEST_KEEP_TMP"] === "1"
 	for (const key of keys) process.env[key] = root
 
