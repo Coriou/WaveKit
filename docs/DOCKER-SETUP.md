@@ -198,6 +198,14 @@ threshold to ignore the first 10 seconds after `wavekit-api` start.
 
 ## Troubleshooting
 
+### After a crash or power cut
+
+State-directory locks from a dead process are reclaimed automatically on restart,
+including locks left by a previous boot or a reused process ID. Incomplete writer
+locks are held for 30 seconds before reclamation. If startup still fails, the
+startup failure line names the error class and code; use that code to diagnose
+the failure.
+
 ### Port conflicts
 
 The `app` profile binds `127.0.0.1` ports 9000, 8080, 8081, 8082 and 4713;

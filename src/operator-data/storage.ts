@@ -1,6 +1,7 @@
+import { acquireWriterLock, releaseWriterLock } from "../utils/lock-owner.js"
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
-import { lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promises"
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { createEmptySnapshot } from "./domain.js"
@@ -234,7 +235,7 @@ export class OperatorDataStorage {
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
 				throw unavailable()
-			await mkdir(this.lock, { mode: 0o700 })
+			if (!(await acquireWriterLock(this.lock))) throw unavailable()
 			this.ownsLock = true
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {
@@ -340,7 +341,7 @@ export class OperatorDataStorage {
 		}
 		if (this.unsafeIO) throw unavailable()
 		if (this.ownsLock) {
-			await this.perform("lock-release", () => rmdir(this.lock))
+			await this.perform("lock-release", () => releaseWriterLock(this.lock))
 			this.ownsLock = false
 		}
 	}

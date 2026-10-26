@@ -5,6 +5,13 @@ import { createHash, randomUUID } from "node:crypto"
 import { hostname } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { z } from "zod"
+import {
+	bootTime,
+	isStale,
+	lockOwnerSchema,
+	probeLockOwner,
+	readLockOwner,
+} from "../utils/lock-owner.js"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	digestMachineToken,
@@ -24,6 +31,7 @@ const LIFETIME = 30 * 24 * 60 * 60 * 1000
 const ownerName = /^owner-([1-9][0-9]*)-([a-f0-9-]{36})\.lock$/
 const ownerSchema = z
 	.object({
+		identity: lockOwnerSchema.optional(),
 		version: z.literal(1),
 		pid: z.number().int().positive().max(0x7fffffff),
 		scope: z.string().regex(/^[a-f0-9]{64}$/),
@@ -402,6 +410,7 @@ export class PrivateAccessStorage {
 
 	async #acquire(scope: string): Promise<void> {
 		const nonce = randomUUID()
+		const identity = await readLockOwner()
 		this.#owner = `owner-${process.pid}-${nonce}.lock`
 		const handle = await fs.open(
 			join(this.#directory, this.#owner),
@@ -416,7 +425,13 @@ export class PrivateAccessStorage {
 			const stat = await handle.stat()
 			this.#ownerIdentity = { dev: stat.dev, ino: stat.ino }
 			await handle.writeFile(
-				JSON.stringify({ version: 1, pid: process.pid, scope, nonce }),
+				JSON.stringify({
+					version: 1,
+					pid: process.pid,
+					scope,
+					nonce,
+					identity,
+				}),
 			)
 			await handle.sync()
 		} finally {
@@ -429,7 +444,8 @@ export class PrivateAccessStorage {
 			if (entry === this.#owner || !entry.startsWith("owner-")) continue
 			const match = ownerName.exec(entry)
 			if (!match) throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
-			const data = await this.#read(entry, 512)
+			// Identity includes a full hostname; reuse the existing bounded metadata read.
+			const data = await this.#read(entry, MAX_BYTES)
 			if (data === undefined) continue
 			let decoded: unknown
 			try {
@@ -444,14 +460,30 @@ export class PrivateAccessStorage {
 				owner.data.nonce !== match[2]
 			)
 				throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
-			if (owner.data.scope !== scope)
+			const recorded = owner.data.identity
+			if (recorded && recorded.pid !== owner.data.pid)
+				throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
+			const beforeBoot =
+				!recorded &&
+				(await fs.stat(join(this.#directory, entry))).mtimeMs < bootTime()
+			// Legacy PIDs are meaningful only in their original namespace; an older
+			// boot is independent proof even though the scope hash includes boot ID.
+			const differentLinuxBoot =
+				recorded?.bootId?.kind === "linux" &&
+				identity.bootId?.kind === "linux" &&
+				recorded.bootId.value !== identity.bootId.value
+			if (
+				owner.data.scope !== scope &&
+				!(recorded ? differentLinuxBoot : beforeBoot)
+			)
 				throw failure("ACCESS_STORAGE_FOREIGN_OWNER")
-			try {
-				process.kill(owner.data.pid, 0)
-				throw failure("ACCESS_STORAGE_BUSY")
-			} catch (error) {
-				if (!hasCode(error, "ESRCH")) throw failure("ACCESS_STORAGE_BUSY")
-			}
+			const probe = await probeLockOwner(
+				recorded ?? { ...identity, pid: owner.data.pid },
+			)
+			const stale = recorded
+				? isStale(recorded, identity, probe)
+				: !probe.alive || beforeBoot
+			if (!stale) throw failure("ACCESS_STORAGE_BUSY")
 			// The unique immutable path cannot name a later owner's different nonce.
 			await fs.unlink(join(this.#directory, entry)).catch(error => {
 				if (!hasCode(error, "ENOENT")) throw error

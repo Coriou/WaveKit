@@ -3,6 +3,7 @@ import {
 	chmod,
 	lstat,
 	mkdir,
+	utimes,
 	mkdtemp,
 	readFile,
 	readdir,
@@ -63,6 +64,19 @@ function gate() {
 }
 
 describe("dedicated operator-data storage", () => {
+	it("reclaims an abandoned incomplete writer directory", async () => {
+		const path = await root()
+		await mkdir(join(path, "operator-data"), { mode: 0o700 })
+		await mkdir(lock(path), { mode: 0o700 })
+		const old = new Date(Date.now() - 31000)
+		await utimes(lock(path), old, old)
+		const recovered = await open(path)
+		await recovered.close()
+		expect(await readdir(join(path, "operator-data"))).not.toContain(
+			".writer-lock",
+		)
+	})
+
 	it("durably initializes once, syncs parent on every open, and returns detached snapshots", async () => {
 		const path = await root()
 		const stages: string[] = []
@@ -170,7 +184,7 @@ describe("dedicated operator-data storage", () => {
 		await first.close()
 		const second = await open(path)
 		await second.close()
-		await mkdir(lock(path), { mode: 0o700 }) // Simulated crash; no automatic lock stealing.
+		await mkdir(lock(path), { mode: 0o700 }) // A fresh incomplete owner must remain held.
 		await expect(open(path)).rejects.toMatchObject(unavailable)
 		expect((await lstat(lock(path))).isDirectory()).toBe(true)
 	})

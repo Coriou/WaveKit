@@ -655,7 +655,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		expect(JSON.parse(await readFile(file(path), "utf8")).revision).toBe(2)
 	})
 
-	it("leaves a crashed writable lock unavailable to a new process", async () => {
+	it("reclaims a crashed writable lock in a new process", async () => {
 		const path = await root()
 		const outfile = join(
 			process.cwd(),
@@ -733,10 +733,9 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 			opened.kill("SIGKILL")
 			await waitExit(opened)
 			child = undefined
-			const error = await rejectionOf(open(path))
-			expect(error).toMatchObject(unavailable)
-			expect(bandPlanStorageFailureReason(error)).toBe("lock-held")
+			const recovered = await open(path)
 			expect((await lstat(lock(path))).isDirectory()).toBe(true)
+			await recovered.close()
 			expect(JSON.parse(await readFile(file(path), "utf8")).revision).toBe(0)
 		} finally {
 			if (child && child.exitCode === null && child.signalCode === null) {

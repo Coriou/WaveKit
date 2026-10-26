@@ -2991,7 +2991,8 @@ if (
 	process.argv[1] &&
 	pathToFileURL(resolve(process.argv[1])).href === import.meta.url
 )
-	void main().catch(() => {
-		process.stderr.write("WaveKit startup failed\n")
+	void main().catch(async error => {
+		const { formatStartupFailure } = await import("./utils/startup-failure.js")
+		process.stderr.write(formatStartupFailure(error))
 		process.exit(1)
 	})

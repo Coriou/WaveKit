@@ -1,15 +1,8 @@
+import { acquireWriterLock, releaseWriterLock } from "../../utils/lock-owner.js"
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import type { Dirent } from "node:fs"
-import {
-	lstat,
-	mkdir,
-	open,
-	readdir,
-	rename,
-	rmdir,
-	unlink,
-} from "node:fs/promises"
+import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { BANDPLANS_LIMITS, bandPlanStateSchema } from "@wavekit/api-types"
@@ -405,12 +398,8 @@ export class BandPlanStorage {
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
 				throw new StorageUnavailable("permissions")
-			try {
-				await mkdir(this.lock, { mode: 0o700 })
-			} catch (error) {
-				if (errno(error) === "EEXIST") throw new StorageUnavailable("lock-held")
-				throw error
-			}
+			if (!(await acquireWriterLock(this.lock)))
+				throw new StorageUnavailable("lock-held")
 			this.ownsLock = true
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {
@@ -564,7 +553,7 @@ export class BandPlanStorage {
 		}
 		if (this.unsafeIO) throw new StorageUnavailable("io")
 		if (this.ownsLock) {
-			await this.perform("lock-release", () => rmdir(this.lock))
+			await this.perform("lock-release", () => releaseWriterLock(this.lock))
 			this.ownsLock = false
 		}
 	}

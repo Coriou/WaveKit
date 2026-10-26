@@ -3,6 +3,8 @@ import { constants } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { LockOwner } from "../../../src/utils/lock-owner.js"
+import { bootTime } from "../../../src/utils/lock-owner.js"
 import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import {
@@ -364,6 +366,7 @@ describe("private single-operator persistence", () => {
 			await fs.readFile(join(directory, ownerPath), "utf8"),
 		) as { pid: number; nonce: string; scope: string; version: number }
 		await storage.close()
+		delete (owner as { identity?: unknown }).identity
 		const deadName = `owner-99999999-${owner.nonce}.lock`
 		await fs.writeFile(
 			join(directory, deadName),
@@ -383,6 +386,87 @@ describe("private single-operator persistence", () => {
 		})
 		expect((await fs.readdir(directory)).includes(deadName)).toBe(true)
 	})
+
+	it.each(["same-linux-boot", "different-linux-boot", "time-boot"])(
+		"checks foreign scope for new-format owners: %s",
+		async kind => {
+			const readFile = fs.readFile
+			vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
+				path === "/proc/sys/kernel/random/boot_id"
+					? Promise.resolve("current-linux-boot")
+					: readFile(path, options),
+			)
+			const { directory } = await location()
+			const storage = await open(directory)
+			const name = (await fs.readdir(directory)).find(entry =>
+				entry.startsWith("owner-"),
+			)!
+			const path = join(directory, name)
+			const record = JSON.parse(await fs.readFile(path, "utf8")) as {
+				scope: string
+				identity: LockOwner
+			}
+			await storage.close()
+			record.scope = "a".repeat(64)
+			record.identity.bootId =
+				kind === "time-boot"
+					? { kind: "time", value: "0" }
+					: {
+							kind: "linux",
+							value:
+								kind === "different-linux-boot"
+									? "previous-linux-boot"
+									: "current-linux-boot",
+						}
+			// Even evidence of a reused PID cannot bypass the same-boot scope guard.
+			record.identity.startTime = { kind: "linux", value: "0" }
+			await fs.writeFile(path, JSON.stringify(record), { mode: 0o600 })
+			if (kind === "different-linux-boot") {
+				await open(directory, "load")
+				expect(await fs.readdir(directory)).not.toContain(name)
+			} else {
+				await expect(open(directory, "load")).rejects.toMatchObject({
+					code: "ACCESS_STORAGE_FOREIGN_OWNER",
+				})
+				expect(await fs.readdir(directory)).toContain(name)
+			}
+		},
+	)
+
+	it.each(["legacy-before-boot", "different-boot", "different-start"])(
+		"recovers a reused live PID: %s",
+		async kind => {
+			const readFile = fs.readFile
+			vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
+				path === "/proc/sys/kernel/random/boot_id"
+					? Promise.resolve("current-linux-boot")
+					: readFile(path, options),
+			)
+			const { directory } = await location()
+			const storage = await open(directory)
+			const name = (await fs.readdir(directory)).find(entry =>
+				entry.startsWith("owner-"),
+			)!
+			const path = join(directory, name)
+			const record = JSON.parse(await fs.readFile(path, "utf8")) as {
+				scope?: string
+				identity?: { bootId: { value: string }; startTime: { value: string } }
+			}
+			await storage.close()
+			if (kind === "legacy-before-boot") delete record.identity
+			else if (kind === "different-boot")
+				record.identity!.bootId.value = "previous-boot"
+			else record.identity!.startTime.value = "0"
+			if (kind !== "different-start") record.scope = "a".repeat(64)
+			await fs.writeFile(path, JSON.stringify(record), { mode: 0o600 })
+			if (kind === "legacy-before-boot") {
+				const old = new Date(bootTime() - 1000)
+				await fs.utimes(path, old, old)
+			}
+			await open(directory, "load")
+			expect(await fs.readdir(directory)).not.toContain(name)
+		},
+	)
 
 	it("leaves a durable incomplete-setup marker if credential creation fails before rename", async () => {
 		const { directory } = await location()
