@@ -237,6 +237,8 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 				tuningTrust: "commanded",
 				fromSample: track.startSample,
 				reason: "detection",
+				// no protocol here needs more than 48 kHz
+				rateHz: 48_000,
 			})
 			internals.endIqCapture(l)
 			expect(port.end).toHaveBeenCalledWith("cap-1")

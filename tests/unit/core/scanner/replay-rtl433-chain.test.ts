@@ -9,7 +9,9 @@ import { PassThrough } from "node:stream"
 import pino from "pino"
 import { describe, expect, it, vi } from "vitest"
 import {
+	shortPulseBits,
 	synthesizeOokSensor,
+	synthesizeShortPulseSensor,
 	toCf32,
 } from "../../../../scripts/fixtures/ook-sensor-iq.mjs"
 import { createPoolReplayProbes } from "../../../../src/core/iq-capture/pool-adapter.js"
@@ -17,6 +19,7 @@ import { IQ_REPLAY_QUEUE_HOLDER } from "../../../../src/core/iq-capture/replay-q
 import {
 	IQ_CAPTURE_MAX_BYTES,
 	IQ_CAPTURE_RATE_HZ,
+	iqCaptureMaxBytes,
 	type IqCaptureView,
 	type IqReplayResult,
 } from "../../../../src/core/scanner/iq-capture-contract.js"
@@ -152,6 +155,29 @@ function scanner() {
 }
 
 describe("rtl_433 replay chain (synthetic OOK sensor)", () => {
+	it("the short-pulse fixture: 56 bits with parity and checksum; one burst fits a 96 kHz capture", () => {
+		const bits = shortPulseBits({
+			id: 421,
+			channel: 3,
+			tempC: 21.5,
+			humidity: 40,
+		})
+		expect(bits).toHaveLength(56)
+		const bytes = Array.from({ length: 7 }, (_, i) =>
+			bits.slice(i * 8, i * 8 + 8).reduce((a, b) => (a << 1) | b, 0),
+		)
+		expect(bytes[6]).toBe(bytes.slice(0, 6).reduce((a, b) => a + b, 0) & 0xff)
+		for (const b of bytes.slice(2, 6)) {
+			let ones = 0
+			for (let i = 0; i < 8; i++) ones += (b >> i) & 1
+			expect(ones % 2).toBe(0)
+		}
+		const iq = toCf32(
+			synthesizeShortPulseSensor({ sampleRateHz: 96_000, offsetHz: 3000 }),
+		)
+		expect(iq.length).toBeLessThanOrEqual(iqCaptureMaxBytes(96_000))
+	})
+
 	it("the synthetic capture fits one capture file", () => {
 		const bytes = fixture().length
 		expect(bytes % 8).toBe(0)

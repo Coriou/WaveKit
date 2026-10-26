@@ -25,7 +25,10 @@ import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ProbeDecoderType } from "../scanner/probes/probe-pool.js"
+import { isCaptureRate, wholeCaptureShapeAt } from "./rates.js"
 import {
+	IQ_CAPTURE_RATE_HZ,
+	type IqCaptureRateHz,
 	IQ_CAPTURE_MAX_MS,
 	IQ_CAPTURE_PREROLL_MAX_MS,
 	IQ_CAPTURE_TOTAL_MAX_BYTES,
@@ -890,7 +893,8 @@ class Service implements IqCaptureService {
 			(req.observationId !== null && typeof req.observationId !== "string") ||
 			(req.tuningTrust !== "commanded" &&
 				req.tuningTrust !== "relay" &&
-				req.tuningTrust !== "unverified")
+				req.tuningTrust !== "unverified") ||
+			(req.rateHz !== undefined && !isCaptureRate(req.rateHz))
 		)
 			return this.refuse("invalid")
 		const slot = this.slots.get(req.sourceId)
@@ -940,12 +944,14 @@ class Service implements IqCaptureService {
 			this.issued.set(proc, own)
 		}
 		own.add(captureId)
+		const rateHz = req.rateHz ?? IQ_CAPTURE_RATE_HZ
 		const sent = proc.send({
 			type: "capture",
 			id: captureId,
 			offsetHz,
 			fromSample,
 			maxMs,
+			...(rateHz !== IQ_CAPTURE_RATE_HZ ? { rateHz } : {}),
 		})
 		if (!sent) {
 			slot.ids.delete(captureId)
@@ -1009,6 +1015,15 @@ class Service implements IqCaptureService {
 		return n
 	}
 
+	replayRateOf(
+		captureId: string,
+		decoderType: ProbeDecoderType,
+	): IqCaptureRateHz | null {
+		const e = this.store?.get(captureId)
+		if (!e) return null
+		return decoderType === "rtl433" ? e.rateHz : IQ_CAPTURE_RATE_HZ
+	}
+
 	openReplay(
 		captureId: string,
 		decoderType: ProbeDecoderType,
@@ -1031,13 +1046,31 @@ class Service implements IqCaptureService {
 		const cfg = this.cfg
 		if (!store || !cfg || this.st !== "on" || !this.dir) return null
 		const shapes = this.shapes
-		const shape =
+		const given =
 			shapes && Object.hasOwn(shapes, decoderType)
 				? shapes[decoderType]
 				: undefined
-		if (!shape) return null
+		if (!given) return null
 		const e = store.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
+		// rtl433 reads the capture at its own rate with the whole passband up to its Nyquist edge;
+		// a 48 kHz decoder of a faster capture gets it brought down to 48 kHz (`--out-rate`).
+		const native = decoderType === "rtl433" && e.rateHz !== IQ_CAPTURE_RATE_HZ
+		const shape = native
+			? wholeCaptureShapeAt(given.bandwidthHz, e.rateHz)
+			: given
+		if (!shape) return null
+		const rateArgs =
+			e.rateHz === IQ_CAPTURE_RATE_HZ
+				? []
+				: native
+					? ["--rate", String(e.rateHz)]
+					: [
+							"--rate",
+							String(e.rateHz),
+							"--out-rate",
+							String(IQ_CAPTURE_RATE_HZ),
+						]
 		const file = path.join(this.dir, `${captureId}.cf32`)
 		if (!this.dirOk()) return null
 		const verified = this.openProven(captureId, file, e.bytes)
@@ -1061,6 +1094,7 @@ class Service implements IqCaptureService {
 					String(shape.bandwidthHz),
 					"--transition",
 					String(shape.transitionHz),
+					...rateArgs,
 				],
 				{
 					env: this.o.env ?? childAccessEnvironment(process.env),
@@ -1175,7 +1209,16 @@ class Service implements IqCaptureService {
 		try {
 			child = this.spawn(
 				cfg.binaryPath,
-				["analyze", "--in", "/dev/fd/3", "--mode", mode],
+				[
+					"analyze",
+					"--in",
+					"/dev/fd/3",
+					"--mode",
+					mode,
+					...(e.rateHz !== IQ_CAPTURE_RATE_HZ
+						? ["--rate", String(e.rateHz)]
+						: []),
+				],
 				{
 					env: this.o.env ?? childAccessEnvironment(process.env),
 					detached: process.platform !== "win32",

@@ -4,27 +4,18 @@
  */
 import { IQ_CAPTURE_RATE_HZ } from "../scanner/iq-capture-contract.js"
 import { PROBE_CHANNEL_REQUESTS } from "../scanner/probes/channel-transport.js"
+import { wholeCaptureShapeAt } from "./rates.js"
 import {
 	captureBandwidthHz,
 	type IqReplayShape,
 	type IqReplayShapes,
 } from "./service.js"
 
-/** The replay tool's narrowest transition (`wavekit-iqcap replay` refuses less). */
-export const IQ_REPLAY_MIN_TRANSITION_HZ = 100
+export { IQ_REPLAY_MIN_TRANSITION_HZ } from "./rates.js"
 
-/**
- * The shape that keeps the whole capture passband: `bandwidthHz` and a transition up to the
- * capture's Nyquist edge, (48 000 − bandwidth) / 2 (288 Hz for the 47 424 Hz capture), so
- * bandwidth / 2 + transition = 24 000 Hz exactly, the replay tool's bound. A bandwidth that leaves
- * less than the 100 Hz minimum transition is narrowed to 48 000 − 200 = 47 800 Hz; a non-finite or
- * non-positive one gives null (no rtl433 replay).
- */
+/** The whole-capture shape of a 48 kHz capture (`wholeCaptureShapeAt`). */
 export function wholeCaptureShape(bandwidthHz: number): IqReplayShape | null {
-	if (!Number.isFinite(bandwidthHz) || bandwidthHz <= 0) return null
-	const maxBandwidth = IQ_CAPTURE_RATE_HZ - 2 * IQ_REPLAY_MIN_TRANSITION_HZ
-	const bw = Math.min(bandwidthHz, maxBandwidth)
-	return { bandwidthHz: bw, transitionHz: (IQ_CAPTURE_RATE_HZ - bw) / 2 }
+	return wholeCaptureShapeAt(bandwidthHz, IQ_CAPTURE_RATE_HZ)
 }
 
 export function probeReplayShapes(): IqReplayShapes {

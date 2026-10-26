@@ -43,6 +43,7 @@ fn bench(fs: u64, captures: usize, bw: f64) -> f64 {
                 offset_hz: 300_000.0,
                 from_sample: e.count(),
                 max_ms: 4000,
+                rate_hz: 48_000,
             },
             &mut ev,
         );

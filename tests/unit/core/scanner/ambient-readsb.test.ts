@@ -13,6 +13,7 @@ import {
 import { classifySpectral } from "../../../../src/core/scanner/classify/classifier.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
+	ADSB_FRAMES_MAX,
 	AmbientEvidence,
 	type AmbientEvidenceEvent,
 } from "../../../../src/core/scanner/probes/ambient.js"
@@ -196,6 +197,27 @@ describe("readsb ambient interpreter", () => {
 		expect(r.got).toEqual([])
 		r.decoders.out(aircraft(beast(DF17_B)))
 		expect(r.got.map(e => e.ev.identity?.value)).toEqual(["4840d6"])
+	})
+
+	it("remembers the last frame of at most ADSB_FRAMES_MAX addresses, the oldest evicted", () => {
+		const r = rig()
+		const frames = () =>
+			(
+				r.ambient as unknown as {
+					states: Map<string, { frames?: Map<string, string> }>
+				}
+			).states.get("adsb")?.frames
+		const payload = [0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac]
+		const send = (n: number) =>
+			r.decoders.out(aircraft(beast(frameOf(0x8d, 0x100000 + n, payload))))
+		for (let n = 0; n < ADSB_FRAMES_MAX; n++) send(n)
+		expect(ADSB_FRAMES_MAX).toBe(4096)
+		expect(frames()?.size).toBe(ADSB_FRAMES_MAX)
+		expect(frames()?.has("100000")).toBe(true)
+		send(ADSB_FRAMES_MAX)
+		expect(frames()?.size).toBe(ADSB_FRAMES_MAX)
+		expect(frames()?.has("100000")).toBe(false)
+		expect(frames()?.has((0x100000 + ADSB_FRAMES_MAX).toString(16))).toBe(true)
 	})
 
 	it("uses the placement's channel when the output carries one", () => {

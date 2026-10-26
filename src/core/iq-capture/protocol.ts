@@ -86,6 +86,8 @@ export interface IqToolCaptureCommand {
 	offsetHz: number
 	fromSample: number
 	maxMs: number
+	/** Output rate; sent only when not 48 kHz (the tool's default). */
+	rateHz?: number
 }
 
 export type IqToolCommand =

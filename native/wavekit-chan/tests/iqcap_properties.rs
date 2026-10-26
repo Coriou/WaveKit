@@ -111,6 +111,7 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
             offset_hz: 150_000.0,
             from_sample: e.oldest(),
             max_ms: 4000,
+            rate_hz: 48_000,
         },
         &mut ev,
     );
@@ -126,6 +127,67 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
     let bytes = std::fs::read(dir.join(format!("{ID}.cf32"))).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     bytes
+}
+
+/// One capture of `ms` milliseconds of a source tone at output rate `rate`; the published bytes
+/// or the error code.
+fn capture_at(rate: u64, ms: u64) -> Result<usize, String> {
+    let fs = 1_024_000u64;
+    let dir = tmp_dir();
+    let mut e = Engine::new(Config {
+        sample_rate: fs,
+        ring_ms: 50,
+        out_dir: dir.clone(),
+        anchor: dir.clone(),
+        max_ms: 4000,
+        bandwidth_hz: 47_424.0,
+    })
+    .unwrap();
+    let mut ev: Vec<Value> = Vec::new();
+    e.command(
+        Command::Capture {
+            id: ID.into(),
+            offset_hz: 474_000.0,
+            from_sample: e.oldest(),
+            max_ms: 4000,
+            rate_hz: rate,
+        },
+        &mut ev,
+    );
+    // ms of input (4 100 ms past the bound: the 4 000 ms budget ends the capture by itself).
+    let ms = if ms >= 4000 { 4100 } else { ms };
+    let input = tone(fs, 474_000.0, (fs * ms / 1000) as usize, 7);
+    for c in input.chunks(65_536) {
+        e.input(c, &mut ev);
+    }
+    e.command(Command::End { id: ID.into() }, &mut ev);
+    let out = match std::fs::read(dir.join(format!("{ID}.cf32"))) {
+        Ok(b) => Ok(b.len()),
+        Err(_) => Err(ev
+            .iter()
+            .find(|v| v["type"] == "error")
+            .map(|v| v["code"].as_str().unwrap_or("").to_string())
+            .unwrap_or_default()),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_capture_runs_at_its_requested_rate_within_its_file_bound() {
+    // 1 s at 96 kHz: 96 000 samples × 8 B (± the filter edge).
+    let b = capture_at(96_000, 1000).unwrap();
+    assert!((b as i64 - 768_000).abs() <= 80, "{b}");
+    // The 4 s bound at each rate: exactly max_file_bytes(rate), never more.
+    for (rate, cap) in [
+        (48_000u64, 1_536_000usize),
+        (96_000, 3_072_000),
+        (192_000, 6_144_000),
+    ] {
+        assert_eq!(capture_at(rate, 4000).unwrap(), cap, "{rate}");
+    }
+    // An unsupported rate never opens a file.
+    assert_eq!(capture_at(250_000, 100), Err("out-of-range".into()));
 }
 
 proptest! {

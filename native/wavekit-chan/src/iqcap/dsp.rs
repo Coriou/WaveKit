@@ -1,5 +1,8 @@
-//! Capture DSP: CU8 at the source rate → channel at `offsetHz` shifted to DC → exactly 48 000 Hz
-//! cf32, low-passed to the capture bandwidth.
+//! Capture DSP: CU8 at the source rate → channel at `offsetHz` shifted to DC → exactly the
+//! capture output rate (48 000 Hz by default; 96 000 or 192 000 Hz per capture, `CAPTURE_RATES`)
+//! cf32, low-passed to the capture bandwidth. The passband is the same at every output rate; a
+//! higher rate keeps short pulses (a 229 µs OOK pulse is 11 samples at 48 kHz, 22 at 96 kHz) for
+//! decoders whose envelope detector smears them at 48 kHz.
 //!
 //! Chain (all blocks reused from the crate library, `stages.rs` / `design.rs` / `convert.rs`):
 //!
@@ -31,10 +34,15 @@ use crate::convert::cu8_to_f32;
 use crate::design::lowpass;
 use crate::stages::{Nco, RationalFir};
 
-/// Output rate of every capture (contract `IQ_CAPTURE_RATE_HZ`).
+/// Default output rate of a capture (contract `IQ_CAPTURE_RATE_HZ`).
 pub const CAPTURE_RATE_HZ: u64 = 48_000;
-/// Stage 1 decimates to at least this rate (4 × the output rate).
-const STAGE1_MIN_RATE: u64 = 192_000;
+/// Output rates a capture may ask for. Each is 48 kHz × 2^k, so the remaining stage-2 ratio
+/// out·D1/fs keeps the same small L2 as at 48 kHz for every common source rate (2.048 Msps →
+/// 3/16, 2.4 Msps → 1/5 or 2/25, 1.024 Msps → 3/32 or 3/16). 250 kHz is not offered: at 1.024
+/// and 2.048 Msps its ratio reduces to L2 = 125 > MAX_L2 = 64.
+pub const CAPTURE_RATES: [u64; 3] = [48_000, 96_000, 192_000];
+/// Stage 1 decimates to at least 4 × the output rate.
+const STAGE1_MIN_FACTOR: u64 = 4;
 /// Largest stage 2 interpolation factor accepted; keeps the polyphase prototype short.
 const MAX_L2: u64 = 64;
 /// Accepted capture bandwidths (Hz). The widest probe passband (multimon-ng / direwolf,
@@ -61,16 +69,26 @@ pub struct ChainPlan {
 }
 
 impl ChainPlan {
-    /// Among D1 with fs/D1 ≥ 192 kHz (D1 = 1 is the single-stage rational case), picks the one
-    /// whose remaining ratio 48000·D1/fs reduces to the smallest L2 (≤ 64), ties to larger D1.
+    /// The 48 kHz plan (see [`ChainPlan::for_output`]).
     pub fn for_rate(fs: u64) -> Option<Self> {
-        if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&fs) {
+        Self::for_output(fs, CAPTURE_RATE_HZ)
+    }
+
+    /// Among D1 with fs/D1 ≥ 4 × out (D1 = 1 is the single-stage rational case), picks the one
+    /// whose remaining ratio out·D1/fs reduces to the smallest L2 (≤ 64), ties to larger D1.
+    /// None for a source rate out of bounds, an output rate not in `CAPTURE_RATES` or above the
+    /// source rate.
+    pub fn for_output(fs: u64, out: u64) -> Option<Self> {
+        if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&fs)
+            || !CAPTURE_RATES.contains(&out)
+            || out > fs
+        {
             return None;
         }
-        let top = (fs / STAGE1_MIN_RATE).max(1);
+        let top = (fs / (STAGE1_MIN_FACTOR * out)).max(1);
         (1..=top)
             .filter_map(|d1| {
-                let num = CAPTURE_RATE_HZ * d1;
+                let num = out * d1;
                 let g = gcd(num, fs);
                 let (l2, m2) = (num / g, fs / g);
                 (l2 <= MAX_L2).then_some(ChainPlan { d1, l2, m2 })
@@ -89,25 +107,34 @@ impl ChainPlan {
 #[derive(Debug, Clone)]
 pub struct ChainDesign {
     pub fs: u64,
+    /// Output rate (one of `CAPTURE_RATES`).
+    pub out: u64,
     pub plan: ChainPlan,
     pub stage1: Option<Vec<f32>>,
     pub stage2: Vec<f32>,
 }
 
 impl ChainDesign {
+    /// The 48 kHz design.
     pub fn new(fs: u64, bandwidth_hz: f64) -> Result<Self, String> {
+        Self::with_output(fs, CAPTURE_RATE_HZ, bandwidth_hz)
+    }
+
+    /// The design for output rate `out` (one of `CAPTURE_RATES`); the bandwidth bounds are the
+    /// 48 kHz ones at every rate (the passband does not widen with the rate).
+    pub fn with_output(fs: u64, out: u64, bandwidth_hz: f64) -> Result<Self, String> {
         if !(MIN_BANDWIDTH_HZ..=MAX_BANDWIDTH_HZ).contains(&bandwidth_hz) {
             return Err(format!(
                 "bandwidth must be within {MIN_BANDWIDTH_HZ}..={MAX_BANDWIDTH_HZ} Hz"
             ));
         }
-        let plan = ChainPlan::for_rate(fs).ok_or_else(|| {
-            format!("sample rate must be within {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE} Hz with a small rational ratio to 48 kHz")
+        let plan = ChainPlan::for_output(fs, out).ok_or_else(|| {
+            format!("sample rate must be within {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE} Hz with a small rational ratio to the output rate")
         })?;
         let pass = bandwidth_hz / 2.0;
-        // Stage 2 stops at 48 kHz − pass: what folds back at the 48 kHz output lands beyond the
+        // Stage 2 stops at out − pass: what folds back at the output rate lands beyond the
         // passband, never inside it (Crochiere & Rabiner §2.4, the alias-free band criterion).
-        let stop2 = CAPTURE_RATE_HZ as f64 - pass;
+        let stop2 = out as f64 - pass;
         let fi = plan.stage1_rate(fs);
         let stage1 = (plan.d1 > 1).then(|| {
             let stop = fi - stop2;
@@ -122,6 +149,7 @@ impl ChainDesign {
         );
         Ok(ChainDesign {
             fs,
+            out,
             plan,
             stage1,
             stage2,
@@ -198,7 +226,18 @@ impl CaptureDsp {
 
 /// Output samples that correspond to `input` source samples (used to report gaps).
 pub fn output_equivalent(fs: u64, input: u64) -> u64 {
-    ((input as u128 * CAPTURE_RATE_HZ as u128 + fs as u128 / 2) / fs as u128) as u64
+    output_equivalent_at(fs, CAPTURE_RATE_HZ, input)
+}
+
+/// As [`output_equivalent`] at output rate `out`.
+pub fn output_equivalent_at(fs: u64, out: u64, input: u64) -> u64 {
+    ((input as u128 * out as u128 + fs as u128 / 2) / fs as u128) as u64
+}
+
+/// Largest capture file at output rate `out`: 4 000 ms × out × 8 B (cf32). 48 kHz: 1 536 000 B
+/// (contract `IQ_CAPTURE_MAX_BYTES`); 96 kHz: 3 072 000 B; 192 kHz: 6 144 000 B.
+pub fn max_file_bytes(out: u64) -> u64 {
+    4 * out * 8
 }
 
 /// Replay filter (48 kHz in, 48 kHz out, same length): a linear-phase Kaiser low-pass
@@ -206,7 +245,17 @@ pub fn output_equivalent(fs: u64, input: u64) -> u64 {
 /// (N−1)/2 zeros through it and dropping the first (N−1)/2 outputs (Lyons §5.10, group delay of
 /// symmetric FIRs), so output n is aligned with input n.
 pub fn replay_filter(input: &[f32], bandwidth_hz: f64, transition_hz: f64) -> Vec<f32> {
-    let fs = CAPTURE_RATE_HZ as f64;
+    replay_filter_at(input, bandwidth_hz, transition_hz, CAPTURE_RATE_HZ)
+}
+
+/// As [`replay_filter`] for a capture at `rate` (one of `CAPTURE_RATES`).
+pub fn replay_filter_at(
+    input: &[f32],
+    bandwidth_hz: f64,
+    transition_hz: f64,
+    rate: u64,
+) -> Vec<f32> {
+    let fs = rate as f64;
     let pass = bandwidth_hz / 2.0;
     let taps = lowpass((pass + transition_hz / 2.0) / fs, transition_hz / fs, 1.0);
     let delay = (taps.len() - 1) / 2;
@@ -241,13 +290,47 @@ pub fn replay_filter(input: &[f32], bandwidth_hz: f64, transition_hz: f64) -> Ve
     out
 }
 
+/// Every `factor`-th complex sample of interleaved cf32 (factor ≥ 1). Alias-free only when the
+/// input already holds nothing above the output Nyquist (`to_capture_rate` filters first).
+pub fn keep_every(input: &[f32], factor: usize) -> Vec<f32> {
+    let factor = factor.max(1);
+    input
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .step_by(factor)
+        .flat_map(|s| [s[0], s[1]])
+        .collect()
+}
+
+/// Brings a capture at `rate` (one of `CAPTURE_RATES`) to 48 kHz for a 48 kHz consumer: a
+/// low-pass at `rate` with the given shape, which must end by 24 kHz (`replay_shape_ok` at
+/// 48 kHz, so nothing folds back), then every rate/48 000-th sample. A 48 kHz capture is
+/// filtered only. Same duration in, same duration out.
+pub fn to_capture_rate(
+    input: &[f32],
+    rate: u64,
+    bandwidth_hz: f64,
+    transition_hz: f64,
+) -> Vec<f32> {
+    let filtered = replay_filter_at(input, bandwidth_hz, transition_hz, rate);
+    keep_every(&filtered, (rate / CAPTURE_RATE_HZ) as usize)
+}
+
 /// Accepted replay shapes: the low-pass must end by 24 kHz.
 pub fn replay_shape_ok(bandwidth_hz: f64, transition_hz: f64) -> bool {
-    bandwidth_hz.is_finite()
+    replay_shape_ok_at(bandwidth_hz, transition_hz, CAPTURE_RATE_HZ)
+}
+
+/// As [`replay_shape_ok`] for a capture at `rate`: the low-pass must end by rate / 2, and the
+/// rate must be one of `CAPTURE_RATES`.
+pub fn replay_shape_ok_at(bandwidth_hz: f64, transition_hz: f64, rate: u64) -> bool {
+    CAPTURE_RATES.contains(&rate)
+        && bandwidth_hz.is_finite()
         && transition_hz.is_finite()
         && bandwidth_hz > 0.0
         && transition_hz >= 100.0
-        && bandwidth_hz / 2.0 + transition_hz <= CAPTURE_RATE_HZ as f64 / 2.0
+        && bandwidth_hz / 2.0 + transition_hz <= rate as f64 / 2.0
 }
 
 #[cfg(test)]
@@ -286,6 +369,93 @@ mod tests {
         dsp.push_cu8(&vec![128u8; 2_048_000 * 2], &mut out);
         let n = out.len() / 2;
         assert!((47_990..=48_010).contains(&n), "{n}");
+    }
+
+    #[test]
+    fn plans_every_capture_rate_at_common_source_rates() {
+        for fs in [1_024_000u64, 2_048_000, 2_400_000, 960_000, 3_200_000] {
+            for out in CAPTURE_RATES {
+                let p = ChainPlan::for_output(fs, out).unwrap();
+                assert_eq!(p.l2 * fs, out * p.d1 * p.m2, "{fs} {out}");
+                assert!(
+                    fs / p.d1 >= STAGE1_MIN_FACTOR * out || p.d1 == 1,
+                    "{fs} {out}"
+                );
+            }
+        }
+        // Not offered: 250 kHz (L2 = 125 at 1.024 Msps), any other rate, a rate above the source.
+        assert!(ChainPlan::for_output(1_024_000, 250_000).is_none());
+        assert!(ChainPlan::for_output(1_024_000, 96_001).is_none());
+        assert!(ChainPlan::for_output(96_000, 96_000).is_some());
+        assert!(ChainPlan::for_output(96_000, 192_000).is_none());
+        assert_eq!(
+            ChainPlan::for_rate(2_048_000),
+            ChainPlan::for_output(2_048_000, 48_000)
+        );
+    }
+
+    #[test]
+    fn output_rate_follows_the_requested_rate() {
+        for out in [96_000u64, 192_000] {
+            let d = ChainDesign::with_output(1_024_000, out, 47_424.0).unwrap();
+            let mut dsp = CaptureDsp::new(&d, 0.0);
+            let mut o = Vec::new();
+            dsp.push_cu8(&vec![128u8; 1_024_000 * 2], &mut o);
+            let n = (o.len() / 2) as u64;
+            assert!(n.abs_diff(out) <= 10, "{out} {n}");
+            assert_eq!(output_equivalent_at(1_024_000, out, 1_024_000), out);
+        }
+        assert_eq!(max_file_bytes(48_000), 1_536_000);
+        assert_eq!(max_file_bytes(96_000), 3_072_000);
+        assert_eq!(max_file_bytes(192_000), 6_144_000);
+    }
+
+    #[test]
+    fn replay_shape_bounds_follow_the_rate() {
+        // At the bound (bandwidth / 2 + transition = rate / 2) and 1 Hz past it.
+        assert!(replay_shape_ok_at(47_424.0, 24_288.0, 96_000));
+        assert!(!replay_shape_ok_at(47_424.0, 24_289.0, 96_000));
+        assert!(replay_shape_ok_at(47_424.0, 288.0, 48_000));
+        assert!(!replay_shape_ok_at(47_424.0, 289.0, 48_000));
+        assert!(!replay_shape_ok_at(12_500.0, 576.0, 250_000));
+        let x: Vec<f32> = (0..4000).map(|k| (k as f32 * 0.01).sin()).collect();
+        assert_eq!(
+            replay_filter_at(&x, 47_424.0, 24_288.0, 96_000).len(),
+            x.len()
+        );
+    }
+
+    #[test]
+    fn brings_a_96k_capture_to_48k_without_aliasing() {
+        // A 10 kHz tone (kept) and a 30 kHz tone (would fold to −18 kHz) at 96 kHz.
+        let n = 96_000usize;
+        let mut x = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            let t = k as f64 / 96_000.0;
+            let (a, b) = (
+                std::f64::consts::TAU * 10_000.0 * t,
+                std::f64::consts::TAU * 30_000.0 * t,
+            );
+            x.push((a.cos() + b.cos()) as f32);
+            x.push((a.sin() + b.sin()) as f32);
+        }
+        let y = to_capture_rate(&x, 96_000, 40_000.0, 4_000.0);
+        assert_eq!(y.len(), n);
+        // Power at −18 kHz (the fold of 30 kHz) is at least 40 dB below the 10 kHz tone.
+        let p = |f: f64| {
+            let (mut re, mut im) = (0f64, 0f64);
+            for (k, s) in y.as_chunks::<2>().0.iter().enumerate().skip(2_000) {
+                let ph = -std::f64::consts::TAU * f * k as f64 / 48_000.0;
+                re += s[0] as f64 * ph.cos() - s[1] as f64 * ph.sin();
+                im += s[0] as f64 * ph.sin() + s[1] as f64 * ph.cos();
+            }
+            re * re + im * im
+        };
+        assert!(10.0 * (p(10_000.0) / p(-18_000.0)).log10() > 40.0);
+        assert_eq!(
+            keep_every(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2),
+            vec![1.0, 2.0, 5.0, 6.0]
+        );
     }
 
     #[test]

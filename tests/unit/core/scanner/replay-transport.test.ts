@@ -117,6 +117,46 @@ describe("replay transport", () => {
 		expect(live.openReplay).not.toHaveBeenCalled()
 	})
 
+	it("feeds rtl433 the capture's own rate (96 kHz) and every failure the safe 48 kHz", () => {
+		const cfgWith = (
+			replayRateOf: (id: string, t: string) => number | null,
+		) => {
+			const t = createReplayTransport({
+				openReplay: () => null,
+				replayRateOf: replayRateOf as never,
+			})
+			const req = replayReq()
+			return buildProbeConfig({
+				probeId: "r",
+				req,
+				mode: modeOf("rtl433"),
+				transport: t,
+				ctx: ctxOf(req),
+				recordDir: null,
+				ports: null,
+			}).options["inputSampleRate"]
+		}
+		expect(cfgWith(() => 96_000)).toBe(96_000)
+		expect(cfgWith(() => null)).toBe(48_000)
+		expect(
+			cfgWith(() => {
+				throw new Error("x")
+			}),
+		).toBe(48_000)
+		const argv = (
+			createRtl433Decoder(
+				{
+					id: "r",
+					type: "rtl433",
+					enabled: true,
+					options: { inputIqFormat: "cf32", inputSampleRate: 96_000 },
+				} as never,
+				pino({ level: "silent" }),
+			) as unknown as { getArgs(): string[] }
+		).getArgs()
+		expect(argv[1]).toMatch(/^rtl_433 -r cf32:- -s 96000 /)
+	})
+
 	it("opens rtl433 replays and runs rtl_433 on the cf32 capture as it is", () => {
 		const stream = new PassThrough()
 		const { port, openReplay } = fakePort(stream)

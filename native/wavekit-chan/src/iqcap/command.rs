@@ -1,6 +1,7 @@
 //! fd 3 control commands: a bounded line reader and strict validation of each JSON line.
 //! Nothing here touches engine state; the engine applies a command only after it parsed.
 
+use super::dsp::{CAPTURE_RATES, CAPTURE_RATE_HZ};
 use serde_json::Value;
 use std::io::{ErrorKind, Read};
 
@@ -62,6 +63,8 @@ pub enum Command {
         offset_hz: f64,
         from_sample: u64,
         max_ms: u64,
+        /// Output rate; absent = 48 000. Only `CAPTURE_RATES` values parse.
+        rate_hz: u64,
     },
     End {
         id: String,
@@ -131,11 +134,19 @@ pub fn parse(line: &[u8]) -> Result<Command, Reject> {
                 .and_then(Value::as_u64)
                 .ok_or_else(bad)?;
             let max_ms = o.get("maxMs").and_then(Value::as_u64).ok_or_else(bad)?;
+            let rate_hz = match o.get("rateHz") {
+                None => CAPTURE_RATE_HZ,
+                Some(v) => v
+                    .as_u64()
+                    .filter(|r| CAPTURE_RATES.contains(r))
+                    .ok_or_else(bad)?,
+            };
             Ok(Command::Capture {
                 id,
                 offset_hz,
                 from_sample,
                 max_ms,
+                rate_hz,
             })
         }
         "end" => Ok(Command::End { id: id_of(o)? }),
@@ -186,9 +197,31 @@ mod tests {
                 id: ID.into(),
                 offset_hz: -1000.5,
                 from_sample: 7,
-                max_ms: 100
+                max_ms: 100,
+                rate_hz: 48_000
             })
         );
+        let l = format!(
+            r#"{{"type":"capture","id":"{ID}","offsetHz":0,"fromSample":7,"maxMs":100,"rateHz":96000}}"#
+        );
+        assert!(matches!(
+            parse(l.as_bytes()),
+            Ok(Command::Capture {
+                rate_hz: 96_000,
+                ..
+            })
+        ));
+        for bad in ["250000", "96001", "0", "-96000", "96000.5", "\"96000\""] {
+            let l = format!(
+                r#"{{"type":"capture","id":"{ID}","offsetHz":0,"fromSample":7,"maxMs":100,"rateHz":{bad}}}"#
+            );
+            let r = parse(l.as_bytes()).unwrap_err();
+            assert_eq!(
+                (r.code, r.id.as_deref()),
+                ("out-of-range", Some(ID)),
+                "{bad}"
+            );
+        }
         assert_eq!(parse(b"nope").unwrap_err().code, "bad-json");
         assert_eq!(parse(b"[1]").unwrap_err().code, "bad-json");
         assert_eq!(

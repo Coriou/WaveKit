@@ -730,6 +730,58 @@ describe("IqCaptureService openReplay", () => {
 		await s.svc.stop()
 	})
 
+	it("a 96 kHz capture: the tool is asked for it, rtl433 reads it at 96 kHz, 48 kHz decoders and analyze get it brought to 48 kHz", async () => {
+		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
+		const s = await setup(
+			{ shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) } },
+			{ samples: 9_600 },
+		)
+		const run = await running(s)
+		const got = s.svc.capture(req({ rateHz: 96_000 }))
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		expect(run.commands().find(c => c["type"] === "capture")).toMatchObject({
+			rateHz: 96_000,
+		})
+		expect(s.svc.replayRateOf?.(id, "rtl433")).toBe(96_000)
+		expect(s.svc.replayRateOf?.(id, "multimon-ng")).toBe(48_000)
+		expect(s.svc.replayRateOf?.("gone", "rtl433")).toBeNull()
+		expect(s.svc.openReplay(id, "rtl433")).not.toBeNull()
+		expect(lastReplay(s).args).toEqual([
+			"replay",
+			"--in",
+			"/dev/fd/3",
+			"--bandwidth",
+			"16000",
+			"--transition",
+			"40000",
+			"--rate",
+			"96000",
+		])
+		expect(s.svc.openReplay(id, "multimon-ng")).not.toBeNull()
+		expect(lastReplay(s).args.slice(-4)).toEqual([
+			"--rate",
+			"96000",
+			"--out-rate",
+			"48000",
+		])
+		await s.svc.stop()
+	})
+
+	it("a request with an unsupported rate is refused invalid; a 48 kHz request sends no rate", async () => {
+		const s = await setup()
+		const run = await running(s)
+		expect(s.svc.capture(req({ rateHz: 250_000 as never }))).toEqual({
+			refused: "invalid",
+		})
+		s.svc.capture(req())
+		await flush(10)
+		expect(
+			run.commands().find(c => c["type"] === "capture"),
+		).not.toHaveProperty("rateHz")
+		await s.svc.stop()
+	})
+
 	it("replays into rtl433 with the whole-capture shape when it is given", async () => {
 		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
 		expect(rtl433).toEqual({ bandwidthHz: 16_000, transitionHz: 16_000 })

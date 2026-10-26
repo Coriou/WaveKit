@@ -3831,10 +3831,15 @@ scanner:
   transmission yet (below `decoded`, or `decoded` with a known protocol no live
   probe has confirmed on this observation), not on a spur or an image, inside the
   usable span; at most 6 per source per minute and 2 at once. The tool shifts the
-  channel to baseband and decimates it to 48 000 Hz complex float32 (cf32) at the
-  widest probe passband, from the pre-roll to the track's close (plus the tracker
-  hang) or `maxCaptureMs`: at most 1 536 000 B per capture (4 s × 48 000 × 8 B).
-  Gaps are counted, never filled; a capture shorter than 100 ms is discarded.
+  channel to baseband and decimates it to complex float32 (cf32) at the widest
+  probe passband, from the pre-roll to the track's close (plus the tracker hang)
+  or `maxCaptureMs`. The rate is 48 000 Hz, or 96 000 Hz when the band plan lists
+  ISM at the capture or the track is an OOK burst (rtl_433 needs it for
+  short-pulse sensors); the passband is the same. At most 1 536 000 B per capture
+  at 48 kHz (4 s × 48 000 × 8 B) and 3 072 000 B at 96 kHz; the tool also accepts
+  192 000 Hz (6 144 000 B), which no protocol uses yet. A 48 kHz decoder and the
+  analog trial get a faster capture brought to 48 kHz. Gaps are counted, never
+  filled; a capture shorter than 100 ms is discarded.
 - **Order.** capture → queue → replay trials → result → discard. A finished capture
   joins one FIFO replay queue per core. Its trials (at most 8,
   `IQ_REPLAY_MAX_TRIALS`) are the known protocol first, then the probe modes the

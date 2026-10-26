@@ -68,7 +68,15 @@ pub enum AnalyzeMode {
 pub struct AnalyzeArgs {
     pub input: PathBuf,
     pub mode: AnalyzeMode,
+    /// The capture's output rate (default 48 000); a faster capture is brought to 48 kHz first.
+    pub rate_hz: u64,
 }
+
+/// Shape of the 48 kHz step for a faster capture: pass ±20 kHz, stop by 24 kHz (nothing folds
+/// back into the passband), wider than every analog channel the analysis reads (its
+/// discriminator band ends at 12 kHz).
+const TO_48K_BANDWIDTH_HZ: f64 = 40_000.0;
+const TO_48K_TRANSITION_HZ: f64 = 4_000.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnalyzeFrame {
@@ -151,8 +159,15 @@ pub fn analyze_cost(iq: &[f32], mode: AnalyzeMode) -> Result<AnalyzeCost, Analyz
 }
 
 pub fn run(args: &AnalyzeArgs) -> i32 {
-    let iq = match super::read_capture(&args.input) {
-        Ok(samples) => samples,
+    let read = super::read_capture_bounded(&args.input, super::dsp::max_file_bytes(args.rate_hz));
+    let iq = match read {
+        Ok(samples) if args.rate_hz == super::dsp::CAPTURE_RATE_HZ => samples,
+        Ok(samples) => super::dsp::to_capture_rate(
+            &samples,
+            args.rate_hz,
+            TO_48K_BANDWIDTH_HZ,
+            TO_48K_TRANSITION_HZ,
+        ),
         Err(err) => {
             let code = match err.as_str() {
                 "cannot open input" | "cannot stat input" => "open-failed",
