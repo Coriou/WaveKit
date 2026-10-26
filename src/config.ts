@@ -862,6 +862,29 @@ export const ConfigSchema = z
 						cpuBudgetCores: z.number().positive().max(64).optional(),
 						cpuGuardPercent: z.number().min(1).max(100).optional(),
 						maxBandplanChannels: z.number().int().min(0).max(16).optional(),
+						/**
+						 * Activity-ranked multimon-ng and dsd-fme channels: slots per
+						 * decoder per source beyond its primary or VFO channel (default
+						 * x86-64 4 and 2, arm64 1 and 0), cores held back for replay
+						 * (0.1, arm64 0.05), moves per source per rolling minute (6) and
+						 * the dwell after a start (20 s). Used while channel activity
+						 * ranking runs; without it the planner keeps the nearest order.
+						 */
+						activity: z
+							.object({
+								slots: z
+									.object({
+										"multimon-ng": z.number().int().min(0).max(32).optional(),
+										"dsd-fme": z.number().int().min(0).max(32).optional(),
+									})
+									.strict()
+									.optional(),
+								replayAllowanceCores: z.number().min(0).max(4).optional(),
+								maxMovesPerMinute: z.number().int().min(0).max(60).optional(),
+								dwellMs: z.number().int().min(0).max(600_000).optional(),
+							})
+							.strict()
+							.optional(),
 					})
 					.strict()
 					.optional(),

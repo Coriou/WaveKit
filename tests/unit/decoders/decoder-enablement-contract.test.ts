@@ -293,6 +293,26 @@ describe("decoder enablement contract", () => {
 				},
 			}).decoderPolicy?.efficiency?.maxBandplanChannels,
 		).toBe(16)
+		expect(
+			ConfigSchema.parse({
+				...config,
+				decoderPolicy: {
+					efficiency: {
+						activity: {
+							slots: { "multimon-ng": 8, "dsd-fme": 0 },
+							replayAllowanceCores: 0.2,
+							maxMovesPerMinute: 3,
+							dwellMs: 30_000,
+						},
+					},
+				},
+			}).decoderPolicy?.efficiency?.activity,
+		).toEqual({
+			slots: { "multimon-ng": 8, "dsd-fme": 0 },
+			replayAllowanceCores: 0.2,
+			maxMovesPerMinute: 3,
+			dwellMs: 30_000,
+		})
 		for (const efficiency of [
 			{ cpuBudgetCores: 0 },
 			{ cpuBudgetCores: 65 },
@@ -302,6 +322,13 @@ describe("decoder enablement contract", () => {
 			{ maxBandplanChannels: 17 },
 			{ maxBandplanChannels: 1.5 },
 			{ unknown: true },
+			{ activity: { slots: { "multimon-ng": 33 } } },
+			{ activity: { slots: { "dsd-fme": -1 } } },
+			{ activity: { slots: { acarsdec: 1 } } },
+			{ activity: { replayAllowanceCores: -0.1 } },
+			{ activity: { maxMovesPerMinute: 61 } },
+			{ activity: { dwellMs: 1.5 } },
+			{ activity: { unknown: true } },
 		]) {
 			expect(
 				ConfigSchema.safeParse({ ...config, decoderPolicy: { efficiency } })

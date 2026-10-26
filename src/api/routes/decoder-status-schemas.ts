@@ -45,10 +45,42 @@ export const decoderStatusExtensionProperties = {
 				reach: { type: "string", enum: ["channel", "raw", "centre"] },
 				origin: {
 					type: "string",
-					enum: ["configured", "band", "vfo", "bandplan", "fallback"],
+					enum: [
+						"configured",
+						"band",
+						"vfo",
+						"bandplan",
+						"fallback",
+						"activity",
+					],
 				},
 				primary: { type: "boolean" },
 				running: { type: "boolean" },
+				activity: {
+					type: "object",
+					properties: {
+						ranking: { type: "string", enum: ["activity", "nearest"] },
+						state: { type: "string", enum: ["hot", "warm", "cold"] },
+						score: { type: "number", minimum: 0 },
+						live: { type: "boolean" },
+						reasons: {
+							type: "array",
+							maxItems: 6,
+							items: {
+								type: "string",
+								enum: [
+									"live-energy",
+									"track",
+									"occupancy",
+									"decoded",
+									"trial-success",
+									"trial-backoff",
+								],
+							},
+						},
+					},
+					required: ["ranking"],
+				},
 				suspension: {
 					type: "object",
 					properties: {

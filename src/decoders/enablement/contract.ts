@@ -11,6 +11,11 @@ import type {
 	DecoderEfficiencyDetail,
 } from "@wavekit/api-types"
 import type { DecoderBandRequirements } from "../band-resolver.js"
+import type {
+	ActivityPlanResult,
+	PlacementActivity,
+	PlannerActivity,
+} from "./activity-plan.js"
 
 /**
  * Requirement 5.4: automatic channelizer composition is accepted per host
@@ -243,6 +248,12 @@ export interface PlannerInput {
 	/** Absent, throwing or not true: the VFO is not in a matching range. */
 	bandplanRangeContains?: BandplanRangeLookup
 	maxBandplanChannels: number
+	/**
+	 * Activity-ranked channels (Stage 1). Absent: today's eligibility, order
+	 * and caps. Present: paging raster and band-plan channels of multimon-ng
+	 * and dsd-fme are ranked whole and sliced by the global slot allocator.
+	 */
+	activity?: PlannerActivity
 }
 export interface WantedPlacement {
 	key: string
@@ -265,6 +276,13 @@ export interface WantedPlacement {
 	 * through the efficiency gate and probation even for a YAML decoder.
 	 */
 	gated?: true
+	/**
+	 * An activity move: the incumbent placement this one replaces. The manager
+	 * hands that placement's earned admission to this one (no new probation).
+	 */
+	movedFrom?: string
+	/** Why an activity decoder's channel runs (ranking, state and score). */
+	activity?: PlacementActivity
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(
@@ -279,6 +297,8 @@ export function placementOptionsKey(
 export interface PlacementPlan {
 	wanted: readonly WantedPlacement[] // admission order (4.2, 3.7)
 	unplaced: ReadonlyMap<string, DecoderSuspensionReasonCode> // decoderId → reason when it has no placement
+	/** Present when the input carried `activity`. */
+	activity?: ActivityPlanResult
 }
 export type PlacementPlanner = (input: PlannerInput) => PlacementPlan
 export function placementKey(
@@ -347,6 +367,12 @@ export interface EfficiencyGate {
 		now: number,
 	): readonly ProbationVerdict[]
 	noteSuspended(key: string, detail: DecoderEfficiencyDetail, now: number): void
+	/**
+	 * An activity move from `fromKey` to `toKey`: when `fromKey` graduated its
+	 * probation, `toKey` is admitted graduated (no new probation) and loses
+	 * any budget backoff. Call before `fromKey` is forgotten.
+	 */
+	inherit?(fromKey: string, toKey: string): void
 	forget(key: string): void
 	view(
 		running: readonly RunningPlacement[],

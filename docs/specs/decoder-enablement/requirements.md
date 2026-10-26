@@ -718,3 +718,91 @@ secondary stop keeps the newcomer out until the stop succeeds; a gate test of th
 reconnect path. A property test: across secondary counts and budgets, the in-band primary runs
 exactly when it fits beside the firm placements, YAML placements are never displaced,
 and the budget holds whenever it covers the YAML placements.
+
+## Activity-ranked channels amendment — 2026-10-26
+
+A capture over a whole paging band holds up to 33 raster channels (3.18), but the budget
+admits only a few of them, nearest the centre first. Traffic on a far channel was never
+decoded: the admitted channels were the near, quiet ones, and a refused channel waited
+`EFFICIENCY_RETRY_MS` before it was tried again.
+
+3.22 **Activity chooses which of a decoder's eligible channels run (Stage 1).** It applies
+to multimon-ng and dsd-fme while a channel activity ranking is available to the core
+(`src/decoders/enablement/activity-contract.ts`). Without one, 3.4, 3.7 and 3.18 are
+unchanged: same channels, same order, same caps.
+
+- _Candidates._ The ranked set of a decoder on a source is every eligible channel the
+  planner would place with origin `bandplan` before any cap: all paging raster channels
+  in view (3.18, config and catalogue origin), and all catalogue band-plan channels (3.4 b;
+  none when `maxBandplanChannels` is 0), deduplicated, in today's order (raster first,
+  each nearest the centre first). Configured, band and VFO channels are mandatory and
+  never ranked; the 3.18 VFO rules hold (an on-raster VFO is the primary, an off-raster
+  VFO in a paging band is not a candidate).
+- _Snapshot._ Each reconciliation pass takes one atomic batch of activity snapshots, one
+  query per (decoder, source) with the source's spectrum epoch and the full candidate
+  list. A snapshot is used only when it is `ready`, of the query's epoch, decoder type and
+  candidates, the only one for that decoder and source, and has exactly one valid entry
+  per candidate in candidate order (finite score at least 0, known state). Otherwise that
+  group uses today's order.
+- _Order._ The eligible VFO first; then hot channels by score (highest first), warm by
+  score, then cold channels in today's order; equal scores keep today's order. The ranking
+  only reorders the candidates; it never adds or drops one.
+- _Primary._ With no configured, band or VFO channel, the primary is the incumbent primary
+  channel while it stays eligible, otherwise the best-ranked channel of the preferred
+  source. Ranking alone never moves a primary (that restarts the decoder's own process).
+- _Slots._ Besides its primary or VFO channel, each group runs at most `slots` channels,
+  origin `activity`, `gated` (3.21): by default 4 for multimon-ng and 2 for dsd-fme on
+  x86-64, 1 and 0 on arm64 hosts with at most 4 cores
+  (`decoderPolicy.efficiency.activity.slots`, 0 to 32).
+- _Allocator._ One allocator per pass spends the budget once:
+  `committed = Σ mandatory placement costs + Σ distinct pending starts that are not
+mandatory placements + Σ channelizer base of each source holding either (0.22 core, 0.26
+above 2.048 Msps)`, `remaining = cpuBudgetCores − committed − replayAllowanceCores`
+  (default 0.1 core, 0.05 on arm64). A pending start is capacity in use whether or not the
+  plan keeps it, so it is never skipped for being merely eligible. A group's own pending
+  channels hold its first slots at no further cost and are kept (never moved) in this pass.
+  The other slots go round-robin over the groups in plan order, one per group per round,
+  each costing the decoder's channel cost (0.14 multimon-ng, 0.155 dsd-fme) plus its
+  source's base when not yet charged; a group whose next slot does not fit stops. When mandatory placements and the allowance already exceed the budget no
+  slot is given; mandatory placements are still planned and the gate decides (4.1).
+  x86-64 at 1.024 Msps: 0.22 + 5 × 0.14 + 3 × 0.155 + 0.1 = 1.485 ≤ 1.5. arm64:
+  0.22 + 2 × 0.14 + 0.155 + 0.05 = 0.705 ≤ 0.75 (two paging slots with the dsd-fme VFO
+  channel would be 0.795).
+- _Moves._ A slot keeps its channel while it stays eligible. Free slots take the best-ranked
+  channels (a new slot, not a move); a shrunk slot count drops the lowest-ranked. With a
+  ready snapshot, a hot or warm channel outranking a running slot replaces the
+  lowest-ranked slot that is not live and has run at least `dwellMs` (20 s) since its
+  successful start (or since it was planned, when it never started), while its source has
+  made fewer than `maxMovesPerMinute` (6) moves in the last 60 s. A slot on a live channel
+  is never displaced; a cold channel never displaces one. The nearest-order fallback
+  displaces nothing, so a ranking outage reshuffles nothing. A move is a restart on the new
+  frequency-keyed placement, not a retune.
+- _Admission._ A move inherits its predecessor's earned admission: when the replaced slot
+  graduated its probation (4.4), the new one starts graduated, does not wait for the
+  source's probationer, and loses any `budget` backoff. A slot replacing one still on
+  probation, and every new slot, starts a fresh probation. An `activity` placement refused
+  for `budget` is retried at the next sample, never after `EFFICIENCY_RETRY_MS` (the
+  allocator sized it to fit; the refusal is a race). Probation verdicts and late-drop
+  shedding are unchanged.
+- _Reconciliation._ A pass asked for while one runs is run after it (bounded, then queued),
+  never dropped. The core re-plans on the ranking's change notices and at the earliest of
+  the snapshots' `nextEvaluationMonoMs`, a blocked move's dwell end and the move window's
+  expiry, on one monotonic clock. Notices and deadlines are coalesced, not debounced: the
+  first schedules a pass 100 ms later and later ones join it without postponing it, so
+  notices at any rate still give a pass at least every 250 ms while passes keep up. At
+  most one activity pass is outstanding: notices while it is queued or running only mark
+  it dirty, and a dirty pass schedules exactly one rerun when it finishes, so slow passes
+  never build a backlog. A placement whose channel frequency differs is moved even
+  when its key is unchanged.
+- _Status._ Each placement of a ranked decoder reports `activity`: `ranking` (`activity` or
+  `nearest`) and, when ranked, `state`, `score` (three decimals), `live` and `reasons`
+  (at most the six known values); a score too large to scale is reported unrounded.
+
+Acceptance: unit and property tests on the planner (a permutation of the eligible set with
+any ranking, the eligible VFO first, the off-raster VFO excluded, malformed snapshots
+falling back, the budget never exceeded or double-spent across decoders and sources, at
+and just past the budget, move limits and dwell under random activity, no reshuffle in the
+fallback); a scenario where activity moves to a far raster channel and the placement
+follows after the dwell; gate tests for inherited and fresh probation and the
+no-backoff refusal; manager tests with a fake ranking (one batch per pass, change notice,
+deadline timer, the move, no dropped pass) and the unchanged plan without a ranking.
