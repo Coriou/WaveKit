@@ -1,6 +1,7 @@
 /** Point decodes require occupied-span containment. Nested channel fragments take
  * precedence; unrelated reaching discoveries remain ambiguous. ADS-B alone uses
- * a nominal-frequency centre tolerance and the enclosing-fragment fallback. */
+ * an inclusive nominal-frequency centre tolerance with nearest-wins; different
+ * discoveries tied within 1 Hz receive nothing. */
 import type { ScannerProtocol } from "../types.js"
 import type { ChannelCandidate } from "./ambient-channel.js"
 
