@@ -1,0 +1,138 @@
+import { describe, expect, it } from "vitest"
+import { EfficiencyBudgetStore } from "../../src/features/settings/efficiency-budget.ts"
+import { json, scripted } from "../data/fake-fetch.ts"
+
+const auto = {
+	cpuBudgetCores: "auto",
+	resolved: {
+		mode: "auto",
+		cpus: 8,
+		cores: 4,
+		label: "auto (8 CPUs → 4 cores)",
+	},
+}
+const view = {
+	budgetCores: 4,
+	budget: auto.resolved,
+	sources: [{ coresInUse: 0.75 }, { coresInUse: 1.5 }],
+}
+
+describe("decoder CPU budget data", () => {
+	it("loads both settings routes and sums cores across sources", async () => {
+		const { api, calls } = scripted(call =>
+			json(200, call.url.endsWith("/budget") ? auto : view),
+		)
+		const store = new EfficiencyBudgetStore(api)
+		await Promise.all([store.load(), store.load()])
+		expect(calls.map(c => c.url)).toEqual([
+			"/api/decoders/efficiency/budget",
+			"/api/decoders/efficiency",
+		])
+		expect(store.get()).toMatchObject({
+			settings: auto,
+			used: 2.25,
+			error: null,
+		})
+	})
+	it("saves a fractional budget and Auto with PUT and uses the returned resolution", async () => {
+		const { api, calls } = scripted(call => {
+			const value = (call.body as { cpuBudgetCores: number | "auto" })
+				.cpuBudgetCores
+			return json(
+				200,
+				value === "auto"
+					? auto
+					: {
+							cpuBudgetCores: value,
+							resolved: {
+								mode: "configured",
+								cores: value,
+								label: "configured",
+							},
+						},
+			)
+		})
+		const store = new EfficiencyBudgetStore(api)
+		expect(await store.save(2.5)).toEqual({ ok: true })
+		expect(store.get().settings?.resolved).toEqual({
+			mode: "configured",
+			cores: 2.5,
+			label: "configured",
+		})
+		expect(await store.save("auto")).toEqual({ ok: true })
+		expect(calls.map(c => [c.method, c.body])).toEqual([
+			["PUT", { cpuBudgetCores: 2.5 }],
+			["PUT", { cpuBudgetCores: "auto" }],
+		])
+		expect(store.get().busy).toBe(false)
+	})
+	it("keeps the saved value on failure and exposes settings-write denials", async () => {
+		let status = 200
+		const { api } = scripted(call =>
+			status === 200
+				? json(200, call.url.endsWith("/budget") ? auto : view)
+				: json(status, { code: "FORBIDDEN", message: "Settings write denied" }),
+		)
+		const store = new EfficiencyBudgetStore(api)
+		await store.load()
+		status = 503
+		expect((await store.save(3)).ok).toBe(false)
+		expect(store.get()).toMatchObject({
+			settings: auto,
+			denied: null,
+			busy: false,
+		})
+		status = 403
+		expect(await store.save(3)).toEqual({
+			ok: false,
+			message: "Settings write denied",
+		})
+		expect(store.get()).toMatchObject({
+			settings: auto,
+			denied: "Settings write denied",
+			busy: false,
+		})
+	})
+	it("validates responses and shows unknown usage after a failed refresh", async () => {
+		let malformed = false
+		const { api } = scripted(call =>
+			json(
+				200,
+				malformed
+					? { sources: [{ coresInUse: -2 }] }
+					: call.url.endsWith("/budget")
+						? auto
+						: view,
+			),
+		)
+		const store = new EfficiencyBudgetStore(api)
+		await store.load()
+		malformed = true
+		await store.load()
+		expect(store.get().settings).toEqual(auto)
+		expect(store.get().used).toBeNull()
+		expect(store.get().error).toMatch(/Unexpected answer/)
+		expect(store.get().usageError).toMatch(/Unexpected answer/)
+	})
+	it("does not let an older read overwrite a completed save", async () => {
+		let answer: ((value: Response) => void) | undefined
+		const { api } = scripted(call =>
+			call.method === "PUT"
+				? json(200, {
+						cpuBudgetCores: 2,
+						resolved: { mode: "configured", cores: 2, label: "configured" },
+					})
+				: call.url.endsWith("/budget")
+					? new Promise<Response>(resolve => {
+							answer = resolve
+						})
+					: json(200, view),
+		)
+		const store = new EfficiencyBudgetStore(api)
+		const loading = store.load()
+		await store.save(2)
+		answer?.(json(200, auto))
+		await loading
+		expect(store.get().settings?.cpuBudgetCores).toBe(2)
+	})
+})

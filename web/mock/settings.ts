@@ -23,6 +23,8 @@ import {
 } from "@wavekit/api-types"
 import type {
 	DecoderInfo,
+	EfficiencyBudgetSettings,
+	EfficiencyBudgetValue,
 	DecoderMode,
 	DecoderLogLine,
 	DecoderOptionDescriptor,
@@ -570,6 +572,57 @@ export function registerSettingsMock(
 ): SettingsMock {
 	const now = ctx.now ?? Date.now
 	const startedAt = now()
+
+	let cpuBudgetCores: EfficiencyBudgetValue = "auto"
+	const budgetView = (): EfficiencyBudgetSettings => ({
+		cpuBudgetCores,
+		resolved:
+			cpuBudgetCores === "auto"
+				? { mode: "auto", cpus: 8, cores: 4, label: "auto (8 CPUs → 4 cores)" }
+				: { mode: "configured", cores: cpuBudgetCores, label: "configured" },
+	})
+	app.get("/api/decoders/efficiency/budget", async (_request, reply) =>
+		sendJson(reply, 200, budgetView()),
+	)
+	app.put("/api/decoders/efficiency/budget", async (request, reply) => {
+		const body = request.body
+		const value = isRecord(body) ? body["cpuBudgetCores"] : undefined
+		if (
+			!isRecord(body) ||
+			Object.keys(body).length !== 1 ||
+			(value !== "auto" &&
+				(typeof value !== "number" ||
+					!Number.isFinite(value) ||
+					value <= 0 ||
+					value > 64))
+		)
+			return sendJson(reply, 400, { code: "EFFICIENCY_BUDGET_INVALID" })
+		cpuBudgetCores = value
+		return sendJson(reply, 200, budgetView())
+	})
+	app.get("/api/decoders/efficiency", async () => {
+		const budget = budgetView().resolved
+		const sources = new Map<string, number>()
+		for (const decoder of ctx.decoders()) {
+			if (!decoder.running || decoder.suspended) continue
+			const sourceId = decoder.sourceId ?? "mock-source"
+			sources.set(sourceId, (sources.get(sourceId) ?? 0) + 0.25)
+		}
+		return {
+			budgetCores: budget.cores,
+			budget,
+			cpuGuardPercent: 85,
+			sources: [...sources].map(([sourceId, coresInUse]) => ({
+				sourceId,
+				coresInUse,
+				cpu: { percent: null, limit: 85 },
+				drops: "unknown",
+				dropBytesPerSecond: null,
+				admitted: [],
+				blocked: [],
+			})),
+		}
+	})
 
 	// --- station state: the persisted UI layer
 	let stationRevision = 2

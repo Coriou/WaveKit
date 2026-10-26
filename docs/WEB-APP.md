@@ -80,6 +80,11 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.
   Each decoder lists where it listens and why, for example `162.025 MHz (tuned)`, or
   `(activity)` for a paging or digital-voice channel chosen because it was active.
+  **Decoders › Decoder CPU budget** shows the total cores used across sources against the budget,
+  with its resolved source (for example `auto (8 CPUs → 4 cores)` or `configured`). Enter **Auto**
+  or a number greater than 0 and up to 64, including fractional cores; press Enter or leave the
+  field to save immediately. Invalid values and save errors appear under the row. The control
+  is disabled with read-only access or when the core denies settings writes.
 
 ## Map and Messages
 

@@ -39,6 +39,13 @@ const row = (
 // Settings rows with a fixed id (decoder pages are listed per decoder in the drawer, not here). Kept in step with
 // rows.ts by tests/features/settings.test.ts.
 export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
+	row(
+		"dec.cpuBudgetCores",
+		"Decoders",
+		"Decoder CPU budget",
+		"cores efficiency auto configured",
+		SETTINGS,
+	),
 	row("station.name", "Station", "Station name", "title name", SETTINGS),
 	row(
 		"station.location",

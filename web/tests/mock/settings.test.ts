@@ -25,7 +25,7 @@ describe("mock settings routes", () => {
 		await server.close()
 	})
 	const inject = (
-		method: "GET" | "POST" | "PATCH",
+		method: "GET" | "POST" | "PATCH" | "PUT",
 		url: string,
 		payload?: unknown,
 		headers: Record<string, string> = {},
@@ -38,6 +38,43 @@ describe("mock settings routes", () => {
 				? {}
 				: { payload: payload as Record<string, unknown> }),
 		})
+
+	it("reads, validates and updates the decoder CPU budget and efficiency resolution", async () => {
+		const route = "/api/decoders/efficiency/budget"
+		expect((await inject("GET", route)).json()).toMatchObject({
+			cpuBudgetCores: "auto",
+			resolved: { mode: "auto", cpus: 8, cores: 4 },
+		})
+		for (const value of [0, -1, 65, "2", null])
+			expect(
+				(await inject("PUT", route, { cpuBudgetCores: value })).statusCode,
+			).toBe(400)
+		expect(
+			(await inject("PUT", route, { cpuBudgetCores: 2, extra: true }))
+				.statusCode,
+		).toBe(400)
+		for (const value of [0.01, 2.5, 64]) {
+			expect(
+				(await inject("PUT", route, { cpuBudgetCores: value })).json(),
+			).toEqual({
+				cpuBudgetCores: value,
+				resolved: { mode: "configured", cores: value, label: "configured" },
+			})
+			expect(
+				(await inject("GET", "/api/decoders/efficiency")).json(),
+			).toMatchObject({
+				budgetCores: value,
+				budget: { mode: "configured", cores: value },
+				sources: expect.any(Array),
+			})
+		}
+		expect(
+			(await inject("PUT", route, { cpuBudgetCores: "auto" })).statusCode,
+		).toBe(200)
+		expect((await inject("GET", route)).json()).toMatchObject({
+			cpuBudgetCores: "auto",
+		})
+	})
 
 	it("serves version and uptime on /api/status", async () => {
 		const status = (await inject("GET", "/api/status")).json<{
