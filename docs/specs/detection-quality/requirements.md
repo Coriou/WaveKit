@@ -174,13 +174,15 @@ its median reaches 15 dB).
   and, for a narrow carrier only (matched width at most one 6.25 kHz slot,
   `CHANNEL_GATE_MIN_WIDTH_HZ`), its **matched-window SNR**: the highest mean power of W contiguous segment bins over
   the local floor of 1.15 (median of 12.5 kHz each side), W = the track's OBW in bins, at
-  least `MATCHED_MIN_BINS` = 2 and at most the segment. The gate's own pass rule still reads
+  least `MATCHED_MIN_BINS` = 2 and at most the segment (a 1-bin segment may borrow the bin next
+  to each edge). A window counts only with at least 2 bins `MATCHED_SUPPORT_DB` = 3 dB or more
+  over that floor: an emission spans 2 bins. The gate's own pass rule still reads
   the slot SNR. A slot spreads a narrow carrier over the whole slot: a 1 kHz carrier 15 dB
   over the floor in an 8.33 kHz slot reads 10·log10((31.6 + 7.33) / 8.33) = 6.7 dB, under the
   9 dB run floor of 1.4b, so the hunt captures' VDL2 and airband carriers never sustained.
-  Matched to its width it reads 12 to 15 dB. The 2-bin minimum halves a single hot bin (a
-  15 dB spike reads 10·log10((31.6 + 1) / 2) = 12.1 dB), and spur lines are dropped before
-  tracking anyway. Fixture: a tone whose slot SNR is 5.9 to 6.2 dB and whose matched SNR is
+  Matched to its width it reads 12 to 15 dB. A single hot bin with its neighbours on the floor
+  has no matched SNR (no second supporting bin), so admission reads its slot SNR, and spur
+  lines are dropped before tracking anyway. Fixture: a tone whose slot SNR is 5.9 to 6.2 dB and whose matched SNR is
   12.4 to 12.9 dB is not admitted at 2.5 s and is admitted by 5 s.
 
   1.12 (amendment 10) **Airband slots.** A range whose protocols include `analog-am` and which has

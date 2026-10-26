@@ -72,6 +72,12 @@ const FIRST_UPDATE_BLOCKS = 2
 export const MATCHED_MIN_BINS = 2
 /** Matched width: bins within 6 dB of the peak (a Hann tone's main lobe at its -6 dB points). */
 export const MATCHED_DROP_DB = 6
+/**
+ * Support for a matched window: a bin counts toward the 2-bin minimum only at or above the local
+ * floor plus this (dB). A Hann tone's second main-lobe bin is within 6 dB of its peak, so a tone
+ * 9 dB or more over the floor has it; a lone hot bin's neighbours sit on the floor.
+ */
+export const MATCHED_SUPPORT_DB = 3
 
 class SpectrumAccumulator {
 	lo = 0
@@ -1312,8 +1318,9 @@ export class Tracker {
 	 * still measured over its own width. A slot SNR spreads a narrow carrier over the whole slot: a 1 kHz carrier
 	 * 15 dB over the floor in an 8.33 kHz slot reads 10·log10((31.6 + 7.33) / 8.33) = 6.7 dB, under
 	 * the 9 dB run floor, while matched to its 1 kHz it reads about 15 dB (a Hann-windowed tone
-	 * keeps its second bin within 6 dB: 2-bin mean about 13 dB). The 2-bin minimum halves a
-	 * single-bin spike (15 dB reads 12.1 dB), so one hot bin cannot read as a carrier.
+	 * keeps its second bin within 6 dB: 2-bin mean about 13 dB). A window counts only with at
+	 * least 2 bins `MATCHED_SUPPORT_DB` over the local floor (a 1-bin segment may borrow the bin
+	 * next to each edge), so one hot bin on the floor has no matched SNR and cannot read as a carrier.
 	 */
 	private localSnr(
 		t: OpenTrack,
@@ -1359,18 +1366,39 @@ export class Tracker {
 			hi6++
 		const obwBins = Math.round(t.geomObw / this.opts.binHz)
 		const cap = Number.isFinite(obwBins) && obwBins > 0 ? obwBins : width
+		// A segment narrower than the 2-bin minimum may borrow the bin next to each edge, so a
+		// tone whose second bin fell under the detection threshold is still measured on 2 bins.
+		const lo =
+			width < MATCHED_MIN_BINS ? Math.max(0, s.startBin - 1) : s.startBin
+		const hi =
+			width < MATCHED_MIN_BINS
+				? Math.min(powerDb.length, s.endBin + 1)
+				: s.endBin
 		const win = Math.min(
-			width,
+			hi - lo,
 			Math.max(MATCHED_MIN_BINS, Math.min(hi6 - lo6 + 1, cap)),
 		)
+		// Only a window with at least 2 bins above the local floor is an emission's width: one
+		// hot bin with its neighbours on the floor never reads as a carrier.
+		const supportDb = median + MATCHED_SUPPORT_DB
 		let sum = 0
+		let support = 0
 		let bestSum = 0
-		for (let i = s.startBin; i < s.endBin; i++) {
-			sum += 10 ** ((powerDb[i] ?? -200) / 10)
-			if (i - s.startBin >= win) sum -= 10 ** ((powerDb[i - win] ?? -200) / 10)
-			if (i - s.startBin >= win - 1 && sum > bestSum) bestSum = sum
+		for (let i = lo; i < hi; i++) {
+			const v = powerDb[i] ?? -200
+			sum += 10 ** (v / 10)
+			if (v >= supportDb) support++
+			if (i - lo >= win) {
+				const old = powerDb[i - win] ?? -200
+				sum -= 10 ** (old / 10)
+				if (old >= supportDb) support--
+			}
+			if (i - lo >= win - 1 && support >= MATCHED_MIN_BINS && sum > bestSum)
+				bestSum = sum
 		}
-		const narrow = win * this.opts.binHz <= CHANNEL_GATE_MIN_WIDTH_HZ
+		const narrow =
+			win >= MATCHED_MIN_BINS &&
+			win * this.opts.binHz <= CHANNEL_GATE_MIN_WIDTH_HZ
 		// Attempt 2: the matched window serves admission only for a narrow carrier too.
 		if (bestSum > 0 && narrow)
 			t.matchedSnrDb = 10 * Math.log10(bestSum / win) - median
