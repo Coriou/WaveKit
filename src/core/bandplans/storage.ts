@@ -563,16 +563,21 @@ export class BandPlanStorage {
 	}
 	private async cleanup(): Promise<void> {
 		this.available = false
-		if (this.directoryHandle) {
-			const handle = this.directoryHandle
-			this.directoryHandle = undefined
-			await this.closeHandle(handle, "directory-close")
-		}
-		if (this.unsafeIO) throw new StorageUnavailable("io")
-		if (this.ownsLock) {
-			const lock = this.ownsLock
-			await this.perform("lock-release", () => releaseWriterLock(lock))
-			this.ownsLock = false
+		const lock = this.ownsLock
+		try {
+			if (this.directoryHandle) {
+				const handle = this.directoryHandle
+				this.directoryHandle = undefined
+				await this.closeHandle(handle, "directory-close")
+			}
+			if (this.unsafeIO) throw new StorageUnavailable("io")
+			if (this.ownsLock) {
+				const lock = this.ownsLock
+				await this.perform("lock-release", () => releaseWriterLock(lock))
+				this.ownsLock = false
+			}
+		} finally {
+			if (lock) await lock.stop()
 		}
 	}
 }

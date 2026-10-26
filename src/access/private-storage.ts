@@ -522,8 +522,11 @@ export class PrivateAccessStorage {
 						if (!(await wait.retry())) throw failure("ACCESS_STORAGE_BUSY")
 						continue
 					}
-					// Residual read/unlink race: displaced holders detect loss within H
-					// and verify ownership again before committing writes.
+					// A reclaimer paused between this final heartbeat read and unlink can
+					// take a lock refreshed during its own pause. Without fencing tokens,
+					// this advisory lease cannot close that window. The old holder notices
+					// the loss within H = 10 s and stops writing; at most the write already
+					// in flight can land.
 					await fs.unlink(path).catch(error => {
 						if (!hasCode(error, "ENOENT")) throw error
 					})

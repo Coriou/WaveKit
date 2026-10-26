@@ -338,6 +338,7 @@ const OWNER = "owner.json"
 export interface WriterLock {
 	readonly lost: boolean
 	check: () => Promise<boolean>
+	stop: () => Promise<void>
 	release: () => Promise<void>
 }
 async function writerHandle(
@@ -370,9 +371,14 @@ async function writerHandle(
 			return heartbeat.lost
 		},
 		check: heartbeat.check,
+		stop: heartbeat,
 		release: async () => {
-			const ours = await heartbeat.check()
-			await heartbeat()
+			let ours = false
+			try {
+				ours = await heartbeat.check()
+			} finally {
+				await heartbeat()
+			}
 			if (!ours || !(await verify().catch(() => false))) return
 			const aside = `${lock}.stale-${randomUUID()}`
 			await fs.rename(lock, aside)
@@ -525,8 +531,11 @@ async function acquireDirectory(
 					wait.observe(lock, finalValue)
 					return "wait"
 				}
-				// A refresh can still race this final read and rename by microseconds.
-				// The displaced holder detects loss within H and checks before commits.
+				// A reclaimer paused between this final heartbeat read and rename can
+				// take a lock refreshed during its own pause. Without fencing tokens,
+				// this advisory lease cannot close that window. The old holder notices
+				// the loss within H = 10 s and stops writing; at most the write already
+				// in flight can land.
 				const aside = `${lock}.stale-${randomUUID()}`
 				await fs.rename(lock, aside)
 				try {

@@ -1,3 +1,4 @@
+import type { FileHandle } from "node:fs/promises"
 import fs from "node:fs/promises"
 import { constants } from "node:fs"
 import { join } from "node:path"
@@ -1061,4 +1062,40 @@ it("rechecks an access heartbeat immediately before unlink", async () => {
 	expect(refresh).toHaveBeenCalledTimes(1)
 	expect(clock).toBe(LOCK_WAIT_MS)
 	expect(await fs.readdir(directory)).toContain(name)
+})
+
+it("stops the access heartbeat and closes its fd when owner removal fails", async () => {
+	const { directory } = await location()
+	const fileOpen = fs.open
+	let ownerHandle: FileHandle | undefined
+	vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+		const handle = await fileOpen(...args)
+		if (
+			String(args[0]).includes("/owner-") &&
+			args[1] === (constants.O_RDONLY | constants.O_NOFOLLOW)
+		)
+			ownerHandle = handle
+		return handle
+	})
+	vi.useFakeTimers()
+	try {
+		const storage = await open(directory)
+		const name = (await fs.readdir(directory)).find(entry =>
+			entry.startsWith("owner-"),
+		)!
+		const path = join(directory, name)
+		vi.spyOn(fs, "unlink").mockRejectedValueOnce(new Error("cleanup fault"))
+		await expect(storage.close()).rejects.toMatchObject({
+			code: "ACCESS_STORAGE_UNAVAILABLE",
+		})
+		expect(ownerHandle).toBeDefined()
+		expect(ownerHandle?.fd).toBe(-1)
+		await expect(ownerHandle?.stat()).rejects.toMatchObject({ code: "EBADF" })
+		expect(vi.getTimerCount()).toBe(0)
+		const before = await fs.lstat(path)
+		await vi.advanceTimersByTimeAsync(3 * HEARTBEAT_MS)
+		expect((await fs.lstat(path)).mtimeMs).toBe(before.mtimeMs)
+	} finally {
+		vi.useRealTimers()
+	}
 })

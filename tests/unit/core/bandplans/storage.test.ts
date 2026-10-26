@@ -1,3 +1,5 @@
+import fs from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 import { rename } from "node:fs/promises"
 import { HEARTBEAT_MS } from "../../../../src/utils/lock-owner.js"
 import { spawn } from "node:child_process"
@@ -791,3 +793,40 @@ it("checks ownership immediately before committing a write", async () => {
 	expect(store.isAvailable()).toBe(false)
 	expect(await readFile(file(path), "utf8")).toBe(before)
 })
+
+it.each([
+	"directory-close:before",
+	"directory-close:after",
+	"lock-release:before",
+])(
+	"stops the writer heartbeat and closes its fd after %s fails",
+	async fault => {
+		const path = await root()
+		const ownerPath = join(lock(path), "owner.json")
+		const fileOpen = fs.open
+		let ownerHandle: FileHandle | undefined
+		vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await fileOpen(...args)
+			if (args[0] === ownerPath) ownerHandle = handle
+			return handle
+		})
+		vi.useFakeTimers()
+		try {
+			const store = await open(path, (stage, phase) => {
+				if (`${stage}:${phase}` === fault) throw new Error("cleanup fault")
+			})
+			const closing = store.close()
+			await expect(closing).rejects.toBeDefined()
+			expect(store.close()).toBe(closing)
+			expect(ownerHandle).toBeDefined()
+			expect(ownerHandle?.fd).toBe(-1)
+			await expect(ownerHandle?.stat()).rejects.toMatchObject({ code: "EBADF" })
+			expect(vi.getTimerCount()).toBe(0)
+			const before = await lstat(ownerPath)
+			await vi.advanceTimersByTimeAsync(3 * HEARTBEAT_MS)
+			expect((await lstat(ownerPath)).mtimeMs).toBe(before.mtimeMs)
+		} finally {
+			vi.useRealTimers()
+		}
+	},
+)
