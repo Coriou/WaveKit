@@ -1,16 +1,21 @@
 /**
  * Decoder-enablement 3.19 through the real native planner: dumpvdl2's own
  * channel request (default EU list) is opened on wavekit-chan (built from
- * native/ into a tmp target dir; skipped without cargo) at 1.024, 2.048 and
- * 2.4 Msps, and must open and deliver cu8 at its output rate. The 945 kHz
+ * native/ into a tmp target dir; skipped, with the reason, when this host
+ * cannot build it offline) at 1.024, 2.048 and 2.4 Msps, and must open and
+ * deliver cu8 at its output rate. The 945 kHz
  * request an earlier draft made at 1.024 Msps is shown to be rejected.
  */
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { createConnection } from "node:net"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
+import {
+	buildWavekitChan,
+	wavekitChanBuildUnavailable,
+} from "./wavekit-chan-build.js"
 import pino from "pino"
 import { Dumpvdl2Decoder } from "../../src/decoders/builtin/dumpvdl2.js"
 import type { DecoderChannelRequest } from "../../src/core/channelizer/types.js"
@@ -19,9 +24,9 @@ const EU = [136_650_000, 136_700_000, 136_975_000]
 const CENTRE = 136_812_500
 const SECONDS = 0.5
 
-const hasCargo =
-	spawnSync("cargo", ["--version"], { stdio: "ignore" }).error === undefined
 const CRATE = resolve(__dirname, "../../native/wavekit-chan")
+// Why this host cannot build the crate offline, if it cannot.
+const chanUnavailable = wavekitChanBuildUnavailable(CRATE)
 let TARGET = ""
 let BINARY = ""
 
@@ -124,52 +129,42 @@ async function open(fs: number, req: DecoderChannelRequest): Promise<Outcome> {
 	}
 }
 
-describe.skipIf(!hasCargo)(
-	"dumpvdl2 channel through the native planner (3.19)",
-	() => {
-		beforeAll(() => {
-			TARGET = mkdtempSync(join(tmpdir(), "wavekit-chan-target-"))
-			BINARY = join(TARGET, "release", "wavekit-chan")
-			const build = spawnSync(
-				"cargo",
-				["build", "--release", "--offline", "--bin", "wavekit-chan"],
-				{
-					cwd: CRATE,
-					env: { ...process.env, CARGO_TARGET_DIR: TARGET },
-					stdio: "ignore",
-				},
-			)
-			if (build.status !== 0 || !existsSync(BINARY))
-				throw new Error("wavekit-chan build failed")
-		}, 600_000)
-		afterAll(() => {
-			if (TARGET) rmSync(TARGET, { recursive: true, force: true })
+describe("dumpvdl2 channel through the native planner (3.19)", () => {
+	beforeAll(async () => {
+		if (chanUnavailable) return
+		TARGET = mkdtempSync(join(tmpdir(), "wavekit-chan-target-"))
+		BINARY = await buildWavekitChan(CRATE, TARGET)
+	}, 600_000)
+	beforeEach(context => {
+		if (chanUnavailable) context.skip(chanUnavailable)
+	})
+	afterAll(() => {
+		if (TARGET) rmSync(TARGET, { recursive: true, force: true })
+	})
+
+	it.each([1_024_000, 2_048_000, 2_400_000])(
+		"opens the default EU request at %i sps",
+		async fs => {
+			const req = requestAt(fs)
+			expect(req.outputRateHz).toBe(fs === 1_024_000 ? 512_000 : 1_050_000)
+			const out = await open(fs, req)
+			expect(out).toMatchObject({ opened: true })
+			if (!out.opened) return
+			// cu8: 2 bytes per sample at the output rate, minus filter latency.
+			const expected = 2 * req.outputRateHz * SECONDS
+			expect(out.bytes).toBeGreaterThan(expected * 0.8)
+			expect(out.bytes).toBeLessThanOrEqual(expected * 1.01)
+		},
+		60_000,
+	)
+
+	it("rejects the infeasible 945 kHz request at 1.024 Msps", async () => {
+		const out = await open(1_024_000, {
+			...requestAt(1_024_000),
+			bandwidthHz: 375_000,
+			transitionHz: 23_625,
+			outputRateHz: 945_000,
 		})
-
-		it.each([1_024_000, 2_048_000, 2_400_000])(
-			"opens the default EU request at %i sps",
-			async fs => {
-				const req = requestAt(fs)
-				expect(req.outputRateHz).toBe(fs === 1_024_000 ? 512_000 : 1_050_000)
-				const out = await open(fs, req)
-				expect(out).toMatchObject({ opened: true })
-				if (!out.opened) return
-				// cu8: 2 bytes per sample at the output rate, minus filter latency.
-				const expected = 2 * req.outputRateHz * SECONDS
-				expect(out.bytes).toBeGreaterThan(expected * 0.8)
-				expect(out.bytes).toBeLessThanOrEqual(expected * 1.01)
-			},
-			60_000,
-		)
-
-		it("rejects the infeasible 945 kHz request at 1.024 Msps", async () => {
-			const out = await open(1_024_000, {
-				...requestAt(1_024_000),
-				bandwidthHz: 375_000,
-				transitionHz: 23_625,
-				outputRateHz: 945_000,
-			})
-			expect(out.opened).toBe(false)
-		}, 60_000)
-	},
-)
+		expect(out.opened).toBe(false)
+	}, 60_000)
+})

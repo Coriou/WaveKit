@@ -4,8 +4,8 @@
  * offset channel of an off-raster capture at 1.024 Msps:
  *
  * cu8 IQ -> wavekit-chan (the real channelizer, built from native/ into a
- * tmp target dir; skipped without cargo) with MultimonDecoder's own channel
- * request per planned channel -> cf32 at 48 kHz -> the decoder's production
+ * tmp target dir; skipped, with the reason, when this host cannot build it
+ * offline) with MultimonDecoder's own channel request per planned channel -> cf32 at 48 kHz -> the decoder's production
  * command line for channel IQ. When csdr is installed the whole command runs;
  * otherwise its csdr head (agc, fmdemod, gain 3, limit, s16) is done here
  * and its exact sox | multimon-ng tail runs. The burst must decode on its
@@ -14,10 +14,14 @@
  */
 import { spawn, spawnSync } from "node:child_process"
 import { createConnection } from "node:net"
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
+import {
+	buildWavekitChan,
+	wavekitChanBuildUnavailable,
+} from "./wavekit-chan-build.js"
 import pino from "pino"
 import { synthesizePocsagCu8 } from "../../scripts/fixtures/pocsag-iq.mjs"
 import { MultimonDecoder } from "../../src/decoders/builtin/multimon-ng.js"
@@ -37,10 +41,11 @@ const CHANNELS = [
 
 const has = (cmd: string, args: string[]) =>
 	spawnSync(cmd, args, { stdio: "ignore" }).error === undefined
-const hasCargo = has("cargo", ["--version"])
 const hasTools = has("multimon-ng", ["-h"]) && has("sox", ["--version"])
 const hasCsdr = has("csdr", ["--help"])
 const CRATE = resolve(__dirname, "../../native/wavekit-chan")
+// Why this host cannot build the crate offline, if it cannot.
+const chanUnavailable = wavekitChanBuildUnavailable(CRATE)
 // An isolated cargo target owned by this run (mkdtemp in beforeAll), never shared.
 let TARGET = ""
 let BINARY = ""
@@ -171,24 +176,17 @@ function csdrHead(cf32: Buffer): Buffer {
 	return pcm
 }
 
-describe.skipIf(!hasCargo || !hasTools)(
+describe.skipIf(!hasTools)(
 	"paging raster through wavekit-chan and the production chain (3.18)",
 	() => {
-		beforeAll(() => {
+		beforeAll(async () => {
+			if (chanUnavailable) return
 			TARGET = mkdtempSync(join(tmpdir(), "wavekit-chan-target-"))
-			BINARY = join(TARGET, "release", "wavekit-chan")
-			const build = spawnSync(
-				"cargo",
-				["build", "--release", "--offline", "--bin", "wavekit-chan"],
-				{
-					cwd: CRATE,
-					env: { ...process.env, CARGO_TARGET_DIR: TARGET },
-					stdio: "ignore",
-				},
-			)
-			if (build.status !== 0 || !existsSync(BINARY))
-				throw new Error("wavekit-chan build failed")
+			BINARY = await buildWavekitChan(CRATE, TARGET)
 		}, 600_000)
+		beforeEach(context => {
+			if (chanUnavailable) context.skip(chanUnavailable)
+		})
 		afterAll(() => {
 			if (TARGET) rmSync(TARGET, { recursive: true, force: true })
 		})
