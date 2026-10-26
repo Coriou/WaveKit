@@ -531,7 +531,7 @@ export function composeDecoderEfficiencyGate(
  */
 export function composeDecoderActivity(
 	config: ActivityPolicyConfig | undefined,
-	budgetCores: number,
+	budgetCores: number | (() => number),
 	host: { arch: string; cpuCount: number },
 	monoNow: () => number = () => performance.now(),
 ): { ranker: ChannelActivityRanker; options: DecoderActivityOptions } {
@@ -541,12 +541,14 @@ export function composeDecoderActivity(
 		options: {
 			port: ranker.port,
 			epochOf: sourceId => ranker.epochOf(sourceId),
-			policy: resolveActivityPolicy(
-				config,
-				budgetCores,
-				host.arch,
-				host.cpuCount,
-			),
+			get policy() {
+				return resolveActivityPolicy(
+					config,
+					typeof budgetCores === "function" ? budgetCores() : budgetCores,
+					host.arch,
+					host.cpuCount,
+				)
+			},
 			monoNow,
 		},
 	}
@@ -1449,12 +1451,13 @@ async function main(): Promise<void> {
 		const budget = await openEfficiencyBudget({
 			stateDir: config.stateDir,
 			configured: config.decoderPolicy?.efficiency?.cpuBudgetCores ?? "auto",
+			onChanged: () => decoderManager.notifyEfficiencyBudgetChanged(),
 		})
 		const budgetCores = budget.view().resolved.cores
 		// Activity-ranked channels: the ScannerService feeds the ranker, the planner reads it.
 		const decoderActivity = composeDecoderActivity(
 			config.decoderPolicy?.efficiency?.activity,
-			budgetCores,
+			() => budget.view().resolved.cores,
 			{ arch: arch(), cpuCount: cpus().length },
 		)
 		const channelActivity = decoderActivity.ranker
