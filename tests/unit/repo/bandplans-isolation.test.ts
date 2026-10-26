@@ -56,6 +56,7 @@ const ioOnlyImports = new Set([
 	"node:fs/promises",
 	"node:path",
 	"../../utils/lock-owner.js",
+	"../../utils/logger.js",
 	"./storage.js",
 	"./service.js",
 	"./import/sdrpp.js",
