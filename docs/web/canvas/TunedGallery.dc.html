@@ -21,9 +21,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<h2 class="wk-h2">{{g.title}}</h2>
 				<span style="font-size: var(--wk-fs-md); color: var(--wk-text-3)">{{g.sub}}</span>
 			</div>
-			<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 320px)); gap: 24px; align-items: start">
+			<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 340px)); gap: 24px; align-items: start">
 				<sc-for list="{{g.cards}}" as="c" hint-placeholder-count="4">
-					<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" freq="{{c}}" variant="floating" hint-size="320px,360px"></dc-import>
+					<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" freq="{{c}}" variant="floating" hint-size="340px,360px"></dc-import>
 				</sc-for>
 			</div>
 		</section>

@@ -15,18 +15,20 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 </helmet>
 <div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="box-sizing: border-box; width: 100%; height: {{rootH}}; display: flex; flex-direction: column; gap: 14px; padding: {{pad}}; color: var(--wk-text); font-family: var(--wk-font-ui); font-size: var(--wk-fs-lg); background: {{rootBg}}; border-radius: {{rootRadius}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootBlur}}">
 	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
+	<!-- title and chips sit above the scrolling cards (sticky in the app); a hairline under them, across the tuned card's lane -->
+	<div style="display: flex; flex-direction: column; gap: 12px; flex: none; margin-left: {{barPull}}; padding-bottom: {{barPad}}; border-bottom: {{barLine}}">
 	<header style="display: flex; align-items: center; gap: 10px; flex: none">
-		<h2 class="wk-h2">Activity</h2>
+		<h2 class="wk-h2">{{heading}}</h2>
 		<span style="display: flex; align-items: center; gap: 6px; font-size: var(--wk-fs-sm); color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</span>
 		<div style="flex: 1"></div>
-		<button class="wk-btn" data-variant="outline" onClick="{{togglePause}}" style="padding: 0 10px; color: var(--wk-text-2); font-weight: 400">{{pauseLabel}}</button>
+		<button class="wk-btn" data-variant="{{pauseVariant}}" onClick="{{togglePause}}" style="padding: 0 10px; color: var(--wk-text-2); font-weight: 400">{{pauseLabel}}</button>
 		<sc-if value="{{feed}}" hint-placeholder-val="{{false}}">
 			<button class="wk-icon-btn" data-close="" onClick="{{close}}" aria-label="Close activity" style="color: var(--wk-text-3)">
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
 			</button>
 		</sc-if>
 	</header>
-	<div role="radiogroup" aria-label="Show" style="display: flex; flex-wrap: wrap; gap: 6px; flex: none">
+	<div role="radiogroup" aria-label="Show" style="display: flex; flex-wrap: {{chipWrap}}; overflow-x: auto; scrollbar-width: none; gap: 6px; flex: none">
 		<sc-for list="{{chips}}" as="c" hint-placeholder-count="9">
 			<button class="wk-chip" role="radio" aria-checked="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.label}}" title="{{c.label}}">
 				<sc-if value="{{c.hasIcon}}" hint-placeholder-val="{{true}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg></sc-if>
@@ -35,8 +37,31 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</button>
 		</sc-for>
 	</div>
+	</div>
 	<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 -4px; padding: 0 4px">
-		<div style="columns: {{cols}}; column-gap: 14px">
+		<sc-if value="{{showEmpty}}" hint-placeholder-val="{{false}}">
+			<!-- empty, off and error: one quiet block in the middle, with the way out -->
+			<div role="status" style="display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 360px; margin: 12vh auto 0; text-align: center">
+				<span class="wk-tile" style="width: 44px; height: 44px; margin-bottom: 4px; color: {{emptyTone}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 14l-3 -3h-7a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1h9a1 1 0 0 1 1 1v10"></path><path d="M14 15v2a1 1 0 0 1 -1 1h-7l-3 3v-10a1 1 0 0 1 1 -1h2"></path></svg></span>
+				<p style="margin: 0; font-size: var(--wk-fs-xl); font-weight: 700">{{emptyTitle}}</p>
+				<p style="margin: 0 0 6px; font-size: var(--wk-fs-md); line-height: 1.5; color: var(--wk-text-3)">{{emptyText}}</p>
+				<sc-if value="{{emptyAction}}" hint-placeholder-val="{{true}}"><button class="wk-btn" data-variant="outline" data-size="sm">{{emptyAction}}</button></sc-if>
+			</div>
+		</sc-if>
+		<sc-if value="{{showSkel}}" hint-placeholder-val="{{false}}">
+			<!-- loading: card shapes in the columns -->
+			<div role="status" aria-label="Loading messages" style="display: grid; grid-template-columns: repeat({{skelCols}}, minmax(0, 1fr)); gap: 14px; align-items: start">
+				<sc-for list="{{skel}}" as="k" hint-placeholder-count="6">
+					<div aria-hidden="true" style="display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: var(--wk-r-4); border: 1px solid var(--wk-line-08)">
+						<span style="width: 38%; height: 14px; border-radius: var(--wk-r-2); background: var(--wk-fill)"></span>
+						<span style="width: 64%; height: 20px; border-radius: var(--wk-r-2); background: var(--wk-fill)"></span>
+						<span style="width: 46%; height: 12px; border-radius: var(--wk-r-2); background: var(--wk-fill)"></span>
+						<span style="height: {{k.h}}; border-radius: var(--wk-r-2); background: var(--wk-fill)"></span>
+					</div>
+				</sc-for>
+			</div>
+		</sc-if>
+		<div style="columns: {{cols}}; column-gap: 14px; display: {{gridDisplay}}">
 			<sc-for list="{{items}}" as="x" hint-placeholder-count="6">
 				<div style="break-inside: avoid; margin-bottom: 14px">
 					<dc-import name="Decode" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" msg="{{x}}" on-tune="{{tune}}" hint-size="100%,240px"></dc-import>
@@ -46,7 +71,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"variant":{"editor":"enum","options":["gallery","feed"],"default":"gallery"},"onTune":{"editor":null},"onClose":{"editor":null},"$preview":{"width":1440,"height":1500}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"variant":{"editor":"enum","options":["gallery","feed"],"default":"gallery"},"onTune":{"editor":null},"onClose":{"editor":null},"embedded":{"editor":null},"topInset":{"editor":null,"tsType":"number"},"rightInset":{"editor":null,"tsType":"number"},"leftInset":{"editor":null,"tsType":"number"},"state":{"editor":"enum","options":["cards","loading","empty","no match","error"],"default":"cards"},"phone":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":1500}}'>
 const CATS = [
 	['voice', 'Voice', ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0']],
 	['aircraft', 'Aircraft', ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7']],
@@ -82,8 +107,10 @@ class Component extends DCLogic {
 		this.state = { cat: 'all', paused: false };
 	}
 	renderVals() {
-		const feed = this.props.variant === 'feed';
+		const feed = this.props.variant === 'feed', emb = !!this.props.embedded;
 		const cat = this.state.cat;
+		const st = this.props.state || 'cards', phone = !!this.props.phone, lane = this.props.leftInset || 0;
+		const empty = { empty: ['Nothing decoded yet', 'Messages appear here as the decoders hear them: pagers, aircraft, ships, APRS, sensors and digital voice.', ''], 'no match': ['Nothing matches yet', 'New matches appear here as they are decoded.', 'Clear search'], error: ['Could not load messages', 'The receiver did not answer. Live messages resume once it does.', 'Try again'] }[st];
 		const count = id => MSGS.filter(m => id === 'all' || m.cat === id).length;
 		const chip = (id, label, icon) => {
 			const on = cat === id;
@@ -93,14 +120,25 @@ class Component extends DCLogic {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			feed,
-			rootH: feed ? '100%' : 'auto',
-			pad: feed ? '18px' : '40px',
+			// gallery as the dock's third view (Immersive): fills the window under the top islands, above the dock, beside a drawer
+			heading: feed ? 'Activity' : 'Messages',
+			rootH: feed || emb ? '100%' : 'auto',
+			// the tuned card's lane (Immersive passes it): the cards keep clear of the card, the title row spans it
+			pad: feed ? '18px' : phone ? '16px' : emb ? (this.props.topInset ?? 88) + 'px ' + (40 + (this.props.rightInset || 0)) + 'px 104px ' + (lane || 40) + 'px' : '40px',
+			barPull: lane ? (40 - lane) + 'px' : '0',
+			barPad: feed ? '0' : '12px', barLine: feed ? '0' : '1px solid var(--wk-line-08)',
+			pauseVariant: feed ? 'outline' : 'ghost',
+			// phone: one row of chips that scrolls sideways
+			chipWrap: phone ? 'nowrap' : 'wrap',
+			showEmpty: !!empty, emptyTitle: empty ? empty[0] : '', emptyText: empty ? empty[1] : '', emptyAction: empty ? empty[2] : '', emptyTone: st === 'error' ? 'var(--wk-amber)' : 'var(--wk-text-3)',
+			showSkel: st === 'loading', skelCols: feed || phone ? 1 : 3, skel: Array.from({ length: feed || phone ? 3 : 6 }, (_, i) => ({ h: i % 3 === 0 ? '88px' : '44px' })),
+			gridDisplay: st === 'cards' ? 'block' : 'none',
 			rootBg: feed ? 'var(--wk-glass-panel)' : 'var(--wk-bg)',
 			rootRadius: feed ? 'var(--wk-r-5)' : '0',
 			rootBorder: feed ? '1px solid var(--wk-line-14)' : '0',
 			rootShadow: feed ? 'var(--wk-e3)' : 'none',
 			rootBlur: feed ? 'var(--wk-blur)' : 'none',
-			cols: feed ? '1' : '3 340px',
+			cols: feed || phone ? '1' : '3 340px',
 			chips: [chip('all', 'All')].concat(CATS.map(([id, label, icon]) => chip(id, label, icon))),
 			items: MSGS.filter(m => cat === 'all' || m.cat === cat),
 			tune: f => this.props.onTune && this.props.onTune(f),

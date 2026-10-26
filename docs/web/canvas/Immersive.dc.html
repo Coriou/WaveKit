@@ -33,6 +33,31 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-paneslot-body > .sc-host > [data-wk-theme]{background:none;border:0;box-shadow:none}
 @keyframes wk-tgt{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
 .wk-tgt{animation:wk-tgt var(--wk-dur-2) var(--wk-ease-out) both}
+/* wk-explore: drawer skeleton (the web app's ui/Skeleton.tsx, styles in web/src/styles/ui.css; not in the kit yet).
+   While a drawer's code or first page loads: the shape of its rows in the kit's fill, a slow wave down them (opacity
+   only), a late fade-in so a fast load never flashes it, and after a second a quiet caption. */
+.wk-skel{display:flex;flex-direction:column;gap:2px;animation:wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 120ms both}
+.wk-skel-bar{display:flex;flex-direction:column;gap:10px;padding:2px 0 10px}
+.wk-skel-field{height:var(--wk-h-md);border-radius:var(--wk-r-3);background:var(--wk-fill)}
+.wk-skel-chips{display:flex;gap:6px}
+.wk-skel-chips span{width:64px;height:24px;border-radius:var(--wk-r-pill);background:var(--wk-fill)}
+.wk-skel-chips span:nth-child(2){width:52px}
+.wk-skel-chips span:nth-child(3){width:76px}
+.wk-skel-caption{margin:0;padding:0 2px 6px;font-size:var(--wk-fs-xs);line-height:16px;color:var(--wk-text-4);animation:wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 1s both}
+.wk-skel-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:0 6px 0 10px;animation:wk-skel-wave 1.6s var(--wk-ease-inout) calc(var(--i, 0) * 90ms) infinite}
+.wk-skel[data-shape="settings"] .wk-skel-row{min-height:56px;padding:0 4px;border-bottom:1px solid var(--wk-line-08)}
+.wk-skel-tile{width:32px;height:32px;flex:none;border-radius:var(--wk-r-3);background:var(--wk-fill)}
+.wk-skel-tile[data-round="true"]{border-radius:50%}
+.wk-skel-lines{flex:1;min-width:0;display:flex;flex-direction:column;gap:7px}
+.wk-skel-lines span{height:9px;border-radius:var(--wk-r-pill);background:var(--wk-fill)}
+.wk-skel-lines span+span{height:7px;opacity:.7}
+.wk-skel-end{width:34px;height:8px;flex:none;border-radius:var(--wk-r-pill);background:var(--wk-fill);opacity:.7}
+.wk-skel[data-shape="settings"] .wk-skel-end{width:72px;height:24px;border-radius:var(--wk-r-3);opacity:1}
+@keyframes wk-skel-in{from{opacity:0}}
+@keyframes wk-skel-wave{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.wk-skel-row{animation:none}}
+/* connection chip (the web app's ConnectionChip): an amber island pill; its place comes from the shell grid */
+.wk-conn-chip{display:flex;align-items:center;gap:8px;height:36px;max-width:100%;box-sizing:border-box;padding:0 14px;border-radius:var(--wk-r-pill);font:inherit;font-size:var(--wk-fs-md);color:inherit;white-space:nowrap;cursor:pointer;pointer-events:auto}
 @media (max-width:1100px){.wk-float{display:none}}
 @media (max-width:760px){.wk-dock{display:none}.wk-src{top:84px !important}}
 </style>
@@ -40,11 +65,16 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 <div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: var(--wk-font-ui); overflow: hidden">
 	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
 	<div style="position: absolute; inset: 0">
-		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" scan="{{specScan}}" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
+		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" scan="{{specScan}}" on-scan-range="{{scanRange}}" listening="{{sigListening}}" on-signal-action="{{sigAction}}" hint-size="100%,100%"></dc-import>
 
 		<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; inset: 0; z-index: 1">
-				<dc-import name="Map" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" embedded="{{true}}" on-action="{{mapAction}}" hint-size="100%,100%"></dc-import>
+				<dc-import name="Map" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" embedded="{{true}}" on-action="{{mapAction}}" on-settings="{{openSetting}}" hint-size="100%,100%"></dc-import>
+			</div>
+		</sc-if>
+		<sc-if value="{{showMessages}}" hint-placeholder-val="{{false}}">
+			<div style="position: absolute; inset: 0; z-index: 1; background: var(--wk-bg)">
+				<dc-import name="Messages" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" variant="gallery" embedded="{{true}}" top-inset="{{msgTop}}" right-inset="{{msgRight}}" left-inset="{{msgLeft}}" on-tune="{{tune}}" hint-size="100%,100%"></dc-import>
 			</div>
 		</sc-if>
 
@@ -61,13 +91,13 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<sc-for list="{{targets}}" as="t" hint-placeholder-count="6">
 					<div class="wk-tgt" style="position: absolute; left: {{t.dotX}}px; top: {{t.dotY}}px; width: 12px; height: 12px; margin: -6px 0 0 -6px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid rgba(var(--wk-accent-rgb),.5); background: rgba(var(--wk-accent-rgb),.12)"></div>
 				</sc-for>
-				<div style="position: absolute; left: 0; top: 0; width: 320px; height: {{cardH}}px; box-sizing: border-box; border-radius: var(--wk-r-5); border: 1.5px dashed rgba(var(--wk-accent-rgb),.55); background: rgba(var(--wk-accent-rgb),.05); transform: translate({{snapX}}px, {{snapY}}px); transition: transform var(--wk-dur-2) var(--wk-ease-out)"></div>
+				<div style="position: absolute; left: 0; top: 0; width: 340px; height: {{cardH}}px; box-sizing: border-box; border-radius: var(--wk-r-5); border: 1.5px dashed rgba(var(--wk-accent-rgb),.55); background: rgba(var(--wk-accent-rgb),.05); transform: translate({{snapX}}px, {{snapY}}px); transition: transform var(--wk-dur-2) var(--wk-ease-out)"></div>
 			</div>
 		</sc-if>
 
 		<sc-if value="{{showCard}}" hint-placeholder-val="{{true}}">
-			<div ref="{{refs.card}}" class="wk-float wk-glide" style="position: absolute; left: 0; top: 0; width: 320px; z-index: {{cardZ}}; transform: translate({{cardX}}px, {{cardY}}px) scale({{cardScale}}); transform-origin: 50% 50%; transition: {{cardTr}}">
-				<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" scan-hold="{{scanHold}}" scan-text="{{scanText}}" scan-resume="{{scanResume}}" on-scan="{{scanAction}}" watch="{{watchOn}}" on-watch="{{setWatch}}" identify-run="{{idRun}}" on-grab="{{grabCard}}" on-grab-key="{{cardKey}}" lifted="{{dragging}}" minimised="{{cardMin}}" on-minimise="{{setCardMin}}" hint-size="320px,300px"></dc-import>
+			<div ref="{{refs.card}}" class="wk-float wk-glide" style="position: absolute; left: 0; top: 0; width: 340px; z-index: {{cardZ}}; transform: translate({{cardX}}px, {{cardY}}px) scale({{cardScale}}); transform-origin: 50% 50%; transition: {{cardTr}}">
+				<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" scan-hold="{{scanHold}}" scan-text="{{scanText}}" scan-resume="{{scanResume}}" on-scan="{{scanAction}}" watch="{{watchOn}}" on-watch="{{setWatch}}" identify-run="{{idRun}}" on-grab="{{grabCard}}" on-grab-key="{{cardKey}}" lifted="{{dragging}}" minimised="{{cardMin}}" on-minimise="{{setCardMin}}" hint-size="340px,300px"></dc-import>
 			</div>
 		</sc-if>
 
@@ -79,8 +109,48 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</div>
 		</sc-if>
 
+		<!-- Pair this browser (2026-10-17, as the web app places it): a read-only browser on a protected core. In the top-row
+		     gap between the Tuner and the Receiver, its title alone when the gap is tight, else under the top row centred in
+		     the plot left of a full-height drawer; above the bottom row on a narrow window. -->
+		<sc-if value="{{pairOn}}" hint-placeholder-val="{{false}}">
+			<div role="status" aria-live="polite" style="position: absolute; z-index: 5; top: {{pairTop}}; bottom: {{pairBottom}}; left: {{pairLeft}}px; max-width: {{pairMaxW}}px; transform: translateX(-50%); pointer-events: none; transition: {{pairTr}}">
+				<button class="wk-island wk-conn-chip" data-tone="amber" onClick="{{pair}}" title="{{pairHint}}">
+					<span aria-hidden="true" style="width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--wk-amber)"></span>
+					<b style="flex: none">Pair this browser</b>
+					<sc-if value="{{pairDetail}}" hint-placeholder-val="{{true}}"><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--wk-text-3)">Read-only until paired · Enter a code</span></sc-if>
+				</button>
+			</div>
+		</sc-if>
+
+		<!-- Pairing sheet (2026-10-17, as the web app has it, connection/PairSheet.tsx): from the chip or ⌘K. The one-time code from
+		     the receiver, an optional name for Settings › Signed-in devices, then the core sets the session and the controls come
+		     on. Centred over the app, a bottom sheet under 600 px. Solid surface, no glass. -->
+		<sc-if value="{{pairSheetOn}}" hint-placeholder-val="{{false}}">
+			<div aria-hidden="true" onClick="{{pairClose}}" style="position: absolute; inset: 0; z-index: 40; background: rgba(0,0,0,.36)"></div>
+			<div role="dialog" aria-modal="true" aria-labelledby="wk-pair-title" onKeyDown="{{pairKey}}" style="position: absolute; z-index: 41; left: {{pairSheetL}}; right: {{pairSheetR}}; top: {{pairSheetT}}; bottom: {{pairSheetB}}; max-width: {{pairSheetMax}}; margin: 0 auto; border-radius: {{pairSheetRad}}; background: var(--wk-surface); border: 1px solid var(--wk-line-14); box-shadow: var(--wk-e3); font-size: var(--wk-fs-lg)">
+				<div style="display: flex; align-items: center; gap: 4px; padding: 12px 10px 4px 18px; font-size: 15px">
+					<b id="wk-pair-title" style="flex: 1">Pair this browser</b>
+					<button class="wk-icon-btn" data-size="lg" onClick="{{pairClose}}" aria-label="Close" style="color: var(--wk-text-3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12M6 6l12 12"></path></svg></button>
+				</div>
+				<div style="display: flex; flex-direction: column; gap: 8px; padding: 0 18px 18px">
+					<p style="margin: 0 0 6px; line-height: 1.45; color: var(--wk-text-3)">Until it is paired, this browser can watch but not tune, scan or change settings. Ask for a one-time code on the receiver: <code style="font-family: var(--wk-font-mono); font-size: .92em; color: var(--wk-text-2)">node dist/access-command.js pair</code>. A code lasts 10 minutes.</p>
+					<label for="wk-pair-code" style="font-weight: 700; margin-top: 4px">Code</label>
+					<input id="wk-pair-code" class="wk-input" value="{{pairCode}}" onChange="{{pairCodeIn}}" onKeyDown="{{pairEnter}}" placeholder="ABCDE-FGHIJ" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="11" style="height: 44px; padding: 0 12px; border-color: var(--wk-line-18); background: var(--wk-well-glass); font-variant-numeric: tabular-nums; letter-spacing: .06em">
+					<label for="wk-pair-name" style="font-weight: 700; margin-top: 4px">Name <span style="font-weight: 400; color: var(--wk-text-3)">(optional)</span></label>
+					<input id="wk-pair-name" class="wk-input" value="{{pairName}}" onChange="{{pairNameIn}}" onKeyDown="{{pairEnter}}" placeholder="Kitchen tablet" maxlength="64" style="height: 44px; padding: 0 12px; border-color: var(--wk-line-18); background: var(--wk-well-glass)">
+					<sc-if value="{{pairHasErr}}" hint-placeholder-val="{{false}}">
+						<p role="alert" style="margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--wk-danger-soft)">{{pairErr}}</p>
+					</sc-if>
+					<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px">
+						<button type="button" class="wk-btn" data-variant="ghost" data-size="lg" onClick="{{pairClose}}">Cancel</button>
+						<button type="button" class="wk-btn" data-variant="primary" data-size="lg" disabled="{{pairOff}}" onClick="{{pairSubmit}}" style="min-width: 76px">{{pairBtn}}</button>
+					</div>
+				</div>
+			</div>
+		</sc-if>
+
 		<div ref="{{refs.listen}}" style="position: absolute; left: 16px; bottom: 16px; z-index: {{listenZ}}">
-			<dc-import name="Listen" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" following-text="{{followingText}}" hint-size="340px,64px"></dc-import>
+			<dc-import name="Listen" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{listenVals}}" on-set="{{set}}" on-saved="{{recSaved}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" following-text="{{followingText}}" hint-size="340px,64px"></dc-import>
 		</div>
 
 		<nav ref="{{refs.dock}}" class="wk-dock wk-island" aria-label="Primary" style="position: absolute; left: {{dockX}}px; bottom: 16px; height: 64px; box-sizing: border-box; display: flex; align-items: center; gap: 4px; padding: 0 8px; z-index: 2; transition: {{dockTr}}">
@@ -112,10 +182,13 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 		<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; display: flex; white-space: nowrap"><div class="wk-toast" role="status">
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{toastIcon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
 				<span>{{toastText}}</span>
 				<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
 					<button class="wk-btn" data-variant="tonal" data-size="sm" onClick="{{undo}}">Undo</button>
+				</sc-if>
+				<sc-if value="{{toastHasAction}}" hint-placeholder-val="{{false}}">
+					<button class="wk-btn" data-variant="tonal" data-size="sm" onClick="{{toastAct}}">{{toastActLabel}}</button>
 				</sc-if>
 				<sc-if value="{{noUndo}}" hint-placeholder-val="{{false}}"><span style="width: 10px"></span></sc-if>
 			</div></div>
@@ -143,6 +216,27 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			<sc-if value="{{showPushPlan}}" hint-placeholder-val="{{false}}">
 				<dc-import name="ScanPlanner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" layout="screen" width="{{pushW}}" state="{{plannerState}}" sweep="{{plannerSweep}}" prefill="{{scanPrefill}}" discoveries="{{discs}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-close="{{closePlanner}}" on-settings="{{openSetting}}" hint-size="100%,100%"></dc-import>
 			</sc-if>
+			<sc-if value="{{showSkel}}" hint-placeholder-val="{{false}}">
+				<div class="wk-drawer" aria-busy="true" style="position: absolute; inset: 0; box-sizing: border-box; overflow: hidden">
+					<header style="flex: none; display: flex; align-items: center; gap: 10px; padding: 14px 10px 10px 18px">
+						<h2 class="wk-h2" style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{drawerName}}</h2>
+						<button class="wk-icon-btn" data-close="" onClick="{{closeActivity}}" aria-label="Close {{drawerName}}" style="color: var(--wk-text-3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+					</header>
+					<div style="flex: 1; min-height: 0; overflow: hidden; padding: 4px 18px 18px">
+						<div class="wk-skel" data-shape="{{skelShape}}" role="status" aria-label="Loading {{drawerName}}">
+							<div class="wk-skel-bar" aria-hidden="true"><span class="wk-skel-field"></span><span class="wk-skel-chips"><span></span><span></span><span></span></span></div>
+							<p class="wk-skel-caption">Loading {{drawerName}}…</p>
+							<sc-for list="{{skelRows}}" as="k" hint-placeholder-count="8">
+								<div class="wk-skel-row" aria-hidden="true" style="--i: {{k.i}}">
+									<sc-if value="{{k.tile}}" hint-placeholder-val="{{true}}"><span class="wk-skel-tile" data-round="{{k.round}}"></span></sc-if>
+									<span class="wk-skel-lines"><span style="width: {{k.w1}}%"></span><span style="width: {{k.w2}}%"></span></span>
+									<span class="wk-skel-end"></span>
+								</div>
+							</sc-for>
+						</div>
+					</div>
+				</div>
+			</sc-if>
 			<sc-if value="{{drawerGrip}}" hint-placeholder-val="{{false}}">
 				<div class="wk-rs" role="separator" aria-orientation="vertical" aria-label="Resize {{drawerName}}" aria-valuemin="360" aria-valuemax="640" aria-valuenow="{{drW}}" aria-valuetext="{{drW}} pixels wide" tabindex="0" data-on="{{resizing}}" onPointerDown="{{rsDown}}" onKeyDown="{{rsKey}}" onDoubleClick="{{rsReset}}" title="Drag to resize · double-click resets" style="position: absolute; left: -14px; top: 16px; bottom: 16px; width: 20px; z-index: 5; cursor: col-resize; touch-action: none; display: flex; align-items: center; justify-content: center; border-radius: 6px">
 					<span class="wk-rs-bar" style="width: 4px; height: 40px; border-radius: 2px; background: rgba(var(--wk-accent-rgb),.45)"></span>
@@ -158,6 +252,20 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			<div aria-hidden="true" style="position: absolute; right: 0; top: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 0, transparent 11.6px, var(--wk-line-14) 12.2px, var(--wk-line-14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 0, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
 			<div aria-hidden="true" style="position: absolute; right: 0; bottom: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 100%, transparent 11.6px, var(--wk-line-14) 12.2px, var(--wk-line-14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 100%, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
 			<div class="wk-paneslot-body" style="position: absolute; inset: 0; display: grid; border-radius: var(--wk-r-5) 0 0 var(--wk-r-5); overflow: hidden">
+				<sc-if value="{{paneSkel}}" hint-placeholder-val="{{false}}">
+					<div style="padding: 16px 18px; overflow: hidden">
+						<div class="wk-skel" data-shape="list" role="status" aria-label="Loading {{paneLabel}}">
+							<p class="wk-skel-caption">Loading {{paneLabel}}…</p>
+							<sc-for list="{{paneSkelRows}}" as="k" hint-placeholder-count="6">
+								<div class="wk-skel-row" aria-hidden="true" style="--i: {{k.i}}">
+									<span class="wk-skel-tile"></span>
+									<span class="wk-skel-lines"><span style="width: {{k.w1}}%"></span><span style="width: {{k.w2}}%"></span></span>
+									<span class="wk-skel-end"></span>
+								</div>
+							</sc-for>
+						</div>
+					</div>
+				</sc-if>
 				<sc-if value="{{paneActivity}}" hint-placeholder-val="{{false}}">
 					<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" part="pane" width="{{paneW}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
 				</sc-if>
@@ -188,7 +296,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	<div class="wk-sr" role="status" aria-live="polite">{{announce}}</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light","system"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"waterfall":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match","section":"Theme"},"sweep":{"editor":"enum","options":["off","sweeping","holding","paused","paused-you","paused-relay"],"default":"off"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light","system"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"waterfall":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match","section":"Theme"},"sweep":{"editor":"enum","options":["off","sweeping","holding","paused","paused-you","paused-relay"],"default":"off"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"openDrawer":{"editor":"enum","options":["none","activity","scanner","recordings","settings"],"default":"none"},"loading":{"editor":"enum","options":["off","brief","hold"],"default":"off"},"pairing":{"editor":"enum","options":["off","on","sheet","sheet error"],"default":"off"},"updateToast":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":900}}'>
 const DETECTED = { 161150000: 'DMR · TG 2081', 163087500: 'P25 · TG 1201', 160450000: 'POCSAG pager', 160625000: 'NFM voice', 161975000: 'AIS channel A', 162025000: 'AIS channel B', 156800000: 'Marine ch 16', 144800000: 'APRS', 433920000: 'ISM sensors', 868300000: 'ISM 868 sensors', 868950000: 'wM-Bus meters', 869525000: 'Meshtastic', 446006250: 'PMR446 ch 1', 118100000: 'Airband tower', 131725000: 'ACARS', 136975000: 'VDL2', 93500000: 'FM broadcast', 1090000000: 'ADS-B' };
 const TONE = { 160625000: 'CTCSS 88.5 Hz', 446006250: 'CTCSS 77.0 Hz', 161425000: 'DCS 023N', 145637500: 'CTCSS 123.0 Hz' };
 // Scanner discoveries (shared mock). s2 = what changes with stage S2. 160.900 is ignored ("Birdie from the Pi"), so it is not tagged.
@@ -246,7 +354,10 @@ const hopCentre = w => { const h = hopList(w)[w.hop - 1] || hopList(w)[0]; retur
 const LEVEL = { 161150000: -57, 161975000: -61, 162025000: -63, 160450000: -60, 160625000: -65, 160900000: -84, 161425000: -76, 162400000: -70, 163087500: -66, 156800000: -62, 144800000: -63, 118100000: -66, 131725000: -64, 136975000: -66, 93500000: -50, 433920000: -58, 446006250: -60, 446031250: -71, 446093750: -77, 868300000: -70, 868950000: -72, 869525000: -75, 1090000000: -62, 466025000: -62 };
 
 // Shell grid: one 16 px gutter. Top row (Tuner, Receiver) on the top gutter; bottom row (Listen, dock, tuned card home) on the bottom gutter.
-const G = 16, DOCK_H = 64, CARD_W = 320;
+// app toast icons: done, a file saved by the browser, a new build of the app
+const TOAST_ICON = { check: ['M5 12l5 5l10 -10'], download: ['M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2', 'M7 11l5 5l5 -5', 'M12 4l0 12'], refresh: ['M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4', 'M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4'] };
+// the tuned card is as wide as the Listen island under it (web, 2026-10-17)
+const G = 16, DOCK_H = 64, CARD_W = 340;
 // Right drawers share one slot, resizable 360–640 px by the left edge, width remembered per drawer
 const DRAWERS = ['activity', 'scanner', 'recordings', 'settings'];
 const DRAWER_NAME = { activity: 'Activity', scanner: 'Scanner', recordings: 'Recordings', settings: 'Settings' };
@@ -255,7 +366,14 @@ const DR_MIN = 360, DR_MAX = 640;
 // From 1100 px a drawer floats over the plot's right side at full height; the plot never moves, the Receiver and the card
 // slide left to clear it. The drawer gives up width before the Receiver would reach the Tuner; below 1100 px (or with no
 // room for 360 px) it overlays between the island rows instead. Dock width with the active label showing, for the collision check.
-const FULL_MIN_VW = 1100, DOCK_WIDE = 460, DOCK_COMPACT = 380;
+// dock widths with Messages as a third view (the web app measured 496 and 424)
+const FULL_MIN_VW = 1100, DOCK_WIDE = 496, DOCK_COMPACT = 424;
+// Pair this browser: the chip's natural widths, whole and title only (the web app measured 459 and 180), and the room it
+// keeps from the islands on each side of the top-row gap (notice.ts CHIP_MARGIN)
+const CHIP_FULL = 460, CHIP_TITLE = 180, CHIP_MARGIN = 12;
+// Skeleton line widths per row (%): uneven, so the placeholder reads as text and not as a grid (ui/Skeleton.tsx)
+const SKEL_WIDE = [68, 54, 76, 60, 72, 48, 64, 80, 58, 70], SKEL_NARROW = [42, 30, 36, 46, 28, 38, 34, 44, 32, 40];
+const skelRows = (n, tile, round) => Array.from({ length: n }, (_, i) => ({ i: String(i), tile, round: round ? 'true' : 'false', w1: SKEL_WIDE[i % 10], w2: SKEL_NARROW[i % 10] }));
 // Tuned card anchors in the free plot area: each is pushed off the islands along its own axis, or dropped if it still collides.
 // "Above Listen" (the default) sits left-aligned with the Listen island, one gutter above it, and rides up when Listen
 // expands; it replaces the old bottom-left anchor, which ended up in the same place ('bl' still resolves to it).
@@ -266,7 +384,7 @@ const ANCHORS = [
 	{ id: 'bc', name: 'bottom centre', h: 'c', v: 'b' }, { id: 'br', name: 'bottom right', h: 'r', v: 'b' }
 ];
 const CARD_ALIAS = { bl: 'al' };
-const VIEWS = ['spectrum', 'map'];
+const VIEWS = ['spectrum', 'map', 'messages'];
 const hits = (a, b) => a.x < b.x + b.w + G - 1 && b.x < a.x + a.w + G - 1 && a.y < b.y + b.h + G - 1 && b.y < a.y + a.h + G - 1;
 const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -358,12 +476,12 @@ class Component extends DCLogic {
 		this.openPal = () => this.setState({ pal: true, preview: null });
 		this.closePal = () => this.setState({ pal: false, preview: null });
 		this.preview = p => this.setState({ preview: wfKey(p) });
-		this.commit = (patch, text) => {
+		this.commit = (patch, text, icon) => {
 			patch = wfKey(patch);
 			if (patch && patch.freq !== undefined) this.manualTune();
 			const prev = patch ? Object.keys(patch).reduce((o, k) => { o[k] = this.state[k]; return o; }, {}) : null;
 			clearTimeout(this.tt);
-			this.setState(Object.assign({}, patch || {}, { pal: false, preview: null, toast: text ? { text, prev } : null }));
+			this.setState(Object.assign({}, patch || {}, { pal: false, preview: null, toast: text ? { text, prev, icon: icon || null } : null }));
 			this.tt = setTimeout(() => this.setState({ toast: null }), 6000);
 		};
 		this.undo = () => { const t = this.state.toast; if (t && t.prev) this.setState(Object.assign({}, t.prev, { toast: null })); };
@@ -381,6 +499,15 @@ class Component extends DCLogic {
 			else if (id === 'copy') this.commit(null, 'Copied ' + (f / 1e6).toFixed(f % 1000 ? 4 : 3));
 			// 'identify' and 'pin' are handled inside the card
 			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
+		};
+		// the spectrum's right-click menu: its rows run what ⌘K and the card run (the plot has already tuned when it had to)
+		this.sigAction = a => {
+			const fv = (a.hz / 1e6).toFixed(3);
+			if (a.kind === 'identify') this.identify(a.hz);
+			else if (a.kind === 'listen') this.setState({ listening: true });
+			else if (a.kind === 'activity') this.cardAction('activity', a.hz);
+			else if (a.kind === 'copy') this.commit(null, 'Copied ' + fv);
+			else if (a.kind === 'save' && !this.state.saved.some(x => x.f === a.hz)) this.commit({ saved: this.state.saved.concat([{ f: a.hz, label: a.name, group: a.group, mode: this.state.mode, bw: this.state.bw }]) }, 'Saved “' + a.name + '” in ' + a.group);
 		};
 		this.setSource = src => this.setState({ source: src });
 		this.setWatch = on => this.setState({ watchOn: on });
@@ -401,6 +528,28 @@ class Component extends DCLogic {
 		this.openStorage = () => this.openSettings('storage');
 		this.openRxSettings = () => this.openSettings('receiver');
 		this.openAudioSettings = () => this.openSettings('audio');
+		this.recSaved = name => this.commit(null, 'Saved ' + name, 'download');
+		// pairing sheet: the pairing tweak opens it (sheet error: a used code); a valid code pairs, the chip goes and the controls come on
+		this.pairSheetNow = () => { const t = this.props.pairing || 'off'; return this.state.pairTouched ? !!this.state.pairSheet : t === 'sheet' || t === 'sheet error'; };
+		this.pairClose = () => this.setState({ pairSheet: false, pairTouched: true, pairErr: null, pairBusy: false });
+		this.pairKey = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.pairClose(); } };
+		this.pairCodeIn = e => this.setState({ pairCode: e.target.value, pairErr: null, pairErrShown: true });
+		this.pairNameIn = e => this.setState({ pairName: e.target.value });
+		this.pairEnter = e => { if (e.key === 'Enter') this.pairSubmit(e); };
+		this.pairSubmit = e => {
+			if (e) e.preventDefault();
+			const code = (this.state.pairCode ?? this.pairDemoCode()).trim();
+			if (!/^[A-Za-z0-9]{5}-?[A-Za-z0-9]{5}$/.test(code) || this.state.pairBusy) return;
+			clearTimeout(this.pairT);
+			this.setState({ pairBusy: true, pairErr: null, pairErrShown: true });
+			this.pairT = setTimeout(() => {
+				if ((this.props.pairing || 'off') === 'sheet error' && !this.state.pairRetried) { this.setState({ pairBusy: false, pairRetried: true, pairErr: 'That code is not valid. It may be used or older than 10 minutes; ask for a new one.' }); return; }
+				this.setState({ pairBusy: false, pairSheet: false, pairTouched: true, paired: true });
+				this.commit(null, 'This browser is paired');
+			}, 700);
+		};
+		this.pairDemoCode = () => (this.props.pairing || 'off') === 'sheet error' ? 'K7Q2M-X9P4T' : '';
+		this.toastAct = () => { const t = this.state.toast; if (t && t.run) t.run(); this.setState({ toast: null, updateGone: true }); };
 		// ⌘K "open in Settings": the drawer opens on that registry row (e.g. 'dev.accent'), scrolled to and highlighted
 		this.openSetting = id => this.openSettings(id || null);
 		this.settingsAction = a => { if (a === 'map') { this.goNav('map'); return true; } if (a === 'shortcuts') { this.setState({ drawer: null, pal: true, preview: null }); return true; } return false; };
@@ -505,6 +654,7 @@ class Component extends DCLogic {
 	}
 	componentDidMount() {
 		this.applySweepTweak();
+		if (this.props.openDrawer && this.props.openDrawer !== 'none') this.setState({ drawer: this.props.openDrawer });
 		this.clock = setInterval(() => this.tick(), 1000);
 		this.onWinResize = () => this.measure();
 		// Theme "system" follows the OS
@@ -517,6 +667,7 @@ class Component extends DCLogic {
 	}
 	componentDidUpdate(prev) {
 		if (prev.sweep !== this.props.sweep) this.applySweepTweak();
+		if (prev.openDrawer !== this.props.openDrawer) this.setState({ drawer: this.props.openDrawer && this.props.openDrawer !== 'none' ? this.props.openDrawer : null });
 		// the pane belongs to the Scanner drawer: another drawer (or none) drops it
 		if (this.state.planner && this.state.drawer !== 'scanner') this.setState({ planner: null, scanPrefill: null });
 		// a tweak change wins over a theme or accent picked in Settings
@@ -525,7 +676,7 @@ class Component extends DCLogic {
 		this.measure();
 	}
 	componentWillUnmount() {
-		clearTimeout(this.tt); clearTimeout(this.minT); clearInterval(this.clock);
+		clearTimeout(this.tt); clearTimeout(this.minT); clearTimeout(this.skT); clearInterval(this.clock);
 		if (this.mq && this.mq.removeEventListener) this.mq.removeEventListener('change', this.onScheme);
 		if (this.ro) this.ro.disconnect();
 		window.removeEventListener('resize', this.onWinResize);
@@ -716,6 +867,7 @@ class Component extends DCLogic {
 		// while the sweep has the receiver, the tuning follows the hop (or the signal it holds on)
 		const swFreq = live ? (sw.state === 'holding' ? sw.holdHz : hopCentre(sw)) : null;
 		const s = Object.assign({}, base, swFreq ? { freq: swFreq } : {}, base.preview || {});
+		const toast = base.toast || (this.props.updateToast && !base.updateGone ? { text: 'WaveKit was updated', action: 'Reload', icon: 'refresh' } : null);
 		const stage = this.props.stage || 'S1';
 		const ign = base.ignored || {};
 		const heardNew = (sw && sw.heard || []).filter(h => !DISCOVERIES.some(d => d.hz === h.hz)).map(h => ({ hz: h.hz, bw: 12500, label: 'Maybe FM voice', sub: h.name, conf: 'maybe', recent: true, fresh: true }));
@@ -733,7 +885,8 @@ class Component extends DCLogic {
 		// The view and an open drawer are both selected; only the view shows its label, so the dock keeps its width.
 		const NAV = [
 			{ id: 'spectrum', label: 'Spectrum', d: ['M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10'] },
-			{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] }
+			{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] },
+			{ id: 'messages', label: 'Messages', d: ['M21 14l-3 -3h-7a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1h9a1 1 0 0 1 1 1v10', 'M14 15v2a1 1 0 0 1 -1 1h-7l-3 3v-10a1 1 0 0 1 1 -1h2'] }
 		];
 		const DRAWER_NAV = [
 			{ id: 'activity', label: 'Activity', d: ['M3 12h4l3 8l4 -16l3 8h4'] },
@@ -742,7 +895,7 @@ class Component extends DCLogic {
 		];
 		// ---- shell grid
 		const drawer = this.drawerId();
-		const view = base.view === 'map' ? 'map' : 'spectrum';
+		const view = base.view === 'map' || base.view === 'messages' ? base.view : 'spectrum';
 		const L = this.shellLayout(base, { drawer, rxOpen: s.open === 'rx', pane: drawer === 'scanner' && (base.planner === 'compose' || (base.planner === 'running' && !!hold)) });
 		this.layout = L;
 		// a between-rows drawer shares the right side with the Receiver panel, so the open panel wins; a full-height one
@@ -756,6 +909,7 @@ class Component extends DCLogic {
 		const drag = base.drag;
 		const cardOn = !!home || !!drag;
 		this.cardPos = home;
+		const msgCard = cardOn && !!home && !drag;
 		const snap = drag ? this.nearest(L.anchors, drag.x, drag.y) || home || drag : home || { x: 0, y: 0 };
 		const moving = !!(base.resizing);
 		// the planner in running mode needs a sweep; if the scan ends while it is open, it closes
@@ -774,6 +928,30 @@ class Component extends DCLogic {
 		const paneOn = paneWant && L.full;
 		const pushIn = paneWant && !L.full && pane.pushIn;
 		const paneW = paneOn ? L.W - 2 * G - L.dW : 0;
+		// loading tweak: a drawer (and its pane) shows the skeleton while its code or first page loads; brief = each
+		// opening loads for 1.2 s, hold = it stays loading
+		const loading = this.props.loading || 'off';
+		if (drawer !== this.lastDr) {
+			this.lastDr = drawer;
+			this.skelUntil = drawer && loading === 'brief' ? Date.now() + 1200 : 0;
+			clearTimeout(this.skT);
+			if (this.skelUntil) this.skT = setTimeout(() => this.forceUpdate(), 1250);
+		}
+		const skel = !!drawer && (loading === 'hold' || (loading === 'brief' && Date.now() < (this.skelUntil || 0)));
+		// Pair this browser: the top-row gap between the Tuner and the Receiver (slid left of a full-height drawer) takes the
+		// whole chip, else its title alone; otherwise it drops under the top row, centred in the plot beside the drawer.
+		// Below 1100 px it sits above the bottom row (src/shell/overlay-slot.ts, connection/notice.ts chipPlace)
+		const pairOn = (this.props.pairing || 'off') !== 'off' && !s.paired;
+		const pairSheet = this.pairSheetNow() && !s.paired, phone = L.W < 600;
+		const pairCode = s.pairCode ?? this.pairDemoCode(), pairOk = /^[A-Za-z0-9]{5}-?[A-Za-z0-9]{5}$/.test(pairCode.trim());
+		const pairErr = s.pairErr || ((this.props.pairing || 'off') === 'sheet error' && !s.pairErrShown ? 'That code is not valid. It may be used or older than 10 minutes; ask for a new one.' : null);
+		const gm = base.geo || {}, tunerLive = (gm.live && gm.live.tuner) || gm.tuner || { w: 440 }, rxLive = (gm.live && gm.live.rx) || gm.rx || { w: 300 };
+		const tunerR = G + tunerLive.w, rxL = L.freeW - G - rxLive.w, gap = rxL > tunerR ? { x: tunerR, w: rxL - tunerR } : null;
+		const room = gap ? gap.w - 2 * CHIP_MARGIN : -1;
+		const chip = L.W < FULL_MIN_VW ? { top: 'auto', bottom: (G + DOCK_H + G) + 'px', x: L.W / 2, maxW: L.W - 32, detail: true }
+			: gap && CHIP_FULL <= room ? { top: G + 'px', bottom: 'auto', x: gap.x + gap.w / 2, maxW: gap.w - 32, detail: true }
+			: gap && CHIP_TITLE <= room ? { top: G + 'px', bottom: 'auto', x: gap.x + gap.w / 2, maxW: gap.w - 32, detail: false }
+			: { top: L.topRow + 'px', bottom: 'auto', x: L.freeW / 2, maxW: L.freeW - 32, detail: true };
 		// the tuned card hides while the sweep moves and while a pane covers the plot
 		const sweepMoving = !!sw && (sw.state === 'sweeping' || sw.state === 'starting');
 		const navItem = (n, isView) => {
@@ -785,22 +963,36 @@ class Component extends DCLogic {
 		};
 		return {
 			wkTheme, wkAccent, wkGround, waterfall,
+			// drawer skeleton (loading tweak): the drawer's header and the shape of its rows
+			showSkel: drawerOn && skel, skelShape: drawer === 'settings' ? 'settings' : 'list', skelRows: skelRows(8, drawer !== 'settings', drawer === 'recordings'),
+			paneSkel: paneOn && skel, paneSkelRows: skelRows(6, true, false),
+			// Pair this browser (pairing tweak); the pairing sheet itself is not drawn here
+			pairOn, pairTop: chip.top, pairBottom: chip.bottom, pairLeft: Math.round(chip.x), pairMaxW: Math.max(0, Math.round(chip.maxW)), pairDetail: chip.detail,
+			pairHint: chip.detail ? 'Enter the code from the receiver' : 'Read-only until paired · Enter a code',
+			pairTr: moving ? 'none' : 'left var(--wk-dur-4) var(--wk-ease-inout), top var(--wk-dur-4) var(--wk-ease-inout)',
+			pair: () => this.setState({ pairSheet: true, pairTouched: true, pal: false }),
+			pairSheetOn: pairSheet, pairClose: this.pairClose, pairKey: this.pairKey, pairSubmit: this.pairSubmit, pairEnter: this.pairEnter,
+			pairSheetL: phone ? '0' : '16px', pairSheetR: phone ? '0' : '16px', pairSheetT: phone ? 'auto' : '96px', pairSheetB: phone ? '0' : 'auto',
+			pairSheetMax: phone ? 'none' : '420px', pairSheetRad: phone ? '14px 14px 0 0' : '12px',
+			pairCode, pairName: s.pairName || '', pairCodeIn: this.pairCodeIn, pairNameIn: this.pairNameIn,
+			pairHasErr: !!pairErr, pairErr: pairErr || '', pairOff: !pairOk || !!s.pairBusy, pairBtn: s.pairBusy ? 'Pairing…' : 'Pair',
 			scanRange: this.scanRange, scanPrefill: base.scanPrefill || null,
 			// Scan a band: attached pane, or a screen pushed into the drawer
 			plannerSweep: plannerOn && base.planner === 'running' ? hold : null,
 			plannerState: base.planner === 'running' ? 'running' : base.scanPrefill ? 'prefilled' : 'empty',
 			closePlanner: this.closePlanner, planScan: this.planScan, holdPlan: this.holdPlan,
-			paneOn, paneSolid: paneOn || pushIn, paneScanPlan: paneOn && pane.id === 'scanner', paneActivity: paneOn && pane.id === 'activity', paneLabel: pane ? pane.label : '', paneW,
+			paneOn, paneSolid: paneOn || pushIn, paneScanPlan: paneOn && !skel && pane.id === 'scanner', paneActivity: paneOn && !skel && pane.id === 'activity', paneLabel: pane ? pane.label : '', paneW,
 			// Activity asks whether a pane fits; without room its columns become a switcher row in the drawer
 			actPaneRoom: L.full,
 			paneTop: L.topRow, paneBottom: L.paneBottom, paneRight: G + L.dW - 1, paneTr: moving ? 'none' : 'right var(--wk-dur-4) var(--wk-ease-inout)',
-			showPushPlan: pushIn, pushW: Math.max(0, L.W - 2 * G),
+			showPushPlan: pushIn && !skel, pushW: Math.max(0, L.W - 2 * G),
 			drawerGrip: !!(L.dr && L.dr.resize) && !paneOn,
 			// an open island panel stays above the pane
 			tunerZ: paneOn && s.open === 'tuner' ? 6 : 3, rxZ: paneOn && s.open === 'rx' ? 6 : 3, listenZ: paneOn && s.open === 'listen' ? 6 : 3,
 			discs, hold, stage,
 			scannerSweep: hold || (sw ? sw : { state: 'watching', preset: 'This span', startHz: s.freq - capHz / 2, endHz: s.freq + capHz / 2, hop: 1, hops: 1, sweepS: 0, coverage: 100 }),
 			scanAction: this.scanAction, identify: this.identify,
+			sigAction: this.sigAction, sigListening: !!s.listening,
 			idRun: base.idRun || 0,
 			scanHold: live,
 			// the card hides while the sweep moves; on a hit it is that signal's card, "Held by the scan" (the frequency shows top right)
@@ -813,13 +1005,15 @@ class Component extends DCLogic {
 			followingText: !live ? '' : sw.state === 'holding' ? sw.holdLabel || (sw.holdHz / 1e6).toFixed(4) : sw.hops !== 1 ? 'Following the scan' : sw.options && (sw.options.followHits === false || sw.options.findOnly) ? 'Hits only logged' : 'Waits for a channel',
 			// the Spectrum shades where the scan is looking (the hop's window, or the band a one-hop plan watches) and names the hit
 			specScan: this.specScan(sw, hold),
-			showScanner: drawerOn && drawer === 'scanner' && !pushIn,
+			showScanner: drawerOn && !skel && drawer === 'scanner' && !pushIn,
 			freq: s.freq, bw: s.bw, step: s.step,
 			palOpen: base.pal, openPal: this.openPal, closePal: this.closePal,
 			palVals: Object.assign({}, base, swFreq ? { freq: swFreq } : {}, committed, { palette: committed.waterfall, sweep: sw ? Object.assign({}, sw, hold || {}) : null }), openSetting: this.openSetting, recent: base.recent,
 			commit: this.commit, preview: this.preview, cardAction: this.cardAction, goNav: this.goNav, goActivity: this.goActivity, used: this.used,
 			actCmd: base.actCmd,
-			hasToast: !!base.toast, toastText: base.toast ? base.toast.text : '', canUndo: !!(base.toast && base.toast.prev), noUndo: !!(base.toast && !base.toast.prev), undo: this.undo,
+			// the app toast; the updateToast tweak shows the service worker's "WaveKit was updated · Reload", which stays until used
+			hasToast: !!toast, toastText: toast ? toast.text : '', canUndo: !!(toast && toast.prev), noUndo: !!(toast && !toast.prev && !toast.action), undo: this.undo,
+			toastIcon: TOAST_ICON[(toast && toast.icon) || 'check'], toastHasAction: !!(toast && toast.action), toastActLabel: toast && toast.action ? toast.action : '', toastAct: this.toastAct,
 			tune: this.tune, set: this.set,
 			specH: 300,
 			// the plot starts under the Tuner, whose scan row adds a line while a scan is on
@@ -829,9 +1023,9 @@ class Component extends DCLogic {
 			setBw: this.setBw,
 			rateHz: s.rate * 1e6,
 			savedMarks: s.saved.map(x => ({ f: x.f, label: x.label })),
-			showActivity: drawerOn && drawer === 'activity',
-			showRecordings: drawerOn && drawer === 'recordings',
-			showSettings: drawerOn && drawer === 'settings',
+			showActivity: drawerOn && !skel && drawer === 'activity',
+			showRecordings: drawerOn && !skel && drawer === 'recordings',
+			showSettings: drawerOn && !skel && drawer === 'settings',
 			settingsVals: Object.assign({}, s, colours), settingsAt: base.settingsAt || null, settingsAction: this.settingsAction,
 			toggleSettings: this.toggleSettings, settingsOn: drawer === 'settings',
 			openStorage: this.openStorage, openRxSettings: this.openRxSettings, openAudioSettings: this.openAudioSettings,
@@ -844,13 +1038,17 @@ class Component extends DCLogic {
 			setActMode: this.setActMode,
 			rxVals: { rate: s.rate, gainIdx: s.gainIdx, gainAuto: s.gainAuto, rtlAgc: s.rtlAgc, biasT: s.biasT, offsetTuning: s.offsetTuning, ppm: s.ppm, direct: s.direct, dcBlock: s.dcBlock, iqCorr: s.iqCorr },
 			listenVals: {
-				listening: s.listening, vol: s.vol, sq: s.sq, sqAuto: s.sqAuto, src: s.src, agc: s.agc, deemph: s.deemph, hp: s.hp, nr: s.nr, rec: s.rec,
+				listening: s.listening, vol: s.vol, sq: s.sq, sqAuto: s.sqAuto, src: s.src, agc: s.agc, deemph: s.deemph, hp: s.hp, nr: s.nr, rec: s.rec, freq: s.freq,
 				toneSq: s.toneSq, tone: TONE[s.freq] || '',
 				base: LEVEL[s.freq] ?? -112, digital: s.freq === 161150000, call: 'TG 2081 · radio 2081045', modeLabel: s.mode
 			},
 			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
 			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
 			showMap: view === 'map', mapAction: this.mapAction,
+			// Messages: the gallery under the top islands, beside an open drawer
+			showMessages: view === 'messages', msgTop: 88, msgRight: Math.max(drawerOn && L.dW ? L.dW + G : 0, msgCard && home.x + CARD_W / 2 >= L.W / 2 ? L.W - home.x - 40 + G : 0),
+			// a lane down the side the tuned card sits on, so no message hides under it (Ben, 2026-10-23)
+			msgLeft: msgCard && home.x + CARD_W / 2 < L.W / 2 ? home.x + CARD_W + G : 0,
 			navViews: NAV.map(n => navItem(n, true)), navDrawers: DRAWER_NAV.map(n => navItem(n, false)),
 			refs: this.refsObj,
 			// drawer slot; the Receiver slides to clear a full-height drawer

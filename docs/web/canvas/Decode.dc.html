@@ -21,7 +21,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		<span class="wk-tile" style="color: var(--wk-accent)">
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 		</span>
-		<span class="wk-label" data-strong="" style="font-size: var(--wk-fs-lg); color: var(--wk-text-2)">{{m.proto}}</span>
+		<span class="wk-label" data-strong="" style="font-size: var(--wk-fs-md); font-weight: 700; letter-spacing: .08em; color: var(--wk-text-2)">{{m.proto}}</span>
 		<sc-for list="{{badges}}" as="b" hint-placeholder-count="1">
 			<span class="wk-tag" data-size="md" data-variant="{{b.v}}" style="background: {{b.bg}}; color: {{b.fg}}">{{b.label}}</span>
 		</sc-for>
@@ -30,7 +30,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</header>
 
 	<div style="display: flex; flex-direction: column; gap: 2px">
-		<span style="font-family: {{titleFont}}; font-weight: 700; font-size: {{titleSize}}; line-height: 1.15; overflow-wrap: anywhere">{{m.title}}</span>
+		<span style="font-family: {{titleFont}}; font-weight: 700; font-size: {{titleSize}}; line-height: 1.25; overflow-wrap: anywhere">{{m.title}}</span>
 		<span style="font-size: var(--wk-fs-md); color: var(--wk-text-3)">{{m.sub}}</span>
 	</div>
 
@@ -68,11 +68,12 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-if>
 
 	<sc-if value="{{hasFields}}" hint-placeholder-val="{{true}}">
-		<dl style="margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 1px; border-radius: var(--wk-r-3); overflow: hidden; background: var(--wk-line-08)">
+		<!-- readings: label over value, each as wide as it needs, wrapping under a hairline; no grid of empty cells -->
+		<dl style="margin: 0; display: flex; flex-wrap: wrap; gap: 10px 22px; padding-top: 12px; border-top: 1px solid var(--wk-line-08)">
 			<sc-for list="{{fields}}" as="f" hint-placeholder-count="4">
-				<div style="background: var(--wk-glass-strong); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; min-width: 0">
+				<div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%">
 					<dt style="font-size: var(--wk-fs-2xs); color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.k}}</dt>
-					<dd style="margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {{f.c}}">{{f.v}}</dd>
+					<dd style="margin: 0; font-size: var(--wk-fs-xl); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {{f.c}}">{{f.v}}</dd>
 				</div>
 			</sc-for>
 		</dl>
@@ -150,8 +151,9 @@ class Component extends DCLogic {
 			cardBorder: this.props.flat ? '0' : '1px solid var(--wk-line-14)',
 			cardShadow: 'none',
 			badges,
-			titleFont: m.kind === 'call' || m.kind === 'aircraft' ? 'var(--wk-font-head)' : 'var(--wk-font-ui)',
-			titleSize: m.kind === 'call' || m.kind === 'aircraft' ? '28px' : 'var(--wk-fs-xl)',
+			// talkgroups read large in the heading face; every other title shares one size
+			titleFont: m.kind === 'call' ? 'var(--wk-font-head)' : 'var(--wk-font-ui)',
+			titleSize: m.kind === 'call' ? '28px' : '17px',
 			hasText: !!m.text,
 			textFont: m.mono ? 'var(--wk-font-mono)' : 'var(--wk-font-ui)',
 			toneOnly: !!m.toneOnly,

@@ -60,27 +60,27 @@ Condensed + Noto Sans, Tabler-based icons).
 
 | Board | What it is | State |
 | --- | --- | --- |
-| C · Immersive | **Chosen shell.** Full-bleed spectrum, floating glass islands | Active |
-| Spectrum + waterfall | Live mock with every decoded signal type at a realistic frequency: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line. Follows the ground; Match-accent waterfall plus Amber / Mono / Classic; `paperRamp` tweak to pick the Paper ramp | Active |
+| C · Immersive | **Chosen shell.** Full-bleed spectrum, floating glass islands. Tweaks `openDrawer`, `loading` (the drawer and pane skeleton, brief / hold) and `pairing` (the Pair this browser chip: whole in the Tuner–Receiver gap, title only when tight, under the top row beside a full-height drawer, above the bottom row when narrow; `sheet` / `sheet error` open the pairing sheet: code, optional name, Pair, a used-code error), `updateToast` ("WaveKit was updated · Reload", kept until used). The tuned card is 340 px, as wide as Listen; a recording Listen saves toasts its file name | Active |
+| Spectrum + waterfall | Live mock with every decoded signal type at a realistic frequency: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line. A click tunes where it lands at the zoom's precision (a signal within 4 px wins). Band ruler under the lanes (8 captures up to the whole tuner range: band plan, heard density, saved dots, the view window, the tuned tick; press or drag goes there) ending with the one zoom (− Fit +; past Fit, − widens the ruler). Dragging past the capture slides the view at once and the receiver follows one retune at a time (`retuneMs`); what no frame covers yet is hatched (`dragDemo`). Follows the ground; Match-accent waterfall plus Amber / Mono / Classic; `paperRamp` tweak to pick the Paper ramp | Active |
 | Tuned-signal card | What is on the tuned frequency: one anatomy for every signal type | Active, reworked |
 | Tuned card, every signal type | Gallery of the card for all 18 mocked signals (voice, fleets, messages, sensors, audio only, unknown) | Active |
 | Tuner island | Digit tuning, typed entry with suggestions, mode, bandwidth, step, saved frequencies | Active |
 | Receiver island | Sample rate, gain table, AGC, bias-T, PPM, advanced (direct sampling, DC removal, IQ correction) | Active |
-| Listen island | Listen, squelch meter with auto/off, volume, analog vs decoded voice, AGC, filters, record | Active |
+| Listen island | Listen, squelch meter with auto/off, tone squelch ("Waiting for 88.5 Hz" in the header while the gate holds, tweak `toneDemo`), volume, analog vs decoded voice, AGC, filters, Record audio (a WAV saved in the browser's downloads, its file name said after) | Active |
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | The drawer (search with typed chips, one list, detail pushed in with Back, audio replay, transcripts, live feed) plus its columns pane: pinned searches side by side, attached to the drawer's left; a switcher row when there is no room. `mode` tweak: wide / drawer / narrow | Active, wide mode reworked |
 | Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
 | Recordings | What you kept: day-grouped list, rows that open in place with waveform + trim (or an IQ thumbnail), name and note, transcript, download / copy link; shared player; IQ "play as source"; storage line; live manual recording. Wired into C (Recordings in the dock); Keep (S) added to Activity | Active, first pass |
-| Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
-| Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Station › Country and the Band plans page (plan stack, import, band list, band editor). Wired into C (gear in the dock) | Active, band plans added |
+| Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo; Install WaveKit (the browser's prompt, else how to install; tweak `install`). Wired into C (⌘K in the dock) | Active, first pass |
+| Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Station › Country and the Band plans page (plan stack, import, band list, band editor). Station › Location: lat, lon field with Use my location (staged for Apply, errors outside HTTPS; tweak `geo`). System › Signed-in devices page on a protected core (this browser, rename, Sign out with confirm or Undo, Sign out everywhere, the receiver command; tweaks `openAt` devices…, `access`). Wired into C (gear in the dock) | Active, devices added |
 | Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
 | Scanner | Discoveries drawer, one-row Watch here and the live hit log; "Scan a band" in the header opens the plan pane beside it. Wired into C | Active, fourth pass |
 | Scan planner | "Scan a band" as a pane attached to the Scanner drawer (pushed in as a screen on narrow windows): presets and lanes from the active band plan, one-lane ruler, range table with channel spacing; running mode (capture window, pass fill, ticks, mid-run edits behind Apply). Wired into C | Active, second pass |
-| Identify | Every identify state of the tuned card | Active, first pass |
+| Identify | Every identify state of the tuned card, with Wait until a transmission (one wait counted up across jobs) and Nothing heard | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 | Kit | Styles only: `packages/brand/tokens/ui.css` verbatim plus the canvas fonts; every board imports it first | Mirror of `ui.css` |
-| Components | Design system v1: foundations and every recipe in three scopes (True black + Mono, Ink + phosphor, Paper + Mono), what each replaced, the recipe inventory | Active |
+| Components | Design system v1: foundations and every recipe in three scopes (True black + Mono, Ink + phosphor, Paper + Mono), what each replaced, the recipe inventory; the loading skeleton as a `wk-explore` recipe | Active |
 
 ## Decision log
 
@@ -918,7 +918,11 @@ Condensed + Noto Sans, Tabler-based icons).
   (`web/src/plot/SignalMenu.tsx`), its rows run the palette's actions. Identify first, then
   Decode as…, Listen here, Save frequency, Show in Activity, Copy frequency; acting on another
   signal tunes there first. Long press on Android, Shift+F10 or the menu key on the focused plot.
-  Not on the canvas yet.
+  Drawn 2026-10-17 on the Spectrum board (tweak `signalMenu`),
+  from the web app's menu: the frequency and channel on a quiet first line, Identify (`I`),
+  Decode as… (a list of the 14 protocols the core can probe, with their decoder, and Back),
+  Listen here / Tune here / Listen, Save frequency (suggested group), Show in Activity, Copy
+  frequency; read-only keeps the last two. Rows run the palette's actions, tuning there first.
 - Tuned card placement: answered 2026-10-11 (drag by the type tile, magnetic snap to
   anchors). Pinning a second card to watch another frequency is not planned.
 - Palette follow-ups: should tuning previews retune the hardware (as drawn) or show a

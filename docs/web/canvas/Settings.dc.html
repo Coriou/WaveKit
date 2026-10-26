@@ -73,6 +73,12 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-phone .wk-swb>span{width:26px !important;height:26px !important}
 .wk-rise{animation:wk-rise var(--wk-dur-3) var(--wk-ease-out)}
 @media (hover:none){.wk-s .wk-reset,.wk-s .wk-more{opacity:1}}
+/* Signed-in devices (2026-10-17): touch sizes on a phone, the rename line stacks */
+.wk-phone .wk-dvi{width:var(--wk-h-touch) !important}
+.wk-phone .wk-dve{flex-direction:column}
+/* Use my location: a phone keeps the field wide and shows the glyph only; the words stay for screen readers */
+.wk-phone .wk-fill{width:var(--wk-h-touch);padding:0 !important}
+.wk-phone .wk-fill>.wk-fill-t{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 </style>
 </helmet>
 <div class="wk-s wk-drawer {{rootClass}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; border-radius: {{radius}}; overflow: hidden">
@@ -449,6 +455,68 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</div>
 				</sc-if>
 
+				<!-- Signed-in devices (System, protected core only; 2026-10-17, as the web app built it): this browser, the others, sign out everywhere -->
+				<sc-if value="{{r.isDv}}" hint-placeholder-val="{{false}}">
+					<div class="wk-row" data-device="{{r.id}}" style="align-items: flex-start; gap: 12px; margin-bottom: 2px; padding: 10px 4px 10px 10px; background: none">
+						<span class="wk-tile"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg></span>
+						<sc-if value="{{r.notEditing}}" hint-placeholder-val="{{true}}">
+							<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-top: 1px">
+								<span style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-height: 20px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere"><b>{{r.title}}</b><sc-if value="{{r.current}}" hint-placeholder-val="{{false}}"><span class="wk-tag">This browser</span></sc-if></span>
+								<span style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{r.sub}}</span>
+							</span>
+							<span style="flex: none; display: flex; align-items: center; gap: 4px">
+								<button class="wk-btn wk-tall wk-dvi" data-variant="ghost" onClick="{{r.edit}}" aria-label="Rename {{r.title}}" title="Rename" style="width: var(--wk-h-md); padding: 0; color: var(--wk-text-3)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4"></path><path d="M13.5 6.5l4 4"></path></svg></button>
+								<sc-if value="{{r.hasOut}}" hint-placeholder-val="{{true}}">
+									<button class="wk-btn wk-tall" data-variant="outline" onClick="{{r.out}}" aria-label="{{r.outAria}}" style="gap: 6px">
+										<sc-if value="{{r.outIcon}}" hint-placeholder-val="{{false}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2"></path><path d="M9 12h12l-3 -3"></path><path d="M18 15l3 -3"></path></svg></sc-if>Sign out
+									</button>
+								</sc-if>
+							</span>
+						</sc-if>
+						<sc-if value="{{r.editing}}" hint-placeholder-val="{{false}}">
+							<div role="group" aria-label="Rename {{r.title}}" onKeyDown="{{r.editKey}}" style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+								<span class="wk-dve" style="display: flex; gap: 8px; min-width: 0">
+									<input class="wk-input wk-box wk-tall" value="{{r.editName}}" onChange="{{r.onName}}" onFocus="{{r.selAll}}" autoFocus="{{true}}" aria-label="Device name" placeholder="{{r.editPh}}" maxlength="64" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 36px; padding: 0 12px; background: var(--wk-well-glass)">
+									<span style="position: relative; display: inline-flex; align-items: center; min-width: 0">
+										<select class="wk-select wk-tall" value="{{r.kindVal}}" onChange="{{r.onKind}}" aria-label="Kind of device" style="width: 100%; min-width: 132px; cursor: pointer">
+											<sc-for list="{{r.kinds}}" as="k" hint-placeholder-count="6"><option value="{{k.v}}">{{k.label}}</option></sc-for>
+										</select>
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position: absolute; right: 10px; top: 50%; margin-top: -7px; pointer-events: none"><path d="M6 9l6 6l6 -6"></path></svg>
+									</span>
+								</span>
+								<span style="display: flex; justify-content: flex-end; gap: 6px">
+									<button class="wk-btn wk-tall" data-variant="ghost" onClick="{{r.cancel}}">Cancel</button>
+									<button class="wk-btn wk-tall" data-variant="primary" onClick="{{r.save}}">Save</button>
+								</span>
+							</div>
+						</sc-if>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isDvConfirm}}" hint-placeholder-val="{{false}}">
+					<div role="group" aria-label="{{r.action}}" onKeyDown="{{r.key}}" class="wk-rise" style="display: flex; flex-direction: column; gap: 10px; margin: 4px 4px 6px 16px; padding: 12px 14px; border-radius: var(--wk-r-4); background: rgba(var(--wk-danger-rgb),.06); border: 1px solid rgba(var(--wk-danger-rgb),.22)">
+						<p style="margin: 0; font-size: 13px; line-height: 1.5; color: var(--wk-text-2); text-wrap: pretty">{{r.text}}</p>
+						<span style="display: flex; justify-content: flex-end; gap: 6px">
+							<button class="wk-btn wk-tall" data-variant="ghost" onClick="{{r.cancel}}" autoFocus="{{true}}">Cancel</button>
+							<button class="wk-btn wk-tall" data-variant="danger" onClick="{{r.confirm}}">{{r.action}}</button>
+						</span>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isDvAll}}" hint-placeholder-val="{{false}}">
+					<div style="padding: 2px 4px 4px 16px">
+						<button class="wk-btn wk-tall" data-variant="danger" onClick="{{r.act}}" style="gap: 6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2"></path><path d="M9 12h12l-3 -3"></path><path d="M18 15l3 -3"></path></svg>Sign out everywhere</button>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isDvEmpty}}" hint-placeholder-val="{{false}}">
+					<p style="margin: 0; padding: 2px 4px 8px 16px; font-size: 12.5px; line-height: 1.5; color: var(--wk-text-3)">No other device is paired.</p>
+				</sc-if>
+
+				<sc-if value="{{r.isDvNote}}" hint-placeholder-val="{{false}}">
+					<p style="margin: 0; padding: 10px 4px 8px 16px; font-size: 12.5px; line-height: 1.5; color: var(--wk-text-3); text-wrap: pretty">Locked out of every device? On the receiver, <code style="font-family: var(--wk-font-mono); font-size: 11.5px; overflow-wrap: anywhere">node dist/access-command.js devices revoke-all --yes</code> signs them all out, and <code style="font-family: var(--wk-font-mono); font-size: 11.5px; overflow-wrap: anywhere">node dist/access-command.js pair</code> gives a new code.</p>
+				</sc-if>
+
 				<sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
 					<div id="{{r.domId}}" class="wk-row {{r.rise}}" style="display: block; position: relative; margin-bottom: 2px; padding: 12px 4px 12px 16px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background-color var(--wk-dur-jump) var(--wk-ease-inout), box-shadow var(--wk-dur-jump) var(--wk-ease-inout)">
 						<sc-if value="{{r.hasBar}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; left: 6px; top: 14px; bottom: 14px; width: 2px; border-radius: var(--wk-r-1); background: {{r.barC}}"></span></sc-if>
@@ -521,7 +589,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 								</sc-if>
 
 								<sc-if value="{{r.isWf}}" hint-placeholder-val="{{false}}">
-									<div role="radiogroup" aria-labelledby="{{r.labelId}}" class="wk-wfg" style="display: grid; grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr)); gap: 6px; width: 100%">
+									<div role="radiogroup" aria-labelledby="{{r.labelId}}" class="wk-wfg" style="display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); gap: 6px; width: 100%">
 										<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="4">
 											<button role="radio" class="wk-wfb" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; border-radius: 8px; text-align: left">
 												<span class="wk-gring" style="display: block; padding: 2px; border-radius: 8px; border: 2px solid {{o.ring}}; transition: border-color var(--wk-dur-2)">
@@ -537,7 +605,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 									<span style="position: relative; display: inline-flex; align-items: center; min-width: 0">
 										<span aria-hidden="true" style="display: {{r.swD}}; width: 10px; height: 10px; margin-right: 8px; border-radius: var(--wk-r-1); background: {{r.selSw}}; flex: none"></span>
 										<select class="wk-select" data-size="{{r.ctlSize}}" value="{{r.selVal}}" onChange="{{r.onSel}}" aria-labelledby="{{r.labelId}}" style="min-width: 96px; max-width: 200px; cursor: pointer">
-											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}">{{o.label}}</option></sc-for>
+											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}" disabled="{{o.off}}">{{o.label}}</option></sc-for>
 										</select>
 										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position: absolute; right: 10px; top: 50%; margin-top: -7px; pointer-events: none"><path d="M6 9l6 6l6 -6"></path></svg>
 									</span>
@@ -560,6 +628,17 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 								<sc-if value="{{r.isText}}" hint-placeholder-val="{{false}}">
 									<input class="wk-input wk-box {{r.badClass}} wk-tall" value="{{r.val}}" onChange="{{r.onText}}" placeholder="{{r.ph}}" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" spellcheck="false" autocomplete="off" style="width: 100%; height: 36px; padding: 0 12px; background: var(--wk-well-glass)">
+								</sc-if>
+
+								<sc-if value="{{r.isLocate}}" hint-placeholder-val="{{false}}">
+									<span style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; max-width: 440px">
+										<input class="wk-input wk-box {{r.badClass}} wk-tall" value="{{r.val}}" onChange="{{r.onText}}" placeholder="{{r.ph}}" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 36px; padding: 0 12px; background: var(--wk-well-glass); font-variant-numeric: tabular-nums">
+										<button class="wk-btn wk-tall wk-fill" data-variant="outline" onClick="{{r.locate}}" aria-busy="{{r.locating}}" disabled="{{r.locating}}" style="flex: none; position: relative; gap: 6px; height: 36px">
+											<sc-if value="{{r.locating}}" hint-placeholder-val="{{false}}"><span class="wk-spinner" aria-hidden="true"></span></sc-if>
+											<sc-if value="{{r.notLocating}}" hint-placeholder-val="{{true}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M4 12a8 8 0 1 0 16 0a8 8 0 1 0 -16 0"></path><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M20 12h2"></path><path d="M2 12h2"></path></svg></sc-if>
+											<span class="wk-fill-t">{{r.fillLabel}}</span>
+										</button>
+									</span>
 								</sc-if>
 
 								<sc-if value="{{r.isEdges}}" hint-placeholder-val="{{false}}">
@@ -746,9 +825,15 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"layout":{"editor":"enum","options":["drawer","phone"],"default":"drawer"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","display","dev.accent","dec:mesh","au.margin","rx.biasT","station.country","bandplans","bandplans:pmr446","bandplans:harbour","bandplans:import"],"default":"none"},"country":{"editor":"enum","options":["location","none","locked"],"default":"location"},"values":{"editor":null},"onSet":{"editor":null},"onClose":{"editor":null},"onAction":{"editor":null},"target":{"editor":null},"$preview":{"width":560,"height":820}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"layout":{"editor":"enum","options":["drawer","phone"],"default":"drawer"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","display","dev.accent","dec:mesh","au.margin","rx.biasT","station.country","bandplans","bandplans:pmr446","bandplans:harbour","bandplans:import","station.location","devices","devices:rename","devices:signout-all"],"default":"none"},"country":{"editor":"enum","options":["location","none","locked"],"default":"location"},"access":{"editor":"enum","options":["protected","open"],"default":"protected"},"geo":{"editor":"enum","options":["ok","denied","unavailable","timeout","insecure"],"default":"ok"},"values":{"editor":null},"onSet":{"editor":null},"onClose":{"editor":null},"onAction":{"editor":null},"target":{"editor":null},"$preview":{"width":560,"height":820}}'>
 const GAINS = [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6];
 const I = {
+	// Signed-in devices and Station › Location (Tabler, as the web app's settings icons)
+	browser: ['M4 5a1 1 0 0 1 1 -1h14a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1z', 'M4 8h16', 'M8 4v4'],
+	phone: ['M6 5a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-14z', 'M11 4h2', 'M12 17v.01'],
+	tablet: ['M5 4a1 1 0 0 1 1 -1h12a1 1 0 0 1 1 1v16a1 1 0 0 1 -1 1h-12a1 1 0 0 1 -1 -1v-16z', 'M11 17a1 1 0 1 0 2 0a1 1 0 0 0 -2 0'],
+	desktop: ['M3 5a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-10z', 'M7 20h10', 'M9 16v4', 'M15 16v4'],
+	terminal: ['M8 9l3 3l-3 3', 'M13 15h3', 'M3 6a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z'],
 	antenna: ['M20 4v8', 'M16 4.5v7', 'M12 5v16', 'M8 5.5v5', 'M4 6v4', 'M20 8h-16'],
 	radio: ['M14 3l-9.371 3.749a1 1 0 0 0 -.629 .928v11.323a1 1 0 0 0 1 1h14a1 1 0 0 0 1 -1v-11a1 1 0 0 0 -1 -1h-14.5', 'M4 12h16', 'M7 12v-2', 'M17 16v.01', 'M13 16v.01'],
 	volume: ['M15 8a5 5 0 0 1 0 8', 'M17.7 5a9 9 0 0 1 0 14', 'M6 15h-2a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1h2l3.5 -4.5a.8 .8 0 0 1 1.5 .5v14a.8 .8 0 0 1 -1.5 .5l-3.5 -4.5'],
@@ -905,6 +990,37 @@ const BP_IMPORT = {
 		['Aircraft Navigation', 108, 118, 'air'], ['Aircraft Voice', 118, 137, 'air'], ['Weather Satellites', 137, 138, 'other'], ['2m Amateur', 144, 148, 'amateur'], ['Marine VHF', 156, 162.025, 'marine'], ['NOAA Weather Radio', 162.4, 162.55, 'other'],
 		['1.25m Amateur', 222, 225, 'amateur'], ['Military Aircraft', 225, 380, 'other'], ['70cm Amateur', 420, 450, 'amateur'], ['FRS / GMRS', 462.5625, 467.7125, 'personal'], ['Cellular 850', 824, 894, 'other'], ['ADS-B', 1089, 1091, 'air']]
 };
+// Station › Location, as the web app parses it: "48.727, -3.985" (or with N/S/E/W)
+const locErr = v => {
+	const t = String(v || '').trim();
+	if (!t) return '';
+	const parts = t.split(/[,;\s]+/).filter(Boolean);
+	if (parts.length !== 2) return 'Type latitude and longitude, like 48.727, -3.985';
+	const num = (x, pos, neg) => { const m = /^(-?\d+(?:[.,]\d+)?)°?([A-Za-z])?$/.exec(x); if (!m) return NaN; const n = Number(m[1].replace(',', '.')), h = m[2] ? m[2].toUpperCase() : null; return h === null || h === pos ? n : h === neg ? -n : NaN; };
+	const lat = num(parts[0], 'N', 'S'), lon = num(parts[1], 'E', 'W');
+	if (!isFinite(lat) || lat < -90 || lat > 90) return 'Latitude goes from −90 to 90';
+	if (!isFinite(lon) || lon < -180 || lon > 180) return 'Longitude goes from −180 to 180';
+	return '';
+};
+// Use my location: the browser's position rounded to four decimals (about 11 m), or what to do instead (board tweak geo)
+const GEO_FOUND = '48.7271, -3.9854';
+const GEO_ERR = {
+	denied: 'Location is blocked for this site · allow it in the browser, or type the position',
+	unavailable: 'This device could not find its position · type it instead',
+	timeout: 'Finding the position took too long · try again, or type it',
+	insecure: 'Browsers share their location only over HTTPS or on localhost · type the position'
+};
+// Signed-in devices (System): what a protected core remembers. Mock: this browser and three others.
+const DV = [
+	{ id: 'mac', name: 'Studio Mac', kind: 'browser', current: true, sub: 'Paired 12 Oct · used this hour · signed in until 16 Nov' },
+	{ id: 'iphone', name: 'Ben’s iPhone', kind: 'phone', sub: 'Paired 12 Oct · used 3 h ago · signed in until 15 Nov' },
+	{ id: 'tablet', name: 'Kitchen tablet', kind: 'tablet', sub: 'Paired 14 Oct · used yesterday · signed in until 13 Nov' },
+	{ id: 'cli', name: 'shack-cli', kind: 'cli', sub: 'Paired today · used this hour · signed in until 16 Nov' }
+];
+const DV_KINDS = [['browser', 'Browser'], ['phone', 'Phone'], ['tablet', 'Tablet'], ['desktop', 'Computer'], ['cli', 'Command line'], ['other', 'Other']];
+const DV_ICON = { browser: 'browser', phone: 'phone', tablet: 'tablet', desktop: 'desktop', cli: 'terminal', other: 'server' };
+const dvTitle = d => d.name || 'Unnamed ' + (DV_KINDS.find(k => k[0] === (d.kind || 'browser')) || DV_KINDS[0])[1].toLowerCase();
+const dvCount = n => n === 1 ? '1 device' : n + ' devices';
 const callsignErr = v => !v || /^[A-Z0-9]{3,7}(-[0-9]{1,2})?$/i.test(v) ? '' : 'Use letters and digits only, like F4ABC or F4ABC-9';
 const keyErr = v => !v || (/^[A-Za-z0-9+/]+={0,2}$/.test(v) && (v.length === 4 || v.length === 24 || v.length === 44)) ? '' : 'Not a valid key. Expected 16 or 32 bytes in base64, as the Meshtastic app shares it.';
 const restarts = name => ({ eff: 'restart', effText: 'Restarts ' + name, effShort: 'restarts ' + name });
@@ -912,7 +1028,8 @@ const S = (id, g, label, o) => Object.assign({ id, g, label }, o);
 const ON = [['on', 'On'], ['off', 'Off']];
 const R = [
 	S('station.name', 'station', 'Station name', { kind: 'text', def: 'WaveKit', init: 'Roscoff station', ph: 'WaveKit', sub: 'Shown in the tab title and on your other devices', alias: 'title' }),
-	S('station.location', 'station', 'Location', { kind: 'btns', btns: [['Change on map', 'map']], sub: 'Roscoff · 48.727° N, 3.985° W. Used by the map and ADS-B, never shared.', alias: 'position latitude longitude coordinates maidenhead locator gps qth', dyn: c => c.props.country === 'none' ? { btns: [['Set on map', 'map']], sub: 'Not set. Used by the map, ADS-B and the country, never shared.' } : {} }),
+	// 2026-10-17, as the web app built it: lat, lon typed or filled by Use my location (browser geolocation, ~10 m), staged for Apply
+	S('station.location', 'station', 'Location', { kind: 'locate', def: '', init: '48.727, -3.985', ph: '48.727, -3.985', fmt: v => v || 'Not set', validate: locErr, sub: 'Latitude, longitude. Used by ADS-B and the map, never shared.', eff: 'restart', effText: 'Restarts ADS-B (readsb takes the position at start)', effShort: 'restarts ADS-B', alias: 'position latitude longitude coordinates maidenhead locator gps qth lat lon geolocation use my location' }),
 	// band plans 2026-10-12: Region becomes Country, from the station location (the coarse region is only the fallback); Band plans opens its page
 	S('station.country', 'station', 'Country', { kind: 'sel', opts: COUNTRIES, def: 'auto', sub: 'Picks the band plan and legal limits', alias: 'region nation band plan legal limits locale', dyn: c => c.countryDyn() }),
 	S('station.bandplans', 'station', 'Band plans', { kind: 'link', text: '3 edits', act: 'bandplans', sub: 'Band and channel names for the spectrum, Tuner, scans and ⌘K', alias: 'band plan bandplan bands channels frequency allocations import sdr++ sdrpp gqrx sdr# sdrsharp csv xml', dyn: c => c.bandplansDyn() }),
@@ -1020,7 +1137,7 @@ const R = [
 	S('dp.units', 'display', 'Units', { kind: 'seg', opts: [['metric', 'Metric'], ['nautical', 'Nautical'], ['imperial', 'Imperial']], def: 'nautical', sub: 'Nautical: knots, nautical miles, feet for altitude', alias: 'km miles knots feet' }),
 	S('dp.time', 'display', 'Time', { kind: 'seg', opts: [['24', '24 h'], ['12', '12 h'], ['utc', 'UTC']], def: '24', alias: 'clock timezone zulu' }),
 	S('dp.lang', 'display', 'Language', { kind: 'sel', opts: [['en', 'English'], ['fr', 'Français']], def: 'en' }),
-	S('dp.fft', 'display', 'FFT size', { kind: 'sel', opts: [[2048, '2048'], [4096, '4096'], [8192, '8192'], [16384, '16384']], def: 8192, more: true, sub: 'Larger shows finer detail and reacts more slowly', alias: 'resolution bins' }),
+	S('dp.fft', 'display', 'FFT size', { kind: 'sel', opts: [[2048, '2048'], [4096, '4096'], [8192, '8192'], [16384, '16384']], def: 8192, limit: 2048, more: true, sub: 'Larger shows finer detail and reacts more slowly', alias: 'resolution bins' }), // limit: the core's limits.bins.max (GET /api/spectrum); 2048 with the shipped config, 8192 at most
 	S('dp.avg', 'display', 'Averaging', { kind: 'seg', opts: [['off', 'Off'], ['low', 'Low'], ['high', 'High']], def: 'low', more: true, sub: 'Smooths the spectrum line' }),
 	S('dp.tags', 'display', 'Tags for saved frequencies', { kind: 'sw', def: true, more: true, sub: 'On the spectrum', alias: 'saved-frequency labels' }), // polish 2026-10-11
 	S('dp.keys', 'display', 'Keyboard shortcuts', { kind: 'link', text: 'Show all', act: 'shortcuts', more: true, alias: 'keymap hotkeys keys' }),
@@ -1035,7 +1152,7 @@ const R = [
 	S('dev.card', 'display', 'Tuned card position', { kind: 'sel', key: 'cardAt', opts: [['al', 'Above Listen'], ['br', 'Bottom right'], ['tr', 'Top right']], other: 'Where you left it', def: 'al', dev: true, sub: 'Or drag the card by its icon', alias: 'tuned card float move anchor' }),
 	S('dev.motion', 'display', 'Motion', { kind: 'seg', opts: [['system', 'Follow system'], ['reduce', 'Reduce']], def: 'system', dev: true, sub: 'Reduce turns off slides and glides', alias: 'animation reduce motion' }), // polish 2026-10-11
 
-	S('sys.devices', 'system', 'Signed-in devices', { kind: 'link', text: '3 devices', act: 'devices', sub: 'This Mac, an iPhone and an iPad', alias: 'access sign out login account' }),
+	S('sys.devices', 'system', 'Signed-in devices', { kind: 'link', text: '4 devices', act: 'devices', sub: 'This browser, Ben’s iPhone and 2 more', alias: 'access sign out login account pair paired browsers rename revoke', dyn: c => c.devicesDyn(), hide: c => c.props.access === 'open' }),
 	S('sys.update', 'system', 'WaveKit 0.14.2', { kind: 'btns', btns: [['Check now', 'update']], sub: 'Up to date · checked today at 09:12', alias: 'update version upgrade' }),
 	S('sys.log', 'system', 'Log detail', { kind: 'seg', opts: [['info', 'Normal'], ['debug', 'Debug']], def: 'info', sub: 'Debug helps when reporting a problem', alias: 'logging level' }),
 	S('sys.config', 'system', 'Configuration', { kind: 'btns', btns: [['Export', 'export'], ['Import…', 'import']], sub: 'Every setting on this page as one YAML file', alias: 'backup restore yaml' }),
@@ -1057,12 +1174,13 @@ const FILTERS = [
 ];
 const TOKEN = { changed: 'Changed', restart: 'Restarts something', hw: 'Touches hardware', locked: 'Locked' };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const WIDE = { text: 1, secret: 1, freqs: 1, chips: 1, slider: 1, ground: 1, wf: 1, edges: 1 };
+const WIDE = { locate: 1, text: 1, secret: 1, freqs: 1, chips: 1, slider: 1, ground: 1, wf: 1, edges: 1 };
 // waterfall colour strips: weak to strong signal, per theme (Match accent reads the scope's own ground and accent)
 const WF = {
 	// same stops as Spectrum's rampStops() (Paper uses ramp a)
 	dark: {
-		match: 'var(--wk-plot-bg) 0%, rgba(var(--wk-accent-rgb),.3) 40%, rgba(var(--wk-accent-rgb),.62) 70%, var(--wk-accent) 86%, var(--wk-text) 100%',
+		// Spectrum's dark Match: deep accent at 30 and 50 %, mid accent at 70 %, the accent at 86 %, ink at the top
+		match: 'var(--wk-plot-bg) 0%, color-mix(in oklab, var(--wk-accent) 16%, var(--wk-plot-bg)) 30%, color-mix(in oklab, var(--wk-accent) 38%, var(--wk-plot-bg)) 50%, color-mix(in oklab, var(--wk-accent) 66%, var(--wk-plot-bg)) 70%, var(--wk-accent) 86%, var(--wk-text) 100%',
 		amber: 'var(--wk-plot-bg) 0%, rgb(40,34,54) 35%, rgb(130,60,82) 60%, #f2b84b 82%, rgb(255,246,222) 100%',
 		mono: 'var(--wk-plot-bg) 0%, rgba(var(--wk-ink-rgb),.3) 55%, var(--wk-text) 100%',
 		classic: 'var(--wk-plot-bg) 0%, rgb(16,40,120) 25%, rgb(20,140,200) 45%, rgb(40,210,200) 62%, rgb(240,220,60) 78%, rgb(240,110,30) 90%, rgb(200,30,30) 100%'
@@ -1095,7 +1213,12 @@ class Component extends DCLogic {
 			// band plans page: bp open, bpBand = the band in the editor; the stack (order, on), imports, filters, the import sheet
 			bp: false, bpBand: null, bpOrder: BP_PLANS.map(p => p.id), bpOn: BP_PLANS.reduce((o, p) => { o[p.id] = p.on; return o; }, {}), bpMenu: null, bpUpd: null,
 			bpImported: (bpPlan('intl') || {}).imported, bpAdded: [], bpDel: [], bpQ: '', bpGrp: 'all', bpChAll: null, bpDrag: null, bpOver: null,
-			sheet: null, sheetUrl: '', sheetSrc: '', sheetAll: false, sheetColours: false };
+			sheet: null, sheetUrl: '', sheetSrc: '', sheetAll: false, sheetColours: false,
+			// Signed-in devices page: dv open, the row being renamed (its draft), an inline confirm, signed-out and renamed devices
+			dv: false, dvEdit: null, dvDraft: null, dvConfirm: null, dvGone: [], dvNames: {},
+			// Use my location: asking the browser, or why it could not
+			locating: false, locErr: null };
+		if (props.country === 'none') vals['station.location'] = '';
 		this.scrollId = this.uid + '-scroll';
 		this.searchId = this.uid + '-q';
 		this.nBand = 0;
@@ -1115,12 +1238,13 @@ class Component extends DCLogic {
 		const t = this.props.target, pt = prev.target;
 		if (t && t.id && (!pt || pt.n !== t.n)) this.navTo(t.id);
 		if (prev.openAt !== this.props.openAt && this.props.openAt && this.props.openAt !== 'none') this.navTo(this.props.openAt);
+		if (prev.country !== this.props.country) this.setState({ vals: Object.assign({}, this.state.vals, { 'station.location': this.props.country === 'none' ? '' : '48.727, -3.985' }), locErr: null });
 		if (prev.scenario !== this.props.scenario) {
 			const sc = this.props.scenario || 'normal';
 			this.setState({ pending: sc === 'pending' ? { 'rx.rate': 3.2, 'rx.biasT': true } : {}, offline: sc === 'offline', failed: {} });
 		}
 	}
-	componentWillUnmount() { if (this.mq && this.mq.removeEventListener) this.mq.removeEventListener('change', this.onScheme); clearTimeout(this.tt); clearTimeout(this.pt); clearTimeout(this.st); }
+	componentWillUnmount() { if (this.mq && this.mq.removeEventListener) this.mq.removeEventListener('change', this.onScheme); clearTimeout(this.tt); clearTimeout(this.lt); clearTimeout(this.pt); clearTimeout(this.st); }
 	// ── Station › Country (from the location, else the coarse region) ──
 	countryInfo() {
 		const how = this.props.country || 'location', v = this.val('station.country');
@@ -1176,6 +1300,7 @@ class Component extends DCLogic {
 	}
 	setVal(id, v) {
 		const d = BY[id], s = this.state;
+		if (d.kind === 'locate' && s.locErr) this.setState({ locErr: null });
 		const draft = Object.assign({}, s.draft);
 		if (d.validate && d.validate(v)) { draft[id] = v; return this.setState({ draft }); }
 		delete draft[id];
@@ -1238,7 +1363,7 @@ class Component extends DCLogic {
 	}
 	spy() {
 		const s = this.state;
-		if (s.dec || s.bp || s.q.trim() || s.tokens.length || this.phone() || Date.now() < (this.spyLock || 0)) return;
+		if (s.dec || s.bp || s.dv || s.q.trim() || s.tokens.length || this.phone() || Date.now() < (this.spyLock || 0)) return;
 		const c = document.getElementById(this.scrollId);
 		if (!c) return;
 		const top = c.getBoundingClientRect().top, line = c.getBoundingClientRect().height * 0.3;
@@ -1250,17 +1375,18 @@ class Component extends DCLogic {
 	rowDom(id) { return this.uid + '-' + id.replace(/[.:]/g, '-'); }
 	goGroup(id) {
 		const phone = this.phone();
-		this.setState({ q: '', tokens: [], dec: null, bp: false, bpBand: null, sheet: null, bpMenu: null, phoneGroup: phone ? id : null, active: id, menu: null }, () => setTimeout(() => {
+		this.setState({ q: '', tokens: [], dec: null, bp: false, bpBand: null, dv: false, dvEdit: null, dvConfirm: null, sheet: null, bpMenu: null, phoneGroup: phone ? id : null, active: id, menu: null }, () => setTimeout(() => {
 			if (phone) { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }
 			else { this.spyLock = Date.now() + 900; this.scrollTo(this.rowDom('g:' + id)); }
 		}, 30));
 	}
 	openDec(id) {
-		this.setState({ dec: id, bp: false, bpBand: null, sheet: null, bpMenu: null, q: '', tokens: [], phoneGroup: this.phone() ? 'decoders' : this.state.phoneGroup, menu: null, active: 'decoders' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
+		this.setState({ dec: id, bp: false, bpBand: null, dv: false, dvEdit: null, dvConfirm: null, sheet: null, bpMenu: null, q: '', tokens: [], phoneGroup: this.phone() ? 'decoders' : this.state.phoneGroup, menu: null, active: 'decoders' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
 	}
 	navTo(id) {
 		if (GID[id]) return this.goGroup(id);
 		if (id === 'bandplans' || id.indexOf('bandplans:') === 0) return this.openBp(id.slice(10) || null);
+		if (id === 'devices' || id.indexOf('devices:') === 0) return this.openDv(id.slice(8) || null);
 		if (id.indexOf('dec:') === 0) return this.openDec(id.slice(4));
 		const d = BY[id];
 		if (!d) return;
@@ -1268,10 +1394,10 @@ class Component extends DCLogic {
 		if (d.more) more[d.g] = true;
 		const isDec = d.g.indexOf('dec:') === 0;
 		const phone = this.phone();
-		this.setState({ q: '', tokens: [], more, menu: null, bp: false, bpBand: null, sheet: null, bpMenu: null, dec: isDec ? d.g.slice(4) : null, phoneGroup: phone ? (isDec ? 'decoders' : d.g) : null, active: isDec ? 'decoders' : d.g }, () => setTimeout(() => this.scrollTo(this.rowDom(id), id), 60));
+		this.setState({ q: '', tokens: [], more, menu: null, bp: false, bpBand: null, dv: false, dvEdit: null, dvConfirm: null, sheet: null, bpMenu: null, dec: isDec ? d.g.slice(4) : null, phoneGroup: phone ? (isDec ? 'decoders' : d.g) : null, active: isDec ? 'decoders' : d.g }, () => setTimeout(() => this.scrollTo(this.rowDom(id), id), 60));
 	}
 	act(a) {
-		if (BY[a] || GID[a] || a.indexOf('dec:') === 0 || a.indexOf('bandplans') === 0) return this.navTo(a);
+		if (BY[a] || GID[a] || a.indexOf('dec:') === 0 || a.indexOf('bandplans') === 0 || a === 'devices') return this.navTo(a);
 		if (this.props.onAction && this.props.onAction(a) === true) return;
 		const T = { map: 'Opens the Map to place the station', tuner: 'Opens the Tuner on saved frequencies', shortcuts: 'Opens ⌘K on Keyboard shortcuts', pi: 'Opens the Pi status page', devices: 'Devices: designed with accounts, later', update: 'WaveKit is up to date', export: 'Downloaded wavekit-settings.yaml', import: 'Choose a YAML file to restore' };
 		this.toast(T[a] || a);
@@ -1307,14 +1433,20 @@ class Component extends DCLogic {
 		else if (x.failed) { note = 'Not saved yet'; noteC = 'var(--wk-amber)'; noteBtn = 'Retry'; noteAct = () => this.retry(); }
 		else if (x.pending) { note = (warn ? warn + '. ' : '') + 'Waiting for Apply · ' + d.effText; noteC = 'var(--wk-amber)'; noteBtn = 'Undo'; noteAct = () => { const p = Object.assign({}, s.pending); delete p[id]; this.setState({ pending: p }); }; }
 		else if (warn) { note = warn; noteC = 'var(--wk-amber)'; }
+		// FFT size above what this core sends: the plot asks for the most it can get and says so (sizes above it are greyed)
+		else if (d.limit && Number(v) > d.limit) note = 'Using ' + d.limit + ': this WaveKit sends up to ' + d.limit + ' bins';
 		else if (locked) note = d.lockNote || 'Set by ' + d.lock + '. Change it in the environment.';
-		const barC = err ? 'var(--wk-danger)' : (x.pending || x.failed) ? 'var(--wk-amber)' : x.changed ? 'var(--wk-accent)' : '';
+		// Use my location failed: the row says what to do instead (the field itself is fine)
+		const geoErr = d.kind === 'locate' && !err && s.locErr ? s.locErr : '';
+		if (geoErr) { note = geoErr; noteC = 'var(--wk-danger-soft)'; noteRole = 'alert'; noteBtn = ''; noteAct = null; }
+		const barC = err || geoErr ? 'var(--wk-danger)' : (x.pending || x.failed) ? 'var(--wk-amber)' : x.changed ? 'var(--wk-accent)' : '';
 		const kind = locked ? 'read' : d.kind;
 		const pulse = s.pulse === id;
 		const amber = (x.pending || x.failed) && !err;
 		const wide = !!WIDE[kind] || (kind === 'seg' && segWidth(d.opts) > (this.phone() ? 150 : 184)) || (kind === 'swatch' && this.phone());
 		const opts = (d.opts || []).map(o => Object.assign({ v: String(o[0]), label: o[1], pick: () => this.setVal(id, o[0]) }, segc(eq(o[0], v))));
 		// a select whose value is not one of its options (the tuned card dragged to another anchor) names it instead of going blank
+		if (kind === 'sel' && d.limit) opts.forEach(o => { o.off = Number(o.v) > d.limit; });
 		if (kind === 'sel' && d.other && v !== undefined && !opts.some(o => o.on)) opts.push(Object.assign({ v: String(v), label: d.other, pick: () => {} }, segc(true)));
 		// accent swatches: each one opens its own scope, so var(--wk-accent) is that accent in the current theme
 		// on the current ground
@@ -1358,7 +1490,8 @@ class Component extends DCLogic {
 			linkText: d.text || '', act: () => this.act(d.act),
 			readText: locked && d.def !== undefined ? this.label(d, v) : d.text || '',
 			btns: (d.btns || []).map(b => ({ label: b[0], act: () => this.act(b[1]) })),
-			menuOpen: s.menu === id, toggleMenu: () => this.setState({ menu: s.menu === id ? null : id })
+			menuOpen: s.menu === id, toggleMenu: () => this.setState({ menu: s.menu === id ? null : id }),
+			isLocate: kind === 'locate', locating: !!s.locating, notLocating: !s.locating, fillLabel: s.locating ? 'Locating…' : 'Use my location', locate: () => this.locate(id)
 		};
 		if (kind === 'chips') r.chips = d.opts.map(o => { const on = v.indexOf(o[0]) >= 0; return { label: o[1], on, pick: () => this.setVal(id, on ? v.filter(y => y !== o[0]) : d.opts.map(z => z[0]).filter(z => z === o[0] || v.indexOf(z) >= 0)) }; });
 		if (kind === 'freqs') {
@@ -1380,7 +1513,23 @@ class Component extends DCLogic {
 			{ label: 'Copy as YAML', icon: I.code, disabled: false, act: () => { this.copy(yaml); this.setState({ menu: null }); this.toast('Copied · ' + yaml); } }
 		];
 		r.menu.forEach((m, i) => { m.first = i === (r.canReset ? 0 : 1); });
+		// the station can still be placed by hand on the Map
+		if (kind === 'locate') r.menu.push({ label: 'Place on the map', icon: I.map, disabled: false, first: false, act: () => { this.setState({ menu: null }); this.act('map'); } });
 		return r;
+	}
+	// Use my location: one position from the browser, staged like a typed one (Apply restarts ADS-B). Board tweak geo picks the outcome.
+	locate(id) {
+		if (this.state.locating) return;
+		const how = this.props.geo || 'ok';
+		// a page over plain http never gets to ask
+		if (how === 'insecure') return this.setState({ locErr: GEO_ERR.insecure });
+		this.setState({ locating: true, locErr: null });
+		clearTimeout(this.lt);
+		this.lt = setTimeout(() => {
+			if (how !== 'ok') return this.setState({ locating: false, locErr: GEO_ERR[how] || GEO_ERR.unavailable });
+			this.setState({ locating: false, locErr: null });
+			if (this.val(id) !== GEO_FOUND) this.setVal(id, GEO_FOUND);
+		}, 1200);
 	}
 	copy(t) { try { if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {}); } catch (e) { /* clipboard unavailable */ } }
 	retry() { this.setState({ offline: false, failed: {} }); this.toast('Saved · your WaveKit is back'); }
@@ -1391,7 +1540,7 @@ class Component extends DCLogic {
 		return Object.assign({ isDec: true, name: d.name, tool: d.tool, icon: d.icon, dotC: st.c, line: !on ? 'Off' : d.where + ' · ' + d.stat, statC: on && d.state === 'fault' ? 'var(--wk-danger-soft)' : 'var(--wk-text-3)', open, toggle: () => this.setVal('dec.' + d.id + '.enabled', !on) }, sw(on), tile);
 	}
 	groupRows(gid) {
-		const rows = R.filter(d => d.g === gid);
+		const rows = R.filter(d => d.g === gid && !(d.hide && d.hide(this)));
 		// only the ground the Theme pick uses; System uses both, so it shows both
 		const pick = this.val('dev.theme'), offGround = pick === 'dark' ? 'dev.lightGround' : pick === 'light' ? 'dev.ground' : null;
 		return { ess: rows.filter(d => !d.more && !d.dev), more: rows.filter(d => d.more), dev: rows.filter(d => d.dev && d.id !== offGround) };
@@ -1449,6 +1598,7 @@ class Component extends DCLogic {
 		});
 		const decHits = !tests.length && words.length ? DECS.filter(d => words.every(w => (d.name + ' ' + d.tool + ' ' + d.where).toLowerCase().indexOf(w) >= 0)) : [];
 		const hits = R.filter(d => {
+			if (d.hide && d.hide(this)) return false;
 			const x = this.info(d);
 			if (!tests.every(f => f.test(d, x))) return false;
 			if (!words.length) return true;
@@ -1488,11 +1638,70 @@ class Component extends DCLogic {
 		if (ids.some(d => d.id in s.pending || s.failed[d.id])) return { hasDot: true, dotC: 'var(--wk-amber)', dotLabel: 'Changes waiting' };
 		return { hasDot: false, dotC: 'transparent', dotLabel: '' };
 	}
+	// ── Signed-in devices (System, 2026-10-17, as the web app built it) ─────────────────────────────────
+	openDv(sub) {
+		const phone = this.phone(), t = DV.find(d => d.id === 'tablet');
+		this.setState({ dv: true, dvEdit: sub === 'rename' ? 'tablet' : null, dvDraft: sub === 'rename' ? { name: t.name, kind: t.kind } : null, dvConfirm: sub === 'signout-all' ? 'all' : null,
+			bp: false, bpBand: null, sheet: null, bpMenu: null, dec: null, q: '', tokens: [], menu: null, phoneGroup: phone ? 'system' : null, active: 'system' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
+	}
+	dvList() { const s = this.state; return DV.filter(d => s.dvGone.indexOf(d.id) < 0).map(d => Object.assign({}, d, s.dvNames[d.id] || null)); }
+	devicesDyn() {
+		const all = this.dvList(), names = all.map(d => d.current ? 'This browser' : dvTitle(d));
+		return { text: dvCount(all.length), sub: names.length <= 2 ? names.join(' and ') : names.slice(0, 2).join(', ') + ' and ' + (names.length - 2) + ' more' };
+	}
+	dvRevoke(d) {
+		const title = dvTitle(d);
+		this.setState({ dvGone: this.state.dvGone.concat([d.id]), dvEdit: null });
+		this.toast('Signed out “' + title + '”', false, () => this.setState({ dvGone: this.state.dvGone.filter(x => x !== d.id) }));
+	}
+	dvSignOut(all) {
+		this.setState({ dvConfirm: null });
+		this.toast(all ? 'Every device is signed out. This browser can watch until it is paired again.' : 'This browser is signed out. It can watch until it is paired again.');
+		this.navTo('sys.devices');
+	}
+	dvRow(d) {
+		const s = this.state, title = dvTitle(d), editing = s.dvEdit === d.id && !!s.dvDraft;
+		const r = { isDv: true, id: d.id, title, current: !!d.current, sub: d.sub, icon: I[DV_ICON[d.kind || 'browser']] || I.server, editing, notEditing: !editing,
+			edit: () => this.setState({ dvEdit: d.id, dvDraft: { name: d.name || '', kind: d.kind || 'browser' }, dvConfirm: d.current && s.dvConfirm === 'self' ? null : s.dvConfirm }),
+			// this browser asks first; another device goes at once, with Undo on the toast
+			hasOut: !(d.current && s.dvConfirm === 'self'), outIcon: !!d.current, outAria: d.current ? 'Sign out' : 'Sign out ' + title,
+			out: () => d.current ? this.setState({ dvConfirm: 'self', dvEdit: null }) : this.dvRevoke(d) };
+		if (!editing) return r;
+		const dr = s.dvDraft, done = () => this.setState({ dvEdit: null, dvDraft: null });
+		const save = () => { const name = dr.name.trim(); this.setState({ dvNames: Object.assign({}, s.dvNames, { [d.id]: { name: name || null, kind: dr.kind } }), dvEdit: null, dvDraft: null }); };
+		return Object.assign(r, {
+			editName: dr.name, editPh: dvTitle({ name: null, kind: dr.kind }), kindVal: dr.kind, kinds: DV_KINDS.map(k => ({ v: k[0], label: k[1] })),
+			onName: e => this.setState({ dvDraft: Object.assign({}, dr, { name: e.target.value }) }),
+			onKind: e => this.setState({ dvDraft: Object.assign({}, dr, { kind: e.target.value }) }),
+			selAll: e => { try { e.target.select(); } catch (x) { /* not a text field */ } },
+			cancel: done, save,
+			editKey: e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); done(); } else if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); save(); } }
+		});
+	}
+	dvConfirmItem(text, action, all) {
+		return { isDvConfirm: true, text, action, cancel: () => this.setState({ dvConfirm: null }), confirm: () => this.dvSignOut(all),
+			key: e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); this.setState({ dvConfirm: null }); } } };
+	}
+	dvPage() {
+		const s = this.state, out = [], all = this.dvList(), me = all.find(d => d.current), others = all.filter(d => !d.current);
+		out.push({ isDesc: true, desc: 'Browsers and apps paired with this WaveKit. Each stays signed in until it is signed out here or its session runs out unused.' });
+		out.push(this.bpSec('This browser', '', null, null, '', null, true));
+		if (me) out.push(this.dvRow(me));
+		if (s.dvConfirm === 'self') out.push(this.dvConfirmItem('Sign this browser out? It can still watch, but tuning, scans and settings need a new pairing code from the receiver.', 'Sign out', false));
+		out.push(this.bpSec('Other devices · ' + others.length, 'Up to 32 devices stay paired at once.'));
+		if (!others.length) out.push({ isDvEmpty: true });
+		others.forEach(d => out.push(this.dvRow(d)));
+		out.push(this.bpSec('Everywhere', 'For a lost phone or a shared computer: every device, this browser too, needs a new code to pair again.'));
+		if (s.dvConfirm === 'all') out.push(this.dvConfirmItem('Sign out ' + dvCount(all.length) + ', this browser too?', 'Sign out all', true));
+		else out.push({ isDvAll: true, act: () => this.setState({ dvConfirm: 'all', dvEdit: null }) });
+		out.push({ isDvNote: true });
+		return out;
+	}
 	// ── Band plans page (2026-10-12) ────────────────────────────────────────────────────────────────────
 	openBp(band) {
 		const phone = this.phone(), sheet = band === 'import' ? 'pick' : null;
 		const b = band && band !== 'import' && this.band(band) ? band : null;
-		this.setState({ bp: true, bpBand: b, sheet, dec: null, q: '', tokens: [], menu: null, bpMenu: null, phoneGroup: phone ? 'station' : null, active: 'station' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
+		this.setState({ bp: true, bpBand: b, sheet, dv: false, dvEdit: null, dvConfirm: null, dec: null, q: '', tokens: [], menu: null, bpMenu: null, phoneGroup: phone ? 'station' : null, active: 'station' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
 	}
 	openBand(id) { this.setState({ bpBand: id, bpMenu: null, bpChAll: null }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20)); }
 	bands() { const s = this.state; return BP_BANDS.concat(s.bpAdded).filter(b => s.bpDel.indexOf(b.id) < 0); }
@@ -1713,7 +1922,8 @@ class Component extends DCLogic {
 		const searching = !!(s.q.trim() || s.tokens.length);
 		const dec = s.dec;
 		let items;
-		if (s.bp) items = s.bpBand ? this.bpEditor(s.bpBand) : this.bpPage();
+		if (s.dv) items = this.dvPage();
+		else if (s.bp) items = s.bpBand ? this.bpEditor(s.bpBand) : this.bpPage();
 		else if (dec) items = this.decPage(dec);
 		else if (searching) items = this.searchItems();
 		else if (phone && !s.phoneGroup) items = GROUPS.map(g => Object.assign({ isGlink: true, label: g.label, icon: g.icon, summary: this.summary(g.id), pick: () => this.goGroup(g.id) }, this.groupFlags(g.id)));
@@ -1724,9 +1934,9 @@ class Component extends DCLogic {
 		const changedOn = s.tokens.indexOf('changed') >= 0;
 		const decObj = dec ? DECS.find(x => x.id === dec) : null;
 		const bpb = s.bp && s.bpBand ? this.band(s.bpBand) : null;
-		const title = s.bp ? (bpb ? this.bv(bpb, 'name') : 'Band plans') : decObj ? decObj.name : phone && s.phoneGroup ? GID[s.phoneGroup].label : 'Settings';
-		const hasBack = s.bp || !!dec || (phone && !!s.phoneGroup);
-		const backLabel = s.bp ? (bpb ? 'Band plans' : 'Station') : dec ? 'Decoders' : 'Settings';
+		const title = s.dv ? 'Signed-in devices' : s.bp ? (bpb ? this.bv(bpb, 'name') : 'Band plans') : decObj ? decObj.name : phone && s.phoneGroup ? GID[s.phoneGroup].label : 'Settings';
+		const hasBack = s.dv || s.bp || !!dec || (phone && !!s.phoneGroup);
+		const backLabel = s.dv ? 'System' : s.bp ? (bpb ? 'Band plans' : 'Station') : dec ? 'Decoders' : 'Settings';
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks or the pick in Display
 			wkTheme: this.theme(), wkAccent: this.val('dev.accent') || 'mono', wkGround: this.ground(),
@@ -1736,15 +1946,16 @@ class Component extends DCLogic {
 			headPad: hasBack ? '8px' : '18px',
 			title, hasBack, backLabel,
 			back: () => {
-				if (s.bp) { if (bpb) this.openBand(null); else this.navTo('station.bandplans'); }
+				if (s.dv) this.navTo('sys.devices');
+				else if (s.bp) { if (bpb) this.openBand(null); else this.navTo('station.bandplans'); }
 				else if (dec) { if (phone) this.setState({ dec: null }); else this.goGroup('decoders'); }
 				else this.setState({ phoneGroup: null });
 			},
 			hasClose: !!this.props.onClose, close: () => this.props.onClose && this.props.onClose(),
-			showChangedChip: changedN > 0 && !dec && !s.bp && !(phone && s.phoneGroup), changedText: changedN + ' changed', changedOn,
+			showChangedChip: changedN > 0 && !dec && !s.bp && !s.dv && !(phone && s.phoneGroup), changedText: changedN + ' changed', changedOn,
 						toggleChanged: () => this.setState({ tokens: changedOn ? s.tokens.filter(t => t !== 'changed') : s.tokens.concat(['changed']), dec: null, phoneGroup: null }),
 			offline: s.offline, retry: () => this.retry(),
-			showSearch: !dec && !s.bp && !(phone && s.phoneGroup),
+			showSearch: !dec && !s.bp && !s.dv && !(phone && s.phoneGroup),
 			searchId: this.searchId, q: s.q, ph: s.tokens.length ? 'Narrow down' : 'Search settings · squelch, ppm, retention…',
 						tokens: s.tokens.map(t => ({ label: TOKEN[t], remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
 			onQ: e => this.setState({ q: e.target.value }),
@@ -1761,7 +1972,7 @@ class Component extends DCLogic {
 			}),
 			scrollId: this.scrollId, padX: phone ? '8px' : '8px',
 			onScroll: () => {
-				if (s.dec || s.bp || searching || phone || Date.now() < (this.spyLock || 0)) return;
+				if (s.dec || s.bp || s.dv || searching || phone || Date.now() < (this.spyLock || 0)) return;
 				this.spy();
 				clearTimeout(this.st);
 				this.st = setTimeout(() => this.spy(), 140);

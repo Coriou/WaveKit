@@ -129,6 +129,14 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<sc-if value="{{idHasLine}}" hint-placeholder-val="{{false}}">
 					<span style="font-size: var(--wk-fs-md); color: var(--wk-text-2); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden">{{idLine}}</span>
 				</sc-if>
+				<!-- Wait until a transmission (2026-10-17, as the web app has it): one wait across as many jobs as it takes, counted up,
+				no countdown, until a transmission is tried or Stop. Shown while waiting, and after a wait where nothing came. -->
+				<sc-if value="{{idUntilShow}}" hint-placeholder-val="{{false}}">
+					<label style="display: flex; align-items: center; gap: 12px; min-height: 36px; font-size: var(--wk-fs-md); color: var(--wk-text-2); cursor: pointer">
+						<span style="flex: 1">Wait until a transmission</span>
+						<button class="wk-switch" role="switch" aria-checked="{{idUntil}}" onClick="{{toggleUntil}}" aria-label="Wait until a transmission" title="{{idUntilTitle}}"></button>
+					</label>
+				</sc-if>
 				<sc-if value="{{idHasTrials}}" hint-placeholder-val="{{false}}">
 					<ol aria-label="Decoders tried" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column">
 						<sc-for list="{{idTrials}}" as="r" hint-placeholder-count="4">
@@ -147,6 +155,20 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<sc-if value="{{idHasNote}}" hint-placeholder-val="{{false}}">
 					<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3)">{{idNote}}</span>
 				</sc-if>
+			</div>
+		</sc-if>
+		<sc-if value="{{msgOpen}}" hint-placeholder-val="{{false}}">
+			<div style="display: flex; flex-direction: column; gap: 8px; min-height: 0">
+				<div style="display: flex; align-items: center; gap: 8px; height: 16px">
+					<span class="wk-label" style="flex: 1">Message</span>
+					<button class="wk-icon-btn" data-size="xs" onClick="{{closeMsg}}" aria-label="Show less" title="Show less" style="margin: -4px -6px -4px 0; color: var(--wk-text-3)">
+						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6 -6l6 6"></path></svg>
+					</button>
+				</div>
+				<div style="max-height: {{msgWellH}}px; overflow-y: auto; overscroll-behavior: contain; margin: 0 -6px; padding: 0 6px">
+					<dc-import name="Decode" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" msg="{{openMsgData}}" flat="{{true}}" json-height="{{160}}" on-tune="{{tuneTo}}" hint-size="100%,300px"></dc-import>
+				</div>
+				<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{closeMsg}}" style="align-self: flex-start; margin: 0 -8px -4px; padding: 0 8px; color: var(--wk-text-3); font-weight: 400">Show less</button>
 			</div>
 		</sc-if>
 		<sc-if value="{{showNormal}}" hint-placeholder-val="{{true}}">
@@ -173,6 +195,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</sc-if>
 		<sc-if value="{{hasBody}}" hint-placeholder-val="{{false}}">
 			<p style="margin: 2px 0 0; font-size: {{bodySize}}; line-height: 1.45; color: {{bodyC}}; font-family: {{bodyFont}}; font-style: {{bodyStyle}}; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{body}}</p>
+		</sc-if>
+		<sc-if value="{{canOpenMsg}}" hint-placeholder-val="{{false}}">
+			<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{openMsg}}" style="align-self: flex-start; margin: -4px -8px -2px; padding: 0 8px; color: var(--wk-accent)">Open message</button>
 		</sc-if>
 		<sc-if value="{{hasChips}}" hint-placeholder-val="{{false}}">
 			<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px">
@@ -284,7 +309,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"identify":{"editor":"enum","options":["","waiting","trying","identified","maybe","unidentified","artefact","blocked","interrupted"],"default":""},"scanHold":{"editor":"boolean","default":false},"scanText":{"editor":null,"tsType":"string"},"scanResume":{"editor":null},"onScan":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"watchDemo":{"editor":"boolean","default":false},"identifyRun":{"editor":null,"tsType":"number"},"onGrab":{"editor":null},"onGrabKey":{"editor":null},"lifted":{"editor":null,"tsType":"boolean"},"minimised":{"editor":"boolean","default":false},"onMinimise":{"editor":null},"$preview":{"width":344,"height":860}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"identify":{"editor":"enum","options":["","waiting","trying","identified","maybe","unidentified","nothing heard","artefact","blocked","interrupted","not decoded"],"default":""},"waitUntil":{"editor":"boolean","default":false},"messageOpen":{"editor":"boolean","default":false},"scanHold":{"editor":"boolean","default":false},"scanText":{"editor":null,"tsType":"string"},"scanResume":{"editor":null},"onScan":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"watchDemo":{"editor":"boolean","default":false},"identifyRun":{"editor":null,"tsType":"number"},"onGrab":{"editor":null},"onGrabKey":{"editor":null},"lifted":{"editor":null,"tsType":"boolean"},"minimised":{"editor":"boolean","default":false},"onMinimise":{"editor":null},"$preview":{"width":344,"height":860}}'>
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
 	analog: ['M3 12c2 -6 4 -6 6 0s4 6 6 0s4 -6 6 0'],
@@ -402,8 +427,22 @@ const I = {
 	pause: ['M6 5h4v14h-4z', 'M14 5h4v14h-4z'],
 	tune: ['M5 12h14', 'M13 18l6 -6', 'M13 6l6 6'],
 	ignore: ['M10.585 10.587a2 2 0 0 0 2.829 2.828', 'M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87', 'M3 3l18 18'],
+	back: ['M15 6l-6 6l6 6'],
+	open: ['M12 6h-6a2 2 0 0 0 -2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-6', 'M11 13l9 -9', 'M15 4h5v5'],
 	copy: ['M8 10a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z', 'M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2']
 };
+// Decode as…: the protocols the core can probe, with the decoder that runs each (web: identify-view.ts DECODE_AS)
+const DECODE_AS = [['dmr', 'DMR', 'dsd-fme'], ['p25p1', 'P25', 'dsd-fme'], ['p25p2', 'P25 Phase 2', 'dsd-fme'], ['nxdn48', 'NXDN', 'dsd-fme'], ['nxdn96', 'NXDN 96', 'dsd-fme'], ['ysf', 'YSF', 'dsd-fme'], ['dstar', 'D-STAR', 'dsd-fme'], ['dpmr', 'dPMR', 'dsd-fme'], ['pocsag', 'POCSAG', 'multimon-ng'], ['flex', 'FLEX', 'multimon-ng'], ['aprs', 'APRS', 'Direwolf'], ['ism', 'ISM sensors', 'rtl_433'], ['analog-fm', 'FM voice', 'voice detection'], ['analog-am', 'AM voice', 'voice detection']];
+// the card's message as the shared Decode card reads it: readings named from their unit when the card shows only the value
+const CAT_OF = icon => Object.keys(ICON).find(k => ICON[k] === icon) || 'sensors';
+const READING = v => /km\/h|kn$|mph/.test(v) ? 'Speed' : /°$/.test(v) ? 'Course' : /away$/.test(v) ? 'Distance' : /°C|°F/.test(v) ? 'Temperature' : /%$/.test(v) ? 'Humidity' : 'Reading';
+function openMessage(freq, x) {
+	const parts = (x.eyebrow || '').split(' · ');
+	return { kind: 'text', cat: CAT_OF(x.icon), proto: x.proto + (x.protoSub ? ' · ' + x.protoSub.split(' · ')[0] : ''), title: parts[0] || x.proto, sub: parts.slice(1).join(' · '),
+		time: '', freq: (freq / 1e6).toFixed(3), text: x.body, mono: !!x.mono,
+		fields: (x.chips || []).map(c => [c[0] || READING(c[1]), c[1]]), pos: x.map ? [48.3904, -4.4861] : null,
+		raw: { frequency: freq, decoder: x.decoder, protocol: x.proto, title: parts[0] || '', text: x.body } };
+}
 const WORD = { decoded: 'Decoded', trying: 'Trying', nosync: 'No sync', crc: 'CRC errors', timeout: 'Timed out', busy: 'Skipped (busy)', s2: 'Not available yet', queued: 'Queued', stopped: 'Stopped' };
 const S2 = 'Telling speech from data comes with S2';
 const BUSY = 'multimon-ng is busy decoding 160.450';
@@ -444,14 +483,26 @@ const planFor = (freq, x) => {
 			line: wfm ? 'Wide FM with a stereo pilot · nothing to decode' : 'Sounds like speech' + (tone ? ' with ' + tone : '') + ' · no digital decoder synced' } };
 };
 
+// how long a wait until a transmission has lasted: "8 s", "2 min 05 s" (web: identify-view.ts formatWaited)
+const waited = sec => { const t = Math.max(0, Math.floor(sec)); return t < 60 ? t + ' s' : Math.floor(t / 60) + ' min ' + String(t % 60).padStart(2, '0') + ' s'; };
 class Component extends DCLogic {
 	constructor(props) {
 		super(props);
 		this.state = { freq: 161150000, tick: 0, play: null, saved: false, pinned: false,
-			run: null, stopped: null, idTouched: false, holdOk: false, menu: false, ignored: false, min: null };
+			run: null, stopped: null, idTouched: false, holdOk: false, menu: false, ignored: false, min: null, msgOpen: null, decodeList: false };
+		// the message under the card opened in full (the Decode card, flat, in a well that scrolls), and closed again
+		this.openMsg = () => this.setState({ msgOpen: this.freq(), msgTouched: true, menu: false });
+		this.closeMsg = () => this.setState({ msgOpen: null, msgTouched: true });
+		this.tuneTo = f => this.tune(f);
 		this.closeMenu = () => this.setState({ menu: false });
-		this.toggleMenu = () => this.setState({ menu: !this.state.menu });
+		this.toggleMenu = () => this.setState({ menu: !this.state.menu, decodeList: false });
 		this.menuKey = e => { if (e.key === 'Escape') { e.stopPropagation(); this.setState({ menu: false }); } };
+		this.toggleUntil = e => {
+			if (e) e.preventDefault();
+			const on = !this.untilOn(), v = this.idView(this.freq(), infoFor(this.freq()));
+			this.setState({ untilSig: on, untilTouched: true });
+			if (on && v && v.phase === 'nothing') this.startId(false);
+		};
 		this.idClose = () => this.setState({ run: null, stopped: null, idTouched: true, menu: false });
 		// Minimise: Immersive owns the state (minimised + onMinimise); standalone, the card keeps its own, seeded by the tweak.
 		this.toggleMin = () => {
@@ -514,10 +565,24 @@ class Component extends DCLogic {
 	}
 	tune(f) { if (this.props.onTune) this.props.onTune(f); else this.setState({ freq: f }); }
 	act(id, f) { if (this.props.onAction) this.props.onAction(id, f, { type: id, hz: f }); }
-	startId(longer, holdOk) {
+	// "Wait until a transmission": remembered per browser in the app; here the waitUntil tweak until the viewer flips it
+	untilOn() { return this.state.untilTouched ? !!this.state.untilSig : !!this.props.waitUntil; }
+	startId(longer, holdOk, proto) {
 		const hz = this.freq(), ok = holdOk || this.state.holdOk;
-		this.setState({ run: { hz, t0: Date.now(), longer: !!longer, blocked: !!this.props.scanHold && !ok }, stopped: null, idTouched: true, menu: false, holdOk: ok });
+		this.setState({ run: { hz, t0: Date.now(), longer: !!longer, blocked: !!this.props.scanHold && !ok, proto: proto || null }, stopped: null, idTouched: true, menu: false, decodeList: false, msgOpen: null, holdOk: ok });
 		this.act('identify', hz);
+	}
+	// Decode as…: Identify limited to one protocol. Not decoded when the signal's class rules it out (the core refuses
+	// to force a protocol, CORE-GAPS) or when nothing synced; a match lands as an identified card.
+	decodeView(r, freq, x, plan) {
+		const p = r.proto, e = (Date.now() - r.t0) / 1000;
+		const tr = [[p[1], p[2], 'nosync']];
+		const dplan = Object.assign({}, plan, { trials: tr });
+		if (e < 1.2) return { phase: 'waiting', plan: dplan, left: 15 - e, win: 15, proto: p };
+		if (e < 3.4) return { phase: 'trying', plan: dplan, done: 0, left: 15 - e, win: 15, proto: p };
+		const first = p[1].split(' ')[0].toLowerCase();
+		if ((x.proto || '').toLowerCase().indexOf(first) === 0) return { phase: 'identified', plan: dplan, done: 1, win: 15, proto: p };
+		return { phase: 'not decoded', plan: dplan, done: 1, win: 15, proto: p };
 	}
 	// Which identify state to draw, if any: forced by the gallery prop, a live run, or a stopped one.
 	idView(freq, x) {
@@ -527,16 +592,20 @@ class Component extends DCLogic {
 			if (forced === 'artefact') return { phase: 'artefact', plan: plan.art ? plan : { art: ART[CENTRE], trials: [] } };
 			if (forced === 'blocked') return { phase: 'blocked', plan };
 			if (forced === 'interrupted') return { phase: 'interrupted', plan, done: Math.min(2, n), to: 161150000 };
-			if (forced === 'waiting') return { phase: 'waiting', plan, left: 9, win: 15 };
+			if (forced === 'waiting') return this.untilOn() ? { phase: 'waiting', plan, until: true, waited: 19, left: 15, win: 15 } : { phase: 'waiting', plan, left: 9, win: 15 };
+			if (forced === 'nothing heard') return { phase: 'nothing', plan, done: 0, win: 15 };
+			if (forced === 'not decoded') return { phase: 'not decoded', plan: Object.assign({}, plan, { trials: [['DMR', 'dsd-fme', 'nosync']] }), done: 1, win: 15, proto: DECODE_AS[0] };
 			if (forced === 'trying') return { phase: 'trying', plan, done: Math.min(2, n - 1), left: 7, win: 15 };
 			return { phase: forced, plan, done: n, win: 15 };
 		}
 		const r = s.run;
 		if (r && r.hz === freq) {
 			if (r.blocked) return { phase: 'blocked', plan };
+			if (r.proto) return this.decodeView(r, freq, x, plan);
 			if (plan.art) return { phase: 'artefact', plan };
 			const win = r.longer ? 60 : 15, e = (Date.now() - r.t0) / 1000;
 			const wait = r.longer ? 3 : plan.quick ? 1.2 : 2.6, step = r.longer ? 2.6 : 1.1;
+			if (this.untilOn() && e < wait) return { phase: 'waiting', plan, until: true, waited: e, left: win, win };
 			if (e < wait) return { phase: 'waiting', plan, left: win - e, win };
 			const k = Math.floor((e - wait) / step);
 			// Hold the last row's answer for a beat before the card changes.
@@ -609,6 +678,8 @@ class Component extends DCLogic {
 		const miCopy = mi('Copy frequency', I.copy, () => { try { if (navigator.clipboard) void navigator.clipboard.writeText(MHZ(freq)); } catch (e) { /* clipboard blocked */ } this.act('copy', freq); });
 		const miScanner = mi('Open in Scanner', I.radar, () => this.act('open-scanner', freq));
 		const startId = () => this.startId(false);
+		const msgOpen = !!this.state.msgOpen && this.state.msgOpen === freq || (!!this.props.messageOpen && !this.state.msgTouched && raw0.kind === 'msg');
+		const miDecode = { label: 'Decode as…', icon: A.scan, hasKey: false, key: '', pick: () => this.setState({ menu: true, decodeList: true }) };
 
 		const actions = [];
 		let menu = [];
@@ -633,7 +704,7 @@ class Component extends DCLogic {
 		} else if (ph === 'blocked') {
 			actions.push(btn('pause-scan', 'Pause the scan and identify', I.pause, { primary: true, pick: () => { this.act('pause-scan', freq); this.startId(false, true); } }));
 			menu.push(miPin, miCopy);
-		} else if (ph === 'interrupted') {
+		} else if (ph === 'interrupted' || ph === 'nothing') {
 			actions.push(btn('identify', 'Identify again', I.again, { primary: true, pick: startId }));
 			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { iconOnly: true, title: saved ? 'Saved' : 'Save this frequency', pressed: saved, pick: toggleSave }));
 			menu.push(miPin, miCopy);
@@ -656,9 +727,23 @@ class Component extends DCLogic {
 				pinInRow = true;
 				actions.push(btn('pin', 'Pin', A.pin, { iconOnly: true, title: pinned ? 'Unpin card' : 'Pin this card. It keeps showing this frequency when you tune away.', pressed: pinned, pick: togglePin }));
 			} else {
-				menu.push(running ? mi('Stop identifying', I.stop, this.idClose) : mi('Identify', A.scan, startId, 'I'), miPin, miCopy);
+				menu.push(running ? mi('Stop identifying', I.stop, this.idClose) : mi('Identify', A.scan, startId, 'I'));
+				if (!running) menu.push(miDecode);
+				if (x.kind === 'msg' && x.body && !msgOpen) menu.push(mi('Open message', I.open, this.openMsg));
+				menu.push(miPin, miCopy);
 			}
 		}
+		if (ph === 'not decoded') {
+			actions.length = 0; menu = [];
+			actions.push(btn('identify', 'Try again', I.again, { primary: true, title: 'Try ' + v.proto[1] + ' again', pick: () => this.startId(false, false, v.proto) }));
+			if (raw.map) actions.push(btn('map', 'Map', A.map));
+			if (raw.kind !== 'audio' && raw.kind !== 'unknown') actions.push(btn('activity', 'Activity', A.activity));
+			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { iconOnly: true, title: saved ? 'Saved' : 'Save this frequency', pressed: saved, pick: toggleSave }));
+			menu.push(mi('Identify', A.scan, startId, 'I'), miDecode, miPin, miCopy);
+		}
+		// the Decode as… list takes the menu's place, with Back
+		if (this.state.decodeList && this.state.menu) menu = [{ label: 'Back', icon: I.back, hasKey: false, key: '', pick: () => this.setState({ decodeList: false }) }]
+			.concat(DECODE_AS.map(p => ({ label: p[1], icon: A.scan, hasKey: true, key: p[2], pick: () => this.startId(false, false, p) })));
 		const menuOpen = this.state.menu && menu.length > 0;
 
 		// Identify block
@@ -677,19 +762,23 @@ class Component extends DCLogic {
 			};
 		};
 		let idTrials = [];
-		if (ph === 'trying') idTrials = plan.trials.map((tr, i) => row(tr, i < v.done ? tr[2] : i === v.done ? 'trying' : 'queued'));
+		if (ph === 'trying' || ph === 'not decoded') idTrials = (ph === 'not decoded' && raw.kind !== 'unknown') ? [] : plan.trials.map((tr, i) => row(tr, i < v.done ? tr[2] : i === v.done ? 'trying' : 'queued'));
 		else if (ph === 'interrupted') idTrials = plan.trials.slice(0, v.done + (v.done < n ? 1 : 0)).map((tr, i) => row(tr, i < v.done ? tr[2] : 'stopped'));
 		else if (ph === 'maybe' || ph === 'unidentified') idTrials = plan.trials.map(tr => row(tr, tr[2]));
 		const res = plan.result || {};
 		let idTitle = '', idSecs = '', idLine = '', idNote = '', idReason = '', big = false;
-		if (ph === 'waiting') { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + Math.max(0, Math.ceil(v.left)) + ' s'; }
+		if (ph === 'waiting' && v.until) { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + waited(v.waited); idLine = 'Listening until one comes.'; }
+		else if (ph === 'waiting') { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + Math.max(0, Math.ceil(v.left)) + ' s'; }
+		else if (ph === 'nothing') { idTitle = 'Nothing heard'; big = true; idLine = 'No transmission in ' + v.win + ' s.'; }
+		else if (ph === 'trying' && v.proto) { idTitle = 'Trying ' + v.proto[1]; }
+		else if (ph === 'not decoded') { idTitle = 'Not decoded'; big = true; idNote = 'Added to discoveries'; idLine = raw.kind === 'unknown' ? 'No ' + v.proto[1] + ' sync in ' + v.win + ' s.' : 'Looks like ' + raw.proto + '. It does not look like ' + v.proto[1] + ', so nothing was tried.'; }
 		else if (ph === 'trying') { idTitle = 'Trying decoders'; idSecs = ' · ' + Math.min(v.done + 1, n) + ' of ' + n; }
 		else if (ph === 'maybe') { idTitle = res.title || 'Maybe'; idLine = res.line || ''; idReason = res.reason || ''; idNote = 'Added to discoveries'; big = true; }
 		else if (ph === 'unidentified') { idTitle = 'Not identified'; idLine = (res.line ? res.line + ' ' : '') + 'No decoder synced in ' + v.win + ' s.'; idNote = 'Added to discoveries'; big = true; }
 		else if (ph === 'artefact') { idTitle = plan.art.title; idLine = plan.art.line; idNote = 'Answered from the receiver’s settings, without listening'; }
 		else if (ph === 'blocked') { idTitle = 'The scanner has the receiver'; idLine = 'Identify listens here for up to 15 s. The scan keeps moving the receiver away.'; }
 		else if (ph === 'interrupted') { idTitle = 'Stopped · you tuned away'; idLine = v.done > 0 ? 'Tried ' + v.done + ' of ' + n + ' decoders before you tuned to ' + MHZ(v.to) + '. Nothing was kept.' : 'Stopped before a transmission came. Nothing was kept.'; }
-		const measured = (ph === 'trying' || ph === 'maybe' || ph === 'unidentified' || (ph === 'interrupted' && v.done > 0)) && !!plan.measured;
+		const measured = (ph === 'trying' || ph === 'not decoded' || ph === 'maybe' || ph === 'unidentified' || (ph === 'interrupted' && v.done > 0)) && !!plan.measured;
 		const left = running ? Math.max(0, v.left) : 0;
 
 		const body = x.transcript && live ? '“' + x.transcript + '”' : x.body || '';
@@ -712,14 +801,18 @@ class Component extends DCLogic {
 			pinMark: pinned && !pinInRow,
 			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder + (held ? ' (held by the scan)' : ''),
 			sigBars: [2, 4, 6, 8, 10].map((h, i) => ({ h, c: i < strength ? 'var(--wk-accent)' : 'var(--wk-track)' })),
-			showNormal: !idOn,
+			showNormal: !idOn && !msgOpen,
+			msgOpen: msgOpen && !idOn, openMsgData: msgOpen ? openMessage(freq, raw) : null, closeMsg: this.closeMsg, tuneTo: this.tuneTo, msgWellH: floating ? 360 : 460,
+			canOpenMsg: msg && !!x.body && !idOn, openMsg: this.openMsg,
 			// a sweep passing through: the header alone, one line
 			stateDisp: scanning ? 'none' : 'flex', freqColDisp: scanning ? 'none' : 'flex', wellDisp: scanning ? 'none' : 'flex',
-			idBanner: found, idBannerText: 'Identified · added to discoveries',
-			idOn, idEyebrow: 'Identify', idCloseLabel: running ? 'Stop identifying' : 'Close', idClose: this.idClose,
+			idBanner: found, idBannerText: v && v.proto ? 'Decoded as ' + v.proto[1] + ' · added to discoveries' : 'Identified · added to discoveries',
+			idOn, idEyebrow: v && v.proto ? 'Decode as ' + v.proto[1] : 'Identify', idCloseLabel: running ? 'Stop identifying' : 'Close', idClose: this.idClose,
 			idTitle, idSecs, idTitleSize: big ? 'var(--wk-fs-3xl)' : 'var(--wk-fs-lg)', idTitleFont: big ? 'var(--wk-font-head)' : 'inherit', idTitleC: 'var(--wk-text)',
 			idHasReason: !!idReason, idReason,
-			idHasBar: running, idBarW: running ? Math.round((left / v.win) * 1000) / 10 : 0, idBarC: 'var(--wk-accent)',
+			idHasBar: running && !(v && v.until),
+			idUntilShow: (ph === 'waiting' && !v.proto) || ph === 'nothing', idUntil: this.untilOn(), toggleUntil: this.toggleUntil,
+			idUntilTitle: this.untilOn() ? 'Identify keeps listening, job after job, until a transmission comes' : 'Stop after 15 s if nothing transmits', idBarW: running ? Math.round((left / v.win) * 1000) / 10 : 0, idBarC: 'var(--wk-accent)',
 			idWindow: running ? v.win : 15, idLeft: Math.ceil(left), idLeftText: Math.ceil(left) + ' seconds left',
 			idHasLine: !!idLine, idLine,
 			idHasTrials: idTrials.length > 0, idTrials,

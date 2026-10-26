@@ -135,7 +135,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"recent":{"editor":null},"onCommit":{"editor":null},"onPreview":{"editor":null},"onNav":{"editor":null},"onActivity":{"editor":null},"onUsed":{"editor":null},"onClose":{"editor":null},"onScan":{"editor":null},"onIdentify":{"editor":null},"onOpenSetting":{"editor":null},"scan":{"editor":"enum","options":["off","sweeping","paused-you"],"default":"off"},"$preview":{"width":760,"height":700}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"recent":{"editor":null},"onCommit":{"editor":null},"onPreview":{"editor":null},"onNav":{"editor":null},"onActivity":{"editor":null},"onUsed":{"editor":null},"onClose":{"editor":null},"onScan":{"editor":null},"onIdentify":{"editor":null},"onOpenSetting":{"editor":null},"scan":{"editor":"enum","options":["off","sweeping","paused-you"],"default":"off"},"install":{"editor":"enum","options":["prompt","hint","no https","installed"],"default":"prompt"},"$preview":{"width":760,"height":700}}'>
 const MODES = ['NFM', 'AM', 'WFM', 'USB', 'LSB', 'CW', 'RAW'];
 const MODE_DESC = { NFM: 'Narrow FM · land mobile, marine, PMR446', AM: 'Airband and broadcast AM', WFM: 'Broadcast FM', USB: 'Upper sideband · SSB voice', LSB: 'Lower sideband · SSB voice', CW: 'Morse', RAW: 'No audio · decoders only' };
 const BW = { NFM: [5000, 25000, 500, 12500], AM: [3000, 20000, 500, 10000], WFM: [50000, 250000, 5000, 150000], USB: [1500, 4000, 100, 2400], LSB: [1500, 4000, 100, 2400], CW: [100, 1000, 50, 500], RAW: [0, 0, 1, 0] };
@@ -212,6 +212,7 @@ const CHANNELS = bpChannels().map(c => {
 ]);
 const TG_INFO = { '2081': ['DMR · last call 14:02 · 0:06', true], '9': ['DMR · last call 13:51 · 0:41', true], '1201': ['P25 · encrypted, nothing was recorded', false] };
 const P = {
+	install: ['M3 5a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1z', 'M7 20h10', 'M9 16v4', 'M15 16v4', 'M12 7v5', 'M9.5 9.5l2.5 2.5l2.5 -2.5'],
 	antenna: ['M20 4v8', 'M16 4.5v7', 'M12 5v16', 'M8 5.5v5', 'M4 6v4', 'M20 8h-16'],
 	up: ['M12 5v14', 'M18 11l-6 -6', 'M6 11l6 -6'],
 	down: ['M12 5v14', 'M18 13l-6 6', 'M6 13l6 6'],
@@ -817,9 +818,19 @@ class Component extends DCLogic {
 			sc('dec', 'Decoders', DECODERS.length + ' running', P.chip, null, ['adsb ais acars vdl2 dmr pocsag aprs ism']),
 			{ id: 'copy:freq', title: 'Copy frequency', sub: mfmt(v.freq) + ' MHz', icon: P.copy, act: () => this.toast('Copied ' + mfmt(v.freq) + ' MHz'), does: 'Copies “' + mfmt(v.freq) + ' MHz” to the clipboard' },
 			{ id: 'copy:link', title: 'Copy link to this frequency', sub: 'Opens WaveKit tuned here, same mode and bandwidth', icon: P.link, act: () => this.toast('Link copied'), does: 'Copies a link for ' + mfmt(v.freq) + ' MHz · ' + v.mode + ' · ' + kfmt(v.bw), keys: ['share', 'url'] },
+			this.installItem(),
 			sc('set', 'All settings', String(SETTINGS.length), P.settings, null, ['settings', 'preferences', 'options', 'configuration', 'config']),
 			sc('keys', 'Keyboard shortcuts', '', P.keys, ['?'], ['help', 'hotkeys'])
-		]);
+		]).filter(Boolean);
+	}
+	// Install WaveKit (2026-10-17, the web app's PWA): the browser's install prompt when it offers one, else how to install;
+	// gone once WaveKit runs in its own window (install tweak)
+	installItem() {
+		const t = this.props.install || 'prompt';
+		if (t === 'installed') return null;
+		const keys = ['install', 'app', 'add to dock', 'desktop', 'pwa', 'window', 'shortcut'];
+		if (t === 'prompt') return { id: 'app:install', title: 'Install WaveKit', sub: 'Open it in its own window, from the dock or the app list', icon: P.install, keys, act: () => this.toast('Your browser asks to install WaveKit'), does: 'Asks your browser to install WaveKit as an app' };
+		return { id: 'app:install', info: true, title: 'Install WaveKit', sub: t === 'no https' ? 'Installing needs HTTPS: open WaveKit over https:// or on localhost' : 'Use your browser’s Install command (Safari: File › Add to Dock)', icon: P.install, keys };
 	}
 	scopeItems(id) {
 		const v = this.v();
