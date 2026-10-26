@@ -1011,6 +1011,7 @@ const PROBE_DECODER_TYPES: ReadonlySet<string> =
 		"multimon-ng",
 		"direwolf",
 		"rtl433",
+		"acarsdec",
 	])
 
 /**

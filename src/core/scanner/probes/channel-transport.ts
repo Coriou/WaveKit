@@ -4,6 +4,7 @@ import {
 	MULTIMON_CHANNEL_TRANSITION_HZ,
 } from "../../../decoders/builtin/multimon-ng.js"
 import { iqChannelRequest } from "../../../decoders/iq-decimate-decoder.js"
+import { acarsdecDemodConfig } from "../../../decoders/builtin/acarsdec.js"
 import type { DemodulationConfig } from "../../../decoders/types.js"
 import { WaveKitError } from "../../../utils/errors.js"
 import { admitChannel } from "../../channelizer/admission.js"
@@ -49,6 +50,10 @@ export const PROBE_CHANNEL_REQUESTS: Readonly<
 	}),
 	direwolf: requestShape(
 		audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
+	),
+	// Replay only: the ACARS channel (shape of the replay filter).
+	acarsdec: requestShape(
+		audioChannelRequest(acarsdecDemodConfig(input.sampleRateHz), input),
 	),
 	rtl433: requestShape(
 		iqChannelRequest(

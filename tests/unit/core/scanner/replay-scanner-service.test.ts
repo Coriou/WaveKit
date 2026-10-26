@@ -207,6 +207,10 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 				bandwidthHz: PROBE_CHANNEL_REQUESTS.direwolf.bandwidthHz,
 				transitionHz: PROBE_CHANNEL_REQUESTS.direwolf.transitionHz,
 			},
+			acarsdec: {
+				bandwidthHz: PROBE_CHANNEL_REQUESTS.acarsdec.bandwidthHz,
+				transitionHz: PROBE_CHANNEL_REQUESTS.acarsdec.transitionHz,
+			},
 			// rtl_433 reads the whole capture passband (the widest probe passband) up to 24 kHz.
 			rtl433: wholeCaptureShape(
 				Math.max(

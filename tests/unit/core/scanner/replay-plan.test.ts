@@ -470,7 +470,6 @@ describe("planReplayTrials", () => {
 								"analog-fm",
 								"analog-am",
 								"ais",
-								"acars",
 								"vdl2",
 								"lora",
 							]).not.toContain(t.protocol)
@@ -511,6 +510,8 @@ describe("planReplayTrials", () => {
 							"aprs",
 							// the ISM replay trial (rtl433)
 							"ism",
+							// the ACARS replay trial (acarsdec)
+							"acars",
 						].includes(c.known)
 					const knownPlanned =
 						replayable || (knownAnalog && !(knownAnalog && pagerFirst))
@@ -522,7 +523,9 @@ describe("planReplayTrials", () => {
 							(replayable ? 1 : 0) +
 								(analogWanted ? 1 : 0) +
 								// a listed ISM band calls the rtl433 replay trial too
-								(c.known !== "ism" && (c.priors["ism"] ?? 0) >= 1 ? 1 : 0),
+								(c.known !== "ism" && (c.priors["ism"] ?? 0) >= 1 ? 1 : 0) +
+								// and a listed ACARS channel the acarsdec one
+								(c.known !== "acars" && (c.priors["acars"] ?? 0) >= 1 ? 1 : 0),
 						)
 				},
 			),

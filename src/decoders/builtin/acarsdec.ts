@@ -66,6 +66,8 @@ export interface ACARSMessage {
 	level: number
 	/** Number of bit errors */
 	error: number
+	/** acarsdec printed `error` itself (`error` 0 is otherwise the default for a missing field). */
+	errorKnown?: boolean
 	/** ACARS mode character */
 	mode: string
 	/** Message label (2 characters) */
@@ -114,6 +116,37 @@ interface AcarsdecJsonOutput {
  * Performs AM demodulation using csdr and feeds raw S16LE audio to
  * f00b4r0/acarsdec fork via stdin.
  */
+/**
+ * acarsdec prints C's `-inf`/`inf`/`nan` for a level it could not measure (`"noise":-inf` when it
+ * reads audio from a file or stdin), which is not JSON. A bare non-finite number right after an
+ * object key becomes `null`; string contents are not touched (their quotes are escaped).
+ */
+export function nonFiniteToNull(line: string): string {
+	return line.replace(
+		/((?:^|[,{])\s*"[A-Za-z_][A-Za-z0-9_]*"\s*:\s*)[-+]?(?:inf(?:inity)?|nan)(?=\s*[,}])/gi,
+		"$1null",
+	)
+}
+
+/**
+ * The ACARS demodulation: AM, a 25 kHz channel, demodulated at 24 kHz (decimation 100 from
+ * 2.4 Msps), audio at 12 kHz (acarsdec needs a multiple of 12 kHz). DC block on: it removes the
+ * carrier from the AM envelope.
+ */
+export function acarsdecDemodConfig(
+	inputSampleRate: number,
+): DemodulationConfig {
+	return {
+		modulation: "am",
+		bandwidth: 25000,
+		sampleRate: 12000,
+		demodSampleRate: 24000,
+		inputSampleRate,
+		deEmphasis: false,
+		fmGain: 1.0,
+	}
+}
+
 export class AcarsdecDecoder extends AudioDemodDecoder {
 	private options: AcarsdecOptions
 	private readonly warnOption: NumericOptionWarn
@@ -147,16 +180,14 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	 * - Sample rate must be multiple of 12kHz for acarsdec
 	 */
 	protected getDemodConfig(): DemodulationConfig {
-		return {
-			modulation: "am", // ACARS uses AM Modulation
-			bandwidth: 25000, // ~25kHz bandwidth
-			sampleRate: 12000, // acarsdec requires 12kHz multiples (using 12000)
-			demodSampleRate: 24000, // Demod at 24ksps (decimation=100 from 2.4Msps)
-			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
-			deEmphasis: false, // No de-emphasis for data
-			fmGain: 1.0, // Default gain
-			// skipDcBlock: true - removed to enable DC block (needed to remove carrier from AM envelope)
-		}
+		const config = acarsdecDemodConfig(
+			this.options.inputSampleRate ?? 2_400_000,
+		)
+		// Channel IQ (cf32) arrives at its own rate and is demodulated there: 24 kHz from the
+		// channelizer, 48 kHz from a replayed scanner capture (sox then resamples to 12 kHz).
+		if (this.inputIsChannelIq() && this.options.inputSampleRate !== undefined)
+			return { ...config, demodSampleRate: this.options.inputSampleRate }
+		return config
 	}
 
 	/**
@@ -266,7 +297,7 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 		}
 
 		try {
-			const json = JSON.parse(trimmed) as AcarsdecJsonOutput
+			const json = JSON.parse(nonFiniteToNull(trimmed)) as AcarsdecJsonOutput
 			const message = parseAcarsdecJson(json)
 
 			if (message) {
@@ -366,6 +397,7 @@ export function parseAcarsdecJson(
 		channel: json.channel ?? 0,
 		level: json.level ?? 0,
 		error: json.error ?? 0,
+		errorKnown: typeof json.error === "number",
 		mode: json.mode ?? "",
 		label: json.label ?? "",
 		blockId: json.block_id,

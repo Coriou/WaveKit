@@ -255,7 +255,13 @@ export interface ScannerProof {
 	}
 	voice?: boolean
 	tried: ScannerProtocol[]
-	unavailable: ("dsd-fme" | "multimon-ng" | "direwolf" | "rtl433")[]
+	unavailable: (
+		| "dsd-fme"
+		| "multimon-ng"
+		| "direwolf"
+		| "rtl433"
+		| "acarsdec"
+	)[]
 	encrypted: boolean
 	summary: string
 }

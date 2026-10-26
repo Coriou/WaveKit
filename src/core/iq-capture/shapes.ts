@@ -30,5 +30,10 @@ export function probeReplayShapes(): IqReplayShapes {
 	}
 	// rtl_433 reads the capture as captured: its live channel (250 kHz) is wider than any capture.
 	const rtl433 = wholeCaptureShape(captureBandwidthHz(audio))
-	return Object.freeze(rtl433 ? { ...audio, rtl433 } : audio)
+	// The ACARS channel: inside the capture passband (25 kHz of 47.4 kHz).
+	const acarsdec = {
+		bandwidthHz: PROBE_CHANNEL_REQUESTS.acarsdec.bandwidthHz,
+		transitionHz: PROBE_CHANNEL_REQUESTS.acarsdec.transitionHz,
+	}
+	return Object.freeze({ ...audio, ...(rtl433 ? { rtl433 } : {}), acarsdec })
 }

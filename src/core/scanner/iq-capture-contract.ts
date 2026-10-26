@@ -88,14 +88,16 @@ export const IQ_REPLAY_MAX_TRIALS = 8
  * the cf32 at 48 kHz. rtl433: rtl_433 reads the 48 kHz cf32 capture as captured (`-r cf32:-`);
  * OOK sensors (pulses of hundreds of µs, a few kHz wide) decode at 48 kHz as at 250 kHz, FSK
  * sensors deviating past ±23.7 kHz do not fit the capture and stay live-only. Capture size is
- * unchanged: 4 s × 48 000 samples/s × 8 B = 1 536 000 B. The replay planner and the replay
- * transport skip any decoder not listed here.
+ * unchanged: 4 s × 48 000 samples/s × 8 B = 1 536 000 B. acarsdec: the capture filtered to its
+ * 25 kHz ACARS channel, AM-demodulated at 48 kHz and resampled to 12 kHz audio (replay only). The
+ * replay planner and the replay transport skip any decoder not listed here.
  */
 export const REPLAY_INPUT_DECODERS: ReadonlySet<string> = new Set([
 	"dsd-fme",
 	"multimon-ng",
 	"direwolf",
 	"rtl433",
+	"acarsdec",
 ])
 
 /** A finished capture as identify and the replay transport see it. */

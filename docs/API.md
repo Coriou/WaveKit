@@ -3852,7 +3852,9 @@ scanner:
   captured track scores (narrow digital included), deduplicated. They run one at a
   time through the `replay` probe transport (`dsd-fme`, `multimon-ng`, `direwolf`,
   and `rtl433` for ISM: `rtl_433 -r cf32:- -s 48000` on the whole 47.4 kHz capture
-  passband), each fed the capture filtered to that decoder's probe channel shape,
+  passband, and `acarsdec` for ACARS: AM at 48 kHz, 12 kHz audio; one block with
+  acarsdec `error` 0 is that replay's decode), each fed the capture filtered to
+  that decoder's probe channel shape,
   faster than real time (68× to 384× in the bench). At most one replay probe
   runs at once, costing 0.15 cores of `cpuBudgetCores`, at a priority below identify
   and above passive; it never preempts and is never preempted, and it needs no live

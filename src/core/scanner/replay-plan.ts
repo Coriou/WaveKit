@@ -236,6 +236,19 @@ export const RTL433_REPLAY_MODE: Readonly<ProbeMode> = Object.freeze({
 	holdMs: IQ_CAPTURE_MAX_MS,
 })
 
+/**
+ * The ACARS replay trial: acarsdec on the capture's 25 kHz channel (AM). One CRC-clean block of
+ * the replay is its decode (`interpretAcarsReplay`). Hold: the longest capture, 4 s.
+ */
+const ACARS_REPLAY_COVERS: ScannerProtocol[] = ["acars"]
+export const ACARS_REPLAY_MODE: Readonly<ProbeMode> = Object.freeze({
+	decoderType: "acarsdec",
+	protocol: "acars",
+	covers: ACARS_REPLAY_COVERS,
+	options: {},
+	holdMs: IQ_CAPTURE_MAX_MS,
+})
+
 /** The extra trial's probe mode when the decoder has one; null otherwise. */
 function extraModeOf(
 	protocol: ScannerProtocol | "adsb",
@@ -256,7 +269,13 @@ function extraModeOf(
 							options: {},
 						}
 					: null))
-			: identifyModeFor(protocol)
+			: protocol === "acars" && decoder === ACARS_REPLAY_MODE.decoderType
+				? {
+						...ACARS_REPLAY_MODE,
+						covers: [...ACARS_REPLAY_MODE.covers],
+						options: {},
+					}
+				: identifyModeFor(protocol)
 	return mode && mode.decoderType === decoder ? mode : null
 }
 

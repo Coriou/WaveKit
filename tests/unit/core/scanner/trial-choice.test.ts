@@ -359,8 +359,19 @@ describe("replay extras behind a capability check (part 2)", () => {
 		expect(none.trials.every(t => t.kind === "analog")).toBe(true)
 	})
 
+	it("a known acars discovery runs the acarsdec replay trial first", () => {
+		const out = planReplayTrialsDetailed(
+			pocsagInput({ knownProtocol: "acars", track: null, priors: {} }),
+		)
+		expect(out.skipped.some(x => x.decoder === "acarsdec")).toBe(false)
+		expect(out.trials[0]).toMatchObject({
+			protocol: "acars",
+			known: true,
+			mode: { decoderType: "acarsdec", protocol: "acars" },
+		})
+	})
+
 	it.each([
-		["acars", "acarsdec"],
 		["vdl2", "dumpvdl2"],
 		["lora", "lora-meshtastic"],
 		["ais", "ais-catcher"],

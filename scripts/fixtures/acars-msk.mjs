@@ -18,10 +18,10 @@
  * with `--sndfile <file>,subtype=0x02 -m 1`); `.cf32` is 48 000 Hz complex
  * float32 IQ, the audio as AM (depth 0.5) on a carrier offset from the centre,
  * like a replayed capture. Checked with the image's acarsdec: the `.s16`
- * output decodes as one block with `error` 0. The `.cf32` output is not yet
- * proven through an AM demodulator: an offline envelope detector gave the bit
- * stream back inverted (the MSK sampling phase moved), which acarsdec did not
- * sync on.
+ * output decodes as one block with `error` 0, and so does the `.cf32` output
+ * after an offline AM envelope detector and 12 kHz resampling (the bit stream
+ * comes back inverted there; the 32-byte pre-key lets acarsdec flip its
+ * polarity and still sync).
  *
  * Usage:
  *   node scripts/fixtures/acars-msk.mjs <out.s16|out.cf32> [--offset 2000]
@@ -31,6 +31,12 @@ import { writeFileSync } from "node:fs"
 const AUDIO_HZ = 12_000
 const IQ_HZ = 48_000
 const BAUD = 2_400
+/**
+ * Pre-key: 32 bytes of ones. acarsdec syncs on at least 12 bytes of 0xFF before `+`; on a
+ * stream it hears inverted (an AM demodulator's MSK sampling phase can flip it) it first counts
+ * 10 bytes of 0x00 to flip its polarity, then needs the 12, so 22 or more are needed either way.
+ */
+const PREKEY_BYTES = 32
 
 /** `c` (7-bit) with odd parity in bit 7. */
 export function oddParity(c) {
@@ -78,7 +84,7 @@ export function acarsBytes({
 	].map(oddParity)
 	const crc = acarsCrc(block)
 	return [
-		...Array(16).fill(0xff),
+		...Array(PREKEY_BYTES).fill(0xff),
 		oddParity(0x2b),
 		oddParity(0x2a),
 		0x16,

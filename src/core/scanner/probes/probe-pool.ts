@@ -64,11 +64,18 @@ import {
 } from "./confirm/dsd-fme.js"
 import { interpretMultimon } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
+import { interpretAcarsReplay } from "./confirm/acars.js"
 
 /** WG11 req 6.5: `replay` feeds the decoder an IQ capture (lane IQ). */
 export type ProbeTransport = "offset" | "channel" | "replay"
 export type ProbeState = "starting" | "confirming" | "following" | "stopping"
-export type ProbeDecoderType = "dsd-fme" | "multimon-ng" | "direwolf" | "rtl433"
+export type ProbeDecoderType =
+	| "dsd-fme"
+	| "multimon-ng"
+	| "direwolf"
+	| "rtl433"
+	/** Replay only (an IQ capture of an ACARS channel); never a live probe. */
+	| "acarsdec"
 
 export interface ProbeRequest {
 	jobId: string
@@ -2093,6 +2100,14 @@ export class ProbePool extends EventEmitter {
 				return
 			case "rtl433":
 				this.deliver(rec, interpretRtl433(out, rec.interp))
+				return
+			case "acarsdec":
+				// Replay only: one CRC-clean block of the replayed capture is the decode.
+				if (rec.req.replay)
+					this.deliver(
+						rec,
+						interpretAcarsReplay(out, rec.interp, rec.req.targetHz),
+					)
 				return
 		}
 	}
