@@ -158,7 +158,10 @@ export function discoveryTitle(d: Discovery): string {
 	const label = d.operator?.label?.trim()
 	if (label) return label
 	const id = identityText(d.identity)
-	const what = confidenceText(d)
+	const what =
+		d.protocol === "dmr" && d.confidence === "activity"
+			? "DMR?"
+			: confidenceText(d)
 	return id ? `${what} · ${id}` : what
 }
 
@@ -437,6 +440,7 @@ export function isVerified(
 export function protocolSlotText(
 	d: Pick<Discovery, "confidence" | "protocol" | "evidenceLevel">,
 ): string {
+	if (d.protocol === "dmr" && d.confidence === "activity") return "DMR?"
 	if (isVerified(d) && d.protocol !== "unknown") return protocolName(d.protocol)
 	return confidenceText(d)
 }

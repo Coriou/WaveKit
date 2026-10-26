@@ -59,6 +59,7 @@ import {
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import {
 	interpretDsdFme,
+	guardDsdFmeEvidence,
 	toDsdFmeScannerEvent,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
@@ -2152,7 +2153,8 @@ export class ProbePool extends EventEmitter {
 
 	/** P17: only evidence of the probe's epoch, stamped before that epoch ended. */
 	private deliver(rec: ProbeRecord, evs: DecodeEvidence[]): void {
-		for (const ev of evs) {
+		for (const raw of evs) {
+			const ev = guardDsdFmeEvidence(raw, rec.req.targetHz, rec.centreHz)
 			if (this.isStopping(rec)) return
 			if (ev.epoch !== rec.epoch) continue
 			if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) continue

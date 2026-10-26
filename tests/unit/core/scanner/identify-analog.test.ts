@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 /**
  * WG10 req 3.1-3.4: identify for analog voice from the live demodulator's transmissions. The fake
  * port returns every transmission it holds unfiltered (a naive or hostile port), so these tests also
@@ -45,11 +46,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import {
-	flushAsync,
-	linkLine,
-	poolHarness,
-} from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
 
 const ENDED = ["completed", "cancelled", "failed"]
 /** The harness clock starts here; the job starts running on the first tick at this time. */
@@ -648,8 +645,8 @@ describe("digital decode keeps priority (WG10 3.3)", () => {
 			h.engine.push(1_100_000)
 			await h.start(dmrTrack())
 			const id = [...h.decoders.created.values()][0]?.id ?? ""
-			h.decoders.emitLink(id, linkLine(1, h.clock.now))
-			h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 			await flushAsync()
 			await h.settle(1000, 80)
 			const e = h.last()!

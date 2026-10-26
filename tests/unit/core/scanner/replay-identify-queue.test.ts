@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 // WG11 req 6.4, 6.8 (Main review M2 and the once-recording integration): the replay queue never
 // takes a capture identify asked for, nor one of an observation an identify target works on.
 // Real IdentifyRunner, real ProbePool, real pool adapter, real replay queue, real capture store.
@@ -41,11 +42,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import {
-	flushAsync,
-	linkLine,
-	poolHarness,
-} from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
 
 /** The capture service's port semantics over the real store; `end` finishes a capture (3 s, no gap). */
 class StorePort {
@@ -223,8 +220,8 @@ function harness(shape?: { samples: number; gapSamples: number }) {
 			for (const [id, d] of replayDecoders()) {
 				if (exited.has(id)) continue
 				exited.add(id)
-				pool.decoders.emitLink(id, linkLine(1, pool.clock.now))
-				pool.decoders.emitLink(id, linkLine(1, pool.clock.now + 30))
+				pool.decoders.emitLink(id, verifiedLinkLine(1, pool.clock.now))
+				pool.decoders.emitLink(id, verifiedLinkLine(1, pool.clock.now + 30))
 				d.emit("exit", 0, null)
 				await new Promise(r => setTimeout(r, 300))
 				await flushAsync()
@@ -470,8 +467,11 @@ describe("off-air replay needs no live spectrum engine (WG11 batch review R1 2)"
 			expect(replays).toHaveLength(1)
 			expect(sink).not.toHaveBeenCalled()
 			const [decoderId, decoder] = replays[0]!
-			pool.decoders.emitLink(decoderId, linkLine(1, pool.clock.now))
-			pool.decoders.emitLink(decoderId, linkLine(1, pool.clock.now + 30))
+			pool.decoders.emitLink(decoderId, verifiedLinkLine(1, pool.clock.now))
+			pool.decoders.emitLink(
+				decoderId,
+				verifiedLinkLine(1, pool.clock.now + 30),
+			)
 			decoder.emit("exit", 0, null)
 			await new Promise(r => setTimeout(r, 300))
 			await flushAsync()

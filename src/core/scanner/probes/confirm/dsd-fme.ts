@@ -10,6 +10,7 @@ import type {
 	IdentityKind,
 	ScannerProtocol,
 } from "../../types.js"
+import { DQ_DC_ADMIT_HZ } from "../../detection-quality-contract.js"
 import { evidenceBase } from "./double-match.js"
 import type { DecoderOutputLike, InterpreterState } from "./double-match.js"
 
@@ -46,6 +47,9 @@ const CallDataSchema = z
 			.optional(),
 	})
 	.passthrough()
+
+/** Internal flag consumed by the DC gate before evidence enters the public DTO. */
+export type DsdFmeDecodeEvidence = DecodeEvidence & { voiceLc?: boolean }
 
 export type DsdFmeCallData = z.infer<typeof CallDataSchema>
 export type DsdFmeScannerEvent =
@@ -139,8 +143,12 @@ function build(
 	metadata: Partial<DiscoveryMetadataInput>,
 	encrypted: boolean,
 	idProtocol: ScannerProtocol = protocol,
-): DecodeEvidence {
-	const ev: DecodeEvidence = { ...evidenceBase(state, at), protocol, metadata }
+): DsdFmeDecodeEvidence {
+	const ev: DsdFmeDecodeEvidence = {
+		...evidenceBase(state, at),
+		protocol,
+		metadata,
+	}
 	const value = state.accepted.get(`${idProtocol}:id`)
 	const kind = IDENTITY_KIND[idProtocol]
 	if (value !== undefined && kind !== undefined) ev.identity = { kind, value }
@@ -151,9 +159,42 @@ function build(
 function interpretLink(
 	line: DsdFmeLinkLine,
 	state: InterpreterState,
-): DecodeEvidence[] {
+): DsdFmeDecodeEvidence[] {
 	const protocol = linkProtocol(line.protocol, state)
-	const clean = !line.crcErr
+	// Missing verification on old/malformed events is the weaker answer.
+	const clean =
+		line.verified === true && line.crcErr === false && (line.fecErrs ?? 0) === 0
+	if (!clean) {
+		// A call DTO must not revive an identity from an earlier checked burst.
+		state.accepted.delete(`${protocol}:id`)
+		if (line.crcErr || (line.fecErrs ?? 0) > 0) return []
+		const ev: DecodeEvidence = {
+			...evidenceBase(state, line.at),
+			protocol,
+			metadata: {},
+		}
+		if (
+			line.protocol === "dmr" &&
+			Number.isInteger(line.cc) &&
+			line.cc !== undefined &&
+			line.cc >= 0 &&
+			line.cc <= 15
+		) {
+			const key = `dmr:hint:${line.cc}`
+			state.accepted.set(key, String(Number(state.accepted.get(key) ?? 0) + 1))
+		}
+		if (line.protocol === "dmr") {
+			let count = 0
+			for (let cc = 0; cc < 16; cc++) {
+				const seen = Number(state.accepted.get(`dmr:hint:${cc}`) ?? 0)
+				if (seen > count) {
+					count = seen
+					ev.unverifiedCc = cc
+				}
+			}
+		}
+		return [ev]
+	}
 	const m = state.match
 	const metadata: Partial<DiscoveryMetadataInput> = {}
 	let hits = false
@@ -182,13 +223,30 @@ function interpretLink(
 			metadata.callsigns = [call]
 	}
 	if (line.encrypted === true && hit(`${protocol}:enc`, "1")) encrypted = true
-	return hits ? [build(protocol, state, line.at, metadata, encrypted)] : []
+	if (!hits) return []
+	const ev = build(protocol, state, line.at, metadata, encrypted)
+	if (
+		line.protocol === "dmr" &&
+		(id === undefined || !m.isAccepted(`${protocol}:id`, id))
+	) {
+		delete ev.identity
+		state.accepted.delete(`${protocol}:id`)
+	}
+	if (
+		line.voiceLc === true &&
+		metadata.talkgroups?.length &&
+		metadata.sources?.length
+	) {
+		ev.voiceLc = true
+		state.accepted.set(`${protocol}:lc:${line.tg}:${line.src}`, "1")
+	}
+	return [ev]
 }
 
 function interpretCall(
 	ev: Extract<DsdFmeScannerEvent, { kind: "call_start" | "call_end" }>,
 	state: InterpreterState,
-): DecodeEvidence[] {
+): DsdFmeDecodeEvidence[] {
 	const c = ev.call
 	if (
 		c.flags?.falsePositiveSuppressed === true ||
@@ -218,6 +276,11 @@ function interpretCall(
 		{
 			...build(protocol, state, ev.at, metadata, encrypted, key),
 			callId: c.callId,
+			...(state.accepted.get(`${key}:lc:${tg}:${src}`) === "1" &&
+			metadata.talkgroups?.length &&
+			metadata.sources?.length
+				? { voiceLc: true }
+				: {}),
 		},
 	]
 }
@@ -225,8 +288,51 @@ function interpretCall(
 export function interpretDsdFme(
 	ev: DsdFmeScannerEvent,
 	state: InterpreterState,
-): DecodeEvidence[] {
+): DsdFmeDecodeEvidence[] {
 	return ev.kind === "link"
 		? interpretLink(ev.line, state)
 		: interpretCall(ev, state)
+}
+
+/** Reuse the scanner DC admission width; sync/headers at DC need paired voice LC. */
+export function guardDsdFmeEvidence(
+	ev: DecodeEvidence,
+	targetHz: number,
+	centreHz: number | undefined,
+): DecodeEvidence {
+	const { voiceLc, ...publicEvidence } = ev as DsdFmeDecodeEvidence
+	if (
+		!isDsdFmeProtocol(ev.protocol) ||
+		(voiceLc === true &&
+			ev.metadata.talkgroups?.length &&
+			ev.metadata.sources?.length)
+	)
+		return publicEvidence
+	if (
+		centreHz !== undefined &&
+		Number.isFinite(centreHz) &&
+		Number.isFinite(targetHz) &&
+		Math.abs(targetHz - centreHz) > DQ_DC_ADMIT_HZ
+	)
+		return publicEvidence
+	const {
+		identity: _identity,
+		callId: _callId,
+		encrypted: _encrypted,
+		...rest
+	} = publicEvidence
+	return { ...rest, metadata: {} }
+}
+
+export function isDsdFmeProtocol(protocol: ScannerProtocol): boolean {
+	return [
+		"dmr",
+		"p25p1",
+		"p25p2",
+		"nxdn48",
+		"nxdn96",
+		"ysf",
+		"dstar",
+		"dpmr",
+	].includes(protocol)
 }

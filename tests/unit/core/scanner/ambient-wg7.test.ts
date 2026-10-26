@@ -717,6 +717,7 @@ describe("WG7 properties", () => {
 						external: false,
 					}
 					const base = {
+						centreOf: () => 449_950_000,
 						decoders: decoders as never,
 						targetOf: (id: string) => (id === "cfg" ? t : null),
 						epochOf: () => epoch.v,
@@ -748,6 +749,7 @@ describe("WG7 properties", () => {
 								tg: s.tg ?? "9",
 								src: "2060945",
 								slot: 1,
+								verified: true,
 								crcErr: s.crcErr,
 								at: clock.v,
 							}
@@ -798,6 +800,7 @@ describe("WG7 properties", () => {
 								tg: String(n),
 								src: "7",
 								slot: 1,
+								verified: true,
 								crcErr: false,
 								at: clock.v,
 							} satisfies DsdFmeLinkLine)

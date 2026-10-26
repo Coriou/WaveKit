@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 import { PassThrough } from "node:stream"
 import pino from "pino"
 import { describe, expect, it, vi } from "vitest"
@@ -25,11 +26,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import {
-	flushAsync,
-	linkLine,
-	poolHarness,
-} from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
 
 const view = (
 	id: string,
@@ -168,8 +165,8 @@ const open = async (h: H, track = trackOf({ obwHz: 12_000 })) => {
 	h.tracks.push(viewOf(track))
 }
 const dmrIdentity = (h: H, id: string): void => {
-	h.decoders.emitLink(id, linkLine(1, h.clock.now))
-	h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+	h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+	h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 }
 
 describe("identify with IQ captures (WG11 req 6.8)", () => {

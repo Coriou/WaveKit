@@ -1,3 +1,4 @@
+import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 /**
  * Discovery store (spec § 7): turns observations into deduplicated discoveries.
  *
@@ -291,9 +292,17 @@ type Ingested = {
 }
 
 const METADATA_MAX = 64
-/** Scanner-redesign 3.10: a weak view publishes `UNKNOWN_LABEL`; only a proof names a label. */
+/** Weak records publish unknown, except an explicit, unverified digital-voice sync hint. */
+function syncOnlyProof(proof: ScannerProof | null): boolean {
+	return (
+		proof !== null &&
+		proof.kind === "digital-undecoded" &&
+		isDsdFmeProtocol(proof.protocol)
+	)
+}
 function publishedOf(view: DiscoveryProofView): EvidenceLabel {
-	return view.evidence === "proven" && view.proof !== null
+	return (view.evidence === "proven" || syncOnlyProof(view.proof)) &&
+		view.proof !== null
 		? view.label
 		: UNKNOWN_LABEL
 }
@@ -590,6 +599,7 @@ function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 			at: ev.at,
 			encrypted: ev.encrypted === true,
 		}
+		if (ev.unverifiedCc !== undefined) row.unverifiedCc = ev.unverifiedCc
 		if (ev.identity !== undefined)
 			row.identity = { kind: ev.identity.kind, value: ev.identity.value }
 		const talkgroup = ev.metadata.talkgroups?.[0]
@@ -4780,7 +4790,7 @@ export class DiscoveryStore
 		const proof = this.deriveDiscovery(d)
 		const evidence = this.proofLevel(proof)
 		const label =
-			evidence === "proven" && proof !== null
+			(evidence === "proven" || syncOnlyProof(proof)) && proof !== null
 				? this.labelOfProof(d, proof)
 				: {
 						protocol: d.protocol,
@@ -4821,8 +4831,8 @@ export class DiscoveryStore
 				confidence = "candidate"
 				break
 			case "digital-undecoded":
-				protocol = "digital-unknown"
-				confidence = "candidate"
+				protocol = syncOnlyProof(proof) ? proof.protocol : "digital-unknown"
+				confidence = syncOnlyProof(proof) ? "activity" : "candidate"
 				break
 			case "carrier-only":
 				protocol = "carrier"
@@ -4841,7 +4851,7 @@ export class DiscoveryStore
 
 	/**
 	 * Scanner-redesign 3.10: the label every read and event path publishes. A weak record
-	 * publishes `UNKNOWN_LABEL` whatever it stores; its stored fields are not rewritten.
+	 * publishes unknown unless a digital-voice sync hint is shown; stored fields are not rewritten.
 	 */
 	private publishedLabel(d: Discovery): EvidenceLabel {
 		return publishedOf(this.discoveryView(d))
@@ -4850,7 +4860,10 @@ export class DiscoveryStore
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
 		const view = this.discoveryView(d)
-		if (view.evidence === "proven" && view.proof !== null) {
+		if (
+			(view.evidence === "proven" || syncOnlyProof(view.proof)) &&
+			view.proof !== null
+		) {
 			copy.proof = clone(view.proof)
 			copy.protocol = view.label.protocol
 			copy.family = view.label.family

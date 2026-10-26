@@ -559,13 +559,16 @@ describe("deriveProof", () => {
 		expect(replay?.summary).toBe("DMR decoded (CC1, encrypted)")
 	})
 
-	it("returns null for an identity-less or encrypted decode that the label does not call decoded", () => {
+	it("keeps identity-less digital voice evidence weak and undecoded", () => {
 		const input = proof({
 			decodes: [decode("dmr", AT, { encrypted: true, talkgroup: "9" })],
 		})
 		expect(labelFromEvidence(input).confidence).not.toBe("decoded")
-		expect(deriveProof(input)).toBeNull()
-		expect(deriveProof(proof({ decodes: [decode("dmr", AT)] }))).toBeNull()
+		expect(deriveProof(input)?.kind).toBe("digital-undecoded")
+		expect(evidenceLevelOf({ proof: deriveProof(input)! })).toBe("weak")
+		expect(deriveProof(proof({ decodes: [decode("dmr", AT)] }))?.kind).toBe(
+			"digital-undecoded",
+		)
 	})
 
 	it("follows the label for tone, voice, digital and carrier, and skips unknown trust for analog audio", () => {
@@ -749,7 +752,8 @@ describe("identity-less decode rank", () => {
 			family: "digital-voice",
 			confidence: "activity",
 		})
-		expect(deriveProof(input)).toBeNull()
+		expect(deriveProof(input)?.kind).toBe("digital-undecoded")
+		expect(evidenceLevelOf({ proof: deriveProof(input)! })).toBe("weak")
 	})
 
 	it("an identity decode still beats a tone", () => {

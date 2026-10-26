@@ -18,7 +18,7 @@ import { interpretRtl433 } from "../../../../src/core/scanner/probes/confirm/rtl
 const T0 = Date.UTC(2026, 9, 9, 12)
 const link = (p: Partial<DsdFmeLinkLine>): DsdFmeScannerEvent => ({
 	kind: "link",
-	line: { protocol: "dmr", crcErr: false, at: T0, ...p },
+	line: { protocol: "dmr", verified: true, crcErr: false, at: T0, ...p },
 })
 const out = (type: string, data: unknown, at = T0): DecoderOutputLike => ({
 	type,
@@ -256,6 +256,30 @@ describe("interpretDsdFme", () => {
 			}),
 		)
 		expect(interpretDsdFme(suppressed as DsdFmeScannerEvent, s)).toEqual([])
+	})
+
+	it("unverified sync or CC-less LC cannot revive an earlier identity through a call DTO", () => {
+		for (const weak of [
+			link({ cc: 3, verified: false }),
+			link({ tg: "9", src: "2001", voiceLc: true }),
+		]) {
+			const s = createInterpreterState({ epoch: 2, origin: "probe" })
+			interpretDsdFme(link({ cc: 3, tg: "9", src: "2001" }), s)
+			interpretDsdFme(link({ cc: 3, tg: "9", src: "2001" }), s)
+			expect(s.accepted.get("dmr:id")).toBe("3")
+			expect(
+				interpretDsdFme(weak, s).every(e => e.identity === undefined),
+			).toBe(true)
+			const call = toDsdFmeScannerEvent(
+				out("call_start", {
+					callId: "synthetic",
+					protocol: "dmr",
+					talkgroup: 9,
+					source: 2001,
+				}),
+			)!
+			expect(interpretDsdFme(call, s)).toEqual([])
+		}
 	})
 
 	it("ignores non-call outputs and malformed call payloads", () => {

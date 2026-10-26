@@ -192,17 +192,28 @@ describe("link events (spec § 6.4)", () => {
 	it("emits one link per DMR link-control line, CRC-ERR lines flagged, unparsable CC skipped", () => {
 		const { links } = replay(createDecoder(), keyUp(130).slice(0, 5), 200)
 		expect(links.map(({ at: _at, ...rest }) => rest)).toEqual([
-			{ protocol: "dmr", cc: 5, crcErr: false },
+			{ protocol: "dmr", crcErr: false, fecErrs: 1, verified: false },
+			{ protocol: "dmr", cc: 5, crcErr: false, verified: true },
 			{
 				protocol: "dmr",
 				tg: "11",
 				src: "10101393",
 				slot: 1,
 				crcErr: true,
+				verified: false,
 				encrypted: true,
 			},
-			{ protocol: "dmr", cc: 1, crcErr: false },
-			{ protocol: "dmr", tg: "9", src: "2060945", slot: 1, crcErr: false },
+			{ protocol: "dmr", cc: 1, crcErr: false, verified: true },
+			{
+				protocol: "dmr",
+				cc: 1,
+				tg: "9",
+				src: "2060945",
+				slot: 1,
+				crcErr: false,
+				verified: true,
+				voiceLc: true,
+			},
 		])
 		expect(links.every(l => l.at >= T0 && l.at <= T0 + 200)).toBe(true)
 	})
@@ -239,9 +250,23 @@ describe("link events (spec § 6.4)", () => {
 			100,
 		)
 		expect(links.map(({ at: _at, ...rest }) => rest)).toEqual([
-			{ protocol: "p25", nac: "1B", tg: "56", src: "1234", crcErr: false },
-			{ protocol: "nxdn", ran: 50, tg: "7", src: "8", crcErr: false },
-			{ protocol: "dstar", callsign: "DL1ABC", crcErr: false },
+			{
+				protocol: "p25",
+				nac: "1B",
+				tg: "56",
+				src: "1234",
+				crcErr: false,
+				verified: false,
+			},
+			{
+				protocol: "nxdn",
+				ran: 50,
+				tg: "7",
+				src: "8",
+				crcErr: false,
+				verified: false,
+			},
+			{ protocol: "dstar", callsign: "DL1ABC", crcErr: false, verified: false },
 		])
 	})
 })

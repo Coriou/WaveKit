@@ -260,6 +260,7 @@ export type DsdFmeProtocol =
 	| "nxdn48"
 	| "nxdn96"
 	| "provoice"
+	| "dpmr"
 	| null
 
 /** DMR-specific metadata */
@@ -523,6 +524,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	// Current protocol detected from sync (candidate context, not event)
 	private currentProtocol: DsdFmeProtocol = null
+	private linkDmrCc: number | undefined
+	private linkDmrAt = 0
 
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
@@ -788,6 +791,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		await super.stop()
+		this.linkDmrCc = undefined
+		this.linkDmrAt = 0
 	}
 
 	/**
@@ -1451,6 +1456,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private parseProtocol(proto: string): DsdFmeProtocol {
 		const upper = proto.toUpperCase()
 		if (upper === "DMR") return "dmr"
+		if (upper === "DPMR") return "dpmr"
 		if (upper === "P25P1" || upper === "P25") return "p25p1"
 		if (upper === "P25P2") return "p25p2"
 		if (upper === "YSF") return "ysf"
@@ -1510,12 +1516,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private parseLinkLine(line: string, at: number): DsdFmeLinkLine | null {
 		const sync = SYNC_PATTERN.exec(line)
+		// dmr_ms.c/dmr_bs.c: loss of frame sync ends the burst sequence.
+		if (
+			/Frame Sync Err:|SYNC LOST|no sync/i.test(line) ||
+			(sync && !/^[+-]DMR$/i.test(sync[0].replace(/^Sync:\s*/i, ""))) ||
+			at - this.linkDmrAt > CALL_TIMEOUT_MS
+		)
+			this.linkDmrCc = undefined
 		const protocol = sync?.groups
 			? this.parseProtocol(sync.groups["proto"] ?? "")
 			: this.currentProtocol
 		const crcErr = CRC_ERR.test(line)
 		const fecErrs = line.match(FEC_ERR_ALL)?.length ?? 0
-		const base = { crcErr, at, ...(fecErrs > 0 ? { fecErrs } : {}) }
+		if (/CACH\/Burst FEC ERR/i.test(line)) {
+			this.linkDmrCc = undefined
+			return null
+		}
+		const clean = !crcErr && fecErrs === 0
+		const base = {
+			verified: false,
+			crcErr,
+			at,
+			...(fecErrs > 0 ? { fecErrs } : {}),
+		}
 		const ids = (
 			groups: Record<string, string> | undefined,
 			tg: string,
@@ -1529,11 +1552,32 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				: {}
 		switch (protocol) {
 			case "dmr": {
-				const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
+				const printedCc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
+				const cc =
+					printedCc !== undefined && Number(printedCc) <= 15
+						? Number(printedCc)
+						: undefined
+				if (sync) {
+					this.linkDmrCc = clean ? cc : undefined
+					this.linkDmrAt = at
+				}
 				const idGroups =
 					DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
-				if (cc === undefined && idGroups === undefined) return null
+				// dmr_dburst.c: these burst payloads carry CRC/FEC checks; VC/IDLE
+				// only print a weak or stale CC. dmr_flco.c prints SLOT TGT/SRC
+				// only after IrrecoverableErrors == 0 (verified voice LC).
+				const voiceLc =
+					idGroups !== undefined &&
+					/\bSLOT\s+[12]\s+TGT=\d+\s+SRC=\d+\b/i.test(line)
+				const verified =
+					clean &&
+					(voiceLc ||
+						(sync !== null &&
+							/\|\s*(?:PI|VLC|TLC|CSBK|MBCH|MBCC|DATA|USBD)\b/.test(line)))
+				const identityCc = cc ?? (clean && voiceLc ? this.linkDmrCc : undefined)
+				if (cc === undefined && idGroups === undefined && !sync) return null
 				const slotText =
+					DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"] ??
 					DMR_SLOT_INLINE.exec(line)?.groups?.["slot"] ??
 					DMR_SLOT_WORD.exec(line)?.groups?.["slot"]
 				const svc = DMR_TLC_FIELDS.exec(line)?.groups?.["svc"]
@@ -1544,7 +1588,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					(alg !== undefined && !isClearAlgorithm(alg))
 				return {
 					protocol: "dmr",
-					...(cc !== undefined ? { cc: parseInt(cc, 10) } : {}),
+					...(identityCc !== undefined ? { cc: identityCc } : {}),
 					...ids(idGroups, "tgt", "src"),
 					...(slotText === "1"
 						? { slot: 1 as const }
@@ -1552,12 +1596,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 							? { slot: 2 as const }
 							: {}),
 					...base,
+					verified,
+					...(verified && voiceLc ? { voiceLc: true } : {}),
 					...(encrypted ? { encrypted: true } : {}),
 				}
 			}
 			case "p25p1":
 			case "p25p2": {
-				const nac = P25_NAC.exec(line)?.groups?.["nac"]
+				// dsd_frame.c sets DUID EE on BCH failure but still prints NAC.
+				// NAC/CC may be cached P2 state: accept only direct NAC + a valid DUID.
+				const checkedNac =
+					/\bNAC:\s*([0-9A-F]{3});.*\b(?:HDU|LDU1|LDU2|TDULC|TDU|TSBK|MPDU|TSDU)\b/i.exec(
+						line,
+					)?.[1]
+				const nac = checkedNac ?? P25_NAC.exec(line)?.groups?.["nac"]
 				const idGroups =
 					P25_SRC_TG.exec(line)?.groups ?? P25P2_VCH.exec(line)?.groups
 				const alg = ALG_ID.exec(line)?.groups?.["alg"]
@@ -1568,6 +1620,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					...(nac !== undefined ? { nac: nac.toUpperCase() } : {}),
 					...ids(idGroups, "tg", "src"),
 					...base,
+					verified: clean && checkedNac !== undefined,
 					...(alg !== undefined && !isClearAlgorithm(alg)
 						? { encrypted: true }
 						: {}),
@@ -1575,7 +1628,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			}
 			case "nxdn48":
 			case "nxdn96": {
-				const ran = NXDN_RAN.exec(line)?.groups?.["ran"]
+				// nxdn_deperm.c prints cached RAN before SACCH/CAC checks.
+				// FACCH2/UDCH alone prints the current RAN only inside crc == check.
+				const checkedRan = /\bRAN\s+(\d{2})\s+(?:FACCH2|UDCH)\b/.exec(line)?.[1]
+				const ran = checkedRan ?? NXDN_RAN.exec(line)?.groups?.["ran"]
 				const idGroups = NXDN_TGT_SRC.exec(line)?.groups
 				if (ran === undefined && idGroups === undefined) return null
 				return {
@@ -1583,14 +1639,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					...(ran !== undefined ? { ran: parseInt(ran, 10) } : {}),
 					...ids(idGroups, "tgt", "src"),
 					...base,
+					verified: clean && checkedRan !== undefined,
 				}
 			}
 			case "ysf":
-				return /\bFICH\b/i.test(line) ? { protocol: "ysf", ...base } : null
+				// ysf.c prints CODE as its SQL code; this parser does not map it to DG-ID.
+				// No supported checked identity format: remain sync-only.
+				return sync || /\bFICH\b/i.test(line)
+					? { protocol: "ysf", ...base }
+					: null
 			case "dstar": {
+				// dstar_header.c has a TODO for header FCS; MY is not proof.
+				// dstar.c slow-data checked header uses SRC, not this MY format.
 				const my = DSTAR_MY.exec(line)?.groups?.["val"]?.trim()
 				return my ? { protocol: "dstar", callsign: my, ...base } : null
 			}
+			case "dpmr":
+				// dpmr_voice.c: Channel Code is stashed state, "no guarantee",
+				// even when CallingIDOk passes. Do not turn it into an identity.
+				return sync || /Channel Code/.test(line)
+					? { protocol: "dpmr", ...base }
+					: null
 			default:
 				return null
 		}

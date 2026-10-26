@@ -583,3 +583,27 @@ queried frequency span, followed by O(k) time/source/ambiguity checks.
 Track insertion, movement and removal update the index; sorted-array updates
 can cost O(n). Closed observations remain indexed through the pairing
 retention period, and merges use their current discovery IDs.
+
+### Digital voice identity checks
+
+A dsd-fme sync alone is a protocol hint. DMR VC\*/VC1–VC6, IDLE,
+unlabelled bursts and R12U never confirm a color-code identity, even when
+hundreds of bursts repeat it. They appear as DMR-like digital sync, not decoded,
+and remain weak evidence. The most frequent sync-only color code may appear in
+the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
+
+DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
+CSBK, MBCH, MBCC, DATA or USBD burst, or checked voice link control carrying
+both target and source. Voice link control uses the latest CC in its current
+burst sequence; unknown CC, sync loss, protocol changes and sequence timeout
+clear that association. CRC/FEC errors do not count, and CACH/burst FEC errors
+produce no evidence. Near the tuner centre, within the existing DC admission
+guard, digital voice additionally needs paired checked voice link control with
+both talkgroup and source before it can be decoded.
+
+The same conservative rule applies to other dsd-fme protocols: P25 accepts a
+direct NAC only on a recognized NID/BCH-checked frame; cached NAC/CC and legacy
+bracketed output stay unverified. NXDN accepts current RAN on CRC-checked
+FACCH2/UDCH output, rather than cached SACCH/CAC RAN. YSF FICH sync, unchecked
+D-STAR MY headers and dPMR's cached channel code do not establish identities.
+Unknown output formats default to unverified.

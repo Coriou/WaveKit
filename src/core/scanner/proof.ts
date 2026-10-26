@@ -1,3 +1,4 @@
+import { isDsdFmeProtocol } from "./probes/confirm/dsd-fme.js"
 import {
 	SCANNER_PROOF_PROTOCOL_LABEL,
 	SCANNER_PROOF_SUMMARY_MAX_CHARS,
@@ -280,7 +281,9 @@ function summaryOf(proof: BareProof): string {
 		case "analog-voice":
 			return analogSummary(proof)
 		case "digital-undecoded":
-			return digitalSummary(proof.tried, proof.unavailable)
+			return isDsdFmeProtocol(proof.protocol)
+				? `Digital, ${SCANNER_PROOF_PROTOCOL_LABEL[proof.protocol]}-like sync${proof.unverifiedCc !== undefined ? `, CC ${proof.unverifiedCc} (unverified)` : ""}, not decoded`
+				: digitalSummary(proof.tried, proof.unavailable)
 		case "carrier-only":
 			return "Carrier only"
 		default:
@@ -323,6 +326,7 @@ export function proofFromFacts(
 			unavailable: unavailableOf(input.unavailable),
 			encrypted: facts.encrypted,
 		}
+		if (facts.unverifiedCc !== undefined) row.unverifiedCc = facts.unverifiedCc
 		if (facts.identity !== undefined)
 			row.identity = { kind: facts.identity.kind, value: facts.identity.value }
 		if (
@@ -400,7 +404,8 @@ function kindAgrees(
 ): boolean {
 	if (kind === "analog-tone" || kind === "analog-voice")
 		return protocol === "analog-fm" || protocol === "analog-am"
-	if (kind === "digital-undecoded") return protocol === "digital-unknown"
+	if (kind === "digital-undecoded")
+		return protocol === "digital-unknown" || isDsdFmeProtocol(protocol)
 	if (kind === "carrier-only") return protocol === "carrier"
 	return decodableProtocol(protocol)
 }
@@ -430,6 +435,7 @@ const ProofSchema = z
 		transport: z.enum(["live", "replay", "ambient"]),
 		at: z.string().refine(value => Number.isFinite(Date.parse(value))),
 		observationId: z.string().min(1),
+		unverifiedCc: z.number().int().min(0).max(15).optional(),
 		identity: z.unknown().optional(),
 		talkgroup: z.string().min(1).max(MAX_IDENTITY_VALUE_LENGTH).optional(),
 		tone: z
@@ -467,6 +473,13 @@ const ProofSchema = z
 				return
 			}
 			previous = type
+		}
+		if (
+			row.unverifiedCc !== undefined &&
+			!(row.kind === "digital-undecoded" && row.protocol === "dmr")
+		) {
+			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "unverifiedCc" })
+			return
 		}
 		if (row.kind === "decoded") {
 			if (!identityFitsProtocol(row.protocol, row.identity)) {
@@ -521,12 +534,16 @@ function acceptedProof(value: unknown): ScannerProof | undefined {
 	}
 }
 
-/** `proven` only for a proof whose fields match this grammar. Anything else is `weak`. */
+/** `proven` for accepted proofs, except explicit digital-voice sync hints, which remain `weak`. */
 export function evidenceLevelOf(d: {
 	proof?: ScannerProof
 }): ScannerEvidenceLevel {
 	try {
-		return acceptedProof(d.proof) !== undefined ? "proven" : "weak"
+		const proof = acceptedProof(d.proof)
+		return proof !== undefined &&
+			!(proof.kind === "digital-undecoded" && isDsdFmeProtocol(proof.protocol))
+			? "proven"
+			: "weak"
 	} catch {
 		return "weak"
 	}

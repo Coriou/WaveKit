@@ -176,6 +176,8 @@ export interface DiscoveryMetadataInput {
 }
 
 export interface DecodeEvidence {
+	/** Most frequent sync-only CC; never an identity. */
+	unverifiedCc?: number
 	protocol: ScannerProtocol
 	identity?: Identity
 	metadata: Partial<DiscoveryMetadataInput>
@@ -243,6 +245,8 @@ export type ScannerProofKind =
 	| "carrier-only"
 export type ScannerProofTransport = "live" | "replay" | "ambient"
 export interface ScannerProof {
+	/** DMR-like sync hint only. */
+	unverifiedCc?: number
 	kind: ScannerProofKind
 	protocol: ScannerProtocol
 	transport: ScannerProofTransport
@@ -266,7 +270,7 @@ export interface ScannerProof {
 	encrypted: boolean
 	summary: string
 }
-/** WG12: `proven` is a discovery with a proof; `weak` is one without. */
+/** Proven evidence excludes unverified digital-voice sync hints, even when they carry a lower-class proof. */
 export type ScannerEvidenceLevel = "proven" | "weak"
 
 export type UndecodedReason =
