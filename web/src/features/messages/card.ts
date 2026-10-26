@@ -348,6 +348,8 @@ export function messageView(
 		.map(batteryWord)
 		.filter(f => {
 			if (BADGE_KEYS.has(f.key)) return false
+			// Paging bodies come from presentation; raw fallback can restore control markers.
+			if (item.category === "paging" && f.key === "message") return false
 			if (
 				MESSAGE_KEYS.has(f.key) &&
 				typeof f.value === "string" &&

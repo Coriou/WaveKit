@@ -68,6 +68,49 @@ it("strips every multimon control marker from the expanded body", () => {
 	expect(rowView(pagerDetailItem(item, record)).message).toBe("Synthetic body")
 	expect(pagerDetailItem(item, null)).toBe(item)
 })
+it.each([0, 1])(
+	"does not restore a marker-only page as a Message field for function %i",
+	fn => {
+		const message = "<NUL><EOT>\u0000\u0004"
+		const { item, record } = fixture(message, "")
+		item.fields = []
+		record.payload.fields = []
+		const raw = {
+			protocol: "POCSAG1200",
+			address: 123,
+			function: fn,
+			messageType: "alpha",
+			message,
+		}
+		record.payload.decodedData = raw
+		for (const summary of [item, pagerDetailItem(item, record)]) {
+			const view = messageView(summary, record)
+			expect(view.text).toBeNull()
+			expect(view.fields.some(f => f.key === "message")).toBe(false)
+			expect(view.raw).toEqual(raw)
+		}
+	},
+)
+it.each(["Synthetic body", "Synthetic…"])(
+	"does not restore inner markers through the card grid with presented body %s",
+	presented => {
+		const message = "Synthetic<NUL>\u0000 body<EOT>"
+		const { item, record } = fixture(message, presented)
+		const detail = pagerDetailItem(item, record)
+		const detailRecord = {
+			...record,
+			payload: { ...record.payload, fields: detail.fields },
+		}
+		for (const view of [
+			messageView(item, record),
+			messageView(detail, detailRecord),
+		]) {
+			expect(view.fields.some(f => f.key === "message")).toBe(false)
+			expect(view.raw).toEqual({ message })
+		}
+		expect(messageView(detail, detailRecord).text).toBe("Synthetic body")
+	},
+)
 it("treats a network beacon as a notice without a tone-only reception body", () => {
 	const { item } = fixture("", "")
 	item.fields = [{ key: "label", label: "Label", value: "network beacon" }]
