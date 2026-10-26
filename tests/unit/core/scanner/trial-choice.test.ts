@@ -416,7 +416,7 @@ function entry(over: Partial<TrialMemoryEntry>): TrialMemoryEntry {
 describe("trial memory order (part 3)", () => {
 	it("a synthetic POCSAG discovery: the trial order before and after", () => {
 		// Before (the frozen plans, no overlay, no memory): POCSAG is the last trial.
-		// the plans before WG16 SC: no French plan, no overlay
+		// the plans before the French plan: no French plan, no overlay
 		const legacy = narrowestPriors(
 			bandplansFor("EU")
 				.filter(p => p.id !== "pager-fr")

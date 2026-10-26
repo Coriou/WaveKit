@@ -25,7 +25,7 @@ const preserved = [
 		"2fc7ea5c676784a444124e2415784edcad88aeb98fce2873f91ba599d4bb307d",
 	],
 	[
-		// WG16 SC (Main's request): the legacy blob gained the French paging plan `pager-fr`
+		// The legacy blob gained the French paging plan `pager-fr`
 		// (466.025–466.230 MHz and 446.5325 MHz, POCSAG), so the scanner and the band view know it.
 		"src/core/scanner/bandplan/builtin.ts",
 		7916,
