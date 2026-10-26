@@ -24,6 +24,8 @@ export interface AmbientParsed {
 	timestamp: Date
 	protocol: ScannerProtocol
 	crcClean: boolean
+	/** The raw frame when the decoder gave one (an exact repeat is not a new message). */
+	frame?: string
 	identity: { key: string; kind: Identity["kind"]; value: string | undefined }
 }
 

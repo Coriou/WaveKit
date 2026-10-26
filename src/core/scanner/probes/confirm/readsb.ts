@@ -5,7 +5,10 @@
  * whose CRC checked), or a Beast frame of a format carrying the address in clear (DF11, DF17,
  * DF18) whose CRC-24 remainder is 0 (`modeS.crcOk`). A Beast frame of any other format, a CRC
  * failure, a non-ICAO address (readsb's `~` prefix) or malformed data is no evidence at all.
- * The identity is accepted on the second such message from the same address (H2).
+ * The identity is accepted on the second such message from the same address, counted by
+ * message (no time gap; readsb hears an aircraft many times a second): AmbientEvidence pairs
+ * ADS-B in its own bounded per-decoder memory, not the shared 2 s confirmation, and an exact
+ * repeat of the previous raw frame of that address is not a second message.
  * The decode's frequency is its placement's channel when it carries one, else 1090 MHz.
  */
 import { z } from "zod"
@@ -22,9 +25,15 @@ const IcaoSchema = z
 	.max(6)
 	.regex(/^[0-9A-Fa-f]{6}$/)
 
+/** A Beast frame is at most 14 bytes: 28 hex digits. */
 const ModeSSchema = z.object({
 	df: z.number().int().min(0).max(31),
 	crcOk: z.boolean(),
+	frame: z
+		.string()
+		.max(28)
+		.regex(/^[0-9a-f]+$/)
+		.optional(),
 })
 
 const ChannelSchema = z.object({
@@ -42,9 +51,11 @@ export function parseReadsb(
 	const icao = IcaoSchema.safeParse(data["icao"])
 	if (!icao.success) return null
 	const modeS = data["modeS"]
+	let frame: string | undefined
 	if (modeS !== undefined) {
-		const frame = ModeSSchema.safeParse(modeS)
-		if (!frame.success || !frame.data.crcOk) return null
+		const parsed = ModeSSchema.safeParse(modeS)
+		if (!parsed.success || !parsed.data.crcOk) return null
+		frame = parsed.data.frame
 	}
 	const placed = ChannelSchema.safeParse(out.provenanceBinding)
 	const hz = placed.success ? placed.data.channelHz : ADSB_HZ
@@ -54,6 +65,7 @@ export function parseReadsb(
 		timestamp: out.timestamp,
 		protocol: "adsb",
 		crcClean: true,
+		...(frame !== undefined ? { frame } : {}),
 		identity: {
 			key: "adsb:icao",
 			kind: "icao",

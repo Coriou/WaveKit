@@ -169,7 +169,16 @@ interface AmbientState {
 	capcodes: CapcodeWindows | null
 	/** Where the decode being interpreted lies; set only while it is interpreted. */
 	pairCtx: AmbientPairContext | null
+	/** ADS-B: the last raw frame per address (an exact repeat is not a second message). */
+	frames?: Map<string, string>
 }
+
+/**
+ * Addresses whose last raw frame one readsb state remembers: the DoubleMatch accepted-value
+ * bound (4 096), far above the few hundred aircraft one receiver hears. Least recent go first;
+ * each entry is a 6-digit address and a frame of at most 28 hex digits (under 100 B).
+ */
+export const ADSB_FRAMES_MAX = 4096
 
 type AmbientParser = (
 	out: DecoderOutputLike,
@@ -482,16 +491,33 @@ export class AmbientEvidence extends EventEmitter {
 				capcodes: null,
 				pairCtx: null,
 			}
+			// ADS-B pairs by message in the decoder's own bounded memory (no shared 2 s separation:
+			// readsb hears one aircraft many times a second, so two clean messages of one address
+			// are the confirmation). Every other type shares the discovery's pairing.
+			const adsb = parsed.protocol === "adsb"
 			fresh.interp = createInterpreterState({
 				epoch,
 				origin: "ambient",
 				decoderId,
-				...this.pairing(fresh),
+				...(adsb ? {} : this.pairing(fresh)),
 			})
+			if (adsb) fresh.frames = new Map()
 			entry = fresh
 			this.states.set(decoderId, entry)
 		}
 		if (entry.interp === null) return
+		const frames = entry.frames
+		const address = parsed.identity.value
+		if (frames && parsed.frame !== undefined && address !== undefined) {
+			if (frames.get(address) === parsed.frame) return
+			frames.delete(address)
+			frames.set(address, parsed.frame)
+			while (frames.size > ADSB_FRAMES_MAX) {
+				const oldest = frames.keys().next()
+				if (oldest.done === true) break
+				frames.delete(oldest.value)
+			}
+		}
 		const at = parsed.timestamp.getTime()
 		let decodes: ReturnType<typeof acceptAmbient>
 		entry.pairCtx = {

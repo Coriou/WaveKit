@@ -30,6 +30,44 @@ import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 /** A public textbook DF17 frame (airborne identification), ICAO 4840D6, CRC-24 remainder 0. */
 const DF17 = Buffer.from("8D4840D6202CC371C32CE0576098", "hex")
 
+/** A long Mode S frame with its CRC-24 parity: first byte, 24-bit address, 7 payload bytes. */
+function frameOf(first: number, address: number, payload: number[]): Buffer {
+	const data = Buffer.from([
+		first,
+		(address >> 16) & 0xff,
+		(address >> 8) & 0xff,
+		address & 0xff,
+		...payload,
+		0,
+		0,
+		0,
+	])
+	// the parity is the CRC-24 of the 88 data bits; the whole frame then leaves remainder 0
+	const parity = modeSCrcRemainder(data.subarray(0, 11))
+	data[11] = (parity >> 16) & 0xff
+	data[12] = (parity >> 8) & 0xff
+	data[13] = parity & 0xff
+	return data
+}
+/** Another DF17 message (different payload) from the same address as DF17. */
+const DF17_B = frameOf(
+	0x8d,
+	0x4840d6,
+	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
+)
+/** DF18 with CF = 1: a non-ICAO address, CRC-valid. */
+const DF18_CF1 = frameOf(
+	0x91,
+	0x4840d6,
+	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
+)
+/** DF18 with CF = 0: an ICAO address. */
+const DF18_CF0 = frameOf(
+	0x90,
+	0x4840d6,
+	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
+)
+
 const beast = (frame: Buffer, msgType = 0x33) =>
 	parseBeastMessage(msgType, Buffer.alloc(6), 0, frame)
 
@@ -96,9 +134,16 @@ describe("Mode S CRC on Beast frames", () => {
 		expect(beast(bad)?.modeS?.crcOk).toBe(false)
 	})
 
+	it("a DF18 is an ICAO address only with control field 0", () => {
+		expect(modeSCrcRemainder(DF18_CF1)).toBe(0)
+		expect(modeSCrcRemainder(DF18_CF0)).toBe(0)
+		expect(beast(DF18_CF1)?.modeS).toMatchObject({ df: 18, crcOk: false })
+		expect(beast(DF18_CF0)?.modeS).toMatchObject({ df: 18, crcOk: true })
+	})
+
 	it("a format whose parity hides the address (DF4) and a wrong length are never proven", () => {
 		const df4 = Buffer.from("20001838CA3804", "hex")
-		expect(beast(df4, 0x32)?.modeS).toEqual({ df: 4, crcOk: false })
+		expect(beast(df4, 0x32)?.modeS).toMatchObject({ df: 4, crcOk: false })
 		// a long frame announced as short
 		expect(beast(DF17, 0x32)?.modeS?.crcOk).toBe(false)
 	})
@@ -141,6 +186,16 @@ describe("readsb ambient interpreter", () => {
 				origin: "ambient",
 			},
 		})
+	})
+
+	it("an exact repeat of the previous raw frame is not a second message; a CF=1 DF18 never primes", () => {
+		const r = rig()
+		r.decoders.out(aircraft(beast(DF18_CF1)))
+		r.decoders.out(aircraft(beast(DF17)))
+		r.decoders.out(aircraft(beast(DF17)))
+		expect(r.got).toEqual([])
+		r.decoders.out(aircraft(beast(DF17_B)))
+		expect(r.got.map(e => e.ev.identity?.value)).toEqual(["4840d6"])
 	})
 
 	it("uses the placement's channel when the output carries one", () => {
@@ -233,12 +288,39 @@ describe("readsb ambient interpreter", () => {
 })
 
 describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
+	/** The production wiring: the service's own AmbientEvidence with its shared confirmation. */
 	async function serviceRig() {
 		const h = serviceHarness({
 			patch: s => {
 				s.passive.enabled = false
 			},
+			decoderConfigs: [
+				{
+					id: "adsb",
+					type: "readsb",
+					sourceId: "rtl",
+					options: {},
+				} as unknown as DecoderConfig,
+			],
+			ambientTrust: () => "commanded",
 		})
+		const status = {
+			id: "adsb",
+			type: "readsb",
+			owner: "config",
+			running: true,
+			health: "running",
+			suspended: false,
+		}
+		const decoders = h.decoders as unknown as {
+			getAllStatus: () => unknown[]
+			getStatus: (id: string) => unknown
+			getDecoder: (id: string) => unknown
+		}
+		decoders.getAllStatus = () => [status]
+		decoders.getStatus = id => (id === "adsb" ? { ...status } : undefined)
+		decoders.getDecoder = id =>
+			id === "adsb" ? { caps: { input: "iq" } } : undefined
 		await h.service.start()
 		const job = await h.service.createJob({
 			sourceId: "rtl",
@@ -247,7 +329,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		const internals = h.service as unknown as {
 			store: DiscoveryStore
 			live: Map<string, LiveObservation>
-			onAmbientEvidence: (e: AmbientEvidenceEvent) => void
+			now: () => number
 		}
 		const epoch = h.service.spectrum.engine("rtl")!.currentEpoch()
 		const track = trackOf({
@@ -277,35 +359,40 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			decoded: false,
 			encrypted: false,
 		})
-		const r = rig()
-		// the rig's events at the live epoch and time, into the scanner
-		r.ambient.on("evidence", (e: AmbientEvidenceEvent) =>
-			internals.onAmbientEvidence({
-				...e,
-				ev: { ...e.ev, epoch: epoch.epoch, at: startedAt + 10 },
-			}),
-		)
-		return { h, internals, r }
+		let clock = startedAt
+		internals.now = () => clock
+		/** One readsb output `dtMs` after the previous, through the manager's output event. */
+		const send = (data: unknown, dtMs = 500): void => {
+			clock += dtMs
+			h.decoders.emitOutput("adsb", {
+				type: "aircraft",
+				data,
+				timestamp: new Date(clock),
+			})
+		}
+		return { h, internals, send }
 	}
 
-	it("single and bad messages leave no record; the second proven one names the discovery", async () => {
-		const { h, internals, r } = await serviceRig()
+	it("two CRC-valid messages 500 ms apart identify; single, bad and repeated frames leave no record", async () => {
+		const { h, internals, send } = await serviceRig()
 		try {
 			const bad = Buffer.from(DF17)
 			bad[2]! ^= 0x10
-			r.decoders.out(aircraft(beast(bad)))
-			r.decoders.out(aircraft({ icao: "~123456" }))
-			r.decoders.out(aircraft(beast(DF17)))
+			send(beast(bad))
+			send({ icao: "~123456" })
+			send(beast(DF18_CF1))
+			send(beast(DF17))
+			// an exact repeat of the same raw frame is not a second message
+			send(beast(DF17))
 			expect(internals.store.snapshot().discoveries).toEqual([])
 			expect(internals.live.get("adsb-1")?.discoveryId).toBeNull()
-			r.decoders.out(aircraft(beast(DF17)))
+			send(beast(DF17_B))
 			const discoveries = internals.store.snapshot().discoveries
 			expect(discoveries).toHaveLength(1)
 			const d = internals.store.get(discoveries[0]!.id)
 			expect(d?.protocol).toBe("adsb")
 			expect(d?.confidence).toBe("decoded")
 		} finally {
-			r.ambient.stop()
 			await h.service.stop()
 		}
 	})

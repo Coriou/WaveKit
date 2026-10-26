@@ -31,7 +31,7 @@ function obs(
 
 const place = (
 	cands: PlacementCandidate[],
-	protocol: "acars" | "ais" | "lora" | "pocsag" | null,
+	protocol: "acars" | "ais" | "lora" | "adsb" | "pocsag" | null,
 	hz = HZ,
 	at = 95_000,
 ) =>
@@ -64,6 +64,10 @@ describe("ambient placement", () => {
 		expect(place([obs("a", HZ + 12_501)], "acars")).toEqual([])
 		expect(place([obs("a", HZ - 62_500)], "lora")).toEqual(["a"])
 		expect(place([obs("a", HZ - 62_501)], "lora")).toEqual([])
+		// ADS-B: a track-centre tolerance of 500 kHz around the nominal 1090 MHz
+		expect(ambientReachHz("adsb", 0)).toBe(500_000)
+		expect(place([obs("a", HZ + 500_000)], "adsb")).toEqual(["a"])
+		expect(place([obs("a", HZ + 500_001)], "adsb")).toEqual([])
 		// a merged wide track centred 8 kHz off (formerly missed by the 1 kHz rule)
 		expect(place([obs("a", HZ + 8_000, { obwHz: 200_000 })], "acars")).toEqual([
 			"a",
