@@ -189,7 +189,15 @@ import {
 } from "./probes/ambient.js"
 import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import { pickChannelObservation } from "./probes/ambient-channel.js"
-import { placeAmbientDecode } from "./probes/ambient-placement.js"
+import {
+	placeAmbientDecode,
+	ambientReachHz,
+	AMBIENT_CHANNEL_WIDTH_HZ,
+} from "./probes/ambient-placement.js"
+import {
+	AmbientObservationIndex,
+	AmbientObservationMap,
+} from "./probes/ambient-index.js"
 import { ConfirmMemory } from "./probes/confirm/confirm-memory.js"
 import type { AmbientPairContext } from "./probes/ambient.js"
 import {
@@ -494,6 +502,7 @@ export interface ScannerServiceDeps {
 		decoderId: string,
 		hz: number,
 		sourceId: string,
+		placement?: { sourceId: string; channelHz: number | null },
 	) => TuningTrust | undefined
 }
 
@@ -823,7 +832,9 @@ export class ScannerService extends EventEmitter {
 		| null = null
 	/** WG15 DQ 8: the passive guard's windows, baselines and trials per source. */
 	private readonly passiveGuard = new PassiveGuard()
-	private readonly live = new Map<string, LiveObservation>()
+	private readonly ambientObservations =
+		new AmbientObservationIndex<LiveObservation>()
+	private readonly live = new AmbientObservationMap(this.ambientObservations)
 	private recent: LiveObservation[] = []
 	private readonly bestPsd = new Map<
 		string,
@@ -3098,6 +3109,7 @@ export class ScannerService extends EventEmitter {
 		// After the job ids: the capture-enabled covering job decides (Task 34a).
 		if (opened) this.openCapture(live, track)
 		live.lastTrack = track
+		this.ambientObservations.upsert(live)
 		if (track.flags.edge) this.dropEdgeIqCapture(live.observationId)
 		live.lastActivityAt = now
 		if (ev.kind !== "track-open")
@@ -3180,6 +3192,7 @@ export class ScannerService extends EventEmitter {
 		live.endedAt = now
 		if (endReason !== undefined) live.endReason = endReason
 		this.recent.push(live)
+		this.ambientObservations.upsert(live)
 		this.emitActivity(live, track, false)
 		if (live.probeIds.size === 0 && live.discoveryId)
 			this.markRecording(live.observationId, "none")
@@ -4164,9 +4177,9 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * The observations an ambient decode names. A channel decode (rtl433) names the one
 	 * observation inside its passband (pickChannelObservation). A point decode names the
-	 * nearest observation whose track reaches it (placeAmbientDecode): half the decoder's
+	 * unique discovery whose tracks reach it (placeAmbientDecode): half the decoder's
 	 * channel width for an ambient-only protocol (AIS, ACARS, VDL2, LoRa), else
-	 * max(1.5 kHz, OBW / 2); a tie between two signals names nothing.
+	 * max(1.5 kHz, OBW / 2); two matching discoveries name nothing.
 	 */
 	private placeAmbient(e: {
 		sourceId: string
@@ -4177,7 +4190,14 @@ export class ScannerService extends EventEmitter {
 		freqHz?: number | undefined
 	}): LiveObservation[] {
 		const now = this.now()
-		const observations = [...this.live.values(), ...this.recent]
+		const observations = this.ambientObservations.window(
+			e.sourceId,
+			e.passband?.centreHz ?? e.hz,
+			e.passband?.halfHz ?? ambientReachHz(e.protocol, 0),
+			!e.passband &&
+				(e.protocol === null ||
+					!Object.hasOwn(AMBIENT_CHANNEL_WIDTH_HZ, e.protocol)),
+		)
 		if (e.passband) {
 			const picked = pickChannelObservation(
 				observations,
@@ -4189,6 +4209,11 @@ export class ScannerService extends EventEmitter {
 				},
 				now,
 				AMBIENT_PAIR_MS,
+				() =>
+					this.log.debug(
+						{ reason: "ambiguous" },
+						"Ambient decode matches multiple observations",
+					),
 			)
 			return picked ? [picked] : []
 		}
@@ -4197,6 +4222,11 @@ export class ScannerService extends EventEmitter {
 			{ sourceId: e.sourceId, hz: e.hz, at: e.at, protocol: e.protocol },
 			now,
 			AMBIENT_PAIR_MS,
+			() =>
+				this.log.debug(
+					{ reason: "ambiguous" },
+					"Ambient decode matches multiple discoveries",
+				),
 		)
 	}
 
@@ -4261,6 +4291,14 @@ export class ScannerService extends EventEmitter {
 			) {
 				counted.add(discoveryId)
 				this.knownProtocols.recordDecode(discoveryId)
+				const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
+				if (decoderType)
+					this.trialMemory.record(
+						discoveryId,
+						e.ev.protocol,
+						decoderType,
+						"decoded",
+					)
 			}
 			// WG7 req 1.5: identify jobs pairing this observation may decode an ambient trial.
 			for (const jobId of live.jobIds)
@@ -7385,6 +7423,7 @@ export class ScannerService extends EventEmitter {
 			const keep = (o.endedAt ?? now) > now - RECENT_KEEP_MS
 			// a late replay decode still needs the span to stamp inside it.
 			if (!keep && this.deps.iqCapture) this.rememberReplaySpan(o)
+			if (!keep) this.ambientObservations.remove(o.observationId)
 			return keep
 		})
 		if (now - this.lastStatusAt >= STATUS_EVERY_MS) {

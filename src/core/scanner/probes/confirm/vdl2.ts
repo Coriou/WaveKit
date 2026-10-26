@@ -1,6 +1,11 @@
 /** dumpvdl2 ambient interpreter (WG7 req 1.3): frequency in Hz, source address identity. */
 import type { DecoderOutputLike } from "./double-match.js"
-import { asRecord, interpretWith, nearTarget } from "./ambient-decode.js"
+import {
+	asRecord,
+	interpretWith,
+	nearTarget,
+	placedFrequency,
+} from "./ambient-decode.js"
 import type { AmbientInterpretCtx, AmbientParsed } from "./ambient-decode.js"
 
 /** 24-bit address as 6 upper-case hex digits (string, or integer 0..0xFFFFFF). */
@@ -29,7 +34,7 @@ export function parseVdl2(
 	const data = asRecord(out.data)
 	if (data === undefined) return null
 	// VDL2Message.frequency is Hz (dumpvdl2's `freq`; the adapter writes 0 when absent)
-	const hz = data["frequency"]
+	const hz = placedFrequency(data["frequency"], ctx)
 	if (typeof hz !== "number" || !Number.isFinite(hz) || hz <= 0) return null
 	if (!nearTarget(hz, ctx.targetsHz)) return null
 	// dumpvdl2 emits only frames that passed the FCS

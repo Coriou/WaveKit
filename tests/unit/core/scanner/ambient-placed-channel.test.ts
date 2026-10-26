@@ -1,3 +1,4 @@
+import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 // A placed multimon-ng or dsd-fme channel (activity slot) names its own channel, not the parent's target.
 import { EventEmitter } from "node:events"
 import pino from "pino"
@@ -23,8 +24,10 @@ function setup() {
 	]
 	decoders["getDecoder"] = () => undefined
 	const clock = { now: 50_000 }
+	ambientStatusFake(decoders)
 	const ambient = new AmbientEvidence({
 		decoders: decoders as never,
+		tuningTrustOf: () => "commanded",
 		targetOf: id =>
 			id === "pager"
 				? { sourceId: "rtl", hz: TARGET, targetsHz: [TARGET], external: false }
@@ -45,7 +48,7 @@ function setup() {
 				address: 1234567,
 				function: 0,
 				messageType: "alpha",
-				message: "",
+				message: `SYNTHETIC ${clock.now}`,
 			},
 		}
 		// the manager attaches the binding as a non-enumerable property
@@ -127,8 +130,10 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 						}
 					: undefined
 		decoders["getDecoder"] = (id: string) => (id === "dmr" ? parent : undefined)
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "dmr"
 					? {
@@ -150,10 +155,10 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 			})
 		// the parent runs the first placement (A): its lines reach its direct listener, bound
 		const onA = (cc: number, at: number) =>
-			parent.emit("link", bound(linkLine(cc, at), A))
+			parent.emit("link", bound({ ...linkLine(cc, at), src: String(at) }, A))
 		// a worker runs the second (B): the manager forwards its lines under the parent id
 		const onB = (cc: number, at: number, channelHz = B) => {
-			const line = bound(linkLine(cc, at), channelHz)
+			const line = bound({ ...linkLine(cc, at), src: String(at) }, channelHz)
 			decoders.emit("decoder:placed-link", "dmr", line, {
 				sourceId: "rtl",
 				channelHz,

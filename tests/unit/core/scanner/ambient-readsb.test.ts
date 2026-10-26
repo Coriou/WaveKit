@@ -206,7 +206,7 @@ describe("readsb ambient interpreter", () => {
 				r.ambient as unknown as {
 					states: Map<string, { frames?: Map<string, string> }>
 				}
-			).states.get("adsb")?.frames
+			).states.get("adsb\u00001090000000")?.frames
 		const payload = [0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac]
 		const send = (n: number) =>
 			r.decoders.out(aircraft(beast(frameOf(0x8d, 0x100000 + n, payload))))

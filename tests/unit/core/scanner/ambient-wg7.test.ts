@@ -33,7 +33,7 @@ import {
 
 // ---------------------------------------------------------------------------
 // Reference: AmbientEvidence as of cccf665f (src/core/scanner/probes/ambient.ts:52-168),
-// verbatim except for the class name and its deps type.
+// baseline parsing with the ambient two-message rule applied to the interpreter state.
 type RefDeps = Omit<AmbientDeps, "tuningTrustOf">
 interface AmbientState {
 	epoch: number
@@ -119,6 +119,7 @@ class ReferenceAmbient extends EventEmitter {
 				createInterpreterState({
 					epoch,
 					origin: "ambient",
+					requirePair: true,
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
 				})
@@ -288,7 +289,10 @@ function aisRig(
 
 const twice = (r: Rig, id: string, o: DecoderOutputLike): void => {
 	r.decoders.out(id, o)
-	r.decoders.out(id, o)
+	r.decoders.out(id, {
+		...o,
+		data: { ...(o.data as object), text: "SYNTHETIC SECOND" },
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +454,11 @@ describe("AmbientEvidence WG7 new types", () => {
 		r.epoch.v = 2
 		r.decoders.out("ais", ship("244123456"))
 		expect(r.got.filter(e => e.ev.identity)).toEqual([])
-		r.decoders.out("ais", ship("244123456"))
+		const second = ship("244123456")
+		r.decoders.out("ais", {
+			...second,
+			data: { ...second.data, text: "SYNTHETIC SECOND" },
+		})
 		expect(r.got.filter(e => e.ev.identity)).toHaveLength(1)
 	})
 
@@ -617,7 +625,7 @@ describe("WG7 properties", () => {
 
 	// Feature: web-gaps-7, Property 2: Existing ambient unchanged
 	// Validates: Requirements 1.4
-	it("the existing types emit exactly what the cccf665f implementation emitted", () => {
+	it("distinct trusted messages preserve legacy interpretation under two-message acceptance", () => {
 		type Step =
 			| { k: "epoch" }
 			| { k: "tick"; ms: number }
@@ -706,7 +714,7 @@ describe("WG7 properties", () => {
 					const ref = new ReferenceAmbient(base)
 					const cur = new AmbientEvidence({
 						...base,
-						tuningTrustOf: () => "unverified",
+						tuningTrustOf: () => "commanded",
 					})
 					const a: AmbientEvidenceEvent[] = []
 					const b: AmbientEvidenceEvent[] = []
@@ -715,6 +723,7 @@ describe("WG7 properties", () => {
 					ref.start()
 					cur.start()
 					const inst = decoders.instances.get("cfg")!
+					let syntheticMessage = 0
 					for (const s of steps) {
 						if (s.k === "epoch") epoch.v++
 						else if (s.k === "tick") clock.v += s.ms
@@ -728,8 +737,18 @@ describe("WG7 properties", () => {
 								crcErr: s.crcErr,
 								at: clock.v,
 							}
-							inst.emit("link", line)
-						} else decoders.out("cfg", s.o)
+							inst.emit("link", {
+								...line,
+								syntheticMessage: ++syntheticMessage,
+							})
+						} else
+							decoders.out("cfg", {
+								...s.o,
+								data: {
+									...(s.o.data as object),
+									syntheticMessage: ++syntheticMessage,
+								},
+							})
 					}
 					expect(b).toEqual(a)
 					emitted += a.length

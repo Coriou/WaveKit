@@ -1,3 +1,4 @@
+import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import pino from "pino"
@@ -223,8 +224,10 @@ describe("AmbientEvidence rtl433 channel", () => {
 			],
 			getDecoder: () => dec,
 		})
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: () => ({
 				sourceId: "rtl",
 				hz: 433_900_000,
@@ -238,8 +241,9 @@ describe("AmbientEvidence rtl433 channel", () => {
 		const got: AmbientEvidenceEvent[] = []
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
+		let syntheticMessage = 0
 		const emit = (binding: unknown) => {
-			const out = device("Acurite-Tower")
+			const out = device("Acurite-Tower", { value: ++syntheticMessage })
 			Object.defineProperty(out, "provenanceBinding", { value: binding })
 			decoders.emit("decoder:output", "rtl433", out)
 		}
@@ -400,8 +404,10 @@ describe("AmbientEvidence rtl433 window reach", () => {
 			],
 			getDecoder: () => new EventEmitter(),
 		})
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: () => ({
 				sourceId: "rtl",
 				hz: CENTRE,
@@ -417,7 +423,10 @@ describe("AmbientEvidence rtl433 window reach", () => {
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
 		for (let i = 0; i < 2; i++) {
-			const out = device("Acurite-Tower", { freq: (CENTRE + 120_000) / 1e6 })
+			const out = device("Acurite-Tower", {
+				freq: (CENTRE + 120_000) / 1e6,
+				value: i,
+			})
 			Object.defineProperty(out, "provenanceBinding", {
 				value: { sourceId: "rtl", channelHz: null },
 			})

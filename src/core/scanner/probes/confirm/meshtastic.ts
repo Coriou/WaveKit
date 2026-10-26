@@ -1,6 +1,11 @@
 /** Meshtastic LoRa ambient interpreter (WG7 req 1.3): RF packets only, `!%08x` node identity. */
 import type { DecoderOutputLike } from "./double-match.js"
-import { asRecord, interpretWith, nearTarget } from "./ambient-decode.js"
+import {
+	asRecord,
+	interpretWith,
+	nearTarget,
+	placedFrequency,
+} from "./ambient-decode.js"
 import type { AmbientInterpretCtx, AmbientParsed } from "./ambient-decode.js"
 
 function nodeOf(raw: unknown): string | undefined {
@@ -27,7 +32,7 @@ export function parseMeshtastic(
 	const viaMqtt = data["viaMqtt"]
 	if (viaMqtt !== undefined && viaMqtt !== false) return null
 	// MeshtasticPacket.frequency is the decoder's tuned frequency in Hz
-	const hz = data["frequency"]
+	const hz = placedFrequency(data["frequency"], ctx)
 	if (typeof hz !== "number" || !Number.isFinite(hz) || hz <= 0) return null
 	if (!nearTarget(hz, ctx.targetsHz)) return null
 	return {

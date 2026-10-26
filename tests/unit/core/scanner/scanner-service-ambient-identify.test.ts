@@ -65,9 +65,10 @@ const status = (id: string, type: string): DecoderStatus =>
 		suspended: false,
 	}) as unknown as DecoderStatus
 
+let syntheticMessage = 0
 const ship = (mmsi: string) => ({
 	type: "ship",
-	data: { mmsi, channel: "A" },
+	data: { mmsi, channel: "A", text: `SYNTHETIC ${++syntheticMessage}` },
 	timestamp: new Date(),
 })
 
@@ -191,7 +192,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 				}),
 			])
 			r.h.decoders.emitOutput("ais", ship("244123456"))
-			// two decodes of one MMSI pair only 2 s or more apart.
+			// Two distinct synthetic messages from one MMSI confirm within the pairing window.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
@@ -251,7 +252,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 				),
 			)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
-			// two decodes of one MMSI pair only 2 s or more apart.
+			// Two distinct synthetic messages from one MMSI confirm within the pairing window.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")

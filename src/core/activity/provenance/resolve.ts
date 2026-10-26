@@ -82,6 +82,34 @@ function singleTarget(
 	return validHz(targets[0])
 }
 
+/** rtl_433 FSK output may name its two tone estimates instead of `freq`.
+ * Their midpoint is the carrier estimate: (freq1 + freq2) / 2, in MHz.
+ * A malformed present field never falls through to another estimate. */
+function rtl433EstimatesMhz(data: unknown): number[] | undefined {
+	const freq = payloadField(data, "freq")
+	if (freq !== undefined) {
+		const parsed = Rtl433FreqMhz.safeParse(freq)
+		return parsed.success ? [parsed.data] : undefined
+	}
+	const first = payloadField(data, "freq1")
+	const second = payloadField(data, "freq2")
+	const parsed = z
+		.array(Rtl433FreqMhz)
+		.safeParse(
+			first === undefined
+				? [second]
+				: second === undefined
+					? [first]
+					: [first, second],
+		)
+	return parsed.success ? parsed.data : undefined
+}
+
+export function rtl433FrequencyMhz(data: unknown): number | undefined {
+	const estimates = rtl433EstimatesMhz(data)
+	return estimates?.reduce((sum, hz) => sum + hz / estimates.length, 0)
+}
+
 /**
  * rtl_433's `freq` (MHz) in Hz, or undefined when absent, malformed, outside
  * [RTL433_FREQ_MIN_HZ, RTL433_FREQ_MAX_HZ], or when the target or input rate is unknown or
@@ -92,9 +120,9 @@ export function rtl433PayloadHz(
 	targetHz: number | undefined,
 	inputSampleRateHz?: number,
 ): number | undefined {
-	const parsed = Rtl433FreqMhz.safeParse(payloadField(data, "freq"))
-	if (!parsed.success) return undefined
-	const hz = Math.round(parsed.data * 1e6)
+	const mhz = rtl433FrequencyMhz(data)
+	if (mhz === undefined) return undefined
+	const hz = Math.round(mhz * 1e6)
 	if (hz < RTL433_FREQ_MIN_HZ || hz > RTL433_FREQ_MAX_HZ) return undefined
 	if (
 		targetHz === undefined ||
@@ -104,7 +132,19 @@ export function rtl433PayloadHz(
 	)
 		return undefined
 	const reach = (RTL433_FREQ_USABLE_FRACTION * inputSampleRateHz) / 2
-	if (Math.abs(hz - targetHz) > reach) return undefined
+	const estimates = rtl433EstimatesMhz(data)
+	if (
+		!estimates ||
+		estimates.some(mhz => {
+			const toneHz = Math.round(mhz * 1e6)
+			return (
+				toneHz < RTL433_FREQ_MIN_HZ ||
+				toneHz > RTL433_FREQ_MAX_HZ ||
+				Math.abs(toneHz - targetHz) > reach
+			)
+		})
+	)
+		return undefined
 	return hz
 }
 

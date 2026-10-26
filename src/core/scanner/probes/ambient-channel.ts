@@ -10,6 +10,7 @@
  * RTL433_FREQ_TOLERANCE_HZ plus half its own bandwidth of it.
  */
 import { z } from "zod"
+import { rtl433FrequencyMhz } from "../../activity/provenance/resolve.js"
 import type { TrackSnapshot } from "../../spectrum/types.js"
 import { RTL433_TARGET_SAMPLE_RATE_MAX_HZ } from "../../../decoders/options/rtl433.js"
 
@@ -89,7 +90,7 @@ export function rtl433FreqHz(
 	passband: ChannelPassband,
 ): number | undefined {
 	if (!data || typeof data !== "object") return undefined
-	const parsed = FreqSchema.safeParse((data as { freq?: unknown }).freq)
+	const parsed = FreqSchema.safeParse(rtl433FrequencyMhz(data))
 	if (!parsed.success) return undefined
 	const hz = parsed.data * 1e6
 	return Math.abs(hz - passband.centreHz) <=
@@ -149,6 +150,7 @@ export function pickChannelObservation<T extends ChannelCandidate>(
 	},
 	now: number,
 	pairMs: number,
+	onAmbiguous?: () => void,
 ): T | null {
 	const qualifying: T[] = []
 	for (const o of candidates) {
@@ -171,8 +173,10 @@ export function pickChannelObservation<T extends ChannelCandidate>(
 				Math.abs(o.lastTrack!.centreHz - e.passband.centreHz) >
 				e.passband.halfHz * RTL433_FREQ_USABLE_FRACTION,
 		)
-	)
+	) {
+		if (qualifying.length > 1) onAmbiguous?.()
 		return qualifying.length === 1 ? qualifying[0]! : null
+	}
 	let only: T | null = null
 	for (const o of qualifying) {
 		const t = o.lastTrack!
@@ -181,7 +185,10 @@ export function pickChannelObservation<T extends ChannelCandidate>(
 			RTL433_FREQ_TOLERANCE_HZ + Math.max(0, t.obwHz) / 2
 		)
 			continue
-		if (only) return null
+		if (only) {
+			onAmbiguous?.()
+			return null
+		}
 		only = o
 	}
 	return only

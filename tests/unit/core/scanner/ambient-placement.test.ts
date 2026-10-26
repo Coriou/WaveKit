@@ -2,7 +2,6 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	AMBIENT_CHANNEL_WIDTH_HZ,
-	AMBIENT_PLACEMENT_TIE_HZ,
 	AMBIENT_VFO_MIN_REACH_HZ,
 	ambientReachHz,
 	placeAmbientDecode,
@@ -51,8 +50,9 @@ describe("ambient placement", () => {
 		expect(AMBIENT_CHANNEL_WIDTH_HZ["acars"]).toBe(25_000)
 	})
 
-	it("keeps max(1.5 kHz, OBW / 2) for VFO decoders", () => {
-		expect(ambientReachHz("pocsag", 0)).toBe(AMBIENT_VFO_MIN_REACH_HZ)
+	it("uses protocol channel widths and retains the unknown-protocol OBW fallback", () => {
+		expect(ambientReachHz("pocsag", 0)).toBe(12_500)
+		expect(ambientReachHz(null, 0)).toBe(AMBIENT_VFO_MIN_REACH_HZ)
 		expect(ambientReachHz(null, 2_000)).toBe(1_500)
 		expect(ambientReachHz(null, 12_500)).toBe(6_250)
 		expect(ambientReachHz(null, -5)).toBe(1_500)
@@ -74,13 +74,13 @@ describe("ambient placement", () => {
 		])
 	})
 
-	it("chooses the nearest candidate", () => {
+	it("refuses two reaching candidates even at unequal distances", () => {
 		expect(
 			place([obs("far", HZ + 9_000), obs("near", HZ - 3_000)], "acars"),
-		).toEqual(["near"])
+		).toEqual([])
 	})
 
-	it("refuses a tie between two signals, at the tie width and resolves just past it", () => {
+	it("refuses two signals at and past the former nearest tie width", () => {
 		expect(
 			place(
 				[
@@ -91,20 +91,11 @@ describe("ambient placement", () => {
 			),
 		).toEqual([])
 		expect(
-			place(
-				[obs("a", HZ + 5_000), obs("b", HZ - 5_000 - AMBIENT_PLACEMENT_TIE_HZ)],
-				"acars",
-			),
+			place([obs("a", HZ + 5_000), obs("b", HZ - 5_000 - 1)], "acars"),
 		).toEqual([])
 		expect(
-			place(
-				[
-					obs("a", HZ + 5_000),
-					obs("b", HZ - 5_000 - AMBIENT_PLACEMENT_TIE_HZ - 1),
-				],
-				"acars",
-			),
-		).toEqual(["a"])
+			place([obs("a", HZ + 5_000), obs("b", HZ - 5_000 - 1 - 1)], "acars"),
+		).toEqual([])
 	})
 
 	it("names every tied observation of one discovery", () => {
@@ -168,21 +159,13 @@ describe("ambient placement", () => {
 						expect(ids.size).toBe(1)
 						expect([...ids][0]).toBeTypeOf("string")
 					}
-					// the named distance is the least reaching distance
 					const reaching = cands.filter(
 						o =>
 							Math.abs(o.lastTrack!.centreHz - HZ) <=
 							ambientReachHz(protocol, o.lastTrack!.obwHz),
 					)
-					if (named.length > 0) {
-						const least = Math.min(
-							...reaching.map(o => Math.abs(o.lastTrack!.centreHz - HZ)),
-						)
-						for (const o of named)
-							expect(
-								Math.abs(o.lastTrack!.centreHz - HZ) - least,
-							).toBeLessThanOrEqual(AMBIENT_PLACEMENT_TIE_HZ)
-					}
+					if (new Set(reaching.map(o => o.discoveryId)).size > 1)
+						expect(named).toEqual([])
 				},
 			),
 			{ numRuns: 200 },

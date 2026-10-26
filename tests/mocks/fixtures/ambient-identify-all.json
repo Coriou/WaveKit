@@ -1,0 +1,185 @@
+[
+	{
+		"decoder": "acarsdec",
+		"type": "acars",
+		"protocol": "acars",
+		"hz": 131725000,
+		"data": {
+			"frequency": 0,
+			"error": 0,
+			"errorKnown": true,
+			"tail": "TEST01",
+			"text": "SYNTHETIC A"
+		}
+	},
+	{
+		"decoder": "dumpvdl2",
+		"type": "vdl2",
+		"protocol": "vdl2",
+		"hz": 136975000,
+		"data": {
+			"frequency": 0,
+			"fromaddr": "ABC001",
+			"msgType": "SYNTHETIC A"
+		}
+	},
+	{
+		"decoder": "ais-catcher",
+		"type": "ship",
+		"protocol": "ais",
+		"hz": 161975000,
+		"data": {
+			"mmsi": "999000001",
+			"channel": "A",
+			"name": "SYNTHETIC A"
+		}
+	},
+	{
+		"decoder": "lora-meshtastic",
+		"type": "meshtastic",
+		"protocol": "lora",
+		"hz": 869525000,
+		"data": {
+			"from": 1,
+			"frequency": 869525000,
+			"id": 1
+		}
+	},
+	{
+		"decoder": "rtl433",
+		"type": "signal",
+		"protocol": "ism",
+		"hz": 433920000,
+		"data": {
+			"model": "SyntheticSensor",
+			"id": 1,
+			"mic": "CRC",
+			"freq": 433.92,
+			"value": 1
+		}
+	},
+	{
+		"decoder": "direwolf",
+		"type": "aprs",
+		"protocol": "aprs",
+		"hz": 144800000,
+		"data": {
+			"source": "TEST01",
+			"destination": "TEST02",
+			"message": "SYNTHETIC A"
+		}
+	},
+	{
+		"decoder": "multimon-ng",
+		"type": "decode",
+		"protocol": "aprs",
+		"hz": 144800000,
+		"data": {
+			"protocol": "AFSK1200",
+			"from": "TEST01",
+			"to": "TEST02"
+		}
+	},
+	{
+		"decoder": "multimon-ng",
+		"type": "message",
+		"protocol": "pocsag",
+		"hz": 466225000,
+		"data": {
+			"protocol": "POCSAG1200",
+			"address": 123,
+			"function": 0,
+			"messageType": "alpha",
+			"message": ""
+		}
+	},
+	{
+		"decoder": "multimon-ng",
+		"type": "message",
+		"protocol": "flex",
+		"hz": 466225000,
+		"data": {
+			"protocol": "FLEX",
+			"capcode": "123",
+			"messageType": "ALN",
+			"message": ""
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "dmr",
+		"hz": 446006250,
+		"data": {
+			"protocol": "dmr",
+			"cc": 1,
+			"crcErr": false
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "p25p1",
+		"hz": 446006250,
+		"data": {
+			"protocol": "p25",
+			"nac": "123",
+			"crcErr": false
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "ysf",
+		"hz": 446006250,
+		"data": {
+			"protocol": "ysf",
+			"dgid": 1,
+			"crcErr": false
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "dstar",
+		"hz": 446006250,
+		"data": {
+			"protocol": "dstar",
+			"callsign": "TEST01",
+			"crcErr": false
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "dpmr",
+		"hz": 446006250,
+		"data": {
+			"protocol": "dpmr",
+			"cc": 1,
+			"crcErr": false
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "nxdn48",
+		"hz": 446006250,
+		"data": {
+			"protocol": "nxdn",
+			"ran": 1,
+			"crcErr": false
+		}
+	},
+	{
+		"decoder": "dsd-fme",
+		"type": "link",
+		"protocol": "nxdn96",
+		"hz": 446006250,
+		"data": {
+			"protocol": "nxdn",
+			"ran": 1,
+			"crcErr": false
+		}
+	}
+]

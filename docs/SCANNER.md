@@ -501,3 +501,51 @@ Progress reports settling, holding, trialing, replaying, capturing or watching,
 with the current hold/trial and replay queue depth; see [API details](API.md#scanner-evidence-and-activity).
 Capture is on by default, and runs only in protected
 access mode (`scanner.iqCapture.allowLegacy` is reserved for legacy mode later).
+
+## Identification from running decoders
+
+Configured, running decoders identify scanner discoveries without starting a
+probe: readsb (ADS-B), acarsdec (ACARS), dumpvdl2 (VDL2), AIS-catcher (AIS),
+rtl_433 (ISM), direwolf and multimon-ng AFSK1200 (APRS), multimon-ng
+(POCSAG/FLEX), dsd-fme (digital voice), and Meshtastic LoRa. Their output must
+come from the discovery's source with commanded or relay tuning trust. ACARS,
+VDL2 and LoRa output with a missing or zero frequency uses the actual channel
+placement (tuner centre plus channelizer offset), never a band default.
+Malformed or out-of-channel frequencies prove nothing.
+
+An ambient identity needs two distinct checksum-valid messages. Different
+message contents can confirm less than two seconds apart; changing a reception
+timestamp does not turn a duplicate into another message. Probe evidence
+without message content retains its two-second separation guard. ADS-B retains
+its CRC/address checks and raw-frame duplicate rejection. Accepted ambient
+identities reset known-protocol misses and record successful trial memory;
+untrusted evidence does neither. Edge tracks use these same strict checks.
+
+Point association uses inclusive distance from the decoded channel to the
+track centre: 25 kHz / 2 = 12.5 kHz for AIS, ACARS, VDL2, APRS, POCSAG and FLEX;
+125 kHz / 2 = 62.5 kHz for LoRa; digital voice channel width / 2
+(12.5 kHz / 2 = 6.25 kHz for DMR, P25, YSF and NXDN96;
+6.25 kHz / 2 = 3.125 kHz for dPMR, D-STAR and NXDN48).
+ADS-B retains its 1 MHz / 2 = 500 kHz centre tolerance.
+The observation lifetime must include the decode time, with two seconds of
+pairing margin on either side.
+
+rtl_433 uses its placed channel or capture span. A usable JSON frequency
+estimate narrows matches to 60 kHz plus half the track's occupied bandwidth.
+Near the capture edge the estimate is unreliable, so the whole detection span
+is used. Activity rows also retain the estimate in Hz: JSON `freq` is MHz,
+or `(freq1 + freq2) / 2` for FSK. Values must be finite numbers in the
+usable tuner window (centre ± 0.8 × sample rate / 2); malformed or out-of-window
+values fall back to the placed target.
+
+If two or more discoveries match, none receives the decode, even if one is
+nearer; point ambiguity is recorded in the debug log. Multiple observations
+of one discovery can receive point evidence. rtl_433 requires exactly one
+qualifying observation. Ambiguous evidence cannot prime shared confirmation.
+
+Ambient observation lookups use a per-source sorted frequency index:
+O(log n + k) per decode for n indexed observations and k candidates in the
+queried frequency span, followed by O(k) time/source/ambiguity checks.
+Track insertion, movement and removal update the index; sorted-array updates
+can cost O(n). Closed observations remain indexed through the pairing
+retention period, and merges use their current discovery IDs.

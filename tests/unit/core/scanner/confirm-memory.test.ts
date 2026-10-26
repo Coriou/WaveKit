@@ -1,3 +1,4 @@
+import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import pino from "pino"
@@ -41,7 +42,7 @@ const page = (at: number, address = 8) => ({
 		address,
 		function: 0,
 		messageType: "unknown",
-		message: "",
+		message: `SYNTHETIC ${at}`,
 	},
 })
 
@@ -309,8 +310,10 @@ describe("AmbientEvidence with the shared pairing", () => {
 		]
 		decoders["getDecoder"] = () => undefined
 		const contexts: AmbientPairContext[] = []
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "pager-cfg"
 					? {
@@ -349,7 +352,13 @@ describe("AmbientEvidence with the shared pairing", () => {
 			// The scope was asked where the decode lies, at its own time.
 			expect(contexts.length).toBeGreaterThan(0)
 			for (const c of contexts)
-				expect(c).toEqual({ sourceId: "rtl", hz: 153_350_000, at: clock.now })
+				expect(c).toEqual({
+					sourceId: "rtl",
+					hz: 153_350_000,
+					at: clock.now,
+					protocol: "pocsag",
+					message: expect.stringMatching(/^[a-f0-9]{64}$/),
+				})
 		} finally {
 			ambient.stop()
 		}
@@ -408,8 +417,10 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 		decoders["getAllStatus"] = () => [status("ais1"), status("ais2")]
 		decoders["getStatus"] = (id: string) => status(id)
 		decoders["getDecoder"] = () => undefined
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: () => ({
 				sourceId: "rtl",
 				hz: AIS_A,
@@ -419,7 +430,6 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 			epochOf: () => 1,
 			logger: pino({ level: "silent" }),
 			now: () => clock.now,
-			tuningTrustOf: () => "commanded",
 			confirm: {
 				memory: mem,
 				// a distinct discovery on each channel
@@ -430,10 +440,10 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 		const got: AmbientEvidenceEvent[] = []
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
-		const hear = (id: string, channel: "A" | "B") =>
+		const hear = (id: string, channel: "A" | "B", text = "SYNTHETIC FIRST") =>
 			decoders.emit("decoder:output", id, {
 				type: "ship",
-				data: { mmsi: "244123456", channel },
+				data: { mmsi: "244123456", channel, text },
 				timestamp: new Date(clock.now),
 			})
 		const named = () => got.filter(e => e.ev.identity !== undefined)
@@ -445,7 +455,7 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 		try {
 			r.hear("ais1", "A")
 			r.clock.now += 60_000
-			r.hear("ais2", "A")
+			r.hear("ais2", "A", "SYNTHETIC SECOND")
 			expect(r.named().map(e => e.hz)).toEqual([AIS_A])
 			r.hear("ais2", "B")
 			expect(r.named().map(e => e.hz)).toEqual([AIS_A])
@@ -455,7 +465,7 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 		}
 	})
 
-	it("one persistent decoder never pairs 100 ms or 300 001 ms apart", () => {
+	it("one persistent decoder rejects duplicates at 100 ms and distinct content 300 001 ms apart", () => {
 		const r = aisRig()
 		try {
 			r.hear("ais1", "A")
@@ -463,10 +473,10 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 			r.hear("ais1", "A")
 			expect(r.named()).toEqual([])
 			r.clock.now += CONFIRM_WINDOW_MS + 1
-			r.hear("ais1", "A")
+			r.hear("ais1", "A", "SYNTHETIC SECOND")
 			expect(r.named()).toEqual([])
 			r.clock.now += 60_000
-			r.hear("ais1", "A")
+			r.hear("ais1", "A", "SYNTHETIC THIRD")
 			expect(r.named()).toHaveLength(1)
 		} finally {
 			r.ambient.stop()

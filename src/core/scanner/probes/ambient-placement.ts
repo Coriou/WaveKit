@@ -1,20 +1,7 @@
 /**
- * Placement of a point ambient decode on an observation. A decoder reports
- * a frequency; the observation it names is the nearest one whose track reaches that
- * frequency, and none when two different signals are equally near.
- *
- * Rule (pure):
- * - A candidate is an observation of the decode's source with a track whose lifetime, widened
- *   by `pairMs` on both sides (an open one ends at `now`), contains the decode time.
- * - It reaches the decode when |track centre - decode hz| <= the reach. An ambient-only
- *   protocol (AIS, ACARS, VDL2, LoRa) reaches half its decoder's channel width
- *   (AMBIENT_CHANNEL_WIDTH_HZ), at least the 1 kHz decode tolerance: a track centred inside
- *   the decoder's channel is that channel's signal, and one centred outside it (a wide
- *   neighbour whose skirt covers the channel) is not. Any other decoder (a VFO-targeted
- *   multimon-ng, dsd-fme or direwolf) reaches max(1.5 kHz, track OBW / 2), as before.
- * - Of the reaching candidates the nearest wins. Candidates within AMBIENT_PLACEMENT_TIE_HZ of
- *   the nearest distance tie: when every tied candidate belongs to the same discovery they are
- *   all that discovery's observations and all are named; otherwise nothing is named.
+ * Point ambient association: keep every time/source/channel match only when they all
+ * belong to one discovery. Two reaching discoveries are ambiguous even when one is
+ * nearer. Callers supply the indexed frequency window (O(k) matching over its k tracks).
  */
 import { SCANNER_AMBIENT_TARGET_TOLERANCE_HZ } from "@wavekit/api-types"
 import type { ScannerProtocol } from "../types.js"
@@ -39,16 +26,24 @@ export const AMBIENT_CHANNEL_WIDTH_HZ: Readonly<Record<string, number>> =
 		vdl2: 25_000,
 		lora: 125_000,
 		adsb: 1_000_000,
+		// Point decoders reach half their channel width: 25 / 2 = 12.5 kHz for
+		// APRS/paging, 12.5 / 2 = 6.25 kHz for digital voice, and 6.25 / 2
+		// = 3.125 kHz for the narrow digital voice modes.
+		aprs: 25_000,
+		pocsag: 25_000,
+		flex: 25_000,
+		dmr: 12_500,
+		p25p1: 12_500,
+		p25p2: 12_500,
+		ysf: 12_500,
+		nxdn96: 12_500,
+		dpmr: 6_250,
+		nxdn48: 6_250,
+		dstar: 6_250,
 	})
 
 /** Least reach of a VFO-targeted ambient decoder (unchanged WG7 rule): 1.5 kHz. */
 export const AMBIENT_VFO_MIN_REACH_HZ = 1500
-
-/**
- * Tie width: 1 Hz. Track centres and decode frequencies are whole-Hz estimates, so two
- * distances within 1 Hz are indistinguishable.
- */
-export const AMBIENT_PLACEMENT_TIE_HZ = 1
 
 /**
  * Reach of a decode of `protocol` towards a track of `obwHz` (see the module rule). An
@@ -84,6 +79,7 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 	},
 	now: number,
 	pairMs: number,
+	onAmbiguous?: () => void,
 ): T[] {
 	if (!Number.isFinite(e.hz) || !Number.isFinite(e.at)) return []
 	const reaching: { o: T; distance: number }[] = []
@@ -98,17 +94,15 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 		reaching.push({ o, distance })
 	}
 	if (reaching.length === 0) return []
-	let nearest = Infinity
-	for (const r of reaching) nearest = Math.min(nearest, r.distance)
-	const tied = reaching
-		.filter(r => r.distance - nearest <= AMBIENT_PLACEMENT_TIE_HZ)
-		.map(r => r.o)
-	if (tied.length === 1) return tied
-	const discoveryId = tied[0]!.discoveryId
+	const matches = reaching.map(r => r.o)
+	if (matches.length === 1) return matches
+	const discoveryId = matches[0]!.discoveryId
 	if (
 		typeof discoveryId !== "string" ||
-		!tied.every(o => o.discoveryId === discoveryId)
-	)
+		!matches.every(o => o.discoveryId === discoveryId)
+	) {
+		onAmbiguous?.()
 		return []
-	return tied
+	}
+	return matches
 }

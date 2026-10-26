@@ -78,7 +78,7 @@ export function interpretMultimon(
 	const key = `${protocol}:cap`
 	// once accepted, every later decode of the capcode is evidence again (ambient refreshes lastConfirm)
 	if (!state.match.isAccepted(key, capcode)) {
-		if (plausible) state.match.markAccepted(key, capcode)
+		if (plausible && !state.requirePair) state.match.markAccepted(key, capcode)
 		else if (!state.match.accept(key, capcode, true)) return []
 	}
 	return [

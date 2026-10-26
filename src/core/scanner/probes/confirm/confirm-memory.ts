@@ -15,8 +15,8 @@
  * - Acceptance is kept per scope too (isAccepted / markAccepted): an identity accepted on one
  *   discovery is never accepted on another through the same decoder. At most
  *   CONFIRM_MAX_ENTRIES accepted entries, least recently used evicted first.
- * - Every pairing decision of an instance with a scope goes through here, repeats inside one
- *   probe or decoder included, so the separation and window bounds always apply.
+ * - Content-aware ambient callers use pairMessage: two distinct payloads need no skew delay;
+ *   identical payloads never pair. Other callers keep pair() and its separation guard.
  * - Invalid scope, key, value or clock reading: no pairing (the safe answer).
  */
 
@@ -45,6 +45,7 @@ export const CONFIRM_MAX_PART_CHARS = 256
 
 export class ConfirmMemory {
 	/** Entry id → time recorded, least recently recorded first. */
+	private readonly messages = new Map<string, { at: number; message: string }>()
 	private readonly seen = new Map<string, number>()
 	/** Accepted entry ids, least recently used first. */
 	private readonly accepted = new Set<string>()
@@ -81,6 +82,48 @@ export class ConfirmMemory {
 		return paired
 	}
 
+	/**
+	 * Content-aware ambient pairing needs no 2 s delay: different checked payloads prove
+	 * two messages even when aircraft send them milliseconds apart. Identical content
+	 * never pairs, even after 2 s; callers without content retain pair()'s skew guard.
+	 * At most 4096 identity entries, each with one 64-character digest (4096 × 64).
+	 */
+	pairMessage(
+		scope: string,
+		key: string,
+		value: string,
+		message: string,
+	): boolean {
+		if (
+			!validPart(scope) ||
+			!validPart(key) ||
+			!validPart(value) ||
+			!validPart(message)
+		)
+			return false
+		let at: number
+		try {
+			at = this.now()
+		} catch {
+			return false
+		}
+		if (!Number.isFinite(at)) return false
+		const id = `${scope}\u0000${key}\u0000${value}`
+		const previous = this.messages.get(id)
+		if (previous && at < previous.at) return false
+		const inWindow =
+			previous !== undefined && at - previous.at <= CONFIRM_WINDOW_MS
+		if (inWindow && previous.message === message) return false
+		const temporalPair = this.pair(scope, key, value)
+		this.messages.delete(id)
+		this.messages.set(id, { at, message })
+		while (this.messages.size > CONFIRM_MAX_ENTRIES) {
+			const oldest = this.messages.keys().next()
+			if (!oldest.done) this.messages.delete(oldest.value)
+		}
+		return inWindow || (previous === undefined && temporalPair)
+	}
+
 	/** Whether `value` under `key` is accepted in `scope` (refreshes its recency). */
 	isAccepted(scope: string, key: string, value: string): boolean {
 		if (!validPart(scope) || !validPart(key) || !validPart(value)) return false
@@ -108,6 +151,7 @@ export class ConfirmMemory {
 	}
 
 	clear(): void {
+		this.messages.clear()
 		this.seen.clear()
 		this.accepted.clear()
 	}

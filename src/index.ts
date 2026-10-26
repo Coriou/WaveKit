@@ -1933,8 +1933,12 @@ async function main(): Promise<void> {
 				// WG7 req 1.3: the decoder's own provenance binding; only commanded/relay, on the very
 				// source the ambient target names, at a frequency within 1 kHz of a binding target
 				// (the frequencies trust was proven for). Anything else: undefined (fail closed).
-				ambientTrust: (decoderId, hz, sourceId) =>
-					ambientTrustFromBinding(ambientProvenance?.(decoderId), hz, sourceId),
+				ambientTrust: (decoderId, hz, sourceId, placement) =>
+					ambientTrustFromBinding(
+						ambientProvenance?.(decoderId, placement),
+						hz,
+						sourceId,
+					),
 				digitalVoice,
 				liveDemod,
 				operatorActivity: liveDemodOperatorActivity(liveDemod),
