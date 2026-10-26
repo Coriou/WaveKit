@@ -1,3 +1,5 @@
+import { rename } from "node:fs/promises"
+import { HEARTBEAT_MS } from "../../../src/utils/lock-owner.js"
 import { spawn } from "node:child_process"
 import {
 	chmod,
@@ -73,7 +75,17 @@ describe("dedicated operator-data storage", () => {
 		await mkdir(lock(path), { mode: 0o700 })
 		const old = new Date(Date.now() - 31000)
 		await utimes(lock(path), old, old)
-		const recovered = await open(path)
+		let clock = 0
+		const recovered = await OperatorDataStorage.open({
+			stateDir: path,
+			lockWait: {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+				},
+			},
+		})
+		expect(clock).toBe(30000)
 		await recovered.close()
 		expect(await readdir(join(path, "operator-data"))).not.toContain(
 			".writer-lock",
@@ -617,4 +629,44 @@ describe("dedicated operator-data storage", () => {
 		expect(resolved).toBe(true)
 		expect(store.snapshot().revision).toBe(1)
 	})
+})
+
+it("latches unavailable on a lost heartbeat and preserves the successor on close", async () => {
+	const path = await root()
+	vi.useFakeTimers()
+	try {
+		const first = await open(path)
+		const snapshot = first.snapshot()
+		const lockPath = join(path, "operator-data", ".writer-lock")
+		await rename(lockPath, `${lockPath}.detached`)
+		const second = await open(path)
+		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await first.close()
+		expect(first.isAvailable()).toBe(false)
+		await expect(first.persist(snapshot)).rejects.toMatchObject({
+			code: "OPERATOR_DATA_IO",
+		})
+		expect((await lstat(lockPath)).isDirectory()).toBe(true)
+		await second.close()
+	} finally {
+		vi.useRealTimers()
+	}
+})
+it("checks ownership immediately before committing a write", async () => {
+	const path = await root()
+	let replace = false
+	const store = await open(path, async (stage, phase) => {
+		if (replace && stage === "rename" && phase === "before") {
+			replace = false
+			const lockPath = join(path, "operator-data", ".writer-lock")
+			await rename(lockPath, `${lockPath}.detached`)
+		}
+	})
+	const before = await readFile(file(path), "utf8")
+	replace = true
+	await expect(store.persist(store.snapshot())).rejects.toMatchObject({
+		code: "OPERATOR_DATA_IO",
+	})
+	expect(store.isAvailable()).toBe(false)
+	expect(await readFile(file(path), "utf8")).toBe(before)
 })

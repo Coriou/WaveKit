@@ -4,7 +4,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import { basename, dirname, join } from "node:path"
 import { z } from "zod"
-import { createComponentLogger, createLogger } from "./logger.js"
+import { createComponentLogger } from "./logger.js"
+import type { Logger } from "./logger.js"
 
 /**
  * Boot + process-start identities detect PID reuse, including container restarts.
@@ -138,16 +139,17 @@ export function sameScope(recorded: LockOwner, current: LockOwner): boolean {
 		recorded.bootId.kind === current.bootId.kind &&
 		!identityDiffers(recorded.bootId, current.bootId) &&
 		recorded.hostname === current.hostname &&
-		(!recorded.pidNamespace ||
-			!current.pidNamespace ||
-			recorded.pidNamespace === current.pidNamespace)
+		(recorded.bootId.kind !== "linux" ||
+			(Boolean(recorded.pidNamespace) &&
+				Boolean(current.pidNamespace) &&
+				recorded.pidNamespace === current.pidNamespace))
 	)
 }
 export function isStale(
 	recorded: LockOwner,
 	current: LockOwner,
 	probe: OwnerProbe,
-	heartbeatAge = 0,
+	unchangedFor = 0,
 ): boolean {
 	if (
 		recorded.bootId?.kind === "linux" &&
@@ -155,7 +157,7 @@ export function isStale(
 		recorded.bootId.value !== current.bootId.value
 	)
 		return true
-	if (heartbeatAge > HEARTBEAT_STALE_MS) return true
+	if (unchangedFor >= HEARTBEAT_STALE_MS) return true
 	if (!sameScope(recorded, current)) return false
 	return (
 		!probe.alive ||
@@ -193,75 +195,188 @@ export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS
 // 3 × H + H = 40 s leaves one additional refresh interval for recovery.
 export const LOCK_WAIT_MS = HEARTBEAT_STALE_MS + HEARTBEAT_MS
 export const INCOMPLETE_LOCK_MS = HEARTBEAT_STALE_MS
-const log = createComponentLogger(
-	createLogger({ level: "info" }),
-	"StorageLock",
-)
 export interface LockWaitOptions {
+	/** Monotonic milliseconds; never a wall clock. */
 	now?: () => number
 	sleep?: (ms: number) => Promise<void>
+	logger?: Logger
+	/** Test-only hook at the last heartbeat recheck before reclaim. */
+	beforeReclaim?: () => Promise<void>
+	onLost?: () => void
+}
+export function heartbeatValue(stat: {
+	dev: number
+	ino: number
+	size: number
+	mtimeMs: number
+}): string {
+	return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
 }
 export function lockWait(options: LockWaitOptions = {}) {
-	const now = options.now ?? (() => Date.now())
+	const now = options.now ?? (() => performance.now())
 	const sleep =
 		options.sleep ??
 		(ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
 	const started = now()
-	const monotonicStart = performance.now()
-	const elapsed = options.now
-		? () => now() - started
-		: () => performance.now() - monotonicStart
+	const observations = new Map<string, { value: string; since: number }>()
+	const log = options.logger
+		? createComponentLogger(options.logger, "StorageLock")
+		: undefined
 	let logged = false
 	return {
 		now,
+		value: (path: string) => observations.get(path)?.value,
+		observe: (path: string, value: string) => {
+			let previous = observations.get(path)
+			if (!previous || previous.value !== value) {
+				previous = { value, since: now() }
+				observations.set(path, previous)
+			}
+			return Math.max(0, Math.min(LOCK_WAIT_MS, now() - previous.since))
+		},
 		retry: async () => {
-			if (elapsed() >= LOCK_WAIT_MS) return false
+			const elapsed = Math.max(0, now() - started)
+			if (elapsed >= LOCK_WAIT_MS) return false
 			if (!logged) {
-				log.info("Waiting for storage lock heartbeat")
+				log?.info("Waiting for storage lock heartbeat")
 				logged = true
 			}
-			await sleep(Math.min(HEARTBEAT_MS, LOCK_WAIT_MS - elapsed()))
+			await sleep(Math.min(HEARTBEAT_MS, LOCK_WAIT_MS - elapsed))
 			return true
 		},
 	}
 }
+export interface LockHeartbeat {
+	(): Promise<void>
+	readonly lost: boolean
+	check: () => Promise<boolean>
+}
 export async function startLockHeartbeat(
 	path: string,
-): Promise<() => Promise<void>> {
-	// Keep an fd so a late refresh cannot touch a successor after rename/reclaim.
+	options: {
+		onLost?: () => void
+		verify?: () => Promise<boolean>
+		logger?: Logger
+	} = {},
+): Promise<LockHeartbeat> {
+	const log = options.logger
+		? createComponentLogger(options.logger, "StorageLock")
+		: undefined
 	const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+	const identity = await handle.stat()
+	let lost = false
+	let stopped = false
 	let pending = Promise.resolve()
+	const lose = () => {
+		if (lost) return
+		lost = true
+		clearInterval(timer)
+		options.onLost?.()
+	}
+	const check = async () => {
+		if (lost || stopped) return false
+		try {
+			const [actual, opened] = await Promise.all([
+				fs.lstat(path),
+				handle.stat(),
+			])
+			if (
+				actual.dev !== opened.dev ||
+				actual.ino !== opened.ino ||
+				actual.dev !== identity.dev ||
+				actual.ino !== identity.ino ||
+				(options.verify && !(await options.verify()))
+			) {
+				lose()
+				return false
+			}
+			return !lost && !stopped
+		} catch {
+			lose()
+			return false
+		}
+	}
 	const timer = setInterval(() => {
 		pending = pending
 			.then(async () => {
+				if (!(await check())) return
 				const now = new Date()
 				await handle.utimes(now, now)
 			})
 			.catch(() => {
-				log.warn("Storage lock heartbeat refresh failed")
+				lose()
+				log?.warn("Storage lock heartbeat refresh failed")
 			})
 	}, HEARTBEAT_MS)
 	timer.unref()
-	return async () => {
-		clearInterval(timer)
-		await pending
-		await handle.close()
+	let closing: Promise<void> | undefined
+	const stop = () => {
+		closing ??= (async () => {
+			clearInterval(timer)
+			await pending
+			stopped = true
+			await handle.close()
+		})()
+		return closing
+	}
+	Object.defineProperty(stop, "lost", { get: () => lost })
+	return Object.assign(stop, { check }) as LockHeartbeat
+}
+const OWNER = "owner.json"
+export interface WriterLock {
+	readonly lost: boolean
+	check: () => Promise<boolean>
+	release: () => Promise<void>
+}
+async function writerHandle(
+	lock: string,
+	options: LockWaitOptions,
+	expected: {
+		directory: { dev: number; ino: number }
+		ownerIdentity: { dev: number; ino: number }
+		contents: string
+	},
+): Promise<WriterLock> {
+	const { directory, ownerIdentity, contents } = expected
+	const verify = async () => {
+		const actual = await fs.lstat(lock)
+		const ownerActual = await fs.lstat(join(lock, OWNER))
+		return (
+			ownerActual.dev === ownerIdentity.dev &&
+			ownerActual.ino === ownerIdentity.ino &&
+			actual.dev === directory.dev &&
+			actual.ino === directory.ino &&
+			(await fs.readFile(join(lock, OWNER), "utf8")) === contents
+		)
+	}
+	const heartbeat = await startLockHeartbeat(join(lock, OWNER), {
+		...options,
+		verify,
+	})
+	return {
+		get lost() {
+			return heartbeat.lost
+		},
+		check: heartbeat.check,
+		release: async () => {
+			const ours = await heartbeat.check()
+			await heartbeat()
+			if (!ours || !(await verify().catch(() => false))) return
+			const aside = `${lock}.stale-${randomUUID()}`
+			await fs.rename(lock, aside)
+			await fs.rm(aside, { recursive: true, force: true })
+		},
 	}
 }
-const heartbeats = new Map<string, () => Promise<void>>()
-const OWNER = "owner.json"
 export async function acquireWriterLock(
 	lock: string,
 	options: LockWaitOptions = {},
-): Promise<boolean> {
+): Promise<WriterLock | false> {
 	const wait = lockWait(options)
 	for (;;) {
 		try {
-			const result = await acquireDirectory(lock, wait.now)
-			if (result === "acquired") {
-				heartbeats.set(lock, await startLockHeartbeat(join(lock, OWNER)))
-				return true
-			}
+			const result = await acquireDirectory(lock, wait, options)
+			if (typeof result !== "string") return result
 			if (result === "held") return false
 		} catch (error) {
 			if (!hasLockCode(error, "ENOENT")) throw error
@@ -269,6 +384,9 @@ export async function acquireWriterLock(
 		}
 		if (!(await wait.retry())) return false
 	}
+}
+export async function releaseWriterLock(lock: WriterLock): Promise<void> {
+	await lock.release()
 }
 function isContended(error: unknown): boolean {
 	return ["ENOTEMPTY", "EEXIST", "EISDIR", "ENOTDIR"].some(code =>
@@ -278,17 +396,17 @@ function isContended(error: unknown): boolean {
 async function ownerIsHeld(
 	lock: string,
 	current: LockOwner,
-	mtimeMs: number,
-	now: () => number,
+	wait: ReturnType<typeof lockWait>,
 ): Promise<"held" | "wait" | false> {
 	let owner: LockOwner | undefined
+	let stat = await fs.lstat(lock)
 	try {
 		const handle = await fs.open(
 			join(lock, OWNER),
 			constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
 		)
 		try {
-			mtimeMs = (await handle.stat()).mtimeMs
+			stat = await handle.stat()
 			const parsed = lockOwnerSchema.safeParse(
 				JSON.parse(await handle.readFile("utf8")),
 			)
@@ -300,10 +418,30 @@ async function ownerIsHeld(
 		if (!hasLockCode(error, "ENOENT") && !(error instanceof SyntaxError))
 			throw error
 	}
-	if (!owner) return now() - mtimeMs > HEARTBEAT_STALE_MS ? false : "wait"
-	if (isStale(owner, current, await probeLockOwner(owner), now() - mtimeMs))
+	const unchangedFor = wait.observe(lock, heartbeatValue(stat))
+	// Observe abandoned sibling claims concurrently with the holder, so both
+	// reach 3H within the same 3H + H acquisition budget after a container kill.
+	try {
+		const claim = `${lock}.reclaim`
+		const claimStat = await fs.lstat(claim)
+		if (claimStat.isDirectory() && !claimStat.isSymbolicLink())
+			await ownerIsHeld(claim, current, wait)
+	} catch (error) {
+		if (!hasLockCode(error, "ENOENT") && !hasLockCode(error, "ENAMETOOLONG"))
+			throw error
+	}
+	if (!owner) return unchangedFor >= HEARTBEAT_STALE_MS ? false : "wait"
+	if (isStale(owner, current, await probeLockOwner(owner), unchangedFor))
 		return false
 	return sameScope(owner, current) ? "held" : "wait"
+}
+async function currentHeartbeatValue(lock: string): Promise<string> {
+	try {
+		return heartbeatValue(await fs.lstat(join(lock, OWNER)))
+	} catch (error) {
+		if (!hasLockCode(error, "ENOENT")) throw error
+		return heartbeatValue(await fs.lstat(lock))
+	}
 }
 async function syncDirectory(path: string): Promise<void> {
 	const directory = await fs.open(
@@ -318,22 +456,29 @@ async function syncDirectory(path: string): Promise<void> {
 }
 async function acquireDirectory(
 	lock: string,
-	now: () => number,
-): Promise<"acquired" | "held" | "wait"> {
+	wait: ReturnType<typeof lockWait>,
+	options: LockWaitOptions,
+): Promise<WriterLock | "held" | "wait"> {
 	const current = await readLockOwner()
 	const prepared = `${lock}.new-${randomUUID()}`
 	await fs.mkdir(prepared, { mode: 0o700 })
 	try {
+		const contents = JSON.stringify({ ...current, nonce: randomUUID() })
 		const temp = join(prepared, `${randomUUID()}.tmp`)
 		const handle = await fs.open(temp, "wx", 0o600)
 		try {
-			await handle.writeFile(JSON.stringify(current))
+			await handle.writeFile(contents)
 			await handle.sync()
 		} finally {
 			await handle.close()
 		}
 		await fs.rename(temp, join(prepared, OWNER))
 		await syncDirectory(prepared)
+		const expected = {
+			directory: await fs.lstat(prepared),
+			ownerIdentity: await fs.lstat(join(prepared, OWNER)),
+			contents,
+		}
 
 		const before = await fs.lstat(lock).catch((error: unknown) => {
 			if (hasLockCode(error, "ENOENT")) return undefined
@@ -341,24 +486,37 @@ async function acquireDirectory(
 		})
 		if (before) {
 			if (!before.isDirectory() || before.isSymbolicLink()) return "held"
-			const held = await ownerIsHeld(lock, current, before.mtimeMs, now)
+			const held = await ownerIsHeld(lock, current, wait)
 			if (held) return held
 			// Claim before moving, then verify both inode and owner again: a legacy
 			// publisher may have installed its live owner since our first observation.
-			const claim = join(lock, ".reclaim")
-			const claimed = await acquireDirectory(claim, now)
-			if (claimed !== "acquired") return claimed
-			const claimIdentity = await fs.lstat(claim)
-			const stopClaim = await startLockHeartbeat(join(claim, OWNER))
-			let moved = false
+			// A sibling claim leaves legacy directory heartbeat metadata untouched.
+			const claim = `${lock}.reclaim`
+			const claimed = await acquireDirectory(
+				claim,
+				wait,
+				options.logger ? { logger: options.logger } : {},
+			)
+			if (typeof claimed === "string") return claimed
+			const claimHandle = claimed
 			try {
 				const actual = await fs.lstat(lock)
 				if (actual.ino !== before.ino || actual.dev !== before.dev)
 					return "held"
-				if (await ownerIsHeld(lock, current, before.mtimeMs, now)) return "held"
+				const observed = wait.value(lock)
+				const recheck = await ownerIsHeld(lock, current, wait)
+				if (wait.value(lock) !== observed) return "wait"
+				if (recheck) return recheck
+				await options.beforeReclaim?.()
+				const finalValue = await currentHeartbeatValue(lock)
+				if (finalValue !== observed) {
+					wait.observe(lock, finalValue)
+					return "wait"
+				}
+				// A refresh can still race this final read and rename by microseconds.
+				// The displaced holder detects loss within H and checks before commits.
 				const aside = `${lock}.stale-${randomUUID()}`
 				await fs.rename(lock, aside)
-				moved = true
 				try {
 					try {
 						await fs.rename(prepared, lock)
@@ -370,18 +528,7 @@ async function acquireDirectory(
 					await fs.rm(aside, { recursive: true, force: true })
 				}
 			} finally {
-				await stopClaim()
-				if (!moved) {
-					const actual = await fs.lstat(claim).catch((error: unknown) => {
-						if (hasLockCode(error, "ENOENT")) return undefined
-						throw error
-					})
-					if (
-						actual?.ino === claimIdentity.ino &&
-						actual.dev === claimIdentity.dev
-					)
-						await releaseWriterLock(claim)
-				}
+				await claimHandle.release()
 			}
 		} else {
 			// Only attempt direct publication after ENOENT. New-code publishers
@@ -398,14 +545,14 @@ async function acquireDirectory(
 		}
 		await syncDirectory(dirname(lock))
 		await cleanupStaleDirectories(lock)
-		return "acquired"
+		return await writerHandle(lock, options, expected)
 	} finally {
 		// Never clean the public lock on failure: only our private sibling is ours.
 		await fs.rm(prepared, { recursive: true, force: true })
 	}
 }
 async function cleanupStaleDirectories(lock: string): Promise<void> {
-	const prefixes = [`${basename(lock)}.stale-`, `${basename(lock)}.new-`]
+	const prefixes = [`${basename(lock)}.stale-`]
 	const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 	try {
 		for (const entry of await fs.readdir(dirname(lock))) {
@@ -414,12 +561,7 @@ async function cleanupStaleDirectories(lock: string): Promise<void> {
 			try {
 				const path = join(dirname(lock), entry)
 				const stat = await fs.lstat(path)
-				if (
-					stat.isDirectory() &&
-					!stat.isSymbolicLink() &&
-					(!entry.startsWith(`${basename(lock)}.new-`) ||
-						Date.now() - stat.mtimeMs >= INCOMPLETE_LOCK_MS)
-				)
+				if (stat.isDirectory() && !stat.isSymbolicLink())
 					await fs.rm(path, { recursive: true, force: true })
 			} catch {
 				// A concurrent acquirer may already have cleaned this sibling.
@@ -428,11 +570,4 @@ async function cleanupStaleDirectories(lock: string): Promise<void> {
 	} catch {
 		// Sibling cleanup must not fail a successfully published lock.
 	}
-}
-export async function releaseWriterLock(lock: string): Promise<void> {
-	await heartbeats.get(lock)?.()
-	heartbeats.delete(lock)
-	const aside = `${lock}.stale-${randomUUID()}`
-	await fs.rename(lock, aside)
-	await fs.rm(aside, { recursive: true, force: true })
 }

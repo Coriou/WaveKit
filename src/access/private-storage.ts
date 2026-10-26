@@ -1,3 +1,4 @@
+import type { Logger } from "../utils/logger.js"
 import { constants } from "node:fs"
 import fs from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
@@ -7,6 +8,7 @@ import { dirname, isAbsolute, join } from "node:path"
 import { z } from "zod"
 import {
 	lockWait,
+	heartbeatValue,
 	sameScope,
 	startLockHeartbeat,
 	isStale,
@@ -14,7 +16,7 @@ import {
 	probeLockOwner,
 	readLockOwner,
 } from "../utils/lock-owner.js"
-import type { LockWaitOptions } from "../utils/lock-owner.js"
+import type { LockHeartbeat, LockWaitOptions } from "../utils/lock-owner.js"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	digestMachineToken,
@@ -68,6 +70,7 @@ export interface PrivateAccessStorageOptions {
 	/** Dedicated local directory, never shared across hosts or PID namespaces. */
 	ownership: "single-host-pid-namespace"
 	random?: AccessRandomBytes
+	logger?: Logger
 	lockWait?: LockWaitOptions
 }
 
@@ -156,7 +159,8 @@ export class PrivateAccessStorage {
 	#directory: string
 	#handle: FileHandle
 	#directoryIdentity: { dev: number; ino: number }
-	#stopHeartbeat: (() => Promise<void>) | undefined
+	#stopHeartbeat: LockHeartbeat | undefined
+	#ownershipLost = false
 	#owner = ""
 	#ownerIdentity: { dev: number; ino: number } | undefined
 	#state: PrivateState | undefined
@@ -293,7 +297,10 @@ export class PrivateAccessStorage {
 			}
 			storage = new PrivateAccessStorage(options.directory, handle, stat)
 			await storage.#assertDirectory()
-			await storage.#acquire(scope, options.lockWait)
+			await storage.#acquire(scope, {
+				...options.lockWait,
+				...(options.logger ? { logger: options.logger } : {}),
+			})
 			await storage.#load(options.mode, options.random)
 			return storage
 		} catch (error) {
@@ -328,6 +335,7 @@ export class PrivateAccessStorage {
 	}
 
 	#current(): PrivateState {
+		if (this.#ownershipLost) throw failure("ACCESS_STORAGE_BUSY")
 		if (this.#closed || this.#unavailable || !this.#state)
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		return this.#state
@@ -445,6 +453,13 @@ export class PrivateAccessStorage {
 		}
 		this.#stopHeartbeat = await startLockHeartbeat(
 			join(this.#directory, this.#owner),
+			{
+				...options,
+				onLost: () => {
+					this.#ownershipLost = true
+					this.#unavailable = true
+				},
+			},
 		)
 		const entries = await fs.readdir(this.#directory)
 		if (entries.length > 64)
@@ -493,10 +508,27 @@ export class PrivateAccessStorage {
 						candidate,
 						identity,
 						await probeLockOwner(candidate),
-						wait.now() - stat.mtimeMs,
+						wait.observe(path, heartbeatValue(stat)),
 					)
-				)
+				) {
+					await options?.beforeReclaim?.()
+					const latest = await fs.lstat(path).catch(error => {
+						if (hasCode(error, "ENOENT")) return undefined
+						throw error
+					})
+					if (!latest) break
+					if (heartbeatValue(latest) !== heartbeatValue(stat)) {
+						wait.observe(path, heartbeatValue(latest))
+						if (!(await wait.retry())) throw failure("ACCESS_STORAGE_BUSY")
+						continue
+					}
+					// Residual read/unlink race: displaced holders detect loss within H
+					// and verify ownership again before committing writes.
+					await fs.unlink(path).catch(error => {
+						if (!hasCode(error, "ENOENT")) throw error
+					})
 					break
+				}
 				const code =
 					owner.data.scope !== scope
 						? "ACCESS_STORAGE_FOREIGN_OWNER"
@@ -504,11 +536,6 @@ export class PrivateAccessStorage {
 				if (sameScope(candidate, identity) || !(await wait.retry()))
 					throw failure(code)
 			}
-
-			// The unique immutable path cannot name a later owner's different nonce.
-			await fs.unlink(join(this.#directory, entry)).catch(error => {
-				if (!hasCode(error, "ENOENT")) throw error
-			})
 		}
 	}
 
@@ -604,11 +631,14 @@ export class PrivateAccessStorage {
 			writing = false
 			await this.#assertDirectory()
 			writing = true
+			if (this.#unavailable || !(await this.#stopHeartbeat?.check()))
+				throw failure("ACCESS_STORAGE_BUSY")
 			await fs.rename(temp, join(this.#directory, name))
 			ownedTemp = false
 			await this.#handle.sync()
 		} catch {
 			if (latch === "always" || !writing) this.#unavailable = true
+			if (this.#ownershipLost) throw failure("ACCESS_STORAGE_BUSY")
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		} finally {
 			if (handle) await handle.close().catch(() => undefined)
@@ -718,9 +748,14 @@ export class PrivateAccessStorage {
 			try {
 				await this.#assertDirectory()
 				if (this.#ownerIdentity) {
-					const stat = await fs.lstat(join(this.#directory, this.#owner))
+					const stat = await fs
+						.lstat(join(this.#directory, this.#owner))
+						.catch(error => {
+							if (hasCode(error, "ENOENT")) return undefined
+							throw error
+						})
 					if (
-						stat.isFile() &&
+						stat?.isFile() &&
 						stat.dev === this.#ownerIdentity.dev &&
 						stat.ino === this.#ownerIdentity.ino
 					)

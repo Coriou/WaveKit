@@ -1,3 +1,5 @@
+import type { WriterLock, LockWaitOptions } from "../utils/lock-owner.js"
+import type { Logger } from "../utils/logger.js"
 import { acquireWriterLock, releaseWriterLock } from "../utils/lock-owner.js"
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
@@ -32,6 +34,8 @@ export type StorageStage =
 	| "lock-release"
 export interface OperatorDataStorageOptions {
 	stateDir: string
+	logger?: Logger
+	lockWait?: LockWaitOptions
 	/** Test-only lifecycle observation/fault injection around actual local I/O. */
 	stage?: (
 		stage: StorageStage,
@@ -64,7 +68,7 @@ export class OperatorDataStorage {
 	private readonly lock: string
 	private readonly file: string
 	private directoryHandle: FileHandle | undefined
-	private ownsLock = false
+	private ownsLock: WriterLock | false = false
 	private unsafeIO = false
 	private available = false
 	private closing = false
@@ -82,6 +86,7 @@ export class OperatorDataStorage {
 		const storage = new OperatorDataStorage(options)
 		try {
 			await storage.initialize()
+			if (storage.ownsLock && storage.ownsLock.lost) throw unavailable()
 			storage.available = true
 			return storage
 		} catch (error) {
@@ -242,9 +247,14 @@ export class OperatorDataStorage {
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
 				throw unavailable()
-			if (!(await acquireWriterLock(this.lock)))
-				throw new StorageUnavailable("lock-held")
-			this.ownsLock = true
+			this.ownsLock = await acquireWriterLock(this.lock, {
+				...this.options.lockWait,
+				...(this.options.logger ? { logger: this.options.logger } : {}),
+				onLost: () => {
+					this.available = false
+				},
+			})
+			if (!this.ownsLock) throw new StorageUnavailable("lock-held")
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {
 			await this.closeHandle(parent, "parent-close")
@@ -315,6 +325,7 @@ export class OperatorDataStorage {
 			handle = undefined
 			await this.closeHandle(closing, "temp-close")
 			await this.stage("rename", "before")
+			if (!this.ownsLock || !(await this.ownsLock.check())) throw unavailable()
 			await rename(temp, this.file)
 			renamed = true
 			await this.stage("rename", "after")
@@ -349,7 +360,8 @@ export class OperatorDataStorage {
 		}
 		if (this.unsafeIO) throw unavailable()
 		if (this.ownsLock) {
-			await this.perform("lock-release", () => releaseWriterLock(this.lock))
+			const lock = this.ownsLock
+			await this.perform("lock-release", () => releaseWriterLock(lock))
 			this.ownsLock = false
 		}
 	}

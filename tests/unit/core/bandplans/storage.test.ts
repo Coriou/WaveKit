@@ -1,3 +1,5 @@
+import { rename } from "node:fs/promises"
+import { HEARTBEAT_MS } from "../../../../src/utils/lock-owner.js"
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
@@ -748,4 +750,44 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 			await rm(outfile, { force: true })
 		}
 	})
+})
+
+it("latches unavailable on a lost heartbeat and preserves the successor on close", async () => {
+	const path = await root()
+	vi.useFakeTimers()
+	try {
+		const first = await open(path)
+		const snapshot = first.snapshot()
+		const lockPath = join(path, "bandplans", ".writer-lock")
+		await rename(lockPath, `${lockPath}.detached`)
+		const second = await open(path)
+		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await first.close()
+		expect(first.isAvailable()).toBe(false)
+		await expect(first.persist(snapshot)).rejects.toMatchObject({
+			code: "BANDPLANS_IO",
+		})
+		expect((await lstat(lockPath)).isDirectory()).toBe(true)
+		await second.close()
+	} finally {
+		vi.useRealTimers()
+	}
+})
+it("checks ownership immediately before committing a write", async () => {
+	const path = await root()
+	let replace = false
+	const store = await open(path, async (stage, phase) => {
+		if (replace && stage === "rename" && phase === "before") {
+			replace = false
+			const lockPath = join(path, "bandplans", ".writer-lock")
+			await rename(lockPath, `${lockPath}.detached`)
+		}
+	})
+	const before = await readFile(file(path), "utf8")
+	replace = true
+	await expect(store.persist(store.snapshot())).rejects.toMatchObject({
+		code: "BANDPLANS_IO",
+	})
+	expect(store.isAvailable()).toBe(false)
+	expect(await readFile(file(path), "utf8")).toBe(before)
 })

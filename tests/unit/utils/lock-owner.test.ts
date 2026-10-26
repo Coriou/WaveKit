@@ -4,14 +4,14 @@ import { join } from "node:path"
 import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
-	acquireWriterLock,
+	acquireWriterLock as acquireHandle,
 	bootTime,
 	INCOMPLETE_LOCK_MS,
 	isStale,
 	parseStartTime,
 	readLockOwner,
 	probeLockOwner,
-	releaseWriterLock,
+	releaseWriterLock as releaseHandle,
 	TIME_IDENTITY_TOLERANCE_MS,
 	HEARTBEAT_MS,
 	HEARTBEAT_STALE_MS,
@@ -19,16 +19,39 @@ import {
 	startLockHeartbeat,
 	lockWait,
 } from "../../../src/utils/lock-owner.js"
-import type { LockOwner, OwnerReader } from "../../../src/utils/lock-owner.js"
+import type {
+	LockOwner,
+	OwnerReader,
+	WriterLock,
+	LockWaitOptions,
+} from "../../../src/utils/lock-owner.js"
 
+// Compatibility helpers for the existing boolean decision assertions. Production
+// callers retain their own acquisition handle; only this test harness tracks paths.
+const acquired = new Map<string, WriterLock>()
+async function acquireWriterLock(path: string, options: LockWaitOptions = {}) {
+	const handle = await acquireHandle(path, options)
+	if (handle) acquired.set(path, handle)
+	return Boolean(handle)
+}
+async function releaseWriterLock(path: string) {
+	const handle = acquired.get(path)
+	if (handle) {
+		await releaseHandle(handle)
+		acquired.delete(path)
+	}
+}
 const owner: LockOwner = {
 	pid: 123,
+	pidNamespace: "known",
 	hostname: "host",
 	bootId: { kind: "linux", value: "boot" },
 	startTime: { kind: "linux", value: "123" },
 }
 const roots: string[] = []
 afterEach(async () => {
+	for (const handle of acquired.values()) await handle.release()
+	acquired.clear()
 	vi.useRealTimers()
 	vi.restoreAllMocks()
 	for (const root of roots.splice(0))
@@ -97,7 +120,7 @@ describe("lock identity", () => {
 					recorded,
 					current,
 					{ alive: false, startTime: null },
-					HEARTBEAT_STALE_MS,
+					HEARTBEAT_STALE_MS - 1,
 				),
 			).toBe(false)
 			expect(
@@ -224,7 +247,7 @@ describe("lock identity", () => {
 									value: startDiffers ? "456" : "123",
 								},
 							},
-							expired ? HEARTBEAT_STALE_MS + 1 : HEARTBEAT_STALE_MS,
+							expired ? HEARTBEAT_STALE_MS : HEARTBEAT_STALE_MS - 1,
 						),
 					).toBe(
 						bootDiffers ||
@@ -300,17 +323,25 @@ describe("directory reclamation", () => {
 		vi.spyOn(Date, "now").mockReturnValue(now)
 		const old = new Date(now - INCOMPLETE_LOCK_MS - 1)
 		await fs.utimes(lock, old, old)
+		let clock = 0
 		const published = JSON.stringify(await readLockOwner())
 		const rename = fs.rename
 		let resumed = false
 		vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
-			if (!resumed && to === join(lock, ".reclaim")) {
+			if (!resumed && to === `${lock}.reclaim`) {
 				resumed = true
 				await fs.writeFile(join(lock, "owner.json"), published)
 			}
 			return rename(from, to)
 		})
-		expect(await acquireWriterLock(lock)).toBe(false)
+		expect(
+			await acquireWriterLock(lock, {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+				},
+			}),
+		).toBe(false)
 		expect(resumed).toBe(true)
 		expect(await fs.readFile(join(lock, "owner.json"), "utf8")).toBe(published)
 		expect(await fs.readdir(lock)).toEqual(["owner.json"])
@@ -394,7 +425,7 @@ describe("directory reclamation", () => {
 	})
 
 	it.each([INCOMPLETE_LOCK_MS - 1, INCOMPLETE_LOCK_MS, INCOMPLETE_LOCK_MS + 1])(
-		"sweeps only exact private UUID directories at age %i",
+		"retains private publisher directories at wall-clock age %i",
 		async age => {
 			const lock = await lockPath()
 			await fs.rmdir(lock)
@@ -411,11 +442,7 @@ describe("directory reclamation", () => {
 			const old = new Date(now - age)
 			await fs.utimes(abandoned, old, old)
 			expect(await acquireWriterLock(lock)).toBe(true)
-			if (age >= INCOMPLETE_LOCK_MS)
-				await expect(fs.lstat(abandoned)).rejects.toMatchObject({
-					code: "ENOENT",
-				})
-			else expect((await fs.lstat(abandoned)).isDirectory()).toBe(true)
+			expect((await fs.lstat(abandoned)).isDirectory()).toBe(true)
 			expect((await fs.lstat(unrelated)).isDirectory()).toBe(true)
 			expect((await fs.lstat(symlink)).isSymbolicLink()).toBe(true)
 			expect(await fs.readFile(regular, "utf8")).toBe("keep")
@@ -428,9 +455,9 @@ describe("directory reclamation", () => {
 		async kind => {
 			const lock = await lockPath()
 			if (kind === "abandoned-claim") {
-				await fs.mkdir(join(lock, ".reclaim"))
+				await fs.mkdir(`${lock}.reclaim`)
 				await fs.writeFile(
-					join(lock, ".reclaim", "owner.json"),
+					join(`${lock}.reclaim`, "owner.json"),
 					JSON.stringify({ ...(await readLockOwner()), pid: 99999999 }),
 				)
 			}
@@ -446,9 +473,13 @@ describe("directory reclamation", () => {
 			await fs.utimes(lock, old, old)
 			if (kind === "malformed")
 				await fs.utimes(join(lock, "owner.json"), old, old)
+			let clock = 0
 			const options = {
-				now: () => now,
-				sleep: () => new Promise<void>(resolve => setImmediate(resolve)),
+				now: () => clock,
+				sleep: async (ms: number) => {
+					clock += ms
+					await new Promise<void>(resolve => setImmediate(resolve))
+				},
 			}
 			const results = await Promise.all([
 				acquireWriterLock(lock, options),
@@ -488,7 +519,7 @@ describe("heartbeat leases", () => {
 					},
 				}),
 			).toBe(!refresh)
-			expect(clock - started).toBe(LOCK_WAIT_MS)
+			expect(clock - started).toBe(refresh ? LOCK_WAIT_MS : HEARTBEAT_STALE_MS)
 			if (refresh)
 				expect(JSON.parse(await fs.readFile(path, "utf8"))).toMatchObject({
 					hostname: "other",
@@ -536,4 +567,203 @@ describe("heartbeat leases", () => {
 		await releaseWriterLock(lock)
 		expect(await fs.readdir(join(lock, ".."))).toEqual([])
 	})
+})
+
+describe("ownership loss and monotonic observation", () => {
+	it.each([null, undefined, "different"])(
+		"does not trust Linux PID evidence with namespace %s",
+		namespace => {
+			const current = { ...owner, pidNamespace: namespace ?? null }
+			expect(isStale(owner, current, { alive: false, startTime: null })).toBe(
+				false,
+			)
+			expect(isStale(current, owner, { alive: false, startTime: null })).toBe(
+				false,
+			)
+			const fallback = {
+				...current,
+				bootId: { kind: "time" as const, value: "1000" },
+			}
+			expect(
+				isStale(fallback, fallback, { alive: false, startTime: null }),
+			).toBe(true)
+		},
+	)
+	it.each([-60000, 60000])(
+		"ignores wall-clock step %i and observes heartbeat for 3H",
+		async step => {
+			const lock = await lockPath()
+			const path = join(lock, "owner.json")
+			await fs.writeFile(
+				path,
+				JSON.stringify({ ...(await readLockOwner()), hostname: "foreign" }),
+			)
+			let clock = 0
+			vi.spyOn(Date, "now").mockReturnValue(Date.now() + step)
+			const handle = await acquireHandle(lock, {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+				},
+			})
+			expect(clock).toBe(HEARTBEAT_STALE_MS)
+			expect(handle).not.toBe(false)
+			if (handle) await handle.release()
+		},
+	)
+	it("restarts observation when a heartbeat refreshes at the final reclaim recheck", async () => {
+		const lock = await lockPath()
+		const path = join(lock, "owner.json")
+		await fs.writeFile(
+			path,
+			JSON.stringify({ ...(await readLockOwner()), hostname: "foreign" }),
+		)
+		let clock = 0
+		let refreshed = false
+		const handle = await acquireHandle(lock, {
+			now: () => clock,
+			sleep: async ms => {
+				clock += ms
+			},
+			beforeReclaim: async () => {
+				refreshed = true
+				await fs.utimes(path, new Date(1234), new Date(1234))
+			},
+		})
+		expect(refreshed).toBe(true)
+		expect(handle).toBe(false)
+		expect(clock).toBe(LOCK_WAIT_MS)
+		expect(JSON.parse(await fs.readFile(path, "utf8"))).toMatchObject({
+			hostname: "foreign",
+		})
+	})
+	it("keeps acquisition handles independent and never releases a successor", async () => {
+		const lock = await lockPath()
+		await fs.rmdir(lock)
+		vi.useFakeTimers()
+		const lost = vi.fn()
+		const first = await acquireHandle(lock, { onLost: lost })
+		if (!first) throw new Error("missing first handle")
+		await fs.rename(lock, `${lock}.detached`)
+		const second = await acquireHandle(lock)
+		if (!second) throw new Error("missing second handle")
+		expect(vi.getTimerCount()).toBe(2)
+		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await first.release()
+		expect(first.lost).toBe(true)
+		expect(lost).toHaveBeenCalledTimes(1)
+		expect(vi.getTimerCount()).toBe(1)
+		expect(await second.check()).toBe(true)
+		await second.release()
+		expect(vi.getTimerCount()).toBe(0)
+	})
+	it("detects changed owner identity even on the same inode", async () => {
+		const lock = await lockPath()
+		await fs.rmdir(lock)
+		const handle = await acquireHandle(lock)
+		if (!handle) throw new Error("missing handle")
+		await fs.writeFile(
+			join(lock, "owner.json"),
+			JSON.stringify(await readLockOwner()),
+		)
+		expect(await handle.check()).toBe(false)
+		await handle.release()
+		expect((await fs.lstat(lock)).isDirectory()).toBe(true)
+	})
+	it("stops refreshing a detached owner inode", async () => {
+		const lock = await lockPath()
+		const path = join(lock, "owner.json")
+		const detached = join(lock, "old.json")
+		await fs.writeFile(path, "owner")
+		await fs.utimes(path, new Date(0), new Date(0))
+		vi.useFakeTimers()
+		const heartbeat = await startLockHeartbeat(path)
+		await fs.rename(path, detached)
+		await fs.writeFile(path, "successor")
+		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await heartbeat()
+		expect(heartbeat.lost).toBe(true)
+		expect((await fs.stat(detached)).mtimeMs).toBe(0)
+	})
+})
+
+it("holds a refreshed foreign heartbeat despite a forward wall-clock step", async () => {
+	const lock = await lockPath()
+	const path = join(lock, "owner.json")
+	await fs.writeFile(
+		path,
+		JSON.stringify({ ...(await readLockOwner()), hostname: "foreign" }),
+	)
+	let clock = 0
+	const wall = Date.now()
+	vi.spyOn(Date, "now").mockReturnValue(wall + 60000)
+	expect(
+		await acquireHandle(lock, {
+			now: () => clock,
+			sleep: async ms => {
+				clock += ms
+				await fs.utimes(path, new Date(wall + clock), new Date(wall + clock))
+			},
+		}),
+	).toBe(false)
+	expect(clock).toBe(LOCK_WAIT_MS)
+})
+
+it.each([HEARTBEAT_STALE_MS - 1, HEARTBEAT_STALE_MS, HEARTBEAT_STALE_MS + 1])(
+	"observes expiry boundary %i",
+	elapsed => {
+		let clock = 0
+		const wait = lockWait({ now: () => clock })
+		expect(wait.observe("lock", "same")).toBe(0)
+		clock = elapsed
+		expect(wait.observe("lock", "same")).toBe(elapsed)
+		expect(
+			isStale(
+				{ ...owner, hostname: "foreign" },
+				owner,
+				{ alive: false, startTime: null },
+				wait.observe("lock", "same"),
+			),
+		).toBe(elapsed >= HEARTBEAT_STALE_MS)
+		expect(wait.observe("lock", "refreshed")).toBe(0)
+	},
+)
+
+it("restarts legacy directory observation after a refresh just before rename", async () => {
+	const lock = await lockPath()
+	let clock = 0
+	const result = await acquireHandle(lock, {
+		now: () => clock,
+		sleep: async ms => {
+			clock += ms
+		},
+		beforeReclaim: async () => {
+			await fs.utimes(lock, new Date(1234), new Date(1234))
+		},
+	})
+	expect(result).toBe(false)
+	expect(clock).toBe(LOCK_WAIT_MS)
+	expect((await fs.lstat(lock)).isDirectory()).toBe(true)
+	expect(await fs.readdir(lock)).toEqual([])
+})
+
+it("observes a foreign abandoned reclaim claim within the same 40 s budget", async () => {
+	const lock = await lockPath()
+	const foreign = JSON.stringify({
+		...(await readLockOwner()),
+		hostname: "foreign",
+	})
+	await fs.writeFile(join(lock, "owner.json"), foreign)
+	await fs.mkdir(`${lock}.reclaim`)
+	await fs.writeFile(join(`${lock}.reclaim`, "owner.json"), foreign)
+	let clock = 0
+	const handle = await acquireHandle(lock, {
+		now: () => clock,
+		sleep: async ms => {
+			clock += ms
+		},
+	})
+	expect(handle).not.toBe(false)
+	expect(clock).toBe(HEARTBEAT_STALE_MS)
+	if (handle) await handle.release()
 })

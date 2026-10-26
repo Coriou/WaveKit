@@ -480,7 +480,7 @@ describe("private single-operator persistence", () => {
 				expect(await fs.readdir(directory)).not.toContain(name)
 				await recovered.close()
 			}
-			expect(clock - started).toBe(LOCK_WAIT_MS)
+			expect(clock - started).toBe(refresh ? LOCK_WAIT_MS : 3 * HEARTBEAT_MS)
 		},
 	)
 
@@ -515,6 +515,12 @@ describe("private single-operator persistence", () => {
 		"recovers a reused live PID: %s",
 		async kind => {
 			const readFile = fs.readFile
+			const stat = fs.stat
+			vi.spyOn(fs, "stat").mockImplementation((path, options) =>
+				path === "/proc/self/ns/pid"
+					? Promise.resolve({ ino: 42 } as Awaited<ReturnType<typeof fs.stat>>)
+					: stat(path, options),
+			)
 			vi.spyOn(fs, "readFile").mockImplementation((path, options) =>
 				path === "/proc/sys/kernel/random/boot_id"
 					? Promise.resolve("11111111-1111-4111-8111-111111111111")
@@ -541,7 +547,19 @@ describe("private single-operator persistence", () => {
 				const old = new Date(bootTime() - 1000)
 				await fs.utimes(path, old, old)
 			}
-			await open(directory, "load")
+			let clock = 0
+			const recovered = await PrivateAccessStorage.open({
+				directory,
+				mode: "load",
+				ownership,
+				lockWait: {
+					now: () => clock,
+					sleep: async ms => {
+						clock += ms
+					},
+				},
+			})
+			await recovered.close()
 			expect(await fs.readdir(directory)).not.toContain(name)
 		},
 	)
@@ -954,4 +972,93 @@ describe("last-seen persistence (WG2 req 11.6)", () => {
 		await expect(storage.persist(snapshot)).rejects.toThrow()
 		expect(storage.unavailable).toBe(true)
 	})
+})
+
+it("latches access storage unavailable when its owner path is reclaimed", async () => {
+	const { directory } = await location()
+	vi.useFakeTimers()
+	try {
+		const first = await open(directory)
+		const snapshot = first.startupSnapshot()
+		const name = (await fs.readdir(directory)).find(entry =>
+			entry.startsWith("owner-"),
+		)!
+		await fs.unlink(join(directory, name))
+		const second = await open(directory, "load")
+		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await expect(first.persist(snapshot)).rejects.toMatchObject({
+			code: "ACCESS_STORAGE_BUSY",
+		})
+		await first.close()
+		expect(
+			(await fs.readdir(directory)).filter(entry => entry.startsWith("owner-")),
+		).toHaveLength(1)
+		await second.close()
+	} finally {
+		vi.useRealTimers()
+	}
+})
+it("rejects an access write reclaimed just before its commit", async () => {
+	const { directory } = await location()
+	const storage = await open(directory)
+	const snapshot = storage.startupSnapshot()
+	const name = (await fs.readdir(directory)).find(entry =>
+		entry.startsWith("owner-"),
+	)!
+	const sync = fs.open
+	let remove = true
+	vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+		const handle = await sync(...args)
+		if (remove && String(args[0]).endsWith(".tmp")) {
+			remove = false
+			await fs.unlink(join(directory, name))
+		}
+		return handle
+	})
+	const before = await fs.readFile(join(directory, "access-state.json"), "utf8")
+	await expect(storage.persist(snapshot)).rejects.toMatchObject({
+		code: "ACCESS_STORAGE_BUSY",
+	})
+	expect(await fs.readFile(join(directory, "access-state.json"), "utf8")).toBe(
+		before,
+	)
+	await storage.close()
+})
+
+it("rechecks an access heartbeat immediately before unlink", async () => {
+	const { directory } = await location()
+	const storage = await open(directory)
+	const name = (await fs.readdir(directory)).find(entry =>
+		entry.startsWith("owner-"),
+	)!
+	const path = join(directory, name)
+	const record = JSON.parse(await fs.readFile(path, "utf8")) as {
+		scope: string
+		identity: LockOwner
+	}
+	await storage.close()
+	record.scope = "a".repeat(64)
+	record.identity.hostname = "foreign"
+	await fs.writeFile(path, JSON.stringify(record), { mode: 0o600 })
+	let clock = 0
+	const refresh = vi.fn(async () => {
+		await fs.utimes(path, new Date(1234), new Date(1234))
+	})
+	await expect(
+		PrivateAccessStorage.open({
+			directory,
+			mode: "load",
+			ownership,
+			lockWait: {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+				},
+				beforeReclaim: refresh,
+			},
+		}),
+	).rejects.toMatchObject({ code: "ACCESS_STORAGE_FOREIGN_OWNER" })
+	expect(refresh).toHaveBeenCalledTimes(1)
+	expect(clock).toBe(LOCK_WAIT_MS)
+	expect(await fs.readdir(directory)).toContain(name)
 })
