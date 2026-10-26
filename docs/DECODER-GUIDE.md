@@ -634,10 +634,11 @@ for suspendable decoders. Decoders protected by `always` mode or an operator sta
 running; after loss, a fresh 60-second clean run with complete evidence lets them graduate
 and frees the source's probation slot. CPU over the guard restarts this recovery interval
 at the following sample; a full 60 seconds of complete evidence must follow the latest
-spike. A failed original probation stays failed even after its evidence ages out of recent
-history; only a fresh clean run can release that protected probation slot. Continued loss
-or CPU spikes keep newcomers waiting. Graduation remains earned when a later CPU spike
-occurs.
+spike. CPU evidence against an original probation stays failed even after it is evicted
+from bounded history; only a fresh clean run can release that protected probation slot.
+Drop evidence resets on reconnect, so previous-epoch loss does not condemn a resumed
+placement. Continued loss or CPU spikes keep newcomers waiting. Graduation remains
+earned when a later CPU spike occurs, including while link recovery delays reconciliation.
 Late-drop shedding uses only completed windows ending within the last 30 seconds
 (3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
 The budget defaults to half the available CPU capacity, with process and cgroup limits;

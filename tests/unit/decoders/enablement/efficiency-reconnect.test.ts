@@ -369,3 +369,127 @@ it.each(["forget", "prune", "readmit"] as const)(
 		}
 	},
 )
+
+it("graduates at completed coverage after pending link recovery despite a later CPU spike", () => {
+	let mono = 0
+	const cpu = { normalisedPercent: 10 }
+	const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+	const monitor = createEfficiencyMonitor({
+		sources: () => ["s"],
+		branchCounters: () => new Map([["raw", counters]]),
+		topology: () => "raw",
+		cpu,
+		now: () => mono,
+		monoNow: () => mono,
+		ingest: () => ({
+			maxGapMs: mono === 98000 ? 1000 : 0,
+			catchupBytes: 0,
+			chunks: 100,
+		}),
+		loopDelay: () => ({ maxMs: 0, p99Ms: 0 }),
+		shortfall: () => false,
+		recovery: () => ({
+			sequence: 1,
+			completedSequence: mono >= 102000 ? 1 : 0,
+			failedSequence: 0,
+			maxGapMs: 1000,
+			shortfall: mono >= 98000 && mono < 102000 ? null : false,
+		}),
+		setInterval: () => ({ cancel() {} }),
+	})
+	const gate = createEfficiencyGate(
+		{ budgetCores: 3, cpuGuardPercent: 90 },
+		{ drops: monitor },
+	)
+	const tick = (at: number) => {
+		mono = at
+		gate.record(monitor.sampleNow())
+	}
+	monitor.start()
+	try {
+		for (let at = 2000; at <= 66000; at += 2000) tick(at)
+		const old = placement("old", 2_048_000)
+		expect(gate.admit(old, [], mono)).toEqual({ admit: true })
+		const running: RunningPlacement[] = [
+			{ ...old, admittedAtMs: mono, mode: "always", startMode: "auto" },
+		]
+		// Earn 30 s at 96 s without reconciling; pending recovery temporarily
+		// hides that completion from the gate at 98 s and 100 s.
+		for (let at = 68000; at <= 96000; at += 2000) tick(at)
+		expect(monitor.coverageCompleteAtMono("s", 66000, 30000)).toBe(96000)
+		counters.droppedBytesTotal++
+		tick(98000)
+		expect(monitor.coverageCompleteAtMono("s", 66000, 30000)).toBeNull()
+		cpu.normalisedPercent = 95
+		tick(100000)
+		expect(gate.probation(running, mono)).toEqual([])
+		cpu.normalisedPercent = 10
+		tick(102000)
+		expect(monitor.latestAttribution("s")).toBe("link")
+		expect(monitor.coverageCompleteAtMono("s", 66000, 30000)).toBe(96000)
+		expect(monitor.droppedBetweenMono("s", 66000, mono)).toBe(false)
+		expect(gate.probation(running, mono)).toEqual([])
+		expect(
+			gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
+		).toBe(false)
+		// The next clean interval restores source admission after link recovery.
+		tick(104000)
+		expect(gate.admit(placement("needed", 2_048_000), running, mono)).toEqual({
+			admit: true,
+		})
+	} finally {
+		monitor.stop()
+	}
+})
+
+it("graduates resumed coverage without retaining a previous epoch's drop failure", () => {
+	const events = new EventEmitter()
+	let mono = 0
+	const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+	const monitor = createEfficiencyMonitor({
+		sourceEvents: events,
+		sources: () => ["s"],
+		branchCounters: () => new Map([["raw", counters]]),
+		topology: () => "raw",
+		cpu: { normalisedPercent: 10 },
+		now: () => mono,
+		monoNow: () => mono,
+		setInterval: () => ({ cancel() {} }),
+	})
+	const gate = createEfficiencyGate(
+		{ budgetCores: 3, cpuGuardPercent: 90 },
+		{ drops: monitor },
+	)
+	const tick = (at: number) => {
+		mono = at
+		gate.record(monitor.sampleNow())
+	}
+	monitor.start()
+	try {
+		for (let at = 2000; at <= 66000; at += 2000) tick(at)
+		const old = placement("old", 2_048_000)
+		expect(gate.admit(old, [], mono)).toEqual({ admit: true })
+		const running: RunningPlacement[] = [
+			{ ...old, admittedAtMs: mono, mode: "always", startMode: "auto" },
+		]
+		counters.droppedBytesTotal++
+		tick(68000)
+		expect(monitor.droppedBetweenMono("s", 66000, mono)).toBe(true)
+		expect(gate.probation(running, mono)).toEqual([])
+		events.emit("disconnected", "s")
+		events.emit("data", "s", Buffer.alloc(1))
+		for (let at = 70000; at <= 102000; at += 2000) {
+			tick(at)
+			expect(gate.probation(running, mono)).toEqual([])
+			expect(
+				gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
+			).toBe(at < 102000)
+		}
+		// Reconnect settling ends at 70 s; baseline at 72 s plus 30 s of
+		// fresh coverage completes at 102 s, before 60 s recovery at 134 s.
+		expect(monitor.coverageCompleteAtMono("s", 66000, 30000)).toBe(102000)
+		expect(monitor.droppedBetweenMono("s", 66000, mono)).toBe(false)
+	} finally {
+		monitor.stop()
+	}
+})

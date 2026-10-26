@@ -178,9 +178,15 @@ export function createEfficiencyGate(
 	// or view() is called with a partial or earlier list.
 	// Placements that completed probation with no evidence against them.
 	const graduated = new Set<string>()
-	// A bounded recent history must never erase a failed original probation.
+	// CPU evidence evicted from bounded history must not erase a failed probation.
 	// One flag per admitted placement, reset with its admission mark or removal.
 	const originalFailed = new Set<string>()
+	const evictHighCpu = () => {
+		const t = highCpu.shift()
+		if (t === undefined) return
+		for (const [key, admitted] of admittedMono)
+			if (!graduated.has(key) && admitted <= t) originalFailed.add(key)
+	}
 	/** Placements this gate admitted (YAML and pre-gate runs never are). */
 	const gated = new Set<string>()
 	/** Activity moves whose next admission inherits a graduated probation. */
@@ -265,8 +271,12 @@ export function createEfficiencyGate(
 		if (graduated.has(p.key)) return true
 		const at = graduationAt(p, mono)
 		const admitted = admittedMono.get(p.key)!
-		if (evidence(p, admitted, at ?? mono) !== null) originalFailed.add(p.key)
-		if (at !== null && !originalFailed.has(p.key)) return true
+		if (
+			at !== null &&
+			!originalFailed.has(p.key) &&
+			evidence(p, admitted, at) === null
+		)
+			return true
 		if (p.mode !== "always" && p.startMode !== "operator") return false
 		// Protected probationers cannot be suspended after loss. Let a fresh
 		// clean run release their slot: cleanAt - 30 × 2000 ms is its first
@@ -414,8 +424,12 @@ export function createEfficiencyGate(
 				return
 			}
 			const at = sample.atMs
-			// Prune on healthy samples too. Original probation failures are
-			// latched separately, so the cap cannot turn them into clean evidence.
+			// Prune on healthy samples too, retaining the recovery interval:
+			// 60000 ms + one 2000 ms sample = at most 32 timestamps.
+			// Normal graduation may still need anything since admission, so
+			// lower the cutoff to the oldest ungraduated admission. Any forced
+			// eviction preserves CPU failure for admissions <= that timestamp;
+			// drops stay with the monitor, which clears them on a new epoch.
 			let mono = NaN
 			try {
 				mono = deps.drops?.lastSampleMono?.() ?? monoNow()
@@ -426,7 +440,7 @@ export function createEfficiencyGate(
 				let since = mono - EFFICIENCY_CLEAR_MS - EFFICIENCY_SAMPLE_MS
 				for (const [key, admitted] of admittedMono)
 					if (!graduated.has(key)) since = Math.min(since, admitted)
-				while (highCpu.length && highCpu[0]! < since) highCpu.shift()
+				while (highCpu.length && highCpu[0]! < since) evictHighCpu()
 			}
 			if (
 				valid(sample.cpuPercent) &&
@@ -436,7 +450,7 @@ export function createEfficiencyGate(
 				// so the sample that completes coverage includes its CPU reading.
 				if (Number.isFinite(mono)) {
 					highCpu.push(mono)
-					if (highCpu.length > 1024) highCpu.shift()
+					if (highCpu.length > 1024) evictHighCpu()
 				}
 			}
 			cpuAt = at
