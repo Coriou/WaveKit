@@ -1503,6 +1503,7 @@ export class DecoderManager extends EventEmitter {
 					this.logPlacement(parent.placement, "removed")
 					this.restorePlacementOptions(parent)
 					delete parent.efficiencyBackoffMs
+					delete parent.efficiencyLateShed
 					delete parent.admission
 					delete parent.admittedAtMs
 					delete parent.placement
@@ -1623,6 +1624,7 @@ export class DecoderManager extends EventEmitter {
 				if (moved && state.placement) {
 					enablement.gate?.forget(state.placement.key)
 					delete state.efficiencyBackoffMs
+					delete state.efficiencyLateShed
 					delete state.admission
 					delete state.admittedAtMs
 				}
@@ -5611,6 +5613,7 @@ export class DecoderManager extends EventEmitter {
 				continue
 			gate.forget(state.placement.key)
 			delete state.efficiencyBackoffMs
+			delete state.efficiencyLateShed
 			state.admission = { admit: false, detail: "budget", retryAtMs: now }
 		}
 		this.scheduleEfficiencyEvaluation()

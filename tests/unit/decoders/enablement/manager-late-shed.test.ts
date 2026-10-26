@@ -16,6 +16,7 @@ import type {
 } from "../../../../src/core/channelizer/types.js"
 import type {
 	EfficiencyGate,
+	LateDropWindow,
 	PlacementPlan,
 	PlacementPlanner,
 	WantedPlacement,
@@ -367,6 +368,100 @@ it.each([
 		expect(Date.parse(status.efficiency!.retryAt!) - Date.now()).toBe(
 			elapsed < resetAfter ? 600_000 : 300_000,
 		)
+	},
+)
+
+it.each(["move", "remove and re-add"] as const)(
+	"resets late-shed history after a configured placement %s and normal probation failure",
+	async change => {
+		let windows: LateDropWindow[] = []
+		let droppedAt: number | undefined
+		const gate = createEfficiencyGate(
+			{ budgetCores: 10, cpuGuardPercent: 90 },
+			{
+				drops: {
+					monoNow: () => performance.now(),
+					sources: () => ["rtl"],
+					dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+					droppedSinceMono: (_id, since) =>
+						droppedAt !== undefined && droppedAt >= since,
+					droppedWithinMs: () => false,
+					latestAttribution: () => "none",
+					lateWindows: () => windows,
+					coverageCompleteAtMono: (_id, since, amount) =>
+						performance.now() >= since + amount ? since + amount : null,
+				},
+			},
+		)
+		const forget = vi.spyOn(gate, "forget")
+		const f = setup("rate-test", gate)
+		// Synthetic channels and in-process streams keep the scenario isolated.
+		f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_000_000 })
+		f.create("dec")
+		const original = f.place("dec", 1_000_000)
+		f.plan([original])
+		await f.manager.startAll()
+		const lateShed = async () => {
+			const start = performance.now()
+			await vi.advanceTimersByTimeAsync(20_000)
+			windows = [0, 1].map(index => ({
+				startMono: start + index * 10_000,
+				endMono: start + (index + 1) * 10_000,
+				condemning: true,
+				linkOrUnknownDrops: false,
+			}))
+			await f.manager["applyProbation"]()
+			await f.settle()
+			expect(f.manager.getAllStatus()[0]).toMatchObject({
+				running: false,
+				efficiency: { detail: "late-drops" },
+			})
+			windows = []
+		}
+		await vi.advanceTimersByTimeAsync(65_000)
+		await lateShed()
+		const replacement = change === "move" ? f.place("dec", 1_025_000) : original
+		if (change === "remove and re-add") {
+			f.plan([])
+			await f.settle()
+		}
+		f.plan([replacement])
+		await f.settle()
+		expect(forget).toHaveBeenCalledWith(original.key)
+		expect(f.instances.get("dec")?.running).toBe(true)
+		expect(f.configs.get("dec")?.["channelHz"]).toBe(replacement.channelHz)
+		expect(f.manager.efficiencyView().sources[0]?.admitted[0]?.probation).toBe(
+			true,
+		)
+
+		// Fail the new placement's normal probation before it can graduate.
+		droppedAt = performance.now()
+		await f.manager["applyProbation"]()
+		const failed = f.manager.getAllStatus()[0]!
+		expect(failed).toMatchObject({
+			running: false,
+			efficiency: { detail: "drops" },
+		})
+		expect(Date.parse(failed.efficiency!.retryAt!) - Date.now()).toBe(300_000)
+		droppedAt = undefined
+		await vi.advanceTimersByTimeAsync(
+			Date.parse(failed.efficiency!.retryAt!) - Date.now() + 2500,
+		)
+		await f.settle()
+		expect(f.instances.get("dec")?.running).toBe(true)
+		await vi.advanceTimersByTimeAsync(35_000)
+		expect(f.manager.efficiencyView().sources[0]?.admitted[0]?.probation).toBe(
+			false,
+		)
+		await lateShed()
+
+		const decision = gate.admit(replacement, [], performance.now())
+		expect(decision.admit).toBe(false)
+		if (decision.admit) return
+		expect(decision.detail).toBe("late-drops")
+		expect(decision.retryAtMs - performance.now()).toBe(299_650)
+		const status = f.manager.getAllStatus()[0]!
+		expect(Date.parse(status.efficiency!.retryAt!) - Date.now()).toBe(299_650)
 	},
 )
 
