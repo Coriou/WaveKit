@@ -305,6 +305,9 @@ describe("activity routes", () => {
 		})
 		expect(unknown.statusCode).toBe(400)
 		expect(unknown.json()).toMatchObject({ code: "ACTIVITY_QUERY_INVALID" })
+		expect(unknown.json<{ message: string }>().message).toContain(
+			"Accepted parameters: kinds, sourceIds, decoderIds, protocols, categories, frequencyMin, frequencyMax, producedFrom, producedTo, entityKey, text, refs, order, limit, pageToken",
+		)
 
 		const invalid = await app.inject({
 			method: "GET",

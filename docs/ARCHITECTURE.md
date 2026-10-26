@@ -483,6 +483,15 @@ Search, facets and cursor replay are served on `/api/activity` and
 the WebSocket `activity` channel. The store is off by default. A failed open
 keeps the process running and those routes answer 503 `ACTIVITY_UNAVAILABLE`.
 
+### Activity presentation
+
+Pager Activity presentation converts multimon whitespace markers (LF, CR, HT,
+VT, FF, RS and US) and their raw control characters to spaces, collapses whitespace,
+and strips other control markers and C0/C1 controls while preserving decoded data.
+Empty function-zero pages carry a `tone only` label; they remain stored events,
+with compact notice presentation in the web app. Message presentation budgets
+still apply to list fields and titles.
+
 ## Decoder Integration Patterns
 
 WaveKit supports three decoder integration patterns:

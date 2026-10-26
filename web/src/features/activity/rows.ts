@@ -152,6 +152,19 @@ export function rowView(s: ActivitySummary): RowView {
 			notice: true,
 		}
 	}
+	if (
+		s.category === "paging" &&
+		s.fields.some(f => f.key === "label" && f.value === "tone only")
+	) {
+		return {
+			icon: null,
+			title: s.title ?? "tone only",
+			subtitle: protocolText(s) ?? "Paging",
+			message: null,
+			readings: null,
+			notice: true,
+		}
+	}
 	if (s.kind === "analog-transmission") return analogView(s)
 	const message = s.fields.find(
 		f =>

@@ -29,6 +29,12 @@ const textualPayload = objectSchema({
 	to: asString,
 })
 
+// Keep marker regexes and sanitisation in sync with web/src/features/activity/pager-detail.ts.
+// multimon-ng pocsag.c trtab: ASCII 0..31 plus DEL (127).
+// https://github.com/EliasOenal/multimon-ng/blob/master/pocsag.c
+const PAGER_MARKERS =
+	/<(NUL|SOH|STX|ETX|EOT|ENQ|ACK|BEL|BS|HT|LF|VT|FF|CR|SO|SI|DLE|DC1|DC2|DC3|DC4|NAK|SYN|ETB|CAN|EM|SUB|ESC|FS|GS|RS|US|DEL)>/g
+
 type TextualType = "message" | "decode"
 
 function family(protocol: string | undefined): string | undefined {
@@ -79,10 +85,22 @@ function presentPage(
 	rawProtocol: string,
 ): DecodePresentation {
 	const cap = canonicalCapcode(payload["address"] ?? payload["capcode"])
-	const message = stringField(payload, "message")
+	const rawMessage = payload["message"]
+	const message =
+		typeof rawMessage === "string"
+			? rawMessage
+					.replace(/<(LF|CR|HT|VT|FF|RS|US)>|[\n\r\t\v\f\u001e\u001f]/g, " ")
+					.replace(PAGER_MARKERS, "")
+					.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+					.replace(/\s+/g, " ")
+					.trim()
+			: undefined
+	const toneOnly = integerField(payload, "function") === 0 && !message
 	const preview = message === undefined ? "" : message.slice(0, 40)
 	const title = clampTitle(
-		[rawProtocol, cap ?? "", preview].filter(part => part !== "").join(" "),
+		[rawProtocol, cap ?? "", toneOnly ? "tone only" : preview]
+			.filter(part => part !== "")
+			.join(" "),
 	)
 	return presentation({
 		category: "paging",
@@ -91,6 +109,11 @@ function presentPage(
 		title,
 		fields: takeFields(
 			[
+				{
+					key: "label",
+					label: "Label",
+					value: toneOnly ? "tone only" : undefined,
+				},
 				{
 					key: "message",
 					label: "Message",

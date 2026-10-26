@@ -13,6 +13,7 @@ import type { CategoryName } from "@wavekit/brand/react"
 import { clockText } from "../display.ts"
 import { formatWidth } from "../format.ts"
 import { fieldText, protocolText, rowView } from "../activity/rows.ts"
+import { sanitisePagerMessage } from "../activity/pager-detail.ts"
 import { bearing, distanceKm, relativeText } from "../map/geo.ts"
 import { mergeFields } from "./humanize.ts"
 
@@ -341,27 +342,45 @@ export function messageView(
 			badges.push({ label: `Type ${t}`, variant: "neutral" })
 	}
 
-	const text = row.message
 	const extra = !FULLY_PRESENTED.has(item.category) || item.protocol === null
 	const said_ = `${row.title} · ${sub}`
-	const fields = mergeFields(coreFields, analog ? undefined : data, extra)
-		.map(batteryWord)
-		.filter(f => {
-			if (BADGE_KEYS.has(f.key)) return false
-			if (
-				MESSAGE_KEYS.has(f.key) &&
-				typeof f.value === "string" &&
-				f.value === text
-			)
-				return false
-			if (text !== null && f.value === text) return false
-			// the header already says "NFM voice"
-			if (analog && f.key === "modulation") return false
-			// identifiers already in the title or subtitle; readings (with a unit) always stay
-			if (!f.unit && typeof f.value !== "boolean" && said(f, said_))
-				return false
-			return true
-		})
+	const merged = mergeFields(coreFields, analog ? undefined : data, extra).map(
+		f =>
+			item.category === "paging" &&
+			f.key === "message" &&
+			typeof f.value === "string"
+				? { ...f, value: sanitisePagerMessage(f.value) }
+				: f,
+	)
+	const fallback = merged.find(f => f.key === "message")?.value
+	const text =
+		item.category === "paging"
+			? sanitisePagerMessage(
+					row.message ?? (typeof fallback === "string" ? fallback : ""),
+				) || null
+			: row.message
+	const fields = merged.map(batteryWord).filter(f => {
+		if (BADGE_KEYS.has(f.key)) return false
+		// The sanitised paging body is already shown above, or is empty.
+		if (
+			item.category === "paging" &&
+			f.key === "message" &&
+			(f.value === "" || text !== null)
+		)
+			return false
+		if (
+			MESSAGE_KEYS.has(f.key) &&
+			typeof f.value === "string" &&
+			f.value === text
+		)
+			return false
+		if (text !== null && f.value === text) return false
+		// the header already says "NFM voice"
+		if (analog && f.key === "modulation") return false
+		// identifiers already in the title or subtitle; readings (with a unit) always stay
+		if (!f.unit && typeof f.value !== "boolean" && said(f, said_)) return false
+		return true
+	})
 
 	const position =
 		item.position ??

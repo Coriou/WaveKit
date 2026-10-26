@@ -14,6 +14,7 @@ import { summaryOfRecord } from "../messages/card.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { ActivityRow } from "./ActivityList.tsx"
 import { rowView } from "./rows.ts"
+import { pagerDetailItem } from "./pager-detail.ts"
 
 const RELATED = 6
 
@@ -119,6 +120,12 @@ export function ActivityDetail({
 	const provenance =
 		record?.kind === "decoder-reception" ? record.payload.provenance : null
 
+	const detailItem = item ? pagerDetailItem(item, record) : null
+	const detailRecord =
+		record?.kind === "decoder-reception" && detailItem && detailItem !== item
+			? { ...record, payload: { ...record.payload, fields: detailItem.fields } }
+			: record
+
 	return (
 		<section className="wka-detail" aria-label="Event" onKeyDown={onKeyDown}>
 			<div className="wka-detail-bar">
@@ -134,7 +141,12 @@ export function ActivityDetail({
 			</div>
 			<div className="wka-detail-body wk-scroll">
 				{item ? (
-					<MessageCard item={item} record={record} flat readOnly={readOnly} />
+					<MessageCard
+						item={detailItem ?? item}
+						record={detailRecord}
+						flat
+						readOnly={readOnly}
+					/>
 				) : (
 					<h3 className="wka-detail-title">Event</h3>
 				)}

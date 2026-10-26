@@ -124,3 +124,9 @@ Browsers only install from HTTPS or `localhost`.
 - What the web app still needs from the core: [`docs/web/CORE-GAPS.md`](web/CORE-GAPS.md).
 - Screenshots on this page and in the README come from `pnpm --filter @wavekit/web docs:shots`
   (the built app against the mock, so the data is the same on every run).
+
+Activity pager details show the full stored message when the list presentation
+was clipped. List previews and titles keep their compact limits. Multimon whitespace
+markers and their raw control characters become spaces in pager titles and message bodies; other control markers are hidden and whitespace
+is collapsed. The raw JSON retains the original payload. Empty function-zero pages
+are labelled **tone only** and displayed as compact notices.

@@ -537,7 +537,7 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	for (const key of Object.keys(params)) {
 		if (!SEARCH_PARAMS.has(key)) {
 			throw new ActivityQueryError(
-				`Unknown activity query parameter ${key}`,
+				`Unknown activity query parameter ${key}. Accepted parameters: ${[...SEARCH_PARAMS].join(", ")}`,
 				"ACTIVITY_QUERY_INVALID",
 				400,
 			)
