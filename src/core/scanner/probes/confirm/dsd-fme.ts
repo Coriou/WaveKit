@@ -146,6 +146,7 @@ function build(
 ): DsdFmeDecodeEvidence {
 	const ev: DsdFmeDecodeEvidence = {
 		...evidenceBase(state, at),
+		contentVerified: true,
 		protocol,
 		metadata,
 	}
@@ -321,7 +322,7 @@ export function guardDsdFmeEvidence(
 		encrypted: _encrypted,
 		...rest
 	} = publicEvidence
-	return { ...rest, metadata: {} }
+	return { ...rest, contentVerified: false, metadata: {} }
 }
 
 export function isDsdFmeProtocol(protocol: ScannerProtocol): boolean {

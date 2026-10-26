@@ -176,6 +176,8 @@ export interface DiscoveryMetadataInput {
 }
 
 export interface DecodeEvidence {
+	/** dsd-fme content passed protocol CRC/FEC checks; absent on legacy evidence. */
+	contentVerified?: boolean
 	/** Most frequent sync-only CC; never an identity. */
 	unverifiedCc?: number
 	protocol: ScannerProtocol

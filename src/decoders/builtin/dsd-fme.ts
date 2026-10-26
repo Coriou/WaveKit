@@ -67,7 +67,9 @@ const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g
 const _TS_PATTERN = /^(?:(?:\d{4}-\d{2}-\d{2}\s+)?\d{1,2}:\d{2}:\d{2})\s+/
 
 /** Sync detection: "Sync: +DMR", "Sync: +P25p1", etc. */
-const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])(?<proto>[A-Za-z0-9]+)\b/i
+// dsd_frame_sync.c prints signed P25/DMR/YSF/dPMR/DSTAR;
+// nxdn_frame.c prints unsigned NXDN48/NXDN96.
+const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])?(?<proto>[A-Za-z0-9]+)\b/i
 
 /** Error conditions - FEC, CRC, sync lost */
 const ERROR_PATTERN = /\b(FEC ERR|CRC ERR|SYNC LOST|no sync)\b/i
@@ -151,7 +153,7 @@ const YSF_CRC_OK = /\bFICH\b(?!.*CRC\s+ERR)/i
 
 // --- NXDN Patterns ---
 /** NXDN sync (reserved - protocol detection uses SYNC_PATTERN) */
-const _NXDN_HEAD = /\bSync:\s*\+NXDN(?<rate>48|96)\b/i
+const _NXDN_HEAD = /\bSync:\s*[+-]?NXDN(?<rate>48|96)\b/i
 /** NXDN RAN (Radio Access Number): "RAN=50" */
 const NXDN_RAN = /\bRAN\s*=\s*(?<ran>\d+)\b/i
 /** NXDN voice/data indicator */
@@ -1519,7 +1521,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// dmr_ms.c/dmr_bs.c: loss of frame sync ends the burst sequence.
 		if (
 			/Frame Sync Err:|SYNC LOST|no sync/i.test(line) ||
-			(sync && !/^[+-]DMR$/i.test(sync[0].replace(/^Sync:\s*/i, ""))) ||
+			(sync && sync.groups?.["proto"]?.toUpperCase() !== "DMR") ||
 			at - this.linkDmrAt > CALL_TIMEOUT_MS
 		)
 			this.linkDmrCc = undefined
@@ -1604,9 +1606,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			case "p25p1":
 			case "p25p2": {
 				// dsd_frame.c sets DUID EE on BCH failure but still prints NAC.
-				// NAC/CC may be cached P2 state: accept only direct NAC + a valid DUID.
+				// printFrameInfo prints NAC or NAC/CC (dsd_frame.c:34); only a
+				// recognized current DUID proves BCH passed, never the cached field alone.
 				const checkedNac =
-					/\bNAC:\s*([0-9A-F]{3});.*\b(?:HDU|LDU1|LDU2|TDULC|TDU|TSBK|MPDU|TSDU)\b/i.exec(
+					/\bNAC(?:\/CC)?:\s*([0-9A-F]{3});.*\b(?:HDU|LDU1|LDU2|TDULC|TDU|TSBK|MPDU|TSDU)\b/i.exec(
 						line,
 					)?.[1]
 				const nac = checkedNac ?? P25_NAC.exec(line)?.groups?.["nac"]

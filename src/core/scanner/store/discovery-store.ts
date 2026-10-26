@@ -2535,8 +2535,61 @@ export class DiscoveryStore
 		try {
 			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
 			for (const d of s.discoveries) this.insertDiscovery(clone(d))
-			for (const o of [...s.observations].sort(compareObs))
-				if (this.discoveries.has(o.discoveryId)) this.putObservation(clone(o))
+			for (const o of [...s.observations].sort(compareObs)) {
+				if (!this.discoveries.has(o.discoveryId)) continue
+				const observation = clone(o)
+				// Old dsd-fme rows called sync-only CCs CRC-clean. Only explicit
+				// content provenance survives a restart as an identity proof.
+				if (observation.decode !== undefined)
+					observation.decode = observation.decode.map(ev => {
+						if (!isDsdFmeProtocol(ev.protocol) || ev.contentVerified === true)
+							return ev
+						const {
+							identity,
+							callId: _callId,
+							encrypted: _encrypted,
+							...rest
+						} = ev
+						const cc =
+							identity?.kind === "dmr-cc" &&
+							/^(?:[0-9]|1[0-5])$/.test(identity.value)
+								? Number(identity.value)
+								: ev.unverifiedCc
+						return {
+							...rest,
+							contentVerified: false,
+							metadata: {},
+							...(cc !== undefined ? { unverifiedCc: cc } : {}),
+						}
+					})
+				this.putObservation(observation)
+			}
+			for (const d of this.discoveries.values()) {
+				if (!isDsdFmeProtocol(d.protocol) || d.identity === undefined) continue
+				const verified = (this.byDiscovery.get(d.id) ?? []).some(o =>
+					o.decode?.some(
+						ev =>
+							ev.contentVerified === true &&
+							ev.protocol === d.protocol &&
+							ev.crcClean === true &&
+							ev.identity !== undefined &&
+							identityFitsProtocol(ev.protocol, ev.identity) &&
+							sameIdentity(ev.identity, d.identity),
+					),
+				)
+				if (verified) continue
+				delete d.identity
+				d.confidence = "activity"
+				d.metadata = {
+					talkgroups: [],
+					sources: [],
+					slots: [],
+					callsigns: [],
+					capcodes: [],
+					ismModels: [],
+				}
+				d.encrypted = false
+			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }

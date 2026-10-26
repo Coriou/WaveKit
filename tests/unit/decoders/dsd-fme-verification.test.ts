@@ -220,6 +220,118 @@ describe("dsd-fme content verification", () => {
 		expect(restored.get(id)?.evidenceLevel).toBe("weak")
 	})
 
+	it.each([undefined, false, "true", 1])(
+		"downgrades legacy persisted identity without explicit provenance (%s)",
+		provenance => {
+			const store = new DiscoveryStore({
+				maxDiscoveries: 10,
+				now: () => T0,
+				newId: counterIds(),
+			})
+			const obs = makeObs({
+				id: "legacy",
+				centreHz: HZ,
+				startedAt: T0,
+				open: true,
+			})
+			const id = store.ingest(obs).discoveryId!
+			const ev: DecodeEvidence = {
+				protocol: "dmr",
+				identity: { kind: "dmr-cc", value: "3" },
+				crcClean: true,
+				metadata: {},
+				at: T0 + 3.7,
+				epoch: obs.track.epoch,
+				origin: "probe",
+			}
+			store.appendObservationEvidence(obs.id, ev)
+			store.applyEvidence(id, ev)
+			const snapshot = store.snapshot()
+			for (const row of snapshot.observations[0]?.decode ?? [])
+				Object.assign(row, { contentVerified: provenance })
+			store.restore(snapshot)
+			expect(store.get(id)).toMatchObject({
+				confidence: "activity",
+				evidenceLevel: "weak",
+				proof: { kind: "digital-undecoded", unverifiedCc: 3 },
+			})
+			expect(store.get(id)?.identity).toBeUndefined()
+		},
+	)
+
+	it.each([
+		["p25p1", "p25-nac", "123"],
+		["p25p2", "p25-nac", "123"],
+		["nxdn48", "nxdn-ran", "3"],
+		["nxdn96", "nxdn-ran", "3"],
+		["ysf", "ysf-dgid", "3"],
+		["dstar", "dstar-call", "TEST123"],
+		["dpmr", "dpmr-cc", "3"],
+	] as const)(
+		"downgrades legacy %s identities too",
+		(protocol, kind, value) => {
+			const store = new DiscoveryStore({
+				maxDiscoveries: 10,
+				now: () => T0,
+				newId: counterIds(),
+			})
+			const obs = makeObs({
+				id: "legacy-family",
+				centreHz: HZ,
+				startedAt: T0,
+				open: true,
+			})
+			const id = store.ingest(obs).discoveryId!
+			const ev: DecodeEvidence = {
+				protocol,
+				identity: { kind, value },
+				crcClean: true,
+				metadata: {},
+				at: T0 + 3.7,
+				epoch: obs.track.epoch,
+				origin: "probe",
+			}
+			store.appendObservationEvidence(obs.id, ev)
+			store.applyEvidence(id, ev)
+			store.restore(store.snapshot())
+			expect(store.get(id)?.proof?.kind).toBe("digital-undecoded")
+			expect(store.get(id)?.evidenceLevel).toBe("weak")
+			expect(store.get(id)?.identity).toBeUndefined()
+		},
+	)
+
+	it("preserves new content verification through schema and snapshot restore", () => {
+		const r = rig()
+		r.feed(bs("03", "CSBK"))
+		r.feed(bs("03", "CSBK"))
+		expect(r.evidence.at(-1)?.contentVerified).toBe(true)
+		const store = new DiscoveryStore({
+			maxDiscoveries: 10,
+			now: () => T0,
+			newId: counterIds(),
+		})
+		const obs = makeObs({
+			id: "checked",
+			centreHz: HZ,
+			startedAt: T0,
+			open: true,
+		})
+		const id = store.ingest(obs).discoveryId!
+		const ev: DecodeEvidence = {
+			...r.evidence.at(-1)!,
+			epoch: obs.track.epoch,
+		}
+		expect(DecodeEvidenceSchema.parse(ev).contentVerified).toBe(true)
+		store.appendObservationEvidence(obs.id, ev)
+		store.applyEvidence(id, ev)
+		store.restore(store.snapshot())
+		expect(store.get(id)).toMatchObject({
+			identity: { kind: "dmr-cc", value: "3" },
+			evidenceLevel: "proven",
+			proof: { kind: "decoded" },
+		})
+	})
+
 	it("replays the two-PTT fixture with checked TG+SRC and a CC identity", () => {
 		const r = rig()
 		const fixture = readFileSync(
@@ -248,8 +360,11 @@ describe("dsd-fme content verification", () => {
 	it.each([
 		["P25p1", "NAC: 123; LDU1", true],
 		["P25p1", "NAC: 123; duid:EE", false],
-		["P25p1", "NAC/CC: 123; LDU1", false],
+		["P25p1", "NAC/CC: 123; LDU1", true],
+		["P25p1", "NAC/CC: 123; duid:EE", false],
+		["P25p1", "NAC/CC: 123;", false],
 		["P25p1", "nac: [123] src: [123] tg: [9]", false],
+		["NXDN48", " RAN 03 FACCH2", true],
 		["NXDN96", " RAN 03 FACCH2", true],
 		["NXDN96", " RAN 03 UDCH", true],
 		["NXDN96", " RAN=03 TGT=9 SRC=123", false],
@@ -265,7 +380,7 @@ describe("dsd-fme content verification", () => {
 		"%s only trusts checked output: %s",
 		(protocol, line, verified) => {
 			const r = rig()
-			r.feed(`Sync: +${protocol} `)
+			r.feed(`Sync: ${protocol.startsWith("NXDN") ? "" : "+"}${protocol} `)
 			r.feed(line)
 			r.feed(line)
 			expect(r.links.at(-1)?.verified ?? false).toBe(verified)

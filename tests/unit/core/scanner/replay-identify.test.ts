@@ -1,3 +1,5 @@
+import { DsdFmeDecoder } from "../../../../src/decoders/builtin/dsd-fme.js"
+import type { DsdFmeLinkLine } from "../../../../src/decoders/builtin/dsd-fme-link.js"
 import { verifiedLinkLine } from "./verified-link-fake.js"
 import { PassThrough } from "node:stream"
 import pino from "pino"
@@ -26,7 +28,11 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
+import {
+	flushAsync,
+	poolHarness,
+	probeRequest,
+} from "../../../mocks/scanner/probe-fakes.js"
 
 const view = (
 	id: string,
@@ -213,6 +219,66 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 		expect(h.claimed.size).toBe(0)
 		expect(h.port.confirmLive).not.toHaveBeenCalled()
 	})
+
+	it.each([0, 25_000, undefined])(
+		"replay CSBK headers use the original tuner centre (offset %s Hz), including after retune",
+		async offset => {
+			const h = harness({ captures: [view("original")] })
+			if (offset !== undefined) {
+				h.engine.setEpoch(1, TARGET_HZ - offset)
+				h.pool.watchEngine("rtl", h.engine)
+			}
+			// The capture records epoch 1; the current tuner has moved to epoch 2.
+			h.engine.setEpoch(2, TARGET_HZ + 50_000)
+			await h.pool.onEpoch("rtl", 2, TARGET_HZ + 50_000)
+			const res = h.pool.request(
+				probeRequest({
+					targetHz: TARGET_HZ,
+					epoch: 1,
+					replay: { captureId: "original" },
+					modes: [
+						{
+							decoderType: "dsd-fme",
+							protocol: "dmr",
+							holdMs: 1800,
+							options: { mode: "auto" },
+							covers: ["dmr"],
+						},
+					],
+				}),
+			)
+			expect(res).toHaveProperty("started")
+			if (!("started" in res)) return
+			await flushAsync()
+			const decoder = new DsdFmeDecoder(
+				{ id: "parser-fake", type: "dsd-fme", enabled: true, options: {} },
+				pino({ level: "silent" }),
+			)
+			let at = h.clock.now + 3.7
+			decoder.on("link", (line: DsdFmeLinkLine) => {
+				h.decoders.emitLink(res.started, { ...line, at })
+				at += 1003.7
+			})
+			for (let i = 0; i < 2; i++)
+				(
+					decoder as unknown as { handleOutputLine(line: string): void }
+				).handleOutputLine(
+					"21:49:48 Sync: +DMR  [slot1]  slot2  | Color Code=03 | CSBK",
+				)
+
+			h.decoders.created.get(res.started)!.emit("exit", 0, null)
+			await new Promise(r => setTimeout(r, 300))
+			await flushAsync()
+			expect(h.evidence).toHaveLength(1)
+			if (offset === 25_000)
+				expect(h.evidence[0]?.ev.identity).toEqual({
+					kind: "dmr-cc",
+					value: "3",
+				})
+			else expect(h.evidence[0]?.ev.identity).toBeUndefined()
+			await h.pool.destroy()
+		},
+	)
 
 	it("a live decode confirms live, replays nothing and settles", async () => {
 		const h = harness({ captures: [view("a")] })

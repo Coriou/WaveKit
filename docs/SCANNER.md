@@ -602,8 +602,16 @@ guard, digital voice additionally needs paired checked voice link control with
 both talkgroup and source before it can be decoded.
 
 The same conservative rule applies to other dsd-fme protocols: P25 accepts a
-direct NAC only on a recognized NID/BCH-checked frame; cached NAC/CC and legacy
-bracketed output stay unverified. NXDN accepts current RAN on CRC-checked
+NAC or NAC/CC only alongside a recognized current NID/BCH-checked frame type;
+a cached field alone, a failed DUID and legacy bracketed output stay unverified. NXDN accepts current RAN on CRC-checked
 FACCH2/UDCH output, rather than cached SACCH/CAC RAN. YSF FICH sync, unchecked
 D-STAR MY headers and dPMR's cached channel code do not establish identities.
 Unknown output formats default to unverified.
+
+Persisted dsd-fme evidence requires explicit `contentVerified: true` provenance
+before a restored identity can be decoded/proven. Legacy rows without it retain
+only digital sync evidence and an unverified DMR color-code hint. Replay uses the
+original source epoch's tuner centre retained by the scanner, rather than the
+narrow capture's channel centre. The capture index stores source and epoch but
+not tuner centre; if that epoch's centre is no longer known (including bounded
+history eviction), the DC guard conservatively requires checked voice LC.

@@ -194,6 +194,10 @@ describe("detection-quality amendment 9 properties", () => {
 					}
 					let prep: ((s: DiscoveryStore) => void) | undefined
 					if (kind === "identity") {
+						// Identity conflicts need well-formed protocol/identity pairs;
+						// malformed legacy dsd-fme identities are now downgraded.
+						a.protocol = b.protocol = "dmr"
+						a.family = b.family = "digital-voice"
 						a.identity = { kind: "dmr-cc", value: "1" }
 						b.identity = { kind: "dmr-cc", value: "2" }
 						if (decodedIdentity) {
