@@ -46,6 +46,7 @@ const KISS_TFESC = 0xdd // Transposed Frame Escape
 
 const BASE_RECONNECT_DELAY = 2000
 const MAX_RECONNECT_DELAY = 30000
+const FIRST_CONNECT_DELAY = 2000
 
 /**
  * Configuration options for the Direwolf decoder.
@@ -162,8 +163,16 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	protected udpClient: UdpSocket | null = null
 	protected reconnectAttempts: number = 0
 	protected reconnectTimer: ReturnType<typeof setTimeout> | null = null
+	/** True while a reconnect is scheduled (its timer pending). */
 	protected isReconnecting: boolean = false
 	protected isStopping: boolean = false
+	/** The first connect after start, once direwolf had time to bind its KISS port. */
+	private connectTimer: ReturnType<typeof setTimeout> | null = null
+	/** Backoff of the KISS reconnects: base × 2^(attempt − 1), at most `reconnectMaxMs`. */
+	protected reconnectBaseMs = BASE_RECONNECT_DELAY
+	protected reconnectMaxMs = MAX_RECONNECT_DELAY
+	/** Delay before the first connect after start. */
+	protected firstConnectDelayMs = FIRST_CONNECT_DELAY
 	protected outputHost: string
 	protected outputPort: number
 
@@ -269,11 +278,26 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		await super.start()
 
 		// Connect to output port (Network Consumer logic)
-		// Direwolf needs time to initialize and bind the KISS port.
-		// We use a longer delay and rely on exponential backoff reconnection if needed.
-		setTimeout(() => {
+		// Direwolf needs time to initialize and bind the KISS port; until it does, the
+		// client retries with bounded backoff for as long as the decoder runs.
+		this.clearConnectTimers()
+		this.reconnectAttempts = 0
+		this.connectTimer = setTimeout(() => {
+			this.connectTimer = null
 			void this.connectToOutput()
-		}, 2000)
+		}, this.firstConnectDelayMs)
+	}
+
+	private clearConnectTimers(): void {
+		if (this.connectTimer) {
+			clearTimeout(this.connectTimer)
+			this.connectTimer = null
+		}
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer)
+			this.reconnectTimer = null
+		}
+		this.isReconnecting = false
 	}
 
 	/**
@@ -281,12 +305,9 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	 */
 	override async stop(): Promise<void> {
 		this.isStopping = true
-		// Cancel reconnects
-		if (this.reconnectTimer) {
-			clearTimeout(this.reconnectTimer)
-			this.reconnectTimer = null
-		}
-		// Diconnect network
+		// Cancel the pending first connect and reconnects
+		this.clearConnectTimers()
+		// Disconnect network
 		this.disconnectFromOutput()
 		// Stop process
 		await super.stop()
@@ -335,65 +356,73 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	// Network Consumer Logic (Adapted from NetworkProducerDecoder)
 	// =========================================================================
 
+	/**
+	 * One connect attempt to direwolf's KISS port. Resolves once the attempt connected or ended
+	 * (never rejects). Every failed or closed connection schedules the next attempt with bounded
+	 * backoff until the decoder stops, so a KISS port that binds late is still reached.
+	 */
 	protected async connectToOutput(): Promise<void> {
+		if (this.isStopping) return
 		const host = this.outputHost
 		const port = this.outputPort
 
-		this.logger.info({ port }, "Connecting to Direwolf KISS output")
+		this.logger.debug({ port }, "Connecting to Direwolf KISS output")
 
-		return new Promise<void>((resolve, reject) => {
-			this.tcpClient = createConnection({ host, port }, () => {
+		return new Promise<void>(resolve => {
+			const socket = createConnection({ host, port }, () => {
 				this.logger.info({ port }, "Connected to Direwolf KISS")
 				this.reconnectAttempts = 0
-				this.isReconnecting = false
 				resolve()
 			})
+			this.tcpClient = socket
 
-			this.tcpClient.on("data", (data: Buffer) => {
+			socket.on("data", (data: Buffer) => {
 				this.handleNetworkData(data)
 			})
 
-			this.tcpClient.on("error", (err: Error) => {
-				this.logger.error(
-					{ err: safeErrorFields(err) },
-					"KISS connection error",
-				)
-				if (!this.isReconnecting && this.reconnectAttempts === 0) {
-					this.scheduleReconnect()
-					resolve()
+			socket.on("error", (err: Error) => {
+				// Refused while direwolf is still binding its port is expected: debug only.
+				const refused = (err as { code?: unknown }).code === "ECONNREFUSED"
+				const fields = {
+					err: safeErrorFields(err),
+					attempt: this.reconnectAttempts,
 				}
+				if (refused) this.logger.debug(fields, "KISS port not ready")
+				else this.logger.warn(fields, "KISS connection error")
 			})
 
-			this.tcpClient.on("close", () => {
-				this.logger.info("KISS connection closed")
+			// A failed connect and a dropped connection both end in `close`.
+			socket.on("close", () => {
+				resolve()
+				if (this.tcpClient !== socket) return
 				this.tcpClient = null
-				if (!this.isStopping) {
-					this.scheduleReconnect()
-				}
+				if (!this.isStopping) this.scheduleReconnect()
 			})
 		})
 	}
 
 	protected disconnectFromOutput(): void {
 		if (this.tcpClient) {
-			this.tcpClient.destroy()
+			const socket = this.tcpClient
 			this.tcpClient = null
+			socket.destroy()
 		}
 	}
 
 	protected scheduleReconnect(): void {
-		if (this.isStopping || this.isReconnecting) return
+		if (this.isStopping || this.reconnectTimer !== null) return
 
 		this.isReconnecting = true
 		this.reconnectAttempts++
+		const exponent = Math.min(this.reconnectAttempts - 1, 30)
 		const delay = Math.min(
-			BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts - 1),
-			MAX_RECONNECT_DELAY,
+			this.reconnectBaseMs * Math.pow(2, exponent),
+			this.reconnectMaxMs,
 		)
 
-		this.logger.info(
+		this.logger.debug(
 			{ attempt: this.reconnectAttempts, delay },
-			"Scheduling reconnect",
+			"Scheduling KISS reconnect",
 		)
 		this.reconnectTimer = setTimeout(() => {
 			void this.attemptReconnect()
@@ -402,14 +431,9 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 
 	private async attemptReconnect(): Promise<void> {
 		this.reconnectTimer = null
+		this.isReconnecting = false
 		if (this.isStopping) return
-
-		try {
-			await this.connectToOutput()
-		} catch (err) {
-			this.isReconnecting = false
-			this.scheduleReconnect()
-		}
+		await this.connectToOutput()
 	}
 
 	/** KISS frames dropped so far (malformed, or an address that is not a callsign). */
