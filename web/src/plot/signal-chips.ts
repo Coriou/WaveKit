@@ -97,3 +97,38 @@ export function layoutChips<
 	}
 	return { placed: kept, leaving: fading }
 }
+
+/** Screen x (CSS px) of an absolute frequency in `view`, or null when it lies outside the view. */
+export function chipX(
+	hz: number,
+	view: SpectrumViewSpan,
+	widthPx: number,
+): number | null {
+	const span = view.endHz - view.startHz
+	if (!(span > 0) || !(widthPx > 0) || !Number.isFinite(hz)) return null
+	if (hz < view.startHz || hz > view.endHz) return null
+	return ((hz - view.startHz) / span) * widthPx
+}
+
+/**
+ * The leaving chips (band view retune correctness): each fades where its signal is now, at x = f(hz) in
+ * the current view, never at a stored screen position (which belongs to the view it was placed in, so
+ * after a retune it would land a chip of another band at its old relative place). One whose frequency
+ * is outside the view, or that was never placed, is not drawn.
+ */
+export function fadingChips<T extends Pick<PlacedLabel, "x" | "hz">>(
+	leaving: readonly { id: number; hz: number }[],
+	lastAt: ReadonlyMap<number, T>,
+	view: SpectrumViewSpan,
+	widthPx: number,
+): (T & { id: number })[] {
+	const out: (T & { id: number })[] = []
+	for (const g of leaving) {
+		const last = lastAt.get(g.id)
+		if (!last) continue
+		const x = chipX(g.hz, view, widthPx)
+		if (x === null) continue
+		out.push({ ...last, hz: g.hz, x, id: g.id })
+	}
+	return out
+}

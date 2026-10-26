@@ -12,8 +12,10 @@ export interface PlacedSavedTag {
 	id: string
 	hz: number
 	name: string
-	/** Left edge in CSS px: the chip starts at its frequency, as on the board. */
+	/** Left edge in CSS px: the chip starts at its frequency, as on the board (moved in at the right edge). */
 	x: number
+	/** The frequency's own x in CSS px, (hz - start) / span * width, never clamped: the anchor tick. */
+	anchorX: number
 	/** Chip width used for collisions, CSS px. */
 	width: number
 	/** The name is drawn (else the bookmark alone: the name dropped to make room, or labels are off). */
@@ -99,13 +101,16 @@ export function placeSavedTags(
 	const placed: PlacedSavedTag[] = []
 	for (const f of order) {
 		// a bookmark at the view's right edge moves in, never clipped (band inspection UX)
-		const x = Math.min(w - bare, ((f.frequencyHz - view.startHz) / span) * w)
+		const anchorX = ((f.frequencyHz - view.startHz) / span) * w
+		// only the body moves in; the anchor tick stays on the frequency
+		const x = Math.min(w - bare, anchorX)
 		if (clash(placed, null, x, x + bare)) continue
 		placed.push({
 			id: f.id,
 			hz: f.frequencyHz,
 			name: f.name,
 			x,
+			anchorX,
 			width: bare,
 			labelled: false,
 		})

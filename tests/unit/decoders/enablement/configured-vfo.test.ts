@@ -143,7 +143,7 @@ function setup({
 	}
 }
 
-it.each(VFO_CHANNEL_TYPES)(
+it.each(VFO_CHANNEL_TYPES.filter(type => type !== "multimon-ng"))(
 	"configured %s follows VFO without opt-in or band-plan channels",
 	async type => {
 		const f = setup({ type })
@@ -328,5 +328,200 @@ it("losing the channelizer rebuilds the audio frontend for raw CU8 instead of re
 		running: true,
 		targetFrequenciesHz: [446_056_000],
 		placements: [{ reach: "raw" }],
+	})
+})
+
+// 3.18: a configured pager decoder without channels takes every paging raster
+// channel in the usable window, not the VFO alone.
+it("configured multimon-ng places the French paging raster, nearest the centre first", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 466_103_300 })
+	f.sources.caps.set("rtl", { ...iqCaps(1_024_000), centerFreq: 466_103_300 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 466_103_300 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	const channels = (status?.placements ?? []).map(p => p.channelHz)
+	expect(status?.placements?.every(p => p.origin === "bandplan")).toBe(true)
+	// 466.025-466.230 MHz at 6.25 kHz: 33 channels, all inside +-409.6 kHz.
+	expect(channels).toHaveLength(33)
+	expect(channels).toEqual(
+		expect.arrayContaining([466_100_000, 466_112_500, 466_156_250]),
+	)
+	expect(channels[0]).toBe(466_106_250)
+	expect(channels).not.toContain(466_103_300)
+	// The setup's gate refuses everything: only the primary (exempt, YAML)
+	// starts; the 32 generated secondaries are asked and refused.
+	const gated = vi
+		.mocked(f.gate.admit)
+		.mock.calls.map(([placement]) => placement.channelHz)
+	expect(new Set(gated)).toEqual(new Set(channels.slice(1)))
+	expect(gated).not.toContain(466_106_250)
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
+})
+
+// 3.18 band: multimon-ng's built-in band is its region's paging ranges.
+it("configured multimon-ng is out of band at 1090 MHz", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 1_090_000_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_090_000_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 1_090_000_000 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(false)
+	expect(status?.bandAssessment).toMatchObject({
+		verdict: "out-of-band",
+		basis: "region-default",
+		region: { code: "EU" },
+	})
+	expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+	expect(status?.placements ?? []).toEqual([])
+	expect(f.provider.requestChannel).not.toHaveBeenCalled()
+})
+
+it("configured multimon-ng runs in band on the French paging band", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 466_100_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(1_024_000), centerFreq: 466_100_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 466_100_000 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(true)
+	expect(status?.bandAssessment?.verdict).toBe("in-band")
+	expect(status?.placements?.[0]).toMatchObject({ channelHz: 466_100_000 })
+})
+
+async function multimonAt(
+	hz: number,
+	modes: readonly string[] | undefined,
+	rate = 2_400_000,
+) {
+	const f = setup({
+		type: "multimon-ng",
+		vfo: hz,
+		...(modes ? { options: { modes: [...modes] } } : {}),
+	})
+	f.sources.caps.set("rtl", { ...iqCaps(rate), centerFreq: hz })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: hz })
+	await f.manager.startAll()
+	return { f, status: f.manager.getStatus("configured") }
+}
+
+// The paging band applies only when every mode is a paging mode.
+const MIXED = [
+	"POCSAG512",
+	"POCSAG1200",
+	"POCSAG2400",
+	"FLEX",
+	"AFSK1200",
+	"DTMF",
+]
+
+it.each([
+	[["POCSAG1200"]],
+	[["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"]],
+	[undefined],
+	[["not-a-mode"]],
+])(
+	"paging-only multimon-ng (modes %j) is suspended out of band at 1090 MHz",
+	async modes => {
+		const { f, status } = await multimonAt(1_090_000_000, modes)
+		expect(status?.running).toBe(false)
+		expect(status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
+
+it.each([
+	[["AFSK1200"], 432_500_000],
+	[["FSK9600"], 432_500_000],
+	[["EAS"], 1_090_000_000],
+	[["DTMF"], 432_500_000],
+	[["DTMF"], 1_090_000_000],
+	[["DTMF"], 868_000_000],
+	[MIXED, 1_090_000_000],
+	[MIXED, 432_500_000],
+] as const)(
+	"multimon-ng with modes %j keeps an unknown band and follows the VFO at %d Hz",
+	async (modes, hz) => {
+		const { status } = await multimonAt(hz, modes)
+		expect(status?.running).toBe(true)
+		expect(status?.bandAssessment?.verdict).toBe("unknown")
+		expect(status?.suspension).toBeUndefined()
+		expect(status?.placements).toEqual([
+			expect.objectContaining({ origin: "vfo", channelHz: hz }),
+		])
+	},
+)
+
+it("a mixed mode set covers the paging raster where a paging band is in view", async () => {
+	const { f, status } = await multimonAt(466_103_300, MIXED, 1_024_000)
+	expect(status?.running).toBe(true)
+	expect(status?.bandAssessment?.verdict).toBe("unknown")
+	const channels = (status?.placements ?? []).map(p => p.channelHz)
+	expect(channels).toHaveLength(33)
+	expect(status?.placements?.every(p => p.origin === "bandplan")).toBe(true)
+	expect(channels[0]).toBe(466_106_250)
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
+})
+
+it("a mode set without a paging mode keeps the VFO channel inside a paging band", async () => {
+	const { status } = await multimonAt(466_103_300, ["DTMF"], 1_024_000)
+	expect(status?.running).toBe(true)
+	expect(status?.placements).toEqual([
+		expect.objectContaining({ origin: "vfo", channelHz: 466_103_300 }),
+	])
+})
+
+it("a band override keeps multimon-ng running at 1090 MHz", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 1_090_000_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_090_000_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 1_090_000_000 })
+	await f.manager.startAll()
+	expect(f.manager.getStatus("configured")?.running).toBe(false)
+	await f.manager.setBandOverride("configured", {
+		rangesHz: [{ minHz: 1_089_000_000, maxHz: 1_091_000_000 }],
+	})
+	await vi.advanceTimersByTimeAsync(3_000)
+	const status = f.manager.getStatus("configured")
+	expect(status?.bandAssessment).toMatchObject({
+		verdict: "in-band",
+		basis: "override",
+	})
+	expect(status?.running).toBe(true)
+})
+
+it("a channelised IQ decoder reports the decoder input its own pipeline makes of the channel", async () => {
+	const f = setup({
+		type: "dumpvdl2",
+		vfo: 446_100_000,
+		useChannelizer: true,
+		options: { channelHz: 446_100_000 },
+	})
+	const decoder = f.decoder()
+	decoder.getChannelRequest = input => ({
+		centerHz: input.centerHz ?? 0,
+		bandwidthHz: 40_000,
+		transitionHz: 2_500,
+		outputRateHz: 48_000,
+		format: "cf32",
+	})
+	decoder.getRateRequirements = () => undefined
+	// Like dumpvdl2 (a 512 kHz channel resampled to 525 kHz): the channel rate
+	// is converted once more before the process reads it.
+	decoder.getRateAdapter = input => ({
+		adaptation:
+			input.sampleRateHz === 48_000 ? "resample" : "integer-decimation",
+		frontendRateHz: input.sampleRateHz === 48_000 ? 52_500 : 48_000,
+		decoderInputKind: "iq",
+		decoderInputRateHz: 52_500,
+		decoderInputFormat: "u8",
+	})
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(true)
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
+	expect(status?.rateAssessment).toMatchObject({
+		adaptation: "resample",
+		frontendRateHz: 48_000,
+		decoderInputKind: "iq",
+		decoderInputRateHz: 52_500,
 	})
 })

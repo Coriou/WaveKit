@@ -21,7 +21,7 @@ import type {
 	ScannerProtocol,
 } from "@wavekit/api-types"
 
-interface FixtureSpec {
+export interface FixtureSpec {
 	id: string
 	mhz: number
 	protocol: ScannerProtocol
@@ -186,12 +186,13 @@ const stats = (dbfs: number) => ({
 	floorDbfs: -100,
 })
 
-/** The fixtures as discoveries on `sourceId`, timed against `now`. */
+/** The fixtures (or other `specs`) as discoveries on `sourceId`, timed against `now`. */
 export function bandFixtureDiscoveries(
 	sourceId: string,
 	now: number,
+	specs: readonly FixtureSpec[] = BAND_FIXTURE_SPECS,
 ): Discovery[] {
-	return BAND_FIXTURE_SPECS.map((s, i) => {
+	return specs.map((s, i) => {
 		const hz = Math.round(s.mhz * 1e6)
 		const last = now - s.agoMin * 60_000
 		const d: Discovery = {

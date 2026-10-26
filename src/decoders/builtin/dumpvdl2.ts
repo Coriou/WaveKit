@@ -11,6 +11,7 @@
 import {
 	IqDecimateDecoder,
 	iqChannelRequest,
+	iqDecimateRateAdapter,
 	readChannelHz,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
@@ -20,6 +21,7 @@ import type {
 	DecoderChannelRequestResult,
 	DecoderConfig,
 	DecoderOutput,
+	DecoderRateAdapter,
 	DecoderRateRequirements,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
@@ -166,6 +168,11 @@ interface XidData {
  * Modified to consume IQ data from stdin (Passive Mode).
  * Extends IqDecimateDecoder to support sample rate adaptation.
  */
+/** One 25 kHz VDL2 channel plus a 12.5 kHz guard on each side of the target span. */
+const VDL2_CHANNEL_MARGIN_HZ = 50_000
+/** VDL2 symbol rate: dumpvdl2's input rate is --oversample × this. */
+const VDL2_SYMBOL_RATE_HZ = 105_000
+
 export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	private options: Dumpvdl2Options
 	private readonly warnOption: NumericOptionWarn
@@ -200,7 +207,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * capture floor is a follow-up (pinned dumpvdl2 out-of-band behaviour).
 	 */
 	getRateRequirements(): DecoderRateRequirements {
-		const target = this.getIqDecimationConfig().targetSampleRate
+		const target = this.options.targetSampleRate ?? 1_050_000
 		const accepted = [
 			{ kind: "range" as const, minHz: 105_000, stepHz: 105_000 },
 		]
@@ -270,18 +277,61 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 			(this.options.followCenter || freqs.length === 0
 				? undefined
 				: (Math.min(...freqs) + Math.max(...freqs)) / 2)
+		const target = this.options.targetSampleRate ?? 1_050_000
+		const capture = input.sampleRateHz
+		// The passband is only what the targets need: dumpvdl2 channelises
+		// internally and the passband is just the front filter. Each VDL2
+		// channel is 25 kHz wide (±12.5 kHz) plus a 12.5 kHz guard, so it is
+		// 2 × (farthest target from the centre) + 50 kHz (default EU list at
+		// its midpoint: 2 × 162 500 + 50 000 = 375 000 Hz). followCenter
+		// decodes the capture centre and keeps the default passband, still
+		// widened or rejected by the list span as before.
+		const centreHz =
+			channelHz ?? (this.options.followCenter ? input.centerHz : undefined)
+		const narrow = !this.options.followCenter && freqs.length > 0
+		const neededHz =
+			narrow && centreHz !== undefined
+				? 2 * Math.max(...freqs.map(f => Math.abs(f - centreHz))) +
+					VDL2_CHANNEL_MARGIN_HZ
+				: span + VDL2_CHANNEL_MARGIN_HZ
+		// 3.19 channel rate. A capture at or above the target rate gets the
+		// target (2.048 / 2.4 Msps -> 1.05 MHz, native-feasible as before).
+		// Below it the channelizer cannot upsample, and 105 kHz × N is no cheap
+		// ratio of the usual captures (factors 3 and 7), so the channel is the
+		// capture decimated by the largest integer D that still holds the
+		// passband at the default 5 % transition; dumpvdl2's own resample
+		// step lifts it to 105 kHz × N (decoderRateHz). 1.024 Msps: D = 2,
+		// 512 kHz (187 500 + 12 800 = 200 300 <= 256 000; D = 3 fails), then
+		// 525 kHz, --oversample 5.
+		let rateHz = target
+		if (capture < target) {
+			if (capture < VDL2_SYMBOL_RATE_HZ)
+				return {
+					invalid: `capture rate ${capture} Hz is below one VDL2 symbol rate (${VDL2_SYMBOL_RATE_HZ} Hz)`,
+				}
+			rateHz = capture
+			// Never below one symbol rate: dumpvdl2 needs --oversample >= 1.
+			for (let d = Math.floor(capture / VDL2_SYMBOL_RATE_HZ); d >= 2; d--) {
+				const r = capture / d
+				if (Number.isInteger(r) && neededHz <= r * 0.95) {
+					rateHz = r
+					break
+				}
+			}
+		}
 		const base = iqChannelRequest(
 			{
 				...this.getIqDecimationConfig(),
+				targetSampleRate: rateHz,
 				...(channelHz !== undefined ? { channelHz } : {}),
 			},
 			input,
 		)
-		const neededHz = span + 50_000
-		if (neededHz <= base.bandwidthHz) return base
+		if (neededHz <= base.bandwidthHz)
+			return narrow ? { ...base, bandwidthHz: neededHz } : base
 		if (neededHz >= base.outputRateHz)
 			return {
-				invalid: `frequency span ${span} Hz needs targetSampleRate > ${neededHz}`,
+				invalid: `frequency span ${span} Hz needs a channel rate > ${neededHz} Hz (have ${base.outputRateHz})`,
 			}
 		return {
 			...base,
@@ -294,13 +344,41 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	}
 
 	/**
+	 * The rate dumpvdl2 runs at (its --oversample × 105 kHz): the smallest
+	 * 105 kHz multiple at or above the delivered rate, capped at the target.
+	 * The pipeline resamples to it when they differ: a 512 kHz channel runs at
+	 * 525 kHz (N = 5), a 945 kHz input directly at N = 9, a raw 2.048 Msps
+	 * capture at the 1.05 MHz target (3.19).
+	 */
+	private decoderRateHz(input = this.options.inputSampleRate): number {
+		const target = this.options.targetSampleRate ?? 1_050_000
+		if (input === undefined || !(input > 0)) return target
+		return Math.min(
+			target,
+			Math.ceil(input / VDL2_SYMBOL_RATE_HZ) * VDL2_SYMBOL_RATE_HZ,
+		)
+	}
+
+	/** The rate plan for a candidate input rate, at that input's dumpvdl2 rate. */
+	override getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {
+		return iqDecimateRateAdapter(
+			{
+				...this.boundedIqDecimationConfig(),
+				targetSampleRate: this.decoderRateHz(input.sampleRateHz),
+			},
+			input.sampleRateHz,
+			this.getDecoderInputFormat(),
+		)
+	}
+
+	/**
 	 * Returns the IQ decimation configuration.
 	 */
 	protected getIqDecimationConfig(): IqDecimationConfig {
 		return {
 			exactSampleRate: true,
 			inputSampleRate: this.options.inputSampleRate ?? 2_048_000,
-			targetSampleRate: this.options.targetSampleRate ?? 1_050_000,
+			targetSampleRate: this.decoderRateHz(),
 			filterTransition: 0.05,
 		}
 	}
@@ -324,7 +402,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 		// Use stdin input (Requirement 25.4)
 		args.push("--iq-file", "-")
 		args.push("--sample-format", "U8")
-		const rate = this.options.targetSampleRate ?? 1050000
+		const rate = this.decoderRateHz()
 		if (rate % 105000 !== 0)
 			throw new Error("VDL2 target rate must be a multiple of 105000")
 		args.push("--oversample", String(rate / 105000))

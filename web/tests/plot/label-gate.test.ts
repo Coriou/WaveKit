@@ -51,7 +51,16 @@ function run(
 	for (let t = from; t <= to; t += 100)
 		s = stepLabelGate(
 			s,
-			{ sourceId: "rtl", tracks: tracks(t), floorDbfs: FLOOR, binHz: 250 },
+			{
+				sourceId: "rtl",
+				tracks: tracks(t),
+				floorDbfs: FLOOR,
+				binHz: 250,
+				// one fixed axis wide enough for every track here
+				epoch: 1,
+				startHz: 0,
+				binCount: 8_000_000,
+			},
 			t,
 			c,
 		)

@@ -44,9 +44,10 @@ export function frameGeometry(
 	centerHz: number,
 	bins: number,
 	summaryBins: number = SPECTRUM_SUMMARY_BINS,
+	sampleRateHz: number = SAMPLE_RATE_HZ,
 ): FrameGeometry {
-	const nativeBinHz = SAMPLE_RATE_HZ / SPECTRUM_FFT_SIZE
-	const native = Math.floor((SAMPLE_RATE_HZ * USABLE_FRACTION) / nativeBinHz)
+	const nativeBinHz = sampleRateHz / SPECTRUM_FFT_SIZE
+	const native = Math.floor((sampleRateHz * USABLE_FRACTION) / nativeBinHz)
 	const group = Math.max(1, Math.ceil(native / summaryBins))
 	const summaryCount = Math.ceil(native / group)
 	const summaryBinHz = nativeBinHz * group
@@ -87,15 +88,21 @@ const noise = new Float32Array(NOISE_SIZE)
 
 const layouts = new Map<string, Layout>()
 
-function layout(centerHz: number, bins: number, summaryBins: number): Layout {
-	const key = `${centerHz}:${bins}:${summaryBins}`
+function layout(
+	centerHz: number,
+	bins: number,
+	summaryBins: number,
+	sampleRateHz: number,
+	extra: readonly MockSignal[],
+): Layout {
+	const key = `${centerHz}:${bins}:${summaryBins}:${sampleRateHz}:${extra.length}`
 	const cached = layouts.get(key)
 	if (cached) return cached
-	const geometry = frameGeometry(centerHz, bins, summaryBins)
+	const geometry = frameGeometry(centerHz, bins, summaryBins, sampleRateHz)
 	const { startHz, binHz, binCount } = geometry
 	const endHz = startHz + binCount * binHz
 	const humps: Hump[] = []
-	for (const signal of MOCK_SIGNALS) {
+	for (const signal of extra.length > 0 ? extra : MOCK_SIGNALS) {
 		const half = signal.bwHz / 2
 		const reach = half * 3 + binHz
 		if (signal.hz + reach < startHz || signal.hz - reach > endHz) continue
@@ -145,6 +152,10 @@ export interface FrameInput {
 	snapshot?: boolean
 	/** The engine's summary budget (scanner.ws.spectrumSummaryBins); default SPECTRUM_SUMMARY_BINS. */
 	summaryBins?: number
+	/** The capture's sample rate (the frame spans its usable 80 %); default SAMPLE_RATE_HZ. */
+	sampleRateHz?: number
+	/** Signals drawn instead of MOCK_SIGNALS (the retune sweep scenario); default none. */
+	signals?: readonly MockSignal[]
 	/** 0..1, picks the noise window; defaults to Math.random(). */
 	random?: () => number
 }
@@ -152,10 +163,13 @@ export interface FrameInput {
 /** One `spectrum:frame` payload. */
 export function synthFrame(input: FrameInput): SpectrumFrameEventData {
 	const { centerHz } = input
+	const sampleRateHz = input.sampleRateHz ?? SAMPLE_RATE_HZ
 	const lay = layout(
 		centerHz,
 		input.bins,
 		input.summaryBins ?? SPECTRUM_SUMMARY_BINS,
+		sampleRateHz,
+		input.signals ?? [],
 	)
 	const bins = lay.binCount
 	const random = input.random ?? Math.random
@@ -214,9 +228,9 @@ export function synthFrame(input: FrameInput): SpectrumFrameEventData {
 		epoch: input.epoch,
 		tuningTrust: "commanded",
 		centerHz,
-		sampleRateHz: SAMPLE_RATE_HZ,
+		sampleRateHz,
 		binHz: lay.binHz,
-		nativeBinHz: SAMPLE_RATE_HZ / SPECTRUM_FFT_SIZE,
+		nativeBinHz: sampleRateHz / SPECTRUM_FFT_SIZE,
 		startHz: lay.startHz,
 		binCount: bins,
 		bins: Buffer.from(

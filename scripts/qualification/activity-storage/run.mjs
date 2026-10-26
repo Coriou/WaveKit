@@ -499,6 +499,9 @@ export async function run(
 		now = () => performance.now(),
 		signal,
 		workerFactory,
+		// Test-only: a fixed free-byte count the default worker probes instead of
+		// statfs, so unit tests do not depend on the host's free disk.
+		workerFreeBytes,
 	} = {},
 ) {
 	// Revalidate programmatic entry too. Disabled/runtime rejection precedes all filesystem calls.
@@ -608,6 +611,9 @@ export async function run(
 							identity: { inode: identity.ino, device: identity.dev },
 							limits: LIMITS,
 							reserveBytes: config.reserveBytes + (externalCapture?.bytes ?? 0),
+							...(workerFreeBytes === undefined
+								? {}
+								: { simulatedFreeBytes: workerFreeBytes }),
 						},
 						resourceLimits: {
 							maxOldGenerationSizeMb: 96,

@@ -84,6 +84,7 @@ import {
 } from "./rate-resolver.js"
 import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
 import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
+import { multimonHasPaging } from "./builtin/multimon-ng.js"
 import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import {
 	normalizeBandOverride,
@@ -91,6 +92,10 @@ import {
 	type ResolvedBand,
 } from "./band-defaults.js"
 import { BandOverrideStore } from "./band-override-store.js"
+import {
+	decoderBandTable,
+	pagingRasterRanges,
+} from "./enablement/paging-plan.js"
 import {
 	createDecoderExitError,
 	createDecoderLastError,
@@ -686,10 +691,12 @@ export class DecoderManager extends EventEmitter {
 	 * decoder's placements (origin "config", whatever mode an operator set) are
 	 * admitted without a gate verdict and never suspended by probation; their
 	 * declared cost still counts in the budget and the efficiency view.
+	 * Exception (3.18): generated secondary paging channels (`gated`) are
+	 * admitted and probated like catalogue placements.
 	 */
 	private gateExempt(state: DecoderState): boolean {
 		const enablement = this.config.enablement
-		if (!enablement || !state.placement) return false
+		if (!enablement || !state.placement || state.placement.gated) return false
 		const parent = state.parentId ? this.decoders.get(state.parentId) : state
 		return (
 			parent?.owner === "config" &&
@@ -720,6 +727,7 @@ export class DecoderManager extends EventEmitter {
 							reach: state.placement.reach,
 							costCores: state.placement.costCores,
 							sampleRateHz: state.placement.sampleRateHz,
+							...(state.placement.gated ? { gated: true as const } : {}),
 							admittedAtMs: state.stopping
 								? performance.now() - EFFICIENCY_PROBATION_MS
 								: (state.admittedAtMs ?? performance.now()),
@@ -1222,6 +1230,16 @@ export class DecoderManager extends EventEmitter {
 						...(config.type === "rtl433"
 							? { channelTargetRateHz: rtl433TargetRateHz(config.options) }
 							: {}),
+						// 3.18: the pager decoder's paging raster for its region, when
+						// at least one of its modes is a paging mode.
+						...(config.type === "multimon-ng" &&
+						multimonHasPaging(config.options["modes"])
+							? {
+									pagingRaster: pagingRasterRanges(
+										this.resolveBand(state).region.code,
+									),
+								}
+							: {}),
 					}
 				}),
 			sources: (this.sourceManager?.getAllStatus() ?? []).map(
@@ -1264,7 +1282,12 @@ export class DecoderManager extends EventEmitter {
 			for (const worker of [...this.decoders.values()]) {
 				if (
 					worker.owner !== "placement" ||
-					wanted.some(placement => placement.key === worker.placement?.key) ||
+					// A worker holds only a secondary: when its channel becomes the
+					// primary (the parent's), it goes, so no channel is decoded twice.
+					wanted.some(
+						placement =>
+							!placement.primary && placement.key === worker.placement?.key,
+					) ||
 					(worker.placement !== undefined &&
 						this.isSourceHeld(worker.placement.sourceId))
 				)
@@ -4855,9 +4878,18 @@ export class DecoderManager extends EventEmitter {
 			const plan = assessDecoderRate(requirements, context)
 			// Addendum §2: an open channel's realised rate replaces the raw
 			// adapter; the source checks are the same as for every instance.
+			// 3.19: the decoder's own plan for the channel rate says whether it
+			// converts the channel again before its process reads it.
 			const channel = state.channel
 			return channel && resolved && plan.verdict !== "unusable"
-				? channelisedRatePlan(requirements, context, channel.realised)
+				? channelisedRatePlan(
+						requirements,
+						context,
+						channel.realised,
+						state.decoder.getRateAdapter?.({
+							sampleRateHz: channel.realised.outputRateHz,
+						}),
+					)
 				: plan
 		} catch (err) {
 			this.log.error(
@@ -5125,9 +5157,95 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
+	 * 3.21: an ungated placement admitted over running gated secondaries
+	 * suspends them for budget (`efficiency-budget`, `budget`), newest first as
+	 * the gate listed them; they retry with the normal backoff. `released` is
+	 * false when one of them is still running (its stop failed), so the
+	 * capacity it holds was not freed.
+	 */
+	private async displaceSecondaries(
+		keys: readonly string[] | undefined,
+	): Promise<{ displaced: DecoderState[]; released: boolean }> {
+		const gate = this.config.enablement?.gate
+		const displaced: DecoderState[] = []
+		if (!gate || !keys?.length) return { displaced, released: true }
+		for (const key of keys) {
+			const state = [...this.decoders.values()].find(
+				item => item.placement?.key === key,
+			)
+			if (!state?.placement?.gated || this.destroying) continue
+			if (state.stopping) {
+				// An earlier stop did not complete: ask again; the capacity counts
+				// as held until it does.
+				if (state.decoder.getStatus().running)
+					await this.stopPlacement(state).catch((error: unknown) => {
+						this.log.warn(
+							{ err: safeErrorFields(error), placement: key },
+							"Secondary channel stop failed",
+						)
+					})
+				continue
+			}
+			const now = performance.now()
+			gate.noteSuspended(key, "budget", now)
+			state.efficiencyBackoffMs ??= EFFICIENCY_RETRY_MS
+			state.admission = {
+				admit: false,
+				detail: "budget",
+				retryAtMs: now + state.efficiencyBackoffMs,
+			}
+			delete state.admittedAtMs
+			this.log.info(
+				{
+					reasonCode: "efficiency-budget",
+					detail: "budget",
+					decoderId: state.placement.decoderId,
+					placement: key,
+				},
+				"Secondary channel yields to a primary placement",
+			)
+			displaced.push(state)
+			await this.suspend(state, this.assessEligibility(state))
+		}
+		// Every listed secondary must have let go, including one skipped above
+		// because it is still stopping.
+		const released = keys.every(key =>
+			[...this.decoders.values()].every(
+				state =>
+					state.placement?.key !== key ||
+					(!state.decoder.getStatus().running && !state.processStartPending),
+			),
+		)
+		return { displaced, released }
+	}
+
+	/**
+	 * Secondaries displaced for a start that did not happen retry at once:
+	 * their backoff is cancelled and the next evaluation re-plans them.
+	 */
+	private restoreDisplaced(displaced: readonly DecoderState[]): void {
+		const gate = this.config.enablement?.gate
+		if (!gate || !displaced.length) return
+		const now = performance.now()
+		for (const state of displaced) {
+			if (
+				!state.placement ||
+				state.admission?.admit !== false ||
+				state.admission.detail !== "budget"
+			)
+				continue
+			gate.forget(state.placement.key)
+			delete state.efficiencyBackoffMs
+			state.admission = { admit: false, detail: "budget", retryAtMs: now }
+		}
+		this.scheduleEfficiencyEvaluation()
+	}
+
+	/**
 	 * Preflight admission avoids allocating a channel for a blocked placement.
 	 * Wiring can await a channel, so only the fresh decision immediately before
-	 * start establishes the run's admission and probation clock.
+	 * start establishes the run's admission and probation clock; displacement
+	 * (3.21) follows that decision only, never the preflight one.
 	 */
 	private async startPlacementNow(
 		state: DecoderState,
@@ -5154,6 +5272,7 @@ export class DecoderManager extends EventEmitter {
 				return { wired: false, superseded: true }
 			}
 		}
+		let displaced: DecoderState[] = []
 		try {
 			const outcome = await this.wireDecoderToFanout(state)
 			if (
@@ -5178,6 +5297,37 @@ export class DecoderManager extends EventEmitter {
 					this.scheduleEfficiencyEvaluation()
 					return { wired: false, superseded: true }
 				}
+				const admission = state.admission
+				const yielded = await this.displaceSecondaries(
+					exempt
+						? gate.yieldTo?.(state.placement, this.runningPlacements())
+						: admission.displace,
+				)
+				displaced = yielded.displaced
+				if (
+					state.admission !== admission ||
+					!canStart() ||
+					!this.stillWanted(state, generation)
+				) {
+					this.unwireDecoderFromFanout(state)
+					if (state.admission?.admit) delete state.admission
+					this.restoreDisplaced(displaced)
+					return { wired: false, superseded: true }
+				}
+				// A secondary whose stop failed still holds its capacity: a catalogue
+				// newcomer waits for a confirmed release (a YAML one starts, 4.9).
+				if (!yielded.released && !exempt) {
+					this.unwireDecoderFromFanout(state)
+					gate.forget(state.placement.key)
+					state.admission = {
+						admit: false,
+						detail: "budget",
+						retryAtMs: performance.now() + EFFICIENCY_SAMPLE_MS,
+					}
+					await this.suspend(state, this.assessEligibility(state))
+					this.scheduleEfficiencyEvaluation()
+					return { wired: false, superseded: true }
+				}
 				state.admittedAtMs = now
 			}
 			this.scheduleEfficiencyEvaluation()
@@ -5187,12 +5337,19 @@ export class DecoderManager extends EventEmitter {
 			} finally {
 				delete state.processStartPending
 			}
+			// Stopped or removed while starting: the room it took is free again.
+			if (
+				displaced.length &&
+				(!canStart() || !this.stillWanted(state, generation))
+			)
+				this.restoreDisplaced(displaced)
 
 			this.scheduleEfficiencyEvaluation()
 			return outcome
 		} catch (error) {
 			if (state.admission?.admit) delete state.admission
 			delete state.admittedAtMs
+			this.restoreDisplaced(displaced)
 			throw error
 		}
 	}
@@ -5290,7 +5447,7 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * The one band resolution (spec §3.2): declaration, config and API
-	 * overrides, the region and the built-in table.
+	 * overrides, the region and the built-in table (with the pager band).
 	 */
 	private resolveBand(state: DecoderState): ResolvedBand {
 		const slots = this.catalogueLoraSlotsOf(state)
@@ -5308,6 +5465,8 @@ export class DecoderManager extends EventEmitter {
 			configOverride: state.config.band,
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
+			// 3.18: a paging-only multimon-ng adds its paging band to the table.
+			table: decoderBandTable(state.config.type, state.config.options),
 		})
 	}
 

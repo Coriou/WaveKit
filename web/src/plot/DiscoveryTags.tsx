@@ -6,6 +6,7 @@ import "./discovery-tags.css"
 
 import type { Discovery } from "@wavekit/api-types"
 import {
+	Fragment,
 	memo,
 	useEffect,
 	useMemo,
@@ -210,30 +211,39 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 			{placed.map(t => {
 				const n = t.members.length
 				return (
-					<button
-						key={t.id}
-						type="button"
-						className="wk-plot-disc"
-						data-tier={t.tier}
-						data-heard={t.heard || undefined}
-						data-group={n > 1 || undefined}
-						style={{ left: t.x, maxWidth: t.width }}
-						aria-label={
-							n > 1 ? t.title : `Discovery: ${t.title}${likelySuffix(t.rep)}`
-						}
-						aria-haspopup="dialog"
-						aria-expanded={shown?.id === t.id}
-						title={
-							n > 1
-								? `${t.title} · ${t.label}`
-								: `${t.title}${likelySuffix(t.rep)}`
-						}
-						onClick={e => toggle({ kind: "tag", id: t.id }, e.currentTarget)}
-					>
-						<i data-solid={t.solid || undefined} aria-hidden="true" />
-						{t.labelled && <span className="wk-plot-disc-name">{t.name}</span>}
-						{t.count && <span className="wk-plot-disc-count">{t.count}</span>}
-					</button>
+					<Fragment key={t.id}>
+						<span
+							className="wk-plot-tag-anchor"
+							data-hz={t.hz}
+							style={{ left: t.anchorX }}
+							aria-hidden="true"
+						/>
+						<button
+							type="button"
+							className="wk-plot-disc"
+							data-tier={t.tier}
+							data-heard={t.heard || undefined}
+							data-group={n > 1 || undefined}
+							style={{ left: t.x, maxWidth: t.width }}
+							aria-label={
+								n > 1 ? t.title : `Discovery: ${t.title}${likelySuffix(t.rep)}`
+							}
+							aria-haspopup="dialog"
+							aria-expanded={shown?.id === t.id}
+							title={
+								n > 1
+									? `${t.title} · ${t.label}`
+									: `${t.title}${likelySuffix(t.rep)}`
+							}
+							onClick={e => toggle({ kind: "tag", id: t.id }, e.currentTarget)}
+						>
+							<i data-solid={t.solid || undefined} aria-hidden="true" />
+							{t.labelled && (
+								<span className="wk-plot-disc-name">{t.name}</span>
+							)}
+							{t.count && <span className="wk-plot-disc-count">{t.count}</span>}
+						</button>
+					</Fragment>
 				)
 			})}
 			{(["left", "right"] as const).map(side => {

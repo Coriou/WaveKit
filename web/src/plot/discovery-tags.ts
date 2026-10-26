@@ -45,6 +45,11 @@ export interface PlacedDiscoveryTag {
 	 * edge of the view (or under an edge marker) is moved inside, so it is never clipped.
 	 */
 	x: number
+	/**
+	 * The first member's frequency x in CSS px, (hz - start) / span * width, never clamped: the anchor
+	 * tick. Only the chip body moves in at an edge or under an edge marker.
+	 */
+	anchorX: number
 	/** Width used for collisions, CSS px. */
 	width: number
 	/** The label is drawn (else the dot alone, and a group's "+n-1": no room before the next tag). */
@@ -284,6 +289,7 @@ export function placeDiscoveryTags(
 			tier,
 			solid: rep.confidence === "decoded",
 			heard: rep.confidence === "activity" || rep.protocol === "unknown",
+			anchorX: ((first.frequencyHz - view.startHz) / span) * w,
 			x: Math.min(
 				maxX - width,
 				Math.max(minX, dotX(first.frequencyHz) - DISCOVERY_DOT_PX),

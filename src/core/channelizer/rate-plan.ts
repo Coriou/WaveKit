@@ -12,11 +12,15 @@ import type { RealisedChannel } from "./types.js"
 /**
  * Addendum §2: what a channelised instance's stdin really receives. The channelizer realises the
  * frontend rate exactly, by resampling; an IQ decoder reads the channel itself, while an audio
- * decoder keeps its demod chain's own stdin rate and format.
+ * decoder keeps its demod chain's own stdin rate and format. `onChannel` is the decoder's own
+ * adapter for an input at the realised rate: when it still converts the channel (dumpvdl2
+ * resamples a 512 kHz channel to 525 kHz, 3.19), its decoder input rate and format are what
+ * the decoder process reads.
  */
 export function channelisedRateAdapter(
 	raw: DecoderRateAdapter,
 	realised: RealisedChannel,
+	onChannel?: DecoderRateAdapter,
 ): DecoderRateAdapter {
 	const adapter: DecoderRateAdapter = {
 		...raw,
@@ -24,10 +28,17 @@ export function channelisedRateAdapter(
 		frontendRateHz: realised.outputRateHz,
 	}
 	if (raw.decoderInputKind !== "iq") return adapter
+	const converted =
+		onChannel?.decoderInputKind === "iq" && onChannel.adaptation !== "none"
+			? onChannel.decoderInputRateHz
+			: undefined
 	return {
 		...adapter,
-		decoderInputRateHz: realised.outputRateHz,
-		decoderInputFormat: realised.format,
+		decoderInputRateHz: converted ?? realised.outputRateHz,
+		decoderInputFormat:
+			converted !== undefined
+				? (onChannel?.decoderInputFormat ?? realised.format)
+				: realised.format,
 	}
 }
 
@@ -41,10 +52,13 @@ export function channelisedRatePlan(
 	requirements: DecoderRateRequirements | undefined,
 	context: DecoderRateContext,
 	realised: RealisedChannel,
+	onChannel?: DecoderRateAdapter,
 ): DecoderRateAssessment {
 	const { adapter, ...rest } = context
 	return assessDecoderRate(requirements, {
 		...rest,
-		...(adapter ? { adapter: channelisedRateAdapter(adapter, realised) } : {}),
+		...(adapter
+			? { adapter: channelisedRateAdapter(adapter, realised, onChannel) }
+			: {}),
 	})
 }

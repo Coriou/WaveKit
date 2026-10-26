@@ -4,7 +4,7 @@
 // view, the width or the tuned frequency change (never per frame).
 import "./saved-tags.css"
 
-import { memo, useMemo } from "react"
+import { Fragment, memo, useMemo } from "react"
 import type { SavedFrequency } from "@wavekit/api-types"
 
 import type { DataLayer } from "../data/index.ts"
@@ -55,33 +55,44 @@ export const SavedTags = memo(function SavedTags({
 				if (!f) return null
 				const text = `${f.name} · ${formatMHz(f.frequencyHz, 4)} MHz · ${savedMeta(f)}`
 				return (
-					<button
-						key={t.id}
-						type="button"
-						className="wk-plot-saved"
-						data-tuned={
-							tunedHz !== null && Math.round(tunedHz) === t.hz ? "" : undefined
-						}
-						data-pending={isPendingId(f.id) ? "" : undefined}
-						style={{ left: t.x }}
-						aria-label={`Saved: ${text}`}
-						title={text}
-						onClick={() => recall(f)}
-					>
-						<svg
-							width="10"
-							height="10"
-							viewBox="0 0 24 24"
-							fill="currentColor"
+					<Fragment key={t.id}>
+						<span
+							className="wk-plot-tag-anchor"
+							data-hz={t.hz}
+							style={{ left: t.anchorX }}
 							aria-hidden="true"
-							focusable="false"
+						/>
+						<button
+							type="button"
+							className="wk-plot-saved"
+							data-tuned={
+								tunedHz !== null && Math.round(tunedHz) === t.hz
+									? ""
+									: undefined
+							}
+							data-pending={isPendingId(f.id) ? "" : undefined}
+							style={{ left: t.x }}
+							aria-label={`Saved: ${text}`}
+							title={text}
+							onClick={() => recall(f)}
 						>
-							<path d={BOOKMARK} />
-						</svg>
-						{t.labelled && (
-							<span style={{ maxWidth: SAVED_TAG_MAX_LABEL_PX }}>{f.name}</span>
-						)}
-					</button>
+							<svg
+								width="10"
+								height="10"
+								viewBox="0 0 24 24"
+								fill="currentColor"
+								aria-hidden="true"
+								focusable="false"
+							>
+								<path d={BOOKMARK} />
+							</svg>
+							{t.labelled && (
+								<span style={{ maxWidth: SAVED_TAG_MAX_LABEL_PX }}>
+									{f.name}
+								</span>
+							)}
+						</button>
+					</Fragment>
 				)
 			})}
 		</>

@@ -75,9 +75,10 @@ describe("predictive probe channel transport", () => {
 			transitionHz: 6_250,
 			format: "cf32",
 		})
-		expect(PROBE_CHANNEL_REQUESTS["multimon-ng"].bandwidthHz).toBeCloseTo(
-			47_424,
-		)
+		expect(PROBE_CHANNEL_REQUESTS["multimon-ng"]).toMatchObject({
+			bandwidthHz: 12_000,
+			transitionHz: 2500,
+		})
 		expect(PROBE_CHANNEL_REQUESTS.rtl433).toMatchObject({
 			outputRateHz: 250_000,
 			format: "cu8",

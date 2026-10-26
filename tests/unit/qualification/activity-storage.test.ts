@@ -41,6 +41,7 @@ interface Report {
 		primitives: Record<string, unknown>
 		initialPragmas: { journalMode: string; synchronous: number }
 		finalPragmas: { journalMode: string; synchronous: number }
+		error?: string
 	}
 	elapsedMs?: number
 	deadlineExceeded?: boolean
@@ -83,6 +84,7 @@ const harness = (await import(pathToFileURL(join(source, "run.mjs")).href)) as {
 			removeArtifact?: typeof fs.unlinkSync
 			now?: () => number
 			signal?: AbortSignal
+			workerFreeBytes?: number
 		},
 	) => Promise<Report>
 }
@@ -119,6 +121,8 @@ const guards = (await import(
 	guardedWrite: (check: () => void, write: () => unknown) => unknown
 }
 const free = () => ({ bavail: 100n * BigInt(harness.GiB), bsize: 1n })
+// The same fixed availability for a real worker, which cannot receive a function.
+const workerFreeBytes = 100 * harness.GiB
 const roots: string[] = []
 function sandbox() {
 	const root = fs.realpathSync(
@@ -622,14 +626,22 @@ describe("disposable activity qualification guards", () => {
 	})
 	it("real SQLite micro fixture and injected ENOSPC, with truthful capability skip", async context => {
 		if (!harness.supportedRuntime(process.versions.node)) {
-			context.skip()
+			context.skip(`Node ${process.versions.node} lacks the required runtime`)
 			return
 		}
 		// Availability probe happens only in an explicitly started worker, never here.
+		// Free space is injected on both sides so the host's free disk cannot decide
+		// the outcome; the real SQLite file, WAL and FTS5 work is unchanged.
 		const root = sandbox()
-		const runtime = await harness.run({ scenario: "runtime" }, { root })
+		const disk = { statfs: free, workerFreeBytes }
+		const runtime = await harness.run(
+			{ scenario: "runtime" },
+			{ root, ...disk },
+		)
 		if (runtime.status === "unsupported") {
-			context.skip()
+			context.skip(
+				`SQLite growth proof unsupported on Node ${process.versions.node}: ${runtime.result?.error ?? "no reason reported"}`,
+			)
 			return
 		}
 		if (
@@ -638,7 +650,7 @@ describe("disposable activity qualification guards", () => {
 				runtime.error ?? "",
 			)
 		) {
-			context.skip()
+			context.skip(`SQLite capability missing: ${runtime.error ?? ""}`)
 			return
 		}
 		expect(runtime.status).toBe("micro-only")
@@ -646,7 +658,7 @@ describe("disposable activity qualification guards", () => {
 			journalMode: "memory",
 			synchronous: 2,
 		})
-		const report = await harness.run({ scenario: "micro" }, { root })
+		const report = await harness.run({ scenario: "micro" }, { root, ...disk })
 		expect(report.status).toBe("micro-only")
 		expect(report.counts).toEqual({
 			offered: 10,
@@ -678,6 +690,7 @@ describe("disposable activity qualification guards", () => {
 			{ scenario: "micro", output: "output/qualification/activity-enospc" },
 			{
 				root,
+				statfs: free,
 				workerFactory: () => {
 					faultDirectory = join(
 						root,
@@ -696,6 +709,7 @@ describe("disposable activity qualification guards", () => {
 							},
 							limits: { queueRows: 32 },
 							reserveBytes: harness.GiB,
+							simulatedFreeBytes: workerFreeBytes,
 							fault: "enospc",
 						},
 					})
@@ -711,6 +725,20 @@ describe("disposable activity qualification guards", () => {
 			committed: 0,
 		})
 		expect(fs.readdirSync(faultDirectory)).toEqual(["report.json"])
+		// The injected availability still meets the real guard inside the worker:
+		// below 8 GiB plus the reserve, the fixture refuses before any write.
+		const low = await harness.run(
+			{ scenario: "micro", output: "output/qualification/activity-low" },
+			{ root, statfs: free, workerFreeBytes: 8 * harness.GiB },
+		)
+		expect(low.status).toBe("failed")
+		expect(low.error).toContain("Disk reserve breached")
+		expect(low.counts).toEqual({
+			offered: 0,
+			admitted: 0,
+			rejected: 0,
+			committed: 0,
+		})
 	}, 20000)
 })
 
@@ -1202,7 +1230,8 @@ describe("allocated driver delivery, virtual evidence only", () => {
 			),
 			{ numRuns: 100, seed: 42 },
 		)
-	})
+		// CPU-bound only (no clocks): ~1.6 s on CI, over the 5 s default under load.
+	}, 30_000)
 	it("has exactly 7200 planned query slots and 900 of each class, without actual queries", () => {
 		const counts = Array<number>(8).fill(0)
 		let slots = 0
@@ -2081,6 +2110,8 @@ async function tinyWorker(
 		identity: { inode: info.ino, device: info.dev },
 		limits: { queueRows: 32 },
 		reserveBytes: harness.GiB,
+		// Fixed availability: the host's free disk must not decide the outcome.
+		simulatedFreeBytes: workerFreeBytes,
 		readerOwner: { id: 0, owner: 1 },
 		batch: tinyBatch(),
 		...options,

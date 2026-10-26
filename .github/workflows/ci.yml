@@ -77,10 +77,12 @@ jobs:
       - name: Build and push (main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/bake-action@v5
+        env:
+          # bake variables come from the environment; `set` takes only target.key overrides
+          CACHE_FROM_ONLY: "false"
         with:
           files: docker/bake.hcl
           targets: default
           push: true
           set: |-
             *.platform=linux/amd64,linux/arm64
-            CACHE_FROM_ONLY=false

@@ -564,6 +564,29 @@ describe("HfdlDecoder", () => {
    `frequency-out-of-band` means the capture does not cover its band, `capture-too-narrow` that the
    band is in view but its channel does not fit the capture, `no-channel-selected` that no VFO or
    band-plan channel is chosen yet ([API](API.md) lists every reason).
+5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
+   when `modes` is unset) runs only where a paging band of your region is in the capture (the
+   band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),
+   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With EAS, AFSK1200, FSK9600 or
+   DTMF among its modes it has no built-in band and follows the VFO on every band. With at
+   least one paging mode, a paging band in view and no
+   `channelHz`, `channelsHz`, `offsetHz` or `frequency` it listens on every paging raster
+   channel inside the usable window (80 % of the sample rate), nearest the centre first and
+   at most 33, each through its own 12 kHz channel filter; a VFO exactly on one of those
+   channels starts first, even when 33 others are nearer. With one of those options it keeps
+   your channels.
+6. The built-in acarsdec (no YAML entry) runs one process per ACARS channel of your region
+   inside the usable window, nearest the centre first and at most 5 (EU: 131.525, 131.550,
+   131.725, 131.825 and 131.850 MHz; other regions 131.550 and 131.725 MHz). The nearest
+   channel, or the VFO when it sits exactly on one of them, starts first; the others start
+   only when the CPU budget admits them, so some may show as suspended. It never falls back
+   to the capture centre. A YAML acarsdec with `frequencies` keeps one process per listed
+   frequency.
+7. These extra paging and ACARS channels (all but each decoder's first) always come last in
+   the CPU budget. When another decoder needs room, for example AIS with 161.975 and
+   162.025 MHz in the capture, that decoder starts and the newest extra channels stop with
+   `efficiency-budget`; they retry later. A decoder you configured in YAML is never stopped
+   for them.
 
 ### No output being parsed
 

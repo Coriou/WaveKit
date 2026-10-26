@@ -147,10 +147,15 @@ export class ScannerService extends EventEmitter {
 		this.owner.ownCleanup("service", async () => {
 			process.stdout.write("scanner-stop-real\\n")
 			if (process.env.R14_PROCESS_CASE === "legacy-held") {
-				process.stdout.write("scanner-component-paused\\n")
+				// Listen before announcing: the parent signals on the marker, and an
+				// unhandled SIGUSR2 would kill this process.
 				const hold = setInterval(() => {}, 1000)
-				try { await new Promise(resolve => process.once("SIGUSR2", resolve)) }
-				finally { clearInterval(hold) }
+				try {
+					await new Promise(resolve => {
+						process.once("SIGUSR2", resolve)
+						process.stdout.write("scanner-component-paused\\n")
+					})
+				} finally { clearInterval(hold) }
 			}
 			if (["partial-failure", "legacy-held"].includes(process.env.R14_PROCESS_CASE))
 				return { ok: false, state: "failed", detail: "Fixture component failed" }
@@ -408,10 +413,14 @@ beforeAll(async () => {
 									original,
 									`stage: async (stage, phase) => {
 							if (process.env.R14_PROCESS_CASE === "operator-held" && stage === "lock-release" && phase === "before") {
-								process.stdout.write("operator-drain-paused\\n")
+								// Listen before announcing: the parent signals on the marker.
 								const hold = setInterval(() => {}, 1000)
-								try { await new Promise(resolve => process.once("SIGUSR2", resolve)) }
-								finally { clearInterval(hold) }
+								try {
+									await new Promise(resolve => {
+										process.once("SIGUSR2", resolve)
+										process.stdout.write("operator-drain-paused\\n")
+									})
+								} finally { clearInterval(hold) }
 							}
 							},`,
 								),
@@ -485,8 +494,11 @@ beforeAll(async () => {
 											: `stage: async (stage, phase) => {
 								if (stage === "parent-open" && phase === "before") {
 									process.once("SIGTERM", () => process.stdout.write("operator-signal-seen\\n"))
-									process.stdout.write("operator-open-paused\\n")
-									await new Promise(resolve => process.once("SIGUSR2", resolve))
+									// Listen before announcing: the parent signals on the marker.
+									await new Promise(resolve => {
+										process.once("SIGUSR2", resolve)
+										process.stdout.write("operator-open-paused\\n")
+									})
 								}
 							},`
 								return {

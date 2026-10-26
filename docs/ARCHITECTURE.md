@@ -129,6 +129,7 @@ Cuts exact-rate channels out of a source's IQ in one native process instead of o
 - **One `wavekit-chan` per source**, spawned lazily on the first channel request and stopped when its last channel is released. It reads raw CU8 (a live IQ source or a CU8 recording) from fanout branch `channelizer-<sourceId>` on stdin, takes JSON-line requests on fd 3 (`--control-fd 3`) and emits events on stdout. Each channel is a Unix socket `<channelizer.socketDir>/<sourceId>-g<generation>/<channelId>.sock`; the decoder gets a stream fed from it.
 - **Admission failures are suspensions, not crashes**: `channel-outside-capture`, `channel-request-invalid`, `channelizer-unavailable` (core-internal; the status DTO shows `suspended: true` without a `suspension` object). `channelizer-unavailable` decoders are retried every 15 s; after 5 unexpected `wavekit-chan` exits within 60 s a source gets no respawn until the oldest exit leaves the window.
 - **Shutdown**: the channelizer is destroyed after `decoderManager.destroy()` has released every channel.
+- **Rate reporting**: a channelised decoder's rate plan (`src/core/channelizer/rate-plan.ts`) shows the channel rate as `frontendRateHz` and, when the decoder's own adapter still converts the channel (for example dumpvdl2 resampling a 512 kHz channel to 525 kHz), that adapter's rate and format as the decoder input; otherwise the decoder input is the channel itself.
 
 **Known limitations**:
 

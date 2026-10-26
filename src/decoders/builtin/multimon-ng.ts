@@ -30,6 +30,28 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import type { DecoderChannelRequestResult } from "../../core/channelizer/types.js"
+
+/**
+ * Channel filter of a multimon-ng channel (decoder-enablement 3.18): flat
+ * to +-6 kHz, stopband (66 dB, wavekit-chan's Kaiser design) at
+ * +-(6 + 2.5) = +-8.5 kHz.
+ *
+ * - Wanted signal: POCSAG FSK deviates +-4.5 kHz; at 1200 baud Carson's
+ *   rule gives 2 x (4.5 + 1.2) = 11.4 kHz <= 12 kHz, so it is passed flat
+ *   (FLEX 1600 baud: 2 x (4.8 + 0.8) = 11.2 kHz; POCSAG2400 at 13.8 kHz loses
+ *   only its outer skirt).
+ * - Neighbour on the 12.5 kHz raster: its carrier sits 12.5 kHz away, its
+ *   +-4.5 kHz tones at 8.0 and 17.0 kHz, its Carson edge at
+ *   12.5 - 5.7 = 6.8 kHz. Everything past 8.5 kHz is 66 dB down, so only its
+ *   inner skirt (6.8-8.5 kHz, in the transition band) reaches the
+ *   discriminator.
+ * - Before: the 48 kHz request with filterTransition 0.012 asked for
+ *   48 000 x (1 - 0.012) = 47 424 Hz, i.e. +-23.7 kHz: both 12.5 kHz
+ *   neighbours, and the 25 kHz ones partly, entered every channel.
+ */
+export const MULTIMON_CHANNEL_BANDWIDTH_HZ = 12_000
+export const MULTIMON_CHANNEL_TRANSITION_HZ = 2500
 
 /** Supported Multimon-ng decoder modes (Requirement 7.3) */
 export type MultimonMode =
@@ -85,6 +107,59 @@ export const MULTIMON_MODES: readonly MultimonMode[] = [
 ] as const
 
 // Output parsing regex patterns
+/** The modes multimon-ng runs with when none (or none valid) are configured. */
+const MULTIMON_DEFAULT_MODES: readonly MultimonMode[] = [
+	"POCSAG512",
+	"POCSAG1200",
+	"POCSAG2400",
+]
+
+/**
+ * Paging-only modes (decoder-enablement 3.18): POCSAG and FLEX are heard only
+ * on paging channels. EAS, AFSK1200, FSK9600 and DTMF can be on any band.
+ */
+export const MULTIMON_PAGING_MODES: readonly MultimonMode[] = [
+	"POCSAG512",
+	"POCSAG1200",
+	"POCSAG2400",
+	"FLEX",
+]
+
+/**
+ * The modes a raw `modes` option runs (the adapter's own reading, without
+ * its warnings): absent, empty, not a list or no valid entry gives the POCSAG
+ * default; otherwise the first MULTIMON_MODES_MAX entries that are known
+ * modes, deduplicated in order.
+ */
+export function effectiveMultimonModes(value: unknown): MultimonMode[] {
+	if (!Array.isArray(value) || value.length === 0)
+		return [...MULTIMON_DEFAULT_MODES]
+	const valid = [
+		...new Set(
+			value
+				.slice(0, MULTIMON_MODES_MAX)
+				.filter((mode): mode is MultimonMode =>
+					MULTIMON_MODES.includes(mode as MultimonMode),
+				),
+		),
+	]
+	return valid.length > 0 ? valid : [...MULTIMON_DEFAULT_MODES]
+}
+
+/** Every mode the option runs is a paging mode (then the paging band applies). */
+export function multimonPagingOnly(value: unknown): boolean {
+	return effectiveMultimonModes(value).every(mode =>
+		MULTIMON_PAGING_MODES.includes(mode),
+	)
+}
+
+/** At least one mode the option runs is a paging mode (then the paging raster applies). */
+export function multimonHasPaging(value: unknown): boolean {
+	return effectiveMultimonModes(value).some(mode =>
+		MULTIMON_PAGING_MODES.includes(mode),
+	)
+}
+
 // POCSAG format: "POCSAG512: Address: 1234567  Function: 0  Alpha:   Message text here"
 // or "POCSAG1200: Address: 1234567  Function: 2  Numeric:   123-456-7890"
 const POCSAG_PATTERN =
@@ -310,9 +385,7 @@ export class MultimonDecoder extends AudioDemodDecoder {
 			)
 		}
 
-		return validModes.length > 0
-			? validModes
-			: ["POCSAG512", "POCSAG1200", "POCSAG2400"]
+		return effectiveMultimonModes(value)
 	}
 
 	/**
@@ -376,6 +449,20 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	 */
 	protected override channelizerSupported(): boolean {
 		return true
+	}
+
+	/** The 12 kHz paging channel filter (see MULTIMON_CHANNEL_BANDWIDTH_HZ). */
+	override getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		const request = super.getChannelRequest(input)
+		if (!request || "invalid" in request) return request
+		return {
+			...request,
+			bandwidthHz: MULTIMON_CHANNEL_BANDWIDTH_HZ,
+			transitionHz: MULTIMON_CHANNEL_TRANSITION_HZ,
+		}
 	}
 
 	/**
