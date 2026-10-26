@@ -9,7 +9,7 @@ Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-des
 - Finds energy in the window a source is tuned to (in-window) or across wider ranges by retuning an rtl_tcp source (sweep).
 - Classifies emissions from their spectrum (bandwidth, shape, TDMA envelope) and confirms them with dsd-fme, multimon-ng or direwolf.
 - Never decrypts and never handles keys. Encrypted traffic is reported as `encrypted: true` and no audio is kept.
-- Confidence is honest: `activity` (energy only) → `candidate` (spectral hypothesis) → `classified` (channel features; after the channelizer) → `decoded` (the confirm rule of the protocol was met: for DMR, the same colour code on two CRC-clean link lines). `decoded` means the first **accepted** identity, not any identity-bearing evidence.
+- Confidence is honest: `activity` (energy only) → `candidate` (spectral hypothesis) → `classified` (channel features; after the channelizer) → `decoded` (the confirm rule of the protocol was met: for DMR, the same colour code on two content-verified bursts or checked voice link-control lines). `decoded` means the first **accepted** identity, not any identity-bearing evidence.
 - Before the channelizer: one confirm probe at a time (each costs about half a core), analog replay characterisation when IQ capture is enabled, no listen-scan, ISM only through configured rtl_433 decoders (ambient evidence).
 
 ## Modes
@@ -593,14 +593,24 @@ and remain weak evidence. The most frequent sync-only color code may appear in
 the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
 
 DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
-CSBK, MBCH, MBCC, DATA or USBD burst, or checked voice link control carrying
+CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
 both target and source. Voice link control uses the latest CC from its own BS
 slot, or from the single MS channel, in its current burst sequence. Unknown CC,
 sync loss, protocol changes and sequence timeout clear that association. Header
 verification waits until the next DMR sync closes the burst (normally one burst
 of latency); a non-DMR sync or any continuation CRC/FEC error rejects it.
 Stop or silence timeout flushes an unfinished header as unverified. CRC/FEC
-errors do not count, and CACH/burst FEC errors
+errors and `-RAS` output do not count. MBCC continuation bursts have no own
+CRC and never confirm CC (dsd-fme ed1d1d6 `dmr_dburst.c:115–119,627`);
+only the completed block is CRC-checked by `dmr_block.c`. MS prints CC before
+slot-type decoding (`dmr_ms.c:676–686`), so header confirmation also requires
+the closing DMR sync to print the same CC. `Sync: no sync` discards pending
+headers and CC context but does not split an active call by itself.
+Checked voice LC with paired TG/SRC but no known slot CC remains weak
+`digital-undecoded` evidence, with summary `DMR voice, TG/SRC verified, CC unknown`
+and a `DMR` tag. It cannot become decoded/proven without a CC identity.
+The interpreter retains at most 256 scoped TG/SRC voice-LC pairs, evicting oldest.
+CACH/burst FEC errors
 produce no evidence. Near the tuner centre, within the existing DC admission
 guard, digital voice additionally needs paired checked voice link control with
 both talkgroup and source before it can be decoded.
@@ -611,7 +621,10 @@ remain unverified even beside a recognized frame type. In dsd-fme,
 when BCH corrects the NAC. No supported output binds the printed NAC to the
 current checked NID, so P25 identity stays unverified. NXDN accepts current RAN
 on CRC-checked
-FACCH2/UDCH output, rather than cached SACCH/CAC RAN. YSF FICH sync, unchecked
+FACCH2/UDCH output, including the exact ` RAN 03  FACCH2` spacing
+(ed1d1d6 `nxdn_deperm.c:1390–1437`). CRC failure prints eight spaces instead
+of RAN, so it supplies no identity. SACCH/CAC print cached RAN
+(`nxdn_deperm.c:466,564,762`) and remain unverified. YSF FICH sync, unchecked
 D-STAR MY headers and dPMR's cached channel code do not establish identities.
 Unknown output formats default to unverified.
 

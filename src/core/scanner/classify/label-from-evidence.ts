@@ -193,6 +193,7 @@ export interface ProofFacts {
 	readonly identity?: Identity
 	readonly talkgroup?: string
 	readonly unverifiedCc?: number
+	readonly tgSrcVerified?: boolean
 	readonly tone?: ProofAnalogInput["tone"]
 	readonly voice?: boolean
 }
@@ -205,6 +206,7 @@ interface AcceptedDecode {
 	readonly identity?: Identity
 	readonly talkgroup?: string
 	readonly unverifiedCc?: number
+	readonly tgSrcVerified?: boolean
 }
 
 function acceptDecode(item: unknown): AcceptedDecode | undefined {
@@ -216,6 +218,8 @@ function acceptDecode(item: unknown): AcceptedDecode | undefined {
 	const identity = prop(item, "identity")
 	const talkgroup = prop(item, "talkgroup")
 	const unverifiedCc = prop(item, "unverifiedCc")
+	const tgSrcVerified =
+		protocol === "dmr" && prop(item, "tgSrcVerified") === true
 	if (!isProtocol(protocol) || protocol === "unknown") return undefined
 	if (typeof transport !== "string" || !TRANSPORTS.has(transport))
 		return undefined
@@ -234,6 +238,7 @@ function acceptDecode(item: unknown): AcceptedDecode | undefined {
 	}
 	return {
 		protocol,
+		...(tgSrcVerified ? { tgSrcVerified: true } : {}),
 		...(protocol === "dmr" &&
 		typeof unverifiedCc === "number" &&
 		Number.isInteger(unverifiedCc) &&
@@ -523,6 +528,7 @@ function decide(e: ProofInput): Decision {
 			facts: isDsdFmeProtocol(activity.protocol)
 				? {
 						kind: "digital-undecoded",
+						...(activity.tgSrcVerified ? { tgSrcVerified: true } : {}),
 						protocol: activity.protocol,
 						...(activity.unverifiedCc !== undefined
 							? { unverifiedCc: activity.unverifiedCc }

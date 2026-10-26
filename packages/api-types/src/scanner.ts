@@ -198,6 +198,10 @@ export interface DiscoveryMetadataInput {
 	ismModels: string[]
 }
 export interface DecodeEvidence {
+	/** Explicit checked-content provenance; absent means unverified. */
+	contentVerified?: boolean
+	/** Most frequent sync-only DMR CC; never an identity. */
+	unverifiedCc?: number
 	protocol: ScannerProtocol
 	identity?: Identity
 	metadata: Partial<DiscoveryMetadataInput>
@@ -225,6 +229,9 @@ export type ScannerProofKind =
 	| "carrier-only"
 export type ScannerProofTransport = "live" | "replay" | "ambient"
 export interface ScannerProof {
+	unverifiedCc?: number
+	/** Checked DMR TG/SRC without an accepted CC identity; still weak. */
+	tgSrcVerified?: boolean
 	kind: ScannerProofKind
 	protocol: ScannerProtocol
 	transport: ScannerProofTransport
@@ -239,7 +246,7 @@ export interface ScannerProof {
 	encrypted: boolean
 	summary: string
 }
-/** WG12: `proven` is a discovery with a proof; `weak` is one without. */
+/** WG12: `proven` requires decoded/analog proof; digital sync and carrier proof remain `weak`. */
 export type ScannerEvidenceLevel = "proven" | "weak"
 /**
  * WG12: the new discovery-list query fields only. `evidence` absent means both.

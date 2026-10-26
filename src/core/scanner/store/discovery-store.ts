@@ -1,4 +1,3 @@
-import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 /**
  * Discovery store (spec § 7): turns observations into deduplicated discoveries.
  *
@@ -12,6 +11,7 @@ import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
  * monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one journal
  * entry whose payload holds the resulting records, so replay is an idempotent upsert.
  */
+import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -600,6 +600,13 @@ function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 			encrypted: ev.encrypted === true,
 		}
 		if (ev.unverifiedCc !== undefined) row.unverifiedCc = ev.unverifiedCc
+		if (
+			ev.protocol === "dmr" &&
+			ev.contentVerified === true &&
+			ev.metadata.talkgroups?.length &&
+			ev.metadata.sources?.length
+		)
+			row.tgSrcVerified = true
 		if (ev.identity !== undefined)
 			row.identity = { kind: ev.identity.kind, value: ev.identity.value }
 		const talkgroup = ev.metadata.talkgroups?.[0]

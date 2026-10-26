@@ -62,6 +62,11 @@ function proof(ev: DecodeEvidence) {
 				transport: "live",
 				encrypted: ev.encrypted === true,
 				...(ev.identity ? { identity: ev.identity } : {}),
+				...(ev.contentVerified &&
+				ev.metadata.talkgroups?.length &&
+				ev.metadata.sources?.length
+					? { tgSrcVerified: true }
+					: {}),
 				...(ev.unverifiedCc !== undefined
 					? { unverifiedCc: ev.unverifiedCc }
 					: {}),
@@ -110,7 +115,126 @@ describe("dsd-fme content verification", () => {
 		expect(r.evidence.every(e => !e.identity)).toBe(true)
 	})
 
-	it.each(["VLC", "CSBK", "PI", "TLC", "MBCH", "MBCC", "DATA", "USBD"])(
+	it("never verifies four clean MBCC continuations", () => {
+		const r = rig()
+		for (let i = 0; i < 4; i++) r.feed(bs("05", "MBCC"), T0 + i * 93.7)
+		expect(r.links).toHaveLength(4)
+		expect(r.links.every(l => !l.verified)).toBe(true)
+		expect(
+			r.evidence.every(
+				e => !e.identity && evidenceLevelOf({ proof: proof(e)! }) === "weak",
+			),
+		).toBe(true)
+	})
+
+	it.each(["VLC -RAS ", "CSBK -RAS "])("rejects RAS output %s", burst => {
+		const r = rig()
+		for (let i = 0; i < 4; i++) r.feed(bs("05", burst), T0 + i * 93.7)
+		expect(r.links.every(l => !l.verified)).toBe(true)
+		expect(r.evidence.every(e => !e.identity)).toBe(true)
+	})
+
+	it("rejects a deferred RAS error", () => {
+		const r = rig()
+		r.feed(bs("05", "VLC"), T0 + 3.7)
+		r.feed(" -RAS ", T0 + 31.3)
+		r.feed(bs("05", "IDLE"), T0 + 69.1)
+		expect(r.links.every(l => !l.verified)).toBe(true)
+	})
+
+	it("rejects MS header CC when the closing checked burst prints another CC", () => {
+		const r = rig()
+		r.feed("Sync: +DMR MS/DM MODE/MONO | Color Code=05 | VLC", T0 + 3.7)
+		r.feed("Sync: +DMR MS/DM MODE/MONO | Color Code=07 | VLC", T0 + 69.1)
+		expect(r.links[0]).toMatchObject({ cc: 5, verified: false })
+		expect(r.evidence.every(e => !e.identity)).toBe(true)
+	})
+
+	it("describes checked voice LC without a slot CC and preserves it on restore", () => {
+		const r = rig()
+		r.feed("Sync: +DMR [slot2] slot1 | Color Code=05 | IDLE", T0 + 3.7)
+		r.feed(lc, T0 + 31.3)
+		r.feed(lc, T0 + 93.7)
+		const ev = r.evidence.at(-1)!
+		expect(ev.identity).toBeUndefined()
+		expect(ev.voiceLc).toBe(true)
+		expect(proof(ev)).toMatchObject({
+			kind: "digital-undecoded",
+			tgSrcVerified: true,
+			summary: "DMR voice, TG/SRC verified, CC unknown",
+		})
+		expect(evidenceLevelOf({ proof: proof(ev)! })).toBe("weak")
+		const store = new DiscoveryStore({
+			maxDiscoveries: 10,
+			now: () => T0,
+			newId: counterIds(),
+		})
+		const obs = makeObs({
+			id: "unknown-cc",
+			centreHz: HZ,
+			startedAt: T0,
+			open: true,
+		})
+		const id = store.ingest(obs).discoveryId!
+		const publicEv = guardDsdFmeEvidence(
+			{ ...ev, epoch: obs.track.epoch },
+			HZ,
+			HZ,
+		)
+		store.appendObservationEvidence(obs.id, publicEv)
+		store.applyEvidence(id, publicEv)
+		store.restore(store.snapshot())
+		expect(store.get(id)).toMatchObject({
+			evidenceLevel: "weak",
+			proof: {
+				tgSrcVerified: true,
+				summary: "DMR voice, TG/SRC verified, CC unknown",
+			},
+		})
+	})
+
+	it("bounds checked TG/SRC pairs at 256, evicting the oldest", () => {
+		const state = createInterpreterState({ epoch: 3, origin: "probe" })
+		for (let i = 0; i < 257; i++) {
+			for (let j = 0; j < 2; j++)
+				interpretDsdFme(
+					{
+						kind: "link",
+						line: {
+							protocol: "dmr",
+							verified: true,
+							voiceLc: true,
+							crcErr: false,
+							cc: 5,
+							tg: String(i + 1),
+							src: String(i + 1001),
+							at: T0 + i * 93.7 + j * 31.3,
+						},
+					},
+					state,
+				)
+		}
+		const call = (i: number) =>
+			interpretDsdFme(
+				{
+					kind: "call_start",
+					at: T0 + 25_137.3,
+					call: {
+						callId: `fake-${i}`,
+						protocol: "dmr",
+						talkgroup: i + 1,
+						source: i + 1001,
+					},
+				},
+				state,
+			)[0]
+		expect(call(0)?.voiceLc).toBeUndefined()
+		expect(call(1)?.voiceLc).toBe(true)
+		expect(call(256)?.voiceLc).toBe(true)
+		expect([...state.accepted.keys()].some(k => k.includes(":lc:"))).toBe(false)
+	})
+
+	it.each(["VLC", "CSBK", "PI", "TLC", "MBCH", "DATA", "USBD"])(
 		"requires two clean %s contents",
 		burst => {
 			const r = rig()
@@ -247,7 +371,7 @@ describe("dsd-fme content verification", () => {
 		expect(r.evidence).toEqual([])
 	})
 
-	it.each(["PI", "VLC", "TLC", "CSBK", "MBCH", "MBCC", "DATA", "USBD"])(
+	it.each(["PI", "VLC", "TLC", "CSBK", "MBCH", "DATA", "USBD"])(
 		"rejects multiline failures throughout a %s burst",
 		burst => {
 			for (const error of [
@@ -577,8 +701,9 @@ describe("dsd-fme content verification", () => {
 		["P25p1", "NAC/CC: 123; duid:EE", false],
 		["P25p1", "NAC/CC: 123;", false],
 		["P25p1", "nac: [123] src: [123] tg: [9]", false],
-		["NXDN48", " RAN 03 FACCH2", true],
-		["NXDN96", " RAN 03 FACCH2", true],
+		["NXDN48", " RAN 03  FACCH2", true],
+		["NXDN96", " RAN 03  FACCH2", true],
+		["NXDN96", "         FACCH2", false],
 		["NXDN96", " RAN 03 UDCH", true],
 		["NXDN96", " RAN=03 TGT=9 SRC=123", false],
 		["NXDN96", " RAN 03 PF 1/4", false],

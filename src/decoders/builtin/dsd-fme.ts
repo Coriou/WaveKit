@@ -69,7 +69,7 @@ const _TS_PATTERN = /^(?:(?:\d{4}-\d{2}-\d{2}\s+)?\d{1,2}:\d{2}:\d{2})\s+/
 /** Sync detection: "Sync: +DMR", "Sync: +P25p1", etc. */
 // dsd_frame_sync.c prints signed P25/DMR/YSF/dPMR/DSTAR;
 // nxdn_frame.c prints unsigned NXDN48/NXDN96.
-const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])?(?<proto>[A-Za-z0-9]+)\b/i
+const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])?(?<proto>(?!no\b)[A-Za-z0-9]+)\b/i
 
 /** Error conditions - FEC, CRC, sync lost */
 const ERROR_PATTERN = /\b(FEC ERR|CRC ERR|SYNC LOST|no sync)\b/i
@@ -1540,8 +1540,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			const expired = at - this.pendingDmrLink.at > CALL_TIMEOUT_MS
 			const lost = /Frame Sync Err\b|SYNC LOST|no sync/i.test(line)
 			if (expired || lost || sync)
-				this.flushPendingDmrLink(!expired && !lost && dmrSync)
-			else if (CRC_ERR.test(line) || /\bFEC\s+ERR\b/i.test(line)) {
+				// ed1d1d6 dmr_ms.c:676-686 prints CC before dmr_data_sync decodes
+				// the slot type. Only a matching closing CC can attest MS CC.
+				this.flushPendingDmrLink(
+					!expired &&
+						!lost &&
+						dmrSync &&
+						(!this.linkDmrMs ||
+							Number(DMR_COLOR_CODE.exec(line)?.groups?.["cc"]) ===
+								this.pendingDmrLink.cc),
+				)
+			else if (CRC_ERR.test(line) || /\bFEC\s+ERR\b| -RAS /i.test(line)) {
 				this.flushPendingDmrLink(false)
 				this.linkDmrCc.clear()
 			}
@@ -1558,7 +1567,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.linkDmrCc.clear()
 			return null
 		}
-		const clean = !crcErr && fecErrs === 0
+		const clean = !crcErr && fecErrs === 0 && !/ -RAS /.test(line)
 		const base = {
 			verified: false,
 			crcErr,
@@ -1597,7 +1606,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				}
 				const idGroups =
 					DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
-				// dmr_dburst.c:88-185 selects PI/VLC/TLC/CSBK/MBCH/MBCC/DATA/USBD.
+				// dmr_dburst.c:88-185 selects PI/VLC/TLC/CSBK/MBCH/DATA/USBD.
+				// ed1d1d6:115-119 MBCC (0x05) has no own CRC; :627
+				// skips CRC ERR for it. Only dmr_block.c checks the final block.
 				// Its shared FEC/CRC errors print at 610-630, AFTER payload handlers:
 				// VLC/TLC dmr_flco.c:809-815 and USBD dmr_dburst.c:589-594
 				// can start a new line first; MBCH/MBCC use dmr_block.c:1464
@@ -1614,7 +1625,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					clean &&
 					(voiceLc ||
 						(sync !== null &&
-							/\|\s*(?:PI|VLC|TLC|CSBK|MBCH|MBCC|DATA|USBD)\b/.test(line)))
+							/\|\s*(?:PI|VLC|TLC|CSBK|MBCH|DATA|USBD)\b/.test(line)))
 				const previousCc =
 					ccKey !== undefined ? this.linkDmrCc.get(ccKey) : undefined
 				const identityCc =
@@ -1674,8 +1685,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			}
 			case "nxdn48":
 			case "nxdn96": {
-				// nxdn_deperm.c prints cached RAN before SACCH/CAC checks.
-				// FACCH2/UDCH alone prints the current RAN only inside crc == check.
+				// ed1d1d6 nxdn_deperm.c:466,564,762 prints cached SACCH/CAC RAN.
+				// :1390-1437 prints current RAN only inside crc == check,
+				// then " FACCH2"/" UDCH" (two spaces after the RAN).
 				const checkedRan = /\bRAN\s+(\d{2})\s+(?:FACCH2|UDCH)\b/.exec(line)?.[1]
 				const ran = checkedRan ?? NXDN_RAN.exec(line)?.groups?.["ran"]
 				const idGroups = NXDN_TGT_SRC.exec(line)?.groups

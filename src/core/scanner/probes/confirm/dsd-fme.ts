@@ -56,6 +56,19 @@ export type DsdFmeScannerEvent =
 	| { kind: "link"; line: DsdFmeLinkLine }
 	| { kind: "call_start" | "call_end"; at: number; call: DsdFmeCallData }
 
+// 256 scoped TG/SRC pairs = 128 callers on each of two TDMA slots per trial.
+// Bound independently of identity/hint keys, including non-shared trial state.
+const MAX_LC_PAIRS = 256
+const lcPairs = new WeakMap<InterpreterState, Map<string, true>>()
+function lcKey(
+	state: InterpreterState,
+	protocol: ScannerProtocol,
+	tg: string | undefined,
+	src: string | undefined,
+): string {
+	return `${state.match.scope() ?? ""}\u0000${protocol}:lc:${tg}:${src}`
+}
+
 const IDENTITY_KIND: Partial<Record<ScannerProtocol, IdentityKind>> = {
 	dmr: "dmr-cc",
 	p25p1: "p25-nac",
@@ -239,7 +252,18 @@ function interpretLink(
 		metadata.sources?.length
 	) {
 		ev.voiceLc = true
-		state.accepted.set(`${protocol}:lc:${line.tg}:${line.src}`, "1")
+		let pairs = lcPairs.get(state)
+		if (!pairs) {
+			pairs = new Map()
+			lcPairs.set(state, pairs)
+		}
+		const key = lcKey(state, protocol, line.tg, line.src)
+		pairs.delete(key)
+		pairs.set(key, true)
+		if (pairs.size > MAX_LC_PAIRS) {
+			const oldest = pairs.keys().next()
+			if (!oldest.done) pairs.delete(oldest.value)
+		}
 	}
 	return [ev]
 }
@@ -277,7 +301,7 @@ function interpretCall(
 		{
 			...build(protocol, state, ev.at, metadata, encrypted, key),
 			callId: c.callId,
-			...(state.accepted.get(`${key}:lc:${tg}:${src}`) === "1" &&
+			...(lcPairs.get(state)?.has(lcKey(state, key, tg, src)) === true &&
 			metadata.talkgroups?.length &&
 			metadata.sources?.length
 				? { voiceLc: true }

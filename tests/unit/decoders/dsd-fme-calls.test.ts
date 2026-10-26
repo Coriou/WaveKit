@@ -91,6 +91,33 @@ describe("dsd-fme call segmentation", () => {
 		vi.useRealTimers()
 	})
 
+	it("does not split an active call on a short no-sync gap", () => {
+		const decoder = createDecoder()
+		const outputs = replay(
+			decoder,
+			[
+				{ atMs: 3.7, text: "Sync: +DMR MS/DM MODE/MONO | Color Code=05 | VC*" },
+				{ atMs: 31.3, text: " SLOT 1 TGT=9 SRC=123 Group Call " },
+				{ atMs: 433.7, text: "Sync: no sync" },
+				{
+					atMs: 697.1,
+					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=05 | VC1",
+				},
+				{ atMs: 731.3, text: " SLOT 1 TGT=9 SRC=123 Group Call " },
+				{
+					atMs: 1093.7,
+					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=05 | TLC",
+				},
+			],
+			4000,
+		)
+		expect(calls(outputs, "call_start")).toHaveLength(1)
+		expect(calls(outputs, "call_end")).toHaveLength(1)
+		expect(
+			(calls(outputs, "call_end")[0]!.data as { duration: number }).duration,
+		).toBeGreaterThan(600)
+	})
+
 	it("reports one call per PTT press, ended by the DMR terminator (TLC)", () => {
 		const decoder = createDecoder()
 		const outputs = replay(decoder, FIXTURE, 30_000)

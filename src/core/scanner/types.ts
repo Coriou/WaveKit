@@ -247,6 +247,8 @@ export type ScannerProofKind =
 	| "carrier-only"
 export type ScannerProofTransport = "live" | "replay" | "ambient"
 export interface ScannerProof {
+	/** Checked DMR TG/SRC without an accepted CC identity; still weak. */
+	tgSrcVerified?: boolean
 	/** DMR-like sync hint only. */
 	unverifiedCc?: number
 	kind: ScannerProofKind

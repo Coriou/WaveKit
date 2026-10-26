@@ -152,6 +152,7 @@ export interface JobPhaseInput {
 }
 
 export interface ProofDecodeInput {
+	tgSrcVerified?: boolean
 	unverifiedCc?: number
 	protocol: ScannerProtocol
 	transport: ScannerProofTransport

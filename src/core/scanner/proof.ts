@@ -281,6 +281,8 @@ function summaryOf(proof: BareProof): string {
 		case "analog-voice":
 			return analogSummary(proof)
 		case "digital-undecoded":
+			if (proof.protocol === "dmr" && proof.tgSrcVerified === true)
+				return "DMR voice, TG/SRC verified, CC unknown"
 			return isDsdFmeProtocol(proof.protocol)
 				? `Digital, ${SCANNER_PROOF_PROTOCOL_LABEL[proof.protocol]}-like sync${proof.unverifiedCc !== undefined ? `, CC ${proof.unverifiedCc} (unverified)` : ""}, not decoded`
 				: digitalSummary(proof.tried, proof.unavailable)
@@ -326,6 +328,7 @@ export function proofFromFacts(
 			unavailable: unavailableOf(input.unavailable),
 			encrypted: facts.encrypted,
 		}
+		if (facts.tgSrcVerified === true) row.tgSrcVerified = true
 		if (facts.unverifiedCc !== undefined) row.unverifiedCc = facts.unverifiedCc
 		if (facts.identity !== undefined)
 			row.identity = { kind: facts.identity.kind, value: facts.identity.value }
@@ -435,6 +438,7 @@ const ProofSchema = z
 		transport: z.enum(["live", "replay", "ambient"]),
 		at: z.string().refine(value => Number.isFinite(Date.parse(value))),
 		observationId: z.string().min(1),
+		tgSrcVerified: z.boolean().optional(),
 		unverifiedCc: z.number().int().min(0).max(15).optional(),
 		identity: z.unknown().optional(),
 		talkgroup: z.string().min(1).max(MAX_IDENTITY_VALUE_LENGTH).optional(),
@@ -473,6 +477,13 @@ const ProofSchema = z
 				return
 			}
 			previous = type
+		}
+		if (
+			row.tgSrcVerified &&
+			!(row.kind === "digital-undecoded" && row.protocol === "dmr")
+		) {
+			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "tgSrcVerified" })
+			return
 		}
 		if (
 			row.unverifiedCc !== undefined &&

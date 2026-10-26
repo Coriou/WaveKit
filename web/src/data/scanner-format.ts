@@ -160,7 +160,9 @@ export function discoveryTitle(d: Discovery): string {
 	const id = identityText(d.identity)
 	const what =
 		d.protocol === "dmr" && d.confidence === "activity"
-			? "DMR?"
+			? d.proof?.tgSrcVerified === true
+				? "DMR"
+				: "DMR?"
 			: confidenceText(d)
 	return id ? `${what} · ${id}` : what
 }
@@ -435,12 +437,14 @@ export function isVerified(
 
 /**
  * The protocol slot of "what is this": the protocol unqualified only when verified ("DMR"), else the
- * qualified words of confidenceText ("Maybe DMR", "Heard"). Never filled from `hint`.
+ * qualified words of confidenceText ("Maybe DMR", "Heard"). Checked DMR TG/SRC
+ * with unknown CC also uses "DMR" while retaining weak evidence. Never filled from `hint`.
  */
 export function protocolSlotText(
-	d: Pick<Discovery, "confidence" | "protocol" | "evidenceLevel">,
+	d: Pick<Discovery, "confidence" | "protocol" | "evidenceLevel" | "proof">,
 ): string {
-	if (d.protocol === "dmr" && d.confidence === "activity") return "DMR?"
+	if (d.protocol === "dmr" && d.confidence === "activity")
+		return d.proof?.tgSrcVerified === true ? "DMR" : "DMR?"
 	if (isVerified(d) && d.protocol !== "unknown") return protocolName(d.protocol)
 	return confidenceText(d)
 }

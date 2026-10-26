@@ -143,7 +143,9 @@ are labelled **tone only** and displayed as compact notices.
 Digital voice tags distinguish sync hints from decoded identities. DMR sync-only
 activity is labelled `DMR?`; its detail summary says DMR-like sync, not decoded,
 and may show the most frequent color code as `CC 3 (unverified)`. Repeating
-VC/IDLE sync never earns a proven tag or `DMR · CC n` identity. A decoded DMR
+Checked TG/SRC voice with unknown CC uses the tag `DMR` and detail
+`DMR voice, TG/SRC verified, CC unknown`; this remains weak evidence.
+VC/IDLE/MBCC sync never earns a proven tag or `DMR · CC n` identity. A decoded DMR
 identity requires repeated checked content, with checked talkgroup/source voice
 link control additionally required inside the tuner-centre DC guard. See
 [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
