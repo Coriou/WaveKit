@@ -30,6 +30,7 @@ function fakeTransport() {
 	return {
 		caps,
 		frames,
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn((_id: string, payload: Buffer) => {
 			frames.push([payload.readUInt8(0), payload.readUInt32BE(1)])
 			return true

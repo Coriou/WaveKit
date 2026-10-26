@@ -64,6 +64,7 @@ function setup(reconnectPolicy: "restore" | "reset" = "restore") {
 	const fanout = new FakeFanout()
 	let failWrites = false
 	const manager = Object.assign(sources, {
+		assertTunerCommandActive: () => {},
 		writeToSource: () => {
 			if (failWrites) throw new Error("socket closed")
 			return true

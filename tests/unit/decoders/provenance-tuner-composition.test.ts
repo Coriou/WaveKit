@@ -46,6 +46,7 @@ function setup() {
 		exclusive: false,
 	}
 	const sources = {
+		assertTunerCommandActive: () => {},
 		writeToSource: () => true,
 		isRtlTcpSource: () => true,
 		updateSourceCaps: () => caps,

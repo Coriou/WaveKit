@@ -2574,6 +2574,11 @@ export class SourceManager extends EventEmitter {
 		Set<AbortController>
 	>()
 
+	/** Reject late writes and state changes from a cancelled tuner command. */
+	assertTunerCommandActive(): void {
+		this.tunerCommandContext.getStore()?.throwIfAborted()
+	}
+
 	/** Serialize API commands, including the receiver's rate-change restart. */
 	async runTunerCommand<T>(
 		id: string,
@@ -2711,7 +2716,7 @@ export class SourceManager extends EventEmitter {
 	writeToSource(id: string, payload: Buffer): boolean {
 		// Async context follows controller awaits, so cancelled callbacks cannot
 		// write later, even after a replacement source registers the same id.
-		this.tunerCommandContext.getStore()?.throwIfAborted()
+		this.assertTunerCommandActive()
 		const state = this.sources.get(id)
 		if (!state) {
 			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")

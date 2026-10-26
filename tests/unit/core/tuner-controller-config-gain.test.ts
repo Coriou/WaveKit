@@ -54,6 +54,7 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 	const frames: string[] = []
 	let failAfter: number | null = null
 	const sources = Object.assign(new EventEmitter(), {
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn((_id: string, payload: Buffer) => {
 			if (failAfter !== null && failAfter <= 0)
 				throw new Error("Source rtl-1 socket is not writable")

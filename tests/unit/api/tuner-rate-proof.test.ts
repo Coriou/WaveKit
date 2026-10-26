@@ -34,6 +34,7 @@ async function harness(): Promise<Harness> {
 	const frames: Buffer[] = []
 	const failNext = { cmd: null as number | null }
 	const transport = {
+		assertTunerCommandActive: () => {},
 		writeToSource: (_id: string, frame: Buffer) => {
 			if (failNext.cmd !== null && frame[0] === failNext.cmd)
 				throw new Error("socket closed")

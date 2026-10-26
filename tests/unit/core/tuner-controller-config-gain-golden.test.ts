@@ -52,6 +52,7 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 	}
 	const frames: string[] = []
 	const sources = Object.assign(new EventEmitter(), {
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn((_id: string, payload: Buffer) => {
 			frames.push(payload.toString("hex"))
 			return true

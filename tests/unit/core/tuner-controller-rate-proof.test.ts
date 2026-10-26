@@ -27,6 +27,7 @@ function make(options: { caps?: Partial<SourceCaps>; noRate?: boolean } = {}) {
 	const frames: Buffer[] = []
 	const fail = { cmd: null as number | null }
 	const transport = {
+		assertTunerCommandActive: () => {},
 		writeToSource: (_id: string, frame: Buffer) => {
 			if (fail.cmd !== null && frame[0] === fail.cmd) throw new Error("closed")
 			frames.push(Buffer.from(frame))

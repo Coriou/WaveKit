@@ -43,6 +43,7 @@ let controller: TunerController
 function create(config = {}, initial = caps({ centerFreq: 1_090_000_000 })) {
 	current = initial
 	const sourceManager = {
+		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn(() => true),
 		isRtlTcpSource: vi.fn(() => true),
 		getCaps: vi.fn(() => current),
