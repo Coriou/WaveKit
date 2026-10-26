@@ -2104,7 +2104,11 @@ export class DiscoveryStore
 			// Settled: a round that saw every candidate and changed nothing.
 			if (plan.groups.length === 0 && retiredNow === 0) {
 				// (With the group budget spent, merges may be left: not settled.)
-				settled = plan.nextCursor === undefined && budget > 0
+				// With the retire budget spent, stale records may be left: not settled either.
+				settled =
+					plan.nextCursor === undefined &&
+					budget > 0 &&
+					retired.length < FRAGMENT_RETIRE_MAX
 				break
 			}
 			// A scan cut short by the candidate cap: the next pass continues from the cursor.

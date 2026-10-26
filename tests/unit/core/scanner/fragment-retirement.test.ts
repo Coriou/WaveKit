@@ -343,8 +343,11 @@ describe("per-pass bounds (DQ 10.6)", () => {
 		const at = fragmentStore(specs(FRAGMENT_RETIRE_MAX), { nowMs }).store
 		expect(at.retireFragments().retired).toHaveLength(FRAGMENT_RETIRE_MAX)
 		const past = fragmentStore(specs(FRAGMENT_RETIRE_MAX + 1), { nowMs }).store
-		const first = past.retireFragments().retired
+		const pastProbe: { plan?: FragmentPlan } = {}
+		const first = past.retireFragments(pastProbe).retired
 		expect(first).toHaveLength(FRAGMENT_RETIRE_MAX)
+		// The retire budget ran out: the pass is not settled.
+		expect(pastProbe.plan?.truncated).toBeGreaterThan(0)
 		expect(first).not.toContain(id(FRAGMENT_RETIRE_MAX))
 		expect(past.retireFragments().retired).toEqual([id(FRAGMENT_RETIRE_MAX)])
 	})

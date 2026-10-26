@@ -737,7 +737,7 @@ caps. A pass that ended on a round with no change and no cap reached is settled.
 Total sightings over the live records plus the retired records equal the total before the
 pass.
 
-10.6 **Bounds per pass**, run on the 5-minute maintenance cadence. Per round: freezing is
+10.6 **Bounds per pass**, run on the maintenance cadence (the first scanner tick after start, then every 5 minutes). Per round: freezing is
 O(n) and the sorts O(n log n) for n records (10 000 by default); at most
 `FRAGMENT_SCAN_MAX` = 512 candidates are examined, in id order from an in-memory cursor
 that wraps; each visits at most `FRAGMENT_PEER_SCAN_MAX` + 2 = 34 nearest records (the
@@ -749,11 +749,12 @@ pass over all rounds: at most `FRAGMENT_GROUPS_MAX` = 32 groups of at most
 observations (122 880 moves); at most `FRAGMENT_RETIRE_MAX` = 256 retirements, oldest
 `lastSeenAt` first. Progress per pass: the 512 is a maximum, not a guarantee, because a
 round stops examining candidates once 32 groups formed (5 000 consecutive two-record pairs
-cover about 64 records per pass). So the worst case is bounded by the caps: G mergeable
-groups take ceil(G / 32) passes (5 000 two-record groups in a 10 000-record store:
-ceil(5 000 / 32) = 157 passes, about 13 h at 5 minutes), R stale records ceil(R / 256)
-passes (10 000: 40 passes), and a store with nothing to merge is examined in
-ceil(10 000 / 512) = 20 passes.
+cover about 64 records per pass). A pass either examines 512 candidates or forms 32 groups
+or retires 256 records, so for N candidates, G mergeable groups and R stale records
+everything is reached within ceil(N / 512) + ceil(G / 32) + ceil(R / 256) passes (one
+group behind 512 records with nothing to merge takes 2 passes). For a 10 000-record store
+of 5 000 two-record groups: 20 + 157 = 177 passes at most (about 15 h at 5 minutes); in
+practice merging and examining overlap, so it is near the larger term.
 The group cap is kept at 32 so one maintenance call stays well under the 0.5 s Pi target of
 7.8; the measured fragment count (a few per cent of a store) clears in a few passes.
 

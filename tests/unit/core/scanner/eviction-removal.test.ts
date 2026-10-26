@@ -27,11 +27,11 @@ interface Internals {
 	storageDir: string
 }
 
-const obs = (id: string, i: number) =>
+const obs = (id: string, i: number, base = T0) =>
 	makeObs({
 		id,
 		centreHz: CH + i * 100_000,
-		startedAt: T0 + i * 1_000,
+		startedAt: base + i * 1_000,
 		blocks: 2,
 	})
 
@@ -52,8 +52,12 @@ describe("capacity eviction removes evicted evidence (WG10 req 1.6)", () => {
 				if (e.change === "deleted") deleted.push(e.discovery)
 			},
 		)
-		const a = internals.store.ingest(obs("o1", 0)).discoveryId ?? ""
-		const b = internals.store.ingest(obs("o2", 1)).discoveryId ?? ""
+		// The service runs on the wall clock: sightings dated now, so the maintenance pass that
+		// runs meanwhile sees fresh records (a fixed past date makes the survivor a stale
+		// one-sighting record, which detection quality 10.4 retires).
+		const now = Date.now()
+		const a = internals.store.ingest(obs("o1", 0, now)).discoveryId ?? ""
+		const b = internals.store.ingest(obs("o2", 1, now)).discoveryId ?? ""
 		const folders = [a, b].map(id =>
 			join(internals.storageDir, "recordings", "dv", id),
 		)
@@ -63,7 +67,7 @@ describe("capacity eviction removes evicted evidence (WG10 req 1.6)", () => {
 		}
 		await mkdir(join(internals.storageDir, "evidence", a), { recursive: true })
 		await writeFile(join(internals.storageDir, "evidence", a, "psd.json"), "{}")
-		const c = internals.store.ingest(obs("o3", 2)).discoveryId ?? ""
+		const c = internals.store.ingest(obs("o3", 2, now)).discoveryId ?? ""
 		expect(c).not.toBe("")
 		expect(deleted.map(d => d.id)).toEqual([a])
 		await Promise.all([...internals.background])
