@@ -1,3 +1,4 @@
+import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import pino from "pino"
@@ -223,8 +224,12 @@ describe("AmbientEvidence rtl433 channel", () => {
 			],
 			getDecoder: () => dec,
 		})
+		ambientStatusFake(decoders)
+		let now = 0
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			now: () => now,
+			tuningTrustOf: () => "commanded",
 			targetOf: () => ({
 				sourceId: "rtl",
 				hz: 433_900_000,
@@ -238,10 +243,12 @@ describe("AmbientEvidence rtl433 channel", () => {
 		const got: AmbientEvidenceEvent[] = []
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
+		let syntheticMessage = 0
 		const emit = (binding: unknown) => {
-			const out = device("Acurite-Tower")
+			const out = device("Acurite-Tower", { value: ++syntheticMessage })
 			Object.defineProperty(out, "provenanceBinding", { value: binding })
 			decoders.emit("decoder:output", "rtl433", out)
+			now += 2_000
 		}
 		return { got, emit, ambient, rates }
 	}
@@ -400,8 +407,12 @@ describe("AmbientEvidence rtl433 window reach", () => {
 			],
 			getDecoder: () => new EventEmitter(),
 		})
+		ambientStatusFake(decoders)
+		let now = 0
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			now: () => now,
+			tuningTrustOf: () => "commanded",
 			targetOf: () => ({
 				sourceId: "rtl",
 				hz: CENTRE,
@@ -417,11 +428,15 @@ describe("AmbientEvidence rtl433 window reach", () => {
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
 		for (let i = 0; i < 2; i++) {
-			const out = device("Acurite-Tower", { freq: (CENTRE + 120_000) / 1e6 })
+			const out = device("Acurite-Tower", {
+				freq: (CENTRE + 120_000) / 1e6,
+				value: i,
+			})
 			Object.defineProperty(out, "provenanceBinding", {
 				value: { sourceId: "rtl", channelHz: null },
 			})
 			decoders.emit("decoder:output", "rtl433", out)
+			now += 2_000
 		}
 		ambient.stop()
 		expect(got).toHaveLength(1)
@@ -467,4 +482,18 @@ it("never lets an estimate pick a wrong track", () => {
 		),
 		{ numRuns: 200 },
 	)
+})
+
+it("rejects FSK tones whose plausible midpoint hides invalid individual estimates", () => {
+	const passband = { centreHz: 433_920_000, halfHz: 512_000 }
+	const freqHz = rtl433FreqHz({ freq1: -1000, freq2: 1867.84 }, passband)
+	expect(freqHz).toBeUndefined()
+	expect(
+		pickChannelObservation(
+			[obs("a", 433_920_000), obs("b", 434_020_000)],
+			{ sourceId: "rtl", at: 1_500, passband, freqHz },
+			10_000,
+			2_000,
+		),
+	).toBeNull()
 })

@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest"
+import { buildActivityRow } from "../../../../../src/core/activity/storage/row.js"
+import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
+import { envelope } from "../storage/helpers.js"
 import {
 	AIS_CHANNEL_A_HZ,
 	AIS_CHANNEL_B_HZ,
@@ -229,4 +232,55 @@ describe("resolveProvenance table", () => {
 			})
 		})
 	})
+})
+
+describe("synthetic rtl_433 FSK estimates", () => {
+	it("uses the midpoint of two FSK tones and keeps the usable tuner-window bounds", () => {
+		const binding = { ...bind([433_920_000]), inputSampleRateHz: 1_000_000 }
+		const frequency = (data: unknown) =>
+			resolveProvenance(out("signal", data), binding).frequency?.hz
+		expect(frequency({ freq1: 433.91, freq2: 433.93 })).toBe(433_920_000)
+		expect(frequency({ freq1: 433.92 })).toBe(433_920_000)
+		expect(frequency({ freq2: 433.92 })).toBe(433_920_000)
+		// Usable half-window = 0.8 × 1 MHz / 2 = 400 kHz, inclusive.
+		expect(frequency({ freq: 434.32 })).toBe(434_320_000)
+		expect(frequency({ freq: 434.320001 })).toBe(433_920_000)
+		for (const freq of [NaN, Infinity, "433.92", null]) {
+			expect(frequency({ freq, freq1: 433.91, freq2: 433.93 })).toBe(
+				433_920_000,
+			)
+		}
+	})
+})
+
+it("rtl_433 Activity rows retain validated MHz estimates as frequencyHz", () => {
+	const target = 433_920_000
+	const binding = { ...bind([target]), inputSampleRateHz: 1_000_000 }
+	for (const [data, expected] of [
+		[{ freq: 434.32 }, 434_320_000],
+		[{ freq: 433.52 }, 433_520_000],
+		[{ freq: 434.320001 }, target],
+		[{ freq: 433.519999 }, target],
+		[{ freq1: 433.91, freq2: 433.93 }, target],
+		[{ freq1: 434.32, freq2: 434.32 }, 434_320_000],
+		[{ freq1: 434.320001, freq2: 433.92 }, target],
+		[{ freq1: Number.NaN, freq2: 433.93 }, target],
+		[{ freq1: "433.91", freq2: 433.93 }, target],
+		[{ freq: Number.NaN }, target],
+		[{ freq: "433.92" }, target],
+	] as const) {
+		const payload = envelope({ outputType: "signal", protocol: "ism" })
+		payload.provenance = resolveProvenance(out("signal", data), binding)
+		const row = buildActivityRow({
+			version: ACTIVITY_RECORD_VERSION,
+			eventId: payload.eventId,
+			commitSeq: "0",
+			producedAt: payload.producedAt,
+			receivedAt: payload.receivedAt,
+			kind: "decoder-reception",
+			payload,
+		})
+		expect(row.frequencyHz).toBe(expected)
+		expect(JSON.parse(row.summaryJson)).toMatchObject({ frequencyHz: expected })
+	}
 })

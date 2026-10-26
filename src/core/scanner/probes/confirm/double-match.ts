@@ -19,6 +19,12 @@ const MAX_ACCEPTED = 4096
 /** The shared, scoped acceptance memory (ConfirmMemory in confirm-memory.ts). */
 export interface SharedConfirmMemory {
 	pair(scope: string, key: string, value: string): boolean
+	pairMessage?(
+		scope: string,
+		key: string,
+		value: string,
+		message: string,
+	): boolean
 	isAccepted(scope: string, key: string, value: string): boolean
 	markAccepted(scope: string, key: string, value: string): void
 }
@@ -31,6 +37,9 @@ export interface SharedConfirmMemory {
 export interface SharedConfirm {
 	memory: SharedConfirmMemory
 	scope: () => string | null
+	message?: () => string | null
+	/** A composed scanner never primes acceptance without unambiguous placement. */
+	requireScope?: boolean
 }
 
 export class DoubleMatch {
@@ -58,10 +67,15 @@ export class DoubleMatch {
 	accept(key: string, value: string, crcClean: boolean): boolean {
 		if (!crcClean || this.isAccepted(key, value)) return false
 		const scope = this.scope()
+		if (scope === null && this.shared?.requireScope) return false
 		if (scope !== null) {
 			let paired = false
 			try {
-				paired = this.shared!.memory.pair(scope, key, value) === true
+				const message = this.shared?.message?.()
+				paired =
+					message && this.shared!.memory.pairMessage
+						? this.shared!.memory.pairMessage(scope, key, value, message)
+						: this.shared!.memory.pair(scope, key, value) === true
 				if (paired) this.shared!.memory.markAccepted(scope, key, value)
 			} catch {
 				return false
@@ -89,6 +103,7 @@ export class DoubleMatch {
 
 	isAccepted(key: string, value: string): boolean {
 		const scope = this.scope()
+		if (scope === null && this.shared?.requireScope) return false
 		if (scope !== null) {
 			try {
 				return this.shared!.memory.isAccepted(scope, key, value) === true
@@ -101,6 +116,7 @@ export class DoubleMatch {
 
 	markAccepted(key: string, value: string): void {
 		const scope = this.scope()
+		if (scope === null && this.shared?.requireScope) return
 		if (scope !== null) {
 			try {
 				this.shared!.memory.markAccepted(scope, key, value)
@@ -153,6 +169,8 @@ class ScopedAccepted extends Map<string, string> {
 }
 
 export interface InterpreterState {
+	/** Configured ambient decoders require two messages even for FCS-valid APRS/paging. */
+	requirePair?: boolean
 	epoch: number
 	origin: "probe" | "ambient"
 	probeId?: string
@@ -170,9 +188,11 @@ export function createInterpreterState(opts: {
 	nxdn?: "nxdn48" | "nxdn96"
 	/** Shared per-discovery acceptance (confirm-memory.ts); absent: this state pairs alone. */
 	shared?: SharedConfirm
+	requirePair?: boolean
 }): InterpreterState {
 	const match = new DoubleMatch(opts.shared)
 	const state: InterpreterState = {
+		...(opts.requirePair ? { requirePair: true } : {}),
 		epoch: opts.epoch,
 		origin: opts.origin,
 		nxdn: opts.nxdn ?? "nxdn96",

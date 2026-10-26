@@ -224,6 +224,7 @@ interface Rig {
 	ambient: AmbientEvidence
 	got: AmbientEvidenceEvent[]
 	epoch: { v: number }
+	clock: { v: number }
 }
 
 function rig(opts: {
@@ -235,12 +236,13 @@ function rig(opts: {
 	const decoders = new FakeDecoders()
 	opts.add(decoders)
 	const epoch = { v: 1 }
+	const clock = { v: 1_000 }
 	const deps: AmbientDeps = {
 		decoders: decoders as never,
 		targetOf: id => opts.targets[id] ?? null,
 		epochOf: () => epoch.v,
 		logger: opts.logger ?? silent,
-		now: () => 1_000,
+		now: () => clock.v,
 	}
 	if (opts.trust !== null)
 		deps.tuningTrustOf = opts.trust ?? (() => "commanded")
@@ -248,7 +250,7 @@ function rig(opts: {
 	const got: AmbientEvidenceEvent[] = []
 	ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 	ambient.start()
-	return { decoders, ambient, got, epoch }
+	return { decoders, ambient, got, epoch, clock }
 }
 
 const ship = (mmsi: string, channel: "A" | "B" | undefined = "A") => ({
@@ -288,7 +290,16 @@ function aisRig(
 
 const twice = (r: Rig, id: string, o: DecoderOutputLike): void => {
 	r.decoders.out(id, o)
-	r.decoders.out(id, o)
+	r.clock.v += 2_000
+	r.decoders.out(id, {
+		...o,
+		data: {
+			...(o.data as object),
+			...(o.type === "meshtastic" ? { id: 2 } : {}),
+			name: "SYNTHETIC SECOND",
+			text: "SYNTHETIC SECOND",
+		},
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +461,16 @@ describe("AmbientEvidence WG7 new types", () => {
 		r.epoch.v = 2
 		r.decoders.out("ais", ship("244123456"))
 		expect(r.got.filter(e => e.ev.identity)).toEqual([])
-		r.decoders.out("ais", ship("244123456"))
+		r.clock.v += 2_000
+		const second = ship("244123456")
+		r.decoders.out("ais", {
+			...second,
+			data: {
+				...second.data,
+				name: "SYNTHETIC SECOND",
+				text: "SYNTHETIC SECOND",
+			},
+		})
 		expect(r.got.filter(e => e.ev.identity)).toHaveLength(1)
 	})
 
@@ -616,12 +636,12 @@ describe("WG7 properties", () => {
 	})
 
 	// Feature: web-gaps-7, Property 2: Existing ambient unchanged
-	// Validates: Requirements 1.4
-	it("the existing types emit exactly what the cccf665f implementation emitted", () => {
+	// Validates: Requirements R2
+	it("agrees with the frozen baseline on parsing and rejections", () => {
 		type Step =
 			| { k: "epoch" }
 			| { k: "tick"; ms: number }
-			| { k: "link"; cc: number; crcErr: boolean }
+			| { k: "link"; cc: number; crcErr: boolean; tg?: string }
 			| { k: "out"; o: DecoderOutputLike }
 		const at = new Date(5_000)
 		const outArb: fc.Arbitrary<Step> = fc.oneof(
@@ -706,7 +726,7 @@ describe("WG7 properties", () => {
 					const ref = new ReferenceAmbient(base)
 					const cur = new AmbientEvidence({
 						...base,
-						tuningTrustOf: () => "unverified",
+						tuningTrustOf: () => "commanded",
 					})
 					const a: AmbientEvidenceEvent[] = []
 					const b: AmbientEvidenceEvent[] = []
@@ -715,14 +735,17 @@ describe("WG7 properties", () => {
 					ref.start()
 					cur.start()
 					const inst = decoders.instances.get("cfg")!
+
 					for (const s of steps) {
+						const oldCount = a.length
+						const newCount = b.length
 						if (s.k === "epoch") epoch.v++
 						else if (s.k === "tick") clock.v += s.ms
 						else if (s.k === "link") {
 							const line: DsdFmeLinkLine = {
 								protocol: "dmr",
 								cc: s.cc,
-								tg: "9",
+								tg: s.tg ?? "9",
 								src: "2060945",
 								slot: 1,
 								crcErr: s.crcErr,
@@ -730,8 +753,85 @@ describe("WG7 properties", () => {
 							}
 							inst.emit("link", line)
 						} else decoders.out("cfg", s.o)
+						const oldEvents = a.slice(oldCount)
+						const newEvents = b.slice(newCount)
+						// Every baseline rejection must remain a rejection. Acceptance
+						// (including DSD metadata) can be delayed by the new pair gate.
+						if (oldEvents.length === 0) expect(newEvents).toEqual([])
+						for (const e of newEvents) {
+							const { identity: _identity, metadata, ...ev } = e.ev
+							const old = oldEvents.find(o => o.ev.protocol === e.ev.protocol)!
+							expect(old).toBeDefined()
+							const {
+								identity: _oldIdentity,
+								metadata: oldMetadata,
+								...oldEv
+							} = old.ev
+							expect({ ...e, ev }).toEqual({ ...old, ev: oldEv })
+							for (const [key, value] of Object.entries(metadata))
+								expect(oldMetadata).toHaveProperty(key, value)
+						}
 					}
-					expect(b).toEqual(a)
+					// Intended differences: trusted tuning is now mandatory (this rig
+					// supplies it); all identities need two spaced, distinct messages,
+					// including formerly single-shot APRS/plausible paging and DSD
+					// metadata fields. The reference may therefore name earlier,
+					// but parsing/rejections agree.
+					const identities = a.flatMap(e =>
+						e.ev.identity ? [e.ev.identity] : [],
+					)
+					for (const e of b)
+						if (e.ev.identity) expect(identities).toContainEqual(e.ev.identity)
+					if (a.length === 0) expect(b).toEqual(a)
+					// Also compare an acceptance where the rules must agree. This
+					// follows (never primes) the random rejection/interleaving run,
+					// in a fresh epoch, with distinct spaced synthetic content.
+					epoch.v++
+					for (const n of [0, 1]) {
+						clock.v += 2_000
+						const oldCount = a.length
+						const newCount = b.length
+						if (type === "dsd-fme")
+							inst.emit("link", {
+								protocol: "dmr",
+								cc: steps.length % 3,
+								tg: String(n),
+								src: "7",
+								slot: 1,
+								crcErr: false,
+								at: clock.v,
+							} satisfies DsdFmeLinkLine)
+						else
+							decoders.out("cfg", {
+								type:
+									type === "multimon-ng"
+										? "message"
+										: type === "direwolf"
+											? "aprs"
+											: "signal",
+								data:
+									type === "multimon-ng"
+										? {
+												protocol: "POCSAG1200",
+												address: 1,
+												messageType: "alpha",
+												message: `SYNTHETIC ${n}`,
+											}
+										: type === "direwolf"
+											? { source: "TEST01", raw: `>SYNTHETIC ${n}` }
+											: {
+													model: "SyntheticSensor",
+													id: 1,
+													mic: "CRC",
+													value: n,
+												},
+								timestamp: new Date(clock.v),
+							})
+						if (n === 1) {
+							expect(b.slice(newCount)).toEqual(a.slice(oldCount))
+							expect(b.slice(newCount).some(e => e.ev.identity)).toBe(true)
+						}
+					}
 					emitted += a.length
 					ref.stop()
 					cur.stop()
@@ -760,22 +860,55 @@ describe("AmbientEvidence WG7 review fixes", () => {
 		expect(r.ambient.trustDropCount).toBe(1)
 	})
 
-	it("ACARS without frequency and two targets with only the first trusted is no evidence", () => {
-		const r = rig({
-			add: d => d.add("acars", "acarsdec"),
-			targets: {
-				acars: target(131_550_000, { targetsHz: [131_550_000, 131_725_000] }),
-			},
-			trust: (_id, hz) => (hz === 131_550_000 ? "commanded" : "unverified"),
-		})
-		const noFreq = {
-			type: "acars",
-			data: { tail: "PH-BXA", error: 0 },
-			timestamp: new Date(1_000),
-		}
-		twice(r, "acars", noFreq)
-		expect(r.got).toEqual([])
-	})
+	it.each([
+		["acarsdec", "acars", { tail: "TEST01", error: 0 }],
+		["dumpvdl2", "vdl2", { fromaddr: "ABC001" }],
+		["lora-meshtastic", "meshtastic", { from: 1 }],
+	])(
+		"%s uses a single configured target without a decoder frequency",
+		(type, output, data) => {
+			for (const frequency of [undefined, 0]) {
+				const r = rig({
+					add: d => d.add("cfg", type),
+					targets: { cfg: target(131_550_000) },
+				})
+				twice(r, "cfg", {
+					type: output,
+					data: { ...data, frequency },
+					timestamp: new Date(1_000),
+				})
+				expect(r.got.map(e => e.hz)).toEqual([131_550_000, 131_550_000])
+				expect(r.got.at(-1)?.ev.identity).toBeDefined()
+				r.ambient.stop()
+			}
+		},
+	)
+
+	it.each([
+		["acarsdec", "acars", { tail: "TEST01", error: 0 }],
+		["dumpvdl2", "vdl2", { fromaddr: "ABC001" }],
+		["lora-meshtastic", "meshtastic", { from: 1 }],
+	])(
+		"%s with no frequency and multiple configured targets is no evidence",
+		(type, output, data) => {
+			for (const frequency of [undefined, 0]) {
+				const r = rig({
+					add: d => d.add("cfg", type),
+					targets: {
+						cfg: target(131_550_000, { targetsHz: [131_550_000, 131_725_000] }),
+					},
+					trust: (_id, hz) => (hz === 131_550_000 ? "commanded" : "unverified"),
+				})
+				twice(r, "cfg", {
+					type: output,
+					data: { ...data, frequency },
+					timestamp: new Date(1_000),
+				})
+				expect(r.got).toEqual([])
+				r.ambient.stop()
+			}
+		},
+	)
 
 	it("a status without owner is not eligible: no evidence and no coverage", () => {
 		const r = aisRig()

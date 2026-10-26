@@ -1,3 +1,4 @@
+import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 // A placed multimon-ng or dsd-fme channel (activity slot) names its own channel, not the parent's target.
 import { EventEmitter } from "node:events"
 import pino from "pino"
@@ -23,8 +24,10 @@ function setup() {
 	]
 	decoders["getDecoder"] = () => undefined
 	const clock = { now: 50_000 }
+	ambientStatusFake(decoders)
 	const ambient = new AmbientEvidence({
 		decoders: decoders as never,
+		tuningTrustOf: () => "commanded",
 		targetOf: id =>
 			id === "pager"
 				? { sourceId: "rtl", hz: TARGET, targetsHz: [TARGET], external: false }
@@ -36,7 +39,7 @@ function setup() {
 	const got: AmbientEvidenceEvent[] = []
 	ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 	ambient.start()
-	const page = (binding?: unknown, stepMs = 1000) => {
+	const page = (binding?: unknown, stepMs = 2000, message?: string) => {
 		const out: Record<string, unknown> = {
 			type: "message",
 			timestamp: new Date(clock.now),
@@ -45,7 +48,7 @@ function setup() {
 				address: 1234567,
 				function: 0,
 				messageType: "alpha",
-				message: "",
+				message: message ?? `SYNTHETIC ${clock.now}`,
 			},
 		}
 		// the manager attaches the binding as a non-enumerable property
@@ -60,7 +63,9 @@ function setup() {
 describe("ambient evidence of a placed point decoder", () => {
 	it("a placed channel's decode is placed at that channel", () => {
 		const { ambient, got, page } = setup()
-		page({ sourceId: "rtl", channelHz: CHANNEL })
+		page({ sourceId: "rtl", channelHz: CHANNEL }, 2000, "SYNTHETIC REPEAT")
+		page({ sourceId: "rtl", channelHz: CHANNEL }, 2000, "SYNTHETIC REPEAT")
+		expect(got).toEqual([])
 		page({ sourceId: "rtl", channelHz: CHANNEL })
 		expect(got).toHaveLength(1)
 		expect(got[0]).toMatchObject({ sourceId: "rtl", hz: CHANNEL })
@@ -70,10 +75,10 @@ describe("ambient evidence of a placed point decoder", () => {
 	it("capcode pairing on 9 placed channels in round robin confirms on every channel", () => {
 		const { ambient, got, page } = setup()
 		const hz = (k: number) => CHANNEL + k * 12_500
-		// 18 pages 200 ms apart: each repeat lands inside the 4 s pairing hold
+		// 18 pages 250 ms apart: each repeat lands inside the 4 s pairing hold
 		for (let round = 0; round < 2; round++)
 			for (let k = 0; k < 9; k++)
-				page({ sourceId: "rtl", channelHz: hz(k) }, 200)
+				page({ sourceId: "rtl", channelHz: hz(k) }, 250)
 		expect(got.map(e => e.hz)).toEqual(
 			Array.from({ length: 9 }, (_, k) => hz(k)),
 		)
@@ -127,8 +132,12 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 						}
 					: undefined
 		decoders["getDecoder"] = (id: string) => (id === "dmr" ? parent : undefined)
+		ambientStatusFake(decoders)
+		let now = 0
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			now: () => now,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "dmr"
 					? {
@@ -149,11 +158,14 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 				value: { sourceId: "rtl", channelHz },
 			})
 		// the parent runs the first placement (A): its lines reach its direct listener, bound
-		const onA = (cc: number, at: number) =>
-			parent.emit("link", bound(linkLine(cc, at), A))
+		const onA = (cc: number, at: number) => {
+			now = at * 20
+			parent.emit("link", bound({ ...linkLine(cc, now), src: String(at) }, A))
+		}
 		// a worker runs the second (B): the manager forwards its lines under the parent id
 		const onB = (cc: number, at: number, channelHz = B) => {
-			const line = bound(linkLine(cc, at), channelHz)
+			now = at * 20
+			const line = bound({ ...linkLine(cc, now), src: String(at) }, channelHz)
 			decoders.emit("decoder:placed-link", "dmr", line, {
 				sourceId: "rtl",
 				channelHz,
@@ -255,7 +267,7 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 		placed.hz = [B, C]
 		onB(3, 1_020, C)
 		onA(1, 1_030)
-		onB(2, 1_040)
+		onB(2, 1_110)
 		expect(identities()).toEqual([[B, "2"]])
 		ambient.stop()
 	})

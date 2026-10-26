@@ -7,6 +7,8 @@
  * 30–60 s ISM sensor still double-matches within its epoch. Matching to observations by
  * frequency and time is done by ScannerService.
  */
+import { ConfirmMemory } from "./confirm/confirm-memory.js"
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { z } from "zod"
 import {
@@ -116,6 +118,8 @@ export interface AmbientEvidenceEvent {
 	passband?: ChannelPassband
 	/** rtl_433's own usable frequency estimate inside the passband (Hz). */
 	freqHz?: number
+	/** Shared by all evidence items from one decoder output, for debug-log deduplication. */
+	decodeToken?: object
 }
 
 /** Where an ambient decode lies, for the shared confirm pairing. */
@@ -128,6 +132,7 @@ export interface AmbientPairContext {
 	freqHz?: number
 	/** The decode's protocol when known before interpretation (the WG7 ambient-only types). */
 	protocol?: ScannerProtocol
+	message?: string | undefined
 }
 
 export interface AmbientDeps {
@@ -151,6 +156,7 @@ export interface AmbientDeps {
 		decoderId: string,
 		hz: number,
 		sourceId: string,
+		placement?: { sourceId: string; channelHz: number | null },
 	) => TuningTrust | undefined
 	/**
 	 * shared per-discovery acceptance (ConfirmMemory) and the scope (discovery)
@@ -432,11 +438,12 @@ export class AmbientEvidence extends EventEmitter {
 		decoderId: string,
 		hz: number,
 		sourceId: string,
+		placement?: { sourceId: string; channelHz: number | null },
 	): TuningTrust | undefined {
 		const of = this.deps.tuningTrustOf
 		if (!of) return undefined
 		try {
-			return of(decoderId, hz, sourceId)
+			return of(decoderId, hz, sourceId, placement)
 		} catch {
 			if (!this.trustErrorLogged.has(decoderId)) {
 				this.trustErrorLogged.add(decoderId)
@@ -449,10 +456,22 @@ export class AmbientEvidence extends EventEmitter {
 	/** The shared pairing of `entry`'s interpreter states: asked with the decode in hand. */
 	private pairing(entry: AmbientState): { shared?: SharedConfirm } {
 		const confirm = this.deps.confirm
-		if (!confirm) return {}
+		if (!confirm)
+			return {
+				shared: {
+					memory: new ConfirmMemory(this.now),
+					message: () => entry.pairCtx?.message ?? null,
+					scope: () => {
+						const ctx = entry.pairCtx
+						return ctx ? `${ctx.sourceId}:${ctx.hz}` : null
+					},
+				},
+			}
 		return {
 			shared: {
 				memory: confirm.memory,
+				requireScope: true,
+				message: () => entry.pairCtx?.message ?? null,
 				scope: () => {
 					const ctx = entry.pairCtx
 					return ctx === null ? null : confirm.scopeOf(ctx)
@@ -475,15 +494,56 @@ export class AmbientEvidence extends EventEmitter {
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		if (!this.eligible(decoderId)) return
-		// Parse against every target, then one trust lookup at the decode's own frequency BEFORE
+		// Parse against every target, then one trust lookup at the placed channel BEFORE
 		// acceptance memory is touched: an untrusted decode never primes the H2 match.
-		const parsed = parse(out, { targetsHz })
+		const rawBinding = out.provenanceBinding
+		const binding =
+			rawBinding === undefined
+				? undefined
+				: PlacedBindingSchema.safeParse(rawBinding)
+		if (
+			binding &&
+			(!binding.success || binding.data.sourceId !== target.sourceId)
+		)
+			return
+		const placement = binding?.data
+		const channelHz =
+			placement?.channelHz ??
+			(!placement && targetsHz.length === 1 ? targetsHz[0] : undefined)
+		const passband = placement
+			? this.channelPassband(decoderId, out, target.sourceId)
+			: null
+		if (placement && !passband) return
+		const parsed = parse(out, {
+			targetsHz:
+				channelHz === undefined ? targetsHz : [...targetsHz, channelHz],
+			...(channelHz !== undefined ? { channelHz } : {}),
+		})
+		if (
+			parsed &&
+			passband &&
+			Math.abs(parsed.hz - passband.centreHz) > passband.halfHz
+		)
+			return
 		if (parsed === null) return
-		if (!isTrusted(this.trustAt(decoderId, parsed.hz, target.sourceId))) {
+		if (
+			!isTrusted(
+				this.trustAt(
+					decoderId,
+					placement?.channelHz ?? parsed.hz,
+					target.sourceId,
+					placement
+						? { sourceId: placement.sourceId, channelHz: placement.channelHz }
+						: undefined,
+				),
+			)
+		) {
 			this.trustDrops++
 			return
 		}
-		let entry = this.states.get(decoderId)
+		const adsb = parsed.protocol === "adsb"
+		const stateKey = placedKey(decoderId, parsed.hz)
+		let entry = this.states.get(stateKey)
 		if (!entry || entry.epoch !== epoch) {
 			const fresh: AmbientState = {
 				epoch,
@@ -494,16 +554,17 @@ export class AmbientEvidence extends EventEmitter {
 			// ADS-B pairs by message in the decoder's own bounded memory (no shared 2 s separation:
 			// readsb hears one aircraft many times a second, so two clean messages of one address
 			// are the confirmation). Every other type shares the discovery's pairing.
-			const adsb = parsed.protocol === "adsb"
 			fresh.interp = createInterpreterState({
 				epoch,
 				origin: "ambient",
+				requirePair: true,
 				decoderId,
 				...(adsb ? {} : this.pairing(fresh)),
 			})
 			if (adsb) fresh.frames = new Map()
 			entry = fresh
-			this.states.set(decoderId, entry)
+			this.states.set(stateKey, entry)
+			this.boundPlaced(decoderId, stateKey)
 		}
 		if (entry.interp === null) return
 		const frames = entry.frames
@@ -520,17 +581,26 @@ export class AmbientEvidence extends EventEmitter {
 		}
 		const at = parsed.timestamp.getTime()
 		let decodes: ReturnType<typeof acceptAmbient>
-		entry.pairCtx = {
-			sourceId: target.sourceId,
-			hz: parsed.hz,
-			at,
-			protocol: parsed.protocol,
-		}
+		let message: string | null | undefined = null
+		const decoderType = adsb ? "" : (this.types.get(decoderId) ?? "")
+		entry.pairCtx = adsb
+			? null
+			: {
+					sourceId: target.sourceId,
+					hz: parsed.hz,
+					at,
+					protocol: parsed.protocol,
+					get message() {
+						if (message === null) message = messageOf(decoderType, out.data)
+						return message
+					},
+				}
 		try {
 			decodes = acceptAmbient(entry.interp, parsed)
 		} finally {
 			entry.pairCtx = null
 		}
+		const decodeToken = {}
 		for (const decode of decodes) {
 			// readsb hears every aircraft in range continuously: an unpaired Mode S message is no
 			// evidence (no observation, discovery or activity from it); only an accepted ICAO is.
@@ -542,6 +612,7 @@ export class AmbientEvidence extends EventEmitter {
 				hz,
 				ev,
 			}
+			Object.defineProperty(event, "decodeToken", { value: decodeToken })
 			this.emit("evidence", event)
 		}
 	}
@@ -636,13 +707,11 @@ export class AmbientEvidence extends EventEmitter {
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		const type = this.types.get(decoderId)
+		if (type === undefined) return
 		// A placed point decoder (a multimon-ng or dsd-fme channel the planner put on a band-plan
 		// channel) hears its own channel, not the parent's target: its binding names it. A binding
 		// on another source drops the output (fail closed); a centre-reach binding keeps the target.
-		const raw =
-			type !== "rtl433"
-				? (input as DecoderOutputLike).provenanceBinding
-				: undefined
+		const raw = (input as DecoderOutputLike).provenanceBinding
 		const binding =
 			raw === undefined ? undefined : PlacedBindingSchema.safeParse(raw)
 		if (binding !== undefined && !binding.success) return
@@ -652,6 +721,22 @@ export class AmbientEvidence extends EventEmitter {
 		)
 			return
 		const placedHz = binding?.data.channelHz ?? undefined
+		// Every ambient decoder proves receiver provenance before acceptance is touched.
+		if (
+			target.external !== false ||
+			!this.eligible(decoderId) ||
+			!isTrusted(
+				this.trustAt(
+					decoderId,
+					placedHz ?? target.hz,
+					target.sourceId,
+					binding?.data,
+				),
+			)
+		) {
+			this.trustDrops++
+			return
+		}
 		// Each placed channel keeps its own acceptance memory: a colour code or capcode heard on
 		// one channel never confirms a decode on another.
 		const key =
@@ -668,13 +753,14 @@ export class AmbientEvidence extends EventEmitter {
 				createInterpreterState({
 					epoch,
 					origin: "ambient",
+					requirePair: true,
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
 					...this.pairing(fresh),
 				})
 			if (type === "multimon-ng")
 				fresh.capcodes = new CapcodeWindows(MULTIMON_HOLD_MS, create)
-			else fresh.interp = create()
+			fresh.interp = create()
 			entry = fresh
 			this.states.set(key, entry)
 			if (placedHz !== undefined) this.boundPlaced(decoderId, key)
@@ -704,10 +790,23 @@ export class AmbientEvidence extends EventEmitter {
 			? rtl433FreqHz((input as DecoderOutputLike).data, onSource)
 			: undefined
 		const at = decodeTime(input, this.now())
+		const protocol = pointProtocol(type, input, target.nxdn)
+		let message: string | null | undefined = null
 		entry.pairCtx = {
+			...(protocol ? { protocol } : {}),
 			sourceId: target.sourceId,
 			hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
 			at,
+			get message() {
+				if (message === null)
+					message = messageOf(
+						type,
+						(input as DecoderOutputLike).data ??
+							(input as { line?: unknown }).line ??
+							input,
+					)
+				return message
+			},
 			...(onSource
 				? {
 						passband: { centreHz: onSource.centreHz, halfHz: onSource.halfHz },
@@ -717,7 +816,26 @@ export class AmbientEvidence extends EventEmitter {
 		}
 		let evs: DecodeEvidence[] = []
 		try {
-			if (entry.capcodes)
+			if (
+				type === "multimon-ng" &&
+				(input as DecoderOutputLike).type === "decode" &&
+				state
+			) {
+				const data = (input as DecoderOutputLike).data
+				if (
+					data &&
+					typeof data === "object" &&
+					(data as { protocol?: unknown }).protocol === "AFSK1200"
+				)
+					evs = interpretDirewolf(
+						{
+							...(input as DecoderOutputLike),
+							type: "aprs",
+							data: { source: (data as { from?: unknown }).from },
+						},
+						state,
+					)
+			} else if (entry.capcodes)
 				evs = entry.capcodes.interpret(input as DecoderOutputLike, this.now())
 			else if (state === null) return
 			else if (type === "dsd-fme")
@@ -732,6 +850,7 @@ export class AmbientEvidence extends EventEmitter {
 		} finally {
 			entry.pairCtx = null
 		}
+		const decodeToken = {}
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,
@@ -748,6 +867,7 @@ export class AmbientEvidence extends EventEmitter {
 						}
 					: {}),
 			}
+			Object.defineProperty(event, "decodeToken", { value: decodeToken })
 			this.emit("evidence", event)
 		}
 	}
@@ -757,12 +877,192 @@ export class AmbientEvidence extends EventEmitter {
 function decodeTime(input: unknown, fallback: number): number {
 	const ts =
 		typeof input === "object" && input !== null
-			? (input as { timestamp?: unknown; at?: unknown })
+			? (input as {
+					timestamp?: unknown
+					at?: unknown
+					kind?: unknown
+					line?: { at?: unknown }
+				})
 			: {}
 	if (ts.timestamp instanceof Date) {
 		const t = ts.timestamp.getTime()
 		if (Number.isFinite(t)) return t
 	}
 	if (typeof ts.at === "number" && Number.isFinite(ts.at)) return ts.at
+	if (ts.kind === "link") {
+		const parsed = z.number().finite().safeParse(ts.line?.at)
+		if (parsed.success) return parsed.data
+	}
 	return fallback
+}
+
+/** Reception metadata never creates a second logical message. */
+const MESSAGE_METADATA =
+	/^(?:level|noise|noise_?floor|(?:rx_?)?rssi|(?:rx_?)?snr|error|errorknown|crcerr|fecerrs|lastseen|mod|modulation|frequency|frequencymalformed|freq|freq1|freq2|channel|at|time|.*time.*|mic)$/i
+
+/** Protocol content identity, or undefined when the DTO has no message content. */
+function messageOf(type: string, data: unknown): string | undefined {
+	if (!data || typeof data !== "object") return undefined
+	const record = data as Record<string, unknown>
+	let content: unknown = data
+	if (type === "acarsdec") {
+		// Blocks share a logical message number; block ID, text and reception differ.
+		if (typeof record["msgno"] === "string" && record["msgno"] !== "")
+			content = {
+				tail: record["tail"],
+				flight: record["flight"],
+				// acarsdec joins the three-character number and block letter;
+				// dumpvdl2 already supplies the three-character msg_num unchanged.
+				msgno: record["msgno"].replace(/^(.{3})[A-Z]$/i, "$1"),
+			}
+		else if (typeof record["text"] !== "string" || record["text"] === "")
+			return undefined
+		else
+			content = {
+				tail: record["tail"],
+				flight: record["flight"],
+				text: record["text"],
+				label: record["label"],
+			}
+	} else if (type === "dumpvdl2") {
+		const acars = record["acars"]
+		const message =
+			acars && typeof acars === "object"
+				? messageOf("acarsdec", acars)
+				: typeof record["text"] === "string" && record["text"] !== ""
+					? record["text"]
+					: undefined
+		if (!message) return undefined
+		content = {
+			fromaddr: record["fromaddr"],
+			toaddr: record["toaddr"],
+			message,
+		}
+	} else if (type === "ais-catcher") {
+		content = fields(record, [
+			"mmsi",
+			"name",
+			"callsign",
+			"imo",
+			"shipType",
+			"lat",
+			"lon",
+			"cog",
+			"sog",
+			"heading",
+			"navStatus",
+			"destination",
+			"eta",
+			"draught",
+			"messageType",
+			"altitudeM",
+			"aidType",
+			"virtualAid",
+			"offPosition",
+		])
+	} else if (type === "lora-meshtastic") {
+		content = fields(record, ["from", "to", "id", "portnum", "payloadB64"])
+	} else if (type === "dsd-fme") {
+		content = fields(record, [
+			"protocol",
+			"cc",
+			"tg",
+			"src",
+			"slot",
+			"nac",
+			"ran",
+			"dgid",
+			"callsign",
+			"encrypted",
+			"callId",
+			"talkgroup",
+			"source",
+		])
+	} else if (type === "multimon-ng" && record["protocol"] === "AFSK1200") {
+		// The adapter exposes only addresses, not the APRS information field.
+		return undefined
+	} else if (type === "multimon-ng") {
+		if (typeof record["message"] !== "string" || record["message"] === "")
+			return undefined
+		content = fields(record, [
+			"protocol",
+			"address",
+			"capcode",
+			"function",
+			"messageType",
+			"message",
+		])
+	} else if (type === "direwolf") {
+		// The adapter's raw field is the information field. Also accept a full
+		// TNC2 packet, stripping its source/destination/digipeater header only.
+		const raw = record["raw"]
+		const info =
+			typeof record["info"] === "string"
+				? record["info"]
+				: typeof raw === "string"
+					? raw.replace(/^[A-Z0-9-]+>[A-Z0-9-]+(?:,[A-Z0-9*-]+)*:/i, "")
+					: undefined
+		if (!info) return undefined
+		content = {
+			source: record["source"],
+			destination: record["destination"],
+			info,
+		}
+	}
+	// AIS: vessel content; Meshtastic: packet ID/payload; paging: capcode/function/text;
+	// DSD: protocol/link content; rtl_433: model/device ID and decoded sensor fields.
+	return createHash("sha256")
+		.update(
+			JSON.stringify(content, (key, value: unknown) => {
+				if (MESSAGE_METADATA.test(key)) return undefined
+				if (value && typeof value === "object" && !Array.isArray(value))
+					return Object.fromEntries(
+						Object.entries(value).sort(([a], [b]) => a.localeCompare(b)),
+					)
+				return value
+			}) ?? "",
+		)
+		.digest("hex")
+}
+
+/** Keep only protocol content carried by the adapter DTO. */
+function fields(
+	record: Record<string, unknown>,
+	keys: readonly string[],
+): Record<string, unknown> {
+	return Object.fromEntries(
+		keys
+			.filter(key => record[key] !== undefined)
+			.map(key => [key, record[key]]),
+	)
+}
+
+/** Choose the same channel reach before pairing as the interpreter will emit afterward. */
+function pointProtocol(
+	type: string,
+	input: unknown,
+	nxdn?: "nxdn48" | "nxdn96",
+): ScannerProtocol | undefined {
+	if (type === "direwolf") return "aprs"
+	if (type === "rtl433") return "ism"
+	if (!input || typeof input !== "object") return undefined
+	const record = input as {
+		kind?: unknown
+		line?: { protocol?: unknown }
+		data?: { protocol?: unknown }
+	}
+	const raw =
+		record.kind === "link" ? record.line?.protocol : record.data?.protocol
+	if (type === "multimon-ng") {
+		if (raw === "AFSK1200") return "aprs"
+		if (typeof raw === "string" && raw.startsWith("POCSAG")) return "pocsag"
+		if (raw === "FLEX") return "flex"
+	}
+	if (type === "dsd-fme") {
+		if (raw === "p25") return "p25p1"
+		if (raw === "nxdn") return nxdn ?? "nxdn96"
+		if (raw === "dmr" || raw === "dpmr" || raw === "ysf" || raw === "dstar")
+			return raw
+	}
+	return undefined
 }

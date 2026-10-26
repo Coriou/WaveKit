@@ -6,6 +6,7 @@ import {
 	asRecord,
 	interpretWith,
 	nearTarget,
+	placedFrequency,
 } from "./ambient-decode.js"
 import type { AmbientInterpretCtx, AmbientParsed } from "./ambient-decode.js"
 
@@ -27,7 +28,8 @@ export function parseAcars(
 	const data = asRecord(out.data)
 	if (data === undefined) return null
 	// ACARSMessage.frequency is Hz (the adapter converts acarsdec's MHz)
-	const frequency = data["frequency"]
+	if (data["frequencyMalformed"] === true) return null
+	const frequency = placedFrequency(data["frequency"], ctx)
 	let hz: number
 	if (frequency === undefined) {
 		const only = ctx.targetsHz.length === 1 ? ctx.targetsHz[0] : undefined

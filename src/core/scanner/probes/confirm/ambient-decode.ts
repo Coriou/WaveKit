@@ -10,6 +10,8 @@ import type { InterpreterState } from "./double-match.js"
 export interface AmbientInterpretCtx {
 	/** The decoder's own target frequencies (Hz). */
 	targetsHz: readonly number[]
+	/** Actual channel placement, never a band default. */
+	channelHz?: number
 }
 
 /** Evidence plus the decode's RF frequency (Hz). */
@@ -109,4 +111,12 @@ export function asRecord(data: unknown): Record<string, unknown> | undefined {
 	return typeof data === "object" && data !== null && !Array.isArray(data)
 		? (data as Record<string, unknown>)
 		: undefined
+}
+
+/** Missing/zero decoder frequency is usable only with an actual channel placement. */
+export function placedFrequency(
+	raw: unknown,
+	ctx: AmbientInterpretCtx,
+): unknown {
+	return raw === undefined || raw === 0 ? (ctx.channelHz ?? raw) : raw
 }

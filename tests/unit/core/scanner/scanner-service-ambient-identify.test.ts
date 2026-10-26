@@ -65,9 +65,10 @@ const status = (id: string, type: string): DecoderStatus =>
 		suspended: false,
 	}) as unknown as DecoderStatus
 
+let syntheticMessage = 0
 const ship = (mmsi: string) => ({
 	type: "ship",
-	data: { mmsi, channel: "A" },
+	data: { mmsi, channel: "A", name: `SYNTHETIC ${++syntheticMessage}` },
 	timestamp: new Date(),
 })
 
@@ -82,6 +83,7 @@ interface Rig {
 	configs: Map<string, DecoderConfig>
 	instances: Map<string, EventEmitter | { caps: { input: string } }>
 	ambient: () => AmbientEvidence
+	hear: (output: ReturnType<typeof ship>) => void
 }
 
 /** A harness whose fake manager reports config-owned decoders (startup or runtime). */
@@ -99,6 +101,9 @@ function rig(opts: {
 		decoderConfigs: opts.startup ?? [],
 		...(opts.trust ? { ambientTrust: opts.trust } : {}),
 	})
+	const clock = { offset: 0 }
+	const internal = h.service as unknown as { now: () => number }
+	internal.now = () => Date.now() + clock.offset
 	const statuses = new Map<string, DecoderStatus>()
 	const configs = new Map<string, DecoderConfig>()
 	const instances = new Map<
@@ -118,6 +123,13 @@ function rig(opts: {
 	d["getConfiguredDecoderConfigs"] = () => [...configs.values()]
 	return {
 		h,
+		hear: output => {
+			h.decoders.emitOutput("ais", {
+				...output,
+				timestamp: new Date(Date.now() + clock.offset),
+			})
+			clock.offset += 2_000
+		},
 		statuses,
 		configs,
 		instances,
@@ -190,10 +202,10 @@ describe("ScannerService ambient identify (WG7)", () => {
 					outcome: "running",
 				}),
 			])
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			// two decodes of one MMSI pair only 2 s or more apart.
+			r.hear(ship("244123456"))
+			// Two distinct synthetic messages from one MMSI confirm within the pairing window.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			const target = firstTarget(r, jobId)
 			expect(target.state).toBe("identified")
@@ -232,9 +244,9 @@ describe("ScannerService ambient identify (WG7)", () => {
 		}
 	}, 30_000)
 
-	it("names a narrow track inside the AIS channel but off its centre", async () => {
-		// 8 kHz above channel A: outside the former 1 kHz tolerance, inside half the 25 kHz channel.
-		const OFF_HZ = AIS_A + 8_000
+	it("names a narrow track within the measured-centre placement tolerance", async () => {
+		// 2.5 kHz above channel A: measured-centre error inside the occupied-span tolerance.
+		const OFF_HZ = AIS_A + 2_500
 		const r = rig({ startup: [aisConfig()], trust: () => "commanded" })
 		await r.h.service.start()
 		try {
@@ -250,10 +262,10 @@ describe("ScannerService ambient identify (WG7)", () => {
 					t => t.transport === "ambient" && t.outcome === "running",
 				),
 			)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			// two decodes of one MMSI pair only 2 s or more apart.
+			r.hear(ship("244123456"))
+			// Two distinct synthetic messages from one MMSI confirm within the pairing window.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")
 			const target = firstTarget(r, job.id)
 			expect(target.state).toBe("identified")
@@ -275,8 +287,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 					t => t.transport === "ambient",
 				),
 			)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			expect(evidence).toEqual([])
 			expect(r.ambient().trustDropCount).toBe(2)
@@ -302,8 +314,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 			const evidence: unknown[] = []
 			r.ambient().on("evidence", e => evidence.push(e))
 			const jobId = await identifyAisTarget(r, 60_000)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			expect(evidence).toEqual([])
 			const target = firstTarget(r, jobId)
@@ -375,7 +387,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 		expect(dsd.listenerCount("link")).toBe(0)
 	}, 30_000)
 
-	it("never names a wide track near channel A from a channel-A decode (centre outside the channel)", async () => {
+	it("names a merged wide track whose occupied span contains channel A", async () => {
 		const WIDE_HZ = 162_000_000
 		const r = rig({ startup: [aisConfig()], trust: () => "commanded" })
 		await r.h.service.start()
@@ -418,22 +430,14 @@ describe("ScannerService ambient identify (WG7)", () => {
 			)
 			// The track is wide enough that the former max(1500, OBW/2) pairing reached 161.975 MHz.
 			expect(wide?.lastTrack?.obwHz ?? 0).toBeGreaterThan(2 * (WIDE_HZ - AIS_A))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")
-			// The decodes are evidence; they just name no wide track.
+			// The occupied span contains channel A even though the track centre is outside it.
 			expect(evidence.map(e => e.hz)).toEqual([AIS_A, AIS_A])
 			const target = firstTarget(r, job.id)
-			expect(target.state).not.toBe("identified")
-			// Scanner-redesign 3.12: the wideband class now lists analog-fm, so its trial leads.
-			expect(target.trials).toEqual([
-				...NARROW_TRIALS,
-				expect.objectContaining({
-					protocol: "ais",
-					transport: "ambient",
-					outcome: "timeout",
-				}),
-			])
+			expect(target.state).toBe("identified")
+			expect(target.result).toMatchObject({ protocol: "ais" })
 		} finally {
 			await r.h.service.stop()
 		}

@@ -63,6 +63,12 @@ function newTypeTargets(
 	if (own === null) return null
 	const listed = own ?? numberList(cfg.options["frequencies"])
 	if (listed !== undefined) return listed
+	const pinned = cfg.options["channelHz"]
+	if (isHz(pinned)) return [pinned]
+	if (cfg.options["followCenter"] === true) {
+		const actual = cfg.options["inputCenterFreq"] ?? centre()
+		if (isHz(actual)) return [actual]
+	}
 	const single = cfg.options["frequency"]
 	if (cfg.type === "lora-meshtastic") {
 		// followCenter decodes the capture centre (lora-meshtastic.ts:155-158, 334-361).

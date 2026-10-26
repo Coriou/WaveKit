@@ -15,7 +15,14 @@ export function interpretDirewolf(
 	if (!parsed.success) return []
 	const call = parsed.data.source.trim().toUpperCase()
 	if (call === "") return []
-	// every FCS-valid frame is evidence; the first one accepts the callsign
+	// Ambient traffic needs two distinct messages, like other always-on decoders.
+	if (
+		state.requirePair &&
+		!state.match.isAccepted("aprs:call", call) &&
+		!state.match.accept("aprs:call", call, true)
+	)
+		return []
+	// Probe callers retain their single FCS-valid frame rule.
 	state.match.markAccepted("aprs:call", call)
 	return [
 		{

@@ -1,3 +1,4 @@
+import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 import { describe, expect, it } from "vitest"
 import { EventEmitter } from "node:events"
 import pino from "pino"
@@ -23,8 +24,12 @@ describe("AmbientEvidence", () => {
 	it("turns a configured decoder's twice-clean identity into ambient evidence at its target", () => {
 		const decoders = new Decoders()
 		let epoch = 3
+		let now = 1_000
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			now: () => now,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "dmr-cfg"
 					? {
@@ -44,7 +49,10 @@ describe("AmbientEvidence", () => {
 		dec.emit("link", linkLine(1, 1000))
 		dec.emit("link", linkLine(5, 1010, true))
 		expect(got.filter(e => e.ev.identity?.kind === "dmr-cc")).toEqual([])
-		dec.emit("link", linkLine(1, 1100))
+		now += 2_000
+		dec.emit("link", linkLine(1, now))
+		expect(got.filter(e => e.ev.identity)).toEqual([])
+		dec.emit("link", { ...linkLine(1, now), tg: "10" })
 		const cc = got.filter(e => e.ev.identity?.kind === "dmr-cc")
 		expect(cc).toHaveLength(1)
 		expect(cc[0]).toMatchObject({
@@ -78,13 +86,15 @@ describe("AmbientEvidence", () => {
 				sourceId: "rtl",
 				owner: "config",
 			},
-			{ id: "nxdn-cfg", type: "dsd-fme", sourceId: "rtl" },
+			{ id: "nxdn-cfg", type: "dsd-fme", sourceId: "rtl", owner: "config" },
 		]
 		decoders["getDecoder"] = (id: string) =>
 			id === "nxdn-cfg" ? nxdn : undefined
 		const clock = { now: 50_000 }
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "pager-cfg"
 					? {
@@ -118,7 +128,7 @@ describe("AmbientEvidence", () => {
 					address,
 					function: 0,
 					messageType: "alpha",
-					message: "",
+					message: `SYNTHETIC ${clock.now}`,
 				},
 			})
 		// straddling hold end + 2 s: no pair
@@ -128,7 +138,7 @@ describe("AmbientEvidence", () => {
 		expect(got).toEqual([])
 		// a busy stream of other capcodes does not keep that window open
 		for (let i = 0; i < 10; i++) {
-			clock.now += 1000
+			clock.now += 2000
 			page(2_000_000 + i)
 		}
 		page()
@@ -152,11 +162,13 @@ describe("AmbientEvidence", () => {
 			crcErr: false,
 			at: clock.now,
 		})
+		clock.now += 2_000
 		nxdn.emit("link", {
 			protocol: "nxdn",
 			ran: 5,
+			tg: "10",
 			crcErr: false,
-			at: clock.now + 80,
+			at: clock.now,
 		})
 		const ran = got.filter(e => e.ev.identity?.kind === "nxdn-ran")
 		expect(ran).toHaveLength(1)
@@ -175,8 +187,10 @@ describe("AmbientEvidence", () => {
 		]
 		decoders["getDecoder"] = () => undefined
 		const clock = { now: 10_000 }
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "ism-cfg"
 					? {
@@ -197,7 +211,12 @@ describe("AmbientEvidence", () => {
 			decoders.emit("decoder:output", "ism-cfg", {
 				type: "signal",
 				timestamp: new Date(clock.now),
-				data: { model: "Acurite-Tower", id: 1234, mic: "CHECKSUM" },
+				data: {
+					model: "Acurite-Tower",
+					id: 1234,
+					mic: "CHECKSUM",
+					value: clock.now,
+				},
 			})
 		decode()
 		expect(got).toEqual([])
@@ -229,8 +248,10 @@ describe("AmbientEvidence", () => {
 		decoders["getDecoder"] = () => undefined
 		const clock = { now: 50_000 }
 		let epoch = 3
+		ambientStatusFake(decoders)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
+			tuningTrustOf: () => "commanded",
 			targetOf: id =>
 				id === "pager-cfg"
 					? {
@@ -256,11 +277,11 @@ describe("AmbientEvidence", () => {
 					address,
 					function: 0,
 					messageType: "alpha",
-					message: "",
+					message: `SYNTHETIC ${clock.now}`,
 				},
 			})
 		page(1234567)
-		clock.now += 1000
+		clock.now += 2000
 		page(1234567)
 		expect(got).toHaveLength(1)
 		clock.now += 5 * 60_000
