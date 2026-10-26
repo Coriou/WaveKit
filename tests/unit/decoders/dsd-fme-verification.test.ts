@@ -127,6 +127,115 @@ describe("dsd-fme content verification", () => {
 	)
 
 	it.each([
+		"Sync: +P25p1",
+		"Sync: NXDN96",
+		"Sync: +YSF",
+		"Sync: no sync",
+		"| Frame Sync Err: 7",
+		"Frame Sync Err",
+	])("discards pending checked bursts and slot CCs on %s", boundary => {
+		const r = rig()
+		for (let i = 0; i < 2; i++) {
+			r.feed(bs("10", "CSBK"), T0 + i * 311.7 + 3.7)
+			r.feed(boundary, T0 + i * 311.7 + 61.3)
+		}
+		expect(r.links.filter(l => l.protocol === "dmr")).toHaveLength(2)
+		expect(
+			r.links.filter(l => l.protocol === "dmr").every(l => !l.verified),
+		).toBe(true)
+		expect(r.evidence.every(e => e.identity === undefined)).toBe(true)
+		// Re-enter on slot 2: slot 1 must have lost its old CC.
+		r.feed("Sync: +DMR slot1 [slot2] | Color Code=07 | IDLE", T0 + 703.7)
+		r.feed(lc, T0 + 719.3)
+		r.feed(lc, T0 + 781.1)
+		expect(r.links.filter(l => l.voiceLc).every(l => l.cc === undefined)).toBe(
+			true,
+		)
+		expect(r.evidence.every(e => e.identity === undefined)).toBe(true)
+	})
+
+	it.each([
+		"Sync: +DMR [slot1] slot2 | Color Code=03 | IDLE",
+		"Sync: -DMR slot1 [slot2] | Color Code=03 | IDLE",
+		"Sync: +DMR MS/DM MODE/MONO | Color Code=03 | VC*",
+		"Sync: -DMR MS/DM MODE/MONO | Color Code=03 | VC*",
+	])("accepts a following DMR burst boundary: %s", boundary => {
+		const r = rig()
+		r.feed(bs("10", "CSBK"), T0 + 3.7)
+		r.feed(bs("10", "CSBK"), T0 + 61.3)
+		r.feed(boundary, T0 + 127.1)
+		expect(r.links.filter(l => l.cc === 10).every(l => l.verified)).toBe(true)
+		expect(r.evidence.some(e => e.identity?.value === "10")).toBe(true)
+	})
+
+	it("keeps checked CSBK identities across interleaved slot-2 IDLE bursts", () => {
+		const r = rig()
+		for (let i = 0; i < 2; i++) {
+			r.feed(bs("03", "CSBK"), T0 + i * 137.7 + 3.7)
+			r.feed(
+				"Sync: +DMR slot1 [slot2] | Color Code=10 | IDLE",
+				T0 + i * 137.7 + 61.3,
+			)
+		}
+		expect(r.links.filter(l => l.verified).map(l => l.cc)).toEqual([3, 3])
+		expect(r.evidence.filter(e => e.identity).map(e => e.identity)).toEqual([
+			{ kind: "dmr-cc", value: "3" },
+		])
+	})
+
+	it.each(["1", "2"])(
+		"lends only slot %s's most recent CC to voice LC",
+		slot => {
+			const r = rig()
+			const other = slot === "1" ? "2" : "1"
+			r.feed(
+				`Sync: +DMR [slot${slot}] slot${other} | Color Code=03 | VC*`,
+				T0 + 3.7,
+			)
+			r.feed(
+				`Sync: +DMR slot${slot} [slot${other}] | Color Code=10 | IDLE`,
+				T0 + 61.3,
+			)
+			for (const at of [127.1, 193.7])
+				r.feed(` SLOT ${slot} TGT=9 SRC=123`, T0 + at)
+			expect(r.links.filter(l => l.voiceLc).map(l => l.cc)).toEqual([3, 3])
+			expect(r.evidence.at(-1)?.identity).toEqual({
+				kind: "dmr-cc",
+				value: "3",
+			})
+			// A newer burst with unknown CC supersedes that slot's older CC.
+			r.feed(
+				`Sync: +DMR [slot${slot}] slot${other} | Color Code=XX | VC*`,
+				T0 + 251.3,
+			)
+			r.feed(` SLOT ${slot} TGT=9 SRC=123`, T0 + 317.1)
+			expect(r.links.at(-1)?.cc).toBeUndefined()
+		},
+	)
+
+	it("does not borrow another slot's CC when its own slot has no burst", () => {
+		const r = rig()
+		r.feed("Sync: +DMR slot1 [slot2] | Color Code=10 | IDLE", T0 + 3.7)
+		r.feed(lc, T0 + 61.3)
+		r.feed(lc, T0 + 127.1)
+		expect(r.links.filter(l => l.voiceLc).map(l => l.cc)).toEqual([
+			undefined,
+			undefined,
+		])
+		expect(r.evidence.every(e => e.identity === undefined)).toBe(true)
+	})
+
+	it("keeps MS color codes on a separate single-channel key", () => {
+		const r = rig()
+		r.feed(bs("10", "IDLE"), T0 + 3.7)
+		r.feed("Sync: -DMR MS/DM MODE/MONO | Color Code=03 | VC*", T0 + 61.3)
+		r.feed(" SLOT 2 TGT=9 SRC=123", T0 + 127.1)
+		r.feed(lc, T0 + 193.7)
+		expect(r.links.filter(l => l.voiceLc).map(l => l.cc)).toEqual([3, 3])
+		expect(r.evidence.at(-1)?.identity).toEqual({ kind: "dmr-cc", value: "3" })
+	})
+
+	it.each([
 		"CSBK (CRC ERR) ",
 		"CSBK (FEC ERR)",
 		"VLC (CRC ERR) ",

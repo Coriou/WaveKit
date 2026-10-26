@@ -594,10 +594,11 @@ the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
 
 DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, MBCC, DATA or USBD burst, or checked voice link control carrying
-both target and source. Voice link control uses the latest CC in its current
-burst sequence; unknown CC, sync loss, protocol changes and sequence timeout
-clear that association. Header verification waits until the next sync closes the
-burst (normally one burst of latency); any continuation CRC/FEC error rejects it.
+both target and source. Voice link control uses the latest CC from its own BS
+slot, or from the single MS channel, in its current burst sequence. Unknown CC,
+sync loss, protocol changes and sequence timeout clear that association. Header
+verification waits until the next DMR sync closes the burst (normally one burst
+of latency); a non-DMR sync or any continuation CRC/FEC error rejects it.
 Stop or silence timeout flushes an unfinished header as unverified. CRC/FEC
 errors do not count, and CACH/burst FEC errors
 produce no evidence. Near the tuner centre, within the existing DC admission

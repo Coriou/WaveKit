@@ -526,8 +526,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	// Current protocol detected from sync (candidate context, not event)
 	private currentProtocol: DsdFmeProtocol = null
-	private linkDmrCc: number | undefined
-	private linkDmrAt = 0
+	private linkDmrCc = new Map<string, { cc: number; at: number }>()
+	private linkDmrMs = false
 	private pendingDmrLink: DsdFmeLinkLine | undefined
 
 	// Active call state (null = no call in progress)
@@ -795,8 +795,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		this.flushPendingDmrLink(false)
 		await super.stop()
-		this.linkDmrCc = undefined
-		this.linkDmrAt = 0
+		this.linkDmrCc.clear()
+		this.linkDmrMs = false
 	}
 
 	/**
@@ -1522,7 +1522,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 	}
 
-	/** A sync closes the previous burst; silence/stop never attests its tail. */
+	/** Only a following DMR sync can attest the previous burst tail. */
 	private flushPendingDmrLink(verified: boolean): void {
 		const pending = this.pendingDmrLink
 		this.pendingDmrLink = undefined
@@ -1535,30 +1535,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private parseLinkLine(line: string, at: number): DsdFmeLinkLine | null {
 		const sync = SYNC_PATTERN.exec(line)
+		const dmrSync = sync?.groups?.["proto"]?.toUpperCase() === "DMR"
 		if (this.pendingDmrLink) {
 			const expired = at - this.pendingDmrLink.at > CALL_TIMEOUT_MS
-			const lost = /Frame Sync Err:|SYNC LOST|no sync/i.test(line)
+			const lost = /Frame Sync Err\b|SYNC LOST|no sync/i.test(line)
 			if (expired || lost || sync)
-				this.flushPendingDmrLink(!expired && !lost && sync !== null)
+				this.flushPendingDmrLink(!expired && !lost && dmrSync)
 			else if (CRC_ERR.test(line) || /\bFEC\s+ERR\b/i.test(line)) {
 				this.flushPendingDmrLink(false)
-				this.linkDmrCc = undefined
+				this.linkDmrCc.clear()
 			}
 		}
 		// dmr_ms.c/dmr_bs.c: loss of frame sync ends the burst sequence.
-		if (
-			/Frame Sync Err:|SYNC LOST|no sync/i.test(line) ||
-			(sync && sync.groups?.["proto"]?.toUpperCase() !== "DMR") ||
-			at - this.linkDmrAt > CALL_TIMEOUT_MS
-		)
-			this.linkDmrCc = undefined
+		if (/Frame Sync Err\b|SYNC LOST|no sync/i.test(line) || (sync && !dmrSync))
+			this.linkDmrCc.clear()
 		const protocol = sync?.groups
 			? this.parseProtocol(sync.groups["proto"] ?? "")
 			: this.currentProtocol
 		const crcErr = CRC_ERR.test(line)
 		const fecErrs = line.match(FEC_ERR_ALL)?.length ?? 0
 		if (/CACH\/Burst FEC ERR/i.test(line)) {
-			this.linkDmrCc = undefined
+			this.linkDmrCc.clear()
 			return null
 		}
 		const clean = !crcErr && fecErrs === 0
@@ -1586,9 +1583,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					printedCc !== undefined && Number(printedCc) <= 15
 						? Number(printedCc)
 						: undefined
-				if (sync) {
-					this.linkDmrCc = clean ? cc : undefined
-					this.linkDmrAt = at
+				const slotText =
+					DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"] ??
+					DMR_SLOT_INLINE.exec(line)?.groups?.["slot"] ??
+					DMR_SLOT_WORD.exec(line)?.groups?.["slot"]
+				if (sync) this.linkDmrMs = /\bMS\/DM\b/i.test(line)
+				// dmr_bs.c marks the current TDMA slot with brackets; dmr_ms.c
+				// has one channel, regardless of the SLOT number on its voice LC.
+				const ccKey = this.linkDmrMs ? "ms" : slotText
+				if (sync && ccKey !== undefined) {
+					if (clean && cc !== undefined) this.linkDmrCc.set(ccKey, { cc, at })
+					else this.linkDmrCc.delete(ccKey)
 				}
 				const idGroups =
 					DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
@@ -1610,12 +1615,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					(voiceLc ||
 						(sync !== null &&
 							/\|\s*(?:PI|VLC|TLC|CSBK|MBCH|MBCC|DATA|USBD)\b/.test(line)))
-				const identityCc = cc ?? (clean && voiceLc ? this.linkDmrCc : undefined)
+				const previousCc =
+					ccKey !== undefined ? this.linkDmrCc.get(ccKey) : undefined
+				const identityCc =
+					cc ??
+					(clean &&
+					voiceLc &&
+					previousCc &&
+					at - previousCc.at <= CALL_TIMEOUT_MS
+						? previousCc.cc
+						: undefined)
 				if (cc === undefined && idGroups === undefined && !sync) return null
-				const slotText =
-					DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"] ??
-					DMR_SLOT_INLINE.exec(line)?.groups?.["slot"] ??
-					DMR_SLOT_WORD.exec(line)?.groups?.["slot"]
 				const svc = DMR_TLC_FIELDS.exec(line)?.groups?.["svc"]
 				const alg = ALG_ID.exec(line)?.groups?.["alg"]
 				const encrypted =
