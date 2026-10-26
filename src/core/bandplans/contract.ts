@@ -4,6 +4,8 @@
  * live in packages/api-types/src/bandplans.ts. This file holds types and the error
  * class only: no I/O, no scanner mutation.
  */
+import type { Logger } from "../../utils/logger.js"
+import type { LockWaitOptions } from "../../utils/lock-owner.js"
 import { BANDPLANS_ERROR_DEFINITIONS } from "@wavekit/api-types"
 import type {
 	Band,
@@ -127,6 +129,8 @@ export type BandPlanStoreUnavailableReason =
 	| "io"
 
 export interface BandPlanServiceOptions {
+	readonly logger?: Logger
+	readonly lockWait?: LockWaitOptions
 	/** Existing durable local stateDir; the service owns `<stateDir>/bandplans/`. */
 	readonly stateDir: string
 	readonly context: BandPlanContext

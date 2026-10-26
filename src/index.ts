@@ -14,6 +14,10 @@
 
 import "./bootstrap.js"
 
+import { observeStartupLocks } from "./utils/lock-owner.js"
+import { OperatorDataError } from "./operator-data/schema.js"
+import { formatStartupFailure } from "./utils/startup-failure.js"
+
 import { openAccessRuntime } from "./access/runtime-context.js"
 import { createAnalogLiveRunner } from "./core/iq-capture/analog-live.js"
 import type { NamedAccessRuntimeContext } from "./access/runtime-context.js"
@@ -1133,6 +1137,9 @@ async function main(): Promise<void> {
 		process.on("SIGINT", signal)
 	}
 	try {
+		let startupLockWait:
+			| Awaited<ReturnType<typeof observeStartupLocks>>
+			| undefined
 		if (config.access.mode === "protected") {
 			accessBootstrap = validateProtectedRuntimeMapping(
 				config.access,
@@ -1145,7 +1152,17 @@ async function main(): Promise<void> {
 			)
 			const exposureWarning = containerExposureWarning(config.access)
 			if (exposureWarning !== null) log.warn(exposureWarning)
+			startupLockWait = await observeStartupLocks(
+				{
+					accessDirectory:
+						process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
+					stateDir: config.stateDir,
+				},
+				{ logger },
+			)
+			checkpoint()
 			access = await openAccessRuntime({
+				lockWait: startupLockWait,
 				bootstrap: accessBootstrap,
 				audio: {
 					analog: {
@@ -2396,6 +2413,8 @@ async function main(): Promise<void> {
 		// The API server closes it after HTTP drain; own() covers a failed construction.
 		let publishBandPlans: BandPlansCommitSink | undefined
 		const bandPlans = await openBandPlanService({
+			logger: bandPlanLog,
+			...(startupLockWait ? { lockWait: startupLockWait } : {}),
 			stateDir: config.stateDir,
 			context: {
 				region: bandRegion.code,
@@ -2504,6 +2523,8 @@ async function main(): Promise<void> {
 			)
 			try {
 				operatorData = await OperatorDataService.open({
+					logger: createComponentLogger(logger, "OperatorData"),
+					...(startupLockWait ? { lockWait: startupLockWait } : {}),
 					stateDir: config.stateDir,
 					onCommit: snapshot => {
 						try {
@@ -2515,8 +2536,9 @@ async function main(): Promise<void> {
 					},
 				})
 				acquisition = "acquired"
-			} catch {
+			} catch (error) {
 				acquisition = "rejected"
+				if (error instanceof OperatorDataError) throw error
 				throw new WaveKitError(
 					"Operator startup unavailable",
 					"ACCESS_UNAVAILABLE",
@@ -2982,7 +3004,43 @@ async function main(): Promise<void> {
 		if (protectedMode) {
 			const watchdog = setTimeout(() => process.exit(1), 10_000)
 			try {
-				await closeProtected()
+				// closeProtected reduces independent failures to one shutdown sentinel.
+				// Retain their causes here so only the acquisition sentinel is suppressed.
+				const cleanupErrors: unknown[] = []
+				for (const entry of cleanup) {
+					const run = entry.run
+					entry.run = async () => {
+						try {
+							await run()
+						} catch (cleanupError) {
+							cleanupErrors.push(cleanupError)
+							throw cleanupError
+						}
+					}
+				}
+				await closeProtected().catch(async cleanupError => {
+					const { safeErrorFields } =
+						await import("./decoders/safe-error-fields.js")
+					const unexpected = cleanupErrors.filter(
+						cause =>
+							!(
+								error instanceof OperatorDataError &&
+								cause instanceof WaveKitError &&
+								cause.code === "ACCESS_UNAVAILABLE" &&
+								cause.message === "Operator acquisition cleanup unknown"
+							),
+					)
+					// Admission and final access-close failures are outside the cleanup list.
+					if (admissionFailed || cleanupErrors.length === 0)
+						unexpected.push(cleanupError)
+					for (const cause of unexpected) {
+						const { type, code } = safeErrorFields(cause)
+						log.error(
+							{ err: { type, ...(code ? { code } : {}) } },
+							"Startup cleanup failed",
+						)
+					}
+				})
 			} finally {
 				clearTimeout(watchdog)
 			}
@@ -3005,7 +3063,7 @@ if (
 	process.argv[1] &&
 	pathToFileURL(resolve(process.argv[1])).href === import.meta.url
 )
-	void main().catch(() => {
-		process.stderr.write("WaveKit startup failed\n")
+	void main().catch(error => {
+		process.stderr.write(formatStartupFailure(error))
 		process.exit(1)
 	})

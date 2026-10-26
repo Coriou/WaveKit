@@ -1,6 +1,9 @@
+import type { WriterLock, LockWaitOptions } from "../utils/lock-owner.js"
+import type { Logger } from "../utils/logger.js"
+import { acquireWriterLock, releaseWriterLock } from "../utils/lock-owner.js"
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
-import { lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promises"
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { createEmptySnapshot } from "./domain.js"
@@ -31,13 +34,22 @@ export type StorageStage =
 	| "lock-release"
 export interface OperatorDataStorageOptions {
 	stateDir: string
+	logger?: Logger
+	lockWait?: LockWaitOptions
 	/** Test-only lifecycle observation/fault injection around actual local I/O. */
 	stage?: (
 		stage: StorageStage,
 		phase: "before" | "after",
 	) => void | Promise<void>
 }
-const unavailable = () => new OperatorDataError("OPERATOR_DATA_UNAVAILABLE")
+class StorageUnavailable extends OperatorDataError {
+	readonly reason: "lock-held" | "io"
+	constructor(reason: "lock-held" | "io") {
+		super("OPERATOR_DATA_UNAVAILABLE")
+		this.reason = reason
+	}
+}
+const unavailable = () => new StorageUnavailable("io")
 function missing(error: unknown): boolean {
 	return (
 		typeof error === "object" &&
@@ -48,7 +60,7 @@ function missing(error: unknown): boolean {
 }
 
 /** Local Unix only: stateDir must already be durable, with trustworthy stable parents.
- * Crash locks require offline repair. Filesystem sync success is not a hardware guarantee.
+ * Crash locks use heartbeat recovery. Filesystem sync success is not a hardware guarantee.
  * Service owns CAS/transaction admission/publication; storage rejects overlapping writes.
  */
 export class OperatorDataStorage {
@@ -56,7 +68,7 @@ export class OperatorDataStorage {
 	private readonly lock: string
 	private readonly file: string
 	private directoryHandle: FileHandle | undefined
-	private ownsLock = false
+	private ownsLock: WriterLock | false = false
 	private unsafeIO = false
 	private available = false
 	private closing = false
@@ -74,11 +86,12 @@ export class OperatorDataStorage {
 		const storage = new OperatorDataStorage(options)
 		try {
 			await storage.initialize()
+			if (storage.ownsLock && storage.ownsLock.lost) throw unavailable()
 			storage.available = true
 			return storage
-		} catch {
+		} catch (error) {
 			await storage.cleanup().catch(() => undefined)
-			throw unavailable()
+			throw error instanceof StorageUnavailable ? error : unavailable()
 		}
 	}
 	isAvailable(): boolean {
@@ -234,8 +247,14 @@ export class OperatorDataStorage {
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
 				throw unavailable()
-			await mkdir(this.lock, { mode: 0o700 })
-			this.ownsLock = true
+			this.ownsLock = await acquireWriterLock(this.lock, {
+				...this.options.lockWait,
+				...(this.options.logger ? { logger: this.options.logger } : {}),
+				onLost: () => {
+					this.available = false
+				},
+			})
+			if (!this.ownsLock) throw new StorageUnavailable("lock-held")
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {
 			await this.closeHandle(parent, "parent-close")
@@ -306,6 +325,7 @@ export class OperatorDataStorage {
 			handle = undefined
 			await this.closeHandle(closing, "temp-close")
 			await this.stage("rename", "before")
+			if (!this.ownsLock || !(await this.ownsLock.check())) throw unavailable()
 			await rename(temp, this.file)
 			renamed = true
 			await this.stage("rename", "after")
@@ -333,15 +353,21 @@ export class OperatorDataStorage {
 	}
 	private async cleanup(): Promise<void> {
 		this.available = false
-		if (this.directoryHandle) {
-			const handle = this.directoryHandle
-			this.directoryHandle = undefined
-			await this.closeHandle(handle, "directory-close")
-		}
-		if (this.unsafeIO) throw unavailable()
-		if (this.ownsLock) {
-			await this.perform("lock-release", () => rmdir(this.lock))
-			this.ownsLock = false
+		const lock = this.ownsLock
+		try {
+			if (this.directoryHandle) {
+				const handle = this.directoryHandle
+				this.directoryHandle = undefined
+				await this.closeHandle(handle, "directory-close")
+			}
+			if (this.unsafeIO) throw unavailable()
+			if (this.ownsLock) {
+				const lock = this.ownsLock
+				await this.perform("lock-release", () => releaseWriterLock(lock))
+				this.ownsLock = false
+			}
+		} finally {
+			if (lock) await lock.stop()
 		}
 	}
 }

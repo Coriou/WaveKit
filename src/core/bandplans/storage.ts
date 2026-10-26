@@ -1,15 +1,10 @@
+import type { WriterLock, LockWaitOptions } from "../../utils/lock-owner.js"
+import type { Logger } from "../../utils/logger.js"
+import { acquireWriterLock, releaseWriterLock } from "../../utils/lock-owner.js"
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import type { Dirent } from "node:fs"
-import {
-	lstat,
-	mkdir,
-	open,
-	readdir,
-	rename,
-	rmdir,
-	unlink,
-} from "node:fs/promises"
+import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { BANDPLANS_LIMITS, bandPlanStateSchema } from "@wavekit/api-types"
@@ -39,6 +34,8 @@ export type StorageStage =
 	| "lock-release"
 export interface BandPlanStorageOptions {
 	stateDir: string
+	logger?: Logger
+	lockWait?: LockWaitOptions
 	/** False skips mkdir, the writer lock, the init write, and the temp sweep. */
 	writable?: boolean
 	/** Once after a post-rename failure latches a store that had opened. */
@@ -148,9 +145,9 @@ function createEmptyState(storeId: string): BandPlanState {
 }
 
 /** Local Unix only: stateDir must already be durable, with trustworthy stable parents.
- * Writable opens take a no-stealing mkdir lock for the process lifetime.
- * A lock left by a crash stays held until offline repair; the next writable
- * open reports unavailable. Read-only opens do not create, lock, write, or sweep.
+ * Writable opens hold a heartbeat lock for the process lifetime.
+ * Crash recovery observes an unchanged heartbeat for 30 s across PID scopes.
+ * Read-only opens do not create, lock, write, or sweep.
  * Filesystem sync success is not a hardware guarantee.
  * The service owns CAS and publication; storage rejects overlapping writes.
  * Invalid, oversized or unknown-version bytes are left untouched.
@@ -161,7 +158,7 @@ export class BandPlanStorage {
 	private readonly file: string
 	private readonly writable: boolean
 	private directoryHandle: FileHandle | undefined
-	private ownsLock = false
+	private ownsLock: WriterLock | false = false
 	private unsafeIO = false
 	private available = false
 	private closing = false
@@ -180,6 +177,8 @@ export class BandPlanStorage {
 		const storage = new BandPlanStorage(options)
 		try {
 			await storage.initialize()
+			if (storage.ownsLock && storage.ownsLock.lost)
+				throw new StorageUnavailable("io")
 			storage.available = true
 			return storage
 		} catch (error) {
@@ -405,13 +404,16 @@ export class BandPlanStorage {
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
 				throw new StorageUnavailable("permissions")
-			try {
-				await mkdir(this.lock, { mode: 0o700 })
-			} catch (error) {
-				if (errno(error) === "EEXIST") throw new StorageUnavailable("lock-held")
-				throw error
-			}
-			this.ownsLock = true
+			this.ownsLock = await acquireWriterLock(this.lock, {
+				...this.options.lockWait,
+				...(this.options.logger ? { logger: this.options.logger } : {}),
+				onLost: () => {
+					const live = this.available
+					this.available = false
+					if (live) this.noteUnavailable("io")
+				},
+			})
+			if (!this.ownsLock) throw new StorageUnavailable("lock-held")
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {
 			await this.closeHandle(parent, "parent-close")
@@ -524,6 +526,8 @@ export class BandPlanStorage {
 			handle = undefined
 			await this.closeHandle(closing, "temp-close")
 			await this.stage("rename", "before")
+			if (!this.ownsLock || !(await this.ownsLock.check()))
+				throw new StorageUnavailable("io")
 			await rename(temp, this.file)
 			renamed = true
 			await this.stage("rename", "after")
@@ -557,15 +561,21 @@ export class BandPlanStorage {
 	}
 	private async cleanup(): Promise<void> {
 		this.available = false
-		if (this.directoryHandle) {
-			const handle = this.directoryHandle
-			this.directoryHandle = undefined
-			await this.closeHandle(handle, "directory-close")
-		}
-		if (this.unsafeIO) throw new StorageUnavailable("io")
-		if (this.ownsLock) {
-			await this.perform("lock-release", () => rmdir(this.lock))
-			this.ownsLock = false
+		const lock = this.ownsLock
+		try {
+			if (this.directoryHandle) {
+				const handle = this.directoryHandle
+				this.directoryHandle = undefined
+				await this.closeHandle(handle, "directory-close")
+			}
+			if (this.unsafeIO) throw new StorageUnavailable("io")
+			if (this.ownsLock) {
+				const lock = this.ownsLock
+				await this.perform("lock-release", () => releaseWriterLock(lock))
+				this.ownsLock = false
+			}
+		} finally {
+			if (lock) await lock.stop()
 		}
 	}
 }

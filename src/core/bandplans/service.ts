@@ -237,6 +237,8 @@ export async function createBandPlanService(
 	try {
 		storage = await BandPlanStorage.open({
 			stateDir: options.stateDir,
+			...(options.logger ? { logger: options.logger } : {}),
+			...(options.lockWait ? { lockWait: options.lockWait } : {}),
 			writable: options.writable,
 			...(options.onStoreUnavailable
 				? { onStoreUnavailable: options.onStoreUnavailable }

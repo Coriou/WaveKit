@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path"
 import { z } from "zod"
+import type { LockWaitOptions } from "../utils/lock-owner.js"
 import { WaveKitError } from "../utils/errors.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { AccessRouteServices } from "./access-routes.js"
@@ -25,6 +26,8 @@ export interface AccessRuntimeOptions {
 	readonly directory: string
 	readonly ownership: "single-host-pid-namespace"
 	readonly sessionCookieName?: string
+	/** Shared boot observations; storage rechecks the current heartbeat. */
+	readonly lockWait?: LockWaitOptions
 	/** Parent logger; the session store logs through a "SessionStore" component logger. */
 	readonly logger?: Logger
 }
@@ -98,6 +101,7 @@ const optionsSchema = z
 			.default("wavekit_session"),
 		/** Parent logger for the session store's component logger. */
 		logger: z.custom<Logger>(isLogger).optional(),
+		lockWait: z.custom<LockWaitOptions>().optional(),
 	})
 	.strict()
 
@@ -209,6 +213,8 @@ export async function openAccessRuntime(
 			directory: config.directory,
 			ownership: config.ownership,
 			mode: "load",
+			...(config.logger ? { logger: config.logger } : {}),
+			...(config.lockWait ? { lockWait: config.lockWait } : {}),
 		})
 		const sessions = await SessionStore.open({
 			credentialBinding: storage.credentialBinding,
@@ -283,13 +289,18 @@ export async function openAccessRuntime(
 				return closing
 			},
 		})
-	} catch {
+	} catch (error) {
 		try {
 			leases?.dispose()
 		} catch {
 			/* Storage must still close if transport cleanup fails. */
 		}
 		await storage?.close().catch(() => undefined)
+		if (
+			error instanceof WaveKitError &&
+			error.code.startsWith("ACCESS_STORAGE_")
+		)
+			throw error
 		throw unavailable()
 	}
 }

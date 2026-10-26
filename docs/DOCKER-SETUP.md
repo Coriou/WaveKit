@@ -198,6 +198,22 @@ threshold to ignore the first 10 seconds after `wavekit-api` start.
 
 ## Troubleshooting
 
+### After a crash or power cut
+
+A lock from a dead process in the same container is reclaimed at once. After a
+container kill, the new core waits about 30–40 seconds in total, observing access,
+band-plan and operator-data lock heartbeats together before reclaiming them.
+Holders refresh every 10 seconds; a heartbeat observed unchanged for 30 seconds on a monotonic clock expires, even if its PID
+is still alive in the same container. A lock whose heartbeat stays fresh
+(another live core using the same state) is never taken. A recent heartbeat from
+an owner with a matching local PID and start time fails immediately; an old
+wall-clock timestamp selects observation and can wait up to 40 seconds. Wall
+clock age alone never proves expiry. Startup failures show the public error code,
+such as `ACCESS_STORAGE_FOREIGN_OWNER`, `ACCESS_STORAGE_BUSY`, or
+`OPERATOR_DATA_UNAVAILABLE/lock-held` (including the safe operator-data reason).
+Band-plan storage failures instead warn and fall back to built-in plans; they do
+not stop startup.
+
 ### Port conflicts
 
 The `app` profile binds `127.0.0.1` ports 9000, 8080, 8081, 8082 and 4713;

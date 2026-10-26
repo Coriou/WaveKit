@@ -137,6 +137,8 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 
 ## Presets and bandplans
 
+Stored band plans use a writer lock in the state directory. After an unclean stop it is reclaimed automatically ([After a crash or power cut](DOCKER-SETUP.md#after-a-crash-or-power-cut)); a lock held by another live core is never taken.
+
 `GET /api/scanner/bandplans` lists the effective plans. Under the default band-plan stack these are the built-in plans for the effective region (`region` config; EU, or US/CA → US):
 
 | Id                | Region | Range (MHz)       | Rasters               | OBW classes (kHz) | Protocols                             |

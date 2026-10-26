@@ -55,6 +55,8 @@ const ioOnlyImports = new Set([
 	"node:fs",
 	"node:fs/promises",
 	"node:path",
+	"../../utils/lock-owner.js",
+	"../../utils/logger.js",
 	"./storage.js",
 	"./service.js",
 	"./import/sdrpp.js",
@@ -88,8 +90,16 @@ describe("band plan authority isolation", () => {
 		expect(files.length).toBeGreaterThan(0)
 		for (const file of files) {
 			const source = readFileSync(resolve(dir, file), "utf8")
+			// Service open options use type-only references; keep runtime I/O forbidden.
+			const importSource =
+				file === "contract.ts"
+					? source.replace(
+							/\bimport\s+type\s+\{[^}]*\}\s+from\s+"\.\.\/\.\.\/utils\/(?:logger|lock-owner)\.js"/g,
+							"",
+						)
+					: source
 			const imports = [
-				...source.matchAll(/\b(?:from|import)\s+"([^"]+)"/g),
+				...importSource.matchAll(/\b(?:from|import)\s+"([^"]+)"/g),
 			].map(match => match[1]!)
 			expect(imports.length).toBeGreaterThan(0)
 			const io = ioModules.has(file)

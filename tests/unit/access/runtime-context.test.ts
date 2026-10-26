@@ -462,7 +462,7 @@ describe("unmounted protected runtime lifecycle", () => {
 		const mkdir = vi.spyOn(fs, "mkdir")
 		const write = vi.spyOn(fs, "writeFile")
 		await expect(openAccessRuntime(options(directory))).rejects.toMatchObject({
-			code: "ACCESS_RUNTIME_UNAVAILABLE",
+			code: "ACCESS_STORAGE_MISSING",
 			cause: undefined,
 		})
 		expect(mkdir).not.toHaveBeenCalled()
@@ -480,8 +480,8 @@ describe("unmounted protected runtime lifecycle", () => {
 			value => value,
 		)
 		expect(error).toMatchObject({
-			message: "Access runtime unavailable",
-			code: "ACCESS_RUNTIME_UNAVAILABLE",
+			message: "Private access storage unavailable",
+			code: "ACCESS_STORAGE_INVALID",
 			cause: undefined,
 		})
 		expect(JSON.stringify(error)).not.toContain(token)

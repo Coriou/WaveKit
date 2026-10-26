@@ -1,3 +1,4 @@
+import type { Logger } from "../utils/logger.js"
 import { constants } from "node:fs"
 import fs from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
@@ -5,6 +6,17 @@ import { createHash, randomUUID } from "node:crypto"
 import { hostname } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { z } from "zod"
+import {
+	lockWait,
+	heartbeatValue,
+	ownerHasRecentHeartbeat,
+	startLockHeartbeat,
+	isStale,
+	lockOwnerSchema,
+	probeLockOwner,
+	readLockOwner,
+} from "../utils/lock-owner.js"
+import type { LockHeartbeat, LockWaitOptions } from "../utils/lock-owner.js"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	digestMachineToken,
@@ -24,6 +36,7 @@ const LIFETIME = 30 * 24 * 60 * 60 * 1000
 const ownerName = /^owner-([1-9][0-9]*)-([a-f0-9-]{36})\.lock$/
 const ownerSchema = z
 	.object({
+		identity: lockOwnerSchema.optional(),
 		version: z.literal(1),
 		pid: z.number().int().positive().max(0x7fffffff),
 		scope: z.string().regex(/^[a-f0-9]{64}$/),
@@ -57,6 +70,8 @@ export interface PrivateAccessStorageOptions {
 	/** Dedicated local directory, never shared across hosts or PID namespaces. */
 	ownership: "single-host-pid-namespace"
 	random?: AccessRandomBytes
+	logger?: Logger
+	lockWait?: LockWaitOptions
 }
 
 export interface ReadMachineCredentialOptions {
@@ -76,25 +91,23 @@ function hasCode(error: unknown, code: string): boolean {
 	)
 }
 
-/** ESRCH is trusted only within this scope; foreign scope requires offline repair. */
+/** Legacy scope hash remains a local PID-evidence boundary. */
 async function processScope(): Promise<string> {
 	const uid = process.getuid?.()
 	if (uid === undefined) throw failure("ACCESS_STORAGE_SCOPE_UNSUPPORTED")
-	let identity: string
+	let scope: string
 	if (process.platform === "linux") {
 		const [boot, namespace] = await Promise.all([
-			fs.readFile("/proc/sys/kernel/random/boot_id", "utf8"),
-			fs.readlink("/proc/self/ns/pid"),
+			fs
+				.readFile("/proc/sys/kernel/random/boot_id", "utf8")
+				.catch(() => "unknown"),
+			fs.readlink("/proc/self/ns/pid").catch(() => "unknown"),
 		])
-		if (!/^[a-f0-9-]{36}\n?$/.test(boot) || !/^pid:\[[0-9]+\]$/.test(namespace))
-			throw failure("ACCESS_STORAGE_SCOPE_UNSUPPORTED")
-		identity = `linux:${hostname()}:${uid}:${boot.trim()}:${namespace}`
-	} else if (process.platform === "darwin") {
-		// macOS has one host PID namespace. The explicit local-only contract
-		// excludes network/shared directories; unknown owners remain fail-closed.
-		identity = `darwin:${hostname()}:${uid}`
-	} else throw failure("ACCESS_STORAGE_SCOPE_UNSUPPORTED")
-	return createHash("sha256").update(identity).digest("hex")
+		scope = `linux:${hostname()}:${uid}:${boot.trim()}:${namespace}`
+	} else if (process.platform === "darwin")
+		scope = `darwin:${hostname()}:${uid}`
+	else throw failure("ACCESS_STORAGE_SCOPE_UNSUPPORTED")
+	return createHash("sha256").update(scope).digest("hex")
 }
 
 function validateSnapshot(input: unknown, binding: string): SessionSnapshot {
@@ -126,11 +139,12 @@ function validateSnapshot(input: unknown, binding: string): SessionSnapshot {
 
 /**
  * One process owns this dedicated local directory until close(). Each open first
- * publishes its own unique owner file, then rejects ANY other live owner (even
- * the same PID). Concurrent contenders may both refuse; retry after graceful
- * cleanup. Only validated, immutable owner paths in the SAME scope with ESRCH
- * are reaped. EPERM, foreign/unverifiable namespace and unknown files never grant
- * ownership. Foreign/stale-unverifiable recovery is an explicit offline operation.
+ * publishes its own unique owner file, then rejects a recent matching live
+ * owner (even the same PID) or observes an old heartbeat until release or expiry.
+ * Concurrent contenders may both refuse;
+ * retry after graceful cleanup. PID evidence is trusted only within the same
+ * scope. Owners are held while their heartbeat is fresh and reclaimed after
+ * its lease expires.
  *
  * Parent directories must be trusted/stable. Existing selected directories/files
  * must already be private and owned by this uid; unrelated paths are never chmod'd.
@@ -147,6 +161,8 @@ export class PrivateAccessStorage {
 	#directory: string
 	#handle: FileHandle
 	#directoryIdentity: { dev: number; ino: number }
+	#stopHeartbeat: LockHeartbeat | undefined
+	#ownershipLost = false
 	#owner = ""
 	#ownerIdentity: { dev: number; ino: number } | undefined
 	#state: PrivateState | undefined
@@ -283,7 +299,10 @@ export class PrivateAccessStorage {
 			}
 			storage = new PrivateAccessStorage(options.directory, handle, stat)
 			await storage.#assertDirectory()
-			await storage.#acquire(scope)
+			await storage.#acquire(scope, {
+				...options.lockWait,
+				...(options.logger ? { logger: options.logger } : {}),
+			})
 			await storage.#load(options.mode, options.random)
 			return storage
 		} catch (error) {
@@ -318,6 +337,7 @@ export class PrivateAccessStorage {
 	}
 
 	#current(): PrivateState {
+		if (this.#ownershipLost) throw failure("ACCESS_STORAGE_BUSY")
 		if (this.#closed || this.#unavailable || !this.#state)
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		return this.#state
@@ -400,8 +420,13 @@ export class PrivateAccessStorage {
 		}
 	}
 
-	async #acquire(scope: string): Promise<void> {
+	async #acquire(
+		scope: string,
+		options: LockWaitOptions | undefined,
+	): Promise<void> {
+		const wait = lockWait(options)
 		const nonce = randomUUID()
+		const identity = await readLockOwner()
 		this.#owner = `owner-${process.pid}-${nonce}.lock`
 		const handle = await fs.open(
 			join(this.#directory, this.#owner),
@@ -416,12 +441,28 @@ export class PrivateAccessStorage {
 			const stat = await handle.stat()
 			this.#ownerIdentity = { dev: stat.dev, ino: stat.ino }
 			await handle.writeFile(
-				JSON.stringify({ version: 1, pid: process.pid, scope, nonce }),
+				JSON.stringify({
+					version: 1,
+					pid: process.pid,
+					scope,
+					nonce,
+					identity,
+				}),
 			)
 			await handle.sync()
 		} finally {
 			await handle.close()
 		}
+		this.#stopHeartbeat = await startLockHeartbeat(
+			join(this.#directory, this.#owner),
+			{
+				...options,
+				onLost: () => {
+					this.#ownershipLost = true
+					this.#unavailable = true
+				},
+			},
+		)
 		const entries = await fs.readdir(this.#directory)
 		if (entries.length > 64)
 			throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
@@ -429,7 +470,8 @@ export class PrivateAccessStorage {
 			if (entry === this.#owner || !entry.startsWith("owner-")) continue
 			const match = ownerName.exec(entry)
 			if (!match) throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
-			const data = await this.#read(entry, 512)
+			// Identity includes a full hostname; reuse the existing bounded metadata read.
+			const data = await this.#read(entry, MAX_BYTES)
 			if (data === undefined) continue
 			let decoded: unknown
 			try {
@@ -444,18 +486,67 @@ export class PrivateAccessStorage {
 				owner.data.nonce !== match[2]
 			)
 				throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
-			if (owner.data.scope !== scope)
-				throw failure("ACCESS_STORAGE_FOREIGN_OWNER")
-			try {
-				process.kill(owner.data.pid, 0)
-				throw failure("ACCESS_STORAGE_BUSY")
-			} catch (error) {
-				if (!hasCode(error, "ESRCH")) throw failure("ACCESS_STORAGE_BUSY")
+			const recorded = owner.data.identity
+			if (recorded && recorded.pid !== owner.data.pid)
+				throw failure("ACCESS_STORAGE_OWNERSHIP_UNVERIFIED")
+			const path = join(this.#directory, entry)
+			for (;;) {
+				const stat = await fs.lstat(path).catch(error => {
+					if (hasCode(error, "ENOENT")) return undefined
+					throw error
+				})
+				if (!stat) break
+				const candidate = recorded ?? {
+					...identity,
+					pid: owner.data.pid,
+					// Legacy records never recorded a start time; do not borrow ours.
+					startTime: null,
+					...(owner.data.scope !== scope
+						? { bootId: null, startTime: null }
+						: {}),
+				}
+				const probe = await probeLockOwner(candidate)
+				if (
+					isStale(
+						candidate,
+						identity,
+						probe,
+						wait.observe(path, heartbeatValue(stat)),
+					)
+				) {
+					await options?.beforeReclaim?.()
+					const latest = await fs.lstat(path).catch(error => {
+						if (hasCode(error, "ENOENT")) return undefined
+						throw error
+					})
+					if (!latest) break
+					if (heartbeatValue(latest) !== heartbeatValue(stat)) {
+						wait.observe(path, heartbeatValue(latest))
+						if (!(await wait.retry())) throw failure("ACCESS_STORAGE_BUSY")
+						continue
+					}
+					// A reclaimer paused between this final heartbeat read and unlink can
+					// take a lock refreshed during its own pause. Without fencing tokens,
+					// this advisory lease cannot close that window. The old holder notices
+					// the loss within H = 10 s and stops writing; at most the write already
+					// in flight can land.
+					await fs.unlink(path).catch(error => {
+						if (!hasCode(error, "ENOENT")) throw error
+					})
+					break
+				}
+				const code =
+					owner.data.scope !== scope
+						? "ACCESS_STORAGE_FOREIGN_OWNER"
+						: "ACCESS_STORAGE_BUSY"
+				// Recent, matching live owners reject immediately; old wall timestamps
+				// only select monotonic observation, including after a clock step.
+				if (
+					ownerHasRecentHeartbeat(candidate, identity, probe, stat.mtimeMs) ||
+					!(await wait.retry())
+				)
+					throw failure(code)
 			}
-			// The unique immutable path cannot name a later owner's different nonce.
-			await fs.unlink(join(this.#directory, entry)).catch(error => {
-				if (!hasCode(error, "ENOENT")) throw error
-			})
 		}
 	}
 
@@ -551,11 +642,14 @@ export class PrivateAccessStorage {
 			writing = false
 			await this.#assertDirectory()
 			writing = true
+			if (this.#unavailable || !(await this.#stopHeartbeat?.check()))
+				throw failure("ACCESS_STORAGE_BUSY")
 			await fs.rename(temp, join(this.#directory, name))
 			ownedTemp = false
 			await this.#handle.sync()
 		} catch {
 			if (latch === "always" || !writing) this.#unavailable = true
+			if (this.#ownershipLost) throw failure("ACCESS_STORAGE_BUSY")
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		} finally {
 			if (handle) await handle.close().catch(() => undefined)
@@ -659,13 +753,20 @@ export class PrivateAccessStorage {
 		return this.#serialize(async () => {
 			if (this.#closed) return
 			this.#closed = true
+			await this.#stopHeartbeat?.()
+			this.#stopHeartbeat = undefined
 			let failed = false
 			try {
 				await this.#assertDirectory()
 				if (this.#ownerIdentity) {
-					const stat = await fs.lstat(join(this.#directory, this.#owner))
+					const stat = await fs
+						.lstat(join(this.#directory, this.#owner))
+						.catch(error => {
+							if (hasCode(error, "ENOENT")) return undefined
+							throw error
+						})
 					if (
-						stat.isFile() &&
+						stat?.isFile() &&
 						stat.dev === this.#ownerIdentity.dev &&
 						stat.ino === this.#ownerIdentity.ino
 					)

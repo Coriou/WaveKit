@@ -1,8 +1,13 @@
+import fs from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
+import { rename } from "node:fs/promises"
+import { HEARTBEAT_MS } from "../../../src/utils/lock-owner.js"
 import { spawn } from "node:child_process"
 import {
 	chmod,
 	lstat,
 	mkdir,
+	utimes,
 	mkdtemp,
 	readFile,
 	readdir,
@@ -16,6 +21,7 @@ import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { OperatorDataStorage } from "../../../src/operator-data/storage.js"
 import type { StorageStage } from "../../../src/operator-data/storage.js"
+import { formatStartupFailure } from "../../../src/utils/startup-failure.js"
 import { OPERATOR_DATA_LIMITS } from "../../../src/operator-data/schema.js"
 
 const roots: string[] = []
@@ -41,8 +47,20 @@ async function open(
 		phase: "before" | "after",
 	) => void | Promise<void>,
 ) {
+	let clock = 0
 	const store = await OperatorDataStorage.open({
 		stateDir,
+		lockWait: {
+			now: () => clock,
+			sleep: async ms => {
+				clock += ms
+				await fs.utimes(
+					join(stateDir, "operator-data", ".writer-lock", "owner.json"),
+					new Date(clock),
+					new Date(clock),
+				)
+			},
+		},
 		...(stage ? { stage } : {}),
 	})
 	stores.push(store)
@@ -63,6 +81,29 @@ function gate() {
 }
 
 describe("dedicated operator-data storage", () => {
+	it("reclaims an abandoned incomplete writer directory", async () => {
+		const path = await root()
+		await mkdir(join(path, "operator-data"), { mode: 0o700 })
+		await mkdir(lock(path), { mode: 0o700 })
+		const old = new Date(Date.now() - 31000)
+		await utimes(lock(path), old, old)
+		let clock = 0
+		const recovered = await OperatorDataStorage.open({
+			stateDir: path,
+			lockWait: {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+				},
+			},
+		})
+		expect(clock).toBe(30000)
+		await recovered.close()
+		expect(await readdir(join(path, "operator-data"))).not.toContain(
+			".writer-lock",
+		)
+	})
+
 	it("durably initializes once, syncs parent on every open, and returns detached snapshots", async () => {
 		const path = await root()
 		const stages: string[] = []
@@ -97,6 +138,7 @@ describe("dedicated operator-data storage", () => {
 
 	// Feature: operator-data, Property 6: Recovery preservation
 	// Validates: Requirements 4.1, 4.4–4.7
+	// Each reopen now also syncs the prepared lock and its parent directory.
 	it("restores exact committed state over 100 real-directory restarts", async () => {
 		await fc.assert(
 			fc.asyncProperty(
@@ -123,7 +165,7 @@ describe("dedicated operator-data storage", () => {
 			),
 			{ numRuns: 100 },
 		)
-	}, 60000)
+	}, 180_000)
 
 	it.each(["corrupt", "future", "oversize", "empty"])(
 		"preserves %s state unchanged and releases its own lock",
@@ -150,7 +192,15 @@ describe("dedicated operator-data storage", () => {
 	it("rejects another same-process opener and real child-process lock acquisition", async () => {
 		const path = await root()
 		const first = await open(path)
-		await expect(open(path)).rejects.toMatchObject(unavailable)
+		const held: unknown = await open(path).catch((error: unknown) => error)
+		expect(held).toMatchObject({
+			...unavailable,
+			code: "OPERATOR_DATA_UNAVAILABLE",
+			reason: "lock-held",
+		})
+		expect(formatStartupFailure(held)).toBe(
+			"WaveKit startup failed: WaveKitError [OPERATOR_DATA_UNAVAILABLE/lock-held]: startup could not complete\n",
+		)
 		const exit = await new Promise<number | null>((resolve, reject) => {
 			const child = spawn(
 				process.execPath,
@@ -170,9 +220,6 @@ describe("dedicated operator-data storage", () => {
 		await first.close()
 		const second = await open(path)
 		await second.close()
-		await mkdir(lock(path), { mode: 0o700 }) // Simulated crash; no automatic lock stealing.
-		await expect(open(path)).rejects.toMatchObject(unavailable)
-		expect((await lstat(lock(path))).isDirectory()).toBe(true)
 	})
 
 	it("requires an existing absolute parent without creating ancestors", async () => {
@@ -596,3 +643,82 @@ describe("dedicated operator-data storage", () => {
 		expect(store.snapshot().revision).toBe(1)
 	})
 })
+
+it("latches unavailable on a lost heartbeat and preserves the successor on close", async () => {
+	const path = await root()
+	vi.useFakeTimers()
+	try {
+		const first = await open(path)
+		const snapshot = first.snapshot()
+		const lockPath = join(path, "operator-data", ".writer-lock")
+		await rename(lockPath, `${lockPath}.detached`)
+		const second = await open(path)
+		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await first.close()
+		expect(first.isAvailable()).toBe(false)
+		await expect(first.persist(snapshot)).rejects.toMatchObject({
+			code: "OPERATOR_DATA_UNAVAILABLE",
+			reason: "io",
+		})
+		expect((await lstat(lockPath)).isDirectory()).toBe(true)
+		await second.close()
+	} finally {
+		vi.useRealTimers()
+	}
+})
+it("checks ownership immediately before committing a write", async () => {
+	const path = await root()
+	let replace = false
+	const store = await open(path, async (stage, phase) => {
+		if (replace && stage === "rename" && phase === "before") {
+			replace = false
+			const lockPath = join(path, "operator-data", ".writer-lock")
+			await rename(lockPath, `${lockPath}.detached`)
+		}
+	})
+	const before = await readFile(file(path), "utf8")
+	replace = true
+	await expect(store.persist(store.snapshot())).rejects.toMatchObject({
+		code: "OPERATOR_DATA_UNAVAILABLE",
+		reason: "io",
+	})
+	expect(store.isAvailable()).toBe(false)
+	expect(await readFile(file(path), "utf8")).toBe(before)
+})
+
+it.each([
+	"directory-close:before",
+	"directory-close:after",
+	"lock-release:before",
+])(
+	"stops the writer heartbeat and closes its fd after %s fails",
+	async fault => {
+		const path = await root()
+		const ownerPath = join(lock(path), "owner.json")
+		const fileOpen = fs.open
+		let ownerHandle: FileHandle | undefined
+		vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await fileOpen(...args)
+			if (args[0] === ownerPath) ownerHandle = handle
+			return handle
+		})
+		vi.useFakeTimers()
+		try {
+			const store = await open(path, (stage, phase) => {
+				if (`${stage}:${phase}` === fault) throw new Error("cleanup fault")
+			})
+			const closing = store.close()
+			await expect(closing).rejects.toBeDefined()
+			expect(store.close()).toBe(closing)
+			expect(ownerHandle).toBeDefined()
+			expect(ownerHandle?.fd).toBe(-1)
+			await expect(ownerHandle?.stat()).rejects.toMatchObject({ code: "EBADF" })
+			expect(vi.getTimerCount()).toBe(0)
+			const before = await lstat(ownerPath)
+			await vi.advanceTimersByTimeAsync(3 * HEARTBEAT_MS)
+			expect((await lstat(ownerPath)).mtimeMs).toBe(before.mtimeMs)
+		} finally {
+			vi.useRealTimers()
+		}
+	},
+)
