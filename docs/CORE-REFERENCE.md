@@ -455,9 +455,13 @@ See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protect
 
 `decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. Automatic sizing takes
 50% of CPUs available to the process (`os.availableParallelism()`), limited further by
-the cgroup v2 `cpu.max` quota divided by its period when present. It clamps the result
-to 0.75–64 cores: `min(64, max(0.75, min(available CPUs, quota / period) / 2))`.
-A missing, unreadable, unlimited or malformed quota leaves the process CPU count in effect.
+the smallest cgroup v2 `cpu.max` quota divided by its period across the process's
+cgroup and its ancestors. It clamps the result to 0.75–64 cores:
+`min(64, max(0.75, min(available CPUs, effective quota / period) / 2))`.
+Missing, unreadable, unlimited or malformed quotas are skipped at each level.
+The path from `/proc/self/cgroup` supports at most 31 components plus the mount root
+(32 levels); an unreadable, malformed, traversal-containing or deeper path falls back
+to the mount root quota alone. Without a valid quota, the process CPU count applies.
 Fractional quotas are preserved. Explicit finite numbers in `(0, 64]` retain their exact
 value, including values below the automatic floor.
 

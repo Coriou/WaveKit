@@ -17,6 +17,109 @@ it("uses half the CPU availability and the smaller fractional quota", () => {
 	expect(auto(8, "350000 100000")).toMatchObject({ cpus: 3.5, cores: 1.75 })
 	expect(auto(4, "800000 100000")).toMatchObject({ cpus: 4, cores: 2 })
 })
+function cgroupFilesystem(
+	procCgroup: string | undefined,
+	files: Record<string, string>,
+) {
+	const reads: string[] = []
+	const result = resolveCpuBudget("auto", {
+		cpuCount: 8,
+		readProcCgroup: () => {
+			if (procCgroup === undefined) throw new TypeError("unreadable")
+			return procCgroup
+		},
+		readCpuMax: path => {
+			reads.push(path)
+			const content = files[path]
+			if (content === undefined) throw new TypeError("unreadable")
+			return content
+		},
+	})
+	return { result, reads }
+}
+it("uses a nested process quota lower than the mount root", () => {
+	const { result, reads } = cgroupFilesystem(
+		"4:memory:/other\n0::/system.slice/decoder.service\n",
+		{
+			"cpu.max": "600000 100000",
+			"system.slice/cpu.max": "400000 100000",
+			"system.slice/decoder.service/cpu.max": "200000 100000",
+		},
+	)
+	expect(result).toMatchObject({ cpus: 2, cores: 1 })
+	expect(reads).toEqual([
+		"system.slice/decoder.service/cpu.max",
+		"system.slice/cpu.max",
+		"cpu.max",
+	])
+})
+it.each([undefined, "max 100000", "invalid", "500000 100000"])(
+	"inherits a tighter ancestor quota with leaf quota %s",
+	leaf => {
+		const { result } = cgroupFilesystem("0::/parent/leaf", {
+			"cpu.max": "600000 100000",
+			"parent/cpu.max": "250000 100000",
+			...(leaf === undefined ? {} : { "parent/leaf/cpu.max": leaf }),
+		})
+		expect(result).toMatchObject({ cpus: 2.5, cores: 1.25 })
+	},
+)
+it("keeps a leaf limit across unreadable and malformed ancestors", () => {
+	const { result, reads } = cgroupFilesystem("0::/parent/missing/leaf", {
+		"parent/missing/leaf/cpu.max": "200000 100000",
+		"parent/cpu.max": "invalid",
+		"cpu.max": "max 100000",
+	})
+	expect(result).toMatchObject({ cpus: 2, cores: 1 })
+	expect(reads).toHaveLength(4)
+})
+it.each([
+	undefined,
+	"",
+	"4:cpu:/parent/leaf",
+	"0:cpu:/parent/leaf",
+	"0::relative/path",
+	"0::/parent\n0::/other",
+	"0::/parent/../outside",
+	"0::/../outside",
+	"0::/parent/./leaf",
+	"0::/parent//leaf",
+	"0::/parent\0/leaf",
+])(
+	"falls back to the root for unreadable or invalid process cgroups %s",
+	proc => {
+		const { result, reads } = cgroupFilesystem(proc, {
+			"cpu.max": "200000 100000",
+		})
+		expect(result).toMatchObject({ cpus: 2, cores: 1 })
+		expect(reads).toEqual(["cpu.max"])
+	},
+)
+it("reads the root process cgroup exactly once", () => {
+	const { result, reads } = cgroupFilesystem("0::/\n", {
+		"cpu.max": "200000 100000",
+	})
+	expect(result).toMatchObject({ cpus: 2, cores: 1 })
+	expect(reads).toEqual(["cpu.max"])
+})
+it("allows 31 components plus root and falls back past the 32-level bound", () => {
+	for (const depth of [31, 32, 200]) {
+		const path = Array.from({ length: depth }, (_, i) => `level${i}`).join("/")
+		const { result, reads } = cgroupFilesystem(`0::/${path}`, {
+			[`${path}/cpu.max`]: "200000 100000",
+			"cpu.max": "600000 100000",
+		})
+		if (depth === 31) {
+			expect(result).toMatchObject({ cpus: 2, cores: 1 })
+			expect(reads).toHaveLength(32)
+			expect(reads[0]).toBe(`${path}/cpu.max`)
+			expect(reads[31]).toBe("cpu.max")
+		} else {
+			expect(result).toMatchObject({ cpus: 6, cores: 3 })
+			expect(reads).toEqual(["cpu.max"])
+		}
+	}
+})
 it.each([
 	"",
 	"max",
@@ -54,6 +157,9 @@ it("preserves explicit numbers including below the auto floor and at the cap", (
 		expect(
 			resolveCpuBudget(cores, {
 				cpuCount: 8,
+				readProcCgroup: () => {
+					throw new TypeError("must not read")
+				},
 				readCpuMax: () => {
 					throw new TypeError("must not read")
 				},
