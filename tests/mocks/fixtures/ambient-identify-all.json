@@ -67,7 +67,7 @@
 		"data": {
 			"source": "TEST01",
 			"destination": "TEST02",
-			"message": "SYNTHETIC A"
+			"raw": ">SYNTHETIC A"
 		}
 	},
 	{

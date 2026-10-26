@@ -522,7 +522,10 @@ once (without a message number, aircraft, label and text are used). VDL2 uses so
 and destination addresses plus embedded ACARS identity, or raw message text;
 non-ACARS frames without text use spacing alone. rtl_433 uses model/device ID and
 decoded sensor fields; AIS uses vessel content; Meshtastic uses packet ID and
-payload; paging uses protocol, capcode, function and text; DSD uses protocol and
+payload; paging with message content uses protocol, capcode, function and text;
+empty or tone-only pages use spacing alone. Direwolf APRS uses source, destination
+and the information field, excluding digipeater paths and other routing fields.
+DSD uses protocol and
 link fields (colour/access code, talkgroup, source, slot or callsign). Repeated
 identical content does not confirm. Address-only APRS output from multimon and
 other DTOs without content use spacing alone. ADS-B retains

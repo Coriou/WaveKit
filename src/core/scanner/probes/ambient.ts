@@ -969,6 +969,8 @@ function messageOf(type: string, data: unknown): string | undefined {
 		// The adapter exposes only addresses, not the APRS information field.
 		return undefined
 	} else if (type === "multimon-ng") {
+		if (typeof record["message"] !== "string" || record["message"] === "")
+			return undefined
 		content = fields(record, [
 			"protocol",
 			"address",
@@ -977,13 +979,22 @@ function messageOf(type: string, data: unknown): string | undefined {
 			"messageType",
 			"message",
 		])
-	} else if (
-		type === "direwolf" &&
-		!record["message"] &&
-		!record["raw"] &&
-		!record["info"]
-	) {
-		return undefined
+	} else if (type === "direwolf") {
+		// The adapter's raw field is the information field. Also accept a full
+		// TNC2 packet, stripping its source/destination/digipeater header only.
+		const raw = record["raw"]
+		const info =
+			typeof record["info"] === "string"
+				? record["info"]
+				: typeof raw === "string"
+					? raw.replace(/^[A-Z0-9-]+>[A-Z0-9-]+(?:,[A-Z0-9*-]+)*:/i, "")
+					: undefined
+		if (!info) return undefined
+		content = {
+			source: record["source"],
+			destination: record["destination"],
+			info,
+		}
 	}
 	// AIS: vessel content; Meshtastic: packet ID/payload; paging: capcode/function/text;
 	// DSD: protocol/link content; rtl_433: model/device ID and decoded sensor fields.

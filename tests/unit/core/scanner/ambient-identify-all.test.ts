@@ -165,7 +165,10 @@ for (const sample of fixtures) {
 					acars: { tail: "TEST01", msgno: "M002" },
 					id: sample.protocol === "lora" ? 2 : sample.data["id"],
 					tg: "2",
-					message: "SYNTHETIC SECOND",
+					raw:
+						sample.decoder === "direwolf"
+							? ">SYNTHETIC SECOND"
+							: sample.data["raw"],
 					value: 2,
 					msgType: "SYNTHETIC SECOND",
 				})
@@ -193,7 +196,8 @@ for (const sample of fixtures) {
 					fecErrs: 1,
 				})
 				expect(r.got.some(e => e.ev.identity !== undefined)).toBe(
-					sample.protocol === "aprs" && sample.decoder === "multimon-ng",
+					sample.decoder === "multimon-ng" &&
+						(sample.protocol === "aprs" || sample.data["message"] === ""),
 				)
 				r.got.length = 0
 				r.trust.value = "unverified"
@@ -212,7 +216,10 @@ for (const sample of fixtures) {
 					acars: { tail: "TEST01", msgno: "M002" },
 					id: sample.protocol === "lora" ? 2 : sample.data["id"],
 					tg: "2",
-					message: "SYNTHETIC SECOND",
+					raw:
+						sample.decoder === "direwolf"
+							? ">SYNTHETIC SECOND"
+							: sample.data["raw"],
 					msgType: "SYNTHETIC SECOND",
 				})
 				expect(r.got.at(-1)?.ev.identity).toBeDefined()
@@ -238,7 +245,10 @@ for (const sample of fixtures) {
 					acars: { tail: "TEST01", msgno: "M002" },
 					id: sample.protocol === "lora" ? 2 : sample.data["id"],
 					tg: "2",
-					message: "SYNTHETIC SECOND",
+					raw:
+						sample.decoder === "direwolf"
+							? ">SYNTHETIC SECOND"
+							: sample.data["raw"],
 					msgType: "SYNTHETIC SECOND",
 				})
 				expect(r.got.at(-1)?.ev.identity).toBeDefined()
@@ -440,7 +450,10 @@ for (const sample of fixtures) {
 						acars: { tail: "TEST01", msgno: `M${value}` },
 						id: sample.protocol === "lora" ? value : sample.data["id"],
 						tg: String(value),
-						message: `SYNTHETIC ${value}`,
+						raw:
+							sample.decoder === "direwolf"
+								? `>SYNTHETIC ${value}`
+								: sample.data["raw"],
 						msgType: `SYNTHETIC ${value}`,
 					}
 					if (sample.type === "link")
@@ -497,7 +510,10 @@ for (const sample of fixtures) {
 						acars: { tail: "TEST01", msgno: `M${value}` },
 						id: sample.protocol === "lora" ? value : sample.data["id"],
 						tg: String(value),
-						message: `SYNTHETIC ${value}`,
+						raw:
+							sample.decoder === "direwolf"
+								? `>SYNTHETIC ${value}`
+								: sample.data["raw"],
 						value,
 						msgType: `SYNTHETIC ${value}`,
 					}
@@ -574,6 +590,103 @@ it("removes the old source entry even when a mutable observation changes source"
 })
 
 describe("logical identity regressions", () => {
+	it.each([
+		{ messageType: "alpha", message: "" },
+		{ messageType: "unknown", message: "" },
+	])("content-free paging uses spacing alone: %j", page => {
+		const r = rig("multimon-ng")
+		try {
+			r.clock.at = 0
+			const data = {
+				protocol: "POCSAG1200",
+				address: 1234567,
+				function: 0,
+				...page,
+			}
+			r.emit("message", data)
+			expect(r.got.some(e => e.ev.identity)).toBe(false)
+			r.emit("message", data)
+			expect(r.got.at(-1)?.ev.identity).toMatchObject({
+				kind: "pocsag-capcode",
+				value: "1234567",
+			})
+		} finally {
+			r.ambient.stop()
+		}
+	})
+
+	it.each(["POCSAG1200", "FLEX"])(
+		"%s pages with content need different text",
+		protocol => {
+			const r = rig("multimon-ng")
+			const data = {
+				protocol,
+				address: 1234567,
+				capcode: "1234567",
+				function: 0,
+				messageType: protocol === "FLEX" ? "ALN" : "alpha",
+				message: "SYNTHETIC FIRST",
+			}
+			try {
+				r.emit("message", data)
+				r.emit("message", data)
+				expect(r.got.some(e => e.ev.identity)).toBe(false)
+				r.emit("message", { ...data, message: "SYNTHETIC SECOND" })
+				expect(r.got.at(-1)?.ev.identity?.value).toBe("1234567")
+			} finally {
+				r.ambient.stop()
+			}
+		},
+	)
+
+	it.each(["raw", "header", "info"])(
+		"Direwolf %s identity ignores routing and extra fields",
+		shape => {
+			const r = rig("direwolf")
+			const packet = (info: string, repeated: boolean) => ({
+				source: "TEST01",
+				destination: "TEST02",
+				path: repeated ? ["TEST03*"] : [],
+				via: repeated ? "TEST03" : "TEST04",
+				digipeater: repeated ? "TEST03" : "TEST04",
+				comment: repeated ? "SYNTHETIC EXTRA" : "SYNTHETIC ORIGINAL",
+				...(shape === "info"
+					? { info, raw: repeated ? ">IGNORED SECOND" : ">IGNORED FIRST" }
+					: {
+							raw:
+								shape === "header"
+									? `TEST01>TEST02${repeated ? ",TEST03*" : ""}:${info}`
+									: info,
+						}),
+			})
+			try {
+				r.emit("aprs", packet(">SYNTHETIC: FIRST", false))
+				r.emit("aprs", packet(">SYNTHETIC: FIRST", true))
+				expect(r.got.some(e => e.ev.identity)).toBe(false)
+				r.emit("aprs", packet(">SYNTHETIC: SECOND", true))
+				expect(r.got.at(-1)?.ev.identity?.value).toBe("TEST01")
+			} finally {
+				r.ambient.stop()
+			}
+		},
+	)
+
+	it("multimon APRS via changes do not bypass spacing", () => {
+		const r = rig("multimon-ng")
+		const data = { protocol: "AFSK1200", from: "TEST01", to: "TEST02" }
+		try {
+			r.emit("decode", { ...data, via: "TEST03" })
+			r.clock.at = 100_100
+			r.emit("decode", { ...data, via: "TEST04" })
+			expect(r.got.some(e => e.ev.identity)).toBe(false)
+			r.clock.at = 102_000
+			r.emit("decode", { ...data, via: "TEST04" })
+			expect(r.got.at(-1)?.ev.identity?.value).toBe("TEST01")
+		} finally {
+			r.ambient.stop()
+		}
+	})
+
 	it.each([
 		[
 			"acarsdec",
