@@ -1,7 +1,10 @@
 import { EventEmitter, once } from "node:events"
 import { PassThrough } from "node:stream"
 import { request, type IncomingMessage, type ServerResponse } from "node:http"
-import { setImmediate as nextTurn } from "node:timers/promises"
+import {
+	setImmediate as nextTurn,
+	setTimeout as delay,
+} from "node:timers/promises"
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import {
@@ -397,32 +400,99 @@ it("accepts the exact byte cap and aborts past it on real HTTP", async () => {
 	await download.result
 })
 
-it("completes a slow steady HTTP reader within the byte cap", async () => {
-	rate = 2_400_000
-	const download = await startHttp({ seconds: 0.37, format: "cu8" }, true)
+it("completes a paced HTTP capture with a slower throttled reader", async () => {
+	// 64 source blocks over several seconds; the reader consumes one block
+	// every 52 ms while the source produces one every 48 ms. The bounded lag
+	// fits the transport buffer and each drain has ample time within its grace.
+	rate = 262_144
+	const bytes = 8 * rate * 2
+	const block = Buffer.alloc(65_536, 23)
+	const download = await startHttp({ seconds: 8, format: "cu8" }, true)
+	let reader: ReturnType<typeof setInterval> | undefined
+	const raw = response!
+	let drains = 0
+	let peakBuffered = 0
+	raw.on("drain", () => drains++)
 	try {
-		input.write(Buffer.alloc(65_536))
+		input.write(block)
 		const message = await download.incoming
-		// Source blocks can arrive while the reader is paused without aborting.
-		input.write(Buffer.alloc(65_536))
-		await new Promise(resolve => setTimeout(resolve, 37))
-		message.resume()
-		let remaining = Math.round(0.37 * rate) * 2 - 2 * 65_536
-		while (remaining > 0) {
-			const bytes = Math.min(65_536, remaining)
-			input.write(Buffer.alloc(bytes))
-			remaining -= bytes
-			await nextTurn()
+		reader = setInterval(() => {
+			// Explicit reads leave the stream paused between bounded pulls.
+			message.read(block.length)
+		}, 52)
+		for (let sent = block.length; sent < bytes; sent += block.length) {
+			await delay(48)
+			input.write(block)
+			peakBuffered = Math.max(peakBuffered, raw.writableLength)
 		}
 		expect(await download.result).toEqual({
-			bytes: 1_776_000,
+			bytes,
 			complete: true,
+			status: 200,
+		})
+		expect(drains).toBeGreaterThan(0)
+		expect(peakBuffered).toBeLessThanOrEqual(IQ_SNAPSHOT_MAX_BUFFERED_BYTES)
+		expect(release).toHaveBeenCalledOnce()
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+	} finally {
+		clearInterval(reader)
+		download.client.destroy()
+		const message = await download.incoming
+		message.destroy()
+		await download.result
+	}
+}, 15_000)
+
+it("expires a real undrained HTTP transport below the byte cap and frees its slot", async () => {
+	rate = 2_400_000
+	const download = await startHttp({ seconds: 10, format: "cu8" }, true)
+	const raw = response!
+	const block = Buffer.alloc(65_536)
+	try {
+		const drained = once(raw, "drain")
+		input.write(block)
+		await drained
+		const message = await download.incoming
+		// Fill the real socket buffers using small blocks, then stop the source
+		// well below the cap. The paused reader never resumes during the stall.
+		let sent = block.length
+		while (raw.writableLength < 524_288 && sent < 32 * 1024 * 1024) {
+			input.write(block)
+			sent += block.length
+			await nextTurn()
+		}
+		expect(raw.destroyed).toBe(false)
+		expect(raw.writableLength).toBeGreaterThanOrEqual(524_288)
+		expect(raw.writableLength).toBeLessThan(IQ_SNAPSHOT_MAX_BUFFERED_BYTES)
+		await once(raw, "close")
+		expect(raw.destroyed).toBe(true)
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		expect(release).toHaveBeenCalledOnce()
+		// Drain the bytes already delivered to observe the truncated response.
+		message.resume()
+		expect(await download.result).toMatchObject({
+			complete: false,
 			status: 200,
 		})
 	} finally {
 		download.client.destroy()
+		const message = await download.incoming
+		message.destroy()
+		await download.result
 	}
-})
+	rate = 1000
+	const next = await startHttp()
+	try {
+		input.write(Buffer.alloc(200))
+		expect(await next.result).toEqual({
+			bytes: 200,
+			complete: true,
+			status: 200,
+		})
+	} finally {
+		next.client.destroy()
+	}
+}, 10_000)
 
 it.each(["caps-changed", "disconnected", "invalidate"])(
 	"detaches on %s",

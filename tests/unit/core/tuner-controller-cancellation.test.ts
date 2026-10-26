@@ -1,6 +1,9 @@
 import { EventEmitter } from "node:events"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { SourceManager } from "../../../src/core/source-manager.js"
+import {
+	SourceManager,
+	TUNER_COMMAND_TIMEOUT_MS,
+} from "../../../src/core/source-manager.js"
 import { TunerController } from "../../../src/core/tuner-controller.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
@@ -28,6 +31,7 @@ const managers: SourceManager[] = []
 afterEach(async () => {
 	for (const manager of managers) await manager.disconnectAll()
 	managers.length = 0
+	vi.restoreAllMocks()
 	vi.useRealTimers()
 })
 
@@ -60,6 +64,61 @@ async function setup() {
 }
 
 describe("tuner command cancellation", () => {
+	it.each(["frequency", "configure"] as const)(
+		"fences gain writes inside an expired %s retune hook",
+		async command => {
+			const { manager, tuner } = await setup()
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+			vi.setSystemTime(1_234_567)
+			const entered = Promise.withResolvers<void>()
+			const gate = Promise.withResolvers<void>()
+			tuner.setBeforeOperatorRetune(async () => {
+				entered.resolve()
+				await gate.promise
+				await tuner.setGain("rtl", 111)
+			})
+			let resumed: Promise<void> = Promise.resolve()
+			const expired = manager.runTunerCommand("rtl", () => {
+				resumed =
+					command === "frequency"
+						? tuner.setFrequency("rtl", 101_000_000, { origin: "rest" })
+						: tuner.configure(
+								"rtl",
+								{ frequency: 101_000_000 },
+								{ origin: "rest" },
+							)
+				return resumed
+			})
+			const timeout = expect(expired).rejects.toMatchObject({
+				code: "TUNER_COMMAND_TIMEOUT",
+			})
+			await entered.promise
+			const replacement = manager.runTunerCommand("rtl", () =>
+				tuner.setGain("rtl", 222),
+			)
+			await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS - 1)
+			expect(tuner.getState("rtl")?.gain).not.toBe(222)
+			await vi.advanceTimersByTimeAsync(138)
+			await timeout
+			await replacement
+			expect(tuner.getState("rtl")?.gain).toBe(222)
+			const current = tuner.getState("rtl")
+			const caps = manager.getCaps("rtl")
+			const writes = vi.spyOn(manager, "writeToSource")
+			const changed = vi.fn()
+			tuner.on("state-changed", changed)
+			const rejected = expect(resumed).rejects.toMatchObject({
+				code: "TUNER_COMMAND_TIMEOUT",
+			})
+			gate.resolve()
+			await rejected
+			expect(tuner.getState("rtl")).toEqual(current)
+			expect(manager.getCaps("rtl")).toEqual(caps)
+			expect(writes).not.toHaveBeenCalled()
+			expect(changed).not.toHaveBeenCalled()
+		},
+	)
+
 	it.each(["controlMode", "tunerIfGain"] as const)(
 		"expired configure cannot overwrite queued %s state after the retune hook resumes",
 		async field => {

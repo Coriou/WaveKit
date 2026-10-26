@@ -2580,7 +2580,7 @@ export class SourceManager extends EventEmitter {
 		Set<AbortController>
 	>()
 
-	/** Keep work started by hooks and listeners independent of the caller lifetime. */
+	/** Detach independently spawned background work from the caller lifetime. */
 	withoutTunerCommand<T>(work: () => T): T {
 		return this.tunerCommandContext.exit(work)
 	}

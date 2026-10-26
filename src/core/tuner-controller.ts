@@ -946,9 +946,8 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("frequency", hz, VALIDATION.frequency)
 		if (opts.origin === "rest" && this.beforeOperatorRetune) {
-			await this.withoutCommand(() =>
-				this.beforeOperatorRetune?.(sourceId, hz, opts),
-			)
+			// Awaited hook work belongs to this command, including its continuations.
+			await this.beforeOperatorRetune(sourceId, hz, opts)
 			await this.proveSampleRateForFrequency(sourceId, opts, hz)
 		}
 		await this.writeFrequency(sourceId, hz, opts, state)
@@ -1309,9 +1308,7 @@ export class TunerController extends EventEmitter {
 			opts.origin === "rest" && this.beforeOperatorRetune !== null
 		if (updates.frequency !== undefined && updates.sampleRate === undefined) {
 			if (policyBulk) {
-				await this.withoutCommand(() =>
-					this.beforeOperatorRetune?.(sourceId, updates.frequency!, opts),
-				)
+				await this.beforeOperatorRetune?.(sourceId, updates.frequency, opts)
 				this.sourceManager.assertTunerCommandActive()
 				this.emitStateChanged(sourceId)
 			}
