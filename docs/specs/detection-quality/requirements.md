@@ -125,8 +125,11 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   lives `DQ_PTT_WINDOW_MS` = 60 000 ms from its first banking (three 2 s overs with 25 s gaps
   fit), at most `DQ_PTT_PER_SOURCE` = 512 entries per source and `DQ_PTT_IDS_MAX` = 8 ids per
   entry; memory only. A create there, a retune or source removal drops it; a retraction of
-  any banked id drops the whole entry. A duration that is non-finite, negative or longer than
-  the window counts 0. Fixtures: 1 500 ms banked plus a 1 500 ms over promotes and 1 ms less
+  any banked id drops the whole entry, and a ninth id restarts the entry empty (so every id
+  holding credit stays retractable). A transmission claims airtime from its first gated
+  snapshot only for its first run; after a reset (a sample under 9 dB or a gap over 2 500 ms)
+  it claims from its next accepted sample. A duration that is non-finite, negative or longer
+  than the window counts 0. Fixtures: 1 500 ms banked plus a 1 500 ms over promotes and 1 ms less
   does not; a median of 12 dB promotes and 11.99 dB does not; banked airtime counts
   59 999 ms after banking and not 60 000 ms; a transmission sampled once banks nothing; three
   synthetic 2 s AM voice overs at about 13.5 dB best-slot SNR make one record, one over none;

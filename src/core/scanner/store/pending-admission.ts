@@ -78,6 +78,12 @@ export interface SustainRun {
 	lastAt: number
 	/** Newest last, at most `DQ_SUSTAIN_SAMPLES`. */
 	snrs: number[]
+	/**
+	 * Req 1.4d: start of the airtime this run may claim: the observation's `startedAt` for its
+	 * first run, else the first accepted sample after the last reset (floor or gap), so a
+	 * rejected stretch never counts.
+	 */
+	eligibleFrom: number
 }
 
 /**
@@ -116,12 +122,9 @@ function nearestOf<E extends { firstAt: number }>(
 	return hi.firstAt < lo.firstAt ? hi : lo
 }
 
-/**
- * Req 1.4d: a transmission's airtime so far, from its first gated snapshot (`startedAt`) to
- * `now`. Non-finite, negative or longer than the airtime window: 0 (the safe answer, no credit).
- */
-export function transmissionMs(obs: ObservationInput, now: number): number {
-	const ms = now - obs.startedAt
+/** Req 1.4d: a run's eligible airtime, `now - eligibleFrom`, under the same bounds (else 0). */
+export function eligibleMs(run: Readonly<SustainRun>, now: number): number {
+	const ms = now - run.eligibleFrom
 	return Number.isFinite(ms) && ms >= 0 && ms <= DQ_PTT_WINDOW_MS ? ms : 0
 }
 
@@ -154,6 +157,15 @@ export class PendingAdmission {
 			const ended = map?.get(id)
 			if (ended !== undefined && obs.endReason !== undefined)
 				this.bank(obs, now, ended)
+			if (ended !== undefined && obs.endReason === undefined) {
+				// Req 1.4d: a reset marker (no samples): the next accepted sample restarts the
+				// run and its eligible airtime from that sample.
+				ended.firstAt = now
+				ended.lastAt = now
+				ended.snrs = []
+				ended.eligibleFrom = Number.NaN
+				return false
+			}
 			if (map?.delete(id) === true && map.size === 0) this.runs.delete(sourceId)
 			return false
 		}
@@ -162,9 +174,23 @@ export class PendingAdmission {
 			this.runs.set(sourceId, map)
 		}
 		let run = map.get(id)
+		// Req 1.4d: the observation's start counts only for its first run, and only when its
+		// first sample is no more than one allowed gap after it (an older start may hide a reset
+		// whose marker was swept or evicted).
+		let eligibleFrom =
+			Number.isFinite(obs.startedAt) &&
+			obs.startedAt <= now &&
+			now - obs.startedAt <= DQ_SUSTAIN_MAX_GAP_MS
+				? obs.startedAt
+				: now
 		if (run !== undefined && now - run.lastAt > DQ_SUSTAIN_MAX_GAP_MS) {
 			map.delete(id)
 			run = undefined
+			eligibleFrom = now
+		} else if (run !== undefined && run.snrs.length === 0) {
+			// After a floor reset: restart here.
+			run.firstAt = now
+			run.eligibleFrom = now
 		}
 		if (run === undefined) {
 			while (map.size >= DQ_SUSTAIN_PER_SOURCE) {
@@ -172,7 +198,7 @@ export class PendingAdmission {
 				if (oldest.done === true) break
 				map.delete(oldest.value)
 			}
-			run = { firstAt: now, lastAt: now, snrs: [] }
+			run = { firstAt: now, lastAt: now, snrs: [], eligibleFrom }
 			map.set(id, run)
 		}
 		run.lastAt = now
@@ -227,21 +253,22 @@ export class PendingAdmission {
 		if (e === undefined || e.onMs <= 0) return false
 		const snrs = [...e.snrs, ...run.snrs]
 		return (
-			e.onMs + transmissionMs(obs, now) >= DQ_SUSTAIN_MS &&
+			e.onMs + eligibleMs(run, now) >= DQ_SUSTAIN_MS &&
 			snrs.length >= DQ_SUSTAIN_MIN_SAMPLES &&
 			median(snrs) >= DQ_SUSTAIN_MEDIAN_SNR_DB
 		)
 	}
 
 	/**
-	 * Req 1.4d: a transmission ended without promoting: its duration (`transmissionMs`) and its
+	 * Req 1.4d: a transmission ended without promoting: its eligible duration (`eligibleMs`) and its
 	 * run's samples join its channel's airtime entry. Only a run sampled at least twice banks
 	 * (the store re-ingests 1 000 ms after an observation starts, so a flicker that closed sooner
-	 * banks nothing). The entry keeps the newest `DQ_SUSTAIN_SAMPLES` samples and
-	 * `DQ_PTT_IDS_MAX` ids.
+	 * banks nothing). The entry keeps the newest `DQ_SUSTAIN_SAMPLES` samples and at most
+	 * `DQ_PTT_IDS_MAX` ids; a new id past that restarts the entry empty, so every id whose
+	 * credit it holds stays retractable.
 	 */
 	private bank(obs: ObservationInput, now: number, run: SustainRun): void {
-		const span = transmissionMs(obs, now)
+		const span = eligibleMs(run, now)
 		const centre = obs.track.centreHz
 		if (run.snrs.length < 2 || !(span > 0) || !Number.isFinite(centre)) return
 		const { sourceId, id } = obs
@@ -263,8 +290,17 @@ export class PendingAdmission {
 			map.set(bucket, entry)
 		}
 		if (!entry.ids.has(id) && entry.ids.size >= DQ_PTT_IDS_MAX) {
-			const oldest = entry.ids.values().next()
-			if (oldest.done !== true) entry.ids.delete(oldest.value)
+			// Every banked id must stay retractable (forget drops the entry): with the id budget
+			// full the entry restarts empty rather than keep credit it can no longer trace.
+			map.delete(entry.bucket)
+			entry = {
+				firstAt: now,
+				bucket: entry.bucket,
+				onMs: 0,
+				snrs: [],
+				ids: new Set(),
+			}
+			map.set(entry.bucket, entry)
 		}
 		entry.ids.add(id)
 		entry.onMs += span

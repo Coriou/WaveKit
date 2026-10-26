@@ -16,7 +16,7 @@ import {
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import {
 	PendingAdmission,
-	transmissionMs,
+	eligibleMs,
 } from "../../../../src/core/scanner/store/pending-admission.js"
 import type { ObservationInput } from "../../../../src/core/scanner/types.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
@@ -170,27 +170,75 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 		expect(c.p.airtimeEntries("src-1")).toHaveLength(0)
 	})
 
-	it("bounds: entries per source and ids and samples per entry", () => {
+	it("bounds: entries per source; samples per entry", () => {
 		const h = holder()
 		for (let i = 0; i <= DQ_PTT_PER_SOURCE; i++)
 			key(h, `e${i}`, i * 10, 1_200, 10, { centreHz: CH + i * 10_000 })
 		expect(h.p.airtimeEntries("src-1")).toHaveLength(DQ_PTT_PER_SOURCE)
 		const g = holder()
-		for (let i = 0; i <= DQ_PTT_IDS_MAX; i++)
+		for (let i = 0; i < DQ_PTT_IDS_MAX; i++)
 			key(g, `i${i}`, i * 2_000, 1_100, 9)
-		const [e] = g.p.airtimeEntries("src-1")
-		expect(e?.ids.size).toBe(DQ_PTT_IDS_MAX)
-		expect(e?.snrs.length).toBe(DQ_SUSTAIN_SAMPLES)
+		expect(g.p.airtimeEntries("src-1")[0]?.snrs.length).toBe(DQ_SUSTAIN_SAMPLES)
 	})
 
-	it("transmissionMs: malformed or out-of-window durations give 0", () => {
-		const o = tx("m", 0, 13)
-		expect(transmissionMs(o, T0 + 1_000)).toBe(1_000)
-		expect(transmissionMs(o, T0 - 1)).toBe(0)
-		expect(transmissionMs(o, T0 + DQ_PTT_WINDOW_MS)).toBe(DQ_PTT_WINDOW_MS)
-		expect(transmissionMs(o, T0 + DQ_PTT_WINDOW_MS + 1)).toBe(0)
-		o.startedAt = Number.NaN
-		expect(transmissionMs(o, T0)).toBe(0)
+	it("boundary: 8 banked ids stay retractable; a 9th restarts the entry empty, then holds only itself", () => {
+		const at = holder()
+		for (let i = 0; i < DQ_PTT_IDS_MAX; i++)
+			key(at, `i${i}`, i * 2_000, 1_100, 9)
+		const [full] = at.p.airtimeEntries("src-1")
+		expect(full?.ids.size).toBe(DQ_PTT_IDS_MAX)
+		expect(full?.onMs).toBe(DQ_PTT_IDS_MAX * 1_100)
+		at.p.forget("src-1", "i0")
+		expect(at.p.airtimeEntries("src-1")).toHaveLength(0)
+		const past = holder()
+		for (let i = 0; i <= DQ_PTT_IDS_MAX; i++)
+			key(past, `i${i}`, i * 2_000, 1_100, 9)
+		const [fresh] = past.p.airtimeEntries("src-1")
+		expect([...(fresh?.ids ?? [])]).toEqual([`i${DQ_PTT_IDS_MAX}`])
+		expect(fresh?.onMs).toBe(1_100)
+		expect(fresh?.snrs).toEqual([9, 9])
+		// The first id's credit went with the restart; forgetting it changes nothing.
+		past.p.forget("src-1", "i0")
+		expect(past.p.airtimeEntries("src-1")).toHaveLength(1)
+		past.p.forget("src-1", `i${DQ_PTT_IDS_MAX}`)
+		expect(past.p.airtimeEntries("src-1")).toHaveLength(0)
+	})
+
+	it("a run reset by a gap over 2 500 ms claims airtime only from its first sample after the reset", () => {
+		const h = holder()
+		key(h, "t1", 0, 1_500, 13) // banks 1 500 ms
+		const at = (ms: number) => {
+			h.clock.now = T0 + ms
+			return h.p.sustained(tx("t2", 5_000, 13))
+		}
+		expect(at(6_000)).toBe(false)
+		// A 3 000 ms gap resets the run: the 4 000 ms since t2 started must not count.
+		expect(at(9_000)).toBe(false)
+		expect(at(10_499)).toBe(false) // 1 500 + 1 499
+		expect(at(10_500)).toBe(true) // 1 500 + 1 500
+	})
+
+	it("a run reset by a sample under 9 dB claims airtime only from the next accepted sample", () => {
+		const h = holder()
+		key(h, "t1", 0, 1_500, 13)
+		const at = (ms: number, snr: number) => {
+			h.clock.now = T0 + ms
+			return h.p.sustained(tx("t2", 5_000, snr))
+		}
+		expect(at(6_000, 13)).toBe(false)
+		expect(at(7_000, 8.99)).toBe(false)
+		expect(at(8_000, 13)).toBe(false) // eligible 0 ms, not 3 000
+		expect(at(9_499, 13)).toBe(false) // 1 500 + 1 499
+		expect(at(9_500, 13)).toBe(true) // 1 500 + 1 500
+	})
+
+	it("eligibleMs: malformed or out-of-window durations give 0", () => {
+		const run = { firstAt: T0, lastAt: T0, snrs: [13], eligibleFrom: T0 }
+		expect(eligibleMs(run, T0 + 1_000)).toBe(1_000)
+		expect(eligibleMs(run, T0 - 1)).toBe(0)
+		expect(eligibleMs(run, T0 + DQ_PTT_WINDOW_MS)).toBe(DQ_PTT_WINDOW_MS)
+		expect(eligibleMs(run, T0 + DQ_PTT_WINDOW_MS + 1)).toBe(0)
+		expect(eligibleMs({ ...run, eligibleFrom: Number.NaN }, T0)).toBe(0)
 	})
 
 	// Feature: detection-quality, Property 27: Push-to-talk airtime promotion
