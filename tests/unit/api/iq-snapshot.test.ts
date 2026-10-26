@@ -447,39 +447,31 @@ it("expires a real undrained HTTP transport below the byte cap and frees its slo
 	rate = 2_400_000
 	const download = await startHttp({ seconds: 10, format: "cu8" }, true)
 	const raw = response!
+	const socket = raw.socket!
 	const block = Buffer.alloc(65_536)
 	try {
-		const drained = once(raw, "drain")
-		input.write(block)
-		await drained
-		const message = await download.incoming
-		// Fill the real socket buffers using small blocks, then stop the source
-		// well below the cap. The paused reader never resumes during the stall.
-		let sent = block.length
-		while (raw.writableLength < 524_288 && sent < 32 * 1024 * 1024) {
-			input.write(block)
-			sent += block.length
-			await nextTurn()
-		}
-		expect(raw.destroyed).toBe(false)
-		expect(raw.writableLength).toBeGreaterThanOrEqual(524_288)
+		// Corking the real socket keeps every byte in the response's writable
+		// buffer, so the stall no longer depends on kernel socket buffer sizes.
+		socket.cork()
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		// 8 × 64 KiB = 512 KiB: undrained, yet well below the 2,000,000 B cap.
+		for (let index = 0; index < 8; index++) input.write(block)
+		expect(raw.writableLength).toBeGreaterThanOrEqual(8 * block.length)
 		expect(raw.writableLength).toBeLessThan(IQ_SNAPSHOT_MAX_BUFFERED_BYTES)
-		await once(raw, "close")
+		expect(raw.writableNeedDrain).toBe(true)
+		await vi.advanceTimersByTimeAsync(IQ_SNAPSHOT_DRAIN_TIMEOUT_MS - 1)
+		expect(raw.destroyed).toBe(false)
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(1)
+		await vi.advanceTimersByTimeAsync(1)
 		expect(raw.destroyed).toBe(true)
 		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
 		expect(release).toHaveBeenCalledOnce()
-		// Drain the bytes already delivered to observe the truncated response.
-		message.resume()
-		expect(await download.result).toMatchObject({
-			complete: false,
-			status: 200,
-		})
 	} finally {
+		vi.useRealTimers()
 		download.client.destroy()
-		const message = await download.incoming
-		message.destroy()
 		await download.result
 	}
+	// The freed slot admits a follow-up on the same isolated listener.
 	rate = 1000
 	const next = await startHttp()
 	try {
@@ -492,7 +484,7 @@ it("expires a real undrained HTTP transport below the byte cap and frees its slo
 	} finally {
 		next.client.destroy()
 	}
-}, 10_000)
+})
 
 it.each(["caps-changed", "disconnected", "invalidate"])(
 	"detaches on %s",
