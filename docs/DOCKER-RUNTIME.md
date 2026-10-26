@@ -53,7 +53,8 @@ decoders. The example profile has `decoders: []`, but an empty list does not mea
 decoders: WaveKit adds every built-in decoder from its catalogue, enabled, and each one
 starts when its band falls inside the tuned window. Set `decoderPolicy.catalogue: false` to
 turn that off and run only the decoders you list, or switch single decoders off in
-Settings › Decoders.
+Settings › Decoders. `decoderPolicy.efficiency.activity` bounds the paging and digital-voice
+channels chosen by activity (see [DECODER-GUIDE.md](DECODER-GUIDE.md#troubleshooting)).
 
 Source REST status includes `activity`: `waiting`, `streaming`, `stale`, `paused`,
 `disconnected`, or `ended`. It reflects payload delivered into the core, excluding

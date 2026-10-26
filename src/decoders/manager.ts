@@ -103,7 +103,17 @@ import {
 	resolveDecoderTargetFrequencies,
 } from "./status-fields.js"
 import type { DecoderRegistry } from "./registry.js"
-import { VFO_CHANNEL_TYPES } from "./enablement/placement.js"
+import { VFO_CHANNEL_TYPES, activityQueries } from "./enablement/placement.js"
+import {
+	ACTIVITY_MOVE_WINDOW_MS,
+	isActivityDecoder,
+} from "./enablement/activity-plan.js"
+import type {
+	ActivityIncumbent,
+	ActivityPendingStart,
+	PlannerActivity,
+} from "./enablement/activity-plan.js"
+import type { ActivitySnapshot } from "./enablement/activity-contract.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type {
 	ChannelAdmissionReason,
@@ -555,6 +565,18 @@ export class DecoderManager extends EventEmitter {
 	private readonly decoders: Map<string, DecoderState> = new Map()
 	private settledVfo: PlannerVfo | null | undefined
 	private reconcilingPlacements = false
+	/** A reconciliation was asked for while one ran: run another after it. */
+	private reconcileDirty = false
+	/** Stage 1 activity ranking: the change subscription, deadline timer and move history. */
+	private activityUnsubscribe: (() => void) | null = null
+	private activityTimer: ReturnType<typeof setTimeout> | null = null
+	private activityTimerAt: number | null = null
+	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
+	/** Per placement key: when it was first planned and when it was first seen running. */
+	private readonly activitySince = new Map<
+		string,
+		{ chosenMonoMs: number; startedMonoMs: number | null }
+	>()
 	private applyingCaps = false
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
 	private sourceManager: SourceManager | null = null
@@ -1035,6 +1057,25 @@ export class DecoderManager extends EventEmitter {
 					...(state.admission?.admit === false
 						? { efficiencyDetail: state.admission.detail }
 						: {}),
+					...(placement.activity
+						? {
+								activity: {
+									ranking: placement.activity.ranking,
+									...(placement.activity.state !== undefined
+										? { state: placement.activity.state }
+										: {}),
+									...(placement.activity.score !== undefined
+										? { score: placement.activity.score }
+										: {}),
+									...(placement.activity.live !== undefined
+										? { live: placement.activity.live }
+										: {}),
+									...(placement.activity.reasons
+										? { reasons: [...placement.activity.reasons] }
+										: {}),
+								},
+							}
+						: {}),
 				},
 			]
 		})
@@ -1268,17 +1309,61 @@ export class DecoderManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Runs placement passes until none was asked for during the last one, so a
+	 * request that arrives mid-pass is never dropped (bounded; a remaining
+	 * request is queued as a source evaluation).
+	 */
 	private async reconcilePlacements(): Promise<void> {
+		if (!this.config.enablement || this.destroying) return
+		if (this.reconcilingPlacements) {
+			this.reconcileDirty = true
+			return
+		}
+		for (let pass = 0; pass < 4; pass++) {
+			this.reconcileDirty = false
+			await this.reconcilePlacementsPass()
+			if (!this.reconcileDirty || this.destroying) return
+		}
+		this.reconcileDirty = false
+		this.notifyBandplansChanged()
+	}
+
+	private async reconcilePlacementsPass(): Promise<void> {
 		const enablement = this.config.enablement
 		if (!enablement || this.reconcilingPlacements || this.destroying) return
 		this.reconcilingPlacements = true
 		try {
 			await this.applyProbation()
-			const plan = enablement.planner(this.plannerInput())
+			const plan = enablement.planner(this.withActivity(this.plannerInput()))
 			const wanted = plan.wanted.filter(placement => {
 				const parent = this.decoders.get(placement.decoderId)
 				return parent?.owner === "config" && this.modeFor(parent).mode !== "off"
 			})
+			if (plan.activity) {
+				for (const move of plan.activity.moves)
+					this.activityMoves.push({
+						sourceId: move.sourceId,
+						atMonoMs: move.atMonoMs,
+					})
+				// An activity move hands the victim's earned probation to its
+				// replacement before the victim is removed below.
+				for (const placement of wanted)
+					if (placement.movedFrom)
+						enablement.gate?.inherit?.(placement.movedFrom, placement.key)
+				for (const move of plan.activity.moves)
+					this.log.info(
+						{
+							decoderId: move.decoderId,
+							sourceId: move.sourceId,
+							fromHz: move.fromHz,
+							toHz: move.toHz,
+							reasonCode: "activity-move",
+						},
+						"Decoder channel follows activity",
+					)
+				this.scheduleActivityDeadline(plan.activity.nextEvaluationMonoMs)
+			}
 			for (const worker of [...this.decoders.values()]) {
 				if (
 					worker.owner !== "placement" ||
@@ -1298,7 +1383,8 @@ export class DecoderManager extends EventEmitter {
 						placement.origin === "vfo" &&
 						worker.placement?.origin === "vfo" &&
 						placement.decoderId === worker.parentId &&
-						placement.sourceId === worker.placement.sourceId,
+						placement.sourceId === worker.placement.sourceId &&
+						placement.channelHz !== worker.placement.channelHz,
 				)
 				if (moved && worker.channel && worker.decoder.getStatus().running) {
 					const provider = worker.channel.provider as ChannelProvider & {
@@ -1428,6 +1514,7 @@ export class DecoderManager extends EventEmitter {
 				let moved =
 					state.placement !== undefined &&
 					(state.placement.key !== placement.key ||
+						state.placement.channelHz !== placement.channelHz ||
 						optionsChanged ||
 						(rawOffsetHz !== undefined &&
 							state.config.options["offsetHz"] !== rawOffsetHz))
@@ -1557,6 +1644,8 @@ export class DecoderManager extends EventEmitter {
 			}
 		} finally {
 			this.reconcilingPlacements = false
+			if (this.config.enablement?.activity)
+				this.refreshActivitySince(this.activityMonoNow())
 			this.scheduleEfficiencyEvaluation()
 		}
 	}
@@ -1624,9 +1713,165 @@ export class DecoderManager extends EventEmitter {
 		this.log = createComponentLogger(logger, "DecoderManager")
 		this.config = { ...DEFAULT_CONFIG, ...config }
 		this.bandOverrides = bandOverrides ?? BandOverrideStore.inMemory(logger)
+		const activity = this.config.enablement?.activity
+		if (activity) {
+			try {
+				this.activityUnsubscribe = activity.port.subscribe(() => {
+					if (!this.destroying) this.notifyBandplansChanged()
+				})
+			} catch (error) {
+				this.log.warn(
+					{ err: safeErrorFields(error) },
+					"Channel activity subscription failed",
+				)
+			}
+		}
 
 		// Start periodic health checks (Requirements 20.1, 20.2, 20.3, 20.4)
 		this.startHealthChecks()
+	}
+
+	private activityMonoNow(): number {
+		const read = this.config.enablement?.activity?.monoNow
+		try {
+			return read ? read() : performance.now()
+		} catch {
+			return performance.now()
+		}
+	}
+
+	/**
+	 * Stage 1: refreshes the dwell clock of every activity decoder placement
+	 * (first planned, first seen running) and drops keys no longer present.
+	 */
+	private refreshActivitySince(now: number): void {
+		const present = new Set<string>()
+		for (const state of this.decoders.values()) {
+			const placement = state.placement
+			if (!placement || !isActivityDecoder(state.config.type)) continue
+			present.add(placement.key)
+			const since = this.activitySince.get(placement.key)
+			const running = state.decoder.getStatus().running
+			if (!since)
+				this.activitySince.set(placement.key, {
+					chosenMonoMs: now,
+					startedMonoMs: running ? now : null,
+				})
+			else if (running && since.startedMonoMs === null)
+				since.startedMonoMs = now
+			else if (!running && !state.processStartPending)
+				since.startedMonoMs = null
+		}
+		for (const key of this.activitySince.keys())
+			if (!present.has(key)) this.activitySince.delete(key)
+	}
+
+	/**
+	 * Stage 1: the activity part of the planner input. One atomic snapshot
+	 * batch per pass, for the queries the planner itself derives.
+	 */
+	private withActivity(input: PlannerInput): PlannerInput {
+		const activity = this.config.enablement?.activity
+		if (!activity) return input
+		const now = this.activityMonoNow()
+		this.refreshActivitySince(now)
+		this.activityMoves = this.activityMoves.filter(
+			move =>
+				move.atMonoMs > now - ACTIVITY_MOVE_WINDOW_MS && move.atMonoMs <= now,
+		)
+		const incumbents: ActivityIncumbent[] = []
+		const pendingStarts: ActivityPendingStart[] = []
+		for (const state of this.decoders.values()) {
+			const placement = state.placement
+			if (!placement) continue
+			const running = state.decoder.getStatus().running
+			if (
+				!running &&
+				(state.processStartPending ||
+					(state.admission?.admit === true && state.desiredRunning))
+			)
+				pendingStarts.push({
+					key: placement.key,
+					sourceId: placement.sourceId,
+					reach: placement.reach,
+					costCores: placement.costCores,
+					sampleRateHz: placement.sampleRateHz,
+				})
+			if (
+				!isActivityDecoder(state.config.type) ||
+				placement.reach !== "channel" ||
+				placement.channelHz === null
+			)
+				continue
+			const since = this.activitySince.get(placement.key)
+			incumbents.push({
+				key: placement.key,
+				decoderId: placement.decoderId,
+				sourceId: placement.sourceId,
+				hz: placement.channelHz,
+				primary: placement.primary,
+				dwellSinceMonoMs: since?.startedMonoMs ?? since?.chosenMonoMs ?? now,
+			})
+		}
+		const epochs = (this.sourceManager?.getAllStatus() ?? []).flatMap(
+			source => {
+				try {
+					const epoch = activity.epochOf(source.id)
+					return epoch && epoch.sourceId === source.id ? [epoch] : []
+				} catch {
+					return []
+				}
+			},
+		)
+		const plannerActivity: PlannerActivity = {
+			nowMonoMs: now,
+			policy: activity.policy,
+			epochs,
+			snapshots: [],
+			incumbents,
+			recentMoves: [...this.activityMoves],
+			pendingStarts,
+		}
+		const withActivity = { ...input, activity: plannerActivity }
+		let snapshots: readonly ActivitySnapshot[] = []
+		const queries = activityQueries(withActivity)
+		if (queries.length)
+			try {
+				const batch = activity.port.snapshot(queries, now)
+				snapshots = Array.isArray(batch) ? batch : []
+			} catch (error) {
+				this.log.warn(
+					{ err: safeErrorFields(error) },
+					"Channel activity snapshot failed",
+				)
+			}
+		return { ...input, activity: { ...plannerActivity, snapshots } }
+	}
+
+	/** Stage 1: one timer for the earliest activity deadline (decay, dwell, move window). */
+	private scheduleActivityDeadline(at: number | null | undefined): void {
+		if (
+			!this.config.enablement?.activity ||
+			this.destroying ||
+			typeof at !== "number" ||
+			!Number.isFinite(at)
+		)
+			return
+		if (
+			this.activityTimer &&
+			this.activityTimerAt !== null &&
+			this.activityTimerAt <= at
+		)
+			return
+		if (this.activityTimer) clearTimeout(this.activityTimer)
+		const delay = Math.max(0, at - this.activityMonoNow())
+		this.activityTimerAt = at
+		this.activityTimer = setTimeout(() => {
+			this.activityTimer = null
+			this.activityTimerAt = null
+			if (!this.destroying) this.notifyBandplansChanged()
+		}, delay)
+		this.activityTimer.unref?.()
 	}
 
 	/**
@@ -3112,6 +3357,14 @@ export class DecoderManager extends EventEmitter {
 		this.destroying = true
 		if (this.efficiencyTimer) clearTimeout(this.efficiencyTimer)
 		this.efficiencyTimer = null
+		if (this.activityTimer) clearTimeout(this.activityTimer)
+		this.activityTimer = null
+		try {
+			this.activityUnsubscribe?.()
+		} catch {
+			/* An unsubscribe failure cannot block shutdown. */
+		}
+		this.activityUnsubscribe = null
 		for (const state of this.pendingScannerChannels.keys())
 			this.cancelScannerChannelAttempt(state)
 		this.log.info("Destroying DecoderManager")

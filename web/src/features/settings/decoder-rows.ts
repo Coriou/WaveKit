@@ -128,6 +128,7 @@ const PLACED_BY: Readonly<Record<DecoderPlacementView["origin"], string>> = {
 	vfo: "tuned",
 	bandplan: "band plan",
 	fallback: "fallback",
+	activity: "activity",
 }
 
 /** Where the core placed it (`placements[]`): "162.025 MHz (tuned), whole capture (its band)". Null on older cores. */

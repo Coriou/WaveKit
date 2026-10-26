@@ -174,6 +174,8 @@ export function createEfficiencyGate(
 	const graduated = new Set<string>()
 	/** Placements this gate admitted (YAML and pre-gate runs never are). */
 	const gated = new Set<string>()
+	/** Activity moves whose next admission inherits a graduated probation. */
+	const earned = new Set<string>()
 	const mark = (key: string, mono: number) => {
 		admittedMono.set(key, mono)
 		graduated.delete(key)
@@ -188,6 +190,7 @@ export function createEfficiencyGate(
 			const present = new Set(running.map(p => p.key))
 			for (const key of admittedMono.keys())
 				if (!present.has(key) && !reconnectRetained.has(key)) {
+					earned.delete(key)
 					placementEpochs.delete(key)
 					admittedMono.delete(key)
 					graduated.delete(key)
@@ -461,6 +464,7 @@ export function createEfficiencyGate(
 			// suspended.
 			if (
 				detail === null &&
+				!earned.has(newcomer.key) &&
 				running.some(
 					p =>
 						p.key !== newcomer.key &&
@@ -479,6 +483,9 @@ export function createEfficiencyGate(
 				// A key already running keeps its mark; any other admission starts a
 				// fresh probation window.
 				if (!running.some(p => p.key === newcomer.key)) mark(newcomer.key, mono)
+				// An activity move keeps the probation its predecessor earned (on
+				// the preflight and the final admission alike).
+				if (earned.has(newcomer.key)) graduated.add(newcomer.key)
 				gated.add(newcomer.key)
 				try {
 					const epoch = deps.drops?.sourceEpoch?.(newcomer.sourceId)
@@ -515,6 +522,14 @@ export function createEfficiencyGate(
 							: base + EFFICIENCY_CLEAR_MS,
 				}
 			}
+			// An activity slot over the budget is a planning race (the allocator
+			// sized it to fit): it is re-checked next sample, with no backoff.
+			if (detail === "budget" && newcomer.origin === "activity")
+				return {
+					admit: false,
+					detail,
+					retryAtMs: (valid(now) ? now : 0) + EFFICIENCY_SAMPLE_MS,
+				}
 			const at = (valid(now) ? now : 0) + (retry?.delay ?? EFFICIENCY_RETRY_MS)
 			retries.set(newcomer.key, {
 				detail,
@@ -640,7 +655,15 @@ export function createEfficiencyGate(
 				...(!valid(now) ? { pending: true } : {}),
 			})
 		},
+		inherit(fromKey, toKey) {
+			if (fromKey === toKey || !graduated.has(fromKey) || !gated.has(fromKey))
+				return
+			earned.add(toKey)
+			if (retries.get(toKey)?.detail === "budget" && !failures.has(toKey))
+				retries.delete(toKey)
+		},
 		forget(key) {
+			earned.delete(key)
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			admittedMono.delete(key)

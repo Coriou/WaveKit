@@ -20,6 +20,22 @@ import {
 	READSB_REACH_HZ,
 } from "../../core/rate-policy-contract.js"
 import { rasterChannelsBetween } from "./paging-plan.js"
+import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
+import {
+	ACTIVITY_MAX_SLOTS,
+	ACTIVITY_MOVE_WINDOW_MS,
+	activityOrder,
+	allocateActivitySlots,
+	isActivityDecoder,
+	placementActivity,
+	readySnapshot,
+	selectChannels,
+} from "./activity-plan.js"
+import type {
+	ActivityGroupView,
+	ActivityMove,
+	PlacementActivity,
+} from "./activity-plan.js"
 
 /** Single-channel audio adapters; AIS/VDL2 and rtl433 retain their protocol windows. */
 export const VFO_CHANNEL_TYPES: readonly string[] = [
@@ -256,6 +272,7 @@ export function pagingChannels(
 	d: PlannerDecoder,
 	s: PlannerSource,
 	vfoHz: number | null = null,
+	limit: number = MULTIMON_PAGING_MAX_CHANNELS,
 ): { channels: number[]; misfit: boolean } {
 	const none = { channels: [], misfit: false }
 	if (
@@ -287,7 +304,7 @@ export function pagingChannels(
 			? [vfoHz, ...nearest.filter(hz => hz !== vfoHz)]
 			: nearest
 	return {
-		channels: ordered.slice(0, MULTIMON_PAGING_MAX_CHANNELS),
+		channels: ordered.slice(0, limit),
 		misfit: fit.length < inBand.length,
 	}
 }
@@ -347,11 +364,36 @@ type Candidate = {
 	 */
 	gatedSecondary?: true
 }
-const originOrder = { configured: 0, band: 1, vfo: 2, bandplan: 3, fallback: 4 }
+// "activity" is assigned after ranking, never to a candidate.
+const originOrder = {
+	configured: 0,
+	band: 1,
+	vfo: 2,
+	bandplan: 3,
+	fallback: 4,
+	activity: 5,
+}
 const decoderClass = (d: PlannerDecoder) =>
 	d.startMode === "operator" ? 0 : d.mode === "always" ? 1 : 2
 
+/** One (activity decoder, source) set of ranked channels. */
+type ActivityGroup = {
+	d: PlannerDecoder
+	source: PlannerSource
+	/** Every eligible channel of the group in today's order (the query's candidates). */
+	candidatesHz: number[]
+	/** Activity order (ranked or nearest), the primary removed. */
+	order: number[]
+	snapshot: ActivitySnapshot | null
+}
+
 export const planPlacements: PlacementPlanner = input => {
+	const act = input.activity
+	// Stage 1: with activity input the whole eligible set is ranked, then the
+	// slot allocator slices it; without it today's caps apply.
+	const unsliced = act !== undefined
+	const groups: ActivityGroup[] = []
+	const queries: ActivityQuery[] = []
 	const wanted: WantedPlacement[] = []
 	// 3.18/3.20: gated secondary placements, admitted after every decoder.
 	const deferred: WantedPlacement[] = []
@@ -437,7 +479,12 @@ export const planPlacements: PlacementPlanner = input => {
 				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				// 3.18: a pager decoder takes every paging raster channel in view; a
 				// VFO exactly on one of them is the primary, an off-raster one is dropped.
-				const paging = pagingChannels(d, s, vfo?.frequencyHz ?? null)
+				const paging = pagingChannels(
+					d,
+					s,
+					vfo?.frequencyHz ?? null,
+					unsliced ? Infinity : MULTIMON_PAGING_MAX_CHANNELS,
+				)
 				// 3.14/3.18: raster channels in the window that all fail to fit are a
 				// fit failure, never a fallback to an off-raster centre or VFO.
 				if (paging.misfit && !paging.channels.length) {
@@ -610,10 +657,12 @@ export const planPlacements: PlacementPlanner = input => {
 					const cap =
 						Number.isInteger(input.maxBandplanChannels) &&
 						input.maxBandplanChannels >= 0
-							? Math.min(
-									input.maxBandplanChannels,
-									DECODER_MAX_BANDPLAN_CHANNELS,
-								)
+							? unsliced && input.maxBandplanChannels > 0
+								? Infinity
+								: Math.min(
+										input.maxBandplanChannels,
+										DECODER_MAX_BANDPLAN_CHANNELS,
+									)
 							: 0
 					const channels = [
 						...new Set(
@@ -639,6 +688,7 @@ export const planPlacements: PlacementPlanner = input => {
 						d,
 						s,
 						input.vfo?.sourceId === s.id ? input.vfo.frequencyHz : null,
+						unsliced ? Infinity : MULTIMON_PAGING_MAX_CHANNELS,
 					)
 					if (paging.misfit && !paging.channels.length) tooNarrow = true
 					const listed = channels.slice(0, cap)
@@ -690,7 +740,7 @@ export const planPlacements: PlacementPlanner = input => {
 					if (!rasterInView) listed.forEach((hz, i) => add(hz, "bandplan", i))
 					// 3.18: the cap holds after the VFO, band-plan and raster channels are
 					// combined and deduplicated; earlier ones (higher priority) are kept.
-					if (d.type === "multimon-ng") {
+					if (d.type === "multimon-ng" && !unsliced) {
 						const kept = new Set<number | null>()
 						for (let i = 0; i < local.length; ) {
 							const hz = local[i]!.hz
@@ -813,8 +863,12 @@ export const planPlacements: PlacementPlanner = input => {
 				(a.origin === "band" ? (a.hz ?? 0) - (b.hz ?? 0) : a.index - b.index) ||
 				a.source.order - b.source.order,
 		)
-		sorted.forEach((c, i) =>
-			(c.gatedSecondary && i > 0 ? deferred : wanted).push({
+		const emit = (
+			c: Candidate,
+			i: number,
+			activity?: PlacementActivity,
+		): void => {
+			;(c.gatedSecondary && i > 0 ? deferred : wanted).push({
 				key: placementKey(d.id, c.source.id, c.reach, c.hz),
 				decoderId: d.id,
 				sourceId: c.source.id,
@@ -826,8 +880,78 @@ export const planPlacements: PlacementPlanner = input => {
 				sampleRateHz: c.source.sampleRateHz!,
 				...(c.options ? { options: c.options } : {}),
 				...(c.gatedSecondary && i > 0 ? { gated: true as const } : {}),
-			}),
-		)
+				...(activity ? { activity } : {}),
+			})
+		}
+		// Stage 1: an activity decoder's paging raster and band-plan channels
+		// are one ranked set per source; the configured, band and VFO channels
+		// stay mandatory (3.18 VFO rules are applied above, before this).
+		const ranked =
+			act && isActivityDecoder(d.type)
+				? sorted.filter(
+						c =>
+							c.origin === "bandplan" && c.reach === "channel" && c.hz !== null,
+					)
+				: []
+		if (act && ranked.length) {
+			const firm = sorted.filter(c => !ranked.includes(c))
+			const local: ActivityGroup[] = []
+			for (const c of ranked) {
+				if (local.some(g => g.source === c.source)) continue
+				const centre = c.source.centreHz!
+				// Today's order (3.7, 3.18): the fallback equals it exactly.
+				const candidatesHz = ranked
+					.filter(r => r.source === c.source)
+					.map(r => r.hz!)
+				const epoch = act.epochs.find(e => e?.sourceId === c.source.id)
+				let snapshot: ActivitySnapshot | null = null
+				if (epoch) {
+					const query: ActivityQuery = {
+						epoch,
+						decoderId: d.id,
+						decoderType: d.type as ActivityQuery["decoderType"],
+						protocols: d.protocols,
+						centreHz: centre,
+						candidatesHz,
+						channelWidthHz: d.channelBandwidthHz,
+					}
+					queries.push(query)
+					snapshot = readySnapshot(query, act.snapshots)
+				}
+				local.push({
+					d,
+					source: c.source,
+					candidatesHz,
+					order: activityOrder(candidatesHz, snapshot),
+					snapshot,
+				})
+			}
+			const info = (g: ActivityGroup, hz: number) =>
+				placementActivity(g.snapshot?.channels.find(ch => ch.hz === hz))
+			firm.forEach((c, i) => emit(c, i))
+			if (!firm.length) {
+				// The primary is not moved by ranking (that restarts the decoder's
+				// own process): the incumbent primary channel while it is eligible,
+				// otherwise the best-ranked channel of the preferred source.
+				const incumbent = act.incumbents.find(
+					i => i.decoderId === d.id && i.primary,
+				)
+				const primary =
+					(incumbent &&
+						ranked.find(
+							c => c.hz === incumbent.hz && c.source.id === incumbent.sourceId,
+						)) ??
+					ranked.find(
+						c => c.source === ranked[0]!.source && c.hz === local[0]!.order[0],
+					)!
+				const g = local.find(x => x.source === primary.source)!
+				emit(primary, 0, info(g, primary.hz!))
+				g.order = g.order.filter(hz => hz !== primary.hz)
+			}
+			groups.push(...local)
+			continue
+		}
+		sorted.forEach((c, i) => emit(c, i))
 		if (!sorted.length) {
 			if (channelizerMissing) unplaced.set(d.id, "channelizer-unavailable")
 			// 3.14: a fit failure is physical, so it holds when `always`, an operator start or an
@@ -841,5 +965,146 @@ export const planPlacements: PlacementPlanner = input => {
 			}
 		}
 	}
-	return { wanted: [...wanted, ...deferred], unplaced }
+	if (!act) return { wanted: [...wanted, ...deferred], unplaced }
+	// Global allocator (activity-plan.ts): every placement planned so far is
+	// mandatory; activity slots get what remains of the budget.
+	const mandatory = [...wanted, ...deferred]
+	const keyOf = (g: ActivityGroup, hz: number) =>
+		placementKey(g.d.id, g.source.id, "channel", hz)
+	const plannedKeys = new Set(mandatory.map(p => p.key))
+	for (const g of groups)
+		for (const hz of g.candidatesHz) plannedKeys.add(keyOf(g, hz))
+	const slotsOf = (type: string) => {
+		const n = isActivityDecoder(type) ? act.policy?.slots?.[type] : 0
+		return Number.isInteger(n) && n! > 0 ? Math.min(n!, ACTIVITY_MAX_SLOTS) : 0
+	}
+	const allocation = allocateActivitySlots({
+		budgetCores: act.policy?.budgetCores,
+		replayAllowanceCores: act.policy?.replayAllowanceCores,
+		mandatory,
+		pending: Array.isArray(act.pendingStarts) ? act.pendingStarts : [],
+		plannedKeys,
+		groups: groups.map(g => ({
+			sourceId: g.source.id,
+			sampleRateHz: g.source.sampleRateHz!,
+			perChannelCores: placementCostCores(g.d.type, "channel"),
+			want: Math.min(slotsOf(g.d.type), g.order.length),
+		})),
+	})
+	const now = act.nowMonoMs
+	const maxMoves =
+		Number.isInteger(act.policy?.maxMovesPerMinute) &&
+		act.policy.maxMovesPerMinute >= 0
+			? act.policy.maxMovesPerMinute
+			: 0
+	const dwellMs =
+		Number.isFinite(act.policy?.dwellMs) && act.policy.dwellMs >= 0
+			? act.policy.dwellMs
+			: Infinity
+	// Rolling window: moves in (now - 60 s, now] count against the source.
+	const windowMoves = new Map<string, number[]>()
+	for (const m of Array.isArray(act.recentMoves) ? act.recentMoves : [])
+		if (
+			Number.isFinite(m?.atMonoMs) &&
+			m.atMonoMs > now - ACTIVITY_MOVE_WINDOW_MS &&
+			m.atMonoMs <= now
+		)
+			windowMoves.set(m.sourceId, [
+				...(windowMoves.get(m.sourceId) ?? []),
+				m.atMonoMs,
+			])
+	const moves: ActivityMove[] = []
+	const views: ActivityGroupView[] = []
+	let next: number | null = null
+	const later = (at: number | null | undefined) => {
+		if (typeof at === "number" && Number.isFinite(at) && at > now)
+			next = next === null ? at : Math.min(next, at)
+	}
+	groups.forEach((g, i) => {
+		const times = (windowMoves.get(g.source.id) ?? []).sort((a, b) => a - b)
+		const selection = selectChannels({
+			order: g.order,
+			ranked: g.snapshot !== null,
+			activity: g.snapshot
+				? new Map(g.snapshot.channels.map(c => [c.hz, c]))
+				: null,
+			count: allocation.given[i]!,
+			incumbents: act.incumbents
+				.filter(
+					inc =>
+						inc.decoderId === g.d.id &&
+						inc.sourceId === g.source.id &&
+						!inc.primary,
+				)
+				.map(inc => ({
+					key: inc.key,
+					hz: inc.hz,
+					dwellSinceMonoMs: inc.dwellSinceMonoMs,
+				})),
+			nowMonoMs: now,
+			dwellMs,
+			movesLeft: Math.max(0, maxMoves - times.length),
+			moveWindowFreesMonoMs:
+				times.length >= maxMoves && times.length > 0
+					? times[times.length - maxMoves]! + ACTIVITY_MOVE_WINDOW_MS
+					: null,
+		})
+		later(selection.blockedUntilMonoMs)
+		later(g.snapshot?.nextEvaluationMonoMs)
+		for (const c of selection.chosen) {
+			const key = keyOf(g, c.hz)
+			deferred.push({
+				key,
+				decoderId: g.d.id,
+				sourceId: g.source.id,
+				channelHz: c.hz,
+				reach: "channel",
+				origin: "activity",
+				primary: false,
+				costCores: placementCostCores(g.d.type, "channel"),
+				sampleRateHz: g.source.sampleRateHz!,
+				gated: true,
+				...(c.movedFrom ? { movedFrom: c.movedFrom.key } : {}),
+				activity: placementActivity(
+					g.snapshot?.channels.find(ch => ch.hz === c.hz),
+				),
+			})
+			if (c.movedFrom) {
+				moves.push({
+					decoderId: g.d.id,
+					sourceId: g.source.id,
+					fromKey: c.movedFrom.key,
+					fromHz: c.movedFrom.hz,
+					toKey: key,
+					toHz: c.hz,
+					atMonoMs: now,
+				})
+				times.push(now)
+			}
+		}
+		windowMoves.set(g.source.id, times)
+		views.push({
+			decoderId: g.d.id,
+			sourceId: g.source.id,
+			ranking: g.snapshot ? "activity" : "nearest",
+			wanted: Math.min(slotsOf(g.d.type), g.order.length),
+			given: allocation.given[i]!,
+		})
+	})
+	return {
+		wanted: [...wanted, ...deferred],
+		unplaced,
+		activity: { queries, moves, groups: views, nextEvaluationMonoMs: next },
+	}
+}
+
+/** The activity queries of one pass: the planner's groups, before any snapshot. */
+export function activityQueries(
+	input: Parameters<PlacementPlanner>[0],
+): readonly ActivityQuery[] {
+	if (!input.activity) return []
+	return (
+		planPlacements({ ...input, activity: { ...input.activity, snapshots: [] } })
+			.activity?.queries ?? []
+	)
 }

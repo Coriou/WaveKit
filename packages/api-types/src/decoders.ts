@@ -396,15 +396,35 @@ export type DecoderEfficiencyDetail =
 	| "drops"
 	| "unknown"
 	| "late-drops"
+/** Why an activity-ranked channel (multimon-ng, dsd-fme) runs. */
+export interface DecoderPlacementActivity {
+	/** "activity": chosen from a ready activity ranking; "nearest": the nearest-first fallback. */
+	ranking: "activity" | "nearest"
+	state?: "hot" | "warm" | "cold"
+	/** At least 0, three decimals. */
+	score?: number
+	/** Energy on the channel in the latest spectrum block. */
+	live?: boolean
+	reasons?: (
+		| "live-energy"
+		| "track"
+		| "occupancy"
+		| "decoded"
+		| "trial-success"
+		| "trial-backoff"
+	)[]
+}
 export interface DecoderPlacementView {
 	sourceId: string
 	channelHz?: number
 	/** A channel placement's two-sided channel width; absent when unknown. */
 	channelWidthHz?: number
 	reach: DecoderReachKind
-	origin: "configured" | "band" | "vfo" | "bandplan" | "fallback"
+	origin: "configured" | "band" | "vfo" | "bandplan" | "fallback" | "activity"
 	primary: boolean
 	running: boolean
+	/** Activity-ranked decoders only: why this channel runs. */
+	activity?: DecoderPlacementActivity
 	suspension?: DecoderSuspension
 	efficiencyDetail?: DecoderEfficiencyDetail
 	costCores: number

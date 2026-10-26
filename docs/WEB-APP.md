@@ -78,6 +78,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
   plans, spectrum and waterfall, map, units and time, theme, density and motion. A paused decoder
   says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.
+  Each decoder lists where it listens and why, for example `162.025 MHz (tuned)`, or
+  `(activity)` for a paging or digital-voice channel chosen because it was active.
 
 ## Map and Messages
 
