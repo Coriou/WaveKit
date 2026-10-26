@@ -2546,6 +2546,95 @@ export class SourceManager extends EventEmitter {
 		return state?.rtlTcpHeaderInfo ?? undefined
 	}
 
+	// One FIFO per source; only commanded rate changes authorize reconnect waits.
+	private readonly tunerCommands = new Map<string, Promise<void>>()
+	private readonly rateRecovery = new Map<
+		string,
+		{ deadline: number; socket: net.Socket }
+	>()
+
+	/** Serialize API commands, including the receiver's rate-change restart. */
+	async runTunerCommand<T>(id: string, command: () => Promise<T>): Promise<T> {
+		const previous = this.tunerCommands.get(id) ?? Promise.resolve()
+		const pending = previous.then(async () => {
+			await this.waitForTunerReady(id)
+			const result = await command()
+			await this.waitForTunerReady(id)
+			return result
+		})
+		const tail = pending.then(
+			() => {},
+			() => {},
+		)
+		this.tunerCommands.set(id, tail)
+		try {
+			return await pending
+		} finally {
+			if (this.tunerCommands.get(id) === tail) this.tunerCommands.delete(id)
+		}
+	}
+
+	private async waitForTunerReady(id: string): Promise<void> {
+		const recovery = this.rateRecovery.get(id)
+		if (recovery === undefined) return
+		// Drain the complete API command (including bulk writes), then reopen.
+		// Keeping the registration preserves the source stream and assignments.
+		if (
+			this.sources.get(id)?.socket === recovery.socket &&
+			this.sources.get(id)?.connected
+		)
+			recovery.socket.destroySoon()
+		if (
+			this.sources.get(id)?.socket !== recovery.socket &&
+			this.sources.get(id)?.connected &&
+			this.sources.get(id)?.socket?.writable &&
+			this.sources.get(id)?.lastSampleAt !== null
+		) {
+			this.rateRecovery.delete(id)
+			return
+		}
+		const remaining = recovery.deadline - Date.now()
+		if (remaining <= 0) throw this.sourceReconnecting()
+		await new Promise<void>((resolve, reject) => {
+			const cleanup = () => {
+				clearTimeout(timer)
+				this.off("payload-started", connected)
+				this.off("source-removed", removed)
+			}
+			const connected = (sourceId: string) => {
+				if (
+					sourceId !== id ||
+					this.sources.get(id)?.socket === recovery.socket ||
+					!this.sources.get(id)?.connected ||
+					!this.sources.get(id)?.socket?.writable
+				)
+					return
+				cleanup()
+				this.rateRecovery.delete(id)
+				resolve()
+			}
+			const removed = (sourceId: string) => {
+				if (sourceId !== id) return
+				cleanup()
+				this.rateRecovery.delete(id)
+				reject(new WaveKitError("Source was removed", "SOURCE_NOT_FOUND"))
+			}
+			const timer = setTimeout(() => {
+				cleanup()
+				reject(this.sourceReconnecting())
+			}, remaining)
+			this.on("payload-started", connected)
+			this.on("source-removed", removed)
+		})
+	}
+
+	private sourceReconnecting(): WaveKitError {
+		return new WaveKitError(
+			"Source is reconnecting after a sample-rate change; retry the command",
+			"SOURCE_RECONNECTING",
+		)
+	}
+
 	/**
 	 * Sends control data upstream to a network source (e.g., RTL-TCP commands).
 	 *
@@ -2556,19 +2645,44 @@ export class SourceManager extends EventEmitter {
 	writeToSource(id: string, payload: Buffer): boolean {
 		const state = this.sources.get(id)
 		if (!state) {
-			throw new Error(`Source ${id} not found`)
+			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
 		}
 		if (state.config.type === "recording") {
-			throw new Error(`Source ${id} does not accept control commands`)
+			throw new WaveKitError(
+				"Source does not accept control commands",
+				"SOURCE_CONTROL_UNSUPPORTED",
+			)
 		}
 		if (!state.socket || !state.connected) {
-			throw new Error(`Source ${id} is not connected`)
+			throw new WaveKitError(
+				`Source ${id} is not connected`,
+				"SOURCE_DISCONNECTED",
+			)
 		}
 		if (!state.socket.writable) {
-			throw new Error(`Source ${id} socket is not writable`)
+			throw new WaveKitError(
+				"Source socket is not writable",
+				"SOURCE_DISCONNECTED",
+			)
 		}
 
-		return state.socket.write(payload)
+		const socket = state.socket
+		const rateChange =
+			this.tunerCommands.has(id) &&
+			payload.length === 5 &&
+			payload[0] === 0x02 &&
+			payload.readUInt32BE(1) !== state.config.caps.sampleRate
+		if (rateChange) {
+			// First retry: <= 4 s equal-jitter backoff (2^1 × 2 s) + 5 s
+			// connect timeout = 9 s. A later retry needs a new caller request.
+			this.rateRecovery.set(id, {
+				deadline:
+					Date.now() + calculateBackoffDelay(1) + SOURCE_CONNECT_TIMEOUT_MS,
+				socket,
+			})
+		}
+		const accepted = socket.write(payload)
+		return accepted
 	}
 
 	/**

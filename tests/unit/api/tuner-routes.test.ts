@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import Fastify, { type FastifyInstance } from "fastify"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
+import { WaveKitError } from "../../../src/utils/errors.js"
 import type { TunerState } from "@wavekit/api-types"
 import {
 	TunerControlModeError,
@@ -175,4 +176,38 @@ describe("Tuner Routes", () => {
 		expect(response.statusCode).toBe(200)
 		expect(tunerController.configure).toHaveBeenCalled()
 	})
+})
+
+it("maps a bounded source recovery failure to retryable service unavailable", async () => {
+	const app = Fastify()
+	const controller = createMockTunerController(createBaseState())
+	await app.register(tunerRoutes, {
+		tunerController: controller as unknown as Parameters<
+			typeof tunerRoutes
+		>[1]["tunerController"],
+		sourceManager: {
+			runTunerCommand: async () => {
+				throw new WaveKitError(
+					"Source is reconnecting; retry the command",
+					"SOURCE_RECONNECTING",
+				)
+			},
+		},
+	})
+	try {
+		const result = await app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl-1/frequency",
+			payload: { hz: 12_345 },
+		})
+		expect(result.statusCode).toBe(503)
+		expect(result.headers["retry-after"]).toBe("1")
+		expect(result.json()).toMatchObject({
+			code: "SOURCE_RECONNECTING",
+			message: expect.stringContaining("retry"),
+		})
+		expect(controller.setFrequency).not.toHaveBeenCalled()
+	} finally {
+		await app.close()
+	}
 })
