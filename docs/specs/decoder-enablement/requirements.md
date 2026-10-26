@@ -568,7 +568,9 @@ internally, so it asks for one channel centred on its target midpoint (or `chann
   105 kHz is invalid.
 - _Decoder rate._ dumpvdl2 runs at the smallest 105 kHz × N at or above the delivered rate,
   capped at the target, and `--oversample` is that N. Its existing SoX resample step (the
-  raw path's) converts when the two differ; no new chain is added.
+  raw path's) converts when the two differ; no new chain is added. A channelised instance's
+  `rateAssessment` reports that rate as `decoderInputRateHz` (525 kHz for a 512 kHz
+  channel) and the channel's realised rate as `frontendRateHz`.
 - _followCenter._ The default passband stays, but it is still widened or rejected by the
   list span, as before this amendment.
 - _Arithmetic._ The default EU list (325 kHz span) at 1.024 Msps needs 375 kHz: D = 3 gives

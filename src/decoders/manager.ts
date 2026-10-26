@@ -4875,9 +4875,18 @@ export class DecoderManager extends EventEmitter {
 			const plan = assessDecoderRate(requirements, context)
 			// Addendum §2: an open channel's realised rate replaces the raw
 			// adapter; the source checks are the same as for every instance.
+			// 3.19: the decoder's own plan for the channel rate says whether it
+			// converts the channel again before its process reads it.
 			const channel = state.channel
 			return channel && resolved && plan.verdict !== "unusable"
-				? channelisedRatePlan(requirements, context, channel.realised)
+				? channelisedRatePlan(
+						requirements,
+						context,
+						channel.realised,
+						state.decoder.getRateAdapter?.({
+							sampleRateHz: channel.realised.outputRateHz,
+						}),
+					)
 				: plan
 		} catch (err) {
 			this.log.error(

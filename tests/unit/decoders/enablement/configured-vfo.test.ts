@@ -423,3 +423,41 @@ it("a band override keeps multimon-ng running at 1090 MHz", async () => {
 	})
 	expect(status?.running).toBe(true)
 })
+
+it("a channelised IQ decoder reports the decoder input its own pipeline makes of the channel", async () => {
+	const f = setup({
+		type: "dumpvdl2",
+		vfo: 446_100_000,
+		useChannelizer: true,
+		options: { channelHz: 446_100_000 },
+	})
+	const decoder = f.decoder()
+	decoder.getChannelRequest = input => ({
+		centerHz: input.centerHz ?? 0,
+		bandwidthHz: 40_000,
+		transitionHz: 2_500,
+		outputRateHz: 48_000,
+		format: "cf32",
+	})
+	decoder.getRateRequirements = () => undefined
+	// Like dumpvdl2 (a 512 kHz channel resampled to 525 kHz): the channel rate
+	// is converted once more before the process reads it.
+	decoder.getRateAdapter = input => ({
+		adaptation:
+			input.sampleRateHz === 48_000 ? "resample" : "integer-decimation",
+		frontendRateHz: input.sampleRateHz === 48_000 ? 52_500 : 48_000,
+		decoderInputKind: "iq",
+		decoderInputRateHz: 52_500,
+		decoderInputFormat: "u8",
+	})
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(true)
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
+	expect(status?.rateAssessment).toMatchObject({
+		adaptation: "resample",
+		frontendRateHz: 48_000,
+		decoderInputKind: "iq",
+		decoderInputRateHz: 52_500,
+	})
+})
