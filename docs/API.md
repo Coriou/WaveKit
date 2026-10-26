@@ -2136,9 +2136,10 @@ automatic sizing. Each successful change re-evaluates activity slot allocation a
 placements refused for budget without waiting for their previous retry deadline. Refusals
 for CPU pressure, drops or missing evidence retain their existing deadlines and safeguards.
 Raising the budget can add secondary activity channels within the configured slot limits.
-Reducing it restricts new admissions and activity slots; running decoders follow the
-existing activity dwell and primary-placement displacement rules. Configured decoders are
-not forcibly stopped by a budget change.
+Reducing it restricts new admissions and takes effect on activity slots at the next
+reconciliation: secondary activity channels beyond the smaller slot allocation stop
+regardless of dwell. Primary placements follow the existing displacement rules, and
+configured decoders are not forcibly stopped by a budget change.
 
 #### GET /api/decoders/types
 
