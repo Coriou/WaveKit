@@ -2132,8 +2132,13 @@ Updates are serialized and saved to `<stateDir>/decoder-efficiency.json` with th
 atomic temporary-file, fsync and rename writer before applying to admission and activity
 allocation. The saved override survives restart and takes precedence over startup config.
 A failed save returns 503 and keeps the previous live budget. Set `"auto"` to restore
-automatic sizing. Reducing the budget restricts new admissions; it does not forcibly stop
-configured decoders.
+automatic sizing. Each successful change re-evaluates activity slot allocation and retries
+placements refused for budget without waiting for their previous retry deadline. Refusals
+for CPU pressure, drops or missing evidence retain their existing deadlines and safeguards.
+Raising the budget can add secondary activity channels within the configured slot limits.
+Reducing it restricts new admissions and activity slots; running decoders follow the
+existing activity dwell and primary-placement displacement rules. Configured decoders are
+not forcibly stopped by a budget change.
 
 #### GET /api/decoders/types
 

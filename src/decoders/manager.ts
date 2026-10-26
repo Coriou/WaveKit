@@ -702,6 +702,20 @@ export class DecoderManager extends EventEmitter {
 		this.notifyBandplansChanged()
 	}
 
+	/** Recheck capacity after a live budget change without clearing loss backoff. */
+	notifyEfficiencyBudgetChanged(): void {
+		if (!this.config.enablement || this.destroying) return
+		const now = performance.now()
+		for (const state of this.decoders.values()) {
+			if (
+				state.admission?.admit === false &&
+				state.admission.detail === "budget"
+			)
+				state.admission = { ...state.admission, retryAtMs: now }
+		}
+		this.notifyBandplansChanged()
+	}
+
 	notifyBandplansChanged(): void {
 		if (!this.config.enablement || this.destroying) return
 		for (const source of this.sourceManager?.getAllStatus() ?? [])
