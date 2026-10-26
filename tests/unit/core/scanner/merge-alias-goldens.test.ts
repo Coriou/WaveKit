@@ -91,9 +91,7 @@ describe("WG10 base goldens (req 1.11)", () => {
 		)
 		store.setOperator(ids[0] ?? "", { keep: true })
 		now = T0 + 182 * DAY
-		// ids[1] is past the 180-day age; ids[2] (one sighting, no evidence, unseen for 180 days)
-		// retires as a stale fragment (detection quality 10.4) in the same maintenance call.
-		expect(store.pruneInactive(180)).toEqual([ids[1], ids[2]])
+		expect(store.pruneInactive(180)).toEqual([ids[1]])
 		expect(ids).toMatchInlineSnapshot(`
 			[
 			  "d_00000000000000000000000001",

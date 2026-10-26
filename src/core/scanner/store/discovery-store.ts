@@ -143,6 +143,7 @@ import type { CompatibilitySide } from "./compatibility.js"
 import { AbsorbedIdIndex } from "./absorbed-id-index.js"
 import {
 	FRAGMENT_GROUPS_MAX,
+	FRAGMENT_RETIRE_CHECK_MAX,
 	FRAGMENT_RETIRE_MAX,
 	FRAGMENT_ROUNDS_MAX,
 	planFragments,
@@ -1982,7 +1983,15 @@ export class DiscoveryStore
 		return true
 	}
 
-	pruneInactive(maxAgeDays: number): string[] {
+	/**
+	 * `canRetire` (DQ 10.4): the caller's check that a record holds no evidence the store cannot
+	 * see (files on disk, captures, remembered trials). Without it no fragment retires; merges
+	 * still run.
+	 */
+	pruneInactive(
+		maxAgeDays: number,
+		opts: { canRetire?: (discoveryId: string) => boolean } = {},
+	): string[] {
 		this.sweepPending() // DQ 1.5: the maintenance cadence also sweeps pending
 		const cutoff = iso(this.now() - maxAgeDays * DAY_MS)
 		const op = newOp()
@@ -2002,7 +2011,11 @@ export class DiscoveryStore
 		}
 		this.finish("evict", op)
 		// DQ 10: the same maintenance cadence retires legacy fragments (bounded per pass).
-		removed.push(...this.retireFragments().retired)
+		removed.push(
+			...this.retireFragments(
+				opts.canRetire !== undefined ? { canRetire: opts.canRetire } : {},
+			).retired,
+		)
 		return removed
 	}
 
@@ -2012,7 +2025,13 @@ export class DiscoveryStore
 	 * low-sighting fragments with no evidence retire (one `evict` operation). Idempotent: a second
 	 * pass over the result changes nothing.
 	 */
-	retireFragments(probe?: { plan?: FragmentPlan }): {
+	retireFragments(
+		opts: {
+			/** DQ 10.4: required for any retirement; fail closed (a throw keeps the record). */
+			canRetire?: (discoveryId: string) => boolean
+			probe?: { plan?: FragmentPlan }
+		} = {},
+	): {
 		groups: number
 		absorbed: number
 		retired: string[]
@@ -2037,6 +2056,8 @@ export class DiscoveryStore
 		let truncated = 0
 		const merges: { survivor: string; mergedIds: string[] }[] = []
 		const retired: string[] = []
+		let checks = 0
+		let checksSpent = false
 		let settled = false
 		// 10.5: each round merges, then retires on the merged state. A merge can make a refused pair
 		// compatible and a retirement can remove a survivor that refused others, so the pass plans
@@ -2090,21 +2111,44 @@ export class DiscoveryStore
 			// 10.4: retirement on the state after this round's merges (re-frozen, O(n)).
 			let retiredNow = 0
 			const room = FRAGMENT_RETIRE_MAX - retired.length
-			if (room > 0) {
+			const canRetire = opts.canRetire
+			if (
+				canRetire !== undefined &&
+				room > 0 &&
+				checks < FRAGMENT_RETIRE_CHECK_MAX
+			) {
 				const after: FragmentRecord[] = []
 				for (const d of this.discoveries.values())
 					after.push(this.fragmentOf(d))
 				const op = newOp()
-				for (const id of planRetirement(after, this.now()).slice(0, room)) {
+				for (const id of planRetirement(
+					after,
+					this.now(),
+					undefined,
+					Number.POSITIVE_INFINITY,
+				)) {
+					if (retiredNow >= room) break
+					if (checks >= FRAGMENT_RETIRE_CHECK_MAX) {
+						checksSpent = true
+						break
+					}
 					const d = this.discoveries.get(id)
 					if (d === undefined || this.fragmentProtected(d)) continue
+					checks += 1
+					let ok = false
+					try {
+						ok = canRetire(id) === true
+					} catch {
+						ok = false
+					}
+					if (!ok) continue
 					retired.push(d.id)
 					retiredNow += 1
 					this.deleteInto(op, d)
 				}
 				this.finish("evict", op)
 			}
-			if (probe) probe.plan = { ...plan, truncated }
+			if (opts.probe) opts.probe.plan = { ...plan, truncated }
 			// Settled: a round that saw every candidate and changed nothing.
 			if (plan.groups.length === 0 && retiredNow === 0) {
 				// (With the group budget spent, merges may be left: not settled.)
@@ -2112,14 +2156,15 @@ export class DiscoveryStore
 				settled =
 					plan.nextCursor === undefined &&
 					budget > 0 &&
-					retired.length < FRAGMENT_RETIRE_MAX
+					retired.length < FRAGMENT_RETIRE_MAX &&
+					!checksSpent
 				break
 			}
 			// A scan cut short by the candidate cap: the next pass continues from the cursor.
 			if (plan.nextCursor !== undefined) break
 		}
 		// A bound was hit (round, group or retire cap): work may be left for the next pass.
-		if (!settled && probe?.plan) probe.plan.truncated += 1
+		if (!settled && opts.probe?.plan) opts.probe.plan.truncated += 1
 		return { groups, absorbed, retired, merges }
 	}
 

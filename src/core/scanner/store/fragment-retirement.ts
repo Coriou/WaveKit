@@ -36,6 +36,11 @@ export const FRAGMENT_ROUNDS_MAX = 4
 export const FRAGMENT_GROUP_MAX = DQ_CONSOLIDATE_GROUP_MAX
 /** 10.6: retirements per pass. */
 export const FRAGMENT_RETIRE_MAX = 256
+/**
+ * 10.4: retirement predicate calls per pass (the caller's own evidence check, which may read an
+ * index): 4 x the retire cap, so records it refuses cannot make a pass unbounded.
+ */
+export const FRAGMENT_RETIRE_CHECK_MAX = 4 * FRAGMENT_RETIRE_MAX
 /** 10.4: a fragment retires after this long without a sighting. */
 export const FRAGMENT_RETIRE_AGE_MS = 72 * 3_600_000
 /** 10.4: only records with at most this many sightings retire. */
@@ -151,6 +156,7 @@ export function planRetirement(
 	records: readonly FragmentRecord[],
 	nowMs: number,
 	skip?: ReadonlySet<string>,
+	limit = FRAGMENT_RETIRE_MAX,
 ): string[] {
 	const stale = records.filter(
 		r => skip?.has(r.id) !== true && retirable(r, nowMs),
@@ -159,7 +165,7 @@ export function planRetirement(
 		(a, b) =>
 			compareText(a.lastSeenAt, b.lastSeenAt) || compareText(a.id, b.id),
 	)
-	if (stale.length > FRAGMENT_RETIRE_MAX) stale.length = FRAGMENT_RETIRE_MAX
+	if (stale.length > limit) stale.length = limit
 	return stale.map(r => r.id)
 }
 
