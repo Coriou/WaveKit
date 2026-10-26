@@ -58,8 +58,19 @@ import {
 	type WorkerEluSample,
 } from "./pipeline-host.js"
 
-/** Pre-channelizer usable fraction of the captured span (§ 5.3). */
+/** Pre-channelizer usable fraction of the captured span (§ 5.3): windows, hop plans, probes. */
 export const USABLE_FRACTION = 0.8
+/**
+ * Fraction of the captured span the detector, segmenter and channel gate see. 0.95 of Nyquist is
+ * ±486.4 kHz at 1.024 Msps (0.95 × 1 024 000 / 2 = 486 400 Hz), against ±409.6 kHz for
+ * `USABLE_FRACTION` (0.8 × 512 000). On a private RTL capture the median noise floor fell only
+ * 1.9 dB from mid-band to 0.93–0.95 of Nyquist (2.4 dB over the last 0.97–1.0), so this band is
+ * still the dongle's flat-topped passband shoulder, not its anti-alias transition: the outermost
+ * 5 % (25.6 kHz a side at 1.024 Msps) stays masked, where energy from just past Nyquist folds
+ * back. The per-bin floor follows the gentle roll-off, so an SNR there means what it means
+ * mid-band. Segments reaching past `USABLE_FRACTION` keep the `edge` flag (§ 6.2).
+ */
+export const DETECTION_USABLE_FRACTION = 0.95
 export const SCANNER_BRANCH_HWM = 262_144
 export const MAX_INFLIGHT_BYTES = 4 * 1024 * 1024
 const DEFAULT_BATCH_BYTES = 131_072
@@ -288,7 +299,8 @@ export function buildPipelineConfig(
 		sampleRateHz,
 		fftSize,
 		integrationMs,
-		usableFraction: USABLE_FRACTION,
+		usableFraction: DETECTION_USABLE_FRACTION,
+		edgeFraction: USABLE_FRACTION,
 		dcGuardHz: s.detection.dcGuardHz,
 		ppmMargin: s.detection.ppmMargin,
 		hysteresisDb: s.detection.hysteresisDb,

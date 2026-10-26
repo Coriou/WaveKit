@@ -550,7 +550,7 @@ describe("SpectrumService", () => {
 		const frames = h.frames().filter(f => f.sourceId === "rtl")
 		expect(frames.length).toBeGreaterThan(0)
 		for (const f of frames) {
-			expect(f.binCount).toBe(819)
+			expect(f.binCount).toBe(973) // the 0.95 detection span of 1024 bins: 1024 − 2 × 26 + 1
 			expect(f.binHz).toBe(1000)
 			expect(f.nativeBinHz).toBe(1000)
 		}

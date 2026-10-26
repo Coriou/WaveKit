@@ -135,6 +135,25 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   synthetic 2 s AM voice overs at about 13.5 dB best-slot SNR make one record, one over none;
   two adjacent 8.33 kHz channels taking turns make two records; 20 s of noise makes none.
 
+  1.4e **Edge band.** The detector, segmenter and channel gate see
+  `DETECTION_USABLE_FRACTION` = 0.95 of the captured span (±486.4 kHz at 1.024 Msps:
+  0.95 × 512 kHz), while windows, hop plans, probes, IQ capture and the activity history keep
+  `USABLE_FRACTION` = 0.8 (±409.6 kHz). On a private RTL capture the median floor fell 1.9 dB
+  from mid-band to 0.93 to 0.95 of Nyquist and 2.4 dB over the last 3 %: still the passband
+  shoulder, so the per-bin floor keeps an SNR there meaningful; the outer 5 % (25.6 kHz a side)
+  stays masked against energy folded back from past Nyquist. A segment reaching within the gap
+  tolerance of the 0.8 bound is flagged `edge` in window (`truncated` in a sweep). An edge track
+  passes the same channel gate, its observation keeps `flags.edge`, it never votes a class (3.4;
+  the record shows `unknown`), it is never held to confirm, channel-refined or IQ-captured, and
+  on the 18 dB rule of 1.4 it never takes the long-track exemption of 1.4c: its own track SNR
+  must also reach `DQ_CREATE_TRACK_SNR_DB` = 15 dB however long it lasts. The image check of
+  § 4.9 is symmetric and runs over the whole detection span. Fixtures: an OOK burst at 0.93 of
+  Nyquist passes a burst gate and makes one record flagged edge (none with a 0.8 span); a tone
+  past 0.95 makes no track; a 30 dB image of a strong carrier at 0.9 and 0.92 of Nyquist is
+  flagged and makes no record; a 150 ms tone about 7 dB over the floor at 0.9 does not pass a
+  12.5 kHz gate; a 60-block edge track at 18 dB with an 8 dB track SNR makes no record (one
+  mid-span), and an edge track creates at a 15 dB track SNR and not 14.99 dB.
+
   1.5 Pending expiry is a **fixed window anchored at the entry's first sample**: an entry is
   deleted `DQ_PENDING_WINDOW_MS` = 600 000 ms (10 min) after its first sample, whatever
   arrived since; samples are never re-anchored. An observation arriving after deletion starts

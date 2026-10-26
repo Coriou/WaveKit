@@ -60,6 +60,7 @@ export const PipelineConfigSchema = z.object({
 	fftSize: z.number().int().min(512).max(16384),
 	integrationMs: z.number().positive(),
 	usableFraction: z.number().gt(0).max(1),
+	edgeFraction: z.number().gt(0).max(1).optional(),
 	dcGuardHz: z.number().nonnegative(),
 	ppmMargin: z.number().nonnegative(),
 	hysteresisDb: z.number().nonnegative(),

@@ -851,3 +851,10 @@ checks `isAmVoice` before `classOf`; `PendingAdmission` banks a closing run's tr
 Tests for requirement 10: `tests/unit/core/scanner/fragment-retirement.test.ts` (the 10.8
 fixtures and bounds) and `fragment-retirement.property.test.ts` (Property 28). Changed:
 `merge-alias-goldens.test.ts` (the prune now also reports a stale one-sighting record).
+
+Tests for 1.4e: `tests/unit/core/spectrum/emissions/segmenter-edge-band.test.ts` (bin bounds
+of both spans, at and past each), `tests/unit/core/spectrum/pipeline-edge-span.test.ts`
+(synthetic OOK, tones, images and a weak burst through the pipeline and store) and
+`tests/unit/core/scanner/edge-admission.test.ts` (the edge threshold bounds). The pipeline
+takes an optional `edgeFraction` next to `usableFraction`; the segmenter flags against
+`edgeStartBin` / `edgeEndBin`, which default to the usable bounds.

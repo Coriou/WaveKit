@@ -1077,10 +1077,14 @@ export class DiscoveryStore
 		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : refuse()
 		// DQ 1.4c: the threshold reads the best of several slot readings; a short burst's own
 		// track SNR must also clear the measured noise maximum. Non-finite blocks or track SNR
-		// never corroborate (the safe answer: the burst waits for more sightings).
+		// never corroborate (the safe answer: the burst waits for more sightings). An edge track
+		// (past the 0.8 usable span, on the passband shoulder) never takes the long-track
+		// exemption: its own SNR must clear the noise maximum too, however long it lasts.
+		const edge = track.flags.edge === true
 		if (
 			snr >= DQ_CREATE_SNR_DB &&
-			((Number.isFinite(track.blocks) &&
+			((!edge &&
+				Number.isFinite(track.blocks) &&
 				track.blocks >= DQ_SHORT_BURST_BLOCKS) ||
 				(Number.isFinite(track.snrDb) && track.snrDb >= DQ_CREATE_TRACK_SNR_DB))
 		)
