@@ -137,7 +137,10 @@ export interface TunerRoutesOptions {
 function handleTunerError(reply: FastifyReply, err: unknown): unknown {
 	const error = err instanceof Error ? err : new Error("Unknown error")
 	const maybeStatus = err as { statusCode?: number; code?: string }
-	if (maybeStatus?.code === "SOURCE_RECONNECTING") {
+	if (
+		maybeStatus?.code === "SOURCE_RECONNECTING" ||
+		maybeStatus?.code === "TUNER_COMMAND_TIMEOUT"
+	) {
 		reply.header("Retry-After", "1")
 		return reply.status(503).send({
 			error: error.name,

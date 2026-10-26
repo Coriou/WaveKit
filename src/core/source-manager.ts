@@ -22,6 +22,7 @@
  */
 
 import { EventEmitter } from "node:events"
+import { AsyncLocalStorage } from "node:async_hooks"
 import * as net from "node:net"
 import * as fs from "node:fs"
 import { types as utilTypes } from "node:util"
@@ -57,6 +58,10 @@ import type {
 
 // Bound startup/reconnect waits without treating quiet connected sources as failures.
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
+// One command gets the same budget as one maximum first reconnect attempt:
+// 2^1 × 2 s backoff + 5 s connect timeout = 9 s, excluding FIFO/recovery waits.
+export const TUNER_COMMAND_TIMEOUT_MS =
+	2 ** 1 * 2000 + SOURCE_CONNECT_TIMEOUT_MS
 // Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
 export const SOURCE_STALL_TIMEOUT_MS = 15_000
 // TCP keepalive is defence in depth for a dead peer (Node 21+ on Linux probes
@@ -873,6 +878,9 @@ export class SourceManager extends EventEmitter {
 		if (chunk.length > 0) {
 			state.lastSampleAt = Date.now()
 			if (attempt) attempt.lastSampleAt = state.lastSampleAt
+			const recovery = this.rateRecovery.get(id)
+			if (recovery && state.socket !== recovery.socket)
+				this.rateRecovery.delete(id)
 		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -2064,6 +2072,13 @@ export class SourceManager extends EventEmitter {
 		// "disconnected" for an id clients have already dropped.
 		const state = this.sources.get(id)
 		if (state) state.connected = false
+		this.rateRecovery.delete(id)
+		for (const controller of this.tunerCommandControllers.get(id) ?? [])
+			controller.abort(
+				new WaveKitError("Source was removed", "SOURCE_NOT_FOUND"),
+			)
+		this.tunerCommandControllers.delete(id)
+		this.tunerCommands.delete(id)
 		if (!this.teardown(id)) return
 		this.emit("source-removed", id, new Date())
 	}
@@ -2553,15 +2568,58 @@ export class SourceManager extends EventEmitter {
 		{ deadline: number; socket: net.Socket }
 	>()
 
+	private readonly tunerCommandContext = new AsyncLocalStorage<AbortSignal>()
+	private readonly tunerCommandControllers = new Map<
+		string,
+		Set<AbortController>
+	>()
+
 	/** Serialize API commands, including the receiver's rate-change restart. */
-	async runTunerCommand<T>(id: string, command: () => Promise<T>): Promise<T> {
+	async runTunerCommand<T>(
+		id: string,
+		command: (signal: AbortSignal) => Promise<T>,
+	): Promise<T> {
+		if (!this.sources.has(id))
+			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
+		const controller = new AbortController()
+		const { signal } = controller
+		const controllers =
+			this.tunerCommandControllers.get(id) ?? new Set<AbortController>()
+		controllers.add(controller)
+		this.tunerCommandControllers.set(id, controllers)
+		let onAbort: () => void = () => {}
+		const cancelled = new Promise<never>((_resolve, reject) => {
+			onAbort = () => reject(signal.reason)
+			signal.addEventListener("abort", onAbort, { once: true })
+		})
+		let timer: ReturnType<typeof setTimeout> | undefined
 		const previous = this.tunerCommands.get(id) ?? Promise.resolve()
-		const pending = previous.then(async () => {
+		const execution = previous.then(async () => {
+			signal.throwIfAborted()
 			await this.waitForTunerReady(id)
-			const result = await command()
+			signal.throwIfAborted()
+			timer = setTimeout(() => {
+				controller.abort(
+					new WaveKitError(
+						"Tuner command timed out; retry the command",
+						"TUNER_COMMAND_TIMEOUT",
+					),
+				)
+			}, TUNER_COMMAND_TIMEOUT_MS)
+			let result: T
+			try {
+				result = await this.tunerCommandContext.run(signal, () =>
+					command(signal),
+				)
+			} finally {
+				clearTimeout(timer)
+			}
+			signal.throwIfAborted()
 			await this.waitForTunerReady(id)
+			signal.throwIfAborted()
 			return result
 		})
+		const pending = Promise.race([execution, cancelled])
 		const tail = pending.then(
 			() => {},
 			() => {},
@@ -2570,6 +2628,14 @@ export class SourceManager extends EventEmitter {
 		try {
 			return await pending
 		} finally {
+			clearTimeout(timer)
+			signal.removeEventListener("abort", onAbort)
+			controllers.delete(controller)
+			if (
+				controllers.size === 0 &&
+				this.tunerCommandControllers.get(id) === controllers
+			)
+				this.tunerCommandControllers.delete(id)
 			if (this.tunerCommands.get(id) === tail) this.tunerCommands.delete(id)
 		}
 	}
@@ -2643,6 +2709,9 @@ export class SourceManager extends EventEmitter {
 	 * @returns true if write buffer accepted the data
 	 */
 	writeToSource(id: string, payload: Buffer): boolean {
+		// Async context follows controller awaits, so cancelled callbacks cannot
+		// write later, even after a replacement source registers the same id.
+		this.tunerCommandContext.getStore()?.throwIfAborted()
 		const state = this.sources.get(id)
 		if (!state) {
 			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")

@@ -5,6 +5,7 @@ import {
 	SourceManager,
 	calculateBackoffDelay,
 	SOURCE_CONNECT_TIMEOUT_MS,
+	TUNER_COMMAND_TIMEOUT_MS,
 } from "../../../src/core/source-manager.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import Fastify from "fastify"
@@ -24,7 +25,8 @@ const frame = (command: number, value: number) => {
 	data.writeUInt32BE(value, 1)
 	return data
 }
-async function setup() {
+async function setup(payloadOnReconnect = true) {
+	let connections = 0
 	const sockets = new Set<net.Socket>()
 	const frames: number[] = []
 	const server = net.createServer(socket => {
@@ -39,8 +41,13 @@ async function setup() {
 				pending = pending.subarray(5)
 			}
 		})
+		connections++
 		socket.write(
-			Buffer.concat([Buffer.from("RTL0"), Buffer.alloc(8), Buffer.alloc(8)]),
+			Buffer.concat([
+				Buffer.from("RTL0"),
+				Buffer.alloc(8),
+				Buffer.alloc(connections === 1 || payloadOnReconnect ? 8 : 0),
+			]),
 		)
 	})
 	server.listen(0, "127.0.0.1")
@@ -201,4 +208,99 @@ it("sample-rate HTTP success waits for IQ before a queued frequency request runs
 		sampleRate: 1_200_000,
 	})
 	expect(frames[0]).toBe(1_200_000)
+})
+
+it("bounds hung execution at 9 s, advances the FIFO and blocks a late write", async () => {
+	const { manager } = await setup()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(3_456_789)
+	let resume: () => void = () => {}
+	const gate = new Promise<void>(resolve => {
+		resume = resolve
+	})
+	const write = vi.spyOn(net.Socket.prototype, "write")
+	let lateError: unknown
+	const hung = manager.runTunerCommand("source", async () => {
+		await gate
+		try {
+			manager.writeToSource("source", frame(1, 12_345))
+		} catch (error) {
+			lateError = error
+			throw error
+		}
+	})
+	const rejected = expect(hung).rejects.toMatchObject({
+		code: "TUNER_COMMAND_TIMEOUT",
+	})
+	const next = vi.fn(async () => {
+		manager.writeToSource("source", frame(4, 42))
+	})
+	const queued = manager.runTunerCommand("source", next)
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS - 1)
+	expect(next).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	await rejected
+	await queued
+	expect(next).toHaveBeenCalledOnce()
+	await vi.advanceTimersByTimeAsync(1)
+	resume()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(lateError).toBeInstanceOf(WaveKitError)
+	expect(lateError).toMatchObject({ code: "TUNER_COMMAND_TIMEOUT" })
+	expect(write).toHaveBeenCalledTimes(1)
+	expect(write).toHaveBeenCalledWith(frame(4, 42))
+})
+
+it("removing a source rejects hung and queued commands immediately", async () => {
+	const { manager } = await setup()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(4_321_987)
+	const hung = manager.runTunerCommand(
+		"source",
+		() => new Promise<never>(() => {}),
+	)
+	const next = vi.fn(async () => {})
+	const queued = manager.runTunerCommand("source", next)
+	const checks = [hung, queued].map(pending =>
+		expect(pending).rejects.toMatchObject({ code: "SOURCE_NOT_FOUND" }),
+	)
+	await vi.advanceTimersByTimeAsync(137)
+	await manager.disconnect("source")
+	await Promise.all(checks)
+	expect(next).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS + 1)
+	expect(next).not.toHaveBeenCalled()
+})
+
+it("clears expired recovery when background reconnect finally supplies IQ", async () => {
+	const { manager, sockets } = await setup(false)
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.setSystemTime(5_432_109)
+	vi.spyOn(Math, "random").mockReturnValue(0)
+	const disconnected = once(manager, "disconnected")
+	const rate = manager.runTunerCommand("source", async () => {
+		manager.writeToSource("source", frame(2, 1_200_000))
+	})
+	const rejected = expect(rate).rejects.toMatchObject({
+		code: "SOURCE_RECONNECTING",
+	})
+	await disconnected
+	const connected = once(manager, "connected")
+	const backoff = calculateBackoffDelay(1)
+	await vi.advanceTimersByTimeAsync(backoff)
+	await connected
+	await vi.advanceTimersByTimeAsync(SOURCE_CONNECT_TIMEOUT_MS)
+	await rejected
+	await vi.advanceTimersByTimeAsync(137)
+	const payload = once(manager, "payload-started")
+	for (const socket of sockets) socket.write(Buffer.alloc(8))
+	await payload
+	const lost = once(manager, "disconnected")
+	for (const socket of sockets) socket.destroy()
+	await lost
+	await expect(
+		manager.runTunerCommand("source", async () => {
+			manager.writeToSource("source", frame(4, 42))
+		}),
+	).rejects.toMatchObject({ code: "SOURCE_DISCONNECTED" })
 })
