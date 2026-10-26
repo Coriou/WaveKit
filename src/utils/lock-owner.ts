@@ -18,6 +18,8 @@ export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
 	hostname: z.string(),
 	pidNamespace: z.string().nullable().optional(),
+	// Linux owners need PID namespace evidence even when boot_id was unreadable.
+	platform: z.string().optional(),
 	bootId: z
 		.object({ kind: z.enum(["linux", "time"]), value: z.string() })
 		.nullable(),
@@ -34,8 +36,10 @@ export interface OwnerReader {
 	uptime: () => number
 	processUptime: () => number
 	now: () => number
+	platform?: () => string
 }
 const reader: OwnerReader = {
+	platform: () => process.platform,
 	readFile: path => fs.readFile(path, "utf8"),
 	pidNamespace: async () => String((await fs.stat("/proc/self/ns/pid")).ino),
 	kill: pid => {
@@ -113,6 +117,7 @@ export async function readLockOwner(
 		bootId,
 		startTime,
 		pidNamespace: pidNamespace ?? null,
+		platform: io.platform?.() ?? process.platform,
 	}
 }
 export interface OwnerProbe {
@@ -139,10 +144,17 @@ export function sameScope(recorded: LockOwner, current: LockOwner): boolean {
 		recorded.bootId.kind === current.bootId.kind &&
 		!identityDiffers(recorded.bootId, current.bootId) &&
 		recorded.hostname === current.hostname &&
-		(recorded.bootId.kind !== "linux" ||
-			(Boolean(recorded.pidNamespace) &&
+		(Boolean(recorded.pidNamespace) || Boolean(current.pidNamespace)
+			? Boolean(recorded.pidNamespace) &&
 				Boolean(current.pidNamespace) &&
-				recorded.pidNamespace === current.pidNamespace))
+				recorded.pidNamespace === current.pidNamespace
+			: // No namespace on either side: only a known non-Linux platform
+				// (no PID namespaces) may use local PID evidence.
+				recorded.bootId.kind !== "linux" &&
+				recorded.platform !== undefined &&
+				recorded.platform !== "linux" &&
+				current.platform !== undefined &&
+				current.platform !== "linux")
 	)
 }
 export function isStale(

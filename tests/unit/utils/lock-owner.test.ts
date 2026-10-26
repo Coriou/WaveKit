@@ -584,9 +584,18 @@ describe("ownership loss and monotonic observation", () => {
 				...current,
 				bootId: { kind: "time" as const, value: "1000" },
 			}
-			expect(
-				isStale(fallback, fallback, { alive: false, startTime: null }),
-			).toBe(true)
+			if (namespace !== "different") {
+				const linux = { ...fallback, platform: "linux" }
+				expect(isStale(linux, linux, { alive: false, startTime: null })).toBe(
+					false,
+				)
+				const unknown = { ...fallback, platform: undefined }
+				expect(
+					isStale(unknown, unknown, { alive: false, startTime: null }),
+				).toBe(false)
+				const mac = { ...fallback, pidNamespace: null, platform: "darwin" }
+				expect(isStale(mac, mac, { alive: false, startTime: null })).toBe(true)
+			}
 		},
 	)
 	it.each([-60000, 60000])(
