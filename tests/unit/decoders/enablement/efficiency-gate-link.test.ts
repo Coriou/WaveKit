@@ -111,6 +111,7 @@ it("nothing sheddable warns at the minute bound and one past it", () => {
 		[110001, 2],
 	]) {
 		s.time(time!)
+		if (time! > 50000) s.windows([window(80000), window(90000)])
 		expect(s.gate.probation(running, 0)).toEqual([])
 		expect(s.warn).toHaveBeenCalledTimes(count!)
 	}
@@ -388,5 +389,25 @@ it.each([31000, 61000])(
 		expect(s.gate.probation(active, 0)).toEqual([
 			{ key: p.key, detail: "late-drops" },
 		])
+	},
+)
+
+it.each([69999, 70000, 70001])(
+	"late windows expire by elapsed evidence time at %i",
+	at => {
+		const s = setup()
+		const p = placement()
+		s.gate.admit(p, [], 0)
+		const running = [s.running(p)]
+		s.gate.probation(running, 0)
+		s.time(30000)
+		s.gate.probation(running, 0)
+		s.windows([window(30000), window(40000)])
+		// Three 10 s windows cover (now - 30000, now]; the first window
+		// ends at 40000, so it expires exactly at 70000, and remains expired.
+		s.time(at)
+		expect(s.gate.probation(running, at)).toEqual(
+			at < 70000 ? [{ key: p.key, detail: "late-drops" }] : [],
+		)
 	},
 )

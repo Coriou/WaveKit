@@ -342,7 +342,12 @@ export function createEfficiencyGate(
 					)
 				)
 					windows = value
-						.filter(w => w.startMono >= (lateSince.get(sourceId) ?? mono))
+						.filter(
+							w =>
+								w.startMono >= (lateSince.get(sourceId) ?? mono) &&
+								w.endMono >
+									mono - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+						)
 						.slice(-LATE_SHED_WINDOWS)
 			}
 		} catch {

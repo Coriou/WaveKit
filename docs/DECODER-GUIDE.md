@@ -628,5 +628,9 @@ counters do not extend the drop window. A zero current drop rate can coexist wit
 `dropping` state; after 10 seconds it becomes `clearing` while the clean window completes.
 Missing or stale samples block admission as `unknown`. A waiting candidate is checked again
 when clean evidence is sufficient, without the additional backoff used for a failed probation.
+After a source reconnect, probation requires fresh coverage; drops recorded in the previous
+source epoch do not condemn a resumed decoder. New drops still trigger probation backoff.
+Late-drop shedding uses only completed windows ending within the last 30 seconds
+(3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
 The budget defaults to half the available CPU capacity, with process and cgroup limits;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).

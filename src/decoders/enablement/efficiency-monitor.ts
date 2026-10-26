@@ -241,7 +241,14 @@ export function createEfficiencyMonitor(deps: {
 	}
 	const sourceDown = (id: string) => {
 		const s = states.get(id)
-		if (s) resetSource(s)
+		if (s) {
+			resetSource(s)
+			// Probation and coverage resume in a new source epoch. Old-rate
+			// transition loss must not condemn a retained admission indefinitely.
+			// New-epoch deltas still condemn it, including before the gate polls.
+			s.lastDropMono = null
+			s.drops = []
+		}
 		recoveries.set(id, {
 			epoch: ++nextSourceEpoch,
 			readyAt: null,
@@ -973,7 +980,13 @@ export function createEfficiencyMonitor(deps: {
 				at - s.lastTickMono > EFFICIENCY_STALE_MS
 			)
 				return []
-			return s.windows.map(w => ({ ...w }))
+			// Incomplete later windows do not replace history: expire it by time
+			// as well as count, over (now - 3 × 10000 ms, now].
+			return s.windows
+				.filter(
+					w => w.endMono > at - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+				)
+				.map(w => ({ ...w }))
 		},
 		linkDropsSince(id, since) {
 			const at = clock()

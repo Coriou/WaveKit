@@ -153,7 +153,9 @@ function scenario(
 		const deadline = missingRecovery ? 12200 : 10000 - phase
 		for (now = pendingAt + 2000; now < pendingAt + deadline; now += 2000) {
 			monitor.sampleNow()
-			expect(monitor.lateWindows("s")).toEqual(windows)
+			expect(monitor.lateWindows("s")).toEqual(
+				windows.filter(w => w.endMono > now - 3 * 10000),
+			)
 		}
 		now = pendingAt + deadline - 1
 		expect(monitor.sampleNow().sources.get("s")!.droppedBytesDelta).toBeNull()
