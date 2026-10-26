@@ -24,7 +24,7 @@ export const DQ_CREATE_SNR_DB = 18
  * its own track SNR is also at least 15 dB, the measured noise maximum (the pending median
  * below). The 18 dB threshold reads the best of the slot, best covering slot and matched-window
  * SNRs, a maximum over several noisy readings: a weak burst whose own SNR is 12 to 14 dB read
- * 18.2 dB once in a private band capture. Such a burst waits for a second and third sighting (1.4)
+ * 18.2 dB once in a recorded band capture. Such a burst waits for a second and third sighting (1.4)
  * instead; a longer observation keeps the threshold alone (a wide track judged at its best slot).
  */
 export const DQ_CREATE_TRACK_SNR_DB = 15

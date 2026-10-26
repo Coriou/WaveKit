@@ -107,7 +107,7 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   integration, so a burst that closed before the store's first re-ingest) therefore creates
   on that rule only when its own track SNR is also at least `DQ_CREATE_TRACK_SNR_DB` = 15 dB
   (the measured noise maximum); otherwise it is held as pending (1.4) like any weak sighting.
-  Non-finite blocks or track SNR never corroborate. Measured on a private band capture: a
+  Non-finite blocks or track SNR never corroborate. Measured on a recorded band capture: a
   weak periodic burst (track SNR 12 to 14 dB, best slot 16 to 18.2 dB) passed the gate once in
   120 s and made a one-sighting record; with 1.4c it makes none, and the five real emitters
   keep their records. Fixtures: a 19-block
@@ -139,7 +139,7 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   1.4e **Edge band.** The detector, segmenter and channel gate see
   `DETECTION_USABLE_FRACTION` = 0.95 of the captured span (±486.4 kHz at 1.024 Msps:
   0.95 × 512 kHz), while windows, hop plans, probes, IQ capture and the activity history keep
-  `USABLE_FRACTION` = 0.8 (±409.6 kHz). On a private RTL capture the median floor fell 1.9 dB
+  `USABLE_FRACTION` = 0.8 (±409.6 kHz). On a recorded RTL capture the median floor fell 1.9 dB
   from mid-band to 0.93 to 0.95 of Nyquist and 2.4 dB over the last 3 %: still the passband
   shoulder, so the per-bin floor keeps an SNR there meaningful; the outer 5 % (25.6 kHz a side)
   stays masked against energy folded back from past Nyquist. A segment reaching within the gap

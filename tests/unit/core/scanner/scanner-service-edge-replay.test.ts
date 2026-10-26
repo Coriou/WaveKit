@@ -1,5 +1,6 @@
 // DQ 1.4e: a finished IQ capture whose track turns edge while the replay queue waits for a decoder
-// slot is never replayed (real replay queue, a stateful capture port).
+// slot is never replayed, and one turning edge while its replay runs has its result dropped (real
+// replay queue, a stateful capture port).
 import { rm } from "node:fs/promises"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { IQ_REPLAY_QUEUE_HOLDER } from "../../../../src/core/iq-capture/replay-queue.js"
@@ -26,7 +27,13 @@ interface Internal {
 function statefulPort() {
 	const entries = new Map<
 		string,
-		{ view: IqCaptureView; holder: string | null; finished: boolean }
+		{
+			view: IqCaptureView
+			holder: string | null
+			finished: boolean
+			replaying?: boolean
+			pendingDiscard?: boolean
+		}
 	>()
 	const finished: ((v: IqCaptureView) => void)[] = []
 	const removed: ((id: string, obs: string | null) => void)[] = []
@@ -59,7 +66,7 @@ function statefulPort() {
 		captureFor: () => ({ refused: "busy" as const }),
 		view: (id: string) => {
 			const e = entries.get(id)
-			return e?.finished ? e.view : null
+			return e?.finished && !e.pendingDiscard ? e.view : null
 		},
 		holderOf: (id: string) => entries.get(id)?.holder,
 		claim: (id: string, holder: string) => {
@@ -74,7 +81,9 @@ function statefulPort() {
 		discard: vi.fn((id: string, _reason: string, holder?: string) => {
 			const e = entries.get(id)
 			if (!e || (e.holder !== null && e.holder !== holder)) return false
-			remove(id)
+			// Deferred while a replay of it runs (the store's pending deletion).
+			if (e.replaying) e.pendingDiscard = true
+			else remove(id)
 			return true
 		}),
 		end: vi.fn(),
@@ -194,5 +203,126 @@ describe("finished IQ capture turning edge (DQ 1.4e)", () => {
 		expect(port.discard).not.toHaveBeenCalled()
 		expect(entries.has("cap-1")).toBe(true)
 		expect(request).toHaveBeenCalledTimes(2)
+	})
+})
+
+interface Spied {
+	applyEvidence(live: LiveObservation, ev: unknown): boolean
+	rememberReplayTrials(...args: unknown[]): void
+}
+
+/** The replay is running (a probe holds the capture) when the track turns edge. */
+async function runWhileReplaying(turnsEdge: boolean) {
+	const h = serviceHarness({ patch: s => void (s.passive.enabled = false) })
+	harnesses.push(h)
+	const internal = h.service as unknown as Internal
+	const { port, entries, finish } = statefulPort()
+	internal.deps = { ...internal.deps, iqCapture: port as never }
+	let answer: ((a: unknown) => void) | null = null
+	const asked: { protocol: string }[] = []
+	const request = vi.fn((req: { captureId: string; protocol: string }) => {
+		asked.push(req)
+		const e = entries.get(req.captureId)
+		if (e) e.replaying = true
+		return {
+			run: {
+				result: new Promise(resolve => {
+					answer = a => {
+						if (e) e.replaying = false
+						resolve(a)
+					}
+				}),
+				cancel: () => answer?.({ outcome: "cancelled", decoded: null }),
+			},
+		}
+	})
+	internal.replayProbes = () => ({
+		request,
+		onSlotRelease: () => () => undefined,
+		dispose: () => undefined,
+	})
+	await h.service.start()
+	await h.service.createJob({
+		sourceId: "rtl",
+		mode: "in-window",
+		ranges: [{ startHz: 446_000_000, endHz: 446_100_000 }],
+	})
+	const track = trackOf({
+		trackId: "t1",
+		centreHz: CENTRE + 50_000,
+		obwHz: 9000,
+		epoch: 1,
+	})
+	track.gate = "passed"
+	const live: LiveObservation = {
+		observationId: "o_1",
+		sourceId: "rtl",
+		trackId: "t1",
+		epoch: 1,
+		jobIds: [],
+		discoveryId: "d_1",
+		startedAt: 0,
+		classification: { class: "unknown", hypotheses: [], tier: "spectral" },
+		probeIds: new Set(),
+		lastActivityAt: 0,
+		lastIngestAt: 0,
+		lastTrack: track,
+		decoded: false,
+		encrypted: false,
+	}
+	internal.live.set("t1", live)
+	internal.requestIqCapture(live, track)
+	finish("cap-1")
+	await new Promise(r => setTimeout(r, 0))
+	// The first trial is running on the capture.
+	expect(request).toHaveBeenCalledTimes(1)
+	expect(entries.get("cap-1")?.replaying).toBe(true)
+	internal.onTrack("rtl", {
+		kind: "track-update",
+		track: { ...track, flags: { ...track.flags, edge: turnsEdge } },
+	})
+	const protocol = asked[0]?.protocol
+	const spied = h.service as unknown as Spied
+	const applied = vi.spyOn(spied, "applyEvidence")
+	const remembered = vi.spyOn(spied, "rememberReplayTrials")
+	const results = vi.spyOn(h.service, "applyReplayResult")
+	;(answer as ((a: unknown) => void) | null)?.({
+		outcome: "decoded",
+		decoded: { protocol, identity: { kind: "dmr-cc", value: "1" } },
+	})
+	await new Promise(r => setTimeout(r, 0))
+	// The decode reached the scanner's result sink either way.
+	expect(results).toHaveBeenCalledTimes(1)
+	expect(results.mock.calls[0]?.[0].decoded).not.toBeNull()
+	return { live, entries, port, protocol, applied, remembered }
+}
+
+describe("IQ replay running when its track turns edge (DQ 1.4e)", () => {
+	it("its decode is dropped: no identity, no trial memory, the capture is not kept", async () => {
+		const { live, entries, port, protocol, applied, remembered } =
+			await runWhileReplaying(true)
+		expect(protocol).toBe("dmr")
+		expect(port.discard).toHaveBeenCalledWith(
+			"cap-1",
+			"invalid",
+			IQ_REPLAY_QUEUE_HOLDER,
+		)
+		expect(applied).not.toHaveBeenCalled()
+		expect(remembered).not.toHaveBeenCalled()
+		expect(live.decoded).toBe(false)
+		// The pending deletion completed when the queue settled the capture.
+		expect(entries.has("cap-1")).toBe(false)
+	})
+
+	it("a control that stays inside keeps its decode", async () => {
+		const { live, port, protocol, applied, remembered } =
+			await runWhileReplaying(false)
+		expect(protocol).toBe("dmr")
+		expect(port.discard).not.toHaveBeenCalled()
+		expect(applied).toHaveBeenCalledWith(
+			live,
+			expect.objectContaining({ protocol: "dmr", transport: "replay" }),
+		)
+		expect(remembered).toHaveBeenCalledTimes(1)
 	})
 })
