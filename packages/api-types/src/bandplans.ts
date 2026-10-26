@@ -381,7 +381,13 @@ export const presetRangeSchema = z
 			)
 			.max(8),
 		obwHz: z.array(z.number().positive().max(10_000_000)).max(8),
-		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(21),
+		protocols: z
+			.array(z.custom<ScannerProtocol>(isScannerProtocol))
+			// Read at parse time: the list is declared below this schema.
+			.refine(
+				list => list.length <= BANDPLAN_SCANNER_PROTOCOLS.length,
+				"Too many protocols",
+			),
 	})
 	.strict()
 	.refine(value => value.startHz < value.endHz, "Empty range")
@@ -447,7 +453,13 @@ export const scanPresetJobSchema = z
 					.refine(value => value.startHz <= value.endHz, "Inverted exclusion"),
 			)
 			.max(BANDPLANS_LIMITS.presetExclusions),
-		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(21),
+		protocols: z
+			.array(z.custom<ScannerProtocol>(isScannerProtocol))
+			// Read at parse time: the list is declared below this schema.
+			.refine(
+				list => list.length <= BANDPLAN_SCANNER_PROTOCOLS.length,
+				"Too many protocols",
+			),
 		sensitivity: z.enum(["low", "normal", "high"]).nullable(),
 		thresholdDb: z.number().min(0).max(40).nullable(),
 		fftSize: z
