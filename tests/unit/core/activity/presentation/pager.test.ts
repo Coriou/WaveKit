@@ -14,6 +14,33 @@ const page = (message: string, fn = 1) => ({
 })
 
 describe("pager presentation", () => {
+	it.each([
+		"<CR><LF>",
+		"<HT>",
+		"<VT>",
+		"<FF>",
+		"<RS>",
+		"<US>",
+		"\r\n",
+		"\t",
+		"\v",
+		"\f",
+		"\u001e",
+		"\u001f",
+	])("preserves words separated by %j in titles and fields", separator => {
+		const raw = page(`  UNIT 5${separator}RESPOND  NOW<NUL>\u0000\u0085 `)
+		const view = presentTextual("message", raw)
+		expect(view?.title).toContain("UNIT 5 RESPOND NOW")
+		expect(view?.fields?.find(f => f.key === "message")?.value).toBe(
+			"UNIT 5 RESPOND NOW",
+		)
+	})
+	it("strips non-whitespace markers and controls without inserting spaces", () => {
+		const view = presentTextual("message", page("Syn<NUL>\u0000\u0085thetic"))
+		expect(view?.fields?.find(f => f.key === "message")?.value).toBe(
+			"Synthetic",
+		)
+	})
 	it.each(names)(
 		"removes inner and trailing <%s> without changing the payload",
 		name => {
@@ -27,24 +54,24 @@ describe("pager presentation", () => {
 		},
 	)
 	it.each(["", "  ", names.map(n => `<${n}>`).join("")])(
-		"labels empty function-zero pages as network beacons",
+		"labels empty function-zero pages as tone only",
 		message => {
 			const view = presentTextual("message", page(message, 0))
-			expect(view?.title).toContain("network beacon")
+			expect(view?.title).toContain("tone only")
 			expect(view?.fields).toContainEqual({
 				key: "label",
 				label: "Label",
-				value: "network beacon",
+				value: "tone only",
 			})
 		},
 	)
 	it("keeps ordinary tone pages and nonempty function-zero messages", () => {
 		expect(presentTextual("message", page("", 1))?.title).not.toContain(
-			"network beacon",
+			"tone only",
 		)
 		expect(
 			presentTextual("message", page("Synthetic", 0))?.title,
-		).not.toContain("network beacon")
+		).not.toContain("tone only")
 	})
 	it.each([LONG_TEXT_BYTES, LONG_TEXT_BYTES + 1])(
 		"preserves the presentation byte budget at %i bytes",

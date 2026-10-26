@@ -1,14 +1,17 @@
 import type { ActivityRecord, ActivitySummary } from "@wavekit/api-types"
 
+// Keep marker regexes and sanitisation in sync with src/core/activity/presentation/pager.ts.
 // multimon-ng pocsag.c trtab: ASCII 0..31 and 127, represented as names.
 const MARKERS =
 	/<(NUL|SOH|STX|ETX|EOT|ENQ|ACK|BEL|BS|HT|LF|VT|FF|CR|SO|SI|DLE|DC1|DC2|DC3|DC4|NAK|SYN|ETB|CAN|EM|SUB|ESC|FS|GS|RS|US|DEL)>/g
 
-/** Remove multimon control names and C0/C1 controls from a pager body. */
+/** Preserve word separators while removing multimon names and C0/C1 controls. */
 export function sanitisePagerMessage(message: string): string {
 	return message
+		.replace(/<(LF|CR|HT|VT|FF|RS|US)>|[\n\r\t\v\f\u001e\u001f]/g, " ")
 		.replace(MARKERS, "")
 		.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+		.replace(/\s+/g, " ")
 		.trim()
 }
 

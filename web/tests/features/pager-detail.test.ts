@@ -1,6 +1,9 @@
 import { expect, it } from "vitest"
 import type { ActivityRecord, ActivitySummary } from "@wavekit/api-types"
-import { pagerDetailItem } from "../../src/features/activity/pager-detail.ts"
+import {
+	pagerDetailItem,
+	sanitisePagerMessage,
+} from "../../src/features/activity/pager-detail.ts"
 import { rowView } from "../../src/features/activity/rows.ts"
 import { messageView } from "../../src/features/messages/card.ts"
 
@@ -137,10 +140,60 @@ it.each(["Synthetic body", "Synthetic…"])(
 		expect(messageView(detail, detailRecord).text).toBe("Synthetic body")
 	},
 )
-it("treats a network beacon as a notice without a tone-only reception body", () => {
+it("treats a tone only as a notice without a tone-only reception body", () => {
 	const { item } = fixture("", "")
-	item.fields = [{ key: "label", label: "Label", value: "network beacon" }]
+	item.fields = [{ key: "label", label: "Label", value: "tone only" }]
 	const view = messageView(item)
 	expect(view.notice).toBe(true)
 	expect(view.toneOnly).toBe(false)
+})
+
+it.each([
+	"<CR><LF>",
+	"<HT>",
+	"<VT>",
+	"<FF>",
+	"<RS>",
+	"<US>",
+	"\r\n",
+	"\t",
+	"\v",
+	"\f",
+	"\u001e",
+	"\u001f",
+])(
+	"preserves words separated by %j in expanded and fallback bodies",
+	separator => {
+		const message = `  UNIT 5${separator}RESPOND  NOW<NUL>\u0000\u0085 `
+		const { item, record } = fixture(message, "UNIT 5…")
+		expect(sanitisePagerMessage(message)).toBe("UNIT 5 RESPOND NOW")
+		expect(messageView(pagerDetailItem(item, record), record).text).toBe(
+			"UNIT 5 RESPOND NOW",
+		)
+		item.fields = []
+		record.payload.fields = []
+		expect(messageView(item, record).text).toBe("UNIT 5 RESPOND NOW")
+	},
+)
+it("strips non-whitespace markers and controls without inserting spaces", () => {
+	expect(sanitisePagerMessage("Syn<NUL>\u0000\u0085thetic")).toBe("Synthetic")
+})
+it("keeps tone only labels outside paging as ordinary receptions", () => {
+	const { item } = fixture("", "")
+	item.category = "other"
+	item.fields = [{ key: "label", label: "Label", value: "tone only" }]
+	expect(rowView(item).notice).toBe(false)
+	expect(messageView(item).notice).toBe(false)
+})
+it("uses the tone only fallback title for a compact paging notice", () => {
+	const { item } = fixture("", "")
+	item.title = null
+	item.fields = [{ key: "label", label: "Label", value: "tone only" }]
+	expect(rowView(item)).toMatchObject({
+		title: "tone only",
+		icon: null,
+		message: null,
+		readings: null,
+		notice: true,
+	})
 })

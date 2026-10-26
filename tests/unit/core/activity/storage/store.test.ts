@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
+import { presentTextual } from "../../../../../src/core/activity/presentation/pager.js"
 import { buildActivityRow } from "../../../../../src/core/activity/storage/row.js"
 import { TELEMETRY_OUTPUT_TYPES } from "../../../../../src/core/activity/storage/telemetry.js"
 import {
@@ -25,6 +26,31 @@ afterEach(async () => {
 })
 
 describe("activity store", () => {
+	it.each(["<CR><LF>", "<HT>"])(
+		"finds the word after %s in pager presentation text",
+		async separator => {
+			const view = presentTextual("message", {
+				protocol: "POCSAG1200",
+				capcode: 123,
+				message: `UNIT 5${separator}RESPOND`,
+			})
+			expect(view).toBeDefined()
+			const store = await openStore()
+			expect(
+				store.admit(
+					envelope({
+						...view,
+						outputType: "message",
+						frequencyHz: null,
+						// Isolate indexed presentation text from the raw payload's tokens.
+						decodedData: {},
+					}),
+				).admitted,
+			).toBe(true)
+			expect(await countFts(store.dbPath, "RESPOND")).toBe(1)
+		},
+	)
+
 	it("persists a reception and ignores a duplicate event id", async () => {
 		const stateDir = await tempDir()
 		const store = await openStore({ stateDir })

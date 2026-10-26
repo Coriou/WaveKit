@@ -152,10 +152,13 @@ export function rowView(s: ActivitySummary): RowView {
 			notice: true,
 		}
 	}
-	if (s.fields.some(f => f.key === "label" && f.value === "network beacon")) {
+	if (
+		s.category === "paging" &&
+		s.fields.some(f => f.key === "label" && f.value === "tone only")
+	) {
 		return {
 			icon: null,
-			title: s.title ?? "network beacon",
+			title: s.title ?? "tone only",
 			subtitle: protocolText(s) ?? "Paging",
 			message: null,
 			readings: null,
