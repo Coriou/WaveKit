@@ -1572,14 +1572,17 @@ function efficiencyBudgetRow(
 ): SettingRow {
 	const state = s.efficiencyBudget
 	const budget = state.settings
-	const disabled = s.readOnly
-		? "Read-only access: sign in on this WaveKit to change it"
-		: (state.denied ??
-			(state.busy
-				? "Saving…"
-				: budget
-					? undefined
-					: "CPU budget is unavailable"))
+	const disabled =
+		!s.decoderSettings || s.accessMode === "legacy"
+			? "This deployment sets the budget in YAML config: decoderPolicy.efficiency.cpuBudgetCores"
+			: s.readOnly
+				? "Read-only access: sign in on this WaveKit to change it"
+				: (state.denied ??
+					(state.busy
+						? "Saving…"
+						: budget
+							? undefined
+							: "CPU budget is unavailable"))
 	const usage =
 		state.used === null
 			? "Usage unavailable"

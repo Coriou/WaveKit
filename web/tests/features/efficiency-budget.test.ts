@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { EfficiencyBudgetStore } from "../../src/features/settings/efficiency-budget.ts"
+import { Store } from "../../src/data/store.ts"
+import type { AccessStoreState } from "../../src/data/index.ts"
 import { json, scripted } from "../data/fake-fetch.ts"
 
 const auto = {
@@ -92,6 +94,73 @@ describe("decoder CPU budget data", () => {
 			denied: "Settings write denied",
 			busy: false,
 		})
+	})
+	it.each([401, 403])(
+		"allows a save after reauthentication following a %s denial",
+		async status => {
+			let allowed = false
+			const { api } = scripted(call =>
+				call.method === "PUT" && !allowed
+					? json(status, { message: "Settings write denied" })
+					: json(200, call.url.endsWith("/budget") ? auto : view),
+			)
+			const access = new Store<AccessStoreState>({
+				access: null,
+				session: null,
+				error: null,
+			})
+			const store = new EfficiencyBudgetStore(api)
+			const unfollow = store.followAccess(access)
+			await store.load()
+			await store.save(3)
+			expect(store.get().denied).toBe("Settings write denied")
+			// Polling and unrelated errors must not clear a write denial.
+			await store.load()
+			access.update(s => ({ ...s, error: "Access refresh failed" }))
+			expect(store.get().denied).toBe("Settings write denied")
+			access.update(s => ({
+				...s,
+				session: {
+					deviceId: `device_${"d".repeat(43)}`,
+					expiresAt: Date.now() + 86_400_000,
+					csrfToken: "t".repeat(43),
+				},
+			}))
+			expect(store.get()).toMatchObject({
+				denied: null,
+				error: null,
+				settings: auto,
+			})
+			allowed = true
+			expect(await store.save("auto")).toEqual({ ok: true })
+			unfollow()
+		},
+	)
+	it("ignores a denial from a write started before the access context changed", async () => {
+		let answer: ((value: Response) => void) | undefined
+		const { api } = scripted(
+			() =>
+				new Promise<Response>(resolve => {
+					answer = resolve
+				}),
+		)
+		const access = new Store<AccessStoreState>({
+			access: null,
+			session: null,
+			error: null,
+		})
+		const store = new EfficiencyBudgetStore(api)
+		const unfollow = store.followAccess(access)
+		const saving = store.save(3)
+		access.update(s => ({ ...s, access: { mode: "legacy" } }))
+		answer?.(json(403, { message: "Settings write denied" }))
+		await saving
+		expect(store.get()).toMatchObject({
+			denied: null,
+			error: null,
+			busy: false,
+		})
+		unfollow()
 	})
 	it("validates responses and shows unknown usage after a failed refresh", async () => {
 		let malformed = false

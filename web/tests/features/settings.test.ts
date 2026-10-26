@@ -908,6 +908,23 @@ describe("Decoder CPU budget row", () => {
 			["efficiencyBudget", "auto"],
 		])
 	})
+	it.each([{ decoderSettings: false }, { accessMode: "legacy" as const }])(
+		"shows the budget as configured in YAML when writes are unavailable: %o",
+		capability => {
+			const row = byId(
+				buildRows(
+					snapshot({ ...capability, efficiencyBudget: state }),
+					actions(),
+				),
+				"dec.cpuBudgetCores",
+			)
+			expect(row.value).toBe("auto")
+			expect(row.help).toContain("1.25 / 4 cores used")
+			expect(row.disabled).toContain(
+				"YAML config: decoderPolicy.efficiency.cpuBudgetCores",
+			)
+		},
+	)
 	it("shows configured values, errors, unavailability and write protection", () => {
 		const rowOf = (over: Partial<SettingsSnapshot>) =>
 			byId(buildRows(snapshot(over), actions()), "dec.cpuBudgetCores")

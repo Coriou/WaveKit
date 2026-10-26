@@ -9,6 +9,8 @@ import { ApiError, errorMessage, validated } from "../../data/api-client.ts"
 import { failedWrite, WRITE_OK } from "../../data/setting-write.ts"
 import type { SettingWriteResult } from "../../data/setting-write.ts"
 import { Store } from "../../data/store.ts"
+import type { ReadableStore } from "../../data/store.ts"
+import type { AccessStoreState } from "../../data/index.ts"
 
 const cores = z.number().positive().max(64)
 const resolution = z.discriminatedUnion("mode", [
@@ -58,9 +60,24 @@ export const EMPTY_BUDGET: EfficiencyBudgetState = {
 export class EfficiencyBudgetStore extends Store<EfficiencyBudgetState> {
 	private inflight: Promise<void> | null = null
 	private revision = 0
+	private accessRevision = 0
 
 	constructor(private readonly api: ApiClient) {
 		super(EMPTY_BUDGET)
+	}
+
+	/** A denial belongs to the access/session context in which the write started. */
+	followAccess(access: ReadableStore<AccessStoreState>): () => void {
+		return access.subscribe((next, previous) => {
+			if (next.access === previous.access && next.session === previous.session)
+				return
+			this.accessRevision++
+			this.update(s => ({
+				...s,
+				error: s.denied === null ? s.error : null,
+				denied: null,
+			}))
+		})
 	}
 
 	load(): Promise<void> {
@@ -122,6 +139,7 @@ export class EfficiencyBudgetStore extends Store<EfficiencyBudgetState> {
 		if (this.get().busy)
 			return { ok: false, message: "A budget change is being saved" }
 		this.revision++
+		const accessRevision = this.accessRevision
 		this.update(s => ({ ...s, busy: true }))
 		try {
 			const result = validated(
@@ -139,8 +157,10 @@ export class EfficiencyBudgetStore extends Store<EfficiencyBudgetState> {
 				(error.status === 401 || error.status === 403)
 			this.update(s => ({
 				...s,
-				error: message,
-				denied: denied ? message : s.denied,
+				error:
+					denied && accessRevision !== this.accessRevision ? s.error : message,
+				denied:
+					denied && accessRevision === this.accessRevision ? message : s.denied,
 			}))
 			return failedWrite(error)
 		} finally {

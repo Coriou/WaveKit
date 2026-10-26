@@ -84,7 +84,9 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   with its resolved source (for example `auto (8 CPUs → 4 cores)` or `configured`). Enter **Auto**
   or a number greater than 0 and up to 64, including fractional cores; press Enter or leave the
   field to save immediately. Invalid values and save errors appear under the row. The control
-  is disabled with read-only access or when the core denies settings writes.
+  is disabled with read-only access or when the core denies settings writes; signing in again
+  allows another save attempt. On deployments without settings writes, the row shows the current
+  budget and a note to set `decoderPolicy.efficiency.cpuBudgetCores` in YAML config.
 
 ## Map and Messages
 

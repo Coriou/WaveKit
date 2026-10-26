@@ -262,10 +262,14 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 	)
 	const snapshot = useSnapshot(budgetStore)
 	useEffect(() => {
+		const unfollow = budgetStore.followAccess(data.access)
 		void budgetStore.load()
 		const timer = setInterval(() => void budgetStore.load(), 5000)
-		return () => clearInterval(timer)
-	}, [budgetStore])
+		return () => {
+			clearInterval(timer)
+			unfollow()
+		}
+	}, [budgetStore, data.access])
 	const [page, setPage] = useState<string | null>(null)
 	/** The band open in Band plans' editor (`packId/bandId`). */
 	const [band, setBand] = useState<string | null>(null)
