@@ -20,7 +20,8 @@
 		"data": {
 			"frequency": 0,
 			"fromaddr": "ABC001",
-			"msgType": "SYNTHETIC A"
+			"msgType": "SYNTHETIC A",
+			"text": "SYNTHETIC A"
 		}
 	},
 	{

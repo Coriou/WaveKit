@@ -130,7 +130,7 @@ export interface AmbientPairContext {
 	freqHz?: number
 	/** The decode's protocol when known before interpretation (the WG7 ambient-only types). */
 	protocol?: ScannerProtocol
-	message?: string
+	message?: string | undefined
 }
 
 export interface AmbientDeps {
@@ -591,7 +591,7 @@ export class AmbientEvidence extends EventEmitter {
 			hz: parsed.hz,
 			at,
 			protocol: parsed.protocol,
-			message: messageOf(out.data),
+			message: messageOf(this.types.get(decoderId) ?? "", out.data),
 		}
 		try {
 			decodes = acceptAmbient(entry.interp, parsed)
@@ -792,7 +792,12 @@ export class AmbientEvidence extends EventEmitter {
 			sourceId: target.sourceId,
 			hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
 			at,
-			message: messageOf((input as DecoderOutputLike).data ?? input),
+			message: messageOf(
+				type,
+				(input as DecoderOutputLike).data ??
+					(input as { line?: unknown }).line ??
+					input,
+			),
 			...(onSource
 				? {
 						passband: { centreHz: onSource.centreHz, halfHz: onSource.halfHz },
@@ -880,13 +885,112 @@ function decodeTime(input: unknown, fallback: number): number {
 	return fallback
 }
 
-/** Fixed-size digest of decoded content; timestamps do not turn a duplicate into a new frame. */
-function messageOf(data: unknown): string {
+/** Reception metadata never creates a second logical message. */
+const MESSAGE_METADATA =
+	/^(?:level|noise|noise_?floor|(?:rx_?)?rssi|(?:rx_?)?snr|error|errorknown|crcerr|fecerrs|lastseen|mod|modulation|frequency|frequencymalformed|freq|freq1|freq2|channel|at|time|.*time.*|mic)$/i
+
+/** Protocol content identity, or undefined when the DTO has no message content. */
+function messageOf(type: string, data: unknown): string | undefined {
+	if (!data || typeof data !== "object") return undefined
+	const record = data as Record<string, unknown>
+	let content: unknown = data
+	if (type === "acarsdec") {
+		// Blocks share a logical message number; block ID, text and reception differ.
+		if (typeof record["msgno"] === "string" && record["msgno"] !== "")
+			content = {
+				tail: record["tail"],
+				flight: record["flight"],
+				msgno: record["msgno"],
+			}
+		else if (typeof record["text"] !== "string" || record["text"] === "")
+			return undefined
+		else
+			content = {
+				tail: record["tail"],
+				flight: record["flight"],
+				text: record["text"],
+				label: record["label"],
+			}
+	} else if (type === "dumpvdl2") {
+		const acars = record["acars"]
+		const message =
+			acars && typeof acars === "object"
+				? messageOf("acarsdec", acars)
+				: typeof record["text"] === "string" && record["text"] !== ""
+					? record["text"]
+					: undefined
+		if (!message) return undefined
+		content = {
+			fromaddr: record["fromaddr"],
+			toaddr: record["toaddr"],
+			message,
+		}
+	} else if (type === "ais-catcher") {
+		content = fields(record, [
+			"mmsi",
+			"name",
+			"callsign",
+			"imo",
+			"shipType",
+			"lat",
+			"lon",
+			"cog",
+			"sog",
+			"heading",
+			"navStatus",
+			"destination",
+			"eta",
+			"draught",
+			"messageType",
+			"altitudeM",
+			"aidType",
+			"virtualAid",
+			"offPosition",
+		])
+	} else if (type === "lora-meshtastic") {
+		content = fields(record, ["from", "to", "id", "portnum", "payloadB64"])
+	} else if (type === "dsd-fme") {
+		content = fields(record, [
+			"protocol",
+			"cc",
+			"tg",
+			"src",
+			"slot",
+			"nac",
+			"ran",
+			"dgid",
+			"callsign",
+			"encrypted",
+			"callId",
+			"talkgroup",
+			"source",
+		])
+	} else if (type === "multimon-ng" && record["protocol"] === "AFSK1200") {
+		// The adapter exposes only addresses, not the APRS information field.
+		return undefined
+	} else if (type === "multimon-ng") {
+		content = fields(record, [
+			"protocol",
+			"address",
+			"capcode",
+			"function",
+			"messageType",
+			"message",
+		])
+	} else if (
+		type === "direwolf" &&
+		!record["message"] &&
+		!record["raw"] &&
+		!record["info"]
+	) {
+		return undefined
+	}
+	// AIS: vessel content; Meshtastic: packet ID/payload; paging: capcode/function/text;
+	// DSD: protocol/link content; rtl_433: model/device ID and decoded sensor fields.
 	return createHash("sha256")
 		.update(
-			JSON.stringify(data, (key, value: unknown) => {
-				if (key === "timestamp" || key === "at" || key === "time")
-					return undefined
+			JSON.stringify(content, (key, value: unknown) => {
+				if (MESSAGE_METADATA.test(key)) return undefined
 				if (value && typeof value === "object" && !Array.isArray(value))
 					return Object.fromEntries(
 						Object.entries(value).sort(([a], [b]) => a.localeCompare(b)),
@@ -895,6 +999,18 @@ function messageOf(data: unknown): string {
 			}) ?? "",
 		)
 		.digest("hex")
+}
+
+/** Keep only protocol content carried by the adapter DTO. */
+function fields(
+	record: Record<string, unknown>,
+	keys: readonly string[],
+): Record<string, unknown> {
+	return Object.fromEntries(
+		keys
+			.filter(key => record[key] !== undefined)
+			.map(key => [key, record[key]]),
+	)
 }
 
 /** Choose the same channel reach before pairing as the interpreter will emit afterward. */

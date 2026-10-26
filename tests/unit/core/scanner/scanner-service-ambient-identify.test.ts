@@ -68,7 +68,7 @@ const status = (id: string, type: string): DecoderStatus =>
 let syntheticMessage = 0
 const ship = (mmsi: string) => ({
 	type: "ship",
-	data: { mmsi, channel: "A", text: `SYNTHETIC ${++syntheticMessage}` },
+	data: { mmsi, channel: "A", name: `SYNTHETIC ${++syntheticMessage}` },
 	timestamp: new Date(),
 })
 
@@ -83,6 +83,7 @@ interface Rig {
 	configs: Map<string, DecoderConfig>
 	instances: Map<string, EventEmitter | { caps: { input: string } }>
 	ambient: () => AmbientEvidence
+	hear: (output: ReturnType<typeof ship>) => void
 }
 
 /** A harness whose fake manager reports config-owned decoders (startup or runtime). */
@@ -100,6 +101,9 @@ function rig(opts: {
 		decoderConfigs: opts.startup ?? [],
 		...(opts.trust ? { ambientTrust: opts.trust } : {}),
 	})
+	const clock = { offset: 0 }
+	const internal = h.service as unknown as { now: () => number }
+	internal.now = () => Date.now() + clock.offset
 	const statuses = new Map<string, DecoderStatus>()
 	const configs = new Map<string, DecoderConfig>()
 	const instances = new Map<
@@ -119,6 +123,13 @@ function rig(opts: {
 	d["getConfiguredDecoderConfigs"] = () => [...configs.values()]
 	return {
 		h,
+		hear: output => {
+			h.decoders.emitOutput("ais", {
+				...output,
+				timestamp: new Date(Date.now() + clock.offset),
+			})
+			clock.offset += 2_000
+		},
 		statuses,
 		configs,
 		instances,
@@ -191,10 +202,10 @@ describe("ScannerService ambient identify (WG7)", () => {
 					outcome: "running",
 				}),
 			])
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
 			// Two distinct synthetic messages from one MMSI confirm within the pairing window.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			const target = firstTarget(r, jobId)
 			expect(target.state).toBe("identified")
@@ -251,10 +262,10 @@ describe("ScannerService ambient identify (WG7)", () => {
 					t => t.transport === "ambient" && t.outcome === "running",
 				),
 			)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
 			// Two distinct synthetic messages from one MMSI confirm within the pairing window.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")
 			const target = firstTarget(r, job.id)
 			expect(target.state).toBe("identified")
@@ -276,8 +287,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 					t => t.transport === "ambient",
 				),
 			)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			expect(evidence).toEqual([])
 			expect(r.ambient().trustDropCount).toBe(2)
@@ -303,8 +314,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 			const evidence: unknown[] = []
 			r.ambient().on("evidence", e => evidence.push(e))
 			const jobId = await identifyAisTarget(r, 60_000)
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			expect(evidence).toEqual([])
 			const target = firstTarget(r, jobId)
@@ -419,8 +430,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 			)
 			// The track is wide enough that the former max(1500, OBW/2) pairing reached 161.975 MHz.
 			expect(wide?.lastTrack?.obwHz ?? 0).toBeGreaterThan(2 * (WIDE_HZ - AIS_A))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
-			r.h.decoders.emitOutput("ais", ship("244123456"))
+			r.hear(ship("244123456"))
+			r.hear(ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")
 			// The decodes are evidence; they just name no wide track.
 			expect(evidence.map(e => e.hz)).toEqual([AIS_A, AIS_A])

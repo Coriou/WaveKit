@@ -15,7 +15,7 @@
  * - Acceptance is kept per scope too (isAccepted / markAccepted): an identity accepted on one
  *   discovery is never accepted on another through the same decoder. At most
  *   CONFIRM_MAX_ENTRIES accepted entries, least recently used evicted first.
- * - Content-aware ambient callers use pairMessage: two distinct payloads need no skew delay;
+ * - Content-aware ambient callers use pairMessage: two distinct payloads also need the separation guard;
  *   identical payloads never pair. Other callers keep pair() and its separation guard.
  * - Invalid scope, key, value or clock reading: no pairing (the safe answer).
  */
@@ -83,9 +83,8 @@ export class ConfirmMemory {
 	}
 
 	/**
-	 * Content-aware ambient pairing needs no 2 s delay: different checked payloads prove
-	 * two messages even when aircraft send them milliseconds apart. Identical content
-	 * never pairs, even after 2 s; callers without content retain pair()'s skew guard.
+	 * Content-aware ambient pairing also enforces the 2 s separation guard. Identical
+	 * content never pairs within the window; callers without content use pair().
 	 * At most 4096 identity entries, each with one 64-character digest (4096 × 64).
 	 */
 	pairMessage(
@@ -109,11 +108,17 @@ export class ConfirmMemory {
 		}
 		if (!Number.isFinite(at)) return false
 		const id = `${scope}\u0000${key}\u0000${value}`
+		this.expire(at)
 		const previous = this.messages.get(id)
 		if (previous && at < previous.at) return false
 		const inWindow =
 			previous !== undefined && at - previous.at <= CONFIRM_WINDOW_MS
-		if (inWindow && previous.message === message) return false
+		if (
+			inWindow &&
+			(previous.message === message ||
+				at - previous.at < CONFIRM_MIN_SEPARATION_MS)
+		)
+			return false
 		const temporalPair = this.pair(scope, key, value)
 		this.messages.delete(id)
 		this.messages.set(id, { at, message })
@@ -121,7 +126,7 @@ export class ConfirmMemory {
 			const oldest = this.messages.keys().next()
 			if (!oldest.done) this.messages.delete(oldest.value)
 		}
-		return inWindow || (previous === undefined && temporalPair)
+		return temporalPair
 	}
 
 	/** Whether `value` under `key` is accepted in `scope` (refreshes its recency). */
@@ -158,6 +163,10 @@ export class ConfirmMemory {
 
 	/** Drops entries older than the window, oldest first (insertion order is recording order). */
 	private expire(at: number): void {
+		for (const [id, entry] of this.messages) {
+			if (at - entry.at <= CONFIRM_WINDOW_MS) break
+			this.messages.delete(id)
+		}
 		for (const [id, t] of this.seen) {
 			// A clock that stepped back keeps the entry; it expires once time passes it again.
 			if (at - t <= CONFIRM_WINDOW_MS) break

@@ -1,7 +1,7 @@
 /**
  * Point ambient association: keep every time/source/channel match only when they all
- * belong to one discovery. Two reaching discoveries are ambiguous even when one is
- * nearer. Callers supply the indexed frequency window (O(k) matching over its k tracks).
+ * belong to one discovery. Multiple discoveries are ambiguous unless exactly one track span encloses all
+ * reaching spans. Callers supply the indexed frequency window (O(k) matching over its k tracks).
  */
 import { SCANNER_AMBIENT_TARGET_TOLERANCE_HZ } from "@wavekit/api-types"
 import type { ScannerProtocol } from "../types.js"
@@ -98,11 +98,34 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 	if (matches.length === 1) return matches
 	const discoveryId = matches[0]!.discoveryId
 	if (
-		typeof discoveryId !== "string" ||
-		!matches.every(o => o.discoveryId === discoveryId)
-	) {
-		onAmbiguous?.()
-		return []
+		typeof discoveryId === "string" &&
+		matches.every(o => o.discoveryId === discoveryId)
+	)
+		return matches
+	// Only a unique enclosing discovery can resolve nested detector fragments.
+	// Use extrema once so association remains O(k), including wide burst tracks.
+	const lower = (o: T): number => o.lastTrack!.centreHz - o.lastTrack!.obwHz / 2
+	const upper = (o: T): number => o.lastTrack!.centreHz + o.lastTrack!.obwHz / 2
+	let min = Infinity
+	let max = -Infinity
+	for (const o of matches) {
+		if (!Number.isFinite(o.lastTrack!.obwHz) || o.lastTrack!.obwHz < 0) {
+			onAmbiguous?.()
+			return []
+		}
+		min = Math.min(min, lower(o))
+		max = Math.max(max, upper(o))
 	}
-	return matches
+	const enclosing = new Set(
+		matches
+			.filter(o => lower(o) <= min && upper(o) >= max)
+			.map(o => o.discoveryId),
+	)
+	if (enclosing.size === 1) {
+		const only = [...enclosing][0]
+		if (typeof only === "string")
+			return matches.filter(o => o.discoveryId === only)
+	}
+	onAmbiguous?.()
+	return []
 }

@@ -443,7 +443,7 @@ describe("AmbientEvidence shared acceptance is scoped per discovery (review regr
 		const hear = (id: string, channel: "A" | "B", text = "SYNTHETIC FIRST") =>
 			decoders.emit("decoder:output", id, {
 				type: "ship",
-				data: { mmsi: "244123456", channel, text },
+				data: { mmsi: "244123456", channel, name: text },
 				timestamp: new Date(clock.now),
 			})
 		const named = () => got.filter(e => e.ev.identity !== undefined)

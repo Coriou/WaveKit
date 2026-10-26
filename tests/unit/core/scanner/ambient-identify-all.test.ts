@@ -84,7 +84,7 @@ function rig(type: string, hz = HZ, protocol?: string) {
 				timestamp: new Date(clock.at),
 				provenanceBinding: { sourceId: "fake", channelHz: hz },
 			})
-		clock.at += 100
+		clock.at += 2_000
 	}
 	return { ambient, got, emit, clock, decoders, trust }
 }
@@ -98,7 +98,7 @@ describe("ambient identify all regressions", () => {
 		],
 		["dumpvdl2", "vdl2", { frequency: 0, fromaddr: "ABC001" }],
 	])(
-		"%s uses the actual channel binding for frequency-less output and pairs fast distinct messages",
+		"%s uses the actual channel binding for frequency-less output and pairs spaced distinct messages",
 		(type, outputType, data) => {
 			const r = rig(type)
 			try {
@@ -118,7 +118,7 @@ describe("ambient identify all regressions", () => {
 		const r = rig("multimon-ng")
 		try {
 			r.emit("decode", { protocol: "AFSK1200", from: "TEST01", to: "TEST02" })
-			r.emit("decode", { protocol: "AFSK1200", from: "TEST01", to: "TEST03" })
+			r.emit("decode", { protocol: "AFSK1200", from: "TEST01", to: "TEST02" })
 			expect(r.got.at(-1)).toMatchObject({
 				hz: HZ,
 				ev: { protocol: "aprs", identity: { value: "TEST01" } },
@@ -160,6 +160,12 @@ for (const sample of fixtures) {
 				r.emit(sample.type, {
 					...sample.data,
 					text: "SYNTHETIC SECOND",
+					name: "SYNTHETIC SECOND",
+					msgno: "M002",
+					acars: { tail: "TEST01", msgno: "M002" },
+					id: sample.protocol === "lora" ? 2 : sample.data["id"],
+					tg: "2",
+					message: "SYNTHETIC SECOND",
 					value: 2,
 					msgType: "SYNTHETIC SECOND",
 				})
@@ -172,7 +178,7 @@ for (const sample of fixtures) {
 			}
 		})
 
-		it("duplicates never prime confirmation and untrusted content does not count", () => {
+		it("content repeats do not confirm; content-free DTOs use spacing", () => {
 			const r = rig(sample.decoder, sample.hz, sample.protocol)
 			try {
 				r.emit(sample.type, sample.data)
@@ -181,8 +187,15 @@ for (const sample of fixtures) {
 					...sample.data,
 					timestamp: "synthetic later",
 					time: "synthetic later",
+					lastSeen: new Date(r.clock.at),
+					rxRssi: -21,
+					rxSnr: 3,
+					fecErrs: 1,
 				})
-				expect(r.got.some(e => e.ev.identity !== undefined)).toBe(false)
+				expect(r.got.some(e => e.ev.identity !== undefined)).toBe(
+					sample.protocol === "aprs" && sample.decoder === "multimon-ng",
+				)
+				r.got.length = 0
 				r.trust.value = "unverified"
 				r.emit(sample.type, {
 					...sample.data,
@@ -194,6 +207,12 @@ for (const sample of fixtures) {
 				r.emit(sample.type, {
 					...sample.data,
 					text: "SYNTHETIC SECOND",
+					name: "SYNTHETIC SECOND",
+					msgno: "M002",
+					acars: { tail: "TEST01", msgno: "M002" },
+					id: sample.protocol === "lora" ? 2 : sample.data["id"],
+					tg: "2",
+					message: "SYNTHETIC SECOND",
 					msgType: "SYNTHETIC SECOND",
 				})
 				expect(r.got.at(-1)?.ev.identity).toBeDefined()
@@ -214,6 +233,12 @@ for (const sample of fixtures) {
 				r.emit(sample.type, {
 					...sample.data,
 					text: "SYNTHETIC SECOND",
+					name: "SYNTHETIC SECOND",
+					msgno: "M002",
+					acars: { tail: "TEST01", msgno: "M002" },
+					id: sample.protocol === "lora" ? 2 : sample.data["id"],
+					tg: "2",
+					message: "SYNTHETIC SECOND",
 					msgType: "SYNTHETIC SECOND",
 				})
 				expect(r.got.at(-1)?.ev.identity).toBeDefined()
@@ -410,6 +435,12 @@ for (const sample of fixtures) {
 						...sample.data,
 						value,
 						text: `SYNTHETIC ${value}`,
+						name: `SYNTHETIC ${value}`,
+						msgno: `M${value}`,
+						acars: { tail: "TEST01", msgno: `M${value}` },
+						id: sample.protocol === "lora" ? value : sample.data["id"],
+						tg: String(value),
+						message: `SYNTHETIC ${value}`,
 						msgType: `SYNTHETIC ${value}`,
 					}
 					if (sample.type === "link")
@@ -426,7 +457,7 @@ for (const sample of fixtures) {
 							timestamp: new Date(clock.at),
 							provenanceBinding: { sourceId: "rtl", channelHz: sample.hz },
 						} as never)
-					clock.at += 100
+					clock.at += 2_000
 				}
 				const id = internal.store.snapshot().discoveries[0]!.id
 				const d = internal.store.get(id)
@@ -461,6 +492,12 @@ for (const sample of fixtures) {
 					const data = {
 						...sample.data,
 						text: `SYNTHETIC ${value}`,
+						name: `SYNTHETIC ${value}`,
+						msgno: `M${value}`,
+						acars: { tail: "TEST01", msgno: `M${value}` },
+						id: sample.protocol === "lora" ? value : sample.data["id"],
+						tg: String(value),
+						message: `SYNTHETIC ${value}`,
 						value,
 						msgType: `SYNTHETIC ${value}`,
 					}
@@ -478,7 +515,7 @@ for (const sample of fixtures) {
 							timestamp: new Date(clock.at),
 							provenanceBinding: { sourceId: "rtl", channelHz: sample.hz },
 						} as never)
-					clock.at += 100
+					clock.at += 2_000
 				}
 				trust.value = "unverified"
 				send(3)
@@ -534,4 +571,86 @@ it("removes the old source entry even when a mutable observation changes source"
 	index.upsert(observation)
 	expect(index.window("first", HZ, 0)).toEqual([])
 	expect(index.window("second", HZ, 0)).toEqual([observation])
+})
+
+describe("logical identity regressions", () => {
+	it.each([
+		[
+			"acarsdec",
+			"acars",
+			{ tail: "TEST01", msgno: "M001", blockId: "A", error: 0, level: -20 },
+			{ level: -21 },
+			100,
+		],
+		[
+			"acarsdec",
+			"acars",
+			{ tail: "TEST01", msgno: "M001", blockId: "A", error: 0 },
+			{ blockId: "B", text: "SYNTHETIC NEXT BLOCK" },
+			2_000,
+		],
+		[
+			"dumpvdl2",
+			"vdl2",
+			{
+				fromaddr: "ABC001",
+				acars: { tail: "TEST01", msgno: "M001" },
+				level: -20,
+			},
+			{ level: -21, noiseFloor: -50 },
+			2_000,
+		],
+		[
+			"rtl433",
+			"signal",
+			{ model: "SyntheticSensor", id: 1, mic: "CRC", value: 1, rssi: -20 },
+			{ rssi: -21 },
+			2_000,
+		],
+	])(
+		"%s metadata/block repeats never confirm",
+		(decoder, output, first, change, separation) => {
+			const r = rig(decoder)
+			try {
+				r.emit(output, first)
+				r.clock.at = 100_000 + separation
+				r.emit(output, { ...first, ...change })
+				expect(r.got.some(e => e.ev.identity !== undefined)).toBe(false)
+			} finally {
+				r.ambient.stop()
+			}
+		},
+	)
+
+	it("VDL2 non-ACARS address-only frames retain spacing-only pairing", () => {
+		const r = rig("dumpvdl2")
+		try {
+			r.emit("vdl2", { fromaddr: "ABC001", level: -20 })
+			r.clock.at = 100_100
+			r.emit("vdl2", { fromaddr: "ABC001", level: -21 })
+			expect(r.got.some(e => e.ev.identity !== undefined)).toBe(false)
+			r.clock.at = 102_000
+			r.emit("vdl2", { fromaddr: "ABC001", level: -22 })
+			expect(r.got.at(-1)?.ev.identity).toBeDefined()
+		} finally {
+			r.ambient.stop()
+		}
+	})
+})
+
+it("two placed channels hearing one emission cannot confirm a discovery", () => {
+	const r = rig("acarsdec")
+	try {
+		r.emit("acars", { frequency: 0, tail: "TEST01", msgno: "M001", error: 0 })
+		r.clock.at = 100_100
+		r.decoders.emit("decoder:output", "synthetic", {
+			type: "acars",
+			data: { frequency: 0, tail: "TEST01", msgno: "M002", error: 0 },
+			timestamp: new Date(r.clock.at),
+			provenanceBinding: { sourceId: "fake", channelHz: HZ + 1_000 },
+		})
+		expect(r.got.some(e => e.ev.identity !== undefined)).toBe(false)
+	} finally {
+		r.ambient.stop()
+	}
 })

@@ -33,7 +33,7 @@ import {
 
 // ---------------------------------------------------------------------------
 // Reference: AmbientEvidence as of cccf665f (src/core/scanner/probes/ambient.ts:52-168),
-// baseline parsing with the ambient two-message rule applied to the interpreter state.
+// baseline parsing with an independent model of spaced, distinct ambient confirmation.
 type RefDeps = Omit<AmbientDeps, "tuningTrustOf">
 interface AmbientState {
 	epoch: number
@@ -48,6 +48,7 @@ class ReferenceAmbient extends EventEmitter {
 	private readonly states = new Map<string, AmbientState>()
 	private readonly types = new Map<string, string>()
 	private readonly detach: (() => void)[] = []
+	private content: string | null = null
 	private running = false
 
 	constructor(private readonly deps: RefDeps) {
@@ -115,14 +116,42 @@ class ReferenceAmbient extends EventEmitter {
 		const type = this.types.get(decoderId)
 		let entry = this.states.get(decoderId)
 		if (!entry || entry.epoch !== epoch) {
-			const create = (): InterpreterState =>
-				createInterpreterState({
+			const create = (): InterpreterState => {
+				const seen = new Map<string, { at: number; message: string | null }>()
+				const accepted = new Set<string>()
+				const pair = (key: string, value: string): boolean => {
+					const id = `${key}:${value}`
+					const previous = seen.get(id)
+					const at = this.now()
+					if (
+						previous &&
+						at - previous.at <= 300_000 &&
+						(at - previous.at < 2_000 ||
+							(this.content !== null && previous.message === this.content))
+					)
+						return false
+					seen.set(id, { at, message: this.content })
+					return previous !== undefined && at - previous.at <= 300_000
+				}
+				return createInterpreterState({
 					epoch,
 					origin: "ambient",
 					requirePair: true,
+					shared: {
+						scope: () => "reference",
+						memory: {
+							pair: (_scope, key, value) => pair(key, value),
+							isAccepted: (_scope, key, value) =>
+								accepted.has(`${key}:${value}`),
+							markAccepted: (_scope, key, value) => {
+								accepted.add(`${key}:${value}`)
+							},
+						},
+					},
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
 				})
+			}
 			const multimon = type === "multimon-ng"
 			entry = {
 				epoch,
@@ -133,6 +162,21 @@ class ReferenceAmbient extends EventEmitter {
 			}
 			this.states.set(decoderId, entry)
 		}
+		const payload =
+			"kind" in input && input.kind === "link"
+				? input.line
+				: (input as DecoderOutputLike).data
+		this.content =
+			type === "direwolf"
+				? null
+				: JSON.stringify(payload, (key, value: unknown) =>
+						key === "at" ||
+						key === "timestamp" ||
+						key === "mic" ||
+						key === "crcErr"
+							? undefined
+							: value,
+					)
 		const state = entry.interp
 		let evs: DecodeEvidence[] = []
 		if (entry.capcodes)
@@ -225,6 +269,7 @@ interface Rig {
 	ambient: AmbientEvidence
 	got: AmbientEvidenceEvent[]
 	epoch: { v: number }
+	clock: { v: number }
 }
 
 function rig(opts: {
@@ -236,12 +281,13 @@ function rig(opts: {
 	const decoders = new FakeDecoders()
 	opts.add(decoders)
 	const epoch = { v: 1 }
+	const clock = { v: 1_000 }
 	const deps: AmbientDeps = {
 		decoders: decoders as never,
 		targetOf: id => opts.targets[id] ?? null,
 		epochOf: () => epoch.v,
 		logger: opts.logger ?? silent,
-		now: () => 1_000,
+		now: () => clock.v,
 	}
 	if (opts.trust !== null)
 		deps.tuningTrustOf = opts.trust ?? (() => "commanded")
@@ -249,7 +295,7 @@ function rig(opts: {
 	const got: AmbientEvidenceEvent[] = []
 	ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 	ambient.start()
-	return { decoders, ambient, got, epoch }
+	return { decoders, ambient, got, epoch, clock }
 }
 
 const ship = (mmsi: string, channel: "A" | "B" | undefined = "A") => ({
@@ -289,9 +335,15 @@ function aisRig(
 
 const twice = (r: Rig, id: string, o: DecoderOutputLike): void => {
 	r.decoders.out(id, o)
+	r.clock.v += 2_000
 	r.decoders.out(id, {
 		...o,
-		data: { ...(o.data as object), text: "SYNTHETIC SECOND" },
+		data: {
+			...(o.data as object),
+			...(o.type === "meshtastic" ? { id: 2 } : {}),
+			name: "SYNTHETIC SECOND",
+			text: "SYNTHETIC SECOND",
+		},
 	})
 }
 
@@ -454,10 +506,15 @@ describe("AmbientEvidence WG7 new types", () => {
 		r.epoch.v = 2
 		r.decoders.out("ais", ship("244123456"))
 		expect(r.got.filter(e => e.ev.identity)).toEqual([])
+		r.clock.v += 2_000
 		const second = ship("244123456")
 		r.decoders.out("ais", {
 			...second,
-			data: { ...second.data, text: "SYNTHETIC SECOND" },
+			data: {
+				...second.data,
+				name: "SYNTHETIC SECOND",
+				text: "SYNTHETIC SECOND",
+			},
 		})
 		expect(r.got.filter(e => e.ev.identity)).toHaveLength(1)
 	})
@@ -623,13 +680,13 @@ describe("WG7 properties", () => {
 		)
 	})
 
-	// Feature: web-gaps-7, Property 2: Existing ambient unchanged
-	// Validates: Requirements 1.4
-	it("distinct trusted messages preserve legacy interpretation under two-message acceptance", () => {
+	// Feature: ambient-identify-all, Property 3: legacy interpretation with spaced distinct content
+	// Validates: Requirements R2
+	it("repeated identical lines and distinct content match the reference confirmation model", () => {
 		type Step =
 			| { k: "epoch" }
 			| { k: "tick"; ms: number }
-			| { k: "link"; cc: number; crcErr: boolean }
+			| { k: "link"; cc: number; crcErr: boolean; tg?: string }
 			| { k: "out"; o: DecoderOutputLike }
 		const at = new Date(5_000)
 		const outArb: fc.Arbitrary<Step> = fc.oneof(
@@ -723,32 +780,28 @@ describe("WG7 properties", () => {
 					ref.start()
 					cur.start()
 					const inst = decoders.instances.get("cfg")!
-					let syntheticMessage = 0
-					for (const s of steps) {
+					const prefix: Step[] = [
+						{ k: "link", cc: 1, crcErr: false },
+						{ k: "tick", ms: 2_000 },
+						{ k: "link", cc: 1, crcErr: false },
+						{ k: "tick", ms: 2_000 },
+						{ k: "link", cc: 1, crcErr: false, tg: "10" },
+					]
+					for (const s of [...prefix, ...steps]) {
 						if (s.k === "epoch") epoch.v++
 						else if (s.k === "tick") clock.v += s.ms
 						else if (s.k === "link") {
 							const line: DsdFmeLinkLine = {
 								protocol: "dmr",
 								cc: s.cc,
-								tg: "9",
+								tg: s.tg ?? "9",
 								src: "2060945",
 								slot: 1,
 								crcErr: s.crcErr,
 								at: clock.v,
 							}
-							inst.emit("link", {
-								...line,
-								syntheticMessage: ++syntheticMessage,
-							})
-						} else
-							decoders.out("cfg", {
-								...s.o,
-								data: {
-									...(s.o.data as object),
-									syntheticMessage: ++syntheticMessage,
-								},
-							})
+							inst.emit("link", line)
+						} else decoders.out("cfg", s.o)
 					}
 					expect(b).toEqual(a)
 					emitted += a.length

@@ -513,10 +513,19 @@ VDL2 and LoRa output with a missing or zero frequency uses the actual channel
 placement (tuner centre plus channelizer offset), never a band default.
 Malformed or out-of-channel frequencies prove nothing.
 
-An ambient identity needs two distinct checksum-valid messages. Different
-message contents can confirm less than two seconds apart; changing a reception
-timestamp does not turn a duplicate into another message. Probe evidence
-without message content retains its two-second separation guard. ADS-B retains
+An ambient identity needs two checksum-valid decodes at least two seconds apart
+and no more than five minutes apart. When the DTO includes content, their logical
+message identities must also differ. Reception level, noise, RSSI/SNR, errors,
+frequency, channel and timestamps never create a new message. ACARS uses aircraft
+registration/flight plus message number, so different blocks of one message count
+once (without a message number, aircraft, label and text are used). VDL2 uses source
+and destination addresses plus embedded ACARS identity, or raw message text;
+non-ACARS frames without text use spacing alone. rtl_433 uses model/device ID and
+decoded sensor fields; AIS uses vessel content; Meshtastic uses packet ID and
+payload; paging uses protocol, capcode, function and text; DSD uses protocol and
+link fields (colour/access code, talkgroup, source, slot or callsign). Repeated
+identical content does not confirm. Address-only APRS output from multimon and
+other DTOs without content use spacing alone. ADS-B retains
 its CRC/address checks and raw-frame duplicate rejection. Accepted ambient
 identities reset known-protocol misses and record successful trial memory;
 untrusted evidence does neither. Edge tracks use these same strict checks.
@@ -538,8 +547,11 @@ or `(freq1 + freq2) / 2` for FSK. Values must be finite numbers in the
 usable tuner window (centre ± 0.8 × sample rate / 2); malformed or out-of-window
 values fall back to the placed target.
 
-If two or more discoveries match, none receives the decode, even if one is
-nearer; point ambiguity is recorded in the debug log. Multiple observations
+When reaching candidates belong to different discoveries, point association
+selects a discovery only if exactly one discovery has a track span
+(centre ± occupied bandwidth / 2) containing every reaching track span. This
+resolves a narrow detector fragment nested inside a wide discovery. All other
+multi-discovery cases receive no decode; point ambiguity is recorded in the debug log. Multiple observations
 of one discovery can receive point evidence. rtl_433 requires exactly one
 qualifying observation. Ambiguous evidence cannot prime shared confirmation.
 

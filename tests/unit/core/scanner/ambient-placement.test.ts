@@ -120,8 +120,8 @@ describe("ambient placement", () => {
 	})
 
 	it("never names a track beyond its reach, nor two discoveries (property)", () => {
-		// Feature: decode-attachment, Property 2: ambient placement is within reach and unambiguous
-		// Validates: Requirements 3c
+		// Feature: ambient-identify-all, Property 2: placement resolves single and nested candidates
+		// Validates: Requirements R2
 		fc.assert(
 			fc.property(
 				fc.array(
@@ -164,8 +164,27 @@ describe("ambient placement", () => {
 							Math.abs(o.lastTrack!.centreHz - HZ) <=
 							ambientReachHz(protocol, o.lastTrack!.obwHz),
 					)
-					if (new Set(reaching.map(o => o.discoveryId)).size > 1)
-						expect(named).toEqual([])
+					if (reaching.length === 1) expect(named).toEqual(reaching)
+					for (const o of named) {
+						if (reaching.some(other => other.discoveryId !== o.discoveryId)) {
+							const own = named.find(n =>
+								reaching.every(
+									other =>
+										n.lastTrack!.centreHz - n.lastTrack!.obwHz / 2 <=
+											other.lastTrack!.centreHz - other.lastTrack!.obwHz / 2 &&
+										n.lastTrack!.centreHz + n.lastTrack!.obwHz / 2 >=
+											other.lastTrack!.centreHz + other.lastTrack!.obwHz / 2,
+								),
+							)
+							expect(own).toBeDefined()
+						}
+					}
+					const wide = obs("wide", HZ, { obwHz: 25_000, discoveryId: "wide" })
+					const fragment = obs("fragment", HZ + 3_000, {
+						obwHz: 2_000,
+						discoveryId: "fragment",
+					})
+					expect(place([wide, fragment], "acars")).toEqual(["wide"])
 				},
 			),
 			{ numRuns: 200 },
