@@ -79,7 +79,7 @@ describe("ScannerService CFAR masks (SF1 req 2.2, 2.5)", () => {
 					(r.protocols ?? []).some(p => ["ism", "pocsag", "aprs"].includes(p)),
 				)
 				.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
-			// WG16 SC: each raster is bounded to its range.
+			// Each raster is bounded to its range.
 			rasters: ranges.flatMap(r =>
 				(r.rasters ?? []).map(x => ({
 					...x,

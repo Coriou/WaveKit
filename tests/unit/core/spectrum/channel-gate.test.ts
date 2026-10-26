@@ -740,7 +740,7 @@ describe("channel gate", () => {
 		expect(wide.passedSample).toBe(low.passedSample)
 		expect(wide.channelSnrDb).toBeGreaterThan(high.channelSnrDb)
 		expect(wide.channelSnrDb).toBeLessThan(low.channelSnrDb)
-		// WG16 SC: admission reads the best covering slot of a wide track, not the sum.
+		// Admission reads the best covering slot of a wide track, not the sum.
 		expect(wide.peakChannelSnrDb).toBeCloseTo(low.channelSnrDb, 9)
 		expect(low.peakChannelSnrDb).toBe(low.channelSnrDb)
 		expect(high.peakChannelSnrDb).toBe(high.channelSnrDb)

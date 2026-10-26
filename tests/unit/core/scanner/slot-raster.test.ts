@@ -3,7 +3,7 @@ import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
 import { slotRasterOf } from "../../../../src/core/scanner/scanner-service.js"
 import type { ScanRange } from "../../../../src/core/scanner/types.js"
 
-// WG16 SC: an analog-am range with several rasters sizes its channel slots by the finest.
+// An analog-am range with several rasters sizes its channel slots by the finest.
 
 const range = (over: Partial<ScanRange>): ScanRange => ({
 	startHz: 118_000_000,
@@ -11,7 +11,7 @@ const range = (over: Partial<ScanRange>): ScanRange => ({
 	...over,
 })
 
-describe("slotRasterOf (WG16 SC)", () => {
+describe("slotRasterOf (amendment 10)", () => {
 	it("the built-in airband range uses its 8.33 kHz raster", () => {
 		const airband = bandplansFor("EU")
 			.flatMap(b => b.ranges)

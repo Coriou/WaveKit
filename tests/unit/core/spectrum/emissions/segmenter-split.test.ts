@@ -7,7 +7,7 @@ import {
 } from "../../../../../src/core/spectrum/emissions/segmenter.js"
 import type { SegmentOptions } from "../../../../../src/core/spectrum/emissions/segmenter.js"
 
-// WG16 SC: the split rules of the segmenter, each at and just past its bound.
+// The split rules of the segmenter, each at and just past its bound.
 
 const N = 128
 const FLOOR = -60
@@ -53,7 +53,7 @@ function plateaus(height: number, dip: number, rightExtraDb = 0) {
 	})
 }
 
-describe("segmenter split rules (WG16 SC)", () => {
+describe("segmenter split rules (amendment 10)", () => {
 	it("dip split: a 6 dB valley splits a 12 dB plateau, 5.9 dB does not", () => {
 		const o = opts({ dipSplit: { smoothBins: 3 } })
 		// The cut is the first bin of the smoothed minimum (bin 50 still averages bin 49 in).
@@ -128,6 +128,35 @@ describe("segmenter split rules (WG16 SC)", () => {
 		expect(spans(carrierAndPiece(52, 15), o(7))).toEqual([
 			[52, 56],
 			[56, 64],
+		])
+	})
+
+	it("one channel per bin: adjacent 8.33 kHz peaks 8 bins apart with a 14 dB valley stay two under a 7-bin limit", () => {
+		// Review repro: equal peaks at bins 60 and 68, valley 14 dB down, a raster edge at 64.
+		const s = spectrum(i => {
+			if (i === 60 || i === 68) return -20
+			if (i > 57 && i < 71) return -34
+			return FLOOR
+		})
+		const perBin = (limit: number) => new Uint16Array(N).fill(limit)
+		const o = (channel: SegmentOptions["channel"]) =>
+			opts({ rasterBinEdges: [64], ...(channel ? { channel } : {}) })
+		// A coarsest-raster limit (20 bins at 25 kHz) for the window would join them.
+		expect(spans(s, o({ minPeakBins: 20 }))).toEqual([[58, 71]])
+		// The airband grid (0.8 x 8.33 kHz = 7 bins at 1 kHz) keeps them apart; 9 joins.
+		expect(spans(s, o({ minPeakBins: 20, perBin: perBin(7) }))).toEqual([
+			[58, 64],
+			[64, 71],
+		])
+		expect(spans(s, o({ minPeakBins: 0, perBin: perBin(9) }))).toEqual([
+			[58, 71],
+		])
+		// The smaller limit of the two peaks applies; 0 there switches the rule off.
+		const mixed = perBin(20)
+		mixed[68] = 0
+		expect(spans(s, o({ minPeakBins: 20, perBin: mixed }))).toEqual([
+			[58, 64],
+			[64, 71],
 		])
 	})
 

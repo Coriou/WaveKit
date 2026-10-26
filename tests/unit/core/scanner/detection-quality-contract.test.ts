@@ -62,7 +62,7 @@ describe("detection-quality contract (frozen)", () => {
 		// 9.2: one emitter spans 13 to 39 kHz, so a band of 3 each way holds it from any one value
 		expect(39_000 / 13_000).toBeLessThanOrEqual(dq.DQ_YOUNG_OBW_RATIO)
 		expect(dq.DQ_YOUNG_OBW_RATIO).toBeGreaterThan(dq.DQ_OBW_RATIO_MAX)
-		// 1.4b (WG16 SC): 12 = gate pass (k 3 + margin 3) + 6; 9 = k 3 + burst margin 6
+		// 1.4b (amendment 10): 12 = gate pass (k 3 + margin 3) + 6; 9 = k 3 + burst margin 6
 		expect(dq.DQ_SUSTAIN_MEDIAN_SNR_DB).toBe(3 + 3 + 6)
 		expect(dq.DQ_SUSTAIN_FLOOR_SNR_DB).toBe(3 + 6)
 		// 3 s at a 1 s re-ingest holds 4 samples; 3 needed, 8 kept; gap = 2 periods + 500 ms

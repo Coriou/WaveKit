@@ -20,7 +20,7 @@ import {
 import type { ObservationInput } from "../../../../src/core/scanner/types.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 
-// WG16 SC, detection-quality requirement 1.4b: a sustained observation promotes on duration.
+// Amendment 10 SC, detection-quality requirement 1.4b: a sustained observation promotes on duration.
 
 const CH = 98_300_000
 const T0 = Date.UTC(2026, 9, 25, 12, 0, 0)
@@ -377,12 +377,65 @@ describe("DiscoveryStore local floor, DC and channel keys (DQ 1.15, 1.16)", () =
 		flat.track.localSnrDb = DQ_LOCAL_SNR_DB - 0.01
 		b.store.ingest(flat)
 		expect(count(b.store)).toBe(0)
-		// Absent or non-finite: no local check.
-		const c = setup()
-		const none = live("l3", 30)
-		none.track.localSnrDb = Number.NaN
-		c.store.ingest(none)
-		expect(count(c.store)).toBe(1)
+		// A supplied non-finite local SNR is rejected (fail closed).
+		for (const bad of [
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			Number.NEGATIVE_INFINITY,
+		]) {
+			const c = setup()
+			const o = live("l3", 30)
+			o.track.localSnrDb = bad
+			c.store.ingest(o)
+			expect(count(c.store)).toBe(0)
+		}
+		// Absent (no channel plan): no local check, an explicit compatibility rule.
+		const d = setup()
+		d.store.ingest(live("l4", 30))
+		expect(count(d.store)).toBe(1)
+	})
+
+	it("a refused sample ends the sustained run: 13/8/13/13 dB with local 10/5/10/10 creates nothing at 3 s", () => {
+		const { clock, store } = setup()
+		const samples: [number, number, number][] = [
+			[0, 13, 10],
+			[1_000, 8, 5],
+			[2_000, 13, 10],
+			[3_000, 13, 10],
+		]
+		for (const [at, snr, local] of samples) {
+			clock.now = T0 + at
+			const o = live("r", snr)
+			o.track.localSnrDb = local
+			store.ingest(o)
+		}
+		expect(count(store)).toBe(0)
+		// The run restarted at 2 s: it promotes at 5 s, not before.
+		for (const at of [4_000, 5_000]) {
+			clock.now = T0 + at
+			const o = live("r", 13)
+			o.track.localSnrDb = 10
+			store.ingest(o)
+			expect(count(store)).toBe(at === 5_000 ? 1 : 0)
+		}
+	})
+
+	it("DC and invalid refusals end the run too", () => {
+		const { clock, store } = setup()
+		const feed = (at: number, o: ObservationInput) => {
+			clock.now = T0 + at
+			store.ingest(o)
+		}
+		feed(0, live("x", 13))
+		feed(1_000, { ...live("x", 13), dcCentred: true })
+		feed(2_000, live("x", 13))
+		feed(3_000, live("x", 13))
+		expect(count(store)).toBe(0)
+		const bad = live("x", 13)
+		bad.track.centreHz = Number.NaN
+		feed(4_000, bad)
+		feed(5_000, live("x", 13))
+		expect(count(store)).toBe(0)
 	})
 
 	it("a DC-centred evidence-less observation never creates, even sustained or at 30 dB", () => {

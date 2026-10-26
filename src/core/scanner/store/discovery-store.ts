@@ -220,7 +220,7 @@ export interface DiscoveryStoreOptions {
 	minSurfaceBlocks?: number
 	rasters?: (sourceId: string, centreHz: number) => Raster[]
 	/**
-	 * WG16 SC (DQ 1.16): channel rasters at a centre (the band plans' coarsest while passive
+	 * (DQ 1.16): channel rasters at a centre (the band plans' coarsest while passive
 	 * runs). An observation off every `rasters` tolerance keys to the nearest of these
 	 * channels instead of a grid key. Absent: grid keys, as before.
 	 */
@@ -1028,7 +1028,7 @@ export class DiscoveryStore
 	/**
 	 * DQ 1.2 to 1.7: may an undecoded observation that matched nothing create a record? Invalid
 	 * input is rejected (1.7); overload needs 25 dB and never pends (1.2); otherwise 18 dB, or
-	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, WG16 SC), which consumes the
+	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC), which consumes the
 	 * bucket's pending entry like a threshold create.
 	 */
 	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
@@ -1037,22 +1037,29 @@ export class DiscoveryStore
 		const overload: unknown = (
 			track.flags as { overload?: unknown } | undefined
 		)?.overload
+		// Every refusal also ends the observation's sustained run (DQ 1.4b): a rejected sample
+		// never keeps a run alive.
+		const refuse = (): "refuse" => {
+			this.pending.dropRun(input.sourceId, input.id)
+			return "refuse"
+		}
 		if (
 			!Number.isFinite(track.centreHz) ||
 			!Number.isFinite(snr) ||
 			typeof overload !== "boolean"
 		)
-			return "refuse"
-		// DQ 1.15 (WG16 SC): the DC pedestal and plateaus without local contrast never create.
-		if (input.dcCentred === true) return "refuse"
+			return refuse()
+		// DQ 1.15: the DC pedestal and plateaus without local contrast never create. A supplied
+		// local SNR must be finite and at least 6 dB; only an absent one (no channel plan, or no
+		// neighbour bins) skips the check.
+		if (input.dcCentred === true) return refuse()
 		const local = track.localSnrDb
 		if (
 			local !== undefined &&
-			Number.isFinite(local) &&
-			local < DQ_LOCAL_SNR_DB
+			!(Number.isFinite(local) && local >= DQ_LOCAL_SNR_DB)
 		)
-			return "refuse"
-		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : "refuse"
+			return refuse()
+		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : refuse()
 		if (snr >= DQ_CREATE_SNR_DB) return "create"
 		if (this.pending.note(input)) {
 			this.pending.dropRun(input.sourceId, input.id)
@@ -3202,7 +3209,7 @@ export class DiscoveryStore
 		const correction = this.corrections.get(sourceId) ?? 0
 		const snap = snapToRaster(centreHz, rasters, correction)
 		if (!snap.snapped) {
-			// WG16 SC (DQ 1.16): off every raster's tolerance, the observation keys to the
+			// (DQ 1.16): off every raster's tolerance, the observation keys to the
 			// nearest channel of the coarsest channel raster, so one emitter whose measured
 			// centre drifts within its channel stays one record.
 			const ch = channelOf(
@@ -5206,7 +5213,7 @@ export function estimateFrequencyError(
 	return { hz, ppm: centreHz > 0 ? (hz / centreHz) * 1e6 : 0, n: best.length }
 }
 
-/** WG16 SC: the nearest channel of the coarsest positive raster (ties: the lower), or null. */
+/** The nearest channel of the coarsest positive raster (ties: the lower), or null. */
 function channelOf(hz: number, rasters: readonly Raster[]): number | null {
 	let r: Raster | undefined
 	for (const x of rasters)

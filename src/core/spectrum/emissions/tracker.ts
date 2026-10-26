@@ -32,7 +32,7 @@ export interface TrackerOptions {
 	maxTrackBlocks: number
 	idPrefix: string
 	/**
-	 * WG16 SC local floor: bins each side of a segment (after a 1-bin gap) whose median power
+	 * Local floor: bins each side of a segment (after a 1-bin gap) whose median power
 	 * is the segment's local floor. Absent or 0: no local SNR.
 	 */
 	localBins?: number
@@ -127,7 +127,7 @@ interface Features {
  */
 interface GateReading {
 	channelSnrDb: number
-	/** WG16 SC: best single covering slot (absent: same as `channelSnrDb`). */
+	/** Best single covering slot (absent: same as `channelSnrDb`). */
 	peakChannelSnrDb?: number
 	kDb: number
 	marginDb: number
@@ -173,7 +173,7 @@ interface OpenTrack {
 	peakDbfs: number
 	maxBlockSnrDb: number
 	bandLinSum: number
-	/** WG16 SC: sum and count of per-block local SNRs (dB). */
+	/** Sum and count of per-block local SNRs (dB). */
 	localSnrSum: number
 	localSnrBlocks: number
 	floorLinSum: number
@@ -202,7 +202,7 @@ interface OpenTrack {
 	 */
 	gate?: "pending" | "passed" | "below"
 	channelSnrDb?: number
-	/** WG16 SC: best single covering slot of the last measurement. */
+	/** Best single covering slot of the last measurement. */
 	peakChannelSnrDb?: number
 	gatePassedSample?: number
 	/** Last measured step was on. The next on-test uses `gateRun`, not this. */
@@ -1283,7 +1283,7 @@ export class Tracker {
 	private localScratch = new Float32Array(0)
 
 	/**
-	 * WG16 SC: this block's mean segment power over the median of `localBins` bins each side
+	 * This block's mean segment power over the median of `localBins` bins each side
 	 * (skipping the bin next to each edge), in dB. Null without the option or neighbours.
 	 */
 	private localSnr(
@@ -1315,7 +1315,7 @@ export class Tracker {
 	}
 
 	/**
-	 * WG16 SC: the -20 dB OBW never exceeds the widest single-block segment. On a weak track
+	 * The -20 dB OBW never exceeds the widest single-block segment. On a weak track
 	 * (peak under 20 dB above the floor in the mean) -20 dB reaches the floor, so the width would
 	 * be the union of every span the track drifted over, not one emission's width. A strong
 	 * track's -20 dB width sits inside its on-bins and is unchanged.
@@ -1383,7 +1383,7 @@ export class Tracker {
 			),
 		}
 		if (this.planActive && t.gate !== undefined) {
-			// WG16 SC: a gate field like the others; absent without a channel plan.
+			// A gate field like the others; absent without a channel plan.
 			if (t.localSnrBlocks > 0)
 				snap.localSnrDb = t.localSnrSum / t.localSnrBlocks
 			snap.gate = t.gate

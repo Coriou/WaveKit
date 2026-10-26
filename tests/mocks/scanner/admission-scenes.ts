@@ -1,5 +1,5 @@
 /**
- * WG16 SC synthetic scenes for admission and segment-split tests. Deterministic for a given
+ * Synthetic scenes for admission and segment-split tests. Deterministic for a given
  * seed (mulberry32); synthetic only, no captured RF. Complex baseband at `fs`, full scale 1.
  */
 import {

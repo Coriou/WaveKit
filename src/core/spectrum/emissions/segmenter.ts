@@ -1,6 +1,6 @@
 /**
  * Turns one block's on-bins into emission segments (spec §6.2): joins runs across small holes,
- * splits them at internal dips (WG16 SC) and at raster channel edges, merges pieces that have no peak of their own (or sit more
+ * splits them at internal dips (amendment 10) and at raster channel edges, merges pieces that have no peak of their own (or sit more
  * than skirtDb below their neighbour) back into the parent as skirt, drops far skirts (below), and
  * flags segments that touch the usable span or an exclusion. Bin ranges are half-open: [startBin, endBin).
  */
@@ -32,30 +32,31 @@ export interface SegmentOptions {
 	 */
 	farSkirt?: { reachBins: number; minDb: number; dcBin: number }
 	/**
-	 * WG16 SC dip split: a run is also cut at an internal valley at least `DIP_SPLIT_DB` below
+	 * Dip split: a run is also cut at an internal valley at least `DIP_SPLIT_DB` below
 	 * the peaks on both sides, measured on the power smoothed over `smoothBins` (odd, ≥ 1).
 	 * Absent: off.
 	 */
 	dipSplit?: { smoothBins: number }
 	/**
-	 * WG16 SC channel boundaries: sorted bin edges of the coarsest raster's channels. A
+	 * Channel boundaries: sorted bin edges of the coarsest raster's channels. A
 	 * prominence merge (no 6 dB valley, neighbour within `skirtDb`) never joins pieces across
 	 * one, so a plateau of busy channels splits per channel. A sideband, a far-weaker skirt
 	 * (more than `skirtDb` down) or a one-channel pair still merges across. Absent: no limit.
 	 */
 	channelEdges?: number[]
 	/**
-	 * WG16 SC sidebands: a piece more than `db` below a neighbour whose peak is within
+	 * Sidebands: a piece more than `db` below a neighbour whose peak is within
 	 * `reachBins` merges into it whatever the valley between them (modulation sidebands and
 	 * close splatter of one carrier stay with it; the raster cap does not apply). Absent: off.
 	 */
 	sideband?: { db: number; reachBins: number }
 	/**
-	 * WG16 SC one-channel rule: two pieces whose peaks are closer than `minPeakBins` (a fraction
-	 * of the coarsest raster channel) are one emitter whatever the valley between them, such as
-	 * the two lobes of an FSK carrier cut by a raster edge it does not follow. Absent: off.
+	 * One-channel rule: two pieces whose peaks are closer than the channel limit are one
+	 * emitter whatever the valley between them, such as the two lobes of an FSK carrier cut by
+	 * a raster edge it does not follow. The limit is `perBin[peak]` (the smaller of the two
+	 * peaks' values; 0 = off there) when given, else `minPeakBins`. Absent: off.
 	 */
-	channel?: { minPeakBins: number }
+	channel?: { minPeakBins: number; perBin?: Uint16Array }
 }
 
 /** A raster piece keeps its identity only if its peak rises this far above the valley to its neighbour. */
@@ -63,13 +64,13 @@ export const PROMINENCE_DB = 6
 /** Peak bins this close to mirror positions about DC count as an IQ-image pair, which far-skirt dropping leaves alone. */
 const MIRROR_SLACK_BINS = 2
 /**
- * WG16 SC: a valley this far below the peaks on both sides splits a run. 6 dB = `PROMINENCE_DB`,
+ * A valley this far below the peaks on both sides splits a run. 6 dB = `PROMINENCE_DB`,
  * the same depth that already keeps a raster piece apart, so a dip cut is never merged back as a
  * prominence skirt (the raw valley is at least as deep as the smoothed one).
  */
 export const DIP_SPLIT_DB = PROMINENCE_DB
 /**
- * WG16 SC: a dip splits only when the valley lies in the lower half (in dB) of the smaller
+ * A dip splits only when the valley lies in the lower half (in dB) of the smaller
  * peak's height above the floor. Two lobes of one FSK carrier (a 47 dB POCSAG pair with a
  * valley 10 to 20 dB down) keep their valley high above the floor; the guard gap between two
  * channels falls toward it.
@@ -232,7 +233,7 @@ function mergeCuts(a: number[], b: number[]): number[] {
 }
 
 /**
- * WG16 SC: valley bins of [start, end) that sit at least `DIP_SPLIT_DB` below the highest
+ * Valley bins of [start, end) that sit at least `DIP_SPLIT_DB` below the highest
  * smoothed level on each side since the previous cut, in the lower `DIP_FLOOR_FRACTION` of the
  * smaller side's height above the floor. One pass, O(end - start); the box mean over
  * `smoothBins` is a running sum in dB, so one FFT bin of scatter cannot fake a dip.
@@ -342,7 +343,7 @@ function valleyBetween(a: number, b: number, powerDb: Float32Array): number {
 	return v
 }
 
-/** WG16 SC split rules for `mergeSkirts` (all optional; absent = the pre-WG16 merge). */
+/** Split rules for `mergeSkirts` (all optional; absent = the pre-amendment 10 merge). */
 interface MergeRules {
 	edges: readonly number[]
 	sideband?: SegmentOptions["sideband"]
@@ -357,7 +358,7 @@ function isSkirtOf(
 	skirtDb: number,
 	rules?: MergeRules,
 ): boolean {
-	// WG16 SC one-channel rule: equal peaks join too (two FSK lobes are usually within 1 dB).
+	// One-channel rule: equal peaks join too (two FSK lobes are usually within 1 dB).
 	if (isSameChannel(p, q, rules?.channel)) return true
 	if (q.peakDb <= p.peakDb) return false
 	if (isSidebandOf(p, q, rules?.sideband)) return true
@@ -365,20 +366,21 @@ function isSkirtOf(
 	return prominence < PROMINENCE_DB || q.peakDb - p.peakDb > skirtDb
 }
 
-/** WG16 SC: `p` peaks within one channel of the not weaker `q` (`SegmentOptions.channel`). */
+/** `p` peaks within one channel of the not weaker `q` (`SegmentOptions.channel`). */
 function isSameChannel(
 	p: Piece,
 	q: Piece,
 	channel: SegmentOptions["channel"],
 ): boolean {
-	return (
-		channel !== undefined &&
-		q.peakDb >= p.peakDb &&
-		Math.abs(p.peakBin - q.peakBin) < channel.minPeakBins
-	)
+	if (channel === undefined || q.peakDb < p.peakDb) return false
+	const limit =
+		channel.perBin !== undefined
+			? Math.min(channel.perBin[p.peakBin] ?? 0, channel.perBin[q.peakBin] ?? 0)
+			: channel.minPeakBins
+	return Math.abs(p.peakBin - q.peakBin) < limit
 }
 
-/** WG16 SC: `p` is a sideband of the much stronger, close `q` (see `SegmentOptions.sideband`). */
+/** `p` is a sideband of the much stronger, close `q` (see `SegmentOptions.sideband`). */
 function isSidebandOf(
 	p: Piece,
 	q: Piece,
@@ -392,7 +394,7 @@ function isSidebandOf(
 }
 
 /**
- * WG16 SC: a merge of `p` into `q` that the channel boundaries refuse: a prominence merge
+ * A merge of `p` into `q` that the channel boundaries refuse: a prominence merge
  * (`p` within `skirtDb` of `q`, neither its sideband nor in its channel) whose merged span
  * would hold a coarse channel edge.
  */

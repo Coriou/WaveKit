@@ -74,7 +74,7 @@ export interface ChannelGateReading {
 	state: ChannelGateState
 	channelSnrDb: number
 	/**
-	 * WG16 SC: SNR of the best single covering slot this block (admission judges the peak
+	 * SNR of the best single covering slot this block (admission judges the peak
 	 * channel, not the wide-track sum). Equals `channelSnrDb` for a track inside one slot;
 	 * −Infinity when invalid. Absent on readings built outside the gate.
 	 */

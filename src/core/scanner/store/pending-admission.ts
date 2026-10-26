@@ -55,7 +55,7 @@ export const PENDING_IDS_MAX = 8
 /**
  * The SNR the creation gate reads: the WG12 channel SNR when the engine has a channel plan,
  * else the track SNR. Present but non-finite stays non-finite (rejected, requirement 1.7).
- * WG16 SC: a track wider than one slot is judged at its best slot (`peakChannelSnrDb`) when
+ * A track wider than one slot is judged at its best slot (`peakChannelSnrDb`) when
  * that is higher than the wide-track sum.
  */
 export function admissionSnrOf(track: TrackSnapshot): number {

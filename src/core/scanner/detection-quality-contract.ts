@@ -29,7 +29,7 @@ export const DQ_PENDING_MIN_OBS = 3
 export const DQ_PENDING_MEDIAN_SNR_DB = 15
 
 /**
- * Req 1.4b (WG16 SC): a sustained observation promotes on duration. The median channel SNR of
+ * Req 1.4b (amendment 10): a sustained observation promotes on duration. The median channel SNR of
  * its run must reach 12 dB = the channel gate pass level (k 3 dB + margin 3 dB = 6 dB) + 6 dB,
  * four times the pass power. Measured: FM broadcast tracks at 11 to 13 dB held 30 s, real narrow
  * emitters at 7 to 17 dB; one continuous emitter is one observation, so 1.4 alone never fires.
@@ -68,7 +68,7 @@ export const DQ_SUSTAIN_SAMPLES = 8
 export const DQ_SUSTAIN_PER_SOURCE = 512
 
 /**
- * Req 1.15 (WG16 SC): an evidence-less observation creates a record only when its segment
+ * Req 1.15 (amendment 10): an evidence-less observation creates a record only when its segment
  * stands at least 6 dB over its local floor (median of the neighbouring 12.5 kHz each side):
  * the gate's own pass margin (k 3 + margin 3), now against the neighbourhood, so a raised
  * plateau of busy channels or splatter is not an emitter of its own.
@@ -76,7 +76,7 @@ export const DQ_SUSTAIN_PER_SOURCE = 512
 export const DQ_LOCAL_SNR_DB = 6
 
 /**
- * Req 1.15 (WG16 SC): no evidence-less create within 12 500 Hz of the tuned centre. The
+ * Req 1.15 (amendment 10): no evidence-less create within 12 500 Hz of the tuned centre. The
  * receiver's DC pedestal (LO leakage, 1/f noise) peaked 5.5 kHz from DC in the hunt captures;
  * 12.5 kHz = about twice that, one land-mobile channel. A decode still creates there (ADS-B on
  * its centre is decode-proven).

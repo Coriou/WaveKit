@@ -559,7 +559,7 @@ As 9.7: no new index query; `associationFamily` is a field read on the cached vi
 (O(1)); two compares per observation in the medians pass. Ingest cost is measured on the
 store bench before and after and reported (9.9), not asserted.
 
-## 10. Sustained admission and segment split (WG16 SC amendment)
+## 10. Sustained admission and segment split (amendment)
 
 Requirements 1.4b and 1.11 to 1.14. Root causes from an offline replay of private hunt
 captures through the real scanner (no captured data is committed): the 18 dB create
@@ -815,7 +815,7 @@ Properties 19 to 22). Expected to change: `consolidation.property.test.ts` and
 `discovery-store-evidence-family.test.ts` and `store-index.property.test.ts` (list key),
 and any 2.6 fixture that relied on the median ratio.
 
-Tests for amendment 10 (WG16 SC): `tests/unit/core/scanner/discovery-store-sustained.test.ts`
+Tests for amendment 10: `tests/unit/core/scanner/discovery-store-sustained.test.ts`
 (1.4b and 1.11 fixtures, Properties 23 and 24), `tests/unit/core/spectrum/segment-split.test.ts`
 (1.14 scene fixtures, Property 25), `tests/unit/core/spectrum/emissions/segmenter-split.test.ts`
 (1.13 bounds, Property 26), `tests/unit/core/scanner/slot-raster.test.ts` (1.12). Changed:

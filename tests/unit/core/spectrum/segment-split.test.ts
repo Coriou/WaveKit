@@ -20,7 +20,7 @@ import {
 } from "../../../mocks/scanner/observations.js"
 import { BIN_HZ, CENTRE, FS, Harness, N } from "./pipeline-harness.js"
 
-// WG16 SC: segment splitting (dip, raster cap, sidebands, one channel) and sustained admission,
+// Segment splitting (dip, raster cap, sidebands, one channel) and sustained admission,
 // end to end from synthetic IQ through the pipeline into the discovery store.
 
 const SIGMA = 0.005
@@ -137,7 +137,7 @@ function tracksAt(events: readonly PipelineEvent[], hz: number): Set<string> {
 	return ids
 }
 
-describe("segment split and sustained admission (WG16 SC)", () => {
+describe("segment split and sustained admission (amendment 10)", () => {
 	it("two adjacent 12.5 kHz carriers at 20 dB become two records (dip split, no raster)", () => {
 		const events = runScene(
 			n =>
@@ -164,6 +164,25 @@ describe("segment split and sustained admission (WG16 SC)", () => {
 		expect(got).toHaveLength(2)
 		expect(Math.abs(got[0]! + 25_000)).toBeLessThan(2_000)
 		expect(Math.abs(got[1]! + 12_500)).toBeLessThan(2_000)
+	})
+
+	it("two carriers on adjacent 8.33 kHz airband channels stay two records (the one-channel rule follows the slot grid)", () => {
+		const off = [25_000, 25_000 + 25_000 / 3]
+		const events = runScene(
+			n =>
+				scene(1607, n, SIGMA, [
+					rng => nfmCarriers(rng, n, FS, off, ampFor(22)),
+				]),
+			{
+				seconds: 5,
+				plan: plan(25_000 / 3),
+				rasters: [raster(25_000), raster(25_000 / 3)],
+			},
+		)
+		const got = centres(admit(events))
+		expect(got).toHaveLength(2)
+		expect(Math.abs(got[0]! - off[0]!)).toBeLessThan(2_000)
+		expect(Math.abs(got[1]! - off[1]!)).toBeLessThan(2_000)
 	})
 
 	it("one wide FM broadcast stays one track and one record over 5 s", () => {
