@@ -596,10 +596,14 @@ DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
 both target and source. Voice link control uses the latest CC from its own BS
 slot, or from the single MS channel, in its current burst sequence. Unknown CC,
-sync loss, protocol changes and sequence timeout clear that association. Header
+sync loss, protocol changes and sequence timeout clear that association. Header and voice-LC
 verification waits until the next DMR sync closes the burst (normally one burst
 of latency); a non-DMR sync or any continuation CRC/FEC error rejects it.
-Stop or silence timeout flushes an unfinished header as unverified. CRC/FEC
+Stop or silence timeout flushes unfinished headers and voice LC as unverified,
+without TG/SRC evidence. A Key-line error also rejects the burst: voice LC can
+print before a Key line and the later burst CRC result (`dmr_flco.c:403,778`,
+`dmr_dburst.c:627`). Call start/end and talkgroup display still process LC
+immediately. CRC/FEC
 errors and `-RAS` output do not count. MBCC continuation bursts have no own
 CRC and never confirm CC (dsd-fme ed1d1d6 `dmr_dburst.c:115–119,627`);
 only the completed block is CRC-checked by `dmr_block.c`. MS prints CC before
@@ -607,7 +611,7 @@ slot-type decoding (`dmr_ms.c:676–686`), so header confirmation also requires
 the closing DMR sync to print the same CC. Voice LC never borrows a CC from
 a still-pending MS header; its checked TG/SRC remain usable with CC unknown.
 `Sync: no sync` discards pending
-headers and CC context but does not split an active call by itself.
+headers, voice LC and CC context but does not split an active call by itself.
 Checked voice LC with paired TG/SRC but no known slot CC remains weak
 `digital-undecoded` evidence, with summary `DMR voice, TG/SRC verified, CC unknown`
 and a `DMR` tag. It cannot become decoded/proven without a CC identity.

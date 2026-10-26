@@ -529,6 +529,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private linkDmrCc = new Map<string, { cc: number; at: number }>()
 	private linkDmrMs = false
 	private pendingDmrLink: DsdFmeLinkLine | undefined
+	private pendingDmrVoiceLinks: DsdFmeLinkLine[] = []
 
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
@@ -926,7 +927,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private checkCallTimeoutAsync(): void {
 		const now = new Date()
 		const nowMs = now.getTime()
-		if (this.pendingDmrLink && nowMs - this.pendingDmrLink.at > CALL_TIMEOUT_MS)
+		const pending = this.pendingDmrLink ?? this.pendingDmrVoiceLinks[0]
+		if (pending && nowMs - pending.at > CALL_TIMEOUT_MS)
 			this.flushPendingDmrLink(false)
 
 		// First, check if pending call should be promoted to active
@@ -1309,10 +1311,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (
 			link?.protocol === "dmr" &&
 			link.verified &&
-			SYNC_PATTERN.test(cleanLine)
-		)
-			this.pendingDmrLink = link
-		else if (link) this.emit("link", link)
+			(SYNC_PATTERN.test(cleanLine) || link.voiceLc)
+		) {
+			if (link.voiceLc) this.pendingDmrVoiceLinks.push(link)
+			else this.pendingDmrLink = link
+		} else if (link) this.emit("link", link)
 
 		// STEP 4: Check for sync (protocol detection)
 		const syncResult = this.handleSync(cleanLine, now)
@@ -1523,10 +1526,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/** Only a following DMR sync can attest the previous burst tail. */
-	private flushPendingDmrLink(verified: boolean): void {
+	private flushPendingDmrLink(
+		verified: boolean,
+		headerVerified = verified,
+	): void {
 		const pending = this.pendingDmrLink
 		this.pendingDmrLink = undefined
-		if (pending) this.emit("link", { ...pending, verified })
+		if (pending) this.emit("link", { ...pending, verified: headerVerified })
+		const voices = this.pendingDmrVoiceLinks
+		this.pendingDmrVoiceLinks = []
+		for (const voice of voices) {
+			if (verified) this.emit("link", voice)
+			else {
+				const { tg: _tg, src: _src, voiceLc: _voiceLc, ...unverified } = voice
+				this.emit("link", { ...unverified, verified: false })
+			}
+		}
 	}
 
 	/**
@@ -1536,21 +1551,26 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private parseLinkLine(line: string, at: number): DsdFmeLinkLine | null {
 		const sync = SYNC_PATTERN.exec(line)
 		const dmrSync = sync?.groups?.["proto"]?.toUpperCase() === "DMR"
-		if (this.pendingDmrLink) {
-			const expired = at - this.pendingDmrLink.at > CALL_TIMEOUT_MS
+		const pending = this.pendingDmrLink ?? this.pendingDmrVoiceLinks[0]
+		if (pending) {
+			const expired = at - pending.at > CALL_TIMEOUT_MS
 			const lost = /Frame Sync Err\b|SYNC LOST|no sync/i.test(line)
 			if (expired || lost || sync)
 				// ed1d1d6 dmr_ms.c:676-686 prints CC before dmr_data_sync decodes
 				// the slot type. Only a matching closing CC can attest MS CC.
 				this.flushPendingDmrLink(
+					!expired && !lost && dmrSync,
 					!expired &&
 						!lost &&
 						dmrSync &&
 						(!this.linkDmrMs ||
 							Number(DMR_COLOR_CODE.exec(line)?.groups?.["cc"]) ===
-								this.pendingDmrLink.cc),
+								this.pendingDmrLink?.cc),
 				)
-			else if (CRC_ERR.test(line) || /\bFEC\s+ERR\b| -RAS /i.test(line)) {
+			else if (
+				CRC_ERR.test(line) ||
+				/\bFEC\s+ERR\b| -RAS |\bKey:.*(?:ERR|error)/i.test(line)
+			) {
 				this.flushPendingDmrLink(false)
 				this.linkDmrCc.clear()
 			}
@@ -1616,8 +1636,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// SLCO errors also continue (dmr_flco.c:981). Hold headers until
 				// the next sync, rejecting any error in the entire burst tail.
 				// VC/IDLE
-				// only print a weak or stale CC. dmr_flco.c prints SLOT TGT/SRC
-				// only after IrrecoverableErrors == 0 (verified voice LC).
+				// only print a weak or stale CC. ed1d1d6 dmr_flco.c:403 prints
+				// SLOT TGT/SRC after LC FEC passes, but :778 can start a Key:
+				// line before dmr_dburst.c:627 prints the burst CRC error.
+				// Hold voice LC too; call handling still consumes it immediately.
 				const voiceLc =
 					idGroups !== undefined &&
 					/\bSLOT\s+[12]\s+TGT=\d+\s+SRC=\d+\b/i.test(line)

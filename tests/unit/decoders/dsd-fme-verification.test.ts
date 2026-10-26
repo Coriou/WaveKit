@@ -142,6 +142,63 @@ describe("dsd-fme content verification", () => {
 		expect(r.links.every(l => !l.verified)).toBe(true)
 	})
 
+	it.each([
+		" Key: 0000000000000000 0000000000000000 (CRC ERR)",
+		" Key: 0000000000000000 error",
+		" SLOT 1 FLCO FEC ERR",
+		" SLCO CRC ERR",
+		" (FEC ERR)",
+		" -RAS ",
+		"Sync: no sync",
+		"Sync: +P25p1",
+		"| Frame Sync Err: 7",
+	])("rejects voice LC with a later burst failure: %s", continuation => {
+		const r = rig()
+		for (let i = 0; i < 2; i++) {
+			const at = T0 + i * 311.7
+			r.feed(bs("05", "VLC"), at + 3.7)
+			r.feed(" SLOT 1 TGT=9 SRC=123 Group Encrypted", at + 19.1)
+			expect(r.links.some(l => l.voiceLc)).toBe(false)
+			r.feed(continuation, at + 31.3)
+			r.feed(bs("05", "IDLE"), at + 69.1)
+		}
+		expect(
+			r.links.every(l => !l.verified && !l.voiceLc && !l.tg && !l.src),
+		).toBe(true)
+		expect(
+			r.evidence.every(
+				e =>
+					!e.contentVerified &&
+					!e.identity &&
+					!e.voiceLc &&
+					!e.metadata.talkgroups?.length &&
+					!e.metadata.sources?.length,
+			),
+		).toBe(true)
+	})
+
+	it("verifies voice LC only after a clean burst continuation closes", () => {
+		const r = rig()
+		for (let i = 0; i < 2; i++) {
+			const at = T0 + i * 311.7
+			r.feed(bs("05", "VLC"), at + 3.7)
+			r.feed(" SLOT 1 TGT=9 SRC=123 Group Encrypted", at + 19.1)
+			r.feed(" Key: 0000000000000000 0000000000000000", at + 31.3)
+			expect(r.links.filter(l => l.voiceLc)).toHaveLength(i)
+			r.feed(bs("05", "IDLE"), at + 69.1)
+		}
+		expect(
+			r.evidence.some(
+				e =>
+					e.contentVerified &&
+					e.voiceLc &&
+					e.identity?.value === "5" &&
+					e.metadata.talkgroups?.[0] === "9" &&
+					e.metadata.sources?.[0] === "123",
+			),
+		).toBe(true)
+	})
+
 	it("rejects MS header CC when the closing checked burst prints another CC", () => {
 		const r = rig()
 		r.feed("Sync: +DMR MS/DM MODE/MONO | Color Code=05 | VLC", T0 + 3.7)
@@ -166,7 +223,7 @@ describe("dsd-fme content verification", () => {
 			r.feed(closing, at + 69.1)
 		}
 		const voice = r.evidence.filter(e => e.voiceLc)
-		expect(voice.length).toBeGreaterThan(0)
+		expect(voice.length).toBe(closing === "Sync: no sync" ? 0 : 1)
 		for (const ev of voice) {
 			expect(ev).toMatchObject({
 				contentVerified: true,
@@ -184,8 +241,8 @@ describe("dsd-fme content verification", () => {
 		r.feed("Sync: +DMR [slot2] slot1 | Color Code=05 | IDLE", T0 + 3.7)
 		r.feed(lc, T0 + 31.3)
 		r.feed(lc, T0 + 93.7)
-		const ev = r.evidence.at(-1)!
 		r.feed("Sync: +DMR [slot2] slot1 | Color Code=05 | IDLE", T0 + 131.9)
+		const ev = r.evidence.filter(e => e.voiceLc).at(-1)!
 		expect(ev.identity).toBeUndefined()
 		expect(ev.voiceLc).toBe(true)
 		expect(proof(ev)).toMatchObject({
@@ -355,8 +412,9 @@ describe("dsd-fme content verification", () => {
 			)
 			for (const at of [127.1, 193.7])
 				r.feed(` SLOT ${slot} TGT=9 SRC=123`, T0 + at)
+			r.feed(bs("10", "IDLE"), T0 + 211.9)
 			expect(r.links.filter(l => l.voiceLc).map(l => l.cc)).toEqual([3, 3])
-			expect(r.evidence.at(-1)?.identity).toEqual({
+			expect(r.evidence.filter(e => e.voiceLc).at(-1)?.identity).toEqual({
 				kind: "dmr-cc",
 				value: "3",
 			})
@@ -366,7 +424,8 @@ describe("dsd-fme content verification", () => {
 				T0 + 251.3,
 			)
 			r.feed(` SLOT ${slot} TGT=9 SRC=123`, T0 + 317.1)
-			expect(r.links.at(-1)?.cc).toBeUndefined()
+			r.feed(bs("10", "IDLE"), T0 + 351.9)
+			expect(r.links.filter(l => l.voiceLc).at(-1)?.cc).toBeUndefined()
 		},
 	)
 
@@ -375,6 +434,7 @@ describe("dsd-fme content verification", () => {
 		r.feed("Sync: +DMR slot1 [slot2] | Color Code=10 | IDLE", T0 + 3.7)
 		r.feed(lc, T0 + 61.3)
 		r.feed(lc, T0 + 127.1)
+		r.feed(bs("10", "IDLE"), T0 + 151.9)
 		expect(r.links.filter(l => l.voiceLc).map(l => l.cc)).toEqual([
 			undefined,
 			undefined,
@@ -388,8 +448,12 @@ describe("dsd-fme content verification", () => {
 		r.feed("Sync: -DMR MS/DM MODE/MONO | Color Code=03 | VC*", T0 + 61.3)
 		r.feed(" SLOT 2 TGT=9 SRC=123", T0 + 127.1)
 		r.feed(lc, T0 + 193.7)
+		r.feed("Sync: -DMR MS/DM MODE/MONO | Color Code=03 | IDLE", T0 + 211.9)
 		expect(r.links.filter(l => l.voiceLc).map(l => l.cc)).toEqual([3, 3])
-		expect(r.evidence.at(-1)?.identity).toEqual({ kind: "dmr-cc", value: "3" })
+		expect(r.evidence.filter(e => e.voiceLc).at(-1)?.identity).toEqual({
+			kind: "dmr-cc",
+			value: "3",
+		})
 	})
 
 	it.each([
@@ -428,12 +492,20 @@ describe("dsd-fme content verification", () => {
 		},
 	)
 
-	it.each(["stop", "timeout", "late-sync"])(
-		"flushes an unfinished burst unverified on %s",
-		async end => {
+	it.each([
+		["stop", false],
+		["timeout", false],
+		["late-sync", false],
+		["stop", true],
+		["timeout", true],
+		["late-sync", true],
+	] as const)(
+		"flushes an unfinished burst unverified on %s (voice LC: %s)",
+		async (end, voice) => {
 			const r = rig()
-			r.feed(bs("10", "VLC"), T0 + 3.7)
-			expect(r.links).toEqual([])
+			r.feed(bs("10", voice ? "VC*" : "VLC"), T0 + 3.7)
+			if (voice) r.feed(lc, T0 + 19.1)
+			const before = r.links.length
 			if (end === "stop") await r.decoder.stop()
 			else {
 				vi.setSystemTime(T0 + 5009.3)
@@ -443,8 +515,11 @@ describe("dsd-fme content verification", () => {
 					).checkCallTimeoutAsync()
 				else r.feed(bs("10", "VLC"), T0 + 5009.3)
 			}
-			expect(r.links).toHaveLength(1)
-			expect(r.links[0]?.verified).toBe(false)
+			expect(r.links).toHaveLength(before + 1)
+			expect(r.links.at(-1)).toMatchObject({ verified: false })
+			expect(r.links.at(-1)?.voiceLc).toBeUndefined()
+			expect(r.links.at(-1)?.tg).toBeUndefined()
+			expect(r.links.at(-1)?.src).toBeUndefined()
 		},
 	)
 
@@ -481,7 +556,8 @@ describe("dsd-fme content verification", () => {
 		r.feed(lc)
 		r.feed(bs("03", "VC*"))
 		r.feed(lc)
-		const voice = r.evidence.at(-1)!
+		r.feed(bs("03", "IDLE"))
+		const voice = r.evidence.filter(e => e.voiceLc).at(-1)!
 		expect(voice).toMatchObject({
 			voiceLc: true,
 			metadata: { talkgroups: ["9"], sources: ["123"] },
