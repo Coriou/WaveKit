@@ -107,6 +107,11 @@ async function setup(
 		noEcho?: boolean
 		/** An older tool: refuses `--rate-ack` as an unknown flag (usage error, exit 2). */
 		oldTool?: boolean
+		/** Per `run` spawn (in order): exit before ready with this code/signal and stderr. */
+		startFailures?: (
+			| { code: number | null; signal?: NodeJS.Signals; stderr: string }
+			| undefined
+		)[]
 	} = {},
 ) {
 	const root = path.join(base, `r${n++}`)
@@ -116,10 +121,22 @@ async function setup(
 	let uuidN = 0
 	const ids: string[] = []
 	const samples = opts.samples ?? 4800
+	let runIndex = 0
 	const sp = fakeSpawner({
 		...(opts.enoent ? { enoent: true } : {}),
 		onSpawn: child => {
 			if (child.args[0] !== "run") return
+			const failure = opts.startFailures?.[runIndex++]
+			if (failure) {
+				queueMicrotask(() => {
+					child.stderr.write(failure.stderr)
+					queueMicrotask(() => {
+						child.exit(failure.code, failure.signal ?? null)
+						child.emit("close", failure.code, failure.signal ?? null)
+					})
+				})
+				return
+			}
 			if (opts.oldTool && child.args.includes("--rate-ack")) {
 				queueMicrotask(() => {
 					child.stderr.write("wavekit-iqcap: unknown flag\nusage: ...")
@@ -729,6 +746,93 @@ describe("IqCaptureService supervision", () => {
 		} finally {
 			await s.svc.stop()
 		}
+	})
+
+	describe("only a clean usage refusal is a --rate-ack fallback", () => {
+		const usage = "wavekit-iqcap: unknown flag\nusage: ..."
+		async function started(
+			failures: NonNullable<
+				NonNullable<Parameters<typeof setup>[1]>["startFailures"]
+			>,
+		) {
+			const s = await setup({}, { startFailures: failures })
+			s.svc.attachSource("src", {
+				sampleRateHz: FS,
+				centerHz: CENTER,
+				epoch: 3,
+				engine: s.engine,
+			})
+			await s.svc.start()
+			await flush(20)
+			const runs = () => s.sp.children.filter(c => c.args[0] === "run")
+			return { s, runs }
+		}
+
+		it.each([
+			["exit 1 with a usage text", { code: 1, stderr: usage }],
+			[
+				"SIGSEGV",
+				{ code: null, signal: "SIGSEGV" as NodeJS.Signals, stderr: usage },
+			],
+			[
+				"exit 2 with another diagnostic",
+				{ code: 2, stderr: "wavekit-iqcap: boom" },
+			],
+		])(
+			"%s is a normal tool failure: counted, restarted later with the flag",
+			async (_n, f) => {
+				const { s, runs } = await started([f])
+				try {
+					expect(runs()).toHaveLength(1)
+					expect(s.svc.counters().toolFailures).toBe(1)
+					expect(s.svc.counters().lastToolFailure).toMatchObject({
+						phase: "exit-before-ready",
+					})
+					s.timers.advance(60_000)
+					await flush(20)
+					expect(runs()[1]?.args).toContain("--rate-ack")
+				} finally {
+					await s.svc.stop()
+				}
+			},
+		)
+
+		it("a fallback after a genuine failure keeps that failure as the last one, uncounted itself", async () => {
+			const { s, runs } = await started([
+				{ code: null, signal: "SIGSEGV", stderr: "" },
+				{ code: 2, stderr: usage },
+			])
+			try {
+				expect(s.svc.counters().toolFailures).toBe(1)
+				const crash = s.svc.counters().lastToolFailure
+				expect(crash).toMatchObject({ signal: "SIGSEGV" })
+				// step past the restart delay, letting the new tool answer before its ready deadline
+				for (let i = 0; i < 60 && runs().length < 2; i++) {
+					s.timers.advance(1_000)
+					await flush(5)
+				}
+				await flush(20)
+				// the restart refused the flag: retried at once without it, no new failure
+				expect(runs()).toHaveLength(3)
+				expect(runs()[1]?.args).toContain("--rate-ack")
+				expect(runs()[2]?.args).not.toContain("--rate-ack")
+				expect(s.svc.counters().toolFailures).toBe(1)
+				expect(s.svc.counters().lastToolFailure).toEqual(crash)
+			} finally {
+				await s.svc.stop()
+			}
+		})
+
+		it("a fallback as the first start leaves no failure recorded", async () => {
+			const { s, runs } = await started([{ code: 2, stderr: usage }])
+			try {
+				expect(runs()).toHaveLength(2)
+				expect(s.svc.counters().toolFailures).toBe(0)
+				expect(s.svc.counters().lastToolFailure).toBeNull()
+			} finally {
+				await s.svc.stop()
+			}
+		})
 	})
 
 	it("stop shuts the tools down and discards everything", async () => {

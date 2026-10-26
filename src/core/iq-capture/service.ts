@@ -90,14 +90,21 @@ export interface IqReplayShape {
 	bandwidthHz: number
 	transitionHz: number
 }
-export type IqReplayDecoderType = Exclude<ProbeDecoderType, "rtl433">
+export type IqReplayDecoderType = Exclude<
+	ProbeDecoderType,
+	"rtl433" | "acarsdec"
+>
 /**
  * The audio probe shapes (required; the capture bandwidth is the widest of them) and the optional
  * rtl433 shape: rtl_433 reads the capture as it is, so its shape is the whole capture passband
  * (`wholeCaptureShape`). Without it a capture is never replayed into rtl433.
  */
 export type IqReplayShapes = Readonly<
-	Record<IqReplayDecoderType, IqReplayShape> & { rtl433?: IqReplayShape }
+	Record<IqReplayDecoderType, IqReplayShape> & {
+		rtl433?: IqReplayShape
+		/** The ACARS channel (25 kHz); without it no capture is replayed into acarsdec. */
+		acarsdec?: IqReplayShape
+	}
 >
 
 /** The spectrum engine surface the service uses (structural; `SpectrumEngine` satisfies it). */
@@ -1479,7 +1486,18 @@ class Service implements IqCaptureService {
 				if (z.proc === proc) this.reap(id)
 		})
 		proc.once("exit", (failed: boolean, code: string | null) => {
-			if (failed && code !== "ENOENT" && proc.lastFailure) {
+			// Classified first: only an older tool refusing `--rate-ack` (a usage error, exit code 2,
+			// no signal, before ready) is a compatibility fallback; a crash never is. A fallback is
+			// no failure and leaves the last genuine failure in place.
+			const f = proc.lastFailure
+			const flagRefused =
+				failed &&
+				slot.rateAck &&
+				f?.phase === "exit-before-ready" &&
+				f.reason === "usage" &&
+				f.exitCode === 2 &&
+				f.signal === null
+			if (failed && code !== "ENOENT" && f && !flagRefused) {
 				this.toolFailures++
 				this.lastToolFailure = proc.lastFailure
 				this.log.debug({ ...proc.lastFailure }, "IQ capture tool failed")
@@ -1494,15 +1512,9 @@ class Service implements IqCaptureService {
 				return
 			}
 			if (!failed) return
-			// An older tool refuses `--rate-ack`: restart once without it (48 kHz only); not a failure.
-			const f = proc.lastFailure
-			if (
-				slot.rateAck &&
-				f?.phase === "exit-before-ready" &&
-				f.reason === "usage"
-			) {
+			// An older tool refuses `--rate-ack`: restart once without it (48 kHz only).
+			if (flagRefused) {
 				slot.rateAck = false
-				this.toolFailures--
 				this.spawnTool(slot)
 				return
 			}
