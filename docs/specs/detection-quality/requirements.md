@@ -144,7 +144,9 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   stays masked against energy folded back from past Nyquist. A segment reaching within the gap
   tolerance of the 0.8 bound is flagged `edge` in window (`truncated` in a sweep). An edge track
   passes the same channel gate, its observation keeps `flags.edge`, it never votes a class (3.4;
-  the record shows `unknown`), it is never held to confirm, channel-refined or IQ-captured, and
+  the record shows `unknown`), it is never held to confirm, channel-refined, IQ-captured or given an automatic analog trial
+  (whose whole channel and the track centre must lie inside the 0.8 span, refusal `edge` or
+  `out-of-window`), and
   on the 18 dB rule of 1.4 it never takes the long-track exemption of 1.4c: its own track SNR
   must also reach `DQ_CREATE_TRACK_SNR_DB` = 15 dB however long it lasts. The image check of
   § 4.9 is symmetric and runs over the whole detection span. Fixtures: an OOK burst at 0.93 of

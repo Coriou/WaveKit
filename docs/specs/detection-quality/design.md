@@ -857,6 +857,8 @@ fixtures and bounds) and `fragment-retirement.property.test.ts` (Property 28). C
 Tests for 1.4e: `tests/unit/core/spectrum/emissions/segmenter-edge-band.test.ts` (bin bounds
 of both spans, at and past each), `tests/unit/core/spectrum/pipeline-edge-span.test.ts`
 (synthetic OOK, tones, images and a weak burst through the pipeline and store) and
-`tests/unit/core/scanner/edge-admission.test.ts` (the edge threshold bounds). The pipeline
+`tests/unit/core/scanner/edge-admission.test.ts` (the edge threshold bounds) and
+`tests/unit/core/scanner/job-analog-edge.test.ts` (automatic analog trials refused for edge
+tracks and for channels past the 0.8 span, at and past the outermost channel). The pipeline
 takes an optional `edgeFraction` next to `usableFraction`; the segmenter flags against
 `edgeStartBin` / `edgeEndBin`, which default to the usable bounds.

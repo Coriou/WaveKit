@@ -4571,6 +4571,25 @@ export class ScannerService extends EventEmitter {
 	// === WG11 req 6: IQ capture on detection, replay results ===
 
 	/** A18: classification and measured bandwidth never exclude an allowed analog trial. */
+	/**
+	 * DQ 1.4e: an automatic analog trial needs its whole channel and the track's centre inside
+	 * the usable 0.8 span of the track's epoch; the detection span reaches 0.95, trials do not.
+	 * The measured width is not used: analog admission ignores it (scanner-redesign 6.7).
+	 */
+	private analogChannelInWindow(
+		sourceId: string,
+		track: TrackSnapshot,
+		channelHz: number,
+		spacingHz: number,
+	): boolean {
+		const epoch = this.spectrum.engine(sourceId)?.currentEpoch()
+		if (!epoch || epoch.epoch !== track.epoch) return false
+		return (
+			inWindow(channelHz, spacingHz, epoch, USABLE_FRACTION) &&
+			inWindow(track.centreHz, 0, epoch, USABLE_FRACTION)
+		)
+	}
+
 	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
 		const runner = this.admittedAnalog()
 		const protocols = this.protocolsFor(live, track.centreHz)
@@ -4599,6 +4618,12 @@ export class ScannerService extends EventEmitter {
 				trial.discoveryId === live.discoveryId &&
 				trial.channelKey === channelKey,
 		)
+		const outside = !this.analogChannelInWindow(
+			live.sourceId,
+			track,
+			channelHz,
+			spacingHz,
+		)
 		const reason = !eligible
 			? "not-allowed"
 			: this.discoveryLockedOut(live.discoveryId)
@@ -4607,17 +4632,21 @@ export class ScannerService extends EventEmitter {
 					? "no-discovery"
 					: track.flags.spur || track.flags.iqImage
 						? "spur-image"
-						: !runner?.runLive
-							? "runner-unavailable"
-							: protocols.length > 0 && !protocols.includes("analog-fm")
-								? "not-allowed"
-								: this.analogAttempted.has(live)
-									? "attempted"
-									: owned
-										? "discovery-owned"
-										: (this.analogCounts.get(live.sourceId) ?? 0) >= 2
-											? "capacity"
-											: undefined
+						: track.flags.edge
+							? "edge"
+							: outside
+								? "out-of-window"
+								: !runner?.runLive
+									? "runner-unavailable"
+									: protocols.length > 0 && !protocols.includes("analog-fm")
+										? "not-allowed"
+										: this.analogAttempted.has(live)
+											? "attempted"
+											: owned
+												? "discovery-owned"
+												: (this.analogCounts.get(live.sourceId) ?? 0) >= 2
+													? "capacity"
+													: undefined
 		if (reason) {
 			this.refuseAnalog(live, reason)
 			if (reason !== "capacity" && reason !== "discovery-owned") {
