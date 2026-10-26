@@ -579,6 +579,7 @@ class Queue implements IqReplayQueue {
 			sourceId: cur.view.sourceId,
 			observationId: cur.view.observationId,
 			epoch: cur.view.epoch,
+			rfHz: cur.view.rfHz,
 			trials: cur.done,
 			decoded,
 		}

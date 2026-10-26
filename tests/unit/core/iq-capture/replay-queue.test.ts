@@ -250,6 +250,18 @@ describe("IqReplayQueue", () => {
 		expect(port.discarded).toEqual([[id(1), "result"]])
 	})
 
+	it("names the captured channel on the result, decoded or not", async () => {
+		const decoded = make(() => hit)
+		decoded.port.add(id(1))
+		await flush()
+		expect(decoded.results[0]?.rfHz).toBe(1e8)
+		const none = make(() => miss)
+		none.port.add(id(2))
+		await flush()
+		expect(none.results[0]?.decoded).toBeNull()
+		expect(none.results[0]?.rfHz).toBe(1e8)
+	})
+
 	it("no decode: every trial ran, result null, then discard", async () => {
 		const { port, p, results } = make(() => miss)
 		port.add(id(1))
