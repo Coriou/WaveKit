@@ -584,7 +584,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		}
 	})
 
-	// Review round 2 major 1: a known protocol the memory moved behind a remembered success still
+	// A known protocol the memory moved behind a remembered success still
 	// counts its full-hold misses, driven through the real replay queue.
 	it("a demoted known DMR still counts two full-hold misses through the real queue", async () => {
 		const { h, port, known, internals, live } = setup()
