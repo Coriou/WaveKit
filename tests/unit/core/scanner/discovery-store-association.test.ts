@@ -853,7 +853,40 @@ describe("DQ properties", () => {
 				fc.array(levelObs, { minLength: 1, maxLength: 40 }),
 				steps => {
 					const { store } = newStore()
+					// Every merge is judged when it happens, on the survivor that absorbs: the
+					// survivor's and the absorbed record's observations at that moment must not be
+					// incompatible (the store re-checks each absorb against the survivor's medians
+					// as earlier members already moved them).
+					type Absorb = (
+						op: unknown,
+						keep: Discovery,
+						drop: Discovery,
+						planned?: boolean,
+					) => void
+					const hooked = store as unknown as { absorb: Absorb }
+					const absorb = hooked.absorb.bind(store)
+					let judged: {
+						keep: string
+						drop: string
+						verdict: boolean | null
+					}[] = []
+					hooked.absorb = (op, keep, drop, planned) => {
+						const samples = oracleSamples(store.snapshot())
+						const a = samples.get(keep.id) ?? []
+						const b = samples.get(drop.id) ?? []
+						const verdict =
+							a.length > 0 && b.length > 0
+								? recordsCompatible(recordOf(a), recordOf(b))
+								: null
+						absorb(op, keep, drop, planned)
+						expect(planned ?? false).toBe(false)
+						const gone = !store
+							.snapshot()
+							.discoveries.some(d => d.id === drop.id)
+						if (gone) judged.push({ keep: keep.id, drop: drop.id, verdict })
+					}
 					steps.forEach((s, i) => {
+						judged = []
 						const pre = oracleSamples(store.snapshot())
 						const before = new Set(store.snapshot().discoveries.map(d => d.id))
 						const merges: [string, string[]][] = []
@@ -891,38 +924,26 @@ describe("DQ properties", () => {
 							if (rec !== undefined)
 								expect(compatible(recordOf(rec).medians, self)).not.toBe(false)
 						}
-						// A merge is judged after the new observation joined one side (or formed one).
-						const sample: Sample = {
-							peakDbfs: self.peakDbfs,
-							obwHz: self.obwHz,
+						// The merge events name the actual survivor; each absorbed id was absorbed by
+						// it (directly or through a member it absorbed in the same operation), and no
+						// absorb merged a pair its observations refuse.
+						for (const j of judged)
+							expect(j.verdict, JSON.stringify(j)).not.toBe(false)
+						const parent = new Map(judged.map(j => [j.drop, j.keep]))
+						const rootOf = (id: string): string => {
+							let at = id
+							for (let n = 0; n < 64 && parent.has(at); n++)
+								at = parent.get(at) ?? at
+							return at
 						}
-						// A group merge keeps the oldest id, but the store judges every member
-						// against the group's survivor (lazyConsolidate: members joinable to the
-						// survivor), which may be any member. So some member must be compatible
-						// with every other one, the new observation counted on either side.
-						const pairOk = (x0: string, y0: string): boolean => {
-							const a = pre.get(x0) ?? []
-							const b = pre.get(y0) ?? []
-							return [
-								[a, b],
-								[[...a, sample], b],
-								[a, [...b, sample]],
-							]
-								.filter(
-									([x, y]) => (x ?? []).length > 0 && (y ?? []).length > 0,
-								)
-								.some(
-									([x, y]) =>
-										recordsCompatible(recordOf(x ?? []), recordOf(y ?? [])) !==
-										false,
-								)
+						const reported = merges.flatMap(([keep, absorbed]) =>
+							absorbed.map(dropId => [keep, dropId] as const),
+						)
+						for (const [keep, dropId] of reported) {
+							expect(parent.has(dropId), dropId).toBe(true)
+							expect(rootOf(dropId)).toBe(keep)
 						}
-						for (const [keep, absorbed] of merges) {
-							const group = [keep, ...absorbed]
-							expect(
-								group.some(sv => group.every(o => o === sv || pairOk(sv, o))),
-							).toBe(true)
-						}
+						expect(reported.length).toBe(judged.length)
 					})
 				},
 			),
