@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { defineConfig } from "vitest/config"
 
 const pkg = JSON.parse(readFileSync("./package.json", "utf8")) as {
@@ -8,7 +9,10 @@ const pkg = JSON.parse(readFileSync("./package.json", "utf8")) as {
 export default defineConfig({
 	define: { __WAVEKIT_VERSION__: JSON.stringify(pkg.version) },
 	test: {
-		globalSetup: ["./tests/global-setup.ts"],
+		// Absolute, so workspace packages that reuse this config (sdr-host) resolve it too.
+		globalSetup: [
+			fileURLToPath(new URL("./tests/global-setup.ts", import.meta.url)),
+		],
 		globals: true,
 		environment: "node",
 		include: ["tests/**/*.test.ts"],
