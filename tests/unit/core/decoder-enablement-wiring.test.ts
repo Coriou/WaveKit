@@ -659,7 +659,7 @@ describe("decoder enablement composition", () => {
 		).not.toThrow()
 		const source = await entry()
 		for (const seam of [
-			"composeDecoderActivity(\n\t\t\tconfig.decoderPolicy?.efficiency?.activity,\n\t\t\t() => budget.view().resolved.cores,",
+			"composeDecoderActivity(\n\t\t\tconfig.decoderPolicy?.efficiency?.activity,\n\t\t\t() => budget.cores(),",
 			"activity: decoderActivity.options,",
 			"\t\t\t\tchannelActivity,\n",
 			"own(44, () => channelActivity.dispose())",

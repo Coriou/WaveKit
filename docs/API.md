@@ -2115,10 +2115,14 @@ completes, without an additional drop rejection backoff.
 
 #### GET /api/decoders/efficiency/budget
 
-Returns `{ cpuBudgetCores, resolved }`. The requested value is `"auto"` or a number;
+Returns `{ cpuBudgetCores, resolved, source }`. `source` is `"saved"` for a persisted
+override, `"config"` for a startup configuration value, or `"default"` for the default
+auto policy. Older cores may omit `source`. A saved override is logged once at startup with its validated value. The requested value is `"auto"` or a number;
 `resolved` includes `mode`, `cores`, `label`, and, in auto mode, `cpus` (available CPU
 capacity after the process limit and cgroup quota). The efficiency response also includes
-this resolution as `budget`, alongside the numeric `budgetCores`.
+this resolution as `budget`, alongside the numeric `budgetCores`. Auto sizing supports
+cgroup v1/v2 and hybrid quotas, including ancestors. Its 0.75-core floor is capped
+at quota: below 0.75 cores, auto uses `min(0.75, quota)` and never exceeds quota.
 
 #### PUT /api/decoders/efficiency/budget
 
@@ -2131,7 +2135,9 @@ access. A successful response returns the same shape as GET with `Cache-Control:
 Updates are serialized and saved to `<stateDir>/decoder-efficiency.json` with the shared
 atomic temporary-file, fsync and rename writer before applying to admission and activity
 allocation. The saved override survives restart and takes precedence over startup config.
-A failed save returns 503 and keeps the previous live budget. Set `"auto"` to restore
+A failed save returns 503 and keeps the previous live budget. If the change notification
+hook fails after saving and publishing the live value, the request still succeeds with
+that value and the failure is logged. Set `"auto"` to restore
 automatic sizing. Each successful change re-evaluates activity slot allocation and retries
 placements refused for budget without waiting for their previous retry deadline. Refusals
 for CPU pressure, drops or missing evidence retain their existing deadlines and safeguards.

@@ -38,6 +38,7 @@ import {
 } from "./decoder-rate-schemas.js"
 import {
 	efficiencyBudgetResolutionSchema,
+	efficiencyBudgetSettingsSchema,
 	decoderHealthValues,
 	decoderStatusSchema,
 } from "./decoder-status-schemas.js"
@@ -345,13 +346,18 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	const { decoderManager, decoderRegistry, authorizeSettings } = options
 	const budget = options.efficiencyBudget
 	if (budget) {
-		fastify.get("/api/decoders/efficiency/budget", async (_request, reply) => {
-			return reply.header("Cache-Control", "no-store").send(budget.view())
-		})
+		fastify.get(
+			"/api/decoders/efficiency/budget",
+			{ schema: { response: { 200: efficiencyBudgetSettingsSchema } } },
+			async (_request, reply) => {
+				return reply.header("Cache-Control", "no-store").send(budget.view())
+			},
+		)
 		if (authorizeSettings)
 			fastify.route({
 				method: "PUT",
 				url: "/api/decoders/efficiency/budget",
+				schema: { response: { 200: efficiencyBudgetSettingsSchema } },
 				onRequest: (request, reply, done) => {
 					const denied = authorizeSettings(request)
 					if (denied) {

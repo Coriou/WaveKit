@@ -4,6 +4,8 @@ export type EfficiencyBudgetResolution =
 	| { mode: "auto"; cpus: number; cores: number; label: string }
 	| { mode: "configured"; cores: number; label: "configured" }
 export interface EfficiencyBudgetSettings {
+	/** Present on cores that report budget provenance. */
+	source?: "saved" | "config" | "default"
 	cpuBudgetCores: EfficiencyBudgetValue
 	resolved: EfficiencyBudgetResolution
 }

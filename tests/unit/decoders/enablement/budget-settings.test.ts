@@ -7,6 +7,7 @@ import {
 	openEfficiencyBudget,
 	readBudgetSettings,
 } from "../../../../src/decoders/enablement/budget-settings.js"
+import type { Logger } from "../../../../src/utils/logger.js"
 import { resolveCpuBudget } from "../../../../src/decoders/enablement/cpu-budget.js"
 
 const resolve = (value: Parameters<typeof resolveCpuBudget>[0]) =>
@@ -47,6 +48,7 @@ it("uses configured or auto budgets when state cannot be read", async () => {
 			},
 		})
 		expect(service.view()).toEqual({
+			source: "config",
 			cpuBudgetCores: configured,
 			resolved: resolve(configured),
 		})
@@ -101,4 +103,55 @@ it("persists across reopening and bounds reads at and past the file limit", asyn
 	} finally {
 		await rm(dir, { recursive: true, force: true })
 	}
+})
+
+it("reports budget provenance and reads live cores without cloning", async () => {
+	for (const configured of [undefined, "auto", 3] as const) {
+		for (const stored of [undefined, { version: 1, cpuBudgetCores: 2 }]) {
+			const service = await openEfficiencyBudget({
+				stateDir: "unused",
+				resolve,
+				...(configured === undefined ? {} : { configured }),
+				read: async () => stored,
+				write: async () => {},
+			})
+			expect(service.view().source).toBe(
+				stored ? "saved" : configured === undefined ? "default" : "config",
+			)
+			const snapshot = service.view()
+			snapshot.resolved.cores = 99
+			expect(service.cores()).toBe(
+				resolve(stored ? 2 : (configured ?? "auto")).cores,
+			)
+			await service.update(1)
+			expect(service.cores()).toBe(1)
+			expect(service.view().source).toBe("saved")
+		}
+	}
+})
+
+it("logs a saved override once and a failed notification without external content", async () => {
+	const info = vi.fn()
+	const warn = vi.fn()
+	const log = { child: vi.fn(() => ({ info, warn })) } as unknown as Logger
+	const service = await openEfficiencyBudget({
+		stateDir: "unused",
+		configured: 3,
+		resolve,
+		log,
+		read: async () => ({ version: 1, cpuBudgetCores: 2 }),
+		write: async () => {},
+		onChanged: () => {
+			throw new TypeError("external detail")
+		},
+	})
+	expect(info).toHaveBeenCalledExactlyOnceWith(
+		{ cpuBudgetCores: 2 },
+		"Saved decoder CPU budget overrides startup configuration",
+	)
+	await expect(service.update(1)).resolves.toMatchObject({ cpuBudgetCores: 1 })
+	expect(warn).toHaveBeenCalledExactlyOnceWith(
+		"CPU budget change notification failed",
+	)
+	expect(info).toHaveBeenCalledOnce()
 })

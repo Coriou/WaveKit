@@ -880,7 +880,7 @@ export function createEfficiencyMonitor(deps: {
 		if (
 			s.pending === null &&
 			s.cleanSinceMono !== null &&
-			at - s.cleanSinceMono >= EFFICIENCY_CLEAR_MS &&
+			s.lastTickMono - s.cleanSinceMono >= EFFICIENCY_CLEAR_MS &&
 			at - s.lastTickMono <= EFFICIENCY_STALE_MS
 		)
 			state = "ok"
@@ -1050,7 +1050,7 @@ export function createEfficiencyMonitor(deps: {
 					t => t !== null && (at < t || at - t <= ms),
 				) ||
 				s.cleanSinceMono === null ||
-				at - s.cleanSinceMono < EFFICIENCY_CLEAR_MS + ms
+				s.lastTickMono - s.cleanSinceMono < EFFICIENCY_CLEAR_MS + ms
 			)
 		},
 		start() {

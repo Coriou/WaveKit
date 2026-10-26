@@ -7,34 +7,48 @@ import type {
 } from "@wavekit/api-types"
 
 // Explicit budgets retain the existing interval (0, 64]; auto uses half
-// the available CPUs, clamped to [3/4, 64] cores.
+// the available CPUs, with a 3/4-core floor capped by the effective quota.
 export const CpuBudgetSchema = z.union([
 	z.literal("auto"),
 	z.number().finite().positive().max(64),
 ])
 
-// At most 31 path components plus the mount root = 32 quota reads.
+// At most 31 path components plus the mount root = 32 levels per hierarchy.
 const MAX_CGROUP_LEVELS = 32
 
-function cgroupComponents(readProcCgroup?: () => string): string[] {
-	try {
-		const lines = readProcCgroup?.()
-			.split("\n")
-			.filter(line => line.startsWith("0:"))
-		if (lines?.length !== 1) return []
-		const match = /^0::(\/[^\0\r\n]*)$/.exec(lines[0] ?? "")
-		if (!match?.[1]) return []
-		const components = match[1].split("/").slice(1)
-		if (components.length === 1 && components[0] === "") return []
-		if (
-			components.length >= MAX_CGROUP_LEVELS ||
-			components.some(part => part === ".." || part === "." || part === "")
-		)
-			return []
-		return components
-	} catch {
+function cgroupComponents(path: string): string[] {
+	const components = path.split("/").slice(1)
+	if (components.length === 1 && components[0] === "") return []
+	if (
+		components.length >= MAX_CGROUP_LEVELS ||
+		components.some(part => part === ".." || part === "." || part === "")
+	)
 		return []
+	return components
+}
+
+function cgroupPaths(read?: () => string): {
+	v2: string[]
+	v1: string[] | null
+} {
+	let content = ""
+	try {
+		content = read?.() ?? ""
+	} catch {
+		/* Mount root fallback. */
 	}
+	const result: { v2: string[]; v1: string[] | null } = { v2: [], v1: null }
+	const lines = content.split("\n")
+	const v2Count = lines.filter(line => line.startsWith("0:")).length
+	for (const line of lines) {
+		const match = /^([0-9]+):([^:]*):(\/[^\0\r\n]*)$/.exec(line)
+		if (!match?.[3]) continue
+		if (match[1] === "0" && match[2] === "" && v2Count === 1)
+			result.v2 = cgroupComponents(match[3])
+		else if (match[1] !== "0" && match[2]?.split(",").includes("cpu"))
+			result.v1 = cgroupComponents(match[3])
+	}
+	return result
 }
 
 /** Pure given its CPU count and readers; malformed quotas mean no quota. */
@@ -52,7 +66,8 @@ export function resolveCpuBudget(
 	// An invalid CPU count fails to the minimum auto budget (one available CPU).
 	let cpus =
 		Number.isSafeInteger(deps.cpuCount) && deps.cpuCount > 0 ? deps.cpuCount : 1
-	const components = cgroupComponents(deps.readProcCgroup)
+	const paths = cgroupPaths(deps.readProcCgroup)
+	const components = paths.v2
 	for (let depth = components.length; depth >= 0; depth--) {
 		const relativePath = [...components.slice(0, depth), "cpu.max"].join("/")
 		try {
@@ -74,7 +89,33 @@ export function resolveCpuBudget(
 			// An unreadable level does not hide quotas at its ancestors.
 		}
 	}
-	const cores = Math.min(64, Math.max(0.75, cpus / 2))
+	if (paths.v1 !== null) {
+		for (const mount of ["cpu,cpuacct", "cpu"]) {
+			for (let depth = paths.v1.length; depth >= 0; depth--) {
+				const prefix = [mount, ...paths.v1.slice(0, depth)].join("/")
+				try {
+					const quotaText = deps.readCpuMax(`${prefix}/cpu.cfs_quota_us`).trim()
+					const periodText = deps
+						.readCpuMax(`${prefix}/cpu.cfs_period_us`)
+						.trim()
+					if (!/^[0-9]+$/.test(quotaText) || !/^[0-9]+$/.test(periodText))
+						continue
+					const quota = Number(quotaText)
+					const period = Number(periodText)
+					if (
+						Number.isSafeInteger(quota) &&
+						quota > 0 &&
+						Number.isSafeInteger(period) &&
+						period > 0
+					)
+						cpus = Math.min(cpus, quota / period)
+				} catch {
+					/* Unreadable levels do not hide inherited quotas. */
+				}
+			}
+		}
+	}
+	const cores = Math.min(64, cpus, Math.max(0.75, cpus / 2))
 	return {
 		mode: "auto",
 		cpus,

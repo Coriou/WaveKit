@@ -9,6 +9,8 @@ import type {
 } from "@wavekit/api-types"
 import { atomicWrite } from "../../core/scanner/store/atomic-write.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { createComponentLogger } from "../../utils/logger.js"
+import type { Logger } from "../../utils/logger.js"
 import { CpuBudgetSchema, hostCpuBudget } from "./cpu-budget.js"
 
 // 2^8 bytes accommodates the version and single budget field plus whitespace.
@@ -20,6 +22,7 @@ const FileSchema = z
 	.strict()
 
 export interface EfficiencyBudgetService {
+	cores(): number
 	view(): EfficiencyBudgetSettings
 	update(value: EfficiencyBudgetValue): Promise<EfficiencyBudgetSettings>
 }
@@ -43,6 +46,7 @@ export async function readBudgetSettings(file: string): Promise<unknown> {
 /** Same atomic tmp + fsync + rename writer used by runtime scanner state. */
 export async function openEfficiencyBudget(options: {
 	stateDir: string
+	log?: Logger
 	configured?: EfficiencyBudgetValue
 	resolve?: (value: EfficiencyBudgetValue) => EfficiencyBudgetResolution
 	read?: (file: string) => Promise<unknown>
@@ -50,22 +54,37 @@ export async function openEfficiencyBudget(options: {
 	onChanged?: (settings: EfficiencyBudgetSettings) => void
 }): Promise<EfficiencyBudgetService> {
 	const file = join(options.stateDir, BUDGET_SETTINGS_FILE)
+	const log = options.log
+		? createComponentLogger(options.log, "EfficiencyBudget")
+		: undefined
+	let source: EfficiencyBudgetSettings["source"] =
+		options.configured === undefined ? "default" : "config"
 	const resolve = options.resolve ?? hostCpuBudget
 	let value = CpuBudgetSchema.parse(options.configured ?? "auto")
 	try {
 		const stored = FileSchema.safeParse(
 			await (options.read ?? readBudgetSettings)(file),
 		)
-		if (stored.success) value = stored.data.cpuBudgetCores
+		if (stored.success) {
+			value = stored.data.cpuBudgetCores
+			source = "saved"
+		}
 	} catch {
 		// Missing or malformed state falls back to the validated startup policy.
 	}
 	let settings: EfficiencyBudgetSettings = {
+		source,
 		cpuBudgetCores: value,
 		resolved: resolve(value),
 	}
+	if (source === "saved")
+		log?.info(
+			{ cpuBudgetCores: value },
+			"Saved decoder CPU budget overrides startup configuration",
+		)
 	let tail: Promise<unknown> = Promise.resolve()
 	return {
+		cores: () => settings.resolved.cores,
 		view: () => structuredClone(settings),
 		update(next) {
 			const parsed = CpuBudgetSchema.safeParse(next)
@@ -86,8 +105,14 @@ export async function openEfficiencyBudget(options: {
 						"EFFICIENCY_BUDGET_STORE_UNAVAILABLE",
 					)
 				}
-				settings = { cpuBudgetCores: parsed.data, resolved }
-				options.onChanged?.(structuredClone(settings))
+				settings = { source: "saved", cpuBudgetCores: parsed.data, resolved }
+				// Persistence and live publication succeeded; a notification failure must
+				// not misreport the committed update as a store failure.
+				try {
+					options.onChanged?.(structuredClone(settings))
+				} catch {
+					log?.warn("CPU budget change notification failed")
+				}
 				return structuredClone(settings)
 			})
 			tail = work.catch(() => undefined)

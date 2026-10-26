@@ -641,5 +641,8 @@ placement. Continued loss or CPU spikes keep newcomers waiting. Graduation remai
 earned when a later CPU spike occurs, including while link recovery delays reconciliation.
 Late-drop shedding uses only completed windows ending within the last 30 seconds
 (3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
-The budget defaults to half the available CPU capacity, with process and cgroup limits;
+The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
+The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).
+
+A clean completed probation resets the gate's consecutive-failure retry backoff.

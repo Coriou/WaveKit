@@ -76,7 +76,6 @@ it("keeps a leaf limit across unreadable and malformed ancestors", () => {
 it.each([
 	undefined,
 	"",
-	"4:cpu:/parent/leaf",
 	"0:cpu:/parent/leaf",
 	"0::relative/path",
 	"0::/parent\n0::/other",
@@ -225,4 +224,76 @@ it("fails malformed drop snapshots closed as unknown", async () => {
 			0,
 		),
 	).toMatchObject({ admit: false, detail: "unknown" })
+})
+
+it.each([0.75, 0.74999, 0.5, 0.001])(
+	"caps the auto floor at quota %s",
+	quota => {
+		expect(auto(8, `${Math.round(quota * 100000)} 100000`).cores).toBe(quota)
+	},
+)
+
+it.each(["cpu,cpuacct", "cpu"])(
+	"walks nested and inherited v1 quotas in %s",
+	mount => {
+		for (const leaf of ["200000", "-1", "invalid", "500000"]) {
+			const { result } = cgroupFilesystem("5:cpu,cpuacct:/parent/leaf", {
+				[`${mount}/parent/leaf/cpu.cfs_quota_us`]: leaf,
+				[`${mount}/parent/leaf/cpu.cfs_period_us`]: "100000",
+				[`${mount}/parent/cpu.cfs_quota_us`]: "250000",
+				[`${mount}/parent/cpu.cfs_period_us`]: "100000",
+			})
+			expect(result).toMatchObject({
+				cpus: leaf === "200000" ? 2 : 2.5,
+				cores: leaf === "200000" ? 1 : 1.25,
+			})
+		}
+	},
+)
+it("uses the tighter quota across hybrid controllers", () => {
+	const { result } = cgroupFilesystem(
+		"0::/unified/leaf\n5:cpu,cpuacct:/legacy/leaf",
+		{
+			"unified/cpu.max": "300000 100000",
+			"cpu/legacy/cpu.cfs_quota_us": "100000",
+			"cpu/legacy/cpu.cfs_period_us": "100000",
+		},
+	)
+	expect(result).toMatchObject({ cpus: 1, cores: 0.75 })
+})
+it.each(["-1", "0", "bad", "1.5", "9007199254740992"])(
+	"skips unlimited or malformed v1 quota %s",
+	quota => {
+		const { result } = cgroupFilesystem("5:cpu:/nested", {
+			"cpu/nested/cpu.cfs_quota_us": quota,
+			"cpu/nested/cpu.cfs_period_us": "100000",
+		})
+		expect(result).toMatchObject({ cpus: 8, cores: 4 })
+	},
+)
+it.each(["0", "bad", "-1", "9007199254740992"])(
+	"skips malformed v1 period %s",
+	period => {
+		const { result } = cgroupFilesystem("5:cpu:/nested", {
+			"cpu/nested/cpu.cfs_quota_us": "100000",
+			"cpu/nested/cpu.cfs_period_us": period,
+		})
+		expect(result).toMatchObject({ cpus: 8, cores: 4 })
+	},
+)
+
+it("bounds v1 ancestry reads at and past 31 components", () => {
+	for (const depth of [31, 32]) {
+		const path = Array.from({ length: depth }, (_, i) => `level${i}`).join("/")
+		const { result, reads } = cgroupFilesystem(`5:cpu:/${path}`, {
+			[`cpu/${path}/cpu.cfs_quota_us`]: "100000",
+			[`cpu/${path}/cpu.cfs_period_us`]: "100000",
+			"cpu/cpu.cfs_quota_us": "200000",
+			"cpu/cpu.cfs_period_us": "100000",
+		})
+		expect(result).toMatchObject({ cores: depth === 31 ? 0.75 : 1 })
+		expect(
+			reads.filter(path => path.endsWith("cpu.cfs_quota_us")),
+		).toHaveLength(depth === 31 ? 64 : 2)
+	}
 })

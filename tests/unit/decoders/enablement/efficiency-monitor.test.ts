@@ -640,3 +640,23 @@ it("ages positive drops out and admits after clean hysteresis without cached rej
 	h.tick(128000)
 	expect(h.monitor.dropState("s").state).toBe("dropping")
 })
+
+it("requires sampled coverage at the clean deadline despite an off-sample read", () => {
+	const h = setup()
+	try {
+		h.tick(0)
+		for (let at = 2000; at <= 60000; at += 2000) h.tick(at)
+		expect(h.monitor.cleanAtMono("s")).toBe(62000)
+		h.advance(2000)
+		expect(h.monitor.dropState("s").state).not.toBe("ok")
+		expect(h.monitor.droppedWithinMs("s", 0)).toBe(true)
+		h.tick(62000)
+		for (const offset of [0, 1, 999, 999]) {
+			h.advance(offset)
+			expect(h.monitor.dropState("s").state).toBe("ok")
+			expect(h.monitor.droppedWithinMs("s", 0)).toBe(false)
+		}
+	} finally {
+		h.monitor.stop()
+	}
+})

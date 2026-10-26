@@ -187,11 +187,11 @@ it("sheds newest admission, clears history and honors cooldown at its bound", ()
 	}
 })
 
-it("late failures double retry delays up to the cap", () => {
+it("late failures after clean probation restart at the base retry delay", () => {
 	const s = setup()
 	const p = placement()
 	let at = 0
-	for (const delay of [300000, 600000, 1200000, 1800000, 1800000]) {
+	for (const delay of [300000, 300000, 300000, 300000, 300000]) {
 		s.time(at)
 		expect(s.gate.admit(p, [], at).admit).toBe(true)
 		const active = [s.running(p)]
@@ -204,6 +204,8 @@ it("late failures double retry delays up to the cap", () => {
 			{ key: p.key, detail: "late-drops" },
 		])
 		s.gate.noteSuspended(p.key, "late-drops", at + 50000)
+		// While stopping, an already graduated placement cannot erase its new retry.
+		expect(s.gate.probation(active, at + 50001)).toEqual([])
 		expect(s.gate.admit(p, [], at + 50001)).toMatchObject({
 			retryAtMs: at + 50000 + delay,
 		})

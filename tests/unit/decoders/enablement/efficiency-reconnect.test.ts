@@ -19,15 +19,21 @@ const placement = (key: string, sampleRateHz: number): WantedPlacement => ({
 	sampleRateHz,
 })
 
-it.each([
-	{ mode: "always", startMode: "auto", continued: false },
-	{ mode: "auto", startMode: "operator", continued: false },
-	{ mode: "always", startMode: "auto", continued: true },
-	{ mode: "auto", startMode: "operator", continued: true },
-	{ mode: "auto", startMode: "auto", continued: false },
-] as const)(
-	"new-epoch loss recovers or suspends with mode=$mode, startMode=$startMode, continued=$continued",
-	({ mode, startMode, continued }) => {
+it.each(
+	(
+		[
+			{ mode: "always", startMode: "auto", continued: false },
+			{ mode: "auto", startMode: "operator", continued: false },
+			{ mode: "always", startMode: "auto", continued: true },
+			{ mode: "auto", startMode: "operator", continued: true },
+			{ mode: "auto", startMode: "auto", continued: false },
+		] as const
+	).flatMap(scenario =>
+		[0, 1, 1000, 1999].map(offset => ({ ...scenario, offset })),
+	),
+)(
+	"new-epoch loss recovers or suspends with mode=$mode, startMode=$startMode, continued=$continued, offset=$offset",
+	({ mode, startMode, continued, offset }) => {
 		const events = new EventEmitter()
 		let mono = 0
 		const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
@@ -48,6 +54,7 @@ it.each([
 		const tick = (at: number) => {
 			mono = at
 			gate.record(monitor.sampleNow())
+			mono += offset
 		}
 		monitor.start()
 		try {
@@ -66,28 +73,28 @@ it.each([
 				if (at === 76000 || (continued && at > 76000))
 					counters.droppedBytesTotal++
 				tick(at)
+				const decision = gate.admit(wanted, running, mono)
+				const probation = gate.view(running, [], mono).sources[0]?.admitted[0]
+					?.probation
 				const verdict = gate.probation(running, mono)
 				if (!protectedPlacement && at === 76000) {
 					expect(verdict).toEqual([{ key: "old", detail: "drops" }])
 					gate.noteSuspended("old", "drops", mono)
 					running = []
 				} else expect(verdict).toEqual([])
-				if (protectedPlacement)
-					expect(
-						gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
-					).toBe(continued || at < 138000)
+				if (protectedPlacement) expect(probation).toBe(continued || at < 138000)
 				// Loss at 76 s, next clean point at 78 s, then 30 × 2000 ms:
 				// the newcomer must be admitted at 138 s and beyond, not at 136 s.
 				if (!continued && at >= 138000) {
 					expect(monitor.dropState("s").state).toBe("ok")
-					expect(gate.admit(wanted, running, mono)).toEqual({ admit: true })
-				} else expect(gate.admit(wanted, running, mono).admit).toBe(false)
+					expect(decision).toEqual({ admit: true })
+				} else expect(decision.admit).toBe(false)
 			}
 			if (!protectedPlacement)
 				expect(gate.admit(old, [], mono)).toMatchObject({
 					admit: false,
 					detail: "drops",
-					retryAtMs: 376000,
+					retryAtMs: 376000 + offset,
 				})
 		} finally {
 			monitor.stop()
@@ -95,13 +102,19 @@ it.each([
 	},
 )
 
-it.each([
-	{ continued: false, mode: "auto" },
-	{ continued: false, mode: "always" },
-	{ continued: true, mode: "auto" },
-] as const)(
-	"a new rate epoch recovers with continued loss=$continued and mode=$mode",
-	({ continued, mode }) => {
+it.each(
+	(
+		[
+			{ continued: false, mode: "auto" },
+			{ continued: false, mode: "always" },
+			{ continued: true, mode: "auto" },
+		] as const
+	).flatMap(scenario =>
+		[0, 1, 1000, 1999].map(offset => ({ ...scenario, offset })),
+	),
+)(
+	"a new rate epoch recovers with continued loss=$continued and mode=$mode, offset=$offset",
+	({ continued, mode, offset }) => {
 		const events = new EventEmitter()
 		let mono = 0
 		const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
@@ -122,6 +135,7 @@ it.each([
 		const tick = (at: number) => {
 			mono = at
 			gate.record(monitor.sampleNow())
+			mono += offset
 		}
 		monitor.start()
 		try {
@@ -144,13 +158,17 @@ it.each([
 			if (!continued) {
 				// Settling ends at 70 s, baseline is 72 s, first clean sample is
 				// 74 s. Admission at 134 s is 66 s after disconnection: less than
-				// 10 s + 30 × 2000 ms + one sample = 72 s.
-				for (let at = 72000; at < 134000; at += 2000) {
+				// 10 s + 30 × 2000 ms + one sample = 72 s. A protected
+				// run also sees new-epoch loss at 76 s and recovers at 138 s.
+				const recoveredAt = mode === "always" ? 138000 : 134000
+				expect(recoveredAt + offset - 68000).toBeLessThanOrEqual(72000)
+				for (let at = 72000; at < recoveredAt; at += 2000) {
+					if (mode === "always" && at === 76000) counters.droppedBytesTotal++
 					tick(at)
 					expect(gate.probation(running, mono)).toEqual([])
 					expect(gate.admit(wanted, running, mono).admit).toBe(false)
 				}
-				for (const at of [134000, 136000]) {
+				for (const at of [recoveredAt, recoveredAt + 2000]) {
 					tick(at)
 					expect(gate.probation(running, mono)).toEqual([])
 					expect(gate.admit(wanted, running, mono)).toEqual({ admit: true })
@@ -159,7 +177,11 @@ it.each([
 					...running,
 					{ ...wanted, admittedAtMs: mono, mode: "auto", startMode: "auto" },
 				]
-				for (let at = 138000; at <= 196000; at += 2000) {
+				for (
+					let at = recoveredAt + 4000;
+					at <= recoveredAt + 62000;
+					at += 2000
+				) {
 					tick(at)
 					expect(gate.probation(active, mono)).toEqual([])
 				}
@@ -199,7 +221,7 @@ it.each([
 			gate.noteSuspended("needed", "drops", mono)
 			expect(gate.admit(wanted, [], mono)).toMatchObject({
 				admit: false,
-				retryAtMs: 458000,
+				retryAtMs: 458000 + offset,
 			})
 		} finally {
 			monitor.stop()
@@ -207,14 +229,20 @@ it.each([
 	},
 )
 
-it.each([
-	{ mode: "always", startMode: "auto", repeated: false },
-	{ mode: "auto", startMode: "operator", repeated: false },
-	{ mode: "always", startMode: "auto", repeated: true },
-	{ mode: "auto", startMode: "operator", repeated: true },
-] as const)(
-	"protected CPU recovery is bounded with mode=$mode, startMode=$startMode, repeated=$repeated",
-	({ mode, startMode, repeated }) => {
+it.each(
+	(
+		[
+			{ mode: "always", startMode: "auto", repeated: false },
+			{ mode: "auto", startMode: "operator", repeated: false },
+			{ mode: "always", startMode: "auto", repeated: true },
+			{ mode: "auto", startMode: "operator", repeated: true },
+		] as const
+	).flatMap(scenario =>
+		[0, 1, 1000, 1999].map(offset => ({ ...scenario, offset })),
+	),
+)(
+	"protected CPU recovery is bounded with mode=$mode, startMode=$startMode, repeated=$repeated, offset=$offset",
+	({ mode, startMode, repeated, offset }) => {
 		const events = new EventEmitter()
 		let mono = 0
 		const cpu = { normalisedPercent: 10 }
@@ -236,6 +264,7 @@ it.each([
 		const tick = (at: number) => {
 			mono = at
 			gate.record(monitor.sampleNow())
+			mono += offset
 		}
 		monitor.start()
 		try {

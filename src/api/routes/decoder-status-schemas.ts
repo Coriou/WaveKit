@@ -219,3 +219,18 @@ export const efficiencyBudgetResolutionSchema = {
 		label: { type: "string" },
 	},
 } as const
+
+export const efficiencyBudgetSettingsSchema = {
+	type: "object",
+	required: ["source", "cpuBudgetCores", "resolved"],
+	properties: {
+		source: { type: "string", enum: ["saved", "config", "default"] },
+		cpuBudgetCores: {
+			anyOf: [
+				{ type: "string", enum: ["auto"] },
+				{ type: "number", exclusiveMinimum: 0, maximum: 64 },
+			],
+		},
+		resolved: efficiencyBudgetResolutionSchema,
+	},
+} as const

@@ -69,8 +69,7 @@ export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
 	deps: { drops?: DropReader; log?: Logger } = {},
 ): EfficiencyGate {
-	const budgetCores = () =>
-		inputs.budget?.view().resolved.cores ?? inputs.budgetCores
+	const budgetCores = () => inputs.budget?.cores() ?? inputs.budgetCores
 	const placementEpochs = new Map<
 		string,
 		{ sourceId: string; epoch: number; placement: WantedPlacement }
@@ -290,8 +289,11 @@ export function createEfficiencyGate(
 			// Recovery needs only the last 60 s plus one sample: at 2 s per
 			// sample that is at most 32 timestamps, well below the 1024 cap.
 			// Older original evidence is retained separately in originalFailed.
+			// Coverage ends at the latest sample, even when reconciliation polls later.
+			const sampled = deps.drops?.lastSampleMono?.() ?? mono
+			if (!valid(sampled)) return false
 			const since = Math.max(
-				mono - EFFICIENCY_CLEAR_MS,
+				Math.min(sampled, mono) - EFFICIENCY_CLEAR_MS,
 				cleanAt - EFFICIENCY_CLEAR_MS,
 				lastHighCpu === undefined
 					? admitted
@@ -590,8 +592,8 @@ export function createEfficiencyGate(
 					admit: false,
 					detail,
 					retryAtMs:
-						cleanAt !== null && Number.isFinite(cleanAt)
-							? Math.max(cleanAt, base + EFFICIENCY_SAMPLE_MS)
+						valid(cleanAt) && valid(mono)
+							? Math.max(base + cleanAt - mono, base + EFFICIENCY_SAMPLE_MS)
 							: base + EFFICIENCY_CLEAR_MS,
 				}
 			}
@@ -634,7 +636,12 @@ export function createEfficiencyGate(
 			// Graduation is sticky: a later discontinuity that discards coverage
 			// restarts only the placements still on probation.
 			for (const placement of running)
-				if (graduates(placement, mono)) graduated.add(placement.key)
+				if (!graduated.has(placement.key) && graduates(placement, mono)) {
+					graduated.add(placement.key)
+					// A clean probation resets consecutive-failure backoff.
+					retries.delete(placement.key)
+					failures.delete(placement.key)
+				}
 			const newest = new Map<
 				string,
 				{ placement: RunningPlacement; admitted: number }

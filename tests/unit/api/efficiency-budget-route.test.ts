@@ -17,7 +17,7 @@ import {
 	sessionCredentialBinding,
 } from "../../../src/access/credentials.js"
 
-async function setup(protectedMode = false) {
+async function setup(protectedMode = false, onChanged?: () => void) {
 	const token = generateMachineToken()
 	const digest = digestMachineToken(token)
 	const sessions = await SessionStore.open({
@@ -28,6 +28,7 @@ async function setup(protectedMode = false) {
 	const budget = await openEfficiencyBudget({
 		stateDir: "unused",
 		configured: 0.1,
+		...(onChanged ? { onChanged } : {}),
 		read: async () => undefined,
 		write,
 		resolve: value =>
@@ -129,6 +130,7 @@ it("validates strict budget bodies, persists, updates the gate live and retains 
 		expect(h.gate.admit(placement, [], 1)).toMatchObject({ admit: true })
 		const read = await h.app.inject({ url, headers })
 		expect(read.json()).toEqual({
+			source: "saved",
 			cpuBudgetCores: "auto",
 			resolved: {
 				mode: "auto",
@@ -203,6 +205,32 @@ it("keeps reads available and writes absent without the settings authorizer", as
 			).statusCode,
 		).toBe(404)
 		expect(h.write).not.toHaveBeenCalled()
+	} finally {
+		await h.app.close()
+	}
+})
+
+it("returns the committed live budget when the change notification throws", async () => {
+	const changed = vi.fn(() => {
+		throw new TypeError("notification")
+	})
+	const h = await setup(true, changed)
+	try {
+		const response = await h.app.inject({
+			method: "PUT",
+			url: "/api/decoders/efficiency/budget",
+			headers: { host: "example.test", authorization: `Bearer ${h.token}` },
+			payload: { cpuBudgetCores: 2 },
+		})
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toMatchObject({
+			source: "saved",
+			cpuBudgetCores: 2,
+			resolved: { cores: 2 },
+		})
+		expect(h.budget.cores()).toBe(2)
+		expect(h.write).toHaveBeenCalledOnce()
+		expect(changed).toHaveBeenCalledOnce()
 	} finally {
 		await h.app.close()
 	}
