@@ -329,6 +329,143 @@ describe("paging raster placement (3.18)", () => {
 		expect(catalogue.unplaced.get("pager")).toBe("capture-too-narrow")
 	})
 
+	it.each(["config", "catalogue"] as const)(
+		"%s: a VFO on a raster channel is the ungated primary, the rest gated",
+		origin => {
+			const d = pager({ origin, channelPlacements: origin === "catalogue" })
+			const plan = planPlacements({
+				...input(d, [capture()]),
+				vfo: { sourceId: "s", frequencyHz: 466_137_500 },
+				bandplanRangeContains: () => true,
+			})
+			expect(plan.wanted[0]).toMatchObject({
+				channelHz: 466_137_500,
+				origin: "vfo",
+				primary: true,
+			})
+			expect(plan.wanted[0]!.gated).toBeUndefined()
+			expect(plan.wanted.slice(1).every(w => w.gated === true)).toBe(true)
+			expect(plan.wanted.slice(1).every(w => w.origin === "bandplan")).toBe(
+				true,
+			)
+			const hz = plan.wanted.map(w => w.channelHz)
+			expect(hz).toHaveLength(33)
+			expect(new Set(hz).size).toBe(33)
+		},
+	)
+
+	it.each([
+		["config", { mode: "always" as const }],
+		["catalogue", { mode: "always" as const }],
+		["catalogue", { startMode: "operator" as const }],
+		["catalogue", { bandSuspension: false }],
+	] as const)(
+		"%s with the band bypassed (%o): a raster in view that no channel fits is capture-too-narrow, no fallback",
+		(origin, bypass) => {
+			const s = capture({ centreHz: 466_016_000, sampleRateHz: 22_500 })
+			const d = pager({ origin, channelPlacements: true, ...bypass })
+			for (const vfo of [null, 466_016_000, 466_025_000]) {
+				const plan = planPlacements({
+					...input(d, [s]),
+					vfo: vfo === null ? null : { sourceId: "s", frequencyHz: vfo },
+				})
+				expect(plan.wanted).toEqual([])
+				expect(plan.unplaced.get("pager")).toBe("capture-too-narrow")
+			}
+		},
+	)
+
+	it.each(["config", "catalogue"] as const)(
+		"%s with mode always and no paging raster in view follows the VFO as before",
+		origin => {
+			const s = source({ centreHz: 1_090_000_000, sampleRateHz: 2_400_000 })
+			const d = pager({
+				origin,
+				channelPlacements: origin === "catalogue",
+				mode: "always",
+			})
+			const plan = planPlacements({
+				...input(d, [s]),
+				vfo: { sourceId: "s", frequencyHz: 1_090_100_000 },
+			})
+			expect(plan.wanted).toEqual([
+				expect.objectContaining({
+					channelHz: 1_090_100_000,
+					origin: "vfo",
+					primary: true,
+				}),
+			])
+			expect(plan.unplaced.has("pager")).toBe(false)
+		},
+	)
+
+	describe("an on-raster VFO counts within the cap", () => {
+		const wide: PagingRasterRange[] = [
+			{
+				minHz: 465_000_000,
+				maxHz: 467_000_000,
+				spacingHz: 6250,
+				firstChannelHz: 465_000_000,
+			},
+		]
+		const byDistance = rasterChannelsBetween(
+			wide,
+			CENTRE - 409_600,
+			CENTRE + 409_600,
+		)
+			.filter(hz => Math.abs(hz - CENTRE) + 8_500 <= 409_600)
+			.sort((a, b) => Math.abs(a - CENTRE) - Math.abs(b - CENTRE) || a - b)
+		const at = byDistance[MULTIMON_PAGING_MAX_CHANNELS - 1]!
+		const past = byDistance[MULTIMON_PAGING_MAX_CHANNELS]!
+		const far = byDistance[byDistance.length - 1]!
+
+		it("pagingChannels keeps the nearest set and puts the VFO first", () => {
+			const d = pager({ band: undefined, pagingRaster: wide })
+			const nearest = pagingChannels(d, capture()).channels
+			expect(nearest).toEqual(byDistance.slice(0, MULTIMON_PAGING_MAX_CHANNELS))
+			// At the cap: the 33rd nearest is already in; it moves first.
+			const withAt = pagingChannels(d, capture(), at).channels
+			expect(withAt[0]).toBe(at)
+			expect(new Set(withAt)).toEqual(new Set(nearest))
+			// Past the cap: the 34th nearest and the farthest replace the 33rd.
+			for (const vfo of [past, far]) {
+				const channels = pagingChannels(d, capture(), vfo).channels
+				expect(channels).toHaveLength(MULTIMON_PAGING_MAX_CHANNELS)
+				expect(channels[0]).toBe(vfo)
+				expect(channels.slice(1)).toEqual(
+					byDistance.slice(0, MULTIMON_PAGING_MAX_CHANNELS - 1),
+				)
+			}
+			// An off-raster VFO changes nothing.
+			expect(pagingChannels(d, capture(), past + 1).channels).toEqual(nearest)
+		})
+
+		it.each(["config", "catalogue"] as const)(
+			"%s: a VFO past the nearest 33 is still the primary",
+			origin => {
+				const d = pager({
+					origin,
+					channelPlacements: origin === "catalogue",
+					band: undefined,
+					pagingRaster: wide,
+				})
+				for (const vfo of [at, past, far]) {
+					const plan = planPlacements({
+						...input(d, [capture()]),
+						vfo: { sourceId: "s", frequencyHz: vfo },
+						bandplanRangeContains: () => true,
+					})
+					expect(plan.wanted[0]).toMatchObject({
+						channelHz: vfo,
+						origin: "vfo",
+						primary: true,
+					})
+					expect(plan.wanted).toHaveLength(MULTIMON_PAGING_MAX_CHANNELS)
+				}
+			},
+		)
+	})
+
 	it("unsafe raster numbers are skipped and enumeration is bounded", () => {
 		const bad: PagingRasterRange[] = [
 			{ minHz: -1e20, maxHz: 1e20, spacingHz: 6250, firstChannelHz: -1e20 },

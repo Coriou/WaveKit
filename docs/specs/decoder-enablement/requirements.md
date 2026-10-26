@@ -524,11 +524,15 @@ their raster frequency, or on the neighbouring 6.25 kHz point, also gives nothin
   so a 12.5 kHz neighbour (tones at 8.0 and 17.0 kHz) is rejected. The old request was
   48 000 × (1 − 0.012) = 47 424 Hz.
 - _Primary._ With the paging raster in view, the settled VFO counts only when it is one of
-  the raster channels; it is then the primary. An off-raster VFO is dropped, on both the
-  config and the catalogue path. Otherwise the nearest raster channel is the primary; then
-  the other raster channels, then catalogue band-plan channels. Raster channels in the
-  window that all fail to fit are `capture-too-narrow` (3.14), never a fallback to an
-  off-raster centre or VFO channel.
+  the raster channels that fit the window; it is then the primary, origin `vfo`, on both the
+  config and the catalogue path. Membership is checked before the cap: an on-raster VFO
+  counts within `MULTIMON_PAGING_MAX_CHANNELS` however far it is from the centre, and the
+  farthest other raster channel yields. An off-raster VFO is dropped. Otherwise the nearest
+  raster channel is the primary; then the other raster channels, then catalogue band-plan
+  channels. Raster channels in the window that all fail to fit are `capture-too-narrow`
+  (3.14), never a fallback to an off-raster centre or VFO channel, also when `always`, an
+  operator start or a band-suspension opt-out bypasses the band. With no raster channel in
+  the window at all, a bypassed band keeps 3.11 (the VFO channel).
 - _Admission._ Besides the primary, every other generated paging channel is
   marked `gated`: it goes through the efficiency gate and probation even for a YAML decoder
   (an exception to 4.9), and it is admitted after every other decoder's placements, so a wide

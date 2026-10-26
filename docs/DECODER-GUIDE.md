@@ -569,7 +569,8 @@ describe("HfdlDecoder", () => {
    French paging), so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. Without
    `channelHz`, `channelsHz`, `offsetHz` or `frequency` it listens on every paging raster
    channel inside the usable window (80 % of the sample rate), nearest the centre first and
-   at most 33, each through its own 12 kHz channel filter; with one of those options it keeps
+   at most 33, each through its own 12 kHz channel filter; a VFO exactly on one of those
+   channels starts first, even when 33 others are nearer. With one of those options it keeps
    your channels. For EAS, DTMF or AFSK1200 elsewhere, set a band override or mode `always`.
 6. The built-in acarsdec (no YAML entry) runs one process per ACARS channel of your region
    inside the usable window, nearest the centre first and at most 5 (EU: 131.525, 131.550,

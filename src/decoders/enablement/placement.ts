@@ -245,14 +245,17 @@ export function rtl433ChannelCandidate(
  * window (the channelizer's, `sampleRate x usableFraction`, not Nyquist),
  * inside its band, each passband (`fitsReach`) inside the window, nearest
  * the capture centre first (ties: lower first), at most
- * MULTIMON_PAGING_MAX_CHANNELS. `misfit`: a raster channel of the band lies
- * in the window but its passband does not fit (a fit failure, 3.14).
- * Empty unless the decoder is multimon-ng with channel reach, no configured
- * channels and a paging raster, and the source has a channelizer.
+ * MULTIMON_PAGING_MAX_CHANNELS. A `vfoHz` that is one of the fitting raster
+ * channels comes first and always counts within the cap, however far it is
+ * from the centre. `misfit`: a raster channel of the band lies in the window
+ * but its passband does not fit (a fit failure, 3.14). Empty unless the
+ * decoder is multimon-ng with channel reach, no configured channels and a
+ * paging raster, and the source has a channelizer.
  */
 export function pagingChannels(
 	d: PlannerDecoder,
 	s: PlannerSource,
+	vfoHz: number | null = null,
 ): { channels: number[]; misfit: boolean } {
 	const none = { channels: [], misfit: false }
 	if (
@@ -275,12 +278,24 @@ export function pagingChannels(
 		centre + half,
 	).filter(hz => bandFits(d, hz))
 	const fit = inBand.filter(hz => fitsReach(d, s, hz))
+	const nearest = fit.sort(
+		(a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b,
+	)
+	// Membership before the cap: an on-raster VFO is never cut for nearer ones.
+	const ordered =
+		vfoHz !== null && fit.includes(vfoHz)
+			? [vfoHz, ...nearest.filter(hz => hz !== vfoHz)]
+			: nearest
 	return {
-		channels: fit
-			.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b)
-			.slice(0, MULTIMON_PAGING_MAX_CHANNELS),
+		channels: ordered.slice(0, MULTIMON_PAGING_MAX_CHANNELS),
 		misfit: fit.length < inBand.length,
 	}
+}
+
+/** A pager decoder's paging raster is in this window but no channel of it fits (3.14, 3.18). */
+function pagingTooNarrow(d: PlannerDecoder, s: PlannerSource): boolean {
+	const paging = pagingChannels(d, s)
+	return paging.misfit && paging.channels.length === 0
 }
 
 /**
@@ -419,8 +434,10 @@ export const planPlacements: PlacementPlanner = input => {
 					sources.find(source => source.id === input.vfo?.sourceId) ??
 					sources[0]
 				if (s !== selected) continue
-				// 3.18: a pager decoder takes every paging raster channel in view.
-				const paging = pagingChannels(d, s)
+				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
+				// 3.18: a pager decoder takes every paging raster channel in view; a
+				// VFO exactly on one of them is the primary, an off-raster one is dropped.
+				const paging = pagingChannels(d, s, vfo?.frequencyHz ?? null)
 				// 3.14/3.18: raster channels in the window that all fail to fit are a
 				// fit failure, never a fallback to an off-raster centre or VFO.
 				if (paging.misfit && !paging.channels.length) {
@@ -428,20 +445,25 @@ export const planPlacements: PlacementPlanner = input => {
 					continue
 				}
 				if (paging.channels.length) {
+					const onRaster =
+						vfo !== null && paging.channels.includes(vfo.frequencyHz)
 					paging.channels.forEach((hz, index) =>
-						local.push({
-							source: s,
-							hz,
-							reach: "channel",
-							origin: "bandplan",
-							index,
-							gatedSecondary: true,
-						}),
+						local.push(
+							onRaster && hz === vfo.frequencyHz
+								? { source: s, hz, reach: "channel", origin: "vfo", index: 0 }
+								: {
+										source: s,
+										hz,
+										reach: "channel",
+										origin: "bandplan",
+										index,
+										gatedSecondary: true,
+									},
+						),
 					)
 					candidates.push(...local)
 					continue
 				}
-				const vfo = input.vfo?.sourceId === s.id ? input.vfo : null
 				const hz = vfo ? vfo.frequencyHz : centre
 				if (bandFits(d, hz, vfo ? 0 : bandHalf) && !fitsReach(d, s, hz)) {
 					if (fitFailureCounts(hz)) tooNarrow = true
@@ -613,7 +635,11 @@ export const planPlacements: PlacementPlanner = input => {
 						.sort(
 							(a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b,
 						)
-					const paging = pagingChannels(d, s)
+					const paging = pagingChannels(
+						d,
+						s,
+						input.vfo?.sourceId === s.id ? input.vfo.frequencyHz : null,
+					)
 					if (paging.misfit && !paging.channels.length) tooNarrow = true
 					const listed = channels.slice(0, cap)
 					// 3.18: with the paging raster in view the VFO counts only when it is a
@@ -704,6 +730,12 @@ export const planPlacements: PlacementPlanner = input => {
 					d.type === "rtl433"
 				)
 					continue
+				// 3.18: a paging raster in view that no channel fits is too narrow even
+				// when the band policy is bypassed; never an off-raster VFO or centre.
+				if (pagingTooNarrow(d, s)) {
+					tooNarrow = true
+					continue
+				}
 				const hz =
 					(d.type === "dsd-fme" || d.type === "multimon-ng") &&
 					input.vfo?.sourceId === s.id
