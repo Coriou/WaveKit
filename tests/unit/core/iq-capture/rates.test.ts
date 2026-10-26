@@ -76,6 +76,20 @@ describe("capture rates", () => {
 		expect(captureRateFor({ priors: { ism: Number.NaN }, track: null })).toBe(
 			48_000,
 		)
+		// malformed tracks are no OOK burst: 48 kHz, never a throw
+		for (const bad of [
+			{ ...burst, blocks: -1 },
+			{ ...burst, blocks: 0 },
+			{ ...burst, blocks: 1.5 },
+			{ ...burst, blocks: undefined },
+			{ ...burst, obwHz: Number.NaN },
+			{ ...burst, spectralShape: undefined },
+			undefined,
+			"track",
+		])
+			expect(captureRateFor({ priors: {}, track: bad as never })).toBe(48_000)
+		expect(captureRateFor(null as never)).toBe(48_000)
+		expect(captureRateFor({ priors: null, track: burst } as never)).toBe(96_000)
 	})
 
 	// Feature: capture-rates, Property 1: a capture rate is always a supported rate
@@ -136,5 +150,30 @@ describe("IqCaptureStore at 96 kHz", () => {
 		s.admit(req(), id(5), 1)
 		expect(s.captured(id(5), 48_000, 0)).toBe(true)
 		expect(s.ready(id(5))).not.toHaveProperty("rateHz")
+	})
+})
+
+describe("rate capability on the tool protocol", () => {
+	it("ready may list supported rates and captured may echo one; anything else is no event", async () => {
+		const { parseToolEvent } =
+			await import("../../../../src/core/iq-capture/protocol.js")
+		expect(parseToolEvent('{"type":"ready"}')).toEqual({ type: "ready" })
+		expect(parseToolEvent('{"type":"ready","rates":[48000,96000]}')).toEqual({
+			type: "ready",
+			rates: [48_000, 96_000],
+		})
+		expect(parseToolEvent('{"type":"ready","rates":[250000]}')).toBeNull()
+		expect(parseToolEvent('{"type":"ready","rates":"96000"}')).toBeNull()
+		const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+		expect(
+			parseToolEvent(
+				`{"type":"captured","id":"${id}","samples":9600,"gapSamples":0,"rateHz":96000}`,
+			),
+		).toMatchObject({ rateHz: 96_000 })
+		expect(
+			parseToolEvent(
+				`{"type":"captured","id":"${id}","samples":9600,"gapSamples":0,"rateHz":96001}`,
+			),
+		).toBeNull()
 	})
 })

@@ -101,6 +101,10 @@ async function setup(
 		samples?: number
 		enoent?: boolean
 		noShapes?: boolean
+		/** A current tool: advertises these rates and echoes each capture's rate. */
+		rates?: number[]
+		/** Advertise the rates but never echo a capture's rate (a broken tool). */
+		noEcho?: boolean
 	} = {},
 ) {
 	const root = path.join(base, `r${n++}`)
@@ -114,13 +118,23 @@ async function setup(
 		...(opts.enoent ? { enoent: true } : {}),
 		onSpawn: child => {
 			if (child.args[0] !== "run") return
-			queueMicrotask(() => child.event({ type: "ready" }))
+			queueMicrotask(() =>
+				child.event(
+					opts.rates ? { type: "ready", rates: opts.rates } : { type: "ready" },
+				),
+			)
 			const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
 			child.control.on("data", (b: Buffer) => {
 				for (const line of b.toString().split("\n").filter(Boolean)) {
-					const cmd = JSON.parse(line) as { type: string; id?: string }
+					const cmd = JSON.parse(line) as {
+						type: string
+						id?: string
+						rateHz?: number
+					}
 					if (cmd.type !== "capture" || opts.behaviour === "silent") continue
 					const id = cmd.id ?? ""
+					const echo =
+						opts.rates && !opts.noEcho ? { rateHz: cmd.rateHz ?? 48_000 } : {}
 					fs.writeFileSync(
 						path.join(outDir, `${id}.cf32`),
 						Buffer.alloc(samples * 8),
@@ -128,7 +142,7 @@ async function setup(
 							mode: 0o600,
 						},
 					)
-					child.event({ type: "captured", id, samples, gapSamples: 0 })
+					child.event({ type: "captured", id, samples, gapSamples: 0, ...echo })
 				}
 			})
 		},
@@ -734,7 +748,7 @@ describe("IqCaptureService openReplay", () => {
 		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
 		const s = await setup(
 			{ shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) } },
-			{ samples: 9_600 },
+			{ samples: 9_600, rates: [48_000, 96_000, 192_000] },
 		)
 		const run = await running(s)
 		const got = s.svc.capture(req({ rateHz: 96_000 }))
@@ -765,6 +779,52 @@ describe("IqCaptureService openReplay", () => {
 			"--out-rate",
 			"48000",
 		])
+		await s.svc.stop()
+	})
+
+	it("an older tool (no rates advertised): a 96 kHz request is an honest 48 kHz capture, replayed without --rate", async () => {
+		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
+		const s = await setup(
+			{ shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) } },
+			{ samples: 48_000 },
+		)
+		const run = await running(s)
+		const got = s.svc.capture(req({ rateHz: 96_000 }))
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		expect(
+			run.commands().find(c => c["type"] === "capture"),
+		).not.toHaveProperty("rateHz")
+		// 48 000 samples are 1 000 ms at the rate the file really has
+		const view = s.svc.near("src", RF, 1_000, {
+			observationId: null,
+			limit: 1,
+		})[0]
+		expect(view).toMatchObject({ captureId: id, durationMs: 1000 })
+		expect(view).not.toHaveProperty("rateHz")
+		expect(s.svc.replayRateOf?.(id, "rtl433")).toBe(48_000)
+		expect(s.svc.openReplay(id, "rtl433")).not.toBeNull()
+		expect(lastReplay(s).args).not.toContain("--rate")
+		expect(s.svc.counters().rateFallbacks).toBe(1)
+		await s.svc.stop()
+	})
+
+	it("a tool that advertises 96 kHz but does not echo the rate: the file is dropped, never mislabelled", async () => {
+		const s = await setup(
+			{},
+			{
+				samples: 9_600,
+				rates: [48_000, 96_000],
+				noEcho: true,
+			},
+		)
+		await running(s)
+		const got = s.svc.capture(req({ rateHz: 96_000 }))
+		await flush(10)
+		expect("captureId" in got).toBe(true)
+		expect(
+			s.svc.near("src", RF, 1_000, { observationId: null, limit: 1 }),
+		).toEqual([])
 		await s.svc.stop()
 	})
 

@@ -38,6 +38,21 @@ export function wholeCaptureShapeAt(
 	return { bandwidthHz: bw, transitionHz: (rateHz - bw) / 2 }
 }
 
+/** A track the classifier can read: finite positive OBW, at least one whole block, a shape. */
+function wellFormed(track: unknown): track is TrackSnapshot {
+	if (typeof track !== "object" || track === null) return false
+	const t = track as Partial<TrackSnapshot>
+	return (
+		typeof t.blocks === "number" &&
+		Number.isSafeInteger(t.blocks) &&
+		t.blocks >= 1 &&
+		typeof t.obwHz === "number" &&
+		Number.isFinite(t.obwHz) &&
+		t.obwHz > 0 &&
+		typeof t.spectralShape === "string"
+	)
+}
+
 /**
  * The rate of a capture: the fastest rate any protocol the capture may hold needs
  * (IQ_CAPTURE_RATE_BY_PROTOCOL), else 48 kHz. A protocol counts when the band plan lists it at the
@@ -48,6 +63,13 @@ export function captureRateFor(input: {
 	priors: Partial<Record<ScannerProtocol, number>>
 	track: TrackSnapshot | null
 }): IqCaptureRateHz {
+	// Malformed input is the safe answer: 48 kHz (the default capture).
+	if (typeof input !== "object" || input === null) return IQ_CAPTURE_RATE_HZ
+	const priors: Partial<Record<ScannerProtocol, number>> =
+		typeof input.priors === "object" && input.priors !== null
+			? input.priors
+			: {}
+	const track = wellFormed(input.track) ? input.track : null
 	let rate: IqCaptureRateHz = IQ_CAPTURE_RATE_HZ
 	const raise = (r: IqCaptureRateHz | undefined): void => {
 		if (r !== undefined && r > rate) rate = r
@@ -56,16 +78,19 @@ export function captureRateFor(input: {
 		ScannerProtocol,
 		IqCaptureRateHz,
 	][]) {
-		const prior = input.priors[protocol]
+		const prior = priors[protocol]
 		if (prior === 0) continue
 		if (typeof prior === "number" && Number.isFinite(prior) && prior >= 1)
 			raise(r)
-		else if (
-			protocol === "ism" &&
-			input.track !== null &&
-			classOf(input.track) === "ook-burst"
-		)
-			raise(r)
+		else if (protocol === "ism" && track !== null && ookBurst(track)) raise(r)
 	}
 	return rate
+}
+
+function ookBurst(track: TrackSnapshot): boolean {
+	try {
+		return classOf(track) === "ook-burst"
+	} catch {
+		return false
+	}
 }

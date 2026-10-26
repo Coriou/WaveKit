@@ -347,7 +347,9 @@ pub fn run(cfg: Config) -> i32 {
         }
         let _ = tx.send(Msg::ControlEof);
     });
-    let mut events = vec![json!({"type": "ready"})];
+    // `rates`: the output rates this tool accepts for this source rate (the capability the bridge
+    // must see before it asks for any rate but 48 kHz; an older tool sends no list).
+    let mut events = vec![json!({"type": "ready", "rates": engine.rates()})];
     emit(&mut events);
     for msg in rx {
         match msg {

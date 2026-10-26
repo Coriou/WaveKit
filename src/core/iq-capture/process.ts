@@ -12,7 +12,10 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process"
 import { EventEmitter } from "node:events"
 import type { Readable, Writable } from "node:stream"
-import { IQ_CAPTURE_CONTROL_LINE_MAX_BYTES } from "../scanner/iq-capture-contract.js"
+import {
+	IQ_CAPTURE_CONTROL_LINE_MAX_BYTES,
+	IQ_CAPTURE_RATE_HZ,
+} from "../scanner/iq-capture-contract.js"
 import {
 	BoundedLineReader,
 	encodeToolCommand,
@@ -148,6 +151,14 @@ export class IqToolProcess extends EventEmitter {
 
 	constructor(private readonly o: IqToolProcessOptions) {
 		super()
+	}
+
+	/** Output rates the tool advertised in `ready` (48 kHz always; an older tool lists none). */
+	private rates: ReadonlySet<number> = new Set([IQ_CAPTURE_RATE_HZ])
+
+	/** Whether the running tool acknowledged `rateHz` (advertised in its `ready` event). */
+	supportsRate(rateHz: number): boolean {
+		return this.rates.has(rateHz)
 	}
 
 	get ready(): boolean {
@@ -339,6 +350,7 @@ export class IqToolProcess extends EventEmitter {
 				return
 			}
 			this.isReady = true
+			this.rates = new Set([IQ_CAPTURE_RATE_HZ, ...(ev.rates ?? [])])
 			if (this.readyTimer !== null) this.o.timers.clearTimeout(this.readyTimer)
 			this.readyTimer = null
 			this.emit("ready")

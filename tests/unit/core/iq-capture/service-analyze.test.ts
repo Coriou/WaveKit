@@ -140,7 +140,10 @@ class FakeEngine {
 }
 
 function wireRun(child: PipeChild): void {
-	queueMicrotask(() => child.event({ type: "ready" }))
+	// a current tool: advertises its rates and echoes each capture's rate
+	queueMicrotask(() =>
+		child.event({ type: "ready", rates: [48_000, 96_000, 192_000] }),
+	)
 	const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
 	const control = child.stdio[3]
 	if (!(control instanceof PassThrough)) return
@@ -172,7 +175,13 @@ function wireRun(child: PipeChild): void {
 					mode: 0o600,
 				},
 			)
-			child.event({ type: "captured", id, samples, gapSamples: 0 })
+			child.event({
+				type: "captured",
+				id,
+				samples,
+				gapSamples: 0,
+				rateHz: cmd.rateHz ?? 48_000,
+			})
 		}
 	})
 }

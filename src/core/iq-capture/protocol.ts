@@ -41,14 +41,25 @@ export type IqToolErrorCode = (typeof IQ_TOOL_ERROR_CODES)[number]
 const id = z.string().regex(IQ_CAPTURE_ID_PATTERN)
 const count = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
 
+/** A capture output rate (IQ_CAPTURE_RATES). */
+const rate = z.union([z.literal(48_000), z.literal(96_000), z.literal(192_000)])
+
 const EventSchema = z.discriminatedUnion("type", [
-	z.object({ type: z.literal("ready") }).strict(),
+	z
+		.object({
+			type: z.literal("ready"),
+			// The rates the tool accepts; absent from an older tool (48 kHz only).
+			rates: z.array(rate).max(8).optional(),
+		})
+		.strict(),
 	z
 		.object({
 			type: z.literal("captured"),
 			id,
 			samples: count,
 			gapSamples: count,
+			// The file's rate as the tool wrote it; absent from an older tool (48 kHz).
+			rateHz: rate.optional(),
 		})
 		.strict(),
 	z

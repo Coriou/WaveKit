@@ -284,6 +284,11 @@ impl Engine {
         Self::with_design(cfg, design)
     }
 
+    /// The output rates this engine can capture at (48 kHz first).
+    pub fn rates(&self) -> Vec<u64> {
+        self.designs.iter().map(|d| d.out).collect()
+    }
+
     /// The design of output rate `rate`, if the source rate supports it.
     fn design_of(&self, rate: u64) -> Option<usize> {
         self.designs.iter().position(|d| d.out == rate)
@@ -393,7 +398,8 @@ impl Engine {
     fn finish(&mut self, mut c: Capture, events: &mut Vec<Value>) {
         match c.finalize() {
             Ok(()) => events.push(json!({
-                "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out
+                "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out,
+                "rateHz": self.designs[c.design].out
             })),
             Err(_) => {
                 c.discard();

@@ -158,6 +158,8 @@ export interface IqCaptureServiceCounters extends IqCaptureCounters {
 	toolRestarts: number
 	toolGiveUps: number
 	replayFailures: number
+	/** Captures asked at a rate the tool did not advertise, made at 48 kHz instead. */
+	rateFallbacks: number
 	/** The capture directory failed its re-proof (swapped, linked): capture went off. */
 	dirRefusals: number
 	sweep: SweepResult
@@ -350,6 +352,7 @@ class Service implements IqCaptureService {
 	private toolRestarts = 0
 	private toolGiveUps = 0
 	private replayFailures = 0
+	private rateFallbacks = 0
 	private sweepTotals: SweepResult = { removed: 0, left: 0, failed: 0 }
 	private warnedGiveUp = false
 	private starting: Promise<void> | null = null
@@ -714,6 +717,7 @@ class Service implements IqCaptureService {
 			toolRestarts: this.toolRestarts,
 			toolGiveUps: this.toolGiveUps,
 			replayFailures: this.replayFailures,
+			rateFallbacks: this.rateFallbacks,
 			dirRefusals: this.dirRefusals,
 			sweep: { ...this.sweepTotals },
 		}
@@ -929,7 +933,19 @@ class Service implements IqCaptureService {
 		const fromSample = Math.max(lo, Math.min(hi, wanted))
 		const captureId = this.uuid()
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
-		const admitted = store.admit(req, captureId, slot.epoch, trial)
+		// Only a rate the running tool advertised is asked for; an older tool (or a source rate
+		// the tool cannot plan) gets an honest 48 kHz capture, recorded as such.
+		const rateHz =
+			req.rateHz !== undefined && proc.supportsRate(req.rateHz)
+				? req.rateHz
+				: IQ_CAPTURE_RATE_HZ
+		if (rateHz !== (req.rateHz ?? IQ_CAPTURE_RATE_HZ)) this.rateFallbacks++
+		const admitted = store.admit(
+			{ ...req, rateHz },
+			captureId,
+			slot.epoch,
+			trial,
+		)
 		if ("refused" in admitted) return admitted
 		// Held before the tool can answer: the queue never sees it unheld.
 		if (holder !== null) store.reserve(captureId, holder)
@@ -944,7 +960,6 @@ class Service implements IqCaptureService {
 			this.issued.set(proc, own)
 		}
 		own.add(captureId)
-		const rateHz = req.rateHz ?? IQ_CAPTURE_RATE_HZ
 		const sent = proc.send({
 			type: "capture",
 			id: captureId,
@@ -1660,6 +1675,12 @@ class Service implements IqCaptureService {
 		slot.ids.delete(ev.id)
 		this.clearCaptureTimer(ev.id)
 		if (ev.type === "aborted") {
+			store.fail(ev.id)
+			return
+		}
+		// The file must be at the rate asked for: a tool that does not echo it wrote 48 kHz.
+		if ((ev.rateHz ?? IQ_CAPTURE_RATE_HZ) !== e.rateHz) {
+			store.countHostile()
 			store.fail(ev.id)
 			return
 		}

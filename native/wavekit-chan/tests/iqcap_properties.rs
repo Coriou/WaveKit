@@ -238,3 +238,69 @@ proptest! {
         prop_assert!(a == b);
     }
 }
+
+/// Power of interleaved cf32 `out` (at `rate`) at frequency `f`, over its steady part.
+fn power_at(out: &[f32], f: f64, rate: f64) -> f64 {
+    let n = out.len() / 2;
+    let (mut re, mut im) = (0f64, 0f64);
+    for k in n / 4..n {
+        let ph = -TAU * f * k as f64 / rate;
+        let (i, q) = (out[k * 2] as f64, out[k * 2 + 1] as f64);
+        re += i * ph.cos() - q * ph.sin();
+        im += i * ph.sin() + q * ph.cos();
+    }
+    re * re + im * im
+}
+
+#[test]
+fn faster_rates_reject_what_would_alias_into_the_passband() {
+    // At output rate R a tone at R + 5 kHz from the channel folds onto +5 kHz; it must arrive at
+    // least 60 dB below an in-band tone of the same level at +5 kHz.
+    let fs = 2_048_000u64;
+    for out in [96_000u64, 192_000] {
+        let d = ChainDesign::with_output(fs, out, 47_424.0).unwrap();
+        let n = fs as usize / 4;
+        let run = |hz: f64| {
+            let mut dsp = CaptureDsp::new(&d, 0.0);
+            let mut o = Vec::new();
+            dsp.push_cu8(&tone(fs, hz, n, 3), &mut o);
+            power_at(&o, 5_000.0, out as f64)
+        };
+        let wanted = run(5_000.0);
+        let alias = run(out as f64 + 5_000.0);
+        let db = 10.0 * (wanted / alias).log10();
+        assert!(db > 60.0, "{out}: {db:.1} dB");
+    }
+}
+
+#[test]
+fn the_tool_advertises_its_rates_and_echoes_each_capture_rate() {
+    let fs = 1_024_000u64;
+    let dir = tmp_dir();
+    let mut e = Engine::new(Config {
+        sample_rate: fs,
+        ring_ms: 50,
+        out_dir: dir.clone(),
+        anchor: dir.clone(),
+        max_ms: 4000,
+        bandwidth_hz: 47_424.0,
+    })
+    .unwrap();
+    assert_eq!(e.rates(), vec![48_000, 96_000, 192_000]);
+    let mut ev: Vec<Value> = Vec::new();
+    e.command(
+        Command::Capture {
+            id: ID.into(),
+            offset_hz: 0.0,
+            from_sample: e.oldest(),
+            max_ms: 200,
+            rate_hz: 96_000,
+        },
+        &mut ev,
+    );
+    e.input(&tone(fs, 1_000.0, fs as usize / 4, 5), &mut ev);
+    let done = ev.iter().find(|v| v["type"] == "captured").unwrap();
+    assert_eq!(done["rateHz"], 96_000);
+    assert_eq!(done["samples"], 19_200);
+    let _ = std::fs::remove_dir_all(&dir);
+}
