@@ -5,7 +5,8 @@
  * One ARINC 618 downlink block, made up (mode, registration, label, text):
  * a pre-key of ones, `+` (with its odd parity bit), `*`, SYN, SYN, SOH, the
  * text block (mode, 7-character address, technical ack, label, block id, STX,
- * text, ETX), the CRC-16 (reflected 0x8408, initial 0, over the text block
+ * text, ETX; a downlink block id is a digit, so the text starts with a
+ * made-up 4-character message number and 6-character flight id), the CRC-16 (reflected 0x8408, initial 0, over the text block
  * from the mode character through ETX, low byte first) and DEL. Every
  * character carries odd parity in bit 7 and is sent LSB first.
  *
@@ -54,16 +55,24 @@ export function acarsBytes({
 	address = ".N12345",
 	label = "H1",
 	blockId = "1",
+	msgno = "M01A",
+	flight = "XX0001",
 	text = "WAVEKIT TEST",
 } = {}) {
 	const chars = s => [...s].map(c => c.charCodeAt(0))
 	const block = [
 		...chars(mode),
-		...chars(address.padEnd(7, ".").slice(0, 7)),
+		...chars(address.padStart(7, ".").slice(0, 7)),
 		0x15,
 		...chars(label),
 		...chars(blockId),
 		0x02,
+		// a downlink (digit block id) text starts with the message number (4) and flight id (6)
+		...(/^[0-9]$/.test(blockId)
+			? chars(
+					msgno.padEnd(4, " ").slice(0, 4) + flight.padEnd(6, " ").slice(0, 6),
+				)
+			: []),
 		...chars(text),
 		0x03,
 	].map(oddParity)

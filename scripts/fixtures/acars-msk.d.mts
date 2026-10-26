@@ -3,6 +3,8 @@ export interface AcarsBlock {
 	address?: string
 	label?: string
 	blockId?: string
+	msgno?: string
+	flight?: string
 	text?: string
 }
 export function oddParity(c: number): number
