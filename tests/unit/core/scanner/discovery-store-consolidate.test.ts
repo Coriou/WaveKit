@@ -1,4 +1,6 @@
 // WG15 DQ requirement 7: legacy consolidation fixtures (7.10) through the real DiscoveryStore.
+// Register directory teardown before a test dynamically imports the scanner fixtures.
+import "../../../helpers/tmp-dir.js"
 import { describe, expect, it } from "vitest"
 import { mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"

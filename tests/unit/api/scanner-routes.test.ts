@@ -1,6 +1,6 @@
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
 import type * as NodeFs from "node:fs"
-import { mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -305,7 +305,7 @@ describe("scanner routes", () => {
 	})
 
 	it("passes takeover on resume and streams recordings as audio/wav", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "wk-rec-"))
+		const dir = makeTmpDir("wk-rec-")
 		const wav = join(dir, "call.wav")
 		writeFileSync(wav, Buffer.from("RIFF0000WAVE"))
 		await build({
