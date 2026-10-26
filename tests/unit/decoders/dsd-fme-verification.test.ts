@@ -1,3 +1,4 @@
+import type { JournalEntry } from "../../../src/core/scanner/store/discovery-store.js"
 import { DiscoveryStore } from "../../../src/core/scanner/store/discovery-store.js"
 import { DecodeEvidenceSchema } from "../../../src/core/scanner/store/schemas.js"
 import { counterIds, makeObs } from "../../mocks/scanner/observations.js"
@@ -39,6 +40,7 @@ function rig() {
 		evidence.push(...interpretDsdFme({ kind: "link", line }, state))
 	})
 	return {
+		decoder,
 		links,
 		evidence,
 		feed(text: string, at = T0 + links.length * 1003.7) {
@@ -112,9 +114,10 @@ describe("dsd-fme content verification", () => {
 		"requires two clean %s contents",
 		burst => {
 			const r = rig()
-			r.feed(bs("10", burst))
+			r.feed(bs("10", burst), T0 + 3.7)
 			expect(r.evidence).toEqual([])
-			r.feed(bs("10", burst))
+			r.feed(bs("10", burst), T0 + 63.1)
+			r.feed(bs("10", burst), T0 + 119.3)
 			expect(r.evidence.at(-1)?.identity).toEqual({
 				kind: "dmr-cc",
 				value: "10",
@@ -135,6 +138,50 @@ describe("dsd-fme content verification", () => {
 		expect(r.evidence).toEqual([])
 	})
 
+	it.each(["PI", "VLC", "TLC", "CSBK", "MBCH", "MBCC", "DATA", "USBD"])(
+		"rejects multiline failures throughout a %s burst",
+		burst => {
+			for (const error of [
+				" SLOT 1 FLCO FEC ERR",
+				" SLCO CRC ERR",
+				" USBD - Reserved 3 (CRC ERR)",
+				" (FEC ERR)",
+				" Slot 1 - Multi Block Control Message CRC16 ERR",
+			]) {
+				const r = rig()
+				for (let i = 0; i < 3; i++) {
+					r.feed(bs("10", burst), T0 + i * 173.7)
+					r.feed(" payload continuation", T0 + i * 173.7 + 7.3)
+					expect(r.links.some(l => l.verified)).toBe(false)
+					r.feed(error, T0 + i * 173.7 + 19.1)
+				}
+				r.feed(bs("10", "IDLE"), T0 + 600.7)
+				expect(r.links.some(l => l.verified)).toBe(false)
+				expect(r.evidence.every(e => e.identity === undefined)).toBe(true)
+			}
+		},
+	)
+
+	it.each(["stop", "timeout", "late-sync"])(
+		"flushes an unfinished burst unverified on %s",
+		async end => {
+			const r = rig()
+			r.feed(bs("10", "VLC"), T0 + 3.7)
+			expect(r.links).toEqual([])
+			if (end === "stop") await r.decoder.stop()
+			else {
+				vi.setSystemTime(T0 + 5009.3)
+				if (end === "timeout")
+					(
+						r.decoder as unknown as { checkCallTimeoutAsync(): void }
+					).checkCallTimeoutAsync()
+				else r.feed(bs("10", "VLC"), T0 + 5009.3)
+			}
+			expect(r.links).toHaveLength(1)
+			expect(r.links[0]?.verified).toBe(false)
+		},
+	)
+
 	it("CACH errors produce no link or evidence; XX and sync loss cannot lend a stale CC to LC", () => {
 		const r = rig()
 		r.feed("21:49:48 Sync: +DMR  [slot1]  slot2  | CACH/Burst FEC ERR")
@@ -152,6 +199,7 @@ describe("dsd-fme content verification", () => {
 
 	it("DC guard downgrades checked headers but allows paired TG+SRC voice LC at centre", () => {
 		const r = rig()
+		r.feed(bs("03", "CSBK"))
 		r.feed(bs("03", "CSBK"))
 		r.feed(bs("03", "CSBK"))
 		const header = r.evidence.at(-1)!
@@ -259,6 +307,61 @@ describe("dsd-fme content verification", () => {
 		},
 	)
 
+	it.each(["dmr", "pocsag"] as const)(
+		"normalizes snapshot plus legacy %s journal replay",
+		protocol => {
+			const store = new DiscoveryStore({
+				maxDiscoveries: 10,
+				now: () => T0,
+				newId: counterIds(),
+			})
+			const obs = makeObs({
+				id: "journal-legacy",
+				centreHz: HZ,
+				startedAt: T0,
+				open: true,
+			})
+			const id = store.ingest(obs).discoveryId!
+			const snapshot = store.snapshot()
+			const entries: JournalEntry[] = []
+			store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+				entries.push({ ...e, seq: entries.length + 1 }),
+			)
+			const ev: DecodeEvidence = {
+				protocol,
+				identity:
+					protocol === "dmr"
+						? { kind: "dmr-cc", value: "3" }
+						: { kind: "pocsag-capcode", value: "123" },
+				crcClean: true,
+				metadata: {},
+				at: T0 + 3.7,
+				epoch: obs.track.epoch,
+				origin: "probe",
+			}
+			store.appendObservationEvidence(obs.id, ev)
+			store.applyEvidence(id, ev)
+			store.restore(snapshot)
+			for (const entry of entries) store.replay(entry)
+			if (protocol === "dmr") {
+				expect(store.get(id)).toMatchObject({
+					confidence: "activity",
+					evidenceLevel: "weak",
+					proof: { kind: "digital-undecoded" },
+				})
+				expect(store.get(id)?.identity).toBeUndefined()
+				expect(store.snapshot().observations[0]?.decode?.[0]).toMatchObject({
+					contentVerified: false,
+					unverifiedCc: 3,
+				})
+			} else {
+				expect(store.get(id)?.identity).toEqual(ev.identity)
+				expect(store.get(id)?.proof?.kind).toBe("decoded")
+				expect(store.get(id)?.evidenceLevel).toBe("proven")
+			}
+		},
+	)
+
 	it.each([
 		["p25p1", "p25-nac", "123"],
 		["p25p2", "p25-nac", "123"],
@@ -302,6 +405,7 @@ describe("dsd-fme content verification", () => {
 
 	it("preserves new content verification through schema and snapshot restore", () => {
 		const r = rig()
+		r.feed(bs("03", "CSBK"))
 		r.feed(bs("03", "CSBK"))
 		r.feed(bs("03", "CSBK"))
 		expect(r.evidence.at(-1)?.contentVerified).toBe(true)
@@ -358,9 +462,9 @@ describe("dsd-fme content verification", () => {
 	})
 
 	it.each([
-		["P25p1", "NAC: 123; LDU1", true],
+		["P25p1", "NAC: 123; LDU1", false],
 		["P25p1", "NAC: 123; duid:EE", false],
-		["P25p1", "NAC/CC: 123; LDU1", true],
+		["P25p1", "NAC/CC: 123; LDU1", false],
 		["P25p1", "NAC/CC: 123; duid:EE", false],
 		["P25p1", "NAC/CC: 123;", false],
 		["P25p1", "nac: [123] src: [123] tg: [9]", false],

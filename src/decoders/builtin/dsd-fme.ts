@@ -75,7 +75,7 @@ const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])?(?<proto>[A-Za-z0-9]+)\b/i
 const ERROR_PATTERN = /\b(FEC ERR|CRC ERR|SYNC LOST|no sync)\b/i
 
 /** A line whose link control failed its CRC: never identity, never encryption. */
-const CRC_ERR = /\bCRC\s+ERR\b/i
+const CRC_ERR = /\bCRC(?:16|32)?\s+ERR\b/i
 const FEC_ERR_ALL = /\bFEC\s+ERR\b/gi
 
 // --- DMR Patterns ---
@@ -528,6 +528,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private currentProtocol: DsdFmeProtocol = null
 	private linkDmrCc: number | undefined
 	private linkDmrAt = 0
+	private pendingDmrLink: DsdFmeLinkLine | undefined
 
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
@@ -792,6 +793,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			}
 		}
 
+		this.flushPendingDmrLink(false)
 		await super.stop()
 		this.linkDmrCc = undefined
 		this.linkDmrAt = 0
@@ -924,6 +926,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private checkCallTimeoutAsync(): void {
 		const now = new Date()
 		const nowMs = now.getTime()
+		if (this.pendingDmrLink && nowMs - this.pendingDmrLink.at > CALL_TIMEOUT_MS)
+			this.flushPendingDmrLink(false)
 
 		// First, check if pending call should be promoted to active
 		const promotedEvent = this.checkPendingCallEmission(now, nowMs)
@@ -1302,7 +1306,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
 		const link = this.parseLinkLine(cleanLine, nowMs)
-		if (link) this.emit("link", link)
+		if (
+			link?.protocol === "dmr" &&
+			link.verified &&
+			SYNC_PATTERN.test(cleanLine)
+		)
+			this.pendingDmrLink = link
+		else if (link) this.emit("link", link)
 
 		// STEP 4: Check for sync (protocol detection)
 		const syncResult = this.handleSync(cleanLine, now)
@@ -1512,12 +1522,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 	}
 
+	/** A sync closes the previous burst; silence/stop never attests its tail. */
+	private flushPendingDmrLink(verified: boolean): void {
+		const pending = this.pendingDmrLink
+		this.pendingDmrLink = undefined
+		if (pending) this.emit("link", { ...pending, verified })
+	}
+
 	/**
 	 * Parses one link-control line of the line's own sync protocol (or the
 	 * current one). Returns null for lines without identity fields.
 	 */
 	private parseLinkLine(line: string, at: number): DsdFmeLinkLine | null {
 		const sync = SYNC_PATTERN.exec(line)
+		if (this.pendingDmrLink) {
+			const expired = at - this.pendingDmrLink.at > CALL_TIMEOUT_MS
+			const lost = /Frame Sync Err:|SYNC LOST|no sync/i.test(line)
+			if (expired || lost || sync)
+				this.flushPendingDmrLink(!expired && !lost && sync !== null)
+			else if (CRC_ERR.test(line) || /\bFEC\s+ERR\b/i.test(line)) {
+				this.flushPendingDmrLink(false)
+				this.linkDmrCc = undefined
+			}
+		}
 		// dmr_ms.c/dmr_bs.c: loss of frame sync ends the burst sequence.
 		if (
 			/Frame Sync Err:|SYNC LOST|no sync/i.test(line) ||
@@ -1565,7 +1592,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				}
 				const idGroups =
 					DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
-				// dmr_dburst.c: these burst payloads carry CRC/FEC checks; VC/IDLE
+				// dmr_dburst.c:88-185 selects PI/VLC/TLC/CSBK/MBCH/MBCC/DATA/USBD.
+				// Its shared FEC/CRC errors print at 610-630, AFTER payload handlers:
+				// VLC/TLC dmr_flco.c:809-815 and USBD dmr_dburst.c:589-594
+				// can start a new line first; MBCH/MBCC use dmr_block.c:1464
+				// (multiline CRC16 ERR), DATA uses its :1331 (CRC32 ERR).
+				// SLCO errors also continue (dmr_flco.c:981). Hold headers until
+				// the next sync, rejecting any error in the entire burst tail.
+				// VC/IDLE
 				// only print a weak or stale CC. dmr_flco.c prints SLOT TGT/SRC
 				// only after IrrecoverableErrors == 0 (verified voice LC).
 				const voiceLc =
@@ -1605,14 +1639,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			}
 			case "p25p1":
 			case "p25p2": {
-				// dsd_frame.c sets DUID EE on BCH failure but still prints NAC.
-				// printFrameInfo prints NAC or NAC/CC (dsd_frame.c:34); only a
-				// recognized current DUID proves BCH passed, never the cached field alone.
-				const checkedNac =
-					/\bNAC(?:\/CC)?:\s*([0-9A-F]{3});.*\b(?:HDU|LDU1|LDU2|TDULC|TDU|TSBK|MPDU|TSDU)\b/i.exec(
-						line,
-					)?.[1]
-				const nac = checkedNac ?? P25_NAC.exec(line)?.groups?.["nac"]
+				// dsd_frame.c:34-36 prints cached p2_cc as NAC/CC, even beside
+				// a current checked DUID. It updates only on NAC correction at
+				// 390-396; even plain NAC is stored state. No supported print
+				// explicitly binds NAC to this frame's checked NID: hints only.
+				const nac =
+					/\bNAC(?:\/CC)?:\s*([0-9A-F]{3});/i.exec(line)?.[1] ??
+					P25_NAC.exec(line)?.groups?.["nac"]
 				const idGroups =
 					P25_SRC_TG.exec(line)?.groups ?? P25P2_VCH.exec(line)?.groups
 				const alg = ALG_ID.exec(line)?.groups?.["alg"]
@@ -1623,7 +1656,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					...(nac !== undefined ? { nac: nac.toUpperCase() } : {}),
 					...ids(idGroups, "tg", "src"),
 					...base,
-					verified: clean && checkedNac !== undefined,
+					verified: false,
 					...(alg !== undefined && !isClearAlgorithm(alg)
 						? { encrypted: true }
 						: {}),

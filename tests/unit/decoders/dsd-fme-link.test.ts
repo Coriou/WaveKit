@@ -189,11 +189,11 @@ describe("link events (spec § 6.4)", () => {
 		vi.useRealTimers()
 	})
 
-	it("emits one link per DMR link-control line, CRC-ERR lines flagged, unparsable CC skipped", () => {
+	it("defers DMR headers until burst completion and flags CRC errors", () => {
 		const { links } = replay(createDecoder(), keyUp(130).slice(0, 5), 200)
 		expect(links.map(({ at: _at, ...rest }) => rest)).toEqual([
 			{ protocol: "dmr", crcErr: false, fecErrs: 1, verified: false },
-			{ protocol: "dmr", cc: 5, crcErr: false, verified: true },
+			{ protocol: "dmr", cc: 5, crcErr: false, verified: false },
 			{
 				protocol: "dmr",
 				tg: "11",
@@ -203,7 +203,6 @@ describe("link events (spec § 6.4)", () => {
 				verified: false,
 				encrypted: true,
 			},
-			{ protocol: "dmr", cc: 1, crcErr: false, verified: true },
 			{
 				protocol: "dmr",
 				cc: 1,
@@ -227,7 +226,7 @@ describe("link events (spec § 6.4)", () => {
 			],
 			50,
 		)
-		expect(links[1]).toMatchObject({
+		expect(links[0]).toMatchObject({
 			protocol: "dmr",
 			tg: "9001",
 			src: "1133",

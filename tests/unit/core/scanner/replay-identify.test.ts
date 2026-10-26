@@ -259,7 +259,8 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 				h.decoders.emitLink(res.started, { ...line, at })
 				at += 1003.7
 			})
-			for (let i = 0; i < 2; i++)
+			// The third sync closes the second checked burst.
+			for (let i = 0; i < 3; i++)
 				(
 					decoder as unknown as { handleOutputLine(line: string): void }
 				).handleOutputLine(

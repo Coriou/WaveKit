@@ -596,20 +596,26 @@ DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, MBCC, DATA or USBD burst, or checked voice link control carrying
 both target and source. Voice link control uses the latest CC in its current
 burst sequence; unknown CC, sync loss, protocol changes and sequence timeout
-clear that association. CRC/FEC errors do not count, and CACH/burst FEC errors
+clear that association. Header verification waits until the next sync closes the
+burst (normally one burst of latency); any continuation CRC/FEC error rejects it.
+Stop or silence timeout flushes an unfinished header as unverified. CRC/FEC
+errors do not count, and CACH/burst FEC errors
 produce no evidence. Near the tuner centre, within the existing DC admission
 guard, digital voice additionally needs paired checked voice link control with
 both talkgroup and source before it can be decoded.
 
-The same conservative rule applies to other dsd-fme protocols: P25 accepts a
-NAC or NAC/CC only alongside a recognized current NID/BCH-checked frame type;
-a cached field alone, a failed DUID and legacy bracketed output stay unverified. NXDN accepts current RAN on CRC-checked
+The same conservative rule applies to other dsd-fme protocols: P25 NAC and NAC/CC
+remain unverified even beside a recognized frame type. In dsd-fme,
+`dsd_frame.c:34–36` prints cached state, and `390–396` updates NAC/CC only
+when BCH corrects the NAC. No supported output binds the printed NAC to the
+current checked NID, so P25 identity stays unverified. NXDN accepts current RAN
+on CRC-checked
 FACCH2/UDCH output, rather than cached SACCH/CAC RAN. YSF FICH sync, unchecked
 D-STAR MY headers and dPMR's cached channel code do not establish identities.
 Unknown output formats default to unverified.
 
 Persisted dsd-fme evidence requires explicit `contentVerified: true` provenance
-before a restored identity can be decoded/proven. Legacy rows without it retain
+in snapshots and journal replay before a restored identity can be decoded/proven. Legacy rows without it retain
 only digital sync evidence and an unverified DMR color-code hint. Replay uses the
 original source epoch's tuner centre retained by the scanner, rather than the
 narrow capture's channel centre. The capture index stores source and epoch but

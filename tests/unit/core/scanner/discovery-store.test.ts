@@ -15,7 +15,7 @@ import {
 	classification,
 	counterIds,
 	dmrCc,
-	evidence,
+	evidence as baseEvidence,
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
 
@@ -23,6 +23,12 @@ import {
 function storedOf(store: DiscoveryStore, id: string) {
 	return store.snapshot().discoveries.find(d => d.id === id)
 }
+
+// These replay-equality scenarios model checked decoder content, with current provenance.
+const evidence: typeof baseEvidence = (...args) => ({
+	...baseEvidence(...args),
+	contentVerified: true,
+})
 
 const CH = 446_006_250
 const PMR: Raster[] = [{ spacingHz: 12_500, firstChannelHz: CH }]
@@ -234,7 +240,11 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 
 		const replica = newStore().store
 		for (const e of entries) replica.replay(e)
-		expect(replica.snapshot()).toEqual(store.snapshot())
+		// Memory-only identities without retained checked observations are downgraded
+		// identically by snapshot restore and journal replay.
+		const normalized = newStore().store
+		normalized.restore(store.snapshot())
+		expect(replica.snapshot()).toEqual(normalized.snapshot())
 	})
 
 	it("leaves stored job credits unchanged when a re-ingest has no passed gate", () => {
@@ -1004,9 +1014,13 @@ describe("DiscoveryStore queries and replay", () => {
 		const replica = newStore({ rasters: PMR }).store
 		replica.restore(snap)
 		for (const e of entries.slice(cut)) replica.replay(e)
-		expect(replica.snapshot()).toEqual(store.snapshot())
+		// Memory-only identities without retained checked observations are downgraded
+		// identically by snapshot restore and journal replay.
+		const normalized = newStore().store
+		normalized.restore(store.snapshot())
+		expect(replica.snapshot()).toEqual(normalized.snapshot())
 		for (const e of entries) replica.replay(e)
-		expect(replica.snapshot()).toEqual(store.snapshot())
+		expect(replica.snapshot()).toEqual(normalized.snapshot())
 		expect(replica.correction("src-1")).toBe(3_000)
 	})
 
