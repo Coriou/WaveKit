@@ -362,7 +362,7 @@ for (const sample of fixtures) {
 }
 
 it.each(Object.entries(AMBIENT_CHANNEL_WIDTH_HZ))(
-	"%s excludes its reach boundary (%s nominal width)",
+	"%s reach boundary (%s nominal width)",
 	(protocol, _width) => {
 		const candidate = (offset: number) => ({
 			observationId: "o",
@@ -384,7 +384,8 @@ it.each(Object.entries(AMBIENT_CHANNEL_WIDTH_HZ))(
 			)
 		const reach = ambientReachHz(protocol as ScannerProtocol, 1)
 		expect(match(reach - 1)).toHaveLength(1)
-		expect(match(reach)).toHaveLength(0)
+		// ADS-B keeps its inclusive centre tolerance; point decodes exclude the boundary.
+		expect(match(reach)).toHaveLength(protocol === "adsb" ? 1 : 0)
 		expect(match(reach + 1)).toHaveLength(0)
 	},
 )

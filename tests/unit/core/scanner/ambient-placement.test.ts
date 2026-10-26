@@ -58,7 +58,10 @@ describe("ambient placement", () => {
 		for (const protocol of ["acars", "lora", "pocsag", "adsb", null] as const) {
 			const reach = ambientReachHz(protocol, 2_000)
 			expect(place([obs("a", HZ + reach - 1)], protocol)).toEqual(["a"])
-			expect(place([obs("a", HZ + reach)], protocol)).toEqual([])
+			// ADS-B keeps its inclusive centre tolerance (see the ADS-B block below).
+			expect(place([obs("a", HZ + reach)], protocol)).toEqual(
+				protocol === "adsb" ? ["a"] : [],
+			)
 			expect(place([obs("a", HZ + reach + 1)], protocol)).toEqual([])
 		}
 	})
@@ -199,5 +202,28 @@ describe("ambient placement", () => {
 			),
 			{ numRuns: 200 },
 		)
+	})
+})
+
+describe("ADS-B placement keeps the nearest-wins rule", () => {
+	const ADSB = 1_090_000_000
+	it("names the nearer of two discoveries inside the reach", () => {
+		const near = obs("near", ADSB + 100_000, {
+			obwHz: 50_000,
+			discoveryId: "d1",
+		})
+		const far = obs("far", ADSB + 200_000, { obwHz: 50_000, discoveryId: "d2" })
+		expect(place([far, near], "adsb", ADSB)).toEqual(["near"])
+	})
+	it("reaches exactly 500 kHz inclusive and not past it", () => {
+		const at = obs("at", ADSB + 500_000, { discoveryId: "d1" })
+		const past = obs("past", ADSB + 500_001, { discoveryId: "d2" })
+		expect(place([at], "adsb", ADSB)).toEqual(["at"])
+		expect(place([past], "adsb", ADSB)).toEqual([])
+	})
+	it("leaves a 1 Hz tie between discoveries ambiguous", () => {
+		const a = obs("a", ADSB + 100_000, { discoveryId: "d1" })
+		const b = obs("b", ADSB - 100_000, { discoveryId: "d2" })
+		expect(place([a, b], "adsb", ADSB)).toEqual([])
 	})
 })

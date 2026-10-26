@@ -81,10 +81,14 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 		if (e.at < o.startedAt - pairMs || e.at > (o.endedAt ?? now) + pairMs)
 			continue
 		const distance = Math.abs(t.centreHz - e.hz)
-		if (!(distance < ambientReachHz(e.protocol, t.obwHz))) continue
+		const reach = ambientReachHz(e.protocol, t.obwHz)
+		// ADS-B keeps its inclusive centre tolerance; point decodes are exclusive.
+		if (!(e.protocol === "adsb" ? distance <= reach : distance < reach))
+			continue
 		reaching.push({ o, distance })
 	}
 	if (reaching.length === 0) return []
+	if (e.protocol === "adsb") return nearestAdsb(reaching, onAmbiguous)
 	let matches = reaching.map(r => r.o)
 	const sharedDiscovery = matches[0]!.discoveryId
 	if (
@@ -94,7 +98,7 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 		return matches
 	// The smallest reaching occupied span wins only when it is nested in all
 	// others. Equal/non-nested signals remain ambiguous, regardless of distance.
-	if (e.protocol !== "adsb" && matches.length > 1) {
+	if (matches.length > 1) {
 		const narrow = matches.reduce((a, b) =>
 			a.lastTrack!.obwHz <= b.lastTrack!.obwHz ? a : b,
 		)
@@ -124,34 +128,36 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 		matches.every(o => o.discoveryId === discoveryId)
 	)
 		return matches
-	if (e.protocol !== "adsb") {
-		onAmbiguous?.()
-		return []
-	}
-	// Only a unique enclosing discovery can resolve nested detector fragments.
-	// Use extrema once so association remains O(k), including wide burst tracks.
-	const lower = (o: T): number => o.lastTrack!.centreHz - o.lastTrack!.obwHz / 2
-	const upper = (o: T): number => o.lastTrack!.centreHz + o.lastTrack!.obwHz / 2
-	let min = Infinity
-	let max = -Infinity
-	for (const o of matches) {
-		if (!Number.isFinite(o.lastTrack!.obwHz) || o.lastTrack!.obwHz < 0) {
-			onAmbiguous?.()
-			return []
-		}
-		min = Math.min(min, lower(o))
-		max = Math.max(max, upper(o))
-	}
-	const enclosing = new Set(
-		matches
-			.filter(o => lower(o) <= min && upper(o) >= max)
-			.map(o => o.discoveryId),
+	onAmbiguous?.()
+	return []
+}
+
+/**
+ * Tie width for ADS-B placement: 1 Hz. Track centres and decode frequencies are whole-Hz
+ * estimates, so two distances within 1 Hz are indistinguishable.
+ */
+export const AMBIENT_PLACEMENT_TIE_HZ = 1
+
+/**
+ * ADS-B placement, unchanged from the earlier rule: the nearest reaching track wins; candidates
+ * tied within AMBIENT_PLACEMENT_TIE_HZ are all named only when they share one discovery.
+ */
+function nearestAdsb<T extends PlacementCandidate>(
+	reaching: readonly { o: T; distance: number }[],
+	onAmbiguous?: () => void,
+): T[] {
+	let nearest = Infinity
+	for (const r of reaching) nearest = Math.min(nearest, r.distance)
+	const tied = reaching
+		.filter(r => r.distance - nearest <= AMBIENT_PLACEMENT_TIE_HZ)
+		.map(r => r.o)
+	if (tied.length === 1) return tied
+	const discoveryId = tied[0]!.discoveryId
+	if (
+		typeof discoveryId === "string" &&
+		tied.every(o => o.discoveryId === discoveryId)
 	)
-	if (enclosing.size === 1) {
-		const only = [...enclosing][0]
-		if (typeof only === "string")
-			return matches.filter(o => o.discoveryId === only)
-	}
+		return tied
 	onAmbiguous?.()
 	return []
 }
