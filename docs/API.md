@@ -3755,7 +3755,16 @@ A decode counts only when all of these hold (fail closed):
 
 The identity is attached on its second clean decode within one engine epoch.
 Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
-(`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
+(`fromaddr`, else `icao`), `lora-node` (`from`) and `icao` (protocol `adsb`: a
+readsb aircraft address, 6 lowercase hex digits). A readsb decode lies at its
+placement's channel, else 1090 MHz, and reaches a track within 500 kHz of it. It
+counts only with a CRC-proven address: SBS and JSON lines (readsb writes them only
+from CRC-checked messages), or a Beast frame of DF11, DF17 or DF18 whose CRC-24
+remainder is 0; any other Beast format, a CRC failure, a `~` non-ICAO address or
+malformed data is no evidence. An unpaired readsb message is no evidence at all
+(no observation, discovery or activity), so only an accepted address reaches the
+scanner. The 2026-10-26 core adds the protocol `adsb` and the identity kind `icao`;
+a client with a closed protocol or identity map must add them. Without a running decoder
 of these types, or without tuning trust, identify behaves as before the 2026-10-16 core.
 
 **Narrow digital trials.** When the target lies in a band-plan range of the
@@ -3822,17 +3831,31 @@ scanner:
   transmission yet (below `decoded`, or `decoded` with a known protocol no live
   probe has confirmed on this observation), not on a spur or an image, inside the
   usable span; at most 6 per source per minute and 2 at once. The tool shifts the
-  channel to baseband and decimates it to 48 000 Hz complex float32 (cf32) at the
-  widest probe passband, from the pre-roll to the track's close (plus the tracker
-  hang) or `maxCaptureMs`: at most 1 536 000 B per capture (4 s × 48 000 × 8 B).
-  Gaps are counted, never filled; a capture shorter than 100 ms is discarded.
+  channel to baseband and decimates it to complex float32 (cf32) at the widest
+  probe passband, from the pre-roll to the track's close (plus the tracker hang)
+  or `maxCaptureMs`. The rate is 48 000 Hz, or 96 000 Hz when the band plan lists
+  ISM at the capture or the track is an OOK burst (rtl_433 needs it for
+  short-pulse sensors); the passband is the same. At most 1 536 000 B per capture
+  at 48 kHz (4 s × 48 000 × 8 B) and 3 072 000 B at 96 kHz; the tool also accepts
+  192 000 Hz (6 144 000 B), which no protocol uses yet. A rate is asked for only when the
+  running tool lists it in its `ready` event and must come back in its `captured`
+  event. The core starts the tool with `--rate-ack` (only then does it add those
+  fields) and, if the tool refuses the flag, once more without it. An older tool
+  gets an honest 48 kHz capture (counted in `GET /api/scanner/status` as
+  `iqCapture.rateFallbacks`),
+  and a file whose rate is not confirmed is dropped. A 48 kHz decoder and the
+  analog trial get a faster capture brought to 48 kHz. Gaps are counted, never
+  filled; a capture shorter than 100 ms is discarded.
 - **Order.** capture → queue → replay trials → result → discard. A finished capture
   joins one FIFO replay queue per core. Its trials (at most 8,
   `IQ_REPLAY_MAX_TRIALS`) are the known protocol first, then the probe modes the
   captured track scores (narrow digital included), deduplicated. They run one at a
-  time through the `replay` probe transport (`dsd-fme`, `multimon-ng`, `direwolf`;
-  never `rtl433`), each fed the capture filtered to that decoder's probe channel
-  shape, faster than real time (68× to 384× in the bench). At most one replay probe
+  time through the `replay` probe transport (`dsd-fme`, `multimon-ng`, `direwolf`,
+  and `rtl433` for ISM: `rtl_433 -r cf32:- -s 48000` on the whole 47.4 kHz capture
+  passband, and `acarsdec` for ACARS: AM at 48 kHz, 12 kHz audio; one block with
+  acarsdec `error` 0 is that replay's decode), each fed the capture filtered to
+  that decoder's probe channel shape,
+  faster than real time (68× to 384× in the bench). At most one replay probe
   runs at once, costing 0.15 cores of `cpuBudgetCores`, at a priority below identify
   and above passive; it never preempts and is never preempted, and it needs no live
   spectrum engine. The first accepted decode is the result and ends the remaining

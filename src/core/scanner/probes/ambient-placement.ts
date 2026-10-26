@@ -23,7 +23,14 @@ import type { ChannelCandidate } from "./ambient-channel.js"
 /**
  * Channel width of each ambient-only decoder. AIS, ACARS and VDL2 use a 25 kHz channel
  * raster (half: 12.5 kHz). Meshtastic LoRa uses 125 or 250 kHz; the narrower 125 kHz
- * (half: 62.5 kHz) is used so a placement never reaches past a real channel.
+ * (half: 62.5 kHz) is used so a placement never reaches past a real channel. ADS-B: readsb
+ * reports no frequency of its own, so the decode sits at the nominal 1090 MHz and the reach is a
+ * tolerance on the track's measured centre, not a spectrum width. Width 1 MHz, so the reach is
+ * 500 kHz: a 50 ppm tuning error is 1090 MHz × 50e-6 = 54.5 kHz, and the centre the detector
+ * measures on a short pulse-position burst may sit off the carrier by a fraction of its spread
+ * (a 0.5 µs pulse has its first spectral nulls at ±1 / 0.5 µs = ±2 MHz); 500 kHz leaves
+ * 500 − 54.5 = 445.5 kHz for that centre error, under a quarter of the ±2 MHz spread. The nearest other allocation, the 1030 MHz
+ * interrogation uplink, is 60 MHz away, so nothing else lies within the reach.
  */
 export const AMBIENT_CHANNEL_WIDTH_HZ: Readonly<Record<string, number>> =
 	Object.freeze({
@@ -31,6 +38,7 @@ export const AMBIENT_CHANNEL_WIDTH_HZ: Readonly<Record<string, number>> =
 		acars: 25_000,
 		vdl2: 25_000,
 		lora: 125_000,
+		adsb: 1_000_000,
 	})
 
 /** Least reach of a VFO-targeted ambient decoder (unchanged WG7 rule): 1.5 kHz. */

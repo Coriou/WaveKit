@@ -6,7 +6,9 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import type { Readable } from "node:stream"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { wholeCaptureShape } from "../../../../src/core/iq-capture/shapes.js"
 import {
+	captureBandwidthHz,
 	createIqCaptureService,
 	type IqCaptureServiceOptions,
 	type IqReplayShapes,
@@ -99,6 +101,17 @@ async function setup(
 		samples?: number
 		enoent?: boolean
 		noShapes?: boolean
+		/** A current tool: advertises these rates and echoes each capture's rate. */
+		rates?: number[]
+		/** Advertise the rates but never echo a capture's rate (a broken tool). */
+		noEcho?: boolean
+		/** An older tool: refuses `--rate-ack` as an unknown flag (usage error, exit 2). */
+		oldTool?: boolean
+		/** Per `run` spawn (in order): exit before ready with this code/signal and stderr. */
+		startFailures?: (
+			| { code: number | null; signal?: NodeJS.Signals; stderr: string }
+			| undefined
+		)[]
 	} = {},
 ) {
 	const root = path.join(base, `r${n++}`)
@@ -108,17 +121,49 @@ async function setup(
 	let uuidN = 0
 	const ids: string[] = []
 	const samples = opts.samples ?? 4800
+	let runIndex = 0
 	const sp = fakeSpawner({
 		...(opts.enoent ? { enoent: true } : {}),
 		onSpawn: child => {
 			if (child.args[0] !== "run") return
-			queueMicrotask(() => child.event({ type: "ready" }))
+			const failure = opts.startFailures?.[runIndex++]
+			if (failure) {
+				queueMicrotask(() => {
+					child.stderr.write(failure.stderr)
+					queueMicrotask(() => {
+						child.exit(failure.code, failure.signal ?? null)
+						child.emit("close", failure.code, failure.signal ?? null)
+					})
+				})
+				return
+			}
+			if (opts.oldTool && child.args.includes("--rate-ack")) {
+				queueMicrotask(() => {
+					child.stderr.write("wavekit-iqcap: unknown flag\nusage: ...")
+					queueMicrotask(() => {
+						child.exit(2)
+						child.emit("close", 2, null)
+					})
+				})
+				return
+			}
+			queueMicrotask(() =>
+				child.event(
+					opts.rates ? { type: "ready", rates: opts.rates } : { type: "ready" },
+				),
+			)
 			const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
 			child.control.on("data", (b: Buffer) => {
 				for (const line of b.toString().split("\n").filter(Boolean)) {
-					const cmd = JSON.parse(line) as { type: string; id?: string }
+					const cmd = JSON.parse(line) as {
+						type: string
+						id?: string
+						rateHz?: number
+					}
 					if (cmd.type !== "capture" || opts.behaviour === "silent") continue
 					const id = cmd.id ?? ""
+					const echo =
+						opts.rates && !opts.noEcho ? { rateHz: cmd.rateHz ?? 48_000 } : {}
 					fs.writeFileSync(
 						path.join(outDir, `${id}.cf32`),
 						Buffer.alloc(samples * 8),
@@ -126,7 +171,7 @@ async function setup(
 							mode: 0o600,
 						},
 					)
-					child.event({ type: "captured", id, samples, gapSamples: 0 })
+					child.event({ type: "captured", id, samples, gapSamples: 0, ...echo })
 				}
 			})
 		},
@@ -649,6 +694,8 @@ describe("IqCaptureService supervision", () => {
 				"16000",
 				"--anchor",
 				s.root,
+				// the extended (rate) protocol is opt-in
+				"--rate-ack",
 			])
 			child.stderr.write("control fd 3 is not open; secret-native-output")
 			await flush()
@@ -668,6 +715,124 @@ describe("IqCaptureService supervision", () => {
 		} finally {
 			await s.svc.stop()
 		}
+	})
+
+	it("an older tool that refuses --rate-ack is restarted once without it and captures at 48 kHz", async () => {
+		const s = await setup({}, { oldTool: true })
+		try {
+			s.svc.attachSource("src", {
+				sampleRateHz: FS,
+				centerHz: CENTER,
+				epoch: 3,
+				engine: s.engine,
+			})
+			await s.svc.start()
+			await flush(20)
+			const runs = () => s.sp.children.filter(c => c.args[0] === "run")
+			expect(runs()[0]?.args).toContain("--rate-ack")
+			const plain = runs()[1] as FakeChild
+			expect(plain).toBeDefined()
+			expect(plain.args).not.toContain("--rate-ack")
+			expect(s.svc.counters().toolFailures).toBe(0)
+			await flush()
+			s.engine.push(FS)
+			const got = s.svc.capture(req({ rateHz: 96_000 }))
+			expect("captureId" in got).toBe(true)
+			await flush(10)
+			expect(
+				plain.commands().find(c => c["type"] === "capture"),
+			).not.toHaveProperty("rateHz")
+			expect(s.svc.counters().rateFallbacks).toBe(1)
+		} finally {
+			await s.svc.stop()
+		}
+	})
+
+	describe("only a clean usage refusal is a --rate-ack fallback", () => {
+		const usage = "wavekit-iqcap: unknown flag\nusage: ..."
+		async function started(
+			failures: NonNullable<
+				NonNullable<Parameters<typeof setup>[1]>["startFailures"]
+			>,
+		) {
+			const s = await setup({}, { startFailures: failures })
+			s.svc.attachSource("src", {
+				sampleRateHz: FS,
+				centerHz: CENTER,
+				epoch: 3,
+				engine: s.engine,
+			})
+			await s.svc.start()
+			await flush(20)
+			const runs = () => s.sp.children.filter(c => c.args[0] === "run")
+			return { s, runs }
+		}
+
+		it.each([
+			["exit 1 with a usage text", { code: 1, stderr: usage }],
+			[
+				"SIGSEGV",
+				{ code: null, signal: "SIGSEGV" as NodeJS.Signals, stderr: usage },
+			],
+			[
+				"exit 2 with another diagnostic",
+				{ code: 2, stderr: "wavekit-iqcap: boom" },
+			],
+		])(
+			"%s is a normal tool failure: counted, restarted later with the flag",
+			async (_n, f) => {
+				const { s, runs } = await started([f])
+				try {
+					expect(runs()).toHaveLength(1)
+					expect(s.svc.counters().toolFailures).toBe(1)
+					expect(s.svc.counters().lastToolFailure).toMatchObject({
+						phase: "exit-before-ready",
+					})
+					s.timers.advance(60_000)
+					await flush(20)
+					expect(runs()[1]?.args).toContain("--rate-ack")
+				} finally {
+					await s.svc.stop()
+				}
+			},
+		)
+
+		it("a fallback after a genuine failure keeps that failure as the last one, uncounted itself", async () => {
+			const { s, runs } = await started([
+				{ code: null, signal: "SIGSEGV", stderr: "" },
+				{ code: 2, stderr: usage },
+			])
+			try {
+				expect(s.svc.counters().toolFailures).toBe(1)
+				const crash = s.svc.counters().lastToolFailure
+				expect(crash).toMatchObject({ signal: "SIGSEGV" })
+				// step past the restart delay, letting the new tool answer before its ready deadline
+				for (let i = 0; i < 60 && runs().length < 2; i++) {
+					s.timers.advance(1_000)
+					await flush(5)
+				}
+				await flush(20)
+				// the restart refused the flag: retried at once without it, no new failure
+				expect(runs()).toHaveLength(3)
+				expect(runs()[1]?.args).toContain("--rate-ack")
+				expect(runs()[2]?.args).not.toContain("--rate-ack")
+				expect(s.svc.counters().toolFailures).toBe(1)
+				expect(s.svc.counters().lastToolFailure).toEqual(crash)
+			} finally {
+				await s.svc.stop()
+			}
+		})
+
+		it("a fallback as the first start leaves no failure recorded", async () => {
+			const { s, runs } = await started([{ code: 2, stderr: usage }])
+			try {
+				expect(runs()).toHaveLength(2)
+				expect(s.svc.counters().toolFailures).toBe(0)
+				expect(s.svc.counters().lastToolFailure).toBeNull()
+			} finally {
+				await s.svc.stop()
+			}
+		})
 	})
 
 	it("stop shuts the tools down and discards everything", async () => {
@@ -721,10 +886,132 @@ describe("IqCaptureService openReplay", () => {
 		})
 	}
 
-	it("refuses rtl433, unknown and unready captures", async () => {
+	it("refuses rtl433 without its shape, unknown and unready captures", async () => {
 		const { s, id } = await ready()
 		expect(s.svc.openReplay(id, "rtl433")).toBeNull()
 		expect(s.svc.openReplay("nope", "dsd-fme")).toBeNull()
+		await s.svc.stop()
+	})
+
+	it("a 96 kHz capture: the tool is asked for it, rtl433 reads it at 96 kHz, 48 kHz decoders and analyze get it brought to 48 kHz", async () => {
+		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
+		const s = await setup(
+			{ shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) } },
+			{ samples: 9_600, rates: [48_000, 96_000, 192_000] },
+		)
+		const run = await running(s)
+		const got = s.svc.capture(req({ rateHz: 96_000 }))
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		expect(run.commands().find(c => c["type"] === "capture")).toMatchObject({
+			rateHz: 96_000,
+		})
+		expect(s.svc.replayRateOf?.(id, "rtl433")).toBe(96_000)
+		expect(s.svc.replayRateOf?.(id, "multimon-ng")).toBe(48_000)
+		expect(s.svc.replayRateOf?.("gone", "rtl433")).toBeNull()
+		expect(s.svc.openReplay(id, "rtl433")).not.toBeNull()
+		expect(lastReplay(s).args).toEqual([
+			"replay",
+			"--in",
+			"/dev/fd/3",
+			"--bandwidth",
+			"16000",
+			"--transition",
+			"40000",
+			"--rate",
+			"96000",
+		])
+		expect(s.svc.openReplay(id, "multimon-ng")).not.toBeNull()
+		expect(lastReplay(s).args.slice(-4)).toEqual([
+			"--rate",
+			"96000",
+			"--out-rate",
+			"48000",
+		])
+		await s.svc.stop()
+	})
+
+	it("an older tool (no rates advertised): a 96 kHz request is an honest 48 kHz capture, replayed without --rate", async () => {
+		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
+		const s = await setup(
+			{ shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) } },
+			{ samples: 48_000 },
+		)
+		const run = await running(s)
+		const got = s.svc.capture(req({ rateHz: 96_000 }))
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		expect(
+			run.commands().find(c => c["type"] === "capture"),
+		).not.toHaveProperty("rateHz")
+		// 48 000 samples are 1 000 ms at the rate the file really has
+		const view = s.svc.near("src", RF, 1_000, {
+			observationId: null,
+			limit: 1,
+		})[0]
+		expect(view).toMatchObject({ captureId: id, durationMs: 1000 })
+		expect(view).not.toHaveProperty("rateHz")
+		expect(s.svc.replayRateOf?.(id, "rtl433")).toBe(48_000)
+		expect(s.svc.openReplay(id, "rtl433")).not.toBeNull()
+		expect(lastReplay(s).args).not.toContain("--rate")
+		expect(s.svc.counters().rateFallbacks).toBe(1)
+		await s.svc.stop()
+	})
+
+	it("a tool that advertises 96 kHz but does not echo the rate: the file is dropped, never mislabelled", async () => {
+		const s = await setup(
+			{},
+			{
+				samples: 9_600,
+				rates: [48_000, 96_000],
+				noEcho: true,
+			},
+		)
+		await running(s)
+		const got = s.svc.capture(req({ rateHz: 96_000 }))
+		await flush(10)
+		expect("captureId" in got).toBe(true)
+		expect(
+			s.svc.near("src", RF, 1_000, { observationId: null, limit: 1 }),
+		).toEqual([])
+		await s.svc.stop()
+	})
+
+	it("a request with an unsupported rate is refused invalid; a 48 kHz request sends no rate", async () => {
+		const s = await setup()
+		const run = await running(s)
+		expect(s.svc.capture(req({ rateHz: 250_000 as never }))).toEqual({
+			refused: "invalid",
+		})
+		s.svc.capture(req())
+		await flush(10)
+		expect(
+			run.commands().find(c => c["type"] === "capture"),
+		).not.toHaveProperty("rateHz")
+		await s.svc.stop()
+	})
+
+	it("replays into rtl433 with the whole-capture shape when it is given", async () => {
+		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
+		expect(rtl433).toEqual({ bandwidthHz: 16_000, transitionHz: 16_000 })
+		const s = await setup({
+			shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) },
+		})
+		await running(s)
+		const got = s.svc.capture(req())
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		const out = s.svc.openReplay(id, "rtl433")
+		expect(out).not.toBeNull()
+		expect(lastReplay(s).args).toEqual([
+			"replay",
+			"--in",
+			"/dev/fd/3",
+			"--bandwidth",
+			"16000",
+			"--transition",
+			"16000",
+		])
 		await s.svc.stop()
 	})
 

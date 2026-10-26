@@ -29,6 +29,8 @@ export type ScannerProtocol =
 	| "acars"
 	| "vdl2"
 	| "lora"
+	/** Mode S / ADS-B at 1090 MHz, named only from a running readsb (ambient evidence). */
+	| "adsb"
 export type ScannerClass =
 	| "fsk4-12k5"
 	| "fsk4-6k25"
@@ -71,6 +73,8 @@ export type IdentityKind =
 	| "acars-reg"
 	| "vdl2-addr"
 	| "lora-node"
+	/** Mode S 24-bit ICAO aircraft address, 6 lowercase hex digits. */
+	| "icao"
 export interface Identity {
 	kind: IdentityKind
 	value: string
@@ -283,6 +287,7 @@ export const SCANNER_PROOF_PROTOCOL_LABEL: Readonly<
 	acars: "ACARS",
 	vdl2: "VDL2",
 	lora: "LoRa",
+	adsb: "ADS-B",
 })
 
 /** Spec § 7.1; timestamps ISO 8601. */
@@ -851,6 +856,11 @@ export interface ScannerIqCaptureStatus {
 		swept: number
 	}
 	toolFailures: number
+	/**
+	 * Captures asked for at a rate the running tool did not acknowledge (an older tool), made at
+	 * 48 kHz instead. Absent from older cores.
+	 */
+	rateFallbacks?: number
 	lastToolFailure: {
 		exitCode: number | null
 		signal: string | null
@@ -1163,9 +1173,10 @@ export type ScannerAmbientDecoderType =
 	| "acarsdec"
 	| "dumpvdl2"
 	| "lora-meshtastic"
+	| "readsb"
 /** WG7 req 1.1: protocols identify names only from ambient evidence (no probe decoder). */
 export const SCANNER_AMBIENT_PROTOCOLS: readonly ScannerProtocol[] =
-	Object.freeze(["ais", "acars", "vdl2", "lora"])
+	Object.freeze(["ais", "acars", "vdl2", "lora", "adsb"])
 /** WG7 req 1.2: the ambient-only protocol each decoder type names. */
 export const SCANNER_AMBIENT_DECODER_PROTOCOL: Readonly<
 	Record<ScannerAmbientDecoderType, ScannerProtocol>
@@ -1174,6 +1185,7 @@ export const SCANNER_AMBIENT_DECODER_PROTOCOL: Readonly<
 	acarsdec: "acars",
 	dumpvdl2: "vdl2",
 	"lora-meshtastic": "lora",
+	readsb: "adsb",
 })
 /** WG7 req 1.3: AIS channel A and B (ITU-R M.1371 channels 87B and 88B). */
 export const SCANNER_AIS_CHANNEL_HZ: Readonly<Record<"A" | "B", number>> =
@@ -1208,6 +1220,8 @@ export type ScannerProbeDecoderType =
 	| "multimon-ng"
 	| "direwolf"
 	| "rtl433"
+	/** Replay only: ACARS from a replayed IQ capture (AM demodulated). */
+	| "acarsdec"
 /**
  * WG10 req 3.4: analog evidence for an identify target, from the live demodulator's closed
  * transmissions within the target's tolerance. Only what the transmission tracker reported.

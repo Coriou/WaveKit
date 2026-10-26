@@ -19,7 +19,8 @@
  * (`REPLAY_EXTRA_TRIALS`: rtl433 for ISM, acarsdec for ACARS, dumpvdl2 for VDL2, readsb at
  * 1090 MHz, ais-catcher for AIS, the LoRa decoder) are planned only behind a capability check: a
  * trial runs only when its decoder has a probe mode and a replay input path
- * (`REPLAY_INPUT_DECODERS`); otherwise it is reported in `skipped` and never run. (b) The
+ * (`REPLAY_INPUT_DECODERS`: rtl433 reads the 48 kHz cf32 capture with `RTL433_REPLAY_MODE`); otherwise
+ * it is reported in `skipped` and never run. (b) The
  * discovery's trial memory reorders the candidates before the dedup and the bound
  * (`orderTrialsByMemory`): remembered success, prior order, untried, failures with backoff.
  */
@@ -35,6 +36,7 @@ import {
 import { classOf, familyOf, inPagerRange } from "./classify/classifier.js"
 import { orderTrialsByMemory } from "./trial-memory.js"
 import {
+	IQ_CAPTURE_MAX_MS,
 	IQ_REPLAY_MAX_TRIALS,
 	REPLAY_INPUT_DECODERS,
 	type IqReplayPlanInput,
@@ -220,19 +222,60 @@ function extraCalled(
 	)
 }
 
+/**
+ * The rtl433 replay trial: every built-in rtl_433 protocol on the capture as captured. Its hold
+ * bounds a run that never exits: the longest capture (IQ_CAPTURE_MAX_MS, 4 s) read in real time;
+ * rtl_433 reads a 4 s 48 kHz cf32 file (1.5 MB) far faster.
+ */
+const RTL433_REPLAY_COVERS: ScannerProtocol[] = ["ism"]
+export const RTL433_REPLAY_MODE: Readonly<ProbeMode> = Object.freeze({
+	decoderType: "rtl433",
+	protocol: "ism",
+	covers: RTL433_REPLAY_COVERS,
+	options: {},
+	holdMs: IQ_CAPTURE_MAX_MS,
+})
+
+/**
+ * The ACARS replay trial: acarsdec on the capture's 25 kHz channel (AM). One CRC-clean block of
+ * the replay is its decode (`interpretAcarsReplay`). Hold: the longest capture, 4 s.
+ */
+const ACARS_REPLAY_COVERS: ScannerProtocol[] = ["acars"]
+export const ACARS_REPLAY_MODE: Readonly<ProbeMode> = Object.freeze({
+	decoderType: "acarsdec",
+	protocol: "acars",
+	covers: ACARS_REPLAY_COVERS,
+	options: {},
+	holdMs: IQ_CAPTURE_MAX_MS,
+})
+
 /** The extra trial's probe mode when the decoder has one; null otherwise. */
 function extraModeOf(
 	protocol: ScannerProtocol | "adsb",
 	decoder: string,
 ): ProbeMode | null {
 	if (protocol === "adsb" || !IDENTIFY_PROTOCOLS.includes(protocol)) return null
-	// ISM has no identify mode (identifyModeFor answers null); its probe mode is the ook-burst one.
+	// ISM has no identify mode (identifyModeFor answers null) and no pre-channelizer probe mode
+	// (ambient-only live); its replay mode is rtl433 on the capture.
 	const mode =
 		protocol === "ism"
 			? (probeModesFor("ook-burst", ["ism"]).find(
 					m => m.decoderType === decoder,
-				) ?? null)
-			: identifyModeFor(protocol)
+				) ??
+				(decoder === RTL433_REPLAY_MODE.decoderType
+					? {
+							...RTL433_REPLAY_MODE,
+							covers: [...RTL433_REPLAY_MODE.covers],
+							options: {},
+						}
+					: null))
+			: protocol === "acars" && decoder === ACARS_REPLAY_MODE.decoderType
+				? {
+						...ACARS_REPLAY_MODE,
+						covers: [...ACARS_REPLAY_MODE.covers],
+						options: {},
+					}
+				: identifyModeFor(protocol)
 	return mode && mode.decoderType === decoder ? mode : null
 }
 
@@ -293,11 +336,12 @@ export function planReplayTrialsDetailed(
 			skipped.push({ ...extra, reason: "no-replay-input" })
 			continue
 		}
-		candidates.push({
-			protocol: extra.protocol as ScannerProtocol,
-			mode,
-			known: input.knownProtocol === extra.protocol,
-		})
+		const known = input.knownProtocol === extra.protocol
+		const trial = { protocol: extra.protocol as ScannerProtocol, mode, known }
+		// The known protocol's trial leads, as a known probe-mode trial does (no other trial is
+		// known then: an extra's protocol has no probe mode of its own).
+		if (known) candidates.unshift(trial)
+		else candidates.push(trial)
 	}
 	// One decoder run per mode key (the dedup below): the memory of any protocol planned on the
 	// same run applies to every candidate of that run, so a backoff cannot be dodged by a sibling.

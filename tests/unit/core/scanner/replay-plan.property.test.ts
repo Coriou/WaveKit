@@ -61,6 +61,10 @@ const REPLAYABLE = new Set<ScannerProtocol>([
 	"pocsag",
 	"flex",
 	"aprs",
+	// the ISM replay trial (rtl433)
+	"ism",
+	// the ACARS replay trial (acarsdec)
+	"acars",
 ])
 
 function listsAm(hz: number): boolean {
@@ -209,7 +213,14 @@ describe("planReplayTrials analog order", () => {
 						}
 					}
 					const scores = scoresOf(input)
-					const digital = out.filter(t => t.kind !== "analog" && !t.known)
+					// The ISM replay trial (rtl433) is called by band, not ranked by score.
+					const digital = out.filter(
+						t =>
+							t.kind !== "analog" &&
+							!t.known &&
+							t.mode.decoderType !== "rtl433" &&
+							t.mode.decoderType !== "acarsdec",
+					)
 					for (let i = 1; i < digital.length; i++) {
 						const prev = digital[i - 1]!
 						const cur = digital[i]!
@@ -229,9 +240,12 @@ describe("planReplayTrials analog order", () => {
 						).toBe(true)
 					}
 					for (const t of out) {
-						expect(t.mode.decoderType).not.toBe("rtl433")
+						if (t.mode.decoderType === "rtl433") expect(t.protocol).toBe("ism")
+						// ACARS only as the acarsdec replay trial; the other ambient-only protocols never
+						if (t.protocol === "acars")
+							expect(t.mode.decoderType).toBe("acarsdec")
 						if (t.kind !== "analog")
-							expect(["ais", "acars", "vdl2", "lora"]).not.toContain(t.protocol)
+							expect(["ais", "vdl2", "lora"]).not.toContain(t.protocol)
 					}
 				},
 			),

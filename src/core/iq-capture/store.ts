@@ -17,7 +17,9 @@ import {
 	IQ_CAPTURE_ORPHAN_TTL_MS,
 	IQ_CAPTURE_PER_SOURCE_PER_MINUTE,
 	IQ_CAPTURE_RATE_HZ,
+	iqCaptureMaxBytes,
 	type IqCaptureDiscardReason,
+	type IqCaptureRateHz,
 	type IqCaptureRefusal,
 	type IqCaptureRequest,
 	type IqCaptureView,
@@ -26,6 +28,10 @@ import {
 const RATE_WINDOW_MS = 60_000
 /** Shortest usable capture: 100 ms at 48 kHz. A shorter file is removed as invalid, never replayed. */
 export const IQ_CAPTURE_MIN_SAMPLES = IQ_CAPTURE_RATE_HZ / 10
+/** Shortest usable capture at `rateHz`: 100 ms (4 800 samples at 48 kHz, 9 600 at 96 kHz). */
+export function minCaptureSamples(rateHz: number): number {
+	return rateHz / 10
+}
 
 export type IqCaptureState = "capturing" | "verifying" | "ready"
 
@@ -38,6 +44,8 @@ export interface IqCaptureEntry {
 	readonly rfHz: number
 	readonly tuningTrust: IqCaptureView["tuningTrust"]
 	readonly requestedAtMs: number
+	/** Output rate of the file (IQ_CAPTURE_RATES); 48 kHz unless the request named another. */
+	readonly rateHz: IqCaptureRateHz
 	state: IqCaptureState
 	/** Bytes counted against the cap (reservation while writing, actual size after). */
 	bytes: number
@@ -101,6 +109,7 @@ const DISCARDS: readonly IqCaptureDiscardReason[] = [
 ]
 
 export class IqCaptureStore {
+	/** The 48 kHz per-capture reservation (`reservationBytes(48 000)`). */
 	readonly perCaptureBytes: number
 	private readonly entries = new Map<string, IqCaptureEntry>()
 	private readonly rate = new Map<string, number[]>()
@@ -116,7 +125,18 @@ export class IqCaptureStore {
 	constructor(private readonly o: IqCaptureStoreOptions) {
 		this.perCaptureBytes = Math.min(
 			IQ_CAPTURE_MAX_BYTES,
-			Math.floor((o.maxCaptureMs * IQ_CAPTURE_RATE_HZ) / 1000) *
+			this.reservationBytes(IQ_CAPTURE_RATE_HZ),
+		)
+	}
+
+	/**
+	 * What one capture at `rateHz` reserves while it is written: maxCaptureMs × rate × 8 B, at
+	 * most the rate's file bound (iqCaptureMaxBytes). 4 s at 96 kHz: 3 072 000 B.
+	 */
+	reservationBytes(rateHz: IqCaptureRateHz): number {
+		return Math.min(
+			iqCaptureMaxBytes(rateHz),
+			Math.floor((this.o.maxCaptureMs * rateHz) / 1000) *
 				IQ_CAPTURE_BYTES_PER_SAMPLE,
 		)
 	}
@@ -193,8 +213,9 @@ export class IqCaptureStore {
 			stamps.length >= IQ_CAPTURE_PER_SOURCE_PER_MINUTE
 		)
 			return this.refuse("rate-limited")
-		if (this.heldBytes() + this.perCaptureBytes > this.o.capBytes)
-			return this.refuse("full")
+		const rateHz: IqCaptureRateHz = req.rateHz ?? IQ_CAPTURE_RATE_HZ
+		const reserve = this.reservationBytes(rateHz)
+		if (this.heldBytes() + reserve > this.o.capBytes) return this.refuse("full")
 		if (this.entries.has(captureId)) return this.refuse("invalid")
 		// Private trials are discarded after analysis; bytes and concurrency bound them.
 		if (!privateTrial && req.reason === "detection") stamps.push(now)
@@ -207,8 +228,9 @@ export class IqCaptureStore {
 			rfHz: req.rfHz,
 			tuningTrust: req.tuningTrust,
 			requestedAtMs: now,
+			rateHz,
 			state: "capturing",
-			bytes: this.perCaptureBytes,
+			bytes: reserve,
 			samples: 0,
 			gapSamples: 0,
 			finishedAtMs: null,
@@ -242,13 +264,13 @@ export class IqCaptureStore {
 			!Number.isSafeInteger(gapSamples) ||
 			samples < 0 ||
 			gapSamples < 0 ||
-			bytes > this.perCaptureBytes
+			bytes > this.reservationBytes(e.rateHz)
 		) {
 			this.countHostile()
 			this.remove(e, "invalid")
 			return false
 		}
-		if (samples < IQ_CAPTURE_MIN_SAMPLES) {
+		if (samples < minCaptureSamples(e.rateHz)) {
 			this.remove(e, "invalid")
 			return false
 		}
@@ -436,7 +458,8 @@ export function viewOf(e: IqCaptureEntry): IqCaptureView {
 		rfHz: e.rfHz,
 		tuningTrust: e.tuningTrust,
 		capturedAtMs: e.finishedAtMs ?? e.requestedAtMs,
-		durationMs: Math.round((e.samples * 1000) / IQ_CAPTURE_RATE_HZ),
+		durationMs: Math.round((e.samples * 1000) / e.rateHz),
 		gapSamples: e.gapSamples,
+		...(e.rateHz !== IQ_CAPTURE_RATE_HZ ? { rateHz: e.rateHz } : {}),
 	}
 }

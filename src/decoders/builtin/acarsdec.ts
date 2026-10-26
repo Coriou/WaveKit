@@ -66,6 +66,13 @@ export interface ACARSMessage {
 	level: number
 	/** Number of bit errors */
 	error: number
+	/** acarsdec printed `error` itself (`error` 0 is otherwise the default for a missing field). */
+	errorKnown?: boolean
+	/**
+	 * acarsdec printed a frequency that is not a finite number (`-inf` read as null, false, a
+	 * string): distinct from no frequency at all, which `frequency` leaves absent.
+	 */
+	frequencyMalformed?: boolean
 	/** ACARS mode character */
 	mode: string
 	/** Message label (2 characters) */
@@ -114,6 +121,55 @@ interface AcarsdecJsonOutput {
  * Performs AM demodulation using csdr and feeds raw S16LE audio to
  * f00b4r0/acarsdec fork via stdin.
  */
+/** Longest line the non-finite rewrite scans (an ACARS block is at most 220 characters of text). */
+export const NON_FINITE_SCAN_MAX_CHARS = 8_192
+
+/** Either frequency alias is present with something other than a finite number. */
+function frequencyMalformed(json: Record<string, unknown>): boolean {
+	return ["freq", "frequency"].some(key => {
+		if (!Object.hasOwn(json, key)) return false
+		const v = json[key]
+		return !(typeof v === "number" && Number.isFinite(v))
+	})
+}
+
+/**
+ * Diagnostic keys acarsdec may print as C's `-inf`/`inf`/`nan` (signal `level` and `noise` in dB,
+ * `-inf` for `noise` when it reads audio from a file or stdin): only these become `null`. Any other
+ * key with a non-finite value (`error`, `freq`, …) keeps the line invalid JSON, so it is rejected
+ * as before. String contents are not touched (their quotes are escaped).
+ */
+const NON_FINITE_DIAGNOSTIC =
+	/((?:^|[,{])\s*"(?:level|noise)"\s*:\s*)[-+]?(?:inf(?:inity)?|nan)(?=\s*[,}])/gi
+/**
+ * acarsdec's JSON line with a non-finite `level` or `noise` made parseable
+ * (`NON_FINITE_DIAGNOSTIC`); everything else unchanged.
+ */
+export function nonFiniteToNull(line: string): string {
+	// Bounded: a longer line is left as it is (and then fails JSON parsing, as before).
+	if (line.length > NON_FINITE_SCAN_MAX_CHARS) return line
+	return line.replace(NON_FINITE_DIAGNOSTIC, "$1null")
+}
+
+/**
+ * The ACARS demodulation: AM, a 25 kHz channel, demodulated at 24 kHz (decimation 100 from
+ * 2.4 Msps), audio at 12 kHz (acarsdec needs a multiple of 12 kHz). DC block on: it removes the
+ * carrier from the AM envelope.
+ */
+export function acarsdecDemodConfig(
+	inputSampleRate: number,
+): DemodulationConfig {
+	return {
+		modulation: "am",
+		bandwidth: 25000,
+		sampleRate: 12000,
+		demodSampleRate: 24000,
+		inputSampleRate,
+		deEmphasis: false,
+		fmGain: 1.0,
+	}
+}
+
 export class AcarsdecDecoder extends AudioDemodDecoder {
 	private options: AcarsdecOptions
 	private readonly warnOption: NumericOptionWarn
@@ -147,16 +203,14 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	 * - Sample rate must be multiple of 12kHz for acarsdec
 	 */
 	protected getDemodConfig(): DemodulationConfig {
-		return {
-			modulation: "am", // ACARS uses AM Modulation
-			bandwidth: 25000, // ~25kHz bandwidth
-			sampleRate: 12000, // acarsdec requires 12kHz multiples (using 12000)
-			demodSampleRate: 24000, // Demod at 24ksps (decimation=100 from 2.4Msps)
-			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
-			deEmphasis: false, // No de-emphasis for data
-			fmGain: 1.0, // Default gain
-			// skipDcBlock: true - removed to enable DC block (needed to remove carrier from AM envelope)
-		}
+		const config = acarsdecDemodConfig(
+			this.options.inputSampleRate ?? 2_400_000,
+		)
+		// Channel IQ (cf32) arrives at its own rate and is demodulated there: 24 kHz from the
+		// channelizer, 48 kHz from a replayed scanner capture (sox then resamples to 12 kHz).
+		if (this.inputIsChannelIq() && this.options.inputSampleRate !== undefined)
+			return { ...config, demodSampleRate: this.options.inputSampleRate }
+		return config
 	}
 
 	/**
@@ -266,7 +320,7 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 		}
 
 		try {
-			const json = JSON.parse(trimmed) as AcarsdecJsonOutput
+			const json = JSON.parse(nonFiniteToNull(trimmed)) as AcarsdecJsonOutput
 			const message = parseAcarsdecJson(json)
 
 			if (message) {
@@ -366,6 +420,10 @@ export function parseAcarsdecJson(
 		channel: json.channel ?? 0,
 		level: json.level ?? 0,
 		error: json.error ?? 0,
+		errorKnown: typeof json.error === "number",
+		frequencyMalformed: frequencyMalformed(
+			json as unknown as Record<string, unknown>,
+		),
 		mode: json.mode ?? "",
 		label: json.label ?? "",
 		blockId: json.block_id,

@@ -25,7 +25,10 @@ import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ProbeDecoderType } from "../scanner/probes/probe-pool.js"
+import { isCaptureRate, wholeCaptureShapeAt } from "./rates.js"
 import {
+	IQ_CAPTURE_RATE_HZ,
+	type IqCaptureRateHz,
 	IQ_CAPTURE_MAX_MS,
 	IQ_CAPTURE_PREROLL_MAX_MS,
 	IQ_CAPTURE_TOTAL_MAX_BYTES,
@@ -87,9 +90,21 @@ export interface IqReplayShape {
 	bandwidthHz: number
 	transitionHz: number
 }
-export type IqReplayDecoderType = Exclude<ProbeDecoderType, "rtl433">
+export type IqReplayDecoderType = Exclude<
+	ProbeDecoderType,
+	"rtl433" | "acarsdec"
+>
+/**
+ * The audio probe shapes (required; the capture bandwidth is the widest of them) and the optional
+ * rtl433 shape: rtl_433 reads the capture as it is, so its shape is the whole capture passband
+ * (`wholeCaptureShape`). Without it a capture is never replayed into rtl433.
+ */
 export type IqReplayShapes = Readonly<
-	Record<IqReplayDecoderType, IqReplayShape>
+	Record<IqReplayDecoderType, IqReplayShape> & {
+		rtl433?: IqReplayShape
+		/** The ACARS channel (25 kHz); without it no capture is replayed into acarsdec. */
+		acarsdec?: IqReplayShape
+	}
 >
 
 /** The spectrum engine surface the service uses (structural; `SpectrumEngine` satisfies it). */
@@ -150,6 +165,8 @@ export interface IqCaptureServiceCounters extends IqCaptureCounters {
 	toolRestarts: number
 	toolGiveUps: number
 	replayFailures: number
+	/** Captures asked at a rate the tool did not advertise, made at 48 kHz instead. */
+	rateFallbacks: number
 	/** The capture directory failed its re-proof (swapped, linked): capture went off. */
 	dirRefusals: number
 	sweep: SweepResult
@@ -234,6 +251,11 @@ const RING_MARGIN_S = 0.25
 const PIPE_BUFFER_BYTES = 64 * 1024
 
 interface SourceSlot {
+	/**
+	 * Start the tool with `--rate-ack`. Cleared for good when a tool refused the flag (a usage
+	 * error before ready): that tool is older and captures at 48 kHz only.
+	 */
+	rateAck: boolean
 	sourceId: string
 	sampleRateHz: number
 	centerHz: number
@@ -249,7 +271,11 @@ interface SourceSlot {
 
 /** The capture bandwidth: the widest replay passband (computed, not hardcoded). */
 export function captureBandwidthHz(shapes: IqReplayShapes): number {
-	return Math.max(...Object.values(shapes).map(s => s.bandwidthHz))
+	return Math.max(
+		shapes["dsd-fme"].bandwidthHz,
+		shapes["multimon-ng"].bandwidthHz,
+		shapes.direwolf.bandwidthHz,
+	)
 }
 
 export function createIqCaptureService(
@@ -338,6 +364,7 @@ class Service implements IqCaptureService {
 	private toolRestarts = 0
 	private toolGiveUps = 0
 	private replayFailures = 0
+	private rateFallbacks = 0
 	private sweepTotals: SweepResult = { removed: 0, left: 0, failed: 0 }
 	private warnedGiveUp = false
 	private starting: Promise<void> | null = null
@@ -542,6 +569,7 @@ class Service implements IqCaptureService {
 			failures: [],
 			restartTimer: null,
 			givenUp: false,
+			rateAck: true,
 			ids: new Set(),
 		}
 		this.slots.set(sourceId, slot)
@@ -702,6 +730,7 @@ class Service implements IqCaptureService {
 			toolRestarts: this.toolRestarts,
 			toolGiveUps: this.toolGiveUps,
 			replayFailures: this.replayFailures,
+			rateFallbacks: this.rateFallbacks,
 			dirRefusals: this.dirRefusals,
 			sweep: { ...this.sweepTotals },
 		}
@@ -881,7 +910,8 @@ class Service implements IqCaptureService {
 			(req.observationId !== null && typeof req.observationId !== "string") ||
 			(req.tuningTrust !== "commanded" &&
 				req.tuningTrust !== "relay" &&
-				req.tuningTrust !== "unverified")
+				req.tuningTrust !== "unverified") ||
+			(req.rateHz !== undefined && !isCaptureRate(req.rateHz))
 		)
 			return this.refuse("invalid")
 		const slot = this.slots.get(req.sourceId)
@@ -916,7 +946,19 @@ class Service implements IqCaptureService {
 		const fromSample = Math.max(lo, Math.min(hi, wanted))
 		const captureId = this.uuid()
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
-		const admitted = store.admit(req, captureId, slot.epoch, trial)
+		// Only a rate the running tool advertised is asked for; an older tool (or a source rate
+		// the tool cannot plan) gets an honest 48 kHz capture, recorded as such.
+		const rateHz =
+			req.rateHz !== undefined && proc.supportsRate(req.rateHz)
+				? req.rateHz
+				: IQ_CAPTURE_RATE_HZ
+		if (rateHz !== (req.rateHz ?? IQ_CAPTURE_RATE_HZ)) this.rateFallbacks++
+		const admitted = store.admit(
+			{ ...req, rateHz },
+			captureId,
+			slot.epoch,
+			trial,
+		)
 		if ("refused" in admitted) return admitted
 		// Held before the tool can answer: the queue never sees it unheld.
 		if (holder !== null) store.reserve(captureId, holder)
@@ -937,6 +979,7 @@ class Service implements IqCaptureService {
 			offsetHz,
 			fromSample,
 			maxMs,
+			...(rateHz !== IQ_CAPTURE_RATE_HZ ? { rateHz } : {}),
 		})
 		if (!sent) {
 			slot.ids.delete(captureId)
@@ -1000,6 +1043,15 @@ class Service implements IqCaptureService {
 		return n
 	}
 
+	replayRateOf(
+		captureId: string,
+		decoderType: ProbeDecoderType,
+	): IqCaptureRateHz | null {
+		const e = this.store?.get(captureId)
+		if (!e) return null
+		return decoderType === "rtl433" ? e.rateHz : IQ_CAPTURE_RATE_HZ
+	}
+
 	openReplay(
 		captureId: string,
 		decoderType: ProbeDecoderType,
@@ -1021,15 +1073,32 @@ class Service implements IqCaptureService {
 		const store = this.store
 		const cfg = this.cfg
 		if (!store || !cfg || this.st !== "on" || !this.dir) return null
-		if (decoderType === "rtl433") return null
 		const shapes = this.shapes
-		const shape =
+		const given =
 			shapes && Object.hasOwn(shapes, decoderType)
 				? shapes[decoderType]
 				: undefined
-		if (!shape) return null
+		if (!given) return null
 		const e = store.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
+		// rtl433 reads the capture at its own rate with the whole passband up to its Nyquist edge;
+		// a 48 kHz decoder of a faster capture gets it brought down to 48 kHz (`--out-rate`).
+		const native = decoderType === "rtl433" && e.rateHz !== IQ_CAPTURE_RATE_HZ
+		const shape = native
+			? wholeCaptureShapeAt(given.bandwidthHz, e.rateHz)
+			: given
+		if (!shape) return null
+		const rateArgs =
+			e.rateHz === IQ_CAPTURE_RATE_HZ
+				? []
+				: native
+					? ["--rate", String(e.rateHz)]
+					: [
+							"--rate",
+							String(e.rateHz),
+							"--out-rate",
+							String(IQ_CAPTURE_RATE_HZ),
+						]
 		const file = path.join(this.dir, `${captureId}.cf32`)
 		if (!this.dirOk()) return null
 		const verified = this.openProven(captureId, file, e.bytes)
@@ -1053,6 +1122,7 @@ class Service implements IqCaptureService {
 					String(shape.bandwidthHz),
 					"--transition",
 					String(shape.transitionHz),
+					...rateArgs,
 				],
 				{
 					env: this.o.env ?? childAccessEnvironment(process.env),
@@ -1167,7 +1237,16 @@ class Service implements IqCaptureService {
 		try {
 			child = this.spawn(
 				cfg.binaryPath,
-				["analyze", "--in", "/dev/fd/3", "--mode", mode],
+				[
+					"analyze",
+					"--in",
+					"/dev/fd/3",
+					"--mode",
+					mode,
+					...(e.rateHz !== IQ_CAPTURE_RATE_HZ
+						? ["--rate", String(e.rateHz)]
+						: []),
+				],
 				{
 					env: this.o.env ?? childAccessEnvironment(process.env),
 					detached: process.platform !== "win32",
@@ -1355,6 +1434,7 @@ class Service implements IqCaptureService {
 			anchor,
 			maxMs: Math.min(IQ_CAPTURE_MAX_MS, cfg.maxCaptureMs),
 			bandwidthHz: this.bandwidthHz,
+			rateAck: slot.rateAck,
 			spawn: this.spawn,
 			env: this.o.env ?? childAccessEnvironment(process.env),
 			timers: this.timers,
@@ -1406,7 +1486,18 @@ class Service implements IqCaptureService {
 				if (z.proc === proc) this.reap(id)
 		})
 		proc.once("exit", (failed: boolean, code: string | null) => {
-			if (failed && code !== "ENOENT" && proc.lastFailure) {
+			// Classified first: only an older tool refusing `--rate-ack` (a usage error, exit code 2,
+			// no signal, before ready) is a compatibility fallback; a crash never is. A fallback is
+			// no failure and leaves the last genuine failure in place.
+			const f = proc.lastFailure
+			const flagRefused =
+				failed &&
+				slot.rateAck &&
+				f?.phase === "exit-before-ready" &&
+				f.reason === "usage" &&
+				f.exitCode === 2 &&
+				f.signal === null
+			if (failed && code !== "ENOENT" && f && !flagRefused) {
 				this.toolFailures++
 				this.lastToolFailure = proc.lastFailure
 				this.log.debug({ ...proc.lastFailure }, "IQ capture tool failed")
@@ -1421,6 +1512,12 @@ class Service implements IqCaptureService {
 				return
 			}
 			if (!failed) return
+			// An older tool refuses `--rate-ack`: restart once without it (48 kHz only).
+			if (flagRefused) {
+				slot.rateAck = false
+				this.spawnTool(slot)
+				return
+			}
 			this.onToolFailure(slot)
 		})
 		proc.start()
@@ -1609,6 +1706,12 @@ class Service implements IqCaptureService {
 		slot.ids.delete(ev.id)
 		this.clearCaptureTimer(ev.id)
 		if (ev.type === "aborted") {
+			store.fail(ev.id)
+			return
+		}
+		// The file must be at the rate asked for: a tool that does not echo it wrote 48 kHz.
+		if ((ev.rateHz ?? IQ_CAPTURE_RATE_HZ) !== e.rateHz) {
+			store.countHostile()
 			store.fail(ev.id)
 			return
 		}

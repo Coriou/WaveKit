@@ -86,7 +86,7 @@ describe("identify planning (spec § 10.8)", () => {
 					expect(classes[0]).toBe(classOf(track))
 					const expected = IDENTIFY_PROTOCOLS.filter(
 						p =>
-							!["ais", "acars", "vdl2", "lora"].includes(p) &&
+							!["ais", "acars", "vdl2", "lora", "adsb"].includes(p) &&
 							(protocols.length > 0 ||
 								classes[0] !== "carrier" ||
 								p === "analog-fm") &&

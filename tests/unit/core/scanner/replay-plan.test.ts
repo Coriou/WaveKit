@@ -118,8 +118,9 @@ describe("planReplayTrials", () => {
 		expect(withTrack.some(t => t.known)).toBe(false)
 	})
 
-	it("no track, no known: analog trial when its prior is above 0, then modes by prior; never ambient or rtl433", () => {
-		// Spec 5.6: analog-fm prior 3 is a replay analog trial. Ambient and rtl433 stay out.
+	it("no track, no known: analog trial when its prior is above 0, then modes by prior; ambient never, rtl433 only as the ISM replay trial", () => {
+		// Spec 5.6: analog-fm prior 3 is a replay analog trial. Ambient stays out; the listed ISM
+		// band calls rtl433, which reads the capture itself (not as a probe mode by prior).
 		const out = planReplayTrials(
 			input({
 				track: null,
@@ -134,15 +135,23 @@ describe("planReplayTrials", () => {
 				},
 			}),
 		)
-		expect(out.map(t => t.protocol)).toEqual(["analog-fm", "dmr", "flex"])
+		expect(out.map(t => t.protocol)).toEqual([
+			"analog-fm",
+			"dmr",
+			"flex",
+			"ism",
+		])
 		expect(out[0]).toMatchObject({
 			kind: "analog",
 			analogMode: "nfm",
 			known: false,
 		})
-		expect(out.map(t => t.mode.decoderType)).not.toContain("rtl433")
+		expect(out[3]).toMatchObject({
+			protocol: "ism",
+			mode: { decoderType: "rtl433" },
+			known: false,
+		})
 		expect(out.map(t => t.protocol)).not.toContain("ais")
-		expect(out.map(t => t.protocol)).not.toContain("ism")
 	})
 
 	it("an unknown known protocol is no trial", () => {
@@ -387,7 +396,7 @@ describe("planReplayTrials", () => {
 
 	// Feature: web-gaps-11, Property 14: Known first, decays safely (replay planner side)
 	// Validates: Requirements 1.7, 6.4
-	it("property: at most 8, known first when replayable, unique modes, never rtl433 or ambient; analog only as the one replay trial", () => {
+	it("property: at most 8, known first when replayable, unique modes, rtl433 only for ISM, never ambient; analog only as the one replay trial", () => {
 		fc.assert(
 			fc.property(
 				fc.record({
@@ -432,7 +441,11 @@ describe("planReplayTrials", () => {
 					)
 					const pagerFirst = inPagerRange(c.priors) && pagerTrials.length > 0
 					for (const t of out) {
-						expect(t.mode.decoderType).not.toBe("rtl433")
+						// rtl433 runs only as the ISM replay trial, and only when ISM is called.
+						if (t.mode.decoderType === "rtl433") {
+							expect(t.protocol).toBe("ism")
+							expect(c.priors["ism"]).not.toBe(0)
+						}
 						if (t.kind === "analog") {
 							expect(["analog-fm", "analog-am"]).toContain(t.protocol)
 							if (knownAnalog) {
@@ -457,7 +470,6 @@ describe("planReplayTrials", () => {
 								"analog-fm",
 								"analog-am",
 								"ais",
-								"acars",
 								"vdl2",
 								"lora",
 							]).not.toContain(t.protocol)
@@ -496,6 +508,10 @@ describe("planReplayTrials", () => {
 							"pocsag",
 							"flex",
 							"aprs",
+							// the ISM replay trial (rtl433)
+							"ism",
+							// the ACARS replay trial (acarsdec)
+							"acars",
 						].includes(c.known)
 					const knownPlanned =
 						replayable || (knownAnalog && !(knownAnalog && pagerFirst))
@@ -504,7 +520,12 @@ describe("planReplayTrials", () => {
 					expect(out.filter(t => t.known).length).toBe(knownPlanned ? 1 : 0)
 					if (!c.hasTrack && c.known !== null)
 						expect(out.length).toBe(
-							(replayable ? 1 : 0) + (analogWanted ? 1 : 0),
+							(replayable ? 1 : 0) +
+								(analogWanted ? 1 : 0) +
+								// a listed ISM band calls the rtl433 replay trial too
+								(c.known !== "ism" && (c.priors["ism"] ?? 0) >= 1 ? 1 : 0) +
+								// and a listed ACARS channel the acarsdec one
+								(c.known !== "acars" && (c.priors["acars"] ?? 0) >= 1 ? 1 : 0),
 						)
 				},
 			),

@@ -2,7 +2,7 @@
 //! process wrapper feeds it stdin chunks and parsed control lines in arrival order.
 
 use super::command::{self, Command, RawLine, Reject};
-use super::dsp::{output_equivalent, CaptureDsp, ChainDesign, CAPTURE_RATE_HZ};
+use super::dsp::{max_file_bytes, output_equivalent_at, CaptureDsp, ChainDesign, CAPTURE_RATES};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 /// Open captures at once (contract `IQ_CAPTURE_MAX_CONCURRENT`).
 pub const MAX_OPEN: usize = 2;
-/// Hard per-file bound (contract `IQ_CAPTURE_MAX_BYTES`): 4 000 ms × 48 samples × 8 B.
+/// Hard per-file bound of a 48 kHz capture (contract `IQ_CAPTURE_MAX_BYTES`): 4 000 ms × 48
+/// samples × 8 B. A capture at another rate is bounded by `max_file_bytes(rate)`, at most
+/// 6 144 000 B at 192 kHz.
 pub const MAX_FILE_BYTES: u64 = 1_536_000;
 pub const MAX_RING_MS: u64 = 2_000;
 pub const MIN_MAX_MS: u64 = 500;
@@ -30,6 +32,9 @@ pub struct Config {
     pub anchor: PathBuf,
     pub max_ms: u64,
     pub bandwidth_hz: f64,
+    /// `--rate-ack`: `captured` events echo the capture's rate (`rateHz`). Off: the legacy event,
+    /// byte for byte (an older bridge parses events strictly).
+    pub rate_ack: bool,
 }
 
 /// Full-rate CU8 ring of whole samples; `oldest()` is the first tool sample still held.
@@ -164,6 +169,8 @@ struct Capture {
     chain: DirChain,
     file_id: FsId,
     offset_hz: f64,
+    /// Index of this capture's output-rate design in `Engine::designs`.
+    design: usize,
     dsp: CaptureDsp,
     file: Option<BufWriter<File>>,
     tmp: PathBuf,
@@ -249,7 +256,8 @@ impl Capture {
 
 pub struct Engine {
     cfg: Config,
-    design: ChainDesign,
+    /// One design per output rate the source rate supports (`CAPTURE_RATES` order; 48 kHz first).
+    designs: Vec<ChainDesign>,
     ring: Ring,
     count: u64,
     carry: Option<u8>,
@@ -279,9 +287,19 @@ impl Engine {
         Self::with_design(cfg, design)
     }
 
+    /// The output rates this engine can capture at (48 kHz first).
+    pub fn rates(&self) -> Vec<u64> {
+        self.designs.iter().map(|d| d.out).collect()
+    }
+
+    /// The design of output rate `rate`, if the source rate supports it.
+    fn design_of(&self, rate: u64) -> Option<usize> {
+        self.designs.iter().position(|d| d.out == rate)
+    }
+
     /// As [`Engine::new`] with prototypes already designed for this rate and bandwidth.
     pub fn with_design(cfg: Config, design: ChainDesign) -> Result<Self, String> {
-        if design.fs != cfg.sample_rate {
+        if design.fs != cfg.sample_rate || design.out != CAPTURE_RATES[0] {
             return Err("design rate mismatch".into());
         }
         if !(1..=MAX_RING_MS).contains(&cfg.ring_ms) {
@@ -298,9 +316,17 @@ impl Engine {
         }
         let chain = record_chain(&cfg.anchor, &cfg.out_dir)?;
         let ring_samples = (cfg.sample_rate * cfg.ring_ms).div_ceil(1000) as usize;
+        // The higher rates are designed once here (a rate the source cannot reach is left out:
+        // a capture asking for it is refused `out-of-range`).
+        let mut designs = vec![design];
+        for &out in &CAPTURE_RATES[1..] {
+            if let Ok(d) = ChainDesign::with_output(cfg.sample_rate, out, cfg.bandwidth_hz) {
+                designs.push(d);
+            }
+        }
         Ok(Engine {
             ring: Ring::new(ring_samples),
-            design,
+            designs,
             cfg,
             count: 0,
             carry: None,
@@ -374,9 +400,16 @@ impl Engine {
 
     fn finish(&mut self, mut c: Capture, events: &mut Vec<Value>) {
         match c.finalize() {
-            Ok(()) => events.push(json!({
-                "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out
-            })),
+            Ok(()) => events.push(if self.cfg.rate_ack {
+                json!({
+                    "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out,
+                    "rateHz": self.designs[c.design].out
+                })
+            } else {
+                json!({
+                    "type": "captured", "id": c.id, "samples": c.out_samples, "gapSamples": c.gap_out
+                })
+            }),
             Err(_) => {
                 c.discard();
                 events.push(json!({"type": "aborted", "id": c.id, "reason": "io"}));
@@ -420,8 +453,9 @@ impl Engine {
                 offset_hz,
                 from_sample,
                 max_ms,
+                rate_hz,
             } => {
-                if let Err(code) = self.open(&id, offset_hz, from_sample, max_ms, events) {
+                if let Err(code) = self.open(&id, offset_hz, from_sample, max_ms, rate_hz, events) {
                     events.push(error_event(code, Some(&id)));
                 }
             }
@@ -440,9 +474,10 @@ impl Engine {
                     let n = samples.min(c.budget_in);
                     c.budget_in -= n;
                     let room = c.max_out.saturating_sub(c.out_samples + c.gap_out);
-                    c.gap_out += output_equivalent(fs, n).min(room);
+                    let design = &self.designs[c.design];
+                    c.gap_out += output_equivalent_at(fs, design.out, n).min(room);
                     // Continuity is broken: restart the filters rather than bridge the hole.
-                    c.dsp = CaptureDsp::new(&self.design, c.offset_hz);
+                    c.dsp = CaptureDsp::new(design, c.offset_hz);
                     k = self.settle(k, Ok(()), events);
                 }
                 self.ring.clear();
@@ -469,8 +504,10 @@ impl Engine {
         offset_hz: f64,
         from_sample: u64,
         max_ms: u64,
+        rate_hz: u64,
         events: &mut Vec<Value>,
     ) -> Result<(), &'static str> {
+        let design = self.design_of(rate_hz).ok_or("out-of-range")?;
         if self.caps.iter().any(|c| c.id == id) || self.used.contains(id) {
             return Err("duplicate-id");
         }
@@ -519,13 +556,14 @@ impl Engine {
         if self.used.len() < MAX_REMEMBERED_IDS {
             self.used.insert(id.to_owned());
         }
-        let max_out = (max_ms * CAPTURE_RATE_HZ / 1000).min(MAX_FILE_BYTES / 8);
+        let max_out = (max_ms * rate_hz / 1000).min(max_file_bytes(rate_hz) / 8);
         let mut c = Capture {
             id: id.to_owned(),
             chain: self.chain.clone(),
             file_id,
             offset_hz,
-            dsp: CaptureDsp::new(&self.design, offset_hz),
+            design,
+            dsp: CaptureDsp::new(&self.designs[design], offset_hz),
             file: Some(BufWriter::with_capacity(64 * 1024, file)),
             tmp,
             done,

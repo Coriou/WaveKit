@@ -44,6 +44,7 @@ import {
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
 import { parseMeshtastic } from "./confirm/meshtastic.js"
+import { parseReadsb } from "./confirm/readsb.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import {
 	channelPassbandOf,
@@ -168,7 +169,16 @@ interface AmbientState {
 	capcodes: CapcodeWindows | null
 	/** Where the decode being interpreted lies; set only while it is interpreted. */
 	pairCtx: AmbientPairContext | null
+	/** ADS-B: the last raw frame per address (an exact repeat is not a second message). */
+	frames?: Map<string, string>
 }
+
+/**
+ * Addresses whose last raw frame one readsb state remembers: the DoubleMatch accepted-value
+ * bound (4 096), far above the few hundred aircraft one receiver hears. Least recent go first;
+ * each entry is a 6-digit address and a frame of at most 28 hex digits (under 100 B).
+ */
+export const ADSB_FRAMES_MAX = 4096
 
 type AmbientParser = (
 	out: DecoderOutputLike,
@@ -184,6 +194,7 @@ const NEW_INTERPRETERS: ReadonlyMap<string, AmbientParser> = new Map<
 	["acarsdec", parseAcars],
 	["dumpvdl2", parseVdl2],
 	["lora-meshtastic", parseMeshtastic],
+	["readsb", parseReadsb],
 ])
 
 const AMBIENT_TYPES = new Set([
@@ -480,16 +491,33 @@ export class AmbientEvidence extends EventEmitter {
 				capcodes: null,
 				pairCtx: null,
 			}
+			// ADS-B pairs by message in the decoder's own bounded memory (no shared 2 s separation:
+			// readsb hears one aircraft many times a second, so two clean messages of one address
+			// are the confirmation). Every other type shares the discovery's pairing.
+			const adsb = parsed.protocol === "adsb"
 			fresh.interp = createInterpreterState({
 				epoch,
 				origin: "ambient",
 				decoderId,
-				...this.pairing(fresh),
+				...(adsb ? {} : this.pairing(fresh)),
 			})
+			if (adsb) fresh.frames = new Map()
 			entry = fresh
 			this.states.set(decoderId, entry)
 		}
 		if (entry.interp === null) return
+		const frames = entry.frames
+		const address = parsed.identity.value
+		if (frames && parsed.frame !== undefined && address !== undefined) {
+			if (frames.get(address) === parsed.frame) return
+			frames.delete(address)
+			frames.set(address, parsed.frame)
+			while (frames.size > ADSB_FRAMES_MAX) {
+				const oldest = frames.keys().next()
+				if (oldest.done === true) break
+				frames.delete(oldest.value)
+			}
+		}
 		const at = parsed.timestamp.getTime()
 		let decodes: ReturnType<typeof acceptAmbient>
 		entry.pairCtx = {
@@ -504,6 +532,9 @@ export class AmbientEvidence extends EventEmitter {
 			entry.pairCtx = null
 		}
 		for (const decode of decodes) {
+			// readsb hears every aircraft in range continuously: an unpaired Mode S message is no
+			// evidence (no observation, discovery or activity from it); only an accepted ICAO is.
+			if (parsed.protocol === "adsb" && !decode.identity) continue
 			const { hz, ...ev } = decode
 			const event: AmbientEvidenceEvent = {
 				decoderId,

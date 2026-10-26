@@ -27,8 +27,35 @@ export const IQ_CAPTURE_MAX_MS = 4_000
 /** 4 s × 48 000 samples/s × 8 B = 1 536 000 B per capture file. */
 export const IQ_CAPTURE_MAX_BYTES =
 	(IQ_CAPTURE_MAX_MS / 1000) * IQ_CAPTURE_RATE_HZ * IQ_CAPTURE_BYTES_PER_SAMPLE
-/** 256 MiB in total (174 full captures). */
+/** 256 MiB in total (174 full 48 kHz captures, 87 at 96 kHz, 43 at 192 kHz). */
 export const IQ_CAPTURE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
+/**
+ * Output rates a capture may have (`wavekit-iqcap` `CAPTURE_RATES`): 48 kHz × 2^k, so the native
+ * decimation keeps a small rational stage at every common source rate; 250 kHz is not offered
+ * (its ratio to 1.024 and 2.048 Msps needs an interpolation factor of 125). The passband is the
+ * same at every rate (the capture bandwidth); a higher rate keeps short pulses.
+ */
+export const IQ_CAPTURE_RATES = [48_000, 96_000, 192_000] as const
+export type IqCaptureRateHz = (typeof IQ_CAPTURE_RATES)[number]
+/**
+ * One capture file's bound at `rateHz`: 4 s × rate × 8 B. 48 kHz: 1 536 000 B; 96 kHz:
+ * 3 072 000 B; 192 kHz: 6 144 000 B. A rate outside IQ_CAPTURE_RATES has no bound (0).
+ */
+export function iqCaptureMaxBytes(rateHz: number): number {
+	return (IQ_CAPTURE_RATES as readonly number[]).includes(rateHz)
+		? (IQ_CAPTURE_MAX_MS / 1000) * rateHz * IQ_CAPTURE_BYTES_PER_SAMPLE
+		: 0
+}
+/**
+ * The capture rate a protocol needs; absent = 48 kHz. ISM: rtl_433 decodes short-pulse OOK
+ * sensors (229 µs pulses, measured) at 96 kHz but not at 48 kHz, where its envelope detector
+ * merges them; 96 kHz decodes them as 192 kHz does. Disk: a full 96 kHz capture is 3 072 000 B,
+ * so 6 captures per source per minute are at most 18.4 MB per minute (9.2 MB at 48 kHz), within
+ * the unchanged 256 MiB total (the store refuses "full" past it).
+ */
+export const IQ_CAPTURE_RATE_BY_PROTOCOL: Readonly<
+	Partial<Record<ScannerProtocol, IqCaptureRateHz>>
+> = Object.freeze({ ism: 96_000 })
 /**
  * A capture is discarded as soon as its result exists; one that never got a result (backlog,
  * decoders unavailable) is discarded this long after it finished (10 minutes).
@@ -56,15 +83,21 @@ export const IDENTIFY_REPLAY_MAX_CAPTURES = 2
 /** Replay trials per capture at most (known protocol first). */
 export const IQ_REPLAY_MAX_TRIALS = 8
 /**
- * the probe decoder types that have a replay input path (the capture service filters a
- * capture to their probe channel shape and the decoder reads cf32 at 48 kHz). `rtl433` has none:
- * the capture service refuses it and the rtl_433 adapter reads cu8 only. The replay planner and
- * the replay transport skip any decoder not listed here.
+ * The probe decoder types that have a replay input path. dsd-fme, multimon-ng and direwolf: the
+ * capture service filters a capture to their probe channel shape and the decoder FM-demodulates
+ * the cf32 at 48 kHz. rtl433: rtl_433 reads the 48 kHz cf32 capture as captured (`-r cf32:-`);
+ * OOK sensors (pulses of hundreds of µs, a few kHz wide) decode at 48 kHz as at 250 kHz, FSK
+ * sensors deviating past ±23.7 kHz do not fit the capture and stay live-only. Capture size is
+ * unchanged: 4 s × 48 000 samples/s × 8 B = 1 536 000 B. acarsdec: the capture filtered to its
+ * 25 kHz ACARS channel, AM-demodulated at 48 kHz and resampled to 12 kHz audio (replay only). The
+ * replay planner and the replay transport skip any decoder not listed here.
  */
 export const REPLAY_INPUT_DECODERS: ReadonlySet<string> = new Set([
 	"dsd-fme",
 	"multimon-ng",
 	"direwolf",
+	"rtl433",
+	"acarsdec",
 ])
 
 /** A finished capture as identify and the replay transport see it. */
@@ -82,6 +115,8 @@ export interface IqCaptureView {
 	durationMs: number
 	/** Samples missing inside the capture (reported by the tool; never filled). */
 	gapSamples: number
+	/** The capture's output rate; absent = 48 kHz (IQ_CAPTURE_RATE_HZ). */
+	rateHz?: IqCaptureRateHz
 }
 
 export interface IqCaptureRequest {
@@ -93,6 +128,8 @@ export interface IqCaptureRequest {
 	/** Engine sample of the track start; the capture starts at most the configured pre-roll earlier. */
 	fromSample: number
 	reason: "detection" | "identify"
+	/** Output rate (one of IQ_CAPTURE_RATES); absent = 48 kHz. */
+	rateHz?: IqCaptureRateHz
 }
 
 /** Why a capture request was not accepted (counted; never logged with ids or frequencies). */
@@ -145,6 +182,15 @@ export interface IqCapturePort {
 	 * (cf32 at the shape's rate), or null when the capture is gone, unverified or `rtl433`.
 	 */
 	openReplay(captureId: string, decoderType: ProbeDecoderType): Readable | null
+	/**
+	 * The rate `openReplay` delivers to `decoderType`: the capture's own rate for rtl433, 48 kHz
+	 * for the 48 kHz decoders (a faster capture is brought down to 48 kHz); null when the capture
+	 * is gone. Absent on an older port: 48 kHz.
+	 */
+	replayRateOf?(
+		captureId: string,
+		decoderType: ProbeDecoderType,
+	): IqCaptureRateHz | null
 	/**
 	 * WG12: spawn `wavekit-iqcap analyze` for one capture. Stdout is s16le 8 kHz audio;
 	 * `event` is the single JSON line from fd 4. Null when the capture is gone. Absent

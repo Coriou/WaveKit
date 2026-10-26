@@ -143,6 +143,7 @@ const PROTOCOL_DECODER: Readonly<Record<ScannerProtocol, DecoderType | null>> =
 		acars: null,
 		vdl2: null,
 		lora: null,
+		adsb: null,
 	}
 
 const PROTOCOL_CLASS: Readonly<Record<ScannerProtocol, ScannerClass | null>> = {
@@ -167,6 +168,7 @@ const PROTOCOL_CLASS: Readonly<Record<ScannerProtocol, ScannerClass | null>> = {
 	acars: null,
 	vdl2: null,
 	lora: null,
+	adsb: null,
 }
 
 const PROTOCOL_FAMILY: Readonly<Record<ScannerProtocol, ProtocolFamily>> = {
@@ -191,6 +193,7 @@ const PROTOCOL_FAMILY: Readonly<Record<ScannerProtocol, ProtocolFamily>> = {
 	acars: "packet",
 	vdl2: "packet",
 	lora: "packet",
+	adsb: "packet",
 }
 
 const ALL_PROTOCOLS = Object.keys(PROTOCOL_DECODER) as ScannerProtocol[]

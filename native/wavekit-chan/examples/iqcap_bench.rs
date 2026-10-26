@@ -12,7 +12,7 @@ const IDS: [&str; 2] = [
     "7c9e6679-7425-40de-944b-e07fc1f90ae7",
 ];
 
-fn bench(fs: u64, captures: usize, bw: f64) -> f64 {
+fn bench(fs: u64, captures: usize, bw: f64, rate: u64) -> f64 {
     let dir =
         std::env::temp_dir().join(format!("wkiq-bench-{}-{fs}-{captures}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -24,6 +24,7 @@ fn bench(fs: u64, captures: usize, bw: f64) -> f64 {
         anchor: dir.clone(),
         max_ms: 4000,
         bandwidth_hz: bw,
+        rate_ack: false,
     })
     .unwrap();
     let chunk: Vec<u8> = (0..65_536).map(|k| (k * 31 % 251) as u8).collect();
@@ -43,6 +44,7 @@ fn bench(fs: u64, captures: usize, bw: f64) -> f64 {
                 offset_hz: 300_000.0,
                 from_sample: e.count(),
                 max_ms: 4000,
+                rate_hz: rate,
             },
             &mut ev,
         );
@@ -301,10 +303,18 @@ fn main() {
         return;
     }
     for fs in [2_048_000u64, 2_400_000] {
-        for (caps, bw) in [(0usize, 25_000.0), (2, 25_000.0), (2, 47_424.0)] {
-            let ns = (0..3).map(|_| bench(fs, caps, bw)).fold(f64::MAX, f64::min);
+        for (caps, bw, rate) in [
+            (0usize, 25_000.0, 48_000u64),
+            (2, 25_000.0, 48_000),
+            (2, 47_424.0, 48_000),
+            (2, 47_424.0, 96_000),
+            (2, 47_424.0, 192_000),
+        ] {
+            let ns = (0..3)
+                .map(|_| bench(fs, caps, bw, rate))
+                .fold(f64::MAX, f64::min);
             println!(
-                "fs {:.3} Msps, {caps} captures, bw {bw}: {ns:.2} ns/input sample, {:.4} cores",
+                "fs {:.3} Msps, {caps} captures at {rate} Hz, bw {bw}: {ns:.2} ns/input sample, {:.4} cores",
                 fs as f64 / 1e6,
                 ns * fs as f64 / 1e9
             );
@@ -314,6 +324,21 @@ fn main() {
     let x: Vec<f32> = (0..n * 2)
         .map(|k| ((k as f32) * 0.37).sin() * 0.5)
         .collect();
+    // rtl433 at 96 kHz: the whole passband to its Nyquist edge (4 s = 384 000 samples)
+    let x96: Vec<f32> = (0..384_000 * 2)
+        .map(|k| ((k as f32) * 0.37).sin() * 0.5)
+        .collect();
+    let t = Instant::now();
+    let y = wavekit_chan::iqcap::dsp::replay_filter_at(&x96, 47_424.0, 24_288.0, 96_000);
+    let s = t.elapsed().as_secs_f64();
+    assert_eq!(y.len(), x96.len());
+    println!("replay 96k bw 47424 tr 24288: {:.1} ms for 4 s", s * 1e3);
+    // a 48 kHz decoder of a 96 kHz capture (multimon shape, then every 2nd sample)
+    let t = Instant::now();
+    let y = wavekit_chan::iqcap::dsp::to_capture_rate(&x96, 96_000, 16_000.0, 576.0);
+    let s = t.elapsed().as_secs_f64();
+    assert_eq!(y.len(), x96.len() / 2);
+    println!("replay 96k->48k bw 16000 tr 576: {:.1} ms for 4 s", s * 1e3);
     for (bw, tr) in [
         (12_500.0, 576.0),
         (25_000.0, 2_000.0),

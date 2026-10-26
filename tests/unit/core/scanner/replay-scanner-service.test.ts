@@ -28,6 +28,7 @@ import {
 	type IqReplayQueuePort,
 } from "../../../../src/core/iq-capture/replay-queue.js"
 import { flush, spyLogger } from "../iq-capture/helpers.js"
+import { wholeCaptureShape } from "../../../../src/core/iq-capture/shapes.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { TrialMemory } from "../../../../src/core/scanner/trial-memory.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
@@ -206,7 +207,47 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 				bandwidthHz: PROBE_CHANNEL_REQUESTS.direwolf.bandwidthHz,
 				transitionHz: PROBE_CHANNEL_REQUESTS.direwolf.transitionHz,
 			},
+			acarsdec: {
+				bandwidthHz: PROBE_CHANNEL_REQUESTS.acarsdec.bandwidthHz,
+				transitionHz: PROBE_CHANNEL_REQUESTS.acarsdec.transitionHz,
+			},
+			// rtl_433 reads the whole capture passband (the widest probe passband) up to 24 kHz.
+			rtl433: wholeCaptureShape(
+				Math.max(
+					PROBE_CHANNEL_REQUESTS["dsd-fme"].bandwidthHz,
+					PROBE_CHANNEL_REQUESTS["multimon-ng"].bandwidthHz,
+					PROBE_CHANNEL_REQUESTS.direwolf.bandwidthHz,
+				),
+			),
 		})
+	})
+
+	it("status reports the capture rate fallbacks next to the tool counters", async () => {
+		const { h, port, internals } = setup()
+		const counters = {
+			toolFailures: 1,
+			lastToolFailure: null,
+			rateFallbacks: 2,
+		}
+		internals.deps = {
+			...internals.deps,
+			iqCapture: { ...port, counters: () => counters } as never,
+		}
+		await h.service.start()
+		try {
+			expect(h.service.status().iqCapture).toMatchObject({
+				toolFailures: 1,
+				rateFallbacks: 2,
+			})
+			const { rateFallbacks: _omit, ...older } = counters
+			internals.deps = {
+				...internals.deps,
+				iqCapture: { ...port, counters: () => older } as never,
+			}
+			expect(h.service.status().iqCapture).not.toHaveProperty("rateFallbacks")
+		} finally {
+			await h.service.stop()
+		}
 	})
 
 	it("requests one detection capture for a surfaced, unconfirmed track in the usable span", async () => {
@@ -228,6 +269,8 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 				tuningTrust: "commanded",
 				fromSample: track.startSample,
 				reason: "detection",
+				// no protocol here needs more than 48 kHz
+				rateHz: 48_000,
 			})
 			internals.endIqCapture(l)
 			expect(port.end).toHaveBeenCalledWith("cap-1")

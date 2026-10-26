@@ -119,6 +119,33 @@ export interface AircraftData {
 	lastSeen: Date
 	/** Number of messages received */
 	messageCount: number
+	/**
+	 * Beast frames only: the Mode S downlink format, whether `icao` is a CRC-proven ICAO address,
+	 * and the raw frame (lowercase hex). Only DF11, DF17 and DF18 carry the address in clear with
+	 * a CRC-24 parity that must leave remainder 0; every other format XORs the address into its
+	 * parity, so its bytes 1-3 are not an address. A DF18 is an ICAO address only with control
+	 * field CF = 0 (CF 1 is a non-ICAO address, 2 and above TIS-B/ADS-R relays and other
+	 * addressing). Absent on SBS and JSON lines (readsb emits those from CRC-checked messages).
+	 */
+	modeS?: { df: number; crcOk: boolean; frame: string } | undefined
+}
+
+/** Mode S CRC-24 generator (ICAO Annex 10 Vol IV, 3.1.2.3.3): x^24 + … , 0xFFF409. */
+const MODES_CRC_POLY = 0xfff409
+
+/** CRC-24 remainder of a whole Mode S frame (data and parity): 0 when the parity matches. */
+export function modeSCrcRemainder(frame: Uint8Array): number {
+	let crc = 0
+	for (const byte of frame) {
+		crc ^= byte << 16
+		for (let bit = 0; bit < 8; bit++) {
+			crc =
+				crc & 0x800000
+					? ((crc << 1) ^ MODES_CRC_POLY) & 0xffffff
+					: (crc << 1) & 0xffffff
+		}
+	}
+	return crc
 }
 
 /** Default ports for each output format */
@@ -720,11 +747,25 @@ export function parseBeastMessage(
 
 	// The ICAO address is in bytes 1-3 (after the DF byte)
 	const icao = message.subarray(1, 4).toString("hex").toUpperCase()
+	const df = (message[0] ?? 0) >> 3
+	const lengthOk =
+		(msgType === 0x32 && message.length === 7) ||
+		(msgType === 0x33 && message.length === 14)
+	// DF11 (short), DF17/DF18 (long) carry AA in clear: the address is proven only by a zero
+	// remainder (a DF11 with a non-zero interrogator code is not proven either).
+	// DF18 carries an ICAO address only with CF (the first byte's low 3 bits) = 0.
+	const cf = (message[0] ?? 0) & 0x07
+	const clearAddress =
+		(df === 11 && msgType === 0x32) ||
+		(df === 17 && msgType === 0x33) ||
+		(df === 18 && cf === 0 && msgType === 0x33)
+	const crcOk = lengthOk && clearAddress && modeSCrcRemainder(message) === 0
 
 	return {
 		icao,
 		lastSeen: new Date(),
 		messageCount: 1,
+		modeS: { df, crcOk, frame: message.toString("hex") },
 	}
 }
 

@@ -35,6 +35,7 @@ const PROTOCOL_NAMES: Readonly<Record<ScannerProtocol, string>> = {
 	ais: "AIS",
 	acars: "ACARS",
 	vdl2: "VDL2",
+	adsb: "ADS-B",
 	"digital-unknown": "Digital",
 	carrier: "Carrier",
 	unknown: "Unknown",
@@ -134,6 +135,7 @@ const IDENTITY_PREFIX: Readonly<Record<IdentityKind, string>> = {
 	"acars-reg": "",
 	"vdl2-addr": "Address",
 	"lora-node": "Node",
+	icao: "ICAO",
 }
 
 /** "CC 1", "NAC 293", "Capcode 1234567", "MMSI 235…"; callsigns, registrations and models as they are. */

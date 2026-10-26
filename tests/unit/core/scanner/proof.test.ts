@@ -363,6 +363,7 @@ describe("proofSummary", () => {
 			"acars-reg": "acars",
 			"vdl2-addr": "vdl2",
 			"lora-node": "lora",
+			icao: "adsb",
 		}
 		for (const [identity, summary] of cases) {
 			expect(

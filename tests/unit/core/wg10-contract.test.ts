@@ -117,7 +117,8 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 		expect(
 			same<
 				Api.ScannerProbeDecoderType,
-				"dsd-fme" | "multimon-ng" | "direwolf" | "rtl433"
+				// acarsdec joined later as a replay-only probe decoder
+				"dsd-fme" | "multimon-ng" | "direwolf" | "rtl433" | "acarsdec"
 			>(true),
 		).toBe(true)
 	})

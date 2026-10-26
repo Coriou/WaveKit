@@ -64,6 +64,7 @@ describe("descriptive channelizer cost fit", () => {
 				"multimon-ng": 0.03,
 				direwolf: 0.05,
 				rtl433: 0.1,
+				acarsdec: 0.05,
 			},
 		})
 		for (const type of [

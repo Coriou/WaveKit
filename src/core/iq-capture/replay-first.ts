@@ -62,6 +62,7 @@ const PROTOCOLS: Record<ScannerProtocol, true> = {
 	acars: true,
 	vdl2: true,
 	lora: true,
+	adsb: true,
 }
 
 const TRIAL_OUTCOMES: Record<ScannerTrialOutcome, true> = {
@@ -85,6 +86,7 @@ const PROBE_DECODERS: Record<ScannerProbeDecoderType, true> = {
 	"multimon-ng": true,
 	direwolf: true,
 	rtl433: true,
+	acarsdec: true,
 }
 
 const ANALOG_MODES: Record<AnalogTrialMode, true> = {

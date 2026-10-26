@@ -13,6 +13,7 @@
 import {
 	IqDecimateDecoder,
 	iqDecimationRates,
+	readChannelHz,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
@@ -61,6 +62,11 @@ export interface Rtl433Options {
 	extraArgs?: string[] | undefined
 	/** RF centre of the IQ on stdin (capture or channel centre), injected by the manager */
 	inputCenterFreq?: number | undefined
+	/**
+	 * `"cf32"`: stdin is complex float32 IQ already centred and at `inputSampleRate` (a replayed
+	 * scanner capture); rtl_433 reads it directly with no decimation stage. Anything else: CU8.
+	 */
+	inputIqFormat?: "cf32" | "cu8" | undefined
 }
 
 /**
@@ -140,6 +146,9 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 	 * Calculates the effective target sample rate after integer decimation.
 	 */
 	private calculateEffectiveTargetRate(): number {
+		// A cf32 replay is read at its own rate: nothing decimates it.
+		if (this.options.inputIqFormat === "cf32")
+			return this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
 		// Same helper as the pipeline and getRateAdapter(): integer decimation.
 		return iqDecimationRates(this.boundedIqDecimationConfig()).outputRate
 	}
@@ -226,7 +235,31 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 			// Injected by the manager, never clamped: a wrong centre would make
 			// rtl_433's freq wrong, so an out-of-bounds one is left out.
 			inputCenterFreq: centreOption(options["inputCenterFreq"]),
+			inputIqFormat: options["inputIqFormat"] === "cf32" ? "cf32" : "cu8",
 		}
+	}
+
+	/**
+	 * A cf32 replay (scanner IQ capture) is centred, filtered and at its final rate already:
+	 * rtl_433 reads stdin directly. Otherwise the csdr decimation pipeline of the base class.
+	 */
+	protected override buildPipelineCommand(): string {
+		if (this.options.inputIqFormat === "cf32")
+			return this.buildDirectDecoderCommand()
+		return super.buildPipelineCommand()
+	}
+
+	protected override getDecoderInputFormat(): string {
+		return this.options.inputIqFormat === "cf32" ? "cf32" : "cu8"
+	}
+
+	/** RF centre of stdin: a cf32 replay is centred on its channel; else the injected centre. */
+	private stdinCentreHz(): number | undefined {
+		if (this.options.inputIqFormat === "cf32") {
+			const channelHz = centreOption(readChannelHz(this.config.options))
+			if (channelHz !== undefined) return channelHz
+		}
+		return this.options.inputCenterFreq
 	}
 
 	/** Migrated to the opt-in core channelizer (addendum §7 step 3). */
@@ -266,8 +299,8 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 	protected getDecoderArgs(): string[] {
 		const args: string[] = []
 
-		// Read CU8 (unsigned 8-bit complex IQ) from stdin
-		args.push("-r", "cu8:-")
+		// Read CU8 (unsigned 8-bit complex IQ) from stdin, or cf32 for a replayed capture
+		args.push("-r", this.options.inputIqFormat === "cf32" ? "cf32:-" : "cu8:-")
 
 		// CRITICAL: Tell rtl_433 the sample rate of incoming IQ data
 		// This is the DECIMATED rate, not the original source rate
@@ -296,13 +329,14 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 		// uses it to tell signals in one channel apart. In file mode `-f` is
 		// metadata only: it changes no demodulation.
 		// An operator `-f` in extraArgs wins (two would form a hop list).
+		const centreHz = this.stdinCentreHz()
 		if (
-			this.options.inputCenterFreq !== undefined &&
+			centreHz !== undefined &&
 			!(this.options.extraArgs ?? []).some(
 				a => a === "-f" || a.startsWith("-f"),
 			)
 		) {
-			args.push("-f", String(Math.round(this.options.inputCenterFreq)))
+			args.push("-f", String(Math.round(centreHz)))
 		}
 		args.push("-M", "level")
 

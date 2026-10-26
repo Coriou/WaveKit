@@ -10,6 +10,8 @@ export const CPU_COST = {
 		"multimon-ng": 0.03,
 		direwolf: 0.05,
 		rtl433: 0.1,
+		// AM demodulation of one 48 kHz replay plus acarsdec (the enablement estimate, 0.05)
+		acarsdec: 0.05,
 	},
 } as const
 
@@ -62,12 +64,14 @@ const DECODERS: readonly ProbeCostDecoder[] = [
 	"multimon-ng",
 	"direwolf",
 	"rtl433",
+	"acarsdec",
 ]
 const ESTIMATED_DECODERS = {
 	"dsd-fme": "estimate",
 	"multimon-ng": "estimate",
 	direwolf: "estimate",
 	rtl433: "estimate",
+	acarsdec: "estimate",
 } as const
 
 /** Historical estimates omit a native base; descriptive fit replaces that omission. */

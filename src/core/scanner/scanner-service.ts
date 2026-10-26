@@ -112,6 +112,7 @@ import {
 } from "../iq-capture/pool-adapter.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { probeReplayShapes } from "../iq-capture/shapes.js"
+import { captureRateFor } from "../iq-capture/rates.js"
 import type { IqReplayShapes } from "../iq-capture/service.js"
 import {
 	createIqReplayQueue,
@@ -1872,6 +1873,9 @@ export class ScannerService extends EventEmitter {
 								? { trialCaptures: captureCounters.trialCaptures }
 								: {}),
 							toolFailures: captureCounters.toolFailures,
+							...(typeof captureCounters.rateFallbacks === "number"
+								? { rateFallbacks: captureCounters.rateFallbacks }
+								: {}),
 							lastToolFailure: captureCounters.lastToolFailure,
 						},
 					}
@@ -4777,6 +4781,11 @@ export class ScannerService extends EventEmitter {
 				tuningTrust: track.tuningTrust,
 				fromSample: track.startSample,
 				reason: "detection",
+				// The rate the protocols this capture may hold need (ISM: 96 kHz).
+				rateHz: captureRateFor({
+					priors: this.priorsAt(track.centreHz),
+					track,
+				}),
 			})
 			if ("captureId" in res) {
 				this.iqCaptureLifecycle.set(live.observationId, {
@@ -5207,6 +5216,14 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/** The planner input of a finished capture: the captured track when the scanner still holds it. */
+	/** The band-plan priors at `hz` (the replay plan's priors). */
+	private priorsAt(hz: number): Partial<Record<ScannerProtocol, number>> {
+		const ranges = (
+			this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region)
+		).flatMap(b => b.ranges)
+		return narrowestPriors(withScannerOverlays(ranges), hz)
+	}
+
 	replayPlanInput(capture: IqCaptureView): IqReplayPlanInput {
 		const live = capture.observationId
 			? this.findObservation(capture.observationId)

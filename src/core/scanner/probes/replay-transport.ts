@@ -9,6 +9,7 @@ import {
 } from "../iq-capture-contract.js"
 import { createChannelTransport } from "./channel-transport.js"
 import type {
+	ProbeDecoderType,
 	ProbeMode,
 	ProbeRequest,
 	TransportContext,
@@ -38,10 +39,12 @@ export function replayCaptureOf(req: ProbeRequest): string | null {
 /**
  * WG11 req 6.5: a probe decoder fed from a narrowband IQ capture (cf32 at 48 kHz, already filtered to the
  * decoder's probe channel shape by the capture tool). Options equal the channel transport's, plus the
- * cf32 input format and the capture rate, so the audio pipeline starts at the FM demodulator.
+ * cf32 input format and the capture rate, so the audio pipeline starts at the FM demodulator and
+ * rtl_433 reads the capture as it is (`-r cf32:-`, `-f` the channel centre).
  */
 export function createReplayTransport(
-	port: Pick<IqCapturePort, "openReplay">,
+	port: Pick<IqCapturePort, "openReplay"> &
+		Partial<Pick<IqCapturePort, "replayRateOf">>,
 ): ReplayTransportStrategy {
 	// Reuse the channel transport's configure: one owner of the probe channel options.
 	const channel = createChannelTransport({
@@ -58,12 +61,27 @@ export function createReplayTransport(
 			REPLAY_INPUT_DECODERS.has(mode.decoderType),
 		configure: (base, ctx): DecoderConfig => {
 			const configured = channel.configure(base, ctx)
+			// The rate openReplay delivers: a faster capture's own rate for rtl433, else 48 kHz.
+			const captureId = replayCaptureOf(ctx.req)
+			let rate: number = IQ_CAPTURE_RATE_HZ
+			if (
+				captureId !== null &&
+				port.replayRateOf &&
+				REPLAY_INPUT_DECODERS.has(base.type)
+			) {
+				try {
+					rate =
+						port.replayRateOf(captureId, base.type as ProbeDecoderType) ?? rate
+				} catch {
+					// the safe answer: 48 kHz (a 48 kHz replay is what every older port gives)
+				}
+			}
 			return {
 				...configured,
 				options: {
 					...configured.options,
 					inputIqFormat: "cf32",
-					inputSampleRate: IQ_CAPTURE_RATE_HZ,
+					inputSampleRate: rate,
 				},
 			}
 		},

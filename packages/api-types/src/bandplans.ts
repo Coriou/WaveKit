@@ -409,6 +409,7 @@ export const BANDPLAN_SCANNER_PROTOCOLS = [
 	"acars",
 	"vdl2",
 	"lora",
+	"adsb",
 ] as const satisfies readonly ScannerProtocol[]
 // Compile-time completeness: every ScannerProtocol is listed.
 const protocolCompleteness: Exclude<

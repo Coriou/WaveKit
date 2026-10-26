@@ -82,6 +82,7 @@ const IDENTITY_KIND_LABEL: Readonly<Record<IdentityKind, string>> = {
 	"acars-reg": "Registration",
 	"vdl2-addr": "Address",
 	"lora-node": "Node",
+	icao: "ICAO",
 }
 
 /** Typed prefixes for identities ("cc 1", "nac 293", "capcode 1234567"…). */

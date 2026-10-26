@@ -51,6 +51,7 @@ const PROTOCOLS = new Set<string>([
 	"acars",
 	"vdl2",
 	"lora",
+	"adsb",
 ])
 
 /**
@@ -79,6 +80,7 @@ const IDENTITY_KIND_FOR: Readonly<
 	acars: "acars-reg",
 	vdl2: "vdl2-addr",
 	lora: "lora-node",
+	adsb: "icao",
 })
 
 /**
@@ -88,6 +90,7 @@ const IDENTITY_KIND_FOR: Readonly<
  * - AIS MMSI is 9 (`mmsiOf`).
  * - ACARS registration is at most 8 (`tailOf`; a raw tail longer than 32 is refused).
  * - VDL2 address is 6 (`addrOf`; a string longer than 16 is refused before that).
+ * - ICAO address is 6 lowercase hex digits (`parseReadsb`).
  * - LoRa node id is 9: `!` plus 8 hex digits from a uint32 (`nodeOf`).
  * - D-STAR callsign from the dsd-fme line parser is at most 8 (`[A-Z0-9/ ]{3,8}`).
  * - AX.25 source from the direwolf frame parser is at most 9: 6 callsign bytes,

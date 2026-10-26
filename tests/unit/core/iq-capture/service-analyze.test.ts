@@ -140,7 +140,10 @@ class FakeEngine {
 }
 
 function wireRun(child: PipeChild): void {
-	queueMicrotask(() => child.event({ type: "ready" }))
+	// a current tool: advertises its rates and echoes each capture's rate
+	queueMicrotask(() =>
+		child.event({ type: "ready", rates: [48_000, 96_000, 192_000] }),
+	)
 	const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
 	const control = child.stdio[3]
 	if (!(control instanceof PassThrough)) return
@@ -156,17 +159,29 @@ function wireRun(child: PipeChild): void {
 				queueMicrotask(() => child.exit(0))
 				continue
 			}
-			const cmd = JSON.parse(line) as { type: string; id?: string }
+			const cmd = JSON.parse(line) as {
+				type: string
+				id?: string
+				rateHz?: number
+			}
 			if (cmd.type !== "capture") continue
 			const id = cmd.id ?? ""
+			// 100 ms at the capture's rate
+			const samples = (SAMPLES * (cmd.rateHz ?? 48_000)) / 48_000
 			fs.writeFileSync(
 				path.join(outDir, `${id}.cf32`),
-				Buffer.alloc(SAMPLES * 8),
+				Buffer.alloc(samples * 8),
 				{
 					mode: 0o600,
 				},
 			)
-			child.event({ type: "captured", id, samples: SAMPLES, gapSamples: 0 })
+			child.event({
+				type: "captured",
+				id,
+				samples,
+				gapSamples: 0,
+				rateHz: cmd.rateHz ?? 48_000,
+			})
 		}
 	})
 }
@@ -226,7 +241,7 @@ function req(over: Partial<IqCaptureRequest> = {}): IqCaptureRequest {
 	}
 }
 
-async function ready(opts: { failAnalyze?: boolean } = {}) {
+async function ready(opts: { failAnalyze?: boolean; rateHz?: 96_000 } = {}) {
 	const s = await setup({}, opts)
 	s.svc.attachSource("src", {
 		sampleRateHz: FS_HZ,
@@ -237,7 +252,7 @@ async function ready(opts: { failAnalyze?: boolean } = {}) {
 	await s.svc.start()
 	await flush()
 	s.engine.push(FS_HZ)
-	const got = s.svc.capture(req())
+	const got = s.svc.capture(opts.rateHz ? req({ rateHz: opts.rateHz }) : req())
 	await flush(10)
 	const id = "captureId" in got ? got.captureId : ""
 	return { ...s, id }
@@ -324,6 +339,23 @@ describe("parseAnalyzeEvent", () => {
 })
 
 describe("IqCaptureService openAnalyze", () => {
+	it("a 96 kHz capture is analysed with --rate 96000", async () => {
+		const s = await ready({ rateHz: 96_000 })
+		const opened = openAnalyze(s.svc, s.id, "am")
+		expect(opened).not.toBeNull()
+		expect(analyzeChild(s.children).args).toEqual([
+			"analyze",
+			"--in",
+			"/dev/fd/3",
+			"--mode",
+			"am",
+			"--rate",
+			"96000",
+		])
+		opened!.kill()
+		await s.svc.stop()
+	})
+
 	it("argv is analyze --in … --mode nfm, stdio fd 4 pipe", async () => {
 		const s = await ready()
 		const opened = openAnalyze(s.svc, s.id, "nfm")

@@ -38,6 +38,7 @@ import {
 	ADSB_REPLAY_LOW_HZ,
 	planReplayTrials,
 	planReplayTrialsDetailed,
+	RTL433_REPLAY_MODE,
 } from "../../../../src/core/scanner/replay-plan.js"
 import {
 	orderTrialsByMemory,
@@ -314,7 +315,7 @@ const label = (i: IqReplayPlanInput): string[] =>
 	planReplayTrials(i).map(t => `${t.protocol}:${t.mode.decoderType}`)
 
 describe("replay extras behind a capability check (part 2)", () => {
-	it("ISM calls rtl433, skipped today (no probe mode), even with the capability", () => {
+	it("ISM calls rtl433: planned with the replay capability, skipped without it", () => {
 		const ism: IqReplayPlanInput = {
 			capture: { ...capture, rfHz: 868_300_000 },
 			track: null,
@@ -327,20 +328,50 @@ describe("replay extras behind a capability check (part 2)", () => {
 			new Set(["dsd-fme", "multimon-ng", "direwolf", "rtl433"]),
 		]) {
 			const out = planReplayTrialsDetailed(ism, caps)
-			expect(out.trials.some(t => t.mode.decoderType === "rtl433")).toBe(false)
-			expect(out.skipped).toContainEqual({
+			expect(out.trials).toContainEqual({
 				protocol: "ism",
-				decoder: "rtl433",
-				reason: "no-probe-mode",
+				mode: { ...RTL433_REPLAY_MODE },
+				known: false,
 			})
+			expect(out.skipped.some(s => s.decoder === "rtl433")).toBe(false)
 		}
+		const without = planReplayTrialsDetailed(
+			ism,
+			new Set(["dsd-fme", "multimon-ng", "direwolf"]),
+		)
+		expect(without.trials.some(t => t.mode.decoderType === "rtl433")).toBe(
+			false,
+		)
+		expect(without.skipped).toContainEqual({
+			protocol: "ism",
+			decoder: "rtl433",
+			reason: "no-replay-input",
+		})
+		// a known ISM discovery's rtl433 trial leads the plan
+		const known = planReplayTrials({
+			...ism,
+			knownProtocol: "ism",
+			priors: { ...ism.priors, "analog-fm": 2 },
+		})
+		expect(known[0]).toMatchObject({ protocol: "ism", known: true })
 		// a decoder outside the capability set never runs, even with a probe mode
 		const none = planReplayTrialsDetailed(pocsagInput(), new Set<string>())
 		expect(none.trials.every(t => t.kind === "analog")).toBe(true)
 	})
 
+	it("a known acars discovery runs the acarsdec replay trial first", () => {
+		const out = planReplayTrialsDetailed(
+			pocsagInput({ knownProtocol: "acars", track: null, priors: {} }),
+		)
+		expect(out.skipped.some(x => x.decoder === "acarsdec")).toBe(false)
+		expect(out.trials[0]).toMatchObject({
+			protocol: "acars",
+			known: true,
+			mode: { decoderType: "acarsdec", protocol: "acars" },
+		})
+	})
+
 	it.each([
-		["acars", "acarsdec"],
 		["vdl2", "dumpvdl2"],
 		["lora", "lora-meshtastic"],
 		["ais", "ais-catcher"],
@@ -380,20 +411,31 @@ describe("replay extras behind a capability check (part 2)", () => {
 	// Validates: Requirements 9.2
 	it("property: every ISM-868 plan names rtl433 (planned or skipped) and never runs it without capability", () => {
 		fc.assert(
-			fc.property(fc.integer({ min: 863_000_000, max: 870_000_000 }), hz => {
-				const out = planReplayTrialsDetailed({
-					capture: { ...capture, rfHz: hz },
-					track: null,
-					knownProtocol: null,
-					priors: narrowestPriors(EU, hz),
-					narrowRaster: false,
-				})
-				return (
-					out.skipped.some(s => s.decoder === "rtl433") &&
-					out.trials.every(t => t.mode.decoderType !== "rtl433") &&
-					out.trials.length <= IQ_REPLAY_MAX_TRIALS
-				)
-			}),
+			fc.property(
+				fc.integer({ min: 863_000_000, max: 870_000_000 }),
+				fc.boolean(),
+				(hz, capable) => {
+					const caps = new Set(["dsd-fme", "multimon-ng", "direwolf"])
+					if (capable) caps.add("rtl433")
+					const out = planReplayTrialsDetailed(
+						{
+							capture: { ...capture, rfHz: hz },
+							track: null,
+							knownProtocol: null,
+							priors: narrowestPriors(EU, hz),
+							narrowRaster: false,
+						},
+						caps,
+					)
+					const planned = out.trials.some(t => t.mode.decoderType === "rtl433")
+					const skipped = out.skipped.some(s => s.decoder === "rtl433")
+					return (
+						planned === capable &&
+						skipped === !capable &&
+						out.trials.length <= IQ_REPLAY_MAX_TRIALS
+					)
+				},
+			),
 			{ numRuns: 100 },
 		)
 	})

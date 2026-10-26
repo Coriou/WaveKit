@@ -98,6 +98,7 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
             anchor: dir.clone(),
             max_ms: 4000,
             bandwidth_hz: BW,
+            rate_ack: false,
         },
         design(fs).clone(),
     )
@@ -111,6 +112,7 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
             offset_hz: 150_000.0,
             from_sample: e.oldest(),
             max_ms: 4000,
+            rate_hz: 48_000,
         },
         &mut ev,
     );
@@ -126,6 +128,68 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
     let bytes = std::fs::read(dir.join(format!("{ID}.cf32"))).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     bytes
+}
+
+/// One capture of `ms` milliseconds of a source tone at output rate `rate`; the published bytes
+/// or the error code.
+fn capture_at(rate: u64, ms: u64) -> Result<usize, String> {
+    let fs = 1_024_000u64;
+    let dir = tmp_dir();
+    let mut e = Engine::new(Config {
+        sample_rate: fs,
+        ring_ms: 50,
+        out_dir: dir.clone(),
+        anchor: dir.clone(),
+        max_ms: 4000,
+        bandwidth_hz: 47_424.0,
+        rate_ack: false,
+    })
+    .unwrap();
+    let mut ev: Vec<Value> = Vec::new();
+    e.command(
+        Command::Capture {
+            id: ID.into(),
+            offset_hz: 474_000.0,
+            from_sample: e.oldest(),
+            max_ms: 4000,
+            rate_hz: rate,
+        },
+        &mut ev,
+    );
+    // ms of input (4 100 ms past the bound: the 4 000 ms budget ends the capture by itself).
+    let ms = if ms >= 4000 { 4100 } else { ms };
+    let input = tone(fs, 474_000.0, (fs * ms / 1000) as usize, 7);
+    for c in input.chunks(65_536) {
+        e.input(c, &mut ev);
+    }
+    e.command(Command::End { id: ID.into() }, &mut ev);
+    let out = match std::fs::read(dir.join(format!("{ID}.cf32"))) {
+        Ok(b) => Ok(b.len()),
+        Err(_) => Err(ev
+            .iter()
+            .find(|v| v["type"] == "error")
+            .map(|v| v["code"].as_str().unwrap_or("").to_string())
+            .unwrap_or_default()),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_capture_runs_at_its_requested_rate_within_its_file_bound() {
+    // 1 s at 96 kHz: 96 000 samples × 8 B (± the filter edge).
+    let b = capture_at(96_000, 1000).unwrap();
+    assert!((b as i64 - 768_000).abs() <= 80, "{b}");
+    // The 4 s bound at each rate: exactly max_file_bytes(rate), never more.
+    for (rate, cap) in [
+        (48_000u64, 1_536_000usize),
+        (96_000, 3_072_000),
+        (192_000, 6_144_000),
+    ] {
+        assert_eq!(capture_at(rate, 4000).unwrap(), cap, "{rate}");
+    }
+    // An unsupported rate never opens a file.
+    assert_eq!(capture_at(250_000, 100), Err("out-of-range".into()));
 }
 
 proptest! {
@@ -175,4 +239,83 @@ proptest! {
         prop_assert_eq!(a.len() % 8, 0);
         prop_assert!(a == b);
     }
+}
+
+/// Power of interleaved cf32 `out` (at `rate`) at frequency `f`, over its steady part.
+fn power_at(out: &[f32], f: f64, rate: f64) -> f64 {
+    let n = out.len() / 2;
+    let (mut re, mut im) = (0f64, 0f64);
+    for k in n / 4..n {
+        let ph = -TAU * f * k as f64 / rate;
+        let (i, q) = (out[k * 2] as f64, out[k * 2 + 1] as f64);
+        re += i * ph.cos() - q * ph.sin();
+        im += i * ph.sin() + q * ph.cos();
+    }
+    re * re + im * im
+}
+
+#[test]
+fn faster_rates_reject_what_would_alias_into_the_passband() {
+    // At output rate R a tone at R + 5 kHz from the channel folds onto +5 kHz; it must arrive at
+    // least 60 dB below an in-band tone of the same level at +5 kHz.
+    let fs = 2_048_000u64;
+    for out in [96_000u64, 192_000] {
+        let d = ChainDesign::with_output(fs, out, 47_424.0).unwrap();
+        let n = fs as usize / 4;
+        let run = |hz: f64| {
+            let mut dsp = CaptureDsp::new(&d, 0.0);
+            let mut o = Vec::new();
+            dsp.push_cu8(&tone(fs, hz, n, 3), &mut o);
+            power_at(&o, 5_000.0, out as f64)
+        };
+        let wanted = run(5_000.0);
+        let alias = run(out as f64 + 5_000.0);
+        let db = 10.0 * (wanted / alias).log10();
+        assert!(db > 60.0, "{out}: {db:.1} dB");
+    }
+}
+
+#[test]
+fn the_tool_advertises_its_rates_and_echoes_each_capture_rate() {
+    for rate_ack in [true, false] {
+        echo_case(rate_ack);
+    }
+}
+
+/// With `--rate-ack` the `captured` event carries `rateHz`; without, it is the legacy event.
+fn echo_case(rate_ack: bool) {
+    let fs = 1_024_000u64;
+    let dir = tmp_dir();
+    let mut e = Engine::new(Config {
+        sample_rate: fs,
+        ring_ms: 50,
+        out_dir: dir.clone(),
+        anchor: dir.clone(),
+        max_ms: 4000,
+        bandwidth_hz: 47_424.0,
+        rate_ack,
+    })
+    .unwrap();
+    assert_eq!(e.rates(), vec![48_000, 96_000, 192_000]);
+    let mut ev: Vec<Value> = Vec::new();
+    e.command(
+        Command::Capture {
+            id: ID.into(),
+            offset_hz: 0.0,
+            from_sample: e.oldest(),
+            max_ms: 200,
+            rate_hz: 96_000,
+        },
+        &mut ev,
+    );
+    e.input(&tone(fs, 1_000.0, fs as usize / 4, 5), &mut ev);
+    let done = ev.iter().find(|v| v["type"] == "captured").unwrap();
+    assert_eq!(done["samples"], 19_200);
+    if rate_ack {
+        assert_eq!(done["rateHz"], 96_000);
+    } else {
+        let keys: Vec<&String> = done.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["gapSamples", "id", "samples", "type"]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
