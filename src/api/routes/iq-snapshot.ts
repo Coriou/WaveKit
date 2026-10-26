@@ -150,7 +150,11 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 					}
 					const output = chunk.subarray(0, remaining)
 					remaining -= output.length
-					if (!reply.raw.write(output)) {
+					const accepted = reply.raw.write(output)
+					// The last chunk detaches from the source at once; end() lets the
+					// buffered tail drain without later source chunks aborting it.
+					if (remaining === 0) return complete()
+					if (!accepted) {
 						waitingForDrain = true
 						reply.raw.once("drain", drained)
 						// Allow 2 chunk durations: bytes / (sampleRate × 2 CU8 bytes)

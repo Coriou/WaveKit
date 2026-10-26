@@ -248,9 +248,11 @@ it.each([1, 2])(
 		const download = await startHttp()
 		try {
 			for (let index = 0; index < chunks; index++) {
-				const drained = once(response!, "drain")
+				const last = index === chunks - 1
+				const drained = last ? undefined : once(response!, "drain")
 				input.write(Buffer.alloc(65_536, 23))
-				expect(response!.writableNeedDrain).toBe(true)
+				// The final chunk ends the response instead of waiting for drain.
+				if (!last) expect(response!.writableNeedDrain).toBe(true)
 				expect(response!.destroyed).toBe(false)
 				await drained
 			}
@@ -266,6 +268,25 @@ it.each([1, 2])(
 		}
 	},
 )
+it("finishes an undrained final HTTP chunk despite later source chunks", async () => {
+	// 0.1 s × 327,680 samples/s × 2 = 65,536 bytes: one chunk fills the snapshot.
+	rate = 327_680
+	const download = await startHttp()
+	try {
+		input.write(Buffer.alloc(65_536, 23))
+		input.write(Buffer.alloc(2, 29))
+		expect(response!.destroyed).toBe(false)
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		expect(await download.result).toEqual({
+			bytes: 65_536,
+			complete: true,
+			status: 200,
+		})
+		expect(release).toHaveBeenCalledOnce()
+	} finally {
+		download.client.destroy()
+	}
+})
 it("aborts a paused HTTP client on the next source chunk and admits a follow-up", async () => {
 	rate = 2_400_000
 	const download = await startHttp({ seconds: 10, format: "cu8" }, true)
