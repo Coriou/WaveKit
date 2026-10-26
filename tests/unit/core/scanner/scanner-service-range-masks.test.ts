@@ -79,7 +79,14 @@ describe("ScannerService CFAR masks (SF1 req 2.2, 2.5)", () => {
 					(r.protocols ?? []).some(p => ["ism", "pocsag", "aprs"].includes(p)),
 				)
 				.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
-			rasters: ranges.flatMap(r => r.rasters ?? []),
+			// Each raster is bounded to its range.
+			rasters: ranges.flatMap(r =>
+				(r.rasters ?? []).map(x => ({
+					...x,
+					startHz: r.startHz,
+					endHz: r.endHz,
+				})),
+			),
 			obwHz: [...new Set(ranges.flatMap(r => r.obwHz ?? []))],
 			inWindow: masks.inWindow,
 		}

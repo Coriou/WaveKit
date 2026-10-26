@@ -48,6 +48,8 @@ const ChannelPlanBodySchema = z.object({
 const RasterSchema = z.object({
 	spacingHz: z.number().positive(),
 	firstChannelHz: z.number(),
+	startHz: z.number().optional(),
+	endHz: z.number().optional(),
 })
 const TuningTrustSchema = z.enum(["commanded", "relay", "unverified"])
 

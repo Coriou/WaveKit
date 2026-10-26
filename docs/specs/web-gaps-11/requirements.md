@@ -296,3 +296,88 @@ page states the performance rules.
 8.1 Each property in the design has a fast-check test with `numRuns >= 100` and the trace
 comment.
 8.2 The root suite, typecheck, lint and the native crate tests pass at every merge.
+
+## 9. Amendment: trial choice and memory
+
+9.1 **Pager classification.** Inside a paging range (the narrowest covering range lists `pocsag`
+or `flex`) the classes `fsk2-wide`, `fsk4-12k5` and `analog-fm` give POCSAG and FLEX hypotheses
+ahead of DMR and every other digital-voice protocol. The scanner adds an EU UHF paging range,
+465.975 to 466.550 MHz on a 12.5 kHz raster (plus the 6.25 kHz split raster), listing POCSAG,
+FLEX and DMR, only where the built-in French paging plan (`pager-fr`: 466.025 to 466.230 MHz
+on a 12.5 kHz raster and the single channel 446.5325 MHz, POCSAG) does not already cover it, so
+no frequency lies in both. A two-tone FSK whose tones are 9 000 ± 1 500 Hz apart with a midpoint within
+1 500 Hz of the centre is `fsk2-wide`, never a digital-voice class.
+9.2 **Pager trials before the analog trial.** In a paging range the replay order is three fixed
+groups: the known digital and pager trials, then the analog trial (known or not), then the rest.
+An analog `heard` can therefore never end a POCSAG or FLEX trial as `not-needed`, whatever the
+memory says; memory reorders only inside a group, and pager trials are never left out for
+backoff. This amends 6.4 (analog trial right after the known one) for paging ranges only.
+9.3 **Extra replay trials behind a capability check.** The plan names rtl433 for ISM (a listed
+ISM range or an `ook-burst` track), acarsdec for ACARS, dumpvdl2 for VDL2, ais-catcher for AIS,
+the LoRa decoder for LoRa, and readsb within 1 089 to 1 091 MHz. A trial runs only when its
+decoder has a probe mode and a replay input path; every other one is reported as skipped
+(`no-probe-mode` or `no-replay-input`) and never run.
+9.4 **Trial memory.** Each replay trial outcome is remembered on its discovery: protocol,
+decoder, attempts, successes, consecutive failures, last outcome and time. Outcomes that are no
+attempt (pending, running, cancelled, skipped-budget, unsupported, not-needed) are not counted.
+It is persisted, validated on load, and a corrupt or oversized file, or a malformed row, is
+ignored. Bounds: 16 trials per discovery and 2 048 discoveries (least recently updated goes),
+counters saturate at 1 000 000, the file is refused above 8 MiB.
+9.5 **Memory order.** Replay trials are ordered: remembered successes (fewer than 2 failures
+since, most recent first), the known trial, trials that ran without a failure streak, untried
+trials (each in prior order), then remembered failures out of backoff (fewest first). A failure
+after k consecutive failures backs off 60 s × 2^(k−1), at most 1 h; a trial still in backoff is
+left out unless every trial is. Trials that share one decoder run share their memory. Only a
+leading run of trials keeps the `known` flag (the replay queue runs flagged trials first), so the
+queue executes exactly this order; a known trial the order moved back runs without the queue flag but keeps `knownProtocol`, so its full-hold misses still count toward the 2-miss expiry (1.8).
+Outcomes are recorded against the discovery the observation has after the decode was applied,
+so the replay decode that admits a pending observation is remembered on the new discovery.
+9.6 **Capture before admission.** A gate-passed track the store has not admitted yet gets a
+detection capture too, at most 2 per source per rolling minute (of the 6 per source), so the first
+transmission can be replayed; a replay decode then admits it through the evidence path.
+
+## Amendment: activity-ranked decoder channels (scanner side)
+
+10.1 **Ranker port.** The scanner provides the channel activity port of the decoder planner. A
+snapshot answers each query in order, echoes the query itself, and holds exactly one channel per
+candidate in candidate order. It never refreshes history or changes evidence. A malformed query
+(duplicate or non-integer candidates, more than 1 024 candidates, a bad width) answers
+`unavailable` with cold channels.
+10.2 **Health.** A source with no spectrum block for 10 s is `stale`; a retune or a new engine
+drops the old window's live evidence and answers `retuning` until its first block; a stopped
+source is `unavailable` and has no epoch. Anything but `ready` makes the planner use its
+nearest-first order. A ready snapshot carries a finite next evaluation time (the earliest stale
+or decay deadline).
+10.3 **Cadence.** Every accepted block and gated track is ingested with its engine identity, at
+O(tracks) per block. Live means energy in the latest accepted block, at most 1 000 ms old; an
+overloaded block clears live energy and is no frame (so 10 s of overload is `stale`). Decode
+history ages from the last decode the store accepted (a rejected or CRC-failed decode never
+refreshes it), never from later activity on the discovery. History (stored decodes, remembered replay successes, occupancy) is pulled
+at most every 2 s per source, never inside a snapshot. Changes are noticed at most 250 ms late
+(leading edge, not trailing; at most 4 notices per second per source).
+10.4 **Ranking.** A channel with energy in the latest block outranks every other channel. Energy
+within 2 min, or a decode or replay success within 15 min, is hot; energy or a gated track within
+15 min, or a decode or success within 6 h, is warm; otherwise cold. Decode and success memory
+expires after 6 h. Occupancy adds score only and never sets a state. An item credits the nearest
+candidate within half the channel width; when two candidates are within that reach it credits none.
+10.5 **Replay outcomes.** A replay counts against a channel only when it covered the decoder's
+whole hold without a gap and failed; cancelled, budget-skipped, unsupported, not-needed or
+incomplete replays count for nothing. The penalty lasts 60 s.
+10.6 **Bounds.** 64 sources; per source 512 energy segments, 256 ended tracks, 256 notes of each
+kind and 512 history items of each kind; 128 remembered queries; 1 024 candidates per query.
+10.7 **Capture by coverage (Stage 1: always capture).** Stage 1 has no trustworthy onset time:
+spectrum blocks are stamped when processed, not when their samples arrived, so queued samples
+would place an onset too late. A gate-passed track is therefore never treated as covered by a live
+decoder and is always captured, within the existing capture budgets. The coverage predicate type
+(`ChannelLiveCoverage`: the track's [centre ± width/2] inside the decoder passband, the decoder
+running at or before the onset) is kept for Stage 2, which needs engine sample-arrival timestamps.
+10.8 **Replay attribution.** A replay result names its captured frequency. A replay decode whose
+observation is gone and never became a discovery lands on a stored discovery of that source only
+when exactly one discovery lies within 6.25 kHz and it has the decoded protocol or is not decoded
+yet; none, several or one incompatible discovery give no attribution. Replay outcomes also reach
+the ranker at the captured frequency.
+10.9 **Capture size.** Captures are cf32 (8 B per sample): 48 000 × 4 × 8 = 1 536 000 B per
+full 4 s capture.
+10.10 **Placed decoder evidence.** A decode from a decoder channel the planner placed on a
+band-plan channel is evidence at that channel (the manager's placement binding), not at the parent
+decoder's target; a binding on another source or a malformed binding is no evidence.

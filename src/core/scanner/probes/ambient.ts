@@ -8,6 +8,7 @@
  * frequency and time is done by ScannerService.
  */
 import { EventEmitter } from "node:events"
+import { z } from "zod"
 import {
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
 	type ScannerAmbientDecoderType,
@@ -31,6 +32,8 @@ import {
 } from "./confirm/ambient-decode.js"
 import {
 	createInterpreterState,
+	type SharedConfirm,
+	type SharedConfirmMemory,
 	type DecoderOutputLike,
 	type InterpreterState,
 } from "./confirm/double-match.js"
@@ -46,6 +49,12 @@ import {
 } from "./ambient-channel.js"
 import { parseVdl2 } from "./confirm/vdl2.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
+
+/** The manager's placement binding on an output (sourceId, channel or null for centre reach). */
+const PlacedBindingSchema = z.object({
+	sourceId: z.string().min(1),
+	channelHz: z.number().finite().positive().nullable(),
+})
 
 export interface AmbientTarget {
 	sourceId: string
@@ -79,6 +88,18 @@ export interface AmbientEvidenceEvent {
 	freqHz?: number
 }
 
+/** Where an ambient decode lies, for the shared confirm pairing. */
+export interface AmbientPairContext {
+	sourceId: string
+	hz: number
+	/** Decode time (ms). */
+	at: number
+	passband?: ChannelPassband
+	freqHz?: number
+	/** The decode's protocol when known before interpretation (the WG7 ambient-only types). */
+	protocol?: ScannerProtocol
+}
+
 export interface AmbientDeps {
 	decoders: Pick<DecoderManager, "on" | "off" | "getDecoder" | "getAllStatus"> &
 		Partial<Pick<DecoderManager, "getStatus">>
@@ -101,6 +122,14 @@ export interface AmbientDeps {
 		hz: number,
 		sourceId: string,
 	) => TuningTrust | undefined
+	/**
+	 * shared per-discovery acceptance (ConfirmMemory) and the scope (discovery)
+	 * a decode lies on; null scope or absent: the decoder's own memory decides.
+	 */
+	confirm?: {
+		memory: SharedConfirmMemory
+		scopeOf: (ctx: AmbientPairContext) => string | null
+	}
 }
 
 /** Acceptance memory of one decoder for one epoch; multimon keeps it per capcode (interp null). */
@@ -108,6 +137,8 @@ interface AmbientState {
 	epoch: number
 	interp: InterpreterState | null
 	capcodes: CapcodeWindows | null
+	/** Where the decode being interpreted lies; set only while it is interpreted. */
+	pairCtx: AmbientPairContext | null
 }
 
 type AmbientParser = (
@@ -320,6 +351,21 @@ export class AmbientEvidence extends EventEmitter {
 		}
 	}
 
+	/** The shared pairing of `entry`'s interpreter states: asked with the decode in hand. */
+	private pairing(entry: AmbientState): { shared?: SharedConfirm } {
+		const confirm = this.deps.confirm
+		if (!confirm) return {}
+		return {
+			shared: {
+				memory: confirm.memory,
+				scope: () => {
+					const ctx = entry.pairCtx
+					return ctx === null ? null : confirm.scopeOf(ctx)
+				},
+			},
+		}
+	}
+
 	private handleNew(
 		decoderId: string,
 		parse: AmbientParser,
@@ -344,19 +390,36 @@ export class AmbientEvidence extends EventEmitter {
 		}
 		let entry = this.states.get(decoderId)
 		if (!entry || entry.epoch !== epoch) {
-			entry = {
+			const fresh: AmbientState = {
 				epoch,
-				interp: createInterpreterState({
-					epoch,
-					origin: "ambient",
-					decoderId,
-				}),
+				interp: null,
 				capcodes: null,
+				pairCtx: null,
 			}
+			fresh.interp = createInterpreterState({
+				epoch,
+				origin: "ambient",
+				decoderId,
+				...this.pairing(fresh),
+			})
+			entry = fresh
 			this.states.set(decoderId, entry)
 		}
 		if (entry.interp === null) return
-		for (const decode of acceptAmbient(entry.interp, parsed)) {
+		const at = parsed.timestamp.getTime()
+		let decodes: ReturnType<typeof acceptAmbient>
+		entry.pairCtx = {
+			sourceId: target.sourceId,
+			hz: parsed.hz,
+			at,
+			protocol: parsed.protocol,
+		}
+		try {
+			decodes = acceptAmbient(entry.interp, parsed)
+		} finally {
+			entry.pairCtx = null
+		}
+		for (const decode of decodes) {
 			const { hz, ...ev } = decode
 			const event: AmbientEvidenceEvent = {
 				decoderId,
@@ -443,21 +506,24 @@ export class AmbientEvidence extends EventEmitter {
 		const type = this.types.get(decoderId)
 		let entry = this.states.get(decoderId)
 		if (!entry || entry.epoch !== epoch) {
+			const fresh: AmbientState = {
+				epoch,
+				interp: null,
+				capcodes: null,
+				pairCtx: null,
+			}
 			const create = (): InterpreterState =>
 				createInterpreterState({
 					epoch,
 					origin: "ambient",
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
+					...this.pairing(fresh),
 				})
-			const multimon = type === "multimon-ng"
-			entry = {
-				epoch,
-				interp: multimon ? null : create(),
-				capcodes: multimon
-					? new CapcodeWindows(MULTIMON_HOLD_MS, create)
-					: null,
-			}
+			if (type === "multimon-ng")
+				fresh.capcodes = new CapcodeWindows(MULTIMON_HOLD_MS, create)
+			else fresh.interp = create()
+			entry = fresh
 			this.states.set(decoderId, entry)
 		}
 		// A placed rtl433 output (it carries a binding) names its channel; an
@@ -476,28 +542,60 @@ export class AmbientEvidence extends EventEmitter {
 			: null
 		const onSource = passband?.sourceId === target.sourceId ? passband : null
 		if (placed && !onSource) return
+		// A placed point decoder (a multimon-ng or dsd-fme channel the planner put on a band-plan
+		// channel) hears its own channel, not the parent's target: its binding names it. A binding
+		// on another source drops the output (fail closed); a centre-reach binding keeps the target.
+		const raw =
+			type !== "rtl433"
+				? (input as DecoderOutputLike).provenanceBinding
+				: undefined
+		const binding =
+			raw === undefined ? undefined : PlacedBindingSchema.safeParse(raw)
+		if (binding !== undefined && !binding.success) return
+		if (
+			binding?.data.sourceId !== undefined &&
+			binding.data.sourceId !== target.sourceId
+		)
+			return
+		const placedHz = binding?.data.channelHz ?? undefined
 		const state = entry.interp
-		let evs: DecodeEvidence[] = []
-		if (entry.capcodes)
-			evs = entry.capcodes.interpret(input as DecoderOutputLike, this.now())
-		else if (state === null) return
-		else if (type === "dsd-fme")
-			evs = interpretDsdFme(
-				input as Parameters<typeof interpretDsdFme>[0],
-				state,
-			)
-		else if (type === "direwolf")
-			evs = interpretDirewolf(input as DecoderOutputLike, state)
-		else if (type === "rtl433")
-			evs = interpretRtl433(input as DecoderOutputLike, state)
 		const freqHz = onSource
 			? rtl433FreqHz((input as DecoderOutputLike).data, onSource)
 			: undefined
+		const at = decodeTime(input, this.now())
+		entry.pairCtx = {
+			sourceId: target.sourceId,
+			hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
+			at,
+			...(onSource
+				? {
+						passband: { centreHz: onSource.centreHz, halfHz: onSource.halfHz },
+						...(freqHz !== undefined ? { freqHz } : {}),
+					}
+				: {}),
+		}
+		let evs: DecodeEvidence[] = []
+		try {
+			if (entry.capcodes)
+				evs = entry.capcodes.interpret(input as DecoderOutputLike, this.now())
+			else if (state === null) return
+			else if (type === "dsd-fme")
+				evs = interpretDsdFme(
+					input as Parameters<typeof interpretDsdFme>[0],
+					state,
+				)
+			else if (type === "direwolf")
+				evs = interpretDirewolf(input as DecoderOutputLike, state)
+			else if (type === "rtl433")
+				evs = interpretRtl433(input as DecoderOutputLike, state)
+		} finally {
+			entry.pairCtx = null
+		}
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,
 				sourceId: target.sourceId,
-				hz: onSource ? onSource.centreHz : target.hz,
+				hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
 				ev,
 				...(onSource
 					? {
@@ -512,4 +610,18 @@ export class AmbientEvidence extends EventEmitter {
 			this.emit("evidence", event)
 		}
 	}
+}
+
+/** The decode time of an ambient output (ms): its own timestamp when valid, else `fallback`. */
+function decodeTime(input: unknown, fallback: number): number {
+	const ts =
+		typeof input === "object" && input !== null
+			? (input as { timestamp?: unknown; at?: unknown })
+			: {}
+	if (ts.timestamp instanceof Date) {
+		const t = ts.timestamp.getTime()
+		if (Number.isFinite(t)) return t
+	}
+	if (typeof ts.at === "number" && Number.isFinite(ts.at)) return ts.at
+	return fallback
 }

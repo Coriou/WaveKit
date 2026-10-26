@@ -8,6 +8,7 @@ import {
 	type AmbientEvidenceEvent,
 	type AmbientTrustBinding,
 } from "../../../../src/core/scanner/probes/ambient.js"
+import { CONFIRM_MIN_SEPARATION_MS } from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
 import type { TuningTrust } from "../../../../src/core/spectrum/types.js"
 import type {
 	DecoderConfig,
@@ -190,6 +191,8 @@ describe("ScannerService ambient identify (WG7)", () => {
 				}),
 			])
 			r.h.decoders.emitOutput("ais", ship("244123456"))
+			// two decodes of one MMSI pair only 2 s or more apart.
+			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			const target = firstTarget(r, jobId)
@@ -224,6 +227,37 @@ describe("ScannerService ambient identify (WG7)", () => {
 					}),
 				}),
 			)
+		} finally {
+			await r.h.service.stop()
+		}
+	}, 30_000)
+
+	it("names a narrow track inside the AIS channel but off its centre", async () => {
+		// 8 kHz above channel A: outside the former 1 kHz tolerance, inside half the 25 kHz channel.
+		const OFF_HZ = AIS_A + 8_000
+		const r = rig({ startup: [aisConfig()], trust: () => "commanded" })
+		await r.h.service.start()
+		try {
+			const job = await r.h.service.identify({
+				sourceId: "rtl",
+				target: { frequencyHz: OFF_HZ, bandwidthHz: 25_000 },
+				timeoutMs: 60_000,
+				record: false,
+			})
+			feedTone(r.h.fanout, 2, OFF_HZ - CENTRE_AIS)
+			await until(() =>
+				(firstTarget(r, job.id).trials ?? []).some(
+					t => t.transport === "ambient" && t.outcome === "running",
+				),
+			)
+			r.h.decoders.emitOutput("ais", ship("244123456"))
+			// two decodes of one MMSI pair only 2 s or more apart.
+			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
+			r.h.decoders.emitOutput("ais", ship("244123456"))
+			await until(() => r.h.service.getJob(job.id)?.state === "completed")
+			const target = firstTarget(r, job.id)
+			expect(target.state).toBe("identified")
+			expect(target.result).toMatchObject({ protocol: "ais" })
 		} finally {
 			await r.h.service.stop()
 		}
@@ -341,7 +375,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 		expect(dsd.listenerCount("link")).toBe(0)
 	}, 30_000)
 
-	it("never names a wide track near channel A from a channel-A decode (1 kHz ambient pairing)", async () => {
+	it("never names a wide track near channel A from a channel-A decode (centre outside the channel)", async () => {
 		const WIDE_HZ = 162_000_000
 		const r = rig({ startup: [aisConfig()], trust: () => "commanded" })
 		await r.h.service.start()

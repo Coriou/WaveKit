@@ -55,11 +55,7 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
-import {
-	SCANNER_AMBIENT_PROTOCOLS,
-	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
-	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
-} from "@wavekit/api-types"
+import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -138,6 +134,12 @@ import { replayMissEligible } from "../iq-capture/replay-miss.js"
 import { createKnownProtocolMemory } from "./known-protocol.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
+import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
+import { PendingCaptureLimiter } from "./pending-capture.js"
+import {
+	replayTrialWeight,
+	type ChannelActivityRanker,
+} from "./channel-activity.js"
 import type { AnalogEvidenceLog } from "./analog-evidence.js"
 import {
 	createLiveAudioEvidence,
@@ -185,6 +187,9 @@ import {
 } from "./probes/ambient.js"
 import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import { pickChannelObservation } from "./probes/ambient-channel.js"
+import { placeAmbientDecode } from "./probes/ambient-placement.js"
+import { ConfirmMemory } from "./probes/confirm/confirm-memory.js"
+import type { AmbientPairContext } from "./probes/ambient.js"
 import {
 	ProbePool,
 	REPLAY_PROBE_PRIORITY,
@@ -246,6 +251,7 @@ import type {
 	BlockSummary,
 	EngineState,
 	FreqRange,
+	MaskRaster,
 	ObservationEndReason,
 	PipelineEvent,
 	TrackSnapshot,
@@ -275,6 +281,7 @@ import type {
 	UndecodedReason,
 } from "./types.js"
 import { AMBIENT_PAIR_MS } from "./types.js"
+import { DQ_DC_ADMIT_HZ } from "./detection-quality-contract.js"
 import {
 	coverageFingerprint,
 	createCoverageRefresh,
@@ -367,11 +374,62 @@ const REPLAY_PLANS_MAX = 64
 /** closed observation spans kept for late replay results. */
 const REPLAY_SPANS_MAX = 1024
 
+/**
+ * Stage 2 (not consulted in Stage 1): the question a detection capture will ask the decoder
+ * placements. Stage 1 has no trustworthy onset time (blocks are stamped when processed, not when
+ * their samples arrived), so a track is never treated as covered and is always captured within
+ * the existing capture budget. Stage 2 needs engine sample-arrival timestamps to fill `onsetMonoMs`.
+ */
+export interface ChannelLiveCoverageQuery {
+	sourceId: string
+	hz: number
+	/** The track's occupied bandwidth. */
+	widthHz: number
+	protocols: readonly ScannerProtocol[]
+	/**
+	 * The track's onset on the monotonic clock, from a sample-arrival timestamp of the engine
+	 * (Stage 2). Never a processing time minus a span: queued samples would place it too late.
+	 */
+	onsetMonoMs: number
+}
+export type ChannelLiveCoverage = (
+	q: ChannelLiveCoverageQuery,
+) => "covered" | "uncovered" | "uncertain"
+/** Frequency attribution of a replay decode: half a 12.5 kHz paging/DMR raster. */
+export const REPLAY_ATTRIBUTION_HALF_RASTER_HZ = 6_250
+
+/**
+ * The coverage predicate's containment rule: the track's [hz ± widthHz/2] lies inside the decoder
+ * channel's usable passband [channelHz ± passbandHz/2]. A non-finite or non-positive input: false.
+ */
+export function trackWithinPassband(
+	channelHz: number,
+	passbandHz: number,
+	hz: number,
+	widthHz: number,
+): boolean {
+	if (
+		![channelHz, passbandHz, hz, widthHz].every(Number.isFinite) ||
+		passbandHz <= 0 ||
+		widthHz < 0
+	)
+		return false
+	return Math.abs(hz - channelHz) + widthHz / 2 <= passbandHz / 2
+}
+
+/** Discoveries whose last decode time is kept for the ranker (the trial memory's 2 048). */
+export const DECODE_TIMES_MAX = 2_048
+
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
+	/**
+	 * Activity-ranked decoder channels: the ranker this service feeds (blocks, gated tracks,
+	 * decodes, replay outcomes, history). Absent: nothing is fed and the planner keeps its order.
+	 */
+	readonly channelActivity?: ChannelActivityRanker
 	/** WG10 req 3: the live demodulator's transmission evidence for identify; absent keeps today's behaviour. */
 	readonly analogEvidence?: IdentifyAnalogEvidence
 	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
@@ -763,6 +821,8 @@ export class ScannerService extends EventEmitter {
 		{ startHz: number; binHz: number; bins: number[]; snrDb: number }
 	>()
 	private readonly lastConfirm = new Map<string, number>()
+	/** trial choice 3a: identity pairing shared by every probe and ambient decoder, per discovery. */
+	private readonly confirmMemory = new ConfirmMemory(() => this.now())
 	/** WG11 req 1.7: the known protocol is the store's decoded protocol (`get` clones: no cheaper read). */
 	private readonly knownProtocols = createKnownProtocolMemory({
 		discovery: id => {
@@ -770,6 +830,10 @@ export class ScannerService extends EventEmitter {
 			return d ? { protocol: d.protocol, confidence: d.confidence } : undefined
 		},
 	})
+	/** per-discovery replay trial outcomes, persisted; orders the replay trials. */
+	private trialMemory: TrialMemory = new TrialMemory({ now: () => Date.now() })
+	/** the bounded share of detection captures for not-yet-admitted tracks. */
+	private readonly pendingCaptures = new PendingCaptureLimiter(() => this.now())
 	/** WG11 req 1.4: the band-plan ranges of the sweep ISM fill, rebuilt only when the plans change. */
 	private readonly bandBurstRanges = createBandRangeCache()
 	private readonly persistedLeases = new Map<string, PersistedLease>()
@@ -796,6 +860,109 @@ export class ScannerService extends EventEmitter {
 	private readonly replayPlans = new Map<string, readonly IqReplayTrial[]>()
 	/** The engine each source is attached to in the capture service. */
 	private readonly iqEngines = new Map<string, SpectrumEngine>()
+	/** Engine identity for the activity ranker: one id per engine object (weak, no bound needed). */
+	private readonly activityEngineIds = new WeakMap<object, string>()
+	private activityEngineSeq = 0
+	/** Last applied decode time per discovery (service clock), least recently set dropped. */
+	private readonly decodeTimes = new Map<string, number>()
+
+	private noteDecoded(
+		discoveryId: string,
+		sourceId: string,
+		protocol: ScannerProtocol,
+	): void {
+		this.decodeTimes.delete(discoveryId)
+		this.decodeTimes.set(discoveryId, this.now())
+		while (this.decodeTimes.size > DECODE_TIMES_MAX) {
+			const oldest = this.decodeTimes.keys().next()
+			if (oldest.done === true) break
+			this.decodeTimes.delete(oldest.value)
+		}
+		const hz = this.store.get(discoveryId)?.frequencyHz
+		if (hz !== undefined)
+			this.feedActivity(r => r.noteDecode(sourceId, hz, protocol))
+	}
+
+	private activityEngineId(sourceId: string): string | null {
+		const engine = this.spectrum.engine(sourceId)
+		if (!engine) return null
+		let id = this.activityEngineIds.get(engine)
+		if (id === undefined) {
+			id = `e${++this.activityEngineSeq}`
+			this.activityEngineIds.set(engine, id)
+		}
+		return id
+	}
+
+	/** Feeds the ranker; a ranker failure never disturbs the pipeline. */
+	private feedActivity(fn: (r: ChannelActivityRanker) => void): void {
+		const r = this.deps.channelActivity
+		if (!r) return
+		try {
+			fn(r)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"Channel activity feed failed",
+			)
+		}
+	}
+
+	/**
+	 * History for the ranker (pulled at most every 2 s per source by the ranker): decoded
+	 * discoveries and remembered replay successes in the tuned window, and the rolling-hour
+	 * occupancy duty. Ages are on this service's clock.
+	 */
+	private activityHistory(
+		sourceId: string,
+		window: { lowHz: number; highHz: number },
+	): {
+		decodes: { hz: number; protocol: string; ageMs: number }[]
+		successes: { hz: number; protocol: string; ageMs: number }[]
+		occupancy: { hz: number; duty: number }[]
+	} {
+		const now = this.now()
+		const decodes: { hz: number; protocol: string; ageMs: number }[] = []
+		const successes: { hz: number; protocol: string; ageMs: number }[] = []
+		const mid = (window.lowHz + window.highHz) / 2
+		for (const d of this.store.near(
+			mid,
+			(window.highHz - window.lowHz) / 2,
+			sourceId,
+		)) {
+			if (decodes.length >= 512) break
+			// The time of the last applied decode, never the discovery's activity time.
+			const decodedAt = this.decodeTimes.get(d.id)
+			if (d.confidence === "decoded" && decodedAt !== undefined)
+				decodes.push({
+					hz: d.frequencyHz,
+					protocol: d.protocol,
+					ageMs: Math.max(0, now - decodedAt),
+				})
+			for (const t of this.trialMemory.view(d.id))
+				if (t.lastDecodedAt !== undefined && successes.length < 512)
+					successes.push({
+						hz: d.frequencyHz,
+						protocol: t.protocol,
+						ageMs: Math.max(0, now - t.lastDecodedAt),
+					})
+		}
+		const occupancy: { hz: number; duty: number }[] = []
+		const occ = this.spectrum.occupancyQuery(
+			sourceId,
+			{ startHz: window.lowHz, endHz: window.highHz },
+			3_600_000,
+		)
+		for (const b of occ?.buckets ?? []) {
+			if (occupancy.length >= 512) break
+			if (b.observedMs > 0)
+				occupancy.push({
+					hz: b.startHz + occ!.bucketHz / 2,
+					duty: b.activeMs / b.observedMs,
+				})
+		}
+		return { decodes, successes, occupancy }
+	}
 	private readonly frequencyErrors = new Map<
 		string,
 		{ hz: number; ppm: number; n: number }
@@ -857,6 +1024,9 @@ export class ScannerService extends EventEmitter {
 
 	constructor(private readonly deps: ScannerServiceDeps) {
 		super()
+		deps.channelActivity?.setHistory((sourceId, window) =>
+			this.started ? this.activityHistory(sourceId, window) : null,
+		)
 		// WG11 req 6.7: the replay shapes come from the probe channel requests this module owns.
 		deps.iqCapture?.setShapes(probeReplayShapes())
 		if (
@@ -947,6 +1117,11 @@ export class ScannerService extends EventEmitter {
 			this.now = deps.now ?? Date.now
 			this.storageDir =
 				deps.settings.storage.dir || join(deps.stateDir, "scanner")
+			this.trialMemory = new TrialMemory({
+				dir: this.storageDir,
+				logger: this.log,
+				now: () => this.now(),
+			})
 			this.effective = mergeScannerSettings({
 				config: deps.settings,
 				sources: deps.sourceConfigs,
@@ -1006,6 +1181,7 @@ export class ScannerService extends EventEmitter {
 				newId: () => ulid(this.now()),
 				minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
 				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
+				channelRasters: (sourceId, hz) => this.channelRastersAt(sourceId, hz),
 				hintScope: () => ({
 					region: this.deps.region,
 					ranges: withScannerOverlays(
@@ -1143,6 +1319,10 @@ export class ScannerService extends EventEmitter {
 				allocatePort: () => this.allocatePort(),
 				logger: deps.logger,
 				now: this.now,
+				confirm: {
+					memory: this.confirmMemory,
+					scopeOf: req => this.probeConfirmScope(req),
+				},
 			})
 			this.ambient = new AmbientEvidence({
 				decoders: deps.decoders,
@@ -1154,6 +1334,10 @@ export class ScannerService extends EventEmitter {
 				sampleRateOf: sourceId => deps.sources.getCaps(sourceId)?.sampleRate,
 				centreOf: sourceId => deps.sources.getCaps(sourceId)?.centerFreq,
 				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
+				confirm: {
+					memory: this.confirmMemory,
+					scopeOf: ctx => this.ambientConfirmScope(ctx),
+				},
 			})
 			this.channelTaps = deps.channelOwnership
 				? new ChannelTaps({
@@ -1264,6 +1448,8 @@ export class ScannerService extends EventEmitter {
 		// A restarted service must not publish during its new recovery barrier.
 		this.store.off("change", this.onStoreChange)
 		let loaded: LoadedState
+		// corrupt or missing trial memory is ignored inside `load` (never throws).
+		await this.trialMemory.load()
 		try {
 			loaded = await this.persistence.load()
 			this.stateLoaded = true
@@ -1567,6 +1753,7 @@ export class ScannerService extends EventEmitter {
 			attempt(() => this.ambient?.stop()),
 			attempt(() => this.deps.cpuMeter?.stop()),
 			attempt(() => this.recorder?.stop()),
+			attempt(() => this.trialMemory.flush()),
 		]
 		for (const registration of this.constructorListeners) {
 			if (registration.settled) continue
@@ -2536,7 +2723,10 @@ export class ScannerService extends EventEmitter {
 		reason: EngineStreamReason,
 	): void => {
 		this.cancelChannelSource(sourceId)
-		if (reason === "stop") this.detachIqEngine(sourceId)
+		if (reason === "stop") {
+			this.detachIqEngine(sourceId)
+			this.feedActivity(r => r.stop(sourceId))
+		}
 		this.streamFloor.set(sourceId, reason === "stop" ? stream + 1 : stream)
 		// A summary of an ended stream never measures for identify.
 		this.lastSummaries.delete(sourceId)
@@ -2604,7 +2794,7 @@ export class ScannerService extends EventEmitter {
 			burstRanges: ranges
 				.filter(r => (r.protocols ?? []).some(p => BURST_PROTOCOLS.has(p)))
 				.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
-			rasters: ranges.flatMap(r => r.rasters ?? []),
+			rasters: this.maskRasters(sourceId, ranges),
 			obwHz: [...new Set(ranges.flatMap(r => r.obwHz ?? []))],
 			// § 6.2: in-window while no sweep lease holds the source (truncated segments → `edge`).
 			inWindow: this.arbiter.holder(sourceId) === undefined,
@@ -2629,7 +2819,7 @@ export class ScannerService extends EventEmitter {
 			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
 				ranges.push(...b.ranges.filter(isRangeEnabled))
 		const entries = ranges.map((r): ChannelPlanEntry => {
-			const raster = r.rasters?.[0]
+			const raster = slotRasterOf(r)
 			const width =
 				r.obwHz?.[0] ?? raster?.spacingHz ?? CHANNEL_GATE_DEFAULT_WIDTH_HZ
 			return {
@@ -2684,15 +2874,92 @@ export class ScannerService extends EventEmitter {
 		return out
 	}
 
+	/**
+	 * trial choice: segment-split rasters, each bounded to its range. The passive job adds the band
+	 * plans' rasters, as `channelPlanOf` adds their channel slots, so busy bands split at
+	 * channel edges even though the passive job's own range has no raster.
+	 */
+	private maskRasters(
+		sourceId: string,
+		ranges: readonly ScanRange[],
+	): MaskRaster[] {
+		const all = [...ranges]
+		const passive = [...this.jobs.values()].some(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state) && j.passive,
+		)
+		if (passive)
+			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+				all.push(...b.ranges.filter(isRangeEnabled))
+		const out: MaskRaster[] = []
+		const seen = new Set<string>()
+		for (const r of all)
+			for (const x of r.rasters ?? []) {
+				const key = `${x.spacingHz}:${x.firstChannelHz}:${r.startHz}:${r.endHz}`
+				if (seen.has(key)) continue
+				seen.add(key)
+				out.push({ ...x, startHz: r.startHz, endHz: r.endHz })
+			}
+		return out
+	}
+
+	/**
+	 * Placement rasters at `hz`: the running jobs' ranges, plus (trial choice, follow-up 6.1) the band
+	 * plans' ranges while the source's passive job runs, so a passive record keys to its channel.
+	 */
 	private rastersAt(sourceId: string, hz: number) {
-		return [...this.jobs.values()]
-			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
+		const jobs = [...this.jobs.values()].filter(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state),
+		)
+		const out = jobs
 			.flatMap(j => j.spec.ranges)
 			.filter(r => isRangeEnabled(r) && hz >= r.startHz && hz <= r.endHz)
 			.flatMap(r => r.rasters ?? [])
+		if (jobs.some(j => j.passive))
+			out.push(...this.channelRastersAt(sourceId, hz))
+		return out
+	}
+
+	/**
+	 * Amendment 10 (DQ 1.16): while the source's passive job runs, every raster of each band plan
+	 * range at `hz`. The store keeps, per observation, only the rasters at least half its OBW
+	 * wide, then snaps to the nearest and otherwise keys to the nearest channel of the finest:
+	 * a 3 kHz airband carrier keys to its 8.33 kHz channel, a 50 kHz VDL2 burst to its 25 kHz one.
+	 */
+	private channelRastersAt(sourceId: string, hz: number) {
+		const passive = [...this.jobs.values()].some(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state) && j.passive,
+		)
+		if (!passive) return []
+		const out: NonNullable<ScanRange["rasters"]> = []
+		for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+			for (const r of b.ranges) {
+				if (!isRangeEnabled(r) || hz < r.startHz || hz > r.endHz) continue
+				for (const x of r.rasters ?? []) if (x.spacingHz > 0) out.push(x)
+			}
+		return out
 	}
 
 	// === pipeline events → observations ===
+
+	/** O(1) per event plus O(tracks) per block inside the ranker. */
+	private feedPipeline(sourceId: string, ev: PipelineEvent): void {
+		if (!this.deps.channelActivity) return
+		if (
+			ev.kind !== "epoch-started" &&
+			ev.kind !== "block-summary" &&
+			ev.kind !== "track-close"
+		)
+			return
+		const engineId = this.activityEngineId(sourceId)
+		if (engineId === null) return
+		this.feedActivity(r => {
+			if (ev.kind === "epoch-started")
+				r.ingestEpoch(sourceId, engineId, ev.epoch)
+			else if (ev.kind === "block-summary")
+				r.ingestBlock(sourceId, engineId, ev.summary)
+			else r.ingestTrack(sourceId, engineId, ev.track)
+		})
+	}
 
 	private onPipelineEvent(
 		sourceId: string,
@@ -2700,6 +2967,7 @@ export class ScannerService extends EventEmitter {
 		epoch: EngineEpoch,
 	): void {
 		const drivers = this.driversOn(sourceId)
+		this.feedPipeline(sourceId, ev)
 		switch (ev.kind) {
 			case "epoch-started":
 				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
@@ -2956,8 +3224,14 @@ export class ScannerService extends EventEmitter {
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
 		)
+		const tuned = this.lastSummaries.get(live.sourceId)
+		const dcCentred =
+			tuned !== undefined &&
+			tuned.epoch === track.epoch &&
+			dcCentredOf(track.centreHz, track.obwHz, tuned.centreHz)
 		const res = this.store.ingest(
 			{
+				...(dcCentred ? { dcCentred: true } : {}),
 				id: live.observationId,
 				sourceId: live.sourceId,
 				jobIds: live.jobIds,
@@ -3120,8 +3394,14 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private classify(track: TrackSnapshot, sourceId: string): Classification {
+		// trial choice: on a rastered band a piece is at most its channel, never "wideband".
+		let widest = 0
+		for (const r of this.rastersAt(sourceId, track.centreHz))
+			if (r.spacingHz > widest) widest = r.spacingHz
+		const seen =
+			widest > 0 && track.obwHz > widest ? { ...track, obwHz: widest } : track
 		const c = classifySpectral(
-			track,
+			seen,
 			this.classifierContext(sourceId, track.centreHz),
 		)
 		// § 4.7: unverified RF: spectral evidence alone never lifts a discovery past `candidate`.
@@ -3819,42 +4099,89 @@ export class ScannerService extends EventEmitter {
 			this.drivers.get(jobId)?.onEvidence(probeId, ev)
 	}
 
-	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
+	/**
+	 * The observations an ambient decode names. A channel decode (rtl433) names the one
+	 * observation inside its passband (pickChannelObservation). A point decode names the
+	 * nearest observation whose track reaches it (placeAmbientDecode): half the decoder's
+	 * channel width for an ambient-only protocol (AIS, ACARS, VDL2, LoRa), else
+	 * max(1.5 kHz, OBW / 2); a tie between two signals names nothing.
+	 */
+	private placeAmbient(e: {
+		sourceId: string
+		hz: number
+		at: number
+		protocol: DecodeEvidence["protocol"] | null
+		passband?: AmbientEvidenceEvent["passband"]
+		freqHz?: number | undefined
+	}): LiveObservation[] {
 		const now = this.now()
-		const ambientOnly = SCANNER_AMBIENT_PROTOCOLS.includes(e.ev.protocol)
 		const observations = [...this.live.values(), ...this.recent]
-		// A channel decode (rtl433) names one observation inside its passband.
-		const picked = e.passband
-			? pickChannelObservation(
-					observations,
-					{
-						sourceId: e.sourceId,
-						passband: e.passband,
-						at: e.ev.at,
-						freqHz: e.freqHz,
-					},
-					now,
-					AMBIENT_PAIR_MS,
-				)
-			: null
-		const candidates = e.passband
-			? picked
-				? [picked]
-				: []
-			: observations.filter(o => {
-					const t = o.lastTrack
-					if (o.sourceId !== e.sourceId || !t) return false
-					// WG7: an ambient-only decode (AIS, ACARS, VDL2, LoRa) names only a track within the
-					// 1 kHz decode tolerance, so a wide track near its channel is never named by it.
-					const tolHz = ambientOnly
-						? SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
-						: Math.max(1500, t.obwHz / 2)
-					if (Math.abs(t.centreHz - e.hz) > tolHz) return false
-					return (
-						e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
-						e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
-					)
-				})
+		if (e.passband) {
+			const picked = pickChannelObservation(
+				observations,
+				{
+					sourceId: e.sourceId,
+					passband: e.passband,
+					at: e.at,
+					freqHz: e.freqHz,
+				},
+				now,
+				AMBIENT_PAIR_MS,
+			)
+			return picked ? [picked] : []
+		}
+		return placeAmbientDecode(
+			observations,
+			{ sourceId: e.sourceId, hz: e.hz, at: e.at, protocol: e.protocol },
+			now,
+			AMBIENT_PAIR_MS,
+		)
+	}
+
+	/** Confirm-memory scope of an observation: its discovery, else the observation itself. */
+	private confirmScopeOf(observationId: string): string {
+		const discoveryId =
+			this.findObservation(observationId)?.discoveryId ??
+			this.store.discoveryIdOf(observationId)
+		return discoveryId ? `d:${discoveryId}` : `o:${observationId}`
+	}
+
+	/** trial choice 3a: a live probe's decodes share acceptance with its discovery; a replay keeps its own. */
+	private probeConfirmScope(req: ProbeRequest): string | null {
+		if (req.replay) return null
+		return this.confirmScopeOf(req.observationId)
+	}
+
+	/**
+	 * trial choice 3a: an ambient decode shares acceptance with the discovery it would be placed on
+	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone.
+	 */
+	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
+		const placed = this.placeAmbient({
+			sourceId: ctx.sourceId,
+			hz: ctx.hz,
+			at: ctx.at,
+			protocol: ctx.protocol ?? null,
+			...(ctx.passband ? { passband: ctx.passband } : {}),
+			...(ctx.freqHz !== undefined ? { freqHz: ctx.freqHz } : {}),
+		})
+		const scopes = new Set(
+			placed.map(o => this.confirmScopeOf(o.observationId)),
+		)
+		if (scopes.size !== 1) return null
+		const [scope] = scopes
+		return scope ?? null
+	}
+
+	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
+		const candidates = this.placeAmbient({
+			sourceId: e.sourceId,
+			hz: e.hz,
+			at: e.ev.at,
+			protocol: e.ev.protocol,
+			...(e.passband ? { passband: e.passband } : {}),
+			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
+		})
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
 		// trials leave the count to this path).
@@ -3904,7 +4231,7 @@ export class ScannerService extends EventEmitter {
 		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
 		const wasLiveDecoded = live.decoded
-		this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
+		const change = this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
 		// The decode may have merged the discovery (identity key): follow the survivor.
 		const survivor = this.store.discoveryIdOf(live.observationId) ?? discoveryId
 		live.discoveryId = survivor
@@ -3912,6 +4239,9 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return accepted
 		live.decoded = true
+		// Only a decode this application accepted dates the decode history.
+		if (change !== null && ev.crcClean)
+			this.noteDecoded(survivor, live.sourceId, ev.protocol)
 		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
 			live.acceptedIdentity = {
@@ -4410,13 +4740,16 @@ export class ScannerService extends EventEmitter {
 		const port = this.deps.iqCapture
 		if (
 			!port ||
-			live.discoveryId === null ||
 			live.acceptedIdentity !== undefined ||
 			track.flags.iqImage ||
 			track.flags.spur ||
 			this.iqTried.has(live.observationId)
 		)
 			return
+		// a gate-passed track the store has not admitted yet is captured too (bounded share
+		// of the per-source budget), so its first transmission can still be replayed and decoded.
+		const pending = live.discoveryId === null
+		if (pending && track.gate !== "passed") return
 		const epoch = this.spectrum.engine(live.sourceId)?.currentEpoch()
 		if (
 			!epoch ||
@@ -4424,6 +4757,7 @@ export class ScannerService extends EventEmitter {
 			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
 		)
 			return
+		if (pending && !this.pendingCaptures.take(live.sourceId)) return
 		this.iqTried.add(live.observationId)
 		try {
 			const res = port.capture({
@@ -4444,8 +4778,12 @@ export class ScannerService extends EventEmitter {
 					captureId: res.captureId,
 					sourceId: live.sourceId,
 				})
-			} else this.giveUpIqCapture(live.observationId)
+			} else {
+				if (pending) this.pendingCaptures.release(live.sourceId)
+				this.giveUpIqCapture(live.observationId)
+			}
 		} catch (err: unknown) {
+			if (pending) this.pendingCaptures.release(live.sourceId)
 			this.giveUpIqCapture(live.observationId)
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
 		}
@@ -4825,6 +5163,24 @@ export class ScannerService extends EventEmitter {
 	 * holdMs (e.g. DMR on dsd-fme auto: 1 800 ms of the at most 4 000 ms capture). A shorter or
 	 * gapped capture, or a capture whose plan or view is gone, is no miss.
 	 */
+	/** The trial is the known protocol's: flagged by the queue, or planned as `knownProtocol`. */
+	private isKnownProtocolTrial(
+		captureId: string,
+		trial: IqReplayResult["trials"][number],
+	): boolean {
+		if (trial.known) return true
+		return (
+			this.replayPlans
+				.get(captureId)
+				?.some(
+					p =>
+						p.knownProtocol === true &&
+						p.protocol === trial.protocol &&
+						p.mode.decoderType === trial.decoderType,
+				) === true
+		)
+	}
+
 	private replayFullHold(
 		captureId: string,
 		trial: IqReplayResult["trials"][number],
@@ -4834,7 +5190,7 @@ export class ScannerService extends EventEmitter {
 			.get(captureId)
 			?.find(
 				p =>
-					p.known &&
+					(p.known || p.knownProtocol === true) &&
 					p.protocol === trial.protocol &&
 					p.mode.decoderType === trial.decoderType,
 			)
@@ -4864,7 +5220,39 @@ export class ScannerService extends EventEmitter {
 				: null,
 			priors: narrowestPriors(withScannerOverlays(ranges), capture.rfHz),
 			narrowRaster: narrowRasterAt(ranges, capture.rfHz),
+			trialMemory: discoveryId ? this.trialMemory.view(discoveryId) : null,
+			nowMs: this.now(),
 		}
+	}
+
+	/**
+	 * Every replay trial outcome is remembered on the discovery (non-attempts ignored), resolved
+	 * after the evidence was applied: the observation's current discovery, else the stored one.
+	 */
+	private rememberReplayTrials(
+		result: IqReplayResult,
+		live: LiveObservation | undefined,
+		fallback: string | null,
+	): void {
+		const discoveryId =
+			live?.discoveryId ??
+			(result.observationId
+				? this.store.discoveryIdOf(result.observationId)
+				: undefined) ??
+			fallback
+		if (!discoveryId) return
+		for (const t of result.trials)
+			this.trialMemory.record(
+				discoveryId,
+				t.protocol,
+				t.mode !== undefined ? "analog-demod" : t.decoderType,
+				t.outcome,
+			)
+	}
+
+	/** the discovery's remembered replay trial outcomes (internal; no DTO field yet). */
+	trialMemoryOf(discoveryId: string): readonly TrialMemoryEntry[] {
+		return this.trialMemory.view(discoveryId)
 	}
 
 	applyReplayResult(result: IqReplayResult): void {
@@ -4872,6 +5260,8 @@ export class ScannerService extends EventEmitter {
 		const live = result.observationId
 			? this.findObservation(result.observationId)
 			: undefined
+		const rfHz = this.replayRfHz(result)
+		this.feedReplayTrials(result, rfHz)
 		if (result.observationId) {
 			this.noteReplaySettled(result.observationId, summary.replayDecoded)
 			try {
@@ -4893,12 +5283,23 @@ export class ScannerService extends EventEmitter {
 				this.log.warn({ err: safeErrorFields(err) }, "Replay evidence failed")
 			}
 		}
-		const discoveryId =
+		const ownDiscovery =
 			live?.discoveryId ??
 			(result.observationId
 				? this.store.discoveryIdOf(result.observationId)
 				: undefined) ??
 			null
+		// Attribution by frequency: an observation that left live/recent without a discovery
+		// (a pending capture) gives its decode to the one stored discovery on its channel.
+		const byFrequency =
+			!live && ownDiscovery === null && result.decoded && rfHz !== null
+				? this.discoveryOnChannel(
+						result.sourceId,
+						rfHz,
+						result.decoded.protocol,
+					)
+				: null
+		const discoveryId = ownDiscovery ?? byFrequency
 		if (result.decoded) {
 			const ev: DecodeEvidence = {
 				protocol: result.decoded.protocol,
@@ -4926,6 +5327,19 @@ export class ScannerService extends EventEmitter {
 						this.applyingReplay = false
 					}
 				}
+			} else if (byFrequency !== null) {
+				if (this.store.get(byFrequency)) {
+					const change = this.store.applyEvidence(byFrequency, ev, {})
+					this.dirty = true
+					applied = true
+					if (
+						change !== null &&
+						ev.identity &&
+						ev.crcClean &&
+						this.store.get(byFrequency)?.confidence === "decoded"
+					)
+						this.noteDecoded(byFrequency, result.sourceId, ev.protocol)
+				}
 			} else if (result.observationId && discoveryId)
 				// the observation closed and left `recent` (10 s) before its replay
 				// ended; the discovery it fed is still stored: the decode lands there.
@@ -4933,14 +5347,20 @@ export class ScannerService extends EventEmitter {
 			// The memory counts a decode only where it was applied.
 			const counted = live?.discoveryId ?? discoveryId
 			if (applied && counted) this.knownProtocols.recordDecode(counted)
+			// resolved after the evidence: a decode may just have admitted a pending observation.
+			this.rememberReplayTrials(result, live, discoveryId)
 			this.replayPlans.delete(result.captureId)
 			this.replayOrders.delete(result.captureId)
 			return
 		}
+		this.rememberReplayTrials(result, live, discoveryId)
 		const ran = summary.unsuccessful
 		if (discoveryId)
 			for (const t of ran)
-				if (t.known && this.replayFullHold(result.captureId, t))
+				if (
+					this.isKnownProtocolTrial(result.captureId, t) &&
+					this.replayFullHold(result.captureId, t)
+				)
 					this.knownProtocols.recordMiss(discoveryId, t.protocol)
 		this.replayPlans.delete(result.captureId)
 		this.replayOrders.delete(result.captureId)
@@ -4959,6 +5379,67 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/** The captured channel: the result's own frequency, else the capture's view. */
+	private replayRfHz(result: IqReplayResult): number | null {
+		if (typeof result.rfHz === "number" && Number.isFinite(result.rfHz))
+			return result.rfHz
+		try {
+			const hz = this.deps.iqCapture?.view(result.captureId)?.rfHz
+			return typeof hz === "number" && Number.isFinite(hz) ? hz : null
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * Replay outcomes for the activity ranker, at the captured channel. A failure counts only when
+	 * the capture held the trial's whole hold without a gap; cancelled, skipped, unsupported and
+	 * not-needed trials count for nothing.
+	 */
+	private feedReplayTrials(result: IqReplayResult, rfHz: number | null): void {
+		if (!this.deps.channelActivity || rfHz === null) return
+		let view: IqCaptureView | null | undefined
+		try {
+			view = this.deps.iqCapture?.view(result.captureId)
+		} catch {
+			view = null
+		}
+		const plan = this.replayPlans.get(result.captureId)
+		for (const t of result.trials) {
+			if (t.mode !== undefined) continue
+			const hold = plan?.find(
+				p => p.protocol === t.protocol && p.mode.decoderType === t.decoderType,
+			)?.mode.holdMs
+			const weight = replayTrialWeight(
+				t.outcome,
+				replayMissEligible(view, hold),
+			)
+			this.feedActivity(r =>
+				r.noteReplayTrial(result.sourceId, rfHz, t.protocol, weight),
+			)
+		}
+	}
+
+	/**
+	 * The one stored discovery of `sourceId` within half a 12.5 kHz raster (6 250 Hz) of `hz`, when
+	 * it can take a `protocol` decode (same protocol, or not decoded yet). Uniqueness is decided over
+	 * every discovery in reach first: two or more, or a single incompatible one, give none.
+	 */
+	private discoveryOnChannel(
+		sourceId: string,
+		hz: number,
+		protocol: ScannerProtocol,
+	): string | null {
+		const hits = this.store.near(
+			hz,
+			REPLAY_ATTRIBUTION_HALF_RASTER_HZ,
+			sourceId,
+		)
+		if (hits.length !== 1) return null
+		const d = hits[0]!
+		return d.protocol === protocol || d.confidence !== "decoded" ? d.id : null
+	}
+
 	/**
 	 * A replay decode of an observation the scanner no longer holds (closed and out of `recent`): the
 	 * observation's evidence and the stored discovery take it, in the capture's epoch (carried by the
@@ -4972,8 +5453,18 @@ export class ScannerService extends EventEmitter {
 		if (!this.store.get(discoveryId)) return false
 		// The observation's own rules decide (epoch, not after a retune/hop end): refused, nothing lands.
 		if (!this.store.appendObservationEvidence(observationId, ev)) return false
-		this.store.applyEvidence(discoveryId, ev, {})
+		const change = this.store.applyEvidence(discoveryId, ev, {})
 		this.dirty = true
+		const d = this.store.get(discoveryId)
+		const sourceId = Array.isArray(d?.sourceIds) ? d.sourceIds[0] : undefined
+		if (
+			change !== null &&
+			ev.identity &&
+			ev.crcClean &&
+			d?.confidence === "decoded" &&
+			sourceId !== undefined
+		)
+			this.noteDecoded(discoveryId, sourceId, ev.protocol)
 		return true
 	}
 
@@ -5092,6 +5583,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onEngineFatal = (sourceId: string, err: Error): void => {
+		this.feedActivity(r => r.stop(sourceId))
 		if (this.iqEngines.delete(sourceId))
 			this.deps.iqCapture?.detachSource(sourceId)
 		this.cancelChannelSource(sourceId, "engine-failed")
@@ -5111,6 +5603,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onSourceDown = (sourceId: string): void => {
+		this.feedActivity(r => r.stop(sourceId))
 		this.cancelChannelSource(sourceId)
 		if (!this.started) return
 		for (const o of this.live.values())
@@ -5181,6 +5674,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onSourceRemoved = (sourceId: string): void => {
+		this.feedActivity(r => r.stop(sourceId))
 		this.cancelChannelSource(sourceId)
 		this.detachIqEngine(sourceId)
 		this.store.clearPending(sourceId) // DQ 1.5
@@ -6510,6 +7004,8 @@ export class ScannerService extends EventEmitter {
 		for (const discovery of evicted) {
 			this.lastConfirm.delete(discovery.id)
 			this.knownProtocols.forget(discovery.id)
+			this.trialMemory.forget(discovery.id)
+			this.decodeTimes.delete(discovery.id)
 			// the store stamped each copy with the revision of its removal
 			this.emitDiscovery({ change: "deleted", discovery })
 		}
@@ -6535,7 +7031,11 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		// WG11 req 1.7: a deleted discovery drops its known-protocol miss count. A merge reports
 		// the merged-away discovery as `deleted` and the survivor (which keeps its count) as `merged`.
-		if (change === "deleted") this.knownProtocols.forget(id)
+		if (change === "deleted") {
+			this.knownProtocols.forget(id)
+			this.trialMemory.forget(id)
+			this.decodeTimes.delete(id)
+		}
 		// WG2: eviction and age pruning never remove a lockout, and operator deletion
 		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
 		// locked survivor schedules a replan (no-op when no job's lockout list changes).
@@ -7105,3 +7605,36 @@ const probeProtocols: readonly ScannerProtocol[] = [
 	"aprs",
 	"ism",
 ]
+
+/**
+ * trial choice: the raster that sizes a range's channel slots. An analog-am range with several
+ * rasters uses its finest (airband 25 kHz and 8.33 kHz → 8.33 kHz): an AM voice channel occupies
+ * about 6 kHz (2 × 3 kHz audio), so a 25 kHz slot adds 25 / 8.33 = 3 × the noise, 4.8 dB, and
+ * a 4 to 6.5 dB carrier never reaches the 6 dB pass. Every 25 kHz channel sits on the 8.33 kHz
+ * grid (exact thirds), so no channel loses its slot. Any other range keeps its first raster.
+ */
+export function slotRasterOf(
+	r: ScanRange,
+): NonNullable<ScanRange["rasters"]>[number] | undefined {
+	const rasters = r.rasters ?? []
+	const first = rasters[0]
+	if (first === undefined || !(r.protocols ?? []).includes("analog-am"))
+		return first
+	let finest = first
+	for (const x of rasters)
+		if (x.spacingHz > 0 && x.spacingHz < finest.spacingHz) finest = x
+	return finest
+}
+
+/**
+ * DQ 1.15: the track's nearer edge (centre ± OBW / 2) lies within `DQ_DC_ADMIT_HZ` of the tuned
+ * centre. A non-finite or non-positive OBW counts as zero width.
+ */
+export function dcCentredOf(
+	centreHz: number,
+	obwHz: number,
+	tunedHz: number,
+): boolean {
+	const half = Number.isFinite(obwHz) && obwHz > 0 ? obwHz / 2 : 0
+	return Math.abs(centreHz - tunedHz) - half <= DQ_DC_ADMIT_HZ
+}

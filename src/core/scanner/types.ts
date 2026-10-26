@@ -199,6 +199,11 @@ export interface ObservationInput {
 	hopIndex?: number
 	/** Sweep mode (§ 7.2 (b)). */
 	singleBlockSurfacingAllowed: boolean
+	/**
+	 * (DQ 1.15): the track centre lies within `DQ_DC_ADMIT_HZ` of the tuned centre of
+	 * its epoch. Such an evidence-less observation never creates a record.
+	 */
+	dcCentred?: boolean
 }
 
 // ---------------------------------------------------------------- stored records (§ 7.1)

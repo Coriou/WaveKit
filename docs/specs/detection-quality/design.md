@@ -49,6 +49,15 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_CONSOLIDATE_GROUP_MAX`  | 16 (survivor plus 15)          | 7.3, 7.8    |
 | `DQ_CONSOLIDATE_SCAN_MAX`   | 32                             | 7.3, 7.7    |
 | `DQ_YOUNG_OBW_RATIO`        | 3                              | 9.2, 9.6    |
+| `DQ_SUSTAIN_MEDIAN_SNR_DB`  | 12                             | 1.4b        |
+| `DQ_SUSTAIN_FLOOR_SNR_DB`   | 9                              | 1.4b        |
+| `DQ_SUSTAIN_MS`             | 3 000                          | 1.4b        |
+| `DQ_SUSTAIN_MIN_SAMPLES`    | 3                              | 1.4b        |
+| `DQ_SUSTAIN_MAX_GAP_MS`     | 2 500                          | 1.4b        |
+| `DQ_SUSTAIN_SAMPLES`        | 8                              | 1.4b        |
+| `DQ_SUSTAIN_PER_SOURCE`     | 512                            | 1.4b        |
+| `DQ_LOCAL_SNR_DB`           | 6                              | 1.15        |
+| `DQ_DC_ADMIT_HZ`            | 12 500                         | 1.15        |
 
 No change to `packages/api-types`, the REST or WebSocket shapes, or
 `docs/CLI-COORDINATION.md`. Pending entries are memory-only. The persisted and journaled
@@ -550,6 +559,63 @@ As 9.7: no new index query; `associationFamily` is a field read on the cached vi
 (O(1)); two compares per observation in the medians pass. Ingest cost is measured on the
 store bench before and after and reported (9.9), not asserted.
 
+## 10. Sustained admission and segment split (amendment)
+
+Requirements 1.4b and 1.11 to 1.14. Root causes from an offline replay of private hunt
+captures through the real scanner (no captured data is committed): the 18 dB create
+threshold refused gated tracks at 7 to 17 dB, a continuous emitter is one observation so the
+3-observation repeat rule never fired, AM airband was diluted by 25 kHz slots, and busy bands
+chained adjacent channels into 80 to 350 kHz segments whose averaged SNR was refused (or,
+when admitted, one wideband record covered several emitters).
+
+### Store
+
+`PendingAdmission.sustained(obs)` keeps one run per observation id (`SustainRun`:
+`firstAt`, `lastAt`, newest 8 SNRs). `admits()` order: invalid, overload, 18 dB, repeat
+rule (`note`), then `sustained`. A sustained promotion returns `"create"`, so the bucket's
+pending entry is consumed. The SNR read is `admissionSnrOf`: the track's channel SNR, or its
+`peakChannelSnrDb` when that is higher.
+
+### Gate and tracker
+
+`ChannelGateReading.peakChannelSnrDb`: the wide-track branch tracks the best covering slot by
+comparing p / f linearly (only the winner pays a `log10`); a one-slot reading copies its
+channel SNR. The tracker stores it with the channel SNR and puts it on the snapshot only when
+it differs. `slotRasterOf` picks the slot raster per range (1.12). The tracker's -20 dB OBW
+is capped at its widest single-block segment.
+
+### Segmenter
+
+`segment()` takes optional `dipSplit`, `channelEdges`, `sideband` and `channel` options;
+absent, it behaves as before. Dip cuts come from one O(width) pass over a running box mean
+(dB) per run and are merged into the sorted raster edges. `mergeSkirts` takes the rules: the
+one-channel and sideband tests come before the prominence test, and a prominence merge whose
+merged span holds a channel edge is refused (binary search over the sorted edges). The
+pipeline sets the options from `DIP_SMOOTH_HZ`, `SIDEBAND_DB` and `CHANNEL_PEAK_FRACTION`;
+`channelEdges` are the edges of each range's coarsest raster. `MaskRaster` adds optional
+`startHz`/`endHz`; `applyMasks` cuts a bounded raster only inside its range. The scanner's
+masks bound every job raster to its range and, while the passive job runs, add the band
+plans' rasters.
+
+### Local floor, DC and channel keys (1.15, 1.16)
+
+The main tracker gets `localBins` (12.5 kHz of bins) and, per extended block, sorts at most
+2 x localBins neighbour powers in a reused scratch array for their median; the snapshot
+carries the mean (`localSnrDb`). The scanner sets `dcCentred` from the last block summary of
+the same epoch. `channelRastersAt` gives the store every raster of each band-plan range while passive runs,
+and `rastersAt` includes them; `gridFor` keeps those at least half the observation's OBW wide,
+and an observation off every tolerance falls back to the nearest channel of the finest kept. The tracker's `localSnr` also stores the matched-window SNR
+(1.11), which feeds `peakChannelSnrDb` in `stepReading`. `classify` clamps the OBW it shows the classifier to
+that channel width.
+
+### CPU
+
+Measured with a private bench of `SpectrumPipeline` alone (2.4 Msps, N 2048, 50 ms blocks,
+24 NFM carriers in clusters of four, one wide FM, airband rasters, 8.33 kHz channel plan) on
+the development Mac; see the lane report for the numbers and load average. The added work is
+per block and proportional to the on-bins (one smoothing pass, one valley scan per merge
+candidate, a -20 dB width scan only past the cap), never per sample.
+
 ## CPU and hot path (`docs/PERFORMANCE.md`)
 
 | Change                              | Rate                      | Cost                                             |
@@ -716,6 +782,24 @@ observation whose OBW is outside a record's band never joins it by the cross-fam
 route, and joins it only by the same-family route within today's tolerance.
 _Validates 9.3, 9.4, 9.8._
 
+**Property 23: Pure noise never promotes.** For any sequence of evidence-less, not-overload
+observations at or under 11.99 dB, with any id reuse, cadence and closes, no discovery is
+created. _Validates 1.3, 1.4, 1.4b._
+
+**Property 24: Sustained promotion.** For one observation id and any sequence of sample times
+and SNRs, a discovery exists iff the 1.4b reference run (samples >= 9 dB, gaps <= 2 500 ms,
+span >= 3 000 ms, at least 3 samples, median of the newest 8 >= 12 dB) or the 18 dB rule
+fires. _Validates 1.4b._
+
+**Property 25: Pure noise through the pipeline.** For any seed and raster (8.33, 12.5 or
+25 kHz, with or without split rasters), 3.5 s of Gaussian noise through the pipeline, gate,
+split rules and store at the scanner's ingest cadence creates no discovery.
+_Validates 1.3, 1.4, 1.4b._
+
+**Property 26: Split rules only cut.** For any block spectrum, the segments with every 1.13
+rule on are ordered, disjoint, non-empty, and every on-bin they hold lies in a segment of the
+plain segmenter. _Validates 1.13._
+
 All fast-check properties run with `numRuns: 100` or more and carry the trace comment
 (`// Feature: detection-quality, Property N: ...`).
 
@@ -731,3 +815,10 @@ Properties 19 to 22). Expected to change: `consolidation.property.test.ts` and
 `discovery-store-consolidate.test.ts` (band test, association family),
 `discovery-store-evidence-family.test.ts` and `store-index.property.test.ts` (list key),
 and any 2.6 fixture that relied on the median ratio.
+
+Tests for amendment 10: `tests/unit/core/scanner/discovery-store-sustained.test.ts`
+(1.4b and 1.11 fixtures, Properties 23 and 24), `tests/unit/core/spectrum/segment-split.test.ts`
+(1.14 scene fixtures, Property 25), `tests/unit/core/spectrum/emissions/segmenter-split.test.ts`
+(1.13 bounds, Property 26), `tests/unit/core/scanner/slot-raster.test.ts` (1.12). Changed:
+`detection-quality-contract.test.ts` (new constants), `channel-gate.test.ts` (peak slot),
+`scanner-service-range-masks.test.ts` (bounded rasters).

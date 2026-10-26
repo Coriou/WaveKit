@@ -2,6 +2,10 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	familyOf,
+	inPagerRange,
+} from "../../../../src/core/scanner/classify/classifier.js"
+import {
 	IQ_REPLAY_MAX_TRIALS,
 	type IqCaptureView,
 	type IqReplayPlanInput,
@@ -421,12 +425,18 @@ describe("planReplayTrials", () => {
 					const analogWanted = knownAnalog || priorAnalog
 					const analogs = out.filter(t => t.kind === "analog")
 					expect(analogs).toHaveLength(analogWanted ? 1 : 0)
+					// In a paging range the pager trials run before any analog trial; a known analog
+					// trial behind them is planned unflagged (the queue runs flagged trials first).
+					const pagerTrials = out.filter(
+						t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
+					)
+					const pagerFirst = inPagerRange(c.priors) && pagerTrials.length > 0
 					for (const t of out) {
 						expect(t.mode.decoderType).not.toBe("rtl433")
 						if (t.kind === "analog") {
 							expect(["analog-fm", "analog-am"]).toContain(t.protocol)
 							if (knownAnalog) {
-								expect(t.known).toBe(true)
+								expect(t.known).toBe(!pagerFirst)
 								expect(t.protocol).toBe(c.known)
 								expect(t.analogMode).toBe(
 									c.known === "analog-am" ? "am" : "nfm",
@@ -454,10 +464,21 @@ describe("planReplayTrials", () => {
 						}
 					}
 					if (analogs.length === 1) {
-						if (analogs[0]!.known) expect(out.indexOf(analogs[0]!)).toBe(0)
-						else
+						if (knownAnalog && pagerFirst)
 							expect(out.indexOf(analogs[0]!)).toBe(
-								out.filter(t => t.known).length,
+								out.filter(t => t.known).length + pagerTrials.length,
+							)
+						else if (analogs[0]!.known) expect(out.indexOf(analogs[0]!)).toBe(0)
+						else
+							// in a paging range the analog trial follows the pager trials.
+							expect(out.indexOf(analogs[0]!)).toBe(
+								out.filter(
+									t =>
+										t.known ||
+										(inPagerRange(c.priors) &&
+											t.kind !== "analog" &&
+											familyOf(t.protocol) === "pager"),
+								).length,
 							)
 					}
 					const replayable =
@@ -476,7 +497,8 @@ describe("planReplayTrials", () => {
 							"flex",
 							"aprs",
 						].includes(c.known)
-					const knownPlanned = replayable || knownAnalog
+					const knownPlanned =
+						replayable || (knownAnalog && !(knownAnalog && pagerFirst))
 					if (knownPlanned)
 						expect(out[0]).toMatchObject({ protocol: c.known, known: true })
 					expect(out.filter(t => t.known).length).toBe(knownPlanned ? 1 : 0)

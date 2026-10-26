@@ -16,7 +16,10 @@ import type { PersistentFeature } from "../retune-alarm.js"
 import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
 import type { TrackAssociation } from "../frame-tracks.js"
-import { CHANNEL_GATE_HYSTERESIS_DB } from "../../scanner/scanner-redesign-contract.js"
+import {
+	CHANNEL_GATE_HYSTERESIS_DB,
+	CHANNEL_GATE_MIN_WIDTH_HZ,
+} from "../../scanner/scanner-redesign-contract.js"
 
 /**
  * Per-epoch emission tracks (spec §4.2, §6.2): matches each block's segments to open tracks by bin
@@ -31,6 +34,11 @@ export interface TrackerOptions {
 	maxTracks: number
 	maxTrackBlocks: number
 	idPrefix: string
+	/**
+	 * Local floor: bins each side of a segment (after a 1-bin gap) whose median power
+	 * is the segment's local floor. Absent or 0: no local SNR.
+	 */
+	localBins?: number
 }
 
 export interface TrackerBlock {
@@ -60,6 +68,10 @@ const SPEC_PAD_BINS = 2
 const OBW_MIN_SNR_DB = 20
 const MATCH_TOLERANCE_BINS = 1
 const FIRST_UPDATE_BLOCKS = 2
+/** Matched-window minimum (see `localSnr`): a Hann tone's two main-lobe bins. */
+export const MATCHED_MIN_BINS = 2
+/** Matched width: bins within 6 dB of the peak (a Hann tone's main lobe at its -6 dB points). */
+export const MATCHED_DROP_DB = 6
 
 class SpectrumAccumulator {
 	lo = 0
@@ -122,6 +134,8 @@ interface Features {
  */
 interface GateReading {
 	channelSnrDb: number
+	/** Best single covering slot (absent: same as `channelSnrDb`). */
+	peakChannelSnrDb?: number
 	kDb: number
 	marginDb: number
 	minDurationMs: number
@@ -166,6 +180,14 @@ interface OpenTrack {
 	peakDbfs: number
 	maxBlockSnrDb: number
 	bandLinSum: number
+	/** Sum and count of per-block local SNRs (dB). */
+	localSnrSum: number
+	localSnrBlocks: number
+	/**
+	 * Admission only: the latest block's matched-window SNR (see `localSnr`), dB; NaN when
+	 * not measured.
+	 */
+	matchedSnrDb: number
 	floorLinSum: number
 	floorDbSum: number
 	centroidNum: number
@@ -192,6 +214,8 @@ interface OpenTrack {
 	 */
 	gate?: "pending" | "passed" | "below"
 	channelSnrDb?: number
+	/** Best single covering slot of the last measurement. */
+	peakChannelSnrDb?: number
 	gatePassedSample?: number
 	/** Last measured step was on. The next on-test uses `gateRun`, not this. */
 	gateOn: boolean
@@ -344,6 +368,7 @@ export class Tracker {
 			for (const t of this.open) {
 				delete t.gate
 				delete t.channelSnrDb
+				delete t.peakChannelSnrDb
 				delete t.gatePassedSample
 				this.clearGateRun(t)
 				t.rolloverFrom = null
@@ -765,6 +790,9 @@ export class Tracker {
 			peakDbfs: -Infinity,
 			maxBlockSnrDb: -Infinity,
 			bandLinSum: 0,
+			localSnrSum: 0,
+			localSnrBlocks: 0,
+			matchedSnrDb: Number.NaN,
 			floorLinSum: 0,
 			floorDbSum: 0,
 			centroidNum: 0,
@@ -837,6 +865,11 @@ export class Tracker {
 			maxSnr = Math.max(maxSnr, p - f)
 		}
 		t.bandLinSum += band
+		const local = this.localSnr(t, s, b.powerDb, band)
+		if (local !== null) {
+			t.localSnrSum += local
+			t.localSnrBlocks++
+		}
 		t.floorLinSum += floor
 		t.floorDbSum += b.blockFloorDb
 		t.peakDbfs = Math.max(t.peakDbfs, s.peakDb)
@@ -1004,6 +1037,14 @@ export class Tracker {
 			return
 		}
 		t.channelSnrDb = snr
+		// Admission reads the highest of the slot SNR, the best covering slot and the
+		// matched-window SNR of this block; the gate's own pass rule reads `snr` only.
+		const peak = reading.peakChannelSnrDb
+		let best = snr
+		if (peak !== undefined && Number.isFinite(peak) && peak > best) best = peak
+		if (Number.isFinite(t.matchedSnrDb) && t.matchedSnrDb > best)
+			best = t.matchedSnrDb
+		t.peakChannelSnrDb = best
 		if (t.gate === undefined) t.gate = "pending"
 		this.stepAlive(t, snr, k, margin, minMs, true, endSample)
 	}
@@ -1160,6 +1201,11 @@ export class Tracker {
 		next.gateStamp = this.blockNo
 		if (prev.channelSnrDb !== undefined && Number.isFinite(prev.channelSnrDb))
 			next.channelSnrDb = prev.channelSnrDb
+		if (
+			prev.peakChannelSnrDb !== undefined &&
+			Number.isFinite(prev.peakChannelSnrDb)
+		)
+			next.peakChannelSnrDb = prev.peakChannelSnrDb
 		if (next.gateQualified) {
 			const qualifiedAt = next.gateQualifiedSample
 			const end = Number.isFinite(qualifiedAt) ? qualifiedAt : next.lastSample
@@ -1223,6 +1269,13 @@ export class Tracker {
 		if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
 			track.channelSnrDb = t.channelSnrDb
 		else delete track.channelSnrDb
+		if (
+			t.peakChannelSnrDb !== undefined &&
+			Number.isFinite(t.peakChannelSnrDb) &&
+			t.peakChannelSnrDb !== t.channelSnrDb
+		)
+			track.peakChannelSnrDb = t.peakChannelSnrDb
+		else delete track.peakChannelSnrDb
 		if (t.gate === "passed" && t.gatePassedSample !== undefined)
 			track.gatePassedSample = t.gatePassedSample
 		else delete track.gatePassedSample
@@ -1244,6 +1297,104 @@ export class Tracker {
 		delete track.gatePassedSample
 	}
 
+	/** Reused by `localSnr`. */
+	private localScratch = new Float32Array(0)
+
+	/**
+	 * This block's local contrast: the mean segment power (or, for a carrier whose matched width
+	 * fits one 6.25 kHz slot, the higher of that and the matched-window power) over the median of `localBins` bins each side (skipping the bin next to
+	 * each edge), in dB. Null without the option or neighbours.
+	 *
+	 * Also stores `t.matchedSnrDb`: the highest mean power of `W` contiguous segment bins over
+	 * the same local floor, W = the bins within `MATCHED_DROP_DB` (6 dB) of the segment peak,
+	 * contiguous around it, capped at the track's OBW in bins and the segment, at least
+	 * `MATCHED_MIN_BINS` (2). A carrier with weak sidebands merged into a wide segment is
+	 * still measured over its own width. A slot SNR spreads a narrow carrier over the whole slot: a 1 kHz carrier
+	 * 15 dB over the floor in an 8.33 kHz slot reads 10·log10((31.6 + 7.33) / 8.33) = 6.7 dB, under
+	 * the 9 dB run floor, while matched to its 1 kHz it reads about 15 dB (a Hann-windowed tone
+	 * keeps its second bin within 6 dB: 2-bin mean about 13 dB). The 2-bin minimum halves a
+	 * single-bin spike (15 dB reads 12.1 dB), so one hot bin cannot read as a carrier.
+	 */
+	private localSnr(
+		t: OpenTrack,
+		s: Segment,
+		powerDb: Float32Array,
+		bandLin: number,
+	): number | null {
+		t.matchedSnrDb = Number.NaN
+		const w = this.opts.localBins ?? 0
+		const width = s.endBin - s.startBin
+		if (w <= 0 || width <= 0) return null
+		if (this.localScratch.length < 2 * w)
+			this.localScratch = new Float32Array(2 * w)
+		let k = 0
+		for (let i = s.startBin - 1 - w; i < s.startBin - 1; i++) {
+			const v = powerDb[i]
+			if (v !== undefined && Number.isFinite(v)) this.localScratch[k++] = v
+		}
+		for (let i = s.endBin + 1; i < s.endBin + 1 + w; i++) {
+			const v = powerDb[i]
+			if (v !== undefined && Number.isFinite(v)) this.localScratch[k++] = v
+		}
+		if (k === 0) return null
+		const sorted = this.localScratch.subarray(0, k).sort()
+		const mid = k >> 1
+		const median =
+			k % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+		const mean = 10 * Math.log10(Math.max(bandLin / width, 1e-30))
+		// Matched width: the bins within 6 dB of the segment peak, contiguous around it (the
+		// carrier's own width), never more than the track's OBW nor fewer than 2.
+		const peakDb = powerDb[s.peakBin] ?? -200
+		let lo6 = s.peakBin
+		let hi6 = s.peakBin
+		while (
+			lo6 > s.startBin &&
+			(powerDb[lo6 - 1] ?? -200) >= peakDb - MATCHED_DROP_DB
+		)
+			lo6--
+		while (
+			hi6 < s.endBin - 1 &&
+			(powerDb[hi6 + 1] ?? -200) >= peakDb - MATCHED_DROP_DB
+		)
+			hi6++
+		const obwBins = Math.round(t.geomObw / this.opts.binHz)
+		const cap = Number.isFinite(obwBins) && obwBins > 0 ? obwBins : width
+		const win = Math.min(
+			width,
+			Math.max(MATCHED_MIN_BINS, Math.min(hi6 - lo6 + 1, cap)),
+		)
+		let sum = 0
+		let bestSum = 0
+		for (let i = s.startBin; i < s.endBin; i++) {
+			sum += 10 ** ((powerDb[i] ?? -200) / 10)
+			if (i - s.startBin >= win) sum -= 10 ** ((powerDb[i - win] ?? -200) / 10)
+			if (i - s.startBin >= win - 1 && sum > bestSum) bestSum = sum
+		}
+		const narrow = win * this.opts.binHz <= CHANNEL_GATE_MIN_WIDTH_HZ
+		// Attempt 2: the matched window serves admission only for a narrow carrier too.
+		if (bestSum > 0 && narrow)
+			t.matchedSnrDb = 10 * Math.log10(bestSum / win) - median
+		// Local contrast is the whole segment's. Narrow exception: when the matched width (the
+		// carrier's own width) fits one slot (`CHANNEL_GATE_MIN_WIDTH_HZ`, 6.25 kHz), the
+		// matched window may stand in, so a carrier with wide weak sidebands merged into its
+		// segment still stands out by its carrier. Wider carriers keep the segment contrast.
+		const whole = mean - median
+		return narrow && Number.isFinite(t.matchedSnrDb) && t.matchedSnrDb > whole
+			? t.matchedSnrDb
+			: whole
+	}
+
+	/**
+	 * The -20 dB OBW never exceeds the widest single-block segment. On a weak track
+	 * (peak under 20 dB above the floor in the mean) -20 dB reaches the floor, so the width would
+	 * be the union of every span the track drifted over, not one emission's width. A strong
+	 * track's -20 dB width sits inside its on-bins and is unchanged.
+	 */
+	private cappedObw(t: OpenTrack, obwHz: number): number {
+		const widest = t.maxWidthBins * this.opts.binHz
+		return widest > 0 && obwHz > widest ? widest : obwHz
+	}
+
 	/** Centre and OBW for this block, computed once and reused by `snapshot`. */
 	private ensureGeometry(t: OpenTrack): void {
 		if (t.geomBlock === this.blockNo) return
@@ -1252,7 +1403,7 @@ export class Tracker {
 		const { a, e } = this.obwWindow(t, mean)
 		const obwHz =
 			t.maxBlockSnrDb >= OBW_MIN_SNR_DB
-				? obwAtDb(mean, a, e, this.opts.binHz, 20)
+				? this.cappedObw(t, obwAtDb(mean, a, e, this.opts.binHz, 20))
 				: t.maxWidthBins * this.opts.binHz
 		t.geomBlock = this.blockNo
 		t.geomCentre = centreHz
@@ -1269,7 +1420,7 @@ export class Tracker {
 		const bandMean = t.bandLinSum / blocks
 		const centreHz = this.rf(this.centroidBin(t), n, t.epoch.centreHz)
 		const obwHz = useDb
-			? obwAtDb(mean, a, e, binHz, 20)
+			? this.cappedObw(t, obwAtDb(mean, a, e, binHz, 20))
 			: t.maxWidthBins * binHz
 		t.geomBlock = this.blockNo
 		t.geomCentre = centreHz
@@ -1302,9 +1453,18 @@ export class Tracker {
 			),
 		}
 		if (this.planActive && t.gate !== undefined) {
+			// A gate field like the others; absent without a channel plan.
+			if (t.localSnrBlocks > 0)
+				snap.localSnrDb = t.localSnrSum / t.localSnrBlocks
 			snap.gate = t.gate
 			if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
 				snap.channelSnrDb = t.channelSnrDb
+			if (
+				t.peakChannelSnrDb !== undefined &&
+				Number.isFinite(t.peakChannelSnrDb) &&
+				t.peakChannelSnrDb !== t.channelSnrDb
+			)
+				snap.peakChannelSnrDb = t.peakChannelSnrDb
 			if (
 				t.gate === "passed" &&
 				t.gatePassedSample !== undefined &&

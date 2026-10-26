@@ -896,27 +896,33 @@ describe("DQ properties", () => {
 							peakDbfs: self.peakDbfs,
 							obwHz: self.obwHz,
 						}
-						for (const [keep, absorbed] of merges)
-							for (const drop of absorbed) {
-								const a = pre.get(keep) ?? []
-								const b = pre.get(drop) ?? []
-								const options = [
-									[a, b],
-									[[...a, sample], b],
-									[a, [...b, sample]],
-								].filter(
+						// A group merge keeps the oldest id, but the store judges every member
+						// against the group's survivor (lazyConsolidate: members joinable to the
+						// survivor), which may be any member. So some member must be compatible
+						// with every other one, the new observation counted on either side.
+						const pairOk = (x0: string, y0: string): boolean => {
+							const a = pre.get(x0) ?? []
+							const b = pre.get(y0) ?? []
+							return [
+								[a, b],
+								[[...a, sample], b],
+								[a, [...b, sample]],
+							]
+								.filter(
 									([x, y]) => (x ?? []).length > 0 && (y ?? []).length > 0,
 								)
-								expect(
-									options.some(
-										([x, y]) =>
-											recordsCompatible(
-												recordOf(x ?? []),
-												recordOf(y ?? []),
-											) !== false,
-									),
-								).toBe(true)
-							}
+								.some(
+									([x, y]) =>
+										recordsCompatible(recordOf(x ?? []), recordOf(y ?? [])) !==
+										false,
+								)
+						}
+						for (const [keep, absorbed] of merges) {
+							const group = [keep, ...absorbed]
+							expect(
+								group.some(sv => group.every(o => o === sv || pairOk(sv, o))),
+							).toBe(true)
+						}
 					})
 				},
 			),

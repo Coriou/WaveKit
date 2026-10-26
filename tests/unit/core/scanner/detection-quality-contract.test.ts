@@ -10,6 +10,15 @@ describe("detection-quality contract (frozen)", () => {
 			DQ_PENDING_MIN_OBS: 3,
 			DQ_PENDING_MEDIAN_SNR_DB: 15,
 			DQ_PENDING_WINDOW_MS: 600_000,
+			DQ_SUSTAIN_MEDIAN_SNR_DB: 12,
+			DQ_SUSTAIN_FLOOR_SNR_DB: 9,
+			DQ_SUSTAIN_MS: 3_000,
+			DQ_SUSTAIN_MIN_SAMPLES: 3,
+			DQ_SUSTAIN_MAX_GAP_MS: 2_500,
+			DQ_SUSTAIN_SAMPLES: 8,
+			DQ_SUSTAIN_PER_SOURCE: 512,
+			DQ_LOCAL_SNR_DB: 6,
+			DQ_DC_ADMIT_HZ: 12_500,
 			DQ_PENDING_PER_SOURCE: 512,
 			DQ_PENDING_SAMPLES: 5,
 			DQ_PENDING_BUCKET_HZ: 2_500,
@@ -53,5 +62,17 @@ describe("detection-quality contract (frozen)", () => {
 		// 9.2: one emitter spans 13 to 39 kHz, so a band of 3 each way holds it from any one value
 		expect(39_000 / 13_000).toBeLessThanOrEqual(dq.DQ_YOUNG_OBW_RATIO)
 		expect(dq.DQ_YOUNG_OBW_RATIO).toBeGreaterThan(dq.DQ_OBW_RATIO_MAX)
+		// 1.4b (amendment 10): 12 = gate pass (k 3 + margin 3) + 6; 9 = k 3 + burst margin 6
+		expect(dq.DQ_SUSTAIN_MEDIAN_SNR_DB).toBe(3 + 3 + 6)
+		expect(dq.DQ_SUSTAIN_FLOOR_SNR_DB).toBe(3 + 6)
+		// 3 s at a 1 s re-ingest holds 4 samples; 3 needed, 8 kept; gap = 2 periods + 500 ms
+		expect(dq.DQ_SUSTAIN_MS / 1_000 + 1).toBeGreaterThan(
+			dq.DQ_SUSTAIN_MIN_SAMPLES,
+		)
+		expect(dq.DQ_SUSTAIN_SAMPLES).toBe(2 * (dq.DQ_SUSTAIN_MS / 1_000 + 1))
+		expect(dq.DQ_SUSTAIN_MAX_GAP_MS).toBe(2 * 1_000 + 500)
+		expect(dq.DQ_SUSTAIN_MEDIAN_SNR_DB).toBeLessThan(
+			dq.DQ_PENDING_MEDIAN_SNR_DB,
+		)
 	})
 })

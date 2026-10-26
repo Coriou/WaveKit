@@ -17,9 +17,69 @@ export const LPD433_RANGE: Readonly<ScanRange> = {
 	bandplanId: "ism-433",
 }
 
-/** The ranges plus LPD433 when the effective plans carry the EU `ism-433` plan (hidden: absent). */
+/**
+ * EU UHF paging, 465.975–466.550 MHz (wide-area POCSAG/FLEX inside the 450–470 MHz
+ * land-mobile allocation; general public band-plan knowledge). 575 kHz / 12.5 kHz = 46 steps, so
+ * 47 channels on the 12.5 kHz raster from 465.975 MHz, plus the 6.25 kHz split raster of the same
+ * origin for off-raster carriers. DMR is listed because land-mobile digital carriers share the
+ * sub-band; the classifier still ranks the pager trials first (PAGER_RANGE_HYPOTHESES). It is
+ * narrower than `uhf-land-mobile` (70 MHz), so `narrowestPriors` picks it inside its span. The
+ * range is a scanner overlay like LPD433. builtin.ts carries the French paging plan `pager-fr`
+ * (466.025–466.230 MHz, POCSAG); when the effective plans hold it, only the parts of this span it
+ * does not cover are added (465.975–466.025 MHz and 466.230–466.550 MHz, each exclusive of the
+ * shared edge), so no frequency is covered by both ranges.
+ */
+export const PAGER_UHF_RANGE: Readonly<ScanRange> = {
+	startHz: 465_975_000,
+	endHz: 466_550_000,
+	rasters: [
+		{ spacingHz: 12_500, firstChannelHz: 465_975_000 },
+		{ spacingHz: 6250, firstChannelHz: 465_975_000 },
+	],
+	obwHz: [12_000],
+	protocols: ["pocsag", "flex", "dmr"],
+	bandplanId: "pager-uhf",
+}
+
+/** The parts of PAGER_UHF_RANGE outside the given ranges' span ([start, end] inclusive Hz). */
+export function pagerOverlayParts(covered: readonly ScanRange[]): ScanRange[] {
+	let parts: ScanRange[] = [copyRange(PAGER_UHF_RANGE)]
+	for (const c of covered)
+		parts = parts.flatMap(p => {
+			if (c.endHz < p.startHz || c.startHz > p.endHz) return [p]
+			const out: ScanRange[] = []
+			if (c.startHz > p.startHz)
+				out.push({ ...copyRange(p), endHz: c.startHz - 1 })
+			if (c.endHz < p.endHz) out.push({ ...copyRange(p), startHz: c.endHz + 1 })
+			return out
+		})
+	return parts
+}
+
+/** EU-only plan ids: their presence says the effective plans are the EU variant. */
+const EU_MARKERS: ReadonlySet<string> = new Set(["ism-433", "pmr446"])
+
+function copyRange(r: Readonly<ScanRange>): ScanRange {
+	return {
+		...r,
+		rasters: [...(r.rasters ?? [])],
+		protocols: [...(r.protocols ?? [])],
+		...(r.obwHz !== undefined ? { obwHz: [...r.obwHz] } : {}),
+	}
+}
+
+/**
+ * The ranges plus LPD433 when the effective plans carry the EU `ism-433` plan (hidden: absent),
+ * and the EU UHF paging range when they carry an EU-only plan (`ism-433` or `pmr446`).
+ */
 export function withScannerOverlays(ranges: readonly ScanRange[]): ScanRange[] {
 	const out = [...ranges]
+	if (
+		ranges.some(r => r.bandplanId !== undefined && EU_MARKERS.has(r.bandplanId))
+	)
+		out.push(
+			...pagerOverlayParts(ranges.filter(r => r.bandplanId === "pager-fr")),
+		)
 	if (ranges.some(r => r.bandplanId === "ism-433"))
 		out.push({
 			...LPD433_RANGE,

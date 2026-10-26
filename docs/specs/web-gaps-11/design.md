@@ -357,3 +357,83 @@ runtime stage copies it next to `wavekit-chan` and the verification step runs `w
     outcomes, deferrals and clocks, each capture goes capture → queue → trials (known first, one
     replay probe at a time) → exactly one result → discard, stops at the first accepted decode,
     and a claimed capture is never replayed by the queue. _Validates 6.4, 6.5, 6.8._
+
+## Design amendment: trial choice and memory
+
+Requirements 9.1 to 9.6. All of it lives in `src/core/scanner/**`.
+
+- **Pager range.** `bandplan/builtin.ts` gains the French plan `pager-fr` (EU variant; Main's
+  request, with the isolation tests' pinned size and hash updated and `pagers` as its display
+  group in `src/core/bandplans/builtin-packs.ts`). The wider EU UHF paging span stays a scanner
+  overlay next to LPD433: `PAGER_UHF_RANGE` in `classify/priors.ts`, added by
+  `withScannerOverlays` when the effective plans hold an EU-only plan (`ism-433` or `pmr446`),
+  minus the span of any `pager-fr` range (`pagerOverlayParts`; the whole span when `pager-fr` is
+  hidden). At 575 kHz wide it is the narrowest range at its frequencies, so
+  `narrowestPriors` gives POCSAG, FLEX and DMR 1 and the other specific protocols 0.25.
+- **Pager hypotheses.** `classHypotheses(cls, priors)` in `classify/classifier.ts` adds
+  `PAGER_RANGE_HYPOTHESES` when `inPagerRange(priors)` (pocsag or flex prior at least 1):
+  fsk4-12k5 pocsag 0.6 and flex 0.56 (DMR 0.55), analog-fm pocsag 0.65 and flex 0.62
+  (analog-fm 0.6), fsk2-wide unchanged. The spectral classifier, the channel tier and
+  `identifyScores` all read it. `isPagerTonePair` in `classify/channel-tier.ts` replaces the
+  fixed ±4 to 5 kHz tone windows with spacing 9 000 ± 1 500 Hz and a midpoint within 1 500 Hz.
+- **Replay plan.** `planReplayTrialsDetailed(input, replayInput)` in `replay-plan.ts` returns the
+  trials and the skipped extras. `REPLAY_INPUT_DECODERS` (iq-capture-contract) is the capability
+  set (dsd-fme, multimon-ng, direwolf) and also gates the replay transport. In a paging range the
+  candidates form three groups (known digital and pager, analog, rest), each ordered by
+  `orderTrialsByMemory` (the first with `keepBackoff`, the others with `allowEmpty`); elsewhere
+  one memory order. Then the `known` flag is kept only on the leading run, so the queue's
+  known-first partition cannot change the order, and the mode-key dedup and the bound of 8 apply. Each candidate carries the protocols of every
+  candidate with the same mode key, so a sibling protocol cannot bring a backed-off run back.
+- **Trial memory.** `trial-memory.ts` (`TrialMemory`): a Map in least-recently-updated order,
+  Zod-checked rows (`parseTrialMemory`), a 5 s debounced atomic write of
+  `<scanner storage>/trial-memory.json`, a flush on stop, no write before the load. The service
+  records every `IqReplayResult` trial in `applyReplayResult` (`rememberReplayTrials`, after the
+  evidence: live discovery, else the stored one, else the pre-evidence id), forgets deleted, merged-away and
+  evicted discoveries, and passes `trialMemory` and `nowMs` in the plan input (optional fields of
+  `IqReplayPlanInput`). `trialMemoryOf(id)` reads it; no DTO field yet.
+- **Pending capture.** `requestIqCapture` no longer needs a discovery when the track's gate passed;
+  `PendingCaptureLimiter` (`pending-capture.ts`) allows 2 per source per rolling 60 s for such
+  tracks (at most 64 sources, 2 timestamps each) and gives a slot back when the port refuses. The
+  port keeps its own pre-roll, rate, concurrency and disk caps. A replay decode of a pending
+  observation still live or in `recent` admits it through `applyEvidence`; one that left both
+  before its replay ended is lost (gap).
+- **Gaps.** rtl433 has no probe mode and no replay input (the capture service refuses it, the
+  adapter reads cu8 only); acarsdec, dumpvdl2, ais-catcher, the LoRa decoder and readsb are no
+  probe decoder types, and the 48 kHz capture is too narrow for VDL2 (dumpvdl2 needs multiples of
+  105 kHz), LoRa (125 kHz) and 1090 MHz (2 Msps). These stay skipped until Main adds the inputs.
+
+### Properties
+
+- Property TC-1: any pager-class track inside the paging range ranks a pager protocol first.
+- Property TC-2: every ISM 868 plan names rtl433 (planned or skipped) and never runs it
+  without the capability; at most 8 trials.
+- Property TC-3: parsing any persisted value never throws and stays within the bounds.
+
+## Design amendment: activity-ranked decoder channels (scanner side)
+
+`src/core/scanner/channel-activity.ts` implements the planner's `ChannelActivityPort`
+(`src/decoders/enablement/activity-contract.ts`) with `createChannelActivityRanker({ monoNow,
+timers?, history? })`. It returns the port, `epochOf`, the ingest hooks (`ingestEpoch`,
+`ingestBlock`, `ingestTrack`, `stop`, `noteDecode`, `noteReplayTrial`), `setHistory`, `sizes`
+and `dispose`. All times are on the planner's monotonic clock.
+
+- Per source it keeps the current epoch (source, engine, epoch), the last frame time, energy
+  segments keyed by track id (least recently seen dropped), ended gated tracks, pushed decodes and
+  replay notes, and the last pulled history. A block updates segments in O(tracks) and marks a live
+  edge when a segment appears or goes.
+- A snapshot evaluates each query on its own: candidates are sorted once, each evidence item is
+  associated by binary search (nearest within half the width, ambiguous when a second candidate is
+  in reach), and the score is `100·live + 2·f(energy, 15 min) + 0.5·min(4, Σ f(track, 15 min)) +
+3·f(decode, 6 h) + 2·f(success, 6 h) + 0.5·duty − 1·backoff`, with `f(a, W) = max(0, 1 − a/W)`.
+  The non-live part is at most 9.5, so live comes first.
+- A snapshot records its query as an interest (at most 128). A dirty source evaluates its
+  interests in a coalesced pass and sends one notice when any channel's live flag, state or order
+  changed, or its health changed. The pass also arms one timer at the earliest deadline.
+- The scanner feeds the ranker from its pipeline handler (epoch starts, blocks, track closes),
+  from engine stops, failures and source removal, from applied decodes and from replay results
+  (weighted by `replayTrialWeight`, complete = whole hold without a gap). Its history provider
+  reads decoded discoveries and remembered replay successes in the tuned window and the
+  rolling-hour occupancy.
+- `ScannerServiceDeps` gains `channelActivity`. `ChannelLiveCoverage` is a Stage 2 type only.
+- `IqReplayResult` gains an optional `rfHz`; the scanner falls back to the capture view.
+  `discoveryOnChannel` gives frequency attribution (exactly one discovery within 6 250 Hz, then a compatible protocol). `trackWithinPassband` states the Stage 2 coverage containment rule; Stage 1 never consults coverage (no sample-arrival time) and always captures. `AmbientEvidence` reads the manager's placement binding (`{ sourceId, channelHz }`, Zod-checked) and places a point decoder's evidence at its channel. Decode times are recorded only when the store accepted the decode. Decode history reads per-discovery decode times (at most 2 048). Live energy expires 1 000 ms after the last accepted block; overloaded blocks clear it and are no frame.

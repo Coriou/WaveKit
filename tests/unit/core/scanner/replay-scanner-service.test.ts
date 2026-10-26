@@ -22,8 +22,14 @@ import {
 import { PROBE_CHANNEL_REQUESTS } from "../../../../src/core/scanner/probes/channel-transport.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
-import { IQ_REPLAY_QUEUE_HOLDER } from "../../../../src/core/iq-capture/replay-queue.js"
+import {
+	createIqReplayQueue,
+	IQ_REPLAY_QUEUE_HOLDER,
+	type IqReplayQueuePort,
+} from "../../../../src/core/iq-capture/replay-queue.js"
+import { flush, spyLogger } from "../iq-capture/helpers.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
+import { TrialMemory } from "../../../../src/core/scanner/trial-memory.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
 const noPassive = {
@@ -231,7 +237,11 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 	})
 
 	it.each([
-		["not surfaced", { discoveryId: null }, {}],
+		[
+			"not surfaced and not gate-passed",
+			{ discoveryId: null },
+			{ gate: "pending" },
+		],
 		[
 			"confirmed on this observation",
 			{
@@ -268,6 +278,36 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 			}
 		},
 	)
+
+	// capture before admission, bounded to PENDING_CAPTURES_PER_SOURCE_PER_MINUTE (2).
+	it("captures a gate-passed track that is not admitted yet, at most 2 per source per minute", async () => {
+		const { h, port, internals, live } = setup()
+		await h.service.start()
+		try {
+			internals.spectrum.engine = () => ({
+				currentEpoch: () => ({
+					epoch: 1,
+					centreHz: CENTRE,
+					sampleRateHz: 1_024_000,
+				}),
+			})
+			const t = trackOf({
+				centreHz: CENTRE + 50_000,
+				gate: "passed",
+			} as never)
+			for (const id of ["o_a", "o_b", "o_c"])
+				internals.requestIqCapture(
+					live({ observationId: id, discoveryId: null }),
+					t,
+				)
+			expect(port.capture).toHaveBeenCalledTimes(2)
+			// an admitted track still gets its capture past the pending share
+			internals.requestIqCapture(live({ observationId: "o_d" }), t)
+			expect(port.capture).toHaveBeenCalledTimes(3)
+		} finally {
+			await h.service.stop()
+		}
+	})
 
 	it("attaches the source at its first epoch, flushes later ones with the new epoch, and forgets open captures", async () => {
 		const { h, port, internals, track, live } = setup()
@@ -543,6 +583,137 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		}
 	})
 
+	// Review round 2 major 1: a known protocol the memory moved behind a remembered success still
+	// counts its full-hold misses, driven through the real replay queue.
+	it("a demoted known DMR still counts two full-hold misses through the real queue", async () => {
+		const { h, port, known, internals, live } = setup()
+		await h.service.start()
+		try {
+			internals.live.set("t1", live())
+			known.known.mockReturnValue("dmr")
+			const mem = (h.service as unknown as { trialMemory: TrialMemory })
+				.trialMemory
+			// a remembered POCSAG success, recorded after time 0 so it sorts ahead of the known trial
+			vi.spyOn(Date, "now").mockReturnValue(1000)
+			const memory = new TrialMemory({ now: () => 1000 })
+			memory.record("d_1", "pocsag", "multimon-ng", "decoded")
+			vi.spyOn(mem, "view").mockImplementation(() => memory.view("d_1"))
+			const v = port.view("cap-1")!
+			let held: string | null = null
+			let present = false
+			const qport: IqReplayQueuePort = {
+				onFinished: () => () => {},
+				view: () => (present ? v : null),
+				holderOf: () => (present ? held : undefined),
+				claim: (_id, holder) => {
+					if (!present || held !== null) return false
+					held = holder
+					return true
+				},
+				settle: () => {
+					present = false
+					held = null
+				},
+				discard: () => {
+					present = false
+					return true
+				},
+			}
+			const requests: string[] = []
+			const q = createIqReplayQueue({
+				port: qport,
+				probes: {
+					request: req => {
+						requests.push(req.protocol)
+						return {
+							run: {
+								result: Promise.resolve({
+									outcome: "no-sync" as const,
+									decoded: null,
+								}),
+								cancel: () => {},
+							},
+						}
+					},
+					onSlotRelease: () => () => {},
+				},
+				planner: input => {
+					const plan = h.service.planReplay({
+						...input,
+						priors: { dmr: 1, pocsag: 1, "analog-fm": 0, "analog-am": 0 },
+					})
+					expect(plan[0]?.protocol).toBe("pocsag")
+					expect(plan.find(t => t.protocol === "dmr")).toMatchObject({
+						known: false,
+						knownProtocol: true,
+					})
+					return plan
+				},
+				sink: r => h.service.applyReplayResult(r),
+				planInput: c => h.service.replayPlanInput(c),
+				logger: spyLogger().logger,
+			})
+			q.start()
+			for (let i = 0; i < 2; i++) {
+				present = true
+				held = null
+				q.enqueue(v)
+				await flush(10)
+			}
+			await q.stop()
+			expect(requests.filter(p => p === "dmr")).toHaveLength(2)
+			expect(known.recordMiss).toHaveBeenCalledTimes(2)
+			expect(known.recordMiss).toHaveBeenCalledWith("d_1", "dmr")
+		} finally {
+			vi.restoreAllMocks()
+			await h.service.stop()
+		}
+	})
+
+	// Review major 3: outcomes are remembered on the discovery the decode admitted, also on disk.
+	it("a pending observation's first replay decode is remembered on the discovery it creates", async () => {
+		const { h, internals, live } = setup()
+		await h.service.start()
+		const dir = (h.service as unknown as { storageDir: string }).storageDir
+		try {
+			const l = live({ discoveryId: null })
+			internals.live.set("t1", l)
+			vi.spyOn(
+				h.service as unknown as {
+					applyEvidence(l: LiveObservation, ev: unknown): boolean
+				},
+				"applyEvidence",
+			).mockImplementation((obs: LiveObservation) => {
+				obs.discoveryId = "d_new"
+				return true
+			})
+			h.service.applyReplayResult(
+				result({
+					trials: [
+						{
+							protocol: "pocsag",
+							decoderType: "multimon-ng",
+							known: false,
+							outcome: "decoded",
+						},
+					],
+					decoded: {
+						protocol: "pocsag",
+						identity: { kind: "pocsag-capcode", value: "1234567" },
+					},
+				}),
+			)
+			expect(
+				h.service.trialMemoryOf("d_new").map(e => [e.protocol, e.decoded]),
+			).toEqual([["pocsag", 1]])
+		} finally {
+			await h.service.stop()
+		}
+		const reloaded = new TrialMemory({ dir, now: () => 0 })
+		await reloaded.load()
+		expect(reloaded.view("d_new")[0]?.lastOutcome).toBe("decoded")
+	})
+
 	it("a decode on another epoch applies no evidence", async () => {
 		const { h, known, internals, live } = setup()
 		await h.service.start()
@@ -585,6 +756,31 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 			expect(known.known).toHaveBeenCalledWith("d_1")
 			expect(input.knownProtocol).toBe("dmr")
 			expect(typeof input.narrowRaster).toBe("boolean")
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	// every replay trial outcome is remembered on the discovery and feeds the plan input.
+	it("remembers the replay outcomes on the discovery and hands them to the next plan", async () => {
+		const { h, internals, live } = setup()
+		await h.service.start()
+		try {
+			internals.live.set("t1", live())
+			internals.replayPlans.set("cap-1", plan)
+			h.service.applyReplayResult(result())
+			const memory = h.service.trialMemoryOf("d_1")
+			expect(
+				memory.map(e => [e.protocol, e.decoder, e.attempts, e.lastOutcome]),
+			).toEqual([
+				["dmr", "dsd-fme", 1, "no-sync"],
+				["pocsag", "multimon-ng", 1, "crc-errors"],
+			])
+			const input = h.service.replayPlanInput({
+				observationId: "o_1",
+				rfHz: CENTRE + 50_000,
+			} as unknown as IqCaptureView)
+			expect(input.trialMemory).toEqual(memory)
 		} finally {
 			await h.service.stop()
 		}

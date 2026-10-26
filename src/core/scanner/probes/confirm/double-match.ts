@@ -16,13 +16,58 @@ export interface DecoderOutputLike {
 const MAX_VALUES_PER_KEY = 256
 const MAX_ACCEPTED = 4096
 
+/** The shared, scoped acceptance memory (ConfirmMemory in confirm-memory.ts). */
+export interface SharedConfirmMemory {
+	pair(scope: string, key: string, value: string): boolean
+	isAccepted(scope: string, key: string, value: string): boolean
+	markAccepted(scope: string, key: string, value: string): void
+}
+
+/**
+ * a DoubleMatch backed by the shared memory. `scope` names the discovery (or
+ * observation) of the decode being interpreted, read on every call; null (or a throw) means
+ * the decode has no single discovery, so this instance's own memory decides as before.
+ */
+export interface SharedConfirm {
+	memory: SharedConfirmMemory
+	scope: () => string | null
+}
+
 export class DoubleMatch {
 	private readonly counts = new Map<string, Map<string, number>>()
 	private readonly accepted = new Set<string>()
 
-	/** True exactly once: on the second CRC-clean occurrence of `value` under `key`. */
+	constructor(private readonly shared?: SharedConfirm) {}
+
+	/** The scope of the current decode when shared pairing governs it, else null. */
+	scope(): string | null {
+		if (!this.shared) return null
+		try {
+			const scope = this.shared.scope()
+			return typeof scope === "string" && scope !== "" ? scope : null
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * True exactly once per scope: on the second CRC-clean occurrence of `value` under `key`.
+	 * With a shared scope, the shared memory alone decides and records the occurrence (its
+	 * separation and window bounds apply to repeats inside this instance too).
+	 */
 	accept(key: string, value: string, crcClean: boolean): boolean {
 		if (!crcClean || this.isAccepted(key, value)) return false
+		const scope = this.scope()
+		if (scope !== null) {
+			let paired = false
+			try {
+				paired = this.shared!.memory.pair(scope, key, value) === true
+				if (paired) this.shared!.memory.markAccepted(scope, key, value)
+			} catch {
+				return false
+			}
+			return paired
+		}
 		let values = this.counts.get(key)
 		if (values === undefined) {
 			values = new Map()
@@ -43,10 +88,27 @@ export class DoubleMatch {
 	}
 
 	isAccepted(key: string, value: string): boolean {
+		const scope = this.scope()
+		if (scope !== null) {
+			try {
+				return this.shared!.memory.isAccepted(scope, key, value) === true
+			} catch {
+				return false
+			}
+		}
 		return this.accepted.has(`${key}\u0000${value}`)
 	}
 
 	markAccepted(key: string, value: string): void {
+		const scope = this.scope()
+		if (scope !== null) {
+			try {
+				this.shared!.memory.markAccepted(scope, key, value)
+			} catch {
+				// no acceptance recorded (the safe answer)
+			}
+			return
+		}
 		const id = `${key}\u0000${value}`
 		if (this.accepted.has(id)) return
 		this.accepted.add(id)
@@ -54,6 +116,39 @@ export class DoubleMatch {
 			const oldest = this.accepted.values().next()
 			if (oldest.done !== true) this.accepted.delete(oldest.value)
 		}
+	}
+}
+
+/**
+ * dsd-fme's accepted link identity per protocol, kept per scope of the DoubleMatch (so an
+ * identity accepted on one discovery is never this decoder's identity on another). Bounded
+ * at MAX_ACCEPTED entries, oldest first.
+ */
+class ScopedAccepted extends Map<string, string> {
+	constructor(private readonly match: DoubleMatch) {
+		super()
+	}
+	private id(key: string): string {
+		return `${this.match.scope() ?? ""}\u0000${key}`
+	}
+	override get(key: string): string | undefined {
+		return super.get(this.id(key))
+	}
+	override has(key: string): boolean {
+		return super.has(this.id(key))
+	}
+	override set(key: string, value: string): this {
+		const id = this.id(key)
+		super.delete(id)
+		super.set(id, value)
+		if (this.size > MAX_ACCEPTED) {
+			const oldest = this.keys().next()
+			if (oldest.done !== true) super.delete(oldest.value)
+		}
+		return this
+	}
+	override delete(key: string): boolean {
+		return super.delete(this.id(key))
 	}
 }
 
@@ -73,13 +168,16 @@ export function createInterpreterState(opts: {
 	probeId?: string
 	decoderId?: string
 	nxdn?: "nxdn48" | "nxdn96"
+	/** Shared per-discovery acceptance (confirm-memory.ts); absent: this state pairs alone. */
+	shared?: SharedConfirm
 }): InterpreterState {
+	const match = new DoubleMatch(opts.shared)
 	const state: InterpreterState = {
 		epoch: opts.epoch,
 		origin: opts.origin,
 		nxdn: opts.nxdn ?? "nxdn96",
-		match: new DoubleMatch(),
-		accepted: new Map(),
+		match,
+		accepted: opts.shared ? new ScopedAccepted(match) : new Map(),
 	}
 	if (opts.probeId !== undefined) state.probeId = opts.probeId
 	if (opts.decoderId !== undefined) state.decoderId = opts.decoderId

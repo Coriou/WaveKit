@@ -21,6 +21,8 @@ const GROUPS: Record<string, DisplayGroup> = {
 	"ism-433": "ism-srd",
 	"ism-868": "ism-srd",
 	"pager-vhf": "pagers",
+	// Added the French paging plan to builtin.ts.
+	"pager-fr": "pagers",
 	"vhf-land-mobile": "land-mobile",
 	"uhf-land-mobile": "land-mobile",
 	"amateur-2m": "amateur",

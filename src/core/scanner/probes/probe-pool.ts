@@ -51,6 +51,8 @@ import type {
 } from "../types.js"
 import {
 	createInterpreterState,
+	type SharedConfirm,
+	type SharedConfirmMemory,
 	type DecoderOutputLike,
 	type InterpreterState,
 } from "./confirm/double-match.js"
@@ -168,6 +170,15 @@ export interface ProbePoolDeps {
 	now?: () => number
 	/** Own the exact remover before the sole external constructor listener effect. */
 	ownConstructorListener?: (removeExact: () => void) => boolean
+	/**
+	 * shared per-discovery acceptance (ConfirmMemory) and the scope of a probe's
+	 * decodes. Never used for a replay probe: a replay re-decodes a captured transmission, so
+	 * it could pair one transmission with itself; it keeps its own memory.
+	 */
+	confirm?: {
+		memory: SharedConfirmMemory
+		scopeOf: (req: ProbeRequest) => string | null
+	}
 }
 
 export interface ProbeStatus {
@@ -524,6 +535,11 @@ export function buildProbeConfig(input: {
 		type: input.mode.decoderType,
 		enabled: true,
 		sourceId: input.req.sourceId,
+		// The probe's channel is its one target: the decoder's Activity provenance
+		// binding then carries this frequency (resolveDecoderTargetFrequencies).
+		...(Number.isFinite(input.req.targetHz) && input.req.targetHz > 0
+			? { frequencies: [input.req.targetHz] }
+			: {}),
 		options,
 	}
 	return input.transport.configure(base, input.ctx)
@@ -1422,6 +1438,16 @@ export class ProbePool extends EventEmitter {
 				this.serviceRounds.delete(oldest)
 			}
 		}
+		const confirm = this.deps.confirm
+		const pairing: { shared?: SharedConfirm } =
+			confirm && !req.replay
+				? {
+						shared: {
+							memory: confirm.memory,
+							scope: () => confirm.scopeOf(req),
+						},
+					}
+				: {}
 		const rec: ProbeRecord = {
 			probeId,
 			decoderId,
@@ -1445,6 +1471,7 @@ export class ProbePool extends EventEmitter {
 				probeId,
 				decoderId,
 				nxdn: mode.options["mode"] === "nxdn48" ? "nxdn48" : "nxdn96",
+				...pairing,
 			}),
 			input: null,
 			untap: null,
@@ -1473,6 +1500,7 @@ export class ProbePool extends EventEmitter {
 					origin: "probe",
 					probeId,
 					decoderId,
+					...pairing,
 				}),
 			)
 		}

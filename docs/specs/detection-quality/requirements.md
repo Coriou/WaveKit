@@ -77,6 +77,30 @@ pending entry is promoted, creating a discovery from the promoting observation, 
 - it holds at least `DQ_PENDING_MIN_OBS` = 3 distinct observation ids and the median of
   their SNRs is at least `DQ_PENDING_MEDIAN_SNR_DB` = 15 dB.
 
+  1.4b (amendment 10) **Sustained promotion.** A continuous emitter (FM broadcast, a
+  steady carrier) is one observation for as long as it is on, so the repeat rule of 1.4 can
+  never fire for it; replayed hunt captures showed FM broadcast tracks at 11 to 13 dB held for
+  30 s and real narrow emitters at 7 to 17 dB that never got a record. A not-overload,
+  evidence-less observation therefore also creates a discovery when one observation id holds a
+  **run** of samples (the store re-ingests a live observation every 1 000 ms) such that:
+
+- every sample is at least `DQ_SUSTAIN_FLOOR_SNR_DB` = 9 dB (the gate's burst pass level,
+  k 3 + burst margin 6); a lower sample ends the run;
+- no two consecutive samples are more than `DQ_SUSTAIN_MAX_GAP_MS` = 2 500 ms apart (two
+  ingest periods plus 500 ms); a longer gap starts a new run;
+- the run spans at least `DQ_SUSTAIN_MS` = 3 000 ms from its first sample (60 blocks of
+  50 ms, ten times the 300 ms gate minimum) with at least `DQ_SUSTAIN_MIN_SAMPLES` = 3
+  samples;
+- the median of its newest `DQ_SUSTAIN_SAMPLES` = 8 samples is at least
+  `DQ_SUSTAIN_MEDIAN_SNR_DB` = 12 dB (the gate pass level 6 dB + 6 dB, four times the pass
+  power).
+
+  A run is memory only (like pending), keyed by observation id, at most
+  `DQ_SUSTAIN_PER_SOURCE` = 512 runs per source (oldest evicted first; about 70 kB). A closing
+  observation's run ends after its last sample; a retune, source removal or a retraction
+  (1.6, flags) drops it; the pending sweep drops runs idle for more than 2 500 ms. A sustained
+  create consumes the bucket's pending entry like a threshold create.
+
   1.5 Pending expiry is a **fixed window anchored at the entry's first sample**: an entry is
   deleted `DQ_PENDING_WINDOW_MS` = 600 000 ms (10 min) after its first sample, whatever
   arrived since; samples are never re-anchored. An observation arriving after deletion starts
@@ -143,6 +167,120 @@ its median reaches 15 dB).
   strong blocks = 250 ms < 300 ms and do not pass (today they pass on 10 counted blocks);
   12 blocks hold 6 strong blocks = 300 ms with best 6.5 >= 6 dB and pass. A run split by
   `inheritRun` after block 6 passes at the same block as an unsplit run.
+
+  1.11 (amendment 10) **Peak channel.** The creation SNR (`peakChannelSnrDb`, admission only)
+  is the highest of: the track's channel SNR; its best single covering slot when it is wider
+  than one slot (max(p_i / f_i) >= sum(p) / sum(f), the summed reading is unchanged for the gate);
+  and, for a narrow carrier only (matched width at most one 6.25 kHz slot,
+  `CHANNEL_GATE_MIN_WIDTH_HZ`), its **matched-window SNR**: the highest mean power of W contiguous segment bins over
+  the local floor of 1.15 (median of 12.5 kHz each side), W = the track's OBW in bins, at
+  least `MATCHED_MIN_BINS` = 2 and at most the segment. The gate's own pass rule still reads
+  the slot SNR. A slot spreads a narrow carrier over the whole slot: a 1 kHz carrier 15 dB
+  over the floor in an 8.33 kHz slot reads 10·log10((31.6 + 7.33) / 8.33) = 6.7 dB, under the
+  9 dB run floor of 1.4b, so the hunt captures' VDL2 and airband carriers never sustained.
+  Matched to its width it reads 12 to 15 dB. The 2-bin minimum halves a single hot bin (a
+  15 dB spike reads 10·log10((31.6 + 1) / 2) = 12.1 dB), and spur lines are dropped before
+  tracking anyway. Fixture: a tone whose slot SNR is 5.9 to 6.2 dB and whose matched SNR is
+  12.4 to 12.9 dB is not admitted at 2.5 s and is admitted by 5 s.
+
+  1.12 (amendment 10) **Airband slots.** A range whose protocols include `analog-am` and which has
+  more than one raster sizes its channel slots by its finest raster (`slotRasterOf`): airband
+  uses 8.33 kHz slots, not 25 kHz. An AM voice channel occupies about 6 kHz (2 x 3 kHz audio);
+  a 25 kHz slot adds 25 / 8.33 = 3 x the noise, 4.8 dB, which put measured AM voice at 4 to
+  6.5 dB channel SNR under the 6 dB pass. Every 25 kHz airband channel lies on the 8.33 kHz
+  grid (exact thirds), so none loses its slot.
+
+  1.13 (amendment 10) **One emitter, one segment.** Adjacent channels and splatter chained into
+  segments 80 to 350 kHz wide (one 1.4 MHz) in the hunt captures, so a busy band gave one
+  wideband record for several emitters, or none. The segmenter shall, per block:
+
+- cut a run at a valley at least `DIP_SPLIT_DB` = 6 dB below the highest level on both sides,
+  measured on the power smoothed over `DIP_SMOOTH_HZ` = 2 kHz (3 bins at 1 kHz; under a third
+  of the narrowest 6.25 kHz raster), when the valley also lies in the lower
+  `DIP_FLOOR_FRACTION` = 0.5 of the smaller side's height above the floor (the two lobes of
+  one FSK pager keep their valley high above the floor);
+- cut at the channel edges of every raster in the masks, each bounded to its range. While the
+  passive job runs, the masks also carry the band plans' rasters (as the channel plan already
+  carries their slots), so a busy band splits although the passive range has no raster;
+- never merge back a piece without a 6 dB valley (the existing prominence rule) across a
+  channel edge of the coarsest raster of its range (25 kHz on airband, 12.5 kHz on land
+  mobile), so a plateau of busy channels splits into one piece per channel;
+- merge a piece more than `SIDEBAND_DB` = 10 dB under a neighbour peaking within 31.25 kHz
+  into it whatever the valley (AM sidebands 10 to 20 dB under the carrier, splatter), across
+  channel edges too;
+- merge two pieces whose peaks are closer than `CHANNEL_PEAK_FRACTION` = 0.8 of the channel
+  grid the gate measures there, whatever the valley: one channel holds one emitter (the two
+  lobes of a +/-4.5 kHz POCSAG carrier are 9 kHz apart), across channel edges too. The grid is
+  the slot raster of the channel-plan entry covering each peak (`slotRasterOf`: 8.33 kHz on
+  airband, so 6.7 kHz; 12.5 kHz on land mobile, so 10 kHz), the finest where entries overlap,
+  and the smaller of the two peaks' limits applies; a bin no rastered entry covers has no
+  one-channel rule. Two equal airband peaks 8 kHz apart with a 14 dB valley therefore stay two
+  pieces (a window-wide coarsest-raster limit, 20 kHz, joined them).
+
+  Without a raster in the window only the dip rule applies, so FM broadcast (no band plan)
+  stays one segment. A track's reported OBW never exceeds its widest single-block segment
+  (a weak track's -20 dB width otherwise reaches the floor and becomes the union of every
+  span it drifted over).
+
+  1.14 (amendment 10) Regression fixtures (synthetic, seeded; `tests/mocks/scanner/admission-scenes.ts`):
+
+- **Sustained broadcast.** One observation re-ingested every second at 12 dB creates one
+  record at 3 s. Boundaries: 3 000 ms promotes, 2 999 ms does not; median 12.0 promotes,
+  11.99 does not; a 9.0 dB sample keeps the run, 8.99 restarts it; a 2 500 ms gap keeps it,
+  2 501 ms restarts it; 512 runs per source, the 513th evicts the oldest.
+- **Pure noise.** Any observation sequence at or under 11.99 dB, with any id reuse and
+  cadence, creates nothing (property); seeded Gaussian noise through the pipeline, gate,
+  split rules and store creates nothing (property).
+- **Adjacent carriers.** Two NFM carriers 12.5 kHz apart at 20 dB (no raster) and at 15 dB
+  (12.5 kHz raster) become two records at their centres.
+- **Wide FM.** One FM signal 90 kHz wide stays one track and one record.
+- **Airband AM.** An AM voice carrier passes the gate in its 8.33 kHz slot and not in a
+  25 kHz slot.
+- **Split bounds.** A 6.0 dB dip splits and 5.9 does not; a valley at half the height splits
+  and 0.1 dB higher does not; a prominence merge joins across a fine edge and not across a channel edge (nor one with a
+  channel edge inside), while a skirt more than 30 dB down joins across one; a
+  sideband 10.5 dB under joins and 10 dB does not, at the reach and not one bin past it; lobes
+  9 bins apart join under a 10-bin channel and not under a 9-bin one.
+
+  1.15 (amendment 10) **Local contrast and DC.** Every refusal below, and every invalid-input or
+  overload refusal of 1.2 and 1.7, also ends the observation's sustained run (1.4b), so a
+  rejected sample never keeps a run alive. A supplied `localSnrDb` that is not finite is
+  refused; only an absent one (no channel plan, or no neighbour bins) skips the local check.
+  An evidence-less observation never creates a record
+  when:
+
+- its track's mean local SNR (`localSnrDb`: per block, the segment's mean power over the median
+  of `LOCAL_FLOOR_HZ` = 12.5 kHz of bins each side, skipping the adjacent bin; averaged over the
+  track's blocks; for a narrow carrier whose matched width fits one 6.25 kHz slot, the higher of
+  that and its matched-window contrast, so a carrier with wide weak sidebands merged into its
+  segment still counts) is under `DQ_LOCAL_SNR_DB` = 6 dB, the gate's own pass margin (k 3 +
+  margin 3) against the neighbourhood instead of the global floor. A raised plateau of busy
+  channels or splatter is then not an emitter of its own; or
+- its centre lies within `DQ_DC_ADMIT_HZ` = 12 500 Hz of the tuned centre of its epoch
+  (`dcCentred`), measured from the track's nearer edge (centre ± OBW/2, `dcCentredOf`): the
+  receiver's DC pedestal peaked 5.5 kHz from DC in the hunt captures, and its neighbouring
+  pieces lean on it,
+  12.5 kHz is about twice that. A decode still creates there.
+
+  1.16 (amendment 10) **Channel keys.** While the passive job runs, the store's placement rasters
+  also hold every raster of each band plan range covering the centre. Per observation only
+  the rasters at least half its OBW wide are used (`gridFor`; the coarsest when none is): a
+  channel holds its emitter, so a 3 kHz airband carrier keeps the 8.33 kHz grid while a 50 kHz
+  VDL2 burst keys to 25 kHz and is not split across fine channels. The observation snaps to
+  the nearest of those rasters within tolerance; off every tolerance it keys to the nearest
+  channel of the finest of them (`channelRasters`) instead of a grid key. One emitter whose
+  measured centre drifts inside its channel stays one record, placed at its channel, and
+  adjacent fine channels stay apart. On a rastered band the classifier sees at most one
+  coarse channel of OBW, so no `wideband` class appears there. Fixtures: a local SNR
+  of 6.0 dB creates and 5.99 dB does not; a DC-centred observation never creates, sustained or
+  at 30 dB; four drifting sightings 9 to 12 kHz off a 25 kHz channel make one record at the
+  channel, and 12 501 Hz off keys to the next channel; with a 25 kHz raster anchored at
+  119 MHz and its 8.33 kHz companion, sightings at 119 MHz and 119 MHz + 8 333 Hz are two
+  records, and one 3 kHz past the second joins it; 50 kHz sightings 4 kHz either side of a
+  25 kHz channel are one record; an OBW of exactly 2 x 8 333 Hz keeps the 8.33 kHz grid and
+  1 Hz more keys to 25 kHz; inside a synthetic 100 kHz plateau of
+  carriers every track's local SNR is under 6 dB and no record is created, while a lone
+  carrier's is above.
 
 ## 2. One emitter, one discovery
 
