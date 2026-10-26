@@ -1,4 +1,8 @@
 import { audioChannelRequest } from "../../../decoders/audio-demod-decoder.js"
+import {
+	MULTIMON_CHANNEL_BANDWIDTH_HZ,
+	MULTIMON_CHANNEL_TRANSITION_HZ,
+} from "../../../decoders/builtin/multimon-ng.js"
 import { iqChannelRequest } from "../../../decoders/iq-decimate-decoder.js"
 import type { DemodulationConfig } from "../../../decoders/types.js"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -37,9 +41,12 @@ export const PROBE_CHANNEL_REQUESTS: Readonly<
 	Record<ProbeDecoderType, Readonly<Omit<DecoderChannelRequest, "centerHz">>>
 > = Object.freeze({
 	"dsd-fme": requestShape(audioChannelRequest(audioDefault, input)),
-	"multimon-ng": requestShape(
-		audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
-	),
+	// The decoder's 12 kHz paging channel filter (decoder-enablement 3.18).
+	"multimon-ng": requestShape({
+		...audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
+		bandwidthHz: MULTIMON_CHANNEL_BANDWIDTH_HZ,
+		transitionHz: MULTIMON_CHANNEL_TRANSITION_HZ,
+	}),
 	direwolf: requestShape(
 		audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
 	),
