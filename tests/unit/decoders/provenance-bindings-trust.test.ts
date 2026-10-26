@@ -129,9 +129,26 @@ describe("verified tuning trust (WG5 req 6)", () => {
 			sourceId: MAIN,
 			targetFrequenciesHz: [131_550_000],
 			tuningTrust: "commanded",
+			inputSampleRateHz: 2_400_000,
 		})
 		tuner.mode(MAIN, "external")
 		expect(index.lookup("a")?.tuningTrust).toBe("relay")
+	})
+
+	it("carries the observed input rate without a channel context, and follows a rate change", () => {
+		const { decoders, tuner, index } = setup()
+		decoders.add("a", { targets: [434_000_000] })
+		expect(index.lookup("a")?.inputSampleRateHz).toBe(2_400_000)
+		tuner.set(MAIN, tuned(131_000_000, "internal", 1_024_000))
+		expect(index.lookup("a")?.inputSampleRateHz).toBe(1_024_000)
+		// A channel context hears a channel, not the capture: rate unknown.
+		expect(
+			index.lookup("a", { sourceId: MAIN, channelHz: 434_000_000 })
+				?.inputSampleRateHz,
+		).toBeUndefined()
+		// An unusable snapshot (direct sampling) gives no rate.
+		tuner.set(MAIN, { ...tuned(131_000_000), directSampling: "q" } as never)
+		expect(index.lookup("a")?.inputSampleRateHz).toBeUndefined()
 	})
 
 	it("drops to unverified after a retune until the decoder starts again (req 6.3)", () => {

@@ -80,6 +80,8 @@ interface Snapshot {
 	frequency: number
 	/** 0.45 × sample rate: the usable 90 % of the IQ bandwidth around the centre. */
 	reach: number
+	/** Observed sample rate (Hz), finite and positive when `usable`. */
+	sampleRate: number
 	relay: boolean
 }
 
@@ -92,6 +94,8 @@ interface Entry {
 	bindCentre: number | undefined
 	/** Source the cached bindings carry; one frozen binding per trust value. */
 	cacheSourceId: string | null
+	/** Input rate the cached bindings carry (undefined: unknown). */
+	cacheRate?: number | undefined
 	cache: Partial<Record<TuningTrust, ActivityDecoderBinding>>
 }
 
@@ -132,6 +136,7 @@ function snapshotOf(state: unknown): Snapshot | undefined {
 		bindable: frequencyKnown,
 		frequency,
 		reach: MARGIN * sampleRate,
+		sampleRate,
 		relay: controlMode === "external",
 	}
 }
@@ -259,8 +264,16 @@ export function createDecoderProvenanceIndex(
 					? (defaultSourceId() ?? null)
 					: entry.configured
 			const trust = tuner ? trustOf(entry, sourceId) : "unverified"
-			if (sourceId !== entry.cacheSourceId) {
+			// The decoder hears the source capture around its single target only without a
+			// channel context; then the observed tuner rate is its input rate.
+			const snap = sourceId !== null ? snapshots.get(sourceId) : undefined
+			const rate =
+				context === undefined && snap?.usable === true
+					? snap.sampleRate
+					: undefined
+			if (sourceId !== entry.cacheSourceId || rate !== entry.cacheRate) {
 				entry.cacheSourceId = sourceId
+				entry.cacheRate = rate
 				entry.cache = {}
 			}
 			let binding = entry.cache[trust]
@@ -269,6 +282,7 @@ export function createDecoderProvenanceIndex(
 					sourceId,
 					targetFrequenciesHz: entry.targets,
 					tuningTrust: trust,
+					...(rate !== undefined ? { inputSampleRateHz: rate } : {}),
 				})
 				entry.cache[trust] = binding
 			}
