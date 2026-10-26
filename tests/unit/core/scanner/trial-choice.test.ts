@@ -614,7 +614,7 @@ describe("trial memory store (part 3)", () => {
 		expect(parseTrialMemory(over).size).toBe(0)
 	})
 
-	it("review round 2 minor: one malformed discovery never discards the others", () => {
+	it("one malformed discovery never discards the others", () => {
 		for (const bad of [null, 5, "x", {}, [{ protocol: 1 }]]) {
 			const out = parseTrialMemory({
 				version: 1,
