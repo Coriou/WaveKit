@@ -4232,9 +4232,19 @@ export class ScannerService extends EventEmitter {
 
 	/** Confirm-memory scope of an observation: its discovery, else the observation itself. */
 	private confirmScopeOf(observationId: string): string {
+		return this.scopeOfObservation(
+			this.findObservation(observationId),
+			observationId,
+		)
+	}
+
+	/** confirmScopeOf for an observation already in hand: no linear observation lookup. */
+	private scopeOfObservation(
+		o: LiveObservation | undefined,
+		observationId: string,
+	): string {
 		const discoveryId =
-			this.findObservation(observationId)?.discoveryId ??
-			this.store.discoveryIdOf(observationId)
+			o?.discoveryId ?? this.store.discoveryIdOf(observationId)
 		return discoveryId ? `d:${discoveryId}` : `o:${observationId}`
 	}
 
@@ -4258,7 +4268,7 @@ export class ScannerService extends EventEmitter {
 			...(ctx.freqHz !== undefined ? { freqHz: ctx.freqHz } : {}),
 		})
 		const scopes = new Set(
-			placed.map(o => this.confirmScopeOf(o.observationId)),
+			placed.map(o => this.scopeOfObservation(o, o.observationId)),
 		)
 		if (scopes.size !== 1) return null
 		const [scope] = scopes

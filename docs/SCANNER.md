@@ -514,7 +514,8 @@ placement (tuner centre plus channelizer offset), never a band default.
 Malformed or out-of-channel frequencies prove nothing.
 
 An ambient identity needs two checksum-valid decodes at least two seconds apart
-and no more than five minutes apart. When the DTO includes content, their logical
+and no more than five minutes apart (ADS-B is the exception: two CRC-valid Mode S
+frames confirm with no minimum spacing). When the DTO includes content, their logical
 message identities must also differ. Reception level, noise, RSSI/SNR, errors,
 frequency, channel and timestamps never create a new message. ACARS uses aircraft
 registration/flight plus message number, so different blocks of one message count
