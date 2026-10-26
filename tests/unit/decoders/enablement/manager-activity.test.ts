@@ -26,7 +26,12 @@ import {
 	resolveActivityPolicy,
 } from "../../../../src/decoders/enablement/activity-plan.js"
 import { planPlacements } from "../../../../src/decoders/enablement/placement.js"
-import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
+import {
+	FakeSources,
+	RateDecoder,
+	deferred,
+	iqCaps,
+} from "../../../mocks/rate-fakes.js"
 
 // Requirement 3.22: a YAML pager in the EU UHF paging band at 1.024 Msps,
 // the capture centred off-raster, a fake channel activity ranker.
@@ -319,4 +324,30 @@ it("notices every 100 ms never starve reconciliation (bounded coalescing)", asyn
 	}
 	await f.advance(250 - 50)
 	expect(f.batches.length).toBe(before + 1)
+})
+
+it("a slow pass never queues a backlog: notices while it waits run at most one more", async () => {
+	const f = setup()
+	await f.m.startAll()
+	await f.advance(1_000)
+	// Hold the serial work chain (a slow caps evaluation or pass) for 5 s.
+	const hold = deferred()
+	const chain = f.m as unknown as { capsWork: Promise<void> }
+	chain.capsWork = chain.capsWork.then(() => hold.promise)
+	const before = f.batches.length
+	for (let t = 0; t < 5_000; t += 100) {
+		f.notify()
+		await f.advance(100)
+	}
+	expect(f.batches.length).toBe(before)
+	hold.resolve()
+	await f.advance(2_000)
+	// The queued pass, then one coalesced rerun for the notices it missed.
+	expect(f.batches.length - before).toBeGreaterThanOrEqual(1)
+	expect(f.batches.length - before).toBeLessThanOrEqual(2)
+	// Idle again: a new notice gives exactly one pass.
+	const idle = f.batches.length
+	f.notify()
+	await f.advance(250)
+	expect(f.batches.length).toBe(idle + 1)
 })

@@ -572,6 +572,9 @@ export class DecoderManager extends EventEmitter {
 	private activityTimer: ReturnType<typeof setTimeout> | null = null
 	private activityTimerAt: number | null = null
 	private activityPassTimer: ReturnType<typeof setTimeout> | null = null
+	/** idle; scheduled (timer pending); busy (queued on capsWork or running). */
+	private activityPassState: "idle" | "scheduled" | "busy" = "idle"
+	private activityPassDirty = false
 	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
 	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
@@ -1878,25 +1881,46 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * Stage 1: bounded coalescing of activity notices and deadlines. The first
-	 * request schedules one pass ACTIVITY_PASS_COALESCE_MS later; requests
-	 * arriving before it runs join it and never postpone it (a trailing
-	 * debounce would starve under notices faster than its delay).
+	 * Stage 1: bounded coalescing of activity notices and deadlines, with at
+	 * most one activity pass outstanding. Idle: a request schedules a pass
+	 * ACTIVITY_PASS_COALESCE_MS later. Scheduled, queued or running: a request
+	 * only marks the state dirty (never postponing the scheduled pass, never
+	 * adding a second one). When the pass finishes dirty, exactly one rerun is
+	 * scheduled through the same coalescer.
 	 */
 	private requestActivityPass(): void {
-		if (this.activityPassTimer || this.destroying) return
+		if (this.destroying) return
+		if (this.activityPassState !== "idle") {
+			if (this.activityPassState === "busy") this.activityPassDirty = true
+			return
+		}
+		this.activityPassState = "scheduled"
 		this.activityPassTimer = setTimeout(() => {
 			this.activityPassTimer = null
-			if (this.destroying) return
+			if (this.destroying) {
+				this.activityPassState = "idle"
+				return
+			}
+			// Queued or running from here: requests set the dirty flag.
+			this.activityPassState = "busy"
+			this.activityPassDirty = false
 			const work = this.capsWork.then(() =>
 				this.destroying ? undefined : this.reconcilePlacements(),
 			)
-			this.capsWork = work.catch(error => {
-				this.log.warn(
-					{ err: safeErrorFields(error) },
-					"Activity placement pass failed",
-				)
-			})
+			this.capsWork = work
+				.catch(error => {
+					this.log.warn(
+						{ err: safeErrorFields(error) },
+						"Activity placement pass failed",
+					)
+				})
+				.finally(() => {
+					this.activityPassState = "idle"
+					if (this.activityPassDirty) {
+						this.activityPassDirty = false
+						this.requestActivityPass()
+					}
+				})
 		}, DecoderManager.ACTIVITY_PASS_COALESCE_MS)
 		this.activityPassTimer.unref?.()
 	}
@@ -3388,6 +3412,8 @@ export class DecoderManager extends EventEmitter {
 		this.activityTimer = null
 		if (this.activityPassTimer) clearTimeout(this.activityPassTimer)
 		this.activityPassTimer = null
+		this.activityPassState = "idle"
+		this.activityPassDirty = false
 		try {
 			this.activityUnsubscribe?.()
 		} catch {

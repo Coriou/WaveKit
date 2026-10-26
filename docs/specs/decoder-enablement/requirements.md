@@ -789,7 +789,10 @@ above 2.048 Msps)`, `remaining = cpuBudgetCores − committed − replayAllowanc
   the snapshots' `nextEvaluationMonoMs`, a blocked move's dwell end and the move window's
   expiry, on one monotonic clock. Notices and deadlines are coalesced, not debounced: the
   first schedules a pass 100 ms later and later ones join it without postponing it, so
-  notices at any rate still give a pass at least every 250 ms. A placement whose channel frequency differs is moved even
+  notices at any rate still give a pass at least every 250 ms while passes keep up. At
+  most one activity pass is outstanding: notices while it is queued or running only mark
+  it dirty, and a dirty pass schedules exactly one rerun when it finishes, so slow passes
+  never build a backlog. A placement whose channel frequency differs is moved even
   when its key is unchanged.
 - _Status._ Each placement of a ranked decoder reports `activity`: `ranking` (`activity` or
   `nearest`) and, when ranked, `state`, `score` (three decimals), `live` and `reasons`
