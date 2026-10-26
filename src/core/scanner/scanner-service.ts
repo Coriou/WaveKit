@@ -4975,6 +4975,24 @@ export class ScannerService extends EventEmitter {
 	 * holdMs (e.g. DMR on dsd-fme auto: 1 800 ms of the at most 4 000 ms capture). A shorter or
 	 * gapped capture, or a capture whose plan or view is gone, is no miss.
 	 */
+	/** The trial is the known protocol's: flagged by the queue, or planned as `knownProtocol`. */
+	private isKnownProtocolTrial(
+		captureId: string,
+		trial: IqReplayResult["trials"][number],
+	): boolean {
+		if (trial.known) return true
+		return (
+			this.replayPlans
+				.get(captureId)
+				?.some(
+					p =>
+						p.knownProtocol === true &&
+						p.protocol === trial.protocol &&
+						p.mode.decoderType === trial.decoderType,
+				) === true
+		)
+	}
+
 	private replayFullHold(
 		captureId: string,
 		trial: IqReplayResult["trials"][number],
@@ -4984,7 +5002,7 @@ export class ScannerService extends EventEmitter {
 			.get(captureId)
 			?.find(
 				p =>
-					p.known &&
+					(p.known || p.knownProtocol === true) &&
 					p.protocol === trial.protocol &&
 					p.mode.decoderType === trial.decoderType,
 			)
@@ -5125,7 +5143,10 @@ export class ScannerService extends EventEmitter {
 		const ran = summary.unsuccessful
 		if (discoveryId)
 			for (const t of ran)
-				if (t.known && this.replayFullHold(result.captureId, t))
+				if (
+					this.isKnownProtocolTrial(result.captureId, t) &&
+					this.replayFullHold(result.captureId, t)
+				)
 					this.knownProtocols.recordMiss(discoveryId, t.protocol)
 		this.replayPlans.delete(result.captureId)
 		this.replayOrders.delete(result.captureId)

@@ -22,7 +22,12 @@ import {
 import { PROBE_CHANNEL_REQUESTS } from "../../../../src/core/scanner/probes/channel-transport.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
-import { IQ_REPLAY_QUEUE_HOLDER } from "../../../../src/core/iq-capture/replay-queue.js"
+import {
+	createIqReplayQueue,
+	IQ_REPLAY_QUEUE_HOLDER,
+	type IqReplayQueuePort,
+} from "../../../../src/core/iq-capture/replay-queue.js"
+import { flush, spyLogger } from "../iq-capture/helpers.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { TrialMemory } from "../../../../src/core/scanner/trial-memory.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
@@ -574,6 +579,93 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 			expect(known.recordDecode).toHaveBeenCalledWith("d_1")
 			expect(port.confirmLive).not.toHaveBeenCalled()
 		} finally {
+			await h.service.stop()
+		}
+	})
+
+	// Review round 2 major 1: a known protocol the memory moved behind a remembered success still
+	// counts its full-hold misses, driven through the real replay queue.
+	it("a demoted known DMR still counts two full-hold misses through the real queue", async () => {
+		const { h, port, known, internals, live } = setup()
+		await h.service.start()
+		try {
+			internals.live.set("t1", live())
+			known.known.mockReturnValue("dmr")
+			const mem = (h.service as unknown as { trialMemory: TrialMemory })
+				.trialMemory
+			// a remembered POCSAG success, recorded after time 0 so it sorts ahead of the known trial
+			vi.spyOn(Date, "now").mockReturnValue(1000)
+			const memory = new TrialMemory({ now: () => 1000 })
+			memory.record("d_1", "pocsag", "multimon-ng", "decoded")
+			vi.spyOn(mem, "view").mockImplementation(() => memory.view("d_1"))
+			const v = port.view("cap-1")!
+			let held: string | null = null
+			let present = false
+			const qport: IqReplayQueuePort = {
+				onFinished: () => () => {},
+				view: () => (present ? v : null),
+				holderOf: () => (present ? held : undefined),
+				claim: (_id, holder) => {
+					if (!present || held !== null) return false
+					held = holder
+					return true
+				},
+				settle: () => {
+					present = false
+					held = null
+				},
+				discard: () => {
+					present = false
+					return true
+				},
+			}
+			const requests: string[] = []
+			const q = createIqReplayQueue({
+				port: qport,
+				probes: {
+					request: req => {
+						requests.push(req.protocol)
+						return {
+							run: {
+								result: Promise.resolve({
+									outcome: "no-sync" as const,
+									decoded: null,
+								}),
+								cancel: () => {},
+							},
+						}
+					},
+					onSlotRelease: () => () => {},
+				},
+				planner: input => {
+					const plan = h.service.planReplay({
+						...input,
+						priors: { dmr: 1, pocsag: 1, "analog-fm": 0, "analog-am": 0 },
+					})
+					expect(plan[0]?.protocol).toBe("pocsag")
+					expect(plan.find(t => t.protocol === "dmr")).toMatchObject({
+						known: false,
+						knownProtocol: true,
+					})
+					return plan
+				},
+				sink: r => h.service.applyReplayResult(r),
+				planInput: c => h.service.replayPlanInput(c),
+				logger: spyLogger().logger,
+			})
+			q.start()
+			for (let i = 0; i < 2; i++) {
+				present = true
+				held = null
+				q.enqueue(v)
+				await flush(10)
+			}
+			await q.stop()
+			expect(requests.filter(p => p === "dmr")).toHaveLength(2)
+			expect(known.recordMiss).toHaveBeenCalledTimes(2)
+			expect(known.recordMiss).toHaveBeenCalledWith("d_1", "dmr")
+		} finally {
+			vi.restoreAllMocks()
 			await h.service.stop()
 		}
 	})

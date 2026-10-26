@@ -329,7 +329,7 @@ trials (each in prior order), then remembered failures out of backoff (fewest fi
 after k consecutive failures backs off 60 s × 2^(k−1), at most 1 h; a trial still in backoff is
 left out unless every trial is. Trials that share one decoder run share their memory. Only a
 leading run of trials keeps the `known` flag (the replay queue runs flagged trials first), so the
-queue executes exactly this order; a known trial the order moved back runs as an ordinary trial.
+queue executes exactly this order; a known trial the order moved back runs without the queue flag but keeps `knownProtocol`, so its full-hold misses still count toward the 2-miss expiry (1.8).
 Outcomes are recorded against the discovery the observation has after the decode was applied,
 so the replay decode that admits a pending observation is remembered on the new discovery.
 9.6 **Capture before admission.** A gate-passed track the store has not admitted yet gets a

@@ -183,8 +183,16 @@ export interface IqReplayPlanInput {
 export interface IqReplayTrial {
 	protocol: ScannerProtocol
 	mode: ProbeMode
-	/** The trial of the discovery's known protocol (a miss counts per requirement 1.8). */
+	/**
+	 * Queue priority: the replay queue runs `known` trials first. The planner keeps it only on a
+	 * leading run so the queue executes the planned order; see `knownProtocol` for the identity.
+	 */
 	known: boolean
+	/**
+	 * The trial of the discovery's known protocol (a miss counts per requirement 1.8), also when
+	 * the memory moved it behind other trials and `known` is false. Absent = equals `known`.
+	 */
+	knownProtocol?: boolean
 	/** WG12: absent means `probe`. */
 	kind?: "probe" | "analog"
 	/** WG12: set when `kind` is `analog`. */

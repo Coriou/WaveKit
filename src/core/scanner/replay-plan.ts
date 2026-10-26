@@ -359,7 +359,8 @@ export function planReplayTrialsDetailed(
 			leading = false
 			return t
 		}
-		return leading ? t : { ...t, known: false }
+		// identity kept apart from the queue flag: its misses still count (requirement 1.8)
+		return leading ? t : { ...t, known: false, knownProtocol: true }
 	})
 	return { trials: boundReplayTrials(ordered), skipped }
 }

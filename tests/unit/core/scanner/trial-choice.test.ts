@@ -614,6 +614,23 @@ describe("trial memory store (part 3)", () => {
 		expect(parseTrialMemory(over).size).toBe(0)
 	})
 
+	it("review round 2 minor: one malformed discovery never discards the others", () => {
+		for (const bad of [null, 5, "x", {}, [{ protocol: 1 }]]) {
+			const out = parseTrialMemory({
+				version: 1,
+				discoveries: { good: [entry({})], bad },
+			})
+			expect(out.get("good")).toHaveLength(1)
+			expect(out.has("bad")).toBe(false)
+		}
+		const longId = "d".repeat(129)
+		const out = parseTrialMemory({
+			version: 1,
+			discoveries: { good: [entry({})], [longId]: [entry({})] },
+		})
+		expect([...out.keys()]).toEqual(["good"])
+	})
+
 	it("Zod on load: corrupt files and rows are ignored, good rows load", () => {
 		expect(parseTrialMemory(null).size).toBe(0)
 		expect(parseTrialMemory({ version: 2, discoveries: {} }).size).toBe(0)

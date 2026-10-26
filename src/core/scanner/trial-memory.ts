@@ -102,7 +102,7 @@ const EntrySchema = z
 const FileSchema = z
 	.object({
 		version: z.literal(1),
-		discoveries: z.record(z.string().min(1).max(ID_MAX), z.array(z.unknown())),
+		discoveries: z.record(z.string(), z.unknown()),
 	})
 	.strict()
 
@@ -129,8 +129,12 @@ export function parseTrialMemory(
 	const out = new Map<string, TrialMemoryEntry[]>()
 	const file = FileSchema.safeParse(raw)
 	if (!file.success) return out
-	for (const [id, rows] of Object.entries(file.data.discoveries)) {
+	// Each discovery is validated on its own: a malformed one is dropped, the rest load.
+	const idSchema = z.string().min(1).max(ID_MAX)
+	for (const [id, value] of Object.entries(file.data.discoveries)) {
 		if (out.size >= TRIAL_MEMORY_MAX_DISCOVERIES) break
+		if (!idSchema.safeParse(id).success || !Array.isArray(value)) continue
+		const rows: unknown[] = value
 		const entries: TrialMemoryEntry[] = []
 		const seen = new Set<string>()
 		for (const row of rows) {
