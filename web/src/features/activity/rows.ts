@@ -152,6 +152,16 @@ export function rowView(s: ActivitySummary): RowView {
 			notice: true,
 		}
 	}
+	if (s.fields.some(f => f.key === "label" && f.value === "network beacon")) {
+		return {
+			icon: null,
+			title: s.title ?? "network beacon",
+			subtitle: protocolText(s) ?? "Paging",
+			message: null,
+			readings: null,
+			notice: true,
+		}
+	}
 	if (s.kind === "analog-transmission") return analogView(s)
 	const message = s.fields.find(
 		f =>

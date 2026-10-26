@@ -124,3 +124,9 @@ Browsers only install from HTTPS or `localhost`.
 - What the web app still needs from the core: [`docs/web/CORE-GAPS.md`](web/CORE-GAPS.md).
 - Screenshots on this page and in the README come from `pnpm --filter @wavekit/web docs:shots`
   (the built app against the mock, so the data is the same on every run).
+
+Activity pager details show the full stored message when the list presentation
+was clipped. List previews and titles keep their compact limits. Multimon ASCII
+control markers are hidden in pager titles and message bodies; the raw JSON
+retains the original payload. Empty function-zero pages are labelled **network
+beacon** and displayed as notices rather than tone-only receptions.

@@ -29,6 +29,11 @@ const textualPayload = objectSchema({
 	to: asString,
 })
 
+// multimon-ng pocsag.c trtab: ASCII 0..31 plus DEL (127).
+// https://github.com/EliasOenal/multimon-ng/blob/master/pocsag.c
+const PAGER_MARKERS =
+	/<(NUL|SOH|STX|ETX|EOT|ENQ|ACK|BEL|BS|HT|LF|VT|FF|CR|SO|SI|DLE|DC1|DC2|DC3|DC4|NAK|SYN|ETB|CAN|EM|SUB|ESC|FS|GS|RS|US|DEL)>/g
+
 type TextualType = "message" | "decode"
 
 function family(protocol: string | undefined): string | undefined {
@@ -80,9 +85,14 @@ function presentPage(
 ): DecodePresentation {
 	const cap = canonicalCapcode(payload["address"] ?? payload["capcode"])
 	const message = stringField(payload, "message")
+		?.replace(PAGER_MARKERS, "")
+		.trim()
+	const beacon = integerField(payload, "function") === 0 && !message
 	const preview = message === undefined ? "" : message.slice(0, 40)
 	const title = clampTitle(
-		[rawProtocol, cap ?? "", preview].filter(part => part !== "").join(" "),
+		[rawProtocol, cap ?? "", beacon ? "network beacon" : preview]
+			.filter(part => part !== "")
+			.join(" "),
 	)
 	return presentation({
 		category: "paging",
@@ -91,6 +101,11 @@ function presentPage(
 		title,
 		fields: takeFields(
 			[
+				{
+					key: "label",
+					label: "Label",
+					value: beacon ? "network beacon" : undefined,
+				},
 				{
 					key: "message",
 					label: "Message",

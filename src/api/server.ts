@@ -69,6 +69,8 @@ import { decoderOptionDescriptors } from "../decoders/options/index.js"
 import type { Config } from "../config.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
+import { registerRouteIndex } from "./routes/route-index.js"
+import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { decoderBandRoutes } from "./routes/decoder-band.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
@@ -1088,6 +1090,7 @@ export class ApiServer {
 	 * Registers all Fastify plugins.
 	 */
 	private async registerPlugins(): Promise<void> {
+		registerRouteIndex(this.app)
 		// CORS support for browser clients
 		if (!this.access)
 			await this.app.register(fastifyCors, {
@@ -1446,6 +1449,9 @@ export class ApiServer {
 		})
 
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
+		await this.app.register(decoderSummaryRoutes, {
+			decoderManager: this.decoderManager,
+		})
 		await this.app.register(decoderRoutes, {
 			decoderManager: this.decoderManager,
 			decoderRegistry: this.decoderRegistry,

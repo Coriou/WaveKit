@@ -466,3 +466,16 @@ export interface DecoderLateDropsView {
 	/** Why sustained late drops are not shedding (requirement 5.5); null when not held. */
 	held: "nothing-sheddable" | "link-or-unknown" | null
 }
+
+/** GET /api/decoders/summary: compact output and placement diagnostics. */
+export interface DecoderSummary {
+	id: string
+	/** Decoder protocol family / adapter type. */
+	protocol: string
+	state: "running" | "stopped"
+	placements: Array<{ sourceId: string | null; frequencyHz: number | null }>
+	eventsOut: number
+	lastOutputAt: string | null
+	suspensionReason: DecoderSuspensionReasonCode | null
+	health: "decoding" | "idle" | "suspended" | "failed"
+}

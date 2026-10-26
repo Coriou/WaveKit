@@ -688,3 +688,8 @@ Targets and tags are defined in `docker/bake.hcl`; see [Docker setup](DOCKER-SET
 
 - Sample decoder output for parsing tests
 - Located in `tests/mocks/fixtures/`
+
+Pager Activity presentation removes multimon ASCII control-name markers from
+visible messages while preserving decoded data. Empty function-zero pages carry
+a `network beacon` label; they remain stored events, with notice presentation in
+the web app. Message presentation budgets still apply to list fields and titles.

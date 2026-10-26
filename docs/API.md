@@ -345,6 +345,14 @@ curl -i http://localhost:9000/health
 
 For the component details behind a 503, read [`GET /api/status`](#get-apistatus).
 
+#### GET /api
+
+Lists every registered HTTP route, including automatic HEAD routes and routes
+without schemas: `{ "routes": [{ "method": "GET", "path": "/api", "summary":
+"List registered routes", "tags": ["system"] }] }`. Summaries and tags come
+from the route schema; missing summaries are null and missing tags are empty.
+The index uses the same authenticated read admission as other API reads.
+
 #### GET /api/status
 
 Full system status including sources, decoders, audio output, and tuner relay (if enabled).
@@ -2184,6 +2192,23 @@ with a key-only warning:
   of at most 4 096 bytes, and all entries together at most 65 536 bytes.
 
 `extraArgs` is the operator's escape hatch: config only, with no flag allowlist.
+
+#### GET /api/decoders/summary
+
+Returns a compact array, one entry per decoder: `id`, `protocol` (adapter type),
+`state` (`running` or `stopped`), `placements` (running placements only, each with
+`sourceId` and `frequencyHz`, null when unknown), `eventsOut`, `lastOutputAt`
+(ISO time or null), `suspensionReason` (reason code or null), and `health`.
+It omits rate histories, capabilities and band assessments. Without a placement
+view, a running decoder has one placement using its assigned source and its single
+declared target, if unambiguous; unknown source or frequency is null.
+
+Health precedence is: **failed** for faulted/restarting health; **suspended**
+when a suspension flag or reason is set; **decoding** when running with output
+at most 60 seconds old (60 × 1,000 = 60,000 ms, inclusive); **idle** otherwise.
+A future output timestamp is idle. Historical `lastError` alone does not mark
+a recovered decoder failed. This is recent output evidence, not a signal-quality
+verdict. Read access is the same as other decoder GET routes.
 
 #### GET /api/decoders/:id
 
@@ -5050,7 +5075,8 @@ Query parameters: `kinds`, `sourceIds`, `decoderIds`, `protocols`,
 `categories`, `frequencyMin`, `frequencyMax`, `producedFrom`, `producedTo`,
 `entityKey`, `text`, `refs` (`type:value`, repeated), `order` (`asc` or
 `desc`), `limit`, `pageToken`. An unknown parameter is 400
-`ACTIVITY_QUERY_INVALID`.
+`ACTIVITY_QUERY_INVALID`; its message names the rejected parameter and lists
+all accepted parameters, derived from the same list that validates the query.
 
 `text` is plain text. The server tokenises it and quotes each token; it is
 not a raw FTS5 query. Indexed text is the title, the protocol, field labels,
