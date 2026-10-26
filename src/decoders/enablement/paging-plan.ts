@@ -15,6 +15,7 @@ import {
 	type BandDefaultEntry,
 } from "../band-defaults.js"
 import { BAND_REGIONS } from "../band-region.js"
+import { multimonPagingOnly } from "../builtin/multimon-ng.js"
 
 /** One paging range and the channel raster on it (inclusive integer Hz). */
 export interface PagingRasterRange {
@@ -99,10 +100,9 @@ export function pagingBandRanges(region: BandRegion): DecoderBandRange[] {
 /**
  * The pager decoder's built-in band (3.18): its region's paging ranges, so
  * it is `frequency-out-of-band` where none is in view (1090 MHz, ISM,
- * airband). The VHF paging plan spans 137-174 MHz, so AFSK1200 on the APRS
- * frequencies stays in band; EAS, DTMF or AFSK1200 elsewhere need a band
- * override or mode `always`. A supplement to the built-in table rather than
- * a row in it: band-defaults.ts is a preserved legacy file (band-plans 1.1).
+ * airband). It applies only when every mode multimon-ng runs is a paging
+ * mode (decoderBandTable). A supplement to the built-in table rather than a
+ * row in it: band-defaults.ts is a preserved legacy file (band-plans 1.1).
  */
 export const PAGER_BAND_DEFAULT: BandDefaultEntry = {
 	scope: "region",
@@ -116,10 +116,25 @@ function pagerBandByRegion(): Record<BandRegion, BandDefault> {
 	return byRegion
 }
 
-/** The built-in band table the manager resolves with: BAND_DEFAULTS plus the pager band. */
+/** BAND_DEFAULTS plus the pager band: the table for a paging-only multimon-ng. */
 export const DECODER_BAND_TABLE: Readonly<
 	Partial<Record<string, BandDefaultEntry>>
 > = { ...BAND_DEFAULTS, "multimon-ng": PAGER_BAND_DEFAULT }
+
+/**
+ * The built-in band table one decoder resolves with. multimon-ng gets the
+ * paging band only when all its modes are paging modes (POCSAG, FLEX); with
+ * EAS, AFSK1200, FSK9600 or DTMF among them its band stays unknown and it
+ * follows the VFO on every band.
+ */
+export function decoderBandTable(
+	type: string,
+	options: Readonly<Record<string, unknown>>,
+): Readonly<Partial<Record<string, BandDefaultEntry>>> {
+	return type === "multimon-ng" && multimonPagingOnly(options["modes"])
+		? DECODER_BAND_TABLE
+		: BAND_DEFAULTS
+}
 
 /** Most raster points one call enumerates (a 2.4 Msps window at 1 kHz is 1 921). */
 export const PAGING_MAX_RASTER_POINTS = 100_000

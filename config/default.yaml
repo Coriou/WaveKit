@@ -555,9 +555,10 @@ csdr:
 # Band suspension works out of the box: decoders without a configured
 # frequency get a built-in band (acarsdec, dsd-fme, direwolf and rtl433 per
 # region, followCenter LoRa from its Meshtastic `region` option, multimon-ng
-# the region's paging bands); ADS-B, AIS and VDL2 keep their protocol/decoder
-# defaults. A decoder started by hand (POST /api/decoders/:id/start)
-# is never band-suspended. See docs/API.md "Band check and band suspension".
+# with only paging modes (POCSAG, FLEX) the region's paging bands; with EAS,
+# AFSK1200, FSK9600 or DTMF among its modes it stays unknown and follows the
+# VFO); ADS-B, AIS and VDL2 keep their protocol/decoder defaults. A decoder
+# started by hand (POST /api/decoders/:id/start) is never band-suspended. See docs/API.md "Band check and band suspension".
 #
 #   region   - Band plan for the regional defaults: EU, US, CA, AU, NZ, JP or
 #              CN (case-insensitive; EU = CEPT / IARU Region 1, incl. UK, CH,

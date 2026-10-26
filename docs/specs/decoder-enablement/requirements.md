@@ -505,14 +505,18 @@ their raster frequency, or on the neighbouring 6.25 kHz point, also gives nothin
 
 3.18 **A pager decoder hears the whole paging band in view.**
 
-- _Band._ multimon-ng's built-in band is its region's paging ranges: the band catalogue's
-  ranges whose protocols are paging only (`pocsag`, `flex`), plus paging bands the catalogue
-  lacks (EU: 466.025–466.230 MHz, France). Out of view (1090 MHz, ISM, airband) it is
-  `frequency-out-of-band`. Overrides, `always` and operator starts work as in 3.13. The entry
-  is a supplement to the built-in table in `src/decoders/enablement/paging-plan.ts`;
+- _Band._ When every mode multimon-ng runs is a paging mode (`POCSAG512`, `POCSAG1200`,
+  `POCSAG2400`, `FLEX`; absent, empty or all-invalid `modes` run the POCSAG default), its
+  built-in band is its region's paging ranges: the band catalogue's ranges whose protocols
+  are paging only (`pocsag`, `flex`), plus paging bands the catalogue lacks (EU:
+  466.025–466.230 MHz, France). Out of view (1090 MHz, ISM, airband) it is then
+  `frequency-out-of-band`. With any other mode enabled (`EAS`, `AFSK1200`, `FSK9600`, `DTMF`,
+  alone or mixed with paging modes) the band stays unknown and it follows the VFO on every
+  band (3.11). Overrides, `always` and operator starts work as in 3.13. The entry is a
+  supplement to the built-in table in `src/decoders/enablement/paging-plan.ts`;
   `src/decoders/band-defaults.ts` stays byte-identical (band-plans requirement 1.1).
-- _Channels._ With a channelizer and no `channelHz`, `channelsHz`, `offsetHz`, `frequency`
-  or `frequencies`, config-origin and catalogue-origin multimon-ng place one channel on every
+- _Channels._ With at least one paging mode enabled (a mixed set included), a channelizer
+  and no `channelHz`, `channelsHz`, `offsetHz`, `frequency` or `frequencies`, config-origin and catalogue-origin multimon-ng place one channel on every
   raster frequency (the range's finest raster, exactly on it) of a paging range inside the
   usable window (`sampleRate × usableFraction`, not Nyquist) whose passband fits the window,
   origin `bandplan`, nearest the capture centre first, at most `MULTIMON_PAGING_MAX_CHANNELS`

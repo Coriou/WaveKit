@@ -84,6 +84,7 @@ import {
 } from "./rate-resolver.js"
 import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
 import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
+import { multimonHasPaging } from "./builtin/multimon-ng.js"
 import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import {
 	normalizeBandOverride,
@@ -92,7 +93,7 @@ import {
 } from "./band-defaults.js"
 import { BandOverrideStore } from "./band-override-store.js"
 import {
-	DECODER_BAND_TABLE,
+	decoderBandTable,
 	pagingRasterRanges,
 } from "./enablement/paging-plan.js"
 import {
@@ -1229,8 +1230,10 @@ export class DecoderManager extends EventEmitter {
 						...(config.type === "rtl433"
 							? { channelTargetRateHz: rtl433TargetRateHz(config.options) }
 							: {}),
-						// 3.18: the pager decoder's paging raster for its region.
-						...(config.type === "multimon-ng"
+						// 3.18: the pager decoder's paging raster for its region, when
+						// at least one of its modes is a paging mode.
+						...(config.type === "multimon-ng" &&
+						multimonHasPaging(config.options["modes"])
 							? {
 									pagingRaster: pagingRasterRanges(
 										this.resolveBand(state).region.code,
@@ -5462,8 +5465,8 @@ export class DecoderManager extends EventEmitter {
 			configOverride: state.config.band,
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
-			// 3.18: the built-in table plus multimon-ng's paging band.
-			table: DECODER_BAND_TABLE,
+			// 3.18: a paging-only multimon-ng adds its paging band to the table.
+			table: decoderBandTable(state.config.type, state.config.options),
 		})
 	}
 

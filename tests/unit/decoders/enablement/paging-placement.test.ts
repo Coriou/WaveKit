@@ -9,6 +9,7 @@ import {
 import {
 	DECODER_BAND_TABLE,
 	PAGER_BAND_DEFAULT,
+	decoderBandTable,
 	pagingBandRanges,
 	pagingRasterRanges,
 	rasterChannelsBetween,
@@ -142,6 +143,31 @@ describe("paging raster placement (3.18)", () => {
 				{ centerHz, sampleRateHz: 1_024_000 },
 			).verdict
 		expect(eu(466_100_000)).toBe("in-band")
+	})
+
+	it("the pager band table applies only when every mode is a paging mode", () => {
+		const table = (modes: unknown) =>
+			decoderBandTable("multimon-ng", modes === undefined ? {} : { modes })
+		for (const modes of [
+			undefined,
+			[],
+			"POCSAG1200",
+			["POCSAG1200"],
+			["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"],
+			["FLEX", "bogus"],
+			["bogus"],
+		])
+			expect(table(modes)).toBe(DECODER_BAND_TABLE)
+		for (const modes of [
+			["AFSK1200"],
+			["FSK9600"],
+			["EAS"],
+			["DTMF"],
+			["POCSAG1200", "AFSK1200"],
+			["FLEX", "DTMF", "bogus"],
+		])
+			expect(table(modes)).toBe(BAND_DEFAULTS)
+		expect(decoderBandTable("dsd-fme", {})).toBe(BAND_DEFAULTS)
 	})
 
 	it("config-origin without channels places every French channel in the window, not the VFO", () => {

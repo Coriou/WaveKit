@@ -387,23 +387,87 @@ it("configured multimon-ng runs in band on the French paging band", async () => 
 	expect(status?.placements?.[0]).toMatchObject({ channelHz: 466_100_000 })
 })
 
-it("configured multimon-ng with AFSK1200 runs in band at the APRS frequency", async () => {
+async function multimonAt(
+	hz: number,
+	modes: readonly string[] | undefined,
+	rate = 2_400_000,
+) {
 	const f = setup({
 		type: "multimon-ng",
-		vfo: 144_800_000,
-		options: { modes: ["AFSK1200"] },
+		vfo: hz,
+		...(modes ? { options: { modes: [...modes] } } : {}),
 	})
-	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 144_800_000 })
-	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 144_800_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(rate), centerFreq: hz })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: hz })
 	await f.manager.startAll()
-	const status = f.manager.getStatus("configured")
+	return { f, status: f.manager.getStatus("configured") }
+}
+
+// The paging band applies only when every mode is a paging mode.
+const MIXED = [
+	"POCSAG512",
+	"POCSAG1200",
+	"POCSAG2400",
+	"FLEX",
+	"AFSK1200",
+	"DTMF",
+]
+
+it.each([
+	[["POCSAG1200"]],
+	[["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"]],
+	[undefined],
+	[["not-a-mode"]],
+])(
+	"paging-only multimon-ng (modes %j) is suspended out of band at 1090 MHz",
+	async modes => {
+		const { f, status } = await multimonAt(1_090_000_000, modes)
+		expect(status?.running).toBe(false)
+		expect(status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
+
+it.each([
+	[["AFSK1200"], 432_500_000],
+	[["FSK9600"], 432_500_000],
+	[["EAS"], 1_090_000_000],
+	[["DTMF"], 432_500_000],
+	[["DTMF"], 1_090_000_000],
+	[["DTMF"], 868_000_000],
+	[MIXED, 1_090_000_000],
+	[MIXED, 432_500_000],
+] as const)(
+	"multimon-ng with modes %j keeps an unknown band and follows the VFO at %d Hz",
+	async (modes, hz) => {
+		const { status } = await multimonAt(hz, modes)
+		expect(status?.running).toBe(true)
+		expect(status?.bandAssessment?.verdict).toBe("unknown")
+		expect(status?.suspension).toBeUndefined()
+		expect(status?.placements).toEqual([
+			expect.objectContaining({ origin: "vfo", channelHz: hz }),
+		])
+	},
+)
+
+it("a mixed mode set covers the paging raster where a paging band is in view", async () => {
+	const { f, status } = await multimonAt(466_103_300, MIXED, 1_024_000)
 	expect(status?.running).toBe(true)
-	// The VHF paging plan (137-174 MHz) holds the APRS frequency.
-	expect(status?.bandAssessment).toMatchObject({
-		verdict: "in-band",
-		basis: "region-default",
-	})
-	expect(status?.placements?.[0]).toMatchObject({ channelHz: 144_800_000 })
+	expect(status?.bandAssessment?.verdict).toBe("unknown")
+	const channels = (status?.placements ?? []).map(p => p.channelHz)
+	expect(channels).toHaveLength(33)
+	expect(status?.placements?.every(p => p.origin === "bandplan")).toBe(true)
+	expect(channels[0]).toBe(466_106_250)
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
+})
+
+it("a mode set without a paging mode keeps the VFO channel inside a paging band", async () => {
+	const { status } = await multimonAt(466_103_300, ["DTMF"], 1_024_000)
+	expect(status?.running).toBe(true)
+	expect(status?.placements).toEqual([
+		expect.objectContaining({ origin: "vfo", channelHz: 466_103_300 }),
+	])
 })
 
 it("a band override keeps multimon-ng running at 1090 MHz", async () => {

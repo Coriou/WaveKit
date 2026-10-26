@@ -107,6 +107,59 @@ export const MULTIMON_MODES: readonly MultimonMode[] = [
 ] as const
 
 // Output parsing regex patterns
+/** The modes multimon-ng runs with when none (or none valid) are configured. */
+const MULTIMON_DEFAULT_MODES: readonly MultimonMode[] = [
+	"POCSAG512",
+	"POCSAG1200",
+	"POCSAG2400",
+]
+
+/**
+ * Paging-only modes (decoder-enablement 3.18): POCSAG and FLEX are heard only
+ * on paging channels. EAS, AFSK1200, FSK9600 and DTMF can be on any band.
+ */
+export const MULTIMON_PAGING_MODES: readonly MultimonMode[] = [
+	"POCSAG512",
+	"POCSAG1200",
+	"POCSAG2400",
+	"FLEX",
+]
+
+/**
+ * The modes a raw `modes` option runs (the adapter's own reading, without
+ * its warnings): absent, empty, not a list or no valid entry gives the POCSAG
+ * default; otherwise the first MULTIMON_MODES_MAX entries that are known
+ * modes, deduplicated in order.
+ */
+export function effectiveMultimonModes(value: unknown): MultimonMode[] {
+	if (!Array.isArray(value) || value.length === 0)
+		return [...MULTIMON_DEFAULT_MODES]
+	const valid = [
+		...new Set(
+			value
+				.slice(0, MULTIMON_MODES_MAX)
+				.filter((mode): mode is MultimonMode =>
+					MULTIMON_MODES.includes(mode as MultimonMode),
+				),
+		),
+	]
+	return valid.length > 0 ? valid : [...MULTIMON_DEFAULT_MODES]
+}
+
+/** Every mode the option runs is a paging mode (then the paging band applies). */
+export function multimonPagingOnly(value: unknown): boolean {
+	return effectiveMultimonModes(value).every(mode =>
+		MULTIMON_PAGING_MODES.includes(mode),
+	)
+}
+
+/** At least one mode the option runs is a paging mode (then the paging raster applies). */
+export function multimonHasPaging(value: unknown): boolean {
+	return effectiveMultimonModes(value).some(mode =>
+		MULTIMON_PAGING_MODES.includes(mode),
+	)
+}
+
 // POCSAG format: "POCSAG512: Address: 1234567  Function: 0  Alpha:   Message text here"
 // or "POCSAG1200: Address: 1234567  Function: 2  Numeric:   123-456-7890"
 const POCSAG_PATTERN =
@@ -332,9 +385,7 @@ export class MultimonDecoder extends AudioDemodDecoder {
 			)
 		}
 
-		return validModes.length > 0
-			? validModes
-			: ["POCSAG512", "POCSAG1200", "POCSAG2400"]
+		return effectiveMultimonModes(value)
 	}
 
 	/**

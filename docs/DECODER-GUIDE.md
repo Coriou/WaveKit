@@ -564,14 +564,17 @@ describe("HfdlDecoder", () => {
    `frequency-out-of-band` means the capture does not cover its band, `capture-too-narrow` that the
    band is in view but its channel does not fit the capture, `no-channel-selected` that no VFO or
    band-plan channel is chosen yet ([API](API.md) lists every reason).
-5. multimon-ng is a pager decoder: it runs only where a paging band of your region is in the
-   capture (the band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for
-   French paging), so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. Without
+5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
+   when `modes` is unset) runs only where a paging band of your region is in the capture (the
+   band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),
+   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With EAS, AFSK1200, FSK9600 or
+   DTMF among its modes it has no built-in band and follows the VFO on every band. With at
+   least one paging mode, a paging band in view and no
    `channelHz`, `channelsHz`, `offsetHz` or `frequency` it listens on every paging raster
    channel inside the usable window (80 % of the sample rate), nearest the centre first and
    at most 33, each through its own 12 kHz channel filter; a VFO exactly on one of those
    channels starts first, even when 33 others are nearer. With one of those options it keeps
-   your channels. For EAS, DTMF or AFSK1200 elsewhere, set a band override or mode `always`.
+   your channels.
 6. The built-in acarsdec (no YAML entry) runs one process per ACARS channel of your region
    inside the usable window, nearest the centre first and at most 5 (EU: 131.525, 131.550,
    131.725, 131.825 and 131.850 MHz; other regions 131.550 and 131.725 MHz). The nearest
