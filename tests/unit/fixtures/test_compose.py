@@ -50,7 +50,9 @@ def read_cu8(path):
 
 class ComposeTest(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='wk-compose-')
+        directory = tempfile.TemporaryDirectory(prefix='wk-compose-')
+        self.addCleanup(directory.cleanup)
+        self.dir = directory.name
 
     def recipe(self, **over):
         r = {

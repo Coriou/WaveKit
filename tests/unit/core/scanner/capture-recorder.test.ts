@@ -1,13 +1,7 @@
+import { makeTmpDir } from "../../../helpers/tmp-dir.js"
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
-import {
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs"
-import { tmpdir } from "node:os"
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import fc from "fast-check"
 import pino from "pino"
@@ -131,7 +125,7 @@ function setup(
 	decodeWaitMs: number | null = 5,
 	fs = FS,
 ) {
-	const dir = mkdtempSync(join(tmpdir(), "wk-cap-"))
+	const dir = makeTmpDir("wk-cap-")
 	const clock = { now: 1_000_000 }
 	const store = new CaptureStore({
 		dir: join(dir, "captures"),

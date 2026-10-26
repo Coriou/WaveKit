@@ -1,3 +1,4 @@
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
 import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import type {
@@ -9,10 +10,12 @@ import type { TunerState } from "@wavekit/api-types"
 import { ScannerConfigSchema } from "../../../src/config.js"
 import type { ScannerSettings } from "../../../src/core/scanner/types.js"
 
+const storageDir = makeTmpDir("wk-scanner-")
+
 /** Scanner settings from the config schema defaults, with test overrides. */
 export function testSettings(
 	patch: (s: ScannerSettings) => void = () => undefined,
-	dir = `/tmp/wk-scanner-${process.pid}`,
+	dir = storageDir,
 ): ScannerSettings {
 	const parsed = ScannerConfigSchema.parse({
 		storage: { dir },

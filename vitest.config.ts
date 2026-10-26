@@ -8,6 +8,7 @@ const pkg = JSON.parse(readFileSync("./package.json", "utf8")) as {
 export default defineConfig({
 	define: { __WAVEKIT_VERSION__: JSON.stringify(pkg.version) },
 	test: {
+		globalSetup: ["./tests/global-setup.ts"],
 		globals: true,
 		environment: "node",
 		include: ["tests/**/*.test.ts"],

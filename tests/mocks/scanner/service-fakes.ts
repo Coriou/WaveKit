@@ -1,6 +1,4 @@
-import { mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
 import pino from "pino"
 import type {
 	DecoderConfig,
@@ -105,7 +103,7 @@ export function serviceHarness(
 	} = {},
 ) {
 	const centre = opts.centreHz ?? CENTRE
-	const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "wk-scan-"))
+	const dir = opts.dir ?? makeTmpDir("wk-scan-")
 	const sources = new FakeSources("rtl", {
 		sampleRate: FS,
 		centerFreq: centre,

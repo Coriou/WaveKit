@@ -1,8 +1,8 @@
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
 import { describe, expect, it, afterEach, vi } from "vitest"
 import * as fc from "fast-check"
 import pino from "pino"
-import { mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
 	CSDR_BUFFER_ENV,
@@ -255,7 +255,7 @@ describe("csdr config schema", () => {
 		] as const
 		const saved = keys.map(key => process.env[key])
 		try {
-			const dir = mkdtempSync(join(tmpdir(), "wavekit-csdr-config-"))
+			const dir = makeTmpDir("wavekit-csdr-config-")
 			const file = join(dir, "config.yaml")
 			writeFileSync(file, "logging:\n  level: error\n")
 			process.env["WAVEKIT_CSDR__BOUNDED_BUFFERS"] = "false"

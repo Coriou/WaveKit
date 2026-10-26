@@ -1,6 +1,5 @@
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
 import { EventEmitter } from "node:events"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import type { Readable } from "node:stream"
 import pino from "pino"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
@@ -186,8 +185,8 @@ export class FakeEngineView extends EventEmitter implements ProbeEngineView {
 	}
 }
 
-/** Real recording dirs land here; probe tests remove it in afterAll. */
-export const PROBE_STORAGE_DIR = join(tmpdir(), `wk-probes-${process.pid}`)
+/** Real recording dirs owned by this test file. */
+export const PROBE_STORAGE_DIR = makeTmpDir("wk-probes-")
 
 export function probeRequest(
 	overrides: Partial<ProbeRequest> = {},

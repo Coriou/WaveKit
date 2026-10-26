@@ -1,5 +1,5 @@
-import { mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -10,7 +10,7 @@ import {
 
 describe("scanner capture routes", () => {
 	let app: FastifyInstance
-	const dir = mkdtempSync(join(tmpdir(), "wk-capr-"))
+	const dir = makeTmpDir("wk-capr-")
 	const iq = join(dir, "cap_abc.cu8")
 	writeFileSync(iq, Buffer.from([1, 2, 3, 4]))
 	const json = join(dir, "cap_abc.json")

@@ -1,14 +1,13 @@
+import { makeTmpDir } from "../../helpers/tmp-dir.js"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	writeFileSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, it, expect } from "vitest"
 
@@ -16,7 +15,7 @@ export function tempManifest(fixtures: unknown[]): {
 	dir: string
 	path: string
 } {
-	const dir = mkdtempSync(join(tmpdir(), "wk-fixtures-"))
+	const dir = makeTmpDir("wk-fixtures-")
 	const path = join(dir, "manifest.yaml")
 	writeFileSync(path, JSON.stringify({ version: 2, fixtures, candidates: [] }))
 	return { dir, path }
@@ -97,7 +96,7 @@ function generatedSetup(
 	sourceSha?: string,
 	edit: (recipe: UnitRecipe) => void = () => undefined,
 ) {
-	const src = mkdtempSync(join(tmpdir(), "wk-src-"))
+	const src = makeTmpDir("wk-src-")
 	const tone = join(src, "tone.cu8")
 	const n = 640
 	const bytes = Buffer.alloc(2 * n)
@@ -189,7 +188,7 @@ function runDownload(
 
 describe("download.sh v2", () => {
 	it("fetches a public raw file and verifies both hashes", () => {
-		const src = mkdtempSync(join(tmpdir(), "wk-src-"))
+		const src = makeTmpDir("wk-src-")
 		const raw = join(src, "tone.cu8")
 		writeFileSync(raw, Buffer.from([127, 128, 129, 130]))
 		const digest = sha(raw)
@@ -206,7 +205,7 @@ describe("download.sh v2", () => {
 		expect(sha(join(dir, "raw/tone.cu8"))).toBe(digest)
 	})
 	it("refuses a file whose sha256 does not match and leaves no target", () => {
-		const src = mkdtempSync(join(tmpdir(), "wk-src-"))
+		const src = makeTmpDir("wk-src-")
 		const raw = join(src, "tone.cu8")
 		writeFileSync(raw, Buffer.from([1, 2]))
 		const { path, dir } = tempManifest([
@@ -227,7 +226,7 @@ describe("download.sh v2", () => {
 		expect(existsSync(join(dir, "raw/tone.cu8"))).toBe(false)
 	})
 	it("copies private fixtures from WAVEKIT_PRIVATE_FIXTURES_DIR and skips without it", () => {
-		const priv = mkdtempSync(join(tmpdir(), "wk-priv-"))
+		const priv = makeTmpDir("wk-priv-")
 		writeFileSync(join(priv, "own.cu8"), Buffer.from([10, 20]))
 		const digest = sha(join(priv, "own.cu8"))
 		const { path, dir } = tempManifest([
@@ -322,7 +321,7 @@ describe("download.sh v2", () => {
 		}
 	}, 30_000)
 	it("fails on a requested id that matches no fixture, after fetching the known ones (final review infra I1)", () => {
-		const src = mkdtempSync(join(tmpdir(), "wk-src-"))
+		const src = makeTmpDir("wk-src-")
 		const raw = join(src, "tone.cu8")
 		writeFileSync(raw, Buffer.from([127, 128]))
 		const digest = sha(raw)
