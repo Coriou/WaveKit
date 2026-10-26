@@ -4,6 +4,14 @@ import type { ActivityRecord, ActivitySummary } from "@wavekit/api-types"
 const MARKERS =
 	/<(NUL|SOH|STX|ETX|EOT|ENQ|ACK|BEL|BS|HT|LF|VT|FF|CR|SO|SI|DLE|DC1|DC2|DC3|DC4|NAK|SYN|ETB|CAN|EM|SUB|ESC|FS|GS|RS|US|DEL)>/g
 
+/** Remove multimon control names and C0/C1 controls from a pager body. */
+export function sanitisePagerMessage(message: string): string {
+	return message
+		.replace(MARKERS, "")
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+		.trim()
+}
+
 /** Expand only the detail body; the stored record, list and title stay intact. */
 export function pagerDetailItem(
 	item: ActivitySummary,
@@ -21,10 +29,7 @@ export function pagerDetailItem(
 		return item
 	const message = raw["message"]
 	if (typeof message !== "string") return item
-	const clean = message
-		.replace(MARKERS, "")
-		.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
-		.trim()
+	const clean = sanitisePagerMessage(message)
 	const field = item.fields.find(f => f.key === "message")
 	if (
 		typeof field?.value !== "string" ||

@@ -68,6 +68,32 @@ it("strips every multimon control marker from the expanded body", () => {
 	expect(rowView(pagerDetailItem(item, record)).message).toBe("Synthetic body")
 	expect(pagerDetailItem(item, null)).toBe(item)
 })
+it.each([
+	["pocsag", "123456789", "123456789"],
+	["flex", "Synthetic FLEX body", "Synthetic FLEX body"],
+	[
+		"pocsag",
+		" \u0000Synthetic<NUL>\u0085 body<ETX>\u009f<EOT> ",
+		"Synthetic body",
+	],
+])(
+	"shows a sanitised %s fallback body without a presented message: %s",
+	(protocol, message, expected) => {
+		const { item, record } = fixture(message, "")
+		item.protocol = protocol
+		item.fields = []
+		record.payload.protocol = protocol
+		record.payload.fields = []
+		for (const summary of [item, pagerDetailItem(item, record)]) {
+			const view = messageView(summary, record)
+			expect(view.text).toBe(expected)
+			expect(view.toneOnly).toBe(false)
+			expect(view.mono).toBe(expected === "123456789")
+			expect(view.fields.some(f => f.key === "message")).toBe(false)
+			expect(view.raw).toEqual({ message })
+		}
+	},
+)
 it.each([0, 1])(
 	"does not restore a marker-only page as a Message field for function %i",
 	fn => {
