@@ -30,8 +30,10 @@ import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 const MARKER = Buffer.from("BURST-ON-CHANNEL")
-const POCSAG_LINE =
-	"POCSAG1200: Address: 1234567  Function: 0  Alpha:   activity e2e"
+// Ambient identity needs distinct pages, so each burst carries its own sequence number.
+let pageSeq = 0
+const pocsagLine = (): string =>
+	`POCSAG1200: Address: 1234567  Function: 0  Alpha:   activity e2e ${++pageSeq}`
 
 class FakeChild extends EventEmitter {
 	readonly stdin = new PassThrough()
@@ -44,8 +46,7 @@ class FakeChild extends EventEmitter {
 	constructor() {
 		super()
 		this.stdin.on("data", (chunk: Buffer) => {
-			if (chunk.includes(MARKER))
-				this.stdout.write(`${POCSAG_LINE}\n${POCSAG_LINE}\n`)
+			if (chunk.includes(MARKER)) this.stdout.write(`${pocsagLine()}\n`)
 		})
 		setImmediate(() => this.emit("spawn"))
 	}
@@ -100,6 +101,8 @@ const { createChannelActivityRanker } =
 	await import("../../src/core/scanner/channel-activity.js")
 const { createDecoderProvenanceIndex } =
 	await import("../../src/decoders/provenance-bindings.js")
+const { ambientTrustFromBinding } =
+	await import("../../src/core/scanner/probes/ambient-trust.js")
 const { createActivityIngress } =
 	await import("../../src/core/activity/ingress.js")
 const { ScannerService } =
@@ -196,8 +199,13 @@ function build() {
 		currentGeneration: () => 1,
 	})
 	manager.setChannelizer(provider as never)
-	// (3) provenance index + Activity ingress, published by the manager
-	const provenance = createDecoderProvenanceIndex(manager, () => "rtl")
+	// The observed tuner state proves the same source centre/rate used by both paths.
+	const tuner = new ArbiterFakeTuner()
+	tuner.addSource("rtl")
+	tuner.states.get("rtl")!.sampleRate = FS
+	tuner.states.get("rtl")!.frequency = CENTRE
+	// (3) production provenance index + Activity ingress, including tuner-backed trust
+	const provenance = createDecoderProvenanceIndex(manager, () => "rtl", tuner)
 	const envelopes: DecodeEnvelope[] = []
 	const ingress = createActivityIngress({
 		sink: env => envelopes.push(env),
@@ -212,10 +220,6 @@ function build() {
 	const sources = new FakeSources("rtl", { sampleRate: FS, centerFreq: CENTRE })
 	sources.rtlTcp.add("rtl")
 	const fanout = new FakeFanout()
-	const tuner = new ArbiterFakeTuner()
-	tuner.addSource("rtl")
-	tuner.states.get("rtl")!.sampleRate = FS
-	tuner.states.get("rtl")!.frequency = CENTRE
 	const settings = testSettings(s => {
 		s.passive.enabled = false
 		s.sweep.markers = false
@@ -246,6 +250,13 @@ function build() {
 		} as never,
 		tuner: tuner as never,
 		decoders: manager,
+		// Match src/index.ts: trust is proven for this output's actual placement.
+		ambientTrust: (decoderId, hz, sourceId, placement) =>
+			ambientTrustFromBinding(
+				provenance.lookup(decoderId, placement),
+				hz,
+				sourceId,
+			),
 		digitalVoice: null,
 		liveDemod: null,
 		logger,
@@ -317,6 +328,9 @@ describe("activity-ranked channels through the production decode path", () => {
 		const pocsag = f.envelopes.filter(e => e.decoderId === "pager")
 		expect(pocsag.length).toBeGreaterThan(0)
 		expect(pocsag.every(e => e.provenance.frequency?.hz === FAR)).toBe(true)
+		expect(
+			pocsag.every(e => e.provenance.frequency?.tuningTrust === "commanded"),
+		).toBe(true)
 		// The scanner placed the ambient decode on the far channel's discovery.
 		expect(found).toMatchObject({ frequencyHz: FAR, confidence: "decoded" })
 		// And the ranker heard that decode: the far channel ranks hot with "decoded".
