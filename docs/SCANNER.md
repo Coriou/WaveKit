@@ -259,7 +259,7 @@ A track's reported bandwidth never exceeds its widest single block, so a weak tr
 
 **Pager data is not voice.** A closed live-audio transmission is not stored as an analog voice (`analog-transmission`) Activity row when Activity accepted a paging or APRS decode from the same source within 1 250 Hz of its frequency, during the transmission or up to 1 s before or after it, on a channel whose tuning WaveKit commands or relays. The pager decode is the record of that burst, and identify attaches no analog proof for it (no `analog-fm` candidate). The decision waits 1 s after the final close is published, so voice rows are stored one second later than before: an ordinary squelch close is already final only after the 1.5 s merge gap, so its row appears about 2.5 s after the audio ends. The `live-audio:transmission` WebSocket events are unchanged. When anything is unknown (no provenance, unverified tuning, more than 8 closes waiting) or at shutdown, the transmission is stored as voice, as before.
 
-**Decodes reach the discovery.** A protocol that confirms on two matching decodes (a POCSAG or FLEX capcode without a plausible message, an rtl_433 device, a DMR colour code, an AIS, ACARS or VDL2 identity) pairs them across every probe and configured decoder on the same discovery (or, before it has one, the same observation): one decode in each of two short probes confirms. The two decodes must be at least 2 s and at most 5 min apart, so one transmission heard by two decoders at once counts once; a repeat within 5 min refreshes the window. At most 4096 identities are remembered; the oldest go first. A replayed IQ capture still pairs only within its own replay. A configured decoder's decode names the nearest track that reaches its frequency: within half the decoder's channel width for AIS, ACARS and VDL2 (12.5 kHz of a 25 kHz channel) and Meshtastic LoRa (62.5 kHz), ADS-B from a running readsb (500 kHz around 1090 MHz, named by the aircraft's ICAO address on its second CRC-proven message; a single or failed message leaves no record), or within max(1.5 kHz, half the track's bandwidth) for a decoder on the VFO. When two different signals are equally near (within 1 Hz) nothing is named. Activity rows from scanner probes carry the probe's channel frequency, rtl_433 rows its own `freq` estimate when it lies in 24 to 1766 MHz and within the usable 80 % of the input it heard (0.8 × sample rate / 2 of its channel, ±409.6 kHz at 1.024 Msps), else its channel frequency (also when the input rate is unknown), and readsb rows 1090 MHz.
+**Decodes reach the discovery.** A protocol that confirms on two matching decodes (a POCSAG or FLEX capcode, an APRS address, an rtl_433 device, a DMR colour code, an AIS, ACARS or VDL2 identity) pairs them across every probe and configured decoder on the same discovery (or, before it has one, the same observation): one decode in each of two short probes confirms. The two decodes must be at least 2 s and at most 5 min apart, so one transmission heard by two decoders at once counts once; a repeat within 5 min refreshes the window. At most 4096 identities are remembered; the oldest go first. A replayed IQ capture still pairs only within its own replay. A configured decoder's decode names tracks by occupied-span containment with a small placement tolerance (see Ambient identification below). Ambiguous signals receive no identity. Activity rows from scanner probes carry the probe's channel frequency, rtl_433 rows its own `freq` estimate when it lies in 24 to 1766 MHz and within the usable 80 % of the input it heard (0.8 × sample rate / 2 of its channel, ±409.6 kHz at 1.024 Msps), else its channel frequency (also when the input rate is unknown), and readsb rows 1090 MHz.
 
 To find discoveries by what a decoder reported, `GET /api/scanner/discoveries?identity=<kind>:<value>` (for example `identity=dmr-cc:1` or `identity=pocsag-capcode:1234567`) keeps those whose identity has that kind and value, ignoring case and surrounding spaces. The free-text `q` matches the operator label or the identity value; talkgroups, callsigns and other metadata are not searched. See [API.md](API.md#get-apiscannerdiscoveries).
 
@@ -510,7 +510,11 @@ rtl_433 (ISM), direwolf and multimon-ng AFSK1200 (APRS), multimon-ng
 (POCSAG/FLEX), dsd-fme (digital voice), and Meshtastic LoRa. Their output must
 come from the discovery's source with commanded or relay tuning trust. ACARS,
 VDL2 and LoRa output with a missing or zero frequency uses the actual channel
-placement (tuner centre plus channelizer offset), never a band default.
+placement (tuner centre plus channelizer offset), or the single configured target
+when unplaced. Multiple configured targets without a decoder frequency give no
+placement; a configured target is never a band default. Paging, DMR, APRS and
+rtl_433 ambient evidence also needs trusted tuning: it stops after an external
+SDR++ retune until the tuning is trusted again.
 Malformed or out-of-channel frequencies prove nothing.
 
 An ambient identity needs two checksum-valid decodes at least two seconds apart
@@ -518,7 +522,9 @@ and no more than five minutes apart (ADS-B is the exception: two CRC-valid Mode 
 frames confirm with no minimum spacing). When the DTO includes content, their logical
 message identities must also differ. Reception level, noise, RSSI/SNR, errors,
 frequency, channel and timestamps never create a new message. ACARS uses aircraft
-registration/flight plus message number, so different blocks of one message count
+registration/flight plus the three-character message number (acarsdec's trailing
+block letter is removed; dumpvdl2 already separates `msg_num` and `msg_num_seq`),
+so different blocks of one message count
 once (without a message number, aircraft, label and text are used). VDL2 uses source
 and destination addresses plus embedded ACARS identity, or raw message text;
 non-ACARS frames without text use spacing alone. rtl_433 uses model/device ID and
@@ -534,12 +540,16 @@ its CRC/address checks and raw-frame duplicate rejection. Accepted ambient
 identities reset known-protocol misses and record successful trial memory;
 untrusted evidence does neither. Edge tracks use these same strict checks.
 
-Point association uses inclusive distance from the decoded channel to the
-track centre: 25 kHz / 2 = 12.5 kHz for AIS, ACARS, VDL2, APRS, POCSAG and FLEX;
-125 kHz / 2 = 62.5 kHz for LoRa; digital voice channel width / 2
-(12.5 kHz / 2 = 6.25 kHz for DMR, P25, YSF and NXDN96;
-6.25 kHz / 2 = 3.125 kHz for dPMR, D-STAR and NXDN48).
-ADS-B retains its 1 MHz / 2 = 500 kHz centre tolerance.
+Point association requires the decode frequency inside the track's occupied
+span, widened by a 2.5 kHz placement tolerance: reach = max(1.5 kHz, occupied
+bandwidth / 2) + 2.5 kHz, with an exclusive boundary. The tolerance budgets
+1 kHz decoder/raster agreement plus 1.5 kHz measured-centre error; 2.5 kHz is
+less than half the tightest 12.5 kHz raster (6.25 kHz). Even with the minimum
+half-span, reach extends at most 4 kHz beyond the measured half-width. This applies to paging,
+APRS, digital voice, 25 kHz AIS/ACARS/VDL2 and wide LoRa alike: channel width
+alone cannot attach a decode to a narrow neighbouring signal. A merged wide
+track can contain several channels. ADS-B retains its separate nominal-frequency
+centre tolerance of 500 kHz, also exclusive.
 The observation lifetime must include the decode time, with two seconds of
 pairing margin on either side.
 
@@ -551,13 +561,17 @@ or `(freq1 + freq2) / 2` for FSK. Values must be finite numbers in the
 usable tuner window (centre ± 0.8 × sample rate / 2); malformed or out-of-window
 values fall back to the placed target.
 
-When reaching candidates belong to different discoveries, point association
-selects a discovery only if exactly one discovery has a track span
-(centre ± occupied bandwidth / 2) containing every reaching track span. This
-resolves a narrow detector fragment nested inside a wide discovery. All other
-multi-discovery cases receive no decode; point ambiguity is recorded in the debug log. Multiple observations
-of one discovery can receive point evidence. rtl_433 requires exactly one
-qualifying observation. Ambiguous evidence cannot prime shared confirmation.
+When reaching candidates belong to different discoveries, a channel fragment
+nested inside every other reaching track span takes precedence. Thus a merged
+wide track covering two ACARS channels yields to each channel's own fragment;
+without that fragment it receives the decode itself. A fragment on the other
+channel cannot contain the decode. For ADS-B's broad nominal-frequency reach,
+the unique enclosing discovery still resolves nested fragments. Other
+multi-discovery cases receive no decode. Point ambiguity is logged at most once
+per decode, after interpretation; shared-confirmation lookups do not log.
+Multiple observations of one discovery can receive point evidence. rtl_433
+requires exactly one qualifying observation. Ambiguous evidence cannot prime
+shared confirmation.
 
 Ambient observation lookups use a per-source sorted frequency index:
 O(log n + k) per decode for n indexed observations and k candidates in the

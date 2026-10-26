@@ -151,6 +151,29 @@ describe("Mode S CRC on Beast frames", () => {
 })
 
 describe("readsb ambient interpreter", () => {
+	it("never traverses ADS-B DTO content for shared message hashing", () => {
+		const r = rig()
+		let reads = 0
+		try {
+			for (const n of [0, 1]) {
+				const frame = frameOf(0x8d, 0xabc001, [n, 0, 0, 0, 0, 0, 0])
+				const data = beast(frame)!
+				Object.defineProperty(data, "syntheticContent", {
+					enumerable: true,
+					get: () => {
+						reads++
+						return "SYNTHETIC"
+					},
+				})
+				r.decoders.out(aircraft(data))
+			}
+			expect(r.got.some(e => e.ev.identity)).toBe(true)
+			expect(reads).toBe(0)
+		} finally {
+			r.ambient.stop()
+		}
+	})
+
 	it("targets 1090 MHz by default", () => {
 		const cfg = {
 			id: "adsb",

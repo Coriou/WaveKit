@@ -48,7 +48,7 @@ export class AmbientObservationIndex<T extends ChannelCandidate> {
 		reachHz: number,
 		includeSpan = false,
 	): T[] {
-		const radius = includeSpan ? Math.max(reachHz, this.halfWidth) : reachHz
+		const radius = includeSpan ? reachHz + this.halfWidth : reachHz
 		const result: T[] = []
 		this.centres.range(sourceId, "ambient", hz - radius, hz + radius, entry => {
 			const observation = this.entries.get(entry.id)?.observation

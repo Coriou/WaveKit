@@ -1,4 +1,5 @@
 import fc from "fast-check"
+import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { describe, expect, it } from "vitest"
 import {
 	AMBIENT_CHANNEL_WIDTH_HZ,
@@ -30,7 +31,7 @@ function obs(
 
 const place = (
 	cands: PlacementCandidate[],
-	protocol: "acars" | "ais" | "lora" | "adsb" | "pocsag" | null,
+	protocol: ScannerProtocol | null,
 	hz = HZ,
 	at = 95_000,
 ) =>
@@ -42,60 +43,69 @@ const place = (
 	).map(o => o.observationId)
 
 describe("ambient placement", () => {
-	it("reaches half the decoder's channel width for ambient-only protocols", () => {
-		expect(ambientReachHz("acars", 300_000)).toBe(12_500)
-		expect(ambientReachHz("ais", 0)).toBe(12_500)
-		expect(ambientReachHz("vdl2", Number.NaN)).toBe(12_500)
-		expect(ambientReachHz("lora", 0)).toBe(62_500)
+	it("uses occupied spans with a bounded placement tolerance", () => {
+		expect(ambientReachHz("acars", 300_000)).toBe(152_500)
+		for (const protocol of ["ais", "vdl2", "lora", "pocsag"] as const)
+			expect(ambientReachHz(protocol, 0)).toBe(4_000)
 		expect(AMBIENT_CHANNEL_WIDTH_HZ["acars"]).toBe(25_000)
-	})
-
-	it("uses protocol channel widths and retains the unknown-protocol OBW fallback", () => {
-		expect(ambientReachHz("pocsag", 0)).toBe(12_500)
 		expect(ambientReachHz(null, 0)).toBe(AMBIENT_VFO_MIN_REACH_HZ)
-		expect(ambientReachHz(null, 2_000)).toBe(1_500)
 		expect(ambientReachHz(null, 12_500)).toBe(6_250)
-		expect(ambientReachHz(null, -5)).toBe(1_500)
-		expect(ambientReachHz(null, Infinity)).toBe(1_500)
+		for (const width of [-5, Infinity, Number.NaN])
+			expect(ambientReachHz("pocsag", width)).toBe(4_000)
 	})
 
-	it("names a track at the reach bound and not 1 Hz past it", () => {
-		expect(place([obs("a", HZ + 12_500)], "acars")).toEqual(["a"])
-		expect(place([obs("a", HZ + 12_501)], "acars")).toEqual([])
-		expect(place([obs("a", HZ - 62_500)], "lora")).toEqual(["a"])
-		expect(place([obs("a", HZ - 62_501)], "lora")).toEqual([])
-		// ADS-B: a track-centre tolerance of 500 kHz around the nominal 1090 MHz
-		expect(ambientReachHz("adsb", 0)).toBe(500_000)
-		expect(place([obs("a", HZ + 500_000)], "adsb")).toEqual(["a"])
-		expect(place([obs("a", HZ + 500_001)], "adsb")).toEqual([])
-		// a merged wide track centred 8 kHz off (formerly missed by the 1 kHz rule)
-		expect(place([obs("a", HZ + 8_000, { obwHz: 200_000 })], "acars")).toEqual([
-			"a",
-		])
+	it("excludes the reach boundary and everything past it", () => {
+		for (const protocol of ["acars", "lora", "pocsag", "adsb", null] as const) {
+			const reach = ambientReachHz(protocol, 2_000)
+			expect(place([obs("a", HZ + reach - 1)], protocol)).toEqual(["a"])
+			expect(place([obs("a", HZ + reach)], protocol)).toEqual([])
+			expect(place([obs("a", HZ + reach + 1)], protocol)).toEqual([])
+		}
 	})
 
-	it("refuses two reaching candidates even at unequal distances", () => {
-		expect(
-			place([obs("far", HZ + 9_000), obs("near", HZ - 3_000)], "acars"),
-		).toEqual([])
+	it.each(["pocsag", "flex", "aprs"] as const)(
+		"%s never names a keyed neighbour and places both tracked channels",
+		protocol => {
+			const neighbour = obs("voice", HZ + 12_500, {
+				obwHz: 8_000,
+				discoveryId: "voice",
+			})
+			expect(place([neighbour], protocol)).toEqual([])
+			const offsetPager = obs("pager", HZ + 2_500, {
+				obwHz: 8_000,
+				discoveryId: "pager",
+			})
+			expect(place([offsetPager], protocol)).toEqual(["pager"])
+			const pager = obs("pager", HZ, { obwHz: 8_000, discoveryId: "pager" })
+			expect(place([pager, neighbour], protocol)).toEqual(["pager"])
+			expect(place([pager, neighbour], protocol, HZ + 12_500)).toEqual([
+				"voice",
+			])
+		},
+	)
+
+	it("uses each ACARS channel fragment inside a merged wide track, else the wide track", () => {
+		const wide = obs("wide", HZ + 12_500, {
+			obwHz: 60_000,
+			discoveryId: "wide",
+		})
+		const a = obs("a", HZ, { obwHz: 8_000, discoveryId: "a" })
+		const b = obs("b", HZ + 25_000, { obwHz: 8_000, discoveryId: "b" })
+		for (const [hz, own, other] of [
+			[HZ, a, b],
+			[HZ + 25_000, b, a],
+		] as const) {
+			expect(place([wide, own, other], "acars", hz)).toEqual([
+				own.observationId,
+			])
+			expect(place([wide, other], "acars", hz)).toEqual(["wide"])
+		}
 	})
 
-	it("refuses two signals at and past the former nearest tie width", () => {
-		expect(
-			place(
-				[
-					obs("a", HZ + 5_000, { discoveryId: "d1" }),
-					obs("b", HZ - 5_000, { discoveryId: "d2" }),
-				],
-				"acars",
-			),
-		).toEqual([])
-		expect(
-			place([obs("a", HZ + 5_000), obs("b", HZ - 5_000 - 1)], "acars"),
-		).toEqual([])
-		expect(
-			place([obs("a", HZ + 5_000), obs("b", HZ - 5_000 - 1 - 1)], "acars"),
-		).toEqual([])
+	it("refuses overlapping non-nested discoveries even at unequal distances", () => {
+		expect(place([obs("a", HZ - 500), obs("b", HZ + 1_000)], "acars")).toEqual(
+			[],
+		)
 	})
 
 	it("names every tied observation of one discovery", () => {
@@ -150,7 +160,7 @@ describe("ambient placement", () => {
 					)
 					for (const o of named) {
 						const t = o.lastTrack!
-						expect(Math.abs(t.centreHz - HZ)).toBeLessThanOrEqual(
+						expect(Math.abs(t.centreHz - HZ)).toBeLessThan(
 							ambientReachHz(protocol, t.obwHz),
 						)
 					}
@@ -161,7 +171,7 @@ describe("ambient placement", () => {
 					}
 					const reaching = cands.filter(
 						o =>
-							Math.abs(o.lastTrack!.centreHz - HZ) <=
+							Math.abs(o.lastTrack!.centreHz - HZ) <
 							ambientReachHz(protocol, o.lastTrack!.obwHz),
 					)
 					if (reaching.length === 1) expect(named).toEqual(reaching)
@@ -170,9 +180,9 @@ describe("ambient placement", () => {
 							const own = named.find(n =>
 								reaching.every(
 									other =>
-										n.lastTrack!.centreHz - n.lastTrack!.obwHz / 2 <=
+										n.lastTrack!.centreHz - n.lastTrack!.obwHz / 2 >=
 											other.lastTrack!.centreHz - other.lastTrack!.obwHz / 2 &&
-										n.lastTrack!.centreHz + n.lastTrack!.obwHz / 2 >=
+										n.lastTrack!.centreHz + n.lastTrack!.obwHz / 2 <=
 											other.lastTrack!.centreHz + other.lastTrack!.obwHz / 2,
 								),
 							)
@@ -184,7 +194,7 @@ describe("ambient placement", () => {
 						obwHz: 2_000,
 						discoveryId: "fragment",
 					})
-					expect(place([wide, fragment], "acars")).toEqual(["wide"])
+					expect(place([wide, fragment], "acars")).toEqual(["fragment"])
 				},
 			),
 			{ numRuns: 200 },

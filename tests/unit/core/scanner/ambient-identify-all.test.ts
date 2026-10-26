@@ -19,15 +19,21 @@ import {
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { EventEmitter } from "node:events"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	AmbientEvidence,
 	type AmbientEvidenceEvent,
+	type AmbientDeps,
 } from "../../../../src/core/scanner/probes/ambient.js"
 import { ConfirmMemory } from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
 
 const HZ = 131_725_000
-function rig(type: string, hz = HZ, protocol?: string) {
+function rig(
+	type: string,
+	hz = HZ,
+	protocol?: string,
+	tuningTrustOf?: AmbientDeps["tuningTrustOf"],
+) {
 	const trust = { value: "commanded" as "commanded" | "unverified" | undefined }
 	const decoders = new EventEmitter()
 	const status = {
@@ -60,7 +66,7 @@ function rig(type: string, hz = HZ, protocol?: string) {
 		now: () => clock.at,
 		sampleRateOf: () => 1_024_000,
 		centreOf: () => hz,
-		tuningTrustOf: () => trust.value,
+		tuningTrustOf: tuningTrustOf ?? (() => trust.value),
 		confirm: {
 			memory: new ConfirmMemory(() => clock.at),
 			scopeOf: () => "synthetic-discovery",
@@ -90,6 +96,39 @@ function rig(type: string, hz = HZ, protocol?: string) {
 }
 
 describe("ambient identify all regressions", () => {
+	it("checks trust at the placed channel rather than the claimed decoder offset", () => {
+		const seen: unknown[][] = []
+		const r = rig("acarsdec", HZ, undefined, (...args) => {
+			seen.push(args)
+			return args[1] === HZ ? "commanded" : "unverified"
+		})
+		try {
+			r.emit("acars", {
+				frequency: HZ + 500,
+				tail: "TEST01",
+				error: 0,
+				msgno: "M01A",
+			})
+			r.emit("acars", {
+				frequency: HZ + 500,
+				tail: "TEST01",
+				error: 0,
+				msgno: "M02A",
+			})
+			expect(seen).toEqual(
+				Array.from({ length: 2 }, () => [
+					"synthetic",
+					HZ,
+					"fake",
+					{ sourceId: "fake", channelHz: HZ },
+				]),
+			)
+			expect(r.got.at(-1)?.ev.identity).toBeDefined()
+		} finally {
+			r.ambient.stop()
+		}
+	})
+
 	it.each([
 		[
 			"acarsdec",
@@ -299,7 +338,7 @@ for (const sample of fixtures) {
 		})
 		// Feature: ambient-identify-all, Property 1: protocol placement is within its reach and unambiguous
 		// Validates: Requirements R2
-		it("matches only in the inclusive protocol window (property)", () => {
+		it("matches only within its exclusive occupied span (property)", () => {
 			fc.assert(
 				fc.property(fc.integer({ min: -100_000, max: 100_000 }), offset => {
 					const reach =
@@ -307,7 +346,9 @@ for (const sample of fixtures) {
 							? 61_000
 							: ambientReachHz(sample.protocol as ScannerProtocol, 2_000)
 					expect(match([offset]).length).toBe(
-						Math.abs(offset) <= reach ||
+						(sample.protocol === "ism"
+							? Math.abs(offset) <= reach
+							: Math.abs(offset) < reach) ||
 							(sample.protocol === "ism" && Math.abs(offset) > 80_000)
 							? 1
 							: 0,
@@ -321,8 +362,8 @@ for (const sample of fixtures) {
 }
 
 it.each(Object.entries(AMBIENT_CHANNEL_WIDTH_HZ))(
-	"%s includes half-channel width %s / 2 and rejects one Hz past it",
-	(protocol, width) => {
+	"%s excludes its reach boundary (%s nominal width)",
+	(protocol, _width) => {
 		const candidate = (offset: number) => ({
 			observationId: "o",
 			sourceId: "fake",
@@ -341,10 +382,90 @@ it.each(Object.entries(AMBIENT_CHANNEL_WIDTH_HZ))(
 				0,
 				0,
 			)
-		expect(match(width / 2)).toHaveLength(1)
-		expect(match(width / 2 + 1)).toHaveLength(0)
+		const reach = ambientReachHz(protocol as ScannerProtocol, 1)
+		expect(match(reach - 1)).toHaveLength(1)
+		expect(match(reach)).toHaveLength(0)
+		expect(match(reach + 1)).toHaveLength(0)
 	},
 )
+
+it("logs ambiguous placement once per decode, with silent shared-scope lookups", () => {
+	const h = serviceHarness()
+	const debug = vi.fn()
+	const internal = h.service as unknown as {
+		now: () => number
+		log: { debug: typeof debug }
+		ambientObservations: AmbientObservationIndex<{
+			observationId: string
+			discoveryId: string
+			sourceId: string
+			startedAt: number
+			lastTrack: { centreHz: number; obwHz: number }
+		}>
+		placeAmbient(e: {
+			sourceId: string
+			hz: number
+			at: number
+			protocol: "acars"
+			decodeToken: object
+		}): unknown[]
+		ambientConfirmScope(ctx: {
+			sourceId: string
+			hz: number
+			at: number
+			protocol: "acars"
+		}): string | null
+	}
+	internal.now = () => 100_000
+	internal.log = { debug }
+	try {
+		for (const [i, offset] of [-500, 500].entries())
+			internal.ambientObservations.upsert({
+				observationId: `o${i}`,
+				discoveryId: `d${i}`,
+				sourceId: "fake",
+				startedAt: 90_000,
+				lastTrack: { centreHz: HZ + offset, obwHz: 2_000 },
+			})
+		const e = {
+			sourceId: "fake",
+			hz: HZ,
+			at: 95_000,
+			protocol: "acars" as const,
+			decodeToken: {},
+		}
+		for (let i = 0; i < 5; i++)
+			expect(internal.ambientConfirmScope(e)).toBeNull()
+		expect(debug).not.toHaveBeenCalled()
+		for (let i = 0; i < 5; i++) expect(internal.placeAmbient(e)).toEqual([])
+		expect(debug).toHaveBeenCalledTimes(1)
+		internal.placeAmbient({ ...e, decodeToken: {} })
+		expect(debug).toHaveBeenCalledTimes(2)
+	} finally {
+		rmSync(h.dir, { recursive: true, force: true })
+	}
+})
+
+it("queries occupied spans plus tolerance even beyond the widest half-width", () => {
+	const index = new AmbientObservationIndex()
+	const o = {
+		observationId: "o",
+		sourceId: "fake",
+		startedAt: 0,
+		lastTrack: { centreHz: HZ + 52_499, obwHz: 100_000 },
+	}
+	index.upsert(o)
+	const candidates = index.window("fake", HZ, ambientReachHz("acars", 0), true)
+	expect(candidates).toEqual([o])
+	expect(
+		placeAmbientDecode(
+			candidates,
+			{ sourceId: "fake", hz: HZ, at: 0, protocol: "acars" },
+			0,
+			0,
+		),
+	).toEqual([o])
+})
 
 it("updates the frequency index on centre movement and expiry", () => {
 	const index = new AmbientObservationIndex()
@@ -590,6 +711,21 @@ it("removes the old source entry even when a mutable observation changes source"
 })
 
 describe("logical identity regressions", () => {
+	it("preserves dumpvdl2's three-character message numbers ending in letters", () => {
+		const r = rig("dumpvdl2")
+		try {
+			for (const msgno of ["M0A", "M0B"])
+				r.emit("vdl2", {
+					frequency: HZ,
+					fromaddr: "ABC001",
+					acars: { tail: "TEST01", msgno },
+				})
+			expect(r.got.at(-1)?.ev.identity).toBeDefined()
+		} finally {
+			r.ambient.stop()
+		}
+	})
+
 	it.each([
 		{ messageType: "alpha", message: "" },
 		{ messageType: "unknown", message: "" },
@@ -691,15 +827,15 @@ describe("logical identity regressions", () => {
 		[
 			"acarsdec",
 			"acars",
-			{ tail: "TEST01", msgno: "M001", blockId: "A", error: 0, level: -20 },
+			{ tail: "TEST01", msgno: "M01A", blockId: "A", error: 0, level: -20 },
 			{ level: -21 },
 			100,
 		],
 		[
 			"acarsdec",
 			"acars",
-			{ tail: "TEST01", msgno: "M001", blockId: "A", error: 0 },
-			{ blockId: "B", text: "SYNTHETIC NEXT BLOCK" },
+			{ tail: "TEST01", msgno: "M01A", blockId: "A", error: 0 },
+			{ msgno: "M01B", blockId: "B", text: "SYNTHETIC NEXT BLOCK" },
 			2_000,
 		],
 		[
@@ -707,7 +843,7 @@ describe("logical identity regressions", () => {
 			"vdl2",
 			{
 				fromaddr: "ABC001",
-				acars: { tail: "TEST01", msgno: "M001" },
+				acars: { tail: "TEST01", msgno: "M01" },
 				level: -20,
 			},
 			{ level: -21, noiseFloor: -50 },
@@ -754,7 +890,7 @@ describe("logical identity regressions", () => {
 it("two placed channels hearing one emission cannot confirm a discovery", () => {
 	const r = rig("acarsdec")
 	try {
-		r.emit("acars", { frequency: 0, tail: "TEST01", msgno: "M001", error: 0 })
+		r.emit("acars", { frequency: 0, tail: "TEST01", msgno: "M01A", error: 0 })
 		r.clock.at = 100_100
 		r.decoders.emit("decoder:output", "synthetic", {
 			type: "acars",

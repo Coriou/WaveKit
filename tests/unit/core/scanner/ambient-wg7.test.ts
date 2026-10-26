@@ -33,7 +33,7 @@ import {
 
 // ---------------------------------------------------------------------------
 // Reference: AmbientEvidence as of cccf665f (src/core/scanner/probes/ambient.ts:52-168),
-// baseline parsing with an independent model of spaced, distinct ambient confirmation.
+// verbatim except for the class name and its deps type.
 type RefDeps = Omit<AmbientDeps, "tuningTrustOf">
 interface AmbientState {
 	epoch: number
@@ -48,7 +48,6 @@ class ReferenceAmbient extends EventEmitter {
 	private readonly states = new Map<string, AmbientState>()
 	private readonly types = new Map<string, string>()
 	private readonly detach: (() => void)[] = []
-	private content: string | null = null
 	private running = false
 
 	constructor(private readonly deps: RefDeps) {
@@ -116,42 +115,13 @@ class ReferenceAmbient extends EventEmitter {
 		const type = this.types.get(decoderId)
 		let entry = this.states.get(decoderId)
 		if (!entry || entry.epoch !== epoch) {
-			const create = (): InterpreterState => {
-				const seen = new Map<string, { at: number; message: string | null }>()
-				const accepted = new Set<string>()
-				const pair = (key: string, value: string): boolean => {
-					const id = `${key}:${value}`
-					const previous = seen.get(id)
-					const at = this.now()
-					if (
-						previous &&
-						at - previous.at <= 300_000 &&
-						(at - previous.at < 2_000 ||
-							(this.content !== null && previous.message === this.content))
-					)
-						return false
-					seen.set(id, { at, message: this.content })
-					return previous !== undefined && at - previous.at <= 300_000
-				}
-				return createInterpreterState({
+			const create = (): InterpreterState =>
+				createInterpreterState({
 					epoch,
 					origin: "ambient",
-					requirePair: true,
-					shared: {
-						scope: () => "reference",
-						memory: {
-							pair: (_scope, key, value) => pair(key, value),
-							isAccepted: (_scope, key, value) =>
-								accepted.has(`${key}:${value}`),
-							markAccepted: (_scope, key, value) => {
-								accepted.add(`${key}:${value}`)
-							},
-						},
-					},
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
 				})
-			}
 			const multimon = type === "multimon-ng"
 			entry = {
 				epoch,
@@ -162,21 +132,6 @@ class ReferenceAmbient extends EventEmitter {
 			}
 			this.states.set(decoderId, entry)
 		}
-		const payload =
-			"kind" in input && input.kind === "link"
-				? input.line
-				: (input as DecoderOutputLike).data
-		this.content =
-			type === "direwolf"
-				? null
-				: JSON.stringify(payload, (key, value: unknown) =>
-						key === "at" ||
-						key === "timestamp" ||
-						key === "mic" ||
-						key === "crcErr"
-							? undefined
-							: value,
-					)
 		const state = entry.interp
 		let evs: DecodeEvidence[] = []
 		if (entry.capcodes)
@@ -680,9 +635,9 @@ describe("WG7 properties", () => {
 		)
 	})
 
-	// Feature: ambient-identify-all, Property 3: legacy interpretation with spaced distinct content
+	// Feature: web-gaps-7, Property 2: Existing ambient unchanged
 	// Validates: Requirements R2
-	it("repeated identical lines and distinct content match the reference confirmation model", () => {
+	it("agrees with the frozen baseline on parsing and rejections", () => {
 		type Step =
 			| { k: "epoch" }
 			| { k: "tick"; ms: number }
@@ -780,14 +735,10 @@ describe("WG7 properties", () => {
 					ref.start()
 					cur.start()
 					const inst = decoders.instances.get("cfg")!
-					const prefix: Step[] = [
-						{ k: "link", cc: 1, crcErr: false },
-						{ k: "tick", ms: 2_000 },
-						{ k: "link", cc: 1, crcErr: false },
-						{ k: "tick", ms: 2_000 },
-						{ k: "link", cc: 1, crcErr: false, tg: "10" },
-					]
-					for (const s of [...prefix, ...steps]) {
+
+					for (const s of steps) {
+						const oldCount = a.length
+						const newCount = b.length
 						if (s.k === "epoch") epoch.v++
 						else if (s.k === "tick") clock.v += s.ms
 						else if (s.k === "link") {
@@ -802,8 +753,85 @@ describe("WG7 properties", () => {
 							}
 							inst.emit("link", line)
 						} else decoders.out("cfg", s.o)
+						const oldEvents = a.slice(oldCount)
+						const newEvents = b.slice(newCount)
+						// Every baseline rejection must remain a rejection. Acceptance
+						// (including DSD metadata) can be delayed by the new pair gate.
+						if (oldEvents.length === 0) expect(newEvents).toEqual([])
+						for (const e of newEvents) {
+							const { identity: _identity, metadata, ...ev } = e.ev
+							const old = oldEvents.find(o => o.ev.protocol === e.ev.protocol)!
+							expect(old).toBeDefined()
+							const {
+								identity: _oldIdentity,
+								metadata: oldMetadata,
+								...oldEv
+							} = old.ev
+							expect({ ...e, ev }).toEqual({ ...old, ev: oldEv })
+							for (const [key, value] of Object.entries(metadata))
+								expect(oldMetadata).toHaveProperty(key, value)
+						}
 					}
-					expect(b).toEqual(a)
+					// Intended differences: trusted tuning is now mandatory (this rig
+					// supplies it); all identities need two spaced, distinct messages,
+					// including formerly single-shot APRS/plausible paging and DSD
+					// metadata fields. The reference may therefore name earlier,
+					// but parsing/rejections agree.
+					const identities = a.flatMap(e =>
+						e.ev.identity ? [e.ev.identity] : [],
+					)
+					for (const e of b)
+						if (e.ev.identity) expect(identities).toContainEqual(e.ev.identity)
+					if (a.length === 0) expect(b).toEqual(a)
+					// Also compare an acceptance where the rules must agree. This
+					// follows (never primes) the random rejection/interleaving run,
+					// in a fresh epoch, with distinct spaced synthetic content.
+					epoch.v++
+					for (const n of [0, 1]) {
+						clock.v += 2_000
+						const oldCount = a.length
+						const newCount = b.length
+						if (type === "dsd-fme")
+							inst.emit("link", {
+								protocol: "dmr",
+								cc: steps.length % 3,
+								tg: String(n),
+								src: "7",
+								slot: 1,
+								crcErr: false,
+								at: clock.v,
+							} satisfies DsdFmeLinkLine)
+						else
+							decoders.out("cfg", {
+								type:
+									type === "multimon-ng"
+										? "message"
+										: type === "direwolf"
+											? "aprs"
+											: "signal",
+								data:
+									type === "multimon-ng"
+										? {
+												protocol: "POCSAG1200",
+												address: 1,
+												messageType: "alpha",
+												message: `SYNTHETIC ${n}`,
+											}
+										: type === "direwolf"
+											? { source: "TEST01", raw: `>SYNTHETIC ${n}` }
+											: {
+													model: "SyntheticSensor",
+													id: 1,
+													mic: "CRC",
+													value: n,
+												},
+								timestamp: new Date(clock.v),
+							})
+						if (n === 1) {
+							expect(b.slice(newCount)).toEqual(a.slice(oldCount))
+							expect(b.slice(newCount).some(e => e.ev.identity)).toBe(true)
+						}
+					}
 					emitted += a.length
 					ref.stop()
 					cur.stop()
@@ -832,22 +860,55 @@ describe("AmbientEvidence WG7 review fixes", () => {
 		expect(r.ambient.trustDropCount).toBe(1)
 	})
 
-	it("ACARS without frequency and two targets with only the first trusted is no evidence", () => {
-		const r = rig({
-			add: d => d.add("acars", "acarsdec"),
-			targets: {
-				acars: target(131_550_000, { targetsHz: [131_550_000, 131_725_000] }),
-			},
-			trust: (_id, hz) => (hz === 131_550_000 ? "commanded" : "unverified"),
-		})
-		const noFreq = {
-			type: "acars",
-			data: { tail: "PH-BXA", error: 0 },
-			timestamp: new Date(1_000),
-		}
-		twice(r, "acars", noFreq)
-		expect(r.got).toEqual([])
-	})
+	it.each([
+		["acarsdec", "acars", { tail: "TEST01", error: 0 }],
+		["dumpvdl2", "vdl2", { fromaddr: "ABC001" }],
+		["lora-meshtastic", "meshtastic", { from: 1 }],
+	])(
+		"%s uses a single configured target without a decoder frequency",
+		(type, output, data) => {
+			for (const frequency of [undefined, 0]) {
+				const r = rig({
+					add: d => d.add("cfg", type),
+					targets: { cfg: target(131_550_000) },
+				})
+				twice(r, "cfg", {
+					type: output,
+					data: { ...data, frequency },
+					timestamp: new Date(1_000),
+				})
+				expect(r.got.map(e => e.hz)).toEqual([131_550_000, 131_550_000])
+				expect(r.got.at(-1)?.ev.identity).toBeDefined()
+				r.ambient.stop()
+			}
+		},
+	)
+
+	it.each([
+		["acarsdec", "acars", { tail: "TEST01", error: 0 }],
+		["dumpvdl2", "vdl2", { fromaddr: "ABC001" }],
+		["lora-meshtastic", "meshtastic", { from: 1 }],
+	])(
+		"%s with no frequency and multiple configured targets is no evidence",
+		(type, output, data) => {
+			for (const frequency of [undefined, 0]) {
+				const r = rig({
+					add: d => d.add("cfg", type),
+					targets: {
+						cfg: target(131_550_000, { targetsHz: [131_550_000, 131_725_000] }),
+					},
+					trust: (_id, hz) => (hz === 131_550_000 ? "commanded" : "unverified"),
+				})
+				twice(r, "cfg", {
+					type: output,
+					data: { ...data, frequency },
+					timestamp: new Date(1_000),
+				})
+				expect(r.got).toEqual([])
+				r.ambient.stop()
+			}
+		},
+	)
 
 	it("a status without owner is not eligible: no evidence and no coverage", () => {
 		const r = aisRig()

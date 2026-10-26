@@ -192,7 +192,6 @@ import { pickChannelObservation } from "./probes/ambient-channel.js"
 import {
 	placeAmbientDecode,
 	ambientReachHz,
-	AMBIENT_CHANNEL_WIDTH_HZ,
 } from "./probes/ambient-placement.js"
 import {
 	AmbientObservationIndex,
@@ -4174,29 +4173,41 @@ export class ScannerService extends EventEmitter {
 			this.drivers.get(jobId)?.onEvidence(probeId, ev)
 	}
 
+	private readonly ambientAmbiguityLogged = new WeakSet<object>()
+
 	/**
 	 * The observations an ambient decode names. A channel decode (rtl433) names the one
 	 * observation inside its passband (pickChannelObservation). A point decode names the
-	 * unique discovery whose tracks reach it (placeAmbientDecode): half the decoder's
-	 * channel width for an ambient-only protocol (AIS, ACARS, VDL2, LoRa), else
-	 * max(1.5 kHz, OBW / 2); two matching discoveries name nothing.
+	 * unique discovery whose occupied span contains it (placeAmbientDecode), allowing
+	 * a small measured-centre tolerance and preferring nested channel fragments.
+	 * Shared-confirmation reads are silent; only emitted evidence logs ambiguity.
 	 */
-	private placeAmbient(e: {
-		sourceId: string
-		hz: number
-		at: number
-		protocol: DecodeEvidence["protocol"] | null
-		passband?: AmbientEvidenceEvent["passband"]
-		freqHz?: number | undefined
-	}): LiveObservation[] {
+	private placeAmbient(
+		e: {
+			sourceId: string
+			hz: number
+			at: number
+			protocol: DecodeEvidence["protocol"] | null
+			passband?: AmbientEvidenceEvent["passband"]
+			freqHz?: number | undefined
+			decodeToken?: object
+		},
+		logAmbiguity = true,
+	): LiveObservation[] {
+		const ambiguous = (message: string): void => {
+			if (!logAmbiguity) return
+			if (e.decodeToken) {
+				if (this.ambientAmbiguityLogged.has(e.decodeToken)) return
+				this.ambientAmbiguityLogged.add(e.decodeToken)
+			}
+			this.log.debug({ reason: "ambiguous" }, message)
+		}
 		const now = this.now()
 		const observations = this.ambientObservations.window(
 			e.sourceId,
 			e.passband?.centreHz ?? e.hz,
 			e.passband?.halfHz ?? ambientReachHz(e.protocol, 0),
-			!e.passband &&
-				(e.protocol === null ||
-					!Object.hasOwn(AMBIENT_CHANNEL_WIDTH_HZ, e.protocol)),
+			!e.passband && e.protocol !== "adsb",
 		)
 		if (e.passband) {
 			const picked = pickChannelObservation(
@@ -4209,11 +4220,7 @@ export class ScannerService extends EventEmitter {
 				},
 				now,
 				AMBIENT_PAIR_MS,
-				() =>
-					this.log.debug(
-						{ reason: "ambiguous" },
-						"Ambient decode matches multiple observations",
-					),
+				() => ambiguous("Ambient decode matches multiple observations"),
 			)
 			return picked ? [picked] : []
 		}
@@ -4222,11 +4229,7 @@ export class ScannerService extends EventEmitter {
 			{ sourceId: e.sourceId, hz: e.hz, at: e.at, protocol: e.protocol },
 			now,
 			AMBIENT_PAIR_MS,
-			() =>
-				this.log.debug(
-					{ reason: "ambiguous" },
-					"Ambient decode matches multiple discoveries",
-				),
+			() => ambiguous("Ambient decode matches multiple discoveries"),
 		)
 	}
 
@@ -4259,14 +4262,17 @@ export class ScannerService extends EventEmitter {
 	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone.
 	 */
 	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
-		const placed = this.placeAmbient({
-			sourceId: ctx.sourceId,
-			hz: ctx.hz,
-			at: ctx.at,
-			protocol: ctx.protocol ?? null,
-			...(ctx.passband ? { passband: ctx.passband } : {}),
-			...(ctx.freqHz !== undefined ? { freqHz: ctx.freqHz } : {}),
-		})
+		const placed = this.placeAmbient(
+			{
+				sourceId: ctx.sourceId,
+				hz: ctx.hz,
+				at: ctx.at,
+				protocol: ctx.protocol ?? null,
+				...(ctx.passband ? { passband: ctx.passband } : {}),
+				...(ctx.freqHz !== undefined ? { freqHz: ctx.freqHz } : {}),
+			},
+			false,
+		)
 		const scopes = new Set(
 			placed.map(o => this.scopeOfObservation(o, o.observationId)),
 		)
@@ -4283,6 +4289,7 @@ export class ScannerService extends EventEmitter {
 			protocol: e.ev.protocol,
 			...(e.passband ? { passband: e.passband } : {}),
 			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
+			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
 		})
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient

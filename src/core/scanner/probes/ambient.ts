@@ -118,6 +118,8 @@ export interface AmbientEvidenceEvent {
 	passband?: ChannelPassband
 	/** rtl_433's own usable frequency estimate inside the passband (Hz). */
 	freqHz?: number
+	/** Shared by all evidence items from one decoder output, for debug-log deduplication. */
+	decodeToken?: object
 }
 
 /** Where an ambient decode lies, for the shared confirm pairing. */
@@ -492,7 +494,7 @@ export class AmbientEvidence extends EventEmitter {
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		if (!this.eligible(decoderId)) return
-		// Parse against every target, then one trust lookup at the decode's own frequency BEFORE
+		// Parse against every target, then one trust lookup at the placed channel BEFORE
 		// acceptance memory is touched: an untrusted decode never primes the H2 match.
 		const rawBinding = out.provenanceBinding
 		const binding =
@@ -505,20 +507,13 @@ export class AmbientEvidence extends EventEmitter {
 		)
 			return
 		const placement = binding?.data
-		const channelHz = placement?.channelHz ?? undefined
+		const channelHz =
+			placement?.channelHz ??
+			(!placement && targetsHz.length === 1 ? targetsHz[0] : undefined)
 		const passband = placement
 			? this.channelPassband(decoderId, out, target.sourceId)
 			: null
 		if (placement && !passband) return
-		const data = out.data as { frequency?: unknown } | null
-		if (
-			(out.type === "acars" ||
-				out.type === "vdl2" ||
-				out.type === "meshtastic") &&
-			(data?.frequency === undefined || data.frequency === 0) &&
-			channelHz === undefined
-		)
-			return
 		const parsed = parse(out, {
 			targetsHz:
 				channelHz === undefined ? targetsHz : [...targetsHz, channelHz],
@@ -535,10 +530,10 @@ export class AmbientEvidence extends EventEmitter {
 			!isTrusted(
 				this.trustAt(
 					decoderId,
-					parsed.hz,
+					placement?.channelHz ?? parsed.hz,
 					target.sourceId,
 					placement
-						? { sourceId: placement.sourceId, channelHz: parsed.hz }
+						? { sourceId: placement.sourceId, channelHz: placement.channelHz }
 						: undefined,
 				),
 			)
@@ -586,18 +581,26 @@ export class AmbientEvidence extends EventEmitter {
 		}
 		const at = parsed.timestamp.getTime()
 		let decodes: ReturnType<typeof acceptAmbient>
-		entry.pairCtx = {
-			sourceId: target.sourceId,
-			hz: parsed.hz,
-			at,
-			protocol: parsed.protocol,
-			message: messageOf(this.types.get(decoderId) ?? "", out.data),
-		}
+		let message: string | null | undefined = null
+		const decoderType = adsb ? "" : (this.types.get(decoderId) ?? "")
+		entry.pairCtx = adsb
+			? null
+			: {
+					sourceId: target.sourceId,
+					hz: parsed.hz,
+					at,
+					protocol: parsed.protocol,
+					get message() {
+						if (message === null) message = messageOf(decoderType, out.data)
+						return message
+					},
+				}
 		try {
 			decodes = acceptAmbient(entry.interp, parsed)
 		} finally {
 			entry.pairCtx = null
 		}
+		const decodeToken = {}
 		for (const decode of decodes) {
 			// readsb hears every aircraft in range continuously: an unpaired Mode S message is no
 			// evidence (no observation, discovery or activity from it); only an accepted ICAO is.
@@ -609,6 +612,7 @@ export class AmbientEvidence extends EventEmitter {
 				hz,
 				ev,
 			}
+			Object.defineProperty(event, "decodeToken", { value: decodeToken })
 			this.emit("evidence", event)
 		}
 	}
@@ -787,17 +791,22 @@ export class AmbientEvidence extends EventEmitter {
 			: undefined
 		const at = decodeTime(input, this.now())
 		const protocol = pointProtocol(type, input, target.nxdn)
+		let message: string | null | undefined = null
 		entry.pairCtx = {
 			...(protocol ? { protocol } : {}),
 			sourceId: target.sourceId,
 			hz: onSource ? onSource.centreHz : (placedHz ?? target.hz),
 			at,
-			message: messageOf(
-				type,
-				(input as DecoderOutputLike).data ??
-					(input as { line?: unknown }).line ??
-					input,
-			),
+			get message() {
+				if (message === null)
+					message = messageOf(
+						type,
+						(input as DecoderOutputLike).data ??
+							(input as { line?: unknown }).line ??
+							input,
+					)
+				return message
+			},
 			...(onSource
 				? {
 						passband: { centreHz: onSource.centreHz, halfHz: onSource.halfHz },
@@ -841,6 +850,7 @@ export class AmbientEvidence extends EventEmitter {
 		} finally {
 			entry.pairCtx = null
 		}
+		const decodeToken = {}
 		for (const ev of evs) {
 			const event: AmbientEvidenceEvent = {
 				decoderId,
@@ -857,6 +867,7 @@ export class AmbientEvidence extends EventEmitter {
 						}
 					: {}),
 			}
+			Object.defineProperty(event, "decodeToken", { value: decodeToken })
 			this.emit("evidence", event)
 		}
 	}
@@ -900,7 +911,9 @@ function messageOf(type: string, data: unknown): string | undefined {
 			content = {
 				tail: record["tail"],
 				flight: record["flight"],
-				msgno: record["msgno"],
+				// acarsdec joins the three-character number and block letter;
+				// dumpvdl2 already supplies the three-character msg_num unchanged.
+				msgno: record["msgno"].replace(/^(.{3})[A-Z]$/i, "$1"),
 			}
 		else if (typeof record["text"] !== "string" || record["text"] === "")
 			return undefined
