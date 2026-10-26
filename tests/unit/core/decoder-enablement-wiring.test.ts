@@ -665,6 +665,31 @@ describe("decoder enablement composition", () => {
 		])
 			expect(source.includes(seam), seam).toBe(true)
 	})
+	it("disposes the channel activity ranker on shutdown in legacy and protected mode", async () => {
+		const { ranker, options } = composeDecoderActivity(undefined, 1, {
+			arch: "x64",
+			cpuCount: 8,
+		})
+		const changes = vi.fn()
+		options.port.subscribe(changes)
+		ranker.ingestEpoch("s1", "engine-a", 1)
+		ranker.dispose()
+		// idempotent: legacy shutdown and the protected own() cleanup may both run it
+		expect(() => ranker.dispose()).not.toThrow()
+		expect(ranker.epochOf("s1")).toBeNull()
+		expect(ranker.sizes().sources).toBe(0)
+		const source = await entry()
+		// legacy mode: own() registers nothing, so the GracefulShutdown handler disposes it
+		const handler =
+			/name: "decoder-enablement",\s*handler: async \(\) => \{([\s\S]*?)\n\t\t\t\},/.exec(
+				source,
+			)?.[1]
+		expect(handler).toContain("channelActivity.dispose()")
+		expect(source).toContain("own(44, () => channelActivity.dispose())")
+		expect(source).toMatch(
+			/const own = \(priority: number, run: \(\) => void \| Promise<void>\) => \{\s*if \(protectedMode\)/,
+		)
+	})
 	it("connects planner, monotonic drop reader, link alerts and shutdown in main", async () => {
 		const source = await entry()
 		for (const seam of [

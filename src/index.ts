@@ -2521,6 +2521,8 @@ async function main(): Promise<void> {
 				closeVfo()
 				monitor.stop()
 				efficiencyCpu.stop()
+				// Legacy mode has no own() cleanup: the ranker's timers end here (idempotent).
+				channelActivity.dispose()
 			},
 		})
 		// Handlers are called in LIFO order, so register in reverse dependency order
