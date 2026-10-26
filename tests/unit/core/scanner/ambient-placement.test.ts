@@ -42,7 +42,7 @@ const place = (
 		PAIR_MS,
 	).map(o => o.observationId)
 
-describe("ambient placement (WG16 SC 3c)", () => {
+describe("ambient placement", () => {
 	it("reaches half the decoder's channel width for ambient-only protocols", () => {
 		expect(ambientReachHz("acars", 300_000)).toBe(12_500)
 		expect(ambientReachHz("ais", 0)).toBe(12_500)
@@ -125,7 +125,7 @@ describe("ambient placement (WG16 SC 3c)", () => {
 	})
 
 	it("never names a track beyond its reach, nor two discoveries (property)", () => {
-		// Feature: wg16-sc, Property 2: ambient placement is within reach and unambiguous
+		// Feature: decode-attachment, Property 2: ambient placement is within reach and unambiguous
 		// Validates: Requirements 3c
 		fc.assert(
 			fc.property(

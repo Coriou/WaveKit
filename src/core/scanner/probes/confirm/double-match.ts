@@ -24,7 +24,7 @@ export interface SharedConfirmMemory {
 }
 
 /**
- * WG16 SC 3a: a DoubleMatch backed by the shared memory. `scope` names the discovery (or
+ * a DoubleMatch backed by the shared memory. `scope` names the discovery (or
  * observation) of the decode being interpreted, read on every call; null (or a throw) means
  * the decode has no single discovery, so this instance's own memory decides as before.
  */

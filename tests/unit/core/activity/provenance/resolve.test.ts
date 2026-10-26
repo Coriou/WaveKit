@@ -129,7 +129,7 @@ describe("resolveProvenance table", () => {
 		})
 	})
 
-	describe("WG16 SC 3b: readsb and rtl_433 frequencies", () => {
+	describe("readsb and rtl_433 frequencies", () => {
 		it("a bound readsb is the 1090 MHz carrier, whatever its targets", () => {
 			expect(ADSB_CARRIER_HZ).toBe(1_090_000_000)
 			expect(

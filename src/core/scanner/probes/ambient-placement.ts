@@ -1,5 +1,5 @@
 /**
- * Placement of a point ambient decode on an observation (WG16 SC fix 3c). A decoder reports
+ * Placement of a point ambient decode on an observation. A decoder reports
  * a frequency; the observation it names is the nearest one whose track reaches that
  * frequency, and none when two different signals are equally near.
  *

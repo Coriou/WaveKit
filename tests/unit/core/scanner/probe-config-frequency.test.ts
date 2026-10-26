@@ -12,7 +12,7 @@ import {
 	probeRequest,
 } from "../../../mocks/scanner/probe-fakes.js"
 
-// WG16 SC 3b: a probe's Activity rows carry its channel frequency.
+// a probe's Activity rows carry its channel frequency.
 
 const CENTRE_HZ = 446_000_000
 const mode: ProbeMode = {

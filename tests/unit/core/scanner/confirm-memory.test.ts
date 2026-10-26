@@ -66,7 +66,7 @@ function probe(shared: SharedConfirm, probeId: string): CapcodeWindows {
 const identities = (evs: DecodeEvidence[]) =>
 	evs.filter(e => e.identity !== undefined)
 
-describe("ConfirmMemory (WG16 SC 3a)", () => {
+describe("ConfirmMemory", () => {
 	it("pairs at the window bound and not 1 ms past it", () => {
 		const { clock, mem } = memory()
 		expect(mem.pair("d:1", "pocsag:cap", "8")).toBe(false)
@@ -148,7 +148,7 @@ describe("ConfirmMemory (WG16 SC 3a)", () => {
 	})
 
 	it("pairs only within [separation, window] of the last recorded occurrence (property)", () => {
-		// Feature: wg16-sc, Property 1: confirm pairing window
+		// Feature: decode-attachment, Property 1: confirm pairing window
 		// Validates: Requirements 3a
 		fc.assert(
 			fc.property(

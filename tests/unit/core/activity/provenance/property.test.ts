@@ -65,7 +65,7 @@ function expectedHz(type: string, data: unknown, b: unknown): number | null {
 			: ["B", "b", "2", "88B", 2].includes(d["channel"] as string)
 				? AIS_CHANNEL_B_HZ
 				: null
-	// WG16 SC: a bound readsb is the 1090 MHz carrier.
+	// a bound readsb is the 1090 MHz carrier.
 	else if (type === "aircraft" && b !== null && typeof b === "object")
 		hz = 1_090_000_000
 	if (hz === null && b !== null && typeof b === "object") {

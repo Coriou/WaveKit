@@ -1,5 +1,5 @@
 /**
- * Per-discovery confirm memory (WG16 SC fix 3a). The confirm interpreters accept an identity on
+ * Per-discovery confirm memory. The confirm interpreters accept an identity on
  * its second CRC-clean occurrence (H2). Each probe and each ambient decoder keeps its own
  * DoubleMatch, so a POCSAG capcode decoded once per short probe never paired. This memory is
  * shared by every probe and ambient decoder: an occurrence pairs with an earlier one under the

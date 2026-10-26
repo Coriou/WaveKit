@@ -81,7 +81,7 @@ export interface AmbientEvidenceEvent {
 	freqHz?: number
 }
 
-/** Where an ambient decode lies, for the shared confirm pairing (WG16 SC 3a). */
+/** Where an ambient decode lies, for the shared confirm pairing. */
 export interface AmbientPairContext {
 	sourceId: string
 	hz: number
@@ -116,7 +116,7 @@ export interface AmbientDeps {
 		sourceId: string,
 	) => TuningTrust | undefined
 	/**
-	 * WG16 SC 3a: shared per-discovery acceptance (ConfirmMemory) and the scope (discovery)
+	 * shared per-discovery acceptance (ConfirmMemory) and the scope (discovery)
 	 * a decode lies on; null scope or absent: the decoder's own memory decides.
 	 */
 	confirm?: {

@@ -171,7 +171,7 @@ export interface ProbePoolDeps {
 	/** Own the exact remover before the sole external constructor listener effect. */
 	ownConstructorListener?: (removeExact: () => void) => boolean
 	/**
-	 * WG16 SC 3a: shared per-discovery acceptance (ConfirmMemory) and the scope of a probe's
+	 * shared per-discovery acceptance (ConfirmMemory) and the scope of a probe's
 	 * decodes. Never used for a replay probe: a replay re-decodes a captured transmission, so
 	 * it could pair one transmission with itself; it keeps its own memory.
 	 */

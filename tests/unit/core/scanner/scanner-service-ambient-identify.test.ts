@@ -191,7 +191,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 				}),
 			])
 			r.h.decoders.emitOutput("ais", ship("244123456"))
-			// WG16 SC 3a: two decodes of one MMSI pair only 2 s or more apart.
+			// two decodes of one MMSI pair only 2 s or more apart.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
@@ -232,7 +232,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 		}
 	}, 30_000)
 
-	it("names a narrow track inside the AIS channel but off its centre (WG16 SC 3c channel-width placement)", async () => {
+	it("names a narrow track inside the AIS channel but off its centre", async () => {
 		// 8 kHz above channel A: outside the former 1 kHz tolerance, inside half the 25 kHz channel.
 		const OFF_HZ = AIS_A + 8_000
 		const r = rig({ startup: [aisConfig()], trust: () => "commanded" })
@@ -251,7 +251,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 				),
 			)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
-			// WG16 SC 3a: two decodes of one MMSI pair only 2 s or more apart.
+			// two decodes of one MMSI pair only 2 s or more apart.
 			await tick(CONFIRM_MIN_SEPARATION_MS + 100)
 			r.h.decoders.emitOutput("ais", ship("244123456"))
 			await until(() => r.h.service.getJob(job.id)?.state === "completed")
