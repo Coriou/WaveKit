@@ -222,6 +222,7 @@ const CLASS: Readonly<Record<ScannerClass, string>> = {
 	"gmsk-narrow": "narrow GMSK",
 	"afsk-fm": "AFSK over FM",
 	"analog-fm": "analog FM",
+	"analog-am": "analog AM",
 	"ook-burst": "on-off keyed bursts",
 	carrier: "a steady carrier",
 	wideband: "a wideband signal",

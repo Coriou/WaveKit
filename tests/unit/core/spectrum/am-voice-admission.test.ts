@@ -187,7 +187,7 @@ describe("push-to-talk AM voice on an 8.33 kHz raster (DQ 1.4d, 1.17)", () => {
 		expect(tracks.size).toBe(PTT.length)
 	}, 60_000)
 
-	it("an AM voice carrier classifies as AM (unknown class, analog-am first), never carrier", () => {
+	it("an AM voice carrier classifies as AM (analog-am class, analog-am first), never carrier", () => {
 		const events = runScene(
 			n =>
 				scene(1702, n, SIGMA, [
@@ -204,7 +204,7 @@ describe("push-to-talk AM voice on an 8.33 kHz raster (DQ 1.4d, 1.17)", () => {
 		for (const t of late) {
 			const c = classify(t)
 			expect(c.class).not.toBe("carrier")
-			expect(c.class).toBe("unknown")
+			expect(c.class).toBe("analog-am")
 			expect(c.hypotheses[0]?.protocol).toBe("analog-am")
 		}
 		const store = admit(events)

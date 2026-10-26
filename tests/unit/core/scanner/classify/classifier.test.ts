@@ -10,6 +10,10 @@ import {
 	isAmVoice,
 	leakOrIntermod,
 } from "../../../../../src/core/scanner/classify/classifier.js"
+import {
+	DiscoverySchema,
+	ScannerClassSchema,
+} from "../../../../../src/core/scanner/store/schemas.js"
 import type { ScannerProtocol } from "../../../../../src/core/scanner/types.js"
 import type { TrackSnapshot } from "../../../../../src/core/spectrum/types.js"
 import {
@@ -235,11 +239,24 @@ describe("AM voice is not a bare carrier (detection-quality 1.17)", () => {
 
 	it("boundary: a narrow track with a 6 000 Hz -20 dB OBW is AM voice, 5 999 Hz is a carrier", () => {
 		const at = classifySpectral(am({ obwHz: AM_VOICE_MIN_OBW_HZ }), ctx(AM))
-		expect(at.class).toBe("unknown")
+		expect(at.class).toBe("analog-am")
 		expect(at.hypotheses[0]?.protocol).toBe("analog-am")
 		expect(
 			classifySpectral(am({ obwHz: AM_VOICE_MIN_OBW_HZ - 1 }), ctx(AM)).class,
 		).toBe("carrier")
+	})
+
+	it("the analog-am class round-trips through the stored class schema", () => {
+		const out = classifySpectral(am(), ctx(AM))
+		expect(out.class).toBe("analog-am")
+		expect(out.hypotheses.map(h => h.protocol)).toEqual([
+			"analog-am",
+			"carrier",
+		])
+		const json: unknown = JSON.parse(JSON.stringify(out.class))
+		expect(ScannerClassSchema.parse(json)).toBe("analog-am")
+		expect(DiscoverySchema.shape.class.parse(json)).toBe("analog-am")
+		expect(ScannerClassSchema.safeParse("analog-xm").success).toBe(false)
 	})
 
 	it("boundary: 12 500 Hz is still AM voice, 12 501 Hz is not", () => {

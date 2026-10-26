@@ -59,6 +59,11 @@ export const CLASS_HYPOTHESES: Readonly<
 		{ protocol: "analog-fm", score: 0.6 },
 		{ protocol: "aprs", score: 0.2 },
 	],
+	// Detection-quality 1.17: a voice-modulated AM carrier (see `isAmVoice`).
+	"analog-am": [
+		{ protocol: "analog-am", score: 0.7 },
+		{ protocol: "carrier", score: 0.2 },
+	],
 	"ook-burst": [
 		{ protocol: "ism", score: 0.6 },
 		{ protocol: "digital-unknown", score: 0.1 },
@@ -135,10 +140,8 @@ export const AM_VOICE_MAX_OBW_HZ = 12_500
  * Detection-quality 1.17: hypotheses of a voice-modulated AM carrier. `analog-am` first; the
  * carrier stays a weak second (a carrier with a nearby spur can widen its OBW too).
  */
-export const AM_VOICE_HYPOTHESES: readonly Hypothesis[] = [
-	{ protocol: "analog-am", score: 0.7 },
-	{ protocol: "carrier", score: 0.2 },
-]
+export const AM_VOICE_HYPOTHESES: readonly Hypothesis[] =
+	CLASS_HYPOTHESES["analog-am"]
 
 /**
  * Detection-quality 1.17: inside a range that lists `analog-am`, is this track a voice-modulated
@@ -285,11 +288,11 @@ export function classifySpectral(
 		protocols: ScannerProtocol[]
 	},
 ): Classification {
-	// Detection-quality 1.17: a voice-modulated AM carrier is not a bare `carrier`. The shared
-	// class list has no AM class, so the class is `unknown` and the hypotheses lead with AM.
+	// Detection-quality 1.17: a voice-modulated AM carrier is not a bare `carrier`; its class is
+	// `analog-am` and the hypotheses lead with AM.
 	if (isAmVoice(track, ctx.priors))
 		return {
-			class: "unknown",
+			class: "analog-am",
 			hypotheses: applyPriors(AM_VOICE_HYPOTHESES, ctx),
 			tier: "spectral",
 		}

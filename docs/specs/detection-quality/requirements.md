@@ -347,8 +347,7 @@ its median reaches 15 dB).
   lies in [`AM_VOICE_MIN_OBW_HZ` = 6 000, `AM_VOICE_MAX_OBW_HZ` = 12 500] Hz (speech
   sidebands; an unmodulated Hann-windowed carrier reads at most 4 bins, 5.66 kHz at the
   coarsest default bin), and that is longer than 4 blocks, is classified as AM voice: class
-  `unknown` (the shared class list has no AM class) with `analog-am` as the first hypothesis,
-  never `carrier`. In a range that lists AM but not FM (airband) a `peaked` track in the same
+  `analog-am` with `analog-am` as the first hypothesis, never `carrier`. In a range that lists AM but not FM (airband) a `peaked` track in the same
   window counts too; a flat top (data) never does. Any malformed field keeps today's class.
   An unmodulated carrier still classifies `carrier`. A weak AM carrier whose sidebands stay
   under 20 dB below the carrier (OBW from on-bins, about 3 to 4 kHz) cannot be told apart

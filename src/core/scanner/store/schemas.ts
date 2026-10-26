@@ -60,6 +60,7 @@ export const ScannerClassSchema = z.enum([
 	"gmsk-narrow",
 	"afsk-fm",
 	"analog-fm",
+	"analog-am",
 	"ook-burst",
 	"carrier",
 	"wideband",
