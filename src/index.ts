@@ -111,6 +111,10 @@ import type {
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
 import {
+	createChannelActivityRanker,
+	type ChannelActivityRanker,
+} from "./core/scanner/channel-activity.js"
+import {
 	createIqCaptureService,
 	type IqCaptureService,
 } from "./core/iq-capture/service.js"
@@ -126,7 +130,14 @@ import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
 import { APP_VERSION } from "./api/routes/health.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
-import { createDecoderManagerOptions } from "./decoders/manager-options.js"
+import {
+	createDecoderManagerOptions,
+	type DecoderActivityOptions,
+} from "./decoders/manager-options.js"
+import {
+	resolveActivityPolicy,
+	type ActivityPolicyConfig,
+} from "./decoders/enablement/activity-plan.js"
 import { resolveProcessBandRegion } from "./decoders/band-region.js"
 import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
@@ -510,6 +521,34 @@ export function composeDecoderEfficiencyGate(
 	return {
 		...gate,
 		record: sample => gate.record({ ...sample, atMs: drops.monoNow() }),
+	}
+}
+
+/**
+ * Activity-ranked decoder channels: one ranker per process. The ranker, the planner snapshots,
+ * dwell and move history all read the same monotonic clock; the policy resolves from
+ * `decoderPolicy.efficiency.activity` with per-host defaults.
+ */
+export function composeDecoderActivity(
+	config: ActivityPolicyConfig | undefined,
+	budgetCores: number,
+	host: { arch: string; cpuCount: number },
+	monoNow: () => number = () => performance.now(),
+): { ranker: ChannelActivityRanker; options: DecoderActivityOptions } {
+	const ranker = createChannelActivityRanker({ monoNow })
+	return {
+		ranker,
+		options: {
+			port: ranker.port,
+			epochOf: sourceId => ranker.epochOf(sourceId),
+			policy: resolveActivityPolicy(
+				config,
+				budgetCores,
+				host.arch,
+				host.cpuCount,
+			),
+			monoNow,
+		},
 	}
 }
 
@@ -1409,11 +1448,20 @@ async function main(): Promise<void> {
 		})
 		monitor.start()
 		own(20, () => monitor.stop())
+		const budgetCores =
+			config.decoderPolicy?.efficiency?.cpuBudgetCores ??
+			defaultCpuBudgetCores(arch(), cpus().length)
+		// Activity-ranked channels: the ScannerService feeds the ranker, the planner reads it.
+		const decoderActivity = composeDecoderActivity(
+			config.decoderPolicy?.efficiency?.activity,
+			budgetCores,
+			{ arch: arch(), cpuCount: cpus().length },
+		)
+		const channelActivity = decoderActivity.ranker
+		own(44, () => channelActivity.dispose())
 		const gate = composeDecoderEfficiencyGate(
 			{
-				budgetCores:
-					config.decoderPolicy?.efficiency?.cpuBudgetCores ??
-					defaultCpuBudgetCores(arch(), cpus().length),
+				budgetCores,
 				cpuGuardPercent:
 					config.decoderPolicy?.efficiency?.cpuGuardPercent ??
 					EFFICIENCY_CPU_GUARD_PERCENT,
@@ -1506,6 +1554,7 @@ async function main(): Promise<void> {
 						config.decoderPolicy?.efficiency?.maxBandplanChannels ??
 						DECODER_MAX_BANDPLAN_CHANNELS,
 					gate,
+					activity: decoderActivity.options,
 				},
 			},
 			bandOverrides,
@@ -1816,6 +1865,9 @@ async function main(): Promise<void> {
 			scanner = new ScannerService({
 				settings: scannerSettings,
 				...(iqCapture ? { iqCapture } : {}),
+				// Stage 1: no coverage predicate (no sample-arrival timestamps yet), so every
+				// gate-passed track is captured within the existing budget.
+				channelActivity,
 				...(analogTrial ? { analogTrial } : {}),
 				analogEvidence,
 				recordingProtection: keeps,

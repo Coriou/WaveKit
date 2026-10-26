@@ -587,19 +587,19 @@ describe("HfdlDecoder", () => {
    162.025 MHz in the capture, that decoder starts and the newest extra channels stop with
    `efficiency-budget`; they retry later. A decoder you configured in YAML is never stopped
    for them.
-8. When the core has a channel activity ranking, multimon-ng and dsd-fme pick their extra
-   channels by activity instead of nearest the centre: besides the first channel (the VFO
-   when it is eligible), they run the channels with live or recent energy first (placement
-   origin `activity`), up to 4 extra multimon-ng and 2 extra dsd-fme channels per source on
-   x86-64 (1 and 0 on a 4-core arm64 host), fewer when the CPU budget is short. A channel
-   that becomes active replaces the least active one after that one has run 20 s, at most
-   6 times a minute per source, and never one that is receiving. Each placement's
-   `activity` field (`GET /api/decoders`) says why it runs. Tune it with
-   `decoderPolicy.efficiency.activity`: `slots` (`multimon-ng`, `dsd-fme`, 0 to 32),
+8. While the scanner watches a source, the core ranks its channels by activity and
+   multimon-ng and dsd-fme pick their extra channels by activity instead of nearest the
+   centre: besides the first channel (the VFO when it is eligible), they run the channels
+   with live or recent energy first (placement origin `activity`), up to 4 extra multimon-ng
+   and 2 extra dsd-fme channels per source on x86-64 (1 and 0 on a 4-core arm64 host), fewer
+   when the CPU budget is short. A channel that becomes active replaces the least active one
+   after that one has run 20 s, at most 6 times a minute per source, and never one that is
+   receiving. Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune
+   it with `decoderPolicy.efficiency.activity`: `slots` (`multimon-ng`, `dsd-fme`, 0 to 32),
    `replayAllowanceCores` (default 0.1, 0.05 on arm64), `maxMovesPerMinute` (6) and
-   `dwellMs` (20000). Without a ranking the channels are those of items 5 and 7; while the
-   ranking is unavailable the running extra channels stay and free ones are filled nearest
-   the centre first.
+   `dwellMs` (20000). Without a ranking (scanner off) the channels are those of items 5 and
+   7; while the ranking is unavailable the running extra channels stay and free ones are
+   filled nearest the centre first.
 
 ### No output being parsed
 

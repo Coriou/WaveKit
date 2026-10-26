@@ -504,7 +504,7 @@ export function selectChannels(args: {
 
 /** Configured activity policy (`decoderPolicy.efficiency.activity`), defaults per host. */
 export interface ActivityPolicyConfig {
-	slots?: Partial<Record<ActivityDecoder, number>> | undefined
+	slots?: { [K in ActivityDecoder]?: number | undefined } | undefined
 	replayAllowanceCores?: number | undefined
 	maxMovesPerMinute?: number | undefined
 	dwellMs?: number | undefined

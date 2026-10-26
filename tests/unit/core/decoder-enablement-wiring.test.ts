@@ -18,6 +18,7 @@ import {
 	composeDecoderRatePolicyLifetime,
 	decoderPolicyTimer,
 	decoderSettingsPort,
+	composeDecoderActivity,
 } from "../../../src/index.js"
 import { openDecoderSettingsService } from "../../../src/decoders/settings/service.js"
 import { configExportRoutes } from "../../../src/api/routes/config-export.js"
@@ -46,6 +47,10 @@ import type { DecoderManager } from "../../../src/decoders/manager.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
 import type { TunerController } from "../../../src/core/tuner-controller.js"
 
+import {
+	ACTIVITY_SLOTS_ARM64,
+	ACTIVITY_SLOTS_X64,
+} from "../../../src/decoders/enablement/activity-plan.js"
 import { DigitalVoiceService } from "../../../src/core/digital-voice.js"
 import { AudioHttpServer } from "../../../src/core/audio-stream-server.js"
 import { wireTunerRatePolicyBroadcast } from "../../../src/api/server.js"
@@ -580,6 +585,85 @@ describe("decoder enablement composition", () => {
 			type: "tuner:rate-policy",
 			data: event,
 		})
+	})
+	it("connects the channel activity ranker to the planner and the scanner on one clock", async () => {
+		let now = 1_000
+		const clock = () => now
+		const { ranker, options } = composeDecoderActivity(
+			{ slots: { "dsd-fme": 3 }, dwellMs: 5_000 },
+			1.5,
+			{ arch: "x64", cpuCount: 8 },
+			clock,
+		)
+		try {
+			// The planner reads the ranker's own port and epochs, on the ranker's clock.
+			expect(options.port).toBe(ranker.port)
+			expect(options.monoNow).toBe(clock)
+			expect(options.epochOf("s1")).toBeNull()
+			ranker.ingestEpoch("s1", "engine-a", 3)
+			expect(options.epochOf("s1")).toEqual(ranker.epochOf("s1"))
+			expect(options.epochOf("s1")).toMatchObject({
+				sourceId: "s1",
+				engineId: "engine-a",
+				epoch: 3,
+			})
+			now = 2_500
+			const epoch = options.epochOf("s1")
+			if (!epoch) throw new Error("epoch expected")
+			const [snap] = options.port.snapshot(
+				[
+					{
+						epoch,
+						decoderId: "pager",
+						decoderType: "multimon-ng",
+						protocols: ["POCSAG512"],
+						centreHz: 466_100_000,
+						candidatesHz: [466_050_000, 466_175_000],
+						channelWidthHz: 12_500,
+					},
+				],
+				options.monoNow?.() ?? 0,
+			)
+			expect(snap?.channels.map(c => c.hz)).toEqual([466_050_000, 466_175_000])
+			// The policy resolves from config over the per-host defaults.
+			expect(options.policy).toMatchObject({
+				budgetCores: 1.5,
+				dwellMs: 5_000,
+				slots: {
+					"multimon-ng": ACTIVITY_SLOTS_X64["multimon-ng"],
+					"dsd-fme": 3,
+				},
+			})
+		} finally {
+			ranker.dispose()
+		}
+		const small = composeDecoderActivity(undefined, 1, {
+			arch: "arm64",
+			cpuCount: 4,
+		})
+		try {
+			expect(small.options.policy.slots).toEqual(ACTIVITY_SLOTS_ARM64)
+			// Production clock: performance.now, shared by ranker and planner.
+			const t = small.options.monoNow?.() ?? -1
+			expect(Math.abs(t - performance.now())).toBeLessThan(1_000)
+		} finally {
+			small.ranker.dispose()
+		}
+		const shippedEfficiency = (await shipped()).decoderPolicy?.efficiency
+		expect(() =>
+			composeDecoderActivity(shippedEfficiency?.activity, 1, {
+				arch: "x64",
+				cpuCount: 8,
+			}).ranker.dispose(),
+		).not.toThrow()
+		const source = await entry()
+		for (const seam of [
+			"composeDecoderActivity(\n\t\t\tconfig.decoderPolicy?.efficiency?.activity,\n\t\t\tbudgetCores,",
+			"activity: decoderActivity.options,",
+			"\t\t\t\tchannelActivity,\n",
+			"own(44, () => channelActivity.dispose())",
+		])
+			expect(source.includes(seam), seam).toBe(true)
 	})
 	it("connects planner, monotonic drop reader, link alerts and shutdown in main", async () => {
 		const source = await entry()
