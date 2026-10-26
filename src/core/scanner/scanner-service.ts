@@ -4941,10 +4941,13 @@ export class ScannerService extends EventEmitter {
 	private fenceEdgeReplay(captureId: string): void {
 		this.edgeFencedReplays.delete(captureId)
 		this.edgeFencedReplays.add(captureId)
-		while (this.edgeFencedReplays.size > REPLAY_PLANS_MAX) {
-			const oldest = this.edgeFencedReplays.values().next().value
-			if (oldest === undefined) break
-			this.edgeFencedReplays.delete(oldest)
+		if (this.edgeFencedReplays.size <= REPLAY_PLANS_MAX) return
+		// A fence whose capture still has a replay plan stays until its result settles; only
+		// fences of captures with no plan left (never queued, or plan evicted) are dropped, oldest
+		// first. Planned fences are at most REPLAY_PLANS_MAX, so the set stays bounded.
+		for (const id of this.edgeFencedReplays) {
+			if (this.edgeFencedReplays.size <= REPLAY_PLANS_MAX) break
+			if (!this.replayPlans.has(id)) this.edgeFencedReplays.delete(id)
 		}
 	}
 

@@ -617,7 +617,7 @@ that channel width.
 
 Measured with a local bench of `SpectrumPipeline` alone (2.4 Msps, N 2048, 50 ms blocks,
 24 NFM carriers in clusters of four, one wide FM, airband rasters, 8.33 kHz channel plan) on
-the development Mac; see the lane report for the numbers and load average. The added work is
+the development Mac. The added work is
 per block and proportional to the on-bins (one smoothing pass, one valley scan per merge
 candidate, a -20 dB width scan only past the cap), never per sample.
 

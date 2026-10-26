@@ -21,6 +21,8 @@ interface Internal {
 		sourceId: string,
 		ev: { kind: "track-update"; track: TrackSnapshot },
 	): void
+	fenceEdgeReplay(captureId: string): void
+	edgeFencedReplays: Set<string>
 }
 
 /** The capture service's holder, claim, settle and discard rules, in memory. */
@@ -212,7 +214,7 @@ interface Spied {
 }
 
 /** The replay is running (a probe holds the capture) when the track turns edge. */
-async function runWhileReplaying(turnsEdge: boolean) {
+async function runWhileReplaying(turnsEdge: boolean, flood = false) {
 	const h = serviceHarness({ patch: s => void (s.passive.enabled = false) })
 	harnesses.push(h)
 	const internal = h.service as unknown as Internal
@@ -281,6 +283,16 @@ async function runWhileReplaying(turnsEdge: boolean) {
 		kind: "track-update",
 		track: { ...track, flags: { ...track.flags, edge: turnsEdge } },
 	})
+	if (flood) {
+		// Many later edge discards of captures with no replay plan, then the track comes back inside.
+		for (let i = 0; i < 100; i++) internal.fenceEdgeReplay(`other-${i}`)
+		expect(internal.edgeFencedReplays.has("cap-1")).toBe(true)
+		expect(internal.edgeFencedReplays.size).toBeLessThanOrEqual(64)
+		internal.onTrack("rtl", {
+			kind: "track-update",
+			track: { ...track, flags: { ...track.flags, edge: false } },
+		})
+	}
 	const protocol = asked[0]?.protocol
 	const spied = h.service as unknown as Spied
 	const applied = vi.spyOn(spied, "applyEvidence")
@@ -312,6 +324,13 @@ describe("IQ replay running when its track turns edge (DQ 1.4e)", () => {
 		expect(live.decoded).toBe(false)
 		// The pending deletion completed when the queue settled the capture.
 		expect(entries.has("cap-1")).toBe(false)
+	})
+
+	it("its fence outlives later edge discards, so a track back inside still drops it", async () => {
+		const { live, applied, remembered } = await runWhileReplaying(true, true)
+		expect(applied).not.toHaveBeenCalled()
+		expect(remembered).not.toHaveBeenCalled()
+		expect(live.decoded).toBe(false)
 	})
 
 	it("a control that stays inside keeps its decode", async () => {
