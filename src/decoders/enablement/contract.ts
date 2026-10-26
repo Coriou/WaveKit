@@ -48,6 +48,24 @@ export const MULTIMON_PAGING_MAX_CHANNELS = 33
  * 5 x 0.16 = 0.80 core; the four secondaries are gated.
  */
 export const ACARSDEC_CATALOGUE_MAX_CHANNELS = 5
+/** Config bound of `decoderPolicy.efficiency.activity.slots` per decoder (src/config.ts). */
+export const ACTIVITY_SLOTS_CONFIG_MAX = 32
+/** Config bound of `decoderPolicy.efficiency.maxBandplanChannels` (src/config.ts). */
+export const BANDPLAN_CHANNELS_CONFIG_MAX = 16
+/** Option bound of an explicit `channelsHz` list (multimon-ng, dsd-fme and direwolf options). */
+export const DECODER_CHANNELS_HZ_MAX = 16
+/**
+ * Most channel placements one decoder can hold at once, over every planner path:
+ * explicit channels (DECODER_CHANNELS_HZ_MAX = 16); the paging raster plus catalogue
+ * band-plan channels (MULTIMON_PAGING_MAX_CHANNELS 33 + BANDPLAN_CHANNELS_CONFIG_MAX 16 = 49);
+ * activity slots plus the primary and the VFO channel (ACTIVITY_SLOTS_CONFIG_MAX 32 + 2 = 34).
+ * The largest, 49, bounds per-channel state kept for one decoder.
+ */
+export const PLACED_CHANNELS_PER_DECODER_MAX = Math.max(
+	DECODER_CHANNELS_HZ_MAX,
+	MULTIMON_PAGING_MAX_CHANNELS + BANDPLAN_CHANNELS_CONFIG_MAX,
+	ACTIVITY_SLOTS_CONFIG_MAX + 2,
+)
 export const VFO_SETTLE_MS = 1_000
 export const EFFICIENCY_SAMPLE_MS = 2_000
 // 3 × 2000 ms = 6000 ms: tolerates one missed tick plus jitter.

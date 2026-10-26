@@ -7,6 +7,10 @@ import {
 	AmbientEvidence,
 	type AmbientEvidenceEvent,
 } from "../../../../src/core/scanner/probes/ambient.js"
+import {
+	ACTIVITY_SLOTS_CONFIG_MAX,
+	PLACED_CHANNELS_PER_DECODER_MAX,
+} from "../../../../src/decoders/enablement/contract.js"
 import { linkLine } from "../../../mocks/scanner/probe-fakes.js"
 
 const TARGET = 466_103_300
@@ -32,7 +36,7 @@ function setup() {
 	const got: AmbientEvidenceEvent[] = []
 	ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 	ambient.start()
-	const page = (binding?: unknown) => {
+	const page = (binding?: unknown, stepMs = 1000) => {
 		const out: Record<string, unknown> = {
 			type: "message",
 			timestamp: new Date(clock.now),
@@ -48,7 +52,7 @@ function setup() {
 		if (binding !== undefined)
 			Object.defineProperty(out, "provenanceBinding", { value: binding })
 		decoders.emit("decoder:output", "pager", out)
-		clock.now += 1000
+		clock.now += stepMs
 	}
 	return { ambient, got, page }
 }
@@ -60,6 +64,19 @@ describe("ambient evidence of a placed point decoder", () => {
 		page({ sourceId: "rtl", channelHz: CHANNEL })
 		expect(got).toHaveLength(1)
 		expect(got[0]).toMatchObject({ sourceId: "rtl", hz: CHANNEL })
+		ambient.stop()
+	})
+
+	it("capcode pairing on 9 placed channels in round robin confirms on every channel", () => {
+		const { ambient, got, page } = setup()
+		const hz = (k: number) => CHANNEL + k * 12_500
+		// 18 pages 200 ms apart: each repeat lands inside the 4 s pairing hold
+		for (let round = 0; round < 2; round++)
+			for (let k = 0; k < 9; k++)
+				page({ sourceId: "rtl", channelHz: hz(k) }, 200)
+		expect(got.map(e => e.hz)).toEqual(
+			Array.from({ length: 9 }, (_, k) => hz(k)),
+		)
 		ambient.stop()
 	})
 
@@ -87,13 +104,28 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 	const A = 446_006_250
 	const B = 446_031_250
 
-	function setupDmr() {
+	/** `placed`: the decoder's placed channels as its status reports them (null: no status). */
+	function setupDmr(placed: { hz: number[] } | null = null) {
 		const decoders = new EventEmitter() as EventEmitter &
 			Record<string, unknown>
 		const parent = new EventEmitter()
 		decoders["getAllStatus"] = () => [
 			{ id: "dmr", type: "dsd-fme", sourceId: "rtl", owner: "config" },
 		]
+		if (placed !== null)
+			decoders["getStatus"] = (id: string) =>
+				id === "dmr"
+					? {
+							id,
+							type: "dsd-fme",
+							sourceId: "rtl",
+							owner: "config",
+							placements: placed.hz.map(channelHz => ({
+								sourceId: "rtl",
+								channelHz,
+							})),
+						}
+					: undefined
 		decoders["getDecoder"] = (id: string) => (id === "dmr" ? parent : undefined)
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
@@ -182,15 +214,59 @@ describe("ambient evidence of placed dsd-fme channels", () => {
 		ambient.stop()
 	})
 
-	it("channel memories are bounded per decoder: the channel heard longest ago is forgotten", () => {
+	it("round-robin traffic on 9 placed channels confirms on every channel", () => {
 		const { ambient, onB, identities } = setupDmr()
 		const hz = (k: number) => B + k * 12_500
+		for (let round = 0; round < 2; round++)
+			for (let k = 0; k < 9; k++) onB(1, 1_000 + round * 100 + k, hz(k))
+		expect(identities()).toEqual(
+			Array.from({ length: 9 }, (_, k) => [hz(k), "1"]),
+		)
+		ambient.stop()
+	})
+
+	it("round-robin traffic on the most placements a decoder can hold confirms on every channel", () => {
+		expect(AMBIENT_PLACED_STATES_MAX).toBe(PLACED_CHANNELS_PER_DECODER_MAX)
+		expect(AMBIENT_PLACED_STATES_MAX).toBeGreaterThanOrEqual(
+			ACTIVITY_SLOTS_CONFIG_MAX + 2,
+		)
+		const hz = (k: number) => B + k * 6_250
+		const placed = {
+			hz: Array.from({ length: AMBIENT_PLACED_STATES_MAX }, (_, k) => hz(k)),
+		}
+		// with and without the decoder's placements readable
+		for (const view of [placed, null]) {
+			const { ambient, onB, identities } = setupDmr(view)
+			for (let round = 0; round < 2; round++)
+				for (let k = 0; k < AMBIENT_PLACED_STATES_MAX; k++)
+					onB(1, 1_000 + round * 1_000 + k, hz(k))
+			expect(identities()).toHaveLength(AMBIENT_PLACED_STATES_MAX)
+			ambient.stop()
+		}
+	})
+
+	it("a channel with no placement any more is forgotten; placed ones are kept", () => {
+		const placed = { hz: [A, B] }
+		const { ambient, onA, onB, identities } = setupDmr(placed)
+		onA(1, 1_000)
+		onB(2, 1_010)
+		// A's placement went (moved to C): the next new channel state drops A's memory
+		const C = B + 12_500
+		placed.hz = [B, C]
+		onB(3, 1_020, C)
+		onA(1, 1_030)
+		onB(2, 1_040)
+		expect(identities()).toEqual([[B, "2"]])
+		ambient.stop()
+	})
+
+	it("beyond the bound with placements unknown, the channel heard longest ago is forgotten", () => {
+		const { ambient, onB, identities } = setupDmr()
+		const hz = (k: number) => B + k * 6_250
 		for (let k = 0; k <= AMBIENT_PLACED_STATES_MAX; k++)
 			onB(1, 1_000 + k, hz(k))
-		// the first channel's memory went; its second sighting starts over
 		onB(1, 2_000, hz(0))
 		expect(identities()).toEqual([])
-		// the newest channel still remembers its first sighting
 		onB(1, 2_010, hz(AMBIENT_PLACED_STATES_MAX))
 		expect(identities()).toEqual([[hz(AMBIENT_PLACED_STATES_MAX), "1"]])
 		ambient.stop()

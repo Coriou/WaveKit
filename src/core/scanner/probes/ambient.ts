@@ -52,6 +52,7 @@ import {
 	type ChannelPassband,
 } from "./ambient-channel.js"
 import { parseVdl2 } from "./confirm/vdl2.js"
+import { PLACED_CHANNELS_PER_DECODER_MAX } from "../../../decoders/enablement/contract.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
 
 /** The manager's placement binding on an output (sourceId, channel or null for centre reach). */
@@ -61,7 +62,16 @@ const PlacedBindingSchema = z.object({
 })
 
 /** Channel states kept per placed decoder (its activity slots are at most a few channels). */
-export const AMBIENT_PLACED_STATES_MAX = 8
+/**
+ * Channel states kept per placed decoder: the most channel placements one decoder can hold
+ * (PLACED_CHANNELS_PER_DECODER_MAX = 49, see its arithmetic), so every placed channel keeps its
+ * memory however many run. Each state is one interpreter's acceptance memory (DoubleMatch: at
+ * most 256 values per key and 4 096 accepted values; a multimon state holds up to 1 024 capcode
+ * windows), as one decoder held before per-channel states. States of channels that are no longer
+ * placed are dropped first, so the count follows the decoder's live placements; the bound is the
+ * backstop when placements cannot be read.
+ */
+export const AMBIENT_PLACED_STATES_MAX = PLACED_CHANNELS_PER_DECODER_MAX
 
 function placedKey(decoderId: string, channelHz: number | string): string {
 	return `${decoderId}\u0000${channelHz}`
@@ -280,15 +290,47 @@ export class AmbientEvidence extends EventEmitter {
 		this.trustErrorLogged.delete(decoderId)
 	}
 
-	/** At most AMBIENT_PLACED_STATES_MAX channel states per decoder; the least recently heard go. */
+	/**
+	 * After a new channel state: drop the decoder's states whose channel has no placement any
+	 * more (when its placements can be read), then, beyond AMBIENT_PLACED_STATES_MAX, the least
+	 * recently heard. The state just added is never dropped.
+	 */
 	private boundPlaced(decoderId: string, added: string): void {
 		const prefix = placedKey(decoderId, "")
-		const mine = [...this.states.keys()].filter(k => k.startsWith(prefix))
-		for (const key of mine.slice(
-			0,
-			Math.max(0, mine.length - AMBIENT_PLACED_STATES_MAX),
-		))
-			if (key !== added) this.states.delete(key)
+		let mine = [...this.states.keys()].filter(k => k.startsWith(prefix))
+		const placed = this.placedChannels(decoderId)
+		if (placed !== null) {
+			for (const key of mine)
+				if (key !== added && !placed.has(key.slice(prefix.length)))
+					this.states.delete(key)
+			mine = mine.filter(k => this.states.has(k))
+		}
+		const over = mine.length - AMBIENT_PLACED_STATES_MAX
+		if (over <= 0) return
+		for (const key of mine.filter(k => k !== added).slice(0, over))
+			this.states.delete(key)
+	}
+
+	/** The decoder's placed channel frequencies (as key suffixes); null when unknown. */
+	private placedChannels(decoderId: string): Set<string> | null {
+		try {
+			const getStatus = this.deps.decoders.getStatus
+			const status = getStatus
+				? getStatus.call(this.deps.decoders, decoderId)
+				: this.deps.decoders.getAllStatus().find(s => s.id === decoderId)
+			const placements: unknown = (
+				status as { placements?: unknown } | undefined
+			)?.placements
+			if (!Array.isArray(placements)) return null
+			const out = new Set<string>()
+			for (const p of placements) {
+				const hz: unknown = (p as { channelHz?: unknown } | null)?.channelHz
+				if (typeof hz === "number" && Number.isFinite(hz)) out.add(String(hz))
+			}
+			return out
+		} catch {
+			return null
+		}
 	}
 
 	private readonly onCreated = (decoderId: unknown): void => {

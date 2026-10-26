@@ -28,6 +28,10 @@ import {
 	CSDR_BUFFER_MIN_ELEMENTS,
 } from "./decoders/csdr-buffers.js"
 import { BAND_REGIONS } from "./decoders/band-region.js"
+import {
+	ACTIVITY_SLOTS_CONFIG_MAX,
+	BANDPLAN_CHANNELS_CONFIG_MAX,
+} from "./decoders/enablement/contract.js"
 
 // ============================================================================
 // Zod Schemas
@@ -861,7 +865,12 @@ export const ConfigSchema = z
 					.object({
 						cpuBudgetCores: z.number().positive().max(64).optional(),
 						cpuGuardPercent: z.number().min(1).max(100).optional(),
-						maxBandplanChannels: z.number().int().min(0).max(16).optional(),
+						maxBandplanChannels: z
+							.number()
+							.int()
+							.min(0)
+							.max(BANDPLAN_CHANNELS_CONFIG_MAX)
+							.optional(),
 						/**
 						 * Activity-ranked multimon-ng and dsd-fme channels: slots per
 						 * decoder per source beyond its primary or VFO channel (default
@@ -874,8 +883,18 @@ export const ConfigSchema = z
 							.object({
 								slots: z
 									.object({
-										"multimon-ng": z.number().int().min(0).max(32).optional(),
-										"dsd-fme": z.number().int().min(0).max(32).optional(),
+										"multimon-ng": z
+											.number()
+											.int()
+											.min(0)
+											.max(ACTIVITY_SLOTS_CONFIG_MAX)
+											.optional(),
+										"dsd-fme": z
+											.number()
+											.int()
+											.min(0)
+											.max(ACTIVITY_SLOTS_CONFIG_MAX)
+											.optional(),
 									})
 									.strict()
 									.optional(),
