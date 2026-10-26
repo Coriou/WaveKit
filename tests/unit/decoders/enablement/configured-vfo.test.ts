@@ -357,3 +357,69 @@ it("configured multimon-ng places the French paging raster, nearest the centre f
 	expect(gated).not.toContain(466_106_250)
 	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
 })
+
+// 3.18 band: multimon-ng's built-in band is its region's paging ranges.
+it("configured multimon-ng is out of band at 1090 MHz", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 1_090_000_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_090_000_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 1_090_000_000 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(false)
+	expect(status?.bandAssessment).toMatchObject({
+		verdict: "out-of-band",
+		basis: "region-default",
+		region: { code: "EU" },
+	})
+	expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+	expect(status?.placements ?? []).toEqual([])
+	expect(f.provider.requestChannel).not.toHaveBeenCalled()
+})
+
+it("configured multimon-ng runs in band on the French paging band", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 466_100_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(1_024_000), centerFreq: 466_100_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 466_100_000 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(true)
+	expect(status?.bandAssessment?.verdict).toBe("in-band")
+	expect(status?.placements?.[0]).toMatchObject({ channelHz: 466_100_000 })
+})
+
+it("configured multimon-ng with AFSK1200 runs in band at the APRS frequency", async () => {
+	const f = setup({
+		type: "multimon-ng",
+		vfo: 144_800_000,
+		options: { modes: ["AFSK1200"] },
+	})
+	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 144_800_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 144_800_000 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	expect(status?.running).toBe(true)
+	// The VHF paging plan (137-174 MHz) holds the APRS frequency.
+	expect(status?.bandAssessment).toMatchObject({
+		verdict: "in-band",
+		basis: "region-default",
+	})
+	expect(status?.placements?.[0]).toMatchObject({ channelHz: 144_800_000 })
+})
+
+it("a band override keeps multimon-ng running at 1090 MHz", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 1_090_000_000 })
+	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_090_000_000 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 1_090_000_000 })
+	await f.manager.startAll()
+	expect(f.manager.getStatus("configured")?.running).toBe(false)
+	await f.manager.setBandOverride("configured", {
+		rangesHz: [{ minHz: 1_089_000_000, maxHz: 1_091_000_000 }],
+	})
+	await vi.advanceTimersByTimeAsync(3_000)
+	const status = f.manager.getStatus("configured")
+	expect(status?.bandAssessment).toMatchObject({
+		verdict: "in-band",
+		basis: "override",
+	})
+	expect(status?.running).toBe(true)
+})

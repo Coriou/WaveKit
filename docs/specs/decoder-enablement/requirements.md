@@ -505,11 +505,12 @@ their raster frequency, or on the neighbouring 6.25 kHz point, also gives nothin
 
 3.18 **A pager decoder hears the whole paging band in view.**
 
-- _Band._ The paging ranges are the band catalogue's ranges whose protocols are paging only
-  (`pocsag`, `flex`), plus paging bands the catalogue lacks (EU: 466.025–466.230 MHz,
-  France). Pending: multimon-ng still has no built-in band (`src/decoders/band-defaults.ts` is
-  a preserved legacy file), so outside a paging range it keeps 3.11 and follows the VFO on
-  every band. Gating it to its paging ranges (`frequency-out-of-band` at 1090 MHz) is open.
+- _Band._ multimon-ng's built-in band is its region's paging ranges: the band catalogue's
+  ranges whose protocols are paging only (`pocsag`, `flex`), plus paging bands the catalogue
+  lacks (EU: 466.025–466.230 MHz, France). Out of view (1090 MHz, ISM, airband) it is
+  `frequency-out-of-band`. Overrides, `always` and operator starts work as in 3.13. The entry
+  is a supplement to the built-in table in `src/decoders/enablement/paging-plan.ts`;
+  `src/decoders/band-defaults.ts` stays byte-identical (band-plans requirement 1.1).
 - _Channels._ With a channelizer and no `channelHz`, `channelsHz`, `offsetHz`, `frequency`
   or `frequencies`, config-origin and catalogue-origin multimon-ng place one channel on every
   raster frequency (the range's finest raster, exactly on it) of a paging range inside the

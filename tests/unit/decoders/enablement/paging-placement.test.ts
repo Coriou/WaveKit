@@ -7,6 +7,8 @@ import {
 	planPlacements,
 } from "../../../../src/decoders/enablement/placement.js"
 import {
+	DECODER_BAND_TABLE,
+	PAGER_BAND_DEFAULT,
 	pagingBandRanges,
 	pagingRasterRanges,
 	rasterChannelsBetween,
@@ -17,6 +19,12 @@ import type {
 	PlannerInput,
 	PlannerSource,
 } from "../../../../src/decoders/enablement/contract.js"
+import {
+	BAND_DEFAULTS,
+	resolveBandRequirements,
+} from "../../../../src/decoders/band-defaults.js"
+import { BAND_REGIONS } from "../../../../src/decoders/band-region.js"
+import { assessDecoderBand } from "../../../../src/decoders/band-resolver.js"
 
 const decoder = (overrides: Partial<PlannerDecoder> = {}): PlannerDecoder => ({
 	id: "test",
@@ -98,6 +106,42 @@ describe("paging raster placement (3.18)", () => {
 		expect(pagingRasterRanges("US").some(r => r.minHz === 466_025_000)).toBe(
 			false,
 		)
+	})
+
+	it("multimon-ng's built-in band is its region's paging ranges; the legacy table is unchanged", () => {
+		expect(BAND_DEFAULTS["multimon-ng"]).toBeUndefined()
+		expect(DECODER_BAND_TABLE).toMatchObject(BAND_DEFAULTS)
+		expect(DECODER_BAND_TABLE["multimon-ng"]).toBe(PAGER_BAND_DEFAULT)
+		for (const code of BAND_REGIONS) {
+			const { requirements } = resolveBandRequirements({
+				type: "multimon-ng",
+				declaration: {},
+				region: { code, source: "configured" },
+				table: DECODER_BAND_TABLE,
+			})
+			expect(requirements).toEqual({
+				rangesHz: pagingBandRanges(code),
+				basis: "region-default",
+				region: { code, source: "configured" },
+			})
+			const at = (centerHz: number) =>
+				assessDecoderBand(requirements, { centerHz, sampleRateHz: 2_400_000 })
+					.verdict
+			expect(at(1_090_000_000)).toBe("out-of-band")
+			expect(at(433_920_000)).toBe("out-of-band")
+			expect(at(153_350_000)).toBe("in-band")
+		}
+		const eu = (centerHz: number) =>
+			assessDecoderBand(
+				resolveBandRequirements({
+					type: "multimon-ng",
+					declaration: {},
+					region: { code: "EU", source: "configured" },
+					table: DECODER_BAND_TABLE,
+				}).requirements,
+				{ centerHz, sampleRateHz: 1_024_000 },
+			).verdict
+		expect(eu(466_100_000)).toBe("in-band")
 	})
 
 	it("config-origin without channels places every French channel in the window, not the VFO", () => {

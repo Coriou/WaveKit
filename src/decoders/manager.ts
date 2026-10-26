@@ -91,7 +91,10 @@ import {
 	type ResolvedBand,
 } from "./band-defaults.js"
 import { BandOverrideStore } from "./band-override-store.js"
-import { pagingRasterRanges } from "./enablement/paging-plan.js"
+import {
+	DECODER_BAND_TABLE,
+	pagingRasterRanges,
+} from "./enablement/paging-plan.js"
 import {
 	createDecoderExitError,
 	createDecoderLastError,
@@ -5432,7 +5435,7 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * The one band resolution (spec §3.2): declaration, config and API
-	 * overrides, the region and the built-in table.
+	 * overrides, the region and the built-in table (with the pager band).
 	 */
 	private resolveBand(state: DecoderState): ResolvedBand {
 		const slots = this.catalogueLoraSlotsOf(state)
@@ -5450,6 +5453,8 @@ export class DecoderManager extends EventEmitter {
 			configOverride: state.config.band,
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
+			// 3.18: the built-in table plus multimon-ng's paging band.
+			table: DECODER_BAND_TABLE,
 		})
 	}
 

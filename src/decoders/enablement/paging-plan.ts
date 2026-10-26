@@ -9,6 +9,12 @@
  */
 import type { BandRegion, DecoderBandRange } from "@wavekit/api-types"
 import { bandplansFor } from "../../core/scanner/bandplan/index.js"
+import {
+	BAND_DEFAULTS,
+	type BandDefault,
+	type BandDefaultEntry,
+} from "../band-defaults.js"
+import { BAND_REGIONS } from "../band-region.js"
 
 /** One paging range and the channel raster on it (inclusive integer Hz). */
 export interface PagingRasterRange {
@@ -89,6 +95,31 @@ export function pagingBandRanges(region: BandRegion): DecoderBandRange[] {
 		maxHz: r.maxHz,
 	}))
 }
+
+/**
+ * The pager decoder's built-in band (3.18): its region's paging ranges, so
+ * it is `frequency-out-of-band` where none is in view (1090 MHz, ISM,
+ * airband). The VHF paging plan spans 137-174 MHz, so AFSK1200 on the APRS
+ * frequencies stays in band; EAS, DTMF or AFSK1200 elsewhere need a band
+ * override or mode `always`. A supplement to the built-in table rather than
+ * a row in it: band-defaults.ts is a preserved legacy file (band-plans 1.1).
+ */
+export const PAGER_BAND_DEFAULT: BandDefaultEntry = {
+	scope: "region",
+	byRegion: pagerBandByRegion(),
+}
+
+function pagerBandByRegion(): Record<BandRegion, BandDefault> {
+	const byRegion = {} as Record<BandRegion, BandDefault>
+	for (const region of BAND_REGIONS)
+		byRegion[region] = { rangesHz: pagingBandRanges(region) }
+	return byRegion
+}
+
+/** The built-in band table the manager resolves with: BAND_DEFAULTS plus the pager band. */
+export const DECODER_BAND_TABLE: Readonly<
+	Partial<Record<string, BandDefaultEntry>>
+> = { ...BAND_DEFAULTS, "multimon-ng": PAGER_BAND_DEFAULT }
 
 /** Most raster points one call enumerates (a 2.4 Msps window at 1 kHz is 1 921). */
 export const PAGING_MAX_RASTER_POINTS = 100_000
