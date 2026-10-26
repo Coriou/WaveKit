@@ -98,9 +98,11 @@ paired once: see [Access and pairing](docs/SECURITY.md#access-and-pairing).
 only, because that is the hardware we own. We would like WaveKit to work with more receivers (for
 example Airspy, HackRF, SDRplay or LimeSDR), and with several dongles at once: the core takes a
 list of sources and decoders follow each tuner, but a setup with two or more dongles has not been
-tested on real hardware yet. If you run WaveKit on other hardware or with several dongles, please
-open an issue with what worked and what did not. If you can lend or donate a receiver we do not
-have, that helps us support it properly.
+tested on real hardware yet.
+
+**If you run WaveKit on other hardware or with several dongles, please open an issue with what
+worked and what did not. If you can lend or donate a receiver we do not have, that helps us support
+it properly.**
 
 ## Decoders
 

@@ -1358,15 +1358,31 @@ entries retain their original paths. Remaining: verify VS Code chat if it become
 
 ## 11. CI images and release validation
 
-The main Docker workflow passes `CACHE_FROM_ONLY=false` through bake's target
-`set` overrides; it is a bake variable and belongs in the step environment.
-Fixing that wiring activates automatic image/cache publication on main pushes.
+Since 2026-10-26 CI builds and publishes images only for version tags (`v*`); a pull request
+checks the image build, and a push to `main` runs the tests and the docs check only. The bake
+cache variable is passed through the step environment.
 
-- [ ] Validate the channelizer/core ARM64 build in a nonpublishing build or PR,
-      alongside AMD64, from a clean worktree and coordinated Docker window.
-- [ ] Correct the bake variable wiring and check GHCR visibility/permissions
-      before enabling multiarch publication. Publishing remains an explicit
-      release step after architecture validation.
+- [ ] Release design: version tags (semver) produce `ghcr.io/coriou/wavekit:<version>` and
+      `latest` (plus `-core` / `-sdrpp`), with release notes; the docs tell users which tag to
+      pull and how to upgrade (pull the new tag, restart, state kept in volumes).
+- [ ] Build and publish the SDR host image (`packages/sdr-host`, arm64 and amd64) from the same
+      release; today `docs/SDR-HOST-SETUP.md` points at a `latest` tag that CI does not build.
+- [ ] Validate the channelizer/core ARM64 build alongside AMD64 before the first release.
 - [ ] Review Actions runtime/runner migrations separately from decoder correctness.
 
 No release check substitutes for live RF or Pi clean-card acceptance.
+
+## 12. Onboarding, install and upgrades
+
+A new user should get from nothing to a working receiver in minutes, with a USB dongle first
+(the simplest setup), then a Raspberry Pi SDR host on the network.
+
+- [ ] A clean-machine test that follows the readme exactly (pull images, no source checkout) for a
+      USB dongle and for a Pi SDR host.
+- [ ] Serve the built web app from the core so the UI needs no source checkout or pnpm.
+- [ ] USB dongle acceptance on real hardware: the dongle plugged into a desktop host, and the core
+      running on a Raspberry Pi with a local USB dongle (to learn whether a Pi can run the core).
+- [ ] Several dongles at once: a test plan with two sources (fake sources first, real dongles when
+      available).
+- [ ] Later: a desktop app (Tauri or Electron, performance first) with a clean install and update
+      path.
