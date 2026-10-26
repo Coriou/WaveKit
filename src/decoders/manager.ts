@@ -1608,8 +1608,12 @@ export class DecoderManager extends EventEmitter {
 							if (parent.parentIntent !== parentIntent || this.destroying)
 								continue
 							this.logPlacement(placement, "moved")
-							if (state.placement && state.placement.key !== placement.key)
+							if (state.placement && state.placement.key !== placement.key) {
 								enablement.gate?.forget(state.placement.key)
+								// The gate restarts this placement's history; the manager's must match.
+								delete state.efficiencyBackoffMs
+								delete state.efficiencyLateShed
+							}
 							state.placement = placement
 							moved = false
 						}
