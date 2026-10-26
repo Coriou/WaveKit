@@ -14,6 +14,8 @@
 
 import "./bootstrap.js"
 
+import { observeStartupLocks } from "./utils/lock-owner.js"
+import { OperatorDataError } from "./operator-data/schema.js"
 import { formatStartupFailure } from "./utils/startup-failure.js"
 
 import { openAccessRuntime } from "./access/runtime-context.js"
@@ -1133,6 +1135,9 @@ async function main(): Promise<void> {
 		process.on("SIGINT", signal)
 	}
 	try {
+		let startupLockWait:
+			| Awaited<ReturnType<typeof observeStartupLocks>>
+			| undefined
 		if (config.access.mode === "protected") {
 			accessBootstrap = validateProtectedRuntimeMapping(
 				config.access,
@@ -1145,7 +1150,17 @@ async function main(): Promise<void> {
 			)
 			const exposureWarning = containerExposureWarning(config.access)
 			if (exposureWarning !== null) log.warn(exposureWarning)
+			startupLockWait = await observeStartupLocks(
+				{
+					accessDirectory:
+						process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
+					stateDir: config.stateDir,
+				},
+				{ logger },
+			)
+			checkpoint()
 			access = await openAccessRuntime({
+				lockWait: startupLockWait,
 				bootstrap: accessBootstrap,
 				audio: {
 					analog: {
@@ -2384,6 +2399,8 @@ async function main(): Promise<void> {
 		// The API server closes it after HTTP drain; own() covers a failed construction.
 		let publishBandPlans: BandPlansCommitSink | undefined
 		const bandPlans = await openBandPlanService({
+			logger: bandPlanLog,
+			...(startupLockWait ? { lockWait: startupLockWait } : {}),
 			stateDir: config.stateDir,
 			context: {
 				region: bandRegion.code,
@@ -2492,6 +2509,8 @@ async function main(): Promise<void> {
 			)
 			try {
 				operatorData = await OperatorDataService.open({
+					logger: createComponentLogger(logger, "OperatorData"),
+					...(startupLockWait ? { lockWait: startupLockWait } : {}),
 					stateDir: config.stateDir,
 					onCommit: snapshot => {
 						try {
@@ -2503,8 +2522,9 @@ async function main(): Promise<void> {
 					},
 				})
 				acquisition = "acquired"
-			} catch {
+			} catch (error) {
 				acquisition = "rejected"
+				if (error instanceof OperatorDataError) throw error
 				throw new WaveKitError(
 					"Operator startup unavailable",
 					"ACCESS_UNAVAILABLE",
@@ -2970,7 +2990,11 @@ async function main(): Promise<void> {
 		if (protectedMode) {
 			const watchdog = setTimeout(() => process.exit(1), 10_000)
 			try {
-				await closeProtected()
+				await closeProtected().catch(cleanupError => {
+					// Rejected operator acquisition already retains private ownership.
+					// Keep its concrete startup code/reason instead of the cleanup sentinel.
+					if (!(error instanceof OperatorDataError)) throw cleanupError
+				})
 			} finally {
 				clearTimeout(watchdog)
 			}

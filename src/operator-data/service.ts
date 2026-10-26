@@ -1,3 +1,5 @@
+import type { Logger } from "../utils/logger.js"
+import type { LockWaitOptions } from "../utils/lock-owner.js"
 import { randomUUID } from "node:crypto"
 import { transition } from "./domain.js"
 import type { DomainContext, TransitionResult } from "./domain.js"
@@ -12,6 +14,8 @@ import { OperatorDataStorage } from "./storage.js"
 import type { OperatorDataStorageOptions } from "./storage.js"
 
 export interface OperatorDataServiceOptions {
+	logger?: Logger
+	lockWait?: LockWaitOptions
 	stateDir: string
 	/** Synchronous publication only; promises are not a supported transport. */
 	onCommit?: (snapshot: OperatorDataSnapshot) => undefined
@@ -51,6 +55,8 @@ export class OperatorDataService {
 		const sink = options.onCommit
 		const storage = await OperatorDataStorage.open({
 			stateDir: options.stateDir,
+			...(options.logger ? { logger: options.logger } : {}),
+			...(options.lockWait ? { lockWait: options.lockWait } : {}),
 			...(options.storageStage ? { stage: options.storageStage } : {}),
 		})
 		return new OperatorDataService(storage, context, sink)

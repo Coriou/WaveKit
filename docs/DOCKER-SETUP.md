@@ -201,9 +201,9 @@ threshold to ignore the first 10 seconds after `wavekit-api` start.
 ### After a crash or power cut
 
 A lock from a dead process in the same container is reclaimed at once. After a
-container kill, the new core waits about 30–40 seconds, watching the old lock's
-heartbeat, then reclaims it. Holders refresh every 10 seconds; a heartbeat
-observed unchanged for 30 seconds on a monotonic clock expires, even if its PID
+container kill, the new core waits about 30–40 seconds in total, observing access,
+band-plan and operator-data lock heartbeats together before reclaiming them.
+Holders refresh every 10 seconds; a heartbeat observed unchanged for 30 seconds on a monotonic clock expires, even if its PID
 is still alive in the same container. A lock whose heartbeat stays fresh
 (another live core using the same state) is never taken. A recent heartbeat from
 an owner with a matching local PID and start time fails immediately; an old

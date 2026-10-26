@@ -23,6 +23,7 @@ import type { Plugin } from "esbuild"
 import { WebSocket } from "ws"
 import { z } from "zod"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
+import { OperatorDataStorage } from "../../../src/operator-data/storage.js"
 import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
 
 const repository = fileURLToPath(new URL("../../../", import.meta.url))
@@ -801,6 +802,54 @@ async function stop(core: RunningCore) {
 }
 
 describe("built protected runtime process", () => {
+	it("retains the operator lock code and reason through startup cleanup", async () => {
+		const env = await fixture()
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		const holder = await OperatorDataStorage.open({
+			stateDir: env.config.stateDir,
+		})
+		try {
+			await env.releasePorts()
+			const core = run(env.configFile, env.directory)
+			expect(await core.exited).toEqual({ code: 1, signal: null })
+			expect(core.stderr()).toBe(
+				"WaveKit startup failed: WaveKitError [OPERATOR_DATA_UNAVAILABLE/lock-held]: startup could not complete\n",
+			)
+			expect(core.stdout() + core.stderr()).not.toContain(env.directory)
+			for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
+				expect(await listening(port)).toBe(false)
+		} finally {
+			await holder.close()
+		}
+	}, 15_000)
+
+	it("names the concrete access lock code on the startup line", async () => {
+		const env = await fixture()
+		const holder = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		try {
+			await env.releasePorts()
+			const core = run(env.configFile, env.directory)
+			expect(await core.exited).toEqual({ code: 1, signal: null })
+			expect(core.stderr()).toBe(
+				"WaveKit startup failed: WaveKitError [ACCESS_STORAGE_BUSY]: startup could not complete\n",
+			)
+			expect(core.stdout() + core.stderr()).not.toContain(env.directory)
+			for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
+				expect(await listening(port)).toBe(false)
+		} finally {
+			await holder.close()
+		}
+	}, 15_000)
+
 	it("mounts admission, disables raw listeners and drains SIGTERM before a durable browser restart", async () => {
 		const env = await fixture()
 		const storage = await PrivateAccessStorage.open({

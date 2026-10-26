@@ -1,4 +1,8 @@
 import fs from "node:fs/promises"
+import { randomUUID } from "node:crypto"
+import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
+import { BandPlanStorage } from "../../../src/core/bandplans/storage.js"
+import { OperatorDataStorage } from "../../../src/operator-data/storage.js"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
@@ -18,6 +22,7 @@ import {
 	LOCK_WAIT_MS,
 	startLockHeartbeat,
 	lockWait,
+	observeStartupLocks,
 	ownerHasRecentHeartbeat,
 } from "../../../src/utils/lock-owner.js"
 import type {
@@ -877,4 +882,85 @@ describe("same-scope fail-fast refusal", () => {
 		}
 		expect(ownerHasRecentHeartbeat(owner, owner, reused, 100_000)).toBe(false)
 	})
+})
+
+describe("startup lock pre-flight", () => {
+	it.each(["foreign-owner", "incomplete-directory"])(
+		"recovers all three families within one monotonic window: %s",
+		async kind => {
+			const root = await fs.mkdtemp(join(tmpdir(), "wavekit-startup-locks-"))
+			roots.push(root)
+			const directory = join(root, "private")
+			const provision = await PrivateAccessStorage.open({
+				directory,
+				mode: "provision",
+				ownership: "single-host-pid-namespace",
+			})
+			await provision.close()
+			const foreign = {
+				...(await readLockOwner()),
+				hostname: "foreign-test-scope",
+			}
+			const nonce = randomUUID()
+			await fs.writeFile(
+				join(directory, `owner-${foreign.pid}-${nonce}.lock`),
+				JSON.stringify({
+					version: 1,
+					pid: foreign.pid,
+					nonce,
+					scope: "0".repeat(64),
+					identity: foreign,
+				}),
+				{ mode: 0o600 },
+			)
+			for (const family of ["bandplans", "operator-data"]) {
+				const lock = join(root, family, ".writer-lock")
+				await fs.mkdir(lock, { recursive: true, mode: 0o700 })
+				if (kind === "foreign-owner")
+					await fs.writeFile(
+						join(lock, "owner.json"),
+						JSON.stringify(foreign),
+						{
+							mode: 0o600,
+						},
+					)
+			}
+			let clock = 0
+			const options = await observeStartupLocks(
+				{ accessDirectory: directory, stateDir: root },
+				{
+					now: () => clock,
+					sleep: async ms => {
+						clock += ms
+					},
+				},
+			)
+			const access = await PrivateAccessStorage.open({
+				directory,
+				mode: "load",
+				ownership: "single-host-pid-namespace",
+				lockWait: options,
+			})
+			try {
+				const bandplans = await BandPlanStorage.open({
+					stateDir: root,
+					writable: true,
+					lockWait: options,
+				})
+				try {
+					const operator = await OperatorDataStorage.open({
+						stateDir: root,
+						lockWait: options,
+					})
+					await operator.close()
+				} finally {
+					await bandplans.close()
+				}
+			} finally {
+				await access.close()
+			}
+			expect(clock).toBe(HEARTBEAT_STALE_MS)
+			expect(clock).toBeLessThanOrEqual(HEARTBEAT_STALE_MS + HEARTBEAT_MS)
+		},
+	)
 })

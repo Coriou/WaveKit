@@ -13,6 +13,9 @@ import type { Logger } from "./logger.js"
  * The current process caches fallback identities to absorb later clock steps.
  * PID evidence is local to boot/hostname/PID namespace. Across scopes, a fresh
  * heartbeat holds ownership regardless of what local PID probing reports.
+ * No fencing tokens: a holder paused after its last ownership check can lose
+ * ownership before its temp-plus-rename write lands. At worst one update from
+ * the already-dead holder is lost; subsequent checks stop further writes.
  */
 export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
@@ -234,6 +237,8 @@ export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS
 export const LOCK_WAIT_MS = HEARTBEAT_STALE_MS + HEARTBEAT_MS
 export const INCOMPLETE_LOCK_MS = HEARTBEAT_STALE_MS
 export interface LockWaitOptions {
+	/** Boot pre-flight observations, revalidated against the current heartbeat. */
+	observations?: Map<string, { value: string; since: number }>
 	/** Monotonic milliseconds; never a wall clock. */
 	now?: () => number
 	sleep?: (ms: number) => Promise<void>
@@ -256,7 +261,8 @@ export function lockWait(options: LockWaitOptions = {}) {
 		options.sleep ??
 		(ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
 	const started = now()
-	const observations = new Map<string, { value: string; since: number }>()
+	const observations =
+		options.observations ?? new Map<string, { value: string; since: number }>()
 	const log = options.logger
 		? createComponentLogger(options.logger, "StorageLock")
 		: undefined
@@ -282,6 +288,97 @@ export function lockWait(options: LockWaitOptions = {}) {
 			await sleep(Math.min(HEARTBEAT_MS, LOCK_WAIT_MS - elapsed))
 			return true
 		},
+	}
+}
+/** Observe startup locks together without acquiring, deleting, or validating stores.
+ * Acquisitions still validate every boundary and decide whether to reclaim.
+ */
+export async function observeStartupLocks(
+	paths: { accessDirectory: string; stateDir: string },
+	options: LockWaitOptions = {},
+): Promise<LockWaitOptions> {
+	const observations = new Map<string, { value: string; since: number }>()
+	const shared = { ...options, observations }
+	const wait = lockWait(shared)
+	const current = await readLockOwner()
+	const candidates: { key: string; file: string }[] = []
+	try {
+		const entries = await fs.readdir(paths.accessDirectory)
+		// The storage itself rejects oversized directories; never scan unbounded input.
+		if (entries.length <= 64)
+			for (const entry of entries)
+				if (/^owner-[1-9][0-9]*-[a-f0-9-]{36}\.lock$/.test(entry)) {
+					const file = join(paths.accessDirectory, entry)
+					candidates.push({ key: file, file })
+				}
+	} catch {
+		// Preserve the storage's typed, sanitized startup error.
+	}
+	for (const family of ["bandplans", "operator-data"])
+		for (const suffix of ["", ".reclaim"]) {
+			const key = join(paths.stateDir, family, `.writer-lock${suffix}`)
+			candidates.push({ key, file: join(key, OWNER) })
+		}
+	for (;;) {
+		const pending = await Promise.all(
+			candidates.map(async ({ key, file }) => {
+				try {
+					const handle = await fs.open(
+						file,
+						constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+					)
+					try {
+						const stat = await handle.stat()
+						if (!stat.isFile() || stat.size > 16384) return false
+						const elapsed = wait.observe(key, heartbeatValue(stat))
+						const buffer = Buffer.alloc(16385)
+						const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+						if (bytesRead > 16384) return false
+						let decoded: unknown
+						try {
+							decoded = JSON.parse(
+								buffer.subarray(0, bytesRead).toString("utf8"),
+							)
+						} catch {
+							return elapsed < HEARTBEAT_STALE_MS
+						}
+						const parsed = lockOwnerSchema.safeParse(
+							typeof decoded === "object" &&
+								decoded !== null &&
+								"identity" in decoded
+								? decoded.identity
+								: decoded,
+						)
+						if (parsed.success) {
+							const probe = await probeLockOwner(parsed.data)
+							if (
+								isStale(parsed.data, current, probe, elapsed) ||
+								ownerHasRecentHeartbeat(
+									parsed.data,
+									current,
+									probe,
+									stat.mtimeMs,
+								)
+							)
+								return false
+						}
+						return elapsed < HEARTBEAT_STALE_MS
+					} finally {
+						await handle.close()
+					}
+				} catch (error) {
+					if (file !== key && hasLockCode(error, "ENOENT")) {
+						const stat = await fs.lstat(key).catch(() => undefined)
+						if (stat?.isDirectory() && !stat.isSymbolicLink())
+							return (
+								wait.observe(key, heartbeatValue(stat)) < HEARTBEAT_STALE_MS
+							)
+					}
+					return false
+				}
+			}),
+		)
+		if (!pending.some(Boolean) || !(await wait.retry())) return shared
 	}
 }
 export interface LockHeartbeat {
