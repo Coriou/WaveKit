@@ -187,32 +187,38 @@ it("sheds newest admission, clears history and honors cooldown at its bound", ()
 	}
 })
 
-it("late failures after clean probation restart at the base retry delay", () => {
-	const s = setup()
-	const p = placement()
-	let at = 0
-	for (const delay of [300000, 300000, 300000, 300000, 300000]) {
-		s.time(at)
-		expect(s.gate.admit(p, [], at).admit).toBe(true)
-		const active = [s.running(p)]
-		s.gate.probation(active, at)
-		s.time(at + 30000)
-		s.gate.probation(active, at)
-		s.windows([window(at + 30000), window(at + 40000)])
-		s.time(at + 50000)
-		expect(s.gate.probation(active, at)).toEqual([
-			{ key: p.key, detail: "late-drops" },
-		])
-		s.gate.noteSuspended(p.key, "late-drops", at + 50000)
-		// While stopping, an already graduated placement cannot erase its new retry.
-		expect(s.gate.probation(active, at + 50001)).toEqual([])
-		expect(s.gate.admit(p, [], at + 50001)).toMatchObject({
-			retryAtMs: at + 50000 + delay,
-		})
-		s.gate.probation([], at)
-		at += 50000 + delay
-	}
-})
+it.each([30_000, 1_800_000])(
+	"late retries decay after a clean run of %s ms",
+	cleanRun => {
+		const s = setup()
+		const p = placement()
+		let at = 0
+		for (const escalated of [
+			300_000, 600_000, 1_200_000, 1_800_000, 1_800_000,
+		]) {
+			const delay = cleanRun < 1_800_000 ? escalated : 300_000
+			s.time(at)
+			expect(s.gate.admit(p, [], at).admit).toBe(true)
+			const active = [s.running(p)]
+			s.gate.probation(active, at)
+			s.time(at + cleanRun)
+			s.gate.probation(active, at)
+			s.windows([window(at + cleanRun), window(at + cleanRun + 10_000)])
+			s.time(at + cleanRun + 20_000)
+			expect(s.gate.probation(active, at)).toEqual([
+				{ key: p.key, detail: "late-drops" },
+			])
+			s.gate.noteSuspended(p.key, "late-drops", at + cleanRun + 20_000)
+			// While stopping, an already graduated placement cannot erase its new retry.
+			expect(s.gate.probation(active, at + cleanRun + 20_001)).toEqual([])
+			expect(s.gate.admit(p, [], at + cleanRun + 20_001)).toMatchObject({
+				retryAtMs: at + cleanRun + 20_000 + delay,
+			})
+			s.gate.probation([], at)
+			at += cleanRun + 20_000 + delay
+		}
+	},
+)
 it("probation on another source remains independent of late shedding", () => {
 	const s = setup()
 	const old = s.running()

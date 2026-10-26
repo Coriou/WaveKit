@@ -831,7 +831,8 @@ access:
 # Set decoders[].mode to override the legacy enabled/band settings.
 # decoderPolicy.catalogue: false disables derived built-in decoder instances.
 # decoderPolicy.rateRaise: false disables the operator ADS-B rate policy.
-# decoderPolicy.efficiency: cpuBudgetCores (auto: half available CPUs, 0.75–64 cores),
+# decoderPolicy.efficiency: cpuBudgetCores (auto: half available CPUs, 0.75 floor,
+# capped by the CPU quota and 64 cores; never exceeds the quota),
 # cpuGuardPercent, maxBandplanChannels,
 #   activity (slots per decoder, replayAllowanceCores, maxMovesPerMinute, dwellMs:
 #   activity-ranked paging and digital-voice channels, see docs/DECODER-GUIDE.md).

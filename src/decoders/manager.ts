@@ -943,10 +943,15 @@ export class DecoderManager extends EventEmitter {
 			if (
 				state.decoder.getStatus().running &&
 				state.admittedAtMs !== undefined &&
-				!(state.placement && condemned.has(state.placement.key)) &&
-				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
+				(state.efficiencyLateShed ||
+					!(state.placement && condemned.has(state.placement.key))) &&
+				now - state.admittedAtMs >=
+					(state.efficiencyLateShed
+						? EFFICIENCY_RETRY_MAX_MS
+						: EFFICIENCY_PROBATION_MS)
 			) {
-				// A clean run ends consecutive failures, including late shedding.
+				// Normal failures reset after 30 s; late-shed history needs 1,800,000 ms
+				// since readmission. Earlier failures double 300k -> 600k -> 1.2M -> 1.8M.
 				delete state.efficiencyLateShed
 				delete state.efficiencyBackoffMs
 			}

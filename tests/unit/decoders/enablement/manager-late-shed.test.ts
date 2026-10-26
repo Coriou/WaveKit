@@ -297,7 +297,7 @@ it.each(
 		for (const escalated of [
 			300_000, 600_000, 1_200_000, 1_800_000, 1_800_000,
 		]) {
-			const delay = clean ? 300_000 : escalated
+			const delay = escalated
 			await vi.advanceTimersByTimeAsync(clean ? 35_000 : 1000)
 			gate.probation = vi.fn(() => [
 				{
@@ -318,16 +318,27 @@ it.each(
 	},
 )
 
-it.each([29_999, 30_000, 30_001])(
-	"resets late-shed backoff only after a clean run reaches 30 seconds: %s ms",
-	async elapsed => {
+it.each([
+	...[1_799_999, 1_800_000, 1_800_001, 7_200_000].map(elapsed => ({
+		detail: "late-drops" as const,
+		elapsed,
+		resetAfter: 1_800_000,
+	})),
+	...[29_999, 30_000, 30_001].map(elapsed => ({
+		detail: "drops" as const,
+		elapsed,
+		resetAfter: 30_000,
+	})),
+])(
+	"resets $detail backoff after $resetAfter ms of clean running: $elapsed ms",
+	async ({ detail, elapsed, resetAfter }) => {
 		const gate = fakeGate()
 		const f = setup("rate-test", gate)
 		f.create("dec")
 		const placement = f.place("dec", f.sources.caps.get("rtl")!.centerFreq!)
 		f.plan([placement])
 		await f.manager.startAll()
-		const fail = () => [{ key: placement.key, detail: "late-drops" as const }]
+		const fail = () => [{ key: placement.key, detail }]
 		gate.probation = vi.fn(fail)
 		await vi.advanceTimersByTimeAsync(2000)
 		const first = f.manager.getAllStatus()[0]!
@@ -339,16 +350,22 @@ it.each([29_999, 30_000, 30_001])(
 		await f.manager["applyProbation"]()
 		const running = vi.mocked(gate.probation).mock.calls.at(-1)![0][0]!
 		await vi.advanceTimersByTimeAsync(
-			running.admittedAtMs + elapsed - performance.now(),
+			running.admittedAtMs + elapsed - performance.now() - 1,
 		)
-		// Sample exactly at the boundary rather than waiting for the periodic pass.
-		await f.manager["applyProbation"]()
-		gate.probation = vi.fn(fail)
+		if (detail === "late-drops") {
+			// The verdict itself may be the first sample at the decay boundary.
+			gate.probation = vi.fn(fail)
+			await vi.advanceTimersByTimeAsync(1)
+		} else {
+			await vi.advanceTimersByTimeAsync(1)
+			await f.manager["applyProbation"]()
+			gate.probation = vi.fn(fail)
+		}
 		await f.manager["applyProbation"]()
 		const status = f.manager.getAllStatus()[0]!
 		expect(status.running).toBe(false)
 		expect(Date.parse(status.efficiency!.retryAt!) - Date.now()).toBe(
-			elapsed < 30_000 ? 600_000 : 300_000,
+			elapsed < resetAfter ? 600_000 : 300_000,
 		)
 	},
 )

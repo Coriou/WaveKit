@@ -137,6 +137,7 @@ export function createEfficiencyGate(
 	>()
 	let lastBudget = budgetCores()
 	const failures = new Set<string>()
+	const lateRetries = new Set<string>()
 	let cpu: number | null = null
 	/** Monotonic times of samples with CPU over the limit, oldest first. */
 	const highCpu: number[] = []
@@ -635,13 +636,22 @@ export function createEfficiencyGate(
 
 			// Graduation is sticky: a later discontinuity that discards coverage
 			// restarts only the placements still on probation.
-			for (const placement of running)
-				if (!graduated.has(placement.key) && graduates(placement, mono)) {
+			for (const placement of running) {
+				if (!graduated.has(placement.key) && graduates(placement, mono))
 					graduated.add(placement.key)
-					// A clean probation resets consecutive-failure backoff.
+				// Normal retries reset on graduation. Late-shed retries retain their
+				// doubling history until readmission + the 1,800,000 ms cap.
+				if (
+					gated.has(placement.key) &&
+					graduated.has(placement.key) &&
+					(!lateRetries.has(placement.key) ||
+						mono - admittedMono.get(placement.key)! >= EFFICIENCY_RETRY_MAX_MS)
+				) {
 					retries.delete(placement.key)
 					failures.delete(placement.key)
+					lateRetries.delete(placement.key)
 				}
+			}
 			const newest = new Map<
 				string,
 				{ placement: RunningPlacement; admitted: number }
@@ -724,6 +734,7 @@ export function createEfficiencyGate(
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			gated.delete(key)
+			if (detail === "late-drops") lateRetries.add(key)
 			const previous = retries.get(key)
 			const delay =
 				failures.delete(key) && previous
@@ -753,6 +764,7 @@ export function createEfficiencyGate(
 			gated.delete(key)
 			retries.delete(key)
 			failures.delete(key)
+			lateRetries.delete(key)
 		},
 		view(running, blocked, now) {
 			const mono = monoNow()
