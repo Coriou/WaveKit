@@ -379,8 +379,8 @@ describe("ScannerService live confirmation (WG11 req 6.5)", () => {
 				true as never,
 			)
 			const rows = vi
-				.spyOn(store, "applyEvidence" as never)
-				.mockReturnValue(undefined as never)
+				.spyOn(store, "applyEvidenceResult" as never)
+				.mockReturnValue({ change: null, accepted: true } as never)
 			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue("d_1" as never)
 			vi.spyOn(store, "get" as never).mockReturnValue({
 				confidence: "decoded",
@@ -458,9 +458,10 @@ describe("ScannerService live confirmation (WG11 req 6.5)", () => {
 			vi.spyOn(store, "appendObservationEvidence" as never).mockReturnValue(
 				true as never,
 			)
-			vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
-				undefined as never,
-			)
+			vi.spyOn(store, "applyEvidenceResult" as never).mockReturnValue({
+				change: null,
+				accepted: true,
+			} as never)
 			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue("d_1" as never)
 			vi.spyOn(store, "get" as never).mockReturnValue({
 				confidence: "decoded",
@@ -853,8 +854,8 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 				true as never,
 			)
 			const applied = vi
-				.spyOn(store, "applyEvidence" as never)
-				.mockReturnValue(undefined as never)
+				.spyOn(store, "applyEvidenceResult" as never)
+				.mockReturnValue({ change: null, accepted: true } as never)
 			// Closed at t = 0, kept 10 s in `recent`, then dropped by the tick at t = 10 001 ms.
 			let clock = 0
 			const svc = h.service as unknown as {
@@ -944,8 +945,8 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 					true as never,
 				)
 				const applied = vi
-					.spyOn(store, "applyEvidence" as never)
-					.mockReturnValue(undefined as never)
+					.spyOn(store, "applyEvidenceResult" as never)
+					.mockReturnValue({ change: null, accepted: true } as never)
 				expect(internals.findObservation("o_1")).toBeUndefined()
 				const pool = (
 					h.service as unknown as {
@@ -989,9 +990,10 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 					stamps.push(ev.at)
 					return true
 				}) as never)
-				vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
-					undefined as never,
-				)
+				vi.spyOn(store, "applyEvidenceResult" as never).mockReturnValue({
+					change: null,
+					accepted: true,
+				} as never)
 				vi.spyOn(store, "get" as never).mockReturnValue({
 					confidence: "decoded",
 				} as never)
@@ -1038,9 +1040,10 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 				vi.spyOn(store, "appendObservationEvidence" as never).mockReturnValue(
 					false as never,
 				)
-				vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
-					undefined as never,
-				)
+				vi.spyOn(store, "applyEvidenceResult" as never).mockReturnValue({
+					change: null,
+					accepted: true,
+				} as never)
 				vi.spyOn(store, "get" as never).mockReturnValue({
 					confidence: "decoded",
 				} as never)
@@ -1097,9 +1100,10 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 					return ev.at < ENDED
 				}) as never,
 			)
-			vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
-				undefined as never,
-			)
+			vi.spyOn(store, "applyEvidenceResult" as never).mockReturnValue({
+				change: null,
+				accepted: true,
+			} as never)
 			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue("d_1" as never)
 			vi.spyOn(store, "get" as never).mockReturnValue({
 				id: "d_1",
@@ -1256,9 +1260,10 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 					return ev.at < 5000
 				}) as never,
 			)
-			vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
-				undefined as never,
-			)
+			vi.spyOn(store, "applyEvidenceResult" as never).mockReturnValue({
+				change: null,
+				accepted: true,
+			} as never)
 			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue("d_1" as never)
 			vi.spyOn(store, "get" as never).mockReturnValue({
 				id: "d_1",
@@ -1521,9 +1526,10 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 			const append = vi
 				.spyOn(store, "appendObservationEvidence" as never)
 				.mockReturnValue(true as never)
-			vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
-				undefined as never,
-			)
+			vi.spyOn(store, "applyEvidenceResult" as never).mockReturnValue({
+				change: null,
+				accepted: true,
+			} as never)
 			internals.live.set("t1", live())
 			// Two full-hold misses: the discovery has no known protocol for planning.
 			internals.knownProtocols.recordMiss("d_1", "dmr")

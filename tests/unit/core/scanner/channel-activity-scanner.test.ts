@@ -163,8 +163,8 @@ describe("replay attribution to the discovery and the ranker", () => {
 			] as never)
 			vi.spyOn(store, "get" as never).mockReturnValue({ id: "d_ch" } as never)
 			const applied = vi
-				.spyOn(store, "applyEvidence" as never)
-				.mockReturnValue(undefined as never)
+				.spyOn(store, "applyEvidenceResult" as never)
+				.mockReturnValue({ change: null, accepted: true } as never)
 			h.service.applyReplayResult(pocsagResult())
 			expect(store["near"]).toHaveBeenCalledWith(RF, 6_250, "rtl")
 			expect(applied).toHaveBeenCalledWith(
@@ -191,8 +191,8 @@ describe("replay attribution to the discovery and the ranker", () => {
 				{ id: "b", protocol: "unknown", confidence: "detected" },
 			] as never)
 			const applied = vi
-				.spyOn(store, "applyEvidence" as never)
-				.mockReturnValue(undefined as never)
+				.spyOn(store, "applyEvidenceResult" as never)
+				.mockReturnValue({ change: null, accepted: true } as never)
 			h.service.applyReplayResult(pocsagResult())
 			expect(applied).not.toHaveBeenCalled()
 		} finally {
@@ -281,8 +281,8 @@ describe("review regressions (scanner side)", () => {
 				},
 			] as never)
 			const applied = vi
-				.spyOn(store, "applyEvidence" as never)
-				.mockReturnValue(undefined as never)
+				.spyOn(store, "applyEvidenceResult" as never)
+				.mockReturnValue({ change: null, accepted: true } as never)
 			h.service.applyReplayResult(pocsagResult())
 			expect(applied).not.toHaveBeenCalled()
 			// a single incompatible one is no attribution either
@@ -334,7 +334,7 @@ describe("review regressions (scanner side)", () => {
 		}
 	})
 
-	it("rejected evidence never refreshes the decode history", async () => {
+	it("rejected evidence never refreshes the decode history; an accepted repeat does", async () => {
 		const { h, internals, live } = setup()
 		await h.service.start()
 		try {
@@ -361,8 +361,8 @@ describe("review regressions (scanner side)", () => {
 				"appendObservationEvidence" as never,
 			).mockReturnValue(true as never)
 			const apply = vi
-				.spyOn(internals.store, "applyEvidence" as never)
-				.mockReturnValue("updated" as never)
+				.spyOn(internals.store, "applyEvidenceResult" as never)
+				.mockReturnValue({ change: "updated", accepted: true } as never)
 			const ev = (crcClean: boolean) => ({
 				protocol: "pocsag",
 				identity: { kind: "pocsag-capcode", value: "1234567" },
@@ -376,14 +376,19 @@ describe("review regressions (scanner side)", () => {
 			expect(svc.decodeTimes.get("d_1")).toBe(1_000_000)
 			clock += 3_600_000
 			// the store rejects it (CRC failure): no refresh
-			apply.mockReturnValue(null as never)
+			apply.mockReturnValue({ change: null, accepted: false } as never)
 			svc.applyEvidence(live(), ev(false))
 			expect(svc.decodeTimes.get("d_1")).toBe(1_000_000)
 			// rejected for another reason: no refresh either
 			svc.applyEvidence(live(), ev(true))
 			expect(svc.decodeTimes.get("d_1")).toBe(1_000_000)
 			// accepted again: refreshed
-			apply.mockReturnValue("updated" as never)
+			apply.mockReturnValue({ change: "updated", accepted: true } as never)
+			svc.applyEvidence(live(), ev(true))
+			expect(svc.decodeTimes.get("d_1")).toBe(clock)
+			// a valid repeat the record already holds (accepted, nothing changed): refreshed
+			clock += 3_600_000
+			apply.mockReturnValue({ change: null, accepted: true } as never)
 			svc.applyEvidence(live(), ev(true))
 			expect(svc.decodeTimes.get("d_1")).toBe(clock)
 		} finally {

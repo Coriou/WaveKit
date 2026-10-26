@@ -4231,7 +4231,11 @@ export class ScannerService extends EventEmitter {
 		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
 		const wasLiveDecoded = live.decoded
-		const change = this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
+		const applied = this.store.applyEvidenceResult(
+			discoveryId,
+			ev,
+			cap ? { cap } : {},
+		)
 		// The decode may have merged the discovery (identity key): follow the survivor.
 		const survivor = this.store.discoveryIdOf(live.observationId) ?? discoveryId
 		live.discoveryId = survivor
@@ -4239,8 +4243,9 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return accepted
 		live.decoded = true
-		// Only a decode this application accepted dates the decode history.
-		if (change !== null && ev.crcClean)
+		// Only a decode the store accepted dates the decode history; a valid repeat of what the
+		// record already holds (no change) refreshes it too.
+		if (applied.accepted && ev.crcClean)
 			this.noteDecoded(survivor, live.sourceId, ev.protocol)
 		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
@@ -5329,11 +5334,15 @@ export class ScannerService extends EventEmitter {
 				}
 			} else if (byFrequency !== null) {
 				if (this.store.get(byFrequency)) {
-					const change = this.store.applyEvidence(byFrequency, ev, {})
+					const { accepted } = this.store.applyEvidenceResult(
+						byFrequency,
+						ev,
+						{},
+					)
 					this.dirty = true
 					applied = true
 					if (
-						change !== null &&
+						accepted &&
 						ev.identity &&
 						ev.crcClean &&
 						this.store.get(byFrequency)?.confidence === "decoded"
@@ -5453,12 +5462,12 @@ export class ScannerService extends EventEmitter {
 		if (!this.store.get(discoveryId)) return false
 		// The observation's own rules decide (epoch, not after a retune/hop end): refused, nothing lands.
 		if (!this.store.appendObservationEvidence(observationId, ev)) return false
-		const change = this.store.applyEvidence(discoveryId, ev, {})
+		const { accepted } = this.store.applyEvidenceResult(discoveryId, ev, {})
 		this.dirty = true
 		const d = this.store.get(discoveryId)
 		const sourceId = Array.isArray(d?.sourceIds) ? d.sourceIds[0] : undefined
 		if (
-			change !== null &&
+			accepted &&
 			ev.identity &&
 			ev.crcClean &&
 			d?.confidence === "decoded" &&

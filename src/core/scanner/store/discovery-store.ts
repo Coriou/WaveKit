@@ -830,6 +830,8 @@ export class DiscoveryStore
 		centreHz: number,
 	) => Raster[]
 	private readonly discoveries = new Map<string, Discovery>()
+	/** Set by `applyEvidenceTo` when evidence passed its checks and was stored (see `applyEvidenceResult`). */
+	private evidenceAccepted = false
 	private readonly observationIndex = new Map<string, Observation>()
 	private readonly byDiscovery = new Map<string, Observation[]>()
 	private readonly bySource = new Map<string, Set<string>>()
@@ -1106,6 +1108,33 @@ export class DiscoveryStore
 		ev: DecodeEvidence,
 		opts: { cap?: ConfidenceCap } = {},
 	): StoreChange | null {
+		return this.applyEvidenceResult(discoveryId, ev, opts).change
+	}
+
+	/**
+	 * `applyEvidence` that also says whether the evidence was accepted: it passed every check and
+	 * landed on a record (this one or a co-channel twin), even when it changed nothing (`change`
+	 * null: a repeat of what the record already holds). Rejected evidence is `accepted: false`.
+	 */
+	applyEvidenceResult(
+		discoveryId: string,
+		ev: DecodeEvidence,
+		opts: { cap?: ConfidenceCap } = {},
+	): { change: StoreChange | null; accepted: boolean } {
+		this.evidenceAccepted = false
+		try {
+			const change = this.applyEvidenceTo(discoveryId, ev, opts)
+			return { change, accepted: change !== null || this.evidenceAccepted }
+		} finally {
+			this.evidenceAccepted = false
+		}
+	}
+
+	private applyEvidenceTo(
+		discoveryId: string,
+		ev: DecodeEvidence,
+		opts: { cap?: ConfidenceCap },
+	): StoreChange | null {
 		const d = this.discoveries.get(discoveryId)
 		if (d === undefined || !ev.crcClean) return null
 		if (
@@ -1154,6 +1183,7 @@ export class DiscoveryStore
 		const beforeRank = rank(d.confidence)
 		this.capInto(d, opts.cap)
 		this.decodeInto(d, ev)
+		this.evidenceAccepted = true
 		// Drop the cached proof after the identity and cap are stored, so the one
 		// change below is the only publication and readers see the capped label.
 		this.invalidateLabel(d.id)
@@ -2846,7 +2876,7 @@ export class DiscoveryStore
 					this.finish("evidence", move)
 				}
 			}
-			return this.applyEvidence(
+			return this.applyEvidenceTo(
 				existing.id,
 				ev,
 				cap === undefined ? {} : { cap },

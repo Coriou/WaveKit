@@ -19,7 +19,7 @@
  * 4. `decoderRegistry.register("multimon-ng", createMultimonDecoder, MULTIMON_CAPS)`.
  */
 import { EventEmitter } from "node:events"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -254,10 +254,14 @@ function build() {
 		channelActivity: ranker,
 	})
 	cleanups.push(async () => {
-		await scanner.stop()
-		await manager.destroy()
-		provenance.dispose()
-		ranker.dispose()
+		try {
+			await scanner.stop()
+			await manager.destroy()
+			provenance.dispose()
+			ranker.dispose()
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
 	})
 	const runningHz = (): number[] =>
 		(manager.getStatus("pager")?.placements ?? [])
