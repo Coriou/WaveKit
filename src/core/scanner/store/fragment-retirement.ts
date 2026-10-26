@@ -228,13 +228,20 @@ export function planFragments(input: FragmentPlanInput): FragmentPlan {
 			raster.spacingHz / 2,
 			FRAGMENT_PEER_SCAN_MAX + 2,
 		)
-		// The candidate and up to 32 others; one more found means some were left out.
+		// The candidate and up to 32 others; one more found means some were left out. A slot is
+		// reserved for the candidate, so the group never holds more than 33 records.
 		let cut = peers.length > FRAGMENT_PEER_SCAN_MAX + 1
 		if (cut) peers.length = FRAGMENT_PEER_SCAN_MAX + 1
+		if (!peers.some(p => p.id === c.id)) {
+			if (peers.length > FRAGMENT_PEER_SCAN_MAX) {
+				peers.length = FRAGMENT_PEER_SCAN_MAX
+				cut = true
+			}
+			peers.push(c)
+		}
 		const onChannel = peers.filter(
 			p => !owned.has(p.id) && channelIndex(p.centreHz, raster) === idx,
 		)
-		if (!onChannel.some(p => p.id === c.id)) onChannel.push(c)
 		if (onChannel.length < 2) continue
 		onChannel.sort(survivorCompare)
 		const s = onChannel[0]

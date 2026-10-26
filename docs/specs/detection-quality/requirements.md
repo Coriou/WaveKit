@@ -727,12 +727,13 @@ record when the group runs.
 `FRAGMENT_RETIRE_MAX_SIGHTINGS` = 2 sightings, confidence `activity` or `candidate`, and
 `lastSeenAt` at least `FRAGMENT_RETIRE_AGE_MS` = 72 h before now.
 
-10.5 **One pass reaches the fixpoint.** A merge moves the survivor's medians, so a pair a round
-refused may become compatible: after a round that examined every candidate and merged
-something, the pass plans again on the merged state, for at most `FRAGMENT_ROUNDS_MAX` = 4
-rounds and within the pass's group cap. Retirement (10.4) is then decided on the state
-after the merges, so a merge survivor that is still a stale low-sighting record retires in
-the same pass. A pass after a pass that hit no bound changes nothing and journals nothing.
+10.5 **One pass reaches the fixpoint.** Each round merges, then retires (10.4) on the
+merged state, so a merge survivor that is still a stale low-sighting record retires in the
+same round. A merge moves the survivor's medians, so a pair a round refused may become
+compatible, and a retirement may remove a survivor that refused the records beside it: so
+after a round that examined every candidate and merged or retired anything, the pass plans
+again, for at most `FRAGMENT_ROUNDS_MAX` = 4 rounds and within the pass's group and retire
+caps. A pass that ended on a round with no change and no cap reached is settled. A pass after a pass that hit no bound changes nothing and journals nothing.
 Total sightings over the live records plus the retired records equal the total before the
 pass.
 
@@ -740,14 +741,19 @@ pass.
 O(n) and the sorts O(n log n) for n records (10 000 by default); at most
 `FRAGMENT_SCAN_MAX` = 512 candidates are examined, in id order from an in-memory cursor
 that wraps; each visits at most `FRAGMENT_PEER_SCAN_MAX` + 2 = 34 nearest records (the
-candidate, 32 others, and one more to detect truncation): 17 408 visits and at most
+candidate, 32 others, and one more to detect truncation; a candidate outside the nearest
+33 takes the last slot, so a group holds at most 33 records): 17 408 visits and at most
 512 x 32 = 16 384 pair checks. At most 4 rounds, so 4 x n freezes and 69 632 visits. Per
 pass over all rounds: at most `FRAGMENT_GROUPS_MAX` = 32 groups of at most
 `FRAGMENT_GROUP_MAX` = 16 records, so 32 x 15 = 480 absorbs, each moving at most 256
 observations (122 880 moves); at most `FRAGMENT_RETIRE_MAX` = 256 retirements, oldest
-`lastSeenAt` first. Worst case for a 10 000-record store: examining every candidate takes
-ceil(10 000 / 512) = 20 passes; 5 000 two-record groups take ceil(5 000 / 32) = 157 passes
-(about 13 h at 5 minutes); retiring 10 000 records takes ceil(10 000 / 256) = 40 passes.
+`lastSeenAt` first. Progress per pass: the 512 is a maximum, not a guarantee, because a
+round stops examining candidates once 32 groups formed (5 000 consecutive two-record pairs
+cover about 64 records per pass). So the worst case is bounded by the caps: G mergeable
+groups take ceil(G / 32) passes (5 000 two-record groups in a 10 000-record store:
+ceil(5 000 / 32) = 157 passes, about 13 h at 5 minutes), R stale records ceil(R / 256)
+passes (10 000: 40 passes), and a store with nothing to merge is examined in
+ceil(10 000 / 512) = 20 passes.
 The group cap is kept at 32 so one maintenance call stays well under the 0.5 s Pi target of
 7.8; the measured fragment count (a few per cent of a store) clears in a few passes.
 

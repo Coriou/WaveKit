@@ -148,6 +148,52 @@ describe("fragment merge (DQ 10.2)", () => {
 })
 
 describe("finest grid and one-pass fixpoint (DQ 10.2, 10.5)", () => {
+	it("retires a refusing survivor and merges the records it refused in the same pass", () => {
+		const nowMs = T0 + 100 * HOUR
+		const { store, entries } = fragmentStore(
+			[
+				{
+					id: "d_a",
+					centreHz: ch(8),
+					count: 2,
+					obwHz: 4_000,
+					peakDbfs: 0,
+					firstSeenMs: T0 - 1000,
+					lastSeenMs: T0,
+				},
+				{
+					id: "d_b",
+					centreHz: ch(8) - 3_000,
+					count: 2,
+					obwHz: 8_000,
+					peakDbfs: -50,
+					firstSeenMs: nowMs - 2000,
+					lastSeenMs: nowMs - 1000,
+				},
+				{
+					id: "d_c",
+					centreHz: ch(8) + 3_000,
+					count: 2,
+					obwHz: 8_000,
+					peakDbfs: -50,
+					firstSeenMs: nowMs - 2000,
+					lastSeenMs: nowMs - 1000,
+				},
+			],
+			{ nowMs },
+		)
+		const probe: { plan?: FragmentPlan } = {}
+		const first = store.retireFragments(probe)
+		expect(first.retired).toEqual(["d_a"])
+		expect(first.absorbed).toBe(1)
+		expect(store.snapshot().discoveries).toHaveLength(1)
+		expect(probe.plan?.truncated).toBe(0)
+		const n = entries.length
+		const second = store.retireFragments()
+		expect(second).toEqual({ groups: 0, absorbed: 0, retired: [], merges: [] })
+		expect(entries.length).toBe(n)
+	})
+
 	it("never merges records on adjacent 8.33 kHz channels through a 25 kHz key", () => {
 		const airband = [
 			{ spacingHz: 25_000, firstChannelHz: 118_000_000 },
@@ -350,6 +396,45 @@ describe("planner bounds (DQ 10.6)", () => {
 		expect(next.scanned).toBe(FRAGMENT_SCAN_MAX)
 		// Wrapped: the one left over first, then from the start.
 		expect(next.nextCursor).toBe(id(FRAGMENT_SCAN_MAX - 2))
+	})
+
+	it("reserves a slot for a candidate outside the nearest records (at most 33 in a group)", () => {
+		// 40 unprotected neighbours nearer the channel centre than the candidate; every pair refused,
+		// so every member is checked once against the survivor.
+		const records = [
+			rec(0, { centreHz: ch(8) + 6_000, observationCount: 1 }),
+			...Array.from({ length: 40 }, (_, i) =>
+				rec(i + 1, { centreHz: ch(8) + (i % 50), observationCount: 5 }),
+			),
+		]
+		// `rasterOf` runs once per candidate examined: it closes the previous candidate's count.
+		const perCandidate: number[] = []
+		const checkedFirst = new Set<string>()
+		let checks = -1
+		const p = planFragments({
+			records,
+			rasterOf: () => {
+				if (checks >= 0) perCandidate.push(checks)
+				checks = 0
+				return RASTER
+			},
+			compatible: (_s, m) => {
+				checks += 1
+				if (perCandidate.length === 0) checkedFirst.add(m)
+				return false
+			},
+			nowMs: T0,
+		})
+		perCandidate.push(checks)
+		expect(p.groups).toEqual([])
+		// id(0) sorts first, so it is the first candidate: it is in its own group (checked against
+		// the survivor) together with exactly 32 others, never 33.
+		expect(checkedFirst.has(id(0))).toBe(true)
+		expect(perCandidate[0]).toBe(FRAGMENT_PEER_SCAN_MAX)
+		expect(Math.max(...perCandidate)).toBeLessThanOrEqual(
+			FRAGMENT_PEER_SCAN_MAX,
+		)
+		expect(p.truncated).toBe(p.scanned)
 	})
 
 	it("visits at most FRAGMENT_PEER_SCAN_MAX nearest records around a channel", () => {

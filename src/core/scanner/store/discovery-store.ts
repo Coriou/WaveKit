@@ -143,6 +143,7 @@ import type { CompatibilitySide } from "./compatibility.js"
 import { AbsorbedIdIndex } from "./absorbed-id-index.js"
 import {
 	FRAGMENT_GROUPS_MAX,
+	FRAGMENT_RETIRE_MAX,
 	FRAGMENT_ROUNDS_MAX,
 	planFragments,
 	planRetirement,
@@ -2031,7 +2032,12 @@ export class DiscoveryStore
 		let absorbed = 0
 		let truncated = 0
 		const merges: { survivor: string; mergedIds: string[] }[] = []
-		for (let round = 0; round < FRAGMENT_ROUNDS_MAX && budget > 0; round++) {
+		const retired: string[] = []
+		let settled = false
+		// 10.5: each round merges, then retires on the merged state. A merge can make a refused pair
+		// compatible and a retirement can remove a survivor that refused others, so the pass plans
+		// again after any progress, at most FRAGMENT_ROUNDS_MAX rounds.
+		for (let round = 0; round < FRAGMENT_ROUNDS_MAX; round++) {
 			const records: FragmentRecord[] = []
 			for (const d of this.discoveries.values())
 				records.push(this.fragmentOf(d))
@@ -2051,7 +2057,7 @@ export class DiscoveryStore
 				},
 				nowMs: this.now(),
 				cursor,
-				groupsMax: budget,
+				groupsMax: Math.max(0, budget),
 			})
 			if (round === 0) this.fragmentCursor = plan.nextCursor
 			truncated += plan.truncated
@@ -2077,25 +2083,35 @@ export class DiscoveryStore
 				}
 				this.finish("rekey", op)
 			}
+			// 10.4: retirement on the state after this round's merges (re-frozen, O(n)).
+			let retiredNow = 0
+			const room = FRAGMENT_RETIRE_MAX - retired.length
+			if (room > 0) {
+				const after: FragmentRecord[] = []
+				for (const d of this.discoveries.values())
+					after.push(this.fragmentOf(d))
+				const op = newOp()
+				for (const id of planRetirement(after, this.now()).slice(0, room)) {
+					const d = this.discoveries.get(id)
+					if (d === undefined || this.fragmentProtected(d)) continue
+					retired.push(d.id)
+					retiredNow += 1
+					this.deleteInto(op, d)
+				}
+				this.finish("evict", op)
+			}
 			if (probe) probe.plan = { ...plan, truncated }
-			// Re-plan only after a round that saw every candidate and merged something.
-			if (plan.groups.length === 0 || plan.nextCursor !== undefined) break
-			// The group budget ran out with work possibly left: a bound was hit.
-			if (budget <= 0 && probe?.plan) probe.plan.truncated += 1
+			// Settled: a round that saw every candidate and changed nothing.
+			if (plan.groups.length === 0 && retiredNow === 0) {
+				// (With the group budget spent, merges may be left: not settled.)
+				settled = plan.nextCursor === undefined && budget > 0
+				break
+			}
+			// A scan cut short by the candidate cap: the next pass continues from the cursor.
+			if (plan.nextCursor !== undefined) break
 		}
-		// 10.4, 10.5: retirement is decided on the state after this pass's merges (re-frozen, O(n)),
-		// so a stale survivor retires now rather than at the next pass.
-		const after: FragmentRecord[] = []
-		for (const d of this.discoveries.values()) after.push(this.fragmentOf(d))
-		const retired: string[] = []
-		const op = newOp()
-		for (const id of planRetirement(after, this.now())) {
-			const d = this.discoveries.get(id)
-			if (d === undefined || this.fragmentProtected(d)) continue
-			retired.push(d.id)
-			this.deleteInto(op, d)
-		}
-		this.finish("evict", op)
+		// A bound was hit (round, group or retire cap): work may be left for the next pass.
+		if (!settled && probe?.plan) probe.plan.truncated += 1
 		return { groups, absorbed, retired, merges }
 	}
 
