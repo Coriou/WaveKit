@@ -512,9 +512,9 @@ come from the discovery's source with commanded or relay tuning trust. ACARS,
 VDL2 and LoRa output with a missing or zero frequency uses the actual channel
 placement (tuner centre plus channelizer offset), or the single configured target
 when unplaced. Multiple configured targets without a decoder frequency give no
-placement; a configured target is never a band default. Paging, DMR, APRS and
-rtl_433 ambient evidence also needs trusted tuning: it stops after an external
-SDR++ retune until the tuning is trusted again.
+placement; a configured target is never a band default. Ambient evidence from
+every decoder also needs trusted tuning: it stops after an external SDR++ retune
+until the tuning is trusted again.
 Malformed or out-of-channel frequencies prove nothing.
 
 An ambient identity needs two checksum-valid decodes at least two seconds apart
@@ -565,7 +565,8 @@ When reaching candidates belong to different discoveries, a channel fragment
 nested inside every other reaching track span takes precedence. Thus a merged
 wide track covering two ACARS channels yields to each channel's own fragment;
 without that fragment it receives the decode itself. A fragment on the other
-channel cannot contain the decode. ADS-B instead keeps nearest-wins: the
+channel does not reach the decode unless its measured occupied span already
+covers it. ADS-B instead keeps nearest-wins: the
 nearest reaching track is named, and tracks of different discoveries tied
 within 1 Hz of that distance receive nothing. Other point multi-discovery
 cases receive no decode. Point ambiguity is logged at most once
