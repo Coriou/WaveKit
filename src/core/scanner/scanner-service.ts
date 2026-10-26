@@ -5022,6 +5022,31 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Every replay trial outcome is remembered on the discovery (non-attempts ignored), resolved
+	 * after the evidence was applied: the observation's current discovery, else the stored one.
+	 */
+	private rememberReplayTrials(
+		result: IqReplayResult,
+		live: LiveObservation | undefined,
+		fallback: string | null,
+	): void {
+		const discoveryId =
+			live?.discoveryId ??
+			(result.observationId
+				? this.store.discoveryIdOf(result.observationId)
+				: undefined) ??
+			fallback
+		if (!discoveryId) return
+		for (const t of result.trials)
+			this.trialMemory.record(
+				discoveryId,
+				t.protocol,
+				t.mode !== undefined ? "analog-demod" : t.decoderType,
+				t.outcome,
+			)
+	}
+
 	/** the discovery's remembered replay trial outcomes (internal; no DTO field yet). */
 	trialMemoryOf(discoveryId: string): readonly TrialMemoryEntry[] {
 		return this.trialMemory.view(discoveryId)
@@ -5059,15 +5084,6 @@ export class ScannerService extends EventEmitter {
 				? this.store.discoveryIdOf(result.observationId)
 				: undefined) ??
 			null
-		// every replay trial outcome is remembered on the discovery (non-attempts ignored).
-		if (discoveryId)
-			for (const t of result.trials)
-				this.trialMemory.record(
-					discoveryId,
-					t.protocol,
-					t.mode !== undefined ? "analog-demod" : t.decoderType,
-					t.outcome,
-				)
 		if (result.decoded) {
 			const ev: DecodeEvidence = {
 				protocol: result.decoded.protocol,
@@ -5102,10 +5118,13 @@ export class ScannerService extends EventEmitter {
 			// The memory counts a decode only where it was applied.
 			const counted = live?.discoveryId ?? discoveryId
 			if (applied && counted) this.knownProtocols.recordDecode(counted)
+			// resolved after the evidence: a decode may just have admitted a pending observation.
+			this.rememberReplayTrials(result, live, discoveryId)
 			this.replayPlans.delete(result.captureId)
 			this.replayOrders.delete(result.captureId)
 			return
 		}
+		this.rememberReplayTrials(result, live, discoveryId)
 		const ran = summary.unsuccessful
 		if (discoveryId)
 			for (const t of ran)

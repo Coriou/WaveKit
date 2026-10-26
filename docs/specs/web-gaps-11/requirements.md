@@ -303,12 +303,15 @@ comment.
 or `flex`) the classes `fsk2-wide`, `fsk4-12k5` and `analog-fm` give POCSAG and FLEX hypotheses
 ahead of DMR and every other digital-voice protocol. The scanner adds an EU UHF paging range,
 465.975 to 466.550 MHz on a 12.5 kHz raster (plus the 6.25 kHz split raster), listing POCSAG,
-FLEX and DMR. A two-tone FSK whose tones are 9 000 ± 1 500 Hz apart with a midpoint within
+FLEX and DMR, only where the built-in French paging plan (`pager-fr`: 466.025 to 466.230 MHz
+on a 12.5 kHz raster and the single channel 446.5325 MHz, POCSAG) does not already cover it, so
+no frequency lies in both. A two-tone FSK whose tones are 9 000 ± 1 500 Hz apart with a midpoint within
 1 500 Hz of the centre is `fsk2-wide`, never a digital-voice class.
-9.2 **Pager trials before the analog trial.** In a paging range the replay order is the known
-trial, the pager trials, the analog trial, then the rest, so an analog `heard` cannot end a
-POCSAG or FLEX trial as `not-needed`. This amends 6.4 (analog trial right after the known one)
-for paging ranges only.
+9.2 **Pager trials before the analog trial.** In a paging range the replay order is three fixed
+groups: the known digital and pager trials, then the analog trial (known or not), then the rest.
+An analog `heard` can therefore never end a POCSAG or FLEX trial as `not-needed`, whatever the
+memory says; memory reorders only inside a group, and pager trials are never left out for
+backoff. This amends 6.4 (analog trial right after the known one) for paging ranges only.
 9.3 **Extra replay trials behind a capability check.** The plan names rtl433 for ISM (a listed
 ISM range or an `ook-burst` track), acarsdec for ACARS, dumpvdl2 for VDL2, ais-catcher for AIS,
 the LoRa decoder for LoRa, and readsb within 1 089 to 1 091 MHz. A trial runs only when its
@@ -324,7 +327,11 @@ counters saturate at 1 000 000, the file is refused above 8 MiB.
 since, most recent first), the known trial, trials that ran without a failure streak, untried
 trials (each in prior order), then remembered failures out of backoff (fewest first). A failure
 after k consecutive failures backs off 60 s × 2^(k−1), at most 1 h; a trial still in backoff is
-left out unless every trial is. Trials that share one decoder run share their memory.
+left out unless every trial is. Trials that share one decoder run share their memory. Only a
+leading run of trials keeps the `known` flag (the replay queue runs flagged trials first), so the
+queue executes exactly this order; a known trial the order moved back runs as an ordinary trial.
+Outcomes are recorded against the discovery the observation has after the decode was applied,
+so the replay decode that admits a pending observation is remembered on the new discovery.
 9.6 **Capture before admission.** A gate-passed track the store has not admitted yet gets a
 detection capture too, at most 2 per source per rolling minute (of the 6 per source), so the first
 transmission can be replayed; a replay decode then admits it through the evidence path.

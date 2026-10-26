@@ -159,13 +159,27 @@ describe("planReplayTrials analog order", () => {
 						c.known !== null &&
 						c.priors[c.known] !== 0 &&
 						REPLAYABLE.has(c.known)
-					const knownPlanned = replayable || knownAnalog
+					const analogBehindPager =
+						knownAnalog &&
+						inPagerRange(c.priors) &&
+						out.some(
+							t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
+						)
+					const knownPlanned = replayable || (knownAnalog && !analogBehindPager)
 					if (knownPlanned)
 						expect(out[0]).toMatchObject({ protocol: c.known, known: true })
 					expect(out.filter(t => t.known)).toHaveLength(knownPlanned ? 1 : 0)
 					if (analogs.length === 1) {
 						const analog = analogs[0]!
-						if (knownAnalog) {
+						// In a paging range a known analog trial runs after the pager trials, unflagged.
+						const pagerTrials = out.filter(
+							t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
+						)
+						const pagerFirst = inPagerRange(c.priors) && pagerTrials.length > 0
+						if (knownAnalog && pagerFirst) {
+							expect(analog.known).toBe(false)
+							expect(out.indexOf(analog)).toBe(pagerTrials.length)
+						} else if (knownAnalog) {
 							expect(analog.known).toBe(true)
 							expect(out.indexOf(analog)).toBe(0)
 							expect(analog.protocol).toBe(c.known)

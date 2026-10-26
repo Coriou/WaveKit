@@ -79,10 +79,12 @@ function pagerTrack(obwHz: number, flat = true) {
 describe("pager classification (part 1)", () => {
 	it("the EU UHF paging overlay is the narrowest range at a pager channel and lists pocsag and flex", () => {
 		expect(PAGER_UHF_RANGE.endHz - PAGER_UHF_RANGE.startHz).toBe(575_000)
-		const p = pagerPriors()
+		// 466.4 MHz lies in the overlay part outside the French plan
+		const p = narrowestPriors(EU, 466_400_000)
 		expect(p.pocsag).toBe(1)
 		expect(p.flex).toBe(1)
 		expect(p.dmr).toBe(1)
+		expect(pagerPriors().pocsag).toBe(1)
 		expect(inPagerRange(p)).toBe(true)
 		expect(inPagerRange(narrowestPriors(EU, LAND_MOBILE_HZ))).toBe(false)
 		// edges inclusive, one hertz past is outside
@@ -97,6 +99,70 @@ describe("pager classification (part 1)", () => {
 			),
 		).toBe(false)
 	})
+
+	it("the French paging plan is in builtin.ts and the overlay never overlaps it", () => {
+		const fr = bandplansFor("EU").find(p => p.id === "pager-fr")
+		expect(fr?.ranges.map(r => [r.startHz, r.endHz])).toEqual([
+			[466_025_000, 466_230_000],
+			[446_526_250, 446_538_750],
+		])
+		const pagers = EU.filter(
+			r => r.bandplanId === "pager-fr" || r.bandplanId === "pager-uhf",
+		)
+		for (const a of pagers)
+			for (const b of pagers)
+				if (a !== b)
+					expect(a.endHz < b.startHz || b.endHz < a.startHz).toBe(true)
+		// overlay parts stop 1 Hz short of the plan's edges
+		expect(
+			EU.some(r => r.bandplanId === "pager-uhf" && r.endHz === 466_024_999),
+		).toBe(true)
+		expect(
+			EU.some(r => r.bandplanId === "pager-uhf" && r.startHz === 466_230_001),
+		).toBe(true)
+		// hiding pager-fr brings the whole overlay back
+		const hidden = withScannerOverlays(
+			bandplansFor("EU")
+				.filter(p => p.id !== "pager-fr")
+				.flatMap(p => p.ranges),
+		).filter(r => r.bandplanId === "pager-uhf")
+		expect(hidden.map(r => [r.startHz, r.endHz])).toEqual([
+			[PAGER_UHF_RANGE.startHz, PAGER_UHF_RANGE.endHz],
+		])
+		// 446.5325 MHz: the single pager channel, edges inclusive
+		expect(narrowestPriors(EU, 446_532_500).pocsag).toBe(1)
+		expect(narrowestPriors(EU, 446_538_750).pocsag).toBe(1)
+		expect(narrowestPriors(EU, 446_538_751).pocsag).not.toBe(1)
+	})
+
+	it.each([466_100_000, 446_532_500])(
+		"a synthetic POCSAG discovery at %i Hz plans POCSAG first",
+		hz => {
+			const track = makeTrack({
+				id: "p",
+				centreHz: hz,
+				startedAt: 0,
+				obwHz: 9000,
+				blocks: 8,
+			})
+			const order = planReplayTrials({
+				capture: { ...capture, rfHz: hz },
+				track,
+				knownProtocol: null,
+				priors: narrowestPriors(EU, hz),
+				narrowRaster: true,
+			}).map(t => t.protocol)
+			expect(order).toEqual([
+				"pocsag",
+				"analog-fm",
+				"dmr",
+				"aprs",
+				"dpmr",
+				"nxdn48",
+				"nxdn96",
+			])
+		},
+	)
 
 	it.each([
 		["fsk2-wide", 12_000, true],
@@ -350,8 +416,11 @@ function entry(over: Partial<TrialMemoryEntry>): TrialMemoryEntry {
 describe("trial memory order (part 3)", () => {
 	it("a synthetic POCSAG discovery: the trial order before and after", () => {
 		// Before (the frozen plans, no overlay, no memory): POCSAG is the last trial.
+		// the plans before WG16 SC: no French plan, no overlay
 		const legacy = narrowestPriors(
-			bandplansFor("EU").flatMap(p => p.ranges),
+			bandplansFor("EU")
+				.filter(p => p.id !== "pager-fr")
+				.flatMap(p => p.ranges),
 			PAGER_HZ,
 		)
 		expect(label(pocsagInput({ priors: legacy }))).toEqual([

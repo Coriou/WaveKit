@@ -24,7 +24,10 @@ export const LPD433_RANGE: Readonly<ScanRange> = {
  * origin for off-raster carriers. DMR is listed because land-mobile digital carriers share the
  * sub-band; the classifier still ranks the pager trials first (PAGER_RANGE_HYPOTHESES). It is
  * narrower than `uhf-land-mobile` (70 MHz), so `narrowestPriors` picks it inside its span. The
- * legacy blob in bandplan/builtin.ts is frozen, so the range is a scanner overlay like LPD433.
+ * range is a scanner overlay like LPD433. builtin.ts carries the French paging plan `pager-fr`
+ * (466.025–466.230 MHz, POCSAG); when the effective plans hold it, only the parts of this span it
+ * does not cover are added (465.975–466.025 MHz and 466.230–466.550 MHz, each exclusive of the
+ * shared edge), so no frequency is covered by both ranges.
  */
 export const PAGER_UHF_RANGE: Readonly<ScanRange> = {
 	startHz: 465_975_000,
@@ -36,6 +39,21 @@ export const PAGER_UHF_RANGE: Readonly<ScanRange> = {
 	obwHz: [12_000],
 	protocols: ["pocsag", "flex", "dmr"],
 	bandplanId: "pager-uhf",
+}
+
+/** The parts of PAGER_UHF_RANGE outside the given ranges' span ([start, end] inclusive Hz). */
+export function pagerOverlayParts(covered: readonly ScanRange[]): ScanRange[] {
+	let parts: ScanRange[] = [copyRange(PAGER_UHF_RANGE)]
+	for (const c of covered)
+		parts = parts.flatMap(p => {
+			if (c.endHz < p.startHz || c.startHz > p.endHz) return [p]
+			const out: ScanRange[] = []
+			if (c.startHz > p.startHz)
+				out.push({ ...copyRange(p), endHz: c.startHz - 1 })
+			if (c.endHz < p.endHz) out.push({ ...copyRange(p), startHz: c.endHz + 1 })
+			return out
+		})
+	return parts
 }
 
 /** EU-only plan ids: their presence says the effective plans are the EU variant. */
@@ -59,7 +77,9 @@ export function withScannerOverlays(ranges: readonly ScanRange[]): ScanRange[] {
 	if (
 		ranges.some(r => r.bandplanId !== undefined && EU_MARKERS.has(r.bandplanId))
 	)
-		out.push(copyRange(PAGER_UHF_RANGE))
+		out.push(
+			...pagerOverlayParts(ranges.filter(r => r.bandplanId === "pager-fr")),
+		)
 	if (ranges.some(r => r.bandplanId === "ism-433"))
 		out.push({
 			...LPD433_RANGE,

@@ -362,10 +362,13 @@ runtime stage copies it next to `wavekit-chan` and the verification step runs `w
 
 Requirements 9.1 to 9.6. All of it lives in `src/core/scanner/**`.
 
-- **Pager range.** `bandplan/builtin.ts` is a frozen legacy blob (the isolation tests pin it), so
-  the EU UHF paging range is a scanner overlay next to LPD433: `PAGER_UHF_RANGE` in
-  `classify/priors.ts`, added by `withScannerOverlays` when the effective plans hold an EU-only plan
-  (`ism-433` or `pmr446`). At 575 kHz wide it is the narrowest range at its frequencies, so
+- **Pager range.** `bandplan/builtin.ts` gains the French plan `pager-fr` (EU variant; Main's
+  request, with the isolation tests' pinned size and hash updated and `pagers` as its display
+  group in `src/core/bandplans/builtin-packs.ts`). The wider EU UHF paging span stays a scanner
+  overlay next to LPD433: `PAGER_UHF_RANGE` in `classify/priors.ts`, added by
+  `withScannerOverlays` when the effective plans hold an EU-only plan (`ism-433` or `pmr446`),
+  minus the span of any `pager-fr` range (`pagerOverlayParts`; the whole span when `pager-fr` is
+  hidden). At 575 kHz wide it is the narrowest range at its frequencies, so
   `narrowestPriors` gives POCSAG, FLEX and DMR 1 and the other specific protocols 0.25.
 - **Pager hypotheses.** `classHypotheses(cls, priors)` in `classify/classifier.ts` adds
   `PAGER_RANGE_HYPOTHESES` when `inPagerRange(priors)` (pocsag or flex prior at least 1):
@@ -376,13 +379,16 @@ Requirements 9.1 to 9.6. All of it lives in `src/core/scanner/**`.
 - **Replay plan.** `planReplayTrialsDetailed(input, replayInput)` in `replay-plan.ts` returns the
   trials and the skipped extras. `REPLAY_INPUT_DECODERS` (iq-capture-contract) is the capability
   set (dsd-fme, multimon-ng, direwolf) and also gates the replay transport. In a paging range the
-  candidates are stably regrouped known, pager, analog, rest. Then `orderTrialsByMemory` reorders
-  before the mode-key dedup and the bound of 8. Each candidate carries the protocols of every
+  candidates form three groups (known digital and pager, analog, rest), each ordered by
+  `orderTrialsByMemory` (the first with `keepBackoff`, the others with `allowEmpty`); elsewhere
+  one memory order. Then the `known` flag is kept only on the leading run, so the queue's
+  known-first partition cannot change the order, and the mode-key dedup and the bound of 8 apply. Each candidate carries the protocols of every
   candidate with the same mode key, so a sibling protocol cannot bring a backed-off run back.
 - **Trial memory.** `trial-memory.ts` (`TrialMemory`): a Map in least-recently-updated order,
   Zod-checked rows (`parseTrialMemory`), a 5 s debounced atomic write of
   `<scanner storage>/trial-memory.json`, a flush on stop, no write before the load. The service
-  records every `IqReplayResult` trial in `applyReplayResult`, forgets deleted, merged-away and
+  records every `IqReplayResult` trial in `applyReplayResult` (`rememberReplayTrials`, after the
+  evidence: live discovery, else the stored one, else the pre-evidence id), forgets deleted, merged-away and
   evicted discoveries, and passes `trialMemory` and `nowMs` in the plan input (optional fields of
   `IqReplayPlanInput`). `trialMemoryOf(id)` reads it; no DTO field yet.
 - **Pending capture.** `requestIqCapture` no longer needs a discovery when the track's gate passed;

@@ -24,6 +24,7 @@ import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import { IQ_REPLAY_QUEUE_HOLDER } from "../../../../src/core/iq-capture/replay-queue.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
+import { TrialMemory } from "../../../../src/core/scanner/trial-memory.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
 const noPassive = {
@@ -575,6 +576,50 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		} finally {
 			await h.service.stop()
 		}
+	})
+
+	// Review major 3: outcomes are remembered on the discovery the decode admitted, also on disk.
+	it("a pending observation's first replay decode is remembered on the discovery it creates", async () => {
+		const { h, internals, live } = setup()
+		await h.service.start()
+		const dir = (h.service as unknown as { storageDir: string }).storageDir
+		try {
+			const l = live({ discoveryId: null })
+			internals.live.set("t1", l)
+			vi.spyOn(
+				h.service as unknown as {
+					applyEvidence(l: LiveObservation, ev: unknown): boolean
+				},
+				"applyEvidence",
+			).mockImplementation((obs: LiveObservation) => {
+				obs.discoveryId = "d_new"
+				return true
+			})
+			h.service.applyReplayResult(
+				result({
+					trials: [
+						{
+							protocol: "pocsag",
+							decoderType: "multimon-ng",
+							known: false,
+							outcome: "decoded",
+						},
+					],
+					decoded: {
+						protocol: "pocsag",
+						identity: { kind: "pocsag-capcode", value: "1234567" },
+					},
+				}),
+			)
+			expect(
+				h.service.trialMemoryOf("d_new").map(e => [e.protocol, e.decoded]),
+			).toEqual([["pocsag", 1]])
+		} finally {
+			await h.service.stop()
+		}
+		const reloaded = new TrialMemory({ dir, now: () => 0 })
+		await reloaded.load()
+		expect(reloaded.view("d_new")[0]?.lastOutcome).toBe("decoded")
 	})
 
 	it("a decode on another epoch applies no evidence", async () => {

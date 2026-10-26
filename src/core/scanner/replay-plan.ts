@@ -299,22 +299,6 @@ export function planReplayTrialsDetailed(
 			known: input.knownProtocol === extra.protocol,
 		})
 	}
-	// In a paging range the pager trials run right after the known trial, ahead of the (not
-	// known) analog trial: an analog `heard` ends the later digital trials `not-needed`, which
-	// would skip POCSAG/FLEX. Order: known, pager trials, analog, the rest (each stable).
-	if (inPagerRange(input.priors)) {
-		const rank = (c: IqReplayTrial): number =>
-			c.known
-				? 0
-				: c.kind !== "analog" && familyOf(c.protocol) === "pager"
-					? 1
-					: c.kind === "analog"
-						? 2
-						: 3
-		const ranked = candidates.map((c, i) => ({ c, i, r: rank(c) }))
-		ranked.sort((x, y) => x.r - y.r || x.i - y.i)
-		candidates.splice(0, candidates.length, ...ranked.map(x => x.c))
-	}
 	// One decoder run per mode key (the dedup below): the memory of any protocol planned on the
 	// same run applies to every candidate of that run, so a backoff cannot be dodged by a sibling.
 	const runCovers = new Map<string, Set<string>>()
@@ -325,18 +309,58 @@ export function planReplayTrialsDetailed(
 		for (const p of c.mode.covers) set.add(p)
 		runCovers.set(k, set)
 	}
-	const ordered = orderTrialsByMemory(
-		candidates.map(trial => ({
-			trial,
-			protocol: trial.protocol,
-			decoder:
-				trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
-			known: trial.known,
-			covers: [...(runCovers.get(modeKey(trial.mode)) ?? [])],
-		})),
-		input.trialMemory,
-		input.nowMs ?? input.capture.capturedAtMs,
-	).map(x => x.trial)
+	const nowMs = input.nowMs ?? input.capture.capturedAtMs
+	const byMemory = (
+		group: readonly IqReplayTrial[],
+		opts: { keepBackoff?: boolean; allowEmpty?: boolean } = {},
+	): IqReplayTrial[] =>
+		orderTrialsByMemory(
+			group.map(trial => ({
+				trial,
+				protocol: trial.protocol,
+				decoder:
+					trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
+				known: trial.known,
+				covers: [...(runCovers.get(modeKey(trial.mode)) ?? [])],
+			})),
+			input.trialMemory,
+			nowMs,
+			opts,
+		).map(x => x.trial)
+	let ordered: IqReplayTrial[]
+	if (inPagerRange(input.priors)) {
+		// In a paging range the groups are fixed: the known digital and pager trials, then the
+		// analog trial (known or not), then the rest. An analog `decoded`/`heard` ends the later
+		// trials `not-needed`, so the pager trials always run before it, whatever the memory says.
+		// Memory reorders only inside a group (a remembered POCSAG success runs before a known
+		// DMR); the first group is never cut for backoff.
+		const group = (c: IqReplayTrial): number =>
+			c.kind === "analog"
+				? 1
+				: c.known || familyOf(c.protocol) === "pager"
+					? 0
+					: 2
+		const of = (g: number): IqReplayTrial[] =>
+			candidates.filter(c => group(c) === g)
+		const groups = [
+			byMemory(of(0), { keepBackoff: true }),
+			byMemory(of(1), { allowEmpty: true }),
+			byMemory(of(2), { allowEmpty: true }),
+		]
+		ordered = groups.flat()
+		if (ordered.length === 0) ordered = byMemory(candidates)
+	} else ordered = byMemory(candidates)
+	// The replay queue runs `known` trials first (it partitions them): only a leading run of
+	// known trials keeps the flag, so the queue executes exactly this order. A known trial the
+	// memory or the paging groups moved behind another trial is planned as an ordinary one.
+	let leading = true
+	ordered = ordered.map(t => {
+		if (!t.known) {
+			leading = false
+			return t
+		}
+		return leading ? t : { ...t, known: false }
+	})
 	return { trials: boundReplayTrials(ordered), skipped }
 }
 

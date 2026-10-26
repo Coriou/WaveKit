@@ -371,6 +371,12 @@ export function orderTrialsByMemory<T extends OrderableTrial>(
 	trials: readonly T[],
 	memory: readonly TrialMemoryEntry[] | null | undefined,
 	nowMs: number,
+	opts: {
+		/** Keep trials still in backoff (last) instead of dropping them (paging-range pager group). */
+		keepBackoff?: boolean
+		/** May return no trial when every one is in backoff (a sub-group of a larger plan). */
+		allowEmpty?: boolean
+	} = {},
 ): T[] {
 	if (!memory || memory.length === 0) return [...trials]
 	const byKey = new Map<string, TrialMemoryEntry>()
@@ -388,6 +394,9 @@ export function orderTrialsByMemory<T extends OrderableTrial>(
 		},
 	)
 	tiers.sort((a, b) => a.tier - b.tier || a.sub - b.sub || a.i - b.i)
+	if (opts.keepBackoff === true) return tiers.map(x => x.t)
 	const ready = tiers.filter(x => x.tier < 4)
-	return (ready.length > 0 ? ready : tiers).map(x => x.t)
+	return (ready.length > 0 || opts.allowEmpty === true ? ready : tiers).map(
+		x => x.t,
+	)
 }
