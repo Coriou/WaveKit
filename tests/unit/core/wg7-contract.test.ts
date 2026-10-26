@@ -51,7 +51,8 @@ type Same<A, B> =
 		: false
 const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 
-const AMBIENT = ["ais", "acars", "vdl2", "lora"] as const
+// ADS-B (readsb) joined the ambient-only protocols after WG7.
+const AMBIENT = ["ais", "acars", "vdl2", "lora", "adsb"] as const
 
 describe("WG7 contract", () => {
 	it("adds the ambient-only protocols and identity kinds everywhere", () => {
@@ -67,12 +68,13 @@ describe("WG7 contract", () => {
 			expect(PROTOCOL_DECODER[p], p).toBeNull()
 			expect(familyOf(p), p).toBe("packet")
 		}
-		expect(BANDPLAN_SCANNER_PROTOCOLS).toHaveLength(21)
+		expect(BANDPLAN_SCANNER_PROTOCOLS).toHaveLength(22)
 		expect(SCANNER_AMBIENT_DECODER_PROTOCOL).toEqual({
 			"ais-catcher": "ais",
 			acarsdec: "acars",
 			dumpvdl2: "vdl2",
 			"lora-meshtastic": "lora",
+			readsb: "adsb",
 		})
 		expect(SCANNER_AIS_CHANNEL_HZ).toEqual({ A: 161_975_000, B: 162_025_000 })
 		expect(SCANNER_AMBIENT_TARGET_TOLERANCE_HZ).toBe(1_000)

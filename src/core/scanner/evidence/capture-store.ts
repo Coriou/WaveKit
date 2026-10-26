@@ -56,6 +56,7 @@ const ExtrasSchema = z.object({
 				"acars-reg",
 				"vdl2-addr",
 				"lora-node",
+				"icao",
 			]),
 			value: z.string(),
 		})

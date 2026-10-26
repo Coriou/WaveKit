@@ -3755,7 +3755,16 @@ A decode counts only when all of these hold (fail closed):
 
 The identity is attached on its second clean decode within one engine epoch.
 Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
-(`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
+(`fromaddr`, else `icao`), `lora-node` (`from`) and `icao` (protocol `adsb`: a
+readsb aircraft address, 6 lowercase hex digits). A readsb decode lies at its
+placement's channel, else 1090 MHz, and reaches a track within 500 kHz of it. It
+counts only with a CRC-proven address: SBS and JSON lines (readsb writes them only
+from CRC-checked messages), or a Beast frame of DF11, DF17 or DF18 whose CRC-24
+remainder is 0; any other Beast format, a CRC failure, a `~` non-ICAO address or
+malformed data is no evidence. An unpaired readsb message is no evidence at all
+(no observation, discovery or activity), so only an accepted address reaches the
+scanner. The 2026-10-26 core adds the protocol `adsb` and the identity kind `icao`;
+a client with a closed protocol or identity map must add them. Without a running decoder
 of these types, or without tuning trust, identify behaves as before the 2026-10-16 core.
 
 **Narrow digital trials.** When the target lies in a band-plan range of the

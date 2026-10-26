@@ -130,6 +130,7 @@ export const PROTOCOL_DECODER: Readonly<
 	acars: null,
 	vdl2: null,
 	lora: null,
+	adsb: null,
 }
 
 const PROTOCOL_CLASS: Readonly<Record<ScannerProtocol, ScannerClass | null>> = {
@@ -154,6 +155,7 @@ const PROTOCOL_CLASS: Readonly<Record<ScannerProtocol, ScannerClass | null>> = {
 	acars: null,
 	vdl2: null,
 	lora: null,
+	adsb: null,
 }
 
 const ALL_PROTOCOLS = Object.keys(PROTOCOL_DECODER) as ScannerProtocol[]

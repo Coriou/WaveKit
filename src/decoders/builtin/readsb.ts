@@ -119,6 +119,31 @@ export interface AircraftData {
 	lastSeen: Date
 	/** Number of messages received */
 	messageCount: number
+	/**
+	 * Beast frames only: the Mode S downlink format and whether `icao` is CRC-proven. Only DF11,
+	 * DF17 and DF18 carry the address in clear with a CRC-24 parity that must leave remainder 0;
+	 * every other format XORs the address into its parity, so its bytes 1-3 are not an address
+	 * (`crcOk` false). Absent on SBS and JSON lines (readsb emits those from CRC-checked messages).
+	 */
+	modeS?: { df: number; crcOk: boolean } | undefined
+}
+
+/** Mode S CRC-24 generator (ICAO Annex 10 Vol IV, 3.1.2.3.3): x^24 + … , 0xFFF409. */
+const MODES_CRC_POLY = 0xfff409
+
+/** CRC-24 remainder of a whole Mode S frame (data and parity): 0 when the parity matches. */
+export function modeSCrcRemainder(frame: Uint8Array): number {
+	let crc = 0
+	for (const byte of frame) {
+		crc ^= byte << 16
+		for (let bit = 0; bit < 8; bit++) {
+			crc =
+				crc & 0x800000
+					? ((crc << 1) ^ MODES_CRC_POLY) & 0xffffff
+					: (crc << 1) & 0xffffff
+		}
+	}
+	return crc
 }
 
 /** Default ports for each output format */
@@ -720,11 +745,22 @@ export function parseBeastMessage(
 
 	// The ICAO address is in bytes 1-3 (after the DF byte)
 	const icao = message.subarray(1, 4).toString("hex").toUpperCase()
+	const df = (message[0] ?? 0) >> 3
+	const lengthOk =
+		(msgType === 0x32 && message.length === 7) ||
+		(msgType === 0x33 && message.length === 14)
+	// DF11 (short), DF17/DF18 (long) carry AA in clear: the address is proven only by a zero
+	// remainder (a DF11 with a non-zero interrogator code is not proven either).
+	const clearAddress =
+		(df === 11 && msgType === 0x32) ||
+		((df === 17 || df === 18) && msgType === 0x33)
+	const crcOk = lengthOk && clearAddress && modeSCrcRemainder(message) === 0
 
 	return {
 		icao,
 		lastSeen: new Date(),
 		messageCount: 1,
+		modeS: { df, crcOk },
 	}
 }
 

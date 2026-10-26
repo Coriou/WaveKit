@@ -154,6 +154,7 @@ const FAMILY: Readonly<Record<ScannerProtocol, ProtocolFamily>> = {
 	acars: "packet",
 	vdl2: "packet",
 	lora: "packet",
+	adsb: "packet",
 }
 
 export function familyOf(p: ScannerProtocol): ProtocolFamily {

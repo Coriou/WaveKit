@@ -10,6 +10,7 @@ import type {
 	DecoderInputType,
 } from "../../../decoders/types.js"
 import type { AmbientTarget } from "./ambient.js"
+import { ADSB_HZ } from "./confirm/readsb.js"
 
 export interface AmbientTargetDeps {
 	/** Source used when the config names none (SourceFanoutRouter.getDefaultSourceId). */
@@ -32,6 +33,7 @@ const NEW_TYPES = new Set([
 	"acarsdec",
 	"dumpvdl2",
 	"lora-meshtastic",
+	"readsb",
 ])
 
 /**
@@ -76,6 +78,8 @@ function newTypeTargets(
 	if (cfg.type === "ais-catcher") return Object.values(SCANNER_AIS_CHANNEL_HZ)
 	if (cfg.type === "acarsdec") return [...ACARS_DEFAULT_HZ]
 	if (cfg.type === "dumpvdl2") return [...VDL2_DEFAULT_HZ]
+	// readsb listens on the Mode S downlink only.
+	if (cfg.type === "readsb") return [ADSB_HZ]
 	return null
 }
 

@@ -70,6 +70,8 @@ export const rtl433OptionsSchema = z
 		frequencies: z.array(frequencyHz).max(RTL433_FREQUENCIES_MAX).optional(),
 		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
+		// Set by the scanner's replay transport: cf32 is a capture rtl_433 reads as it is.
+		inputIqFormat: z.enum(["cu8", "cf32"]).nullable().optional(),
 	})
 	.strict()
 
@@ -132,6 +134,16 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		secret: false,
 		effect: "restart",
 		description: "Centre of the input IQ, passed as -f (the manager sets it).",
+	},
+	{
+		key: "inputIqFormat",
+		type: "enum",
+		enumValues: ["cu8", "cf32"],
+		default: null,
+		secret: false,
+		effect: "restart",
+		description:
+			"IQ format on stdin; cf32 is a replayed scanner capture read as it is.",
 	},
 	{
 		key: "inputSampleRate",

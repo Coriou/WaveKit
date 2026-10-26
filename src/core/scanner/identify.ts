@@ -178,6 +178,7 @@ export const IDENTIFY_PROTOCOLS: readonly ScannerProtocol[] = [
 	"acars",
 	"vdl2",
 	"lora",
+	"adsb",
 ]
 
 /**
@@ -676,6 +677,7 @@ export function identifyDigitalProof(
 			"acarsdec",
 			"dumpvdl2",
 			"lora-meshtastic",
+			"readsb",
 			"live-audio",
 			"analog-demod",
 			null,

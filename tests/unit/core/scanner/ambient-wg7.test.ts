@@ -456,10 +456,10 @@ describe("AmbientEvidence WG7 new types", () => {
 
 	it("ignores a decoder whose type is not ambient", () => {
 		const r = rig({
-			add: d => d.add("adsb", "readsb"),
-			targets: { adsb: target(1_090_000_000) },
+			add: d => d.add("other", "not-a-decoder"),
+			targets: { other: target(1_090_000_000) },
 		})
-		twice(r, "adsb", ship("244123456"))
+		twice(r, "other", ship("244123456"))
 		expect(r.got).toEqual([])
 		expect(r.ambient.coverageAt("rtl", 1_090_000_000, 1_000)).toEqual([])
 	})

@@ -46,6 +46,8 @@ export type ScannerProtocol =
 	| "acars"
 	| "vdl2"
 	| "lora"
+	/** Mode S / ADS-B at 1090 MHz, named only from a running readsb. */
+	| "adsb"
 
 export type ScannerClass =
 	| "fsk4-12k5"
@@ -102,6 +104,8 @@ export type IdentityKind =
 	| "acars-reg"
 	| "vdl2-addr"
 	| "lora-node"
+	/** Mode S 24-bit ICAO aircraft address (6 lowercase hex digits). */
+	| "icao"
 
 export interface Identity {
 	kind: IdentityKind

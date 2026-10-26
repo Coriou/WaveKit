@@ -67,6 +67,7 @@ const KINDS: Readonly<Record<ScannerProtocol, IdentityKind | undefined>> = {
 	acars: "acars-reg",
 	vdl2: "vdl2-addr",
 	lora: "lora-node",
+	adsb: "icao",
 }
 const RAN = new Set([
 	"decoded",

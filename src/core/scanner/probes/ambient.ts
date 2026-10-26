@@ -44,6 +44,7 @@ import {
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
 import { parseMeshtastic } from "./confirm/meshtastic.js"
+import { parseReadsb } from "./confirm/readsb.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import {
 	channelPassbandOf,
@@ -184,6 +185,7 @@ const NEW_INTERPRETERS: ReadonlyMap<string, AmbientParser> = new Map<
 	["acarsdec", parseAcars],
 	["dumpvdl2", parseVdl2],
 	["lora-meshtastic", parseMeshtastic],
+	["readsb", parseReadsb],
 ])
 
 const AMBIENT_TYPES = new Set([
@@ -504,6 +506,9 @@ export class AmbientEvidence extends EventEmitter {
 			entry.pairCtx = null
 		}
 		for (const decode of decodes) {
+			// readsb hears every aircraft in range continuously: an unpaired Mode S message is no
+			// evidence (no observation, discovery or activity from it); only an accepted ICAO is.
+			if (parsed.protocol === "adsb" && !decode.identity) continue
 			const { hz, ...ev } = decode
 			const event: AmbientEvidenceEvent = {
 				decoderId,

@@ -62,6 +62,7 @@ const PROTOCOLS: Record<ScannerProtocol, true> = {
 	acars: true,
 	vdl2: true,
 	lora: true,
+	adsb: true,
 }
 
 const TRIAL_OUTCOMES: Record<ScannerTrialOutcome, true> = {

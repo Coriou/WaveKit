@@ -172,6 +172,7 @@ const PROTOCOL: Readonly<Record<ScannerProtocol, string>> = {
 	acars: "ACARS",
 	vdl2: "VDL2",
 	lora: "LoRa",
+	adsb: "ADS-B",
 	"digital-unknown": "digital",
 	carrier: "carrier",
 	unknown: "unknown",
@@ -357,6 +358,7 @@ export function identityText(id: Identity): string {
 		"acars-reg": "",
 		"vdl2-addr": "address",
 		"lora-node": "node",
+		icao: "ICAO",
 	}
 	return `${prefix[id.kind]} ${id.value}`.trim()
 }
