@@ -604,11 +604,15 @@ errors and `-RAS` output do not count. MBCC continuation bursts have no own
 CRC and never confirm CC (dsd-fme ed1d1d6 `dmr_dburst.c:115–119,627`);
 only the completed block is CRC-checked by `dmr_block.c`. MS prints CC before
 slot-type decoding (`dmr_ms.c:676–686`), so header confirmation also requires
-the closing DMR sync to print the same CC. `Sync: no sync` discards pending
+the closing DMR sync to print the same CC. Voice LC never borrows a CC from
+a still-pending MS header; its checked TG/SRC remain usable with CC unknown.
+`Sync: no sync` discards pending
 headers and CC context but does not split an active call by itself.
 Checked voice LC with paired TG/SRC but no known slot CC remains weak
 `digital-undecoded` evidence, with summary `DMR voice, TG/SRC verified, CC unknown`
 and a `DMR` tag. It cannot become decoded/proven without a CC identity.
+Later sync-only hints cannot replace this checked TG/SRC result; newer checked
+TG/SRC evidence may replace it.
 The interpreter retains at most 256 scoped TG/SRC voice-LC pairs, evicting oldest.
 CACH/burst FEC errors
 produce no evidence. Near the tuner centre, within the existing DC admission

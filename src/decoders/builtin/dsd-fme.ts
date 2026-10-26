@@ -1632,6 +1632,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					cc ??
 					(clean &&
 					voiceLc &&
+					// ed1d1d6 dmr_ms.c:676-686 prints the opening CC before
+					// slot-type decode. LC must not bypass the pending check.
+					!(this.linkDmrMs && this.pendingDmrLink) &&
 					previousCc &&
 					at - previousCc.at <= CALL_TIMEOUT_MS
 						? previousCc.cc

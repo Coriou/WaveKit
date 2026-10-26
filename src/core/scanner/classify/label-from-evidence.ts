@@ -521,7 +521,10 @@ function decide(e: ProofInput): Decision {
 	}
 	// Below tone and voice: a stray identity-less decode must not unprove an
 	// analog proof on the same observation.
-	const activity = newest(input.decodes)
+	// Checked TG/SRC outranks sync-only hints; recency breaks ties within
+	// the checked class so later IDLE bursts cannot erase voice provenance.
+	const activity =
+		newest(input.decodes.filter(d => d.tgSrcVerified)) ?? newest(input.decodes)
 	if (activity !== undefined)
 		return {
 			label: named(activity.protocol, "activity"),

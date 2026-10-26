@@ -205,7 +205,7 @@ describe("link events (spec § 6.4)", () => {
 			},
 			{
 				protocol: "dmr",
-				cc: 1,
+				// The MS header is still pending, so checked LC has no CC yet.
 				tg: "9",
 				src: "2060945",
 				slot: 1,

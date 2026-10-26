@@ -6922,8 +6922,8 @@ api:
 ### Scanner evidence and activity
 
 The existing scanner REST responses and `scanner:discovery` events carry optional
-`Discovery.proof` and `evidenceLevel` (`proven` for accepted decoded or analog proof; `weak` for
-sync-only digital or carrier evidence, even when a proof exists).
+`Discovery.proof` and `evidenceLevel` (`proven` for valid proofs, including carrier proofs;
+`weak` for dsd-fme sync-only and TG/SRC-verified CC-unknown proofs).
 Each observation also has its own optional `proof`. `ScannerProof` contains `kind`
 (`decoded`, `analog-tone`, `analog-voice`, `digital-undecoded`, `carrier-only`),
 `protocol`, `transport` (`live`, `replay`, `ambient`), `at`, `observationId`, optional

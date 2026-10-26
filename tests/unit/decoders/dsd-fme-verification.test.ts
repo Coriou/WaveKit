@@ -150,12 +150,42 @@ describe("dsd-fme content verification", () => {
 		expect(r.evidence.every(e => !e.identity)).toBe(true)
 	})
 
+	it.each([
+		"Sync: +DMR MS/DM MODE/MONO | Color Code=07 | IDLE",
+		"Sync: +DMR MS/DM MODE/MONO | Color Code=05 | IDLE",
+		"Sync: no sync",
+	])("never lends a pending MS header CC to checked LC before %s", closing => {
+		const r = rig()
+		for (let i = 0; i < 2; i++) {
+			const at = T0 + i * 311.7
+			r.feed("Sync: +DMR MS/DM MODE/MONO | Color Code=05 | VLC", at + 3.7)
+			r.feed(lc, at + 31.3)
+			expect(
+				r.links.filter(l => l.voiceLc).every(l => l.cc === undefined),
+			).toBe(true)
+			r.feed(closing, at + 69.1)
+		}
+		const voice = r.evidence.filter(e => e.voiceLc)
+		expect(voice.length).toBeGreaterThan(0)
+		for (const ev of voice) {
+			expect(ev).toMatchObject({
+				contentVerified: true,
+				metadata: { talkgroups: ["9"], sources: ["123"] },
+			})
+			expect(ev.identity).toBeUndefined()
+			expect(proof(ev)?.summary).toBe("DMR voice, TG/SRC verified, CC unknown")
+		}
+		if (!closing.includes("Color Code=05"))
+			expect(r.evidence.every(e => !e.identity)).toBe(true)
+	})
+
 	it("describes checked voice LC without a slot CC and preserves it on restore", () => {
 		const r = rig()
 		r.feed("Sync: +DMR [slot2] slot1 | Color Code=05 | IDLE", T0 + 3.7)
 		r.feed(lc, T0 + 31.3)
 		r.feed(lc, T0 + 93.7)
 		const ev = r.evidence.at(-1)!
+		r.feed("Sync: +DMR [slot2] slot1 | Color Code=05 | IDLE", T0 + 131.9)
 		expect(ev.identity).toBeUndefined()
 		expect(ev.voiceLc).toBe(true)
 		expect(proof(ev)).toMatchObject({
@@ -183,6 +213,9 @@ describe("dsd-fme content verification", () => {
 		)
 		store.appendObservationEvidence(obs.id, publicEv)
 		store.applyEvidence(id, publicEv)
+		const hint = { ...r.evidence.at(-1)!, epoch: obs.track.epoch }
+		store.appendObservationEvidence(obs.id, hint)
+		store.applyEvidence(id, hint)
 		store.restore(store.snapshot())
 		expect(store.get(id)).toMatchObject({
 			evidenceLevel: "weak",
@@ -688,6 +721,7 @@ describe("dsd-fme content verification", () => {
 				e =>
 					e.voiceLc &&
 					e.identity?.kind === "dmr-cc" &&
+					e.identity.value === "1" &&
 					e.metadata.talkgroups?.[0] === "9" &&
 					e.metadata.sources?.[0] === "2060945",
 			),

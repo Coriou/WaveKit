@@ -721,6 +721,28 @@ describe("deriveProof", () => {
 })
 
 describe("identity-less decode rank", () => {
+	it("keeps checked TG/SRC above later sync hints and prefers newer checked evidence", () => {
+		const checked: ProofDecodeInput = {
+			...decode("dmr", AT + 93.7),
+			tgSrcVerified: true,
+		}
+		const hint = { ...decode("dmr", AT + 131.9), unverifiedCc: 5 }
+		const input = proof({ decodes: [checked, hint] })
+		expect(deriveProof(input)).toMatchObject({
+			tgSrcVerified: true,
+			at: new Date(checked.at).toISOString(),
+			summary: "DMR voice, TG/SRC verified, CC unknown",
+		})
+		const newer = { ...checked, at: AT + 193.7, transport: "replay" as const }
+		expect(
+			deriveProof(proof({ decodes: [checked, newer, hint] })),
+		).toMatchObject({
+			tgSrcVerified: true,
+			at: new Date(newer.at).toISOString(),
+			transport: "replay",
+		})
+	})
+
 	it("ranks an identity-less decode below an analog tone and voice proof", () => {
 		const stray = decode("dmr", AT + 5, { talkgroup: "9" })
 		const toned = proof({

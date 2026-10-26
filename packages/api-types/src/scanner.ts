@@ -246,7 +246,7 @@ export interface ScannerProof {
 	encrypted: boolean
 	summary: string
 }
-/** WG12: `proven` requires decoded/analog proof; digital sync and carrier proof remain `weak`. */
+/** Valid proofs are `proven`, except dsd-fme sync-only and TG/SRC-verified CC-unknown proofs, which stay `weak`. */
 export type ScannerEvidenceLevel = "proven" | "weak"
 /**
  * WG12: the new discovery-list query fields only. `evidence` absent means both.

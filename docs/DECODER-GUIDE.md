@@ -657,6 +657,9 @@ identity. Only checked data bursts or checked target/source voice link control
 can participate in the scanner's two-match identity confirmation. CRC/FEC
 failures and `-RAS` output never count. MBCC has no own CRC
 (ed1d1d6 `dmr_dburst.c:115–119,627`), so it cannot verify a CC.
+MS voice LC does not borrow CC from a pending checked header: the opening CC
+precedes slot-type decoding (`dmr_ms.c:676–686`). Checked TG/SRC remain usable
+with CC unknown while that header awaits its closing-sync check.
 NXDN accepts only current CRC-checked ` RAN 03  FACCH2`/UDCH output
 (`nxdn_deperm.c:1390–1437`); failure omits RAN, and SACCH/CAC print cached RAN.
 Other protocols also require a known checked print format;
