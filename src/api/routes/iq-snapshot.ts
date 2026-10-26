@@ -120,6 +120,17 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 				let remaining = bytes
 				let finished = false
 				let started = false
+				let waitingForDrain = false
+				let drainTimer: ReturnType<typeof setTimeout> | undefined
+				const complete = () => {
+					cleanup()
+					reply.raw.end()
+				}
+				const drained = () => {
+					waitingForDrain = false
+					clearTimeout(drainTimer)
+					if (remaining === 0) complete()
+				}
 				const closed = () => abort()
 				const changed = (id: string) => {
 					if (id === sourceId) abort()
@@ -129,6 +140,7 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 				}
 				const onData = (chunk: Buffer) => {
 					if (finished) return
+					if (waitingForDrain) return abort()
 					if (!started) {
 						started = true
 						reply.raw.setHeader(
@@ -138,16 +150,28 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 					}
 					const output = chunk.subarray(0, remaining)
 					remaining -= output.length
-					if (!reply.raw.write(output)) return abort()
-					if (remaining === 0) {
-						cleanup()
-						reply.raw.end()
+					if (!reply.raw.write(output)) {
+						waitingForDrain = true
+						reply.raw.once("drain", drained)
+						// Allow 2 chunk durations: bytes / (sampleRate × 2 CU8 bytes)
+						// × 2 × 1000 ms, rounded up to at least 1 ms. The capture
+						// deadline still caps the entire request at 2 × seconds.
+						const drainMs = Math.max(
+							1,
+							Math.ceil((output.length * 2 * 1000) / (caps.sampleRate * 2)),
+						)
+						drainTimer = setTimeout(abort, drainMs)
+						drainTimer.unref()
+						return
 					}
+					if (remaining === 0) complete()
 				}
 				cleanup = () => {
 					if (finished) return
 					finished = true
 					clearTimeout(timer)
+					clearTimeout(drainTimer)
+					reply.raw.off("drain", drained)
 					active.delete(abort)
 					branch.off("data", onData)
 					fanout.off("backpressure", congestion)

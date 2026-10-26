@@ -74,10 +74,14 @@ unsigned 8-bit I and Q. Length is `round(seconds × sampleRate) × 2`, capped at
 `10 × 2,400,000 × 2 = 48,000,000` bytes; at higher rates the cap shortens the window.
 Only one snapshot can run per process; another receives 429 `IQ_SNAPSHOT_BUSY`.
 
-The fanout never waits for a snapshot client. The first refused client write or
-fanout congestion aborts the download and detaches the branch, retaining at most
-one source chunk. Source removal, disconnect, tuning/capability change, lease
-revocation or client closure also aborts it. Silent input times out after twice the
+The fanout never waits for a snapshot client. A write that fills the response
+buffer may drain before the next source chunk arrives. Otherwise the download
+aborts and detaches the branch, retaining at most one source chunk. The drain
+deadline is twice the written chunk duration: `ceil(bytes / (sampleRate × 2) ×
+2 × 1000)` milliseconds, at least 1 ms and subject to the overall capture deadline.
+Fanout congestion also aborts the download. Source removal, disconnect,
+tuning/capability change, lease revocation or client closure also aborts it.
+Silent input times out after twice the
 requested duration (at most 20 seconds). An aborted download may already have 200
 headers: clients must reject incomplete bodies against `Content-Length`.
 

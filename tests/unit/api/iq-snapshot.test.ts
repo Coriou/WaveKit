@@ -1,6 +1,7 @@
 import { EventEmitter, once } from "node:events"
 import { PassThrough } from "node:stream"
-import type { ServerResponse } from "node:http"
+import { request, type IncomingMessage, type ServerResponse } from "node:http"
+import { setImmediate as nextTurn } from "node:timers/promises"
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import {
@@ -41,6 +42,41 @@ const start = async (body = payload) => {
 	// Branch creation precedes the synchronous installation of its data listener.
 	await Promise.resolve()
 	return { pending }
+}
+// Real HTTP transport on an isolated ephemeral listener; only the source is fake.
+const startHttp = async (body = payload, paused = false) => {
+	const listening = app.server.address()
+	const address =
+		listening && typeof listening === "object"
+			? `http://127.0.0.1:${listening.port}`
+			: await app.listen({ host: "127.0.0.1", port: 0 })
+	const added = once(fanout, "branch-added")
+	const client = request(`${address}${url}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		agent: false,
+	})
+	const incoming = new Promise<IncomingMessage>((resolve, reject) => {
+		client.once("response", resolve)
+		client.once("error", reject)
+	})
+	const result = incoming.then(async message => {
+		let bytes = 0
+		message.on("data", (chunk: Buffer) => {
+			bytes += chunk.length
+		})
+		// An aborted download is a result to inspect, not an unhandled rejection.
+		message.on("error", () => {})
+		if (paused) message.pause()
+		await new Promise<void>(resolve => message.once("close", resolve))
+		return { bytes, complete: message.complete, status: message.statusCode }
+	})
+	// Attach rejection handling before a server abort can close the socket.
+	const settled = result.catch(() => undefined)
+	client.end(JSON.stringify(body))
+	await added
+	await Promise.resolve()
+	return { client, incoming, result: settled }
 }
 beforeEach(async () => {
 	rate = 1000
@@ -204,16 +240,94 @@ it.each([2_400_000, 3_200_000])(
 		expect(response!.getHeader("Content-Length")).toBe(IQ_SNAPSHOT_MAX_BYTES)
 	},
 )
-it("aborts and detaches on the first refused client write", async () => {
-	const { pending } = await start()
-	const rejected = pending.catch(() => undefined)
-	vi.spyOn(response!, "write").mockReturnValue(false)
-	input.write(Buffer.alloc(100))
-	expect(response!.destroyed).toBe(true)
-	expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
-	expect(release).toHaveBeenCalledOnce()
-	await rejected
+it.each([1, 2])(
+	"delivers %s real HTTP chunk(s) despite the writable high watermark",
+	async chunks => {
+		// 0.1 s × (chunks × 327,680 samples/s) × 2 = chunks × 65,536 bytes.
+		rate = chunks * 327_680
+		const download = await startHttp()
+		try {
+			for (let index = 0; index < chunks; index++) {
+				const drained = once(response!, "drain")
+				input.write(Buffer.alloc(65_536, 23))
+				expect(response!.writableNeedDrain).toBe(true)
+				expect(response!.destroyed).toBe(false)
+				await drained
+			}
+			expect(await download.result).toEqual({
+				bytes: chunks * 65_536,
+				complete: true,
+				status: 200,
+			})
+			expect(release).toHaveBeenCalledOnce()
+			expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		} finally {
+			download.client.destroy()
+		}
+	},
+)
+it("aborts a paused HTTP client on the next source chunk and admits a follow-up", async () => {
+	rate = 2_400_000
+	const download = await startHttp({ seconds: 10, format: "cu8" }, true)
+	try {
+		const drained = once(response!, "drain")
+		input.write(Buffer.alloc(65_536))
+		await drained
+		await download.incoming
+		// 8 MiB exceeds socket buffering even with the client no longer reading.
+		input.write(Buffer.alloc(8 * 1024 * 1024))
+		await nextTurn()
+		expect(response!.writableNeedDrain).toBe(true)
+		expect(response!.destroyed).toBe(false)
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(1)
+		input.write(Buffer.alloc(1))
+		expect(response!.destroyed).toBe(true)
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		expect(release).toHaveBeenCalledOnce()
+	} finally {
+		download.client.destroy()
+		const message = await download.incoming
+		message.destroy()
+		await download.result
+	}
+	// Reuse the same isolated listener with a normal reader and a fake source.
+	rate = 1000
+	const next = await startHttp()
+	try {
+		input.write(Buffer.alloc(200))
+		expect(await next.result).toEqual({
+			bytes: 200,
+			complete: true,
+			status: 200,
+		})
+	} finally {
+		next.client.destroy()
+	}
 })
+it.each([
+	[1000, 100, 100],
+	[10_000, 1, 1],
+])(
+	"aborts an undrained chunk at and past its deadline: rate %s, bytes %s, ms %s",
+	async (sampleRate, size, deadline) => {
+		rate = sampleRate
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { pending } = await start()
+		const rejected = pending.catch(() => undefined)
+		vi.spyOn(response!, "write").mockReturnValue(false)
+		input.write(Buffer.alloc(size))
+		// max(1, ceil(bytes / (rate × 2) × 2 × 1000)) tests the duration
+		// and the 1 ms minimum, immediately before, at, and past expiry.
+		await vi.advanceTimersByTimeAsync(deadline - 1)
+		expect(response!.destroyed).toBe(false)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(response!.destroyed).toBe(true)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		expect(release).toHaveBeenCalledOnce()
+		await rejected
+	},
+)
 it.each(["caps-changed", "disconnected", "invalidate"])(
 	"detaches on %s",
 	async reason => {
