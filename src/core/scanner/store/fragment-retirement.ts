@@ -5,9 +5,11 @@
  * ordinary delete).
  *
  * Bounds per pass (10.6), at the default `maxDiscoveries` 10 000:
+ * Per round (at most `FRAGMENT_ROUNDS_MAX` 4 rounds per pass; the group and retire caps are per
+ * pass):
  * - freezing and sorting: O(n log n) over n records (one centre sort per source, one id sort);
  * - at most `FRAGMENT_SCAN_MAX` 512 candidates examined, each visiting at most
- *   `FRAGMENT_PEER_SCAN_MAX` + 1 = 33 nearest entries: at most 16 896 entry visits and
+ *   `FRAGMENT_PEER_SCAN_MAX` + 2 = 34 nearest entries: at most 17 408 entry visits and
  *   512 x 32 = 16 384 pair checks;
  * - at most `FRAGMENT_GROUPS_MAX` 32 groups of at most 16 records: 32 x 15 = 480 absorbs, each
  *   moving at most 256 observations, so at most 122 880 observation moves;
@@ -22,8 +24,14 @@ import type { Raster } from "../../spectrum/types.js"
 export const FRAGMENT_SCAN_MAX = 512
 /** 10.6: nearest records visited around one candidate's channel centre. */
 export const FRAGMENT_PEER_SCAN_MAX = 32
-/** 10.6: channel groups merged per pass. */
+/** 10.6: channel groups merged per pass (over all rounds). */
 export const FRAGMENT_GROUPS_MAX = 32
+/**
+ * 10.5: planning rounds per pass. A merge moves the survivor's medians, which can make a pair the
+ * previous round refused compatible; the pass re-plans (only after a round that saw every
+ * candidate and merged something) until a round merges nothing or this many rounds ran.
+ */
+export const FRAGMENT_ROUNDS_MAX = 4
 /** 10.6: records per group (the survivor and at most 15 members). */
 export const FRAGMENT_GROUP_MAX = DQ_CONSOLIDATE_GROUP_MAX
 /** 10.6: retirements per pass. */
@@ -58,11 +66,19 @@ export interface FragmentPlanInput {
 	records: readonly FragmentRecord[]
 	/** The finest covering channel raster at a candidate, or null where no channel grid covers it. */
 	rasterOf: (r: FragmentRecord) => Raster | null
+	/**
+	 * 10.2: the finest channel raster at a record whatever its OBW (null: none). A pair merges only
+	 * when it shares a channel of the finer of the two, so a wide record keyed to a coarse grid
+	 * never absorbs a record on a neighbouring fine channel.
+	 */
+	fineRasterOf?: (r: FragmentRecord) => Raster | null
 	/** DQ 3.1 on the live records: false only when refused. */
 	compatible: (survivorId: string, memberId: string) => boolean
 	nowMs: number
 	/** Id after which this pass starts examining candidates (wraps). */
 	cursor?: string | undefined
+	/** Groups this round may still form (default `FRAGMENT_GROUPS_MAX`). */
+	groupsMax?: number
 }
 
 export interface FragmentGroup {
@@ -114,6 +130,39 @@ function channelIndex(hz: number, r: Raster): number {
 	return Math.round((hz - r.firstChannelHz) / r.spacingHz)
 }
 
+function sameFineChannel(
+	a: FragmentRecord,
+	b: FragmentRecord,
+	group: Raster,
+	fine: ((r: FragmentRecord) => Raster | null) | undefined,
+): boolean {
+	let f = group
+	for (const r of [fine?.(a) ?? null, fine?.(b) ?? null])
+		if (r !== null && r.spacingHz > 0 && r.spacingHz < f.spacingHz) f = r
+	return channelIndex(a.centreHz, f) === channelIndex(b.centreHz, f)
+}
+
+/**
+ * 10.4: the records that retire, oldest `lastSeenAt` first, at most `FRAGMENT_RETIRE_MAX`. The
+ * store calls it on the state after the pass's merges, so a merge survivor that is still a stale
+ * low-sighting record retires in the same pass (one pass reaches the fixpoint).
+ */
+export function planRetirement(
+	records: readonly FragmentRecord[],
+	nowMs: number,
+	skip?: ReadonlySet<string>,
+): string[] {
+	const stale = records.filter(
+		r => skip?.has(r.id) !== true && retirable(r, nowMs),
+	)
+	stale.sort(
+		(a, b) =>
+			compareText(a.lastSeenAt, b.lastSeenAt) || compareText(a.id, b.id),
+	)
+	if (stale.length > FRAGMENT_RETIRE_MAX) stale.length = FRAGMENT_RETIRE_MAX
+	return stale.map(r => r.id)
+}
+
 function familiesMeet(a: ProtocolFamily, b: ProtocolFamily): boolean {
 	return a === b || LOOSE.has(a) || LOOSE.has(b)
 }
@@ -161,7 +210,7 @@ export function planFragments(input: FragmentPlanInput): FragmentPlan {
 	let scanned = 0
 	let last: string | undefined
 	for (let k = 0; k < scanCount; k++) {
-		if (groups.length >= FRAGMENT_GROUPS_MAX) break
+		if (groups.length >= (input.groupsMax ?? FRAGMENT_GROUPS_MAX)) break
 		const c = candidates[(start + k) % candidates.length]
 		if (c === undefined) continue
 		scanned += 1
@@ -177,10 +226,11 @@ export function planFragments(input: FragmentPlanInput): FragmentPlan {
 			list,
 			channelHz,
 			raster.spacingHz / 2,
-			FRAGMENT_PEER_SCAN_MAX + 1,
+			FRAGMENT_PEER_SCAN_MAX + 2,
 		)
-		let cut = peers.length > FRAGMENT_PEER_SCAN_MAX
-		if (cut) peers.length = FRAGMENT_PEER_SCAN_MAX
+		// The candidate and up to 32 others; one more found means some were left out.
+		let cut = peers.length > FRAGMENT_PEER_SCAN_MAX + 1
+		if (cut) peers.length = FRAGMENT_PEER_SCAN_MAX + 1
 		const onChannel = peers.filter(
 			p => !owned.has(p.id) && channelIndex(p.centreHz, raster) === idx,
 		)
@@ -196,6 +246,7 @@ export function planFragments(input: FragmentPlanInput): FragmentPlan {
 			if (!(Number.isFinite(m.obwHz) && m.obwHz > 0 && m.obwHz <= maxObw))
 				continue
 			if (!familiesMeet(s.family, m.family)) continue
+			if (!sameFineChannel(s, m, raster, input.fineRasterOf)) continue
 			if (!input.compatible(s.id, m.id)) continue
 			if (members.length >= FRAGMENT_GROUP_MAX - 1) {
 				cut = true
@@ -210,18 +261,10 @@ export function planFragments(input: FragmentPlanInput): FragmentPlan {
 		groups.push({ survivor: s.id, members })
 	}
 
-	const stale = candidates.filter(
-		r => !owned.has(r.id) && retirable(r, input.nowMs),
-	)
-	stale.sort(
-		(a, b) =>
-			compareText(a.lastSeenAt, b.lastSeenAt) || compareText(a.id, b.id),
-	)
-	if (stale.length > FRAGMENT_RETIRE_MAX) stale.length = FRAGMENT_RETIRE_MAX
 	const wholeList = scanned >= candidates.length
 	return {
 		groups,
-		retire: stale.map(r => r.id),
+		retire: planRetirement(candidates, input.nowMs, owned),
 		scanned,
 		nextCursor: wholeList ? undefined : last,
 		truncated,

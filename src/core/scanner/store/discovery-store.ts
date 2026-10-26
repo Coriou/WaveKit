@@ -141,7 +141,12 @@ import type {
 } from "./consolidation.js"
 import type { CompatibilitySide } from "./compatibility.js"
 import { AbsorbedIdIndex } from "./absorbed-id-index.js"
-import { planFragments } from "./fragment-retirement.js"
+import {
+	FRAGMENT_GROUPS_MAX,
+	FRAGMENT_ROUNDS_MAX,
+	planFragments,
+	planRetirement,
+} from "./fragment-retirement.js"
 import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
@@ -2008,76 +2013,85 @@ export class DiscoveryStore
 		retired: string[]
 		merges: { survivor: string; mergedIds: string[] }[]
 	} {
-		const records: FragmentRecord[] = []
-		for (const d of this.discoveries.values()) records.push(this.fragmentOf(d))
-		const byId = new Map(records.map(r => [r.id, r] as const))
-		const plan = planFragments({
-			records,
-			rasterOf: r => {
-				const rasters = gridFor(
-					this.channelRastersFor(
-						r.sourceId,
-						r.centreHz + (this.corrections.get(r.sourceId) ?? 0),
-					),
-					r.obwHz,
-				)
-				let best: Raster | null = null
-				for (const x of rasters)
-					if (
-						x.spacingHz > 0 &&
-						(best === null || x.spacingHz < best.spacingHz)
-					)
-						best = x
-				return best
-			},
-			compatible: (a, b) => {
-				const x = this.discoveries.get(a)
-				const y = this.discoveries.get(b)
-				return (
-					x !== undefined &&
-					y !== undefined &&
-					!this.decodedConflict(x, y) &&
-					this.pairCompatible(x, y) !== false
-				)
-			},
-			nowMs: this.now(),
-			cursor: this.fragmentCursor,
-		})
-		this.fragmentCursor = plan.nextCursor
-		if (probe) probe.plan = plan
+		const finest = (rasters: readonly Raster[]): Raster | null => {
+			let best: Raster | null = null
+			for (const x of rasters)
+				if (x.spacingHz > 0 && (best === null || x.spacingHz < best.spacingHz))
+					best = x
+			return best
+		}
+		const at = (r: FragmentRecord): Raster[] =>
+			this.channelRastersFor(
+				r.sourceId,
+				r.centreHz + (this.corrections.get(r.sourceId) ?? 0),
+			)
+		const cursor = this.fragmentCursor
+		let budget = FRAGMENT_GROUPS_MAX
 		let groups = 0
 		let absorbed = 0
+		let truncated = 0
 		const merges: { survivor: string; mergedIds: string[] }[] = []
-		for (const g of plan.groups) {
-			const keep = this.discoveries.get(g.survivor)
-			if (keep === undefined) continue
-			const op = newOp()
-			for (const id of g.members) {
-				const drop = this.discoveries.get(id)
-				// 10.3: re-checked on the live record; a protected record is never merged away.
-				if (drop === undefined || drop.id === keep.id) continue
-				if (this.fragmentProtected(drop)) continue
-				this.absorb(op, keep, drop)
+		for (let round = 0; round < FRAGMENT_ROUNDS_MAX && budget > 0; round++) {
+			const records: FragmentRecord[] = []
+			for (const d of this.discoveries.values())
+				records.push(this.fragmentOf(d))
+			const plan = planFragments({
+				records,
+				rasterOf: r => finest(gridFor(at(r), r.obwHz)),
+				fineRasterOf: r => finest(at(r)),
+				compatible: (a, b) => {
+					const x = this.discoveries.get(a)
+					const y = this.discoveries.get(b)
+					return (
+						x !== undefined &&
+						y !== undefined &&
+						!this.decodedConflict(x, y) &&
+						this.pairCompatible(x, y) !== false
+					)
+				},
+				nowMs: this.now(),
+				cursor,
+				groupsMax: budget,
+			})
+			if (round === 0) this.fragmentCursor = plan.nextCursor
+			truncated += plan.truncated
+			budget -= plan.groups.length
+			for (const g of plan.groups) {
+				const keep = this.discoveries.get(g.survivor)
+				if (keep === undefined) continue
+				const op = newOp()
+				for (const id of g.members) {
+					const drop = this.discoveries.get(id)
+					// 10.3: re-checked on the live record; a protected record is never merged away.
+					if (drop === undefined || drop.id === keep.id) continue
+					if (this.fragmentProtected(drop)) continue
+					this.absorb(op, keep, drop)
+				}
+				if (op.merged.length > 0) {
+					groups += 1
+					absorbed += op.merged.length
+					merges.push({
+						survivor: keep.id,
+						mergedIds: op.merged.map(([, drop]) => drop).sort(compareText),
+					})
+				}
+				this.finish("rekey", op)
 			}
-			if (op.merged.length > 0) {
-				groups += 1
-				absorbed += op.merged.length
-				merges.push({
-					survivor: keep.id,
-					mergedIds: op.merged.map(([, drop]) => drop).sort(compareText),
-				})
-			}
-			this.finish("rekey", op)
+			if (probe) probe.plan = { ...plan, truncated }
+			// Re-plan only after a round that saw every candidate and merged something.
+			if (plan.groups.length === 0 || plan.nextCursor !== undefined) break
+			// The group budget ran out with work possibly left: a bound was hit.
+			if (budget <= 0 && probe?.plan) probe.plan.truncated += 1
 		}
+		// 10.4, 10.5: retirement is decided on the state after this pass's merges (re-frozen, O(n)),
+		// so a stale survivor retires now rather than at the next pass.
+		const after: FragmentRecord[] = []
+		for (const d of this.discoveries.values()) after.push(this.fragmentOf(d))
 		const retired: string[] = []
 		const op = newOp()
-		for (const id of plan.retire) {
+		for (const id of planRetirement(after, this.now())) {
 			const d = this.discoveries.get(id)
-			const frozen = byId.get(id)
-			if (d === undefined || frozen === undefined) continue
-			// Unchanged since freezing (a merge above never touches a retirement candidate).
-			if (d.observationCount !== frozen.observationCount) continue
-			if (this.fragmentProtected(d)) continue
+			if (d === undefined || this.fragmentProtected(d)) continue
 			retired.push(d.id)
 			this.deleteInto(op, d)
 		}

@@ -710,7 +710,10 @@ raster channel is the same one (`c` included). The survivor is the group's first
 the order: operator state, then protected, then most sightings, then earliest
 `firstSeenAt`, then smaller id. Members are the group's other fragment candidates whose
 median OBW is finite, positive and at most 2 spacings, whose association family equals the
-survivor's or either is `unknown` or `carrier`, that are not decoded as another protocol
+survivor's or either is `unknown` or `carrier`, that lie on the same channel as the
+survivor on the finest channel raster covering either of the two (whatever their OBW, so a
+20 kHz record keyed to a 25 kHz channel never absorbs a record on a neighbouring 8.33 kHz
+channel), that are not decoded as another protocol
 (9.5) and that 3.1 does not refuse (undecided joins). Each member is absorbed with `absorb`
 (observations, `observationCount`, `airtimeMs`, first/last seen, metadata, evidence moved;
 the absorbed id recorded in the absorbed-id index and adopted as an alias). A survivor may
@@ -724,18 +727,29 @@ record when the group runs.
 `FRAGMENT_RETIRE_MAX_SIGHTINGS` = 2 sightings, confidence `activity` or `candidate`, and
 `lastSeenAt` at least `FRAGMENT_RETIRE_AGE_MS` = 72 h before now.
 
-10.5 **Idempotent.** A pass over the result of a pass that hit no bound changes nothing and
-journals nothing. Total sightings over the live records plus the retired records equal the
-total before the pass.
+10.5 **One pass reaches the fixpoint.** A merge moves the survivor's medians, so a pair a round
+refused may become compatible: after a round that examined every candidate and merged
+something, the pass plans again on the merged state, for at most `FRAGMENT_ROUNDS_MAX` = 4
+rounds and within the pass's group cap. Retirement (10.4) is then decided on the state
+after the merges, so a merge survivor that is still a stale low-sighting record retires in
+the same pass. A pass after a pass that hit no bound changes nothing and journals nothing.
+Total sightings over the live records plus the retired records equal the total before the
+pass.
 
-10.6 **Bounds per pass**, run on the 5-minute maintenance cadence. At most
+10.6 **Bounds per pass**, run on the 5-minute maintenance cadence. Per round: freezing is
+O(n) and the sorts O(n log n) for n records (10 000 by default); at most
 `FRAGMENT_SCAN_MAX` = 512 candidates are examined, in id order from an in-memory cursor
-that wraps; each visits at most `FRAGMENT_PEER_SCAN_MAX` + 1 = 33 nearest records (16 896
-visits, at most 512 x 32 = 16 384 pair checks). At most `FRAGMENT_GROUPS_MAX` = 32 groups of
-at most `FRAGMENT_GROUP_MAX` = 16 records are merged: 32 x 15 = 480 absorbs, each moving at
-most 256 observations (122 880 moves). At most `FRAGMENT_RETIRE_MAX` = 256 records retire,
-oldest `lastSeenAt` first. Freezing is O(n) and the sorts O(n log n) for n records (10 000
-by default). A store of 10 000 candidates is examined in 20 passes.
+that wraps; each visits at most `FRAGMENT_PEER_SCAN_MAX` + 2 = 34 nearest records (the
+candidate, 32 others, and one more to detect truncation): 17 408 visits and at most
+512 x 32 = 16 384 pair checks. At most 4 rounds, so 4 x n freezes and 69 632 visits. Per
+pass over all rounds: at most `FRAGMENT_GROUPS_MAX` = 32 groups of at most
+`FRAGMENT_GROUP_MAX` = 16 records, so 32 x 15 = 480 absorbs, each moving at most 256
+observations (122 880 moves); at most `FRAGMENT_RETIRE_MAX` = 256 retirements, oldest
+`lastSeenAt` first. Worst case for a 10 000-record store: examining every candidate takes
+ceil(10 000 / 512) = 20 passes; 5 000 two-record groups take ceil(5 000 / 32) = 157 passes
+(about 13 h at 5 minutes); retiring 10 000 records takes ceil(10 000 / 256) = 40 passes.
+The group cap is kept at 32 so one maintenance call stays well under the 0.5 s Pi target of
+7.8; the measured fragment count (a few per cent of a store) clears in a few passes.
 
 10.7 **Migration.** Existing stores need no conversion: merges are journaled as `rekey`
 with the ordinary merge mutation and retirements as `evict`, so an older reader replays
@@ -745,7 +759,10 @@ them unchanged.
 fragments 2.5 to 4 kHz apart on one 12.5 kHz channel merge into the record with the most
 sightings; a labelled record is the survivor and a second labelled record stays; decoded
 and recording-holding records stay; other channels, no grid, a 30 kHz record and a 3.1
-level split stay apart; retirement at exactly 72 h and not 1 ms before; each bound at and
+level split stay apart; a 20 kHz record at 118.025 MHz and an 8 kHz record at
+118.016667 MHz under 8.33 and 25 kHz rasters stay apart; two stale single-sighting records
+on one channel merge and the survivor retires in one pass, the next pass journalling
+nothing; 32, 33 and 34 neighbours around a channel; retirement at exactly 72 h and not 1 ms before; each bound at and
 one past its limit; an old-reader replay of the journal.
 
 ## 8. Passive marginal cost guard

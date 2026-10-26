@@ -1,5 +1,6 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
+import type { FragmentPlan } from "../../../../src/core/scanner/store/fragment-retirement.js"
 import {
 	FRAGMENT_RETIRE_AGE_MS,
 	FRAGMENT_RETIRE_MAX_SIGHTINGS,
@@ -60,37 +61,62 @@ const isProtected = (s: FragmentSpec): boolean =>
 describe("fragment retirement properties", () => {
 	// Feature: detection-quality, Property 28: Fragment retirement keeps protected records and sightings
 	// Validates: Requirements 10.1, 10.2, 10.3, 10.4, 10.5
-	it("labelled and decoded records always survive; sightings are preserved; passes reach a fixpoint", () => {
+	it("labelled and decoded records always survive; sightings are preserved; one bound-free pass reaches the fixpoint", () => {
 		fc.assert(
 			fc.property(storeArb, specs => {
-				const { store } = fragmentStore(specs, { nowMs: T0 })
+				const { store, entries } = fragmentStore(specs, { nowMs: T0 })
 				const total = sightings(store)
-				let retiredSightings = 0
-				for (let pass = 0; pass < 4; pass++) {
-					const counts = new Map(
-						store
-							.snapshot()
-							.discoveries.map(d => [d.id, d.observationCount] as const),
-					)
-					const r = store.retireFragments()
-					for (const id of r.retired) {
-						const n = counts.get(id) ?? 0
-						expect(n).toBeLessThanOrEqual(FRAGMENT_RETIRE_MAX_SIGHTINGS)
-						retiredSightings += n
+				const counts = new Map(
+					store
+						.snapshot()
+						.discoveries.map(d => [d.id, d.observationCount] as const),
+				)
+				const probe: { plan?: FragmentPlan } = {}
+				const r = store.retireFragments(probe)
+				// Replay the merges in order (a later round may absorb an earlier survivor).
+				const cur = new Map(counts)
+				for (const m of r.merges) {
+					let n = cur.get(m.survivor) ?? 0
+					for (const id of m.mergedIds) {
+						n += cur.get(id) ?? 0
+						cur.delete(id)
 					}
-					for (const m of r.merges)
-						for (const id of m.mergedIds)
-							expect(store.survivorOf(id)).toBe(m.survivor)
+					cur.set(m.survivor, n)
+				}
+				// Each absorbed id resolves to its final owner while that owner is live; an owner
+				// retired in this pass takes its absorbed ids with it (like any delete).
+				const owner = new Map<string, string>()
+				for (const m of r.merges)
+					for (const id of m.mergedIds) owner.set(id, m.survivor)
+				const final = (id: string): string => {
+					let x = id
+					for (let o = owner.get(x); o !== undefined; o = owner.get(x)) x = o
+					return x
+				}
+				for (const id of owner.keys()) {
+					const f = final(id)
+					if (store.get(f) !== undefined) expect(store.survivorOf(id)).toBe(f)
+					else expect(r.retired).toContain(f)
+				}
+				let retiredSightings = 0
+				for (const id of r.retired) {
+					const n = cur.get(id) ?? 0
+					expect(n).toBeLessThanOrEqual(FRAGMENT_RETIRE_MAX_SIGHTINGS)
+					retiredSightings += n
 				}
 				for (const s of specs) {
 					if (isProtected(s)) expect(store.get(s.id), s.id).toBeDefined()
 				}
 				expect(sightings(store) + retiredSightings).toBe(total)
-				// Idempotent at the fixpoint.
+				// 10.5: a pass that hit no bound is the fixpoint: the next one changes and journals nothing.
+				// (At most 24 records: only the 16-record group cap can be reached; then run to it.)
+				while ((probe.plan?.truncated ?? 0) > 0) store.retireFragments(probe)
 				const snap = store.snapshot()
+				const journaled = entries.length
 				const again = store.retireFragments()
 				expect(again.groups + again.retired.length).toBe(0)
 				expect(store.snapshot()).toEqual(snap)
+				expect(entries.length).toBe(journaled)
 				// Nothing retired before the stated age.
 				for (const s of specs)
 					if (
@@ -101,5 +127,5 @@ describe("fragment retirement properties", () => {
 			}),
 			{ numRuns: 100 },
 		)
-	})
+	}, 60_000)
 })

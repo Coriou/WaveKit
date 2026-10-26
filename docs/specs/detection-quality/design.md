@@ -813,10 +813,10 @@ twice, inside 60 000 ms of the first banking, plus the live transmission's durat
 
 **Property 28: Fragment retirement keeps protected records and sightings.** For any store of
 fragments on a few 12.5 kHz channels (random offsets, counts, OBW, levels, ages and
-protection), after any number of passes every protected record (10.1) is live, the live
-sightings plus the retired sightings equal the total, every merged id resolves to its
-survivor, nothing unseen for less than 72 h is retired, and a further pass changes
-nothing. _Validates 10.1 to 10.5._
+protection), after one pass every protected record (10.1) is live, the live sightings plus
+the retired sightings equal the total, every merged id resolves to a live record or one
+retired in that pass, nothing unseen for less than 72 h is retired, and (once no bound is
+hit) the next pass changes and journals nothing. _Validates 10.1 to 10.5._
 
 All fast-check properties run with `numRuns: 100` or more and carry the trace comment
 (`// Feature: detection-quality, Property N: ...`).

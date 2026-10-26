@@ -147,6 +147,55 @@ describe("fragment merge (DQ 10.2)", () => {
 	})
 })
 
+describe("finest grid and one-pass fixpoint (DQ 10.2, 10.5)", () => {
+	it("never merges records on adjacent 8.33 kHz channels through a 25 kHz key", () => {
+		const airband = [
+			{ spacingHz: 25_000, firstChannelHz: 118_000_000 },
+			{ spacingHz: 25_000 / 3, firstChannelHz: 118_000_000 },
+		]
+		const { store } = fragmentStore(
+			[
+				{ id: "d_wide", centreHz: 118_025_000, obwHz: 20_000, count: 40 },
+				{ id: "d_fine", centreHz: 118_016_667, obwHz: 8_000, count: 5 },
+			],
+			{ rasters: airband },
+		)
+		expect(store.retireFragments().absorbed).toBe(0)
+		expect(store.get("d_fine")).toBeDefined()
+	})
+
+	it("retires a stale merge survivor in the same pass; the next pass journals nothing", () => {
+		const nowMs = T0 + 100 * HOUR
+		const { store, entries } = fragmentStore(
+			[
+				{
+					id: "d_a",
+					centreHz: ch(8),
+					count: 1,
+					firstSeenMs: T0,
+					lastSeenMs: T0,
+				},
+				{
+					id: "d_b",
+					centreHz: ch(8) + 3_000,
+					count: 1,
+					firstSeenMs: T0,
+					lastSeenMs: T0,
+				},
+			],
+			{ nowMs },
+		)
+		const first = store.retireFragments()
+		expect(first.absorbed).toBe(1)
+		expect(first.retired).toHaveLength(1)
+		expect(store.snapshot().discoveries).toEqual([])
+		const n = entries.length
+		const second = store.retireFragments()
+		expect(second).toEqual({ groups: 0, absorbed: 0, retired: [], merges: [] })
+		expect(entries.length).toBe(n)
+	})
+})
+
 describe("stale fragment retirement (DQ 10.4)", () => {
 	const stale = (over: Partial<FragmentSpec> = {}): FragmentSpec => ({
 		id: "d_stale",
@@ -216,12 +265,23 @@ describe("per-pass bounds (DQ 10.6)", () => {
 				count: 100 - i,
 			}))
 		const at = fragmentStore(specs(FRAGMENT_GROUP_MAX)).store
-		expect(at.retireFragments().absorbed).toBe(FRAGMENT_GROUP_MAX - 1)
+		const atProbe: { plan?: FragmentPlan } = {}
+		const one = at.retireFragments(atProbe)
+		expect(one.merges.map(m => m.mergedIds.length)).toEqual([
+			FRAGMENT_GROUP_MAX - 1,
+		])
+		expect(atProbe.plan?.truncated).toBe(0)
+		// One past: the first group is capped at 16 records; the leftover is folded into the
+		// survivor by the pass's next round (10.5), never into a group above the cap.
 		const past = fragmentStore(specs(FRAGMENT_GROUP_MAX + 1)).store
 		const probe: { plan?: FragmentPlan } = {}
-		expect(past.retireFragments(probe).absorbed).toBe(FRAGMENT_GROUP_MAX - 1)
+		const r = past.retireFragments(probe)
+		expect(r.merges.map(m => m.mergedIds.length)).toEqual([
+			FRAGMENT_GROUP_MAX - 1,
+			1,
+		])
 		expect(probe.plan?.truncated).toBe(1)
-		expect(past.retireFragments().absorbed).toBe(1)
+		expect(past.retireFragments().absorbed).toBe(0)
 	})
 
 	it("retires at most FRAGMENT_RETIRE_MAX records per pass, oldest first", () => {
@@ -293,17 +353,22 @@ describe("planner bounds (DQ 10.6)", () => {
 	})
 
 	it("visits at most FRAGMENT_PEER_SCAN_MAX nearest records around a channel", () => {
-		// Many protected records on one channel and one fragment: checks stay bounded.
-		const dense = (n: number): FragmentRecord[] => [
+		// Protected neighbours on one channel and one fragment: checks stay bounded.
+		const dense = (neighbours: number): FragmentRecord[] => [
 			rec(0, { centreHz: ch(8) + 5_000, observationCount: 1 }),
-			...Array.from({ length: n }, (_, i) =>
+			...Array.from({ length: neighbours }, (_, i) =>
 				rec(i + 1, { centreHz: ch(8) + (i % 50), evidence: true }),
 			),
 		]
-		const at = plan(dense(FRAGMENT_PEER_SCAN_MAX - 1))
+		// 32 neighbours: every one visited, nothing left out.
+		const at = plan(dense(FRAGMENT_PEER_SCAN_MAX))
 		expect(at.truncated).toBe(0)
-		const past = plan(dense(FRAGMENT_PEER_SCAN_MAX + 5))
-		expect(past.truncated).toBe(1)
-		expect(past.groups.map(g => g.members)).toEqual([[id(0)]])
+		expect(at.groups.map(g => g.members)).toEqual([[id(0)]])
+		// 33 and 34 neighbours: one more than the scan holds, so the candidate counts as truncated.
+		for (const n of [FRAGMENT_PEER_SCAN_MAX + 1, FRAGMENT_PEER_SCAN_MAX + 2]) {
+			const past = plan(dense(n))
+			expect(past.truncated, String(n)).toBe(1)
+			expect(past.groups.map(g => g.members)).toEqual([[id(0)]])
+		}
 	})
 })
