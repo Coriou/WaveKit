@@ -101,6 +101,37 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   (1.6, flags) drops it; the pending sweep drops runs idle for more than 2 500 ms. A sustained
   create consumes the bucket's pending entry like a threshold create.
 
+  1.4c **Short weak bursts need corroboration.** The 18 dB rule of 1.4 reads the best of the
+  slot, best covering slot and matched-window SNRs, a maximum over several noisy readings. An
+  observation of fewer than `DQ_SHORT_BURST_BLOCKS` = 20 blocks (1 000 ms at 50 ms
+  integration, so a burst that closed before the store's first re-ingest) therefore creates
+  on that rule only when its own track SNR is also at least `DQ_CREATE_TRACK_SNR_DB` = 15 dB
+  (the measured noise maximum); otherwise it is held as pending (1.4) like any weak sighting.
+  Non-finite blocks or track SNR never corroborate. Measured on a private band capture: a
+  weak periodic burst (track SNR 12 to 14 dB, best slot 16 to 18.2 dB) passed the gate once in
+  120 s and made a one-sighting record; with 1.4c it makes none, and the five real emitters
+  keep their records. Fixtures: a 19-block
+  burst at an 18 dB best slot creates with a 15 dB track SNR and not with 14.99 dB; at 20
+  blocks the threshold alone creates; the same weak burst seen three times creates (1.4).
+
+  1.4d **Push-to-talk airtime.** Separate transmissions are separate observations, so a
+  channel used in 2 to 10 s overs never forms a 3 s run (1.4b). A transmission that ends
+  without promoting, and whose run was sampled at least twice (it lived past its first
+  1 000 ms re-ingest), banks its duration (from its first gated snapshot) and its run's
+  samples on its channel (the pending bucket, nearest of b - 1, b, b + 1, so adjacent
+  8.33 kHz channels bank apart). A later sample on that channel promotes when the banked
+  airtime plus the live transmission's duration reaches `DQ_SUSTAIN_MS` = 3 000 ms, with at
+  least 3 samples whose median (banked and live, newest 8 banked) is at least 12 dB. An entry
+  lives `DQ_PTT_WINDOW_MS` = 60 000 ms from its first banking (three 2 s overs with 25 s gaps
+  fit), at most `DQ_PTT_PER_SOURCE` = 512 entries per source and `DQ_PTT_IDS_MAX` = 8 ids per
+  entry; memory only. A create there, a retune or source removal drops it; a retraction of
+  any banked id drops the whole entry. A duration that is non-finite, negative or longer than
+  the window counts 0. Fixtures: 1 500 ms banked plus a 1 500 ms over promotes and 1 ms less
+  does not; a median of 12 dB promotes and 11.99 dB does not; banked airtime counts
+  59 999 ms after banking and not 60 000 ms; a transmission sampled once banks nothing; three
+  synthetic 2 s AM voice overs at about 13.5 dB best-slot SNR make one record, one over none;
+  two adjacent 8.33 kHz channels taking turns make two records; 20 s of noise makes none.
+
   1.5 Pending expiry is a **fixed window anchored at the entry's first sample**: an entry is
   deleted `DQ_PENDING_WINDOW_MS` = 600 000 ms (10 min) after its first sample, whatever
   arrived since; samples are never re-anchored. An observation arriving after deletion starts
@@ -283,6 +314,18 @@ its median reaches 15 dB).
   1 Hz more keys to 25 kHz; inside a synthetic 100 kHz plateau of
   carriers every track's local SNR is under 6 dB and no record is created, while a lone
   carrier's is above.
+
+  1.17 **AM voice is not a bare carrier.** Inside a band plan range that lists `analog-am`
+  (prior at least 1), a track whose -6 dB width is a carrier's (`narrow`) but whose -20 dB OBW
+  lies in [`AM_VOICE_MIN_OBW_HZ` = 6 000, `AM_VOICE_MAX_OBW_HZ` = 12 500] Hz (speech
+  sidebands; an unmodulated Hann-windowed carrier reads at most 4 bins, 5.66 kHz at the
+  coarsest default bin), and that is longer than 4 blocks, is classified as AM voice: class
+  `unknown` (the shared class list has no AM class) with `analog-am` as the first hypothesis,
+  never `carrier`. In a range that lists AM but not FM (airband) a `peaked` track in the same
+  window counts too; a flat top (data) never does. Any malformed field keeps today's class.
+  An unmodulated carrier still classifies `carrier`. A weak AM carrier whose sidebands stay
+  under 20 dB below the carrier (OBW from on-bins, about 3 to 4 kHz) cannot be told apart
+  from a carrier and keeps that class.
 
 ## 2. One emitter, one discovery
 

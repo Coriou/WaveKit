@@ -14,6 +14,9 @@ import {
 	DQ_PENDING_PER_SOURCE,
 	DQ_PENDING_SAMPLES,
 	DQ_PENDING_WINDOW_MS,
+	DQ_PTT_IDS_MAX,
+	DQ_PTT_PER_SOURCE,
+	DQ_PTT_WINDOW_MS,
 	DQ_SUSTAIN_FLOOR_SNR_DB,
 	DQ_SUSTAIN_MAX_GAP_MS,
 	DQ_SUSTAIN_MEDIAN_SNR_DB,
@@ -77,11 +80,49 @@ export interface SustainRun {
 	snrs: number[]
 }
 
+/**
+ * Req 1.4d: one channel's push-to-talk airtime (memory only), keyed by pending bucket. Separate
+ * transmissions are separate observations (separate runs); their credited time adds up here.
+ */
+export interface AirtimeEntry {
+	firstAt: number
+	bucket: number
+	/** Credited time: the sum of the gaps between consecutive samples of each run. */
+	onMs: number
+	/** Newest last, at most `DQ_SUSTAIN_SAMPLES`. */
+	snrs: number[]
+	/** Run ids that added credit, insertion order, at most `DQ_PTT_IDS_MAX`. */
+	ids: Set<string>
+}
+
 /** Median of a non-empty list (mean of the two middles when even). */
 function median(xs: readonly number[]): number {
 	const s = [...xs].sort((a, b) => a - b)
 	const mid = s.length >> 1
 	return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2
+}
+
+/** Buckets b - 1, b, b + 1; the nearest bucket wins, ties to the older entry. */
+function nearestOf<E extends { firstAt: number }>(
+	map: Map<number, E>,
+	bucket: number,
+): E | undefined {
+	const same = map.get(bucket)
+	if (same !== undefined) return same
+	const lo = map.get(bucket - 1)
+	const hi = map.get(bucket + 1)
+	if (lo === undefined) return hi
+	if (hi === undefined) return lo
+	return hi.firstAt < lo.firstAt ? hi : lo
+}
+
+/**
+ * Req 1.4d: a transmission's airtime so far, from its first gated snapshot (`startedAt`) to
+ * `now`. Non-finite, negative or longer than the airtime window: 0 (the safe answer, no credit).
+ */
+export function transmissionMs(obs: ObservationInput, now: number): number {
+	const ms = now - obs.startedAt
+	return Number.isFinite(ms) && ms >= 0 && ms <= DQ_PTT_WINDOW_MS ? ms : 0
 }
 
 export class PendingAdmission {
@@ -90,14 +131,17 @@ export class PendingAdmission {
 	private readonly epochs = new Map<string, number>()
 	/** Req 1.4b: sustained runs per source, keyed by observation id, insertion order. */
 	private readonly runs = new Map<string, Map<string, SustainRun>>()
+	/** Req 1.4d: push-to-talk airtime per source, keyed by bucket, insertion (firstAt) order. */
+	private readonly airtime = new Map<string, Map<number, AirtimeEntry>>()
 
 	constructor(private readonly now: () => number) {}
 
 	/**
 	 * Req 1.4b: one sample of a weak observation's sustained run (finite centre and SNR, not
-	 * overload; the store checks). True = the run promotes now; it is deleted. A sample under
+	 * overload; the store checks). True = the run promotes now, or (req 1.4d) its channel's
+	 * banked airtime plus this run does; the run and that entry are deleted. A sample under
 	 * `DQ_SUSTAIN_FLOOR_SNR_DB`, or after a gap over `DQ_SUSTAIN_MAX_GAP_MS`, restarts the run;
-	 * a closing observation's run is dropped after this sample.
+	 * a closing observation's run is banked (1.4d) and dropped after this sample.
 	 */
 	sustained(obs: ObservationInput): boolean {
 		const { sourceId, id } = obs
@@ -106,6 +150,10 @@ export class PendingAdmission {
 		const snr = admissionSnrOf(obs.track)
 		let map = this.runs.get(sourceId)
 		if (!(snr >= DQ_SUSTAIN_FLOOR_SNR_DB)) {
+			// A transmission whose last sample fell under the floor still banks what it had (1.4d).
+			const ended = map?.get(id)
+			if (ended !== undefined && obs.endReason !== undefined)
+				this.bank(obs, now, ended)
 			if (map?.delete(id) === true && map.size === 0) this.runs.delete(sourceId)
 			return false
 		}
@@ -131,9 +179,12 @@ export class PendingAdmission {
 		run.snrs.push(snr)
 		if (run.snrs.length > DQ_SUSTAIN_SAMPLES) run.snrs.shift()
 		const promotes =
-			now - run.firstAt >= DQ_SUSTAIN_MS &&
-			run.snrs.length >= DQ_SUSTAIN_MIN_SAMPLES &&
-			median(run.snrs) >= DQ_SUSTAIN_MEDIAN_SNR_DB
+			(now - run.firstAt >= DQ_SUSTAIN_MS &&
+				run.snrs.length >= DQ_SUSTAIN_MIN_SAMPLES &&
+				median(run.snrs) >= DQ_SUSTAIN_MEDIAN_SNR_DB) ||
+			this.airtimePromotes(obs, now, run)
+		if (promotes) this.dropAirtime(sourceId, obs.track.centreHz)
+		else if (obs.endReason !== undefined) this.bank(obs, now, run)
 		if (promotes || obs.endReason !== undefined) {
 			map.delete(id)
 			if (map.size === 0) this.runs.delete(sourceId)
@@ -145,6 +196,94 @@ export class PendingAdmission {
 	dropRun(sourceId: string, id: string): void {
 		const runs = this.runs.get(sourceId)
 		if (runs?.delete(id) === true && runs.size === 0) this.runs.delete(sourceId)
+	}
+
+	/** Req 1.4d: the live airtime entry nearest the observation's centre (expired: deleted). */
+	private airtimeAt(
+		sourceId: string,
+		centreHz: number,
+		now: number,
+	): AirtimeEntry | undefined {
+		const map = this.airtime.get(sourceId)
+		if (map === undefined || !Number.isFinite(centreHz)) return undefined
+		const e = nearestOf(map, Math.round(centreHz / DQ_PENDING_BUCKET_HZ))
+		if (e === undefined || now < e.firstAt + DQ_PTT_WINDOW_MS) return e
+		map.delete(e.bucket)
+		if (map.size === 0) this.airtime.delete(sourceId)
+		return undefined
+	}
+
+	/**
+	 * Req 1.4d: does the channel's banked airtime plus this live run reach the sustained rule
+	 * (`DQ_SUSTAIN_MS` in total, `DQ_SUSTAIN_MIN_SAMPLES` samples, median of the banked and run
+	 * samples at least `DQ_SUSTAIN_MEDIAN_SNR_DB`)? Without banked airtime: false (1.4b decides).
+	 */
+	private airtimePromotes(
+		obs: ObservationInput,
+		now: number,
+		run: SustainRun,
+	): boolean {
+		const e = this.airtimeAt(obs.sourceId, obs.track.centreHz, now)
+		if (e === undefined || e.onMs <= 0) return false
+		const snrs = [...e.snrs, ...run.snrs]
+		return (
+			e.onMs + transmissionMs(obs, now) >= DQ_SUSTAIN_MS &&
+			snrs.length >= DQ_SUSTAIN_MIN_SAMPLES &&
+			median(snrs) >= DQ_SUSTAIN_MEDIAN_SNR_DB
+		)
+	}
+
+	/**
+	 * Req 1.4d: a transmission ended without promoting: its duration (`transmissionMs`) and its
+	 * run's samples join its channel's airtime entry. Only a run sampled at least twice banks
+	 * (the store re-ingests 1 000 ms after an observation starts, so a flicker that closed sooner
+	 * banks nothing). The entry keeps the newest `DQ_SUSTAIN_SAMPLES` samples and
+	 * `DQ_PTT_IDS_MAX` ids.
+	 */
+	private bank(obs: ObservationInput, now: number, run: SustainRun): void {
+		const span = transmissionMs(obs, now)
+		const centre = obs.track.centreHz
+		if (run.snrs.length < 2 || !(span > 0) || !Number.isFinite(centre)) return
+		const { sourceId, id } = obs
+		let entry = this.airtimeAt(sourceId, centre, now)
+		let map = this.airtime.get(sourceId)
+		if (map === undefined) {
+			map = new Map()
+			this.airtime.set(sourceId, map)
+		}
+		if (entry === undefined) {
+			const bucket = Math.round(centre / DQ_PENDING_BUCKET_HZ)
+			if (map.has(bucket)) map.delete(bucket)
+			while (map.size >= DQ_PTT_PER_SOURCE) {
+				const oldest = map.keys().next()
+				if (oldest.done === true) break
+				map.delete(oldest.value)
+			}
+			entry = { firstAt: now, bucket, onMs: 0, snrs: [], ids: new Set() }
+			map.set(bucket, entry)
+		}
+		if (!entry.ids.has(id) && entry.ids.size >= DQ_PTT_IDS_MAX) {
+			const oldest = entry.ids.values().next()
+			if (oldest.done !== true) entry.ids.delete(oldest.value)
+		}
+		entry.ids.add(id)
+		entry.onMs += span
+		for (const x of run.snrs) entry.snrs.push(x)
+		while (entry.snrs.length > DQ_SUSTAIN_SAMPLES) entry.snrs.shift()
+	}
+
+	/** Req 1.4d: drops the airtime entry nearest `centreHz` (a create there consumed it). */
+	private dropAirtime(sourceId: string, centreHz: number): void {
+		const map = this.airtime.get(sourceId)
+		if (map === undefined || !Number.isFinite(centreHz)) return
+		const e = nearestOf(map, Math.round(centreHz / DQ_PENDING_BUCKET_HZ))
+		if (e !== undefined) map.delete(e.bucket)
+		if (map.size === 0) this.airtime.delete(sourceId)
+	}
+
+	/** Airtime entries held for a source (tests and bounds). */
+	airtimeEntries(sourceId: string): readonly Readonly<AirtimeEntry>[] {
+		return [...(this.airtime.get(sourceId)?.values() ?? [])]
 	}
 
 	/** One observation's run (tests and bounds). */
@@ -225,6 +364,13 @@ export class PendingAdmission {
 			}
 			if (map.size === 0) this.bySource.delete(sourceId)
 		}
+		for (const [sourceId, map] of this.airtime) {
+			for (const [bucket, e] of map) {
+				if (now < e.firstAt + DQ_PTT_WINDOW_MS) break
+				map.delete(bucket)
+			}
+			if (map.size === 0) this.airtime.delete(sourceId)
+		}
 	}
 
 	/**
@@ -233,6 +379,13 @@ export class PendingAdmission {
 	 */
 	forget(sourceId: string, id: string): void {
 		this.dropRun(sourceId, id)
+		// Req 1.4d: a retracted run's credit cannot be told apart from the rest: the safe answer
+		// drops the whole channel entry.
+		const air = this.airtime.get(sourceId)
+		if (air !== undefined) {
+			for (const [bucket, e] of air) if (e.ids.has(id)) air.delete(bucket)
+			if (air.size === 0) this.airtime.delete(sourceId)
+		}
 		const map = this.bySource.get(sourceId)
 		if (map === undefined) return
 		for (const [bucket, e] of map) {
@@ -246,6 +399,7 @@ export class PendingAdmission {
 
 	/** Any create at this centre consumes the matching entry (nearest of b - 1, b, b + 1). */
 	consume(obs: ObservationInput): void {
+		this.dropAirtime(obs.sourceId, obs.track.centreHz)
 		const map = this.bySource.get(obs.sourceId)
 		if (map === undefined) return
 		const centre = obs.track.centreHz
@@ -260,11 +414,13 @@ export class PendingAdmission {
 		if (sourceId === undefined) {
 			this.bySource.clear()
 			this.runs.clear()
+			this.airtime.clear()
 			this.epochs.clear()
 			return
 		}
 		this.bySource.delete(sourceId)
 		this.runs.delete(sourceId)
+		this.airtime.delete(sourceId)
 		this.epochs.delete(sourceId)
 	}
 
@@ -285,13 +441,7 @@ export class PendingAdmission {
 		map: Map<number, PendingEntry>,
 		bucket: number,
 	): PendingEntry | undefined {
-		const same = map.get(bucket)
-		if (same !== undefined) return same
-		const lo = map.get(bucket - 1)
-		const hi = map.get(bucket + 1)
-		if (lo === undefined) return hi
-		if (hi === undefined) return lo
-		return hi.firstAt < lo.firstAt ? hi : lo
+		return nearestOf(map, bucket)
 	}
 
 	private add(e: PendingEntry, id: string, at: number, snr: number): void {

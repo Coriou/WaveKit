@@ -56,6 +56,11 @@ New constants in `src/core/scanner/detection-quality-contract.ts` (new, core onl
 | `DQ_SUSTAIN_MAX_GAP_MS`     | 2 500                          | 1.4b        |
 | `DQ_SUSTAIN_SAMPLES`        | 8                              | 1.4b        |
 | `DQ_SUSTAIN_PER_SOURCE`     | 512                            | 1.4b        |
+| `DQ_CREATE_TRACK_SNR_DB`    | 15                             | 1.4c        |
+| `DQ_SHORT_BURST_BLOCKS`     | 20                             | 1.4c        |
+| `DQ_PTT_WINDOW_MS`          | 60 000                         | 1.4d        |
+| `DQ_PTT_PER_SOURCE`         | 512                            | 1.4d        |
+| `DQ_PTT_IDS_MAX`            | 8                              | 1.4d        |
 | `DQ_LOCAL_SNR_DB`           | 6                              | 1.15        |
 | `DQ_DC_ADMIT_HZ`            | 12 500                         | 1.15        |
 
@@ -800,6 +805,12 @@ _Validates 1.3, 1.4, 1.4b._
 rule on are ordered, disjoint, non-empty, and every on-bin they hold lies in a segment of the
 plain segmenter. _Validates 1.13._
 
+**Property 27: Push-to-talk airtime promotion.** For any sequence of transmissions on one
+channel (gaps, durations of 500 to 2 500 ms, SNRs of 9 to 14.99 dB, sampled at the store's
+cadence), a discovery exists iff the 1.4d reference (banked airtime of transmissions sampled
+twice, inside 60 000 ms of the first banking, plus the live transmission's duration reaches
+3 000 ms with at least 3 samples of median at least 12 dB) fires. _Validates 1.4d._
+
 All fast-check properties run with `numRuns: 100` or more and carry the trace comment
 (`// Feature: detection-quality, Property N: ...`).
 
@@ -822,3 +833,10 @@ Tests for amendment 10: `tests/unit/core/scanner/discovery-store-sustained.test.
 (1.13 bounds, Property 26), `tests/unit/core/scanner/slot-raster.test.ts` (1.12). Changed:
 `detection-quality-contract.test.ts` (new constants), `channel-gate.test.ts` (peak slot),
 `scanner-service-range-masks.test.ts` (bounded rasters).
+
+Tests for 1.4c, 1.4d and 1.17: `tests/unit/core/scanner/pending-airtime.test.ts` (1.4c and
+1.4d bounds, Property 27), `tests/unit/core/spectrum/am-voice-admission.test.ts` (synthetic
+push-to-talk AM voice through the pipeline, classifier and store),
+`tests/unit/core/scanner/classify/classifier.test.ts` (1.17 bounds). `classifySpectral`
+checks `isAmVoice` before `classOf`; `PendingAdmission` banks a closing run's transmission
+(`bank`) and checks banked airtime on each sustained sample (`airtimePromotes`).

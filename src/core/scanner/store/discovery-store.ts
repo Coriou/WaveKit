@@ -108,6 +108,8 @@ import {
 	DQ_CONSOLIDATE_GROUP_MAX,
 	DQ_CONSOLIDATE_SCAN_MAX,
 	DQ_CREATE_SNR_DB,
+	DQ_CREATE_TRACK_SNR_DB,
+	DQ_SHORT_BURST_BLOCKS,
 	DQ_CROSS_FAMILY_HZ,
 	DQ_IDENTITY_OVERLAP_MS,
 	DQ_IDENTITY_PROTOCOLS,
@@ -1030,8 +1032,9 @@ export class DiscoveryStore
 	/**
 	 * DQ 1.2 to 1.7: may an undecoded observation that matched nothing create a record? Invalid
 	 * input is rejected (1.7); overload needs 25 dB and never pends (1.2); otherwise 18 dB, or
-	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC), which consumes the
-	 * bucket's pending entry like a threshold create.
+	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC) or channel
+	 * airtime over separate transmissions (1.4d), which consume the bucket's pending entry like a
+	 * threshold create. A short burst's 18 dB threshold also needs a track SNR of at least 15 dB (1.4c).
 	 */
 	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
 		const track = input.track
@@ -1062,7 +1065,16 @@ export class DiscoveryStore
 		)
 			return refuse()
 		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : refuse()
-		if (snr >= DQ_CREATE_SNR_DB) return "create"
+		// DQ 1.4c: the threshold reads the best of several slot readings; a short burst's own
+		// track SNR must also clear the measured noise maximum. Non-finite blocks or track SNR
+		// never corroborate (the safe answer: the burst waits for more sightings).
+		if (
+			snr >= DQ_CREATE_SNR_DB &&
+			((Number.isFinite(track.blocks) &&
+				track.blocks >= DQ_SHORT_BURST_BLOCKS) ||
+				(Number.isFinite(track.snrDb) && track.snrDb >= DQ_CREATE_TRACK_SNR_DB))
+		)
+			return "create"
 		if (this.pending.note(input)) {
 			this.pending.dropRun(input.sourceId, input.id)
 			return "promoted"

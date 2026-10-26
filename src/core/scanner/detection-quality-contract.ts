@@ -19,6 +19,24 @@ export const DQ_OVERLOAD_CREATE_SNR_DB = 25
  */
 export const DQ_CREATE_SNR_DB = 18
 
+/**
+ * Req 1.4c: a short observation (under `DQ_SHORT_BURST_BLOCKS`) creates on the threshold only when
+ * its own track SNR is also at least 15 dB, the measured noise maximum (the pending median
+ * below). The 18 dB threshold reads the best of the slot, best covering slot and matched-window
+ * SNRs, a maximum over several noisy readings: a weak burst whose own SNR is 12 to 14 dB read
+ * 18.2 dB once in a private band capture. Such a burst waits for a second and third sighting (1.4)
+ * instead; a longer observation keeps the threshold alone (a wide track judged at its best slot).
+ */
+export const DQ_CREATE_TRACK_SNR_DB = 15
+
+/**
+ * Req 1.4c: blocks under which an observation is a short burst. 20 blocks = 1 000 ms at the
+ * default 50 ms integration (2 000 ms at 100 ms): the store's first re-ingest of a live
+ * observation comes 1 000 ms after its start, so only a burst that closed sooner, or the
+ * gate-pass ingest, is judged short.
+ */
+export const DQ_SHORT_BURST_BLOCKS = 20
+
 /** Req 1.4: distinct observation ids a pending entry needs before it can promote. */
 export const DQ_PENDING_MIN_OBS = 3
 
@@ -66,6 +84,25 @@ export const DQ_SUSTAIN_SAMPLES = 8
  * ≈ 70 kB per source; the oldest run is evicted first.
  */
 export const DQ_SUSTAIN_PER_SOURCE = 512
+
+/**
+ * Req 1.4d: push-to-talk airtime. Sustained runs on one channel (the pending bucket, nearest of
+ * b - 1, b, b + 1) add up for 60 000 ms from the first credited sample: an exchange of three
+ * 2 s transmissions with 25 s gaps (2 + 25 + 2 + 25 + 2 = 56 s) fits. A transmission that ends
+ * banks its duration from its first gated snapshot, once its run was sampled twice (it lived past
+ * the 1 000 ms re-ingest, so a flicker banks nothing); the channel promotes like one run: banked
+ * plus live airtime 3 000 ms, 3 samples, median 12 dB.
+ */
+export const DQ_PTT_WINDOW_MS = 60_000
+
+/**
+ * Req 1.4d: airtime entries per source, the pending budget. 512 × (8 × 8 B SNRs + 8 × 40 B ids +
+ * 48 B) ≈ 220 kB per source; the oldest entry is evicted first.
+ */
+export const DQ_PTT_PER_SOURCE = 512
+
+/** Req 1.4d: distinct run ids an airtime entry remembers (for retraction), oldest dropped first. */
+export const DQ_PTT_IDS_MAX = 8
 
 /**
  * Req 1.15 (amendment 10): an evidence-less observation creates a record only when its segment

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest"
 import {
+	AM_VOICE_MAX_OBW_HZ,
+	AM_VOICE_MIN_OBW_HZ,
 	applyPriors,
 	CLASS_HYPOTHESES,
 	classifySpectral,
 	classOf,
 	familyOf,
+	isAmVoice,
 	leakOrIntermod,
 } from "../../../../../src/core/scanner/classify/classifier.js"
 import type { ScannerProtocol } from "../../../../../src/core/scanner/types.js"
@@ -208,5 +211,66 @@ describe("pipeline + classifier", () => {
 		const c = classifySpectral(closed[0]!.track, all)
 		expect(c.class).toBe("tdma-ms")
 		expect(c.hypotheses[0]?.protocol).toBe("dmr")
+	})
+})
+
+describe("AM voice is not a bare carrier (detection-quality 1.17)", () => {
+	// An AM-only range (airband) and an AM + FM range (CB), as `priorsFor` builds them.
+	const AM: Partial<Record<ScannerProtocol, number>> = {
+		"analog-am": 1,
+		"analog-fm": 0.25,
+		carrier: 1,
+		unknown: 1,
+	}
+	const AM_FM: Partial<Record<ScannerProtocol, number>> = {
+		...AM,
+		"analog-fm": 1,
+	}
+	const ctx = (priors: Partial<Record<ScannerProtocol, number>>) => ({
+		priors,
+		protocols: [],
+	})
+	const am = (over: Partial<TrackSnapshot> = {}) =>
+		snap({ spectralShape: "narrow", obwHz: 7_000, blocks: 40, ...over })
+
+	it("boundary: a narrow track with a 6 000 Hz -20 dB OBW is AM voice, 5 999 Hz is a carrier", () => {
+		const at = classifySpectral(am({ obwHz: AM_VOICE_MIN_OBW_HZ }), ctx(AM))
+		expect(at.class).toBe("unknown")
+		expect(at.hypotheses[0]?.protocol).toBe("analog-am")
+		expect(
+			classifySpectral(am({ obwHz: AM_VOICE_MIN_OBW_HZ - 1 }), ctx(AM)).class,
+		).toBe("carrier")
+	})
+
+	it("boundary: 12 500 Hz is still AM voice, 12 501 Hz is not", () => {
+		expect(isAmVoice(am({ obwHz: AM_VOICE_MAX_OBW_HZ }), AM)).toBe(true)
+		expect(isAmVoice(am({ obwHz: AM_VOICE_MAX_OBW_HZ + 1 }), AM)).toBe(false)
+	})
+
+	it("boundary: a burst of 4 blocks is not AM voice, 5 blocks is", () => {
+		expect(isAmVoice(am({ blocks: 4 }), AM)).toBe(false)
+		expect(isAmVoice(am({ blocks: 5 }), AM)).toBe(true)
+	})
+
+	it("needs a range listing analog-am; peaked tracks only where FM is not listed; never flat", () => {
+		expect(isAmVoice(am(), {})).toBe(false)
+		expect(classifySpectral(am(), ctx({})).class).toBe("carrier")
+		expect(isAmVoice(am(), AM_FM)).toBe(true)
+		expect(isAmVoice(am({ spectralShape: "peaked" }), AM)).toBe(true)
+		expect(isAmVoice(am({ spectralShape: "peaked" }), AM_FM)).toBe(false)
+		expect(isAmVoice(am({ spectralShape: "flat" }), AM)).toBe(false)
+	})
+
+	it("malformed input is never AM voice (today's class stays)", () => {
+		expect(isAmVoice(am({ obwHz: Number.NaN }), AM)).toBe(false)
+		expect(isAmVoice(am({ blocks: Number.NaN }), AM)).toBe(false)
+		expect(isAmVoice(am(), { "analog-am": Number.NaN })).toBe(false)
+		expect(isAmVoice(am(), { "analog-am": 0.99 })).toBe(false)
+		expect(
+			isAmVoice(
+				am(),
+				null as unknown as Partial<Record<ScannerProtocol, number>>,
+			),
+		).toBe(false)
 	})
 })
