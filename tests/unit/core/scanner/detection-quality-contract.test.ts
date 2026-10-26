@@ -7,6 +7,8 @@ describe("detection-quality contract (frozen)", () => {
 		expect({ ...dq }).toEqual({
 			DQ_OVERLOAD_CREATE_SNR_DB: 25,
 			DQ_CREATE_SNR_DB: 18,
+			DQ_CREATE_TRACK_SNR_DB: 15,
+			DQ_SHORT_BURST_BLOCKS: 20,
 			DQ_PENDING_MIN_OBS: 3,
 			DQ_PENDING_MEDIAN_SNR_DB: 15,
 			DQ_PENDING_WINDOW_MS: 600_000,
@@ -17,6 +19,9 @@ describe("detection-quality contract (frozen)", () => {
 			DQ_SUSTAIN_MAX_GAP_MS: 2_500,
 			DQ_SUSTAIN_SAMPLES: 8,
 			DQ_SUSTAIN_PER_SOURCE: 512,
+			DQ_PTT_WINDOW_MS: 60_000,
+			DQ_PTT_PER_SOURCE: 512,
+			DQ_PTT_IDS_MAX: 8,
 			DQ_LOCAL_SNR_DB: 6,
 			DQ_DC_ADMIT_HZ: 12_500,
 			DQ_PENDING_PER_SOURCE: 512,
@@ -56,6 +61,13 @@ describe("detection-quality contract (frozen)", () => {
 		)
 		expect(dq.DQ_PENDING_SAMPLES).toBeGreaterThanOrEqual(dq.DQ_PENDING_MIN_OBS)
 		expect(dq.DQ_PENDING_WINDOW_MS).toBe(10 * 60_000)
+		// 1.4c: the short-burst track SNR is the measured noise maximum; 20 blocks of 50 ms = 1 s
+		expect(dq.DQ_CREATE_TRACK_SNR_DB).toBe(dq.DQ_PENDING_MEDIAN_SNR_DB)
+		expect(dq.DQ_SHORT_BURST_BLOCKS * 50).toBe(1_000)
+		// 1.4d: three 2 s transmissions with 25 s gaps fit the airtime window
+		expect(2 + 25 + 2 + 25 + 2).toBeLessThanOrEqual(dq.DQ_PTT_WINDOW_MS / 1_000)
+		expect(dq.DQ_PTT_PER_SOURCE).toBe(dq.DQ_PENDING_PER_SOURCE)
+		expect(dq.DQ_PTT_IDS_MAX).toBe(dq.DQ_SUSTAIN_SAMPLES)
 		// data: half a 2.5 kHz raster; 256 / 16 per s = 16 s of one busy source
 		expect(dq.DQ_DATA_FREQ_HZ * 2).toBe(dq.DQ_PENDING_BUCKET_HZ)
 		expect(dq.DQ_DATA_RING / dq.DQ_DATA_RATE_PER_S).toBe(16)

@@ -31,7 +31,7 @@ import {
  */
 import { EventEmitter } from "node:events"
 import { readdir } from "node:fs/promises"
-import { existsSync } from "node:fs"
+import { existsSync, lstatSync } from "node:fs"
 import { join } from "node:path"
 import { ZodError } from "zod"
 import type {
@@ -717,6 +717,13 @@ export class ScannerService extends EventEmitter {
 	private deferAnalog(live: LiveObservation, track: TrackSnapshot): void {
 		const pending = this.analogDeferred.get(live.observationId)
 		if (pending?.captureId != null) return
+		// DQ 1.4e: a retry re-enters here with the track kept at deferral; the edge flag is sticky
+		// and may have risen since, so the latest snapshot decides.
+		if (track.flags.edge || live.lastTrack?.flags.edge === true) {
+			this.analogDeferred.delete(live.observationId)
+			this.refuseAnalog(live, "edge")
+			return
+		}
 		const port = this.deps.iqCapture
 		if (!port) {
 			this.refuseAnalog(live, "capture-unavailable")
@@ -1263,7 +1270,12 @@ export class ScannerService extends EventEmitter {
 				now: this.now,
 			})
 			// Each capture can be ~100 MB: enforce the cap at once, not only at the 5 min maintenance.
-			this.recorder.on("captured", () => {
+			// DQ 10.3: a committed or discarded burst capture no longer holds its discovery.
+			this.recorder.on("discarded", (observationId: string) =>
+				this.burstInFlight.delete(observationId),
+			)
+			this.recorder.on("captured", (capture: { observationId: string }) => {
+				this.burstInFlight.delete(capture.observationId)
 				this.captures
 					.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
 					.catch((err: unknown) =>
@@ -3081,6 +3093,7 @@ export class ScannerService extends EventEmitter {
 		// After the job ids: the capture-enabled covering job decides (Task 34a).
 		if (opened) this.openCapture(live, track)
 		live.lastTrack = track
+		if (track.flags.edge) this.dropEdgeIqCapture(live.observationId)
 		live.lastActivityAt = now
 		if (ev.kind !== "track-open")
 			live.classification = this.classify(track, sourceId)
@@ -3150,8 +3163,13 @@ export class ScannerService extends EventEmitter {
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
 		this.probes.trackClosed(track.trackId)
 		const closed = live
-		this.recorder.close(live.observationId, track.lastSample, () =>
-			this.captureCloseInfo(closed, track),
+		// DQ 1.4e: a burst capture whose track turned edge after it opened is never kept (the flag
+		// is sticky, so the closing snapshot holds it). Closing at the lowest sample index leaves
+		// the recorder an empty window, which it discards (staging file removed) and never commits.
+		this.recorder.close(
+			live.observationId,
+			track.flags.edge ? Number.MIN_SAFE_INTEGER : track.lastSample,
+			() => this.captureCloseInfo(closed, track),
 		)
 		this.live.delete(track.trackId)
 		live.endedAt = now
@@ -3908,6 +3926,11 @@ export class ScannerService extends EventEmitter {
 		for (const live of this.live.values()) {
 			const t = live.lastTrack
 			if (live.sourceId !== sourceId || !t) continue
+			// DQ 1.4e: an edge track keeps no PSD slice (the flag is sticky: drop any held one).
+			if (t.flags.edge) {
+				this.bestPsd.delete(live.observationId)
+				continue
+			}
 			const best = this.bestPsd.get(live.observationId)
 			if (best && best.snrDb >= t.snrDb) continue
 			const lo = Math.max(
@@ -3935,19 +3958,25 @@ export class ScannerService extends EventEmitter {
 	private async writePsdEvidence(live: LiveObservation): Promise<void> {
 		const best = this.bestPsd.get(live.observationId)
 		this.bestPsd.delete(live.observationId)
-		if (!best || !live.discoveryId) return
+		if (!best || !live.discoveryId || live.lastTrack?.flags.edge === true)
+			return
 		const wants = live.jobIds.some(id => this.jobs.get(id)?.spec.evidence.psd)
 		if (!wants) return
-		const written = await this.evidence
-			.writePsd(live.discoveryId, best)
-			.catch((err: unknown) => {
-				this.log.warn(
-					{ err, discoveryId: live.discoveryId },
-					"PSD evidence write failed",
-				)
-				return false
-			})
-		if (written) this.store.setEvidenceFlags(live.discoveryId, { psd: true })
+		const release = this.holdEvidence([live.discoveryId])
+		try {
+			const written = await this.evidence
+				.writePsd(live.discoveryId, best)
+				.catch((err: unknown) => {
+					this.log.warn(
+						{ err, discoveryId: live.discoveryId },
+						"PSD evidence write failed",
+					)
+					return false
+				})
+			if (written) this.store.setEvidenceFlags(live.discoveryId, { psd: true })
+		} finally {
+			release()
+		}
 	}
 
 	private markRecording(
@@ -3959,6 +3988,21 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/** Task 34a: a burst capture for a new observation of a capture-enabled covering job. */
+	/**
+	 * DQ 1.4e: the track (centre ± OBW / 2; a non-finite OBW counts as its centre alone) lies inside
+	 * the usable 0.8 span of its own, current epoch.
+	 */
+	private trackInUsableSpan(sourceId: string, track: TrackSnapshot): boolean {
+		const epoch = this.spectrum.engine(sourceId)?.currentEpoch()
+		if (!epoch || epoch.epoch !== track.epoch) return false
+		return inWindow(
+			track.centreHz,
+			Number.isFinite(track.obwHz) ? track.obwHz : 0,
+			epoch,
+			USABLE_FRACTION,
+		)
+	}
+
 	private openCapture(live: LiveObservation, track: TrackSnapshot): void {
 		const job = live.jobIds
 			.map(id => this.jobs.get(id))
@@ -3968,7 +4012,10 @@ export class ScannerService extends EventEmitter {
 			? this.store.get(live.discoveryId)
 			: undefined
 		if (discovery?.operator?.lockout) return
-		this.recorder.open({
+		// DQ 1.4e: no capture for an edge track or one reaching past the usable 0.8 span.
+		if (track.flags.edge || !this.trackInUsableSpan(live.sourceId, track))
+			return
+		const opened = this.recorder.open({
 			observationId: live.observationId,
 			jobId: job.id,
 			sourceId: live.sourceId,
@@ -3978,6 +4025,8 @@ export class ScannerService extends EventEmitter {
 			targetHz: track.centreHz,
 			spec: job.spec.capture,
 		})
+		// DQ 10.3: held against folding until the recorder commits or discards it.
+		if (opened) this.burstInFlight.add(live.observationId)
 	}
 
 	/**
@@ -4413,6 +4462,7 @@ export class ScannerService extends EventEmitter {
 			endedAt: o.endedAt ?? this.now(),
 			encrypted: o.encrypted,
 		}))
+		const release = this.holdEvidence(candidates.map(c => c.discoveryId))
 		const publication = this.evidence
 			.linkProbeRecordings(r.probeDir, candidates)
 			.then(res => {
@@ -4429,6 +4479,7 @@ export class ScannerService extends EventEmitter {
 					"Linking probe recordings failed",
 				),
 			)
+			.finally(release)
 		this.track(publication, "Probe recording settlement failed")
 	}
 
@@ -4575,6 +4626,25 @@ export class ScannerService extends EventEmitter {
 	// === WG11 req 6: IQ capture on detection, replay results ===
 
 	/** A18: classification and measured bandwidth never exclude an allowed analog trial. */
+	/**
+	 * DQ 1.4e: an automatic analog trial needs its whole channel and the track's centre inside
+	 * the usable 0.8 span of the track's epoch; the detection span reaches 0.95, trials do not.
+	 * The measured width is not used: analog admission ignores it (scanner-redesign 6.7).
+	 */
+	private analogChannelInWindow(
+		sourceId: string,
+		track: TrackSnapshot,
+		channelHz: number,
+		spacingHz: number,
+	): boolean {
+		const epoch = this.spectrum.engine(sourceId)?.currentEpoch()
+		if (!epoch || epoch.epoch !== track.epoch) return false
+		return (
+			inWindow(channelHz, spacingHz, epoch, USABLE_FRACTION) &&
+			inWindow(track.centreHz, 0, epoch, USABLE_FRACTION)
+		)
+	}
+
 	private requestJobAnalog(live: LiveObservation, track: TrackSnapshot): void {
 		const runner = this.admittedAnalog()
 		const protocols = this.protocolsFor(live, track.centreHz)
@@ -4603,6 +4673,12 @@ export class ScannerService extends EventEmitter {
 				trial.discoveryId === live.discoveryId &&
 				trial.channelKey === channelKey,
 		)
+		const outside = !this.analogChannelInWindow(
+			live.sourceId,
+			track,
+			channelHz,
+			spacingHz,
+		)
 		const reason = !eligible
 			? "not-allowed"
 			: this.discoveryLockedOut(live.discoveryId)
@@ -4611,17 +4687,21 @@ export class ScannerService extends EventEmitter {
 					? "no-discovery"
 					: track.flags.spur || track.flags.iqImage
 						? "spur-image"
-						: !runner?.runLive
-							? "runner-unavailable"
-							: protocols.length > 0 && !protocols.includes("analog-fm")
-								? "not-allowed"
-								: this.analogAttempted.has(live)
-									? "attempted"
-									: owned
-										? "discovery-owned"
-										: (this.analogCounts.get(live.sourceId) ?? 0) >= 2
-											? "capacity"
-											: undefined
+						: track.flags.edge
+							? "edge"
+							: outside
+								? "out-of-window"
+								: !runner?.runLive
+									? "runner-unavailable"
+									: protocols.length > 0 && !protocols.includes("analog-fm")
+										? "not-allowed"
+										: this.analogAttempted.has(live)
+											? "attempted"
+											: owned
+												? "discovery-owned"
+												: (this.analogCounts.get(live.sourceId) ?? 0) >= 2
+													? "capacity"
+													: undefined
 		if (reason) {
 			this.refuseAnalog(live, reason)
 			if (reason !== "capacity" && reason !== "discovery-owned") {
@@ -4756,6 +4836,7 @@ export class ScannerService extends EventEmitter {
 			live.acceptedIdentity !== undefined ||
 			track.flags.iqImage ||
 			track.flags.spur ||
+			track.flags.edge ||
 			this.iqTried.has(live.observationId)
 		)
 			return
@@ -4804,6 +4885,50 @@ export class ScannerService extends EventEmitter {
 			if (pending) this.pendingCaptures.release(live.sourceId)
 			this.giveUpIqCapture(live.observationId)
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
+		}
+	}
+
+	/**
+	 * DQ 1.4e: the captured track turned edge after its IQ capture opened: the capture is discarded
+	 * at once (never finished, replayed or kept). A capture another holder already took is left to
+	 * the replay planner, which plans no trial for an edge track.
+	 */
+	private dropEdgeIqCapture(observationId: string): void {
+		this.dropFinishedEdgeCaptures(observationId)
+		const hit = this.iqCaptureOf.get(observationId)
+		if (!hit) return
+		try {
+			if (!this.deps.iqCapture?.discard(hit.captureId, "invalid")) return
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture discard failed")
+			return
+		}
+		this.iqCaptureOf.delete(observationId)
+		this.giveUpIqCapture(observationId)
+	}
+
+	/**
+	 * DQ 1.4e: the observation's finished, stored captures (left `iqCaptureOf` when they finished)
+	 * are discarded too, also while the replay queue holds one with its trials already planned:
+	 * the queue finds the capture gone before its next trial and runs none. A capture an identify
+	 * job holds is left to that job.
+	 */
+	private dropFinishedEdgeCaptures(observationId: string): void {
+		const port = this.deps.iqCapture
+		const pins = this.spanPins.get(observationId)
+		if (!port || !pins) return
+		for (const captureId of [...pins]) {
+			try {
+				const holder = port.holderOf(captureId)
+				if (holder === undefined) continue
+				if (holder !== null && holder !== IQ_REPLAY_QUEUE_HOLDER) continue
+				port.discard(captureId, "invalid", holder ?? undefined)
+			} catch (err: unknown) {
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture discard failed",
+				)
+			}
 		}
 	}
 
@@ -7287,12 +7412,88 @@ export class ScannerService extends EventEmitter {
 		this.background.add(run)
 	}
 
+	/**
+	 * DQ 10.3: may a fragment be merged away or retired? Only when nothing outside the store holds
+	 * evidence for it or for any of its aliases: no evidence folder (PSD/IQ files land before the
+	 * store's flags, and a merged-away id's evidence folder is not reachable from its survivor), no
+	 * dv or analog recording folder, no burst capture naming it, and no remembered replay trial
+	 * (trial memory is forgotten for a deleted or merged-away id, and analog proof is memory-only).
+	 * Merging a fragment that carries such evidence would need the evidence folder and the trial
+	 * memory moved to the survivor first: future work, so such records are refused for now.
+	 * Synchronous; the store asks once per record per pass and at most FRAGMENT_FOLD_CHECK_MAX
+	 * (1 024) times, each a few lstatSync calls. A throw keeps the record (the store fails closed).
+	 */
+	private foldCheck(): (discoveryId: string) => boolean {
+		const captured = new Set<string>(this.evidenceInFlight.keys())
+		for (const c of this.captures.list())
+			if (c.discoveryId !== null) captured.add(c.discoveryId)
+		// Burst captures still recording, parked or committing (not yet in the capture index).
+		for (const observationId of this.burstInFlight) {
+			const id =
+				this.findObservation(observationId)?.discoveryId ??
+				this.store.discoveryIdOf(observationId)
+			if (id) captured.add(id)
+		}
+		// Only a confirmed ENOENT/ENOTDIR counts as absent: existsSync reports false on EACCES, which
+		// would fail open, so any other stat error counts as present (refuse the fold).
+		const mayExist = (path: string): boolean => {
+			try {
+				lstatSync(path)
+				return true
+			} catch (err: unknown) {
+				const code = (err as NodeJS.ErrnoException).code
+				return code !== "ENOENT" && code !== "ENOTDIR"
+			}
+		}
+		const holdsEvidence = (id: string): boolean =>
+			captured.has(id) ||
+			this.trialMemory.view(id).length > 0 ||
+			mayExist(join(this.storageDir, "evidence", id)) ||
+			mayExist(join(this.storageDir, "recordings", "dv", id)) ||
+			mayExist(join(this.storageDir, "recordings", "analog", id))
+		return id => {
+			for (const x of [id, ...this.store.aliasesOf(id)])
+				if (holdsEvidence(x)) return false
+			return true
+		}
+	}
+
+	/**
+	 * DQ 10.3: discovery ids with an evidence write in flight (PSD, probe recording link), counted
+	 * per id; the fold check refuses them. One entry per concurrent operation's id, released when
+	 * the operation settles, so the map holds at most the ids of operations in flight.
+	 */
+	private readonly evidenceInFlight = new Map<string, number>()
+	/**
+	 * DQ 10.3: observations whose burst capture the recorder holds (recording, parked or
+	 * committing), until it reports `captured` or `discarded`; bounded by the recorder's own caps.
+	 */
+	private readonly burstInFlight = new Set<string>()
+
+	private holdEvidence(ids: readonly string[]): () => void {
+		const held = [...new Set(ids)]
+		for (const id of held)
+			this.evidenceInFlight.set(id, (this.evidenceInFlight.get(id) ?? 0) + 1)
+		let released = false
+		return () => {
+			if (released) return
+			released = true
+			for (const id of held) {
+				const n = (this.evidenceInFlight.get(id) ?? 1) - 1
+				if (n <= 0) this.evidenceInFlight.delete(id)
+				else this.evidenceInFlight.set(id, n)
+			}
+		}
+	}
+
 	private async maintenance(): Promise<void> {
 		const s = this.settings()
 		await this.spectrum.persist()
 		// § 8 storage.discoveryMaxAgeDays (never operator `keep` or `lockout`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
-		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays)
+		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays, {
+			canFold: this.foldCheck(),
+		})
 		// band inspection UX req 3.3: one operation removed them all, at this revision
 		const prunedAt = this.store.currentRevision()
 		for (const id of pruned) {

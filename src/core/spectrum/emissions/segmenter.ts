@@ -17,6 +17,13 @@ export interface SegmentOptions {
 	gapBins: number
 	usableStartBin: number
 	usableEndBin: number
+	/**
+	 * Inner span [edgeStartBin, edgeEndBin) inside the usable one: a segment reaching past it
+	 * (within `gapBins`) is flagged `edge` (in window) or `truncated` (out of window), so the
+	 * outer band of the detection span stays flagged. Absent: the usable span's own bounds.
+	 */
+	edgeStartBin?: number
+	edgeEndBin?: number
 	exclusionEdges: number[]
 	rasterBinEdges: number[]
 	skirtDb: number
@@ -485,9 +492,16 @@ function finish(
 		num += i * excess
 		den += excess
 	}
+	const edgeStart = Math.max(
+		opts.usableStartBin,
+		opts.edgeStartBin ?? opts.usableStartBin,
+	)
+	const edgeEnd = Math.min(
+		opts.usableEndBin,
+		opts.edgeEndBin ?? opts.usableEndBin,
+	)
 	const touchesSpan =
-		p.start <= opts.usableStartBin + opts.gapBins ||
-		p.end >= opts.usableEndBin - opts.gapBins
+		p.start <= edgeStart + opts.gapBins || p.end >= edgeEnd - opts.gapBins
 	const touchesExclusion = opts.exclusionEdges.some(
 		e => e >= p.start - opts.gapBins && e <= p.end + opts.gapBins,
 	)

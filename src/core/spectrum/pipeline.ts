@@ -237,6 +237,8 @@ export class SpectrumPipeline {
 	/** `DIP_SMOOTH_HZ` in bins, odd, at least 1. */
 	private readonly dipSmoothBins: number
 	private readonly edgeBins: number
+	/** Bins from each end inside which a segment is flagged `edge` (≥ edgeBins; cfg.edgeFraction). */
+	private readonly flagEdgeBins: number
 	private readonly dcBins: number
 	private readonly dcGuardHz: number
 	private readonly maxStaleBlocks: number
@@ -445,6 +447,10 @@ export class SpectrumPipeline {
 			2 * Math.floor(Math.max(1, Math.round(DIP_SMOOTH_HZ / this.binHz)) / 2) +
 			1
 		this.edgeBins = usableEdgeBins(this.n, cfg.usableFraction)
+		this.flagEdgeBins = Math.max(
+			this.edgeBins,
+			usableEdgeBins(this.n, cfg.edgeFraction ?? cfg.usableFraction),
+		)
 		this.dcBins = dcGuardBins(cfg.dcGuardHz, this.binHz, this.binHz)
 		this.dcGuardHz = Math.max(cfg.dcGuardHz, 2 * this.binHz)
 		this.maxStaleBlocks = Math.ceil(STALE_MAX_MS / this.blockMs)
@@ -1235,6 +1241,8 @@ export class SpectrumPipeline {
 			gapBins: this.gapBins,
 			usableStartBin: this.edgeBins,
 			usableEndBin: this.n - this.edgeBins + 1,
+			edgeStartBin: this.flagEdgeBins,
+			edgeEndBin: this.n - this.flagEdgeBins + 1,
 			exclusionEdges: this.exclusionEdges,
 			rasterBinEdges: this.rasterEdges,
 			dipSplit: { smoothBins: this.dipSmoothBins },

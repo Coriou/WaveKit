@@ -397,6 +397,7 @@ export const CLASS_WORDS: Readonly<Record<ScannerClass, string | null>> = {
 	"gmsk-narrow": "narrow GMSK",
 	"afsk-fm": "AFSK on FM",
 	"analog-fm": "FM with speech pauses",
+	"analog-am": "AM with speech",
 	"ook-burst": "OOK bursts",
 	carrier: "a steady carrier",
 	wideband: "a wideband signal",

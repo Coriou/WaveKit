@@ -234,6 +234,8 @@ interface SourceState {
 	revision: number
 	segments: Map<string, Segment>
 	liveKeys: Set<string>
+	/** The previous block's live set, cleared and refilled by the next block (no per-block Set). */
+	spareKeys: Set<string>
 	tracks: Map<string, { centreHz: number; at: number }>
 	decodes: Map<string, TimedPoint>
 	successes: Map<string, TimedPoint>
@@ -312,8 +314,9 @@ export function associateCandidate(
 	// sorted[lo - 1] < hz <= sorted[lo]
 	let best = -1
 	let within = 0
-	for (const i of [lo - 2, lo - 1, lo, lo + 1]) {
-		if (i < 0 || i >= sorted.length) continue
+	// Indices lo - 2 .. lo + 1, without allocating a list per call.
+	const end = Math.min(sorted.length, lo + 2)
+	for (let i = Math.max(0, lo - 2); i < end; i++) {
 		const d = Math.abs(sorted[i]! - hz)
 		if (d > half) continue
 		within++
@@ -365,6 +368,8 @@ interface Evaluated {
 	status: ActivitySnapshot["status"]
 	channels: ChannelActivity[]
 	next: number | null
+	/** `interestKey(query)` when the answer is `ready` (built once per evaluation). */
+	key?: string
 }
 
 export function createChannelActivityRanker(
@@ -395,6 +400,7 @@ export function createChannelActivityRanker(
 			revision: 0,
 			segments: new Map(),
 			liveKeys: new Set(),
+			spareKeys: new Set(),
 			tracks: new Map(),
 			decodes: new Map(),
 			successes: new Map(),
@@ -454,8 +460,11 @@ export function createChannelActivityRanker(
 				}))
 			: []
 
-	/** Pure: reads the evidence and the interest memo, writes nothing. */
-	const evaluate = (q: ActivityQuery, now: number): Evaluated => {
+	/**
+	 * Pure: reads the evidence and the interest memo, writes nothing. `key` is `interestKey(q)`
+	 * when the caller already built it (it is O(candidates) to build, so it is built once).
+	 */
+	const evaluate = (q: ActivityQuery, now: number, key?: string): Evaluated => {
 		if (!QuerySchema.safeParse(q).success)
 			return {
 				status: "unavailable",
@@ -541,6 +550,8 @@ export function createChannelActivityRanker(
 			if (due > now && due < next) next = due
 		}
 		const channels: ChannelActivity[] = []
+		const k = key ?? interestKey(q)
+		const memos = interests.get(k)?.memo
 		for (let i = 0; i < n; i++) {
 			const hz = q.candidatesHz[i]!
 			const reasons: ActivityReason[] = []
@@ -603,7 +614,7 @@ export function createChannelActivityRanker(
 			deadline(ok, ACTIVITY_DECODE_HOT_MS)
 			deadline(ok, ACTIVITY_DECODE_WARM_MS)
 			deadline(bad, ACTIVITY_REPLAY_BACKOFF_MS)
-			const memo = interests.get(interestKey(q))?.memo.get(hz)
+			const memo = memos?.get(hz)
 			channels.push({
 				hz,
 				score,
@@ -618,6 +629,7 @@ export function createChannelActivityRanker(
 			status: "ready",
 			channels,
 			next: Number.isFinite(next) ? next : null,
+			key: k,
 		}
 	}
 
@@ -686,9 +698,9 @@ export function createChannelActivityRanker(
 		let changed = s.healthChanged
 		s.healthChanged = false
 		let next = Infinity
-		for (const it of interests.values()) {
+		for (const [key, it] of interests) {
 			if (it.sourceId !== sourceId) continue
-			const ev = evaluate(it.query, now)
+			const ev = evaluate(it.query, now, key)
 			if (remember(it, ev)) changed = true
 			if (ev.next !== null && ev.next < next) next = ev.next
 		}
@@ -809,14 +821,14 @@ export function createChannelActivityRanker(
 			const out: ActivitySnapshot[] = []
 			for (const q of Array.isArray(queries) ? queries : []) {
 				const ev = evaluate(q, now)
+				const key = ev.key
 				const s =
 					typeof q?.epoch?.sourceId === "string"
 						? (sources.get(q.epoch.sourceId) ?? null)
 						: null
-				if (ev.status === "ready" && s) {
+				if (ev.status === "ready" && s && key !== undefined) {
 					// Interest only (bounded): lets a later ingest notice order changes. The answer above
 					// is already computed; no evidence or history changes here.
-					const key = interestKey(q)
 					const known = interests.get(key)
 					if (known) {
 						interests.delete(key)
@@ -886,7 +898,8 @@ export function createChannelActivityRanker(
 			if (first || wasStale) markDirty(sourceId, true)
 			refreshHistory(sourceId, s, block)
 			s.lastBlockMono = now
-			const liveKeys = new Set<string>()
+			const liveKeys = s.spareKeys
+			liveKeys.clear()
 			let edge = false
 			for (const t of block.tracks) {
 				if (t.flags.iqImage || t.flags.spur === true) continue
@@ -895,16 +908,24 @@ export function createChannelActivityRanker(
 				if (!Number.isFinite(centre)) continue
 				const key = t.trackId ?? `u${Math.round(centre / 1000)}`
 				const seg = s.segments.get(key)
-				touch(
-					s.segments,
-					key,
-					{ centreHz: centre, firstMono: seg?.firstMono ?? now, lastMono: now },
-					ACTIVITY_MAX_SEGMENTS,
-				)
+				if (seg !== undefined) {
+					// Same LRU move as `touch`, reusing the entry (the map size is unchanged).
+					seg.centreHz = centre
+					seg.lastMono = now
+					s.segments.delete(key)
+					s.segments.set(key, seg)
+				} else
+					touch(
+						s.segments,
+						key,
+						{ centreHz: centre, firstMono: now, lastMono: now },
+						ACTIVITY_MAX_SEGMENTS,
+					)
 				liveKeys.add(key)
 				if (!s.liveKeys.has(key)) edge = true
 			}
 			if (liveKeys.size !== s.liveKeys.size) edge = true
+			s.spareKeys = s.liveKeys
 			s.liveKeys = liveKeys
 			if (edge) markDirty(sourceId)
 		},

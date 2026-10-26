@@ -100,6 +100,7 @@ export const DEFAULT_CONFIRM_HOLD_MS: Readonly<Record<ScannerClass, number>> = {
 	"afsk-fm": 3000,
 	"ook-burst": 10_000,
 	"analog-fm": 1500,
+	"analog-am": 0, // no AM probe decoder
 	carrier: 0,
 	wideband: 0,
 	unknown: 0,

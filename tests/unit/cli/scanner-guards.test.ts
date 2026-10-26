@@ -348,6 +348,20 @@ describe("strict identify attribution projection", () => {
 			}
 	})
 
+	it("keeps an analog-am result hint and drops an unknown one", () => {
+		const target = SCAN_JOB.identify!.targets[0]!
+		const hinted = (hint: string) =>
+			guardScan("job", {
+				...wire(),
+				identify: {
+					...wire().identify,
+					targets: [{ ...target, result: { ...target.result!, hint } }],
+				},
+			})?.identify?.targets[0]?.result?.hint
+		expect(hinted("analog-am")).toBe("analog-am")
+		expect(hinted("analog-xm")).toBeUndefined()
+	})
+
 	it("accepts WG7 ambient trials (AIS/ACARS/VDL2/LoRa decoded by a running decoder)", () => {
 		const target = SCAN_JOB.identify!.targets[0]!
 		const parsed = guardScan("job", {

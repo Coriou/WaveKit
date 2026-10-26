@@ -90,3 +90,61 @@ export function scene(
 	for (const e of emitters) addInto(iq, e(rng))
 	return iq
 }
+
+/** One push-to-talk transmission in seconds from the start of the scene. */
+export interface PttBurst {
+	startS: number
+	endS: number
+}
+
+/**
+ * Push-to-talk AM voice stand-in: the carrier `amp` is keyed only inside each burst, and its
+ * audio is band-limited (12 random tones in 300 to 3 000 Hz) under a syllabic envelope (random
+ * 120 to 400 ms syllables with 30 to 200 ms pauses), modulation index `m` at the syllable peak.
+ * A pause keeps the carrier (AM transmitters key the carrier for the whole transmission).
+ */
+export function amVoicePtt(
+	rng: Rng,
+	n: number,
+	fs: number,
+	offsetHz: number,
+	amp: number,
+	bursts: readonly PttBurst[],
+	m = 0.7,
+): Iq {
+	const tones: { w: number; phase: number }[] = []
+	for (let k = 0; k < 12; k++)
+		tones.push({
+			w: (TWO_PI * (300 + rng() * 2_700)) / fs,
+			phase: TWO_PI * rng(),
+		})
+	const out = { re: new Float32Array(n), im: new Float32Array(n) }
+	const w0 = (TWO_PI * offsetHz) / fs
+	const norm = 1 / Math.sqrt(tones.length * 2)
+	for (const b of bursts) {
+		const from = Math.max(0, Math.round(b.startS * fs))
+		const to = Math.min(n, Math.round(b.endS * fs))
+		let i = from
+		while (i < to) {
+			const syl = Math.round((0.12 + rng() * 0.28) * fs)
+			const gap = Math.round((0.03 + rng() * 0.17) * fs)
+			const sylEnd = Math.min(to, i + syl)
+			for (let j = i; j < sylEnd; j++) {
+				const env = Math.sin((Math.PI * (j - i)) / syl)
+				let a = 0
+				for (const t of tones) a += Math.sin(t.w * j + t.phase)
+				const s = Math.max(-1, Math.min(1, a * norm))
+				const e = amp * (1 + m * env * s)
+				out.re[j] = e * Math.cos(w0 * j)
+				out.im[j] = e * Math.sin(w0 * j)
+			}
+			const gapEnd = Math.min(to, sylEnd + gap)
+			for (let j = sylEnd; j < gapEnd; j++) {
+				out.re[j] = amp * Math.cos(w0 * j)
+				out.im[j] = amp * Math.sin(w0 * j)
+			}
+			i = gapEnd
+		}
+	}
+	return out
+}

@@ -487,6 +487,7 @@ export function probeModesFor(
 		case "ook-burst":
 			// ISM confirmation is ambient-only before the channelizer (§ 6.4, § 14.1).
 			return []
+		case "analog-am":
 		case "carrier":
 		case "wideband":
 		case "unknown":

@@ -207,16 +207,20 @@ describe("DiscoveryStore sustained admission (DQ 1.4b)", () => {
 			clock.now = T0 + at
 			return store.ingest(o)
 		}
+		// The closed run banks its airtime on its channel (DQ 1.4d); the reopened id is fed on
+		// another channel so only the run rule (1.4b) is under test.
+		const other = { centreHz: CH + 25_000 }
 		feed(live("a", 13), 0)
 		feed(live("a", 13, { closing: true }), 1_000)
-		feed(live("a", 13), 2_000)
-		feed(live("a", 13), 3_000)
+		feed(live("a", 13, other), 2_000)
+		feed(live("a", 13, other), 3_000)
 		expect(count(store)).toBe(0)
-		feed(live("b", 13), 4_000)
-		feed(live("b", 13), 5_000)
-		feed(live("b", 13, { epoch: 2 }), 6_000) // retune: the run starts again
-		feed(live("b", 13, { epoch: 2 }), 7_000)
-		feed(live("b", 13, { epoch: 2 }), 8_000)
+		const third = { centreHz: CH + 50_000 }
+		feed(live("b", 13, third), 4_000)
+		feed(live("b", 13, third), 5_000)
+		feed(live("b", 13, { ...third, epoch: 2 }), 6_000) // retune: the run starts again
+		feed(live("b", 13, { ...third, epoch: 2 }), 7_000)
+		feed(live("b", 13, { ...third, epoch: 2 }), 8_000)
 		expect(count(store)).toBe(0)
 		for (let i = 0; i < 6; i++)
 			feed(live("c", 20, { overload: true }), 10_000 + i * 1_000)

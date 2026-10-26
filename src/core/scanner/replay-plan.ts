@@ -287,6 +287,9 @@ export function planReplayTrialsDetailed(
 	input: IqReplayPlanInput,
 	replayInput: ReadonlySet<string> = REPLAY_INPUT_DECODERS,
 ): { trials: IqReplayTrial[]; skipped: SkippedReplayTrial[] } {
+	// DQ 1.4e: a capture whose track turned edge is never replayed; with no trial the queue
+	// settles it and the capture is discarded.
+	if (input.track?.flags.edge === true) return { trials: [], skipped: [] }
 	const candidates: IqReplayTrial[] = []
 	const skipped: SkippedReplayTrial[] = []
 	const add = (protocol: ScannerProtocol, known: boolean): void => {

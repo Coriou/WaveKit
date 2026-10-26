@@ -57,6 +57,7 @@ export type ScannerClass =
 	| "gmsk-narrow"
 	| "afsk-fm"
 	| "analog-fm"
+	| "analog-am"
 	| "ook-burst"
 	| "carrier"
 	| "wideband"

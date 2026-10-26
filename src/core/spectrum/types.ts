@@ -263,6 +263,11 @@ export interface PipelineConfig {
 	fftSize: number
 	integrationMs: number
 	usableFraction: number
+	/**
+	 * Inner fraction of the span inside `usableFraction`: a segment reaching past it is flagged
+	 * `edge` (or `truncated` out of window). Absent: `usableFraction` (no flagged outer band).
+	 */
+	edgeFraction?: number
 	dcGuardHz: number
 	ppmMargin: number
 	hysteresisDb: number

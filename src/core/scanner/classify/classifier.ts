@@ -59,6 +59,11 @@ export const CLASS_HYPOTHESES: Readonly<
 		{ protocol: "analog-fm", score: 0.6 },
 		{ protocol: "aprs", score: 0.2 },
 	],
+	// Detection-quality 1.17: a voice-modulated AM carrier (see `isAmVoice`).
+	"analog-am": [
+		{ protocol: "analog-am", score: 0.7 },
+		{ protocol: "carrier", score: 0.2 },
+	],
 	"ook-burst": [
 		{ protocol: "ism", score: 0.6 },
 		{ protocol: "digital-unknown", score: 0.1 },
@@ -102,15 +107,68 @@ export const PAGER_RANGE_HYPOTHESES: Readonly<
 	],
 }
 
+/** A range lists `p` when its prior is a finite number of at least 1 (malformed: not listed). */
+function listedIn(
+	priors: Partial<Record<ScannerProtocol, number>>,
+	p: ScannerProtocol,
+): boolean {
+	const v = priors[p]
+	return typeof v === "number" && Number.isFinite(v) && v >= 1
+}
+
 /** True when the priors come from a range that lists a pager protocol (prior at least 1). */
 export function inPagerRange(
 	priors: Partial<Record<ScannerProtocol, number>>,
 ): boolean {
-	const listed = (p: ScannerProtocol): boolean => {
-		const v = priors[p]
-		return typeof v === "number" && Number.isFinite(v) && v >= 1
-	}
-	return listed("pocsag") || listed("flex")
+	return listedIn(priors, "pocsag") || listedIn(priors, "flex")
+}
+
+/**
+ * Detection-quality 1.17 (AM voice): the -20 dB OBW window of a voice-modulated AM carrier. The
+ * carrier holds most of the power, so its -6 dB width is a carrier's (shape `narrow`, at most 2
+ * bins); the speech sidebands (300 to 3 000 Hz each side) widen the -20 dB OBW. A Hann-windowed
+ * unmodulated carrier stays inside its main lobe (±2 bins): at most 4 bins, measured 3 to 4 bins
+ * from 10 to 30 dB. The engine's default bin (`defaultFftSize`: fs / 1 000 rounded to a power of
+ * two) is 1 000 / √2 to 1 000 × √2 = 0.71 to 1.41 kHz, so a carrier reads at most 4 × 1.41 =
+ * 5.66 kHz; 6 000 Hz is past that. AM voice (sidebands to 3 kHz each side) measured 6 to 7 kHz
+ * from 10 to 20 dB. 12 500 Hz = half a 25 kHz AM channel, past ±3 kHz audio plus drift.
+ */
+export const AM_VOICE_MIN_OBW_HZ = 6_000
+export const AM_VOICE_MAX_OBW_HZ = 12_500
+
+/**
+ * Detection-quality 1.17: hypotheses of a voice-modulated AM carrier. `analog-am` first; the
+ * carrier stays a weak second (a carrier with a nearby spur can widen its OBW too).
+ */
+export const AM_VOICE_HYPOTHESES: readonly Hypothesis[] =
+	CLASS_HYPOTHESES["analog-am"]
+
+/**
+ * Detection-quality 1.17: inside a range that lists `analog-am`, is this track a voice-modulated
+ * AM carrier rather than a bare carrier? A carrier-shaped (`narrow`) track with a -20 dB OBW in
+ * [`AM_VOICE_MIN_OBW_HZ`, `AM_VOICE_MAX_OBW_HZ`]; in a range listing AM but not FM (airband),
+ * a `peaked` track in that window too (a carrier on a bin centre spreads its -6 dB width to 3
+ * bins). Flat tops (data such as VDL2), bursts (at most 4 blocks) and any non-finite or
+ * malformed field: false, the safe answer (today's class).
+ */
+export function isAmVoice(
+	track: TrackSnapshot,
+	priors: Partial<Record<ScannerProtocol, number>>,
+): boolean {
+	if (typeof track !== "object" || track === null) return false
+	if (typeof priors !== "object" || priors === null) return false
+	if (!listedIn(priors, "analog-am")) return false
+	const obw = track.obwHz
+	if (typeof obw !== "number" || !Number.isFinite(obw)) return false
+	if (obw < AM_VOICE_MIN_OBW_HZ || obw > AM_VOICE_MAX_OBW_HZ) return false
+	if (
+		typeof track.blocks !== "number" ||
+		!Number.isFinite(track.blocks) ||
+		track.blocks <= BURST_MAX_BLOCKS
+	)
+		return false
+	if (track.spectralShape === "narrow") return true
+	return track.spectralShape === "peaked" && !listedIn(priors, "analog-fm")
 }
 
 /**
@@ -231,6 +289,14 @@ export function classifySpectral(
 		protocols: ScannerProtocol[]
 	},
 ): Classification {
+	// Detection-quality 1.17: a voice-modulated AM carrier is not a bare `carrier`; its class is
+	// `analog-am` and the hypotheses lead with AM.
+	if (isAmVoice(track, ctx.priors))
+		return {
+			class: "analog-am",
+			hypotheses: applyPriors(AM_VOICE_HYPOTHESES, ctx),
+			tier: "spectral",
+		}
 	const cls = classOf(track, { allowBurst: (ctx.priors.ism ?? 1) >= 1 })
 	return {
 		class: cls,

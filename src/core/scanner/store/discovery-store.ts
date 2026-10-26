@@ -85,6 +85,7 @@ import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
 import type { StoreMutation } from "./schemas.js"
 import { RecordingAliasTable } from "../recording-aliases.js"
+import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
 import type { DiscoveryAliasEntry } from "../recording-aliases.js"
 import {
 	PreparedRecordingMetadataSchema,
@@ -108,6 +109,8 @@ import {
 	DQ_CONSOLIDATE_GROUP_MAX,
 	DQ_CONSOLIDATE_SCAN_MAX,
 	DQ_CREATE_SNR_DB,
+	DQ_CREATE_TRACK_SNR_DB,
+	DQ_SHORT_BURST_BLOCKS,
 	DQ_CROSS_FAMILY_HZ,
 	DQ_IDENTITY_OVERLAP_MS,
 	DQ_IDENTITY_PROTOCOLS,
@@ -139,6 +142,15 @@ import type {
 } from "./consolidation.js"
 import type { CompatibilitySide } from "./compatibility.js"
 import { AbsorbedIdIndex } from "./absorbed-id-index.js"
+import {
+	FRAGMENT_GROUPS_MAX,
+	FRAGMENT_FOLD_CHECK_MAX,
+	FRAGMENT_RETIRE_MAX,
+	FRAGMENT_ROUNDS_MAX,
+	planFragments,
+	planRetirement,
+} from "./fragment-retirement.js"
+import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -855,6 +867,8 @@ export class DiscoveryStore
 	private readonly aliasTable = new RecordingAliasTable()
 	/** Band inspection UX req 3.1: absorbed id -> survivor, in memory only. */
 	private readonly absorbedIndex = new AbsorbedIdIndex()
+	/** DQ 10.6: where the next fragment pass resumes examining candidates (memory only). */
+	private fragmentCursor: string | undefined
 	/**
 	 * Band inspection UX req 3.3: the public revision. One store-wide counter, bumped once per
 	 * published change (an operation, a proof change, a recording commit); every record that
@@ -1022,16 +1036,21 @@ export class DiscoveryStore
 		const created = this.createFrom(input, label, target.coChannel)
 		// A threshold, overload or decode create consumes the bucket's entry. A promotion
 		// already deleted the one entry it selected; consuming again could take a neighbour.
-		if (created.discoveryId !== null && admission === "create")
-			this.pending.consume(input)
+		// Any create clears the channel's push-to-talk airtime (1.4d): banked credit must not
+		// outlive the record it helped make.
+		if (created.discoveryId !== null) {
+			if (admission === "create") this.pending.consume(input)
+			else this.pending.consumeAirtime(input)
+		}
 		return created
 	}
 
 	/**
 	 * DQ 1.2 to 1.7: may an undecoded observation that matched nothing create a record? Invalid
 	 * input is rejected (1.7); overload needs 25 dB and never pends (1.2); otherwise 18 dB, or
-	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC), which consumes the
-	 * bucket's pending entry like a threshold create.
+	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC) or channel
+	 * airtime over separate transmissions (1.4d), which consume the bucket's pending entry like a
+	 * threshold create. A short burst's 18 dB threshold also needs a track SNR of at least 15 dB (1.4c).
 	 */
 	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
 		const track = input.track
@@ -1062,7 +1081,20 @@ export class DiscoveryStore
 		)
 			return refuse()
 		if (overload) return snr >= DQ_OVERLOAD_CREATE_SNR_DB ? "create" : refuse()
-		if (snr >= DQ_CREATE_SNR_DB) return "create"
+		// DQ 1.4c: the threshold reads the best of several slot readings; a short burst's own
+		// track SNR must also clear the measured noise maximum. Non-finite blocks or track SNR
+		// never corroborate (the safe answer: the burst waits for more sightings). An edge track
+		// (past the 0.8 usable span, on the passband shoulder) never takes the long-track
+		// exemption: its own SNR must clear the noise maximum too, however long it lasts.
+		const edge = track.flags.edge === true
+		if (
+			snr >= DQ_CREATE_SNR_DB &&
+			((!edge &&
+				Number.isFinite(track.blocks) &&
+				track.blocks >= DQ_SHORT_BURST_BLOCKS) ||
+				(Number.isFinite(track.snrDb) && track.snrDb >= DQ_CREATE_TRACK_SNR_DB))
+		)
+			return "create"
 		if (this.pending.note(input)) {
 			this.pending.dropRun(input.sourceId, input.id)
 			return "promoted"
@@ -1956,7 +1988,15 @@ export class DiscoveryStore
 		return true
 	}
 
-	pruneInactive(maxAgeDays: number): string[] {
+	/**
+	 * `canFold` (DQ 10.3): the caller's check that a record holds no evidence the store cannot see
+	 * (files on disk, captures, remembered trials) and so may be merged away or retired. Without
+	 * it the fragment pass does nothing.
+	 */
+	pruneInactive(
+		maxAgeDays: number,
+		opts: { canFold?: (discoveryId: string) => boolean } = {},
+	): string[] {
 		this.sweepPending() // DQ 1.5: the maintenance cadence also sweeps pending
 		const cutoff = iso(this.now() - maxAgeDays * DAY_MS)
 		const op = newOp()
@@ -1975,7 +2015,233 @@ export class DiscoveryStore
 			this.deleteInto(op, d)
 		}
 		this.finish("evict", op)
+		// DQ 10: the same maintenance cadence retires legacy fragments (bounded per pass).
+		removed.push(
+			...this.retireFragments(
+				opts.canFold !== undefined ? { canFold: opts.canFold } : {},
+			).retired,
+		)
 		return removed
+	}
+
+	/**
+	 * DQ 10.2 to 10.6: one bounded fragment pass. Fragments on one channel of the covering grid
+	 * merge into the channel record (one `rekey` operation per group, the ordinary merge); stale
+	 * low-sighting fragments with no evidence retire (one `evict` operation). Idempotent: a second
+	 * pass over the result changes nothing.
+	 */
+	retireFragments(
+		opts: {
+			/**
+			 * DQ 10.3: asked for every record that would be merged away or retired; required for the
+			 * pass to do anything. Fail closed: a throw or a non-true answer keeps the record.
+			 */
+			canFold?: (discoveryId: string) => boolean
+			probe?: { plan?: FragmentPlan }
+		} = {},
+	): {
+		groups: number
+		absorbed: number
+		retired: string[]
+		merges: { survivor: string; mergedIds: string[] }[]
+	} {
+		const canFold = opts.canFold
+		if (canFold === undefined)
+			return { groups: 0, absorbed: 0, retired: [], merges: [] }
+		const finest = (rasters: readonly Raster[]): Raster | null => {
+			let best: Raster | null = null
+			for (const x of rasters)
+				if (x.spacingHz > 0 && (best === null || x.spacingHz < best.spacingHz))
+					best = x
+			return best
+		}
+		const at = (r: FragmentRecord): Raster[] =>
+			this.channelRastersFor(
+				r.sourceId,
+				r.centreHz + (this.corrections.get(r.sourceId) ?? 0),
+			)
+		const cursor = this.fragmentCursor
+		let budget = FRAGMENT_GROUPS_MAX
+		let groups = 0
+		let absorbed = 0
+		let truncated = 0
+		const merges: { survivor: string; mergedIds: string[] }[] = []
+		const retired: string[] = []
+		let checks = 0
+		let checksSpent = false
+		const asked = new Map<string, boolean>()
+		const fold = (id: string): boolean => {
+			const known = asked.get(id)
+			if (known !== undefined) return known
+			if (checks >= FRAGMENT_FOLD_CHECK_MAX) {
+				checksSpent = true
+				return false
+			}
+			checks += 1
+			let ok = false
+			try {
+				ok = canFold(id) === true
+			} catch {
+				ok = false
+			}
+			asked.set(id, ok)
+			return ok
+		}
+		let settled = false
+		// 10.5: each round merges, then retires on the merged state. A merge can make a refused pair
+		// compatible and a retirement can remove a survivor that refused others, so the pass plans
+		// again after any progress, at most FRAGMENT_ROUNDS_MAX rounds.
+		for (let round = 0; round < FRAGMENT_ROUNDS_MAX; round++) {
+			const records: FragmentRecord[] = []
+			for (const d of this.discoveries.values())
+				records.push(this.fragmentOf(d))
+			const plan = planFragments({
+				records,
+				rasterOf: r => finest(gridFor(at(r), r.obwHz)),
+				fineRasterOf: r => finest(at(r)),
+				compatible: (a, b) => {
+					const x = this.discoveries.get(a)
+					const y = this.discoveries.get(b)
+					return (
+						x !== undefined &&
+						y !== undefined &&
+						!this.decodedConflict(x, y) &&
+						this.pairCompatible(x, y) !== false &&
+						fold(b)
+					)
+				},
+				nowMs: this.now(),
+				cursor,
+				groupsMax: Math.max(0, budget),
+			})
+			if (round === 0) this.fragmentCursor = plan.nextCursor
+			truncated += plan.truncated
+			budget -= plan.groups.length
+			let absorbedNow = 0
+			for (const g of plan.groups) {
+				const keep = this.discoveries.get(g.survivor)
+				if (keep === undefined) continue
+				const op = newOp()
+				for (const id of g.members) {
+					const drop = this.discoveries.get(id)
+					// 10.3: re-checked on the live record; a protected record is never merged away.
+					if (drop === undefined || drop.id === keep.id) continue
+					if (this.fragmentProtected(drop) || !fold(drop.id)) continue
+					// Never past the alias cap: a dropped alias would stop protecting its evidence.
+					if (
+						this.aliasesOf(keep.id).length +
+							1 +
+							this.aliasesOf(drop.id).length >
+						DISCOVERY_RECORDING_ALIASES_MAX
+					)
+						continue
+					this.absorb(op, keep, drop)
+				}
+				if (op.merged.length > 0) {
+					absorbedNow += op.merged.length
+					groups += 1
+					absorbed += op.merged.length
+					merges.push({
+						survivor: keep.id,
+						mergedIds: op.merged.map(([, drop]) => drop).sort(compareText),
+					})
+				}
+				this.finish("rekey", op)
+			}
+			// 10.4: retirement on the state after this round's merges (re-frozen, O(n)).
+			let retiredNow = 0
+			const room = FRAGMENT_RETIRE_MAX - retired.length
+			if (room > 0) {
+				const after: FragmentRecord[] = []
+				for (const d of this.discoveries.values())
+					after.push(this.fragmentOf(d))
+				const op = newOp()
+				for (const id of planRetirement(
+					after,
+					this.now(),
+					undefined,
+					Number.POSITIVE_INFINITY,
+				)) {
+					if (retiredNow >= room || checksSpent) break
+					const d = this.discoveries.get(id)
+					if (d === undefined || this.fragmentProtected(d)) continue
+					if (!fold(id)) continue
+					retired.push(d.id)
+					retiredNow += 1
+					this.deleteInto(op, d)
+				}
+				this.finish("evict", op)
+			}
+			if (opts.probe) opts.probe.plan = { ...plan, truncated }
+			// Settled: a round that saw every candidate and changed nothing.
+			if (absorbedNow === 0 && retiredNow === 0) {
+				// (With the group budget spent, merges may be left: not settled.)
+				// With the retire budget spent, stale records may be left: not settled either.
+				settled =
+					plan.nextCursor === undefined &&
+					budget > 0 &&
+					retired.length < FRAGMENT_RETIRE_MAX &&
+					!checksSpent
+				break
+			}
+			// A scan cut short by the candidate cap: the next pass continues from the cursor.
+			if (plan.nextCursor !== undefined) break
+		}
+		// A bound was hit (round, group or retire cap): work may be left for the next pass.
+		if (!settled && opts.probe?.plan) opts.probe.plan.truncated += 1
+		return { groups, absorbed, retired, merges }
+	}
+
+	/** DQ 10.3: operator state, decodes or any evidence keep a record from being merged away. */
+	private fragmentProtected(d: Discovery): boolean {
+		return hasOperatorState(d) || this.fragmentEvidence(d)
+	}
+
+	private fragmentEvidence(d: Discovery): boolean {
+		if (d.identity !== undefined || d.confidence === "decoded" || d.encrypted)
+			return true
+		const e = d.evidence
+		if (e.recordings > 0 || e.psd || e.iq) return true
+		const m = d.metadata
+		if (
+			m.talkgroups.length > 0 ||
+			m.sources.length > 0 ||
+			m.slots.length > 0 ||
+			m.callsigns.length > 0 ||
+			m.capcodes.length > 0 ||
+			m.ismModels.length > 0 ||
+			m.ctcssHz !== undefined
+		)
+			return true
+		const view = this.discoveryView(d)
+		if (
+			view.label.confidence === "decoded" ||
+			view.evidence === "proven" ||
+			view.proof !== null
+		)
+			return true
+		return this.holdsKept(d.id)
+	}
+
+	/** DQ 10: a record's frozen values for the fragment pass. */
+	private fragmentOf(d: Discovery): FragmentRecord {
+		const sourceId = d.sourceIds[0] ?? ""
+		const m = this.mediansOf(d.id)
+		return {
+			id: d.id,
+			sourceId,
+			centreHz:
+				(m?.centre ?? d.frequencyHz + d.measuredOffsetHz) -
+				(this.corrections.get(sourceId) ?? 0),
+			obwHz: m?.obw ?? d.bandwidthHz,
+			observationCount: d.observationCount,
+			firstSeenAt: d.firstSeenAt,
+			lastSeenAt: d.lastSeenAt,
+			confidence: d.confidence,
+			family: this.associationFamily(d),
+			operator: hasOperatorState(d),
+			evidence: this.fragmentEvidence(d),
+		}
 	}
 
 	correction(sourceId: string): number {

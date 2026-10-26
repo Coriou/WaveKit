@@ -101,6 +101,64 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   (1.6, flags) drops it; the pending sweep drops runs idle for more than 2 500 ms. A sustained
   create consumes the bucket's pending entry like a threshold create.
 
+  1.4c **Short weak bursts need corroboration.** The 18 dB rule of 1.4 reads the best of the
+  slot, best covering slot and matched-window SNRs, a maximum over several noisy readings. An
+  observation of fewer than `DQ_SHORT_BURST_BLOCKS` = 20 blocks (1 000 ms at 50 ms
+  integration, so a burst that closed before the store's first re-ingest) therefore creates
+  on that rule only when its own track SNR is also at least `DQ_CREATE_TRACK_SNR_DB` = 15 dB
+  (the measured noise maximum); otherwise it is held as pending (1.4) like any weak sighting.
+  Non-finite blocks or track SNR never corroborate. Measured on a private band capture: a
+  weak periodic burst (track SNR 12 to 14 dB, best slot 16 to 18.2 dB) passed the gate once in
+  120 s and made a one-sighting record; with 1.4c it makes none, and the five real emitters
+  keep their records. Fixtures: a 19-block
+  burst at an 18 dB best slot creates with a 15 dB track SNR and not with 14.99 dB; at 20
+  blocks the threshold alone creates; the same weak burst seen three times creates (1.4).
+
+  1.4d **Push-to-talk airtime.** Separate transmissions are separate observations, so a
+  channel used in 2 to 10 s overs never forms a 3 s run (1.4b). A transmission that ends
+  without promoting, and whose run was sampled at least twice, banks its run's span and
+  samples on its channel (the pending bucket, nearest of b - 1, b, b + 1, so adjacent
+  8.33 kHz channels bank apart). A later sample on that channel promotes when the banked
+  airtime plus the live run's span reaches `DQ_SUSTAIN_MS` = 3 000 ms, with at
+  least 3 samples whose median (banked and live, newest 8 banked) is at least 12 dB. An entry
+  lives `DQ_PTT_WINDOW_MS` = 60 000 ms from its first banking (three 2 s overs with 25 s gaps
+  fit), at most `DQ_PTT_PER_SOURCE` = 512 entries per source and `DQ_PTT_IDS_MAX` = 8 ids per
+  entry; memory only. Any create there (threshold, overload, decode, sustained or a
+  three-observation promotion of 1.3) drops it, a retune or source removal too; a retraction of
+  any banked id drops the whole entry, and a ninth id restarts the entry empty (so every id
+  holding credit stays retractable). A run's span only ever runs from an accepted
+  sample through its latest accepted sample: a sample under 9 dB or a gap over 2 500 ms ends
+  the run (a closing sample under 9 dB banks the run through its last accepted sample), and
+  the time before the first accepted sample never counts. A duration that is non-finite, negative or longer
+  than the window counts 0. Fixtures: 1 500 ms banked plus a 1 500 ms over promotes and 1 ms less
+  does not; a below-floor first sample or close adds no time; a median of 12 dB promotes and 11.99 dB does not; banked airtime counts
+  59 999 ms after banking and not 60 000 ms; a transmission sampled once banks nothing; three
+  synthetic 2 s AM voice overs at about 13.5 dB best-slot SNR make one record, one over none;
+  two adjacent 8.33 kHz channels taking turns make two records; 20 s of noise makes none.
+
+  1.4e **Edge band.** The detector, segmenter and channel gate see
+  `DETECTION_USABLE_FRACTION` = 0.95 of the captured span (±486.4 kHz at 1.024 Msps:
+  0.95 × 512 kHz), while windows, hop plans, probes, IQ capture and the activity history keep
+  `USABLE_FRACTION` = 0.8 (±409.6 kHz). On a private RTL capture the median floor fell 1.9 dB
+  from mid-band to 0.93 to 0.95 of Nyquist and 2.4 dB over the last 3 %: still the passband
+  shoulder, so the per-bin floor keeps an SNR there meaningful; the outer 5 % (25.6 kHz a side)
+  stays masked against energy folded back from past Nyquist. A segment reaching within the gap
+  tolerance of the 0.8 bound is flagged `edge` in window (`truncated` in a sweep). An edge track
+  passes the same channel gate, its observation keeps `flags.edge`, it never votes a class (3.4;
+  the record shows `unknown`), it is never held to confirm, channel-refined, IQ-captured, burst-captured, given PSD evidence or given an automatic analog trial
+  (whose whole channel and the track centre must lie inside the 0.8 span, refusal `edge` or
+  `out-of-window`); an IQ capture whose track turns edge after it opened is discarded at once
+  and the replay planner plans no trial for an edge track, and a burst capture whose track
+  closes edge is closed on an empty window, which the recorder discards without committing; and
+  on the 18 dB rule of 1.4 it never takes the long-track exemption of 1.4c: its own track SNR
+  must also reach `DQ_CREATE_TRACK_SNR_DB` = 15 dB however long it lasts. The image check of
+  § 4.9 is symmetric and runs over the whole detection span. Fixtures: an OOK burst at 0.93 of
+  Nyquist passes a burst gate and makes one record flagged edge (none with a 0.8 span); a tone
+  past 0.95 makes no track; a 30 dB image of a strong carrier at 0.9 and 0.92 of Nyquist is
+  flagged and makes no record; a 150 ms tone about 7 dB over the floor at 0.9 does not pass a
+  12.5 kHz gate; a 60-block edge track at 18 dB with an 8 dB track SNR makes no record (one
+  mid-span), and an edge track creates at a 15 dB track SNR and not 14.99 dB.
+
   1.5 Pending expiry is a **fixed window anchored at the entry's first sample**: an entry is
   deleted `DQ_PENDING_WINDOW_MS` = 600 000 ms (10 min) after its first sample, whatever
   arrived since; samples are never re-anchored. An observation arriving after deletion starts
@@ -283,6 +341,17 @@ its median reaches 15 dB).
   1 Hz more keys to 25 kHz; inside a synthetic 100 kHz plateau of
   carriers every track's local SNR is under 6 dB and no record is created, while a lone
   carrier's is above.
+
+  1.17 **AM voice is not a bare carrier.** Inside a band plan range that lists `analog-am`
+  (prior at least 1), a track whose -6 dB width is a carrier's (`narrow`) but whose -20 dB OBW
+  lies in [`AM_VOICE_MIN_OBW_HZ` = 6 000, `AM_VOICE_MAX_OBW_HZ` = 12 500] Hz (speech
+  sidebands; an unmodulated Hann-windowed carrier reads at most 4 bins, 5.66 kHz at the
+  coarsest default bin), and that is longer than 4 blocks, is classified as AM voice: class
+  `analog-am` with `analog-am` as the first hypothesis, never `carrier`. In a range that lists AM but not FM (airband) a `peaked` track in the same
+  window counts too; a flat top (data) never does. Any malformed field keeps today's class.
+  An unmodulated carrier still classifies `carrier`. A weak AM carrier whose sidebands stay
+  under 20 dB below the carrier (OBW from on-bins, about 3 to 4 kHz) cannot be told apart
+  from a carrier and keeps that class.
 
 ## 2. One emitter, one discovery
 
@@ -639,6 +708,114 @@ load) and removed after the next durable snapshot.
   expect the same end state as an uninterrupted run, the plan file gone after the snapshot.
 - **Old reader.** The journal lines a plan writes, replayed by the existing `replay` (no
   consolidation code involved) onto the pre-plan snapshot, give the consolidated store.
+
+## 10. Legacy fragment retirement
+
+As an operator I want the fragments older stores hold beside or inside one channel folded
+into that channel's record, and stale empty fragments gone, without ever losing a record I
+labelled or one that decoded.
+
+Root cause: records written before the 1.16 channel keying and the 2.1 sticky join sit up
+to half a channel spacing from the channel's own record, often more than 1 000 Hz away, so
+7.1 never joins them, and nothing ages a record faster than
+`storage.discoveryMaxAgeDays`.
+
+10.1 A record is **protected** when it carries operator state (7.1), is decoded (stored or
+effective), carries an identity, decoded metadata (talkgroups, sources, slots, callsigns,
+capcodes, ISM models, CTCSS), recordings, PSD or IQ evidence, is encrypted, shows proof or
+proven evidence, or holds a kept recording. Every other record is a **fragment candidate**.
+
+10.2 **Channel merge.** For a candidate `c`, the covering raster is the finest channel
+raster at `c`'s median centre (correction removed) among those fit for its OBW (1.16). With
+none, `c` takes no channel merge. The channel is the raster channel nearest `c`; the group
+is the records of `c`'s source within half a spacing of the channel centre whose nearest
+raster channel is the same one (`c` included). The survivor is the group's first record in
+the order: operator state, then protected, then most sightings, then earliest
+`firstSeenAt`, then smaller id. Members are the group's other fragment candidates whose
+median OBW is finite, positive and at most 2 spacings, whose association family equals the
+survivor's or either is `unknown` or `carrier`, that lie on the same channel as the
+survivor on the finest channel raster covering either of the two (whatever their OBW, so a
+20 kHz record keyed to a 25 kHz channel never absorbs a record on a neighbouring 8.33 kHz
+channel), that are not decoded as another protocol
+(9.5) and that 3.1 does not refuse (undecided joins). Each member is absorbed with `absorb`
+(observations, `observationCount`, `airtimeMs`, first/last seen, metadata, evidence moved;
+the absorbed id recorded in the absorbed-id index and adopted as an alias). A survivor may
+carry operator state; a member never does.
+
+10.3 A protected record is never a member and never retires; it is re-checked on the live
+record when the group runs. **The whole fragment pass is behind the caller's
+`canFold(id)` predicate**: it is asked for every record that would be merged away or
+retired, and a record it does not answer true for (a throw included) stays outside the
+group and is never retired. Without the predicate the pass does nothing at all (no merge,
+no retirement). The store cannot see every kind of evidence: evidence and recording files
+land on disk before the store's flags are set (a crash leaves them unflagged), burst
+captures name their discovery only in their own sidecar, analog proof is memory-only while
+the trial memory that produced it persists, a merged-away id's trial memory is forgotten on
+its `deleted` event, and its evidence folder is not reachable from the survivor. The answer
+is cached per pass (one call per record) and at most `FRAGMENT_FOLD_CHECK_MAX` = 1 024
+calls are made per pass (a pass folds at most 480 + 256 = 736 records, leaving 288 for
+refusals); past it every further record is refused for that pass and the pass is not
+settled. A merge that would give the survivor more than
+`DISCOVERY_RECORDING_ALIASES_MAX` = 64 aliases is refused (the member stays), so no alias,
+and no evidence tied to one, is ever dropped. The scanner service supplies the predicate
+on its maintenance cadence, so the fragment pass is active: true only when no evidence, dv
+or analog recording folder exists on disk (`lstat`; only `ENOENT` or `ENOTDIR` counts as
+absent, so a permission error refuses), no burst capture names the id (committed, or still
+recording, parked or committing), no PSD write or probe recording link for it is in flight,
+and no trial is remembered for it, for the id and every alias.
+Merging a fragment that carries such evidence would need its evidence folder and trial
+memory moved to the survivor first (future work).
+
+10.4 **Retirement.** A fragment candidate not in a group this pass retires (is deleted, one
+`evict` operation, reported by `pruneInactive` with the age prune) when it has at most
+`FRAGMENT_RETIRE_MAX_SIGHTINGS` = 2 sightings, confidence `activity` or `candidate`,
+`lastSeenAt` at least `FRAGMENT_RETIRE_AGE_MS` = 72 h before now, and `canFold(id)` (10.3)
+answers true. Stale records are considered oldest first.
+
+10.5 **One pass reaches the fixpoint.** Each round merges, then retires (10.4) on the
+merged state, so a merge survivor that is still a stale low-sighting record retires in the
+same round. A merge moves the survivor's medians, so a pair a round refused may become
+compatible, and a retirement may remove a survivor that refused the records beside it: so
+after a round that examined every candidate and merged or retired anything, the pass plans
+again, for at most `FRAGMENT_ROUNDS_MAX` = 4 rounds and within the pass's group and retire
+caps. A pass that ended on a round with no change and no cap reached is settled. A pass after a pass that hit no bound changes nothing and journals nothing.
+Total sightings over the live records plus the retired records equal the total before the
+pass.
+
+10.6 **Bounds per pass**, run on the maintenance cadence (the first scanner tick after start, then every 5 minutes). Per round: freezing is
+O(n) and the sorts O(n log n) for n records (10 000 by default); at most
+`FRAGMENT_SCAN_MAX` = 512 candidates are examined, in id order from an in-memory cursor
+that wraps; each visits at most `FRAGMENT_PEER_SCAN_MAX` + 2 = 34 nearest records (the
+candidate, 32 others, and one more to detect truncation; a candidate outside the nearest
+33 takes the last slot, so a group holds at most 33 records): 17 408 visits and at most
+512 x 32 = 16 384 pair checks. At most 4 rounds, so 4 x n freezes and 69 632 visits. Per
+pass over all rounds: at most `FRAGMENT_GROUPS_MAX` = 32 groups of at most
+`FRAGMENT_GROUP_MAX` = 16 records, so 32 x 15 = 480 absorbs, each moving at most 256
+observations (122 880 moves); at most `FRAGMENT_RETIRE_MAX` = 256 retirements, oldest
+`lastSeenAt` first. Progress per pass: the 512 is a maximum, not a guarantee, because a
+round stops examining candidates once 32 groups formed (5 000 consecutive two-record pairs
+cover about 64 records per pass). A pass either examines 512 candidates or forms 32 groups
+or retires 256 records, so for N candidates, G mergeable groups and R stale records
+everything is reached within ceil(N / 512) + ceil(G / 32) + ceil(R / 256) passes (one
+group behind 512 records with nothing to merge takes 2 passes). For a 10 000-record store
+of 5 000 two-record groups: 20 + 157 = 177 passes at most (about 15 h at 5 minutes); in
+practice merging and examining overlap, so it is near the larger term.
+The group cap is kept at 32 so one maintenance call stays well under the 0.5 s Pi target of
+7.8; the measured fragment count (a few per cent of a store) clears in a few passes.
+
+10.7 **Migration.** Existing stores need no conversion: merges are journaled as `rekey`
+with the ordinary merge mutation and retirements as `evict`, so an older reader replays
+them unchanged.
+
+10.8 Regression fixtures (`tests/unit/core/scanner/fragment-retirement.test.ts`): three
+fragments 2.5 to 4 kHz apart on one 12.5 kHz channel merge into the record with the most
+sightings; a labelled record is the survivor and a second labelled record stays; decoded
+and recording-holding records stay; other channels, no grid, a 30 kHz record and a 3.1
+level split stay apart; a 20 kHz record at 118.025 MHz and an 8 kHz record at
+118.016667 MHz under 8.33 and 25 kHz rasters stay apart; two stale single-sighting records
+on one channel merge and the survivor retires in one pass, the next pass journalling
+nothing; 32, 33 and 34 neighbours around a channel; no predicate does nothing (no merge, no retirement), a refusing or throwing predicate keeps the record out of every group and from retirement and an accepting one retires it, at most 1 024 predicate calls per pass, a merge refused at and past the 64-alias cap; retirement (with an accepting predicate) at exactly 72 h and not 1 ms before; each bound at and
+one past its limit; an old-reader replay of the journal.
 
 ## 8. Passive marginal cost guard
 

@@ -58,6 +58,7 @@ describe("hint text", () => {
 		expect(hintText("analog-voice")).toBe("analog voice")
 		expect(hintText("lora")).toBe("LoRa")
 		expect(hintText("ook-burst")).toBe("OOK bursts")
+		expect(hintText("analog-am")).toBe("AM with speech")
 		expect(hintText("unknown")).toBe("unclassified")
 		expect(hintText("sub-ghz-warble")).toBe("unclassified")
 		expect(hintText(42)).toBe("unclassified")
