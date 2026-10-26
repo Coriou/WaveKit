@@ -9,6 +9,7 @@ import {
 	ACTIVITY_DECODE_WARM_MS,
 	ACTIVITY_HISTORY_REFRESH_MS,
 	ACTIVITY_HOT_HOLD_MS,
+	ACTIVITY_LIVE_TTL_MS,
 	ACTIVITY_MAX_CANDIDATES,
 	ACTIVITY_MAX_INTERESTS,
 	ACTIVITY_MAX_NOTES,
@@ -607,5 +608,45 @@ describe("channel activity ranker", () => {
 		process.stdout.write(
 			`channel-activity ingest: ${perBlockUs.toFixed(2)} µs/block (8 tracks)\n`,
 		)
+	})
+})
+
+describe("review regressions", () => {
+	it("overloaded blocks clear live evidence and never keep a source fresh (6 h of overload)", () => {
+		const { clock, ranker } = setup()
+		const a = RASTER_HZ[10]!
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([a]))
+		expect(one(ranker, query(), clock.now()).channels[10]!.live).toBe(true)
+		for (let t = 0; t < 6 * 3_600_000; t += 60_000) {
+			clock.advance(60_000)
+			ranker.ingestBlock("rtl", "e1", block([a], { overload: true }))
+		}
+		const s = one(ranker, query(), clock.now())
+		expect(s.status).toBe("stale")
+		expect(s.channels[10]).toMatchObject({ live: false, state: "cold" })
+		// the first overloaded block already clears live while still fresh
+		const g = setup()
+		g.ranker.ingestEpoch("rtl", "e1", 1)
+		g.ranker.ingestBlock("rtl", "e1", block([a]))
+		g.ranker.ingestBlock("rtl", "e1", block([a], { overload: true }))
+		const fresh = one(g.ranker, query(), g.clock.now())
+		expect(fresh.status).toBe("ready")
+		expect(fresh.channels[10]!.live).toBe(false)
+		expect(fresh.channels[10]!.state).toBe("hot")
+	})
+
+	it("live expires 1 000 ms after the last accepted block, ready or not", () => {
+		const { clock, ranker } = setup()
+		const a = RASTER_HZ[11]!
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([a]))
+		const t0 = clock.now()
+		const live0 = one(ranker, query(), t0 + ACTIVITY_LIVE_TTL_MS - 1)
+		expect(live0.channels[11]!.live).toBe(true)
+		expect(live0.nextEvaluationMonoMs).toBe(t0 + ACTIVITY_LIVE_TTL_MS)
+		expect(
+			one(ranker, query(), t0 + ACTIVITY_LIVE_TTL_MS).channels[11]!.live,
+		).toBe(false)
 	})
 })

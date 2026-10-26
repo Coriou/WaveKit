@@ -381,16 +381,48 @@ export interface ChannelLiveCoverageQuery {
 	/** The track's occupied bandwidth. */
 	widthHz: number
 	protocols: readonly ScannerProtocol[]
-	/** Track onset on the monotonic clock, already moved earlier by ONSET_SLACK_MS. */
-	onsetMonoMs: number
+	/**
+	 * The earliest the track's onset can have been on the monotonic clock: processing time minus
+	 * the track's sample span minus COVERAGE_MAX_PIPELINE_LATENCY_MS. `covered` only when the
+	 * decoder ran from at or before this time.
+	 */
+	earliestOnsetMonoMs: number
 }
 export type ChannelLiveCoverage = (
 	q: ChannelLiveCoverageQuery,
 ) => "covered" | "uncovered" | "uncertain"
 /** Frequency attribution of a replay decode: half a 12.5 kHz paging/DMR raster. */
 export const REPLAY_ATTRIBUTION_HALF_RASTER_HZ = 6_250
-/** Onset uncertainty added before a coverage check: the track surfaces some blocks after its energy. */
-export const COVERAGE_ONSET_SLACK_MS = 500
+/**
+ * The scanner has no sample-to-monotonic mapping (blocks are stamped when processed, not when
+ * their samples arrived), so the onset is bounded from below: samples may wait in the source,
+ * fanout and spectrum host queues before processing. Bound: 10 000 ms, the ranker's staleness
+ * window (ACTIVITY_STALE_MS); a pipeline lagging longer is not trusted for anything and a live
+ * decoder that started within it is `uncertain` (the track is captured).
+ */
+export const COVERAGE_MAX_PIPELINE_LATENCY_MS = 10_000
+
+/**
+ * The coverage predicate's containment rule: the track's [hz ± widthHz/2] lies inside the decoder
+ * channel's usable passband [channelHz ± passbandHz/2]. A non-finite or non-positive input: false.
+ */
+export function trackWithinPassband(
+	channelHz: number,
+	passbandHz: number,
+	hz: number,
+	widthHz: number,
+): boolean {
+	if (
+		![channelHz, passbandHz, hz, widthHz].every(Number.isFinite) ||
+		passbandHz <= 0 ||
+		widthHz < 0
+	)
+		return false
+	return Math.abs(hz - channelHz) + widthHz / 2 <= passbandHz / 2
+}
+
+/** Discoveries whose last decode time is kept for the ranker (the trial memory's 2 048). */
+export const DECODE_TIMES_MAX = 2_048
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
@@ -842,6 +874,25 @@ export class ScannerService extends EventEmitter {
 	/** Engine identity for the activity ranker: one id per engine object (weak, no bound needed). */
 	private readonly activityEngineIds = new WeakMap<object, string>()
 	private activityEngineSeq = 0
+	/** Last applied decode time per discovery (service clock), least recently set dropped. */
+	private readonly decodeTimes = new Map<string, number>()
+
+	private noteDecoded(
+		discoveryId: string,
+		sourceId: string,
+		protocol: ScannerProtocol,
+	): void {
+		this.decodeTimes.delete(discoveryId)
+		this.decodeTimes.set(discoveryId, this.now())
+		while (this.decodeTimes.size > DECODE_TIMES_MAX) {
+			const oldest = this.decodeTimes.keys().next()
+			if (oldest.done === true) break
+			this.decodeTimes.delete(oldest.value)
+		}
+		const hz = this.store.get(discoveryId)?.frequencyHz
+		if (hz !== undefined)
+			this.feedActivity(r => r.noteDecode(sourceId, hz, protocol))
+	}
 
 	private activityEngineId(sourceId: string): string | null {
 		const engine = this.spectrum.engine(sourceId)
@@ -891,15 +942,14 @@ export class ScannerService extends EventEmitter {
 			sourceId,
 		)) {
 			if (decodes.length >= 512) break
-			if (d.confidence === "decoded") {
-				const seen = Date.parse(d.lastSeenAt)
-				if (Number.isFinite(seen))
-					decodes.push({
-						hz: d.frequencyHz,
-						protocol: d.protocol,
-						ageMs: Math.max(0, now - seen),
-					})
-			}
+			// The time of the last applied decode, never the discovery's activity time.
+			const decodedAt = this.decodeTimes.get(d.id)
+			if (d.confidence === "decoded" && decodedAt !== undefined)
+				decodes.push({
+					hz: d.frequencyHz,
+					protocol: d.protocol,
+					ageMs: Math.max(0, now - decodedAt),
+				})
 			for (const t of this.trialMemory.view(d.id))
 				if (t.lastDecodedAt !== undefined && successes.length < 512)
 					successes.push({
@@ -4200,11 +4250,7 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return accepted
 		live.decoded = true
-		const decodedAt = this.store.get(survivor)?.frequencyHz
-		if (decodedAt !== undefined)
-			this.feedActivity(r =>
-				r.noteDecode(live.sourceId, decodedAt, ev.protocol),
-			)
+		this.noteDecoded(survivor, live.sourceId, ev.protocol)
 		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
 			live.acceptedIdentity = {
@@ -4781,7 +4827,7 @@ export class ScannerService extends EventEmitter {
 					hz: track.centreHz,
 					widthHz: track.obwHz,
 					protocols: this.protocolsFor(live, track.centreHz),
-					onsetMonoMs: mono - spanMs - COVERAGE_ONSET_SLACK_MS,
+					earliestOnsetMonoMs: mono - spanMs - COVERAGE_MAX_PIPELINE_LATENCY_MS,
 				}) === "covered"
 			)
 		} catch {
@@ -5332,6 +5378,11 @@ export class ScannerService extends EventEmitter {
 					this.store.applyEvidence(byFrequency, ev, {})
 					this.dirty = true
 					applied = true
+					if (
+						ev.identity &&
+						this.store.get(byFrequency)?.confidence === "decoded"
+					)
+						this.noteDecoded(byFrequency, result.sourceId, ev.protocol)
 				}
 			} else if (result.observationId && discoveryId)
 				// the observation closed and left `recent` (10 s) before its replay
@@ -5414,18 +5465,23 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * The one stored discovery of `sourceId` within half a 12.5 kHz raster (6 250 Hz) of `hz`
-	 * that can take a `protocol` decode (same protocol, or not decoded yet). Two or more: none.
+	 * The one stored discovery of `sourceId` within half a 12.5 kHz raster (6 250 Hz) of `hz`, when
+	 * it can take a `protocol` decode (same protocol, or not decoded yet). Uniqueness is decided over
+	 * every discovery in reach first: two or more, or a single incompatible one, give none.
 	 */
 	private discoveryOnChannel(
 		sourceId: string,
 		hz: number,
 		protocol: ScannerProtocol,
 	): string | null {
-		const hits = this.store
-			.near(hz, REPLAY_ATTRIBUTION_HALF_RASTER_HZ, sourceId)
-			.filter(d => d.protocol === protocol || d.confidence !== "decoded")
-		return hits.length === 1 ? hits[0]!.id : null
+		const hits = this.store.near(
+			hz,
+			REPLAY_ATTRIBUTION_HALF_RASTER_HZ,
+			sourceId,
+		)
+		if (hits.length !== 1) return null
+		const d = hits[0]!
+		return d.protocol === protocol || d.confidence !== "decoded" ? d.id : null
 	}
 
 	/**
@@ -5443,6 +5499,10 @@ export class ScannerService extends EventEmitter {
 		if (!this.store.appendObservationEvidence(observationId, ev)) return false
 		this.store.applyEvidence(discoveryId, ev, {})
 		this.dirty = true
+		const d = this.store.get(discoveryId)
+		const sourceId = Array.isArray(d?.sourceIds) ? d.sourceIds[0] : undefined
+		if (ev.identity && d?.confidence === "decoded" && sourceId !== undefined)
+			this.noteDecoded(discoveryId, sourceId, ev.protocol)
 		return true
 	}
 
@@ -6983,6 +7043,7 @@ export class ScannerService extends EventEmitter {
 			this.lastConfirm.delete(discovery.id)
 			this.knownProtocols.forget(discovery.id)
 			this.trialMemory.forget(discovery.id)
+			this.decodeTimes.delete(discovery.id)
 			// the store stamped each copy with the revision of its removal
 			this.emitDiscovery({ change: "deleted", discovery })
 		}
@@ -7011,6 +7072,7 @@ export class ScannerService extends EventEmitter {
 		if (change === "deleted") {
 			this.knownProtocols.forget(id)
 			this.trialMemory.forget(id)
+			this.decodeTimes.delete(id)
 		}
 		// WG2: eviction and age pruning never remove a lockout, and operator deletion
 		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a

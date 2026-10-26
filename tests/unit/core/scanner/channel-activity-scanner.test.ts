@@ -6,7 +6,8 @@ import type {
 } from "../../../../src/core/scanner/iq-capture-contract.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
-	COVERAGE_ONSET_SLACK_MS,
+	COVERAGE_MAX_PIPELINE_LATENCY_MS,
+	trackWithinPassband,
 	type ChannelLiveCoverage,
 	type ScannerServiceDeps,
 } from "../../../../src/core/scanner/scanner-service.js"
@@ -145,7 +146,7 @@ describe("replay capture by live coverage from onset", () => {
 		}
 	})
 
-	it("asks with the onset on the monotonic clock, moved earlier by the slack", async () => {
+	it("asks with the onset on the monotonic clock, moved earlier by the latency bound", async () => {
 		const coverage = vi.fn<ChannelLiveCoverage>(() => "uncovered")
 		const { h, internals, track, live } = setup({
 			channelCoverage: coverage,
@@ -159,7 +160,8 @@ describe("replay capture by live coverage from onset", () => {
 				expect.objectContaining({
 					sourceId: "rtl",
 					hz: RF,
-					onsetMonoMs: 100_000 - spanMs - COVERAGE_ONSET_SLACK_MS,
+					earliestOnsetMonoMs:
+						100_000 - spanMs - COVERAGE_MAX_PIPELINE_LATENCY_MS,
 				}),
 			)
 		} finally {
@@ -272,6 +274,133 @@ describe("replay attribution to the discovery and the ranker", () => {
 			])
 			h.service.applyReplayResult({ ...failed, rfHz: RF })
 			expect(note).toHaveBeenLastCalledWith("rtl", RF, "pocsag", "failure")
+		} finally {
+			await h.service.stop()
+		}
+	})
+})
+
+describe("review regressions (scanner side)", () => {
+	it("an onset before the decoder start is never covered: buffered samples cannot shift it later", async () => {
+		// Burst at 0; its first 100 ms processed at 2 000 ms; decoder started at 1 000 ms.
+		const decoderStartMono = 1_000
+		const reference: ChannelLiveCoverage = q =>
+			decoderStartMono <= q.earliestOnsetMonoMs ? "covered" : "uncertain"
+		const { h, port, internals, live } = setup({
+			channelCoverage: reference,
+			monoNow: () => 2_000,
+		})
+		await h.service.start()
+		try {
+			const t = trackOf({
+				trackId: "t1",
+				centreHz: RF,
+				obwHz: 9000,
+				epoch: 1,
+				gate: "passed",
+				startSample: 0,
+				lastSample: 102_400, // 100 ms at 1.024 Msps
+			} as never)
+			internals.requestIqCapture(live(), t)
+			expect(port.capture).toHaveBeenCalledTimes(1)
+			// earliest onset = 2 000 − 100 − 10 000 < 1 000: uncertain, captured
+			expect(COVERAGE_MAX_PIPELINE_LATENCY_MS).toBe(10_000)
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	it("the coverage contract is containment of the whole track in the passband", async () => {
+		// 12 kHz multimon-ng passband: a 9 kHz track 6 kHz off sticks out, a centred one fits.
+		expect(trackWithinPassband(RF, 12_000, RF + 6_000, 9_000)).toBe(false)
+		expect(trackWithinPassband(RF, 12_000, RF, 9_000)).toBe(true)
+		expect(trackWithinPassband(RF, 12_000, RF + 1_500, 9_000)).toBe(true)
+		expect(trackWithinPassband(RF, 12_000, RF + 1_501, 9_000)).toBe(false)
+		expect(trackWithinPassband(RF, 0, RF, 0)).toBe(false)
+		expect(trackWithinPassband(RF, 12_000, Number.NaN, 0)).toBe(false)
+		// the scanner asks with the track's own width
+		const coverage = vi.fn<ChannelLiveCoverage>(() => "uncovered")
+		const { h, internals, track, live } = setup({
+			channelCoverage: coverage,
+			monoNow: () => 100_000,
+		})
+		await h.service.start()
+		try {
+			internals.requestIqCapture(live(), track)
+			expect(coverage).toHaveBeenCalledWith(
+				expect.objectContaining({ hz: RF, widthHz: track.obwHz }),
+			)
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	it("a conflicting decoded discovery in reach blocks the fallback: no neighbour match", async () => {
+		const { h, internals } = setup()
+		await h.service.start()
+		try {
+			const store = internals.store
+			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue(
+				undefined as never,
+			)
+			vi.spyOn(store, "near" as never).mockReturnValue([
+				{ id: "A", protocol: "dmr", confidence: "decoded", frequencyHz: RF },
+				{
+					id: "B",
+					protocol: "unknown",
+					confidence: "detected",
+					frequencyHz: RF + 6_000,
+				},
+			] as never)
+			const applied = vi
+				.spyOn(store, "applyEvidence" as never)
+				.mockReturnValue(undefined as never)
+			h.service.applyReplayResult(pocsagResult())
+			expect(applied).not.toHaveBeenCalled()
+			// a single incompatible one is no attribution either
+			vi.spyOn(store, "near" as never).mockReturnValue([
+				{ id: "A", protocol: "dmr", confidence: "decoded", frequencyHz: RF },
+			] as never)
+			h.service.applyReplayResult(pocsagResult())
+			expect(applied).not.toHaveBeenCalled()
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	it("decode history ages from the last applied decode, not from later undecoded activity", async () => {
+		const { h, internals } = setup()
+		await h.service.start()
+		try {
+			let clock = 1_000_000
+			const svc = h.service as unknown as {
+				now: () => number
+				noteDecoded(id: string, sourceId: string, protocol: string): void
+				activityHistory(
+					sourceId: string,
+					w: { lowHz: number; highHz: number },
+				): { decodes: { hz: number; ageMs: number }[] }
+			}
+			svc.now = () => clock
+			const d = {
+				id: "d_old",
+				protocol: "pocsag",
+				confidence: "decoded",
+				frequencyHz: RF,
+				sourceIds: ["rtl"],
+				// an undecoded burst just refreshed the discovery's activity time
+				lastSeenAt: new Date(clock + 7 * 3_600_000).toISOString(),
+			}
+			vi.spyOn(internals.store, "near" as never).mockReturnValue([d] as never)
+			vi.spyOn(internals.store, "get" as never).mockReturnValue(d as never)
+			const w = { lowHz: CENTRE - 512_000, highHz: CENTRE + 512_000 }
+			// never decoded in this process: no decode time, no decode history
+			expect(svc.activityHistory("rtl", w).decodes).toEqual([])
+			svc.noteDecoded("d_old", "rtl", "pocsag")
+			clock += 7 * 3_600_000
+			expect(svc.activityHistory("rtl", w).decodes).toEqual([
+				expect.objectContaining({ hz: RF, ageMs: 7 * 3_600_000 }),
+			])
 		} finally {
 			await h.service.stop()
 		}

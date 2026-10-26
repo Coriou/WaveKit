@@ -68,6 +68,12 @@ import type {
 
 /** Stale at now − lastFrame ≥ 10 s (Stage 1 rule). */
 export const ACTIVITY_STALE_MS = 10_000
+/**
+ * Live means energy in a recent accepted block: the latest one, and no older than 1 000 ms
+ * (20 blocks at the default 50 ms integration; 4 at 250 ms). A source whose blocks stop, or turn
+ * overloaded, loses its live flags within this time.
+ */
+export const ACTIVITY_LIVE_TTL_MS = 1_000
 /** History pull at most every 2 s per source, outside snapshot(). */
 export const ACTIVITY_HISTORY_REFRESH_MS = 2_000
 /** Notice coalescing: at most 250 ms late, at most 4 notices per second per source. */
@@ -490,11 +496,13 @@ export function createChannelActivityRanker(
 		}
 		const later = (a: number | null, b: number): number =>
 			a === null || b > a ? b : a
+		const liveFresh =
+			s.lastBlockMono !== null && now - s.lastBlockMono < ACTIVITY_LIVE_TTL_MS
 		for (const [key, seg] of s.segments) {
 			const i = at(seg.centreHz)
 			if (i === -1) continue
 			lastEnergy[i] = later(lastEnergy[i]!, seg.lastMono)
-			if (s.liveKeys.has(key)) live[i] = true
+			if (liveFresh && s.liveKeys.has(key)) live[i] = true
 		}
 		for (const t of s.tracks.values()) {
 			const i = at(t.centreHz)
@@ -523,6 +531,10 @@ export function createChannelActivityRanker(
 				duty[i] = Math.max(duty[i]!, Math.min(1, Math.max(0, o.duty)))
 		}
 		let next = health.next ?? Infinity
+		if (liveFresh && s.liveKeys.size > 0) {
+			const due = s.lastBlockMono! + ACTIVITY_LIVE_TTL_MS
+			if (due < next) next = due
+		}
 		const deadline = (t: number | null, window: number): void => {
 			if (t === null) return
 			const due = t + window
@@ -858,14 +870,21 @@ export function createChannelActivityRanker(
 			const s = startEpoch(sourceId, engineId, block.epoch)
 			if (!s) return
 			const now = mono()
+			// An overloaded block establishes nothing: it clears the live flags and is no frame, so
+			// a source that stays overloaded turns stale after ACTIVITY_STALE_MS (the planner falls back).
+			if (block.overload) {
+				if (s.liveKeys.size > 0) {
+					s.liveKeys = new Set()
+					markDirty(sourceId)
+				}
+				return
+			}
 			const first = s.lastFrameMono === null
 			const wasStale =
 				s.lastFrameMono !== null && now - s.lastFrameMono >= ACTIVITY_STALE_MS
 			s.lastFrameMono = now
 			if (first || wasStale) markDirty(sourceId, true)
 			refreshHistory(sourceId, s, block)
-			// An overloaded block is a frame (health) but no energy evidence.
-			if (block.overload) return
 			s.lastBlockMono = now
 			const liveKeys = new Set<string>()
 			let edge = false

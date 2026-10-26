@@ -437,4 +437,4 @@ and `dispose`. All times are on the planner's monotonic clock.
 - `ScannerServiceDeps` gains `channelActivity`, `channelCoverage` (`ChannelLiveCoverage`) and
   `monoNow`. `requestIqCapture` skips the capture only on `covered`.
 - `IqReplayResult` gains an optional `rfHz`; the scanner falls back to the capture view.
-  `discoveryOnChannel` gives frequency attribution (unique within 6 250 Hz, compatible protocol).
+  `discoveryOnChannel` gives frequency attribution (exactly one discovery within 6 250 Hz, then a compatible protocol). `trackWithinPassband` states the coverage containment rule; the predicate gets `earliestOnsetMonoMs` (span and `COVERAGE_MAX_PIPELINE_LATENCY_MS` 10 000 ms subtracted). Decode history reads per-discovery decode times (at most 2 048). Live energy expires 1 000 ms after the last accepted block; overloaded blocks clear it and are no frame.
