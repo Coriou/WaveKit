@@ -145,7 +145,9 @@ describe("legacy startup with a held port (WG9 5.1)", () => {
 			digitalVoice: { enabled: false, httpPort: digital },
 		})
 		expect(result.code).toBe(1)
-		expect(result.stderr).toBe("WaveKit startup failed\n")
+		expect(result.stderr).toBe(
+			"WaveKit startup failed: Error [EADDRINUSE]: startup could not complete\n",
+		)
 		expect(result.stderr).not.toMatch(/Unhandled|uncaught|\n\s+at /i)
 		expect(result.stdout).not.toContain("WaveKit started successfully")
 		expect(result.stdout + result.stderr).not.toContain(String(audio))
@@ -170,7 +172,9 @@ describe("legacy startup with a held port (WG9 5.1)", () => {
 			digitalVoice: { enabled: false, httpPort: digital },
 		})
 		expect(result.code).toBe(1)
-		expect(result.stderr).toBe("WaveKit startup failed\n")
+		expect(result.stderr).toBe(
+			"WaveKit startup failed: ConfigValidationError [CONFIG_VALIDATION_ERROR]: startup could not complete\n",
+		)
 		expect(result.stderr).not.toMatch(/Unhandled|uncaught|\n\s+at /i)
 		expect(result.stdout).not.toContain("WaveKit started successfully")
 		await new Promise<void>(resolve => held.close(() => resolve()))
