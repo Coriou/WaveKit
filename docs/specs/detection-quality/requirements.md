@@ -686,6 +686,68 @@ load) and removed after the next durable snapshot.
 - **Old reader.** The journal lines a plan writes, replayed by the existing `replay` (no
   consolidation code involved) onto the pre-plan snapshot, give the consolidated store.
 
+## 10. Legacy fragment retirement
+
+As an operator I want the fragments older stores hold beside or inside one channel folded
+into that channel's record, and stale empty fragments gone, without ever losing a record I
+labelled or one that decoded.
+
+Root cause: records written before the 1.16 channel keying and the 2.1 sticky join sit up
+to half a channel spacing from the channel's own record, often more than 1 000 Hz away, so
+7.1 never joins them, and nothing ages a record faster than
+`storage.discoveryMaxAgeDays`.
+
+10.1 A record is **protected** when it carries operator state (7.1), is decoded (stored or
+effective), carries an identity, decoded metadata (talkgroups, sources, slots, callsigns,
+capcodes, ISM models, CTCSS), recordings, PSD or IQ evidence, is encrypted, shows proof or
+proven evidence, or holds a kept recording. Every other record is a **fragment candidate**.
+
+10.2 **Channel merge.** For a candidate `c`, the covering raster is the finest channel
+raster at `c`'s median centre (correction removed) among those fit for its OBW (1.16). With
+none, `c` takes no channel merge. The channel is the raster channel nearest `c`; the group
+is the records of `c`'s source within half a spacing of the channel centre whose nearest
+raster channel is the same one (`c` included). The survivor is the group's first record in
+the order: operator state, then protected, then most sightings, then earliest
+`firstSeenAt`, then smaller id. Members are the group's other fragment candidates whose
+median OBW is finite, positive and at most 2 spacings, whose association family equals the
+survivor's or either is `unknown` or `carrier`, that are not decoded as another protocol
+(9.5) and that 3.1 does not refuse (undecided joins). Each member is absorbed with `absorb`
+(observations, `observationCount`, `airtimeMs`, first/last seen, metadata, evidence moved;
+the absorbed id recorded in the absorbed-id index and adopted as an alias). A survivor may
+carry operator state; a member never does.
+
+10.3 A protected record is never a member and never retires; it is re-checked on the live
+record when the group runs.
+
+10.4 **Retirement.** A fragment candidate not in a group this pass retires (is deleted, one
+`evict` operation, reported by `pruneInactive` with the age prune) when it has at most
+`FRAGMENT_RETIRE_MAX_SIGHTINGS` = 2 sightings, confidence `activity` or `candidate`, and
+`lastSeenAt` at least `FRAGMENT_RETIRE_AGE_MS` = 72 h before now.
+
+10.5 **Idempotent.** A pass over the result of a pass that hit no bound changes nothing and
+journals nothing. Total sightings over the live records plus the retired records equal the
+total before the pass.
+
+10.6 **Bounds per pass**, run on the 5-minute maintenance cadence. At most
+`FRAGMENT_SCAN_MAX` = 512 candidates are examined, in id order from an in-memory cursor
+that wraps; each visits at most `FRAGMENT_PEER_SCAN_MAX` + 1 = 33 nearest records (16 896
+visits, at most 512 x 32 = 16 384 pair checks). At most `FRAGMENT_GROUPS_MAX` = 32 groups of
+at most `FRAGMENT_GROUP_MAX` = 16 records are merged: 32 x 15 = 480 absorbs, each moving at
+most 256 observations (122 880 moves). At most `FRAGMENT_RETIRE_MAX` = 256 records retire,
+oldest `lastSeenAt` first. Freezing is O(n) and the sorts O(n log n) for n records (10 000
+by default). A store of 10 000 candidates is examined in 20 passes.
+
+10.7 **Migration.** Existing stores need no conversion: merges are journaled as `rekey`
+with the ordinary merge mutation and retirements as `evict`, so an older reader replays
+them unchanged.
+
+10.8 Regression fixtures (`tests/unit/core/scanner/fragment-retirement.test.ts`): three
+fragments 2.5 to 4 kHz apart on one 12.5 kHz channel merge into the record with the most
+sightings; a labelled record is the survivor and a second labelled record stays; decoded
+and recording-holding records stay; other channels, no grid, a 30 kHz record and a 3.1
+level split stay apart; retirement at exactly 72 h and not 1 ms before; each bound at and
+one past its limit; an old-reader replay of the journal.
+
 ## 8. Passive marginal cost guard
 
 As an operator I want passive discovery to stay on while I watch the waterfall on a host

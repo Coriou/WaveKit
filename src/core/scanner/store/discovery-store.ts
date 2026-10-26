@@ -141,6 +141,8 @@ import type {
 } from "./consolidation.js"
 import type { CompatibilitySide } from "./compatibility.js"
 import { AbsorbedIdIndex } from "./absorbed-id-index.js"
+import { planFragments } from "./fragment-retirement.js"
+import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -857,6 +859,8 @@ export class DiscoveryStore
 	private readonly aliasTable = new RecordingAliasTable()
 	/** Band inspection UX req 3.1: absorbed id -> survivor, in memory only. */
 	private readonly absorbedIndex = new AbsorbedIdIndex()
+	/** DQ 10.6: where the next fragment pass resumes examining candidates (memory only). */
+	private fragmentCursor: string | undefined
 	/**
 	 * Band inspection UX req 3.3: the public revision. One store-wide counter, bumped once per
 	 * published change (an operation, a proof change, a recording commit); every record that
@@ -1987,7 +1991,150 @@ export class DiscoveryStore
 			this.deleteInto(op, d)
 		}
 		this.finish("evict", op)
+		// DQ 10: the same maintenance cadence retires legacy fragments (bounded per pass).
+		removed.push(...this.retireFragments().retired)
 		return removed
+	}
+
+	/**
+	 * DQ 10.2 to 10.6: one bounded fragment pass. Fragments on one channel of the covering grid
+	 * merge into the channel record (one `rekey` operation per group, the ordinary merge); stale
+	 * low-sighting fragments with no evidence retire (one `evict` operation). Idempotent: a second
+	 * pass over the result changes nothing.
+	 */
+	retireFragments(probe?: { plan?: FragmentPlan }): {
+		groups: number
+		absorbed: number
+		retired: string[]
+		merges: { survivor: string; mergedIds: string[] }[]
+	} {
+		const records: FragmentRecord[] = []
+		for (const d of this.discoveries.values()) records.push(this.fragmentOf(d))
+		const byId = new Map(records.map(r => [r.id, r] as const))
+		const plan = planFragments({
+			records,
+			rasterOf: r => {
+				const rasters = gridFor(
+					this.channelRastersFor(
+						r.sourceId,
+						r.centreHz + (this.corrections.get(r.sourceId) ?? 0),
+					),
+					r.obwHz,
+				)
+				let best: Raster | null = null
+				for (const x of rasters)
+					if (
+						x.spacingHz > 0 &&
+						(best === null || x.spacingHz < best.spacingHz)
+					)
+						best = x
+				return best
+			},
+			compatible: (a, b) => {
+				const x = this.discoveries.get(a)
+				const y = this.discoveries.get(b)
+				return (
+					x !== undefined &&
+					y !== undefined &&
+					!this.decodedConflict(x, y) &&
+					this.pairCompatible(x, y) !== false
+				)
+			},
+			nowMs: this.now(),
+			cursor: this.fragmentCursor,
+		})
+		this.fragmentCursor = plan.nextCursor
+		if (probe) probe.plan = plan
+		let groups = 0
+		let absorbed = 0
+		const merges: { survivor: string; mergedIds: string[] }[] = []
+		for (const g of plan.groups) {
+			const keep = this.discoveries.get(g.survivor)
+			if (keep === undefined) continue
+			const op = newOp()
+			for (const id of g.members) {
+				const drop = this.discoveries.get(id)
+				// 10.3: re-checked on the live record; a protected record is never merged away.
+				if (drop === undefined || drop.id === keep.id) continue
+				if (this.fragmentProtected(drop)) continue
+				this.absorb(op, keep, drop)
+			}
+			if (op.merged.length > 0) {
+				groups += 1
+				absorbed += op.merged.length
+				merges.push({
+					survivor: keep.id,
+					mergedIds: op.merged.map(([, drop]) => drop).sort(compareText),
+				})
+			}
+			this.finish("rekey", op)
+		}
+		const retired: string[] = []
+		const op = newOp()
+		for (const id of plan.retire) {
+			const d = this.discoveries.get(id)
+			const frozen = byId.get(id)
+			if (d === undefined || frozen === undefined) continue
+			// Unchanged since freezing (a merge above never touches a retirement candidate).
+			if (d.observationCount !== frozen.observationCount) continue
+			if (this.fragmentProtected(d)) continue
+			retired.push(d.id)
+			this.deleteInto(op, d)
+		}
+		this.finish("evict", op)
+		return { groups, absorbed, retired, merges }
+	}
+
+	/** DQ 10.3: operator state, decodes or any evidence keep a record from being merged away. */
+	private fragmentProtected(d: Discovery): boolean {
+		return hasOperatorState(d) || this.fragmentEvidence(d)
+	}
+
+	private fragmentEvidence(d: Discovery): boolean {
+		if (d.identity !== undefined || d.confidence === "decoded" || d.encrypted)
+			return true
+		const e = d.evidence
+		if (e.recordings > 0 || e.psd || e.iq) return true
+		const m = d.metadata
+		if (
+			m.talkgroups.length > 0 ||
+			m.sources.length > 0 ||
+			m.slots.length > 0 ||
+			m.callsigns.length > 0 ||
+			m.capcodes.length > 0 ||
+			m.ismModels.length > 0 ||
+			m.ctcssHz !== undefined
+		)
+			return true
+		const view = this.discoveryView(d)
+		if (
+			view.label.confidence === "decoded" ||
+			view.evidence === "proven" ||
+			view.proof !== null
+		)
+			return true
+		return this.holdsKept(d.id)
+	}
+
+	/** DQ 10: a record's frozen values for the fragment pass. */
+	private fragmentOf(d: Discovery): FragmentRecord {
+		const sourceId = d.sourceIds[0] ?? ""
+		const m = this.mediansOf(d.id)
+		return {
+			id: d.id,
+			sourceId,
+			centreHz:
+				(m?.centre ?? d.frequencyHz + d.measuredOffsetHz) -
+				(this.corrections.get(sourceId) ?? 0),
+			obwHz: m?.obw ?? d.bandwidthHz,
+			observationCount: d.observationCount,
+			firstSeenAt: d.firstSeenAt,
+			lastSeenAt: d.lastSeenAt,
+			confidence: d.confidence,
+			family: this.associationFamily(d),
+			operator: hasOperatorState(d),
+			evidence: this.fragmentEvidence(d),
+		}
 	}
 
 	correction(sourceId: string): number {
