@@ -31,6 +31,20 @@ export function writeGuard(
 	diskGuard(free, reserveBytes)
 }
 
+// The real filesystem probe, unless a test-only fixed availability was injected
+// through run()'s programmatic options. The CLI cannot set it, and the guard
+// thresholds apply unchanged to whichever value is probed.
+export function diskAvailability(data) {
+	if (data.simulatedFreeBytes === undefined)
+		return fs.statfsSync(data.directory, { bigint: true })
+	if (
+		!Number.isSafeInteger(data.simulatedFreeBytes) ||
+		data.simulatedFreeBytes < 0
+	)
+		throw new Error("Invalid simulated disk availability")
+	return { bavail: BigInt(data.simulatedFreeBytes), bsize: 1n }
+}
+
 export function guardedWrite(check, write) {
 	check()
 	return write()
@@ -578,7 +592,7 @@ async function fixture(data) {
 				queuedBytes: bytes,
 				artifactBytes: inventoryArtifacts(data.directory).bytes,
 				rssBytes: process.memoryUsage().rss,
-				free: fs.statfsSync(data.directory, { bigint: true }),
+				free: diskAvailability(data),
 			},
 			data.reserveBytes + TINY_GROWTH.totalBytes,
 		)
