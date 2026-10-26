@@ -203,11 +203,15 @@ threshold to ignore the first 10 seconds after `wavekit-api` start.
 A lock from a dead process in the same container is reclaimed at once. After a
 container kill, the new core waits about 30–40 seconds, watching the old lock's
 heartbeat, then reclaims it. Holders refresh every 10 seconds; a heartbeat
-observed unchanged for 30 seconds on a monotonic clock expires. A lock whose heartbeat stays fresh
-(another live core using the same state) is never taken, and startup fails with
-the error code shown in the startup failure line, such as
-`ACCESS_STORAGE_FOREIGN_OWNER`, `ACCESS_STORAGE_BUSY`, `BANDPLANS_LOCK_HELD`, or
-`OPERATOR_DATA_LOCK_HELD`.
+observed unchanged for 30 seconds on a monotonic clock expires, even if its PID
+is still alive in the same container. A lock whose heartbeat stays fresh
+(another live core using the same state) is never taken. A recent heartbeat from
+an owner with a matching local PID and start time fails immediately; an old
+wall-clock timestamp selects observation and can wait up to 40 seconds. Wall
+clock age alone never proves expiry. Startup shows the public error code and,
+for band-plan and operator-data storage, a safe reason, such as
+`ACCESS_STORAGE_FOREIGN_OWNER`, `ACCESS_STORAGE_BUSY`,
+`BANDPLANS_UNAVAILABLE/lock-held`, or `OPERATOR_DATA_UNAVAILABLE/lock-held`.
 
 ### Port conflicts
 

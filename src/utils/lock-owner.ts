@@ -157,6 +157,24 @@ export function sameScope(recorded: LockOwner, current: LockOwner): boolean {
 				current.platform !== "linux")
 	)
 }
+/** Wall time only selects fail-fast; an old timestamp never proves lease expiry. */
+export function ownerHasRecentHeartbeat(
+	recorded: LockOwner,
+	current: LockOwner,
+	probe: OwnerProbe,
+	mtimeMs: number,
+): boolean {
+	return (
+		sameScope(recorded, current) &&
+		probe.alive &&
+		recorded.startTime !== null &&
+		probe.startTime !== null &&
+		recorded.startTime.kind === probe.startTime.kind &&
+		!identityDiffers(recorded.startTime, probe.startTime) &&
+		Math.abs(Date.now() - mtimeMs) <=
+			HEARTBEAT_STALE_MS + TIME_IDENTITY_TOLERANCE_MS
+	)
+}
 export function isStale(
 	recorded: LockOwner,
 	current: LockOwner,
@@ -449,9 +467,13 @@ async function ownerIsHeld(
 			throw error
 	}
 	if (!owner) return unchangedFor >= HEARTBEAT_STALE_MS ? false : "wait"
-	if (isStale(owner, current, await probeLockOwner(owner), unchangedFor))
-		return false
-	return sameScope(owner, current) ? "held" : "wait"
+	const probe = await probeLockOwner(owner)
+	if (isStale(owner, current, probe, unchangedFor)) return false
+	// A matching live owner with a recent heartbeat should reject CLI contenders
+	// immediately. A clock step only selects observation, never immediate reclaim.
+	return ownerHasRecentHeartbeat(owner, current, probe, stat.mtimeMs)
+		? "held"
+		: "wait"
 }
 async function currentHeartbeatValue(lock: string): Promise<string> {
 	try {

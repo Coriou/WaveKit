@@ -39,10 +39,25 @@ async function open(
 	directory: string,
 	mode: "load" | "provision" = "provision",
 ) {
+	let clock = 0
 	const storage = await PrivateAccessStorage.open({
 		directory,
 		mode,
 		ownership,
+		lockWait: {
+			now: () => clock,
+			sleep: async ms => {
+				clock += ms
+				for (const entry of await fs.readdir(directory)) {
+					if (entry.startsWith("owner-"))
+						await fs.utimes(
+							join(directory, entry),
+							new Date(clock),
+							new Date(clock),
+						)
+				}
+			},
+		},
 	})
 	owners.push(storage)
 	return storage
@@ -1099,3 +1114,62 @@ it("stops the access heartbeat and closes its fd when owner removal fails", asyn
 		vi.useRealTimers()
 	}
 })
+
+it.each(["recent", "stopped", "forward-step"] as const)(
+	"observes a live same-scope access owner for the lease budget, heartbeat=%s",
+	async scenario => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const name = (await fs.readdir(directory)).find(entry =>
+			entry.startsWith("owner-"),
+		)!
+		const path = join(directory, name)
+		// A failed close leaves a live same-scope PID with a stopped heartbeat.
+		if (scenario !== "recent") {
+			vi.spyOn(fs, "unlink").mockRejectedValueOnce(new Error("cleanup fault"))
+			await expect(storage.close()).rejects.toMatchObject({
+				code: "ACCESS_STORAGE_UNAVAILABLE",
+			})
+		}
+		const contents = await fs.readFile(path, "utf8")
+		if (scenario === "stopped") await fs.utimes(path, new Date(0), new Date(0))
+		const wallNow = Date.now()
+		if (scenario === "forward-step")
+			vi.spyOn(Date, "now").mockReturnValue(wallNow + 120_000)
+		let clock = 0
+		const result = PrivateAccessStorage.open({
+			directory,
+			mode: "load",
+			ownership,
+			lockWait: {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+					if (scenario === "forward-step")
+						await fs.utimes(
+							path,
+							new Date(wallNow + clock),
+							new Date(wallNow + clock),
+						)
+				},
+			},
+		})
+		if (scenario !== "stopped") {
+			await expect(result).rejects.toMatchObject({
+				code: "ACCESS_STORAGE_BUSY",
+			})
+			expect(await fs.readFile(path, "utf8")).toBe(contents)
+		} else {
+			const recovered = await result
+			owners.push(recovered)
+			expect(await fs.readdir(directory)).not.toContain(name)
+		}
+		expect(clock).toBe(
+			scenario === "recent"
+				? 0
+				: scenario === "stopped"
+					? 3 * HEARTBEAT_MS
+					: LOCK_WAIT_MS,
+		)
+	},
+)

@@ -43,10 +43,10 @@ export interface OperatorDataStorageOptions {
 	) => void | Promise<void>
 }
 class StorageUnavailable extends OperatorDataError {
-	override readonly code: string
+	readonly reason: "lock-held" | "io"
 	constructor(reason: "lock-held" | "io") {
 		super("OPERATOR_DATA_UNAVAILABLE")
-		this.code = `OPERATOR_DATA_${reason.replaceAll("-", "_").toUpperCase()}`
+		this.reason = reason
 	}
 }
 const unavailable = () => new StorageUnavailable("io")

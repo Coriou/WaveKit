@@ -30,7 +30,21 @@ import type {
 // callers retain their own acquisition handle; only this test harness tracks paths.
 const acquired = new Map<string, WriterLock>()
 async function acquireWriterLock(path: string, options: LockWaitOptions = {}) {
-	const handle = await acquireHandle(path, options)
+	let clock = 0
+	const handle = await acquireHandle(path, {
+		now: () => clock,
+		sleep: async ms => {
+			clock += ms
+			await acquired.get(path)?.check()
+			if (acquired.has(path))
+				await fs.utimes(
+					join(path, "owner.json"),
+					new Date(clock),
+					new Date(clock),
+				)
+		},
+		...options,
+	})
 	if (handle) acquired.set(path, handle)
 	return Boolean(handle)
 }
@@ -339,6 +353,12 @@ describe("directory reclamation", () => {
 				now: () => clock,
 				sleep: async ms => {
 					clock += ms
+					if (resumed)
+						await fs.utimes(
+							join(lock, "owner.json"),
+							new Date(clock),
+							new Date(clock),
+						)
 				},
 			}),
 		).toBe(false)
@@ -478,6 +498,12 @@ describe("directory reclamation", () => {
 				now: () => clock,
 				sleep: async (ms: number) => {
 					clock += ms
+					if (acquired.has(lock))
+						await fs.utimes(
+							join(lock, "owner.json"),
+							new Date(clock),
+							new Date(clock),
+						)
 					await new Promise<void>(resolve => setImmediate(resolve))
 				},
 			}
@@ -776,3 +802,51 @@ it("observes a foreign abandoned reclaim claim within the same 40 s budget", asy
 	expect(clock).toBe(HEARTBEAT_STALE_MS)
 	if (handle) await handle.release()
 })
+
+it.each(["recent", "stopped", "forward-step"] as const)(
+	"observes a live same-scope writer for the lease budget, heartbeat=%s",
+	async scenario => {
+		const lock = await lockPath()
+		await fs.rmdir(lock)
+		const first = await acquireHandle(lock)
+		if (!first) throw new Error("missing first handle")
+		if (scenario !== "recent") await first.stop()
+		const path = join(lock, "owner.json")
+		const contents = await fs.readFile(path, "utf8")
+		if (scenario === "stopped") await fs.utimes(path, new Date(0), new Date(0))
+		const wallNow = Date.now()
+		if (scenario === "forward-step")
+			vi.spyOn(Date, "now").mockReturnValue(wallNow + 120_000)
+		let clock = 0
+		try {
+			const second = await acquireHandle(lock, {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+					if (scenario === "forward-step")
+						await fs.utimes(
+							path,
+							new Date(wallNow + clock),
+							new Date(wallNow + clock),
+						)
+				},
+			})
+			expect(clock).toBe(
+				scenario === "recent"
+					? 0
+					: scenario === "stopped"
+						? HEARTBEAT_STALE_MS
+						: LOCK_WAIT_MS,
+			)
+			if (scenario !== "stopped") {
+				expect(second).toBe(false)
+				expect(await fs.readFile(path, "utf8")).toBe(contents)
+			} else {
+				expect(second).not.toBe(false)
+				if (second) await second.release()
+			}
+		} finally {
+			await first.release()
+		}
+	},
+)

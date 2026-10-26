@@ -71,8 +71,20 @@ async function open(
 		) => void
 	},
 ) {
+	let clock = 0
 	const store = await BandPlanStorage.open({
 		stateDir,
+		lockWait: {
+			now: () => clock,
+			sleep: async ms => {
+				clock += ms
+				await fs.utimes(
+					join(stateDir, "bandplans", ".writer-lock", "owner.json"),
+					new Date(clock),
+					new Date(clock),
+				)
+			},
+		},
 		...(options?.writable === false ? { writable: false } : {}),
 		...(options?.onStoreUnavailable
 			? { onStoreUnavailable: options.onStoreUnavailable }
@@ -101,9 +113,7 @@ function waitExit(child: ChildProcess): Promise<void> {
 const file = (path: string) => join(path, "bandplans", "state.json")
 const lock = (path: string) => join(path, "bandplans", ".writer-lock")
 const unavailable = {
-	code: expect.stringMatching(
-		/^BANDPLANS_(UNAVAILABLE|IO|LOCK_HELD|PERMISSIONS|INVALID|OVERSIZED)$/,
-	),
+	code: "BANDPLANS_UNAVAILABLE",
 	message: "Band-plan storage is unavailable.",
 }
 function gate() {
@@ -229,9 +239,13 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		const path = await root()
 		const first = await open(path)
 		const held = await rejectionOf(open(path))
-		expect(held).toMatchObject({ ...unavailable, code: "BANDPLANS_LOCK_HELD" })
+		expect(held).toMatchObject({
+			...unavailable,
+			code: "BANDPLANS_UNAVAILABLE",
+			reason: "lock-held",
+		})
 		expect(formatStartupFailure(held)).toBe(
-			"WaveKit startup failed: WaveKitError [BANDPLANS_LOCK_HELD]: startup could not complete\n",
+			"WaveKit startup failed: WaveKitError [BANDPLANS_UNAVAILABLE/lock-held]: startup could not complete\n",
 		)
 		const exit = await new Promise<number | null>((resolve, reject) => {
 			const child = spawn(
@@ -752,81 +766,85 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 			await rm(outfile, { force: true })
 		}
 	})
-})
 
-it("latches unavailable on a lost heartbeat and preserves the successor on close", async () => {
-	const path = await root()
-	vi.useFakeTimers()
-	try {
-		const first = await open(path)
-		const snapshot = first.snapshot()
-		const lockPath = join(path, "bandplans", ".writer-lock")
-		await rename(lockPath, `${lockPath}.detached`)
-		const second = await open(path)
-		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
-		await first.close()
-		expect(first.isAvailable()).toBe(false)
-		await expect(first.persist(snapshot)).rejects.toMatchObject({
-			code: "BANDPLANS_IO",
-		})
-		expect((await lstat(lockPath)).isDirectory()).toBe(true)
-		await second.close()
-	} finally {
-		vi.useRealTimers()
-	}
-})
-it("checks ownership immediately before committing a write", async () => {
-	const path = await root()
-	let replace = false
-	const store = await open(path, async (stage, phase) => {
-		if (replace && stage === "rename" && phase === "before") {
-			replace = false
-			const lockPath = join(path, "bandplans", ".writer-lock")
-			await rename(lockPath, `${lockPath}.detached`)
-		}
-	})
-	const before = await readFile(file(path), "utf8")
-	replace = true
-	await expect(store.persist(store.snapshot())).rejects.toMatchObject({
-		code: "BANDPLANS_IO",
-	})
-	expect(store.isAvailable()).toBe(false)
-	expect(await readFile(file(path), "utf8")).toBe(before)
-})
-
-it.each([
-	"directory-close:before",
-	"directory-close:after",
-	"lock-release:before",
-])(
-	"stops the writer heartbeat and closes its fd after %s fails",
-	async fault => {
+	it("latches unavailable on a lost heartbeat and preserves the successor on close", async () => {
 		const path = await root()
-		const ownerPath = join(lock(path), "owner.json")
-		const fileOpen = fs.open
-		let ownerHandle: FileHandle | undefined
-		vi.spyOn(fs, "open").mockImplementation(async (...args) => {
-			const handle = await fileOpen(...args)
-			if (args[0] === ownerPath) ownerHandle = handle
-			return handle
-		})
 		vi.useFakeTimers()
 		try {
-			const store = await open(path, (stage, phase) => {
-				if (`${stage}:${phase}` === fault) throw new Error("cleanup fault")
+			const first = await open(path)
+			const snapshot = first.snapshot()
+			const lockPath = join(path, "bandplans", ".writer-lock")
+			await rename(lockPath, `${lockPath}.detached`)
+			const second = await open(path)
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			await first.close()
+			expect(first.isAvailable()).toBe(false)
+			await expect(first.persist(snapshot)).rejects.toMatchObject({
+				code: "BANDPLANS_UNAVAILABLE",
+				reason: "io",
 			})
-			const closing = store.close()
-			await expect(closing).rejects.toBeDefined()
-			expect(store.close()).toBe(closing)
-			expect(ownerHandle).toBeDefined()
-			expect(ownerHandle?.fd).toBe(-1)
-			await expect(ownerHandle?.stat()).rejects.toMatchObject({ code: "EBADF" })
-			expect(vi.getTimerCount()).toBe(0)
-			const before = await lstat(ownerPath)
-			await vi.advanceTimersByTimeAsync(3 * HEARTBEAT_MS)
-			expect((await lstat(ownerPath)).mtimeMs).toBe(before.mtimeMs)
+			expect((await lstat(lockPath)).isDirectory()).toBe(true)
+			await second.close()
 		} finally {
 			vi.useRealTimers()
 		}
-	},
-)
+	})
+	it("checks ownership immediately before committing a write", async () => {
+		const path = await root()
+		let replace = false
+		const store = await open(path, async (stage, phase) => {
+			if (replace && stage === "rename" && phase === "before") {
+				replace = false
+				const lockPath = join(path, "bandplans", ".writer-lock")
+				await rename(lockPath, `${lockPath}.detached`)
+			}
+		})
+		const before = await readFile(file(path), "utf8")
+		replace = true
+		await expect(store.persist(store.snapshot())).rejects.toMatchObject({
+			code: "BANDPLANS_UNAVAILABLE",
+			reason: "io",
+		})
+		expect(store.isAvailable()).toBe(false)
+		expect(await readFile(file(path), "utf8")).toBe(before)
+	})
+
+	it.each([
+		"directory-close:before",
+		"directory-close:after",
+		"lock-release:before",
+	])(
+		"stops the writer heartbeat and closes its fd after %s fails",
+		async fault => {
+			const path = await root()
+			const ownerPath = join(lock(path), "owner.json")
+			const fileOpen = fs.open
+			let ownerHandle: FileHandle | undefined
+			vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+				const handle = await fileOpen(...args)
+				if (args[0] === ownerPath) ownerHandle = handle
+				return handle
+			})
+			vi.useFakeTimers()
+			try {
+				const store = await open(path, (stage, phase) => {
+					if (`${stage}:${phase}` === fault) throw new Error("cleanup fault")
+				})
+				const closing = store.close()
+				await expect(closing).rejects.toBeDefined()
+				expect(store.close()).toBe(closing)
+				expect(ownerHandle).toBeDefined()
+				expect(ownerHandle?.fd).toBe(-1)
+				await expect(ownerHandle?.stat()).rejects.toMatchObject({
+					code: "EBADF",
+				})
+				expect(vi.getTimerCount()).toBe(0)
+				const before = await lstat(ownerPath)
+				await vi.advanceTimersByTimeAsync(3 * HEARTBEAT_MS)
+				expect((await lstat(ownerPath)).mtimeMs).toBe(before.mtimeMs)
+			} finally {
+				vi.useRealTimers()
+			}
+		},
+	)
+})

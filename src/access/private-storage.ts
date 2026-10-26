@@ -9,7 +9,7 @@ import { z } from "zod"
 import {
 	lockWait,
 	heartbeatValue,
-	sameScope,
+	ownerHasRecentHeartbeat,
 	startLockHeartbeat,
 	isStale,
 	lockOwnerSchema,
@@ -139,10 +139,12 @@ function validateSnapshot(input: unknown, binding: string): SessionSnapshot {
 
 /**
  * One process owns this dedicated local directory until close(). Each open first
- * publishes its own unique owner file, then rejects ANY other live owner (even
- * the same PID). Concurrent contenders may both refuse; retry after graceful
- * cleanup. PID evidence is trusted only within the same scope. Foreign owners
- * are held while their heartbeat is fresh and reclaimed after its lease expires.
+ * publishes its own unique owner file, then rejects a recent matching live
+ * owner (even the same PID) or observes an old heartbeat until release or expiry.
+ * Concurrent contenders may both refuse;
+ * retry after graceful cleanup. PID evidence is trusted only within the same
+ * scope. Owners are held while their heartbeat is fresh and reclaimed after
+ * its lease expires.
  *
  * Parent directories must be trusted/stable. Existing selected directories/files
  * must already be private and owned by this uid; unrelated paths are never chmod'd.
@@ -503,11 +505,12 @@ export class PrivateAccessStorage {
 						? { bootId: null, startTime: null }
 						: {}),
 				}
+				const probe = await probeLockOwner(candidate)
 				if (
 					isStale(
 						candidate,
 						identity,
-						await probeLockOwner(candidate),
+						probe,
 						wait.observe(path, heartbeatValue(stat)),
 					)
 				) {
@@ -536,7 +539,12 @@ export class PrivateAccessStorage {
 					owner.data.scope !== scope
 						? "ACCESS_STORAGE_FOREIGN_OWNER"
 						: "ACCESS_STORAGE_BUSY"
-				if (sameScope(candidate, identity) || !(await wait.retry()))
+				// Recent, matching live owners reject immediately; old wall timestamps
+				// only select monotonic observation, including after a clock step.
+				if (
+					ownerHasRecentHeartbeat(candidate, identity, probe, stat.mtimeMs) ||
+					!(await wait.retry())
+				)
 					throw failure(code)
 			}
 		}

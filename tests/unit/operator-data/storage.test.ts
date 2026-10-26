@@ -47,8 +47,20 @@ async function open(
 		phase: "before" | "after",
 	) => void | Promise<void>,
 ) {
+	let clock = 0
 	const store = await OperatorDataStorage.open({
 		stateDir,
+		lockWait: {
+			now: () => clock,
+			sleep: async ms => {
+				clock += ms
+				await fs.utimes(
+					join(stateDir, "operator-data", ".writer-lock", "owner.json"),
+					new Date(clock),
+					new Date(clock),
+				)
+			},
+		},
 		...(stage ? { stage } : {}),
 	})
 	stores.push(store)
@@ -57,9 +69,7 @@ async function open(
 const file = (path: string) => join(path, "operator-data", "state.json")
 const lock = (path: string) => join(path, "operator-data", ".writer-lock")
 const unavailable = {
-	code: expect.stringMatching(
-		/^OPERATOR_DATA_(UNAVAILABLE|IO|LOCK_HELD|PERMISSIONS|INVALID|OVERSIZED)$/,
-	),
+	code: "OPERATOR_DATA_UNAVAILABLE",
 	message: "Operator data is unavailable.",
 }
 function gate() {
@@ -185,10 +195,11 @@ describe("dedicated operator-data storage", () => {
 		const held: unknown = await open(path).catch((error: unknown) => error)
 		expect(held).toMatchObject({
 			...unavailable,
-			code: "OPERATOR_DATA_LOCK_HELD",
+			code: "OPERATOR_DATA_UNAVAILABLE",
+			reason: "lock-held",
 		})
 		expect(formatStartupFailure(held)).toBe(
-			"WaveKit startup failed: WaveKitError [OPERATOR_DATA_LOCK_HELD]: startup could not complete\n",
+			"WaveKit startup failed: WaveKitError [OPERATOR_DATA_UNAVAILABLE/lock-held]: startup could not complete\n",
 		)
 		const exit = await new Promise<number | null>((resolve, reject) => {
 			const child = spawn(
@@ -646,7 +657,8 @@ it("latches unavailable on a lost heartbeat and preserves the successor on close
 		await first.close()
 		expect(first.isAvailable()).toBe(false)
 		await expect(first.persist(snapshot)).rejects.toMatchObject({
-			code: "OPERATOR_DATA_IO",
+			code: "OPERATOR_DATA_UNAVAILABLE",
+			reason: "io",
 		})
 		expect((await lstat(lockPath)).isDirectory()).toBe(true)
 		await second.close()
@@ -667,7 +679,8 @@ it("checks ownership immediately before committing a write", async () => {
 	const before = await readFile(file(path), "utf8")
 	replace = true
 	await expect(store.persist(store.snapshot())).rejects.toMatchObject({
-		code: "OPERATOR_DATA_IO",
+		code: "OPERATOR_DATA_UNAVAILABLE",
+		reason: "io",
 	})
 	expect(store.isAvailable()).toBe(false)
 	expect(await readFile(file(path), "utf8")).toBe(before)
