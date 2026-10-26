@@ -285,3 +285,87 @@ it.each([
 		}
 	},
 )
+
+// The 1024-entry CPU history fills at 2114 s (68 s + 1023 × 2 s).
+// At 2154 s it has lost every spike through the interval ending at 106 s.
+it.each(["forget", "prune", "readmit"] as const)(
+	"retains failed original probation beyond the CPU history cap and resets on %s",
+	cleanup => {
+		const events = new EventEmitter()
+		let mono = 0
+		const cpu = { normalisedPercent: 10 }
+		const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+		const monitor = createEfficiencyMonitor({
+			sourceEvents: events,
+			sources: () => ["s"],
+			branchCounters: () =>
+				mono === 108000 ? null : new Map([["raw", counters]]),
+			topology: () => "raw",
+			cpu,
+			now: () => mono,
+			monoNow: () => mono,
+			setInterval: () => ({ cancel() {} }),
+		})
+		const gate = createEfficiencyGate(
+			{ budgetCores: 3, cpuGuardPercent: 90 },
+			{ drops: monitor },
+		)
+		const tick = (at: number) => {
+			mono = at
+			gate.record(monitor.sampleNow())
+		}
+		monitor.start()
+		try {
+			for (let at = 2000; at <= 66000; at += 2000) tick(at)
+			const old = placement("old", 2_048_000)
+			expect(gate.admit(old, [], mono)).toEqual({ admit: true })
+			const running: RunningPlacement[] = [
+				{ ...old, admittedAtMs: mono, mode: "always", startMode: "auto" },
+			]
+			cpu.normalisedPercent = 95
+			for (let at = 68000; at <= 3600000; at += 2000) {
+				tick(at)
+				expect(gate.probation(running, mono)).toEqual([])
+				if ([2114000, 2116000, 2154000, 3600000].includes(at)) {
+					expect(
+						gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
+					).toBe(true)
+					expect(
+						gate.admit(placement(`waiting-${at}`, 2_048_000), running, mono)
+							.admit,
+					).toBe(false)
+				}
+			}
+			cpu.normalisedPercent = 10
+			const wanted = placement("needed", 2_048_000)
+			// Last spike at 3600 s, first clean point at 3602 s, then 60 s.
+			// A single healthy sample cannot release the original probation slot.
+			for (let at = 3602000; at <= 3664000; at += 2000) {
+				tick(at)
+				expect(gate.probation(running, mono)).toEqual([])
+				expect(
+					gate.view(running, [], mono).sources[0]?.admitted[0]?.probation,
+				).toBe(at < 3662000)
+				expect(gate.admit(wanted, running, mono).admit).toBe(at >= 3662000)
+			}
+			// Reusing the key starts an independent original probation. A leftover
+			// failure flag would wrongly require protected recovery past its 30 s.
+			if (cleanup === "forget") gate.forget(old.key)
+			if (cleanup === "prune") expect(gate.probation([], mono)).toEqual([])
+			expect(gate.admit(old, [], mono)).toEqual({ admit: true })
+			const restarted: RunningPlacement[] = [
+				{ ...old, admittedAtMs: mono, mode: "always", startMode: "auto" },
+			]
+			const completesAt = mono + 30000
+			for (let at = mono + 2000; at <= completesAt + 2000; at += 2000) {
+				tick(at)
+				expect(gate.probation(restarted, mono)).toEqual([])
+				expect(
+					gate.view(restarted, [], mono).sources[0]?.admitted[0]?.probation,
+				).toBe(at < completesAt)
+			}
+		} finally {
+			monitor.stop()
+		}
+	},
+)

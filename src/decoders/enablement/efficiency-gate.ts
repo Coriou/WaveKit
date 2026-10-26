@@ -178,12 +178,16 @@ export function createEfficiencyGate(
 	// or view() is called with a partial or earlier list.
 	// Placements that completed probation with no evidence against them.
 	const graduated = new Set<string>()
+	// A bounded recent history must never erase a failed original probation.
+	// One flag per admitted placement, reset with its admission mark or removal.
+	const originalFailed = new Set<string>()
 	/** Placements this gate admitted (YAML and pre-gate runs never are). */
 	const gated = new Set<string>()
 	/** Activity moves whose next admission inherits a graduated probation. */
 	const earned = new Set<string>()
 	const mark = (key: string, mono: number) => {
 		admittedMono.set(key, mono)
+		originalFailed.delete(key)
 		graduated.delete(key)
 	}
 	const observeRunning = (
@@ -199,6 +203,7 @@ export function createEfficiencyGate(
 					earned.delete(key)
 					placementEpochs.delete(key)
 					admittedMono.delete(key)
+					originalFailed.delete(key)
 					graduated.delete(key)
 					gated.delete(key)
 				}
@@ -260,7 +265,8 @@ export function createEfficiencyGate(
 		if (graduated.has(p.key)) return true
 		const at = graduationAt(p, mono)
 		const admitted = admittedMono.get(p.key)!
-		if (at !== null && evidence(p, admitted, at) === null) return true
+		if (evidence(p, admitted, at ?? mono) !== null) originalFailed.add(p.key)
+		if (at !== null && !originalFailed.has(p.key)) return true
 		if (p.mode !== "always" && p.startMode !== "operator") return false
 		// Protected probationers cannot be suspended after loss. Let a fresh
 		// clean run release their slot: cleanAt - 30 × 2000 ms is its first
@@ -271,7 +277,11 @@ export function createEfficiencyGate(
 			const cleanAt = deps.drops?.cleanAtMono?.(p.sourceId)
 			if (!valid(cleanAt) || cleanAt > mono) return false
 			const lastHighCpu = highCpu.findLast(t => t >= admitted && t <= mono)
+			// Recovery needs only the last 60 s plus one sample: at 2 s per
+			// sample that is at most 32 timestamps, well below the 1024 cap.
+			// Older original evidence is retained separately in originalFailed.
 			const since = Math.max(
+				mono - EFFICIENCY_CLEAR_MS,
 				cleanAt - EFFICIENCY_CLEAR_MS,
 				lastHighCpu === undefined
 					? admitted
@@ -404,8 +414,8 @@ export function createEfficiencyGate(
 				return
 			}
 			const at = sample.atMs
-			// Prune on healthy samples too. Unfinished original probation still
-			// needs its admission evidence; recovery needs only the recent window.
+			// Prune on healthy samples too. Original probation failures are
+			// latched separately, so the cap cannot turn them into clean evidence.
 			let mono = NaN
 			try {
 				mono = deps.drops?.lastSampleMono?.() ?? monoNow()
@@ -689,6 +699,7 @@ export function createEfficiencyGate(
 			return verdicts
 		},
 		noteSuspended(key, detail, now) {
+			originalFailed.delete(key)
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			gated.delete(key)
@@ -716,6 +727,7 @@ export function createEfficiencyGate(
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			admittedMono.delete(key)
+			originalFailed.delete(key)
 			graduated.delete(key)
 			gated.delete(key)
 			retries.delete(key)
