@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { EfficiencyBudgetStore } from "../../src/features/settings/efficiency-budget.ts"
+import {
+	EMPTY_BUDGET,
+	EfficiencyBudgetStore,
+} from "../../src/features/settings/efficiency-budget.ts"
 import { Store } from "../../src/data/store.ts"
 import type { AccessStoreState } from "../../src/data/index.ts"
 import { json, scripted } from "../data/fake-fetch.ts"
@@ -36,6 +39,47 @@ describe("decoder CPU budget data", () => {
 			error: null,
 		})
 	})
+	it.each(["saved", "config", "default", undefined] as const)(
+		"keeps optional budget provenance %s on reads and writes",
+		async source => {
+			const response = { ...auto, ...(source === undefined ? {} : { source }) }
+			const { api } = scripted(call =>
+				json(200, call.url.endsWith("/budget") ? response : view),
+			)
+			const store = new EfficiencyBudgetStore(api)
+			await store.load()
+			expect(store.get().settings).toEqual(response)
+			await store.save("auto")
+			expect(store.get().settings).toEqual(response)
+		},
+	)
+	it.each([{}, { code: "DECODER_NOT_FOUND", message: "Decoder not found" }])(
+		"treats an absent budget route as unavailable: %o",
+		async body => {
+			let available = true
+			const { api, calls } = scripted(call =>
+				available
+					? json(200, call.url.endsWith("/budget") ? auto : view)
+					: json(404, body),
+			)
+			const store = new EfficiencyBudgetStore(api)
+			await store.load()
+			available = false
+			calls.length = 0
+			await store.load()
+			expect(store.get()).toEqual({ ...EMPTY_BUDGET, unavailable: true })
+			expect(calls.map(call => call.url)).toEqual([
+				"/api/decoders/efficiency/budget",
+			])
+			available = true
+			await store.load()
+			expect(store.get()).toMatchObject({
+				unavailable: false,
+				settings: auto,
+				used: 2.25,
+			})
+		},
+	)
 	it("saves a fractional budget and Auto with PUT and uses the returned resolution", async () => {
 		const { api, calls } = scripted(call => {
 			const value = (call.body as { cpuBudgetCores: number | "auto" })

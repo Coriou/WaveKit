@@ -42,6 +42,7 @@ describe("mock settings routes", () => {
 	it("reads, validates and updates the decoder CPU budget and efficiency resolution", async () => {
 		const route = "/api/decoders/efficiency/budget"
 		expect((await inject("GET", route)).json()).toMatchObject({
+			source: "default",
 			cpuBudgetCores: "auto",
 			resolved: { mode: "auto", cpus: 8, cores: 4 },
 		})
@@ -57,6 +58,7 @@ describe("mock settings routes", () => {
 			expect(
 				(await inject("PUT", route, { cpuBudgetCores: value })).json(),
 			).toEqual({
+				source: "saved",
 				cpuBudgetCores: value,
 				resolved: { mode: "configured", cores: value, label: "configured" },
 			})
@@ -72,6 +74,7 @@ describe("mock settings routes", () => {
 			(await inject("PUT", route, { cpuBudgetCores: "auto" })).statusCode,
 		).toBe(200)
 		expect((await inject("GET", route)).json()).toMatchObject({
+			source: "saved",
 			cpuBudgetCores: "auto",
 		})
 	})

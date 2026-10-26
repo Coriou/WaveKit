@@ -26,10 +26,18 @@ const resolution = z.discriminatedUnion("mode", [
 		label: z.literal("configured"),
 	}),
 ])
-const settings = z.object({
-	cpuBudgetCores: z.union([z.literal("auto"), cores]),
-	resolved: resolution,
-})
+const settings = z
+	.object({
+		source: z.enum(["saved", "config", "default"]).optional(),
+		cpuBudgetCores: z.union([z.literal("auto"), cores]),
+		resolved: resolution,
+	})
+	.transform(
+		({ source, ...value }): EfficiencyBudgetSettings => ({
+			...value,
+			...(source === undefined ? {} : { source }),
+		}),
+	)
 const efficiency = z.object({
 	budgetCores: cores,
 	budget: resolution,
@@ -39,6 +47,7 @@ const ROUTE = "/api/decoders/efficiency/budget"
 const VIEW = "/api/decoders/efficiency"
 
 export interface EfficiencyBudgetState {
+	unavailable: boolean
 	settings: EfficiencyBudgetSettings | null
 	used: number | null
 	error: string | null
@@ -48,6 +57,7 @@ export interface EfficiencyBudgetState {
 }
 
 export const EMPTY_BUDGET: EfficiencyBudgetState = {
+	unavailable: false,
 	settings: null,
 	used: null,
 	error: null,
@@ -90,49 +100,60 @@ export class EfficiencyBudgetStore extends Store<EfficiencyBudgetState> {
 
 	private async fetch(): Promise<void> {
 		const revision = this.revision
-		await Promise.all([
-			(async () => {
-				try {
-					const value = validated(
-						settings,
-						await this.api.get<unknown>(ROUTE),
-						"GET",
-						ROUTE,
-					)
-					if (revision === this.revision)
-						this.update(s => ({ ...s, settings: value, error: null }))
-				} catch (error) {
-					if (revision === this.revision)
-						this.update(s => ({ ...s, error: errorMessage(error) }))
-				}
-			})(),
-			(async () => {
-				try {
-					const view = validated(
-						efficiency,
-						await this.api.get<unknown>(VIEW),
-						"GET",
-						VIEW,
-					)
-					if (revision === this.revision)
-						this.update(s => ({
-							...s,
-							used: view.sources.reduce(
-								(sum, source) => sum + source.coresInUse,
-								0,
-							),
-							usageError: null,
-						}))
-				} catch (error) {
-					if (revision === this.revision)
-						this.update(s => ({
-							...s,
-							used: null,
-							usageError: errorMessage(error),
-						}))
-				}
-			})(),
-		])
+		try {
+			const value = validated(
+				settings,
+				await this.api.get<unknown>(ROUTE),
+				"GET",
+				ROUTE,
+			)
+			if (revision === this.revision)
+				this.update(s => ({
+					...s,
+					settings: value,
+					unavailable: false,
+					error: null,
+				}))
+		} catch (error) {
+			if (error instanceof ApiError && error.status === 404) {
+				if (revision === this.revision)
+					this.update(s => ({
+						...s,
+						settings: null,
+						unavailable: true,
+						used: null,
+						error: null,
+						usageError: null,
+					}))
+				return
+			}
+			if (revision === this.revision)
+				this.update(s => ({ ...s, error: errorMessage(error) }))
+		}
+		try {
+			const view = validated(
+				efficiency,
+				await this.api.get<unknown>(VIEW),
+				"GET",
+				VIEW,
+			)
+			if (revision === this.revision)
+				this.update(s => ({
+					...s,
+					used: view.sources.reduce(
+						(sum, source) => sum + source.coresInUse,
+						0,
+					),
+					usageError: null,
+				}))
+		} catch (error) {
+			if (revision === this.revision)
+				this.update(s => ({
+					...s,
+					used: null,
+					usageError: errorMessage(error),
+				}))
+		}
 	}
 
 	async save(value: EfficiencyBudgetValue): Promise<SettingWriteResult> {
@@ -148,7 +169,13 @@ export class EfficiencyBudgetStore extends Store<EfficiencyBudgetState> {
 				"PUT",
 				ROUTE,
 			)
-			this.update(s => ({ ...s, settings: result, error: null, denied: null }))
+			this.update(s => ({
+				...s,
+				settings: result,
+				unavailable: false,
+				error: null,
+				denied: null,
+			}))
 			return WRITE_OK
 		} catch (error) {
 			const message = errorMessage(error)

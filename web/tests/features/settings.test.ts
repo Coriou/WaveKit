@@ -889,13 +889,17 @@ describe("Decoder CPU budget row", () => {
 			buildRows(snapshot({ efficiencyBudget: state }), a),
 			"dec.cpuBudgetCores",
 		)
-		expect(row.help).toContain("1.25 / 4 cores used · auto (8 CPUs → 4 cores)")
+		expect(row.help).toContain("1.25 / 4 cores used · Auto (8 CPUs → 4 cores)")
+		expect(row.text).toBe("Auto")
+		expect(row.def?.text).toBe("Auto")
 		expect(row.effect).toBeUndefined()
 		expect(row.widget.kind).toBe("text")
 		if (row.widget.kind !== "text") return
 		for (const text of ["0", "-1", "64.01", "NaN", "Infinity", "", "junk"])
 			expect(row.widget.parse(text)).toHaveProperty("error")
 		expect(row.widget.parse(" Auto ")).toEqual({ value: "auto" })
+		expect(row.widget.format("auto")).toBe("Auto")
+		expect(row.widget.placeholder).toBe("Auto or cores")
 		for (const value of [0.01, 2.5, 64]) {
 			expect(row.widget.parse(String(value))).toEqual({ value })
 			await row.write?.(value)
@@ -908,6 +912,51 @@ describe("Decoder CPU budget row", () => {
 			["efficiencyBudget", "auto"],
 		])
 	})
+	it.each(["saved", "config", "default", undefined] as const)(
+		"shows the override note only for saved provenance: %s",
+		source => {
+			const row = byId(
+				buildRows(
+					snapshot({
+						efficiencyBudget: {
+							...state,
+							settings: {
+								...state.settings,
+								...(source === undefined ? {} : { source }),
+							},
+						},
+					}),
+					actions(),
+				),
+				"dec.cpuBudgetCores",
+			)
+			expect(row.help?.includes("Saved setting overrides config")).toBe(
+				source === "saved",
+			)
+		},
+	)
+	it.each([
+		{},
+		{ decoderSettings: false, accessMode: "legacy" as const },
+		{ readOnly: true },
+	])(
+		"disables an unavailable budget without a validation error: %o",
+		capability => {
+			const row = byId(
+				buildRows(
+					snapshot({
+						...capability,
+						efficiencyBudget: { ...EMPTY_BUDGET, unavailable: true },
+					}),
+					actions(),
+				),
+				"dec.cpuBudgetCores",
+			)
+			expect(row.text).toBe("Not available")
+			expect(row.disabled).toBe("Not available")
+			expect(row.error).toBeUndefined()
+		},
+	)
 	it.each([{ decoderSettings: false }, { accessMode: "legacy" as const }])(
 		"shows the budget as configured in YAML when writes are unavailable: %o",
 		capability => {

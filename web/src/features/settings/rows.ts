@@ -1572,8 +1572,9 @@ function efficiencyBudgetRow(
 ): SettingRow {
 	const state = s.efficiencyBudget
 	const budget = state.settings
-	const disabled =
-		!s.decoderSettings || s.accessMode === "legacy"
+	const disabled = state.unavailable
+		? "Not available"
+		: !s.decoderSettings || s.accessMode === "legacy"
 			? "This deployment sets the budget in YAML config: decoderPolicy.efficiency.cpuBudgetCores"
 			: s.readOnly
 				? "Read-only access: sign in on this WaveKit to change it"
@@ -1583,6 +1584,9 @@ function efficiencyBudgetRow(
 						: budget
 							? undefined
 							: "CPU budget is unavailable"))
+	const label = budget?.resolved.label.replace(/^auto\b/i, "Auto")
+	const note =
+		budget?.source === "saved" ? " Saved setting overrides config." : ""
 	const usage =
 		state.used === null
 			? "Usage unavailable"
@@ -1591,7 +1595,9 @@ function efficiencyBudgetRow(
 		id: "dec.cpuBudgetCores",
 		group: "decoders",
 		label: "Decoder CPU budget",
-		help: `${usage}${budget ? ` · ${budget.resolved.label}` : ""}. Enter Auto or a core count greater than 0 and up to 64.`,
+		help: state.unavailable
+			? "Not available"
+			: `${usage}${label ? ` · ${label}` : ""}. Enter Auto or a core count greater than 0 and up to 64.${note}`,
 		keys: words("decoder cpu budget cores efficiency auto configured"),
 		widget: {
 			kind: "text",
@@ -1607,10 +1613,14 @@ function efficiencyBudgetRow(
 				value === "auto" ? "Auto" : value === null ? "" : String(value),
 		},
 		value: budget?.cpuBudgetCores ?? null,
-		text: budget ? String(budget.cpuBudgetCores) : "Unavailable",
+		text: budget
+			? budget.cpuBudgetCores === "auto"
+				? "Auto"
+				: String(budget.cpuBudgetCores)
+			: "Not available",
 		def: { value: "auto", text: "Auto" },
 		...(disabled ? { disabled } : {}),
-		...((state.error ?? state.usageError)
+		...(!state.unavailable && (state.error ?? state.usageError)
 			? { error: state.error ?? state.usageError ?? "" }
 			: {}),
 		busy: state.busy,

@@ -574,7 +574,9 @@ export function registerSettingsMock(
 	const startedAt = now()
 
 	let cpuBudgetCores: EfficiencyBudgetValue = "auto"
+	let budgetSource: NonNullable<EfficiencyBudgetSettings["source"]> = "default"
 	const budgetView = (): EfficiencyBudgetSettings => ({
+		source: budgetSource,
 		cpuBudgetCores,
 		resolved:
 			cpuBudgetCores === "auto"
@@ -598,6 +600,7 @@ export function registerSettingsMock(
 		)
 			return sendJson(reply, 400, { code: "EFFICIENCY_BUDGET_INVALID" })
 		cpuBudgetCores = value
+		budgetSource = "saved"
 		return sendJson(reply, 200, budgetView())
 	})
 	app.get("/api/decoders/efficiency", async () => {
