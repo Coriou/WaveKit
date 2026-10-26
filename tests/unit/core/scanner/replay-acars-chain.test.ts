@@ -29,6 +29,7 @@ import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import {
 	createAcarsdecDecoder,
+	NON_FINITE_SCAN_MAX_CHARS,
 	nonFiniteToNull,
 } from "../../../../src/decoders/builtin/acarsdec.js"
 import type { DecoderOutput } from "../../../../src/decoders/types.js"
@@ -204,6 +205,10 @@ describe("interpretAcarsReplay", () => {
 		expect(run({ errorKnown: undefined })).toEqual([])
 		expect(run({ tail: "no such tail!" })).toEqual([])
 		expect(run({ frequency: RF + 20_000 })).toEqual([])
+		// an implausible registration never stands on one block; a plausible one does
+		for (const tail of ["-------", "--", ".", "A", "..-..", "N1234567X"])
+			expect(run({ tail })).toEqual([])
+		expect(run({ tail: "..N12345" })[0]?.identity).toEqual(IDENTITY)
 		expect(run({ frequency: Number.NaN })).toEqual([])
 		expect(run({}, 0)).toEqual([])
 		expect(run({}, Number.NaN)).toEqual([])
@@ -223,6 +228,9 @@ describe("acarsdec replay chain (synthetic ACARS)", () => {
 		expect(nonFiniteToNull('{"level":-8.0,"noise":-inf,"x":nan}')).toBe(
 			'{"level":-8.0,"noise":null,"x":null}',
 		)
+		// a line past the bound is not scanned (it then fails JSON parsing, as before)
+		const long = `{"noise":-inf,"pad":"${"x".repeat(NON_FINITE_SCAN_MAX_CHARS)}"}`
+		expect(nonFiniteToNull(long)).toBe(long)
 		// inside a string it is text, not a value
 		expect(nonFiniteToNull('{"text":"a,\\"b\\":inf,c"}')).toBe(
 			'{"text":"a,\\"b\\":inf,c"}',
@@ -276,6 +284,26 @@ describe("acarsdec replay chain (synthetic ACARS)", () => {
 		} finally {
 			await h.service.stop()
 		}
+	})
+
+	it.each([
+		["-inf", '"freq":-inf'],
+		["false", '"freq":false'],
+		["a string", '"freq":"131.550"'],
+		["nan", '"freq":nan'],
+		["null", '"freq":null'],
+	])("a malformed frequency (%s) is no decode", async (_n, field) => {
+		const bad = line(0).replace('"freq":0.000', field)
+		const answer = await replayThroughPool([bad], "clean")
+		expect(answer.decoded).toBeNull()
+	})
+
+	it.each([
+		["absent", (l: string) => l.replace('"freq":0.000,', "")],
+		["0", (l: string) => l],
+	])("a frequency %s is still accepted", async (_n, edit) => {
+		const answer = await replayThroughPool([edit(line(0))], "clean")
+		expect(answer.decoded).toEqual({ protocol: "acars", identity: IDENTITY })
 	})
 
 	it("a line without an error field is no decode", async () => {

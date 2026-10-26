@@ -59,6 +59,15 @@ export function parseAcars(
 export const interpretAcars = interpretWith(parseAcars)
 
 /**
+ * A registration one block may stand on: 2-8 characters (after acarsdec's leading dots are
+ * trimmed) with at least one letter or digit, so "-------" or "." never identify. The two-decode
+ * live rule keeps `tailOf`'s 1-8.
+ */
+export function plausibleRegistration(tail: string): boolean {
+	return /^[A-Z0-9-]{2,8}$/.test(tail) && /[A-Z0-9]/.test(tail)
+}
+
+/**
  * A replayed IQ capture of one ACARS channel (acarsdec reading the capture's AM audio, so it
  * reports no frequency of its own: 0 or none). ONE block with acarsdec `error` 0 (its framing,
  * parity and CRC-16 all valid, no bit corrected) is the decode, at the capture's channel: a
@@ -76,6 +85,8 @@ export function interpretAcarsReplay(
 	if (data === undefined) return []
 	// Only an error count acarsdec printed itself counts (the adapter defaults a missing one to 0).
 	if (data["errorKnown"] !== true) return []
+	// A frequency acarsdec printed that is not a number is malformed, never "no frequency".
+	if (data["frequencyMalformed"] === true) return []
 	// acarsdec reading audio reports frequency 0: the channel is the capture's.
 	const { frequency, ...rest } = data
 	const sanitised =
@@ -86,7 +97,7 @@ export function interpretAcarsReplay(
 	)
 	if (!parsed || !parsed.crcClean) return []
 	const value = parsed.identity.value
-	if (value === undefined) return []
+	if (value === undefined || !plausibleRegistration(value)) return []
 	state.match.markAccepted(parsed.identity.key, value)
 	return acceptAmbient(state, parsed).map(({ hz: _hz, ...ev }) => ev)
 }

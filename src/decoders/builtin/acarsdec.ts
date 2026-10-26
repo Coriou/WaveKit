@@ -68,6 +68,11 @@ export interface ACARSMessage {
 	error: number
 	/** acarsdec printed `error` itself (`error` 0 is otherwise the default for a missing field). */
 	errorKnown?: boolean
+	/**
+	 * acarsdec printed a frequency that is not a finite number (`-inf` read as null, false, a
+	 * string): distinct from no frequency at all, which `frequency` leaves absent.
+	 */
+	frequencyMalformed?: boolean
 	/** ACARS mode character */
 	mode: string
 	/** Message label (2 characters) */
@@ -116,12 +121,27 @@ interface AcarsdecJsonOutput {
  * Performs AM demodulation using csdr and feeds raw S16LE audio to
  * f00b4r0/acarsdec fork via stdin.
  */
+/** Longest line the non-finite rewrite scans (an ACARS block is at most 220 characters of text). */
+export const NON_FINITE_SCAN_MAX_CHARS = 8_192
+
+/** A frequency key is present with something other than a finite number. */
+function frequencyMalformed(json: Record<string, unknown>): boolean {
+	for (const key of ["freq", "frequency"]) {
+		if (!Object.hasOwn(json, key)) continue
+		const v = json[key]
+		return !(typeof v === "number" && Number.isFinite(v))
+	}
+	return false
+}
+
 /**
  * acarsdec prints C's `-inf`/`inf`/`nan` for a level it could not measure (`"noise":-inf` when it
  * reads audio from a file or stdin), which is not JSON. A bare non-finite number right after an
  * object key becomes `null`; string contents are not touched (their quotes are escaped).
  */
 export function nonFiniteToNull(line: string): string {
+	// Bounded: a longer line is left as it is (and then fails JSON parsing, as before).
+	if (line.length > NON_FINITE_SCAN_MAX_CHARS) return line
 	return line.replace(
 		/((?:^|[,{])\s*"[A-Za-z_][A-Za-z0-9_]*"\s*:\s*)[-+]?(?:inf(?:inity)?|nan)(?=\s*[,}])/gi,
 		"$1null",
@@ -398,6 +418,9 @@ export function parseAcarsdecJson(
 		level: json.level ?? 0,
 		error: json.error ?? 0,
 		errorKnown: typeof json.error === "number",
+		frequencyMalformed: frequencyMalformed(
+			json as unknown as Record<string, unknown>,
+		),
 		mode: json.mode ?? "",
 		label: json.label ?? "",
 		blockId: json.block_id,
