@@ -566,7 +566,7 @@ store bench before and after and reported (9.9), not asserted.
 
 ## 10. Sustained admission and segment split (amendment)
 
-Requirements 1.4b and 1.11 to 1.14. Root causes from an offline replay of private hunt
+Requirements 1.4b and 1.11 to 1.14. Root causes from an offline replay of recorded band
 captures through the real scanner (no captured data is committed): the 18 dB create
 threshold refused gated tracks at 7 to 17 dB, a continuous emitter is one observation so the
 3-observation repeat rule never fired, AM airband was diluted by 25 kHz slots, and busy bands
@@ -615,7 +615,7 @@ that channel width.
 
 ### CPU
 
-Measured with a private bench of `SpectrumPipeline` alone (2.4 Msps, N 2048, 50 ms blocks,
+Measured with a local bench of `SpectrumPipeline` alone (2.4 Msps, N 2048, 50 ms blocks,
 24 NFM carriers in clusters of four, one wide FM, airband rasters, 8.33 kHz channel plan) on
 the development Mac; see the lane report for the numbers and load average. The added work is
 per block and proportional to the on-bins (one smoothing pass, one valley scan per merge
