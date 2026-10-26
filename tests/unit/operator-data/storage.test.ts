@@ -111,6 +111,7 @@ describe("dedicated operator-data storage", () => {
 
 	// Feature: operator-data, Property 6: Recovery preservation
 	// Validates: Requirements 4.1, 4.4–4.7
+	// Each reopen now also syncs the prepared lock and its parent directory.
 	it("restores exact committed state over 100 real-directory restarts", async () => {
 		await fc.assert(
 			fc.asyncProperty(
@@ -137,7 +138,7 @@ describe("dedicated operator-data storage", () => {
 			),
 			{ numRuns: 100 },
 		)
-	}, 60000)
+	}, 180_000)
 
 	it.each(["corrupt", "future", "oversize", "empty"])(
 		"preserves %s state unchanged and releases its own lock",

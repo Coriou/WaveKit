@@ -164,6 +164,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 
 	// Feature: band-plans, Property 8: Durability and latch
 	// Validates: Requirements 8.1, 8.3
+	// Each reopen now also syncs the prepared lock and its parent directory.
 	it("restores the exact committed state over 100 real-directory restarts", async () => {
 		const path = await root()
 		await writeFile(
@@ -186,7 +187,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 			}),
 			{ numRuns: 100 },
 		)
-	})
+	}, 180_000)
 
 	it.each([
 		["corrupt", "invalid"],

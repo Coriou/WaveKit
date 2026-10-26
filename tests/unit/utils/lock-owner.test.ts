@@ -195,7 +195,7 @@ async function lockPath() {
 }
 describe("directory reclamation", () => {
 	it.each([
-		INCOMPLETE_LOCK_MS - 1000,
+		INCOMPLETE_LOCK_MS - 1,
 		INCOMPLETE_LOCK_MS,
 		INCOMPLETE_LOCK_MS + 1000,
 	])("handles incomplete owners at age %i", async age => {
@@ -206,29 +206,94 @@ describe("directory reclamation", () => {
 		expect(await acquireWriterLock(lock)).toBe(age >= INCOMPLETE_LOCK_MS)
 		if (age >= INCOMPLETE_LOCK_MS) await releaseWriterLock(lock)
 	})
-	it("preserves a successor when a suspended publisher fails after reclamation", async () => {
+	it("a publisher stalled past the bound cannot overwrite a successful acquirer", async () => {
 		const lock = await lockPath()
 		await fs.rmdir(lock)
 		const rename = fs.rename
+		const now = Date.now()
+		vi.spyOn(Date, "now").mockReturnValue(now)
 		let suspended = false
 		let successor: string | undefined
 		vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
-			if (!suspended && to === join(lock, "owner.json")) {
+			if (!suspended && to === lock) {
 				suspended = true
-				const old = new Date(Date.now() - INCOMPLETE_LOCK_MS - 1000)
-				await fs.utimes(lock, old, old)
+				// The stalled publisher has a complete private lock, never a public one.
+				await expect(fs.lstat(lock)).rejects.toMatchObject({ code: "ENOENT" })
+				expect(
+					JSON.parse(
+						await fs.readFile(join(String(from), "owner.json"), "utf8"),
+					),
+				).toMatchObject({ pid: process.pid })
+				vi.spyOn(Date, "now").mockReturnValue(now + INCOMPLETE_LOCK_MS + 1)
 				expect(await acquireWriterLock(lock)).toBe(true)
 				successor = await fs.readFile(join(lock, "owner.json"), "utf8")
-				throw Object.assign(new Error("publisher resumed after reclaim"), {
-					code: "EIO",
-				})
 			}
 			return rename(from, to)
 		})
-		await expect(acquireWriterLock(lock)).rejects.toMatchObject({ code: "EIO" })
+		expect(await acquireWriterLock(lock)).toBe(false)
 		expect(await fs.readFile(join(lock, "owner.json"), "utf8")).toBe(successor)
 		expect(await acquireWriterLock(lock)).toBe(false)
 		await releaseWriterLock(lock)
+	})
+	it("rechecks a legacy owner published after the stale observation", async () => {
+		const lock = await lockPath()
+		const now = Date.now()
+		vi.spyOn(Date, "now").mockReturnValue(now)
+		const old = new Date(now - INCOMPLETE_LOCK_MS)
+		await fs.utimes(lock, old, old)
+		const published = JSON.stringify(await readLockOwner())
+		const rename = fs.rename
+		let resumed = false
+		vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (!resumed && to === join(lock, ".reclaim")) {
+				resumed = true
+				await fs.writeFile(join(lock, "owner.json"), published)
+			}
+			return rename(from, to)
+		})
+		expect(await acquireWriterLock(lock)).toBe(false)
+		expect(resumed).toBe(true)
+		expect(await fs.readFile(join(lock, "owner.json"), "utf8")).toBe(published)
+		expect(await fs.readdir(lock)).toEqual(["owner.json"])
+		await releaseWriterLock(lock)
+	})
+	it("allows exactly one publisher on an initially empty path", async () => {
+		const lock = await lockPath()
+		await fs.rmdir(lock)
+		// Make both publishers observe ENOENT before either can publish.
+		const lstat = fs.lstat
+		let observations = 0
+		let release = () => undefined as void
+		const barrier = new Promise<void>(resolve => {
+			release = resolve
+		})
+		vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+			if (args[0] === lock && observations < 2) {
+				observations++
+				if (observations === 2) release()
+				await barrier
+				throw Object.assign(new Error(), { code: "ENOENT" })
+			}
+			return lstat(...args)
+		})
+		const results = await Promise.all([
+			acquireWriterLock(lock),
+			acquireWriterLock(lock),
+		])
+		expect(results.filter(Boolean)).toHaveLength(1)
+		await releaseWriterLock(lock)
+	})
+	it("removes only its private directory on publication failure", async () => {
+		const lock = await lockPath()
+		await fs.rmdir(lock)
+		const rename = fs.rename
+		vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (String(to).endsWith("owner.json"))
+				throw Object.assign(new Error("publication failed"), { code: "EIO" })
+			return rename(from, to)
+		})
+		await expect(acquireWriterLock(lock)).rejects.toMatchObject({ code: "EIO" })
+		expect(await fs.readdir(join(lock, ".."))).toEqual([])
 	})
 	it("cleans only exact stale UUID directories after acquisition", async () => {
 		const lock = await lockPath()
@@ -253,6 +318,36 @@ describe("directory reclamation", () => {
 		expect(await fs.readFile(regular, "utf8")).toBe("keep")
 		await releaseWriterLock(lock)
 	})
+
+	it.each([INCOMPLETE_LOCK_MS - 1, INCOMPLETE_LOCK_MS, INCOMPLETE_LOCK_MS + 1])(
+		"sweeps only exact private UUID directories at age %i",
+		async age => {
+			const lock = await lockPath()
+			await fs.rmdir(lock)
+			const now = Date.now()
+			vi.spyOn(Date, "now").mockReturnValue(now)
+			const abandoned = `${lock}.new-12345678-1234-1234-1234-123456789abc`
+			const unrelated = `${abandoned}-extra`
+			const symlink = `${lock}.new-22345678-1234-1234-1234-123456789abc`
+			const regular = `${lock}.new-32345678-1234-1234-1234-123456789abc`
+			await fs.mkdir(abandoned)
+			await fs.mkdir(unrelated)
+			await fs.symlink(unrelated, symlink)
+			await fs.writeFile(regular, "keep")
+			const old = new Date(now - age)
+			await fs.utimes(abandoned, old, old)
+			expect(await acquireWriterLock(lock)).toBe(true)
+			if (age >= INCOMPLETE_LOCK_MS)
+				await expect(fs.lstat(abandoned)).rejects.toMatchObject({
+					code: "ENOENT",
+				})
+			else expect((await fs.lstat(abandoned)).isDirectory()).toBe(true)
+			expect((await fs.lstat(unrelated)).isDirectory()).toBe(true)
+			expect((await fs.lstat(symlink)).isSymbolicLink()).toBe(true)
+			expect(await fs.readFile(regular, "utf8")).toBe("keep")
+			await releaseWriterLock(lock)
+		},
+	)
 
 	it.each(["missing", "malformed", "dead-owner", "abandoned-claim"])(
 		"allows exactly one concurrent reclaimer of %s",

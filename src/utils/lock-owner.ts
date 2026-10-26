@@ -171,75 +171,68 @@ export async function probeLockOwner(
 	}
 }
 
-// 30 s = 3 × a conservative 10 s owner-publication allowance; younger incomplete locks stay held.
+// 30 s = 3 × a conservative 10 s legacy owner-publication allowance.
+// New locks are born with an owner; only pre-change publishers expose incomplete locks.
 export const INCOMPLETE_LOCK_MS = 30 * 1000
 const OWNER = "owner.json"
 export async function acquireWriterLock(lock: string): Promise<boolean> {
 	try {
 		return await acquireDirectory(lock)
 	} catch (error) {
-		// A winning reclaimer can move the directory between any two observations.
+		// A winning reclaimer or sibling sweep can move/remove a directory.
 		if (hasLockCode(error, "ENOENT")) return false
 		throw error
 	}
 }
+function isContended(error: unknown): boolean {
+	return ["ENOTEMPTY", "EEXIST", "EISDIR", "ENOTDIR"].some(code =>
+		hasLockCode(error, code),
+	)
+}
+async function ownerIsHeld(
+	lock: string,
+	current: LockOwner,
+	mtimeMs: number,
+): Promise<boolean> {
+	let owner: LockOwner | undefined
+	try {
+		const handle = await fs.open(
+			join(lock, OWNER),
+			constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+		)
+		try {
+			const parsed = lockOwnerSchema.safeParse(
+				JSON.parse(await handle.readFile("utf8")),
+			)
+			if (parsed.success) owner = parsed.data
+		} finally {
+			await handle.close()
+		}
+	} catch (error) {
+		if (!hasLockCode(error, "ENOENT") && !(error instanceof SyntaxError))
+			throw error
+	}
+	return owner
+		? !isStale(owner, current, await probeLockOwner(owner))
+		: Date.now() - mtimeMs < INCOMPLETE_LOCK_MS
+}
+async function syncDirectory(path: string): Promise<void> {
+	const directory = await fs.open(
+		path,
+		constants.O_RDONLY | constants.O_DIRECTORY,
+	)
+	try {
+		await directory.sync()
+	} finally {
+		await directory.close()
+	}
+}
 async function acquireDirectory(lock: string): Promise<boolean> {
 	const current = await readLockOwner()
+	const prepared = `${lock}.new-${randomUUID()}`
+	await fs.mkdir(prepared, { mode: 0o700 })
 	try {
-		await fs.mkdir(lock, { mode: 0o700 })
-	} catch (error) {
-		if (!hasLockCode(error, "EEXIST")) throw error
-		const before = await fs.lstat(lock)
-		if (!before.isDirectory() || before.isSymbolicLink()) return false
-		let owner: LockOwner | undefined
-		try {
-			const handle = await fs.open(
-				join(lock, OWNER),
-				constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-			)
-			try {
-				const parsed = lockOwnerSchema.safeParse(
-					JSON.parse(await handle.readFile("utf8")),
-				)
-				if (parsed.success) owner = parsed.data
-			} finally {
-				await handle.close()
-			}
-		} catch (error) {
-			if (!hasLockCode(error, "ENOENT") && !(error instanceof SyntaxError))
-				throw error
-		}
-		if (
-			owner
-				? !isStale(owner, current, await probeLockOwner(owner))
-				: Date.now() - before.mtimeMs < INCOMPLETE_LOCK_MS
-		)
-			return false
-		// Claim inside the observed directory before moving it. A second reclaimer
-		// cannot rename our replacement: it must both win this claim and match inode.
-		const claim = join(lock, ".reclaim")
-		if (!(await acquireWriterLock(claim))) return false
-		const actual = await fs.lstat(lock)
-		if (actual.ino !== before.ino || actual.dev !== before.dev) {
-			await releaseWriterLock(claim)
-			return false
-		}
-		const aside = `${lock}.stale-${randomUUID()}`
-		await fs.rename(lock, aside)
-		try {
-			try {
-				await fs.mkdir(lock, { mode: 0o700 })
-			} catch (error) {
-				if (hasLockCode(error, "EEXIST")) return false
-				throw error
-			}
-		} finally {
-			await fs.rm(aside, { recursive: true, force: true })
-		}
-	}
-	const created = await fs.lstat(lock)
-	const temp = join(lock, `${randomUUID()}.tmp`)
-	try {
+		const temp = join(prepared, `${randomUUID()}.tmp`)
 		const handle = await fs.open(temp, "wx", 0o600)
 		try {
 			await handle.writeFile(JSON.stringify(current))
@@ -247,43 +240,78 @@ async function acquireDirectory(lock: string): Promise<boolean> {
 		} finally {
 			await handle.close()
 		}
-		await fs.rename(temp, join(lock, OWNER))
-		const directory = await fs.open(
-			lock,
-			constants.O_RDONLY | constants.O_DIRECTORY,
-		)
-		try {
-			await directory.sync()
-		} finally {
-			await directory.close()
-		}
-	} catch (error) {
-		await fs.rm(temp, { force: true }).catch(() => undefined)
-		try {
+		await fs.rename(temp, join(prepared, OWNER))
+		await syncDirectory(prepared)
+
+		const before = await fs.lstat(lock).catch((error: unknown) => {
+			if (hasLockCode(error, "ENOENT")) return undefined
+			throw error
+		})
+		if (before) {
+			if (!before.isDirectory() || before.isSymbolicLink()) return false
+			if (await ownerIsHeld(lock, current, before.mtimeMs)) return false
+			// Claim before moving, then verify both inode and owner again: a legacy
+			// publisher may have installed its live owner since our first observation.
+			const claim = join(lock, ".reclaim")
+			if (!(await acquireWriterLock(claim))) return false
 			const actual = await fs.lstat(lock)
-			if (actual.dev === created.dev && actual.ino === created.ino) {
-				// rmdir only removes an empty directory: never remove another owner.json.
-				await fs.rmdir(lock)
+			if (actual.ino !== before.ino || actual.dev !== before.dev) {
+				await releaseWriterLock(claim)
+				return false
 			}
-		} catch {
-			// Cleanup is best effort; preserve the publication error.
+			if (await ownerIsHeld(lock, current, before.mtimeMs)) {
+				await releaseWriterLock(claim)
+				return false
+			}
+			const aside = `${lock}.stale-${randomUUID()}`
+			await fs.rename(lock, aside)
+			try {
+				try {
+					await fs.rename(prepared, lock)
+				} catch (error) {
+					if (isContended(error)) return false
+					throw error
+				}
+			} finally {
+				await fs.rm(aside, { recursive: true, force: true })
+			}
+		} else {
+			// Only attempt direct publication after ENOENT. New-code publishers
+			// always rename non-empty directories, so competing publication fails.
+			// A pre-change publisher still running could create an empty directory
+			// in this residual window and POSIX rename would replace it; deployments
+			// must not run that legacy mkdir-first code alongside this implementation.
+			try {
+				await fs.rename(prepared, lock)
+			} catch (error) {
+				if (isContended(error)) return false
+				throw error
+			}
 		}
-		throw error
+		await syncDirectory(dirname(lock))
+		await cleanupStaleDirectories(lock)
+		return true
+	} finally {
+		// Never clean the public lock on failure: only our private sibling is ours.
+		await fs.rm(prepared, { recursive: true, force: true })
 	}
-	await cleanupStaleDirectories(lock)
-	return true
 }
 async function cleanupStaleDirectories(lock: string): Promise<void> {
-	const prefix = `${basename(lock)}.stale-`
+	const prefixes = [`${basename(lock)}.stale-`, `${basename(lock)}.new-`]
 	const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 	try {
 		for (const entry of await fs.readdir(dirname(lock))) {
-			if (!entry.startsWith(prefix) || !uuid.test(entry.slice(prefix.length)))
-				continue
+			const prefix = prefixes.find(value => entry.startsWith(value))
+			if (!prefix || !uuid.test(entry.slice(prefix.length))) continue
 			try {
 				const path = join(dirname(lock), entry)
 				const stat = await fs.lstat(path)
-				if (stat.isDirectory() && !stat.isSymbolicLink())
+				if (
+					stat.isDirectory() &&
+					!stat.isSymbolicLink() &&
+					(!entry.startsWith(`${basename(lock)}.new-`) ||
+						Date.now() - stat.mtimeMs >= INCOMPLETE_LOCK_MS)
+				)
 					await fs.rm(path, { recursive: true, force: true })
 			} catch {
 				// A concurrent acquirer may already have cleaned this sibling.
