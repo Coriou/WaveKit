@@ -445,7 +445,8 @@ export async function prepareDecoderCatalogue(
 
 /** Metrics are KiB/s; link advice uses bytes/s and reconnect-local evidence. */
 export function wireDecoderLinkFeed(
-	sources: Pick<SourceManager, "on" | "off">,
+	sources: Pick<SourceManager, "on" | "off"> &
+		Partial<Pick<SourceManager, "isCommandedRecovery">>,
 	tuner: Pick<TunerController, "getState">,
 	link: LinkAdvisor,
 	policy: Pick<RatePolicy, "reset">,
@@ -458,15 +459,23 @@ export function wireDecoderLinkFeed(
 			tuner.getState(id)?.sampleRate ?? null,
 			now(),
 		)
+	const resetPolicy = (id: string) => {
+		if (!sources.isCommandedRecovery?.(id)) policy.reset(id)
+	}
 	const connected = (id: string) => {
 		link.reset(id)
-		policy.reset(id)
+		resetPolicy(id)
 	}
+	const removed = (id: string) => policy.reset(id)
 	sources.on("metrics", metrics)
 	sources.on("connected", connected)
+	sources.on("disconnected", resetPolicy)
+	sources.on("source-removed", removed)
 	return () => {
 		sources.off("metrics", metrics)
 		sources.off("connected", connected)
+		sources.off("disconnected", resetPolicy)
+		sources.off("source-removed", removed)
 	}
 }
 

@@ -1640,6 +1640,11 @@ export class SourceManager extends EventEmitter {
 					state.socket === socket
 				const wasConnected = state.connected
 				if (owns) this.noteEndpointClose(id, state)
+				// A failed replacement connection is an unplanned disconnect, even
+				// if the original socket closed during commanded rate recovery.
+				const recovery = this.rateRecovery.get(id)
+				if (owns && recovery && recovery.socket !== socket)
+					recovery.failed = true
 				if (owns) {
 					attempt.phase = "closed"
 					attempt.sessionId = null
@@ -2571,10 +2576,19 @@ export class SourceManager extends EventEmitter {
 	private readonly tunerCommands = new Map<string, Promise<void>>()
 	private readonly rateRecovery = new Map<
 		string,
-		{ deadline: number; socket: net.Socket; owner: AbortSignal }
+		{
+			deadline: number
+			socket: net.Socket
+			owner: AbortSignal
+			failed?: boolean
+		}
 	>()
 
-	private readonly tunerCommandContext = new AsyncLocalStorage<AbortSignal>()
+	private readonly tunerCommandContext = new AsyncLocalStorage<{
+		id: string
+		signal: AbortSignal
+		active: boolean
+	}>()
 	private readonly tunerCommandControllers = new Map<
 		string,
 		Set<AbortController>
@@ -2587,14 +2601,36 @@ export class SourceManager extends EventEmitter {
 
 	/** Reject late writes and state changes from a cancelled tuner command. */
 	assertTunerCommandActive(): void {
-		this.tunerCommandContext.getStore()?.throwIfAborted()
+		this.tunerCommandContext.getStore()?.signal.throwIfAborted()
 	}
 
-	/** Serialize API commands, including the receiver's rate-change restart. */
+	/** Whether this source is still in its commanded rate-change recovery window. */
+	isCommandedRecovery(id: string): boolean {
+		const recovery = this.rateRecovery.get(id)
+		return (
+			recovery !== undefined &&
+			!recovery.failed &&
+			!recovery.owner.aborted &&
+			recovery.deadline > Date.now()
+		)
+	}
+
+	/**
+	 * Serialize API commands, including the receiver's rate-change restart.
+	 * Same-source nested commands share the parent's signal and deadline; queueing
+	 * them would deadlock an awaited hook behind its own command.
+	 */
 	async runTunerCommand<T>(
 		id: string,
 		command: (signal: AbortSignal) => Promise<T>,
 	): Promise<T> {
+		const parent = this.tunerCommandContext.getStore()
+		parent?.signal.throwIfAborted()
+		if (parent?.id === id && parent.active) {
+			const result = await command(parent.signal)
+			parent.signal.throwIfAborted()
+			return result
+		}
 		if (!this.sources.has(id))
 			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
 		if (
@@ -2631,11 +2667,13 @@ export class SourceManager extends EventEmitter {
 				)
 			}, TUNER_COMMAND_TIMEOUT_MS)
 			let result: T
+			const context = { id, signal, active: true }
 			try {
-				result = await this.tunerCommandContext.run(signal, () =>
+				result = await this.tunerCommandContext.run(context, () =>
 					command(signal),
 				)
 			} finally {
+				context.active = false
 				clearTimeout(timer)
 				if (this.rateRecovery.get(id)?.owner === signal)
 					await this.waitForTunerReady(id)
@@ -2795,7 +2833,7 @@ export class SourceManager extends EventEmitter {
 				deadline:
 					Date.now() + calculateBackoffDelay(1) + SOURCE_CONNECT_TIMEOUT_MS,
 				socket,
-				owner: this.tunerCommandContext.getStore()!,
+				owner: this.tunerCommandContext.getStore()!.signal,
 			})
 		}
 		return accepted

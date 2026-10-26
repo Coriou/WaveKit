@@ -13,6 +13,14 @@ import Fastify from "fastify"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
 import { TunerController } from "../../../src/core/tuner-controller.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
+import { createRatePolicy } from "../../../src/core/rate-policy.js"
+import { createLinkAdvisor } from "../../../src/core/link-advisory.js"
+import {
+	ADSB_FREQUENCY_HZ,
+	READSB_REACH_HZ,
+	READSB_SAMPLE_RATE,
+} from "../../../src/core/rate-policy-contract.js"
+import { composeDecoderRatePolicyLifetime } from "../../../src/index.js"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -581,4 +589,166 @@ it("maps the real rate recovery deadline to a retryable HTTP response", async ()
 	expect(result.statusCode).toBe(503)
 	expect(result.json()).toMatchObject({ code: "SOURCE_RECONNECTING" })
 	expect(result.headers["retry-after"]).toBe("1")
+})
+
+async function policyApp() {
+	const { manager, sockets } = await setup()
+	const log = createLogger({ level: "fatal" })
+	const tuner = new TunerController(log, manager)
+	tuner.initializeSource("source", manager.getCaps("source"), "rtl_tcp")
+	tuner.on("error", () => {})
+	manager.on("connected", id => tuner.noteSourceConnected(id))
+	manager.on("payload-started", id => tuner.synchronizeOnConnect(id))
+	const link = createLinkAdvisor({ now: Date.now })
+	const policy = createRatePolicy({
+		port: { readsbOn: () => ({ mode: "auto", ownDevice: false }) },
+		tuner: {
+			sampleRateOf: id => tuner.getState(id)?.sampleRate ?? null,
+			controlModeOf: id => tuner.getState(id)?.controlMode ?? null,
+			setSampleRate: (id, hz, opts) => tuner.setSampleRate(id, hz, opts),
+		},
+		link,
+		linkInput: () => null,
+		upstreamDropsOf: () => null,
+		reportLink() {},
+		setTimer: () => ({ cancel() {} }),
+		emit() {},
+		now: () => new Date(),
+		log,
+		enabled: true,
+	})
+	const close = composeDecoderRatePolicyLifetime(manager, tuner, link, policy)
+	cleanup.push(async () => close())
+	const app = Fastify()
+	await app.register(tunerRoutes, {
+		tunerController: tuner,
+		sourceManager: manager,
+	})
+	await app.ready()
+	cleanup.push(() => app.close())
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+	vi.spyOn(Math, "random").mockReturnValue(0)
+	const tune = async (hz: number) => {
+		const lost = once(manager, "disconnected")
+		const request = app
+			.inject({
+				method: "POST",
+				url: "/api/tuner/source/frequency",
+				payload: { hz },
+			})
+			.then(result => result)
+		await lost
+		const payload = once(manager, "payload-started")
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+		await payload
+		expect((await request).statusCode).toBe(200)
+	}
+	return { manager, sockets, tuner, policy, tune }
+}
+
+it("restores the original rate after a policy raise and commanded recovery", async () => {
+	const { tuner, policy, tune } = await policyApp()
+	await tune(ADSB_FREQUENCY_HZ)
+	expect(tuner.getState("source")?.sampleRate).toBe(READSB_SAMPLE_RATE)
+	expect(policy.recordFor("source")).toMatchObject({ raisedFromHz: 1_000_000 })
+	await tune(ADSB_FREQUENCY_HZ + READSB_REACH_HZ + 137)
+	expect(tuner.getState("source")?.sampleRate).toBe(1_000_000)
+	expect(policy.recordFor("source")).toBeUndefined()
+})
+
+it.each(["disconnect", "remove"] as const)(
+	"clears a raised policy record on an unplanned %s",
+	async action => {
+		const { manager, sockets, policy, tune } = await policyApp()
+		await tune(ADSB_FREQUENCY_HZ)
+		expect(policy.recordFor("source")).toBeDefined()
+		if (action === "remove") await manager.disconnect("source")
+		else {
+			const lost = new Promise<void>(resolve =>
+				manager.once("disconnected", () => resolve()),
+			)
+			for (const socket of sockets) socket.destroy()
+			await lost
+		}
+		expect(policy.recordFor("source")).toBeUndefined()
+	},
+)
+
+it("runs healthy same-source nested commands within the parent signal", async () => {
+	const { manager } = await setup()
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+	let finished = false
+	const pending = manager.runTunerCommand("source", async signal => {
+		await manager.runTunerCommand("source", async nestedSignal => {
+			expect(nestedSignal).toBe(signal)
+			manager.writeToSource("source", frame(4, 42))
+		})
+		finished = true
+	})
+	const settled = pending.catch(() => undefined)
+	await vi.advanceTimersByTimeAsync(137)
+	expect(finished).toBe(true)
+	await settled
+})
+
+it("blocks a nested hook write after its parent times out", async () => {
+	const { manager } = await setup()
+	const tuner = new TunerController(createLogger({ level: "fatal" }), manager)
+	tuner.initializeSource("source", manager.getCaps("source"), "rtl_tcp")
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+	const entered = Promise.withResolvers<void>()
+	const resume = Promise.withResolvers<void>()
+	let nested: Promise<void> = Promise.resolve()
+	tuner.setBeforeOperatorRetune(async () => {
+		nested = manager.runTunerCommand("source", async () => {
+			entered.resolve()
+			await resume.promise
+			await tuner.setGain("source", 42)
+		})
+		await nested
+	})
+	const parent = manager.runTunerCommand("source", () =>
+		tuner.setFrequency("source", 2 ** 25 + 137, { origin: "rest" }),
+	)
+	const timedOut = expect(parent).rejects.toMatchObject({
+		code: "TUNER_COMMAND_TIMEOUT",
+	})
+	// Let the parent start; the nested callback must enter without waiting for it.
+	await vi.advanceTimersByTimeAsync(137)
+	const nestedFailure = expect(nested).rejects.toMatchObject({
+		code: "TUNER_COMMAND_TIMEOUT",
+	})
+	await vi.advanceTimersByTimeAsync(TUNER_COMMAND_TIMEOUT_MS)
+	await timedOut
+	await entered.promise
+	const write = vi.spyOn(manager, "writeToSource")
+	resume.resolve()
+	await nestedFailure
+	expect(write).not.toHaveBeenCalled()
+})
+
+it("queues a retained continuation after its parent has completed", async () => {
+	const { manager } = await setup()
+	const resume = Promise.withResolvers<void>()
+	let continuation = Promise.resolve()
+	const work = vi.fn(async () => {})
+	await manager.runTunerCommand("source", async () => {
+		continuation = (async () => {
+			await resume.promise
+			await manager.runTunerCommand("source", work)
+		})()
+	})
+	const entered = Promise.withResolvers<void>()
+	const release = Promise.withResolvers<void>()
+	const blocker = manager.runTunerCommand("source", async () => {
+		entered.resolve()
+		await release.promise
+	})
+	await entered.promise
+	resume.resolve()
+	await new Promise<void>(resolve => setImmediate(resolve))
+	expect(work).not.toHaveBeenCalled()
+	release.resolve()
+	await Promise.all([blocker, continuation])
+	expect(work).toHaveBeenCalledOnce()
 })

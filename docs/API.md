@@ -47,10 +47,14 @@ Other disconnects continue to fail immediately (`SOURCE_DISCONNECTED`); they do
 not authorize delayed commands. Queued commands whose recovery wait times out are
 not applied later. A 503 after a sample-rate change does not mean the rate was rejected: the
 write may already have reached the receiver. Reconnect restoration retains
-accepted tuner state.
+accepted tuner state. A decoder policy's original sample rate also survives a
+commanded recovery, so leaving its required tuning range restores that rate.
+An unplanned disconnect or source removal clears the policy record.
 
 Command execution has a separate 9-second deadline (`TUNER_COMMAND_TIMEOUT`,
-503 with `Retry-After: 1`); expired commands cannot apply late writes. Each source
+503 with `Retry-After: 1`); expired commands cannot apply late writes. Hooks that
+await a nested command for the same source run it within the parent's cancellation
+signal and deadline, without adding another queue entry or timeout. Each source
 retains at most 16 commands (one executing plus 15 waiting). Overflow returns
 503 `TUNER_QUEUE_FULL` with `Retry-After: 1`. Missing or removed tuner sources
 return 404 `TUNER_SOURCE_NOT_FOUND`; disconnected sources return 503
