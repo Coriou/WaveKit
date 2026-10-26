@@ -21,9 +21,9 @@ import {
 	presetToJobSpec,
 } from "../../../../src/core/bandplans/presets.js"
 import {
-	bandplansFor,
-	resolveBandplan,
-} from "../../../../src/core/scanner/bandplan/index.js"
+	builtinBandplansFor,
+	resolveBuiltinBandplan,
+} from "../../../../src/core/bandplans/builtin-supplement.js"
 
 const REGIONS = ["EU", "US", "CA", "AU", "NZ", "JP", "CN"] as const
 const COMBINATIONS = [
@@ -187,7 +187,7 @@ const arbOperatorPreset: fc.Arbitrary<OperatorScanPreset> = fc
 
 function unresolved(preset: ScanPreset, region: BandRegion): string[] {
 	return preset.job.bandplans.filter(
-		id => resolveBandplan(id, region) === undefined,
+		id => resolveBuiltinBandplan(id, region) === undefined,
 	)
 }
 
@@ -200,10 +200,10 @@ describe("band-plan presets", () => {
 
 	it("builds one preset per regional plan, then the fixed combinations", () => {
 		for (const region of REGIONS) {
-			const plans = bandplansFor(region)
+			const plans = builtinBandplansFor(region)
 			const before = structuredClone(plans)
 			const presets = builtinPresetsFor(region)
-			expect(bandplansFor(region)).toEqual(before)
+			expect(builtinBandplansFor(region)).toEqual(before)
 			expect(presets.slice(0, plans.length).map(preset => preset.id)).toEqual(
 				plans.map(plan => `builtin-${plan.id}`),
 			)
@@ -239,7 +239,7 @@ describe("band-plan presets", () => {
 			expect(combos.map(preset => preset.id)).toEqual(
 				COMBINATIONS.flatMap(combo => {
 					const ids = combo.planIds.filter(
-						id => resolveBandplan(id, region) !== undefined,
+						id => resolveBuiltinBandplan(id, region) !== undefined,
 					)
 					return ids.length >= 2 ? [combo.id] : []
 				}),
@@ -270,7 +270,7 @@ describe("band-plan presets", () => {
 	})
 
 	it("omits null and empty top-level fields and keeps full ranges", () => {
-		const plan = bandplansFor("EU")[0]
+		const plan = builtinBandplansFor("EU")[0]
 		const first = builtinPresetsFor("EU")[0]
 		if (!plan || !first) throw new Error("EU bandplans missing")
 		expect(presetToJobSpec(first)).toEqual({
@@ -372,7 +372,7 @@ describe("band-plan presets", () => {
 				expect(unresolved(preset, region)).toEqual([])
 				expect(presetIssuesFor(preset, region)).toEqual([])
 				for (const id of preset.job.bandplans)
-					expect(resolveBandplan(id, region)?.id).toBe(id)
+					expect(resolveBuiltinBandplan(id, region)?.id).toBe(id)
 			}
 		}
 		fc.assert(
@@ -449,7 +449,7 @@ describe("band-plan presets", () => {
 			{ code: "unknown-bandplan", bandplanId: "pmr446" },
 		])
 		for (const region of REGIONS) {
-			const known = new Set(bandplansFor(region).map(plan => plan.id))
+			const known = new Set(builtinBandplansFor(region).map(plan => plan.id))
 			for (const preset of builtinPresetsFor(region)) {
 				expect(presetIssuesFor(preset, region)).toEqual([])
 				expect(presetIssuesFor(preset, region, known)).toEqual([])

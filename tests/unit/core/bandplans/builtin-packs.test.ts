@@ -3,7 +3,10 @@ import { resolve } from "node:path"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type { BandRegion, DisplayGroup } from "@wavekit/api-types"
-import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
+import {
+	BUILTIN_SUPPLEMENT,
+	builtinBandplansFor,
+} from "../../../../src/core/bandplans/builtin-supplement.js"
 import { BUILTIN_BANDPLANS } from "../../../../src/core/scanner/bandplan/builtin.js"
 import {
 	builtinGroupFor,
@@ -21,7 +24,7 @@ const GROUPS: Record<string, DisplayGroup> = {
 	"ism-433": "ism-srd",
 	"ism-868": "ism-srd",
 	"pager-vhf": "pagers",
-	// Added the French paging plan to builtin.ts.
+	// The French paging plan of the built-in supplement.
 	"pager-fr": "pagers",
 	"vhf-land-mobile": "land-mobile",
 	"uhf-land-mobile": "land-mobile",
@@ -32,7 +35,7 @@ const GROUPS: Record<string, DisplayGroup> = {
 }
 
 describe("built-in pack projection", () => {
-	it("projects one frozen pack per region, in order, from bandplansFor", () => {
+	it("projects one frozen pack per region, in order, from the built-in catalogue", () => {
 		const packs = projectBuiltinPacks()
 		expect(packs).toBe(projectBuiltinPacks())
 		expect(packs.map(pack => pack.region)).toEqual([...REGIONS])
@@ -42,7 +45,7 @@ describe("built-in pack projection", () => {
 			expect(pack.provenance).toEqual({ kind: "builtin" })
 			expect(pack.id).toBe(builtinPackIdFor(pack.region!))
 			expect(pack.name).toBe(`Built-in (${pack.region})`)
-			const plans = bandplansFor(pack.region!)
+			const plans = builtinBandplansFor(pack.region!)
 			expect(pack.bands.map(band => band.id)).toEqual(plans.map(plan => plan.id))
 			for (const [index, band] of pack.bands.entries()) {
 				const plan = plans[index]!
@@ -106,15 +109,18 @@ describe("built-in pack projection", () => {
 	})
 
 	it("does not freeze or rewrite scanner plan objects", () => {
-		const before = bandplansFor("EU").map(plan => structuredClone(plan.ranges))
+		const before = builtinBandplansFor("EU").map(plan => structuredClone(plan.ranges))
 		projectBuiltinPacks()
-		const after = bandplansFor("EU")
+		const after = builtinBandplansFor("EU")
 		expect(after.map(plan => plan.ranges)).toEqual(before)
 		expect(Object.isFrozen(after[0]?.ranges[0])).toBe(false)
 	})
 
 	it("maps every current plan id explicitly and unknown ids to other", () => {
-		const ids = new Set(BUILTIN_BANDPLANS.map(plan => plan.id))
+		const ids = new Set([
+			...BUILTIN_BANDPLANS.map(plan => plan.id),
+			...BUILTIN_SUPPLEMENT.map(s => s.plan.id),
+		])
 		expect(new Set(Object.keys(GROUPS))).toEqual(ids)
 		for (const id of ids) expect(builtinGroupFor(id)).toBe(GROUPS[id])
 		expect(builtinGroupFor("not-a-plan")).toBe("other")
@@ -123,11 +129,11 @@ describe("built-in pack projection", () => {
 
 	// Feature: band-plans, Property 14: Projection fidelity
 	// Validates: Requirements 1.3, 2.1, 2.2, 2.3, 2.4
-	it("keeps scan ranges identical to bandplansFor for every region", () => {
+	it("keeps scan ranges identical to the built-in catalogue for every region", () => {
 		fc.assert(
 			fc.property(fc.constantFrom(...REGIONS), region => {
 				const pack = projectBuiltinPacks().find(item => item.region === region)
-				const plans = bandplansFor(region)
+				const plans = builtinBandplansFor(region)
 				expect(pack?.bands).toHaveLength(plans.length)
 				for (const [index, plan] of plans.entries()) {
 					const band = pack?.bands[index]

@@ -10,10 +10,8 @@ import {
 	openBandPlanService,
 } from "../../../../src/core/bandplans/index.js"
 import type { BandPlanService } from "../../../../src/core/bandplans/contract.js"
-import {
-	bandplansFor,
-	priorsFor,
-} from "../../../../src/core/scanner/bandplan/index.js"
+import { priorsFor } from "../../../../src/core/scanner/bandplan/index.js"
+import { builtinBandplansFor } from "../../../../src/core/bandplans/builtin-supplement.js"
 import type { Bandplan } from "../../../../src/core/scanner/bandplan/index.js"
 import type { ScanJob } from "@wavekit/api-types"
 import type { JobDriver } from "../../../../src/core/scanner/job-runner.js"
@@ -92,7 +90,7 @@ function builtinPackId(view: BandPlanStackView): string {
 	return entry.packId
 }
 
-const plans = bandplansFor(REGION)
+const plans = builtinBandplansFor(REGION)
 const planIds = plans.map(plan => plan.id)
 
 /** Job specs covering plan-id lookup and host-range inheritance. */
@@ -132,7 +130,7 @@ describe("scanner fed by the band-plan stack", () => {
 		const service = await openService()
 		const fed = scanner(feedFrom(() => service))
 		const plain = scanner()
-		expect(fed.bandplans()).toEqual(bandplansFor(REGION))
+		expect(fed.bandplans()).toEqual(builtinBandplansFor(REGION))
 		expect(fed.bandplans()).toEqual(plain.bandplans())
 		for (const spec of specsFor())
 			expect(fed.preview(spec)).toEqual(plain.preview(spec))
@@ -255,18 +253,18 @@ describe("scanner fed by the band-plan stack", () => {
 
 	// Feature: band-plans, Property 16: Default scanner parity
 	// Validates: Requirements 11.5
-	it("falls back to bandplansFor(region) before the service opens and when view() throws", async () => {
+	it("falls back to builtinBandplansFor(region) before the service opens and when view() throws", async () => {
 		let source: Pick<BandPlanService, "view"> | undefined
 		const onError = vi.fn()
 		const fed = scanner(feedFrom(() => source, onError))
-		expect(fed.bandplans()).toEqual(bandplansFor(REGION))
+		expect(fed.bandplans()).toEqual(builtinBandplansFor(REGION))
 		expect(onError).not.toHaveBeenCalled()
 		source = {
 			view: () => {
 				throw new Error("store exploded")
 			},
 		}
-		expect(fed.bandplans()).toEqual(bandplansFor(REGION))
+		expect(fed.bandplans()).toEqual(builtinBandplansFor(REGION))
 		expect(onError).toHaveBeenCalled()
 		const plain = scanner()
 		for (const spec of specsFor())

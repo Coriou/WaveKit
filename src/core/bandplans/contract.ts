@@ -53,7 +53,7 @@ export class BandPlansError extends WaveKitError {
 
 // --- Lane A: builtin-packs.ts and resolve.ts (pure) ---
 
-/** builtin-packs.ts: one read-only pack per BandRegion, projected from bandplansFor(region). */
+/** builtin-packs.ts: one read-only pack per BandRegion, projected from builtinBandplansFor(region). */
 export type ProjectBuiltinPacks = () => readonly BandPlanPack[]
 /** builtin-packs.ts: `builtin-<region lowercase>`. */
 export type BuiltinPackIdFor = (region: BandRegion) => string
@@ -254,7 +254,7 @@ export type BandPlanImportParsers = Readonly<
 
 // --- Lane D: presets.ts (pure) ---
 
-/** presets.ts: one preset per bandplansFor(region) plan, then fixed combinations of existing ids. */
+/** presets.ts: one preset per builtinBandplansFor(region) plan, then fixed combinations of existing ids. */
 export type BuiltinPresetsFor = (
 	region: BandRegion,
 ) => readonly BuiltinScanPreset[]
@@ -277,19 +277,19 @@ export type PresetToJobSpec = (preset: ScanPreset) => ScanJobSpec
 /**
  * scanner-feed.ts: the effective scanner list for one stack view. For each enabled stack
  * entry in stack order whose pack is built-in (`builtin-<region>`), the plans of
- * `bandplansFor(packRegion)` in that order, omitting a plan whose band
+ * `builtinBandplansFor(packRegion)` (the built-in catalogue) in that order, omitting a plan whose band
  * (`packId/planId`) carries a stored `hidden: true` edit and any plan id already
  * emitted by a higher entry. Imported packs, operator bands, `skip`, other edit fields,
  * segments and shadowing never change the result. Plans are the scanner's own objects
  * (exact ranges, rasters, priors). Under the default stack with no edits the result
- * deep-equals `bandplansFor(view.context.region)`. Total and pure: never throws, no I/O.
+ * deep-equals `builtinBandplansFor(view.context.region)`. Total and pure: never throws, no I/O.
  */
 export type ResolveScannerBandplans = (
 	view: BandPlanStackView,
 ) => readonly Bandplan[]
 /**
  * What the scanner receives (ScannerServiceDeps): read per call, never cached across
- * admissions. Composition returns `bandplansFor(region)` until the band-plan service is
+ * admissions. Composition returns `builtinBandplansFor(region)` until the band-plan service is
  * open, and if a read throws.
  */
 export type ScannerBandplanProvider = () => readonly Bandplan[]

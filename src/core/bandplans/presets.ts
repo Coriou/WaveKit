@@ -12,7 +12,10 @@ import type {
 	ScanPresetJob,
 	ScanRange,
 } from "@wavekit/api-types"
-import { bandplansFor, resolveBandplan } from "../scanner/bandplan/index.js"
+import {
+	builtinBandplansFor,
+	resolveBuiltinBandplan,
+} from "./builtin-supplement.js"
 import type {
 	BuiltinPresetsFor,
 	PresetIssuesFor,
@@ -64,12 +67,12 @@ function builtinPreset(
 }
 
 export const builtinPresetsFor: BuiltinPresetsFor = region => {
-	const presets: BuiltinScanPreset[] = bandplansFor(region).map(plan =>
+	const presets: BuiltinScanPreset[] = builtinBandplansFor(region).map(plan =>
 		builtinPreset(region, `builtin-${plan.id}`, plan.name, [plan.id]),
 	)
 	for (const combination of COMBINATIONS) {
 		const bandplans = combination.planIds.filter(
-			id => resolveBandplan(id, region) !== undefined,
+			id => resolveBuiltinBandplan(id, region) !== undefined,
 		)
 		if (bandplans.length < 2) continue
 		presets.push(
@@ -87,7 +90,7 @@ export const presetIssuesFor: PresetIssuesFor = (
 	preset.job.bandplans
 		.filter(id =>
 			effectiveIds === undefined
-				? resolveBandplan(id, region) === undefined
+				? resolveBuiltinBandplan(id, region) === undefined
 				: !effectiveIds.has(id),
 		)
 		.map(

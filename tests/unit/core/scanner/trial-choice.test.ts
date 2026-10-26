@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
+import { builtinBandplansFor } from "../../../../src/core/bandplans/builtin-supplement.js"
 import {
 	classHypotheses,
 	classifySpectral,
@@ -59,7 +59,7 @@ import { makeTrack } from "../../../mocks/scanner/observations.js"
 // Synthetic frequencies only: a pager channel inside the overlay span, a land-mobile one outside.
 const PAGER_HZ = 466_100_000
 const LAND_MOBILE_HZ = 455_000_000
-const EU = withScannerOverlays(bandplansFor("EU").flatMap(p => p.ranges))
+const EU = withScannerOverlays(builtinBandplansFor("EU").flatMap(p => p.ranges))
 
 function pagerPriors(): ReturnType<typeof narrowestPriors> {
 	return narrowestPriors(EU, PAGER_HZ)
@@ -94,14 +94,14 @@ describe("pager classification (part 1)", () => {
 		expect(narrowestPriors(EU, PAGER_UHF_RANGE.endHz + 1).pocsag).not.toBe(1)
 		// a non-EU plan set has no overlay
 		expect(
-			withScannerOverlays(bandplansFor("JP").flatMap(p => p.ranges)).some(
-				r => r.bandplanId === "pager-uhf",
-			),
+			withScannerOverlays(
+				builtinBandplansFor("JP").flatMap(p => p.ranges),
+			).some(r => r.bandplanId === "pager-uhf"),
 		).toBe(false)
 	})
 
-	it("the French paging plan is in builtin.ts and the overlay never overlaps it", () => {
-		const fr = bandplansFor("EU").find(p => p.id === "pager-fr")
+	it("the French paging plan is in the built-in catalogue and the overlay never overlaps it", () => {
+		const fr = builtinBandplansFor("EU").find(p => p.id === "pager-fr")
 		expect(fr?.ranges.map(r => [r.startHz, r.endHz])).toEqual([
 			[466_025_000, 466_230_000],
 			[446_526_250, 446_538_750],
@@ -122,7 +122,7 @@ describe("pager classification (part 1)", () => {
 		).toBe(true)
 		// hiding pager-fr brings the whole overlay back
 		const hidden = withScannerOverlays(
-			bandplansFor("EU")
+			builtinBandplansFor("EU")
 				.filter(p => p.id !== "pager-fr")
 				.flatMap(p => p.ranges),
 		).filter(r => r.bandplanId === "pager-uhf")
@@ -418,7 +418,7 @@ describe("trial memory order (part 3)", () => {
 		// Before (the frozen plans, no overlay, no memory): POCSAG is the last trial.
 		// the plans before the French plan: no French plan, no overlay
 		const legacy = narrowestPriors(
-			bandplansFor("EU")
+			builtinBandplansFor("EU")
 				.filter(p => p.id !== "pager-fr")
 				.flatMap(p => p.ranges),
 			PAGER_HZ,

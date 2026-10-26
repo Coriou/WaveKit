@@ -21,7 +21,7 @@ import {
 	resolveScannerBandplans,
 } from "../../../../src/core/bandplans/scanner-feed.js"
 import { BAND_REGIONS } from "../../../../src/decoders/band-region.js"
-import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
+import { builtinBandplansFor } from "../../../../src/core/bandplans/builtin-supplement.js"
 import type { Bandplan } from "../../../../src/core/scanner/bandplan/index.js"
 
 const WHEN = "2026-01-01T00:00:00.000Z"
@@ -157,7 +157,7 @@ function stackView(init: {
 }
 
 function identities(region: BandRegion): readonly Bandplan[] {
-	return bandplansFor(region)
+	return builtinBandplansFor(region)
 }
 
 function expectPlans(
@@ -191,7 +191,7 @@ function feedByDesign(view: BandPlanStackView): readonly Bandplan[] {
 		if (!item.enabled) continue
 		const region = regionByPack.get(item.packId)
 		if (region === undefined) continue
-		for (const plan of bandplansFor(region)) {
+		for (const plan of builtinBandplansFor(region)) {
 			if (hidden.has(`${item.packId}/${plan.id}`)) continue
 			if (emitted.has(plan.id)) continue
 			emitted.add(plan.id)
@@ -288,7 +288,7 @@ const arbView: fc.Arbitrary<BandPlanStackView> = fc
 			entries.push(
 				entry(pack, draft.enabled, draft.mislabel ? "imported" : pack.kind),
 			)
-			const plans = bandplansFor(draft.region)
+			const plans = builtinBandplansFor(draft.region)
 			for (const index of draft.hiddenAt) {
 				const plan = plans[index % plans.length]
 				if (!plan) continue
@@ -314,7 +314,7 @@ const arbView: fc.Arbitrary<BandPlanStackView> = fc
 			})
 		const region = drafts[0]?.region ?? "EU"
 		const pack = packFor(region)
-		const target = bandplansFor(region)[0]
+		const target = builtinBandplansFor(region)[0]
 		if (sample.skip && target)
 			edits.push(edit(pack.id, target.id, { skip: { reason: "display only" } }))
 		if (sample.rename && target)
@@ -340,7 +340,7 @@ const arbView: fc.Arbitrary<BandPlanStackView> = fc
 	})
 
 describe("scanner bandplan feed", () => {
-	it("matches bandplansFor for a default stack in every region", async () => {
+	it("matches the built-in catalogue for a default stack in every region", async () => {
 		// Feature: band-plans, Property 16: Default scanner parity
 		// Validates: Requirements 11.2, 11.4, 1.1
 		fc.assert(
@@ -436,7 +436,7 @@ describe("scanner bandplan feed", () => {
 			const plans: Bandplan[] = []
 			for (const layer of layers) {
 				const hidden = new Set(layer.hidden ?? [])
-				for (const plan of bandplansFor(layer.region)) {
+				for (const plan of builtinBandplansFor(layer.region)) {
 					if (hidden.has(plan.id) || emitted.has(plan.id)) continue
 					emitted.add(plan.id)
 					plans.push(plan)
@@ -579,14 +579,14 @@ describe("scanner bandplan feed", () => {
 })
 
 describe("createScannerBandplanProvider", () => {
-	it("falls back to bandplansFor(region) while the view is undefined", () => {
+	it("falls back to builtinBandplansFor(region) while the view is undefined", () => {
 		const onError = vi.fn()
 		const provider = createScannerBandplanProvider(
 			() => undefined,
 			"US",
 			onError,
 		)
-		expect(provider()).toEqual(bandplansFor("US"))
+		expect(provider()).toEqual(builtinBandplansFor("US"))
 		expect(onError).not.toHaveBeenCalled()
 	})
 
@@ -600,7 +600,7 @@ describe("createScannerBandplanProvider", () => {
 			"EU",
 			onError,
 		)
-		expect(provider()).toEqual(bandplansFor("EU"))
+		expect(provider()).toEqual(builtinBandplansFor("EU"))
 		expect(onError).toHaveBeenCalledExactlyOnceWith(failure)
 		const loud = createScannerBandplanProvider(
 			() => {
@@ -611,29 +611,29 @@ describe("createScannerBandplanProvider", () => {
 				throw new Error("logger failed")
 			},
 		)
-		expect(loud()).toEqual(bandplansFor("EU"))
+		expect(loud()).toEqual(builtinBandplansFor("EU"))
 		expect(
 			createScannerBandplanProvider(() => {
 				throw failure
 			}, "EU")(),
-		).toEqual(bandplansFor("EU"))
+		).toEqual(builtinBandplansFor("EU"))
 	})
 
 	it("resolves the current view on every call", () => {
 		const pack = packFor("EU")
-		const hiddenId = bandplansFor("EU")[0]?.id
+		const hiddenId = builtinBandplansFor("EU")[0]?.id
 		if (hiddenId === undefined) throw new Error("no EU plans")
 		let view = stackView({ region: "EU" })
 		const onError = vi.fn()
 		const provider = createScannerBandplanProvider(() => view, "EU", onError)
 		expect(provider()).toEqual(resolveScannerBandplans(view))
-		expect(provider()).toEqual(bandplansFor("EU"))
+		expect(provider()).toEqual(builtinBandplansFor("EU"))
 		view = stackView({
 			region: "EU",
 			edits: [edit(pack.id, hiddenId, { hidden: true })],
 		})
 		expect(provider()).toEqual(
-			bandplansFor("EU").filter(plan => plan.id !== hiddenId),
+			builtinBandplansFor("EU").filter(plan => plan.id !== hiddenId),
 		)
 		expect(onError).not.toHaveBeenCalled()
 	})

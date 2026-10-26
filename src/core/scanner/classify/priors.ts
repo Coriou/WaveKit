@@ -24,7 +24,8 @@ export const LPD433_RANGE: Readonly<ScanRange> = {
  * origin for off-raster carriers. DMR is listed because land-mobile digital carriers share the
  * sub-band; the classifier still ranks the pager trials first (PAGER_RANGE_HYPOTHESES). It is
  * narrower than `uhf-land-mobile` (70 MHz), so `narrowestPriors` picks it inside its span. The
- * range is a scanner overlay like LPD433. builtin.ts carries the French paging plan `pager-fr`
+ * range is a scanner overlay like LPD433. The built-in catalogue
+ * (`src/core/bandplans/builtin-supplement.ts`) carries the French paging plan `pager-fr`
  * (466.025–466.230 MHz, POCSAG); when the effective plans hold it, only the parts of this span it
  * does not cover are added (465.975–466.025 MHz and 466.230–466.550 MHz, each exclusive of the
  * shared edge), so no frequency is covered by both ranges.

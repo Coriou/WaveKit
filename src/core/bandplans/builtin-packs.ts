@@ -1,6 +1,7 @@
 /**
- * Read-only projection of bandplansFor (docs/specs/band-plans/design.md).
- * One frozen pack per BandRegion. Adds no frequency data.
+ * Read-only projection of the built-in catalogue, builtinBandplansFor
+ * (docs/specs/band-plans/design.md; the legacy plans plus builtin-supplement.ts).
+ * One frozen pack per BandRegion. Adds no frequency data of its own.
  */
 import type {
 	Band,
@@ -12,7 +13,7 @@ import type {
 	ScanRange,
 } from "@wavekit/api-types"
 import type { BandRegion } from "@wavekit/api-types"
-import { bandplansFor } from "../scanner/bandplan/index.js"
+import { builtinBandplansFor } from "./builtin-supplement.js"
 import type { Bandplan } from "../scanner/bandplan/index.js"
 import { BandPlansError } from "./contract.js"
 import type {
@@ -167,7 +168,7 @@ function projectRegion(region: BandRegion): BandPlanPack {
 		name: `Built-in (${region})`,
 		region,
 		provenance: { kind: "builtin" },
-		bands: bandplansFor(region).map(projectBand),
+		bands: builtinBandplansFor(region).map(projectBand),
 	}
 }
 

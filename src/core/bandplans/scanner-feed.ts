@@ -6,7 +6,7 @@
  * built-in list, when the view is missing or reading it throws.
  */
 import type { BandPlanStackView, BandRegion } from "@wavekit/api-types"
-import { bandplansFor } from "../scanner/bandplan/index.js"
+import { builtinBandplansFor } from "./builtin-supplement.js"
 import type { Bandplan, BandRegionCode } from "../scanner/bandplan/index.js"
 import type {
 	ResolveScannerBandplans,
@@ -32,7 +32,7 @@ function collect(view: BandPlanStackView): readonly Bandplan[] {
 		if (!entry.enabled) continue
 		const region = regionByPack.get(entry.packId)
 		if (region === undefined) continue
-		for (const plan of bandplansFor(region)) {
+		for (const plan of builtinBandplansFor(region)) {
 			if (hidden.has(`${entry.packId}/${plan.id}`)) continue
 			if (emitted.has(plan.id)) continue
 			emitted.add(plan.id)
@@ -53,7 +53,7 @@ export const resolveScannerBandplans: ResolveScannerBandplans = view => {
 /**
  * The scanner's `bandplans` provider, read per call. `getView` returns undefined
  * until the band-plan service is open; then, and when `getView` throws, the
- * scanner gets `bandplansFor(region)`. `onError` sees the throw; its own
+ * scanner gets `builtinBandplansFor(region)`. `onError` sees the throw; its own
  * failure is ignored so the scanner always gets a list.
  */
 export function createScannerBandplanProvider(
@@ -71,9 +71,9 @@ export function createScannerBandplanProvider(
 			} catch {
 				// Reporting is best-effort; the fallback below still applies.
 			}
-			return bandplansFor(region)
+			return builtinBandplansFor(region)
 		}
-		if (view === undefined) return bandplansFor(region)
+		if (view === undefined) return builtinBandplansFor(region)
 		return resolveScannerBandplans(view)
 	}
 }

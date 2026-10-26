@@ -8,7 +8,7 @@
  * below for paging bands the catalogue does not list yet.
  */
 import type { BandRegion, DecoderBandRange } from "@wavekit/api-types"
-import { bandplansFor } from "../../core/scanner/bandplan/index.js"
+import { builtinBandplansFor } from "../../core/bandplans/builtin-supplement.js"
 import {
 	BAND_DEFAULTS,
 	type BandDefault,
@@ -63,7 +63,7 @@ export function pagingRasterRanges(
 	const hit = cache.get(region)
 	if (hit) return hit
 	const out: PagingRasterRange[] = []
-	for (const plan of bandplansFor(region))
+	for (const plan of builtinBandplansFor(region))
 		for (const range of plan.ranges) {
 			const protocols = range.protocols ?? []
 			if (

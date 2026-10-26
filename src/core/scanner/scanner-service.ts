@@ -75,11 +75,11 @@ import type { SourceConfig, SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
 import { sourceScannerConfig } from "../../config.js"
 import {
-	bandplansFor,
 	priorsFor,
 	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
+import { builtinBandplansFor } from "../bandplans/builtin-supplement.js"
 import {
 	createBandRangeCache,
 	withBandBurstPrior,
@@ -445,7 +445,7 @@ export interface ScannerServiceDeps {
 	sourceConfigs: readonly SourceConfig[]
 	decoderConfigs: readonly DecoderConfig[]
 	region: BandRegionCode
-	/** Effective plans from the band-plan stack, read per call. Absent: bandplansFor(region). */
+	/** Effective plans from the band-plan stack, read per call. Absent: builtinBandplansFor(region). */
 	bandplans?: () => readonly Bandplan[]
 	stateDir: string
 	sources: SourceManager
@@ -1186,9 +1186,9 @@ export class ScannerService extends EventEmitter {
 				hintScope: () => ({
 					region: this.deps.region,
 					ranges: withScannerOverlays(
-						(this.deps.bandplans?.() ?? bandplansFor(this.deps.region)).flatMap(
-							p => p.ranges,
-						),
+						(
+							this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region)
+						).flatMap(p => p.ranges),
 					),
 				}),
 				logger: this.log,
@@ -1954,7 +1954,7 @@ export class ScannerService extends EventEmitter {
 	bandplans(): BandplanDto[] {
 		return this.deps.bandplans
 			? [...this.deps.bandplans()]
-			: bandplansFor(this.deps.region)
+			: builtinBandplansFor(this.deps.region)
 	}
 
 	recordMeasurement(m: Partial<PreviewMeasured>): void {
@@ -2817,7 +2817,8 @@ export class ScannerService extends EventEmitter {
 		if (records.length === 0) return null
 		const ranges = records.flatMap(j => j.spec.ranges.filter(isRangeEnabled))
 		if (records.some(j => j.passive))
-			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+			for (const b of this.deps.bandplans?.() ??
+				builtinBandplansFor(this.deps.region))
 				ranges.push(...b.ranges.filter(isRangeEnabled))
 		const entries = ranges.map((r): ChannelPlanEntry => {
 			const raster = slotRasterOf(r)
@@ -2889,7 +2890,8 @@ export class ScannerService extends EventEmitter {
 			j => j.spec.sourceId === sourceId && !isTerminal(j.state) && j.passive,
 		)
 		if (passive)
-			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+			for (const b of this.deps.bandplans?.() ??
+				builtinBandplansFor(this.deps.region))
 				all.push(...b.ranges.filter(isRangeEnabled))
 		const out: MaskRaster[] = []
 		const seen = new Set<string>()
@@ -2932,7 +2934,8 @@ export class ScannerService extends EventEmitter {
 		)
 		if (!passive) return []
 		const out: NonNullable<ScanRange["rasters"]> = []
-		for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+		for (const b of this.deps.bandplans?.() ??
+			builtinBandplansFor(this.deps.region))
 			for (const r of b.ranges) {
 				if (!isRangeEnabled(r) || hz < r.startHz || hz > r.endHz) continue
 				for (const x of r.rasters ?? []) if (x.spacingHz > 0) out.push(x)
@@ -3385,7 +3388,7 @@ export class ScannerService extends EventEmitter {
 				() =>
 					priorsFor(
 						this.bandBurstRanges(
-							this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
+							this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region),
 						),
 						centreHz,
 					),
@@ -5209,7 +5212,7 @@ export class ScannerService extends EventEmitter {
 			? this.findObservation(capture.observationId)
 			: undefined
 		const ranges = (
-			this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
+			this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region)
 		).flatMap(b => b.ranges)
 		// Minor: the stored discovery once the observation left live/recent.
 		const discoveryId =
@@ -6071,7 +6074,7 @@ export class ScannerService extends EventEmitter {
 		identify: NormalisedIdentify,
 	): IdentifyRunner {
 		const ranges = (
-			this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
+			this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region)
 		).flatMap(b => b.ranges)
 		return new IdentifyRunner({
 			record,
@@ -6599,7 +6602,8 @@ export class ScannerService extends EventEmitter {
 			},
 			impactFor: (sourceId, spec) => this.arbiter.impact(sourceId, spec),
 			region: this.deps.region,
-			bandplans: this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
+			bandplans:
+				this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region),
 			tunerRange: () => ({ startHz: 24_000_000, endHz: 1_766_000_000 }),
 			lockouts: sourceId => this.store.lockouts(sourceId),
 			...(this.deps.decoderCoverage

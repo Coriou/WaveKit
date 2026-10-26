@@ -119,30 +119,6 @@ export const BUILTIN_BANDPLANS: readonly Bandplan[] = [
 		],
 	},
 	{
-		id: "pager-fr",
-		region: "EU",
-		name: "French paging (466 MHz and 446.5325 MHz)",
-		// French wide-area POCSAG paging: 466.025–466.230 MHz on a 12.5 kHz raster from
-		// 466.025 MHz (205 kHz / 12.5 kHz = 16.4, so 17 channels up to 466.225 MHz), plus the
-		// single pager channel at 446.5325 MHz (±6.25 kHz: one 12.5 kHz channel). General public
-		// band-plan knowledge; data only.
-		ranges: [
-			range("pager-fr", 466.025, 466.23, {
-				rasters: [raster(12_500, 466.025)],
-				obwHz: [12_000],
-				protocols: ["pocsag"],
-			}),
-			{
-				startHz: MHz(446.5325) - 6250,
-				endHz: MHz(446.5325) + 6250,
-				rasters: [raster(12_500, 446.5325)],
-				obwHz: [12_000],
-				protocols: ["pocsag"],
-				bandplanId: "pager-fr",
-			},
-		],
-	},
-	{
 		id: "pmr446",
 		region: "EU",
 		name: "PMR446",

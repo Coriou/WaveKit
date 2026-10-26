@@ -41,7 +41,9 @@ registry. Applying a scan preset shall remain a separate client call to the exis
 scanner job API with its existing admission and arbitration.
 1.3 BP1 shall add no frequency, channel, raster or regulatory data. Built-in packs are a
 read-only projection of `BUILTIN_BANDPLANS`; tuning hints and channel lists of built-in
-bands shall be null or empty.
+bands shall be null or empty. _Amended by [web-gaps-11 9.7](../web-gaps-11/requirements.md):_ the projection is of the built-in catalogue
+`builtinBandplansFor(region)`: the legacy plans plus the band-plan supplement
+(`src/core/bandplans/builtin-supplement.ts`), the one place a new built-in band is added.
 1.4 The effective country shall remain `station.country ?? region` context only; core
 shall not infer a country from coordinates.
 
@@ -50,6 +52,7 @@ shall not infer a country from coordinates.
 2.1 Core shall expose one read-only built-in pack per `BandRegion` (`builtin-eu` ...
 `builtin-cn`) whose bands are exactly the plans of `bandplansFor(region)`, one band per
 plan, band id = plan id, edges = minimum start and maximum end of the plan's ranges.
+_Amended by [web-gaps-11 9.7](../web-gaps-11/requirements.md):_ the plans of `builtinBandplansFor(region)`.
 2.2 Each built-in band shall carry a read-only `scan` reference holding the plan id and
 an exact copy of the plan's ranges, so BP2 can project without loss.
 2.3 Each built-in band shall get a display group from a fixed table keyed by plan id;
@@ -202,6 +205,7 @@ mapping totality; preset-to-job validity; built-in projection fidelity.
 10.2 A repository test shall prove the four pinned files unchanged, every built-in
 citation URL present in `builtin.ts`, and `src/core/bandplans/` importing from the
 scanner only `bandplan/index.js`, `bandplan/builtin.js` and type modules.
+_Amended by [web-gaps-11 9.7](../web-gaps-11/requirements.md):_ `src/core/bandplans/` also imports its own `builtin-supplement.js`.
 
 ## 11. Batch 2 (BP2): scanner feed, preview digest, store identity, change notice
 
@@ -220,7 +224,8 @@ this list; the resolved skip-marked segments reach a scan plan only as exclusion
 that opts in with `skipBandPlanSkips`, evaluated when that job's plan is computed (a band-plan
 edit never replans a running job, so 1.2 holds)._
 11.2 With the default stack and no edits, including an unavailable store, the effective
-scanner list shall deep-equal `bandplansFor(region)` for every `BandRegion`. The four
+scanner list shall deep-equal `bandplansFor(region)` for every `BandRegion`
+(_Amended by [web-gaps-11 9.7](../web-gaps-11/requirements.md):_ `builtinBandplansFor(region)`). The four
 files pinned by 1.1 shall stay byte-identical, and scanner defaults, ranges, rasters,
 priors and snapping shall not change.
 11.3 The scanner shall read the effective scanner list when serving

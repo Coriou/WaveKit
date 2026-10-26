@@ -360,11 +360,12 @@ runtime stage copies it next to `wavekit-chan` and the verification step runs `w
 
 ## Design amendment: trial choice and memory
 
-Requirements 9.1 to 9.6. All of it lives in `src/core/scanner/**`.
+Requirements 9.1 to 9.7. All of it lives in `src/core/scanner/**`, except the built-in band supplement (9.7) in `src/core/bandplans/`.
 
-- **Pager range.** `bandplan/builtin.ts` gains the French plan `pager-fr` (EU variant; Main's
-  request, with the isolation tests' pinned size and hash updated and `pagers` as its display
-  group in `src/core/bandplans/builtin-packs.ts`). The wider EU UHF paging span stays a scanner
+- **Pager range.** The French plan `pager-fr` (EU variant) is a built-in band of the band-plan
+  supplement (9.7, `src/core/bandplans/builtin-supplement.ts`, `pagers` as its display group in
+  `src/core/bandplans/builtin-packs.ts`); `bandplan/builtin.ts` and the isolation pins are
+  unchanged. The wider EU UHF paging span stays a scanner
   overlay next to LPD433: `PAGER_UHF_RANGE` in `classify/priors.ts`, added by
   `withScannerOverlays` when the effective plans hold an EU-only plan (`ism-433` or `pmr446`),
   minus the span of any `pager-fr` range (`pagerOverlayParts`; the whole span when `pager-fr` is

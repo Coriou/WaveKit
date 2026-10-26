@@ -335,6 +335,17 @@ so the replay decode that admits a pending observation is remembered on the new 
 9.6 **Capture before admission.** A gate-passed track the store has not admitted yet gets a
 detection capture too, at most 2 per source per rolling minute (of the 6 per source), so the first
 transmission can be replayed; a replay decode then admits it through the evidence path.
+9.7 **Built-in band supplement.** `pager-fr` (9.1) is a built-in band of the band-plan
+authority, not a row of the legacy scanner table: `src/core/bandplans/builtin-supplement.ts`
+inserts it into the EU built-in catalogue (`builtinBandplansFor`, right before `pmr446`), and
+the built-in packs, presets, the scanner's effective list and its fallback, the scanner's own
+plan reads and the pager decoder's paging ranges all read that catalogue. The four files pinned
+by [band-plans 1.1](../band-plans/requirements.md) stay byte-identical, as
+[regional-display-registry 1.5](../regional-display-registry/requirements.md) requires of the
+existing scanner ranges. This amends band-plans 1.3 and 2.1 (a built-in pack projects the
+catalogue, so the supplement's frequency data reaches it), 11.2 (under the default stack the
+effective list deep-equals `builtinBandplansFor(region)`) and 10.2 (`src/core/bandplans/` may
+import the supplement it owns). A later built-in band joins the supplement the same way.
 
 ## Amendment: activity-ranked decoder channels (scanner side)
 

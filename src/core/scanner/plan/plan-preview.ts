@@ -1,7 +1,7 @@
 import type { TunerControlMode } from "@wavekit/api-types"
 import { WaveKitError } from "../../../utils/errors.js"
 import { defaultFftSize } from "../../spectrum/fft.js"
-import { bandplansFor } from "../bandplan/index.js"
+import { builtinBandplansFor } from "../../bandplans/builtin-supplement.js"
 import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
@@ -70,7 +70,7 @@ export interface PreviewContext {
 	impactFor(sourceId: string, spec: NormalisedJobSpec): Impact
 	region: BandRegionCode
 	tunerRange(sourceId: string): FreqRange
-	/** Omitted: bandplansFor(region). Present: host ranges and plan-id lookup. */
+	/** Omitted: builtinBandplansFor(region). Present: host ranges and plan-id lookup. */
 	bandplans?: readonly Bandplan[]
 	/** WG2 req 12: locked-out discoveries heard on the source. Omitted: none (sweeps plan as before). */
 	lockouts?: (sourceId: string) => readonly LockoutTarget[]
@@ -377,7 +377,7 @@ export function normaliseSpec(
 	// Ranges: operator ranges (inheriting rasters from the enclosing regional bandplan), then bandplans.
 	const ranges: ScanRange[] = []
 	let inherited = false
-	const scannerPlans = ctx.bandplans ?? bandplansFor(ctx.region)
+	const scannerPlans = ctx.bandplans ?? builtinBandplansFor(ctx.region)
 	const hosts = scannerPlans
 		.flatMap(p => p.ranges)
 		.sort((a, b) => a.endHz - a.startHz - (b.endHz - b.startHz))

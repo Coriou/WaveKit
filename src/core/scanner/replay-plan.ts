@@ -24,7 +24,7 @@
  * (`orderTrialsByMemory`): remembered success, prior order, untried, failures with backoff.
  */
 import { SCANNER_AMBIENT_PROTOCOLS } from "@wavekit/api-types"
-import { bandplansFor } from "./bandplan/index.js"
+import { builtinBandplansFor } from "../bandplans/builtin-supplement.js"
 import type { BandRegionCode } from "./bandplan/index.js"
 import {
 	IDENTIFY_ANALOG_PROTOCOLS,
@@ -111,7 +111,7 @@ function chooseAnalogTrial(input: IqReplayPlanInput): IqReplayTrial | null {
 function bandplanListsAm(hz: number): boolean {
 	if (!Number.isFinite(hz)) return false
 	for (const region of BAND_REGIONS) {
-		for (const plan of bandplansFor(region)) {
+		for (const plan of builtinBandplansFor(region)) {
 			for (const range of plan.ranges) {
 				if (hz < range.startHz || hz > range.endHz) continue
 				if (range.protocols?.includes("analog-am")) return true
