@@ -85,6 +85,7 @@ import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
 import type { StoreMutation } from "./schemas.js"
 import { RecordingAliasTable } from "../recording-aliases.js"
+import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
 import type { DiscoveryAliasEntry } from "../recording-aliases.js"
 import {
 	PreparedRecordingMetadataSchema,
@@ -143,7 +144,7 @@ import type { CompatibilitySide } from "./compatibility.js"
 import { AbsorbedIdIndex } from "./absorbed-id-index.js"
 import {
 	FRAGMENT_GROUPS_MAX,
-	FRAGMENT_RETIRE_CHECK_MAX,
+	FRAGMENT_FOLD_CHECK_MAX,
 	FRAGMENT_RETIRE_MAX,
 	FRAGMENT_ROUNDS_MAX,
 	planFragments,
@@ -1984,13 +1985,13 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * `canRetire` (DQ 10.4): the caller's check that a record holds no evidence the store cannot
-	 * see (files on disk, captures, remembered trials). Without it no fragment retires; merges
-	 * still run.
+	 * `canFold` (DQ 10.3): the caller's check that a record holds no evidence the store cannot see
+	 * (files on disk, captures, remembered trials) and so may be merged away or retired. Without
+	 * it the fragment pass does nothing.
 	 */
 	pruneInactive(
 		maxAgeDays: number,
-		opts: { canRetire?: (discoveryId: string) => boolean } = {},
+		opts: { canFold?: (discoveryId: string) => boolean } = {},
 	): string[] {
 		this.sweepPending() // DQ 1.5: the maintenance cadence also sweeps pending
 		const cutoff = iso(this.now() - maxAgeDays * DAY_MS)
@@ -2013,7 +2014,7 @@ export class DiscoveryStore
 		// DQ 10: the same maintenance cadence retires legacy fragments (bounded per pass).
 		removed.push(
 			...this.retireFragments(
-				opts.canRetire !== undefined ? { canRetire: opts.canRetire } : {},
+				opts.canFold !== undefined ? { canFold: opts.canFold } : {},
 			).retired,
 		)
 		return removed
@@ -2027,8 +2028,11 @@ export class DiscoveryStore
 	 */
 	retireFragments(
 		opts: {
-			/** DQ 10.4: required for any retirement; fail closed (a throw keeps the record). */
-			canRetire?: (discoveryId: string) => boolean
+			/**
+			 * DQ 10.3: asked for every record that would be merged away or retired; required for the
+			 * pass to do anything. Fail closed: a throw or a non-true answer keeps the record.
+			 */
+			canFold?: (discoveryId: string) => boolean
 			probe?: { plan?: FragmentPlan }
 		} = {},
 	): {
@@ -2037,6 +2041,9 @@ export class DiscoveryStore
 		retired: string[]
 		merges: { survivor: string; mergedIds: string[] }[]
 	} {
+		const canFold = opts.canFold
+		if (canFold === undefined)
+			return { groups: 0, absorbed: 0, retired: [], merges: [] }
 		const finest = (rasters: readonly Raster[]): Raster | null => {
 			let best: Raster | null = null
 			for (const x of rasters)
@@ -2058,6 +2065,24 @@ export class DiscoveryStore
 		const retired: string[] = []
 		let checks = 0
 		let checksSpent = false
+		const asked = new Map<string, boolean>()
+		const fold = (id: string): boolean => {
+			const known = asked.get(id)
+			if (known !== undefined) return known
+			if (checks >= FRAGMENT_FOLD_CHECK_MAX) {
+				checksSpent = true
+				return false
+			}
+			checks += 1
+			let ok = false
+			try {
+				ok = canFold(id) === true
+			} catch {
+				ok = false
+			}
+			asked.set(id, ok)
+			return ok
+		}
 		let settled = false
 		// 10.5: each round merges, then retires on the merged state. A merge can make a refused pair
 		// compatible and a retirement can remove a survivor that refused others, so the pass plans
@@ -2077,7 +2102,8 @@ export class DiscoveryStore
 						x !== undefined &&
 						y !== undefined &&
 						!this.decodedConflict(x, y) &&
-						this.pairCompatible(x, y) !== false
+						this.pairCompatible(x, y) !== false &&
+						fold(b)
 					)
 				},
 				nowMs: this.now(),
@@ -2087,6 +2113,7 @@ export class DiscoveryStore
 			if (round === 0) this.fragmentCursor = plan.nextCursor
 			truncated += plan.truncated
 			budget -= plan.groups.length
+			let absorbedNow = 0
 			for (const g of plan.groups) {
 				const keep = this.discoveries.get(g.survivor)
 				if (keep === undefined) continue
@@ -2095,10 +2122,19 @@ export class DiscoveryStore
 					const drop = this.discoveries.get(id)
 					// 10.3: re-checked on the live record; a protected record is never merged away.
 					if (drop === undefined || drop.id === keep.id) continue
-					if (this.fragmentProtected(drop)) continue
+					if (this.fragmentProtected(drop) || !fold(drop.id)) continue
+					// Never past the alias cap: a dropped alias would stop protecting its evidence.
+					if (
+						this.aliasesOf(keep.id).length +
+							1 +
+							this.aliasesOf(drop.id).length >
+						DISCOVERY_RECORDING_ALIASES_MAX
+					)
+						continue
 					this.absorb(op, keep, drop)
 				}
 				if (op.merged.length > 0) {
+					absorbedNow += op.merged.length
 					groups += 1
 					absorbed += op.merged.length
 					merges.push({
@@ -2111,12 +2147,7 @@ export class DiscoveryStore
 			// 10.4: retirement on the state after this round's merges (re-frozen, O(n)).
 			let retiredNow = 0
 			const room = FRAGMENT_RETIRE_MAX - retired.length
-			const canRetire = opts.canRetire
-			if (
-				canRetire !== undefined &&
-				room > 0 &&
-				checks < FRAGMENT_RETIRE_CHECK_MAX
-			) {
+			if (room > 0) {
 				const after: FragmentRecord[] = []
 				for (const d of this.discoveries.values())
 					after.push(this.fragmentOf(d))
@@ -2127,21 +2158,10 @@ export class DiscoveryStore
 					undefined,
 					Number.POSITIVE_INFINITY,
 				)) {
-					if (retiredNow >= room) break
-					if (checks >= FRAGMENT_RETIRE_CHECK_MAX) {
-						checksSpent = true
-						break
-					}
+					if (retiredNow >= room || checksSpent) break
 					const d = this.discoveries.get(id)
 					if (d === undefined || this.fragmentProtected(d)) continue
-					checks += 1
-					let ok = false
-					try {
-						ok = canRetire(id) === true
-					} catch {
-						ok = false
-					}
-					if (!ok) continue
+					if (!fold(id)) continue
 					retired.push(d.id)
 					retiredNow += 1
 					this.deleteInto(op, d)
@@ -2150,7 +2170,7 @@ export class DiscoveryStore
 			}
 			if (opts.probe) opts.probe.plan = { ...plan, truncated }
 			// Settled: a round that saw every candidate and changed nothing.
-			if (plan.groups.length === 0 && retiredNow === 0) {
+			if (absorbedNow === 0 && retiredNow === 0) {
 				// (With the group budget spent, merges may be left: not settled.)
 				// With the retire budget spent, stale records may be left: not settled either.
 				settled =

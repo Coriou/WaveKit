@@ -37,10 +37,12 @@ export const FRAGMENT_GROUP_MAX = DQ_CONSOLIDATE_GROUP_MAX
 /** 10.6: retirements per pass. */
 export const FRAGMENT_RETIRE_MAX = 256
 /**
- * 10.4: retirement predicate calls per pass (the caller's own evidence check, which may read an
- * index): 4 x the retire cap, so records it refuses cannot make a pass unbounded.
+ * 10.4: `canFold` calls per pass (the caller's own evidence check, which may touch the disk),
+ * one per distinct record (answers are cached for the pass). A pass folds at most
+ * 32 x 15 = 480 merged-away plus 256 retired = 736 records, so 1 024 leaves room for 288
+ * refusals; past it every further record is refused for this pass.
  */
-export const FRAGMENT_RETIRE_CHECK_MAX = 4 * FRAGMENT_RETIRE_MAX
+export const FRAGMENT_FOLD_CHECK_MAX = 1_024
 /** 10.4: a fragment retires after this long without a sighting. */
 export const FRAGMENT_RETIRE_AGE_MS = 72 * 3_600_000
 /** 10.4: only records with at most this many sightings retire. */

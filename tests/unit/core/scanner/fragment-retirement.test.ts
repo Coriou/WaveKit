@@ -1,12 +1,13 @@
 // Detection quality requirement 10: legacy fragment retirement.
 import { describe, expect, it } from "vitest"
+import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../../../src/core/recordings/contract.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import {
 	FRAGMENT_GROUPS_MAX,
 	FRAGMENT_GROUP_MAX,
 	FRAGMENT_PEER_SCAN_MAX,
 	FRAGMENT_RETIRE_AGE_MS,
-	FRAGMENT_RETIRE_CHECK_MAX,
+	FRAGMENT_FOLD_CHECK_MAX,
 	FRAGMENT_RETIRE_MAX,
 	FRAGMENT_SCAN_MAX,
 	planFragments,
@@ -27,7 +28,7 @@ import {
 } from "./fragment-retirement-fixtures.js"
 import type { FragmentSpec } from "./fragment-retirement-fixtures.js"
 
-/** DQ 10.4: the service-side evidence check, answering "nothing else holds evidence". */
+/** DQ 10.3: the service-side evidence check, answering "nothing else holds evidence". */
 const yes = (): boolean => true
 
 const id = (n: number): string => `d_${String(n).padStart(4, "0")}`
@@ -53,7 +54,7 @@ describe("fragment merge (DQ 10.2)", () => {
 	it("merges fragments on one channel into the channel record, keeping their history", () => {
 		const { store } = fragmentStore(CHANNEL_8)
 		const total = sightings(store)
-		const r = store.retireFragments({ canRetire: yes })
+		const r = store.retireFragments({ canFold: yes })
 		expect(r.merges).toEqual([
 			{ survivor: "d_main", mergedIds: ["d_fragA", "d_fragB"] },
 		])
@@ -72,10 +73,10 @@ describe("fragment merge (DQ 10.2)", () => {
 
 	it("is idempotent: a second pass changes nothing", () => {
 		const { store, entries } = fragmentStore(CHANNEL_8)
-		store.retireFragments({ canRetire: yes })
+		store.retireFragments({ canFold: yes })
 		const after = store.snapshot()
 		const n = entries.length
-		const again = store.retireFragments({ canRetire: yes })
+		const again = store.retireFragments({ canFold: yes })
 		expect(again).toEqual({ groups: 0, absorbed: 0, retired: [], merges: [] })
 		expect(store.snapshot()).toEqual(after)
 		// Empty operations journal nothing.
@@ -84,7 +85,7 @@ describe("fragment merge (DQ 10.2)", () => {
 
 	it("journals ordinary merges an old reader replays to the same store", () => {
 		const { store, entries, before } = fragmentStore(CHANNEL_8)
-		store.retireFragments({ canRetire: yes })
+		store.retireFragments({ canFold: yes })
 		const reader = new DiscoveryStore({
 			maxDiscoveries: 100_000,
 			now: () => T0,
@@ -106,7 +107,7 @@ describe("fragment merge (DQ 10.2)", () => {
 				operator: { notes: "x" },
 			},
 		])
-		const r = store.retireFragments({ canRetire: yes })
+		const r = store.retireFragments({ canFold: yes })
 		expect(r.merges).toEqual([{ survivor: "d_main", mergedIds: ["d_big"] }])
 		expect(store.get("d_main")?.operator?.label).toBe("mine")
 		expect(store.get("d_other")).toBeDefined()
@@ -119,7 +120,7 @@ describe("fragment merge (DQ 10.2)", () => {
 			{ id: "d_rec", centreHz: ch(8) + 2_000, count: 50, recordings: 1 },
 			{ id: "d_frag", centreHz: ch(8) - 4_000, count: 60 },
 		])
-		const r = store.retireFragments({ canRetire: yes })
+		const r = store.retireFragments({ canFold: yes })
 		expect(r.merges.map(m => m.mergedIds).flat()).toEqual(["d_frag"])
 		expect(store.get("d_dec")).toBeDefined()
 		expect(store.get("d_rec")).toBeDefined()
@@ -132,10 +133,10 @@ describe("fragment merge (DQ 10.2)", () => {
 			{ id: "d_wide", centreHz: ch(8), count: 10, obwHz: 30_000 },
 		]
 		expect(
-			fragmentStore(specs).store.retireFragments({ canRetire: yes }).groups,
+			fragmentStore(specs).store.retireFragments({ canFold: yes }).groups,
 		).toBe(0)
 		const noGrid = fragmentStore(CHANNEL_8, { rasters: [] }).store
-		expect(noGrid.retireFragments({ canRetire: yes }).groups).toBe(0)
+		expect(noGrid.retireFragments({ canFold: yes }).groups).toBe(0)
 	})
 
 	it("keeps a level-split fragment apart (DQ 3.1)", () => {
@@ -149,7 +150,7 @@ describe("fragment merge (DQ 10.2)", () => {
 				obwHz: 9000,
 			},
 		])
-		expect(store.retireFragments({ canRetire: yes }).groups).toBe(0)
+		expect(store.retireFragments({ canFold: yes }).groups).toBe(0)
 	})
 })
 
@@ -189,13 +190,13 @@ describe("finest grid and one-pass fixpoint (DQ 10.2, 10.5)", () => {
 			{ nowMs },
 		)
 		const probe: { plan?: FragmentPlan } = {}
-		const first = store.retireFragments({ probe: probe, canRetire: yes })
+		const first = store.retireFragments({ probe: probe, canFold: yes })
 		expect(first.retired).toEqual(["d_a"])
 		expect(first.absorbed).toBe(1)
 		expect(store.snapshot().discoveries).toHaveLength(1)
 		expect(probe.plan?.truncated).toBe(0)
 		const n = entries.length
-		const second = store.retireFragments({ canRetire: yes })
+		const second = store.retireFragments({ canFold: yes })
 		expect(second).toEqual({ groups: 0, absorbed: 0, retired: [], merges: [] })
 		expect(entries.length).toBe(n)
 	})
@@ -212,7 +213,7 @@ describe("finest grid and one-pass fixpoint (DQ 10.2, 10.5)", () => {
 			],
 			{ rasters: airband },
 		)
-		expect(store.retireFragments({ canRetire: yes }).absorbed).toBe(0)
+		expect(store.retireFragments({ canFold: yes }).absorbed).toBe(0)
 		expect(store.get("d_fine")).toBeDefined()
 	})
 
@@ -237,12 +238,12 @@ describe("finest grid and one-pass fixpoint (DQ 10.2, 10.5)", () => {
 			],
 			{ nowMs },
 		)
-		const first = store.retireFragments({ canRetire: yes })
+		const first = store.retireFragments({ canFold: yes })
 		expect(first.absorbed).toBe(1)
 		expect(first.retired).toHaveLength(1)
 		expect(store.snapshot().discoveries).toEqual([])
 		const n = entries.length
-		const second = store.retireFragments({ canRetire: yes })
+		const second = store.retireFragments({ canFold: yes })
 		expect(second).toEqual({ groups: 0, absorbed: 0, retired: [], merges: [] })
 		expect(entries.length).toBe(n)
 	})
@@ -258,13 +259,33 @@ describe("stale fragment retirement (DQ 10.4)", () => {
 		...over,
 	})
 
-	it("retires nothing without the caller's predicate; merges still run", () => {
+	it("does nothing at all without the caller's predicate (no merge, no retirement)", () => {
 		const nowMs = T0 + 10 * FRAGMENT_RETIRE_AGE_MS
-		const { store } = fragmentStore([stale()], { nowMs })
-		expect(store.retireFragments().retired).toEqual([])
+		const { store, entries } = fragmentStore([stale()], { nowMs })
+		expect(store.retireFragments()).toEqual({
+			groups: 0,
+			absorbed: 0,
+			retired: [],
+			merges: [],
+		})
 		expect(store.pruneInactive(180)).toEqual([])
 		expect(store.get("d_stale")).toBeDefined()
-		expect(fragmentStore(CHANNEL_8).store.retireFragments().absorbed).toBe(2)
+		const merging = fragmentStore(CHANNEL_8)
+		expect(merging.store.retireFragments().absorbed).toBe(0)
+		expect(merging.store.pruneInactive(180)).toEqual([])
+		expect(Object.keys(shape(merging.store))).toHaveLength(3)
+		expect(merging.entries.length + entries.length).toBe(0)
+	})
+
+	it("never merges away a member the predicate refuses", () => {
+		const { store } = fragmentStore(CHANNEL_8)
+		const r = store.retireFragments({ canFold: id => id !== "d_fragA" })
+		expect(r.merges).toEqual([{ survivor: "d_main", mergedIds: ["d_fragB"] }])
+		expect(store.get("d_fragA")).toBeDefined()
+		// Asked once per record per pass; the refusal is stable, so the next pass changes nothing.
+		expect(
+			store.retireFragments({ canFold: id => id !== "d_fragA" }).absorbed,
+		).toBe(0)
 	})
 
 	it("keeps a record the predicate refuses (or throws on) and retires one it accepts", () => {
@@ -273,7 +294,7 @@ describe("stale fragment retirement (DQ 10.4)", () => {
 		const asked: string[] = []
 		const refused = fragmentStore(two, { nowMs }).store
 		const r = refused.retireFragments({
-			canRetire: id => {
+			canFold: id => {
 				asked.push(id)
 				if (id === "d_other") throw new Error("unreadable")
 				return false
@@ -283,28 +304,27 @@ describe("stale fragment retirement (DQ 10.4)", () => {
 		expect(asked.sort()).toEqual(["d_other", "d_stale"])
 		expect(refused.get("d_stale")).toBeDefined()
 		const accepted = fragmentStore(two, { nowMs }).store
-		const ok = accepted.retireFragments({ canRetire: id => id === "d_stale" })
+		const ok = accepted.retireFragments({ canFold: id => id === "d_stale" })
 		expect(ok.retired).toEqual(["d_stale"])
 		expect(accepted.get("d_other")).toBeDefined()
 	})
 
-	it("calls the predicate at most FRAGMENT_RETIRE_CHECK_MAX times per pass", () => {
+	it("calls the predicate at most FRAGMENT_FOLD_CHECK_MAX times per pass", () => {
 		const nowMs = T0 + 10 * FRAGMENT_RETIRE_AGE_MS
-		const specs = Array.from(
-			{ length: FRAGMENT_RETIRE_CHECK_MAX + 10 },
-			(_, i) => stale({ id: id(i), centreHz: ch(i) }),
+		const specs = Array.from({ length: FRAGMENT_FOLD_CHECK_MAX + 10 }, (_, i) =>
+			stale({ id: id(i), centreHz: ch(i) }),
 		)
 		const { store } = fragmentStore(specs, { nowMs })
 		let calls = 0
 		const probe: { plan?: FragmentPlan } = {}
 		store.retireFragments({
 			probe,
-			canRetire: () => {
+			canFold: () => {
 				calls += 1
 				return false
 			},
 		})
-		expect(calls).toBe(FRAGMENT_RETIRE_CHECK_MAX)
+		expect(calls).toBe(FRAGMENT_FOLD_CHECK_MAX)
 		expect(probe.plan?.truncated).toBeGreaterThan(0)
 	})
 
@@ -312,9 +332,9 @@ describe("stale fragment retirement (DQ 10.4)", () => {
 		const early = fragmentStore([stale()], {
 			nowMs: T0 + FRAGMENT_RETIRE_AGE_MS - 1,
 		})
-		expect(early.store.retireFragments({ canRetire: yes }).retired).toEqual([])
+		expect(early.store.retireFragments({ canFold: yes }).retired).toEqual([])
 		const due = fragmentStore([stale()], { nowMs: T0 + FRAGMENT_RETIRE_AGE_MS })
-		expect(due.store.retireFragments({ canRetire: yes }).retired).toEqual([
+		expect(due.store.retireFragments({ canFold: yes }).retired).toEqual([
 			"d_stale",
 		])
 		expect(due.store.get("d_stale")).toBeUndefined()
@@ -333,7 +353,7 @@ describe("stale fragment retirement (DQ 10.4)", () => {
 		]) {
 			const { store } = fragmentStore([stale(over)], { nowMs })
 			expect(
-				store.retireFragments({ canRetire: yes }).retired,
+				store.retireFragments({ canFold: yes }).retired,
 				JSON.stringify(over),
 			).toEqual([])
 			expect(store.get("d_stale")).toBeDefined()
@@ -344,11 +364,38 @@ describe("stale fragment retirement (DQ 10.4)", () => {
 		const { store } = fragmentStore([stale()], {
 			nowMs: T0 + FRAGMENT_RETIRE_AGE_MS,
 		})
-		expect(store.pruneInactive(180, { canRetire: yes })).toEqual(["d_stale"])
+		expect(store.pruneInactive(180, { canFold: yes })).toEqual(["d_stale"])
 	})
 })
 
 describe("per-pass bounds (DQ 10.6)", () => {
+	it("refuses a merge that would take the survivor past the alias cap", () => {
+		const build = (fragments: number) =>
+			fragmentStore([
+				{ id: "d_main", centreHz: ch(8), count: 500 },
+				...Array.from({ length: fragments }, (_, i) => ({
+					id: id(i),
+					centreHz: ch(8) - 6_000 + (i * 12_000) / fragments,
+					count: 5,
+				})),
+			]).store
+		const settle = (store: ReturnType<typeof build>): void => {
+			for (let i = 0; i < 20; i++)
+				if (store.retireFragments({ canFold: yes }).absorbed === 0) return
+		}
+		const at = build(DISCOVERY_RECORDING_ALIASES_MAX)
+		settle(at)
+		expect(at.aliasesOf("d_main")).toHaveLength(DISCOVERY_RECORDING_ALIASES_MAX)
+		expect(at.snapshot().discoveries).toHaveLength(1)
+		const past = build(DISCOVERY_RECORDING_ALIASES_MAX + 1)
+		settle(past)
+		expect(past.aliasesOf("d_main")).toHaveLength(
+			DISCOVERY_RECORDING_ALIASES_MAX,
+		)
+		// One fragment stays outside instead of an alias being dropped.
+		expect(past.snapshot().discoveries).toHaveLength(2)
+	})
+
 	it("merges at most FRAGMENT_GROUPS_MAX channel groups per pass", () => {
 		const specs = (channels: number): FragmentSpec[] =>
 			Array.from({ length: channels }, (_, c) => [
@@ -356,16 +403,16 @@ describe("per-pass bounds (DQ 10.6)", () => {
 				{ id: `d_${c}_b`, centreHz: ch(c) + 3_000, count: 5 },
 			]).flat()
 		const at = fragmentStore(specs(FRAGMENT_GROUPS_MAX)).store
-		expect(at.retireFragments({ canRetire: yes }).groups).toBe(
+		expect(at.retireFragments({ canFold: yes }).groups).toBe(
 			FRAGMENT_GROUPS_MAX,
 		)
 		const past = fragmentStore(specs(FRAGMENT_GROUPS_MAX + 1)).store
-		expect(past.retireFragments({ canRetire: yes }).groups).toBe(
+		expect(past.retireFragments({ canFold: yes }).groups).toBe(
 			FRAGMENT_GROUPS_MAX,
 		)
 		// The next pass resumes and finishes.
-		expect(past.retireFragments({ canRetire: yes }).groups).toBe(1)
-		expect(past.retireFragments({ canRetire: yes }).groups).toBe(0)
+		expect(past.retireFragments({ canFold: yes }).groups).toBe(1)
+		expect(past.retireFragments({ canFold: yes }).groups).toBe(0)
 	})
 
 	it("holds at most FRAGMENT_GROUP_MAX records in a group", () => {
@@ -377,7 +424,7 @@ describe("per-pass bounds (DQ 10.6)", () => {
 			}))
 		const at = fragmentStore(specs(FRAGMENT_GROUP_MAX)).store
 		const atProbe: { plan?: FragmentPlan } = {}
-		const one = at.retireFragments({ probe: atProbe, canRetire: yes })
+		const one = at.retireFragments({ probe: atProbe, canFold: yes })
 		expect(one.merges.map(m => m.mergedIds.length)).toEqual([
 			FRAGMENT_GROUP_MAX - 1,
 		])
@@ -386,13 +433,13 @@ describe("per-pass bounds (DQ 10.6)", () => {
 		// survivor by the pass's next round (10.5), never into a group above the cap.
 		const past = fragmentStore(specs(FRAGMENT_GROUP_MAX + 1)).store
 		const probe: { plan?: FragmentPlan } = {}
-		const r = past.retireFragments({ probe: probe, canRetire: yes })
+		const r = past.retireFragments({ probe: probe, canFold: yes })
 		expect(r.merges.map(m => m.mergedIds.length)).toEqual([
 			FRAGMENT_GROUP_MAX - 1,
 			1,
 		])
 		expect(probe.plan?.truncated).toBe(1)
-		expect(past.retireFragments({ canRetire: yes }).absorbed).toBe(0)
+		expect(past.retireFragments({ canFold: yes }).absorbed).toBe(0)
 	})
 
 	it("retires at most FRAGMENT_RETIRE_MAX records per pass, oldest first", () => {
@@ -406,20 +453,20 @@ describe("per-pass bounds (DQ 10.6)", () => {
 			}))
 		const nowMs = T0 + 2 * FRAGMENT_RETIRE_AGE_MS
 		const at = fragmentStore(specs(FRAGMENT_RETIRE_MAX), { nowMs }).store
-		expect(at.retireFragments({ canRetire: yes }).retired).toHaveLength(
+		expect(at.retireFragments({ canFold: yes }).retired).toHaveLength(
 			FRAGMENT_RETIRE_MAX,
 		)
 		const past = fragmentStore(specs(FRAGMENT_RETIRE_MAX + 1), { nowMs }).store
 		const pastProbe: { plan?: FragmentPlan } = {}
 		const first = past.retireFragments({
 			probe: pastProbe,
-			canRetire: yes,
+			canFold: yes,
 		}).retired
 		expect(first).toHaveLength(FRAGMENT_RETIRE_MAX)
 		// The retire budget ran out: the pass is not settled.
 		expect(pastProbe.plan?.truncated).toBeGreaterThan(0)
 		expect(first).not.toContain(id(FRAGMENT_RETIRE_MAX))
-		expect(past.retireFragments({ canRetire: yes }).retired).toEqual([
+		expect(past.retireFragments({ canFold: yes }).retired).toEqual([
 			id(FRAGMENT_RETIRE_MAX),
 		])
 	})

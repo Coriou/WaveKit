@@ -14,7 +14,7 @@ import {
 } from "./fragment-retirement-fixtures.js"
 import type { FragmentSpec } from "./fragment-retirement-fixtures.js"
 
-/** DQ 10.4: the service-side evidence check, answering "nothing else holds evidence". */
+/** DQ 10.3: the service-side evidence check, answering "nothing else holds evidence". */
 const yes = (): boolean => true
 
 const specArb = (i: number): fc.Arbitrary<FragmentSpec> =>
@@ -75,7 +75,7 @@ describe("fragment retirement properties", () => {
 						.discoveries.map(d => [d.id, d.observationCount] as const),
 				)
 				const probe: { plan?: FragmentPlan } = {}
-				const r = store.retireFragments({ probe: probe, canRetire: yes })
+				const r = store.retireFragments({ probe: probe, canFold: yes })
 				// Replay the merges in order (a later round may absorb an earlier survivor).
 				const cur = new Map(counts)
 				for (const m of r.merges) {
@@ -114,10 +114,10 @@ describe("fragment retirement properties", () => {
 				// 10.5: a pass that hit no bound is the fixpoint: the next one changes and journals nothing.
 				// (At most 24 records: only the 16-record group cap can be reached; then run to it.)
 				while ((probe.plan?.truncated ?? 0) > 0)
-					store.retireFragments({ probe: probe, canRetire: yes })
+					store.retireFragments({ probe: probe, canFold: yes })
 				const snap = store.snapshot()
 				const journaled = entries.length
-				const again = store.retireFragments({ canRetire: yes })
+				const again = store.retireFragments({ canFold: yes })
 				expect(again.groups + again.retired.length).toBe(0)
 				expect(store.snapshot()).toEqual(snap)
 				expect(entries.length).toBe(journaled)

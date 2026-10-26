@@ -741,23 +741,31 @@ the absorbed id recorded in the absorbed-id index and adopted as an alias). A su
 carry operator state; a member never does.
 
 10.3 A protected record is never a member and never retires; it is re-checked on the live
-record when the group runs.
+record when the group runs. **The whole fragment pass is behind the caller's
+`canFold(id)` predicate**: it is asked for every record that would be merged away or
+retired, and a record it does not answer true for (a throw included) stays outside the
+group and is never retired. Without the predicate the pass does nothing at all (no merge,
+no retirement). The store cannot see every kind of evidence: evidence and recording files
+land on disk before the store's flags are set (a crash leaves them unflagged), burst
+captures name their discovery only in their own sidecar, analog proof is memory-only while
+the trial memory that produced it persists, a merged-away id's trial memory is forgotten on
+its `deleted` event, and its evidence folder is not reachable from the survivor. The answer
+is cached per pass (one call per record) and at most `FRAGMENT_FOLD_CHECK_MAX` = 1 024
+calls are made per pass (a pass folds at most 480 + 256 = 736 records, leaving 288 for
+refusals); past it every further record is refused for that pass and the pass is not
+settled. A merge that would give the survivor more than
+`DISCOVERY_RECORDING_ALIASES_MAX` = 64 aliases is refused (the member stays), so no alias,
+and no evidence tied to one, is ever dropped. The scanner service is to supply the
+predicate (no evidence, dv or analog recording folder on disk, no capture and no
+remembered trial for the id or any alias); until it does, the fragment pass is inactive.
+Merging a fragment that carries such evidence would need its evidence folder and trial
+memory moved to the survivor first (future work).
 
 10.4 **Retirement.** A fragment candidate not in a group this pass retires (is deleted, one
 `evict` operation, reported by `pruneInactive` with the age prune) when it has at most
-`FRAGMENT_RETIRE_MAX_SIGHTINGS` = 2 sightings, confidence `activity` or `candidate`, and
-`lastSeenAt` at least `FRAGMENT_RETIRE_AGE_MS` = 72 h before now, **and** the caller's
-`canRetire(id)` predicate answers true. The store cannot see every kind of evidence:
-evidence and recording files land on disk before the store's flags are set (a crash leaves
-them unflagged), burst captures name their discovery only in their own sidecar, and analog
-proof is memory-only while the trial memory that produced it persists. So `pruneInactive`
-and `retireFragments` retire nothing without the predicate (the safe default), a throwing
-predicate keeps the record, and the predicate is called at most
-`FRAGMENT_RETIRE_CHECK_MAX` = 4 x 256 = 1 024 times per pass, on stale records oldest
-first. The scanner service supplies the predicate (no evidence or recording folder on disk
-for the id or its aliases, no capture naming it, no remembered trial); until it does,
-retirement is inactive and only merges run. A pass that spent the check budget is not
-settled.
+`FRAGMENT_RETIRE_MAX_SIGHTINGS` = 2 sightings, confidence `activity` or `candidate`,
+`lastSeenAt` at least `FRAGMENT_RETIRE_AGE_MS` = 72 h before now, and `canFold(id)` (10.3)
+answers true. Stale records are considered oldest first.
 
 10.5 **One pass reaches the fixpoint.** Each round merges, then retires (10.4) on the
 merged state, so a merge survivor that is still a stale low-sighting record retires in the
@@ -801,7 +809,7 @@ and recording-holding records stay; other channels, no grid, a 30 kHz record and
 level split stay apart; a 20 kHz record at 118.025 MHz and an 8 kHz record at
 118.016667 MHz under 8.33 and 25 kHz rasters stay apart; two stale single-sighting records
 on one channel merge and the survivor retires in one pass, the next pass journalling
-nothing; 32, 33 and 34 neighbours around a channel; no predicate retires nothing (merges still run), a refusing or throwing predicate keeps the record and an accepting one retires it, at most 1 024 predicate calls per pass; retirement (with an accepting predicate) at exactly 72 h and not 1 ms before; each bound at and
+nothing; 32, 33 and 34 neighbours around a channel; no predicate does nothing (no merge, no retirement), a refusing or throwing predicate keeps the record out of every group and from retirement and an accepting one retires it, at most 1 024 predicate calls per pass, a merge refused at and past the 64-alias cap; retirement (with an accepting predicate) at exactly 72 h and not 1 ms before; each bound at and
 one past its limit; an old-reader replay of the journal.
 
 ## 8. Passive marginal cost guard
