@@ -246,7 +246,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 		async (request, reply) => {
 			try {
 				return await run(request.params.sourceId, async () => {
-					// WG10 req 2.8: prove the held rate once per connection first; a failed
+					// Prove the held rate once per connection first; a failed
 					// write fails the request before any frequency write.
 					if (!tunerController.hasBeforeOperatorRetune?.())
 						await tunerController.proveSampleRateForFrequency(
