@@ -17,6 +17,7 @@
  * - 27.3: THE Configuration SHALL support specifying minimum and maximum versions per decoder type
  */
 
+import type { EfficiencyBudgetService } from "./enablement/budget-settings.js"
 import { EventEmitter } from "node:events"
 import {
 	PlacementLifecycle,
@@ -773,6 +774,16 @@ export class DecoderManager extends EventEmitter {
 					]
 				: []
 		})
+	}
+
+	private budgetSettings: EfficiencyBudgetService | undefined
+
+	setEfficiencyBudgetService(service: EfficiencyBudgetService): void {
+		this.budgetSettings = service
+	}
+
+	efficiencyBudget(): EfficiencyBudgetService | undefined {
+		return this.budgetSettings
 	}
 
 	efficiencyView(): DecoderEfficiencyView {

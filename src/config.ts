@@ -863,7 +863,13 @@ export const ConfigSchema = z
 				rateRaise: z.boolean().optional(),
 				efficiency: z
 					.object({
-						cpuBudgetCores: z.number().positive().max(64).optional(),
+						// Auto reserves half the process CPU capacity; explicit values keep (0, 64].
+						cpuBudgetCores: z
+							.union([
+								z.literal("auto"),
+								z.number().finite().positive().max(64),
+							])
+							.default("auto"),
 						cpuGuardPercent: z.number().min(1).max(100).optional(),
 						maxBandplanChannels: z
 							.number()

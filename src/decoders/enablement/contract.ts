@@ -16,6 +16,7 @@ import type {
 	PlacementActivity,
 	PlannerActivity,
 } from "./activity-plan.js"
+import type { EfficiencyBudgetService } from "./budget-settings.js"
 
 /**
  * Requirement 5.4: automatic channelizer composition is accepted per host
@@ -338,6 +339,7 @@ export interface EfficiencySample {
 	sources: ReadonlyMap<string, SourceDropSample>
 }
 export interface EfficiencyInputs {
+	budget?: EfficiencyBudgetService
 	budgetCores: number
 	cpuGuardPercent: number
 }

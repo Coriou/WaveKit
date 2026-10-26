@@ -1,3 +1,4 @@
+import { z } from "zod"
 import type { Logger } from "../../utils/logger.js"
 import type {
 	DecoderEfficiencyDetail,
@@ -25,6 +26,11 @@ import type {
 	WantedPlacement,
 } from "./contract.js"
 
+const DropStateSchema = z.object({
+	state: z.enum(["ok", "dropping", "clearing", "unknown"]),
+	dropBytesPerSecond: z.number().finite().nonnegative().nullable(),
+})
+
 const valid = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0
 
@@ -35,7 +41,7 @@ export interface DropReader {
 	lateWindows?(id: string): readonly LateDropWindow[]
 	linkDropsSince?(id: string, sinceMono: number): boolean
 	dropState(id: string): {
-		state: "ok" | "dropping" | "unknown"
+		state: "ok" | "dropping" | "clearing" | "unknown"
 		dropBytesPerSecond: number | null
 	}
 	monoNow(): number
@@ -63,6 +69,8 @@ export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
 	deps: { drops?: DropReader; log?: Logger } = {},
 ): EfficiencyGate {
+	const budgetCores = () =>
+		inputs.budget?.view().resolved.cores ?? inputs.budgetCores
 	const placementEpochs = new Map<
 		string,
 		{ sourceId: string; epoch: number; placement: WantedPlacement }
@@ -91,15 +99,12 @@ export function createEfficiencyGate(
 	}
 	const readDrops = (id: string) => {
 		try {
-			return (
-				deps.drops?.dropState(id) ?? {
-					state: "unknown" as const,
-					dropBytesPerSecond: null,
-				}
-			)
+			const parsed = DropStateSchema.safeParse(deps.drops?.dropState(id))
+			if (parsed.success) return parsed.data
 		} catch {
-			return { state: "unknown" as const, dropBytesPerSecond: null }
+			// Unreadable and malformed snapshots close admission as unknown.
 		}
+		return { state: "unknown" as const, dropBytesPerSecond: null }
 	}
 	const latestAttribution = (id: string): DropAttribution | undefined => {
 		try {
@@ -131,6 +136,7 @@ export function createEfficiencyGate(
 			pending?: boolean
 		}
 	>()
+	let lastBudget = budgetCores()
 	const failures = new Set<string>()
 	let cpu: number | null = null
 	/** Monotonic times of samples with CPU over the limit, oldest first. */
@@ -292,8 +298,8 @@ export function createEfficiencyGate(
 				onProbation(p, mono)
 			if (
 				!probationer &&
-				valid(inputs.budgetCores) &&
-				total([...kept, p]) <= inputs.budgetCores
+				valid(budgetCores()) &&
+				total([...kept, p]) <= budgetCores()
 			)
 				kept.push(p)
 			else displace.push(p.key)
@@ -397,6 +403,13 @@ export function createEfficiencyGate(
 			const mono = monoNow()
 			observeRunning(running, mono)
 			if (!valid(now)) return { admit: false, detail: "unknown", retryAtMs: 0 }
+			// A live budget change rechecks capacity immediately, keeping loss backoff.
+			const currentBudget = budgetCores()
+			if (currentBudget !== lastBudget) {
+				for (const [key, retry] of retries)
+					if (retry.detail === "budget") retries.delete(key)
+				lastBudget = currentBudget
+			}
 			const retry = retries.get(newcomer.key)
 			if (retry?.pending) {
 				retry.at = Math.max(retry.at, now + retry.delay)
@@ -425,7 +438,7 @@ export function createEfficiencyGate(
 			)
 			if (reconnectRetained.has(newcomer.key) && gated.has(newcomer.key)) {
 				const resumedCost = total([...firm, newcomer])
-				if (valid(inputs.budgetCores) && resumedCost <= inputs.budgetCores) {
+				if (valid(budgetCores()) && resumedCost <= budgetCores()) {
 					const previous = placementEpochs.get(newcomer.key)
 					if (previous) previous.placement = { ...newcomer }
 					const displace = displacement(newcomer, running, firm, mono, false)
@@ -445,6 +458,7 @@ export function createEfficiencyGate(
 			if (
 				!valid(now) ||
 				state === "unknown" ||
+				state === "clearing" ||
 				attribution === "unknown" ||
 				(attribution !== undefined && !valid(mono))
 			)
@@ -453,9 +467,9 @@ export function createEfficiencyGate(
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
 			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) detail = "cpu"
 			else if (
-				!valid(inputs.budgetCores) ||
+				!valid(budgetCores()) ||
 				!Number.isFinite(total([...firm, newcomer])) ||
-				total([...firm, newcomer]) > inputs.budgetCores
+				total([...firm, newcomer]) > budgetCores()
 			)
 				detail = "budget"
 			// Otherwise admissible: one gated probationer per source, so probation
@@ -505,7 +519,9 @@ export function createEfficiencyGate(
 			// placement is re-evaluated when the source's clean run earns its clear
 			// window (one clear window from now while it has no clean run; the next
 			// sample when the window is earned but the reading is stale).
-			if (detail === "unknown") {
+			// Admission waits for source recovery without caching a drop rejection
+			// for the five-minute backoff reserved for suspended probationers.
+			if (detail === "unknown" || detail === "drops") {
 				let cleanAt: number | null = null
 				try {
 					cleanAt = deps.drops?.cleanAtMono?.(newcomer.sourceId) ?? null
@@ -687,7 +703,8 @@ export function createEfficiencyGate(
 				...blocked.map(b => b.placement.sourceId),
 			])
 			return {
-				budgetCores: inputs.budgetCores,
+				budgetCores: budgetCores(),
+				...(inputs.budget ? { budget: inputs.budget.view().resolved } : {}),
 				cpuGuardPercent: inputs.cpuGuardPercent,
 				sources: [...ids].map(sourceId => {
 					const attribution = latestAttribution(sourceId)

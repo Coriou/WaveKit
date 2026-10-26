@@ -414,7 +414,7 @@ it("admit and view with partial running lists never prune marks", () => {
 	)
 })
 
-it("unknown evidence retries when the clean window is earned, without backoff; drops back off", () => {
+it("waiting admissions retry after clean evidence without caching drop rejections", () => {
 	let state: "ok" | "dropping" | "unknown" = "unknown"
 	let cleanAt: number | null = null
 	const gate = createEfficiencyGate(
@@ -450,15 +450,15 @@ it("unknown evidence retries when the clean window is earned, without backoff; d
 	// No retry hold was recorded: the first read after the window admits.
 	state = "ok"
 	expect(gate.admit(placement(), [], 64_000)).toEqual({ admit: true })
-	// A drop rejection keeps the backoff.
+	// A waiting candidate is distinct from a failed probationer.
 	state = "dropping"
 	expect(gate.admit(placement("q"), [], 70_000)).toEqual({
 		admit: false,
 		detail: "drops",
-		retryAtMs: 370_000,
+		retryAtMs: 72_000,
 	})
 	state = "ok"
-	expect(gate.admit(placement("q"), [], 100_000).admit).toBe(false)
+	expect(gate.admit(placement("q"), [], 100_000).admit).toBe(true)
 })
 
 it("admits one gated probationer per source at a time", () => {

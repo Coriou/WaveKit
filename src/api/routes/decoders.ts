@@ -12,6 +12,8 @@
  * - 20.3: Report health as "faulted" when crashed and exceeded restart limits
  */
 
+import type { EfficiencyBudgetService } from "../../decoders/enablement/budget-settings.js"
+import { CpuBudgetSchema } from "../../decoders/enablement/cpu-budget.js"
 import type {
 	FastifyInstance,
 	FastifyPluginAsync,
@@ -35,6 +37,7 @@ import {
 	decoderRateRequirementsSchema,
 } from "./decoder-rate-schemas.js"
 import {
+	efficiencyBudgetResolutionSchema,
 	decoderHealthValues,
 	decoderStatusSchema,
 } from "./decoder-status-schemas.js"
@@ -168,6 +171,7 @@ const decoderConfigUpdateSchema = {
  * Options for the decoder routes plugin
  */
 export interface DecoderRoutesOptions {
+	efficiencyBudget?: EfficiencyBudgetService | undefined
 	decoderManager: DecoderManager
 	decoderRegistry?: DecoderRegistry | undefined
 	/**
@@ -338,7 +342,45 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	fastify: FastifyInstance,
 	options: DecoderRoutesOptions,
 ) => {
-	const { decoderManager, decoderRegistry } = options
+	const { decoderManager, decoderRegistry, authorizeSettings } = options
+	const budget = options.efficiencyBudget
+	if (budget) {
+		fastify.get("/api/decoders/efficiency/budget", async (_request, reply) => {
+			return reply.header("Cache-Control", "no-store").send(budget.view())
+		})
+		if (authorizeSettings)
+			fastify.route({
+				method: "PUT",
+				url: "/api/decoders/efficiency/budget",
+				onRequest: (request, reply, done) => {
+					const denied = authorizeSettings(request)
+					if (denied) {
+						void sendSettingsDenial(reply, denied)
+						return
+					}
+					done()
+				},
+				handler: async (request, reply) => {
+					const parsed = z
+						.object({ cpuBudgetCores: CpuBudgetSchema })
+						.strict()
+						.safeParse(request.body)
+					if (!parsed.success)
+						return sendJson(reply, 400, { code: "EFFICIENCY_BUDGET_INVALID" })
+					try {
+						return sendJson(
+							reply,
+							200,
+							await budget.update(parsed.data.cpuBudgetCores),
+						)
+					} catch {
+						return sendJson(reply, 503, {
+							code: "EFFICIENCY_BUDGET_STORE_UNAVAILABLE",
+						})
+					}
+				},
+			})
+	}
 
 	fastify.get<{
 		Params: { id: string }
@@ -439,6 +481,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						required: ["budgetCores", "cpuGuardPercent", "sources"],
 						properties: {
 							budgetCores: { type: "number" },
+							budget: efficiencyBudgetResolutionSchema,
 							cpuGuardPercent: { type: "number" },
 							sources: {
 								type: "array",
@@ -893,7 +936,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 		},
 	)
 
-	const { settings, authorizeSettings } = options
+	const { settings } = options
 	if (settings && authorizeSettings) {
 		/** WG8 req 2.7: GET /api/decoders/:id/settings (root admission only). */
 		fastify.get<{ Params: { id: string } }>(

@@ -619,3 +619,14 @@ describe("HfdlDecoder", () => {
 1. Check if decoder is in a restart loop
 2. Verify input format matches decoder expectations
 3. Consider adding rate limiting
+
+### Efficiency recovery
+
+Automatic decoder admission uses a recent 10-second positive-drop window and a separate
+60-second clean-evidence window to prevent repeated stop/start cycles. Unchanged cumulative
+counters do not extend the drop window. A zero current drop rate can coexist with a recent
+`dropping` state; after 10 seconds it becomes `clearing` while the clean window completes.
+Missing or stale samples block admission as `unknown`. A waiting candidate is checked again
+when clean evidence is sufficient, without the additional backoff used for a failed probation.
+The budget defaults to half the available CPU capacity, with process and cgroup limits;
+see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).

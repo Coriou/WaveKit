@@ -207,3 +207,15 @@ export const decoderStatusSchema = {
 		"restartCount",
 	],
 } as const
+
+/** Resolution metadata shared with the efficiency settings and status output. */
+export const efficiencyBudgetResolutionSchema = {
+	type: "object",
+	required: ["mode", "cores", "label"],
+	properties: {
+		mode: { type: "string", enum: ["auto", "configured"] },
+		cpus: { type: "number" },
+		cores: { type: "number" },
+		label: { type: "string" },
+	},
+} as const

@@ -1447,6 +1447,7 @@ export class ApiServer {
 
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
 		await this.app.register(decoderRoutes, {
+			efficiencyBudget: this.decoderManager.efficiencyBudget?.(),
 			decoderManager: this.decoderManager,
 			decoderRegistry: this.decoderRegistry,
 			...(this.decoderSettings &&

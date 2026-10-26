@@ -450,3 +450,19 @@ WaveKit can also take audio from an SDR++ network sink (`type: "sdrpp-network"`)
 
 See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protected`, `dev`,
 `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.
+
+### Decoder efficiency CPU budget
+
+`decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. Automatic sizing takes
+50% of CPUs available to the process (`os.availableParallelism()`), limited further by
+the cgroup v2 `cpu.max` quota divided by its period when present. It clamps the result
+to 0.75–64 cores: `min(64, max(0.75, min(available CPUs, quota / period) / 2))`.
+A missing, unreadable, unlimited or malformed quota leaves the process CPU count in effect.
+Fractional quotas are preserved. Explicit finite numbers in `(0, 64]` retain their exact
+value, including values below the automatic floor.
+
+`GET /api/decoders/efficiency` reports the resolved numeric budget and its `budget`
+metadata (`mode`, `cores`, `label`, plus `cpus` for auto). The protected
+`PUT /api/decoders/efficiency/budget` saves a live override in
+`<stateDir>/decoder-efficiency.json`; it wins over startup config after restart.
+See [budget settings](API.md#get-apidecodersefficiencybudget) for request and access rules.

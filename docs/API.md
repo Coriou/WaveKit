@@ -2107,6 +2107,33 @@ How the decoder CPU budget is spent, per source. The body is a `DecoderEfficienc
 cores in use, CPU percent, the drop state (`ok`, `dropping`, `clearing`, `unknown`), and the
 `admitted` and `blocked` decoder placements with their cost in cores and, for a blocked one,
 why (`budget`, `cpu`, `drops`, `late-drops`, `unknown`) and when it is retried.
+`dropping` means a positive drop was observed in the last 10 seconds (the endpoint at
+10 seconds is excluded). The current interval rate may already be zero. `clearing` means
+fresh clean evidence is accumulating toward the separate 60-second admission hysteresis;
+missing or stale evidence is `unknown`. Waiting admissions recheck when that clean window
+completes, without an additional drop rejection backoff.
+
+#### GET /api/decoders/efficiency/budget
+
+Returns `{ cpuBudgetCores, resolved }`. The requested value is `"auto"` or a number;
+`resolved` includes `mode`, `cores`, `label`, and, in auto mode, `cpus` (available CPU
+capacity after the process limit and cgroup quota). The efficiency response also includes
+this resolution as `budget`, alongside the numeric `budgetCores`.
+
+#### PUT /api/decoders/efficiency/budget
+
+Protected settings write, with the same bearer/session, origin and CSRF requirements as
+other decoder settings writes. Send `{ "cpuBudgetCores": "auto" }` or a finite number
+strictly greater than zero and at most 64. Unknown fields and invalid values return 400.
+The route is absent without the settings write authorizer; GET follows normal API read
+access. A successful response returns the same shape as GET with `Cache-Control: no-store`.
+
+Updates are serialized and saved to `<stateDir>/decoder-efficiency.json` with the shared
+atomic temporary-file, fsync and rename writer before applying to admission and activity
+allocation. The saved override survives restart and takes precedence over startup config.
+A failed save returns 503 and keeps the previous live budget. Set `"auto"` to restore
+automatic sizing. Reducing the budget restricts new admissions; it does not forcibly stop
+configured decoders.
 
 #### GET /api/decoders/types
 

@@ -869,7 +869,7 @@ export function createEfficiencyMonitor(deps: {
 			at < s.lastTickMono
 		)
 			return { state: "unknown", dropBytesPerSecond: null }
-		let state: "ok" | "dropping" | "unknown" = "unknown"
+		let state: "ok" | "dropping" | "clearing" | "unknown" = "unknown"
 		if (
 			s.pending === null &&
 			s.cleanSinceMono !== null &&
@@ -880,9 +880,19 @@ export function createEfficiencyMonitor(deps: {
 		else if (
 			s.lastDropMono !== null &&
 			at >= s.lastDropMono &&
-			at - s.lastDropMono < EFFICIENCY_CLEAR_MS
+			// Recent loss occupies [lastDrop, lastDrop + 5 × 2000 ms).
+			// The separate 30 × 2000 ms clean run prevents admission flapping.
+			at - s.lastDropMono < EFFICIENCY_DROP_WINDOW_MS &&
+			at - s.lastTickMono <= EFFICIENCY_STALE_MS
 		)
 			state = "dropping"
+		else if (
+			s.lastDropMono !== null &&
+			s.pending === null &&
+			s.cleanSinceMono !== null &&
+			at - s.lastTickMono <= EFFICIENCY_STALE_MS
+		)
+			state = "clearing"
 		return {
 			state,
 			dropBytesPerSecond:
