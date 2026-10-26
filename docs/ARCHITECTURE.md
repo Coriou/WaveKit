@@ -342,6 +342,7 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 - Classify tracks from the spectrum and confirm them with ephemeral probe decoders and ambient decoder evidence
 - Keep discoveries, observations and evidence (`DiscoveryStore`, journal and snapshot, recordings, PSD/IQ evidence, burst IQ captures)
 - Hold configured decoders on a swept source (suspension reason `tuner-scanning`) and release them afterwards
+- Rank decoder channels by activity: one channel activity ranker per process (`src/core/scanner/channel-activity.ts`, built in `src/index.ts`), fed by the scanner with spectrum blocks, tracks, decodes and replay outcomes, and read by the `DecoderManager` planner on the same monotonic clock to choose which paging and digital-voice channels run ([DECODER-GUIDE.md](DECODER-GUIDE.md))
 - Serve `/api/scanner` and the `scanner` WS channel
 
 **Data path:** the fanout branch `scanner-<sourceId>` → `SpectrumEngine` (copy-once batches, absolute sample index including drops, IQ ring) → `spectrum-worker` thread (`SpectrumPipeline`: FFT, floor, detector, tracker) → track events → `ScannerService` (classifier, crediting to jobs, `DiscoveryStore`, persistence) → REST/WS.
@@ -474,7 +475,11 @@ Subscribed WebSocket Clients
 When `activity.enabled` is true, that same decoder output is also published as
 a decode envelope into `<stateDir>/activity/activity.db` (Node 24 `node:sqlite`
 with FTS5). Output types `sync`, `rates`, `stats`, `status` and `error` are
-not stored. Search, facets and cursor replay are served on `/api/activity` and
+not stored. Each envelope's frequency is a frequency the decoder reports in its
+payload or else the decoder's single target from its provenance binding (source,
+targets, tuning trust and, for a decoder on the whole capture, the observed input
+rate, which bounds an rtl_433 frequency estimate to what that decoder can hear).
+Search, facets and cursor replay are served on `/api/activity` and
 the WebSocket `activity` channel. The store is off by default. A failed open
 keeps the process running and those routes answer 503 `ACTIVITY_UNAVAILABLE`.
 
