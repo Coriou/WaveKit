@@ -1,6 +1,6 @@
 // Detection quality requirement 10.3: the service-side evidence check that lets the fragment pass
 // merge away or retire a record.
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -18,6 +18,22 @@ interface Internal {
 	trialMemory: TrialMemory
 	foldCheck(): (discoveryId: string) => boolean
 	maintenance(): Promise<void>
+	evidence: {
+		writePsd(
+			id: string,
+			psd: { startHz: number; binHz: number; bins: number[]; snrDb: number },
+		): Promise<boolean>
+	}
+	bestPsd: Map<
+		string,
+		{ startHz: number; binHz: number; bins: number[]; snrDb: number }
+	>
+	burstInFlight: Set<string>
+	writePsdEvidence(live: {
+		observationId: string
+		discoveryId: string
+		jobIds: string[]
+	}): Promise<void>
 }
 
 const harnesses: ReturnType<typeof serviceHarness>[] = []
@@ -116,40 +132,45 @@ describe("fold check (DQ 10.3)", () => {
 	)
 })
 
+/** d_main (40 sightings), d_clean (4) and d_held (2) on channel 8, with the 12.5 kHz grid. */
+function seedFragments(internal: Internal): void {
+	const HOUR = 3_600_000
+	const now = Date.now()
+	const snap = fragmentSnapshot([
+		{
+			id: "d_main",
+			centreHz: ch(8) + 300,
+			count: 40,
+			firstSeenMs: now - 5 * HOUR,
+		},
+		{
+			id: "d_clean",
+			centreHz: ch(8) - 2_500,
+			count: 4,
+			firstSeenMs: now - 9 * HOUR,
+		},
+		{
+			id: "d_held",
+			centreHz: ch(8) + 4_000,
+			count: 2,
+			firstSeenMs: now - 3 * HOUR,
+		},
+	])
+	for (const d of snap.discoveries) d.sourceIds = ["rtl"]
+	for (const o of snap.observations) o.sourceId = "rtl"
+	internal.store.restore(snap)
+	// The channel grid the passive job would supply.
+	;(
+		internal.store as unknown as {
+			channelRastersFor: (sourceId: string, hz: number) => Raster[]
+		}
+	).channelRastersFor = () => [RASTER]
+}
+
 describe("maintenance folds clean fragments only (DQ 10.3)", () => {
 	it("merges a clean fragment and keeps one that holds evidence", async () => {
 		const { internal } = await boot()
-		const HOUR = 3_600_000
-		const now = Date.now()
-		const snap = fragmentSnapshot([
-			{
-				id: "d_main",
-				centreHz: ch(8) + 300,
-				count: 40,
-				firstSeenMs: now - 5 * HOUR,
-			},
-			{
-				id: "d_clean",
-				centreHz: ch(8) - 2_500,
-				count: 4,
-				firstSeenMs: now - 9 * HOUR,
-			},
-			{
-				id: "d_held",
-				centreHz: ch(8) + 4_000,
-				count: 2,
-				firstSeenMs: now - 3 * HOUR,
-			},
-		])
-		for (const d of snap.discoveries) d.sourceIds = ["rtl"]
-		for (const o of snap.observations) o.sourceId = "rtl"
-		internal.store.restore(snap)
-		// The channel grid the passive job would supply.
-		;(
-			internal.store as unknown as {
-				channelRastersFor: (sourceId: string, hz: number) => Raster[]
-			}
-		).channelRastersFor = () => [RASTER]
+		seedFragments(internal)
 		const held = join(internal.storageDir, "evidence", "d_held")
 		mkdirSync(held, { recursive: true })
 		writeFileSync(join(held, "psd.json"), "{}")
@@ -159,5 +180,63 @@ describe("maintenance folds clean fragments only (DQ 10.3)", () => {
 		expect(internal.store.survivorOf("d_clean")).toBe("d_main")
 		expect(internal.store.get("d_held")).toBeDefined()
 		expect(internal.store.get("d_main")?.observationCount).toBe(44)
+	})
+
+	it("a PSD write paused before its folder exists keeps the record; resumed, the evidence is reachable", async () => {
+		const { h, internal } = await boot()
+		const job = await h.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+			ranges: [{ startHz: 446_000_000, endHz: 446_100_000 }],
+			evidence: { psd: true, iq: false },
+		})
+		seedFragments(internal)
+		const writePsd = internal.evidence.writePsd.bind(internal.evidence)
+		let resume: () => void = () => undefined
+		const gate = new Promise<void>(r => (resume = r))
+		vi.spyOn(internal.evidence, "writePsd").mockImplementation(
+			async (id, psd) => {
+				await gate
+				return writePsd(id, psd)
+			},
+		)
+		internal.bestPsd.set("o_held", {
+			startHz: ch(8),
+			binHz: 1_000,
+			bins: [-60, -40, -60],
+			snrDb: 20,
+		})
+		const write = internal.writePsdEvidence({
+			observationId: "o_held",
+			discoveryId: "d_held",
+			jobIds: [job.id],
+		})
+		expect(existsSync(join(internal.storageDir, "evidence", "d_held"))).toBe(
+			false,
+		)
+		await internal.maintenance()
+		expect(internal.store.get("d_clean")).toBeUndefined()
+		expect(internal.store.get("d_held")).toBeDefined()
+		resume()
+		await write
+		expect(
+			existsSync(join(internal.storageDir, "evidence", "d_held", "psd.json")),
+		).toBe(true)
+		expect(internal.store.get("d_held")?.evidence.psd).toBe(true)
+		// Settled: the write no longer holds the record (its folder does now).
+		expect(internal.foldCheck()("d_held")).toBe(false)
+		expect(internal.foldCheck()("d_main")).toBe(true)
+	})
+
+	it("a burst capture the recorder still holds keeps its discovery", async () => {
+		const { internal } = await boot()
+		seedFragments(internal)
+		vi.spyOn(internal.store, "discoveryIdOf").mockImplementation(o =>
+			o === "o_burst" ? "d_held" : undefined,
+		)
+		internal.burstInFlight.add("o_burst")
+		expect(internal.foldCheck()("d_held")).toBe(false)
+		internal.burstInFlight.delete("o_burst")
+		expect(internal.foldCheck()("d_held")).toBe(true)
 	})
 })

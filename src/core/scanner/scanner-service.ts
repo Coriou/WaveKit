@@ -1269,7 +1269,12 @@ export class ScannerService extends EventEmitter {
 				now: this.now,
 			})
 			// Each capture can be ~100 MB: enforce the cap at once, not only at the 5 min maintenance.
-			this.recorder.on("captured", () => {
+			// DQ 10.3: a committed or discarded burst capture no longer holds its discovery.
+			this.recorder.on("discarded", (observationId: string) =>
+				this.burstInFlight.delete(observationId),
+			)
+			this.recorder.on("captured", (capture: { observationId: string }) => {
+				this.burstInFlight.delete(capture.observationId)
 				this.captures
 					.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
 					.catch((err: unknown) =>
@@ -3953,16 +3958,21 @@ export class ScannerService extends EventEmitter {
 			return
 		const wants = live.jobIds.some(id => this.jobs.get(id)?.spec.evidence.psd)
 		if (!wants) return
-		const written = await this.evidence
-			.writePsd(live.discoveryId, best)
-			.catch((err: unknown) => {
-				this.log.warn(
-					{ err, discoveryId: live.discoveryId },
-					"PSD evidence write failed",
-				)
-				return false
-			})
-		if (written) this.store.setEvidenceFlags(live.discoveryId, { psd: true })
+		const release = this.holdEvidence([live.discoveryId])
+		try {
+			const written = await this.evidence
+				.writePsd(live.discoveryId, best)
+				.catch((err: unknown) => {
+					this.log.warn(
+						{ err, discoveryId: live.discoveryId },
+						"PSD evidence write failed",
+					)
+					return false
+				})
+			if (written) this.store.setEvidenceFlags(live.discoveryId, { psd: true })
+		} finally {
+			release()
+		}
 	}
 
 	private markRecording(
@@ -4001,7 +4011,7 @@ export class ScannerService extends EventEmitter {
 		// DQ 1.4e: no capture for an edge track or one reaching past the usable 0.8 span.
 		if (track.flags.edge || !this.trackInUsableSpan(live.sourceId, track))
 			return
-		this.recorder.open({
+		const opened = this.recorder.open({
 			observationId: live.observationId,
 			jobId: job.id,
 			sourceId: live.sourceId,
@@ -4011,6 +4021,8 @@ export class ScannerService extends EventEmitter {
 			targetHz: track.centreHz,
 			spec: job.spec.capture,
 		})
+		// DQ 10.3: held against folding until the recorder commits or discards it.
+		if (opened) this.burstInFlight.add(live.observationId)
 	}
 
 	/**
@@ -4446,6 +4458,7 @@ export class ScannerService extends EventEmitter {
 			endedAt: o.endedAt ?? this.now(),
 			encrypted: o.encrypted,
 		}))
+		const release = this.holdEvidence(candidates.map(c => c.discoveryId))
 		const publication = this.evidence
 			.linkProbeRecordings(r.probeDir, candidates)
 			.then(res => {
@@ -4462,6 +4475,7 @@ export class ScannerService extends EventEmitter {
 					"Linking probe recordings failed",
 				),
 			)
+			.finally(release)
 		this.track(publication, "Probe recording settlement failed")
 	}
 
@@ -4871,6 +4885,7 @@ export class ScannerService extends EventEmitter {
 	 * the replay planner, which plans no trial for an edge track.
 	 */
 	private dropEdgeIqCapture(observationId: string): void {
+		this.dropFinishedEdgeCaptures(observationId)
 		const hit = this.iqCaptureOf.get(observationId)
 		if (!hit) return
 		try {
@@ -4881,6 +4896,31 @@ export class ScannerService extends EventEmitter {
 		}
 		this.iqCaptureOf.delete(observationId)
 		this.giveUpIqCapture(observationId)
+	}
+
+	/**
+	 * DQ 1.4e: the observation's finished, stored captures (left `iqCaptureOf` when they finished)
+	 * are discarded too, also while the replay queue holds one with its trials already planned:
+	 * the queue finds the capture gone before its next trial and runs none. A capture an identify
+	 * job holds is left to that job.
+	 */
+	private dropFinishedEdgeCaptures(observationId: string): void {
+		const port = this.deps.iqCapture
+		const pins = this.spanPins.get(observationId)
+		if (!port || !pins) return
+		for (const captureId of [...pins]) {
+			try {
+				const holder = port.holderOf(captureId)
+				if (holder === undefined) continue
+				if (holder !== null && holder !== IQ_REPLAY_QUEUE_HOLDER) continue
+				port.discard(captureId, "invalid", holder ?? undefined)
+			} catch (err: unknown) {
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture discard failed",
+				)
+			}
+		}
 	}
 
 	/** The captured track closed: the capture finishes now. */
@@ -7367,9 +7407,16 @@ export class ScannerService extends EventEmitter {
 	 * (1 024) times, each a few lstatSync calls. A throw keeps the record (the store fails closed).
 	 */
 	private foldCheck(): (discoveryId: string) => boolean {
-		const captured = new Set<string>()
+		const captured = new Set<string>(this.evidenceInFlight.keys())
 		for (const c of this.captures.list())
 			if (c.discoveryId !== null) captured.add(c.discoveryId)
+		// Burst captures still recording, parked or committing (not yet in the capture index).
+		for (const observationId of this.burstInFlight) {
+			const id =
+				this.findObservation(observationId)?.discoveryId ??
+				this.store.discoveryIdOf(observationId)
+			if (id) captured.add(id)
+		}
 		// Only a confirmed ENOENT/ENOTDIR counts as absent: existsSync reports false on EACCES, which
 		// would fail open, so any other stat error counts as present (refuse the fold).
 		const mayExist = (path: string): boolean => {
@@ -7391,6 +7438,34 @@ export class ScannerService extends EventEmitter {
 			for (const x of [id, ...this.store.aliasesOf(id)])
 				if (holdsEvidence(x)) return false
 			return true
+		}
+	}
+
+	/**
+	 * DQ 10.3: discovery ids with an evidence write in flight (PSD, probe recording link), counted
+	 * per id; the fold check refuses them. One entry per concurrent operation's id, released when
+	 * the operation settles, so the map holds at most the ids of operations in flight.
+	 */
+	private readonly evidenceInFlight = new Map<string, number>()
+	/**
+	 * DQ 10.3: observations whose burst capture the recorder holds (recording, parked or
+	 * committing), until it reports `captured` or `discarded`; bounded by the recorder's own caps.
+	 */
+	private readonly burstInFlight = new Set<string>()
+
+	private holdEvidence(ids: readonly string[]): () => void {
+		const held = [...new Set(ids)]
+		for (const id of held)
+			this.evidenceInFlight.set(id, (this.evidenceInFlight.get(id) ?? 0) + 1)
+		let released = false
+		return () => {
+			if (released) return
+			released = true
+			for (const id of held) {
+				const n = (this.evidenceInFlight.get(id) ?? 1) - 1
+				if (n <= 0) this.evidenceInFlight.delete(id)
+				else this.evidenceInFlight.set(id, n)
+			}
 		}
 	}
 

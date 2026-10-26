@@ -760,8 +760,9 @@ settled. A merge that would give the survivor more than
 and no evidence tied to one, is ever dropped. The scanner service supplies the predicate
 on its maintenance cadence, so the fragment pass is active: true only when no evidence, dv
 or analog recording folder exists on disk (`lstat`; only `ENOENT` or `ENOTDIR` counts as
-absent, so a permission error refuses), no burst capture names the id and no trial is
-remembered for it, for the id and every alias.
+absent, so a permission error refuses), no burst capture names the id (committed, or still
+recording, parked or committing), no PSD write or probe recording link for it is in flight,
+and no trial is remembered for it, for the id and every alias.
 Merging a fragment that carries such evidence would need its evidence folder and trial
 memory moved to the survivor first (future work).
 
