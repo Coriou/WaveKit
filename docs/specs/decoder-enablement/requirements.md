@@ -206,7 +206,7 @@ and `sourceId` exactly as today; further placements are internal processes repor
 provenance; Activity, trackers and receptions see one decoder.
 3.9 An `always` decoder with no in-window placement runs one fallback placement: the VFO channel
 for dsd-fme and multimon-ng, the centre channel for other channel types, the raw or centre path
-for readsb and lora-meshtastic.
+for readsb and lora-meshtastic. Exception (3.20): catalogue acarsdec has no fallback.
 3.10 Band-plan reads now select decoder channels: band-plans requirement 1.2 is amended so that a
 band-plan read may add or remove a dsd-fme or multimon-ng placement; it still never tunes,
 starts or stops audio, scan jobs or any other decoder.
@@ -227,7 +227,7 @@ none for `EFFICIENCY_CLEAR_MS` (60 s) after the last drop.
 
 4.2 Admission order: operator-pinned, then `always`, then `auto`; within a class, YAML order,
 then catalogue order; within a decoder, placement order (3.7).
-4.3 A newcomer never evicts a running placement. A placement that does not fit is suspended with
+4.3 A newcomer never evicts a running placement (except gated secondaries, 3.21). A placement that does not fit is suspended with
 reason `efficiency-budget` and a detail (`budget`, `cpu`, `drops` or `unknown`), retried in order
 whenever capacity frees and at least every `EFFICIENCY_RETRY_MS` (5 min, doubling to 30 min after
 probation failures). `unknown` is no rejection and takes no backoff: the placement is re-evaluated
@@ -495,3 +495,215 @@ Acceptance:
 - A decoder moving from `frequency-out-of-band` to `capture-too-narrow` shows a new `since`.
 - Live (Main): tune the receiver to a 433 MHz ISM centre at 1.024 Msps; rtl_433 runs and decodes
   a local sensor or remote; tune away and back twice; it suspends and resumes each time.
+
+## Paging raster amendment — 2026-10-25
+
+Found live: a capture centred off-raster in a UHF paging band, with pagers on several raster
+channels (some on the 6.25 kHz offsets), and the configured multimon-ng with one VFO
+placement and a 47 kHz channel decoded nothing. Demodulating the same bursts a few kHz off
+their raster frequency, or on the neighbouring 6.25 kHz point, also gives nothing.
+
+3.18 **A pager decoder hears the whole paging band in view.**
+
+- _Band._ The paging ranges are the band catalogue's ranges whose protocols are paging only
+  (`pocsag`, `flex`), plus paging bands the catalogue lacks (EU: 466.025–466.230 MHz,
+  France). Pending: multimon-ng still has no built-in band (`src/decoders/band-defaults.ts` is
+  a preserved legacy file), so outside a paging range it keeps 3.11 and follows the VFO on
+  every band. Gating it to its paging ranges (`frequency-out-of-band` at 1090 MHz) is open.
+- _Channels._ With a channelizer and no `channelHz`, `channelsHz`, `offsetHz`, `frequency`
+  or `frequencies`, config-origin and catalogue-origin multimon-ng place one channel on every
+  raster frequency (the range's finest raster, exactly on it) of a paging range inside the
+  usable window (`sampleRate × usableFraction`, not Nyquist) whose passband fits the window,
+  origin `bandplan`, nearest the capture centre first, at most `MULTIMON_PAGING_MAX_CHANNELS`
+  (33: the French band at 6.25 kHz). The VFO alone no longer selects the channel. A raster
+  channel in the window that cannot fit is a fit failure (3.14). Explicit channels, and the
+  case with no channelizer, keep 3.11. Catalogue band-plan channels (3.5) follow the raster channels.
+- _Filter._ Each channel asks for 12 kHz bandwidth and 2.5 kHz transition at 48 kHz: flat
+  to ±6 kHz (POCSAG1200 Carson width 2 × (4.5 + 1.2) = 11.4 kHz), 66 dB down from ±8.5 kHz,
+  so a 12.5 kHz neighbour (tones at 8.0 and 17.0 kHz) is rejected. The old request was
+  48 000 × (1 − 0.012) = 47 424 Hz.
+- _Primary._ With the paging raster in view, the settled VFO counts only when it is one of
+  the raster channels; it is then the primary. An off-raster VFO is dropped, on both the
+  config and the catalogue path. Otherwise the nearest raster channel is the primary; then
+  the other raster channels, then catalogue band-plan channels. Raster channels in the
+  window that all fail to fit are `capture-too-narrow` (3.14), never a fallback to an
+  off-raster centre or VFO channel.
+- _Admission._ Besides the primary, every other generated paging channel is
+  marked `gated`: it goes through the efficiency gate and probation even for a YAML decoder
+  (an exception to 4.9), and it is admitted after every other decoder's placements, so a wide
+  paging band never starves them. The cap applies after the VFO, band-plan and raster
+  channels are combined and deduplicated, keeping the higher-priority ones.
+- _Cost._ At 1.024 Msps the window is 819.2 kHz: at most 129 fitting points at 6.25 kHz,
+  65 at 12.5 kHz, hence the bound. Measured on a Mac (load average 9 to 15): wavekit-chan
+  1.0 % of a core idle, 4.4 % with one 12 kHz channel, 29 % with 8, 83 % with 33 (about
+  2.5 % per channel); multimon-ng with POCSAG512/1200/2400 and FLEX 1.8 % per channel, sox
+  0.2 %. csdr was not measured. The planner's estimate (0.14 core per channel) makes the
+  efficiency gate admit about ten channels within the 1.5-core budget.
+- _Not changed._ dsd-fme, direwolf and acarsdec keep 3.11.
+
+Acceptance: unit tests on the planner (in and out of the window, the bound after combining,
+config-origin with and without channels, gated secondaries refused by a
+closed gate) and a property test; with a synthetic POCSAG1200 burst on a 6.25 kHz offset
+channel (`scripts/fixtures/pocsag-iq.mjs`) through wavekit-chan and multimon-ng's channel
+command line, and through an independent reference filter, it decodes on that channel only.
+
+3.19 **dumpvdl2 requests only the channel its targets need.** dumpvdl2 channelises
+internally, so it asks for one channel centred on its target midpoint (or `channelHz`).
+
+- _Passband._ 2 × (farthest target from the channel centre) + 50 kHz (one 25 kHz VDL2
+  channel plus a 12.5 kHz guard each side), transition rate × 0.025, instead of the full
+  rate × 0.95. It widens only past rate × 0.95 (transition shrunk so bw/2 + tr ≤ rate/2)
+  and is invalid when it reaches the rate.
+- _Channel rate._ A capture at or above `targetSampleRate` (default 1.05 MHz) gets the
+  target, as before (2.048 and 2.4 Msps to 1.05 MHz plan natively). Below it the channelizer
+  cannot upsample, and 105 kHz × N is no cheap ratio of the usual capture rates (factors 3
+  and 7: 1.024 Msps to 945 kHz has no feasible native plan), so the channel is the capture
+  divided by the largest integer D giving an integer rate of at least 105 kHz that holds
+  the passband at rate × 0.95; with none, D = 1 (the capture itself). A capture below
+  105 kHz is invalid.
+- _Decoder rate._ dumpvdl2 runs at the smallest 105 kHz × N at or above the delivered rate,
+  capped at the target, and `--oversample` is that N. Its existing SoX resample step (the
+  raw path's) converts when the two differ; no new chain is added.
+- _followCenter._ The default passband stays, but it is still widened or rejected by the
+  list span, as before this amendment.
+- _Arithmetic._ The default EU list (325 kHz span) at 1.024 Msps needs 375 kHz: D = 3 gives
+  a non-integer 341 333 Hz, D = 2 gives 512 kHz (375 kHz ≤ 486.4 kHz), transition 12.8 kHz,
+  reach 187.5 + 12.8 = 200.3 kHz inside the ± 409.6 kHz window (0.8); SoX lifts 512 kHz to
+  525 kHz (N = 5). The full 997.5 kHz passband at 1.05 MHz (reach 525 kHz, and above the
+  capture rate) was `capture-too-narrow`. A centred span fits a 1.024 Msps window up to
+  718 kHz (D = 1).
+- _Cost._ The 512 to 525 kHz SoX step (`rate -h`) took 7 to 7.5 % of a core on a Mac (load
+  average 7 to 10). Raspberry Pi figures are still to be measured.
+
+Acceptance: unit tests through placement reach and channelizer admission at 1.024 and
+2.4 Msps, at and just past the bound, a capture where no rate fits, off-midpoint
+`channelHz` at the narrowing, widening and invalid bounds, the command line rate against
+the request, and a property test that a placed request is admitted, lies in the window,
+covers every target channel, and that every target set that fits is placed. An integration
+test opens the request on the real wavekit-chan at 1.024, 2.048 and 2.4 Msps.
+
+## Catalogue ACARS channels amendment — 2026-10-25
+
+A narrow capture over the European ACARS channels placed the catalogue acarsdec on only
+the two channels the catalogue listed, each one process with its own cost, so the budget
+could suspend the second, and channels in use elsewhere in the window were never decoded.
+
+3.20 **Catalogue acarsdec covers every listed ACARS channel in view.** It replaces 3.3's
+"one channel per configured frequency" for the catalogue decoder only.
+
+- _List._ EU: 131.525, 131.550, 131.725, 131.825 and 131.850 MHz (131.550 the worldwide
+  primary, 131.725 the European primary, the others published European secondaries). The
+  136.7–136.975 MHz channels are VDL Mode 2 (dumpvdl2) in Europe, not ACARS, and stay out.
+  Other regions keep the adapter default (131.550, 131.725 MHz). Only the EU gains frequencies;
+  the placement, ordering and gating below apply to catalogue acarsdec in every region.
+- _Channels._ With a channelizer, catalogue acarsdec places one channel (one process) on
+  each listed frequency inside the usable window (`sampleRate × usableFraction`) and its
+  band whose passband fits the window, origin `bandplan`, nearest the capture centre first
+  (ties: lower first), at most `ACARSDEC_CATALOGUE_MAX_CHANNELS` (5). Listed channels
+  outside the window are not candidates. A listed channel in the window whose passband
+  cannot fit is a fit failure (3.14) when nothing else places; there is no fallback to
+  the capture centre, even when `always` or an operator start bypasses the band. With the
+  band in view but no listed channel in the window the decoder is `no-channel-selected`.
+- _Primary._ The settled VFO is primary when it is exactly one of the placed channels,
+  origin `vfo`. Between two captures holding that channel at the same distance from their
+  centres, the one on the VFO's source wins (a tie break for these generated channels only;
+  it never overrides distance, and configured channels keep 3.3); otherwise the nearest channel is.
+- _Swaps._ A channel is never decoded twice. A secondary worker survives a re-plan only
+  while its channel is still a secondary; when the primary moves onto it (a VFO or centre
+  change), that worker is removed before the decoder's own process moves there, and the
+  former primary channel gets a new secondary. This holds for the 3.18 paging channels too.
+- _Admission._ Every placement but the primary is `gated`, the 3.18 mechanism made
+  generic: it goes through the efficiency gate and probation and is admitted after every
+  other decoder's placements, so the ACARS secondaries never starve another decoder.
+- _Bound._ The EU list spans 325 kHz. Each channel reaches bandwidth/2 + transition =
+  6 + 6 = 12 kHz from its frequency, so at 1.024 Msps (window ± 409.6 kHz) all five fit
+  while the capture centre lies within 409.6 − 12 − 162.5 = 235.1 kHz of the 131.6875 MHz
+  midpoint. Each placement costs 0.05 + 0.11 = 0.16 core in the planner, five at most
+  0.80 core; the primary alone is ungated.
+- _Limitation._ A listed channel inside the window whose passband does not fit (at the
+  window edge) is reported only when no channel places (`capture-too-narrow`). When other
+  channels place, it is silently not covered: suspension reasons are per decoder, not per
+  channel.
+- _Not changed._ Configured (YAML) acarsdec with explicit frequencies keeps one ungated
+  placement per frequency; configured acarsdec without them keeps 3.11.
+- _Open._ The intended follow-up is one acarsdec process for every channel in view:
+  acarsdec's sndfile input takes an interleaved N-channel stream (`channels=N`), fed by one
+  wide channel request and N AM chains, costed once. It needs a 24 kHz-multiple channel
+  rate (no integer divisor of 1.024 Msps gives one), the fan-out pipeline, and a channel
+  index to frequency mapping for provenance.
+
+Acceptance: unit tests on the planner (in and out of the window, the edge misfit without
+fallback, the bound, ordering, VFO primary, config and catalogue paths, gated secondaries
+admitted last) and a property test that every in-window channel that fits is placed, none that misfits is,
+and a decoder with no placement carries a reason; manager tests where a closed gate refuses
+the gated secondaries while the primary runs, and where moving the primary onto a running
+secondary (acarsdec and paging multimon-ng) keeps one worker per channel and the cost
+bound; the VFO primary across identical captures; each placement's channel request is on
+its frequency.
+
+## Secondaries yield amendment — 2026-10-26
+
+The 3.18 and 3.20 promise that gated secondaries are "admitted after every other decoder's
+placements" held only for the order of one planning pass. Admission was first come, first
+served: a decoder's secondary workers can start inside a re-plan before other decoders'
+placements, and every later retry raced on equal terms, so a capture holding a paging range
+and a catalogue decoder's own band could fill the budget with paging secondaries and leave
+the in-band decoder (AIS at 161.975 and 162.025 MHz inside the 137–174 MHz VHF paging
+range) suspended with `efficiency-budget` (`budget`) for good.
+
+3.21 **Gated secondaries yield to every ungated placement.** It amends 4.3 ("a newcomer
+never evicts a running placement") for gated secondaries only.
+
+- _Rule._ A placement is firm when it is not `gated`: a primary of any decoder, a catalogue
+  placement of any origin (`band`, `bandplan`, `vfo`, `fallback`), and every YAML placement
+  (4.9). A firm newcomer is judged on the firm placements alone: running and
+  reconnect-retained gated secondaries count neither in its budget term 4.1 (a) nor as the
+  source's single probationer (4.4). When it is admitted, the running gated secondaries
+  that no longer fit beside the firm placements and the newcomer, kept oldest-admitted
+  first, are suspended with `efficiency-budget` (`budget`) and retried with the normal
+  4.3 backoff; so is a gated secondary on probation on the newcomer's source, whose
+  evidence the newcomer would blur. The CPU (b) and drop (c) terms are unchanged: a
+  firm newcomer the host cannot carry is refused and displaces nothing.
+- _When._ Displacement follows only the final decision taken immediately before the
+  start, after the channel is wired, never the preflight one: a newcomer refused there
+  (CPU, drops, budget) or whose channel allocation fails displaces nothing. When the start
+  is superseded or fails after displacement, the displaced secondaries lose their backoff
+  and retry at the next evaluation. A catalogue newcomer starts only once every
+  displaced secondary has stopped: one whose stop fails or is incomplete still holds its
+  cost, so the newcomer is refused for `budget` and retried at the next sample, which
+  asks for that stop again. A YAML newcomer starts regardless (4.9), so until that stop
+  succeeds the declared cost may exceed the budget for a while. Displaced secondaries are
+  stopped newest first. A newcomer stopped or removed while its process is starting
+  returns their room the same way as a superseded start.
+- _Reconnect._ A reconnecting placement's own reservation is replaced by it, never
+  counted twice, and on that path too gated secondaries yield to a firm placement.
+- _YAML placements._ A gate-exempt placement (4.9) still starts without a verdict and is
+  never suspended; when it starts, the running gated secondaries that no longer fit the
+  budget beside the firm placements are suspended the same way. 4.9 is otherwise
+  unchanged: a YAML decoder that only follows the VFO keeps its exemption. Its declared
+  cost still counts for catalogue newcomers, and on the default budgets it leaves room
+  for an in-band catalogue decoder (arithmetic below).
+- _Between secondaries._ A gated newcomer is judged on everything running, as before;
+  gated secondaries never displace each other or a firm placement.
+- _Arithmetic._ At 1.024 Msps the channelizer base is 0.22 core and each channel adds
+  0.11. A YAML multimon-ng primary (0.03 + 0.11 = 0.14) and a YAML dsd-fme VFO channel
+  (0.045 + 0.11 = 0.155) make 0.515 firm cores; catalogue ais-catcher on its channel
+  (0.10 + 0.11 = 0.21) brings it to 0.725. On the 1.5-core x86-64 budget that leaves
+  0.775 for paging secondaries at 0.14 each: 5 run (0.70), where 7 (0.98) filled the
+  budget before AIS was admitted; the 2 newest yield. On the 0.75-core arm64 budget AIS
+  fits (0.725) and no secondary does. AIS is refused only when the firm placements
+  alone exceed the budget (0.725 > budget), when no displacement could make room.
+- _Not changed._ Placement (3.18, 3.20), the gated mark, 4.2 ordering of a planning pass,
+  probation verdicts and late-drop shedding.
+
+Acceptance: manager tests with the real gate at 161.975 MHz and 1.024 Msps (YAML
+multimon-ng with its paging raster, YAML dsd-fme on the VFO, catalogue ais-catcher):
+AIS admitted in plan order; AIS admitted after secondaries filled the x86-64 budget,
+with the newest yielding and the budget held; the arm64 budget; at and just past the
+bound, with the surviving secondary's identity and stop count; the newest-first stop
+order; a newcomer stopped while starting returns the room; CPU over the limit while
+the channel is pending and a refused channel allocation displace nothing; a failed
+secondary stop keeps the newcomer out until the stop succeeds; a gate test of the
+reconnect path. A property test: across secondary counts and budgets, the in-band primary runs
+exactly when it fits beside the firm placements, YAML placements are never displaced,
+and the budget holds whenever it covers the YAML placements.

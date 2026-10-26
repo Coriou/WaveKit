@@ -1,3 +1,4 @@
+import type { PagingRasterRange } from "./paging-plan.js"
 import type {
 	DecoderReachKind,
 	DropAttribution,
@@ -21,6 +22,27 @@ export function channelizerAutoAccepted(arch: string): boolean {
 	return arch === "x64"
 }
 export const DECODER_MAX_BANDPLAN_CHANNELS = 4
+/**
+ * 3.18: most paging raster channels one pager decoder places per source.
+ * A 1.024 Msps capture has a usable window of 1.024 MHz x 0.8 = 819.2 kHz:
+ * at most floor(819.2 / 6.25) + 1 = 132 raster points, fewer once each
+ * channel's 6 kHz half-passband plus 2.5 kHz transition must fit inside
+ * (floor((819.2 - 17) / 6.25) + 1 = 129). 33 holds the whole French UHF
+ * paging band (466.025-466.230 MHz at 6.25 kHz) and 412.5 kHz of a 12.5 kHz
+ * band; nearest the capture centre first. Each channel is one channelizer
+ * output plus one multimon-ng pipeline at 48 kHz (see paging-plan.ts and the
+ * amendment for the measured cost); the efficiency gate admits what fits.
+ */
+export const MULTIMON_PAGING_MAX_CHANNELS = 33
+/**
+ * 3.20: catalogue acarsdec places at most this many channels, one process
+ * each: the five EU catalogue channels (131.525-131.850 MHz, a 325 kHz span)
+ * all fit one 1.024 Msps window (0.8 usable: +-409.6 kHz) when the capture
+ * centre lies within 235.1 kHz of the span midpoint (409.6 - 12 kHz reach
+ * - 162.5 kHz half span). Five placements cost at most
+ * 5 x 0.16 = 0.80 core; the four secondaries are gated.
+ */
+export const ACARSDEC_CATALOGUE_MAX_CHANNELS = 5
 export const VFO_SETTLE_MS = 1_000
 export const EFFICIENCY_SAMPLE_MS = 2_000
 // 3 × 2000 ms = 6000 ms: tolerates one missed tick plus jitter.
@@ -167,6 +189,12 @@ export interface PlannerDecoder {
 	bandHalfWidthHz?: number
 	/** rtl_433 (3.16): the widest channel output rate it wants; absent 1 MHz. */
 	channelTargetRateHz?: number
+	/**
+	 * 3.18: the paging raster of the effective region (pager decoder only).
+	 * Present and non-empty: without configured channels the decoder takes
+	 * every raster channel of the band inside the usable window.
+	 */
+	pagingRaster?: readonly PagingRasterRange[]
 }
 export interface PlannerCentreSlot {
 	slotHz: { minHz: number; maxHz: number }
@@ -232,6 +260,11 @@ export interface WantedPlacement {
 	 * restarts the placement; absent means none.
 	 */
 	options?: Readonly<Record<string, unknown>>
+	/**
+	 * 3.18: an automatically generated secondary paging channel. It goes
+	 * through the efficiency gate and probation even for a YAML decoder.
+	 */
+	gated?: true
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(
@@ -279,9 +312,16 @@ export interface RunningPlacement {
 	costCores: number
 	sampleRateHz: number
 	admittedAtMs: number
+	/** 3.18/3.20: a generated secondary channel; it yields to primaries (3.21). */
+	gated?: true
+}
+/** 3.21: an admission may list running gated secondaries to suspend for budget. */
+export interface Admitted {
+	admit: true
+	displace?: readonly string[]
 }
 export type AdmissionDecision =
-	| { admit: true }
+	| Admitted
 	| { admit: false; detail: DecoderEfficiencyDetail; retryAtMs: number }
 export interface ProbationVerdict {
 	key: string
@@ -294,6 +334,14 @@ export interface EfficiencyGate {
 		running: readonly RunningPlacement[],
 		now: number,
 	): AdmissionDecision
+	/**
+	 * 3.21: the running gated secondaries a gate-exempt (4.9) placement
+	 * displaces when it starts, so they never hold budget against it.
+	 */
+	yieldTo?(
+		newcomer: WantedPlacement,
+		running: readonly RunningPlacement[],
+	): readonly string[]
 	probation(
 		running: readonly RunningPlacement[],
 		now: number,

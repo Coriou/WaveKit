@@ -143,7 +143,7 @@ function setup({
 	}
 }
 
-it.each(VFO_CHANNEL_TYPES)(
+it.each(VFO_CHANNEL_TYPES.filter(type => type !== "multimon-ng"))(
 	"configured %s follows VFO without opt-in or band-plan channels",
 	async type => {
 		const f = setup({ type })
@@ -329,4 +329,31 @@ it("losing the channelizer rebuilds the audio frontend for raw CU8 instead of re
 		targetFrequenciesHz: [446_056_000],
 		placements: [{ reach: "raw" }],
 	})
+})
+
+// 3.18: a configured pager decoder without channels takes every paging raster
+// channel in the usable window, not the VFO alone.
+it("configured multimon-ng places the French paging raster, nearest the centre first", async () => {
+	const f = setup({ type: "multimon-ng", vfo: 466_103_300 })
+	f.sources.caps.set("rtl", { ...iqCaps(1_024_000), centerFreq: 466_103_300 })
+	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: 466_103_300 })
+	await f.manager.startAll()
+	const status = f.manager.getStatus("configured")
+	const channels = (status?.placements ?? []).map(p => p.channelHz)
+	expect(status?.placements?.every(p => p.origin === "bandplan")).toBe(true)
+	// 466.025-466.230 MHz at 6.25 kHz: 33 channels, all inside +-409.6 kHz.
+	expect(channels).toHaveLength(33)
+	expect(channels).toEqual(
+		expect.arrayContaining([466_100_000, 466_112_500, 466_156_250]),
+	)
+	expect(channels[0]).toBe(466_106_250)
+	expect(channels).not.toContain(466_103_300)
+	// The setup's gate refuses everything: only the primary (exempt, YAML)
+	// starts; the 32 generated secondaries are asked and refused.
+	const gated = vi
+		.mocked(f.gate.admit)
+		.mock.calls.map(([placement]) => placement.channelHz)
+	expect(new Set(gated)).toEqual(new Set(channels.slice(1)))
+	expect(gated).not.toContain(466_106_250)
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
 })
