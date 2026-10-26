@@ -123,7 +123,8 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   least 3 samples whose median (banked and live, newest 8 banked) is at least 12 dB. An entry
   lives `DQ_PTT_WINDOW_MS` = 60 000 ms from its first banking (three 2 s overs with 25 s gaps
   fit), at most `DQ_PTT_PER_SOURCE` = 512 entries per source and `DQ_PTT_IDS_MAX` = 8 ids per
-  entry; memory only. A create there, a retune or source removal drops it; a retraction of
+  entry; memory only. Any create there (threshold, overload, decode, sustained or a
+  three-observation promotion of 1.3) drops it, a retune or source removal too; a retraction of
   any banked id drops the whole entry, and a ninth id restarts the entry empty (so every id
   holding credit stays retractable). A run's span only ever runs from an accepted
   sample through its latest accepted sample: a sample under 9 dB or a gap over 2 500 ms ends
@@ -144,9 +145,11 @@ pending entry is promoted, creating a discovery from the promoting observation, 
   stays masked against energy folded back from past Nyquist. A segment reaching within the gap
   tolerance of the 0.8 bound is flagged `edge` in window (`truncated` in a sweep). An edge track
   passes the same channel gate, its observation keeps `flags.edge`, it never votes a class (3.4;
-  the record shows `unknown`), it is never held to confirm, channel-refined, IQ-captured, burst-captured or given an automatic analog trial
+  the record shows `unknown`), it is never held to confirm, channel-refined, IQ-captured, burst-captured, given PSD evidence or given an automatic analog trial
   (whose whole channel and the track centre must lie inside the 0.8 span, refusal `edge` or
-  `out-of-window`), and
+  `out-of-window`); an IQ capture whose track turns edge after it opened is discarded at once
+  and the replay planner plans no trial for an edge track, and a burst capture whose track
+  closes edge is closed on an empty window, which the recorder discards without committing; and
   on the 18 dB rule of 1.4 it never takes the long-track exemption of 1.4c: its own track SNR
   must also reach `DQ_CREATE_TRACK_SNR_DB` = 15 dB however long it lasts. The image check of
   § 4.9 is symmetric and runs over the whole detection span. Fixtures: an OOK burst at 0.93 of
@@ -755,9 +758,11 @@ calls are made per pass (a pass folds at most 480 + 256 = 736 records, leaving 2
 refusals); past it every further record is refused for that pass and the pass is not
 settled. A merge that would give the survivor more than
 `DISCOVERY_RECORDING_ALIASES_MAX` = 64 aliases is refused (the member stays), so no alias,
-and no evidence tied to one, is ever dropped. The scanner service is to supply the
-predicate (no evidence, dv or analog recording folder on disk, no capture and no
-remembered trial for the id or any alias); until it does, the fragment pass is inactive.
+and no evidence tied to one, is ever dropped. The scanner service supplies the predicate
+on its maintenance cadence, so the fragment pass is active: true only when no evidence, dv
+or analog recording folder exists on disk (`lstat`; only `ENOENT` or `ENOTDIR` counts as
+absent, so a permission error refuses), no burst capture names the id and no trial is
+remembered for it, for the id and every alias.
 Merging a fragment that carries such evidence would need its evidence folder and trial
 memory moved to the survivor first (future work).
 

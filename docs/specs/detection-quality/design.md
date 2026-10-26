@@ -808,8 +808,9 @@ plain segmenter. _Validates 1.13._
 **Property 27: Push-to-talk airtime promotion.** For any sequence of transmissions on one
 channel (gaps, durations of 500 to 2 500 ms, SNRs of 9 to 14.99 dB, sampled at the store's
 cadence), a discovery exists iff the 1.4d reference (banked airtime of transmissions sampled
-twice, inside 60 000 ms of the first banking, plus the live transmission's duration reaches
-3 000 ms with at least 3 samples of median at least 12 dB) fires. _Validates 1.4d._
+twice, inside 60 000 ms of the first banking, restarted empty when a ninth id banks, plus the
+live transmission's duration reaches 3 000 ms with at least 3 samples of median at least
+12 dB) fires. _Validates 1.4d._
 
 **Property 28: Fragment retirement keeps protected records and sightings.** For any store of
 fragments on a few 12.5 kHz channels (random offsets, counts, OBW, levels, ages and

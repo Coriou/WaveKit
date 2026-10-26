@@ -31,7 +31,7 @@ import {
  */
 import { EventEmitter } from "node:events"
 import { readdir } from "node:fs/promises"
-import { existsSync } from "node:fs"
+import { existsSync, lstatSync } from "node:fs"
 import { join } from "node:path"
 import { ZodError } from "zod"
 import type {
@@ -3084,6 +3084,7 @@ export class ScannerService extends EventEmitter {
 		// After the job ids: the capture-enabled covering job decides (Task 34a).
 		if (opened) this.openCapture(live, track)
 		live.lastTrack = track
+		if (track.flags.edge) this.dropEdgeIqCapture(live.observationId)
 		live.lastActivityAt = now
 		if (ev.kind !== "track-open")
 			live.classification = this.classify(track, sourceId)
@@ -3153,8 +3154,13 @@ export class ScannerService extends EventEmitter {
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
 		this.probes.trackClosed(track.trackId)
 		const closed = live
-		this.recorder.close(live.observationId, track.lastSample, () =>
-			this.captureCloseInfo(closed, track),
+		// DQ 1.4e: a burst capture whose track turned edge after it opened is never kept (the flag
+		// is sticky, so the closing snapshot holds it). Closing at the lowest sample index leaves
+		// the recorder an empty window, which it discards (staging file removed) and never commits.
+		this.recorder.close(
+			live.observationId,
+			track.flags.edge ? Number.MIN_SAFE_INTEGER : track.lastSample,
+			() => this.captureCloseInfo(closed, track),
 		)
 		this.live.delete(track.trackId)
 		live.endedAt = now
@@ -3911,6 +3917,11 @@ export class ScannerService extends EventEmitter {
 		for (const live of this.live.values()) {
 			const t = live.lastTrack
 			if (live.sourceId !== sourceId || !t) continue
+			// DQ 1.4e: an edge track keeps no PSD slice (the flag is sticky: drop any held one).
+			if (t.flags.edge) {
+				this.bestPsd.delete(live.observationId)
+				continue
+			}
 			const best = this.bestPsd.get(live.observationId)
 			if (best && best.snrDb >= t.snrDb) continue
 			const lo = Math.max(
@@ -3938,7 +3949,8 @@ export class ScannerService extends EventEmitter {
 	private async writePsdEvidence(live: LiveObservation): Promise<void> {
 		const best = this.bestPsd.get(live.observationId)
 		this.bestPsd.delete(live.observationId)
-		if (!best || !live.discoveryId) return
+		if (!best || !live.discoveryId || live.lastTrack?.flags.edge === true)
+			return
 		const wants = live.jobIds.some(id => this.jobs.get(id)?.spec.evidence.psd)
 		if (!wants) return
 		const written = await this.evidence
@@ -4851,6 +4863,24 @@ export class ScannerService extends EventEmitter {
 			this.giveUpIqCapture(live.observationId)
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
 		}
+	}
+
+	/**
+	 * DQ 1.4e: the captured track turned edge after its IQ capture opened: the capture is discarded
+	 * at once (never finished, replayed or kept). A capture another holder already took is left to
+	 * the replay planner, which plans no trial for an edge track.
+	 */
+	private dropEdgeIqCapture(observationId: string): void {
+		const hit = this.iqCaptureOf.get(observationId)
+		if (!hit) return
+		try {
+			if (!this.deps.iqCapture?.discard(hit.captureId, "invalid")) return
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture discard failed")
+			return
+		}
+		this.iqCaptureOf.delete(observationId)
+		this.giveUpIqCapture(observationId)
 	}
 
 	/** The captured track closed: the capture finishes now. */
@@ -7325,12 +7355,53 @@ export class ScannerService extends EventEmitter {
 		this.background.add(run)
 	}
 
+	/**
+	 * DQ 10.3: may a fragment be merged away or retired? Only when nothing outside the store holds
+	 * evidence for it or for any of its aliases: no evidence folder (PSD/IQ files land before the
+	 * store's flags, and a merged-away id's evidence folder is not reachable from its survivor), no
+	 * dv or analog recording folder, no burst capture naming it, and no remembered replay trial
+	 * (trial memory is forgotten for a deleted or merged-away id, and analog proof is memory-only).
+	 * Merging a fragment that carries such evidence would need the evidence folder and the trial
+	 * memory moved to the survivor first: future work, so such records are refused for now.
+	 * Synchronous; the store asks once per record per pass and at most FRAGMENT_FOLD_CHECK_MAX
+	 * (1 024) times, each a few lstatSync calls. A throw keeps the record (the store fails closed).
+	 */
+	private foldCheck(): (discoveryId: string) => boolean {
+		const captured = new Set<string>()
+		for (const c of this.captures.list())
+			if (c.discoveryId !== null) captured.add(c.discoveryId)
+		// Only a confirmed ENOENT/ENOTDIR counts as absent: existsSync reports false on EACCES, which
+		// would fail open, so any other stat error counts as present (refuse the fold).
+		const mayExist = (path: string): boolean => {
+			try {
+				lstatSync(path)
+				return true
+			} catch (err: unknown) {
+				const code = (err as NodeJS.ErrnoException).code
+				return code !== "ENOENT" && code !== "ENOTDIR"
+			}
+		}
+		const holdsEvidence = (id: string): boolean =>
+			captured.has(id) ||
+			this.trialMemory.view(id).length > 0 ||
+			mayExist(join(this.storageDir, "evidence", id)) ||
+			mayExist(join(this.storageDir, "recordings", "dv", id)) ||
+			mayExist(join(this.storageDir, "recordings", "analog", id))
+		return id => {
+			for (const x of [id, ...this.store.aliasesOf(id)])
+				if (holdsEvidence(x)) return false
+			return true
+		}
+	}
+
 	private async maintenance(): Promise<void> {
 		const s = this.settings()
 		await this.spectrum.persist()
 		// § 8 storage.discoveryMaxAgeDays (never operator `keep` or `lockout`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
-		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays)
+		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays, {
+			canFold: this.foldCheck(),
+		})
 		// band inspection UX req 3.3: one operation removed them all, at this revision
 		const prunedAt = this.store.currentRevision()
 		for (const id of pruned) {

@@ -410,6 +410,11 @@ export class PendingAdmission {
 		if (map.size === 0) this.bySource.delete(sourceId)
 	}
 
+	/** Req 1.4d: a create that already took its pending entry clears the channel's airtime only. */
+	consumeAirtime(obs: ObservationInput): void {
+		this.dropAirtime(obs.sourceId, obs.track.centreHz)
+	}
+
 	/** Any create at this centre consumes the matching entry (nearest of b - 1, b, b + 1). */
 	consume(obs: ObservationInput): void {
 		this.dropAirtime(obs.sourceId, obs.track.centreHz)

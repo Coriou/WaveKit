@@ -99,6 +99,12 @@ function setupStore() {
 	return { clock, store }
 }
 
+/** The store's banked airtime entries for src-1. */
+const airtimeOf = (store: DiscoveryStore): number =>
+	(store as unknown as { pending: PendingAdmission }).pending.airtimeEntries(
+		"src-1",
+	).length
+
 const count = (store: DiscoveryStore): number =>
 	store.snapshot().discoveries.length
 
@@ -175,6 +181,40 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 		c.clock.now = T0 + 5_000
 		c.p.sustained(tx("t2", 4_000, 13, { epoch: 2 }))
 		expect(c.p.airtimeEntries("src-1")).toHaveLength(0)
+	})
+
+	it("a three-observation promotion clears the channel's banked airtime", () => {
+		// 2 000 ms banked at 13 dB, then two distinct 16 dB sightings make three ids with a 16 dB
+		// median: the repeat rule promotes. With the record deleted, a 13 dB transmission 1 000 ms
+		// long would reach 3 000 ms on the old credit; it must not create.
+		const { clock, store } = setupStore()
+		for (const [at, closing] of [
+			[0, false],
+			[1_000, false],
+			[2_000, true],
+		] as const) {
+			clock.now = T0 + at
+			store.ingest(tx("t1", 0, 13, { closing }))
+		}
+		expect(count(store)).toBe(0)
+		expect(airtimeOf(store)).toBe(1)
+		clock.now = T0 + 5_000
+		store.ingest(tx("a", 5_000, 16, { closing: true }))
+		expect(count(store)).toBe(0)
+		clock.now = T0 + 8_000
+		store.ingest(tx("b", 8_000, 16, { closing: true }))
+		const [made] = store.snapshot().discoveries
+		expect(made).toBeDefined()
+		expect(airtimeOf(store)).toBe(0)
+		expect(store.delete(made!.id)).toBe(true)
+		for (const [at, closing] of [
+			[20_000, false],
+			[21_000, true],
+		] as const) {
+			clock.now = T0 + at
+			store.ingest(tx("t2", 20_000, 13, { closing }))
+		}
+		expect(count(store)).toBe(0)
 	})
 
 	it("bounds: entries per source; samples per entry", () => {
@@ -297,62 +337,105 @@ describe("push-to-talk airtime (DQ 1.4d)", () => {
 					{ minLength: 1, maxLength: 12 },
 				),
 				txs => {
-					const { clock, store } = setupStore()
-					let expected = false
-					let bankAt = Number.NaN
-					let banked = 0
-					let bankSnrs: number[] = []
-					let t = 0
-					const median = (xs: number[]): number => {
-						const s = [...xs].sort((a, b) => a - b)
-						const m = s.length >> 1
-						return s.length % 2 === 1 ? s[m]! : (s[m - 1]! + s[m]!) / 2
-					}
-					txs.forEach((x, i) => {
-						const start = t + x.gap
-						t = start + x.dur
-						// The store's cadence: the gate-pass ingest, one at 1 000 ms, the close.
-						const samples =
-							x.dur > 1_000
-								? [start, start + 1_000, start + x.dur]
-								: [start, start + x.dur]
-						const run: number[] = []
-						samples.forEach((at, k) => {
-							const closing = k === samples.length - 1
-							clock.now = T0 + at
-							store.ingest(tx(`t${i}`, start, x.snr, { closing }))
-							if (expected) return
-							if (banked > 0 && at >= bankAt + DQ_PTT_WINDOW_MS) {
-								banked = 0
-								bankSnrs = []
-								bankAt = Number.NaN
-							}
-							run.push(x.snr)
-							const all = [...bankSnrs, ...run]
-							if (
-								banked > 0 &&
-								banked + (at - start) >= DQ_SUSTAIN_MS &&
-								all.length >= DQ_SUSTAIN_MIN_SAMPLES &&
-								median(all) >= DQ_SUSTAIN_MEDIAN_SNR_DB
-							) {
-								expected = true
-								return
-							}
-							if (closing && run.length >= 2) {
-								if (banked === 0) bankAt = at
-								banked += at - start
-								bankSnrs.push(...run)
-								bankSnrs = bankSnrs.slice(-DQ_SUSTAIN_SAMPLES)
-							}
-						})
-					})
-					expect(count(store) > 0).toBe(expected)
+					expect(airtimeCreates(txs)).toBe(airtimeModel(txs))
 				},
 			),
 			{ numRuns: 200 },
 		)
 	})
+
+	it("Property 27 model: a 9th banked id restarts the entry (eight 9 dB then three 14 dB, no gaps)", () => {
+		const txs = [
+			...Array.from({ length: 8 }, () => ({ gap: 0, dur: 500, snr: 9 })),
+			...Array.from({ length: 3 }, () => ({ gap: 0, dur: 500, snr: 14 })),
+		]
+		expect(airtimeModel(txs)).toBe(false)
+		expect(airtimeCreates(txs)).toBe(false)
+	})
 })
+
+interface Tx {
+	gap: number
+	dur: number
+	snr: number
+}
+
+/** The store's cadence: the gate-pass ingest, one at 1 000 ms (when longer), the close. */
+function samplesOf(start: number, dur: number): number[] {
+	return dur > 1_000
+		? [start, start + 1_000, start + dur]
+		: [start, start + dur]
+}
+
+/** Feeds `txs` through a store; true when any record was created. */
+function airtimeCreates(txs: readonly Tx[]): boolean {
+	const { clock, store } = setupStore()
+	let t = 0
+	txs.forEach((x, i) => {
+		const start = t + x.gap
+		t = start + x.dur
+		const samples = samplesOf(start, x.dur)
+		samples.forEach((at, k) => {
+			clock.now = T0 + at
+			store.ingest(
+				tx(`t${i}`, start, x.snr, { closing: k === samples.length - 1 }),
+			)
+		})
+	})
+	return count(store) > 0
+}
+
+/**
+ * Reference model of one channel's airtime entry (DQ 1.4d): expires 60 000 ms after it started,
+ * keeps the newest DQ_SUSTAIN_SAMPLES samples, and restarts empty when a new id would exceed
+ * DQ_PTT_IDS_MAX banked ids.
+ */
+function airtimeModel(txs: readonly Tx[]): boolean {
+	let bankAt = Number.NaN
+	let banked = 0
+	let bankSnrs: number[] = []
+	let bankIds = 0
+	let t = 0
+	const median = (xs: number[]): number => {
+		const s = [...xs].sort((a, b) => a - b)
+		const m = s.length >> 1
+		return s.length % 2 === 1 ? s[m]! : (s[m - 1]! + s[m]!) / 2
+	}
+	const reset = (): void => {
+		banked = 0
+		bankSnrs = []
+		bankIds = 0
+		bankAt = Number.NaN
+	}
+	for (const x of txs) {
+		const start = t + x.gap
+		t = start + x.dur
+		const samples = samplesOf(start, x.dur)
+		const run: number[] = []
+		for (const [k, at] of samples.entries()) {
+			const closing = k === samples.length - 1
+			if (banked > 0 && at >= bankAt + DQ_PTT_WINDOW_MS) reset()
+			run.push(x.snr)
+			const all = [...bankSnrs, ...run]
+			if (
+				banked > 0 &&
+				banked + (at - start) >= DQ_SUSTAIN_MS &&
+				all.length >= DQ_SUSTAIN_MIN_SAMPLES &&
+				median(all) >= DQ_SUSTAIN_MEDIAN_SNR_DB
+			)
+				return true
+			if (closing && run.length >= 2) {
+				if (banked > 0 && bankIds >= DQ_PTT_IDS_MAX) reset()
+				if (banked === 0) bankAt = at
+				banked += at - start
+				bankIds += 1
+				bankSnrs.push(...run)
+				bankSnrs = bankSnrs.slice(-DQ_SUSTAIN_SAMPLES)
+			}
+		}
+	}
+	return false
+}
 
 describe("short weak bursts need corroboration (DQ 1.4c)", () => {
 	it("boundary: a short burst at an 18 dB best slot creates with a 15 dB track SNR, not 14.99 dB", () => {

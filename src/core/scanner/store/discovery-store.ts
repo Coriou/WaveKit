@@ -1036,8 +1036,12 @@ export class DiscoveryStore
 		const created = this.createFrom(input, label, target.coChannel)
 		// A threshold, overload or decode create consumes the bucket's entry. A promotion
 		// already deleted the one entry it selected; consuming again could take a neighbour.
-		if (created.discoveryId !== null && admission === "create")
-			this.pending.consume(input)
+		// Any create clears the channel's push-to-talk airtime (1.4d): banked credit must not
+		// outlive the record it helped make.
+		if (created.discoveryId !== null) {
+			if (admission === "create") this.pending.consume(input)
+			else this.pending.consumeAirtime(input)
+		}
 		return created
 	}
 
