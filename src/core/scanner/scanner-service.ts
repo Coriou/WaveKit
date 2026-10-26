@@ -716,6 +716,13 @@ export class ScannerService extends EventEmitter {
 	private deferAnalog(live: LiveObservation, track: TrackSnapshot): void {
 		const pending = this.analogDeferred.get(live.observationId)
 		if (pending?.captureId != null) return
+		// DQ 1.4e: a retry re-enters here with the track kept at deferral; the edge flag is sticky
+		// and may have risen since, so the latest snapshot decides.
+		if (track.flags.edge || live.lastTrack?.flags.edge === true) {
+			this.analogDeferred.delete(live.observationId)
+			this.refuseAnalog(live, "edge")
+			return
+		}
 		const port = this.deps.iqCapture
 		if (!port) {
 			this.refuseAnalog(live, "capture-unavailable")
@@ -3955,6 +3962,21 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/** Task 34a: a burst capture for a new observation of a capture-enabled covering job. */
+	/**
+	 * DQ 1.4e: the track (centre ± OBW / 2; a non-finite OBW counts as its centre alone) lies inside
+	 * the usable 0.8 span of its own, current epoch.
+	 */
+	private trackInUsableSpan(sourceId: string, track: TrackSnapshot): boolean {
+		const epoch = this.spectrum.engine(sourceId)?.currentEpoch()
+		if (!epoch || epoch.epoch !== track.epoch) return false
+		return inWindow(
+			track.centreHz,
+			Number.isFinite(track.obwHz) ? track.obwHz : 0,
+			epoch,
+			USABLE_FRACTION,
+		)
+	}
+
 	private openCapture(live: LiveObservation, track: TrackSnapshot): void {
 		const job = live.jobIds
 			.map(id => this.jobs.get(id))
@@ -3964,6 +3986,9 @@ export class ScannerService extends EventEmitter {
 			? this.store.get(live.discoveryId)
 			: undefined
 		if (discovery?.operator?.lockout) return
+		// DQ 1.4e: no capture for an edge track or one reaching past the usable 0.8 span.
+		if (track.flags.edge || !this.trackInUsableSpan(live.sourceId, track))
+			return
 		this.recorder.open({
 			observationId: live.observationId,
 			jobId: job.id,
@@ -4781,6 +4806,7 @@ export class ScannerService extends EventEmitter {
 			live.acceptedIdentity !== undefined ||
 			track.flags.iqImage ||
 			track.flags.spur ||
+			track.flags.edge ||
 			this.iqTried.has(live.observationId)
 		)
 			return

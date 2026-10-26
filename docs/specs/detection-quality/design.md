@@ -859,6 +859,8 @@ of both spans, at and past each), `tests/unit/core/spectrum/pipeline-edge-span.t
 (synthetic OOK, tones, images and a weak burst through the pipeline and store) and
 `tests/unit/core/scanner/edge-admission.test.ts` (the edge threshold bounds) and
 `tests/unit/core/scanner/job-analog-edge.test.ts` (automatic analog trials refused for edge
-tracks and for channels past the 0.8 span, at and past the outermost channel). The pipeline
+tracks and for channels past the 0.8 span, at and past the outermost channel) and
+`tests/unit/core/scanner/scanner-service-edge-capture.test.ts` (burst and automatic IQ
+capture refused for edge tracks and past the 0.8 span, at and 1 Hz past the bound). The pipeline
 takes an optional `edgeFraction` next to `usableFraction`; the segmenter flags against
 `edgeStartBin` / `edgeEndBin`, which default to the usable bounds.
