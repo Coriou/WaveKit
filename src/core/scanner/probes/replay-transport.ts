@@ -38,7 +38,8 @@ export function replayCaptureOf(req: ProbeRequest): string | null {
 /**
  * WG11 req 6.5: a probe decoder fed from a narrowband IQ capture (cf32 at 48 kHz, already filtered to the
  * decoder's probe channel shape by the capture tool). Options equal the channel transport's, plus the
- * cf32 input format and the capture rate, so the audio pipeline starts at the FM demodulator.
+ * cf32 input format and the capture rate, so the audio pipeline starts at the FM demodulator and
+ * rtl_433 reads the capture as it is (`-r cf32:-`, `-f` the channel centre).
  */
 export function createReplayTransport(
 	port: Pick<IqCapturePort, "openReplay">,

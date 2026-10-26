@@ -56,15 +56,19 @@ export const IDENTIFY_REPLAY_MAX_CAPTURES = 2
 /** Replay trials per capture at most (known protocol first). */
 export const IQ_REPLAY_MAX_TRIALS = 8
 /**
- * the probe decoder types that have a replay input path (the capture service filters a
- * capture to their probe channel shape and the decoder reads cf32 at 48 kHz). `rtl433` has none:
- * the capture service refuses it and the rtl_433 adapter reads cu8 only. The replay planner and
- * the replay transport skip any decoder not listed here.
+ * The probe decoder types that have a replay input path. dsd-fme, multimon-ng and direwolf: the
+ * capture service filters a capture to their probe channel shape and the decoder FM-demodulates
+ * the cf32 at 48 kHz. rtl433: rtl_433 reads the 48 kHz cf32 capture as captured (`-r cf32:-`);
+ * OOK sensors (pulses of hundreds of µs, a few kHz wide) decode at 48 kHz as at 250 kHz, FSK
+ * sensors deviating past ±23.7 kHz do not fit the capture and stay live-only. Capture size is
+ * unchanged: 4 s × 48 000 samples/s × 8 B = 1 536 000 B. The replay planner and the replay
+ * transport skip any decoder not listed here.
  */
 export const REPLAY_INPUT_DECODERS: ReadonlySet<string> = new Set([
 	"dsd-fme",
 	"multimon-ng",
 	"direwolf",
+	"rtl433",
 ])
 
 /** A finished capture as identify and the replay transport see it. */

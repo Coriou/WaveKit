@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import { createDirewolfDecoder } from "../../../../src/decoders/builtin/direwolf.js"
 import { createDsdFmeDecoder } from "../../../../src/decoders/builtin/dsd-fme.js"
 import { createMultimonDecoder } from "../../../../src/decoders/builtin/multimon-ng.js"
+import { createRtl433Decoder } from "../../../../src/decoders/builtin/rtl433.js"
 import { createChannelTransport } from "../../../../src/core/scanner/probes/channel-transport.js"
 import {
 	buildProbeConfig,
@@ -74,15 +75,19 @@ describe("replay transport", () => {
 		expect(t.cores("multimon-ng")).toBe(IQ_REPLAY_PROBE_CORES)
 	})
 
-	it("supports only requests that name a capture, and never rtl433", () => {
+	it("supports only requests that name a capture, rtl433 included", () => {
 		const t = createReplayTransport(fakePort(null).port)
-		for (const type of ["dsd-fme", "multimon-ng", "direwolf"] as const) {
+		for (const type of [
+			"dsd-fme",
+			"multimon-ng",
+			"direwolf",
+			"rtl433",
+		] as const) {
 			expect(t.supports(modeOf(type), ctxOf(replayReq()))).toBe(true)
 			expect(t.supports(modeOf(type), ctxOf(probeRequest() as never))).toBe(
 				false,
 			)
 		}
-		expect(t.supports(modeOf("rtl433"), ctxOf(replayReq()))).toBe(false)
 		expect(replayCaptureOf(probeRequest())).toBeNull()
 		expect(replayCaptureOf(replayReq())).toBe("cap-1")
 		// A capture needs no live IQ format.
@@ -100,7 +105,7 @@ describe("replay transport", () => {
 		expect(openReplay).toHaveBeenCalledWith("cap-1", "multimon-ng")
 	})
 
-	it("returns null when the capture is gone, the request is live, or the type is rtl433", () => {
+	it("returns null when the capture is gone or the request is live", () => {
 		const gone = fakePort(null)
 		const t = createReplayTransport(gone.port)
 		expect(t.openInput(modeOf("dsd-fme"), ctxOf(replayReq()))).toBeNull()
@@ -109,8 +114,41 @@ describe("replay transport", () => {
 		expect(
 			t2.openInput(modeOf("dsd-fme"), ctxOf(probeRequest() as never)),
 		).toBeNull()
-		expect(t2.openInput(modeOf("rtl433"), ctxOf(replayReq()))).toBeNull()
 		expect(live.openReplay).not.toHaveBeenCalled()
+	})
+
+	it("opens rtl433 replays and runs rtl_433 on the cf32 capture as it is", () => {
+		const stream = new PassThrough()
+		const { port, openReplay } = fakePort(stream)
+		const t = createReplayTransport(port)
+		const req = replayReq()
+		const ctx = ctxOf(req)
+		const mode = modeOf("rtl433")
+		expect(t.openInput(mode, ctx)).toBe(stream)
+		expect(openReplay).toHaveBeenCalledWith("cap-1", "rtl433")
+		const cfg = buildProbeConfig({
+			probeId: "r",
+			req,
+			mode,
+			transport: t,
+			ctx,
+			recordDir: null,
+			ports: null,
+		})
+		expect(cfg.options).toMatchObject({
+			inputIqFormat: "cf32",
+			inputSampleRate: 48_000,
+			channelHz: req.targetHz,
+		})
+		const argv = (
+			createRtl433Decoder(cfg, pino({ level: "silent" })) as unknown as {
+				getArgs(): string[]
+			}
+		).getArgs()
+		const pipeline = argv.join(" ")
+		expect(pipeline).not.toContain("csdr")
+		expect(argv[1]).toMatch(/^rtl_433 -r cf32:- -s 48000 /)
+		expect(pipeline).toContain(`-f ${req.targetHz}`)
 	})
 
 	describe("configure equals the channel transport's options", () => {

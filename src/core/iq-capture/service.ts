@@ -88,8 +88,13 @@ export interface IqReplayShape {
 	transitionHz: number
 }
 export type IqReplayDecoderType = Exclude<ProbeDecoderType, "rtl433">
+/**
+ * The audio probe shapes (required; the capture bandwidth is the widest of them) and the optional
+ * rtl433 shape: rtl_433 reads the capture as it is, so its shape is the whole capture passband
+ * (`wholeCaptureShape`). Without it a capture is never replayed into rtl433.
+ */
 export type IqReplayShapes = Readonly<
-	Record<IqReplayDecoderType, IqReplayShape>
+	Record<IqReplayDecoderType, IqReplayShape> & { rtl433?: IqReplayShape }
 >
 
 /** The spectrum engine surface the service uses (structural; `SpectrumEngine` satisfies it). */
@@ -249,7 +254,11 @@ interface SourceSlot {
 
 /** The capture bandwidth: the widest replay passband (computed, not hardcoded). */
 export function captureBandwidthHz(shapes: IqReplayShapes): number {
-	return Math.max(...Object.values(shapes).map(s => s.bandwidthHz))
+	return Math.max(
+		shapes["dsd-fme"].bandwidthHz,
+		shapes["multimon-ng"].bandwidthHz,
+		shapes.direwolf.bandwidthHz,
+	)
 }
 
 export function createIqCaptureService(
@@ -1021,7 +1030,6 @@ class Service implements IqCaptureService {
 		const store = this.store
 		const cfg = this.cfg
 		if (!store || !cfg || this.st !== "on" || !this.dir) return null
-		if (decoderType === "rtl433") return null
 		const shapes = this.shapes
 		const shape =
 			shapes && Object.hasOwn(shapes, decoderType)

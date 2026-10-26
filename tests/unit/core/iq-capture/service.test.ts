@@ -6,7 +6,9 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import type { Readable } from "node:stream"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { wholeCaptureShape } from "../../../../src/core/iq-capture/shapes.js"
 import {
+	captureBandwidthHz,
 	createIqCaptureService,
 	type IqCaptureServiceOptions,
 	type IqReplayShapes,
@@ -721,10 +723,34 @@ describe("IqCaptureService openReplay", () => {
 		})
 	}
 
-	it("refuses rtl433, unknown and unready captures", async () => {
+	it("refuses rtl433 without its shape, unknown and unready captures", async () => {
 		const { s, id } = await ready()
 		expect(s.svc.openReplay(id, "rtl433")).toBeNull()
 		expect(s.svc.openReplay("nope", "dsd-fme")).toBeNull()
+		await s.svc.stop()
+	})
+
+	it("replays into rtl433 with the whole-capture shape when it is given", async () => {
+		const rtl433 = wholeCaptureShape(captureBandwidthHz(SHAPES))
+		expect(rtl433).toEqual({ bandwidthHz: 16_000, transitionHz: 16_000 })
+		const s = await setup({
+			shapes: { ...SHAPES, ...(rtl433 ? { rtl433 } : {}) },
+		})
+		await running(s)
+		const got = s.svc.capture(req())
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		const out = s.svc.openReplay(id, "rtl433")
+		expect(out).not.toBeNull()
+		expect(lastReplay(s).args).toEqual([
+			"replay",
+			"--in",
+			"/dev/fd/3",
+			"--bandwidth",
+			"16000",
+			"--transition",
+			"16000",
+		])
 		await s.svc.stop()
 	})
 

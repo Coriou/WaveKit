@@ -61,6 +61,8 @@ const REPLAYABLE = new Set<ScannerProtocol>([
 	"pocsag",
 	"flex",
 	"aprs",
+	// the ISM replay trial (rtl433)
+	"ism",
 ])
 
 function listsAm(hz: number): boolean {
@@ -209,7 +211,13 @@ describe("planReplayTrials analog order", () => {
 						}
 					}
 					const scores = scoresOf(input)
-					const digital = out.filter(t => t.kind !== "analog" && !t.known)
+					// The ISM replay trial (rtl433) is called by band, not ranked by score.
+					const digital = out.filter(
+						t =>
+							t.kind !== "analog" &&
+							!t.known &&
+							t.mode.decoderType !== "rtl433",
+					)
 					for (let i = 1; i < digital.length; i++) {
 						const prev = digital[i - 1]!
 						const cur = digital[i]!
@@ -229,7 +237,7 @@ describe("planReplayTrials analog order", () => {
 						).toBe(true)
 					}
 					for (const t of out) {
-						expect(t.mode.decoderType).not.toBe("rtl433")
+						if (t.mode.decoderType === "rtl433") expect(t.protocol).toBe("ism")
 						if (t.kind !== "analog")
 							expect(["ais", "acars", "vdl2", "lora"]).not.toContain(t.protocol)
 					}

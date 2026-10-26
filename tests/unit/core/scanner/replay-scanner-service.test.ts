@@ -28,6 +28,7 @@ import {
 	type IqReplayQueuePort,
 } from "../../../../src/core/iq-capture/replay-queue.js"
 import { flush, spyLogger } from "../iq-capture/helpers.js"
+import { wholeCaptureShape } from "../../../../src/core/iq-capture/shapes.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { TrialMemory } from "../../../../src/core/scanner/trial-memory.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
@@ -206,6 +207,14 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 				bandwidthHz: PROBE_CHANNEL_REQUESTS.direwolf.bandwidthHz,
 				transitionHz: PROBE_CHANNEL_REQUESTS.direwolf.transitionHz,
 			},
+			// rtl_433 reads the whole capture passband (the widest probe passband) up to 24 kHz.
+			rtl433: wholeCaptureShape(
+				Math.max(
+					PROBE_CHANNEL_REQUESTS["dsd-fme"].bandwidthHz,
+					PROBE_CHANNEL_REQUESTS["multimon-ng"].bandwidthHz,
+					PROBE_CHANNEL_REQUESTS.direwolf.bandwidthHz,
+				),
+			),
 		})
 	})
 
