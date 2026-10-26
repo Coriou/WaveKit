@@ -588,6 +588,7 @@ class ConfigValidationError extends WaveKitError { }
 | Decoder process crashed  | Auto-restart with backoff      |
 | Decoder parse error      | Log warning, skip line         |
 | Config validation error  | Fail fast, exit                |
+| Stale state lock         | Reclaim after heartbeat check  |
 
 ## Logging
 

@@ -4442,6 +4442,10 @@ Writes take the normal protected mutation admission (session, CSRF, Origin). The
 `packages/api-types/src/operator-data.ts`; the design is in the
 [operator data specification](specs/operator-data/design.md).
 
+After an unclean stop the store's writer lock is reclaimed automatically; a lock
+held by another live core is never taken and the store answers unavailable. See
+[After a crash or power cut](DOCKER-SETUP.md#after-a-crash-or-power-cut).
+
 ### Config export
 
 `GET /api/config/export` downloads the effective configuration (the YAML
