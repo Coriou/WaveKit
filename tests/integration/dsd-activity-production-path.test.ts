@@ -327,6 +327,9 @@ describe("dsd-fme activity through production wiring", () => {
 		"checked voice",
 		"checked control CSBK",
 		"identical checked control CSBK",
+		"identical checked control CSBK within 2 s",
+		"different checked control CSBK opcodes",
+		"different checked control CSBK payloads",
 		"error tail",
 		"unchecked CSBK",
 	])(
@@ -352,6 +355,18 @@ describe("dsd-fme activity through production wiring", () => {
 										]
 									: []),
 							]
+			if (kind.startsWith("different checked control CSBK")) {
+				// dmr_csbk.c at the pinned revision prints opcode-specific descriptions
+				// and preamble payload on continuation lines. The link DTO omits these.
+				replayRows = [
+					CONTROL[0]!,
+					{
+						at: 31.3,
+						line: " Preamble CSBK - Group CSBK - Source: 20 - Target: 10 ",
+					},
+					CONTROL[1]!,
+				]
+			}
 			vi.useFakeTimers({
 				toFake: [
 					"Date",
@@ -395,7 +410,7 @@ describe("dsd-fme activity through production wiring", () => {
 			f.burstOn(hz)
 			await vi.advanceTimersByTimeAsync(491.7)
 			// Scanner acceptance requires a second checked identity at least 2 s later.
-			for (let i = 0; i < 7; i++) {
+			for (let i = 0; i < (kind.endsWith("within 2 s") ? 2 : 7); i++) {
 				feed4fsk(f.fanout)
 				await vi.advanceTimersByTimeAsync(317.3)
 			}
@@ -405,6 +420,18 @@ describe("dsd-fme activity through production wiring", () => {
 					...row,
 					at: row.at - 2_700,
 				}))
+			}
+			if (kind.startsWith("different checked control CSBK")) {
+				replayRows = [
+					CONTROL[0]!,
+					{
+						at: 31.3,
+						line: kind.endsWith("opcodes")
+							? " Channel Timing CSBK (CT_CSBK) "
+							: " Preamble CSBK - Group CSBK - Source: 21 - Target: 10 ",
+					},
+					CONTROL[1]!,
+				]
 			}
 			f.burstOn(hz)
 			await vi.advanceTimersByTimeAsync(491.7)
@@ -418,22 +445,21 @@ describe("dsd-fme activity through production wiring", () => {
 				).toBe(false)
 				return
 			}
-			if (kind === "identical checked control CSBK") {
-				// Main's ambient messageOf hashes CC/slot, not CSBK payload or reception time.
-				// ConfirmMemory.pairMessage rejects identical hashes even >2 s apart.
-				// Keep this current behaviour: parser verification alone cannot confirm a discovery.
+			if (kind.startsWith("identical checked control CSBK")) {
 				expect(f.links.filter(l => l.verified)).toHaveLength(2)
 				expect(
 					f.links
 						.filter(l => l.verified)
 						.every(l => l.cc === 1 && l.slot === 1),
 				).toBe(true)
-				expect(
-					f.scanner
-						.listDiscoveries({} as never)
-						.items.some(d => d.confidence === "decoded"),
-				).toBe(false)
-				return
+				if (kind.endsWith("within 2 s")) {
+					expect(
+						f.scanner
+							.listDiscoveries({} as never)
+							.items.some(d => d.confidence === "decoded"),
+					).toBe(false)
+					return
+				}
 			}
 			if (kind === "checked control CSBK") {
 				// Control-only BS bursts prove CC without voice LC, calls or TG/SRC.
@@ -447,7 +473,7 @@ describe("dsd-fme activity through production wiring", () => {
 						l => !l.voiceLc && l.tg === undefined && l.src === undefined,
 					),
 				).toBe(true)
-			} else
+			} else if (kind === "checked voice")
 				expect(f.links.some(l => l.verified && l.cc === 1 && l.voiceLc)).toBe(
 					true,
 				)

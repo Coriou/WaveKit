@@ -2,7 +2,7 @@
 # dmr_bs.c brackets the current slot; dmr_dburst.c prints CSBK after slot-type decode.
 # No CRC/FEC/RAS tail: the following DMR sync closes and verifies the CSBK burst.
 # Two checked control bursts use different BS slots, with the same synthetic CC.
-# The ambient distinct-content guard hashes the slot; a same-slot repeat cannot pair.
+# Checked same-slot repeats also pair once the 2-second separation guard passes.
 # Interleaved IDLE is only a sync hint, never checked control or voice LC.
 # Format: <ms since start><TAB><line>. ANSI colours stripped; synthetic CC only.
 3.7	21:49:48 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK

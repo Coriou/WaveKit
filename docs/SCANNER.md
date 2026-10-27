@@ -549,8 +549,10 @@ payload; paging with message content uses protocol, capcode, function and text;
 empty or tone-only pages use spacing alone. Direwolf APRS uses source, destination
 and the information field, excluding digipeater paths and other routing fields.
 DSD uses protocol and
-link fields (colour/access code, talkgroup, source, slot or callsign). Repeated
-identical content does not confirm. Address-only APRS output from multimon and
+link fields (colour/access code, talkgroup, source, slot or callsign). Checked
+DMR control bursts use spacing alone, including identical CC/slot repeats; voice
+LC and other content-bearing evidence still require distinct content. Address-only
+APRS output from multimon and
 other DTOs without content use spacing alone. ADS-B retains
 its local CRC/address checks and raw-frame duplicate rejection for Beast output.
 For SBS output, the adapter emits one aircraft record per `MSG` line: `messageCount: 1`
@@ -706,11 +708,12 @@ the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
 
 DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
-both target and source. Ambient confirmation also requires distinct link content:
-repeating CSBK with the same CC and slot cannot confirm a discovery, because the
-current adapter does not expose the CSBK payload to the content hash. Checked
-CSBKs with the same CC on different BS slots can pair after the 2-second
-separation guard. Voice link control uses the latest CC from its own BS
+both target and source. Two checked control bursts with the same channel, CC
+and slot confirm at least 2 seconds and at most 5 minutes apart, even when their
+printed content is identical. Closer repeats count once and retain the first
+burst's time for the separation check. Checked bursts on different BS slots can
+also pair. Unchecked sync or CC-only hints never confirm. Voice link control
+still requires distinct link content and uses the latest CC from its own BS
 slot, or from the single MS channel, in its current burst sequence. Unknown CC,
 sync loss, protocol changes and sequence timeout clear that association. Header and voice-LC
 verification waits until the next DMR sync closes the burst (normally one burst
