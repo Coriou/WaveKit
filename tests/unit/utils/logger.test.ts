@@ -6,6 +6,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { once } from "node:events"
+import pino from "pino"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -176,13 +178,19 @@ describe("Logger", () => {
 			}
 		})
 
-		it("should create log directory if it does not exist", () => {
+		it("should create log directory if it does not exist", async () => {
 			const logDir = path.join(tempDir, "logs", "nested")
 			expect(fs.existsSync(logDir)).toBe(false)
 
-			createLogger({ level: "info", dir: logDir })
+			const logger = createLogger({ level: "info", dir: logDir })
 
 			expect(fs.existsSync(logDir)).toBe(true)
+			// The file destination opens asynchronously; let it finish before afterEach
+			// removes the directory, or the late open throws outside the test.
+			const destination = (logger as unknown as Record<symbol, unknown>)[
+				pino.symbols.streamSym
+			] as { fd: number } & NodeJS.EventEmitter
+			if (destination.fd < 0) await once(destination, "ready")
 		})
 
 		it("should write logs to file when directory is specified", async () => {

@@ -573,7 +573,7 @@ describe("labelFromEvidence", () => {
 			line: Partial<DsdFmeLinkLine> & Pick<DsdFmeLinkLine, "protocol">,
 		): DsdFmeScannerEvent => ({
 			kind: "link",
-			line: { crcErr: false, at: T0, ...line },
+			line: { verified: true, crcErr: false, at: T0, ...line },
 		})
 		const p25 = createInterpreterState({ epoch: 1, origin: "probe" })
 		expect(

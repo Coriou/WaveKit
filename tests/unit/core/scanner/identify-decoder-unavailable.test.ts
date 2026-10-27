@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 /**
  * WG9 req 5.4: an identify trial whose decoder program cannot run is
  * `unsupported` / `decoder-unavailable`; every other early end keeps the
@@ -14,7 +15,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import { flushAsync, linkLine } from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync } from "../../../mocks/scanner/probe-fakes.js"
 
 type Harness = ReturnType<typeof identifyHarness>
 const ENDED = ["completed", "cancelled", "failed"]
@@ -107,7 +108,7 @@ describe("identify decoder-unavailable (WG9 5.4)", () => {
 		await flushAsync()
 		const [probe] = [...h.decoders.created.values()]
 		expect(probe?.config.type).toBe("dsd-fme")
-		h.decoders.emitLink(probe!.id, linkLine(1, h.clock.now))
+		h.decoders.emitLink(probe!.id, verifiedLinkLine(1, h.clock.now))
 		probe!.emit("exit", 127, null)
 		await flushAsync()
 		await settle(h, 1000, 40)

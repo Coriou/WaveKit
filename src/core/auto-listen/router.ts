@@ -357,7 +357,10 @@ export class AutoListenRouter extends EventEmitter {
 		if (sel === this.analog) {
 			const pre = this.preemptor(now)
 			if (pre !== null) {
-				// 4.5: analog's remaining queued audio is dropped and counted.
+				// 4.5: analog's remaining queued audio is dropped and counted. Its silent head is
+				// discarded first, uncounted (4.3), so a preemption after analog has gone quiet
+				// (including one in the same block as its release) loses and counts nothing.
+				this.analog.out.discardUntilAudible()
 				this.analog.out.dropAll()
 				this.select(pre, now)
 				return

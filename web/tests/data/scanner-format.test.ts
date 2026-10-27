@@ -3,6 +3,7 @@ import type { ScanJob, ScannerProtocol } from "@wavekit/api-types"
 import {
 	confidenceText,
 	discoveryTitle,
+	protocolSlotText,
 	formatWait,
 	heldFrequencyHz,
 	identityText,
@@ -26,6 +27,42 @@ const paused = (over: Partial<JobLine>): JobLine => ({
 })
 
 describe("scanner-format", () => {
+	it("labels checked TG/SRC without CC as DMR while leaving sync-only DMR tentative", () => {
+		const d = {
+			protocol: "dmr",
+			confidence: "activity",
+			evidenceLevel: "weak",
+			proof: {
+				kind: "digital-undecoded",
+				protocol: "dmr",
+				tgSrcVerified: true,
+				transport: "live",
+				at: "2026-10-23T12:00:00.123Z",
+				observationId: "fake",
+				tried: [],
+				unavailable: [],
+				encrypted: false,
+				summary: "DMR voice, TG/SRC verified, CC unknown",
+			},
+		} as const
+		// Full discovery fixture is unnecessary for these presentation-only fields.
+		expect(
+			protocolSlotText({
+				...d,
+				proof: { ...d.proof, tried: [], unavailable: [] },
+			}),
+		).toBe("DMR")
+		expect(
+			protocolSlotText({
+				protocol: "dmr",
+				confidence: "activity",
+				evidenceLevel: "weak",
+			}),
+		).toBe("DMR?")
+		expect(
+			discoveryTitle(d as unknown as Parameters<typeof discoveryTitle>[0]),
+		).toBe("DMR")
+	})
 	it("names every protocol without raw ids", () => {
 		const all: ScannerProtocol[] = [
 			"analog-fm",

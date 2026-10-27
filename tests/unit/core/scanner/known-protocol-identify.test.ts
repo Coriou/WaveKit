@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 /** WG11 req 1.7 / 1.8, identify side: the known protocol's run first, miss and decode counting. */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
@@ -8,7 +9,7 @@ import type {
 } from "../../../../src/core/scanner/types.js"
 import { DecoderSpawnError } from "../../../../src/utils/errors.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
-import { flushAsync, linkLine } from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync } from "../../../mocks/scanner/probe-fakes.js"
 import { FakeMemory, harness } from "./identify-heard-fakes.js"
 
 const dmrTrack = () => trackOf({ acf30: -0.94, acf60: 0.99 })
@@ -56,8 +57,8 @@ async function runOnce(opts: {
 	const trying = h.events.find(e => e.state === "trying")!
 	if (opts.outcome === "decode") {
 		const id = [...h.decoders.created.values()][0]?.id ?? ""
-		h.decoders.emitLink(id, linkLine(1, h.clock.now))
-		h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+		h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+		h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 		await flushAsync()
 	}
 	// Review m2: the transmission ends before the known run's hold does.

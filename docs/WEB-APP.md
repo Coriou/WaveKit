@@ -146,3 +146,13 @@ The label sits at its nominal channel, independently of nearby narrow carriers.
 Its identification is proven by decodes; API spectrum fields contain unmeasured zero placeholders.
 The drawer hides RF measurements and transmission history for anchors. Aircraft counts
 update through live discovery events when confirmations expire, without a new decode. See [decode-anchored ADS-B](SCANNER.md#decode-anchored-ads-b).
+
+Digital voice tags distinguish sync hints from decoded identities. DMR sync-only
+activity is labelled `DMR?`; its detail summary says DMR-like sync, not decoded,
+and may show the most frequent color code as `CC 3 (unverified)`. Repeating
+Checked TG/SRC voice with unknown CC uses the tag `DMR` and detail
+`DMR voice, TG/SRC verified, CC unknown`; this remains weak evidence.
+VC/IDLE/MBCC sync never earns a proven tag or `DMR · CC n` identity. A decoded DMR
+identity requires repeated checked content, with checked talkgroup/source voice
+link control additionally required inside the tuner-centre DC guard. See
+[Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).

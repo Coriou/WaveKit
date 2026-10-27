@@ -93,6 +93,21 @@ export function legacySnapshot(specs: readonly LegacySpec[]): StoreSnapshot {
 			o.peakDbfs = s.peakDbfs ?? -50
 			o.startedAt = iso(first + i * 1000)
 			if (o.endedAt !== undefined) o.endedAt = iso(first + i * 1000 + 500)
+			// These fixtures model established identities, so provide checked content
+			// rather than relying on a legacy discovery label alone.
+			if (s.identity !== undefined)
+				o.decode = [
+					{
+						protocol: d.protocol,
+						identity: s.identity,
+						contentVerified: true,
+						crcClean: true,
+						metadata: {},
+						at: first + i * 1000 + 3.7,
+						epoch: o.sampleRange.epoch,
+						origin: "probe",
+					},
+				]
 			observations.push(o)
 		}
 	}

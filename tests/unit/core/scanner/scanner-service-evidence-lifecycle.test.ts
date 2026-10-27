@@ -180,8 +180,10 @@ describe("discovery deletion producer boundary (review F3)", () => {
 	})
 })
 
+// These are checked identities: this fixture isolates evidence timing and leak caps.
 const decode = (o: LiveObservation): DecodeEvidence => ({
 	protocol: "dmr",
+	contentVerified: true,
 	identity: { kind: "dmr-cc", value: "1" },
 	metadata: {},
 	crcClean: true,

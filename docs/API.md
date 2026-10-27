@@ -7027,7 +7027,8 @@ api:
 ### Scanner evidence and activity
 
 The existing scanner REST responses and `scanner:discovery` events carry optional
-`Discovery.proof` and `evidenceLevel` (`proven` when a proof exists, otherwise `weak`).
+`Discovery.proof` and `evidenceLevel` (`proven` for valid proofs, including carrier proofs;
+`weak` for dsd-fme sync-only and TG/SRC-verified CC-unknown proofs).
 Each observation also has its own optional `proof`. `ScannerProof` contains `kind`
 (`decoded`, `analog-tone`, `analog-voice`, `digital-undecoded`, `carrier-only`),
 `protocol`, `transport` (`live`, `replay`, `ambient`), `at`, `observationId`, optional
@@ -7035,6 +7036,14 @@ Each observation also has its own optional `proof`. `ScannerProof` contains `kin
 `unavailable`, `encrypted` and `summary`. The summary is fixed English, at most
 160 characters; `tried` holds at most 16 unique protocols in trial order.
 `DecodeEvidence.transport?: "live" | "replay"` is additive and persisted.
+`DecodeEvidence.contentVerified?: boolean` records explicit checked-content
+provenance; absent/false cannot establish a dsd-fme identity on restore.
+`DecodeEvidence.unverifiedCc?: number` and `ScannerProof.unverifiedCc?: number`
+carry a DMR sync-only color-code hint (integer 0–15), never an identity.
+Sync-only proofs are labelled DMR-like sync, not decoded, and remain weak.
+`ScannerProof.tgSrcVerified?: boolean` marks checked DMR voice TG/SRC with
+unknown CC: summary `DMR voice, TG/SRC verified, CC unknown`, web tag `DMR`.
+It stays `digital-undecoded`/weak until a CC identity is accepted.
 A `scanner:discovery` merge carries optional `mergedIds`, the absorbed discovery ids
 (see [scanner:discovery](#scannerdiscovery) for `mergedTruncated` and `deleted`).
 

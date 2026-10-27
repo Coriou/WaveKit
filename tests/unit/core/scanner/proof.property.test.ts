@@ -297,14 +297,25 @@ describe("proof is a function of the evidence", () => {
 					expect(evidenceLevelOf({})).toBe("weak")
 					return
 				}
-				expect(proofWorthy(label)).toBe(true)
+				expect(
+					proofWorthy(label) ||
+						(once.kind === "digital-undecoded" &&
+							label.family === "digital-voice" &&
+							label.confidence === "activity"),
+				).toBe(true)
 				expect(once.protocol).toBe(label.protocol)
 				expect(once.observationId).toBe(input.observationId)
 				expect(once.summary.length).toBeLessThanOrEqual(
 					SCANNER_PROOF_SUMMARY_MAX_CHARS,
 				)
 				expect(once.summary.length).toBeGreaterThan(0)
-				expect(once.summary).toMatch(grammar(once.kind))
+				if (
+					once.kind === "digital-undecoded" &&
+					label.family === "digital-voice"
+				) {
+					expect(once.summary).toMatch(/^Digital, .+-like sync.*not decoded$/)
+					expect(evidenceLevelOf({ proof: once })).toBe("weak")
+				} else expect(once.summary).toMatch(grammar(once.kind))
 				expect(proofSummary(omitSummary(once))).toBe(once.summary)
 				expect(once.tried).toEqual(expectedTried(input.trials))
 				expect(once.unavailable).toEqual(expectedUnavailable(input.unavailable))
@@ -321,7 +332,11 @@ describe("proof is a function of the evidence", () => {
 					if (label.confidence === "classified")
 						expect(once.kind).toBe("analog-tone")
 				}
-				expect(evidenceLevelOf({ proof: once })).toBe("proven")
+				expect(evidenceLevelOf({ proof: once })).toBe(
+					once.kind === "digital-undecoded" && label.family === "digital-voice"
+						? "weak"
+						: "proven",
+				)
 				expect(strongestProof([once])).toEqual(once)
 			}),
 			{ numRuns: 100 },

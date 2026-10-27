@@ -9,7 +9,7 @@ Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-des
 - Finds energy in the window a source is tuned to (in-window) or across wider ranges by retuning an rtl_tcp source (sweep).
 - Classifies emissions from their spectrum (bandwidth, shape, TDMA envelope) and confirms them with dsd-fme, multimon-ng or direwolf.
 - Never decrypts and never handles keys. Encrypted traffic is reported as `encrypted: true` and no audio is kept.
-- Confidence is honest: `activity` (energy only) → `candidate` (spectral hypothesis) → `classified` (channel features; after the channelizer) → `decoded` (the confirm rule of the protocol was met: for DMR, the same colour code on two CRC-clean link lines). `decoded` means the first **accepted** identity, not any identity-bearing evidence.
+- Confidence is honest: `activity` (energy only) → `candidate` (spectral hypothesis) → `classified` (channel features; after the channelizer) → `decoded` (the confirm rule of the protocol was met: for DMR, the same colour code on two content-verified bursts or checked voice link-control lines). `decoded` means the first **accepted** identity, not any identity-bearing evidence.
 - Before the channelizer: one confirm probe at a time (each costs about half a core), analog replay characterisation when IQ capture is enabled, no listen-scan, ISM only through configured rtl_433 decoders (ambient evidence).
 
 ## Modes
@@ -682,3 +682,76 @@ code evidence that all AIS or rtl_433 emissions structurally evade tracking, so
 neither is in the anchor list. Sweeps observe only their current hop (default dwell
 is settle plus three integration blocks); a missed off-hop transmission supplies
 no verified decode and cannot create an anchor.
+
+### Digital voice identity checks
+
+A dsd-fme sync alone is a protocol hint. DMR VC\*/VC1–VC6, IDLE,
+unlabelled bursts and R12U never confirm a color-code identity, even when
+hundreds of bursts repeat it. They appear as DMR-like digital sync, not decoded,
+and remain weak evidence. The most frequent sync-only color code may appear in
+the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
+
+DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
+CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
+both target and source. Voice link control uses the latest CC from its own BS
+slot, or from the single MS channel, in its current burst sequence. Unknown CC,
+sync loss, protocol changes and sequence timeout clear that association. Header and voice-LC
+verification waits until the next DMR sync closes the burst (normally one burst
+of latency); a non-DMR sync or any continuation CRC/FEC error rejects it.
+Stop or silence timeout flushes unfinished headers and voice LC as unverified,
+without TG/SRC evidence. A Key-line error also rejects the burst: voice LC can
+print before a Key line and the later burst CRC result (`dmr_flco.c:403,778`,
+`dmr_dburst.c:627`). Call start/end and talkgroup display still process LC
+immediately. CRC/FEC
+errors and `-RAS` output do not count. MBCC continuation bursts have no own
+CRC and never confirm CC (dsd-fme ed1d1d6 `dmr_dburst.c:115–119,627`);
+only the completed block is CRC-checked by `dmr_block.c`. MS prints CC before
+slot-type decoding (`dmr_ms.c:676–686`), so header confirmation also requires
+the closing DMR sync to print the same CC. Voice LC never borrows a CC from
+a still-pending MS header; its checked TG/SRC remain usable with CC unknown.
+`Sync: no sync` discards pending
+headers, voice LC and CC context but does not split an active call by itself.
+Checked voice LC with paired TG/SRC but no known slot CC remains weak
+`digital-undecoded` evidence, with summary `DMR voice, TG/SRC verified, CC unknown`
+and a `DMR` tag. It cannot become decoded/proven without a CC identity.
+Later sync-only hints cannot replace this checked TG/SRC result; newer checked
+TG/SRC evidence may replace it.
+The interpreter retains at most 256 scoped TG/SRC voice-LC pairs, evicting oldest.
+CACH/burst FEC errors
+produce no evidence. Near the tuner centre, within the existing DC admission
+guard, digital voice additionally needs paired checked voice link control with
+both talkgroup and source before it can be decoded.
+
+The same conservative rule applies to other dsd-fme protocols: P25 NAC and NAC/CC
+remain unverified even beside a recognized frame type. In dsd-fme,
+`dsd_frame.c:34–36` prints cached state, and `390–396` updates NAC/CC only
+when BCH corrects the NAC. No supported output binds the printed NAC to the
+current checked NID, so P25 identity stays unverified. NXDN accepts current RAN
+on CRC-checked
+FACCH2/UDCH output, including the exact ` RAN 03  FACCH2` spacing
+(ed1d1d6 `nxdn_deperm.c:1390–1437`). CRC failure prints eight spaces instead
+of RAN, so it supplies no identity. SACCH/CAC print cached RAN
+(`nxdn_deperm.c:466,564,762`) and remain unverified. YSF FICH sync, unchecked
+D-STAR MY headers and dPMR's cached channel code do not establish identities.
+Unknown output formats default to unverified.
+
+Persisted dsd-fme evidence requires explicit `contentVerified: true` provenance
+in snapshots and journal replay before a restored identity can be decoded/proven. Legacy rows without it retain
+only digital sync evidence and an unverified DMR color-code hint. Historical
+stored discovery identities remain association history so restarting cannot join
+previously separate families; they are not decode proof. Published identities and
+saved call metadata require checked content: either the discovery’s persisted
+verification flag or a retained checked decode proving its current protocol and
+identity, including co-channel observations. Observation evidence sets the flag
+so verification survives retention. A verified merge survivor adopts another record’s
+identity only when that record has checked content for its identity. Merges preserve checked metadata and discard
+unchecked call metadata and encryption flags before transferring provenance; identity, search and
+encryption filters match the published values. Stored discoveries retain an internal
+`contentVerified` flag for checked evidence whose observation was never retained or
+has since been trimmed; this flag alone grants no decoded/proven observation proof.
+Live evidence and restored evidence use the same normalization, so new snapshots
+and journal replay reproduce the live store exactly. Replay uses the
+original source epoch's tuner centre retained by the scanner, rather than the
+narrow capture's channel centre. The capture index stores source and epoch but
+not tuner centre; if that epoch's centre is no longer known (including bounded
+history eviction), the DC guard conservatively requires checked voice LC.

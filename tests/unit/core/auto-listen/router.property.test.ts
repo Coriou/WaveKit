@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events"
 import type * as http from "node:http"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
+import { LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS } from "@wavekit/api-types"
 import type { LiveAudioAutoRouteLevel } from "@wavekit/api-types"
 import { AUTO_ROUTE_STREAM } from "../../../../src/core/auto-listen/contract.js"
 import type {
@@ -467,6 +468,68 @@ const oversArb = fc.array(
 	{ minLength: 1, maxLength: 4 },
 )
 
+/**
+ * Drops that are not a 4.5 preemption: each drop must be analog's, made in the block that
+ * switched to digital, after the digital source's oldest queued sample waited
+ * PREEMPT_MAX_MS, and start at an audible sample (analog still holds audio, so it has not
+ * released; a silent head is discarded, never counted).
+ */
+function badDrops(sim: Sim, flags: number[]): number {
+	let bad = 0
+	sim.traces.forEach((t, i) => {
+		if (t.kind !== "drop") return
+		const oldest = oldestAt(sim, "dmr", i)
+		const switched = sim.events.some(
+			(e, k) =>
+				e.active === "digital" &&
+				sim.eventTimes[k] === t.at &&
+				(sim.eventTraceIndex[k] ?? -1) > i,
+		)
+		const ok =
+			t.source === "analog" &&
+			switched &&
+			oldest !== null &&
+			t.at - oldest >= LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS &&
+			(flags[t.from] ?? 0) !== 0
+		if (!ok) bad++
+	})
+	return bad
+}
+
+/** Property 4, 5 and 7 checks for one run of sequential overs. */
+function checkOvers(
+	overs: Over[],
+	rate: number,
+	delay: number,
+	seed: number,
+): Sim {
+	const sim = runOvers(overs, rate, delay, seed)
+	const aref = sim.analogRef()
+	// Audio is lost only by a 4.5 preemption (analog still audible after digital waited the
+	// bound); everything else audible or admitted is played.
+	expect(badDrops(sim, aref.flags)).toBe(0)
+	expect(dropTotal(sim)).toBe(sim.router.droppedSamples)
+	const aread = sim.positions("analog", ["read", "drop"])
+	expect(missing(aref, aread)).toBe(0)
+	expect(discardsSilent(sim, "analog", aref.flags)).toBe(0)
+	expect(readsIncreasing(sim, "analog")).toBe(true)
+	sim.expectReadsMatch("analog", aref)
+	const vref = sim.voiceRef("dmr")
+	const vread = sim.positions("dmr", ["read"])
+	expect(vread.size).toBe(vref.samples.length)
+	expect(sim.of("dmr", "discard")).toHaveLength(0)
+	expect(readsIncreasing(sim, "dmr")).toBe(true)
+	sim.expectReadsMatch("dmr", vref)
+	// One source per block: nothing is mixed.
+	const perBlock = new Map<number, string>()
+	for (const r of sim.traces.filter(x => x.kind === "read")) {
+		const seen = perBlock.get(r.block)
+		expect(seen === undefined || seen === r.source).toBe(true)
+		perBlock.set(r.block, r.source)
+	}
+	return sim
+}
+
 describe("AutoListenRouter properties", { timeout: 120_000 }, () => {
 	// Feature: auto-listen-route, Property 3: Bounded pacing
 	// Validates: Requirements 2.6, 2.7
@@ -542,32 +605,57 @@ describe("AutoListenRouter properties", { timeout: 120_000 }, () => {
 				fc.integer({ min: 0, max: 45 }),
 				fc.integer(),
 				(overs, rate, delay, seed) => {
-					const sim = runOvers(overs, rate, delay, seed)
-					expect(sim.router.droppedSamples).toBe(0)
-					expect(dropTotal(sim)).toBe(0)
-					const aref = sim.analogRef()
-					const aread = sim.positions("analog", ["read"])
-					expect(missing(aref, aread)).toBe(0)
-					expect(discardsSilent(sim, "analog", aref.flags)).toBe(0)
-					expect(readsIncreasing(sim, "analog")).toBe(true)
-					sim.expectReadsMatch("analog", aref)
-					const vref = sim.voiceRef("dmr")
-					const vread = sim.positions("dmr", ["read"])
-					expect(vread.size).toBe(vref.samples.length)
-					expect(sim.of("dmr", "discard")).toHaveLength(0)
-					expect(readsIncreasing(sim, "dmr")).toBe(true)
-					sim.expectReadsMatch("dmr", vref)
-					// One source per block: nothing is mixed.
-					const perBlock = new Map<number, string>()
-					for (const r of sim.traces.filter(x => x.kind === "read")) {
-						const seen = perBlock.get(r.block)
-						expect(seen === undefined || seen === r.source).toBe(true)
-						perBlock.set(r.block, r.source)
-					}
+					checkOvers(overs, rate, delay, seed)
 				},
 			),
 			{ numRuns: RUNS },
 		)
+	})
+
+	// Digital waits from 860 ms; analog's second over ends 300 ms before the 2 360 ms bound, so
+	// the preemption finds only silence queued: it must count no drop.
+	it("a preemption after analog has gone quiet drops and counts nothing", () => {
+		for (const [tail, rate] of [
+			[14, 25_000],
+			[16, 25_000],
+			[19, 25_600],
+			[15, 48_000],
+		] as const) {
+			const sim = checkOvers(
+				[
+					{ kind: "analog", steps: 43, gap: 0 },
+					{ kind: "digital", steps: 5, gap: 0 },
+					{ kind: "analog", steps: tail, gap: 0 },
+				],
+				rate,
+				42,
+				0,
+			)
+			expect(sim.router.droppedSamples).toBe(0)
+			expect(sim.events.map(e => e.active)).toEqual([
+				"analog",
+				"digital",
+				"none",
+			])
+		}
+	})
+
+	// Same, but analog is still audible at the bound: 4.5 drops its queued audio, counted.
+	it("a preemption of still audible analog drops and counts its queued audio", () => {
+		const sim = checkOvers(
+			[
+				{ kind: "analog", steps: 43, gap: 0 },
+				{ kind: "digital", steps: 5, gap: 0 },
+				{ kind: "analog", steps: 30, gap: 0 },
+			],
+			48_000,
+			42,
+			0,
+		)
+		expect(sim.router.droppedSamples).toBeGreaterThan(0)
+		expect(
+			sim.eventTimes[sim.events.findIndex(e => e.active === "digital")],
+		).toBe(860 + LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS)
 	})
 
 	// Feature: auto-listen-route, Property 6: Priority and bound

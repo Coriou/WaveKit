@@ -1,3 +1,4 @@
+import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 import type {
 	ProofAnalogInput,
 	ProofInput,
@@ -191,6 +192,8 @@ export interface ProofFacts {
 	readonly encrypted: boolean
 	readonly identity?: Identity
 	readonly talkgroup?: string
+	readonly unverifiedCc?: number
+	readonly tgSrcVerified?: boolean
 	readonly tone?: ProofAnalogInput["tone"]
 	readonly voice?: boolean
 }
@@ -202,6 +205,8 @@ interface AcceptedDecode {
 	readonly encrypted: boolean
 	readonly identity?: Identity
 	readonly talkgroup?: string
+	readonly unverifiedCc?: number
+	readonly tgSrcVerified?: boolean
 }
 
 function acceptDecode(item: unknown): AcceptedDecode | undefined {
@@ -212,6 +217,9 @@ function acceptDecode(item: unknown): AcceptedDecode | undefined {
 	const encrypted = prop(item, "encrypted")
 	const identity = prop(item, "identity")
 	const talkgroup = prop(item, "talkgroup")
+	const unverifiedCc = prop(item, "unverifiedCc")
+	const tgSrcVerified =
+		protocol === "dmr" && prop(item, "tgSrcVerified") === true
 	if (!isProtocol(protocol) || protocol === "unknown") return undefined
 	if (typeof transport !== "string" || !TRANSPORTS.has(transport))
 		return undefined
@@ -230,6 +238,14 @@ function acceptDecode(item: unknown): AcceptedDecode | undefined {
 	}
 	return {
 		protocol,
+		...(tgSrcVerified ? { tgSrcVerified: true } : {}),
+		...(protocol === "dmr" &&
+		typeof unverifiedCc === "number" &&
+		Number.isInteger(unverifiedCc) &&
+		unverifiedCc >= 0 &&
+		unverifiedCc <= 15
+			? { unverifiedCc }
+			: {}),
 		transport: transport as ScannerProofTransport,
 		at,
 		encrypted,
@@ -505,9 +521,27 @@ function decide(e: ProofInput): Decision {
 	}
 	// Below tone and voice: a stray identity-less decode must not unprove an
 	// analog proof on the same observation.
-	const activity = newest(input.decodes)
+	// Checked TG/SRC outranks sync-only hints; recency breaks ties within
+	// the checked class so later IDLE bursts cannot erase voice provenance.
+	const activity =
+		newest(input.decodes.filter(d => d.tgSrcVerified)) ?? newest(input.decodes)
 	if (activity !== undefined)
-		return { label: named(activity.protocol, "activity"), facts: null }
+		return {
+			label: named(activity.protocol, "activity"),
+			facts: isDsdFmeProtocol(activity.protocol)
+				? {
+						kind: "digital-undecoded",
+						...(activity.tgSrcVerified ? { tgSrcVerified: true } : {}),
+						protocol: activity.protocol,
+						...(activity.unverifiedCc !== undefined
+							? { unverifiedCc: activity.unverifiedCc }
+							: {}),
+						transport: activity.transport,
+						at: activity.at,
+						encrypted: false,
+					}
+				: null,
+		}
 	if (input.digitalPlanComplete) {
 		const data = newest(input.analog.filter(a => a.outcome === "data-like"))
 		if (data !== undefined)

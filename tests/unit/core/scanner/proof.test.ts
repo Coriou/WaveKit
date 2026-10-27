@@ -559,13 +559,16 @@ describe("deriveProof", () => {
 		expect(replay?.summary).toBe("DMR decoded (CC1, encrypted)")
 	})
 
-	it("returns null for an identity-less or encrypted decode that the label does not call decoded", () => {
+	it("keeps identity-less digital voice evidence weak and undecoded", () => {
 		const input = proof({
 			decodes: [decode("dmr", AT, { encrypted: true, talkgroup: "9" })],
 		})
 		expect(labelFromEvidence(input).confidence).not.toBe("decoded")
-		expect(deriveProof(input)).toBeNull()
-		expect(deriveProof(proof({ decodes: [decode("dmr", AT)] }))).toBeNull()
+		expect(deriveProof(input)?.kind).toBe("digital-undecoded")
+		expect(evidenceLevelOf({ proof: deriveProof(input)! })).toBe("weak")
+		expect(deriveProof(proof({ decodes: [decode("dmr", AT)] }))?.kind).toBe(
+			"digital-undecoded",
+		)
 	})
 
 	it("follows the label for tone, voice, digital and carrier, and skips unknown trust for analog audio", () => {
@@ -718,6 +721,28 @@ describe("deriveProof", () => {
 })
 
 describe("identity-less decode rank", () => {
+	it("keeps checked TG/SRC above later sync hints and prefers newer checked evidence", () => {
+		const checked: ProofDecodeInput = {
+			...decode("dmr", AT + 93.7),
+			tgSrcVerified: true,
+		}
+		const hint = { ...decode("dmr", AT + 131.9), unverifiedCc: 5 }
+		const input = proof({ decodes: [checked, hint] })
+		expect(deriveProof(input)).toMatchObject({
+			tgSrcVerified: true,
+			at: new Date(checked.at).toISOString(),
+			summary: "DMR voice, TG/SRC verified, CC unknown",
+		})
+		const newer = { ...checked, at: AT + 193.7, transport: "replay" as const }
+		expect(
+			deriveProof(proof({ decodes: [checked, newer, hint] })),
+		).toMatchObject({
+			tgSrcVerified: true,
+			at: new Date(newer.at).toISOString(),
+			transport: "replay",
+		})
+	})
+
 	it("ranks an identity-less decode below an analog tone and voice proof", () => {
 		const stray = decode("dmr", AT + 5, { talkgroup: "9" })
 		const toned = proof({
@@ -749,7 +774,8 @@ describe("identity-less decode rank", () => {
 			family: "digital-voice",
 			confidence: "activity",
 		})
-		expect(deriveProof(input)).toBeNull()
+		expect(deriveProof(input)?.kind).toBe("digital-undecoded")
+		expect(evidenceLevelOf({ proof: deriveProof(input)! })).toBe("weak")
 	})
 
 	it("an identity decode still beats a tone", () => {

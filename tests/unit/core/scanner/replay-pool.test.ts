@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 import { PassThrough } from "node:stream"
 import { describe, expect, it, vi } from "vitest"
 import {
@@ -9,7 +10,6 @@ import {
 import { createReplayTransport } from "../../../../src/core/scanner/probes/replay-transport.js"
 import {
 	flushAsync,
-	linkLine,
 	poolHarness,
 	probeRequest,
 } from "../../../mocks/scanner/probe-fakes.js"
@@ -198,8 +198,8 @@ describe("probe pool replay requests", () => {
 			h.pool.request(h.req({ modes: [dmr] }))
 			await flushAsync()
 			const [id, decoder] = [...h.decoders.created.entries()][0]!
-			h.decoders.emitLink(id, linkLine(1, h.clock.now))
-			h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 			await flushAsync()
 			const beforeEnd = evidence.length
 			if (fail) stream.destroy(new Error("native replay failed"))
@@ -241,7 +241,7 @@ describe("probe pool replay requests", () => {
 			await flushAsync()
 			const [id, decoder] = [...h.decoders.created.entries()][0]!
 			for (let i = 0; i < lines; i++)
-				h.decoders.emitLink(id, linkLine(1, h.clock.now + i))
+				h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + i))
 			await flushAsync()
 			stream.end()
 			await flushAsync()
