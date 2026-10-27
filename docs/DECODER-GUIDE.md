@@ -650,3 +650,23 @@ in both admission and the decoder manager. After late-drop shedding, retry histo
 resets only after a clean run of at least 30 minutes since readmission. A shed or
 probation failure before then doubles the delay from 5 to 10 to 20 minutes, capped
 at 30 minutes. After that sustained clean run, the next failure starts at 5 minutes.
+
+### readsb aircraft evidence
+
+The default `outputFormat: "sbs"` selects `--net-sbs-port`; the adapter maps each
+`MSG` line to an aircraft record with a fresh `lastSeen` and `messageCount: 1`.
+That count describes one line, not readsb's cumulative aircraft state. JSON output
+sets `readsbFormat: "json"` and maps `messages` to the cumulative count. Scanner
+confirmation requires advancing records of the same ICAO 2 s to 5 min apart;
+JSON also requires a count greater than one and count advancement. Identical
+snapshots and one record never identify a signal. Beast keeps local CRC/address
+validation and distinct-frame confirmation without a minimum interval.
+
+SBS/JSON validation is delegated to readsb; their records do not expose whether a
+CRC was corrected or the address was independently confirmed. The adapter proves
+only the mapping semantics above. The image pins readsb at
+`b499ecbd18dc4a2ec6098c31de31508017fa6190` in `Dockerfile`; no upstream source is
+vendored here to independently establish that revision's CRC/address policy.
+See [scanner ambient identification](SCANNER.md#identification-from-running-decoders) for tuning
+trust: readsb's protocol declaration supplies 1090 MHz when raw placements have
+no explicit target, but only observed tuning that covers it establishes trust.

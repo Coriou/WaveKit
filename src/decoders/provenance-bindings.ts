@@ -3,7 +3,7 @@ import type {
 	ActivityProvenanceLookup,
 } from "../core/activity/types.js"
 import type { TunerControlMode, TunerState } from "@wavekit/api-types"
-import type { DecoderStatus } from "./types.js"
+import type { DecoderBandDeclaration, DecoderStatus } from "./types.js"
 
 type ProvenanceDecoderEvent =
 	| "decoder:created"
@@ -18,7 +18,11 @@ export interface ProvenanceDecoderSource {
 	getStatus(
 		id: string,
 	): Pick<DecoderStatus, "sourceId" | "targetFrequenciesHz"> | undefined
-	getDecoder(id: string): { caps: { input: string } } | undefined
+	getDecoder(
+		id: string,
+	):
+		| { caps: { input: string }; getBandDeclaration?(): DecoderBandDeclaration }
+		| undefined
 }
 
 /**
@@ -187,9 +191,23 @@ export function createDecoderProvenanceIndex(
 			entries.delete(id)
 			return
 		}
-		const external = decoders.getDecoder(id)?.caps.input === "external"
+		const decoder = decoders.getDecoder(id)
+		const external = decoder?.caps.input === "external"
 		const configured = external ? null : status.sourceId
-		const targets = Object.freeze([...(status.targetFrequenciesHz ?? [])])
+		// Raw readsb placements have no channel and status deliberately omits built-in
+		// defaults. Its protocol declaration supplies 1090 MHz; this is only a target,
+		// never tuning proof. trustOf still requires observed source centre/rate.
+		const declaration = decoder?.getBandDeclaration?.()
+		const intrinsic =
+			!external &&
+			!declaration?.ownSource &&
+			!declaration?.ownTuning &&
+			declaration?.intrinsic?.basis === "protocol"
+				? declaration?.intrinsic?.targetsHz
+				: undefined
+		const targets = Object.freeze([
+			...(status.targetFrequenciesHz ?? intrinsic ?? []),
+		])
 		const sourceId =
 			configured === undefined ? (defaultSourceId() ?? null) : configured
 		let bindCentre: number | undefined
@@ -233,7 +251,11 @@ export function createDecoderProvenanceIndex(
 		)
 			return "unverified"
 		for (const target of entry.targets)
-			if (Math.abs(target - snapshot.frequency) > snapshot.reach)
+			if (
+				!Number.isFinite(target) ||
+				target <= 0 ||
+				Math.abs(target - snapshot.frequency) > snapshot.reach
+			)
 				return "unverified"
 		return snapshot.relay ? "relay" : "commanded"
 	}

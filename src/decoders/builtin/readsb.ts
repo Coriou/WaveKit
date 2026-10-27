@@ -117,15 +117,17 @@ export interface AircraftData {
 	onGround?: boolean | undefined
 	/** Timestamp of last message */
 	lastSeen: Date
-	/** Number of messages received */
+	/** Messages in this SBS line (1), or cumulative messages in a JSON snapshot. */
 	messageCount: number
+	/** Distinguishes cumulative JSON snapshots from per-message SBS records. */
+	readsbFormat?: "sbs" | "json"
 	/**
 	 * Beast frames only: the Mode S downlink format, whether `icao` is a CRC-proven ICAO address,
 	 * and the raw frame (lowercase hex). Only DF11, DF17 and DF18 carry the address in clear with
 	 * a CRC-24 parity that must leave remainder 0; every other format XORs the address into its
 	 * parity, so its bytes 1-3 are not an address. A DF18 is an ICAO address only with control
 	 * field CF = 0 (CF 1 is a non-ICAO address, 2 and above TIS-B/ADS-R relays and other
-	 * addressing). Absent on SBS and JSON lines (readsb emits those from CRC-checked messages).
+	 * addressing). Absent on SBS/JSON lines, which delegate message validation to readsb.
 	 */
 	modeS?: { df: number; crcOk: boolean; frame: string } | undefined
 }
@@ -724,6 +726,7 @@ export function parseSbsLine(line: string): AircraftData | null {
 		onGround,
 		lastSeen: new Date(),
 		messageCount: 1,
+		readsbFormat: "sbs",
 	}
 }
 
@@ -794,6 +797,7 @@ export function parseJsonAircraft(
 		onGround: json["ground"] as boolean | undefined,
 		lastSeen: new Date(),
 		messageCount: (json["messages"] as number) ?? 1,
+		readsbFormat: "json",
 	}
 }
 

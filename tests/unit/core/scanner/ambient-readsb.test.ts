@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 import {
 	modeSCrcRemainder,
 	parseBeastMessage,
+	ReadsbDecoder,
 } from "../../../../src/decoders/builtin/readsb.js"
 import { classifySpectral } from "../../../../src/core/scanner/classify/classifier.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
@@ -25,11 +26,13 @@ import {
 } from "../../../../src/core/scanner/probes/confirm/readsb.js"
 import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
+import { createDecoderProvenanceIndex } from "../../../../src/decoders/provenance-bindings.js"
+import { ambientTrustFromBinding } from "../../../../src/core/scanner/probes/ambient-trust.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
-/** A public textbook DF17 frame (airborne identification), ICAO 4840D6, CRC-24 remainder 0. */
-const DF17 = Buffer.from("8D4840D6202CC371C32CE0576098", "hex")
+/** Synthetic DF17 with generated parity. */
+const DF17 = frameOf(0x8d, 0xabc123, [0, 0, 0, 0, 0, 0, 0])
 
 /** A long Mode S frame with its CRC-24 parity: first byte, 24-bit address, 7 payload bytes. */
 function frameOf(first: number, address: number, payload: number[]): Buffer {
@@ -53,19 +56,19 @@ function frameOf(first: number, address: number, payload: number[]): Buffer {
 /** Another DF17 message (different payload) from the same address as DF17. */
 const DF17_B = frameOf(
 	0x8d,
-	0x4840d6,
+	0xabc123,
 	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
 )
 /** DF18 with CF = 1: a non-ICAO address, CRC-valid. */
 const DF18_CF1 = frameOf(
 	0x91,
-	0x4840d6,
+	0xabc123,
 	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
 )
 /** DF18 with CF = 0: an ICAO address. */
 const DF18_CF0 = frameOf(
 	0x90,
-	0x4840d6,
+	0xabc123,
 	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
 )
 
@@ -126,7 +129,7 @@ describe("Mode S CRC on Beast frames", () => {
 	it("a DF17 frame with its parity proves its address; one flipped bit does not", () => {
 		expect(modeSCrcRemainder(DF17)).toBe(0)
 		expect(beast(DF17)).toMatchObject({
-			icao: "4840D6",
+			icao: "ABC123",
 			modeS: { df: 17, crcOk: true },
 		})
 		const bad = Buffer.from(DF17)
@@ -143,7 +146,7 @@ describe("Mode S CRC on Beast frames", () => {
 	})
 
 	it("a format whose parity hides the address (DF4) and a wrong length are never proven", () => {
-		const df4 = Buffer.from("20001838CA3804", "hex")
+		const df4 = Buffer.from([0x20, 0xab, 0xc1, 0x23, 0, 0, 0])
 		expect(beast(df4, 0x32)?.modeS).toMatchObject({ df: 4, crcOk: false })
 		// a long frame announced as short
 		expect(beast(DF17, 0x32)?.modeS?.crcOk).toBe(false)
@@ -197,7 +200,7 @@ describe("readsb ambient interpreter", () => {
 		const r = rig()
 		r.decoders.out(aircraft(beast(DF17)))
 		expect(r.got).toEqual([])
-		r.decoders.out(aircraft({ icao: "4840D6", messageCount: 1 }))
+		r.decoders.out(aircraft(beast(DF17_B)))
 		expect(r.got).toHaveLength(1)
 		expect(r.got[0]).toMatchObject({
 			decoderId: "adsb",
@@ -205,7 +208,7 @@ describe("readsb ambient interpreter", () => {
 			hz: ADSB_HZ,
 			ev: {
 				protocol: "adsb",
-				identity: { kind: "icao", value: "4840d6" },
+				identity: { kind: "icao", value: "abc123" },
 				crcClean: true,
 				origin: "ambient",
 			},
@@ -219,7 +222,7 @@ describe("readsb ambient interpreter", () => {
 		r.decoders.out(aircraft(beast(DF17)))
 		expect(r.got).toEqual([])
 		r.decoders.out(aircraft(beast(DF17_B)))
-		expect(r.got.map(e => e.ev.identity?.value)).toEqual(["4840d6"])
+		expect(r.got.map(e => e.ev.identity?.value)).toEqual(["abc123"])
 	})
 
 	it("remembers the last frame of at most ADSB_FRAMES_MAX addresses, the oldest evicted", () => {
@@ -246,7 +249,7 @@ describe("readsb ambient interpreter", () => {
 	it("uses the placement's channel when the output carries one", () => {
 		const parsed = parseReadsb(
 			aircraft(
-				{ icao: "4840d6" },
+				{ icao: "abc123", messageCount: 1, lastSeen: new Date(1000) },
 				{ provenanceBinding: { sourceId: "rtl", channelHz: ADSB_HZ + 200 } },
 			),
 			{ targetsHz: [ADSB_HZ] },
@@ -260,20 +263,20 @@ describe("readsb ambient interpreter", () => {
 		bad[13]! ^= 0x80
 		for (const data of [
 			beast(bad),
-			beast(Buffer.from("20001838CA3804", "hex"), 0x32),
-			{ icao: "~4840d6" },
+			beast(Buffer.from([0x20, 0xab, 0xc1, 0x23, 0, 0, 0]), 0x32),
+			{ icao: "~abc123" },
 			{ icao: "4840D" },
-			{ icao: "4840D6", modeS: { df: 17, crcOk: "yes" } },
-			{ icao: "4840D6", modeS: null },
-			{ icao: 0x4840d6 },
+			{ icao: "ABC123", modeS: { df: 17, crcOk: "yes" } },
+			{ icao: "ABC123", modeS: null },
+			{ icao: 0xabc123 },
 			null,
-			"4840D6",
+			"ABC123",
 			[],
 		])
 			r.decoders.out(aircraft(data))
 		r.decoders.out({
 			type: "signal",
-			data: { icao: "4840D6" },
+			data: { icao: "ABC123" },
 			timestamp: new Date(1_000),
 		})
 		expect(r.got).toEqual([])
@@ -284,7 +287,7 @@ describe("readsb ambient interpreter", () => {
 
 	// Feature: adsb-ambient, Property 1: only the second CRC-proven message of an ICAO names it
 	it("property: evidence only for an ICAO with at least two proven messages, from its second on", () => {
-		const icaos = ["4840d6", "abc123", "00ff00"]
+		const icaos = ["abc123", "abc123", "00ff00"]
 		const msg = fc.oneof(
 			fc.record({
 				kind: fc.constant("good" as const),
@@ -317,7 +320,13 @@ describe("readsb ambient interpreter", () => {
 						const n = (seen.get(m.icao) ?? 0) + 1
 						seen.set(m.icao, n)
 						if (n >= 2) expected++
-						r.decoders.out(aircraft({ icao: m.icao.toUpperCase() }))
+						r.decoders.out(
+							aircraft(
+								beast(
+									frameOf(0x8d, parseInt(m.icao, 16), [n, 0, 0, 0, 0, 0, 0]),
+								),
+							),
+						)
 					} else r.decoders.out(aircraft(m.data))
 				}
 				expect(r.got).toHaveLength(expected)
@@ -334,38 +343,74 @@ describe("readsb ambient interpreter", () => {
 
 describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 	/** The production wiring: the service's own AmbientEvidence with its shared confirmation. */
-	async function serviceRig() {
+	async function serviceRig(
+		mode:
+			| "trusted"
+			| "unknown"
+			| "external"
+			| "outside"
+			| "declared" = "trusted",
+	) {
+		let provenance: ReturnType<typeof createDecoderProvenanceIndex> | undefined
 		const h = serviceHarness({
+			centreHz: ADSB_HZ,
 			patch: s => {
 				s.passive.enabled = false
 			},
 			decoderConfigs: [
 				{
-					id: "adsb",
+					id: "readsb",
 					type: "readsb",
 					sourceId: "rtl",
 					options: {},
 				} as unknown as DecoderConfig,
 			],
-			ambientTrust: () => "commanded",
+			ambientTrust: (id, hz, sourceId, placement) =>
+				ambientTrustFromBinding(
+					provenance?.lookup(id, placement),
+					hz,
+					sourceId,
+				),
 		})
 		const status = {
-			id: "adsb",
+			id: "readsb",
 			type: "readsb",
 			owner: "config",
 			running: true,
 			health: "running",
 			suspended: false,
 		}
+		h.tuner.states.get("rtl")!.sampleRate = 2_400_000
+		h.sources.setCaps("rtl", { sampleRate: 2_400_000 })
+		const decoder = new ReadsbDecoder(
+			{
+				id: "readsb",
+				type: "readsb",
+				enabled: true,
+				options: mode === "external" ? { rtlTcpHost: "synthetic.invalid" } : {},
+			} as DecoderConfig,
+			pino({ level: "silent" }),
+		)
 		const decoders = h.decoders as unknown as {
+			getAllDecoders: () => { id: string }[]
 			getAllStatus: () => unknown[]
 			getStatus: (id: string) => unknown
 			getDecoder: (id: string) => unknown
 		}
 		decoders.getAllStatus = () => [status]
-		decoders.getStatus = id => (id === "adsb" ? { ...status } : undefined)
-		decoders.getDecoder = id =>
-			id === "adsb" ? { caps: { input: "iq" } } : undefined
+		decoders.getStatus = id => (id === "readsb" ? { ...status } : undefined)
+		decoders.getDecoder = id => (id === "readsb" ? decoder : undefined)
+		decoders.getAllDecoders = () => [{ id: "readsb" }]
+		if (mode === "unknown") h.tuner.known.get("rtl")!.delete("frequency")
+		if (mode === "declared")
+			h.tuner.declared.set("rtl", new Set(["frequency", "sampleRate"]))
+		if (mode === "outside")
+			h.tuner.states.get("rtl")!.frequency = ADSB_HZ + 2_000_000
+		provenance = createDecoderProvenanceIndex(
+			h.decoders as never,
+			() => "rtl",
+			h.tuner,
+		)
 		await h.service.start()
 		const job = await h.service.createJob({
 			sourceId: "rtl",
@@ -409,17 +454,74 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		/** One readsb output `dtMs` after the previous, through the manager's output event. */
 		const send = (data: unknown, dtMs = 500): void => {
 			clock += dtMs
-			h.decoders.emitOutput("adsb", {
+			const output = {
+				decoder: "readsb",
 				type: "aircraft",
 				data,
 				timestamp: new Date(clock),
-			})
+				provenanceBinding: { sourceId: "rtl", channelHz: null },
+			}
+			h.decoders.emitOutput("readsb", output)
 		}
-		return { h, internals, send }
+		return { h, internals, send, provenance }
 	}
 
+	it.each(["trusted", "unknown", "external", "outside", "declared"] as const)(
+		"advancing SBS-shaped aircraft records through production provenance: %s",
+		async mode => {
+			const { h, internals, send, provenance } = await serviceRig(mode)
+			try {
+				send({
+					icao: "abc123",
+					altitude: 12000,
+					lastSeen: new Date(1000).toISOString(),
+					messageCount: 1,
+				})
+				expect(internals.store.snapshot().discoveries).toEqual([])
+				send(
+					{
+						icao: "abc123",
+						onGround: false,
+						lastSeen: new Date(3000).toISOString(),
+						messageCount: 1,
+					},
+					2000,
+				)
+				const discoveries = internals.store.snapshot().discoveries
+				if (mode === "trusted") {
+					expect(discoveries).toHaveLength(1)
+					expect(internals.store.get(discoveries[0]!.id)).toMatchObject({
+						protocol: "adsb",
+						confidence: "decoded",
+					})
+				} else expect(discoveries).toEqual([])
+			} finally {
+				await h.service.stop()
+				provenance.dispose()
+			}
+		},
+	)
+
+	it("identical state records never confirm even when reception timestamps advance", async () => {
+		const { h, internals, send, provenance } = await serviceRig()
+		try {
+			const data = {
+				icao: "abc123",
+				altitude: 12000,
+				lastSeen: new Date(1000).toISOString(),
+				messageCount: 1,
+			}
+			send(data)
+			send(data, 2000)
+			expect(internals.store.snapshot().discoveries).toEqual([])
+		} finally {
+			await h.service.stop()
+			provenance.dispose()
+		}
+	})
+
 	it("two CRC-valid messages 500 ms apart identify; single, bad and repeated frames leave no record", async () => {
-		const { h, internals, send } = await serviceRig()
+		const { h, internals, send, provenance } = await serviceRig()
 		try {
 			const bad = Buffer.from(DF17)
 			bad[2]! ^= 0x10
@@ -439,6 +541,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			expect(d?.confidence).toBe("decoded")
 		} finally {
 			await h.service.stop()
+			provenance.dispose()
 		}
 	})
 })

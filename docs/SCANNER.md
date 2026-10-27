@@ -521,7 +521,8 @@ Malformed or out-of-channel frequencies prove nothing.
 
 An ambient identity needs two checksum-valid decodes at least two seconds apart
 and no more than five minutes apart (ADS-B is the exception: two CRC-valid Mode S
-frames confirm with no minimum spacing). When the DTO includes content, their logical
+frames confirm with no minimum spacing; aircraft records need advancing message
+evidence 2 s to 5 min apart). When the DTO includes content, their logical
 message identities must also differ. Reception level, noise, RSSI/SNR, errors,
 frequency, channel and timestamps never create a new message. ACARS uses aircraft
 registration/flight plus the three-character message number (acarsdec's trailing
@@ -538,7 +539,22 @@ DSD uses protocol and
 link fields (colour/access code, talkgroup, source, slot or callsign). Repeated
 identical content does not confirm. Address-only APRS output from multimon and
 other DTOs without content use spacing alone. ADS-B retains
-its CRC/address checks and raw-frame duplicate rejection. Accepted ambient
+its local CRC/address checks and raw-frame duplicate rejection for Beast output.
+For SBS output, the adapter emits one aircraft record per `MSG` line: `messageCount: 1`
+is a per-line count, not a single-message aircraft snapshot. Two records of the same
+six-digit ICAO must have increasing `lastSeen` or message count, 2 s to 5 min apart.
+Repeated identical records never confirm. JSON records carry `readsbFormat: "json"`;
+they need a cumulative count greater than one and a later increasing count, with the
+same spacing. State is bounded to 4096 addresses per decoder/source epoch.
+SBS/JSON inherit readsb's message validation policy; WaveKit cannot verify an
+uncorrected CRC or address confirmation from these records. The local adapter
+sources (`parseSbsLine` and `parseJsonAircraft` in `src/decoders/builtin/readsb.ts`)
+establish the record/count semantics, not upstream CRC correction guarantees.
+Only configured local decoders with trusted receiver tuning count. For raw readsb
+placements without a channel or configured frequencies, its protocol declaration
+supplies the 1090 MHz target; the provenance index still requires an observed source
+centre/rate covering that target (within 0.45 × sample rate), unchanged since decoder
+start. Unknown or merely configured tuning and external-input decoders fail closed. Accepted ambient
 identities reset known-protocol misses and record successful trial memory;
 untrusted evidence does neither. Edge tracks use these same strict checks.
 

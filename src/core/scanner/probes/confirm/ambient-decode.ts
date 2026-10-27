@@ -28,6 +28,8 @@ export interface AmbientParsed {
 	crcClean: boolean
 	/** The raw frame when the decoder gave one (an exact repeat is not a new message). */
 	frame?: string
+	/** readsb state progress; SBS counts are per-line, JSON counts cumulative. */
+	readsbState?: { messageCount: number; lastSeen: number; snapshot: boolean }
 	identity: { key: string; kind: Identity["kind"]; value: string | undefined }
 }
 
