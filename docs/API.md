@@ -7104,10 +7104,15 @@ See the [instrumentation record](engineering/LINK-BURST-2026-10-INSTRUMENTATION.
 
 Scanner discovery responses add optional `anchor: "decode"` and `aircraftCount`
 fields. A decode anchor identifies a nominal emission channel from confirmed,
-verified ambient decodes when spectrum placement finds no qualifying observation.
+verified ambient decodes. All accepted evidence for a decode-anchored protocol
+refreshes its anchor, including when a spectrum observation covers the channel.
 Currently only ADS-B at 1090 MHz is eligible. Its `proof` has kind `decoded` and
-transport `ambient`; spectrum bandwidth, airtime and signal statistics are unavailable
-and represented by zero placeholders. `aircraftCount` is the number of distinct
+transport `ambient`. When `anchor` is `"decode"`, `measuredOffsetHz`, `bandwidthHz`,
+`airtimeMs`, all `signal` statistics, and observation spectrum fields (`obwHz`,
+`peakDbfs`, `meanDbfs`, `snrDb`, `floorDbfs`, `thresholdDb`, `dutyCycle`) are required
+numeric zero placeholders, not measurements; `obwMethod` is `"on-bins"`.
+Clients must use the anchor flag to hide these unavailable measurements. `aircraftCount` is the number of distinct
 confirmed ICAOs in the inclusive preceding 60 seconds, capped at 4096, and ages on
-reads. Decode anchors are separate from nearby spectrum carriers and use normal
+reads and through `scanner:discovery` updates at aircraft expiry (confirmation +
+60,001 ms for the inclusive window). Decode anchors are separate from nearby spectrum carriers and use normal
 scanner retention. See [decode-anchored ADS-B](SCANNER.md#decode-anchored-ads-b).

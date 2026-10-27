@@ -111,7 +111,7 @@ function ambient(store: DiscoveryStore, n = 20): string {
 	return id
 }
 
-const centreOf = (d: Discovery): number => d.frequencyHz + d.measuredOffsetHz
+const centreOf = (d: Discovery): number => d.frequencyHz + d.measuredOffsetHz!
 
 function expectReplayEqual(
 	store: DiscoveryStore,
@@ -131,7 +131,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 	it("strong transmission 15 kHz away gets its own record; ambient best and class stay", () => {
 		const { store, entries } = newStore()
 		const amb = ambient(store)
-		const before = structuredClone(store.get(amb)?.signal.best)
+		const before = structuredClone(store.get(amb)?.signal!.best)
 		const r = store.ingest(
 			obs({
 				id: "strong",
@@ -147,8 +147,8 @@ describe("DQ 3: ambient misattach fixtures", () => {
 		expect(r.change).toBe("created")
 		expect(r.discoveryId).not.toBe(amb)
 		const a = store.get(amb)
-		expect(a?.signal.best).toEqual(before)
-		expect(a?.signal.best.peakDbfs).toBeLessThanOrEqual(-23)
+		expect(a?.signal!.best).toEqual(before)
+		expect(a?.signal!.best.peakDbfs).toBeLessThanOrEqual(-23)
 		expect(a?.class).toBe("carrier")
 		expectReplayEqual(store, entries)
 	})
@@ -156,7 +156,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 	it("strong transmission 564 Hz away: one new record holds both bursts, ambient untouched", () => {
 		const { store, entries } = newStore()
 		const amb = ambient(store)
-		const before = structuredClone(store.get(amb)?.signal.best)
+		const before = structuredClone(store.get(amb)?.signal!.best)
 		const first = store.ingest(
 			obs({
 				id: "tx1",
@@ -191,8 +191,8 @@ describe("DQ 3: ambient misattach fixtures", () => {
 		expect(store.discoveryIdOf("tx1")).toBe(strong)
 		expect(store.discoveryIdOf("tx2")).toBe(strong)
 		const a = store.get(amb)
-		expect(a?.signal.best).toEqual(before)
-		expect(a?.signal.best.peakDbfs).toBeLessThanOrEqual(-23)
+		expect(a?.signal!.best).toEqual(before)
+		expect(a?.signal!.best.peakDbfs).toBeLessThanOrEqual(-23)
 		expect(a?.class).toBe("carrier")
 		expect(a?.observationCount).toBe(20)
 		// Same key, refused settle: linked both ways instead of merged.
@@ -205,7 +205,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 	it("shared key: settle keeps an established strong record apart from the ambient", () => {
 		const { store, entries } = newStore()
 		const amb = ambient(store)
-		const before = structuredClone(store.get(amb)?.signal.best)
+		const before = structuredClone(store.get(amb)?.signal!.best)
 		const ambKey = store.get(amb)?.frequencyKey
 		// A strong record born 3 kHz up (another key), then walking onto the ambient's key.
 		const walk = [3_000, 3_000, 3_000, 1_500, 1_500, 1_500, 1_500, 600, 600]
@@ -239,7 +239,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 		// refresh re-keyed the strong record onto the ambient's key; settle ran on every add
 		expect(s?.frequencyKey).toBe(ambKey)
 		expect(store.snapshot().discoveries).toHaveLength(2)
-		expect(store.get(amb)?.signal.best).toEqual(before)
+		expect(store.get(amb)?.signal!.best).toEqual(before)
 		expect(store.get(amb)?.class).toBe("carrier")
 		expect(s?.coChannel).toEqual([amb])
 		expect(store.get(amb)?.coChannel).toEqual([strong])
@@ -272,7 +272,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 	it("an incompatible observation does not raise an established record's best", () => {
 		const { store } = newStore()
 		const amb = ambient(store, 5)
-		const before = structuredClone(store.get(amb)?.signal.best)
+		const before = structuredClone(store.get(amb)?.signal!.best)
 		// Compatible (same OBW class) and louder by 25 dB, but overload: no raise.
 		store.ingest(
 			obs({
@@ -286,7 +286,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 			}),
 		)
 		expect(store.discoveryIdOf("ov")).toBe(amb)
-		expect(store.get(amb)?.signal.best).toEqual(before)
+		expect(store.get(amb)?.signal!.best).toEqual(before)
 		// Compatible, not overload: raises.
 		store.ingest(
 			obs({
@@ -298,7 +298,7 @@ describe("DQ 3: ambient misattach fixtures", () => {
 				snrDb: 30,
 			}),
 		)
-		expect(store.get(amb)?.signal.best.snrDb).toBe(30)
+		expect(store.get(amb)?.signal!.best.snrDb).toBe(30)
 	})
 })
 
@@ -378,7 +378,7 @@ describe("review repros", () => {
 			obs({ id: "a", centreHz: F, at: T0, snrDb: 20 }),
 		).discoveryId
 		store.ingest(obs({ id: "b", centreHz: F, at: T0 + 2_000, snrDb: 40 }))
-		expect(store.get(id ?? "")?.signal.best.snrDb).toBe(40)
+		expect(store.get(id ?? "")?.signal!.best.snrDb).toBe(40)
 	})
 
 	it("a young record's best does not rise from an overload observation", () => {
@@ -390,7 +390,7 @@ describe("review repros", () => {
 			obs({ id: "b", centreHz: F, at: T0 + 2_000, snrDb: 40, overload: true }),
 		)
 		expect(store.discoveryIdOf("b")).toBe(id)
-		expect(store.get(id ?? "")?.signal.best.snrDb).toBe(20)
+		expect(store.get(id ?? "")?.signal!.best.snrDb).toBe(20)
 	})
 
 	it("recomputes and journals the majority class after a merge", () => {
@@ -557,7 +557,7 @@ describe("DQ 2.3: co-channel cap and pruning", () => {
 			d.family = "digital-voice"
 			d.confidence = "decoded"
 			d.frequencyHz = centre(i)
-			d.measuredOffsetHz = 0
+			d.measuredOffsetHz! = 0
 			d.frequencyKey = `g:${Math.round(centre(i) / 2_500) * 2_500}`
 			d.coChannel = ids.filter(x => x !== d.id)
 		})
@@ -678,7 +678,7 @@ function oracleSamples(snap: StoreSnapshot): Map<string, Sample[]> {
 		)
 		out.set(
 			id,
-			list.slice(-64).map(o => ({ peakDbfs: o.peakDbfs, obwHz: o.obwHz })),
+			list.slice(-64).map(o => ({ peakDbfs: o.peakDbfs!, obwHz: o.obwHz! })),
 		)
 	}
 	return out
@@ -793,7 +793,7 @@ describe("DQ properties", () => {
 							expect(p?.coChannel).toContain(d.id)
 							const dist = Math.abs(centreOf(p as Discovery) - centreOf(d))
 							expect(dist).toBeLessThanOrEqual(
-								gridToleranceHz(d.bandwidthHz) + 1,
+								gridToleranceHz(d.bandwidthHz!) + 1,
 							)
 						}
 					}
@@ -823,7 +823,7 @@ describe("DQ properties", () => {
 				(history, probes) => {
 					const { store } = newStore()
 					const amb = ambient(store, history)
-					const before = structuredClone(store.get(amb)?.signal.best)
+					const before = structuredClone(store.get(amb)?.signal!.best)
 					probes.forEach((p, i) => {
 						const refused = p.kind === "refused"
 						store.ingest(
@@ -838,7 +838,7 @@ describe("DQ properties", () => {
 							}),
 						)
 					})
-					expect(store.get(amb)?.signal.best).toEqual(before)
+					expect(store.get(amb)?.signal!.best).toEqual(before)
 				},
 			),
 			{ numRuns: 100 },

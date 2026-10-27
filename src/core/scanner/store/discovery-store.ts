@@ -12,6 +12,7 @@
  * entry whose payload holds the resulting records, so replay is an idempotent upsert.
  */
 import {
+	ANCHOR_AIRCRAFT_WINDOW_MS,
 	anchorDecodes,
 	aircraftCount,
 	canAnchor,
@@ -849,6 +850,11 @@ export class DiscoveryStore
 		centreHz: number,
 	) => Raster[]
 	private readonly discoveries = new Map<string, Discovery>()
+	private anchorExpiryEnabled = true
+	private readonly anchorExpiry = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>()
 	private readonly decodeAnchors = new Map<string, string>()
 	/** Set by `applyEvidenceTo` when evidence passed its checks and was stored (see `applyEvidenceResult`). */
 	private evidenceAccepted = false
@@ -1053,7 +1059,59 @@ export class DiscoveryStore
 		return created
 	}
 
-	/** Confirmed, trusted ambient decodes with no qualifying spectrum observation. */
+	/** At most one timer per retained anchor (therefore at most maxDiscoveries timers).
+	 * The inclusive 60 s window expires at timestamp + 60_000 + 1 ms. */
+	startAnchorExpiry(): void {
+		this.anchorExpiryEnabled = true
+		for (const id of this.decodeAnchors.values()) this.scheduleAnchorExpiry(id)
+	}
+
+	stopAnchorExpiry(): void {
+		this.anchorExpiryEnabled = false
+		for (const timer of this.anchorExpiry.values()) clearTimeout(timer)
+		this.anchorExpiry.clear()
+	}
+
+	private scheduleAnchorExpiry(id: string): void {
+		const previous = this.anchorExpiry.get(id)
+		if (previous) clearTimeout(previous)
+		this.anchorExpiry.delete(id)
+		if (!this.anchorExpiryEnabled || !this.discoveries.has(id)) return
+		const rows = this.observationIndex.get(`decode:${id}`)?.decode ?? []
+		const now = this.now()
+		const next = rows.reduce((expiry, row) => {
+			const at = row.at + ANCHOR_AIRCRAFT_WINDOW_MS + 1
+			return at > now ? Math.min(expiry, at) : expiry
+		}, Infinity)
+		const d = this.discoveries.get(id)!
+		const count = aircraftCount(rows, now)
+		if (d.aircraftCount !== count) {
+			this.commit("observation", op => {
+				d.aircraftCount = count
+				this.touch(d)
+				op.discoveries.add(id)
+				mark(op, id, "updated")
+				return id
+			})
+		}
+		if (
+			!Number.isFinite(next) ||
+			!this.anchorExpiryEnabled ||
+			!this.discoveries.has(id)
+		)
+			return
+		const timer = setTimeout(
+			() => {
+				this.anchorExpiry.delete(id)
+				this.scheduleAnchorExpiry(id)
+			},
+			Math.max(1, Math.min(2_147_483_647, next - now)),
+		)
+		timer.unref()
+		this.anchorExpiry.set(id, timer)
+	}
+
+	/** Canonical destination for confirmed, trusted decode-anchored protocols. */
 	anchorDecode(
 		sourceId: string,
 		hz: number,
@@ -1067,7 +1125,7 @@ export class DiscoveryStore
 		const existing =
 			existingId === undefined ? undefined : this.discoveries.get(existingId)
 		if (!existing && !this.makeRoom()) return TRANSIENT
-		return this.commit("observation", op => {
+		const result = this.commit("observation", op => {
 			const fresh = newDecodeAnchor(
 				existing?.id ?? `d_${this.newId()}`,
 				sourceId,
@@ -1097,6 +1155,8 @@ export class DiscoveryStore
 			mark(op, d.id, existing ? "updated" : "created")
 			return d.id
 		})
+		if (result.discoveryId) this.scheduleAnchorExpiry(result.discoveryId)
+		return result
 	}
 
 	/**
@@ -2532,6 +2592,8 @@ export class DiscoveryStore
 	}
 
 	restore(s: StoreSnapshot): void {
+		for (const timer of this.anchorExpiry.values()) clearTimeout(timer)
+		this.anchorExpiry.clear()
 		// band inspection UX req 3.3: restored records are a new store; revisions restart with it
 		this.epoch = newStoreEpoch()
 		this.revisionSeq = 1
@@ -4990,6 +5052,9 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		this.discoveries.delete(id)
+		const timer = this.anchorExpiry.get(id)
+		if (timer) clearTimeout(timer)
+		this.anchorExpiry.delete(id)
 		if (d.anchor === "decode")
 			this.decodeAnchors.delete(
 				decodeAnchorKey(d.sourceIds[0]!, d.protocol, d.frequencyHz),

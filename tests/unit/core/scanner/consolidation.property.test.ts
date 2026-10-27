@@ -232,7 +232,7 @@ describe("consolidation properties", () => {
 				const sum = (
 					ds: typeof before.discoveries,
 					k: "airtimeMs" | "observationCount",
-				) => ds.reduce((n, d) => n + d[k], 0)
+				) => ds.reduce((n, d) => n + (d[k] ?? 0), 0)
 				expect(sum(after.discoveries, "airtimeMs")).toBe(
 					sum(before.discoveries, "airtimeMs"),
 				)

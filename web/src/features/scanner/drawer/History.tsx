@@ -25,6 +25,10 @@ interface Page {
 }
 
 export function DiscoveryHistory({ d }: { d: Discovery }) {
+	return d.anchor === "decode" ? null : <SpectrumDiscoveryHistory d={d} />
+}
+
+function SpectrumDiscoveryHistory({ d }: { d: Discovery }) {
 	const { data } = useServices()
 	const [page, setPage] = useState<Page | null>(null)
 	const [error, setError] = useState<string | null>(null)

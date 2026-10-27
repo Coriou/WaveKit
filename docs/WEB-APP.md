@@ -143,5 +143,6 @@ are labelled **tone only** and displayed as compact notices.
 The band view labels a decode-anchored 1090 MHz discovery **ADS-B · N aircraft**,
 where N counts distinct confirmed ICAOs in the last 60 seconds (up to 4096).
 The label sits at its nominal channel, independently of nearby narrow carriers.
-Its identification is proven by decodes; zero spectrum measurements on an anchor
-mean unavailable measurements. See [decode-anchored ADS-B](SCANNER.md#decode-anchored-ads-b).
+Its identification is proven by decodes; API spectrum fields contain unmeasured zero placeholders.
+The drawer hides RF measurements and transmission history for anchors. Aircraft counts
+update through live discovery events when confirmations expire, without a new decode. See [decode-anchored ADS-B](SCANNER.md#decode-anchored-ads-b).

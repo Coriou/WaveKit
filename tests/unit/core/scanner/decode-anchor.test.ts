@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	anchorDecodes,
 	aircraftCount,
@@ -33,6 +33,99 @@ const store = (now = () => T0) =>
 	new DiscoveryStore({ maxDiscoveries: 10, now, newId: () => "anchor" })
 
 describe("decode-anchored persistence and bounds", () => {
+	it("publishes count expiry without a read and clears timers on stop and removal", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(T0)
+		const s = store(() => Date.now())
+		try {
+			s.anchorDecode("rtl", HZ, ev(1), "commanded")
+			expect(vi.getTimerCount()).toBe(1)
+			const updates: number[] = []
+			s.on("change", (id: string) => {
+				const d = s.get(id)
+				if (d) updates.push(d.aircraftCount!)
+			})
+			vi.advanceTimersByTime(60_000)
+			expect(updates).toEqual([])
+			vi.advanceTimersByTime(1)
+			expect(updates).toEqual([0])
+			expect(s.snapshot().discoveries[0]!.aircraftCount).toBe(0)
+			expect(vi.getTimerCount()).toBe(0)
+			s.anchorDecode("rtl", HZ, ev(2, Date.now()), "commanded")
+			s.anchorDecode("rtl", HZ, ev(3, Date.now()), "commanded")
+			expect(vi.getTimerCount()).toBe(1)
+			s.stopAnchorExpiry()
+			expect(vi.getTimerCount()).toBe(0)
+			s.startAnchorExpiry()
+			expect(vi.getTimerCount()).toBe(1)
+			s.delete(s.snapshot().discoveries[0]!.id)
+			expect(vi.getTimerCount()).toBe(0)
+		} finally {
+			s.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
+	})
+
+	it("keeps unavailable RF measurements as zero placeholders on anchors and observations", () => {
+		const s = store()
+		try {
+			s.anchorDecode("rtl", HZ, ev(1), "commanded")
+			const snapshot = s.snapshot()
+			for (const key of ["bandwidthHz", "airtimeMs", "measuredOffsetHz"])
+				expect(snapshot.discoveries[0]).toHaveProperty(key, 0)
+			for (const key of [
+				"snrDb",
+				"peakDbfs",
+				"meanDbfs",
+				"floorDbfs",
+				"obwHz",
+				"thresholdDb",
+				"dutyCycle",
+			])
+				expect(snapshot.observations[0]).toHaveProperty(key, 0)
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	it("preserves legacy zero placeholders on restore and resumes aircraft expiry", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(T0)
+		const original = store(() => Date.now())
+		const restored = store(() => Date.now())
+		try {
+			original.anchorDecode("rtl", HZ, ev(1), "commanded")
+			const snapshot = original.snapshot()
+			original.stopAnchorExpiry()
+			const stats = { peakDbfs: 0, meanDbfs: 0, snrDb: 0, floorDbfs: 0 }
+			Object.assign(snapshot.discoveries[0]!, {
+				signal: { best: stats, last: stats },
+				bandwidthHz: 0,
+				airtimeMs: 0,
+				measuredOffsetHz: 0,
+			})
+			Object.assign(snapshot.observations[0]!, {
+				...stats,
+				obwHz: 0,
+				obwMethod: "on-bins",
+				thresholdDb: 0,
+				dutyCycle: 0,
+			})
+			restored.restore(snapshot)
+			restored.startAnchorExpiry()
+			expect(vi.getTimerCount()).toBe(1)
+			expect(restored.snapshot()).toEqual(snapshot)
+			expect(restored.get("d_anchor")).toHaveProperty("signal.best.snrDb", 0)
+			expect(restored.snapshot().observations[0]).toHaveProperty("snrDb", 0)
+			vi.advanceTimersByTime(60_001)
+			expect(restored.snapshot().discoveries[0]!.aircraftCount).toBe(0)
+		} finally {
+			original.stopAnchorExpiry()
+			restored.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
+	})
+
 	it.each([
 		ANCHOR_AIRCRAFT_MAX - 1,
 		ANCHOR_AIRCRAFT_MAX,

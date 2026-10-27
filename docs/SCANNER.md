@@ -618,20 +618,24 @@ with the decoder's source and tuning verified as `commanded` or `relay`. One SBS
 record, a repeated message, unverified tuning and external-input decoders cannot
 create an anchor.
 
-When no observation qualifies, the scanner creates one `anchor: "decode"` discovery
+Every accepted confirmation for a protocol on the decode-anchor list goes to one `anchor: "decode"` discovery
 per source, protocol and nominal channel (1090 MHz for ADS-B). Further confirmations
 refresh that record, including after a restart. Its proof comes from accepted ambient
 decodes. It does not imply a measured carrier: bandwidth, airtime and signal statistics
-are zero placeholders because those measurements are unavailable. Decode anchors
-never associate or consolidate with spectrum discoveries. ADS-B spectrum placement
-requires at least 250 kHz measured occupied bandwidth (one quarter of the nominal
-1 MHz channel), so a nearby 1–2 kHz spur cannot acquire the ADS-B identity.
+use numeric zero placeholders in the API because those measurements are unavailable
+(`anchor: "decode"` identifies them as unmeasured). Decode anchors
+never associate or consolidate with spectrum discoveries. Even if a qualifying wideband
+observation opens later near 1090 MHz, further ADS-B confirmations refresh only the anchor.
+Spectrum observations, including nearby spurs, remain unidentified by ADS-B.
 
 The band label reads **ADS-B · N aircraft**. `aircraftCount` counts distinct confirmed
 ICAOs seen in the inclusive last 60 seconds, with a ceiling of 4096 (the ambient
 accepted-identity ceiling). The anchor retains one latest accepted decode per ICAO;
-when full, the oldest entries leave first. The count ages on reads, and retained
-entries age out on the next confirmation. This is a count of confirmed aircraft,
+when full, the oldest entries leave first. The count ages on reads and publishes a
+`scanner:discovery` update at the next aircraft expiry, even without further confirmations.
+The inclusive window expires at confirmation time + 60,001 ms. There is at most one
+timer per anchor, bounded by discovery capacity, cleared on removal and scanner stop.
+Retained entries age out on the next confirmation. This is a count of confirmed aircraft,
 not every aircraft that produced a single message. Anchors use the same discovery
 capacity, inactivity retention, Keep and Ignore rules as spectrum discoveries.
 

@@ -375,7 +375,11 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			| "external"
 			| "outside"
 			| "declared" = "trusted",
-		options: { observation?: "wide" | "none" | "carrier"; dir?: string } = {},
+		options: {
+			observation?: "wide" | "none" | "carrier"
+			dir?: string
+			now?: number
+		} = {},
 	) {
 		let provenance: ReturnType<typeof createDecoderProvenanceIndex> | undefined
 		const h = serviceHarness({
@@ -438,16 +442,20 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			() => "rtl",
 			h.tuner,
 		)
-		await h.service.start()
-		const job = await h.service.createJob({
-			sourceId: "rtl",
-			mode: "in-window",
-		})
 		const internals = h.service as unknown as {
 			store: DiscoveryStore
 			live: Map<string, LiveObservation>
 			now: () => number
 		}
+		let clock = options.now ?? Date.now()
+		internals.now = () => clock
+		;(internals.store as unknown as { now: () => number }).now = () => clock
+		await h.service.start()
+		const job = await h.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+		})
+
 		const epoch = h.service.spectrum.engine("rtl")!.currentEpoch()
 		const track = trackOf({
 			trackId: "adsb-1",
@@ -477,7 +485,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 				decoded: false,
 				encrypted: false,
 			})
-		let clock = Math.max(
+		clock = Math.max(
 			startedAt,
 			...internals.store
 				.snapshot()
@@ -649,6 +657,41 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		},
 	)
 
+	it("keeps the anchor canonical when a qualifying wideband observation opens later", async () => {
+		const r = await serviceRig("trusted")
+		try {
+			const live = r.internals.live.get("adsb-1")!
+			r.internals.live.delete("adsb-1")
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			const anchor = r.internals.store.snapshot().discoveries[0]!
+			r.internals.live.set("adsb-1", live)
+			live.lastTrack!.gate = "passed"
+			live.lastTrack!.snrDb = 30
+			live.lastTrack!.maxBlockSnrDb = 30
+			const service = r.h.service as unknown as {
+				ingest: (
+					o: LiveObservation,
+					t: NonNullable<LiveObservation["lastTrack"]>,
+				) => void
+			}
+			service.ingest(live, live.lastTrack!)
+			expect(live.discoveryId).not.toBeNull()
+			r.send(parseSbsLine(sbsLine("00:00:05.000")), 2000)
+			const records = r.internals.store.snapshot().discoveries
+			expect(records.filter(d => d.protocol === "adsb")).toHaveLength(1)
+			expect(
+				r.internals.store.get(anchor.id)!.lastSeenAt > anchor.lastSeenAt,
+			).toBe(true)
+			expect(r.internals.store.get(live.discoveryId!)?.protocol).not.toBe(
+				"adsb",
+			)
+		} finally {
+			await r.h.service.stop()
+			r.provenance.dispose()
+		}
+	})
+
 	it("refreshes one anchor, preserves it through disk restart, and expires by normal retention", async () => {
 		const r = await serviceRig("trusted", { observation: "none" })
 		let stopped = false
@@ -676,6 +719,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			const again = await serviceRig("trusted", {
 				observation: "none",
 				dir: r.h.dir,
+				now: Date.parse(snapshot.discoveries[0]!.lastSeenAt),
 			})
 			try {
 				expect(again.internals.store.snapshot()).toEqual(snapshot)

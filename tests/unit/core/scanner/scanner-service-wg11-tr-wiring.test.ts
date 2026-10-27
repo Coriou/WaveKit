@@ -15,6 +15,7 @@ afterEach(async () => {
 interface Internals {
 	live: Map<string, LiveObservation>
 	store: {
+		stopAnchorExpiry(): void
 		discoveryIdOf(observationId: string): string | undefined
 		identityOf(id: string): unknown
 	}
@@ -29,6 +30,7 @@ function setup(discovery: unknown) {
 	const internals = h.service as unknown as Internals
 	const survivors: Record<string, string> = { o_1: "d_1", o_3: "d_gone" }
 	internals.store = {
+		stopAnchorExpiry: () => undefined,
 		discoveryIdOf: o => survivors[o],
 		identityOf: id => (id === "d_1" ? discovery : undefined),
 	}
@@ -90,6 +92,7 @@ describe("ScannerService.trackIdentity", () => {
 		const { service, internals, obs } = setup(DISCOVERY)
 		internals.live.set("t1", obs())
 		internals.store = {
+			stopAnchorExpiry: () => undefined,
 			discoveryIdOf: () => "d_1",
 			identityOf: () => {
 				throw new Error("boom")

@@ -121,7 +121,7 @@ describe("discovery store copies (WG11 SC, req 3.4)", () => {
 		const got = store.get(id)
 		if (got !== undefined) {
 			got.jobIds.push("x")
-			got.signal.best.snrDb = 999
+			got.signal!.best.snrDb = 999
 		}
 		const listed = store.list({}).items[0]
 		if (listed !== undefined) listed.metadata.talkgroups.push("x")

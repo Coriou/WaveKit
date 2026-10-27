@@ -1,3 +1,4 @@
+import { confidenceText } from "../../src/data/scanner-format.ts"
 import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
@@ -352,6 +353,35 @@ describe("ScannerStore live events", () => {
 		await ctx.store.refreshDiscoveries({})
 		return ctx
 	}
+
+	it("updates the anchored band label from an expiry event without fetching", async () => {
+		const anchor = discovery("anchor", {
+			anchor: "decode",
+			protocol: "adsb",
+			confidence: "decoded",
+			aircraftCount: 1,
+		})
+		const { store, send, tick } = await loaded([anchor])
+		vi.useFakeTimers()
+		try {
+			expect(confidenceText(store.discovery("anchor")!)).toBe(
+				"ADS-B · 1 aircraft",
+			)
+			setTimeout(() => {
+				send("scanner:discovery", {
+					change: "updated",
+					discovery: { ...anchor, aircraftCount: 0 },
+				})
+			}, 60_001)
+			vi.advanceTimersByTime(60_001)
+			tick()
+			expect(confidenceText(store.discovery("anchor")!)).toBe(
+				"ADS-B · 0 aircraft",
+			)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 
 	it("coalesces events into one snapshot per frame", async () => {
 		const { store, send, tick } = await loaded([])

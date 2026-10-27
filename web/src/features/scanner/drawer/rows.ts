@@ -184,7 +184,9 @@ export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
 		label ||
 		d.proof?.summary ||
 		ident ||
-		(d.bandwidthHz > 0 ? `${formatWidth(d.bandwidthHz)} wide` : "")
+		(d.anchor !== "decode" && d.bandwidthHz > 0
+			? `${formatWidth(d.bandwidthHz)} wide`
+			: "")
 	const tone: RowTone =
 		d.confidence === "decoded"
 			? "accent"
@@ -379,14 +381,17 @@ export function whyText(d: Discovery): string {
 /** "12.5 kHz wide · SNR 24 dB · first heard 12 Sep 14:02 · 3 recordings". */
 export function measuredText(d: Discovery): string {
 	const parts: string[] = []
-	if (d.bandwidthHz > 0) parts.push(`${formatWidth(d.bandwidthHz)} wide`)
-	parts.push(`SNR ${Math.round(d.signal.best.snrDb)} dB`)
+	if (d.anchor !== "decode" && d.bandwidthHz > 0)
+		parts.push(`${formatWidth(d.bandwidthHz)} wide`)
+	if (d.anchor !== "decode")
+		parts.push(`SNR ${Math.round(d.signal.best.snrDb)} dB`)
 	const first = Date.parse(d.firstSeenAt)
 	if (Number.isFinite(first)) {
 		const day = dateText(first)
 		parts.push(`first heard ${day} ${clockText(first)}`)
 	}
-	if (d.airtimeMs > 0) parts.push(`${durationText(d.airtimeMs)} on air`)
+	if (d.anchor !== "decode" && d.airtimeMs > 0)
+		parts.push(`${durationText(d.airtimeMs)} on air`)
 	if (d.evidence.recordings > 0)
 		parts.push(plural(d.evidence.recordings, "recording"))
 	if (d.tuningTrust === "unverified") parts.push("frequency unverified")

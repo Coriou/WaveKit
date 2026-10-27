@@ -1,3 +1,7 @@
+import {
+	guardScan,
+	parseScanEvent,
+} from "../../../cli/source/data/scanner-guards.js"
 import type { ScannerRouteService } from "../../../src/api/routes/scanner.js"
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, describe, expect, it } from "vitest"
@@ -63,6 +67,8 @@ it("exposes decode anchors and aircraft counts on discovery list and detail resp
 			scanner: {
 				listDiscoveries: () => store.list({}),
 				getDiscovery: (id: string) => store.get(id),
+				discoveryObservations: (id: string) =>
+					store.observations(id, null, 100),
 			} as unknown as ScannerRouteService,
 		})
 		const list = await app.inject({
@@ -82,7 +88,43 @@ it("exposes decode anchors and aircraft counts on discovery list and detail resp
 		})
 		expect(detail.statusCode).toBe(200)
 		expect(detail.json()).toMatchObject({ anchor: "decode", aircraftCount: 1 })
+		for (const body of [list.json().items[0], detail.json()])
+			for (const key of ["bandwidthHz", "airtimeMs", "measuredOffsetHz"])
+				expect(body).toHaveProperty(key, 0)
+		for (const body of [list.json().items[0], detail.json()]) {
+			expect(body.signal).toEqual({
+				best: { peakDbfs: 0, meanDbfs: 0, snrDb: 0, floorDbfs: 0 },
+				last: { peakDbfs: 0, meanDbfs: 0, snrDb: 0, floorDbfs: 0 },
+			})
+			expect(guardScan("discovery", body)).toBeDefined()
+			expect(
+				parseScanEvent("scanner:discovery", {
+					change: "updated",
+					discovery: body,
+				}),
+			).toEqual({
+				type: "scanner:invalidate",
+				key: "discovery:d_anchor",
+			})
+		}
+		expect(guardScan("discoveries", list.json())).toBeDefined()
+		const observations = await app.inject({
+			method: "GET",
+			url: "/api/scanner/discoveries/d_anchor/observations",
+		})
+		expect(observations.statusCode).toBe(200)
+		expect(observations.json().items[0]).toMatchObject({
+			obwHz: 0,
+			obwMethod: "on-bins",
+			peakDbfs: 0,
+			meanDbfs: 0,
+			snrDb: 0,
+			floorDbfs: 0,
+			thresholdDb: 0,
+			dutyCycle: 0,
+		})
 	} finally {
+		store.stopAnchorExpiry()
 		await app.close()
 	}
 })

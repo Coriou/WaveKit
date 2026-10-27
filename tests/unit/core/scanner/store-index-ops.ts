@@ -251,7 +251,7 @@ export function freshMedian(s: DiscoveryStore, d: Discovery): number {
 	const recent = (internals(s).byDiscovery.get(d.id) ?? []).slice(-64)
 	return recent.length > 0
 		? median(recent.map(o => o.centerHz))
-		: d.frequencyHz + d.measuredOffsetHz
+		: d.frequencyHz + d.measuredOffsetHz!
 }
 
 function acceptsFamily(

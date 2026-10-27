@@ -1,3 +1,7 @@
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
+import type { Discovery } from "@wavekit/api-types"
+import { DiscoveryHistory } from "../../src/features/scanner/drawer/History.tsx"
 import { describe, expect, it } from "vitest"
 import type { HistoryObservation } from "../../src/features/scanner/drawer/history.ts"
 import {
@@ -83,4 +87,11 @@ describe("a discovery's last 24 h", () => {
 		})
 		expect(t[1]?.length).toBe("12 s")
 	})
+})
+
+it("hides synthetic transmission history for a decode anchor", () => {
+	const anchor = { anchor: "decode" } as Discovery
+	expect(
+		renderToStaticMarkup(createElement(DiscoveryHistory, { d: anchor })),
+	).toBe("")
 })

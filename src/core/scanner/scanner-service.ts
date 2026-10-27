@@ -1,3 +1,4 @@
+import { DECODE_ANCHOR_PROTOCOLS } from "./store/decode-anchor.js"
 import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
@@ -1475,6 +1476,7 @@ export class ScannerService extends EventEmitter {
 	private async startUp(): Promise<void> {
 		this.startLiveAudioEvidence()
 		// A restarted service must not publish during its new recovery barrier.
+		this.store.stopAnchorExpiry()
 		this.store.off("change", this.onStoreChange)
 		let loaded: LoadedState
 		// corrupt or missing trial memory is ignored inside `load` (never throws).
@@ -1577,6 +1579,7 @@ export class ScannerService extends EventEmitter {
 				this.log.warn({ err }, "Orphaned probe folder cleanup failed"),
 			)
 		this.store.on("change", this.onStoreChange)
+		this.store.startAnchorExpiry()
 		this.spectrum.on("pipeline", this.onSpectrumPipeline)
 		this.spectrum.on("stream", this.onEngineStream)
 		this.spectrum.on("released", this.onEngineReleased)
@@ -1700,6 +1703,7 @@ export class ScannerService extends EventEmitter {
 	sealAdmission(
 		_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown",
 	): void {
+		this.store.stopAnchorExpiry()
 		this.consumerLifecycle.sealAdmission()
 		for (const [id, pending] of this.analogDeferred)
 			if (pending.captureId !== null)
@@ -1761,6 +1765,7 @@ export class ScannerService extends EventEmitter {
 
 	/** EACH independent actual component settles before an aggregate failure; no native66 wait. */
 	private async cleanupServiceComponents(): Promise<CleanupOutcome> {
+		this.store.stopAnchorExpiry()
 		this.stopLiveAudioEvidence()
 		let failed = false
 		const attempt = async (
@@ -4282,16 +4287,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
-		const candidates = this.placeAmbient({
-			sourceId: e.sourceId,
-			hz: e.hz,
-			at: e.ev.at,
-			protocol: e.ev.protocol,
-			...(e.passband ? { passband: e.passband } : {}),
-			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
-			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
-		})
-		if (candidates.length === 0) {
+		if (DECODE_ANCHOR_PROTOCOLS.includes(e.ev.protocol)) {
 			this.store.anchorDecode(
 				e.sourceId,
 				e.hz,
@@ -4301,7 +4297,18 @@ export class ScannerService extends EventEmitter {
 					channelHz: null,
 				}),
 			)
+			return
 		}
+		const candidates = this.placeAmbient({
+			sourceId: e.sourceId,
+			hz: e.hz,
+			at: e.ev.at,
+			protocol: e.ev.protocol,
+			...(e.passband ? { passband: e.passband } : {}),
+			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
+			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
+		})
+
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
 		// trials leave the count to this path).

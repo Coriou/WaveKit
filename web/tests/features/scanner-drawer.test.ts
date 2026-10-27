@@ -12,6 +12,7 @@ import {
 	frequencyParts,
 	groupDiscoveries,
 	headerCount,
+	measuredText,
 	heardText,
 	hitEntries,
 	hitMeta,
@@ -632,4 +633,9 @@ describe("scanner drawer proofs (WG12)", () => {
 		expect(last("hidden")).toEqual({ type: "weak", key: "weak", shown: false })
 		expect(last("shown")).toEqual({ type: "weak", key: "weak", shown: true })
 	})
+})
+
+it("does not present anchor placeholders as RF measurements", () => {
+	const d = disc({ anchor: "decode", bandwidthHz: 0, airtimeMs: 1000 })
+	expect(measuredText(d)).not.toMatch(/SNR|wide|on air/)
 })
