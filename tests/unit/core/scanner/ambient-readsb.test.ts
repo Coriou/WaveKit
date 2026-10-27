@@ -375,9 +375,11 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			| "external"
 			| "outside"
 			| "declared" = "trusted",
+		options: { observation?: "wide" | "none" | "carrier"; dir?: string } = {},
 	) {
 		let provenance: ReturnType<typeof createDecoderProvenanceIndex> | undefined
 		const h = serviceHarness({
+			...(options.dir ? { dir: options.dir } : {}),
 			centreHz: ADSB_HZ,
 			patch: s => {
 				s.passive.enabled = false
@@ -452,30 +454,37 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			stream: epoch.stream,
 			epoch: epoch.epoch,
 			centreHz: ADSB_HZ + 20_000,
-			obwHz: 1_200_000,
+			obwHz: options.observation === "carrier" ? 2_000 : 1_200_000,
 			blocks: 1,
 			gate: "pending",
 			flags: { ...trackOf().flags, burst: true },
 		})
 		const startedAt = Date.now()
-		internals.live.set("adsb-1", {
-			observationId: "adsb-1",
-			sourceId: "rtl",
-			trackId: "adsb-1",
-			epoch: epoch.epoch,
-			jobIds: [job.id],
-			discoveryId: null,
+		if (options.observation !== "none")
+			internals.live.set("adsb-1", {
+				observationId: "adsb-1",
+				sourceId: "rtl",
+				trackId: "adsb-1",
+				epoch: epoch.epoch,
+				jobIds: [job.id],
+				discoveryId: null,
+				startedAt,
+				classification: classifySpectral(track, { priors: {}, protocols: [] }),
+				probeIds: new Set(),
+				lastActivityAt: startedAt,
+				lastIngestAt: startedAt,
+				lastTrack: track,
+				decoded: false,
+				encrypted: false,
+			})
+		let clock = Math.max(
 			startedAt,
-			classification: classifySpectral(track, { priors: {}, protocols: [] }),
-			probeIds: new Set(),
-			lastActivityAt: startedAt,
-			lastIngestAt: startedAt,
-			lastTrack: track,
-			decoded: false,
-			encrypted: false,
-		})
-		let clock = startedAt
+			...internals.store
+				.snapshot()
+				.discoveries.map(d => Date.parse(d.lastSeenAt)),
+		)
 		internals.now = () => clock
+		;(internals.store as unknown as { now: () => number }).now = () => clock
 		/** One readsb output `dtMs` after the previous, through the manager's output event. */
 		const send = (data: unknown, dtMs = 500): void => {
 			clock += dtMs
@@ -488,7 +497,15 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			}
 			h.decoders.emitOutput("readsb", output)
 		}
-		return { h, internals, send, provenance }
+		return {
+			h,
+			internals,
+			send,
+			provenance,
+			advance: (ms: number) => {
+				clock += ms
+			},
+		}
 	}
 
 	it.each(["trusted", "unknown", "external", "outside", "declared"] as const)(
@@ -604,6 +621,112 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		} finally {
 			await h.service.stop()
 			provenance.dispose()
+		}
+	})
+	it.each(["trusted", "unknown", "external", "outside", "declared"] as const)(
+		"decode anchor without a spectrum observation: %s",
+		async mode => {
+			const r = await serviceRig(mode, { observation: "none" })
+			try {
+				r.send(parseSbsLine(sbsLine("00:00:01.000")))
+				expect(r.internals.store.snapshot().discoveries).toEqual([])
+				r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+				const discoveries = r.internals.store.snapshot().discoveries
+				expect(discoveries).toHaveLength(mode === "trusted" ? 1 : 0)
+				if (mode === "trusted")
+					expect(r.internals.store.get(discoveries[0]!.id)).toMatchObject({
+						anchor: "decode",
+						frequencyHz: ADSB_HZ,
+						protocol: "adsb",
+						confidence: "decoded",
+						aircraftCount: 1,
+						proof: { kind: "decoded", transport: "ambient" },
+					})
+			} finally {
+				await r.h.service.stop()
+				r.provenance.dispose()
+			}
+		},
+	)
+
+	it("refreshes one anchor, preserves it through disk restart, and expires by normal retention", async () => {
+		const r = await serviceRig("trusted", { observation: "none" })
+		let stopped = false
+		try {
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			const id = r.internals.store.snapshot().discoveries[0]!.id
+			const first = r.internals.store.get(id)!
+			r.send(parseSbsLine(sbsLine("00:00:04.000").replace("ABC123", "DEF456")))
+			r.send(
+				parseSbsLine(sbsLine("00:00:06.000").replace("ABC123", "DEF456")),
+				2000,
+			)
+			expect(r.internals.store.snapshot().discoveries).toHaveLength(1)
+			expect(r.internals.store.get(id)).toMatchObject({
+				aircraftCount: 2,
+				observationCount: 2,
+			})
+			expect(r.internals.store.get(id)!.lastSeenAt > first.lastSeenAt).toBe(
+				true,
+			)
+			await r.h.service.stop()
+			stopped = true
+			const snapshot = r.internals.store.snapshot()
+			const again = await serviceRig("trusted", {
+				observation: "none",
+				dir: r.h.dir,
+			})
+			try {
+				expect(again.internals.store.snapshot()).toEqual(snapshot)
+				again.send(parseSbsLine(sbsLine("00:00:10.000")))
+				again.send(parseSbsLine(sbsLine("00:00:12.000")), 2000)
+				expect(
+					again.internals.store.snapshot().discoveries.map(d => d.id),
+				).toEqual([id])
+				again.advance(86_400_000)
+				expect(again.internals.store.pruneInactive(1)).toEqual([])
+				again.advance(1)
+				expect(again.internals.store.pruneInactive(1)).toEqual([id])
+			} finally {
+				await again.h.service.stop()
+				again.provenance.dispose()
+			}
+		} finally {
+			if (!stopped) await r.h.service.stop()
+			r.provenance.dispose()
+		}
+	})
+
+	it("never credits a nearby narrow carrier with ADS-B", async () => {
+		const r = await serviceRig("trusted", { observation: "carrier" })
+		try {
+			const live = r.internals.live.get("adsb-1")!
+			live.lastTrack!.centreHz = ADSB_HZ + 10_000
+			live.lastTrack!.gate = "passed"
+			live.lastTrack!.snrDb = 30
+			live.lastTrack!.maxBlockSnrDb = 30
+			const internals = r.h.service as unknown as {
+				ingest: (
+					o: LiveObservation,
+					t: NonNullable<LiveObservation["lastTrack"]>,
+				) => void
+			}
+			internals.ingest(live, live.lastTrack!)
+			expect(live.discoveryId).not.toBeNull()
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			const records = r.internals.store.snapshot().discoveries
+			expect(records).toHaveLength(2)
+			expect(r.internals.store.get(live.discoveryId!)?.protocol).toBe("unknown")
+			expect(records.find(d => d.anchor === "decode")).toMatchObject({
+				protocol: "adsb",
+				confidence: "decoded",
+			})
+			expect(r.internals.store.consolidationPlan().groups).toEqual([])
+		} finally {
+			await r.h.service.stop()
+			r.provenance.dispose()
 		}
 	})
 })

@@ -278,6 +278,8 @@ export type UndecodedReason =
 	| "unsupported-format"
 
 export interface Discovery {
+	anchor?: "decode"
+	aircraftCount?: number
 	/** "d_" + ULID */
 	id: string
 	/** Raster channel, or the median measured centre. */

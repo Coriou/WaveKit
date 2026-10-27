@@ -444,3 +444,9 @@ export const identifyBodySchema = {
 		},
 	],
 } as const
+
+/** Additive decode-anchor discovery response fields. */
+export const discoveryAnchorProperties = {
+	anchor: { type: "string", enum: ["decode"] },
+	aircraftCount: { type: "integer", minimum: 0, maximum: 4096 },
+} as const

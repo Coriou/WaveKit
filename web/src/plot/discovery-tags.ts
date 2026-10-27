@@ -525,6 +525,7 @@ export function identifiedAt(
 /** What a signal chip says for an identified signal: the decoder's words ("DMR · CC 1"), not a name someone gave it. */
 export function identifiedLabel(d: Discovery): string {
 	const what = confidenceText(d)
+	if (d.anchor === "decode") return what
 	const id = identityText(d.identity)
 	return id ? `${what} · ${id}` : what
 }

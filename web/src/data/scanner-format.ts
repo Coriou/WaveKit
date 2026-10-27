@@ -65,10 +65,17 @@ export function confidenceRank(confidence: ScannerConfidence): number {
  * "DMR" (decoded). A protocol nobody could name (unknown) stays "Heard"; a carrier is "Carrier".
  */
 export function confidenceText(
-	d: Pick<Discovery, "confidence" | "protocol">,
+	d: Pick<Discovery, "confidence" | "protocol" | "anchor" | "aircraftCount">,
 ): string {
 	if (d.confidence === "activity" || d.protocol === "unknown") return "Heard"
 	const name = protocolName(d.protocol)
+	if (
+		d.anchor === "decode" &&
+		d.protocol === "adsb" &&
+		d.confidence === "decoded" &&
+		d.aircraftCount !== undefined
+	)
+		return `${name} · ${d.aircraftCount} aircraft`
 	if (d.protocol === "carrier" || d.confidence === "decoded") return name
 	return d.confidence === "candidate" ? `Maybe ${name}` : `Likely ${name}`
 }
@@ -159,6 +166,7 @@ export function discoveryTitle(d: Discovery): string {
 	if (label) return label
 	const id = identityText(d.identity)
 	const what = confidenceText(d)
+	if (d.anchor === "decode") return what
 	return id ? `${what} · ${id}` : what
 }
 
@@ -435,8 +443,12 @@ export function isVerified(
  * qualified words of confidenceText ("Maybe DMR", "Heard"). Never filled from `hint`.
  */
 export function protocolSlotText(
-	d: Pick<Discovery, "confidence" | "protocol" | "evidenceLevel">,
+	d: Pick<
+		Discovery,
+		"confidence" | "protocol" | "evidenceLevel" | "anchor" | "aircraftCount"
+	>,
 ): string {
+	if (d.anchor === "decode") return confidenceText(d)
 	if (isVerified(d) && d.protocol !== "unknown") return protocolName(d.protocol)
 	return confidenceText(d)
 }

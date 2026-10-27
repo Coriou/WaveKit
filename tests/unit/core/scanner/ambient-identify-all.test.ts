@@ -368,7 +368,10 @@ it.each(Object.entries(AMBIENT_CHANNEL_WIDTH_HZ))(
 			observationId: "o",
 			sourceId: "fake",
 			startedAt: 0,
-			lastTrack: { centreHz: HZ + offset, obwHz: 1 },
+			lastTrack: {
+				centreHz: HZ + offset,
+				obwHz: protocol === "adsb" ? 250_000 : 1,
+			},
 		})
 		const match = (offset: number) =>
 			placeAmbientDecode(

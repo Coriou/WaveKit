@@ -608,3 +608,44 @@ queried frequency span, followed by O(k) time/source/ambiguity checks.
 Track insertion, movement and removal update the index; sorted-array updates
 can cost O(n). Closed observations remain indexed through the pairing
 retention period, and merges use their current discovery IDs.
+
+### Decode-anchored ADS-B
+
+A verified on-air decode can identify an emission even when no spectrum observation
+covers it. The explicit protocol list is currently **ADS-B only**. The normal ambient
+confirmation rule still applies: a confirmed ICAO identity from distinct messages,
+with the decoder's source and tuning verified as `commanded` or `relay`. One SBS
+record, a repeated message, unverified tuning and external-input decoders cannot
+create an anchor.
+
+When no observation qualifies, the scanner creates one `anchor: "decode"` discovery
+per source, protocol and nominal channel (1090 MHz for ADS-B). Further confirmations
+refresh that record, including after a restart. Its proof comes from accepted ambient
+decodes. It does not imply a measured carrier: bandwidth, airtime and signal statistics
+are zero placeholders because those measurements are unavailable. Decode anchors
+never associate or consolidate with spectrum discoveries. ADS-B spectrum placement
+requires at least 250 kHz measured occupied bandwidth (one quarter of the nominal
+1 MHz channel), so a nearby 1–2 kHz spur cannot acquire the ADS-B identity.
+
+The band label reads **ADS-B · N aircraft**. `aircraftCount` counts distinct confirmed
+ICAOs seen in the inclusive last 60 seconds, with a ceiling of 4096 (the ambient
+accepted-identity ceiling). The anchor retains one latest accepted decode per ICAO;
+when full, the oldest entries leave first. The count ages on reads, and retained
+entries age out on the next confirmation. This is a count of confirmed aircraft,
+not every aircraft that produced a single message. Anchors use the same discovery
+capacity, inactivity retention, Keep and Ignore rules as spectrum discoveries.
+
+Why only ADS-B: `src/core/spectrum/pipeline.ts` integrates default 50 ms blocks and
+has a sliding default 5 ms short path; FFT hop is `fftSize × (1 − overlap)` samples.
+An approximately 120 µs ADS-B message occupies only 0.024 of a 5 ms window, about
+16.2 dB integration dilution, before its broad pulse energy is spread across bins.
+The live failure is therefore consistent with the detector missing these emissions.
+AIS's approximately 26 ms burst spans several short windows, and rtl_433's OOK packet
+trains can also trigger the short path (which specifically handles bursts up to
+15 ms). Their short tracks may fail the channel gate's 100 ms burst / 300 ms normal
+minimum, but an accepted ambient decode can already admit a pending observation.
+Failing that gate is different from failing to open an observation: there is no
+code evidence that all AIS or rtl_433 emissions structurally evade tracking, so
+neither is in the anchor list. Sweeps observe only their current hop (default dwell
+is settle plus three integration blocks); a missed off-hop transmission supplies
+no verified decode and cannot create an anchor.

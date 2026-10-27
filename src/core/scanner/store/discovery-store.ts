@@ -11,6 +11,13 @@
  * monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one journal
  * entry whose payload holds the resulting records, so replay is an idempotent upsert.
  */
+import {
+	anchorDecodes,
+	aircraftCount,
+	canAnchor,
+	decodeAnchorKey,
+	newDecodeAnchor,
+} from "./decode-anchor.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -842,6 +849,7 @@ export class DiscoveryStore
 		centreHz: number,
 	) => Raster[]
 	private readonly discoveries = new Map<string, Discovery>()
+	private readonly decodeAnchors = new Map<string, string>()
 	/** Set by `applyEvidenceTo` when evidence passed its checks and was stored (see `applyEvidenceResult`). */
 	private evidenceAccepted = false
 	private readonly observationIndex = new Map<string, Observation>()
@@ -1043,6 +1051,52 @@ export class DiscoveryStore
 			else this.pending.consumeAirtime(input)
 		}
 		return created
+	}
+
+	/** Confirmed, trusted ambient decodes with no qualifying spectrum observation. */
+	anchorDecode(
+		sourceId: string,
+		hz: number,
+		ev: DecodeEvidence,
+		trust: Discovery["tuningTrust"] | undefined,
+	): Ingested {
+		if (!canAnchor(ev, hz, trust)) return TRANSIENT
+		const existingId = this.decodeAnchors.get(
+			decodeAnchorKey(sourceId, ev.protocol, hz),
+		)
+		const existing =
+			existingId === undefined ? undefined : this.discoveries.get(existingId)
+		if (!existing && !this.makeRoom()) return TRANSIENT
+		return this.commit("observation", op => {
+			const fresh = newDecodeAnchor(
+				existing?.id ?? `d_${this.newId()}`,
+				sourceId,
+				hz,
+				ev,
+				trust,
+			)
+			const d = existing ?? fresh.discovery
+			const previous = this.observationIndex.get(fresh.observation.id)
+			if (previous && ev.at < Date.parse(d.lastSeenAt)) return d.id
+			const observation = previous ? clone(previous) : fresh.observation
+			observation.decode = anchorDecodes(observation.decode ?? [], ev)
+			observation.endedAt = iso(ev.at)
+			observation.tuningTrust = trust
+			d.lastSeenAt = iso(ev.at)
+			d.identity = clone(ev.identity!)
+			d.tuningTrust = trust
+			d.aircraftCount = aircraftCount(observation.decode, ev.at)
+			if (existing) d.observationCount += 1
+			else this.insertDiscovery(d)
+			if (previous) this.unlinkObservation(previous)
+			this.putObservation(observation)
+			this.invalidateLabel(d.id)
+			this.touch(d)
+			op.discoveries.add(d.id)
+			op.observations.add(observation.id)
+			mark(op, d.id, existing ? "updated" : "created")
+			return d.id
+		})
 	}
 
 	/**
@@ -1567,6 +1621,7 @@ export class DiscoveryStore
 			protocol: label.protocol,
 			firstSeenAt: d.firstSeenAt,
 			hasOperator: hasOperatorState(d),
+			...(d.anchor ? { anchor: d.anchor } : {}),
 		}
 	}
 
@@ -2240,6 +2295,7 @@ export class DiscoveryStore
 			confidence: d.confidence,
 			family: this.associationFamily(d),
 			operator: hasOperatorState(d),
+			...(d.anchor ? { anchor: d.anchor } : {}),
 			evidence: this.fragmentEvidence(d),
 		}
 	}
@@ -2502,6 +2558,7 @@ export class DiscoveryStore
 		this.proofCache.clear()
 		this.clearProofIndexes()
 		this.discoveries.clear()
+		this.decodeAnchors.clear()
 		this.observationIndex.clear()
 		this.byDiscovery.clear()
 		this.bySource.clear()
@@ -2597,7 +2654,7 @@ export class DiscoveryStore
 		let crossFamily = false
 		const consider = (e: IndexedCentre): void => {
 			const d = this.discoveries.get(e.id)
-			if (d === undefined) return
+			if (d === undefined || d.anchor === "decode") return
 			const dist = Math.abs(e.centreHz - centre)
 			if (dist > radius) return
 			// DQ 9.5: never to a record decoded as another protocol than this observation's decode.
@@ -2716,7 +2773,7 @@ export class DiscoveryStore
 		decodedAs?: string,
 		evidenceLess = false,
 	): { merge: Discovery | null; coChannel: string[] } {
-		const linked = this.atKey(sourceId, key)
+		const linked = this.atKey(sourceId, key).filter(d => d.anchor !== "decode")
 		// DQ 3.2, 9.4, 9.5: a record that refuses the observation, or is decoded as another protocol
 		// than its decode, is never a merge target; it stays a co-channel partner of whatever the
 		// observation creates.
@@ -3578,6 +3635,7 @@ export class DiscoveryStore
 
 	/** DQ 3.1, 9.4: an observation against a record; null when undecided (3.5). */
 	private obsCompatible(d: Discovery, obs: ObservationInput): boolean | null {
+		if (d.anchor === "decode") return false
 		const m = this.mediansOf(d.id)
 		if (m === undefined) return null
 		const peak = obs.track.peakDbfs
@@ -3632,6 +3690,7 @@ export class DiscoveryStore
 
 	/** DQ 3.1, 3.2: two records' medians (see `recordsCompatible`). */
 	private pairCompatible(a: Discovery, b: Discovery): boolean | null {
+		if (a.anchor === "decode" || b.anchor === "decode") return false
 		const ma = this.mediansOf(a.id)
 		const mb = this.mediansOf(b.id)
 		if (ma === undefined || mb === undefined) return null
@@ -3664,6 +3723,7 @@ export class DiscoveryStore
 
 	/** Recomputes frequency, key, offset and bandwidth from the last 64 observations. */
 	private refresh(d: Discovery): void {
+		if (d.anchor === "decode") return
 		this.markDirty(d.id)
 		const m = this.mediansOf(d.id)
 		const centre = m?.centre ?? d.frequencyHz + d.measuredOffsetHz
@@ -3809,6 +3869,7 @@ export class DiscoveryStore
 	 * by 2.3 through `pruneLinks`).
 	 */
 	private linkPair(op: Op, a: Discovery, b: Discovery): void {
+		if (a.anchor === "decode" || b.anchor === "decode") return
 		if (a.coChannel.includes(b.id) && b.coChannel.includes(a.id)) return
 		this.armWatchers(a.id)
 		this.armWatchers(b.id)
@@ -3878,6 +3939,7 @@ export class DiscoveryStore
 		drop: Discovery,
 		planned = false,
 	): void {
+		if (keep.anchor === "decode" || drop.anchor === "decode") return
 		// DQ 3.2: any caller is covered; an incompatible pair is never merged. DQ 7.5: a planned
 		// consolidation pair was checked on the frozen values (3.1 included) when the plan was made;
 		// re-checking against medians the group's earlier members already moved would make the
@@ -4222,7 +4284,20 @@ export class DiscoveryStore
 				this.bySource.get(s)?.delete(d.id)
 				members.delete(s)
 			}
+		if (previous?.anchor === "decode")
+			this.decodeAnchors.delete(
+				decodeAnchorKey(
+					previous.sourceIds[0]!,
+					previous.protocol,
+					previous.frequencyHz,
+				),
+			)
 		this.discoveries.set(d.id, d)
+		if (d.anchor === "decode")
+			this.decodeAnchors.set(
+				decodeAnchorKey(d.sourceIds[0]!, d.protocol, d.frequencyHz),
+				d.id,
+			)
 		for (const s of d.sourceIds) {
 			let set = this.bySource.get(s)
 			if (set === undefined) {
@@ -4849,6 +4924,11 @@ export class DiscoveryStore
 
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
+		if (d.anchor === "decode")
+			copy.aircraftCount = aircraftCount(
+				this.observationIndex.get(`decode:${d.id}`)?.decode ?? [],
+				this.now(),
+			)
 		const view = this.discoveryView(d)
 		if (view.evidence === "proven" && view.proof !== null) {
 			copy.proof = clone(view.proof)
@@ -4910,6 +4990,10 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		this.discoveries.delete(id)
+		if (d.anchor === "decode")
+			this.decodeAnchors.delete(
+				decodeAnchorKey(d.sourceIds[0]!, d.protocol, d.frequencyHz),
+			)
 		this.published.delete(id)
 		const members = this.members.get(id)
 		for (const s of d.sourceIds) {
@@ -5473,6 +5557,7 @@ export function estimateFrequencyError(
 	const usable = discoveries
 		.filter(
 			d =>
+				d.anchor !== "decode" &&
 				d.confidence === "decoded" &&
 				d.sourceIds.includes(sourceId) &&
 				d.frequencyKey.startsWith("r:") &&

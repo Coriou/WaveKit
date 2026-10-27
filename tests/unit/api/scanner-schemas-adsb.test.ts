@@ -1,3 +1,4 @@
+import type { ScannerRouteService } from "../../../src/api/routes/scanner.js"
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, describe, expect, it } from "vitest"
 import {
@@ -30,4 +31,58 @@ describe("scanner query schemas: ADS-B", () => {
 			"4840d6",
 		])
 	})
+})
+
+it("exposes decode anchors and aircraft counts on discovery list and detail responses", async () => {
+	const { scannerRoutes } = await import("../../../src/api/routes/scanner.js")
+	const { DiscoveryStore } =
+		await import("../../../src/core/scanner/store/discovery-store.js")
+	const at = Date.UTC(2026, 9, 27)
+	const store = new DiscoveryStore({
+		maxDiscoveries: 10,
+		now: () => at,
+		newId: () => "anchor",
+	})
+	store.anchorDecode(
+		"rtl",
+		1_090_000_000,
+		{
+			protocol: "adsb",
+			origin: "ambient",
+			crcClean: true,
+			identity: { kind: "icao", value: "abc123" },
+			epoch: 1,
+			at,
+			metadata: {},
+		},
+		"commanded",
+	)
+	const app = Fastify({ logger: false })
+	try {
+		await app.register(scannerRoutes, {
+			scanner: {
+				listDiscoveries: () => store.list({}),
+				getDiscovery: (id: string) => store.get(id),
+			} as unknown as ScannerRouteService,
+		})
+		const list = await app.inject({
+			method: "GET",
+			url: "/api/scanner/discoveries",
+		})
+		expect(list.statusCode).toBe(200)
+		expect(list.json().items[0]).toMatchObject({
+			anchor: "decode",
+			aircraftCount: 1,
+			frequencyHz: 1_090_000_000,
+			proof: { kind: "decoded" },
+		})
+		const detail = await app.inject({
+			method: "GET",
+			url: "/api/scanner/discoveries/d_anchor",
+		})
+		expect(detail.statusCode).toBe(200)
+		expect(detail.json()).toMatchObject({ anchor: "decode", aircraftCount: 1 })
+	} finally {
+		await app.close()
+	}
 })

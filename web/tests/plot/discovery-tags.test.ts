@@ -260,3 +260,15 @@ describe("identified signal", () => {
 		expect(identifiedLabel(d)).toBe("DMR · CC 1")
 	})
 })
+
+it("labels ADS-B at its nominal anchor without choosing one aircraft identity", () => {
+	const d = disc("anchor", 10, {
+		frequencyHz: 1_090_000_000,
+		protocol: "adsb",
+		confidence: "decoded",
+		anchor: "decode",
+		aircraftCount: 3,
+		identity: { kind: "icao", value: "abc123" },
+	})
+	expect(identifiedLabel(d)).toBe("ADS-B · 3 aircraft")
+})

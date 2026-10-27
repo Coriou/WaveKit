@@ -14,6 +14,7 @@
  * - 500 `SCANNER_SETTINGS_WRITE_FAILED`
  * - 503 `SCANNER_DISABLED`, `SCANNER_STATE_UNAVAILABLE`
  */
+import { discoveryAnchorProperties } from "./scanner-schemas.js"
 import type { ReadStream } from "node:fs"
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import {
@@ -441,6 +442,7 @@ const discoveryResponseSchema = {
 	type: "object",
 	additionalProperties: true,
 	properties: {
+		...discoveryAnchorProperties,
 		coverage: discoveryCoverageSchema,
 		trialMemory: discoveryTrialMemorySchema,
 		absorbedInto: { type: "string" },

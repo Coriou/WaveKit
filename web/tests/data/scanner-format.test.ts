@@ -236,3 +236,14 @@ describe("scanner-format", () => {
 		expect(trialOutcomeText("carrier-only")).toBe("Carrier only")
 	})
 })
+
+it("labels a decode anchor with its confirmed aircraft count", () => {
+	expect(
+		confidenceText({
+			protocol: "adsb",
+			confidence: "decoded",
+			anchor: "decode",
+			aircraftCount: 7,
+		}),
+	).toBe("ADS-B · 7 aircraft")
+})

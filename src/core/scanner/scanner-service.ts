@@ -4291,6 +4291,17 @@ export class ScannerService extends EventEmitter {
 			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
 			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
 		})
+		if (candidates.length === 0) {
+			this.store.anchorDecode(
+				e.sourceId,
+				e.hz,
+				e.ev,
+				this.deps.ambientTrust?.(e.decoderId, e.hz, e.sourceId, {
+					sourceId: e.sourceId,
+					channelHz: null,
+				}),
+			)
+		}
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
 		// trials leave the count to this path).

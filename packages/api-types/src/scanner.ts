@@ -293,6 +293,10 @@ export const SCANNER_PROOF_PROTOCOL_LABEL: Readonly<
 
 /** Spec § 7.1; timestamps ISO 8601. */
 export interface Discovery {
+	/** Decodes locate this emission; spectrum statistics are unavailable (zero placeholders). */
+	anchor?: "decode"
+	/** Distinct confirmed ICAOs in the last 60 seconds, capped at 4096. */
+	aircraftCount?: number
 	id: string
 	frequencyHz: number
 	frequencyKey: string

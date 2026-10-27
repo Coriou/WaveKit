@@ -150,6 +150,8 @@ export type DecodeEvidenceCheck = Assert<
 >
 
 export const DiscoverySchema = z.object({
+	anchor: z.literal("decode").optional(),
+	aircraftCount: z.number().int().min(0).max(4096).optional(),
 	id: z.string().min(1),
 	frequencyHz: z.number(),
 	frequencyKey: z.string(),

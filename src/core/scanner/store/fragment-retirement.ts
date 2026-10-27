@@ -52,6 +52,7 @@ export const FRAGMENT_OBW_SPACINGS_MAX = 2
 
 /** One record's frozen values for one pass. */
 export interface FragmentRecord {
+	anchor?: "decode"
 	id: string
 	sourceId: string
 	/** Median centre with the source correction removed (the raster frame). */
@@ -116,7 +117,7 @@ const compareText = (a: string, b: string): number =>
 
 /** 10.1: protected records never become members. */
 export function isProtected(r: FragmentRecord): boolean {
-	return r.operator || r.evidence
+	return r.anchor === "decode" || r.operator || r.evidence
 }
 
 /**

@@ -14,6 +14,7 @@ import { recordsCompatible } from "./compatibility.js"
 
 /** One record's frozen values (read once before planning, never re-read while planning). */
 export interface ConsolidationRecord {
+	anchor?: "decode"
 	id: string
 	sourceId: string
 	/** Median centre over the last 64 observations. */
@@ -116,6 +117,7 @@ export function joinable(
 	a: ConsolidationRecord,
 	b: ConsolidationRecord,
 ): boolean {
+	if (a.anchor === "decode" || b.anchor === "decode") return false
 	if (a.id === b.id || a.sourceId !== b.sourceId) return false
 	if (a.hasOperator || b.hasOperator) return false
 	if (!Number.isFinite(a.centreHz) || !Number.isFinite(b.centreHz)) return false
