@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { existsSync } from "node:fs"
 import { rm } from "node:fs/promises"
@@ -15,7 +16,6 @@ import {
 	FakeEngineView,
 	PROBE_STORAGE_DIR,
 	flushAsync,
-	linkLine,
 	poolHarness,
 	probeRequest,
 } from "../../../mocks/scanner/probe-fakes.js"
@@ -481,12 +481,15 @@ describe("ProbePool", () => {
 							for (const p of h.pool.status()) {
 								h.decoders.emitLink(
 									p.decoderId,
-									linkLine(o.cc, h.clock.now + o.jitter, o.crcErr),
+									verifiedLinkLine(o.cc, h.clock.now + o.jitter, o.crcErr),
 								)
 							}
 							// a late line from every removed decoder of an ended epoch
 							for (const id of h.decoders.removed)
-								h.decoders.emitLink(id, linkLine(o.cc, h.clock.now, false))
+								h.decoders.emitLink(
+									id,
+									verifiedLinkLine(o.cc, h.clock.now, false),
+								)
 						}
 					}
 					for (const [i, { req, ev }] of h.evidence.entries()) {
@@ -1076,7 +1079,7 @@ describe("original probe launch capabilities across early sealing", () => {
 		const bytes = decoder.bytesIn
 		h.pool.sealAdmission()
 		h.engine.push(500)
-		h.decoders.emitLink(result.started, linkLine(7, h.clock.now))
+		h.decoders.emitLink(result.started, verifiedLinkLine(7, h.clock.now))
 		h.decoders.emitOutput(result.started, {
 			type: "sync",
 			timestamp: new Date(h.clock.now),

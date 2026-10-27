@@ -1254,6 +1254,8 @@ describe("ScannerService", () => {
 				protocol: "dmr",
 				identity: { kind: "dmr-cc", value: "1" },
 				metadata: {},
+				// A checked decode tests the intermod cap, independently of sync rejection.
+				contentVerified: true,
 				crcClean: true,
 				at: Date.now(),
 				epoch,

@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type { ArtefactKind } from "../../../../src/core/spectrum/artefacts.js"
@@ -8,11 +9,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import {
-	flushAsync,
-	linkLine,
-	probeRequest,
-} from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync, probeRequest } from "../../../mocks/scanner/probe-fakes.js"
 
 type Harness = ReturnType<typeof identifyHarness>
 const ENDED = ["completed", "cancelled", "failed"]
@@ -38,8 +35,8 @@ function decoderOrder(h: Harness): string[] {
 }
 
 function emitDmrIdentity(h: Harness, probeId: string): void {
-	h.decoders.emitLink(probeId, linkLine(1, h.clock.now))
-	h.decoders.emitLink(probeId, linkLine(1, h.clock.now + 30))
+	h.decoders.emitLink(probeId, verifiedLinkLine(1, h.clock.now))
+	h.decoders.emitLink(probeId, verifiedLinkLine(1, h.clock.now + 30))
 }
 
 const outcomes = (h: Harness) =>

@@ -58,6 +58,16 @@ const sha = (text: string): string =>
 // grew again. With both, seeds 3 to 5 carry the DQ 9.1/9.3 association and the `short` input: each
 // length is the DQ length plus the `short` bytes of the observations it keeps (seeds 3 and 4 the
 // same +461 and +859 bytes as without DQ 9.3, seed 5 +912 instead of +964 as it keeps fewer).
+// WG17 DM: persist checked-content provenance for memory-only synthetic decodes.
+// Only discoveries[].contentVerified:true is added: seeds 3/4/5 grow by 5/3/4
+// copies of the 23-byte property. Removing it must still match the prior hashes.
+// Example: {"identity":{"kind":"dmr-cc","value":"1"}} becomes
+// {"identity":{"kind":"dmr-cc","value":"1"},"contentVerified":true}.
+const PRE_VERIFICATION_HASHES: Readonly<Record<number, string>> = {
+	3: "b23b2e4219617ea3842f6e79b4f3a868f51494949cbb277c9bc17a8e4422dddd",
+	4: "28f7dd7d1c797a886287992d36fbc53fa499af6213f603f00c241481a4ab0d25",
+	5: "4e124573513250f8de7bb3558d2e3bef7367d7a7b0cf3201d3abd03343b2b3f0",
+}
 const GOLDENS: [number, number, number, boolean, number, string][] = [
 	[
 		1,
@@ -80,24 +90,24 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		400,
 		40,
 		false,
-		39900,
-		"b23b2e4219617ea3842f6e79b4f3a868f51494949cbb277c9bc17a8e4422dddd",
+		40015,
+		"c1ca1b70651302cf7193f1bd20a4f3066c156074d38b951a5d689ae1c430df18",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		64595,
-		"28f7dd7d1c797a886287992d36fbc53fa499af6213f603f00c241481a4ab0d25",
+		64664,
+		"6bd7dd2abf9bab1f7fbb2b835bfa3bfa43cdf03eef1d6077a2dd85eb83771d44",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		68648,
-		"4e124573513250f8de7bb3558d2e3bef7367d7a7b0cf3201d3abd03343b2b3f0",
+		68740,
+		"7c744bf8fa9c7c577a10be76551df8e89ad43082055ea16c4da1ddf18d35aa7a",
 	],
 	[
 		6,
@@ -169,6 +179,11 @@ describe("snapshot mirror goldens (WG11 req 3.5)", () => {
 			run.entries.forEach((e, i) => mirror.applyLine(lineOf(i + 1, e)))
 			const s = run.store.snapshot()
 			const built = mirrorText(mirror, s, run.entries.length, SAVED_AT)
+			const priorHash = PRE_VERIFICATION_HASHES[seed]
+			if (priorHash !== undefined)
+				expect(sha(built.replaceAll(',"contentVerified":true', ""))).toBe(
+					priorHash,
+				)
 			expect([seed, built.length, sha(built)]).toEqual([seed, bytes, hash])
 			expect(mirror.counts()).toEqual({
 				discoveries: s.discoveries.length,

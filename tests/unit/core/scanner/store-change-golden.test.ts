@@ -10,6 +10,21 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // WG15 DQ 9.3 re-baseline: an evidence-less sighting no longer reaches a decoded record of another
 // family beyond 1 000 Hz or outside its band (decoded-record shortcut and key fallback), so the first
 // such sighting in this run now joins the nearest same-family record instead (seed 1 o39, seed 7 o296, seed 42 o343).
+// WG17 DM integration re-baseline: checked synthetic decodes explicitly persist
+// contentVerified:true on M.payload.observations[].decode / S.observations[].decode.
+// Stored discovery provenance also survives observation trimming: the same field
+// appears on M.payload.discoveries[], S.discoveries[] and internal E[] eviction copies.
+// Example decode fragment: {"crcClean":true,"identity":{"kind":"dmr-cc","value":"1"}}
+// -> {"contentVerified":true,"crcClean":true,"identity":{"kind":"dmr-cc","value":"1"}}.
+// Example stored discovery fragment: {"identity":{"kind":"dmr-cc","value":"1"}}
+// -> {"identity":{"kind":"dmr-cc","value":"1"},"contentVerified":true}.
+// Only these added fields differ semantically: no unverifiedCc/tgSrcVerified,
+// identity, confidence, metadata, association, R return value or C event changes.
+// Task 10: seed 1 lines 814,827,884,928,967,1002,1008,1023,1201,1221,
+// 1288,1305,1313,1325,1380,1499,1518,1569,1586,1638–1654 and seed 42
+// lines 71,80,129,137,146,158,192,210,2106–2110 add contentVerified:true.
+// Same-identity observation proof and checked merge provenance now persist;
+// checked talkgroups and every other field match the pre-cab741cd goldens.
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 1, steps: 700 },

@@ -42,6 +42,7 @@ import {
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import {
 	interpretDsdFme,
+	guardDsdFmeEvidence,
 	toDsdFmeScannerEvent,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
@@ -860,7 +861,12 @@ export class AmbientEvidence extends EventEmitter {
 			entry.pairCtx = null
 		}
 		const decodeToken = {}
-		for (const ev of evs) {
+		for (const raw of evs) {
+			const ev = guardDsdFmeEvidence(
+				raw,
+				placedHz ?? target.hz,
+				this.deps.centreOf?.(target.sourceId),
+			)
 			const event: AmbientEvidenceEvent = {
 				decoderId,
 				sourceId: target.sourceId,

@@ -563,6 +563,21 @@ describe("DQ 2.3: co-channel cap and pruning", () => {
 		})
 		snap.observations.forEach((o: Observation) => {
 			o.centerHz = centre(ids.indexOf(o.discoveryId))
+			o.decode = [
+				{
+					protocol: "dmr",
+					identity: {
+						kind: "dmr-cc",
+						value: String(ids.indexOf(o.discoveryId) + 1),
+					},
+					contentVerified: true,
+					crcClean: true,
+					metadata: {},
+					at: T0 + 3.7,
+					epoch: o.sampleRange.epoch,
+					origin: "probe",
+				},
+			]
 		})
 		const { store } = newStore()
 		store.restore(snap)

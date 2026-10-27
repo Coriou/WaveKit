@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 /**
  * WG12 R 4.5: a probe whose decoder program cannot run ends `unsupported` /
  * `decoder-unavailable` with no `undecodedReason`, and the type is memoised.
@@ -12,7 +13,6 @@ import {
 import type { ProbeRequest } from "../../../../src/core/scanner/probes/probe-pool.js"
 import {
 	flushAsync,
-	linkLine,
 	poolHarness,
 	probeRequest,
 } from "../../../mocks/scanner/probe-fakes.js"
@@ -113,7 +113,7 @@ describe("probe pool unavailable exit", () => {
 		const h = poolHarness()
 		const seen = watch(h)
 		const id = await started(h)
-		h.decoders.emitLink(id, linkLine(1, h.clock.now))
+		h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
 		h.decoders.created.get(id)?.emit("exit", 127, null)
 		await flushAsync()
 		await flushAsync()

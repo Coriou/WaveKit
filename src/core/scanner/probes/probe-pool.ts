@@ -59,6 +59,7 @@ import {
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import {
 	interpretDsdFme,
+	guardDsdFmeEvidence,
 	toDsdFmeScannerEvent,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
@@ -259,7 +260,7 @@ interface ProbeRecord {
 	modes: ProbeMode[]
 	transport: TransportStrategy
 	epoch: number
-	centreHz: number
+	centreHz: number | undefined
 	state: ProbeState
 	startedAt: number
 	turnStartedAt: number | null
@@ -679,6 +680,35 @@ function replayContext(req: ProbeRequest): TransportContext {
 export class ProbePool extends EventEmitter {
 	private readonly log: Logger
 	private readonly now: () => number
+	/** Captures retain source+epoch, not tuner centre. Keep those original centres
+	 * across retunes; evicted/unknown epochs remain subject to the strict DC gate. */
+	private readonly tunerCentres = new Map<string, number | undefined>()
+	private rememberCentre(
+		sourceId: string,
+		epoch: number,
+		centreHz: number,
+	): void {
+		if (!Number.isFinite(centreHz)) return
+		const key = JSON.stringify([sourceId, epoch])
+		// Epoch centres are immutable. A reused/conflicting epoch cannot prove
+		// where an older capture sat relative to DC.
+		this.tunerCentres.set(
+			key,
+			this.tunerCentres.has(key) && this.tunerCentres.get(key) !== centreHz
+				? undefined
+				: centreHz,
+		)
+		if (this.tunerCentres.size > 4096)
+			this.tunerCentres.delete(this.tunerCentres.keys().next().value!)
+	}
+
+	private originalCentre(req: ProbeRequest): number | undefined {
+		const epoch = this.deps.engines(req.sourceId)?.currentEpoch()
+		if (epoch?.epoch === req.epoch)
+			this.rememberCentre(req.sourceId, epoch.epoch, epoch.centreHz)
+		return this.tunerCentres.get(JSON.stringify([req.sourceId, req.epoch]))
+	}
+
 	private readonly records = new Map<string, ProbeRecord>()
 	private readonly byDecoder = new Map<string, ProbeRecord>()
 	private readonly queue: ProbeRequest[] = []
@@ -751,6 +781,7 @@ export class ProbePool extends EventEmitter {
 			const engine = this.deps.engines(req.sourceId)
 			if (!engine) return { deferred: "no-transport" }
 			const epoch = engine.currentEpoch()
+			this.rememberCentre(req.sourceId, epoch.epoch, epoch.centreHz)
 			if (
 				epoch.epoch !== req.epoch ||
 				!this.streamCurrent(req.sourceId, engine, epoch)
@@ -832,6 +863,7 @@ export class ProbePool extends EventEmitter {
 		epoch: number,
 		centreHz: number,
 	): Promise<void> {
+		this.rememberCentre(sourceId, epoch, centreHz)
 		const at = this.now()
 		// A replay probe reads a capture, not the live stream: an epoch change leaves it running.
 		this.dropQueued(
@@ -963,6 +995,8 @@ export class ProbePool extends EventEmitter {
 	// source replaces the old subscription. Without it the pool subscribes on first use.
 	watchEngine(sourceId: string, engine: ProbeEngineView): void {
 		if (this.destroyed || this.stoppedEngines.has(engine)) return
+		const epoch = engine.currentEpoch()
+		this.rememberCentre(sourceId, epoch.epoch, epoch.centreHz)
 		this.watch(sourceId, engine)
 	}
 
@@ -1465,7 +1499,7 @@ export class ProbePool extends EventEmitter {
 			modes,
 			transport,
 			epoch: req.epoch,
-			centreHz: ctx.epoch.centreHz,
+			centreHz: req.replay ? this.originalCentre(req) : ctx.epoch.centreHz,
 			state: "starting",
 			startedAt: this.now(),
 			turnStartedAt: carry?.turnStartedAt ?? null,
@@ -1827,6 +1861,7 @@ export class ProbePool extends EventEmitter {
 			const engine = this.deps.engines(rec.req.sourceId)
 			if (!engine) return
 			const epoch = engine.currentEpoch()
+			this.rememberCentre(rec.req.sourceId, epoch.epoch, epoch.centreHz)
 			if (epoch.epoch !== rec.epoch) return
 			ctx = {
 				req: rec.req,
@@ -2152,7 +2187,8 @@ export class ProbePool extends EventEmitter {
 
 	/** P17: only evidence of the probe's epoch, stamped before that epoch ended. */
 	private deliver(rec: ProbeRecord, evs: DecodeEvidence[]): void {
-		for (const ev of evs) {
+		for (const raw of evs) {
+			const ev = guardDsdFmeEvidence(raw, rec.req.targetHz, rec.centreHz)
 			if (this.isStopping(rec)) return
 			if (ev.epoch !== rec.epoch) continue
 			if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) continue

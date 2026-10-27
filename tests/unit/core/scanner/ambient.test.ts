@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 import { ambientStatusFake } from "../../../mocks/scanner/ambient-status-fake.js"
 import { describe, expect, it } from "vitest"
 import { EventEmitter } from "node:events"
@@ -6,7 +7,6 @@ import {
 	AmbientEvidence,
 	type AmbientEvidenceEvent,
 } from "../../../../src/core/scanner/probes/ambient.js"
-import { linkLine } from "../../../mocks/scanner/probe-fakes.js"
 
 class Decoders extends EventEmitter {
 	readonly instances = new Map([["dmr-cfg", new EventEmitter()]])
@@ -39,6 +39,7 @@ describe("AmbientEvidence", () => {
 							external: false,
 						}
 					: null,
+			centreOf: () => 1_000_003,
 			epochOf: () => epoch,
 			logger: pino({ level: "silent" }),
 		})
@@ -46,13 +47,13 @@ describe("AmbientEvidence", () => {
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
 		const dec = decoders.instances.get("dmr-cfg")!
-		dec.emit("link", linkLine(1, 1000))
-		dec.emit("link", linkLine(5, 1010, true))
+		dec.emit("link", verifiedLinkLine(1, 1000))
+		dec.emit("link", verifiedLinkLine(5, 1010, true))
 		expect(got.filter(e => e.ev.identity?.kind === "dmr-cc")).toEqual([])
 		now += 2_000
-		dec.emit("link", linkLine(1, now))
+		dec.emit("link", verifiedLinkLine(1, now))
 		expect(got.filter(e => e.ev.identity)).toEqual([])
-		dec.emit("link", { ...linkLine(1, now), tg: "10" })
+		dec.emit("link", { ...verifiedLinkLine(1, now), tg: "10" })
 		const cc = got.filter(e => e.ev.identity?.kind === "dmr-cc")
 		expect(cc).toHaveLength(1)
 		expect(cc[0]).toMatchObject({
@@ -68,10 +69,10 @@ describe("AmbientEvidence", () => {
 		// a new epoch starts a fresh double match
 		epoch = 4
 		got.length = 0
-		dec.emit("link", linkLine(1, 2000))
+		dec.emit("link", verifiedLinkLine(1, 2000))
 		expect(got.filter(e => e.ev.identity?.kind === "dmr-cc")).toEqual([])
 		ambient.stop()
-		dec.emit("link", linkLine(1, 2100))
+		dec.emit("link", verifiedLinkLine(1, 2100))
 		expect(got.filter(e => e.ev.identity?.kind === "dmr-cc")).toEqual([])
 	})
 
@@ -112,6 +113,7 @@ describe("AmbientEvidence", () => {
 								external: false,
 							}
 						: null,
+			centreOf: () => 1_000_003,
 			epochOf: () => 3,
 			logger: pino({ level: "silent" }),
 			now: () => clock.now,
@@ -159,6 +161,7 @@ describe("AmbientEvidence", () => {
 		nxdn.emit("link", {
 			protocol: "nxdn",
 			ran: 5,
+			verified: true,
 			crcErr: false,
 			at: clock.now,
 		})
@@ -167,6 +170,7 @@ describe("AmbientEvidence", () => {
 			protocol: "nxdn",
 			ran: 5,
 			tg: "10",
+			verified: true,
 			crcErr: false,
 			at: clock.now,
 		})

@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 /**
  * Identify regression snapshots, updated for scanner redesign 6.7/6.9:
  * narrow analog eligibility, nonzero priors, explicit requests, and evidence-only labels.
@@ -30,11 +31,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import {
-	flushAsync,
-	linkLine,
-	poolHarness,
-} from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
 
 const FIXTURE = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -174,8 +171,8 @@ const SCENARIOS: GoldenScenario[] = [
 			h.engine.push(1_100_000)
 			await startWith(h, dmrTrack())
 			const id = firstProbe(h)
-			h.decoders.emitLink(id, linkLine(1, h.clock.now))
-			h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 			await flushAsync()
 			await h.settle(1000, 40)
 			return h.events
@@ -191,8 +188,8 @@ const SCENARIOS: GoldenScenario[] = [
 			h.engine.push(1_100_000)
 			await startWith(h, dmrTrack())
 			const id = firstProbe(h)
-			h.decoders.emitLink(id, linkLine(1, h.clock.now))
-			h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+			h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 			await flushAsync()
 			await h.settle(1000, 60)
 			return h.events

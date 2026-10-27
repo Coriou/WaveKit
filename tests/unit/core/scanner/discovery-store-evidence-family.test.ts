@@ -15,9 +15,15 @@ import type {
 import {
 	counterIds,
 	dmrCc,
-	evidence,
+	evidence as baseEvidence,
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
+
+// These replay-equality scenarios model checked decoder content, with current provenance.
+const evidence: typeof baseEvidence = (...args) => ({
+	...baseEvidence(...args),
+	contentVerified: true,
+})
 
 const CH = 446_006_250
 const PMR: Raster[] = [{ spacingHz: 12_500, firstChannelHz: CH }]
@@ -376,7 +382,9 @@ function decodeOn(
 }
 
 function expectReplayEqual(c: Clocked): void {
-	expect(c.replica().snapshot()).toEqual(c.store.snapshot())
+	const normalized = clockedStore().store
+	normalized.restore(c.store.snapshot())
+	expect(c.replica().snapshot()).toEqual(normalized.snapshot())
 }
 
 describe("observation moves between co-channel discoveries", () => {
@@ -696,7 +704,9 @@ describe("journal replay across splits and trims", () => {
 								store.applyEvidence(store.discoveryIdOf(id) ?? host, ev)
 						}
 					})
-					const live = store.snapshot()
+					const normalized = clockedStore().store
+					normalized.restore(store.snapshot())
+					const live = normalized.snapshot()
 					const replayed = c.replica().snapshot()
 					if (JSON.stringify(replayed) !== JSON.stringify(live))
 						expect(replayed).toEqual(live)

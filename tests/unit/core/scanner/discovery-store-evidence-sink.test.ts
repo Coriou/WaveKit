@@ -385,10 +385,10 @@ describe("DiscoveryStore evidence sink", () => {
 
 		const decoded = planted()
 		expect(
-			decoded.store.appendObservationEvidence(
-				decoded.obs,
-				evidence("dmr", T0 + 10, { identity: dmrCc(1) }),
-			),
+			decoded.store.appendObservationEvidence(decoded.obs, {
+				...evidence("dmr", T0 + 10, { identity: dmrCc(1) }),
+				contentVerified: true,
+			}),
 		).toBe(true)
 		expect(decoded.store.get(decoded.id)?.proof).toBeUndefined()
 		expect(storedOf(decoded.store, decoded.id)?.confidence).toBe("activity")
