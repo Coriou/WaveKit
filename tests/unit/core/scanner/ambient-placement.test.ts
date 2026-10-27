@@ -2,6 +2,7 @@ import fc from "fast-check"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { describe, expect, it } from "vitest"
 import {
+	ADSB_IDENTIFY_MIN_WIDTH_HZ,
 	AMBIENT_CHANNEL_WIDTH_HZ,
 	AMBIENT_VFO_MIN_REACH_HZ,
 	ambientReachHz,
@@ -43,6 +44,63 @@ const place = (
 	).map(o => o.observationId)
 
 describe("ambient placement", () => {
+	it.each([
+		{
+			tracks: [
+				[10_000, 2_000],
+				[50_000, 1_200_000],
+			],
+			expected: ["1"],
+		},
+		{
+			tracks: [
+				[10_000, 2_000],
+				[20_000, 1_000],
+				[50_000, 1_200_000],
+			],
+			expected: ["2"],
+		},
+		{
+			tracks: [
+				[100_000, 500_000],
+				[10_000, 2_000],
+				[50_000, 1_200_000],
+			],
+			expected: ["2"],
+		},
+		{
+			tracks: [
+				[10_000, 2_000],
+				[20_000, 1_000],
+			],
+			expected: [],
+		},
+		{ tracks: [[50_000, 249_999]], expected: [] },
+		{ tracks: [[50_000, 250_000]], expected: ["0"] },
+		{ tracks: [[50_000, 250_001]], expected: ["0"] },
+	])(
+		"filters ADS-B width before nearest placement: $tracks",
+		({ tracks, expected }) => {
+			const candidates = tracks.map(([offset = 0, width = 0], i) =>
+				obs(String(i), 1_090_000_000 + offset, { obwHz: width }),
+			)
+			expect(
+				placeAmbientDecode(
+					candidates,
+					{
+						sourceId: "rtl",
+						hz: 1_090_000_000,
+						at: 95_000,
+						protocol: "adsb",
+						minimumWidthHz: ADSB_IDENTIFY_MIN_WIDTH_HZ,
+					},
+					NOW,
+					PAIR_MS,
+				).map(o => o.observationId),
+			).toEqual(expected)
+		},
+	)
+
 	it("uses occupied spans with a bounded placement tolerance", () => {
 		expect(ambientReachHz("acars", 300_000)).toBe(152_500)
 		for (const protocol of ["ais", "vdl2", "lora", "pocsag"] as const)

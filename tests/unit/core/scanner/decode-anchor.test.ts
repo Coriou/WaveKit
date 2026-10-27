@@ -216,13 +216,15 @@ describe("decode-anchored persistence and bounds", () => {
 		}
 	})
 
-	it("flushes pending state before removal and discards it on crash restore", () => {
+	it("journals one removal without a pending-state commit and discards pending state on crash restore", () => {
 		vi.useFakeTimers()
 		vi.setSystemTime(T0)
 		const s = store(() => Date.now())
 		const restored = store(() => Date.now())
 		const events: ReturnType<DiscoveryStore["get"]>[] = []
 		s.on("change", (id: string) => events.push(s.get(id)))
+		const mutations = vi.fn()
+		s.on("mutation", mutations)
 		try {
 			s.anchorDecode("rtl", HZ, ev(1), "commanded")
 			vi.advanceTimersByTime(1000)
@@ -234,15 +236,26 @@ describe("decode-anchored persistence and bounds", () => {
 				lastSeenAt: new Date(T0).toISOString(),
 			})
 			s.delete("d_anchor")
-			expect(events.at(-2)).toMatchObject({
-				aircraftCount: 2,
-				observationCount: 2,
-				lastSeenAt: new Date(T0 + 1000).toISOString(),
+			expect(events).toHaveLength(2)
+			expect(events[0]).toMatchObject({
+				aircraftCount: 1,
+				observationCount: 1,
+				lastSeenAt: new Date(T0).toISOString(),
 			})
+			expect(mutations).toHaveBeenCalledTimes(2)
+			expect(mutations).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					op: "delete",
+					payload: expect.objectContaining({
+						deleted: ["d_anchor"],
+						discoveries: [],
+					}),
+				}),
+			)
 			expect(events.at(-1)).toBeUndefined()
 			expect(vi.getTimerCount()).toBe(0)
 			vi.advanceTimersByTime(65_000)
-			expect(events).toHaveLength(3)
+			expect(events).toHaveLength(2)
 		} finally {
 			s.stopAnchorExpiry()
 			restored.stopAnchorExpiry()

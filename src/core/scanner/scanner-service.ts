@@ -192,6 +192,7 @@ import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import { pickChannelObservation } from "./probes/ambient-channel.js"
 import {
 	placeAmbientDecode,
+	ADSB_IDENTIFY_MIN_WIDTH_HZ,
 	ambientReachHz,
 } from "./probes/ambient-placement.js"
 import {
@@ -4197,6 +4198,7 @@ export class ScannerService extends EventEmitter {
 			passband?: AmbientEvidenceEvent["passband"]
 			freqHz?: number | undefined
 			decodeToken?: object
+			minimumWidthHz?: number
 		},
 		logAmbiguity = true,
 	): LiveObservation[] {
@@ -4232,7 +4234,7 @@ export class ScannerService extends EventEmitter {
 		}
 		return placeAmbientDecode(
 			observations,
-			{ sourceId: e.sourceId, hz: e.hz, at: e.at, protocol: e.protocol },
+			{ ...e },
 			now,
 			AMBIENT_PAIR_MS,
 			() => ambiguous("Ambient decode matches multiple discoveries"),
@@ -4306,7 +4308,17 @@ export class ScannerService extends EventEmitter {
 				return
 			}
 			const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
-			if (decoderType)
+			if (
+				decoderType &&
+				!this.trialMemory
+					.view(anchored.discoveryId)
+					.some(
+						entry =>
+							entry.protocol === e.ev.protocol &&
+							entry.decoder === decoderType &&
+							entry.lastOutcome === "decoded",
+					)
+			)
 				this.trialMemory.record(
 					anchored.discoveryId,
 					e.ev.protocol,
@@ -4319,11 +4331,8 @@ export class ScannerService extends EventEmitter {
 				hz: e.hz,
 				at: e.ev.at,
 				protocol: e.ev.protocol,
+				minimumWidthHz: ADSB_IDENTIFY_MIN_WIDTH_HZ,
 			})) {
-				// A 0.5 µs PPM pulse has first spectral nulls at ±1/0.5 µs = ±2 MHz.
-				// Real ADS-B tracks are hundreds of kHz to MHz wide: 250 kHz is far above
-				// nearby 1–2 kHz carriers/spurs and well below the pulse spread.
-				if ((live.lastTrack?.obwHz ?? 0) < 250_000) continue
 				let accepted = false
 				for (const jobId of live.jobIds) {
 					const driver = this.drivers.get(jobId)

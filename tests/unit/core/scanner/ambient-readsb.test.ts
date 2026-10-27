@@ -659,37 +659,90 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		},
 	)
 
-	it("Identify on the anchor reports already decoded without starting a trial", async () => {
+	it("records one anchor trial rather than counting accepted messages", async () => {
 		const r = await serviceRig("trusted", { observation: "none" })
 		try {
-			r.send(parseSbsLine(sbsLine("00:00:01.000")))
-			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
-			const job = await r.h.service.identify({
-				sourceId: "rtl",
-				target: { frequencyHz: ADSB_HZ },
-				record: false,
-			})
-			expect(job).toMatchObject({
-				state: "completed",
-				identify: {
-					targets: [
-						{
-							state: "identified",
-							trials: [],
-							result: {
-								alreadyDecoded: "already decoded: ADS-B, 1 aircraft",
-								protocol: "adsb",
-							},
-						},
-					],
-				},
-			})
-			expect(r.h.decoders.held.size).toBe(0)
+			const memory = (
+				r.h.service as unknown as {
+					trialMemory: { record: (...args: unknown[]) => void }
+				}
+			).trialMemory
+			const record = vi.spyOn(memory, "record")
+			for (let second = 1; second <= 39; second += 2)
+				r.send(
+					parseSbsLine(sbsLine(`00:00:${String(second).padStart(2, "0")}.000`)),
+					2_000,
+				)
+			const anchor = r.internals.store.snapshot().discoveries[0]
+			if (!anchor) throw new TypeError("synthetic anchor missing")
+			expect(record).toHaveBeenCalledTimes(1)
+			expect(r.h.service.trialMemoryOf(anchor.id)).toMatchObject([
+				{ attempts: 1, decoded: 1, lastOutcome: "decoded" },
+			])
 		} finally {
 			await r.h.service.stop()
 			r.provenance.dispose()
 		}
 	})
+
+	it.each([
+		[0, 0, true],
+		[2_000, 0, false],
+		[undefined, 0, false],
+		[0, 60_000, true],
+		[0, 60_001, false],
+	] as const)(
+		"anchor Identify width=%i age=%i short-circuits=%s",
+		async (bandwidthHz, age, shortcut) => {
+			const r = await serviceRig("trusted", { observation: "none" })
+			try {
+				r.send(parseSbsLine(sbsLine("00:00:01.000")))
+				r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+				if (age > 0) {
+					r.advance(age)
+					const store = r.internals.store as unknown as {
+						discoveries: Map<string, { aircraftCount: number }>
+					}
+					for (const anchor of store.discoveries.values())
+						anchor.aircraftCount = 0
+				}
+				const job = await r.h.service.identify({
+					sourceId: "rtl",
+					target: {
+						frequencyHz: ADSB_HZ,
+						...(bandwidthHz !== undefined ? { bandwidthHz } : {}),
+					},
+					record: false,
+				})
+				if (!shortcut) {
+					expect(job.state).not.toBe("completed")
+					expect(
+						job.identify?.targets.some(t => t.result?.alreadyDecoded),
+					).not.toBe(true)
+					return
+				}
+				expect(job).toMatchObject({
+					state: "completed",
+					identify: {
+						targets: [
+							{
+								state: "identified",
+								trials: [],
+								result: {
+									alreadyDecoded: `already decoded: ADS-B, ${age > 0 ? 0 : 1} aircraft`,
+									protocol: "adsb",
+								},
+							},
+						],
+					},
+				})
+				expect(r.h.decoders.held.size).toBe(0)
+			} finally {
+				await r.h.service.stop()
+				r.provenance.dispose()
+			}
+		},
+	)
 
 	it.each([
 		[2_000, "valid", false],
@@ -710,7 +763,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 				).artefactAt = () => Promise.resolve(null)
 				const job = await r.h.service.identify({
 					sourceId: "rtl",
-					target: { frequencyHz: ADSB_HZ, bandwidthHz: 100_000 },
+					target: { frequencyHz: ADSB_HZ + 50_000, bandwidthHz: 100_000 },
 					record: false,
 				})
 				const service = r.h.service as unknown as {
@@ -727,8 +780,23 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 				record.startedAt = r.internals.now()
 				live.jobIds.push(job.id)
 				live.lastTrack.blocks = 20
-				live.lastTrack.centreHz = ADSB_HZ + 10_000
+				live.lastTrack.centreHz = ADSB_HZ + 50_000
 				live.lastTrack.obwHz = obwHz
+				// Two nearer spurs must never starve the qualifying wide observation.
+				for (const offset of [10_000, 20_000]) {
+					const id = `spur-${offset}`
+					r.internals.live.set(id, {
+						...live,
+						observationId: id,
+						trackId: id,
+						jobIds: [],
+						lastTrack: {
+							...live.lastTrack,
+							centreHz: ADSB_HZ + offset,
+							obwHz: 2_000,
+						},
+					})
+				}
 				live.lastTrack.gate = "passed"
 				;(
 					r.h.service as unknown as {
@@ -895,6 +963,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			expect(r.internals.store.get(id)!.lastSeenAt > first.lastSeenAt).toBe(
 				true,
 			)
+			expect(r.h.service.trialMemoryOf(id)).toMatchObject([{ attempts: 1 }])
 			const snapshot = r.internals.store.snapshot()
 			const again = await serviceRig("trusted", {
 				observation: "none",
@@ -909,15 +978,38 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 						aircraftCount: 0,
 					})),
 				})
+				const changes: string[] = []
+				again.internals.store.on("change", (_id, change) =>
+					changes.push(change),
+				)
 				again.send(parseSbsLine(sbsLine("00:00:10.000")))
 				again.send(parseSbsLine(sbsLine("00:00:12.000")), 2000)
 				expect(
 					again.internals.store.snapshot().discoveries.map(d => d.id),
 				).toEqual([id])
+				expect(changes).toEqual(["updated"])
+				const mutation = vi.fn()
+				again.internals.store.on("mutation", mutation)
+				changes.length = 0
 				again.advance(86_400_000)
 				expect(again.internals.store.pruneInactive(1)).toEqual([])
 				again.advance(1)
 				expect(again.internals.store.pruneInactive(1)).toEqual([id])
+				expect(changes).toEqual(["deleted"])
+				expect(mutation).toHaveBeenCalledTimes(1)
+				expect(mutation).toHaveBeenCalledWith(
+					expect.objectContaining({
+						op: "evict",
+						payload: expect.objectContaining({
+							deleted: [id],
+							discoveries: [],
+						}),
+					}),
+				)
+				const state = again.internals.store as unknown as {
+					anchorExpiry: Map<string, unknown>
+				}
+				expect(state.anchorExpiry.size).toBe(0)
 			} finally {
 				await again.h.service.stop()
 				again.provenance.dispose()

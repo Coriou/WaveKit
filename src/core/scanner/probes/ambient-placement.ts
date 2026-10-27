@@ -32,6 +32,11 @@ export const AMBIENT_CHANNEL_WIDTH_HZ: Readonly<Record<string, number>> =
 /** Least reach of a VFO-targeted ambient decoder (unchanged WG7 rule): 1.5 kHz. */
 export const AMBIENT_VFO_MIN_REACH_HZ = 1500
 
+/** A 0.5 µs PPM pulse has first nulls at ±1/0.5 µs = ±2 MHz.
+ * Real ADS-B tracks are hundreds of kHz to MHz wide; nearby carriers/spurs
+ * are 1–2 kHz. 250 kHz excludes those while retaining broad pulse tracks. */
+export const ADSB_IDENTIFY_MIN_WIDTH_HZ = 250_000
+
 /**
  * Placement tolerance: 1 kHz decoder/raster agreement + 1.5 kHz measured-centre
  * error = 2.5 kHz. Including the 1.5 kHz minimum half-span, the added
@@ -68,6 +73,7 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 		hz: number
 		at: number
 		protocol: ScannerProtocol | null
+		minimumWidthHz?: number
 	},
 	now: number,
 	pairMs: number,
@@ -80,6 +86,8 @@ export function placeAmbientDecode<T extends PlacementCandidate>(
 		if (o.sourceId !== e.sourceId || !t || !Number.isFinite(t.centreHz))
 			continue
 		if (e.at < o.startedAt - pairMs || e.at > (o.endedAt ?? now) + pairMs)
+			continue
+		if (e.minimumWidthHz !== undefined && !(t.obwHz >= e.minimumWidthHz))
 			continue
 		// ADS-B placement serves Identify/confirmation scopes only; discovery ownership is the anchor.
 		const distance = Math.abs(t.centreHz - e.hz)

@@ -8,6 +8,7 @@
  * IdentifyRunner decorates the job's in-window JobRunner, which keeps the lifecycle (transition
  * table), the engine reference and the teardown.
  */
+import { ANCHOR_AIRCRAFT_WINDOW_MS } from "./store/decode-anchor.js"
 import { DQ_DATA_HOLD_MS } from "./data-decode-gate.js"
 import type {
 	DiscoveryMetadata,
@@ -1367,11 +1368,22 @@ export class IdentifyRunner implements JobDriver {
 
 	start(): Promise<void> {
 		const target = this.deps.identify.target
+		// Discovery requests carry the anchor's zero bandwidth. Frequency-only requests
+		// and measured spectrum targets must collect their own trial evidence.
 		const anchor =
 			"all" in target
 				? undefined
 				: this.deps.anchorAt?.(this.sourceId, target.frequencyHz)
-		if (anchor && !("all" in target)) {
+		if (
+			anchor?.anchor === "decode" &&
+			!("all" in target) &&
+			target.frequencyHz === anchor.frequencyHz &&
+			target.bandwidthHz === 0 &&
+			anchor.bandwidthHz === 0 &&
+			((anchor.aircraftCount ?? 0) > 0 ||
+				this.deps.now() - Date.parse(anchor.lastSeenAt) <=
+					ANCHOR_AIRCRAFT_WINDOW_MS)
+		) {
 			const t = this.newTarget(
 				target.frequencyHz,
 				toleranceHz(target.bandwidthHz),

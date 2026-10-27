@@ -635,14 +635,24 @@ when full, the oldest entries leave first. No aircraft list is persisted in `Obs
 After restart, the count starts at zero and rebuilds from fresh confirmations. The anchor
 has no individual aircraft identity. Count expiry runs even without further confirmations.
 Journal entries and discovery events publish count changes or a new 10-second last-seen bucket,
-limited to one write per anchor every 5 seconds, with a final latest-state flush on stop/removal.
+limited to one write per anchor every 5 seconds, with a final latest-state flush on stop.
+Removal journals a single delete.
 Before rate limiting, writes are at most one per bucket plus one per count change
 (confirmations bound increases; expiry bounds decreases). With rate limiting, a busy
 minute uses at most 12 rate slots plus creation and final flush, independent of aircraft count.
-The persisted anchor stays constant size. Identify at an existing anchor reports
-“already decoded: ADS-B, N aircraft” without a trial. Identify on a 1090 MHz spectrum
+The persisted anchor stays constant size. Identify at the exact canonical anchor frequency
+with explicitly zero bandwidth (the anchor discovery’s unmeasured width) reports
+“already decoded: ADS-B, N aircraft” without a trial only while its aircraft count is positive
+or its last confirmation is within 60 seconds. Frequency-only requests and measured spectrum
+targets run the normal trial. A stale anchor also runs the normal Identify trial and must
+receive fresh qualifying spectrum evidence; the anchor itself supplies no measured track.
+Without such a track, the trial waits for a signal and ends with no signal at its deadline.
+Identify on a 1090 MHz spectrum
 observation can receive fresh ADS-B confirmations only when its measured occupied bandwidth
-is at least 250 kHz. Narrow carriers and spurs cannot complete Identify as ADS-B.
+is at least 250 kHz. Width filtering happens before choosing the nearest track, so a closer
+spur cannot hide a wide track. Anchor trial memory records the first accepted outcome and
+subsequent outcome changes, rather than counting messages as trials. Narrow carriers and
+spurs cannot complete Identify as ADS-B.
 Spectrum trial success is recorded only after the running Identify trial accepts the
 confirmation for its target, epoch and deadline; the spectrum discovery remains
 unidentified by ADS-B.

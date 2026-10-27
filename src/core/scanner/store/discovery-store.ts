@@ -1095,7 +1095,7 @@ export class DiscoveryStore
 		this.anchorExpiry.clear()
 	}
 
-	private publishAnchor(id: string, force = false): void {
+	private publishAnchor(id: string, force = false, created = false): void {
 		const d = this.discoveries.get(id)
 		const pending = this.anchorPending.get(id)
 		if (!d || !pending) return
@@ -1112,7 +1112,7 @@ export class DiscoveryStore
 					previous.observations === pending.observations))
 		)
 			return
-		// At most one write / 5 s, plus creation and the final stop/removal flush.
+		// At most one write / 5 s, plus creation and the final stop flush.
 		// Before rate limiting: at most one / 10 s bucket + one / count change.
 		if (!force && previous && now - previous.at < 5_000) return
 		this.anchorPublished.set(id, {
@@ -1133,12 +1133,12 @@ export class DiscoveryStore
 			this.touch(d)
 			op.discoveries.add(id)
 			op.observations.add(`decode:${id}`)
-			mark(op, id, previous ? "updated" : "created")
+			mark(op, id, created ? "created" : "updated")
 			return id
 		})
 	}
 
-	private scheduleAnchorExpiry(id: string): void {
+	private scheduleAnchorExpiry(id: string, created = false): void {
 		const previous = this.anchorExpiry.get(id)
 		if (previous) clearTimeout(previous)
 		this.anchorExpiry.delete(id)
@@ -1154,7 +1154,7 @@ export class DiscoveryStore
 		const pending = this.anchorPending.get(id)
 		if (!pending) return
 		pending.count = rows?.size ?? 0
-		this.publishAnchor(id)
+		this.publishAnchor(id, false, created)
 		if (!this.anchorExpiryEnabled) return
 		const oldest = rows?.values().next().value
 		let next =
@@ -1237,7 +1237,7 @@ export class DiscoveryStore
 				(existingId === undefined ? 0 : 1),
 			trust,
 		})
-		this.scheduleAnchorExpiry(d.id)
+		this.scheduleAnchorExpiry(d.id, existingId === undefined)
 		return {
 			discoveryId: d.id,
 			change: existingId === undefined ? "created" : "updated",
@@ -5155,7 +5155,7 @@ export class DiscoveryStore
 	private removeDiscovery(id: string): void {
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
-		if (d.anchor === "decode") this.publishAnchor(id, true)
+		// The outer delete/merge journals removal; publishing here would nest a commit.
 		this.anchorWindows.delete(id)
 		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
