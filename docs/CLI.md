@@ -99,6 +99,10 @@ Open with `6` or `--view scan`. Press `s` to cycle eligible sources; `w`, `d` an
 
 In open discovery detail, press `i` to identify the selected source, frequency and width, then `y` to confirm or `n`/Esc to discard the unsent prompt. The pinned summary shows the complete target and effects; submission is unavailable when that summary cannot fit. Identify waits up to 15 seconds for signal; trials may take longer, may preempt scanner probes, and update discoveries/observations. This action requests no trial recordings; other scanner activity may still record. Fresh supported U8 IQ and an in-window target are local readiness checks, with final admission decided by core.
 
+Discovery proof summaries can show `dumpvdl2 unavailable` or
+`lora-meshtastic unavailable` when those replay-only scanner decoders cannot run.
+These names do not indicate live scanner probe support.
+
 Press `o` to inspect the retained identify receipt by exact job ID, including after source removal or when it is absent from the displayed jobs. Leaving Scan stops optional inspection reads without cancelling the job. A fresh terminal direct read permits another deliberate identification; terminal status does not establish successful decoding or resource cleanup.
 
 Submission is never retried automatically. A lost response or unusable creation response leaves an uncertain receipt blocked for this CLI session; inspect jobs without assuming a similar job is the same request. Receipts are not durable across process restart, and restarting does not establish that prior work stopped. The API does not provide exactly-once submission or conditional discovery/stream binding. Scan does not tune, cancel jobs, listen or download recordings. Scanner-owned decoder probes remain unavailable for manual lifecycle controls.

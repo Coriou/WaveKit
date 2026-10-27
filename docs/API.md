@@ -3844,7 +3844,8 @@ Since 2026-10-17: the probe pool remembers a decoder type found unavailable for 
 (`PROBE_UNAVAILABLE_MEMO_MS`); meanwhile identify plans that type's trials as
 `unsupported`/`decoder-unavailable` without spawning, and a successful start of the
 type clears it. `result.decodersUnavailable` lists the probe decoder types (`dsd-fme`,
-`multimon-ng`, `direwolf`, `rtl433`; sorted, unique) that could not run during this
+`multimon-ng`, `direwolf`, `rtl433`, plus replay-only `acarsdec`, `dumpvdl2` and
+`lora-meshtastic`; sorted, unique) that could not run during this
 job; absent when none. A decoder that ran and heard nothing stays `no-sync`.
 
 **Analog voice.** Identify reads the live demodulator's analog transmissions
@@ -7082,6 +7083,9 @@ without decoded tone), `data-like` and `carrier-only`, alongside `pending`,
 `running`, `decoded`, `no-sync`, `crc-errors`, `timeout` and `cancelled`.
 Missing decoder programs report `unsupported` with `reason: "decoder-unavailable"`,
 never a failed synchronization, and appear in `proof.unavailable`.
+`ScannerProbeDecoderType` includes replay-only `dumpvdl2` and `lora-meshtastic`
+(alongside `acarsdec`); their presence in proof or unavailable lists does not
+enable live scanner probes.
 
 `scanner.iqCapture.allowLegacy` (default false) is reserved: today IQ capture runs
 only in protected access mode, whatever this flag says. It is meant to permit capture
