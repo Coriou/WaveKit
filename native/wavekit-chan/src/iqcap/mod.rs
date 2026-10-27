@@ -26,7 +26,7 @@ use std::thread;
 
 pub const VERSION_LINE: &str = concat!("wavekit-iqcap ", env!("CARGO_PKG_VERSION"));
 
-const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> [--rate-ack] | replay --in <abs file> --bandwidth <hz> --transition <hz> [--rate 48000|96000|192000] | analyze --in <abs file> --mode nfm|am [--rate 48000|96000|192000]";
+const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> [--rate-ack] | replay --in <abs file> --bandwidth <hz> --transition <hz> [--rate 48000|96000|192000] [--out-rate 48000|105000|250000] [--format cf32|cu8] | analyze --in <abs file> --mode nfm|am [--rate 48000|96000|192000]";
 
 /// Process entry; returns the exit code.
 pub fn main_entry(argv: &[String]) -> i32 {
@@ -131,6 +131,8 @@ pub struct ReplayArgs {
     pub rate_hz: u64,
     /// `--out-rate 48000`: the output is brought to 48 kHz (a 48 kHz consumer of a faster capture).
     pub out48: bool,
+    pub out_rate: u64,
+    pub cu8: bool,
 }
 
 /// Splits an optional `--rate` off `args`: the rest, and the rate (default 48 000, one of
@@ -178,17 +180,53 @@ pub fn parse_analyze(args: &[String]) -> Result<analyze::AnalyzeArgs, String> {
     })
 }
 
+fn replay_gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Peak component target 10^(-6/20) = 0.501187: 6 dB headroom before CU8.
+/// Gain is at most 256 (48.16 dB); silence and malformed samples use unity.
+fn replay_cu8_gain(input: &[f32]) -> f32 {
+    let mut peak = 0.0_f32;
+    for x in input {
+        if !x.is_finite() {
+            return 1.0;
+        }
+        peak = peak.max(x.abs());
+    }
+    if peak == 0.0 {
+        1.0
+    } else {
+        (10.0_f32.powf(-6.0 / 20.0) / peak).min(256.0)
+    }
+}
+
 pub fn parse_replay(args: &[String]) -> Result<ReplayArgs, String> {
     // `--rate` (the capture's rate) and `--out-rate 48000` (bring it to 48 kHz) are optional.
     let (rest, rate_hz) = split_rate(args)?;
     let mut rest2: Vec<String> = Vec::with_capacity(rest.len());
-    let mut out48 = false;
+    let mut out_rate = None;
+    let mut format = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
-        if a == "--out-rate" {
+        if a == "--format" {
             match it.next().map(String::as_str) {
-                Some("48000") if !out48 => out48 = true,
-                _ => return Err("--out-rate must be 48000, given once".into()),
+                Some(v @ ("cf32" | "cu8")) if format.is_none() => format = Some(v),
+                _ => return Err("--format must be cf32 or cu8, given once".into()),
+            }
+        } else if a == "--out-rate" {
+            match it.next().map(String::as_str) {
+                Some(v) if out_rate.is_none() => {
+                    let rate = num(v, "out-rate")?;
+                    if ![48_000, 105_000, 250_000].contains(&rate) {
+                        return Err("--out-rate must be 48000, 105000 or 250000".into());
+                    }
+                    out_rate = Some(rate);
+                }
+                _ => return Err("--out-rate must be given once".into()),
             }
         } else {
             rest2.push(a.clone());
@@ -200,7 +238,9 @@ pub fn parse_replay(args: &[String]) -> Result<ReplayArgs, String> {
         bandwidth_hz: hz(v[1], "bandwidth")?,
         transition_hz: hz(v[2], "transition")?,
         rate_hz,
-        out48,
+        out48: out_rate == Some(48_000),
+        out_rate: out_rate.unwrap_or(rate_hz),
+        cu8: format == Some("cu8"),
     };
     if !r.input.is_absolute() {
         return Err("--in must be absolute".into());
@@ -208,9 +248,17 @@ pub fn parse_replay(args: &[String]) -> Result<ReplayArgs, String> {
     if !dsp::replay_shape_ok_at(r.bandwidth_hz, r.transition_hz, r.rate_hz) {
         return Err("bandwidth/2 + transition must fit in rate/2 (transition >= 100 Hz)".into());
     }
-    // A 48 kHz output needs a shape that ends by 24 kHz (nothing folds back).
-    if r.out48 && !dsp::replay_shape_ok(r.bandwidth_hz, r.transition_hz) {
-        return Err("--out-rate 48000 needs bandwidth/2 + transition within 24 kHz".into());
+    // The output shape must end by output Nyquist (nothing folds back).
+    if r.bandwidth_hz / 2.0 + r.transition_hz > r.out_rate as f64 / 2.0 {
+        return Err(format!(
+            "output rate {} Hz needs bandwidth/2 + transition <= {} Hz",
+            r.out_rate,
+            r.out_rate / 2
+        ));
+    }
+    if r.out_rate != r.rate_hz {
+        let up = r.rate_hz as f64 * (r.out_rate / replay_gcd(r.rate_hz, r.out_rate)) as f64;
+        crate::design::kaiser_len_checked(r.transition_hz / up, dsp::MAX_REPLAY_TAPS)?;
     }
     Ok(r)
 }
@@ -258,12 +306,31 @@ pub fn replay(r: &ReplayArgs) -> i32 {
     };
     let out = if r.out48 {
         dsp::to_capture_rate(&input, r.rate_hz, r.bandwidth_hz, r.transition_hz)
+    } else if r.out_rate != r.rate_hz {
+        match dsp::resample_replay(
+            &input,
+            r.rate_hz,
+            r.out_rate,
+            r.bandwidth_hz,
+            r.transition_hz,
+        ) {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("wavekit-iqcap: replay: {e}");
+                return 2;
+            }
+        }
     } else {
         dsp::replay_filter_at(&input, r.bandwidth_hz, r.transition_hz, r.rate_hz)
     };
-    let mut bytes = Vec::with_capacity(out.len() * 4);
+    let gain = if r.cu8 { replay_cu8_gain(&out) } else { 1.0 };
+    let mut bytes = Vec::with_capacity(out.len() * if r.cu8 { 1 } else { 4 });
     for x in &out {
-        bytes.extend_from_slice(&x.to_le_bytes());
+        if r.cu8 {
+            bytes.push(crate::convert::f32_to_cu8(*x, gain).0);
+        } else {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
     }
     let stdout = std::io::stdout();
     let mut l = stdout.lock();
@@ -317,7 +384,7 @@ fn open_control_fd() -> Result<std::fs::File, ()> {
 /// The `ready` event: with `--rate-ack` it lists the accepted rates; without, the legacy line.
 pub fn ready_event(rate_ack: bool, rates: &[u64]) -> Value {
     if rate_ack {
-        json!({"type": "ready", "rates": rates})
+        json!({"type": "ready", "rates": rates, "wideband": true})
     } else {
         json!({"type": "ready"})
     }
@@ -405,6 +472,111 @@ mod replay_rate_tests {
     }
 
     #[test]
+    fn cu8_gain_has_headroom_cap_and_safe_silence() {
+        let target = 10.0_f32.powf(-6.0 / 20.0);
+        let edge = target / 256.0;
+        assert_eq!(super::replay_cu8_gain(&[0.0; 4]), 1.0);
+        assert_eq!(super::replay_cu8_gain(&[f32::NAN]), 1.0);
+        assert_eq!(super::replay_cu8_gain(&[f32::INFINITY]), 1.0);
+        assert_eq!(super::replay_cu8_gain(&[edge]), 256.0);
+        assert_eq!(super::replay_cu8_gain(&[edge / 2.0]), 256.0);
+        assert!(super::replay_cu8_gain(&[edge * 1.001]) < 256.0);
+        let weak = 0.0001;
+        assert_eq!(crate::convert::f32_to_cu8(weak, 1.0).0, 128);
+        assert!(crate::convert::f32_to_cu8(weak, super::replay_cu8_gain(&[weak])).0 > 130);
+        let gain = super::replay_cu8_gain(&[-0.01, 0.005]);
+        assert!((gain * 0.01 - target).abs() < 1e-6);
+        assert!((super::replay_cu8_gain(&[2.0]) * 2.0 - target).abs() < 1e-6);
+    }
+
+    #[test]
+    fn output_shape_error_names_the_actual_clock() {
+        let argv: Vec<String> = [
+            "--in",
+            "/x.cf32",
+            "--bandwidth",
+            "100000",
+            "--transition",
+            "3000",
+            "--rate",
+            "192000",
+            "--out-rate",
+            "105000",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            parse_replay(&argv).err().unwrap(),
+            "output rate 105000 Hz needs bandwidth/2 + transition <= 52500 Hz"
+        );
+    }
+
+    #[test]
+    fn replay_cli_caps_prototype_before_design() {
+        let up = 192_000.0 * 125.0;
+        // Invert ceil((A-7.95)/(14.36*t)) + 1, rounded odd.
+        let transition = (crate::design::DESIGN_ATTENUATION_DB - 7.95)
+            / (14.36 * ((super::dsp::MAX_REPLAY_TAPS - 1) as f64 - 0.25))
+            * up;
+        assert_eq!(
+            crate::design::kaiser_len_checked(transition / up, super::dsp::MAX_REPLAY_TAPS)
+                .unwrap(),
+            super::dsp::MAX_REPLAY_TAPS
+        );
+        let t = transition.to_string();
+        assert!(parse_replay(&args(&[
+            "--transition",
+            &t,
+            "--rate",
+            "192000",
+            "--out-rate",
+            "250000"
+        ]))
+        .is_ok());
+        let past = (transition * 0.999).to_string();
+        assert!(parse_replay(&args(&[
+            "--transition",
+            &past,
+            "--rate",
+            "192000",
+            "--out-rate",
+            "250000"
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn accepts_exact_decoder_rates_and_u8_format_only() {
+        for rate in ["105000", "250000"] {
+            let r = parse_replay(&args(&[
+                "--transition",
+                "288",
+                "--out-rate",
+                rate,
+                "--format",
+                "cu8",
+            ]))
+            .unwrap();
+            assert!(r.cu8);
+            assert_eq!(r.out_rate.to_string(), rate);
+        }
+        for rate in ["104999", "105001", "249999", "250001"] {
+            assert!(parse_replay(&args(&["--transition", "288", "--out-rate", rate])).is_err());
+        }
+        assert!(parse_replay(&args(&["--transition", "288", "--format", "s16"])).is_err());
+        assert!(parse_replay(&args(&[
+            "--transition",
+            "288",
+            "--format",
+            "cu8",
+            "--format",
+            "cu8"
+        ]))
+        .is_err());
+    }
+
+    #[test]
     fn replay_rate_is_optional_and_bounded() {
         assert_eq!(
             parse_replay(&args(&["--transition", "288"]))
@@ -478,7 +650,7 @@ mod replay_rate_tests {
         );
         assert_eq!(
             serde_json::to_string(&super::ready_event(true, &[48_000, 96_000])).unwrap(),
-            r#"{"rates":[48000,96000],"type":"ready"}"#
+            r#"{"rates":[48000,96000],"type":"ready","wideband":true}"#
         );
     }
 

@@ -699,6 +699,22 @@ Targets and tags are defined in `docker/bake.hcl`; see [Docker setup](DOCKER-SET
 - Sample decoder output for parsing tests
 - Located in `tests/mocks/fixtures/`
 
+The offline IQ replay tool reuses the native rational polyphase FIR for decoder
+clocks: 48/96/192 kHz captures can become exactly 105 kHz for VDL2, and a 192 kHz
+capture can become 250 kHz for 125 kHz LoRa. Replay can emit U8 directly for these
+decoders; audio consumers retain cf32. The output length is exactly
+`ceil(inputSamples * outputRate / inputRate)`, without a filter tail. Capture at
+192 kHz scales the narrow passband by four, capped at 150 kHz (125 kHz plus two
+12.5 kHz guards), leaving a 42 kHz capture-filter transition. Its ready event must
+acknowledge this wider passband before the core requests that rate.
+
+The IQ replay CLI normalizes CU8 output by its largest absolute I/Q component:
+gain = min(256, 10^(-6/20) / peak), leaving 6 dB headroom. All-zero or non-finite
+input uses unity gain. CF32 output retains its original level. The rational
+resampler checks its Kaiser length before allocation and caps the prototype,
+including verification growth, at 131071 taps (131071 × 4 = 524284 bytes of f32
+coefficients). A request beyond this cap fails with a tap-limit error.
+
 ### Wireless M-Bus activity
 
 rtl_433 signal output with model `Wireless-MBus` is presented as protocol

@@ -1,3 +1,4 @@
+import { SCANNER_PROBE_DECODER_TYPES } from "@wavekit/api-types"
 import { isDsdFmeProtocol } from "./probes/confirm/dsd-fme.js"
 import {
 	SCANNER_PROOF_PROTOCOL_LABEL,
@@ -36,7 +37,7 @@ const RAN = new Set<string>([
 	"carrier-only",
 ])
 
-const PROBES = new Set<string>(["direwolf", "dsd-fme", "multimon-ng", "rtl433"])
+const PROBES = new Set<string>(SCANNER_PROBE_DECODER_TYPES)
 
 const RANK: Readonly<Record<ScannerProofKind, number>> = {
 	decoded: 5,

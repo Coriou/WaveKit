@@ -1,3 +1,5 @@
+import { SCANNER_PROBE_DECODER_TYPES } from "@wavekit/api-types"
+import { captureRateFor } from "../iq-capture/rates.js"
 /**
  * Identify mode (spec § 10.8, the primary use case): "what is this signal?" for one waterfall
  * target or every surfaced emission in the window. Never retunes. A target on an artefact mask
@@ -1006,14 +1008,9 @@ export function planAnalogTrials(
 	return out
 }
 
-const PROBE_DECODER_TYPES: ReadonlySet<string> =
-	new Set<ScannerProbeDecoderType>([
-		"dsd-fme",
-		"multimon-ng",
-		"direwolf",
-		"rtl433",
-		"acarsdec",
-	])
+const PROBE_DECODER_TYPES: ReadonlySet<string> = new Set(
+	SCANNER_PROBE_DECODER_TYPES,
+)
 
 /**
  * WG10 req 3.5 (pure): the plan's trials whose run's decoder type `memo` names become `unsupported`/
@@ -3078,6 +3075,11 @@ export class IdentifyRunner implements JobDriver {
 				tuningTrust: view.track.tuningTrust,
 				fromSample: view.track.startSample,
 				reason: "identify",
+				rateHz: captureRateFor({
+					rfHz: view.track.centreHz,
+					priors: this.deps.priorsAt(view.track.centreHz),
+					track: view.track,
+				}),
 			}
 			// Review M2: held for this job from the start (the queue skips held captures).
 			const reserve = port.captureFor !== undefined && port.view !== undefined

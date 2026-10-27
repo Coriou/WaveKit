@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use wavekit_chan::iqcap::command::Command;
-use wavekit_chan::iqcap::dsp::{replay_filter, CaptureDsp, ChainDesign};
+use wavekit_chan::iqcap::dsp::{capture_bandwidth, replay_filter, CaptureDsp, ChainDesign};
 use wavekit_chan::iqcap::engine::{Config, Engine};
 
 const BW: f64 = 25_000.0;
@@ -133,6 +133,10 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
 /// One capture of `ms` milliseconds of a source tone at output rate `rate`; the published bytes
 /// or the error code.
 fn capture_at(rate: u64, ms: u64) -> Result<usize, String> {
+    capture_at_offset(rate, ms, 0.0)
+}
+
+fn capture_at_offset(rate: u64, ms: u64, past_edge: f64) -> Result<usize, String> {
     let fs = 1_024_000u64;
     let dir = tmp_dir();
     let mut e = Engine::new(Config {
@@ -149,7 +153,8 @@ fn capture_at(rate: u64, ms: u64) -> Result<usize, String> {
     e.command(
         Command::Capture {
             id: ID.into(),
-            offset_hz: 474_000.0,
+            // Source Nyquist minus the actual capture half-passband; 1 Hz past must fail.
+            offset_hz: fs as f64 / 2.0 - capture_bandwidth(47_424.0, rate) / 2.0 + past_edge,
             from_sample: e.oldest(),
             max_ms: 4000,
             rate_hz: rate,
@@ -158,7 +163,12 @@ fn capture_at(rate: u64, ms: u64) -> Result<usize, String> {
     );
     // ms of input (4 100 ms past the bound: the 4 000 ms budget ends the capture by itself).
     let ms = if ms >= 4000 { 4100 } else { ms };
-    let input = tone(fs, 474_000.0, (fs * ms / 1000) as usize, 7);
+    let input = tone(
+        fs,
+        fs as f64 / 2.0 - capture_bandwidth(47_424.0, rate) / 2.0 + past_edge,
+        (fs * ms / 1000) as usize,
+        7,
+    );
     for c in input.chunks(65_536) {
         e.input(c, &mut ev);
     }
@@ -188,6 +198,13 @@ fn a_capture_runs_at_its_requested_rate_within_its_file_bound() {
     ] {
         assert_eq!(capture_at(rate, 4000).unwrap(), cap, "{rate}");
     }
+    // The 192 kHz capture has a wider passband: at the source edge is legal,
+    // one Hz past it cannot preserve the whole channel.
+    assert!(capture_at_offset(192_000, 100, 0.0).is_ok());
+    assert_eq!(
+        capture_at_offset(192_000, 100, 1.0),
+        Err("out-of-range".into())
+    );
     // An unsupported rate never opens a file.
     assert_eq!(capture_at(250_000, 100), Err("out-of-range".into()));
 }

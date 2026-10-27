@@ -14,6 +14,7 @@ import {
 import {
 	boundReplayTrials,
 	planReplayTrials,
+	planReplayTrialsDetailed,
 } from "../../../../src/core/scanner/replay-plan.js"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { TARGET_HZ, trackOf } from "../../../mocks/scanner/identify-fakes.js"
@@ -28,6 +29,7 @@ const capture: IqCaptureView = {
 	capturedAtMs: 0,
 	durationMs: 2000,
 	gapSamples: 0,
+	rateHz: 192_000,
 }
 
 function input(over: Partial<IqReplayPlanInput> = {}): IqReplayPlanInput {
@@ -466,13 +468,9 @@ describe("planReplayTrials", () => {
 								expect(t.analogMode).toBe(expectAm ? "am" : "nfm")
 							}
 						} else {
-							expect([
-								"analog-fm",
-								"analog-am",
-								"ais",
-								"vdl2",
-								"lora",
-							]).not.toContain(t.protocol)
+							expect(["analog-fm", "analog-am", "ais"]).not.toContain(
+								t.protocol,
+							)
 						}
 					}
 					if (analogs.length === 1) {
@@ -510,8 +508,10 @@ describe("planReplayTrials", () => {
 							"aprs",
 							// the ISM replay trial (rtl433)
 							"ism",
-							// the ACARS replay trial (acarsdec)
+							// the extra IQ replay trials
 							"acars",
+							"vdl2",
+							"lora",
 						].includes(c.known)
 					const knownPlanned =
 						replayable || (knownAnalog && !(knownAnalog && pagerFirst))
@@ -525,11 +525,49 @@ describe("planReplayTrials", () => {
 								// a listed ISM band calls the rtl433 replay trial too
 								(c.known !== "ism" && (c.priors["ism"] ?? 0) >= 1 ? 1 : 0) +
 								// and a listed ACARS channel the acarsdec one
-								(c.known !== "acars" && (c.priors["acars"] ?? 0) >= 1 ? 1 : 0),
+								(c.known !== "acars" && (c.priors["acars"] ?? 0) >= 1 ? 1 : 0) +
+								(c.known !== "vdl2" && (c.priors["vdl2"] ?? 0) >= 1 ? 1 : 0) +
+								(c.known !== "lora" && (c.priors["lora"] ?? 0) >= 1 ? 1 : 0),
 						)
 				},
 			),
 			{ numRuns: 300 },
 		)
 	})
+})
+
+describe("LoRa replay capture gate", () => {
+	it.each([undefined, 48_000, 96_000, 191_999, 192_000, 192_001, NaN])(
+		"requires exactly 192000 Hz, got %s",
+		rateHz => {
+			const captureAtRate = {
+				...capture,
+				...(rateHz === undefined ? {} : { rateHz }),
+			}
+			if (rateHz === undefined) delete captureAtRate.rateHz
+			for (const knownProtocol of ["lora", null] as const) {
+				const plan = planReplayTrialsDetailed(
+					input({
+						capture: captureAtRate as IqCaptureView,
+						knownProtocol,
+						priors: { lora: 1 },
+					}),
+				)
+				expect(plan.trials.some(t => t.protocol === "lora")).toBe(
+					rateHz === 192_000,
+				)
+				expect(plan.skipped).toEqual(
+					rateHz === 192_000
+						? []
+						: [
+								{
+									protocol: "lora",
+									decoder: "lora-meshtastic",
+									reason: "lora-needs-192khz",
+								},
+							],
+				)
+			}
+		},
+	)
 })

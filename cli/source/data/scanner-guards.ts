@@ -2,6 +2,7 @@ import { z } from "zod"
 import { validProofFields } from "./scanner-proof.js"
 import type { ScannerProof } from "@wavekit/api-types"
 import {
+	SCANNER_PROBE_DECODER_TYPES,
 	SCANNER_PROOF_PROTOCOL_LABEL,
 	SCANNER_PROOF_SUMMARY_MAX_CHARS,
 	SCANNER_PROOF_TRIED_MAX,
@@ -228,10 +229,7 @@ const proof = z
 			.optional(),
 		voice: z.boolean().optional(),
 		tried: boundedArray(proofProtocol, SCANNER_PROOF_TRIED_MAX),
-		unavailable: boundedArray(
-			z.enum(["dsd-fme", "multimon-ng", "direwolf", "rtl433"]),
-			16,
-		),
+		unavailable: boundedArray(z.enum(SCANNER_PROBE_DECODER_TYPES), 16),
 		encrypted: z.boolean(),
 		summary: z.string().max(SCANNER_PROOF_SUMMARY_MAX_CHARS),
 	})

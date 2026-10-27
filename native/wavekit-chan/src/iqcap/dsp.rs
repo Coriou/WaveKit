@@ -1,7 +1,7 @@
 //! Capture DSP: CU8 at the source rate → channel at `offsetHz` shifted to DC → exactly the
 //! capture output rate (48 000 Hz by default; 96 000 or 192 000 Hz per capture, `CAPTURE_RATES`)
-//! cf32, low-passed to the capture bandwidth. The passband is the same at every output rate; a
-//! higher rate keeps short pulses (a 229 µs OOK pulse is 11 samples at 48 kHz, 22 at 96 kHz) for
+//! cf32, low-passed to the capture bandwidth. The 192 kHz capture widens the passband by four
+//! for 125 kHz LoRa; 96 kHz retains the narrow passband and keeps short pulses (a 229 µs OOK pulse is 11 samples at 48 kHz, 22 at 96 kHz) for
 //! decoders whose envelope detector smears them at 48 kHz.
 //!
 //! Chain (all blocks reused from the crate library, `stages.rs` / `design.rs` / `convert.rs`):
@@ -31,8 +31,9 @@
 //! yields bit-identical output (Property 12).
 
 use crate::convert::cu8_to_f32;
-use crate::design::lowpass;
+use crate::design::{kaiser_len_checked, lowpass, lowpass_bounded};
 use crate::stages::{Nco, RationalFir};
+use std::sync::atomic::AtomicBool;
 
 /// Default output rate of a capture (contract `IQ_CAPTURE_RATE_HZ`).
 pub const CAPTURE_RATE_HZ: u64 = 48_000;
@@ -121,11 +122,12 @@ impl ChainDesign {
     }
 
     /// The design for output rate `out` (one of `CAPTURE_RATES`); the bandwidth bounds are the
-    /// 48 kHz ones at every rate (the passband does not widen with the rate).
+    /// 48 kHz ones at 96 kHz, and scaled (capped at 150 kHz) at 192 kHz for LoRa.
     pub fn with_output(fs: u64, out: u64, bandwidth_hz: f64) -> Result<Self, String> {
-        if !(MIN_BANDWIDTH_HZ..=MAX_BANDWIDTH_HZ).contains(&bandwidth_hz) {
+        let max_bandwidth = capture_bandwidth(MAX_BANDWIDTH_HZ, out);
+        if !(MIN_BANDWIDTH_HZ..=max_bandwidth).contains(&bandwidth_hz) {
             return Err(format!(
-                "bandwidth must be within {MIN_BANDWIDTH_HZ}..={MAX_BANDWIDTH_HZ} Hz"
+                "bandwidth must be within {MIN_BANDWIDTH_HZ}..={max_bandwidth} Hz"
             ));
         }
         let plan = ChainPlan::for_output(fs, out).ok_or_else(|| {
@@ -290,6 +292,71 @@ pub fn replay_filter_at(
     out
 }
 
+/// Maximum prototype payload: 131071 f32 coefficients × 4 = 524284 bytes.
+pub const MAX_REPLAY_TAPS: usize = 131_071;
+
+/// Rational polyphase replay conversion (Crochiere & Rabiner §3.3.4). The prototype
+/// passes bandwidth/2, stops transition Hz later, and is designed at rate * L with
+/// gain L. 48k→105k = 35/16; 192k→250k = 125/96. Causal output has a short
+/// leading group delay and no flushed tail: exactly ceil(N * L / M) samples.
+pub fn resample_replay(
+    input: &[f32],
+    rate: u64,
+    out: u64,
+    bandwidth: f64,
+    transition: f64,
+) -> Result<Vec<f32>, String> {
+    if !CAPTURE_RATES.contains(&rate)
+        || ![48_000, 105_000, 250_000].contains(&out)
+        || !replay_shape_ok_at(bandwidth, transition, rate)
+        || bandwidth / 2.0 + transition > out as f64 / 2.0
+    {
+        return Err("invalid replay rates or shape".into());
+    }
+    let g = gcd(rate, out);
+    let (l, m) = ((out / g) as usize, (rate / g) as usize);
+    let up = rate as f64 * l as f64;
+    kaiser_len_checked(transition / up, MAX_REPLAY_TAPS)?;
+    let taps = lowpass_bounded(
+        (bandwidth / 2.0 + transition / 2.0) / up,
+        transition / up,
+        l as f64,
+        MAX_REPLAY_TAPS,
+        &AtomicBool::new(false),
+    )?;
+    let mut fir = RationalFir::new(l, m, &taps);
+    let (mut oi, mut oq) = (Vec::new(), Vec::new());
+    let (mut bi, mut bq) = (Vec::with_capacity(4096), Vec::with_capacity(4096));
+    let mut output = Vec::with_capacity((input.len() / 2 * l).div_ceil(m) * 2);
+    for chunk in input.chunks(8192) {
+        bi.clear();
+        bq.clear();
+        oi.clear();
+        oq.clear();
+        for pair in chunk.as_chunks::<2>().0 {
+            bi.push(pair[0]);
+            bq.push(pair[1]);
+        }
+        fir.process(&bi, &bq, &mut oi, &mut oq);
+        for (i, q) in oi.iter().zip(&oq) {
+            output.extend_from_slice(&[*i, *q]);
+        }
+    }
+    Ok(output)
+}
+
+/// Only the widest capture (192 kHz, for 125 kHz LoRa) widens its passband:
+/// bandwidth * (192000 / 48000), capped at 125000 + 2 * 12500 = 150000 Hz.
+/// The resulting capture FIR transition is 192000 − 150000 = 42000 Hz,
+/// avoiding the expensive near-Nyquist filter while retaining the LoRa channel.
+pub fn capture_bandwidth(bandwidth: f64, rate: u64) -> f64 {
+    if rate == 192_000 {
+        (bandwidth * 4.0).min(150_000.0)
+    } else {
+        bandwidth
+    }
+}
+
 /// Every `factor`-th complex sample of interleaved cf32 (factor ≥ 1). Alias-free only when the
 /// input already holds nothing above the output Nyquist (`to_capture_rate` filters first).
 pub fn keep_every(input: &[f32], factor: usize) -> Vec<f32> {
@@ -336,6 +403,92 @@ pub fn replay_shape_ok_at(bandwidth_hz: f64, transition_hz: f64, rate: u64) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rational_replay_rejects_malformed_and_over_budget_shapes() {
+        assert!(resample_replay(&[], 0, 0, 25_000.0, 5_000.0).is_err());
+        assert!(resample_replay(&[], 48_000, 105_000, f64::NAN, 5_000.0).is_err());
+        assert!(resample_replay(&[], 192_000, 250_000, 125_000.0, 100.0)
+            .unwrap_err()
+            .contains("tap limit"));
+    }
+
+    #[test]
+    fn rational_replay_lengths_and_response() {
+        for (rate, out, bw, tr) in [
+            (48_000, 105_000, 25_000.0, 5_000.0),
+            (96_000, 105_000, 25_000.0, 5_000.0),
+            (192_000, 105_000, 25_000.0, 5_000.0),
+            (192_000, 250_000, 125_000.0, 12_500.0),
+        ] {
+            for n in [0usize, 1, 16, 17, 96, 97] {
+                let y = resample_replay(&vec![0.0; n * 2], rate, out, bw, tr).unwrap();
+                assert_eq!(y.len() / 2, (n * out as usize).div_ceil(rate as usize));
+            }
+            // DC and the passband edge survive; a tone beyond the stop edge is rejected.
+            for (f, wanted) in [(0.0, true), (bw / 2.0, true), (bw / 2.0 + tr * 1.2, false)] {
+                let x: Vec<f32> = (0..rate / 10)
+                    .flat_map(|k| {
+                        let p = std::f64::consts::TAU * f * k as f64 / rate as f64;
+                        [p.cos() as f32, p.sin() as f32]
+                    })
+                    .collect();
+                let y = resample_replay(&x, rate, out, bw, tr).unwrap();
+                let samples = &y[y.len() / 2..];
+                let power = samples.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() * 2.0
+                    / samples.len() as f64;
+                if wanted {
+                    assert!((power - 1.0).abs() < 0.01, "{rate} {out} {f}: {power}");
+                    let (mut re, mut im) = (0.0, 0.0);
+                    for (k, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
+                        let phase = std::f64::consts::TAU * f * k as f64 / out as f64;
+                        re += pair[0] as f64 * phase.cos() + pair[1] as f64 * phase.sin();
+                        im += pair[1] as f64 * phase.cos() - pair[0] as f64 * phase.sin();
+                    }
+                    let amplitude = (re * re + im * im).sqrt() / (samples.len() / 2) as f64;
+                    assert!(
+                        (amplitude - 1.0).abs() < 0.01,
+                        "tone frequency changed: {amplitude}"
+                    );
+                } else {
+                    assert!(power < 1e-6, "{rate} {out} {f}: {power}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_capture_bounds() {
+        assert_eq!(capture_bandwidth(47_424.0, 192_000), 150_000.0);
+        assert_eq!(capture_bandwidth(47_424.0, 96_000), 47_424.0);
+        assert_eq!(capture_bandwidth(37_500.0, 192_000), 150_000.0);
+        assert_eq!(capture_bandwidth(37_500.25, 192_000), 150_000.0);
+        let d = ChainDesign::with_output(1_024_000, 192_000, 150_000.0).unwrap();
+        let up = d.plan.stage1_rate(d.fs) * d.plan.l2 as f64;
+        let gain = crate::design::response_db(&d.stage2, 62_500.0 / up);
+        assert!(gain.abs() < 0.1, "LoRa pass edge: {gain} dB");
+        assert!(ChainDesign::with_output(1_024_000, 192_000, 150_000.0).is_ok());
+        assert!(ChainDesign::with_output(1_024_000, 192_000, 150_001.0).is_err());
+    }
+
+    /// Manual measurement, never a wall-clock pass/fail assertion. Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn replay_resampler_cost() {
+        for (rate, out, bw, tr) in [
+            (48_000, 105_000, 25_000.0, 5_000.0),
+            (192_000, 250_000, 125_000.0, 12_500.0),
+        ] {
+            let x = vec![0.25; rate as usize * 4 * 2];
+            let start = std::time::Instant::now();
+            let y = resample_replay(&x, rate, out, bw, tr).unwrap();
+            eprintln!(
+                "replay {rate}->{out}: {} samples, {:.3} ms for 4 s",
+                y.len() / 2,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
 
     #[test]
     fn plans_common_rates() {

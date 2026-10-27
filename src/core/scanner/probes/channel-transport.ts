@@ -39,7 +39,10 @@ function requestShape(request: DecoderChannelRequest) {
 
 /** Default scanner mode requests, checked against the built-in decoder factories in tests. */
 export const PROBE_CHANNEL_REQUESTS: Readonly<
-	Record<ProbeDecoderType, Readonly<Omit<DecoderChannelRequest, "centerHz">>>
+	Record<
+		Exclude<ProbeDecoderType, "dumpvdl2" | "lora-meshtastic">,
+		Readonly<Omit<DecoderChannelRequest, "centerHz">>
+	>
 > = Object.freeze({
 	"dsd-fme": requestShape(audioChannelRequest(audioDefault, input)),
 	// The decoder's 12 kHz paging channel filter (decoder-enablement 3.18).
@@ -73,6 +76,7 @@ export function probeChannelAdmitted(
 	capture: { sampleRateHz: number; centerHz: number },
 	usableFraction: number,
 ): boolean {
+	if (type === "dumpvdl2" || type === "lora-meshtastic") return false
 	const request = PROBE_CHANNEL_REQUESTS[type]
 	if (!request || !Number.isFinite(targetHz) || targetHz <= 0) return false
 	return admitChannel(

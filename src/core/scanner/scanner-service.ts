@@ -4996,6 +4996,7 @@ export class ScannerService extends EventEmitter {
 				reason: "detection",
 				// The rate the protocols this capture may hold need (ISM: 96 kHz).
 				rateHz: captureRateFor({
+					rfHz: track.centreHz,
 					priors: this.priorsAt(track.centreHz),
 					track,
 				}),
@@ -8024,7 +8025,9 @@ function probeDecoderType(
 		decoder === "dsd-fme" ||
 		decoder === "multimon-ng" ||
 		decoder === "direwolf" ||
-		decoder === "rtl433"
+		decoder === "rtl433" ||
+		decoder === "dumpvdl2" ||
+		decoder === "lora-meshtastic"
 	)
 		return decoder
 	return undefined

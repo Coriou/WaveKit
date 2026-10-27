@@ -142,7 +142,11 @@ class FakeEngine {
 function wireRun(child: PipeChild): void {
 	// a current tool: advertises its rates and echoes each capture's rate
 	queueMicrotask(() =>
-		child.event({ type: "ready", rates: [48_000, 96_000, 192_000] }),
+		child.event({
+			type: "ready",
+			rates: [48_000, 96_000, 192_000],
+			wideband: true,
+		}),
 	)
 	const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
 	const control = child.stdio[3]

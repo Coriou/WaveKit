@@ -167,7 +167,7 @@ export function boundReplayTrials(
 export interface SkippedReplayTrial {
 	protocol: ScannerProtocol | "adsb"
 	decoder: string
-	reason: "no-probe-mode" | "no-replay-input"
+	reason: "no-probe-mode" | "no-replay-input" | "lora-needs-192khz"
 }
 
 /** 1090 MHz Mode S/ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive). */
@@ -255,6 +255,12 @@ function extraModeOf(
 	decoder: string,
 ): ProbeMode | null {
 	if (protocol === "adsb" || !IDENTIFY_PROTOCOLS.includes(protocol)) return null
+	if (protocol === "vdl2" || protocol === "lora") {
+		const mode = IQ_REPLAY_WIDEBAND_MODES[protocol]
+		return mode.decoderType === decoder
+			? { ...mode, covers: [...mode.covers], options: { ...mode.options } }
+			: null
+	}
 	// ISM has no identify mode (identifyModeFor answers null) and no pre-channelizer probe mode
 	// (ambient-only live); its replay mode is rtl433 on the capture.
 	const mode =
@@ -330,6 +336,10 @@ export function planReplayTrialsDetailed(
 	}
 	for (const extra of REPLAY_EXTRA_TRIALS) {
 		if (!extraCalled(input, extra.protocol)) continue
+		if (extra.protocol === "lora" && input.capture.rateHz !== 192_000) {
+			skipped.push({ ...extra, reason: "lora-needs-192khz" })
+			continue
+		}
 		const mode = extraModeOf(extra.protocol, extra.decoder)
 		if (mode === null) {
 			skipped.push({ ...extra, reason: "no-probe-mode" })
@@ -418,3 +428,28 @@ export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
 
 /** Type check: the planner satisfies the frozen contract's port. */
 export const replayPlanner: IqReplayPlanner = planReplayTrials
+
+/** Replay-only mode descriptors. The probe pool must admit these decoder types and
+ * interpret their CRC-clean output before it can consume these descriptors. */
+export const IQ_REPLAY_WIDEBAND_MODES = Object.freeze({
+	vdl2: {
+		decoderType: "dumpvdl2",
+		protocol: "vdl2",
+		covers: ["vdl2"],
+		options: {},
+		holdMs: IQ_CAPTURE_MAX_MS,
+	},
+	lora: {
+		decoderType: "lora-meshtastic",
+		protocol: "lora",
+		covers: ["lora"],
+		// 125 kHz × 2 samples/chip = 250 kHz; 250 kHz presets do not fit 192 kHz captures.
+		options: { preset: "LongModerate", bandwidth: 125_000, oversampling: 2 },
+		holdMs: IQ_CAPTURE_MAX_MS,
+	},
+} satisfies Record<
+	"vdl2" | "lora",
+	Omit<ProbeMode, "decoderType"> & {
+		decoderType: "dumpvdl2" | "lora-meshtastic"
+	}
+>)

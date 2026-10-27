@@ -295,7 +295,15 @@ describe("DiscoveryStore evidence sink", () => {
 
 	it("recordUnavailable is set-like and sorted", () => {
 		const { store, obs } = planted()
-		const order = ["rtl433", "direwolf", "dsd-fme", "multimon-ng"] as const
+		const order = [
+			"rtl433",
+			"direwolf",
+			"dsd-fme",
+			"multimon-ng",
+			"acarsdec",
+			"dumpvdl2",
+			"lora-meshtastic",
+		] as const
 		for (const type of order)
 			expect(store.recordUnavailable(obs, type)).toBe(true)
 		expect(store.recordUnavailable(obs, "dsd-fme")).toBe(false)
@@ -305,7 +313,7 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(store.recordAnalog(obs, dataLike())).toBe(true)
 		expect(
 			store.get(store.discoveryIdOf(obs) ?? "")?.proof?.unavailable,
-		).toEqual(["direwolf", "dsd-fme", "multimon-ng", "rtl433"])
+		).toEqual([...order].sort())
 		expect(store.get(store.discoveryIdOf(obs) ?? "")?.proof?.summary).toBe(
 			"Digital, not decoded (no decoder available)",
 		)

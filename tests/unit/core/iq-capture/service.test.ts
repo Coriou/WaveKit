@@ -6,7 +6,19 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import type { Readable } from "node:stream"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { wholeCaptureShape } from "../../../../src/core/iq-capture/shapes.js"
+import { createPoolReplayProbes } from "../../../../src/core/iq-capture/pool-adapter.js"
+import { createReplayTransport } from "../../../../src/core/scanner/probes/replay-transport.js"
+import { REPLAY_PROBE_PRIORITY } from "../../../../src/core/scanner/probes/probe-pool.js"
+import { planReplayTrialsDetailed } from "../../../../src/core/scanner/replay-plan.js"
+import {
+	FakeEngineView,
+	flushAsync,
+	poolHarness,
+} from "../../../mocks/scanner/probe-fakes.js"
+import {
+	probeReplayShapes,
+	wholeCaptureShape,
+} from "../../../../src/core/iq-capture/shapes.js"
 import {
 	captureBandwidthHz,
 	createIqCaptureService,
@@ -149,7 +161,9 @@ async function setup(
 			}
 			queueMicrotask(() =>
 				child.event(
-					opts.rates ? { type: "ready", rates: opts.rates } : { type: "ready" },
+					opts.rates
+						? { type: "ready", rates: opts.rates, wideband: true }
+						: { type: "ready" },
 				),
 			)
 			const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
@@ -748,6 +762,36 @@ describe("IqCaptureService supervision", () => {
 		}
 	})
 
+	it("checks the source edge at the fallback rate an older tool will capture at", async () => {
+		const s = await setup({}, { oldTool: true })
+		try {
+			s.svc.attachSource("src", {
+				sampleRateHz: FS,
+				centerHz: CENTER,
+				epoch: 3,
+				engine: s.engine,
+			})
+			await s.svc.start()
+			await flush(20)
+			s.engine.push(FS)
+			// The test shapes give a 16 kHz capture bandwidth. Edge limit FS / 2 − passband / 2:
+			// 1 024 000 − 32 000 = 992 000 Hz at 192 kHz (4 × 16 kHz passband), 1 024 000 − 8 000 =
+			// 1 016 000 Hz at the 48 kHz fallback. 1 MHz fits only the latter.
+			const got = s.svc.capture(
+				req({ rfHz: CENTER + 1_000_000, rateHz: 192_000 }),
+			)
+			expect("captureId" in got).toBe(true)
+			expect(s.svc.counters().rateFallbacks).toBe(1)
+			// Past the 48 kHz limit it is still refused.
+			const past = s.svc.capture(
+				req({ rfHz: CENTER + 1_016_001, rateHz: 192_000 }),
+			)
+			expect(past).toEqual({ refused: expect.anything() as unknown })
+		} finally {
+			await s.svc.stop()
+		}
+	})
+
 	describe("only a clean usage refusal is a --rate-ack fallback", () => {
 		const usage = "wavekit-iqcap: unknown flag\nusage: ..."
 		async function started(
@@ -890,6 +934,189 @@ describe("IqCaptureService openReplay", () => {
 		const { s, id } = await ready()
 		expect(s.svc.openReplay(id, "rtl433")).toBeNull()
 		expect(s.svc.openReplay("nope", "dsd-fme")).toBeNull()
+		await s.svc.stop()
+	})
+
+	it.each([
+		{
+			decoder: "dumpvdl2" as const,
+			rate: 48_000 as const,
+			outRate: 105_000,
+			bw: 25_000,
+			tr: 5_000,
+		},
+		{
+			decoder: "lora-meshtastic" as const,
+			rate: 192_000 as const,
+			outRate: 250_000,
+			bw: 125_000,
+			tr: 12_500,
+		},
+	])(
+		"replays $decoder with exact U8 output and rejects an extra sample",
+		async ({ decoder, rate, outRate, bw, tr }) => {
+			const s = await setup(
+				{
+					shapes: {
+						...SHAPES,
+						// A wide enough default capture passband for the 125 kHz LoRa channel.
+						"multimon-ng": { bandwidthHz: 47_424, transitionHz: 288 },
+						[decoder]: { bandwidthHz: bw, transitionHz: tr },
+						rtl433: { bandwidthHz: 47_424, transitionHz: 288 },
+					},
+				},
+				{ samples: rate / 10, rates: [48_000, 96_000, 192_000] },
+			)
+			await running(s)
+			const got = s.svc.capture(req({ rateHz: rate }))
+			await flush(10)
+			const id = "captureId" in got ? got.captureId : ""
+			expect(s.svc.replayRateOf?.(id, decoder)).toBe(outRate)
+			const stream = s.svc.openReplay(id, decoder) as Readable
+			expect(stream).not.toBeNull()
+			expect(lastReplay(s).args.slice(-4)).toEqual([
+				"--out-rate",
+				String(outRate),
+				"--format",
+				"cu8",
+			])
+			const done = readAll(stream)
+			lastReplay(s).stdout.write(Buffer.alloc((outRate / 10) * 2))
+			lastReplay(s).exit(0)
+			expect(await done).toEqual({ bytes: (outRate / 10) * 2, error: null })
+			const over = readAll(s.svc.openReplay(id, decoder) as Readable)
+			lastReplay(s).stdout.write(Buffer.alloc((outRate / 10) * 2 + 2))
+			expect((await over).error).toBeInstanceOf(Error)
+			if (rate === 192_000) {
+				expect(s.svc.openReplay(id, "rtl433")).not.toBeNull()
+				expect(lastReplay(s).args.slice(3, 7)).toEqual([
+					"--bandwidth",
+					"150000",
+					"--transition",
+					"21000",
+				])
+			}
+			await s.svc.stop()
+		},
+	)
+
+	it.each([
+		{
+			protocol: "vdl2" as const,
+			decoder: "dumpvdl2",
+			rfHz: 136_975_000,
+			rate: 48_000 as const,
+			replayRate: 105_000,
+		},
+		{
+			protocol: "lora" as const,
+			decoder: "lora-meshtastic",
+			rfHz: 869_525_000,
+			rate: 192_000 as const,
+			replayRate: 250_000,
+		},
+	])(
+		"production wiring plans and starts an identify $protocol capture",
+		async ({ protocol, decoder, rfHz, rate, replayRate }) => {
+			// Fractional milliseconds deliberately do not fall on either capture's sample grid.
+			const s = await setup(
+				{ shapes: probeReplayShapes(), now: () => 1_000_000.1234567 },
+				{ samples: rate / 10, rates: [48_000, 96_000, 192_000] },
+			)
+			const engine = new FakeEngineView({
+				sourceId: "src",
+				centreHz: rfHz,
+				epoch: 3,
+			})
+			const h = poolHarness({
+				engines: [engine],
+				transports: [createReplayTransport(s.svc)],
+			})
+			const adapter = createPoolReplayProbes(h.pool, {
+				priority: REPLAY_PROBE_PRIORITY,
+				jobId: "identify-replay",
+			})
+			try {
+				s.svc.attachSource("src", {
+					sampleRateHz: FS,
+					centerHz: rfHz,
+					epoch: 3,
+					engine: s.engine,
+				})
+				await s.svc.start()
+				await flush()
+				s.engine.push(FS)
+				const got = s.svc.captureFor(
+					req({ reason: "identify", rfHz, rateHz: rate }),
+					"identify-replay",
+				)
+				expect(got).toHaveProperty("captureId")
+				if (!("captureId" in got)) return
+				await flush(10)
+				const capture = s.svc.view(got.captureId)
+				expect(capture).not.toBeNull()
+				if (!capture) return
+				const plan = planReplayTrialsDetailed({
+					capture,
+					track: null,
+					knownProtocol: protocol,
+					priors: { [protocol]: 1 },
+					narrowRaster: false,
+					nowMs: 1_000_001.7654321,
+				})
+				expect(plan.skipped).not.toContainEqual(
+					expect.objectContaining({ decoder }),
+				)
+				const trial = plan.trials[0]
+				expect(trial?.mode.decoderType).toBe(decoder)
+				if (!trial) return
+				expect(
+					s.svc.replayRateOf?.(capture.captureId, trial.mode.decoderType),
+				).toBe(replayRate)
+				const run = adapter.request({
+					captureId: capture.captureId,
+					sourceId: capture.sourceId,
+					epoch: capture.epoch,
+					observationId: capture.observationId,
+					rfHz,
+					protocol,
+					mode: trial.mode,
+				})
+				expect(run).toHaveProperty("run")
+				await flushAsync()
+				expect([...h.decoders.created.values()].map(d => d.config)).toEqual([
+					expect.objectContaining({
+						type: decoder,
+						useChannelizer: false,
+						options: expect.objectContaining({ inputSampleRate: replayRate }),
+					}),
+				])
+				expect(lastReplay(s).args.slice(-4)).toEqual([
+					"--out-rate",
+					String(replayRate),
+					"--format",
+					"cu8",
+				])
+			} finally {
+				adapter.dispose()
+				await h.pool.destroy()
+				await s.svc.stop()
+			}
+		},
+	)
+
+	it("never replays narrow captures into LoRa", async () => {
+		const s = await setup({
+			shapes: {
+				...SHAPES,
+				"lora-meshtastic": { bandwidthHz: 125_000, transitionHz: 12_500 },
+			},
+		})
+		await running(s)
+		const got = s.svc.capture(req())
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		expect(s.svc.openReplay(id, "lora-meshtastic")).toBeNull()
 		await s.svc.stop()
 	})
 

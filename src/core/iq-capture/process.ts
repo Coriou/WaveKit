@@ -356,7 +356,12 @@ export class IqToolProcess extends EventEmitter {
 				return
 			}
 			this.isReady = true
-			this.rates = new Set([IQ_CAPTURE_RATE_HZ, ...(ev.rates ?? [])])
+			this.rates = new Set([
+				IQ_CAPTURE_RATE_HZ,
+				...(ev.rates ?? []).filter(
+					rate => rate !== 192_000 || ev.wideband === true,
+				),
+			])
 			if (this.readyTimer !== null) this.o.timers.clearTimeout(this.readyTimer)
 			this.readyTimer = null
 			this.emit("ready")

@@ -1,4 +1,5 @@
 import type { Readable } from "node:stream"
+import { configureNativeReplayDecoder } from "../../iq-capture/replay-decoder.js"
 import type { DecoderConfig } from "../../../decoders/types.js"
 import {
 	IQ_CAPTURE_RATE_HZ,
@@ -76,6 +77,8 @@ export function createReplayTransport(
 					// the safe answer: 48 kHz (a 48 kHz replay is what every older port gives)
 				}
 			}
+			const native = configureNativeReplayDecoder(base, ctx.req.targetHz, rate)
+			if (native) return native
 			return {
 				...configured,
 				options: {

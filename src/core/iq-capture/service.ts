@@ -25,10 +25,15 @@ import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ProbeDecoderType } from "../scanner/probes/probe-pool.js"
-import { isCaptureRate, wholeCaptureShapeAt } from "./rates.js"
 import {
+	capturePassbandHz,
+	replayRateHz,
+	isCaptureRate,
+	wholeCaptureShapeAt,
+} from "./rates.js"
+import {
+	iqCaptureMaxBytes,
 	IQ_CAPTURE_RATE_HZ,
-	type IqCaptureRateHz,
 	IQ_CAPTURE_MAX_MS,
 	IQ_CAPTURE_PREROLL_MAX_MS,
 	IQ_CAPTURE_TOTAL_MAX_BYTES,
@@ -92,7 +97,7 @@ export interface IqReplayShape {
 }
 export type IqReplayDecoderType = Exclude<
 	ProbeDecoderType,
-	"rtl433" | "acarsdec"
+	"rtl433" | "acarsdec" | "dumpvdl2" | "lora-meshtastic"
 >
 /**
  * The audio probe shapes (required; the capture bandwidth is the widest of them) and the optional
@@ -103,6 +108,8 @@ export type IqReplayShapes = Readonly<
 	Record<IqReplayDecoderType, IqReplayShape> & {
 		rtl433?: IqReplayShape
 		/** The ACARS channel (25 kHz); without it no capture is replayed into acarsdec. */
+		dumpvdl2?: IqReplayShape
+		["lora-meshtastic"]?: IqReplayShape
 		acarsdec?: IqReplayShape
 	}
 >
@@ -283,20 +290,28 @@ export function captureBandwidthHz(shapes: IqReplayShapes): number {
  * `fileBytes` at R. The tool low-passes at R with the group delay flushed and trimmed, so the
  * filtered signal has exactly the input's N complex samples (no filter tail), then keeps every
  * D = R / O-th sample starting with the first: ceil(N / D) samples, 8 bytes each
- * (native/wavekit-chan/src/iqcap/dsp.rs `to_capture_rate`). With R = O this is the file size.
+ * (native/wavekit-chan/src/iqcap/dsp.rs `to_capture_rate`). Rational replay uses the
+ * same ceil(N * O / R) count, with a causal FIR and no tail. Input is capped at
+ * 4 * R * 8 bytes, so N * O stays exactly representable. R = O gives the file size.
  */
 export function replayOutputBytes(
 	fileBytes: number,
 	rateHz: number,
 	outRateHz: number,
 ): number {
-	const factor = rateHz / outRateHz
-	if (!Number.isInteger(factor) || factor < 1 || fileBytes % 8 !== 0)
+	if (
+		!Number.isSafeInteger(fileBytes) ||
+		fileBytes < 0 ||
+		fileBytes > iqCaptureMaxBytes(rateHz) ||
+		fileBytes % 8 !== 0 ||
+		![48_000, 96_000, 192_000].includes(rateHz) ||
+		(outRateHz !== rateHz && ![48_000, 105_000, 250_000].includes(outRateHz))
+	)
 		throw new WaveKitError(
 			"IQ replay output size is undefined for this capture",
 			"IQ_REPLAY_FAILED",
 		)
-	return Math.ceil(fileBytes / 8 / factor) * 8
+	return Math.ceil(((fileBytes / 8) * outRateHz) / rateHz) * 8
 }
 
 export function createIqCaptureService(
@@ -941,8 +956,18 @@ class Service implements IqCaptureService {
 		// Safety: the whole anchored chain, root and directory re-proven before any command.
 		if (!this.dirOk()) return this.refuse("unavailable")
 		const fs_ = slot.sampleRateHz
+		// Only a rate the running tool advertised is asked for; an older tool (or a source rate
+		// the tool cannot plan) gets an honest 48 kHz capture, recorded as such.
+		const rateHz =
+			req.rateHz !== undefined && proc.supportsRate(req.rateHz)
+				? req.rateHz
+				: IQ_CAPTURE_RATE_HZ
 		const offsetHz = req.rfHz - slot.centerHz
-		if (Math.abs(offsetHz) > fs_ / 2 - this.bandwidthHz / 2)
+		// The edge check uses the rate the tool will actually capture at, not the one asked for.
+		if (
+			Math.abs(offsetHz) >
+			fs_ / 2 - capturePassbandHz(this.bandwidthHz, rateHz) / 2
+		)
 			return this.refuse("invalid")
 		const preRollSamples = Math.round(
 			(Math.min(this.cfg.preRollMs, IQ_CAPTURE_PREROLL_MAX_MS) * fs_) / 1000,
@@ -967,12 +992,6 @@ class Service implements IqCaptureService {
 		const fromSample = Math.max(lo, Math.min(hi, wanted))
 		const captureId = this.uuid()
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
-		// Only a rate the running tool advertised is asked for; an older tool (or a source rate
-		// the tool cannot plan) gets an honest 48 kHz capture, recorded as such.
-		const rateHz =
-			req.rateHz !== undefined && proc.supportsRate(req.rateHz)
-				? req.rateHz
-				: IQ_CAPTURE_RATE_HZ
 		if (rateHz !== (req.rateHz ?? IQ_CAPTURE_RATE_HZ)) this.rateFallbacks++
 		const admitted = store.admit(
 			{ ...req, rateHz },
@@ -1066,16 +1085,16 @@ class Service implements IqCaptureService {
 
 	replayRateOf(
 		captureId: string,
-		decoderType: ProbeDecoderType,
-	): IqCaptureRateHz | null {
+		decoderType: ProbeDecoderType | "dumpvdl2" | "lora-meshtastic",
+	): number | null {
 		const e = this.store?.get(captureId)
 		if (!e) return null
-		return decoderType === "rtl433" ? e.rateHz : IQ_CAPTURE_RATE_HZ
+		return replayRateHz(decoderType, e.rateHz)
 	}
 
 	openReplay(
 		captureId: string,
-		decoderType: ProbeDecoderType,
+		decoderType: ProbeDecoderType | "dumpvdl2" | "lora-meshtastic",
 	): Readable | null {
 		try {
 			if (this.trials.has(captureId)) return null
@@ -1089,7 +1108,7 @@ class Service implements IqCaptureService {
 
 	private doOpenReplay(
 		captureId: string,
-		decoderType: ProbeDecoderType,
+		decoderType: ProbeDecoderType | "dumpvdl2" | "lora-meshtastic",
 	): Readable | null {
 		const store = this.store
 		const cfg = this.cfg
@@ -1102,25 +1121,29 @@ class Service implements IqCaptureService {
 		if (!given) return null
 		const e = store.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
-		// rtl433 reads the capture at its own rate with the whole passband up to its Nyquist edge;
-		// a 48 kHz decoder of a faster capture gets it brought down to 48 kHz (`--out-rate`).
-		const native = decoderType === "rtl433" && e.rateHz !== IQ_CAPTURE_RATE_HZ
-		const downsampled = !native && e.rateHz !== IQ_CAPTURE_RATE_HZ
-		const shape = native
-			? wholeCaptureShapeAt(given.bandwidthHz, e.rateHz)
-			: given
+		// Never claim a decoder channel that the capture did not retain.
+		if (decoderType === "lora-meshtastic" && e.rateHz !== 192_000) return null
+		if (
+			(decoderType === "lora-meshtastic" || decoderType === "dumpvdl2") &&
+			capturePassbandHz(this.bandwidthHz, e.rateHz) < given.bandwidthHz
+		)
+			return null
+		const outRate = replayRateHz(decoderType, e.rateHz)
+		const downsampled = outRate !== e.rateHz
+		const cu8 = decoderType === "dumpvdl2" || decoderType === "lora-meshtastic"
+		const shape =
+			decoderType === "rtl433" && e.rateHz !== IQ_CAPTURE_RATE_HZ
+				? wholeCaptureShapeAt(
+						capturePassbandHz(given.bandwidthHz, e.rateHz),
+						e.rateHz,
+					)
+				: given
 		if (!shape) return null
-		const rateArgs =
-			e.rateHz === IQ_CAPTURE_RATE_HZ
-				? []
-				: native
-					? ["--rate", String(e.rateHz)]
-					: [
-							"--rate",
-							String(e.rateHz),
-							"--out-rate",
-							String(IQ_CAPTURE_RATE_HZ),
-						]
+		const rateArgs = [
+			...(e.rateHz === IQ_CAPTURE_RATE_HZ ? [] : ["--rate", String(e.rateHz)]),
+			...(downsampled ? ["--out-rate", String(outRate)] : []),
+			...(cu8 ? ["--format", "cu8"] : []),
+		]
 		const file = path.join(this.dir, `${captureId}.cf32`)
 		if (!this.dirOk()) return null
 		const verified = this.openProven(captureId, file, e.bytes)
@@ -1132,8 +1155,10 @@ class Service implements IqCaptureService {
 		let limit: number
 		try {
 			limit = downsampled
-				? replayOutputBytes(verified.size, e.rateHz, IQ_CAPTURE_RATE_HZ)
+				? replayOutputBytes(verified.size, e.rateHz, outRate)
 				: verified.size
+			// U8 has 2 bytes per complex sample instead of cf32’s 8: divide by four.
+			if (cu8) limit /= 4
 		} catch (err: unknown) {
 			fs.closeSync(verified.fd)
 			throw err

@@ -39,6 +39,22 @@ async function ready(child: FakeChild) {
 }
 
 describe("IqToolProcess", () => {
+	it("requires an explicit wide passband acknowledgement for 192 kHz", async () => {
+		for (const wideband of [undefined, false, true]) {
+			const { proc, child } = make()
+			child.event({
+				type: "ready",
+				rates: [48_000, 96_000, 192_000],
+				...(wideband === undefined ? {} : { wideband }),
+			})
+			await flush()
+			expect(proc.supportsRate(192_000)).toBe(wideband === true)
+			expect(proc.supportsRate(96_000)).toBe(true)
+			const stopped = proc.stop()
+			child.exit(0)
+			await stopped
+		}
+	})
 	it("spawns run with fd 3 control, detached, the fixed argv", () => {
 		const { sp } = make()
 		const [cmd, args, opts] = sp.spawn.mock.calls[0] ?? []

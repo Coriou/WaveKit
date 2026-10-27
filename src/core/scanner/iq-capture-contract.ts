@@ -32,8 +32,9 @@ export const IQ_CAPTURE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
 /**
  * Output rates a capture may have (`wavekit-iqcap` `CAPTURE_RATES`): 48 kHz × 2^k, so the native
  * decimation keeps a small rational stage at every common source rate; 250 kHz is not offered
- * (its ratio to 1.024 and 2.048 Msps needs an interpolation factor of 125). The passband is the
- * same at every rate (the capture bandwidth); a higher rate keeps short pulses.
+ * (its ratio to 1.024 and 2.048 Msps needs an interpolation factor of 125).
+ * The 192 kHz passband scales by four, capped at 125000 + 2 × 12500 = 150000 Hz
+ * to hold 125 kHz LoRa cheaply; 96 kHz keeps the narrow passband for short pulses.
  */
 export const IQ_CAPTURE_RATES = [48_000, 96_000, 192_000] as const
 export type IqCaptureRateHz = (typeof IQ_CAPTURE_RATES)[number]
@@ -55,7 +56,7 @@ export function iqCaptureMaxBytes(rateHz: number): number {
  */
 export const IQ_CAPTURE_RATE_BY_PROTOCOL: Readonly<
 	Partial<Record<ScannerProtocol, IqCaptureRateHz>>
-> = Object.freeze({ ism: 96_000 })
+> = Object.freeze({ ism: 96_000, lora: 192_000 })
 /**
  * A capture is discarded as soon as its result exists; one that never got a result (backlog,
  * decoders unavailable) is discarded this long after it finished (10 minutes).
@@ -90,7 +91,8 @@ export const IQ_REPLAY_MAX_TRIALS = 8
  * sensors deviating past ±23.7 kHz do not fit the capture and stay live-only. Capture size is
  * unchanged: 4 s × 48 000 samples/s × 8 B = 1 536 000 B. acarsdec: the capture filtered to its
  * 25 kHz ACARS channel, AM-demodulated at 48 kHz and resampled to 12 kHz audio (replay only). The
- * replay planner and the replay transport skip any decoder not listed here.
+ * VDL2/LoRa: native rational conversion to 105/250 kHz U8, respectively.
+ * The replay planner and the replay transport skip any decoder not listed here.
  */
 export const REPLAY_INPUT_DECODERS: ReadonlySet<string> = new Set([
 	"dsd-fme",
@@ -98,6 +100,8 @@ export const REPLAY_INPUT_DECODERS: ReadonlySet<string> = new Set([
 	"direwolf",
 	"rtl433",
 	"acarsdec",
+	"dumpvdl2",
+	"lora-meshtastic",
 ])
 
 /** A finished capture as identify and the replay transport see it. */
@@ -179,18 +183,22 @@ export interface IqCapturePort {
 	confirmLive(sourceId: string, observationId: string): number
 	/**
 	 * A fresh replay stream of the capture filtered to the decoder type's probe channel shape
-	 * (cf32 at the shape's rate), or null when the capture is gone, unverified or `rtl433`.
+	 * (cf32 for audio/rtl_433, U8 for VDL2/LoRa at replayRateOf), or null when the
+	 * capture is gone, unverified or too narrow for that decoder.
 	 */
-	openReplay(captureId: string, decoderType: ProbeDecoderType): Readable | null
+	openReplay(
+		captureId: string,
+		decoderType: ProbeDecoderType | "dumpvdl2" | "lora-meshtastic",
+	): Readable | null
 	/**
 	 * The rate `openReplay` delivers to `decoderType`: the capture's own rate for rtl433, 48 kHz
 	 * for the 48 kHz decoders (a faster capture is brought down to 48 kHz); null when the capture
-	 * is gone. Absent on an older port: 48 kHz.
+	 * is gone. VDL2 gets 105 kHz U8 and LoRa 250 kHz U8. Absent on an older port: 48 kHz.
 	 */
 	replayRateOf?(
 		captureId: string,
-		decoderType: ProbeDecoderType,
-	): IqCaptureRateHz | null
+		decoderType: ProbeDecoderType | "dumpvdl2" | "lora-meshtastic",
+	): number | null
 	/**
 	 * WG12: spawn `wavekit-iqcap analyze` for one capture. Stdout is s16le 8 kHz audio;
 	 * `event` is the single JSON line from fd 4. Null when the capture is gone. Absent

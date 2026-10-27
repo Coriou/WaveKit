@@ -50,6 +50,7 @@ const EventSchema = z.discriminatedUnion("type", [
 			type: z.literal("ready"),
 			// The rates the tool accepts; absent from an older tool (48 kHz only).
 			rates: z.array(rate).max(8).optional(),
+			wideband: z.boolean().optional(),
 		})
 		.strict(),
 	z
