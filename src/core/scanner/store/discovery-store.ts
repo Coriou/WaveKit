@@ -633,6 +633,13 @@ function checkedDecode(ev: DecodeEvidence): DecodeEvidence {
 	}
 }
 
+/** Keep historical identities for association, but never promote unchecked call data. */
+function downgradeLegacyDiscovery(d: Discovery): void {
+	if (!isDsdFmeProtocol(d.protocol) || d.contentVerified === true) return
+	d.metadata = emptyMetadata()
+	d.encrypted = false
+}
+
 const DIGITAL_FAILURE = new Set<string>(["no-sync", "crc-errors", "timeout"])
 
 function isAnalogDecoder(decoder: string): boolean {
@@ -2350,18 +2357,27 @@ export class DiscoveryStore
 				return false
 			if (filter.since !== undefined && Date.parse(d.lastSeenAt) < filter.since)
 				return false
-			if (filter.encrypted !== undefined && d.encrypted !== filter.encrypted)
+			const published =
+				filter.encrypted !== undefined ||
+				identity !== undefined ||
+				q !== undefined
+					? this.presentDiscovery(d)
+					: d
+			if (
+				filter.encrypted !== undefined &&
+				published.encrypted !== filter.encrypted
+			)
 				return false
 			if (
 				identity !== undefined &&
-				(d.identity?.kind !== identity.kind ||
-					d.identity.value.trim().toLowerCase() !== identityValue)
+				(published.identity?.kind !== identity.kind ||
+					published.identity.value.trim().toLowerCase() !== identityValue)
 			)
 				return false
 			if (
 				q !== undefined &&
-				!(d.operator?.label ?? "").toLowerCase().includes(q) &&
-				!(d.identity?.value ?? "").toLowerCase().includes(q)
+				!(published.operator?.label ?? "").toLowerCase().includes(q) &&
+				!(published.identity?.value ?? "").toLowerCase().includes(q)
 			)
 				return false
 			if (!evidenceOn && !labelFilter) return true
@@ -3972,6 +3988,10 @@ export class DiscoveryStore
 			(!keepBestOk || drop.signal.best.snrDb > keep.signal.best.snrDb)
 		)
 			keep.signal.best = drop.signal.best
+		// Sanitize each side before verification can be transferred to the survivor.
+		// The same downgrade runs when snapshots and journal records are inserted.
+		downgradeLegacyDiscovery(keep)
+		downgradeLegacyDiscovery(drop)
 		const km = keep.metadata
 		const dm = drop.metadata
 		km.talkgroups = lruMerge(km.talkgroups, dm.talkgroups)
@@ -4272,6 +4292,7 @@ export class DiscoveryStore
 	}
 
 	private insertDiscovery(d: Discovery): void {
+		downgradeLegacyDiscovery(d)
 		const previous = this.discoveries.get(d.id)
 		let members = this.members.get(d.id)
 		if (members === undefined) {
