@@ -133,6 +133,7 @@ describe("decode-anchored persistence and bounds", () => {
 			try {
 				for (let i = 0; i < n; i++)
 					s.anchorDecode("rtl", HZ, ev(i), "commanded")
+				s.stopAnchorExpiry()
 				expect(s.get("d_anchor")?.aircraftCount).toBe(Math.min(n, 4096))
 				expect(s.snapshot().observations[0]?.decode).toEqual([])
 				expect(s.get("d_anchor")?.identity).toBeUndefined()
@@ -166,6 +167,132 @@ describe("decode-anchored persistence and bounds", () => {
 			expect(counts).toEqual([1, 2, 3])
 		} finally {
 			s.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
+	})
+
+	it("keeps reads at the creation revision until the pending count publishes at 5 s", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(T0)
+		const s = store(() => Date.now())
+		const events: ReturnType<DiscoveryStore["get"]>[] = []
+		s.on("change", (id: string) => events.push(s.get(id)))
+		try {
+			s.anchorDecode("rtl", HZ, ev(1), "commanded")
+			const created = s.get("d_anchor")
+			const snapshot = s.snapshot()
+			vi.advanceTimersByTime(1000)
+			s.anchorDecode("rtl", HZ, ev(2, Date.now()), "relay")
+			expect(s.get("d_anchor")).toEqual(created)
+			expect(s.snapshot()).toEqual(snapshot)
+			expect(s.snapshot().observations[0]?.endedAt).toBe(
+				new Date(T0).toISOString(),
+			)
+			vi.advanceTimersByTime(3999)
+			expect(s.get("d_anchor")).toEqual(events.at(-1))
+			expect(events).toHaveLength(1)
+			vi.advanceTimersByTime(1)
+			expect(events).toHaveLength(2)
+			expect(s.get("d_anchor")).toEqual(events.at(-1))
+			expect(s.get("d_anchor")?.aircraftCount).toBe(2)
+			expect(s.get("d_anchor")?.revision).toBeGreaterThan(
+				created?.revision ?? 0,
+			)
+			// Same-count, same-bucket refreshes remain private even after a rate slot.
+			vi.advanceTimersByTime(1000)
+			s.anchorDecode("rtl", HZ, ev(2, Date.now()), "commanded")
+			vi.advanceTimersByTime(5000)
+			expect(events).toHaveLength(2)
+			expect(s.get("d_anchor")).toEqual(events.at(-1))
+			s.stopAnchorExpiry()
+			expect(s.get("d_anchor")?.lastSeenAt).toBe(
+				new Date(T0 + 6000).toISOString(),
+			)
+			expect(s.get("d_anchor")).toEqual(events.at(-1))
+			expect(vi.getTimerCount()).toBe(0)
+		} finally {
+			s.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
+	})
+
+	it("flushes pending state before removal and discards it on crash restore", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(T0)
+		const s = store(() => Date.now())
+		const restored = store(() => Date.now())
+		const events: ReturnType<DiscoveryStore["get"]>[] = []
+		s.on("change", (id: string) => events.push(s.get(id)))
+		try {
+			s.anchorDecode("rtl", HZ, ev(1), "commanded")
+			vi.advanceTimersByTime(1000)
+			s.anchorDecode("rtl", HZ, ev(2, Date.now()), "commanded")
+			restored.restore(s.snapshot())
+			expect(restored.get("d_anchor")).toMatchObject({
+				aircraftCount: 0,
+				observationCount: 1,
+				lastSeenAt: new Date(T0).toISOString(),
+			})
+			s.delete("d_anchor")
+			expect(events.at(-2)).toMatchObject({
+				aircraftCount: 2,
+				observationCount: 2,
+				lastSeenAt: new Date(T0 + 1000).toISOString(),
+			})
+			expect(events.at(-1)).toBeUndefined()
+			expect(vi.getTimerCount()).toBe(0)
+			vi.advanceTimersByTime(65_000)
+			expect(events).toHaveLength(3)
+		} finally {
+			s.stopAnchorExpiry()
+			restored.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
+	})
+
+	// Feature: band-inspection-ux, Property: decode anchor reads match the published revision
+	// Validates: Requirements 3.3
+	it("keeps every read identical to the last change event over random confirmation schedules", () => {
+		vi.useFakeTimers()
+		try {
+			fc.assert(
+				fc.property(
+					fc.array(
+						fc.record({
+							delay: fc.integer({ min: 0, max: 65_000 }),
+							address: fc.integer({ min: 1, max: 20 }),
+						}),
+						{ minLength: 1, maxLength: 40 },
+					),
+					steps => {
+						vi.setSystemTime(T0)
+						const s = store(() => Date.now())
+						let last: ReturnType<DiscoveryStore["get"]>
+						s.on("change", (id: string) => {
+							last = s.get(id)
+						})
+						try {
+							for (const step of steps) {
+								vi.advanceTimersByTime(step.delay)
+								expect(s.get("d_anchor")).toEqual(last)
+								s.anchorDecode(
+									"rtl",
+									HZ,
+									ev(step.address, Date.now()),
+									"commanded",
+								)
+								expect(s.get("d_anchor")).toEqual(last)
+							}
+							s.stopAnchorExpiry()
+							expect(s.get("d_anchor")).toEqual(last)
+						} finally {
+							s.stopAnchorExpiry()
+						}
+					},
+				),
+				{ numRuns: 100 },
+			)
+		} finally {
 			vi.useRealTimers()
 		}
 	})

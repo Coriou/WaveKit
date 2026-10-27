@@ -787,6 +787,8 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			await r.h.tuner.setFrequency("rtl", ADSB_HZ, { origin: "rest" })
 			r.send(parseSbsLine(sbsLine("00:01:10.000")))
 			r.send(parseSbsLine(sbsLine("00:01:12.000")), 2000)
+			r.advance(5000)
+			vi.advanceTimersByTime(5000)
 			expect(r.internals.store.snapshot().discoveries).toHaveLength(1)
 			expect(r.internals.store.get(anchor.id)).toMatchObject({
 				aircraftCount: 1,
@@ -818,7 +820,8 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			}
 			service.ingest(live, live.lastTrack!)
 			expect(live.discoveryId).not.toBeNull()
-			r.send(parseSbsLine(sbsLine("00:00:05.000")), 2000)
+			// A new last-seen bucket publishes the pending refresh.
+			r.send(parseSbsLine(sbsLine("00:00:15.000")), 12_000)
 			const records = r.internals.store.snapshot().discoveries
 			expect(records.filter(d => d.protocol === "adsb")).toHaveLength(1)
 			expect(
@@ -847,6 +850,9 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 				2000,
 			)
 			expect(r.internals.store.snapshot().discoveries).toHaveLength(1)
+			expect(r.internals.store.get(id)).toEqual(first)
+			await r.h.service.stop()
+			stopped = true
 			expect(r.internals.store.get(id)).toMatchObject({
 				aircraftCount: 2,
 				observationCount: 2,
@@ -854,8 +860,6 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			expect(r.internals.store.get(id)!.lastSeenAt > first.lastSeenAt).toBe(
 				true,
 			)
-			await r.h.service.stop()
-			stopped = true
 			const snapshot = r.internals.store.snapshot()
 			const again = await serviceRig("trusted", {
 				observation: "none",

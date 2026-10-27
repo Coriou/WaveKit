@@ -644,7 +644,13 @@ The persisted anchor stays constant size. Identify at an existing anchor reports
 observation can receive fresh ADS-B confirmations without assigning aircraft identity to its discovery.
 The inclusive window expires at confirmation time + 60,001 ms. There is at most one
 timer per anchor, bounded by discovery capacity, cleared on removal and scanner stop.
-Count publications may wait for the next 5-second write slot. This is a count of confirmed aircraft,
+Reads, snapshots and events share the last published state and revision. Pending count
+changes publish within 5 seconds; a refresh that changes neither count nor the 10-second
+last-seen bucket stays pending by design until another publication or the final flush.
+After a crash, pending confirmations since the last publish are lost: up to 5 seconds
+of count changes and lastSeenAt refreshes within the current 10-second bucket.
+Observation count and lastSeenAt restore to their last published values; aircraft count
+restarts at zero. This is a count of confirmed aircraft,
 not every aircraft that produced a single message. Anchors use the same discovery
 capacity, inactivity retention, Keep and Ignore rules as spectrum discoveries.
 

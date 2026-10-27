@@ -857,6 +857,16 @@ export class DiscoveryStore
 		ReturnType<typeof setTimeout>
 	>()
 	private readonly anchorWindows = new Map<string, Map<string, number>>()
+	/** Latest confirmations stay private until publishAnchor commits a revision. */
+	private readonly anchorPending = new Map<
+		string,
+		{
+			count: number
+			seen: string
+			observations: number
+			trust: "commanded" | "relay"
+		}
+	>()
 	private readonly anchorPublished = new Map<
 		string,
 		{
@@ -1087,18 +1097,19 @@ export class DiscoveryStore
 
 	private publishAnchor(id: string, force = false): void {
 		const d = this.discoveries.get(id)
-		if (!d) return
+		const pending = this.anchorPending.get(id)
+		if (!d || !pending) return
 		const now = this.now()
 		const previous = this.anchorPublished.get(id)
-		const count = d.aircraftCount ?? 0
-		const bucket = Math.floor(Date.parse(d.lastSeenAt) / 10_000)
+		const count = pending.count
+		const bucket = Math.floor(Date.parse(pending.seen) / 10_000)
 		if (
 			previous &&
 			previous.count === count &&
 			previous.bucket === bucket &&
 			(!force ||
-				(previous.seen === d.lastSeenAt &&
-					previous.observations === d.observationCount))
+				(previous.seen === pending.seen &&
+					previous.observations === pending.observations))
 		)
 			return
 		// At most one write / 5 s, plus creation and the final stop/removal flush.
@@ -1108,10 +1119,17 @@ export class DiscoveryStore
 			at: now,
 			count,
 			bucket,
-			seen: d.lastSeenAt,
-			observations: d.observationCount,
+			seen: pending.seen,
+			observations: pending.observations,
 		})
 		this.commit("observation", op => {
+			d.aircraftCount = pending.count
+			d.lastSeenAt = pending.seen
+			d.observationCount = pending.observations
+			d.tuningTrust = pending.trust
+			const observation = this.observationIndex.get(`decode:${id}`)
+			if (observation) observation.endedAt = pending.seen
+			this.invalidateLabel(id)
 			this.touch(d)
 			op.discoveries.add(id)
 			op.observations.add(`decode:${id}`)
@@ -1133,7 +1151,9 @@ export class DiscoveryStore
 				if (at + ANCHOR_AIRCRAFT_WINDOW_MS >= now) break
 				rows.delete(address)
 			}
-		d.aircraftCount = rows?.size ?? 0
+		const pending = this.anchorPending.get(id)
+		if (!pending) return
+		pending.count = rows?.size ?? 0
 		this.publishAnchor(id)
 		if (!this.anchorExpiryEnabled) return
 		const oldest = rows?.values().next().value
@@ -1142,8 +1162,8 @@ export class DiscoveryStore
 		const published = this.anchorPublished.get(id)
 		if (
 			published &&
-			(published.count !== d.aircraftCount ||
-				published.bucket !== Math.floor(Date.parse(d.lastSeenAt) / 10_000))
+			(published.count !== pending.count ||
+				published.bucket !== Math.floor(Date.parse(pending.seen) / 10_000))
 		)
 			next = Math.min(next, published.at + 5_000)
 		if (!Number.isFinite(next)) return
@@ -1183,7 +1203,10 @@ export class DiscoveryStore
 		)
 		let d =
 			existingId === undefined ? undefined : this.discoveries.get(existingId)
-		if (d && ev.at < Date.parse(d.lastSeenAt))
+		if (
+			d &&
+			ev.at < Date.parse(this.anchorPending.get(d.id)?.seen ?? d.lastSeenAt)
+		)
 			return { discoveryId: d.id, change: "transient" }
 		if (!d) {
 			if (!this.makeRoom()) return TRANSIENT
@@ -1206,12 +1229,14 @@ export class DiscoveryStore
 			const first = rows.keys().next()
 			if (!first.done) rows.delete(first.value)
 		}
-		d.lastSeenAt = iso(ev.at)
-		d.tuningTrust = trust
-		d.observationCount += existingId === undefined ? 0 : 1
-		const observation = this.observationIndex.get(`decode:${d.id}`)
-		if (observation) observation.endedAt = d.lastSeenAt
-		this.invalidateLabel(d.id)
+		this.anchorPending.set(d.id, {
+			count: rows.size,
+			seen: iso(ev.at),
+			observations:
+				(this.anchorPending.get(d.id)?.observations ?? d.observationCount) +
+				(existingId === undefined ? 0 : 1),
+			trust,
+		})
 		this.scheduleAnchorExpiry(d.id)
 		return {
 			discoveryId: d.id,
@@ -2682,6 +2707,7 @@ export class DiscoveryStore
 		this.discoveries.clear()
 		this.decodeAnchors.clear()
 		this.anchorWindows.clear()
+		this.anchorPending.clear()
 		this.anchorPublished.clear()
 		this.observationIndex.clear()
 		this.byDiscovery.clear()
@@ -5131,6 +5157,7 @@ export class DiscoveryStore
 		if (d === undefined) return
 		if (d.anchor === "decode") this.publishAnchor(id, true)
 		this.anchorWindows.delete(id)
+		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
 		this.discoveries.delete(id)
 		const timer = this.anchorExpiry.get(id)
