@@ -1,5 +1,6 @@
 /** Explicit allowlist: short ADS-B pulses cannot reliably open spectrum tracks.
  * AIS and rtl_433 remain observation-based: the 5 ms path can track their bursts. */
+import { SCANNER_AMBIENT_TARGET_TOLERANCE_HZ } from "@wavekit/api-types"
 import type { TuningTrust } from "../../spectrum/types.js"
 import type {
 	DecodeEvidence,
@@ -14,8 +15,7 @@ import { ADSB_HZ } from "../probes/confirm/readsb.js"
 export const DECODE_ANCHOR_PROTOCOLS: readonly ScannerProtocol[] =
 	Object.freeze(["adsb"])
 export const ANCHOR_AIRCRAFT_WINDOW_MS = 60_000
-/** Same ceiling as ambient's accepted identity memory: 4096 x one latest decode.
- * A single anchor observation replaces entries in place, never banks message history. */
+/** Same ceiling as ambient's accepted identity memory: 4096 latest confirmation times. */
 export const ANCHOR_AIRCRAFT_MAX = 4096
 
 /** JSON tuple avoids source-id delimiter collisions; rebuilt from persisted records. */
@@ -34,7 +34,7 @@ export function canAnchor(
 ): trust is "commanded" | "relay" {
 	return (
 		DECODE_ANCHOR_PROTOCOLS.includes(ev.protocol) &&
-		hz === ADSB_HZ &&
+		Math.abs(hz - ADSB_HZ) <= SCANNER_AMBIENT_TARGET_TOLERANCE_HZ &&
 		isTrusted(trust) &&
 		ev.origin === "ambient" &&
 		ev.crcClean &&
@@ -43,31 +43,6 @@ export function canAnchor(
 		identityFitsProtocol(ev.protocol, ev.identity) &&
 		/^[0-9a-f]{6}$/i.test(ev.identity.value)
 	)
-}
-
-export function anchorDecodes(
-	rows: readonly DecodeEvidence[],
-	ev: DecodeEvidence,
-): DecodeEvidence[] {
-	const next = rows.filter(
-		row =>
-			row.at >= ev.at - ANCHOR_AIRCRAFT_WINDOW_MS &&
-			row.identity?.value !== ev.identity?.value,
-	)
-	next.push(structuredClone(ev))
-	next.sort(
-		(a, b) => a.at - b.at || (a.identity!.value < b.identity!.value ? -1 : 1),
-	)
-	return next.slice(-ANCHOR_AIRCRAFT_MAX)
-}
-
-export function aircraftCount(
-	rows: readonly DecodeEvidence[],
-	now: number,
-): number {
-	return rows.filter(
-		row => row.at >= now - ANCHOR_AIRCRAFT_WINDOW_MS && row.at <= now,
-	).length
 }
 
 export function newDecodeAnchor(
@@ -94,7 +69,6 @@ export function newDecodeAnchor(
 			family: "packet",
 			class: "unknown",
 			confidence: "decoded",
-			identity: structuredClone(ev.identity!),
 			encrypted: false,
 			coChannel: [],
 			firstSeenAt: at,
@@ -128,7 +102,7 @@ export function newDecodeAnchor(
 			thresholdDb: 0,
 			dutyCycle: 0,
 			hypotheses: [],
-			decode: [structuredClone(ev)],
+			decode: [],
 			recordingIds: [],
 			flags: {
 				overload: false,

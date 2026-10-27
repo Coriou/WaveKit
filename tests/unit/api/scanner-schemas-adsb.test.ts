@@ -54,7 +54,7 @@ it("exposes decode anchors and aircraft counts on discovery list and detail resp
 			protocol: "adsb",
 			origin: "ambient",
 			crcClean: true,
-			identity: { kind: "icao", value: "abc123" },
+			identity: { kind: "icao", value: "f00001" },
 			epoch: 1,
 			at,
 			metadata: {},

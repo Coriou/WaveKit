@@ -7112,7 +7112,13 @@ transport `ambient`. When `anchor` is `"decode"`, `measuredOffsetHz`, `bandwidth
 `peakDbfs`, `meanDbfs`, `snrDb`, `floorDbfs`, `thresholdDb`, `dutyCycle`) are required
 numeric zero placeholders, not measurements; `obwMethod` is `"on-bins"`.
 Clients must use the anchor flag to hide these unavailable measurements. `aircraftCount` is the number of distinct
-confirmed ICAOs in the inclusive preceding 60 seconds, capped at 4096, and ages on
-reads and through `scanner:discovery` updates at aircraft expiry (confirmation +
-60,001 ms for the inclusive window). Decode anchors are separate from nearby spectrum carriers and use normal
+confirmed ICAOs in the inclusive preceding 60 seconds, capped at 4096, and ages through a timer at aircraft expiry (confirmation +
+60,001 ms for the inclusive window), with discovery updates subject to the 5-second rate limit. Decode anchors are separate from nearby spectrum carriers and use normal
 scanner retention. See [decode-anchored ADS-B](SCANNER.md#decode-anchored-ads-b).
+
+For a decode anchor, Identify completes immediately with no decoder trial. Its result
+includes `alreadyDecoded: "already decoded: ADS-B, N aircraft"`. The anchor has no
+individual ICAO identity; its per-aircraft count window is memory-only and resets to zero
+on restart. Journal and discovery updates use a 10-second last-seen bucket and a
+5-second rate limit, with latest-state flushing on stop/removal. Source id changes
+create a separate anchor.

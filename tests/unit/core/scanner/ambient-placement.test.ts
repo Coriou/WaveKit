@@ -231,12 +231,3 @@ describe("ADS-B placement keeps the nearest-wins rule", () => {
 		expect(place([a, b], "adsb", ADSB)).toEqual([])
 	})
 })
-
-it.each([249_999, 250_000, 250_001])(
-	"ADS-B placement bandwidth boundary %s Hz",
-	obwHz => {
-		expect(place([obs("a", HZ, { obwHz })], "adsb")).toEqual(
-			obwHz >= 250_000 ? ["a"] : [],
-		)
-	},
-)

@@ -627,6 +627,7 @@ export class ScannerService extends EventEmitter {
 		return true
 	}
 	private readonly channelTier: ScannerChannelTier
+	private readonly refusedAnchors = new Set<string>()
 	private readonly log: Logger
 	/** Band inspection UX req 3.2: consolidation events raised before a listener attached. */
 	private readonly consolidationEvents = new ConsolidationEventQueue()
@@ -4288,7 +4289,7 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
 		if (DECODE_ANCHOR_PROTOCOLS.includes(e.ev.protocol)) {
-			this.store.anchorDecode(
+			const anchored = this.store.anchorDecode(
 				e.sourceId,
 				e.hz,
 				e.ev,
@@ -4297,6 +4298,45 @@ export class ScannerService extends EventEmitter {
 					channelHz: null,
 				}),
 			)
+			if (!anchored.discoveryId) {
+				if (!this.refusedAnchors.has(e.decoderId)) {
+					this.refusedAnchors.add(e.decoderId)
+					this.log.warn("ADS-B anchor evidence refused")
+				}
+				return
+			}
+			const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
+			if (decoderType)
+				this.trialMemory.record(
+					anchored.discoveryId,
+					e.ev.protocol,
+					decoderType,
+					"decoded",
+				)
+			// Identify receives the confirmation without applying identity to a spectrum discovery.
+			for (const live of this.placeAmbient({
+				sourceId: e.sourceId,
+				hz: e.hz,
+				at: e.ev.at,
+				protocol: e.ev.protocol,
+			})) {
+				const identifying = live.jobIds.flatMap(jobId => {
+					const driver = this.drivers.get(jobId)
+					return driver instanceof IdentifyRunner &&
+						driver.covers(e.sourceId, e.hz)
+						? [driver]
+						: []
+				})
+				if (identifying.length > 0 && live.discoveryId && decoderType)
+					this.trialMemory.record(
+						live.discoveryId,
+						e.ev.protocol,
+						decoderType,
+						"decoded",
+					)
+				for (const driver of identifying)
+					driver.onAmbientEvidence(live.observationId, e.ev)
+			}
 			return
 		}
 		const candidates = this.placeAmbient({
@@ -6377,6 +6417,7 @@ export class ScannerService extends EventEmitter {
 				const id = this.store.discoveryIdOf(observationId)
 				return id ? this.store.get(id) : undefined
 			},
+			anchorAt: (sourceId, hz) => this.store.decodeAnchorFor(sourceId, hz),
 			priorsAt: hz => narrowestPriors(withScannerOverlays(ranges), hz),
 			narrowRasterAt: hz => narrowRasterAt(ranges, hz),
 			knownProtocols: this.knownProtocols,

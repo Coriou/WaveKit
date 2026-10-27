@@ -1246,6 +1246,8 @@ export interface ScannerIdentifyAnalog {
 	tuningTrust: TuningTrust
 }
 export interface ScannerIdentifyResult {
+	/** Target is a canonical decode anchor; no trial was needed. */
+	alreadyDecoded?: string
 	/** Fixed summary of the target evidence. Absent on older cores. */
 	proof?: ScannerProof
 	/** Spectral class derived from target measurements, never decoder text. */

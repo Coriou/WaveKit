@@ -1129,6 +1129,7 @@ export interface IdentifyDeps {
 	/** Live observations with a track on the source (ScannerService.live). */
 	liveTracks: (sourceId: string) => IdentifyTrackView[]
 	lastSummary: (sourceId: string) => BlockSummary | null
+	anchorAt?: (sourceId: string, hz: number) => Discovery | undefined
 	discoveryOf: (observationId: string) => Discovery | undefined
 	/** Bandplan priors at a frequency (Task 12 `priorsFor` over the region's bandplans). */
 	priorsAt: (hz: number) => Partial<Record<ScannerProtocol, number>>
@@ -1365,6 +1366,36 @@ export class IdentifyRunner implements JobDriver {
 	// === JobDriver ===
 
 	start(): Promise<void> {
+		const target = this.deps.identify.target
+		const anchor =
+			"all" in target
+				? undefined
+				: this.deps.anchorAt?.(this.sourceId, target.frequencyHz)
+		if (anchor && !("all" in target)) {
+			const t = this.newTarget(
+				target.frequencyHz,
+				toleranceHz(target.bandwidthHz),
+				target.bandwidthHz ?? 0,
+				this.deps.now(),
+				null,
+			)
+			t.state = "identified"
+			t.result = {
+				protocol: "adsb",
+				confidence: "decoded",
+				metadata: anchor.metadata,
+				discoveryId: anchor.id,
+				measurements: measureTarget(null, null, t.targetHz, t.toleranceHz),
+				alreadyDecoded: `already decoded: ADS-B, ${anchor.aircraftCount ?? 0} aircraft`,
+			}
+			this.phase = "finished"
+			this.record.state = "completed"
+			this.record.endedAt = this.deps.now()
+			this.record.updatedAt = this.deps.now()
+			this.emitTarget(t)
+			this.detach()
+			return Promise.resolve()
+		}
 		return this.deps.inner.start()
 	}
 
@@ -2230,7 +2261,8 @@ export class IdentifyRunner implements JobDriver {
 			// decoded earlier (another PTT, passive discovery) without a decode now is a candidate carrying its identity
 			decoded:
 				t.decoded !== null &&
-				(discovery?.confidence ?? "decoded") === "decoded",
+				(t.decoded.protocol === "adsb" ||
+					(discovery?.confidence ?? "decoded") === "decoded"),
 			heardIdentity: t.decoded !== null,
 			discoveryConfidence: discovery?.confidence ?? null,
 			topScore: top?.score ?? 0,
@@ -2262,7 +2294,9 @@ export class IdentifyRunner implements JobDriver {
 			...(protocol ? { protocol } : {}),
 			confidence: analogIdentified
 				? "classified"
-				: (discovery?.confidence ?? (t.decoded ? "decoded" : "activity")),
+				: t.decoded?.protocol === "adsb"
+					? "decoded"
+					: (discovery?.confidence ?? (t.decoded ? "decoded" : "activity")),
 			...(identity ? { identity } : {}),
 			metadata:
 				analogProtocol !== null && analog && analog.ctcssHz !== null

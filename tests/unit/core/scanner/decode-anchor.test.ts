@@ -5,9 +5,6 @@ import fc from "fast-check"
 import pino from "pino"
 import { describe, expect, it, vi } from "vitest"
 import {
-	anchorDecodes,
-	aircraftCount,
-	ANCHOR_AIRCRAFT_MAX,
 	ANCHOR_AIRCRAFT_WINDOW_MS,
 	canAnchor,
 } from "../../../../src/core/scanner/store/decode-anchor.js"
@@ -26,7 +23,10 @@ const ev = (address: number, at = T0): DecodeEvidence => ({
 	crcClean: true,
 	epoch: 1,
 	at,
-	identity: { kind: "icao", value: address.toString(16).padStart(6, "0") },
+	identity: {
+		kind: "icao",
+		value: (0xf00000 + (address % 0x10000)).toString(16),
+	},
 	metadata: {},
 })
 const store = (now = () => T0) =>
@@ -88,7 +88,7 @@ describe("decode-anchored persistence and bounds", () => {
 		}
 	})
 
-	it("preserves legacy zero placeholders on restore and resumes aircraft expiry", () => {
+	it("preserves zero placeholders on restore and rebuilds aircraft count from fresh decodes", () => {
 		vi.useFakeTimers()
 		vi.setSystemTime(T0)
 		const original = store(() => Date.now())
@@ -113,8 +113,8 @@ describe("decode-anchored persistence and bounds", () => {
 			})
 			restored.restore(snapshot)
 			restored.startAnchorExpiry()
-			expect(vi.getTimerCount()).toBe(1)
-			expect(restored.snapshot()).toEqual(snapshot)
+			expect(vi.getTimerCount()).toBe(0)
+			expect(restored.get("d_anchor")?.aircraftCount).toBe(0)
 			expect(restored.get("d_anchor")).toHaveProperty("signal.best.snrDb", 0)
 			expect(restored.snapshot().observations[0]).toHaveProperty("snrDb", 0)
 			vi.advanceTimersByTime(60_001)
@@ -126,26 +126,66 @@ describe("decode-anchored persistence and bounds", () => {
 		}
 	})
 
-	it.each([
-		ANCHOR_AIRCRAFT_MAX - 1,
-		ANCHOR_AIRCRAFT_MAX,
-		ANCHOR_AIRCRAFT_MAX + 1,
-	])("retains at most 4096 latest distinct addresses: %s", n => {
-		const rows = Array.from({ length: n }, (_, i) => ev(i, T0 + i))
-		const next = anchorDecodes(rows.slice(0, -1), rows.at(-1)!)
-		expect(next).toHaveLength(Math.min(n, ANCHOR_AIRCRAFT_MAX))
-		expect(next.at(-1)).toEqual(rows.at(-1))
+	it.each([4095, 4096, 4097])(
+		"bounds the production memory window at %s aircraft",
+		n => {
+			const s = store()
+			try {
+				for (let i = 0; i < n; i++)
+					s.anchorDecode("rtl", HZ, ev(i), "commanded")
+				expect(s.get("d_anchor")?.aircraftCount).toBe(Math.min(n, 4096))
+				expect(s.snapshot().observations[0]?.decode).toEqual([])
+				expect(s.get("d_anchor")?.identity).toBeUndefined()
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		},
+	)
+
+	it("flushes the latest count at the rate boundary and on stop", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(T0)
+		const s = store(() => Date.now())
+		const counts: (number | undefined)[] = []
+		s.on("mutation", (entry: Omit<JournalEntry, "seq">) => {
+			const payload = entry.payload as {
+				discoveries: { aircraftCount?: number }[]
+			}
+			counts.push(payload.discoveries[0]?.aircraftCount)
+		})
+		try {
+			s.anchorDecode("rtl", HZ, ev(1), "commanded")
+			s.anchorDecode("rtl", HZ + 1000, ev(2), "commanded")
+			expect(s.snapshot().discoveries).toHaveLength(1)
+			vi.advanceTimersByTime(4999)
+			expect(counts).toEqual([1])
+			vi.advanceTimersByTime(1)
+			expect(counts).toEqual([1, 2])
+			s.anchorDecode("rtl", HZ, ev(3, Date.now()), "commanded")
+			s.stopAnchorExpiry()
+			expect(counts).toEqual([1, 2, 3])
+		} finally {
+			s.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
 	})
 
 	it.each([59_999, 60_000, 60_001])(
 		"counts confirmations at the inclusive 60 s window boundary: %s",
 		age => {
-			expect(aircraftCount([ev(1)], T0 + age)).toBe(
-				age <= ANCHOR_AIRCRAFT_WINDOW_MS ? 1 : 0,
-			)
-			expect(anchorDecodes([ev(1)], ev(2, T0 + age))).toHaveLength(
-				age <= ANCHOR_AIRCRAFT_WINDOW_MS ? 2 : 1,
-			)
+			vi.useFakeTimers()
+			vi.setSystemTime(T0)
+			const s = store(() => Date.now())
+			try {
+				s.anchorDecode("rtl", HZ, ev(1), "commanded")
+				vi.advanceTimersByTime(age)
+				expect(s.get("d_anchor")?.aircraftCount).toBe(
+					age <= ANCHOR_AIRCRAFT_WINDOW_MS ? 1 : 0,
+				)
+			} finally {
+				s.stopAnchorExpiry()
+				vi.useRealTimers()
+			}
 		},
 	)
 
@@ -153,14 +193,27 @@ describe("decode-anchored persistence and bounds", () => {
 	// Validates: Requirements R3, R5
 	it("refreshes rather than duplicates any confirmed ICAO", () => {
 		fc.assert(
-			fc.property(fc.integer({ min: 1, max: 0xffffff }), address => {
-				const first = ev(address)
-				const second = ev(address, T0 + 1)
-				expect(anchorDecodes([first], second)).toEqual([second])
+			fc.property(fc.integer({ min: 1, max: 0xffff }), address => {
+				const s = store()
+				try {
+					s.anchorDecode("rtl", HZ, ev(address), "commanded")
+					s.anchorDecode("rtl", HZ, ev(address), "commanded")
+					expect(s.get("d_anchor")?.aircraftCount).toBe(1)
+				} finally {
+					s.stopAnchorExpiry()
+				}
 			}),
 			{ numRuns: 100 },
 		)
 	})
+
+	it.each([999, 1000, 1001])(
+		"uses readsb's inclusive frequency tolerance: %s",
+		offset => {
+			expect(canAnchor(ev(1), HZ + offset, "commanded")).toBe(offset <= 1000)
+			expect(canAnchor(ev(1), HZ - offset, "commanded")).toBe(offset <= 1000)
+		},
+	)
 
 	it("fails closed on ineligible protocols, malformed identities and untrusted tuning", () => {
 		expect(canAnchor(ev(1), HZ, "unverified")).toBe(false)
@@ -241,6 +294,7 @@ describe("decode-anchored persistence and bounds", () => {
 				entries.push(entry),
 			)
 			s.anchorDecode("rtl", HZ, ev(2), "relay")
+			s.stopAnchorExpiry()
 			for (const entry of entries) await p.append(entry)
 			const loaded = await new ScannerPersistence({
 				dir,
@@ -250,12 +304,17 @@ describe("decode-anchored persistence and bounds", () => {
 			const replica = store()
 			replica.restore(loaded)
 			for (const entry of loaded.entries) replica.replay(entry)
-			expect(replica.snapshot()).toEqual(s.snapshot())
+			expect(replica.snapshot()).toEqual({
+				...s.snapshot(),
+				discoveries: s
+					.snapshot()
+					.discoveries.map(d => ({ ...d, aircraftCount: 0 })),
+			})
 			expect(replica.get("d_anchor")?.proof).toEqual(s.get("d_anchor")?.proof)
 			replica.anchorDecode("rtl", HZ, ev(3), "commanded")
 			expect(replica.snapshot().discoveries).toHaveLength(1)
 			expect(replica.get("d_anchor")).toMatchObject({
-				aircraftCount: 3,
+				aircraftCount: 1,
 				proof: { kind: "decoded" },
 			})
 		} finally {

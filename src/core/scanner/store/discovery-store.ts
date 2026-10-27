@@ -13,12 +13,12 @@
  */
 import {
 	ANCHOR_AIRCRAFT_WINDOW_MS,
-	anchorDecodes,
-	aircraftCount,
+	ANCHOR_AIRCRAFT_MAX,
 	canAnchor,
 	decodeAnchorKey,
 	newDecodeAnchor,
 } from "./decode-anchor.js"
+import { ADSB_HZ } from "../probes/confirm/readsb.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -33,6 +33,7 @@ import {
 } from "../bandplan/index.js"
 import {
 	DISCOVERY_MERGED_IDS_MAX,
+	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
 	type BandRegion,
 	type ScannerProbeDecoderType,
@@ -855,6 +856,17 @@ export class DiscoveryStore
 		string,
 		ReturnType<typeof setTimeout>
 	>()
+	private readonly anchorWindows = new Map<string, Map<string, number>>()
+	private readonly anchorPublished = new Map<
+		string,
+		{
+			at: number
+			count: number
+			bucket: number
+			seen: string
+			observations: number
+		}
+	>()
 	private readonly decodeAnchors = new Map<string, string>()
 	/** Set by `applyEvidenceTo` when evidence passed its checks and was stored (see `applyEvidenceResult`). */
 	private evidenceAccepted = false
@@ -1059,8 +1071,8 @@ export class DiscoveryStore
 		return created
 	}
 
-	/** At most one timer per retained anchor (therefore at most maxDiscoveries timers).
-	 * The inclusive 60 s window expires at timestamp + 60_000 + 1 ms. */
+	/** One timer per anchor handles expiry and a pending publication. Window entries are
+	 * insertion ordered by latest confirmation; refreshing an address is O(1). */
 	startAnchorExpiry(): void {
 		this.anchorExpiryEnabled = true
 		for (const id of this.decodeAnchors.values()) this.scheduleAnchorExpiry(id)
@@ -1068,38 +1080,73 @@ export class DiscoveryStore
 
 	stopAnchorExpiry(): void {
 		this.anchorExpiryEnabled = false
+		for (const id of this.decodeAnchors.values()) this.publishAnchor(id, true)
 		for (const timer of this.anchorExpiry.values()) clearTimeout(timer)
 		this.anchorExpiry.clear()
+	}
+
+	private publishAnchor(id: string, force = false): void {
+		const d = this.discoveries.get(id)
+		if (!d) return
+		const now = this.now()
+		const previous = this.anchorPublished.get(id)
+		const count = d.aircraftCount ?? 0
+		const bucket = Math.floor(Date.parse(d.lastSeenAt) / 10_000)
+		if (
+			previous &&
+			previous.count === count &&
+			previous.bucket === bucket &&
+			(!force ||
+				(previous.seen === d.lastSeenAt &&
+					previous.observations === d.observationCount))
+		)
+			return
+		// At most one write / 5 s, plus creation and the final stop/removal flush.
+		// Before rate limiting: at most one / 10 s bucket + one / count change.
+		if (!force && previous && now - previous.at < 5_000) return
+		this.anchorPublished.set(id, {
+			at: now,
+			count,
+			bucket,
+			seen: d.lastSeenAt,
+			observations: d.observationCount,
+		})
+		this.commit("observation", op => {
+			this.touch(d)
+			op.discoveries.add(id)
+			op.observations.add(`decode:${id}`)
+			mark(op, id, previous ? "updated" : "created")
+			return id
+		})
 	}
 
 	private scheduleAnchorExpiry(id: string): void {
 		const previous = this.anchorExpiry.get(id)
 		if (previous) clearTimeout(previous)
 		this.anchorExpiry.delete(id)
-		if (!this.anchorExpiryEnabled || !this.discoveries.has(id)) return
-		const rows = this.observationIndex.get(`decode:${id}`)?.decode ?? []
+		const d = this.discoveries.get(id)
+		if (!d) return
+		const rows = this.anchorWindows.get(id)
 		const now = this.now()
-		const next = rows.reduce((expiry, row) => {
-			const at = row.at + ANCHOR_AIRCRAFT_WINDOW_MS + 1
-			return at > now ? Math.min(expiry, at) : expiry
-		}, Infinity)
-		const d = this.discoveries.get(id)!
-		const count = aircraftCount(rows, now)
-		if (d.aircraftCount !== count) {
-			this.commit("observation", op => {
-				d.aircraftCount = count
-				this.touch(d)
-				op.discoveries.add(id)
-				mark(op, id, "updated")
-				return id
-			})
-		}
+		if (rows)
+			for (const [address, at] of rows) {
+				if (at + ANCHOR_AIRCRAFT_WINDOW_MS >= now) break
+				rows.delete(address)
+			}
+		d.aircraftCount = rows?.size ?? 0
+		this.publishAnchor(id)
+		if (!this.anchorExpiryEnabled) return
+		const oldest = rows?.values().next().value
+		let next =
+			oldest === undefined ? Infinity : oldest + ANCHOR_AIRCRAFT_WINDOW_MS + 1
+		const published = this.anchorPublished.get(id)
 		if (
-			!Number.isFinite(next) ||
-			!this.anchorExpiryEnabled ||
-			!this.discoveries.has(id)
+			published &&
+			(published.count !== d.aircraftCount ||
+				published.bucket !== Math.floor(Date.parse(d.lastSeenAt) / 10_000))
 		)
-			return
+			next = Math.min(next, published.at + 5_000)
+		if (!Number.isFinite(next)) return
 		const timer = setTimeout(
 			() => {
 				this.anchorExpiry.delete(id)
@@ -1111,6 +1158,18 @@ export class DiscoveryStore
 		this.anchorExpiry.set(id, timer)
 	}
 
+	decodeAnchorFor(sourceId: string, hz: number): Discovery | undefined {
+		if (
+			!Number.isFinite(hz) ||
+			Math.abs(hz - ADSB_HZ) > SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
+		)
+			return undefined
+		const id = this.decodeAnchors.get(
+			decodeAnchorKey(sourceId, "adsb", ADSB_HZ),
+		)
+		return id === undefined ? undefined : this.get(id)
+	}
+
 	/** Canonical destination for confirmed, trusted decode-anchored protocols. */
 	anchorDecode(
 		sourceId: string,
@@ -1118,45 +1177,46 @@ export class DiscoveryStore
 		ev: DecodeEvidence,
 		trust: Discovery["tuningTrust"] | undefined,
 	): Ingested {
-		if (!canAnchor(ev, hz, trust)) return TRANSIENT
+		if (!canAnchor(ev, hz, trust) || !ev.identity) return TRANSIENT
 		const existingId = this.decodeAnchors.get(
-			decodeAnchorKey(sourceId, ev.protocol, hz),
+			decodeAnchorKey(sourceId, ev.protocol, ADSB_HZ),
 		)
-		const existing =
+		let d =
 			existingId === undefined ? undefined : this.discoveries.get(existingId)
-		if (!existing && !this.makeRoom()) return TRANSIENT
-		const result = this.commit("observation", op => {
+		if (d && ev.at < Date.parse(d.lastSeenAt))
+			return { discoveryId: d.id, change: "transient" }
+		if (!d) {
+			if (!this.makeRoom()) return TRANSIENT
 			const fresh = newDecodeAnchor(
-				existing?.id ?? `d_${this.newId()}`,
+				`d_${this.newId()}`,
 				sourceId,
-				hz,
+				ADSB_HZ,
 				ev,
 				trust,
 			)
-			const d = existing ?? fresh.discovery
-			const previous = this.observationIndex.get(fresh.observation.id)
-			if (previous && ev.at < Date.parse(d.lastSeenAt)) return d.id
-			const observation = previous ? clone(previous) : fresh.observation
-			observation.decode = anchorDecodes(observation.decode ?? [], ev)
-			observation.endedAt = iso(ev.at)
-			observation.tuningTrust = trust
-			d.lastSeenAt = iso(ev.at)
-			d.identity = clone(ev.identity!)
-			d.tuningTrust = trust
-			d.aircraftCount = aircraftCount(observation.decode, ev.at)
-			if (existing) d.observationCount += 1
-			else this.insertDiscovery(d)
-			if (previous) this.unlinkObservation(previous)
-			this.putObservation(observation)
-			this.invalidateLabel(d.id)
-			this.touch(d)
-			op.discoveries.add(d.id)
-			op.observations.add(observation.id)
-			mark(op, d.id, existing ? "updated" : "created")
-			return d.id
-		})
-		if (result.discoveryId) this.scheduleAnchorExpiry(result.discoveryId)
-		return result
+			d = fresh.discovery
+			this.insertDiscovery(d)
+			this.putObservation(fresh.observation)
+		}
+		const rows = this.anchorWindows.get(d.id) ?? new Map<string, number>()
+		this.anchorWindows.set(d.id, rows)
+		rows.delete(ev.identity.value.toLowerCase())
+		rows.set(ev.identity.value.toLowerCase(), ev.at)
+		if (rows.size > ANCHOR_AIRCRAFT_MAX) {
+			const first = rows.keys().next()
+			if (!first.done) rows.delete(first.value)
+		}
+		d.lastSeenAt = iso(ev.at)
+		d.tuningTrust = trust
+		d.observationCount += existingId === undefined ? 0 : 1
+		const observation = this.observationIndex.get(`decode:${d.id}`)
+		if (observation) observation.endedAt = d.lastSeenAt
+		this.invalidateLabel(d.id)
+		this.scheduleAnchorExpiry(d.id)
+		return {
+			discoveryId: d.id,
+			change: existingId === undefined ? "created" : "updated",
+		}
 	}
 
 	/**
@@ -2621,6 +2681,8 @@ export class DiscoveryStore
 		this.clearProofIndexes()
 		this.discoveries.clear()
 		this.decodeAnchors.clear()
+		this.anchorWindows.clear()
+		this.anchorPublished.clear()
 		this.observationIndex.clear()
 		this.byDiscovery.clear()
 		this.bySource.clear()
@@ -4354,6 +4416,10 @@ export class DiscoveryStore
 					previous.frequencyHz,
 				),
 			)
+		if (d.anchor === "decode") {
+			d.aircraftCount = this.anchorWindows.get(d.id)?.size ?? 0
+			delete d.identity
+		}
 		this.discoveries.set(d.id, d)
 		if (d.anchor === "decode")
 			this.decodeAnchors.set(
@@ -4898,6 +4964,22 @@ export class DiscoveryStore
 	}
 
 	private discoveryView(d: Discovery): DiscoveryProofView {
+		if (d.anchor === "decode")
+			return {
+				label: { protocol: "adsb", family: "packet", confidence: "decoded" },
+				evidence: "proven",
+				proof: {
+					kind: "decoded",
+					protocol: "adsb",
+					transport: "ambient",
+					at: d.lastSeenAt,
+					observationId: `decode:${d.id}`,
+					tried: [],
+					unavailable: [],
+					encrypted: false,
+					summary: "ADS-B",
+				},
+			}
 		const hit = this.proofCache.get(d.id)
 		if (hit !== undefined) return hit
 		// No sink or decode input: the stored record is the label.
@@ -4986,11 +5068,7 @@ export class DiscoveryStore
 
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
-		if (d.anchor === "decode")
-			copy.aircraftCount = aircraftCount(
-				this.observationIndex.get(`decode:${d.id}`)?.decode ?? [],
-				this.now(),
-			)
+
 		const view = this.discoveryView(d)
 		if (view.evidence === "proven" && view.proof !== null) {
 			copy.proof = clone(view.proof)
@@ -5051,6 +5129,9 @@ export class DiscoveryStore
 	private removeDiscovery(id: string): void {
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
+		if (d.anchor === "decode") this.publishAnchor(id, true)
+		this.anchorWindows.delete(id)
+		this.anchorPublished.delete(id)
 		this.discoveries.delete(id)
 		const timer = this.anchorExpiry.get(id)
 		if (timer) clearTimeout(timer)
@@ -5084,6 +5165,7 @@ export class DiscoveryStore
 
 	/** Inserts an unlinked observation in canonical order and trims the per-discovery window. */
 	private putObservation(o: Observation): void {
+		if (this.discoveries.get(o.discoveryId)?.anchor === "decode") o.decode = []
 		this.armWatchers(o.discoveryId)
 		this.observationIndex.set(o.id, o)
 		let list = this.byDiscovery.get(o.discoveryId)

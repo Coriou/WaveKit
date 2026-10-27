@@ -268,7 +268,7 @@ it("labels ADS-B at its nominal anchor without choosing one aircraft identity", 
 		confidence: "decoded",
 		anchor: "decode",
 		aircraftCount: 3,
-		identity: { kind: "icao", value: "abc123" },
+		identity: { kind: "icao", value: "f00001" },
 	})
 	expect(identifiedLabel(d)).toBe("ADS-B · 3 aircraft")
 })

@@ -5,7 +5,7 @@
 import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	modeSCrcRemainder,
 	parseBeastMessage,
@@ -14,6 +14,8 @@ import {
 	ReadsbDecoder,
 } from "../../../../src/decoders/builtin/readsb.js"
 import { classifySpectral } from "../../../../src/core/scanner/classify/classifier.js"
+import type { IdentifyRunner } from "../../../../src/core/scanner/identify.js"
+import type { JobRecord } from "../../../../src/core/scanner/job-runner.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
 	ADSB_FRAMES_MAX,
@@ -34,7 +36,7 @@ import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
 /** Synthetic DF17 with generated parity. */
-const DF17 = frameOf(0x8d, 0xabc123, [0, 0, 0, 0, 0, 0, 0])
+const DF17 = frameOf(0x8d, 0xf00001, [0, 0, 0, 0, 0, 0, 0])
 
 /** A long Mode S frame with its CRC-24 parity: first byte, 24-bit address, 7 payload bytes. */
 function frameOf(first: number, address: number, payload: number[]): Buffer {
@@ -58,19 +60,19 @@ function frameOf(first: number, address: number, payload: number[]): Buffer {
 /** Another DF17 message (different payload) from the same address as DF17. */
 const DF17_B = frameOf(
 	0x8d,
-	0xabc123,
+	0xf00001,
 	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
 )
 /** DF18 with CF = 1: a non-ICAO address, CRC-valid. */
 const DF18_CF1 = frameOf(
 	0x91,
-	0xabc123,
+	0xf00001,
 	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
 )
 /** DF18 with CF = 0: an ICAO address. */
 const DF18_CF0 = frameOf(
 	0x90,
-	0xabc123,
+	0xf00001,
 	[0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac],
 )
 
@@ -130,10 +132,10 @@ const aircraft = (data: unknown, extra: Partial<DecoderOutputLike> = {}) => ({
 describe("Mode S CRC on Beast frames", () => {
 	it("checks a fixed synthetic vector independently verified by polynomial long division", () => {
 		// Generator polynomial 0x1fff409; fixed parity, independent of modeSCrcRemainder.
-		const fixed = Buffer.from("8dabc123202cc371c32ce0cf28bc", "hex")
+		const fixed = Buffer.from("8df00001202cc371c32ce0732043", "hex")
 		expect(modeSCrcRemainder(fixed)).toBe(0)
 		expect(beast(fixed)).toMatchObject({
-			icao: "ABC123",
+			icao: "F00001",
 			modeS: { crcOk: true },
 		})
 		fixed[13]! ^= 1
@@ -143,7 +145,7 @@ describe("Mode S CRC on Beast frames", () => {
 	it("a DF17 frame with its parity proves its address; one flipped bit does not", () => {
 		expect(modeSCrcRemainder(DF17)).toBe(0)
 		expect(beast(DF17)).toMatchObject({
-			icao: "ABC123",
+			icao: "F00001",
 			modeS: { df: 17, crcOk: true },
 		})
 		const bad = Buffer.from(DF17)
@@ -222,7 +224,7 @@ describe("readsb ambient interpreter", () => {
 			hz: ADSB_HZ,
 			ev: {
 				protocol: "adsb",
-				identity: { kind: "icao", value: "abc123" },
+				identity: { kind: "icao", value: "f00001" },
 				crcClean: true,
 				origin: "ambient",
 			},
@@ -236,7 +238,7 @@ describe("readsb ambient interpreter", () => {
 		r.decoders.out(aircraft(beast(DF17)))
 		expect(r.got).toEqual([])
 		r.decoders.out(aircraft(beast(DF17_B)))
-		expect(r.got.map(e => e.ev.identity?.value)).toEqual(["abc123"])
+		expect(r.got.map(e => e.ev.identity?.value)).toEqual(["f00001"])
 	})
 
 	it("remembers the last frame of at most ADSB_FRAMES_MAX addresses, the oldest evicted", () => {
@@ -264,7 +266,7 @@ describe("readsb ambient interpreter", () => {
 		const parsed = parseReadsb(
 			aircraft(
 				{
-					icao: "abc123",
+					icao: "f00001",
 					messageCount: 2,
 					lastSeen: new Date(1000),
 					readsbFormat: "json",
@@ -284,19 +286,19 @@ describe("readsb ambient interpreter", () => {
 		for (const data of [
 			beast(bad),
 			beast(Buffer.from([0x20, 0xab, 0xc1, 0x23, 0, 0, 0]), 0x32),
-			{ icao: "~abc123" },
+			{ icao: "~f00001" },
 			{ icao: "4840D" },
-			{ icao: "ABC123", modeS: { df: 17, crcOk: "yes" } },
-			{ icao: "ABC123", modeS: null },
-			{ icao: 0xabc123 },
+			{ icao: "F00001", modeS: { df: 17, crcOk: "yes" } },
+			{ icao: "F00001", modeS: null },
+			{ icao: 0xf00001 },
 			null,
-			"ABC123",
+			"F00001",
 			[],
 		])
 			r.decoders.out(aircraft(data))
 		r.decoders.out({
 			type: "signal",
-			data: { icao: "ABC123" },
+			data: { icao: "F00001" },
 			timestamp: new Date(1_000),
 		})
 		expect(r.got).toEqual([])
@@ -307,7 +309,7 @@ describe("readsb ambient interpreter", () => {
 
 	// Feature: adsb-ambient, Property 1: only the second CRC-proven message of an ICAO names it
 	it("property: evidence only for an ICAO with at least two proven messages, from its second on", () => {
-		const icaos = ["abc123", "abc124", "00ff00"]
+		const icaos = ["f00001", "f00002", "f00003"]
 		const msg = fc.oneof(
 			fc.record({
 				kind: fc.constant("good" as const),
@@ -363,7 +365,7 @@ describe("readsb ambient interpreter", () => {
 
 /** Synthetic SBS source line; all fields, including type and timestamps, are source content. */
 function sbsLine(time: string): string {
-	return `MSG,3,1,1,ABC123,1,2026/01/01,${time},2026/01/01,00:00:09.000,,12000,,,,,,,,,,0`
+	return `MSG,3,1,1,F00001,1,2026/01/01,${time},2026/01/01,00:00:09.000,,12000,,,,,,,,,,0`
 }
 
 describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
@@ -595,8 +597,8 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		async (_name, messages, now, decoded) => {
 			const { h, internals, send, provenance } = await serviceRig()
 			try {
-				send(parseJsonAircraft({ hex: "abc123", messages: 2, now: 1, seen: 0 }))
-				send(parseJsonAircraft({ hex: "abc123", messages, now, seen: 0 }), 2000)
+				send(parseJsonAircraft({ hex: "f00001", messages: 2, now: 1, seen: 0 }))
+				send(parseJsonAircraft({ hex: "f00001", messages, now, seen: 0 }), 2000)
 				expect(internals.store.snapshot().discoveries).toHaveLength(
 					decoded ? 1 : 0,
 				)
@@ -613,7 +615,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			const bad = Buffer.from(DF17)
 			bad[2]! ^= 0x10
 			send(beast(bad))
-			send({ icao: "~123456" })
+			send({ icao: "~f00007" })
 			send(beast(DF18_CF1))
 			send(beast(DF17))
 			// an exact repeat of the same raw frame is not a second message
@@ -656,6 +658,145 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			}
 		},
 	)
+
+	it("Identify on the anchor reports already decoded without starting a trial", async () => {
+		const r = await serviceRig("trusted", { observation: "none" })
+		try {
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			const job = await r.h.service.identify({
+				sourceId: "rtl",
+				target: { frequencyHz: ADSB_HZ },
+				record: false,
+			})
+			expect(job).toMatchObject({
+				state: "completed",
+				identify: {
+					targets: [
+						{
+							state: "identified",
+							trials: [],
+							result: {
+								alreadyDecoded: "already decoded: ADS-B, 1 aircraft",
+								protocol: "adsb",
+							},
+						},
+					],
+				},
+			})
+			expect(r.h.decoders.held.size).toBe(0)
+		} finally {
+			await r.h.service.stop()
+			r.provenance.dispose()
+		}
+	})
+
+	it("Identify on a 1090 MHz observation receives ADS-B without changing its discovery", async () => {
+		const r = await serviceRig("trusted")
+		try {
+			// Synthetic mask response avoids involving a spectrum worker in this evidence-routing test.
+			;(
+				r.h.service as unknown as { artefactAt: () => Promise<null> }
+			).artefactAt = () => Promise.resolve(null)
+			const job = await r.h.service.identify({
+				sourceId: "rtl",
+				target: { frequencyHz: ADSB_HZ, bandwidthHz: 100_000 },
+				record: false,
+			})
+			const service = r.h.service as unknown as {
+				jobs: Map<string, JobRecord>
+				drivers: Map<string, IdentifyRunner>
+			}
+			const record = service.jobs.get(job.id)
+			const driver = service.drivers.get(job.id)
+			const live = r.internals.live.get("adsb-1")
+			if (!record || !driver || !live?.lastTrack)
+				throw new TypeError("synthetic identify fixture missing")
+			// Supply engine readiness and a settled synthetic track; no source socket or RF input.
+			record.state = "running"
+			record.startedAt = r.internals.now()
+			live.jobIds.push(job.id)
+			live.lastTrack.blocks = 20
+			live.lastTrack.centreHz = ADSB_HZ
+			live.lastTrack.gate = "passed"
+			;(
+				r.h.service as unknown as {
+					ingest: (
+						o: LiveObservation,
+						t: NonNullable<LiveObservation["lastTrack"]>,
+					) => void
+				}
+			).ingest(live, live.lastTrack)
+			const spectrumId = live.discoveryId
+			if (!spectrumId)
+				throw new TypeError("synthetic spectrum discovery missing")
+			for (let i = 0; i < 10; i++) {
+				driver.tick(r.internals.now())
+				await Promise.resolve()
+			}
+			expect(driver.view().targets[0]?.trials).toContainEqual(
+				expect.objectContaining({ protocol: "adsb", outcome: "running" }),
+			)
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			for (let i = 0; i < 10; i++) {
+				driver.tick(r.internals.now())
+				await Promise.resolve()
+			}
+			expect(driver.view().targets[0]).toMatchObject({
+				state: "identified",
+				result: { protocol: "adsb" },
+			})
+			expect(live.discoveryId).toBe(spectrumId)
+			expect(r.internals.store.get(spectrumId)?.protocol).not.toBe("adsb")
+			expect(r.internals.store.get(spectrumId)?.identity).toBeUndefined()
+			expect(r.h.service.trialMemoryOf(spectrumId)).toContainEqual(
+				expect.objectContaining({ protocol: "adsb" }),
+			)
+			const anchor = r.internals.store
+				.snapshot()
+				.discoveries.find(d => d.anchor === "decode")
+			expect(anchor?.identity).toBeUndefined()
+			expect(r.h.service.trialMemoryOf(anchor?.id ?? "")).toContainEqual(
+				expect.objectContaining({ protocol: "adsb" }),
+			)
+		} finally {
+			await r.h.service.stop()
+			r.provenance.dispose()
+		}
+	})
+
+	it("retuning away loses trust, ages count to zero, and tuning back refreshes the same anchor", async () => {
+		const r = await serviceRig("trusted", { observation: "none" })
+		vi.useFakeTimers()
+		try {
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			const anchor = r.internals.store.snapshot().discoveries[0]
+			if (!anchor) throw new TypeError("synthetic anchor missing")
+			await r.h.tuner.setFrequency("rtl", ADSB_HZ + 5_000_000, {
+				origin: "rest",
+			})
+			r.send(parseSbsLine(sbsLine("00:00:05.000")), 2000)
+			expect(r.internals.store.get(anchor.id)?.lastSeenAt).toBe(
+				anchor.lastSeenAt,
+			)
+			r.advance(60_001)
+			vi.advanceTimersByTime(60_001)
+			expect(r.internals.store.get(anchor.id)?.aircraftCount).toBe(0)
+			await r.h.tuner.setFrequency("rtl", ADSB_HZ, { origin: "rest" })
+			r.send(parseSbsLine(sbsLine("00:01:10.000")))
+			r.send(parseSbsLine(sbsLine("00:01:12.000")), 2000)
+			expect(r.internals.store.snapshot().discoveries).toHaveLength(1)
+			expect(r.internals.store.get(anchor.id)).toMatchObject({
+				aircraftCount: 1,
+			})
+		} finally {
+			vi.useRealTimers()
+			await r.h.service.stop()
+			r.provenance.dispose()
+		}
+	})
 
 	it("keeps the anchor canonical when a qualifying wideband observation opens later", async () => {
 		const r = await serviceRig("trusted")
@@ -700,9 +841,9 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
 			const id = r.internals.store.snapshot().discoveries[0]!.id
 			const first = r.internals.store.get(id)!
-			r.send(parseSbsLine(sbsLine("00:00:04.000").replace("ABC123", "DEF456")))
+			r.send(parseSbsLine(sbsLine("00:00:04.000").replace("F00001", "F00004")))
 			r.send(
-				parseSbsLine(sbsLine("00:00:06.000").replace("ABC123", "DEF456")),
+				parseSbsLine(sbsLine("00:00:06.000").replace("F00001", "F00004")),
 				2000,
 			)
 			expect(r.internals.store.snapshot().discoveries).toHaveLength(1)
@@ -722,7 +863,13 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 				now: Date.parse(snapshot.discoveries[0]!.lastSeenAt),
 			})
 			try {
-				expect(again.internals.store.snapshot()).toEqual(snapshot)
+				expect(again.internals.store.snapshot()).toEqual({
+					...snapshot,
+					discoveries: snapshot.discoveries.map(d => ({
+						...d,
+						aircraftCount: 0,
+					})),
+				})
 				again.send(parseSbsLine(sbsLine("00:00:10.000")))
 				again.send(parseSbsLine(sbsLine("00:00:12.000")), 2000)
 				expect(
@@ -762,6 +909,7 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
 			const records = r.internals.store.snapshot().discoveries
 			expect(records).toHaveLength(2)
+			expect(r.h.service.trialMemoryOf(live.discoveryId ?? "")).toEqual([])
 			expect(r.internals.store.get(live.discoveryId!)?.protocol).toBe("unknown")
 			expect(records.find(d => d.anchor === "decode")).toMatchObject({
 				protocol: "adsb",

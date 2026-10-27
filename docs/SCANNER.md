@@ -620,7 +620,7 @@ create an anchor.
 
 Every accepted confirmation for a protocol on the decode-anchor list goes to one `anchor: "decode"` discovery
 per source, protocol and nominal channel (1090 MHz for ADS-B). Further confirmations
-refresh that record, including after a restart. Its proof comes from accepted ambient
+refresh that record, including after a restart. A source id change creates a new anchor. Its proof comes from accepted ambient
 decodes. It does not imply a measured carrier: bandwidth, airtime and signal statistics
 use numeric zero placeholders in the API because those measurements are unavailable
 (`anchor: "decode"` identifies them as unmeasured). Decode anchors
@@ -630,12 +630,21 @@ Spectrum observations, including nearby spurs, remain unidentified by ADS-B.
 
 The band label reads **ADS-B · N aircraft**. `aircraftCount` counts distinct confirmed
 ICAOs seen in the inclusive last 60 seconds, with a ceiling of 4096 (the ambient
-accepted-identity ceiling). The anchor retains one latest accepted decode per ICAO;
-when full, the oldest entries leave first. The count ages on reads and publishes a
-`scanner:discovery` update at the next aircraft expiry, even without further confirmations.
+accepted-identity ceiling). The per-ICAO window lives only in memory, with one latest confirmation time per ICAO;
+when full, the oldest entries leave first. No aircraft list is persisted in `Observation.decode`.
+After restart, the count starts at zero and rebuilds from fresh confirmations. The anchor
+has no individual aircraft identity. Count expiry runs even without further confirmations.
+Journal entries and discovery events publish count changes or a new 10-second last-seen bucket,
+limited to one write per anchor every 5 seconds, with a final latest-state flush on stop/removal.
+Before rate limiting, writes are at most one per bucket plus one per count change
+(confirmations bound increases; expiry bounds decreases). With rate limiting, a busy
+minute uses at most 12 rate slots plus creation and final flush, independent of aircraft count.
+The persisted anchor stays constant size. Identify at an existing anchor reports
+“already decoded: ADS-B, N aircraft” without a trial. Identify on a 1090 MHz spectrum
+observation can receive fresh ADS-B confirmations without assigning aircraft identity to its discovery.
 The inclusive window expires at confirmation time + 60,001 ms. There is at most one
 timer per anchor, bounded by discovery capacity, cleared on removal and scanner stop.
-Retained entries age out on the next confirmation. This is a count of confirmed aircraft,
+Count publications may wait for the next 5-second write slot. This is a count of confirmed aircraft,
 not every aircraft that produced a single message. Anchors use the same discovery
 capacity, inactivity retention, Keep and Ignore rules as spectrum discoveries.
 
