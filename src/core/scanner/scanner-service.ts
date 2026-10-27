@@ -4320,22 +4320,27 @@ export class ScannerService extends EventEmitter {
 				at: e.ev.at,
 				protocol: e.ev.protocol,
 			})) {
-				const identifying = live.jobIds.flatMap(jobId => {
+				// A 0.5 µs PPM pulse has first spectral nulls at ±1/0.5 µs = ±2 MHz.
+				// Real ADS-B tracks are hundreds of kHz to MHz wide: 250 kHz is far above
+				// nearby 1–2 kHz carriers/spurs and well below the pulse spread.
+				if ((live.lastTrack?.obwHz ?? 0) < 250_000) continue
+				let accepted = false
+				for (const jobId of live.jobIds) {
 					const driver = this.drivers.get(jobId)
-					return driver instanceof IdentifyRunner &&
-						driver.covers(e.sourceId, e.hz)
-						? [driver]
-						: []
-				})
-				if (identifying.length > 0 && live.discoveryId && decoderType)
+					if (
+						driver instanceof IdentifyRunner &&
+						driver.covers(e.sourceId, e.hz) &&
+						driver.onAmbientEvidence(live.observationId, e.ev)
+					)
+						accepted = true
+				}
+				if (accepted && live.discoveryId && decoderType)
 					this.trialMemory.record(
 						live.discoveryId,
 						e.ev.protocol,
 						decoderType,
 						"decoded",
 					)
-				for (const driver of identifying)
-					driver.onAmbientEvidence(live.observationId, e.ev)
 			}
 			return
 		}

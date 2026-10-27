@@ -641,7 +641,11 @@ Before rate limiting, writes are at most one per bucket plus one per count chang
 minute uses at most 12 rate slots plus creation and final flush, independent of aircraft count.
 The persisted anchor stays constant size. Identify at an existing anchor reports
 “already decoded: ADS-B, N aircraft” without a trial. Identify on a 1090 MHz spectrum
-observation can receive fresh ADS-B confirmations without assigning aircraft identity to its discovery.
+observation can receive fresh ADS-B confirmations only when its measured occupied bandwidth
+is at least 250 kHz. Narrow carriers and spurs cannot complete Identify as ADS-B.
+Spectrum trial success is recorded only after the running Identify trial accepts the
+confirmation for its target, epoch and deadline; the spectrum discovery remains
+unidentified by ADS-B.
 The inclusive window expires at confirmation time + 60,001 ms. There is at most one
 timer per anchor, bounded by discovery capacity, cleared on removal and scanner stop.
 Reads, snapshots and events share the last published state and revision. Pending count

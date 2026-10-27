@@ -691,80 +691,115 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		}
 	})
 
-	it("Identify on a 1090 MHz observation receives ADS-B without changing its discovery", async () => {
-		const r = await serviceRig("trusted")
-		try {
-			// Synthetic mask response avoids involving a spectrum worker in this evidence-routing test.
-			;(
-				r.h.service as unknown as { artefactAt: () => Promise<null> }
-			).artefactAt = () => Promise.resolve(null)
-			const job = await r.h.service.identify({
-				sourceId: "rtl",
-				target: { frequencyHz: ADSB_HZ, bandwidthHz: 100_000 },
-				record: false,
-			})
-			const service = r.h.service as unknown as {
-				jobs: Map<string, JobRecord>
-				drivers: Map<string, IdentifyRunner>
-			}
-			const record = service.jobs.get(job.id)
-			const driver = service.drivers.get(job.id)
-			const live = r.internals.live.get("adsb-1")
-			if (!record || !driver || !live?.lastTrack)
-				throw new TypeError("synthetic identify fixture missing")
-			// Supply engine readiness and a settled synthetic track; no source socket or RF input.
-			record.state = "running"
-			record.startedAt = r.internals.now()
-			live.jobIds.push(job.id)
-			live.lastTrack.blocks = 20
-			live.lastTrack.centreHz = ADSB_HZ
-			live.lastTrack.gate = "passed"
-			;(
-				r.h.service as unknown as {
-					ingest: (
-						o: LiveObservation,
-						t: NonNullable<LiveObservation["lastTrack"]>,
-					) => void
+	it.each([
+		[2_000, "valid", false],
+		[249_999, "valid", false],
+		[250_000, "valid", true],
+		[1_200_000, "valid", true],
+		[250_000, "wrong-epoch", false],
+		[250_000, "expired", false],
+		[250_000, "no-running-trial", false],
+	] as const)(
+		"Identify ADS-B at %i Hz OBW, %s: accepted=%s",
+		async (obwHz, validation, accepted) => {
+			const r = await serviceRig("trusted")
+			try {
+				// Synthetic mask response avoids involving a spectrum worker in this evidence-routing test.
+				;(
+					r.h.service as unknown as { artefactAt: () => Promise<null> }
+				).artefactAt = () => Promise.resolve(null)
+				const job = await r.h.service.identify({
+					sourceId: "rtl",
+					target: { frequencyHz: ADSB_HZ, bandwidthHz: 100_000 },
+					record: false,
+				})
+				const service = r.h.service as unknown as {
+					jobs: Map<string, JobRecord>
+					drivers: Map<string, IdentifyRunner>
 				}
-			).ingest(live, live.lastTrack)
-			const spectrumId = live.discoveryId
-			if (!spectrumId)
-				throw new TypeError("synthetic spectrum discovery missing")
-			for (let i = 0; i < 10; i++) {
-				driver.tick(r.internals.now())
-				await Promise.resolve()
+				const record = service.jobs.get(job.id)
+				const driver = service.drivers.get(job.id)
+				const live = r.internals.live.get("adsb-1")
+				if (!record || !driver || !live?.lastTrack)
+					throw new TypeError("synthetic identify fixture missing")
+				// Supply engine readiness and a settled synthetic track; no source socket or RF input.
+				record.state = "running"
+				record.startedAt = r.internals.now()
+				live.jobIds.push(job.id)
+				live.lastTrack.blocks = 20
+				live.lastTrack.centreHz = ADSB_HZ + 10_000
+				live.lastTrack.obwHz = obwHz
+				live.lastTrack.gate = "passed"
+				;(
+					r.h.service as unknown as {
+						ingest: (
+							o: LiveObservation,
+							t: NonNullable<LiveObservation["lastTrack"]>,
+						) => void
+					}
+				).ingest(live, live.lastTrack)
+				const spectrumId = live.discoveryId
+				if (!spectrumId)
+					throw new TypeError("synthetic spectrum discovery missing")
+				for (let i = 0; i < 10; i++) {
+					driver.tick(r.internals.now())
+					await Promise.resolve()
+				}
+				expect(driver.view().targets[0]?.trials).toContainEqual(
+					expect.objectContaining({ protocol: "adsb", outcome: "running" }),
+				)
+				const runner = driver as unknown as {
+					targets: {
+						view?: { epoch: number }
+						ambientUntil: number
+						trials: { protocol: string; outcome: string }[]
+					}[]
+				}
+				const target = runner.targets[0]
+				if (!target?.view) throw new TypeError("synthetic target missing")
+				if (validation === "wrong-epoch") target.view.epoch += 1
+				if (validation === "expired") target.ambientUntil = r.internals.now()
+				if (validation === "no-running-trial")
+					for (const trial of target.trials)
+						if (trial.protocol === "adsb") trial.outcome = "timeout"
+				r.send(parseSbsLine(sbsLine("00:00:01.000")))
+				r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+				for (let i = 0; i < 10; i++) {
+					driver.tick(r.internals.now())
+					await Promise.resolve()
+				}
+				if (accepted) {
+					expect(record.state).toBe("completed")
+					expect(driver.view().targets[0]).toMatchObject({
+						state: "identified",
+						result: { protocol: "adsb" },
+					})
+				} else
+					expect(driver.view().targets[0]?.result?.protocol).not.toBe("adsb")
+				expect(live.discoveryId).toBe(spectrumId)
+				expect(r.internals.store.get(spectrumId)?.protocol).not.toBe("adsb")
+				expect(r.internals.store.get(spectrumId)?.identity).toBeUndefined()
+				if (accepted)
+					expect(r.h.service.trialMemoryOf(spectrumId)).toContainEqual(
+						expect.objectContaining({
+							protocol: "adsb",
+							lastOutcome: "decoded",
+						}),
+					)
+				else expect(r.h.service.trialMemoryOf(spectrumId)).toEqual([])
+				const anchor = r.internals.store
+					.snapshot()
+					.discoveries.find(d => d.anchor === "decode")
+				expect(anchor?.identity).toBeUndefined()
+				expect(r.h.service.trialMemoryOf(anchor?.id ?? "")).toContainEqual(
+					expect.objectContaining({ protocol: "adsb" }),
+				)
+			} finally {
+				await r.h.service.stop()
+				r.provenance.dispose()
 			}
-			expect(driver.view().targets[0]?.trials).toContainEqual(
-				expect.objectContaining({ protocol: "adsb", outcome: "running" }),
-			)
-			r.send(parseSbsLine(sbsLine("00:00:01.000")))
-			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
-			for (let i = 0; i < 10; i++) {
-				driver.tick(r.internals.now())
-				await Promise.resolve()
-			}
-			expect(driver.view().targets[0]).toMatchObject({
-				state: "identified",
-				result: { protocol: "adsb" },
-			})
-			expect(live.discoveryId).toBe(spectrumId)
-			expect(r.internals.store.get(spectrumId)?.protocol).not.toBe("adsb")
-			expect(r.internals.store.get(spectrumId)?.identity).toBeUndefined()
-			expect(r.h.service.trialMemoryOf(spectrumId)).toContainEqual(
-				expect.objectContaining({ protocol: "adsb" }),
-			)
-			const anchor = r.internals.store
-				.snapshot()
-				.discoveries.find(d => d.anchor === "decode")
-			expect(anchor?.identity).toBeUndefined()
-			expect(r.h.service.trialMemoryOf(anchor?.id ?? "")).toContainEqual(
-				expect.objectContaining({ protocol: "adsb" }),
-			)
-		} finally {
-			await r.h.service.stop()
-			r.provenance.dispose()
-		}
-	})
+		},
+	)
 
 	it("retuning away loses trust, ages count to zero, and tuning back refreshes the same anchor", async () => {
 		const r = await serviceRig("trusted", { observation: "none" })

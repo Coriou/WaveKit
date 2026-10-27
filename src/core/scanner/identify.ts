@@ -2494,16 +2494,16 @@ export class IdentifyRunner implements JobDriver {
 	/**
 	 * WG7 req 1.5: ambient evidence paired with one of this job's observations. Decodes a running ambient trial
 	 * of the target whose resolved observation it is, when the evidence is CRC-clean, ambient and carries an
-	 * accepted (H2) identity for the trial's protocol.
+	 * accepted (H2) identity for the trial's protocol. Returns true only when a running trial accepts it.
 	 */
-	onAmbientEvidence(observationId: string, ev: DecodeEvidence): void {
+	onAmbientEvidence(observationId: string, ev: DecodeEvidence): boolean {
 		if (
 			this.phase !== "running" ||
 			ev.origin !== "ambient" ||
 			!ev.crcClean ||
 			!ev.identity
 		)
-			return
+			return false
 		const identity = ev.identity
 		const now = this.deps.now()
 		for (const t of this.targets) {
@@ -2536,8 +2536,9 @@ export class IdentifyRunner implements JobDriver {
 				this.releaseRuns(runs)
 			}
 			this.emitTarget(t)
-			return
+			return true
 		}
+		return false
 	}
 
 	// === WG10: analog evidence and the unavailable memo ===
