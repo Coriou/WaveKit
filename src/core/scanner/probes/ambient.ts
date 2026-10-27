@@ -978,6 +978,23 @@ function messageOf(type: string, data: unknown): string | undefined {
 	} else if (type === "lora-meshtastic") {
 		content = fields(record, ["from", "to", "id", "portnum", "payloadB64"])
 	} else if (type === "dsd-fme") {
+		// Checked DMR bursts >= 2 s apart pair by CC across slots for identification,
+		// even with identical printed content. They may come from one keying (hang
+		// time or VLC + TLC), so spacing does not prove independent transmissions.
+		// Any checked burst type qualifies except voice LC with both TG/SRC, which
+		// keeps the content-aware rule. Unchecked sync/CC hints cannot prime H2.
+		if (
+			record["protocol"] === "dmr" &&
+			record["verified"] === true &&
+			record["crcErr"] === false &&
+			(record["fecErrs"] === undefined || record["fecErrs"] === 0) &&
+			!(
+				record["voiceLc"] === true &&
+				record["tg"] !== undefined &&
+				record["src"] !== undefined
+			)
+		)
+			return undefined
 		content = fields(record, [
 			"protocol",
 			"cc",

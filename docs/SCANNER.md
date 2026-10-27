@@ -4,6 +4,19 @@ The scanner finds and characterises RF activity on a source, confirms it with a 
 
 Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-design.md). Endpoint and message reference: [API.md, Scanner and Spectrum](API.md#scanner). Component view: [ARCHITECTURE.md, Scanner](ARCHITECTURE.md#scanner).
 
+While watching a source, the scanner supplies its current-epoch, gated energy centres
+as extra dsd-fme activity candidates. Centres are rounded to the nearest 6.25 kHz
+raster (initial ties upward). Each track keeps its previous raster centre until its
+actual centre moves more than 500 Hz past the midpoint: distance > 3125 + 500 =
+3625 Hz. This gives a 1000 Hz return deadband and at most 3625 Hz identity error.
+The same stable centre is returned to the planner and used for coalesced notices;
+back-and-forth midpoint jitter does not
+force a planner pass. Only the current candidate set per epoch and decoder is retained. This allows digital voice on an unlisted channel
+to receive a decoder without a protocol hint or VFO selection. Suggestions remain
+subject to decoder band, passband fit, source ownership and CPU limits; energy alone
+does not verify a protocol. Checked dsd-fme output must pass the existing verification
+and receiver provenance rules. See [decoder activity placement](DECODER-GUIDE.md).
+
 ## What it does and does not do
 
 - Finds energy in the window a source is tuned to (in-window) or across wider ranges by retuning an rtl_tcp source (sweep).
@@ -330,6 +343,40 @@ On by default in protected access mode (`scanner.iqCapture.enabled: true`; in le
 
 **Decodes from busy-channel decoders land on their channel.** A paging or digital-voice decoder that the planner moved to a band-plan channel reports its decodes at that channel, so they land on that channel's discovery (not at the tuned centre). Each such channel confirms its own identities: a colour code or capcode heard on one channel never confirms a decode on another.
 
+dsd-fme excludes a channel while the ranker has a decode of a non-digital-voice
+protocol within its existing 15-minute decode-hot window (strictly younger than
+900,000 ms). DMR, P25, NXDN, YSF, dPMR and D-Star remain voice candidates;
+paging, APRS, ACARS and other protocols do not. This evidence travels through the
+activity snapshot, including decode history pulled by the ranker. Association
+requires `|candidate centre − decoded channel centre| ≤ channelWidthHz / 4`:
+3,125 Hz for a 12,500 Hz channel, including that boundary and narrower than half
+a channel. Ambiguous associations exclude neither candidate. A recent checked
+voice decode on that same centre wins over non-voice evidence for the same
+900,000 ms window, regardless of which decode came later. Recent verified sync
+on the exact running placement also overrides exclusion while its protection lasts.
+Thus a pager at H + 6,250 Hz cannot suppress DMR at H.
+
+A running dsd-fme activity slot without clean checked sync after its full dwell is
+demoted for `max(60,000, dwellMs × max(1, maxMovesPerMinute))` milliseconds:
+with the defaults, `max(60,000, 20,000 × 6) = 120,000 ms`. This allows six other
+full dwells before retrying a failed channel. A zero move budget still holds
+for a full 60,000 ms window (or one dwell, if longer). The cooldown applies strictly
+before its deadline; at or after it a fresh run on the channel may compete again.
+An incumbent without recent clean sync stays demoted until clean sync or a move,
+even after cooldown expiry; continuous energy cannot revive that failed run when
+a challenger arrives late. Demoted channels cannot challenge or fill free slots;
+replacing a demoted incumbent still spends the shared per-source move budget.
+There are at most 256 demotions (one quarter of the 1,024-candidate query cap),
+oldest insertion dropped first.
+
+Only explicitly `verified: true`, `crcErr: false` lines with absent or zero
+`fecErrs` clear demotion and renew protection for the exact running placement.
+Protection lasts strictly until `lastCleanSyncMonoMs + cooldownMs` (120 seconds
+with defaults), and expires at that deadline even without new spectrum events.
+Repeated clean evidence renews it; a restart resets it. Weak sync/CC hints and
+CRC/FEC failures never renew protection: their only protection is the run's
+initial `dwellMs` (20 seconds by default), expiring at or after the dwell boundary.
+
 **Busy channels get the decoders.** Paging (POCSAG/FLEX) and digital-voice (DMR and similar) decoders can only run on a few channels of a band at once. The scanner ranks every channel those decoders could use by recent activity, and the decoder planner puts its spare channel slots on the busiest ones instead of only the ones nearest the tuned centre:
 
 - a channel with signal energy in the latest spectrum block (no older than 1 s) always ranks first; an overloaded block shows no energy, and 10 s of overloaded blocks count as no fresh spectrum;
@@ -536,8 +583,10 @@ payload; paging with message content uses protocol, capcode, function and text;
 empty or tone-only pages use spacing alone. Direwolf APRS uses source, destination
 and the information field, excluding digipeater paths and other routing fields.
 DSD uses protocol and
-link fields (colour/access code, talkgroup, source, slot or callsign). Repeated
-identical content does not confirm. Address-only APRS output from multimon and
+link fields (colour/access code, talkgroup, source, slot or callsign). Checked
+DMR control bursts use spacing alone, including identical CC/slot repeats; voice
+LC and other content-bearing evidence still require distinct content. Address-only
+APRS output from multimon and
 other DTOs without content use spacing alone. ADS-B retains
 its local CRC/address checks and raw-frame duplicate rejection for Beast output.
 For SBS output, the adapter emits one aircraft record per `MSG` line: `messageCount: 1`
@@ -693,7 +742,14 @@ the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
 
 DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
-both target and source. Voice link control uses the latest CC from its own BS
+both target and source. Pairing is by CC on the same channel across slots:
+any checked burst type except voice LC carrying both TG/SRC can confirm at
+least 2 seconds and at most 5 minutes apart, even with identical printed content.
+These bursts may come from one keying (hang time or VLC + TLC); the spacing is
+accepted for identification and does not prove independent transmissions.
+Closer repeats count once and retain the first burst's time for the separation
+check. Unchecked sync or CC-only hints never confirm. Voice LC with both TG/SRC
+still requires distinct link content and uses the latest CC from its own BS
 slot, or from the single MS channel, in its current burst sequence. Unknown CC,
 sync loss, protocol changes and sequence timeout clear that association. Header and voice-LC
 verification waits until the next DMR sync closes the burst (normally one burst

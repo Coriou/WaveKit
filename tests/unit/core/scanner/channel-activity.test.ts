@@ -5,6 +5,7 @@ import type {
 	ActivityQuery,
 } from "../../../../src/decoders/enablement/activity-contract.js"
 import {
+	ACTIVITY_CENTRE_HYSTERESIS_HZ,
 	ACTIVITY_DECODE_HOT_MS,
 	ACTIVITY_DECODE_WARM_MS,
 	ACTIVITY_HISTORY_REFRESH_MS,
@@ -115,6 +116,122 @@ const one = (
 ) => r.port.snapshot([q], now)[0]!
 
 describe("channel activity ranker", () => {
+	it("offers bounded current-epoch energy centres and notifies with no prior queries", () => {
+		const { clock, ranker, changes } = setup()
+		const epoch = query().epoch
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([]))
+		clock.advance(317.3)
+		const before = changes.length
+		const hzs = Array.from(
+			{ length: ACTIVITY_MAX_SEGMENTS + 1 },
+			(_, i) => CENTRE + i * 6_250,
+		)
+		ranker.ingestBlock("rtl", "e1", block(hzs.slice(0, ACTIVITY_MAX_SEGMENTS)))
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toHaveLength(
+			ACTIVITY_MAX_SEGMENTS,
+		)
+		ranker.ingestBlock("rtl", "e1", block(hzs))
+		const seenAt = clock.now()
+		clock.advance(317.3)
+		expect(changes.length).toBeGreaterThan(before)
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toHaveLength(
+			ACTIVITY_MAX_SEGMENTS,
+		)
+		expect(ranker.port.observedChannels!(epoch, clock.now())).not.toContain(
+			hzs[0],
+		)
+		expect(
+			ranker.port.observedChannels!(epoch, seenAt + ACTIVITY_WARM_HOLD_MS - 1),
+		).toHaveLength(ACTIVITY_MAX_SEGMENTS)
+		expect(
+			ranker.port.observedChannels!(epoch, seenAt + ACTIVITY_WARM_HOLD_MS),
+		).toEqual([])
+		expect(
+			ranker.port.observedChannels!(epoch, seenAt + ACTIVITY_WARM_HOLD_MS + 1),
+		).toEqual([])
+		clock.advance(ACTIVITY_WARM_HOLD_MS + 1)
+		ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toEqual([CENTRE])
+		ranker.ingestEpoch("rtl", "e2", 1)
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toEqual([])
+		ranker.dispose()
+	})
+
+	it("emits no notice for unchanged blocks with all retained centres", () => {
+		const { clock, ranker, changes } = setup()
+		const same = block(
+			Array.from(
+				{ length: ACTIVITY_MAX_SEGMENTS },
+				(_, i) => CENTRE + i * 6_250,
+			),
+		)
+		ranker.ingestBlock("rtl", "e1", same)
+		clock.advance(250)
+		const before = changes.length
+		for (let i = 0; i < 40; i++) {
+			ranker.ingestBlock("rtl", "e1", same)
+			clock.advance(250)
+		}
+		expect(changes).toHaveLength(before)
+		ranker.dispose()
+	})
+
+	it("cancels centre swaps and retains shared centres until their last segment moves", () => {
+		const { clock, ranker, changes } = setup()
+		const feed = (hzs: number[]) => {
+			const b = block(hzs)
+			b.tracks.forEach((t, i) => {
+				t.trackId = `stable-${i}`
+			})
+			ranker.ingestBlock("rtl", "e1", b)
+			clock.advance(250)
+		}
+		feed([CENTRE, CENTRE, CENTRE + 6_250])
+		const before = changes.length
+		feed([CENTRE + 6_250, CENTRE, CENTRE])
+		expect(changes).toHaveLength(before)
+		feed([CENTRE + 6_250, CENTRE + 6_250, CENTRE])
+		expect(changes).toHaveLength(before)
+		feed([CENTRE + 6_250, CENTRE + 6_250, CENTRE + 6_250])
+		expect(changes).toHaveLength(before + 1)
+		expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual([
+			CENTRE + 6_250,
+		])
+		ranker.dispose()
+	})
+
+	it.each([-1, 0, 1])(
+		"notifies retained-centre expiry at the hold boundary %+d ms",
+		offset => {
+			const { clock, ranker, changes } = setup()
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			const started = clock.now()
+			ranker.ingestBlock("rtl", "e1", block([]))
+			// Keep the source healthy throughout, so expiry is the only final notice trigger.
+			for (let i = 0; i < ACTIVITY_WARM_HOLD_MS / 1_000 - 1; i++) {
+				clock.advance(1_000)
+				ranker.ingestBlock("rtl", "e1", block([]))
+			}
+			clock.advance(250)
+			const before = changes.length
+			clock.advance(started + ACTIVITY_WARM_HOLD_MS + offset - clock.now())
+			ranker.ingestBlock("rtl", "e1", block([]))
+			clock.advance(0)
+			expect(changes).toHaveLength(before + (offset >= 0 ? 1 : 0))
+			expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual(
+				offset < 0 ? [CENTRE] : [],
+			)
+			// Revival after expiry is a fresh membership change even with the same track id.
+			if (offset >= 0) {
+				ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+				clock.advance(250)
+				expect(changes).toHaveLength(before + 2)
+			}
+			ranker.dispose()
+		},
+	)
+
 	it("a far raster channel with activity ranks hot ahead of the near idle ones (two-channel scenario)", () => {
 		const { clock, ranker } = setup()
 		const far = RASTER_HZ[32]!
@@ -648,5 +765,218 @@ describe("review regressions", () => {
 		expect(
 			one(ranker, query(), t0 + ACTIVITY_LIVE_TTL_MS).channels[11]!.live,
 		).toBe(false)
+	})
+})
+
+it("notifies coalesced raster crossings of a drifting track with the same id", () => {
+	const { clock, ranker, changes } = setup()
+	const feed = (offset: number) =>
+		ranker.ingestBlock(
+			"rtl",
+			"e1",
+			block([], {
+				tracks: [
+					{
+						startHz: CENTRE + offset - 100,
+						endHz: CENTRE + offset + 100,
+						trackId: "drift",
+						flags: { iqImage: false },
+						gate: "passed",
+					},
+				],
+			}),
+		)
+	ranker.ingestEpoch("rtl", "e1", 1)
+	feed(0)
+	clock.advance(250)
+	const before = changes.length
+	for (let hz = 100; hz <= 3_100; hz += 100) {
+		feed(hz)
+		clock.advance(10)
+	}
+	expect(changes).toHaveLength(before)
+	// Forty alternating midpoint crossings in 10 s must not churn notices or centres.
+	for (let i = 0; i < 40; i++) {
+		feed(i % 2 ? 3_126 : 3_124)
+		clock.advance(250)
+		expect(changes).toHaveLength(before)
+		expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual([
+			CENTRE,
+		])
+	}
+	const boundary = 3_125 + ACTIVITY_CENTRE_HYSTERESIS_HZ
+	feed(boundary)
+	clock.advance(250)
+	expect(changes).toHaveLength(before)
+	feed(boundary + 1)
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 1)
+	expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual([
+		CENTRE + 6_250,
+	])
+	// The reverse threshold is equally strict, at 6 250 - 3 625 = 2 625 Hz.
+	feed(6_250 - boundary)
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 1)
+	feed(6_250 - boundary - 1)
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 2)
+	for (let hz = 3_200; hz <= 12_000; hz += 100) {
+		feed(hz)
+		clock.advance(10)
+	}
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 4)
+	ranker.dispose()
+})
+
+it("replaces superseded candidate interests within an epoch and decoder", () => {
+	const { clock, ranker } = setup()
+	ranker.ingestEpoch("rtl", "e1", 1)
+	ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+	for (let i = 0; i <= ACTIVITY_MAX_INTERESTS; i++) {
+		one(ranker, query({ candidatesHz: [CENTRE + i] }), clock.now())
+		expect(ranker.sizes().interests).toBe(1)
+	}
+	ranker.dispose()
+})
+
+describe("dsd-fme non-voice decode exclusion", () => {
+	it.each(["pocsag", "flex", "aprs", "acars", "unknown"])(
+		"excludes recent %s decodes only for dsd-fme",
+		protocol => {
+			const { ranker, clock } = setup()
+			const hz = CENTRE
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([hz]))
+			ranker.noteDecode("rtl", hz, protocol)
+			const voice = query({
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				candidatesHz: [hz],
+			})
+			const snapshot = () =>
+				ranker.port.snapshot([voice], clock.now())[0]!.channels[0]!
+			expect(snapshot().excluded).toBe(true)
+			expect(
+				ranker.port.snapshot([query({ candidatesHz: [hz] })], clock.now())[0]!
+					.channels[0]!.excluded,
+			).toBeUndefined()
+			clock.advance(ACTIVITY_DECODE_HOT_MS - 1)
+			ranker.ingestBlock("rtl", "e1", block([hz]))
+			expect(snapshot().excluded).toBe(true)
+			clock.advance(1)
+			expect(snapshot().excluded).toBe(false)
+			clock.advance(1)
+			expect(snapshot().excluded).toBe(false)
+			ranker.dispose()
+		},
+	)
+
+	it.each([
+		"dmr",
+		"p25p1",
+		"p25p2",
+		"nxdn48",
+		"nxdn96",
+		"ysf",
+		"dpmr",
+		"dstar",
+	])("keeps %s as digital voice", protocol => {
+		const { ranker, clock } = setup()
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+		ranker.noteDecode("rtl", CENTRE, protocol)
+		ranker.noteDecode("rtl", CENTRE, "pocsag")
+		const q = query({
+			decoderType: "dsd-fme",
+			protocols: [protocol],
+			candidatesHz: [CENTRE],
+		})
+		expect(
+			ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+		).toBe(false)
+		ranker.dispose()
+	})
+
+	it.each([3124, 3125, 3126, 6250, 6251])(
+		"excludes only the decoded centre within width / 4 at offset %i Hz",
+		offset => {
+			const { ranker, clock } = setup()
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE, CENTRE + 12_500]))
+			ranker.noteDecode("rtl", CENTRE + offset, "pocsag")
+			const q = query({
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				candidatesHz: [CENTRE, CENTRE + 12_500],
+			})
+			const channels = ranker.port.snapshot([q], clock.now())[0]!.channels
+			expect(channels.map(c => c.excluded)).toEqual([offset <= 3125, false])
+			ranker.dispose()
+		},
+	)
+
+	it.each([0, 3125, 6250])(
+		"recent DMR wins over paging at H + %i Hz",
+		offset => {
+			const { ranker, clock } = setup()
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			ranker.noteDecode("rtl", CENTRE, "dmr")
+			clock.advance(1)
+			ranker.noteDecode("rtl", CENTRE + offset, "pocsag")
+			const q = query({
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				candidatesHz: [CENTRE],
+			})
+			expect(
+				ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+			).toBe(false)
+			// Renewing DMR keeps winning even though paging was decoded more recently.
+			ranker.noteDecode("rtl", CENTRE, "dmr")
+			expect(
+				ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+			).toBe(false)
+			ranker.dispose()
+		},
+	)
+
+	it.each([899_999, 900_000, 900_001])(
+		"voice override expires at/past 900 s: %i",
+		age => {
+			const { ranker, clock } = setup()
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			ranker.noteDecode("rtl", CENTRE, "dmr")
+			clock.advance(age)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			ranker.noteDecode("rtl", CENTRE, "pocsag")
+			const q = query({
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				candidatesHz: [CENTRE],
+			})
+			expect(
+				ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+			).toBe(age >= 900_000)
+			ranker.dispose()
+		},
+	)
+
+	it("includes pulled decode history without doing history I/O in snapshot", () => {
+		const { ranker, clock } = setup(() => ({
+			decodes: [{ hz: CENTRE, protocol: "pocsag", ageMs: 100 }],
+			successes: [],
+			occupancy: [],
+		}))
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+		const q = query({ decoderType: "dsd-fme", candidatesHz: [CENTRE] })
+		expect(
+			ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+		).toBe(true)
+		ranker.dispose()
 	})
 })

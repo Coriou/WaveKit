@@ -594,7 +594,18 @@ describe("HfdlDecoder", () => {
    and 2 extra dsd-fme channels per source on x86-64 (1 and 0 on a 4-core arm64 host), fewer
    when the CPU budget is short. A channel that becomes active replaces the least active one
    after that one has run 20 s, at most 6 times a minute per source, and never one that is
-   receiving. Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune
+   receiving. dsd-fme also considers scanner-observed energy centres when no explicit
+   decoder channels are configured, including channels absent from the protocol band plan.
+   No protocol hint is required: energy selects a trial channel, and the existing checked
+   decoder output rules still decide whether it is verified digital voice. Band, capture
+   reach and CPU admission still apply. Observed candidate identities initially use round(Hz / 6250) × 6250 (ties upward).
+   A track keeps that identity until its actual centre is more than 3625 Hz away
+   (half the raster plus 500 Hz hysteresis), limiting identity error to 3625 Hz.
+   Coverage deduplication uses the actual energy centre against half the decoder
+   bandwidth; rounding an uncovered centre into that range does not discard it. The manager accepts at most 512 finite positive integer
+   centres per source epoch; a malformed result is treated as empty. Nearby FFT centre changes reuse the existing
+   channel, and burst gaps keep its placement eligible for the usual dwell and move rules.
+   Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune
    it with `decoderPolicy.efficiency.activity`: `slots` (`multimon-ng`, `dsd-fme`, 0 to 32),
    `replayAllowanceCores` (default 0.1, 0.05 on arm64), `maxMovesPerMinute` (6) and
    `dwellMs` (20000). Without a ranking (scanner off) the channels are those of items 5 and
@@ -698,7 +709,15 @@ with CC unknown while that header awaits its closing-sync check.
 NXDN accepts only current CRC-checked ` RAN 03  FACCH2`/UDCH output
 (`nxdn_deperm.c:1390–1437`); failure omits RAN, and SACCH/CAC print cached RAN.
 Other protocols also require a known checked print format;
-unknown formats default to unverified. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
+unknown formats default to unverified. Activity placement protection follows the
+same clean check: only `verified: true`, `crcErr: false`, absent/zero `fecErrs`
+renew it. Each clean line protects the exact running placement strictly before
+`lastCleanSyncMonoMs + max(60,000, dwellMs × max(1, maxMovesPerMinute))`
+(default 120 seconds). Weak hints and failed checks never extend the initial dwell
+(default 20 seconds); at/past expiry, normal no-sync demotion and the shared move
+budget apply. Recent checked voice decodes override non-voice exclusion; exclusion
+associates only within one quarter of the channel width (3,125 Hz at 12,500 Hz),
+so adjacent paging does not remove confirmed DMR. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
 
 ### readsb aircraft evidence
 

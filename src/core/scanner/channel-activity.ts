@@ -2,16 +2,17 @@
  * Activity-ranked decoder channels, scanner side: the ranker behind `ChannelActivityPort`
  * (src/decoders/enablement/activity-contract.ts). It turns spectrum blocks, gated tracks, decodes,
  * replay outcomes and coarse occupancy into one score and state per candidate channel of a planner
- * query. It never adds a frequency and never assigns placements: the planner ranks its own
- * eligible candidates with it and falls back to its nearest order on anything but `ready`.
+ * query. It exposes bounded observed energy centres but never assigns placements. The planner
+ * filters and ranks eligible candidates and falls back to nearest order on anything but `ready`.
  *
  * Clock: one monotonic clock (`monoNow`, `performance.now()` in production), the planner's clock.
  * Every time the ranker stores or returns is on it.
  *
  * Cadence (stated rules):
  * - Ingest: every accepted block (`ingestBlock`) and gated track (`ingestTrack`) with the engine
- *   identity (sourceId, engineId, epoch). A block is O(tracks of the block): its segments update a
- *   bounded per-source map; no per-sample and no per-candidate work happens on the spectrum path.
+ *   identity (sourceId, engineId, epoch). Steady-state blocks are O(tracks of the block): segments
+ *   update bounded maps in place; retained segments are scanned only at retention deadlines.
+ *   No per-sample or per-candidate work happens on the spectrum path.
  * - History (stored decodes, trial memory, occupancy) is pulled at most once per
  *   ACTIVITY_HISTORY_REFRESH_MS = 2 000 ms per source, from the block ingest, never in snapshot().
  * - Notices: a live edge (a segment appears or goes), a history refresh, a health change (retune,
@@ -55,6 +56,10 @@
  * candidates) and candidates per query. Nothing is logged with frequencies, ids or protocols.
  */
 import { z } from "zod"
+import {
+	ACTIVITY_MAX_CANDIDATES,
+	quantiseObservedCentre,
+} from "../../decoders/enablement/activity-contract.js"
 import type {
 	ActivityChange,
 	ActivityEpoch,
@@ -78,6 +83,12 @@ export const ACTIVITY_LIVE_TTL_MS = 1_000
 export const ACTIVITY_HISTORY_REFRESH_MS = 2_000
 /** Notice coalescing: at most 250 ms late, at most 4 notices per second per source. */
 export const ACTIVITY_NOTIFY_MAX_DELAY_MS = 250
+/**
+ * Retain the previous raster centre until distance > 6 250 / 2 + 500 = 3 625 Hz.
+ * This gives a 1 000 Hz return deadband and at most 3 625 Hz identity error.
+ * One extra number per bounded segment: 64 × 512 × 8 B = 256 KiB.
+ */
+export const ACTIVITY_CENTRE_HYSTERESIS_HZ = 500
 /** Energy keeps a channel hot for 2 min (a paging or call cycle), then warm. */
 export const ACTIVITY_HOT_HOLD_MS = 120_000
 /** Energy or a gated track keeps a channel warm for 15 min. */
@@ -106,13 +117,9 @@ export const ACTIVITY_MAX_TRACKS = 256
 export const ACTIVITY_MAX_NOTES = 256
 /** Pulled history items per source and kind (decodes, trials, occupancy); the rest is cut. */
 export const ACTIVITY_MAX_HISTORY = 512
-/** Interests (epoch × decoder × candidates) remembered for change notices, least recent dropped. */
+/** Interests (one current candidate set per epoch × decoder) remembered for change notices, least recent dropped. */
 export const ACTIVITY_MAX_INTERESTS = 128
-/**
- * Candidates per query: 1 024 (a 12.8 MHz span at a 12.5 kHz raster). A larger query answers
- * `unavailable`, still one channel per candidate.
- */
-export const ACTIVITY_MAX_CANDIDATES = 1_024
+export { ACTIVITY_MAX_CANDIDATES } from "../../decoders/enablement/activity-contract.js"
 
 export interface ActivityTimers {
 	setTimeout(fn: () => void, ms: number): unknown
@@ -213,6 +220,8 @@ export interface ChannelActivityRanker {
 }
 
 interface Segment {
+	observedActive: boolean
+	observedHz: number
 	centreHz: number
 	firstMono: number
 	lastMono: number
@@ -232,6 +241,10 @@ interface SourceState {
 	lastFrameMono: number | null
 	lastBlockMono: number | null
 	revision: number
+	/** Reference counts of retained stable centres; scratch changes cancel within a block. */
+	observedCounts: Map<number, number>
+	observedChanges: Set<number>
+	nextObservedExpiry: number
 	segments: Map<string, Segment>
 	liveKeys: Set<string>
 	/** The previous block's live set, cleared and refilled by the next block (no per-block Set). */
@@ -362,6 +375,19 @@ function interestKey(q: ActivityQuery): string {
 	].join("|")
 }
 
+const DIGITAL_VOICE_PROTOCOLS = new Set([
+	"dmr",
+	"p25",
+	"p25p1",
+	"p25p2",
+	"nxdn",
+	"nxdn48",
+	"nxdn96",
+	"ysf",
+	"dpmr",
+	"dstar",
+])
+
 const STATE_RANK: Record<ActivityState, number> = { hot: 0, warm: 1, cold: 2 }
 
 interface Evaluated {
@@ -398,6 +424,9 @@ export function createChannelActivityRanker(
 			lastFrameMono: null,
 			lastBlockMono: null,
 			revision: 0,
+			observedCounts: new Map(),
+			observedChanges: new Set(),
+			nextObservedExpiry: Infinity,
 			segments: new Map(),
 			liveKeys: new Set(),
 			spareKeys: new Set(),
@@ -496,6 +525,8 @@ export function createChannelActivityRanker(
 		const trackSum = new Array<number>(n).fill(0)
 		const lastTrack = new Array<number | null>(n).fill(null)
 		const lastDecode = new Array<number | null>(n).fill(null)
+		const nonVoiceDecode = new Array<number | null>(n).fill(null)
+		const voiceDecode = new Array<number | null>(n).fill(null)
 		const lastSuccess = new Array<number | null>(n).fill(null)
 		const lastFailure = new Array<number | null>(n).fill(null)
 		const duty = new Array<number>(n).fill(0)
@@ -529,6 +560,22 @@ export function createChannelActivityRanker(
 				if (i !== -1) into[i] = later(into[i]!, p.at)
 			}
 		}
+		// Associate exclusion and its positive override to the decoded channel itself:
+		// |candidate - decode| <= width / 4 (3,125 Hz at 12,500 Hz), strictly
+		// narrower than half a channel. Ambiguous associations credit neither.
+		if (q.decoderType === "dsd-fme") {
+			for (const list of [s.decodes.values(), s.history.decodes])
+				for (const p of list) {
+					const k = associateCandidate(sorted, p.hz, raster / 2)
+					if (k === -1) continue
+					const i = order[k]!.i
+					const into = DIGITAL_VOICE_PROTOCOLS.has(p.protocol.toLowerCase())
+						? voiceDecode
+						: nonVoiceDecode
+					into[i] = later(into[i]!, p.at)
+				}
+		}
+
 		points(s.decodes.values(), lastDecode)
 		points(s.history.decodes, lastDecode)
 		points(s.successes.values(), lastSuccess)
@@ -614,8 +661,20 @@ export function createChannelActivityRanker(
 			deadline(ok, ACTIVITY_DECODE_HOT_MS)
 			deadline(ok, ACTIVITY_DECODE_WARM_MS)
 			deadline(bad, ACTIVITY_REPLAY_BACKOFF_MS)
+			const otherDecode = nonVoiceDecode[i]!
+			const positiveDecode = voiceDecode[i]!
+			deadline(otherDecode, ACTIVITY_DECODE_HOT_MS)
+			deadline(positiveDecode, ACTIVITY_DECODE_HOT_MS)
+			const excluded =
+				otherDecode !== null &&
+				now - otherDecode < ACTIVITY_DECODE_HOT_MS &&
+				!(
+					positiveDecode !== null &&
+					now - positiveDecode < ACTIVITY_DECODE_HOT_MS
+				)
 			const memo = memos?.get(hz)
 			channels.push({
+				...(q.decoderType === "dsd-fme" ? { excluded } : {}),
 				hz,
 				score,
 				state,
@@ -635,7 +694,7 @@ export function createChannelActivityRanker(
 
 	const orderOf = (q: ActivityQuery, channels: readonly ChannelActivity[]) =>
 		channels
-			.map(c => c)
+			.filter(c => c.excluded !== true)
 			.sort(
 				(a, b) =>
 					Number(b.live) - Number(a.live) ||
@@ -743,6 +802,17 @@ export function createChannelActivityRanker(
 		s.pendingTimer = timers.setTimeout(() => flush(sourceId), wait)
 	}
 
+	/** Toggle membership changes so removing and readding a centre in one block is a no-op. */
+	const countObserved = (s: SourceState, hz: number, delta: 1 | -1): void => {
+		const before = s.observedCounts.get(hz) ?? 0
+		const after = before + delta
+		if (after === 0) s.observedCounts.delete(hz)
+		else s.observedCounts.set(hz, after)
+		if ((before === 0) !== (after === 0)) {
+			if (!s.observedChanges.delete(hz)) s.observedChanges.add(hz)
+		}
+	}
+
 	const startEpoch = (
 		sourceId: string,
 		engineId: string,
@@ -758,6 +828,9 @@ export function createChannelActivityRanker(
 		s.lastFrameMono = null
 		s.lastBlockMono = null
 		s.segments.clear()
+		s.observedCounts.clear()
+		s.observedChanges.clear()
+		s.nextObservedExpiry = Infinity
 		s.liveKeys = new Set()
 		s.tracks.clear()
 		dropInterests(sourceId, s.epoch)
@@ -816,6 +889,30 @@ export function createChannelActivityRanker(
 	}
 
 	const port: ChannelActivityPort = {
+		observedCentres(epoch, nowMonoMs) {
+			const s = sources.get(epoch.sourceId)
+			if (!s || !sameEpoch(s.epoch, epoch)) return []
+			return [...s.segments.values()]
+				.filter(seg => nowMonoMs < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
+				.map(seg => ({
+					actualHz: Math.round(seg.centreHz),
+					candidateHz: seg.observedHz,
+				}))
+		},
+		observedChannels(epoch, nowMonoMs) {
+			const s = sources.get(epoch.sourceId)
+			if (!s || !sameEpoch(s.epoch, epoch)) return []
+			// Existing segment bound: <= 512 centres/source, 64 x 512 overall.
+			// Keep recent centres for the same 15 min as energy ranking, never history
+			// from another epoch. Stale health is handled by the snapshot fallback.
+			return [
+				...new Set(
+					[...s.segments.values()]
+						.filter(seg => nowMonoMs < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
+						.map(seg => seg.observedHz),
+				),
+			]
+		},
 		snapshot(queries, nowMonoMs) {
 			const now = Number.isFinite(nowMonoMs) ? nowMonoMs : mono()
 			const out: ActivitySnapshot[] = []
@@ -834,6 +931,14 @@ export function createChannelActivityRanker(
 						interests.delete(key)
 						interests.set(key, known)
 					} else {
+						// A decoder has one current candidate set per source epoch. Retire
+						// superseded lists instead of re-evaluating obsolete FFT centres.
+						for (const [oldKey, old] of interests)
+							if (
+								sameEpoch(old.query.epoch, q.epoch) &&
+								old.query.decoderId === q.decoderId
+							)
+								interests.delete(oldKey)
 						const it: Interest = {
 							query: q,
 							sourceId: q.epoch.sourceId,
@@ -901,6 +1006,19 @@ export function createChannelActivityRanker(
 			const liveKeys = s.spareKeys
 			liveKeys.clear()
 			let edge = false
+			s.observedChanges.clear()
+			// Only visit retained segments when a retention deadline is reached, not every block.
+			if (now >= s.nextObservedExpiry) {
+				s.nextObservedExpiry = Infinity
+				for (const seg of s.segments.values()) {
+					if (!seg.observedActive) continue
+					const expires = seg.lastMono + ACTIVITY_WARM_HOLD_MS
+					if (now >= expires) {
+						countObserved(s, seg.observedHz, -1)
+						seg.observedActive = false
+					} else s.nextObservedExpiry = Math.min(s.nextObservedExpiry, expires)
+				}
+			}
 			for (const t of block.tracks) {
 				if (t.flags.iqImage || t.flags.spur === true) continue
 				if (t.gate !== undefined && t.gate !== "passed") continue
@@ -910,24 +1028,56 @@ export function createChannelActivityRanker(
 				const seg = s.segments.get(key)
 				if (seg !== undefined) {
 					// Same LRU move as `touch`, reusing the entry (the map size is unchanged).
+					if (
+						Math.abs(centre - seg.observedHz) >
+						3_125 + ACTIVITY_CENTRE_HYSTERESIS_HZ
+					) {
+						if (seg.observedActive) countObserved(s, seg.observedHz, -1)
+						seg.observedHz = quantiseObservedCentre(centre)
+						countObserved(s, seg.observedHz, 1)
+						seg.observedActive = true
+					} else if (!seg.observedActive) {
+						countObserved(s, seg.observedHz, 1)
+						seg.observedActive = true
+					}
 					seg.centreHz = centre
 					seg.lastMono = now
 					s.segments.delete(key)
 					s.segments.set(key, seg)
-				} else
-					touch(
-						s.segments,
-						key,
-						{ centreHz: centre, firstMono: now, lastMono: now },
-						ACTIVITY_MAX_SEGMENTS,
-					)
+				} else {
+					if (s.segments.size >= ACTIVITY_MAX_SEGMENTS) {
+						const oldest = s.segments.keys().next().value
+						if (oldest !== undefined) {
+							const evicted = s.segments.get(oldest)!
+							if (evicted.observedActive)
+								countObserved(s, evicted.observedHz, -1)
+							s.segments.delete(oldest)
+						}
+					}
+					const observedHz = quantiseObservedCentre(centre)
+					countObserved(s, observedHz, 1)
+					s.segments.set(key, {
+						centreHz: centre,
+						observedHz,
+						observedActive: true,
+						firstMono: now,
+						lastMono: now,
+					})
+				}
+				s.nextObservedExpiry = Math.min(
+					s.nextObservedExpiry,
+					now + ACTIVITY_WARM_HOLD_MS,
+				)
 				liveKeys.add(key)
 				if (!s.liveKeys.has(key)) edge = true
 			}
 			if (liveKeys.size !== s.liveKeys.size) edge = true
 			s.spareKeys = s.liveKeys
 			s.liveKeys = liveKeys
-			if (edge) markDirty(sourceId)
+			// New energy may be outside every existing query (including no queries).
+			// Notify so the manager can derive a new candidate set before ranking it.
+			const observedChanged = s.observedChanges.size > 0
+			if (edge || observedChanged) markDirty(sourceId, observedChanged)
 		},
 		ingestTrack(sourceId, engineId, track) {
 			if (disposed) return
@@ -952,6 +1102,9 @@ export function createChannelActivityRanker(
 			s.lastFrameMono = null
 			s.lastBlockMono = null
 			s.segments.clear()
+			s.observedCounts.clear()
+			s.observedChanges.clear()
+			s.nextObservedExpiry = Infinity
 			s.liveKeys = new Set()
 			s.tracks.clear()
 			dropInterests(sourceId)

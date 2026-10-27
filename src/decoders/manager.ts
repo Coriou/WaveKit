@@ -19,6 +19,7 @@
 
 import type { EfficiencyBudgetService } from "./enablement/budget-settings.js"
 import { EventEmitter } from "node:events"
+import { z } from "zod"
 import {
 	PlacementLifecycle,
 	PLACEMENT_STOP_TIMEOUT_MS,
@@ -114,6 +115,12 @@ import type {
 	ActivityPendingStart,
 	PlannerActivity,
 } from "./enablement/activity-plan.js"
+import {
+	DsdActivityDemotions,
+	dsdSyncProtectionUntil,
+	isDsdActivitySync,
+} from "./enablement/dsd-activity.js"
+import { ACTIVITY_MAX_OBSERVED } from "./enablement/activity-contract.js"
 import type { ActivitySnapshot } from "./enablement/activity-contract.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type {
@@ -557,6 +564,19 @@ function loraCentreReach(
 	}
 }
 
+const ObservedChannelsSchema = z
+	.array(z.number().finite().int().positive())
+	.max(ACTIVITY_MAX_OBSERVED)
+
+const ObservedCentresSchema = z
+	.array(
+		z.object({
+			actualHz: z.number().finite().int().positive(),
+			candidateHz: z.number().finite().int().positive(),
+		}),
+	)
+	.max(ACTIVITY_MAX_OBSERVED)
+
 /**
  * DecoderManager - Orchestrates decoder lifecycle and coordinates with other components.
  *
@@ -588,11 +608,17 @@ export class DecoderManager extends EventEmitter {
 	private activityPassDirty = false
 	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
 	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
+	private readonly dsdActivityDemotions = new DsdActivityDemotions()
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
 	/** Per placement key: when it was first planned and when it was first seen running. */
 	private readonly activitySince = new Map<
 		string,
-		{ chosenMonoMs: number; startedMonoMs: number | null }
+		{
+			chosenMonoMs: number
+			startedMonoMs: number | null
+			cleanSyncMonoMs: number | null
+			demoted: boolean
+		}
 	>()
 	private applyingCaps = false
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
@@ -1811,11 +1837,16 @@ export class DecoderManager extends EventEmitter {
 				this.activitySince.set(placement.key, {
 					chosenMonoMs: now,
 					startedMonoMs: running ? now : null,
+					cleanSyncMonoMs: null,
+					demoted: false,
 				})
 			else if (running && since.startedMonoMs === null)
 				since.startedMonoMs = now
-			else if (!running && !state.processStartPending)
+			else if (!running && !state.processStartPending) {
 				since.startedMonoMs = null
+				since.cleanSyncMonoMs = null
+				since.demoted = false
+			}
 		}
 		for (const key of this.activitySince.keys())
 			if (!present.has(key)) this.activitySince.delete(key)
@@ -1859,7 +1890,32 @@ export class DecoderManager extends EventEmitter {
 			)
 				continue
 			const since = this.activitySince.get(placement.key)
+			const syncUntilMonoMs =
+				state.config.type === "dsd-fme"
+					? dsdSyncProtectionUntil(
+							since?.cleanSyncMonoMs ?? null,
+							now,
+							activity.policy,
+						)
+					: null
+			const syncSeen = syncUntilMonoMs !== null
+			if (
+				state.config.type === "dsd-fme" &&
+				placement.origin === "activity" &&
+				running &&
+				since !== undefined &&
+				since.startedMonoMs !== null &&
+				!syncSeen &&
+				!since.demoted &&
+				now - since.startedMonoMs >= activity.policy.dwellMs
+			) {
+				this.dsdActivityDemotions.note(placement.key, now, activity.policy)
+				since.demoted = true
+			}
 			incumbents.push({
+				...(syncSeen
+					? { syncSeen: true, syncUntilMonoMs: syncUntilMonoMs! }
+					: {}),
 				key: placement.key,
 				decoderId: placement.decoderId,
 				sourceId: placement.sourceId,
@@ -1881,7 +1937,40 @@ export class DecoderManager extends EventEmitter {
 		const plannerActivity: PlannerActivity = {
 			nowMonoMs: now,
 			policy: activity.policy,
+			demotions: this.dsdActivityDemotions.snapshot(now),
 			epochs,
+			observed: epochs.flatMap(epoch => {
+				try {
+					if (activity.port.observedCentres) {
+						const centres = activity.port.observedCentres(epoch, now)
+						if (
+							!Array.isArray(centres) ||
+							centres.length > ACTIVITY_MAX_OBSERVED
+						)
+							return []
+						const parsed = ObservedCentresSchema.safeParse(centres)
+						return parsed.success
+							? [
+									{
+										epoch,
+										channelsHz: parsed.data.map(c => c.candidateHz),
+										centres: parsed.data,
+									},
+								]
+							: []
+					}
+					const channelsHz = activity.port.observedChannels?.(epoch, now)
+					if (
+						!Array.isArray(channelsHz) ||
+						channelsHz.length > ACTIVITY_MAX_OBSERVED
+					)
+						return []
+					const parsed = ObservedChannelsSchema.safeParse(channelsHz)
+					return parsed.success ? [{ epoch, channelsHz: parsed.data }] : []
+				} catch {
+					return []
+				}
+			}),
 			snapshots: [],
 			incumbents,
 			recentMoves: [...this.activityMoves],
@@ -3539,6 +3628,34 @@ export class DecoderManager extends EventEmitter {
 		decoder.prependListener("link", (line: unknown) => {
 			const placement = state.placement
 			if (!placement || line === null || typeof line !== "object") return
+			if (
+				state.config.type === "dsd-fme" &&
+				this.config.enablement?.activity &&
+				decoder.getStatus().running &&
+				isDsdActivitySync(line)
+			) {
+				let since = this.activitySince.get(placement.key)
+				if (!since) {
+					this.refreshActivitySince(this.activityMonoNow())
+					since = this.activitySince.get(placement.key)
+				}
+				if (since) {
+					// Renew on the manager's monotonic clock, never the event's wall time.
+					const now = this.activityMonoNow()
+					const wasProtected =
+						dsdSyncProtectionUntil(
+							since.cleanSyncMonoMs,
+							now,
+							this.config.enablement.activity.policy,
+						) !== null
+					since.cleanSyncMonoMs = now
+					since.demoted = false
+					this.dsdActivityDemotions.clear(placement.key)
+					// The existing expiry timer re-reads the renewed deadline; steady
+					// checked output does not need a planner pass for every parser line.
+					if (!wasProtected) this.requestActivityPass()
+				}
+			}
 			const binding = {
 				sourceId: placement.sourceId,
 				channelHz: placement.channelHz,
@@ -3620,6 +3737,22 @@ export class DecoderManager extends EventEmitter {
 		// Handle started event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("started", () => {
+			// Each actual run earns its own dwell and sync evidence, even when a quick
+			// restart never leaves a stopped state visible to an activity pass.
+			if (
+				state.placement &&
+				isActivityDecoder(state.config.type) &&
+				this.config.enablement?.activity
+			) {
+				const now = this.activityMonoNow()
+				this.activitySince.set(state.placement.key, {
+					chosenMonoMs:
+						this.activitySince.get(state.placement.key)?.chosenMonoMs ?? now,
+					startedMonoMs: now,
+					cleanSyncMonoMs: null,
+					demoted: false,
+				})
+			}
 			state.lifecycle?.kick()
 			try {
 				state.lastOutputAt = null

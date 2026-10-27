@@ -24,6 +24,10 @@ import {
 	READSB_REACH_HZ,
 } from "../../core/rate-policy-contract.js"
 import { rasterChannelsBetween } from "./paging-plan.js"
+import {
+	ACTIVITY_MAX_CANDIDATES,
+	quantiseObservedCentre,
+} from "./activity-contract.js"
 import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
 import {
 	BUDGET_EPSILON,
@@ -820,6 +824,68 @@ export const planPlacements: PlacementPlanner = input => {
 				(d.type === "dsd-fme" || d.type === "multimon-ng")
 			)
 				noChannel = true
+			// Digital voice is not confined to protocol-labelled band-plan channels.
+			// Use scanner energy centres as extra candidates for unpinned dsd-fme,
+			// preserving incumbent centres through burst gaps and health outages.
+			const observed = act?.observed?.find(o => {
+				const epoch = act.epochs.find(e => e.sourceId === s.id)
+				return (
+					epoch &&
+					o.epoch.sourceId === s.id &&
+					o.epoch.engineId === epoch.engineId &&
+					o.epoch.epoch === epoch.epoch
+				)
+			})
+			if (
+				act &&
+				act.observed !== undefined &&
+				d.type === "dsd-fme" &&
+				d.reach === "channel" &&
+				s.channelizerAvailable &&
+				(d.origin === "catalogue" || followsVfo) &&
+				d.configuredChannelsHz.length === 0
+			) {
+				const addObserved = (actualHz: number, hz = actualHz) => {
+					if (
+						!Number.isInteger(actualHz) ||
+						!positive(actualHz) ||
+						!Number.isInteger(hz) ||
+						!positive(hz)
+					)
+						return
+					// A centre within bandwidth / 2 is already covered. Prefer existing
+					// placements and listed channels to FFT jitter, preventing duplicates
+					// and ambiguous ranker association within half a channel width.
+					if (
+						local.some(
+							c =>
+								c.hz !== null &&
+								(c.hz === hz ||
+									Math.abs(c.hz - actualHz) <= d.channelBandwidthHz / 2),
+						)
+					)
+						return
+					if (local.length >= ACTIVITY_MAX_CANDIDATES) return
+					add(hz, "bandplan", local.length)
+				}
+				for (const inc of act.incumbents)
+					if (inc.decoderId === d.id && inc.sourceId === s.id)
+						addObserved(inc.hz)
+				const centres = (
+					observed?.centres ??
+					(observed?.channelsHz ?? []).map(actualHz => ({
+						actualHz,
+						candidateHz: quantiseObservedCentre(actualHz),
+					}))
+				)
+					.slice(0, ACTIVITY_MAX_CANDIDATES)
+					.sort(
+						(a, b) =>
+							Math.abs(a.actualHz - centre) - Math.abs(b.actualHz - centre) ||
+							a.actualHz - b.actualHz,
+					)
+				for (const c of centres) addObserved(c.actualHz, c.candidateHz)
+			}
 			candidates.push(...local)
 		}
 		// 3.20: catalogue ACARS stays on its channels, never the capture centre.
@@ -982,6 +1048,26 @@ export const planPlacements: PlacementPlanner = input => {
 					}
 					queries.push(query)
 					snapshot = readySnapshot(query, act.snapshots)
+					if (snapshot && d.type === "dsd-fme") {
+						const protectedHz = new Set(
+							act.incumbents
+								.filter(
+									inc =>
+										inc.decoderId === d.id &&
+										inc.sourceId === c.source.id &&
+										inc.syncSeen === true &&
+										inc.syncUntilMonoMs !== undefined &&
+										act.nowMonoMs < inc.syncUntilMonoMs,
+								)
+								.map(inc => inc.hz),
+						)
+						snapshot = {
+							...snapshot,
+							channels: snapshot.channels.map(ch =>
+								protectedHz.has(ch.hz) ? { ...ch, excluded: false } : ch,
+							),
+						}
+					}
 				}
 				local.push({
 					d,
@@ -1004,14 +1090,19 @@ export const planPlacements: PlacementPlanner = input => {
 				const primary =
 					(incumbent &&
 						ranked.find(
-							c => c.hz === incumbent.hz && c.source.id === incumbent.sourceId,
+							c =>
+								c.hz === incumbent.hz &&
+								c.source.id === incumbent.sourceId &&
+								local.find(g => g.source === c.source)?.order.includes(c.hz!),
 						)) ??
 					ranked.find(
 						c => c.source === ranked[0]!.source && c.hz === local[0]!.order[0],
 					)!
-				const g = local.find(x => x.source === primary.source)!
-				emit(primary, 0, info(g, primary.hz!))
-				g.order = g.order.filter(hz => hz !== primary.hz)
+				if (primary) {
+					const g = local.find(x => x.source === primary.source)!
+					emit(primary, 0, info(g, primary.hz!))
+					g.order = g.order.filter(hz => hz !== primary.hz)
+				}
 			}
 			groups.push(...local)
 			continue
@@ -1139,13 +1230,57 @@ export const planPlacements: PlacementPlanner = input => {
 		if (typeof at === "number" && Number.isFinite(at) && at > now)
 			next = next === null ? at : Math.min(next, at)
 	}
+	const demotions = new Map(act.demotions?.map(d => [d.key, d.untilMonoMs]))
 	groups.forEach((g, i) => {
 		const times = (windowMoves.get(g.source.id) ?? []).sort((a, b) => a - b)
+		if (g.d.type === "dsd-fme")
+			for (const inc of act.incumbents)
+				if (
+					inc.decoderId === g.d.id &&
+					inc.sourceId === g.source.id &&
+					inc.syncSeen
+				) {
+					later(inc.syncUntilMonoMs)
+				}
+		const demotedHz = new Set<number>()
+		if (g.d.type === "dsd-fme") {
+			for (const hz of g.order) {
+				const until = demotions.get(keyOf(g, hz))
+				if (until !== undefined && Number.isFinite(until) && now < until) {
+					demotedHz.add(hz)
+					later(until)
+				}
+			}
+			for (const inc of act.incumbents)
+				if (
+					inc.decoderId === g.d.id &&
+					inc.sourceId === g.source.id &&
+					!inc.primary &&
+					!inc.syncSeen
+				) {
+					// Cooldown expiry permits a fresh trial, not revival of an existing
+					// run that still has no sync. Keep it replaceable until sync or a move.
+					if (now - inc.dwellSinceMonoMs >= dwellMs) demotedHz.add(inc.hz)
+					else later(inc.dwellSinceMonoMs + dwellMs)
+				}
+		}
+		const effectiveSnapshot =
+			g.snapshot && demotedHz.size > 0
+				? {
+						...g.snapshot,
+						channels: g.snapshot.channels.map(c =>
+							demotedHz.has(c.hz)
+								? { ...c, score: 0, state: "cold" as const, live: false }
+								: c,
+						),
+					}
+				: g.snapshot
 		const selection = selectChannels({
-			order: g.order,
+			order: activityOrder(g.order, effectiveSnapshot),
+			demotedHz,
 			ranked: g.snapshot !== null,
-			activity: g.snapshot
-				? new Map(g.snapshot.channels.map(c => [c.hz, c]))
+			activity: effectiveSnapshot
+				? new Map(effectiveSnapshot.channels.map(c => [c.hz, c]))
 				: null,
 			count: allocation.given[i]!,
 			incumbents: act.incumbents
@@ -1159,6 +1294,7 @@ export const planPlacements: PlacementPlanner = input => {
 					key: inc.key,
 					hz: inc.hz,
 					dwellSinceMonoMs: inc.dwellSinceMonoMs,
+					syncSeen: g.d.type === "dsd-fme" && inc.syncSeen === true,
 					...(pendingKeys.has(inc.key) ? { pinned: true } : {}),
 				})),
 			nowMonoMs: now,
@@ -1186,7 +1322,7 @@ export const planPlacements: PlacementPlanner = input => {
 				gated: true,
 				...(c.movedFrom ? { movedFrom: c.movedFrom.key } : {}),
 				activity: placementActivity(
-					g.snapshot?.channels.find(ch => ch.hz === c.hz),
+					effectiveSnapshot?.channels.find(ch => ch.hz === c.hz),
 				),
 			})
 			if (c.movedFrom) {

@@ -13,6 +13,7 @@ import type {
 	ActivitySnapshot,
 	ActivityState,
 	ChannelActivity,
+	ObservedActivityCentre,
 } from "./activity-contract.js"
 import type { DecoderReach } from "./contract.js"
 import { channelizerBaseCores } from "./contract.js"
@@ -76,6 +77,10 @@ export interface ActivityIncumbent {
 	primary: boolean
 	/** Its successful start, or when it was first planned while never started. */
 	dwellSinceMonoMs: number
+	/** Recent checked, CRC/FEC-clean sync from this exact running placement. */
+	syncSeen?: boolean
+	/** Monotonic expiry supplied by the manager; re-evaluate even in quiet spectrum. */
+	syncUntilMonoMs?: number
 }
 
 /** A placement whose process start is in flight (it holds capacity already). */
@@ -89,9 +94,17 @@ export interface ActivityPendingStart {
 
 export interface PlannerActivity {
 	nowMonoMs: number
+	/** Bounded no-sync cooldowns, carried by the manager on the same clock. */
+	demotions?: readonly { key: string; untilMonoMs: number }[]
 	policy: ActivityPolicy
 	/** The current spectrum epoch of each source; a source without one is unranked. */
 	epochs: readonly ActivityEpoch[]
+	/** Scanner energy centres, at most the ranker's bounded segment count per source. */
+	observed?: readonly {
+		epoch: ActivityEpoch
+		channelsHz: readonly number[]
+		centres?: readonly ObservedActivityCentre[]
+	}[]
 	/** One atomic batch taken for this pass (empty while computing the queries). */
 	snapshots: readonly ActivitySnapshot[]
 	incumbents: readonly ActivityIncumbent[]
@@ -162,7 +175,8 @@ function validChannel(c: ChannelActivity | null | undefined, hz: number) {
 		c.score >= 0 &&
 		STATES.includes(c.state) &&
 		typeof c.live === "boolean" &&
-		Array.isArray(c.reasons)
+		Array.isArray(c.reasons) &&
+		(c.excluded === undefined || typeof c.excluded === "boolean")
 	)
 }
 
@@ -211,7 +225,7 @@ const stateRank = { hot: 0, warm: 1, cold: 2 } as const
  * the capture centre first, paging raster before other band-plan channels):
  * hot by score (highest first), then warm by score, then cold; equal scores
  * and cold channels keep today's order. Without a snapshot: today's order.
- * Always a permutation of the candidates.
+ * Excludes candidates with recent non-voice decode evidence; otherwise a permutation.
  */
 export function activityOrder(
 	candidatesHz: readonly number[],
@@ -220,15 +234,17 @@ export function activityOrder(
 	if (!snapshot) return [...candidatesHz]
 	const by = new Map(snapshot.channels.map(c => [c.hz, c]))
 	const index = new Map(candidatesHz.map((hz, i) => [hz, i]))
-	return [...candidatesHz].sort((a, b) => {
-		const ca = by.get(a)!
-		const cb = by.get(b)!
-		return (
-			stateRank[ca.state] - stateRank[cb.state] ||
-			(ca.state === "cold" ? 0 : cb.score - ca.score) ||
-			index.get(a)! - index.get(b)!
-		)
-	})
+	return candidatesHz
+		.filter(hz => by.get(hz)?.excluded !== true)
+		.sort((a, b) => {
+			const ca = by.get(a)!
+			const cb = by.get(b)!
+			return (
+				stateRank[ca.state] - stateRank[cb.state] ||
+				(ca.state === "cold" ? 0 : cb.score - ca.score) ||
+				index.get(a)! - index.get(b)!
+			)
+		})
 }
 
 /** The bounded status entry for one channel. */
@@ -393,6 +409,8 @@ export interface SelectionIncumbent {
 	dwellSinceMonoMs: number
 	/** A prepaid pending start: always kept, never a victim. */
 	pinned?: boolean
+	/** Sync from this placement protects an identified voice channel between bursts. */
+	syncSeen?: boolean
 }
 export interface SelectionResult {
 	chosen: { hz: number; movedFrom?: { key: string; hz: number } }[]
@@ -419,6 +437,8 @@ export interface SelectionResult {
  */
 export function selectChannels(args: {
 	order: readonly number[]
+	/** Demoted channels cannot fill a free slot or challenge; incumbents still spend moves. */
+	demotedHz?: ReadonlySet<number>
 	ranked: boolean
 	activity: ReadonlyMap<number, ChannelActivity> | null
 	count: number
@@ -449,7 +469,7 @@ export function selectChannels(args: {
 	const has = (hz: number) => chosen.some(e => e.hz === hz)
 	for (const hz of args.order) {
 		if (chosen.length >= count) break
-		if (!has(hz)) chosen.push({ hz })
+		if (!has(hz) && !args.demotedHz?.has(hz)) chosen.push({ hz })
 	}
 	let moves = 0
 	let blocked: number | null = null
@@ -458,7 +478,7 @@ export function selectChannels(args: {
 	}
 	if (args.ranked && args.activity) {
 		for (const hz of args.order) {
-			if (has(hz)) continue
+			if (has(hz) || args.demotedHz?.has(hz)) continue
 			const a = args.activity.get(hz)
 			if (!a || a.state === "cold") continue
 			const victims = chosen
@@ -466,6 +486,7 @@ export function selectChannels(args: {
 					e =>
 						e.incumbent !== undefined &&
 						e.incumbent.pinned !== true &&
+						e.incumbent.syncSeen !== true &&
 						rank.get(e.hz)! > rank.get(hz)! &&
 						args.activity!.get(e.hz)?.live !== true,
 				)

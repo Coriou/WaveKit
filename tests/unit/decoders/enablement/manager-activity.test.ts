@@ -20,6 +20,7 @@ import type {
 	ActivityQuery,
 	ActivitySnapshot,
 	ChannelActivityPort,
+	ObservedActivityCentre,
 } from "../../../../src/decoders/enablement/activity-contract.js"
 import {
 	ACTIVITY_DWELL_MS,
@@ -48,7 +49,7 @@ afterEach(async () => {
 	vi.useRealTimers()
 })
 
-function setup(withActivity = true) {
+function setup(withActivity = true, type = "multimon-ng") {
 	vi.useFakeTimers()
 	let mono = 0
 	const sources = new FakeSources()
@@ -61,7 +62,7 @@ function setup(withActivity = true) {
 		integrationPattern: "pure_consumer",
 	} as const
 	registry.register(
-		"multimon-ng",
+		type,
 		config => {
 			const decoder = new RateDecoder(config.id, caps)
 			let options = { ...config.options }
@@ -84,7 +85,12 @@ function setup(withActivity = true) {
 	)
 	const heat = new Map<
 		number,
-		{ state: "hot" | "warm" | "cold"; score: number; live: boolean }
+		{
+			state: "hot" | "warm" | "cold"
+			score: number
+			live: boolean
+			excluded?: boolean
+		}
 	>()
 	const batches: ActivityQuery[][] = []
 	const batchTimes: number[] = []
@@ -102,6 +108,7 @@ function setup(withActivity = true) {
 				nextEvaluationMonoMs: null,
 				channels: query.candidatesHz.map(hz => ({
 					hz,
+					excluded: heat.get(hz)?.excluded ?? false,
 					score: heat.get(hz)?.score ?? 0,
 					state: heat.get(hz)?.state ?? "cold",
 					reasons: heat.has(hz) ? ["live-energy" as const] : [],
@@ -131,11 +138,13 @@ function setup(withActivity = true) {
 		enablement: {
 			planner,
 			resolveMode: () => ({ mode: "auto", source: "default" }),
-			isCatalogue: () => false,
+			isCatalogue: () => type === "dsd-fme",
 			unavailable: () => false,
 			recheckAvailable: async () => true,
-			vfo: () => null,
-			bandplanChannels: () => [],
+			vfo: () =>
+				type === "dsd-fme" ? { sourceId: "rtl", frequencyHz: CENTRE } : null,
+			bandplanChannels: () =>
+				type === "dsd-fme" ? [CENTRE + 25_000, FAR] : [],
 			maxBandplanChannels: 4,
 			...(withActivity
 				? {
@@ -143,7 +152,7 @@ function setup(withActivity = true) {
 							port,
 							epochOf: (id: string) => (id === "rtl" ? EPOCH : null),
 							policy: resolveActivityPolicy(
-								undefined,
+								type === "dsd-fme" ? { slots: { "dsd-fme": 1 } } : undefined,
 								EFFICIENCY_BUDGET_X64,
 								"x64",
 								8,
@@ -178,7 +187,7 @@ function setup(withActivity = true) {
 	m.setChannelizer(provider as unknown as ChannelProvider)
 	void m.createDecoder({
 		id: "pager",
-		type: "multimon-ng",
+		type,
 		enabled: true,
 		options: {},
 		useChannelizer: true,
@@ -190,6 +199,7 @@ function setup(withActivity = true) {
 			.map(p => p.channelHz)
 	return {
 		m,
+		port,
 		hooks,
 		heat,
 		batches,
@@ -350,4 +360,157 @@ it("a slow pass never queues a backlog: notices while it waits run at most one m
 	f.notify()
 	await f.advance(250)
 	expect(f.batches.length).toBe(idle + 1)
+})
+
+// Observed-channel boundary: reject the whole malformed result, never partially admit it.
+it.each([
+	Array.from({ length: 1 }),
+	{},
+	null,
+	[NaN],
+	[Infinity],
+	[0],
+	[-1],
+	[1.5],
+	["1"],
+	Array.from({ length: 513 }, () => 1),
+])("ignores malformed observed channels: %j", async value => {
+	const f = setup()
+	f.port.observedChannels = () => value as unknown as readonly number[]
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([])
+	expect(f.runningHz().length).toBeGreaterThan(0)
+})
+it("accepts exactly 512 finite positive integer observed channels", async () => {
+	const f = setup()
+	const channelsHz = Array.from({ length: 512 }, (_, i) => i + 1)
+	f.port.observedChannels = () => channelsHz
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([
+		{ epoch: EPOCH, channelsHz },
+	])
+})
+
+it.each(
+	[
+		[{}],
+		[{ actualHz: NaN, candidateHz: 1 }],
+		[{ actualHz: 1, candidateHz: 0 }],
+		[{ actualHz: 1.5, candidateHz: 1 }],
+		Array.from({ length: 513 }, () => ({ actualHz: 1, candidateHz: 1 })),
+	].map(value => ({ value })),
+)("ignores malformed observed centre pairs: %j", async ({ value }) => {
+	const f = setup()
+	f.port.observedCentres = () =>
+		value as unknown as readonly ObservedActivityCentre[]
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([])
+})
+it("preserves actual and stable centres through the manager at the 512 segment bound", async () => {
+	const f = setup()
+	const centres = Array.from({ length: 512 }, (_, i) => ({
+		actualHz: 466_109_374 + i * 6_250,
+		candidateHz: 466_106_250 + i * 6_250,
+	}))
+	f.port.observedCentres = () => centres
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([
+		{ epoch: EPOCH, channelsHz: centres.map(c => c.candidateHz), centres },
+	])
+})
+
+// All evidence ages use the injected monotonic clock, independent of test runtime.
+it.each([false, true])(
+	"dsd checked protection expires and weak hints cannot latch it (clean=%s)",
+	async clean => {
+		const f = setup(true, "dsd-fme")
+		await f.m.startAll()
+		await f.advance(1000)
+		const incumbent = f.inputs
+			.at(-1)!
+			.activity!.incumbents.find(i => !i.primary)!
+		expect(incumbent).toBeDefined()
+		const decoder = f.m.getDecoder(incumbent.key)!
+		decoder.emit("link", {
+			protocol: "dmr",
+			at: 7,
+			crcErr: false,
+			verified: clean,
+		})
+		const oldHz = incumbent.hz
+		const challenger = oldHz === FAR ? CENTRE + 25_000 : FAR
+		f.heat.set(oldHz, { state: "hot", score: 102, live: true, excluded: clean })
+		f.heat.set(challenger, { state: "hot", score: 105, live: true })
+		f.notify()
+		await f.advance(100)
+		expect(f.runningHz()).toContain(oldHz)
+		f.heat.set(oldHz, { state: "hot", score: 102, live: true })
+		// Weak hints keep only the initial dwell (20 s from process start).
+		// Clean protection lasts cooldown=120 s from receipt at mono=1,000.
+		const deadline = clean
+			? 121_000
+			: f.inputs
+					.at(-1)!
+					.activity!.incumbents.find(i => i.key === incumbent.key)!
+					.dwellSinceMonoMs + 20_000
+		const now = f.inputs.at(-1)!.activity!.nowMonoMs
+		await f.advance(deadline - now - 1)
+		f.notify()
+		await f.advance(0)
+		expect(f.runningHz()).toContain(oldHz)
+		await f.advance(1)
+
+		f.notify()
+		await f.advance(100)
+		expect(f.runningHz()).toContain(challenger)
+		expect(f.runningHz()).not.toContain(oldHz)
+		f.notify()
+		await f.advance(100)
+		expect(
+			f.inputs.at(-1)!.activity!.demotions?.some(d => d.key === incumbent.key),
+		).toBe(true)
+		const moves = f.inputs.flatMap(i => i.activity?.recentMoves ?? [])
+		expect(moves.some(m => m.sourceId === "rtl")).toBe(true)
+	},
+)
+
+it("renewed clean evidence keeps a dsd incumbent past its original deadline", async () => {
+	const f = setup(true, "dsd-fme")
+	await f.m.startAll()
+	await f.advance(1000)
+	const incumbent = f.inputs.at(-1)!.activity!.incumbents.find(i => !i.primary)!
+	const decoder = f.m.getDecoder(incumbent.key)!
+	const checked = {
+		protocol: "dmr",
+		at: 7,
+		verified: true,
+		crcErr: false,
+		fecErrs: 0,
+	}
+	decoder.emit("link", checked)
+	await f.advance(100)
+	await f.advance(60_000)
+	decoder.emit("link", checked)
+	f.heat.set(incumbent.hz, {
+		state: "cold",
+		score: 0,
+		live: false,
+		excluded: true,
+	})
+	const challenger = incumbent.hz === FAR ? CENTRE + 25_000 : FAR
+	f.heat.set(challenger, { state: "hot", score: 105, live: true })
+	await f.advance(60_000)
+	f.notify()
+	await f.advance(100)
+	expect(f.runningHz()).toContain(incumbent.hz)
+	const latest = f.inputs.at(-1)!.activity!
+	expect(latest.incumbents.find(i => i.key === incumbent.key)).toMatchObject({
+		syncSeen: true,
+		syncUntilMonoMs: 181_100,
+	})
+	expect(latest.demotions?.some(d => d.key === incumbent.key)).toBe(false)
 })

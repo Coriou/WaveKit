@@ -1,3 +1,5 @@
+import { loadavg } from "node:os"
+import { createChannelActivityRanker } from "../../../../src/core/scanner/channel-activity.js"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import type {
@@ -288,6 +290,121 @@ describe("activity ranking: slots and order", () => {
 		expect(channels(plan)).not.toContain(CENTRE)
 	})
 
+	it("places dsd-fme on observed activity absent from the protocol band plan", () => {
+		const far = 466_037_500
+		const input = base([dsd()], [source()], {
+			vfo: { sourceId: "s", frequencyHz: CENTRE },
+			bandplanChannels: () => [],
+		})
+		const act = {
+			...activity(),
+			observed: [{ epoch: EPOCH, channelsHz: [far] }],
+		}
+		const out = planWith(
+			input,
+			act,
+			new Map([[far, { state: "hot", score: 102, live: true }]]),
+		)
+		expect(channels(out, "dsd")).toEqual([CENTRE, far])
+		expect(out.wanted[1]).toMatchObject({
+			origin: "activity",
+			primary: false,
+			gated: true,
+		})
+	})
+
+	it("filters observed centres by epoch, band, reach, explicit channels and budget", () => {
+		const far = 466_037_500
+		const input = base(
+			[
+				dsd({
+					band: {
+						basis: "configured",
+						rangesHz: [{ minHz: 466_000_000, maxHz: 466_200_000 }],
+					},
+				}),
+			],
+			[source()],
+			{
+				vfo: { sourceId: "s", frequencyHz: CENTRE },
+			},
+		)
+		const act = {
+			...activity(),
+			observed: [
+				{ epoch: EPOCH, channelsHz: [far, 466_300_000, 465_000_000, NaN] },
+			],
+		}
+		expect(channels(planWith(input, act), "dsd")).toEqual([CENTRE, far])
+		expect(
+			channels(
+				planWith(input, {
+					...act,
+					observed: [
+						{ epoch: { ...EPOCH, engineId: "old" }, channelsHz: [far] },
+					],
+				}),
+				"dsd",
+			),
+		).toEqual([CENTRE])
+		for (const budget of [0.63, 0.63 - 0.000001]) {
+			const out = planWith(input, {
+				...act,
+				policy: { ...act.policy, budgetCores: budget },
+			})
+			// Primary 0.155 + base 0.22 + replay 0.1 + one slot 0.155 = 0.63.
+			expect(channels(out, "dsd")).toHaveLength(budget === 0.63 ? 2 : 1)
+		}
+		const pinned = {
+			...input,
+			decoders: [
+				dsd({
+					origin: "config",
+					followVfo: false,
+					configuredChannelsHz: [CENTRE],
+				}),
+			],
+		}
+		expect(channels(planWith(pinned, act), "dsd")).toEqual([CENTRE])
+	})
+
+	it("deduplicates observed centres at half the passband but retains channels beyond it", () => {
+		const input = base([dsd()], [source()], {
+			vfo: { sourceId: "s", frequencyHz: 466_100_000 },
+		})
+		for (const offset of [6_249, 6_250, 6_251, 9_374, 9_375, 9_376, 12_500]) {
+			const act = {
+				...activity(),
+				observed: [{ epoch: EPOCH, channelsHz: [466_100_000 + offset] }],
+			}
+			const result = channels(planWith(input, act), "dsd")
+			expect(result).toHaveLength(offset <= 6_250 ? 1 : 2)
+			if (offset === 9_374) expect(result).toContain(466_106_250)
+			// Production ranker supplies the actual centre alongside its stable identity.
+			expect(
+				channels(
+					planWith(input, {
+						...act,
+						observed: [
+							{
+								epoch: EPOCH,
+								channelsHz: [466_100_000],
+								centres: [
+									{
+										actualHz: 466_100_000 + offset,
+										candidateHz:
+											Math.round((466_100_000 + offset) / 6_250) * 6_250,
+									},
+								],
+							},
+						],
+					}),
+					"dsd",
+				),
+			).toEqual(result)
+		}
+	})
+
 	it("ranks the catalogue band-plan channels of dsd-fme, VFO first", () => {
 		const plan = [466_050_000, 466_075_000, 466_150_000, 466_175_000]
 		const input = base([dsd()], [source()], {
@@ -429,6 +546,7 @@ function simulate(
 		heat: ReadonlyMap<number, Heat>
 		status?: ActivitySnapshot["status"]
 	}[],
+	observed?: PlannerActivity["observed"],
 ) {
 	let incumbents: ActivityIncumbent[] = []
 	const since = new Map<string, number>()
@@ -440,6 +558,7 @@ function simulate(
 			input,
 			activity({
 				nowMonoMs: step.atMs,
+				...(observed ? { observed } : {}),
 				incumbents,
 				recentMoves: moves.map(m => ({
 					sourceId: m.sourceId,
@@ -473,6 +592,92 @@ function simulate(
 }
 
 describe("activity ranking: bounded moves", () => {
+	it("dsd-fme observed slots respect dwell and move limits, keep live channels and survive ranking outages", () => {
+		const far = 466_037_500
+		const a = 466_125_000
+		const b = 466_075_000
+		const input = base([dsd()], [source()], {
+			vfo: { sourceId: "s", frequencyHz: CENTRE },
+		})
+		const hot = new Map([
+			[far, { state: "hot" as const, score: 102, live: true }],
+		])
+		const { plans, moves } = simulate(
+			input,
+			[
+				{ atMs: 123.7, heat: new Map() },
+				{ atMs: 20_122.7, heat: hot },
+				{ atMs: 20_123.7, heat: hot },
+				{ atMs: 20_124.7, heat: hot },
+				{ atMs: 60_317.3, heat: hot, status: "stale" },
+			],
+			[{ epoch: EPOCH, channelsHz: [a, b, far] }],
+		)
+		expect(channels(plans[0]!.plan, "dsd")).toEqual([CENTRE, a, b])
+		expect(channels(plans[1]!.plan, "dsd")).not.toContain(far)
+		expect(channels(plans[2]!.plan, "dsd")).toContain(far)
+		expect(moves).toHaveLength(1)
+		expect(channels(plans[3]!.plan, "dsd")).toEqual(
+			channels(plans[2]!.plan, "dsd"),
+		)
+		expect(channels(plans[4]!.plan, "dsd")).toEqual(
+			channels(plans[2]!.plan, "dsd"),
+		)
+		const incumbent = plans[2]!.plan.wanted.map(p => ({
+			key: p.key,
+			decoderId: p.decoderId,
+			sourceId: p.sourceId,
+			hz: p.channelHz!,
+			primary: p.primary,
+			dwellSinceMonoMs: 0,
+		}))
+		const stopped = planWith(input, {
+			...activity(),
+			nowMonoMs: 80_317.3,
+			epochs: [],
+			observed: [],
+			incumbents: incumbent,
+		})
+		expect(new Set(channels(stopped, "dsd"))).toEqual(
+			new Set(channels(plans[2]!.plan, "dsd")),
+		)
+		const jitter = planWith(
+			input,
+			{
+				...activity(),
+				nowMonoMs: 80_317.3,
+				incumbents: incumbent,
+				observed: [{ epoch: EPOCH, channelsHz: [far + 137] }],
+			},
+			hot,
+		)
+		expect(channels(jitter, "dsd")).toContain(far)
+		expect(channels(jitter, "dsd")).not.toContain(far + 137)
+		const blocked = planWith(
+			input,
+			{
+				...activity(),
+				nowMonoMs: 80_317.3,
+				incumbents: plans[0]!.plan.wanted.map(p => ({
+					key: p.key,
+					decoderId: p.decoderId,
+					sourceId: p.sourceId,
+					hz: p.channelHz!,
+					primary: p.primary,
+					dwellSinceMonoMs: 0,
+				})),
+				observed: [{ epoch: EPOCH, channelsHz: [a, b, far] }],
+				recentMoves: Array.from({ length: 6 }, (_, i) => ({
+					sourceId: "s",
+					atMonoMs: 80_000 + i,
+				})),
+			},
+			hot,
+		)
+		expect(channels(blocked, "dsd")).not.toContain(far)
+		expect(blocked.activity!.moves).toEqual([])
+	})
+
 	it("follows activity to a far raster channel within the dwell and move bounds", () => {
 		const far = todayHz[todayHz.length - 1]!
 		const hotFar = new Map([
@@ -589,4 +794,151 @@ describe("activity ranking: bounded moves", () => {
 			{ numRuns: 120 },
 		)
 	})
+})
+
+it("keeps 60 jittering observed candidates, interests and synced placements stable with a toggling track", () => {
+	let now = 0
+	let timerId = 0
+	const pending = new Map<number, { at: number; fn: () => void }>()
+	const ranker = createChannelActivityRanker({
+		monoNow: () => now,
+		timers: {
+			setTimeout: (fn, ms) => {
+				const id = ++timerId
+				pending.set(id, { at: now + ms, fn })
+				return id
+			},
+			clearTimeout: id => {
+				pending.delete(id as number)
+			},
+		},
+	})
+	const epoch = EPOCH
+	const input = base(
+		[dsd()],
+		[source({ centreHz: 466_500_000, sampleRateHz: 2_400_000 })],
+		{
+			vfo: { sourceId: "s", frequencyHz: 466_500_000 },
+		},
+	)
+	const centres = Array.from({ length: 60 }, (_, i) => 466_125_000 + i * 12_500)
+	let candidates: readonly number[] | undefined
+	let wanted: readonly string[] | undefined
+	let stable = true
+	let maxInterests = 0
+	let incumbents: ActivityIncumbent[] = []
+	ranker.ingestEpoch("s", "e", 1)
+	const started = performance.now()
+	const passes = 160
+	for (let pass = 0; pass < passes; pass++) {
+		now += 317.3
+		const tracks = centres.map((hz, i) => ({
+			trackId: `t${i}`,
+			startHz: hz + pass - 3_000,
+			endHz: hz + pass + 3_000,
+			flags: { iqImage: false },
+			gate: "passed" as const,
+		}))
+		// Toggle a second id at the same centre: live edges without a new observed set.
+		if (pass % 2) tracks.push({ ...tracks[0]!, trackId: "toggle" })
+		ranker.ingestBlock("s", "e", {
+			epoch: 1,
+			centreHz: 466_500_000,
+			sampleRateHz: 2_400_000,
+			overload: false,
+			tracks,
+		})
+		for (const [id, timer] of [...pending])
+			if (timer.at <= now) {
+				pending.delete(id)
+				timer.fn()
+			}
+		const act = activity({
+			nowMonoMs: now,
+			incumbents,
+			observed: [
+				{ epoch, channelsHz: ranker.port.observedChannels!(epoch, now) },
+			],
+		})
+		const queries = activityQueries({ ...input, activity: act })
+		const snapshot = ranker.port.snapshot(queries, now)
+		const plan = planPlacements({
+			...input,
+			activity: { ...act, snapshots: snapshot },
+		})
+		const nextCandidates = queries[0]!.candidatesHz
+		const nextWanted = plan.wanted.map(p => p.key)
+		if (
+			pass > 1 &&
+			(JSON.stringify(nextCandidates) !== JSON.stringify(candidates) ||
+				JSON.stringify(nextWanted) !== JSON.stringify(wanted) ||
+				plan.activity!.moves.length > 0)
+		)
+			stable = false
+		candidates = nextCandidates
+		wanted = nextWanted
+		incumbents = plan.wanted.map(p => ({
+			key: p.key,
+			decoderId: p.decoderId,
+			sourceId: p.sourceId,
+			hz: p.channelHz!,
+			primary: p.primary,
+			dwellSinceMonoMs: 0,
+			// This is established voice; no-sync search has separate sequence coverage.
+			syncSeen: true,
+		}))
+		maxInterests = Math.max(maxInterests, ranker.sizes().interests)
+	}
+	const msPerPass = (performance.now() - started) / passes
+	if (process.env["WAVEKIT_JITTER_BENCH"] === "1")
+		process.stdout.write(
+			`${JSON.stringify({ msPerPass, passes, maxInterests, stable, loadavg: loadavg() })}\n`,
+		)
+	ranker.dispose()
+	expect(stable).toBe(true)
+	expect(maxInterests).toBe(1)
+})
+
+it("keeps planner candidates stable across repeated midpoint crossings", () => {
+	let now = 0
+	const ranker = createChannelActivityRanker({
+		monoNow: () => now,
+		timers: { setTimeout: () => 0, clearTimeout: () => {} },
+	})
+	const input = base([dsd()], [source()])
+	ranker.ingestEpoch("s", "e", 1)
+	let candidates: readonly number[] | undefined
+	for (let i = 0; i < 40; i++) {
+		now += 250
+		const hz = 466_003_124 + (i % 2) * 2
+		ranker.ingestBlock("s", "e", {
+			epoch: 1,
+			centreHz: CENTRE,
+			sampleRateHz: 1_024_000,
+			overload: false,
+			tracks: [
+				{
+					trackId: "boundary",
+					startHz: hz - 100,
+					endHz: hz + 100,
+					flags: { iqImage: false },
+					gate: "passed",
+				},
+			],
+		})
+		const act = activity({
+			nowMonoMs: now,
+			observed: [
+				{
+					epoch: EPOCH,
+					channelsHz: ranker.port.observedChannels!(EPOCH, now),
+					centres: ranker.port.observedCentres!(EPOCH, now),
+				},
+			],
+		})
+		const next = activityQueries({ ...input, activity: act })[0]!.candidatesHz
+		if (candidates) expect(next).toEqual(candidates)
+		candidates = next
+	}
+	ranker.dispose()
 })
