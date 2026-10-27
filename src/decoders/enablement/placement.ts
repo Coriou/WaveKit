@@ -20,6 +20,7 @@ import {
 	READSB_REACH_HZ,
 } from "../../core/rate-policy-contract.js"
 import { rasterChannelsBetween } from "./paging-plan.js"
+import { ACTIVITY_MAX_CANDIDATES } from "./activity-contract.js"
 import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
 import {
 	ACTIVITY_MAX_SLOTS,
@@ -761,6 +762,51 @@ export const planPlacements: PlacementPlanner = input => {
 				(d.type === "dsd-fme" || d.type === "multimon-ng")
 			)
 				noChannel = true
+			// Digital voice is not confined to protocol-labelled band-plan channels.
+			// Use scanner energy centres as extra candidates for unpinned dsd-fme,
+			// preserving incumbent centres through burst gaps and health outages.
+			const observed = act?.observed?.find(o => {
+				const epoch = act.epochs.find(e => e.sourceId === s.id)
+				return (
+					epoch &&
+					o.epoch.sourceId === s.id &&
+					o.epoch.engineId === epoch.engineId &&
+					o.epoch.epoch === epoch.epoch
+				)
+			})
+			if (
+				act &&
+				act.observed !== undefined &&
+				d.type === "dsd-fme" &&
+				d.reach === "channel" &&
+				s.channelizerAvailable &&
+				(d.origin === "catalogue" || followsVfo) &&
+				d.configuredChannelsHz.length === 0
+			) {
+				const addObserved = (hz: number) => {
+					if (!Number.isInteger(hz) || !positive(hz)) return
+					// A centre within bandwidth / 2 is already covered. Prefer existing
+					// placements and listed channels to FFT jitter, preventing duplicates
+					// and ambiguous ranker association within half a channel width.
+					if (
+						local.some(
+							c =>
+								c.hz !== null &&
+								Math.abs(c.hz - hz) <= d.channelBandwidthHz / 2,
+						)
+					)
+						return
+					if (local.length >= ACTIVITY_MAX_CANDIDATES) return
+					add(hz, "bandplan", local.length)
+				}
+				for (const inc of act.incumbents)
+					if (inc.decoderId === d.id && inc.sourceId === s.id)
+						addObserved(inc.hz)
+				const centres = (observed?.channelsHz ?? [])
+					.slice(0, ACTIVITY_MAX_CANDIDATES)
+					.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b)
+				for (const hz of centres) addObserved(hz)
+			}
 			candidates.push(...local)
 		}
 		// 3.20: catalogue ACARS stays on its channels, never the capture centre.

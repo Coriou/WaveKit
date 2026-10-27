@@ -594,7 +594,13 @@ describe("HfdlDecoder", () => {
    and 2 extra dsd-fme channels per source on x86-64 (1 and 0 on a 4-core arm64 host), fewer
    when the CPU budget is short. A channel that becomes active replaces the least active one
    after that one has run 20 s, at most 6 times a minute per source, and never one that is
-   receiving. Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune
+   receiving. dsd-fme also considers scanner-observed energy centres when no explicit
+   decoder channels are configured, including channels absent from the protocol band plan.
+   No protocol hint is required: energy selects a trial channel, and the existing checked
+   decoder output rules still decide whether it is verified digital voice. Band, capture
+   reach and CPU admission still apply. Nearby FFT centre changes reuse the existing
+   channel, and burst gaps keep its placement eligible for the usual dwell and move rules.
+   Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune
    it with `decoderPolicy.efficiency.activity`: `slots` (`multimon-ng`, `dsd-fme`, 0 to 32),
    `replayAllowanceCores` (default 0.1, 0.05 on arm64), `maxMovesPerMinute` (6) and
    `dwellMs` (20000). Without a ranking (scanner off) the channels are those of items 5 and

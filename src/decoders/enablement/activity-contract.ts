@@ -1,8 +1,8 @@
 /**
  * Activity-ranked decoder channels: the contract between the scanner-side ranker (evidence: live
  * energy, tracks, occupancy, decodes, trial outcomes) and the decoder planner (which channels of a
- * decoder's eligible set run within the CPU budget). Types only. The ranker never adds a frequency
- * and never assigns placements; the planner never reads scanner state except through this port.
+ * decoder's eligible set run within the CPU budget). Observed energy centres are suggestions,
+ * never placements; the planner never reads scanner state except through this port.
  */
 
 /** Decoder types whose channels can be chosen by activity. */
@@ -67,6 +67,9 @@ export interface ActivityChange {
 }
 
 export interface ChannelActivityPort {
+	/** Optional bounded energy centres of this exact epoch, on the planner clock. */
+	// The planner still enforces decoder band, reach, ownership and slot budgets.
+	observedChannels?(epoch: ActivityEpoch, nowMonoMs: number): readonly number[]
 	/** One atomic, immutable batch: no mutation, I/O or history refresh happens here. */
 	snapshot(
 		queries: readonly ActivityQuery[],
@@ -75,3 +78,9 @@ export interface ChannelActivityPort {
 	/** Coalesced change notices (at most 250 ms late); returns the unsubscribe function. */
 	subscribe(listener: (change: ActivityChange) => void): () => void
 }
+
+/**
+ * Candidates per query: 1 024 (a 12.8 MHz span at a 12.5 kHz raster). A larger query answers
+ * `unavailable`, still one channel per candidate.
+ */
+export const ACTIVITY_MAX_CANDIDATES = 1_024

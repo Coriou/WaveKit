@@ -2,8 +2,8 @@
  * Activity-ranked decoder channels, scanner side: the ranker behind `ChannelActivityPort`
  * (src/decoders/enablement/activity-contract.ts). It turns spectrum blocks, gated tracks, decodes,
  * replay outcomes and coarse occupancy into one score and state per candidate channel of a planner
- * query. It never adds a frequency and never assigns placements: the planner ranks its own
- * eligible candidates with it and falls back to its nearest order on anything but `ready`.
+ * query. It exposes bounded observed energy centres but never assigns placements. The planner
+ * filters and ranks eligible candidates and falls back to nearest order on anything but `ready`.
  *
  * Clock: one monotonic clock (`monoNow`, `performance.now()` in production), the planner's clock.
  * Every time the ranker stores or returns is on it.
@@ -55,6 +55,7 @@
  * candidates) and candidates per query. Nothing is logged with frequencies, ids or protocols.
  */
 import { z } from "zod"
+import { ACTIVITY_MAX_CANDIDATES } from "../../decoders/enablement/activity-contract.js"
 import type {
 	ActivityChange,
 	ActivityEpoch,
@@ -108,11 +109,7 @@ export const ACTIVITY_MAX_NOTES = 256
 export const ACTIVITY_MAX_HISTORY = 512
 /** Interests (epoch × decoder × candidates) remembered for change notices, least recent dropped. */
 export const ACTIVITY_MAX_INTERESTS = 128
-/**
- * Candidates per query: 1 024 (a 12.8 MHz span at a 12.5 kHz raster). A larger query answers
- * `unavailable`, still one channel per candidate.
- */
-export const ACTIVITY_MAX_CANDIDATES = 1_024
+export { ACTIVITY_MAX_CANDIDATES } from "../../decoders/enablement/activity-contract.js"
 
 export interface ActivityTimers {
 	setTimeout(fn: () => void, ms: number): unknown
@@ -816,6 +813,20 @@ export function createChannelActivityRanker(
 	}
 
 	const port: ChannelActivityPort = {
+		observedChannels(epoch, nowMonoMs) {
+			const s = sources.get(epoch.sourceId)
+			if (!s || !sameEpoch(s.epoch, epoch)) return []
+			// Existing segment bound: <= 512 centres/source, 64 x 512 overall.
+			// Keep recent centres for the same 15 min as energy ranking, never history
+			// from another epoch. Stale health is handled by the snapshot fallback.
+			return [
+				...new Set(
+					[...s.segments.values()]
+						.filter(seg => nowMonoMs < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
+						.map(seg => Math.round(seg.centreHz)),
+				),
+			]
+		},
 		snapshot(queries, nowMonoMs) {
 			const now = Number.isFinite(nowMonoMs) ? nowMonoMs : mono()
 			const out: ActivitySnapshot[] = []
@@ -927,7 +938,9 @@ export function createChannelActivityRanker(
 			if (liveKeys.size !== s.liveKeys.size) edge = true
 			s.spareKeys = s.liveKeys
 			s.liveKeys = liveKeys
-			if (edge) markDirty(sourceId)
+			// New energy may be outside every existing query (including no queries).
+			// Notify so the manager can derive a new candidate set before ranking it.
+			if (edge) markDirty(sourceId, true)
 		},
 		ingestTrack(sourceId, engineId, track) {
 			if (disposed) return

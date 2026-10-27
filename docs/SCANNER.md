@@ -4,6 +4,13 @@ The scanner finds and characterises RF activity on a source, confirms it with a 
 
 Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-design.md). Endpoint and message reference: [API.md, Scanner and Spectrum](API.md#scanner). Component view: [ARCHITECTURE.md, Scanner](ARCHITECTURE.md#scanner).
 
+While watching a source, the scanner supplies its current-epoch, gated energy centres
+as extra dsd-fme activity candidates. This allows digital voice on an unlisted channel
+to receive a decoder without a protocol hint or VFO selection. Suggestions remain
+subject to decoder band, passband fit, source ownership and CPU limits; energy alone
+does not verify a protocol. Checked dsd-fme output must pass the existing verification
+and receiver provenance rules. See [decoder activity placement](DECODER-GUIDE.md).
+
 ## What it does and does not do
 
 - Finds energy in the window a source is tuned to (in-window) or across wider ranges by retuning an rtl_tcp source (sweep).

@@ -115,6 +115,48 @@ const one = (
 ) => r.port.snapshot([q], now)[0]!
 
 describe("channel activity ranker", () => {
+	it("offers bounded current-epoch energy centres and notifies with no prior queries", () => {
+		const { clock, ranker, changes } = setup()
+		const epoch = query().epoch
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([]))
+		clock.advance(317.3)
+		const before = changes.length
+		const hzs = Array.from(
+			{ length: ACTIVITY_MAX_SEGMENTS + 1 },
+			(_, i) => CENTRE + i * 100,
+		)
+		ranker.ingestBlock("rtl", "e1", block(hzs.slice(0, ACTIVITY_MAX_SEGMENTS)))
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toHaveLength(
+			ACTIVITY_MAX_SEGMENTS,
+		)
+		ranker.ingestBlock("rtl", "e1", block(hzs))
+		const seenAt = clock.now()
+		clock.advance(317.3)
+		expect(changes.length).toBeGreaterThan(before)
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toHaveLength(
+			ACTIVITY_MAX_SEGMENTS,
+		)
+		expect(ranker.port.observedChannels!(epoch, clock.now())).not.toContain(
+			hzs[0],
+		)
+		expect(
+			ranker.port.observedChannels!(epoch, seenAt + ACTIVITY_WARM_HOLD_MS - 1),
+		).toHaveLength(ACTIVITY_MAX_SEGMENTS)
+		expect(
+			ranker.port.observedChannels!(epoch, seenAt + ACTIVITY_WARM_HOLD_MS),
+		).toEqual([])
+		expect(
+			ranker.port.observedChannels!(epoch, seenAt + ACTIVITY_WARM_HOLD_MS + 1),
+		).toEqual([])
+		clock.advance(ACTIVITY_WARM_HOLD_MS + 1)
+		ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toEqual([CENTRE])
+		ranker.ingestEpoch("rtl", "e2", 1)
+		expect(ranker.port.observedChannels!(epoch, clock.now())).toEqual([])
+		ranker.dispose()
+	})
+
 	it("a far raster channel with activity ranks hot ahead of the near idle ones (two-channel scenario)", () => {
 		const { clock, ranker } = setup()
 		const far = RASTER_HZ[32]!

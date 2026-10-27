@@ -1881,6 +1881,14 @@ export class DecoderManager extends EventEmitter {
 			nowMonoMs: now,
 			policy: activity.policy,
 			epochs,
+			observed: epochs.flatMap(epoch => {
+				try {
+					const channelsHz = activity.port.observedChannels?.(epoch, now)
+					return channelsHz ? [{ epoch, channelsHz }] : []
+				} catch {
+					return []
+				}
+			}),
 			snapshots: [],
 			incumbents,
 			recentMoves: [...this.activityMoves],
