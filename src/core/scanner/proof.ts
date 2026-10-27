@@ -36,7 +36,14 @@ const RAN = new Set<string>([
 	"carrier-only",
 ])
 
-const PROBES = new Set<string>(["direwolf", "dsd-fme", "multimon-ng", "rtl433"])
+const PROBES = new Set<string>([
+	"direwolf",
+	"dsd-fme",
+	"multimon-ng",
+	"rtl433",
+	"dumpvdl2",
+	"lora-meshtastic",
+])
 
 const RANK: Readonly<Record<ScannerProofKind, number>> = {
 	decoded: 5,

@@ -87,6 +87,8 @@ const PROBE_DECODERS: Record<ScannerProbeDecoderType, true> = {
 	direwolf: true,
 	rtl433: true,
 	acarsdec: true,
+	dumpvdl2: true,
+	"lora-meshtastic": true,
 }
 
 const ANALOG_MODES: Record<AnalogTrialMode, true> = {

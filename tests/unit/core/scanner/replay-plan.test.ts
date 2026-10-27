@@ -466,13 +466,9 @@ describe("planReplayTrials", () => {
 								expect(t.analogMode).toBe(expectAm ? "am" : "nfm")
 							}
 						} else {
-							expect([
-								"analog-fm",
-								"analog-am",
-								"ais",
-								"vdl2",
-								"lora",
-							]).not.toContain(t.protocol)
+							expect(["analog-fm", "analog-am", "ais"]).not.toContain(
+								t.protocol,
+							)
 						}
 					}
 					if (analogs.length === 1) {
@@ -510,8 +506,10 @@ describe("planReplayTrials", () => {
 							"aprs",
 							// the ISM replay trial (rtl433)
 							"ism",
-							// the ACARS replay trial (acarsdec)
+							// the extra IQ replay trials
 							"acars",
+							"vdl2",
+							"lora",
 						].includes(c.known)
 					const knownPlanned =
 						replayable || (knownAnalog && !(knownAnalog && pagerFirst))
@@ -525,7 +523,9 @@ describe("planReplayTrials", () => {
 								// a listed ISM band calls the rtl433 replay trial too
 								(c.known !== "ism" && (c.priors["ism"] ?? 0) >= 1 ? 1 : 0) +
 								// and a listed ACARS channel the acarsdec one
-								(c.known !== "acars" && (c.priors["acars"] ?? 0) >= 1 ? 1 : 0),
+								(c.known !== "acars" && (c.priors["acars"] ?? 0) >= 1 ? 1 : 0) +
+								(c.known !== "vdl2" && (c.priors["vdl2"] ?? 0) >= 1 ? 1 : 0) +
+								(c.known !== "lora" && (c.priors["lora"] ?? 0) >= 1 ? 1 : 0),
 						)
 				},
 			),

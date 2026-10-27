@@ -66,6 +66,8 @@ import {
 import { interpretMultimon } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import { interpretAcarsReplay } from "./confirm/acars.js"
+import { interpretVdl2 } from "./confirm/vdl2.js"
+import { interpretMeshtastic } from "./confirm/meshtastic.js"
 
 /** WG11 req 6.5: `replay` feeds the decoder an IQ capture (lane IQ). */
 export type ProbeTransport = "offset" | "channel" | "replay"
@@ -77,6 +79,8 @@ export type ProbeDecoderType =
 	| "rtl433"
 	/** Replay only (an IQ capture of an ACARS channel); never a live probe. */
 	| "acarsdec"
+	| "dumpvdl2"
+	| "lora-meshtastic"
 
 export interface ProbeRequest {
 	jobId: string
@@ -506,6 +510,8 @@ export const offsetTransport: TransportStrategy = {
 	supports: (mode, ctx) =>
 		ctx.format === "U8_IQ" &&
 		mode.decoderType !== "rtl433" &&
+		mode.decoderType !== "dumpvdl2" &&
+		mode.decoderType !== "lora-meshtastic" &&
 		Math.abs(ctx.req.targetHz - ctx.epoch.centreHz) <=
 			(ctx.sampleRateHz * USABLE_FRACTION) / 2,
 	configure: (base, ctx) => ({
@@ -2137,6 +2143,23 @@ export class ProbePool extends EventEmitter {
 			case "rtl433":
 				this.deliver(rec, interpretRtl433(out, rec.interp))
 				return
+			case "dumpvdl2":
+			case "lora-meshtastic": {
+				if (rec.req.replay) {
+					const interpret =
+						rec.mode.decoderType === "dumpvdl2"
+							? interpretVdl2
+							: interpretMeshtastic
+					this.deliver(
+						rec,
+						interpret(out, rec.interp, {
+							targetsHz: [rec.req.targetHz],
+							channelHz: rec.req.targetHz,
+						}),
+					)
+				}
+				return
+			}
 			case "acarsdec":
 				// Replay only: one CRC-clean block of the replayed capture is the decode.
 				if (rec.req.replay)

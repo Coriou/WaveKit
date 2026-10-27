@@ -1013,6 +1013,8 @@ const PROBE_DECODER_TYPES: ReadonlySet<string> =
 		"direwolf",
 		"rtl433",
 		"acarsdec",
+		"dumpvdl2",
+		"lora-meshtastic",
 	])
 
 /**

@@ -8024,7 +8024,9 @@ function probeDecoderType(
 		decoder === "dsd-fme" ||
 		decoder === "multimon-ng" ||
 		decoder === "direwolf" ||
-		decoder === "rtl433"
+		decoder === "rtl433" ||
+		decoder === "dumpvdl2" ||
+		decoder === "lora-meshtastic"
 	)
 		return decoder
 	return undefined

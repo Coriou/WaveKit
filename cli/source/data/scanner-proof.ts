@@ -12,7 +12,14 @@ import type {
 } from "@wavekit/api-types"
 
 type BareProof = Omit<ScannerProof, "summary">
-const PROBES = new Set<string>(["direwolf", "dsd-fme", "multimon-ng", "rtl433"])
+const PROBES = new Set<string>([
+	"direwolf",
+	"dsd-fme",
+	"multimon-ng",
+	"rtl433",
+	"dumpvdl2",
+	"lora-meshtastic",
+])
 function knownProtocol(value: unknown): value is ScannerProtocol {
 	return (
 		typeof value === "string" &&

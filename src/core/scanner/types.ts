@@ -270,6 +270,8 @@ export interface ScannerProof {
 		| "direwolf"
 		| "rtl433"
 		| "acarsdec"
+		| "dumpvdl2"
+		| "lora-meshtastic"
 	)[]
 	encrypted: boolean
 	summary: string

@@ -6,7 +6,19 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import type { Readable } from "node:stream"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { wholeCaptureShape } from "../../../../src/core/iq-capture/shapes.js"
+import { createPoolReplayProbes } from "../../../../src/core/iq-capture/pool-adapter.js"
+import { createReplayTransport } from "../../../../src/core/scanner/probes/replay-transport.js"
+import { REPLAY_PROBE_PRIORITY } from "../../../../src/core/scanner/probes/probe-pool.js"
+import { planReplayTrialsDetailed } from "../../../../src/core/scanner/replay-plan.js"
+import {
+	FakeEngineView,
+	flushAsync,
+	poolHarness,
+} from "../../../mocks/scanner/probe-fakes.js"
+import {
+	probeReplayShapes,
+	wholeCaptureShape,
+} from "../../../../src/core/iq-capture/shapes.js"
 import {
 	captureBandwidthHz,
 	createIqCaptureService,
@@ -985,6 +997,111 @@ describe("IqCaptureService openReplay", () => {
 				])
 			}
 			await s.svc.stop()
+		},
+	)
+
+	it.each([
+		{
+			protocol: "vdl2" as const,
+			decoder: "dumpvdl2",
+			rfHz: 136_975_000,
+			rate: 48_000 as const,
+			replayRate: 105_000,
+		},
+		{
+			protocol: "lora" as const,
+			decoder: "lora-meshtastic",
+			rfHz: 869_525_000,
+			rate: 192_000 as const,
+			replayRate: 250_000,
+		},
+	])(
+		"production wiring plans and starts an identify $protocol capture",
+		async ({ protocol, decoder, rfHz, rate, replayRate }) => {
+			// Fractional milliseconds deliberately do not fall on either capture's sample grid.
+			const s = await setup(
+				{ shapes: probeReplayShapes(), now: () => 1_000_000.1234567 },
+				{ samples: rate / 10, rates: [48_000, 96_000, 192_000] },
+			)
+			const engine = new FakeEngineView({
+				sourceId: "src",
+				centreHz: rfHz,
+				epoch: 3,
+			})
+			const h = poolHarness({
+				engines: [engine],
+				transports: [createReplayTransport(s.svc)],
+			})
+			const adapter = createPoolReplayProbes(h.pool, {
+				priority: REPLAY_PROBE_PRIORITY,
+				jobId: "identify-replay",
+			})
+			try {
+				s.svc.attachSource("src", {
+					sampleRateHz: FS,
+					centerHz: rfHz,
+					epoch: 3,
+					engine: s.engine,
+				})
+				await s.svc.start()
+				await flush()
+				s.engine.push(FS)
+				const got = s.svc.captureFor(
+					req({ reason: "identify", rfHz, rateHz: rate }),
+					"identify-replay",
+				)
+				expect(got).toHaveProperty("captureId")
+				if (!("captureId" in got)) return
+				await flush(10)
+				const capture = s.svc.view(got.captureId)
+				expect(capture).not.toBeNull()
+				if (!capture) return
+				const plan = planReplayTrialsDetailed({
+					capture,
+					track: null,
+					knownProtocol: protocol,
+					priors: { [protocol]: 1 },
+					narrowRaster: false,
+					nowMs: 1_000_001.7654321,
+				})
+				expect(plan.skipped).not.toContainEqual(
+					expect.objectContaining({ decoder }),
+				)
+				const trial = plan.trials[0]
+				expect(trial?.mode.decoderType).toBe(decoder)
+				if (!trial) return
+				expect(
+					s.svc.replayRateOf?.(capture.captureId, trial.mode.decoderType),
+				).toBe(replayRate)
+				const run = adapter.request({
+					captureId: capture.captureId,
+					sourceId: capture.sourceId,
+					epoch: capture.epoch,
+					observationId: capture.observationId,
+					rfHz,
+					protocol,
+					mode: trial.mode,
+				})
+				expect(run).toHaveProperty("run")
+				await flushAsync()
+				expect([...h.decoders.created.values()].map(d => d.config)).toEqual([
+					expect.objectContaining({
+						type: decoder,
+						useChannelizer: false,
+						options: expect.objectContaining({ inputSampleRate: replayRate }),
+					}),
+				])
+				expect(lastReplay(s).args.slice(-4)).toEqual([
+					"--out-rate",
+					String(replayRate),
+					"--format",
+					"cu8",
+				])
+			} finally {
+				adapter.dispose()
+				await h.pool.destroy()
+				await s.svc.stop()
+			}
 		},
 	)
 

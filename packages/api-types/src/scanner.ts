@@ -1232,8 +1232,10 @@ export type ScannerProbeDecoderType =
 	| "multimon-ng"
 	| "direwolf"
 	| "rtl433"
-	/** Replay only: ACARS from a replayed IQ capture (AM demodulated). */
+	/** Replay only: IQ capture consumers. */
 	| "acarsdec"
+	| "dumpvdl2"
+	| "lora-meshtastic"
 /**
  * WG10 req 3.4: analog evidence for an identify target, from the live demodulator's closed
  * transmissions within the target's tolerance. Only what the transmission tracker reported.

@@ -374,23 +374,43 @@ describe("replay extras behind a capability check (part 2)", () => {
 	it.each([
 		["vdl2", "dumpvdl2"],
 		["lora", "lora-meshtastic"],
-		["ais", "ais-catcher"],
 	] as const)(
-		"a known %s discovery calls %s, skipped (no probe mode)",
+		"a known %s discovery runs %s only with replay capability",
 		(protocol, decoder) => {
-			const out = planReplayTrialsDetailed(
-				pocsagInput({ knownProtocol: protocol, track: null, priors: {} }),
+			const input = pocsagInput({
+				knownProtocol: protocol,
+				track: null,
+				priors: {},
+			})
+			const out = planReplayTrialsDetailed(input)
+			expect(out.skipped.some(x => x.decoder === decoder)).toBe(false)
+			expect(out.trials[0]).toMatchObject({
+				protocol,
+				known: true,
+				mode: { decoderType: decoder },
+			})
+			const without = planReplayTrialsDetailed(input, new Set())
+			expect(without.trials.some(t => t.mode.decoderType === decoder)).toBe(
+				false,
 			)
-			expect(out.skipped).toContainEqual({
+			expect(without.skipped).toContainEqual({
 				protocol,
 				decoder,
-				reason: "no-probe-mode",
+				reason: "no-replay-input",
 			})
-			expect(
-				out.trials.every(t => String(t.mode.decoderType) !== decoder),
-			).toBe(true)
 		},
 	)
+
+	it("a known AIS discovery still skips ais-catcher without a probe mode", () => {
+		const out = planReplayTrialsDetailed(
+			pocsagInput({ knownProtocol: "ais", track: null, priors: {} }),
+		)
+		expect(out.skipped).toContainEqual({
+			protocol: "ais",
+			decoder: "ais-catcher",
+			reason: "no-probe-mode",
+		})
+	})
 
 	it("readsb is called at 1090 MHz ± 1 MHz inclusive and not 1 Hz past", () => {
 		const at = (rfHz: number) =>

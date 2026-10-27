@@ -255,6 +255,12 @@ function extraModeOf(
 	decoder: string,
 ): ProbeMode | null {
 	if (protocol === "adsb" || !IDENTIFY_PROTOCOLS.includes(protocol)) return null
+	if (protocol === "vdl2" || protocol === "lora") {
+		const mode = IQ_REPLAY_WIDEBAND_MODES[protocol]
+		return mode.decoderType === decoder
+			? { ...mode, covers: [...mode.covers], options: { ...mode.options } }
+			: null
+	}
 	// ISM has no identify mode (identifyModeFor answers null) and no pre-channelizer probe mode
 	// (ambient-only live); its replay mode is rtl433 on the capture.
 	const mode =

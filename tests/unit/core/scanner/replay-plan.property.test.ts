@@ -63,8 +63,10 @@ const REPLAYABLE = new Set<ScannerProtocol>([
 	"aprs",
 	// the ISM replay trial (rtl433)
 	"ism",
-	// the ACARS replay trial (acarsdec)
+	// the native IQ replay trials
 	"acars",
+	"vdl2",
+	"lora",
 ])
 
 function listsAm(hz: number): boolean {
@@ -219,7 +221,9 @@ describe("planReplayTrials analog order", () => {
 							t.kind !== "analog" &&
 							!t.known &&
 							t.mode.decoderType !== "rtl433" &&
-							t.mode.decoderType !== "acarsdec",
+							t.mode.decoderType !== "acarsdec" &&
+							t.mode.decoderType !== "dumpvdl2" &&
+							t.mode.decoderType !== "lora-meshtastic",
 					)
 					for (let i = 1; i < digital.length; i++) {
 						const prev = digital[i - 1]!
@@ -241,11 +245,14 @@ describe("planReplayTrials analog order", () => {
 					}
 					for (const t of out) {
 						if (t.mode.decoderType === "rtl433") expect(t.protocol).toBe("ism")
-						// ACARS only as the acarsdec replay trial; the other ambient-only protocols never
+						// Extra IQ consumers use their own replay decoders; AIS remains live-only
 						if (t.protocol === "acars")
 							expect(t.mode.decoderType).toBe("acarsdec")
-						if (t.kind !== "analog")
-							expect(["ais", "vdl2", "lora"]).not.toContain(t.protocol)
+						if (t.protocol === "vdl2")
+							expect(t.mode.decoderType).toBe("dumpvdl2")
+						if (t.protocol === "lora")
+							expect(t.mode.decoderType).toBe("lora-meshtastic")
+						if (t.kind !== "analog") expect(t.protocol).not.toBe("ais")
 					}
 				},
 			),
