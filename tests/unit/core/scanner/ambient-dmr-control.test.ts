@@ -55,7 +55,7 @@ function setup() {
 }
 
 describe("ambient checked DMR control", () => {
-	it("confirms identical idle control repeats in 1.037 s steps only after 2 s", () => {
+	it("confirms identical checked burst repeats in 1.037 s steps only after 2 s", () => {
 		const f = setup()
 		try {
 			f.emit(0)
@@ -84,6 +84,24 @@ describe("ambient checked DMR control", () => {
 			f.stop()
 		}
 	})
+
+	it.each([
+		{ slot: 2 as const },
+		{ slot: 2 as const, tg: "10", src: "20" },
+		{ slot: 2 as const, voiceLc: true, tg: "10" },
+	])(
+		"pairs checked bursts by CC across slots except voice LC with both TG/SRC: %j",
+		fields => {
+			const f = setup()
+			try {
+				f.emit(0, { ...fields, slot: 1 })
+				f.emit(CONFIRM_MIN_SEPARATION_MS, fields)
+				expect(f.confirmed()).toHaveLength(1)
+			} finally {
+				f.stop()
+			}
+		},
+	)
 
 	it.each([
 		{ verified: false },

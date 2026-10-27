@@ -796,7 +796,7 @@ describe("activity ranking: bounded moves", () => {
 	})
 })
 
-it("keeps 60 jittering observed candidates, interests and placements stable with a toggling track", () => {
+it("keeps 60 jittering observed candidates, interests and synced placements stable with a toggling track", () => {
 	let now = 0
 	let timerId = 0
 	const pending = new Map<number, { at: number; fn: () => void }>()
@@ -884,6 +884,8 @@ it("keeps 60 jittering observed candidates, interests and placements stable with
 			hz: p.channelHz!,
 			primary: p.primary,
 			dwellSinceMonoMs: 0,
+			// This is established voice; no-sync search has separate sequence coverage.
+			syncSeen: true,
 		}))
 		maxInterests = Math.max(maxInterests, ranker.sizes().interests)
 	}

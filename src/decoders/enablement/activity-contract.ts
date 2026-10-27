@@ -38,6 +38,8 @@ export interface ActivityQuery {
 
 export interface ChannelActivity {
 	readonly hz: number
+	/** Recent decode of a non-voice protocol excludes this candidate from dsd-fme. */
+	readonly excluded?: boolean
 	/** Finite and at least 0. */
 	readonly score: number
 	readonly state: ActivityState

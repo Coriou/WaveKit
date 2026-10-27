@@ -115,6 +115,10 @@ import type {
 	ActivityPendingStart,
 	PlannerActivity,
 } from "./enablement/activity-plan.js"
+import {
+	DsdActivityDemotions,
+	isDsdActivitySync,
+} from "./enablement/dsd-activity.js"
 import { ACTIVITY_MAX_OBSERVED } from "./enablement/activity-contract.js"
 import type { ActivitySnapshot } from "./enablement/activity-contract.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
@@ -603,11 +607,17 @@ export class DecoderManager extends EventEmitter {
 	private activityPassDirty = false
 	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
 	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
+	private readonly dsdActivityDemotions = new DsdActivityDemotions()
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
 	/** Per placement key: when it was first planned and when it was first seen running. */
 	private readonly activitySince = new Map<
 		string,
-		{ chosenMonoMs: number; startedMonoMs: number | null }
+		{
+			chosenMonoMs: number
+			startedMonoMs: number | null
+			syncSeen: boolean
+			demoted: boolean
+		}
 	>()
 	private applyingCaps = false
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
@@ -1825,11 +1835,16 @@ export class DecoderManager extends EventEmitter {
 				this.activitySince.set(placement.key, {
 					chosenMonoMs: now,
 					startedMonoMs: running ? now : null,
+					syncSeen: false,
+					demoted: false,
 				})
 			else if (running && since.startedMonoMs === null)
 				since.startedMonoMs = now
-			else if (!running && !state.processStartPending)
+			else if (!running && !state.processStartPending) {
 				since.startedMonoMs = null
+				since.syncSeen = false
+				since.demoted = false
+			}
 		}
 		for (const key of this.activitySince.keys())
 			if (!present.has(key)) this.activitySince.delete(key)
@@ -1873,7 +1888,21 @@ export class DecoderManager extends EventEmitter {
 			)
 				continue
 			const since = this.activitySince.get(placement.key)
+			if (
+				state.config.type === "dsd-fme" &&
+				placement.origin === "activity" &&
+				running &&
+				since !== undefined &&
+				since.startedMonoMs !== null &&
+				!since.syncSeen &&
+				!since.demoted &&
+				now - since.startedMonoMs >= activity.policy.dwellMs
+			) {
+				this.dsdActivityDemotions.note(placement.key, now, activity.policy)
+				since.demoted = true
+			}
 			incumbents.push({
+				...(since?.syncSeen ? { syncSeen: true } : {}),
 				key: placement.key,
 				decoderId: placement.decoderId,
 				sourceId: placement.sourceId,
@@ -1895,6 +1924,7 @@ export class DecoderManager extends EventEmitter {
 		const plannerActivity: PlannerActivity = {
 			nowMonoMs: now,
 			policy: activity.policy,
+			demotions: this.dsdActivityDemotions.snapshot(now),
 			epochs,
 			observed: epochs.flatMap(epoch => {
 				try {
@@ -3585,6 +3615,25 @@ export class DecoderManager extends EventEmitter {
 		decoder.prependListener("link", (line: unknown) => {
 			const placement = state.placement
 			if (!placement || line === null || typeof line !== "object") return
+			if (
+				state.config.type === "dsd-fme" &&
+				this.config.enablement?.activity &&
+				decoder.getStatus().running &&
+				isDsdActivitySync(line)
+			) {
+				let since = this.activitySince.get(placement.key)
+				if (!since) {
+					this.refreshActivitySince(this.activityMonoNow())
+					since = this.activitySince.get(placement.key)
+				}
+				// A run's first sync changes placement policy; later lines need no pass
+				// or scan of the other decoders on this parser's output path.
+				if (since && !since.syncSeen) {
+					since.syncSeen = true
+					this.dsdActivityDemotions.clear(placement.key)
+					this.requestActivityPass()
+				}
+			}
 			const binding = {
 				sourceId: placement.sourceId,
 				channelHz: placement.channelHz,
@@ -3666,6 +3715,22 @@ export class DecoderManager extends EventEmitter {
 		// Handle started event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("started", () => {
+			// Each actual run earns its own dwell and sync evidence, even when a quick
+			// restart never leaves a stopped state visible to an activity pass.
+			if (
+				state.placement &&
+				isActivityDecoder(state.config.type) &&
+				this.config.enablement?.activity
+			) {
+				const now = this.activityMonoNow()
+				this.activitySince.set(state.placement.key, {
+					chosenMonoMs:
+						this.activitySince.get(state.placement.key)?.chosenMonoMs ?? now,
+					startedMonoMs: now,
+					syncSeen: false,
+					demoted: false,
+				})
+			}
 			state.lifecycle?.kick()
 			try {
 				state.lastOutputAt = null

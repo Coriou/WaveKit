@@ -1005,14 +1005,19 @@ export const planPlacements: PlacementPlanner = input => {
 				const primary =
 					(incumbent &&
 						ranked.find(
-							c => c.hz === incumbent.hz && c.source.id === incumbent.sourceId,
+							c =>
+								c.hz === incumbent.hz &&
+								c.source.id === incumbent.sourceId &&
+								local.find(g => g.source === c.source)?.order.includes(c.hz!),
 						)) ??
 					ranked.find(
 						c => c.source === ranked[0]!.source && c.hz === local[0]!.order[0],
 					)!
-				const g = local.find(x => x.source === primary.source)!
-				emit(primary, 0, info(g, primary.hz!))
-				g.order = g.order.filter(hz => hz !== primary.hz)
+				if (primary) {
+					const g = local.find(x => x.source === primary.source)!
+					emit(primary, 0, info(g, primary.hz!))
+					g.order = g.order.filter(hz => hz !== primary.hz)
+				}
 			}
 			groups.push(...local)
 			continue
@@ -1094,13 +1099,48 @@ export const planPlacements: PlacementPlanner = input => {
 		if (typeof at === "number" && Number.isFinite(at) && at > now)
 			next = next === null ? at : Math.min(next, at)
 	}
+	const demotions = new Map(act.demotions?.map(d => [d.key, d.untilMonoMs]))
 	groups.forEach((g, i) => {
 		const times = (windowMoves.get(g.source.id) ?? []).sort((a, b) => a - b)
+		const demotedHz = new Set<number>()
+		if (g.d.type === "dsd-fme") {
+			for (const hz of g.order) {
+				const until = demotions.get(keyOf(g, hz))
+				if (until !== undefined && Number.isFinite(until) && now < until) {
+					demotedHz.add(hz)
+					later(until)
+				}
+			}
+			for (const inc of act.incumbents)
+				if (
+					inc.decoderId === g.d.id &&
+					inc.sourceId === g.source.id &&
+					!inc.primary &&
+					!inc.syncSeen
+				) {
+					// Cooldown expiry permits a fresh trial, not revival of an existing
+					// run that still has no sync. Keep it replaceable until sync or a move.
+					if (now - inc.dwellSinceMonoMs >= dwellMs) demotedHz.add(inc.hz)
+					else later(inc.dwellSinceMonoMs + dwellMs)
+				}
+		}
+		const effectiveSnapshot =
+			g.snapshot && demotedHz.size > 0
+				? {
+						...g.snapshot,
+						channels: g.snapshot.channels.map(c =>
+							demotedHz.has(c.hz)
+								? { ...c, score: 0, state: "cold" as const, live: false }
+								: c,
+						),
+					}
+				: g.snapshot
 		const selection = selectChannels({
-			order: g.order,
+			order: activityOrder(g.order, effectiveSnapshot),
+			demotedHz,
 			ranked: g.snapshot !== null,
-			activity: g.snapshot
-				? new Map(g.snapshot.channels.map(c => [c.hz, c]))
+			activity: effectiveSnapshot
+				? new Map(effectiveSnapshot.channels.map(c => [c.hz, c]))
 				: null,
 			count: allocation.given[i]!,
 			incumbents: act.incumbents
@@ -1114,6 +1154,7 @@ export const planPlacements: PlacementPlanner = input => {
 					key: inc.key,
 					hz: inc.hz,
 					dwellSinceMonoMs: inc.dwellSinceMonoMs,
+					syncSeen: g.d.type === "dsd-fme" && inc.syncSeen === true,
 					...(pendingKeys.has(inc.key) ? { pinned: true } : {}),
 				})),
 			nowMonoMs: now,
@@ -1141,7 +1182,7 @@ export const planPlacements: PlacementPlanner = input => {
 				gated: true,
 				...(c.movedFrom ? { movedFrom: c.movedFrom.key } : {}),
 				activity: placementActivity(
-					g.snapshot?.channels.find(ch => ch.hz === c.hz),
+					effectiveSnapshot?.channels.find(ch => ch.hz === c.hz),
 				),
 			})
 			if (c.movedFrom) {

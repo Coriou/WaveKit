@@ -343,6 +343,29 @@ On by default in protected access mode (`scanner.iqCapture.enabled: true`; in le
 
 **Decodes from busy-channel decoders land on their channel.** A paging or digital-voice decoder that the planner moved to a band-plan channel reports its decodes at that channel, so they land on that channel's discovery (not at the tuned centre). Each such channel confirms its own identities: a colour code or capcode heard on one channel never confirms a decode on another.
 
+dsd-fme excludes a channel while the ranker has a decode of a non-digital-voice
+protocol within its existing 15-minute decode-hot window (strictly younger than
+900,000 ms). DMR, P25, NXDN, YSF, dPMR and D-Star remain voice candidates;
+paging, APRS, ACARS and other protocols do not. This evidence travels through the
+activity snapshot, including decode history pulled by the ranker. Every candidate
+within half its channel width of that decode is excluded (including the exact
+boundary); overlapping candidates are all excluded even when positive decode
+credit would be ambiguous.
+
+A running dsd-fme activity slot with no parser sync line after its full dwell is
+demoted for `max(60,000, dwellMs × max(1, maxMovesPerMinute))` milliseconds:
+with the defaults, `max(60,000, 20,000 × 6) = 120,000 ms`. This allows six other
+full dwells before retrying a failed channel. A zero move budget still holds
+for a full 60,000 ms window (or one dwell, if longer). The cooldown applies strictly
+before its deadline; at or after it a fresh run on the channel may compete again.
+An incumbent that still has no sync stays demoted until it receives sync or
+leaves, even after cooldown expiry; continuous energy cannot revive that failed
+run when a challenger arrives late. Demoted channels cannot challenge or fill free slots; replacing a demoted incumbent
+still spends the shared per-source move budget. There are at most 256 demotions
+(one quarter of the 1,024-candidate query cap), oldest insertion dropped first.
+A sync line from the exact running placement clears its demotion and protects
+that placement between bursts; sync is a protocol hint, not an identity proof.
+
 **Busy channels get the decoders.** Paging (POCSAG/FLEX) and digital-voice (DMR and similar) decoders can only run on a few channels of a band at once. The scanner ranks every channel those decoders could use by recent activity, and the decoder planner puts its spare channel slots on the busiest ones instead of only the ones nearest the tuned centre:
 
 - a channel with signal energy in the latest spectrum block (no older than 1 s) always ranks first; an overloaded block shows no energy, and 10 s of overloaded blocks count as no fresh spectrum;
@@ -708,11 +731,13 @@ the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
 
 DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
-both target and source. Two checked control bursts with the same channel, CC
-and slot confirm at least 2 seconds and at most 5 minutes apart, even when their
-printed content is identical. Closer repeats count once and retain the first
-burst's time for the separation check. Checked bursts on different BS slots can
-also pair. Unchecked sync or CC-only hints never confirm. Voice link control
+both target and source. Pairing is by CC on the same channel across slots:
+any checked burst type except voice LC carrying both TG/SRC can confirm at
+least 2 seconds and at most 5 minutes apart, even with identical printed content.
+These bursts may come from one keying (hang time or VLC + TLC); the spacing is
+accepted for identification and does not prove independent transmissions.
+Closer repeats count once and retain the first burst's time for the separation
+check. Unchecked sync or CC-only hints never confirm. Voice LC with both TG/SRC
 still requires distinct link content and uses the latest CC from its own BS
 slot, or from the single MS channel, in its current burst sequence. Unknown CC,
 sync loss, protocol changes and sequence timeout clear that association. Header and voice-LC

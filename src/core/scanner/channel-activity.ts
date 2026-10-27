@@ -375,6 +375,19 @@ function interestKey(q: ActivityQuery): string {
 	].join("|")
 }
 
+const DIGITAL_VOICE_PROTOCOLS = new Set([
+	"dmr",
+	"p25",
+	"p25p1",
+	"p25p2",
+	"nxdn",
+	"nxdn48",
+	"nxdn96",
+	"ysf",
+	"dpmr",
+	"dstar",
+])
+
 const STATE_RANK: Record<ActivityState, number> = { hot: 0, warm: 1, cold: 2 }
 
 interface Evaluated {
@@ -512,6 +525,7 @@ export function createChannelActivityRanker(
 		const trackSum = new Array<number>(n).fill(0)
 		const lastTrack = new Array<number | null>(n).fill(null)
 		const lastDecode = new Array<number | null>(n).fill(null)
+		const nonVoiceDecode = new Array<number | null>(n).fill(null)
 		const lastSuccess = new Array<number | null>(n).fill(null)
 		const lastFailure = new Array<number | null>(n).fill(null)
 		const duty = new Array<number>(n).fill(0)
@@ -544,6 +558,32 @@ export function createChannelActivityRanker(
 				const i = at(p.hz)
 				if (i !== -1) into[i] = later(into[i]!, p.at)
 			}
+		}
+		// Reuse the decode hot window (15 minutes), including pulled history. Unknown
+		// protocols are conservatively non-voice; no scanner state leaks into the planner.
+		if (q.decoderType === "dsd-fme") {
+			for (const list of [s.decodes.values(), s.history.decodes])
+				for (const p of list) {
+					if (DIGITAL_VOICE_PROTOCOLS.has(p.protocol.toLowerCase())) continue
+					// Positive credit requires one unambiguous candidate. Exclusion is
+					// conservative: every passband overlapping this decode is ineligible,
+					// including both candidates exactly half a channel width away.
+					let lo = 0
+					let hi = sorted.length
+					while (lo < hi) {
+						const mid = (lo + hi) >> 1
+						if (sorted[mid]! < p.hz - raster / 2) lo = mid + 1
+						else hi = mid
+					}
+					for (
+						let k = lo;
+						k < sorted.length && sorted[k]! <= p.hz + raster / 2;
+						k++
+					) {
+						const i = order[k]!.i
+						nonVoiceDecode[i] = later(nonVoiceDecode[i]!, p.at)
+					}
+				}
 		}
 		points(s.decodes.values(), lastDecode)
 		points(s.history.decodes, lastDecode)
@@ -630,8 +670,13 @@ export function createChannelActivityRanker(
 			deadline(ok, ACTIVITY_DECODE_HOT_MS)
 			deadline(ok, ACTIVITY_DECODE_WARM_MS)
 			deadline(bad, ACTIVITY_REPLAY_BACKOFF_MS)
+			const otherDecode = nonVoiceDecode[i]!
+			deadline(otherDecode, ACTIVITY_DECODE_HOT_MS)
+			const excluded =
+				otherDecode !== null && now - otherDecode < ACTIVITY_DECODE_HOT_MS
 			const memo = memos?.get(hz)
 			channels.push({
+				...(q.decoderType === "dsd-fme" ? { excluded } : {}),
 				hz,
 				score,
 				state,
@@ -651,7 +696,7 @@ export function createChannelActivityRanker(
 
 	const orderOf = (q: ActivityQuery, channels: readonly ChannelActivity[]) =>
 		channels
-			.map(c => c)
+			.filter(c => c.excluded !== true)
 			.sort(
 				(a, b) =>
 					Number(b.live) - Number(a.live) ||
