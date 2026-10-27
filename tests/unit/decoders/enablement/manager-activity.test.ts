@@ -190,6 +190,7 @@ function setup(withActivity = true) {
 			.map(p => p.channelHz)
 	return {
 		m,
+		port,
 		hooks,
 		heat,
 		batches,
@@ -350,4 +351,35 @@ it("a slow pass never queues a backlog: notices while it waits run at most one m
 	f.notify()
 	await f.advance(250)
 	expect(f.batches.length).toBe(idle + 1)
+})
+
+// Observed-channel boundary: reject the whole malformed result, never partially admit it.
+it.each([
+	Array.from({ length: 1 }),
+	{},
+	null,
+	[NaN],
+	[Infinity],
+	[0],
+	[-1],
+	[1.5],
+	["1"],
+	Array.from({ length: 513 }, () => 1),
+])("ignores malformed observed channels: %j", async value => {
+	const f = setup()
+	f.port.observedChannels = () => value as unknown as readonly number[]
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([])
+	expect(f.runningHz().length).toBeGreaterThan(0)
+})
+it("accepts exactly 512 finite positive integer observed channels", async () => {
+	const f = setup()
+	const channelsHz = Array.from({ length: 512 }, (_, i) => i + 1)
+	f.port.observedChannels = () => channelsHz
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([
+		{ epoch: EPOCH, channelsHz },
+	])
 })

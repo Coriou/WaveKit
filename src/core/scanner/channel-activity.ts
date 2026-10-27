@@ -55,7 +55,10 @@
  * candidates) and candidates per query. Nothing is logged with frequencies, ids or protocols.
  */
 import { z } from "zod"
-import { ACTIVITY_MAX_CANDIDATES } from "../../decoders/enablement/activity-contract.js"
+import {
+	ACTIVITY_MAX_CANDIDATES,
+	quantiseObservedCentre,
+} from "../../decoders/enablement/activity-contract.js"
 import type {
 	ActivityChange,
 	ActivityEpoch,
@@ -107,7 +110,7 @@ export const ACTIVITY_MAX_TRACKS = 256
 export const ACTIVITY_MAX_NOTES = 256
 /** Pulled history items per source and kind (decodes, trials, occupancy); the rest is cut. */
 export const ACTIVITY_MAX_HISTORY = 512
-/** Interests (epoch × decoder × candidates) remembered for change notices, least recent dropped. */
+/** Interests (one current candidate set per epoch × decoder) remembered for change notices, least recent dropped. */
 export const ACTIVITY_MAX_INTERESTS = 128
 export { ACTIVITY_MAX_CANDIDATES } from "../../decoders/enablement/activity-contract.js"
 
@@ -229,6 +232,7 @@ interface SourceState {
 	lastFrameMono: number | null
 	lastBlockMono: number | null
 	revision: number
+	observedKey: string
 	segments: Map<string, Segment>
 	liveKeys: Set<string>
 	/** The previous block's live set, cleared and refilled by the next block (no per-block Set). */
@@ -395,6 +399,7 @@ export function createChannelActivityRanker(
 			lastFrameMono: null,
 			lastBlockMono: null,
 			revision: 0,
+			observedKey: "",
 			segments: new Map(),
 			liveKeys: new Set(),
 			spareKeys: new Set(),
@@ -755,6 +760,7 @@ export function createChannelActivityRanker(
 		s.lastFrameMono = null
 		s.lastBlockMono = null
 		s.segments.clear()
+		s.observedKey = ""
 		s.liveKeys = new Set()
 		s.tracks.clear()
 		dropInterests(sourceId, s.epoch)
@@ -845,6 +851,14 @@ export function createChannelActivityRanker(
 						interests.delete(key)
 						interests.set(key, known)
 					} else {
+						// A decoder has one current candidate set per source epoch. Retire
+						// superseded lists instead of re-evaluating obsolete FFT centres.
+						for (const [oldKey, old] of interests)
+							if (
+								sameEpoch(old.query.epoch, q.epoch) &&
+								old.query.decoderId === q.decoderId
+							)
+								interests.delete(oldKey)
 						const it: Interest = {
 							query: q,
 							sourceId: q.epoch.sourceId,
@@ -940,7 +954,18 @@ export function createChannelActivityRanker(
 			s.liveKeys = liveKeys
 			// New energy may be outside every existing query (including no queries).
 			// Notify so the manager can derive a new candidate set before ranking it.
-			if (edge) markDirty(sourceId, true)
+			const observedKey = [
+				...new Set(
+					[...s.segments.values()]
+						.filter(seg => now < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
+						.map(seg => quantiseObservedCentre(seg.centreHz)),
+				),
+			]
+				.sort((a, b) => a - b)
+				.join(",")
+			const observedChanged = observedKey !== s.observedKey
+			s.observedKey = observedKey
+			if (edge || observedChanged) markDirty(sourceId, observedChanged)
 		},
 		ingestTrack(sourceId, engineId, track) {
 			if (disposed) return
@@ -965,6 +990,7 @@ export function createChannelActivityRanker(
 			s.lastFrameMono = null
 			s.lastBlockMono = null
 			s.segments.clear()
+			s.observedKey = ""
 			s.liveKeys = new Set()
 			s.tracks.clear()
 			dropInterests(sourceId)

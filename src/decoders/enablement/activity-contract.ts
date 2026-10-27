@@ -84,3 +84,14 @@ export interface ChannelActivityPort {
  * `unavailable`, still one channel per candidate.
  */
 export const ACTIVITY_MAX_CANDIDATES = 1_024
+
+/** Observed centres: at most 512 = one scanner block's maximum track count. */
+export const ACTIVITY_MAX_OBSERVED = 512
+
+/**
+ * Nearest 6 250 Hz raster: round(hz / 6 250) × 6 250, ties upward.
+ * Maximum rounding error is 3 125 Hz, one quarter of a 12.5 kHz voice channel.
+ */
+export function quantiseObservedCentre(hz: number): number {
+	return Math.round(hz / 6_250) * 6_250
+}

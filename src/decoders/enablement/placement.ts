@@ -20,7 +20,10 @@ import {
 	READSB_REACH_HZ,
 } from "../../core/rate-policy-contract.js"
 import { rasterChannelsBetween } from "./paging-plan.js"
-import { ACTIVITY_MAX_CANDIDATES } from "./activity-contract.js"
+import {
+	ACTIVITY_MAX_CANDIDATES,
+	quantiseObservedCentre,
+} from "./activity-contract.js"
 import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
 import {
 	ACTIVITY_MAX_SLOTS,
@@ -804,6 +807,7 @@ export const planPlacements: PlacementPlanner = input => {
 						addObserved(inc.hz)
 				const centres = (observed?.channelsHz ?? [])
 					.slice(0, ACTIVITY_MAX_CANDIDATES)
+					.map(quantiseObservedCentre)
 					.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b)
 				for (const hz of centres) addObserved(hz)
 			}

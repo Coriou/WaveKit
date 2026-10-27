@@ -19,6 +19,7 @@
 
 import type { EfficiencyBudgetService } from "./enablement/budget-settings.js"
 import { EventEmitter } from "node:events"
+import { z } from "zod"
 import {
 	PlacementLifecycle,
 	PLACEMENT_STOP_TIMEOUT_MS,
@@ -114,6 +115,7 @@ import type {
 	ActivityPendingStart,
 	PlannerActivity,
 } from "./enablement/activity-plan.js"
+import { ACTIVITY_MAX_OBSERVED } from "./enablement/activity-contract.js"
 import type { ActivitySnapshot } from "./enablement/activity-contract.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type {
@@ -556,6 +558,10 @@ function loraCentreReach(
 		passbandHz: Math.min(parsed.effectiveTargetRate, usable),
 	}
 }
+
+const ObservedChannelsSchema = z
+	.array(z.number().finite().int().positive())
+	.max(ACTIVITY_MAX_OBSERVED)
 
 /**
  * DecoderManager - Orchestrates decoder lifecycle and coordinates with other components.
@@ -1884,7 +1890,13 @@ export class DecoderManager extends EventEmitter {
 			observed: epochs.flatMap(epoch => {
 				try {
 					const channelsHz = activity.port.observedChannels?.(epoch, now)
-					return channelsHz ? [{ epoch, channelsHz }] : []
+					if (
+						!Array.isArray(channelsHz) ||
+						channelsHz.length > ACTIVITY_MAX_OBSERVED
+					)
+						return []
+					const parsed = ObservedChannelsSchema.safeParse(channelsHz)
+					return parsed.success ? [{ epoch, channelsHz: parsed.data }] : []
 				} catch {
 					return []
 				}

@@ -598,7 +598,9 @@ describe("HfdlDecoder", () => {
    decoder channels are configured, including channels absent from the protocol band plan.
    No protocol hint is required: energy selects a trial channel, and the existing checked
    decoder output rules still decide whether it is verified digital voice. Band, capture
-   reach and CPU admission still apply. Nearby FFT centre changes reuse the existing
+   reach and CPU admission still apply. Observed centres use round(Hz / 6250) × 6250 (ties upward), with at most
+   3125 Hz rounding error. The manager accepts at most 512 finite positive integer
+   centres per source epoch; a malformed result is treated as empty. Nearby FFT centre changes reuse the existing
    channel, and burst gaps keep its placement eligible for the usual dwell and move rules.
    Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune
    it with `decoderPolicy.efficiency.activity`: `slots` (`multimon-ng`, `dsd-fme`, 0 to 32),

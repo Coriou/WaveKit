@@ -1,3 +1,5 @@
+import { loadavg } from "node:os"
+import { createChannelActivityRanker } from "../../../../src/core/scanner/channel-activity.js"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import type {
@@ -289,7 +291,7 @@ describe("activity ranking: slots and order", () => {
 	})
 
 	it("places dsd-fme on observed activity absent from the protocol band plan", () => {
-		const far = 466_036_250
+		const far = 466_037_500
 		const input = base([dsd()], [source()], {
 			vfo: { sourceId: "s", frequencyHz: CENTRE },
 			bandplanChannels: () => [],
@@ -312,7 +314,7 @@ describe("activity ranking: slots and order", () => {
 	})
 
 	it("filters observed centres by epoch, band, reach, explicit channels and budget", () => {
-		const far = 466_036_250
+		const far = 466_037_500
 		const input = base(
 			[
 				dsd({
@@ -368,15 +370,15 @@ describe("activity ranking: slots and order", () => {
 
 	it("deduplicates observed centres at half the passband but retains channels beyond it", () => {
 		const input = base([dsd()], [source()], {
-			vfo: { sourceId: "s", frequencyHz: CENTRE },
+			vfo: { sourceId: "s", frequencyHz: 466_100_000 },
 		})
-		for (const offset of [6_250, 6_251, 12_500]) {
+		for (const offset of [6_250, 9_374, 9_375, 9_376, 12_500]) {
 			const act = {
 				...activity(),
-				observed: [{ epoch: EPOCH, channelsHz: [CENTRE + offset] }],
+				observed: [{ epoch: EPOCH, channelsHz: [466_100_000 + offset] }],
 			}
 			expect(channels(planWith(input, act), "dsd")).toHaveLength(
-				offset === 6_250 ? 1 : 2,
+				offset < 9_375 ? 1 : 2,
 			)
 		}
 	})
@@ -569,7 +571,7 @@ function simulate(
 
 describe("activity ranking: bounded moves", () => {
 	it("dsd-fme observed slots respect dwell and move limits, keep live channels and survive ranking outages", () => {
-		const far = 466_036_250
+		const far = 466_037_500
 		const a = 466_125_000
 		const b = 466_075_000
 		const input = base([dsd()], [source()], {
@@ -770,4 +772,105 @@ describe("activity ranking: bounded moves", () => {
 			{ numRuns: 120 },
 		)
 	})
+})
+
+it("keeps 60 jittering observed candidates, interests and placements stable with a toggling track", () => {
+	let now = 0
+	let timerId = 0
+	const pending = new Map<number, { at: number; fn: () => void }>()
+	const ranker = createChannelActivityRanker({
+		monoNow: () => now,
+		timers: {
+			setTimeout: (fn, ms) => {
+				const id = ++timerId
+				pending.set(id, { at: now + ms, fn })
+				return id
+			},
+			clearTimeout: id => {
+				pending.delete(id as number)
+			},
+		},
+	})
+	const epoch = EPOCH
+	const input = base(
+		[dsd()],
+		[source({ centreHz: 466_500_000, sampleRateHz: 2_400_000 })],
+		{
+			vfo: { sourceId: "s", frequencyHz: 466_500_000 },
+		},
+	)
+	const centres = Array.from({ length: 60 }, (_, i) => 466_125_000 + i * 12_500)
+	let candidates: readonly number[] | undefined
+	let wanted: readonly string[] | undefined
+	let stable = true
+	let maxInterests = 0
+	let incumbents: ActivityIncumbent[] = []
+	ranker.ingestEpoch("s", "e", 1)
+	const started = performance.now()
+	const passes = 160
+	for (let pass = 0; pass < passes; pass++) {
+		now += 317.3
+		const tracks = centres.map((hz, i) => ({
+			trackId: `t${i}`,
+			startHz: hz + pass - 3_000,
+			endHz: hz + pass + 3_000,
+			flags: { iqImage: false },
+			gate: "passed" as const,
+		}))
+		// Toggle a second id at the same centre: live edges without a new observed set.
+		if (pass % 2) tracks.push({ ...tracks[0]!, trackId: "toggle" })
+		ranker.ingestBlock("s", "e", {
+			epoch: 1,
+			centreHz: 466_500_000,
+			sampleRateHz: 2_400_000,
+			overload: false,
+			tracks,
+		})
+		for (const [id, timer] of [...pending])
+			if (timer.at <= now) {
+				pending.delete(id)
+				timer.fn()
+			}
+		const act = activity({
+			nowMonoMs: now,
+			incumbents,
+			observed: [
+				{ epoch, channelsHz: ranker.port.observedChannels!(epoch, now) },
+			],
+		})
+		const queries = activityQueries({ ...input, activity: act })
+		const snapshot = ranker.port.snapshot(queries, now)
+		const plan = planPlacements({
+			...input,
+			activity: { ...act, snapshots: snapshot },
+		})
+		const nextCandidates = queries[0]!.candidatesHz
+		const nextWanted = plan.wanted.map(p => p.key)
+		if (
+			pass > 1 &&
+			(JSON.stringify(nextCandidates) !== JSON.stringify(candidates) ||
+				JSON.stringify(nextWanted) !== JSON.stringify(wanted) ||
+				plan.activity!.moves.length > 0)
+		)
+			stable = false
+		candidates = nextCandidates
+		wanted = nextWanted
+		incumbents = plan.wanted.map(p => ({
+			key: p.key,
+			decoderId: p.decoderId,
+			sourceId: p.sourceId,
+			hz: p.channelHz!,
+			primary: p.primary,
+			dwellSinceMonoMs: 0,
+		}))
+		maxInterests = Math.max(maxInterests, ranker.sizes().interests)
+	}
+	const msPerPass = (performance.now() - started) / passes
+	if (process.env["WAVEKIT_JITTER_BENCH"] === "1")
+		process.stdout.write(
+			`${JSON.stringify({ msPerPass, passes, maxInterests, stable, loadavg: loadavg() })}\n`,
+		)
+	ranker.dispose()
+	expect(stable).toBe(true)
+	expect(maxInterests).toBe(1)
 })

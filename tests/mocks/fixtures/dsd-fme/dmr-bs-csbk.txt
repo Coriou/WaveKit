@@ -1,6 +1,0 @@
-# Synthetic dsd-fme base-station stderr using dmr_bs.c / dmr_dburst.c print formats.
-# Milliseconds are intentionally not aligned to IQ sample blocks.
-3.7	21:49:48 Sync: +DMR  [slot1]  slot2  | Color Code=03 | CSBK
-61.3	21:49:48 Sync: +DMR   slot1  [slot2] | Color Code=10 | IDLE
-141.4	21:49:48 Sync: +DMR   slot1  [slot2] | Color Code=03 | CSBK
-199.0	21:49:48 Sync: +DMR  [slot1]  slot2  | Color Code=10 | IDLE

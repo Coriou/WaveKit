@@ -5,7 +5,10 @@ The scanner finds and characterises RF activity on a source, confirms it with a 
 Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-design.md). Endpoint and message reference: [API.md, Scanner and Spectrum](API.md#scanner). Component view: [ARCHITECTURE.md, Scanner](ARCHITECTURE.md#scanner).
 
 While watching a source, the scanner supplies its current-epoch, gated energy centres
-as extra dsd-fme activity candidates. This allows digital voice on an unlisted channel
+as extra dsd-fme activity candidates. Centres are rounded to the nearest 6.25 kHz
+raster (ties upward, at most 3.125 kHz error). A raster crossing emits a coalesced
+notice even when the track id stays the same; jitter within a raster cell does not
+force a planner pass. Only the current candidate set per epoch and decoder is retained. This allows digital voice on an unlisted channel
 to receive a decoder without a protocol hint or VFO selection. Suggestions remain
 subject to decoder band, passband fit, source ownership and CPU limits; energy alone
 does not verify a protocol. Checked dsd-fme output must pass the existing verification

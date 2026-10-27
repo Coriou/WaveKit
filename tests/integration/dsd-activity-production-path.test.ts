@@ -15,9 +15,10 @@ import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 const MARKER = Buffer.from("BURST-ON-CHANNEL")
-// Sanitized source-format stderr, including the closing burst needed for verification.
-const CSBK = readFileSync(
-	new URL("../mocks/fixtures/dsd-fme/dmr-bs-csbk.txt", import.meta.url),
+// Reuse the MS/direct-mode print formats exercised by the parser verification tests.
+// This existing fixture is source-format synthesis, not a captured stderr recording.
+const VOICE = readFileSync(
+	new URL("../mocks/fixtures/dsd-fme/dmr-ms-two-ptt.txt", import.meta.url),
 	"utf8",
 )
 	.split("\n")
@@ -26,6 +27,8 @@ const CSBK = readFileSync(
 		at: Number(row.split("\t")[0]),
 		line: row.slice(row.indexOf("\t") + 1),
 	}))
+
+let replayRows = VOICE.slice(0, 5)
 
 class FakeChild extends EventEmitter {
 	readonly stdin = new PassThrough()
@@ -39,7 +42,7 @@ class FakeChild extends EventEmitter {
 		super()
 		this.stdin.on("data", (chunk: Buffer) => {
 			if (chunk.includes(MARKER)) {
-				for (const row of CSBK)
+				for (const row of replayRows)
 					setTimeout(() => this.stderr.write(`${row.line}\n`), row.at)
 			}
 		})
@@ -316,76 +319,110 @@ function feed4fsk(fanout: InstanceType<typeof FakeFanout>) {
 }
 
 describe("dsd-fme activity through production wiring", () => {
-	it("places an unlisted far 4FSK channel and verifies checked CSBK through placement trust", async () => {
-		vi.useFakeTimers({
-			toFake: [
-				"Date",
-				"performance",
-				"setTimeout",
-				"clearTimeout",
-				"setInterval",
-				"clearInterval",
-			],
-		})
-		vi.setSystemTime(Date.parse("2026-10-23T12:00:00.123Z"))
-		const f = build()
-		await f.scanner.start()
-		await f.scanner.createJob({
-			sourceId: "rtl",
-			mode: "in-window",
-			ranges: [{ startHz: 466_025_000, endHz: 466_230_000 }],
-		})
-		void f.manager.createDecoder({
-			id: "voice",
-			type: "dsd-fme",
-			enabled: true,
-			options: {},
-			useChannelizer: true,
-		})
-		await f.manager.startAll()
-		feedTones(f.fanout, 0.25, [])
-		await vi.advanceTimersByTimeAsync(317.3)
-		expect(f.runningHz()).toEqual([CENTRE])
-		// Clock increments deliberately differ from the 50 ms IQ integration.
-		for (let i = 0; i < 4; i++) {
-			feed4fsk(f.fanout)
+	it.each(["checked voice", "error tail", "unchecked CSBK"])(
+		"places an unlisted far 4FSK channel with %s through placement trust",
+		async kind => {
+			replayRows =
+				kind === "checked voice"
+					? VOICE.slice(0, 5)
+					: [
+							{
+								at: 3.7,
+								line: `21:49:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | CSBK${kind === "unchecked CSBK" ? " -RAS " : ""}`,
+							},
+							...(kind === "error tail"
+								? [
+										{ at: 31.3, line: " (CRC ERR)" },
+										{
+											at: 61.3,
+											line: "21:49:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | IDLE",
+										},
+									]
+								: []),
+						]
+			vi.useFakeTimers({
+				toFake: [
+					"Date",
+					"performance",
+					"setTimeout",
+					"clearTimeout",
+					"setInterval",
+					"clearInterval",
+				],
+			})
+			vi.setSystemTime(Date.parse("2026-10-23T12:00:00.123Z"))
+			const f = build()
+			await f.scanner.start()
+			await f.scanner.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				ranges: [{ startHz: 466_025_000, endHz: 466_230_000 }],
+			})
+			void f.manager.createDecoder({
+				id: "voice",
+				type: "dsd-fme",
+				enabled: true,
+				options: {},
+				useChannelizer: true,
+			})
+			await f.manager.startAll()
+			feedTones(f.fanout, 0.25, [])
 			await vi.advanceTimersByTimeAsync(317.3)
-		}
-		const placement = f.manager
-			.getStatus("voice")
-			?.placements?.find(p => p.origin === "activity" && p.running)
-		expect(placement).toBeDefined()
-		expect(Math.abs(placement!.channelHz! - FAR)).toBeLessThan(2_000)
-		const hz = placement!.channelHz!
-		f.burstOn(hz)
-		await vi.advanceTimersByTimeAsync(491.7)
-		// Scanner acceptance requires a second checked identity at least 2 s later.
-		for (let i = 0; i < 7; i++) {
-			feed4fsk(f.fanout)
-			await vi.advanceTimersByTimeAsync(317.3)
-		}
-		f.burstOn(hz)
-		await vi.advanceTimersByTimeAsync(491.7)
-		expect(f.links.some(l => l.verified && l.cc === 3)).toBe(true)
-		const found = f.scanner
-			.listDiscoveries({} as never)
-			.items.find(
-				d =>
-					Math.abs(d.frequencyHz - FAR) < 2_000 && d.confidence === "decoded",
+			expect(f.runningHz()).toEqual([CENTRE])
+			// Clock increments deliberately differ from the 50 ms IQ integration.
+			for (let i = 0; i < 4; i++) {
+				feed4fsk(f.fanout)
+				await vi.advanceTimersByTimeAsync(317.3)
+			}
+			const placement = f.manager
+				.getStatus("voice")
+				?.placements?.find(p => p.origin === "activity" && p.running)
+			expect(placement).toBeDefined()
+			expect(Math.abs(placement!.channelHz! - FAR)).toBeLessThan(2_000)
+			const hz = placement!.channelHz!
+			f.burstOn(hz)
+			await vi.advanceTimersByTimeAsync(491.7)
+			// Scanner acceptance requires a second checked identity at least 2 s later.
+			for (let i = 0; i < 7; i++) {
+				feed4fsk(f.fanout)
+				await vi.advanceTimersByTimeAsync(317.3)
+			}
+			f.burstOn(hz)
+			await vi.advanceTimersByTimeAsync(491.7)
+			if (kind !== "checked voice") {
+				expect(f.links.length).toBeGreaterThan(0)
+				expect(f.links.every(l => !l.verified)).toBe(true)
+				expect(
+					f.scanner
+						.listDiscoveries({} as never)
+						.items.some(d => d.confidence === "decoded"),
+				).toBe(false)
+				return
+			}
+			expect(f.links.some(l => l.verified && l.cc === 1 && l.voiceLc)).toBe(
+				true,
 			)
-		expect(found).toBeDefined()
-		expect(found!.protocol).toBe("dmr")
-		expect(found!.tuningTrust).toBe("commanded")
-		expect(found!.proof).toMatchObject({
-			kind: "decoded",
-			protocol: "dmr",
-			identity: { kind: "dmr-cc", value: "3" },
-		})
-		const before = f.runningHz()
-		for (let i = 0; i < 5; i++) {
-			feed4fsk(f.fanout)
-			await vi.advanceTimersByTimeAsync(317.3)
-		}
-		expect(f.runningHz()).toEqual(before)
-	}, 30_000)
+			const found = f.scanner
+				.listDiscoveries({} as never)
+				.items.find(
+					d =>
+						Math.abs(d.frequencyHz - FAR) < 2_000 && d.confidence === "decoded",
+				)
+			expect(found).toBeDefined()
+			expect(found!.protocol).toBe("dmr")
+			expect(found!.tuningTrust).toBe("commanded")
+			expect(found!.proof).toMatchObject({
+				kind: "decoded",
+				protocol: "dmr",
+				identity: { kind: "dmr-cc", value: "1" },
+			})
+			const before = f.runningHz()
+			for (let i = 0; i < 5; i++) {
+				feed4fsk(f.fanout)
+				await vi.advanceTimersByTimeAsync(317.3)
+			}
+			expect(f.runningHz()).toEqual(before)
+		},
+		30_000,
+	)
 })

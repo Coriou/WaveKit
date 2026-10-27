@@ -692,3 +692,59 @@ describe("review regressions", () => {
 		).toBe(false)
 	})
 })
+
+it("notifies coalesced raster crossings of a drifting track with the same id", () => {
+	const { clock, ranker, changes } = setup()
+	const feed = (offset: number) =>
+		ranker.ingestBlock(
+			"rtl",
+			"e1",
+			block([], {
+				tracks: [
+					{
+						startHz: CENTRE + offset - 100,
+						endHz: CENTRE + offset + 100,
+						trackId: "drift",
+						flags: { iqImage: false },
+						gate: "passed",
+					},
+				],
+			}),
+		)
+	ranker.ingestEpoch("rtl", "e1", 1)
+	feed(0)
+	clock.advance(250)
+	const before = changes.length
+	for (let hz = 100; hz <= 3_100; hz += 100) {
+		feed(hz)
+		clock.advance(10)
+	}
+	expect(changes).toHaveLength(before)
+	feed(3_124)
+	clock.advance(250)
+	expect(changes).toHaveLength(before)
+	feed(3_125) // round upward at exactly half the 6 250 Hz raster
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 1)
+	feed(3_126)
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 1)
+	for (let hz = 3_200; hz <= 12_000; hz += 100) {
+		feed(hz)
+		clock.advance(10)
+	}
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 2)
+	ranker.dispose()
+})
+
+it("replaces superseded candidate interests within an epoch and decoder", () => {
+	const { clock, ranker } = setup()
+	ranker.ingestEpoch("rtl", "e1", 1)
+	ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+	for (let i = 0; i <= ACTIVITY_MAX_INTERESTS; i++) {
+		one(ranker, query({ candidatesHz: [CENTRE + i] }), clock.now())
+		expect(ranker.sizes().interests).toBe(1)
+	}
+	ranker.dispose()
+})
