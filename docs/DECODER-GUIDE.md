@@ -695,3 +695,11 @@ and two-message guard do not establish those upstream guarantees.
 See [scanner ambient identification](SCANNER.md#identification-from-running-decoders) for tuning
 trust: readsb's protocol declaration supplies 1090 MHz when raw placements have
 no explicit target, but only observed tuning that covers it establishes trust.
+
+IQ replay uses a separate offline clock for single-channel VDL2: the capture tool
+resamples to 105 kHz and converts to unsigned 8-bit IQ before dumpvdl2 reads
+`--iq-file - --sample-format U8 --oversample 1`. The 25 kHz channel fits a 48 kHz
+capture. For 125 kHz LoRa, capture uses 192 kHz with a wider passband and replay
+resamples to 250 kHz U8, matching the Python wrapper’s two samples per chip.
+Automatic scanner trials also need probe-pool decoder admission and confirmation;
+see [scanner replay](SCANNER.md#iq-capture-on-detection).

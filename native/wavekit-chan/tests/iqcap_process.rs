@@ -475,6 +475,47 @@ fn replay_checks_files_and_keeps_length() {
     assert_eq!(o.status.code(), Some(2));
 }
 
+#[test]
+fn replay_exact_decoder_clocks_emit_u8_pairs() {
+    let d = TempDir::new();
+    let file = d.0.join("decoder.cf32");
+    for (rate, out_rate, bandwidth, transition) in [
+        (48_000u64, 105_000u64, 25_000, 5_000),
+        (192_000, 250_000, 125_000, 12_500),
+    ] {
+        // One sample beyond an integral duration exercises the rational ceiling.
+        let n = rate / 100 + 1;
+        let sample = [0.25f32.to_le_bytes(), (-0.25f32).to_le_bytes()].concat();
+        std::fs::write(&file, sample.repeat(n as usize)).unwrap();
+        let output = Command::new(BIN)
+            .arg("replay")
+            .arg("--in")
+            .arg(&file)
+            .args([
+                "--rate",
+                &rate.to_string(),
+                "--out-rate",
+                &out_rate.to_string(),
+                "--bandwidth",
+                &bandwidth.to_string(),
+                "--transition",
+                &transition.to_string(),
+                "--format",
+                "cu8",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout.len() as u64,
+            (n * out_rate).div_ceil(rate) * 2
+        );
+        let tail = &output.stdout[output.stdout.len() - 2..];
+        assert!(tail[0].abs_diff(159) <= 1);
+        assert!(tail[1].abs_diff(96) <= 1);
+    }
+}
+
 /// Safety: the out-dir is renamed away and replaced by a symlink to a foreign directory
 /// holding a sentinel `<id>.cf32.tmp` (and `<id>.cf32` slot). The tool must never remove, rename
 /// or link through the swapped path: the sentinel stays intact.

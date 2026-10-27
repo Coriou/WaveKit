@@ -698,3 +698,12 @@ Targets and tags are defined in `docker/bake.hcl`; see [Docker setup](DOCKER-SET
 
 - Sample decoder output for parsing tests
 - Located in `tests/mocks/fixtures/`
+
+The offline IQ replay tool reuses the native rational polyphase FIR for decoder
+clocks: 48/96/192 kHz captures can become exactly 105 kHz for VDL2, and a 192 kHz
+capture can become 250 kHz for 125 kHz LoRa. Replay can emit U8 directly for these
+decoders; audio consumers retain cf32. The output length is exactly
+`ceil(inputSamples * outputRate / inputRate)`, without a filter tail. Capture at
+192 kHz scales the narrow passband by four, capped at 150 kHz (125 kHz plus two
+12.5 kHz guards), leaving a 42 kHz capture-filter transition. Its ready event must
+acknowledge this wider passband before the core requests that rate.

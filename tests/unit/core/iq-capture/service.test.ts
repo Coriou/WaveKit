@@ -149,7 +149,9 @@ async function setup(
 			}
 			queueMicrotask(() =>
 				child.event(
-					opts.rates ? { type: "ready", rates: opts.rates } : { type: "ready" },
+					opts.rates
+						? { type: "ready", rates: opts.rates, wideband: true }
+						: { type: "ready" },
 				),
 			)
 			const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
@@ -890,6 +892,84 @@ describe("IqCaptureService openReplay", () => {
 		const { s, id } = await ready()
 		expect(s.svc.openReplay(id, "rtl433")).toBeNull()
 		expect(s.svc.openReplay("nope", "dsd-fme")).toBeNull()
+		await s.svc.stop()
+	})
+
+	it.each([
+		{
+			decoder: "dumpvdl2" as const,
+			rate: 48_000 as const,
+			outRate: 105_000,
+			bw: 25_000,
+			tr: 5_000,
+		},
+		{
+			decoder: "lora-meshtastic" as const,
+			rate: 192_000 as const,
+			outRate: 250_000,
+			bw: 125_000,
+			tr: 12_500,
+		},
+	])(
+		"replays $decoder with exact U8 output and rejects an extra sample",
+		async ({ decoder, rate, outRate, bw, tr }) => {
+			const s = await setup(
+				{
+					shapes: {
+						...SHAPES,
+						// A wide enough default capture passband for the 125 kHz LoRa channel.
+						"multimon-ng": { bandwidthHz: 47_424, transitionHz: 288 },
+						[decoder]: { bandwidthHz: bw, transitionHz: tr },
+						rtl433: { bandwidthHz: 47_424, transitionHz: 288 },
+					},
+				},
+				{ samples: rate / 10, rates: [48_000, 96_000, 192_000] },
+			)
+			await running(s)
+			const got = s.svc.capture(req({ rateHz: rate }))
+			await flush(10)
+			const id = "captureId" in got ? got.captureId : ""
+			expect(s.svc.replayRateOf?.(id, decoder)).toBe(outRate)
+			const stream = s.svc.openReplay(id, decoder) as Readable
+			expect(stream).not.toBeNull()
+			expect(lastReplay(s).args.slice(-4)).toEqual([
+				"--out-rate",
+				String(outRate),
+				"--format",
+				"cu8",
+			])
+			const done = readAll(stream)
+			lastReplay(s).stdout.write(Buffer.alloc((outRate / 10) * 2))
+			lastReplay(s).exit(0)
+			expect(await done).toEqual({ bytes: (outRate / 10) * 2, error: null })
+			const over = readAll(s.svc.openReplay(id, decoder) as Readable)
+			lastReplay(s).stdout.write(Buffer.alloc((outRate / 10) * 2 + 2))
+			expect((await over).error).toBeInstanceOf(Error)
+			if (rate === 192_000) {
+				expect(s.svc.openReplay(id, "rtl433")).not.toBeNull()
+				expect(lastReplay(s).args.slice(3, 7)).toEqual([
+					"--bandwidth",
+					"150000",
+					"--transition",
+					"21000",
+				])
+			}
+			await s.svc.stop()
+		},
+	)
+
+	it("never replays narrow captures into LoRa", async () => {
+		const s = await setup({
+			shapes: {
+				...SHAPES,
+				"lora-meshtastic": { bandwidthHz: 125_000, transitionHz: 12_500 },
+			},
+		})
+		await running(s)
+		const got = s.svc.capture(req())
+		await flush(10)
+		const id = "captureId" in got ? got.captureId : ""
+		expect(s.svc.openReplay(id, "lora-meshtastic")).toBeNull()
 		await s.svc.stop()
 	})
 

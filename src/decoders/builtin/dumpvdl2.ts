@@ -1,3 +1,4 @@
+import { WaveKitError } from "../../utils/errors.js"
 /**
  * VDL2 Decoder - VDL Mode 2 data link decoder using dumpvdl2
  *
@@ -397,6 +398,13 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * dumpvdl2 --rtlsdr <device> [--gain <gain>] [--correction <ppm>] --output decoded:json:file:- <freq1> [freq2] ...
 	 */
 	protected getDecoderArgs(): string[] {
+		if (
+			this.options.followCenter &&
+			this.options.inputCenterFreq !== undefined &&
+			this.decoderRateHz() === 105_000 &&
+			!this.options.extraArgs?.length
+		)
+			return buildDumpvdl2ReplayArgs(this.options.inputCenterFreq)
 		const args: string[] = []
 
 		// Use stdin input (Requirement 25.4)
@@ -404,7 +412,10 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 		args.push("--sample-format", "U8")
 		const rate = this.decoderRateHz()
 		if (rate % 105000 !== 0)
-			throw new Error("VDL2 target rate must be a multiple of 105000")
+			throw new WaveKitError(
+				"VDL2 target rate must be a multiple of 105000",
+				"VDL2_RATE_INVALID",
+			)
 		args.push("--oversample", String(rate / 105000))
 		args.push(
 			"--centerfreq",
@@ -674,4 +685,28 @@ export const DUMPVDL2_CAPS: DecoderCaps = {
 	wantsExclusiveSource: false,
 	output: "jsonl",
 	integrationPattern: "pure_consumer",
+}
+
+/** One replay channel at DC, U8 at 105000 × oversample 1. The capture retains
+ * ±12.5 kHz of VDL2; its 48 kHz Nyquist edge leaves 11.5 kHz of guard. */
+export function buildDumpvdl2ReplayArgs(centerHz: number): string[] {
+	if (
+		!Number.isSafeInteger(centerHz) ||
+		centerHz < DUMPVDL2_BOUNDS.frequencyHz.min ||
+		centerHz > DUMPVDL2_BOUNDS.frequencyHz.max
+	)
+		throw new WaveKitError("Invalid VDL2 replay center", "VDL2_REPLAY_INVALID")
+	return [
+		"--iq-file",
+		"-",
+		"--sample-format",
+		"U8",
+		"--oversample",
+		"1",
+		"--centerfreq",
+		String(centerHz),
+		"--output",
+		"decoded:json:file:path=-",
+		String(centerHz),
+	]
 }

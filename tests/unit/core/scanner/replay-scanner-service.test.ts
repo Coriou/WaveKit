@@ -207,6 +207,8 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 				bandwidthHz: PROBE_CHANNEL_REQUESTS.direwolf.bandwidthHz,
 				transitionHz: PROBE_CHANNEL_REQUESTS.direwolf.transitionHz,
 			},
+			dumpvdl2: { bandwidthHz: 25_000, transitionHz: 5_000 },
+			"lora-meshtastic": { bandwidthHz: 125_000, transitionHz: 12_500 },
 			acarsdec: {
 				bandwidthHz: PROBE_CHANNEL_REQUESTS.acarsdec.bandwidthHz,
 				transitionHz: PROBE_CHANNEL_REQUESTS.acarsdec.transitionHz,

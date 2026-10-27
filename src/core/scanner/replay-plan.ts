@@ -418,3 +418,28 @@ export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
 
 /** Type check: the planner satisfies the frozen contract's port. */
 export const replayPlanner: IqReplayPlanner = planReplayTrials
+
+/** Replay-only mode descriptors. The probe pool must admit these decoder types and
+ * interpret their CRC-clean output before it can consume these descriptors. */
+export const IQ_REPLAY_WIDEBAND_MODES = Object.freeze({
+	vdl2: {
+		decoderType: "dumpvdl2",
+		protocol: "vdl2",
+		covers: ["vdl2"],
+		options: {},
+		holdMs: IQ_CAPTURE_MAX_MS,
+	},
+	lora: {
+		decoderType: "lora-meshtastic",
+		protocol: "lora",
+		covers: ["lora"],
+		// 125 kHz × 2 samples/chip = 250 kHz; 250 kHz presets do not fit 192 kHz captures.
+		options: { preset: "LongModerate", bandwidth: 125_000, oversampling: 2 },
+		holdMs: IQ_CAPTURE_MAX_MS,
+	},
+} satisfies Record<
+	"vdl2" | "lora",
+	Omit<ProbeMode, "decoderType"> & {
+		decoderType: "dumpvdl2" | "lora-meshtastic"
+	}
+>)

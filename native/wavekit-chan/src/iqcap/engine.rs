@@ -320,7 +320,11 @@ impl Engine {
         // a capture asking for it is refused `out-of-range`).
         let mut designs = vec![design];
         for &out in &CAPTURE_RATES[1..] {
-            if let Ok(d) = ChainDesign::with_output(cfg.sample_rate, out, cfg.bandwidth_hz) {
+            if let Ok(d) = ChainDesign::with_output(
+                cfg.sample_rate,
+                out,
+                super::dsp::capture_bandwidth(cfg.bandwidth_hz, out),
+            ) {
                 designs.push(d);
             }
         }
@@ -515,7 +519,7 @@ impl Engine {
             return Err("busy");
         }
         let fs = self.cfg.sample_rate as f64;
-        let limit = fs / 2.0 - self.cfg.bandwidth_hz / 2.0;
+        let limit = fs / 2.0 - super::dsp::capture_bandwidth(self.cfg.bandwidth_hz, rate_hz) / 2.0;
         if offset_hz.abs() > limit
             || !(1..=self.cfg.max_ms).contains(&max_ms)
             || from_sample < self.oldest()

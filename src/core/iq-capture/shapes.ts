@@ -35,5 +35,12 @@ export function probeReplayShapes(): IqReplayShapes {
 		bandwidthHz: PROBE_CHANNEL_REQUESTS.acarsdec.bandwidthHz,
 		transitionHz: PROBE_CHANNEL_REQUESTS.acarsdec.transitionHz,
 	}
-	return Object.freeze({ ...audio, ...(rtl433 ? { rtl433 } : {}), acarsdec })
+	return Object.freeze({
+		...audio,
+		...(rtl433 ? { rtl433 } : {}),
+		acarsdec,
+		dumpvdl2: { bandwidthHz: 25_000, transitionHz: 5_000 },
+		// 62.5 kHz pass edge + 12.5 kHz transition = 75 kHz < 96 kHz Nyquist.
+		["lora-meshtastic"]: { bandwidthHz: 125_000, transitionHz: 12_500 },
+	})
 }

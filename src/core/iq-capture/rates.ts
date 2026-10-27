@@ -99,3 +99,21 @@ function ookBurst(track: TrackSnapshot): boolean {
 		return false
 	}
 }
+
+/** 192 kHz captures hold 125 kHz LoRa: scale the 48 kHz passband by four,
+ * capped at 125000 + 2 × 12500 = 150000 Hz (one replay transition per side).
+ * This leaves a cheap 192000 − 150000 = 42000 Hz capture FIR transition.
+ * 96 kHz OOK captures retain their narrow passband. Unknown rates never widen it. */
+export function capturePassbandHz(bandwidthHz: number, rateHz: number): number {
+	return rateHz === 192_000 ? Math.min(bandwidthHz * 4, 150_000) : bandwidthHz
+}
+
+/** Exact decoder clocks: VDL2 105000 × 1; LoRa 125000 × 2 samples/chip. */
+export function replayRateHz(
+	decoder: string,
+	captureRate: IqCaptureRateHz,
+): number {
+	if (decoder === "dumpvdl2") return 105_000
+	if (decoder === "lora-meshtastic") return 250_000
+	return decoder === "rtl433" ? captureRate : IQ_CAPTURE_RATE_HZ
+}
