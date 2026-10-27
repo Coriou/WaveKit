@@ -1,3 +1,4 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 import * as fs from "node:fs"
 import * as fsp from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -55,11 +56,7 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import {
-	flushAsync,
-	linkLine,
-	poolHarness,
-} from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
 import { FakeMemory, FakePort } from "./identify-heard-fakes.js"
 
 const FINAL = new Set(["identified", "candidate", "unidentified"])
@@ -987,8 +984,8 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 				await h.advance(100)
 			expect(h.pool.decoders.created.size).toBeGreaterThan(0)
 			const id = [...h.pool.decoders.created.values()][0]?.id ?? ""
-			h.pool.decoders.emitLink(id, linkLine(1, h.pool.clock.now))
-			h.pool.decoders.emitLink(id, linkLine(1, h.pool.clock.now + 30))
+			h.pool.decoders.emitLink(id, verifiedLinkLine(1, h.pool.clock.now))
+			h.pool.decoders.emitLink(id, verifiedLinkLine(1, h.pool.clock.now + 30))
 			await flushAsync()
 			expect(h.trials().find(t => t.protocol === "dmr")?.outcome).toBe(
 				"decoded",

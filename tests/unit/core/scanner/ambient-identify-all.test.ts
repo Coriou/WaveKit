@@ -65,7 +65,7 @@ function rig(
 		logger: pino({ level: "silent" }),
 		now: () => clock.at,
 		sampleRateOf: () => 1_024_000,
-		centreOf: () => hz,
+		centreOf: () => hz - 50_000,
 		tuningTrustOf: tuningTrustOf ?? (() => trust.value),
 		confirm: {
 			memory: new ConfirmMemory(() => clock.at),
@@ -80,7 +80,7 @@ function rig(
 			decoders.emit(
 				"decoder:placed-link",
 				"synthetic",
-				{ ...(data as object), at: clock.at },
+				{ ...(data as object), verified: true, at: clock.at },
 				{ sourceId: "fake", channelHz: hz },
 			)
 		else
@@ -582,7 +582,7 @@ for (const sample of fixtures) {
 						h.decoders.emit(
 							"decoder:placed-link",
 							"synthetic",
-							{ ...data, at: clock.at },
+							{ ...data, verified: true, at: clock.at },
 							{ sourceId: "rtl", channelHz: sample.hz },
 						)
 					else
@@ -643,7 +643,7 @@ for (const sample of fixtures) {
 						h.decoders.emit(
 							"decoder:placed-link",
 							"synthetic",
-							{ ...data, at: clock.at },
+							{ ...data, verified: true, at: clock.at },
 							{ sourceId: "rtl", channelHz: sample.hz },
 						)
 					else

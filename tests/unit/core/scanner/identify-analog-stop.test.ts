@@ -1,10 +1,11 @@
+import { verifiedLinkLine } from "./verified-link-fake.js"
 /** WG11 req 1.2: analog evidence ends only the other live-audio trials; digital trials run to their own end. */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type { ScannerIdentifyTrial } from "@wavekit/api-types"
 import type { AmbientCoverageLike } from "../../../../src/core/scanner/identify.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
-import { flushAsync, linkLine } from "../../../mocks/scanner/probe-fakes.js"
+import { flushAsync } from "../../../mocks/scanner/probe-fakes.js"
 import { harness, tx } from "./identify-heard-fakes.js"
 
 const AIS: AmbientCoverageLike = {
@@ -60,8 +61,8 @@ describe("analog evidence does not stop digital trials (WG11 1.2)", () => {
 		h.engine.push(1_100_000)
 		await h.start(dmrTrack())
 		const id = [...h.decoders.created.values()][0]?.id ?? ""
-		h.decoders.emitLink(id, linkLine(1, h.clock.now))
-		h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+		h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+		h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 		await flushAsync()
 		await h.settle(500, 120)
 		const o = outcomes(h.last()!.trials)
@@ -103,8 +104,8 @@ describe("analog evidence does not stop digital trials (WG11 1.2)", () => {
 						await h.advance(c.decodeAfterMs)
 						const id = [...h.decoders.created.values()][0]?.id
 						if (id && !FINAL.includes(h.last()?.state ?? "")) {
-							h.decoders.emitLink(id, linkLine(1, h.clock.now))
-							h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
+							h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+							h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now + 30))
 							await flushAsync()
 							decoded =
 								h

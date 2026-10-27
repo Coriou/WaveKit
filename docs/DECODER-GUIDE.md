@@ -650,3 +650,17 @@ in both admission and the decoder manager. After late-drop shedding, retry histo
 resets only after a clean run of at least 30 minutes since readmission. A shed or
 probation failure before then doubles the delay from 5 to 10 to 20 minutes, capped
 at 30 minutes. After that sustained clean run, the next failure starts at 5 minutes.
+
+The dsd-fme scanner link event distinguishes `verified` content from sync-only
+fields. DMR color code from voice/IDLE sync is an unverified hint, not an
+identity. Only checked data bursts or checked target/source voice link control
+can participate in the scanner's two-match identity confirmation. CRC/FEC
+failures and `-RAS` output never count. MBCC has no own CRC
+(ed1d1d6 `dmr_dburst.c:115–119,627`), so it cannot verify a CC.
+MS voice LC does not borrow CC from a pending checked header: the opening CC
+precedes slot-type decoding (`dmr_ms.c:676–686`). Checked TG/SRC remain usable
+with CC unknown while that header awaits its closing-sync check.
+NXDN accepts only current CRC-checked ` RAN 03  FACCH2`/UDCH output
+(`nxdn_deperm.c:1390–1437`); failure omits RAN, and SACCH/CAC print cached RAN.
+Other protocols also require a known checked print format;
+unknown formats default to unverified. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).

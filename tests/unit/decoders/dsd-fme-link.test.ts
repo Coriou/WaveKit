@@ -189,22 +189,59 @@ describe("link events (spec § 6.4)", () => {
 		vi.useRealTimers()
 	})
 
-	it("emits one link per DMR link-control line, CRC-ERR lines flagged, unparsable CC skipped", () => {
+	it("defers DMR headers until burst completion and flags CRC errors", () => {
 		const { links } = replay(createDecoder(), keyUp(130).slice(0, 5), 200)
 		expect(links.map(({ at: _at, ...rest }) => rest)).toEqual([
-			{ protocol: "dmr", cc: 5, crcErr: false },
+			{ protocol: "dmr", crcErr: false, fecErrs: 1, verified: false },
+			{ protocol: "dmr", cc: 5, crcErr: false, verified: false },
 			{
 				protocol: "dmr",
 				tg: "11",
 				src: "10101393",
 				slot: 1,
 				crcErr: true,
+				verified: false,
 				encrypted: true,
 			},
-			{ protocol: "dmr", cc: 1, crcErr: false },
-			{ protocol: "dmr", tg: "9", src: "2060945", slot: 1, crcErr: false },
 		])
 		expect(links.every(l => l.at >= T0 && l.at <= T0 + 200)).toBe(true)
+		expect(links.some(l => l.voiceLc)).toBe(false)
+		const closed = replay(
+			createDecoder(),
+			[...keyUp(130).slice(0, 5), { atMs: 193.7, text: SYNC("01", "IDLE") }],
+			200,
+		)
+		expect(
+			closed.links.filter(l => l.voiceLc).map(({ at: _at, ...rest }) => rest),
+		).toEqual([
+			{
+				protocol: "dmr",
+				// The MS header is still pending, so checked LC has no CC yet.
+				tg: "9",
+				src: "2060945",
+				slot: 1,
+				crcErr: false,
+				verified: true,
+				voiceLc: true,
+			},
+		])
+	})
+
+	it("publishes call metadata while voice LC verification awaits the next sync", () => {
+		const { outputs, links } = replay(
+			createDecoder(),
+			[
+				{ atMs: 3.7, text: SYNC("05", "VLC") },
+				{ atMs: 31.3, text: " SLOT 1 TGT=9 SRC=123 Group Encrypted" },
+				{ atMs: 61.9, text: " Key: 0000000000000000 0000000000000000" },
+			],
+			510,
+		)
+		expect(links).toEqual([])
+		expect(starts(outputs)).toMatchObject([
+			{ talkgroup: 9, source: 123, encrypted: true },
+		])
+		expect(ends(outputs)).toEqual([])
 	})
 
 	it("normalises zero-padded DMR voice event ids", () => {
@@ -216,7 +253,7 @@ describe("link events (spec § 6.4)", () => {
 			],
 			50,
 		)
-		expect(links[1]).toMatchObject({
+		expect(links[0]).toMatchObject({
 			protocol: "dmr",
 			tg: "9001",
 			src: "1133",
@@ -239,9 +276,23 @@ describe("link events (spec § 6.4)", () => {
 			100,
 		)
 		expect(links.map(({ at: _at, ...rest }) => rest)).toEqual([
-			{ protocol: "p25", nac: "1B", tg: "56", src: "1234", crcErr: false },
-			{ protocol: "nxdn", ran: 50, tg: "7", src: "8", crcErr: false },
-			{ protocol: "dstar", callsign: "DL1ABC", crcErr: false },
+			{
+				protocol: "p25",
+				nac: "1B",
+				tg: "56",
+				src: "1234",
+				crcErr: false,
+				verified: false,
+			},
+			{
+				protocol: "nxdn",
+				ran: 50,
+				tg: "7",
+				src: "8",
+				crcErr: false,
+				verified: false,
+			},
+			{ protocol: "dstar", callsign: "DL1ABC", crcErr: false, verified: false },
 		])
 	})
 })

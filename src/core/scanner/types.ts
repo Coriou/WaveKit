@@ -176,6 +176,10 @@ export interface DiscoveryMetadataInput {
 }
 
 export interface DecodeEvidence {
+	/** dsd-fme content passed protocol CRC/FEC checks; absent on legacy evidence. */
+	contentVerified?: boolean
+	/** Most frequent sync-only CC; never an identity. */
+	unverifiedCc?: number
 	protocol: ScannerProtocol
 	identity?: Identity
 	metadata: Partial<DiscoveryMetadataInput>
@@ -243,6 +247,10 @@ export type ScannerProofKind =
 	| "carrier-only"
 export type ScannerProofTransport = "live" | "replay" | "ambient"
 export interface ScannerProof {
+	/** Checked DMR TG/SRC without an accepted CC identity; still weak. */
+	tgSrcVerified?: boolean
+	/** DMR-like sync hint only. */
+	unverifiedCc?: number
 	kind: ScannerProofKind
 	protocol: ScannerProtocol
 	transport: ScannerProofTransport
@@ -266,7 +274,7 @@ export interface ScannerProof {
 	encrypted: boolean
 	summary: string
 }
-/** WG12: `proven` is a discovery with a proof; `weak` is one without. */
+/** Proven evidence excludes unverified digital-voice sync hints, even when they carry a lower-class proof. */
 export type ScannerEvidenceLevel = "proven" | "weak"
 
 export type UndecodedReason =

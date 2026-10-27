@@ -11,6 +11,7 @@
  * monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one journal
  * entry whose payload holds the resulting records, so replay is an idempotent upsert.
  */
+import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -291,9 +292,17 @@ type Ingested = {
 }
 
 const METADATA_MAX = 64
-/** Scanner-redesign 3.10: a weak view publishes `UNKNOWN_LABEL`; only a proof names a label. */
+/** Weak records publish unknown, except an explicit, unverified digital-voice sync hint. */
+function syncOnlyProof(proof: ScannerProof | null): boolean {
+	return (
+		proof !== null &&
+		proof.kind === "digital-undecoded" &&
+		isDsdFmeProtocol(proof.protocol)
+	)
+}
 function publishedOf(view: DiscoveryProofView): EvidenceLabel {
-	return view.evidence === "proven" && view.proof !== null
+	return (view.evidence === "proven" || syncOnlyProof(view.proof)) &&
+		view.proof !== null
 		? view.label
 		: UNKNOWN_LABEL
 }
@@ -590,6 +599,14 @@ function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 			at: ev.at,
 			encrypted: ev.encrypted === true,
 		}
+		if (ev.unverifiedCc !== undefined) row.unverifiedCc = ev.unverifiedCc
+		if (
+			ev.protocol === "dmr" &&
+			ev.contentVerified === true &&
+			ev.metadata.talkgroups?.length &&
+			ev.metadata.sources?.length
+		)
+			row.tgSrcVerified = true
 		if (ev.identity !== undefined)
 			row.identity = { kind: ev.identity.kind, value: ev.identity.value }
 		const talkgroup = ev.metadata.talkgroups?.[0]
@@ -2525,8 +2542,13 @@ export class DiscoveryStore
 		try {
 			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
 			for (const d of s.discoveries) this.insertDiscovery(clone(d))
-			for (const o of [...s.observations].sort(compareObs))
-				if (this.discoveries.has(o.discoveryId)) this.putObservation(clone(o))
+			for (const o of [...s.observations].sort(compareObs)) {
+				if (!this.discoveries.has(o.discoveryId)) continue
+				const observation = clone(o)
+				this.downgradeLegacyObservation(observation)
+				this.putObservation(observation)
+			}
+			this.downgradeLegacyDiscoveries(this.discoveries.values())
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }
@@ -4780,7 +4802,7 @@ export class DiscoveryStore
 		const proof = this.deriveDiscovery(d)
 		const evidence = this.proofLevel(proof)
 		const label =
-			evidence === "proven" && proof !== null
+			(evidence === "proven" || syncOnlyProof(proof)) && proof !== null
 				? this.labelOfProof(d, proof)
 				: {
 						protocol: d.protocol,
@@ -4821,8 +4843,8 @@ export class DiscoveryStore
 				confidence = "candidate"
 				break
 			case "digital-undecoded":
-				protocol = "digital-unknown"
-				confidence = "candidate"
+				protocol = syncOnlyProof(proof) ? proof.protocol : "digital-unknown"
+				confidence = syncOnlyProof(proof) ? "activity" : "candidate"
 				break
 			case "carrier-only":
 				protocol = "carrier"
@@ -4841,7 +4863,7 @@ export class DiscoveryStore
 
 	/**
 	 * Scanner-redesign 3.10: the label every read and event path publishes. A weak record
-	 * publishes `UNKNOWN_LABEL` whatever it stores; its stored fields are not rewritten.
+	 * publishes unknown unless a digital-voice sync hint is shown; stored fields are not rewritten.
 	 */
 	private publishedLabel(d: Discovery): EvidenceLabel {
 		return publishedOf(this.discoveryView(d))
@@ -4850,7 +4872,10 @@ export class DiscoveryStore
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
 		const view = this.discoveryView(d)
-		if (view.evidence === "proven" && view.proof !== null) {
+		if (
+			(view.evidence === "proven" || syncOnlyProof(view.proof)) &&
+			view.proof !== null
+		) {
 			copy.proof = clone(view.proof)
 			copy.protocol = view.label.protocol
 			copy.family = view.label.family
@@ -5108,6 +5133,58 @@ export class DiscoveryStore
 		}
 	}
 
+	private downgradeLegacyObservation(observation: Observation): void {
+		// Old dsd-fme rows called sync-only CCs CRC-clean. Only explicit
+		// content provenance survives a restart as an identity proof.
+		if (observation.decode !== undefined)
+			observation.decode = observation.decode.map(ev => {
+				if (!isDsdFmeProtocol(ev.protocol) || ev.contentVerified === true)
+					return ev
+				const { identity, callId: _callId, encrypted: _encrypted, ...rest } = ev
+				const cc =
+					identity?.kind === "dmr-cc" &&
+					/^(?:[0-9]|1[0-5])$/.test(identity.value)
+						? Number(identity.value)
+						: ev.unverifiedCc
+				return {
+					...rest,
+					contentVerified: false,
+					metadata: {},
+					...(cc !== undefined ? { unverifiedCc: cc } : {}),
+				}
+			})
+	}
+
+	private downgradeLegacyDiscoveries(discoveries: Iterable<Discovery>): void {
+		for (const d of discoveries) {
+			if (!isDsdFmeProtocol(d.protocol) || d.identity === undefined) continue
+			// Checked proof can live on a linked co-channel observation as well.
+			const verified = this.proofSources(d).some(({ observation }) =>
+				observation.decode?.some(
+					ev =>
+						ev.contentVerified === true &&
+						ev.protocol === d.protocol &&
+						ev.crcClean === true &&
+						ev.identity !== undefined &&
+						identityFitsProtocol(ev.protocol, ev.identity) &&
+						sameIdentity(ev.identity, d.identity),
+				),
+			)
+			if (verified) continue
+			delete d.identity
+			d.confidence = "activity"
+			d.metadata = {
+				talkgroups: [],
+				sources: [],
+				slots: [],
+				callsigns: [],
+				capcodes: [],
+				ismModels: [],
+			}
+			d.encrypted = false
+		}
+	}
+
 	private applyStoredMutation(m: StoreMutation): void {
 		const patch = m.preparedRecordingOperations
 		if (patch !== undefined) {
@@ -5140,8 +5217,20 @@ export class DiscoveryStore
 		for (const o of m.observations) {
 			const previous = this.observationIndex.get(o.id)
 			if (previous !== undefined) this.unlinkObservation(previous)
-			this.putObservation(clone(o))
+			const observation = clone(o)
+			this.downgradeLegacyObservation(observation)
+			this.putObservation(observation)
 		}
+		this.downgradeLegacyDiscoveries(
+			[
+				...new Set([
+					...m.discoveries.map(d => d.id),
+					...m.observations.map(o => o.discoveryId),
+				]),
+			]
+				.map(id => this.discoveries.get(id))
+				.filter((d): d is Discovery => d !== undefined),
+		)
 		for (const id of m.removedObservations ?? []) {
 			this.forgetEvidence(id)
 			const previous = this.observationIndex.get(id)

@@ -132,6 +132,8 @@ const MetadataSchema = z.object({
 })
 
 export const DecodeEvidenceSchema = z.object({
+	contentVerified: z.boolean().optional(),
+	unverifiedCc: z.number().int().min(0).max(15).optional(),
 	protocol: ScannerProtocolSchema,
 	identity: IdentitySchema.optional(),
 	metadata: MetadataSchema.required().partial(),
