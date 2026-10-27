@@ -956,12 +956,17 @@ class Service implements IqCaptureService {
 		// Safety: the whole anchored chain, root and directory re-proven before any command.
 		if (!this.dirOk()) return this.refuse("unavailable")
 		const fs_ = slot.sampleRateHz
+		// Only a rate the running tool advertised is asked for; an older tool (or a source rate
+		// the tool cannot plan) gets an honest 48 kHz capture, recorded as such.
+		const rateHz =
+			req.rateHz !== undefined && proc.supportsRate(req.rateHz)
+				? req.rateHz
+				: IQ_CAPTURE_RATE_HZ
 		const offsetHz = req.rfHz - slot.centerHz
+		// The edge check uses the rate the tool will actually capture at, not the one asked for.
 		if (
 			Math.abs(offsetHz) >
-			fs_ / 2 -
-				capturePassbandHz(this.bandwidthHz, req.rateHz ?? IQ_CAPTURE_RATE_HZ) /
-					2
+			fs_ / 2 - capturePassbandHz(this.bandwidthHz, rateHz) / 2
 		)
 			return this.refuse("invalid")
 		const preRollSamples = Math.round(
@@ -987,12 +992,6 @@ class Service implements IqCaptureService {
 		const fromSample = Math.max(lo, Math.min(hi, wanted))
 		const captureId = this.uuid()
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
-		// Only a rate the running tool advertised is asked for; an older tool (or a source rate
-		// the tool cannot plan) gets an honest 48 kHz capture, recorded as such.
-		const rateHz =
-			req.rateHz !== undefined && proc.supportsRate(req.rateHz)
-				? req.rateHz
-				: IQ_CAPTURE_RATE_HZ
 		if (rateHz !== (req.rateHz ?? IQ_CAPTURE_RATE_HZ)) this.rateFallbacks++
 		const admitted = store.admit(
 			{ ...req, rateHz },

@@ -750,6 +750,36 @@ describe("IqCaptureService supervision", () => {
 		}
 	})
 
+	it("checks the source edge at the fallback rate an older tool will capture at", async () => {
+		const s = await setup({}, { oldTool: true })
+		try {
+			s.svc.attachSource("src", {
+				sampleRateHz: FS,
+				centerHz: CENTER,
+				epoch: 3,
+				engine: s.engine,
+			})
+			await s.svc.start()
+			await flush(20)
+			s.engine.push(FS)
+			// The test shapes give a 16 kHz capture bandwidth. Edge limit FS / 2 − passband / 2:
+			// 1 024 000 − 32 000 = 992 000 Hz at 192 kHz (4 × 16 kHz passband), 1 024 000 − 8 000 =
+			// 1 016 000 Hz at the 48 kHz fallback. 1 MHz fits only the latter.
+			const got = s.svc.capture(
+				req({ rfHz: CENTER + 1_000_000, rateHz: 192_000 }),
+			)
+			expect("captureId" in got).toBe(true)
+			expect(s.svc.counters().rateFallbacks).toBe(1)
+			// Past the 48 kHz limit it is still refused.
+			const past = s.svc.capture(
+				req({ rfHz: CENTER + 1_016_001, rateHz: 192_000 }),
+			)
+			expect(past).toEqual({ refused: expect.anything() as unknown })
+		} finally {
+			await s.svc.stop()
+		}
+	})
+
 	describe("only a clean usage refusal is a --rate-ack fallback", () => {
 		const usage = "wavekit-iqcap: unknown flag\nusage: ..."
 		async function started(
