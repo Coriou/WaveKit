@@ -511,6 +511,9 @@ interface PendingCall {
 	emitAfter: number // Timestamp when call_start should be emitted
 }
 
+/** Voice LC lines awaiting their closing DMR sync (see the push site). */
+const MAX_PENDING_DMR_VOICE_LINKS = 8
+
 /**
  * DSD-FME Decoder - Decodes digital voice signals.
  *
@@ -1313,8 +1316,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			link.verified &&
 			(SYNC_PATTERN.test(cleanLine) || link.voiceLc)
 		) {
-			if (link.voiceLc) this.pendingDmrVoiceLinks.push(link)
-			else this.pendingDmrLink = link
+			if (link.voiceLc) {
+				this.pendingDmrVoiceLinks.push(link)
+				// dsd-fme prints at most one voice LC per slot between two DMR syncs, so 2 is
+				// the real ceiling; 8 leaves headroom while bounding sync-less noise.
+				if (this.pendingDmrVoiceLinks.length > MAX_PENDING_DMR_VOICE_LINKS)
+					this.pendingDmrVoiceLinks.shift()
+			} else this.pendingDmrLink = link
 		} else if (link) this.emit("link", link)
 
 		// STEP 4: Check for sync (protocol detection)

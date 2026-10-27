@@ -199,6 +199,22 @@ describe("dsd-fme content verification", () => {
 		).toBe(true)
 	})
 
+	it.each([
+		[8, 8],
+		[9, 8],
+		[20, 8],
+	])(
+		"keeps at most 8 pending voice LC lines without a closing sync (%i fed → %i emitted)",
+		(fed, emitted) => {
+			const r = rig()
+			r.feed(bs("05", "VLC"), T0 + 3.7)
+			for (let i = 0; i < fed; i++)
+				r.feed(` SLOT 1 TGT=9 SRC=${100 + i}`, T0 + 19.1 + i * 7.3)
+			r.feed(bs("05", "IDLE"), T0 + 400.9)
+			expect(r.links.filter(l => l.voiceLc)).toHaveLength(emitted)
+		},
+	)
+
 	it("rejects MS header CC when the closing checked burst prints another CC", () => {
 		const r = rig()
 		r.feed("Sync: +DMR MS/DM MODE/MONO | Color Code=05 | VLC", T0 + 3.7)
