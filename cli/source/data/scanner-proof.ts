@@ -1,5 +1,6 @@
 // Fixed proof grammar mirrored from core/scanner/proof.ts; agreement is tested.
 import {
+	SCANNER_PROBE_DECODER_TYPES,
 	SCANNER_PROOF_PROTOCOL_LABEL,
 	SCANNER_PROOF_SUMMARY_MAX_CHARS,
 } from "@wavekit/api-types"
@@ -12,14 +13,7 @@ import type {
 } from "@wavekit/api-types"
 
 type BareProof = Omit<ScannerProof, "summary">
-const PROBES = new Set<string>([
-	"direwolf",
-	"dsd-fme",
-	"multimon-ng",
-	"rtl433",
-	"dumpvdl2",
-	"lora-meshtastic",
-])
+const PROBES = new Set<string>(SCANNER_PROBE_DECODER_TYPES)
 function knownProtocol(value: unknown): value is ScannerProtocol {
 	return (
 		typeof value === "string" &&

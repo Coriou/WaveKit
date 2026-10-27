@@ -7083,6 +7083,10 @@ without decoded tone), `data-like` and `carrier-only`, alongside `pending`,
 `running`, `decoded`, `no-sync`, `crc-errors`, `timeout` and `cancelled`.
 Missing decoder programs report `unsupported` with `reason: "decoder-unavailable"`,
 never a failed synchronization, and appear in `proof.unavailable`.
+
+Scanner proof `unavailable` decoder names share the exported
+`SCANNER_PROBE_DECODER_TYPES` list, including replay-only `acarsdec`,
+`dumpvdl2` and `lora-meshtastic`. These names may appear in discovery and identify job proofs.
 `ScannerProbeDecoderType` includes replay-only `dumpvdl2` and `lora-meshtastic`
 (alongside `acarsdec`); their presence in proof or unavailable lists does not
 enable live scanner probes.

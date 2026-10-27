@@ -4996,6 +4996,7 @@ export class ScannerService extends EventEmitter {
 				reason: "detection",
 				// The rate the protocols this capture may hold need (ISM: 96 kHz).
 				rateHz: captureRateFor({
+					rfHz: track.centreHz,
 					priors: this.priorsAt(track.centreHz),
 					track,
 				}),

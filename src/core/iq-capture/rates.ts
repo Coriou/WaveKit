@@ -15,6 +15,15 @@ import type { ScannerProtocol } from "../scanner/types.js"
 /** The replay tool's narrowest transition (`wavekit-iqcap replay` refuses less). */
 export const IQ_REPLAY_MIN_TRANSITION_HZ = 100
 
+/**
+ * EU LoRa candidate sub-bands, in Hz with inclusive endpoints. These capture-rate
+ * hints preserve a 125 kHz LoRa channel without changing band-plan protocol priors.
+ */
+export const EU_LORA_CAPTURE_SUB_BANDS = [
+	{ minHz: 867_000_000, maxHz: 868_600_000 },
+	{ minHz: 869_400_000, maxHz: 869_650_000 },
+] as const
+
 export function isCaptureRate(v: unknown): v is IqCaptureRateHz {
 	return (
 		typeof v === "number" && (IQ_CAPTURE_RATES as readonly number[]).includes(v)
@@ -62,9 +71,12 @@ function wellFormed(track: unknown): track is TrackSnapshot {
  * The rate of a capture: the fastest rate any protocol the capture may hold needs
  * (IQ_CAPTURE_RATE_BY_PROTOCOL), else 48 kHz. A protocol counts when the band plan lists it at the
  * capture (prior at least 1) and its prior is not 0; ISM also counts for an OOK-burst track (the
- * replay plan's rtl_433 trial is called the same way). Malformed priors count for nothing.
+ * replay plan's rtl_433 trial is called the same way). A finite rfHz inside an inclusive
+ * EU_LORA_CAPTURE_SUB_BANDS range also raises LoRa to 192 kHz unless its prior is explicitly 0.
+ * Missing/non-finite rfHz does not raise the rate. Malformed priors count for nothing.
  */
 export function captureRateFor(input: {
+	rfHz?: number
 	priors: Partial<Record<ScannerProtocol, number>>
 	track: TrackSnapshot | null
 }): IqCaptureRateHz {
@@ -89,6 +101,16 @@ export function captureRateFor(input: {
 			raise(r)
 		else if (protocol === "ism" && track !== null && ookBurst(track)) raise(r)
 	}
+	const rfHz = input.rfHz
+	if (
+		priors.lora !== 0 &&
+		typeof rfHz === "number" &&
+		Number.isFinite(rfHz) &&
+		EU_LORA_CAPTURE_SUB_BANDS.some(
+			band => rfHz >= band.minHz && rfHz <= band.maxHz,
+		)
+	)
+		raise(IQ_CAPTURE_RATE_BY_PROTOCOL.lora)
 	return rate
 }
 

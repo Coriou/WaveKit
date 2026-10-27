@@ -511,8 +511,13 @@ fn replay_exact_decoder_clocks_emit_u8_pairs() {
             (n * out_rate).div_ceil(rate) * 2
         );
         let tail = &output.stdout[output.stdout.len() - 2..];
-        assert!(tail[0].abs_diff(159) <= 1);
-        assert!(tail[1].abs_diff(96) <= 1);
+        // The global component peak reaches 10^(-6/20) × 127.5 + 128,
+        // quantized to 191 (positive) / 64 (negative), with 6 dB headroom.
+        assert!(output.stdout.iter().copied().max().unwrap().abs_diff(191) <= 1);
+        assert!(output.stdout.iter().copied().min().unwrap().abs_diff(64) <= 1);
+        // A steady DC tail retains its polarity and stays well above the U8 floor.
+        assert!((174..=192).contains(&tail[0]));
+        assert!((63..=82).contains(&tail[1]));
     }
 }
 

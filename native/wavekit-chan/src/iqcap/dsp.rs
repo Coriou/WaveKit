@@ -31,8 +31,9 @@
 //! yields bit-identical output (Property 12).
 
 use crate::convert::cu8_to_f32;
-use crate::design::lowpass;
+use crate::design::{kaiser_len_checked, lowpass, lowpass_bounded};
 use crate::stages::{Nco, RationalFir};
+use std::sync::atomic::AtomicBool;
 
 /// Default output rate of a capture (contract `IQ_CAPTURE_RATE_HZ`).
 pub const CAPTURE_RATE_HZ: u64 = 48_000;
@@ -291,6 +292,9 @@ pub fn replay_filter_at(
     out
 }
 
+/// Maximum prototype payload: 131071 f32 coefficients × 4 = 524284 bytes.
+pub const MAX_REPLAY_TAPS: usize = 131_071;
+
 /// Rational polyphase replay conversion (Crochiere & Rabiner §3.3.4). The prototype
 /// passes bandwidth/2, stops transition Hz later, and is designed at rate * L with
 /// gain L. 48k→105k = 35/16; 192k→250k = 125/96. Causal output has a short
@@ -301,15 +305,25 @@ pub fn resample_replay(
     out: u64,
     bandwidth: f64,
     transition: f64,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, String> {
+    if !CAPTURE_RATES.contains(&rate)
+        || ![48_000, 105_000, 250_000].contains(&out)
+        || !replay_shape_ok_at(bandwidth, transition, rate)
+        || bandwidth / 2.0 + transition > out as f64 / 2.0
+    {
+        return Err("invalid replay rates or shape".into());
+    }
     let g = gcd(rate, out);
     let (l, m) = ((out / g) as usize, (rate / g) as usize);
     let up = rate as f64 * l as f64;
-    let taps = lowpass(
+    kaiser_len_checked(transition / up, MAX_REPLAY_TAPS)?;
+    let taps = lowpass_bounded(
         (bandwidth / 2.0 + transition / 2.0) / up,
         transition / up,
         l as f64,
-    );
+        MAX_REPLAY_TAPS,
+        &AtomicBool::new(false),
+    )?;
     let mut fir = RationalFir::new(l, m, &taps);
     let (mut oi, mut oq) = (Vec::new(), Vec::new());
     let (mut bi, mut bq) = (Vec::with_capacity(4096), Vec::with_capacity(4096));
@@ -328,7 +342,7 @@ pub fn resample_replay(
             output.extend_from_slice(&[*i, *q]);
         }
     }
-    output
+    Ok(output)
 }
 
 /// Only the widest capture (192 kHz, for 125 kHz LoRa) widens its passband:
@@ -391,6 +405,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rational_replay_rejects_malformed_and_over_budget_shapes() {
+        assert!(resample_replay(&[], 0, 0, 25_000.0, 5_000.0).is_err());
+        assert!(resample_replay(&[], 48_000, 105_000, f64::NAN, 5_000.0).is_err());
+        assert!(resample_replay(&[], 192_000, 250_000, 125_000.0, 100.0)
+            .unwrap_err()
+            .contains("tap limit"));
+    }
+
+    #[test]
     fn rational_replay_lengths_and_response() {
         for (rate, out, bw, tr) in [
             (48_000, 105_000, 25_000.0, 5_000.0),
@@ -399,7 +422,7 @@ mod tests {
             (192_000, 250_000, 125_000.0, 12_500.0),
         ] {
             for n in [0usize, 1, 16, 17, 96, 97] {
-                let y = resample_replay(&vec![0.0; n * 2], rate, out, bw, tr);
+                let y = resample_replay(&vec![0.0; n * 2], rate, out, bw, tr).unwrap();
                 assert_eq!(y.len() / 2, (n * out as usize).div_ceil(rate as usize));
             }
             // DC and the passband edge survive; a tone beyond the stop edge is rejected.
@@ -410,7 +433,7 @@ mod tests {
                         [p.cos() as f32, p.sin() as f32]
                     })
                     .collect();
-                let y = resample_replay(&x, rate, out, bw, tr);
+                let y = resample_replay(&x, rate, out, bw, tr).unwrap();
                 let samples = &y[y.len() / 2..];
                 let power = samples.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() * 2.0
                     / samples.len() as f64;
@@ -458,7 +481,7 @@ mod tests {
         ] {
             let x = vec![0.25; rate as usize * 4 * 2];
             let start = std::time::Instant::now();
-            let y = resample_replay(&x, rate, out, bw, tr);
+            let y = resample_replay(&x, rate, out, bw, tr).unwrap();
             eprintln!(
                 "replay {rate}->{out}: {} samples, {:.3} ms for 4 s",
                 y.len() / 2,

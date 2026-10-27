@@ -573,6 +573,9 @@ const TRIAL_OUTCOMES = new Set<string>([
 ])
 
 const PROBE_DECODERS = new Set<string>([
+	"acarsdec",
+	"dumpvdl2",
+	"lora-meshtastic",
 	"direwolf",
 	"dsd-fme",
 	"multimon-ng",

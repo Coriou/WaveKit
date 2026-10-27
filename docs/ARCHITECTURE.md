@@ -707,3 +707,10 @@ decoders; audio consumers retain cf32. The output length is exactly
 192 kHz scales the narrow passband by four, capped at 150 kHz (125 kHz plus two
 12.5 kHz guards), leaving a 42 kHz capture-filter transition. Its ready event must
 acknowledge this wider passband before the core requests that rate.
+
+The IQ replay CLI normalizes CU8 output by its largest absolute I/Q component:
+gain = min(256, 10^(-6/20) / peak), leaving 6 dB headroom. All-zero or non-finite
+input uses unity gain. CF32 output retains its original level. The rational
+resampler checks its Kaiser length before allocation and caps the prototype,
+including verification growth, at 131071 taps (131071 × 4 = 524284 bytes of f32
+coefficients). A request beyond this cap fails with a tap-limit error.

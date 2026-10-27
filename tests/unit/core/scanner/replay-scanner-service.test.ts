@@ -281,6 +281,33 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 		}
 	})
 
+	it.each([867_000_000, 868_600_000, 869_400_000, 869_650_000])(
+		"requests 192 kHz for a detection candidate at %s Hz",
+		async rfHz => {
+			const { h, port, internals, live } = setup()
+			await h.service.start()
+			try {
+				internals.spectrum.engine = () => ({
+					currentEpoch: () => ({
+						epoch: 1,
+						centreHz: rfHz,
+						sampleRateHz: 1_024_000,
+					}),
+				})
+				internals.requestIqCapture(live(), trackOf({ centreHz: rfHz }))
+				expect(port.capture).toHaveBeenCalledWith(
+					expect.objectContaining({
+						rfHz,
+						reason: "detection",
+						rateHz: 192_000,
+					}),
+				)
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+
 	it.each([
 		[
 			"not surfaced and not gate-passed",

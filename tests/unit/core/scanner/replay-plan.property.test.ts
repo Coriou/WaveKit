@@ -140,6 +140,7 @@ describe("planReplayTrials analog order", () => {
 							capturedAtMs: 0,
 							durationMs: 2000,
 							gapSamples: 0,
+							rateHz: 192_000,
 						},
 						track: c.hasTrack
 							? trackOf({ obwHz: c.obwHz, spectralShape: c.shape })

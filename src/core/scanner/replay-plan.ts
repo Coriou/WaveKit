@@ -167,7 +167,7 @@ export function boundReplayTrials(
 export interface SkippedReplayTrial {
 	protocol: ScannerProtocol | "adsb"
 	decoder: string
-	reason: "no-probe-mode" | "no-replay-input"
+	reason: "no-probe-mode" | "no-replay-input" | "lora-needs-192khz"
 }
 
 /** 1090 MHz Mode S/ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive). */
@@ -336,6 +336,10 @@ export function planReplayTrialsDetailed(
 	}
 	for (const extra of REPLAY_EXTRA_TRIALS) {
 		if (!extraCalled(input, extra.protocol)) continue
+		if (extra.protocol === "lora" && input.capture.rateHz !== 192_000) {
+			skipped.push({ ...extra, reason: "lora-needs-192khz" })
+			continue
+		}
 		const mode = extraModeOf(extra.protocol, extra.decoder)
 		if (mode === null) {
 			skipped.push({ ...extra, reason: "no-probe-mode" })

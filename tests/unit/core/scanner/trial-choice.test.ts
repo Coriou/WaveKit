@@ -378,6 +378,7 @@ describe("replay extras behind a capability check (part 2)", () => {
 		"a known %s discovery runs %s only with replay capability",
 		(protocol, decoder) => {
 			const input = pocsagInput({
+				capture: { ...capture, rateHz: 192_000 },
 				knownProtocol: protocol,
 				track: null,
 				priors: {},

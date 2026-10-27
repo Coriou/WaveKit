@@ -1227,15 +1227,18 @@ export const IDENTIFY_ANALOG_LOOKBACK_MS = 30_000
 /** WG10 req 3.5: how long the probe pool remembers a decoder type whose program could not run. */
 export const PROBE_UNAVAILABLE_MEMO_MS = 300_000
 /** WG10 req 3.5: probe decoder types `decodersUnavailable` can name. */
+export const SCANNER_PROBE_DECODER_TYPES = [
+	"dsd-fme",
+	"multimon-ng",
+	"direwolf",
+	"rtl433",
+	// Replay-only IQ capture consumers.
+	"acarsdec",
+	"dumpvdl2",
+	"lora-meshtastic",
+] as const
 export type ScannerProbeDecoderType =
-	| "dsd-fme"
-	| "multimon-ng"
-	| "direwolf"
-	| "rtl433"
-	/** Replay only: IQ capture consumers. */
-	| "acarsdec"
-	| "dumpvdl2"
-	| "lora-meshtastic"
+	(typeof SCANNER_PROBE_DECODER_TYPES)[number]
 /**
  * WG10 req 3.4: analog evidence for an identify target, from the live demodulator's closed
  * transmissions within the target's tolerance. Only what the transmission tracker reported.

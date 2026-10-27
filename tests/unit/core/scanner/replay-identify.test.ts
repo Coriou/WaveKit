@@ -55,9 +55,12 @@ function harness(
 		captures?: IqCaptureView[]
 		/** Captures that appear in `near` only after the first `end`. */
 		requested?: IqCaptureView
+		lora?: boolean
+		rfHz?: number
 		exhaustive?: boolean
 	} = {},
 ) {
+	const rfHz = opts.rfHz ?? TARGET_HZ
 	const captures = [...(opts.captures ?? [])]
 	const calls: string[] = []
 	const claimed = new Map<string, string>()
@@ -94,13 +97,14 @@ function harness(
 		settings,
 		transports: [offsetTransport, createReplayTransport(port)],
 	})
+	pool.engine.setEpoch(1, rfHz - 25_000)
 	const record = identifyRecord()
 	const tracks: IdentifyTrackView[] = []
 	const events: ScannerIdentifyEventData[] = []
 	const runner = new IdentifyRunner({
 		record,
 		identify: normaliseIdentify({
-			target: { frequencyHz: TARGET_HZ },
+			target: { frequencyHz: rfHz },
 			record: false,
 			...(opts.exhaustive ? { exhaustive: true } : {}),
 		}),
@@ -111,7 +115,7 @@ function harness(
 		liveTracks: () => tracks,
 		lastSummary: () => summaryOf(),
 		discoveryOf: () => undefined,
-		priorsAt: () => ({}),
+		priorsAt: () => (opts.lora ? { lora: 1 } : {}),
 		format: () => "U8_IQ",
 		channelizer: () => false,
 		settings: () => settings,
@@ -327,6 +331,35 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 		expect(h.calls.filter(c => c.startsWith("settle:"))).toHaveLength(2)
 	})
 
+	it.each([867_000_000, 868_600_000, 869_400_000, 869_650_000])(
+		"requests 192 kHz from the identify candidate at %s Hz without LoRa priors",
+		async rfHz => {
+			const h = harness({ rfHz })
+			await open(h, trackOf({ centreHz: rfHz, obwHz: 12_000 }))
+			try {
+				for (let i = 0; i < 3; i++) await h.advance(1000)
+				expect(h.port.capture).toHaveBeenCalledWith(
+					expect.objectContaining({
+						rfHz,
+						reason: "identify",
+						rateHz: 192_000,
+					}),
+				)
+			} finally {
+				await h.runner.dispatch({ type: "cancel" })
+			}
+		},
+	)
+
+	it("requests the LoRa capture rate from identify priors", async () => {
+		const h = harness({ lora: true })
+		await open(h)
+		await h.run()
+		expect(h.port.capture).toHaveBeenCalledWith(
+			expect.objectContaining({ rateHz: 192_000 }),
+		)
+	})
+
 	it("requests a capture for the resolved track once when none exists, and claims it when finished", async () => {
 		const h = harness({ requested: view("requested-1") })
 		await open(h)
@@ -337,6 +370,7 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 				sourceId: "rtl",
 				observationId: "o_t1",
 				reason: "identify",
+				rateHz: 48_000,
 				rfHz: TARGET_HZ,
 			}),
 		)

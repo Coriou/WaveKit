@@ -1,3 +1,5 @@
+import { narrowestPriors } from "../../../../src/core/scanner/classify/priors.js"
+import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
 import { describe, it, expect } from "vitest"
 import {
 	capturePassbandHz,
@@ -56,5 +58,47 @@ describe("wideband replay clocks", () => {
 			bandwidth: 125_000,
 			oversampling: 2,
 		})
+	})
+})
+
+describe("EU LoRa candidate capture rate", () => {
+	const ranges = bandplansFor("EU").flatMap(p => p.ranges)
+	it.each([867_000_000, 868_600_000, 869_400_000, 869_650_000])(
+		"honours an explicit LoRa exclusion at %s Hz",
+		rfHz => {
+			expect(captureRateFor({ rfHz, priors: { lora: 0 }, track: null })).toBe(
+				48_000,
+			)
+		},
+	)
+	it.each([undefined, NaN, Infinity, -Infinity])(
+		"does not raise for missing or non-finite frequency %s",
+		rfHz => {
+			expect(
+				captureRateFor({
+					...(rfHz === undefined ? {} : { rfHz }),
+					priors: {},
+					track: null,
+				}),
+			).toBe(48_000)
+		},
+	)
+	it.each([
+		[866_999_999, 96_000],
+		[867_000_000, 192_000],
+		[868_600_000, 192_000],
+		[868_600_001, 96_000],
+		[869_399_999, 96_000],
+		[869_400_000, 192_000],
+		[869_650_000, 192_000],
+		[869_650_001, 96_000],
+	])("selects capture rate at %s Hz", (hz, rate) => {
+		expect(
+			captureRateFor({
+				rfHz: hz,
+				priors: narrowestPriors(ranges, hz),
+				track: null,
+			}),
+		).toBe(rate)
 	})
 })
