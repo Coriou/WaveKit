@@ -10,7 +10,7 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // WG15 DQ 9.3 re-baseline: an evidence-less sighting no longer reaches a decoded record of another
 // family beyond 1 000 Hz or outside its band (decoded-record shortcut and key fallback), so the first
 // such sighting in this run now joins the nearest same-family record instead (seed 5 o1261).
-// WG17 DM integration re-baseline: checked synthetic decodes explicitly persist
+// Re-baseline: checked synthetic decodes explicitly persist
 // contentVerified:true on M.payload.observations[].decode / S.observations[].decode.
 // Stored discovery provenance also survives observation trimming: the same field
 // appears on M.payload.discoveries[], S.discoveries[] and internal E[] eviction copies.

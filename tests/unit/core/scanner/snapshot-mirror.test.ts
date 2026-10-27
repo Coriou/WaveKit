@@ -58,7 +58,7 @@ const sha = (text: string): string =>
 // grew again. With both, seeds 3 to 5 carry the DQ 9.1/9.3 association and the `short` input: each
 // length is the DQ length plus the `short` bytes of the observations it keeps (seeds 3 and 4 the
 // same +461 and +859 bytes as without DQ 9.3, seed 5 +912 instead of +964 as it keeps fewer).
-// WG17 DM: persist checked-content provenance for memory-only synthetic decodes.
+// Persist checked-content provenance for memory-only synthetic decodes.
 // Only discoveries[].contentVerified:true is added: seeds 3/4/5 grow by 5/3/4
 // copies of the 23-byte property. Removing it must still match the prior hashes.
 // Example: {"identity":{"kind":"dmr-cc","value":"1"}} becomes
