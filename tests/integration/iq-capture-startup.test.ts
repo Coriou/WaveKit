@@ -5,7 +5,10 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, it } from "vitest"
-import { createIqCaptureService } from "../../src/core/iq-capture/service.js"
+import {
+	captureBandwidthHz,
+	createIqCaptureService,
+} from "../../src/core/iq-capture/service.js"
 import { probeReplayShapes } from "../../src/core/iq-capture/shapes.js"
 import { spyLogger } from "../unit/core/iq-capture/helpers.js"
 
@@ -94,14 +97,10 @@ it.skipIf(!fs.existsSync(binary))(
 				clearTimeout(deadline)
 			}
 			expect(runArgs).toContain("1024000")
+			// The capture keeps the widest audio passband; wider replay shapes (LoRa) widen
+			// per capture rate instead (capturePassbandHz).
 			expect(runArgs[runArgs.indexOf("--bandwidth") + 1]).toBe(
-				String(
-					Math.max(
-						...Object.values(probeReplayShapes()).map(
-							shape => shape.bandwidthHz,
-						),
-					),
-				),
+				String(captureBandwidthHz(probeReplayShapes())),
 			)
 			expect(runStdio).toEqual(["pipe", "pipe", "pipe", "pipe"])
 			feed?.(0, new Uint8Array(8192))
