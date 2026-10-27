@@ -706,7 +706,11 @@ the summary as `CC 3 (unverified)`; it is never a `dmr-cc` identity.
 
 DMR needs two matching content-verified occurrences: a clean PI, VLC, TLC,
 CSBK, MBCH, DATA or USBD burst, or checked voice link control carrying
-both target and source. Voice link control uses the latest CC from its own BS
+both target and source. Ambient confirmation also requires distinct link content:
+repeating CSBK with the same CC and slot cannot confirm a discovery, because the
+current adapter does not expose the CSBK payload to the content hash. Checked
+CSBKs with the same CC on different BS slots can pair after the 2-second
+separation guard. Voice link control uses the latest CC from its own BS
 slot, or from the single MS channel, in its current burst sequence. Unknown CC,
 sync loss, protocol changes and sequence timeout clear that association. Header and voice-LC
 verification waits until the next DMR sync closes the burst (normally one burst

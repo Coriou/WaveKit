@@ -17,16 +17,20 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const MARKER = Buffer.from("BURST-ON-CHANNEL")
 // Reuse the MS/direct-mode print formats exercised by the parser verification tests.
 // This existing fixture is source-format synthesis, not a captured stderr recording.
-const VOICE = readFileSync(
-	new URL("../mocks/fixtures/dsd-fme/dmr-ms-two-ptt.txt", import.meta.url),
-	"utf8",
-)
-	.split("\n")
-	.filter(line => line && !line.startsWith("#"))
-	.map(row => ({
-		at: Number(row.split("\t")[0]),
-		line: row.slice(row.indexOf("\t") + 1),
-	}))
+function fixtureRows(name: string) {
+	return readFileSync(
+		new URL(`../mocks/fixtures/dsd-fme/${name}`, import.meta.url),
+		"utf8",
+	)
+		.split("\n")
+		.filter(line => line && !line.startsWith("#"))
+		.map(row => ({
+			at: Number(row.split("\t")[0]),
+			line: row.slice(row.indexOf("\t") + 1),
+		}))
+}
+const VOICE = fixtureRows("dmr-ms-two-ptt.txt")
+const CONTROL = fixtureRows("dmr-bs-checked-csbk.txt")
 
 let replayRows = VOICE.slice(0, 5)
 
@@ -319,27 +323,35 @@ function feed4fsk(fanout: InstanceType<typeof FakeFanout>) {
 }
 
 describe("dsd-fme activity through production wiring", () => {
-	it.each(["checked voice", "error tail", "unchecked CSBK"])(
+	it.each([
+		"checked voice",
+		"checked control CSBK",
+		"identical checked control CSBK",
+		"error tail",
+		"unchecked CSBK",
+	])(
 		"places an unlisted far 4FSK channel with %s through placement trust",
 		async kind => {
 			replayRows =
 				kind === "checked voice"
 					? VOICE.slice(0, 5)
-					: [
-							{
-								at: 3.7,
-								line: `21:49:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | CSBK${kind === "unchecked CSBK" ? " -RAS " : ""}`,
-							},
-							...(kind === "error tail"
-								? [
-										{ at: 31.3, line: " (CRC ERR)" },
-										{
-											at: 61.3,
-											line: "21:49:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | IDLE",
-										},
-									]
-								: []),
-						]
+					: kind.includes("checked control CSBK")
+						? CONTROL.slice(0, 2)
+						: [
+								{
+									at: 3.7,
+									line: `21:49:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | CSBK${kind === "unchecked CSBK" ? " -RAS " : ""}`,
+								},
+								...(kind === "error tail"
+									? [
+											{ at: 31.3, line: " (CRC ERR)" },
+											{
+												at: 61.3,
+												line: "21:49:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | IDLE",
+											},
+										]
+									: []),
+							]
 			vi.useFakeTimers({
 				toFake: [
 					"Date",
@@ -387,9 +399,16 @@ describe("dsd-fme activity through production wiring", () => {
 				feed4fsk(f.fanout)
 				await vi.advanceTimersByTimeAsync(317.3)
 			}
+			if (kind === "checked control CSBK") {
+				// Same CC on the other BS slot supplies distinct content after the 2 s guard.
+				replayRows = CONTROL.slice(2).map(row => ({
+					...row,
+					at: row.at - 2_700,
+				}))
+			}
 			f.burstOn(hz)
 			await vi.advanceTimersByTimeAsync(491.7)
-			if (kind !== "checked voice") {
+			if (kind === "error tail" || kind === "unchecked CSBK") {
 				expect(f.links.length).toBeGreaterThan(0)
 				expect(f.links.every(l => !l.verified)).toBe(true)
 				expect(
@@ -399,9 +418,39 @@ describe("dsd-fme activity through production wiring", () => {
 				).toBe(false)
 				return
 			}
-			expect(f.links.some(l => l.verified && l.cc === 1 && l.voiceLc)).toBe(
-				true,
-			)
+			if (kind === "identical checked control CSBK") {
+				// Main's ambient messageOf hashes CC/slot, not CSBK payload or reception time.
+				// ConfirmMemory.pairMessage rejects identical hashes even >2 s apart.
+				// Keep this current behaviour: parser verification alone cannot confirm a discovery.
+				expect(f.links.filter(l => l.verified)).toHaveLength(2)
+				expect(
+					f.links
+						.filter(l => l.verified)
+						.every(l => l.cc === 1 && l.slot === 1),
+				).toBe(true)
+				expect(
+					f.scanner
+						.listDiscoveries({} as never)
+						.items.some(d => d.confidence === "decoded"),
+				).toBe(false)
+				return
+			}
+			if (kind === "checked control CSBK") {
+				// Control-only BS bursts prove CC without voice LC, calls or TG/SRC.
+				expect(f.links.filter(l => l.verified).map(l => l.slot)).toEqual([1, 2])
+				expect(f.links.filter(l => l.verified)).toHaveLength(2)
+				expect(f.links.filter(l => l.verified).every(l => l.cc === 1)).toBe(
+					true,
+				)
+				expect(
+					f.links.every(
+						l => !l.voiceLc && l.tg === undefined && l.src === undefined,
+					),
+				).toBe(true)
+			} else
+				expect(f.links.some(l => l.verified && l.cc === 1 && l.voiceLc)).toBe(
+					true,
+				)
 			const found = f.scanner
 				.listDiscoveries({} as never)
 				.items.find(

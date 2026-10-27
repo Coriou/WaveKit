@@ -158,6 +158,80 @@ describe("channel activity ranker", () => {
 		ranker.dispose()
 	})
 
+	it("emits no notice for unchanged blocks with all retained centres", () => {
+		const { clock, ranker, changes } = setup()
+		const same = block(
+			Array.from(
+				{ length: ACTIVITY_MAX_SEGMENTS },
+				(_, i) => CENTRE + i * 6_250,
+			),
+		)
+		ranker.ingestBlock("rtl", "e1", same)
+		clock.advance(250)
+		const before = changes.length
+		for (let i = 0; i < 40; i++) {
+			ranker.ingestBlock("rtl", "e1", same)
+			clock.advance(250)
+		}
+		expect(changes).toHaveLength(before)
+		ranker.dispose()
+	})
+
+	it("cancels centre swaps and retains shared centres until their last segment moves", () => {
+		const { clock, ranker, changes } = setup()
+		const feed = (hzs: number[]) => {
+			const b = block(hzs)
+			b.tracks.forEach((t, i) => {
+				t.trackId = `stable-${i}`
+			})
+			ranker.ingestBlock("rtl", "e1", b)
+			clock.advance(250)
+		}
+		feed([CENTRE, CENTRE, CENTRE + 6_250])
+		const before = changes.length
+		feed([CENTRE + 6_250, CENTRE, CENTRE])
+		expect(changes).toHaveLength(before)
+		feed([CENTRE + 6_250, CENTRE + 6_250, CENTRE])
+		expect(changes).toHaveLength(before)
+		feed([CENTRE + 6_250, CENTRE + 6_250, CENTRE + 6_250])
+		expect(changes).toHaveLength(before + 1)
+		expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual([
+			CENTRE + 6_250,
+		])
+		ranker.dispose()
+	})
+
+	it.each([-1, 0, 1])(
+		"notifies retained-centre expiry at the hold boundary %+d ms",
+		offset => {
+			const { clock, ranker, changes } = setup()
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			const started = clock.now()
+			ranker.ingestBlock("rtl", "e1", block([]))
+			// Keep the source healthy throughout, so expiry is the only final notice trigger.
+			for (let i = 0; i < ACTIVITY_WARM_HOLD_MS / 1_000 - 1; i++) {
+				clock.advance(1_000)
+				ranker.ingestBlock("rtl", "e1", block([]))
+			}
+			clock.advance(250)
+			const before = changes.length
+			clock.advance(started + ACTIVITY_WARM_HOLD_MS + offset - clock.now())
+			ranker.ingestBlock("rtl", "e1", block([]))
+			clock.advance(0)
+			expect(changes).toHaveLength(before + (offset >= 0 ? 1 : 0))
+			expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual(
+				offset < 0 ? [CENTRE] : [],
+			)
+			// Revival after expiry is a fresh membership change even with the same track id.
+			if (offset >= 0) {
+				ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+				clock.advance(250)
+				expect(changes).toHaveLength(before + 2)
+			}
+			ranker.dispose()
+		},
+	)
+
 	it("a far raster channel with activity ranks hot ahead of the near idle ones (two-channel scenario)", () => {
 		const { clock, ranker } = setup()
 		const far = RASTER_HZ[32]!

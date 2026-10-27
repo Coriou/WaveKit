@@ -10,8 +10,9 @@
  *
  * Cadence (stated rules):
  * - Ingest: every accepted block (`ingestBlock`) and gated track (`ingestTrack`) with the engine
- *   identity (sourceId, engineId, epoch). A block is O(tracks of the block): its segments update a
- *   bounded per-source map; no per-sample and no per-candidate work happens on the spectrum path.
+ *   identity (sourceId, engineId, epoch). Steady-state blocks are O(tracks of the block): segments
+ *   update bounded maps in place; retained segments are scanned only at retention deadlines.
+ *   No per-sample or per-candidate work happens on the spectrum path.
  * - History (stored decodes, trial memory, occupancy) is pulled at most once per
  *   ACTIVITY_HISTORY_REFRESH_MS = 2 000 ms per source, from the block ingest, never in snapshot().
  * - Notices: a live edge (a segment appears or goes), a history refresh, a health change (retune,
@@ -219,6 +220,7 @@ export interface ChannelActivityRanker {
 }
 
 interface Segment {
+	observedActive: boolean
 	observedHz: number
 	centreHz: number
 	firstMono: number
@@ -239,7 +241,10 @@ interface SourceState {
 	lastFrameMono: number | null
 	lastBlockMono: number | null
 	revision: number
-	observedKey: string
+	/** Reference counts of retained stable centres; scratch changes cancel within a block. */
+	observedCounts: Map<number, number>
+	observedChanges: Set<number>
+	nextObservedExpiry: number
 	segments: Map<string, Segment>
 	liveKeys: Set<string>
 	/** The previous block's live set, cleared and refilled by the next block (no per-block Set). */
@@ -406,7 +411,9 @@ export function createChannelActivityRanker(
 			lastFrameMono: null,
 			lastBlockMono: null,
 			revision: 0,
-			observedKey: "",
+			observedCounts: new Map(),
+			observedChanges: new Set(),
+			nextObservedExpiry: Infinity,
 			segments: new Map(),
 			liveKeys: new Set(),
 			spareKeys: new Set(),
@@ -752,6 +759,17 @@ export function createChannelActivityRanker(
 		s.pendingTimer = timers.setTimeout(() => flush(sourceId), wait)
 	}
 
+	/** Toggle membership changes so removing and readding a centre in one block is a no-op. */
+	const countObserved = (s: SourceState, hz: number, delta: 1 | -1): void => {
+		const before = s.observedCounts.get(hz) ?? 0
+		const after = before + delta
+		if (after === 0) s.observedCounts.delete(hz)
+		else s.observedCounts.set(hz, after)
+		if ((before === 0) !== (after === 0)) {
+			if (!s.observedChanges.delete(hz)) s.observedChanges.add(hz)
+		}
+	}
+
 	const startEpoch = (
 		sourceId: string,
 		engineId: string,
@@ -767,7 +785,9 @@ export function createChannelActivityRanker(
 		s.lastFrameMono = null
 		s.lastBlockMono = null
 		s.segments.clear()
-		s.observedKey = ""
+		s.observedCounts.clear()
+		s.observedChanges.clear()
+		s.nextObservedExpiry = Infinity
 		s.liveKeys = new Set()
 		s.tracks.clear()
 		dropInterests(sourceId, s.epoch)
@@ -943,6 +963,19 @@ export function createChannelActivityRanker(
 			const liveKeys = s.spareKeys
 			liveKeys.clear()
 			let edge = false
+			s.observedChanges.clear()
+			// Only visit retained segments when a retention deadline is reached, not every block.
+			if (now >= s.nextObservedExpiry) {
+				s.nextObservedExpiry = Infinity
+				for (const seg of s.segments.values()) {
+					if (!seg.observedActive) continue
+					const expires = seg.lastMono + ACTIVITY_WARM_HOLD_MS
+					if (now >= expires) {
+						countObserved(s, seg.observedHz, -1)
+						seg.observedActive = false
+					} else s.nextObservedExpiry = Math.min(s.nextObservedExpiry, expires)
+				}
+			}
 			for (const t of block.tracks) {
 				if (t.flags.iqImage || t.flags.spur === true) continue
 				if (t.gate !== undefined && t.gate !== "passed") continue
@@ -955,24 +988,43 @@ export function createChannelActivityRanker(
 					if (
 						Math.abs(centre - seg.observedHz) >
 						3_125 + ACTIVITY_CENTRE_HYSTERESIS_HZ
-					)
+					) {
+						if (seg.observedActive) countObserved(s, seg.observedHz, -1)
 						seg.observedHz = quantiseObservedCentre(centre)
+						countObserved(s, seg.observedHz, 1)
+						seg.observedActive = true
+					} else if (!seg.observedActive) {
+						countObserved(s, seg.observedHz, 1)
+						seg.observedActive = true
+					}
 					seg.centreHz = centre
 					seg.lastMono = now
 					s.segments.delete(key)
 					s.segments.set(key, seg)
-				} else
-					touch(
-						s.segments,
-						key,
-						{
-							centreHz: centre,
-							observedHz: quantiseObservedCentre(centre),
-							firstMono: now,
-							lastMono: now,
-						},
-						ACTIVITY_MAX_SEGMENTS,
-					)
+				} else {
+					if (s.segments.size >= ACTIVITY_MAX_SEGMENTS) {
+						const oldest = s.segments.keys().next().value
+						if (oldest !== undefined) {
+							const evicted = s.segments.get(oldest)!
+							if (evicted.observedActive)
+								countObserved(s, evicted.observedHz, -1)
+							s.segments.delete(oldest)
+						}
+					}
+					const observedHz = quantiseObservedCentre(centre)
+					countObserved(s, observedHz, 1)
+					s.segments.set(key, {
+						centreHz: centre,
+						observedHz,
+						observedActive: true,
+						firstMono: now,
+						lastMono: now,
+					})
+				}
+				s.nextObservedExpiry = Math.min(
+					s.nextObservedExpiry,
+					now + ACTIVITY_WARM_HOLD_MS,
+				)
 				liveKeys.add(key)
 				if (!s.liveKeys.has(key)) edge = true
 			}
@@ -981,17 +1033,7 @@ export function createChannelActivityRanker(
 			s.liveKeys = liveKeys
 			// New energy may be outside every existing query (including no queries).
 			// Notify so the manager can derive a new candidate set before ranking it.
-			const observedKey = [
-				...new Set(
-					[...s.segments.values()]
-						.filter(seg => now < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
-						.map(seg => seg.observedHz),
-				),
-			]
-				.sort((a, b) => a - b)
-				.join(",")
-			const observedChanged = observedKey !== s.observedKey
-			s.observedKey = observedKey
+			const observedChanged = s.observedChanges.size > 0
 			if (edge || observedChanged) markDirty(sourceId, observedChanged)
 		},
 		ingestTrack(sourceId, engineId, track) {
@@ -1017,7 +1059,9 @@ export function createChannelActivityRanker(
 			s.lastFrameMono = null
 			s.lastBlockMono = null
 			s.segments.clear()
-			s.observedKey = ""
+			s.observedCounts.clear()
+			s.observedChanges.clear()
+			s.nextObservedExpiry = Infinity
 			s.liveKeys = new Set()
 			s.tracks.clear()
 			dropInterests(sourceId)
