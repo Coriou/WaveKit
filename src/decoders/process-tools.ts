@@ -41,6 +41,10 @@ export function iqResampleCommand(
 	return shellCommand("sox", [
 		"-q",
 		"-D",
+		// stdin is an unbounded stream. On macOS Node uses a socketpair whose
+		// stat size can report only the bytes queued when SoX starts; treating
+		// that as the input length truncates a live stream and causes EPIPE.
+		"--ignore-length",
 		"-t",
 		"raw",
 		"-e",

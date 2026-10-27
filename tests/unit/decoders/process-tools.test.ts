@@ -100,7 +100,13 @@ describe("paired IQ resampling with SoX", () => {
 					{ code, signal, stdinError: stdinError?.message },
 					`SoX pipeline stderr: ${stderr}`,
 				).toEqual({ code: 0, signal: null, stdinError: undefined })
-				return Buffer.concat(output)
+				const bytes = Buffer.concat(output)
+				// Exit 0 is insufficient: consume the entire IQ stream, even when
+				// its stdin socket initially contains only a prefix.
+				expect(bytes.length).toBe(
+					2 * Math.round((frames * 1050000) / inputRate),
+				)
+				return bytes
 			}
 			expect(await run(17)).toEqual(await run(frames * 2))
 		},

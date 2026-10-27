@@ -1,3 +1,5 @@
+// The frozen argv fixtures include the intentional streaming-length correction:
+// SoX must ignore stdin's queued socket size and read until EOF (--ignore-length).
 // Feature: web-gaps-7, Property 14: Bounded numeric options
 // Validates: Requirements 9.5
 //
@@ -157,7 +159,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 5",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 5",
 		],
 		getDecoderArgs: ["-r", "CU8", ".", "-s", "384000", "-o", "5"],
 	},
@@ -190,7 +192,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136975000",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136975000",
 		],
 		getDecoderArgs: [
 			"--iq-file",
@@ -813,7 +815,7 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 1",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 1",
 		],
 		getDecoderArgs: ["-r", "CU8", ".", "-s", "384000", "-o", "1"],
 	},
@@ -840,7 +842,7 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
 		],
 		getDecoderArgs: [
 			"--iq-file",
@@ -869,7 +871,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2000000 - rate -h 2000000 | python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5 --samp-rate 2000000 --frequency 869525000 --channel-key AQ== --region EU_868",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2000000 - rate -h 2000000 | python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5 --samp-rate 2000000 --frequency 869525000 --channel-key AQ== --region EU_868",
 		],
 		getDecoderArgs: [
 			"/usr/local/bin/lora_meshtastic_decode.py",
