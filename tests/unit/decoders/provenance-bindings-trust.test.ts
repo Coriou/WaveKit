@@ -2,6 +2,8 @@
  * WG5 req 6: verified tuning trust from the observed tuner state, over structural fakes.
  */
 
+import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
+import type { DecoderConfig } from "../../../src/decoders/types.js"
 import { createActivityIngress } from "../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../src/core/activity/types.js"
 import { EventEmitter } from "node:events"
@@ -120,6 +122,33 @@ describe("verified tuning trust (WG5 req 6)", () => {
 		expect(index.lookup("a")?.tuningTrust).toBe("unverified")
 		expect(decoders.listenerCount("decoder:started")).toBe(0)
 		index.dispose()
+	})
+
+	it("keeps a default AIS-catcher without configured targets unverified", () => {
+		const { decoders, tuner, index } = setup()
+		index.dispose()
+		tuner.set(MAIN, tuned(162_000_000))
+		decoders.add("ais", {})
+		const decoder = new AisCatcherDecoder(
+			{
+				id: "ais",
+				type: "ais-catcher",
+				enabled: true,
+				options: {},
+			} as DecoderConfig,
+			createLogger({ level: "error" }),
+		)
+		decoders.getStatus = () => ({ type: "ais-catcher", sourceId: MAIN })
+		decoders.getDecoder = () => decoder
+		const provenance = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+		try {
+			expect(provenance.lookup("ais")).toMatchObject({
+				targetFrequenciesHz: [],
+				tuningTrust: "unverified",
+			})
+		} finally {
+			provenance.dispose()
+		}
 	})
 
 	it("is commanded under internal control and relay under external (req 6.2)", () => {
