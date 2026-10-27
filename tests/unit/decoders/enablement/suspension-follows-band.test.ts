@@ -39,6 +39,7 @@ function ismCandidate(
 	c: number,
 	h: number,
 	ranges: readonly { minHz: number; maxHz: number }[],
+	target = 1_000_000,
 ): { hz: number; rateHz: number } | undefined {
 	let best: { hz: number; rateHz: number } | undefined
 	for (const range of ranges) {
@@ -50,7 +51,7 @@ function ismCandidate(
 			c + h - 125_000,
 		)
 		const rateHz =
-			Math.floor(Math.min(1_000_000, 2 * (h - Math.abs(hz - c))) / 1000) * 1000
+			Math.floor(Math.min(target, 2 * (h - Math.abs(hz - c))) / 1000) * 1000
 		if (rateHz >= 250_000 && (!best || rateHz > best.rateHz))
 			best = { hz, rateHz }
 	}
@@ -1069,4 +1070,49 @@ describe("no channel selected", () => {
 			).unplaced.get("test"),
 		).toBe("no-channel-selected")
 	})
+})
+
+it("Property 17: a 2 MHz target preserves ISM and any widened meter span", () => {
+	// Feature: decoder-enablement, Property 17: The rtl_433 channel fits
+	// Validates: Requirements 3.16
+	fc.assert(
+		fc.property(
+			fc.integer({ min: 867_000_000, max: 871_000_000 }),
+			fc.integer({ min: 312_500, max: 6_000_000 }),
+			(c, fs) => {
+				const ranges = [{ minHz: 863_000_000, maxHz: 870_000_000 }]
+				const h = (fs * 0.8) / 2
+				const old = ismCandidate(c, h, ranges, 2_000_000)
+				const found = rtl433ChannelCandidate(
+					source({ centreHz: c, sampleRateHz: fs }),
+					ranges,
+					2_000_000,
+				)
+				if (!("hz" in found)) {
+					expect(old).toBeUndefined()
+					return
+				}
+				const lo = found.hz - found.rateHz / 2
+				const hi = found.hz + found.rateHz / 2
+				if (old) {
+					expect(lo).toBeLessThanOrEqual(old.hz - old.rateHz / 2)
+					expect(hi).toBeGreaterThanOrEqual(old.hz + old.rateHz / 2)
+				}
+				if (!old || found.rateHz > old.rateHz) {
+					expect(lo).toBeLessThanOrEqual(868_350_000)
+					expect(hi).toBeGreaterThanOrEqual(869_550_000)
+				}
+				expect(lo).toBeGreaterThanOrEqual(c - h)
+				expect(hi).toBeLessThanOrEqual(c + h)
+				expect(found.rateHz).toBeLessThanOrEqual(2_400_000)
+			},
+		),
+		{
+			numRuns: 500,
+			examples: [
+				[868_950_000, 3_000_000],
+				[868_600_000, 3_000_000],
+			],
+		},
+	)
 })

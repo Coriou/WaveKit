@@ -635,7 +635,9 @@ its original span and the meter span (868.95 MHz ±600 kHz). The union must fit
 inside the usable window and the 2.4 Msps maximum, including rounding the rate
 up in 1 kHz steps. The resulting channel uses at least 1.2 Msps and preserves coverage
 for other sensors. Otherwise the original ISM placement remains unchanged;
-explicit targets below 1 MHz disable this widening. The EU rtl433 band is
+explicit targets below 1 MHz disable this widening. Widening also requires the
+remaining CPU budget to cover the channel cost: 0.21 × (rate / 1 MHz) cores
+above 1 MHz, plus the existing shared channelizer and replay allowances. The EU rtl433 band is
 863–870 MHz; other regions retain their own band policy. A detected packet count alone does
 not prove wM-Bus: it can include unrelated protocols, noise or damaged frames.
 
@@ -643,6 +645,9 @@ The JSON model is `Wireless-MBus`; the pinned output uses `C` for the control
 field (not `C_field`), plus `mode`, `M`, `id`, `version`, `type`, `type_string`,
 `data` and `mic: "CRC"`. Encrypted payloads can still identify a meter, but
 rtl_433 does not decrypt them. Activity labels these receptions `wmbus`.
+
+Wireless M-Bus meter IDs and readings are personal data, stored like other sensor IDs.
+Validation so far uses synthetic fixtures; live meter decodes have not been observed.
 
 ### High CPU usage
 

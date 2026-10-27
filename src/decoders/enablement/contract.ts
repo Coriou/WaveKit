@@ -1,5 +1,6 @@
 import type { PagingRasterRange } from "./paging-plan.js"
 import type {
+	BandRegion,
 	DecoderReachKind,
 	DropAttribution,
 	DecoderMode,
@@ -156,11 +157,22 @@ export const DECODER_COSTS: Readonly<Record<CatalogueType, DecoderCost>> = {
 }
 // readsb 0.25 e, ais-catcher 0.10 m, acarsdec 0.05 e, dumpvdl2 0.15 e, rtl433 0.10 e, direwolf 0.05 e,
 // multimon-ng 0.03 e, dsd-fme 0.045 e, lora-meshtastic 0.60 e (decoder share; channel reach adds CHANNEL_MARGINAL_CORES)
-export function placementCostCores(type: string, reach: DecoderReach): number {
+export function placementCostCores(
+	type: string,
+	reach: DecoderReach,
+	rateHz = RTL433_CHANNEL_TARGET_RATE_HZ,
+): number {
 	const cost = Object.hasOwn(DECODER_COSTS, type)
 		? DECODER_COSTS[type as CatalogueType].cores
 		: DECODER_COST_UNKNOWN_CORES
-	return cost + (reach === "channel" ? CHANNEL_MARGINAL_CORES : 0)
+	const base = cost + (reach === "channel" ? CHANNEL_MARGINAL_CORES : 0)
+	// ChannelDsp measured 0.205 / 0.275 core at 1.0 / 1.2 Msps; rtl_433
+	// measured 0.026 / 0.031 / 0.062 at 1.0 / 1.2 / 2.4 Msps. Scale the
+	// existing 0.21 estimate linearly above 1 MHz: 0.21 × 1.2 = 0.252,
+	// 0.21 × 2.4 = 0.504 cores, preserving admission costs at <= 1 MHz.
+	return type === "rtl433" && reach === "channel" && rateHz > 1_000_000
+		? base * (rateHz / 1_000_000)
+		: base
 }
 export function channelizerBaseCores(sampleRateHz: number): number {
 	return sampleRateHz <= 2_048_000
@@ -189,6 +201,8 @@ export interface PlannerDecoder {
 	startMode: DecoderStartMode
 	configuredSourceId: string | null
 	band: DecoderBandRequirements | undefined // undefined: unknown, never band-suspended
+	/** Resolved regional policy, independent of band overrides. */
+	bandRegion?: BandRegion
 	configuredChannelsHz: readonly number[]
 	/** False when an explicit frequency option prevents configured VFO following. */
 	followVfo?: boolean

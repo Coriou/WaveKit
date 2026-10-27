@@ -639,3 +639,28 @@ it("stores a synthetic Wireless-MBus row as wmbus at the FSK carrier midpoint", 
 	})
 	expect(row).toMatchObject({ protocol: "wmbus", frequencyHz: 868_950_000 })
 })
+
+it.each([{ mode: 2 }, { version: "1.2" }, { M: 42, type_string: 3 }])(
+	"preserves other rtl_433 presentations with model-specific fields %j",
+	extra => {
+		const view = presentDecoderOutput(
+			decoderOutput("signal", {
+				model: "Weather",
+				id: 7,
+				temperature_C: 21,
+				...extra,
+			}),
+			"rtl433",
+		)
+		expect(view).toMatchObject({
+			protocol: "rtl_433",
+			entityKey: "sensor:Weather-7",
+		})
+		expect(view?.fields).toContainEqual({
+			key: "temperature_C",
+			label: "Temperature",
+			unit: "°C",
+			value: 21,
+		})
+	},
+)

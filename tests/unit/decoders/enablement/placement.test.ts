@@ -1,3 +1,8 @@
+import {
+	placementCostCores,
+	channelizerBaseCores,
+} from "../../../../src/decoders/enablement/contract.js"
+import { resolveActivityPolicy } from "../../../../src/decoders/enablement/activity-plan.js"
 import { performance } from "node:perf_hooks"
 import { describe, expect, it } from "vitest"
 import type {
@@ -948,6 +953,7 @@ it.each([2_399_999, 2_400_000, 2_400_001])(
 			input(
 				decoder({
 					type: "rtl433",
+					bandRegion: "EU",
 					band: { basis: "configured", rangesHz: meterRange },
 				}),
 				[source({ centreHz: 868_900_000, sampleRateHz: rate })],
@@ -971,6 +977,7 @@ it("also gives configured channel placements 1.2 Msps at 2.4 Msps input", () => 
 			decoder({
 				type: "rtl433",
 				origin: "config",
+				bandRegion: "EU",
 				band: { basis: "configured", rangesHz: meterRange },
 			}),
 			[source({ centreHz: 868_900_000 })],
@@ -980,5 +987,103 @@ it("also gives configured channel placements 1.2 Msps at 2.4 Msps input", () => 
 		reach: "channel",
 		channelHz: 868_950_000,
 		options: { targetSampleRate: 1_200_000 },
+	})
+})
+
+it.each([
+	[999_999, 0.21],
+	[1_000_000, 0.21],
+	[1_000_001, 0.21 * 1.000001],
+	[1_200_000, 0.252],
+	[2_400_000, 0.504],
+])("scales rtl433 channel cost at %i samples/s", (rate, cost) => {
+	expect(placementCostCores("rtl433", "channel", rate)).toBeCloseTo(cost, 12)
+	expect(placementCostCores("rtl433", "raw", rate)).toBe(0.1)
+	expect(placementCostCores("acarsdec", "channel", rate)).toBeCloseTo(0.16)
+})
+
+it.each(["arm64", "x64"])(
+	"retains ISM when widening exceeds the %s budget",
+	arch => {
+		// 0.21 × 1.2 + source base + replay is the exact widened admission bound.
+		const rate = 2_400_000
+		const replay = 0.05
+		const bound =
+			placementCostCores("rtl433", "channel", 1_200_000) +
+			channelizerBaseCores(rate) +
+			replay
+		for (const budget of [bound, bound - 0.000001]) {
+			const plan = planPlacements({
+				...input(
+					decoder({
+						type: "rtl433",
+						origin: "config",
+						bandRegion: "EU",
+						band: { basis: "region-default", rangesHz: meterRange },
+					}),
+					[source({ centreHz: 868_950_000, sampleRateHz: rate })],
+				),
+				activity: {
+					nowMonoMs: 0,
+					policy: {
+						...resolveActivityPolicy(undefined, budget, arch, 4),
+						replayAllowanceCores: replay,
+					},
+					epochs: [],
+					snapshots: [],
+					incumbents: [],
+					recentMoves: [],
+					pendingStarts: [],
+				},
+			})
+			const target = budget === bound ? 1_200_000 : 1_000_000
+			expect(plan.wanted[0]).toMatchObject({
+				channelHz: 868_950_000,
+				options: { targetSampleRate: target },
+				costCores: placementCostCores("rtl433", "channel", target),
+			})
+		}
+	},
+)
+
+it.each([
+	{ mode: "always" as const },
+	{ startMode: "operator" as const },
+	{ bandSuspension: false },
+])("does not widen a skipped regional band without 868 MHz: %j", override => {
+	const plan = planPlacements(
+		input(
+			decoder({
+				type: "rtl433",
+				origin: "config",
+				band: {
+					basis: "region-default",
+					rangesHz: [{ minHz: 902_000_000, maxHz: 928_000_000 }],
+				},
+				...override,
+			}),
+			[source({ centreHz: 868_950_000 })],
+		),
+	)
+	expect(plan.wanted[0]).toMatchObject({
+		channelHz: 868_950_000,
+		options: { targetSampleRate: 1_000_000 },
+	})
+})
+
+it("does not widen an 868 MHz band override in the US region", () => {
+	const plan = planPlacements(
+		input(
+			decoder({
+				type: "rtl433",
+				origin: "config",
+				bandRegion: "US",
+				band: { basis: "override", rangesHz: meterRange },
+			}),
+			[source({ centreHz: 868_950_000 })],
+		),
+	)
+	expect(plan.wanted[0]).toMatchObject({
+		options: { targetSampleRate: 1_000_000 },
 	})
 })

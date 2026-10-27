@@ -1,3 +1,4 @@
+import { BAND_DEFAULTS } from "../band-defaults.js"
 import {
 	ACARSDEC_CATALOGUE_MAX_CHANNELS,
 	DECODER_MAX_BANDPLAN_CHANNELS,
@@ -223,6 +224,7 @@ export function rtl433ChannelCandidate(
 	},
 	ranges: readonly ({ minHz: number; maxHz: number } | null | undefined)[],
 	target: number = RTL433_CHANNEL_TARGET_RATE_HZ,
+	widen = true,
 ): { hz: number; rateHz: number } | { overlap: boolean } {
 	const c = source.centreHz
 	const fs = source.sampleRateHz
@@ -257,6 +259,7 @@ export function rtl433ChannelCandidate(
 	}
 	const meterHz = RTL433_WMBUS_FREQUENCY_HZ
 	if (
+		widen &&
 		target >= RTL433_CHANNEL_TARGET_RATE_HZ &&
 		ranges.some(
 			r =>
@@ -660,10 +663,22 @@ export const planPlacements: PlacementPlanner = input => {
 						configured,
 					)
 				else if (d.type === "rtl433") {
+					const regional = BAND_DEFAULTS["rtl433"]
+					const region = d.bandRegion ?? d.band?.region?.code
+					const regionalRanges =
+						region && regional?.scope === "region"
+							? (regional.byRegion[region].rangesHz ?? [])
+							: []
+					const widen = regionalRanges.some(
+						r =>
+							r.minHz <= RTL433_WMBUS_FREQUENCY_HZ &&
+							r.maxHz >= RTL433_WMBUS_FREQUENCY_HZ,
+					)
 					let found = rtl433ChannelCandidate(
 						s,
 						Array.isArray(d.band?.rangesHz) ? d.band.rangesHz : [],
 						d.channelTargetRateHz,
+						widen,
 					)
 					// `always` and operator starts skip the band: the window itself.
 					if (!("hz" in found) && bandFree(d))
@@ -671,6 +686,7 @@ export const planPlacements: PlacementPlanner = input => {
 							s,
 							[{ minHz: centre - half, maxHz: centre + half }],
 							d.channelTargetRateHz,
+							false,
 						)
 					if ("hz" in found)
 						local.push({
@@ -915,7 +931,13 @@ export const planPlacements: PlacementPlanner = input => {
 				reach: c.reach,
 				origin: c.origin,
 				primary: i === 0,
-				costCores: placementCostCores(d.type, c.reach),
+				costCores: placementCostCores(
+					d.type,
+					c.reach,
+					typeof c.options?.["targetSampleRate"] === "number"
+						? c.options["targetSampleRate"]
+						: d.channelTargetRateHz,
+				),
 				sampleRateHz: c.source.sampleRateHz!,
 				...(c.options ? { options: c.options } : {}),
 				...(c.gatedSecondary && i > 0 ? { gated: true as const } : {}),
@@ -1008,6 +1030,52 @@ export const planPlacements: PlacementPlanner = input => {
 	// Global allocator (activity-plan.ts): every placement planned so far is
 	// mandatory; activity slots get what remains of the budget.
 	const mandatory = [...wanted, ...deferred]
+	// The policy already resolves host architecture/budget. Charge all mandatory
+	// placements, pending starts, shared bases and replay before optional widening.
+	// Reuse the allocator's accounting so a wider rtl433 channel cannot starve
+	// the old ISM placement on arm64 or any other constrained host.
+	for (const [i, p] of mandatory.entries()) {
+		const d = decoders.find(d => d.id === p.decoderId)
+		if (d?.type !== "rtl433" || p.reach !== "channel") continue
+		const remaining = allocateActivitySlots({
+			budgetCores: act.policy.budgetCores,
+			replayAllowanceCores: act.policy.replayAllowanceCores,
+			mandatory,
+			pending: act.pendingStarts,
+			plannedKeys: new Set(mandatory.map(p => p.key)),
+			groups: [],
+		}).remainingCores
+		if (remaining >= 0) continue
+		const s = input.sources.find(s => s.id === p.sourceId)
+		if (!s || !windowValid(s)) continue
+		let old = rtl433ChannelCandidate(
+			s,
+			d.band?.rangesHz ?? [],
+			d.channelTargetRateHz,
+			false,
+		)
+		if (!("hz" in old) && bandFree(d)) {
+			const half = (s.sampleRateHz! * s.usableFraction) / 2
+			old = rtl433ChannelCandidate(
+				s,
+				[{ minHz: s.centreHz! - half, maxHz: s.centreHz! + half }],
+				d.channelTargetRateHz,
+				false,
+			)
+		}
+		if (!("hz" in old) || old.rateHz >= Number(p.options?.["targetSampleRate"]))
+			continue
+		const fallback = {
+			...p,
+			key: placementKey(d.id, s.id, "channel", old.hz),
+			channelHz: old.hz,
+			costCores: placementCostCores(d.type, "channel", old.rateHz),
+			options: { ...p.options, targetSampleRate: old.rateHz },
+		}
+		mandatory[i] = fallback
+		const list = wanted.includes(p) ? wanted : deferred
+		list[list.indexOf(p)] = fallback
+	}
 	const keyOf = (g: ActivityGroup, hz: number) =>
 		placementKey(g.d.id, g.source.id, "channel", hz)
 	// Pending starts are capacity in use: deduplicated only against the

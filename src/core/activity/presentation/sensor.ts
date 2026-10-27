@@ -16,10 +16,9 @@ import {
 
 const sensorPayload = objectSchema({
 	model: asString,
-	mode: asString,
-	M: asString,
-	type_string: asString,
-	version: asNumber,
+	mode: asScalar,
+	M: asScalar,
+	type_string: asScalar,
 	id: asNumberOrString,
 	channel: asNumberOrString,
 	temperature_C: asNumber,

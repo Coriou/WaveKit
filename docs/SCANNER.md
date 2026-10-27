@@ -765,3 +765,6 @@ tuning-trust, timing and unique-observation association rules. Activity rows
 use the more specific `wmbus` protocol. The narrow replay captures do not meet
 the C/T uplink's 1.2 Msps minimum; identify these meters through live ambient
 output. See [decoder setup](DECODER-GUIDE.md#wireless-m-bus-meters-86895-mhz).
+
+Wireless M-Bus meter IDs and readings are personal data, stored like other sensor IDs.
+Validation so far uses synthetic fixtures; live meter decodes have not been observed.
