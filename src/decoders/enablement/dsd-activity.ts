@@ -19,11 +19,30 @@ export function dsdNoSyncCooldownMs(policy: ActivityPolicy): number {
 	)
 }
 
-/** Parser link events are sync evidence, including unverified hints (not identity proof). */
+/** A quiet run loses clean-sync protection at/past one cooldown from receipt. */
+export function dsdSyncProtectionUntil(
+	lastCleanMonoMs: number | null,
+	now: number,
+	policy: ActivityPolicy,
+): number | null {
+	if (
+		lastCleanMonoMs === null ||
+		!Number.isFinite(lastCleanMonoMs) ||
+		!Number.isFinite(now) ||
+		lastCleanMonoMs > now
+	)
+		return null
+	const until = lastCleanMonoMs + dsdNoSyncCooldownMs(policy)
+	return Number.isFinite(until) && now < until ? until : null
+}
+
+/** Only explicitly checked, CRC/FEC-clean parser lines renew protection. */
 const SyncSchema = z.object({
 	protocol: z.enum(["dmr", "p25", "nxdn", "ysf", "dpmr", "dstar"]),
 	at: z.number().finite(),
-	crcErr: z.boolean(),
+	crcErr: z.literal(false),
+	verified: z.literal(true),
+	fecErrs: z.literal(0).optional(),
 })
 export function isDsdActivitySync(line: unknown): boolean {
 	return SyncSchema.safeParse(line).success

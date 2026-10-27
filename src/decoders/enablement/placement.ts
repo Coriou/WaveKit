@@ -983,6 +983,26 @@ export const planPlacements: PlacementPlanner = input => {
 					}
 					queries.push(query)
 					snapshot = readySnapshot(query, act.snapshots)
+					if (snapshot && d.type === "dsd-fme") {
+						const protectedHz = new Set(
+							act.incumbents
+								.filter(
+									inc =>
+										inc.decoderId === d.id &&
+										inc.sourceId === c.source.id &&
+										inc.syncSeen === true &&
+										inc.syncUntilMonoMs !== undefined &&
+										act.nowMonoMs < inc.syncUntilMonoMs,
+								)
+								.map(inc => inc.hz),
+						)
+						snapshot = {
+							...snapshot,
+							channels: snapshot.channels.map(ch =>
+								protectedHz.has(ch.hz) ? { ...ch, excluded: false } : ch,
+							),
+						}
+					}
 				}
 				local.push({
 					d,
@@ -1102,6 +1122,15 @@ export const planPlacements: PlacementPlanner = input => {
 	const demotions = new Map(act.demotions?.map(d => [d.key, d.untilMonoMs]))
 	groups.forEach((g, i) => {
 		const times = (windowMoves.get(g.source.id) ?? []).sort((a, b) => a - b)
+		if (g.d.type === "dsd-fme")
+			for (const inc of act.incumbents)
+				if (
+					inc.decoderId === g.d.id &&
+					inc.sourceId === g.source.id &&
+					inc.syncSeen
+				) {
+					later(inc.syncUntilMonoMs)
+				}
 		const demotedHz = new Set<number>()
 		if (g.d.type === "dsd-fme") {
 			for (const hz of g.order) {

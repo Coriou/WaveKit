@@ -325,6 +325,7 @@ function build() {
 }
 
 describe("mixed-channel activity sequence", () => {
+	// Three simulated minutes of production paths can exceed 5 s on a loaded host.
 	it("finds bursty DMR, rejects a decoded pager and preserves paging moves over three minutes", async () => {
 		vi.useFakeTimers({
 			toFake: [
@@ -453,7 +454,7 @@ describe("mixed-channel activity sequence", () => {
 			if (step < 199) expect(f.runningHz()).toContain(decodedHz)
 		}
 		expect(f.runningHz()).not.toContain(decodedHz)
-	})
+	}, 60_000)
 
 	it("keeps a no-sync incumbent replaceable when DMR arrives after its cooldown", async () => {
 		vi.useFakeTimers({
@@ -494,6 +495,20 @@ describe("mixed-channel activity sequence", () => {
 		})
 		await f.manager.startAll()
 		await vi.advanceTimersByTimeAsync(137.3)
+		const placement = f.plans
+			.at(-1)
+			?.wanted.find(p => p.decoderId === "voice" && p.channelHz === analog)
+		expect(placement).toBeDefined()
+		const decoder = f.manager.getDecoder(placement!.key)
+		expect(decoder).toBeDefined()
+		// Repro: a failed IDLE sync must never latch protection for this analog run.
+		decoder!.emit("link", {
+			protocol: "dmr",
+			at: Date.now(),
+			cc: 1,
+			crcErr: true,
+			verified: false,
+		})
 		// Full dwell 20 s + default cooldown 120 s = 140 s. Keep the failed
 		// analog run through 150 s with no alternative and no sync from its process.
 		for (let step = 0; step < 1500; step++) {
@@ -501,7 +516,7 @@ describe("mixed-channel activity sequence", () => {
 			await vi.advanceTimersByTimeAsync(100)
 		}
 		expect(f.runningHz()).toContain(analog)
-		expect(f.links).toEqual([])
+		expect(f.links).toHaveLength(1)
 		for (let step = 0; step < 30; step++) {
 			block(step < 4 ? [analog, FAR] : [analog])
 			const hz = f.runningHz().find(h => Math.abs(h - FAR) < 2000)

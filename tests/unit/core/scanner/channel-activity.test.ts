@@ -887,6 +887,7 @@ describe("dsd-fme non-voice decode exclusion", () => {
 		ranker.ingestEpoch("rtl", "e1", 1)
 		ranker.ingestBlock("rtl", "e1", block([CENTRE]))
 		ranker.noteDecode("rtl", CENTRE, protocol)
+		ranker.noteDecode("rtl", CENTRE, "pocsag")
 		const q = query({
 			decoderType: "dsd-fme",
 			protocols: [protocol],
@@ -898,8 +899,8 @@ describe("dsd-fme non-voice decode exclusion", () => {
 		ranker.dispose()
 	})
 
-	it.each([6250, 6251])(
-		"excludes all overlapping passbands, including ambiguous candidates, at offset %i Hz",
+	it.each([3124, 3125, 3126, 6250, 6251])(
+		"excludes only the decoded centre within width / 4 at offset %i Hz",
 		offset => {
 			const { ranker, clock } = setup()
 			ranker.ingestEpoch("rtl", "e1", 1)
@@ -911,7 +912,55 @@ describe("dsd-fme non-voice decode exclusion", () => {
 				candidatesHz: [CENTRE, CENTRE + 12_500],
 			})
 			const channels = ranker.port.snapshot([q], clock.now())[0]!.channels
-			expect(channels.map(c => c.excluded)).toEqual([offset <= 6250, true])
+			expect(channels.map(c => c.excluded)).toEqual([offset <= 3125, false])
+			ranker.dispose()
+		},
+	)
+
+	it.each([0, 3125, 6250])(
+		"recent DMR wins over paging at H + %i Hz",
+		offset => {
+			const { ranker, clock } = setup()
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			ranker.noteDecode("rtl", CENTRE, "dmr")
+			clock.advance(1)
+			ranker.noteDecode("rtl", CENTRE + offset, "pocsag")
+			const q = query({
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				candidatesHz: [CENTRE],
+			})
+			expect(
+				ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+			).toBe(false)
+			// Renewing DMR keeps winning even though paging was decoded more recently.
+			ranker.noteDecode("rtl", CENTRE, "dmr")
+			expect(
+				ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+			).toBe(false)
+			ranker.dispose()
+		},
+	)
+
+	it.each([899_999, 900_000, 900_001])(
+		"voice override expires at/past 900 s: %i",
+		age => {
+			const { ranker, clock } = setup()
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			ranker.noteDecode("rtl", CENTRE, "dmr")
+			clock.advance(age)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			ranker.noteDecode("rtl", CENTRE, "pocsag")
+			const q = query({
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				candidatesHz: [CENTRE],
+			})
+			expect(
+				ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
+			).toBe(age >= 900_000)
 			ranker.dispose()
 		},
 	)

@@ -77,8 +77,10 @@ export interface ActivityIncumbent {
 	primary: boolean
 	/** Its successful start, or when it was first planned while never started. */
 	dwellSinceMonoMs: number
-	/** A sync line received by this exact running placement. */
+	/** Recent checked, CRC/FEC-clean sync from this exact running placement. */
 	syncSeen?: boolean
+	/** Monotonic expiry supplied by the manager; re-evaluate even in quiet spectrum. */
+	syncUntilMonoMs?: number
 }
 
 /** A placement whose process start is in flight (it holds capacity already). */

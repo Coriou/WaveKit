@@ -117,6 +117,7 @@ import type {
 } from "./enablement/activity-plan.js"
 import {
 	DsdActivityDemotions,
+	dsdSyncProtectionUntil,
 	isDsdActivitySync,
 } from "./enablement/dsd-activity.js"
 import { ACTIVITY_MAX_OBSERVED } from "./enablement/activity-contract.js"
@@ -615,7 +616,7 @@ export class DecoderManager extends EventEmitter {
 		{
 			chosenMonoMs: number
 			startedMonoMs: number | null
-			syncSeen: boolean
+			cleanSyncMonoMs: number | null
 			demoted: boolean
 		}
 	>()
@@ -1835,14 +1836,14 @@ export class DecoderManager extends EventEmitter {
 				this.activitySince.set(placement.key, {
 					chosenMonoMs: now,
 					startedMonoMs: running ? now : null,
-					syncSeen: false,
+					cleanSyncMonoMs: null,
 					demoted: false,
 				})
 			else if (running && since.startedMonoMs === null)
 				since.startedMonoMs = now
 			else if (!running && !state.processStartPending) {
 				since.startedMonoMs = null
-				since.syncSeen = false
+				since.cleanSyncMonoMs = null
 				since.demoted = false
 			}
 		}
@@ -1888,13 +1889,22 @@ export class DecoderManager extends EventEmitter {
 			)
 				continue
 			const since = this.activitySince.get(placement.key)
+			const syncUntilMonoMs =
+				state.config.type === "dsd-fme"
+					? dsdSyncProtectionUntil(
+							since?.cleanSyncMonoMs ?? null,
+							now,
+							activity.policy,
+						)
+					: null
+			const syncSeen = syncUntilMonoMs !== null
 			if (
 				state.config.type === "dsd-fme" &&
 				placement.origin === "activity" &&
 				running &&
 				since !== undefined &&
 				since.startedMonoMs !== null &&
-				!since.syncSeen &&
+				!syncSeen &&
 				!since.demoted &&
 				now - since.startedMonoMs >= activity.policy.dwellMs
 			) {
@@ -1902,7 +1912,9 @@ export class DecoderManager extends EventEmitter {
 				since.demoted = true
 			}
 			incumbents.push({
-				...(since?.syncSeen ? { syncSeen: true } : {}),
+				...(syncSeen
+					? { syncSeen: true, syncUntilMonoMs: syncUntilMonoMs! }
+					: {}),
 				key: placement.key,
 				decoderId: placement.decoderId,
 				sourceId: placement.sourceId,
@@ -3626,12 +3638,21 @@ export class DecoderManager extends EventEmitter {
 					this.refreshActivitySince(this.activityMonoNow())
 					since = this.activitySince.get(placement.key)
 				}
-				// A run's first sync changes placement policy; later lines need no pass
-				// or scan of the other decoders on this parser's output path.
-				if (since && !since.syncSeen) {
-					since.syncSeen = true
+				if (since) {
+					// Renew on the manager's monotonic clock, never the event's wall time.
+					const now = this.activityMonoNow()
+					const wasProtected =
+						dsdSyncProtectionUntil(
+							since.cleanSyncMonoMs,
+							now,
+							this.config.enablement.activity.policy,
+						) !== null
+					since.cleanSyncMonoMs = now
+					since.demoted = false
 					this.dsdActivityDemotions.clear(placement.key)
-					this.requestActivityPass()
+					// The existing expiry timer re-reads the renewed deadline; steady
+					// checked output does not need a planner pass for every parser line.
+					if (!wasProtected) this.requestActivityPass()
 				}
 			}
 			const binding = {
@@ -3727,7 +3748,7 @@ export class DecoderManager extends EventEmitter {
 					chosenMonoMs:
 						this.activitySince.get(state.placement.key)?.chosenMonoMs ?? now,
 					startedMonoMs: now,
-					syncSeen: false,
+					cleanSyncMonoMs: null,
 					demoted: false,
 				})
 			}

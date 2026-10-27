@@ -347,24 +347,35 @@ dsd-fme excludes a channel while the ranker has a decode of a non-digital-voice
 protocol within its existing 15-minute decode-hot window (strictly younger than
 900,000 ms). DMR, P25, NXDN, YSF, dPMR and D-Star remain voice candidates;
 paging, APRS, ACARS and other protocols do not. This evidence travels through the
-activity snapshot, including decode history pulled by the ranker. Every candidate
-within half its channel width of that decode is excluded (including the exact
-boundary); overlapping candidates are all excluded even when positive decode
-credit would be ambiguous.
+activity snapshot, including decode history pulled by the ranker. Association
+requires `|candidate centre − decoded channel centre| ≤ channelWidthHz / 4`:
+3,125 Hz for a 12,500 Hz channel, including that boundary and narrower than half
+a channel. Ambiguous associations exclude neither candidate. A recent checked
+voice decode on that same centre wins over non-voice evidence for the same
+900,000 ms window, regardless of which decode came later. Recent verified sync
+on the exact running placement also overrides exclusion while its protection lasts.
+Thus a pager at H + 6,250 Hz cannot suppress DMR at H.
 
-A running dsd-fme activity slot with no parser sync line after its full dwell is
+A running dsd-fme activity slot without clean checked sync after its full dwell is
 demoted for `max(60,000, dwellMs × max(1, maxMovesPerMinute))` milliseconds:
 with the defaults, `max(60,000, 20,000 × 6) = 120,000 ms`. This allows six other
 full dwells before retrying a failed channel. A zero move budget still holds
 for a full 60,000 ms window (or one dwell, if longer). The cooldown applies strictly
 before its deadline; at or after it a fresh run on the channel may compete again.
-An incumbent that still has no sync stays demoted until it receives sync or
-leaves, even after cooldown expiry; continuous energy cannot revive that failed
-run when a challenger arrives late. Demoted channels cannot challenge or fill free slots; replacing a demoted incumbent
-still spends the shared per-source move budget. There are at most 256 demotions
-(one quarter of the 1,024-candidate query cap), oldest insertion dropped first.
-A sync line from the exact running placement clears its demotion and protects
-that placement between bursts; sync is a protocol hint, not an identity proof.
+An incumbent without recent clean sync stays demoted until clean sync or a move,
+even after cooldown expiry; continuous energy cannot revive that failed run when
+a challenger arrives late. Demoted channels cannot challenge or fill free slots;
+replacing a demoted incumbent still spends the shared per-source move budget.
+There are at most 256 demotions (one quarter of the 1,024-candidate query cap),
+oldest insertion dropped first.
+
+Only explicitly `verified: true`, `crcErr: false` lines with absent or zero
+`fecErrs` clear demotion and renew protection for the exact running placement.
+Protection lasts strictly until `lastCleanSyncMonoMs + cooldownMs` (120 seconds
+with defaults), and expires at that deadline even without new spectrum events.
+Repeated clean evidence renews it; a restart resets it. Weak sync/CC hints and
+CRC/FEC failures never renew protection: their only protection is the run's
+initial `dwellMs` (20 seconds by default), expiring at or after the dwell boundary.
 
 **Busy channels get the decoders.** Paging (POCSAG/FLEX) and digital-voice (DMR and similar) decoders can only run on a few channels of a band at once. The scanner ranks every channel those decoders could use by recent activity, and the decoder planner puts its spare channel slots on the busiest ones instead of only the ones nearest the tuned centre:
 

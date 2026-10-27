@@ -3,6 +3,7 @@ import {
 	DSD_MAX_DEMOTIONS,
 	DsdActivityDemotions,
 	dsdNoSyncCooldownMs,
+	dsdSyncProtectionUntil,
 	isDsdActivitySync,
 } from "../../../../src/decoders/enablement/dsd-activity.js"
 import {
@@ -33,6 +34,22 @@ describe("dsd-fme no-sync dwell cooldown", () => {
 		},
 	)
 
+	it.each([119_999, 120_000, 120_001])(
+		"clean sync expires at/past its bound: %i",
+		age => {
+			expect(dsdSyncProtectionUntil(137.3, 137.3 + age, policy)).toBe(
+				age < 120_000 ? 120_137.3 : null,
+			)
+		},
+	)
+
+	it.each([null, NaN, Infinity, 1000])(
+		"missing/invalid/future clean sync is unprotected: %s",
+		last => {
+			expect(dsdSyncProtectionUntil(last, 100, policy)).toBeNull()
+		},
+	)
+
 	it("keeps exactly 256 entries and drops the oldest past that bound", () => {
 		const notes = new DsdActivityDemotions()
 		for (let i = 0; i < DSD_MAX_DEMOTIONS; i++) notes.note(String(i), i, policy)
@@ -46,10 +63,17 @@ describe("dsd-fme no-sync dwell cooldown", () => {
 		expect(notes.snapshot(300)).toHaveLength(255)
 	})
 
-	it("accepts parser sync hints but safely ignores malformed evidence", () => {
+	it("accepts only checked CRC/FEC-clean sync evidence", () => {
 		for (const protocol of ["dmr", "p25", "nxdn", "ysf", "dpmr", "dstar"])
-			expect(isDsdActivitySync({ protocol, at: 7, crcErr: false })).toBe(true)
+			expect(
+				isDsdActivitySync({ protocol, at: 7, crcErr: false, verified: true }),
+			).toBe(true)
 		for (const line of [
+			{ protocol: "dmr", at: 7, crcErr: true, verified: true },
+			{ protocol: "dmr", at: 7, crcErr: false, verified: true, fecErrs: 1 },
+			{ protocol: "dmr", at: 7, crcErr: false, verified: true, fecErrs: -1 },
+			{ protocol: "dmr", at: 7, crcErr: false },
+			{ protocol: "dmr", at: 7, crcErr: false, verified: false },
 			null,
 			{},
 			{ protocol: "pocsag", at: 7, crcErr: false },

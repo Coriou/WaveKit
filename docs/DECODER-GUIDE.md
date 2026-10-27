@@ -674,7 +674,15 @@ with CC unknown while that header awaits its closing-sync check.
 NXDN accepts only current CRC-checked ` RAN 03  FACCH2`/UDCH output
 (`nxdn_deperm.c:1390–1437`); failure omits RAN, and SACCH/CAC print cached RAN.
 Other protocols also require a known checked print format;
-unknown formats default to unverified. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
+unknown formats default to unverified. Activity placement protection follows the
+same clean check: only `verified: true`, `crcErr: false`, absent/zero `fecErrs`
+renew it. Each clean line protects the exact running placement strictly before
+`lastCleanSyncMonoMs + max(60,000, dwellMs × max(1, maxMovesPerMinute))`
+(default 120 seconds). Weak hints and failed checks never extend the initial dwell
+(default 20 seconds); at/past expiry, normal no-sync demotion and the shared move
+budget apply. Recent checked voice decodes override non-voice exclusion; exclusion
+associates only within one quarter of the channel width (3,125 Hz at 12,500 Hz),
+so adjacent paging does not remove confirmed DMR. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
 
 ### readsb aircraft evidence
 
