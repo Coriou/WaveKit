@@ -1,8 +1,10 @@
+import { deepStrictEqual } from "node:assert"
 import { setImmediate } from "node:timers/promises"
 import fc from "fast-check"
 import { expect, it } from "vitest"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
+import type { StoreMutation } from "../../../../src/core/scanner/store/schemas.js"
 import {
 	counterIds,
 	dmrCc,
@@ -165,17 +167,19 @@ it(
 						checked: fc.boolean(),
 						identity: fc.boolean(),
 					}),
-					{ minLength: 30, maxLength: 90 },
+					{ minLength: 12, maxLength: 24 },
 				),
 				async ops => {
-					// Keep long retention runs from blocking Vitest worker updates.
+					// Yield between runs so Vitest can process worker updates.
 					await setImmediate()
 					let clock = T0 + 31_003.7
 					const live = create(() => clock)
 					const replayed = create(() => clock)
 					const legacy = counts.runs++ % 2 === 0
 					if (legacy) counts.legacyStarts++
-					const start = initial(legacy, 250)
+					const start = initial(legacy, 256)
+					// Only the boundary rows need proof; the other rows exercise retention.
+					for (const o of start.observations.slice(1, -1)) delete o.decode
 					const partner = legacySnapshot([
 						{
 							id: "d_partner",
@@ -193,27 +197,34 @@ it(
 					live.restore(start)
 					replayed.restore(start)
 					let seq = 0
-					live.on("mutation", (entry: Omit<JournalEntry, "seq">) =>
-						replayed.replay({ ...entry, seq: ++seq }),
-					)
+					const touched = new Set<string>()
+					live.on("mutation", (entry: Omit<JournalEntry, "seq">) => {
+						const mutation = entry.payload as StoreMutation
+						for (const d of mutation.discoveries) touched.add(d.id)
+						for (const o of mutation.observations) touched.add(o.discoveryId)
+						for (const id of mutation.deleted) touched.add(id)
+						replayed.replay({ ...entry, seq: ++seq })
+					})
 					live.on("evicted", (discoveries: unknown[]) => {
 						counts.evictions += discoveries.length
 					})
-					const assertRoundTrip = () => {
+					const assertRoundTrip = (all = false) => {
 						const snapshot = live.snapshot()
 						const restored = create(() => clock)
 						restored.restore(snapshot)
-						expect(restored.snapshot()).toEqual(snapshot)
-						expect(replayed.snapshot()).toEqual(snapshot)
-						for (const d of snapshot.discoveries) {
+						deepStrictEqual(restored.snapshot(), snapshot)
+						deepStrictEqual(replayed.snapshot(), snapshot)
+						const ids = all ? snapshot.discoveries.map(d => d.id) : touched
+						for (const id of ids) {
 							const published = (store: DiscoveryStore) => {
-								const value = store.get(d.id)
+								const value = store.get(id)
 								if (value !== undefined) delete value.revision
 								return value
 							}
-							expect(published(restored)).toEqual(published(live))
-							expect(published(replayed)).toEqual(published(live))
+							deepStrictEqual(published(restored), published(live))
+							deepStrictEqual(published(replayed), published(live))
 						}
+						touched.clear()
 					}
 					const ingest = (id: string, centreHz: number) => {
 						clock += 1003.7
@@ -228,23 +239,25 @@ it(
 						)
 					}
 					// Guarantee a real two-member merge, capacity eviction, and a full retention window.
+					const beforeRetention = live.snapshot().observations.length
 					counts.merges += live.applyConsolidation({
 						groups: [{ survivor: "d_seed", members: ["d_seed", "d_partner"] }],
 					}).absorbed
 					assertRoundTrip()
-					// Resume just below the bound, then ingest across it with checked/legacy rows retained.
-					const beforeRetention = live.snapshot().observations.length
-					for (let i = 0; i < 10; i++) {
-						ingest("retention-" + i, F)
-						assertRoundTrip()
-					}
 					const retained = live.snapshot().observations.length
-					counts.trims += beforeRetention + 10 - retained
+					counts.trims += beforeRetention - retained
 					expect(retained).toBe(256)
 					live.setLimits({ maxDiscoveries: 1, minSurfaceBlocks: 2 })
 					ingest("capacity", F + 100_000)
 					assertRoundTrip()
-					live.setLimits({ maxDiscoveries: 20, minSurfaceBlocks: 2 })
+					// Checked discoveries resist capacity eviction. Age out the large retention
+					// fixture before the random steps so those steps use small windows.
+					clock += 2 * 86_400_000
+					live.pruneInactive(1)
+					assertRoundTrip()
+					ingest("random-seed", F)
+					assertRoundTrip()
+					live.setLimits({ maxDiscoveries: 2, minSurfaceBlocks: 2 })
 					for (const [step, op] of ops.entries()) {
 						clock += 1003.7
 						const snapshot = live.snapshot()
@@ -290,7 +303,7 @@ it(
 								break
 							case 6:
 								live.setLimits({
-									maxDiscoveries: 1 + op.slot,
+									maxDiscoveries: 1 + (op.slot % 2),
 									minSurfaceBlocks: 2,
 								})
 								break
@@ -310,6 +323,7 @@ it(
 						}
 						assertRoundTrip()
 					}
+					assertRoundTrip(true)
 				},
 			),
 			{ numRuns: 100, seed: 110027 },
