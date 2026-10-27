@@ -29,6 +29,10 @@ const SAMPLES = Math.round(RATE * SECONDS)
 const DEVIATION_HZ = 5_000
 const SKIP_S = 0.1
 const MAX_LAG_S = 0.2
+// Each case synthesizes 1.6 × 2,048,000 = 3,276,800 IQ samples, performs
+// ~60 M FIR operations and ~45 M correlation products in JS, plus a child run.
+// At eight contending workers, 8 × 5 s CPU + 10 s child/IO allowance < 60 s.
+const AB_TIMEOUT_MS = 60_000
 
 const binary = join(
 	process.cwd(),
@@ -52,42 +56,54 @@ describe.skipIf(binaryMissing)(
 		})
 
 		for (const tone of [67, 100, 250.3]) {
-			it(`NFM CTCSS ${tone} Hz correlates and is identified`, async () => {
-				const cu8 = synthCtcss(tone)
+			it(
+				`NFM CTCSS ${tone} Hz correlates and is identified`,
+				async () => {
+					const cu8 = synthCtcss(tone)
+					const rust = await rustAudio(engines, cu8, "nfm")
+					const reference = referenceDemod(cu8, "nfm")
+					const score = bestNormalizedCorrelation(rust, reference)
+					expect(
+						score.corr,
+						`normalised correlation ${score.corr} at lag ${score.lag} samples (rust ${rust.length}, reference ${reference.length} samples)`,
+					).toBeGreaterThanOrEqual(0.98)
+					const detected = detect(rust)
+					expect(detected.ctcssHz).toBe(tone)
+				},
+				AB_TIMEOUT_MS,
+			)
+		}
+
+		it(
+			"NFM DCS 023 correlates and is identified",
+			async () => {
+				const cu8 = synthDcs()
 				const rust = await rustAudio(engines, cu8, "nfm")
 				const reference = referenceDemod(cu8, "nfm")
 				const score = bestNormalizedCorrelation(rust, reference)
 				expect(
 					score.corr,
-					`normalised correlation ${score.corr} at lag ${score.lag} samples (rust ${rust.length}, reference ${reference.length} samples)`,
+					`normalised correlation ${score.corr} at lag ${score.lag} samples`,
 				).toBeGreaterThanOrEqual(0.98)
-				const detected = detect(rust)
-				expect(detected.ctcssHz).toBe(tone)
-			}, 5_000)
-		}
+				expect(detect(rust).dcs).toEqual({ code: "023", polarity: "normal" })
+			},
+			AB_TIMEOUT_MS,
+		)
 
-		it("NFM DCS 023 correlates and is identified", async () => {
-			const cu8 = synthDcs()
-			const rust = await rustAudio(engines, cu8, "nfm")
-			const reference = referenceDemod(cu8, "nfm")
-			const score = bestNormalizedCorrelation(rust, reference)
-			expect(
-				score.corr,
-				`normalised correlation ${score.corr} at lag ${score.lag} samples`,
-			).toBeGreaterThanOrEqual(0.98)
-			expect(detect(rust).dcs).toEqual({ code: "023", polarity: "normal" })
-		}, 5_000)
-
-		it("AM 1 kHz m=0.5 correlates", async () => {
-			const cu8 = synthAm()
-			const rust = await rustAudio(engines, cu8, "am")
-			const reference = referenceDemod(cu8, "am")
-			const score = bestNormalizedCorrelation(rust, reference)
-			expect(
-				score.corr,
-				`normalised correlation ${score.corr} at lag ${score.lag} samples`,
-			).toBeGreaterThanOrEqual(0.95)
-		}, 5_000)
+		it(
+			"AM 1 kHz m=0.5 correlates",
+			async () => {
+				const cu8 = synthAm()
+				const rust = await rustAudio(engines, cu8, "am")
+				const reference = referenceDemod(cu8, "am")
+				const score = bestNormalizedCorrelation(rust, reference)
+				expect(
+					score.corr,
+					`normalised correlation ${score.corr} at lag ${score.lag} samples`,
+				).toBeGreaterThanOrEqual(0.95)
+			},
+			AB_TIMEOUT_MS,
+		)
 	},
 )
 
@@ -158,10 +174,9 @@ async function rustAudio(
 	})
 	input.end(cu8)
 	await exited
-	await Promise.race([
-		audioClosed,
-		new Promise(resolve => setTimeout(resolve, 5000)),
-	])
+	// The per-test deadline reports a missing close as a failure. A raced sleep
+	// silently accepted truncated audio and left a live timer behind on success.
+	await audioClosed
 	const audio = Buffer.concat(chunks)
 	const n = Math.floor(audio.length / 4)
 	const copy = Buffer.from(audio.subarray(0, n * 4))

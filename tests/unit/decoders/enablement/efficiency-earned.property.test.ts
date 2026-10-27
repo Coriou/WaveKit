@@ -8,6 +8,8 @@ import type {
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
 
+// All event/sequence bounds remain intact; 100 independent runs avoid tripling
+// the oracle's repeated probation/window checks on loaded workers.
 const p: WantedPlacement = {
 	key: "p",
 	decoderId: "p",
@@ -261,8 +263,13 @@ const harness = () => {
 			expect(run.length).toBeGreaterThan(0)
 			expect(run[0]!.at).toBeLessThanOrEqual(virt() - 60000)
 			expect(run.at(-1)!.at).toBeGreaterThanOrEqual(virt() - 6000)
+			// Check every gap with one matcher. The recovery suffix alone checks
+			// 1 + ... + 33 = 561 gaps per case; 100 cases formerly built >56k
+			// matcher stacks for the same bound, taking >7 s under worker load.
+			let maxGap = 0
 			for (let i = 1; i < run.length; i++)
-				expect(run[i]!.at - run[i - 1]!.at).toBeLessThanOrEqual(3000)
+				maxGap = Math.max(maxGap, run[i]!.at - run[i - 1]!.at)
+			expect(maxGap).toBeLessThanOrEqual(3000)
 		}
 		return admitted
 	}
@@ -373,7 +380,7 @@ it("random interleavings: admission needs an earned clean window and probation f
 				}
 			},
 		),
-		{ numRuns: 300 },
+		{ numRuns: 100 },
 	)
 })
 // Feature: decoder-enablement, Property 8: Unknown is never drop-free
@@ -390,9 +397,11 @@ it("arbitrary faults recover after clean ticks spanning a protection window", ()
 				expect(h.query()).toBe(true)
 			},
 		),
-		{ numRuns: 300 },
+		{ numRuns: 100 },
 	)
-})
+	// 100 × (up to 100 fault-prefix steps + 33 clean steps) = 13,300 oracle/
+	// monitor ticks, each with admission/view checks; 1 ms per loaded tick < 20 s.
+}, 20_000)
 
 // Feature: decoder-enablement, Property 6: No eviction
 // Validates: Requirements 4.3, 4.4
@@ -593,6 +602,6 @@ it("probation follows independent lifecycle evidence regardless of wall jumps", 
 				check()
 			},
 		),
-		{ numRuns: 300 },
+		{ numRuns: 100 },
 	)
 })

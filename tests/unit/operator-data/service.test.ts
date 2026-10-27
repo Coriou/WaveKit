@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import {
+	mkdtemp,
+	open as openFile,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 import { arch, cpus, platform, release, tmpdir } from "node:os"
 import { join } from "node:path"
 import { performance } from "node:perf_hooks"
 import fc from "fast-check"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { snapshotToken } from "../../../src/operator-data/domain.js"
 import {
 	encodeSnapshot,
@@ -18,12 +25,27 @@ import type { StorageStage } from "../../../src/operator-data/storage.js"
 
 const roots: string[] = []
 const services: OperatorDataService[] = []
+const unblock: (() => void)[] = []
+const properties: Promise<unknown>[] = []
+let tearingDown = false
+beforeEach(() => {
+	tearingDown = false
+})
+function trackProperty(operation: Promise<unknown>) {
+	properties.push(operation)
+	return operation
+}
 afterEach(async () => {
+	// Vitest timeouts don't cancel an async fast-check run. Stop admitting cases,
+	// release gates and await the current case BEFORE closing writers/removing roots.
+	tearingDown = true
+	for (const release of unblock.splice(0)) release()
+	await Promise.allSettled(properties.splice(0))
+	await Promise.all(services.splice(0).map(service => service.close()))
 	await Promise.all(
-		services.splice(0).map(service => service.close().catch(() => undefined)),
-	)
-	await Promise.all(
-		roots.splice(0).map(path => rm(path, { recursive: true, force: true })),
+		roots
+			.splice(0)
+			.map(path => rm(path, { recursive: true, force: true, maxRetries: 5 })),
 	)
 })
 async function root() {
@@ -64,6 +86,7 @@ function patch(
 function blockedStage() {
 	const entered = gate()
 	const blocked = gate()
+	unblock.push(blocked.release)
 	let armed = false
 	const stage = async (stage: StorageStage, phase: string) => {
 		if (armed && stage === "directory-sync" && phase === "before") {
@@ -254,48 +277,73 @@ describe("bounded durable operator-data service", () => {
 	// Feature: operator-data, Property 9: Bounded lifecycle
 	// Validates: Requirements 4.6–4.7
 	it("bounds admission and drains all accepted operations before releasing ownership over 100 cases", async () => {
-		await fc.assert(
-			fc.asyncProperty(fc.integer({ min: 0, max: 36 }), async count => {
-				const path = await root()
-				const block = blockedStage()
-				const service = await open(path, { storageStage: block.stage })
-				const prior = service.snapshot()
-				block.arm()
-				const active = service.mutate(patch(prior))
-				await block.entered.promise
-				const waiting = Array.from({ length: count }, () =>
-					service.mutate(patch(prior, 1)),
-				)
-				// Attach every rejection handler before releasing the gate.
-				const settled = Promise.allSettled(waiting)
-				const closing = service.close()
-				expect(service.close()).toBe(closing)
-				await expect(service.mutate(patch(prior))).rejects.toMatchObject(
-					unavailable,
-				)
-				await expect(open(path)).rejects.toMatchObject(unavailable)
-				block.blocked.release()
-				await active
-				const results = await settled
-				expect(
-					results.filter(result => result.status === "fulfilled"),
-				).toHaveLength(Math.min(count, 32))
-				for (const result of results.slice(32))
-					expect(result).toMatchObject({ status: "rejected", reason: busy })
-				await closing
-				expect(() => service.snapshot()).toThrow(
-					"Operator data is unavailable.",
-				)
-				const reopened = await open(path)
-				expect(reopened.snapshot()).toMatchObject({
-					storeId: prior.storeId,
-					revision: 1,
-					preferenceOverrides: { units: "metric" },
-				})
-				await reopened.close()
-			}),
-			{ numRuns: 100 },
-		)
+		// Reuse the durable directory across cases: each case still closes, rejects a
+		// competing owner, reopens and verifies persisted state. Creating an empty
+		// store and closing a second idle owner 100 times only repeated startup fsyncs.
+		const path = await root()
+		// This property checks admission/draining/ownership, not physical durability.
+		// Keep real files, locks, writes, renames and closes, but omit repeated device
+		// flushes. All other cases (including ten maximum-state mutations) use fsync.
+		const probe = await openFile(join(path, "sync-probe"), "w")
+		const handles = Object.getPrototypeOf(probe) as Pick<FileHandle, "sync">
+		await probe.close()
+		const sync = vi.spyOn(handles, "sync").mockResolvedValue(undefined)
+		try {
+			let block = blockedStage()
+			const storageStage: NonNullable<
+				OperatorDataServiceOptions["storageStage"]
+			> = (stage, phase) => block.stage(stage, phase)
+			let service = await open(path, { storageStage })
+			await trackProperty(
+				fc.assert(
+					fc.asyncProperty(fc.integer({ min: 0, max: 36 }), async count => {
+						if (tearingDown) return
+						block = blockedStage()
+						const prior = service.snapshot()
+						block.arm()
+						const units =
+							prior.preferenceOverrides.units === "metric"
+								? "imperial"
+								: "metric"
+						const active = service.mutate(patch(prior, prior.revision, units))
+						await block.entered.promise
+						const waiting = Array.from({ length: count }, () =>
+							service.mutate(patch(prior, prior.revision + 1, units)),
+						)
+						// Attach every rejection handler before releasing the gate.
+						const settled = Promise.allSettled(waiting)
+						const closing = service.close()
+						expect(service.close()).toBe(closing)
+						await expect(service.mutate(patch(prior))).rejects.toMatchObject(
+							unavailable,
+						)
+						await expect(open(path)).rejects.toMatchObject(unavailable)
+						block.blocked.release()
+						await active
+						const results = await settled
+						expect(
+							results.filter(result => result.status === "fulfilled"),
+						).toHaveLength(Math.min(count, 32))
+						for (const result of results.slice(32))
+							expect(result).toMatchObject({ status: "rejected", reason: busy })
+						await closing
+						expect(() => service.snapshot()).toThrow(
+							"Operator data is unavailable.",
+						)
+						const reopened = await open(path, { storageStage })
+						expect(reopened.snapshot()).toMatchObject({
+							storeId: prior.storeId,
+							revision: prior.revision + 1,
+							preferenceOverrides: { units },
+						})
+						service = reopened
+					}),
+					{ numRuns: 100 },
+				),
+			)
+		} finally {
+			sync.mockRestore()
+		}
 	}, 60000)
 
 	it("drains changed queued work on close even when responses are discarded; has no implicit cancellation", async () => {
@@ -579,5 +627,7 @@ describe("bounded durable operator-data service", () => {
 				},
 			}),
 		)
-	})
+		// 10 mutations × 256 maximum-size records × repeated boundary validation,
+		// cloning and encoding, plus real fsyncs: budget 2 s per mutation + 10 s setup.
+	}, 30_000)
 })

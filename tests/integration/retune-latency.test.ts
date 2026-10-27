@@ -180,7 +180,7 @@ interface RetuneResult {
 	oldContentBlocks: number
 }
 
-/** One operator retune; watches the blocks published during `windowMs` after the command. */
+/** One retune; structural mode observes `windowMs` of samples, bench mode wall time. */
 async function retune(
 	rig: Rig,
 	target: number,
@@ -190,7 +190,26 @@ async function retune(
 	const from = rig.blocks.length
 	const sentAt = performance.now()
 	await rig.tuner.setFrequency("rtl", target, { origin: "rest" })
-	await sleep(windowMs)
+	if (BENCH) await sleep(windowMs)
+	else {
+		// Preserve the whole observation window even when the fake producer falls
+		// behind wall time. Include several settled blocks, so a later stale block
+		// cannot escape the assertions by triggering the next retune too early.
+		const pending = rig.pendings.at(-1)!
+		const throughSample =
+			pending.commandSample +
+			pending.bufferedSamples +
+			Math.ceil((windowMs * FS) / 1000)
+		await waitFor(() => {
+			const own = rig.blocks
+				.slice(from)
+				.filter(b => b.summary.epoch === pending.epoch)
+			return (
+				(own.at(-1)?.summary.endSample ?? 0) >= throughSample &&
+				own.filter(b => b.epoch.tuningTrust === "commanded").length >= 3
+			)
+		}, 30_000)
+	}
 	let firstNewMs: number | null = null
 	let newCentreBlocks = 0
 	let oldContentBlocks = 0

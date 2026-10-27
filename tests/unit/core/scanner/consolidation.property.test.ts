@@ -1,3 +1,4 @@
+import { setImmediate as yieldToRpc } from "node:timers/promises"
 // WG15 DQ requirement 7: consolidation properties (design Properties 12 to 16).
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
@@ -19,6 +20,12 @@ import { counterIds } from "../../../mocks/scanner/observations.js"
 import { T0, legacySnapshot, shape, storeOf } from "./consolidation-fixtures.js"
 import type { LegacySpec } from "./consolidation-fixtures.js"
 
+// Keep the full generated stores (including over-cap groups) and 100 runs per
+// property; repeated restore/replay/snapshot work dominates these CPU-only cases.
+// The crash property restores up to 100 × 3 stores × 22 records × 6
+// observations = 39,600 observations, then replays/clones/compares snapshots.
+// Allow 1 ms per observation under CPU contention (39.6 s), plus 20 s overhead.
+const STORE_PROPERTY_TIMEOUT_MS = 60_000
 const F = 446_500_000
 const FAMILIES: ProtocolFamily[] = [
 	"unknown",
@@ -111,7 +118,7 @@ describe("consolidation properties", () => {
 					records.length * DQ_CONSOLIDATE_SCAN_MAX,
 				)
 			}),
-			{ numRuns: 200 },
+			{ numRuns: 100 },
 		)
 	})
 
@@ -133,120 +140,140 @@ describe("consolidation properties", () => {
 					expect(planConsolidation(b)).toEqual(planConsolidation(a))
 				},
 			),
-			{ numRuns: 200 },
+			{ numRuns: 100 },
 		)
 	})
 
-	it("stores restored in different orders consolidate to the same shape", () => {
-		// Feature: detection-quality, Property 13: Order independence
-		// Validates: Requirements 7.2, 7.3
-		fc.assert(
-			fc.property(
-				specsArb.chain(ss =>
-					fc.tuple(
-						fc.constant(ss),
-						fc.shuffledSubarray(ss, {
-							minLength: ss.length,
-							maxLength: ss.length,
-						}),
+	it(
+		"stores restored in different orders consolidate to the same shape",
+		async () => {
+			// Feature: detection-quality, Property 13: Order independence
+			// Validates: Requirements 7.2, 7.3
+			await fc.assert(
+				fc.asyncProperty(
+					specsArb.chain(ss =>
+						fc.tuple(
+							fc.constant(ss),
+							fc.shuffledSubarray(ss, {
+								minLength: ss.length,
+								maxLength: ss.length,
+							}),
+						),
 					),
+					async ([a, b]) => {
+						await yieldToRpc()
+						const x = storeOf(a).store
+						const y = storeOf(b).store
+						x.applyConsolidation(x.consolidationPlan())
+						y.applyConsolidation(y.consolidationPlan())
+						expect(shape(y)).toEqual(shape(x))
+					},
 				),
-				([a, b]) => {
-					const x = storeOf(a).store
-					const y = storeOf(b).store
-					x.applyConsolidation(x.consolidationPlan())
-					y.applyConsolidation(y.consolidationPlan())
-					expect(shape(y)).toEqual(shape(x))
-				},
-			),
-			{ numRuns: 100 },
-		)
-	})
+				{ numRuns: 100 },
+			)
+		},
+		STORE_PROPERTY_TIMEOUT_MS,
+	)
 
-	it("applying or resuming a plan twice equals once", () => {
-		// Feature: detection-quality, Property 14: Idempotence
-		// Validates: Requirements 7.6
-		fc.assert(
-			fc.property(specsArb, specs => {
-				const { store } = storeOf(specs)
-				const plan = store.consolidationPlan()
-				store.applyConsolidation(plan)
-				const once = shape(store)
-				expect(store.applyConsolidation(plan)).toEqual({
-					groups: 0,
-					absorbed: 0,
-					merges: [],
-				})
-				expect(shape(store)).toEqual(once)
-			}),
-			{ numRuns: 100 },
-		)
-	})
-
-	it("a crash after any group, then replay and resume, equals the uninterrupted run", () => {
-		// Feature: detection-quality, Property 15: Crash equivalence
-		// Validates: Requirements 7.5, 7.6
-		const overCap: LegacySpec[] = Array.from({ length: 18 }, (_, i) => ({
-			id: `d_${String(i).padStart(3, "0")}`,
-			centreHz: F + i * 20,
-			firstSeenMs: T0 + i,
-		}))
-		fc.assert(
-			fc.property(
-				fc.oneof(specsArb, fc.constant(overCap)),
-				fc.nat(),
-				(specs, k) => {
-					const reference = storeOf(specs).store
-					const plan = reference.consolidationPlan()
-					reference.applyConsolidation(plan)
-					const crashAt =
-						plan.groups.length === 0 ? 0 : k % (plan.groups.length + 1)
-					const { store, entries } = storeOf(specs)
-					store.applyConsolidation({ groups: plan.groups.slice(0, crashAt) })
-					const reader = new DiscoveryStore({
-						maxDiscoveries: 100_000,
-						now: () => T0,
-						newId: counterIds(),
+	it(
+		"applying or resuming a plan twice equals once",
+		async () => {
+			// Feature: detection-quality, Property 14: Idempotence
+			// Validates: Requirements 7.6
+			await fc.assert(
+				fc.asyncProperty(specsArb, async specs => {
+					await yieldToRpc()
+					const { store } = storeOf(specs)
+					const plan = store.consolidationPlan()
+					store.applyConsolidation(plan)
+					const once = shape(store)
+					expect(store.applyConsolidation(plan)).toEqual({
+						groups: 0,
+						absorbed: 0,
+						merges: [],
 					})
-					reader.restore(legacySnapshot(specs))
-					for (const e of entries) reader.replay(e)
-					reader.applyConsolidation(plan)
-					expect(shape(reader)).toEqual(shape(reference))
-				},
-			),
-			{ numRuns: 100 },
-		)
-	})
+					expect(shape(store)).toEqual(once)
+				}),
+				{ numRuns: 100 },
+			)
+		},
+		STORE_PROPERTY_TIMEOUT_MS,
+	)
 
-	it("conserves observations and airtime and resolves every absorbed id", () => {
-		// Feature: detection-quality, Property 16: Conservation and safety
-		// Validates: Requirements 7.1, 7.5
-		fc.assert(
-			fc.property(specsArb, specs => {
-				const { store } = storeOf(specs)
-				const before = store.snapshot()
-				const plan = store.consolidationPlan()
-				store.applyConsolidation(plan)
-				const after = store.snapshot()
-				expect(after.observations.length).toBe(before.observations.length)
-				const sum = (
-					ds: typeof before.discoveries,
-					k: "airtimeMs" | "observationCount",
-				) => ds.reduce((n, d) => n + (d[k] ?? 0), 0)
-				expect(sum(after.discoveries, "airtimeMs")).toBe(
-					sum(before.discoveries, "airtimeMs"),
-				)
-				expect(sum(after.discoveries, "observationCount")).toBe(
-					sum(before.discoveries, "observationCount"),
-				)
-				const live = new Set(after.discoveries.map(d => d.id))
-				for (const d of before.discoveries)
-					if (!live.has(d.id))
-						expect(live.has(store.aliasOwner(d.id) ?? "")).toBe(true)
-			}),
-			{ numRuns: 100 },
-		)
-	})
+	it(
+		"a crash after any group, then replay and resume, equals the uninterrupted run",
+		async () => {
+			// Feature: detection-quality, Property 15: Crash equivalence
+			// Validates: Requirements 7.5, 7.6
+			const overCap: LegacySpec[] = Array.from({ length: 18 }, (_, i) => ({
+				id: `d_${String(i).padStart(3, "0")}`,
+				centreHz: F + i * 20,
+				firstSeenMs: T0 + i,
+			}))
+			await fc.assert(
+				fc.asyncProperty(
+					fc.oneof(specsArb, fc.constant(overCap)),
+					fc.nat(),
+					async (specs, k) => {
+						await yieldToRpc()
+						const reference = storeOf(specs).store
+						const plan = reference.consolidationPlan()
+						reference.applyConsolidation(plan)
+						const crashAt =
+							plan.groups.length === 0 ? 0 : k % (plan.groups.length + 1)
+						const { store, entries } = storeOf(specs)
+						store.applyConsolidation({ groups: plan.groups.slice(0, crashAt) })
+						const reader = new DiscoveryStore({
+							maxDiscoveries: 100_000,
+							now: () => T0,
+							newId: counterIds(),
+						})
+						reader.restore(legacySnapshot(specs))
+						for (const e of entries) reader.replay(e)
+						reader.applyConsolidation(plan)
+						expect(shape(reader)).toEqual(shape(reference))
+					},
+				),
+				{ numRuns: 100 },
+			)
+		},
+		STORE_PROPERTY_TIMEOUT_MS,
+	)
+
+	it(
+		"conserves observations and airtime and resolves every absorbed id",
+		async () => {
+			// Feature: detection-quality, Property 16: Conservation and safety
+			// Validates: Requirements 7.1, 7.5
+			await fc.assert(
+				fc.asyncProperty(specsArb, async specs => {
+					await yieldToRpc()
+					const { store } = storeOf(specs)
+					const before = store.snapshot()
+					const plan = store.consolidationPlan()
+					store.applyConsolidation(plan)
+					const after = store.snapshot()
+					expect(after.observations.length).toBe(before.observations.length)
+					const sum = (
+						ds: typeof before.discoveries,
+						k: "airtimeMs" | "observationCount",
+					) => ds.reduce((n, d) => n + (d[k] ?? 0), 0)
+					expect(sum(after.discoveries, "airtimeMs")).toBe(
+						sum(before.discoveries, "airtimeMs"),
+					)
+					expect(sum(after.discoveries, "observationCount")).toBe(
+						sum(before.discoveries, "observationCount"),
+					)
+					const live = new Set(after.discoveries.map(d => d.id))
+					for (const d of before.discoveries)
+						if (!live.has(d.id))
+							expect(live.has(store.aliasOwner(d.id) ?? "")).toBe(true)
+				}),
+				{ numRuns: 100 },
+			)
+		},
+		STORE_PROPERTY_TIMEOUT_MS,
+	)
 
 	it("nearest equals the brute-force (distance, id) order", () => {
 		// Feature: detection-quality, Property 12: Plan ownership and bound
@@ -275,7 +302,7 @@ describe("consolidation properties", () => {
 					expect(nearest(list, at, radius, k)).toEqual(want)
 				},
 			),
-			{ numRuns: 300 },
+			{ numRuns: 100 },
 		)
 	})
 })

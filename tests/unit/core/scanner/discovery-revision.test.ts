@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ScannerDiscoveryEventData } from "@wavekit/api-types"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
 import { createLogger } from "../../../../src/utils/logger.js"
@@ -12,7 +12,6 @@ import {
 	CENTRE,
 	feedTone,
 	serviceHarness,
-	tick,
 } from "../../../mocks/scanner/service-fakes.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 import { T0, legacySnapshot, storeOf } from "./consolidation-fixtures.js"
@@ -150,6 +149,7 @@ describe("discovery store revision (band inspection UX req 3.3)", () => {
 })
 
 describe("ScannerService revision on answers and events (band inspection UX req 3.3)", () => {
+	afterEach(() => vi.useRealTimers())
 	const inWindow = {
 		sourceId: "rtl",
 		mode: "in-window" as const,
@@ -157,6 +157,9 @@ describe("ScannerService revision on answers and events (band inspection UX req 
 	}
 
 	it("list, detail, PATCH and every discovery event carry the epoch and an increasing revision", async () => {
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+		})
 		const h = serviceHarness({
 			patch: s => {
 				s.passive.enabled = false
@@ -170,7 +173,7 @@ describe("ScannerService revision on answers and events (band inspection UX req 
 			)
 			await h.service.createJob(inWindow)
 			feedTone(h.fanout, 2, 93_750)
-			await tick(1500)
+			await vi.advanceTimersByTimeAsync(1500)
 			const page = h.service.listDiscoveries({})
 			const d = page.items.find(
 				x => Math.abs(x.frequencyHz - (CENTRE + 93_750)) < 2_000,
@@ -206,7 +209,9 @@ describe("ScannerService revision on answers and events (band inspection UX req 
 		} finally {
 			await h.service.stop()
 		}
-	})
+		// 2 s × 1,024,000 = 2,048,000 synthesized IQ samples, plus FFT/ingest:
+		// ~2 s CPU alone × 8 contending workers + storage setup fits in 30 s.
+	}, 30_000)
 
 	it("a startup merge event carries the survivor's revision and the store's epoch", async () => {
 		const F = 446_042_000
@@ -231,13 +236,14 @@ describe("ScannerService revision on answers and events (band inspection UX req 
 			)
 			const h = serviceHarness({ dir })
 			try {
+				// Subscribe before start; startup publication is deferred to an IO turn.
+				const publication = new Promise<ScannerDiscoveryEventData>(resolve => {
+					h.service.on("discovery", (event: ScannerDiscoveryEventData) => {
+						if (event.change === "merged") resolve(event)
+					})
+				})
 				await h.service.start()
-				const events: ScannerDiscoveryEventData[] = []
-				h.service.on("discovery", (e: ScannerDiscoveryEventData) =>
-					events.push(e),
-				)
-				await new Promise(r => setImmediate(r))
-				const merged = events.find(e => e.change === "merged")
+				const merged = await publication
 				expect(merged).toBeDefined()
 				const survivor = h.service.getDiscovery("d_a")!
 				expect(merged!.mergedIds).toEqual(["d_b"])

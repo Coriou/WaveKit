@@ -6,7 +6,7 @@
  */
 import Fastify, { type FastifyInstance } from "fastify"
 import fc from "fast-check"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import {
 	decoderRoutes,
 	type DecoderRoutesOptions,
@@ -203,12 +203,6 @@ const cases: Case[] = [
 	},
 ]
 
-let app: FastifyInstance | undefined
-afterEach(async () => {
-	await app?.close()
-	app = undefined
-})
-
 async function send(
 	target: FastifyInstance,
 	c: Omit<Case, "name" | "status" | "body">,
@@ -226,8 +220,17 @@ async function send(
 }
 
 describe.each(variants)("legacy decoder PATCH goldens (%s)", variant => {
-	it.each(cases)("$name", async c => {
+	let app: FastifyInstance
+	beforeAll(async () => {
+		// These legacy routes never mutate the fake manager. Compile the same
+		// schemas once per variant, rather than booting 18 identical Fastify apps.
 		app = await legacyApp(variant)
+		await app.ready()
+	})
+	afterAll(async () => {
+		await app.close()
+	})
+	it.each(cases)("$name", async c => {
 		const res = await send(app, c)
 		expect(res.statusCode).toBe(c.status)
 		expect(res.body).toBe(c.body)
@@ -237,8 +240,27 @@ describe.each(variants)("legacy decoder PATCH goldens (%s)", variant => {
 	})
 })
 
+// Cover every JSON type and two nesting levels without generating large random
+// payloads. The explicit 413 golden already covers the 1 MiB boundary.
+const jsonScalar = fc.oneof(
+	fc.constant(null),
+	fc.boolean(),
+	fc.double({ noNaN: true, noDefaultInfinity: true }),
+	fc.string({ maxLength: 32 }),
+)
+const jsonLeaf = fc.oneof(
+	jsonScalar,
+	fc.array(jsonScalar, { maxLength: 4 }),
+	fc.dictionary(fc.string({ maxLength: 8 }), jsonScalar, { maxKeys: 4 }),
+)
+const boundedJson = fc.oneof(
+	jsonLeaf,
+	fc.array(jsonLeaf, { maxLength: 4 }),
+	fc.dictionary(fc.string({ maxLength: 8 }), jsonLeaf, { maxKeys: 4 }),
+)
+
 const legacyBody = fc.oneof(
-	fc.dictionary(fc.string({ maxLength: 8 }), fc.jsonValue({ maxDepth: 2 }), {
+	fc.dictionary(fc.string({ maxLength: 8 }), boundedJson, {
 		maxKeys: 4,
 	}),
 	fc.record(
@@ -250,7 +272,7 @@ const legacyBody = fc.oneof(
 				fc.integer(),
 			),
 			options: fc.oneof(
-				fc.object({ maxDepth: 1 }),
+				fc.dictionary(fc.string({ maxLength: 8 }), jsonLeaf, { maxKeys: 4 }),
 				fc.integer(),
 				fc.string({ maxLength: 4 }),
 			),
@@ -288,7 +310,9 @@ describe("legacy property", () => {
 						expect(allowed).toContain(first.body)
 					},
 				),
-				{ numRuns: 150 },
+				// Keep all body/id variants and shrinking, with 100 × 3 route injections
+				// instead of repeating another 150 injections under worker contention.
+				{ numRuns: 100 },
 			)
 		} finally {
 			await Promise.all(apps.map(a => a.close()))

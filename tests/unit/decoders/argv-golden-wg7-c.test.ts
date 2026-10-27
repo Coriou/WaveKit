@@ -1,3 +1,5 @@
+// The frozen argv fixtures include the intentional streaming-length correction:
+// SoX must ignore stdin's queued socket size and read until EOF (--ignore-length).
 // Feature: web-gaps-7, Property 14: Bounded numeric options
 // Validates: Requirements 9.1, 9.3, 9.5
 //
@@ -113,7 +115,7 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
 				],
 			},
 		},
@@ -137,7 +139,7 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
 				],
 			},
 		},
@@ -166,7 +168,7 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 525000 - rate -h 525000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 5 --centerfreq 136800000 --output decoded:json:file:path=- 136800000",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 525000 - rate -h 525000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 5 --centerfreq 136800000 --output decoded:json:file:path=- 136800000",
 				],
 			},
 		},
@@ -197,7 +199,7 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136800000 --output decoded:json:file:path=- --foo 136975000",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136800000 --output decoded:json:file:path=- --foo 136975000",
 				],
 			},
 		},
@@ -209,7 +211,7 @@ const GOLDEN: Record<string, Row[]> = {
 				getDecoderArgs: ["-r", "CU8", ".", "-s", "384000", "-o", "1"],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 1",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 1",
 				],
 			},
 		},
@@ -219,7 +221,7 @@ const GOLDEN: Record<string, Row[]> = {
 				getDecoderArgs: ["-r", "CU8", ".", "-s", "384000", "-o", "5"],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 5",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -o 5",
 				],
 			},
 		},
@@ -248,7 +250,7 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -gr tuner=33.8 -p 3 -o 1",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -gr tuner=33.8 -p 3 -o 1",
 				],
 			},
 		},
@@ -278,7 +280,7 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 1200000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -gr tuner=33.8 -p -2 -o 1 -q",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1200000 - -t raw -e unsigned-integer -b 8 -c 2 -r 384000 - rate -h 384000 | AIS-catcher -r CU8 . -s 384000 -gr tuner=33.8 -p -2 -o 1 -q",
 				],
 			},
 		},
@@ -289,7 +291,7 @@ const GOLDEN: Record<string, Row[]> = {
 			expected: {
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-sbs-port 30003 --net",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-sbs-port 30003 --net",
 				],
 			},
 		},
@@ -298,7 +300,7 @@ const GOLDEN: Record<string, Row[]> = {
 			expected: {
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-bo-port 30005 --net",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-bo-port 30005 --net",
 				],
 			},
 		},
@@ -307,7 +309,7 @@ const GOLDEN: Record<string, Row[]> = {
 			expected: {
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-json-port 30010 --net",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-json-port 30010 --net",
 				],
 			},
 		},
@@ -324,7 +326,7 @@ const GOLDEN: Record<string, Row[]> = {
 			expected: {
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --gain 49.6 --ppm 2 --net-sbs-port 30003 --net --lat 37.7749 --lon -122.4194",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --gain 49.6 --ppm 2 --net-sbs-port 30003 --net --lat 37.7749 --lon -122.4194",
 				],
 			},
 		},
@@ -392,7 +394,7 @@ const GOLDEN: Record<string, Row[]> = {
 			expected: {
 				getArgs: [
 					"-c",
-					"sox -q -D -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-sbs-port 30003 --net --quiet",
+					"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2400000 - rate -h 2400000 | readsb --device-type ifile --ifile - --iformat UC8 --net-sbs-port 30003 --net --quiet",
 				],
 			},
 		},
