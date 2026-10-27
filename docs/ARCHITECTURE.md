@@ -698,3 +698,13 @@ Targets and tags are defined in `docker/bake.hcl`; see [Docker setup](DOCKER-SET
 
 - Sample decoder output for parsing tests
 - Located in `tests/mocks/fixtures/`
+
+### Wireless M-Bus activity
+
+rtl_433 signal output with model `Wireless-MBus` is presented as protocol
+`wmbus` in the sensors category, with mode, manufacturer and meter type fields.
+The existing sensor entity key is retained. Activity frequency provenance uses
+rtl_433's `freq` in MHz, or the midpoint `(freq1 + freq2) / 2` for FSK, validated
+against the decoder's actual input centre and rate before conversion to Hz.
+The mapper does not infer a frequency from a model name. See
+[Wireless M-Bus setup](DECODER-GUIDE.md#wireless-m-bus-meters-86895-mhz).

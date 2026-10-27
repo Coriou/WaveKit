@@ -755,3 +755,13 @@ original source epoch's tuner centre retained by the scanner, rather than the
 narrow capture's channel centre. The capture index stores source and epoch but
 not tuner centre; if that epoch's centre is no longer known (including bounded
 history eviction), the DC guard conservatively requires checked voice LC.
+
+### Wireless M-Bus ambient identification
+
+Wireless M-Bus from the live rtl433 decoder uses the existing `ism` scanner
+protocol and `ism-model` identity (`Wireless-MBus:<id>`). As for other rtl_433
+devices, two distinct CRC-bearing messages must satisfy the existing source,
+tuning-trust, timing and unique-observation association rules. Activity rows
+use the more specific `wmbus` protocol. The narrow replay captures do not meet
+the C/T uplink's 1.2 Msps minimum; identify these meters through live ambient
+output. See [decoder setup](DECODER-GUIDE.md#wireless-m-bus-meters-86895-mhz).

@@ -5,6 +5,8 @@ import {
 	RTL433_CHANNEL_MIN_RATE_HZ,
 	RTL433_CHANNEL_TARGET_RATE_HZ,
 	RTL433_WINDOW_MAX_RATE_HZ,
+	RTL433_WMBUS_MIN_RATE_HZ,
+	RTL433_WMBUS_FREQUENCY_HZ,
 	placementCostCores,
 	placementKey,
 } from "./contract.js"
@@ -196,12 +198,6 @@ function bandFits(d: PlannerDecoder, hz: number, halfWidth = 0): boolean {
 }
 
 /**
- * rtl_433 channel arithmetic (design 2026-10-25, Property 17): the widest
- * channel, at most `target` and at least 250 kHz, that fits the usable window
- * around the overlap of each range with the window. Ranges in order; largest
- * rate wins, ties by order. `overlap` is true when some range overlaps.
- */
-/**
  * True when rtl_433 can read a capture at `rateHz` whole (window reach):
  * at least the narrowest rate it accepts, at most RTL433_WINDOW_MAX_RATE_HZ.
  */
@@ -213,6 +209,12 @@ export function rtl433WindowFits(rateHz: number): boolean {
 	)
 }
 
+/**
+ * Prefer the 1.2 Msps C/T meter channel when its full span fits. Otherwise
+ * retain the ISM overlap arithmetic (Property 17): at most `target`, at least
+ * 250 kHz, largest rate wins and ties follow range order. `overlap` reports
+ * an intersecting range even when no channel fits.
+ */
 export function rtl433ChannelCandidate(
 	source: {
 		centreHz: number | null
@@ -228,6 +230,31 @@ export function rtl433ChannelCandidate(
 	if (!positive(c) || !positive(fs) || !positive(u) || !positive(target))
 		return { overlap: false }
 	const h = (fs * u) / 2
+	// Keep the cheaper whole-capture path above unchanged. For channel reach,
+	// centre C/T uplink explicitly: overlap midpoints can put it outside a 1 MHz
+	// channel. 100 kbps × 12 samples/bit = 1.2 Msps, or ±600 kHz.
+	const meterHz = RTL433_WMBUS_FREQUENCY_HZ
+	const meterReach = 2 * (h - Math.abs(meterHz - c))
+	if (
+		ranges.some(
+			r =>
+				r &&
+				Number.isFinite(r.minHz) &&
+				Number.isFinite(r.maxHz) &&
+				r.minHz <= meterHz &&
+				r.maxHz >= meterHz,
+		) &&
+		meterReach >= RTL433_WMBUS_MIN_RATE_HZ
+	) {
+		return {
+			hz: meterHz,
+			rateHz:
+				Math.floor(
+					Math.min(Math.max(target, RTL433_WMBUS_MIN_RATE_HZ), meterReach) /
+						1000,
+				) * 1000,
+		}
+	}
 	const rMin = RTL433_CHANNEL_MIN_RATE_HZ
 	let best: { hz: number; rateHz: number } | null = null
 	let overlap = false

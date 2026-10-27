@@ -6,6 +6,8 @@ import type {
 	PlannerSource,
 } from "../../../../src/decoders/enablement/contract.js"
 import {
+	rtl433ChannelCandidate,
+	rtl433WindowFits,
 	fitsReach,
 	planPlacements,
 } from "../../../../src/decoders/enablement/placement.js"
@@ -847,4 +849,80 @@ it("malformed configured VFO intent yields no placement", () => {
 			vfo: { sourceId: "s", frequencyHz: 100_100_000 },
 		}).wanted,
 	).toEqual([])
+})
+
+const meterRange = [{ minHz: 863_000_000, maxHz: 870_000_000 }]
+
+it.each([1_199_999, 1_200_000, 1_200_001])(
+	"wM-Bus channel needs 100 kbps × 12 samples/bit: usable rate %i",
+	sampleRateHz => {
+		const candidate = rtl433ChannelCandidate(
+			{ centreHz: 868_950_000, sampleRateHz, usableFraction: 1 },
+			meterRange,
+		)
+		expect(candidate).toEqual({
+			hz: 868_950_000,
+			rateHz: sampleRateHz < 1_200_000 ? 1_000_000 : 1_200_000,
+		})
+	},
+)
+
+it.each([868_590_000, 869_310_000])(
+	"wM-Bus ±600 kHz fits at the usable edge, centre %i",
+	centreHz => {
+		const src = { centreHz, sampleRateHz: 2_400_000, usableFraction: 0.8 }
+		expect(rtl433ChannelCandidate(src, meterRange)).toEqual({
+			hz: 868_950_000,
+			rateHz: 1_200_000,
+		})
+		const away = centreHz < 868_950_000 ? -1 : 1
+		const past = rtl433ChannelCandidate(
+			{ ...src, centreHz: centreHz + away },
+			meterRange,
+		)
+		expect("rateHz" in past && past.rateHz).toBeLessThan(1_200_000)
+	},
+)
+
+it.each([2_399_999, 2_400_000, 2_400_001])(
+	"keeps raw window reach through 2.4 Msps: %i",
+	rate => {
+		expect(rtl433WindowFits(rate)).toBe(rate <= 2_400_000)
+		const plan = planPlacements(
+			input(
+				decoder({
+					type: "rtl433",
+					band: { basis: "configured", rangesHz: meterRange },
+				}),
+				[source({ centreHz: 868_900_000, sampleRateHz: rate })],
+			),
+		)
+		expect(plan.wanted[0]).toMatchObject(
+			rate <= 2_400_000
+				? { reach: "raw", channelHz: null, options: { targetSampleRate: rate } }
+				: {
+						reach: "channel",
+						channelHz: 868_950_000,
+						options: { targetSampleRate: 1_200_000 },
+					},
+		)
+	},
+)
+
+it("also gives configured channel placements 1.2 Msps at 2.4 Msps input", () => {
+	const plan = planPlacements(
+		input(
+			decoder({
+				type: "rtl433",
+				origin: "config",
+				band: { basis: "configured", rangesHz: meterRange },
+			}),
+			[source({ centreHz: 868_900_000 })],
+		),
+	)
+	expect(plan.wanted[0]).toMatchObject({
+		reach: "channel",
+		channelHz: 868_950_000,
+		options: { targetSampleRate: 1_200_000 },
+	})
 })

@@ -46,7 +46,7 @@ export type Rtl433OutputFormat = "json" | "csv"
 export interface Rtl433Options {
 	/** Enable analyze mode for unknown signals */
 	analyze?: boolean | undefined
-	/** List of protocol IDs to enable (empty = all protocols) */
+	/** List of protocol IDs to enable (empty = rtl_433 default-enabled protocols) */
 	protocols?: number[] | undefined
 	/** Output format (json recommended for parsing) */
 	outputFormat?: Rtl433OutputFormat | undefined
@@ -92,7 +92,8 @@ const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
 
 /**
  * The rtl_433 channel rate the planner aims for (3.16): a valid configured
- * `targetSampleRate`, else 1 MHz. The planner never widens past it.
+ * `targetSampleRate`, else 1 MHz. C/T meter channel coverage can raise it to
+ * the protocol minimum of 1.2 Msps (100 kbps × 12 samples/bit).
  */
 export function rtl433TargetRateHz(options: Record<string, unknown>): number {
 	const raw = options["targetSampleRate"]

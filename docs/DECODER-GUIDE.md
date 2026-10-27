@@ -614,6 +614,33 @@ describe("HfdlDecoder", () => {
    `["-Y", "minlevel=<dB>"]` sets the lowest level rtl_433 may use, and
    `["-Y", "autolevel"]` keeps the automatic level.
 
+### Wireless M-Bus meters (868.95 MHz)
+
+Mode C/T uplinks need at least 1.2 Msps: 100,000 bits/s × 12 samples/bit.
+The pinned rtl_433 (`19f788d0d67720ac23556b5bcdbad63a005637f2`) enables
+protocol 104 (Wireless M-Bus, Mode C&T, 100kbps), 105 (Mode S, 32.768kbps)
+and 238 (Mode T downlink, 32.768kbps) by default. No extra `-R` flags are
+needed with the default protocol list. An explicit `protocols` list must include
+104 for C/T uplinks. S and T downlink use 868.3 MHz and need 1 Msps.
+Protocols 106 (Mode R, 4.8kbps) and 107 (Mode F, 2.4kbps) are disabled,
+experimental stubs; they are not needed for 868.95 MHz meters. Source:
+[pinned m_bus.c](https://github.com/merbanan/rtl_433/blob/19f788d0d67720ac23556b5bcdbad63a005637f2/src/devices/m_bus.c#L1118-L1187).
+
+A catalogue rtl433 placement reads the complete capture unchanged from 250 ksps
+through 2.4 Msps, at the tuner centre. This raw branch avoids channelizer work.
+At 2.4 Msps it supplies 24 samples per 100 kbps bit, twice the C/T minimum.
+For channel placements, when the regional band and usable window include
+868.95 MHz with at least ±600 kHz of room, the planner centres there and raises
+the channel target to at least 1.2 Msps. Otherwise the existing narrower ISM
+placement remains available for other sensors. The EU rtl433 band is 863–870 MHz;
+other regions retain their own band policy. A detected packet count alone does
+not prove wM-Bus: it can include unrelated protocols, noise or damaged frames.
+
+The JSON model is `Wireless-MBus`; the pinned output uses `C` for the control
+field (not `C_field`), plus `mode`, `M`, `id`, `version`, `type`, `type_string`,
+`data` and `mic: "CRC"`. Encrypted payloads can still identify a meter, but
+rtl_433 does not decrypt them. Activity labels these receptions `wmbus`.
+
 ### High CPU usage
 
 1. Check if decoder is in a restart loop

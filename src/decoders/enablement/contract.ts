@@ -211,7 +211,7 @@ export interface PlannerDecoder {
 	bandSuspension?: boolean
 	/** Half-width of the window the band assessment uses (narrower frontends); absent: usable window. */
 	bandHalfWidthHz?: number
-	/** rtl_433 (3.16): the widest channel output rate it wants; absent 1 MHz. */
+	/** rtl_433 (3.16): channel target, absent 1 MHz; C/T coverage raises it to 1.2 Msps. */
 	channelTargetRateHz?: number
 	/**
 	 * 3.18: the paging raster of the effective region (pager decoder only).
@@ -227,6 +227,9 @@ export interface PlannerCentreSlot {
 /** rtl_433 channel bounds (design 2026-10-25): narrowest accepted and target rate. */
 export const RTL433_CHANNEL_MIN_RATE_HZ = 250_000
 export const RTL433_CHANNEL_TARGET_RATE_HZ = 1_000_000
+/** C/T uplink: 100,000 bits/s × 12 samples/bit (pinned rtl_433 m_bus.c). */
+export const RTL433_WMBUS_MIN_RATE_HZ = 1_200_000
+export const RTL433_WMBUS_FREQUENCY_HZ = 868_950_000
 /**
  * Widest capture rtl_433 reads whole (window reach): 2.4 Msps, the highest
  * rate an RTL-SDR streams without drops and well inside rtl_433's own
