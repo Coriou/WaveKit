@@ -307,7 +307,7 @@ describe("readsb ambient interpreter", () => {
 
 	// Feature: adsb-ambient, Property 1: only the second CRC-proven message of an ICAO names it
 	it("property: evidence only for an ICAO with at least two proven messages, from its second on", () => {
-		const icaos = ["abc123", "abc123", "00ff00"]
+		const icaos = ["abc123", "abc124", "00ff00"]
 		const msg = fc.oneof(
 			fc.record({
 				kind: fc.constant("good" as const),

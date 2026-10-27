@@ -207,6 +207,16 @@ describe("parseSbsLine", () => {
 		).toBeUndefined()
 	})
 
+	it("keeps source time continuous across midnight", () => {
+		const before = parseSbsLine(timestampLine("2026/01/01", "23:59:59.000"))
+		const after = parseSbsLine(timestampLine("2026/01/02", "00:00:01.000"))
+		const a = before?.sbsSourceTimestamp?.getTime()
+		const b = after?.sbsSourceTimestamp?.getTime()
+		expect(a).toBeDefined()
+		expect(b).toBeDefined()
+		expect(b! - a!).toBe(2_000)
+	})
+
 	it.each([
 		["2026/02/29", "00:00:00.000"],
 		["2026/04/31", "00:00:00.000"],
