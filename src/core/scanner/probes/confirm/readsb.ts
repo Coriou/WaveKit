@@ -2,11 +2,9 @@
  * readsb ambient interpreter: Mode S / ADS-B at 1090 MHz, the 24-bit ICAO address as identity.
  *
  * Beast evidence proves CRC locally. SBS/JSON aircraft records instead inherit readsb's
- * validation policy: they do NOT prove an uncorrected CRC here. The adapter's parseSbsLine
- * emits one record per MSG line with messageCount=1 and a fresh lastSeen; that count is not
- * readsb's cumulative aircraft count. JSON is marked as a snapshot by parseJsonAircraft and
- * must have messageCount > 1. Neither one state record nor an unchanged snapshot confirms:
- * ReadsbStateMemory requires advancing message evidence 2 s to 5 min apart.
+ * validation policy: they do NOT prove an uncorrected CRC here. SBS confirmation uses
+ * validated source timestamps and distinct source-line identities, never receipt time.
+ * JSON snapshots require cumulative count advancement and source-time spacing.
  * Upstream CRC correction/address acceptance is outside this parser's guarantee; only use
  * configured, trusted local readsb output, never arbitrary feeders as receiver evidence.
  */
@@ -44,6 +42,19 @@ const StateSchema = z.object({
 	lastSeen: z
 		.union([z.date(), z.string().datetime()])
 		.transform(v => new Date(v).getTime()),
+	jsonSourceTimestamp: z
+		.union([z.date(), z.string().datetime()])
+		.transform(v => new Date(v).getTime())
+		.optional(),
+	sbsSourceTimestamp: z
+		.union([z.date(), z.string().datetime()])
+		.transform(v => new Date(v).getTime())
+		.optional(),
+	sbsContentId: z
+		.string()
+		.length(64)
+		.regex(/^[0-9a-f]{64}$/)
+		.optional(),
 	readsbFormat: z.enum(["sbs", "json"]).optional(),
 })
 
@@ -72,10 +83,24 @@ export function parseReadsb(
 		const state = StateSchema.safeParse(data)
 		if (!state.success) return null
 		const snapshot = state.data.readsbFormat === "json"
-		if (snapshot && state.data.messageCount <= 1) return null
+		if (
+			snapshot &&
+			(state.data.messageCount <= 1 ||
+				state.data.jsonSourceTimestamp === undefined)
+		)
+			return null
+		if (
+			!snapshot &&
+			(state.data.sbsSourceTimestamp === undefined ||
+				state.data.sbsContentId === undefined)
+		)
+			return null
 		readsbState = {
 			messageCount: state.data.messageCount,
-			lastSeen: state.data.lastSeen,
+			lastSeen: snapshot
+				? state.data.jsonSourceTimestamp!
+				: state.data.sbsSourceTimestamp!,
+			...(!snapshot ? { contentId: state.data.sbsContentId! } : {}),
 			snapshot,
 		}
 	}
@@ -104,7 +129,13 @@ export const READSB_STATES_MAX = 4096
 export class ReadsbStateMemory {
 	private readonly records = new Map<
 		string,
-		{ at: number; messageCount: number; lastSeen: number; snapshot: boolean }
+		{
+			at: number
+			messageCount: number
+			lastSeen: number
+			snapshot: boolean
+			contentId?: string
+		}
 	>()
 
 	get size(): number {
@@ -114,8 +145,9 @@ export class ReadsbStateMemory {
 	accept(p: AmbientParsed): boolean {
 		const state = p.readsbState
 		const address = p.identity.value
-		const at = p.timestamp.getTime()
-		if (!state || !address || !Number.isFinite(at)) return false
+		const at = state?.lastSeen
+		if (!state || !address || at === undefined || !Number.isFinite(at))
+			return false
 		const previous = this.records.get(address)
 		const reset =
 			!previous ||
@@ -124,9 +156,10 @@ export class ReadsbStateMemory {
 			state.messageCount < previous.messageCount ||
 			state.snapshot !== previous.snapshot
 		if (!reset) {
-			const advanced =
-				state.messageCount > previous.messageCount ||
-				(!state.snapshot && state.lastSeen > previous.lastSeen)
+			const advanced = state.snapshot
+				? state.messageCount > previous.messageCount
+				: state.contentId !== previous.contentId &&
+					state.lastSeen > previous.lastSeen
 			if (!advanced || at - previous.at < CONFIRM_MIN_SEPARATION_MS)
 				return false
 		}

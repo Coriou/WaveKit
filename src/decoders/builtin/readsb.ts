@@ -9,6 +9,7 @@ import type { DecoderReach } from "../enablement/contract.js"
  * - 22.4: WHEN configured, THE Readsb_Decoder SHALL expose its network ports for external feeders
  */
 
+import { createHash } from "node:crypto"
 import { iqResampleCommand, shellCommand } from "../process-tools.js"
 import {
 	NetworkProducerDecoder,
@@ -121,6 +122,12 @@ export interface AircraftData {
 	messageCount: number
 	/** Distinguishes cumulative JSON snapshots from per-message SBS records. */
 	readsbFormat?: "sbs" | "json"
+	/** SBS source clock (timezone-free fields normalized to UTC), absent if invalid. */
+	sbsSourceTimestamp?: Date
+	/** JSON last-message source time from snapshot epoch seconds minus age. */
+	jsonSourceTimestamp?: Date
+	/** SHA-256 of the complete SBS source line, including message type. */
+	sbsContentId?: string
 	/**
 	 * Beast frames only: the Mode S downlink format, whether `icao` is a CRC-proven ICAO address,
 	 * and the raw frame (lowercase hex). Only DF11, DF17 and DF18 carry the address in clear with
@@ -169,7 +176,7 @@ const DEFAULT_PORTS: Record<ReadsbOutputFormat, number> = {
  * MSG,8 = All Call Reply
  */
 const SBS_MSG_PATTERN =
-	/^MSG,(\d+),\d+,\d+,([A-F0-9]{6}),\d+,(\d{4}\/\d{2}\/\d{2}),(\d{2}:\d{2}:\d{2}\.\d{3}),(\d{4}\/\d{2}\/\d{2}),(\d{2}:\d{2}:\d{2}\.\d{3}),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*)$/
+	/^MSG,(\d+),\d+,\d+,([A-F0-9]{6}),\d+,([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*)$/
 
 /**
  * Readsb ADS-B Decoder - Decodes aircraft transponder signals.
@@ -687,6 +694,23 @@ function parseReadsbOptions(
 }
 
 /**
+ * SBS has no timezone. Normalize its wall clock to UTC for deterministic intervals,
+ * rejecting calendar rollover and invalid clock components instead of Date's coercions.
+ */
+function sbsTimestamp(date: string, time: string): Date | undefined {
+	if (
+		!/^\d{4}\/\d{2}\/\d{2}$/.test(date) ||
+		!/^\d{2}:\d{2}:\d{2}\.\d{3}$/.test(time)
+	)
+		return undefined
+	const iso = `${date.replaceAll("/", "-")}T${time}Z`
+	const parsed = new Date(iso)
+	if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== iso)
+		return undefined
+	return parsed
+}
+
+/**
  * Parses an SBS (BaseStation) format line into AircraftData.
  *
  * SBS format fields:
@@ -699,6 +723,13 @@ export function parseSbsLine(line: string): AircraftData | null {
 
 	const icao = match[2]
 	if (!icao) return null
+
+	// Fall back only when BOTH generated fields are absent; malformed is not absent.
+	const generatedAbsent = match[3] === "" && match[4] === ""
+	const sourceTimestamp = sbsTimestamp(
+		match[generatedAbsent ? 5 : 3] ?? "",
+		match[generatedAbsent ? 6 : 4] ?? "",
+	)
 
 	// Parse optional fields
 	const callsign = match[7]?.trim() || undefined
@@ -727,6 +758,8 @@ export function parseSbsLine(line: string): AircraftData | null {
 		lastSeen: new Date(),
 		messageCount: 1,
 		readsbFormat: "sbs",
+		...(sourceTimestamp ? { sbsSourceTimestamp: sourceTimestamp } : {}),
+		sbsContentId: createHash("sha256").update(line).digest("hex"),
 	}
 }
 
@@ -784,6 +817,22 @@ export function parseJsonAircraft(
 	const icao = (json["hex"] as string) ?? (json["icao"] as string)
 	if (!icao) return null
 
+	// Receipt time cannot establish source-message spacing. Aircraft-only snapshots
+	// lacking the source epoch/age remain useful for display, but cannot confirm.
+	const now = json["now"]
+	const seen = json["seen"]
+	const sourceMs =
+		typeof now === "number" &&
+		Number.isFinite(now) &&
+		now >= 0 &&
+		typeof seen === "number" &&
+		Number.isFinite(seen) &&
+		seen >= 0 &&
+		seen <= now
+			? Math.round((now - seen) * 1000)
+			: NaN
+	const sourceTimestamp = new Date(sourceMs)
+
 	return {
 		icao: icao.toUpperCase(),
 		callsign: (json["flight"] as string)?.trim() || undefined,
@@ -798,6 +847,9 @@ export function parseJsonAircraft(
 		lastSeen: new Date(),
 		messageCount: (json["messages"] as number) ?? 1,
 		readsbFormat: "json",
+		...(Number.isFinite(sourceTimestamp.getTime())
+			? { jsonSourceTimestamp: sourceTimestamp }
+			: {}),
 	}
 }
 

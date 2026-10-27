@@ -22,7 +22,13 @@ function record(
 				icao,
 				messageCount: count,
 				lastSeen: new Date(seen).toISOString(),
-				...(snapshot ? { readsbFormat: "json" } : {}),
+				...(snapshot
+					? { readsbFormat: "json", jsonSourceTimestamp: new Date(seen) }
+					: {
+							readsbFormat: "sbs",
+							sbsSourceTimestamp: new Date(seen),
+							sbsContentId: seen.toString(16).padStart(64, "0"),
+						}),
 			},
 		},
 		{ targetsHz: [ADSB_HZ] },
@@ -37,8 +43,68 @@ describe("readsb state confirmation", () => {
 		expect(memory.accept(record(3000, 1, 1000))).toBe(false)
 		expect(memory.accept(record(3000))).toBe(true)
 		expect(memory.accept(record(5000, 1, 3000))).toBe(false)
-		expect(memory.accept(record(5000, 2, 3000))).toBe(true)
+		expect(memory.accept(record(5000, 2, 5000))).toBe(true)
 	})
+
+	it("uses source spacing even when receipts are close or delayed", () => {
+		const memory = new ReadsbStateMemory()
+		expect(memory.accept(record(1000, 1, 1000))).toBe(false)
+		expect(memory.accept(record(9000, 1, 2999))).toBe(false)
+		expect(memory.accept(record(9001, 1, 3000))).toBe(true)
+	})
+
+	it("requires different validated source content identities", () => {
+		const memory = new ReadsbStateMemory()
+		const first = record(1000)
+		const second = record(3000)
+		second.readsbState!.contentId = first.readsbState!.contentId!
+		expect(memory.accept(first)).toBe(false)
+		expect(memory.accept(second)).toBe(false)
+	})
+
+	it.each([undefined, "", "x".repeat(64), "a".repeat(65), 12])(
+		"rejects missing or malformed source identity %s at the scanner boundary",
+		contentId => {
+			expect(
+				parseReadsb(
+					{
+						type: "aircraft",
+						timestamp: new Date(1000),
+						data: {
+							icao: "abc123",
+							messageCount: 1,
+							lastSeen: new Date(1000),
+							sbsSourceTimestamp: new Date(1000),
+							sbsContentId: contentId,
+						},
+					},
+					{ targetsHz: [ADSB_HZ] },
+				),
+			).toBeNull()
+		},
+	)
+
+	it.each([undefined, "invalid", new Date(NaN), 1000])(
+		"rejects missing or malformed source time %s at the scanner boundary",
+		sourceTimestamp => {
+			expect(
+				parseReadsb(
+					{
+						type: "aircraft",
+						timestamp: new Date(1000),
+						data: {
+							icao: "abc123",
+							messageCount: 1,
+							lastSeen: new Date(1000),
+							sbsSourceTimestamp: sourceTimestamp,
+							sbsContentId: "a".repeat(64),
+						},
+					},
+					{ targetsHz: [ADSB_HZ] },
+				),
+			).toBeNull()
+		},
+	)
 
 	it("includes 5 min and resets beyond it, on time reversal and counter reset", () => {
 		for (const delta of [CONFIRM_WINDOW_MS, CONFIRM_WINDOW_MS + 1]) {

@@ -174,6 +174,56 @@ describe("ReadsbDecoder", () => {
 })
 
 describe("parseSbsLine", () => {
+	const timestampLine = (
+		date: string,
+		time: string,
+		loggedDate = "2026/01/01",
+		loggedTime = "00:00:09.000",
+	) =>
+		`MSG,3,1,1,ABC123,1,${date},${time},${loggedDate},${loggedTime},,12000,,,,,,,,,,0`
+
+	it("carries source time and stable full-line identity independently of receipt", () => {
+		const line = timestampLine("2026/01/01", "00:00:01.123")
+		const first = parseSbsLine(line)
+		expect(first?.sbsSourceTimestamp?.toISOString()).toBe(
+			"2026-01-01T00:00:01.123Z",
+		)
+		expect(first?.sbsContentId).toMatch(/^[0-9a-f]{64}$/)
+		expect(parseSbsLine(line)?.sbsContentId).toBe(first?.sbsContentId)
+		expect(parseSbsLine(line.replace("MSG,3", "MSG,4"))?.sbsContentId).not.toBe(
+			first?.sbsContentId,
+		)
+	})
+
+	it("uses logged time only when both generated fields are absent", () => {
+		expect(
+			parseSbsLine(timestampLine("", ""))?.sbsSourceTimestamp?.toISOString(),
+		).toBe("2026-01-01T00:00:09.000Z")
+		expect(
+			parseSbsLine(timestampLine("", "00:00:01.000"))?.sbsSourceTimestamp,
+		).toBeUndefined()
+		expect(
+			parseSbsLine(timestampLine("", "", "", ""))?.sbsSourceTimestamp,
+		).toBeUndefined()
+	})
+
+	it.each([
+		["2026/02/29", "00:00:00.000"],
+		["2026/04/31", "00:00:00.000"],
+		["2026/13/01", "00:00:00.000"],
+		["2026/01/01", "24:00:00.000"],
+		["2026/01/01", "00:60:00.000"],
+		["2026/01/01", "00:00:60.000"],
+		["2026/01/01", "malformed"],
+	])(
+		"rejects malformed source timestamp %s %s without logged fallback",
+		(date, time) => {
+			const record = parseSbsLine(timestampLine(date, time))
+			expect(record).not.toBeNull()
+			expect(record?.sbsSourceTimestamp).toBeUndefined()
+		},
+	)
+
 	it("should parse a valid MSG,3 (airborne position) line", () => {
 		const line =
 			"MSG,3,1,1,A12345,1,2024/01/15,12:30:45.123,2024/01/15,12:30:45.123,UAL123,35000,450,180,40.7128,-74.0060,0,1234,0,0,0,0"
@@ -283,6 +333,29 @@ describe("parseBeastMessage", () => {
 })
 
 describe("parseJsonAircraft", () => {
+	it("derives JSON source time from epoch seconds minus last-message age", () => {
+		expect(
+			parseJsonAircraft({
+				hex: "abc123",
+				now: 100.25,
+				seen: 0.125,
+			})?.jsonSourceTimestamp?.getTime(),
+		).toBe(100125)
+	})
+	it.each([
+		{},
+		{ now: 100 },
+		{ now: 100, seen: -1 },
+		{ now: 100, seen: 101 },
+		{ now: Infinity, seen: 0 },
+		{ now: 1e20, seen: 0 },
+		{ now: "100", seen: 0 },
+	])("does not manufacture JSON source time for %s", fields => {
+		expect(
+			parseJsonAircraft({ hex: "abc123", ...fields })?.jsonSourceTimestamp,
+		).toBeUndefined()
+	})
+
 	it("should parse a valid JSON aircraft object", () => {
 		const json = {
 			hex: "a12345",

@@ -9,6 +9,8 @@ import { describe, expect, it } from "vitest"
 import {
 	modeSCrcRemainder,
 	parseBeastMessage,
+	parseSbsLine,
+	parseJsonAircraft,
 	ReadsbDecoder,
 } from "../../../../src/decoders/builtin/readsb.js"
 import { classifySpectral } from "../../../../src/core/scanner/classify/classifier.js"
@@ -126,6 +128,18 @@ const aircraft = (data: unknown, extra: Partial<DecoderOutputLike> = {}) => ({
 })
 
 describe("Mode S CRC on Beast frames", () => {
+	it("checks a fixed synthetic vector independently verified by polynomial long division", () => {
+		// Generator polynomial 0x1fff409; fixed parity, independent of modeSCrcRemainder.
+		const fixed = Buffer.from("8dabc123202cc371c32ce0cf28bc", "hex")
+		expect(modeSCrcRemainder(fixed)).toBe(0)
+		expect(beast(fixed)).toMatchObject({
+			icao: "ABC123",
+			modeS: { crcOk: true },
+		})
+		fixed[13]! ^= 1
+		expect(modeSCrcRemainder(fixed)).not.toBe(0)
+	})
+
 	it("a DF17 frame with its parity proves its address; one flipped bit does not", () => {
 		expect(modeSCrcRemainder(DF17)).toBe(0)
 		expect(beast(DF17)).toMatchObject({
@@ -249,7 +263,13 @@ describe("readsb ambient interpreter", () => {
 	it("uses the placement's channel when the output carries one", () => {
 		const parsed = parseReadsb(
 			aircraft(
-				{ icao: "abc123", messageCount: 1, lastSeen: new Date(1000) },
+				{
+					icao: "abc123",
+					messageCount: 2,
+					lastSeen: new Date(1000),
+					readsbFormat: "json",
+					jsonSourceTimestamp: new Date(1000),
+				},
 				{ provenanceBinding: { sourceId: "rtl", channelHz: ADSB_HZ + 200 } },
 			),
 			{ targetsHz: [ADSB_HZ] },
@@ -340,6 +360,11 @@ describe("readsb ambient interpreter", () => {
 		)
 	})
 })
+
+/** Synthetic SBS source line; all fields, including type and timestamps, are source content. */
+function sbsLine(time: string): string {
+	return `MSG,3,1,1,ABC123,1,2026/01/01,${time},2026/01/01,00:00:09.000,,12000,,,,,,,,,,0`
+}
 
 describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 	/** The production wiring: the service's own AmbientEvidence with its shared confirmation. */
@@ -471,22 +496,9 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		async mode => {
 			const { h, internals, send, provenance } = await serviceRig(mode)
 			try {
-				send({
-					icao: "abc123",
-					altitude: 12000,
-					lastSeen: new Date(1000).toISOString(),
-					messageCount: 1,
-				})
+				send(parseSbsLine(sbsLine("00:00:01.000")))
 				expect(internals.store.snapshot().discoveries).toEqual([])
-				send(
-					{
-						icao: "abc123",
-						onGround: false,
-						lastSeen: new Date(3000).toISOString(),
-						messageCount: 1,
-					},
-					2000,
-				)
+				send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
 				const discoveries = internals.store.snapshot().discoveries
 				if (mode === "trusted") {
 					expect(discoveries).toHaveLength(1)
@@ -502,23 +514,73 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		},
 	)
 
-	it("identical state records never confirm even when reception timestamps advance", async () => {
-		const { h, internals, send, provenance } = await serviceRig()
-		try {
-			const data = {
-				icao: "abc123",
-				altitude: 12000,
-				lastSeen: new Date(1000).toISOString(),
-				messageCount: 1,
+	it.each([
+		[
+			"identical line replayed",
+			sbsLine("00:00:01.000"),
+			sbsLine("00:00:01.000"),
+			false,
+		],
+		[
+			"one burst delayed in processing",
+			sbsLine("00:00:01.000"),
+			sbsLine("00:00:01.999"),
+			false,
+		],
+		[
+			"distinct source messages two seconds apart",
+			sbsLine("00:00:01.000"),
+			sbsLine("00:00:03.000"),
+			true,
+		],
+		[
+			"malformed generated time",
+			sbsLine("25:00:01.000"),
+			sbsLine("25:00:03.000"),
+			false,
+		],
+	] as const)(
+		"%s through adapter and production trust",
+		async (_name, first, second, decoded) => {
+			const { h, internals, send, provenance } = await serviceRig()
+			try {
+				send(parseSbsLine(first))
+				send(parseSbsLine(second), 2000)
+				const discoveries = internals.store.snapshot().discoveries
+				expect(discoveries).toHaveLength(decoded ? 1 : 0)
+				if (decoded)
+					expect(discoveries[0]).toMatchObject({
+						confidence: "decoded",
+						protocol: "adsb",
+					})
+			} finally {
+				await h.service.stop()
+				provenance.dispose()
 			}
-			send(data)
-			send(data, 2000)
-			expect(internals.store.snapshot().discoveries).toEqual([])
-		} finally {
-			await h.service.stop()
-			provenance.dispose()
-		}
-	})
+		},
+	)
+
+	it.each([
+		["replayed JSON snapshot", 2, 1, false],
+		["JSON burst delayed in processing", 3, 2.999, false],
+		["JSON source-time advancement", 3, 3, true],
+		["JSON without source epoch", 3, undefined, false],
+	] as const)(
+		"%s through adapter and production trust",
+		async (_name, messages, now, decoded) => {
+			const { h, internals, send, provenance } = await serviceRig()
+			try {
+				send(parseJsonAircraft({ hex: "abc123", messages: 2, now: 1, seen: 0 }))
+				send(parseJsonAircraft({ hex: "abc123", messages, now, seen: 0 }), 2000)
+				expect(internals.store.snapshot().discoveries).toHaveLength(
+					decoded ? 1 : 0,
+				)
+			} finally {
+				await h.service.stop()
+				provenance.dispose()
+			}
+		},
+	)
 
 	it("two CRC-valid messages 500 ms apart identify; single, bad and repeated frames leave no record", async () => {
 		const { h, internals, send, provenance } = await serviceRig()

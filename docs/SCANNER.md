@@ -541,15 +541,24 @@ identical content does not confirm. Address-only APRS output from multimon and
 other DTOs without content use spacing alone. ADS-B retains
 its local CRC/address checks and raw-frame duplicate rejection for Beast output.
 For SBS output, the adapter emits one aircraft record per `MSG` line: `messageCount: 1`
-is a per-line count, not a single-message aircraft snapshot. Two records of the same
-six-digit ICAO must have increasing `lastSeen` or message count, 2 s to 5 min apart.
-Repeated identical records never confirm. JSON records carry `readsbFormat: "json"`;
-they need a cumulative count greater than one and a later increasing count, with the
-same spacing. State is bounded to 4096 addresses per decoder/source epoch.
-SBS/JSON inherit readsb's message validation policy; WaveKit cannot verify an
-uncorrected CRC or address confirmation from these records. The local adapter
-sources (`parseSbsLine` and `parseJsonAircraft` in `src/decoders/builtin/readsb.ts`)
-establish the record/count semantics, not upstream CRC correction guarantees.
+is a per-line count, not a single-message aircraft snapshot. Confirmation relies on
+readsb's own decoding and two independent messages of the same six-digit ICAO,
+at least 2 s and at most 5 min apart in readsb's own time, with different full-line
+content identities. The adapter carries the generated date/time (SBS fields 7–8),
+or logged date/time (9–10) only when both generated fields are absent. Calendar and
+clock values are validated; missing or malformed source time cannot confirm.
+SBS has no timezone; the adapter normalizes its wall clock to UTC for intervals.
+Receipt time and receipt delays never advance SBS confirmation. JSON records carry
+`readsbFormat: "json"`; they need a cumulative count greater than one and a later
+increasing count, with the same spacing measured in source time (`jsonSourceTimestamp`, derived from numeric
+`now` epoch seconds minus nonnegative `seen` age). JSON snapshots without valid
+source epoch/age cannot confirm. State is bounded to
+4096 addresses per decoder/source epoch.
+SBS/JSON inherit readsb's message validation policy. We could not verify offline
+the CRC-correction/address-confirmation policy of the pinned readsb build
+(`b499ecbd18dc4a2ec6098c31de31508017fa6190`); these records do not prove an
+uncorrected CRC or independent address confirmation. The two-message guard above
+does not establish those upstream guarantees.
 Only configured local decoders with trusted receiver tuning count. For raw readsb
 placements without a channel or configured frequencies, its protocol declaration
 supplies the 1090 MHz target; the provenance index still requires an observed source

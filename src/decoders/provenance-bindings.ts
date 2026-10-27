@@ -17,7 +17,10 @@ export interface ProvenanceDecoderSource {
 	getAllDecoders(): ReadonlyArray<{ id: string }>
 	getStatus(
 		id: string,
-	): Pick<DecoderStatus, "sourceId" | "targetFrequenciesHz"> | undefined
+	):
+		| (Pick<DecoderStatus, "sourceId" | "targetFrequenciesHz"> &
+				Partial<Pick<DecoderStatus, "type">>)
+		| undefined
 	getDecoder(
 		id: string,
 	):
@@ -199,6 +202,7 @@ export function createDecoderProvenanceIndex(
 		// never tuning proof. trustOf still requires observed source centre/rate.
 		const declaration = decoder?.getBandDeclaration?.()
 		const intrinsic =
+			status.type === "readsb" &&
 			!external &&
 			!declaration?.ownSource &&
 			!declaration?.ownTuning &&
