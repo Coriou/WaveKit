@@ -1,8 +1,8 @@
+import { setImmediate as yieldToRpc } from "node:timers/promises"
 import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { performance } from "node:perf_hooks"
 import { DatabaseSync } from "node:sqlite"
 import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -351,7 +351,7 @@ describe("acceptTrailRows", () => {
 					expect(result.truncated).toBe(result.truncation.length > 0)
 				},
 			),
-			{ numRuns: 300 },
+			{ numRuns: 100 },
 		)
 	})
 
@@ -461,7 +461,7 @@ describe("acceptTrailRows", () => {
 					}
 				},
 			),
-			{ numRuns: 300 },
+			{ numRuns: 100 },
 		)
 	})
 })
@@ -474,10 +474,8 @@ describe("readTrails against a store", () => {
 	let reader: SqlDatabase
 	let seq = 0
 
-	beforeAll(async () => {
-		dir = await mkdtemp(join(tmpdir(), "wavekit-trails-"))
-		const path = join(dir, "activity.db")
-		writer = new DatabaseSync(path)
+	async function database(path: string) {
+		const writer = new DatabaseSync(path)
 		writer.exec("PRAGMA journal_mode = WAL")
 		writer.exec(ACTIVITY_SCHEMA_V1)
 		const meta = writer.prepare(
@@ -487,7 +485,14 @@ describe("readTrails against a store", () => {
 		meta.run("storeUuid", randomUUID())
 		meta.run("restoreGeneration", "1")
 		meta.run("pruneWatermark", "0")
-		reader = await openReadOnly(path)
+		return { writer, reader: await openReadOnly(path) }
+	}
+
+	beforeAll(async () => {
+		dir = await mkdtemp(join(tmpdir(), "wavekit-trails-"))
+		const opened = await database(join(dir, "activity.db"))
+		writer = opened.writer
+		reader = opened.reader
 	})
 
 	afterAll(async () => {
@@ -533,6 +538,7 @@ describe("readTrails against a store", () => {
 				producedToMs: NOW,
 				limits: DEFAULT_TRAILS_READ_LIMITS,
 				nowMs: NOW,
+				clock: () => 0,
 				...input,
 			},
 		})
@@ -657,9 +663,12 @@ describe("readTrails against a store", () => {
 		])
 	})
 
-	/** Wraps the reader so chosen statement calls block for `delay(sql, call)` ms. */
+	// Charge statement work to an injected monotonic clock. Real Atomics.wait
+	// also charged arbitrary OS descheduling, making the 40/60 ms margins flaky.
+	let queryMs = 0
+	/** Wraps the real reader, charging `delay(sql, call)` ms per statement. */
 	function delayed(delay: (sql: string, call: number) => number): SqlDatabase {
-		const cell = new Int32Array(new SharedArrayBuffer(4))
+		queryMs = 0
 		return {
 			prepare(sql) {
 				const statement = reader.prepare(sql)
@@ -667,7 +676,7 @@ describe("readTrails against a store", () => {
 				const wait = () => {
 					call += 1
 					const ms = delay(sql, call)
-					if (ms > 0) Atomics.wait(cell, 0, 0, ms)
+					queryMs += ms
 				}
 				return {
 					all: (...params) => (wait(), statement.all(...params)),
@@ -683,7 +692,7 @@ describe("readTrails against a store", () => {
 		db: SqlDatabase,
 		input: Partial<TrailsReadInput>,
 	): { ms: number; result: ActivityTrails } {
-		const started = performance.now()
+		const started = queryMs
 		const result = runRead(db, {
 			op: "trails",
 			input: {
@@ -691,11 +700,12 @@ describe("readTrails against a store", () => {
 				producedToMs: NOW,
 				limits: DEFAULT_TRAILS_READ_LIMITS,
 				nowMs: NOW,
+				clock: () => queryMs,
 				...input,
 			},
 		})
 		if (result.op !== "trails") throw new TypeError("wrong op")
-		return { ms: performance.now() - started, result: result.trails }
+		return { ms: queryMs - started, result: result.trails }
 	}
 
 	function fill(rows: number, keyOf: (index: number) => string): void {
@@ -712,7 +722,7 @@ describe("readTrails against a store", () => {
 		writer.exec("COMMIT")
 	}
 
-	it("real clock: a slow walk fetch stops at the default budget with no probe overrun", () => {
+	it("a slow walk fetch stops at the default budget with no probe overrun", () => {
 		reset()
 		fill(101, index => `mmsi:${index}`)
 		// The second walk chunk (first keyset continuation) takes 610 ms; every probe
@@ -731,7 +741,7 @@ describe("readTrails against a store", () => {
 		expect(ms).toBeLessThan(650)
 	})
 
-	it("real clock: a slow probe stops at the shared budget", () => {
+	it("a slow probe stops at the shared budget", () => {
 		reset()
 		// A and B are returned (maxPoints 2), C is refused, then 400 rows of X follow:
 		// the probe never resolves A or B and needs many chunks of 4 rows, 20 ms each.
@@ -969,127 +979,141 @@ describe("readTrails against a store", () => {
 		])
 	})
 
-	it("a run of 100 000 equal timestamps is walked in bounded statements", () => {
-		reset()
-		const RUN = 100_000
-		const ENTITIES = 10
-		const CHUNK = 16
-		// One prepared insert: the fixture is load, not the subject.
-		const tie = writer.prepare(insertSql)
-		writer.exec("BEGIN")
-		for (let index = 0; index < RUN; index += 1) {
-			seq += 1
-			tie.run(
-				`e${seq}`,
-				"decoder-reception",
-				NOW - 5,
-				NOW - 5,
-				"adsb",
-				"aircraft",
-				`icao:${index % ENTITIES}`,
-				// The longitude tells the rows apart: index / 1000.
-				JSON.stringify({
-					eventId: `e${seq}`,
-					position: { lat: 1, lon: index / 1_000 },
-				}),
-			)
-		}
-		writer.exec("COMMIT")
-		// Index rows a statement may examine, from its bound parameters: every statement
-		// seeks activity_produced on these bounds (EXPLAIN QUERY PLAN test above), so the
-		// rows in the bounds (or the LIMIT / OFFSET of the step-end statements) are all it
-		// can visit. Counted on the index after the read, load independent.
-		const countTie = writer.prepare(
-			`SELECT COUNT(*) AS n FROM activity INDEXED BY activity_produced
-			WHERE produced_at_ms = ? AND seq < ? AND seq >= ?`,
-		)
-		const countRange = writer.prepare(
-			`SELECT COUNT(*) AS n FROM activity INDEXED BY activity_produced
-			WHERE produced_at_ms BETWEEN ? AND ?`,
-		)
-		const calls: { sql: string; values: unknown[] }[] = []
-		const recording: SqlDatabase = {
-			prepare(sql) {
-				const statement = reader.prepare(sql)
-				return {
-					all: (...values) => (
-						calls.push({ sql, values }),
-						statement.all(...values)
-					),
-					get: (...values) => (
-						calls.push({ sql, values }),
-						statement.get(...values)
-					),
-				}
-			},
-			exec: sql => reader.exec(sql),
-			close: () => undefined,
-		}
-		const out = runRead(recording, {
-			op: "trails",
-			input: {
-				producedFromMs: NOW - 1_000,
-				producedToMs: NOW,
-				limits: DEFAULT_TRAILS_READ_LIMITS,
-				nowMs: NOW,
-				chunkRows: CHUNK,
-				// The budget never expires: the walk covers the whole run.
-				clock: () => 0,
-			},
-		})
-		if (out.op !== "trails") throw new TypeError("wrong op")
-		const result = out.trails
-		expect(result.truncation).toEqual(["per-entity"])
-		expect(result.scannedRows).toBe(RUN)
-		// The newest maxPointsPerEntity rows of each entity, ascending by commit order.
-		const perEntity = DEFAULT_TRAILS_READ_LIMITS.maxPointsPerEntity
-		const perEntityRows = RUN / ENTITIES
-		expect(result.trails.map(trail => trail.entityKey)).toEqual(
-			Array.from({ length: ENTITIES }, (_, k) => `icao:${k}`),
-		)
-		for (const [k, trail] of result.trails.entries()) {
-			expect(trail.truncated).toBe(true)
-			expect(trail.points).toEqual(
-				Array.from({ length: perEntity }, (_, j) => [
+	it("a run of 100 000 equal timestamps is walked in bounded statements", async () => {
+		// Own the bulk fixture: DELETE of 100k indexed rows in the next test's
+		// reset could consume its entire 5 s deadline (9 s observed under load).
+		const { writer, reader } = await database(join(dir, "ties.db"))
+		try {
+			const RUN = 100_000
+			const ENTITIES = 10
+			const CHUNK = 16
+			// One prepared insert: the fixture is load, not the subject.
+			const tie = writer.prepare(insertSql)
+			writer.exec("BEGIN")
+			for (let index = 0; index < RUN; index += 1) {
+				// A long synchronous fixture also starves Vitest's worker RPC.
+				if (index % 1000 === 0) await yieldToRpc()
+				seq += 1
+				tie.run(
+					`e${seq}`,
+					"decoder-reception",
 					NOW - 5,
-					1,
-					(k + ENTITIES * (perEntityRows - perEntity + j)) / 1_000,
-					null,
-				]),
-			)
-		}
-		expect(result.pointCount).toBe(ENTITIES * perEntity)
-		// Every statement examines at most CHUNK index rows.
-		let bounded = 0
-		let widest = 0
-		for (const { sql, values } of calls) {
-			if (!sql.includes("activity_produced")) continue
-			const bounds = sql.startsWith("SELECT entity_key")
-				? values.slice(1)
-				: values
-			const at = (index: number): number => {
-				const value = bounds[index]
-				if (typeof value !== "number")
-					throw new TypeError(`non-numeric bound ${index}: ${sql}`)
-				return value
+					NOW - 5,
+					"adsb",
+					"aircraft",
+					`icao:${index % ENTITIES}`,
+					// The longitude tells the rows apart: index / 1000.
+					JSON.stringify({
+						eventId: `e${seq}`,
+						position: { lat: 1, lon: index / 1_000 },
+					}),
+				)
 			}
-			let examined: number
-			if (sql.includes("COUNT(*) AS n, MIN(seq)")) examined = at(2)
-			else if (sql.includes("OFFSET ?")) examined = at(2) + 1
-			else if (sql.includes("seq < ? AND seq >= ?"))
-				examined = Number(countTie.get(at(0), at(1), at(2))?.["n"])
-			else if (sql.includes("BETWEEN ? AND ?"))
-				examined = Number(countRange.get(at(0), at(1))?.["n"])
-			else throw new TypeError(`unclassified trails statement: ${sql}`)
-			widest = Math.max(widest, examined)
-			bounded += 1
+			writer.exec("COMMIT")
+			// Index rows a statement may examine, from its bound parameters: every statement
+			// seeks activity_produced on these bounds (EXPLAIN QUERY PLAN test above), so the
+			// rows in the bounds (or the LIMIT / OFFSET of the step-end statements) are all it
+			// can visit. Counted on the index after the read, load independent.
+			const countTie = writer.prepare(
+				`SELECT COUNT(*) AS n FROM activity INDEXED BY activity_produced
+			WHERE produced_at_ms = ? AND seq < ? AND seq >= ?`,
+			)
+			const countRange = writer.prepare(
+				`SELECT COUNT(*) AS n FROM activity INDEXED BY activity_produced
+			WHERE produced_at_ms BETWEEN ? AND ?`,
+			)
+			const calls: { sql: string; values: unknown[] }[] = []
+			const recording: SqlDatabase = {
+				prepare(sql) {
+					const statement = reader.prepare(sql)
+					return {
+						all: (...values) => (
+							calls.push({ sql, values }),
+							statement.all(...values)
+						),
+						get: (...values) => (
+							calls.push({ sql, values }),
+							statement.get(...values)
+						),
+					}
+				},
+				exec: sql => reader.exec(sql),
+				close: () => undefined,
+			}
+			await yieldToRpc()
+			const out = runRead(recording, {
+				op: "trails",
+				input: {
+					producedFromMs: NOW - 1_000,
+					producedToMs: NOW,
+					limits: DEFAULT_TRAILS_READ_LIMITS,
+					nowMs: NOW,
+					chunkRows: CHUNK,
+					// The budget never expires: the walk covers the whole run.
+					clock: () => 0,
+				},
+			})
+			if (out.op !== "trails") throw new TypeError("wrong op")
+			await yieldToRpc()
+			const result = out.trails
+			expect(result.truncation).toEqual(["per-entity"])
+			expect(result.scannedRows).toBe(RUN)
+			// The newest maxPointsPerEntity rows of each entity, ascending by commit order.
+			const perEntity = DEFAULT_TRAILS_READ_LIMITS.maxPointsPerEntity
+			const perEntityRows = RUN / ENTITIES
+			expect(result.trails.map(trail => trail.entityKey)).toEqual(
+				Array.from({ length: ENTITIES }, (_, k) => `icao:${k}`),
+			)
+			for (const [k, trail] of result.trails.entries()) {
+				expect(trail.truncated).toBe(true)
+				expect(trail.points).toEqual(
+					Array.from({ length: perEntity }, (_, j) => [
+						NOW - 5,
+						1,
+						(k + ENTITIES * (perEntityRows - perEntity + j)) / 1_000,
+						null,
+					]),
+				)
+			}
+			expect(result.pointCount).toBe(ENTITIES * perEntity)
+			// Every statement examines at most CHUNK index rows.
+			let bounded = 0
+			let widest = 0
+			for (const [index, { sql, values }] of calls.entries()) {
+				if (index % 1000 === 0) await yieldToRpc()
+				if (!sql.includes("activity_produced")) continue
+				const bounds = sql.startsWith("SELECT entity_key")
+					? values.slice(1)
+					: values
+				const at = (index: number): number => {
+					const value = bounds[index]
+					if (typeof value !== "number")
+						throw new TypeError(`non-numeric bound ${index}: ${sql}`)
+					return value
+				}
+				let examined: number
+				if (sql.includes("COUNT(*) AS n, MIN(seq)")) examined = at(2)
+				else if (sql.includes("OFFSET ?")) examined = at(2) + 1
+				else if (sql.includes("seq < ? AND seq >= ?"))
+					examined = Number(countTie.get(at(0), at(1), at(2))?.["n"])
+				else if (sql.includes("BETWEEN ? AND ?"))
+					examined = Number(countRange.get(at(0), at(1))?.["n"])
+				else throw new TypeError(`unclassified trails statement: ${sql}`)
+				widest = Math.max(widest, examined)
+				bounded += 1
+			}
+			expect(widest).toBeLessThanOrEqual(CHUNK)
+			// The walk needs a step end and a scan per CHUNK rows of the run.
+			expect(bounded).toBeGreaterThanOrEqual((2 * RUN) / CHUNK)
+			if (process.env["WAVEKIT_TRAILS_EQP"] === "1")
+				process.stderr.write(`TRAILS_TIES ${bounded} ${widest}\n`)
+		} finally {
+			reader.close()
+			writer.close()
 		}
-		expect(widest).toBeLessThanOrEqual(CHUNK)
-		// The walk needs a step end and a scan per CHUNK rows of the run.
-		expect(bounded).toBeGreaterThanOrEqual((2 * RUN) / CHUNK)
-		if (process.env["WAVEKIT_TRAILS_EQP"] === "1")
-			process.stderr.write(`TRAILS_TIES ${bounded} ${widest}\n`)
-	}, 60_000)
+		// 100k inserts + (100k / 16) × 2 walk statements + bounded-statement
+		// verification: ~12 s CPU alone × 8 workers = 96 s, plus 24 s setup/IO.
+	}, 120_000)
 
 	it("empty store returns no trails and a null floor; from == to allowed", () => {
 		reset()

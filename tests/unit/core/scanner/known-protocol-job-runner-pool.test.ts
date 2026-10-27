@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks"
 import pino from "pino"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
@@ -36,10 +37,6 @@ const TARGET = 150_112_500
 const FS = 1_024_000
 const EPOCH = 11
 const LATENCY = 400 // ProbePool DEFAULT_START_LATENCY_MS before any measured start
-
-async function settle(): Promise<void> {
-	for (let i = 0; i < 20; i++) await flushAsync()
-}
 
 function memoryFor(protocol: ScannerProtocol) {
 	const log: string[] = []
@@ -157,17 +154,52 @@ async function inWindow(
 		now: () => h.clock.now,
 		knownProtocols: memory,
 	})
+	const polling = new AbortController()
+	const waits = new Set<Promise<void>>()
+	const waitFor = (
+		check: () => boolean,
+		description: string,
+	): Promise<void> => {
+		const wait = (async () => {
+			// performance is real even while the scenario advances fake timers.
+			const deadline = performance.now() + 3000
+			while (true) {
+				polling.signal.throwIfAborted()
+				if (check()) return
+				if (performance.now() >= deadline)
+					throw new Error(`probe pool never ${description}`)
+				await flushAsync()
+			}
+		})()
+		waits.add(wait)
+		return wait
+	}
+	cleanup.push(async () => {
+		polling.abort()
+		await Promise.allSettled(waits)
+		await runner.dispatch({ type: "cancel" })
+		await h.pool.releaseJob(record.id)
+	})
 	await runner.start()
-	await settle()
+	await runner.idle()
 	runner.onBlock(1, false)
-	await settle()
+	await runner.idle()
 	await runner.idle()
 	expect(record.state).toBe("running")
 	const advance = async (ms: number): Promise<void> => {
 		h.clock.now += ms
 		await vi.advanceTimersByTimeAsync(ms)
-		// A mode step relaunches the decoder through real IO: let it reach confirming.
-		for (let i = 0; i < 200; i++) await flushAsync()
+		// Timer callbacks start async teardown/relaunch. Wait for their state,
+		// rather than doing 200 real event-loop turns for every simulated 100 ms.
+		await runner.idle()
+		await waitFor(
+			() =>
+				!h.pool
+					.status()
+					.some(p => p.state === "starting" || p.state === "stopping"),
+			"finished starting/stopping",
+		)
+		await runner.idle()
 	}
 	/** One observation of discovery d_1 of `cls` that needs a confirmation. */
 	const transmit = async (cls: ScannerClass): Promise<void> => {
@@ -206,11 +238,10 @@ async function inWindow(
 	}
 	/** Spins the IO queue (the launch awaits real IO) until the probe's first mode is confirming. */
 	const confirming = async (): Promise<void> => {
-		for (let i = 0; i < 10_000; i++) {
-			if (h.pool.status()[0]?.state === "confirming") return
-			await flushAsync()
-		}
-		throw new Error("probe never reached confirming")
+		await waitFor(
+			() => h.pool.status()[0]?.state === "confirming",
+			"reached confirming",
+		)
 	}
 	/** dsd-fme modes in launch order (the fake manager forgets removed decoders). */
 	const launched: unknown[] = []
@@ -221,11 +252,17 @@ async function inWindow(
 	return { h, runner, record, advance, transmit, modes }
 }
 
+const cleanup: (() => Promise<void>)[] = []
+
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
 })
-afterEach(() => {
-	vi.useRealTimers()
+afterEach(async () => {
+	try {
+		for (const close of cleanup.splice(0)) await close()
+	} finally {
+		vi.useRealTimers()
+	}
 })
 
 describe("job driver miss counting with the real probe pool mode stepping (review M2)", () => {

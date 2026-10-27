@@ -290,8 +290,14 @@ it("explicitly reselects and reconnects a re-added sole Scan source across App/r
 	const { SCAN_PROFILE, SCAN_FRAME } = await import("./test/fixtures.js")
 	const handlers: WsHandlers[] = [],
 		sent: string[] = []
-	const rt = createRuntime(
-		nodeRuntimeDeps(
+	const state = scenarioState(
+		"live",
+		(await import("./data/reducers.js")).PLAIN_SUMMARY,
+	)
+	const source = { ...state.sources.value![0]!, id: "rtl" }
+	state.sources.value = [source]
+	const rt = createRuntime({
+		...nodeRuntimeDeps(
 			{
 				base: "http://localhost:9100",
 				ws: "ws://localhost:9100/ws",
@@ -306,13 +312,16 @@ it("explicitly reselects and reconnects a re-added sole Scan source across App/r
 				},
 			},
 		),
-	)
-	const state = scenarioState(
-		"live",
-		(await import("./data/reducers.js")).PLAIN_SUMMARY,
-	)
-	const source = { ...state.sources.value![0]!, id: "rtl" }
-	state.sources.value = [source]
+		// Runtime time/ticks are explicit; Ink keeps its real scheduling. A delayed
+		// React effect must not race the runtime's age eviction or poll interval.
+		now: () => state.now,
+		timers: {
+			setTimeout: () => 1,
+			clearTimeout: () => undefined,
+			setInterval: () => 1,
+			clearInterval: () => undefined,
+		},
+	})
 	rt.start()
 	rt.store.set(state)
 	const h = await renderAt(
@@ -346,6 +355,11 @@ it("explicitly reselects and reconnects a re-added sole Scan source across App/r
 		let wire = handlers[0]!
 		wire.open()
 		wire.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		// Scan demand is installed by a passive effect, after the first Ink frame.
+		// Wait for the actual subscription before delivering its first profile/frame.
+		expect(
+			await pollUntil(() => sent.some(s => s.includes('"sourceId":"rtl"'))),
+		).toBe(true)
 		admit(wire)
 		expect(rt.store.get().scan.rows).toHaveLength(1)
 		for (const key of ["s", "r"]) {
@@ -391,6 +405,8 @@ it("explicitly reselects and reconnects a re-added sole Scan source across App/r
 			expect(sent).toHaveLength(removed)
 			expect(rt.store.get().scan.phase).toBe("removed")
 			await h.press(key, QUIET)
+			if (key === "s")
+				expect(await pollUntil(() => sent.length > removed)).toBe(true)
 			if (key === "r") {
 				wire = handlers.at(-1)!
 				wire.open()
