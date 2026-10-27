@@ -786,8 +786,14 @@ export const planPlacements: PlacementPlanner = input => {
 				(d.origin === "catalogue" || followsVfo) &&
 				d.configuredChannelsHz.length === 0
 			) {
-				const addObserved = (hz: number) => {
-					if (!Number.isInteger(hz) || !positive(hz)) return
+				const addObserved = (actualHz: number, hz = actualHz) => {
+					if (
+						!Number.isInteger(actualHz) ||
+						!positive(actualHz) ||
+						!Number.isInteger(hz) ||
+						!positive(hz)
+					)
+						return
 					// A centre within bandwidth / 2 is already covered. Prefer existing
 					// placements and listed channels to FFT jitter, preventing duplicates
 					// and ambiguous ranker association within half a channel width.
@@ -795,7 +801,8 @@ export const planPlacements: PlacementPlanner = input => {
 						local.some(
 							c =>
 								c.hz !== null &&
-								Math.abs(c.hz - hz) <= d.channelBandwidthHz / 2,
+								(c.hz === hz ||
+									Math.abs(c.hz - actualHz) <= d.channelBandwidthHz / 2),
 						)
 					)
 						return
@@ -805,11 +812,20 @@ export const planPlacements: PlacementPlanner = input => {
 				for (const inc of act.incumbents)
 					if (inc.decoderId === d.id && inc.sourceId === s.id)
 						addObserved(inc.hz)
-				const centres = (observed?.channelsHz ?? [])
+				const centres = (
+					observed?.centres ??
+					(observed?.channelsHz ?? []).map(actualHz => ({
+						actualHz,
+						candidateHz: quantiseObservedCentre(actualHz),
+					}))
+				)
 					.slice(0, ACTIVITY_MAX_CANDIDATES)
-					.map(quantiseObservedCentre)
-					.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b)
-				for (const hz of centres) addObserved(hz)
+					.sort(
+						(a, b) =>
+							Math.abs(a.actualHz - centre) - Math.abs(b.actualHz - centre) ||
+							a.actualHz - b.actualHz,
+					)
+				for (const c of centres) addObserved(c.actualHz, c.candidateHz)
 			}
 			candidates.push(...local)
 		}

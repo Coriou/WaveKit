@@ -372,14 +372,36 @@ describe("activity ranking: slots and order", () => {
 		const input = base([dsd()], [source()], {
 			vfo: { sourceId: "s", frequencyHz: 466_100_000 },
 		})
-		for (const offset of [6_250, 9_374, 9_375, 9_376, 12_500]) {
+		for (const offset of [6_249, 6_250, 6_251, 9_374, 9_375, 9_376, 12_500]) {
 			const act = {
 				...activity(),
 				observed: [{ epoch: EPOCH, channelsHz: [466_100_000 + offset] }],
 			}
-			expect(channels(planWith(input, act), "dsd")).toHaveLength(
-				offset < 9_375 ? 1 : 2,
-			)
+			const result = channels(planWith(input, act), "dsd")
+			expect(result).toHaveLength(offset <= 6_250 ? 1 : 2)
+			if (offset === 9_374) expect(result).toContain(466_106_250)
+			// Production ranker supplies the actual centre alongside its stable identity.
+			expect(
+				channels(
+					planWith(input, {
+						...act,
+						observed: [
+							{
+								epoch: EPOCH,
+								channelsHz: [466_100_000],
+								centres: [
+									{
+										actualHz: 466_100_000 + offset,
+										candidateHz:
+											Math.round((466_100_000 + offset) / 6_250) * 6_250,
+									},
+								],
+							},
+						],
+					}),
+					"dsd",
+				),
+			).toEqual(result)
 		}
 	})
 
@@ -873,4 +895,48 @@ it("keeps 60 jittering observed candidates, interests and placements stable with
 	ranker.dispose()
 	expect(stable).toBe(true)
 	expect(maxInterests).toBe(1)
+})
+
+it("keeps planner candidates stable across repeated midpoint crossings", () => {
+	let now = 0
+	const ranker = createChannelActivityRanker({
+		monoNow: () => now,
+		timers: { setTimeout: () => 0, clearTimeout: () => {} },
+	})
+	const input = base([dsd()], [source()])
+	ranker.ingestEpoch("s", "e", 1)
+	let candidates: readonly number[] | undefined
+	for (let i = 0; i < 40; i++) {
+		now += 250
+		const hz = 466_003_124 + (i % 2) * 2
+		ranker.ingestBlock("s", "e", {
+			epoch: 1,
+			centreHz: CENTRE,
+			sampleRateHz: 1_024_000,
+			overload: false,
+			tracks: [
+				{
+					trackId: "boundary",
+					startHz: hz - 100,
+					endHz: hz + 100,
+					flags: { iqImage: false },
+					gate: "passed",
+				},
+			],
+		})
+		const act = activity({
+			nowMonoMs: now,
+			observed: [
+				{
+					epoch: EPOCH,
+					channelsHz: ranker.port.observedChannels!(EPOCH, now),
+					centres: ranker.port.observedCentres!(EPOCH, now),
+				},
+			],
+		})
+		const next = activityQueries({ ...input, activity: act })[0]!.candidatesHz
+		if (candidates) expect(next).toEqual(candidates)
+		candidates = next
+	}
+	ranker.dispose()
 })

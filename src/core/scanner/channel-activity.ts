@@ -82,6 +82,12 @@ export const ACTIVITY_LIVE_TTL_MS = 1_000
 export const ACTIVITY_HISTORY_REFRESH_MS = 2_000
 /** Notice coalescing: at most 250 ms late, at most 4 notices per second per source. */
 export const ACTIVITY_NOTIFY_MAX_DELAY_MS = 250
+/**
+ * Retain the previous raster centre until distance > 6 250 / 2 + 500 = 3 625 Hz.
+ * This gives a 1 000 Hz return deadband and at most 3 625 Hz identity error.
+ * One extra number per bounded segment: 64 × 512 × 8 B = 256 KiB.
+ */
+export const ACTIVITY_CENTRE_HYSTERESIS_HZ = 500
 /** Energy keeps a channel hot for 2 min (a paging or call cycle), then warm. */
 export const ACTIVITY_HOT_HOLD_MS = 120_000
 /** Energy or a gated track keeps a channel warm for 15 min. */
@@ -213,6 +219,7 @@ export interface ChannelActivityRanker {
 }
 
 interface Segment {
+	observedHz: number
 	centreHz: number
 	firstMono: number
 	lastMono: number
@@ -819,6 +826,16 @@ export function createChannelActivityRanker(
 	}
 
 	const port: ChannelActivityPort = {
+		observedCentres(epoch, nowMonoMs) {
+			const s = sources.get(epoch.sourceId)
+			if (!s || !sameEpoch(s.epoch, epoch)) return []
+			return [...s.segments.values()]
+				.filter(seg => nowMonoMs < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
+				.map(seg => ({
+					actualHz: Math.round(seg.centreHz),
+					candidateHz: seg.observedHz,
+				}))
+		},
 		observedChannels(epoch, nowMonoMs) {
 			const s = sources.get(epoch.sourceId)
 			if (!s || !sameEpoch(s.epoch, epoch)) return []
@@ -829,7 +846,7 @@ export function createChannelActivityRanker(
 				...new Set(
 					[...s.segments.values()]
 						.filter(seg => nowMonoMs < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
-						.map(seg => Math.round(seg.centreHz)),
+						.map(seg => seg.observedHz),
 				),
 			]
 		},
@@ -935,6 +952,11 @@ export function createChannelActivityRanker(
 				const seg = s.segments.get(key)
 				if (seg !== undefined) {
 					// Same LRU move as `touch`, reusing the entry (the map size is unchanged).
+					if (
+						Math.abs(centre - seg.observedHz) >
+						3_125 + ACTIVITY_CENTRE_HYSTERESIS_HZ
+					)
+						seg.observedHz = quantiseObservedCentre(centre)
 					seg.centreHz = centre
 					seg.lastMono = now
 					s.segments.delete(key)
@@ -943,7 +965,12 @@ export function createChannelActivityRanker(
 					touch(
 						s.segments,
 						key,
-						{ centreHz: centre, firstMono: now, lastMono: now },
+						{
+							centreHz: centre,
+							observedHz: quantiseObservedCentre(centre),
+							firstMono: now,
+							lastMono: now,
+						},
 						ACTIVITY_MAX_SEGMENTS,
 					)
 				liveKeys.add(key)
@@ -958,7 +985,7 @@ export function createChannelActivityRanker(
 				...new Set(
 					[...s.segments.values()]
 						.filter(seg => now < seg.lastMono + ACTIVITY_WARM_HOLD_MS)
-						.map(seg => quantiseObservedCentre(seg.centreHz)),
+						.map(seg => seg.observedHz),
 				),
 			]
 				.sort((a, b) => a - b)

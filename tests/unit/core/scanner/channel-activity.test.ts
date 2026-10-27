@@ -5,6 +5,7 @@ import type {
 	ActivityQuery,
 } from "../../../../src/decoders/enablement/activity-contract.js"
 import {
+	ACTIVITY_CENTRE_HYSTERESIS_HZ,
 	ACTIVITY_DECODE_HOT_MS,
 	ACTIVITY_DECODE_WARM_MS,
 	ACTIVITY_HISTORY_REFRESH_MS,
@@ -124,7 +125,7 @@ describe("channel activity ranker", () => {
 		const before = changes.length
 		const hzs = Array.from(
 			{ length: ACTIVITY_MAX_SEGMENTS + 1 },
-			(_, i) => CENTRE + i * 100,
+			(_, i) => CENTRE + i * 6_250,
 		)
 		ranker.ingestBlock("rtl", "e1", block(hzs.slice(0, ACTIVITY_MAX_SEGMENTS)))
 		expect(ranker.port.observedChannels!(epoch, clock.now())).toHaveLength(
@@ -720,21 +721,38 @@ it("notifies coalesced raster crossings of a drifting track with the same id", (
 		clock.advance(10)
 	}
 	expect(changes).toHaveLength(before)
-	feed(3_124)
+	// Forty alternating midpoint crossings in 10 s must not churn notices or centres.
+	for (let i = 0; i < 40; i++) {
+		feed(i % 2 ? 3_126 : 3_124)
+		clock.advance(250)
+		expect(changes).toHaveLength(before)
+		expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual([
+			CENTRE,
+		])
+	}
+	const boundary = 3_125 + ACTIVITY_CENTRE_HYSTERESIS_HZ
+	feed(boundary)
 	clock.advance(250)
 	expect(changes).toHaveLength(before)
-	feed(3_125) // round upward at exactly half the 6 250 Hz raster
+	feed(boundary + 1)
 	clock.advance(250)
 	expect(changes).toHaveLength(before + 1)
-	feed(3_126)
+	expect(ranker.port.observedChannels!(query().epoch, clock.now())).toEqual([
+		CENTRE + 6_250,
+	])
+	// The reverse threshold is equally strict, at 6 250 - 3 625 = 2 625 Hz.
+	feed(6_250 - boundary)
 	clock.advance(250)
 	expect(changes).toHaveLength(before + 1)
+	feed(6_250 - boundary - 1)
+	clock.advance(250)
+	expect(changes).toHaveLength(before + 2)
 	for (let hz = 3_200; hz <= 12_000; hz += 100) {
 		feed(hz)
 		clock.advance(10)
 	}
 	clock.advance(250)
-	expect(changes).toHaveLength(before + 2)
+	expect(changes).toHaveLength(before + 4)
 	ranker.dispose()
 })
 

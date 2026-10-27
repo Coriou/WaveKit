@@ -563,6 +563,15 @@ const ObservedChannelsSchema = z
 	.array(z.number().finite().int().positive())
 	.max(ACTIVITY_MAX_OBSERVED)
 
+const ObservedCentresSchema = z
+	.array(
+		z.object({
+			actualHz: z.number().finite().int().positive(),
+			candidateHz: z.number().finite().int().positive(),
+		}),
+	)
+	.max(ACTIVITY_MAX_OBSERVED)
+
 /**
  * DecoderManager - Orchestrates decoder lifecycle and coordinates with other components.
  *
@@ -1889,6 +1898,24 @@ export class DecoderManager extends EventEmitter {
 			epochs,
 			observed: epochs.flatMap(epoch => {
 				try {
+					if (activity.port.observedCentres) {
+						const centres = activity.port.observedCentres(epoch, now)
+						if (
+							!Array.isArray(centres) ||
+							centres.length > ACTIVITY_MAX_OBSERVED
+						)
+							return []
+						const parsed = ObservedCentresSchema.safeParse(centres)
+						return parsed.success
+							? [
+									{
+										epoch,
+										channelsHz: parsed.data.map(c => c.candidateHz),
+										centres: parsed.data,
+									},
+								]
+							: []
+					}
 					const channelsHz = activity.port.observedChannels?.(epoch, now)
 					if (
 						!Array.isArray(channelsHz) ||

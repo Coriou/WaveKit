@@ -13,6 +13,7 @@ import type {
 	ActivitySnapshot,
 	ActivityState,
 	ChannelActivity,
+	ObservedActivityCentre,
 } from "./activity-contract.js"
 import type { DecoderReach } from "./contract.js"
 import { channelizerBaseCores } from "./contract.js"
@@ -93,7 +94,11 @@ export interface PlannerActivity {
 	/** The current spectrum epoch of each source; a source without one is unranked. */
 	epochs: readonly ActivityEpoch[]
 	/** Scanner energy centres, at most the ranker's bounded segment count per source. */
-	observed?: readonly { epoch: ActivityEpoch; channelsHz: readonly number[] }[]
+	observed?: readonly {
+		epoch: ActivityEpoch
+		channelsHz: readonly number[]
+		centres?: readonly ObservedActivityCentre[]
+	}[]
 	/** One atomic batch taken for this pass (empty while computing the queries). */
 	snapshots: readonly ActivitySnapshot[]
 	incumbents: readonly ActivityIncumbent[]

@@ -6,8 +6,11 @@ Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-des
 
 While watching a source, the scanner supplies its current-epoch, gated energy centres
 as extra dsd-fme activity candidates. Centres are rounded to the nearest 6.25 kHz
-raster (ties upward, at most 3.125 kHz error). A raster crossing emits a coalesced
-notice even when the track id stays the same; jitter within a raster cell does not
+raster (initial ties upward). Each track keeps its previous raster centre until its
+actual centre moves more than 500 Hz past the midpoint: distance > 3125 + 500 =
+3625 Hz. This gives a 1000 Hz return deadband and at most 3625 Hz identity error.
+The same stable centre is returned to the planner and used for coalesced notices;
+back-and-forth midpoint jitter does not
 force a planner pass. Only the current candidate set per epoch and decoder is retained. This allows digital voice on an unlisted channel
 to receive a decoder without a protocol hint or VFO selection. Suggestions remain
 subject to decoder band, passband fit, source ownership and CPU limits; energy alone

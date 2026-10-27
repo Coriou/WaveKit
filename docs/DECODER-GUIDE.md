@@ -598,8 +598,11 @@ describe("HfdlDecoder", () => {
    decoder channels are configured, including channels absent from the protocol band plan.
    No protocol hint is required: energy selects a trial channel, and the existing checked
    decoder output rules still decide whether it is verified digital voice. Band, capture
-   reach and CPU admission still apply. Observed centres use round(Hz / 6250) × 6250 (ties upward), with at most
-   3125 Hz rounding error. The manager accepts at most 512 finite positive integer
+   reach and CPU admission still apply. Observed candidate identities initially use round(Hz / 6250) × 6250 (ties upward).
+   A track keeps that identity until its actual centre is more than 3625 Hz away
+   (half the raster plus 500 Hz hysteresis), limiting identity error to 3625 Hz.
+   Coverage deduplication uses the actual energy centre against half the decoder
+   bandwidth; rounding an uncovered centre into that range does not discard it. The manager accepts at most 512 finite positive integer
    centres per source epoch; a malformed result is treated as empty. Nearby FFT centre changes reuse the existing
    channel, and burst gaps keep its placement eligible for the usual dwell and move rules.
    Each placement's `activity` field (`GET /api/decoders`) says why it runs. Tune

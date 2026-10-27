@@ -66,7 +66,17 @@ export interface ActivityChange {
 	readonly revision: number
 }
 
+export interface ObservedActivityCentre {
+	readonly actualHz: number
+	readonly candidateHz: number
+}
+
 export interface ChannelActivityPort {
+	/** Actual energy and stable candidate identity, before coverage deduplication. */
+	observedCentres?(
+		epoch: ActivityEpoch,
+		nowMonoMs: number,
+	): readonly ObservedActivityCentre[]
 	/** Optional bounded energy centres of this exact epoch, on the planner clock. */
 	// The planner still enforces decoder band, reach, ownership and slot budgets.
 	observedChannels?(epoch: ActivityEpoch, nowMonoMs: number): readonly number[]

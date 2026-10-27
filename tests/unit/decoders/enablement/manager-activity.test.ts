@@ -20,6 +20,7 @@ import type {
 	ActivityQuery,
 	ActivitySnapshot,
 	ChannelActivityPort,
+	ObservedActivityCentre,
 } from "../../../../src/decoders/enablement/activity-contract.js"
 import {
 	ACTIVITY_DWELL_MS,
@@ -381,5 +382,35 @@ it("accepts exactly 512 finite positive integer observed channels", async () => 
 	await f.advance(1_000)
 	expect(f.inputs.at(-1)?.activity?.observed).toEqual([
 		{ epoch: EPOCH, channelsHz },
+	])
+})
+
+it.each(
+	[
+		[{}],
+		[{ actualHz: NaN, candidateHz: 1 }],
+		[{ actualHz: 1, candidateHz: 0 }],
+		[{ actualHz: 1.5, candidateHz: 1 }],
+		Array.from({ length: 513 }, () => ({ actualHz: 1, candidateHz: 1 })),
+	].map(value => ({ value })),
+)("ignores malformed observed centre pairs: %j", async ({ value }) => {
+	const f = setup()
+	f.port.observedCentres = () =>
+		value as unknown as readonly ObservedActivityCentre[]
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([])
+})
+it("preserves actual and stable centres through the manager at the 512 segment bound", async () => {
+	const f = setup()
+	const centres = Array.from({ length: 512 }, (_, i) => ({
+		actualHz: 466_109_374 + i * 6_250,
+		candidateHz: 466_106_250 + i * 6_250,
+	}))
+	f.port.observedCentres = () => centres
+	await f.m.startAll()
+	await f.advance(1_000)
+	expect(f.inputs.at(-1)?.activity?.observed).toEqual([
+		{ epoch: EPOCH, channelsHz: centres.map(c => c.candidateHz), centres },
 	])
 })
