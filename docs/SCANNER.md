@@ -641,8 +641,11 @@ in snapshots and journal replay before a restored identity can be decoded/proven
 only digital sync evidence and an unverified DMR color-code hint. Historical
 stored discovery identities remain association history so restarting cannot join
 previously separate families; they are not decode proof. Published identities and
-saved call metadata require checked content. Merges discard unchecked call metadata
-and encryption flags before transferring checked provenance; identity, search and
+saved call metadata require checked content: either the discovery’s persisted
+verification flag or a retained checked decode proving its current protocol and
+identity, including co-channel observations. Observation evidence sets the flag
+so verification survives retention. Merges preserve checked metadata and discard
+unchecked call metadata and encryption flags before transferring provenance; identity, search and
 encryption filters match the published values. Stored discoveries retain an internal
 `contentVerified` flag for checked evidence whose observation was never retained or
 has since been trimmed; this flag alone grants no decoded/proven observation proof.

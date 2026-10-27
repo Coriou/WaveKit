@@ -20,6 +20,8 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // -> {"identity":{"kind":"dmr-cc","value":"1"},"contentVerified":true}.
 // Only these added fields differ semantically: no unverifiedCc/tgSrcVerified,
 // identity, confidence, metadata, association, R return value or C event changes.
+// Task 10: 125 lines between 2738 and 3648 add only contentVerified:true,
+// preserving checked provenance through a rekey merge. All other fields are unchanged.
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 5, steps: 1400, slots: 2 },

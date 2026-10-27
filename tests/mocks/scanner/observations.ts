@@ -1,3 +1,4 @@
+import { isDsdFmeProtocol } from "../../../src/core/scanner/probes/confirm/dsd-fme.js"
 import type {
 	Classification,
 	ConfidenceCap,
@@ -166,8 +167,12 @@ export function evidence(
 		protocol,
 		metadata:
 			extra.talkgroups !== undefined ? { talkgroups: extra.talkgroups } : {},
-		// Synthetic decoded evidence models checked content; legacy/sync tests opt out.
-		contentVerified: extra.contentVerified ?? true,
+		// Only dsd-fme fixtures model checked content by default.
+		...(isDsdFmeProtocol(protocol)
+			? { contentVerified: extra.contentVerified ?? true }
+			: extra.contentVerified !== undefined
+				? { contentVerified: extra.contentVerified }
+				: {}),
 		crcClean: extra.crcClean ?? true,
 		at,
 		epoch: 1,

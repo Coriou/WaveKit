@@ -18,13 +18,13 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // -> {"contentVerified":true,"crcClean":true,"identity":{"kind":"dmr-cc","value":"1"}}.
 // Example stored discovery fragment: {"identity":{"kind":"dmr-cc","value":"1"}}
 // -> {"identity":{"kind":"dmr-cc","value":"1"},"contentVerified":true}.
-// The initial integration only added these provenance fields.
-// WG17 DM task 9: seeds 1 and 42 now discard saved talkgroups on DMR records
-// lacking contentVerified before a merge can promote them. The only semantic
-// differences are metadata.talkgroups in M/S records and their R copies:
-// seed 1 ["1"] -> []; seed 42 ["1", "5", "4"] -> [] and later
-// ["5", "4", "1", "3"] -> ["1", "3"]. Identities, proof, association,
-// confidence, events and every other field remain unchanged; seed 7 is unchanged.
+// Only these added fields differ semantically: no unverifiedCc/tgSrcVerified,
+// identity, confidence, metadata, association, R return value or C event changes.
+// Task 10: seed 1 lines 814,827,884,928,967,1002,1008,1023,1201,1221,
+// 1288,1305,1313,1325,1380,1499,1518,1569,1586,1638–1654 and seed 42
+// lines 71,80,129,137,146,158,192,210,2106–2110 add contentVerified:true.
+// Same-identity observation proof and checked merge provenance now persist;
+// checked talkgroups and every other field match the pre-cab741cd goldens.
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 1, steps: 700 },

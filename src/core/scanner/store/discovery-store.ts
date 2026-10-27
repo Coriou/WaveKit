@@ -633,13 +633,6 @@ function checkedDecode(ev: DecodeEvidence): DecodeEvidence {
 	}
 }
 
-/** Keep historical identities for association, but never promote unchecked call data. */
-function downgradeLegacyDiscovery(d: Discovery): void {
-	if (!isDsdFmeProtocol(d.protocol) || d.contentVerified === true) return
-	d.metadata = emptyMetadata()
-	d.encrypted = false
-}
-
 const DIGITAL_FAILURE = new Set<string>(["no-sync", "crc-errors", "timeout"])
 
 function isAnalogDecoder(decoder: string): boolean {
@@ -2357,27 +2350,29 @@ export class DiscoveryStore
 				return false
 			if (filter.since !== undefined && Date.parse(d.lastSeenAt) < filter.since)
 				return false
-			const published =
-				filter.encrypted !== undefined ||
-				identity !== undefined ||
-				q !== undefined
-					? this.presentDiscovery(d)
-					: d
+			const checked =
+				(filter.encrypted === undefined &&
+					identity === undefined &&
+					q === undefined) ||
+				!isDsdFmeProtocol(d.protocol) ||
+				this.hasCheckedContent(d)
+			const publishedIdentity = checked ? d.identity : undefined
+			const publishedEncrypted = checked && d.encrypted
 			if (
 				filter.encrypted !== undefined &&
-				published.encrypted !== filter.encrypted
+				publishedEncrypted !== filter.encrypted
 			)
 				return false
 			if (
 				identity !== undefined &&
-				(published.identity?.kind !== identity.kind ||
-					published.identity.value.trim().toLowerCase() !== identityValue)
+				(publishedIdentity?.kind !== identity.kind ||
+					publishedIdentity.value.trim().toLowerCase() !== identityValue)
 			)
 				return false
 			if (
 				q !== undefined &&
-				!(published.operator?.label ?? "").toLowerCase().includes(q) &&
-				!(published.identity?.value ?? "").toLowerCase().includes(q)
+				!(d.operator?.label ?? "").toLowerCase().includes(q) &&
+				!(publishedIdentity?.value ?? "").toLowerCase().includes(q)
 			)
 				return false
 			if (!evidenceOn && !labelFilter) return true
@@ -2582,6 +2577,7 @@ export class DiscoveryStore
 				this.downgradeLegacyObservation(observation)
 				this.putObservation(observation)
 			}
+			for (const d of this.discoveries.values()) this.normalizeCheckedContent(d)
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }
@@ -3137,16 +3133,16 @@ export class DiscoveryStore
 			(d.identity === undefined || sameIdentity(d.identity, ev.identity)) &&
 			d.contentVerified !== true
 		) {
-			d.metadata = emptyMetadata()
-			d.encrypted = false
+			this.normalizeCheckedContent(d)
 			d.contentVerified = true
 			this.touch(d)
 		}
-		if (ev.encrypted === true) {
+		const checked = !isDsdFmeProtocol(d.protocol) || this.hasCheckedContent(d)
+		if (checked && ev.encrypted === true) {
 			if (!d.encrypted) this.touch(d)
 			d.encrypted = true
 		}
-		const m = ev.metadata
+		const m = checked ? ev.metadata : {}
 		const md = d.metadata
 		const merge = <T>(current: T[], values: readonly T[]): T[] => {
 			const next = lruMerge(current, values)
@@ -3969,6 +3965,8 @@ export class DiscoveryStore
 		this.invalidateLabel(drop.id)
 		this.markDirty(keep.id)
 		this.markDirty(drop.id)
+		this.normalizeCheckedContent(keep)
+		this.normalizeCheckedContent(drop)
 		for (const o of [...(this.byDiscovery.get(drop.id) ?? [])]) {
 			this.unlinkObservation(o)
 			o.discoveryId = keep.id
@@ -3988,10 +3986,6 @@ export class DiscoveryStore
 			(!keepBestOk || drop.signal.best.snrDb > keep.signal.best.snrDb)
 		)
 			keep.signal.best = drop.signal.best
-		// Sanitize each side before verification can be transferred to the survivor.
-		// The same downgrade runs when snapshots and journal records are inserted.
-		downgradeLegacyDiscovery(keep)
-		downgradeLegacyDiscovery(drop)
 		const km = keep.metadata
 		const dm = drop.metadata
 		km.talkgroups = lruMerge(km.talkgroups, dm.talkgroups)
@@ -4007,7 +4001,6 @@ export class DiscoveryStore
 		keep.encrypted = keep.encrypted || drop.encrypted
 		if (keep.identity === undefined && drop.identity !== undefined) {
 			keep.identity = drop.identity
-			delete keep.contentVerified
 		}
 		if (
 			keep.confidence !== "decoded" &&
@@ -4292,7 +4285,6 @@ export class DiscoveryStore
 	}
 
 	private insertDiscovery(d: Discovery): void {
-		downgradeLegacyDiscovery(d)
 		const previous = this.discoveries.get(d.id)
 		let members = this.members.get(d.id)
 		if (members === undefined) {
@@ -4929,6 +4921,36 @@ export class DiscoveryStore
 		return publishedOf(this.discoveryView(d))
 	}
 
+	/** Verification depends only on persisted provenance, including co-channel proof. */
+	private hasCheckedContent(d: Discovery): boolean {
+		return (
+			d.contentVerified === true ||
+			this.proofSources(d).some(({ observation }) =>
+				(observation.decode ?? []).some(
+					ev =>
+						ev.contentVerified === true &&
+						ev.crcClean === true &&
+						ev.protocol === d.protocol &&
+						sameIdentity(ev.identity, d.identity),
+				),
+			)
+		)
+	}
+
+	/** Run after observations are loaded, and before publishing or journaling mutations. */
+	private normalizeCheckedContent(d: Discovery): boolean {
+		if (!isDsdFmeProtocol(d.protocol)) return false
+		if (this.hasCheckedContent(d)) {
+			if (d.contentVerified === true) return false
+			d.contentVerified = true
+			return true
+		}
+		const changed = d.encrypted || !jsonEqual(d.metadata, emptyMetadata())
+		d.metadata = emptyMetadata()
+		d.encrypted = false
+		return changed
+	}
+
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
 		const view = this.discoveryView(d)
@@ -4951,17 +4973,10 @@ export class DiscoveryStore
 		// Historical stored identities keep association boundaries stable. Only checked
 		// content can publish a dsd-fme identity or its saved call metadata. Stored
 		// provenance alone does not establish an observation proof or raise its level.
-		const checkedIdentity =
-			d.contentVerified === true ||
-			(view.proof?.kind === "decoded" &&
-				view.proof.protocol === d.protocol &&
-				sameIdentity(view.proof.identity, d.identity))
-		if (isDsdFmeProtocol(d.protocol) && !checkedIdentity) {
+		if (isDsdFmeProtocol(d.protocol) && !this.hasCheckedContent(d)) {
 			delete copy.identity
-			if (view.proof?.tgSrcVerified !== true) {
-				copy.encrypted = false
-				copy.metadata = emptyMetadata()
-			}
+			copy.encrypted = false
+			copy.metadata = emptyMetadata()
 		}
 		delete copy.contentVerified
 		copy.evidenceLevel = view.evidence
@@ -5263,6 +5278,14 @@ export class DiscoveryStore
 			// as a settled runtime removal and a snapshot restore leave them (nothing detached).
 			this.aliasTable.release(id)
 		}
+		const checkedIds = new Set(m.discoveries.map(d => d.id))
+		for (const o of m.observations) checkedIds.add(o.discoveryId)
+		for (const id of [...checkedIds])
+			for (const reader of this.watcherIds(id)) checkedIds.add(reader)
+		for (const id of checkedIds) {
+			const d = this.discoveries.get(id)
+			if (d !== undefined) this.normalizeCheckedContent(d)
+		}
 		for (const a of m.aliases ?? []) {
 			this.aliasTable.release(a.id)
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
@@ -5318,6 +5341,18 @@ export class DiscoveryStore
 				mark(op, id, "updated")
 			}
 			this.linkTouched.clear()
+		}
+		const checkedIds = new Set(op.discoveries)
+		for (const id of op.observations) {
+			const o = this.observationIndex.get(id)
+			if (o !== undefined) checkedIds.add(o.discoveryId)
+		}
+		for (const id of [...checkedIds])
+			for (const reader of this.watcherIds(id)) checkedIds.add(reader)
+		for (const id of checkedIds) {
+			const d = this.discoveries.get(id)
+			if (d !== undefined && this.normalizeCheckedContent(d))
+				op.discoveries.add(id)
 		}
 		const pending = this.pendingProof
 		this.pendingProof = new Map()
