@@ -1002,6 +1002,41 @@ it.each([
 	expect(placementCostCores("acarsdec", "channel", rate)).toBeCloseTo(0.16)
 })
 
+it("keeps both configured EU meter channels at the exact shared budget", () => {
+	const plan = planPlacements({
+		...input(decoder(), [source({ centreHz: 868_950_000 })]),
+		decoders: ["first", "second"].map((id, order) =>
+			decoder({
+				id,
+				order,
+				type: "rtl433",
+				origin: "config",
+				bandRegion: "EU",
+				band: { basis: "region-default", rangesHz: meterRange },
+			}),
+		),
+		activity: {
+			nowMonoMs: 0,
+			policy: {
+				...resolveActivityPolicy(undefined, 0.814, "arm64", 4),
+				replayAllowanceCores: 0.05,
+			},
+			epochs: [],
+			snapshots: [],
+			incumbents: [],
+			recentMoves: [],
+			pendingStarts: [],
+		},
+	})
+	expect(plan.wanted).toHaveLength(2)
+	for (const p of plan.wanted)
+		expect(p).toMatchObject({
+			channelHz: 868_950_000,
+			options: { targetSampleRate: 1_200_000 },
+			costCores: 0.252,
+		})
+})
+
 it.each(["arm64", "x64"])(
 	"retains ISM when widening exceeds the %s budget",
 	arch => {

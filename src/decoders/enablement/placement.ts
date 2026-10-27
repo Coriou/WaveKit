@@ -1,3 +1,4 @@
+import { ADMISSION_EPSILON_HZ } from "../../core/channelizer/admission.js"
 import { BAND_DEFAULTS } from "../band-defaults.js"
 import {
 	ACARSDEC_CATALOGUE_MAX_CHANNELS,
@@ -25,6 +26,7 @@ import {
 import { rasterChannelsBetween } from "./paging-plan.js"
 import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
 import {
+	BUDGET_EPSILON,
 	ACTIVITY_MAX_SLOTS,
 	ACTIVITY_MOVE_WINDOW_MS,
 	activityOrder,
@@ -146,7 +148,7 @@ export function fitsReach(
 		Math.abs(channelHz - centre) +
 			d.channelBandwidthHz / 2 +
 			d.channelTransitionHz <=
-			(s.sampleRateHz! * s.usableFraction) / 2
+			(s.sampleRateHz! * s.usableFraction) / 2 + ADMISSION_EPSILON_HZ
 	)
 }
 
@@ -281,8 +283,8 @@ export function rtl433ChannelCandidate(
 		const rateHz =
 			Math.ceil(Math.max(hi - lo, RTL433_WMBUS_MIN_RATE_HZ) / 1000) * 1000
 		if (
-			lo >= c - h &&
-			hi <= c + h &&
+			lo >= c - h - ADMISSION_EPSILON_HZ &&
+			hi <= c + h + ADMISSION_EPSILON_HZ &&
 			rateHz <= RTL433_WINDOW_MAX_RATE_HZ &&
 			rateHz <= 2 * h
 		) {
@@ -292,7 +294,9 @@ export function rtl433ChannelCandidate(
 				Math.max((lo + hi) / 2, c - h + rateHz / 2),
 				c + h - rateHz / 2,
 			)
-			return { hz, rateHz }
+			// Use the same occupied-reach tolerance as channelizer admission.
+			if (Math.abs(hz - c) + rateHz / 2 <= h + ADMISSION_EPSILON_HZ)
+				return { hz, rateHz }
 		}
 	}
 	return best ?? { overlap }
@@ -1045,7 +1049,7 @@ export const planPlacements: PlacementPlanner = input => {
 			plannedKeys: new Set(mandatory.map(p => p.key)),
 			groups: [],
 		}).remainingCores
-		if (remaining >= 0) continue
+		if (remaining >= -BUDGET_EPSILON) continue
 		const s = input.sources.find(s => s.id === p.sourceId)
 		if (!s || !windowValid(s)) continue
 		let old = rtl433ChannelCandidate(

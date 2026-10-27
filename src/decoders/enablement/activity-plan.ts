@@ -57,7 +57,7 @@ export const ACTIVITY_SLOTS_ARM64: Readonly<Record<ActivityDecoder, number>> = {
 export const ACTIVITY_REPLAY_CORES_X64 = 0.1
 export const ACTIVITY_REPLAY_CORES_ARM64 = 0.05
 /** Floating point slack of the budget comparison (cores). */
-const BUDGET_EPSILON = 1e-9
+export const BUDGET_EPSILON = 1e-9
 
 export interface ActivityPolicy {
 	slots: Readonly<Record<ActivityDecoder, number>>

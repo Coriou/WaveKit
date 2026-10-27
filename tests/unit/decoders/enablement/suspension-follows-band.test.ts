@@ -390,6 +390,34 @@ describe("rtl_433 channel arithmetic", () => {
 		expect(args[args.indexOf("-s") + 1]).toBe("759000")
 	})
 
+	it("admits meter widening at a rounded usable-window edge", () => {
+		const s = source({ centreHz: 868_612_959, sampleRateHz: 2_342_663 })
+		const found = rtl433ChannelCandidate(s, [
+			{ minHz: 868_612_976, maxHz: 869_550_025 },
+		])
+		expect(found).toEqual({ hz: 868_949_524.2, rateHz: 1_201_000 })
+		if (!("hz" in found)) return
+		const request = iqChannelRequest(
+			{
+				inputSampleRate: s.sampleRateHz!,
+				targetSampleRate: found.rateHz,
+				filterTransition: 0.05,
+			},
+			{ sampleRateHz: s.sampleRateHz! },
+		)
+		expect(
+			fitsReach(
+				decoder({
+					type: "rtl433",
+					channelBandwidthHz: request.bandwidthHz,
+					channelTransitionHz: request.transitionHz,
+				}),
+				s,
+				found.hz,
+			),
+		).toBe(true)
+	})
+
 	it("Property 17: channels fit and meter widening preserves the ISM span", () => {
 		// Feature: decoder-enablement, Property 17: The rtl_433 channel fits
 		// Validates: Requirements 3.16
