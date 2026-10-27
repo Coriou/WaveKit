@@ -47,7 +47,7 @@ import {
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
 import { parseMeshtastic } from "./confirm/meshtastic.js"
-import { parseReadsb } from "./confirm/readsb.js"
+import { parseReadsb, ReadsbStateMemory } from "./confirm/readsb.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import {
 	channelPassbandOf,
@@ -178,6 +178,7 @@ interface AmbientState {
 	pairCtx: AmbientPairContext | null
 	/** ADS-B: the last raw frame per address (an exact repeat is not a second message). */
 	frames?: Map<string, string>
+	readsbStates?: ReadsbStateMemory
 }
 
 /**
@@ -552,9 +553,9 @@ export class AmbientEvidence extends EventEmitter {
 				capcodes: null,
 				pairCtx: null,
 			}
-			// ADS-B pairs by message in the decoder's own bounded memory (no shared 2 s separation:
-			// readsb hears one aircraft many times a second, so two clean messages of one address
-			// are the confirmation). Every other type shares the discovery's pairing.
+			// ADS-B keeps decoder-local confirmation: distinct CRC-proven Beast frames or
+			// advancing aircraft state records (with their own 2 s separation gate below).
+			// Every other type shares the discovery's pairing.
 			fresh.interp = createInterpreterState({
 				epoch,
 				origin: "ambient",
@@ -562,12 +563,22 @@ export class AmbientEvidence extends EventEmitter {
 				decoderId,
 				...(adsb ? {} : this.pairing(fresh)),
 			})
-			if (adsb) fresh.frames = new Map()
+			if (adsb) {
+				fresh.frames = new Map()
+				fresh.readsbStates = new ReadsbStateMemory()
+			}
 			entry = fresh
 			this.states.set(stateKey, entry)
 			this.boundPlaced(decoderId, stateKey)
 		}
 		if (entry.interp === null) return
+		if (parsed.readsbState) {
+			const address = parsed.identity.value
+			if (address === undefined || !entry.readsbStates?.accept(parsed)) return
+			// The state rule has independently paired two advancing records. Do not pair a
+			// first state with a Beast frame or a record from another decoder.
+			entry.interp.match.markAccepted(parsed.identity.key, address)
+		}
 		const frames = entry.frames
 		const address = parsed.identity.value
 		if (frames && parsed.frame !== undefined && address !== undefined) {
@@ -618,11 +629,9 @@ export class AmbientEvidence extends EventEmitter {
 		}
 	}
 
-	/**
-	 * The passband of the channel that produced `out`: its placement binding and
-	 * the decoder's channel request for the capture it reads. Any failure is
-	 * null; the caller then drops the decode.
-	 */
+	// The passband of the channel that produced `out`: its placement binding and
+	// the decoder's channel request for the capture it reads. Any failure is
+	// null; the caller then drops the decode.
 	private channelPassband(
 		decoderId: string,
 		out: DecoderOutputLike,
