@@ -473,9 +473,13 @@ capture rate is 250 ksps to 2.4 Msps, the catalogue rtl_433 decoder reads the ra
 (reach `raw`, no channel, no resampling, `-s` = the capture rate, `-f` = the capture centre);
 band plans enable and order it, never narrow what it hears. A moved capture centre restarts it
 so `-f` stays current. Above 2.4 Msps its channel is the widest one that fits the usable window
-around the band and window overlap, at most its 1 MHz target and at least 250 kHz; a changed
-rate or a moved channel restarts the placement (no in-place retune, `-f` is the channel
-centre). Below 250 ksps the reason is `capture-too-narrow`. Rationale: a sensor near the window
+around the band and window overlap, at most its 1 MHz target and at least 250 kHz,
+except optional meter widening. When the target is at least 1 MHz and a regional range
+contains 868.95 MHz, the channel may widen to include 868.95 MHz ±600 kHz while retaining
+its entire original span. The union, rounded up to 1 kHz and at least 1.2 Msps, must fit
+the usable window and the 2.4 Msps window maximum; otherwise the original channel is
+retained. Explicit lower targets disable widening. A changed rate or a moved channel restarts
+the placement (no in-place retune, `-f` is the channel centre). Below 250 ksps the reason is `capture-too-narrow`. Rationale: a sensor near the window
 edge (about 0.93 of Nyquist) lies outside every channelizer channel and decodes only from the
 raw stream.
 3.17 **LoRa follows the regional band.** The catalogue LoRa decoder in an EU region declares both

@@ -629,11 +629,14 @@ experimental stubs; they are not needed for 868.95 MHz meters. Source:
 A catalogue rtl433 placement reads the complete capture unchanged from 250 ksps
 through 2.4 Msps, at the tuner centre. This raw branch avoids channelizer work.
 At 2.4 Msps it supplies 24 samples per 100 kbps bit, twice the C/T minimum.
-For channel placements, when the regional band and usable window include
-868.95 MHz with at least ±600 kHz of room, the planner centres there and raises
-the channel target to at least 1.2 Msps. Otherwise the existing narrower ISM
-placement remains available for other sensors. The EU rtl433 band is 863–870 MHz;
-other regions retain their own band policy. A detected packet count alone does
+For channel placements with a target of at least 1 MHz, when the regional band
+includes 868.95 MHz, the planner can widen the existing ISM channel to cover both
+its original span and the meter span (868.95 MHz ±600 kHz). The union must fit
+inside the usable window and the 2.4 Msps maximum, including rounding the rate
+up in 1 kHz steps. The resulting channel uses at least 1.2 Msps and preserves coverage
+for other sensors. Otherwise the original ISM placement remains unchanged;
+explicit targets below 1 MHz disable this widening. The EU rtl433 band is
+863–870 MHz; other regions retain their own band policy. A detected packet count alone does
 not prove wM-Bus: it can include unrelated protocols, noise or damaged frames.
 
 The JSON model is `Wireless-MBus`; the pinned output uses `C` for the control

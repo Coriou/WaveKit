@@ -867,13 +867,16 @@ it.each([1_199_999, 1_200_000, 1_200_001])(
 	},
 )
 
-it.each([868_590_000, 869_310_000])(
-	"wM-Bus ±600 kHz fits at the usable edge, centre %i",
-	centreHz => {
+it.each([
+	[868_590_000, 868_820_000, 1_460_000],
+	[869_310_000, 869_012_500, 1_325_000],
+])(
+	"wM-Bus union preserves ISM coverage at the usable edge, centre %i",
+	(centreHz, expectedHz, expectedRateHz) => {
 		const src = { centreHz, sampleRateHz: 2_400_000, usableFraction: 0.8 }
 		expect(rtl433ChannelCandidate(src, meterRange)).toEqual({
-			hz: 868_950_000,
-			rateHz: 1_200_000,
+			hz: expectedHz,
+			rateHz: expectedRateHz,
 		})
 		const away = centreHz < 868_950_000 ? -1 : 1
 		const past = rtl433ChannelCandidate(
@@ -883,6 +886,59 @@ it.each([868_590_000, 869_310_000])(
 		expect("rateHz" in past && past.rateHz).toBeLessThan(1_200_000)
 	},
 )
+
+it("wM-Bus widening retains the 868.3 MHz sensors", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 868_600_000, sampleRateHz: 2_400_000, usableFraction: 0.8 },
+			meterRange,
+		),
+	).toEqual({ hz: 868_825_000, rateHz: 1_450_000 })
+})
+
+it("honours a configured channel target below 1 MHz without meter widening", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 868_600_000, sampleRateHz: 2_400_000, usableFraction: 0.8 },
+			meterRange,
+			750_000,
+		),
+	).toEqual({ hz: 868_600_000, rateHz: 750_000 })
+})
+
+it("retains the ISM candidate when the union exceeds the window rate cap", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 867_500_000, sampleRateHz: 6_000_000, usableFraction: 0.8 },
+			meterRange,
+		),
+	).toEqual({ hz: 867_500_000, rateHz: 1_000_000 })
+})
+
+it("retains the ISM candidate when the union exceeds the usable window", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 868_600_000, sampleRateHz: 1_600_000, usableFraction: 0.8 },
+			meterRange,
+		),
+	).toEqual({ hz: 868_600_000, rateHz: 1_000_000 })
+})
+
+it("rounds the union rate up to preserve both spans", () => {
+	const candidate = rtl433ChannelCandidate(
+		{ centreHz: 868_590_001, sampleRateHz: 2_400_000, usableFraction: 0.8 },
+		meterRange,
+	)
+	expect(candidate).toEqual({ hz: 868_820_000.5, rateHz: 1_460_000 })
+})
+
+it("keeps rounding padding inside the usable window while retaining both spans", () => {
+	const candidate = rtl433ChannelCandidate(
+		{ centreHz: 868_590_001, sampleRateHz: 2_399_997.5, usableFraction: 0.8 },
+		meterRange,
+	)
+	expect(candidate).toEqual({ hz: 868_820_000, rateHz: 1_460_000 })
+})
 
 it.each([2_399_999, 2_400_000, 2_400_001])(
 	"keeps raw window reach through 2.4 Msps: %i",

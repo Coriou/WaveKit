@@ -210,10 +210,10 @@ export function rtl433WindowFits(rateHz: number): boolean {
 }
 
 /**
- * Prefer the 1.2 Msps C/T meter channel when its full span fits. Otherwise
- * retain the ISM overlap arithmetic (Property 17): at most `target`, at least
- * 250 kHz, largest rate wins and ties follow range order. `overlap` reports
- * an intersecting range even when no channel fits.
+ * Select the ISM overlap candidate unchanged (Property 17), then optionally
+ * widen it to also cover the C/T meter span. Widening preserves the old span,
+ * fits the usable window and window rate cap, and honours targets below 1 MHz.
+ * `overlap` reports an intersecting range even when no channel fits.
  */
 export function rtl433ChannelCandidate(
 	source: {
@@ -230,31 +230,6 @@ export function rtl433ChannelCandidate(
 	if (!positive(c) || !positive(fs) || !positive(u) || !positive(target))
 		return { overlap: false }
 	const h = (fs * u) / 2
-	// Keep the cheaper whole-capture path above unchanged. For channel reach,
-	// centre C/T uplink explicitly: overlap midpoints can put it outside a 1 MHz
-	// channel. 100 kbps × 12 samples/bit = 1.2 Msps, or ±600 kHz.
-	const meterHz = RTL433_WMBUS_FREQUENCY_HZ
-	const meterReach = 2 * (h - Math.abs(meterHz - c))
-	if (
-		ranges.some(
-			r =>
-				r &&
-				Number.isFinite(r.minHz) &&
-				Number.isFinite(r.maxHz) &&
-				r.minHz <= meterHz &&
-				r.maxHz >= meterHz,
-		) &&
-		meterReach >= RTL433_WMBUS_MIN_RATE_HZ
-	) {
-		return {
-			hz: meterHz,
-			rateHz:
-				Math.floor(
-					Math.min(Math.max(target, RTL433_WMBUS_MIN_RATE_HZ), meterReach) /
-						1000,
-				) * 1000,
-		}
-	}
 	const rMin = RTL433_CHANNEL_MIN_RATE_HZ
 	let best: { hz: number; rateHz: number } | null = null
 	let overlap = false
@@ -279,6 +254,43 @@ export function rtl433ChannelCandidate(
 			Math.floor(Math.min(target, 2 * (h - Math.abs(hz - c))) / 1000) * 1000
 		if (rateHz < rMin) continue
 		if (!best || rateHz > best.rateHz) best = { hz, rateHz }
+	}
+	const meterHz = RTL433_WMBUS_FREQUENCY_HZ
+	if (
+		target >= RTL433_CHANNEL_TARGET_RATE_HZ &&
+		ranges.some(
+			r =>
+				r &&
+				Number.isFinite(r.minHz) &&
+				Number.isFinite(r.maxHz) &&
+				r.minHz <= meterHz &&
+				r.maxHz >= meterHz,
+		)
+	) {
+		const lo = Math.min(
+			best ? best.hz - best.rateHz / 2 : Infinity,
+			meterHz - RTL433_WMBUS_MIN_RATE_HZ / 2,
+		)
+		const hi = Math.max(
+			best ? best.hz + best.rateHz / 2 : -Infinity,
+			meterHz + RTL433_WMBUS_MIN_RATE_HZ / 2,
+		)
+		const rateHz =
+			Math.ceil(Math.max(hi - lo, RTL433_WMBUS_MIN_RATE_HZ) / 1000) * 1000
+		if (
+			lo >= c - h &&
+			hi <= c + h &&
+			rateHz <= RTL433_WINDOW_MAX_RATE_HZ &&
+			rateHz <= 2 * h
+		) {
+			// Rounding up adds less than 1 kHz. Shift only that padding if the
+			// union touches a window edge, preserving both original spans.
+			const hz = Math.min(
+				Math.max((lo + hi) / 2, c - h + rateHz / 2),
+				c + h - rateHz / 2,
+			)
+			return { hz, rateHz }
+		}
 	}
 	return best ?? { overlap }
 }
