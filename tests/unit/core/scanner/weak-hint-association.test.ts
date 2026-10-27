@@ -124,6 +124,18 @@ describe("weak hints and association families together", () => {
 		expect(d?.protocol).toBe("unknown")
 		expect(d?.confidence).toBe("activity")
 		expect(d?.hint).toBe("ism-device")
+		expect(d?.identity).toBeUndefined()
+		// The legacy identity is association history, never checked decode proof.
+		expect(
+			store.snapshot().discoveries.find(row => row.id === id)?.identity,
+		).toEqual(dmrCc(1))
+		const restored = newStore(2)
+		restored.restore(store.snapshot())
+		expect(restored.discoveryIdOf("o2")).toBe(r.discoveryId)
+		expect(
+			restored.ingest(sighting("o3", ISM_HZ + 900, T0 + 10_193.7)).discoveryId,
+		).toBe(r.discoveryId)
+		expect(restored.snapshot().discoveries).toHaveLength(2)
 	})
 
 	it("a decoded record has no hint and splits from a decode of another protocol", () => {

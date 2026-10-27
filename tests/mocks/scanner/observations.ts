@@ -158,6 +158,7 @@ export function evidence(
 		identity?: Identity
 		encrypted?: boolean
 		crcClean?: boolean
+		contentVerified?: boolean
 		talkgroups?: string[]
 	} = {},
 ): DecodeEvidence {
@@ -165,6 +166,8 @@ export function evidence(
 		protocol,
 		metadata:
 			extra.talkgroups !== undefined ? { talkgroups: extra.talkgroups } : {},
+		// Synthetic decoded evidence models checked content; legacy/sync tests opt out.
+		contentVerified: extra.contentVerified ?? true,
 		crcClean: extra.crcClean ?? true,
 		at,
 		epoch: 1,

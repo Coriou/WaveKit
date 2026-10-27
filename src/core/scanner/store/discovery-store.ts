@@ -66,7 +66,6 @@ import type {
 	Classification,
 	ConfidenceCap,
 	DecodeEvidence,
-	Discovery,
 	DiscoveryMetadata,
 	Identity,
 	Observation,
@@ -84,7 +83,7 @@ import type {
 } from "../types.js"
 import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
-import type { StoreMutation } from "./schemas.js"
+import type { StoredDiscovery as Discovery, StoreMutation } from "./schemas.js"
 import { RecordingAliasTable } from "../recording-aliases.js"
 import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
 import type { DiscoveryAliasEntry } from "../recording-aliases.js"
@@ -584,6 +583,7 @@ interface EvidenceBag {
  */
 function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 	try {
+		ev = checkedDecode(ev)
 		if (ev.crcClean !== true) return undefined
 		if (!knownProtocol(ev.protocol) || ev.protocol === "unknown")
 			return undefined
@@ -614,6 +614,22 @@ function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 		return row
 	} catch {
 		return undefined
+	}
+}
+
+/** Normalize old/unchecked dsd-fme content at both live and persistence boundaries. */
+function checkedDecode(ev: DecodeEvidence): DecodeEvidence {
+	if (!isDsdFmeProtocol(ev.protocol) || ev.contentVerified === true) return ev
+	const { identity, callId: _callId, encrypted: _encrypted, ...rest } = ev
+	const cc =
+		identity?.kind === "dmr-cc" && /^(?:[0-9]|1[0-5])$/.test(identity.value)
+			? Number(identity.value)
+			: ev.unverifiedCc
+	return {
+		...rest,
+		contentVerified: false,
+		metadata: {},
+		...(cc !== undefined ? { unverifiedCc: cc } : {}),
 	}
 }
 
@@ -1184,6 +1200,7 @@ export class DiscoveryStore
 		ev: DecodeEvidence,
 		opts: { cap?: ConfidenceCap },
 	): StoreChange | null {
+		ev = checkedDecode(ev)
 		const d = this.discoveries.get(discoveryId)
 		if (d === undefined || !ev.crcClean) return null
 		if (
@@ -1359,6 +1376,7 @@ export class DiscoveryStore
 		observationId: string,
 		ev: DecodeEvidence,
 	): boolean {
+		ev = checkedDecode(ev)
 		const o = this.observationIndex.get(observationId)
 		if (o === undefined || !ev.crcClean || ev.epoch !== o.sampleRange.epoch)
 			return false
@@ -2548,7 +2566,6 @@ export class DiscoveryStore
 				this.downgradeLegacyObservation(observation)
 				this.putObservation(observation)
 			}
-			this.downgradeLegacyDiscoveries(this.discoveries.values())
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }
@@ -3093,6 +3110,20 @@ export class DiscoveryStore
 		) {
 			d.protocol = label.protocol
 			d.family = label.family
+			this.touch(d)
+		}
+		// Memory-only checked evidence still needs durable provenance when its observation
+		// is absent or later trimmed. A loose decode cannot verify a historical identity.
+		if (
+			isDsdFmeProtocol(ev.protocol) &&
+			ev.contentVerified === true &&
+			ev.protocol === d.protocol &&
+			(d.identity === undefined || sameIdentity(d.identity, ev.identity)) &&
+			d.contentVerified !== true
+		) {
+			d.metadata = emptyMetadata()
+			d.encrypted = false
+			d.contentVerified = true
 			this.touch(d)
 		}
 		if (ev.encrypted === true) {
@@ -3954,8 +3985,10 @@ export class DiscoveryStore
 		keep.jobIds = appendMissing(keep.jobIds, drop.jobIds)
 		keep.sourceIds = appendMissing(keep.sourceIds, drop.sourceIds)
 		keep.encrypted = keep.encrypted || drop.encrypted
-		if (keep.identity === undefined && drop.identity !== undefined)
+		if (keep.identity === undefined && drop.identity !== undefined) {
 			keep.identity = drop.identity
+			delete keep.contentVerified
+		}
 		if (
 			keep.confidence !== "decoded" &&
 			(drop.confidence === "decoded" ||
@@ -3965,6 +3998,12 @@ export class DiscoveryStore
 			keep.family = drop.family
 			if (drop.class !== "unknown") keep.class = drop.class
 		}
+		if (
+			drop.contentVerified === true &&
+			drop.protocol === keep.protocol &&
+			sameIdentity(keep.identity, drop.identity)
+		)
+			keep.contentVerified = true
 		keep.confidence = maxConfidence(keep.confidence, drop.confidence)
 		if (keep.confidence === "decoded" || drop.confidenceCap === undefined)
 			delete keep.confidenceCap
@@ -4888,6 +4927,22 @@ export class DiscoveryStore
 			const hint = this.hintFor(d)
 			if (hint !== undefined) copy.hint = hint
 		}
+		// Historical stored identities keep association boundaries stable. Only checked
+		// content can publish a dsd-fme identity or its saved call metadata. Stored
+		// provenance alone does not establish an observation proof or raise its level.
+		const checkedIdentity =
+			d.contentVerified === true ||
+			(view.proof?.kind === "decoded" &&
+				view.proof.protocol === d.protocol &&
+				sameIdentity(view.proof.identity, d.identity))
+		if (isDsdFmeProtocol(d.protocol) && !checkedIdentity) {
+			delete copy.identity
+			if (view.proof?.tgSrcVerified !== true) {
+				copy.encrypted = false
+				copy.metadata = emptyMetadata()
+			}
+		}
+		delete copy.contentVerified
 		copy.evidenceLevel = view.evidence
 		copy.revision = this.published.get(d.id) ?? 1
 		return copy
@@ -5134,55 +5189,8 @@ export class DiscoveryStore
 	}
 
 	private downgradeLegacyObservation(observation: Observation): void {
-		// Old dsd-fme rows called sync-only CCs CRC-clean. Only explicit
-		// content provenance survives a restart as an identity proof.
 		if (observation.decode !== undefined)
-			observation.decode = observation.decode.map(ev => {
-				if (!isDsdFmeProtocol(ev.protocol) || ev.contentVerified === true)
-					return ev
-				const { identity, callId: _callId, encrypted: _encrypted, ...rest } = ev
-				const cc =
-					identity?.kind === "dmr-cc" &&
-					/^(?:[0-9]|1[0-5])$/.test(identity.value)
-						? Number(identity.value)
-						: ev.unverifiedCc
-				return {
-					...rest,
-					contentVerified: false,
-					metadata: {},
-					...(cc !== undefined ? { unverifiedCc: cc } : {}),
-				}
-			})
-	}
-
-	private downgradeLegacyDiscoveries(discoveries: Iterable<Discovery>): void {
-		for (const d of discoveries) {
-			if (!isDsdFmeProtocol(d.protocol) || d.identity === undefined) continue
-			// Checked proof can live on a linked co-channel observation as well.
-			const verified = this.proofSources(d).some(({ observation }) =>
-				observation.decode?.some(
-					ev =>
-						ev.contentVerified === true &&
-						ev.protocol === d.protocol &&
-						ev.crcClean === true &&
-						ev.identity !== undefined &&
-						identityFitsProtocol(ev.protocol, ev.identity) &&
-						sameIdentity(ev.identity, d.identity),
-				),
-			)
-			if (verified) continue
-			delete d.identity
-			d.confidence = "activity"
-			d.metadata = {
-				talkgroups: [],
-				sources: [],
-				slots: [],
-				callsigns: [],
-				capcodes: [],
-				ismModels: [],
-			}
-			d.encrypted = false
-		}
+			observation.decode = observation.decode.map(checkedDecode)
 	}
 
 	private applyStoredMutation(m: StoreMutation): void {
@@ -5221,16 +5229,6 @@ export class DiscoveryStore
 			this.downgradeLegacyObservation(observation)
 			this.putObservation(observation)
 		}
-		this.downgradeLegacyDiscoveries(
-			[
-				...new Set([
-					...m.discoveries.map(d => d.id),
-					...m.observations.map(o => o.discoveryId),
-				]),
-			]
-				.map(id => this.discoveries.get(id))
-				.filter((d): d is Discovery => d !== undefined),
-		)
 		for (const id of m.removedObservations ?? []) {
 			this.forgetEvidence(id)
 			const previous = this.observationIndex.get(id)

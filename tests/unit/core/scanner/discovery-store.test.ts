@@ -240,11 +240,8 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 
 		const replica = newStore().store
 		for (const e of entries) replica.replay(e)
-		// Memory-only identities without retained checked observations are downgraded
-		// identically by snapshot restore and journal replay.
-		const normalized = newStore().store
-		normalized.restore(store.snapshot())
-		expect(replica.snapshot()).toEqual(normalized.snapshot())
+		// Stored association history survives exactly, including memory-only evidence.
+		expect(replica.snapshot()).toEqual(store.snapshot())
 	})
 
 	it("leaves stored job credits unchanged when a re-ingest has no passed gate", () => {
@@ -1014,13 +1011,10 @@ describe("DiscoveryStore queries and replay", () => {
 		const replica = newStore({ rasters: PMR }).store
 		replica.restore(snap)
 		for (const e of entries.slice(cut)) replica.replay(e)
-		// Memory-only identities without retained checked observations are downgraded
-		// identically by snapshot restore and journal replay.
-		const normalized = newStore().store
-		normalized.restore(store.snapshot())
-		expect(replica.snapshot()).toEqual(normalized.snapshot())
+		// Stored association history survives exactly, including memory-only evidence.
+		expect(replica.snapshot()).toEqual(store.snapshot())
 		for (const e of entries) replica.replay(e)
-		expect(replica.snapshot()).toEqual(normalized.snapshot())
+		expect(replica.snapshot()).toEqual(store.snapshot())
 		expect(replica.correction("src-1")).toBe(3_000)
 	})
 

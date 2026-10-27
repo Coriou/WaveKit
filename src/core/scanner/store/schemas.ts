@@ -23,6 +23,9 @@ import type {
 } from "../types.js"
 import type { Assert, SchemaMatches } from "../../spectrum/types.js"
 
+/** Persisted association history and its checked-content provenance, never a DTO field. */
+export type StoredDiscovery = Discovery & { contentVerified?: boolean }
+
 type SameUnion<A, B> = [A] extends [B]
 	? [B] extends [A]
 		? true
@@ -163,6 +166,7 @@ export const DiscoverySchema = z.object({
 	confidence: ConfidenceSchema,
 	confidenceCap: z.enum(["adjacent-leak", "suspected-intermod"]).optional(),
 	identity: IdentitySchema.optional(),
+	contentVerified: z.boolean().optional(),
 	encrypted: z.boolean(),
 	undecodedReason: z
 		.enum([
@@ -206,7 +210,7 @@ export const DiscoverySchema = z.object({
 export type DiscoveryCheck = Assert<
 	SchemaMatches<
 		Omit<
-			Discovery,
+			StoredDiscovery,
 			| "proof"
 			| "evidenceLevel"
 			| "hint"

@@ -653,8 +653,18 @@ describe("dsd-fme content verification", () => {
 			store.appendObservationEvidence(obs.id, ev)
 			store.applyEvidence(id, ev)
 			const snapshot = store.snapshot()
-			for (const row of snapshot.observations[0]?.decode ?? [])
-				Object.assign(row, { contentVerified: provenance })
+			// Model an actual pre-provenance snapshot, bypassing live normalization.
+			const savedObservation = snapshot.observations[0]!
+			savedObservation.decode = [{ ...ev }]
+			Object.assign(savedObservation.decode[0]!, {
+				contentVerified: provenance,
+			})
+			Object.assign(snapshot.discoveries[0]!, {
+				identity: ev.identity,
+				protocol: "dmr",
+				family: "digital-voice",
+				confidence: "decoded",
+			})
 			store.restore(snapshot)
 			expect(store.get(id)).toMatchObject({
 				confidence: "activity",
@@ -699,8 +709,24 @@ describe("dsd-fme content verification", () => {
 			}
 			store.appendObservationEvidence(obs.id, ev)
 			store.applyEvidence(id, ev)
+			// A real legacy journal has an unchecked identity, unlike new live writes.
+			const legacy = store.snapshot()
+			legacy.observations[0]!.decode = [ev]
+			Object.assign(legacy.discoveries[0]!, {
+				identity: ev.identity,
+				protocol,
+				family: protocol === "dmr" ? "digital-voice" : "pager",
+				confidence: "decoded",
+			})
 			store.restore(snapshot)
-			for (const entry of entries) store.replay(entry)
+			store.replay({
+				...entries.at(-1)!,
+				payload: {
+					discoveries: legacy.discoveries,
+					observations: legacy.observations,
+					deleted: [],
+				},
+			})
 			if (protocol === "dmr") {
 				expect(store.get(id)).toMatchObject({
 					confidence: "activity",
@@ -758,6 +784,63 @@ describe("dsd-fme content verification", () => {
 			expect(store.get(id)?.proof?.kind).toBe("digital-undecoded")
 			expect(store.get(id)?.evidenceLevel).toBe("weak")
 			expect(store.get(id)?.identity).toBeUndefined()
+		},
+	)
+
+	it.each([undefined, false, true])(
+		"keeps live, snapshot and journal objects identical with contentVerified=%s",
+		contentVerified => {
+			const makeStore = () =>
+				new DiscoveryStore({
+					maxDiscoveries: 10,
+					now: () => T0,
+					newId: counterIds(),
+				})
+			const store = makeStore()
+			const entries: JournalEntry[] = []
+			store.on("mutation", (entry: Omit<JournalEntry, "seq">) =>
+				entries.push({ ...entry, seq: entries.length + 1 }),
+			)
+			for (const [index, retained] of [false, true].entries()) {
+				const obs = makeObs({
+					id: `live-${index}`,
+					centreHz: HZ + index * 100_000,
+					startedAt: T0 + 17.3,
+					open: true,
+				})
+				const id = store.ingest(obs).discoveryId!
+				const ev: DecodeEvidence = {
+					protocol: "dmr",
+					identity: { kind: "dmr-cc", value: "3" },
+					crcClean: true,
+					metadata: { talkgroups: ["123"], sources: ["456"] },
+					encrypted: true,
+					at: T0 + 193.7,
+					epoch: obs.track.epoch,
+					origin: "probe",
+					...(contentVerified !== undefined ? { contentVerified } : {}),
+				}
+				if (retained) store.appendObservationEvidence(obs.id, ev)
+				store.applyEvidence(id, ev)
+			}
+			const restored = makeStore()
+			restored.restore(store.snapshot())
+			const replayed = makeStore()
+			for (const entry of entries) replayed.replay(entry)
+			expect(restored.snapshot()).toEqual(store.snapshot())
+			expect(replayed.snapshot()).toEqual(store.snapshot())
+			for (const discovery of store.list({}).items) {
+				expect(discovery).not.toHaveProperty("contentVerified")
+				if (contentVerified === true) {
+					expect(discovery.identity).toEqual({ kind: "dmr-cc", value: "3" })
+					// Stored provenance alone never grants an observation proof.
+					if (discovery.observationCount === 1 && discovery.proof == null)
+						expect(discovery.evidenceLevel).toBe("weak")
+				} else {
+					expect(discovery.identity).toBeUndefined()
+					expect(discovery.evidenceLevel).toBe("weak")
+				}
+			}
 		},
 	)
 

@@ -10,6 +10,16 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // WG15 DQ 9.3 re-baseline: an evidence-less sighting no longer reaches a decoded record of another
 // family beyond 1 000 Hz or outside its band (decoded-record shortcut and key fallback), so the first
 // such sighting in this run now joins the nearest same-family record instead (seed 1 o39, seed 7 o296, seed 42 o343).
+// WG17 DM integration re-baseline: checked synthetic decodes explicitly persist
+// contentVerified:true on M.payload.observations[].decode / S.observations[].decode.
+// Stored discovery provenance also survives observation trimming: the same field
+// appears on M.payload.discoveries[], S.discoveries[] and internal E[] eviction copies.
+// Example decode fragment: {"crcClean":true,"identity":{"kind":"dmr-cc","value":"1"}}
+// -> {"contentVerified":true,"crcClean":true,"identity":{"kind":"dmr-cc","value":"1"}}.
+// Example stored discovery fragment: {"identity":{"kind":"dmr-cc","value":"1"}}
+// -> {"identity":{"kind":"dmr-cc","value":"1"},"contentVerified":true}.
+// Only these added fields differ semantically: no unverifiedCc/tgSrcVerified,
+// identity, confidence, metadata, association, R return value or C event changes.
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 1, steps: 700 },

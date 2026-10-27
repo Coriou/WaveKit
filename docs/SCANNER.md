@@ -638,7 +638,14 @@ Unknown output formats default to unverified.
 
 Persisted dsd-fme evidence requires explicit `contentVerified: true` provenance
 in snapshots and journal replay before a restored identity can be decoded/proven. Legacy rows without it retain
-only digital sync evidence and an unverified DMR color-code hint. Replay uses the
+only digital sync evidence and an unverified DMR color-code hint. Historical
+stored discovery identities remain association history so restarting cannot join
+previously separate families; they are not decode proof. Published identities and
+saved call metadata require checked content. Stored discoveries retain an internal
+`contentVerified` flag for checked evidence whose observation was never retained or
+has since been trimmed; this flag alone grants no decoded/proven observation proof.
+Live evidence and restored evidence use the same normalization, so new snapshots
+and journal replay reproduce the live store exactly. Replay uses the
 original source epoch's tuner centre retained by the scanner, rather than the
 narrow capture's channel centre. The capture index stores source and epoch but
 not tuner centre; if that epoch's centre is no longer known (including bounded
