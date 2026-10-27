@@ -650,3 +650,34 @@ in both admission and the decoder manager. After late-drop shedding, retry histo
 resets only after a clean run of at least 30 minutes since readmission. A shed or
 probation failure before then doubles the delay from 5 to 10 to 20 minutes, capped
 at 30 minutes. After that sustained clean run, the next failure starts at 5 minutes.
+
+### readsb aircraft evidence
+
+The default `outputFormat: "sbs"` selects `--net-sbs-port`; the adapter maps each
+`MSG` line to an aircraft record with a fresh `lastSeen` and `messageCount: 1`.
+That count describes one line, not readsb's cumulative aircraft state.
+The adapter also carries `sbsSourceTimestamp` and `sbsContentId` (SHA-256 of the
+complete source line). Generated date/time fields 7–8 supply source time; logged
+fields 9–10 are used only when both generated fields are absent. Strict calendar
+and clock validation rejects malformed values without falling back. SBS has no
+timezone, so its wall clock is normalized to UTC for deterministic intervals.
+Records without valid source time never confirm.
+
+Scanner confirmation relies on readsb's own decoding and two independent messages
+of the same ICAO at least 2 s and at most 5 min apart in readsb's own time, with
+different content identities. Receipt delays and identical line replays cannot
+satisfy this guard. JSON output sets `readsbFormat: "json"` and maps `messages` to
+the cumulative count; it requires a count greater than one and count advancement,
+2 s to 5 min apart in source time (`jsonSourceTimestamp`, numeric `now` epoch
+seconds minus nonnegative `seen` age). Snapshots lacking valid source epoch/age
+still map for display but cannot confirm. Beast keeps local CRC/address validation and
+distinct-frame confirmation without a minimum interval.
+
+SBS/JSON validation is delegated to readsb; their records do not expose whether a
+CRC was corrected or the address was independently confirmed. We could not verify
+offline the CRC-correction/address-confirmation policy for the pinned build
+`b499ecbd18dc4a2ec6098c31de31508017fa6190` in `Dockerfile`. The adapter mapping
+and two-message guard do not establish those upstream guarantees.
+See [scanner ambient identification](SCANNER.md#identification-from-running-decoders) for tuning
+trust: readsb's protocol declaration supplies 1090 MHz when raw placements have
+no explicit target, but only observed tuning that covers it establishes trust.
