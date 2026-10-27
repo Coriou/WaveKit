@@ -465,7 +465,13 @@ Property 16 is the next free number in this design (1–15 are above).
     _Validates 3.13, 3.14, 3.15, 11.3._
 17. **The `rtl_433` channel fits.** For random finite centres and rates with `h ≥ 125 kHz` and
     random ranges, the planner's `rtl_433` candidate, when it exists, satisfies `fitsReach`, has
-    `250 kHz ≤ r ≤ target` and `-s` equal to `r`; no candidate exists exactly when step 2 gives
+    `250 kHz ≤ r ≤ target` and `-s` equal to `r`, except optional meter widening.
+    With a target of at least 1 MHz and a range containing 868.95 MHz, the candidate
+    may widen to the union of its original span and 868.95 MHz ±600 kHz. It must
+    retain the entire original span, fit the usable window, and use at least
+    1.2 Msps and at most the 2.4 Msps window maximum, rounded up to 1 kHz. If the
+    union or its rounded rate cannot fit, keep the original candidate. Explicit
+    targets below 1 MHz are never widened. No candidate exists exactly when step 2 gives
     no overlap or step 4 rejects every range; non-finite or missing caps give no candidate. A
     re-plan with a changed `r` restarts the placement once; one with the same `r` and a new
     `hz` retunes in place without a restart (deterministic tests for both).

@@ -1,3 +1,5 @@
+import { ADMISSION_EPSILON_HZ } from "../../core/channelizer/admission.js"
+import { BAND_DEFAULTS } from "../band-defaults.js"
 import {
 	ACARSDEC_CATALOGUE_MAX_CHANNELS,
 	DECODER_MAX_BANDPLAN_CHANNELS,
@@ -5,6 +7,8 @@ import {
 	RTL433_CHANNEL_MIN_RATE_HZ,
 	RTL433_CHANNEL_TARGET_RATE_HZ,
 	RTL433_WINDOW_MAX_RATE_HZ,
+	RTL433_WMBUS_MIN_RATE_HZ,
+	RTL433_WMBUS_FREQUENCY_HZ,
 	placementCostCores,
 	placementKey,
 } from "./contract.js"
@@ -22,6 +26,7 @@ import {
 import { rasterChannelsBetween } from "./paging-plan.js"
 import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
 import {
+	BUDGET_EPSILON,
 	ACTIVITY_MAX_SLOTS,
 	ACTIVITY_MOVE_WINDOW_MS,
 	activityOrder,
@@ -143,7 +148,7 @@ export function fitsReach(
 		Math.abs(channelHz - centre) +
 			d.channelBandwidthHz / 2 +
 			d.channelTransitionHz <=
-			(s.sampleRateHz! * s.usableFraction) / 2
+			(s.sampleRateHz! * s.usableFraction) / 2 + ADMISSION_EPSILON_HZ
 	)
 }
 
@@ -196,12 +201,6 @@ function bandFits(d: PlannerDecoder, hz: number, halfWidth = 0): boolean {
 }
 
 /**
- * rtl_433 channel arithmetic (design 2026-10-25, Property 17): the widest
- * channel, at most `target` and at least 250 kHz, that fits the usable window
- * around the overlap of each range with the window. Ranges in order; largest
- * rate wins, ties by order. `overlap` is true when some range overlaps.
- */
-/**
  * True when rtl_433 can read a capture at `rateHz` whole (window reach):
  * at least the narrowest rate it accepts, at most RTL433_WINDOW_MAX_RATE_HZ.
  */
@@ -213,6 +212,12 @@ export function rtl433WindowFits(rateHz: number): boolean {
 	)
 }
 
+/**
+ * Select the ISM overlap candidate unchanged (Property 17), then optionally
+ * widen it to also cover the C/T meter span. Widening preserves the old span,
+ * fits the usable window and window rate cap, and honours targets below 1 MHz.
+ * `overlap` reports an intersecting range even when no channel fits.
+ */
 export function rtl433ChannelCandidate(
 	source: {
 		centreHz: number | null
@@ -221,6 +226,7 @@ export function rtl433ChannelCandidate(
 	},
 	ranges: readonly ({ minHz: number; maxHz: number } | null | undefined)[],
 	target: number = RTL433_CHANNEL_TARGET_RATE_HZ,
+	widen = true,
 ): { hz: number; rateHz: number } | { overlap: boolean } {
 	const c = source.centreHz
 	const fs = source.sampleRateHz
@@ -252,6 +258,46 @@ export function rtl433ChannelCandidate(
 			Math.floor(Math.min(target, 2 * (h - Math.abs(hz - c))) / 1000) * 1000
 		if (rateHz < rMin) continue
 		if (!best || rateHz > best.rateHz) best = { hz, rateHz }
+	}
+	const meterHz = RTL433_WMBUS_FREQUENCY_HZ
+	if (
+		widen &&
+		target >= RTL433_CHANNEL_TARGET_RATE_HZ &&
+		ranges.some(
+			r =>
+				r &&
+				Number.isFinite(r.minHz) &&
+				Number.isFinite(r.maxHz) &&
+				r.minHz <= meterHz &&
+				r.maxHz >= meterHz,
+		)
+	) {
+		const lo = Math.min(
+			best ? best.hz - best.rateHz / 2 : Infinity,
+			meterHz - RTL433_WMBUS_MIN_RATE_HZ / 2,
+		)
+		const hi = Math.max(
+			best ? best.hz + best.rateHz / 2 : -Infinity,
+			meterHz + RTL433_WMBUS_MIN_RATE_HZ / 2,
+		)
+		const rateHz =
+			Math.ceil(Math.max(hi - lo, RTL433_WMBUS_MIN_RATE_HZ) / 1000) * 1000
+		if (
+			lo >= c - h - ADMISSION_EPSILON_HZ &&
+			hi <= c + h + ADMISSION_EPSILON_HZ &&
+			rateHz <= RTL433_WINDOW_MAX_RATE_HZ &&
+			rateHz <= 2 * h
+		) {
+			// Rounding up adds less than 1 kHz. Shift only that padding if the
+			// union touches a window edge, preserving both original spans.
+			const hz = Math.min(
+				Math.max((lo + hi) / 2, c - h + rateHz / 2),
+				c + h - rateHz / 2,
+			)
+			// Use the same occupied-reach tolerance as channelizer admission.
+			if (Math.abs(hz - c) + rateHz / 2 <= h + ADMISSION_EPSILON_HZ)
+				return { hz, rateHz }
+		}
 	}
 	return best ?? { overlap }
 }
@@ -621,10 +667,22 @@ export const planPlacements: PlacementPlanner = input => {
 						configured,
 					)
 				else if (d.type === "rtl433") {
+					const regional = BAND_DEFAULTS["rtl433"]
+					const region = d.bandRegion ?? d.band?.region?.code
+					const regionalRanges =
+						region && regional?.scope === "region"
+							? (regional.byRegion[region].rangesHz ?? [])
+							: []
+					const widen = regionalRanges.some(
+						r =>
+							r.minHz <= RTL433_WMBUS_FREQUENCY_HZ &&
+							r.maxHz >= RTL433_WMBUS_FREQUENCY_HZ,
+					)
 					let found = rtl433ChannelCandidate(
 						s,
 						Array.isArray(d.band?.rangesHz) ? d.band.rangesHz : [],
 						d.channelTargetRateHz,
+						widen,
 					)
 					// `always` and operator starts skip the band: the window itself.
 					if (!("hz" in found) && bandFree(d))
@@ -632,6 +690,7 @@ export const planPlacements: PlacementPlanner = input => {
 							s,
 							[{ minHz: centre - half, maxHz: centre + half }],
 							d.channelTargetRateHz,
+							false,
 						)
 					if ("hz" in found)
 						local.push({
@@ -876,7 +935,13 @@ export const planPlacements: PlacementPlanner = input => {
 				reach: c.reach,
 				origin: c.origin,
 				primary: i === 0,
-				costCores: placementCostCores(d.type, c.reach),
+				costCores: placementCostCores(
+					d.type,
+					c.reach,
+					typeof c.options?.["targetSampleRate"] === "number"
+						? c.options["targetSampleRate"]
+						: d.channelTargetRateHz,
+				),
 				sampleRateHz: c.source.sampleRateHz!,
 				...(c.options ? { options: c.options } : {}),
 				...(c.gatedSecondary && i > 0 ? { gated: true as const } : {}),
@@ -969,6 +1034,52 @@ export const planPlacements: PlacementPlanner = input => {
 	// Global allocator (activity-plan.ts): every placement planned so far is
 	// mandatory; activity slots get what remains of the budget.
 	const mandatory = [...wanted, ...deferred]
+	// The policy already resolves host architecture/budget. Charge all mandatory
+	// placements, pending starts, shared bases and replay before optional widening.
+	// Reuse the allocator's accounting so a wider rtl433 channel cannot starve
+	// the old ISM placement on arm64 or any other constrained host.
+	for (const [i, p] of mandatory.entries()) {
+		const d = decoders.find(d => d.id === p.decoderId)
+		if (d?.type !== "rtl433" || p.reach !== "channel") continue
+		const remaining = allocateActivitySlots({
+			budgetCores: act.policy.budgetCores,
+			replayAllowanceCores: act.policy.replayAllowanceCores,
+			mandatory,
+			pending: act.pendingStarts,
+			plannedKeys: new Set(mandatory.map(p => p.key)),
+			groups: [],
+		}).remainingCores
+		if (remaining >= -BUDGET_EPSILON) continue
+		const s = input.sources.find(s => s.id === p.sourceId)
+		if (!s || !windowValid(s)) continue
+		let old = rtl433ChannelCandidate(
+			s,
+			d.band?.rangesHz ?? [],
+			d.channelTargetRateHz,
+			false,
+		)
+		if (!("hz" in old) && bandFree(d)) {
+			const half = (s.sampleRateHz! * s.usableFraction) / 2
+			old = rtl433ChannelCandidate(
+				s,
+				[{ minHz: s.centreHz! - half, maxHz: s.centreHz! + half }],
+				d.channelTargetRateHz,
+				false,
+			)
+		}
+		if (!("hz" in old) || old.rateHz >= Number(p.options?.["targetSampleRate"]))
+			continue
+		const fallback = {
+			...p,
+			key: placementKey(d.id, s.id, "channel", old.hz),
+			channelHz: old.hz,
+			costCores: placementCostCores(d.type, "channel", old.rateHz),
+			options: { ...p.options, targetSampleRate: old.rateHz },
+		}
+		mandatory[i] = fallback
+		const list = wanted.includes(p) ? wanted : deferred
+		list[list.indexOf(p)] = fallback
+	}
 	const keyOf = (g: ActivityGroup, hz: number) =>
 		placementKey(g.d.id, g.source.id, "channel", hz)
 	// Pending starts are capacity in use: deduplicated only against the

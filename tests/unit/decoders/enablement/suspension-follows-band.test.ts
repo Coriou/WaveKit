@@ -16,6 +16,7 @@ import type {
 	EfficiencyGate,
 	PlannerSource,
 } from "../../../../src/decoders/enablement/contract.js"
+import { RTL433_WINDOW_MAX_RATE_HZ } from "../../../../src/decoders/enablement/contract.js"
 import {
 	fitsReach,
 	planPlacements,
@@ -32,6 +33,30 @@ import type {
 	PlannerDecoder,
 	PlannerInput,
 } from "../../../../src/decoders/enablement/contract.js"
+
+// Reference ISM selection before optional meter widening (Property 17).
+function ismCandidate(
+	c: number,
+	h: number,
+	ranges: readonly { minHz: number; maxHz: number }[],
+	target = 1_000_000,
+): { hz: number; rateHz: number } | undefined {
+	let best: { hz: number; rateHz: number } | undefined
+	for (const range of ranges) {
+		const lo = Math.max(range.minHz, c - h)
+		const hi = Math.min(range.maxHz, c + h)
+		if (lo > hi || h < 125_000) continue
+		const hz = Math.min(
+			Math.max((lo + hi) / 2, c - h + 125_000),
+			c + h - 125_000,
+		)
+		const rateHz =
+			Math.floor(Math.min(target, 2 * (h - Math.abs(hz - c))) / 1000) * 1000
+		if (rateHz >= 250_000 && (!best || rateHz > best.rateHz))
+			best = { hz, rateHz }
+	}
+	return best
+}
 
 const decoder = (overrides: Partial<PlannerDecoder> = {}): PlannerDecoder => ({
 	id: "test",
@@ -365,13 +390,44 @@ describe("rtl_433 channel arithmetic", () => {
 		expect(args[args.indexOf("-s") + 1]).toBe("759000")
 	})
 
-	it("Property 17: an accepted channel fits and stays within 250 kHz and the target", () => {
+	it("admits meter widening at a rounded usable-window edge", () => {
+		const s = source({ centreHz: 868_612_959, sampleRateHz: 2_342_663 })
+		const found = rtl433ChannelCandidate(s, [
+			{ minHz: 868_612_976, maxHz: 869_550_025 },
+		])
+		expect(found).toEqual({ hz: 868_949_524.2, rateHz: 1_201_000 })
+		if (!("hz" in found)) return
+		const request = iqChannelRequest(
+			{
+				inputSampleRate: s.sampleRateHz!,
+				targetSampleRate: found.rateHz,
+				filterTransition: 0.05,
+			},
+			{ sampleRateHz: s.sampleRateHz! },
+		)
+		expect(
+			fitsReach(
+				decoder({
+					type: "rtl433",
+					channelBandwidthHz: request.bandwidthHz,
+					channelTransitionHz: request.transitionHz,
+				}),
+				s,
+				found.hz,
+			),
+		).toBe(true)
+	})
+
+	it("Property 17: channels fit and meter widening preserves the ISM span", () => {
 		// Feature: decoder-enablement, Property 17: The rtl_433 channel fits
 		// Validates: Requirements 3.16
 		fc.assert(
 			fc.property(
-				fc.integer({ min: 300_000_000, max: 900_000_000 }),
-				fc.integer({ min: 312_500, max: 3_200_000 }),
+				fc.oneof(
+					fc.integer({ min: 300_000_000, max: 900_000_000 }),
+					fc.integer({ min: 867_000_000, max: 871_000_000 }),
+				),
+				fc.integer({ min: 312_500, max: 6_000_000 }),
 				fc.array(
 					fc
 						.tuple(
@@ -389,15 +445,35 @@ describe("rtl_433 channel arithmetic", () => {
 					}))
 					const found = rtl433ChannelCandidate(s, rangesHz)
 					const h = (fs * 0.8) / 2
+					const old = ismCandidate(c, h, rangesHz)
 					const overlap = rangesHz.some(
 						r => Math.max(r.minHz, c - h) <= Math.min(r.maxHz, c + h),
 					)
 					if (!("hz" in found)) {
 						expect(found.overlap).toBe(overlap)
+						expect(old).toBeUndefined()
 						return
 					}
 					expect(found.rateHz).toBeGreaterThanOrEqual(250_000)
-					expect(found.rateHz).toBeLessThanOrEqual(1_000_000)
+					const lo = found.hz - found.rateHz / 2
+					const hi = found.hz + found.rateHz / 2
+					if (old) {
+						expect(lo).toBeLessThanOrEqual(old.hz - old.rateHz / 2)
+						expect(hi).toBeGreaterThanOrEqual(old.hz + old.rateHz / 2)
+					}
+					if (old && found.rateHz === old.rateHz) {
+						expect(found).toEqual(old)
+					} else {
+						expect(found.rateHz).toBeGreaterThanOrEqual(1_200_000)
+						expect(found.rateHz).toBeLessThanOrEqual(RTL433_WINDOW_MAX_RATE_HZ)
+						expect(
+							rangesHz.some(
+								r => r.minHz <= 868_950_000 && r.maxHz >= 868_950_000,
+							),
+						).toBe(true)
+						expect(lo).toBeLessThanOrEqual(868_350_000)
+						expect(hi).toBeGreaterThanOrEqual(869_550_000)
+					}
 					expect(found.rateHz % 1000).toBe(0)
 					const request = iqChannelRequest(
 						{
@@ -420,7 +496,10 @@ describe("rtl_433 channel arithmetic", () => {
 					).toBe(true)
 				},
 			),
-			{ numRuns: 200 },
+			{
+				numRuns: 500,
+				examples: [[868563082, 2467295, [{ lo: 0, width: 386918 }]]],
+			},
 		)
 	})
 })
@@ -1019,4 +1098,49 @@ describe("no channel selected", () => {
 			).unplaced.get("test"),
 		).toBe("no-channel-selected")
 	})
+})
+
+it("Property 17: a 2 MHz target preserves ISM and any widened meter span", () => {
+	// Feature: decoder-enablement, Property 17: The rtl_433 channel fits
+	// Validates: Requirements 3.16
+	fc.assert(
+		fc.property(
+			fc.integer({ min: 867_000_000, max: 871_000_000 }),
+			fc.integer({ min: 312_500, max: 6_000_000 }),
+			(c, fs) => {
+				const ranges = [{ minHz: 863_000_000, maxHz: 870_000_000 }]
+				const h = (fs * 0.8) / 2
+				const old = ismCandidate(c, h, ranges, 2_000_000)
+				const found = rtl433ChannelCandidate(
+					source({ centreHz: c, sampleRateHz: fs }),
+					ranges,
+					2_000_000,
+				)
+				if (!("hz" in found)) {
+					expect(old).toBeUndefined()
+					return
+				}
+				const lo = found.hz - found.rateHz / 2
+				const hi = found.hz + found.rateHz / 2
+				if (old) {
+					expect(lo).toBeLessThanOrEqual(old.hz - old.rateHz / 2)
+					expect(hi).toBeGreaterThanOrEqual(old.hz + old.rateHz / 2)
+				}
+				if (!old || found.rateHz > old.rateHz) {
+					expect(lo).toBeLessThanOrEqual(868_350_000)
+					expect(hi).toBeGreaterThanOrEqual(869_550_000)
+				}
+				expect(lo).toBeGreaterThanOrEqual(c - h)
+				expect(hi).toBeLessThanOrEqual(c + h)
+				expect(found.rateHz).toBeLessThanOrEqual(2_400_000)
+			},
+		),
+		{
+			numRuns: 500,
+			examples: [
+				[868_950_000, 3_000_000],
+				[868_600_000, 3_000_000],
+			],
+		},
+	)
 })

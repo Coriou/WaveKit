@@ -1,3 +1,7 @@
+import { wmbusJsonLine } from "../../../../mocks/rtl433-wmbus.js"
+import { resolveProvenance } from "../../../../../src/core/activity/provenance/resolve.js"
+import { buildActivityRow } from "../../../../../src/core/activity/storage/row.js"
+import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
 import { describe, expect, it } from "vitest"
 import { createDecodeEnvelope } from "../../../../../src/core/activity/envelope.js"
 import {
@@ -592,3 +596,71 @@ describe("activity presentation registry", () => {
 		).not.toThrow()
 	})
 })
+
+it("stores a synthetic Wireless-MBus row as wmbus at the FSK carrier midpoint", () => {
+	const data: unknown = JSON.parse(wmbusJsonLine)
+	const output = decoderOutput("signal", data)
+	const view = presentDecoderOutput(output, "rtl433")
+	expect(view).toMatchObject({
+		protocol: "wmbus",
+		category: "sensors",
+		entityKey: "sensor:Wireless-MBus-12345678",
+	})
+	expect(view?.fields).toEqual(
+		expect.arrayContaining([
+			{ key: "mode", label: "Mode", value: "C" },
+			{ key: "M", label: "Manufacturer", value: "TST" },
+		]),
+	)
+	const envelope = createDecodeEnvelope(
+		output,
+		{
+			eventId: "synthetic-wmbus",
+			receivedAt: at,
+			decoderId: output.decoder,
+			decoderType: "rtl433",
+			provenance: resolveProvenance(output, {
+				sourceId: "fake",
+				targetFrequenciesHz: [868_900_000],
+				inputSampleRateHz: 2_400_000,
+				tuningTrust: "commanded",
+			}),
+		},
+		view,
+	)
+	const row = buildActivityRow({
+		version: ACTIVITY_RECORD_VERSION,
+		eventId: envelope.eventId,
+		commitSeq: "0",
+		producedAt: envelope.producedAt,
+		receivedAt: envelope.receivedAt,
+		kind: "decoder-reception",
+		payload: envelope,
+	})
+	expect(row).toMatchObject({ protocol: "wmbus", frequencyHz: 868_950_000 })
+})
+
+it.each([{ mode: 2 }, { version: "1.2" }, { M: 42, type_string: 3 }])(
+	"preserves other rtl_433 presentations with model-specific fields %j",
+	extra => {
+		const view = presentDecoderOutput(
+			decoderOutput("signal", {
+				model: "Weather",
+				id: 7,
+				temperature_C: 21,
+				...extra,
+			}),
+			"rtl433",
+		)
+		expect(view).toMatchObject({
+			protocol: "rtl_433",
+			entityKey: "sensor:Weather-7",
+		})
+		expect(view?.fields).toContainEqual({
+			key: "temperature_C",
+			label: "Temperature",
+			unit: "°C",
+			value: 21,
+		})
+	},
+)

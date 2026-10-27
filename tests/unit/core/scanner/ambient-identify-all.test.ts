@@ -1,3 +1,4 @@
+import { wmbusPacket } from "../../../mocks/rtl433-wmbus.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
@@ -96,6 +97,28 @@ function rig(
 }
 
 describe("ambient identify all regressions", () => {
+	it("identifies wM-Bus through the existing ISM ambient confirmation rules", () => {
+		const r = rig("rtl433", 868_950_000)
+		try {
+			r.emit("signal", wmbusPacket)
+			expect(r.got.some(e => e.ev.identity !== undefined)).toBe(false)
+			r.emit("signal", {
+				...wmbusPacket,
+				AC: 2,
+				data: "0b4453547856341201077801",
+			})
+			expect(r.got.at(-1)).toMatchObject({
+				hz: 868_950_000,
+				ev: {
+					protocol: "ism",
+					identity: { kind: "ism-model", value: "Wireless-MBus:12345678" },
+				},
+			})
+		} finally {
+			r.ambient.stop()
+		}
+	})
+
 	it("checks trust at the placed channel rather than the claimed decoder offset", () => {
 		const seen: unknown[][] = []
 		const r = rig("acarsdec", HZ, undefined, (...args) => {

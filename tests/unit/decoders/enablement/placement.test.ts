@@ -1,3 +1,8 @@
+import {
+	placementCostCores,
+	channelizerBaseCores,
+} from "../../../../src/decoders/enablement/contract.js"
+import { resolveActivityPolicy } from "../../../../src/decoders/enablement/activity-plan.js"
 import { performance } from "node:perf_hooks"
 import { describe, expect, it } from "vitest"
 import type {
@@ -6,6 +11,8 @@ import type {
 	PlannerSource,
 } from "../../../../src/decoders/enablement/contract.js"
 import {
+	rtl433ChannelCandidate,
+	rtl433WindowFits,
 	fitsReach,
 	planPlacements,
 } from "../../../../src/decoders/enablement/placement.js"
@@ -847,4 +854,271 @@ it("malformed configured VFO intent yields no placement", () => {
 			vfo: { sourceId: "s", frequencyHz: 100_100_000 },
 		}).wanted,
 	).toEqual([])
+})
+
+const meterRange = [{ minHz: 863_000_000, maxHz: 870_000_000 }]
+
+it.each([1_199_999, 1_200_000, 1_200_001])(
+	"wM-Bus channel needs 100 kbps × 12 samples/bit: usable rate %i",
+	sampleRateHz => {
+		const candidate = rtl433ChannelCandidate(
+			{ centreHz: 868_950_000, sampleRateHz, usableFraction: 1 },
+			meterRange,
+		)
+		expect(candidate).toEqual({
+			hz: 868_950_000,
+			rateHz: sampleRateHz < 1_200_000 ? 1_000_000 : 1_200_000,
+		})
+	},
+)
+
+it.each([
+	[868_590_000, 868_820_000, 1_460_000],
+	[869_310_000, 869_012_500, 1_325_000],
+])(
+	"wM-Bus union preserves ISM coverage at the usable edge, centre %i",
+	(centreHz, expectedHz, expectedRateHz) => {
+		const src = { centreHz, sampleRateHz: 2_400_000, usableFraction: 0.8 }
+		expect(rtl433ChannelCandidate(src, meterRange)).toEqual({
+			hz: expectedHz,
+			rateHz: expectedRateHz,
+		})
+		const away = centreHz < 868_950_000 ? -1 : 1
+		const past = rtl433ChannelCandidate(
+			{ ...src, centreHz: centreHz + away },
+			meterRange,
+		)
+		expect("rateHz" in past && past.rateHz).toBeLessThan(1_200_000)
+	},
+)
+
+it("wM-Bus widening retains the 868.3 MHz sensors", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 868_600_000, sampleRateHz: 2_400_000, usableFraction: 0.8 },
+			meterRange,
+		),
+	).toEqual({ hz: 868_825_000, rateHz: 1_450_000 })
+})
+
+it("honours a configured channel target below 1 MHz without meter widening", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 868_600_000, sampleRateHz: 2_400_000, usableFraction: 0.8 },
+			meterRange,
+			750_000,
+		),
+	).toEqual({ hz: 868_600_000, rateHz: 750_000 })
+})
+
+it("retains the ISM candidate when the union exceeds the window rate cap", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 867_500_000, sampleRateHz: 6_000_000, usableFraction: 0.8 },
+			meterRange,
+		),
+	).toEqual({ hz: 867_500_000, rateHz: 1_000_000 })
+})
+
+it("retains the ISM candidate when the union exceeds the usable window", () => {
+	expect(
+		rtl433ChannelCandidate(
+			{ centreHz: 868_600_000, sampleRateHz: 1_600_000, usableFraction: 0.8 },
+			meterRange,
+		),
+	).toEqual({ hz: 868_600_000, rateHz: 1_000_000 })
+})
+
+it("rounds the union rate up to preserve both spans", () => {
+	const candidate = rtl433ChannelCandidate(
+		{ centreHz: 868_590_001, sampleRateHz: 2_400_000, usableFraction: 0.8 },
+		meterRange,
+	)
+	expect(candidate).toEqual({ hz: 868_820_000.5, rateHz: 1_460_000 })
+})
+
+it("keeps rounding padding inside the usable window while retaining both spans", () => {
+	const candidate = rtl433ChannelCandidate(
+		{ centreHz: 868_590_001, sampleRateHz: 2_399_997.5, usableFraction: 0.8 },
+		meterRange,
+	)
+	expect(candidate).toEqual({ hz: 868_820_000, rateHz: 1_460_000 })
+})
+
+it.each([2_399_999, 2_400_000, 2_400_001])(
+	"keeps raw window reach through 2.4 Msps: %i",
+	rate => {
+		expect(rtl433WindowFits(rate)).toBe(rate <= 2_400_000)
+		const plan = planPlacements(
+			input(
+				decoder({
+					type: "rtl433",
+					bandRegion: "EU",
+					band: { basis: "configured", rangesHz: meterRange },
+				}),
+				[source({ centreHz: 868_900_000, sampleRateHz: rate })],
+			),
+		)
+		expect(plan.wanted[0]).toMatchObject(
+			rate <= 2_400_000
+				? { reach: "raw", channelHz: null, options: { targetSampleRate: rate } }
+				: {
+						reach: "channel",
+						channelHz: 868_950_000,
+						options: { targetSampleRate: 1_200_000 },
+					},
+		)
+	},
+)
+
+it("also gives configured channel placements 1.2 Msps at 2.4 Msps input", () => {
+	const plan = planPlacements(
+		input(
+			decoder({
+				type: "rtl433",
+				origin: "config",
+				bandRegion: "EU",
+				band: { basis: "configured", rangesHz: meterRange },
+			}),
+			[source({ centreHz: 868_900_000 })],
+		),
+	)
+	expect(plan.wanted[0]).toMatchObject({
+		reach: "channel",
+		channelHz: 868_950_000,
+		options: { targetSampleRate: 1_200_000 },
+	})
+})
+
+it.each([
+	[999_999, 0.21],
+	[1_000_000, 0.21],
+	[1_000_001, 0.21 * 1.000001],
+	[1_200_000, 0.252],
+	[2_400_000, 0.504],
+])("scales rtl433 channel cost at %i samples/s", (rate, cost) => {
+	expect(placementCostCores("rtl433", "channel", rate)).toBeCloseTo(cost, 12)
+	expect(placementCostCores("rtl433", "raw", rate)).toBe(0.1)
+	expect(placementCostCores("acarsdec", "channel", rate)).toBeCloseTo(0.16)
+})
+
+it("keeps both configured EU meter channels at the exact shared budget", () => {
+	const plan = planPlacements({
+		...input(decoder(), [source({ centreHz: 868_950_000 })]),
+		decoders: ["first", "second"].map((id, order) =>
+			decoder({
+				id,
+				order,
+				type: "rtl433",
+				origin: "config",
+				bandRegion: "EU",
+				band: { basis: "region-default", rangesHz: meterRange },
+			}),
+		),
+		activity: {
+			nowMonoMs: 0,
+			policy: {
+				...resolveActivityPolicy(undefined, 0.814, "arm64", 4),
+				replayAllowanceCores: 0.05,
+			},
+			epochs: [],
+			snapshots: [],
+			incumbents: [],
+			recentMoves: [],
+			pendingStarts: [],
+		},
+	})
+	expect(plan.wanted).toHaveLength(2)
+	for (const p of plan.wanted)
+		expect(p).toMatchObject({
+			channelHz: 868_950_000,
+			options: { targetSampleRate: 1_200_000 },
+			costCores: 0.252,
+		})
+})
+
+it.each(["arm64", "x64"])(
+	"retains ISM when widening exceeds the %s budget",
+	arch => {
+		// 0.21 × 1.2 + source base + replay is the exact widened admission bound.
+		const rate = 2_400_000
+		const replay = 0.05
+		const bound =
+			placementCostCores("rtl433", "channel", 1_200_000) +
+			channelizerBaseCores(rate) +
+			replay
+		for (const budget of [bound, bound - 0.000001]) {
+			const plan = planPlacements({
+				...input(
+					decoder({
+						type: "rtl433",
+						origin: "config",
+						bandRegion: "EU",
+						band: { basis: "region-default", rangesHz: meterRange },
+					}),
+					[source({ centreHz: 868_950_000, sampleRateHz: rate })],
+				),
+				activity: {
+					nowMonoMs: 0,
+					policy: {
+						...resolveActivityPolicy(undefined, budget, arch, 4),
+						replayAllowanceCores: replay,
+					},
+					epochs: [],
+					snapshots: [],
+					incumbents: [],
+					recentMoves: [],
+					pendingStarts: [],
+				},
+			})
+			const target = budget === bound ? 1_200_000 : 1_000_000
+			expect(plan.wanted[0]).toMatchObject({
+				channelHz: 868_950_000,
+				options: { targetSampleRate: target },
+				costCores: placementCostCores("rtl433", "channel", target),
+			})
+		}
+	},
+)
+
+it.each([
+	{ mode: "always" as const },
+	{ startMode: "operator" as const },
+	{ bandSuspension: false },
+])("does not widen a skipped regional band without 868 MHz: %j", override => {
+	const plan = planPlacements(
+		input(
+			decoder({
+				type: "rtl433",
+				origin: "config",
+				band: {
+					basis: "region-default",
+					rangesHz: [{ minHz: 902_000_000, maxHz: 928_000_000 }],
+				},
+				...override,
+			}),
+			[source({ centreHz: 868_950_000 })],
+		),
+	)
+	expect(plan.wanted[0]).toMatchObject({
+		channelHz: 868_950_000,
+		options: { targetSampleRate: 1_000_000 },
+	})
+})
+
+it("does not widen an 868 MHz band override in the US region", () => {
+	const plan = planPlacements(
+		input(
+			decoder({
+				type: "rtl433",
+				origin: "config",
+				bandRegion: "US",
+				band: { basis: "override", rangesHz: meterRange },
+			}),
+			[source({ centreHz: 868_950_000 })],
+		),
+	)
+	expect(plan.wanted[0]).toMatchObject({
+		options: { targetSampleRate: 1_000_000 },
+	})
 })

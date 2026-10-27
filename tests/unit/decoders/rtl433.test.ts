@@ -1,3 +1,4 @@
+import { wmbusJsonLine, wmbusPacket } from "../../mocks/rtl433-wmbus.js"
 /**
  * RTL_433 Decoder Property-Based Tests
  *
@@ -515,3 +516,42 @@ describe("rtl_433 stdin centre", () => {
 		expect(args({ inputCenterFreq: 6_000_000_001 })).not.toContain("-f")
 	})
 })
+
+// The default list in the pinned binary already enables protocols 104, 105 and 238.
+it.each([1_200_000, 2_400_000])(
+	"reads wM-Bus at %i without protocol filters or decimation",
+	rate => {
+		const decoder = new TestRtl433Decoder(
+			{
+				id: "synthetic-meter",
+				type: "rtl433",
+				enabled: true,
+				options: {
+					inputSampleRate: rate,
+					targetSampleRate: rate,
+					inputCenterFreq: 868_900_000,
+				},
+			},
+			testLogger,
+		)
+		const args = decoder.testGetDecoderArgs()
+		expect(args).toEqual(
+			expect.arrayContaining([
+				"-r",
+				"cu8:-",
+				"-s",
+				String(rate),
+				"-f",
+				"868900000",
+				"-M",
+				"level",
+			]),
+		)
+		expect(args).not.toContain("-R")
+		expect(args).not.toContain("-G")
+		expect(decoder.testParseOutput(wmbusJsonLine)).toMatchObject({
+			type: "signal",
+			data: wmbusPacket,
+		})
+	},
+)

@@ -16,6 +16,9 @@ import {
 
 const sensorPayload = objectSchema({
 	model: asString,
+	mode: asScalar,
+	M: asScalar,
+	type_string: asScalar,
 	id: asNumberOrString,
 	channel: asNumberOrString,
 	temperature_C: asNumber,
@@ -67,11 +70,22 @@ export function presentSensor(data: unknown): DecodePresentation | undefined {
 	const title = clampTitle(id === null ? model : `${model} ${id}`)
 	return presentation({
 		category: "sensors",
-		protocol: "rtl_433",
+		protocol: model === "Wireless-MBus" ? "wmbus" : "rtl_433",
 		entityKey: key,
 		title,
 		fields: takeFields(
 			[
+				...(model === "Wireless-MBus"
+					? [
+							{ key: "mode", label: "Mode", value: payload["mode"] },
+							{ key: "M", label: "Manufacturer", value: payload["M"] },
+							{
+								key: "type_string",
+								label: "Meter type",
+								value: payload["type_string"],
+							},
+						]
+					: []),
 				{
 					key: "temperature_C",
 					label: "Temperature",

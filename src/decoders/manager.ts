@@ -1270,6 +1270,7 @@ export class DecoderManager extends EventEmitter {
 						startMode: state.startMode,
 						configuredSourceId: config.sourceId ?? null,
 						band: this.resolveBand(state).requirements,
+						bandRegion: this.resolveBand(state).region.code,
 						...bandWindow(this.assessBand(state)),
 						// 3.13: either opt-out lifts the band policy in planning too.
 						...(this.config.bandSuspension && this.decoderBandSuspension(state)
