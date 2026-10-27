@@ -669,7 +669,8 @@ previously separate families; they are not decode proof. Published identities an
 saved call metadata require checked content: either the discovery’s persisted
 verification flag or a retained checked decode proving its current protocol and
 identity, including co-channel observations. Observation evidence sets the flag
-so verification survives retention. Merges preserve checked metadata and discard
+so verification survives retention. A verified merge survivor adopts another record’s
+identity only when that record has checked content for its identity. Merges preserve checked metadata and discard
 unchecked call metadata and encryption flags before transferring provenance; identity, search and
 encryption filters match the published values. Stored discoveries retain an internal
 `contentVerified` flag for checked evidence whose observation was never retained or

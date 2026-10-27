@@ -3999,7 +3999,11 @@ export class DiscoveryStore
 		keep.jobIds = appendMissing(keep.jobIds, drop.jobIds)
 		keep.sourceIds = appendMissing(keep.sourceIds, drop.sourceIds)
 		keep.encrypted = keep.encrypted || drop.encrypted
-		if (keep.identity === undefined && drop.identity !== undefined) {
+		if (
+			keep.identity === undefined &&
+			drop.identity !== undefined &&
+			(!this.hasCheckedContent(keep) || this.hasCheckedContent(drop))
+		) {
 			keep.identity = drop.identity
 		}
 		if (
@@ -4011,6 +4015,7 @@ export class DiscoveryStore
 			keep.family = drop.family
 			if (drop.class !== "unknown") keep.class = drop.class
 		}
+		// Different identities do not transfer verification; their checked TGs may be discarded.
 		if (
 			drop.contentVerified === true &&
 			drop.protocol === keep.protocol &&
@@ -4923,17 +4928,16 @@ export class DiscoveryStore
 
 	/** Verification depends only on persisted provenance, including co-channel proof. */
 	private hasCheckedContent(d: Discovery): boolean {
-		return (
-			d.contentVerified === true ||
-			this.proofSources(d).some(({ observation }) =>
-				(observation.decode ?? []).some(
-					ev =>
-						ev.contentVerified === true &&
-						ev.crcClean === true &&
-						ev.protocol === d.protocol &&
-						sameIdentity(ev.identity, d.identity),
-				),
-			)
+		if (d.contentVerified === true) return true
+		if (!this.evidenceCanNameProof(d)) return false
+		return this.proofSources(d).some(({ observation }) =>
+			(observation.decode ?? []).some(
+				ev =>
+					ev.contentVerified === true &&
+					ev.crcClean === true &&
+					ev.protocol === d.protocol &&
+					sameIdentity(ev.identity, d.identity),
+			),
 		)
 	}
 
