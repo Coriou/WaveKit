@@ -7116,9 +7116,13 @@ confirmed ICAOs in the inclusive preceding 60 seconds, capped at 4096, and ages 
 60,001 ms for the inclusive window), with discovery updates subject to the 5-second rate limit. Decode anchors are separate from nearby spectrum carriers and use normal
 scanner retention. See [decode-anchored ADS-B](SCANNER.md#decode-anchored-ads-b).
 
-For a decode anchor, Identify completes immediately with no decoder trial. Its result
+For a fresh decode anchor (the target is the anchor discovery itself, at its exact
+frequency with zero bandwidth, and `aircraftCount` is above zero or its last
+confirmation is within 60 seconds), Identify completes immediately with no decoder
+trial. A stale anchor, or any other target near 1090 MHz, runs a normal trial. The result
 includes `alreadyDecoded: "already decoded: ADS-B, N aircraft"`. The anchor has no
 individual ICAO identity; its per-aircraft count window is memory-only and resets to zero
 on restart. Journal and discovery updates use a 10-second last-seen bucket and a
-5-second rate limit, with latest-state flushing on stop/removal. Source id changes
+5-second rate limit, with latest-state flushing on stop; removing an anchor publishes
+only the delete, and its unpublished state is discarded. Source id changes
 create a separate anchor.
