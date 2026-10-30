@@ -89,8 +89,9 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   budget and a note to set `decoderPolicy.efficiency.cpuBudgetCores` in YAML config.
   A saved override adds “Saved setting overrides config”. On cores without the budget service,
   the row is disabled and says “Not available”.
-  **Receiver › Per-band gain** lists the gain the core sets in each frequency range: scanner hops,
-  dwells and jobs that tune into a listed band use its gain and give yours back after, so a gain
+  **Receiver › Per-band gain** lists the gain the core sets in each frequency range: scanner hops
+  and jobs that tune into a listed band use its gain and give yours back after (also when you
+  tune away from a running sweep), so a gain
   that suits one band does not overload the dongle in another (the defaults set 37.2 dB at 868 and
   915 MHz and keep the gain at 2 m, 70 cm and ADS-B). Edit a band's range in MHz and its gain in dB,
   or press **Keep** to leave the gain alone there; **Add band** and the `×` add and remove rows.

@@ -149,9 +149,12 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/gain \
 A gain that suits one band can overload the dongle in another. At 868 MHz a manual 49.6 dB
 let busy moments raise the whole window by about 25 dB, while 29.7 dB did not; the same
 49.6 dB was fine in a quieter UHF band. The `tuner.bandGain` table sets a gain per frequency range for
-scanner hops, dwells and jobs, which put your exact gain mode and gain back when they hand the
-tuner back. Your own retunes keep your gain unless `applyToMyTuning` is true; then tuning into
-a listed range applies its gain and tuning out puts yours back.
+scanner hops and jobs, which put your exact gain mode and gain back when they hand the tuner
+back, also when your own write or a relay client takes it from them. While your gain or gain
+mode is unknown (right after a restart, before any gain write) they write no band gain. Manual
+tuning (the API, the web app, a dwell you drive through the API) keeps your gain unless
+`applyToMyTuning` is true; then tuning into a listed range applies its gain and tuning out puts
+yours back, from `<stateDir>/tuner-band-gain-saved.json` after a restart.
 
 ```yaml
 tuner:

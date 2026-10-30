@@ -1,7 +1,8 @@
 /**
  * TunerState.bandGain: reported only while a band gain is confirmed on the tuner. Set after
  * the band's writes succeed; cleared by a later gain, gain mode or frequency write, a relay
- * client, a control hand-over or the gain becoming unknown.
+ * client, a control hand-over or the gain becoming unknown. IF gain and gain index writes set
+ * other gain stages: they keep both the band gain and the saved pre-band gain.
  */
 import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
@@ -185,8 +186,9 @@ describe("TunerState.bandGain", () => {
 	it.each([
 		["SET_IF_GAIN", 0x06, 30],
 		["SET_TUNER_IF_GAIN", 0x0f, (1 << 16) | 30],
+		["SET_TUNER_GAIN_INDEX", 0x0d, 12],
 	])(
-		"a relay %s supersedes a saved AGC mode",
+		"a relay %s sets another gain stage: the saved AGC mode still comes back",
 		async (_name, command, value) => {
 			const { controller } = setup(true)
 			await controller.setGainMode("rtl", "agc", REST)
@@ -194,7 +196,24 @@ describe("TunerState.bandGain", () => {
 			controller.applyExternalCommand("rtl", command, value)
 			controller.setControlMode("rtl", "internal")
 			await controller.setFrequency("rtl", UHF, REST)
-			expect(controller.getState("rtl")?.gainMode).toBe("manual")
+			expect(controller.getState("rtl")?.gainMode).toBe("agc")
+		},
+	)
+
+	it.each([
+		["SET_GAIN_MODE", 0x03, 1],
+		["SET_AGC_MODE", 0x08, 1],
+	])(
+		"a relay %s is a gain choice: the saved pre-band gain is dropped",
+		async (_name, command, value) => {
+			const { controller } = setup(true)
+			await manual(controller, 100)
+			await controller.setFrequency("rtl", ISM, REST)
+			controller.applyExternalCommand("rtl", command, value)
+			controller.setControlMode("rtl", "internal")
+			await controller.setFrequency("rtl", UHF, REST)
+			// No restore write: the older 10.0 dB never comes back.
+			expect(controller.getState("rtl")?.gain).toBe(400)
 		},
 	)
 
@@ -208,16 +227,27 @@ describe("TunerState.bandGain", () => {
 			"setTunerIfGain",
 			(c: TunerController) => c.setTunerIfGain("rtl", 1, 30, REST),
 		],
-	])("a REST %s supersedes the saved pre-band gain", async (_name, write) => {
-		const { controller } = setup(true)
-		await manual(controller, 100)
-		await controller.setFrequency("rtl", ISM, REST)
-		await write(controller)
-		expect(controller.getState("rtl")?.bandGain).toBeUndefined()
-		await controller.setFrequency("rtl", UHF, REST)
-		// No restore write: the older 10.0 dB never comes back.
-		expect(controller.getState("rtl")?.gain).toBe(400)
-	})
+	])(
+		"a REST %s sets another gain stage: the band gain stays reported and the saved gain comes back",
+		async (_name, write) => {
+			const { controller } = setup(true)
+			await manual(controller, 100)
+			await controller.setFrequency("rtl", ISM, REST)
+			await write(controller)
+			// The tuner gain and mode did not change, so the confirmed band gain stays.
+			expect(controller.getState("rtl")?.bandGain).toEqual({
+				tenthsDb: 400,
+				label: "ISM 868",
+				owner: "user",
+			})
+			await controller.setFrequency("rtl", UHF, REST)
+			expect(controller.getState("rtl")).toMatchObject({
+				gainMode: "manual",
+				gain: 100,
+			})
+			expect(controller.getState("rtl")?.bandGain).toBeUndefined()
+		},
+	)
 
 	it("noteBandGainApplied (scanner) is ignored unless the tuner shows that manual gain at that frequency", async () => {
 		const { controller } = setup(false)

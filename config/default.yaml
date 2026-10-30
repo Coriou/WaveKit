@@ -285,14 +285,18 @@ tunerRelay:
 #
 # Per-band gain (bandGain). A manual gain that suits one band can overload the
 # RTL-SDR front end in another: strong cellular and ISM emitters next to
-# 868/915 MHz raise the whole window at once. Scanner hops, dwells and jobs
-# that tune into a listed range apply its gain (tenths of a dB, 0-500, snapped
-# to the tuner's nearest step) and restore your exact gain mode and gain when
-# they hand the tuner back. "keep" (or no matching range) leaves gain alone.
+# 868/915 MHz raise the whole window at once. Scanner hops and jobs that tune
+# into a listed range apply its gain (tenths of a dB, 0-500, snapped to the
+# tuner's nearest step) and restore your exact gain mode and gain when they
+# hand the tuner back, also when your own write or a relay client takes it
+# from them. They skip it while your gain or gain mode is unknown (e.g. right
+# after a restart). "keep" (or no matching range) leaves gain alone.
 # Ranges are inclusive Hz, at most 32, and must not overlap.
-#   applyToMyTuning: false - your own retunes (API, web app) never change gain;
-#                    true  - they apply the band gain too and put your gain
-#                            back when you tune out of the band.
+#   applyToMyTuning: false - manual tuning (API, web app, a dwell driven
+#                            through the API) never changes gain;
+#                    true  - it applies the band gain too and puts your gain
+#                            back when you tune out of the band (saved in
+#                            <stateDir>/tuner-band-gain-saved.json).
 # Defaults: 868/915 MHz ISM at 37.2 dB (49.6 dB overloaded at 868 MHz, 29.7 dB
 # did not); ADS-B, 2 m and 70 cm keep. Runtime edits via PUT
 # /api/tuner-band-gain are saved in <stateDir>/tuner-band-gain.json and

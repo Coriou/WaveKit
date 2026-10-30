@@ -209,6 +209,122 @@ describe("POST /api/tuner/:sourceId/gain field names", () => {
 	})
 })
 
+describe("tuner 400s name the failing field by its schema name (m5)", () => {
+	const messageOf = (body: string) =>
+		(JSON.parse(body) as { message: string }).message
+	const patch = (a: FastifyInstance, payload: unknown) =>
+		a.inject({
+			method: "PATCH",
+			url: "/api/tuner/rtl-1/config",
+			payload: payload as object,
+		})
+
+	it("a schema type or missing-field 400 names the field (instancePath, missingProperty)", async () => {
+		const { app: a } = await build()
+		const wrongType = await post(a, "/api/tuner/rtl-1/frequency", {
+			hz: "ECHO-abc",
+		})
+		expect(wrongType.statusCode).toBe(400)
+		expect(messageOf(wrongType.body)).toMatch(/^Invalid request body at hz;/)
+		expect(messageOf(wrongType.body)).not.toContain("ECHO")
+		const missing = await post(a, "/api/tuner/rtl-1/frequency", {})
+		expect(messageOf(missing.body)).toMatch(/^Invalid request body at hz;/)
+	})
+
+	it("PATCH /config: a schema 400 names the field, nested ones by path", async () => {
+		const { app: a, controller } = await build()
+		const rate = await patch(a, { sampleRate: "ECHO" })
+		expect(rate.statusCode).toBe(400)
+		expect(messageOf(rate.body)).toMatch(/^Invalid request body at sampleRate;/)
+		const nested = await patch(a, { tunerIfGain: { stage: "ECHO", gain: 1 } })
+		expect(messageOf(nested.body)).toMatch(
+			/^Invalid request body at tunerIfGain\.stage;/,
+		)
+		for (const res of [rate, nested])
+			expect(messageOf(res.body)).not.toContain("ECHO")
+		expect(controller.configure).not.toHaveBeenCalled()
+	})
+
+	it("PATCH /config: a controller 400 names its field, never the value", async () => {
+		const { app: a, controller } = await build()
+		controller.configure.mockRejectedValueOnce(
+			new TunerValidationError(
+				"sampleRate 2000123 is not supported by RTL-SDR",
+				"sampleRate",
+			),
+		)
+		const res = await patch(a, { sampleRate: 2_000_123 })
+		expect(res.statusCode).toBe(400)
+		const body = JSON.parse(res.body) as { code: string; message: string }
+		expect(body.code).toBe("TUNER_VALIDATION_ERROR")
+		expect(body.message).toMatch(/^Invalid tuner value at sampleRate;/)
+		expect(body.message).not.toContain("2000123")
+		controller.configure.mockRejectedValueOnce(
+			new TunerValidationError(
+				"tunerIfGain.stage out of range",
+				"tunerIfGain.stage",
+			),
+		)
+		const nested = await patch(a, { tunerIfGain: { stage: 70_000, gain: 1 } })
+		expect(messageOf(nested.body)).toMatch(
+			/^Invalid tuner value at tunerIfGain\.stage;/,
+		)
+	})
+
+	it("a controller field outside the schema names is not echoed", async () => {
+		const { app: a, controller } = await build()
+		controller.configure.mockRejectedValueOnce(
+			new TunerValidationError("bad", "ECHO-field"),
+		)
+		const res = await patch(a, { frequency: 144_800_000 })
+		expect(res.statusCode).toBe(400)
+		expect(messageOf(res.body)).toMatch(/^Invalid tuner value; expected/)
+		expect(messageOf(res.body)).not.toContain("ECHO")
+	})
+
+	it("the real controller's validation names the field (POST gain out of range)", async () => {
+		const { TunerController } =
+			await import("../../../src/core/tuner-controller.js")
+		const real = new TunerController(pino({ level: "silent" }), {
+			assertTunerCommandActive: () => {},
+			writeToSource: () => true,
+			isRtlTcpSource: () => true,
+			updateSourceCaps: () => {},
+		} as never)
+		real.initializeSource("rtl-1", {
+			kind: "iq",
+			sampleRate: 2_048_000,
+			format: "U8_IQ",
+			exclusive: false,
+			centerFreq: 144_800_000,
+		})
+		app = Fastify({ logger: false })
+		await app.register(tunerRoutes, { tunerController: real })
+		const res = await post(app, "/api/tuner/rtl-1/gain", { gain: 987_654 })
+		expect(res.statusCode).toBe(400)
+		expect(messageOf(res.body)).toMatch(/^Invalid tuner value at gain;/)
+		expect(messageOf(res.body)).not.toContain("987654")
+		// In the RTL rate gap (300001-900000): the controller's own check fails.
+		const cfg = await patch(app, { sampleRate: 500_123 })
+		expect(cfg.statusCode).toBe(400)
+		expect(messageOf(cfg.body)).toMatch(/^Invalid tuner value at sampleRate;/)
+		expect(messageOf(cfg.body)).not.toContain("500123")
+	})
+
+	it("the gain route's own 400 names gain, or both names when they disagree", async () => {
+		const { app: a } = await build()
+		const none = await post(a, "/api/tuner/rtl-1/gain", {})
+		expect(messageOf(none.body)).toMatch(/^Invalid request body at gain;/)
+		const both = await post(a, "/api/tuner/rtl-1/gain", {
+			gain: 297,
+			tenthsDb: 372,
+		})
+		expect(messageOf(both.body)).toMatch(
+			/^Invalid request body at gain, tenthsDb;/,
+		)
+	})
+})
+
 describe("GET/PUT /api/tuner-band-gain", () => {
 	function service() {
 		const m = memoryFs()

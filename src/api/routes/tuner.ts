@@ -195,6 +195,56 @@ function expectedFor(url: string | undefined): string | undefined {
 		: undefined
 }
 
+/**
+ * Field names a tuner 400 may name: the route schemas' property names and the controller's
+ * TunerState field names. Anything else (an unknown key the client sent) is never echoed.
+ */
+const KNOWN_FIELDS: ReadonlySet<string> = new Set([
+	...Object.keys(tunerConfigUpdateSchema.properties),
+	"sourceId",
+	"hz",
+	"tenthsDb",
+	"mode",
+	"enabled",
+	"index",
+	"stage",
+])
+/** At most this many failing fields are named (Fastify stops at the first by default). */
+const MAX_NAMED_FIELDS = 4
+
+/** "a.b" when every segment is a known field name or an array index, else null. */
+function knownPath(segments: readonly (string | number)[]): string | null {
+	if (segments.length === 0) return null
+	for (const segment of segments)
+		if (typeof segment === "string" && !KNOWN_FIELDS.has(segment)) return null
+	return segments.join(".")
+}
+
+/** Where a Fastify (Ajv) validation failed, from schema paths only, never input values. */
+function validationWhere(errors: FastifyError["validation"]): string | null {
+	const where: string[] = []
+	for (const issue of (errors ?? []).slice(0, MAX_NAMED_FIELDS)) {
+		const segments: (string | number)[] = issue.instancePath
+			.split("/")
+			.filter(segment => segment !== "")
+			.map(segment => (/^\d+$/.test(segment) ? Number(segment) : segment))
+		const missing = (issue.params as { missingProperty?: unknown })
+			.missingProperty
+		if (typeof missing === "string") segments.push(missing)
+		where.push(knownPath(segments) ?? "an unnamed field")
+	}
+	return where.length > 0 ? [...new Set(where)].join(", ") : null
+}
+
+/** The failing field a controller validation error (TunerValidationError) names, if known. */
+function tunerErrorField(err: unknown): string | null {
+	const field =
+		typeof err === "object" && err !== null
+			? (err as { field?: unknown }).field
+			: undefined
+	return typeof field === "string" ? knownPath(field.split(".")) : null
+}
+
 function handleTunerError(
 	reply: FastifyReply,
 	err: unknown,
@@ -229,15 +279,18 @@ function handleTunerError(
 				? maybeStatus.code
 				: "TUNER_ERROR"
 
-	// A 400 answers static text only: the controller's message can echo the submitted value.
+	// A 400 answers static text and the failing field's schema name only: the controller's
+	// message can echo the submitted value.
+	const field = statusCode === 400 ? tunerErrorField(err) : null
+	const at = field !== null ? ` at ${field}` : ""
 	return reply.status(statusCode).send({
 		error: error.name || "TunerError",
 		code,
 		message:
 			statusCode === 400
 				? expected !== undefined
-					? `Invalid tuner value; expected ${expected}`
-					: "Invalid tuner value"
+					? `Invalid tuner value${at}; expected ${expected}`
+					: `Invalid tuner value${at}`
 				: error.message,
 	})
 }
@@ -266,13 +319,15 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			const part = error.validation
 				? (error.validationContext ?? "body")
 				: "body"
+			const where = error.validation ? validationWhere(error.validation) : null
+			const at = where !== null ? ` at ${where}` : ""
 			return reply.status(400).send({
 				error: "ValidationError",
 				code: "VALIDATION_ERROR",
 				message:
 					expected !== undefined
-						? `Invalid request ${part}; expected ${expected}`
-						: `Invalid request ${part}`,
+						? `Invalid request ${part}${at}; expected ${expected}`
+						: `Invalid request ${part}${at}`,
 			})
 		}
 		throw error
@@ -417,7 +472,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				return reply.status(400).send({
 					error: "ValidationError",
 					code: "VALIDATION_ERROR",
-					message: `Invalid request body; expected ${GAIN_EXPECTED}`,
+					message: `Invalid request body at ${value === undefined ? "gain" : "gain, tenthsDb"}; expected ${GAIN_EXPECTED}`,
 				})
 			try {
 				return await run(request.params.sourceId, async () => {

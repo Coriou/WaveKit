@@ -294,8 +294,10 @@ client such as SDR++).
 - Apply relay command updates so the API state stays in sync with relay clients
 - Answer the per-band gain for a frequency (`bandGainFor`, from `BandGainSettingsService` in
   `src/core/band-gain.ts`, snapped to the tuner's gain steps). `TunerArbiter` writes it on
-  scanner hops and restores the leased snapshot; operator retunes apply it only with
-  `tuner.bandGain.applyToMyTuning`
+  scanner hops (never while the snapshot's gain or gain mode is unknown) and restores the
+  leased snapshot, including a gain-only restore when an operator or relay write takes the
+  lease; operator retunes apply it only with `tuner.bandGain.applyToMyTuning` (serialised per
+  source, the pre-band gain persisted by `BandGainSettingsService`)
 
 ### TunerRelay
 

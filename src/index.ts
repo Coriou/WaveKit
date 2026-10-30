@@ -1319,6 +1319,11 @@ async function main(): Promise<void> {
 		})
 		await bandGain.load()
 		tunerController.setBandGain(bandGain)
+		// Band gains snap to the tuner's advertised gain steps when its table is known. Wired
+		// before the scanner exists; the capabilities provider is attached once it is built
+		// below (until then, and without a known table, the configured value is written).
+		let gainStepsOf: ((id: string) => readonly number[] | null) | null = null
+		tunerController.setGainStepsResolver(id => gainStepsOf?.(id) ?? null)
 		const { config: liveDemodConfig, publicOrigin: legacyAudioOrigin } =
 			splitLiveDemodConfig(LiveDemodConfigSchema.parse(config.liveDemod ?? {}))
 		const liveDemodOrigin = liveDemodAdvertisedOrigin(
@@ -2357,13 +2362,12 @@ async function main(): Promise<void> {
 					: null
 			},
 		)
-		// Band gains snap to the tuner's advertised gain steps when its table is known.
-		tunerController.setGainStepsResolver(id => {
+		gainStepsOf = id => {
 			const caps = receiverCapabilitiesProvider.get(id)
 			return caps.ok && caps.value.gainTable?.state === "suggested"
 				? caps.value.gainTable.valuesTenthsDb
 				: null
-		})
+		}
 		let receiverDisposed = false
 		disposeReceiver = () => {
 			if (receiverDisposed) return

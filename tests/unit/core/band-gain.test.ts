@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { Writable } from "node:stream"
 import fc from "fast-check"
 import pino from "pino"
 import {
@@ -17,8 +20,10 @@ import {
 } from "../../../src/core/band-gain-schema.js"
 import {
 	BAND_GAIN_FILE_MAX_BYTES,
+	BAND_GAIN_FILE_NAME,
 	BandGainSettingsError,
 	BandGainSettingsService,
+	readFileBounded,
 	type BandGainFs,
 } from "../../../src/core/band-gain.js"
 import { ConfigSchema } from "../../../src/config.js"
@@ -297,5 +302,136 @@ describe("BandGainSettingsService", () => {
 		})
 		await svc.load()
 		expect(svc.view().provenance).toBe("runtime")
+	})
+})
+
+describe("BandGainSettingsService file reads (m1)", () => {
+	const dirs: string[] = []
+	afterEach(() => {
+		for (const dir of dirs.splice(0))
+			rmSync(dir, { recursive: true, force: true })
+	})
+	function tmp(): string {
+		const dir = mkdtempSync("/tmp/wk-band-gain-")
+		dirs.push(dir)
+		return dir
+	}
+
+	it("the default read checks the size before reading: at the bound it reads, one byte past it fails", async () => {
+		const dir = tmp()
+		const at = join(dir, "at.json")
+		const past = join(dir, "past.json")
+		writeFileSync(at, "x".repeat(64))
+		writeFileSync(past, "x".repeat(65))
+		expect((await readFileBounded(at, 64)).byteLength).toBe(64)
+		await expect(readFileBounded(past, 64)).rejects.toMatchObject({
+			code: "EFBIG",
+		})
+		await expect(readFileBounded(join(dir, "none"), 64)).rejects.toMatchObject({
+			code: "ENOENT",
+		})
+	})
+
+	it("an oversized settings file on disk is never parsed: the config applies", async () => {
+		const dir = tmp()
+		// Valid JSON past the cap: only the size check can reject it.
+		const body = JSON.stringify({
+			version: 1,
+			settings: { applyToMyTuning: true, entries: [] },
+		})
+		writeFileSync(
+			join(dir, BAND_GAIN_FILE_NAME),
+			body + " ".repeat(BAND_GAIN_FILE_MAX_BYTES + 1 - body.length),
+		)
+		const svc = new BandGainSettingsService({
+			stateDir: dir,
+			config: configDefaults,
+			logger,
+		})
+		await svc.load()
+		expect(svc.view().provenance).toBe("config")
+	})
+
+	it("the service passes the byte bound to the read", async () => {
+		const seen: number[] = []
+		const svc = new BandGainSettingsService({
+			stateDir: "/state",
+			config: configDefaults,
+			logger,
+			fs: {
+				readFile: (_path, maxBytes) => {
+					seen.push(maxBytes)
+					return Promise.reject(
+						Object.assign(new Error("missing"), { code: "ENOENT" }),
+					)
+				},
+				atomicWrite: () => Promise.resolve(),
+			},
+		})
+		await svc.load()
+		expect(seen[0]).toBe(BAND_GAIN_FILE_MAX_BYTES)
+	})
+
+	it("logs one info line, with no file values, when the persisted file overrides the YAML table", async () => {
+		const lines: { msg?: unknown; level?: unknown }[] = []
+		const sink = new Writable({
+			write(chunk: Buffer, _enc, done) {
+				for (const line of chunk.toString("utf8").split("\n"))
+					if (line.trim() !== "")
+						lines.push(JSON.parse(line) as { msg?: unknown; level?: unknown })
+				done()
+			},
+		})
+		const capture = pino({ level: "info" }, sink)
+		const file = JSON.stringify({
+			version: 1,
+			settings: {
+				applyToMyTuning: true,
+				entries: [
+					{
+						minHz: 400_000_000,
+						maxHz: 401_000_000,
+						gain: 123,
+						label: "MARKER-LABEL",
+					},
+				],
+			},
+		})
+		const svc = new BandGainSettingsService({
+			stateDir: "/state",
+			config: configDefaults,
+			logger: capture,
+			fs: memoryFs(file).fs,
+		})
+		await svc.load()
+		await new Promise<void>(resolve => setImmediate(resolve))
+		const overrides = lines.filter(l =>
+			String(l.msg).includes("override tuner.bandGain"),
+		)
+		expect(overrides).toHaveLength(1)
+		expect(overrides[0]?.level).toBe(30)
+		const text = JSON.stringify(overrides[0])
+		expect(text).not.toContain("MARKER-LABEL")
+		// Only the logger's own fields: nothing from the file is attached.
+		const own = new Set([
+			"hostname",
+			"level",
+			"msg",
+			"pid",
+			"time",
+			"component",
+		])
+		expect(Object.keys(overrides[0] ?? {}).filter(k => !own.has(k))).toEqual([])
+		// Without a file, nothing is logged.
+		lines.length = 0
+		const plain = new BandGainSettingsService({
+			stateDir: "/state",
+			config: configDefaults,
+			logger: capture,
+			fs: memoryFs().fs,
+		})
+		await plain.load()
+		await new Promise<void>(resolve => setImmediate(resolve))
+		expect(lines.filter(l => String(l.msg).includes("override"))).toEqual([])
 	})
 })

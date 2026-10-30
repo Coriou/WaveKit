@@ -1364,9 +1364,10 @@ reconnect makes them unknown again; the field is absent when everything is known
 wrote it for the current frequency (or found it already there) and the tuner's known gain mode
 is manual with exactly that gain. `tenthsDb` is the value written, snapped to the tuner's gain
 step (a 40.0 dB entry reads `402` on an R820T); `label` is the entry's; `owner` is `scanner` (a
-scanner hop, dwell or job) or `user` (your retune with `applyToMyTuning` on). Any later gain,
-gain mode or frequency write, a relay client, a control hand-over or the gain becoming unknown
-removes it. Turning `applyToMyTuning` on adds nothing until your next retune.
+scanner job's hop) or `user` (your retune with `applyToMyTuning` on). Any later gain, gain mode
+or frequency write, a relay client, a control hand-over or the gain becoming unknown removes it.
+IF gain and gain index writes set other gain stages and keep it. Turning `applyToMyTuning` on
+adds nothing until your next retune.
 
 ```bash
 curl http://localhost:9000/api/tuner
@@ -1459,25 +1460,35 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 - `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
 - `PATCH /api/tuner/:sourceId/config` — Bulk update
 
-Every 400 from these routes names the fields it expects, their types and units, for example
-`Invalid request body; expected {"gain": integer, gain in tenths of a dB (0-500, e.g. 372 =
-37.2 dB)}; ...`. A value out of range answers `Invalid tuner value; expected ...`, and a body
-that is not valid JSON answers `Invalid request body; expected ...`. The message never repeats
-the value you sent.
+Every 400 from these routes names the field that failed, by its schema name, and the fields it
+expects, their types and units, for example `Invalid request body at gain; expected {"gain":
+integer, gain in tenths of a dB (0-500, e.g. 372 = 37.2 dB)}; ...`. A value the tuner refuses
+answers `Invalid tuner value at <field>; expected ...` (for `PATCH …/config`, the `TunerState`
+name such as `sampleRate` or `tunerIfGain.stage`), and a body that is not valid JSON answers
+`Invalid request body; expected ...`. The message never repeats the value you sent.
 
 #### Per-band gain: GET and PUT /api/tuner-band-gain
 
 A manual gain that suits one band can overload the RTL-SDR front end in another: strong
 cellular and ISM emitters next to 868 and 915 MHz raise the whole window at once. The band
-gain table gives a gain per frequency range. Scanner hops, dwells and jobs that tune into a
-listed range write its gain, and give your exact gain mode and gain back when they return the
-tuner (on release, on a later hop outside the bands, and after a core crash through the
-lease's crash record). A job's own `tuner.gainTenthsDb` wins over the table.
+gain table gives a gain per frequency range. Scanner hops (every scanner job: discover,
+monitor and identify, including each hop's dwell) that tune into a listed range write its gain,
+and give your exact gain mode and gain back when they return the tuner: on release, on a later
+hop outside the bands, after a core crash through the lease's crash record, and when your own
+write or a relay client takes the tuner from the job. Your write puts only the gain back, at
+once (unless it set the gain or gain mode itself); after a relay client, the gain goes back
+when control returns, unless the relay client set a gain or gain mode meanwhile. While the
+tuner's gain or gain mode is unknown (for example right after a core restart, before any gain
+write), hops write no band gain, since yours could not be put back. A job's own
+`tuner.gainTenthsDb` wins over the table.
 
-Your own retunes (`POST …/frequency`, `PATCH …/config`, the web app) do **not** change gain
-unless `applyToMyTuning` is on. With it on, tuning into a listed range applies its gain, and
-tuning out of the bands puts back the gain mode and gain you had before; setting a gain
-yourself inside a band makes that your gain. Relay clients (SDR++) are never touched.
+Manual tuning (`POST …/frequency`, `PATCH …/config`, the web app, and a dwell you drive
+through these routes) does **not** change gain unless `applyToMyTuning` is on. With it on,
+tuning into a listed range applies its gain, and tuning out of the bands puts back the gain
+mode and gain you had before (kept in `<stateDir>/tuner-band-gain-saved.json`, so a restart
+inside a band still restores it); setting a gain, gain mode or AGC yourself inside a band
+makes that your gain, while IF gain and gain index writes do not. Overlapping retunes of one
+source then run one at a time. Relay clients (SDR++) are never touched.
 
 ```bash
 curl http://localhost:9000/api/tuner-band-gain
@@ -1489,7 +1500,8 @@ curl -X PUT http://localhost:9000/api/tuner-band-gain \
 `GET` answers `{ settings: { applyToMyTuning, entries }, provenance, limits }`; `provenance` is
 `config` (the YAML `tuner.bandGain` section) or `runtime` (a saved PUT). `PUT` replaces the
 whole table and saves it in `<stateDir>/tuner-band-gain.json`; that file then wins over the
-YAML until it is deleted. A failed save answers 500 and changes nothing. Rules (400 otherwise):
+YAML until it is deleted (the core logs one line at start when it does). A failed save answers
+500 and changes nothing. Rules (400 otherwise):
 at most 32 entries; `minHz` < `maxHz`, both whole Hz from 24 000 000 to 1 900 000 000;
 ranges are inclusive and must not overlap (so the one containing a frequency is the only
 match); `gain` is a whole number of tenths of a dB, 0 to 500, or `"keep"`; `label` is at most 48
