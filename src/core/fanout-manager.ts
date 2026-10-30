@@ -296,6 +296,8 @@ export class FanoutManager extends EventEmitter {
 		stream.on("drain", () => {
 			if (!branchState.backpressure) this.emit("writable-drain", config.id)
 		})
+		// A destroyed, errored or closed stream never drains: stop polling it.
+		stream.once("close", () => this.clearEpisode(branchState))
 		this.branches.set(config.id, branchState)
 		this.emit("branch-added", config.id)
 		this.log.info({ branchId: config.id, highWaterMark }, "Branch added")
@@ -347,8 +349,7 @@ export class FanoutManager extends EventEmitter {
 
 		clearTimeout(branch.startupTimer)
 		branch.startupTimer = undefined
-		clearInterval(branch.lowWaterTimer)
-		branch.lowWaterTimer = undefined
+		this.clearEpisode(branch)
 		// End the stream gracefully
 		branch.stream.end()
 		// Destroy to release resources
@@ -486,24 +487,19 @@ export class FanoutManager extends EventEmitter {
 				branch.backpressureSince = now
 				branch.lastBackpressureAt = new Date(now).toISOString()
 
-				this.emit("backpressure", branchId, branch.bufferedBytes)
-				// Entering drop-mode loses nothing yet: the chunk was written, and a
-				// burst absorber holds the next ones until the branch drains. The
-				// warning waits for the first chunk actually dropped (countDrop).
-				this.log.debug(
-					{ branchId, bufferedBytes: branch.bufferedBytes },
-					"Branch congested, entering drop-mode",
-				)
-
 				// The episode ends at the stream's 'drain' (writable side empty)
 				// or, polled while it lasts, once the writable side is back at the
-				// low-water mark, whichever comes first.
+				// low-water mark, whichever comes first. Installed before the
+				// event, so a handler that removes the branch also clears them.
 				const onDrain = () => this.endEpisode(branchId, branch)
 				branch.episodeDrain = onDrain
 				branch.stream.once("drain", onDrain)
 				branch.lowWaterTimer = setInterval(() => {
 					const stream = branch.stream
-					if (stream.destroyed || stream.writableEnded) return
+					if (stream.destroyed || stream.writableEnded) {
+						this.clearEpisode(branch)
+						return
+					}
 					if (
 						stream.writableLength <=
 						(branch.startupHighWaterMark ?? branch.highWaterMark) *
@@ -512,16 +508,30 @@ export class FanoutManager extends EventEmitter {
 						this.endEpisode(branchId, branch)
 				}, DROP_MODE_POLL_MS)
 				branch.lowWaterTimer.unref?.()
+
+				this.emit("backpressure", branchId, branch.bufferedBytes)
+				// Entering drop-mode loses nothing yet: the chunk was written, and a
+				// burst absorber holds the next ones until the branch drains. The
+				// warning waits for the first chunk actually dropped (countDrop).
+				this.log.debug(
+					{ branchId, bufferedBytes: branch.bufferedBytes },
+					"Branch congested, entering drop-mode",
+				)
 			}
 		}
 	}
 
-	/** Ends a drop-mode episode once; the next chunk is written again. */
-	private endEpisode(branchId: string, branch: BranchState): void {
+	/** Stops an episode's low-water poll and 'drain' listener; idempotent. */
+	private clearEpisode(branch: BranchState): void {
 		clearInterval(branch.lowWaterTimer)
 		branch.lowWaterTimer = undefined
 		if (branch.episodeDrain) branch.stream.off("drain", branch.episodeDrain)
 		branch.episodeDrain = undefined
+	}
+
+	/** Ends a drop-mode episode once; the next chunk is written again. */
+	private endEpisode(branchId: string, branch: BranchState): void {
+		this.clearEpisode(branch)
 		if (!branch.backpressure) return
 		const drainTime = Date.now()
 		const durationMs = branch.backpressureSince

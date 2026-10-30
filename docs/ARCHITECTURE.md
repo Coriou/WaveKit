@@ -114,7 +114,9 @@ Multiplexes a single audio stream to multiple decoder consumers.
   fanout knows its source byte rate (`setByteRate`), a branch without an explicit
   mark holds 250 ms per side (1 200 000 bytes at 2.4 Msps CU8, 512 000 at
   1.024 Msps), never less than 256 KiB. The live-demod branch and the channelizer
-  input size themselves the same way from the source caps. Measurements:
+  input size themselves the same way from the source caps. Decoder branches get
+  the derived mark only once the source router calls `setByteRate` (pending), so
+  they keep 256 KiB for now. Measurements:
   [PERFORMANCE.md, "Branch marks in signal time"](PERFORMANCE.md#branch-marks-in-signal-time-2026-10-30).
 - Real-time priority: prefer dropping data over blocking source
 - Data is copied to each branch (no shared buffers)

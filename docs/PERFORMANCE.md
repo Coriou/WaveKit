@@ -69,9 +69,14 @@ Now:
   [256 KiB, 16 MiB]. That is 1 200 000 bytes at 2.4 Msps and 512 000 at 1.024 Msps.
   A branch congests after 2 × 1 200 000 + 65 536 bytes, 513.7 ms of signal.
 - The live-demod branch and the channelizer input size themselves the same way
-  from the source caps. `channelizer.inputHighWaterMark` is now a floor.
-- A drop-mode episode ends at half the mark (polled every 10 ms while it lasts),
-  not only at an empty writable side. Waiting for empty meant consuming about two
+  from the source caps, today. `channelizer.inputHighWaterMark` is now a floor.
+- Decoder branches do not have the derived marks yet. They take them only once
+  the source router calls `setByteRate` for their source, which is still pending.
+  Until then they keep the 256 KiB floor, and a branch keeps the mark it was
+  created with: only branches added after `setByteRate` get 250 ms.
+- A drop-mode episode ends at half the mark (polled every 10 ms while it lasts,
+  and stopped when the branch is removed or its stream closes), not only at an
+  empty writable side. Waiting for empty meant consuming about two
   marks after a stall, 500 ms of signal at 2.4 Msps, which tripped the absorber's
   500 ms laggard exclusion.
 - Entering drop-mode logs at debug, because with an absorber it loses nothing.
