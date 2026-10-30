@@ -56,7 +56,7 @@ const raw = (id: string, costCores: number): WantedPlacement => ({
 async function setup() {
 	vi.useFakeTimers()
 	const sources = new FakeSources()
-	sources.caps.set("rtl", { ...iqCaps(NEW_RATE), centerFreq: FAR_HZ })
+	sources.caps.set("rtl", { ...iqCaps(OLD_RATE), centerFreq: FAR_HZ })
 	const instances = new Map<string, RateDecoder>()
 	const registry = new DecoderRegistry()
 	const caps = {
@@ -221,6 +221,42 @@ async function apply(f: Fixture, step: Op) {
 	}
 }
 
+/**
+ * The live sequence every run starts with: at the old rate with near
+ * untuned, the rate changes (the source re-delivers: evidence unknown) and
+ * the centre moves into near's band, so near is refused while the source
+ * settles; once that refusal's retry is due, a reconciliation no source
+ * evaluation follows (the operator stopping and starting another decoder)
+ * runs.
+ */
+async function livePrefix(f: Fixture, check: (label: string) => void) {
+	const advance = async (label: string, ms: number) => {
+		for (let t = 0; t < ms; t += STEP_MS) {
+			await vi.advanceTimersByTimeAsync(STEP_MS)
+			check(`${label} +${t + STEP_MS} ms`)
+		}
+	}
+	expect(f.sources.caps.get("rtl")?.sampleRate).toBe(OLD_RATE)
+	expect(f.instances.get("near")?.running).not.toBe(true)
+	await apply(f, { kind: "rate", rate: NEW_RATE })
+	await advance("prefix rate", 2 * STEP_MS)
+	await apply(f, { kind: "tune", hz: NEAR_HZ })
+	let waited = 0
+	while (!f.m.getStatus("near")?.efficiency?.retryAt && waited < 20_000) {
+		await advance("prefix refusal", STEP_MS)
+		waited += STEP_MS
+	}
+	const refusal = f.m.getStatus("near")?.efficiency
+	expect(refusal?.detail).toBe("unknown")
+	expect(refusal?.retryAt).toBeTypeOf("string")
+	const dueMs = Math.max(0, Date.parse(refusal?.retryAt ?? "") - Date.now())
+	await vi.advanceTimersByTimeAsync(dueMs + 1)
+	check("prefix retry due")
+	await apply(f, { kind: "idle", start: false })
+	await apply(f, { kind: "idle", start: true })
+	await advance("prefix reconcile", STEP_MS)
+}
+
 /** An efficiency suspension of near the gate does not list with a retry time. */
 function unlisted(f: Fixture): string | null {
 	const status = f.m.getStatus("near")
@@ -237,7 +273,7 @@ function unlisted(f: Fixture): string | null {
 it("keeps every efficiency suspension listed by the gate and admits a clean tuned-band decoder within one sample", async () => {
 	await fc.assert(
 		fc.asyncProperty(
-			fc.array(op, { minLength: 1, maxLength: 12 }),
+			fc.array(op, { minLength: 0, maxLength: 12 }),
 			async ops => {
 				const f = await setup()
 				try {
@@ -247,6 +283,7 @@ it("keeps every efficiency suspension listed by the gate and admits a clean tune
 						const problem = unlisted(f)
 						if (problem) violations.push(`${label}: ${problem}`)
 					}
+					await livePrefix(f, check)
 					for (const [i, step] of ops.entries()) {
 						await apply(f, step)
 						const ms = step.kind === "wait" ? step.ms : STEP_MS
