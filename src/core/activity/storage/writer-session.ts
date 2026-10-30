@@ -70,6 +70,11 @@ export interface ActivitySession {
 	/** Wall time of the last retention seed scan, in ms. */
 	readonly seedMs: number
 	snapshot(): ActivityWorkerSnapshot
+	/**
+	 * Runs the retention seed scan when it was deferred at open. Idempotent; write()
+	 * calls it first, so a write never runs against unseeded counters.
+	 */
+	seedCounters(): void
 	write(rows: readonly BuiltActivityRow[], nowMs: number): WriterWorkResult
 	checkpoint(reason: "threshold" | "close"): ActivityWorkerSnapshot
 	close(): void
@@ -88,6 +93,7 @@ export function createActivitySession(
 	failNextWrites = 0,
 	throwNextWrites = 0,
 	clock: () => number = Date.now,
+	options: { deferSeed?: boolean } = {},
 ): ActivitySession {
 	const opened = openActivityDatabase(db)
 	let failures = failNextWrites
@@ -121,7 +127,17 @@ export function createActivitySession(
 			seedMs = performance.now() - started
 		}
 	}
-	seed()
+	// The seed is one sequential pass over the whole table (every record blob): about 2.8 s
+	// for a 272 MB store on a cold page cache, 0.3 s warm. The worker defers it past the
+	// open reply so the open costs only the indexed reads above; it then runs as the first
+	// task on the worker's serial chain, before any write.
+	let seeded = false
+	const seedOnce = (): void => {
+		if (seeded) return
+		seeded = true
+		seed()
+	}
+	if (options.deferSeed !== true) seedOnce()
 	if (state.walBytes >= limits.walPassiveBytes || paused) {
 		const wal = syncActivityWal(db, dbPath, limits)
 		paused = wal.paused
@@ -375,7 +391,9 @@ export function createActivitySession(
 			return seedMs
 		},
 		snapshot,
+		seedCounters: seedOnce,
 		write(rows, nowMs) {
+			seedOnce()
 			if (throws > 0) {
 				throws -= 1
 				throw new ActivityUnavailableError("injected write throw")

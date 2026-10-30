@@ -98,6 +98,8 @@ async function openSession(
 		throw new ActivityUnavailableError("activity writer is already open")
 	writeDelayMs = request.writeDelayMs
 	lock = await acquireActivityLock(request.lockPath)
+	if (request.openDelayMs !== undefined && request.openDelayMs > 0)
+		await delay(request.openDelayMs)
 	const db = await openSqliteFile(request.dbPath)
 	try {
 		session = createActivitySession(
@@ -106,6 +108,8 @@ async function openSession(
 			request.limits as ActivityLimits,
 			request.failNextWrites,
 			request.throwNextWrites,
+			Date.now,
+			{ deferSeed: true },
 		)
 	} catch (error) {
 		try {
@@ -121,6 +125,13 @@ async function openSession(
 		type: "ready",
 		created: session.created,
 		snapshot: session.snapshot(),
+	})
+	// The deferred seed scan is the next task on the serial chain: a write queued behind
+	// it finds the counters seeded. A seed failure is handled inside the session
+	// (oldest-first until reopen), so this never rejects the chain.
+	const opened = session
+	chain = chain.then(() => {
+		opened.seedCounters()
 	})
 }
 

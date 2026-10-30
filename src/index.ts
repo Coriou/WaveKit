@@ -78,6 +78,7 @@ import {
 	splitLiveDemodConfig,
 	sourceScannerConfig,
 	type Config,
+	type SourceCaps,
 } from "./config.js"
 import {
 	CSDR_BUFFER_ENV,
@@ -151,10 +152,8 @@ import {
 import { resolveProcessBandRegion } from "./decoders/band-region.js"
 import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
-import {
-	activityConfigOptions,
-	startActivityRuntime,
-} from "./core/activity/runtime.js"
+import { activityConfigOptions } from "./core/activity/runtime.js"
+import { startActivityLifecycle } from "./core/activity/lifecycle.js"
 import { OperatorDataService } from "./operator-data/service.js"
 import {
 	openBandPlanService,
@@ -1559,20 +1558,29 @@ async function main(): Promise<void> {
 			updateVfo(tunerController.centreChangeOrigin(sourceId) ?? "other")
 		const updateVfoOnConnect = () => updateVfo("other")
 		liveDemod.on("config-changed", updateVfoOnLiveConfig)
-		sourceManager.on("caps-changed", updateVfoOnCaps)
 		sourceManager.on("connected", updateVfoOnConnect)
 		const bumpCoverage = () => {
 			coverageGeneration++
 		}
 		liveDemod.on("config-changed", bumpCoverage)
-		sourceManager.on("caps-changed", bumpCoverage)
+		// One caps-changed listener for the entry point's own consumers, in this order: the
+		// VFO, coverage, and the sources WebSocket broadcast once the API exists (step 11b).
+		// SourceManager keeps one listener per subsystem (SOURCE_MANAGER_MAX_LISTENERS).
+		let broadcastCaps: ((sourceId: string, caps: SourceCaps) => void) | null =
+			null
+		const onSourceCaps = (sourceId: string, caps: SourceCaps) => {
+			updateVfoOnCaps(sourceId)
+			bumpCoverage()
+			broadcastCaps?.(sourceId, caps)
+		}
+		sourceManager.on("caps-changed", onSourceCaps)
 		const closeVfo = () => {
 			vfo.dispose()
 			liveDemod.off("config-changed", updateVfoOnLiveConfig)
-			sourceManager.off("caps-changed", updateVfoOnCaps)
+			sourceManager.off("caps-changed", onSourceCaps)
 			sourceManager.off("connected", updateVfoOnConnect)
 			liveDemod.off("config-changed", bumpCoverage)
-			sourceManager.off("caps-changed", bumpCoverage)
+			broadcastCaps = null
 		}
 		own(20, closeVfo)
 		const modeBinding = composeDecoderModes(
@@ -1883,6 +1891,30 @@ async function main(): Promise<void> {
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let bandPlanSkipsWarned = false
 		let ambientProvenance: ActivityProvenanceLookup | null = null
+		// Activity runs when config.activity.enabled (the default). The store opens in the
+		// background, in parallel with the scanner state load below, and a failed open is
+		// retried with backoff (startActivityLifecycle); the rest of WaveKit never waits for it.
+		// Receptions before the open are counted as dropped. Provenance resolves through the
+		// decoder binding index once it is built below (null until then).
+		// Detection quality R4: admitted paging/APRS receptions feed the data-decode gate, so a
+		// pager burst on the live channel is not stored as an analog voice transmission.
+		const dataGate = createDataDecodeGate()
+		const activity = startActivityLifecycle({
+			...activityConfigOptions(config.activity),
+			stateDir: config.stateDir,
+			logger,
+			setPublisher: publish => {
+				decoderManager.setActivityPublisher(publish)
+			},
+			discloseErrors: !protectedMode,
+			resolveProvenance: (decoderId, context) =>
+				ambientProvenance?.(decoderId, context) ?? null,
+			onEnvelope: env => {
+				dataGate.noteEnvelope(env)
+			},
+		})
+		// Own at once: a stop during the open must still close the workers.
+		own(8, () => activity.close())
 		const { channelTier, ...scannerSettings } = config.scanner
 		// WG8 req 5.2: the host bins cap, resolved once (bounded bench, or the configured value)
 		const spectrumBinsCap = resolveSpectrumBinsCap(
@@ -2406,26 +2438,7 @@ async function main(): Promise<void> {
 		own(8, () => decoderProvenance.dispose())
 		ambientProvenance = decoderProvenance.lookup
 
-		// Activity runs when config.activity.enabled (the default). A failed probe or open
-		// logs and leaves the rest of WaveKit running.
-		// Detection quality R4: admitted paging/APRS receptions feed the data-decode gate, so a
-		// pager burst on the live channel is not stored as an analog voice transmission.
-		const dataGate = createDataDecodeGate()
-		const activity = await startActivityRuntime({
-			...activityConfigOptions(config.activity),
-			stateDir: config.stateDir,
-			logger,
-			setPublisher: publish => {
-				decoderManager.setActivityPublisher(publish)
-			},
-			discloseErrors: !protectedMode,
-			resolveProvenance: decoderProvenance.lookup,
-			onEnvelope: env => {
-				dataGate.noteEnvelope(env)
-			},
-		})
-		// Own before checkpoint: a stop during open must still close the workers.
-		own(8, () => activity.close())
+		// Activity (started before the scanner, above) resolves provenance through this lookup.
 		checkpoint()
 
 		// WG4 req 3: storage report over the areas WaveKit writes. Areas and the low-space
@@ -2496,7 +2509,7 @@ async function main(): Promise<void> {
 			{
 				bandPlans,
 				...(access ? { access } : {}),
-				activity,
+				activity: activity.api,
 				station: stationService.identity(),
 				stationService,
 				// WG8 req 2: mounted by the server only in protected mode (the access controller)
@@ -2919,13 +2932,13 @@ async function main(): Promise<void> {
 		await tunerRelay.start()
 		checkpoint()
 
-		// Broadcast source caps changes to WebSocket clients
-		sourceManager.on("caps-changed", (sourceId, caps) => {
+		// Broadcast source caps changes to WebSocket clients (through onSourceCaps)
+		broadcastCaps = (sourceId, caps) => {
 			wsBroadcaster.broadcast("sources", {
 				type: "source:caps-changed",
 				data: { sourceId, caps },
 			})
-		})
+		}
 
 		// Step 12: Wire decoder audio outputs to AudioOutput (Requirement 11.1)
 		// This creates a combined stream that aggregates audio from all decoders

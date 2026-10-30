@@ -269,6 +269,37 @@ export type AdmitResult =
 	| { admitted: true }
 	| { admitted: false; reason: AdmitRejection }
 
+/**
+ * Activity store lifecycle in `GET /api/activity/status` (`stats.lifecycle`). `opening`: the
+ * first open is running; `retrying`: an open failed and the next attempt is at
+ * `nextAttemptAt`; `available`: the store is open; `unavailable`: a failure that a retry
+ * cannot fix (no node:sqlite, a foreign schema). `reason` is a code, never a message.
+ * Identical to the api-types DTO (api-types-compat test).
+ */
+export type ActivityLifecycleState =
+	| "opening"
+	| "retrying"
+	| "available"
+	| "unavailable"
+
+export type ActivityLifecycleReason =
+	| "ACTIVITY_UNAVAILABLE"
+	| "ACTIVITY_STORE_LOCKED"
+	| "ACTIVITY_SCHEMA_MISMATCH"
+	| "ACTIVITY_OPEN_TIMEOUT"
+
+export interface ActivityLifecycleStatus {
+	state: ActivityLifecycleState
+	/** The last failed attempt's code; null once available or before any failure. */
+	reason: ActivityLifecycleReason | null
+	/** Open attempts started this session, the running one included. */
+	attempts: number
+	/** ISO time of the next attempt while `retrying`, else null. */
+	nextAttemptAt: string | null
+	/** Receptions and transmissions dropped while the store was not open. */
+	droppedWhileClosed: number
+}
+
 export interface ActivityStoreStats {
 	admitted: number
 	committed: number
@@ -294,6 +325,8 @@ export interface ActivityStoreStats {
 	retention?: ActivityRetentionStats
 	/** WG3 (req 6.6): Meshtastic flood copies not stored; not a loss. Absent on older cores. */
 	floodCopies?: number
+	/** Store lifecycle, set by the runtime's API view. Store counters are zero unless `available`. */
+	lifecycle?: ActivityLifecycleStatus
 }
 
 /**

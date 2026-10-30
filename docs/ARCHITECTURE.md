@@ -502,6 +502,21 @@ Search, facets and cursor replay are served on `/api/activity` and
 the WebSocket `activity` channel. The store is off by default. A failed open
 keeps the process running and those routes answer 503 `ACTIVITY_UNAVAILABLE`.
 
+The store opens in the background (`src/core/activity/lifecycle.ts`), started
+before the scanner loads its state, so neither waits for the other. The writer
+answers the open after its indexed reads; the full-table retention seed scan
+runs next on the writer thread, before its first write, so the open no longer
+grows with the database (5 s budget). A failed open is retried after 5 s, 15 s
+and 60 s, then every 5 minutes; a missing `node:sqlite` or a foreign schema is
+not retried. Receptions and transmissions while the store is not open are
+counted (`droppedWhileClosed`), not buffered. The writer is never opened twice,
+and a timed-out writer is terminated, which frees its lock.
+
+The scanner validates its `discoveries.json` snapshot and restores the store in
+slices of 1,024 items with an event-loop turn between slices
+(`src/core/scanner/store/slices.ts`), so a large store does not hold the main
+thread for the whole load.
+
 ### Activity presentation
 
 Pager Activity presentation converts multimon whitespace markers (LF, CR, HT,

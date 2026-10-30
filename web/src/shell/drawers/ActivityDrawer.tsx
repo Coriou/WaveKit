@@ -1,6 +1,6 @@
 import "../../features/activity/activity.css"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 
 import { useServices } from "../../app/context.ts"
@@ -13,6 +13,10 @@ import { ActivityDetail } from "../../features/activity/ActivityDetail.tsx"
 import { ActivityList } from "../../features/activity/ActivityList.tsx"
 import { MAX_COLUMNS } from "../../features/activity/columns.ts"
 import { foldedOf } from "../../features/activity/fold.ts"
+import {
+	lifecycleNotice,
+	useActivityAvailability,
+} from "../../features/activity/lifecycle.ts"
 import {
 	activitySearchFocus,
 	takeActivitySearchFocus,
@@ -472,13 +476,7 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 		activity.clear()
 		activity.setAudio(false)
 	}
-	if (!available)
-		return (
-			<p className="wka-note">
-				Activity is turned off on this receiver. Decodes still show on the
-				spectrum.
-			</p>
-		)
+	if (!available) return <Unavailable feed={feed} />
 	if (status === "error")
 		return (
 			<p className="wka-note" data-tone="warn">
@@ -581,6 +579,28 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 					/>
 				))}
 		</>
+	)
+}
+
+/**
+ * The core answered 404/503: off, starting, retrying or unavailable, from the store's lifecycle
+ * (polled while shown). The list reloads by itself once the store opens.
+ */
+function Unavailable({ feed }: { feed: ActivityFeed }) {
+	const { data } = useServices()
+	const reload = useCallback(() => void feed.reload(), [feed])
+	const notice = lifecycleNotice(
+		useActivityAvailability(data.api, true, reload),
+	)
+	if (notice === null) return null
+	return (
+		<p
+			className="wka-note"
+			role="status"
+			{...(notice.tone === "warn" ? { "data-tone": "warn" } : {})}
+		>
+			{notice.text}
+		</p>
 	)
 }
 

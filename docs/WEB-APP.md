@@ -98,6 +98,9 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
   when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying
   stops, Activity shows `rate limited, retry in N s` (or `rate limited, retry later`).
+  While the core is still opening its Activity store, the drawer says `Activity is starting…`; if
+  an open failed and the core is retrying, it says `Activity store unavailable, retrying`. It checks
+  again every 3 s and loads the list by itself once the store opens.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.

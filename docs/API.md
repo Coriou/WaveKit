@@ -4996,9 +4996,19 @@ The activity routes then answer 503:
 ```
 
 `reason` is `ACTIVITY_UNAVAILABLE` (runtime, FTS5 or an invalid limit),
-`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`. When error
+`ACTIVITY_STORE_LOCKED`, `ACTIVITY_SCHEMA_MISMATCH`, or `ACTIVITY_OPEN_TIMEOUT`
+(the writer did not open within 5 s). When error
 disclosure is off (protected mode), `message` is `Request failed` and
 `reason` is still set. The response does not include the open error text.
+
+From the 2026-10-30 core the store opens in the background while the rest of
+WaveKit starts, and a failed open is retried: after 5 s, 15 s and 60 s, then
+every 5 minutes. A missing `node:sqlite` or FTS5 and a schema mismatch are not
+retried. Until the store is open the activity routes answer 503
+`ACTIVITY_UNAVAILABLE` with `error` `ActivityQueryError`, the last failure's
+code in `reason` (absent while the first open runs) and the fixed message
+`Activity store is not open`; `GET /api/activity/status` answers 200 and says
+which state the store is in (see [GET /api/activity/status](#get-apiactivitystatus)).
 
 The store holds three kinds:
 
@@ -5601,6 +5611,40 @@ committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
 admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
 `ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no stats provider.
+
+From the 2026-10-30 core `stats.lifecycle` says where the store is (older cores
+omit it; an older core answers this route 503 when the store did not open):
+
+- `state`: `opening` (an open attempt is running), `retrying` (the last attempt
+  failed; the next one is at `nextAttemptAt`), `available`, or `unavailable` (a
+  failure a retry cannot fix).
+- `reason`: the last failed attempt's code (`ACTIVITY_UNAVAILABLE`,
+  `ACTIVITY_STORE_LOCKED`, `ACTIVITY_SCHEMA_MISMATCH`, `ACTIVITY_OPEN_TIMEOUT`),
+  null when `available` or before any failure. Never the error text.
+- `attempts`: open attempts this session, the running one included.
+- `nextAttemptAt`: ISO time of the next attempt while `retrying`, else null.
+- `droppedWhileClosed`: receptions and transmissions not stored because the
+  store was not open.
+
+While `state` is not `available`, the store counters in `stats` are zero and
+`writer` is `stopped`.
+
+```json
+{
+	"enabled": true,
+	"stats": {
+		"rows": 0,
+		"writer": "stopped",
+		"lifecycle": {
+			"state": "retrying",
+			"reason": "ACTIVITY_OPEN_TIMEOUT",
+			"attempts": 1,
+			"nextAttemptAt": "2026-10-30T12:00:05.000Z",
+			"droppedWhileClosed": 12
+		}
+	}
+}
+```
 
 From the 2026-10-16 core `stats` also has two optional fields (older cores omit them):
 

@@ -1,4 +1,5 @@
 import { WaveKitError } from "../../../utils/errors.js"
+import type { ActivityLifecycleReason } from "../storage/contract.js"
 
 /** REST/WS reset reason carried on cursor failures. */
 export type ActivityCursorReason =
@@ -16,13 +17,14 @@ export type ActivityCursorReason =
  */
 export class ActivityQueryError extends WaveKitError {
 	readonly statusCode: number
-	readonly reason: ActivityCursorReason | undefined
+	/** A cursor reason, or the store's failure code on a 503 while it is not open. */
+	readonly reason: ActivityCursorReason | ActivityLifecycleReason | undefined
 
 	constructor(
 		message: string,
 		code: string,
 		statusCode: number,
-		reason?: ActivityCursorReason,
+		reason?: ActivityCursorReason | ActivityLifecycleReason,
 		cause?: Error,
 	) {
 		super(message, code, cause)

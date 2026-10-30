@@ -160,6 +160,8 @@ import {
 	planRetirement,
 } from "./fragment-retirement.js"
 import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
+import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./slices.js"
+import type { YieldTurn } from "./slices.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -2731,6 +2733,42 @@ export class DiscoveryStore
 	}
 
 	restore(s: StoreSnapshot): void {
+		const steps = this.restoreSteps(s, Number.POSITIVE_INFINITY)
+		while (!steps.next().done);
+	}
+
+	/**
+	 * `restore(s)` with an awaited `yieldTurn` after every `sliceItems` discoveries or
+	 * observations (SCANNER_LOAD_SLICE_ITEMS by default), so a large store does not hold the
+	 * event loop for the whole restore. The same steps in the same order: only the load path
+	 * uses it, before any ingest, listener or API can reach the store.
+	 */
+	async restoreInSlices(
+		s: StoreSnapshot,
+		yieldTurn: YieldTurn = yieldToEventLoop,
+		sliceItems: number = SCANNER_LOAD_SLICE_ITEMS,
+	): Promise<void> {
+		const steps = this.restoreSteps(s, sliceItems)
+		try {
+			while (!steps.next().done) await yieldTurn()
+		} finally {
+			// A throwing yieldTurn still runs the restore's finally (proof bookkeeping).
+			steps.return()
+		}
+	}
+
+	/** Yields after every `sliceItems` items; restore() runs it without pausing. */
+	private *restoreSteps(
+		s: StoreSnapshot,
+		sliceItems: number,
+	): Generator<void, void, void> {
+		let items = 0
+		const tick = (): boolean => {
+			items += 1
+			if (items < sliceItems) return false
+			items = 0
+			return true
+		}
 		for (const timer of this.anchorExpiry.values()) clearTimeout(timer)
 		this.anchorExpiry.clear()
 		// band inspection UX req 3.3: restored records are a new store; revisions restart with it
@@ -2785,14 +2823,21 @@ export class DiscoveryStore
 		this.proofQuiet++
 		try {
 			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
-			for (const d of s.discoveries) this.insertDiscovery(clone(d))
+			for (const d of s.discoveries) {
+				this.insertDiscovery(clone(d))
+				if (tick()) yield
+			}
 			for (const o of [...s.observations].sort(compareObs)) {
 				if (!this.discoveries.has(o.discoveryId)) continue
 				const observation = clone(o)
 				this.downgradeLegacyObservation(observation)
 				this.putObservation(observation)
+				if (tick()) yield
 			}
-			for (const d of this.discoveries.values()) this.normalizeCheckedContent(d)
+			for (const d of this.discoveries.values()) {
+				this.normalizeCheckedContent(d)
+				if (tick()) yield
+			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }

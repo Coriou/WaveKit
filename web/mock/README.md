@@ -21,6 +21,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   446.1, 466.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 466.078 MHz at 1.024 MS/s. Each window
   has its own steady signals and discoveries, a saved frequency sits at 434.502 MHz, and frames follow
   the tuner's sample rate. Parked, only four signals may be labelled in the plot.
+- Activity store lifecycle: `GET /api/activity/status` reports `stats.lifecycle`. With
+  `WAVEKIT_MOCK_ACTIVITY_STORE=opening` (or `retrying`, next attempt every 5 s; `activityStore` in
+  `buildMockServer()`) Activity reads answer the core's 503 `ACTIVITY_UNAVAILABLE` until
+  `WAVEKIT_MOCK_ACTIVITY_OPEN_MS` after start (never without it), so the drawer shows
+  `Activity is starting…` or `Activity store unavailable, retrying`.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

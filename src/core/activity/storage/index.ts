@@ -1,4 +1,5 @@
 export {
+	ActivityOpenTimeoutError,
 	ActivitySchemaMismatchError,
 	ActivityStoreLockedError,
 	ActivityUnavailableError,

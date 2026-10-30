@@ -14,6 +14,8 @@ interface OpenActivityWorkerRequest {
 	failNextWrites: number
 	throwNextWrites: number
 	writeDelayMs: number
+	/** Test seam: the worker waits this long after taking the lock, before opening. */
+	openDelayMs?: number
 }
 
 interface ReadyActivityWorkerResponse {
@@ -62,7 +64,9 @@ export function isActivityWorkerRequest(
 			isRecord(value["limits"]) &&
 			typeof value["failNextWrites"] === "number" &&
 			typeof value["throwNextWrites"] === "number" &&
-			typeof value["writeDelayMs"] === "number"
+			typeof value["writeDelayMs"] === "number" &&
+			(value["openDelayMs"] === undefined ||
+				typeof value["openDelayMs"] === "number")
 		)
 	}
 	if (type === "write")
