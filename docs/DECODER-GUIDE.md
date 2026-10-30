@@ -666,6 +666,42 @@ Validation so far uses synthetic fixtures; live meter decodes have not been obse
 2. Verify input format matches decoder expectations
 3. Consider adding rate limiting
 
+### Decoders start when you tune
+
+In `auto` mode (the default) you never need Settings to start a decoder: tune into its band
+and it starts. When you tune, the core decides for each decoder in this order:
+
+1. **Mode.** A decoder set to `off` in Settings (or `enabled: false` in YAML) never starts,
+   whatever you tune. `always` runs everywhere; `auto` runs where its band is. Pressing
+   **Stop** on a decoder also keeps it stopped until you start it or change its mode.
+2. **Source ready.** A sample-rate change reconnects the source; until the new rate is known
+   decoders wait as `source-rate-unknown`.
+3. **Band.** The decoder's band (ADS-B 1090 MHz, APRS 144.800 MHz, ISM 433/868 MHz, ACARS and
+   VDL2 near 131 and 136 MHz, LoRa near 869.5 MHz, the paging and digital-voice bands of your
+   region, or your band override) must be in the capture, else `frequency-out-of-band`.
+4. **Rate.** The capture must suit the decoder (ADS-B needs 2.4 Msps; unless ADS-B is `off`,
+   WaveKit raises the rate when you tune within 200 kHz of 1090 MHz in WaveKit; a retune made
+   in SDR++ through the relay only gets advice), else a rate reason such as `insufficient-sample-rate`.
+5. **Placement.** Channel decoders need a channel that fits the capture (`capture-too-narrow`,
+   `no-channel-selected`) and the channelizer (`channelizer-unavailable`).
+6. **CPU budget.** Decoders the core started on its own share a CPU budget
+   (`efficiency-budget`). The decoder whose band holds the frequency you tuned (the VFO, or the
+   capture centre without one, within 200 kHz of its target or inside its band) goes first:
+   - it is admitted before the others, and when the budget is full the other automatic
+     decoders stop to make room (newest first);
+   - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds
+     after the rate change), instead of waiting the 60-second clear window others wait;
+   - when drops or CPU load force the core to stop something, it stops the other automatic
+     decoders first; the tuned one stops only when nothing else is left, and says so.
+
+   Tuning into a band also clears any earlier budget or loss wait of its decoder. YAML
+   decoders, `always` decoders and decoders you started yourself are never stopped for it.
+
+7. **Start.** The process then starts; ADS-B shows aircraft once readsb has heard them.
+
+Each decoder's verdict in `GET /api/decoders/summary` sums this up in one sentence with a
+suggested action, for example "ADS-B paused: CPU budget full" with `raise-budget`.
+
 ### Efficiency recovery
 
 Automatic decoder admission uses a recent 10-second positive-drop window and a separate

@@ -2354,6 +2354,26 @@ A future output timestamp is idle. Historical `lastError` alone does not mark
 a recovered decoder failed. This is recent output evidence, not a signal-quality
 verdict. Read access is the same as other decoder GET routes.
 
+A decoder whose placement workers run (instance ids `<decoder>#<channel>@<source>`)
+counts as running, and its `lastOutputAt` is the newest output of the decoder and
+its workers.
+
+Each entry also carries `verdict`: `{ code, text, actions }`. `text` is one short
+sentence of at most 160 characters, such as "ADS-B paused: CPU budget full". `code` is
+one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, `off`
+(mode off), `stopped` (stopped by the operator), `failed`, `out-of-band`,
+`no-channel`, `capture-too-narrow`, `source-unavailable`, `unsupported-rate`,
+`scanner-busy`, `efficiency-budget`, `efficiency-cpu`, `efficiency-drops`,
+`efficiency-late-drops`, `efficiency-waiting`, `decoder-unavailable`,
+`channelizer-unavailable` or `unknown`. `actions` lists suggestions from `turn-on`,
+`start`, `restart`, `tune-to-band`, `raise-sample-rate`, `lower-sample-rate`,
+`change-sample-rate`, `check-source`, `pause-scanner`, `raise-budget`,
+`turn-off-others`, `install-decoder` and `enable-channelizer`, most helpful first.
+Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
+`decoderVerdictSchema` in `@wavekit/api-types`); a client treats an unknown code as
+`unknown` and ignores an unknown action. Precedence: failed, off, stopped,
+suspended (efficiency detail first), decoding, listening, starting.
+
 #### GET /api/decoders/:id
 
 Get status of a specific decoder.

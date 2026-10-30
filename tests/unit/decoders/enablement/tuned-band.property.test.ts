@@ -1,0 +1,254 @@
+import fc from "fast-check"
+import { expect, it } from "vitest"
+import type {
+	RunningPlacement,
+	WantedPlacement,
+} from "../../../../src/decoders/enablement/contract.js"
+import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
+import type { EfficiencyBudgetService } from "../../../../src/decoders/enablement/budget-settings.js"
+import {
+	TUNED_TARGET_TOLERANCE_HZ,
+	bandContainsTuned,
+	prioritiseTuned,
+	tunedFrequencyHz,
+} from "../../../../src/decoders/enablement/tuned-band.js"
+
+const raw = (
+	key: string,
+	sourceId: string,
+	costCores: number,
+	tuned: boolean,
+): WantedPlacement => ({
+	key,
+	decoderId: key,
+	sourceId,
+	channelHz: null,
+	reach: "raw",
+	origin: "band",
+	primary: true,
+	costCores,
+	sampleRateHz: 2_400_000,
+	...(tuned ? { tunedBand: true as const } : {}),
+})
+
+const okReader = {
+	dropState: () => ({ state: "ok" as const, dropBytesPerSecond: 0 }),
+	monoNow: () => 0,
+	sources: () => [],
+	droppedSinceMono: () => false,
+	droppedWithinMs: () => false,
+}
+
+function gateWithBudget(initial: number) {
+	let cores = initial
+	const budget = {
+		cores: () => cores,
+		view: () => ({}),
+		update: async () => ({}),
+	} as unknown as EfficiencyBudgetService
+	const gate = createEfficiencyGate(
+		{ budget, budgetCores: initial, cpuGuardPercent: 90 },
+		{ drops: okReader },
+	)
+	return { gate, setBudget: (value: number) => (cores = value) }
+}
+
+const decoderArb = fc.record({
+	cost: fc.integer({ min: 5, max: 60 }).map(n => n / 100),
+	tuned: fc.boolean(),
+	protect: fc.constantFrom("none", "always", "operator"),
+})
+
+// Feature: decoder-autostart, Property 1: the tuned band is refused last
+// Validates: Requirements R2
+it("a tuned-band newcomer is refused only when untuned placements could not make room", () => {
+	fc.assert(
+		fc.property(
+			fc.array(decoderArb, { minLength: 0, maxLength: 7 }),
+			fc.integer({ min: 10, max: 300 }).map(n => n / 100),
+			fc.integer({ min: 5, max: 60 }).map(n => n / 100),
+			fc.boolean(),
+			(decoders, budgetCores, newcomerCost, newcomerTuned) => {
+				const { gate, setBudget } = gateWithBudget(100)
+				const running: RunningPlacement[] = []
+				decoders.forEach((d, i) => {
+					// One source each: no probation slot is shared.
+					const p = raw(`d${i}`, `s${i}`, d.cost, d.tuned)
+					expect(gate.admit(p, running, 0)).toEqual({ admit: true })
+					running.push({
+						key: p.key,
+						sourceId: p.sourceId,
+						reach: p.reach,
+						costCores: p.costCores,
+						sampleRateHz: p.sampleRateHz,
+						admittedAtMs: 0,
+						mode: d.protect === "always" ? "always" : "auto",
+						startMode: d.protect === "operator" ? "operator" : "auto",
+						...(d.tuned ? { tunedBand: true as const } : {}),
+					})
+				})
+				setBudget(budgetCores)
+				const newcomer = raw("new", "t", newcomerCost, newcomerTuned)
+				const decision = gate.admit(newcomer, running, 0)
+				const sheddableUntuned = (p: RunningPlacement) =>
+					p.tunedBand !== true &&
+					p.mode !== "always" &&
+					p.startMode !== "operator"
+				const firm = running.filter(p =>
+					newcomerTuned ? !sheddableUntuned(p) : true,
+				)
+				const firmCost =
+					firm.reduce((sum, p) => sum + p.costCores, 0) + newcomerCost
+				if (decision.admit) {
+					const displaced = new Set(decision.displace ?? [])
+					// Only untuned, sheddable placements ever make room.
+					for (const key of displaced)
+						expect(sheddableUntuned(running.find(p => p.key === key)!)).toBe(
+							true,
+						)
+					// An untuned newcomer never displaces anything here.
+					if (!newcomerTuned) expect(displaced.size).toBe(0)
+					const kept =
+						running
+							.filter(p => !displaced.has(p.key))
+							.reduce((sum, p) => sum + p.costCores, 0) + newcomerCost
+					expect(kept).toBeLessThanOrEqual(budgetCores + 1e-9)
+				} else {
+					expect(decision.detail).toBe("budget")
+					// Refused: even with every untuned placement gone it does not fit.
+					expect(firmCost).toBeGreaterThan(budgetCores - 1e-9)
+				}
+			},
+		),
+		{ numRuns: 300 },
+	)
+})
+
+// Feature: decoder-autostart, Property 2: a tuned-band probationer's loss sheds untuned first
+// Validates: Requirements R2
+it("drops during a tuned-band probation shed the newest untuned placement on its source", () => {
+	fc.assert(
+		fc.property(
+			fc.array(fc.boolean(), { minLength: 0, maxLength: 5 }),
+			others => {
+				let mono = 0
+				let dropAt: number | null = null
+				const gate = createEfficiencyGate(
+					{ budgetCores: 100, cpuGuardPercent: 90 },
+					{
+						drops: {
+							...okReader,
+							monoNow: () => mono,
+							droppedSinceMono: (_id, since) =>
+								dropAt !== null && dropAt >= since,
+						},
+					},
+				)
+				const running: RunningPlacement[] = []
+				// Other placements on the same source, admitted and graduated in turn.
+				others.forEach((tuned, i) => {
+					const p = raw(`o${i}`, "s", 0.1, tuned)
+					expect(gate.admit(p, running, mono)).toEqual({ admit: true })
+					running.push({
+						key: p.key,
+						sourceId: "s",
+						reach: "raw",
+						costCores: 0.1,
+						sampleRateHz: p.sampleRateHz,
+						admittedAtMs: mono,
+						mode: "auto",
+						startMode: "auto",
+						...(tuned ? { tunedBand: true as const } : {}),
+					})
+					mono += 31_000
+					expect(gate.probation(running, mono)).toEqual([])
+				})
+				const tuned = raw("tuned", "s", 0.25, true)
+				expect(gate.admit(tuned, running, mono).admit).toBe(true)
+				running.push({
+					key: tuned.key,
+					sourceId: "s",
+					reach: "raw",
+					costCores: 0.25,
+					sampleRateHz: tuned.sampleRateHz,
+					admittedAtMs: mono,
+					mode: "auto",
+					startMode: "auto",
+					tunedBand: true,
+				})
+				mono += 2_000
+				dropAt = mono
+				const verdicts = gate.probation(running, mono)
+				const untuned = others
+					.map((t, i) => (t ? null : `o${i}`))
+					.filter((k): k is string => k !== null)
+				if (untuned.length)
+					expect(verdicts).toEqual([
+						{ key: untuned[untuned.length - 1]!, detail: "drops" },
+					])
+				else expect(verdicts).toEqual([{ key: "tuned", detail: "drops" }])
+			},
+		),
+		{ numRuns: 100 },
+	)
+})
+
+it("tuned means within 200 kHz of a target, inside a target cluster or a range", () => {
+	const tol = TUNED_TARGET_TOLERANCE_HZ
+	const t = 500_000_000
+	expect(bandContainsTuned({ targetsHz: [t], basis: "protocol" }, t)).toBe(true)
+	// At the bound and one hertz past it.
+	expect(
+		bandContainsTuned({ targetsHz: [t], basis: "protocol" }, t + tol),
+	).toBe(true)
+	expect(
+		bandContainsTuned({ targetsHz: [t], basis: "protocol" }, t + tol + 1),
+	).toBe(false)
+	expect(
+		bandContainsTuned(
+			{ targetsHz: [t, t + 1_000_000], basis: "protocol" },
+			t + 500_000,
+		),
+	).toBe(true)
+	const range = { rangesHz: [{ minHz: t, maxHz: t + 1_000 }], basis: "region" }
+	expect(bandContainsTuned(range as never, t - tol)).toBe(true)
+	expect(bandContainsTuned(range as never, t - tol - 1)).toBe(false)
+	// Unknown or malformed: never tuned.
+	expect(bandContainsTuned(undefined, t)).toBe(false)
+	expect(bandContainsTuned({ basis: "protocol" }, t)).toBe(false)
+	expect(bandContainsTuned({ targetsHz: [t], basis: "protocol" }, null)).toBe(
+		false,
+	)
+	expect(
+		bandContainsTuned({ targetsHz: [NaN, -1], basis: "protocol" } as never, t),
+	).toBe(false)
+})
+
+it("the tuned frequency is the VFO on its source, else the capture centre", () => {
+	expect(tunedFrequencyHz("a", 100, { sourceId: "a", frequencyHz: 120 })).toBe(
+		120,
+	)
+	expect(tunedFrequencyHz("a", 100, { sourceId: "b", frequencyHz: 120 })).toBe(
+		100,
+	)
+	expect(tunedFrequencyHz("a", null, null)).toBeNull()
+	expect(tunedFrequencyHz("a", NaN, null)).toBeNull()
+})
+
+it("tuned placements move to the front, otherwise in planner order", () => {
+	const order = prioritiseTuned(
+		[raw("a", "s", 1, false), raw("b", "s", 1, false), raw("c", "s", 1, true)],
+		p => p.key !== "a",
+	)
+	expect(order.map(p => [p.key, p.tunedBand === true])).toEqual([
+		["b", true],
+		["c", true],
+		["a", false],
+	])
+	// A throwing predicate is the safe answer: untuned.
+	expect(
+		prioritiseTuned([raw("a", "s", 1, false)], () => {
+			throw new Error("boom")
+		})[0]!.tunedBand,
+	).toBeUndefined()
+})

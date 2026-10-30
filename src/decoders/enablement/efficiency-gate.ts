@@ -312,10 +312,39 @@ export function createEfficiencyGate(
 	}
 	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
 	/**
-	 * 3.21: the running gated secondaries an ungated newcomer displaces, newest
-	 * first out: those that no longer fit the budget beside the firm placements,
-	 * and (when `probationers`) one on probation on the newcomer's source, whose
-	 * evidence the newcomer would blur.
+	 * A gate-admitted placement the gate may stop for another: never a YAML
+	 * placement (never admitted here), an `always` decoder or an operator start.
+	 */
+	const sheddable = (p: RunningPlacement | WantedPlacement) =>
+		gated.has(p.key) &&
+		(!("mode" in p) || p.mode !== "always") &&
+		(!("startMode" in p) || p.startMode !== "operator")
+	/**
+	 * Whether `p` holds no budget against `newcomer`. 3.21: gated secondaries
+	 * yield to an ungated newcomer, except a tuned-band secondary to an
+	 * untuned one. Tuned band: every sheddable untuned placement yields to a
+	 * tuned-band newcomer, so the decoders of the tuned band are refused last.
+	 */
+	const yieldsTo = (
+		newcomer: WantedPlacement,
+		p: RunningPlacement | WantedPlacement,
+	): boolean => {
+		if (p.key === newcomer.key) return false
+		const tuned = newcomer.tunedBand === true
+		if (
+			newcomer.gated !== true &&
+			p.gated === true &&
+			(tuned || p.tunedBand !== true)
+		)
+			return true
+		return tuned && p.tunedBand !== true && sheddable(p)
+	}
+	/**
+	 * 3.21 and tuned band: the running placements a newcomer displaces, newest
+	 * first out: those in `forced`, those that no longer fit the budget beside
+	 * the firm placements (primaries are kept before secondaries, oldest
+	 * first), and (when `probationers`) one on probation on the newcomer's
+	 * source, whose evidence the newcomer would blur.
 	 */
 	const displacement = (
 		newcomer: WantedPlacement,
@@ -323,23 +352,25 @@ export function createEfficiencyGate(
 		firm: readonly (RunningPlacement | WantedPlacement)[],
 		mono: number,
 		probationers: boolean,
+		forced: ReadonlySet<string> = new Set(),
 	): string[] => {
-		if (newcomer.gated === true) return []
 		const displace: string[] = []
 		const kept = [...firm, newcomer]
-		const secondaries = running
-			.filter(p => p.gated === true && p.key !== newcomer.key)
+		const yielding = running
+			.filter(p => yieldsTo(newcomer, p))
 			.sort(
 				(a, b) =>
+					Number(a.gated === true) - Number(b.gated === true) ||
 					(admittedMono.get(a.key) ?? 0) - (admittedMono.get(b.key) ?? 0),
 			)
-		for (const p of secondaries) {
+		for (const p of yielding) {
 			const probationer =
 				probationers &&
 				p.sourceId === newcomer.sourceId &&
 				gated.has(p.key) &&
 				onProbation(p, mono)
 			if (
+				!forced.has(p.key) &&
 				!probationer &&
 				valid(budgetCores()) &&
 				total([...kept, p]) <= budgetCores()
@@ -349,6 +380,28 @@ export function createEfficiencyGate(
 		}
 		// Newest first: the stop order 3.21 names.
 		return displace.reverse()
+	}
+	/**
+	 * A clean run is under way on the source: it delivers complete evidence
+	 * with no drop since the run began, and its latest sample is fresh
+	 * (within EFFICIENCY_STALE_MS). It has not yet earned the 60 s clear
+	 * window that "ok" needs.
+	 */
+	const cleanRunUnderway = (sourceId: string, mono: number): boolean => {
+		if (!valid(mono)) return false
+		try {
+			const cleanAt = deps.drops?.cleanAtMono?.(sourceId)
+			if (!valid(cleanAt) || cleanAt - EFFICIENCY_CLEAR_MS > mono) return false
+			const sampled = deps.drops?.lastSampleMono?.()
+			return (
+				sampled === undefined ||
+				(valid(sampled) &&
+					sampled <= mono &&
+					mono - sampled <= EFFICIENCY_STALE_MS)
+			)
+		} catch {
+			return false
+		}
 	}
 
 	const lateState = (
@@ -470,12 +523,15 @@ export function createEfficiencyGate(
 					if (retry.detail === "budget") retries.delete(key)
 				lastBudget = currentBudget
 			}
+			const tuned = newcomer.tunedBand === true
 			const retry = retries.get(newcomer.key)
 			if (retry?.pending) {
 				retry.at = Math.max(retry.at, now + retry.delay)
 				delete retry.pending
 			}
-			if (retry && now < retry.at) {
+			// A tuned-band newcomer is not held by a budget backoff: untuned
+			// placements yield their budget to it. Loss backoff still applies.
+			if (retry && now < retry.at && !(tuned && retry.detail === "budget")) {
 				return { admit: false, detail: retry.detail, retryAtMs: retry.at }
 			}
 			// A disconnected placement still owns its admitted capacity. Otherwise
@@ -489,9 +545,8 @@ export function createEfficiencyGate(
 			// 3.21: gated secondaries yield to an ungated newcomer. They hold no
 			// budget or probation slot against it; running ones that no longer fit
 			// are displaced (newest first) instead of starving it.
-			const primary = newcomer.gated !== true
 			const yields = (p: RunningPlacement | WantedPlacement) =>
-				primary && p.gated === true && p.key !== newcomer.key
+				yieldsTo(newcomer, p)
 			// The newcomer's own running entry or reservation is replaced by it.
 			const firm = [...running, ...reserved].filter(
 				p => p.key !== newcomer.key && !yields(p),
@@ -514,22 +569,55 @@ export function createEfficiencyGate(
 				}
 
 			const state = readDrops(newcomer.sourceId).state
+			// Tuned band, start latency: after a reconnect the source reads
+			// "unknown" until a 60 s clear window is earned. A tuned-band
+			// newcomer starts once a clean run is under way instead (host or
+			// consumer loss still refuses); its probation judges it as usual.
+			const warming =
+				tuned &&
+				state !== "dropping" &&
+				attribution !== "host" &&
+				attribution !== "consumer" &&
+				cleanRunUnderway(newcomer.sourceId, mono)
+			const unsettled =
+				state === "unknown" || state === "clearing" || attribution === "unknown"
 			let detail: DecoderEfficiencyDetail | null = null
+			// Over the CPU limit a tuned-band newcomer swaps in for untuned
+			// placements (newest first) whose cost together covers its own.
+			const swapped = new Set<string>()
 			if (
 				!valid(now) ||
-				state === "unknown" ||
-				state === "clearing" ||
-				attribution === "unknown" ||
+				(unsettled && !warming) ||
 				(attribution !== undefined && !valid(mono))
 			)
 				detail = "unknown"
-			else if (state !== "ok") detail = "drops"
+			else if (state === "dropping") detail = "drops"
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
-			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) detail = "cpu"
-			else if (
-				!valid(budgetCores()) ||
-				!Number.isFinite(total([...firm, newcomer])) ||
-				total([...firm, newcomer]) > budgetCores()
+			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) {
+				detail = "cpu"
+				if (tuned && valid(newcomer.costCores)) {
+					let freed = 0
+					const victims = running
+						.filter(p => yields(p) && p.tunedBand !== true && sheddable(p))
+						.sort(
+							(a, b) =>
+								(admittedMono.get(b.key) ?? 0) - (admittedMono.get(a.key) ?? 0),
+						)
+					for (const p of victims) {
+						if (freed >= newcomer.costCores) break
+						if (!valid(p.costCores)) continue
+						swapped.add(p.key)
+						freed += p.costCores
+					}
+					if (freed >= newcomer.costCores) detail = null
+					else swapped.clear()
+				}
+			}
+			if (
+				detail === null &&
+				(!valid(budgetCores()) ||
+					!Number.isFinite(total([...firm, newcomer])) ||
+					total([...firm, newcomer]) > budgetCores())
 			)
 				detail = "budget"
 			// Otherwise admissible: one gated probationer per source, so probation
@@ -572,7 +660,14 @@ export function createEfficiencyGate(
 				} catch {
 					/* Optional lifecycle evidence. */
 				}
-				const displace = displacement(newcomer, running, firm, mono, true)
+				const displace = displacement(
+					newcomer,
+					running,
+					firm,
+					mono,
+					true,
+					swapped,
+				)
 				return displace.length ? { admit: true, displace } : { admit: true }
 			}
 			// Missing evidence is not a rejection: no backoff is recorded and the
@@ -589,6 +684,14 @@ export function createEfficiencyGate(
 					/* Unreadable: the fallback below applies. */
 				}
 				const base = valid(now) ? now : 0
+				// Tuned band: re-checked every sample (2000 ms), since a clean run
+				// starting is enough for it (see `warming`), not the clear window.
+				if (tuned)
+					return {
+						admit: false,
+						detail,
+						retryAtMs: base + EFFICIENCY_SAMPLE_MS,
+					}
 				return {
 					admit: false,
 					detail,
@@ -598,6 +701,16 @@ export function createEfficiencyGate(
 							: base + EFFICIENCY_CLEAR_MS,
 				}
 			}
+			// A tuned-band newcomer refused for budget or CPU had every untuned
+			// placement yield already: only tuned, YAML, `always` or operator
+			// placements hold the budget. It is re-checked after one clear window
+			// (60 s) without a growing backoff; a budget change rechecks at once.
+			if ((detail === "budget" || detail === "cpu") && tuned)
+				return {
+					admit: false,
+					detail,
+					retryAtMs: (valid(now) ? now : 0) + EFFICIENCY_CLEAR_MS,
+				}
 			// An activity slot over the budget is a planning race (the allocator
 			// sized it to fit): it is re-checked next sample, with no backoff.
 			if (detail === "budget" && newcomer.origin === "activity")
@@ -618,7 +731,7 @@ export function createEfficiencyGate(
 			const mono = monoNow()
 			observeRunning(running, mono)
 			const firm = running.filter(
-				p => p.gated !== true && p.key !== newcomer.key,
+				p => p.key !== newcomer.key && !yieldsTo(newcomer, p),
 			)
 			return displacement(newcomer, running, firm, mono, false)
 		},
@@ -676,6 +789,31 @@ export function createEfficiencyGate(
 					placement.mode !== "always" &&
 					placement.startMode !== "operator"
 				) {
+					// Tuned band: a tuned-band probationer's loss sheds the newest
+					// sheddable untuned placement instead (on its source for drops,
+					// anywhere for CPU); the tuned one restarts its probation, so
+					// it is shed only when nothing untuned is left.
+					const scapegoat =
+						placement.tunedBand === true
+							? running
+									.filter(
+										p =>
+											p.key !== placement.key &&
+											p.tunedBand !== true &&
+											sheddable(p) &&
+											(detail === "cpu" || p.sourceId === placement.sourceId) &&
+											!verdicts.some(v => v.key === p.key),
+									)
+									.reduce<
+										RunningPlacement | undefined
+									>((best, p) => (!best || (admittedMono.get(p.key) ?? 0) > (admittedMono.get(best.key) ?? 0) ? p : best), undefined)
+							: undefined
+					if (scapegoat && valid(mono)) {
+						failures.add(scapegoat.key)
+						verdicts.push({ key: scapegoat.key, detail })
+						mark(placement.key, mono)
+						continue
+					}
 					failures.add(placement.key)
 					verdicts.push({ key: placement.key, detail })
 				}
@@ -711,9 +849,11 @@ export function createEfficiencyGate(
 						state.condemningWindows < LATE_SHED_HITS
 					)
 						continue
-					const newestEligible = state.eligible.reduce<
-						RunningPlacement | undefined
-					>(
+					// Tuned band: untuned placements are shed before tuned ones.
+					const untuned = state.eligible.filter(p => p.tunedBand !== true)
+					const newestEligible = (
+						untuned.length ? untuned : state.eligible
+					).reduce<RunningPlacement | undefined>(
 						(best, p) =>
 							!best || admittedMono.get(p.key)! > admittedMono.get(best.key)!
 								? p

@@ -319,6 +319,12 @@ export interface WantedPlacement {
 	movedFrom?: string
 	/** Why an activity decoder's channel runs (ranking, state and score). */
 	activity?: PlacementActivity
+	/**
+	 * The decoder's band contains the frequency the operator tuned on this
+	 * source (see tuned-band.ts). The efficiency gate refuses and sheds these
+	 * last: other gate-admitted placements yield to them first.
+	 */
+	tunedBand?: true
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(
@@ -371,6 +377,8 @@ export interface RunningPlacement {
 	admittedAtMs: number
 	/** 3.18/3.20: a generated secondary channel; it yields to primaries (3.21). */
 	gated?: true
+	/** Its decoder's band contains the tuned frequency: shed last (see WantedPlacement). */
+	tunedBand?: true
 }
 /** 3.21: an admission may list running gated secondaries to suspend for budget. */
 export interface Admitted {

@@ -6,6 +6,12 @@ import {
 	DECODING_WINDOW_MS,
 } from "../../../src/api/routes/decoder-summary.js"
 import type { DecoderStatus } from "../../../src/decoders/types.js"
+import fc from "fast-check"
+import {
+	DECODER_VERDICT_ACTIONS,
+	DECODER_VERDICT_CODES,
+	decoderVerdictSchema,
+} from "@wavekit/api-types"
 
 const now = Date.parse("2026-10-01T12:00:00Z")
 const status = (patch: Partial<DecoderStatus> = {}): DecoderStatus => ({
@@ -89,6 +95,7 @@ it("serves a compact summary and takes static precedence over decoder ids", asyn
 				"lastOutputAt",
 				"suspensionReason",
 				"health",
+				"verdict",
 			].sort(),
 		)
 	} finally {
@@ -107,4 +114,171 @@ it("represents a running decoder without placement metadata conservatively", () 
 		decoderSummary(status({ targetFrequenciesHz: [123, 456] }), now).placements,
 	).toEqual([{ sourceId: null, frequencyHz: null }])
 	expect(decoderSummary(status({ running: false }), now).placements).toEqual([])
+})
+
+it.each([
+	[{}, "decoding", []],
+	[{ lastOutputAt: undefined }, "listening", []],
+	[{ mode: "off", running: false }, "off", ["turn-on"]],
+	[{ running: false, desiredRunning: false }, "stopped", ["start"]],
+	[{ running: false, desiredRunning: true }, "starting", []],
+	[{ health: "faulted" }, "failed", ["restart"]],
+	[
+		{
+			running: false,
+			suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
+			efficiency: { detail: "budget" },
+		},
+		"efficiency-budget",
+		["raise-budget", "turn-off-others", "pause-scanner"],
+	],
+	[
+		{
+			running: false,
+			suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
+		},
+		"efficiency-budget",
+		["raise-budget", "turn-off-others", "pause-scanner"],
+	],
+	[
+		{
+			running: false,
+			suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
+			efficiency: { detail: "unknown" },
+		},
+		"efficiency-waiting",
+		[],
+	],
+	[
+		{
+			running: false,
+			suspension: {
+				reasonCode: "frequency-out-of-band",
+				since: new Date(now),
+			},
+		},
+		"out-of-band",
+		["tune-to-band"],
+	],
+	[
+		{
+			running: false,
+			suspension: { reasonCode: "source-rate-unknown", since: new Date(now) },
+		},
+		"source-unavailable",
+		["check-source"],
+	],
+	[
+		{
+			running: false,
+			suspension: {
+				reasonCode: "insufficient-sample-rate",
+				since: new Date(now),
+			},
+		},
+		"unsupported-rate",
+		["change-sample-rate"],
+	],
+	[
+		{
+			running: false,
+			suspension: { reasonCode: "tuner-scanning", since: new Date(now) },
+		},
+		"scanner-busy",
+		["pause-scanner"],
+	],
+] as const)("gives one verdict for %j", (patch, code, actions) => {
+	const verdict = decoderSummary(
+		status(patch as Partial<DecoderStatus>),
+		now,
+	).verdict
+	expect(verdict.code).toBe(code)
+	expect(verdict.actions).toEqual(actions)
+	expect(decoderVerdictSchema.parse(verdict)).toEqual(verdict)
+})
+
+it("names a paused ADS-B decoder plainly", () => {
+	expect(
+		decoderSummary(
+			status({
+				type: "readsb",
+				running: false,
+				suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
+				efficiency: { detail: "budget" },
+			}),
+			now,
+		).verdict.text,
+	).toBe("ADS-B paused: CPU budget full")
+})
+
+// Feature: decoder-autostart, Property 5: one valid verdict for any status
+// Validates: Requirements R4
+it("always yields a verdict from the closed sets, generic for unknown input", () => {
+	fc.assert(
+		fc.property(
+			fc.record({
+				type: fc.string(),
+				running: fc.boolean(),
+				desiredRunning: fc.option(fc.boolean(), { nil: undefined }),
+				mode: fc.option(fc.string(), { nil: undefined }),
+				health: fc.constantFrom("running", "idle", "restarting", "faulted"),
+				reason: fc.option(fc.string(), { nil: undefined }),
+				detail: fc.option(fc.string(), { nil: undefined }),
+			}),
+			input => {
+				const verdict = decoderSummary(
+					status({
+						type: input.type,
+						running: input.running,
+						desiredRunning: input.desiredRunning,
+						health: input.health,
+						...(input.mode !== undefined
+							? { mode: input.mode as NonNullable<DecoderStatus["mode"]> }
+							: {}),
+						...(input.reason !== undefined
+							? {
+									suspension: {
+										reasonCode: input.reason as never,
+										since: new Date(now),
+									},
+								}
+							: {}),
+						...(input.detail !== undefined
+							? { efficiency: { detail: input.detail as never } }
+							: {}),
+					}),
+					now,
+				).verdict
+				expect(DECODER_VERDICT_CODES).toContain(verdict.code)
+				for (const action of verdict.actions)
+					expect(DECODER_VERDICT_ACTIONS).toContain(action)
+				expect(decoderVerdictSchema.safeParse(verdict).success).toBe(true)
+			},
+		),
+		{ numRuns: 200 },
+	)
+})
+
+it("counts a running placement worker as the decoder running", () => {
+	const summary = decoderSummary(
+		status({
+			type: "dsd-fme",
+			running: false,
+			placements: [
+				{
+					sourceId: "synthetic",
+					channelHz: 123,
+					running: true,
+					reach: "channel",
+					origin: "activity",
+					primary: false,
+					costCores: 0,
+				},
+			],
+		}),
+		now,
+	)
+	expect(summary.state).toBe("running")
+	expect(summary.health).toBe("decoding")
+	expect(summary.verdict.code).toBe("decoding")
 })

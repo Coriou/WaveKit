@@ -47,6 +47,11 @@ import {
 	placementOptionsKey,
 } from "./enablement/contract.js"
 import type { PlannerCentreSlot } from "./enablement/contract.js"
+import {
+	bandContainsTuned,
+	prioritiseTuned,
+	tunedFrequencyHz,
+} from "./enablement/tuned-band.js"
 import { catalogueLoraSlots } from "./enablement/catalogue.js"
 import { rtl433TargetRateHz } from "./builtin/rtl433.js"
 import {
@@ -789,6 +794,49 @@ export class DecoderManager extends EventEmitter {
 		return false
 	}
 
+	/** Whether a planned placement's decoder band holds its source's tuned frequency. */
+	private placementTuned(
+		placement: WantedPlacement,
+		input: PlannerInput,
+	): boolean {
+		const parent = this.decoders.get(placement.decoderId)
+		if (!parent) return false
+		const source = input.sources.find(item => item.id === placement.sourceId)
+		return bandContainsTuned(
+			this.resolveBand(parent).requirements,
+			tunedFrequencyHz(placement.sourceId, source?.centreHz, input.vfo),
+		)
+	}
+
+	/**
+	 * A placement that just became tuned-band (the operator tuned into its
+	 * band) drops any capacity hold it was waiting out, so it starts as soon
+	 * as the source is usable rather than when an old budget retry expires.
+	 * A loss backoff (drops, CPU, late drops) of a stopped placement is
+	 * forgotten too: the operator asked for this band. An operator stop or
+	 * mode off is never overridden.
+	 */
+	private releaseTunedHolds(wanted: readonly WantedPlacement[]): void {
+		const gate = this.config.enablement?.gate
+		for (const placement of wanted) {
+			if (placement.tunedBand !== true) continue
+			const state = [...this.decoders.values()].find(
+				item => item.placement?.key === placement.key,
+			)
+			if (
+				!state ||
+				state.placement?.tunedBand === true ||
+				state.decoder.getStatus().running ||
+				state.admission?.admit !== false
+			)
+				continue
+			gate?.forget(placement.key)
+			delete state.efficiencyBackoffMs
+			delete state.efficiencyLateShed
+			delete state.admission
+		}
+	}
+
 	private runningPlacements(): RunningPlacement[] {
 		return [...this.decoders.values()].flatMap(state => {
 			const owner = state.parentId ? this.decoders.get(state.parentId) : state
@@ -807,6 +855,9 @@ export class DecoderManager extends EventEmitter {
 							costCores: state.placement.costCores,
 							sampleRateHz: state.placement.sampleRateHz,
 							...(state.placement.gated ? { gated: true as const } : {}),
+							...(state.placement.tunedBand
+								? { tunedBand: true as const }
+								: {}),
 							admittedAtMs: state.stopping
 								? performance.now() - EFFICIENCY_PROBATION_MS
 								: (state.admittedAtMs ?? performance.now()),
@@ -1410,11 +1461,20 @@ export class DecoderManager extends EventEmitter {
 		this.reconcilingPlacements = true
 		try {
 			await this.applyProbation()
-			const plan = enablement.planner(this.withActivity(this.plannerInput()))
-			const wanted = plan.wanted.filter(placement => {
-				const parent = this.decoders.get(placement.decoderId)
-				return parent?.owner === "config" && this.modeFor(parent).mode !== "off"
-			})
+			const input = this.withActivity(this.plannerInput())
+			const plan = enablement.planner(input)
+			// Tuned band: placements whose decoder's band holds the tuned
+			// frequency are admitted first and shed last.
+			const wanted = prioritiseTuned(
+				plan.wanted.filter(placement => {
+					const parent = this.decoders.get(placement.decoderId)
+					return (
+						parent?.owner === "config" && this.modeFor(parent).mode !== "off"
+					)
+				}),
+				placement => this.placementTuned(placement, input),
+			)
+			this.releaseTunedHolds(wanted)
 			if (plan.activity) {
 				for (const move of plan.activity.moves)
 					this.activityMoves.push({
@@ -3378,7 +3438,30 @@ export class DecoderManager extends EventEmitter {
 				idleTimeoutMs: this.config.idleTimeout,
 			}),
 			...this.placementTargetFields(state),
+			...this.placementLastOutput(state),
 		}
+	}
+
+	/**
+	 * A decoder's placement workers (ids `<decoder>#<channel>@<source>`) decode
+	 * for it, so its last output is the newest of its own and theirs; without
+	 * this an instance decoder showed its parent's old output time.
+	 */
+	private placementLastOutput(
+		parent: DecoderState,
+	): Pick<DecoderStatus, "lastOutputAt"> {
+		let latest = parent.decoder.getStatus().lastOutputAt
+		for (const state of this.decoders.values()) {
+			if (state.parentId !== parent.config.id) continue
+			const at = state.decoder.getStatus().lastOutputAt
+			if (
+				at instanceof Date &&
+				Number.isFinite(at.getTime()) &&
+				(latest === undefined || at.getTime() > latest.getTime())
+			)
+				latest = at
+		}
+		return latest !== undefined ? { lastOutputAt: latest } : {}
 	}
 
 	private placementTargetFields(
@@ -5695,7 +5778,10 @@ export class DecoderManager extends EventEmitter {
 			const state = [...this.decoders.values()].find(
 				item => item.placement?.key === key,
 			)
-			if (!state?.placement?.gated || this.destroying) continue
+			// Gated secondaries (3.21) and, for a tuned-band newcomer, any
+			// gate-admitted untuned placement; never a YAML one.
+			if (!state?.placement || this.gateExempt(state) || this.destroying)
+				continue
 			if (state.stopping) {
 				// An earlier stop did not complete: ask again; the capacity counts
 				// as held until it does.
