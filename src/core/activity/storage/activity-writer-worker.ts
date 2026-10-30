@@ -129,9 +129,13 @@ async function openSession(
 	// The deferred seed scan is the next task on the serial chain: a write queued behind
 	// it finds the counters seeded. A seed failure is handled inside the session
 	// (oldest-first until reopen), so this never rejects the chain.
+	// The parent cached the ready snapshot (no shares yet): the seeded one replaces its
+	// retention block without waiting for a write.
 	const opened = session
 	chain = chain.then(() => {
+		if (session !== opened) return
 		opened.seedCounters()
+		post({ id: 0, type: "seeded", snapshot: opened.snapshot() })
 	})
 }
 

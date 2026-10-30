@@ -207,6 +207,7 @@ class ActivityWriterClient {
 	private exited = false
 	private closing = false
 	private gone: (() => void) | undefined
+	private seeded: ((snapshot: ActivityWorkerSnapshot) => void) | undefined
 	private readonly pending = new Map<
 		number,
 		{
@@ -370,8 +371,17 @@ class ActivityWriterClient {
 		})
 	}
 
+	/** Called with each unsolicited post-seed snapshot. */
+	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void {
+		this.seeded = listener
+	}
+
 	private onMessage(raw: unknown): void {
 		if (!isActivityWorkerResponse(raw)) return
+		if (raw.type === "seeded") {
+			this.seeded?.(raw.snapshot)
+			return
+		}
 		const waiter = this.pending.get(raw.id)
 		if (!waiter) return
 		clearTimeout(waiter.timer)
@@ -439,6 +449,10 @@ class ActivityStore implements ActivityStoreHandle {
 		this.ingress.paused = snapshot.paused
 		this.threaded?.onGone(() => {
 			this.onWriterGone()
+		})
+		// The deferred seed changes only the retention counters (and `effective` on failure).
+		this.threaded?.onSeeded(seeded => {
+			this.retention = retentionOf(seeded) ?? this.retention
 		})
 	}
 

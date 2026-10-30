@@ -25,6 +25,16 @@ interface ReadyActivityWorkerResponse {
 	snapshot: ActivityWorkerSnapshot
 }
 
+/**
+ * Unsolicited, after the deferred retention seed (id 0, never a request id): the snapshot with
+ * the seeded shares, or with `effective: "oldest-first"` when the seed failed.
+ */
+interface SeededActivityWorkerMessage {
+	id: 0
+	type: "seeded"
+	snapshot: ActivityWorkerSnapshot
+}
+
 interface ErrorActivityWorkerResponse {
 	id: number
 	type: "error"
@@ -45,6 +55,7 @@ export type ActivityWorkerResponse =
 	| { id: number; type: "wrote"; result: WriterWorkResult }
 	| { id: number; type: "checkpointed"; snapshot: ActivityWorkerSnapshot }
 	| { id: number; type: "closed" }
+	| SeededActivityWorkerMessage
 	| ErrorActivityWorkerResponse
 
 const REQUEST_TYPES = new Set(["open", "write", "checkpoint", "close"])
@@ -87,6 +98,7 @@ export function isActivityWorkerResponse(
 		type === "wrote" ||
 		type === "checkpointed" ||
 		type === "closed" ||
+		type === "seeded" ||
 		type === "error"
 	)
 }
