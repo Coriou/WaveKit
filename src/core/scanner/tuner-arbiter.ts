@@ -92,7 +92,12 @@ export type ArbiterTuner = Pick<
 > &
 	// WG9 req 3.1/3.2: present on the real controller; a double without it skips the check.
 	// Per-band gain: a double without bandGainFor never changes gain for a band.
-	Partial<Pick<TunerController, "tuningWrittenOnConnection" | "bandGainFor">>
+	Partial<
+		Pick<
+			TunerController,
+			"tuningWrittenOnConnection" | "bandGainFor" | "noteBandGainApplied"
+		>
+	>
 
 /**
  * WG9 req 3.1: a hop's epoch trust by the shared fail-closed rule. The hop itself commands the
@@ -622,6 +627,14 @@ export class TunerArbiter extends EventEmitter {
 			)
 		}
 		if (hopGain.bandGainAfter === false) delete lease.bandGain
+		if (hopGain.bandGainAfter === true && target.gainTenthsDb !== null)
+			// The writes succeeded (or the gain was already there): report the band gain.
+			this.deps.tuner.noteBandGainApplied?.(
+				sourceId,
+				target.gainTenthsDb,
+				"scanner",
+				target.centreHz,
+			)
 		const written = this.requireState(sourceId)
 		lease.verified = {
 			centreHz: target.centreHz,

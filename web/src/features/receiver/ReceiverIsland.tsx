@@ -1,6 +1,6 @@
 // The Receiver island (docs/web/canvas/Receiver.dc.html): the source, then its tuner settings as
 // controls: sample rate (confirmed inline, the core restarts the stream), gain on the tuner's own gain
-// table or auto (with the band gain in effect and the scanner's overload hint under it), RTL AGC,
+// table or auto (with the core-confirmed band gain and the scanner's overload hint under it), RTL AGC,
 // bias-T, offset tuning, frequency correction and, under Advanced, direct sampling. Values are the
 // core's (TunerState); a control shows its target only while its write is in flight. When the tuner
 // cannot be changed (read-only access, an external client has it, offline) the panel says why and
@@ -10,7 +10,6 @@ import type { TunerState } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
-import { bandGainStore } from "../../data/receiver-band-gain.ts"
 import type {
 	ControlStatus,
 	ReceiverCaps,
@@ -39,7 +38,6 @@ import {
 	type ReceiverControlId,
 } from "./controls.ts"
 import {
-	bandGainInEffect,
 	bandGainText,
 	gainAt,
 	gainDb,
@@ -47,7 +45,6 @@ import {
 	gainSteps,
 	nearestGainIndex,
 	overloadHintText,
-	scannerHoldsTuner,
 } from "./gain.ts"
 import { receiverSummary, sourceTitle } from "./summary.ts"
 import { ratePolicyNote } from "./notices.ts"
@@ -253,14 +250,9 @@ function Gain({ tuner, caps, locked, status, dismiss }: SectionProps) {
 	const major = steps.source === "table" ? 7 : 10
 	const setGain = (tenthsDb: number) =>
 		void data.receiver.setManualGain(tuner.sourceId, tenthsDb)
-	const bandGain = useStore(bandGainStore(data.api), s => s.view)
-	const jobs = useStore(data.scanner, s => s.jobs)
 	const engines = useStore(data.scanner, s => s.status?.engines)
-	const inBand = bandGainInEffect(
-		bandGain?.settings ?? null,
-		tuner.frequency,
-		scannerHoldsTuner(jobs.values(), tuner.sourceId),
-	)
+	// Only the core's confirmed band gain (it is absent whenever the tuner may not have it).
+	const inBand = auto ? undefined : tuner.bandGain
 	const overload = auto ? null : overloadHintText(engines ?? [], tuner.sourceId)
 	return (
 		<div className="wkf-field">
@@ -545,7 +537,6 @@ function ReceiverPanel() {
 	const tunerError = useStore(data.tuner, s => s.error)
 	useEffect(() => {
 		void data.receiver.loadRelay()
-		void bandGainStore(data.api).load()
 		if (sourceId !== null) void data.receiver.loadCaps(sourceId)
 	}, [data, sourceId])
 	const lock = receiverLock({ tuner, source, readOnly, relay })

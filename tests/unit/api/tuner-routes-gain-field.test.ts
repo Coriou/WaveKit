@@ -102,6 +102,21 @@ describe("POST /api/tuner/:sourceId/gain field names", () => {
 		expect((JSON.parse(get.body) as TunerState).gain).toBe(372)
 	})
 
+	it("GET serialises TunerState.bandGain when present and omits it otherwise", async () => {
+		const { app: a, state } = await build()
+		const plain = await a.inject({ method: "GET", url: "/api/tuner" })
+		expect((JSON.parse(plain.body) as TunerState[])[0]).not.toHaveProperty(
+			"bandGain",
+		)
+		state.bandGain = { tenthsDb: 402, label: "ISM 868", owner: "scanner" }
+		const one = await a.inject({ method: "GET", url: "/api/tuner/rtl-1" })
+		expect((JSON.parse(one.body) as TunerState).bandGain).toEqual({
+			tenthsDb: 402,
+			label: "ISM 868",
+			owner: "scanner",
+		})
+	})
+
 	it('keeps {"tenthsDb"} as a deprecated alias; both equal is fine', async () => {
 		const { app: a, controller } = await build()
 		expect(

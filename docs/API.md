@@ -1359,6 +1359,15 @@ counts as observed (it is not replayed on reconnect). The field values keep
 their types for older clients. A reset
 reconnect makes them unknown again; the field is absent when everything is known.
 
+**`bandGain`** (`{ tenthsDb, label?, owner }`) is present only while a
+[band gain](#per-band-gain-get-and-put-apituner-band-gain) is confirmed on the tuner: the core
+wrote it for the current frequency (or found it already there) and the tuner's known gain mode
+is manual with exactly that gain. `tenthsDb` is the value written, snapped to the tuner's gain
+step (a 40.0 dB entry reads `402` on an R820T); `label` is the entry's; `owner` is `scanner` (a
+scanner hop, dwell or job) or `user` (your retune with `applyToMyTuning` on). Any later gain,
+gain mode or frequency write, a relay client, a control hand-over or the gain becoming unknown
+removes it. Turning `applyToMyTuning` on adds nothing until your next retune.
+
 ```bash
 curl http://localhost:9000/api/tuner
 ```

@@ -100,9 +100,11 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   core's own message shows under the row if it refuses the save. **Per-band gain for my tuning**
   (off by default) saves at once: on, your own retunes also set the band's gain and give yours
   back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
-- **Receiver** (the island at the top): under Gain, a quiet line says when a band gain is in
-  effect at the current frequency, for example `Band gain 37.2 dB · 868 MHz ISM · while the
-scanner tunes` (or `· for your tuning` with the switch on). When the scanner sees broadband
+- **Receiver** (the island at the top): under Gain, a quiet line says when the core confirms a
+  band gain on the tuner, for example `Band gain 37.2 dB · 868 MHz ISM · while the
+scanner tunes` (or `· for your tuning` with the switch on). It shows the gain the tuner really
+  has (snapped to its gain step) and goes away as soon as you change the gain, the mode or the
+  frequency; turning the switch on shows nothing until your next retune. When the scanner sees broadband
   blanking rise at a manual gain, the line `Front end may be overloaded at this gain (49.6 dB,
 7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
 

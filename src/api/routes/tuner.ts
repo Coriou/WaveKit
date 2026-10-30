@@ -86,6 +86,15 @@ const tunerStateSchema = {
 		commandCount: { type: "integer" },
 		unknownFields: { type: "array", items: { type: "string" } },
 		declaredOnlyFields: { type: "array", items: { type: "string" } },
+		bandGain: {
+			type: "object",
+			properties: {
+				tenthsDb: { type: "integer" },
+				label: { type: "string" },
+				owner: { type: "string", enum: ["scanner", "user"] },
+			},
+			required: ["tenthsDb", "owner"],
+		},
 	},
 	required: [
 		"sourceId",

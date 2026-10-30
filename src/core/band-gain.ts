@@ -206,6 +206,14 @@ export class BandGainSettingsService {
 		return bandGainAt(this.current.entries, hz)
 	}
 
+	/** The label of the entry containing `hz`, if that entry has one. */
+	labelAt(hz: number): string | undefined {
+		if (!Number.isFinite(hz)) return undefined
+		for (const entry of this.current.entries)
+			if (hz >= entry.minHz && hz <= entry.maxHz) return entry.label
+		return undefined
+	}
+
 	view(): BandGainSettingsView {
 		return {
 			settings: {

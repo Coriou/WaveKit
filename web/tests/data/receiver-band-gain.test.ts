@@ -111,6 +111,82 @@ describe("band gain data", () => {
 	})
 })
 
+describe("band gain reads racing a write", () => {
+	function deferredApi() {
+		const pending: {
+			method: string
+			resolve: (r: Response) => void
+		}[] = []
+		const { api, calls } = scripted(
+			call =>
+				new Promise<Response>(resolve => {
+					pending.push({ method: call.method, resolve })
+				}),
+		)
+		const next = (method: string) => {
+			const i = pending.findIndex(p => p.method === method)
+			const [entry] = pending.splice(i, 1)
+			if (!entry) throw new Error(`no pending ${method}`)
+			return entry
+		}
+		return { api, calls, next }
+	}
+	const saved = { ...settings, applyToMyTuning: true }
+	const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+	it("a GET sent before the PUT that answers after it keeps the saved table", async () => {
+		const { api, next } = deferredApi()
+		const store = new BandGainStore(api)
+		const load = store.load()
+		await flush()
+		const save = store.save(saved)
+		await flush()
+		next("PUT").resolve(json(200, view(saved, "runtime")))
+		expect(await save).toEqual({ ok: true })
+		next("GET").resolve(json(200, view(settings)))
+		await load
+		expect(store.get().view?.settings).toEqual(saved)
+		expect(store.get().loaded).toBe(true)
+	})
+
+	it("a GET sent during the PUT that answers after it keeps the saved table", async () => {
+		const { api, next } = deferredApi()
+		const store = new BandGainStore(api)
+		const save = store.save(saved)
+		await flush()
+		const load = store.load()
+		await flush()
+		next("PUT").resolve(json(200, view(saved, "runtime")))
+		expect(await save).toEqual({ ok: true })
+		next("GET").resolve(json(200, view(settings)))
+		await load
+		expect(store.get().view).toMatchObject({
+			settings: saved,
+			provenance: "runtime",
+		})
+	})
+
+	it("a load after the write sends a fresh GET instead of joining the stale one", async () => {
+		const { api, calls, next } = deferredApi()
+		const store = new BandGainStore(api)
+		void store.load()
+		await flush()
+		const save = store.save(saved)
+		await flush()
+		next("PUT").resolve(json(200, view(saved, "runtime")))
+		await save
+		const fresh = store.load()
+		await flush()
+		expect(calls.filter(c => c.method === "GET")).toHaveLength(2)
+		// the stale GET answers first and is dropped; the fresh one lands
+		next("GET").resolve(json(200, view(settings)))
+		const later = { ...saved, entries: [] }
+		next("GET").resolve(json(200, view(later, "runtime")))
+		await fresh
+		expect(store.get().view?.settings).toEqual(later)
+	})
+})
+
 describe("band gain draft", () => {
 	it("round-trips the core's table through the editor's text", () => {
 		const d = draftOf(settings)

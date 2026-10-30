@@ -20,6 +20,8 @@ import { configuredTuningFrames } from "./tuner-config-gain.js"
 import { nearestGainStep } from "./band-gain-schema.js"
 import type { BandGainSettingsService } from "./band-gain.js"
 import type {
+	TunerBandGain,
+	TunerBandGainOwner,
 	TunerState,
 	TunerStateField,
 	TunerGainMode,
@@ -454,6 +456,12 @@ export class TunerController extends EventEmitter {
 	> = new Map()
 	/** Sources whose band gain write is in flight (its own gain writes keep the saved gain). */
 	private applyingBandGain: Set<string> = new Set()
+	/**
+	 * The band gain on the tuner per source (TunerState.bandGain). Set only after the band's
+	 * writes succeed; any later gain, gain mode or frequency write drops it, and cloneState
+	 * drops it once the known state no longer shows exactly this manual gain.
+	 */
+	private appliedBandGain: Map<string, TunerBandGain> = new Map()
 
 	setBandGain(settings: BandGainSettingsService | null): void {
 		this.bandGain = settings
@@ -524,6 +532,7 @@ export class TunerController extends EventEmitter {
 					await this.setGainMode(sourceId, "manual", opts)
 				if (state.gain !== target || unknown.includes("gain"))
 					await this.setGain(sourceId, target, opts)
+				this.noteBandGainApplied(sourceId, target, "user", hz)
 				return
 			}
 			if (saved === null || saved === undefined) {
@@ -551,6 +560,57 @@ export class TunerController extends EventEmitter {
 		} finally {
 			this.applyingBandGain.delete(sourceId)
 		}
+	}
+
+	/**
+	 * Records that the band gain `tenthsDb` for `hz` is on the tuner after its writes
+	 * succeeded (or were not needed). Ignored unless the known state shows exactly this
+	 * manual gain at `hz`, so the reported band gain is always the tuner's confirmed one.
+	 */
+	noteBandGainApplied(
+		sourceId: string,
+		tenthsDb: number,
+		owner: TunerBandGainOwner,
+		hz: number,
+	): void {
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return
+		this.appliedBandGain.delete(sourceId)
+		if (state.frequency === hz) {
+			let label: string | undefined
+			try {
+				label = this.bandGain?.labelAt(hz)
+			} catch {
+				label = undefined
+			}
+			this.appliedBandGain.set(sourceId, {
+				tenthsDb,
+				owner,
+				...(label !== undefined ? { label } : {}),
+			})
+		}
+		this.emitStateChanged(sourceId)
+	}
+
+	/** The confirmed band gain of `state`, dropping a record the tuner has left. */
+	private confirmedBandGain(
+		state: TunerState,
+		unknownFields: readonly TunerStateField[],
+	): TunerBandGain | undefined {
+		const applied = this.appliedBandGain.get(state.sourceId)
+		if (!applied) return undefined
+		if (
+			state.controlMode !== "internal" ||
+			state.gainMode !== "manual" ||
+			state.gain !== applied.tenthsDb ||
+			unknownFields.includes("gain") ||
+			unknownFields.includes("gainMode")
+		) {
+			// Once the tuner leaves the band gain it is never reported again until rewritten.
+			this.appliedBandGain.delete(state.sourceId)
+			return undefined
+		}
+		return { ...applied }
 	}
 
 	/** An explicit operator gain write supersedes the gain saved before a band. */
@@ -684,6 +744,7 @@ export class TunerController extends EventEmitter {
 
 	removeSource(sourceId: string): void {
 		this.operatorGainBeforeBand.delete(sourceId)
+		this.appliedBandGain.delete(sourceId)
 		// WG11: configured tuning belongs to the removed source's config; a source
 		// re-added under the same id brings its own (resolved on `connected`).
 		this.configuredTuning.delete(sourceId)
@@ -782,6 +843,8 @@ export class TunerController extends EventEmitter {
 		}
 
 		state.controlMode = mode
+		// Either hand-over may change the tuning: a band gain is reported again only once rewritten.
+		this.appliedBandGain.delete(sourceId)
 		if (mode === "internal" && this.onRelayRetune) {
 			try {
 				this.withoutCommand(() =>
@@ -839,6 +902,8 @@ export class TunerController extends EventEmitter {
 		if (state.controlMode === "internal") {
 			this.setControlMode(sourceId, "external", "relay")
 		}
+		// A relay client's tuning write supersedes the band gain.
+		this.appliedBandGain.delete(sourceId)
 
 		const cmdName = COMMAND_NAMES[command] ?? `cmd-0x${command.toString(16)}`
 		const now = new Date().toISOString()
@@ -1088,6 +1153,8 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions,
 		state: TunerState,
 	): Promise<void> {
+		// Before the write: a failed write may still have moved the tuner off the band.
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.frequency = hz
@@ -1196,6 +1263,7 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "manual" ? 1 : 0
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_GAIN_MODE,
@@ -1215,6 +1283,7 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("gain", tenthsDb, VALIDATION.gain)
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.gain = tenthsDb
@@ -2286,6 +2355,7 @@ export class TunerController extends EventEmitter {
 			state.sourceId,
 		)
 		const ratePolicy = this.ratePolicyRecordFor?.(state.sourceId)
+		const bandGain = this.confirmedBandGain(state, unknownFields)
 		return {
 			...fields,
 			...(ratePolicy ? { ratePolicy } : {}),
@@ -2294,6 +2364,7 @@ export class TunerController extends EventEmitter {
 				: state.tunerIfGain,
 			...(unknownFields.length > 0 ? { unknownFields } : {}),
 			...(declaredOnlyFields.length > 0 ? { declaredOnlyFields } : {}),
+			...(bandGain ? { bandGain } : {}),
 		}
 	}
 

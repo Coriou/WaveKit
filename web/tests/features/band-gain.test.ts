@@ -1,7 +1,6 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it } from "vitest"
-import type { ScanJob } from "@wavekit/api-types"
 import { ServicesContext } from "../../src/app/context.ts"
 import { createServices } from "../../src/app/services.ts"
 import type { AppServices } from "../../src/app/services.ts"
@@ -18,10 +17,8 @@ import {
 } from "../../src/features/settings/BandGainRow.tsx"
 import { receiverSlot } from "../../src/features/receiver/ReceiverIsland.tsx"
 import {
-	bandGainInEffect,
 	bandGainText,
 	overloadHintText,
-	scannerHoldsTuner,
 } from "../../src/features/receiver/gain.ts"
 import { haystack, matches } from "../../src/features/settings/model.ts"
 import { SETTINGS_REGISTRY } from "../../src/features/settings/registry.ts"
@@ -217,53 +214,13 @@ describe("Settings › Per-band gain", () => {
 })
 
 describe("Receiver island band gain indicator", () => {
-	const job = (
-		patch: Partial<ScanJob>,
-	): Pick<ScanJob, "passive" | "state" | "spec"> => ({
-		passive: false,
-		state: "running",
-		spec: { sourceId: "rtl-0" } as ScanJob["spec"],
-		...patch,
-	})
-
-	it("knows when a scan job holds the tuner", () => {
-		expect(scannerHoldsTuner([job({})], "rtl-0")).toBe(true)
-		expect(scannerHoldsTuner([job({ state: "holding" })], "rtl-0")).toBe(true)
-		expect(scannerHoldsTuner([job({ passive: true })], "rtl-0")).toBe(false)
-		expect(scannerHoldsTuner([job({ state: "paused" })], "rtl-0")).toBe(false)
-		expect(scannerHoldsTuner([job({})], "rtl-1")).toBe(false)
-	})
-
-	it("shows a band gain only inside a non-keep band, while the scanner tunes or with the switch on", () => {
-		const settings = {
-			applyToMyTuning: false,
-			entries: [
-				{
-					minHz: 863_000_000,
-					maxHz: 870_000_000,
-					gain: 372,
-					label: "868 MHz ISM",
-				},
-				{ minHz: 1_085_000_000, maxHz: 1_095_000_000, gain: "keep" as const },
-				{ minHz: 902_000_000, maxHz: 928_000_000, gain: 400 },
-			],
-		}
-		expect(bandGainInEffect(settings, 868_300_000, false)).toBeNull()
-		expect(bandGainInEffect(settings, 1_090_000_000, true)).toBeNull()
-		expect(bandGainInEffect(settings, 446_000_000, true)).toBeNull()
-		const scan = bandGainInEffect(settings, 870_000_000, true)
-		expect(scan && bandGainText(scan)).toBe(
-			"Band gain 37.2 dB · 868 MHz ISM · while the scanner tunes",
+	it("words the core's confirmed band gain: its value, label and owner", () => {
+		expect(
+			bandGainText({ tenthsDb: 372, label: "868 MHz ISM", owner: "scanner" }),
+		).toBe("Band gain 37.2 dB · 868 MHz ISM · while the scanner tunes")
+		expect(bandGainText({ tenthsDb: 402, owner: "user" })).toBe(
+			"Band gain 40.2 dB · for your tuning",
 		)
-		const mine = bandGainInEffect(
-			{ ...settings, applyToMyTuning: true },
-			915_000_000,
-			false,
-		)
-		expect(mine && bandGainText(mine)).toBe(
-			"Band gain 40.0 dB · 902–928 MHz · for your tuning",
-		)
-		expect(bandGainInEffect(null, 868_300_000, true)).toBeNull()
 	})
 
 	it("words the scanner's overload hint for this source only", () => {
@@ -298,10 +255,13 @@ describe("Receiver island band gain indicator", () => {
 		expect(html).toContain(
 			"Front end may be overloaded at this gain (29.7 dB, 7.5 % of frames blanked)",
 		)
-		// your own tuning inside 868 MHz with the switch on
+		// the switch on but no retune yet: the core has applied nothing, so nothing is claimed
 		const view = store.get().view
 		if (!view) throw new Error("no view")
 		await store.save({ ...view.settings, applyToMyTuning: true })
+		await data.tuner.load()
+		expect(renderIsland(services)).not.toContain("data-band-gain")
+		// your own tuning inside 868 MHz with the switch on: the core confirms it
 		await server.app.inject({
 			method: "POST",
 			url: "/api/tuner/rtl-0/frequency",
@@ -310,6 +270,24 @@ describe("Receiver island band gain indicator", () => {
 		await data.tuner.load()
 		html = renderIsland(services)
 		expect(html).toContain("Band gain 37.2 dB · 868 MHz ISM · for your tuning")
+		// a manual gain change (even to the same value) supersedes it
+		await data.receiver.write("rtl-0", { key: "gain", value: 372 })
+		await data.tuner.load()
+		expect(renderIsland(services)).not.toContain("data-band-gain")
+		// a band gain the dongle snaps (40.0 dB on an R820T) shows the gain on the tuner
+		await store.save({
+			applyToMyTuning: true,
+			entries: [{ minHz: 863_000_000, maxHz: 870_000_000, gain: 400 }],
+		})
+		await server.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl-0/frequency",
+			payload: { hz: 868_400_000 },
+		})
+		await data.tuner.load()
+		expect(renderIsland(services)).toContain(
+			"Band gain 40.2 dB · for your tuning",
+		)
 		// AGC: no overload hint (the core sends none either)
 		await data.receiver.write("rtl-0", { key: "gainMode", value: "agc" })
 		await data.scanner.load()

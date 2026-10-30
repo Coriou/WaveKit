@@ -311,4 +311,52 @@ describe("TunerArbiter per-band gain", () => {
 			{ numRuns: 150 },
 		)
 	})
+
+	describe("reports the confirmed band gain to the controller", () => {
+		function withNotes(h: ReturnType<typeof harness>) {
+			const notes: [string, number, string, number][] = []
+			Object.assign(h.tuner, {
+				noteBandGainApplied: (
+					id: string,
+					tenths: number,
+					owner: string,
+					hz: number,
+				) => {
+					notes.push([id, tenths, owner, hz])
+				},
+			})
+			return notes
+		}
+
+		it("after a band hop's writes, and when the band gain was already on the tuner", async () => {
+			const h = harness({ gain: 297 })
+			const notes = withNotes(h)
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			await h.arbiter.retune(r.lease, hop(ISM))
+			expect(gainWrites(h)).toEqual([])
+			await h.arbiter.retune(r.lease, hop(OTHER_ISM))
+			expect(notes).toEqual([
+				["rtl", 297, "scanner", ISM],
+				["rtl", 372, "scanner", OTHER_ISM],
+			])
+		})
+
+		it("never for a job gain, a keep or no-match hop, or a failed hop", async () => {
+			const h = harness()
+			const notes = withNotes(h)
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			await h.arbiter.retune(r.lease, hop(ISM, 400))
+			await h.arbiter.retune(r.lease, hop(ADSB))
+			await h.arbiter.retune(r.lease, hop(UHF))
+			const setGain = h.tuner.setGain.bind(h.tuner)
+			Object.assign(h.tuner, {
+				setGain: () => Promise.reject(new Error("socket closed")),
+			})
+			await expect(h.arbiter.retune(r.lease, hop(ISM))).rejects.toThrow()
+			Object.assign(h.tuner, { setGain })
+			expect(notes).toEqual([])
+		})
+	})
 })

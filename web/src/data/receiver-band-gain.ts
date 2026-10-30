@@ -94,19 +94,29 @@ export const EMPTY_BAND_GAIN: BandGainState = {
 }
 
 export class BandGainStore extends Store<BandGainState> {
-	private inflight: Promise<void> | null = null
+	private inflight: { promise: Promise<void>; revision: number } | null = null
+	/**
+	 * Bumped when a PUT starts and again when it succeeds: a GET answers only if no write started
+	 * or finished since the GET was sent, so a read that raced a write never overwrites the table
+	 * the PUT answered.
+	 */
 	private revision = 0
 
 	constructor(private readonly api: ApiClient) {
 		super(EMPTY_BAND_GAIN)
 	}
 
-	/** GET; concurrent calls share one request. Never rejects. */
+	/** GET; concurrent calls share one request (a write since starts a new one). Never rejects. */
 	load(): Promise<void> {
-		this.inflight ??= this.fetch().finally(() => {
-			this.inflight = null
-		})
-		return this.inflight
+		if (this.inflight?.revision === this.revision) return this.inflight.promise
+		const entry = {
+			revision: this.revision,
+			promise: this.fetch().finally(() => {
+				if (this.inflight === entry) this.inflight = null
+			}),
+		}
+		this.inflight = entry
+		return entry.promise
 	}
 
 	private async fetch(): Promise<void> {
@@ -158,7 +168,14 @@ export class BandGainStore extends Store<BandGainState> {
 					BAND_GAIN_ROUTE,
 				),
 			)
-			this.update(s => ({ ...s, view, unavailable: false, error: null }))
+			this.revision++
+			this.update(s => ({
+				...s,
+				view,
+				unavailable: false,
+				loaded: true,
+				error: null,
+			}))
 			return WRITE_OK
 		} catch (error) {
 			return failedWrite(error)

@@ -54,6 +54,13 @@ export interface ReceiverMockControls {
 	relayClient(active: boolean, remote?: string): void
 	/** The current capabilities snapshot (tests). */
 	capabilities(): ReceiverCapabilities
+	/**
+	 * After an operator frequency write (POST frequency, PATCH config): with "apply to my tuning"
+	 * on, writes the band gain at `hz` (snapped to the R820T table) and reports it as
+	 * TunerState.bandGain, or puts the operator's own gain back on leaving the bands, as
+	 * TunerController.applyOperatorBandGain does. Scanner hops in the mock never apply band gains.
+	 */
+	operatorRetuned(hz: number): void
 }
 
 /** R820T on rtl_tcp: tuner type 5 in the header, 29 gains (RTL_TUNER_GAIN_TABLES[5]). */
@@ -199,6 +206,7 @@ export function registerReceiverMock(
 		controlOrigin = origin
 		if (tuner.controlMode === mode) return
 		tuner.controlMode = mode
+		delete tuner.bandGain
 		ctx.broadcast("tuner", "tuner:control-mode-changed", { sourceId, mode })
 		stateChanged()
 	}
@@ -236,11 +244,24 @@ export function registerReceiverMock(
 		else delete tuner.unknownFields
 	}
 
+	/** The operator's gain from before a band changed it; null when it was unknown. */
+	let gainBeforeBand:
+		| { gainMode: TunerGainMode; gain: number }
+		| null
+		| undefined
+	let applyingBand = false
+	/** Any gain write drops the reported band gain; an operator's own also the saved gain. */
+	const gainWritten = () => {
+		delete tuner.bandGain
+		if (!applyingBand) gainBeforeBand = undefined
+	}
+
 	const writers = {
 		gain(tenthsDb: number) {
 			forControl()
 			checkRange("gain", tenthsDb, RANGES.gain)
 			sent("set-gain", tenthsDb, () => {
+				gainWritten()
 				tuner.gain = tenthsDb
 				known("gain")
 			})
@@ -248,6 +269,7 @@ export function registerReceiverMock(
 		gainMode(mode: TunerGainMode) {
 			forControl()
 			sent("set-gain-mode", mode === "manual" ? 1 : 0, () => {
+				gainWritten()
 				tuner.gainMode = mode
 				known("gainMode")
 			})
@@ -474,6 +496,7 @@ export function registerReceiverMock(
 				if (u.controlMode === "internal") setControlMode("internal", "user")
 				if (u.frequency !== undefined && u.frequency !== tuner.frequency) {
 					checkRange("frequency", u.frequency, RANGES.frequency)
+					// the frequency route applies the band gain (operatorRetuned)
 					await ctx.retune(u.frequency)
 				}
 				if (u.sampleRate !== undefined && u.sampleRate !== tuner.sampleRate)
@@ -649,6 +672,53 @@ export function registerReceiverMock(
 		},
 	)
 
+	// --- per-band gain on operator retunes (TunerController.applyOperatorBandGain) ---
+
+	const operatorRetuned = (hz: number) => {
+		if (!bandGain.applyToMyTuning || tuner.controlMode !== "internal") return
+		applyingBand = true
+		try {
+			applyBandGain(hz)
+		} finally {
+			applyingBand = false
+		}
+	}
+	const applyBandGain = (hz: number) => {
+		const entry = bandGain.entries.find(e => hz >= e.minHz && hz <= e.maxHz)
+		const target =
+			entry && entry.gain !== "keep"
+				? nearestStep(entry.gain, R820T?.valuesTenthsDb ?? null)
+				: null
+		if (target !== null) {
+			const unknown = tuner.unknownFields ?? []
+			gainBeforeBand ??=
+				unknown.includes("gain") || unknown.includes("gainMode")
+					? null
+					: { gainMode: tuner.gainMode, gain: tuner.gain }
+			if (tuner.gainMode !== "manual" || unknown.includes("gainMode"))
+				writers.gainMode("manual")
+			if (tuner.gain !== target || unknown.includes("gain"))
+				writers.gain(target)
+			tuner.bandGain = {
+				tenthsDb: target,
+				owner: "user",
+				...(entry?.label !== undefined ? { label: entry.label } : {}),
+			}
+			stateChanged()
+			return
+		}
+		const saved = gainBeforeBand
+		gainBeforeBand = undefined
+		if (!saved) return
+		if (saved.gainMode === "agc") {
+			writers.gain(saved.gain)
+			writers.gainMode("agc")
+		} else {
+			if (tuner.gainMode !== "manual") writers.gainMode("manual")
+			writers.gain(saved.gain)
+		}
+	}
+
 	// --- tuner relay: listening on 1234, exclusive control, nobody connected unless simulated ---
 
 	app.get("/api/tuner-relay", async (): Promise<TunerRelayStatus> => {
@@ -680,6 +750,7 @@ export function registerReceiverMock(
 	})
 
 	return {
+		operatorRetuned,
 		relayClient(active, remote = "192.168.1.23:51544") {
 			if (active) {
 				relay.clients = 1
@@ -724,6 +795,22 @@ export function defaultBandGain(): BandGainSettings {
 			},
 		],
 	}
+}
+
+/** The supported step nearest `tenthsDb` (the lower on a tie), as the core's nearestGainStep. */
+function nearestStep(
+	tenthsDb: number,
+	steps: readonly number[] | null,
+): number {
+	if (!steps || steps.length === 0) return tenthsDb
+	let best = steps[0] ?? tenthsDb
+	for (const step of steps)
+		if (
+			Math.abs(step - tenthsDb) < Math.abs(best - tenthsDb) ||
+			(Math.abs(step - tenthsDb) === Math.abs(best - tenthsDb) && step < best)
+		)
+			best = step
+	return best
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>

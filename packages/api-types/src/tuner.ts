@@ -119,7 +119,26 @@ export interface TunerState {
 	 * elsewhere (rtlmux replays relay-set values), so it proves nothing. Absent when empty.
 	 */
 	declaredOnlyFields?: TunerStateField[]
+	/**
+	 * Per-band gain: present only while a band gain is confirmed on the tuner, i.e. the core
+	 * wrote it (or found it already there) for the current frequency and the tuner's known
+	 * gain mode is manual with exactly this gain. Cleared by any later gain, gain mode or
+	 * frequency write, the scanner's restore, a relay client taking control, or the gain
+	 * becoming unknown. `tenthsDb` is the value written (snapped to the tuner's step).
+	 */
+	bandGain?: TunerBandGain
 }
+
+/** The band gain on the tuner (TunerState.bandGain). */
+export interface TunerBandGain {
+	/** Tenths of a dB, as written (snapped to the tuner's nearest supported step). */
+	tenthsDb: number
+	/** The band entry's label, when it has one. */
+	label?: string
+	/** "scanner": a scanner hop, dwell or job; "user": an operator retune ("apply to my tuning"). */
+	owner: TunerBandGainOwner
+}
+export type TunerBandGainOwner = "scanner" | "user"
 
 // API request/response types
 export interface SetFrequencyRequest {

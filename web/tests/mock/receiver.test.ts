@@ -239,6 +239,72 @@ describe("mock receiver controls", () => {
 		expect(kept.json()).toMatchObject({ settings: body })
 	})
 
+	it("applies the band gain on an operator retune with the switch on, as the core does", async () => {
+		const own = await buildMockServer({ port: 0 })
+		await own.app.ready()
+		try {
+			const call = (
+				method: "GET" | "POST" | "PATCH" | "PUT",
+				url: string,
+				payload?: unknown,
+			) =>
+				own.app.inject(
+					payload === undefined
+						? { method, url }
+						: { method, url, payload: payload as Record<string, unknown> },
+				)
+			const state = async () =>
+				(await call("GET", "/api/tuner/rtl-0")).json<TunerState>()
+			await call("POST", "/api/tuner/rtl-0/gain-mode", { mode: "manual" })
+			await call("POST", "/api/tuner/rtl-0/gain", { gain: 496 })
+			// switch off (the default): a retune into 868 MHz leaves the gain
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 868_300_000 })
+			expect(await state()).toMatchObject({ gain: 496 })
+			expect(await state()).not.toHaveProperty("bandGain")
+			const table = {
+				applyToMyTuning: true,
+				entries: [
+					{
+						minHz: 863_000_000,
+						maxHz: 870_000_000,
+						gain: 400,
+						label: "868 MHz ISM",
+					},
+					{ minHz: 902_000_000, maxHz: 928_000_000, gain: 372 },
+				],
+			}
+			await call("PUT", "/api/tuner-band-gain", table)
+			// switched on, not retuned yet: nothing applied, nothing reported
+			expect(await state()).not.toHaveProperty("bandGain")
+			const res = await call("POST", "/api/tuner/rtl-0/frequency", {
+				hz: 868_400_000,
+			})
+			// 40.0 dB snaps to the R820T's 40.2 dB; the frequency answer carries it
+			expect(res.json<TunerState>()).toMatchObject({
+				gainMode: "manual",
+				gain: 402,
+				bandGain: { tenthsDb: 402, label: "868 MHz ISM", owner: "user" },
+			})
+			await call("PATCH", "/api/tuner/rtl-0/config", { frequency: 915_000_000 })
+			expect((await state()).bandGain).toEqual({ tenthsDb: 372, owner: "user" })
+			// out of the bands: the operator's own gain comes back, no band gain reported
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 455_500_000 })
+			expect(await state()).toMatchObject({ gain: 496 })
+			expect(await state()).not.toHaveProperty("bandGain")
+			// back in, then the operator's own gain write or AGC drops it
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 868_400_000 })
+			expect((await state()).bandGain?.tenthsDb).toBe(402)
+			await call("POST", "/api/tuner/rtl-0/gain", { gain: 402 })
+			expect(await state()).not.toHaveProperty("bandGain")
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 915_000_000 })
+			expect((await state()).bandGain?.tenthsDb).toBe(372)
+			await call("POST", "/api/tuner/rtl-0/gain-mode", { mode: "agc" })
+			expect(await state()).not.toHaveProperty("bandGain")
+		} finally {
+			await own.close()
+		}
+	})
+
 	it("refuses commands with 409 while a relay client has the tuner, until control is reclaimed", async () => {
 		server.receiver.relayClient(true)
 		const relay = (

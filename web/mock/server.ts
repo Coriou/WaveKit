@@ -1486,6 +1486,8 @@ export async function buildMockServer(
 			epoch += 1
 			epochStartedAt = Date.now()
 		}
+		// the core drops a reported band gain before every frequency write
+		delete tuner.bandGain
 		tuner.frequency = hz
 		tuner.commandCount += 1
 		tuner.lastCommandAt = new Date().toISOString()
@@ -1573,6 +1575,7 @@ export async function buildMockServer(
 			const delay = options.retuneMs ?? 0
 			if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
 			applyFrequency(hz, "rest")
+			receiver.operatorRetuned(hz)
 			// an operator write: a running sweep pauses (preempted-operator)
 			scanner.operatorWrite()
 			return tuner
