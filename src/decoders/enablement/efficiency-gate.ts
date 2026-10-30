@@ -147,6 +147,11 @@ export function createEfficiencyGate(
 	const lateSince = new Map<string, number>()
 	/** When a tuned-band probationer's loss last shed a scapegoat on each source. */
 	const scapegoatAt = new Map<string, number>()
+	/**
+	 * The branches whose host loss the latest scapegoat on each source was
+	 * shed for; with the source-wide part, the loss episode it spent.
+	 */
+	const scapegoatSpent = new Map<string, ReadonlySet<string>>()
 	/** Per tuned-band probationer: host loss before this time was already judged. */
 	const hostJudged = new Map<string, number>()
 	const cooldownUntil = new Map<string, number>()
@@ -522,6 +527,11 @@ export function createEfficiencyGate(
 									w.condemnedBranches.every(
 										(b: unknown) => typeof b === "string",
 									))) &&
+							(w.explicitBranches === undefined ||
+								(Array.isArray(w.explicitBranches) &&
+									w.explicitBranches.every(
+										(b: unknown) => typeof b === "string",
+									))) &&
 							(i === 0 || value[i - 1].endMono <= w.startMono),
 					)
 				)
@@ -538,6 +548,29 @@ export function createEfficiencyGate(
 			}
 		} catch {
 			/* Unreadable windows never condemn or credit. */
+		}
+		// While a scapegoat's clear window is open on this source, the loss it
+		// was shed for (source-wide or unscoped loss, and host loss on the
+		// branches it was charged for) is spent: only other branches' own
+		// charges condemn, so a new episode on another placement's own branch
+		// is still shed while the scapegoat's relief has not had time to show.
+		const shedAt = scapegoatAt.get(sourceId)
+		if (shedAt !== undefined && mono - shedAt < EFFICIENCY_CLEAR_MS) {
+			const spent = scapegoatSpent.get(sourceId) ?? new Set<string>()
+			windows = windows.map(w => {
+				const charged = (
+					w.condemnedBranches === "source"
+						? (w.explicitBranches ?? [])
+						: (w.condemnedBranches ?? [])
+				).filter(b => !spent.has(b))
+				return {
+					startMono: w.startMono,
+					endMono: w.endMono,
+					condemning: w.condemning && charged.length > 0,
+					linkOrUnknownDrops: w.linkOrUnknownDrops,
+					condemnedBranches: charged,
+				}
+			})
 		}
 		// A window condemns the placements reading a branch that dropped in it;
 		// an unscoped window (no branch list) or upstream loss no branch can be
@@ -979,6 +1012,10 @@ export function createEfficiencyGate(
 						failures.add(scapegoat.key)
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
 						scapegoatAt.set(scapegoat.sourceId, mono)
+						scapegoatSpent.set(
+							scapegoat.sourceId,
+							new Set(detail === null ? hostCharged : []),
+						)
 					}
 					// CPU with nothing untuned left: while the clear window since the
 					// latest scapegoat on any source is open, that scapegoat's relief
@@ -1028,12 +1065,8 @@ export function createEfficiencyGate(
 							}
 						}
 					}
-					// A scapegoat on this source spent its loss: no late shed there
-					// until its clear window closes (its relief shows only later).
 					if (
 						mono < (cooldownUntil.get(sourceId) ?? 0) ||
-						mono - (scapegoatAt.get(sourceId) ?? -Infinity) <
-							EFFICIENCY_CLEAR_MS ||
 						state.condemned.length === 0
 					)
 						continue

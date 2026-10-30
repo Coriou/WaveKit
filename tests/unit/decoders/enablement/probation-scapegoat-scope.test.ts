@@ -133,7 +133,7 @@ function harness(specs: readonly Spec[], gateGuardPercent: number) {
 		const k = `${source}|decoder-${key}#0`
 		totals.set(k, totals.get(k)! + 1)
 	}
-	return { run, overflowNoHolder, dropOn, cpu, running }
+	return { run, overflowNoHolder, dropOn, cpu, running, monitor }
 }
 
 it("CPU scapegoats are one per clear window across all sources", () => {
@@ -324,4 +324,73 @@ it("late drops on a CPU scapegoat's source do not shed a second placement for th
 		else h.cpu.normalisedPercent = 10
 	}, 120_000)
 	expect(verdicts).toEqual([{ key: "c", detail: "cpu", at: 2_000 }])
+})
+
+it("late drops on another placement's own branch still shed it inside a scapegoat's clear window", () => {
+	// readsb's CPU loss sheds c at +2 s and the CPU recovers at once; then
+	// only b's own branch drops (consumer loss, a new episode). The scapegoat
+	// window spends the loss that shed c, not b's own: b survived until
+	// +62 s before the fix.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "s" },
+			{ key: "c", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) > 2_000) {
+			h.cpu.normalisedPercent = 10
+			h.dropOn("s", "b")
+		}
+	}, 2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts[0]).toEqual({ key: "c", detail: "cpu", at: 2_000 })
+	const b = verdicts.find(v => v.key === "b")
+	expect(b?.detail).toBe("late-drops")
+	expect(b!.at).toBeLessThan(2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts.filter(v => v.key !== "b" && v.key !== "c")).toEqual([])
+})
+
+it("the tuned probationer's own branch drops count when no-holder overflow shares the sample", () => {
+	// Each sample: readsb's own branch drops and the absorber overflows with
+	// no holder known, on a healthy host. The overflow is loss elsewhere; the
+	// branch drops are readsb's own. Before the fix the sample was charged to
+	// the source as a whole only, and readsb was never shed in 180 s.
+	const h = harness([{ key: "readsb", source: "s", tuned: true }], 90)
+	const verdicts = h.run(() => {
+		h.dropOn("s", "readsb")
+		h.overflowNoHolder("s")
+	}, 180_000)
+	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
+		{ key: "readsb", detail: "drops", at: 2_000 },
+	])
+	const charged = h.monitor.chargedDropsBetweenMono("s", 0, Infinity)
+	expect(charged.at(-1)?.branches).toBe("source")
+	expect(charged.at(-2)?.branches).toEqual(["decoder-readsb"])
+	expect(charged.at(-2)?.atMono).toBe(charged.at(-1)?.atMono)
+})
+
+it("late windows keep explicit branch charges beside source-wide overflow", () => {
+	// Host loss (CPU between the monitor's and the gate's guards): readsb's
+	// own branch drops beside no-holder overflow are still its own, and the
+	// windows name its branch beside the source-wide charge.
+	const h = harness([{ key: "readsb", source: "s", tuned: true }], 99)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => {
+		h.dropOn("s", "readsb")
+		h.overflowNoHolder("s")
+	}, 40_000)
+	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
+		{ key: "readsb", detail: "drops", at: 2_000 },
+	])
+	expect(h.monitor.latestAttribution("s")).toBe("host")
+	expect(h.monitor.lateWindows("s").at(-1)).toMatchObject({
+		condemning: true,
+		condemnedBranches: "source",
+		explicitBranches: ["decoder-readsb"],
+	})
 })
