@@ -188,3 +188,8 @@ Appended during implementation (WG12); earlier criteria keep their numbers.
    leaves the key off. The expected `modulation-unsupported` and `input-format-unsupported`
    fallbacks of an omitted engine log at info; every other fallback, and every fallback of
    an explicit `engine: "rust"`, logs at warn.
+7. 10.7 (amends 10.6, 2026-10-30) Absent `engine` means `csdr` again: a live CPU A/B (one
+   RTL-SDR receiver, NFM at 1.024 Msps) measured the Rust engine about 55 % above the
+   csdr chain (0.071 to 0.077 cores against 0.044 to 0.051). Rust is opt-in with
+   `engine: "rust"`. An omitted engine never asks for Rust, so it logs no Rust fallback;
+   every fallback of an explicit `engine: "rust"` logs at warn.

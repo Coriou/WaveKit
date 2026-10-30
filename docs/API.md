@@ -1653,7 +1653,7 @@ Configuration notes:
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
   replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
   keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine
-  (the default; `engine: "csdr"` selects csdr), `auto` on `nfm` runs the same evidence gate and pre-roll when
+  (opt-in with `engine: "rust"`; csdr is the default), `auto` on `nfm` runs the same evidence gate and pre-roll when
   the demodulator carries its stage-1 gate state in-band (framed audio, amendment
   A18, 2026-10-25), so `autoSquelch` reports `waiting` / `open` as on csdr. A Rust
   binary without framing, or a run whose framing failed safe, keeps stage 1 alone
@@ -7105,9 +7105,9 @@ in memory; persisted decode evidence can rebuild decoded proofs after restart.
 ### Live audio engine and tone
 
 `LiveAudioConfig.engine` and PATCH `/api/live-audio/config` accept `csdr|rust`; absent
-means `rust`. Changing it restarts the pipeline. The Rust engine runs by default for NFM
-and AM on a CU8 source; other modulations, other source formats and `engine: "csdr"`
-use csdr. `LiveAudioStatus.engine` identifies
+means `csdr`. Changing it restarts the pipeline. `engine: "rust"` runs the Rust engine for
+NFM and AM on a CU8 source; other modulations and other source formats fall back to
+csdr. `LiveAudioStatus.engine` identifies
 the engine actually used. Optional `engineFallback` is `binary-unavailable`,
 `protocol-unsupported`, `input-format-unsupported`, `modulation-unsupported`,
 `open-rejected` or `process-unstable`.

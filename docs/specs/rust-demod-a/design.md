@@ -154,8 +154,9 @@ backpressure entries/hour, dropped bytes. The fix proposal goes to the report.
 
 ## Defaults
 
-No deliberate default change at phase A: `engine: "csdr"`. Since requirement 10.6
-an absent `engine` means `rust` for NFM and AM on a CU8 source, csdr otherwise.
+No deliberate default change at phase A: `engine: "csdr"`. Requirement 10.6 made an
+absent `engine` mean `rust` for NFM and AM on a CU8 source; requirement 10.7 reverted
+that after a live CPU A/B, so an absent `engine` is csdr and Rust is opt-in.
 
 ## Docker
 
