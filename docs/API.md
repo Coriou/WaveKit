@@ -1482,8 +1482,9 @@ monitor and identify, including each hop's dwell) that tune into a listed range 
 and give your exact gain mode and gain back when they return the tuner: on release, on a later
 hop outside the bands, after a core crash through the lease's crash record, and when your own
 write or a relay client takes the tuner from the job. Your write puts only the gain back, at
-once (unless it set the gain or gain mode itself); after a relay client, the gain goes back
-when control returns, unless the relay client set a gain or gain mode meanwhile. While the
+once (unless it set the gain, gain mode or tuner gain index itself); after a relay client, the
+gain goes back when control returns, unless the relay client set a gain, gain mode or tuner gain
+index meanwhile. While the
 tuner's gain or gain mode is unknown (for example right after a core restart, before any gain
 write), hops write no band gain, since yours could not be put back. A job's own
 `tuner.gainTenthsDb` wins over the table.
@@ -1493,7 +1494,8 @@ through these routes) does **not** change gain unless `applyToMyTuning` is on. W
 tuning into a listed range applies its gain, and tuning out of the bands puts back the gain
 mode and gain you had before (kept in `<stateDir>/tuner-band-gain-saved.json`, so a restart
 inside a band still restores it). The band gain goes on only after that file is written; if
-writing it fails, your gain stays and the failure is logged. Setting a gain, gain mode or tuner gain index
+writing it fails or takes over 5 s, your gain stays and the failure is logged. While your gain or
+gain mode is unknown (right after a restart, before any gain write), no band gain goes on. Setting a gain, gain mode or tuner gain index
 yourself inside a band makes that your gain, also in a `PATCH …/config` whose value equals the
 tuner's, while RTL AGC (`agcMode`), IF gain and tuner IF gain writes set other stages and do not. Overlapping retunes of one
 source then run one at a time. Relay clients (SDR++) are never touched.
@@ -4728,7 +4730,11 @@ its value. Outside options a string is kept only at
 `CONFIG_EXPORT_KEPT_STRING_PATHS` (ids, types and similar) or when the config
 schema limits it to a closed set (enum or literal), and numbers and booleans
 only where the schema declares that type, so host names, URLs, file paths,
-names and callsigns are redacted. The lists live in
+names and callsigns are redacted. `tuner.bandGain` follows the same rule: its
+ranges, gains (or `keep`) and `applyToMyTuning` are exported and each entry's
+free-text `label` is redacted. Runtime overrides are not exported, so a table
+saved with `PUT /api/tuner-band-gain` (`<stateDir>/tuner-band-gain.json`) is
+not in the export, which shows the YAML section. The lists live in
 `packages/api-types/src/config-export.ts`. The body is at most 256 KiB; larger
 is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
 `CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
