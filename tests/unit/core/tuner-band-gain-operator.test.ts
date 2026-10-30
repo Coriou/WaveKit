@@ -30,6 +30,7 @@ const logger = pino({ level: "silent" })
 const SET_FREQUENCY = 0x01
 const SET_GAIN_MODE = 0x03
 const SET_GAIN = 0x04
+const SET_AGC_MODE = 0x08
 const ISM = 868_100_000
 const OTHER_ISM = 915_000_000
 const UHF = 455_500_000
@@ -261,6 +262,20 @@ describe("a REST write takes the tuner from a band-gain sweep", () => {
 		h.controller.setControlMode("rtl", "internal")
 		await settle()
 		expect(h.controller.getState("rtl")?.gain).toBe(386)
+	})
+
+	it("a relay AGC choice during the takeover cancels the owed restore", async () => {
+		const h = await setup(false)
+		await manual(h.controller, 496)
+		await sweepOnBand(h)
+		h.controller.applyExternalCommand("rtl", SET_FREQUENCY, UHF)
+		const bandGain = h.controller.getState("rtl")?.gain
+		h.controller.applyExternalCommand("rtl", SET_AGC_MODE, 1)
+		;(h.arbiter as unknown as { connected: Set<string> }).connected.add("rtl")
+		h.controller.setControlMode("rtl", "internal")
+		await settle()
+		// No restore of 49.6 dB over the relay's newer choice.
+		expect(h.controller.getState("rtl")?.gain).toBe(bandGain)
 	})
 })
 

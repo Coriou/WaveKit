@@ -1049,13 +1049,11 @@ export class TunerController extends EventEmitter {
 			command === RTL_TCP_COMMANDS.SET_GAIN ||
 			command === RTL_TCP_COMMANDS.SET_GAIN_MODE ||
 			command === RTL_TCP_COMMANDS.SET_AGC_MODE
-		)
+		) {
 			this.dropOperatorGain(sourceId)
-		if (
-			command === RTL_TCP_COMMANDS.SET_GAIN ||
-			command === RTL_TCP_COMMANDS.SET_GAIN_MODE
-		)
+			// Also cancels a scanner restore owed from a lost lease.
 			this.noteGainChoice(sourceId, {})
+		}
 
 		const cmdName = COMMAND_NAMES[command] ?? `cmd-0x${command.toString(16)}`
 		const now = new Date().toISOString()
