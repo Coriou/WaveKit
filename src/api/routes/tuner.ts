@@ -4,7 +4,16 @@
 
 import type { SourceManager } from "../../core/source-manager.js"
 import { TUNER_REST_COMMAND_POLICY } from "../../core/tuner-controller.js"
-import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
+import type {
+	FastifyError,
+	FastifyInstance,
+	FastifyPluginAsync,
+	FastifyReply,
+} from "fastify"
+import {
+	BandGainSettingsError,
+	type BandGainSettingsService,
+} from "../../core/band-gain.js"
 import type {
 	TunerController,
 	TunerWriteOptions,
@@ -132,9 +141,56 @@ const tunerConfigUpdateSchema = {
 export interface TunerRoutesOptions {
 	tunerController: TunerController
 	sourceManager?: Pick<SourceManager, "runTunerCommand">
+	/** Per-band gain settings; GET/PUT /api/tuner-band-gain are mounted only with them. */
+	bandGain?: BandGainSettingsService | null
 }
 
-function handleTunerError(reply: FastifyReply, err: unknown): unknown {
+const GAIN_EXPECTED =
+	'{"gain": integer, gain in tenths of a dB (0-500, e.g. 372 = 37.2 dB)}; the deprecated alias "tenthsDb" takes the same unit, send exactly one'
+const U32 = "unsigned 32-bit"
+
+/**
+ * What each tuner route expects, named in every 400 it answers (field names, types and
+ * units). Static text: a 400 never echoes the submitted value.
+ */
+const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
+	"/api/tuner/:sourceId/frequency":
+		'{"hz": integer, frequency in Hz (24000000-1900000000)}',
+	"/api/tuner/:sourceId/gain": GAIN_EXPECTED,
+	"/api/tuner/:sourceId/gain-mode": '{"mode": "manual" | "agc"}',
+	"/api/tuner/:sourceId/sample-rate":
+		'{"hz": integer, sample rate in Hz (225001-300000 or 900001-3200000)}',
+	"/api/tuner/:sourceId/ppm":
+		'{"ppm": integer, frequency correction in ppm (-500-500)}',
+	"/api/tuner/:sourceId/if-gain": `{"gain": integer, RTL2832 IF gain (${U32})}`,
+	"/api/tuner/:sourceId/test-mode": '{"enabled": boolean}',
+	"/api/tuner/:sourceId/agc": '{"enabled": boolean}',
+	"/api/tuner/:sourceId/bias-tee": '{"enabled": boolean}',
+	"/api/tuner/:sourceId/direct-sampling": '{"mode": "off" | "i" | "q"}',
+	"/api/tuner/:sourceId/offset-tuning": '{"enabled": boolean}',
+	"/api/tuner/:sourceId/rtl-xtal": `{"hz": integer, crystal frequency in Hz (${U32})}`,
+	"/api/tuner/:sourceId/tuner-xtal": `{"hz": integer, crystal frequency in Hz (${U32})}`,
+	"/api/tuner/:sourceId/tuner-gain-index": `{"index": integer, tuner gain table index (${U32})}`,
+	"/api/tuner/:sourceId/tuner-if-gain":
+		'{"stage": integer (0-65535), "gain": integer, tenths of a dB (0-65535)}',
+	"/api/tuner/:sourceId/control-mode": '{"mode": "internal" | "external"}',
+	"/api/tuner-band-gain":
+		'{"applyToMyTuning": boolean, "entries": [{"minHz": integer Hz, "maxHz": integer Hz, "gain": integer tenths of a dB (0-500) or "keep", "label"?: string}]}',
+	"/api/tuner/:sourceId/config":
+		'an object of tuner fields only: "frequency" (Hz), "sampleRate" (Hz), "gain" (tenths of a dB, 0-500), "gainMode" ("manual" | "agc"), "ppm", "agcMode", "biasTee", "directSampling", "offsetTuning", "ifGain", "tunerIfGain", "testMode", "rtlXtal" (Hz), "tunerXtal" (Hz), "tunerGainIndex", "controlMode"',
+})
+
+function expectedFor(url: string | undefined): string | undefined {
+	return url !== undefined && Object.hasOwn(EXPECTED_BODY, url)
+		? EXPECTED_BODY[url]
+		: undefined
+}
+
+function handleTunerError(
+	reply: FastifyReply,
+	err: unknown,
+	expected?: string,
+): unknown {
 	const error = err instanceof Error ? err : new Error("Unknown error")
 	const maybeStatus = err as { statusCode?: number; code?: string }
 	if (
@@ -167,7 +223,10 @@ function handleTunerError(reply: FastifyReply, err: unknown): unknown {
 	return reply.status(statusCode).send({
 		error: error.name || "TunerError",
 		code,
-		message: error.message,
+		message:
+			statusCode === 400 && expected !== undefined
+				? `${error.message}; expected ${expected}`
+				: error.message,
 	})
 }
 
@@ -176,6 +235,24 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 	options: TunerRoutesOptions,
 ) => {
 	const { tunerController } = options
+
+	// Scoped to these routes: a schema 400 names the expected fields and units (static text,
+	// so it is safe with access configured). Anything else goes to the parent handler.
+	fastify.setErrorHandler((error: FastifyError, request, reply) => {
+		if (error.validation) {
+			const expected = expectedFor(request.routeOptions.url)
+			const part = error.validationContext ?? "body"
+			return reply.status(400).send({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message:
+					expected !== undefined
+						? `Invalid request ${part}; expected ${expected}`
+						: `Invalid request ${part}`,
+			})
+		}
+		throw error
+	})
 	const run = async (
 		id: string,
 		command: () => Promise<unknown>,
@@ -273,7 +350,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -289,27 +370,42 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			schema: {
 				tags: ["tuner"],
 				summary: "Set gain",
+				description:
+					'Body {"gain": tenths of a dB}, the same name and unit as GET /api/tuner. "tenthsDb" is a deprecated alias; send exactly one.',
 				body: {
 					type: "object",
-					properties: { tenthsDb: { type: "integer" } },
-					required: ["tenthsDb"],
+					properties: {
+						gain: { type: "integer" },
+						tenthsDb: { type: "integer", deprecated: true },
+					},
 					additionalProperties: false,
 				},
 				response: { 200: tunerStateSchema, 400: errorResponseSchema },
 			},
 		},
 		async (request, reply) => {
+			const { gain, tenthsDb } = request.body
+			const value = gain ?? tenthsDb
+			if (
+				value === undefined ||
+				(gain !== undefined && tenthsDb !== undefined && gain !== tenthsDb)
+			)
+				return reply.status(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid request body; expected ${GAIN_EXPECTED}`,
+				})
 			try {
 				return await run(request.params.sourceId, async () => {
-					await tunerController.setGain(
-						request.params.sourceId,
-						request.body.tenthsDb,
-						REST,
-					)
+					await tunerController.setGain(request.params.sourceId, value, REST)
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -345,7 +441,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -381,7 +481,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -417,7 +521,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -453,7 +561,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -489,7 +601,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -525,7 +641,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -561,7 +681,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -597,7 +721,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -633,7 +761,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -669,7 +801,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -705,7 +841,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -741,7 +881,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -781,7 +925,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -820,7 +968,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
 			}
 		},
 	)
@@ -852,7 +1004,52 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					return tunerController.getState(request.params.sourceId)
 				})
 			} catch (err) {
-				return handleTunerError(reply, err)
+				return handleTunerError(
+					reply,
+					err,
+					expectedFor(request.routeOptions.url),
+				)
+			}
+		},
+	)
+
+	const bandGain = options.bandGain ?? null
+	if (bandGain === null) return
+
+	// GET /api/tuner-band-gain - Per-band gain table and "apply to my tuning"
+	fastify.get(
+		"/api/tuner-band-gain",
+		{
+			schema: {
+				tags: ["tuner"],
+				summary: "Per-band gain settings with provenance and limits",
+			},
+		},
+		async () => bandGain.view(),
+	)
+
+	// PUT /api/tuner-band-gain - Replace them (persisted; Zod-validated in the service)
+	fastify.put<{ Body: unknown }>(
+		"/api/tuner-band-gain",
+		{
+			schema: {
+				tags: ["tuner"],
+				summary: "Replace the per-band gain settings (persisted)",
+				body: { type: "object" },
+				response: { 400: errorResponseSchema, 500: errorResponseSchema },
+			},
+		},
+		async (request, reply) => {
+			try {
+				return await bandGain.put(request.body)
+			} catch (err) {
+				if (err instanceof BandGainSettingsError)
+					return reply.status(err.statusCode).send({
+						error: err.name,
+						code: err.code,
+						message: err.message,
+					})
+				throw err
 			}
 		},
 	)

@@ -1522,6 +1522,7 @@ export class ApiServer {
 			await this.app.register(tunerRoutes, {
 				tunerController: this.tunerController,
 				sourceManager: this.sourceManager,
+				bandGain: this.tunerController.bandGainSettings(),
 			})
 		}
 

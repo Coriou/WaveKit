@@ -125,8 +125,15 @@ export interface TunerState {
 export interface SetFrequencyRequest {
 	hz: number
 }
+/**
+ * POST /api/tuner/:sourceId/gain. Send exactly one field: `gain` (tenths of a dB, the same
+ * name and unit as TunerState.gain) or the deprecated alias `tenthsDb`. Both present with
+ * different values is a 400.
+ */
 export interface SetGainRequest {
-	tenthsDb: number
+	gain?: number
+	/** @deprecated Use `gain` (same unit). */
+	tenthsDb?: number
 }
 export interface SetGainModeRequest {
 	mode: TunerGainMode
@@ -218,4 +225,57 @@ export interface LinkBurstSummary {
 	worstStallMs: number | null
 	overflowedBytes10m: number
 	burstSeconds: number
+}
+
+// === Per-band gain (GET/PUT /api/tuner-band-gain) ===
+
+/** A band's gain: tenths of a dB (0-500), or "keep" to leave the current gain alone. */
+export type BandGainValue = number | "keep"
+
+/** One entry of the band gain table. The range is inclusive at both ends. */
+export interface BandGainEntry {
+	minHz: number
+	maxHz: number
+	gain: BandGainValue
+	/** Display name only (at most BAND_GAIN_LABEL_MAX_LENGTH characters). */
+	label?: string
+}
+
+export interface BandGainSettings {
+	/**
+	 * When true, an operator retune (REST frequency or config) also applies the band gain.
+	 * When false (the default), only scanner hops, dwells and jobs apply it.
+	 */
+	applyToMyTuning: boolean
+	/** At most BAND_GAIN_MAX_ENTRIES entries; ranges never overlap. */
+	entries: BandGainEntry[]
+}
+
+/**
+ * Bounds of the band gain table. 32 entries: an RTL-SDR covers 24 MHz-1.9 GHz, and the bands
+ * that warrant their own gain (ISM 433/868/915, ADS-B, 2 m, 70 cm, airband, marine, pagers,
+ * broadcast FM, ...) number about 20, so 32 leaves headroom while one hop's lookup stays a
+ * linear scan of at most 32 range checks. Frequencies span the tuner's write range; gains span
+ * the tuner gain write range (0-500 tenths, 0-50 dB).
+ */
+export const BAND_GAIN_MAX_ENTRIES = 32
+export const BAND_GAIN_MIN_HZ = 24_000_000
+export const BAND_GAIN_MAX_HZ = 1_900_000_000
+export const BAND_GAIN_MIN_TENTHS_DB = 0
+export const BAND_GAIN_MAX_TENTHS_DB = 500
+export const BAND_GAIN_LABEL_MAX_LENGTH = 48
+
+/** GET /api/tuner-band-gain and the PUT response. */
+export interface BandGainSettingsView {
+	settings: BandGainSettings
+	/** "config": the YAML `tuner.bandGain` section; "runtime": the persisted PUT override. */
+	provenance: "config" | "runtime"
+	limits: {
+		maxEntries: number
+		minHz: number
+		maxHz: number
+		minGainTenthsDb: number
+		maxGainTenthsDb: number
+		labelMaxLength: number
+	}
 }

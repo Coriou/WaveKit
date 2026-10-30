@@ -50,6 +50,11 @@ export interface Lease {
 	changedFields: Set<keyof TunerFieldValues>
 	/** Set only after a retune that finished writing. Absent on leases built outside the arbiter. */
 	verified?: VerifiedTune | null
+	/**
+	 * A band gain (not the snapshot's) may be on the tuner: a later hop with no job gain and
+	 * no band gain puts the snapshot's gain mode and gain back first.
+	 */
+	bandGain?: boolean
 }
 
 /**
@@ -86,7 +91,8 @@ export type ArbiterTuner = Pick<
 	| "off"
 > &
 	// WG9 req 3.1/3.2: present on the real controller; a double without it skips the check.
-	Partial<Pick<TunerController, "tuningWrittenOnConnection">>
+	// Per-band gain: a double without bandGainFor never changes gain for a band.
+	Partial<Pick<TunerController, "tuningWrittenOnConnection" | "bandGainFor">>
 
 /**
  * WG9 req 3.1: a hop's epoch trust by the shared fail-closed rule. The hop itself commands the
@@ -147,6 +153,26 @@ const FIELDS: readonly (keyof TunerFieldValues)[] = [
 	"gain",
 	"agcMode",
 ]
+/**
+ * Restore order for an AGC snapshot: rtl_tcp SET_GAIN switches the tuner to manual, so the
+ * gain goes first and the AGC mode last; the tuner ends in AGC with the exact snapshot gain.
+ */
+const FIELDS_AGC_SNAPSHOT: readonly (keyof TunerFieldValues)[] = [
+	"sampleRate",
+	"frequency",
+	"gain",
+	"gainMode",
+	"agcMode",
+]
+
+/** A hop's gain after the band table: the target to write, or an AGC snapshot to put back. */
+interface HopGain {
+	gainTenthsDb: number | null
+	/** Set when the snapshot's AGC mode (with this gain) goes back on the tuner. */
+	agcRestoreGain: number | null
+	/** The lease's bandGain flag once the hop has written. */
+	bandGainAfter: boolean | undefined
+}
 
 function toError(err: unknown): Error {
 	return err instanceof Error
@@ -376,6 +402,7 @@ export class TunerArbiter extends EventEmitter {
 				snapshot: { ...current.snapshot },
 				changedFields: new Set(current.changedFields),
 				verified: null,
+				...(current.bandGain === true ? { bandGain: true } : {}),
 			}
 			if (this.adopted.has(current)) this.adopted.add(lease)
 			this.lost.add(current)
@@ -416,13 +443,17 @@ export class TunerArbiter extends EventEmitter {
 
 	async retune(
 		lease: Lease,
-		target: {
+		jobTarget: {
 			centreHz: number
 			gainTenthsDb: number | null
 			sampleRateHz: number | null
 		},
 		allowed?: () => boolean,
 	): Promise<PendingEpoch & { skipped?: true }> {
+		// A job gain wins; else the band gain of the centre; else the snapshot's gain after a band.
+		const hopGain = this.hopGain(lease, jobTarget)
+		const target = { ...jobTarget, gainTenthsDb: hopGain.gainTenthsDb }
+		const agcRestore = hopGain.agcRestoreGain
 		// Once a command starts, finish the retune; activity cannot leave a partial tuning.
 		let writesStarted = false
 		const guard = () => {
@@ -503,6 +534,9 @@ export class TunerArbiter extends EventEmitter {
 					? (["gainMode", "gain"] as const)
 					: (["gain"] as const)),
 			)
+		if (agcRestore !== null) changing.push("gain", "gainMode")
+		// Set before the first write: a failed hop may already have changed the gain.
+		if (hopGain.bandGainAfter === true) lease.bandGain = true
 		await this.markChanged(lease, changing)
 		this.assertHeld(lease)
 		guard()
@@ -526,7 +560,9 @@ export class TunerArbiter extends EventEmitter {
 			gainKey:
 				target.gainTenthsDb !== null
 					? `m:${target.gainTenthsDb}`
-					: gainKeyOf(state),
+					: agcRestore !== null
+						? "agc"
+						: gainKeyOf(state),
 			tuningTrust: hopTrust(state),
 			centreChanged: target.centreHz !== clock.currentEpoch().centreHz,
 		}
@@ -557,6 +593,15 @@ export class TunerArbiter extends EventEmitter {
 				guard()
 				await this.deps.tuner.setGain(sourceId, target.gainTenthsDb, opts)
 			}
+			if (agcRestore !== null) {
+				// Gain first, AGC mode last (FIELDS_AGC_SNAPSHOT).
+				this.assertHeld(lease)
+				guard()
+				await this.deps.tuner.setGain(sourceId, agcRestore, opts)
+				this.assertHeld(lease)
+				guard()
+				await this.deps.tuner.setGainMode(sourceId, "agc", opts)
+			}
 		} catch (err) {
 			failure = err
 		} finally {
@@ -576,6 +621,7 @@ export class TunerArbiter extends EventEmitter {
 				toError(failure),
 			)
 		}
+		if (hopGain.bandGainAfter === false) delete lease.bandGain
 		const written = this.requireState(sourceId)
 		lease.verified = {
 			centreHz: target.centreHz,
@@ -836,6 +882,42 @@ export class TunerArbiter extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Per-band gain of one hop. A job gain is written as today. Without one, a band gain for
+	 * the centre is written; with none ("keep" or no entry) after a band gain in this lease,
+	 * the snapshot's gain mode and gain go back; else gain is left alone. A failing lookup
+	 * counts as "keep" (the controller already answers null on failure).
+	 */
+	private hopGain(
+		lease: Lease,
+		target: { centreHz: number; gainTenthsDb: number | null },
+	): HopGain {
+		const keep: HopGain = {
+			gainTenthsDb: target.gainTenthsDb,
+			agcRestoreGain: null,
+			bandGainAfter: undefined,
+		}
+		if (target.gainTenthsDb !== null) return keep
+		const lookup = this.deps.tuner.bandGainFor
+		let band: number | null = null
+		if (lookup !== undefined) {
+			try {
+				band = lookup.call(this.deps.tuner, lease.sourceId, target.centreHz)
+			} catch {
+				band = null
+			}
+		}
+		if (band !== null)
+			return { gainTenthsDb: band, agcRestoreGain: null, bandGainAfter: true }
+		if (lease.bandGain !== true) return keep
+		const { gainMode, gain } = lease.snapshot
+		// An unknown snapshot cannot be put back; release reports it as unrestorable.
+		if (gain === undefined || gainMode === undefined) return keep
+		return gainMode === "manual"
+			? { gainTenthsDb: gain, agcRestoreGain: null, bandGainAfter: false }
+			: { gainTenthsDb: null, agcRestoreGain: gain, bandGainAfter: false }
+	}
+
 	private clearVerified(leaseOrSource: Lease | string): void {
 		const lease =
 			typeof leaseOrSource === "string"
@@ -935,7 +1017,8 @@ export class TunerArbiter extends EventEmitter {
 		const failed: string[] = []
 		const opts: TunerWriteOptions = { origin: "scanner" }
 		const tuner = this.deps.tuner
-		for (const field of FIELDS) {
+		const order = snapshot.gainMode === "agc" ? FIELDS_AGC_SNAPSHOT : FIELDS
+		for (const field of order) {
 			if (!changed.includes(field)) continue
 			const value = snapshot[field]
 			if (value === undefined) {
@@ -1101,6 +1184,12 @@ export class TunerArbiter extends EventEmitter {
 			snapshot: { ...persisted.snapshot },
 			// Frequency always, as in recover(): the stale last hop is the H4 hazard.
 			changedFields: new Set([...persisted.changedFields, "frequency"]),
+			// The crashed sweep's gain may still be on the tuner: with a band table, a later
+			// hop without a gain of its own puts the snapshot's gain back.
+			...(this.deps.tuner.bandGainFor !== undefined &&
+			persisted.changedFields.includes("gain")
+				? { bandGain: true }
+				: {}),
 		}
 		this.adopted.add(lease)
 		this.leases.set(sourceId, lease)

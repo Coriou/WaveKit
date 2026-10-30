@@ -292,6 +292,10 @@ client such as SDR++).
 - Send RTL-TCP control commands upstream via `SourceManager.writeToSource()`
 - Toggle control mode (internal/external) for an external tuner client
 - Apply relay command updates so the API state stays in sync with relay clients
+- Answer the per-band gain for a frequency (`bandGainFor`, from `BandGainSettingsService` in
+  `src/core/band-gain.ts`, snapped to the tuner's gain steps). `TunerArbiter` writes it on
+  scanner hops and restores the leased snapshot; operator retunes apply it only with
+  `tuner.bandGain.applyToMyTuning`
 
 ### TunerRelay
 

@@ -1432,7 +1432,9 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 
 #### Additional tuner endpoints
 
-- `POST /api/tuner/:sourceId/gain` — Set manual gain (`{ "tenthsDb": 400 }`)
+- `POST /api/tuner/:sourceId/gain` — Set manual gain: `{ "gain": 400 }` in tenths of a dB,
+  the same name and unit as `gain` in `GET /api/tuner`. `{ "tenthsDb": 400 }` is a deprecated
+  alias with the same unit. Send exactly one; both with different values is a 400.
 - `POST /api/tuner/:sourceId/gain-mode` — `manual` or `agc`
 - `POST /api/tuner/:sourceId/sample-rate` — Set sample rate
 - `POST /api/tuner/:sourceId/ppm` — Set PPM correction
@@ -1447,6 +1449,44 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 - `POST /api/tuner/:sourceId/tuner-xtal` — Tuner XTAL frequency
 - `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
 - `PATCH /api/tuner/:sourceId/config` — Bulk update
+
+Every 400 from these routes names the fields it expects, their types and units, for example
+`Invalid request body; expected {"gain": integer, gain in tenths of a dB (0-500, e.g. 372 =
+37.2 dB)}; ...`. The message never repeats the value you sent.
+
+#### Per-band gain: GET and PUT /api/tuner-band-gain
+
+A manual gain that suits one band can overload the RTL-SDR front end in another: strong
+cellular and ISM emitters next to 868 and 915 MHz raise the whole window at once. The band
+gain table gives a gain per frequency range. Scanner hops, dwells and jobs that tune into a
+listed range write its gain, and give your exact gain mode and gain back when they return the
+tuner (on release, on a later hop outside the bands, and after a core crash through the
+lease's crash record). A job's own `tuner.gainTenthsDb` wins over the table.
+
+Your own retunes (`POST …/frequency`, `PATCH …/config`, the web app) do **not** change gain
+unless `applyToMyTuning` is on. With it on, tuning into a listed range applies its gain, and
+tuning out of the bands puts back the gain mode and gain you had before; setting a gain
+yourself inside a band makes that your gain. Relay clients (SDR++) are never touched.
+
+```bash
+curl http://localhost:9000/api/tuner-band-gain
+curl -X PUT http://localhost:9000/api/tuner-band-gain \
+  -H "Content-Type: application/json" \
+  -d '{"applyToMyTuning":false,"entries":[{"minHz":863000000,"maxHz":870000000,"gain":297,"label":"868 MHz ISM"}]}'
+```
+
+`GET` answers `{ settings: { applyToMyTuning, entries }, provenance, limits }`; `provenance` is
+`config` (the YAML `tuner.bandGain` section) or `runtime` (a saved PUT). `PUT` replaces the
+whole table and saves it in `<stateDir>/tuner-band-gain.json`; that file then wins over the
+YAML until it is deleted. A failed save answers 500 and changes nothing. Rules (400 otherwise):
+at most 32 entries; `minHz` < `maxHz`, both whole Hz from 24 000 000 to 1 900 000 000;
+ranges are inclusive and must not overlap (so the one containing a frequency is the only
+match); `gain` is a whole number of tenths of a dB, 0 to 500, or `"keep"`; `label` is at most 48
+printable characters. A gain is snapped to the tuner's nearest gain step when the receiver
+advertises its tuner type (see `GET /api/receiver-capabilities`). `"keep"` and frequencies
+without an entry leave gain alone. Writes follow the same access rules as every other write
+route. Defaults and their reasons are in
+[CORE-REFERENCE.md, Per-band gain](CORE-REFERENCE.md#per-band-gain).
 
 ### Tuner Relay
 

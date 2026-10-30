@@ -282,8 +282,31 @@ tunerRelay:
 # Caps reconciliation is not readback: after a core-only restart nothing is
 # written, yet rtlmux may still hold relay-set values it replays to rtl_tcp.
 # Env override: WAVEKIT_TUNER__RECONNECT_POLICY=reset
+#
+# Per-band gain (bandGain). A manual gain that suits one band can overload the
+# RTL-SDR front end in another: strong cellular and ISM emitters next to
+# 868/915 MHz raise the whole window at once. Scanner hops, dwells and jobs
+# that tune into a listed range apply its gain (tenths of a dB, 0-500, snapped
+# to the tuner's nearest step) and restore your exact gain mode and gain when
+# they hand the tuner back. "keep" (or no matching range) leaves gain alone.
+# Ranges are inclusive Hz, at most 32, and must not overlap.
+#   applyToMyTuning: false - your own retunes (API, web app) never change gain;
+#                    true  - they apply the band gain too and put your gain
+#                            back when you tune out of the band.
+# Defaults: 868/915 MHz ISM at 37.2 dB (49.6 dB overloaded at 868 MHz, 29.7 dB
+# did not); ADS-B, 2 m and 70 cm keep. Runtime edits via PUT
+# /api/tuner-band-gain are saved in <stateDir>/tuner-band-gain.json and
+# replace this whole section.
 tuner:
   reconnectPolicy: restore
+  bandGain:
+    applyToMyTuning: false
+    entries:
+      - { minHz: 144000000, maxHz: 148000000, gain: keep, label: "2 m" }
+      - { minHz: 420000000, maxHz: 450000000, gain: keep, label: "70 cm" }
+      - { minHz: 863000000, maxHz: 870000000, gain: 372, label: "868 MHz ISM" }
+      - { minHz: 902000000, maxHz: 928000000, gain: 372, label: "915 MHz ISM" }
+      - { minHz: 1085000000, maxHz: 1095000000, gain: keep, label: "ADS-B" }
 
 # -----------------------------------------------------------------------------
 # Live Demodulator (HTTP Audio Stream)
