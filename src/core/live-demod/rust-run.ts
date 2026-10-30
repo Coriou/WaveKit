@@ -51,10 +51,11 @@ import {
 export const RUST_AUTO_INITIAL_THRESHOLD_DBFS = -0.001
 
 /**
- * Absent `engine` is the Rust engine; `csdr` selects the csdr chain. Parsed
- * config leaves the key off, so this is the one place the default lives.
+ * Absent `engine` is the csdr chain; `rust` opts in to the Rust engine (a
+ * live CPU A/B measured Rust above csdr). Parsed config leaves the key off,
+ * so this is the one place the default lives.
  */
-export const DEFAULT_LIVE_DEMOD_ENGINE = "rust" as const
+export const DEFAULT_LIVE_DEMOD_ENGINE = "csdr" as const
 
 export function rustEngineRequested(config: {
 	engine?: "csdr" | "rust" | undefined
@@ -584,16 +585,9 @@ export class RustLiveRun {
 		this.warnedFallback = reason
 		const fields =
 			error === undefined ? { reason } : { reason, err: safeErrorFields(error) }
-		// The default engine meets csdr-only modulations (WFM, SSB, CW, raw) and
-		// non-CU8 sources (an S16 SDR++ stream) in normal use: those fallbacks
-		// are expected, so they are info, not a warning. An explicit "rust" warns.
-		if (
-			(reason === "modulation-unsupported" ||
-				reason === "input-format-unsupported") &&
-			this.host.config().engine === undefined
-		)
-			this.host.log.info(fields, RUST_FALLBACK_LOG)
-		else this.host.log.warn(fields, RUST_FALLBACK_LOG)
+		// Only an explicit `engine: "rust"` gets here (csdr is the default), so
+		// every fallback is a warning.
+		this.host.log.warn(fields, RUST_FALLBACK_LOG)
 	}
 
 	private onGate(run: PipelineRun, open: boolean): void {

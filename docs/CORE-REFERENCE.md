@@ -299,7 +299,7 @@ ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:808
 - `iqDcBlock` — Deprecated and ignored (it corrupted I/Q); use `offsetHz`
 - `squelchMode` — `auto` (default, below), `manual` (the `squelch` threshold) or
   `noise` (an FM quieting squelch, NFM and WFM only)
-- `engine` — `rust` (default) or `csdr`. The Rust engine (the `wavekit-chan` binary,
+- `engine` — `csdr` (default) or `rust` (opt-in). The Rust engine (the `wavekit-chan` binary,
   shipped in the image; `chanBinaryPath` overrides the path) demodulates NFM and AM;
   WFM, USB, LSB, DSB, CW, raw, a non-CU8 source, a bandwidth outside 2 500–40 000 Hz,
   a missing or too-old binary, or three quick crashes fall back to the csdr chain,
@@ -332,7 +332,7 @@ On NFM with stage 2:
 - **Squelch tail elimination.** A 55 Hz STE tone, or a CTCSS reverse burst (the radio
   shifts its tone's phase by 120° or 180° just before it drops the carrier), ends the
   over from its onset.
-- **Engines.** The csdr engine runs stage 2. The Rust engine (the default) runs it
+- **Engines.** The csdr engine runs stage 2. The Rust engine (opt-in) runs it
   too when its demodulator sends the stage 1 gate state in band with the audio (framed
   audio); a Rust binary without framing, or a run whose framing failed, keeps stage 1
   alone. A fallback to csdr starts the evidence gate fresh.

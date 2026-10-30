@@ -137,8 +137,8 @@ Two limits remain:
   `wavekit-chan`'s single DSP thread got about 0.32 core, and 4 channels at
   2.4 Msps need 0.31. Sustained load at that level turned into input loss whatever
   the buffer. The DSP pool below fixes this for the channelizer.
-- The csdr live-demod chain (`engine: "csdr"`, or a mode or format Rust does not
-  take) was not measured here because csdr is not on the bench host. It runs three
+- The csdr live-demod chain (the default engine, and the fallback for a mode or
+  format Rust does not take) was not measured here because csdr is not on the bench host. It runs three
   processes and moves 19.2 MB/s of complex float between them at 2.4 Msps; the Rust
   engine needs 0.18 core.
 
@@ -178,7 +178,19 @@ alternated; one-minute load average after each run:
 No run dropped bytes. The block size is the win, about 40 % less CPU at both
 rates; buffer reuse alone is within the noise, so the cost was per read, not per
 allocation. csdr is not on
-the bench host, so it is not in the table; a live CPU A/B against csdr is pending.
+the bench host, so it is not in the table.
+
+Live CPU A/B against csdr (2026-10-30, one RTL-SDR receiver, NFM at 1.024 Msps): three
+60 s windows per engine, process CPU (utime + stime) of the live-demod processes only,
+host load average 5 to 13.
+
+| Engine                                                                       | Cores (per window)  |
+| ---------------------------------------------------------------------------- | ------------------- |
+| Rust live demod, 16 384-sample reads                                         | 0.071, 0.077, 0.077 |
+| csdr chain (convert, firdecimate 41, fmdemod, dcblock, gain, limit, convert) | 0.045, 0.044, 0.051 |
+
+Rust still costs about 55 % more CPU than the csdr chain, so csdr is the default
+engine and Rust is opt-in (`liveDemod.engine: rust`).
 
 ## Channelizer DSP threads (2026-10-30)
 

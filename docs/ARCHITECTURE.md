@@ -332,11 +332,11 @@ Real-time IQ demodulation with an embedded HTTP audio stream.
 **Responsibilities**:
 
 - Attach an IQ branch from `FanoutManager`
-- Run the demodulation engine: by default (`liveDemod.engine` omitted or `rust`)
-  one `wavekit-chan` demod channel for NFM and AM (`src/core/live-demod/`), else
-  the csdr pipeline below. WFM, SSB, CW, DSB and raw, a non-CU8 source, a missing
-  or too-old binary, or a crash-looping process fall back to csdr with the reason
-  logged once and reported as `engineFallback`; `engine: csdr` always uses csdr.
+- Run the demodulation engine: by default (`liveDemod.engine` omitted or `csdr`)
+  the csdr pipeline below. Opt-in `engine: rust` runs one `wavekit-chan` demod
+  channel for NFM and AM (`src/core/live-demod/`); WFM, SSB, CW, DSB and raw, a
+  non-CU8 source, a missing or too-old binary, or a crash-looping process fall back
+  to csdr with the reason logged once and reported as `engineFallback`.
 - Serve demodulated audio via HTTP `/stream`
 - Hot-reconfigure modulation and DSP parameters
 

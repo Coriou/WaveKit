@@ -72,8 +72,8 @@ async function startHarness(
 }
 
 describe("LiveDemodulator front swap (WG10 req 2.3)", () => {
-	it("swaps the front of a wfm run on the default (rust) engine: wfm stays csdr", async () => {
-		const h = await startHarness({ engine: undefined, modulation: "wfm" })
+	it("swaps the front of a wfm run on engine rust: wfm stays csdr", async () => {
+		const h = await startHarness({ engine: "rust", modulation: "wfm" })
 		expect(h.demod.getStatus().engine).toBe("csdr")
 		const { back } = h.current()
 		const done = h.demod.reconfigure({ offsetHz: 6000 })
@@ -88,8 +88,8 @@ describe("LiveDemodulator front swap (WG10 req 2.3)", () => {
 		expect(h.demod.getStatus().pipelineRestarts).toBe(0)
 	})
 
-	it("swaps the front of an nfm run on an S16 source with the default engine: S16 stays csdr", async () => {
-		const h = await startHarness({ engine: undefined }, "S16_IQ")
+	it("swaps the front of an nfm run on an S16 source with engine rust: S16 stays csdr", async () => {
+		const h = await startHarness({ engine: "rust" }, "S16_IQ")
 		expect(h.demod.getStatus().engine).toBe("csdr")
 		expect(h.demod.getStatus().engineFallback).toBe("input-format-unsupported")
 		const { back } = h.current()

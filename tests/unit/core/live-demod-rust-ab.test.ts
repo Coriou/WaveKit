@@ -117,14 +117,36 @@ describe.skipIf(binaryMissing)(
 describe("default engine per modulation (no binary needed)", () => {
 	const probe = { available: true, protocol: 3 }
 	const caps = { format: "U8_IQ" }
+	for (const [modulation, bandwidth] of [
+		["nfm", 12_500],
+		["am", 10_000],
+		["wfm", 200_000],
+	] as const) {
+		it(`an omitted engine runs ${modulation} on csdr without a fallback`, () => {
+			const config = LiveDemodConfigSchema.parse({ modulation, bandwidth })
+			expect(config.engine).toBeUndefined()
+			expect(rustEngineRequested(config)).toBe(false)
+			expect(
+				selectEngine({
+					config: { engine: config.engine, modulation, bandwidth },
+					caps,
+					probe,
+				}),
+			).toEqual({ engine: "csdr" })
+		})
+	}
+
 	for (const [modulation, bandwidth, expected] of [
 		["nfm", 12_500, { engine: "rust" }],
 		["am", 10_000, { engine: "rust" }],
 		["wfm", 200_000, { engine: "csdr", fallback: "modulation-unsupported" }],
 	] as const) {
-		it(`an omitted engine runs ${modulation} on ${expected.engine}`, () => {
-			const config = LiveDemodConfigSchema.parse({ modulation, bandwidth })
-			expect(config.engine).toBeUndefined()
+		it(`engine rust runs ${modulation} on ${expected.engine}`, () => {
+			const config = LiveDemodConfigSchema.parse({
+				engine: "rust",
+				modulation,
+				bandwidth,
+			})
 			expect(rustEngineRequested(config)).toBe(true)
 			expect(
 				selectEngine({
