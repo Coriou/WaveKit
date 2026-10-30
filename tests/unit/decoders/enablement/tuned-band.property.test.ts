@@ -255,12 +255,13 @@ it("CPU loss during a tuned-band probation sheds the newest untuned placement, o
 				// CPU over the limit every 20 000 ms (inside the 30 000 ms
 				// probation, which each loss restarts): a scapegoat at most once per
 				// 60 000 ms clear window, the newest untuned one; the losses inside
-				// the window are spent on it. Nothing untuned left: the tuned one.
+				// the window are spent on it. Nothing untuned left: the tuned one,
+				// once the last scapegoat's clear window has closed too.
 				let lastShed = -Infinity
 				for (;;) {
 					mono += 20_000
 					gate.record({ atMs: mono, cpuPercent: 99, sources: new Map() })
-					const due = mono - lastShed >= 60_000 || untuned.length === 0
+					const due = mono - lastShed >= 60_000
 					const expected = due ? (untuned.pop() ?? "tuned") : null
 					expect(gate.probation(running, mono)).toEqual(
 						expected ? [{ key: expected, detail: "cpu" }] : [],

@@ -466,12 +466,21 @@ export interface LateDropWindow {
 	 * window is not scoped and condemns every placement on its source.
 	 */
 	condemnedBranches?: readonly string[] | "source"
+	/**
+	 * With `condemnedBranches: "source"`: the branches also charged in the
+	 * window (their own drops, or overflow they held). The source-wide part
+	 * and these explicit charges are separate loss: a scapegoat that spent the
+	 * source-wide part has not spent these. Absent: none.
+	 */
+	explicitBranches?: readonly string[]
 }
 
 /**
  * A drop sample as probation judges it: its evidence time, its attribution
  * and the branches charged with it (`condemnedBranches` semantics, never
- * absent: `"source"` charges every placement on the source).
+ * absent: `"source"` charges every placement on the source). A sample with
+ * both explicit branch drops and loss no branch can be charged with is two
+ * charges at the same time: one to the branches, one to the source.
  */
 export interface ChargedDrop {
 	atMono: number

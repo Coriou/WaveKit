@@ -758,12 +758,17 @@ export function createEfficiencyMonitor(deps: {
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
 				} else {
 					s.lastDropMono = Math.max(s.lastDropMono ?? -Infinity, r.at)
-					s.drops.push({
-						atMono: r.at,
-						code: r.code,
-						branches: r.sourceWide ? "source" : [...r.branches].sort(),
-					})
-					if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
+					// Explicit branch drops stay charged to their branches when
+					// some of the loss also falls on the source as a whole.
+					if (!r.sourceWide || r.branches.length > 0)
+						s.drops.push({
+							atMono: r.at,
+							code: r.code,
+							branches: [...r.branches].sort(),
+						})
+					if (r.sourceWide)
+						s.drops.push({ atMono: r.at, code: r.code, branches: "source" })
+					while (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
 					fault(s, at)
 				}
 			}
@@ -866,6 +871,9 @@ export function createEfficiencyMonitor(deps: {
 								condemnedBranches: w.sourceWide
 									? "source"
 									: [...w.branches].sort(),
+								...(w.sourceWide && w.branches.size > 0
+									? { explicitBranches: [...w.branches].sort() }
+									: {}),
 							})
 							if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
 						}
@@ -1091,6 +1099,9 @@ export function createEfficiencyMonitor(deps: {
 					...w,
 					...(Array.isArray(w.condemnedBranches)
 						? { condemnedBranches: [...w.condemnedBranches] }
+						: {}),
+					...(w.explicitBranches
+						? { explicitBranches: [...w.explicitBranches] }
 						: {}),
 				}))
 		},

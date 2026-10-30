@@ -1,3 +1,4 @@
+import fc from "fast-check"
 import { expect, it } from "vitest"
 import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/efficiency-monitor.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
@@ -128,7 +129,12 @@ function harness(specs: readonly Spec[], gateGuardPercent: number) {
 		const key = `${source}|@absorber#0`
 		totals.set(key, totals.get(key)! + 1)
 	}
-	return { run, overflowNoHolder, cpu, running }
+	/** Drops on `key`'s own decoder branch. */
+	const dropOn = (source: string, key: string) => {
+		const k = `${source}|decoder-${key}#0`
+		totals.set(k, totals.get(k)! + 1)
+	}
+	return { run, overflowNoHolder, dropOn, cpu, running, monitor }
 }
 
 it("CPU scapegoats are one per clear window across all sources", () => {
@@ -210,9 +216,11 @@ it("host overflow with no holder known sheds an untuned placement before the tun
 	expect(h.running.map(p => p.key)).toContain("readsb")
 })
 
-it("source-wide loss that is not host loss still judges the tuned probationer", () => {
-	// A healthy host: overflow with no holder known is not host load, and
-	// probation fails closed on it as before.
+it("source-wide loss that is not host loss is loss elsewhere for the tuned probationer", () => {
+	// A healthy host: overflow with no holder known is not host load, and no
+	// holder is known, so it is not readsb's own loss either (readsb was shed
+	// at +2 s before the fix). The untuned placement goes first; with nothing
+	// untuned left, readsb is judged by its own branch and CPU only.
 	const h = harness(
 		[
 			{ key: "a", source: "s" },
@@ -222,6 +230,347 @@ it("source-wide loss that is not host loss still judges the tuned probationer", 
 	)
 	const verdicts = h.run(() => h.overflowNoHolder("s"), 10_000)
 	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
+		{ key: "a", detail: "drops" },
+	])
+	expect(h.running.map(p => p.key)).toEqual(["readsb"])
+})
+
+it("loss charged to the tuned probationer's own branch is its own", () => {
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	const verdicts = h.run(() => h.dropOn("s", "readsb"), 10_000)
+	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
 		{ key: "readsb", detail: "drops" },
 	])
+	expect(h.running.map(p => p.key)).toEqual(["a"])
+})
+
+it("sustained CPU does not shed the tuned probationer while the scapegoat's clear window is open", () => {
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	// a goes at +2 s; nothing untuned is left, but its relief has not had
+	// EFFICIENCY_CLEAR_MS to show: readsb was shed at +4 s before the fix.
+	const verdicts = h.run(() => {}, 2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
+		{ key: "a", detail: "cpu", at: 2_000 },
+		{ key: "readsb", detail: "cpu", at: 2_000 + EFFICIENCY_CLEAR_MS },
+	])
+})
+
+it("CPU relieved within the scapegoat's clear window keeps the tuned probationer", () => {
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) > 6_000) h.cpu.normalisedPercent = 10
+	}, 120_000)
+	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
+		{ key: "a", detail: "cpu" },
+	])
+	expect(h.running.map(p => p.key)).toEqual(["readsb"])
+})
+
+it("late drops do not shed a second placement for loss spent on a scapegoat", () => {
+	// Sustained host overflow with no holder known: c is the scapegoat at
+	// +2 s and readsb graduates (the overflow is not its own). b was shed by
+	// late drops at +56 s before the fix, inside c's clear window.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "s" },
+			{ key: "c", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		99,
+	)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => h.overflowNoHolder("s"), EFFICIENCY_CLEAR_MS)
+	expect(verdicts).toEqual([{ key: "c", detail: "drops", at: 2_000 }])
+})
+
+it("late drops on a CPU scapegoat's source do not shed a second placement for that loss", () => {
+	// readsb's CPU loss on source s sheds c on source t at +2 s; t's host
+	// drops up to then were the same loss. b was shed by late drops at +16 s
+	// before the fix.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) <= 8_000) h.overflowNoHolder("t")
+		else h.cpu.normalisedPercent = 10
+	}, 120_000)
+	expect(verdicts).toEqual([{ key: "c", detail: "cpu", at: 2_000 }])
+})
+
+it("late drops on another placement's own branch still shed it inside a scapegoat's clear window", () => {
+	// readsb's CPU loss sheds c at +2 s and the CPU recovers at once; then
+	// only b's own branch drops (consumer loss, a new episode). The scapegoat
+	// window spends the loss that shed c, not b's own: b survived until
+	// +62 s before the fix.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "s" },
+			{ key: "c", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) > 2_000) {
+			h.cpu.normalisedPercent = 10
+			h.dropOn("s", "b")
+		}
+	}, 2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts[0]).toEqual({ key: "c", detail: "cpu", at: 2_000 })
+	const b = verdicts.find(v => v.key === "b")
+	expect(b?.detail).toBe("late-drops")
+	expect(b!.at).toBeLessThan(2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts.filter(v => v.key !== "b" && v.key !== "c")).toEqual([])
+})
+
+it("the tuned probationer's own branch drops count when no-holder overflow shares the sample", () => {
+	// Each sample: readsb's own branch drops and the absorber overflows with
+	// no holder known, on a healthy host. The overflow is loss elsewhere; the
+	// branch drops are readsb's own. Before the fix the sample was charged to
+	// the source as a whole only, and readsb was never shed in 180 s.
+	const h = harness([{ key: "readsb", source: "s", tuned: true }], 90)
+	const verdicts = h.run(() => {
+		h.dropOn("s", "readsb")
+		h.overflowNoHolder("s")
+	}, 180_000)
+	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
+		{ key: "readsb", detail: "drops", at: 2_000 },
+	])
+	const charged = h.monitor.chargedDropsBetweenMono("s", 0, Infinity)
+	expect(charged.at(-1)?.branches).toBe("source")
+	expect(charged.at(-2)?.branches).toEqual(["decoder-readsb"])
+	expect(charged.at(-2)?.atMono).toBe(charged.at(-1)?.atMono)
+})
+
+it("late windows keep explicit branch charges beside source-wide overflow", () => {
+	// Host loss (CPU between the monitor's and the gate's guards): readsb's
+	// own branch drops beside no-holder overflow are still its own, and the
+	// windows name its branch beside the source-wide charge.
+	const h = harness([{ key: "readsb", source: "s", tuned: true }], 99)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => {
+		h.dropOn("s", "readsb")
+		h.overflowNoHolder("s")
+	}, 40_000)
+	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
+		{ key: "readsb", detail: "drops", at: 2_000 },
+	])
+	expect(h.monitor.latestAttribution("s")).toBe("host")
+	expect(h.monitor.lateWindows("s").at(-1)).toMatchObject({
+		condemning: true,
+		condemnedBranches: "source",
+		explicitBranches: ["decoder-readsb"],
+	})
+})
+
+it("host loss during a CPU scapegoat's clear window sheds nobody else on any source", () => {
+	// readsb's CPU loss on s sheds c on t at +2 s; the CPU stays at 95 % and
+	// b's own branch on t drops every sample for 30 s. Those drops are host
+	// loss (the monitor charges them to the host), the same episode c was
+	// shed for: b was late-dropped at +26 s before the fix.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) <= 30_000) h.dropOn("t", "b")
+	}, EFFICIENCY_CLEAR_MS)
+	expect(verdicts).toEqual([{ key: "c", detail: "cpu", at: 2_000 }])
+	expect(
+		h.monitor
+			.chargedDropsBetweenMono("t", 0, Infinity)
+			.filter(d => d.branches !== "source" && d.branches.includes("decoder-b"))
+			.every(d => d.code === "host"),
+	).toBe(true)
+})
+
+it("host loss past a CPU scapegoat's clear window sheds again at its edge", () => {
+	// As above, with b's host drops sustained: nothing more goes inside c's
+	// clear window, and the next shed comes only at or after its edge.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => h.dropOn("t", "b"), 120_000)
+	expect(verdicts[0]).toEqual({ key: "c", detail: "cpu", at: 2_000 })
+	expect(verdicts.length).toBeGreaterThan(1)
+	expect(verdicts[1]!.at).toBeGreaterThanOrEqual(2_000 + EFFICIENCY_CLEAR_MS)
+})
+
+it("consumer loss on another source's own branch still sheds it inside a CPU scapegoat's clear window", () => {
+	// readsb's CPU loss sheds c on t at +2 s and the CPU recovers at once;
+	// then x's own branch on t drops (consumer loss): x is still late-dropped
+	// inside c's clear window.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "x", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) > 2_000) {
+			h.cpu.normalisedPercent = 10
+			h.dropOn("t", "x")
+		}
+	}, 2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts[0]).toEqual({ key: "c", detail: "cpu", at: 2_000 })
+	const x = verdicts.find(v => v.key === "x")
+	expect(x?.detail).toBe("late-drops")
+	expect(x!.at).toBeLessThan(2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts.filter(v => v.key !== "x" && v.key !== "c")).toEqual([])
+})
+
+it("non-CPU scapegoats do not extend a CPU scapegoat's host-loss window", () => {
+	// readsb's CPU loss on s sheds c on v at +2 s; the CPU stays at 95 % and
+	// b's own branch on t drops in every other sample (host loss). At +20 s
+	// and +40 s instead the CPU dips for one sample and overflow with no holder
+	// known on s, then u, sheds a, then x. Those stand-ins are not CPU scapegoats: c's window
+	// closes at 2 000 + 60 000 = 62 000 ms all the same, and the sample at
+	// that edge is no longer suppressed: b is acted on at 62 000 ms (it was
+	// shed at +100 s, after 98 s of host loss, before the fix).
+	const h = harness(
+		[
+			{ key: "b", source: "t" },
+			{ key: "a", source: "s" },
+			{ key: "x", source: "u" },
+			{ key: "c", source: "v" },
+			{ key: "readsb", source: "s", tuned: true },
+			{ key: "ais", source: "u", tuned: true },
+		],
+		90,
+	)
+	let t = 0
+	const verdicts = h.run(() => {
+		t += 2_000
+		h.cpu.normalisedPercent = 95
+		if (t === 20_000 || t === 40_000) {
+			h.cpu.normalisedPercent = 10
+			h.overflowNoHolder(t === 20_000 ? "s" : "u")
+		} else h.dropOn("t", "b")
+	}, 70_000)
+	expect(verdicts.slice(0, 3)).toEqual([
+		{ key: "c", detail: "cpu", at: 2_000 },
+		{ key: "a", detail: "drops", at: 20_000 },
+		{ key: "x", detail: "drops", at: 40_000 },
+	])
+	const b = verdicts.find(v => v.key === "b")
+	expect(b?.at).toBe(2_000 + EFFICIENCY_CLEAR_MS)
+	expect(["late-drops", "cpu"]).toContain(b?.detail)
+})
+
+// Feature: decoder-autostart, Property 9: host-loss suppression is bounded
+// Validates: Requirements R2, R7
+it("host-loss suppression after a CPU scapegoat is bounded by its clear window", () => {
+	// Sustained 95 % CPU: readsb's CPU loss sheds CPU scapegoats and b's own
+	// branch on t drops every sample (host loss, spent on the open CPU
+	// scapegoat). A random set of samples in 4 000..56 000 ms dips the CPU
+	// instead and overflows with no holder known on s or u, shedding non-CPU
+	// scapegoats there. However they fall, while b runs every sample is at
+	// most 60 000 ms + one 2 000 ms sample past the latest CPU scapegoat
+	// (past that, b is acted on: shed itself, or a new CPU scapegoat opens a
+	// window), and CPU scapegoats (untuned placements shed for a
+	// probationer's CPU) are at least 60 000 ms apart. The run
+	// (130 000 ms) spans two full windows.
+	const dips = fc.uniqueArray(
+		fc.record({
+			at: fc.integer({ min: 2, max: 28 }).map(n => n * 2_000),
+			source: fc.constantFrom("s", "u"),
+		}),
+		{ selector: d => d.at, maxLength: 8 },
+	)
+	fc.assert(
+		fc.property(dips, fc.boolean(), (dips, extra) => {
+			const h = harness(
+				[
+					{ key: "b", source: "t" },
+					{ key: "a", source: "s" },
+					...(extra ? [{ key: "a2", source: "s" }] : []),
+					{ key: "x", source: "u" },
+					...(extra ? [{ key: "x2", source: "u" }] : []),
+					{ key: "c", source: "v" },
+					{ key: "readsb", source: "s", tuned: true },
+					{ key: "ais", source: "u", tuned: true },
+				],
+				90,
+			)
+			const end = 130_000
+			const dipAt = new Map(dips.map(d => [d.at, d.source]))
+			let t = 0
+			const verdicts = h.run(() => {
+				t += 2_000
+				const dip = dipAt.get(t)
+				h.cpu.normalisedPercent = dip === undefined ? 95 : 10
+				if (dip === undefined) h.dropOn("t", "b")
+				else h.overflowNoHolder(dip)
+			}, end)
+			// CPU scapegoats: untuned placements shed for a probationer's CPU.
+			const cpu = verdicts
+				.filter(
+					v => v.detail === "cpu" && v.key !== "readsb" && v.key !== "ais",
+				)
+				.map(v => v.at)
+			expect(cpu[0]).toBe(2_000)
+			for (let i = 1; i < cpu.length; i++)
+				expect(cpu[i]! - cpu[i - 1]!).toBeGreaterThanOrEqual(
+					EFFICIENCY_CLEAR_MS,
+				)
+			const bEnd = verdicts.find(v => v.key === "b")?.at ?? end
+			for (let at = 2_000; at <= bEnd; at += 2_000) {
+				const last = Math.max(...cpu.filter(c => c <= at))
+				expect(at - last).toBeLessThanOrEqual(EFFICIENCY_CLEAR_MS + 2_000)
+			}
+		}),
+		{ numRuns: 100 },
+	)
 })
