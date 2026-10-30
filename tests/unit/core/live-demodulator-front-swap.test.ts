@@ -59,9 +59,13 @@ function noiseIq(samples: number, amplitude: number): Buffer {
 	return buffer
 } // 10 ms at the 25 kHz default channel rate
 
-async function startHarness(config: Record<string, unknown> = {}) {
+async function startHarness(
+	config: Record<string, unknown> = {},
+	sourceFormat?: "U8_IQ" | "S16_IQ",
+) {
 	harness = await createDemodHarness({
 		config: { squelchMode: "manual", ...config },
+		...(sourceFormat !== undefined ? { sourceFormat } : {}),
 	})
 	await harness.demod.start()
 	return harness
@@ -71,6 +75,23 @@ describe("LiveDemodulator front swap (WG10 req 2.3)", () => {
 	it("swaps the front of a wfm run on the default (rust) engine: wfm stays csdr", async () => {
 		const h = await startHarness({ engine: undefined, modulation: "wfm" })
 		expect(h.demod.getStatus().engine).toBe("csdr")
+		const { back } = h.current()
+		const done = h.demod.reconfigure({ offsetHz: 6000 })
+		await waitFor(() => h.processes.length === 3)
+		const newFront = h.processes[2]!
+		await writeAndSettle(newFront.stdout, channelIq(10, 0.5))
+		await done
+		expect(h.processes).toHaveLength(3)
+		expect(back.signals).toEqual([])
+		expect(h.current().front).toBe(newFront)
+		expect(h.demod.getStatus().engine).toBe("csdr")
+		expect(h.demod.getStatus().pipelineRestarts).toBe(0)
+	})
+
+	it("swaps the front of an nfm run on an S16 source with the default engine: S16 stays csdr", async () => {
+		const h = await startHarness({ engine: undefined }, "S16_IQ")
+		expect(h.demod.getStatus().engine).toBe("csdr")
+		expect(h.demod.getStatus().engineFallback).toBe("input-format-unsupported")
 		const { back } = h.current()
 		const done = h.demod.reconfigure({ offsetHz: 6000 })
 		await waitFor(() => h.processes.length === 3)

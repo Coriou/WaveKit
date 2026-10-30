@@ -46,8 +46,8 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [receiver-endpoints](receiver-endpoints/requirements.md): a receiver's ranked addresses and
   DNS-SD advertisement; core moves IQ to the best verified endpoint (opt-in)
 - [regional-display-registry](regional-display-registry/requirements.md)
-- [rust-demod-a](rust-demod-a/requirements.md): opt-in Rust NFM/AM live demodulator, with csdr
-  the default and fallback
+- [rust-demod-a](rust-demod-a/requirements.md): Rust NFM/AM live demodulator, the default
+  on CU8 sources, with csdr for other modes and formats and as the fallback
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)
 - [scanner-redesign](scanner-redesign/requirements.md): a fitting window stays tuned, a

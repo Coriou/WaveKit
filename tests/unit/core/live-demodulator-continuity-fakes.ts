@@ -44,9 +44,16 @@ export class FakeProcess extends EventEmitter {
 	}
 }
 
-export function createFakeSourceManager(sampleRate = 2_400_000) {
+export function createFakeSourceManager(
+	sampleRate = 2_400_000,
+	format: "U8_IQ" | "S16_IQ" = "U8_IQ",
+) {
 	const emitter = new EventEmitter()
-	const caps = { kind: "iq", sampleRate, format: "U8_IQ" as const }
+	const caps: { kind: string; sampleRate: number; format: string } = {
+		kind: "iq",
+		sampleRate,
+		format,
+	}
 	return {
 		caps,
 		getAllStatus: () => [{ id: "rtl-pi", connected: true }],
@@ -177,6 +184,8 @@ export interface DemodHarnessOptions {
 	onSpawn?: (proc: FakeProcess) => void
 	/** IQ rate the fake source reports (default 2.4 Msps). */
 	sourceSampleRate?: number
+	/** IQ format the fake source reports (default CU8). */
+	sourceFormat?: "U8_IQ" | "S16_IQ"
 	/** Pacing clock of the `/auto` router (default: the real clock). */
 	autoRouteClock?: AutoRouteClock
 }
@@ -192,7 +201,10 @@ export async function createDemodHarness(options: DemodHarnessOptions = {}) {
 	const { createLogger } = await import("../../../src/utils/logger.js")
 	const processes: FakeProcess[] = []
 	const clock = options.clock ?? new ManualClock()
-	const sourceManager = createFakeSourceManager(options.sourceSampleRate)
+	const sourceManager = createFakeSourceManager(
+		options.sourceSampleRate,
+		options.sourceFormat,
+	)
 	const fanout = createFakeFanout()
 	const realKill = process.kill.bind(process)
 	const killSpy = (pid: number, signal?: string | number): true => {

@@ -182,3 +182,8 @@ Appended during implementation (WG12); earlier criteria keep their numbers.
 5. 10.5 (amends 6.1) The 4 % budget is not met: one channel measured about 6 % of one core
    on the development host. The figure is reported with the host CPU and load average;
    the csdr comparison is part of the live test plan.
+6. 10.6 (amends 8.1 and 10.3, 2026-10-30) Absent `engine` means `rust`: the Rust
+   engine runs by default for NFM and AM on a CU8 source. Other modulations, other source
+   formats and an explicit `engine: "csdr"` use csdr; the parsed default config still
+   leaves the key off. The expected `modulation-unsupported` fallback of an omitted engine
+   logs at info, every other fallback at warn.

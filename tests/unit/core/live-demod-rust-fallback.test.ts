@@ -262,6 +262,29 @@ describe("live demod rust fallback and retune", () => {
 		expect(fallbacks(lines)[0]?.["reason"]).toBe("modulation-unsupported")
 	})
 
+	it("an omitted engine starts nfm on a cu8 source on rust", async () => {
+		const { lines } = await boot({ engine: undefined, modulation: "nfm" })
+		expect(versions).toHaveLength(1)
+		expect(channels).toHaveLength(1)
+		expect(shells).toHaveLength(0)
+		expect(fallbacks(lines)).toEqual([])
+		expect(demod?.getStatus()).toMatchObject({
+			engine: "rust",
+			effectiveSampleRate: 48000,
+		})
+		expect(demod?.getStatus().engineFallback ?? null).toBeNull()
+	})
+
+	it("an omitted engine runs nfm on an s16 source on csdr without probing", async () => {
+		format = "S16_IQ"
+		const { lines } = await boot({ engine: undefined, modulation: "nfm" })
+		expect(versions).toHaveLength(0)
+		expect(channels).toHaveLength(0)
+		expect(shells.length).toBeGreaterThanOrEqual(2)
+		expect(fallbacks(lines)[0]?.["reason"]).toBe("input-format-unsupported")
+		expect(demod?.getStatus().engine).toBe("csdr")
+	})
+
 	it("an omitted engine is rust: a missing binary falls back once with a warning", async () => {
 		versionMode = "enoent"
 		const { lines } = await boot({ engine: undefined })

@@ -56,7 +56,13 @@ export function createFanoutOracle(configs: OracleBranchConfig[]) {
 				if (
 					startupMark === undefined
 						? !accepted
-						: stream.writableLength > startupMark
+						: // The startup mark bounds both sides: the writable side gets
+							// what the readable side's mark leaves of it.
+							stream.writableLength >
+							Math.max(
+								startupMark - stream.readableHighWaterMark,
+								config.highWaterMark,
+							)
 				) {
 					refusing = true
 					result.transitions.push("bp")

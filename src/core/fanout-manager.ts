@@ -246,6 +246,14 @@ export class FanoutManager extends EventEmitter {
 				"Branch mark resized to the source rate",
 			)
 			branch.highWaterMark = mark
+			// A startup mark stays in force while it is the larger one. A normal
+			// mark grown to it ends the period early, as activateBranch would
+			// not have opened one against this mark.
+			if (
+				branch.startupHighWaterMark !== undefined &&
+				mark >= branch.startupHighWaterMark
+			)
+				this.endStartup(branch)
 		}
 	}
 
@@ -352,16 +360,39 @@ export class FanoutManager extends EventEmitter {
 		) {
 			branch.startupHighWaterMark = startup.highWaterMark
 			// One timer per activation ends the period: no clock read per chunk.
-			branch.startupTimer = setTimeout(() => {
-				branch.startupTimer = undefined
-				branch.startupHighWaterMark = undefined
-				// A backlog at or above the normal mark drains before new data.
-				branch.startupDraining =
-					branch.stream.writableLength >= branch.highWaterMark
-			}, startup.durationMs)
+			branch.startupTimer = setTimeout(
+				() => this.endStartup(branch),
+				startup.durationMs,
+			)
 			branch.startupTimer.unref?.()
 		}
 		this.log.debug({ branchId: id }, "Branch activated")
+	}
+
+	/**
+	 * Mark of the branch's writable side. Outside startup it is the normal
+	 * (possibly resized) mark. The startup mark bounds the whole branch, so the
+	 * writable side gets what the readable side's construction mark leaves of
+	 * it: startupBuffer's seconds of signal whatever the construction mark,
+	 * and never less than the normal mark.
+	 */
+	private writableMark(branch: BranchState): number {
+		const startup = branch.startupHighWaterMark
+		if (startup === undefined) return branch.highWaterMark
+		return Math.max(
+			startup - branch.stream.readableHighWaterMark,
+			branch.highWaterMark,
+		)
+	}
+
+	/** Ends a branch's startup period; the normal (current) mark applies. */
+	private endStartup(branch: BranchState): void {
+		clearTimeout(branch.startupTimer)
+		branch.startupTimer = undefined
+		branch.startupHighWaterMark = undefined
+		// A backlog at or above the normal mark drains before new data.
+		branch.startupDraining =
+			branch.stream.writableLength >= branch.highWaterMark
 	}
 
 	// Remove a branch and clean up its resources.
@@ -403,8 +434,7 @@ export class FanoutManager extends EventEmitter {
 				(branch.backpressure ||
 					branch.stream.destroyed ||
 					branch.stream.writableEnded ||
-					branch.stream.writableLength >=
-						(branch.startupHighWaterMark ?? branch.highWaterMark))
+					branch.stream.writableLength >= this.writableMark(branch))
 			)
 				out.add(id)
 		}
@@ -490,12 +520,12 @@ export class FanoutManager extends EventEmitter {
 				if (!branch.stream.destroyed) {
 					canWrite = branch.stream.write(chunk)
 					branch.bufferedBytes = this.getBufferedBytes(branch)
-					// While the startup mark lasts, only a writable backlog beyond it
-					// is congestion. Beyond it the writable side is above the normal
-					// mark, so the stream has a pending 'drain' to end the episode.
+					// While the startup mark lasts, only a writable backlog beyond
+					// its share (writableMark) is congestion. A share at or above the
+					// construction mark leaves the stream a pending 'drain' to end the
+					// episode; below it (a shrunk soft mark) the low-water poll does.
 					if (branch.startupHighWaterMark !== undefined)
-						canWrite =
-							branch.stream.writableLength <= branch.startupHighWaterMark
+						canWrite = branch.stream.writableLength <= this.writableMark(branch)
 					// A mark resized after construction (setByteRate) replaces the
 					// stream's own: write() answers against the construction mark.
 					// Below a grown mark the stream may hold a pending 'drain'; above
@@ -537,8 +567,7 @@ export class FanoutManager extends EventEmitter {
 					}
 					if (
 						stream.writableLength <=
-						(branch.startupHighWaterMark ?? branch.highWaterMark) *
-							DROP_MODE_LOW_WATER
+						this.writableMark(branch) * DROP_MODE_LOW_WATER
 					)
 						this.endEpisode(branchId, branch)
 				}, DROP_MODE_POLL_MS)

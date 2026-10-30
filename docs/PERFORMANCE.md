@@ -134,9 +134,10 @@ Two limits remain:
   `wavekit-chan`'s single DSP thread got about 0.32 core, and 4 channels at
   2.4 Msps need 0.31. Sustained load at that level turned into input loss whatever
   the buffer. The DSP pool below fixes this for the channelizer.
-- The csdr live-demod chain (`engine` absent) was not measured here because csdr
-  is not on the bench host. It runs three processes and moves 19.2 MB/s of
-  complex float between them at 2.4 Msps; the Rust engine needs 0.18 core.
+- The csdr live-demod chain (`engine: "csdr"`, or a mode or format Rust does not
+  take) was not measured here because csdr is not on the bench host. It runs three
+  processes and moves 19.2 MB/s of complex float between them at 2.4 Msps; the Rust
+  engine needs 0.18 core.
 
 ## Channelizer DSP threads (2026-10-30)
 

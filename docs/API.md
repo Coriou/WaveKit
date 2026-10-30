@@ -7105,8 +7105,9 @@ in memory; persisted decode evidence can rebuild decoded proofs after restart.
 ### Live audio engine and tone
 
 `LiveAudioConfig.engine` and PATCH `/api/live-audio/config` accept `csdr|rust`; absent
-means `csdr`. Changing it restarts the pipeline. Rust is opt-in for NFM/AM;
-unsupported configurations fall back to csdr. `LiveAudioStatus.engine` identifies
+means `rust`. Changing it restarts the pipeline. The Rust engine runs by default for NFM
+and AM on a CU8 source; other modulations, other source formats and `engine: "csdr"`
+use csdr. `LiveAudioStatus.engine` identifies
 the engine actually used. Optional `engineFallback` is `binary-unavailable`,
 `protocol-unsupported`, `input-format-unsupported`, `modulation-unsupported`,
 `open-rejected` or `process-unstable`.
