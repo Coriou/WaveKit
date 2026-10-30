@@ -32,8 +32,8 @@ export interface FamilyRule {
 	/** Calls: one stack per radio; a row whose radio is not known yet joins its neighbour's. */
 	byRadio?: boolean
 	/**
-	 * Pages: the channel splits stacks instead of the key, and a copy heard on another channel within this
-	 * many ms of the stack's newest row joins it (one page simulcast by several transmitters).
+	 * Pages: the channel splits stacks instead of the key, and a copy heard within this many ms of one of the
+	 * stack's rows on another channel joins it (one page simulcast by several transmitters).
 	 */
 	simulcastMs?: number
 }
@@ -308,20 +308,38 @@ function chronological(list: readonly ActivitySummary[]): {
 	return { rows: pairs.map(p => p.r), times: pairs.map(p => p.t) }
 }
 
-/** A stack being built: its rows (in time order), its newest time, its channels and its radio. */
+/**
+ * A stack being built: its rows (in time order), its newest time, the channel it started on, when each of
+ * its channels was last heard, and its radio.
+ */
 interface Run {
 	rows: ActivitySummary[]
 	last: number
-	khz: Set<number | null>
+	primary: number | null
+	heard: Map<number | null, number>
 	radio: string | null
+}
+
+/** A copy of `run`'s page: heard on `khz` within `within` ms of one of its rows on another channel. */
+function simulcastCopy(
+	run: Run,
+	khz: number | null,
+	t: number,
+	within: number,
+): boolean {
+	for (const [c, at] of run.heard)
+		if (c !== khz && t - at <= within) return true
+	return false
 }
 
 /**
  * Splits one key's rows (in time order) into stacks. A row joins an open stack (one whose newest row is
  * within the family's gap) and otherwise starts one. Calls keep one stack per radio; a row whose radio is
  * not known yet (a DMR call start) joins the stack of the next row with a radio, or, when none follows
- * within the gap, the stack before it. A page joins the stack on its channel, or, heard on another channel
- * within `simulcastMs` of the stack's newest row, the same stack (a simulcast copy).
+ * within the gap, the stack before it. A page joins a stack it is a simulcast copy of (heard within
+ * `simulcastMs` of one of the stack's rows on another channel), else the stack that started on its channel:
+ * a channel stays with another channel's stack only while its copies keep arriving with that stack's, so a
+ * repeat heard on it alone later is its own channel's again.
  */
 function splitRuns(
 	family: FoldFamily,
@@ -337,7 +355,13 @@ function splitRuns(
 	let floatFirst = 0
 	let floatLast = 0
 	const start = (rs: ActivitySummary[], t: number, khz: number | null) => {
-		const run: Run = { rows: rs, last: t, khz: new Set([khz]), radio: null }
+		const run: Run = {
+			rows: rs,
+			last: t,
+			primary: khz,
+			heard: new Map([[khz, t]]),
+			radio: null,
+		}
 		runs.push(run)
 		open.push(run)
 		return run
@@ -385,15 +409,15 @@ function splitRuns(
 		}
 		// one open stack per key, except pages: one per channel, unless a simulcast copy joins
 		const within = rule.simulcastMs
-		let run =
-			within === undefined ? newest(() => true) : newest(r => r.khz.has(khz))
-		if (!run && within !== undefined) {
-			run = newest(r => t - r.last <= within)
-			run?.khz.add(khz)
-		}
+		const run =
+			within === undefined
+				? newest(() => true)
+				: (newest(r => simulcastCopy(r, khz, t, within)) ??
+					newest(r => r.primary === khz))
 		if (run) {
 			run.rows.push(row)
 			run.last = t
+			run.heard.set(khz, t)
 		} else start([row], t, khz)
 	}
 	settle()
@@ -487,12 +511,20 @@ function withIdentity(
 	}
 }
 
-/** The identity an event lacks that the other rows of its stack say (the detail's "Latest known"). */
+/**
+ * The identity an event lacks that rows of its stack heard before it say (the detail's "Latest known (from
+ * earlier rows)"): never a later row's.
+ */
 export function knownFor(
 	stack: ActivityStack,
 	item: ActivitySummary,
 ): KnownIdentity {
-	return item === stack.latest ? stack.known : identityFrom(item, stack.members)
+	const at = stack.byTime.indexOf(item)
+	// the newest row, last in time too: what the list row took (from every other, all earlier)
+	if (item === stack.latest && at === stack.byTime.length - 1)
+		return stack.known
+	// only the rows heard before it (time order, commitSeq breaking ties), newest first
+	return identityFrom(item, stack.byTime.slice(0, Math.max(0, at)).reverse())
 }
 
 /** The list a fold belongs to (an ActivityFeed): its identity owns the keys, its capacity bounds them. */

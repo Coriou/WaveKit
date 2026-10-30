@@ -127,9 +127,11 @@ bridges one):
 A talkgroup's calls are one stack per radio. A DMR `call_start` that arrives before its radio is
 decoded joins the call that follows it on the same talkgroup and channel (or, with none within the
 gap, the call before it) instead of becoming a stack of its own. A capcode is one stack per channel,
-except that the same page (same capcode, kind and text) heard on another channel within 2 s of the
-stack's newest decode is a simulcast copy and joins the stack: the row and the detail list the
-channels it was heard on (`On 160.450 · 466.075 MHz`). The 2 s is one POCSAG batch at the slowest
+except that the same page (same capcode, kind and text) heard within 2 s of one of the stack's
+decodes on another channel is a simulcast copy and joins the stack: the row and the detail list the
+channels it was heard on (`On 160.450 · 466.075 MHz`). A channel stays with the stack only while its
+copies keep arriving within 2 s of the others: a repeat heard later on that channel alone is a
+stack of that channel again. The 2 s is one POCSAG batch at the slowest
 rate (544 bits at 512 baud, 1.06 s), the most two decoders' timestamps of one page differ, plus the
 network's launch skew between transmitters (under 1 s).
 
@@ -145,7 +147,10 @@ last list at once (with `Updating…`) while it reloads, also for a rolling rang
 whose start has moved on (rows now before its start are dropped); the fresh rows join the kept ones
 when they overlap, else they replace them. Kept rows the store has since pruned, or that the fresh
 rows' range no longer holds, are dropped, and loading older rows continues after the oldest kept
-row rather than fetching the kept ones again.
+row rather than fetching the kept ones again (after a rolling range moved on, with the range it was
+loaded for, keeping only rows inside the current one). If the core no longer takes that position
+(it expired), loading starts again from the fresh rows and skips the pages of kept rows, at most one
+page per 100 kept rows.
 
 Before the first rows arrive, the list shows its shape in placeholder rows (`Loading what was
 heard…` after a second). An empty list says which case it is: **Nothing heard yet** with **Find
@@ -153,8 +158,8 @@ signals** (opens the Scanner) when nothing narrows it, **Nothing matches yet** w
 filters** and, for a time range, **Any time** when a search or range does, and **Nothing was heard
 in this range** for a range that has ended.
 
-An event's detail shows the event exactly as it was stored. Who earlier rows of its stack said it
-is, when this decode does not say it (a title, callsign, flight, registration or name), is a
+An event's detail shows the event exactly as it was stored. Who rows of its stack heard before it
+said it is (never a later row), when this decode does not say it (a title, callsign, flight, registration or name), is a
 separate **Latest known (from earlier rows)** block, each value with the time of the row that said
 it. The detail says **What it is** as a guess from its stack, labelled as one: a tone-only
 capcode repeating on a schedule reads `Likely a paging-network idle beacon (no content, repeats

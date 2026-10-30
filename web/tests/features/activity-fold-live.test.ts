@@ -288,6 +288,12 @@ describe("activity cache across close and open", () => {
 		const older = c.feed.get().items[5]
 		c.open(older ?? null)
 		expect(c.get().openItem).toBe(older)
+		// evt_7 was heard before evt_10 named it: nothing from a later row
+		expect(older?.eventId).toBe("evt_7")
+		expect(stack && older ? knownFor(stack, older) : null).toEqual({
+			title: null,
+			fields: [],
+		})
 		detach()
 		c.dispose()
 	})
@@ -338,6 +344,90 @@ describe("activity cache across close and open", () => {
 		expect(seen.at(-1)).toContain("pageToken=p%3Asnapshot")
 		expect(feed.get().error).toBeNull()
 		expect(feed.get().items).toHaveLength(131)
+	})
+
+	it("pages on after a rolling range moved with the cache token's own query, never re-fetching cached rows", async () => {
+		const firstFrom = new Date(T0).toISOString()
+		const movedFrom = new Date(T0 + 150_000).toISOString()
+		const seen: URLSearchParams[] = []
+		const answer = { current: page(range(201, 300), "p:cache") }
+		const api = new ApiClient({
+			fetch: async url => {
+				const params = new URL(String(url), "http://core").searchParams
+				seen.push(params)
+				// the core binds a cursor to its exact query
+				if (
+					params.get("pageToken") === "p:cache" &&
+					params.get("producedFrom") !== firstFrom
+				)
+					return new Response(JSON.stringify({ error: "query-changed" }), {
+						status: 400,
+					})
+				return new Response(JSON.stringify(answer.current), { status: 200 })
+			},
+		})
+		const core = setup()
+		const feed = new ActivityFeed(api, core.events, { id: "rolling" })
+		await feed.setQuery({ producedAt: { from: firstFrom } }, "Last hour")
+		feed.stop()
+		// "Last hour" advanced; the snapshot 290-320 joins the cache 201-300
+		answer.current = page(range(290, 320), "p:snapshot")
+		await feed.setQuery({ producedAt: { from: movedFrom } }, "Last hour")
+		expect(feed.get().items).toHaveLength(120)
+		// the old query's next page: 101-200, of which 150-200 are inside the moved range
+		answer.current = page(range(101, 200), null)
+		await feed.loadMore()
+		const last = seen.at(-1)
+		expect(last?.get("pageToken")).toBe("p:cache")
+		expect(last?.get("producedFrom")).toBe(firstFrom)
+		expect(seen.some(p => p.get("pageToken") === "p:snapshot")).toBe(false)
+		expect(feed.get().error).toBeNull()
+		expect(feed.get().items).toHaveLength(120 + 51)
+		const from = Date.parse(movedFrom)
+		expect(feed.get().items.every(i => Date.parse(i.producedAt) >= from)).toBe(
+			true,
+		)
+		expect(feed.get().nextPageToken).toBeNull()
+	})
+
+	it("skips the snapshot's pages of cached rows when the cache's token expired, within a bound", async () => {
+		const seen: string[] = []
+		const pages: Record<string, ActivitySearchPage> = {
+			first: page(range(201, 300), "p:cache"),
+			snapshot: page(range(290, 320), "p:s1"),
+			"p:s1": page(range(201, 289), "p:s2"),
+			"p:s2": page(range(150, 200), null),
+		}
+		let reopened = false
+		const api = new ApiClient({
+			fetch: async url => {
+				const token = new URL(String(url), "http://core").searchParams.get(
+					"pageToken",
+				)
+				seen.push(token ?? "")
+				if (token === "p:cache")
+					return new Response(JSON.stringify({ error: "expired" }), {
+						status: 400,
+					})
+				const p =
+					token === null
+						? reopened
+							? pages["snapshot"]
+							: pages["first"]
+						: pages[token]
+				return new Response(JSON.stringify(p), { status: 200 })
+			},
+		})
+		const core = setup()
+		const feed = new ActivityFeed(api, core.events, { id: "skip" })
+		await feed.setQuery({})
+		feed.stop()
+		reopened = true
+		await feed.setQuery({})
+		await feed.loadMore()
+		expect(seen.slice(-3)).toEqual(["p:cache", "p:s1", "p:s2"])
+		expect(feed.get().items).toHaveLength(120 + 51)
+		expect(feed.get().nextPageToken).toBeNull()
 	})
 
 	it("keeps a rolling range's cache across reopen a few minutes later, dropping rows before its start", async () => {

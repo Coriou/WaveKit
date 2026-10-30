@@ -274,6 +274,12 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	private subId = ""
 	/** The snapshot's page token, kept while paging continues from the cache's own (see reopenPaging). */
 	private fallbackToken: string | null = null
+	/**
+	 * The query `nextPageToken` was issued for: the core binds a cursor to its exact query, so after a
+	 * rolling range moved on, the cache's token pages on with the query it came from (a wider range; rows
+	 * before the new start are dropped) and never meets "query-changed".
+	 */
+	private pageQuery: ActivityQuery | null = null
 
 	constructor(
 		api: ApiClient,
@@ -338,6 +344,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			return this.reload()
 		}
 		this.fallbackToken = null
+		this.pageQuery = null
 		this.set({
 			...INITIAL,
 			query,
@@ -378,6 +385,11 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 						)
 					: { token: page.nextPageToken, fallback: null }
 				this.fallbackToken = paging.fallback
+				// the cache's token belongs to the query it was issued for; the snapshot's to this one
+				const fromCache =
+					keep && paging.token !== null && paging.token === s.nextPageToken
+				if (!fromCache) this.pageQuery = query
+				else this.pageQuery ??= query
 				return {
 					...s,
 					status: "live",
@@ -405,16 +417,25 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		}
 	}
 
-	/** The next (older) page of the snapshot. */
+	/**
+	 * The next (older) page of the snapshot. Continuing from the cache's own token, with the query that
+	 * token was issued for, no cached row is fetched again. When the core no longer takes that token (it
+	 * expired), paging starts over from the snapshot's token, whose pages first repeat the cached rows below
+	 * the snapshot: those pages are skipped (fetched, never merged) up to a bound of one page per page of
+	 * rows held, plus one.
+	 */
 	async loadMore(): Promise<void> {
 		const s = this.get()
-		if (s.query === null || s.nextPageToken === null || s.loadingMore) return
+		const query = s.query
+		if (query === null || s.nextPageToken === null || s.loadingMore) return
 		const generation = this.generation
+		const tokenQuery = this.pageQuery ?? query
 		this.update(v => ({ ...v, loadingMore: true }))
 		try {
-			const page = await this.fetchPage(s.query, s.nextPageToken).catch(
+			let pagedWith = tokenQuery
+			let page = await this.fetchPage(tokenQuery, s.nextPageToken).catch(
 				(error: unknown) => {
-					// the cache's token expired: page on from the snapshot's (rows already held are deduplicated)
+					// the cache's token expired: page on from the snapshot's
 					const fallback = this.fallbackToken
 					const status = (error as { status?: number }).status
 					if (
@@ -426,11 +447,21 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 						status === 429
 					)
 						throw error
-					return this.fetchPage(s.query as ActivityQuery, fallback)
+					pagedWith = query
+					return this.fetchPage(query, fallback).then(p =>
+						this.pastHeld(query, p, s.items, generation),
+					)
 				},
 			)
 			this.fallbackToken = null
 			if (generation !== this.generation) return
+			this.pageQuery = pagedWith
+			// a wider query's page (the range before it moved on): only the rows inside the current range
+			if (pagedWith !== query)
+				page = {
+					...page,
+					items: [...since(page.items, query.producedAt?.from)],
+				}
 			this.update(v => ({
 				...v,
 				loadingMore: false,
@@ -478,6 +509,29 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	dispose(): void {
 		this.stop()
 		for (const off of this.cleanup) off()
+	}
+
+	/**
+	 * Pages on from `page` while it holds only rows at or above the oldest held row (the cache, fetched
+	 * again from the snapshot's token): at most one page per `pageSize` rows held, plus one.
+	 */
+	private async pastHeld(
+		query: ActivityQuery,
+		page: ActivitySearchPage,
+		held: readonly ActivitySummary[],
+		generation: number,
+	): Promise<ActivitySearchPage> {
+		const oldest = held.at(-1)
+		if (oldest === undefined) return page
+		const bound = Math.ceil(held.length / this.pageSize) + 1
+		const repeats = (p: ActivitySearchPage) =>
+			p.items.length > 0 &&
+			p.items.every(i => compareSeq(i.commitSeq, oldest.commitSeq) >= 0)
+		for (let n = 0; n < bound && repeats(page); n++) {
+			if (page.nextPageToken === null || generation !== this.generation) break
+			page = await this.fetchPage(query, page.nextPageToken)
+		}
+		return page
 	}
 
 	private fetchPage(

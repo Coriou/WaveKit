@@ -533,6 +533,52 @@ describe("activity fold keys", () => {
 		expect(two.map(s => s.members.length)).toEqual([3, 3])
 	})
 
+	it("lets a simulcast association expire: a later copy on one channel alone is that channel's again", () => {
+		const A = 160_450_000
+		const B = 466_075_000
+		const page = (at: number, hz: number) =>
+			row(at, {
+				...ENTITY.pager,
+				frequencyHz: hz,
+				fields: [
+					{ key: "message", label: "Message", value: "Synthetic call 7" },
+				],
+			})
+		// A at 0 s, B at 1 s (one simulcast page), B at 90 s and A at 180 s heard alone: never one stack
+		const a0 = page(0, A)
+		const b1 = page(1000, B)
+		const b90 = page(90_000, B)
+		const a180 = page(180_000, A)
+		const stacks = foldActivity([a180, b90, b1, a0])
+		expect(stacks.length).toBeGreaterThan(1)
+		expect(stackOf(stacks, b90.eventId)?.members).not.toContain(a0)
+		expect(stackOf(stacks, a180.eventId)?.members).not.toContain(b90)
+		// B at 90 s is B's own (channel-bound); A at 180 s stays with the stack begun on A
+		expect(stackOf(stacks, b90.eventId)?.members).toEqual([b90])
+		expect(
+			stackOf(stacks, a180.eventId)
+				?.members.map(m => m.eventId)
+				.sort(),
+		).toEqual([a0, b1, a180].map(m => m.eventId).sort())
+		// the same network repeating the page on both channels together stays one stack
+		const both = [0, 60_000, 120_000].flatMap(t => [
+			page(t, A),
+			page(t + 800, B),
+		])
+		const one = foldActivity(both)
+		expect(one).toHaveLength(1)
+		expect(one[0]?.channelsHz).toEqual([A, B])
+		// copies whose order flips (B first) still join while within 2 s of each other
+		const flipped = foldActivity([
+			page(0, A),
+			page(500, B),
+			page(59_500, B),
+			page(60_000, A),
+		])
+		expect(flipped.every(s => s.members.length === 2)).toBe(true)
+		expect(flipped.every(s => s.channelsHz.length === 2)).toBe(true)
+	})
+
 	it("separates pages by content: tone only, numeric, alpha, and different texts", () => {
 		const page = (message: string | null) =>
 			row(0, {
@@ -624,16 +670,52 @@ describe("activity stacks", () => {
 		expect(stack?.latest).toBe(start)
 		expect(stack?.view.fields.some(f => f.key === "duration")).toBe(false)
 		expect(stack && knownFor(stack, start)).toEqual({ title: null, fields: [] })
-		// the older row opened from the stack: what it lacks, from the others
+		// an older row opened from the stack: what it lacks, from the rows heard before it only
+		const first = row(0, {
+			...ENTITY.aircraft,
+			title: "WKT100",
+			fields: [{ key: "callsign", label: "Callsign", value: "WKT100" }],
+		})
+		const older = row(1000, ENTITY.aircraft)
 		const named = row(4000, {
 			...ENTITY.aircraft,
 			title: "WKT101",
 			fields: [{ key: "callsign", label: "Callsign", value: "WKT101" }],
 		})
-		const older = row(1000, ENTITY.aircraft)
-		const [plane] = foldActivity([named, older])
-		expect(plane && knownFor(plane, older).title?.value).toBe("WKT101")
+		const [plane] = foldActivity([named, older, first])
+		const known = plane && knownFor(plane, older)
+		expect(known?.title).toEqual({ value: "WKT100", from: first })
+		expect(known?.fields.map(k => [k.field.value, k.from])).toEqual([
+			["WKT100", first],
+		])
+		// never a later row's: with nothing before it, nothing is known
+		const [alone] = foldActivity([named, older])
+		expect(alone && knownFor(alone, older)).toEqual({ title: null, fields: [] })
 		expect(plane && knownFor(plane, named)).toEqual({ title: null, fields: [] })
+		// equal times: commitSeq orders them, the later one is not "earlier"
+		const tieA = row(9000, ENTITY.aircraft)
+		const tieB = row(9000, {
+			...ENTITY.aircraft,
+			title: "WKT102",
+		})
+		const [tied] = foldActivity([tieA, tieB])
+		expect(tied && knownFor(tied, tieA)).toEqual({ title: null, fields: [] })
+		expect(tied && knownFor(tied, tieB)).toEqual({ title: null, fields: [] })
+	})
+
+	it("gives a newest row stored before an earlier-heard one only what was heard before it", () => {
+		// the latest by commitSeq was heard first: the later-heard row is not "earlier"
+		const heardLater = row(5000, { ...ENTITY.aircraft, title: "WKT103" })
+		const storedLast = {
+			...row(1000, ENTITY.aircraft),
+			commitSeq: String(seq + 100),
+		}
+		const [stack] = foldActivity([storedLast, heardLater])
+		expect(stack?.latest).toBe(storedLast)
+		expect(stack && knownFor(stack, storedLast)).toEqual({
+			title: null,
+			fields: [],
+		})
 	})
 
 	it("finds the stack of an event and memoises per list", () => {
@@ -929,6 +1011,16 @@ describe("activity incremental folding", () => {
 			deltaMs: fc.integer({ min: 0, max: 400_000 }),
 		}),
 		fc.record({
+			op: fc.constant("page" as const),
+			older: fc.boolean(),
+			channels: fc.array(fc.integer({ min: 0, max: 2 }), {
+				minLength: 1,
+				maxLength: 4,
+			}),
+			deltaMs: fc.integer({ min: 0, max: 200_000 }),
+			copyMs: fc.integer({ min: 0, max: 3_000 }),
+		}),
+		fc.record({
 			op: fc.constant("evict" as const),
 			n: fc.integer({ min: 1, max: 5 }),
 		}),
@@ -938,8 +1030,10 @@ describe("activity incremental folding", () => {
 		}),
 	)
 
+	const PAGER_CHANNELS = [160_450_000, 466_075_000, 169_650_000] as const
+
 	// Feature: activity-folding, Property 8: an incremental fold equals a full fold
-	// Validates: Requirements R1, R3, MAJOR 1
+	// Validates: Requirements R1, R3, MAJOR 1 (multi-channel pages too)
 	it("folds a changing list incrementally to exactly the stacks a full fold gives", () => {
 		fc.assert(
 			fc.property(fc.array(opArb, { minLength: 1, maxLength: 30 }), ops => {
@@ -958,6 +1052,19 @@ describe("activity incremental folding", () => {
 						// an older page: lower commit sequences, earlier times
 						const add = Array.from({ length: o.n }, () => {
 							const r = row((oldest -= o.deltaMs), ENTITY[o.family])
+							low -= 1
+							return { ...r, commitSeq: String(low) }
+						})
+						list = mergeNewest(list, add, owner.capacity)
+					} else if (o.op === "page") {
+						// one page heard on several channels, copies spread around the simulcast window
+						const base = o.older ? (oldest -= o.deltaMs) : (newest += o.deltaMs)
+						const add = o.channels.map((c, i) => {
+							const r = row(base + i * o.copyMs, {
+								...ENTITY.pager,
+								frequencyHz: PAGER_CHANNELS[c] ?? null,
+							})
+							if (!o.older) return r
 							low -= 1
 							return { ...r, commitSeq: String(low) }
 						})
