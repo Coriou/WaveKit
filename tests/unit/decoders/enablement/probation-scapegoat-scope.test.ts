@@ -128,7 +128,12 @@ function harness(specs: readonly Spec[], gateGuardPercent: number) {
 		const key = `${source}|@absorber#0`
 		totals.set(key, totals.get(key)! + 1)
 	}
-	return { run, overflowNoHolder, cpu, running }
+	/** Drops on `key`'s own decoder branch. */
+	const dropOn = (source: string, key: string) => {
+		const k = `${source}|decoder-${key}#0`
+		totals.set(k, totals.get(k)! + 1)
+	}
+	return { run, overflowNoHolder, dropOn, cpu, running }
 }
 
 it("CPU scapegoats are one per clear window across all sources", () => {
@@ -210,9 +215,11 @@ it("host overflow with no holder known sheds an untuned placement before the tun
 	expect(h.running.map(p => p.key)).toContain("readsb")
 })
 
-it("source-wide loss that is not host loss still judges the tuned probationer", () => {
-	// A healthy host: overflow with no holder known is not host load, and
-	// probation fails closed on it as before.
+it("source-wide loss that is not host loss is loss elsewhere for the tuned probationer", () => {
+	// A healthy host: overflow with no holder known is not host load, and no
+	// holder is known, so it is not readsb's own loss either (readsb was shed
+	// at +2 s before the fix). The untuned placement goes first; with nothing
+	// untuned left, readsb is judged by its own branch and CPU only.
 	const h = harness(
 		[
 			{ key: "a", source: "s" },
@@ -222,6 +229,99 @@ it("source-wide loss that is not host loss still judges the tuned probationer", 
 	)
 	const verdicts = h.run(() => h.overflowNoHolder("s"), 10_000)
 	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
+		{ key: "a", detail: "drops" },
+	])
+	expect(h.running.map(p => p.key)).toEqual(["readsb"])
+})
+
+it("loss charged to the tuned probationer's own branch is its own", () => {
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	const verdicts = h.run(() => h.dropOn("s", "readsb"), 10_000)
+	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
 		{ key: "readsb", detail: "drops" },
 	])
+	expect(h.running.map(p => p.key)).toEqual(["a"])
+})
+
+it("sustained CPU does not shed the tuned probationer while the scapegoat's clear window is open", () => {
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	// a goes at +2 s; nothing untuned is left, but its relief has not had
+	// EFFICIENCY_CLEAR_MS to show: readsb was shed at +4 s before the fix.
+	const verdicts = h.run(() => {}, 2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
+		{ key: "a", detail: "cpu", at: 2_000 },
+		{ key: "readsb", detail: "cpu", at: 2_000 + EFFICIENCY_CLEAR_MS },
+	])
+})
+
+it("CPU relieved within the scapegoat's clear window keeps the tuned probationer", () => {
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) > 6_000) h.cpu.normalisedPercent = 10
+	}, 120_000)
+	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
+		{ key: "a", detail: "cpu" },
+	])
+	expect(h.running.map(p => p.key)).toEqual(["readsb"])
+})
+
+it("late drops do not shed a second placement for loss spent on a scapegoat", () => {
+	// Sustained host overflow with no holder known: c is the scapegoat at
+	// +2 s and readsb graduates (the overflow is not its own). b was shed by
+	// late drops at +56 s before the fix, inside c's clear window.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "s" },
+			{ key: "c", source: "s" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		99,
+	)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => h.overflowNoHolder("s"), EFFICIENCY_CLEAR_MS)
+	expect(verdicts).toEqual([{ key: "c", detail: "drops", at: 2_000 }])
+})
+
+it("late drops on a CPU scapegoat's source do not shed a second placement for that loss", () => {
+	// readsb's CPU loss on source s sheds c on source t at +2 s; t's host
+	// drops up to then were the same loss. b was shed by late drops at +16 s
+	// before the fix.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) <= 8_000) h.overflowNoHolder("t")
+		else h.cpu.normalisedPercent = 10
+	}, 120_000)
+	expect(verdicts).toEqual([{ key: "c", detail: "cpu", at: 2_000 }])
 })

@@ -281,10 +281,10 @@ export function createEfficiencyGate(
 	/**
 	 * Drops or CPU over the limit observed in [admitted, until]. Drops judge a
 	 * placement only when charged to the branch it reads (or the source as a
-	 * whole), as late drops do; for a tuned-band placement, host loss charged
-	 * to the source as a whole is loss elsewhere (no holder known), never its
-	 * own. A placement naming no input branch, or a reader without branch
-	 * evidence, is judged by every drop on the source: probation fails closed
+	 * whole), as late drops do; for a tuned-band placement, loss charged to the
+	 * source as a whole (no holder known), host or not, is loss elsewhere: only
+	 * a charge to its own branch is its own. A placement naming no input
+	 * branch, or a reader without branch evidence, is judged by every drop on the source: probation fails closed
 	 * where it cannot tell whose loss it was.
 	 */
 	const evidence = (
@@ -301,11 +301,7 @@ export function createEfficiencyGate(
 					d =>
 						p.inputBranch === undefined ||
 						(chargesBranch(d.branches, p.inputBranch) &&
-							!(
-								p.tunedBand === true &&
-								d.code === "host" &&
-								d.branches === "source"
-							)),
+							!(p.tunedBand === true && d.branches === "source")),
 				)
 			else if (until === Infinity)
 				dropped = reader?.droppedSinceMono(p.sourceId, admitted) ?? false
@@ -529,10 +525,12 @@ export function createEfficiencyGate(
 							(i === 0 || value[i - 1].endMono <= w.startMono),
 					)
 				)
+					// Loss up to a scapegoat on this source was spent on it.
 					windows = value
 						.filter(
 							w =>
 								w.startMono >= (lateSince.get(sourceId) ?? mono) &&
+								w.startMono > (scapegoatAt.get(sourceId) ?? -Infinity) &&
 								w.endMono >
 									mono - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
 						)
@@ -894,8 +892,9 @@ export function createEfficiencyGate(
 				const detail = evidence(placement, admitted)
 				const tuned = placement.tunedBand === true
 				// Tuned band: host loss charged to a sibling branch some placement
-				// reads, or to the source as a whole (no holder known), while the
-				// probationer's own branch stayed clean, is its load on the host.
+				// reads, or any loss charged to the source as a whole (no holder
+				// known, host or not), while the probationer's own branch stayed
+				// clean, is loss elsewhere: an untuned scapegoat goes first.
 				// Drops on a branch no placement reads (live audio) never count.
 				let hostElsewhere = false
 				// Sibling branches the host loss was charged to (holder attribution).
@@ -917,9 +916,8 @@ export function createEfficiencyGate(
 						Math.max(admitted, hostJudged.get(placement.key) ?? admitted),
 						mono,
 					) ?? []) {
-						if (d.code !== "host") continue
 						if (d.branches === "source") hostElsewhere = true
-						else
+						else if (d.code === "host")
 							for (const b of d.branches)
 								if (read.has(b)) {
 									hostElsewhere = true
@@ -935,7 +933,7 @@ export function createEfficiencyGate(
 				// restarts its probation. Host loss charged to sibling branches sheds
 				// a placement reading one of them first (newest among those), so the
 				// holder goes rather than a clean bystander and then the holder too;
-				// unattributed (source-wide) host loss and CPU loss shed the newest.
+				// unattributed (source-wide) loss and CPU loss shed the newest.
 				// Loss on its own branch is its own.
 				if (tuned && detail !== "drops" && valid(mono)) {
 					const candidates = running.filter(
@@ -982,7 +980,14 @@ export function createEfficiencyGate(
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
 						scapegoatAt.set(scapegoat.sourceId, mono)
 					}
-					if (scapegoat || candidates.length > 0) {
+					// CPU with nothing untuned left: while the clear window since the
+					// latest scapegoat on any source is open, that scapegoat's relief
+					// has not had time to show, so the tuned one is not shed yet.
+					const cpuRelieving =
+						detail === "cpu" &&
+						mono - Math.max(-Infinity, ...scapegoatAt.values()) <
+							EFFICIENCY_CLEAR_MS
+					if (scapegoat || candidates.length > 0 || cpuRelieving) {
 						// The loss is spent on the scapegoat, the one shed within this
 						// window included: the restarted probation counts only drops
 						// and CPU strictly after this evaluation, so the same loss
@@ -1023,8 +1028,12 @@ export function createEfficiencyGate(
 							}
 						}
 					}
+					// A scapegoat on this source spent its loss: no late shed there
+					// until its clear window closes (its relief shows only later).
 					if (
 						mono < (cooldownUntil.get(sourceId) ?? 0) ||
+						mono - (scapegoatAt.get(sourceId) ?? -Infinity) <
+							EFFICIENCY_CLEAR_MS ||
 						state.condemned.length === 0
 					)
 						continue

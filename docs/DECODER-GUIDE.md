@@ -761,6 +761,13 @@ input for every branch): a congested live audio branch stops no decoder, even wh
 closes before the next sample (its share is kept for two samples). Overflow with no
 holding branch known is charged to the source as a whole, even when live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
 decoders of the tuned band last; `always` and operator-started decoders are never stopped.
+A decoder of the tuned band (such as ADS-B) on probation is judged only by drops on its own
+branch: overflow charged to the source as a whole, CPU over the guard, or host loss on
+another decoder's branch stops the newest other automatic decoder instead, at most one per
+60-second clear window on each source (one host-wide for CPU). Under sustained CPU load the
+tuned decoder is stopped only once that window has closed with nothing else left to stop,
+and loss already spent on such a stop does not stop a second decoder through late drops
+on that source until the window has closed.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).
