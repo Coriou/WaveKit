@@ -726,8 +726,9 @@ Late-drop shedding uses only completed windows ending within the last 30 seconds
 Late drops are charged to the fanout branch that dropped them: a raw decoder (such as
 ADS-B) is stopped only for drops on its own branch, channelizer drops stop only decoders on
 channelizer channels, and drops on live audio stop no decoder. Upstream loss (burst
-absorber overflow) names no branch and sheds nothing late. Among the decoders whose
-branch dropped, the newest automatic one is stopped, decoders of the tuned band last.
+absorber overflow) names no branch, so it is charged to the source as a whole, even when
+live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
+decoders of the tuned band last; `always` and operator-started decoders are never stopped.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).

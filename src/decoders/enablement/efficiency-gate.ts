@@ -451,6 +451,7 @@ export function createEfficiencyGate(
 							typeof w.condemning === "boolean" &&
 							typeof w.linkOrUnknownDrops === "boolean" &&
 							(w.condemnedBranches === undefined ||
+								w.condemnedBranches === "source" ||
 								(Array.isArray(w.condemnedBranches) &&
 									w.condemnedBranches.every(
 										(b: unknown) => typeof b === "string",
@@ -471,10 +472,12 @@ export function createEfficiencyGate(
 			/* Unreadable windows never condemn or credit. */
 		}
 		// A window condemns the placements reading a branch that dropped in it;
-		// an unscoped window (no branch list) condemns the whole source.
+		// an unscoped window (no branch list) or upstream loss no branch can be
+		// charged with (absorber overflow, "source") condemns the whole source.
 		const condemns = (w: LateDropWindow, p: RunningPlacement) =>
 			w.condemning &&
 			(w.condemnedBranches === undefined ||
+				w.condemnedBranches === "source" ||
 				(p.inputBranch !== undefined &&
 					w.condemnedBranches.includes(p.inputBranch)))
 		// Windows that condemn some placement on the source: drops only on a

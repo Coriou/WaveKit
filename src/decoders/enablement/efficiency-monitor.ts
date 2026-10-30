@@ -55,6 +55,8 @@ type DeferredLoss = {
 	at: number
 	/** The fanout branches that dropped in this interval. */
 	branches: string[]
+	/** Some of the loss has no branch to charge (absorber overflow). */
+	sourceWide: boolean
 	bytes: number
 	chunks: number
 	gap: number
@@ -66,6 +68,8 @@ type WindowEvidence = LateDropWindow & {
 	closedAt?: number
 	/** Branches whose condemning (consumer or host) drops fell in the window. */
 	branches: Set<string>
+	/** A condemning drop in the window had no branch to charge. */
+	sourceWide: boolean
 }
 type SourceState = {
 	pending: {
@@ -565,13 +569,16 @@ export function createEfficiencyMonitor(deps: {
 			if (!applies) evidenceValid = true
 			const intervalBytes = bytes
 			const positiveNow = bytes > 0 || chunks > 0
-			// Late drops are charged to the branches that dropped, never to the
-			// source as a whole.
+			// Late drops are charged to the branches that dropped; loss upstream
+			// of the branch split (absorber overflow), or with no branch to
+			// charge, falls on the source as a whole.
 			const droppedBranches: string[] = []
 			for (const [key, loss] of s.branchDrops) {
 				const branch = counterBranchId(key)
 				if (loss > 0 && branch !== null) droppedBranches.push(branch)
 			}
+			const sourceWide =
+				(absorberOverflow ?? 0) > 0 || droppedBranches.length === 0
 			let currentCode: DropAttribution = !applies
 				? positiveNow
 					? "unknown"
@@ -592,6 +599,7 @@ export function createEfficiencyMonitor(deps: {
 				deferred: boolean
 				at: number
 				branches: string[]
+				sourceWide: boolean
 				bytes: number
 				chunks: number
 				code: DropAttribution
@@ -656,6 +664,7 @@ export function createEfficiencyMonitor(deps: {
 				const loss: DeferredLoss = {
 					at,
 					branches: droppedBranches,
+					sourceWide,
 					bytes,
 					chunks,
 					gap: maxGapMs!,
@@ -692,6 +701,7 @@ export function createEfficiencyMonitor(deps: {
 					deferred: false,
 					at,
 					branches: droppedBranches,
+					sourceWide,
 					bytes,
 					chunks,
 					code: currentCode,
@@ -762,6 +772,7 @@ export function createEfficiencyMonitor(deps: {
 						linkOrUnknownDrops: false,
 						complete: comparable && evidenceValid,
 						branches: new Set(),
+						sourceWide: false,
 					}
 				}
 				s.openWindow ??= {
@@ -771,6 +782,7 @@ export function createEfficiencyMonitor(deps: {
 					linkOrUnknownDrops: false,
 					complete: true,
 					branches: new Set(),
+					sourceWide: false,
 				}
 				if (at > s.openWindow.startMono)
 					s.openWindow.complete &&= comparable && evidenceValid
@@ -782,6 +794,7 @@ export function createEfficiencyMonitor(deps: {
 						if (r.code === "consumer" || r.code === "host") {
 							w.condemning = true
 							for (const branch of r.branches) w.branches.add(branch)
+							w.sourceWide ||= r.sourceWide
 						} else w.linkOrUnknownDrops = true
 					}
 				}
@@ -794,6 +807,7 @@ export function createEfficiencyMonitor(deps: {
 						linkOrUnknownDrops: false,
 						complete: comparable && evidenceValid,
 						branches: new Set(),
+						sourceWide: false,
 					}
 				}
 				if (!waiting) {
@@ -804,7 +818,9 @@ export function createEfficiencyMonitor(deps: {
 								endMono: w.endMono,
 								condemning: w.condemning,
 								linkOrUnknownDrops: !w.condemning && w.linkOrUnknownDrops,
-								condemnedBranches: [...w.branches].sort(),
+								condemnedBranches: w.sourceWide
+									? "source"
+									: [...w.branches].sort(),
 							})
 							if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
 						}
@@ -1012,7 +1028,7 @@ export function createEfficiencyMonitor(deps: {
 				)
 				.map(w => ({
 					...w,
-					...(w.condemnedBranches
+					...(Array.isArray(w.condemnedBranches)
 						? { condemnedBranches: [...w.condemnedBranches] }
 						: {}),
 				}))

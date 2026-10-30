@@ -1325,7 +1325,9 @@ it("manager serializes generated desires with independent adapter events", async
 		),
 		{ numRuns: 200 },
 	)
-})
+	// 200 generated scenarios take about 4 s alone and flaked past vitest's
+	// 5 s default under parallel load; the bound guards hangs, not speed.
+}, 30_000)
 
 function realGate(budgetCores = 1) {
 	const drops = {

@@ -449,10 +449,13 @@ export interface LateDropWindow {
 	 * The fanout branches (ids without the instance suffix) whose drops made
 	 * the window condemning. A condemning window condemns only the placements
 	 * reading one of them, so a branch no decoder reads (live audio) condemns
-	 * none; upstream loss (absorber overflow) names no branch. Absent: the
+	 * none. `"source"`: some condemning loss had no branch to charge
+	 * (upstream absorber overflow), so the window condemns the source as a
+	 * whole, whatever branches also dropped. An empty list is not that: only
+	 * branches no placement reads dropped, and it condemns nobody. Absent: the
 	 * window is not scoped and condemns every placement on its source.
 	 */
-	condemnedBranches?: readonly string[]
+	condemnedBranches?: readonly string[] | "source"
 }
 
 /** The source fanout branch the channelizer reads (named by ChannelizerManager). */
