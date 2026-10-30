@@ -695,7 +695,9 @@ and it starts. When you tune, the core decides for each decoder in this order:
    source, within 200 kHz of its targets or the span between them, or inside its band) goes
    first. The VFO tunes only the source it is on: a second dongle is not "tuned" by its own
    capture centre while the VFO is elsewhere, and only with no VFO at all does the default
-   source's capture centre stand in for it. A source a scanner sweep holds is never tuned.
+   source's capture centre stand in for it. A source a scanner sweep holds is never tuned,
+   nor is a VFO a sweep's hop left settled, until the restore or your own tune settles it
+   again.
    For the tuned decoder:
    - it is admitted before the others, and when the budget is full the other automatic
      decoders stop to make room (newest first);

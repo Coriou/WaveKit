@@ -411,3 +411,38 @@ it("a second dongle is not tuned by its own centre while the VFO is on another s
 	expect(near()?.tunedBand).toBe(true)
 	expect(probed.find(p => p.key === raw("far").key)?.tunedBand).toBeUndefined()
 })
+
+it("a hop VFO left when the scanner releases is not tuned until a later settle", async () => {
+	const forgotten: string[] = []
+	const f = await setup({
+		budgetCores: 0.5,
+		wrapGate: gate => ({
+			...gate,
+			forget: key => {
+				forgotten.push(key)
+				gate.forget(key)
+			},
+		}),
+	})
+	f.settle(FAR_HZ)
+	await vi.advanceTimersByTimeAsync(1_000)
+	expect(f.m.getStatus("near")?.efficiency?.detail).toBe("budget")
+	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+	// A hop settles the VFO in the near band.
+	await f.tune(NEAR_HZ)
+	// The restore moves the centre back, and the source is released before
+	// the restored VFO settles: the settled VFO is still the hop's.
+	f.sources.setCenter("rtl", FAR_HZ)
+	await f.m.releaseSource("rtl", "job-1")
+	await vi.advanceTimersByTimeAsync(5_000)
+	expect(forgotten).not.toContain(raw("near").key)
+	expect(f.running("near")).toBe(false)
+	expect(f.m.getStatus("near")?.efficiency?.detail).toBe("budget")
+	// The restore settles back at the far band, then the user tunes near.
+	f.settle(FAR_HZ)
+	await vi.advanceTimersByTimeAsync(5_000)
+	expect(forgotten).not.toContain(raw("near").key)
+	await f.tune(NEAR_HZ)
+	await vi.advanceTimersByTimeAsync(TUNED_SETTLE_MS + DEBOUNCE_MS)
+	expect(forgotten).toContain(raw("near").key)
+})
