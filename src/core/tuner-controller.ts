@@ -462,6 +462,9 @@ export class TunerController extends EventEmitter {
 		new Map()
 	/** Sources whose band gain write is in flight (its own gain writes keep the saved gain). */
 	private applyingBandGain: Set<string> = new Set()
+	/** The saveOperatorGain call that wrote each saved gain (a drop or newer save replaces it). */
+	private savedRecords: Map<string, { value: SavedOperatorGain | null }> =
+		new Map()
 	/**
 	 * The band gain on the tuner per source (TunerState.bandGain). Set only after the band's
 	 * writes succeed; any later gain, gain mode or frequency write drops it, and cloneState
@@ -567,15 +570,39 @@ export class TunerController extends EventEmitter {
 		return run
 	}
 
-	private saveOperatorGain(
+	/**
+	 * Saves the operator's gain before a band gain: "saved" once it is durable, "failed"
+	 * when persisting it failed (the record is taken back), "superseded" when an operator
+	 * gain choice came meanwhile (the record is dropped: that choice is the newest gain).
+	 */
+	private async saveOperatorGain(
 		sourceId: string,
 		saved: SavedOperatorGain | null,
-	): void {
+	): Promise<"saved" | "failed" | "superseded"> {
+		const record = { value: saved }
+		const choices = this.gainChoiceCount(sourceId)
 		this.operatorGainBeforeBand.set(sourceId, saved)
-		void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
+		this.savedRecords.set(sourceId, record)
+		const durable =
+			(await this.bandGain?.saveOperatorGains(
+				this.operatorGainBeforeBand,
+				sourceId,
+			)) ?? true
+		const current = this.savedRecords.get(sourceId) === record
+		if (current && this.gainChoiceCount(sourceId) !== choices) {
+			this.dropOperatorGain(sourceId)
+			return "superseded"
+		}
+		if (!durable && current) {
+			this.savedRecords.delete(sourceId)
+			this.operatorGainBeforeBand.delete(sourceId)
+		}
+		if (!current) return "superseded"
+		return durable ? "saved" : "failed"
 	}
 
 	private dropOperatorGain(sourceId: string): void {
+		this.savedRecords.delete(sourceId)
 		if (!this.operatorGainBeforeBand.delete(sourceId)) return
 		void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
 	}
@@ -604,17 +631,28 @@ export class TunerController extends EventEmitter {
 			if (target !== null) {
 				const unknown = this.fieldProof(sourceId).unknownFields
 				const gain = unknown.includes("gain") ? null : state.gain
-				if (saved === undefined)
-					this.saveOperatorGain(
+				// The band gain goes on only once the gain it replaces is durable, so a restart
+				// in the band still restores it. Unsaved, or chosen meanwhile: the gain stays.
+				if (saved === undefined) {
+					const outcome = await this.saveOperatorGain(
 						sourceId,
 						unknown.includes("gainMode") ||
 							(state.gainMode === "manual" && gain === null)
 							? null
 							: { gainMode: state.gainMode, gain },
 					)
-				if (state.gainMode !== "manual" || unknown.includes("gainMode"))
+					if (outcome === "failed")
+						this.log.warn(
+							{ sourceId },
+							"Saving the gain from before the band failed; band gain not applied",
+						)
+					if (outcome !== "saved") return
+				}
+				const now = this.tunerStates.get(sourceId) ?? state
+				const proof = this.fieldProof(sourceId).unknownFields
+				if (now.gainMode !== "manual" || proof.includes("gainMode"))
 					await this.setGainMode(sourceId, "manual", opts)
-				if (state.gain !== target || unknown.includes("gain"))
+				if (now.gain !== target || proof.includes("gain"))
 					await this.setGain(sourceId, target, opts)
 				this.noteBandGainApplied(sourceId, target, "user", hz)
 				return
@@ -695,6 +733,23 @@ export class TunerController extends EventEmitter {
 			return undefined
 		}
 		return { ...applied }
+	}
+
+	/**
+	 * A bulk update's gain, gain mode or AGC field equal to the tuner's: no write, but still
+	 * the operator's choice (as POST /gain): counted, and it supersedes the saved gain. An
+	 * explicit gain also replaces a confirmed band gain (the gain is now the operator's);
+	 * an unchanged mode keeps it.
+	 */
+	private noteUnchangedGainChoice(
+		sourceId: string,
+		opts: TunerWriteOptions,
+		gain = false,
+	): void {
+		this.noteGainChoice(sourceId, opts)
+		this.noteOperatorGainWrite(sourceId, opts)
+		if (gain && this.appliedBandGain.delete(sourceId))
+			this.emitStateChanged(sourceId)
 	}
 
 	/** An explicit operator gain write supersedes the gain saved before a band. */
@@ -1464,6 +1519,9 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
+		// An AGC choice is a gain choice, as a gain mode one: it supersedes the saved gain.
+		this.noteGainChoice(sourceId, opts)
+		if (state.agcMode !== enabled) this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_AGC_MODE,
@@ -1472,6 +1530,7 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.agcMode = enabled
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1666,10 +1725,12 @@ export class TunerController extends EventEmitter {
 		}
 		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {
 			await this.setGainMode(sourceId, updates.gainMode, opts)
-		}
+		} else if (updates.gainMode !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts)
 		if (updates.gain !== undefined && updates.gain !== state.gain) {
 			await this.setGain(sourceId, updates.gain, opts)
-		}
+		} else if (updates.gain !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts, true)
 		if (updates.ppm !== undefined && updates.ppm !== state.ppm) {
 			await this.setPpm(sourceId, updates.ppm, opts)
 		}
@@ -1681,7 +1742,8 @@ export class TunerController extends EventEmitter {
 		}
 		if (updates.agcMode !== undefined && updates.agcMode !== state.agcMode) {
 			await this.setAgcMode(sourceId, updates.agcMode, opts)
-		}
+		} else if (updates.agcMode !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts)
 		if (updates.biasTee !== undefined && updates.biasTee !== state.biasTee) {
 			await this.setBiasTee(sourceId, updates.biasTee, opts)
 		}

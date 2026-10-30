@@ -50,6 +50,7 @@ const SAVED_SOURCE_ID_MAX_LENGTH = 128
 /**
  * 16 records x about 190 bytes each (a 128-char source id, the mode, a 3-digit gain, keys
  * and tab indentation) is about 3 KiB; 8 KiB leaves room and bounds the read before parse.
+ * Ids that JSON escapes take more, so a write is bounded by its serialised bytes too.
  */
 export const BAND_GAIN_SAVED_FILE_MAX_BYTES = 8 * 1024
 
@@ -350,12 +351,16 @@ export class BandGainSettingsService {
 
 	/**
 	 * Persists the controller's saved pre-band gains (a copy, taken now). Serialised; never
-	 * rejects: a failed write is logged and the next change writes again. Past
-	 * BAND_GAIN_SAVED_MAX_SOURCES the oldest records are dropped.
+	 * rejects: resolves false when the write failed (logged; the next change writes again)
+	 * or when `required` (a source id) was not among the records written. Past
+	 * BAND_GAIN_SAVED_MAX_SOURCES, or past BAND_GAIN_SAVED_FILE_MAX_BYTES serialised (an
+	 * id of escaped characters takes up to 6 bytes per character), the oldest records are
+	 * dropped, so the file always reads back within its bound.
 	 */
 	saveOperatorGains(
 		gains: ReadonlyMap<string, SavedOperatorGain | null>,
-	): Promise<void> {
+		required?: string,
+	): Promise<boolean> {
 		const records = [...gains]
 			.filter(([sourceId]) => sourceId.length <= SAVED_SOURCE_ID_MAX_LENGTH)
 			.slice(-BAND_GAIN_SAVED_MAX_SOURCES)
@@ -363,18 +368,38 @@ export class BandGainSettingsService {
 				sourceId,
 				saved: saved === null ? null : { ...saved },
 			}))
-		this.saved = new Map(records.map(r => [r.sourceId, r.saved] as const))
-		const text = JSON.stringify(
-			{ version: FILE_VERSION, sources: records },
-			null,
-			"\t",
-		)
+		const serialise = () =>
+			JSON.stringify({ version: FILE_VERSION, sources: records }, null, "\t")
+		let text = serialise()
+		let dropped = 0
+		// One record serialises to under 1 KiB (128 ids x 6 bytes), so this always ends.
+		while (
+			Buffer.byteLength(text, "utf8") > BAND_GAIN_SAVED_FILE_MAX_BYTES &&
+			records.length > 0
+		) {
+			records.shift()
+			dropped += 1
+			text = serialise()
+		}
+		if (dropped > 0)
+			this.log.warn(
+				{ dropped, maxBytes: BAND_GAIN_SAVED_FILE_MAX_BYTES },
+				"Saved pre-band gains past the file size bound; the oldest were not persisted",
+			)
+		const kept = new Map(records.map(r => [r.sourceId, r.saved] as const))
 		const run = this.savedChain.then(() =>
-			this.fs.atomicWrite(this.savedFile, text).catch(() => {
-				this.log.warn("Writing the saved pre-band gain failed")
-			}),
+			this.fs.atomicWrite(this.savedFile, text).then(
+				() => {
+					this.saved = kept
+					return required === undefined || kept.has(required)
+				},
+				() => {
+					this.log.warn("Writing the saved pre-band gain failed")
+					return false
+				},
+			),
 		)
-		this.savedChain = run
+		this.savedChain = run.then(() => undefined)
 		return run
 	}
 

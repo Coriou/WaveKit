@@ -1486,8 +1486,10 @@ Manual tuning (`POST …/frequency`, `PATCH …/config`, the web app, and a dwel
 through these routes) does **not** change gain unless `applyToMyTuning` is on. With it on,
 tuning into a listed range applies its gain, and tuning out of the bands puts back the gain
 mode and gain you had before (kept in `<stateDir>/tuner-band-gain-saved.json`, so a restart
-inside a band still restores it); setting a gain, gain mode or AGC yourself inside a band
-makes that your gain, while IF gain and gain index writes do not. Overlapping retunes of one
+inside a band still restores it). The band gain goes on only after that file is written; if
+writing it fails, your gain stays and the failure is logged. Setting a gain, gain mode or AGC
+yourself inside a band makes that your gain, also in a `PATCH …/config` whose value equals the
+tuner's, while IF gain and gain index writes do not. Overlapping retunes of one
 source then run one at a time. Relay clients (SDR++) are never touched.
 
 ```bash

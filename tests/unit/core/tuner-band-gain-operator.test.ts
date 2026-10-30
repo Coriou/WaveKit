@@ -422,3 +422,217 @@ describe("apply to my tuning: overlapping REST retunes and restarts (m4)", () =>
 		).toEqual([])
 	})
 })
+
+describe("apply to my tuning: the saved gain is a durable, superseded record (WG18 gate)", () => {
+	function gainWrites(writes: [number, number][], mark: number) {
+		return writes
+			.slice(mark)
+			.filter(([c]) => c === SET_GAIN || c === SET_GAIN_MODE)
+	}
+
+	it("the band gain waits until the saved gain is on disk", async () => {
+		const disk = memoryFs()
+		let release: () => void = () => {}
+		const write = disk.fs.atomicWrite
+		disk.fs.atomicWrite = (path, data) =>
+			path === SAVED_PATH
+				? new Promise<void>(resolve => {
+						release = () => {
+							void write(path, data).then(resolve)
+						}
+					})
+				: write(path, data)
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 100)
+		const mark = h.writes.length
+		const retune = h.controller.setFrequency("rtl", ISM, REST)
+		await settle()
+		expect(gainWrites(h.writes, mark)).toEqual([])
+		release()
+		await retune
+		expect(gainWrites(h.writes, mark)).toEqual([[SET_GAIN, 297]])
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toMatchObject({
+			sources: [{ sourceId: "rtl", saved: { gainMode: "manual", gain: 100 } }],
+		})
+	})
+
+	it("a failed save keeps the user's gain and applies no band gain", async () => {
+		const disk = memoryFs()
+		const write = disk.fs.atomicWrite
+		disk.fs.atomicWrite = (path, data) =>
+			path === SAVED_PATH
+				? Promise.reject(Object.assign(new Error("x"), { code: "ENOSPC" }))
+				: write(path, data)
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 100)
+		const mark = h.writes.length
+		await h.controller.setFrequency("rtl", ISM, REST)
+		expect(gainWrites(h.writes, mark)).toEqual([])
+		expect(h.controller.getState("rtl")).toMatchObject({
+			frequency: ISM,
+			gainMode: "manual",
+			gain: 100,
+		})
+		expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
+		// Nothing saved in memory either: leaving the band restores nothing.
+		const leave = h.writes.length
+		await h.controller.setFrequency("rtl", UHF, REST)
+		expect(gainWrites(h.writes, leave)).toEqual([])
+	})
+
+	it("an operator gain choice while the save is in flight wins: no band gain, nothing saved", async () => {
+		const disk = memoryFs()
+		let release: () => void = () => {}
+		const write = disk.fs.atomicWrite
+		let hold = true
+		disk.fs.atomicWrite = (path, data) =>
+			path === SAVED_PATH && hold
+				? new Promise<void>(resolve => {
+						hold = false
+						release = () => {
+							void write(path, data).then(resolve)
+						}
+					})
+				: write(path, data)
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 100)
+		const retune = h.controller.setFrequency("rtl", ISM, REST)
+		await settle()
+		await h.controller.setGain("rtl", 420, REST)
+		release()
+		await retune
+		await settle()
+		expect(h.controller.getState("rtl")?.gain).toBe(420)
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toMatchObject({
+			sources: [],
+		})
+	})
+
+	it("a REST AGC choice in a band supersedes the saved gain and counts as a gain choice", async () => {
+		const disk = memoryFs()
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 100)
+		await h.controller.setFrequency("rtl", ISM, REST)
+		const before = h.controller.gainChoiceCount("rtl")
+		// The tuner's baseline is AGC on: turning it off changes the mode.
+		await h.controller.setAgcMode("rtl", false, REST)
+		expect(h.controller.gainChoiceCount("rtl")).toBe(before + 1)
+		expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
+		await settle()
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toMatchObject({
+			sources: [],
+		})
+		const mark = h.writes.length
+		await h.controller.setFrequency("rtl", UHF, REST)
+		expect(gainWrites(h.writes, mark)).toEqual([])
+	})
+
+	it("a scanner AGC write is not an operator choice", async () => {
+		const h = await setup(true)
+		await manual(h.controller, 100)
+		await h.controller.setFrequency("rtl", ISM, REST)
+		const before = h.controller.gainChoiceCount("rtl")
+		await h.controller.setAgcMode("rtl", false, { origin: "scanner" })
+		expect(h.controller.gainChoiceCount("rtl")).toBe(before)
+		const mark = h.writes.length
+		await h.controller.setFrequency("rtl", UHF, REST)
+		expect(gainWrites(h.writes, mark)).toEqual([[SET_GAIN, 100]])
+	})
+
+	it.each([
+		["gain equal to the band gain", { gain: 297 }, true],
+		["gain mode equal to the tuner's", { gainMode: "manual" as const }, false],
+		["AGC equal to the tuner's", { agcMode: true }, false],
+	])(
+		"PATCH config with a %s is a choice: no write, saved gain superseded",
+		async (_name, update, dropsBandGain) => {
+			const disk = memoryFs()
+			const h = await setup(true, disk.fs)
+			await manual(h.controller, 100)
+			await h.controller.setFrequency("rtl", ISM, REST)
+			expect(h.controller.getState("rtl")?.bandGain).toBeDefined()
+			const before = h.controller.gainChoiceCount("rtl")
+			const mark = h.writes.length
+			await h.controller.configure("rtl", update, REST)
+			expect(h.writes.slice(mark)).toEqual([])
+			expect(h.controller.gainChoiceCount("rtl")).toBe(before + 1)
+			expect(h.controller.getState("rtl")?.bandGain === undefined).toBe(
+				dropsBandGain,
+			)
+			await settle()
+			expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toMatchObject({
+				sources: [],
+			})
+			await h.controller.setFrequency("rtl", UHF, REST)
+			expect(gainWrites(h.writes, mark)).toEqual([])
+		},
+	)
+
+	it("ids of escaped characters: the file stays within the read bound and reads back", async () => {
+		const disk = memoryFs()
+		const s = await service(true, disk.fs)
+		// 128 control characters serialise to 768 bytes each ("\u0001").
+		const id = (i: number) =>
+			`${String.fromCharCode(i + 1)}${"\u0001".repeat(127)}`
+		const many = new Map(
+			Array.from({ length: BAND_GAIN_SAVED_MAX_SOURCES }, (_, i) => [
+				id(i),
+				{ gainMode: "manual" as const, gain: 100 },
+			]),
+		)
+		const naive = JSON.stringify(
+			{
+				version: 1,
+				sources: [...many].map(([sourceId, saved]) => ({ sourceId, saved })),
+			},
+			null,
+			"\t",
+		)
+		expect(Buffer.byteLength(naive)).toBeGreaterThan(
+			BAND_GAIN_SAVED_FILE_MAX_BYTES,
+		)
+		const newest = id(BAND_GAIN_SAVED_MAX_SOURCES - 1)
+		await expect(s.saveOperatorGains(many, newest)).resolves.toBe(true)
+		const text = disk.files.get(SAVED_PATH) ?? ""
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(
+			BAND_GAIN_SAVED_FILE_MAX_BYTES,
+		)
+		const reloaded = await service(true, disk.fs)
+		const loaded = reloaded.savedOperatorGains()
+		expect(loaded.size).toBe(
+			(JSON.parse(text) as { sources: unknown[] }).sources.length,
+		)
+		expect(loaded.size).toBeGreaterThan(0)
+		expect(loaded.has(newest)).toBe(true)
+		// The oldest went first.
+		expect(loaded.has(id(0))).toBe(false)
+	})
+
+	it("one more escaped record past the bound drops one more of the oldest", async () => {
+		const disk = memoryFs()
+		const s = await service(true, disk.fs)
+		const id = (i: number) =>
+			`${String.fromCharCode(i + 1)}${"\u0001".repeat(127)}`
+		const sizes: number[] = []
+		for (const n of [9, 10, 11]) {
+			const gains = new Map(
+				Array.from({ length: n }, (_, i) => [id(i), null] as const),
+			)
+			await s.saveOperatorGains(gains)
+			const text = disk.files.get(SAVED_PATH) ?? ""
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(
+				BAND_GAIN_SAVED_FILE_MAX_BYTES,
+			)
+			sizes.push((JSON.parse(text) as { sources: unknown[] }).sources.length)
+		}
+		// 10 records fit (about 7.8 KiB); the 11th pushes the oldest out.
+		expect(sizes).toEqual([9, 10, 10])
+	})
+
+	it("a source id the file cannot hold is not durable", async () => {
+		const s = await service(true, memoryFs().fs)
+		await expect(
+			s.saveOperatorGains(new Map([["y".repeat(129), null]]), "y".repeat(129)),
+		).resolves.toBe(false)
+	})
+})

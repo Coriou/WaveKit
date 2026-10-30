@@ -154,7 +154,8 @@ back, also when your own write or a relay client takes it from them. While your 
 mode is unknown (right after a restart, before any gain write) they write no band gain. Manual
 tuning (the API, the web app, a dwell you drive through the API) keeps your gain unless
 `applyToMyTuning` is true; then tuning into a listed range applies its gain and tuning out puts
-yours back, from `<stateDir>/tuner-band-gain-saved.json` after a restart.
+yours back, from `<stateDir>/tuner-band-gain-saved.json` after a restart (the band gain goes
+on only once that file is written; a failed write keeps your gain).
 
 ```yaml
 tuner:
