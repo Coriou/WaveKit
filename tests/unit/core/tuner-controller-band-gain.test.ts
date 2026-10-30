@@ -178,6 +178,38 @@ describe("TunerController per-band gain", () => {
 		expect(gainWrites()).toEqual([])
 	})
 
+	it("a failed restore write keeps the saved gain; the next out-of-band retune retries it", async () => {
+		const { controller, writes, gainWrites } = setup(true)
+		await controller.setGainMode("rtl", "manual", REST)
+		await controller.setGain("rtl", 496, REST)
+		await controller.setFrequency("rtl", ISM, REST)
+		const sm = (
+			controller as unknown as {
+				sourceManager: { writeToSource: ReturnType<typeof vi.fn> }
+			}
+		).sourceManager
+		const healthy = sm.writeToSource.getMockImplementation()
+		sm.writeToSource.mockImplementation((_id: string, payload: Buffer) => {
+			if (payload.readUInt8(0) === SET_GAIN) throw new Error("socket closed")
+			writes.push([payload.readUInt8(0), payload.readUInt32BE(1)])
+			return true
+		})
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")!.gain).toBe(297)
+		sm.writeToSource.mockImplementation(healthy!)
+		const mark = gainWrites().length
+		await controller.setFrequency("rtl", UHF + 25_000, REST)
+		expect(gainWrites(mark)).toEqual([[SET_GAIN, 496]])
+		expect(controller.getState("rtl")).toMatchObject({
+			gainMode: "manual",
+			gain: 496,
+		})
+		// Restored: the saved gain is gone, so a further retune writes nothing.
+		const again = gainWrites().length
+		await controller.setFrequency("rtl", UHF + 50_000, REST)
+		expect(gainWrites(again)).toEqual([])
+	})
+
 	it("a failed band gain write leaves the retune itself successful", async () => {
 		const { controller, writes } = setup(true)
 		const sm = (

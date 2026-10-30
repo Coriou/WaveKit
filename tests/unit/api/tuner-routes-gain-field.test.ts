@@ -152,13 +152,45 @@ describe("POST /api/tuner/:sourceId/gain field names", () => {
 		)
 	})
 
-	it("a controller 400 also names the expected field and unit", async () => {
+	it("a controller 400 names the expected field and unit and never echoes the value", async () => {
 		const { app: a } = await build()
-		const res = await post(a, "/api/tuner/rtl-1/gain", { gain: 900 })
+		const res = await post(a, "/api/tuner/rtl-1/gain", { gain: 987654321 })
 		expect(res.statusCode).toBe(400)
-		const message = (JSON.parse(res.body) as { message: string }).message
-		expect(message).toContain("gain out of range")
-		expect(message).toContain("tenths of a dB")
+		const body = JSON.parse(res.body) as { code: string; message: string }
+		expect(body.code).toBe("TUNER_VALIDATION_ERROR")
+		expect(body.message).toContain('"gain"')
+		expect(body.message).toContain("tenths of a dB")
+		expect(body.message).not.toContain("987654321")
+		expect(body.message).not.toContain("out of range")
+	})
+
+	it("a malformed JSON body is a 400 with the same static field and unit guidance", async () => {
+		const { app: a, controller } = await build()
+		for (const payload of ['{"gain": 29ECHO7', ""]) {
+			const res = await a.inject({
+				method: "POST",
+				url: "/api/tuner/rtl-1/gain",
+				headers: { "content-type": "application/json" },
+				payload,
+			})
+			expect(res.statusCode).toBe(400)
+			const body = JSON.parse(res.body) as { code: string; message: string }
+			expect(body.code).toBe("VALIDATION_ERROR")
+			expect(body.message).toContain('"gain"')
+			expect(body.message).toContain("tenths of a dB")
+			expect(body.message).not.toContain("ECHO")
+		}
+		const freq = await a.inject({
+			method: "POST",
+			url: "/api/tuner/rtl-1/frequency",
+			headers: { "content-type": "application/json" },
+			payload: "{hz:",
+		})
+		expect(freq.statusCode).toBe(400)
+		expect((JSON.parse(freq.body) as { message: string }).message).toContain(
+			'"hz"',
+		)
+		expect(controller.setGain).not.toHaveBeenCalled()
 	})
 })
 

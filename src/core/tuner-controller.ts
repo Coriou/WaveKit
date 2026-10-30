@@ -526,8 +526,12 @@ export class TunerController extends EventEmitter {
 					await this.setGain(sourceId, target, opts)
 				return
 			}
-			this.operatorGainBeforeBand.delete(sourceId)
-			if (saved === null || saved === undefined) return
+			if (saved === null || saved === undefined) {
+				this.operatorGainBeforeBand.delete(sourceId)
+				return
+			}
+			// The saved gain is dropped only after the restore succeeds: a failed write keeps
+			// it, so the next out-of-band retune retries the restore.
 			// rtl_tcp SET_GAIN switches the tuner to manual: an AGC restore writes the gain
 			// first and the mode last, so the tuner ends in AGC with the exact saved gain.
 			if (saved.gainMode === "agc") {
@@ -538,6 +542,7 @@ export class TunerController extends EventEmitter {
 					await this.setGainMode(sourceId, "manual", opts)
 				await this.setGain(sourceId, saved.gain, opts)
 			}
+			this.operatorGainBeforeBand.delete(sourceId)
 		} catch (err) {
 			this.log.warn(
 				{ sourceId, err: safeErrorFields(err) },

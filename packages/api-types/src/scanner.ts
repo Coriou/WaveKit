@@ -859,6 +859,17 @@ export interface ScannerEngineStatus {
 	passive: { enabled: boolean; disabledReason?: string }
 	frequencyError: { hz: number; ppm: number; discoveries: number } | null
 	lastError?: string
+	/**
+	 * R3: broadband blanking keeps rising while the gain is manual, so the front end may be
+	 * overloaded at this gain (`gain`, tenths of a dB). `blankedPercent` is the share of frames
+	 * blanked over the last ~30 s. A hint only: absent when not shown, in AGC, when the gain is
+	 * unknown, and from older cores.
+	 */
+	overloadHint?: {
+		reason: "front end may be overloaded at this gain"
+		gain: number
+		blankedPercent: number
+	}
 }
 export interface ScannerIqCaptureStatus {
 	trialCaptures?: {

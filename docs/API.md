@@ -1452,7 +1452,9 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 
 Every 400 from these routes names the fields it expects, their types and units, for example
 `Invalid request body; expected {"gain": integer, gain in tenths of a dB (0-500, e.g. 372 =
-37.2 dB)}; ...`. The message never repeats the value you sent.
+37.2 dB)}; ...`. A value out of range answers `Invalid tuner value; expected ...`, and a body
+that is not valid JSON answers `Invalid request body; expected ...`. The message never repeats
+the value you sent.
 
 #### Per-band gain: GET and PUT /api/tuner-band-gain
 
@@ -2820,6 +2822,11 @@ curl http://localhost:9000/api/scanner
 
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
+`overloadHint` is present only while the gain mode is manual and at least 5 % of frames
+(and at least 50) were blanked over the last ~30 s at the current gain:
+`{ "reason": "front end may be overloaded at this gain", "gain": 496, "blankedPercent": 7.5 }`
+(`gain` in tenths of a dB). It is a hint, not a measurement; absent in AGC, when the gain
+is unknown, and from older cores.
 `passive.disabledReason` explains a passive job switched off by the cost rule
 (for example `engine-cpu 31 % of a core`).
 

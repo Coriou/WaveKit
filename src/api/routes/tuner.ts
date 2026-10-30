@@ -220,14 +220,26 @@ function handleTunerError(
 				? maybeStatus.code
 				: "TUNER_ERROR"
 
+	// A 400 answers static text only: the controller's message can echo the submitted value.
 	return reply.status(statusCode).send({
 		error: error.name || "TunerError",
 		code,
 		message:
-			statusCode === 400 && expected !== undefined
-				? `${error.message}; expected ${expected}`
+			statusCode === 400
+				? expected !== undefined
+					? `Invalid tuner value; expected ${expected}`
+					: "Invalid tuner value"
 				: error.message,
 	})
+}
+
+/** Fastify body parser 400s (malformed or empty JSON body, bad content length). */
+function isBodyParseError(error: FastifyError): boolean {
+	return (
+		error.statusCode === 400 &&
+		typeof error.code === "string" &&
+		error.code.startsWith("FST_ERR_CTP_")
+	)
 }
 
 export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
@@ -236,12 +248,15 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 ) => {
 	const { tunerController } = options
 
-	// Scoped to these routes: a schema 400 names the expected fields and units (static text,
-	// so it is safe with access configured). Anything else goes to the parent handler.
+	// Scoped to these routes: a schema or body parse 400 names the expected fields and units
+	// (static text, so it is safe with access configured). Anything else goes to the parent
+	// handler.
 	fastify.setErrorHandler((error: FastifyError, request, reply) => {
-		if (error.validation) {
+		if (error.validation || isBodyParseError(error)) {
 			const expected = expectedFor(request.routeOptions.url)
-			const part = error.validationContext ?? "body"
+			const part = error.validation
+				? (error.validationContext ?? "body")
+				: "body"
 			return reply.status(400).send({
 				error: "ValidationError",
 				code: "VALIDATION_ERROR",
