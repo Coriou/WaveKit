@@ -1043,12 +1043,11 @@ export class TunerController extends EventEmitter {
 		}
 		// A relay client's tuning write supersedes the band gain.
 		this.appliedBandGain.delete(sourceId)
-		// A relay gain, gain mode or AGC choice is the operator's newest gain: never restore the
-		// older one over it. IF gain and gain index writes set other stages and keep it.
+		// A relay gain or gain mode choice is the operator's newest gain: never restore the older
+		// one over it. RTL2832 digital AGC, IF gain and gain index writes set other stages and keep it.
 		if (
 			command === RTL_TCP_COMMANDS.SET_GAIN ||
-			command === RTL_TCP_COMMANDS.SET_GAIN_MODE ||
-			command === RTL_TCP_COMMANDS.SET_AGC_MODE
+			command === RTL_TCP_COMMANDS.SET_GAIN_MODE
 		) {
 			this.dropOperatorGain(sourceId)
 			// Also cancels a scanner restore owed from a lost lease.
@@ -1517,9 +1516,8 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
-		// An AGC choice is a gain choice, as a gain mode one: it supersedes the saved gain.
-		this.noteGainChoice(sourceId, opts)
-		if (state.agcMode !== enabled) this.appliedBandGain.delete(sourceId)
+		// The RTL2832 digital AGC is a separate stage from the tuner gain mode and gain: it is no
+		// gain choice, keeps the saved pre-band gain and the band gain on the tuner.
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_AGC_MODE,
@@ -1528,7 +1526,6 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.agcMode = enabled
-		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1740,8 +1737,7 @@ export class TunerController extends EventEmitter {
 		}
 		if (updates.agcMode !== undefined && updates.agcMode !== state.agcMode) {
 			await this.setAgcMode(sourceId, updates.agcMode, opts)
-		} else if (updates.agcMode !== undefined)
-			this.noteUnchangedGainChoice(sourceId, opts)
+		}
 		if (updates.biasTee !== undefined && updates.biasTee !== state.biasTee) {
 			await this.setBiasTee(sourceId, updates.biasTee, opts)
 		}

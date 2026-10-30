@@ -187,6 +187,7 @@ describe("TunerState.bandGain", () => {
 		["SET_IF_GAIN", 0x06, 30],
 		["SET_TUNER_IF_GAIN", 0x0f, (1 << 16) | 30],
 		["SET_TUNER_GAIN_INDEX", 0x0d, 12],
+		["SET_AGC_MODE (RTL2832 digital AGC)", 0x08, 1],
 	])(
 		"a relay %s sets another gain stage: the saved AGC mode still comes back",
 		async (_name, command, value) => {
@@ -200,10 +201,7 @@ describe("TunerState.bandGain", () => {
 		},
 	)
 
-	it.each([
-		["SET_GAIN_MODE", 0x03, 1],
-		["SET_AGC_MODE", 0x08, 1],
-	])(
+	it.each([["SET_GAIN_MODE", 0x03, 1]])(
 		"a relay %s is a gain choice: the saved pre-band gain is dropped",
 		async (_name, command, value) => {
 			const { controller } = setup(true)

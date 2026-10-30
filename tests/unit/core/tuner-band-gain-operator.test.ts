@@ -264,22 +264,35 @@ describe("a REST write takes the tuner from a band-gain sweep", () => {
 		expect(h.controller.getState("rtl")?.gain).toBe(386)
 	})
 
-	it("a relay AGC choice during the takeover cancels the owed restore", async () => {
+	it("a relay RTL AGC write during the takeover is no gain choice: the gain still comes back", async () => {
 		const h = await setup(false)
 		await manual(h.controller, 496)
 		await sweepOnBand(h)
 		h.controller.applyExternalCommand("rtl", SET_FREQUENCY, UHF)
-		const bandGain = h.controller.getState("rtl")?.gain
 		h.controller.applyExternalCommand("rtl", SET_AGC_MODE, 1)
 		;(h.arbiter as unknown as { connected: Set<string> }).connected.add("rtl")
 		h.controller.setControlMode("rtl", "internal")
 		await settle()
-		// No restore of 49.6 dB over the relay's newer choice.
-		expect(h.controller.getState("rtl")?.gain).toBe(bandGain)
+		expect(h.controller.getState("rtl")).toMatchObject({
+			gainMode: "manual",
+			gain: 496,
+		})
+	})
+
+	it("a REST RTL AGC write that takes the tuner puts the gain back", async () => {
+		const h = await setup(false)
+		await manual(h.controller, 496)
+		await sweepOnBand(h)
+		await h.controller.setAgcMode("rtl", false, REST)
+		await settle()
+		expect(h.controller.getState("rtl")).toMatchObject({
+			gainMode: "manual",
+			gain: 496,
+		})
 	})
 })
 
-describe("apply to my tuning: overlapping REST retunes and restarts (m4)", () => {
+describe("apply to my tuning: overlapping REST retunes and restarts", () => {
 	it("two concurrent setFrequency calls run one after the other", async () => {
 		const h = await setup(true)
 		await manual(h.controller, 100)
@@ -438,7 +451,7 @@ describe("apply to my tuning: overlapping REST retunes and restarts (m4)", () =>
 	})
 })
 
-describe("apply to my tuning: the saved gain is a durable, superseded record (WG18 gate)", () => {
+describe("apply to my tuning: the saved gain is a durable, superseded record", () => {
 	function gainWrites(writes: [number, number][], mark: number) {
 		return writes
 			.slice(mark)
@@ -523,23 +536,17 @@ describe("apply to my tuning: the saved gain is a durable, superseded record (WG
 		})
 	})
 
-	it("a REST AGC choice in a band supersedes the saved gain and counts as a gain choice", async () => {
-		const disk = memoryFs()
-		const h = await setup(true, disk.fs)
+	it("a REST RTL AGC write in a band is no gain choice: the saved gain still comes back", async () => {
+		const h = await setup(true)
 		await manual(h.controller, 100)
 		await h.controller.setFrequency("rtl", ISM, REST)
 		const before = h.controller.gainChoiceCount("rtl")
-		// The tuner's baseline is AGC on: turning it off changes the mode.
 		await h.controller.setAgcMode("rtl", false, REST)
-		expect(h.controller.gainChoiceCount("rtl")).toBe(before + 1)
-		expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
-		await settle()
-		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toMatchObject({
-			sources: [],
-		})
+		expect(h.controller.gainChoiceCount("rtl")).toBe(before)
+		expect(h.controller.getState("rtl")?.bandGain).toBeDefined()
 		const mark = h.writes.length
 		await h.controller.setFrequency("rtl", UHF, REST)
-		expect(gainWrites(h.writes, mark)).toEqual([])
+		expect(gainWrites(h.writes, mark)).toEqual([[SET_GAIN, 100]])
 	})
 
 	it("a scanner AGC write is not an operator choice", async () => {
@@ -557,7 +564,6 @@ describe("apply to my tuning: the saved gain is a durable, superseded record (WG
 	it.each([
 		["gain equal to the band gain", { gain: 297 }, true],
 		["gain mode equal to the tuner's", { gainMode: "manual" as const }, false],
-		["AGC equal to the tuner's", { agcMode: true }, false],
 	])(
 		"PATCH config with a %s is a choice: no write, saved gain superseded",
 		async (_name, update, dropsBandGain) => {

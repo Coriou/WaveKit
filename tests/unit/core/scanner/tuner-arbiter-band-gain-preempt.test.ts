@@ -339,7 +339,7 @@ describe("TunerArbiter per-band gain: a lost lease puts the operator's gain back
 	})
 })
 
-describe("TunerArbiter per-band gain: unknown snapshot gain (M1)", () => {
+describe("TunerArbiter per-band gain: unknown snapshot gain", () => {
 	it.each([
 		["gain and gain mode", ["gain", "gainMode"] as const],
 		["gain", ["gain"] as const],
