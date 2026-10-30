@@ -700,6 +700,8 @@ export class DecoderManager extends EventEmitter {
 	private sourceRemovedHandler: ((sourceId: string) => void) | null = null
 	/** Forgets per-source scan state when a source is removed for good. */
 	private sourceGoneHandler: ((sourceId: string) => void) | null = null
+	/** Pause / resume of a source's feed re-evaluates its decoders ("source-paused"). */
+	private sourceFeedHandler: ((sourceId: string) => void) | null = null
 	private sourceConnectedEvaluation: ((sourceId: string) => void) | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
@@ -2998,18 +3000,29 @@ export class DecoderManager extends EventEmitter {
 		return this.drainCapsChanges()
 	}
 
-	/** The hold reason that applies to a configured stdin decoder, if any. */
-	private heldReason(state: DecoderState): "tuner-scanning" | null {
+	/** The hold reason that applies to a configured stdin decoder, if any; a paused feed first. */
+	private heldReason(
+		state: DecoderState,
+	): "source-paused" | "tuner-scanning" | null {
 		if (state.owner === "scanner" || state.decoder.caps.input === "external")
 			return null
 		const sourceId = this.selectedSourceId(state)
-		return sourceId !== undefined && this.isSourceHeld(sourceId)
-			? "tuner-scanning"
-			: null
+		if (sourceId === undefined) return null
+		// Optional call: test doubles of the source manager predate pause / resume.
+		if (this.sourceManager?.isPaused?.(sourceId) === true)
+			return "source-paused"
+		return this.isSourceHeld(sourceId) ? "tuner-scanning" : null
 	}
 
 	private assertNotHeld(state: DecoderState): void {
-		if (this.heldReason(state) === null) return
+		// Only a scanner hold refuses; a start on a paused feed is recorded and suspended.
+		const sourceId = this.selectedSourceId(state)
+		if (
+			this.heldReason(state) === null ||
+			sourceId === undefined ||
+			!this.isSourceHeld(sourceId)
+		)
+			return
 		throw new WaveKitError(
 			`Source ${this.selectedSourceId(state)} is held by a scanner sweep; decoder ${state.config.id} can start when the sweep ends`,
 			"SOURCE_HELD_BY_SCANNER",
@@ -4084,6 +4097,10 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceGoneHandler && this.sourceManager) {
 			this.sourceManager.off("source-removed", this.sourceGoneHandler)
 			this.sourceGoneHandler = null
+		}
+		if (this.sourceFeedHandler && this.sourceManager) {
+			this.sourceManager.off("feed-changed", this.sourceFeedHandler)
+			this.sourceFeedHandler = null
 		}
 		if (this.sourceConnectedEvaluation && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
@@ -5229,6 +5246,9 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceGoneHandler && this.sourceManager) {
 			this.sourceManager.off("source-removed", this.sourceGoneHandler)
 		}
+		if (this.sourceFeedHandler && this.sourceManager) {
+			this.sourceManager.off("feed-changed", this.sourceFeedHandler)
+		}
 		if (this.sourceConnectedEvaluation && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
 		}
@@ -5292,6 +5312,15 @@ export class DecoderManager extends EventEmitter {
 			this.scanTainted.delete(sourceId)
 		}
 		sourceManager.on("source-removed", this.sourceGoneHandler)
+		this.sourceFeedHandler = sourceId => {
+			void this.evaluateSourceNow(sourceId).catch((err: unknown) =>
+				this.log.warn(
+					{ err: safeErrorFields(err), sourceId },
+					"Re-evaluating decoders after a feed change failed",
+				),
+			)
+		}
+		sourceManager.on("feed-changed", this.sourceFeedHandler)
 		this.subscribeToSourceCapsChanges()
 	}
 

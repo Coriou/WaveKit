@@ -144,7 +144,7 @@ Every 409 `SCANNER_SOURCE_BUSY` carries `details.reason`: `releasing`, `recovery
 
 ### Takeover and impact
 
-A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact`: `liveAudioClients`, `digitalVoiceListeners`, `runningDecoders`, `pinnedDecoders` (started by hand), `scannerJobs` (other non-passive jobs on the source) and `unrestorable` tuner fields. Resending with `takeover: true` consents. Decoders on the source are held (`suspension.reasonCode: "tuner-scanning"`) for the whole sweep and resume afterwards; a manual start of a held decoder answers 409 `SOURCE_HELD_BY_SCANNER`. Live-audio listeners hear the sweep. Relay clients (SDR++) holding the tuner make sweeps impossible (`SCANNER_SOURCE_BUSY`).
+A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact`: `liveAudioClients`, `digitalVoiceListeners`, `runningDecoders`, `pinnedDecoders` (started by hand), `scannerJobs` (other non-passive jobs on the source) and `unrestorable` tuner fields. Resending with `takeover: true` consents. Decoders on the source are held (`suspension.reasonCode: "tuner-scanning"`) for the whole sweep and resume afterwards; a manual start of a held decoder answers 409 `SOURCE_HELD_BY_SCANNER`. Live-audio listeners hear the sweep. Relay clients (SDR++) holding the tuner make sweeps impossible (`SCANNER_SOURCE_BUSY`). A paused receiver feed (`POST /api/sources/:id/pause`) takes no new job, identify request or job resume (409 `SOURCE_PAUSED`); jobs running at the pause wait in `paused` with reason `source-down`, as after a dropout, and continue on resume, where the usual reconnect recovery restores a lease's tuning and band gain.
 
 ### Tuner restore
 

@@ -374,6 +374,8 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 
 **Wiring** (`src/index.ts`, step 7b): the scanner is built after the decoders and digital voice and started before any source connects, so a persisted lease is restored on the source's first data. It is always constructed: with `scanner.enabled: false` it runs no jobs, but its `SpectrumService` still serves `spectrum` subscribers and `/api/spectrum`. An unreadable state directory is handled inside `start()` (the scanner runs without the unread files and never overwrites them).
 
+**Paused feed:** `SourceManager.pause()` closes a network source's connection without reconnecting and keeps its registration; `resume()` makes one attempt and the normal reconnect path restores tuning. While the feed is not `live`, `isPaused()` is true and decoders on the source report `suspension.reasonCode: "source-paused"` (ahead of `tuner-scanning`); `feed-changed` re-evaluates them. Paused ids persist in `<stateDir>/source-feed.json` (`SourceFeedStore`), so a paused source registers at boot without connecting.
+
 **Decoder hold:** while a sweep holds a source, every configured decoder on it reports `suspended: true` with `suspension.reasonCode: "tuner-scanning"`, ahead of rate and band checks, and a manual start answers 409 `SOURCE_HELD_BY_SCANNER`. Scanner probes are exempt and appear as `owner: "scanner"`, `ephemeral: true` decoders (`decoder:created` / `decoder:removed`).
 
 ### Dynamic Sample Rate Handling

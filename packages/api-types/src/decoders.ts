@@ -185,8 +185,9 @@ export interface DecoderBandAssessment {
 }
 
 /**
- * Rate reasons, the tuned band no longer covering any target, or the
- * source held by a scanner sweep (signal discovery spec § 10.4).
+ * Rate reasons, the tuned band no longer covering any target, the source
+ * held by a scanner sweep (signal discovery spec § 10.4), or its receiver
+ * feed paused by the operator ("source-paused", see SourceFeed).
  */
 export type DecoderSuspensionReasonCode =
 	| NonNullable<DecoderRateAssessment["reasonCode"]>
@@ -194,6 +195,7 @@ export type DecoderSuspensionReasonCode =
 	| "capture-too-narrow"
 	| "no-channel-selected"
 	| "tuner-scanning"
+	| "source-paused"
 	| "efficiency-budget"
 	| "decoder-unavailable"
 	| "channelizer-unavailable"

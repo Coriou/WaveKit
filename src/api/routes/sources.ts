@@ -8,15 +8,19 @@
  * - 15.2: Assign decoders to specific sources by source ID
  * - 15.4: Return capabilities for each source
  * - 16.2: Verify capability compatibility before attachment
+ * - POST /api/sources/:id/pause and /resume: the receiver feed (idempotent)
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import {
+	SOURCE_RESUME_FAILED_MESSAGE,
 	sourceActivitySchema,
+	sourceFeedSchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
 	sourceEndpointSchema,
 } from "@wavekit/api-types"
+import { WaveKitError } from "../../utils/errors.js"
 import { SourceConfigSchema } from "../../config.js"
 import type {
 	SourceManager,
@@ -28,6 +32,7 @@ import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js
 import type {
 	DecoderAssignment as ApiDecoderAssignment,
 	ExtendedSourceStatus as ApiExtendedSourceStatus,
+	SourceFeedResponse,
 } from "@wavekit/api-types"
 import {
 	countConsumersBySource,
@@ -126,6 +131,7 @@ const extendedSourceStatusSchema = {
 		signalFlat: sourceSignalFlatSchema,
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
+		feed: sourceFeedSchema,
 		assignments: {
 			type: "array",
 			items: decoderAssignmentSchema,
@@ -165,6 +171,7 @@ const sourceStatusSchema = {
 		signalFlat: sourceSignalFlatSchema,
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
+		feed: sourceFeedSchema,
 	},
 	required: [
 		"id",
@@ -211,6 +218,32 @@ const sourceDeletedResponseSchema = {
 		id: { type: "string" },
 	},
 	required: ["message", "id"],
+} as const
+
+/**
+ * Pause / resume answer: 200 (also for a repeated call) and 503 (resume could not
+ * reach the receiver; the feed reads "error" and a later resume retries).
+ */
+const sourceFeedResponseSchema = {
+	type: "object",
+	properties: {
+		id: { type: "string" },
+		feed: sourceFeedSchema,
+		changed: { type: "boolean" },
+	},
+	required: ["id", "feed", "changed"],
+} as const
+
+const sourceResumeFailedSchema = {
+	type: "object",
+	properties: {
+		error: { type: "string" },
+		code: { type: "string" },
+		message: { type: "string" },
+		id: { type: "string" },
+		feed: sourceFeedSchema,
+	},
+	required: ["error", "code", "message", "id", "feed"],
 } as const
 
 /**
@@ -369,13 +402,97 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 		},
 		async () => {
 			const consumersBySourceId = countConsumersBySource(fanoutManager)
-			return sourceManager
-				.getAllStatus()
-				.map(status =>
-					toApiExtendedSourceStatus(status, sourceManager, consumersBySourceId),
-				)
+			return sourceManager.getAllStatus().map(status => ({
+				...toApiExtendedSourceStatus(
+					status,
+					sourceManager,
+					consumersBySourceId,
+				),
+				...(status.feed !== undefined ? { feed: status.feed } : {}),
+			}))
 		},
 	)
+
+	/**
+	 * POST /api/sources/:id/pause and /resume - Pause or resume the receiver feed.
+	 * Pause closes the connection with no reconnect and persists; resume makes one
+	 * attempt and restores tuning as on any reconnect. Both are idempotent.
+	 */
+	for (const action of ["pause", "resume"] as const) {
+		fastify.post<{
+			Params: { id: string }
+			Reply:
+				| SourceFeedResponse
+				| ErrorResponse
+				| (ErrorResponse & Pick<SourceFeedResponse, "id" | "feed">)
+		}>(
+			`/api/sources/:id/${action}`,
+			{
+				schema: {
+					tags: ["sources"],
+					summary:
+						action === "pause"
+							? "Pause a source's receiver feed"
+							: "Resume a source's receiver feed",
+					description:
+						action === "pause"
+							? "Closes the receiver connection without reconnecting; decoders, scanner jobs and the channelizer wait (reason source-paused). Survives a core restart. Idempotent."
+							: "Reconnects a paused feed with one attempt and restores its tuning. 503 when the receiver is unreachable (feed state error; call again to retry). Idempotent.",
+					params: {
+						type: "object",
+						properties: {
+							id: { type: "string", minLength: 1 },
+						},
+						required: ["id"],
+					},
+					response: {
+						200: sourceFeedResponseSchema,
+						404: errorResponseSchema,
+						409: errorResponseSchema,
+						...(action === "resume" ? { 503: sourceResumeFailedSchema } : {}),
+					},
+				},
+			},
+			async (request, reply) => {
+				const { id } = request.params
+				const notFound = {
+					error: "NotFound",
+					code: "SOURCE_NOT_FOUND",
+					message: `Source with id '${id}' not found`,
+				}
+				if (!sourceManager.getStatus(id))
+					return reply.status(404).send(notFound)
+				try {
+					const result =
+						action === "pause"
+							? await sourceManager.pause(id)
+							: await sourceManager.resume(id)
+					if (result.feed.state === "error")
+						return reply.status(503).send({
+							error: "ServiceUnavailable",
+							code: "SOURCE_RESUME_FAILED",
+							message: SOURCE_RESUME_FAILED_MESSAGE,
+							id,
+							feed: result.feed,
+						})
+					return { id, ...result }
+				} catch (err) {
+					if (err instanceof WaveKitError && err.code === "SOURCE_NOT_FOUND")
+						return reply.status(404).send(notFound)
+					if (
+						err instanceof WaveKitError &&
+						err.code === "SOURCE_FEED_UNSUPPORTED"
+					)
+						return reply.status(409).send({
+							error: "Conflict",
+							code: err.code,
+							message: err.message,
+						})
+					throw err
+				}
+			},
+		)
+	}
 
 	/**
 	 * POST /api/sources - Add a new source

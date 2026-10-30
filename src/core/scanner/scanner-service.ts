@@ -2173,6 +2173,7 @@ export class ScannerService extends EventEmitter {
 		const preview = this.preview(spec)
 		this.rejectErrors(preview.issues)
 		const n = preview.spec
+		this.assertFeedLive(n.sourceId)
 		if (n.mode === "sweep" && !this.configLoaded) throw this.stateUnavailable()
 		if (n.mode === "sweep") {
 			const impact = this.arbiter.impact(n.sourceId, n)
@@ -2360,11 +2361,27 @@ export class ScannerService extends EventEmitter {
 
 	async resumeJob(id: string, opts: { takeover: boolean }): Promise<ScanJob> {
 		const record = this.requireJob(id)
+		this.assertFeedLive(record.spec.sourceId)
 		if (record.spec.mode === "sweep" && !this.configLoaded)
 			throw this.stateUnavailable()
 		if (record.spec.mode === "sweep" && isPreempted(record))
 			return this.resumePreempted(record, opts.takeover)
 		return this.lifecycle(id, { type: "resume", takeover: opts.takeover })
+	}
+
+	/**
+	 * A paused receiver feed takes no new or resumed job: it could not tune. Jobs running when
+	 * the feed paused wait in paused(source-down) and continue on resume, as after a dropout.
+	 */
+	private assertFeedLive(sourceId: string): void {
+		// Optional call: test doubles of the source manager predate pause / resume.
+		if (this.deps.sources.isPaused?.(sourceId) !== true) return
+		throw new ScannerApiError(
+			"The receiver feed is paused; resume it first",
+			"SOURCE_PAUSED",
+			409,
+			{ reason: "source-paused" },
+		)
 	}
 
 	async cancelJob(id: string): Promise<ScanJob> {
@@ -2413,6 +2430,7 @@ export class ScannerService extends EventEmitter {
 		const preview = this.preview(rawSpec)
 		this.rejectErrors(preview.issues)
 		const n = preview.spec
+		this.assertFeedLive(n.sourceId)
 		// Identify never acquires a lease (in-window), so the arbiter's refusal details do not apply; the holder does.
 		const holder = this.arbiter.holder(n.sourceId)
 		if (holder) {

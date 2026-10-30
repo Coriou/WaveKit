@@ -28,7 +28,13 @@ import * as fs from "node:fs"
 import { types as utilTypes } from "node:util"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
-import type { SourceActivity, SourceEndpoint } from "@wavekit/api-types"
+import { SOURCE_RESUME_FAILED_MESSAGE } from "@wavekit/api-types"
+import type {
+	SourceActivity,
+	SourceEndpoint,
+	SourceFeed,
+	SourceFeedState,
+} from "@wavekit/api-types"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
@@ -44,6 +50,10 @@ import {
 	iqComponentFormatFor,
 	type SignalFlat,
 } from "./signal-level.js"
+import {
+	SourceFeedStore,
+	type SourceFeedPersistence,
+} from "./source-feed-store.js"
 
 import {
 	isReceiverSourceId,
@@ -73,6 +83,11 @@ export const SOURCE_KEEPALIVE_DELAY_MS = 5000
 
 /** Reconnect delay after a deliberate endpoint switch (not a failure). */
 export const SOURCE_RETARGET_RECONNECT_MS = 250
+/**
+ * A pause half-closes the receiver connection (FIN) and waits this long for the peer to
+ * close its side before destroying the socket; rtl_tcp closes at once on end of stream.
+ */
+export const SOURCE_PAUSE_CLOSE_TIMEOUT_MS = 2000
 /**
  * Fallback from a selected endpoint (receiver-endpoints 3.4): this many failures
  * (a failed attempt, or any session that ends without a deliberate switch)
@@ -152,6 +167,8 @@ export interface SourceStatus {
 	signalLevelDbfs?: number | undefined
 	/** Receiver endpoint selection; only for sources it tracks. */
 	endpoint?: SourceEndpoint | undefined
+	/** Pause / resume state; network sources only (recordings omit it). */
+	feed?: SourceFeed | undefined
 }
 
 export interface SourceManagerOptions {
@@ -159,6 +176,13 @@ export interface SourceManagerOptions {
 	signalFlatThresholdDbfs?: number | undefined
 	/** Signal-flat hold time in ms (default SIGNAL_FLAT_HOLD_MS). */
 	signalFlatHoldMs?: number | undefined
+	/**
+	 * Persists paused feeds in `<stateDir>/source-feed.json` (SourceFeedStore). Without it
+	 * (or `feedPersistence`) a pause lasts until the process ends.
+	 */
+	stateDir?: string | undefined
+	/** Overrides the store built from `stateDir` (tests). */
+	feedPersistence?: SourceFeedPersistence | undefined
 }
 
 /**
@@ -195,6 +219,12 @@ export interface SourceManagerEvents {
 	removed: (sourceId: string) => void
 	/** Permanent removal only (disconnect()); never on reconnect or shutdown. */
 	"source-removed": (sourceId: string, removedAt: Date) => void
+	/**
+	 * The feed state changed (pause, resume start, resume success or failure). While it is
+	 * not "live" the source is paused: consumers hold back with reason "source-paused".
+	 * A pause's "disconnected" follows once the connection closed.
+	 */
+	"feed-changed": (sourceId: string, feed: SourceFeed) => void
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
 	/** The rate-truth mismatch flag was raised or cleared (see getStatus().rateMismatch). */
 	"rate-truth-changed": (sourceId: string) => void
@@ -309,6 +339,8 @@ interface SourceState {
 	rtlTcpHeader: Buffer | null
 	rtlTcpHeaderInfo: RtlTcpHeaderInfo | null
 	rtlTcpHeaderBuffer: Buffer | null
+	/** Pause / resume state (network sources; a recording stays "live"). */
+	feed: { state: SourceFeedState; since: number }
 	// Recording source specific state
 	recordingState?: RecordingState | undefined
 }
@@ -422,12 +454,26 @@ export class SourceManager extends EventEmitter {
 	private decoderAssignments: Map<string, DecoderAssignment> = new Map()
 	private logger: Logger
 	private readonly options: SourceManagerOptions
+	/** Ids whose feed the operator paused (persisted); outlives a registration. */
+	private readonly pausedIds = new Set<string>()
+	private readonly feedPersistence: SourceFeedPersistence | null
+	/** Settles once the persisted pauses were read (null: nothing to read). */
+	private feedLoad: Promise<void> | null = null
+	private feedsLoaded: boolean
+	/** Pause and resume of one source run one at a time, in call order. */
+	private readonly feedChains = new Map<string, Promise<unknown>>()
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
 		this.setMaxListeners(SOURCE_MANAGER_MAX_LISTENERS)
 		this.logger = logger.child({ component: "SourceManager" })
 		this.options = options
+		this.feedPersistence =
+			options.feedPersistence ??
+			(options.stateDir !== undefined
+				? new SourceFeedStore({ stateDir: options.stateDir, logger })
+				: null)
+		this.feedsLoaded = this.feedPersistence === null
 	}
 
 	private plainSourceData<T>(value: T): T {
@@ -752,6 +798,9 @@ export class SourceManager extends EventEmitter {
 	 */
 	async connect(config: SourceConfig): Promise<Readable> {
 		config = this.plainSourceData(config)
+		// The persisted pauses are read once, before the first registration; nothing awaits
+		// between the duplicate check below and the registration.
+		if (!this.feedsLoaded) await this.loadFeeds()
 		if (this.sources.has(config.id)) {
 			throw new Error(`Source ${config.id} already exists`)
 		}
@@ -811,6 +860,13 @@ export class SourceManager extends EventEmitter {
 				config.type === "rtl_tcp" && config.caps.format === "U8_IQ"
 					? Buffer.alloc(0)
 					: null,
+			feed: {
+				state:
+					config.type !== "recording" && this.pausedIds.has(config.id)
+						? "paused"
+						: "live",
+				since: Date.now(),
+			},
 		}
 
 		this.sources.set(config.id, state)
@@ -843,6 +899,12 @@ export class SourceManager extends EventEmitter {
 				// This continuation must never re-fetch or delete a replacement.
 				throw err
 			}
+		} else if (state.feed.state === "paused") {
+			// A paused feed registers (status, caps, stream) but never dials the receiver.
+			this.logger.info(
+				{ sourceId: config.id },
+				"Source feed is paused; not connecting (POST /api/sources/:id/resume)",
+			)
 		} else {
 			// Attempt initial connection for network sources
 			state.connectPending = true
@@ -1456,6 +1518,9 @@ export class SourceManager extends EventEmitter {
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
 					state.lastError = undefined
+					// A resume's connection: the feed is live before "connected" fires.
+					if (state.feed.state === "resuming")
+						state.feed = { state: "live", since: Date.now() }
 					// Connected settlement precedes reentrant lifecycle notifications.
 					safeResolve()
 					this.resetRateTruth(id, state)
@@ -1883,6 +1948,8 @@ export class SourceManager extends EventEmitter {
 			state.socket === null
 		if (!current()) return
 		if (state.reconnectTimer) return
+		// A paused feed, or a resume's single attempt, never retries on its own.
+		if (state.feed.state !== "live") return
 
 		let delay: number
 		if (state.retargetPending) {
@@ -1910,6 +1977,7 @@ export class SourceManager extends EventEmitter {
 		const timer = setTimeout(() => {
 			if (!current() || state.reconnectTimer !== timer) return
 			state.reconnectTimer = null
+			if (state.feed.state !== "live") return
 			this.attemptConnection(id).catch(() => {
 				// Error already handled in attemptConnection
 			})
@@ -2104,6 +2172,8 @@ export class SourceManager extends EventEmitter {
 		this.tunerCommandControllers.delete(id)
 		this.tunerCommands.delete(id)
 		if (!this.teardown(id)) return
+		// Gone for good: a source added again with this id starts live.
+		if (this.pausedIds.delete(id)) void this.persistFeeds()
 		this.emit("source-removed", id, new Date())
 	}
 
@@ -2180,7 +2250,13 @@ export class SourceManager extends EventEmitter {
 	 * arrives. A deliberate switch never counts.
 	 */
 	private noteEndpointClose(id: string, state: SourceState): void {
-		if (state.activeHost === null || state.retargetPending) return
+		// A deliberate switch or a paused feed's close is no endpoint failure.
+		if (
+			state.activeHost === null ||
+			state.retargetPending ||
+			state.feed.state !== "live"
+		)
+			return
 		if (!state.endpointFailures.record(Date.now())) return
 		const left = state.activeHost
 		const configured = state.config.host
@@ -2270,6 +2346,208 @@ export class SourceManager extends EventEmitter {
 		return true
 	}
 
+	// === Feed pause / resume ===
+
+	/** Reads the persisted pauses once; a failed read leaves every feed live. */
+	private loadFeeds(): Promise<void> {
+		const persistence = this.feedPersistence
+		if (persistence === null) return Promise.resolve()
+		this.feedLoad ??= persistence.load().then(
+			paused => {
+				for (const id of paused) this.pausedIds.add(id)
+				this.feedsLoaded = true
+				if (paused.size > 0)
+					this.logger.info(
+						{ paused: paused.size },
+						"Paused source feeds restored; they stay paused until resumed",
+					)
+			},
+			() => {
+				// SourceFeedStore never rejects; another persistence reads as none paused.
+				this.feedsLoaded = true
+			},
+		)
+		return this.feedLoad
+	}
+
+	/** Never rejects: a failed write is logged by the store (the in-memory pause stands). */
+	private async persistFeeds(): Promise<boolean> {
+		if (this.feedPersistence === null) return true
+		await this.loadFeeds()
+		return this.feedPersistence.save(new Set(this.pausedIds)).catch(() => false)
+	}
+
+	private feedOf(state: SourceState): SourceFeed {
+		return {
+			state: state.feed.state,
+			since: new Date(state.feed.since).toISOString(),
+			...(state.feed.state === "error"
+				? { error: SOURCE_RESUME_FAILED_MESSAGE }
+				: {}),
+		}
+	}
+
+	/** The source's feed; undefined for unknown ids and recordings. */
+	getFeed(id: string): SourceFeed | undefined {
+		const state = this.sources.get(id)
+		if (!state || state.config.type === "recording") return undefined
+		return this.feedOf(state)
+	}
+
+	/**
+	 * True while the operator holds the source's feed back: paused, resuming, or after a
+	 * failed resume. Consumers suspend with reason "source-paused" meanwhile.
+	 */
+	isPaused(id: string): boolean {
+		const state = this.sources.get(id)
+		return state !== undefined && state.feed.state !== "live"
+	}
+
+	private isLive(state: SourceState): boolean {
+		return state.feed.state === "live"
+	}
+
+	private setFeed(id: string, state: SourceState, next: SourceFeedState): void {
+		state.feed = { state: next, since: Date.now() }
+		if (this.isCurrent(state)) this.emit("feed-changed", id, this.feedOf(state))
+	}
+
+	/** Runs `work` after every earlier pause or resume of `id` settled. */
+	private serialFeed<T>(id: string, work: () => Promise<T>): Promise<T> {
+		const previous = this.feedChains.get(id) ?? Promise.resolve()
+		const run = previous.then(work, work)
+		const tail = run.then(
+			() => undefined,
+			() => undefined,
+		)
+		this.feedChains.set(id, tail)
+		void tail.then(() => {
+			if (this.feedChains.get(id) === tail) this.feedChains.delete(id)
+		})
+		return run
+	}
+
+	private feedSource(id: string): SourceState {
+		const state = this.sources.get(id)
+		if (!state)
+			throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
+		if (state.config.type === "recording")
+			throw new WaveKitError(
+				"A recording source has no receiver feed to pause",
+				"SOURCE_FEED_UNSUPPORTED",
+			)
+		return state
+	}
+
+	/**
+	 * Pauses the source's receiver feed: the connection is closed cleanly (FIN, then destroy
+	 * after SOURCE_PAUSE_CLOSE_TIMEOUT_MS) and never retried, any backoff timer is cancelled,
+	 * and the pause is persisted. The registration, stream, caps and decoder assignments stay,
+	 * so a resume restores the same tuning through the normal reconnect path. Idempotent:
+	 * resolves once the connection is closed; `changed` is false when it was already paused.
+	 */
+	pause(id: string): Promise<{ feed: SourceFeed; changed: boolean }> {
+		return this.serialFeed(id, async () => {
+			const state = this.feedSource(id)
+			const changed = state.feed.state !== "paused"
+			const persist = !this.pausedIds.has(id)
+			this.pausedIds.add(id)
+			if (changed) {
+				this.logger.info({ sourceId: id }, "Pausing source feed")
+				this.setFeed(id, state, "paused")
+			}
+			await this.closeForPause(id, state)
+			if (persist) await this.persistFeeds()
+			return { feed: this.feedOf(state), changed }
+		})
+	}
+
+	private closeForPause(id: string, state: SourceState): Promise<void> {
+		if (state.reconnectTimer) {
+			clearTimeout(state.reconnectTimer)
+			state.reconnectTimer = null
+		}
+		state.retargetPending = false
+		// A commanded rate-change restart cannot complete while paused.
+		this.finishRateRecovery(id, false)
+		const attempt = state.attempt
+		if (!attempt || !this.isActiveAttempt(state, attempt))
+			return Promise.resolve()
+		const socket = attempt.socket
+		const connected = attempt.phase === "connected"
+		// No more payload from this session; the close handler still reports "disconnected".
+		attempt.phase = "closed"
+		attempt.sessionId = null
+		attempt.lastSampleAt = null
+		attempt.headerAt = null
+		this.stopStallWatchdog(state)
+		return new Promise<void>(resolve => {
+			const timer = setTimeout(
+				() => socket.destroy(),
+				SOURCE_PAUSE_CLOSE_TIMEOUT_MS,
+			)
+			socket.once("close", () => {
+				clearTimeout(timer)
+				resolve()
+			})
+			if (socket.destroyed) {
+				clearTimeout(timer)
+				resolve()
+				return
+			}
+			if (connected) {
+				// Keep reading (and dropping) until the peer's FIN, so the close is clean.
+				socket.resume()
+				socket.end()
+			} else socket.destroy()
+		})
+	}
+
+	/**
+	 * Resumes a paused feed with one connection attempt (no backoff). On success the feed is
+	 * live before "connected" fires, the pause is dropped from the state file, and tuning is
+	 * restored by the usual reconnect path (tuner restore, scanner recovery and gain restore
+	 * on the first payload). On failure the feed reads "error" with a fixed safe message and
+	 * stays paused (also across a restart); resume again to retry. Idempotent: a live feed
+	 * answers `changed: false`.
+	 */
+	resume(id: string): Promise<{ feed: SourceFeed; changed: boolean }> {
+		return this.serialFeed(id, async () => {
+			const state = this.feedSource(id)
+			if (state.feed.state === "live") {
+				// A live feed may still be recorded as paused after a failed write: retry it.
+				if (this.pausedIds.delete(id)) await this.persistFeeds()
+				return { feed: this.feedOf(state), changed: false }
+			}
+			this.logger.info({ sourceId: id }, "Resuming source feed")
+			this.setFeed(id, state, "resuming")
+			state.reconnectAttempts = 0
+			try {
+				await this.attemptConnection(id)
+			} catch {
+				// Logged by the attempt; the feed state below says what happened.
+			}
+			if (!this.isCurrent(state))
+				throw new WaveKitError(`Source ${id} not found`, "SOURCE_NOT_FOUND")
+			// The attempt's connect handler makes the feed live (TS still sees the narrowing above).
+			if (this.isLive(state)) {
+				this.pausedIds.delete(id)
+				await this.persistFeeds()
+				if (this.isCurrent(state))
+					this.emit("feed-changed", id, this.feedOf(state))
+				this.logger.info({ sourceId: id }, "Source feed resumed")
+				return { feed: this.feedOf(state), changed: true }
+			}
+			// Still resuming (a pause cannot interleave): the receiver was not reached.
+			this.logger.warn(
+				{ sourceId: id },
+				"Resuming the source feed failed; the feed stays paused",
+			)
+			this.setFeed(id, state, "error")
+			return { feed: this.feedOf(state), changed: true }
+		})
+	}
+
 	/**
 	 * Gets the status of a specific source (Requirements 1.7, 15.4).
 	 *
@@ -2299,6 +2577,9 @@ export class SourceManager extends EventEmitter {
 				? { signalLevelDbfs: state.signalLevel.levelDbfs }
 				: {}),
 			...(state.endpoint ? { endpoint: { ...state.endpoint } } : {}),
+			...(state.config.type !== "recording"
+				? { feed: this.feedOf(state) }
+				: {}),
 		}
 	}
 

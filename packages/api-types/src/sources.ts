@@ -144,6 +144,8 @@ export interface SourceStatus {
 	signalLevelDbfs?: number
 	/** Receiver endpoint selection; only with `sdrHost.endpointSelection: auto`. */
 	endpoint?: SourceEndpoint
+	/** Pause / resume state of a network source; omitted for recordings. */
+	feed?: SourceFeed
 }
 
 export interface DecoderAssignment {
@@ -160,4 +162,53 @@ export interface ExtendedSourceStatus extends SourceStatus {
 	bytesReceived: number
 	dataRate: number
 	reconnectAttempts: number
+}
+
+/**
+ * Whether the core pulls the receiver's feed (pause / resume). "live": the source
+ * connects and reconnects as usual. "paused": the operator paused it; the connection
+ * is closed and never retried, and the pause survives a core restart. "resuming": a
+ * resume is dialling the receiver. "error": the last resume could not reach the
+ * receiver; the source stays paused until a resume succeeds (call resume again).
+ */
+export type SourceFeedState = "live" | "paused" | "resuming" | "error"
+
+export const SOURCE_FEED_STATES = [
+	"live",
+	"paused",
+	"resuming",
+	"error",
+] as const satisfies readonly SourceFeedState[]
+
+/** Fixed, safe text for a failed resume (never the transport error). */
+export const SOURCE_RESUME_FAILED_MESSAGE =
+	"The receiver could not be reached; resume again to retry"
+
+/** What a decoder held back by a paused feed reads, with its Resume action. */
+export const SOURCE_PAUSED_TEXT = "Receiver paused — Resume"
+
+export interface SourceFeed {
+	state: SourceFeedState
+	/** ISO-8601 time the feed entered this state (boot time for a pause restored at boot). */
+	since: string
+	/** Only in "error": a fixed safe message (SOURCE_RESUME_FAILED_MESSAGE). */
+	error?: string
+}
+
+export const sourceFeedSchema = {
+	type: "object",
+	properties: {
+		state: { type: "string", enum: SOURCE_FEED_STATES },
+		since: { type: "string", format: "date-time" },
+		error: { type: "string" },
+	},
+	required: ["state", "since"],
+} as const
+
+/** POST /api/sources/:id/pause and /resume answer (200; idempotent). */
+export interface SourceFeedResponse {
+	id: string
+	feed: SourceFeed
+	/** True when this call changed the feed (false for a repeated pause or resume). */
+	changed: boolean
 }
