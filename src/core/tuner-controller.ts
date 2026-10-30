@@ -453,8 +453,8 @@ export class TunerController extends EventEmitter {
 	/**
 	 * The operator's gain mode and gain from before "apply to my tuning" first changed them
 	 * (null when they were unknown then; an AGC gain may be unknown, null). Restored, and
-	 * cleared, when an operator retune leaves the bands with a gain; an operator gain, gain
-	 * mode or AGC choice clears it (IF gain and gain index writes do not). Persisted through
+	 * cleared, when an operator retune leaves the bands with a gain; an operator gain or gain
+	 * mode choice clears it (RTL AGC, IF gain and gain index writes do not). Persisted through
 	 * the band gain settings, so a restart inside a band still restores it on leaving; kept
 	 * across a source's teardown and reconnect for the same reason.
 	 */
@@ -736,7 +736,7 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * A bulk update's gain, gain mode or AGC field equal to the tuner's: no write, but still
+	 * A bulk update's gain or gain mode field equal to the tuner's: no write, but still
 	 * the operator's choice (as POST /gain): counted, and it supersedes the saved gain. An
 	 * explicit gain also replaces a confirmed band gain (the gain is now the operator's);
 	 * an unchanged mode keeps it.
