@@ -13,6 +13,8 @@ import {
 import { Store } from "../../data/store.ts"
 import { shellStore } from "../../shell/store.ts"
 import type { ActivityColumn } from "./columns.ts"
+import type { ActivityStack } from "./fold.ts"
+import { foldedOf, stackOf } from "./fold.ts"
 import {
 	MAX_COLUMNS,
 	columnQuery,
@@ -139,6 +141,8 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** One feed per column, kept while the column exists; it follows the core only while the drawer is open. */
 	private readonly columnFeeds = new Map<string, ActivityFeed>()
 	private readonly columnQueries = new Map<string, string>()
+	/** The list the open event was picked from (its stack is folded from that list). */
+	private openFeed: ActivityFeed | null = null
 
 	constructor(data: DataLayer) {
 		super({
@@ -277,9 +281,30 @@ export class ActivityController extends Store<ActivityViewState> {
 		for (const f of this.columnFeeds.values()) f.setPaused(paused)
 	}
 
-	/** Opens an event's detail (null goes back to the list). */
+	/**
+	 * Opens an event's detail (null goes back to the list). The newest event of a stack opens with the
+	 * stack's latest state (what older rows knew, such as an aircraft's callsign).
+	 */
 	open(item: ActivitySummary | null): void {
-		this.update(s => ({ ...s, openId: item?.eventId ?? null, openItem: item }))
+		const stack = item ? this.stackFor(item.eventId) : null
+		const shown =
+			item && stack && stack.latest.eventId === item.eventId ? stack.view : item
+		this.update(s => ({ ...s, openId: item?.eventId ?? null, openItem: shown }))
+	}
+
+	/** The list the next open() comes from (a column's or the drawer's); the detail folds that list. */
+	noteOpenFeed(feed: ActivityFeed): void {
+		this.openFeed = feed
+	}
+
+	/** The list the open event's stack is folded from: the one it was picked from, else the drawer's. */
+	stackFeed(): ActivityFeed {
+		return this.openFeed ?? this.feed
+	}
+
+	/** The stack holding an event in the list it came from, or null (opened by a link, or since dropped). */
+	stackFor(eventId: string): ActivityStack | null {
+		return stackOf(foldedOf(this.stackFeed().get().items), eventId)
 	}
 
 	/** Narrows the list to one entity (the detail's "Only this"). */
@@ -478,6 +503,7 @@ export class ActivityController extends Store<ActivityViewState> {
 		const ids = new Set(s.columns.map(c => c.id))
 		for (const [id, f] of this.columnFeeds)
 			if (!ids.has(id)) {
+				if (this.openFeed === f) this.openFeed = null
 				f.dispose()
 				this.columnFeeds.delete(id)
 				this.columnQueries.delete(id)

@@ -1,7 +1,11 @@
 // The Activity list: windowed rows (only what is on screen is mounted, heights measured once), grouped
-// by minute, arrows to move, Enter to open. Arrivals are held while the list is scrolled away from the
-// top and announced by the "N new" pill, so rows never jump under the pointer. In the Cards layout each event is
-// its decoded message card (Messages board, feed variant), windowed the same way.
+// by minute, arrows to move, Enter to open. Repeats fold into stacks (fold.ts): one row per thing going on,
+// its latest state, a count and a span, expanded in place to the folded earlier rows. A stack's React key is
+// its fold key and start, so a live decode updates the stack where it is mounted. Stacks are ordered by
+// their latest decode: at the top of the list a stack that hears again moves to the top; while the list is
+// scrolled away from the top (or paused) arrivals are held and announced by the "N new" pill, so nothing
+// moves under the pointer. In the Cards layout each stack is its decoded message card (Messages board, feed
+// variant), windowed the same way.
 import type { ActivitySummary } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
 import {
@@ -17,24 +21,35 @@ import type { KeyboardEvent as ReactKeyboardEvent, Ref } from "react"
 
 import type { ActivityFeed } from "../../data/activity-feed.ts"
 import { compareSeq } from "../../data/activity-feed.ts"
-import { useReadOnly } from "../../app/context.ts"
+import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
-import { useDisplay } from "../display.ts"
+import { clockText, useDisplay } from "../display.ts"
 import { useNow } from "../hooks.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
+import type { ActivityStack } from "./fold.ts"
+import { foldedOf, spanText } from "./fold.ts"
 import { activityLayout } from "./layout.ts"
-import type { ListEntry } from "./rows.ts"
 import {
+	entryEventId,
 	estimateCardHeight,
 	estimateHeight,
-	listEntries,
+	memberLine,
 	rowView,
+	stackEntries,
 	timeText,
 } from "./rows.ts"
 import { prefixOffsets, virtualWindow } from "./virtual.ts"
+import { Icon } from "../../ui/Icon.tsx"
 
 const HOLD_PX = 8
 const MORE_PX = 600
+/**
+ * Older pages loaded by themselves while the folded list is shorter than the viewport: folding can turn a
+ * 100-row page into a handful of stacks (one aircraft at 2 rows/s is 120 rows a minute), so the list asks for
+ * more until it fills, at most 10 pages (1 000 rows, a fifth of MAX_ITEMS) per search. Past that, scrolling
+ * loads more as before.
+ */
+export const AUTO_FILL_PAGES = 10
 
 export interface ActivityListProps {
 	feed: ActivityFeed
@@ -58,11 +73,13 @@ export function ActivityList({
 	column,
 	ref,
 }: ActivityListProps) {
+	const { activity } = useServices()
 	const items = useStore(feed, s => s.items)
 	const pending = useStore(feed, s => s.pending.length)
 	const status = useStore(feed, s => s.status)
 	const more = useStore(feed, s => s.nextPageToken !== null)
 	const loadingMore = useStore(feed, s => s.loadingMore)
+	const full = useStore(feed, s => s.items.length >= feed.capacity)
 	const now = useNow(true, 30_000)
 	const scroller = useRef<HTMLDivElement | null>(null)
 	const heights = useRef(new Map<string, number>())
@@ -70,7 +87,9 @@ export function ActivityList({
 	const [scrollTop, setScrollTop] = useState(0)
 	const [viewport, setViewport] = useState(600)
 	const [cursor, setCursor] = useState<string | null>(null)
+	const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
 	const seen = useRef<string | null>(null)
+	const autoPages = useRef(0)
 	const cards = useStore(activityLayout, s => s.layout === "cards")
 	const readOnly = useReadOnly()
 	const estimate = cards ? estimateCardHeight : estimateHeight
@@ -87,9 +106,10 @@ export function ActivityList({
 	}, [cards])
 
 	const display = useDisplay()
+	const stacks = useMemo(() => foldedOf(items), [items])
 	const entries = useMemo(
-		() => listEntries(items, now),
-		[items, now, display], // group labels follow the time setting
+		() => stackEntries(stacks, now, expanded),
+		[stacks, now, display, expanded], // group labels follow the time setting
 	)
 	const offsets = useMemo(() => {
 		void version
@@ -99,18 +119,18 @@ export function ActivityList({
 	}, [entries, version, estimate])
 	const win = virtualWindow(offsets, scrollTop, viewport)
 
-	// Rows that arrive live (newer than the newest row so far) flash once; older pages do not.
+	// Stacks that heard live (a decode newer than the newest so far) flash once; older pages do not.
 	const fresh = useMemo(() => {
 		const out = new Set<string>()
 		const newest = items[0]?.commitSeq ?? null
 		const before = status === "live" ? seen.current : null
 		if (before === null || newest === null) return out
-		for (const i of items) {
-			if (compareSeq(i.commitSeq, before) <= 0) break
-			out.add(i.eventId)
+		for (const st of stacks) {
+			if (compareSeq(st.latest.commitSeq, before) <= 0) break
+			out.add(st.key)
 		}
 		return out
-	}, [items, status])
+	}, [items, stacks, status])
 	useEffect(() => {
 		seen.current = status === "live" ? (items[0]?.commitSeq ?? null) : null
 	}, [items, status])
@@ -157,13 +177,33 @@ export function ActivityList({
 		return () => ro.disconnect()
 	}, [])
 
-	// A new search starts at the top.
+	// A new search starts at the top, folded.
 	const query = useStore(feed, s => s.query)
 	useEffect(() => {
 		if (scroller.current) scroller.current.scrollTop = 0
 		setScrollTop(0)
+		setExpanded(new Set())
+		autoPages.current = 0
 		feed.setHolding(false)
 	}, [query, feed])
+
+	// Folded stacks shorter than the viewport: ask for older pages until it fills (bounded above).
+	useEffect(() => {
+		if (
+			!shouldAutoFill({
+				live: status === "live",
+				more,
+				loadingMore,
+				full,
+				pages: autoPages.current,
+				contentPx: win.total,
+				viewportPx: viewport,
+			})
+		)
+			return
+		autoPages.current += 1
+		void feed.loadMore()
+	}, [status, more, loadingMore, full, win.total, viewport, feed])
 
 	const onScroll = useCallback(() => {
 		const el = scroller.current
@@ -181,10 +221,28 @@ export function ActivityList({
 		feed.setHolding(false)
 	}, [feed])
 
+	// The detail folds the same list: tell the controller which one this row came from.
+	const open = useCallback(
+		(eventId: string) => {
+			activity.noteOpenFeed(feed)
+			onOpen(eventId)
+		},
+		[activity, feed, onOpen],
+	)
+
+	const toggle = useCallback((key: string) => {
+		setExpanded(prev => {
+			const next = new Set(prev)
+			if (next.has(key)) next.delete(key)
+			else next.add(key)
+			return next
+		})
+	}, [])
+
 	const rowIndex = useMemo(() => {
 		const m = new Map<string, number>()
 		entries.forEach((e, i) => {
-			if (e.type === "row") m.set(e.key, i)
+			if (e.type !== "group") m.set(e.key, i)
 		})
 		return m
 	}, [entries])
@@ -220,16 +278,16 @@ export function ActivityList({
 			e.key !== "End"
 		)
 			return
-		// A card holds its own buttons: Enter on one of them is that button's, not "open".
-		if (e.key === "Enter" && cards && e.target !== e.currentTarget) return
-		const rows = entries.filter(
-			(x): x is Extract<ListEntry, { type: "row" }> => x.type === "row",
-		)
+		// A card or a stack holds its own buttons: Enter on one of them is that button's, not "open".
+		if (e.key === "Enter" && e.target !== e.currentTarget) return
+		const rows = entries.filter(x => x.type !== "group")
 		if (rows.length === 0) return
 		e.preventDefault()
 		const at = cursor === null ? -1 : rows.findIndex(r => r.key === cursor)
 		if (e.key === "Enter") {
-			if (at >= 0) onOpen(rows[at]?.key ?? "")
+			const row = rows[at]
+			const id = row ? entryEventId(row) : null
+			if (id !== null) open(id)
 			return
 		}
 		const next =
@@ -253,6 +311,8 @@ export function ActivityList({
 		else if (ref) ref.current = el
 	}
 
+	const refreshing = status === "loading" && items.length > 0
+
 	return (
 		<div className={className ? `wka-listwrap ${className}` : "wka-listwrap"}>
 			{pending > 0 && (
@@ -260,12 +320,18 @@ export function ActivityList({
 					↑ {pending} new
 				</button>
 			)}
+			{refreshing && (
+				<span className="wka-refresh" role="status">
+					Updating…
+				</span>
+			)}
 			<div
 				ref={setRefs}
 				className="wka-list wk-scroll"
 				data-layout={cards ? "cards" : undefined}
 				role="list"
 				aria-label={label}
+				aria-busy={refreshing || undefined}
 				tabIndex={0}
 				data-act-col={column}
 				onScroll={onScroll}
@@ -287,38 +353,113 @@ export function ActivityList({
 								>
 									{e.label}
 								</div>
-							) : cards ? (
-								<ActivityCard
+							) : e.type === "member" ? (
+								<FoldedRow
 									key={e.key}
+									entryKey={e.key}
 									item={e.item}
 									measure={measure}
 									cursor={cursor === e.key}
-									current={openId === e.key}
-									fresh={fresh.has(e.key)}
-									readOnly={readOnly}
-									onOpen={onOpen}
+									current={openId === e.item.eventId}
+									onOpen={open}
 								/>
-							) : (
+							) : e.type === "row" ? (
 								<ActivityRow
 									key={e.key}
 									item={e.item}
 									measure={measure}
 									cursor={cursor === e.key}
 									current={openId === e.key}
+									fresh={false}
+									onOpen={open}
+								/>
+							) : cards ? (
+								<ActivityCard
+									key={e.key}
+									entryKey={e.key}
+									item={e.stack.view}
+									stack={e.stack}
+									expanded={e.expanded}
+									onToggle={toggle}
+									measure={measure}
+									cursor={cursor === e.key}
+									current={openId === e.stack.latest.eventId}
 									fresh={fresh.has(e.key)}
-									onOpen={onOpen}
+									readOnly={readOnly}
+									onOpen={open}
+								/>
+							) : (
+								<ActivityRow
+									key={e.key}
+									entryKey={e.key}
+									item={e.stack.view}
+									stack={e.stack}
+									expanded={e.expanded}
+									onToggle={toggle}
+									measure={measure}
+									cursor={cursor === e.key}
+									current={openId === e.stack.latest.eventId}
+									fresh={fresh.has(e.key)}
+									onOpen={open}
 								/>
 							),
 						)}
 					</div>
 				</div>
 				{loadingMore && <p className="wka-foot">Loading older activity…</p>}
-				{!more && items.length > 0 && status === "live" && (
-					<p className="wka-foot">That is everything kept for this search.</p>
+				{items.length > 0 && status !== "error" && (
+					<p className="wka-foot">
+						{foldedText(items.length, stacks.length)}
+						{!more && status === "live"
+							? " That is everything kept for this search."
+							: ""}
+					</p>
 				)}
 			</div>
 		</div>
 	)
+}
+
+export interface AutoFillState {
+	live: boolean
+	more: boolean
+	loadingMore: boolean
+	/** The list holds its most items (MAX_ITEMS): a page more would only push old rows out. */
+	full: boolean
+	/** Older pages already loaded by themselves for this search. */
+	pages: number
+	contentPx: number
+	viewportPx: number
+}
+
+/** Whether to load an older page by itself: the folded list ends within MORE_PX of the viewport's end. */
+export function shouldAutoFill(s: AutoFillState): boolean {
+	if (!s.live || !s.more || s.loadingMore || s.full) return false
+	if (s.pages >= AUTO_FILL_PAGES) return false
+	return s.contentPx < s.viewportPx + MORE_PX
+}
+
+/** The list's honest count: what is loaded, and how it folded ("312 events in 41 rows, loaded so far."). */
+export function foldedText(events: number, rows: number): string {
+	const ev = `${events} event${events === 1 ? "" : "s"}`
+	return events === rows
+		? `${ev} loaded so far.`
+		: `${ev} in ${rows} row${rows === 1 ? "" : "s"}, loaded so far.`
+}
+
+/** "25 · 3 min": a stack's count and span in the loaded list. */
+export function stackBadge(stack: ActivityStack): string {
+	const span = stack.lastMs - stack.firstMs
+	return span >= 1000
+		? `${stack.members.length} · ${spanText(span)}`
+		: String(stack.members.length)
+}
+
+function stackLabel(stack: ActivityStack, expanded: boolean): string {
+	const n = stack.members.length
+	return `${n} in the loaded list over ${spanText(stack.lastMs - stack.firstMs)}. ${
+		expanded ? "Hide" : "Show"
+	} the ${n - 1} earlier`
 }
 
 /** Moves focus to the next list left or right: the pane's columns in order, then the drawer's list. */
@@ -341,6 +482,36 @@ interface RowProps {
 	current: boolean
 	fresh: boolean
 	onOpen: (eventId: string) => void
+	/** The list entry's key (a stack's fold key and start); the event id for a lone row. */
+	entryKey?: string
+	/** The stack this row stands for; with more than one member it shows the count and expands. */
+	stack?: ActivityStack
+	expanded?: boolean
+	onToggle?: (key: string) => void
+}
+
+function StackToggle({
+	stack,
+	expanded,
+	onToggle,
+}: {
+	stack: ActivityStack
+	expanded: boolean
+	onToggle: ((key: string) => void) | undefined
+}) {
+	return (
+		<button
+			type="button"
+			className="wka-stack"
+			aria-expanded={expanded}
+			aria-label={stackLabel(stack, expanded)}
+			title={stackLabel(stack, expanded)}
+			onClick={() => onToggle?.(stack.key)}
+		>
+			<span className="wka-stack-n">{stackBadge(stack)}</span>
+			<Icon name={expanded ? "chevron-up" : "chevron-down"} size={14} />
+		</button>
+	)
 }
 
 export const ActivityRow = memo(function ActivityRow({
@@ -350,15 +521,21 @@ export const ActivityRow = memo(function ActivityRow({
 	current,
 	fresh,
 	onOpen,
+	entryKey,
+	stack,
+	expanded = false,
+	onToggle,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
 	const v = rowView(item)
+	const stacked = stack !== undefined && stack.members.length > 1
 	return (
 		<div
 			role="listitem"
-			data-key={item.eventId}
+			data-key={entryKey ?? item.eventId}
 			ref={measure}
 			className="wka-item"
+			data-stacked={stacked || undefined}
 		>
 			<button
 				type="button"
@@ -394,6 +571,49 @@ export const ActivityRow = memo(function ActivityRow({
 					)}
 				</span>
 			</button>
+			{stacked && (
+				<StackToggle stack={stack} expanded={expanded} onToggle={onToggle} />
+			)}
+		</div>
+	)
+})
+
+/** A folded earlier row under an expanded stack: its time and what it said, one line; opens its detail. */
+export const FoldedRow = memo(function FoldedRow({
+	entryKey,
+	item,
+	measure,
+	cursor,
+	current,
+	onOpen,
+}: {
+	entryKey: string
+	item: ActivitySummary
+	measure: (el: HTMLElement | null) => void
+	cursor: boolean
+	current: boolean
+	onOpen: (eventId: string) => void
+}) {
+	useDisplay()
+	return (
+		<div
+			role="listitem"
+			data-key={entryKey}
+			ref={measure}
+			className="wka-item wka-folded"
+		>
+			<button
+				type="button"
+				className="wk-row wka-row wka-folded-row"
+				data-kb-cursor={cursor || undefined}
+				aria-current={current || undefined}
+				onClick={() => onOpen(item.eventId)}
+			>
+				<time className="wka-time" dateTime={item.producedAt}>
+					{clockText(item.producedAt, { seconds: true })}
+				</time>
+				<span className="wka-folded-text">{memberLine(item)}</span>
+			</button>
 		</div>
 	)
 })
@@ -406,11 +626,16 @@ export const ActivityCard = memo(function ActivityCard({
 	fresh,
 	readOnly,
 	onOpen,
+	entryKey,
+	stack,
+	expanded = false,
+	onToggle,
 }: RowProps & { readOnly: boolean }) {
+	const stacked = stack !== undefined && stack.members.length > 1
 	return (
 		<div
 			role="listitem"
-			data-key={item.eventId}
+			data-key={entryKey ?? item.eventId}
 			ref={measure}
 			className="wka-item wka-carditem"
 			data-kb-cursor={cursor || undefined}
@@ -420,8 +645,13 @@ export const ActivityCard = memo(function ActivityCard({
 			<MessageCard
 				item={item}
 				readOnly={readOnly}
-				onOpen={() => onOpen(item.eventId)}
+				onOpen={() => onOpen(stack?.latest.eventId ?? item.eventId)}
 			/>
+			{stacked && (
+				<div className="wka-cardstack">
+					<StackToggle stack={stack} expanded={expanded} onToggle={onToggle} />
+				</div>
+			)}
 		</div>
 	)
 })

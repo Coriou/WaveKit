@@ -4,6 +4,10 @@
  * Live records are batched (one store update per flush, never one per message) and held while
  * the list is paused or scrolled away from the top ("N new"). A replay reset or a failed
  * snapshot is a visible state; a reset reloads the snapshot and resubscribes.
+ *
+ * The list is its own cache: stopping (the drawer closed) keeps it, and showing the same query again
+ * renders it at once while the snapshot reloads behind it ("loading" with items). The fresh snapshot is
+ * merged into the cache only when the two overlap (no hole between them), else it replaces the cache.
  */
 import type {
 	ActivityQuery,
@@ -125,6 +129,32 @@ export function mergeNewest(
 	return [...fresh, ...list].sort(newestFirst).slice(0, max)
 }
 
+/** Two queries ask for the same rows (key order aside). */
+export function sameQuery(a: ActivityQuery, b: ActivityQuery): boolean {
+	return JSON.stringify(queryParams(a)) === JSON.stringify(queryParams(b))
+}
+
+/**
+ * The cache can be kept beside a fresh snapshot (both newest first) when nothing can be missing between
+ * them: the snapshot reaches back to (or past) the cache's newest row. A complete snapshot (no next page)
+ * is everything stored, so it replaces the cache (rows pruned since are dropped).
+ */
+export function joins(
+	snapshot: readonly ActivitySummary[],
+	cache: readonly ActivitySummary[],
+	complete: boolean,
+): boolean {
+	if (cache.length === 0 || complete) return false
+	const oldest = snapshot.at(-1)
+	const newest = cache.reduce<ActivitySummary | null>(
+		(top, i) =>
+			top === null || compareSeq(i.commitSeq, top.commitSeq) > 0 ? i : top,
+		null,
+	)
+	if (oldest === undefined || newest === null) return false
+	return compareSeq(oldest.commitSeq, newest.commitSeq) <= 0
+}
+
 /** The REST query string for a query (the core's flat parameter names). */
 export function queryParams(q: ActivityQuery): Record<string, QueryValue> {
 	const p: Record<string, QueryValue> = {}
@@ -187,7 +217,12 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			}),
 			events.on("activity:reset", data => {
 				if (data.id !== this.subId) return
-				this.update(s => ({ ...s, reset: data.reason }))
+				// another store: its sequence numbers say nothing about the cached rows
+				this.update(s =>
+					data.reason === "store-changed"
+						? { ...s, reset: data.reason, items: [], pending: [] }
+						: { ...s, reset: data.reason },
+				)
 				void this.reload()
 			}),
 			events.on("error", data => {
@@ -197,13 +232,26 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		]
 	}
 
-	/** Shows `query` (null clears the list): loads the snapshot, then follows it live. */
+	/** Most items the list keeps. */
+	get capacity(): number {
+		return this.maxItems
+	}
+
+	/**
+	 * Shows `query` (null clears the list): loads the snapshot, then follows it live. The same query as
+	 * the one shown keeps the list (and the query object) while it reloads: the cache across close/open.
+	 */
 	setQuery(query: ActivityQuery | null): Promise<void> {
+		const s = this.get()
+		if (query !== null && s.query !== null && sameQuery(s.query, query)) {
+			this.set({ ...s, error: null, reset: null })
+			return this.reload()
+		}
 		this.set({
 			...INITIAL,
 			query,
-			paused: this.get().paused,
-			holding: this.get().holding,
+			paused: s.paused,
+			holding: s.holding,
 		})
 		return this.reload()
 	}
@@ -221,14 +269,22 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		try {
 			const page = await this.fetchPage(query, null)
 			if (generation !== this.generation) return
-			this.update(s => ({
-				...s,
-				status: "live",
-				items: [...page.items].sort(newestFirst).slice(0, this.maxItems),
-				pending: [],
-				nextPageToken: page.nextPageToken,
-				available: true,
-			}))
+			this.update(s => {
+				const cached = [...s.pending, ...s.items]
+				const fresh = [...page.items].sort(newestFirst)
+				const keep = joins(fresh, cached, page.nextPageToken === null)
+				return {
+					...s,
+					status: "live",
+					items: keep
+						? mergeNewest(cached, fresh, this.maxItems)
+						: fresh.slice(0, this.maxItems),
+					pending: [],
+					// past the cache's oldest row the next page continues from the snapshot's token
+					nextPageToken: page.nextPageToken,
+					available: true,
+				}
+			})
 			this.subId = `${this.id}-${generation}`
 			this.unsubscribe = this.events.subscribeActivity(
 				this.subId,

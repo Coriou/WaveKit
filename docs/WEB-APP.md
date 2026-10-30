@@ -72,6 +72,7 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
   when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying
   stops, Activity shows `rate limited, retry in N s` (or `rate limited, retry later`).
+  Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
 - **Recordings:** recordings kept by the core, to play, search and keep.
@@ -89,6 +90,46 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   budget and a note to set `decoderPolicy.efficiency.cpuBudgetCores` in YAML config.
   A saved override adds “Saved setting overrides config”. On cores without the budget service,
   the row is disabled and says “Not available”.
+
+### Activity folding
+
+Activity folds repeats into stacks, so one aircraft, one beacon or one call is one row. A stack
+shows its latest state (an aircraft's callsign even when the newest decode is position only), the
+count and the span (`25 · 1 min`), and expands in place to the earlier rows. Counts are for the
+loaded list, never totals: the list footer says `312 events in 41 rows, loaded so far.` Folding
+runs in the browser over the rows already loaded (at most 5 000); with a short folded list,
+Activity loads up to 10 older pages of 100 by itself to fill the view.
+
+Each row gets a fold key from its own data: protocol and event kind, the core's entity
+(`icao:`, `mmsi:`, `capcode:`, `talkgroup:` plus the radio, `sensor:`, `callsign:`, `node:`; the
+title when there is none), the channel to 1 kHz where an entity is only unique per channel, and,
+when the row carries a message, its kind (tone only, numeric, alpha) and a hash of its text, so two
+different pages never fold. Ingestion gaps never fold. A silence longer than the family's gap ends
+a stack:
+
+| Family                        | Gap    | Why                                                                                                                           |
+| ----------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Aircraft (ICAO, registration) | 2 min  | readsb sends 1-30 messages/s; the core stores a position update at most once a minute. Twice that tolerates one missed minute |
+| Vessel (MMSI)                 | 10 min | AIS reports every 2 s to 3 min (at anchor); 3 missed anchor reports                                                           |
+| Pager (capcode)               | 3 min  | Idle beacons repeat every 30-60 s; 3 × 60 s tolerates two missed beacons                                                      |
+| Call (talkgroup and radio)    | 10 s   | Bursts are under 3 s apart; 2 × a 5 s hang time ends the call                                                                 |
+| Sensor                        | 5 min  | 433/868 MHz sensors send every 16-60 s; 5 × 60 s                                                                              |
+| APRS station (callsign)       | 15 min | Fixed stations beacon every 10 min; plus 50 % jitter                                                                          |
+| Mesh node                     | 30 min | Meshtastic sends position every 15 min by default; twice that                                                                 |
+| Anything else                 | 2 min  | One exchange on one channel (analog overs are seconds apart)                                                                  |
+
+Stacks are ordered by their latest decode. At the top of the list, a stack that hears again moves
+to the top and keeps its place in React (its key is the fold key and its first row); while you are
+scrolled down or Paused, new decodes wait behind the `N new` pill and nothing moves. Reopening the
+drawer shows the last list at once (with `Updating…`) while it reloads; the fresh rows join the
+kept ones when they overlap, else they replace them.
+
+An event's detail says **What it is** as a guess from its stack, labelled as one: a tone-only
+capcode repeating on a schedule reads `Likely a paging-network idle beacon (no content, repeats
+about every 45 s)`; bursts of one talkgroup and radio read `Likely one call: 25 bursts over 58 s`.
+A schedule needs at least 3 rows with every interval within 35 % of the median. The detail also
+shows how often it was seen, the strength when the decoder sends it, **Open in Scanner** when a
+discovery sits within 12.5 kHz, and up to 50 folded rows.
 
 ## Map and Messages
 

@@ -38,6 +38,8 @@ import type {
 	SpectrumProfileEventData,
 	TunerState,
 } from "@wavekit/api-types"
+import type { FloodEvent } from "./activity-floods.ts"
+import { floodEvents } from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
 import { registerReceiverMock } from "./receiver.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
@@ -128,6 +130,12 @@ export interface MockServerOptions {
 	 * Retry-After: "1", "30", an HTTP date 2 s ahead ("date") or a malformed value (WAVEKIT_MOCK_ACTIVITY_429).
 	 */
 	activity429?: Activity429Mode
+	/**
+	 * Activity floods (./activity-floods.ts): an aircraft at 2.5 decodes/s, a pager tone-only beacon every
+	 * ~45 s and a 25-burst DMR call every 3 min, in the seeded history and live. On for `pnpm mock`
+	 * (WAVEKIT_MOCK_ACTIVITY_FLOODS=0 turns them off), off by default in buildMockServer().
+	 */
+	activityFloods?: boolean
 }
 
 export interface MockServer {
@@ -149,6 +157,13 @@ export interface MockServer {
 	/** Map fleets and coverage (./map.ts). */
 	map: MapMock
 }
+
+/**
+ * Seeded flood history: 30 min of beacons and calls (30 min / 45 s = 40 beacons, 30 min / 3 min = 10 calls of
+ * 25 bursts), 3 min of aircraft (180 s × 2.5/s, about 450 rows): enough for every kind of stack on the first page.
+ */
+const FLOOD_HISTORY_MS = 30 * 60_000
+const FLOOD_AIRCRAFT_HISTORY_MS = 3 * 60_000
 
 /** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
 const TUNER_MIN_HZ = 24_000_000
@@ -453,6 +468,7 @@ export async function buildMockServer(
 		Math.max(512, Math.round(options.spectrumBins ?? SPECTRUM_SUMMARY_BINS)),
 	)
 	const messageEvery = Math.max(20, (options.messageIntervalMs ?? 3000) / load)
+	const activityFloods = options.activityFloods ?? false
 	let audioOrigin = options.audioOrigin ?? `http://localhost:${audioPort}`
 	const startedAt = Date.now()
 
@@ -844,6 +860,24 @@ export async function buildMockServer(
 		return summary
 	}
 
+	const summaryFromFlood = (f: FloodEvent, at: number): ActivitySummary => {
+		seq += 1
+		const iso = new Date(at).toISOString()
+		const summary: ActivitySummary = {
+			...f.summary,
+			eventId: `evt_${seq.toString(36)}`,
+			commitSeq: String(seq),
+			producedAt: iso,
+			receivedAt: iso,
+		}
+		decodedById.set(summary.eventId, f.data)
+		if (decodedById.size > 2500) {
+			const first = decodedById.keys().next().value
+			if (first !== undefined) decodedById.delete(first)
+		}
+		return summary
+	}
+
 	const seedHistory = () => {
 		const now = Date.now()
 		const items: { at: number; build: (at: number) => ActivitySummary }[] = []
@@ -925,6 +959,13 @@ export async function buildMockServer(
 				}
 			},
 		})
+		if (activityFloods)
+			for (const f of floodEvents(
+				now - FLOOD_HISTORY_MS,
+				now - 1000,
+				now - FLOOD_AIRCRAFT_HISTORY_MS,
+			))
+				items.push({ at: f.at, build: t => summaryFromFlood(f, t) })
 		for (const item of items.sort((a, b) => a.at - b.at))
 			activity.push(item.build(Math.min(item.at, now - 1000)))
 	}
@@ -975,6 +1016,7 @@ export async function buildMockServer(
 	let ticker: ReturnType<typeof setInterval> | null = null
 	let tick = 0
 	let lastMessageAt = Date.now()
+	let lastFloodAt = Date.now()
 	const onTick = () => {
 		tick += 1
 		if (live.running) {
@@ -988,11 +1030,18 @@ export async function buildMockServer(
 			lastMessageAt += messageEvery
 			emitMessage()
 		}
+		if (activityFloods) {
+			const to = Date.now()
+			for (const f of floodEvents(lastFloodAt, to))
+				pushActivity(summaryFromFlood(f, f.at))
+			lastFloodAt = to
+		}
 		if (tick % 20 === 0) broadcast("sources", "source:status", sourceStatus())
 	}
 	const startTicker = () => {
 		if (ticker) return
 		lastMessageAt = Date.now()
+		lastFloodAt = Date.now()
 		ticker = setInterval(onTick, 250)
 	}
 	const stopTickerIfIdle = () => {
@@ -2374,6 +2423,7 @@ async function main(): Promise<void> {
 		...(isActivity429Mode(activity429Env)
 			? { activity429: activity429Env }
 			: {}),
+		activityFloods: env["WAVEKIT_MOCK_ACTIVITY_FLOODS"] !== "0",
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)
