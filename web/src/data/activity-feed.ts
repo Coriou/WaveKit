@@ -364,7 +364,14 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			this.update(s => ({ ...s, status: "idle", items: [], pending: [] }))
 			return
 		}
-		this.update(s => ({ ...s, status: "loading", error: null }))
+		// A reload invalidates any older-page request in flight (its generation check drops it), so the
+		// paging flag it set must clear here or loadMore() would stay blocked.
+		this.update(s => ({
+			...s,
+			status: "loading",
+			error: null,
+			loadingMore: false,
+		}))
 		try {
 			const page = await this.fetchPage(query, null)
 			if (generation !== this.generation) return

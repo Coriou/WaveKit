@@ -196,6 +196,42 @@ describe("ActivityFeed", () => {
 		expect(feed.get().nextPageToken).toBeNull()
 	})
 
+	it("a reopen while an older page loads does not leave paging blocked", async () => {
+		let release: (() => void) | null = null
+		const urls: string[] = []
+		const api = new ApiClient({
+			fetch: async url => {
+				urls.push(url)
+				if (url.includes("pageToken") && release === null) {
+					await new Promise<void>(r => {
+						release = r
+					})
+					return new Response(JSON.stringify(page([summary(1)], null, 3)))
+				}
+				const body = url.includes("pageToken")
+					? page([summary(1)], null, 3)
+					: page([summary(3), summary(2)], "p:2:3", 3)
+				return new Response(JSON.stringify(body))
+			},
+		})
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		const feed = new ActivityFeed(api, events, { flushMs: 50, id: "t" })
+		await feed.setQuery({})
+		const stale = feed.loadMore()
+		expect(feed.get().loadingMore).toBe(true)
+		// Close and reopen the same search before the older page answers.
+		await feed.setQuery({})
+		;(release as (() => void) | null)?.()
+		await stale
+		expect(feed.get().loadingMore).toBe(false)
+		await feed.loadMore()
+		expect(urls.filter(u => u.includes("pageToken"))).toHaveLength(2)
+		expect(feed.get().items.map(i => i.commitSeq)).toEqual(["3", "2", "1"])
+	})
+
 	it("reloads and resubscribes after a replay reset, and says so", async () => {
 		let top = 2
 		const { feed, sockets, subscribes } = setup(() =>
