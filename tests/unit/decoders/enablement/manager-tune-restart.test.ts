@@ -569,3 +569,18 @@ for (const hold of ["late-drops", "stop"] as const)
 		}
 		expect(f.running("far")).toBe(true)
 	})
+
+it("a source removed for good drops its scan mark; a reconnect keeps it", async () => {
+	const f = await setup()
+	const tainted = (f.m as unknown as { scanTainted: Set<string> }).scanTainted
+	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+	await f.m.releaseSource("rtl", "job-1")
+	expect(tainted.has("rtl")).toBe(true)
+	// "removed" alone is the reconnect teardown: the mark survives it.
+	f.sources.emit("removed", "rtl")
+	expect(tainted.has("rtl")).toBe(true)
+	f.sources.emit("source-removed", "rtl", new Date())
+	expect(tainted.has("rtl")).toBe(false)
+	await f.m.destroy()
+	expect(f.sources.listenerCount("source-removed")).toBe(0)
+})

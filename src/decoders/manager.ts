@@ -694,6 +694,8 @@ export class DecoderManager extends EventEmitter {
 	private ownsSourceRouting = false
 	private sourceConnectedHandler: ((sourceId: string) => void) | null = null
 	private sourceRemovedHandler: ((sourceId: string) => void) | null = null
+	/** Forgets per-source scan state when a source is removed for good. */
+	private sourceGoneHandler: ((sourceId: string) => void) | null = null
 	private sourceConnectedEvaluation: ((sourceId: string) => void) | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
@@ -3982,6 +3984,10 @@ export class DecoderManager extends EventEmitter {
 			this.sourceManager.off("removed", this.sourceRemovedHandler)
 			this.sourceRemovedHandler = null
 		}
+		if (this.sourceGoneHandler && this.sourceManager) {
+			this.sourceManager.off("source-removed", this.sourceGoneHandler)
+			this.sourceGoneHandler = null
+		}
 		if (this.sourceConnectedEvaluation && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
 			this.sourceConnectedEvaluation = null
@@ -5123,6 +5129,9 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceRemovedHandler && this.sourceManager) {
 			this.sourceManager.off("removed", this.sourceRemovedHandler)
 		}
+		if (this.sourceGoneHandler && this.sourceManager) {
+			this.sourceManager.off("source-removed", this.sourceGoneHandler)
+		}
 		if (this.sourceConnectedEvaluation && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
 		}
@@ -5180,6 +5189,12 @@ export class DecoderManager extends EventEmitter {
 		}
 		this.sourceConnectedEvaluation = connectedEvaluation
 		sourceManager.on("removed", this.sourceRemovedHandler)
+		// "removed" also fires on reconnect, where the scan taint must survive;
+		// "source-removed" means the source is gone for good.
+		this.sourceGoneHandler = sourceId => {
+			this.scanTainted.delete(sourceId)
+		}
+		sourceManager.on("source-removed", this.sourceGoneHandler)
 		this.subscribeToSourceCapsChanges()
 	}
 
