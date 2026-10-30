@@ -19,7 +19,7 @@ import {
 	type BandAction,
 	type BandDecoderRow,
 } from "./band-decoders.ts"
-import { raiseBudget } from "./budget-raise.ts"
+import { budgetPort, followBudget, raiseBudget } from "./budget-raise.ts"
 import { DecoderVerdictsFeed } from "./verdicts.ts"
 import "./band-decoders.css"
 
@@ -45,16 +45,22 @@ export function BandDecoders({
 		() => new EfficiencyBudgetStore(data.api),
 		[data.api],
 	)
+	const budgetWrites = useMemo(
+		() => budgetPort(data.api, budgetStore),
+		[data.api, budgetStore],
+	)
 	const budget = useStore(budgetStore, s => s.settings?.resolved ?? null)
-	// the budget is read only when a verdict here suggests raising it, so a raise at the cap is not offered
+	// the budget is read only while a verdict here suggests raising it, so a raise at the cap is not offered;
+	// it is read again with every verdicts read, so a cap lowered elsewhere offers the raise again
 	const wantsBudget = decoders.some(
 		d =>
 			verdicts?.get(d.id)?.actions.includes("raise-budget") === true &&
 			onBand(d, hz),
 	)
-	useEffect(() => {
-		if (wantsBudget) void budgetStore.load()
-	}, [wantsBudget, budgetStore])
+	useEffect(
+		() => (wantsBudget ? followBudget(feed, budgetStore) : undefined),
+		[wantsBudget, feed, budgetStore],
+	)
 	const [busy, setBusy] = useState<string | null>(null)
 
 	const rows = bandDecoders(decoders, verdicts, hz, { scanJobId, budget })
@@ -80,7 +86,9 @@ export function BandDecoders({
 			else if (action.kind === "stop-scan")
 				await data.scanner.cancelJob(action.jobId)
 			else
-				failed = await raiseBudget(budgetStore, showAppToast, () => feed.soon())
+				failed = await raiseBudget(budgetWrites, showAppToast, () =>
+					feed.soon(),
+				)
 		} catch (error) {
 			failed = error instanceof Error ? error.message : String(error)
 		} finally {

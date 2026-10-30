@@ -25,7 +25,20 @@ export interface EfficiencyBudgetService {
 	cores(): number
 	view(): EfficiencyBudgetSettings
 	update(value: EfficiencyBudgetValue): Promise<EfficiencyBudgetSettings>
+	/**
+	 * Saves `value` only while the stored budget still equals `expected`. Updates run one at a
+	 * time, so no other update lands between the comparison and the write.
+	 */
+	updateIf(
+		expected: EfficiencyBudgetValue,
+		value: EfficiencyBudgetValue,
+	): Promise<EfficiencyBudgetUpdate>
 }
+
+/** A conditional update whose `expected` no longer matched leaves the budget as `current`. */
+export type EfficiencyBudgetUpdate =
+	| { ok: true; settings: EfficiencyBudgetSettings }
+	| { ok: false; current: EfficiencyBudgetSettings }
 
 export async function readBudgetSettings(file: string): Promise<unknown> {
 	const handle = await open(
@@ -83,40 +96,49 @@ export async function openEfficiencyBudget(options: {
 			"Saved decoder CPU budget overrides startup configuration",
 		)
 	let tail: Promise<unknown> = Promise.resolve()
+	const enqueue = (
+		next: EfficiencyBudgetValue,
+		expected: EfficiencyBudgetValue | undefined,
+	): Promise<EfficiencyBudgetUpdate> => {
+		const parsed = CpuBudgetSchema.safeParse(next)
+		if (!parsed.success)
+			return Promise.reject(
+				new WaveKitError("Invalid CPU budget", "EFFICIENCY_BUDGET_INVALID"),
+			)
+		const work = tail.then(async (): Promise<EfficiencyBudgetUpdate> => {
+			if (expected !== undefined && settings.cpuBudgetCores !== expected)
+				return { ok: false, current: structuredClone(settings) }
+			const resolved = resolve(parsed.data)
+			try {
+				await (options.write ?? atomicWrite)(
+					file,
+					`${JSON.stringify({ version: 1, cpuBudgetCores: parsed.data })}\n`,
+				)
+			} catch {
+				throw new WaveKitError(
+					"Could not persist CPU budget",
+					"EFFICIENCY_BUDGET_STORE_UNAVAILABLE",
+				)
+			}
+			settings = { source: "saved", cpuBudgetCores: parsed.data, resolved }
+			// Persistence and live publication succeeded; a notification failure must
+			// not misreport the committed update as a store failure.
+			try {
+				options.onChanged?.(structuredClone(settings))
+			} catch {
+				log?.warn("CPU budget change notification failed")
+			}
+			return { ok: true, settings: structuredClone(settings) }
+		})
+		tail = work.catch(() => undefined)
+		return work
+	}
 	return {
 		cores: () => settings.resolved.cores,
 		view: () => structuredClone(settings),
-		update(next) {
-			const parsed = CpuBudgetSchema.safeParse(next)
-			if (!parsed.success)
-				return Promise.reject(
-					new WaveKitError("Invalid CPU budget", "EFFICIENCY_BUDGET_INVALID"),
-				)
-			const work = tail.then(async () => {
-				const resolved = resolve(parsed.data)
-				try {
-					await (options.write ?? atomicWrite)(
-						file,
-						`${JSON.stringify({ version: 1, cpuBudgetCores: parsed.data })}\n`,
-					)
-				} catch {
-					throw new WaveKitError(
-						"Could not persist CPU budget",
-						"EFFICIENCY_BUDGET_STORE_UNAVAILABLE",
-					)
-				}
-				settings = { source: "saved", cpuBudgetCores: parsed.data, resolved }
-				// Persistence and live publication succeeded; a notification failure must
-				// not misreport the committed update as a store failure.
-				try {
-					options.onChanged?.(structuredClone(settings))
-				} catch {
-					log?.warn("CPU budget change notification failed")
-				}
-				return structuredClone(settings)
-			})
-			tail = work.catch(() => undefined)
-			return work
-		},
+		// without `expected` the update always applies
+		update: next =>
+			enqueue(next, undefined).then(r => (r.ok ? r.settings : r.current)),
+		updateIf: (expected, next) => enqueue(next, expected),
 	}
 }

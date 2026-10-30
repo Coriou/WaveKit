@@ -2245,6 +2245,14 @@ strictly greater than zero and at most 64. Unknown fields and invalid values ret
 The route is absent without the settings write authorizer; GET follows normal API read
 access. A successful response returns the same shape as GET with `Cache-Control: no-store`.
 
+An optional `expected` field (`"auto"` or a number, validated like `cpuBudgetCores`) makes the
+write conditional: the budget is saved only while the stored `cpuBudgetCores` still equals
+`expected`. Otherwise the response is 409
+`{ "code": "EFFICIENCY_BUDGET_CONFLICT", "current": <GET shape> }` and nothing changes. The
+comparison runs in the same serialized update queue as the write, so no other update lands
+between them. Without `expected` the write applies unconditionally. Older cores reject the
+field with 400.
+
 Updates are serialized and saved to `<stateDir>/decoder-efficiency.json` with the shared
 atomic temporary-file, fsync and rename writer before applying to admission and activity
 allocation. The saved override survives restart and takes precedence over startup config.

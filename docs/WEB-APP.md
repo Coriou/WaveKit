@@ -69,8 +69,10 @@ does not. A decoder that does not run gets one button for the core's first sugge
 
 A decoder set to off in Settings shows "off in Settings" and only links there, whatever its last
 verdict said: turning decoders on and off stays in Settings. When the budget is already at its
-maximum, the next suggestion's button shows instead of Raise CPU budget. Undo puts the old budget
-back only if nobody changed it in the meantime; otherwise the toast says so and leaves it. Stop the
+maximum, the next suggestion's button shows instead of Raise CPU budget; the card reads the budget
+again each time it refreshes the verdicts, so a budget lowered elsewhere offers the raise again. The
+raise and its Undo each change the budget only if nobody changed it since the card read it (the
+core checks this as it saves); otherwise the toast says so, names the value now set, and leaves it. Stop the
 scan shows while a scan holds the decoders: moving, holding on a hit, or paused. A verdict this app
 does not know shows as plain text without a button. With read-only access the buttons that change
 something are disabled; the links still work.

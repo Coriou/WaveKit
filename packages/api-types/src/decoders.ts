@@ -1,5 +1,9 @@
 import { z } from "zod"
-import type { EfficiencyBudgetResolution } from "./efficiency-budget.js"
+import type {
+	EfficiencyBudgetResolution,
+	EfficiencyBudgetSettings,
+	EfficiencyBudgetValue,
+} from "./efficiency-budget.js"
 import type { DropAttribution } from "./resources.js"
 
 export interface DecoderStats {
@@ -459,6 +463,18 @@ export interface DecoderEfficiencyView {
 	budgetCores: number
 	cpuGuardPercent: number
 	sources: DecoderEfficiencySourceView[]
+}
+
+/** PUT /api/decoders/efficiency/budget body. */
+export interface EfficiencyBudgetUpdateRequest {
+	cpuBudgetCores: EfficiencyBudgetValue
+	/** Save only while the stored `cpuBudgetCores` still equals this; otherwise 409 and no change. */
+	expected?: EfficiencyBudgetValue
+}
+/** The 409 body of a PUT whose `expected` no longer matched. */
+export interface EfficiencyBudgetConflict {
+	code: "EFFICIENCY_BUDGET_CONFLICT"
+	current: EfficiencyBudgetSettings
 }
 
 export interface DecoderLateDropsView {
