@@ -61,6 +61,8 @@ export interface SettingsMock {
 	station(): StationIdentity
 	/** Decoder settings view (tests). */
 	decoderView(id: string): DecoderSettingsView | undefined
+	/** True once the CPU budget was saved away from its default "auto". */
+	budgetRaised(): boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1167,5 +1169,9 @@ export function registerSettingsMock(
 			),
 	)
 
-	return { station, decoderView: view }
+	return {
+		station,
+		decoderView: view,
+		budgetRaised: () => cpuBudgetCores !== "auto",
+	}
 }

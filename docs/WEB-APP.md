@@ -52,6 +52,25 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 The card on the left follows the frequency you are tuned to: what is heard there, the last
 transmissions, decoded content, and the actions (Activity, save, Identify, Open message).
 
+Under the last transmissions, **On this band** lists the decoders whose band holds the tuned
+frequency (within 200 kHz of one of their frequencies, or inside their band), the ones listening
+first. Each line is the core's one-sentence verdict, for example "ADS-B decoding" or "ADS-B
+paused: CPU budget full", with a filled dot for a decoder that runs and a hollow one for one that
+does not. A decoder that does not run gets one button for the core's first suggestion:
+
+| Suggestion                                     | Button                                     | What it does                                                                                     |
+| ---------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| Start, restart                                 | Start, Restart                             | Starts or restarts that decoder                                                                  |
+| Raise the CPU budget                           | Raise CPU budget                           | Adds one core to the decoder CPU budget (Undo in the toast); Settings › Decoders keeps the value |
+| Pause the scanner                              | Pause the scan                             | Pauses the running scan                                                                          |
+| Tune to its band                               | Tune to 1090.000                           | Tunes the receiver to the decoder's frequency                                                    |
+| Change the sample rate, check the source       | Raise sample rate, Check the receiver…     | Opens the Receiver, where you set it                                                             |
+| Turn on, turn off others, install, channelizer | Turn on in Settings, Decoders in Settings… | Opens the decoder's row in Settings                                                              |
+
+A decoder set to off in Settings shows "off in Settings" and only links there: turning decoders
+on and off stays in Settings. A verdict this app does not know shows as plain text without a
+button. With read-only access the buttons that change something are disabled; the links still work.
+
 ### Listen
 
 The bar under the tuned card plays the demodulated audio in the browser: analog modes with squelch

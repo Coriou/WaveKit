@@ -39,6 +39,7 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import { createAudioServer } from "./audio.ts"
+import { buildDecoderSummaries, withAdsbBudget } from "./decoder-summary.ts"
 import { registerReceiverMock } from "./receiver.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
@@ -536,15 +537,22 @@ export async function buildMockServer(
 
 	/** Operator start / stop / restart over the band-derived statuses (./settings.ts). */
 	const lifecycle = createDecoderLifecycle()
+	// set once Settings is registered: the ADS-B budget case lasts until the budget is raised
+	let budgetRaised = (): boolean => false
 	const decoders = (): DecoderInfo[] =>
-		lifecycle.adjust(
-			buildDecoders(
-				tuner.frequency,
-				startedAt,
-				Date.now(),
-				decoderStats,
-				suspendedSince,
+		withAdsbBudget(
+			lifecycle.adjust(
+				buildDecoders(
+					tuner.frequency,
+					startedAt,
+					Date.now(),
+					decoderStats,
+					suspendedSince,
+				),
 			),
+			tuner.frequency,
+			budgetRaised(),
+			suspendedSince.get("readsb") ?? new Date(startedAt).toISOString(),
 		)
 
 	const tunedHz = () => tuner.frequency + (live.config.offsetHz ?? 0)
@@ -1442,6 +1450,7 @@ export async function buildMockServer(
 		broadcast: (channel, type, data) => broadcast(channel, type, data),
 		lifecycle,
 	})
+	budgetRaised = () => settings.budgetRaised()
 	// --- Map (./map.ts): aircraft, vessels, APRS, mesh and coverage around the Settings station.
 	const map = registerMapMock(app, {
 		load,
@@ -1462,6 +1471,10 @@ export async function buildMockServer(
 	// The core has no GET /api/sources/:id (it answers the route-not-found 404 below).
 
 	app.get("/api/decoders", async () => decoders())
+	// The core's one verdict per decoder (./decoder-summary.ts); ADS-B near 1090 MHz waits for CPU budget.
+	app.get("/api/decoders/summary", async () =>
+		buildDecoderSummaries(decoders(), Date.now()),
+	)
 	app.get<{ Params: { id: string } }>(
 		"/api/decoders/:id",
 		async (request, reply) => {

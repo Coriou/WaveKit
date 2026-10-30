@@ -1,0 +1,51 @@
+/* Tuned card: "On this band" (BandDecoders.tsx). Layout only: materials, colours and states come from the
+   ui.css recipes, the card's .wkf-state and .wkf-dot, and tokens. A decoder that does not run has a hollow dot
+   and says why in words. */
+@layer wk-app {
+	.wkf-band {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkf-band > h3 {
+		margin: 0 0 2px;
+	}
+	.wkf-band-list {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.wkf-band-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 28px;
+	}
+	.wkf-band-state {
+		flex: 1;
+		min-width: 0;
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+		white-space: normal;
+	}
+	.wkf-band-state[data-tone="accent"] {
+		color: var(--wk-text-2);
+	}
+	.wkf-band-state[data-tone="accent"] > .wkf-dot {
+		color: var(--wk-accent);
+	}
+	.wkf-band-state > .wkf-dot[data-off] {
+		background: transparent;
+		box-shadow: inset 0 0 0 1.5px var(--wk-text-3);
+	}
+	.wkf-band-text {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.wkf-band-act {
+		flex: none;
+	}
+}
