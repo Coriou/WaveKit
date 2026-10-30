@@ -86,12 +86,42 @@ describe("config export classifies decoder options by meaning", () => {
 			"sk_live_private1234",
 			"47.123456789",
 			"protocol",
-			"band",
 		])
 			expect(body).not.toContain(leak)
+		// The unknown option key `band` is dropped; the tuner's bandGain section may still
+		// appear, so the check is for `band` as a key of its own.
+		expect(body).not.toMatch(/^\s*band:/m)
 		expect(optionsOf(config)).toEqual({
 			mode: R,
 			[CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY]: 3,
+		})
+	})
+
+	it("exports the tuner band gain table by meaning and redacts each free-text label", () => {
+		const config = baseConfig()
+		config.tuner.bandGain = {
+			applyToMyTuning: true,
+			entries: [
+				{
+					minHz: 863_000_000,
+					maxHz: 870_000_000,
+					gain: 372,
+					label: "my-private-label",
+				},
+				{ minHz: 1_085_000_000, maxHz: 1_095_000_000, gain: "keep" },
+			],
+		}
+		const body = exportConfig(config, META)
+		expect(body).not.toContain("my-private-label")
+		const r = redactConfig(config) as {
+			tuner: { bandGain: unknown }
+		}
+		expect(r.tuner.bandGain).toEqual({
+			applyToMyTuning: true,
+			entries: [
+				{ minHz: 863_000_000, maxHz: 870_000_000, gain: 372, label: R },
+				{ minHz: 1_085_000_000, maxHz: 1_095_000_000, gain: "keep" },
+			],
 		})
 	})
 

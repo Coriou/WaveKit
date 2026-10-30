@@ -4725,7 +4725,11 @@ its value. Outside options a string is kept only at
 `CONFIG_EXPORT_KEPT_STRING_PATHS` (ids, types and similar) or when the config
 schema limits it to a closed set (enum or literal), and numbers and booleans
 only where the schema declares that type, so host names, URLs, file paths,
-names and callsigns are redacted. The lists live in
+names and callsigns are redacted. `tuner.bandGain` follows the same rule: its
+ranges, gains (or `keep`) and `applyToMyTuning` are exported and each entry's
+free-text `label` is redacted. Runtime overrides are not exported, so a table
+saved with `PUT /api/tuner-band-gain` (`<stateDir>/tuner-band-gain.json`) is
+not in the export, which shows the YAML section. The lists live in
 `packages/api-types/src/config-export.ts`. The body is at most 256 KiB; larger
 is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
 `CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
