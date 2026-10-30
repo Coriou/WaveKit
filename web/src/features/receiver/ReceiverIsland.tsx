@@ -4,13 +4,15 @@
 // bias-T, offset tuning, frequency correction and, under Advanced, direct sampling. Values are the
 // core's (TunerState); a control shows its target only while its write is in flight. When the tuner
 // cannot be changed (read-only access, an external client has it, offline) the panel says why and
-// disables the controls instead of failing on click.
+// disables the controls instead of failing on click. Pause stops the receiver feed (feed.ts): the panel then says
+// "Receiver paused" with Resume, a failed resume reads as an alert with Retry, and the tuner controls wait.
 import { useEffect, useId, useState, type CSSProperties } from "react"
 import type { TunerState } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import type {
+	DataLayer,
 	ControlStatus,
 	ReceiverCaps,
 	ReceiverSettingKey,
@@ -46,6 +48,14 @@ import {
 	nearestGainIndex,
 	overloadHintText,
 } from "./gain.ts"
+import {
+	feedControllerFor,
+	feedLabel,
+	feedOf,
+	isPaused,
+	pausedDecoders,
+	sinceText,
+} from "./feed.ts"
 import { receiverSummary, sourceTitle } from "./summary.ts"
 import { ratePolicyNote } from "./notices.ts"
 import "./receiver.css"
@@ -69,6 +79,11 @@ function useReceiver() {
 		sourceId === null ? undefined : s.controls[sourceId],
 	)
 	const relay = useStore(data.receiver, s => s.relay)
+	const feeds = feedControllerFor(data)
+	const feedEntry = useStore(feeds, s =>
+		source ? s.bySource[source.id] : undefined,
+	)
+	const feed = feedOf(source, feedEntry)
 	return {
 		data,
 		tuner,
@@ -78,12 +93,151 @@ function useReceiver() {
 		caps: capsEntry?.caps ?? null,
 		controls,
 		relay,
+		feeds,
+		feedEntry,
+		feed,
+		paused: isPaused(feed),
 	}
 }
 
+/**
+ * The plot's "Receiver paused" label over the frozen waterfall (rendered by the plot for its source); nothing
+ * while the feed is live.
+ */
+export function ReceiverPausedBadge({
+	data,
+	sourceId,
+}: {
+	data: Pick<DataLayer, "api" | "sources">
+	sourceId: string | null
+}) {
+	const source = useStore(data.sources, s =>
+		sourceId === null ? undefined : s.sources.find(x => x.id === sourceId),
+	)
+	const entry = useStore(feedControllerFor(data), s =>
+		sourceId === null ? undefined : s.bySource[sourceId],
+	)
+	const feed = feedOf(source, entry)
+	if (!isPaused(feed)) return null
+	const since = sinceText(feed)
+	return (
+		<div className="wkf-rx-frozen" role="status" data-state={feed?.state}>
+			<b>
+				{feed?.state === "resuming"
+					? "Resuming the receiver…"
+					: "Receiver paused"}
+			</b>
+			<span>
+				{feed?.state === "error"
+					? "Resume failed · the waterfall is frozen"
+					: `The waterfall is frozen${since ? ` since ${since}` : ""}`}
+			</span>
+		</div>
+	)
+}
+
+/** Pause / resume of the receiver feed: one quiet button while live, the paused block with Resume otherwise. */
+function FeedControl() {
+	const { decoders } = useServices()
+	const { source, feeds, feedEntry, feed, paused } = useReceiver()
+	const readOnly = useReadOnly()
+	const list = useStore(decoders, s => s.decoders)
+	if (!source || feed === null) return null
+	const id = source.id
+	const pending = feedEntry?.pending ?? null
+	const busy = pending !== null || feed.state === "resuming"
+	const waiting = pausedDecoders(list, id).length
+	const since = sinceText(feed)
+	const failure = feedEntry?.error ?? null
+	const note = failure && (
+		<span className="wkf-warn wkf-rx-error" role="alert">
+			<span className="wkf-grow">{failure}</span>
+			<button
+				type="button"
+				className="wkf-rx-dismiss"
+				aria-label="Dismiss"
+				onClick={() => feeds.dismiss(id)}
+			>
+				<Icon name="close" size={14} />
+			</button>
+		</span>
+	)
+	if (!paused)
+		return (
+			<>
+				<div className="wkf-rx-feed">
+					<span className="wkf-grow wkf-rx-toggle-text">
+						<span className="wkf-strong">Receiver feed</span>
+						<span className="wkf-quiet wkf-small">
+							{readOnly
+								? "Read-only: sign in to this core to pause the receiver."
+								: "Pause stops the IQ stream: the waterfall freezes and decoders wait."}
+						</span>
+					</span>
+					<Button
+						size="sm"
+						variant="outline"
+						disabled={readOnly || busy}
+						aria-keyshortcuts="P"
+						onClick={() => void feeds.pause(id)}
+					>
+						{pending === "pause" ? "Pausing…" : "Pause"}
+					</Button>
+				</div>
+				{note}
+			</>
+		)
+	const failed = feed.state === "error"
+	const detail = [
+		since ? `since ${since}` : null,
+		"waterfall frozen",
+		waiting > 0
+			? `${waiting} decoder${waiting === 1 ? "" : "s"} waiting`
+			: "decoders wait",
+	]
+		.filter(Boolean)
+		.join(" · ")
+	return (
+		<>
+			<div
+				className="wkf-rx-paused"
+				role={failed ? "alert" : "status"}
+				data-state={feed.state}
+			>
+				<span className="wkf-grow wkf-rx-toggle-text">
+					<span className="wkf-strong">
+						{feed.state === "resuming" || pending === "resume"
+							? "Resuming the receiver…"
+							: failed
+								? "Resume failed"
+								: "Receiver paused"}
+					</span>
+					<span className="wkf-small">
+						{failed
+							? (feed.error ?? "The receiver could not be reached")
+							: detail}
+					</span>
+				</span>
+				<Button
+					size="sm"
+					variant={failed ? "amber" : "primary"}
+					disabled={readOnly || busy}
+					aria-keyshortcuts="P"
+					onClick={() => void feeds.resume(id)}
+				>
+					<Icon name="play" size={14} />
+					{busy ? "Resuming…" : failed ? "Retry" : "Resume"}
+				</Button>
+			</div>
+			{note}
+		</>
+	)
+}
+
 function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
-	const { tuner, source } = useReceiver()
-	const connected = source?.connected ?? false
+	const { tuner, source, feed, paused } = useReceiver()
+	const connected = (source?.connected ?? false) && !paused
+	const state = feedLabel(feed)
 	return (
 		<button
 			{...trigger}
@@ -96,8 +250,12 @@ function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
 				aria-hidden="true"
 			/>
 			<b>{sourceTitle(source, tuner)}</b>
-			<span className="wk-shell-sub">{receiverSummary(tuner, source)}</span>
-			<span className="wk-sr">{connected ? "connected" : "not connected"}</span>
+			<span className="wk-shell-sub" data-paused={paused || undefined}>
+				{state ?? receiverSummary(tuner, source)}
+			</span>
+			<span className="wk-sr">
+				{paused ? "paused" : connected ? "connected" : "not connected"}
+			</span>
 			<Icon
 				name="chevron-down"
 				size={16}
@@ -531,15 +689,25 @@ function throughput(kibPerSecond: number | undefined): string {
 }
 
 function ReceiverPanel() {
-	const { data, tuner, sourceId, source, capsEntry, caps, controls, relay } =
-		useReceiver()
+	const {
+		data,
+		tuner,
+		sourceId,
+		source,
+		capsEntry,
+		caps,
+		controls,
+		relay,
+		feed,
+		paused,
+	} = useReceiver()
 	const readOnly = useReadOnly()
 	const tunerError = useStore(data.tuner, s => s.error)
 	useEffect(() => {
 		void data.receiver.loadRelay()
 		if (sourceId !== null) void data.receiver.loadCaps(sourceId)
 	}, [data, sourceId])
-	const lock = receiverLock({ tuner, source, readOnly, relay })
+	const lock = receiverLock({ tuner, source, readOnly, relay, paused })
 	const name = tunerName(caps)
 	const status = (key: ReceiverSettingKey) => controls?.[key]
 	const dismiss = (key: ReceiverSettingKey) => {
@@ -579,15 +747,20 @@ function ReceiverPanel() {
 				<span
 					className="wk-tag"
 					data-size="md"
-					data-variant={source?.connected ? "accent" : "amber"}
+					data-variant={source?.connected && !paused ? "accent" : "amber"}
 				>
-					{source?.connected
-						? source.activity?.state === "streaming"
-							? "Streaming"
-							: "Connected"
-						: "Offline"}
+					{paused
+						? feed?.state === "resuming"
+							? "Resuming"
+							: "Paused"
+						: source?.connected
+							? source.activity?.state === "streaming"
+								? "Streaming"
+								: "Connected"
+							: "Offline"}
 				</span>
 			</div>
+			<FeedControl />
 			<dl className="wkf-rx-stats">
 				{stats.map(s => (
 					<div key={s.k}>
@@ -617,7 +790,7 @@ function ReceiverPanel() {
 				</div>
 			)}
 			<ControlError status={reclaim} onDismiss={() => dismiss("controlMode")} />
-			{source?.lastError && (
+			{source?.lastError && !paused && (
 				<span className="wkf-warn">{source.lastError}</span>
 			)}
 			{tuner?.lastError && (

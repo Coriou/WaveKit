@@ -1,9 +1,11 @@
 // The app's single-key shortcuts (keys.ts), always mounted; the palette itself loads on first use.
 import { useEffect } from "react"
 
-import { useServices } from "../../app/context.ts"
+import { isReadOnly, useServices } from "../../app/context.ts"
 import { shellStore } from "../../shell/store.ts"
+import { showAppToast } from "../../shell/toast.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
+import { feedControllerFor, toggleFeed } from "../receiver/feed.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import { GO_WINDOW_MS, isTypingTarget, shortcutFor } from "./keys.ts"
 import { openPalette } from "./request.ts"
@@ -60,6 +62,20 @@ export function PaletteKeys() {
 					if (!data.liveAudio.get().status) return
 					void (listen.get().wanted ? listen.stop() : listen.start())
 					break
+				case "feed": {
+					if (isReadOnly(data.access.get())) return
+					const run = toggleFeed(data)
+					if (!run) return
+					void run.result.then(r => {
+						if (!r.ok) showAppToast(r.error ?? "Not done", { tone: "warn" })
+						else if (run.op === "resume") showAppToast("Receiver resumed")
+						else
+							showAppToast("Receiver paused", {
+								undo: () => void feedControllerFor(data).resume(run.sourceId),
+							})
+					})
+					break
+				}
 				case "searchActivity":
 					// the open Activity drawer focuses its own field
 					if (shell.drawer === "activity") return

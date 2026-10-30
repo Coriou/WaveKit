@@ -8,10 +8,11 @@ import { useShell, useTheme } from "../../shell/hooks.ts"
 import { browserStorage } from "../../shell/theme.ts"
 import { useTunedHz, useTunerState } from "../hooks.ts"
 import { receiverLock, sampleRateOptions } from "../receiver/controls.ts"
+import { feedControllerFor, feedOf } from "../receiver/feed.ts"
 import { gainSteps } from "../receiver/gain.ts"
 import { presetsFrom } from "../scanner/planner/plan.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
-import type { PaletteContext, ReceiverContext } from "./model.ts"
+import type { FeedContext, PaletteContext, ReceiverContext } from "./model.ts"
 import { RecentList } from "./rank.ts"
 
 /** The page's recent list (per browser). */
@@ -44,6 +45,9 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	const relay = useStore(data.receiver, s => s.relay)
 	const accessMode = useStore(data.access, s => s.access?.mode ?? null)
 	const pwa = useStore(pwaState)
+	const feedEntry = useStore(feedControllerFor(data), s =>
+		source ? s.bySource[source.id] : undefined,
+	)
 
 	// scan presets and receiver capabilities, once
 	useEffect(() => {
@@ -53,9 +57,20 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		if (sourceId !== null) void data.receiver.loadCaps(sourceId)
 	}, [data, sourceId])
 
+	const feed = useMemo((): FeedContext | null => {
+		const f = feedOf(source, feedEntry)
+		if (!source || f === null) return null
+		return {
+			sourceId: source.id,
+			state: f.state,
+			busy: (feedEntry?.pending ?? null) !== null,
+		}
+	}, [source, feedEntry])
+
 	const receiver = useMemo((): ReceiverContext | null => {
 		if (!tuner) return null
-		const lock = receiverLock({ tuner, source, readOnly, relay })
+		const paused = feed !== null && feed.state !== "live"
+		const lock = receiverLock({ tuner, source, readOnly, relay, paused })
 		return {
 			gainAuto: tuner.gainMode === "agc",
 			gainTenthsDb: tuner.gain,
@@ -66,7 +81,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			rtlAgc: tuner.agcMode,
 			lockReason: lock.locked ? lock.reason : null,
 		}
-	}, [tuner, source, readOnly, relay, caps])
+	}, [tuner, source, readOnly, relay, caps, feed])
 
 	const discoveries = useMemo(() => [...byId.values()], [byId])
 	const presets = useMemo(
@@ -101,6 +116,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			recent: recentList.ids(now),
 			boost: (id: string) => recentList.boost(id, now),
 			pwa,
+			feed,
 		}
 		// recentVersion: the list changed (a row ran)
 	}, [
@@ -121,5 +137,6 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		shell,
 		recentVersion,
 		pwa,
+		feed,
 	])
 }

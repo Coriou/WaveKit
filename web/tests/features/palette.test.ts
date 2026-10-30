@@ -625,3 +625,76 @@ describe("palette: values from the root", () => {
 		expect(first?.action).toEqual({ kind: "theme", patch: { theme: "light" } })
 	})
 })
+
+describe("palette: receiver feed", () => {
+	const feedRow = (over: Partial<PaletteContext>) =>
+		flatten(new PaletteModel(ctx(over)).build(null, "receiver")).filter(
+			x => x.id === "tog:feed",
+		)
+	const live = { sourceId: "rtl-0", state: "live", busy: false } as const
+
+	it("offers Pause receiver while live and Resume receiver while paused, never both", () => {
+		const [pause, ...restLive] = feedRow({ feed: live })
+		expect(restLive).toHaveLength(0)
+		expect(pause).toMatchObject({
+			title: "Pause receiver",
+			kbd: ["P"],
+			action: { kind: "feed", op: "pause", sourceId: "rtl-0" },
+			done: "Receiver paused",
+		})
+		for (const state of ["paused", "error"] as const) {
+			const rows = feedRow({ feed: { ...live, state } })
+			expect(rows).toHaveLength(1)
+			expect(rows[0]).toMatchObject({
+				title: "Resume receiver",
+				action: { kind: "feed", op: "resume" },
+			})
+		}
+		expect(feedRow({ feed: { ...live, state: "error" } })[0]?.sub).toBe(
+			"The last resume failed · resume again to retry",
+		)
+	})
+
+	it("finds them by what people call it", () => {
+		const find = (q: string, over: Partial<PaletteContext>) =>
+			flatten(new PaletteModel(ctx(over)).build(null, q)).some(
+				x => x.id === "tog:feed",
+			)
+		expect(find("pause", { feed: live })).toBe(true)
+		expect(find("freeze waterfall", { feed: live })).toBe(true)
+		expect(find("resume", { feed: { ...live, state: "paused" } })).toBe(true)
+	})
+
+	it("is a note, not a command, while read-only or a call is in flight", () => {
+		const ro = feedRow({ feed: live, readOnly: true })[0]
+		expect(ro?.info).toBe(true)
+		expect(ro?.action).toBeUndefined()
+		const busy = feedRow({ feed: { ...live, busy: true } })[0]
+		expect(busy).toMatchObject({ info: true, sub: "Pausing the receiver…" })
+		expect(busy?.action).toBeUndefined()
+		const resuming = feedRow({ feed: { ...live, state: "resuming" } })[0]
+		expect(resuming).toMatchObject({
+			title: "Resume receiver",
+			info: true,
+			sub: "Resuming the receiver…",
+		})
+	})
+
+	it("has no row without a feed (a recording, no source)", () => {
+		expect(feedRow({})).toHaveLength(0)
+		expect(feedRow({ feed: null })).toHaveLength(0)
+	})
+
+	it("lists P among the shortcuts and maps the key", () => {
+		const keys = new PaletteModel(ctx({ feed: live })).scopeItems("keys")
+		expect(keys.find(x => x.id === "tog:feed")?.kbd).toEqual(["P"])
+		const key = (k: string, typing = false) =>
+			shortcutFor(
+				{ key: k, meta: false, ctrl: false, alt: false, typing },
+				false,
+			)
+		expect(key("p")).toEqual({ kind: "feed" })
+		expect(key("P")).toEqual({ kind: "feed" })
+		expect(key("p", true)).toBeNull()
+	})
+})

@@ -66,6 +66,14 @@ export interface ReceiverContext {
 	readonly lockReason: string | null
 }
 
+/** The receiver feed (receiver/feed.ts): Pause receiver while live, Resume receiver while paused. */
+export interface FeedContext {
+	readonly sourceId: string
+	readonly state: "live" | "paused" | "resuming" | "error"
+	/** A pause or resume is in flight. */
+	readonly busy: boolean
+}
+
 /** What the palette reads from the app, once per render. */
 export interface PaletteContext {
 	readonly tunedHz: number | null
@@ -93,6 +101,8 @@ export interface PaletteContext {
 	readonly boost: (id: string) => number
 	/** Installing as an app (pwa.ts); absent: no install row. */
 	readonly pwa?: PwaState
+	/** The receiver feed; absent or null (a recording, no source): no pause row. */
+	readonly feed?: FeedContext | null
 }
 
 // ---- outputs
@@ -230,6 +240,13 @@ export interface IdentifyAction {
 	readonly protocols?: readonly ScannerProtocol[]
 }
 
+/** Pause or resume the receiver feed (receiver/feed.ts). */
+export interface FeedAction {
+	readonly kind: "feed"
+	readonly op: "pause" | "resume"
+	readonly sourceId: string
+}
+
 export type PaletteAction =
 	| TuneAction
 	| { readonly kind: "recall"; readonly saved: SavedFrequency }
@@ -249,6 +266,7 @@ export type PaletteAction =
 	| ActivityAction
 	| { readonly kind: "scanPlan"; readonly presetId: string | null }
 	| { readonly kind: "scanJob"; readonly op: "pause" | "resume" | "stop" }
+	| FeedAction
 	| { readonly kind: "discovery"; readonly id: string }
 	| { readonly kind: "setting"; readonly entry: SettingEntry }
 	| { readonly kind: "copy"; readonly text: string; readonly label: string }
@@ -1267,6 +1285,57 @@ export class PaletteModel {
 		)
 	}
 
+	/** « Pause receiver » while the feed is live, « Resume receiver » while it is paused (P on both). */
+	feedItem(): PaletteItem | null {
+		const c = this.#c
+		const f = c.feed
+		if (!f) return null
+		const paused = f.state !== "live"
+		const base = {
+			id: "tog:feed",
+			title: paused ? "Resume receiver" : "Pause receiver",
+			glyph: paused ? "play" : "pause",
+			kbd: ["P"],
+			keys: paused
+				? ["resume feed", "unpause", "start iq", "reconnect receiver"]
+				: [
+						"pause feed",
+						"stop iq",
+						"freeze waterfall",
+						"stop stream",
+						"disconnect receiver",
+					],
+		} as const
+		if (c.readOnly)
+			return {
+				...base,
+				info: true,
+				sub: "Read-only: sign in to this core to pause or resume the receiver.",
+			}
+		if (f.busy || f.state === "resuming")
+			return {
+				...base,
+				info: true,
+				sub: paused ? "Resuming the receiver…" : "Pausing the receiver…",
+			}
+		if (paused)
+			return {
+				...base,
+				...(f.state === "error"
+					? { sub: "The last resume failed · resume again to retry" }
+					: {}),
+				action: { kind: "feed", op: "resume", sourceId: f.sourceId },
+				does: "Reconnects to the receiver and restores its tuning · decoders continue",
+				done: "Receiver resumed",
+			}
+		return {
+			...base,
+			action: { kind: "feed", op: "pause", sourceId: f.sourceId },
+			does: "Stops the IQ stream · the waterfall freezes and decoders wait until you resume",
+			done: "Receiver paused",
+		}
+	}
+
 	rootCommands(): PaletteItem[] {
 		const c = this.#c
 		const rx = c.receiver
@@ -1421,6 +1490,7 @@ export class PaletteModel {
 						scope: "rate",
 					}
 				: null,
+			this.feedItem(),
 			rx
 				? {
 						id: "tog:biasT",

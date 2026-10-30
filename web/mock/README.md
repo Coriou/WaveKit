@@ -26,6 +26,13 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `buildMockServer()`) Activity reads answer the core's 503 `ACTIVITY_UNAVAILABLE` until
   `WAVEKIT_MOCK_ACTIVITY_OPEN_MS` after start (never without it), so the drawer shows
   `Activity is starting…` or `Activity store unavailable, retrying`.
+- Receiver feed (`source-feed.ts`): `POST /api/sources/rtl-0/pause` and `/resume` as the core
+  answers them (`{ id, feed, changed }`, idempotent `changed: false`, 404 `SOURCE_NOT_FOUND`).
+  `GET /api/sources` and `source:status` carry `feed`; while paused the source reads not connected,
+  no spectrum frames or decoder messages are sent (the waterfall freezes) and every wanted decoder
+  on it is suspended with reason `source-paused`. A resume reads `resuming` for `resumeMs`
+  (default 400 ms); `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
+  resumes answer the core's 503 `SOURCE_RESUME_FAILED` with the feed in `error`, to try Retry.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

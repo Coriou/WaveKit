@@ -44,6 +44,8 @@ import { floodEvents } from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
 import { buildDecoderSummaries, withAdsbBudget } from "./decoder-summary.ts"
 import { registerReceiverMock } from "./receiver.ts"
+import { registerSourceFeedMock, withSourcePaused } from "./source-feed.ts"
+import type { SourceFeedMock } from "./source-feed.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
 import {
@@ -141,6 +143,10 @@ export interface MockServerOptions {
 	activityFloods?: boolean
 	/** The scanner engine starts with its front-end overload hint (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
 	overloadHint?: boolean
+	/** How long a receiver resume dials before it answers, ms (./source-feed.ts). Default 400. */
+	resumeMs?: number
+	/** The next this many receiver resumes fail with 503 (WAVEKIT_MOCK_RESUME_FAILURES). Default 0. */
+	resumeFailures?: number
 	/**
 	 * The Activity store is not open yet: Activity reads answer the core's 503 and
 	 * `GET /api/activity/status` reports `opening` (WAVEKIT_MOCK_ACTIVITY_STORE=opening) or
@@ -168,6 +174,8 @@ export interface MockServer {
 	settings: SettingsMock
 	/** Map fleets and coverage (./map.ts). */
 	map: MapMock
+	/** Receiver feed pause / resume (./source-feed.ts). */
+	feed: SourceFeedMock
 }
 
 /**
@@ -516,6 +524,9 @@ export async function buildMockServer(
 	let epochStartedAt = Date.now()
 	const decoderStats = new Map<string, number>()
 	const suspendedSince = new Map<string, string>()
+	/** Set once the routes are registered (./source-feed.ts); until then the feed is live. */
+	let feedMock: SourceFeedMock | null = null
+	const feedHeld = () => feedMock?.paused() ?? false
 	const live = {
 		running: false,
 		clients: 0,
@@ -568,8 +579,8 @@ export async function buildMockServer(
 	const lifecycle = createDecoderLifecycle()
 	// set once Settings is registered: the ADS-B budget case lasts until the budget is raised
 	let budgetRaised = (): boolean => false
-	const decoders = (): DecoderInfo[] =>
-		withAdsbBudget(
+	const decoders = (): DecoderInfo[] => {
+		const list = withAdsbBudget(
 			lifecycle.adjust(
 				buildDecoders(
 					tuner.frequency,
@@ -583,6 +594,10 @@ export async function buildMockServer(
 			budgetRaised(),
 			suspendedSince.get("readsb") ?? new Date(startedAt).toISOString(),
 		)
+		return feedMock
+			? withSourcePaused(list, MOCK_SOURCE_ID, feedMock.feed())
+			: list
+	}
 
 	const tunedHz = () => tuner.frequency + (live.config.offsetHz ?? 0)
 
@@ -793,21 +808,30 @@ export async function buildMockServer(
 		const now = Date.now()
 		const bytes = Math.round(((now - startedAt) / 1000) * SAMPLE_RATE_HZ * 2)
 		const list = decoders().filter(d => d.sourceId === MOCK_SOURCE_ID)
+		// a paused feed: the link is closed, nothing streams (SourceManager.getActivity "disconnected")
+		const held = feedHeld()
 		return {
 			id: MOCK_SOURCE_ID,
 			type: "rtl_tcp",
 			url: "tcp://192.168.1.40:1234",
-			connected: true,
-			activity: {
-				state: "streaming",
-				lastSampleAt: new Date(now - 12).toISOString(),
-				sampleAgeMs: 12,
-				timeoutMs: 5000,
-			},
+			connected: !held,
+			activity: held
+				? {
+						state: "disconnected",
+						lastSampleAt: null,
+						sampleAgeMs: null,
+						timeoutMs: 5000,
+					}
+				: {
+						state: "streaming",
+						lastSampleAt: new Date(now - 12).toISOString(),
+						sampleAgeMs: 12,
+						timeoutMs: 5000,
+					},
 			consumers: list.filter(d => d.running).length + (live.running ? 1 : 0),
 			bytesReceived: bytes,
 			// KiB/s, as the core's SourceManager (bytes / 1024 / s)
-			dataRate: (SAMPLE_RATE_HZ * 2) / 1024,
+			dataRate: held ? 0 : (SAMPLE_RATE_HZ * 2) / 1024,
 			reconnectAttempts: 0,
 			caps: {
 				kind: "iq",
@@ -822,7 +846,8 @@ export async function buildMockServer(
 				assignedAt: new Date(startedAt).toISOString(),
 			})),
 			available: true,
-			signalLevelDbfs: -31.5,
+			...(held ? {} : { signalLevelDbfs: -31.5 }),
+			...(feedMock ? { feed: feedMock.feed() } : {}),
 		}
 	}
 
@@ -1015,6 +1040,8 @@ export async function buildMockServer(
 	}
 
 	const emitMessage = () => {
+		// no IQ while the feed is paused: nothing decodes
+		if (feedHeld()) return
 		const candidates = MOCK_MESSAGES.filter(m => {
 			const seed = DECODER_SEEDS.find(d => d.id === m.decoderId)
 			return seed !== undefined && decoderInBand(seed, tuner.frequency)
@@ -1163,7 +1190,9 @@ export async function buildMockServer(
 					backfill: true,
 				},
 			})
-		const frame = (snapshot: boolean) =>
+		// a paused feed sends no frames: the waterfall stops on its last rows
+		const frame = (snapshot: boolean) => {
+			if (feedHeld()) return
 			send(client, {
 				type: "spectrum:frame",
 				channel: "spectrum",
@@ -1179,6 +1208,7 @@ export async function buildMockServer(
 					...sweepFrame(),
 				}),
 			})
+		}
 		frame(true)
 		startSweep()
 		client.spectrum = {
@@ -1657,6 +1687,22 @@ export async function buildMockServer(
 			return tuner
 		},
 	)
+
+	// --- Receiver feed (./source-feed.ts): pause / resume; decoders wait with reason source-paused. ---
+	const feed = registerSourceFeedMock(app, {
+		sourceId: MOCK_SOURCE_ID,
+		...(options.resumeMs !== undefined ? { resumeMs: options.resumeMs } : {}),
+		...(options.resumeFailures !== undefined
+			? { resumeFailures: options.resumeFailures }
+			: {}),
+		onChange: () => {
+			broadcast("sources", "source:status", sourceStatus())
+			for (const d of decoders())
+				if (d.sourceId === MOCK_SOURCE_ID)
+					broadcast("decoders", "decoder:status", d)
+		},
+	})
+	feedMock = feed
 
 	// --- Receiver controls (./receiver.ts): tuner settings, capabilities, relay. Begin. ---
 	const receiver = registerReceiverMock(app, {
@@ -2481,6 +2527,7 @@ export async function buildMockServer(
 		scanner,
 		settings,
 		map,
+		feed,
 		async listen() {
 			await new Promise<void>((resolve, reject) => {
 				audio.once("error", reject)
@@ -2521,6 +2568,7 @@ async function main(): Promise<void> {
 	const activity429Env = env["WAVEKIT_MOCK_ACTIVITY_429"]
 	const activityStoreEnv = env["WAVEKIT_MOCK_ACTIVITY_STORE"]
 	const activityOpenEnv = env["WAVEKIT_MOCK_ACTIVITY_OPEN_MS"]
+	const resumeFailuresEnv = env["WAVEKIT_MOCK_RESUME_FAILURES"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2543,6 +2591,9 @@ async function main(): Promise<void> {
 			? { activity429: activity429Env }
 			: {}),
 		activityFloods: env["WAVEKIT_MOCK_ACTIVITY_FLOODS"] !== "0",
+		...(resumeFailuresEnv !== undefined
+			? { resumeFailures: Number(resumeFailuresEnv) }
+			: {}),
 		...(activityStoreEnv === "opening" || activityStoreEnv === "retrying"
 			? {
 					activityStore: {

@@ -131,6 +131,17 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   core's own message shows under the row if it refuses the save. **Per-band gain for my tuning**
   (off by default) saves at once: on, your own retunes also set the band's gain and give yours
   back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
+- **Receiver › Pause** stops pulling IQ from the receiver without removing it: the core closes the
+  receiver connection, the waterfall stops on its last rows under a `Receiver paused` label,
+  decoders wait (their status reads paused because the receiver is paused) and the tuner
+  controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
+waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
+  pause survives a core restart. **Resume** reconnects once and restores the tuning; if the
+  receiver cannot be reached, the island says `Resume failed` with the reason and a **Retry**
+  button, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live) or
+  **Resume receiver** (while paused) does the same, and the `P` key toggles it from anywhere; a
+  pause from the palette or the key offers Undo. Read-only browsers cannot pause. See
+  [pause and resume](API.md#post-apisourcesidpause-and-post-apisourcesidresume).
 - **Receiver** (the island at the top): under Gain, a quiet line says when the core confirms a
   band gain on the tuner, for example `Band gain 37.2 dB · 868 MHz ISM · while the
 scanner tunes` (or `· for your tuning` with the switch on). It shows the gain the tuner really
@@ -239,6 +250,7 @@ full content or its position on the map.
 | `Q`                  | Squelch                           |
 | `[` `]`              | Step down / up                    |
 | `L`                  | Listen                            |
+| `P`                  | Pause / resume the receiver       |
 | `B` / `S`            | Saved frequencies / save this one |
 | `/`                  | Search Activity                   |
 | `G` then `S` `M` `D` | Spectrum, Map, Messages           |
