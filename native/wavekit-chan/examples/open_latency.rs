@@ -126,6 +126,7 @@ fn main() {
                     block_samples: 16384,
                     socket_dir: dir.clone(),
                     control_fd: 3,
+                    dsp_helpers: None,
                 },
                 Box::new(move |e| sink.lock().unwrap().push(e)),
             );

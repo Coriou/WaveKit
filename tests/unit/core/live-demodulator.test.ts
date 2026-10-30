@@ -24,6 +24,11 @@ import {
 } from "../../../src/access/credentials.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
+import {
+	DEFAULT_BRANCH_BUFFER_MS,
+	DEFAULT_HIGH_WATER_MARK,
+	FanoutManager,
+} from "../../../src/core/fanout-manager.js"
 import type {
 	LiveDemodConfig,
 	LiveDemodulator as LiveDemodulatorType,
@@ -197,6 +202,7 @@ describe("LiveDemodulator", () => {
 		options: LiveDemodulatorOptions = {},
 	): LiveDemodulatorType {
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,
@@ -590,6 +596,61 @@ describe("LiveDemodulator", () => {
 		expect(processes[2]!.command).toContain("csdr firdecimate 82 ")
 	})
 
+	// The branch holds 250 ms of signal at the fanout's byte rate.
+	it("sizes its branch in ms of signal and replaces it on a rate change only", async () => {
+		await liveDemod.start()
+		expect(fanoutManager.addBranch).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				id: "live-demod-rtl-pi",
+				highWaterMarkMs: DEFAULT_BRANCH_BUFFER_MS,
+			}),
+		)
+		expect(fanoutManager.addBranch.mock.lastCall?.[0]).not.toHaveProperty(
+			"highWaterMark",
+		)
+		sourceManager.emitCaps({ centerFreq: 446_093_750 } as never)
+		await delay(400)
+		expect(fanoutManager.removeBranch).not.toHaveBeenCalled()
+		sourceManager.emitCaps({ sampleRate: 2_048_000 })
+		await waitFor(() => spawnMock.mock.calls.length === 4, 2000)
+		// The old branch may hold samples at the old rate: replaced.
+		expect(fanoutManager.removeBranch).toHaveBeenCalledWith("live-demod-rtl-pi")
+		expect(fanoutManager.addBranch).toHaveBeenCalledTimes(2)
+		expect(processes[2]!.command).toContain("csdr firdecimate 82 ")
+	})
+
+	it("lets the fanout's byte rate size and resize its branch mark", async () => {
+		const fanout = new FanoutManager(testLogger)
+		fanout.setByteRate(2_400_000 * 2)
+		liveDemod = new LiveDemodulatorClass(
+			testLogger,
+			sourceManager as any,
+			fanout as any,
+			LiveDemodConfigSchema.parse({
+				engine: "csdr",
+				enabled: true,
+				sourceId: "rtl-pi",
+				httpPort: port,
+				squelchMode: "manual",
+			}),
+			{},
+		)
+		await liveDemod.start()
+		const mark = () =>
+			fanout
+				.getTelemetrySnapshot()
+				.branches.find(b => b.id === "live-demod-rtl-pi")?.highWaterMark
+		// 2.4 Msps CU8: 4 800 000 B/s × 250 ms.
+		expect(mark()).toBe(1_200_000)
+		// The router's setByteRate on a rate change resizes the live branch in place.
+		fanout.setByteRate(2_048_000 * 2)
+		expect(mark()).toBe(1_024_000) // 4 096 000 B/s × 250 ms
+		fanout.setByteRate(null)
+		expect(mark()).toBe(DEFAULT_HIGH_WATER_MARK)
+		await liveDemod.stop()
+		fanout.destroy()
+	})
+
 	it("kills the process group and escalates to SIGKILL when SIGTERM is ignored", async () => {
 		liveDemod = create({}, { stopTimeoutMs: 30 })
 		await liveDemod.start()
@@ -924,6 +985,7 @@ describe("LiveDemodulator", () => {
 			sourceManager as any,
 			router as any,
 			LiveDemodConfigSchema.parse({
+				engine: "csdr",
 				enabled: true,
 				httpPort: port,
 				squelchMode: "manual",

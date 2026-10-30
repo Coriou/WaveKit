@@ -53,7 +53,15 @@ export const RUST_METRIC_BLOCK_SAMPLES = RUST_AUDIO_RATE_HZ / 100
  */
 export const GATE_HISTORY_MAX = 256
 const USABLE_FRACTION = 0.8
-const BLOCK_SAMPLES = 1024
+/**
+ * Largest stdin read of the native process, in IQ samples (`--block-samples`, the channelizer's
+ * size). A read returns what the pipe holds, so this bounds a block rather than waiting to fill
+ * one: at most 16384 / 2.4e6 ≈ 6.8 ms of input at 2.4 Msps and 16384 / 1.024e6 ≈ 16 ms at
+ * 1.024 Msps. Against 1024 it cuts the reads and wakeups of a 64 KiB source chunk from 32 to 2.
+ * The DSP is a stream, so audio does not depend on how the input is split; a retune or squelch
+ * change applies between reads, so it can land up to one block later in the input.
+ */
+export const LIVE_DEMOD_BLOCK_SAMPLES = 16_384
 const VERSION_LIMIT_BYTES = 4096
 const DEFAULT_PROBE_MS = 2000
 const DEFAULT_OPEN_MS = 2000
@@ -414,7 +422,7 @@ export class RustEngine implements LiveDemodEngine {
 			inputRateHz: input.caps.sampleRate,
 			inputCenterHz: center,
 			usableFraction: USABLE_FRACTION,
-			blockSamples: BLOCK_SAMPLES,
+			blockSamples: LIVE_DEMOD_BLOCK_SAMPLES,
 			socketDir,
 		})
 		let child: ChildProcess

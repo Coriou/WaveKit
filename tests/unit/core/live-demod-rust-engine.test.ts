@@ -50,6 +50,7 @@ import { LiveDemodConfigSchema, type SourceCaps } from "../../../src/config.js"
 import type { DemodSquelch } from "../../../src/core/live-demod/engine.js"
 import {
 	HANDSHAKE_EARLY_MAX,
+	LIVE_DEMOD_BLOCK_SAMPLES,
 	RustEngine,
 } from "../../../src/core/live-demod/rust-engine.js"
 import {
@@ -162,6 +163,42 @@ describe("RustEngine process", () => {
 		for (const channel of channels) await channel.dispose()
 		channels.length = 0
 		vi.restoreAllMocks()
+	})
+
+	it("spawns the native process with the channelizer's block size", async () => {
+		const installed = install(true)
+		const spawned: string[][] = []
+		const spawnProcess = ((command: string, args: string[]) => {
+			spawned.push(args)
+			return installed.spawnProcess(command, args)
+		}) as unknown as typeof spawn
+		const engine = new RustEngine({
+			binaryPath: "wavekit-chan",
+			logger: createLogger({ level: "fatal" }),
+			spawnProcess,
+		})
+		engines.push(engine)
+		const { PassThrough } = await import("node:stream")
+		const started = await engine.start({
+			config: config(),
+			caps,
+			input: new PassThrough(),
+			squelch: { mode: "off" },
+			handlers: {
+				onAudio: () => undefined,
+				onGate: () => undefined,
+				onMetrics: () => undefined,
+				onDown: () => undefined,
+			},
+		})
+		channels.push(...installed.channels)
+		expect(started).toMatchObject({ ok: true })
+		// 16384 samples: ≈ 6.8 ms of input at 2.4 Msps, ≈ 16 ms at 1.024 Msps.
+		expect(LIVE_DEMOD_BLOCK_SAMPLES).toBe(16_384)
+		const args = spawned.find(a => a[0] !== "--version") ?? []
+		const at = args.indexOf("--block-samples")
+		expect(at).toBeGreaterThanOrEqual(0)
+		expect(args[at + 1]).toBe("16384")
 	})
 
 	it("drops hostile event lines and still applies a later gate", async () => {

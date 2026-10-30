@@ -1,5 +1,5 @@
 import { isIP } from "node:net"
-import type { LinkBurstSummary } from "@wavekit/api-types"
+import type { LinkAdvisory, LinkBurstSummary } from "@wavekit/api-types"
 import { LINK_DROPPING_HOLD_MS } from "./link-burst/contract.js"
 import type { LinkAdvisor } from "./rate-policy-contract.js"
 import {
@@ -15,6 +15,9 @@ export function isLoopbackHost(host: string): boolean {
 		(isIP(host) === 4 && host.startsWith("127."))
 	)
 }
+
+/** Why samples were lost: see `LinkAdvisory.lossReason`. */
+export type LinkLossReason = NonNullable<LinkAdvisory["lossReason"]>
 
 interface History {
 	rate: number
@@ -104,7 +107,7 @@ export function createLinkAdvisor(deps: {
 				? null
 				: exceedsShortfall(received, sampleRateHz * frameBytes)
 		},
-		classify(input, drops) {
+		classify(input, drops): LinkAdvisory {
 			const payload = valid(input.sampleRateHz) ? input.sampleRateHz * 2 : 0
 			const history = histories.get(input.sourceId)
 			const received =
@@ -136,10 +139,18 @@ export function createLinkAdvisor(deps: {
 					/* Optional summary is unavailable. */
 				}
 			}
+			// Only loss before the core is a link problem. Internal branch drops
+			// after an arrival gap are reported apart and never raise `dropping`.
 			const dropping =
-				linkDropping ||
 				(received !== null && exceedsShortfall(received, payload)) ||
 				(upstream !== null && upstream > LINK_UPSTREAM_DROPS_BYTES_PER_SECOND)
+			const lossReason: LinkLossReason | null = loopback
+				? null
+				: dropping
+					? "source"
+					: linkDropping
+						? "branch-congestion"
+						: null
 			return {
 				level: loopback
 					? "none"
@@ -154,6 +165,7 @@ export function createLinkAdvisor(deps: {
 				shortfallPercent: shortfall,
 				upstreamDropBytesPerSecond: upstream,
 				...(burst === null ? {} : { burst }),
+				...(lossReason === null ? {} : { lossReason }),
 			}
 		},
 		reset(sourceId) {

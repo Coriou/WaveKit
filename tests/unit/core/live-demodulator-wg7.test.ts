@@ -153,6 +153,7 @@ describe("LiveDemodulator WG7", () => {
 		options: LiveDemodulatorOptions = {},
 	): LiveDemodulatorType {
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,

@@ -1,7 +1,7 @@
 /**
  * Csdr-path goldens recorded from the live demodulator before the Rust engine
- * seam. Parsed config omits `engine`; the runtime default is csdr, so these
- * argv and HTTP headers must keep matching. Status still reports `engine`
+ * seam. The runtime default is now Rust, so these runs select `engine: "csdr"`
+ * and their argv and HTTP headers must keep matching. Status still reports `engine`
  * (requirement 1.5); argv and headers did not change.
  */
 
@@ -90,6 +90,7 @@ describe("csdr live demod goldens", () => {
 	}> {
 		const port = await freePort()
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,

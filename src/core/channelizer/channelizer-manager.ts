@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { PassThrough, type Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { ChannelizerConfig, SourceCaps } from "../../config.js"
-import type { FanoutManager } from "../fanout-manager.js"
+import { branchHighWaterMark, type FanoutManager } from "../fanout-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -154,6 +154,21 @@ const invalid = (detail: string): ChannelRequestResult => ({
 /** CU8 IQ, live or replayed: recording sources carry IQ like the rate model assumes (`recording → iq`). */
 const isCu8Iq = (caps: SourceCaps): boolean =>
 	(caps.kind === "iq" || caps.kind === "recording") && caps.format === "U8_IQ"
+
+/**
+ * Input branch mark: the configured `inputHighWaterMark` is a floor; the mark
+ * also holds DEFAULT_BRANCH_BUFFER_MS of CU8 (2 bytes per sample) at the
+ * input rate. The 262 144-byte default alone held 54.6 ms at 2.4 Msps
+ * (4.8 MB/s), shorter than the scheduler stalls of a loaded host; 250 ms is
+ * 1 200 000 bytes there and 512 000 at 1.024 Msps. A rate change restarts
+ * the process and its branch, so the mark follows the rate.
+ */
+export function channelizerInputMark(
+	configured: number,
+	sampleRateHz: number,
+): number {
+	return Math.max(configured, branchHighWaterMark(sampleRateHz * 2))
+}
 
 function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
 	return new Promise((resolve, reject) => {
@@ -1254,7 +1269,10 @@ export class ChannelizerManager
 		const branch = fanout.addBranch({
 			id: branchId,
 			sourceId,
-			highWaterMark: this.deps.config.inputHighWaterMark,
+			highWaterMark: channelizerInputMark(
+				this.deps.config.inputHighWaterMark,
+				caps.sampleRate,
+			),
 		})
 		void pipeline(branch, proc.input).catch((err: unknown) =>
 			this.log.debug(

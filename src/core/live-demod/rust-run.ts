@@ -38,6 +38,7 @@ import {
 	RUST_FALLBACK_LOG,
 	bandwidthAccepted,
 	selectEngine,
+	type EngineSelection,
 	type EngineFallbackReason,
 } from "./select-engine.js"
 
@@ -49,11 +50,24 @@ import {
  */
 export const RUST_AUTO_INITIAL_THRESHOLD_DBFS = -0.001
 
-/** Absent `engine` is the csdr chain. Parsed config leaves the key off. */
+/**
+ * Absent `engine` is the Rust engine; `csdr` selects the csdr chain. Parsed
+ * config leaves the key off, so this is the one place the default lives.
+ */
+export const DEFAULT_LIVE_DEMOD_ENGINE = "rust" as const
+
 export function rustEngineRequested(config: {
 	engine?: "csdr" | "rust" | undefined
 }): boolean {
-	return (config.engine ?? "csdr") === "rust"
+	return (config.engine ?? DEFAULT_LIVE_DEMOD_ENGINE) === "rust"
+}
+
+/** Modulation and bandwidth a Rust demod channel can open with. */
+function rustModulationAccepted(config: LiveDemodConfig): boolean {
+	return (
+		(config.modulation === "nfm" || config.modulation === "am") &&
+		bandwidthAccepted(config.bandwidth)
+	)
 }
 
 /** Pipeline keys a running Rust demod can apply with one `retune`. */
@@ -210,6 +224,8 @@ export class RustLiveRun {
 		if (this.host.currentRun() !== null) return null
 		if (!rustEngineRequested(this.host.config())) return null
 		if (this.engineFallback !== null) return null
+		// WFM and the other csdr-only modes fall back at start: no Rust rate.
+		if (!rustModulationAccepted(this.host.config())) return null
 		return {
 			rate: RUST_AUDIO_RATE_HZ,
 			format: this.host.config().audioFormat,
@@ -230,6 +246,50 @@ export class RustLiveRun {
 		if (rustEngineRequested(config)) return
 		this.engineFallback = null
 		this.warnedFallback = null
+	}
+
+	/**
+	 * False when a start with `config` on a `sourceFormat` source takes the
+	 * csdr chain as far as is known without a probe: csdr selected, a source
+	 * that is not CU8, a csdr-only modulation or bandwidth, an unstable latch,
+	 * or a binary already found missing or too old. A csdr run that would stay
+	 * csdr keeps the csdr front swap instead of a restart. Shares `tryStart`'s
+	 * pre-probe selection, so the two cannot disagree.
+	 */
+	wouldStartRust(
+		config: LiveDemodConfig,
+		sourceFormat: string | undefined,
+	): boolean {
+		return (
+			rustEngineRequested(config) &&
+			this.engineFallback !== "binary-unavailable" &&
+			this.engineFallback !== "protocol-unsupported" &&
+			this.preSelect(config, sourceFormat).engine === "rust"
+		)
+	}
+
+	/**
+	 * Engine selection before the version probe: every condition but the
+	 * binary itself, which is assumed present at the demod protocol.
+	 */
+	private preSelect(
+		config: LiveDemodConfig,
+		sourceFormat: string | undefined,
+	): EngineSelection {
+		return selectEngine({
+			config: {
+				engine: "rust",
+				modulation: config.modulation,
+				bandwidth: config.bandwidth,
+			},
+			caps: sourceFormat === undefined ? null : { format: sourceFormat },
+			probe: {
+				available: true,
+				protocol: DEMOD_PROTOCOL,
+				processUnstable: this.rustUnstable,
+				openRejected: !bandwidthAccepted(config.bandwidth),
+			},
+		})
 	}
 
 	/** True while `tryStart` is inside the version probe or the handshake. */
@@ -326,27 +386,14 @@ export class RustLiveRun {
 		this.resetRetuneTracking()
 		const config = this.host.config()
 		if (!rustEngineRequested(config)) {
-			// An explicit csdr (or an omitted engine) is not a Rust fallback.
+			// An explicit csdr selection is not a Rust fallback.
 			this.engineFallback = null
 			this.warnedFallback = null
 			return false
 		}
 		const branch = this.host.branchStream()
 		if (!branch) return false
-		const pre = selectEngine({
-			config: {
-				engine: "rust",
-				modulation: config.modulation,
-				bandwidth: config.bandwidth,
-			},
-			caps: { format: planned.caps.format },
-			probe: {
-				available: true,
-				protocol: DEMOD_PROTOCOL,
-				processUnstable: this.rustUnstable,
-				openRejected: !bandwidthAccepted(config.bandwidth),
-			},
-		})
+		const pre = this.preSelect(config, planned.caps.format)
 		if (pre.engine !== "rust") {
 			if (pre.fallback) this.noteFallback(pre.fallback)
 			return false
@@ -535,12 +582,18 @@ export class RustLiveRun {
 		this.engineFallback = reason
 		if (this.warnedFallback === reason) return
 		this.warnedFallback = reason
-		this.host.log.warn(
-			error === undefined
-				? { reason }
-				: { reason, err: safeErrorFields(error) },
-			RUST_FALLBACK_LOG,
+		const fields =
+			error === undefined ? { reason } : { reason, err: safeErrorFields(error) }
+		// The default engine meets csdr-only modulations (WFM, SSB, CW, raw) and
+		// non-CU8 sources (an S16 SDR++ stream) in normal use: those fallbacks
+		// are expected, so they are info, not a warning. An explicit "rust" warns.
+		if (
+			(reason === "modulation-unsupported" ||
+				reason === "input-format-unsupported") &&
+			this.host.config().engine === undefined
 		)
+			this.host.log.info(fields, RUST_FALLBACK_LOG)
+		else this.host.log.warn(fields, RUST_FALLBACK_LOG)
 	}
 
 	private onGate(run: PipelineRun, open: boolean): void {

@@ -154,7 +154,8 @@ backpressure entries/hour, dropped bytes. The fix proposal goes to the report.
 
 ## Defaults
 
-No deliberate default change: `engine: "csdr"`.
+No deliberate default change at phase A: `engine: "csdr"`. Since requirement 10.6
+an absent `engine` means `rust` for NFM and AM on a CU8 source, csdr otherwise.
 
 ## Docker
 

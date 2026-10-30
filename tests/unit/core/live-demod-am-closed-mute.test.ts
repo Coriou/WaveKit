@@ -93,6 +93,7 @@ describe("live demodulator AM closed mute (A19)", () => {
 
 	async function boot(overrides: Record<string, unknown>): Promise<Internals> {
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: await findFreePort(),
@@ -111,7 +112,7 @@ describe("live demodulator AM closed mute (A19)", () => {
 	}
 
 	for (const modulation of ["am", "dsb", "cw"]) {
-		it(`${modulation} on the default (csdr) engine mutes closed output`, async () => {
+		it(`${modulation} on the csdr engine mutes closed output`, async () => {
 			const internals = await boot({ modulation })
 			expect(internals.run?.rust).toBeUndefined()
 			expect(internals.run?.squelch.mutesClosedPcm).toBe(true)
@@ -128,7 +129,7 @@ describe("live demodulator AM closed mute (A19)", () => {
 		})
 	}
 
-	it("the default engine is still csdr and Rust AM runs are unchanged (no closed mute)", async () => {
+	it("an omitted engine parses absent (Rust at runtime) and Rust AM runs are unchanged (no closed mute)", async () => {
 		expect(LiveDemodConfigSchema.parse({}).engine).toBeUndefined()
 		const internals = await boot({
 			modulation: "am",

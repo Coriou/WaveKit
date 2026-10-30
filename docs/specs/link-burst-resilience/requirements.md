@@ -210,10 +210,14 @@ unmeasured), and receiver facts (interface kind, Wi-Fi signal dBm, under-voltage
 throttled) from the receiver host's telemetry when it reports them, else null.
 6.3 Burst seconds count each second in which the absorber held bytes or an arrival gap of at
 least `LINK_GAP_MS` ended.
-6.4 The link advisory (decoder-enablement 7.1) also becomes `dropping` while a `link`
-attribution with drops occurred in the last `LINK_DROPPING_HOLD_MS`; `unproven` and `dropping`
-keep their `link-capacity` alert severities (warning, critical). `LinkAdvisory` gains an
-optional `burst` summary (worst stall, overflowed bytes over 10 min, burst seconds).
+6.4 The link advisory (decoder-enablement 7.1) is `dropping` only for source-side loss: a
+received-rate shortfall or receiver-side drops, reported as `lossReason: "source"`. A `link`
+attribution with drops in the last `LINK_DROPPING_HOLD_MS` means every byte arrived and an
+internal fanout branch dropped them after an arrival gap; it is reported as
+`lossReason: "branch-congestion"` and never makes the advisory `dropping`. `lossReason` is
+absent when nothing was lost. `unproven` and `dropping` keep their `link-capacity` alert
+severities (warning, critical). `LinkAdvisory` gains an optional `burst` summary (worst stall,
+overflowed bytes over 10 min, burst seconds) and the optional `lossReason`.
 6.5 The report carries numbers and closed enums only; it never echoes host names, addresses,
 SSIDs or other untrusted strings.
 6.6 Bursts absorbed without loss never raise an alert; they are visible in the report only.

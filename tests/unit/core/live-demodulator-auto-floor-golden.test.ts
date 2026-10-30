@@ -128,6 +128,7 @@ describe("LiveDemodulator squelch traces (frozen behaviour, WG10 req 2.6)", () =
 			sourceManager,
 			createFakeFanout(),
 			LiveDemodConfigSchema.parse({
+				engine: "csdr",
 				enabled: true,
 				sourceId: "rtl-pi",
 				httpPort: await findFreePort(),

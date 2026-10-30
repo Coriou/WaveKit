@@ -27,6 +27,7 @@ function setup() {
 			{ id: "b", connected: false },
 		],
 		getStatus: () => undefined,
+		getCaps: () => undefined,
 	})
 	const logger = pino({ level: "silent" })
 	const primary = new FanoutManager(logger)

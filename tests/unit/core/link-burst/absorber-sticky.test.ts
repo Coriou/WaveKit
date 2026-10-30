@@ -160,7 +160,8 @@ it("observes the startup writable mark and resumes on its drain", async () => {
 		highWaterMark: 4,
 		deferred: true,
 	})
-	fanout.activateBranch("startup", { highWaterMark: 8, durationMs: 10000 })
+	// The startup mark bounds both sides: 12 - 4 leaves the writable side 8.
+	fanout.activateBranch("startup", { highWaterMark: 12, durationMs: 10000 })
 	const absorber = createBurstAbsorber({
 		fanout,
 		frameBytes: 2,

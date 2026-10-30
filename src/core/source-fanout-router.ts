@@ -66,6 +66,7 @@ export class SourceFanoutRouter extends EventEmitter {
 		const fanout =
 			this.fanouts.get(sourceId) ??
 			(sourceId === this.primarySourceId ? this.primary : undefined)
+		if (fanout) this.syncByteRate(sourceId, fanout)
 		const stream = this.sources.getStream(sourceId)
 		if (fanout && stream) this.wire(sourceId, fanout, stream)
 	}
@@ -102,10 +103,34 @@ export class SourceFanoutRouter extends EventEmitter {
 		sources.on("connected", this.connected)
 		sources.on("disconnected", this.disconnected)
 		sources.on("removed", this.removed)
+		sources.on("caps-changed", this.rateChanged)
 		if (this.factories) sources.on("caps-changed", this.capsChanged)
+		if (this.primarySourceId !== undefined)
+			this.syncByteRate(this.primarySourceId, primary)
 		for (const status of sources.getAllStatus()) {
 			if (status.connected) this.connected(status.id)
 		}
+	}
+
+	/**
+	 * Sizes the fanout's derived branch marks in signal time: its byte rate is
+	 * the source's sample rate × IQ frame bytes (2 400 000 × 2 = 4.8 MB/s for
+	 * 2.4 Msps CU8, a 1 200 000-byte 250 ms mark). Unknown caps keep the last
+	 * rate; known caps without an IQ frame (audio) fall back to the floor.
+	 */
+	private syncByteRate(sourceId: string, fanout: FanoutManager): void {
+		const caps = this.sources.getCaps(sourceId)
+		if (!caps) return
+		const frame = frameBytesFor(caps.format)
+		fanout.setByteRate(frame === null ? null : caps.sampleRate * frame)
+	}
+
+	private readonly rateChanged = (sourceId: string) => {
+		const fanout =
+			sourceId === this.primarySourceId
+				? this.primary
+				: this.fanouts.get(sourceId)
+		if (fanout) this.syncByteRate(sourceId, fanout)
 	}
 
 	linkBurst(sourceId: string): LinkBurstHandles | null {
@@ -257,6 +282,7 @@ export class SourceFanoutRouter extends EventEmitter {
 			fanout = new FanoutManager(this.logger)
 			this.fanouts.set(sourceId, fanout)
 			this.forwardEvents(fanout)
+			this.syncByteRate(sourceId, fanout)
 			if (this.sources.getStatus(sourceId)?.connected) {
 				const stream = this.sources.getStream(sourceId)
 				if (stream) this.wire(sourceId, fanout, stream)
@@ -469,6 +495,7 @@ export class SourceFanoutRouter extends EventEmitter {
 		this.sources.off("connected", this.connected)
 		this.sources.off("disconnected", this.disconnected)
 		this.sources.off("removed", this.removed)
+		this.sources.off("caps-changed", this.rateChanged)
 		this.sources.off("caps-changed", this.capsChanged)
 		for (const id of this.bursts.keys()) this.disposeBurst(id)
 		this.primary.off("backpressure", this.backpressure)

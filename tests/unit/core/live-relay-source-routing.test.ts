@@ -305,6 +305,7 @@ describe("live audio and relay source routing (§10.4, §10.7)", () => {
 			sources as unknown as SourceManager,
 			router,
 			LiveDemodConfigSchema.parse({
+				engine: "csdr",
 				enabled: true,
 				httpPort: await freePort(),
 				offsetHz: 20_000,
@@ -425,7 +426,10 @@ describe("live audio and relay source routing (§10.4, §10.7)", () => {
 			logger,
 			sources as unknown as SourceManager,
 			router,
-			LiveDemodConfigSchema.parse({ httpPort: await freePort() }),
+			LiveDemodConfigSchema.parse({
+				engine: "csdr",
+				httpPort: await freePort(),
+			}),
 		)
 		await expect(live.start()).rejects.toThrow()
 		const relay = new TunerRelay(
@@ -452,6 +456,7 @@ describe("live audio and relay source routing (§10.4, §10.7)", () => {
 			sources as unknown as SourceManager,
 			primary,
 			LiveDemodConfigSchema.parse({
+				engine: "csdr",
 				sourceId: "B",
 				httpPort: await freePort(),
 			}),
