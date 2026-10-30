@@ -130,6 +130,55 @@ describe("scanner load slices", () => {
 		expect(yields).toBe(Math.floor(items / 16))
 	})
 
+	it("refuses ingest and a second restore until a sliced restore completes", async () => {
+		const snapshot = filledStore(40, 3).snapshot()
+		const store = new DiscoveryStore({
+			maxDiscoveries: 100_000,
+			now: () => T0 + 10_000_000,
+			newId: counterIds(),
+			rasters: () => [{ spacingHz: 12_500, firstChannelHz: 100_000_000 }],
+		})
+		const fresh = () =>
+			makeObs({
+				id: `late-${store.ingestsRefusedDuringRestore()}`,
+				centreHz: 200_000_000,
+				startedAt: T0 + 9_999_000,
+				blocks: 3,
+				snrDb: 25,
+				cls: "analog-fm",
+				hypotheses: [["analog-fm", 0.8]],
+			})
+		const during: string[] = []
+		let second: unknown = null
+		await store.restoreInSlices(
+			snapshot,
+			async () => {
+				// Between slices, as another service running before the load completes would.
+				expect(store.isRestoring()).toBe(true)
+				during.push(store.ingest(fresh()).change)
+				if (second === null)
+					second = await store.restoreInSlices(snapshot).then(
+						() => "resolved",
+						(e: unknown) => e,
+					)
+			},
+			16,
+		)
+		expect(during.length).toBeGreaterThan(0)
+		expect(new Set(during)).toEqual(new Set(["transient"]))
+		expect(store.ingestsRefusedDuringRestore()).toBe(during.length)
+		expect(second).toMatchObject({ code: "SCANNER_STORE_RESTORING" })
+		expect(() => {
+			store.restore(snapshot)
+		}).not.toThrow()
+		// Nothing refused leaked into the store; after the load, ingest admits again.
+		expect(store.snapshot().discoveries).toHaveLength(40)
+		expect(store.isRestoring()).toBe(false)
+		const after = store.ingest(fresh())
+		expect(after.change).not.toBe("transient")
+		expect(after.discoveryId).not.toBeNull()
+	})
+
 	it("loads a snapshot past one slice with a yield between validation slices", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "wavekit-load-slices-"))
 		dirs.push(dir)

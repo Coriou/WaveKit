@@ -13,9 +13,21 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { startActivityLifecycle } from "../../../../../src/core/activity/lifecycle.js"
 import { startActivityRuntime } from "../../../../../src/core/activity/runtime.js"
 import { ActivityOpenTimeoutError } from "../../../../../src/core/activity/storage/errors.js"
-import { openActivityStore } from "../../../../../src/core/activity/storage/store.js"
+import {
+	ActivityWriterClient,
+	openActivityStore,
+} from "../../../../../src/core/activity/storage/store.js"
+import { resolveActivityLimits } from "../../../../../src/core/activity/storage/limits.js"
+import type { ActivityWorkerResponse } from "../../../../../src/core/activity/storage/writer-protocol.js"
 import { loadDatabaseSync } from "../../../../../src/core/activity/storage/probe.js"
-import { envelope, fixtureClock, logger } from "./helpers.js"
+import { Worker } from "node:worker_threads"
+import {
+	envelope,
+	FIXTURE_CLOCK_ANCHOR_MS,
+	fixtureClock,
+	logger,
+} from "./helpers.js"
+import { shareRow, YEAR_MS } from "./retention-helpers.js"
 
 const repository = fileURLToPath(new URL("../../../../../", import.meta.url))
 const roots: string[] = []
@@ -238,5 +250,133 @@ describe("deferred retention seed", () => {
 			["decoder:b", 2],
 		])
 		await store.close()
+	}, 20_000)
+})
+
+/** The worker's replies in order, from a raw worker on the bundled entry. */
+function rawWorker() {
+	const worker = new Worker(workerUrl, { name: "activity-writer-test" })
+	const messages: ActivityWorkerResponse[] = []
+	const waiters: (() => void)[] = []
+	worker.on("message", (m: ActivityWorkerResponse) => {
+		messages.push(m)
+		for (const wake of waiters.splice(0)) wake()
+	})
+	/** Resolves once `count` messages arrived (event-driven, no clock). */
+	const received = async (count: number): Promise<ActivityWorkerResponse[]> => {
+		while (messages.length < count)
+			await new Promise<void>(resolve => {
+				waiters.push(resolve)
+			})
+		return messages.slice(0, count)
+	}
+	return { worker, messages, received }
+}
+
+describe("deferred retention seed on the worker protocol", () => {
+	it("answers ready unseeded and scans once, after ready", async () => {
+		const dir = await populated()
+		const w = rawWorker()
+		try {
+			w.worker.postMessage({
+				id: 1,
+				type: "open",
+				dbPath: join(dir, "activity", "activity.db"),
+				lockPath: join(dir, "activity", "activity.lock.db"),
+				limits: resolveActivityLimits({ maxAgeMs: YEAR_MS }),
+				failNextWrites: 0,
+				throwNextWrites: 0,
+				writeDelayMs: 0,
+			})
+			const [ready, seeded] = await w.received(2)
+			// Without deferSeed the ready snapshot would carry seedScans 1 and both shares.
+			expect(ready).toMatchObject({ id: 1, type: "ready" })
+			if (ready?.type !== "ready") return
+			expect(ready.snapshot.rows).toBe(3)
+			expect(ready.snapshot.seedScans).toBe(0)
+			expect(ready.snapshot.retention.shares).toEqual([])
+			expect(seeded).toMatchObject({ id: 0, type: "seeded" })
+			if (seeded?.type !== "seeded") return
+			expect(seeded.snapshot.seedScans).toBe(1)
+			expect(
+				seeded.snapshot.retention.shares.map(share => [share.key, share.rows]),
+			).toEqual([
+				["decoder:a", 2],
+				["decoder:b", 1],
+			])
+			// The first write does not scan again: exactly one seed scan this session.
+			w.worker.postMessage({
+				id: 2,
+				type: "write",
+				rows: [shareRow("new", "b", FIXTURE_CLOCK_ANCHOR_MS)],
+				nowMs: FIXTURE_CLOCK_ANCHOR_MS,
+			})
+			const wrote = (await w.received(3))[2]
+			expect(wrote).toMatchObject({ id: 2, type: "wrote" })
+			if (wrote?.type !== "wrote" || !wrote.result.ok) return
+			expect(wrote.result.snapshot.seedScans).toBe(1)
+			w.worker.postMessage({ id: 3, type: "close" })
+			expect((await w.received(4))[3]).toMatchObject({ id: 3, type: "closed" })
+		} finally {
+			await w.worker.terminate()
+		}
+	}, 20_000)
+
+	it("a throwing seed task loses no message and keeps the writer", async () => {
+		const store = await openActivityStore({
+			stateDir: await populated(),
+			logger,
+			workerUrl,
+			now: fixtureClock(),
+			limits: { batchWindowMs: 0, globalBurst: 100, decoderBurst: 100 },
+			seedThrows: true,
+		})
+		const committed = new Promise<void>(resolve => {
+			store.onCommit(() => {
+				resolve()
+			})
+		})
+		store.admit(envelope({ eventId: "after-throw", decoderId: "b" }))
+		await committed
+		// The write was answered (not an error for the next message) and seeded the counters.
+		expect(store.stats()).toMatchObject({ writer: "running", rows: 4 })
+		expect(
+			store.stats().retention?.shares.map(share => [share.key, share.rows]),
+		).toEqual([
+			["decoder:a", 2],
+			["decoder:b", 2],
+		])
+		await store.close()
+	}, 20_000)
+
+	it("replays the last seeded snapshot to a late listener", async () => {
+		const dir = await populated()
+		const client = await ActivityWriterClient.open(
+			workerUrl,
+			join(dir, "activity", "activity.db"),
+			join(dir, "activity", "activity.lock.db"),
+			resolveActivityLimits({ maxAgeMs: YEAR_MS }),
+			0,
+			0,
+			0,
+			0,
+			false,
+			5_000,
+			30_000,
+			logger,
+		)
+		try {
+			await vi.waitFor(() => {
+				expect(client.seededSnapshot()).toBeDefined()
+			}, SEED_WAIT)
+			const heard: number[] = []
+			client.onSeeded(snapshot => {
+				heard.push(snapshot.seedScans)
+			})
+			// Synchronously, once, with the snapshot that arrived before the listener.
+			expect(heard).toEqual([1])
+		} finally {
+			await client.close()
+		}
 	}, 20_000)
 })

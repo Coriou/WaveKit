@@ -48,6 +48,8 @@ export interface ActivityWorkerSnapshot {
 	paused: boolean
 	/** WG3 (req 2.1): mapped by the store into `stats().retention`. */
 	retention: ActivityRetentionStats
+	/** Retention seed scans this session has run (the open's and any reseed). Not in stats. */
+	seedScans: number
 }
 
 /** Shares listed in the retention block (req 2.2). */
@@ -111,8 +113,10 @@ export function createActivitySession(
 	let stepNote: string | undefined
 	/** Wall time of the last seed scan (design F seed budget). */
 	let seedMs = 0
+	let seedScans = 0
 	const seed = (): boolean => {
 		const started = performance.now()
+		seedScans += 1
 		try {
 			counters.seed()
 			return true
@@ -159,6 +163,7 @@ export function createActivitySession(
 			...counters.listed(),
 			prefixFallbackSteps,
 		},
+		seedScans,
 	})
 
 	/** A prefix step (age, oldest-first or fallback) with the counters kept in step. */

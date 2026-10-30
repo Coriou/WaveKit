@@ -16,6 +16,8 @@ interface OpenActivityWorkerRequest {
 	writeDelayMs: number
 	/** Test seam: the worker waits this long after taking the lock, before opening. */
 	openDelayMs?: number
+	/** Test seam: the deferred seed task throws before it scans. */
+	seedThrows?: boolean
 }
 
 interface ReadyActivityWorkerResponse {
@@ -77,7 +79,9 @@ export function isActivityWorkerRequest(
 			typeof value["throwNextWrites"] === "number" &&
 			typeof value["writeDelayMs"] === "number" &&
 			(value["openDelayMs"] === undefined ||
-				typeof value["openDelayMs"] === "number")
+				typeof value["openDelayMs"] === "number") &&
+			(value["seedThrows"] === undefined ||
+				typeof value["seedThrows"] === "boolean")
 		)
 	}
 	if (type === "write")

@@ -13,6 +13,9 @@ export const ACTIVITY_LIFECYCLE_POLL_MS = 3_000
 
 /** What the drawer shows instead of an empty list while Activity is not open. */
 export type ActivityAvailability =
+	/** No answer yet (the first poll is in flight): no notice. */
+	| { kind: "checking" }
+	/** The status request failed without an answer (network): the receiver is out of reach. */
 	| { kind: "unknown" }
 	| { kind: "off" }
 	| { kind: "lifecycle"; lifecycle: ActivityLifecycleStatus }
@@ -62,13 +65,15 @@ export async function fetchActivityAvailability(
 export function lifecycleNotice(
 	availability: ActivityAvailability,
 ): { text: string; tone: "info" | "warn" } | null {
+	if (availability.kind === "checking") return null
 	if (availability.kind === "off")
 		return {
 			text: "Activity is turned off on this receiver. Decodes still show on the spectrum.",
 			tone: "info",
 		}
+	// No answer at all (network): not a store state, so neither "starting" nor "retrying".
 	if (availability.kind === "unknown")
-		return { text: "Activity is starting…", tone: "info" }
+		return { text: "Can’t reach the receiver", tone: "warn" }
 	switch (availability.lifecycle.state) {
 		case "opening":
 			return { text: "Activity is starting…", tone: "info" }
@@ -84,9 +89,58 @@ export function lifecycleNotice(
 	}
 }
 
+export interface AvailabilityTimers {
+	setTimeout(run: () => void, ms: number): unknown
+	clearTimeout(handle: unknown): void
+}
+
+const browserTimers: AvailabilityTimers = {
+	setTimeout: (run, ms) => setTimeout(run, ms),
+	clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
 /**
- * Polls the lifecycle while `active` (the feed answered 404/503) and calls `onAvailable`
- * once the store reports `available`, so the list loads without a page reload.
+ * Polls the lifecycle every ACTIVITY_LIFECYCLE_POLL_MS, reporting each answer to `onChange`.
+ * Each `available` answer calls `onAvailable` (the feed reloads) and polling goes on: the
+ * caller stops it once its list loaded, so a reload that still met a 503 is retried on the
+ * next poll. Polling ends on "off" and "unavailable" (unchanged until a core restart); a
+ * network failure keeps polling. Returns the stop function.
+ */
+export function pollActivityAvailability(
+	api: ApiClient,
+	onChange: (availability: ActivityAvailability) => void,
+	onAvailable: () => void,
+	timers: AvailabilityTimers = browserTimers,
+): () => void {
+	const controller = new AbortController()
+	let timer: unknown = null
+	const poll = async () => {
+		timer = null
+		const next = await fetchActivityAvailability(api, controller.signal)
+		if (controller.signal.aborted) return
+		onChange(next)
+		if (next.kind === "lifecycle" && next.lifecycle.state === "available")
+			onAvailable()
+		if (controller.signal.aborted) return
+		if (
+			next.kind === "off" ||
+			(next.kind === "lifecycle" && next.lifecycle.state === "unavailable")
+		)
+			return
+		timer = timers.setTimeout(() => void poll(), ACTIVITY_LIFECYCLE_POLL_MS)
+	}
+	void poll()
+	return () => {
+		controller.abort()
+		if (timer !== null) timers.clearTimeout(timer)
+		timer = null
+	}
+}
+
+/**
+ * Polls the lifecycle while `active` (the feed answered 404/503) and reloads through
+ * `onAvailable` whenever the store reports `available`, until the caller unmounts or turns
+ * `active` off; the list then loads without a page reload.
  */
 export function useActivityAvailability(
 	api: ApiClient,
@@ -94,33 +148,11 @@ export function useActivityAvailability(
 	onAvailable: () => void,
 ): ActivityAvailability {
 	const [availability, setAvailability] = useState<ActivityAvailability>({
-		kind: "unknown",
+		kind: "checking",
 	})
 	useEffect(() => {
 		if (!active) return
-		const controller = new AbortController()
-		let timer: ReturnType<typeof setTimeout> | null = null
-		const poll = async () => {
-			const next = await fetchActivityAvailability(api, controller.signal)
-			if (controller.signal.aborted) return
-			setAvailability(next)
-			if (next.kind === "lifecycle" && next.lifecycle.state === "available") {
-				onAvailable()
-				return
-			}
-			// Off and permanently unavailable do not change without a core restart.
-			if (
-				next.kind === "off" ||
-				(next.kind === "lifecycle" && next.lifecycle.state === "unavailable")
-			)
-				return
-			timer = setTimeout(() => void poll(), ACTIVITY_LIFECYCLE_POLL_MS)
-		}
-		void poll()
-		return () => {
-			controller.abort()
-			if (timer !== null) clearTimeout(timer)
-		}
+		return pollActivityAvailability(api, setAvailability, onAvailable)
 	}, [api, active, onAvailable])
 	return availability
 }

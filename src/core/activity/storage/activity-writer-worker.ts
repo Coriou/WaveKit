@@ -128,15 +128,22 @@ async function openSession(
 	})
 	// The deferred seed scan is the next task on the serial chain: a write queued behind
 	// it finds the counters seeded. A seed failure is handled inside the session
-	// (oldest-first until reopen), so this never rejects the chain.
+	// (oldest-first until reopen); any other throw is caught below.
 	// The parent cached the ready snapshot (no shares yet): the seeded one replaces its
 	// retention block without waiting for a write.
 	const opened = session
-	chain = chain.then(() => {
-		if (session !== opened) return
-		opened.seedCounters()
-		post({ id: 0, type: "seeded", snapshot: opened.snapshot() })
-	})
+	const seedThrows = request.seedThrows === true
+	chain = chain
+		.then(() => {
+			if (session !== opened) return
+			if (seedThrows) throw new ActivityUnavailableError("injected seed throw")
+			opened.seedCounters()
+			post({ id: 0, type: "seeded", snapshot: opened.snapshot() })
+		})
+		.catch(() => {
+			// Never reject the chain: the next message must still dispatch. The counters stay
+			// unseeded and the next write seeds them (write() seeds first).
+		})
 }
 
 function errorResponse(id: number, error: unknown): ActivityWorkerResponse {

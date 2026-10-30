@@ -56,6 +56,8 @@ export interface OpenActivityStoreOptions {
 	writeDelayMs?: number
 	/** Test seam: the worker waits this long after taking the lock, before opening. */
 	openDelayMs?: number
+	/** Test seam: the worker's deferred seed task throws. */
+	seedThrows?: boolean
 	/** Open budget; ACTIVITY_OPEN_TIMEOUT_MS by default. */
 	openTimeoutMs?: number
 	/** Acknowledgement budget for a write. Distinct from openTimeoutMs. */
@@ -71,6 +73,7 @@ interface OpenWorkerRequest {
 	throwNextWrites: number
 	writeDelayMs: number
 	openDelayMs?: number
+	seedThrows?: boolean
 }
 
 type WorkerRequestBody =
@@ -183,6 +186,7 @@ export async function openActivityStore(
 		throwNextWrites,
 		writeDelayMs,
 		openDelayMs,
+		options.seedThrows === true,
 		openTimeoutMs,
 		writeTimeoutMs,
 		options.logger,
@@ -201,13 +205,15 @@ export async function openActivityStore(
 	return store
 }
 
-class ActivityWriterClient {
+/** Exported for tests; production code reaches it only through openActivityStore. */
+export class ActivityWriterClient {
 	private readySnapshot: ActivityWorkerSnapshot | undefined
 	private nextId = 1
 	private exited = false
 	private closing = false
 	private gone: (() => void) | undefined
 	private seeded: ((snapshot: ActivityWorkerSnapshot) => void) | undefined
+	private lastSeeded: ActivityWorkerSnapshot | undefined
 	private readonly pending = new Map<
 		number,
 		{
@@ -250,6 +256,7 @@ class ActivityWriterClient {
 		throwNextWrites: number,
 		writeDelayMs: number,
 		openDelayMs: number,
+		seedThrows: boolean,
 		timeoutMs: number,
 		writeTimeoutMs: number,
 		logger: Logger,
@@ -272,6 +279,7 @@ class ActivityWriterClient {
 					throwNextWrites,
 					writeDelayMs,
 					...(openDelayMs > 0 ? { openDelayMs } : {}),
+					...(seedThrows ? { seedThrows } : {}),
 				},
 				timeoutMs,
 				() => new ActivityOpenTimeoutError(),
@@ -371,14 +379,24 @@ class ActivityWriterClient {
 		})
 	}
 
-	/** Called with each unsolicited post-seed snapshot. */
+	/**
+	 * Called with each unsolicited post-seed snapshot. A snapshot that arrived before the
+	 * listener is replayed to it at once, so a late listener never misses the seed.
+	 */
 	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void {
 		this.seeded = listener
+		if (this.lastSeeded !== undefined) listener(this.lastSeeded)
+	}
+
+	/** The last post-seed snapshot, if one arrived. */
+	seededSnapshot(): ActivityWorkerSnapshot | undefined {
+		return this.lastSeeded
 	}
 
 	private onMessage(raw: unknown): void {
 		if (!isActivityWorkerResponse(raw)) return
 		if (raw.type === "seeded") {
+			this.lastSeeded = raw.snapshot
 			this.seeded?.(raw.snapshot)
 			return
 		}
