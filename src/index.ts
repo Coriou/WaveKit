@@ -63,6 +63,7 @@ import type {
 	EfficiencyGate,
 	EfficiencyInputs,
 	ResolvedMode,
+	VfoChangeOrigin,
 } from "./decoders/enablement/contract.js"
 import type { LinkAdvisor, RatePolicy } from "./core/rate-policy-contract.js"
 import { PassThrough } from "node:stream"
@@ -1511,12 +1512,12 @@ async function main(): Promise<void> {
 		const vfo = createVfoTracker({
 			now: () => performance.now(),
 			setTimer: decoderPolicyTimer,
-			onSettled: value => {
-				decoderManager.notifyVfoSettled(value)
+			onSettled: (value, origin) => {
+				decoderManager.notifyVfoSettled(value, origin)
 				coverageGeneration++
 			},
 		})
-		const updateVfo = () =>
+		const updateVfo = (origin: VfoChangeOrigin = "other") =>
 			vfo.update(
 				vfoFromLiveDemod({
 					sourceId: () =>
@@ -1526,10 +1527,17 @@ async function main(): Promise<void> {
 					offsetHz: () => liveDemod.getStatus().config.offsetHz,
 					centreHz: id => sourceManager.getCaps(id)?.centerFreq ?? null,
 				}),
+				origin,
 			)
-		liveDemod.on("config-changed", updateVfo)
-		sourceManager.on("caps-changed", updateVfo)
-		sourceManager.on("connected", updateVfo)
+		// Live audio settings are the user's; a centre change is the user's only
+		// when the tuner controller says so (REST write, relay retune).
+		const updateVfoByUser = () => updateVfo("user")
+		const updateVfoOnCaps = (sourceId: string) =>
+			updateVfo(tunerController.centreChangeOrigin(sourceId) ?? "other")
+		const updateVfoOnConnect = () => updateVfo("other")
+		liveDemod.on("config-changed", updateVfoByUser)
+		sourceManager.on("caps-changed", updateVfoOnCaps)
+		sourceManager.on("connected", updateVfoOnConnect)
 		const bumpCoverage = () => {
 			coverageGeneration++
 		}
@@ -1537,9 +1545,9 @@ async function main(): Promise<void> {
 		sourceManager.on("caps-changed", bumpCoverage)
 		const closeVfo = () => {
 			vfo.dispose()
-			liveDemod.off("config-changed", updateVfo)
-			sourceManager.off("caps-changed", updateVfo)
-			sourceManager.off("connected", updateVfo)
+			liveDemod.off("config-changed", updateVfoByUser)
+			sourceManager.off("caps-changed", updateVfoOnCaps)
+			sourceManager.off("connected", updateVfoOnConnect)
 			liveDemod.off("config-changed", bumpCoverage)
 			sourceManager.off("caps-changed", bumpCoverage)
 		}

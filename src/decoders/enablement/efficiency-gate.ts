@@ -281,9 +281,11 @@ export function createEfficiencyGate(
 	/**
 	 * Drops or CPU over the limit observed in [admitted, until]. Drops judge a
 	 * placement only when charged to the branch it reads (or the source as a
-	 * whole), as late drops do. A placement naming no input branch, or a
-	 * reader without branch evidence, is judged by every drop on the source:
-	 * probation fails closed where it cannot tell whose loss it was.
+	 * whole), as late drops do; for a tuned-band placement, host loss charged
+	 * to the source as a whole is loss elsewhere (no holder known), never its
+	 * own. A placement naming no input branch, or a reader without branch
+	 * evidence, is judged by every drop on the source: probation fails closed
+	 * where it cannot tell whose loss it was.
 	 */
 	const evidence = (
 		p: RunningPlacement,
@@ -298,7 +300,12 @@ export function createEfficiencyGate(
 				dropped = charged.some(
 					d =>
 						p.inputBranch === undefined ||
-						chargesBranch(d.branches, p.inputBranch),
+						(chargesBranch(d.branches, p.inputBranch) &&
+							!(
+								p.tunedBand === true &&
+								d.code === "host" &&
+								d.branches === "source"
+							)),
 				)
 			else if (until === Infinity)
 				dropped = reader?.droppedSinceMono(p.sourceId, admitted) ?? false
@@ -887,9 +894,9 @@ export function createEfficiencyGate(
 				const detail = evidence(placement, admitted)
 				const tuned = placement.tunedBand === true
 				// Tuned band: host loss charged to a sibling branch some placement
-				// reads, while the probationer's own branch stayed clean, is its
-				// load on the host. Drops on a branch no placement reads (live
-				// audio) or charged to the source as a whole never count here.
+				// reads, or to the source as a whole (no holder known), while the
+				// probationer's own branch stayed clean, is its load on the host.
+				// Drops on a branch no placement reads (live audio) never count.
 				let hostElsewhere = false
 				if (tuned && detail === null && valid(mono)) {
 					const read = new Set(
@@ -912,8 +919,7 @@ export function createEfficiencyGate(
 					).some(
 						d =>
 							d.code === "host" &&
-							d.branches !== "source" &&
-							d.branches.some(b => read.has(b)),
+							(d.branches === "source" || d.branches.some(b => read.has(b))),
 					)
 					hostJudged.set(placement.key, justAfter(mono))
 				}
@@ -931,14 +937,19 @@ export function createEfficiencyGate(
 							(detail === "cpu" || p.sourceId === placement.sourceId) &&
 							!verdicts.some(v => v.key === p.key),
 					)
-					// At most one scapegoat per source per clear window
-					// (EFFICIENCY_CLEAR_MS, 60 000 ms): a shed placement's relief
-					// shows only in later samples.
+					// At most one scapegoat per clear window (EFFICIENCY_CLEAR_MS,
+					// 60 000 ms): a shed placement's relief shows only in later
+					// samples. Host drops are relieved per source; CPU is host-wide,
+					// so a CPU scapegoat waits for the window since the latest
+					// scapegoat on any source.
 					const scapegoat = candidates
 						.filter(
 							p =>
 								mono - (scapegoatAt.get(p.sourceId) ?? -Infinity) >=
-								EFFICIENCY_CLEAR_MS,
+									EFFICIENCY_CLEAR_MS &&
+								(detail !== "cpu" ||
+									mono - Math.max(-Infinity, ...scapegoatAt.values()) >=
+										EFFICIENCY_CLEAR_MS),
 						)
 						.reduce<
 							RunningPlacement | undefined

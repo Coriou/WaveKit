@@ -731,7 +731,8 @@ describe("decoder enablement composition", () => {
 		for (const seam of [
 			"bandplanRangeContains",
 			"getResolved: () => bandPlanService?.resolved()",
-			"decoderManager.notifyVfoSettled(value)",
+			"decoderManager.notifyVfoSettled(value, origin)",
+			"tunerController.centreChangeOrigin(sourceId)",
 			"sourceRouting.branchDropCounters(id)",
 			"sourceRouting.branchTopology(id)",
 			"composeDecoderEfficiencyGate(",

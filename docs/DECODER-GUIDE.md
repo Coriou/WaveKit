@@ -676,10 +676,12 @@ and it starts. When you tune, the core decides for each decoder in this order:
    **Stop** on an `auto` decoder keeps it stopped until you start it, change its mode or
    tune into its band again: once your VFO has settled (stayed put for 1 second) inside its
    band after being outside it, the core starts it again as one it started on its own, so
-   the CPU budget can still pause it. Moving within its band, a scanner sweep's hops, the
-   sweep's restore of your frequency afterwards, a reconnect and WaveKit starting up are not
-   tunes: they leave a stopped decoder stopped. A stopped `always` decoder stays stopped
-   until you start it.
+   the CPU budget can still pause it. Your tunes are the tuner frequency you set in the web
+   app or the API, a live audio setting, and a retune from SDR++ through the relay. Moving
+   within its band, a scanner sweep's hops, the sweep's restore of your frequency afterwards
+   (even when it lands only after a reconnect), a reconnect (including one that returns the
+   tuner to its configured frequency) and WaveKit starting up are not tunes: they leave a
+   stopped decoder stopped. A stopped `always` decoder stays stopped until you start it.
 2. **Source ready.** A sample-rate change reconnects the source; until the new rate is known
    decoders wait as `source-rate-unknown`.
 3. **Band.** The decoder's band (ADS-B 1090 MHz, APRS 144.800 MHz, ISM 433/868 MHz, ACARS and
@@ -703,10 +705,12 @@ and it starts. When you tune, the core decides for each decoder in this order:
      decoders stop to make room (newest first);
    - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds
      after the rate change), instead of waiting the 60-second clear window others wait;
-   - when CPU load, or host overload dropping data on another decoder's input, forces the core
-     to stop something while the tuned decoder is new, it stops the other automatic decoders
-     first, at most one per source every 60 seconds; the tuned one stops only when nothing else
-     is left, and says so. Drops on its own input are its own: it stops, not a bystander.
+   - when CPU load, or host overload dropping data on another decoder's input or on the source
+     with no one decoder to blame, forces the core to stop something while the tuned decoder is
+     new, it stops the other automatic decoders first: for CPU load at most one every 60
+     seconds across all sources (CPU is shared), for host overload at most one per source every
+     60 seconds. The tuned one stops only when nothing else is left, and says so. Drops on its
+     own input are its own: it stops, not a bystander.
 
    Tuning into a band also clears any earlier budget or loss wait of its decoder, once the
    tuned frequency has stayed in that band for 1 second (passing through a band on the way

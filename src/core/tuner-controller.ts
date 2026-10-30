@@ -417,6 +417,33 @@ export class TunerController extends EventEmitter {
 		return this.beforeOperatorRetune !== null
 	}
 
+	/**
+	 * Who made the centre change whose `caps-changed` is being emitted right
+	 * now: "user" for a REST frequency write or a relay (SDR++) retune,
+	 * "other" for a reconnect's caps reconcile (baseline reset, forgotten
+	 * inferred tuning) and every other write (scanner, replay, config,
+	 * decoder rate). Undefined outside such a change: a caps change the
+	 * controller did not make has no known origin.
+	 */
+	centreChangeOrigin(sourceId: string): "user" | "other" | undefined {
+		return this.centreOrigins.get(sourceId)
+	}
+
+	private withCentreOrigin<T>(
+		sourceId: string,
+		origin: "user" | "other",
+		apply: () => T,
+	): T {
+		const outer = this.centreOrigins.get(sourceId)
+		this.centreOrigins.set(sourceId, origin)
+		try {
+			return apply()
+		} finally {
+			if (outer === undefined) this.centreOrigins.delete(sourceId)
+			else this.centreOrigins.set(sourceId, outer)
+		}
+	}
+
 	setOnOperatorSampleRate(
 		hook: RatePolicy["onOperatorSampleRate"] | null,
 	): void {
@@ -440,6 +467,11 @@ export class TunerController extends EventEmitter {
 	private readonly config: TunerControllerConfig
 	private tunerStates: Map<string, TunerState> = new Map()
 	private controlModeOrigins: Map<string, ControlModeOrigin> = new Map()
+	/**
+	 * Per source, who changed the centre whose caps update is being applied
+	 * now; set only for the synchronous `caps-changed` it emits.
+	 */
+	private readonly centreOrigins = new Map<string, "user" | "other">()
 	/** Accepted desired fields per source, keyed to their acceptance sequence. */
 	private desiredFields: Map<string, Map<DesiredField, number>> = new Map()
 	/** Fields inferred from observed relay commands (known, never replayed). */
@@ -720,7 +752,11 @@ export class TunerController extends EventEmitter {
 			case RTL_TCP_COMMANDS.SET_FREQUENCY:
 				if (this.isWithinRange(value, VALIDATION.frequency)) {
 					state.frequency = value
-					this.sourceManager.updateSourceCaps(sourceId, { centerFreq: value })
+					this.withCentreOrigin(sourceId, "user", () =>
+						this.sourceManager.updateSourceCaps(sourceId, {
+							centerFreq: value,
+						}),
+					)
 					updated = true
 				} else {
 					this.markIgnoredRelayField(sourceId, "frequency")
@@ -962,7 +998,11 @@ export class TunerController extends EventEmitter {
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.frequency = hz
-		this.sourceManager.updateSourceCaps(sourceId, { centerFreq: hz })
+		this.withCentreOrigin(
+			sourceId,
+			opts.origin === "rest" ? "user" : "other",
+			() => this.sourceManager.updateSourceCaps(sourceId, { centerFreq: hz }),
+		)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1604,7 +1644,9 @@ export class TunerController extends EventEmitter {
 			"Reconciling source tuning metadata after reconnect",
 		)
 		try {
-			this.sourceManager.setTuningCaps(sourceId, { sampleRate, centerFreq })
+			this.withCentreOrigin(sourceId, "other", () =>
+				this.sourceManager.setTuningCaps(sourceId, { sampleRate, centerFreq }),
+			)
 		} catch (err) {
 			this.log.warn({ sourceId, err }, "Failed to reconcile source caps")
 			return false

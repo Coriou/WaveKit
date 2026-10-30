@@ -30,6 +30,7 @@ import type { DecoderEnablementOptions } from "./manager-options.js"
 import type {
 	PlannerInput,
 	PlannerVfo,
+	VfoChangeOrigin,
 	WantedPlacement,
 	ResolvedMode,
 	RunningPlacement,
@@ -218,7 +219,10 @@ interface TunedEpisode {
 	released: boolean
 }
 
-/** A scanner hold of a source, kept until the first VFO settle after its release. */
+/**
+ * A scanner hold of a source, kept after its release until the VFO settles
+ * back at its pre-hold value (the restore observed) or the user settles it.
+ */
 interface ScanHold {
 	/** The settled VFO when the first holder took the source. */
 	preHoldVfo: PlannerVfo | null | undefined
@@ -230,10 +234,11 @@ interface ScanHold {
 
 /**
  * Who moved the settled VFO there: a scanner hop on a held source, the
- * scanner's restore after its release, or anything else (the user, startup, a
- * source back after no VFO).
+ * scanner's restore after its release, the user (a settle whose latest change
+ * had a user origin), or anything else (startup, a source back after no VFO,
+ * a reconnect's baseline reset or replay, a caps reconcile).
  */
-type VfoSettleKind = "hop" | "restore" | "other"
+type VfoSettleKind = "hop" | "restore" | "user" | "other"
 
 const sameVfo = (a: PlannerVfo | null | undefined, b: PlannerVfo | null) =>
 	a?.sourceId === b?.sourceId && a?.frequencyHz === b?.frequencyHz
@@ -641,7 +646,7 @@ export class DecoderManager extends EventEmitter {
 	private vfoSettledAtMs = -Infinity
 	/**
 	 * Provenance of the settled VFO, kept until the next settle report: only
-	 * an "other" settle earns a tuned stay dwell credit from its settle time.
+	 * a "user" settle earns a tuned stay dwell credit from its settle time.
 	 */
 	private vfoSettleKind: VfoSettleKind = "other"
 	/**
@@ -658,7 +663,7 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * Sources a scanner hold took since the user last settled the VFO on
 	 * them: their tuned stays still have priority once released, but earn no
-	 * hold release until the user's next settle there ("other", after the
+	 * hold release until the user's next settle there ("user", after the
 	 * release) starts a fresh stay.
 	 */
 	private readonly scanTainted = new Set<string>()
@@ -793,24 +798,31 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * The VFO tracker reports a VFO that held its value for VFO_SETTLE_MS. A
+	 * The VFO tracker reports a VFO that held its value for VFO_SETTLE_MS,
+	 * with the origin of the latest change that moved it there: "user" for
+	 * the user's own tuning (REST tuner writes, live audio settings, relay
+	 * retunes from SDR++), anything else (a reconnect's baseline reset or
+	 * replay, a caps reconcile, the scanner, unknown) is not the user's. A
 	 * settled move made by the user into the band of an operator-stopped
 	 * `auto` decoder restarts it (see `scannerSettle`, `restartStoppedOnTune`).
 	 */
-	notifyVfoSettled(vfo: PlannerVfo | null): void {
+	notifyVfoSettled(
+		vfo: PlannerVfo | null,
+		origin: VfoChangeOrigin = "other",
+	): void {
 		const previous = this.settledVfo
 		const next = vfo ? { ...vfo } : null
 		this.settledVfo = next
 		this.vfoSettledAtMs = performance.now()
-		this.vfoSettleKind = next ? this.scannerSettle(next) : "other"
-		if (next && this.vfoSettleKind === "other") {
+		this.vfoSettleKind = next ? this.scannerSettle(next, origin) : "other"
+		if (next && this.vfoSettleKind === "user") {
 			// The user's settle starts the source's stays afresh: earlier ones,
 			// tuned before or by a sweep, were dropped while it was tainted.
 			this.scanTainted.delete(next.sourceId)
 		}
 		if (
 			next &&
-			this.vfoSettleKind === "other" &&
+			this.vfoSettleKind === "user" &&
 			previous != null &&
 			!sameVfo(previous, next)
 		)
@@ -820,29 +832,43 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * Whether a settle is the scanner's. A settled VFO move is the user's tune
-	 * only when it is "other" and moves a settled VFO: not the first settle
+	 * only when it is "user" and moves a settled VFO: not the first settle
 	 * (startup) or one from no VFO (a source back after a disconnect); not a
-	 * settle on a source a scanner sweep holds (a "hop"); not the scanner's
-	 * "restore", the first settle after the release when it comes within
-	 * SCANNER_RESTORE_SETTLE_MS or returns a hopped VFO to where it was before
-	 * the sweep. A tune made during a sweep pre-empts it and counts as the
-	 * scanner's too: the safe answer leaves a stopped decoder stopped.
+	 * settle whose latest change had no user origin; not a settle on a source
+	 * a scanner sweep holds (a "hop"); not the scanner's "restore", a settle
+	 * within SCANNER_RESTORE_SETTLE_MS of the release or, without a user
+	 * origin, back at the VFO from before the sweep. A tune made during a
+	 * sweep pre-empts it and counts as the scanner's too: the safe answer
+	 * leaves a stopped decoder stopped. The sweep's record is kept until the
+	 * restore is observed or the user settles, so a restore reaching the VFO
+	 * only on a later connection is still the restore.
 	 */
-	private scannerSettle(next: PlannerVfo): VfoSettleKind {
+	private scannerSettle(
+		next: PlannerVfo,
+		origin: VfoChangeOrigin,
+	): VfoSettleKind {
 		const scan = this.scanHolds.get(next.sourceId)
 		if (this.isSourceHeld(next.sourceId)) {
 			if (scan) scan.settled = true
 			return "hop"
 		}
 		if (scan?.releasedAtMs !== undefined) {
-			this.scanHolds.delete(next.sourceId)
-			if (
-				performance.now() - scan.releasedAtMs <= SCANNER_RESTORE_SETTLE_MS ||
-				(scan.settled && sameVfo(scan.preHoldVfo, next))
-			)
+			const restored = sameVfo(scan.preHoldVfo, next)
+			if (performance.now() - scan.releasedAtMs <= SCANNER_RESTORE_SETTLE_MS) {
+				if (restored) this.scanHolds.delete(next.sourceId)
 				return "restore"
+			}
+			if (origin === "user") {
+				this.scanHolds.delete(next.sourceId)
+				return "user"
+			}
+			if (restored) {
+				this.scanHolds.delete(next.sourceId)
+				return "restore"
+			}
+			return "other"
 		}
-		return "other"
+		return origin === "user" ? "user" : "other"
 	}
 
 	/**
@@ -1014,7 +1040,7 @@ export class DecoderManager extends EventEmitter {
 			const episode = this.tunedEpisodes.get(placement.key) ?? {
 				sinceMs:
 					this.settledVfo?.sourceId === placement.sourceId &&
-					this.vfoSettleKind === "other"
+					this.vfoSettleKind === "user"
 						? Math.min(now, this.vfoSettledAtMs - TUNED_SETTLE_MS)
 						: now,
 				released: false,

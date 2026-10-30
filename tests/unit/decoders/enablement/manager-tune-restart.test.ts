@@ -3,12 +3,17 @@ import pino from "pino"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
-import type { SourceManager } from "../../../../src/core/source-manager.js"
+import type {
+	SourceCaps,
+	SourceManager,
+} from "../../../../src/core/source-manager.js"
+import { TunerController } from "../../../../src/core/tuner-controller.js"
 import type {
 	EfficiencyGate,
 	PlacementPlanner,
 	PlannerVfo,
 	RunningPlacement,
+	VfoChangeOrigin,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
 import {
@@ -153,9 +158,12 @@ async function setup(
 	await m.startAll()
 	await vi.advanceTimersByTimeAsync(1_000)
 	const running = (id: string) => instances.get(id)?.running === true
-	/** A settled user retune: the capture centre moves and the VFO settles there. */
-	const settle = (hz: number, sourceId = "rtl") =>
-		m.notifyVfoSettled({ sourceId, frequencyHz: hz })
+	/** A settle report; a user retune's unless `origin` says otherwise. */
+	const settle = (
+		hz: number,
+		sourceId = "rtl",
+		origin: VfoChangeOrigin = "user",
+	) => m.notifyVfoSettled({ sourceId, frequencyHz: hz }, origin)
 	const tune = async (hz: number) => {
 		sources.setCenter("rtl", hz)
 		settle(hz)
@@ -231,7 +239,7 @@ it("scanner hops into its band and the restore leave an operator-stopped decoder
 	f.sources.setCenter("rtl", NEAR_HZ)
 	await f.m.releaseSource("rtl", "job-1")
 	await vi.advanceTimersByTimeAsync(SCANNER_RESTORE_SETTLE_MS + 1_000)
-	f.settle(NEAR_HZ)
+	f.settle(NEAR_HZ, "rtl", "other")
 	await vi.advanceTimersByTimeAsync(1_000)
 	expect(f.running("near")).toBe(false)
 	expect(f.m.getStatus("near")?.desiredRunning).toBe(false)
@@ -302,20 +310,20 @@ it("a stopped decoder restarts only once the VFO settled in its band", async () 
 			const timer = setTimeout(fn, ms)
 			return { cancel: () => clearTimeout(timer) }
 		},
-		onSettled: vfo => f.m.notifyVfoSettled(vfo),
+		onSettled: (vfo, origin) => f.m.notifyVfoSettled(vfo, origin),
 	})
 	try {
 		// Through the near band and out again inside one settle.
 		f.sources.setCenter("rtl", NEAR_HZ)
-		tracker.update({ sourceId: "rtl", frequencyHz: NEAR_HZ })
+		tracker.update({ sourceId: "rtl", frequencyHz: NEAR_HZ }, "user")
 		await vi.advanceTimersByTimeAsync(VFO_SETTLE_MS - 1)
 		f.sources.setCenter("rtl", FAR_HZ)
-		tracker.update({ sourceId: "rtl", frequencyHz: FAR_HZ })
+		tracker.update({ sourceId: "rtl", frequencyHz: FAR_HZ }, "user")
 		await vi.advanceTimersByTimeAsync(3_000)
 		expect(f.running("near")).toBe(false)
 		// Into it to stay: not before one settle, then restarted.
 		f.sources.setCenter("rtl", NEAR_HZ)
-		tracker.update({ sourceId: "rtl", frequencyHz: NEAR_HZ })
+		tracker.update({ sourceId: "rtl", frequencyHz: NEAR_HZ }, "user")
 		await vi.advanceTimersByTimeAsync(VFO_SETTLE_MS - 1)
 		expect(f.m.getStatus("near")?.desiredRunning).toBe(false)
 		await vi.advanceTimersByTimeAsync(1_000)
@@ -460,7 +468,7 @@ for (const hopSettles of [true, false])
 			f.sources.setCenter("rtl", NEAR_HZ)
 		}
 		await f.m.releaseSource("rtl", "job-1")
-		if (hopSettles) f.settle(NEAR_HZ)
+		if (hopSettles) f.settle(NEAR_HZ, "rtl", "other")
 		// Far longer than a fresh dwell (TUNED_SETTLE_MS = 1000 ms).
 		await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
 		expect(g.forgotten).not.toContain(raw("near").key)
@@ -497,11 +505,11 @@ it("a restore that settles while held gives the restored band priority after the
 			const timer = setTimeout(fn, ms)
 			return { cancel: () => clearTimeout(timer) }
 		},
-		onSettled: vfo => f.m.notifyVfoSettled(vfo),
+		onSettled: (vfo, origin) => f.m.notifyVfoSettled(vfo, origin),
 	})
 	const move = async (hz: number) => {
 		f.sources.setCenter("rtl", hz)
-		tracker.update({ sourceId: "rtl", frequencyHz: hz })
+		tracker.update({ sourceId: "rtl", frequencyHz: hz }, "user")
 		await vi.advanceTimersByTimeAsync(VFO_SETTLE_MS + DEBOUNCE_MS)
 	}
 	try {
@@ -546,7 +554,7 @@ for (const hold of ["late-drops", "stop"] as const)
 		await f.tune(NEAR_HZ)
 		f.sources.setCenter("rtl", FAR_HZ)
 		await f.m.releaseSource("rtl", "job-1")
-		f.settle(FAR_HZ)
+		f.settle(FAR_HZ, "rtl", "other")
 		await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
 		// The restored band is the tuned one again...
 		expect(tunedFlag(f.m, "near")).toBe(false)
@@ -583,4 +591,185 @@ it("a source removed for good drops its scan mark; a reconnect keeps it", async 
 	expect(tainted.has("rtl")).toBe(false)
 	await f.m.destroy()
 	expect(f.sources.listenerCount("source-removed")).toBe(0)
+})
+
+/**
+ * The core's own wiring of tuning changes into settles (`src/index.ts`): the
+ * real tuner controller (reconnect policy "reset") writes the centre through
+ * the fake sources, and a VFO tracker reads it on every caps change with the
+ * controller's origin for that change, as the core does. The live audio
+ * offset is 0, so the VFO is the capture centre.
+ */
+function tunerChain(f: Awaited<ReturnType<typeof setup>>) {
+	const transport = Object.assign(f.sources, {
+		writeToSource: () => true,
+		assertTunerCommandActive: () => {},
+		updateSourceCaps: (id: string, updates: Partial<SourceCaps>) => {
+			if (
+				updates.centerFreq !== undefined &&
+				updates.centerFreq !== f.sources.getCaps(id)?.centerFreq
+			)
+				f.sources.setCenter(id, updates.centerFreq)
+			return f.sources.getCaps(id)
+		},
+		setTuningCaps: (
+			id: string,
+			tuning: { sampleRate: number; centerFreq?: number },
+		) => {
+			if (tuning.centerFreq !== f.sources.getCaps(id)?.centerFreq)
+				f.sources.setCenter(id, tuning.centerFreq)
+			return f.sources.getCaps(id)
+		},
+	})
+	const tuner = new TunerController(
+		pino({ level: "silent" }),
+		transport as unknown as SourceManager,
+		{ reconnectPolicy: "reset" },
+	)
+	tuner.initializeSource("rtl", f.sources.getCaps("rtl"), "rtl_tcp")
+	const tracker = createVfoTracker({
+		now: () => performance.now(),
+		setTimer: (fn, ms) => {
+			const timer = setTimeout(fn, ms)
+			return { cancel: () => clearTimeout(timer) }
+		},
+		onSettled: (vfo, origin) => f.m.notifyVfoSettled(vfo, origin),
+	})
+	const update = (origin: VfoChangeOrigin) => {
+		const centre = f.sources.getCaps("rtl")?.centerFreq
+		tracker.update(
+			centre === undefined ? null : { sourceId: "rtl", frequencyHz: centre },
+			origin,
+		)
+	}
+	const onCaps = (id: string) => update(tuner.centreChangeOrigin(id) ?? "other")
+	f.sources.on("caps-changed", onCaps)
+	const settled = () => vi.advanceTimersByTimeAsync(VFO_SETTLE_MS + 1_000)
+	return {
+		tuner,
+		/** A REST frequency write, settled. */
+		rest: async (hz: number) => {
+			await tuner.setFrequency("rtl", hz, { origin: "rest" })
+			await settled()
+		},
+		/** SDR++ retunes through the relay, settled. */
+		relay: async (hz: number) => {
+			tuner.applyExternalCommand("rtl", 0x01, hz)
+			tuner.syncExternalControl("rtl", false)
+			await settled()
+		},
+		/** The source reconnects; the reset policy returns it to its baseline. */
+		reconnect: async () => {
+			tuner.synchronizeOnConnect("rtl")
+			update("other")
+			await settled()
+		},
+		dispose: () => {
+			f.sources.off("caps-changed", onCaps)
+			tracker.dispose()
+		},
+	}
+}
+
+for (const user of ["rest", "relay"] as const)
+	it(`a reconnect's baseline reset into a stopped decoder's band leaves it stopped; a ${user} retune into it restarts it`, async () => {
+		// The configured baseline centre is in the near band.
+		const f = await setup({ centreHz: NEAR_HZ })
+		const chain = tunerChain(f)
+		try {
+			f.settle(NEAR_HZ, "rtl", "other")
+			expect(f.running("near")).toBe(true)
+			await f.m.stopDecoder("near")
+			await chain.rest(FAR_HZ)
+			expect(f.sources.getCaps("rtl")?.centerFreq).toBe(FAR_HZ)
+			// The reconnect resets the centre to the baseline (near): not a tune.
+			await chain.reconnect()
+			expect(f.sources.getCaps("rtl")?.centerFreq).toBe(NEAR_HZ)
+			expect(f.running("near")).toBe(false)
+			expect(f.m.getStatus("near")?.desiredRunning).toBe(false)
+			// The user's own retune away and back into the band restarts it.
+			await chain.rest(FAR_HZ)
+			expect(f.running("near")).toBe(false)
+			if (user === "rest") await chain.rest(NEAR_HZ)
+			else await chain.relay(NEAR_HZ)
+			expect(f.sources.getCaps("rtl")?.centerFreq).toBe(NEAR_HZ)
+			expect(f.running("near")).toBe(true)
+		} finally {
+			chain.dispose()
+		}
+	})
+
+/** The manager's scan record and mark of a source. */
+const scanState = (m: DecoderManager) => {
+	const internals = m as unknown as {
+		scanTainted: Set<string>
+		scanHolds: Map<string, unknown>
+	}
+	return {
+		tainted: (id: string) => internals.scanTainted.has(id),
+		recorded: (id: string) => internals.scanHolds.has(id),
+	}
+}
+
+it("hops never settled while held: the scan mark persists through settles that are not the user's", async () => {
+	const g = shedding()
+	const f = await setup({ wrapGate: g.wrapGate })
+	const scan = scanState(f.m)
+	f.settle(FAR_HZ)
+	await stoppedThenAway(f)
+	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+	await f.m.releaseSource("rtl", "job-1")
+	// No hop settled; past the restore window a settle no user made (a
+	// reconnect's baseline reset into the near band) arrives.
+	await vi.advanceTimersByTimeAsync(SCANNER_RESTORE_SETTLE_MS + 1)
+	f.sources.setCenter("rtl", NEAR_HZ)
+	f.settle(NEAR_HZ, "rtl", "other")
+	await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
+	expect(f.running("near")).toBe(false)
+	expect(scan.tainted("rtl")).toBe(true)
+	expect(scan.recorded("rtl")).toBe(true)
+	// The restore back to the pre-hold VFO ends the record, not the mark.
+	f.sources.setCenter("rtl", FAR_HZ)
+	f.settle(FAR_HZ, "rtl", "other")
+	await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
+	expect(scan.recorded("rtl")).toBe(false)
+	expect(scan.tainted("rtl")).toBe(true)
+	expect(f.running("near")).toBe(false)
+	// The user's settle clears it, and the user's tune into the band restarts.
+	await f.tune(NEAR_HZ)
+	expect(scan.tainted("rtl")).toBe(false)
+	expect(f.running("near")).toBe(true)
+})
+
+it("a restore applied on a later connection is not a user tune, and the mark stays until the user settles", async () => {
+	const OTHER_HZ = 600_000_000
+	const f = await setup()
+	const scan = scanState(f.m)
+	f.settle(FAR_HZ)
+	// Stopped while tuned in its band: the pre-hold VFO is in the near band.
+	await f.tune(NEAR_HZ)
+	await f.m.stopDecoder("near")
+	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+	await f.tune(FAR_HZ)
+	await f.m.releaseSource("rtl", "job-1")
+	// The connection drops before the restore lands: past the window, the
+	// reconnect settles elsewhere, then the restore reaches the VFO.
+	await vi.advanceTimersByTimeAsync(SCANNER_RESTORE_SETTLE_MS + 1)
+	f.sources.setCenter("rtl", OTHER_HZ)
+	f.settle(OTHER_HZ, "rtl", "other")
+	await vi.advanceTimersByTimeAsync(1_000)
+	expect(scan.recorded("rtl")).toBe(true)
+	expect(scan.tainted("rtl")).toBe(true)
+	f.sources.setCenter("rtl", NEAR_HZ)
+	f.settle(NEAR_HZ, "rtl", "other")
+	await vi.advanceTimersByTimeAsync(1_000)
+	expect(f.running("near")).toBe(false)
+	expect(f.m.getStatus("near")?.desiredRunning).toBe(false)
+	expect(scan.recorded("rtl")).toBe(false)
+	expect(scan.tainted("rtl")).toBe(true)
+	// The user's tune away and back clears the mark and restarts it.
+	await f.tune(FAR_HZ)
+	expect(scan.tainted("rtl")).toBe(false)
+	await f.tune(NEAR_HZ)
+	expect(f.running("near")).toBe(true)
 })

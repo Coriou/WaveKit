@@ -266,6 +266,14 @@ export interface PlannerVfo {
 	sourceId: string
 	frequencyHz: number
 }
+/**
+ * Who made a change that moved the VFO: "user" for the user's own tuning
+ * (REST tuner writes, live audio settings, relay retunes from SDR++);
+ * "other" for everything else (a reconnect's baseline reset or replay, a
+ * caps reconcile, inferred-tuning resets, the scanner) and for an unknown
+ * origin.
+ */
+export type VfoChangeOrigin = "user" | "other"
 export type BandplanChannelLookup = (
 	window: { sourceId: string; minHz: number; maxHz: number },
 	protocols: readonly string[],

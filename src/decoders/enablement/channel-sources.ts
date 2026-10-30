@@ -5,6 +5,7 @@ import type {
 	BandplanChannelLookup,
 	BandplanRangeLookup,
 	PlannerVfo,
+	VfoChangeOrigin,
 } from "./contract.js"
 import { VFO_SETTLE_MS } from "./contract.js"
 
@@ -46,9 +47,11 @@ export function vfoFromLiveDemod(port: {
 export function createVfoTracker(deps: {
 	now: () => number
 	setTimer: (fn: () => void, ms: number) => { cancel(): void }
-	onSettled: (vfo: PlannerVfo | null) => void
+	/** With the origin of the latest change that moved the VFO there. */
+	onSettled: (vfo: PlannerVfo | null, origin: VfoChangeOrigin) => void
 }): {
-	update(vfo: PlannerVfo | null): void
+	/** `origin` defaults to "other": an unknown origin is never the user's. */
+	update(vfo: PlannerVfo | null, origin?: VfoChangeOrigin): void
 	current(): PlannerVfo | null
 	dispose(): void
 } {
@@ -60,11 +63,14 @@ export function createVfoTracker(deps: {
 	const equal = (a: PlannerVfo | null, b: PlannerVfo | null) =>
 		a?.sourceId === b?.sourceId && a?.frequencyHz === b?.frequencyHz
 	return {
-		update(value) {
+		update(value, origin = "other") {
 			if (disposed) return
 			const next = safeVfo(value)
 			if (equal(next, pending)) return
 			pending = next
+			// The latest change decides: one that only repeats the pending
+			// value above keeps the origin of the change that set it.
+			const changeOrigin: VfoChangeOrigin = origin === "user" ? "user" : "other"
 			timer?.cancel()
 			const token = ++generation
 			if (equal(next, settled)) return
@@ -79,7 +85,7 @@ export function createVfoTracker(deps: {
 				}
 				settled = next
 				timer = undefined
-				deps.onSettled(settled === null ? null : { ...settled })
+				deps.onSettled(settled === null ? null : { ...settled }, changeOrigin)
 			}
 			timer = deps.setTimer(settle, VFO_SETTLE_MS)
 		},
