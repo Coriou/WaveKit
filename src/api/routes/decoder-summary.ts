@@ -146,8 +146,9 @@ function efficiencyCode(status: DecoderStatus): DecoderVerdictCode {
 		case "unknown":
 			return "efficiency-waiting"
 		case undefined:
-			// No detail: the gate's capacity verdict, the common case.
-			return "efficiency-budget"
+			// No refusal from the gate (the core is about to evaluate it again):
+			// claim no cause, least of all a full budget, only the wait.
+			return "efficiency-waiting"
 		default:
 			// A detail this build does not know (a newer core): claim no cause
 			// and suggest no budget action; the generic verdict is the safe one.

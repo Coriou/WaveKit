@@ -706,7 +706,8 @@ and it starts. When you tune, the core decides for each decoder in this order:
    - it is admitted before the others, and when the budget is full the other automatic
      decoders stop to make room (newest first);
    - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds
-     after the rate change), instead of waiting the 60-second clear window others wait;
+     after the rate change), instead of waiting the 60-second clear window others wait; while
+     it waits it is checked again on every 2-second efficiency sample;
    - when CPU load, or host overload dropping data on another decoder's input or on the source
      with no one decoder to blame, forces the core to stop something while the tuned decoder is
      new, it stops the other automatic decoders first: for CPU load at most one every 60
@@ -727,7 +728,9 @@ and it starts. When you tune, the core decides for each decoder in this order:
 7. **Start.** The process then starts; ADS-B shows aircraft once readsb has heard them.
 
 Each decoder's verdict in `GET /api/decoders/summary` sums this up in one sentence with a
-suggested action, for example "ADS-B paused: CPU budget full" with `raise-budget`.
+suggested action, for example "ADS-B paused: CPU budget full" with `raise-budget`. That
+verdict appears only when the budget is what holds the decoder back; one waiting to be
+checked again reads "waiting for the source to settle", with no action.
 
 ### Efficiency recovery
 

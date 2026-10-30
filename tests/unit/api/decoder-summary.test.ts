@@ -132,13 +132,14 @@ it.each([
 		"efficiency-budget",
 		["raise-budget", "turn-off-others", "pause-scanner"],
 	],
+	// No refusal from the gate: never "CPU budget full" without a budget detail.
 	[
 		{
 			running: false,
 			suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
 		},
-		"efficiency-budget",
-		["raise-budget", "turn-off-others", "pause-scanner"],
+		"efficiency-waiting",
+		[],
 	],
 	[
 		{
@@ -304,7 +305,10 @@ it("always yields a verdict from the closed sets, generic for unknown input", ()
 					})
 				}
 				if (input.detail === undefined && input.reason === "efficiency-budget")
-					expect(verdict.code).toBe("efficiency-budget")
+					expect(verdict.code).toBe("efficiency-waiting")
+				// "CPU budget full" only for the gate's budget refusal.
+				if (verdict.code === "efficiency-budget")
+					expect(input.detail).toBe("budget")
 			},
 		),
 		{ numRuns: 200 },

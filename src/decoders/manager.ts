@@ -1065,7 +1065,9 @@ export class DecoderManager extends EventEmitter {
 			gate?.forget(placement.key)
 			delete state.efficiencyBackoffMs
 			delete state.efficiencyLateShed
-			delete state.admission
+			// Due now rather than gone: it stays a refusal the gate view lists
+			// until the source evaluation re-admits or refuses it.
+			state.admission = { ...state.admission, retryAtMs: now }
 		}
 		this.tunedEpisodes = episodes
 		this.scheduleTunedSettle(waitMs)
@@ -1275,9 +1277,10 @@ export class DecoderManager extends EventEmitter {
 		if (
 			![...this.decoders.values()].some(
 				state =>
-					state.placement &&
-					(state.decoder.getStatus().running ||
-						(state.desiredRunning && state.admission?.admit === false)),
+					this.staleEfficiencySuspension(state) ||
+					(state.placement &&
+						(state.decoder.getStatus().running ||
+							(state.desiredRunning && state.admission?.admit === false))),
 			)
 		)
 			return
@@ -1286,15 +1289,27 @@ export class DecoderManager extends EventEmitter {
 			const work = this.capsWork.then(async () => {
 				if (this.destroying) return
 				await this.applyProbation()
-				if (
-					[...this.decoders.values()].some(
-						state =>
-							state.desiredRunning &&
-							state.admission?.admit === false &&
-							state.admission.retryAtMs <= performance.now(),
+				const now = performance.now()
+				let due = false
+				for (const state of this.decoders.values()) {
+					// Nothing else would re-admit it: evaluate it now.
+					if (this.staleEfficiencySuspension(state)) due = true
+					if (!state.desiredRunning || state.admission?.admit !== false)
+						continue
+					// A tuned-band refusal is re-checked on every sample: a retry
+					// falling due before the next sample is due now, not a sample
+					// later.
+					if (
+						state.placement?.tunedBand === true &&
+						state.admission.retryAtMs < now + EFFICIENCY_SAMPLE_MS
 					)
-				)
-					this.notifyBandplansChanged()
+						state.admission = {
+							...state.admission,
+							retryAtMs: Math.min(state.admission.retryAtMs, now),
+						}
+					if (state.admission.retryAtMs <= now) due = true
+				}
+				if (due) this.notifyBandplansChanged()
 				this.scheduleEfficiencyEvaluation()
 			})
 			this.capsWork = work.catch(error => {
@@ -1770,19 +1785,77 @@ export class DecoderManager extends EventEmitter {
 	 * request that arrives mid-pass is never dropped (bounded; a remaining
 	 * request is queued as a source evaluation).
 	 */
-	private async reconcilePlacements(): Promise<void> {
+	private async reconcilePlacements(evaluatedSourceId?: string): Promise<void> {
 		if (!this.config.enablement || this.destroying) return
 		if (this.reconcilingPlacements) {
 			this.reconcileDirty = true
 			return
 		}
-		for (let pass = 0; pass < 4; pass++) {
+		try {
+			for (let pass = 0; pass < 4; pass++) {
+				this.reconcileDirty = false
+				await this.reconcilePlacementsPass()
+				if (!this.reconcileDirty || this.destroying) return
+			}
 			this.reconcileDirty = false
-			await this.reconcilePlacementsPass()
-			if (!this.reconcileDirty || this.destroying) return
+			this.notifyBandplansChanged()
+		} finally {
+			this.reviveDueEfficiency(evaluatedSourceId)
 		}
-		this.reconcileDirty = false
-		this.notifyBandplansChanged()
+	}
+
+	/**
+	 * Suspended for the efficiency gate while holding no refusal from it, so
+	 * the gate does not list it as blocked and no retry is pending: nothing
+	 * would re-admit it, so it must be evaluated.
+	 */
+	private staleEfficiencySuspension(state: DecoderState): boolean {
+		return (
+			state.suspension?.reasonCode === "efficiency-budget" &&
+			state.admission?.admit !== false &&
+			this.awaitsEfficiency(state)
+		)
+	}
+
+	/** Wanted, not running and not in a suspend or resume transition. */
+	private awaitsEfficiency(state: DecoderState): boolean {
+		return (
+			state.transition === null &&
+			state.desiredRunning &&
+			!state.intentionallyStopped &&
+			!state.decoder.getStatus().running
+		)
+	}
+
+	/**
+	 * Queues a source evaluation (re-admission or a fresh refusal) for every
+	 * suspended decoder whose refusal is due, or that holds none, except on
+	 * the source the caller evaluates itself next: a pass that released a
+	 * tuned-band hold is acted on now, not at the next sample.
+	 */
+	private reviveDueEfficiency(evaluatedSourceId?: string): void {
+		if (this.destroying) return
+		const now = performance.now()
+		const sourceIds = new Set<string>()
+		for (const state of this.decoders.values()) {
+			if (
+				!this.staleEfficiencySuspension(state) &&
+				!(
+					state.suspension !== null &&
+					state.admission?.admit === false &&
+					state.admission.retryAtMs <= now &&
+					this.awaitsEfficiency(state)
+				)
+			)
+				continue
+			const sourceId = this.selectedSourceId(state)
+			if (sourceId !== undefined && sourceId !== evaluatedSourceId)
+				sourceIds.add(sourceId)
+		}
+		for (const sourceId of sourceIds) {
+			const caps = this.sourceManager?.getCaps(sourceId)
+			if (caps) this.enqueueSourceEvaluation(sourceId, { caps, adapt: false })
+		}
 	}
 
 	private async reconcilePlacementsPass(): Promise<void> {
@@ -2089,7 +2162,9 @@ export class DecoderManager extends EventEmitter {
 					parent.desiredRunning &&
 					!parent.intentionallyStopped
 				) {
-					this.clearExpiredAdmission(state)
+					// A due refusal is cleared only by the start below or the source
+					// evaluation, which re-admit or refuse it again: cleared here, a
+					// suspended decoder would keep its suspension with no refusal.
 					// A moved placement with a crash retry pending waits for that retry,
 					// which starts it with the options set above (backoff honoured).
 					const retryPending = moved && state.restartTimer !== null
@@ -5300,7 +5375,8 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 		adapt = true,
 	): Promise<void> {
-		if (this.config.enablement) await this.reconcilePlacements()
+		// Every decoder on this source is evaluated below.
+		if (this.config.enablement) await this.reconcilePlacements(sourceId)
 		const affectedDecoders: string[] = []
 
 		// Every decoder selecting this source gets a fresh plan and, if the
