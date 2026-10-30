@@ -618,6 +618,37 @@ describe("activity fold keys", () => {
 		expect(stackOf(withAlone, alone.eventId)?.members).toEqual([alone])
 	})
 
+	it("keeps the simulcast look-ahead linear on a dense burst of one channel", () => {
+		const A = 160_450_000
+		const B = 466_075_000
+		const page = (at: number, hz: number) =>
+			row(at, {
+				...ENTITY.pager,
+				frequencyHz: hz,
+				fields: [
+					{ key: "message", label: "Message", value: "Synthetic call 8" },
+				],
+			})
+		const N = 5_000
+		// no stack has heard two channels: the look-ahead never runs
+		const burst = Array.from({ length: N }, () => page(0, A))
+		let before = foldWork.ahead
+		expect(foldActivity(burst)).toHaveLength(1)
+		expect(foldWork.ahead - before).toBe(0)
+		// a two-channel stack is open, then N rows on one channel at one instant: rows on the row's own
+		// channel are skipped by index, so the scan examines only the few rows on the other channel
+		const mixed = [
+			page(0, A),
+			page(500, B),
+			...Array.from({ length: N }, () => page(1_000, A)),
+			page(1_500, B),
+		]
+		before = foldWork.ahead
+		expect(foldActivity(mixed)).toHaveLength(1)
+		expect(foldWork.ahead - before).toBeLessThanOrEqual(N + 4)
+		// quadratic would be about N * N / 2 = 12.5 million examined rows
+	})
+
 	it("separates pages by content: tone only, numeric, alpha, and different texts", () => {
 		const page = (message: string | null) =>
 			row(0, {

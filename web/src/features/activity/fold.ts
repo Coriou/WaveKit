@@ -155,8 +155,11 @@ export function contentClass(s: ActivitySummary): ContentClass {
 const fieldValue = (s: ActivitySummary, key: string) =>
 	s.fields.find(f => f.key === key)?.value ?? null
 
-/** Work the caches did not save (a key or a time worked out from a summary): for tests and diagnostics. */
-export const foldWork = { keys: 0, times: 0 }
+/**
+ * Work the caches did not save (a key or a time worked out from a summary), and rows the simulcast
+ * look-ahead examined: for tests and diagnostics.
+ */
+export const foldWork = { keys: 0, times: 0, ahead: 0 }
 
 // The feed never edits a summary (a changed row is a new object), so a summary's key and time are worked
 // out once per object: a live update parses only the rows it brought, never the whole list again.
@@ -359,6 +362,8 @@ function splitRuns(
 	let floating: ActivitySummary[] = []
 	let floatFirst = 0
 	let floatLast = 0
+	let chans: (number | null)[] = []
+	let nextOther: number[] | null = null
 	const start = (rs: ActivitySummary[], t: number, khz: number | null) => {
 		const run: Run = {
 			rows: rs,
@@ -398,13 +403,22 @@ function splitRuns(
 		t: number,
 		within: number,
 	) => {
-		for (
-			let j = i + 1;
-			j < rows.length && (times[j] as number) - t <= within;
-			j++
-		) {
-			const other = khzOf(rows[j] as ActivitySummary)
-			if (other === khz) continue
+		// only a stack that heard two channels can pair; most lists never have one
+		if (!open.some(r => r.heard.size >= 2)) return null
+		const tried = new Set<number | null>()
+		// rows on this row's own channel are skipped in one step each (nextOther), so the scan visits only
+		// rows on other channels inside the window, and stops at the first row past it
+		let j = (nextOther as number[])[i] as number
+		while (j < rows.length && (times[j] as number) - t <= within) {
+			foldWork.ahead++
+			const other = chans[j] as number | null
+			const k = j + 1
+			j =
+				k < rows.length && chans[k] === khz
+					? ((nextOther as number[])[k] as number)
+					: k
+			if (tried.has(other)) continue
+			tried.add(other)
 			const run = newest(r => {
 				const a = r.heard.get(khz)
 				const b = r.heard.get(other)
@@ -442,6 +456,18 @@ function splitRuns(
 		}
 		// one open stack per key, except pages: one per channel, unless a simulcast copy joins
 		const within = rule.simulcastMs
+		if (within !== undefined && nextOther === null) {
+			// nextOther[i]: the first row after i on a channel other than row i's (rows.length when none)
+			chans = rows.map(khzOf)
+			nextOther = new Array<number>(rows.length)
+			for (let k = rows.length - 1; k >= 0; k--)
+				nextOther[k] =
+					k + 1 >= rows.length
+						? rows.length
+						: chans[k + 1] !== chans[k]
+							? k + 1
+							: (nextOther[k + 1] as number)
+		}
 		const run =
 			within === undefined
 				? newest(() => true)
