@@ -103,9 +103,10 @@ Activity loads up to 10 older pages of 100 by itself to fill the view.
 Each row gets a fold key from its own data: protocol and event kind, the core's entity
 (`icao:`, `mmsi:`, `capcode:`, `talkgroup:` plus the radio, `sensor:`, `callsign:`, `node:`; the
 title when there is none), the channel to 1 kHz where an entity is only unique per channel, and,
-when the row carries a message, its kind (tone only, numeric, alpha) and a hash of its text, so two
-different pages never fold. Ingestion gaps never fold. A silence longer than the family's gap ends
-a stack:
+when the row carries a message, its kind (tone only, numeric, alpha) and its exact text, so two
+different pages never fold. Ingestion gaps never fold. Rows of one key are taken in the order they
+were heard, and a silence longer than the family's gap between two of them ends a stack (a row
+stored late never bridges one):
 
 | Family                        | Gap    | Why                                                                                                                           |
 | ----------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -119,10 +120,12 @@ a stack:
 | Anything else                 | 2 min  | One exchange on one channel (analog overs are seconds apart)                                                                  |
 
 Stacks are ordered by their latest decode. At the top of the list, a stack that hears again moves
-to the top and keeps its place in React (its key is the fold key and its first row); while you are
+to the top and keeps its place in React and stays expanded (its key is kept while it shares a row
+with the stack before, so older rows leaving the list or an older page loading do not reset it); while you are
 scrolled down or Paused, new decodes wait behind the `N new` pill and nothing moves. Reopening the
 drawer shows the last list at once (with `Updating…`) while it reloads; the fresh rows join the
-kept ones when they overlap, else they replace them.
+kept ones when they overlap, else they replace them. Kept rows the store has since pruned, or
+that the fresh rows' range no longer holds, are dropped.
 
 An event's detail says **What it is** as a guess from its stack, labelled as one: a tone-only
 capcode repeating on a schedule reads `Likely a paging-network idle beacon (no content, repeats

@@ -226,6 +226,44 @@ describe("activity cache across close and open", () => {
 		)
 	})
 
+	it("drops cached rows the reopened snapshot's retention barrier has pruned", async () => {
+		const core = setup()
+		core.serve(page(range(1, 300), null))
+		const feed = new ActivityFeed(core.api, core.events, { id: "barrier" })
+		await feed.setQuery({})
+		expect(feed.get().items).toHaveLength(300)
+		feed.stop()
+		// the store pruned everything up to 150 meanwhile; the snapshot has more pages
+		core.serve({
+			...page(range(250, 349), "p:2"),
+			snapshot: { lowBarrier: "150", highWater: "349", expiresAt: "x" },
+		})
+		await feed.setQuery({})
+		const seqs = feed.get().items.map(i => Number(i.commitSeq))
+		expect(seqs.every(n => n > 150)).toBe(true)
+		expect(seqs).toEqual(range(151, 349).map(i => Number(i.commitSeq)))
+		expect(feed.get().nextPageToken).toBe("p:2")
+	})
+
+	it("drops a cached row the reopened snapshot's range no longer holds", async () => {
+		const core = setup()
+		core.serve(page(range(1, 300), null))
+		const feed = new ActivityFeed(core.api, core.events, { id: "gone" })
+		await feed.setQuery({})
+		feed.stop()
+		const fresh = range(250, 349).filter(i => i.commitSeq !== "260")
+		const retitled = fresh.map(i =>
+			i.commitSeq === "270" ? { ...i, title: "WKT270" } : i,
+		)
+		core.serve(page(retitled, "p:2"))
+		await feed.setQuery({})
+		const items = feed.get().items
+		expect(items.some(i => i.commitSeq === "260")).toBe(false)
+		expect(items).toHaveLength(348)
+		// a row in both is taken as the snapshot has it
+		expect(items.find(i => i.commitSeq === "270")?.title).toBe("WKT270")
+	})
+
 	it("opens a stack's newest event with the stack's latest state", async () => {
 		const core = setup()
 		core.serve(page(range(1, 12), null))

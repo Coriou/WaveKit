@@ -535,6 +535,8 @@ export async function buildMockServer(
 		} as LiveAudioConfig,
 	}
 	const activity: ActivitySummary[] = []
+	// the greatest pruned commitSeq, as the core reports it (snapshot.lowBarrier); "0" until one is pruned
+	let activityPruned = "0"
 	let seq = 1000
 	let jobCounter = 0
 	const clients = new Set<Client>()
@@ -973,7 +975,10 @@ export async function buildMockServer(
 
 	const pushActivity = (summary: ActivitySummary) => {
 		activity.push(summary)
-		if (activity.length > 2000) activity.splice(0, activity.length - 2000)
+		if (activity.length > 2000) {
+			const removed = activity.splice(0, activity.length - 2000)
+			activityPruned = removed.at(-1)?.commitSeq ?? activityPruned
+		}
 		for (const client of clients)
 			for (const [id, query] of client.activity) {
 				if (!matchesQuery(summary, query)) continue
@@ -2064,7 +2069,7 @@ export async function buildMockServer(
 			nextPageToken: next,
 			replayCursor: `mock:${snapshotTop}`,
 			snapshot: {
-				lowBarrier: activity[0]?.commitSeq ?? "0",
+				lowBarrier: activityPruned,
 				highWater: String(snapshotTop),
 				expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
 			},
@@ -2118,7 +2123,7 @@ export async function buildMockServer(
 			facets,
 			scanned: matched.length,
 			truncated: false,
-			snapshot: { lowBarrier: activity[0]?.commitSeq ?? "0", highWater },
+			snapshot: { lowBarrier: activityPruned, highWater },
 		}
 	})
 

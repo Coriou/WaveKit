@@ -14,6 +14,7 @@ import {
 	regularIntervalMs,
 	spanText,
 	stackOf,
+	timeOf,
 } from "../../src/features/activity/fold.ts"
 import type { FoldFamily } from "../../src/features/activity/fold.ts"
 import {
@@ -256,6 +257,129 @@ describe("activity folding properties", () => {
 			}),
 			{ numRuns: 200 },
 		)
+	})
+})
+
+describe("activity folding out of order, keys and content", () => {
+	// Feature: activity-folding, Property 7: stacks never span a silence longer than the gap
+	// Validates: Requirements R1
+	it("keeps every stack's members, in time order, within the family's gap of each other", () => {
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						family: fc.constantFrom(...FAMILIES),
+						atMs: fc.integer({ min: 0, max: 10_000_000 }),
+					}),
+					{ minLength: 1, maxLength: 60 },
+				),
+				steps => {
+					// commit order is the draw order; times are in any order
+					const items = steps.map(s => row(s.atMs, ENTITY[s.family]))
+					const stacks = foldActivity(items)
+					const spans = new Map<string, [number, number][]>()
+					for (const s of stacks) {
+						const gap = FAMILY_RULES[s.family].gapMs
+						const times = s.members.map(timeOf).sort((a, b) => a - b)
+						for (let i = 1; i < times.length; i++)
+							expect(
+								(times[i] as number) - (times[i - 1] as number),
+							).toBeLessThanOrEqual(gap)
+						const list = spans.get(s.foldKey) ?? []
+						list.push([times[0] as number, times.at(-1) as number])
+						spans.set(s.foldKey, list)
+					}
+					// two stacks of one key are separated by more than the gap
+					for (const [k, list] of spans) {
+						const gap =
+							FAMILY_RULES[
+								familyOf(stacks.find(s => s.foldKey === k)?.latest ?? row(0))
+							].gapMs
+						list.sort((a, b) => a[0] - b[0])
+						for (let i = 1; i < list.length; i++)
+							expect(
+								(list[i] as [number, number])[0] -
+									(list[i - 1] as [number, number])[1],
+							).toBeGreaterThan(gap)
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("splits a row stored late from a stack more than the gap away", () => {
+		// seq 1 heard at T+600 s, seq 2 at T: 600 s apart, over the aircraft's 120 s gap
+		const late = row(600_000, { entityKey: "icao:0FF0RD" })
+		const early = row(0, { entityKey: "icao:0FF0RD" })
+		const stacks = foldActivity([early, late])
+		expect(stacks).toHaveLength(2)
+		for (const s of stacks) expect(s.lastMs - s.firstMs).toBe(0)
+		// newest stored first: the late row's stack
+		expect(stacks[0]?.latest).toBe(early)
+	})
+
+	it("folds out-of-order rows within the gap into one stack, latest by commit order", () => {
+		const a = row(60_000, { entityKey: "icao:0FF0RE" })
+		const b = row(0, { entityKey: "icao:0FF0RE" })
+		const c = row(30_000, { entityKey: "icao:0FF0RE" })
+		const stacks = foldActivity([a, b, c])
+		expect(stacks).toHaveLength(1)
+		expect(stacks[0]?.latest).toBe(c)
+		expect(stacks[0]?.members).toEqual([c, b, a])
+		expect(stacks[0]?.lastMs).toBe(T0 + 60_000)
+	})
+
+	it("keeps a stack's key when its oldest rows are evicted from the loaded list", () => {
+		const all = Array.from({ length: 10 }, (_, i) =>
+			row(i * 1000, { entityKey: "icao:0EV1C7" }),
+		).reverse()
+		const before = foldedOf(all)
+		expect(before).toHaveLength(1)
+		const key = before[0]?.key
+		// the 5 000-row window drops the oldest three, then a new decode arrives
+		const after = foldedOf([
+			row(10_000, { entityKey: "icao:0EV1C7" }),
+			...all.slice(0, 7),
+		])
+		expect(after).toHaveLength(1)
+		expect(after[0]?.members).toHaveLength(8)
+		expect(after[0]?.key).toBe(key)
+	})
+
+	it("keeps a stack's key when an older page loads beneath it", () => {
+		const all = Array.from({ length: 10 }, (_, i) =>
+			row(i * 1000, { entityKey: "icao:0PAGE0" }),
+		).reverse()
+		const before = foldedOf(all.slice(0, 4))
+		const key = before[0]?.key
+		const after = foldedOf(all)
+		expect(after).toHaveLength(1)
+		expect(after[0]?.members).toHaveLength(10)
+		expect(after[0]?.key).toBe(key)
+	})
+
+	it("gives two stacks of one key distinct keys when they split", () => {
+		const items = [0, 1000, 500_000, 501_000].map(t =>
+			row(t, { entityKey: "icao:0SP117" }),
+		)
+		const stacks = foldedOf([...items].reverse())
+		expect(stacks).toHaveLength(2)
+		expect(new Set(stacks.map(s => s.key)).size).toBe(2)
+	})
+
+	it("never folds two pages whose texts differ, even when a 32-bit hash of them collides", () => {
+		const page = (text: string) =>
+			row(0, {
+				...ENTITY.pager,
+				fields: [{ key: "message", label: "Message", value: text }],
+			})
+		// FNV-1a 32 bit gives both 9b7e3cdd
+		const a = page("Synthetic page 1qe3b6h")
+		const b = page("Synthetic page 1i5tktr")
+		expect(foldKey(a)).not.toBe(foldKey(b))
+		expect(foldActivity([a, b])).toHaveLength(2)
+		expect(foldActivity([a, page("Synthetic page 1qe3b6h")])).toHaveLength(1)
 	})
 })
 

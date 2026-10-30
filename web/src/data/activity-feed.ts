@@ -7,7 +7,8 @@
  *
  * The list is its own cache: stopping (the drawer closed) keeps it, and showing the same query again
  * renders it at once while the snapshot reloads behind it ("loading" with items). The fresh snapshot is
- * merged into the cache only when the two overlap (no hole between them), else it replaces the cache.
+ * merged into the cache only when the two overlap (no hole between them), else it replaces the cache;
+ * the merge drops cached rows the snapshot says are gone (pruned, or missing from its range).
  */
 import type {
 	ActivityQuery,
@@ -99,6 +100,7 @@ const pageSchema = z
 		items: z.array(summarySchema),
 		nextPageToken: z.string().nullable(),
 		replayCursor: z.string(),
+		snapshot: z.object({ lowBarrier: z.string() }).passthrough(),
 	})
 	.passthrough() as unknown as z.ZodType<ActivitySearchPage>
 
@@ -153,6 +155,30 @@ export function joins(
 	)
 	if (oldest === undefined || newest === null) return false
 	return compareSeq(oldest.commitSeq, newest.commitSeq) <= 0
+}
+
+/**
+ * The list after a reopen whose snapshot `joins` the cache: the fresh rows (newest first), plus the cached
+ * rows older than the snapshot's oldest row that the store still holds (above `lowBarrier`, the greatest
+ * pruned seq). From its oldest row up the snapshot is the truth: a cached row in that range it lacks was
+ * removed, and a row in both is taken as the snapshot has it.
+ */
+export function reopenMerge(
+	cached: readonly ActivitySummary[],
+	fresh: readonly ActivitySummary[],
+	lowBarrier: string,
+	max = MAX_ITEMS,
+): ActivitySummary[] {
+	const oldest = fresh.at(-1)
+	if (oldest === undefined) return []
+	const ids = new Set(fresh.map(i => i.eventId))
+	const older = cached.filter(
+		i =>
+			!ids.has(i.eventId) &&
+			compareSeq(i.commitSeq, lowBarrier) > 0 &&
+			compareSeq(i.commitSeq, oldest.commitSeq) < 0,
+	)
+	return mergeNewest(fresh, older, max)
 }
 
 /** The REST query string for a query (the core's flat parameter names). */
@@ -277,7 +303,12 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 					...s,
 					status: "live",
 					items: keep
-						? mergeNewest(cached, fresh, this.maxItems)
+						? reopenMerge(
+								cached,
+								fresh,
+								page.snapshot.lowBarrier,
+								this.maxItems,
+							)
 						: fresh.slice(0, this.maxItems),
 					pending: [],
 					// past the cache's oldest row the next page continues from the snapshot's token

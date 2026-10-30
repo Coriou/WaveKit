@@ -132,23 +132,14 @@ export function contentClass(s: ActivitySummary): ContentClass {
 	return NUMERIC.test(m) ? "numeric" : "alpha"
 }
 
-/** FNV-1a (32 bit) over the UTF-16 code units: equal text, equal hash; cheap for 5 000 rows. */
-export function contentHash(text: string): string {
-	let h = 0x811c9dc5
-	for (let i = 0; i < text.length; i++) {
-		h ^= text.charCodeAt(i)
-		h = Math.imul(h, 0x01000193)
-	}
-	return (h >>> 0).toString(16).padStart(8, "0")
-}
-
 const fieldValue = (s: ActivitySummary, key: string) =>
 	s.fields.find(f => f.key === key)?.value ?? null
 
 /**
  * The fold key: family, event kind, protocol, identity (entity, plus the radio for a call; the title when
- * there is no entity), the channel to 1 kHz where the family is channel-bound, and the content signature
- * (class + hash) when the row carries a message, so two different pages to one capcode never fold.
+ * there is no entity), the channel to 1 kHz where the family is channel-bound, and the content (class +
+ * the text itself, quoted) when the row carries a message: two pages fold only when their text is equal,
+ * so two different pages to one capcode never fold (a hash could collide).
  */
 export function foldKey(s: ActivitySummary): string {
 	const family = familyOf(s)
@@ -166,7 +157,7 @@ export function foldKey(s: ActivitySummary): string {
 	const content =
 		cls === "none"
 			? ""
-			: `|c:${cls}${message === null ? "" : `:${contentHash(message)}`}`
+			: `|c:${cls}${message === null ? "" : `:${JSON.stringify(message)}`}`
 	return `${family}|${s.kind}|${s.protocol ?? ""}|${identity}${radio}${channel}${content}`
 }
 
@@ -179,7 +170,11 @@ export function timeOf(s: ActivitySummary): number {
 }
 
 export interface ActivityStack {
-	/** Stable React key: the fold key and the oldest member in the loaded list (the stack's start). */
+	/**
+	 * Stable React key: the fold key and the first member it was seen with. foldedOf keeps a stack's key
+	 * while it shares a member with the stack that had it, so rows evicted from the old end of the list or
+	 * an older page loaded beneath it do not change it; foldActivity alone anchors on the earliest member.
+	 */
 	key: string
 	foldKey: string
 	family: FoldFamily
@@ -194,9 +189,10 @@ export interface ActivityStack {
 }
 
 /**
- * Folds a list into stacks, newest stack first. Per fold key, members are taken in commitSeq order and a
- * new stack starts when a member is more than the family's gap after the latest time seen so far in the
- * current stack. Membership depends only on the set of rows, never on their input order.
+ * Folds a list into stacks, newest stack first (by their newest commitSeq). Per fold key, members are taken
+ * in time order (commitSeq breaks ties) and a new stack starts when a member is more than the family's gap
+ * after the one before it, so a row stored late never bridges a silence. Membership depends only on the
+ * set of rows, never on their input order.
  */
 export function foldActivity(
 	items: readonly ActivitySummary[],
@@ -211,7 +207,7 @@ export function foldActivity(
 	}
 	const stacks: ActivityStack[] = []
 	for (const [k, list] of byKey) {
-		list.sort((a, b) => compareSeq(a.commitSeq, b.commitSeq))
+		list.sort(chronological)
 		const family = familyOf(list[0] as ActivitySummary)
 		const gap = rules[family].gapMs
 		let run: ActivitySummary[] = []
@@ -221,10 +217,9 @@ export function foldActivity(
 			if (run.length > 0 && (family === "notice" || t - runLast > gap)) {
 				stacks.push(makeStack(k, family, run))
 				run = []
-				runLast = Number.NEGATIVE_INFINITY
 			}
 			run.push(item)
-			if (t > runLast) runLast = t
+			runLast = t
 		}
 		if (run.length > 0) stacks.push(makeStack(k, family, run))
 	}
@@ -233,15 +228,22 @@ export function foldActivity(
 	)
 }
 
-/** `oldestFirst` is in commitSeq order. */
+/** Oldest first by time, commitSeq breaking ties. */
+function chronological(a: ActivitySummary, b: ActivitySummary): number {
+	return timeOf(a) - timeOf(b) || compareSeq(a.commitSeq, b.commitSeq)
+}
+
+/** `byTime` is in chronological order; the members and the latest state go by commitSeq. */
 function makeStack(
 	foldKeyText: string,
 	family: FoldFamily,
-	oldestFirst: readonly ActivitySummary[],
+	byTime: readonly ActivitySummary[],
 ): ActivityStack {
-	const members = [...oldestFirst].reverse()
+	const members = [...byTime].sort((a, b) =>
+		compareSeq(b.commitSeq, a.commitSeq),
+	)
 	const latest = members[0] as ActivitySummary
-	const oldest = oldestFirst[0] as ActivitySummary
+	const oldest = byTime[0] as ActivitySummary
 	let firstMs = Number.POSITIVE_INFINITY
 	let lastMs = Number.NEGATIVE_INFINITY
 	for (const m of members) {
@@ -294,13 +296,67 @@ export function latestState(
 	return view
 }
 
-const folded = new WeakMap<readonly ActivitySummary[], ActivityStack[]>()
+/** Most event ids StackKeys remembers (two full lists, so a second feed does not wipe the first). */
+const REMEMBERED = 10_000
 
-/** foldActivity, memoised per list array (the feed replaces its array on every change). */
+/**
+ * Keeps stack keys across folds of a changing list: a stack takes the key of a stack it shares a member
+ * with (same fold key, newest shared member first, each key used once), else keeps its own. So a stack
+ * whose oldest rows are evicted, or that gains older rows from a loaded page, stays mounted and expanded.
+ */
+export class StackKeys {
+	private readonly byEvent = new Map<string, string>()
+
+	reconcile(stacks: ActivityStack[]): ActivityStack[] {
+		const used = new Set<string>()
+		// kept keys first, so a new stack's own key never takes one a known stack still holds
+		const kept = stacks.map(stack => {
+			for (const m of stack.members) {
+				const k = this.byEvent.get(m.eventId)
+				if (
+					k !== undefined &&
+					!used.has(k) &&
+					k.startsWith(`${stack.foldKey}@`)
+				) {
+					used.add(k)
+					return k
+				}
+			}
+			return null
+		})
+		const out = stacks.map((stack, i) => {
+			let key = kept[i] ?? null
+			if (key === null) {
+				key = stack.key
+				for (let n = 2; used.has(key); n++) key = `${stack.key}#${n}`
+				used.add(key)
+			}
+			return key === stack.key ? stack : { ...stack, key }
+		})
+		for (const stack of out)
+			for (const m of stack.members) {
+				this.byEvent.delete(m.eventId)
+				this.byEvent.set(m.eventId, stack.key)
+			}
+		for (const id of this.byEvent.keys()) {
+			if (this.byEvent.size <= REMEMBERED) break
+			this.byEvent.delete(id)
+		}
+		return out
+	}
+}
+
+const folded = new WeakMap<readonly ActivitySummary[], ActivityStack[]>()
+const keys = new StackKeys()
+
+/**
+ * foldActivity, memoised per list array (the feed replaces its array on every change), with stack keys
+ * kept across the arrays (StackKeys).
+ */
 export function foldedOf(items: readonly ActivitySummary[]): ActivityStack[] {
 	let out = folded.get(items)
 	if (!out) {
-		out = foldActivity(items)
+		out = keys.reconcile(foldActivity(items))
 		folded.set(items, out)
 	}
 	return out

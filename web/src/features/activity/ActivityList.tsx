@@ -1,7 +1,8 @@
 // The Activity list: windowed rows (only what is on screen is mounted, heights measured once), grouped
 // by minute, arrows to move, Enter to open. Repeats fold into stacks (fold.ts): one row per thing going on,
 // its latest state, a count and a span, expanded in place to the folded earlier rows. A stack's React key is
-// its fold key and start, so a live decode updates the stack where it is mounted. Stacks are ordered by
+// its fold key and the first row it was seen with, kept while it shares a row with the stack before
+// (fold.ts StackKeys), so a live decode, an evicted old row or a loaded older page leaves it mounted. Stacks are ordered by
 // their latest decode: at the top of the list a stack that hears again moves to the top; while the list is
 // scrolled away from the top (or paused) arrivals are held and announced by the "N new" pill, so nothing
 // moves under the pointer. In the Cards layout each stack is its decoded message card (Messages board, feed
