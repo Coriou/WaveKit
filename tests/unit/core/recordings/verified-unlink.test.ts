@@ -274,9 +274,13 @@ describe("verified unlink (WG10 progress names)", () => {
 		const s = await setup()
 		const other = path.join(path.dirname(s.dir), "other.wav")
 		await nodeFs.writeFile(other, "OTHER")
+		// A hard link keeps the original inode allocated, so the swapped-in copy can never
+		// reuse its number (ext4 reuses a freed inode at once, which made the swap invisible).
+		const held = path.join(path.dirname(s.dir), "held.wav")
 		const fs = countingFs({
 			rename: async (a, b) => {
 				if (path.basename(b) === "verified") {
+					await nodeFs.link(a, held)
 					await nodeFs.unlink(a)
 					await nodeFs.copyFile(other, a)
 				}
