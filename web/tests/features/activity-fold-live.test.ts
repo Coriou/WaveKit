@@ -121,12 +121,12 @@ describe("activity live folding", () => {
 			id: "fold",
 		})
 		await feed.setQuery({})
-		const before = foldedOf(feed.get().items)
+		const before = foldedOf(feed.get().items, feed)
 		expect(before.map(s => s.members.length)).toEqual([1, 20])
 		const key = before[1]?.key
 		core.push([aircraft(40)])
 		await vi.waitFor(() => expect(feed.get().items).toHaveLength(22))
-		const after = foldedOf(feed.get().items)
+		const after = foldedOf(feed.get().items, feed)
 		expect(after).toHaveLength(2)
 		expect(after[0]?.key).toBe(key)
 		expect(after[0]?.members).toHaveLength(21)
@@ -149,9 +149,9 @@ describe("activity live folding", () => {
 		await vi.waitFor(() => expect(feed.get().pending).toHaveLength(2))
 		expect(feed.get().items).toBe(items)
 		feed.setHolding(false)
-		const [stack] = foldedOf(feed.get().items)
+		const [stack] = foldedOf(feed.get().items, feed)
 		expect(stack?.members).toHaveLength(7)
-		expect(stack?.key).toBe(foldedOf(items)[0]?.key)
+		expect(stack?.key).toBe(foldedOf(items, feed)[0]?.key)
 	})
 
 	it("starts a new stack when the aircraft was silent longer than the gap", async () => {
@@ -165,9 +165,9 @@ describe("activity live folding", () => {
 		// 5 s + 121 s: past the aircraft's 120 s gap
 		core.push([aircraft(126)])
 		await vi.waitFor(() => expect(feed.get().items).toHaveLength(6))
-		expect(foldedOf(feed.get().items).map(s => s.members.length)).toEqual([
-			1, 5,
-		])
+		expect(foldedOf(feed.get().items, feed).map(s => s.members.length)).toEqual(
+			[1, 5],
+		)
 	})
 })
 
@@ -181,7 +181,7 @@ describe("activity cache across close and open", () => {
 		} as unknown as DataLayer)
 		const detach = c.attach()
 		await vi.waitFor(() => expect(c.feed.get().status).toBe("live"))
-		const key = foldedOf(c.feed.get().items)[0]?.key
+		const key = foldedOf(c.feed.get().items, c.feed)[0]?.key
 		detach()
 
 		// reopen while the core is slow: the cache shows, marked as refreshing
@@ -196,8 +196,8 @@ describe("activity cache across close and open", () => {
 			range(1, 12).map(i => i.commitSeq),
 		)
 		// the same stack, still keyed from its start
-		expect(foldedOf(c.feed.get().items)[0]?.key).toBe(key)
-		expect(foldedOf(c.feed.get().items)[0]?.members).toHaveLength(12)
+		expect(foldedOf(c.feed.get().items, c.feed)[0]?.key).toBe(key)
+		expect(foldedOf(c.feed.get().items, c.feed)[0]?.members).toHaveLength(12)
 		again()
 		c.dispose()
 	})

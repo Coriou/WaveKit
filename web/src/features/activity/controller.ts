@@ -14,7 +14,7 @@ import { Store } from "../../data/store.ts"
 import { shellStore } from "../../shell/store.ts"
 import type { ActivityColumn } from "./columns.ts"
 import type { ActivityStack } from "./fold.ts"
-import { foldedOf, stackOf } from "./fold.ts"
+import { foldedOf, releaseFolds, stackOf } from "./fold.ts"
 import {
 	MAX_COLUMNS,
 	columnQuery,
@@ -304,7 +304,8 @@ export class ActivityController extends Store<ActivityViewState> {
 
 	/** The stack holding an event in the list it came from, or null (opened by a link, or since dropped). */
 	stackFor(eventId: string): ActivityStack | null {
-		return stackOf(foldedOf(this.stackFeed().get().items), eventId)
+		const feed = this.stackFeed()
+		return stackOf(foldedOf(feed.get().items, feed), eventId)
 	}
 
 	/** Narrows the list to one entity (the detail's "Only this"). */
@@ -486,7 +487,11 @@ export class ActivityController extends Store<ActivityViewState> {
 		this.countsAbort?.abort()
 		if (this.countsTimer !== null) clearTimeout(this.countsTimer)
 		this.feed.dispose()
-		for (const f of this.columnFeeds.values()) f.dispose()
+		releaseFolds(this.feed)
+		for (const f of this.columnFeeds.values()) {
+			f.dispose()
+			releaseFolds(f)
+		}
 		this.columnFeeds.clear()
 	}
 
@@ -505,6 +510,7 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (!ids.has(id)) {
 				if (this.openFeed === f) this.openFeed = null
 				f.dispose()
+				releaseFolds(f)
 				this.columnFeeds.delete(id)
 				this.columnQueries.delete(id)
 			}

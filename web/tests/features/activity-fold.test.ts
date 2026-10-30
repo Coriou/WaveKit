@@ -12,7 +12,10 @@ import {
 	foldedOf,
 	latestState,
 	regularIntervalMs,
+	releaseFolds,
+	rememberedFor,
 	spanText,
+	StackKeys,
 	stackOf,
 	timeOf,
 } from "../../src/features/activity/fold.ts"
@@ -29,6 +32,10 @@ import {
 	withoutUnknownType,
 } from "../../src/features/activity/ActivityDetail.tsx"
 import { stackEntries } from "../../src/features/activity/rows.ts"
+import { MAX_ITEMS, mergeNewest } from "../../src/data/activity-feed.ts"
+
+/** The one list these tests fold (an ActivityFeed's identity and capacity). */
+const LIST = { capacity: MAX_ITEMS }
 
 const T0 = Date.parse("2026-10-17T08:00:00.000Z")
 
@@ -334,14 +341,14 @@ describe("activity folding out of order, keys and content", () => {
 		const all = Array.from({ length: 10 }, (_, i) =>
 			row(i * 1000, { entityKey: "icao:0EV1C7" }),
 		).reverse()
-		const before = foldedOf(all)
+		const before = foldedOf(all, LIST)
 		expect(before).toHaveLength(1)
 		const key = before[0]?.key
 		// the 5 000-row window drops the oldest three, then a new decode arrives
-		const after = foldedOf([
-			row(10_000, { entityKey: "icao:0EV1C7" }),
-			...all.slice(0, 7),
-		])
+		const after = foldedOf(
+			[row(10_000, { entityKey: "icao:0EV1C7" }), ...all.slice(0, 7)],
+			LIST,
+		)
 		expect(after).toHaveLength(1)
 		expect(after[0]?.members).toHaveLength(8)
 		expect(after[0]?.key).toBe(key)
@@ -351,9 +358,9 @@ describe("activity folding out of order, keys and content", () => {
 		const all = Array.from({ length: 10 }, (_, i) =>
 			row(i * 1000, { entityKey: "icao:0PAGE0" }),
 		).reverse()
-		const before = foldedOf(all.slice(0, 4))
+		const before = foldedOf(all.slice(0, 4), LIST)
 		const key = before[0]?.key
-		const after = foldedOf(all)
+		const after = foldedOf(all, LIST)
 		expect(after).toHaveLength(1)
 		expect(after[0]?.members).toHaveLength(10)
 		expect(after[0]?.key).toBe(key)
@@ -363,7 +370,7 @@ describe("activity folding out of order, keys and content", () => {
 		const items = [0, 1000, 500_000, 501_000].map(t =>
 			row(t, { entityKey: "icao:0SP117" }),
 		)
-		const stacks = foldedOf([...items].reverse())
+		const stacks = foldedOf([...items].reverse(), LIST)
 		expect(stacks).toHaveLength(2)
 		expect(new Set(stacks.map(s => s.key)).size).toBe(2)
 	})
@@ -480,11 +487,11 @@ describe("activity stacks", () => {
 
 	it("finds the stack of an event and memoises per list", () => {
 		const items = [row(1000), row(0)]
-		expect(foldedOf(items)).toBe(foldedOf(items))
+		expect(foldedOf(items, LIST)).toBe(foldedOf(items, LIST))
 		expect(
-			stackOf(foldedOf(items), items[1]?.eventId ?? "")?.members,
+			stackOf(foldedOf(items, LIST), items[1]?.eventId ?? "")?.members,
 		).toHaveLength(2)
-		expect(stackOf(foldedOf(items), "nope")).toBeNull()
+		expect(stackOf(foldedOf(items, LIST), "nope")).toBeNull()
 	})
 
 	it("lists an expanded stack's earlier rows after it, keyed by event", () => {
@@ -612,5 +619,88 @@ describe("activity list and detail bounds", () => {
 			false,
 		)
 		expect(isNearDiscovery(undefined, 160_450_000)).toBe(false)
+	})
+})
+
+describe("activity stack keys per list", () => {
+	/** `n` decodes of one entity 1 s apart from `fromMs`, newest first (one stack). */
+	const run = (entityKey: string, n: number, fromMs = 0) =>
+		Array.from({ length: n }, (_, i) =>
+			row(fromMs + i * 1000, { entityKey }),
+		).reverse()
+
+	it("keeps a stack's key when other lists fold more than 10 000 events between its updates", () => {
+		const a = { capacity: MAX_ITEMS }
+		const b = { capacity: MAX_ITEMS }
+		const c = { capacity: MAX_ITEMS }
+		let listA = run("icao:0A0A0A", MAX_ITEMS)
+		const key = foldedOf(listA, a)[0]?.key
+		expect(foldedOf(listA, a)[0]?.members).toHaveLength(MAX_ITEMS)
+		// a decode evicts the stack's original anchor
+		listA = mergeNewest(listA, [
+			row(MAX_ITEMS * 1000, { entityKey: "icao:0A0A0A" }),
+		])
+		expect(foldedOf(listA, a)[0]?.key).toBe(key)
+		// two other full lists, disjoint from it: 10 000 more events remembered
+		foldedOf(run("icao:0B0B0B", MAX_ITEMS), b)
+		foldedOf(run("icao:0C0C0C", MAX_ITEMS), c)
+		listA = mergeNewest(listA, [
+			row((MAX_ITEMS + 1) * 1000, { entityKey: "icao:0A0A0A" }),
+		])
+		const [stack] = foldedOf(listA, a)
+		expect(stack?.members).toHaveLength(MAX_ITEMS)
+		expect(stack?.key).toBe(key)
+		for (const owner of [a, b, c])
+			expect(rememberedFor(owner)).toBeLessThanOrEqual(MAX_ITEMS)
+	})
+
+	it("keeps a key through a full list sliding one decode at a time (at the bound)", () => {
+		const keys = new StackKeys(4)
+		let list = run("icao:0B0B00", 4)
+		const key = keys.reconcile(foldActivity(list))[0]?.key
+		for (let i = 4; i < 20; i++) {
+			list = mergeNewest(list, [row(i * 1000, { entityKey: "icao:0B0B00" })], 4)
+			const [stack] = keys.reconcile(foldActivity(list))
+			expect(stack?.members).toHaveLength(4)
+			expect(stack?.key).toBe(key)
+			expect(keys.size).toBe(4)
+		}
+	})
+
+	it("forgets ids past the bound: a full list of other events in the same list drops them", () => {
+		const keys = new StackKeys(4)
+		const x = run("icao:0F0F0F", 4)
+		const kx = keys.reconcile(foldActivity(x))[0]?.key
+		keys.reconcile(foldActivity(run("icao:0E0E0E", 4)))
+		expect(keys.size).toBe(4)
+		// X comes back with its three newest rows and a new one: its ids were trimmed, so a fresh key
+		const back = [row(10_000, { entityKey: "icao:0F0F0F" }), ...x.slice(0, 3)]
+		const [stack] = keys.reconcile(foldActivity(back))
+		expect(stack?.key).not.toBe(kx)
+		expect(stack?.key).toBe(foldActivity(back)[0]?.key)
+	})
+
+	it("keeps each list's keys apart: a list at its bound does not trim another's", () => {
+		const a = { capacity: 4 }
+		const b = { capacity: 4 }
+		let listA = run("icao:0A0B0C", 4)
+		const key = foldedOf(listA, a)[0]?.key
+		for (let i = 0; i < 5; i++) foldedOf(run("icao:0D0E0F", 4, i * 10_000), b)
+		expect(rememberedFor(b)).toBe(4)
+		listA = mergeNewest(listA, [row(4000, { entityKey: "icao:0A0B0C" })], 4)
+		expect(foldedOf(listA, a)[0]?.key).toBe(key)
+		expect(rememberedFor(a)).toBe(4)
+	})
+
+	it("releases a list's keys when its feed is disposed", () => {
+		const owner = { capacity: 4 }
+		const list = run("icao:0D1500", 3)
+		const folded = foldedOf(list, owner)
+		expect(rememberedFor(owner)).toBe(3)
+		releaseFolds(owner)
+		expect(rememberedFor(owner)).toBe(0)
+		// a fold after release starts fresh (not the memoised array)
+		expect(foldedOf(list, owner)).not.toBe(folded)
+		expect(rememberedFor(owner)).toBe(3)
 	})
 })

@@ -107,7 +107,7 @@ export function ActivityList({
 	}, [cards])
 
 	const display = useDisplay()
-	const stacks = useMemo(() => foldedOf(items), [items])
+	const stacks = useMemo(() => foldedOf(items, feed), [items, feed])
 	const entries = useMemo(
 		() => stackEntries(stacks, now, expanded),
 		[stacks, now, display, expanded], // group labels follow the time setting

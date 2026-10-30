@@ -160,10 +160,11 @@ export function ActivityDetail({
 	}, [data.api, entityKey, eventId])
 
 	// the stack it belongs to, folded from the list it was opened from (live: it grows as decodes arrive)
-	const loaded = useStore(activity.stackFeed(), v => v.items)
+	const loadedFrom = activity.stackFeed()
+	const loaded = useStore(loadedFrom, v => v.items)
 	const folded = useMemo(
-		() => stackOf(foldedOf(loaded), eventId),
-		[loaded, eventId],
+		() => stackOf(foldedOf(loaded, loadedFrom), eventId),
+		[loaded, loadedFrom, eventId],
 	)
 	const stack: ActivityStack | null = useMemo(
 		() => folded ?? (item ? (foldActivity([item])[0] ?? null) : null),

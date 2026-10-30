@@ -296,16 +296,29 @@ export function latestState(
 	return view
 }
 
-/** Most event ids StackKeys remembers (two full lists, so a second feed does not wipe the first). */
-const REMEMBERED = 10_000
-
 /**
  * Keeps stack keys across folds of a changing list: a stack takes the key of a stack it shares a member
  * with (same fold key, newest shared member first, each key used once), else keeps its own. So a stack
  * whose oldest rows are evicted, or that gains older rows from a loaded page, stays mounted and expanded.
+ *
+ * One instance serves one list. It remembers at most `limit` event ids, the list's capacity: a fold looks
+ * up only the members of the previous fold of the same list (at most capacity rows), and every fold
+ * re-inserts all its members (at most capacity) at the newest end before the oldest ids are trimmed, so
+ * the last fold's ids are never dropped. Sharing one instance between lists would let a busy list trim
+ * another's ids (the keys would change under it).
  */
 export class StackKeys {
 	private readonly byEvent = new Map<string, string>()
+	private readonly limit: number
+
+	constructor(limit: number) {
+		this.limit = limit
+	}
+
+	/** Event ids remembered now (at most the limit). */
+	get size(): number {
+		return this.byEvent.size
+	}
 
 	reconcile(stacks: ActivityStack[]): ActivityStack[] {
 		const used = new Set<string>()
@@ -339,27 +352,54 @@ export class StackKeys {
 				this.byEvent.set(m.eventId, stack.key)
 			}
 		for (const id of this.byEvent.keys()) {
-			if (this.byEvent.size <= REMEMBERED) break
+			if (this.byEvent.size <= this.limit) break
 			this.byEvent.delete(id)
 		}
 		return out
 	}
 }
 
-const folded = new WeakMap<readonly ActivitySummary[], ActivityStack[]>()
-const keys = new StackKeys()
+/** The list a fold belongs to (an ActivityFeed): its identity owns the keys, its capacity bounds them. */
+export interface FoldOwner {
+	readonly capacity: number
+}
+
+interface OwnerFolds {
+	keys: StackKeys
+	folded: WeakMap<readonly ActivitySummary[], ActivityStack[]>
+}
+
+const owners = new WeakMap<FoldOwner, OwnerFolds>()
 
 /**
  * foldActivity, memoised per list array (the feed replaces its array on every change), with stack keys
- * kept across the arrays (StackKeys).
+ * kept across the arrays of one owner (StackKeys, one per owner, bounded by its capacity).
  */
-export function foldedOf(items: readonly ActivitySummary[]): ActivityStack[] {
-	let out = folded.get(items)
+export function foldedOf(
+	items: readonly ActivitySummary[],
+	owner: FoldOwner,
+): ActivityStack[] {
+	let own = owners.get(owner)
+	if (!own) {
+		own = { keys: new StackKeys(owner.capacity), folded: new WeakMap() }
+		owners.set(owner, own)
+	}
+	let out = own.folded.get(items)
 	if (!out) {
-		out = keys.reconcile(foldActivity(items))
-		folded.set(items, out)
+		out = own.keys.reconcile(foldActivity(items))
+		own.folded.set(items, out)
 	}
 	return out
+}
+
+/** Forgets an owner's stack keys (its feed was disposed); a later fold starts fresh. */
+export function releaseFolds(owner: FoldOwner): void {
+	owners.delete(owner)
+}
+
+/** Event ids an owner's stack keys remember now (0 when it has none): for tests and diagnostics. */
+export function rememberedFor(owner: FoldOwner): number {
+	return owners.get(owner)?.keys.size ?? 0
 }
 
 /** The stack holding an event, or null. */
