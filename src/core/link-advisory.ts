@@ -1,5 +1,5 @@
 import { isIP } from "node:net"
-import type { LinkBurstSummary } from "@wavekit/api-types"
+import type { LinkAdvisory, LinkBurstSummary } from "@wavekit/api-types"
 import { LINK_DROPPING_HOLD_MS } from "./link-burst/contract.js"
 import type { LinkAdvisor } from "./rate-policy-contract.js"
 import {
@@ -14,6 +14,18 @@ export function isLoopbackHost(host: string): boolean {
 		host === "::1" ||
 		(isIP(host) === 4 && host.startsWith("127."))
 	)
+}
+
+/**
+ * Why samples were lost, additive to `LinkAdvisory` until the shared DTO
+ * carries it: `source` when bytes never reached the core (a received-rate
+ * shortfall, or receiver-side drops), `branch-congestion` when every byte
+ * arrived and a core fanout branch dropped them (a `link` drop attribution:
+ * an arrival gap followed by internal loss). Only `source` is `dropping`.
+ */
+export type LinkLossReason = "source" | "branch-congestion"
+export interface LinkAdvisoryDetail extends LinkAdvisory {
+	lossReason?: LinkLossReason
 }
 
 interface History {
@@ -104,7 +116,7 @@ export function createLinkAdvisor(deps: {
 				? null
 				: exceedsShortfall(received, sampleRateHz * frameBytes)
 		},
-		classify(input, drops) {
+		classify(input, drops): LinkAdvisoryDetail {
 			const payload = valid(input.sampleRateHz) ? input.sampleRateHz * 2 : 0
 			const history = histories.get(input.sourceId)
 			const received =
@@ -136,10 +148,18 @@ export function createLinkAdvisor(deps: {
 					/* Optional summary is unavailable. */
 				}
 			}
+			// Only loss before the core is a link problem. Internal branch drops
+			// after an arrival gap are reported apart and never raise `dropping`.
 			const dropping =
-				linkDropping ||
 				(received !== null && exceedsShortfall(received, payload)) ||
 				(upstream !== null && upstream > LINK_UPSTREAM_DROPS_BYTES_PER_SECOND)
+			const lossReason: LinkLossReason | null = loopback
+				? null
+				: dropping
+					? "source"
+					: linkDropping
+						? "branch-congestion"
+						: null
 			return {
 				level: loopback
 					? "none"
@@ -154,6 +174,7 @@ export function createLinkAdvisor(deps: {
 				shortfallPercent: shortfall,
 				upstreamDropBytesPerSecond: upstream,
 				...(burst === null ? {} : { burst }),
+				...(lossReason === null ? {} : { lossReason }),
 			}
 		},
 		reset(sourceId) {

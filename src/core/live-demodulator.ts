@@ -113,7 +113,8 @@ import type {
 } from "./auto-listen/contract.js"
 import { PreRollShadow } from "./auto-listen/preroll-shadow.js"
 import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
-import type { FanoutManager } from "./fanout-manager.js"
+import { branchHighWaterMark, type FanoutManager } from "./fanout-manager.js"
+import { frameBytesFor } from "./link-burst/contract.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
 
@@ -477,6 +478,8 @@ export class LiveDemodulator extends EventEmitter {
 	private autoAligned = false
 	private run: PipelineRun | null = null
 	private branchId: string | null = null
+	/** Mark of the attached branch: DEFAULT_BRANCH_BUFFER_MS at its source rate. */
+	private branchMark = 0
 	private branchStream: Readable | null = null
 	private branchErrorHandler: ((err: Error) => void) | null = null
 	private pipelineHealth: LiveDemodStatus["pipelineHealth"] = "stopped"
@@ -1353,14 +1356,29 @@ export class LiveDemodulator extends EventEmitter {
 				: this.fanoutManager
 		const branchId = `live-demod-${sourceId}`
 		this.branchId = branchId
+		this.branchMark = this.branchMarkFor(sourceId)
 		this.branchStream = this.branchFanout.addBranch({
 			id: branchId,
 			sourceId,
+			highWaterMark: this.branchMark,
 		})
 		this.branchErrorHandler = err => {
 			this.log.warn({ err }, "Live demodulation branch error")
 		}
 		this.branchStream.on("error", this.branchErrorHandler)
+	}
+
+	/**
+	 * The branch holds DEFAULT_BRANCH_BUFFER_MS of signal at the source's byte
+	 * rate (1 200 000 bytes at 2.4 Msps CU8), not a fixed 256 KiB (54.6 ms
+	 * there). Unknown caps keep the 256 KiB floor.
+	 */
+	private branchMarkFor(sourceId: string): number {
+		const caps = this.sourceManager.getCaps(sourceId)
+		const frame = caps ? frameBytesFor(caps.format) : null
+		return branchHighWaterMark(
+			caps && frame !== null ? caps.sampleRate * frame : null,
+		)
 	}
 
 	private detachBranch(): void {
@@ -1943,6 +1961,17 @@ export class LiveDemodulator extends EventEmitter {
 			)
 		}
 		if (stopping) await stopping
+		// A rate change resizes the branch mark: the stopped run no longer reads
+		// the branch, so it is replaced before the new run attaches to it.
+		const sourceId = this.activeSourceId
+		if (
+			sourceId &&
+			this.branchStream &&
+			this.branchMarkFor(sourceId) !== this.branchMark
+		) {
+			this.detachBranch()
+			this.attachBranch(sourceId)
+		}
 		try {
 			await this.startPipeline()
 		} catch (err) {

@@ -105,11 +105,17 @@ Multiplexes a single audio stream to multiple decoder consumers.
 - Accept source stream as input
 - Create independent buffered branches for each decoder
 - Handle backpressure without blocking the source
-- Emit backpressure warnings when buffers fill
+- Warn when a congested branch actually drops input (entering drop-mode alone is
+  flow control: the burst absorber holds the next chunks until the branch drains)
 
 **Key design decisions**:
 
-- Each branch has independent buffering (default 256KB highWaterMark)
+- Each branch has independent buffering sized in milliseconds of signal: once the
+  fanout knows its source byte rate (`setByteRate`), a branch without an explicit
+  mark holds 250 ms per side (1 200 000 bytes at 2.4 Msps CU8, 512 000 at
+  1.024 Msps), never less than 256 KiB. The live-demod branch and the channelizer
+  input size themselves the same way from the source caps. Measurements:
+  [PERFORMANCE.md, "Branch marks in signal time"](PERFORMANCE.md#branch-marks-in-signal-time-2026-10-30).
 - Real-time priority: prefer dropping data over blocking source
 - Data is copied to each branch (no shared buffers)
 
@@ -135,7 +141,7 @@ Cuts exact-rate channels out of a source's IQ in one native process instead of o
 
 - **No decoder is gate-verified yet.** The golden gates (Property 15 raw-vs-channel equality per decoder, the dsd-fme voice A/B) and the capacity run are still pending, so `useChannelizer: true` on any decoder is an unverified prototype setting.
 - **Channel open stalls input (Pi-class hosts)**: `wavekit-chan` designs a channel's filters on its input thread when the channel opens (about 34 ms worst measured on x86, for 2.048 → 1.05 Msps; wider or unusual rate splits cost more). While it runs no input is read, so every open (startup, a decoder restart, a re-request after invalidation) eats the input branch's slack, and an overrun drops bytes, which `mark-gap` turns into a discontinuity on every open channel. Before enabling the channelizer on a Pi-class host, either move filter design off the input path or measure the open stall there below 60 ms.
-- **Eight channels under a CPU quota (capacity T36, ruling QH-16)**: all channel DSP runs on `wavekit-chan`'s single input thread, and its input branch buffers only `channelizer.inputHighWaterMark` (262 144 bytes, about 64 ms at 2.048 Msps). With 8 AIS channels under a 4-CPU container quota, throttling stalls dropped 1.4–2.0 % of input as `input-gap` discontinuities on every channel (none with 6 CPUs), and unpaced the process reaches only about 1.0× real time at N = 8 (i5-1038NG7). N = 8 is not recommended on a ≤4-core host or under a CPU quota until the default buffer is raised and/or the AVX2/FMA path or per-channel DSP threads land; see `docs/CAPACITY-2026-10-10-CHANNELIZER.md`.
+- **Eight channels under a CPU quota (capacity T36, ruling QH-16)**: all channel DSP runs on `wavekit-chan`'s single input thread, and its input branch then buffered only `channelizer.inputHighWaterMark` (262 144 bytes, about 64 ms at 2.048 Msps; since 2026-10-30 that value is a floor and the branch holds 250 ms of signal at the input rate). With 8 AIS channels under a 4-CPU container quota, throttling stalls dropped 1.4–2.0 % of input as `input-gap` discontinuities on every channel (none with 6 CPUs), and unpaced the process reaches only about 1.0× real time at N = 8 (i5-1038NG7). N = 8 is not recommended on a ≤4-core host or under a CPU quota until the default buffer is raised and/or the AVX2/FMA path or per-channel DSP threads land; see `docs/CAPACITY-2026-10-10-CHANNELIZER.md`.
 - Every channel invalidation (caps change, source disconnect/remove, `wavekit-chan` exit, or one channel dying on its own: client gone or socket error) restarts the channelised decoder. dsd-fme's `stop()` emits `call_end`, so a PTT spanning a retune is split and the digital-voice stream (:8082) has a gap.
 - An input-branch drop sends `mark-gap`, which resets the channel filter state without a restart; expect AMBE errors around branch drops.
 - A stale `caps.centerFreq` (SDR++ retuning the Pi without going through the relay) puts every channel centre on the wrong RF. Rate-truth only warns.

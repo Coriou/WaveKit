@@ -716,6 +716,17 @@ describe("ChannelizerManager", () => {
 				groupDelaySamples: 5,
 			})
 	})
+	// The input branch holds 250 ms of CU8 at the input rate, with
+	// the configured inputHighWaterMark as a floor.
+	it("sizes the input branch in ms of signal above the configured floor", async () => {
+		const m = manager()
+		expect((await m.requestChannel("rtl", "ais", req(), caps())).ok).toBe(true)
+		// 2 048 000 × 2 B × 250 ms = 1 024 000 B > the 262 144 B default.
+		expect(fanout.getBranchTelemetry("channelizer-rtl")?.highWaterMark).toBe(
+			1_024_000,
+		)
+	})
+
 	it("sends an open whose queueBytes is channelQueueMs of output samples", async () => {
 		const sent: ChannelizerRequest[] = []
 		const m = manager(

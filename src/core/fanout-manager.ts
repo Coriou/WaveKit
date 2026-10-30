@@ -17,7 +17,13 @@ import { createComponentLogger, type Logger } from "../utils/logger.js"
 
 export interface BranchConfig {
 	id: string
-	highWaterMark?: number // Default: 256KB (262144 bytes)
+	/** Bytes. Wins over highWaterMarkMs. Default: see branchHighWaterMark. */
+	highWaterMark?: number
+	/**
+	 * Milliseconds of signal at the fanout's byte rate (setByteRate), never
+	 * below DEFAULT_HIGH_WATER_MARK. Ignored while the byte rate is unknown.
+	 */
+	highWaterMarkMs?: number
 	decoderId?: string // Optional decoder ID for telemetry context
 	sourceId?: string // Optional source ID for telemetry context
 	// Created inactive: it receives no data (and counts no drops) until
@@ -100,9 +106,72 @@ interface BranchState {
 	backpressureSince?: number | undefined // hrtime in ms for precise duration
 	lastBackpressureAt?: string | undefined // ISO timestamp for display
 	lastDrainAt?: string | undefined // ISO timestamp for display
+	/** This congestion episode already logged its first dropped chunk. */
+	dropLogged: boolean
+	/** Polls the low-water exit while a drop-mode episode lasts. */
+	lowWaterTimer?: ReturnType<typeof setInterval> | undefined
+	/** The episode's one-shot 'drain' listener, removed when the poll ends it. */
+	episodeDrain?: (() => void) | undefined
 }
 
-const DEFAULT_HIGH_WATER_MARK = 256 * 1024 // 256KB (Increased to prevent congestion)
+/**
+ * Floor of every derived mark: 256 KiB, the historic fixed default (128 ms of
+ * CU8 at 1.024 Msps, but only 54.6 ms at 2.4 Msps).
+ */
+export const DEFAULT_HIGH_WATER_MARK = 256 * 1024
+/**
+ * Default branch buffer in signal time once the byte rate is known. A mark
+ * bounds each side of a PassThrough, so a consumer stalls for about twice
+ * this before its branch congests: 2 × 250 ms = 500 ms, the absorber's
+ * laggard bound (ABSORBER_LAGGARD_MS). At 2.4 Msps CU8 (4.8 MB/s) that is
+ * 1 200 000 B per side; at 1.024 Msps (2.048 MB/s) 512 000 B.
+ */
+export const DEFAULT_BRANCH_BUFFER_MS = 250
+/**
+ * Ceiling of a derived mark: 16 MiB, the channelizer input limit. 250 ms
+ * reaches it only above 33.5 MB/s (8.4 Msps of CS16).
+ */
+export const MAX_DERIVED_HIGH_WATER_MARK = 16 * 1024 * 1024
+
+/**
+ * A drop-mode episode ends once the branch's writable side is back at half its
+ * mark, not only at Node's 'drain' (writable side empty). Waiting for empty
+ * meant consuming both sides first, about 2 × mark: 2.4 MB, 500 ms of signal
+ * at 2.4 Msps with 250 ms marks, as long as the absorber's laggard bound.
+ * Half leaves room for 0.5 × 1 200 000 = 600 000 bytes (125 ms) before the
+ * branch congests again, so episodes do not chatter.
+ */
+export const DROP_MODE_LOW_WATER = 0.5
+/**
+ * Low-water poll while an episode lasts (only then): 10 ms is 48 000 bytes at
+ * 4.8 MB/s, 4 % of a 1 200 000-byte mark, and 100 timer callbacks per second
+ * per congested branch.
+ */
+export const DROP_MODE_POLL_MS = 10
+
+/**
+ * Bytes holding `ms` of signal at `bytesPerSecond`, clamped to
+ * [DEFAULT_HIGH_WATER_MARK, MAX_DERIVED_HIGH_WATER_MARK]. An unknown or
+ * invalid rate or duration returns the floor.
+ */
+export function branchHighWaterMark(
+	bytesPerSecond: number | null | undefined,
+	ms: number = DEFAULT_BRANCH_BUFFER_MS,
+): number {
+	if (
+		bytesPerSecond === null ||
+		bytesPerSecond === undefined ||
+		!Number.isFinite(bytesPerSecond) ||
+		bytesPerSecond <= 0 ||
+		!Number.isFinite(ms) ||
+		ms <= 0
+	)
+		return DEFAULT_HIGH_WATER_MARK
+	return Math.min(
+		MAX_DERIVED_HIGH_WATER_MARK,
+		Math.max(DEFAULT_HIGH_WATER_MARK, Math.ceil((bytesPerSecond * ms) / 1000)),
+	)
+}
 
 export class FanoutManager extends EventEmitter {
 	private readonly log: Logger
@@ -111,6 +180,7 @@ export class FanoutManager extends EventEmitter {
 	private dataHandler: ((chunk: Buffer) => void) | null = null
 	private sourceErrorHandler: ((error: Error) => void) | null = null
 	private sourceEndHandler: (() => void) | null = null
+	private byteRate: number | null = null
 
 	constructor(logger: Logger) {
 		super()
@@ -144,6 +214,23 @@ export class FanoutManager extends EventEmitter {
 		this.log.info("Source attached")
 	}
 
+	/**
+	 * Source byte rate (sample rate × frame bytes), or null when unknown. Sizes
+	 * the marks of branches added afterwards; existing streams keep theirs.
+	 */
+	setByteRate(bytesPerSecond: number | null): void {
+		this.byteRate =
+			bytesPerSecond !== null &&
+			Number.isFinite(bytesPerSecond) &&
+			bytesPerSecond > 0
+				? bytesPerSecond
+				: null
+	}
+
+	getByteRate(): number | null {
+		return this.byteRate
+	}
+
 	// Detach the current source stream.
 	detachSource(): void {
 		if (this.source && this.dataHandler) {
@@ -171,7 +258,9 @@ export class FanoutManager extends EventEmitter {
 			return this.branches.get(config.id)!.stream
 		}
 
-		const highWaterMark = config.highWaterMark ?? DEFAULT_HIGH_WATER_MARK
+		const highWaterMark =
+			config.highWaterMark ??
+			branchHighWaterMark(this.byteRate, config.highWaterMarkMs)
 
 		const stream = new PassThrough({
 			highWaterMark,
@@ -198,6 +287,7 @@ export class FanoutManager extends EventEmitter {
 			backpressureSince: undefined,
 			lastBackpressureAt: undefined,
 			lastDrainAt: undefined,
+			dropLogged: false,
 		} as BranchState
 
 		// Startup buffering can suppress drop-mode while writableLength reaches
@@ -257,6 +347,8 @@ export class FanoutManager extends EventEmitter {
 
 		clearTimeout(branch.startupTimer)
 		branch.startupTimer = undefined
+		clearInterval(branch.lowWaterTimer)
+		branch.lowWaterTimer = undefined
 		// End the stream gracefully
 		branch.stream.end()
 		// Destroy to release resources
@@ -351,19 +443,18 @@ export class FanoutManager extends EventEmitter {
 					!stream.destroyed &&
 					!stream.writableEnded &&
 					stream.writableLength < branch.highWaterMark
-				)
+				) {
 					branch.startupDraining = false
-				else {
-					branch.droppedBytesTotal += chunkLength
-					branch.droppedChunksTotal++
+					branch.dropLogged = false
+				} else {
+					this.countDrop(branchId, branch, chunkLength)
 					continue
 				}
 			}
 
 			if (branch.backpressure) {
 				// Already in backpressure state, drop packet and track metrics
-				branch.droppedBytesTotal += chunkLength
-				branch.droppedChunksTotal++
+				this.countDrop(branchId, branch, chunkLength)
 				continue
 			}
 
@@ -396,32 +487,76 @@ export class FanoutManager extends EventEmitter {
 				branch.lastBackpressureAt = new Date(now).toISOString()
 
 				this.emit("backpressure", branchId, branch.bufferedBytes)
-				this.log.warn(
+				// Entering drop-mode loses nothing yet: the chunk was written, and a
+				// burst absorber holds the next ones until the branch drains. The
+				// warning waits for the first chunk actually dropped (countDrop).
+				this.log.debug(
 					{ branchId, bufferedBytes: branch.bufferedBytes },
 					"Branch congested, entering drop-mode",
 				)
 
-				// Wait for drain before accepting new data for this branch
-				branch.stream.once("drain", () => {
-					const drainTime = Date.now()
-					const durationMs = branch.backpressureSince
-						? drainTime - branch.backpressureSince
-						: 0
-
-					branch.backpressure = false
-					branch.bufferedBytes = 0
-					branch.backpressureSince = undefined
-					branch.lastDrainAt = new Date(drainTime).toISOString()
-
-					// Emit drain event with duration for telemetry
-					this.emit("drain", branchId, durationMs)
-					this.log.debug(
-						{ branchId, durationMs },
-						"Branch drained, resuming flow",
+				// The episode ends at the stream's 'drain' (writable side empty)
+				// or, polled while it lasts, once the writable side is back at the
+				// low-water mark, whichever comes first.
+				const onDrain = () => this.endEpisode(branchId, branch)
+				branch.episodeDrain = onDrain
+				branch.stream.once("drain", onDrain)
+				branch.lowWaterTimer = setInterval(() => {
+					const stream = branch.stream
+					if (stream.destroyed || stream.writableEnded) return
+					if (
+						stream.writableLength <=
+						(branch.startupHighWaterMark ?? branch.highWaterMark) *
+							DROP_MODE_LOW_WATER
 					)
-				})
+						this.endEpisode(branchId, branch)
+				}, DROP_MODE_POLL_MS)
+				branch.lowWaterTimer.unref?.()
 			}
 		}
+	}
+
+	/** Ends a drop-mode episode once; the next chunk is written again. */
+	private endEpisode(branchId: string, branch: BranchState): void {
+		clearInterval(branch.lowWaterTimer)
+		branch.lowWaterTimer = undefined
+		if (branch.episodeDrain) branch.stream.off("drain", branch.episodeDrain)
+		branch.episodeDrain = undefined
+		if (!branch.backpressure) return
+		const drainTime = Date.now()
+		const durationMs = branch.backpressureSince
+			? drainTime - branch.backpressureSince
+			: 0
+
+		branch.backpressure = false
+		branch.dropLogged = false
+		branch.bufferedBytes = this.getBufferedBytes(branch)
+		branch.backpressureSince = undefined
+		branch.lastDrainAt = new Date(drainTime).toISOString()
+
+		// Emit drain event with duration for telemetry; it also wakes the absorber.
+		this.emit("drain", branchId, durationMs)
+		this.log.debug({ branchId, durationMs }, "Branch drained, resuming flow")
+	}
+
+	/** Counts one dropped chunk; the first of a congestion episode warns. */
+	private countDrop(
+		branchId: string,
+		branch: BranchState,
+		chunkLength: number,
+	): void {
+		branch.droppedBytesTotal += chunkLength
+		branch.droppedChunksTotal++
+		if (branch.dropLogged) return
+		branch.dropLogged = true
+		this.log.warn(
+			{
+				branchId,
+				bufferedBytes: this.getBufferedBytes(branch),
+				highWaterMark: branch.highWaterMark,
+			},
+			"Branch congested, dropping input",
+		)
 	}
 
 	// Get extended telemetry for a specific branch.

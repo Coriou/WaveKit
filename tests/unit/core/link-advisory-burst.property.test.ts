@@ -7,7 +7,9 @@ const input = { sourceId: "s", host: "source.invalid", sampleRateHz: 1000 }
 describe("burst advisory", () => {
 	// Feature: link-burst-resilience, Property 13: Advisory
 	// Validates: Requirements 6.4, 6.6
-	it("keeps loopback none, holds link drops and leaves absorbed bursts at the existing level", () => {
+	// Amended 2026-10-30: a `link` drop attribution is internal branch loss
+	// (every byte arrived), reported as lossReason, never as `dropping`.
+	it("keeps loopback none, reports held link drops as branch congestion and leaves absorbed bursts at the existing level", () => {
 		fc.assert(
 			fc.property(fc.nat(100000), fc.nat(100000), (stall, seconds) => {
 				const burst = {
@@ -34,7 +36,14 @@ describe("burst advisory", () => {
 					baseline.classify(input, null).level,
 				)
 				expect(absorbed.classify(input, null).burst).toEqual(burst)
-				expect(held.classify(input, null).level).toBe("dropping")
+				expect(held.classify(input, null)).toMatchObject({
+					level: baseline.classify(input, null).level,
+					lossReason: "branch-congestion",
+				})
+				expect(held.classify(input, 20000)).toMatchObject({
+					level: "dropping",
+					lossReason: "source",
+				})
 				for (const host of ["localhost", "::1", "127.0.0.5"]) {
 					expect(held.classify({ ...input, host }, 20000)).toMatchObject({
 						level: "none",
@@ -42,6 +51,9 @@ describe("burst advisory", () => {
 					})
 					expect(held.classify({ ...input, host }, null)).not.toHaveProperty(
 						"burst",
+					)
+					expect(held.classify({ ...input, host }, 20000)).not.toHaveProperty(
+						"lossReason",
 					)
 				}
 			}),
@@ -59,13 +71,17 @@ describe("burst advisory", () => {
 				throw new Error("unavailable")
 			},
 		})
-		expect(advisor.classify(input, null).level).toBe("dropping")
+		expect(advisor.classify(input, null)).toMatchObject({
+			level: "unproven",
+			lossReason: "branch-congestion",
+		})
 		expect(linkDropsSince).toHaveBeenCalledWith(
 			"s",
 			mono - LINK_DROPPING_HOLD_MS,
 		)
 		mono++
 		expect(advisor.classify(input, null).level).toBe("unproven")
+		expect(advisor.classify(input, null)).not.toHaveProperty("lossReason")
 		const throwing = createLinkAdvisor({
 			now: () => 0,
 			linkDropsSince: () => {

@@ -590,6 +590,32 @@ describe("LiveDemodulator", () => {
 		expect(processes[2]!.command).toContain("csdr firdecimate 82 ")
 	})
 
+	// The branch holds 250 ms of signal at the source rate.
+	it("sizes its branch in ms of signal and resizes it on a rate change only", async () => {
+		await liveDemod.start()
+		// 2.4 Msps CU8: 4 800 000 B/s × 250 ms.
+		expect(fanoutManager.addBranch).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				id: "live-demod-rtl-pi",
+				highWaterMark: 1_200_000,
+			}),
+		)
+		sourceManager.emitCaps({ centerFreq: 446_093_750 } as never)
+		await delay(400)
+		expect(fanoutManager.removeBranch).not.toHaveBeenCalled()
+		sourceManager.emitCaps({ sampleRate: 2_048_000 })
+		await waitFor(() => spawnMock.mock.calls.length === 4, 2000)
+		// 2.048 Msps: 4 096 000 B/s × 250 ms.
+		expect(fanoutManager.removeBranch).toHaveBeenCalledWith("live-demod-rtl-pi")
+		expect(fanoutManager.addBranch).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				id: "live-demod-rtl-pi",
+				highWaterMark: 1_024_000,
+			}),
+		)
+		expect(processes[2]!.command).toContain("csdr firdecimate 82 ")
+	})
+
 	it("kills the process group and escalates to SIGKILL when SIGTERM is ignored", async () => {
 		liveDemod = create({}, { stopTimeoutMs: 30 })
 		await liveDemod.start()
