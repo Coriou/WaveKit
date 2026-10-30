@@ -66,6 +66,7 @@ import { sourceTitle } from "../receiver/summary.ts"
 import { STEPS } from "../tuner/prefs.ts"
 import type { EfficiencyBudgetState } from "./efficiency-budget.ts"
 import { decoderRows } from "./decoder-rows.ts"
+import { bandGainRow } from "./BandGainRow.tsx"
 import { ratePolicyNote } from "../receiver/notices.ts"
 import { devicesCount, devicesSummary } from "./devices.ts"
 import {
@@ -1555,6 +1556,7 @@ export function buildRows(
 	return [
 		...stationRows(s, a),
 		...receiverRows(s, a),
+		bandGainRow(),
 		...audioRows(s, a),
 		efficiencyBudgetRow(s, a),
 		...decoderRows(s, a),

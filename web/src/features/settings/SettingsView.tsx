@@ -29,6 +29,7 @@ import { useTunerState } from "../hooks.ts"
 import { openPalette } from "../palette/request.ts"
 import { decoderLabel } from "../tuned/signal.ts"
 import { BandPlansPage } from "./bandplans/BandPlansPage.tsx"
+import { BAND_GAIN_ROW_ID, BandGainRow } from "./BandGainRow.tsx"
 import { DevicesPage } from "./DevicesPage.tsx"
 import { canLocate, locate } from "./geolocate.ts"
 import { DecoderPageHead, DecoderStatus } from "./DecoderPage.tsx"
@@ -721,6 +722,14 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 				) : null
 			case "row": {
 				const row = item.row
+				if (row.id === BAND_GAIN_ROW_ID)
+					return (
+						<BandGainRow
+							key={row.id}
+							crumb={item.crumb}
+							flash={flash === row.id}
+						/>
+					)
 				if (row.widget.kind === "page") {
 					const w = row.widget
 					const staged = stagedOf(row.id)

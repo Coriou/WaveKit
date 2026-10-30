@@ -160,7 +160,7 @@ export function settingRequest(setting: ReceiverSetting): {
 } {
 	switch (setting.key) {
 		case "gain":
-			return { route: "gain", body: { tenthsDb: setting.value } }
+			return { route: "gain", body: { gain: setting.value } }
 		case "gainMode":
 			return { route: "gain-mode", body: { mode: setting.value } }
 		case "agcMode":

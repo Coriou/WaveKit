@@ -89,6 +89,22 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   budget and a note to set `decoderPolicy.efficiency.cpuBudgetCores` in YAML config.
   A saved override adds “Saved setting overrides config”. On cores without the budget service,
   the row is disabled and says “Not available”.
+  **Receiver › Per-band gain** lists the gain the core sets in each frequency range: scanner hops,
+  dwells and jobs that tune into a listed band use its gain and give yours back after, so a gain
+  that suits one band does not overload the dongle in another (the defaults set 37.2 dB at 868 and
+  915 MHz and keep the gain at 2 m, 70 cm and ADS-B). Edit a band's range in MHz and its gain in dB,
+  or press **Keep** to leave the gain alone there; **Add band** and the `×` add and remove rows.
+  **Save** sends the whole table and **Discard** drops your edits. Fields the core would refuse are
+  marked before anything is sent (a range outside 24 to 1900 MHz, an end not above the start,
+  ranges that overlap, ends included, a gain outside 0 to 50 dB, more than 32 bands), and the
+  core's own message shows under the row if it refuses the save. **Per-band gain for my tuning**
+  (off by default) saves at once: on, your own retunes also set the band's gain and give yours
+  back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
+- **Receiver** (the island at the top): under Gain, a quiet line says when a band gain is in
+  effect at the current frequency, for example `Band gain 37.2 dB · 868 MHz ISM · while the
+scanner tunes` (or `· for your tuning` with the switch on). When the scanner sees broadband
+  blanking rise at a manual gain, the line `Front end may be overloaded at this gain (49.6 dB,
+7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
 
 ## Map and Messages
 

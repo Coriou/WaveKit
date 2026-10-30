@@ -2107,6 +2107,8 @@ export interface ScannerMockContext {
 	bandFixtures?: boolean
 	/** Seeds the retune sweep scenario's discoveries too (./retune-sweep.ts). */
 	retuneSweep?: boolean
+	/** Starts with the engine's front-end overload hint shown (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
+	overloadHint?: boolean
 }
 
 export interface ScannerMock {
@@ -2116,6 +2118,11 @@ export interface ScannerMock {
 	operatorWrite(): void
 	/** The sweep job holding the source's tuner, if any (identify refuses then). */
 	sweepHolder(): string | null
+	/**
+	 * Shows the engine's `overloadHint` (`blankedPercent`, at the tuner's current manual gain; absent
+	 * in AGC, as on the core) or hides it (null), then sends `scanner:status`.
+	 */
+	overloadHint(blankedPercent: number | null): void
 	/** An identify result: creates or updates the discovery and sets its ids on the result. */
 	identified(jobId: string, result: ScannerIdentifyResult): void
 }
@@ -2204,6 +2211,7 @@ export function registerScannerMock(
 	const timers = new Set<ReturnType<typeof setTimeout>>()
 	let idCounter = 0
 	let observationSeq = 0
+	let overloadBlanked: number | null = ctx.overloadHint ? 7.5 : null
 
 	const newId = (prefix: string) => {
 		idCounter += 1
@@ -2780,10 +2788,19 @@ export function registerScannerMock(
 					markerSupported: true,
 					stuckTestMode: false,
 					staleAfterSettle: 0,
-					blankedFrames: 0,
+					blankedFrames: overloadBlanked === null ? 0 : 1200,
 					broadbandRfi: null,
 					passive: { enabled: passiveEnabled() },
 					frequencyError: null,
+					...(overloadBlanked !== null && tuner.gainMode === "manual"
+						? {
+								overloadHint: {
+									reason: "front end may be overloaded at this gain" as const,
+									gain: tuner.gain,
+									blankedPercent: overloadBlanked,
+								},
+							}
+						: {}),
 				},
 			],
 			budgets: {
@@ -3904,6 +3921,10 @@ export function registerScannerMock(
 		},
 		sweepHolder() {
 			return leaseHolder()?.id ?? null
+		},
+		overloadHint(blankedPercent) {
+			overloadBlanked = blankedPercent
+			emitStatus()
 		},
 		identified(jobId, result) {
 			if (result.measurements.source !== "track") return

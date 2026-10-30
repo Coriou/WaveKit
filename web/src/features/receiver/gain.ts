@@ -5,6 +5,13 @@
 // (older core, header not seen yet, unlisted tuner) it falls back to 1 dB steps over the range the
 // core's gain command admits. The core does not snap: rtl_tcp picks the nearest table value itself,
 // so the slider sends table values to keep what it shows and what the dongle uses the same.
+import type {
+	BandGainEntry,
+	BandGainSettings,
+	ScanJob,
+	ScannerEngineStatus,
+} from "@wavekit/api-types"
+
 import type { ReceiverCaps } from "../../data/index.ts"
 
 /** The core's gain command range (TUNER_REST_COMMAND_POLICY gain: 0..500 tenths of dB). */
@@ -117,4 +124,66 @@ export function gainHint(steps: GainSteps): string {
 	if (steps.source === "table")
 		return `Steps follow the ${steps.tuner ?? "tuner"}'s own gain table.`
 	return `${steps.reason ?? "No gain table"}: 1 dB steps, the dongle picks its nearest gain.`
+}
+
+// ---- per-band gain (GET /api/tuner-band-gain) and the scanner's overload hint
+
+/** A scan, dwell or identify job that retunes `sourceId` now (passive jobs only listen). */
+export function scannerHoldsTuner(
+	jobs: Iterable<Pick<ScanJob, "passive" | "state" | "spec">>,
+	sourceId: string,
+): boolean {
+	for (const job of jobs)
+		if (
+			!job.passive &&
+			job.spec.sourceId === sourceId &&
+			(job.state === "starting" ||
+				job.state === "running" ||
+				job.state === "holding")
+		)
+			return true
+	return false
+}
+
+export interface BandGainInEffect {
+	entry: BandGainEntry & { gain: number }
+	/** `scanner`: a scanner hop or job applies it; `you`: "Per-band gain for my tuning" is on. */
+	by: "scanner" | "you"
+}
+
+/**
+ * The band gain the core applies at `hz`, or null: a non-keep entry contains the frequency (ranges
+ * are inclusive and never overlap) and the scanner holds the tuner or the operator turned
+ * applyToMyTuning on. Keep entries and frequencies outside every band leave the gain alone.
+ */
+export function bandGainInEffect(
+	settings: BandGainSettings | null,
+	hz: number | null,
+	scannerHolds: boolean,
+): BandGainInEffect | null {
+	if (!settings || hz === null || !Number.isFinite(hz)) return null
+	if (!scannerHolds && !settings.applyToMyTuning) return null
+	const entry = settings.entries.find(e => hz >= e.minHz && hz <= e.maxHz)
+	if (!entry || entry.gain === "keep") return null
+	return {
+		entry: { ...entry, gain: entry.gain },
+		by: scannerHolds ? "scanner" : "you",
+	}
+}
+
+/** "Band gain 37.2 dB · 868 MHz ISM · scanner". */
+export function bandGainText(inEffect: BandGainInEffect): string {
+	const { entry, by } = inEffect
+	const where = entry.label ?? `${entry.minHz / 1e6}–${entry.maxHz / 1e6} MHz`
+	return `Band gain ${gainDb(entry.gain)} · ${where} · ${by === "scanner" ? "while the scanner tunes" : "for your tuning"}`
+}
+
+/** The scanner engine's overload hint for `sourceId`, in words, or null. */
+export function overloadHintText(
+	engines: readonly Pick<ScannerEngineStatus, "sourceId" | "overloadHint">[],
+	sourceId: string,
+): string | null {
+	const hint = engines.find(e => e.sourceId === sourceId)?.overloadHint
+	if (!hint) return null
+	return `Front end may be overloaded at this gain (${gainDb(hint.gain)}, ${hint.blankedPercent.toFixed(1)} % of frames blanked)`
 }

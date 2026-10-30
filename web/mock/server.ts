@@ -128,6 +128,8 @@ export interface MockServerOptions {
 	 * Retry-After: "1", "30", an HTTP date 2 s ahead ("date") or a malformed value (WAVEKIT_MOCK_ACTIVITY_429).
 	 */
 	activity429?: Activity429Mode
+	/** The scanner engine starts with its front-end overload hint (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
+	overloadHint?: boolean
 }
 
 export interface MockServer {
@@ -1517,6 +1519,7 @@ export async function buildMockServer(
 		liveStatus,
 		...(options.bandFixtures ? { bandFixtures: true } : {}),
 		...(options.retuneSweep ? { retuneSweep: true } : {}),
+		...(options.overloadHint ? { overloadHint: true } : {}),
 		liveListen: offsetHz => {
 			live.config = { ...live.config, offsetHz, sourceId: MOCK_SOURCE_ID }
 			broadcast("live-audio", "live-audio:config", liveStatus().config)
@@ -2371,6 +2374,9 @@ async function main(): Promise<void> {
 			? { bandFixtures: true }
 			: {}),
 		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
+		...(env["WAVEKIT_MOCK_OVERLOAD_HINT"] === "1"
+			? { overloadHint: true }
+			: {}),
 		...(isActivity429Mode(activity429Env)
 			? { activity429: activity429Env }
 			: {}),
