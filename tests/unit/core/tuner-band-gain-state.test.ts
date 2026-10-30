@@ -198,6 +198,27 @@ describe("TunerState.bandGain", () => {
 		},
 	)
 
+	it.each([
+		["setIfGain", (c: TunerController) => c.setIfGain("rtl", 30, REST)],
+		[
+			"setTunerGainIndex",
+			(c: TunerController) => c.setTunerGainIndex("rtl", 12, REST),
+		],
+		[
+			"setTunerIfGain",
+			(c: TunerController) => c.setTunerIfGain("rtl", 1, 30, REST),
+		],
+	])("a REST %s supersedes the saved pre-band gain", async (_name, write) => {
+		const { controller } = setup(true)
+		await manual(controller, 100)
+		await controller.setFrequency("rtl", ISM, REST)
+		await write(controller)
+		expect(controller.getState("rtl")?.bandGain).toBeUndefined()
+		await controller.setFrequency("rtl", UHF, REST)
+		// No restore write: the older 10.0 dB never comes back.
+		expect(controller.getState("rtl")?.gain).toBe(400)
+	})
+
 	it("noteBandGainApplied (scanner) is ignored unless the tuner shows that manual gain at that frequency", async () => {
 		const { controller } = setup(false)
 		await manual(controller, 496)

@@ -1331,6 +1331,9 @@ export class TunerController extends EventEmitter {
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_IF_GAIN, gain, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.ifGain = gain
+		// An explicit gain choice supersedes the band gain and the saved pre-band gain.
+		this.appliedBandGain.delete(sourceId)
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1449,6 +1452,9 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.tunerGainIndex = index
+		// An explicit gain choice supersedes the band gain and the saved pre-band gain.
+		this.appliedBandGain.delete(sourceId)
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1487,6 +1493,9 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.tunerIfGain = { stage, gain }
+		// An explicit gain choice supersedes the band gain and the saved pre-band gain.
+		this.appliedBandGain.delete(sourceId)
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
