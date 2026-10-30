@@ -192,6 +192,7 @@ describe("TunerState.bandGain", () => {
 		"a relay %s sets another gain stage: the saved AGC mode still comes back",
 		async (_name, command, value) => {
 			const { controller } = setup(true)
+			await controller.setGain("rtl", 300, REST)
 			await controller.setGainMode("rtl", "agc", REST)
 			await controller.setFrequency("rtl", ISM, REST)
 			controller.applyExternalCommand("rtl", command, value)

@@ -7,7 +7,10 @@
 import { describe, expect, it, vi } from "vitest"
 import { EventEmitter } from "node:events"
 import pino from "pino"
-import { TunerController } from "../../../src/core/tuner-controller.js"
+import {
+	OPERATOR_GAIN_SAVE_TIMEOUT_MS,
+	TunerController,
+} from "../../../src/core/tuner-controller.js"
 import {
 	BAND_GAIN_SAVED_FILE_MAX_BYTES,
 	BAND_GAIN_SAVED_FILE_NAME,
@@ -124,7 +127,7 @@ async function setup(applyToMyTuning: boolean, fs = memoryFs().fs) {
 		logger,
 	}
 	const arbiter = new TunerArbiter(deps)
-	return { controller, arbiter, writes, bandGain }
+	return { controller, arbiter, writes, bandGain, sourceManager }
 }
 
 async function manual(controller: TunerController, gain: number) {
@@ -146,6 +149,50 @@ async function sweepOnBand(h: Awaited<ReturnType<typeof setup>>) {
 	})
 	return r.lease
 }
+
+describe("unknown gains and gain writes that fail", () => {
+	it("with apply to my tuning and the gain unknown (just after a restart), no band gain goes on", async () => {
+		const h = await setup(true)
+		const mark = h.writes.length
+		await h.controller.setFrequency("rtl", ISM, REST)
+		expect(
+			h.writes
+				.slice(mark)
+				.filter(([c]) => c === SET_GAIN || c === SET_GAIN_MODE),
+		).toEqual([])
+		expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
+	})
+
+	it.each([
+		[
+			"setGain",
+			(h: Awaited<ReturnType<typeof setup>>) =>
+				h.controller.setGain("rtl", 300, REST),
+		],
+		[
+			"setGainMode",
+			(h: Awaited<ReturnType<typeof setup>>) =>
+				h.controller.setGainMode("rtl", "agc", REST),
+		],
+		[
+			"setTunerGainIndex",
+			(h: Awaited<ReturnType<typeof setup>>) =>
+				h.controller.setTunerGainIndex("rtl", 12, REST),
+		],
+	])(
+		"a %s write that throws takes its gain choice count back",
+		async (_name, write) => {
+			const h = await setup(false)
+			await manual(h.controller, 496)
+			const before = h.controller.gainChoiceCount("rtl")
+			h.sourceManager.writeToSource.mockImplementationOnce(() => {
+				throw new Error("source disconnected")
+			})
+			await expect(write(h)).rejects.toThrow()
+			expect(h.controller.gainChoiceCount("rtl")).toBe(before)
+		},
+	)
+})
 
 describe("a REST write takes the tuner from a band-gain sweep", () => {
 	it("REST frequency: the operator's gain comes back (apply to my tuning off)", async () => {
@@ -520,6 +567,39 @@ describe("apply to my tuning: the saved gain is a durable, superseded record", (
 		const leave = h.writes.length
 		await h.controller.setFrequency("rtl", UHF, REST)
 		expect(gainWrites(h.writes, leave)).toEqual([])
+	})
+
+	it("a save that never settles counts as failed after the timeout and never blocks the next retune", async () => {
+		const disk = memoryFs()
+		const write = disk.fs.atomicWrite
+		disk.fs.atomicWrite = (path, data) =>
+			path === SAVED_PATH ? new Promise<void>(() => {}) : write(path, data)
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 100)
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		try {
+			const mark = h.writes.length
+			const into = h.controller.setFrequency("rtl", ISM, REST)
+			await vi.advanceTimersByTimeAsync(OPERATOR_GAIN_SAVE_TIMEOUT_MS - 1)
+			let settled = false
+			void into.then(() => {
+				settled = true
+			})
+			await Promise.resolve()
+			expect(settled).toBe(false)
+			await vi.advanceTimersByTimeAsync(1)
+			await into
+			expect(gainWrites(h.writes, mark)).toEqual([])
+			expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
+			// The per-source REST queue moves on.
+			await h.controller.setFrequency("rtl", UHF, REST)
+			expect(h.controller.getState("rtl")).toMatchObject({
+				frequency: UHF,
+				gain: 100,
+			})
+		} finally {
+			vi.useRealTimers()
+		}
 	})
 
 	it("an operator gain choice while the save is in flight wins: no band gain, nothing saved", async () => {

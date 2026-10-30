@@ -74,6 +74,22 @@ const VALIDATION = {
 } as const
 
 const DEFAULT_FREQUENCY = 100_000_000
+
+/**
+ * The saved pre-band gain write (temp file, fsync, rename of at most 8 KiB) normally takes
+ * well under 100 ms; 5 s is 50x that. Past it the save counts as failed (no band gain), so
+ * one stuck write never holds the per-source REST retune queue.
+ */
+export const OPERATOR_GAIN_SAVE_TIMEOUT_MS = 5_000
+
+function withSaveTimeout(save: Promise<boolean>): Promise<boolean> {
+	let timer: NodeJS.Timeout | undefined
+	const expiry = new Promise<boolean>(resolve => {
+		timer = setTimeout(() => resolve(false), OPERATOR_GAIN_SAVE_TIMEOUT_MS)
+		timer.unref()
+	})
+	return Promise.race([save, expiry]).finally(() => clearTimeout(timer))
+}
 const DEFAULT_SAMPLE_RATE = 2_400_000
 
 // RTL-TCP commands (mirrored from tuner-relay.ts for consistency)
@@ -540,15 +556,44 @@ export class TunerController extends EventEmitter {
 		})
 	}
 
-	/** Counted when issued (before the write), so a queued scanner restore sees it. */
-	private noteGainChoice(sourceId: string, opts: TunerWriteOptions): void {
+	/**
+	 * Counted when issued (before the write), so a queued scanner restore sees it. Returns the
+	 * new count (null when not an operator choice) for `countedGainWrite`.
+	 */
+	private noteGainChoice(
+		sourceId: string,
+		opts: TunerWriteOptions,
+	): number | null {
 		if (
 			opts.origin === "scanner" ||
 			opts.origin === "replay" ||
 			opts.origin === "config"
 		)
-			return
-		this.gainChoices.set(sourceId, this.gainChoiceCount(sourceId) + 1)
+			return null
+		const count = this.gainChoiceCount(sourceId) + 1
+		this.gainChoices.set(sourceId, count)
+		return count
+	}
+
+	/**
+	 * A gain write that threw (e.g. the source disconnected) chose nothing: its count is taken
+	 * back, unless a later choice was counted since (then the count stays ahead, so no earlier
+	 * snapshot of it can match again).
+	 */
+	private async countedGainWrite(
+		sourceId: string,
+		opts: TunerWriteOptions,
+		write: () => Promise<void>,
+	): Promise<void> {
+		const count = this.noteGainChoice(sourceId, opts)
+		try {
+			await write()
+			this.sourceManager.assertTunerCommandActive()
+		} catch (err) {
+			if (count !== null && this.gainChoices.get(sourceId) === count)
+				this.gainChoices.set(sourceId, count - 1)
+			throw err
+		}
 	}
 
 	/**
@@ -584,10 +629,14 @@ export class TunerController extends EventEmitter {
 		this.operatorGainBeforeBand.set(sourceId, saved)
 		this.savedRecords.set(sourceId, record)
 		const durable =
-			(await this.bandGain?.saveOperatorGains(
-				this.operatorGainBeforeBand,
-				sourceId,
-			)) ?? true
+			this.bandGain === null
+				? true
+				: await withSaveTimeout(
+						this.bandGain.saveOperatorGains(
+							this.operatorGainBeforeBand,
+							sourceId,
+						),
+					)
 		const current = this.savedRecords.get(sourceId) === record
 		if (current && this.gainChoiceCount(sourceId) !== choices) {
 			this.dropOperatorGain(sourceId)
@@ -630,17 +679,16 @@ export class TunerController extends EventEmitter {
 		try {
 			if (target !== null) {
 				const unknown = this.fieldProof(sourceId).unknownFields
-				const gain = unknown.includes("gain") ? null : state.gain
 				// The band gain goes on only once the gain it replaces is durable, so a restart
 				// in the band still restores it. Unsaved, or chosen meanwhile: the gain stays.
 				if (saved === undefined) {
-					const outcome = await this.saveOperatorGain(
-						sourceId,
-						unknown.includes("gainMode") ||
-							(state.gainMode === "manual" && gain === null)
-							? null
-							: { gainMode: state.gainMode, gain },
-					)
+					// A gain or gain mode not known yet (right after a restart, before any gain
+					// write) could never be restored: no band gain, as for a scanner hop.
+					if (unknown.includes("gainMode") || unknown.includes("gain")) return
+					const outcome = await this.saveOperatorGain(sourceId, {
+						gainMode: state.gainMode,
+						gain: state.gain,
+					})
 					if (outcome === "failed")
 						this.log.warn(
 							{ sourceId },
@@ -1427,15 +1475,10 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "manual" ? 1 : 0
-		this.noteGainChoice(sourceId, opts)
 		this.appliedBandGain.delete(sourceId)
-		await this.sendCommand(
-			sourceId,
-			RTL_TCP_COMMANDS.SET_GAIN_MODE,
-			value,
-			opts,
+		await this.countedGainWrite(sourceId, opts, () =>
+			this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE, value, opts),
 		)
-		this.sourceManager.assertTunerCommandActive()
 		state.gainMode = mode
 		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
@@ -1448,10 +1491,10 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("gain", tenthsDb, VALIDATION.gain)
-		this.noteGainChoice(sourceId, opts)
 		this.appliedBandGain.delete(sourceId)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts)
-		this.sourceManager.assertTunerCommandActive()
+		await this.countedGainWrite(sourceId, opts, () =>
+			this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts),
+		)
 		state.gain = tenthsDb
 		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
@@ -1600,15 +1643,15 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("tunerGainIndex", index)
 		// rtl_tcp 0x0d sets the same tuner gain stage by table index: a gain choice, as setGain.
-		this.noteGainChoice(sourceId, opts)
 		this.appliedBandGain.delete(sourceId)
-		await this.sendCommand(
-			sourceId,
-			RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
-			index,
-			opts,
+		await this.countedGainWrite(sourceId, opts, () =>
+			this.sendCommand(
+				sourceId,
+				RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
+				index,
+				opts,
+			),
 		)
-		this.sourceManager.assertTunerCommandActive()
 		state.tunerGainIndex = index
 		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)

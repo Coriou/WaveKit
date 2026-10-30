@@ -150,13 +150,13 @@ describe("TunerController per-band gain", () => {
 		})
 	})
 
-	it("apply to my tuning on: an AGC operator whose gain was never set gets AGC back (mode only)", async () => {
+	it("apply to my tuning on: an AGC operator whose gain was never set gets no band gain", async () => {
 		const { controller, gainWrites } = setup(true)
 		await controller.setGainMode("rtl", "agc", REST)
-		await controller.setFrequency("rtl", ISM, REST)
 		const mark = gainWrites().length
+		await controller.setFrequency("rtl", ISM, REST)
 		await controller.setFrequency("rtl", UHF, REST)
-		expect(gainWrites(mark)).toEqual([[SET_GAIN_MODE, 0]])
+		expect(gainWrites(mark)).toEqual([])
 		expect(controller.getState("rtl")!.gainMode).toBe("agc")
 	})
 
