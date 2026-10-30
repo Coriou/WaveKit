@@ -686,7 +686,8 @@ and it starts. When you tune, the core decides for each decoder in this order:
    `no-channel-selected`) and the channelizer (`channelizer-unavailable`).
 6. **CPU budget.** Decoders the core started on its own share a CPU budget
    (`efficiency-budget`). The decoder whose band holds the frequency you tuned (the VFO, or the
-   capture centre without one, within 200 kHz of its target or inside its band) goes first:
+   capture centre without one, within 200 kHz of its targets or the span between them, or inside
+   its band) goes first:
    - it is admitted before the others, and when the budget is full the other automatic
      decoders stop to make room (newest first);
    - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds

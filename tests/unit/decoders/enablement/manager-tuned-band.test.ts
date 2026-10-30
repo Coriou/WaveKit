@@ -255,3 +255,45 @@ it("a decoder's last output time includes its placement workers", async () => {
 		recent.getTime() + 1,
 	)
 })
+
+it("shedding on a retune reads the newly tuned band, not the old one", async () => {
+	// Both 0.2-core placements fit the 0.5-core budget. Loss evidence is armed
+	// as the operator tunes from the far band to the near one; the gate sheds
+	// an untuned placement first, as the real one does.
+	let probations = 0
+	let armed = false
+	let victim: string | undefined
+	const light = (id: string): WantedPlacement => ({
+		...raw(id),
+		costCores: 0.2,
+	})
+	const f = await setup(FAR_HZ, "auto", [], {
+		plan: () => [light("far"), light("near")],
+		wrapGate: gate => ({
+			...gate,
+			probation: (list, now) => {
+				probations++
+				if (!armed) return gate.probation(list, now)
+				armed = false
+				victim = list.find(p => p.tunedBand !== true)?.key
+				return victim ? [{ key: victim, detail: "late-drops" }] : []
+			},
+		}),
+	})
+	// Past the 300 000 ms budget retry of whichever was not admitted first.
+	await vi.advanceTimersByTimeAsync(EFFICIENCY_RETRY_MS + 5_000)
+	expect(running(f, "far")).toBe(true)
+	expect(running(f, "near")).toBe(true)
+	// Retune just after an efficiency sample, so the caps-change
+	// reconciliation (300 ms debounce) runs the next probation pass.
+	const seen = probations
+	while (probations === seen) await vi.advanceTimersByTimeAsync(100)
+	armed = true
+	f.sources.setCenter("rtl", NEAR_HZ)
+	await vi.advanceTimersByTimeAsync(1_000)
+	// Before the fix the pass saw far as tuned and shed near.
+	expect(victim).toBe(raw("far").key)
+	expect(running(f, "near")).toBe(true)
+	expect(running(f, "far")).toBe(false)
+	expect(f.m.getStatus("near")?.efficiency).toBeUndefined()
+})

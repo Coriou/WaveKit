@@ -53,10 +53,11 @@ The card on the left follows the frequency you are tuned to: what is heard there
 transmissions, decoded content, and the actions (Activity, save, Identify, Open message).
 
 Under the last transmissions, **On this band** lists the decoders whose band holds the tuned
-frequency (within 200 kHz of one of their frequencies, or inside their band), the ones listening
-first. Each line is the core's one-sentence verdict, for example "ADS-B decoding" or "ADS-B
-paused: CPU budget full", with a filled dot for a decoder that runs and a hollow one for one that
-does not. A decoder that does not run gets one button for the core's first suggestion:
+frequency (within 200 kHz of one of their frequencies or of the span between them, or inside
+their band), the ones listening first. Each line is the core's one-sentence verdict, for example
+"ADS-B decoding" or "ADS-B paused: CPU budget full", with a filled dot for a decoder that runs and
+a hollow one for one that does not. A decoder that does not run gets one button for the core's
+first suggestion:
 
 | Suggestion                                     | Button                                     | What it does                                                                                                              |
 | ---------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |

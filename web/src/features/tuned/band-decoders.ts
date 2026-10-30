@@ -17,7 +17,7 @@ import type {
 import { formatMHz } from "../format.ts"
 import { decoderLabel } from "./signal.ts"
 
-/** The core's tuned-band reach: within 200 kHz of a target, or inside a band range (DECODER-GUIDE "Decoders start when you tune"). */
+/** The core's tuned-band reach (TUNED_TARGET_TOLERANCE_HZ): within 200 kHz of a target, of the span between targets, or of a band range. */
 export const BAND_REACH_HZ = 200_000
 
 /** A verdict as the card shows it; `code` is "unknown" for a code this app does not know. */
@@ -84,13 +84,45 @@ function bandDistance(d: DecoderInfo, hz: number): number {
 	return best
 }
 
+const positive = (n: unknown): n is number =>
+	typeof n === "number" && Number.isFinite(n) && n > 0
+
+/**
+ * The core's bandContainsTuned (src/decoders/enablement/tuned-band.ts), ported because the web cannot
+ * import the core: within BAND_REACH_HZ of a target, between the lowest and highest target (a channel
+ * cluster such as VDL2's), or inside a range widened by the reach. Malformed values never match.
+ * web/tests/features/tuned-band-contract.test.ts holds the two to the same answers.
+ */
+export function bandHoldsHz(
+	targetsHz: readonly number[] | undefined,
+	rangesHz: readonly { minHz: number; maxHz: number }[] | undefined,
+	hz: number,
+): boolean {
+	if (!positive(hz)) return false
+	const reach = BAND_REACH_HZ
+	const targets = Array.isArray(targetsHz) ? targetsHz.filter(positive) : []
+	if (targets.some(t => Math.abs(t - hz) <= reach)) return true
+	if (
+		targets.length > 1 &&
+		hz >= Math.min(...targets) - reach &&
+		hz <= Math.max(...targets) + reach
+	)
+		return true
+	return (Array.isArray(rangesHz) ? rangesHz : []).some(
+		r =>
+			r != null &&
+			positive(r.minHz) &&
+			positive(r.maxHz) &&
+			r.minHz <= r.maxHz &&
+			hz >= r.minHz - reach &&
+			hz <= r.maxHz + reach,
+	)
+}
+
 /** True when the decoder's band holds `hz` (the core's tuned-band rule). Scanner probes are not band decoders. */
 export function onBand(d: DecoderInfo, hz: number): boolean {
 	if (d.owner === "scanner") return false
-	const inRange = (d.bandAssessment?.rangesHz ?? []).some(
-		r => hz >= r.minHz && hz <= r.maxHz,
-	)
-	return inRange || bandDistance(d, hz) <= BAND_REACH_HZ
+	return bandHoldsHz(targetsOf(d), d.bandAssessment?.rangesHz, hz)
 }
 
 /** Opens Settings on a row (`dec.<id>` opens that decoder's row). */
