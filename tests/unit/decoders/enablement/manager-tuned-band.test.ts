@@ -10,6 +10,7 @@ import type {
 } from "../../../../src/decoders/enablement/contract.js"
 import {
 	EFFICIENCY_RETRY_MS,
+	EFFICIENCY_SAMPLE_MS,
 	placementKey,
 } from "../../../../src/decoders/enablement/contract.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
@@ -296,4 +297,81 @@ it("shedding on a retune reads the newly tuned band, not the old one", async () 
 	expect(running(f, "near")).toBe(true)
 	expect(running(f, "far")).toBe(false)
 	expect(f.m.getStatus("near")?.efficiency).toBeUndefined()
+})
+
+/** Advances to just before the next efficiency sample fires. */
+async function beforeNextSample(probations: () => number) {
+	const seen = probations()
+	while (probations() === seen) await vi.advanceTimersByTimeAsync(50)
+	await vi.advanceTimersByTimeAsync(EFFICIENCY_SAMPLE_MS - 150)
+	expect(probations()).toBe(seen + 1)
+}
+
+it("an efficiency sample inside the caps debounce sheds by the newly tuned band", async () => {
+	let probations = 0
+	let armed = false
+	let victim: string | undefined
+	let armedAt = 0
+	let shedAt = 0
+	const light = (id: string): WantedPlacement => ({
+		...raw(id),
+		costCores: 0.2,
+	})
+	const f = await setup(FAR_HZ, "auto", [], {
+		plan: () => [light("far"), light("near")],
+		wrapGate: gate => ({
+			...gate,
+			probation: (list, now) => {
+				probations++
+				if (!armed) return gate.probation(list, now)
+				armed = false
+				shedAt = Date.now()
+				victim = list.find(p => p.tunedBand !== true)?.key
+				return victim ? [{ key: victim, detail: "late-drops" }] : []
+			},
+		}),
+	})
+	await vi.advanceTimersByTimeAsync(EFFICIENCY_RETRY_MS + 5_000)
+	expect(running(f, "far")).toBe(true)
+	expect(running(f, "near")).toBe(true)
+	// Retune 150 ms before the efficiency sample, so the timer's probation
+	// pass runs before the 300 ms caps-change reconciliation.
+	await beforeNextSample(() => probations)
+	armed = true
+	armedAt = Date.now()
+	f.sources.setCenter("rtl", NEAR_HZ)
+	await vi.advanceTimersByTimeAsync(1_000)
+	expect(shedAt - armedAt).toBeLessThan(300)
+	// Before the fix the timer pass saw far as tuned and shed near.
+	expect(victim).toBe(raw("far").key)
+	expect(running(f, "near")).toBe(true)
+	expect(running(f, "far")).toBe(false)
+	expect(f.m.getStatus("near")?.efficiency).toBeUndefined()
+})
+
+it("a budget hold is still released by the reconciliation after a sample refreshed the flags", async () => {
+	let probations = 0
+	let sampledAt = 0
+	let armedAt = 0
+	const f = await setup(FAR_HZ, "auto", [], {
+		wrapGate: gate => ({
+			...gate,
+			probation: (list, now) => {
+				probations++
+				if (armedAt && !sampledAt) sampledAt = Date.now()
+				return gate.probation(list, now)
+			},
+		}),
+	})
+	expect(running(f, "far")).toBe(true)
+	expect(f.m.getStatus("near")?.efficiency?.detail).toBe("budget")
+	await beforeNextSample(() => probations)
+	armedAt = Date.now()
+	f.sources.setCenter("rtl", NEAR_HZ)
+	await vi.advanceTimersByTimeAsync(3_000)
+	// The sample ran first and flagged near as tuned; the reconciliation still
+	// saw the rising edge and dropped near's 300 000 ms budget retry.
+	expect(sampledAt - armedAt).toBeLessThan(300)
+	expect(running(f, "near")).toBe(true)
+	expect(running(f, "far")).toBe(false)
 })

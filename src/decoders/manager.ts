@@ -202,6 +202,12 @@ export interface DecoderManagerConfig {
 /**
  * Internal state for tracking decoder restart behavior.
  */
+/** The planner input fields the tuned frequency is read from. */
+interface TunedView {
+	sources: readonly { id: string; centreHz: number | null }[]
+	vfo: PlannerVfo | null
+}
+
 interface DecoderState {
 	/** WG6: option problems found at creation; undefined = type has no schema */
 	optionIssues?: DecoderOptionIssue[] | undefined
@@ -601,6 +607,12 @@ export class DecoderManager extends EventEmitter {
 	private readonly config: DecoderManagerConfig
 	private readonly decoders: Map<string, DecoderState> = new Map()
 	private settledVfo: PlannerVfo | null | undefined
+	/**
+	 * Placement keys the last placement reconciliation saw as tuned-band, so
+	 * `releaseTunedHolds` sees a rising edge relative to that pass even after a
+	 * probation pass in between refreshed the placements' own flags.
+	 */
+	private reconciledTuned = new Set<string>()
 	private reconcilingPlacements = false
 	/** A reconciliation was asked for while one ran: run another after it. */
 	private reconcileDirty = false
@@ -807,7 +819,7 @@ export class DecoderManager extends EventEmitter {
 	/** Whether a planned placement's decoder band holds its source's tuned frequency. */
 	private placementTuned(
 		placement: WantedPlacement,
-		input: PlannerInput,
+		input: TunedView,
 	): boolean {
 		const parent = this.decoders.get(placement.decoderId)
 		if (!parent) return false
@@ -824,14 +836,11 @@ export class DecoderManager extends EventEmitter {
 	 * as the source is usable rather than when an old budget retry expires.
 	 * A loss backoff (drops, CPU, late drops) of a stopped placement is
 	 * forgotten too: the operator asked for this band. An operator stop or
-	 * mode off is never overridden. `wasTuned` holds the keys flagged before
-	 * this reconciliation touched any flag, so the rising edge is seen even
-	 * after `retuneFlags` refreshed them for probation.
+	 * mode off is never overridden. The edge is read against the keys the last
+	 * reconciliation saw as tuned, not the placements' flags, which every
+	 * probation pass refreshes through `retuneFlags`.
 	 */
-	private releaseTunedHolds(
-		wanted: readonly WantedPlacement[],
-		wasTuned: ReadonlySet<string>,
-	): void {
+	private releaseTunedHolds(wanted: readonly WantedPlacement[]): void {
 		const gate = this.config.enablement?.gate
 		for (const placement of wanted) {
 			if (placement.tunedBand !== true) continue
@@ -840,7 +849,7 @@ export class DecoderManager extends EventEmitter {
 			)
 			if (
 				!state ||
-				wasTuned.has(placement.key) ||
+				this.reconciledTuned.has(placement.key) ||
 				state.decoder.getStatus().running ||
 				state.admission?.admit !== false
 			)
@@ -878,18 +887,16 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * Before probation, every existing placement takes its tuned-band flag
-	 * from the tuned frequency now (the planner's filter and predicate), so a
-	 * pass that sheds on loss evidence protects the band the operator just
-	 * tuned rather than the one tuned at the last reconciliation. Returns the
-	 * keys that were flagged before, for `releaseTunedHolds`.
+	 * Before every probation pass (efficiency timer or reconciliation), each
+	 * existing placement takes its tuned-band flag from the tuned frequency
+	 * now (the planner's filter and predicate), so a pass that sheds on loss
+	 * evidence protects the band the operator just tuned rather than the one
+	 * tuned at the last reconciliation, even inside the caps debounce.
 	 */
-	private retuneFlags(input: PlannerInput): Set<string> {
-		const wasTuned = new Set<string>()
+	private retuneFlags(input: TunedView): void {
 		for (const state of this.decoders.values()) {
 			const placement = state.placement
 			if (!placement) continue
-			if (placement.tunedBand === true) wasTuned.add(placement.key)
 			const parent = this.decoders.get(placement.decoderId)
 			const flag =
 				parent?.owner === "config" &&
@@ -903,7 +910,21 @@ export class DecoderManager extends EventEmitter {
 				state.placement = plain
 			}
 		}
-		return wasTuned
+	}
+
+	/**
+	 * The tuned frequency inputs of `plannerInput` alone (source centres and
+	 * the VFO), cheap enough for every efficiency sample.
+	 */
+	private tunedView(): TunedView {
+		const enablement = this.config.enablement!
+		return {
+			sources: (this.sourceManager?.getAllStatus() ?? []).map(source => ({
+				id: source.id,
+				centreHz: this.sourceManager?.getCaps(source.id)?.centerFreq ?? null,
+			})),
+			vfo: this.settledVfo === undefined ? enablement.vfo() : this.settledVfo,
+		}
 	}
 
 	/**
@@ -1093,6 +1114,7 @@ export class DecoderManager extends EventEmitter {
 	private async applyProbationNow(): Promise<void> {
 		const gate = this.config.enablement?.gate
 		if (!gate) return
+		this.retuneFlags(this.tunedView())
 		const now = performance.now()
 		const running = this.runningPlacements()
 		// Admission, probation and retry bookkeeping share the monotonic clock.
@@ -1547,7 +1569,6 @@ export class DecoderManager extends EventEmitter {
 		if (!enablement || this.reconcilingPlacements || this.destroying) return
 		this.reconcilingPlacements = true
 		try {
-			const wasTuned = this.retuneFlags(this.plannerInput())
 			await this.applyProbation()
 			const input = this.withActivity(this.plannerInput())
 			const plan = enablement.planner(input)
@@ -1562,7 +1583,12 @@ export class DecoderManager extends EventEmitter {
 				}),
 				placement => this.placementTuned(placement, input),
 			)
-			this.releaseTunedHolds(wanted, wasTuned)
+			this.releaseTunedHolds(wanted)
+			this.reconciledTuned = new Set(
+				wanted
+					.filter(placement => placement.tunedBand === true)
+					.map(placement => placement.key),
+			)
 			this.refreshTunedFlags(wanted)
 			if (plan.activity) {
 				for (const move of plan.activity.moves)
