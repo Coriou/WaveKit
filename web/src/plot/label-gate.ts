@@ -3,10 +3,13 @@
 // moves while its signal lasts. WG11/WG12 cores give each track a stable id, a `surfaced` verdict (the channel gate:
 // a real transmission) and a spur flag: the gate then follows by (sourceId, trackId), trusts `surfaced` instead of
 // its own clear-for-a-second rule and drops spurs. Older cores send bare segments, which are followed by position
-// and measured against the floor as before. Pure: the caller passes the clock.
+// and measured against the floor as before. A chip on a proven, live discovery holds as long as the discovery's tag
+// stays live (PROVEN_LIVE_HOLD_MS), so a control channel that only sends bursts no longer flashes. Pure: the caller
+// passes the clock.
 
 import type { SpectrumFrameTrackScanner } from "@wavekit/api-types"
 
+import { PROVEN_LIVE_HOLD_MS } from "./discovery-tags.ts"
 import type { Track } from "./maths.ts"
 
 export const SIGNAL_LABELS = ["named", "clear", "all"] as const
@@ -46,6 +49,8 @@ interface Followed {
 	/** The core's surfacing verdict in the newest frame it was seen in; null when the core sends none. */
 	surfaced: boolean | null
 	scanner: SpectrumFrameTrackScanner | null
+	/** It sits on a proven, live discovery (LabelGateContext.provenLive), re-asked every frame. */
+	proven: boolean
 }
 
 export interface LabelGateState {
@@ -94,6 +99,15 @@ export interface LabelGateContext {
 		widthHz: number,
 		scanner: SpectrumFrameTrackScanner | null,
 	) => boolean
+	/**
+	 * A proven discovery that is live (its tag is lit) sits on the signal: the chip holds PROVEN_LIVE_HOLD_MS
+	 * between bursts and is never dropped as weak. Absent: nothing is proven (the chip keeps the usual holds).
+	 */
+	provenLive?: (
+		hz: number,
+		widthHz: number,
+		scanner: SpectrumFrameTrackScanner | null,
+	) => boolean
 }
 
 /** An unknown signal earns a chip at this many dB over the floor… */
@@ -110,6 +124,11 @@ export const MAX_UNKNOWN = 5
 /** A signal unseen this long is forgotten (bursty signals keep their chip between bursts). */
 export const HOLD_MS = 1500
 export const BURST_HOLD_MS = 4000
+/**
+ * A chip on a proven, live discovery holds as long as the discovery's tag stays live after it was last heard
+ * (discovery-tags.ts, 5 min): a quiet control channel's bursts come minutes apart, so a 4 s burst hold flashes it.
+ */
+export const PROVEN_CHIP_HOLD_MS = PROVEN_LIVE_HOLD_MS
 /** A leaving chip stays this long, transparent, so it fades instead of vanishing. */
 export const LEAVE_MS = 240
 /** The held peak falls this fast once the signal weakens. */
@@ -121,6 +140,10 @@ function near(f: Followed, t: Track, tolHz: number): number | null {
 	const hi = f.hz + f.widthHz / 2 + tolHz
 	if (t.endHz < lo || t.startHz > hi) return null
 	return Math.abs((t.startHz + t.endHz) / 2 - f.hz)
+}
+
+function holdOf(f: Followed): number {
+	return f.proven ? PROVEN_CHIP_HOLD_MS : f.burst ? BURST_HOLD_MS : HOLD_MS
 }
 
 function isTunedAt(f: Followed, tunedHz: number | null): boolean {
@@ -200,6 +223,7 @@ export function stepLabelGate(
 				key,
 				surfaced: t.surfaced ?? null,
 				scanner: t.scanner ?? null,
+				proven: false,
 			}
 			followed.push(best)
 		} else {
@@ -230,7 +254,9 @@ export function stepLabelGate(
 
 	const kept: Followed[] = []
 	for (const f of followed) {
-		const hold = f.burst ? BURST_HOLD_MS : HOLD_MS
+		// asked every frame, seen or not: a discovery that stops being live (or a throwing lookup) ends the hold
+		f.proven = isProvenLive(f, ctx)
+		const hold = holdOf(f)
 		if (f.leavingSince !== null && now - f.leavingSince >= LEAVE_MS) continue
 		if (now - f.lastSeen > hold) {
 			if (f.shown && f.leavingSince === null) {
@@ -246,7 +272,9 @@ export function stepLabelGate(
 			else if (snr < KEEP_SNR_DB) f.clearSince = null
 			// the core's gate passing is a real transmission, however low its peak reads here
 			f.weakSince =
-				snr < KEEP_SNR_DB && f.surfaced !== true ? (f.weakSince ?? now) : null
+				snr < KEEP_SNR_DB && f.surfaced !== true && !f.proven
+					? (f.weakSince ?? now)
+					: null
 		}
 		kept.push(f)
 	}
@@ -259,11 +287,7 @@ export function stepLabelGate(
 			(b.snrDb ?? -Infinity) - (a.snrDb ?? -Infinity),
 	)
 	for (const f of order) {
-		if (
-			f.leavingSince !== null &&
-			now - f.lastSeen > (f.burst ? BURST_HOLD_MS : HOLD_MS)
-		)
-			continue
+		if (f.leavingSince !== null && now - f.lastSeen > holdOf(f)) continue
 		const want = wanted(f, now, ctx, unknown)
 		if (want === "unknown") unknown++
 		if (want !== null) {
@@ -278,6 +302,15 @@ export function stepLabelGate(
 	return { followed: kept, nextId, axis }
 }
 
+function isProvenLive(f: Followed, ctx: LabelGateContext): boolean {
+	if (!ctx.provenLive) return false
+	try {
+		return ctx.provenLive(f.hz, f.widthHz, f.scanner) === true
+	} catch {
+		return false
+	}
+}
+
 function wanted(
 	f: Followed,
 	now: number,
@@ -287,7 +320,9 @@ function wanted(
 	if (isTunedAt(f, ctx.tunedHz)) return "tuned"
 	if (ctx.mode === "all") return "unknown"
 	const snr = f.snrDb ?? -Infinity
-	const weakTooLong = f.weakSince !== null && now - f.weakSince >= WEAK_FOR_MS
+	// a proven, live chip is never weak: between its bursts the trace has nothing to measure
+	const weakTooLong =
+		!f.proven && f.weakSince !== null && now - f.weakSince >= WEAK_FOR_MS
 	if (ctx.isNamed(f.hz, f.widthHz, f.scanner)) {
 		if (f.shown) return weakTooLong ? null : "named"
 		return snr >= NAMED_SNR_DB ? "named" : null

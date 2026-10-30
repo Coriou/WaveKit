@@ -51,7 +51,7 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 #### Spectrum tags
 
 There are two kinds of label on the spectrum. The labels over the peaks follow what is on the air
-right now. The tags in the row under the band ruler are the scanner's **discoveries**: frequencies it
+now (a proven one waits between bursts, see below). The tags in the row under the band ruler are the scanner's **discoveries**: frequencies it
 has heard and kept, with what it has learnt about each.
 
 A tag is in one of three states:
@@ -67,6 +67,18 @@ A tag is bright while its discovery is live. A proven tag stays lit for 5 minute
 heard, and any other tag for 90 seconds, so a signal that only sends short bursts (a DMR control
 channel, a pager) does not flash with every burst. A continuous carrier is on the air all the
 time, so its tag never goes away. If nothing identifies it, it stays quiet and grey.
+
+The labels over the peaks use the same evidence:
+
+- A label on a proven discovery has a filled dot and an outline, like its tag. While that tag is
+  lit, the label stays between bursts, so a DMR control channel shows one steady `DMR · CC 1`
+  instead of flashing. Once the tag dims, the label goes the next time the signal is quiet.
+- An unnamed peak near a discovery that is not proven says what was measured, for example
+  `Unidentified · 4FSK ~9 kHz` with its frequency, and has a grey ring for a dot. Any other
+  unnamed peak shows its frequency.
+- Any other label stays a few seconds after its signal goes quiet, as before.
+- Hover over a label that sits on a discovery to see how we know (the tag's first detail line).
+  Clicking a label tunes there. For the full detail, click the tag in the row below.
 
 Click a single tag for its detail:
 

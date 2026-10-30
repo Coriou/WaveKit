@@ -1,7 +1,10 @@
 // Signal chips over the trace (band inspection UX req 1.1, extended to the live-signal layer): co-located
 // signals share one chip ("+n-1"), a leaving chip never lands on another, and the number of chips is
 // capped. Pure: no DOM, no stores.
+import type { Discovery } from "@wavekit/api-types"
+
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
+import { tagState, tagTier } from "./discovery-tags.ts"
 import type { PlacedLabel, SignalInfo } from "./maths.ts"
 
 /** Two signals closer than this on screen share one chip. */
@@ -131,4 +134,54 @@ export function fadingChips<T extends Pick<PlacedLabel, "x" | "hz">>(
 		out.push({ ...last, hz: g.hz, x, id: g.id })
 	}
 	return out
+}
+
+/** The closest discovery within max(3 kHz, half the signal's width) that `pick` accepts; Ignored ones never. */
+function closestDiscovery(
+	items: Iterable<Discovery>,
+	hz: number,
+	widthHz: number,
+	pick: (d: Discovery) => boolean,
+): Discovery | null {
+	if (!Number.isFinite(hz)) return null
+	const tol = Math.max(3000, Number.isFinite(widthHz) ? widthHz / 2 : 0)
+	let best: Discovery | null = null
+	for (const d of items) {
+		if (d.operator?.lockout || !Number.isFinite(d.frequencyHz)) continue
+		const off = Math.abs(d.frequencyHz - hz)
+		if (off > tol || (best && off >= Math.abs(best.frequencyHz - hz))) continue
+		if (pick(d)) best = d
+	}
+	return best
+}
+
+/**
+ * The proven discovery on a signal whose tag is live (tagTier active: heard now or within PROVEN_LIVE_HOLD_MS),
+ * or null: its chip holds between bursts like the tag (label-gate.ts provenLive). `now` is the wall clock.
+ */
+export function provenLiveAt(
+	items: Iterable<Discovery>,
+	hz: number,
+	widthHz: number,
+	activeNow: ReadonlySet<string>,
+	now: number,
+): Discovery | null {
+	return closestDiscovery(
+		items,
+		hz,
+		widthHz,
+		d => tagState(d) === "proven" && tagTier(d, activeNow, now) === "active",
+	)
+}
+
+/**
+ * The discovery a chip says it is not proven yet (likely or only heard), or null: an unknown chip near one reads
+ * "Unidentified · 4FSK ~9 kHz" instead of the bare frequency.
+ */
+export function weakDiscoveryAt(
+	items: Iterable<Discovery>,
+	hz: number,
+	widthHz: number,
+): Discovery | null {
+	return closestDiscovery(items, hz, widthHz, d => tagState(d) !== "proven")
 }
