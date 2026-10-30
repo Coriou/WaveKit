@@ -197,6 +197,7 @@ describe("LiveDemodulator", () => {
 		options: LiveDemodulatorOptions = {},
 	): LiveDemodulatorType {
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: port,
@@ -950,6 +951,7 @@ describe("LiveDemodulator", () => {
 			sourceManager as any,
 			router as any,
 			LiveDemodConfigSchema.parse({
+				engine: "csdr",
 				enabled: true,
 				httpPort: port,
 				squelchMode: "manual",

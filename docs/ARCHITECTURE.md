@@ -114,9 +114,10 @@ Multiplexes a single audio stream to multiple decoder consumers.
   fanout knows its source byte rate (`setByteRate`), a branch without an explicit
   mark holds 250 ms per side (1 200 000 bytes at 2.4 Msps CU8, 512 000 at
   1.024 Msps), never less than 256 KiB. The live-demod branch and the channelizer
-  input size themselves the same way from the source caps. Decoder branches get
-  the derived mark only once the source router calls `setByteRate` (pending), so
-  they keep 256 KiB for now. Measurements:
+  input size themselves the same way from the source caps. The source router
+  calls `setByteRate` when it learns a source's caps, and a rate change resizes
+  the derived marks of existing branches (a soft mark in the fanout's congestion
+  check; a stream's own mark is fixed at construction). Measurements:
   [PERFORMANCE.md, "Branch marks in signal time"](PERFORMANCE.md#branch-marks-in-signal-time-2026-10-30).
 - Real-time priority: prefer dropping data over blocking source
 - Data is copied to each branch (no shared buffers)
@@ -325,11 +326,15 @@ Real-time IQ demodulation with an embedded HTTP audio stream.
 **Responsibilities**:
 
 - Attach an IQ branch from `FanoutManager`
-- Spawn and manage a csdr demodulation pipeline
+- Run the demodulation engine: by default (`liveDemod.engine` omitted or `rust`)
+  one `wavekit-chan` demod channel for NFM and AM (`src/core/live-demod/`), else
+  the csdr pipeline below. WFM, SSB, CW, DSB and raw, a non-CU8 source, a missing
+  or too-old binary, or a crash-looping process fall back to csdr with the reason
+  logged once and reported as `engineFallback`; `engine: csdr` always uses csdr.
 - Serve demodulated audio via HTTP `/stream`
 - Hot-reconfigure modulation and DSP parameters
 
-**DSP pipeline (high-level)**:
+**csdr DSP pipeline (high-level)**:
 
 ```
 IQ (U8/S16) -> csdr convert -> (optional IQ dcblock) -> csdr firdecimate

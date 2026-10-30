@@ -207,6 +207,7 @@ export async function createDemodHarness(options: DemodHarnessOptions = {}) {
 	}
 	process.kill = killSpy as typeof process.kill
 	const config = LiveDemodConfigSchema.parse({
+		engine: "csdr",
 		enabled: true,
 		sourceId: "rtl-pi",
 		httpPort: await findFreePort(),

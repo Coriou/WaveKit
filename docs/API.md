@@ -606,6 +606,11 @@ Link-burst additions are optional and additive; older cores omit them:
 
 - `LinkAdvisory.burst` (`LinkBurstSummary`): nullable `worstStallMs`,
   `overflowedBytes10m`, `burstSeconds`.
+- `LinkAdvisory.lossReason`: `source` when bytes never reached the core (a
+  received-rate shortfall or receiver-side drops; only this makes `level`
+  `dropping`), `branch-congestion` when every byte arrived and an internal fanout
+  branch dropped them after an arrival gap (the link itself is not at fault).
+  Absent when nothing was lost.
 - `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
   (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
   `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or
@@ -1635,8 +1640,8 @@ Configuration notes:
 
 - `squelchMode` — `auto` (default) or `manual` (`squelch` is the threshold). `auto`
   stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
-  default 6, and delimits transmissions. On `nfm` on the csdr engine (the default)
-  only, `auto` adds stage 2, an evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
+  default 6, and delimits transmissions. On `nfm` on the csdr engine
+  `auto` adds stage 2, an evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
   or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
   to 1.5 s and played when the gate latches. During an over the stream can run up
   to 1.5 s behind; it catches up by dropping the silence after the over. An over
@@ -1648,7 +1653,7 @@ Configuration notes:
   keep "any carrier opens the gate"; a configured `toneSquelch` is unchanged (it
   replaces stage 2); other modulations, including `am` (amendment A8, 2026-10-23),
   keep stage 1 alone, with `autoSquelch` state `off`. On the Rust engine
-  (`engine: "rust"`), `auto` on `nfm` runs the same evidence gate and pre-roll when
+  (the default; `engine: "csdr"` selects csdr), `auto` on `nfm` runs the same evidence gate and pre-roll when
   the demodulator carries its stage-1 gate state in-band (framed audio, amendment
   A18, 2026-10-25), so `autoSquelch` reports `waiting` / `open` as on csdr. A Rust
   binary without framing, or a run whose framing failed safe, keeps stage 1 alone

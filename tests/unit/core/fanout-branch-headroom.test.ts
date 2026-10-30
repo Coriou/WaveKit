@@ -121,19 +121,24 @@ describe("branch marks in ms of signal", () => {
 		expect(branchHighWaterMark(BYTES_PER_S, 0)).toBe(DEFAULT_HIGH_WATER_MARK)
 	})
 
-	it("uses the fanout byte rate for unsized branches, and only once it is known", () => {
+	it("sizes unsized branches from the byte rate, resizing existing ones", () => {
 		const fanout = new FanoutManager(createLogger({ level: "fatal" }))
+		const mark = (id: string) => fanout.getBranchTelemetry(id)?.highWaterMark
 		fanout.addBranch({ id: "before" })
+		expect(mark("before")).toBe(DEFAULT_HIGH_WATER_MARK)
 		fanout.setByteRate(BYTES_PER_S)
 		fanout.addBranch({ id: "after" })
 		fanout.addBranch({ id: "ms", highWaterMarkMs: 500 })
 		fanout.addBranch({ id: "bytes", highWaterMark: 65_536 })
-		fanout.setByteRate(NaN)
-		fanout.addBranch({ id: "unknown" })
-		const mark = (id: string) => fanout.getBranchTelemetry(id)?.highWaterMark
-		expect(mark("before")).toBe(DEFAULT_HIGH_WATER_MARK)
+		expect(mark("before")).toBe(1_200_000)
 		expect(mark("after")).toBe(1_200_000)
 		expect(mark("ms")).toBe(2_400_000)
+		expect(mark("bytes")).toBe(65_536)
+		// An unknown rate returns every derived mark to the floor.
+		fanout.setByteRate(NaN)
+		fanout.addBranch({ id: "unknown" })
+		expect(mark("before")).toBe(DEFAULT_HIGH_WATER_MARK)
+		expect(mark("ms")).toBe(DEFAULT_HIGH_WATER_MARK)
 		expect(mark("bytes")).toBe(65_536)
 		expect(mark("unknown")).toBe(DEFAULT_HIGH_WATER_MARK)
 		expect(fanout.getByteRate()).toBeNull()

@@ -70,10 +70,20 @@ Now:
   A branch congests after 2 × 1 200 000 + 65 536 bytes, 513.7 ms of signal.
 - The live-demod branch and the channelizer input size themselves the same way
   from the source caps, today. `channelizer.inputHighWaterMark` is now a floor.
-- Decoder branches do not have the derived marks yet. They take them only once
-  the source router calls `setByteRate` for their source, which is still pending.
-  Until then they keep the 256 KiB floor, and a branch keeps the mark it was
-  created with: only branches added after `setByteRate` get 250 ms.
+- The source router calls `setByteRate` with the sample rate × IQ frame bytes
+  whenever it learns a source's caps (connect, `caps-changed`, a new per-source
+  fanout), so decoder, relay and audio-monitor branches get 250 ms too. Audio caps
+  have no IQ frame and keep the 256 KiB floor.
+- A rate change resizes existing derived marks (512 000 ↔ 1 200 000 bytes between
+  1.024 and 2.4 Msps); explicit byte marks never change. A `PassThrough`'s own mark
+  is fixed at construction, so the resized mark is a soft mark: the fanout's
+  congestion check compares the writable backlog with it instead of trusting
+  `write()`, and the episode's low-water poll ends drop-mode when no `'drain'` is
+  pending. Recreating the streams instead would have meant re-attaching every
+  consumer (decoder stdin pipes among them) on each retune. The readable side keeps
+  its construction mark, so until the consumer restarts a branch resized from
+  1.024 to 2.4 Msps congests after 512 000 + 1 200 000 + 65 536 bytes (370.3 ms),
+  and one resized down after 1 200 000 + 512 000 + 65 536 (868 ms at 1.024 Msps).
 - A drop-mode episode ends at half the mark (polled every 10 ms while it lasts,
   and stopped when the branch is removed or its stream closes), not only at an
   empty writable side. Waiting for empty meant consuming about two

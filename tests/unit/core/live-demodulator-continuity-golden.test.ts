@@ -59,6 +59,7 @@ describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
 		const captured = capturingLogger()
 		lines = captured.lines
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: PORT,

@@ -349,10 +349,12 @@ const liveDemodFields = z.object({
 	 */
 	agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
 	/**
-	 * Demodulator engine. `csdr` is the shipped chain. `rust` uses one
-	 * wavekit-chan demod channel and falls back to csdr when it cannot run.
-	 * Optional with no schema default: absence means csdr at runtime, and
-	 * a default would show up in snapshots of the parsed config.
+	 * Demodulator engine. `rust` (the default) uses one wavekit-chan demod
+	 * channel for NFM and AM and falls back to the csdr chain when it cannot
+	 * run (WFM and the other modes, a missing binary, a non-CU8 source).
+	 * `csdr` always uses the csdr chain. Optional with no schema default:
+	 * absence means rust at runtime (DEFAULT_LIVE_DEMOD_ENGINE), and a default
+	 * would show up in snapshots of the parsed config.
 	 */
 	engine: z.enum(["csdr", "rust"]).optional(),
 	/**

@@ -203,6 +203,15 @@ export interface LinkAdvisory {
 	sustainedBytesPerSecond: number | null
 	shortfallPercent: number | null
 	upstreamDropBytesPerSecond: number | null
+	/**
+	 * Why samples were lost; absent when none were. `source`: bytes never
+	 * reached the core (a received-rate shortfall, or receiver-side drops);
+	 * only this makes `level` `dropping`. `branch-congestion`: every byte
+	 * arrived and a core fanout branch dropped them after an arrival gap (a
+	 * `link` drop attribution caused by internal congestion); `level` stays
+	 * as the link itself reads.
+	 */
+	lossReason?: "source" | "branch-congestion"
 }
 export interface TunerRatePolicyEventData {
 	sourceId: string

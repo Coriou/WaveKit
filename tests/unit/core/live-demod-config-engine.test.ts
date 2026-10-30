@@ -21,7 +21,7 @@ const base = {
 describe("LiveDemodConfigSchema engine", () => {
 	it("omits engine and chanBinaryPath from parsed config", () => {
 		const parsed = LiveDemodConfigSchema.parse({})
-		// Absence is the csdr runtime default. A schema default would land in snapshots.
+		// Absence is the Rust runtime default. A schema default would land in snapshots.
 		expect(parsed.engine).toBeUndefined()
 		expect(Object.hasOwn(parsed, "engine")).toBe(false)
 		expect(parsed.chanBinaryPath).toBeUndefined()

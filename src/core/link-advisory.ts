@@ -16,17 +16,8 @@ export function isLoopbackHost(host: string): boolean {
 	)
 }
 
-/**
- * Why samples were lost, additive to `LinkAdvisory` until the shared DTO
- * carries it: `source` when bytes never reached the core (a received-rate
- * shortfall, or receiver-side drops), `branch-congestion` when every byte
- * arrived and a core fanout branch dropped them (a `link` drop attribution:
- * an arrival gap followed by internal loss). Only `source` is `dropping`.
- */
-export type LinkLossReason = "source" | "branch-congestion"
-export interface LinkAdvisoryDetail extends LinkAdvisory {
-	lossReason?: LinkLossReason
-}
+/** Why samples were lost: see `LinkAdvisory.lossReason`. */
+export type LinkLossReason = NonNullable<LinkAdvisory["lossReason"]>
 
 interface History {
 	rate: number
@@ -116,7 +107,7 @@ export function createLinkAdvisor(deps: {
 				? null
 				: exceedsShortfall(received, sampleRateHz * frameBytes)
 		},
-		classify(input, drops): LinkAdvisoryDetail {
+		classify(input, drops): LinkAdvisory {
 			const payload = valid(input.sampleRateHz) ? input.sampleRateHz * 2 : 0
 			const history = histories.get(input.sourceId)
 			const received =

@@ -262,6 +262,39 @@ describe("live demod rust fallback and retune", () => {
 		expect(fallbacks(lines)[0]?.["reason"]).toBe("modulation-unsupported")
 	})
 
+	it("an omitted engine is rust: a missing binary falls back once with a warning", async () => {
+		versionMode = "enoent"
+		const { lines } = await boot({ engine: undefined })
+		expect(versions.length).toBeGreaterThanOrEqual(1)
+		expect(channels).toHaveLength(0)
+		expect(shells.length).toBeGreaterThanOrEqual(2)
+		expect(fallbacks(lines)).toHaveLength(1)
+		expect(fallbacks(lines)[0]).toMatchObject({
+			level: 40,
+			reason: "binary-unavailable",
+		})
+		expect(demod?.getStatus().engine).toBe("csdr")
+		expect(demod?.getStatus().engineFallback).toBe("binary-unavailable")
+	})
+
+	it("an omitted engine runs wfm on csdr and logs that expected fallback at info", async () => {
+		const { lines } = await boot({ engine: undefined, modulation: "wfm" })
+		expect(versions).toHaveLength(0)
+		expect(channels).toHaveLength(0)
+		expect(fallbacks(lines)).toEqual([
+			expect.objectContaining({ level: 30, reason: "modulation-unsupported" }),
+		])
+		expect(demod?.getStatus().engine).toBe("csdr")
+	})
+
+	it("an explicit rust engine still warns on wfm", async () => {
+		const { lines } = await boot({ modulation: "wfm" })
+		expect(fallbacks(lines)[0]).toMatchObject({
+			level: 40,
+			reason: "modulation-unsupported",
+		})
+	})
+
 	it("falls back when bandwidth is outside 2500..40000", async () => {
 		const { lines } = await boot({ bandwidth: 1000 })
 		expect(versions).toHaveLength(0)

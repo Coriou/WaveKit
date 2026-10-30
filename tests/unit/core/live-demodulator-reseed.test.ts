@@ -121,6 +121,7 @@ describe("LiveDemodulator auto floor re-seed after retune (WG9 5.6)", () => {
 				return true
 			})
 		const config = LiveDemodConfigSchema.parse({
+			engine: "csdr",
 			enabled: true,
 			sourceId: "rtl-pi",
 			httpPort: await findAvailablePort(),

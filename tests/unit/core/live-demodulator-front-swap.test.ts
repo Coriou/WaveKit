@@ -68,6 +68,22 @@ async function startHarness(config: Record<string, unknown> = {}) {
 }
 
 describe("LiveDemodulator front swap (WG10 req 2.3)", () => {
+	it("swaps the front of a wfm run on the default (rust) engine: wfm stays csdr", async () => {
+		const h = await startHarness({ engine: undefined, modulation: "wfm" })
+		expect(h.demod.getStatus().engine).toBe("csdr")
+		const { back } = h.current()
+		const done = h.demod.reconfigure({ offsetHz: 6000 })
+		await waitFor(() => h.processes.length === 3)
+		const newFront = h.processes[2]!
+		await writeAndSettle(newFront.stdout, channelIq(10, 0.5))
+		await done
+		expect(h.processes).toHaveLength(3)
+		expect(back.signals).toEqual([])
+		expect(h.current().front).toBe(newFront)
+		expect(h.demod.getStatus().engine).toBe("csdr")
+		expect(h.demod.getStatus().pipelineRestarts).toBe(0)
+	})
+
 	it("keeps the back and clients, feeds both fronts, then stops the old front", async () => {
 		const h = await startHarness()
 		const { front: oldFront, back } = h.current()

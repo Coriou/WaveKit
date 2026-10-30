@@ -818,7 +818,8 @@ export class LiveDemodulator extends EventEmitter {
 				} else if (
 					swapPlan !== null &&
 					run !== null &&
-					!rustEngineRequested(this.config)
+					(!rustEngineRequested(this.config) ||
+						(!run.rust && !this.rustRuns.wouldStartRust(this.config)))
 				) {
 					// The transmission closes as "config", as on a full restart.
 					run.gateHeld = true

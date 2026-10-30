@@ -29,6 +29,9 @@ class Sources extends EventEmitter {
 	getStream() {
 		return new PassThrough()
 	}
+	getCaps() {
+		return undefined
+	}
 }
 
 describe("dedicated scanner sources (spec § 10.7)", () => {

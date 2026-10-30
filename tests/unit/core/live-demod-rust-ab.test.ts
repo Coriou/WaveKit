@@ -8,7 +8,13 @@
  *
  * Skip reason when the binary is absent: the release binary
  * native/wavekit-chan/target/release/wavekit-chan is missing. Build it with
- * `cargo build --release --locked --offline --manifest-path native/wavekit-chan/Cargo.toml`.
+ * `cargo build --release --locked --offline --manifest-path native/wavekit-chan/Cargo.toml`,
+ * or point WAVEKIT_CHAN_AB_BINARY at a built one.
+ *
+ * Tolerances: normalised correlation with the reference at the best lag
+ * within MAX_LAG_S, at least 0.98 for NFM and 0.95 for AM. WFM has no Rust
+ * demod: the default engine resolves it to the csdr chain, asserted below
+ * without the binary.
  */
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -16,6 +22,8 @@ import type { Socket } from "node:net"
 import { PassThrough } from "node:stream"
 import { afterEach, describe, expect, it } from "vitest"
 import { LiveDemodConfigSchema, type SourceCaps } from "../../../src/config.js"
+import { rustEngineRequested } from "../../../src/core/live-demod/rust-run.js"
+import { selectEngine } from "../../../src/core/live-demod/select-engine.js"
 import { ToneDetector } from "../../../src/core/audio-tones/tone-detector.js"
 import { RustEngine } from "../../../src/core/live-demod/rust-engine.js"
 import { createLogger } from "../../../src/utils/logger.js"
@@ -34,10 +42,9 @@ const MAX_LAG_S = 0.2
 // At eight contending workers, 8 × 5 s CPU + 10 s child/IO allowance < 60 s.
 const AB_TIMEOUT_MS = 60_000
 
-const binary = join(
-	process.cwd(),
-	"native/wavekit-chan/target/release/wavekit-chan",
-)
+const binary =
+	process.env["WAVEKIT_CHAN_AB_BINARY"] ??
+	join(process.cwd(), "native/wavekit-chan/target/release/wavekit-chan")
 const binaryMissing = !existsSync(binary)
 
 const stage1Taps = designLowpass(63, 20_000 / RATE)
@@ -106,6 +113,34 @@ describe.skipIf(binaryMissing)(
 		)
 	},
 )
+
+describe("default engine per modulation (no binary needed)", () => {
+	const probe = { available: true, protocol: 3 }
+	const caps = { format: "U8_IQ" }
+	for (const [modulation, bandwidth, expected] of [
+		["nfm", 12_500, { engine: "rust" }],
+		["am", 10_000, { engine: "rust" }],
+		["wfm", 200_000, { engine: "csdr", fallback: "modulation-unsupported" }],
+	] as const) {
+		it(`an omitted engine runs ${modulation} on ${expected.engine}`, () => {
+			const config = LiveDemodConfigSchema.parse({ modulation, bandwidth })
+			expect(config.engine).toBeUndefined()
+			expect(rustEngineRequested(config)).toBe(true)
+			expect(
+				selectEngine({
+					config: { engine: "rust", modulation, bandwidth },
+					caps,
+					probe,
+				}),
+			).toEqual(expected)
+		})
+	}
+
+	it("engine csdr stays csdr for every modulation", () => {
+		const config = LiveDemodConfigSchema.parse({ engine: "csdr" })
+		expect(rustEngineRequested(config)).toBe(false)
+	})
+})
 
 async function rustAudio(
 	engines: RustEngine[],

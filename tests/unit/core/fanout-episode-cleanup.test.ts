@@ -1,22 +1,17 @@
 /**
  * Drop-mode episode resources (low-water poll, one-shot 'drain' listener) end
- * with their branch, and decoder branches take the derived mark only once the
- * fanout knows its byte rate. Deterministic: fake timers, counters only.
+ * with their branch. Deterministic: fake timers, counters only. Decoder branch
+ * marks through the router: source-fanout-router-byte-rate.test.ts.
  */
-import { EventEmitter } from "node:events"
-import { PassThrough } from "node:stream"
+import type { PassThrough } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
-	DEFAULT_HIGH_WATER_MARK,
 	DROP_MODE_POLL_MS,
 	FanoutManager,
 } from "../../../src/core/fanout-manager.js"
-import { SourceFanoutRouter } from "../../../src/core/source-fanout-router.js"
-import type { SourceManager } from "../../../src/core/source-manager.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
 const logger = createLogger({ level: "fatal" })
-const BYTES_PER_S = 2_400_000 * 2 // 2.4 Msps CU8
 
 afterEach(() => vi.useRealTimers())
 
@@ -97,61 +92,4 @@ describe("drop-mode episode cleanup", () => {
 		expect(vi.getTimerCount()).toBe(0)
 		fanout.destroy()
 	})
-})
-
-class Sources extends EventEmitter {
-	readonly ids = ["main", "second"]
-	getAllStatus() {
-		return this.ids.map(id => ({ id, connected: false }))
-	}
-	getStatus(id: string) {
-		return this.ids.includes(id) ? { id, connected: false } : undefined
-	}
-	getStream() {
-		return new PassThrough()
-	}
-}
-
-/** DecoderManager's raw wiring (src/decoders/manager.ts): same config shape. */
-function addDecoderBranch(
-	router: SourceFanoutRouter,
-	decoderId: string,
-	sourceId: string,
-): PassThrough {
-	return router.getFanout(sourceId).addBranch({
-		id: `decoder-${decoderId}`,
-		decoderId,
-		sourceId,
-		deferred: true,
-	})
-}
-
-describe("decoder branches and setByteRate", () => {
-	// The router does not call setByteRate yet (pending, Main seam): until it
-	// does, decoder branches keep the 256 KiB floor.
-	it.each(["main", "second"])(
-		"source %s: branches added after setByteRate get 250 ms; earlier ones keep theirs",
-		sourceId => {
-			const primary = new FanoutManager(logger)
-			const router = new SourceFanoutRouter(
-				new Sources() as unknown as SourceManager,
-				primary,
-				logger,
-			)
-			const fanout = router.getFanout(sourceId)
-			const before = addDecoderBranch(router, "early", sourceId)
-			fanout.setByteRate(BYTES_PER_S)
-			const after = addDecoderBranch(router, "late", sourceId)
-
-			const mark = (id: string) =>
-				fanout.getBranchTelemetry(`decoder-${id}`)?.highWaterMark
-			expect(mark("early")).toBe(DEFAULT_HIGH_WATER_MARK)
-			expect(before.writableHighWaterMark).toBe(DEFAULT_HIGH_WATER_MARK)
-			expect(mark("late")).toBe(1_200_000)
-			expect(after.writableHighWaterMark).toBe(1_200_000)
-			expect(after.readableHighWaterMark).toBe(1_200_000)
-			router.destroy()
-			primary.destroy()
-		},
-	)
 })

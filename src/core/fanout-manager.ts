@@ -93,7 +93,13 @@ interface BranchState {
 	startupTimer?: ReturnType<typeof setTimeout> | undefined
 	/** The startup mark ended with a backlog that must drain first. */
 	startupDraining?: boolean | undefined
+	/**
+	 * Congestion mark in bytes. A derived mark follows setByteRate after the
+	 * stream exists, so it can differ from the stream's construction mark.
+	 */
 	highWaterMark: number
+	/** Signal time of a derived mark; undefined for an explicit byte mark. */
+	markMs?: number | undefined
 	backpressure: boolean
 	bufferedBytes: number
 	// Extended telemetry state
@@ -216,15 +222,31 @@ export class FanoutManager extends EventEmitter {
 
 	/**
 	 * Source byte rate (sample rate × frame bytes), or null when unknown. Sizes
-	 * the marks of branches added afterwards; existing streams keep theirs.
+	 * the derived marks of branches added afterwards and resizes those of
+	 * existing branches; an explicit byte mark never changes. A stream's own
+	 * highWaterMark is fixed at construction, so a resized mark is enforced by
+	 * distributeData's congestion check (a soft mark): the writable side holds
+	 * the new mark, the readable side keeps its construction mark.
 	 */
 	setByteRate(bytesPerSecond: number | null): void {
-		this.byteRate =
+		const rate =
 			bytesPerSecond !== null &&
 			Number.isFinite(bytesPerSecond) &&
 			bytesPerSecond > 0
 				? bytesPerSecond
 				: null
+		if (rate === this.byteRate) return
+		this.byteRate = rate
+		for (const [branchId, branch] of this.branches) {
+			if (branch.markMs === undefined) continue
+			const mark = branchHighWaterMark(rate, branch.markMs)
+			if (mark === branch.highWaterMark) continue
+			this.log.debug(
+				{ branchId, from: branch.highWaterMark, to: mark },
+				"Branch mark resized to the source rate",
+			)
+			branch.highWaterMark = mark
+		}
 	}
 
 	getByteRate(): number | null {
@@ -258,9 +280,12 @@ export class FanoutManager extends EventEmitter {
 			return this.branches.get(config.id)!.stream
 		}
 
+		const markMs =
+			config.highWaterMark === undefined
+				? (config.highWaterMarkMs ?? DEFAULT_BRANCH_BUFFER_MS)
+				: undefined
 		const highWaterMark =
-			config.highWaterMark ??
-			branchHighWaterMark(this.byteRate, config.highWaterMarkMs)
+			config.highWaterMark ?? branchHighWaterMark(this.byteRate, markMs)
 
 		const stream = new PassThrough({
 			highWaterMark,
@@ -275,6 +300,7 @@ export class FanoutManager extends EventEmitter {
 			stream,
 			active: config.deferred !== true,
 			highWaterMark,
+			markMs,
 			backpressure: false,
 			bufferedBytes: 0,
 			// Extended telemetry state
@@ -470,6 +496,15 @@ export class FanoutManager extends EventEmitter {
 					if (branch.startupHighWaterMark !== undefined)
 						canWrite =
 							branch.stream.writableLength <= branch.startupHighWaterMark
+					// A mark resized after construction (setByteRate) replaces the
+					// stream's own: write() answers against the construction mark.
+					// Below a grown mark the stream may hold a pending 'drain'; above
+					// a shrunk one it may have none, and the episode's low-water poll
+					// ends it.
+					else if (branch.highWaterMark !== branch.stream.writableHighWaterMark)
+						canWrite =
+							!branch.stream.writableEnded &&
+							branch.stream.writableLength < branch.highWaterMark
 				}
 			} catch (err) {
 				this.log.error(
