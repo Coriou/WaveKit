@@ -153,9 +153,9 @@ export function createEfficiencyGate(
 	 */
 	const scapegoatSpent = new Map<string, ReadonlySet<string>>()
 	/**
-	 * Until when host loss on every source is spent on a CPU scapegoat: the
-	 * clear window since the latest scapegoat on any source, once a CPU
-	 * scapegoat was shed in it (CPU is host-wide).
+	 * Until when host loss on every source is spent on a CPU scapegoat: that
+	 * scapegoat's own clear window (CPU is host-wide). Later scapegoats of any
+	 * kind never extend it.
 	 */
 	let cpuSpentUntil = -Infinity
 	/** Per tuned-band probationer: host loss before this time was already judged. */
@@ -1053,7 +1053,11 @@ export function createEfficiencyGate(
 						failures.add(scapegoat.key)
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
 						scapegoatAt.set(scapegoat.sourceId, mono)
-						if (detail === "cpu" || mono < cpuSpentUntil)
+						// Only a CPU scapegoat opens the window, and only once the
+						// previous one has closed: other scapegoats never extend it,
+						// so host loss is suppressed for at most EFFICIENCY_CLEAR_MS
+						// (60 000 ms) after the CPU scapegoat that opened it.
+						if (detail === "cpu" && mono >= cpuSpentUntil)
 							cpuSpentUntil = mono + EFFICIENCY_CLEAR_MS
 						scapegoatSpent.set(
 							scapegoat.sourceId,

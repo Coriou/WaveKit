@@ -768,7 +768,8 @@ another decoder's branch stops the newest other automatic decoder instead, at mo
 tuned decoder is stopped only once that window has closed with nothing else left to stop,
 and loss already spent on such a stop does not stop a second decoder through late drops
 on that source until the window has closed. After a stop for CPU, host-attributed drops on
-any source are that same load and stop nobody else until the window has closed. Other
+any source are that same load and stop nobody else until that stop's own 60-second window
+has closed; stops for other loss inside it do not extend it. Other
 fresh drops on another decoder's own branch within that window are new loss and still
 stop it. A decoder's own branch drops count as
 its own even when overflow with no holder known falls in the same sample.
