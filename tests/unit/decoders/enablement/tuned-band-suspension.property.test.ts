@@ -270,6 +270,11 @@ function unlisted(f: Fixture): string | null {
 
 // Feature: decoder-autostart, Property 10: an efficiency suspension is always a refusal the gate lists, and a tuned-band decoder with clean evidence and budget room runs within one sample
 // Validates: Requirements R2, R3
+// Each run's live prefix waits out a 60 000 ms refusal retry that the real
+// manager re-checks every sample: most of a run's time, all of it manager
+// work. Timeout: 4 132 ms, the slowest run measured under `vitest run
+// tests/unit/decoders --maxWorkers=2`, × 3 = 12 396, so 12 400 ms (the
+// 5 000 ms default timed out in the full suite on 2-core CI runners).
 it("keeps every efficiency suspension listed by the gate and admits a clean tuned-band decoder within one sample", async () => {
 	await fc.assert(
 		fc.asyncProperty(
@@ -323,4 +328,4 @@ it("keeps every efficiency suspension listed by the gate and admits a clean tune
 		),
 		{ numRuns: 100 },
 	)
-})
+}, 12_400)

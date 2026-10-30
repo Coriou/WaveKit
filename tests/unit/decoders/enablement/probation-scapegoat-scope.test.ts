@@ -22,38 +22,45 @@ type Spec = { key: string; source: string; tuned?: boolean }
 /**
  * `gateGuardPercent` above the monitor's 90 % guard: CPU between them makes
  * the monitor attribute drops to the host while the gate sees no CPU loss.
+ * `pipelined` graduates the untuned placements of different sources side by
+ * side (see below) instead of one after another.
  */
-function harness(specs: readonly Spec[], gateGuardPercent: number) {
+function harness(
+	specs: readonly Spec[],
+	gateGuardPercent: number,
+	{ pipelined = false }: { pipelined?: boolean } = {},
+) {
 	const sources = [...new Set(specs.map(s => s.source))]
 	let mono = 0
-	const totals = new Map<string, number>()
+	/** Drop totals per source, then per branch. */
+	const totals = new Map<string, Map<string, number>>()
 	const gatedBy = new Map<string, Record<string, number>>()
 	for (const source of sources) {
 		gatedBy.set(source, {})
-		totals.set(`${source}|live-demod-${source}#0`, 0)
-		totals.set(`${source}|@absorber#0`, 0)
+		totals.set(
+			source,
+			new Map([
+				[`live-demod-${source}#0`, 0],
+				["@absorber#0", 0],
+			]),
+		)
 	}
-	for (const s of specs) totals.set(`${s.source}|decoder-${s.key}#0`, 0)
+	for (const s of specs) totals.get(s.source)!.set(`decoder-${s.key}#0`, 0)
 	const cpu = { normalisedPercent: 10 as number | null }
 	const monitor = createEfficiencyMonitor({
 		sources: () => sources,
 		branchCounters: (id: string) =>
 			new Map(
-				[...totals]
-					.filter(([k]) => k.startsWith(`${id}|`))
-					.map(([k, n]) => {
-						const key = k.slice(id.length + 1)
-						return [
-							key,
-							{
-								droppedBytesTotal: n,
-								droppedChunksTotal: n,
-								...(key.startsWith("@")
-									? { overflowGatedBy: { ...gatedBy.get(id) } }
-									: {}),
-							},
-						]
-					}),
+				[...(totals.get(id) ?? [])].map(([key, n]) => [
+					key,
+					{
+						droppedBytesTotal: n,
+						droppedChunksTotal: n,
+						...(key.startsWith("@")
+							? { overflowGatedBy: { ...gatedBy.get(id) } }
+							: {}),
+					},
+				]),
 			),
 		topology: () => "fixed",
 		cpu,
@@ -98,15 +105,33 @@ function harness(specs: readonly Spec[], gateGuardPercent: number) {
 		})
 	}
 	// A clean source (60 s clear window) admits; one probationer per source,
-	// so each untuned placement graduates (17 samples = 34 s) before the next.
+	// so each untuned placement graduates (17 samples = 34 s) before the next
+	// on its source.
 	for (let i = 0; i < 32; i++) tick()
-	for (const s of specs.filter(s => !s.tuned)) {
-		admit(s)
-		for (let i = 0; i < 17; i++) {
-			tick()
-			expect(gate.probation(running, mono)).toEqual([])
-		}
+	let samples = 0
+	const quietTick = () => {
+		tick()
+		samples++
+		const verdicts = gate.probation(running, mono)
+		if (verdicts.length > 0) expect(verdicts).toEqual([])
 	}
+	/** Per source: the sample its latest untuned placement was admitted at. */
+	const admittedAtSample = new Map<string, number>()
+	const graduating = (source: string) => {
+		const at = admittedAtSample.get(source)
+		return at !== undefined && samples - at < 17
+	}
+	for (const s of specs.filter(s => !s.tuned)) {
+		// Pipelined: in the same order, one sample apart (so "newest" is
+		// unchanged), each as soon as its own source's previous one graduated.
+		// Otherwise each waits for every earlier one.
+		while (pipelined ? graduating(s.source) : sources.some(graduating))
+			quietTick()
+		admit(s)
+		admittedAtSample.set(s.source, samples)
+		quietTick()
+	}
+	while (sources.some(graduating)) quietTick()
 	for (const s of specs.filter(s => s.tuned)) admit(s)
 	const admittedAt = mono
 	/** Runs `step` before every sample for `ms`; a shed placement stops. */
@@ -126,13 +151,14 @@ function harness(specs: readonly Spec[], gateGuardPercent: number) {
 	}
 	/** Absorber overflow on `source` with no holder known: charged source-wide. */
 	const overflowNoHolder = (source: string) => {
-		const key = `${source}|@absorber#0`
-		totals.set(key, totals.get(key)! + 1)
+		const branches = totals.get(source)!
+		branches.set("@absorber#0", branches.get("@absorber#0")! + 1)
 	}
 	/** Drops on `key`'s own decoder branch. */
 	const dropOn = (source: string, key: string) => {
-		const k = `${source}|decoder-${key}#0`
-		totals.set(k, totals.get(k)! + 1)
+		const branches = totals.get(source)!
+		const k = `decoder-${key}#0`
+		branches.set(k, branches.get(k)! + 1)
 	}
 	return { run, overflowNoHolder, dropOn, cpu, running, monitor }
 }
@@ -511,6 +537,9 @@ it("non-CPU scapegoats do not extend a CPU scapegoat's host-loss window", () => 
 
 // Feature: decoder-autostart, Property 9: host-loss suppression is bounded
 // Validates: Requirements R2, R7
+// Timeout: 1 772 ms, the slowest run measured under `vitest run
+// tests/unit/decoders --maxWorkers=2`, × 3 = 5 316, so 5 400 ms (the 5 000 ms
+// default timed out in the full suite on 2-core CI runners).
 it("host-loss suppression after a CPU scapegoat is bounded by its clear window", () => {
 	// Sustained 95 % CPU: readsb's CPU loss sheds CPU scapegoats and b's own
 	// branch on t drops every sample (host loss, spent on the open CPU
@@ -543,6 +572,10 @@ it("host-loss suppression after a CPU scapegoat is bounded by its clear window",
 					{ key: "ais", source: "u", tuned: true },
 				],
 				90,
+				// The sequential harness's admission order in 52 or 86 samples
+				// instead of 100 or 134: b, a, x and c graduate side by side on
+				// t, s, u and v (32 clean samples, then 20 or 54).
+				{ pipelined: true },
 			)
 			const end = 130_000
 			const dipAt = new Map(dips.map(d => [d.at, d.source]))
@@ -573,4 +606,4 @@ it("host-loss suppression after a CPU scapegoat is bounded by its clear window",
 		}),
 		{ numRuns: 100 },
 	)
-})
+}, 5_400)
