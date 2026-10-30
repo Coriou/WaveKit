@@ -904,6 +904,14 @@ export class TunerController extends EventEmitter {
 		}
 		// A relay client's tuning write supersedes the band gain.
 		this.appliedBandGain.delete(sourceId)
+		// A relay gain choice is the operator's newest gain: never restore the older one over it.
+		if (
+			command === RTL_TCP_COMMANDS.SET_GAIN ||
+			command === RTL_TCP_COMMANDS.SET_GAIN_MODE ||
+			command === RTL_TCP_COMMANDS.SET_AGC_MODE ||
+			command === RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX
+		)
+			this.operatorGainBeforeBand.delete(sourceId)
 
 		const cmdName = COMMAND_NAMES[command] ?? `cmd-0x${command.toString(16)}`
 		const now = new Date().toISOString()

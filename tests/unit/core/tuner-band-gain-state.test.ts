@@ -170,6 +170,18 @@ describe("TunerState.bandGain", () => {
 		expect(controller.getState("rtl")?.bandGain).toBeUndefined()
 	})
 
+	it("a relay gain choice supersedes the saved pre-band gain", async () => {
+		const { controller } = setup(true)
+		await manual(controller, 100)
+		await controller.setFrequency("rtl", ISM, REST)
+		expect(controller.getState("rtl")?.gain).toBe(400)
+		controller.applyExternalCommand("rtl", SET_GAIN, 300)
+		controller.setControlMode("rtl", "internal")
+		await controller.setFrequency("rtl", UHF, REST)
+		// Leaving the band keeps the relay's newer 30.0 dB, not the older 10.0 dB.
+		expect(controller.getState("rtl")?.gain).toBe(300)
+	})
+
 	it("noteBandGainApplied (scanner) is ignored unless the tuner shows that manual gain at that frequency", async () => {
 		const { controller } = setup(false)
 		await manual(controller, 496)
