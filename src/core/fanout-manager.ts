@@ -129,7 +129,7 @@ export const DEFAULT_HIGH_WATER_MARK = 256 * 1024
 export const DEFAULT_BRANCH_BUFFER_MS = 250
 /**
  * Ceiling of a derived mark: 16 MiB, the channelizer input limit. 250 ms
- * reaches it only above 33.5 MB/s (8.4 Msps of CS16).
+ * reaches it only above 67.1 MB/s (16 MiB × 4 per second; 16.8 Msps of CS16).
  */
 export const MAX_DERIVED_HIGH_WATER_MARK = 16 * 1024 * 1024
 
