@@ -102,7 +102,7 @@ describe("clusterDiscoveries", () => {
 		expect(tags[0]!.hz).toBe(view.startHz)
 		expect(tags[0]!.members).toHaveLength(6)
 		expect(tags[0]!.title).toBe("6 signals, 433.0000-433.1540 MHz")
-		expect(tags[0]!.label).toBe("Heard +5")
+		expect(tags[0]!.label).toBe("Unidentified · ~2 kHz +5")
 		expect(tags[0]!.x).toBe(0)
 	})
 
@@ -116,7 +116,7 @@ describe("clusterDiscoveries", () => {
 		expect(t!.labelled).toBe(true)
 		expect(t!.name).toBe(long)
 		expect(t!.count).toBe("+1")
-		expect(t!.width).toBe(Math.round(22 + 140 + 4 + 2 * 6.6))
+		expect(t!.width).toBe(Math.round(22 + 160 + 4 + 2 * 6.6))
 	})
 
 	it("a group without room for its label still shows its count", () => {
@@ -151,8 +151,8 @@ describe("clusterDiscoveries", () => {
 
 	it("a cluster of one renders as before", () => {
 		const [t] = placeDiscoveryTags([disc("solo", xHz(200))], view, opts)
-		expect(t!.label).toBe("Heard")
-		expect(t!.title).toMatch(/^Heard · 433\.4000 MHz · heard/)
+		expect(t!.label).toBe("Unidentified · ~2 kHz")
+		expect(t!.title).toMatch(/^Unidentified · ~2 kHz · 433\.4000 MHz · heard/)
 		expect(t!.members.map(d => d.id)).toEqual(["solo"])
 	})
 })

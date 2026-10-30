@@ -75,6 +75,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `resumeAt` (60 s after the last write by default); identify results update their discovery.
   Not mocked: decoded-elsewhere and band-plan skip layers, probes, recordings, evidence, captures
   (an empty list), monitor jobs.
+- Spectrum tag cases (synthesised, in the default window): at 161.3125 MHz a DMR control channel
+  keyed 0.6 s every 14 s, decoded with colour code 7 and no talkgroup or source (a proven tag that
+  stays lit between bursts, "No calls heard yet — control channel only", no Activity rows); at
+  161.7375 MHz a continuous weak 4FSK carrier, 9 kHz wide, never identified (the quiet
+  `Unidentified · 4FSK ~9 kHz` tag).
 - `data.ts` holds the canvas data (signals, band plan, decoders, messages, identify plans),
   `spectrum.ts` the frame synthesis, `audio.ts` the audio server, `server.ts` the routes and
   `buildMockServer()` (used by `web/tests/mock`).

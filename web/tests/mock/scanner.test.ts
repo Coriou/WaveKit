@@ -465,8 +465,20 @@ describe("mock scanner discoveries", () => {
 		server = await buildMockServer({ port: 0 })
 		await server.app.ready()
 		const dmr = await list("?protocol=dmr")
+		// the synthesised control channel (161.3125 MHz) is DMR too
 		expect(dmr.items.map(d => d.frequencyHz).sort()).toEqual([
-			161_150_000, 446_093_750,
+			161_150_000, 161_312_500, 446_093_750,
+		])
+		const control = dmr.items.find(d => d.frequencyHz === 161_312_500)
+		expect(control).toMatchObject({
+			identity: { kind: "dmr-cc", value: "7" },
+			evidenceLevel: "proven",
+			metadata: { talkgroups: [], sources: [] },
+		})
+		// and the unidentified 4FSK carrier is weak activity with a measured class and width
+		const weak = await list("?freqMinHz=161737000&freqMaxHz=161738000")
+		expect(weak.items.map(d => [d.protocol, d.class, d.bandwidthHz])).toEqual([
+			["unknown", "fsk4-12k5", 9000],
 		])
 		const cc = await list("?identity=dmr-cc:1")
 		expect(cc.items.map(d => d.frequencyHz)).toEqual([161_150_000])

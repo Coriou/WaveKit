@@ -1,6 +1,7 @@
 /* Discovery tags (Spectrum board discovery row: 20 px under the lanes; 16 px chips at top 2 px, 4 px radius, 11 px
-   text, a 6 px dot, filled when decoded). Active: bright on a 12 % accent tint; heard in the last hour: dimmed accent
-   (grey when only heard); older: muted grey. Opaque ground, no blur. */
+   text, a 6 px dot, filled when proven). Live (a proven tag stays live between bursts): bright on a 12 % accent tint;
+   heard in the last hour: dimmed accent; older: muted grey. An unidentified (only heard) tag stays quiet grey in
+   every tier. Opaque ground, no blur. */
 @layer wk-app {
 	.wk-plot-discs {
 		height: 20px;
@@ -35,13 +36,25 @@
 	.wk-plot-disc[data-tier="recent"] {
 		--disc-c: rgba(var(--wk-accent-rgb), 0.72);
 	}
-	.wk-plot-disc[data-tier="recent"][data-heard] {
-		--disc-c: var(--wk-text-2);
-	}
 	.wk-plot-disc[data-tier="active"] {
 		--disc-c: var(--wk-accent);
 		background: rgba(var(--wk-accent-rgb), 0.12);
 		font-weight: 700;
+	}
+	/* proven and live: a steady outline on top of the tint, so it reads apart from a guess */
+	.wk-plot-disc[data-tier="active"][data-state="proven"] {
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-accent-rgb), 0.45);
+	}
+	/* unidentified: never the accent, never bold; live only lifts the grey a step */
+	.wk-plot-disc[data-state="heard"] {
+		--disc-c: var(--wk-text-4);
+		font-weight: 400;
+	}
+	.wk-plot-disc[data-state="heard"]:not(:hover):not([aria-expanded="true"]) {
+		background: transparent;
+	}
+	.wk-plot-disc[data-state="heard"][data-tier="active"] {
+		--disc-c: var(--wk-text-3);
 	}
 	.wk-plot-disc > i {
 		width: 6px;
@@ -180,6 +193,98 @@
 		overflow-wrap: anywhere;
 	}
 	.wk-plot-disc-member-what > .wk-plot-disc-likely {
+		color: var(--wk-text-4);
+	}
+	/* one discovery's detail: what it is, how we know, when, and what to do */
+	.wk-plot-disc-detail {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 4px 10px 6px;
+	}
+	.wk-plot-disc-detail-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+	.wk-plot-disc-detail-head > b {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: 600;
+		color: var(--wk-text);
+	}
+	.wk-plot-disc-state {
+		flex: none;
+		align-self: flex-start;
+		padding: 0 5px;
+		border-radius: var(--wk-r-2);
+		border: 1px solid var(--wk-line-18);
+		font-size: 10px;
+		line-height: 14px;
+		font-weight: 700;
+		color: var(--wk-text-3);
+	}
+	.wk-plot-disc-member-what > .wk-plot-disc-state {
+		font-size: 10px;
+		color: var(--wk-text-3);
+	}
+	.wk-plot-disc-state[data-state="proven"],
+	.wk-plot-disc-member-what > .wk-plot-disc-state[data-state="proven"] {
+		border-color: transparent;
+		background: rgba(var(--wk-accent-rgb), 0.12);
+		color: var(--wk-accent);
+	}
+	.wk-plot-disc-detail-freq {
+		font-size: 11px;
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-disc-detail p {
+		margin: 0;
+		font-size: 11px;
+		overflow-wrap: anywhere;
+	}
+	.wk-plot-disc-detail .wk-plot-disc-how {
+		color: var(--wk-text);
+		font-size: 12px;
+	}
+	.wk-plot-disc-detail .wk-plot-disc-likely {
+		color: var(--wk-text-4);
+	}
+	.wk-plot-disc-detail .wk-plot-disc-next {
+		color: var(--wk-text-2);
+	}
+	.wk-plot-disc-facts {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 1px 10px;
+		margin: 2px 0;
+		font-size: 11px;
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-disc-facts > dt {
+		color: var(--wk-text-3);
+	}
+	.wk-plot-disc-facts > dd {
+		margin: 0;
+		color: var(--wk-text-2);
+	}
+	.wk-plot-disc-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 4px;
+	}
+	.wk-plot-disc-legend {
+		flex: none;
+		margin: 0;
+		padding: 6px 10px 4px;
+		border-top: 1px solid var(--wk-line-14);
+		font-size: 10px;
+		line-height: 1.4;
 		color: var(--wk-text-4);
 	}
 	.wk-plot-disc-confirm {

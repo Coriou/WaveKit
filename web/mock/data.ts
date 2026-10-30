@@ -172,6 +172,10 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 		name: "DMR · TG 2081",
 		sub: "Tier II · slot 1 · CC 1",
 	}),
+	// Synthesised tag cases (docs/WEB-APP.md "Spectrum tags"): a DMR control channel heard only in short
+	// bursts, proven by its colour code with no call yet, and a weak continuous 4FSK carrier nobody identified
+	sig(161.3125, 9e3, -66, "tdma", { on: 0.6, per: 14, ph: 3 }),
+	sig(161.7375, 9e3, -78, "steady"),
 	sig(161.425, 11e3, -76, "voice", {
 		on: 3,
 		per: 9,
@@ -362,6 +366,20 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 			{ protocol: "dmr", decoder: "dsd-fme", mode: "auto", outcome: "decoded" },
 		],
 		identity: { kind: "dmr-cc", value: "0" },
+	},
+	161312500: {
+		state: "identified",
+		class: "tdma-ms",
+		protocol: "dmr",
+		trials: [
+			{ protocol: "dmr", decoder: "dsd-fme", mode: "auto", outcome: "decoded" },
+		],
+		identity: { kind: "dmr-cc", value: "7" },
+	},
+	161737500: {
+		state: "unidentified",
+		class: "fsk4-12k5",
+		trials: DIGITAL_NO_SYNC,
 	},
 	160450000: {
 		state: "identified",
@@ -2402,6 +2420,27 @@ export const DISCOVERY_SEEDS: readonly DiscoverySeed[] = [
 		agoMin: 7,
 		firstDays: 10,
 		observations: 210,
+	},
+	// Synthesised tag cases (appended: earlier seeds keep their ids). A DMR control channel proven by its
+	// colour code, no talkgroup or source yet (no Activity rows); a continuous 4FSK carrier, weak, never identified.
+	{
+		mhz: 161.3125,
+		protocol: "dmr",
+		confidence: "decoded",
+		class: "tdma-ms",
+		identity: { kind: "dmr-cc", value: "7" },
+		agoMin: 1,
+		firstDays: 2,
+		observations: 640,
+	},
+	{
+		mhz: 161.7375,
+		protocol: "unknown",
+		confidence: "activity",
+		class: "fsk4-12k5",
+		agoMin: 1,
+		firstDays: 2,
+		observations: 96,
 	},
 ]
 
