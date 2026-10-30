@@ -14,8 +14,11 @@ identify and activity phases ([spec](specs/scanner-redesign/requirements.md)). T
 untracked-retune alarm now counts only sustained strong features (amendment A16).
 IQ capture remains off by default. The
 [Rust live demodulator phase A](specs/rust-demod-a/requirements.md) also landed:
-NFM/AM is opt-in through `liveDemod.engine: rust`, with csdr the default and fallback
-(in a live A/B on one receiver it used more CPU than csdr).
+it is now the default for NFM and AM on a CU8 source (an absent `liveDemod.engine`), with
+csdr for other modulations and source formats, for `engine: csdr`, and as the fallback when
+the Rust engine cannot start. An earlier live A/B on one receiver had it using more CPU
+than csdr; the native reads now take up to 16 384 samples into reused buffers. A new live
+CPU A/B against csdr is pending.
 
 Live acceptance (2026-10-20, one RTL-SDR on a Wi-Fi-linked receiver host) is
 partial. Passing: no false retune alarm while parked, POCSAG decoded, a DMR

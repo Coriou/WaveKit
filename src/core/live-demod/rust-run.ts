@@ -584,10 +584,12 @@ export class RustLiveRun {
 		this.warnedFallback = reason
 		const fields =
 			error === undefined ? { reason } : { reason, err: safeErrorFields(error) }
-		// The default engine meets csdr-only modulations (WFM, SSB, CW, raw) in
-		// normal use: that fallback is expected, so it is info, not a warning.
+		// The default engine meets csdr-only modulations (WFM, SSB, CW, raw) and
+		// non-CU8 sources (an S16 SDR++ stream) in normal use: those fallbacks
+		// are expected, so they are info, not a warning. An explicit "rust" warns.
 		if (
-			reason === "modulation-unsupported" &&
+			(reason === "modulation-unsupported" ||
+				reason === "input-format-unsupported") &&
 			this.host.config().engine === undefined
 		)
 			this.host.log.info(fields, RUST_FALLBACK_LOG)

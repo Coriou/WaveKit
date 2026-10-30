@@ -113,7 +113,10 @@ import type {
 } from "./auto-listen/contract.js"
 import { PreRollShadow } from "./auto-listen/preroll-shadow.js"
 import { ANALOG_TRIAL_AM_CARRIER_DB } from "./scanner/scanner-redesign-contract.js"
-import { branchHighWaterMark, type FanoutManager } from "./fanout-manager.js"
+import {
+	DEFAULT_BRANCH_BUFFER_MS,
+	type FanoutManager,
+} from "./fanout-manager.js"
 import { frameBytesFor } from "./link-burst/contract.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
@@ -478,8 +481,8 @@ export class LiveDemodulator extends EventEmitter {
 	private autoAligned = false
 	private run: PipelineRun | null = null
 	private branchId: string | null = null
-	/** Mark of the attached branch: DEFAULT_BRANCH_BUFFER_MS at its source rate. */
-	private branchMark = 0
+	/** Source byte rate (caps) the attached branch was added at; null when unknown. */
+	private branchByteRate: number | null = null
 	private branchStream: Readable | null = null
 	private branchErrorHandler: ((err: Error) => void) | null = null
 	private pipelineHealth: LiveDemodStatus["pipelineHealth"] = "stopped"
@@ -1358,11 +1361,11 @@ export class LiveDemodulator extends EventEmitter {
 				: this.fanoutManager
 		const branchId = `live-demod-${sourceId}`
 		this.branchId = branchId
-		this.branchMark = this.branchMarkFor(sourceId)
+		this.branchByteRate = this.byteRateOf(sourceId)
 		this.branchStream = this.branchFanout.addBranch({
 			id: branchId,
 			sourceId,
-			highWaterMark: this.branchMark,
+			highWaterMarkMs: DEFAULT_BRANCH_BUFFER_MS,
 		})
 		this.branchErrorHandler = err => {
 			this.log.warn({ err }, "Live demodulation branch error")
@@ -1371,16 +1374,16 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	/**
-	 * The branch holds DEFAULT_BRANCH_BUFFER_MS of signal at the source's byte
-	 * rate (1 200 000 bytes at 2.4 Msps CU8), not a fixed 256 KiB (54.6 ms
-	 * there). Unknown caps keep the 256 KiB floor.
+	 * The branch mark is DEFAULT_BRANCH_BUFFER_MS of signal at the fanout's
+	 * byte rate, which the source router sets from the caps (1 200 000 bytes
+	 * at 2.4 Msps CU8, not a fixed 256 KiB, 54.6 ms there) and resizes on a
+	 * rate change. A fanout with no rate keeps the 256 KiB floor. This is the
+	 * caps' byte rate, only to tell when the source rate changed.
 	 */
-	private branchMarkFor(sourceId: string): number {
+	private byteRateOf(sourceId: string): number | null {
 		const caps = this.sourceManager.getCaps(sourceId)
 		const frame = caps ? frameBytesFor(caps.format) : null
-		return branchHighWaterMark(
-			caps && frame !== null ? caps.sampleRate * frame : null,
-		)
+		return caps && frame !== null ? caps.sampleRate * frame : null
 	}
 
 	private detachBranch(): void {
@@ -1963,13 +1966,14 @@ export class LiveDemodulator extends EventEmitter {
 			)
 		}
 		if (stopping) await stopping
-		// A rate change resizes the branch mark: the stopped run no longer reads
-		// the branch, so it is replaced before the new run attaches to it.
+		// The fanout resizes the branch mark itself (setByteRate). The branch is
+		// still replaced on a rate change: it may hold samples at the old rate,
+		// which the new run must not read.
 		const sourceId = this.activeSourceId
 		if (
 			sourceId &&
 			this.branchStream &&
-			this.branchMarkFor(sourceId) !== this.branchMark
+			this.byteRateOf(sourceId) !== this.branchByteRate
 		) {
 			this.detachBranch()
 			this.attachBranch(sourceId)

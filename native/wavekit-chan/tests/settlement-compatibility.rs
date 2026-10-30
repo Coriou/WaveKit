@@ -177,6 +177,7 @@ fn output(private: bool, format: &str, gain: &str) -> (Vec<u8>, Vec<Value>) {
         block_samples: 16384,
         socket_dir: dir.0.clone(),
         control_fd: 3,
+        dsp_helpers: None,
     };
     let (stream, _proof_peer) = UnixStream::pair().unwrap();
     let mut runtime = if private {

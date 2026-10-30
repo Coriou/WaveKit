@@ -19,6 +19,10 @@
  * the child), the scheduler stall a busy VM imposes; it shows how much signal a
  * branch mark absorbs before drop-mode.
  *
+ * `--channels 0` leaves the channelizer out, so a live-demod-only run measures
+ * the live engine alone; `--live-block N` sets its `--block-samples` (1024 in
+ * builds before 2026-10-30, `LIVE_DEMOD_BLOCK_SAMPLES` now).
+ *
  * `--hogs N` starts N busy-loop processes for the run (a loaded host);
  * `--readsb-core F` adds an emulated readsb raw IQ branch spending F of a core
  * at the rate (0 turns it off). Each branch reports when it first entered
@@ -33,6 +37,8 @@
  *   node output/bench/fanout-headroom.mjs --rate 2400000 --seconds 30
  *   node output/bench/fanout-headroom.mjs --rate 2400000 --unpaced
  *   node output/bench/fanout-headroom.mjs --rate 2400000 --stall-ms 150
+ *   node output/bench/fanout-headroom.mjs --rate 1024000 --channels 0 \
+ *     --readsb-core 0 --seconds 30
  */
 import { spawn, type ChildProcess, execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -61,6 +67,7 @@ import {
 	squelchFor,
 } from "../../src/core/live-demod/rust-protocol.js"
 import { LiveDemodRuntimeConfigSchema } from "../../src/core/live-demodulator.js"
+import { LIVE_DEMOD_BLOCK_SAMPLES } from "../../src/core/live-demod/rust-engine.js"
 import { WaveKitError } from "../../src/utils/errors.js"
 
 interface Options {
@@ -68,6 +75,8 @@ interface Options {
 	rate: number
 	seconds: number
 	channels: number
+	/** `--block-samples` of the live-demod process (1024 before 2026-10-30). */
+	liveBlock: number
 	chunk: number
 	chanMark: number | null
 	liveMark: number | null
@@ -105,6 +114,7 @@ function parse(argv: string[]): Options {
 		rate: num("rate", 2_400_000),
 		seconds: num("seconds", 20),
 		channels: num("channels", 4),
+		liveBlock: num("live-block", LIVE_DEMOD_BLOCK_SAMPLES),
 		// rtl_tcp over TCP arrives in socket reads of up to 64 KiB.
 		chunk: num("chunk", 65_536),
 		chanMark: mark("chan-mark"),
@@ -180,7 +190,7 @@ async function startChan(
 		inputRateHz: o.rate,
 		inputCenterHz: center,
 		usableFraction: 0.8,
-		blockSamples: name === "live-demod" ? 1024 : 16_384,
+		blockSamples: name === "live-demod" ? o.liveBlock : 16_384,
 		socketDir: dir,
 	})
 	const child = spawn(o.binary, args, {
@@ -334,9 +344,10 @@ function demodOpen(center: number): string[] {
 }
 
 async function startConsumers(o: Options): Promise<Consumer[]> {
-	const consumers = [
-		await startChan(o, "channelizer", channelOpens(o.channels)),
-	]
+	const consumers =
+		o.channels > 0
+			? [await startChan(o, "channelizer", channelOpens(o.channels))]
+			: []
 	if (o.live) consumers.push(await startChan(o, "live-demod", demodOpen))
 	if (o.readsbCore > 0) consumers.push(startReadsb(o))
 	return consumers

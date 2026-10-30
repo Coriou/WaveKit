@@ -68,8 +68,11 @@ Now:
   side at the fanout's byte rate (`FanoutManager.setByteRate`), clamped to
   [256 KiB, 16 MiB]. That is 1 200 000 bytes at 2.4 Msps and 512 000 at 1.024 Msps.
   A branch congests after 2 × 1 200 000 + 65 536 bytes, 513.7 ms of signal.
-- The live-demod branch and the channelizer input size themselves the same way
-  from the source caps, today. `channelizer.inputHighWaterMark` is now a floor.
+- The live-demod branch asks for the derived 250 ms mark (`highWaterMarkMs`), so
+  `setByteRate` resizes it like a decoder branch; it is still replaced when the
+  live demodulator restarts on a rate change, so the new run never reads samples
+  at the old rate. The channelizer input sizes itself from the source caps.
+  `channelizer.inputHighWaterMark` is now a floor.
 - The source router calls `setByteRate` with the sample rate × IQ frame bytes
   whenever it learns a source's caps (connect, `caps-changed`, a new per-source
   fanout), so decoder, relay and audio-monitor branches get 250 ms too. Audio caps
@@ -139,6 +142,44 @@ Two limits remain:
   processes and moves 19.2 MB/s of complex float between them at 2.4 Msps; the Rust
   engine needs 0.18 core.
 
+## Live demod input reads (2026-10-30)
+
+The Rust live engine is one `wavekit-chan` process with a demod channel. It read
+stdin in 1 024-sample blocks (2 048 bytes), about 2 340 reads a second at 2.4 Msps,
+each a fresh buffer handed to the main thread, which then built two fresh sample
+vectors: about 4 700 wake-ups and 7 000 allocations a second. Now:
+
+- `LIVE_DEMOD_BLOCK_SAMPLES` = 16 384, the channelizer's size. A read returns what
+  the pipe holds, so this caps a block rather than waiting to fill one: at most
+  16 384 / 2.4e6 ≈ 6.8 ms of input at 2.4 Msps and 16 384 / 1.024e6 ≈ 16 ms at
+  1.024 Msps. A 64 KiB source chunk takes 2 reads instead of 32. The DSP is a
+  stream, so the audio does not depend on the split (the A/B and the chunk-split
+  properties pass unchanged); a retune or squelch change applies between reads, so
+  it can land up to one block later in the input.
+- The stdin reader takes its buffers back from the main thread through a bounded
+  return channel (`INPUT_BUFFERS` = 3: one being converted, one queued, one being
+  read into), and the converted I/Q vectors are kept between blocks.
+
+Paced bench, live demod alone (`fanout-headroom.ts --channels 0 --readsb-core 0
+--seconds 15`), NFM, Mac i5 with 8 threads shared with other work. "before" is the
+previous build at 1 024 samples, "after-1024" this build forced to 1 024
+(`--live-block 1024`), "after" this build at the new default. Three runs each,
+alternated; one-minute load average after each run:
+
+| Rate       | Build      | Cores (per run)     | CPU s per Msample | Load average (1 min) |
+| ---------- | ---------- | ------------------- | ----------------- | -------------------- |
+| 1.024 Msps | before     | 0.073, 0.080, 0.080 | 0.074–0.081       | 34, 14, 15           |
+| 1.024 Msps | after-1024 | 0.075, 0.083, 0.078 | 0.076–0.084       | 31, 16, 14           |
+| 1.024 Msps | after      | 0.043, 0.054, 0.047 | 0.044–0.055       | 24, 17, 14           |
+| 2.4 Msps   | before     | 0.160, 0.170, 0.181 | 0.069–0.078       | 21, 15, 12           |
+| 2.4 Msps   | after-1024 | 0.159, 0.157, 0.163 | 0.067–0.070       | 17, 12, 9            |
+| 2.4 Msps   | after      | 0.095, 0.091, 0.097 | 0.039–0.042       | 14, 17, 15           |
+
+No run dropped bytes. The block size is the win, about 40 % less CPU at both
+rates; buffer reuse alone is within the noise, so the cost was per read, not per
+allocation. csdr is not on
+the bench host, so it is not in the table; a live CPU A/B against csdr is pending.
+
 ## Channelizer DSP threads (2026-10-30)
 
 Profile first (`native/wavekit-chan/examples/chan_bench.rs`, one thread, 2.4 Msps,
@@ -154,11 +195,17 @@ and the NCO is a serial phasor recursion that cannot be split without changing
 its bits. The channels themselves are independent, so the channelizer now runs
 them in parallel:
 
-- `wavekit-chan` keeps a pool of `min(available_parallelism − 1, 3)` helper
-  threads (`dsp_pool::dsp_helpers`). With the main thread that is at most 4 DSP
-  threads, half of an 8-thread desktop. A 4-core Pi gets 3 helpers and a
-  1-core host none, which is the old serial loop. The helpers start on the first
-  block worth splitting. There is no configuration key.
+- `wavekit-chan` keeps a pool of `min(available_parallelism / 2, 3)` helper
+  threads (`dsp_pool::dsp_helpers`): half the host at most. With the main thread
+  that is at most 4 DSP threads on an 8-thread desktop. A 4-core Pi gets 2
+  helpers (3 DSP threads, one core left for the live demodulator, decoders and the
+  core), a 2-thread host 1, and a 1-core host none, which is the old serial loop.
+  The helpers start on the first block worth splitting. There is no configuration
+  key; `--dsp-helpers N` or the environment variable `WAVEKIT_CHAN_DSP_HELPERS=N`
+  overrides the count (the argument wins). N is a non-negative integer, clamped to
+  3; `0` is the serial loop. An invalid environment value is ignored with a line on
+  stderr, an invalid argument fails startup. The core passes no argument, so on a
+  container host set the variable in the core's environment: `wavekit-chan` inherits it.
 - A block of at least 2 048 input samples (`PARALLEL_MIN_SAMPLES`) with two or
   more channels open is split: each channel's engine moves to whichever thread
   takes it, runs the whole block and moves back. The main thread takes jobs too,

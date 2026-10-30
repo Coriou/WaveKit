@@ -281,8 +281,24 @@ describe("live demod rust fallback and retune", () => {
 		expect(versions).toHaveLength(0)
 		expect(channels).toHaveLength(0)
 		expect(shells.length).toBeGreaterThanOrEqual(2)
-		expect(fallbacks(lines)[0]?.["reason"]).toBe("input-format-unsupported")
+		// Expected for the default engine: info, not a warning.
+		expect(fallbacks(lines)).toEqual([
+			expect.objectContaining({
+				level: 30,
+				reason: "input-format-unsupported",
+			}),
+		])
 		expect(demod?.getStatus().engine).toBe("csdr")
+	})
+
+	it("an explicit rust engine still warns on an s16 source", async () => {
+		format = "S16_IQ"
+		const { lines } = await boot({ modulation: "nfm" })
+		expect(versions).toHaveLength(0)
+		expect(fallbacks(lines)[0]).toMatchObject({
+			level: 40,
+			reason: "input-format-unsupported",
+		})
 	})
 
 	it("an omitted engine is rust: a missing binary falls back once with a warning", async () => {

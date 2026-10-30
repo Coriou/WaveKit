@@ -16,7 +16,7 @@ use crate::{
         self, Admission, AttemptPermits, Disposal, PayloadPublisher, RuntimePermits,
         WriterPublisher, SLOTS,
     },
-    dsp_pool::{dsp_helpers, DspPool, Job},
+    dsp_pool::{resolve_dsp_helpers, DspPool, Job, DSP_HELPERS_ENV},
     framing::{self, FrameSink},
     preparation::{Planner, Prepared, SubmitError},
     protocol::{
@@ -210,6 +210,9 @@ pub struct Runtime {
     /// pooled block does not allocate them again.
     jobs: Vec<ChannelJob>,
     scratch: Vec<(Vec<u8>, Vec<Value>)>,
+    /// One input block's converted I and Q, kept between blocks so `on_input` does not allocate.
+    input_i: Vec<f32>,
+    input_q: Vec<f32>,
 }
 
 /// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
@@ -236,7 +239,12 @@ fn schema_id(id: &str) -> &str {
 impl Runtime {
     pub fn new(args: Args, sink: Box<dyn FnMut(Value) + Send>) -> Self {
         let parallelism = thread::available_parallelism().map_or(1, |n| n.get());
-        Self::with_dsp_helpers(args, sink, dsp_helpers(parallelism))
+        let env = std::env::var(DSP_HELPERS_ENV).ok();
+        let (helpers, warning) = resolve_dsp_helpers(args.dsp_helpers, env.as_deref(), parallelism);
+        if let Some(w) = warning {
+            eprintln!("wavekit-chan: {w}");
+        }
+        Self::with_dsp_helpers(args, sink, helpers)
     }
 
     fn with_dsp_helpers(args: Args, sink: Box<dyn FnMut(Value) + Send>, helpers: usize) -> Self {
@@ -260,6 +268,8 @@ impl Runtime {
             pool: DspPool::new(helpers),
             jobs: Vec::new(),
             scratch: Vec::new(),
+            input_i: Vec::new(),
+            input_q: Vec::new(),
         }
     }
 
@@ -863,9 +873,20 @@ impl Runtime {
     }
 
     pub fn on_input(&mut self, bytes: &[u8]) {
-        let (mut i, mut q) = (Vec::new(), Vec::new());
+        let (mut i, mut q) = (
+            std::mem::take(&mut self.input_i),
+            std::mem::take(&mut self.input_q),
+        );
+        i.clear();
+        q.clear();
+        self.convert_and_feed(bytes, &mut i, &mut q);
+        self.input_i = i;
+        self.input_q = q;
+    }
+
+    fn convert_and_feed(&mut self, bytes: &[u8], i: &mut Vec<f32>, q: &mut Vec<f32>) {
         let first_sample = self.asm.consumed_bytes / 2;
-        self.asm.push(bytes, &mut i, &mut q);
+        self.asm.push(bytes, i, q);
         let mut start = 0usize;
         // A2: each gap resets at the first whole sample at or after its byte.
         while let Some(&(at, dropped_in)) = self.pending_gaps.front() {
@@ -1374,6 +1395,41 @@ fn read_control_mode<R: BufRead>(
     }
 }
 
+/// Input buffers alive at once: one being converted, one queued in the input channel and one
+/// being read into. Spent buffers go back to the reader, which allocates only when none is free.
+const INPUT_BUFFERS: usize = 3;
+
+/// The stdin reader: reads of at most `block` bytes into recycled buffers, then `InputEof`.
+fn read_input(
+    mut input: impl Read,
+    block: usize,
+    tx: &mpsc::SyncSender<Msg>,
+    free: &mpsc::Receiver<Vec<u8>>,
+) {
+    loop {
+        let mut buf = free.try_recv().unwrap_or_default();
+        buf.resize(block, 0);
+        match input.read(&mut buf) {
+            Ok(0) => {
+                let _ = tx.send(Msg::InputEof);
+                return;
+            }
+            Ok(n) => {
+                buf.truncate(n);
+                if tx.send(Msg::Input(buf)).is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => {
+                eprintln!("wavekit-chan: stdin: {e}");
+                let _ = tx.send(Msg::InputEof);
+                return;
+            }
+        }
+    }
+}
+
 /// The process main loop. Returns the exit code.
 pub fn run(args: Args) -> i32 {
     run_inner(args, None)
@@ -1406,33 +1462,11 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         }
     }
     let (tx, rx) = mpsc::sync_channel::<Msg>(1); // ≤ 2 input blocks in flight (addendum §6)
+    let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_BUFFERS);
     {
         let tx = tx.clone();
         let block = args.block_samples * 2;
-        thread::spawn(move || {
-            let mut stdin = std::io::stdin().lock();
-            loop {
-                let mut buf = vec![0u8; block];
-                match stdin.read(&mut buf) {
-                    Ok(0) => {
-                        let _ = tx.send(Msg::InputEof);
-                        return;
-                    }
-                    Ok(n) => {
-                        buf.truncate(n);
-                        if tx.send(Msg::Input(buf)).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        eprintln!("wavekit-chan: stdin: {e}");
-                        let _ = tx.send(Msg::InputEof);
-                        return;
-                    }
-                }
-            }
-        });
+        thread::spawn(move || read_input(std::io::stdin().lock(), block, &tx, &free_rx));
     }
     {
         let fd = args.control_fd;
@@ -1466,7 +1500,10 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
             Duration::from_millis(5)
         };
         match rx.recv_timeout(wait) {
-            Ok(Msg::Input(b)) => rt.on_input(&b),
+            Ok(Msg::Input(b)) => {
+                rt.on_input(&b);
+                let _ = free_tx.try_send(b); // full or reader gone: the buffer is freed
+            }
             Ok(Msg::InputEof) => return rt.on_eof(),
             Ok(Msg::Control(Ok(r))) => {
                 if let Some(code) = rt.on_observed_request(r) {
@@ -1549,6 +1586,7 @@ mod tests {
             block_samples: 1024,
             socket_dir: dir.into(),
             control_fd: 3,
+            dsp_helpers: None,
         }
     }
     fn rt(dir: &Path) -> (Runtime, Events) {
@@ -2579,6 +2617,7 @@ mod tests {
                 block_samples: 1024,
                 socket_dir: dir.0.clone(),
                 control_fd: 3,
+                dsp_helpers: None,
             },
             sink,
         );
@@ -2994,6 +3033,80 @@ mod tests {
         }
     }
 
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        // Feature: core-channelizer, Property 4: Chunk-split independence (DSP pool)
+        // Validates: addendum §12.4
+        #[test]
+        fn dsp_pool_matches_the_serial_loop_as_channels_open_and_close(
+            blocks in proptest::collection::vec(
+                (proptest::collection::vec(any::<u8>(), 1..12_000), 0usize..3, 0usize..8, -24i32..24),
+                1..10),
+        ) {
+            let (pd, sd) = (TempDir::new(), TempDir::new());
+            let (mut par, pev) = rt_with_helpers(&pd.0, crate::dsp_pool::MAX_DSP_HELPERS);
+            let (mut ser, sev) = rt_with_helpers(&sd.0, 0);
+            // Two channels from the start, so the first blocks can already be split.
+            for (id, off) in [("s0", -4.0), ("s1", 4.0)] {
+                par.request_and_wait(iq_open_as(id, off * 25_000.0, 48_000, "cf32", 1 << 20));
+                ser.request_and_wait(iq_open_as(id, off * 25_000.0, 48_000, "cf32", 1 << 20));
+            }
+            let mut opened = 0;
+            let mut split = false;
+            for (bytes, op, pick, off) in &blocks {
+                // At least PARALLEL_MIN_SAMPLES whole pairs, even after a carried odd byte.
+                split |= bytes.len() >= 2 * PARALLEL_MIN_SAMPLES + 2 && ser.channels.len() > 1;
+                par.on_input(bytes);
+                ser.on_input(bytes);
+                let ids: Vec<String> = ser.channels.keys().cloned().collect();
+                prop_assert_eq!(par.channels.keys().cloned().collect::<Vec<_>>(), ids.clone());
+                for id in &ids {
+                    prop_assert_eq!(take_queue(&par, id), take_queue(&ser, id), "channel {}", id);
+                }
+                match op {
+                    // Open between blocks: an IQ channel, or a demod channel on odd picks.
+                    1 => {
+                        let id = format!("o{opened}");
+                        opened += 1;
+                        let req = || if pick % 2 == 1 {
+                            demod_open(&id, 1 << 20, pick % 4 == 1)
+                        } else {
+                            iq_open_as(&id, *off as f64 * 25_000.0, 250_000, "cu8", 1 << 20)
+                        };
+                        par.request_and_wait(req());
+                        ser.request_and_wait(req());
+                    }
+                    // Close between blocks; the next block runs with one channel fewer.
+                    2 if !ids.is_empty() => {
+                        let id = ids[pick % ids.len()].clone();
+                        par.request_and_wait(Request::Close { id: id.clone() });
+                        ser.request_and_wait(Request::Close { id });
+                    }
+                    _ => {}
+                }
+            }
+            if split {
+                prop_assert!(par.pool.started() > 0);
+            }
+            for id in ser.channels.keys() {
+                prop_assert_eq!(par.channels[id].out_samples, ser.channels[id].out_samples);
+                prop_assert_eq!(take_queue(&par, id), take_queue(&ser, id), "channel {}", id);
+            }
+            par.shutdown();
+            ser.shutdown();
+            // `opened` names each runtime's own socket directory; everything else must match.
+            let strip = |ev: &Events| -> Vec<Value> {
+                ev.lock().unwrap().iter().cloned().map(|mut e| {
+                    if let Some(o) = e.as_object_mut() {
+                        o.remove("socket");
+                    }
+                    e
+                }).collect()
+            };
+            prop_assert_eq!(strip(&pev), strip(&sev));
+        }
+    }
+
     #[test]
     fn pooled_blocks_reuse_their_buffers_after_warm_up() {
         let dir = TempDir::new();
@@ -3027,6 +3140,61 @@ mod tests {
             assert_eq!(caps(&r), warm);
         }
         assert!(r.pool.started() > 0);
+        r.shutdown();
+    }
+
+    #[test]
+    fn input_reads_reuse_returned_buffers() {
+        let input: Vec<u8> = (0..10_000u32).map(|n| n as u8).collect();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(64);
+        let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_BUFFERS);
+        let spare = Vec::with_capacity(4096);
+        let spare_at = spare.as_ptr();
+        free_tx.try_send(spare).unwrap();
+        read_input(std::io::Cursor::new(input.clone()), 4096, &tx, &free_rx);
+        let mut got = Vec::new();
+        let mut reads = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                Msg::Input(b) => {
+                    got.extend_from_slice(&b);
+                    reads.push(b);
+                }
+                Msg::InputEof => break,
+                _ => panic!("unexpected message"),
+            }
+        }
+        assert_eq!(got, input);
+        assert_eq!(reads.len(), 3); // 4096 + 4096 + 1808
+        assert_eq!(
+            reads[0].as_ptr(),
+            spare_at,
+            "the returned buffer was not reused"
+        );
+        // The return channel holds INPUT_BUFFERS; past that a spent buffer is dropped, not queued.
+        assert_eq!(INPUT_BUFFERS, 3);
+        for b in reads {
+            assert!(free_tx.try_send(b).is_ok());
+        }
+        assert!(free_tx.try_send(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn serial_input_blocks_reuse_their_sample_vectors() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt_with_helpers(&dir.0, 0);
+        r.request_and_wait(iq_open_as("a", 0.0, 250_000, "cf32", 1 << 20));
+        let block = iq_bytes(2 * 4096);
+        r.on_input(&block);
+        let warm = (r.input_i.as_ptr(), r.input_q.as_ptr(), r.input_i.capacity());
+        for _ in 0..20 {
+            r.drain_queue_for_test("a");
+            r.on_input(&block);
+            assert_eq!(
+                (r.input_i.as_ptr(), r.input_q.as_ptr(), r.input_i.capacity()),
+                warm
+            );
+        }
         r.shutdown();
     }
 }

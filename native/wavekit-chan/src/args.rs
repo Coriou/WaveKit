@@ -11,6 +11,9 @@ pub struct Args {
     pub block_samples: usize,
     pub socket_dir: PathBuf,
     pub control_fd: i32,
+    /// `--dsp-helpers`: DSP pool helper threads, clamped to `MAX_DSP_HELPERS`; `None` defers to
+    /// `WAVEKIT_CHAN_DSP_HELPERS`, then the host default (`dsp_pool::resolve_dsp_helpers`).
+    pub dsp_helpers: Option<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -52,6 +55,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         "socket-dir",
         "control-fd",
         "settlement-socket",
+        "dsp-helpers",
     ];
     if let Some(bad) = map.keys().find(|k| !known.contains(&k.as_str())) {
         return Err(format!("unknown option --{bad}"));
@@ -85,6 +89,10 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
     if control_fd < 3 {
         return Err("--control-fd must be >= 3 (0-2 carry IQ, events and logs)".into());
     }
+    let dsp_helpers = map
+        .get("dsp-helpers")
+        .map(|v| crate::dsp_pool::parse_dsp_helpers(v).map_err(|e| format!("--dsp-helpers {e}")))
+        .transpose()?;
     let args = Args {
         generation: get("generation")?
             .parse()
@@ -95,6 +103,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         block_samples,
         socket_dir: PathBuf::from(get("socket-dir")?),
         control_fd,
+        dsp_helpers,
     };
     match map.get("settlement-socket") {
         None => Ok(Command::Run(args)),
@@ -135,9 +144,28 @@ mod tests {
                 usable_fraction: 0.8,
                 block_samples: 16384,
                 socket_dir: "/tmp/s".into(),
-                control_fd: 3
+                control_fd: 3,
+                dsp_helpers: None,
             })
         );
+    }
+    #[test]
+    fn dsp_helpers_is_validated_and_clamped() {
+        let line = |n: &str| {
+            v(&format!("--generation 1 --input-format cu8 --input-rate 2048000 --input-center 1 --usable-fraction 0.8 --block-samples 16384 --socket-dir /t --control-fd 3 --dsp-helpers {n}"))
+        };
+        let helpers = |n: &str| match parse(&line(n)) {
+            Ok(Command::Run(a)) => Ok(a.dsp_helpers),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(helpers("0"), Ok(Some(0)));
+        assert_eq!(helpers("3"), Ok(Some(crate::dsp_pool::MAX_DSP_HELPERS)));
+        assert_eq!(helpers("4"), Ok(Some(crate::dsp_pool::MAX_DSP_HELPERS)));
+        for bad in ["-1", "x", "1.0"] {
+            let e = helpers(bad).unwrap_err();
+            assert!(e.starts_with("--dsp-helpers must be"), "{e}");
+        }
     }
     #[test]
     fn version() {

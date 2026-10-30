@@ -282,8 +282,11 @@ counters, the monitor's attribution counts, the upstream drop rate from
 default route: kind and `wireless.signalDbm`; `power.undervoltageNow`; `power.throttling.throttled`).
 `ResourceAggregator` emits `resources:link-quality` on its tick and serves the two routes in
 `src/api/routes/resources.ts`. `createLinkAdvisor` gains an optional dependency
-`linkDropsSince(sourceId, mono)`; `classify` returns `dropping` when a `link` attribution with
-drops lies within `LINK_DROPPING_HOLD_MS`, and attaches the optional `burst` summary.
+`linkDropsSince(sourceId, mono)`. Requirement 6.4 (amended): `classify` returns `dropping`
+only for source-side loss (a received-rate shortfall or upstream drops), with
+`lossReason: "source"`. A `link` attribution with drops within `LINK_DROPPING_HOLD_MS` is
+branch congestion after an arrival gap: it sets `lossReason: "branch-congestion"` and leaves
+the level unchanged. `classify` also attaches the optional `burst` summary.
 
 ### Delivery hook
 
@@ -404,8 +407,10 @@ monotonic clocks.
     slots, worst stall equals the largest recorded gap in them, p99 lies within one bucket of
     the exact p99, and the report contains no string other than ids and closed enums.
     _Validates 2.1, 6.2, 6.3, 6.5._
-13. **Advisory.** Loopback stays `none`; a `link` drop within the hold makes a network source
-    `dropping`; absorbed bursts without loss never change the level. _Validates 6.4, 6.6._
+13. **Advisory.** Loopback stays `none` with no `lossReason`; only source-side loss makes a
+    network source `dropping` (`lossReason: "source"`); a `link` drop within the hold sets
+    `lossReason: "branch-congestion"` and never changes the level; absorbed bursts without
+    loss never change the level. _Validates 6.4, 6.6._
 14. **Delivery hook.** For any config, `auto` and `raw` resolve to `raw`; `channels` fails
     validation; `iqDelivery.resolved` is always `"raw"`. _Validates 7.1, 7.2._
 

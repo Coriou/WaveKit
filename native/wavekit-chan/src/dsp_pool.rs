@@ -22,11 +22,49 @@ use std::thread;
 /// 8-thread desktop, so a channelizer never takes the whole host.
 pub const MAX_DSP_HELPERS: usize = 3;
 
-/// Helpers for a host with `parallelism` hardware threads: `min(parallelism − 1, MAX_DSP_HELPERS)`.
-/// One thread is left for the main loop's other work and the socket writers, and a 1-thread
-/// host gets no helper (the serial loop).
+/// Overrides the default helper count when `--dsp-helpers` is not given.
+pub const DSP_HELPERS_ENV: &str = "WAVEKIT_CHAN_DSP_HELPERS";
+
+/// Helpers for a host with `parallelism` hardware threads: `min(parallelism / 2, MAX_DSP_HELPERS)`.
+/// A process takes at most half the host, so a 4-core Pi gets 2 helpers (3 DSP threads with the
+/// main thread, one core left for the live demodulator, decoders and the core), an 8-thread
+/// desktop 3, a 2-thread host 1, and a 1-thread host none (the serial loop).
 pub fn dsp_helpers(parallelism: usize) -> usize {
-    parallelism.saturating_sub(1).min(MAX_DSP_HELPERS)
+    (parallelism / 2).min(MAX_DSP_HELPERS)
+}
+
+/// An override value: a non-negative decimal integer, clamped to `MAX_DSP_HELPERS`. `0` is the
+/// serial loop.
+pub fn parse_dsp_helpers(value: &str) -> Result<usize, String> {
+    let v = value.trim();
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "must be an integer 0..={MAX_DSP_HELPERS}, got {value:?}"
+        ));
+    }
+    // All digits: only an overflow fails, and an overflowing count is past the cap anyway.
+    Ok(v.parse::<usize>()
+        .map_or(MAX_DSP_HELPERS, |n| n.min(MAX_DSP_HELPERS)))
+}
+
+/// The helper count: the `--dsp-helpers` argument, else a valid `WAVEKIT_CHAN_DSP_HELPERS`, else
+/// `dsp_helpers(parallelism)`. An invalid environment value is ignored and returned as a warning.
+pub fn resolve_dsp_helpers(
+    arg: Option<usize>,
+    env: Option<&str>,
+    parallelism: usize,
+) -> (usize, Option<String>) {
+    if let Some(n) = arg {
+        return (n.min(MAX_DSP_HELPERS), None);
+    }
+    match env.map(parse_dsp_helpers) {
+        Some(Ok(n)) => (n, None),
+        Some(Err(e)) => (
+            dsp_helpers(parallelism),
+            Some(format!("{DSP_HELPERS_ENV} {e}; using the host default")),
+        ),
+        None => (dsp_helpers(parallelism), None),
+    }
 }
 
 /// One unit of per-block work.
@@ -248,14 +286,52 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
-    fn helper_count_is_bounded_at_and_past_the_cap() {
+    fn helper_count_is_half_the_host_bounded_at_and_past_the_cap() {
         assert_eq!(dsp_helpers(0), 0);
         assert_eq!(dsp_helpers(1), 0);
         assert_eq!(dsp_helpers(2), 1);
-        assert_eq!(dsp_helpers(MAX_DSP_HELPERS), MAX_DSP_HELPERS - 1);
-        assert_eq!(dsp_helpers(MAX_DSP_HELPERS + 1), MAX_DSP_HELPERS);
-        assert_eq!(dsp_helpers(MAX_DSP_HELPERS + 2), MAX_DSP_HELPERS);
+        assert_eq!(dsp_helpers(3), 1);
+        assert_eq!(dsp_helpers(4), 2); // a 4-core Pi
+        assert_eq!(dsp_helpers(5), 2);
+        assert_eq!(dsp_helpers(6), MAX_DSP_HELPERS); // at the cap
+        assert_eq!(dsp_helpers(7), MAX_DSP_HELPERS);
+        assert_eq!(dsp_helpers(8), MAX_DSP_HELPERS); // past it: 8 / 2 = 4
         assert_eq!(dsp_helpers(256), MAX_DSP_HELPERS);
+    }
+
+    #[test]
+    fn override_is_validated_and_clamped_at_and_past_the_cap() {
+        assert_eq!(parse_dsp_helpers("0"), Ok(0));
+        assert_eq!(parse_dsp_helpers("2"), Ok(2));
+        assert_eq!(parse_dsp_helpers(" 3 "), Ok(MAX_DSP_HELPERS));
+        assert_eq!(parse_dsp_helpers("4"), Ok(MAX_DSP_HELPERS));
+        assert_eq!(
+            parse_dsp_helpers("99999999999999999999999"),
+            Ok(MAX_DSP_HELPERS)
+        );
+        for bad in ["", " ", "-1", "+1", "1.5", "two", "0x2"] {
+            assert!(parse_dsp_helpers(bad).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn argument_beats_environment_beats_host_default() {
+        assert_eq!(resolve_dsp_helpers(None, None, 4), (2, None));
+        assert_eq!(resolve_dsp_helpers(None, None, 8), (3, None));
+        assert_eq!(resolve_dsp_helpers(None, None, 1), (0, None));
+        assert_eq!(resolve_dsp_helpers(None, Some("0"), 8), (0, None));
+        assert_eq!(
+            resolve_dsp_helpers(None, Some("7"), 1),
+            (MAX_DSP_HELPERS, None)
+        );
+        assert_eq!(resolve_dsp_helpers(Some(1), Some("3"), 8), (1, None));
+        assert_eq!(
+            resolve_dsp_helpers(Some(9), None, 8),
+            (MAX_DSP_HELPERS, None)
+        );
+        let (n, warning) = resolve_dsp_helpers(None, Some("lots"), 4);
+        assert_eq!(n, 2);
+        assert!(warning.unwrap().starts_with(DSP_HELPERS_ENV));
     }
 
     /// A running sum: its output depends on every earlier block, in order, and on its identity,
