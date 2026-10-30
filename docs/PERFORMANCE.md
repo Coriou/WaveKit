@@ -105,6 +105,7 @@ Throughput ceiling (unpaced, 2.4 Msps; Mac i5, 8 threads, shared with other work
 | Consumer                   | Load average | CPU s per Msample | Core at 2.4 Msps | Headroom, no hogs | Headroom, 8 hogs |
 | -------------------------- | ------------ | ----------------- | ---------------- | ----------------- | ---------------- |
 | channelizer, 4 channels    | 20 / 65 / 48 | 0.13              | 0.31             | 3.0× / 2.8×       | 0.97×            |
+| channelizer, DSP pool      | 60–250       | 0.13–0.15         | 0.32–0.35        | 3.1× to 5.5×      | 2.3× to 3.3×     |
 | Rust live demod (NFM)      | 20 / 65 / 48 | 0.076             | 0.18             | 5.9× / 5.1×       | 2.7×             |
 | readsb IQ (emulated, 0.35) | 65 / 48      | n/a               | 0.31             | 2.5×              | 1.3×             |
 
@@ -130,10 +131,63 @@ threads. Read them for the direction and the mechanism, not for exact counts.
 Two limits remain:
 
 - Above about 1.0× headroom the larger marks only absorb stalls. Under 8 hogs,
-  `wavekit-chan`'s single DSP thread gets about 0.32 core, and 4 channels at
-  2.4 Msps need 0.31. Sustained load at that level turns into input loss whatever
-  the buffer. The fixes are the AVX2/FMA path or per-channel DSP threads already
-  named in the [channelizer capacity report](CAPACITY-2026-10-10-CHANNELIZER.md).
+  `wavekit-chan`'s single DSP thread got about 0.32 core, and 4 channels at
+  2.4 Msps need 0.31. Sustained load at that level turned into input loss whatever
+  the buffer. The DSP pool below fixes this for the channelizer.
 - The csdr live-demod chain (`engine` absent) was not measured here because csdr
   is not on the bench host. It runs three processes and moves 19.2 MB/s of
   complex float between them at 2.4 Msps; the Rust engine needs 0.18 core.
+
+## Channelizer DSP threads (2026-10-30)
+
+Profile first (`native/wavekit-chan/examples/chan_bench.rs`, one thread, 2.4 Msps,
+the bench's 12.5 kHz channel at 48 kHz cu8): about 28 ns of DSP per input sample
+per channel, 0.028 CPU s per Msample. The NCO takes 6.5 ns, the first
+decimate-by-2 stage (11 taps at 2.4 Msps) 11 ns, the next two 5.4 and 2.6 ns,
+the 16/25 stage (973 taps at 75 kHz) under 1 ns. The cu8 input conversion,
+shared by all channels, took 3 ns per sample.
+
+A SIMD FIR does not pay here. The long filter is already cheap. The short
+half-band stages are dominated by per-output overhead rather than multiplies,
+and the NCO is a serial phasor recursion that cannot be split without changing
+its bits. The channels themselves are independent, so the channelizer now runs
+them in parallel:
+
+- `wavekit-chan` keeps a pool of `min(available_parallelism − 1, 3)` helper
+  threads (`dsp_pool::dsp_helpers`). With the main thread that is at most 4 DSP
+  threads, half of an 8-thread desktop. A 4-core Pi gets 3 helpers and a
+  1-core host none, which is the old serial loop. The helpers start on the first
+  block worth splitting. There is no configuration key.
+- A block of at least 2 048 input samples (`PARALLEL_MIN_SAMPLES`) with two or
+  more channels open is split: each channel's engine moves to whichever thread
+  takes it, runs the whole block and moves back. The main thread takes jobs too,
+  so a helper that is slow to wake costs at most the serial time. Handing a job
+  to a helper and back costs about 12 µs, against about 60 µs of DSP for 2 048
+  samples on one narrowband channel. Smaller blocks stay on the main thread.
+- Output is byte-identical to the serial loop. A channel runs every block in
+  order on one thread at a time, and queueing and events then follow the serial
+  channel order. The equivalence property
+  `dsp_pool_output_and_events_match_the_serial_loop` compares queue bytes,
+  counters and events of a pooled and a serial runtime over random IQ and demod
+  channel sets and random block splits. The pinned Intel macOS output hashes in
+  `channel.rs` still match.
+- The cu8 input conversion uses a 256-entry table built at compile time from the
+  same expression, so it is bit-identical (tested for every byte).
+
+Unpaced, 2.4 Msps, 4 channels, base (head before the pool) and pooled builds
+alternated, 3 runs each, 12 s per run. The host was shared with other work, at a
+one-minute load average of 60 to 250 on 8 threads:
+
+| Build  | Hogs | Headroom per run    | CPU s per Msample | Load average (1 min, after) |
+| ------ | ---- | ------------------- | ----------------- | --------------------------- |
+| serial | 0    | 1.18×, 1.88×, 1.34× | 0.128–0.134       | 64, 221, 211                |
+| pooled | 0    | 3.13×, 5.52×, 3.38× | 0.132–0.140       | 159, 167, 234               |
+| serial | 8    | 0.95×, 1.06×, 1.07× | 0.129–0.132       | 219, 166, 231               |
+| pooled | 8    | 2.56×, 3.28×, 2.29× | 0.132–0.146       | 237, 188, 251               |
+
+The serial runs with no hogs fall below the 3.0× in the table above because the
+host was far busier this time. The pool costs 3 to 10 % more CPU per Msample
+(hand-off, and the threads contending for cache). Paced 2.4 Msps with 8 hogs for
+15 s at a load average of about 280: the serial build entered drop-mode 62 times
+and lost 12.2 MB to absorber overflow, the pooled build entered it 0 times and
+lost nothing.

@@ -1,8 +1,10 @@
 //! The `wavekit-chan` process (addendum §11): IQ on stdin, JSON-lines control on `--control-fd`
 //! (plan A1), events on stdout, logs on stderr, one Unix socket per channel (D3).
 //!
-//! The main thread owns every channel's DSP. Each channel's socket has one writer thread that
-//! accepts exactly one client and drains the channel's bounded queue into it.
+//! The main thread owns every channel's DSP. For a large enough block it lends the engines to a
+//! bounded pool of DSP helper threads (`dsp_pool`) and takes them back before anything else
+//! touches them. Each channel's socket has one writer thread that accepts exactly one client and
+//! drains the channel's bounded queue into it.
 
 use crate::{
     admission,
@@ -14,6 +16,7 @@ use crate::{
         self, Admission, AttemptPermits, Disposal, PayloadPublisher, RuntimePermits,
         WriterPublisher, SLOTS,
     },
+    dsp_pool::{dsp_helpers, DspPool, Job},
     framing::{self, FrameSink},
     preparation::{Planner, Prepared, SubmitError},
     protocol::{
@@ -73,6 +76,9 @@ type ConnSlot = Arc<Mutex<Conn>>;
 enum Engine {
     Iq(Box<ChannelDsp>),
     Demod(Box<DemodChannel>),
+    /// In a `DspPool` job for the current block; only `Runtime::feed` sees this, and it puts the
+    /// engine back before it returns.
+    Lent,
 }
 
 impl Engine {
@@ -80,6 +86,7 @@ impl Engine {
         match self {
             Engine::Iq(dsp) => dsp.reset(),
             Engine::Demod(dsp) => dsp.reset(),
+            Engine::Lent => unreachable!("DSP engine still lent"),
         }
     }
 
@@ -87,6 +94,7 @@ impl Engine {
         match self {
             Engine::Iq(dsp) => dsp.output_rate(),
             Engine::Demod(_) => DEMOD_OUTPUT_RATE_HZ,
+            Engine::Lent => unreachable!("DSP engine still lent"),
         }
     }
 
@@ -100,7 +108,27 @@ impl Engine {
         match self {
             Engine::Iq(dsp) => dsp.process(i, q, out),
             Engine::Demod(dsp) => dsp.process(i, q, out, events),
+            Engine::Lent => unreachable!("DSP engine still lent"),
         }
+    }
+}
+
+/// Below this many input samples a block runs on the main thread alone: handing 2 048 samples
+/// to a helper and back costs ≈ 12 µs, against ≈ 60 µs of DSP per narrowband channel
+/// (≈ 28 ns per input sample, `examples/chan_bench.rs`). Output is the same bytes either way.
+const PARALLEL_MIN_SAMPLES: usize = 2048;
+
+/// One channel's block for the DSP pool: its engine and the buffers `Engine::process` fills.
+struct ChannelJob {
+    engine: Engine,
+    out: Vec<u8>,
+    events: Vec<Value>,
+    outcome: ProcessOutcome,
+}
+
+impl Job for ChannelJob {
+    fn run(&mut self, i: &[f32], q: &[f32]) {
+        self.outcome = self.engine.process(i, q, &mut self.out, &mut self.events);
     }
 }
 
@@ -176,6 +204,10 @@ pub struct Runtime {
     disposal: Option<Disposal>,
     retired: [Option<Retired>; SLOTS],
     reap_cursor: usize,
+    /// Helper threads start on the first block worth splitting.
+    pool: DspPool<ChannelJob>,
+    /// Output buffers for pool jobs, kept between blocks.
+    scratch: Vec<Vec<u8>>,
 }
 
 /// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
@@ -201,6 +233,11 @@ fn schema_id(id: &str) -> &str {
 
 impl Runtime {
     pub fn new(args: Args, sink: Box<dyn FnMut(Value) + Send>) -> Self {
+        let parallelism = thread::available_parallelism().map_or(1, |n| n.get());
+        Self::with_dsp_helpers(args, sink, dsp_helpers(parallelism))
+    }
+
+    fn with_dsp_helpers(args: Args, sink: Box<dyn FnMut(Value) + Send>, helpers: usize) -> Self {
         let (gone_tx, gone_rx) = mpsc::channel();
         Runtime {
             args,
@@ -218,6 +255,8 @@ impl Runtime {
             disposal: None,
             retired: std::array::from_fn(|_| None),
             reap_cursor: 0,
+            pool: DspPool::new(helpers),
+            scratch: Vec::new(),
         }
     }
 
@@ -675,6 +714,7 @@ impl Runtime {
             Some(ch) => match &mut ch.dsp {
                 Engine::Iq(_) => Some("not a demod channel".to_string()),
                 Engine::Demod(dsp) => dsp.queue_retune(&req).err(),
+                Engine::Lent => unreachable!("DSP engine still lent"),
             },
         };
         if let Some(detail) = rejected {
@@ -689,6 +729,7 @@ impl Runtime {
             Some(ch) => match &mut ch.dsp {
                 Engine::Iq(_) => Some("not a demod channel".to_string()),
                 Engine::Demod(dsp) => dsp.queue_squelch(&req).err(),
+                Engine::Lent => unreachable!("DSP engine still lent"),
             },
         };
         if let Some(detail) = rejected {
@@ -882,6 +923,9 @@ impl Runtime {
         if i.is_empty() {
             return;
         }
+        if self.pool.helpers() > 0 && self.channels.len() > 1 && i.len() >= PARALLEL_MIN_SAMPLES {
+            return self.feed_parallel(i, q);
+        }
         let mut events = Vec::new();
         let mut out = Vec::new();
         for (id, ch) in self.channels.iter_mut() {
@@ -891,6 +935,46 @@ impl Runtime {
             let first = ch.out_samples;
             ch.out_samples += r.samples;
             push_output(id, ch, &out, first, &mut events);
+        }
+        for e in events {
+            self.emit(e);
+        }
+    }
+
+    /// `feed` with the engines run on the DSP pool. Every channel's block is processed before any
+    /// output is queued; queueing and events then follow the serial loop's channel order, so the
+    /// bytes, counters and event order are the same as `feed`'s.
+    fn feed_parallel(&mut self, i: &[f32], q: &[f32]) {
+        let jobs: Vec<ChannelJob> = self
+            .channels
+            .values_mut()
+            .map(|ch| ChannelJob {
+                engine: std::mem::replace(&mut ch.dsp, Engine::Lent),
+                out: self.scratch.pop().unwrap_or_default(),
+                events: Vec::new(),
+                outcome: ProcessOutcome {
+                    samples: 0,
+                    saturated: 0,
+                },
+            })
+            .collect();
+        let done = self.pool.run(jobs, i, q);
+        let mut events = Vec::new();
+        for ((id, ch), job) in self.channels.iter_mut().zip(done) {
+            let ChannelJob {
+                engine,
+                mut out,
+                events: produced,
+                outcome: r,
+            } = job;
+            ch.dsp = engine;
+            events.extend(produced);
+            ch.saturated += r.saturated;
+            let first = ch.out_samples;
+            ch.out_samples += r.samples;
+            push_output(id, ch, &out, first, &mut events);
+            out.clear();
+            self.scratch.push(out);
         }
         for e in events {
             self.emit(e);
@@ -1454,13 +1538,8 @@ mod tests {
         assert!(path.exists());
     }
 
-    fn rt(dir: &Path) -> (Runtime, Events) {
-        let events: Events = Arc::new(Mutex::new(Vec::new()));
-        let sink = {
-            let e = events.clone();
-            Box::new(move |v| e.lock().unwrap().push(v))
-        };
-        let args = crate::args::Args {
+    fn test_args(dir: &Path) -> crate::args::Args {
+        crate::args::Args {
             generation: 7,
             input_rate: 2_048_000,
             input_center: 162e6,
@@ -1468,8 +1547,15 @@ mod tests {
             block_samples: 1024,
             socket_dir: dir.into(),
             control_fd: 3,
+        }
+    }
+    fn rt(dir: &Path) -> (Runtime, Events) {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let e = events.clone();
+            Box::new(move |v| e.lock().unwrap().push(v))
         };
-        (Runtime::new(args, sink), events)
+        (Runtime::new(test_args(dir), sink), events)
     }
     fn open(id: &str, center: f64, queue: usize) -> Request {
         parse_request(&format!(r#"{{"v":1,"type":"open","id":"{id}","centerHz":{center},"bandwidthHz":45600,"transitionHz":1200,"outputRateHz":48000,"format":"cf32","queueBytes":{queue}}}"#)).unwrap()
@@ -1498,7 +1584,7 @@ mod tests {
             .iter()
             .map(|id| match &mut r.channels.get_mut(*id).unwrap().dsp {
                 Engine::Iq(dsp) => dsp.process_f32(&i, &q),
-                Engine::Demod(_) => unreachable!(),
+                Engine::Demod(_) | Engine::Lent => unreachable!(),
             })
             .collect();
         assert!(!outputs[0].0.is_empty());
@@ -2773,5 +2859,85 @@ mod tests {
             "overhead {:.1} % over {samples} samples",
             overhead * 100.0
         );
+    }
+
+    fn rt_with_helpers(dir: &Path, helpers: usize) -> (Runtime, Events) {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let e = events.clone();
+            Box::new(move |v| e.lock().unwrap().push(v))
+        };
+        (
+            Runtime::with_dsp_helpers(test_args(dir), sink, helpers),
+            events,
+        )
+    }
+
+    fn iq_open_as(id: &str, offset_hz: f64, rate: u64, format: &str, queue: usize) -> Request {
+        let (bw, tr) = (rate as f64 * 0.8, rate as f64 * 0.05);
+        parse_request(&format!(
+            r#"{{"v":1,"type":"open","id":"{id}","centerHz":{},"bandwidthHz":{bw},"transitionHz":{tr},"outputRateHz":{rate},"format":"{format}","queueBytes":{queue}}}"#,
+            162e6 + offset_hz
+        ))
+        .unwrap()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        // Feature: core-channelizer, Property 4: Chunk-split independence (DSP pool)
+        // Validates: addendum §12.4
+        #[test]
+        fn dsp_pool_output_and_events_match_the_serial_loop(
+            channels in proptest::collection::vec(
+                (0usize..5, -24i32..24, 0usize..3, any::<bool>()), 1..6),
+            input in proptest::collection::vec(any::<u8>(), 1..60_000),
+            mut cuts in proptest::collection::vec(0usize..60_000, 0..12),
+        ) {
+            const RATES: [u64; 5] = [24_000, 48_000, 250_000, 384_000, 1_000_000];
+            let (pd, sd) = (TempDir::new(), TempDir::new());
+            let (mut par, pev) = rt_with_helpers(&pd.0, crate::dsp_pool::MAX_DSP_HELPERS);
+            let (mut ser, sev) = rt_with_helpers(&sd.0, 0);
+            for (n, &(rate, off, queue, cf32)) in channels.iter().enumerate() {
+                let id = format!("c{n}");
+                // A small queue overflows, so drop runs and their events are compared too.
+                let queue = [512usize, 8192, 1 << 20][queue];
+                let req = || if rate == 4 && !cf32 {
+                    demod_open(&id, queue, n % 2 == 0)
+                } else {
+                    iq_open_as(&id, off as f64 * 25_000.0, RATES[rate], if cf32 { "cf32" } else { "cu8" }, queue)
+                };
+                par.request_and_wait(req());
+                ser.request_and_wait(req());
+            }
+            // Some random opens fall outside admission; both runtimes refuse the same ones.
+            let ids: Vec<String> = ser.channels.keys().cloned().collect();
+            prop_assert_eq!(par.channels.keys().cloned().collect::<Vec<_>>(), ids.clone());
+            let (p0, s0) = (pev.lock().unwrap().len(), sev.lock().unwrap().len());
+            cuts.sort_unstable();
+            let mut last = 0;
+            let mut split = false;
+            for c in cuts.into_iter().map(|c| c.min(input.len())).chain(std::iter::once(input.len())) {
+                if c < last {
+                    continue;
+                }
+                // The assembler emits whole pairs counted from the stream start.
+                split |= c / 2 - last / 2 >= PARALLEL_MIN_SAMPLES && ids.len() > 1;
+                par.on_input(&input[last..c]);
+                ser.on_input(&input[last..c]);
+                last = c;
+            }
+            prop_assert_eq!(par.pool.started() > 0, split);
+            for id in &ids {
+                prop_assert_eq!(par.channels[id].out_samples, ser.channels[id].out_samples);
+                prop_assert_eq!(par.channels[id].dropped, ser.channels[id].dropped);
+                prop_assert_eq!(par.channels[id].saturated, ser.channels[id].saturated);
+                prop_assert_eq!(take_queue(&par, id), take_queue(&ser, id), "channel {}", id);
+            }
+            let pe = pev.lock().unwrap()[p0..].to_vec();
+            let se = sev.lock().unwrap()[s0..].to_vec();
+            prop_assert_eq!(pe, se);
+            par.shutdown();
+            ser.shutdown();
+        }
     }
 }

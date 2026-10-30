@@ -3,6 +3,19 @@ pub fn cu8_to_f32(u: u8) -> f32 {
     (u as f64 / 127.5 - 1.0) as f32
 }
 
+/// `cu8_to_f32` for every byte, built at compile time with the same f64 arithmetic (basic IEEE
+/// operations round the same in const evaluation), so a lookup is bit-identical and skips the
+/// divide on the per-sample input path.
+const CU8_TABLE: [f32; 256] = {
+    let mut t = [0f32; 256];
+    let mut u = 0usize;
+    while u < 256 {
+        t[u] = (u as f64 / 127.5 - 1.0) as f32;
+        u += 1;
+    }
+    t
+};
+
 /// csdr `convert -i float -o char` (x * UCHAR_MAX * 0.5 + 128, truncated) with saturation.
 pub fn f32_to_cu8(x: f32, gain: f32) -> (u8, bool) {
     let v = ((x * gain * 255.0f32) as f64) * 0.5 + 128.0;
@@ -28,8 +41,8 @@ impl InputAssembler {
         if let Some(first) = self.carry.take() {
             match rest.split_first() {
                 Some((&second, tail)) => {
-                    i.push(cu8_to_f32(first));
-                    q.push(cu8_to_f32(second));
+                    i.push(CU8_TABLE[first as usize]);
+                    q.push(CU8_TABLE[second as usize]);
                     self.consumed_bytes += 2;
                     rest = tail;
                 }
@@ -43,9 +56,11 @@ impl InputAssembler {
         if let [odd] = remainder {
             self.carry = Some(*odd);
         }
+        i.reserve(pairs.len());
+        q.reserve(pairs.len());
         for &[iu, qu] in pairs {
-            i.push(cu8_to_f32(iu));
-            q.push(cu8_to_f32(qu));
+            i.push(CU8_TABLE[iu as usize]);
+            q.push(CU8_TABLE[qu as usize]);
         }
         self.consumed_bytes += (pairs.len() * 2) as u64;
     }
@@ -70,6 +85,23 @@ mod tests {
         }
         assert_eq!(cu8_to_f32(0), -1.0);
         assert_eq!(cu8_to_f32(255), 1.0);
+    }
+    #[test]
+    fn lookup_table_is_bit_identical_to_the_conversion() {
+        for u in 0..=255u8 {
+            assert_eq!(
+                CU8_TABLE[u as usize].to_bits(),
+                cu8_to_f32(u).to_bits(),
+                "byte {u}"
+            );
+        }
+        let bytes: Vec<u8> = (0..=255u8).flat_map(|u| [u, 255 - u]).collect();
+        let (mut i, mut q) = (Vec::new(), Vec::new());
+        InputAssembler::default().push(&bytes, &mut i, &mut q);
+        for (k, (x, y)) in i.iter().zip(&q).enumerate() {
+            assert_eq!(x.to_bits(), cu8_to_f32(k as u8).to_bits());
+            assert_eq!(y.to_bits(), cu8_to_f32(255 - k as u8).to_bits());
+        }
     }
     #[test]
     fn saturates_and_counts() {
