@@ -162,6 +162,20 @@ describe("a REST write takes the tuner from a band-gain sweep", () => {
 		expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
 	})
 
+	it("a REST tuner gain index that takes the tuner is the operator's gain: no restore over it", async () => {
+		const h = await setup(false)
+		await manual(h.controller, 496)
+		await sweepOnBand(h)
+		const mark = h.writes.length
+		await h.controller.setTunerGainIndex("rtl", 12, REST)
+		await settle()
+		expect(
+			h.writes
+				.slice(mark)
+				.filter(([c]) => c === SET_GAIN || c === SET_GAIN_MODE),
+		).toEqual([])
+	})
+
 	it("REST sample rate: the operator's gain comes back", async () => {
 		const h = await setup(false)
 		await manual(h.controller, 496)

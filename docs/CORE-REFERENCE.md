@@ -180,7 +180,13 @@ Why these defaults:
 - Anything without an entry keeps your gain too.
 
 `gain` is tenths of a dB (0-500) or `keep`, snapped to the tuner's nearest gain step when the
-receiver advertises its tuner. Change the table at runtime with `PUT /api/tuner-band-gain`
+receiver advertises its tuner. Before the receiver's capabilities are known (just after
+startup) the configured value is written as is, and `rtl_tcp` sets the nearest step itself.
+
+Only a tuner gain choice makes a gain yours and replaces the saved one: a gain, a gain mode, or
+a tuner gain index (`rtl_tcp` command 0x0d sets the same tuner stage from its gain table). The
+RTL2832 digital AGC (`agcMode`), IF gain and tuner IF gain are separate stages: they keep the
+saved gain and the band gain. Change the table at runtime with `PUT /api/tuner-band-gain`
 ([API.md](API.md#per-band-gain-get-and-put-apituner-band-gain)); a saved PUT replaces this
 whole section until `<stateDir>/tuner-band-gain.json` is deleted.
 

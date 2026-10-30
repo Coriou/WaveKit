@@ -1,8 +1,9 @@
 /**
  * TunerState.bandGain: reported only while a band gain is confirmed on the tuner. Set after
  * the band's writes succeed; cleared by a later gain, gain mode or frequency write, a relay
- * client, a control hand-over or the gain becoming unknown. IF gain and gain index writes set
- * other gain stages: they keep both the band gain and the saved pre-band gain.
+ * client, a control hand-over or the gain becoming unknown. A tuner gain index write sets the
+ * same tuner stage and counts as a gain choice; RTL AGC and IF gain writes set other stages:
+ * they keep both the band gain and the saved pre-band gain.
  */
 import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
@@ -186,7 +187,6 @@ describe("TunerState.bandGain", () => {
 	it.each([
 		["SET_IF_GAIN", 0x06, 30],
 		["SET_TUNER_IF_GAIN", 0x0f, (1 << 16) | 30],
-		["SET_TUNER_GAIN_INDEX", 0x0d, 12],
 		["SET_AGC_MODE (RTL2832 digital AGC)", 0x08, 1],
 	])(
 		"a relay %s sets another gain stage: the saved AGC mode still comes back",
@@ -201,7 +201,10 @@ describe("TunerState.bandGain", () => {
 		},
 	)
 
-	it.each([["SET_GAIN_MODE", 0x03, 1]])(
+	it.each([
+		["SET_GAIN_MODE", 0x03, 1],
+		["SET_TUNER_GAIN_INDEX", 0x0d, 12],
+	])(
 		"a relay %s is a gain choice: the saved pre-band gain is dropped",
 		async (_name, command, value) => {
 			const { controller } = setup(true)
@@ -217,10 +220,6 @@ describe("TunerState.bandGain", () => {
 
 	it.each([
 		["setIfGain", (c: TunerController) => c.setIfGain("rtl", 30, REST)],
-		[
-			"setTunerGainIndex",
-			(c: TunerController) => c.setTunerGainIndex("rtl", 12, REST),
-		],
 		[
 			"setTunerIfGain",
 			(c: TunerController) => c.setTunerIfGain("rtl", 1, 30, REST),
@@ -246,6 +245,27 @@ describe("TunerState.bandGain", () => {
 			expect(controller.getState("rtl")?.bandGain).toBeUndefined()
 		},
 	)
+
+	it("a REST tuner gain index is a gain choice: band gain cleared, the saved gain never comes back", async () => {
+		const { controller } = setup(true)
+		await manual(controller, 100)
+		await controller.setFrequency("rtl", ISM, REST)
+		await controller.setTunerGainIndex("rtl", 12, REST)
+		expect(controller.getState("rtl")?.bandGain).toBeUndefined()
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(400)
+	})
+
+	it("a PATCH tuner gain index equal to the tuner's is still a gain choice", async () => {
+		const { controller } = setup(true)
+		await manual(controller, 100)
+		await controller.setTunerGainIndex("rtl", 12, REST)
+		await manual(controller, 100)
+		await controller.setFrequency("rtl", ISM, REST)
+		await controller.configure("rtl", { tunerGainIndex: 12 }, REST)
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(400)
+	})
 
 	it("noteBandGainApplied (scanner) is ignored unless the tuner shows that manual gain at that frequency", async () => {
 		const { controller } = setup(false)

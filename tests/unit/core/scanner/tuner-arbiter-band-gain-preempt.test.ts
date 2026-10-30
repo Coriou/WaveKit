@@ -319,7 +319,6 @@ describe("TunerArbiter per-band gain: a lost lease puts the operator's gain back
 					"set-freq-correction",
 					"set-agc-mode",
 					"set-if-gain",
-					"set-tuner-gain-index",
 				),
 				async (gainMode, gain, hops, command) => {
 					const h = harness({ gainMode, gain })

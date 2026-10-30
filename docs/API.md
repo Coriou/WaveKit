@@ -1365,8 +1365,9 @@ wrote it for the current frequency (or found it already there) and the tuner's k
 is manual with exactly that gain. `tenthsDb` is the value written, snapped to the tuner's gain
 step (a 40.0 dB entry reads `402` on an R820T); `label` is the entry's; `owner` is `scanner` (a
 scanner job's hop) or `user` (your retune with `applyToMyTuning` on). Any later gain, gain mode
-or frequency write, a relay client, a control hand-over or the gain becoming unknown removes it.
-IF gain and gain index writes set other gain stages and keep it. Turning `applyToMyTuning` on
+or frequency write, a tuner gain index write, a relay client, a control hand-over or the gain
+becoming unknown removes it. RTL AGC (`agcMode`), IF gain and tuner IF gain writes set other
+gain stages and keep it. Turning `applyToMyTuning` on
 adds nothing until your next retune.
 
 ```bash
@@ -1487,9 +1488,9 @@ through these routes) does **not** change gain unless `applyToMyTuning` is on. W
 tuning into a listed range applies its gain, and tuning out of the bands puts back the gain
 mode and gain you had before (kept in `<stateDir>/tuner-band-gain-saved.json`, so a restart
 inside a band still restores it). The band gain goes on only after that file is written; if
-writing it fails, your gain stays and the failure is logged. Setting a gain or gain mode
+writing it fails, your gain stays and the failure is logged. Setting a gain, gain mode or tuner gain index
 yourself inside a band makes that your gain, also in a `PATCH …/config` whose value equals the
-tuner's, while RTL AGC (`agcMode`), IF gain and gain index writes set other stages and do not. Overlapping retunes of one
+tuner's, while RTL AGC (`agcMode`), IF gain and tuner IF gain writes set other stages and do not. Overlapping retunes of one
 source then run one at a time. Relay clients (SDR++) are never touched.
 
 ```bash

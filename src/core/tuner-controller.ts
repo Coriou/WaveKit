@@ -454,7 +454,7 @@ export class TunerController extends EventEmitter {
 	 * The operator's gain mode and gain from before "apply to my tuning" first changed them
 	 * (null when they were unknown then; an AGC gain may be unknown, null). Restored, and
 	 * cleared, when an operator retune leaves the bands with a gain; an operator gain or gain
-	 * mode choice clears it (RTL AGC, IF gain and gain index writes do not). Persisted through
+	 * mode or gain index choice clears it (RTL AGC and IF gain writes do not). Persisted through
 	 * the band gain settings, so a restart inside a band still restores it on leaving; kept
 	 * across a source's teardown and reconnect for the same reason.
 	 */
@@ -1044,10 +1044,12 @@ export class TunerController extends EventEmitter {
 		// A relay client's tuning write supersedes the band gain.
 		this.appliedBandGain.delete(sourceId)
 		// A relay gain or gain mode choice is the operator's newest gain: never restore the older
-		// one over it. RTL2832 digital AGC, IF gain and gain index writes set other stages and keep it.
+		// one over it. Gain index sets the same tuner stage, so it counts; RTL2832 digital AGC and IF gain writes
+		// set other stages and keep it.
 		if (
 			command === RTL_TCP_COMMANDS.SET_GAIN ||
-			command === RTL_TCP_COMMANDS.SET_GAIN_MODE
+			command === RTL_TCP_COMMANDS.SET_GAIN_MODE ||
+			command === RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX
 		) {
 			this.dropOperatorGain(sourceId)
 			// Also cancels a scanner restore owed from a lost lease.
@@ -1597,6 +1599,9 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("tunerGainIndex", index)
+		// rtl_tcp 0x0d sets the same tuner gain stage by table index: a gain choice, as setGain.
+		this.noteGainChoice(sourceId, opts)
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
@@ -1605,7 +1610,7 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.tunerGainIndex = index
-		// Another gain stage: the band gain and the saved pre-band gain stay.
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1767,7 +1772,8 @@ export class TunerController extends EventEmitter {
 			updates.tunerGainIndex !== state.tunerGainIndex
 		) {
 			await this.setTunerGainIndex(sourceId, updates.tunerGainIndex, opts)
-		}
+		} else if (updates.tunerGainIndex !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts, true)
 		if (
 			updates.tunerIfGain !== undefined &&
 			!this.isSameTunerIfGain(updates.tunerIfGain, state.tunerIfGain)

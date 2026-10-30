@@ -198,6 +198,7 @@ interface GainRecovery {
 const GAIN_CHOICE_COMMANDS: ReadonlySet<string> = new Set([
 	"set-gain",
 	"set-gain-mode",
+	"set-tuner-gain-index",
 ])
 
 function toError(err: unknown): Error {

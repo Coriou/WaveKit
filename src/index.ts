@@ -1321,7 +1321,8 @@ async function main(): Promise<void> {
 		tunerController.setBandGain(bandGain)
 		// Band gains snap to the tuner's advertised gain steps when its table is known. Wired
 		// before the scanner exists; the capabilities provider is attached once it is built
-		// below (until then, and without a known table, the configured value is written).
+		// below (until then, and without a known table, the configured value is written unsnapped;
+		// rtl_tcp then sets the tuner's nearest gain step itself).
 		let gainStepsOf: ((id: string) => readonly number[] | null) | null = null
 		tunerController.setGainStepsResolver(id => gainStepsOf?.(id) ?? null)
 		const { config: liveDemodConfig, publicOrigin: legacyAudioOrigin } =
