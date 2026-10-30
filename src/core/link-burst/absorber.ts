@@ -13,7 +13,26 @@ export const ABSORBER_RECOVERY_MS = 5_000
 // A relapse in the next recovery-length interval needs no second hold.
 export const ABSORBER_REINCLUSION_COOLDOWN_MS = 5_000
 
-export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
+/**
+ * Which branches held the absorber when it overflowed: a congested branch
+ * holds input for every branch, so overflow during its hold is its loss.
+ */
+export interface OverflowGates {
+	/**
+	 * Overflow bytes lost while each branch (fanout id) held the absorber,
+	 * totals since creation; a removed branch's total is forgotten.
+	 */
+	overflowGatedBy(): Readonly<Record<string, number>>
+}
+
+export const hasOverflowGates = (
+	absorber: BurstAbsorber,
+): absorber is BurstAbsorber & OverflowGates =>
+	typeof (absorber as Partial<OverflowGates>).overflowGatedBy === "function"
+
+export function createBurstAbsorber(
+	deps: BurstAbsorberDeps,
+): BurstAbsorber & OverflowGates {
 	const { fanout, recorder, monoNow, frameBytes, log } = deps
 	let ring: Buffer | null = null
 	let head = 0
@@ -35,6 +54,7 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 	const since = new Map<string, number>()
 	const recovering = new Map<string, number>()
 	const reincluded = new Map<string, number>()
+	const gatedOverflow = new Map<string, number>()
 	let releaseStarted = false
 	const branchStates = [since, recovering, reincluded]
 	let deadline: ReturnType<typeof setTimeout> | null = null
@@ -239,6 +259,7 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 		excluded.delete(id)
 		recovering.delete(id)
 		reincluded.delete(id)
+		gatedOverflow.delete(id)
 		wake()
 	}
 	fanout.on("backpressure", backpressure)
@@ -308,6 +329,12 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 			}
 			const lost = chunk.length - accepted
 			if (lost > 0) {
+				// Overflow path only: refresh the hold and charge the branches
+				// holding it (congested, active and not excluded).
+				gated(now)
+				for (const id of congested)
+					if (active.has(id) && !excluded.has(id))
+						gatedOverflow.set(id, (gatedOverflow.get(id) ?? 0) + lost)
 				overflow += lost
 				overflowChunks++
 				overflows[index()] = overflows[index()]! + lost
@@ -345,6 +372,9 @@ export function createBurstAbsorber(deps: BurstAbsorberDeps): BurstAbsorber {
 					maxLaggardExcludeMs: maxExclude < 0 ? null : maxExclude,
 				},
 			}
+		},
+		overflowGatedBy() {
+			return Object.fromEntries(gatedOverflow)
 		},
 		dispose() {
 			if (disposed) return

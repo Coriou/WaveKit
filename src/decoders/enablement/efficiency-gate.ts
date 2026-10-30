@@ -5,6 +5,7 @@ import type {
 	DropAttribution,
 } from "@wavekit/api-types"
 import {
+	chargesBranch,
 	channelizerBaseCores,
 	LATE_SHED_WINDOWS,
 	LATE_SHED_HITS,
@@ -19,6 +20,7 @@ import {
 } from "./contract.js"
 import type {
 	AdmissionDecision,
+	ChargedDrop,
 	LateDropWindow,
 	EfficiencyGate,
 	EfficiencyInputs,
@@ -74,6 +76,16 @@ export interface DropReader {
 	lastSampleMono?(): number | null
 	/** True for a positive drop delta observed by a sample within [fromMono, toMono]. */
 	droppedBetweenMono?(id: string, fromMono: number, toMono: number): boolean
+	/**
+	 * The drop samples within [fromMono, toMono] with the branches charged with
+	 * each. With it, probation judges a placement only by drops charged to the
+	 * branch it reads; without it, every drop on the source judges it.
+	 */
+	chargedDropsBetweenMono?(
+		id: string,
+		fromMono: number,
+		toMono: number,
+	): readonly ChargedDrop[]
 }
 
 export function createEfficiencyGate(
@@ -133,6 +145,10 @@ export function createEfficiencyGate(
 		}
 	}
 	const lateSince = new Map<string, number>()
+	/** When a tuned-band probationer's loss last shed a scapegoat on each source. */
+	const scapegoatAt = new Map<string, number>()
+	/** Per tuned-band probationer: host loss before this time was already judged. */
+	const hostJudged = new Map<string, number>()
 	const cooldownUntil = new Map<string, number>()
 	const warned = new Map<string, Map<string, number>>()
 	let lastLateMono: number | null = null
@@ -218,6 +234,7 @@ export function createEfficiencyGate(
 			for (const key of admittedMono.keys())
 				if (!present.has(key) && !reconnectRetained.has(key)) {
 					earned.delete(key)
+					hostJudged.delete(key)
 					placementEpochs.delete(key)
 					admittedMono.delete(key)
 					originalFailed.delete(key)
@@ -228,7 +245,46 @@ export function createEfficiencyGate(
 		for (const placement of running)
 			if (!admittedMono.has(placement.key)) mark(placement.key, mono)
 	}
-	/** Drops or CPU over the limit observed in [admitted, until]. */
+	/**
+	 * The drop samples on a source within [from, to] with their charged
+	 * branches; null when the reader does not scope drops by branch.
+	 * Unreadable or malformed evidence is no drop.
+	 */
+	const chargedDrops = (
+		sourceId: string,
+		from: number,
+		to: number,
+	): readonly ChargedDrop[] | null => {
+		const read = deps.drops?.chargedDropsBetweenMono
+		if (read === undefined) return null
+		try {
+			const value: unknown =
+				typeof read === "function"
+					? read.call(deps.drops, sourceId, from, to)
+					: []
+			return Array.isArray(value)
+				? value.filter(
+						(d: ChargedDrop) =>
+							d &&
+							valid(d.atMono) &&
+							d.atMono >= from &&
+							d.atMono <= to &&
+							(d.branches === "source" ||
+								(Array.isArray(d.branches) &&
+									d.branches.every((b: unknown) => typeof b === "string"))),
+					)
+				: []
+		} catch {
+			return []
+		}
+	}
+	/**
+	 * Drops or CPU over the limit observed in [admitted, until]. Drops judge a
+	 * placement only when charged to the branch it reads (or the source as a
+	 * whole), as late drops do. A placement naming no input branch, or a
+	 * reader without branch evidence, is judged by every drop on the source:
+	 * probation fails closed where it cannot tell whose loss it was.
+	 */
 	const evidence = (
 		p: RunningPlacement,
 		admitted: number,
@@ -237,7 +293,14 @@ export function createEfficiencyGate(
 		let dropped = false
 		try {
 			const reader = deps.drops
-			if (until === Infinity)
+			const charged = chargedDrops(p.sourceId, admitted, until)
+			if (charged !== null)
+				dropped = charged.some(
+					d =>
+						p.inputBranch === undefined ||
+						chargesBranch(d.branches, p.inputBranch),
+				)
+			else if (until === Infinity)
 				dropped = reader?.droppedSinceMono(p.sourceId, admitted) ?? false
 			else if (reader?.droppedBetweenMono)
 				dropped = reader.droppedBetweenMono(p.sourceId, admitted, until)
@@ -475,11 +538,7 @@ export function createEfficiencyGate(
 		// an unscoped window (no branch list) or upstream loss no branch can be
 		// charged with (absorber overflow, "source") condemns the whole source.
 		const condemns = (w: LateDropWindow, p: RunningPlacement) =>
-			w.condemning &&
-			(w.condemnedBranches === undefined ||
-				w.condemnedBranches === "source" ||
-				(p.inputBranch !== undefined &&
-					w.condemnedBranches.includes(p.inputBranch)))
+			w.condemning && chargesBranch(w.condemnedBranches, p.inputBranch)
 		// Windows that condemn some placement on the source: drops only on a
 		// branch no decoder reads (live audio) condemn nothing.
 		const condemningWindows = windows.filter(w =>
@@ -823,43 +882,86 @@ export function createEfficiencyGate(
 			}[] = []
 			for (const { placement, admitted } of newest.values()) {
 				if (valid(mono)) lateSince.set(placement.sourceId, mono)
+				if (placement.mode === "always" || placement.startMode === "operator")
+					continue
 				const detail = evidence(placement, admitted)
-				if (
-					detail &&
-					placement.mode !== "always" &&
-					placement.startMode !== "operator"
-				) {
-					// Tuned band: a tuned-band probationer's loss sheds the newest
-					// sheddable untuned placement instead (on its source for drops,
-					// anywhere for CPU); the tuned one restarts its probation, so
-					// it is shed only when nothing untuned is left.
-					const scapegoat =
-						placement.tunedBand === true
-							? running
-									.filter(
-										p =>
-											p.key !== placement.key &&
-											p.tunedBand !== true &&
-											sheddable(p) &&
-											(detail === "cpu" || p.sourceId === placement.sourceId) &&
-											!verdicts.some(v => v.key === p.key),
-									)
-									.reduce<
-										RunningPlacement | undefined
-									>((best, p) => (!best || (admittedMono.get(p.key) ?? 0) > (admittedMono.get(best.key) ?? 0) ? p : best), undefined)
-							: undefined
-					if (scapegoat && valid(mono)) {
+				const tuned = placement.tunedBand === true
+				// Tuned band: host loss charged to a sibling branch some placement
+				// reads, while the probationer's own branch stayed clean, is its
+				// load on the host. Drops on a branch no placement reads (live
+				// audio) or charged to the source as a whole never count here.
+				let hostElsewhere = false
+				if (tuned && detail === null && valid(mono)) {
+					const read = new Set(
+						running
+							.filter(
+								p =>
+									p.sourceId === placement.sourceId &&
+									p.key !== placement.key &&
+									p.inputBranch !== undefined &&
+									p.inputBranch !== placement.inputBranch,
+							)
+							.map(p => p.inputBranch),
+					)
+					hostElsewhere = (
+						chargedDrops(
+							placement.sourceId,
+							Math.max(admitted, hostJudged.get(placement.key) ?? admitted),
+							mono,
+						) ?? []
+					).some(
+						d =>
+							d.code === "host" &&
+							d.branches !== "source" &&
+							d.branches.some(b => read.has(b)),
+					)
+					hostJudged.set(placement.key, justAfter(mono))
+				}
+				if (detail === null && !hostElsewhere) continue
+				// Tuned band: a tuned-band probationer's CPU loss, or host loss on a
+				// sibling's branch, sheds the newest sheddable untuned placement
+				// instead (on its source for drops, anywhere for CPU); the tuned one
+				// restarts its probation. Loss on its own branch is its own.
+				if (tuned && detail !== "drops" && valid(mono)) {
+					const candidates = running.filter(
+						p =>
+							p.key !== placement.key &&
+							p.tunedBand !== true &&
+							sheddable(p) &&
+							(detail === "cpu" || p.sourceId === placement.sourceId) &&
+							!verdicts.some(v => v.key === p.key),
+					)
+					// At most one scapegoat per source per clear window
+					// (EFFICIENCY_CLEAR_MS, 60 000 ms): a shed placement's relief
+					// shows only in later samples.
+					const scapegoat = candidates
+						.filter(
+							p =>
+								mono - (scapegoatAt.get(p.sourceId) ?? -Infinity) >=
+								EFFICIENCY_CLEAR_MS,
+						)
+						.reduce<
+							RunningPlacement | undefined
+						>((best, p) => (!best || (admittedMono.get(p.key) ?? 0) > (admittedMono.get(best.key) ?? 0) ? p : best), undefined)
+					if (scapegoat) {
 						failures.add(scapegoat.key)
-						verdicts.push({ key: scapegoat.key, detail })
-						// The loss is spent on the scapegoat: the restarted probation
-						// counts only drops and CPU strictly after this evaluation,
-						// so the same drop never condemns a second placement.
-						mark(placement.key, justAfter(mono))
+						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
+						scapegoatAt.set(scapegoat.sourceId, mono)
+					}
+					if (scapegoat || candidates.length > 0) {
+						// The loss is spent on the scapegoat, the one shed within this
+						// window included: the restarted probation counts only drops
+						// and CPU strictly after this evaluation, so the same loss
+						// never condemns a second placement.
+						if (detail === "cpu") mark(placement.key, justAfter(mono))
 						continue
 					}
-					failures.add(placement.key)
-					verdicts.push({ key: placement.key, detail })
 				}
+				// Host loss on a sibling's branch with nothing untuned left to shed:
+				// the tuned one is judged by its own branch and CPU only.
+				if (detail === null) continue
+				failures.add(placement.key)
+				verdicts.push({ key: placement.key, detail })
 			}
 			if (valid(mono))
 				for (const sourceId of new Set(running.map(p => p.sourceId))) {
@@ -940,6 +1042,7 @@ export function createEfficiencyGate(
 		},
 		forget(key) {
 			earned.delete(key)
+			hostJudged.delete(key)
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			admittedMono.delete(key)

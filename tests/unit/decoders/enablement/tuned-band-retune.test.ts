@@ -2,9 +2,7 @@ import { EventEmitter } from "node:events"
 import { expect, it } from "vitest"
 import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/efficiency-monitor.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
-import type { DropReader } from "../../../../src/decoders/enablement/efficiency-gate.js"
 import type {
-	LateDropWindow,
 	RunningPlacement,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
@@ -19,7 +17,10 @@ import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
  * at about t+188 s late drops shed it although an untuned placement ran.
  *
  * The monitor and the gate read one fake monotonic clock (`mono`), the
- * gate's own time source; samples are taken on it every 2000 ms.
+ * gate's own time source; samples are taken on it every 2000 ms. The monitor
+ * reads per-branch counters as the source router reports them: each
+ * decoder's own branch (`decoder-<key>`) and live audio's (`live-demod-s`,
+ * read by no placement), so late drops are scoped by branch (R7).
  */
 const placement = (
 	key: string,
@@ -46,57 +47,60 @@ const running = (p: WantedPlacement, at: number): RunningPlacement => ({
 	admittedAtMs: at,
 	mode: "auto",
 	startMode: "auto",
+	inputBranch: `decoder-${p.key}`,
 	...(p.tunedBand ? { tunedBand: true as const } : {}),
 })
 
 const TUNE_MS = 100_000
-// Late drops are condemned from this point on (late-drop detection itself is
-// out of scope here: the windows are supplied as the monitor would report).
+// Live audio drops (no placement reads it) from here until LATE_FROM_MS,
+// once both placements have graduated, whether tuned or not.
+const LIVE_FROM_MS = TUNE_MS + 120_000
+// From this point on every sample drops on the running decoders' own
+// branches, which late drops condemn.
 const LATE_FROM_MS = TUNE_MS + 188_000
+const BRANCHES = ["decoder-other", "decoder-adsb", "live-demod-s"]
 
 function retune(tuned: boolean) {
 	const events = new EventEmitter()
 	let mono = 0
-	const counters = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
+	const totals = new Map(BRANCHES.map(b => [b, 0]))
 	const monitor = createEfficiencyMonitor({
 		sourceEvents: events,
 		sources: () => ["s"],
-		branchCounters: () => new Map([["raw", counters]]),
-		topology: () => "raw",
+		branchCounters: () =>
+			new Map(
+				[...totals].map(([branch, n]) => [
+					`${branch}#0`,
+					{ droppedBytesTotal: n, droppedChunksTotal: n },
+				]),
+			),
+		topology: () => "fixed",
 		cpu: { normalisedPercent: 10 },
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),
 	})
-	const lateWindows = (): readonly LateDropWindow[] =>
-		mono >= LATE_FROM_MS
-			? [
-					{
-						startMono: mono - 20_000,
-						endMono: mono - 10_000,
-						condemning: true,
-						linkOrUnknownDrops: false,
-					},
-					{
-						startMono: mono - 10_000,
-						endMono: mono,
-						condemning: true,
-						linkOrUnknownDrops: false,
-					},
-				]
-			: []
-	const drops: DropReader = { ...monitor, lateWindows }
 	const gate = createEfficiencyGate(
 		{ budgetCores: 1.5, cpuGuardPercent: 90 },
-		{ drops },
+		{ drops: monitor },
 	)
+	let live: RunningPlacement[] = []
+	// Drops land before the sample that reads them: live audio's alone in
+	// [LIVE_FROM_MS, LATE_FROM_MS), then the running decoders' own branches
+	// (a strict subset of the branches with a healthy host: consumer loss).
 	const tick = (at: number) => {
 		mono = at
+		const dropping =
+			at >= LATE_FROM_MS
+				? live.map(p => `decoder-${p.key}`)
+				: at >= LIVE_FROM_MS
+					? ["live-demod-s"]
+					: []
+		for (const branch of dropping) totals.set(branch, totals.get(branch)! + 1)
 		gate.record(monitor.sampleNow())
 	}
 	const other = placement("other", 0.3, false)
 	const adsb = placement("adsb", 0.25, tuned)
-	let live: RunningPlacement[] = []
 	let adsbAdmittedAt: number | null = null
 	const shed: { key: string; detail: string; at: number }[] = []
 	monitor.start()
@@ -153,6 +157,9 @@ it("late drops shed the untuned decoder first and the tuned-band one only when i
 	// After: the untuned placement is shed first, at the first late verdict.
 	expect(after.shed[0]).toMatchObject({ key: "other", detail: "late-drops" })
 	expect(after.shed[0]!.at).toBeGreaterThanOrEqual(LATE_FROM_MS)
+	// Live audio's drops before it shed nothing, tuned or not.
+	for (const run of [before, after])
+		expect(run.shed.every(s => s.at >= LATE_FROM_MS)).toBe(true)
 	// Alone and still condemned after the 30 s cooldown, it is shed too...
 	const alone = after.shed.find(s => s.key === "adsb")
 	expect(alone).toMatchObject({ detail: "late-drops" })

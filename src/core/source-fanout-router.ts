@@ -6,6 +6,7 @@ import { sourceScannerConfig, type SourceConfig } from "../config.js"
 import type { Logger } from "../utils/logger.js"
 
 import { isLoopbackHost } from "./link-advisory.js"
+import { hasOverflowGates } from "./link-burst/absorber.js"
 import {
 	ABSORBER_COUNTER_PREFIX,
 	frameBytesFor,
@@ -290,6 +291,8 @@ export class SourceFanoutRouter extends EventEmitter {
 			droppedBytesTotal: number
 			droppedChunksTotal: number
 			active: boolean
+			/** The absorber's: overflow lost while each branch held it. */
+			overflowGatedBy?: Readonly<Record<string, number>>
 		}
 	> | null {
 		const fanout =
@@ -299,7 +302,12 @@ export class SourceFanoutRouter extends EventEmitter {
 		if (!fanout) return null
 		const counters = new Map<
 			string,
-			{ droppedBytesTotal: number; droppedChunksTotal: number; active: boolean }
+			{
+				droppedBytesTotal: number
+				droppedChunksTotal: number
+				active: boolean
+				overflowGatedBy?: Readonly<Record<string, number>>
+			}
 		>()
 		const instances = this.topology.get(fanout)?.instances
 		for (const id of fanout.getBranchIds()) {
@@ -312,11 +320,15 @@ export class SourceFanoutRouter extends EventEmitter {
 		}
 		const burst = this.bursts.get(sourceId)
 		if (burst?.handles.absorber) {
-			const overflow = burst.handles.absorber.counters()
+			const absorber = burst.handles.absorber
+			const overflow = absorber.counters()
 			counters.set(`${ABSORBER_COUNTER_PREFIX}#${burst.instance}`, {
 				droppedBytesTotal: overflow.overflowBytesTotal,
 				droppedChunksTotal: overflow.overflowChunksTotal,
 				active: true,
+				...(hasOverflowGates(absorber)
+					? { overflowGatedBy: absorber.overflowGatedBy() }
+					: {}),
 			})
 		}
 		return counters

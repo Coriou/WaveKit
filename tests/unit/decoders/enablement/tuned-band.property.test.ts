@@ -205,25 +205,17 @@ it("no newcomer displaces an always or operator-started placement, primary or se
 	)
 })
 
-// Feature: decoder-autostart, Property 2: a tuned-band probationer's loss sheds untuned first, one placement per drop
+// Feature: decoder-autostart, Property 2: a tuned-band probationer's CPU loss sheds untuned first, one placement per clear window
 // Validates: Requirements R2
-it("drops during a tuned-band probation shed the newest untuned placement on its source", () => {
+it("CPU loss during a tuned-band probation sheds the newest untuned placement, one per clear window", () => {
 	fc.assert(
 		fc.property(
 			fc.array(fc.boolean(), { minLength: 0, maxLength: 5 }),
 			others => {
 				let mono = 0
-				let dropAt: number | null = null
 				const gate = createEfficiencyGate(
 					{ budgetCores: 100, cpuGuardPercent: 90 },
-					{
-						drops: {
-							...okReader,
-							monoNow: () => mono,
-							droppedSinceMono: (_id, since) =>
-								dropAt !== null && dropAt >= since,
-						},
-					},
+					{ drops: { ...okReader, monoNow: () => mono } },
 				)
 				const running: RunningPlacement[] = []
 				// Other placements on the same source, admitted and graduated in turn.
@@ -260,24 +252,25 @@ it("drops during a tuned-band probation shed the newest untuned placement on its
 				const untuned = others
 					.map((t, i) => (t ? null : `o${i}`))
 					.filter((k): k is string => k !== null)
-				// Each drop (at the evaluation's own time, the boundary case) sheds
-				// exactly one placement: the newest untuned one, else the tuned
-				// one. The evaluations after it, with no new drop, shed nothing.
+				// CPU over the limit every 20 000 ms (inside the 30 000 ms
+				// probation, which each loss restarts): a scapegoat at most once per
+				// 60 000 ms clear window, the newest untuned one; the losses inside
+				// the window are spent on it. Nothing untuned left: the tuned one.
+				let lastShed = -Infinity
 				for (;;) {
-					mono += 2_000
-					dropAt = mono
-					const expected = untuned.pop() ?? "tuned"
-					expect(gate.probation(running, mono)).toEqual([
-						{ key: expected, detail: "drops" },
-					])
+					mono += 20_000
+					gate.record({ atMs: mono, cpuPercent: 99, sources: new Map() })
+					const due = mono - lastShed >= 60_000 || untuned.length === 0
+					const expected = due ? (untuned.pop() ?? "tuned") : null
+					expect(gate.probation(running, mono)).toEqual(
+						expected ? [{ key: expected, detail: "cpu" }] : [],
+					)
+					if (expected === null) continue
+					lastShed = mono
 					running.splice(
 						running.findIndex(p => p.key === expected),
 						1,
 					)
-					for (let quiet = 0; quiet < 3; quiet++) {
-						mono += 2_000
-						expect(gate.probation(running, mono)).toEqual([])
-					}
 					if (expected === "tuned") break
 				}
 			},

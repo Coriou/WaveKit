@@ -11,6 +11,7 @@ import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import { channelizerBranchId } from "../../decoders/enablement/contract.js"
 import { admitChannel } from "./admission.js"
 import {
 	ChannelizerProcess,
@@ -1205,7 +1206,7 @@ export class ChannelizerManager
 			}
 		}
 		const fanout = this.deps.routing.getFanout(sourceId)
-		const branchId = `channelizer-${sourceId}`
+		const branchId = channelizerBranchId(sourceId)
 		const onBackpressure = (id: string) => {
 			if (id !== branchId || s.gapAtByte !== null) return
 			const t = fanout.getBranchTelemetry(branchId)

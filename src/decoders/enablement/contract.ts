@@ -449,14 +449,40 @@ export interface LateDropWindow {
 	 * The fanout branches (ids without the instance suffix) whose drops made
 	 * the window condemning. A condemning window condemns only the placements
 	 * reading one of them, so a branch no decoder reads (live audio) condemns
-	 * none. `"source"`: some condemning loss had no branch to charge
-	 * (upstream absorber overflow), so the window condemns the source as a
-	 * whole, whatever branches also dropped. An empty list is not that: only
+	 * none. Absorber overflow is charged to the branches that held the
+	 * absorber when it overflowed (see `overflowGatedBy`). `"source"`: some
+	 * condemning loss had no branch to charge (absorber overflow with no
+	 * holding branch known), so the window condemns the source as a whole,
+	 * whatever branches also dropped. An empty list is not that: only
 	 * branches no placement reads dropped, and it condemns nobody. Absent: the
 	 * window is not scoped and condemns every placement on its source.
 	 */
 	condemnedBranches?: readonly string[] | "source"
 }
+
+/**
+ * A drop sample as probation judges it: its evidence time, its attribution
+ * and the branches charged with it (`condemnedBranches` semantics, never
+ * absent: `"source"` charges every placement on the source).
+ */
+export interface ChargedDrop {
+	atMono: number
+	code: DropAttribution
+	branches: readonly string[] | "source"
+}
+
+/**
+ * Whether drops charged to `branches` judge a placement reading `inputBranch`:
+ * source-wide loss judges every placement, branch loss only the placements
+ * reading a branch that dropped (none for a placement reading no branch).
+ */
+export const chargesBranch = (
+	branches: readonly string[] | "source" | undefined,
+	inputBranch: string | undefined,
+): boolean =>
+	branches === undefined ||
+	branches === "source" ||
+	(inputBranch !== undefined && branches.includes(inputBranch))
 
 /** The source fanout branch the channelizer reads (named by ChannelizerManager). */
 export const channelizerBranchId = (sourceId: string) =>

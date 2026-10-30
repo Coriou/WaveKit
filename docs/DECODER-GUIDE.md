@@ -692,8 +692,10 @@ and it starts. When you tune, the core decides for each decoder in this order:
      decoders stop to make room (newest first);
    - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds
      after the rate change), instead of waiting the 60-second clear window others wait;
-   - when drops or CPU load force the core to stop something, it stops the other automatic
-     decoders first; the tuned one stops only when nothing else is left, and says so.
+   - when CPU load, or host overload dropping data on another decoder's input, forces the core
+     to stop something while the tuned decoder is new, it stops the other automatic decoders
+     first, at most one per source every 60 seconds; the tuned one stops only when nothing else
+     is left, and says so. Drops on its own input are its own: it stops, not a bystander.
 
    Tuning into a band also clears any earlier budget or loss wait of its decoder. YAML
    decoders, `always` decoders and decoders you started yourself are never stopped for it.
@@ -722,13 +724,17 @@ from bounded history; only a fresh clean run can release that protected probatio
 Drop evidence resets on reconnect, so previous-epoch loss does not condemn a resumed
 placement. Continued loss or CPU spikes keep newcomers waiting. Graduation remains
 earned when a later CPU spike occurs, including while link recovery delays reconciliation.
+Drops are charged to the fanout branch that dropped them, during probation as after it: a
+new decoder is judged only by drops on its own input (its raw branch or the channelizer's),
+never by drops on live audio or on another decoder's branch.
 Late-drop shedding uses only completed windows ending within the last 30 seconds
 (3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
 Late drops are charged to the fanout branch that dropped them: a raw decoder (such as
 ADS-B) is stopped only for drops on its own branch, channelizer drops stop only decoders on
-channelizer channels, and drops on live audio stop no decoder. Upstream loss (burst
-absorber overflow) names no branch, so it is charged to the source as a whole, even when
-live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
+channelizer channels, and drops on live audio stop no decoder. Burst absorber overflow is
+charged to the branches that held the absorber when it overflowed (a congested branch holds
+input for every branch): a congested live audio branch stops no decoder. Overflow with no
+holding branch known is charged to the source as a whole, even when live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
 decoders of the tuned band last; `always` and operator-started decoders are never stopped.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;

@@ -21,7 +21,11 @@ import type {
 	PlacementPlanner,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
-import { placementKey } from "../../../../src/decoders/enablement/contract.js"
+import {
+	channelizerBranchId,
+	counterBranchId,
+	placementKey,
+} from "../../../../src/decoders/enablement/contract.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
 
@@ -249,6 +253,31 @@ it("channel placement inherits parent mode and start mode", async () => {
 	expect(running).toHaveLength(2)
 	for (const item of running)
 		expect(item).toMatchObject({ mode: "always", startMode: "operator" })
+})
+
+it("placement input branches are branches the source router reports", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate, "auto", true)
+	f.create("raw")
+	f.create("chan")
+	f.plan([
+		{ ...f.place("raw", 162_000_000), channelHz: null, reach: "raw" },
+		f.place("chan", 162_025_000),
+	])
+	await f.manager.startAll()
+	// The channelizer's branch, named as ChannelizerManager names it (its
+	// process is not spawned here).
+	f.routing!.getFanout("rtl").addBranch({ id: channelizerBranchId("rtl") })
+	await vi.advanceTimersByTimeAsync(2500)
+	const running = vi.mocked(gate.probation).mock.calls.at(-1)![0]
+	const reported = [...f.routing!.branchDropCounters("rtl")!.keys()].map(
+		counterBranchId,
+	)
+	expect(running.map(p => p.inputBranch).sort()).toEqual([
+		"channelizer-rtl",
+		"decoder-raw",
+	])
+	for (const p of running) expect(reported).toContain(p.inputBranch)
 })
 
 it("late-drops verdict suspends with efficiency-budget and detail late-drops", async () => {
