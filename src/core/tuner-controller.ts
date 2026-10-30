@@ -491,7 +491,15 @@ export class TunerController extends EventEmitter {
 	 * Operator gain and gain mode choices per source (REST or relay), counted when issued.
 	 * The scanner drops a pending gain restore of a lost lease once this count moves.
 	 */
-	private gainChoices: Map<string, number> = new Map()
+	/**
+	 * Gain choice marks per source: `seq` numbers every operator gain choice as it is issued
+	 * (never reused); `done` is the newest one that took effect; `inFlight` those still being
+	 * written. A failed write leaves `inFlight` and never moves `done`.
+	 */
+	private gainChoices: Map<
+		string,
+		{ seq: number; done: number; inFlight: Set<number> }
+	> = new Map()
 	/** The scanner's gain restore of a lost lease per source; an operator band gain waits for it. */
 	private gainRestoreHolds: Map<string, Promise<void>> = new Map()
 	/** The last queued REST retune per source while "apply to my tuning" is on (never rejects). */
@@ -534,9 +542,31 @@ export class TunerController extends EventEmitter {
 		}
 	}
 
-	/** Operator gain and gain mode choices issued on `sourceId` so far (REST and relay). */
+	/**
+	 * The mark of the newest operator gain choice on `sourceId` (REST and relay) that took
+	 * effect or is still being written. It only grows while choices succeed; a failed write
+	 * drops back to the choice before it. A later choice than a mark `m` exists exactly when
+	 * this is greater than `m`, so a failed write never hides or fakes one (no reused values).
+	 */
 	gainChoiceCount(sourceId: string): number {
-		return this.gainChoices.get(sourceId) ?? 0
+		const marks = this.gainChoices.get(sourceId)
+		if (!marks) return 0
+		let mark = marks.done
+		for (const seq of marks.inFlight) if (seq > mark) mark = seq
+		return mark
+	}
+
+	private gainChoiceMarks(sourceId: string): {
+		seq: number
+		done: number
+		inFlight: Set<number>
+	} {
+		let marks = this.gainChoices.get(sourceId)
+		if (!marks) {
+			marks = { seq: 0, done: 0, inFlight: new Set() }
+			this.gainChoices.set(sourceId, marks)
+		}
+		return marks
 	}
 
 	/**
@@ -557,12 +587,13 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * Counted when issued (before the write), so a queued scanner restore sees it. Returns the
-	 * new count (null when not an operator choice) for `countedGainWrite`.
+	 * Marked when issued (before the write), so a queued scanner restore sees it. A choice
+	 * with no write (a relay command, an unchanged PATCH value) takes effect at once.
 	 */
 	private noteGainChoice(
 		sourceId: string,
 		opts: TunerWriteOptions,
+		inFlight = false,
 	): number | null {
 		if (
 			opts.origin === "scanner" ||
@@ -570,29 +601,27 @@ export class TunerController extends EventEmitter {
 			opts.origin === "config"
 		)
 			return null
-		const count = this.gainChoiceCount(sourceId) + 1
-		this.gainChoices.set(sourceId, count)
-		return count
+		const marks = this.gainChoiceMarks(sourceId)
+		marks.seq += 1
+		if (inFlight) marks.inFlight.add(marks.seq)
+		else marks.done = marks.seq
+		return marks.seq
 	}
 
-	/**
-	 * A gain write that threw (e.g. the source disconnected) chose nothing: its count is taken
-	 * back, unless a later choice was counted since (then the count stays ahead, so no earlier
-	 * snapshot of it can match again).
-	 */
+	/** A gain write that threw (e.g. the source disconnected) chose nothing. */
 	private async countedGainWrite(
 		sourceId: string,
 		opts: TunerWriteOptions,
 		write: () => Promise<void>,
 	): Promise<void> {
-		const count = this.noteGainChoice(sourceId, opts)
+		const seq = this.noteGainChoice(sourceId, opts, true)
+		const marks = this.gainChoices.get(sourceId)
 		try {
 			await write()
 			this.sourceManager.assertTunerCommandActive()
-		} catch (err) {
-			if (count !== null && this.gainChoices.get(sourceId) === count)
-				this.gainChoices.set(sourceId, count - 1)
-			throw err
+			if (seq !== null && marks && seq > marks.done) marks.done = seq
+		} finally {
+			if (seq !== null) marks?.inFlight.delete(seq)
 		}
 	}
 
@@ -638,13 +667,16 @@ export class TunerController extends EventEmitter {
 						),
 					)
 		const current = this.savedRecords.get(sourceId) === record
-		if (current && this.gainChoiceCount(sourceId) !== choices) {
+		if (current && this.gainChoiceCount(sourceId) > choices) {
 			this.dropOperatorGain(sourceId)
 			return "superseded"
 		}
 		if (!durable && current) {
 			this.savedRecords.delete(sourceId)
 			this.operatorGainBeforeBand.delete(sourceId)
+			// A save that timed out may still land later: the next save in the service's chain
+			// writes the gains without this record, so it never comes back from disk.
+			void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
 		}
 		if (!current) return "superseded"
 		return durable ? "saved" : "failed"

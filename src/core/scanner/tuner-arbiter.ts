@@ -1165,7 +1165,7 @@ export class TunerArbiter extends EventEmitter {
 		return (
 			record.choices !== null &&
 			count !== undefined &&
-			count.call(this.deps.tuner, sourceId) !== record.choices
+			count.call(this.deps.tuner, sourceId) > record.choices
 		)
 	}
 

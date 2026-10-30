@@ -194,6 +194,28 @@ describe("unknown gains and gain writes that fail", () => {
 	)
 })
 
+describe("gain choice marks are never reused", () => {
+	it("a failed write rolled back after a relay takeover never hides the relay's later gain", async () => {
+		const h = await setup(false)
+		await manual(h.controller, 496)
+		await sweepOnBand(h)
+		h.sourceManager.writeToSource.mockImplementationOnce(() => {
+			throw new Error("source disconnected")
+		})
+		const failing = h.controller.setGain("rtl", 300, REST).then(
+			() => "written",
+			() => "failed",
+		)
+		h.controller.applyExternalCommand("rtl", SET_FREQUENCY, UHF)
+		expect(await failing).toBe("failed")
+		h.controller.applyExternalCommand("rtl", SET_GAIN, 386)
+		;(h.arbiter as unknown as { connected: Set<string> }).connected.add("rtl")
+		h.controller.setControlMode("rtl", "internal")
+		await settle()
+		expect(h.controller.getState("rtl")?.gain).toBe(386)
+	})
+})
+
 describe("a REST write takes the tuner from a band-gain sweep", () => {
 	it("REST frequency: the operator's gain comes back (apply to my tuning off)", async () => {
 		const h = await setup(false)
@@ -600,6 +622,42 @@ describe("apply to my tuning: the saved gain is a durable, superseded record", (
 		} finally {
 			vi.useRealTimers()
 		}
+	})
+
+	it("a save that lands after its timeout never brings the expired record back", async () => {
+		const disk = memoryFs()
+		const write = disk.fs.atomicWrite
+		let release: () => void = () => {}
+		let held = true
+		disk.fs.atomicWrite = (path, data) =>
+			path === SAVED_PATH && held
+				? new Promise<void>(resolve => {
+						held = false
+						release = () => {
+							void write(path, data).then(resolve)
+						}
+					})
+				: write(path, data)
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 100)
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		try {
+			const into = h.controller.setFrequency("rtl", ISM, REST)
+			await vi.advanceTimersByTimeAsync(OPERATOR_GAIN_SAVE_TIMEOUT_MS)
+			await into
+		} finally {
+			vi.useRealTimers()
+		}
+		await h.controller.setGain("rtl", 420, REST)
+		release()
+		await settle()
+		await settle()
+		// The late write landed, then the reconciling one: no saved gain on disk or in memory.
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toMatchObject({
+			sources: [],
+		})
+		const restarted = await service(true, disk.fs)
+		expect(restarted.savedOperatorGains().size).toBe(0)
 	})
 
 	it("an operator gain choice while the save is in flight wins: no band gain, nothing saved", async () => {
