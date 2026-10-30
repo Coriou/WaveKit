@@ -66,7 +66,10 @@ export interface ChannelProvider {
 		/** Acquisition only: abort prevents a late grant; after grant, release its opaque ID. */
 		signal?: AbortSignal,
 	): Promise<ChannelRequestResult>
-	/** Stops delivery synchronously; resolves after terminal closure or disruptive generation retirement. */
+	/**
+	 * Stops delivery synchronously; resolves after terminal closure, disruptive generation retirement, or the
+	 * close budget while a live process still owes the reply (the id stays fenced until it arrives).
+	 */
 	releaseChannel(channelId: string): Promise<void>
 	currentGeneration(sourceId: string): number
 	on(

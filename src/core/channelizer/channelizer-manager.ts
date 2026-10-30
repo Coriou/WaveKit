@@ -211,6 +211,8 @@ function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
  * One `wavekit-chan` per source (addendum §4, §6; plan A2, A14): a raw-fanout consumer spawned lazily on the first
  * channel request and stopped when its last channel is released. Every spawn is a new generation; caps changes,
  * source loss and unexpected exits invalidate the generation's channels, and nothing respawns until the next request.
+ * Channel opens, closes and retunes are control lines to the running generation: a slow reply never restarts it or
+ * re-creates its fanout branch (only a wedged process, one that stopped consuming input, is retired).
  */
 export class ChannelizerManager
 	extends EventEmitter
@@ -707,6 +709,8 @@ export class ChannelizerManager
 		this.clearIdleTimer(s)
 		s.pending++
 		let ownedAttempt: OpenAttempt | undefined
+		// Input the process had consumed when the last open went out: an unconfirmed close is a wedge only without progress since.
+		let sentMark = this.consumedInput(s)
 		try {
 			let event: OpenedEvent
 			for (;;) {
@@ -744,6 +748,7 @@ export class ChannelizerManager
 					attempt.reply = done
 					s.waiters.set(channelId, attempt)
 					ctx.sends++
+					sentMark = this.consumedInput(s)
 					if (attempt.settlement)
 						s.process.sendObserved?.(open, attempt.settlement)
 					else s.process.send(open)
@@ -760,6 +765,7 @@ export class ChannelizerManager
 						attempt.pending,
 						this.remaining(ctx),
 						reply === null ? "open-timeout" : "cancel-close-unconfirmed",
+						sentMark,
 					)
 					return reply === null
 						? this.timeout()
@@ -774,6 +780,7 @@ export class ChannelizerManager
 							false,
 							this.remaining(ctx),
 							ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
+							sentMark,
 						)
 					return ctx.signal?.aborted
 						? unavailable(this.cancellationDetail())
@@ -817,6 +824,7 @@ export class ChannelizerManager
 					false,
 					this.remaining(ctx),
 					ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
+					sentMark,
 				)
 				return ctx.signal?.aborted
 					? unavailable(this.cancellationDetail())
@@ -890,6 +898,7 @@ export class ChannelizerManager
 							: connected === "cancelled"
 								? "cancel-close-unconfirmed"
 								: "connect-close-unconfirmed",
+						sentMark,
 					)
 				if (
 					ownedAttempt?.closed &&
@@ -924,6 +933,7 @@ export class ChannelizerManager
 					false,
 					this.remaining(ctx),
 					ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
+					sentMark,
 				)
 				return ctx.signal?.aborted
 					? unavailable(this.cancellationDetail())
@@ -1052,22 +1062,53 @@ export class ChannelizerManager
 		})
 	}
 
-	/** A closed line is a FIFO terminal barrier. Unknown native close has no reply: bounded retirement is the fallback. */
+	/**
+	 * Input bytes the process has taken from its branch: accepted minus still buffered. It advances while the
+	 * process's main loop runs (it reads input between control lines), so it tells a slow process from a wedged one.
+	 */
+	private consumedInput(s: SourceChannelizer): number {
+		const t = s.fanout.getBranchTelemetry(s.branchId)
+		return t ? t.totalBytesWritten - t.droppedBytesTotal - t.bufferBytes : 0
+	}
+
+	/**
+	 * A closed line is a FIFO terminal barrier. The caller waits at most `budget` (≤ CLOSE_TIMEOUT_MS). A close
+	 * still unconfirmed then retires the generation only when the process is wedged, i.e. consumed no input since
+	 * `since` (default: the send). A process that is consuming input applies the queued close after its current
+	 * block, so the id stays fenced (`s.closing`, same-id reuse waits for the terminal) and the check repeats every
+	 * CLOSE_TIMEOUT_MS: one slow close no longer tears down every other channel, the branch and the process.
+	 */
 	private closeOwned(
 		s: SourceChannelizer,
 		id: string,
 		pendingOpen: boolean,
 		budget = CLOSE_TIMEOUT_MS,
 		cause = "close-unconfirmed",
+		since = this.consumedInput(s),
 	): Promise<void> {
 		if (s.invalidated) return Promise.resolve()
 		const held = s.closing.get(id)
-		if (held) return held.promise
+		if (held) {
+			// A second waiter gets the same bound; the fence and its wedge check stay with the first close.
+			if (budget <= 0) return Promise.resolve()
+			return new Promise(done => {
+				const t = setTimeout(done, Math.min(CLOSE_TIMEOUT_MS, budget))
+				void held.promise.then(() => {
+					clearTimeout(t)
+					done()
+				})
+			})
+		}
 		let resolve = () => {}
 		const promise = new Promise<void>(done => {
 			resolve = done
 		})
+		let release = () => {}
+		const waited = new Promise<void>(done => {
+			release = done
+		})
 		let timer: ReturnType<typeof setTimeout> | undefined
+		let verdict: ReturnType<typeof setImmediate> | undefined
 		const closing: Closing = {
 			pendingOpen,
 			promise,
@@ -1075,21 +1116,39 @@ export class ChannelizerManager
 				if (s.closing.get(id) !== closing) return
 				s.closing.delete(id)
 				if (timer !== undefined) clearTimeout(timer)
+				if (verdict !== undefined) clearImmediate(verdict)
 				resolve()
+				release()
 			},
 		}
 		s.closing.set(id, closing) // before send or socket destruction
 		s.process.send({ v: 1, type: "close", id })
 		if (s.closing.get(id) === closing) {
-			const retire = () => {
+			let mark = since
+			const judge = () => {
+				timer = verdict = undefined
+				if (s.closing.get(id) !== closing) return
+				release()
+				const consumed = this.consumedInput(s)
+				if (consumed > mark && this.active.get(s.sourceId) === s) {
+					mark = consumed
+					timer = setTimeout(defer, CLOSE_TIMEOUT_MS)
+					return
+				}
 				if (this.active.get(s.sourceId) === s)
 					this.invalidate(s.sourceId, cause)
 				closing.finish()
 			}
-			if (budget <= 0) retire()
-			else timer = setTimeout(retire, Math.min(CLOSE_TIMEOUT_MS, budget))
+			// The verdict waits for this loop turn's I/O: after an event-loop stall the timer phase runs before the
+			// poll phase, which would read a `closed` line the process wrote long ago.
+			const defer = () => {
+				timer = undefined
+				verdict = setImmediate(judge)
+			}
+			if (budget <= 0) defer()
+			else timer = setTimeout(defer, Math.min(CLOSE_TIMEOUT_MS, budget))
 		}
-		return promise
+		return waited
 	}
 
 	private async spawn(
