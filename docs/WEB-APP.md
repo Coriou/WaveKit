@@ -94,8 +94,9 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 ### Activity folding
 
 Activity folds repeats into stacks, so one aircraft, one beacon or one call is one row. A stack
-shows its newest decode as it was stored, with only who it is filled in from earlier rows (an
-aircraft's callsign when the newest decode is position only); a measurement such as a call's
+shows its newest decode as it was stored, with only who it is filled in from rows heard before it
+(an aircraft's callsign when the newest decode is position only; by time, the latest value wins,
+never a row heard after it even when stored earlier); a measurement such as a call's
 duration, an altitude, a position or a signal level is always the newest decode's own, so a call
 that has just started never shows the previous over's duration. The row also shows the count and
 the span (`24 · 1 min`) and expands in place to the earlier rows. Counts are for the loaded list,
@@ -159,7 +160,7 @@ filters** and, for a time range, **Any time** when a search or range does, and *
 in this range** for a range that has ended.
 
 An event's detail shows the event exactly as it was stored. Who rows of its stack heard before it
-said it is (never a later row), when this decode does not say it (a title, callsign, flight, registration or name), is a
+said it is (never a later row; the same rule as the list row), when this decode does not say it (a title, callsign, flight, registration or name), is a
 separate **Latest known (from earlier rows)** block, each value with the time of the row that said
 it. The detail says **What it is** as a guess from its stack, labelled as one: a tone-only
 capcode repeating on a schedule reads `Likely a paging-network idle beacon (no content, repeats

@@ -718,6 +718,74 @@ describe("activity stacks", () => {
 		})
 	})
 
+	it("finds a retained event after a reload brings new objects (by eventId)", () => {
+		const a = row(0, {
+			title: "WKT104",
+			fields: [{ key: "callsign", label: "Callsign", value: "WKT104" }],
+		})
+		const b = row(1000)
+		const [stack] = foldActivity([b, a])
+		const before = stack && knownFor(stack, b)
+		expect(before?.title?.value).toBe("WKT104")
+		// a reload: identical rows, new objects; the opened summary is still the old b
+		const reloaded = JSON.parse(JSON.stringify([b, a])) as ActivitySummary[]
+		const [fresh] = foldActivity(reloaded)
+		const known = fresh && knownFor(fresh, b)
+		expect(known?.title?.value).toBe("WKT104")
+		expect(known?.title?.from.eventId).toBe(a.eventId)
+		expect(known?.fields.map(k => k.field.value)).toEqual(["WKT104"])
+		// an older retained row is found too: nothing heard before it
+		expect(fresh && knownFor(fresh, a)).toEqual({ title: null, fields: [] })
+	})
+
+	it("takes the latest-heard identity before a row, not the latest stored", () => {
+		const base = (seq += 10)
+		const old = {
+			...row(0, { ...ENTITY.aircraft, title: "OLD1" }),
+			commitSeq: String(base + 2),
+		}
+		const heardNew = {
+			...row(1000, { ...ENTITY.aircraft, title: "NEW1" }),
+			commitSeq: String(base + 1),
+		}
+		const c = { ...row(2000, ENTITY.aircraft), commitSeq: String(base + 3) }
+		seq += 10
+		const [stack] = foldActivity([c, old, heardNew])
+		expect(stack?.latest).toBe(c)
+		expect(stack?.known.title).toEqual({ value: "NEW1", from: heardNew })
+		expect(stack?.view.title).toBe("NEW1")
+		expect(stack && knownFor(stack, c).title?.value).toBe("NEW1")
+		// the list's incremental fold agrees
+		const [live] = foldedOf([c, old, heardNew], { capacity: MAX_ITEMS })
+		expect(live?.view.title).toBe("NEW1")
+	})
+
+	it("never fills the list row from a row heard after it, even one stored earlier", () => {
+		const base = (seq += 10)
+		const unnamed = {
+			...row(0, ENTITY.aircraft),
+			commitSeq: String(base + 2),
+		}
+		const named = {
+			...row(1000, {
+				...ENTITY.aircraft,
+				title: "WKT105",
+				fields: [{ key: "callsign", label: "Callsign", value: "WKT105" }],
+			}),
+			commitSeq: String(base + 1),
+		}
+		seq += 10
+		const [stack] = foldActivity([unnamed, named])
+		expect(stack?.latest).toBe(unnamed)
+		expect(stack?.known).toEqual({ title: null, fields: [] })
+		expect(stack?.view).toBe(unnamed)
+		expect(stack?.view.fields.some(f => f.key === "callsign")).toBe(false)
+		// the detail says the same
+		expect(stack && knownFor(stack, unnamed)).toEqual(stack?.known)
+		const [live] = foldedOf([unnamed, named], { capacity: MAX_ITEMS })
+		expect(live?.view).toBe(unnamed)
+	})
+
 	it("finds the stack of an event and memoises per list", () => {
 		const items = [row(1000), row(0)]
 		expect(foldedOf(items, LIST)).toBe(foldedOf(items, LIST))

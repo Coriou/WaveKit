@@ -222,7 +222,7 @@ function radioOf(s: ActivitySummary): string | null {
 	return v === null || v === "" ? null : String(v)
 }
 
-/** Identity fields an earlier row of a stack can fill in: who it is, never what this decode measured. */
+/** Identity fields an earlier-heard row of a stack can fill in: who it is, never what this decode measured. */
 export const IDENTITY_KEYS: ReadonlySet<string> = new Set([
 	"callsign",
 	"flight",
@@ -234,7 +234,7 @@ export const IDENTITY_KEYS: ReadonlySet<string> = new Set([
 export interface KnownIdentity {
 	/** A title naming more than the bare entity id, from an earlier row; null when the row has its own. */
 	title: { value: string; from: ActivitySummary } | null
-	/** Identity fields the row lacks, each from the newest earlier row that carried it. */
+	/** Identity fields the row lacks, each from the latest earlier-heard row that carried it. */
 	fields: readonly {
 		field: ActivitySummary["fields"][number]
 		from: ActivitySummary
@@ -257,11 +257,14 @@ export interface ActivityStack {
 	/** The newest member, as stored. */
 	latest: ActivitySummary
 	/**
-	 * What the list row shows: the newest member as stored, with only its identity filled in from older
-	 * members (`known`). Its measurements (duration, altitude, position, signal…) are always its own.
+	 * What the list row shows: the newest member as stored, with only its identity filled in from members
+	 * heard before it (`known`). Its measurements (duration, altitude, position, signal…) are always its own.
 	 */
 	view: ActivitySummary
-	/** The identity `view` took from older members (empty when the newest row names itself). */
+	/**
+	 * The identity `view` took from the members heard before the newest row (time, then commitSeq; the
+	 * latest of them wins): never from a row heard after it, even one stored earlier.
+	 */
 	known: KnownIdentity
 	firstMs: number
 	lastMs: number
@@ -446,7 +449,9 @@ function makeStack(
 			if (k !== null && !khz.has(k)) khz.set(k, m.frequencyHz as number)
 		}
 	const known =
-		members.length === 1 ? NOTHING_KNOWN : identityFrom(latest, members)
+		members.length === 1
+			? NOTHING_KNOWN
+			: knownBefore(byTime, byTime.indexOf(latest))
 	return {
 		key: `${foldKeyText}@${oldest.eventId}`,
 		foldKey: foldKeyText,
@@ -465,8 +470,9 @@ function makeStack(
 const NOTHING_KNOWN: KnownIdentity = { title: null, fields: [] }
 
 /**
- * The identity `row` lacks that other members say, newest first: a title naming more than the bare
- * entity id, and the IDENTITY_KEYS fields it does not carry. Never a measurement.
+ * The identity `row` lacks that `newestFirst` (the rows heard before it, the latest first) says: a title
+ * naming more than the bare entity id, and the IDENTITY_KEYS fields it does not carry, each from the first
+ * row that has it. Never a measurement.
  */
 export function identityFrom(
 	row: ActivitySummary,
@@ -512,19 +518,46 @@ function withIdentity(
 }
 
 /**
+ * The identity the row at `at` of `byTime` lacks that the rows heard before it say (time order, commitSeq
+ * breaking ties), the latest of them first: the one rule for the list row and the detail.
+ */
+function knownBefore(
+	byTime: readonly ActivitySummary[],
+	at: number,
+): KnownIdentity {
+	if (at <= 0) return NOTHING_KNOWN
+	return identityFrom(
+		byTime[at] as ActivitySummary,
+		byTime.slice(0, at).reverse(),
+	)
+}
+
+/**
  * The identity an event lacks that rows of its stack heard before it say (the detail's "Latest known (from
- * earlier rows)"): never a later row's.
+ * earlier rows)"): never a later row's. The event is found by eventId, so a retained copy of it (the row
+ * opened before a reload brought new objects) gets the same answer as the stack's own.
  */
 export function knownFor(
 	stack: ActivityStack,
 	item: ActivitySummary,
 ): KnownIdentity {
-	const at = stack.byTime.indexOf(item)
-	// the newest row, last in time too: what the list row took (from every other, all earlier)
-	if (item === stack.latest && at === stack.byTime.length - 1)
-		return stack.known
-	// only the rows heard before it (time order, commitSeq breaking ties), newest first
-	return identityFrom(item, stack.byTime.slice(0, Math.max(0, at)).reverse())
+	const at = stack.byTime.findIndex(r => r.eventId === item.eventId)
+	// the row the list shows: what the list row took, by the same rule
+	if (at >= 0 && stack.byTime[at] === stack.latest) return stack.known
+	if (at >= 0) return knownBefore(stack.byTime, at)
+	// not in the stack: the rows heard before it (time, then commitSeq)
+	const t = timeOf(item)
+	let n = 0
+	while (n < stack.byTime.length) {
+		const r = stack.byTime[n] as ActivitySummary
+		const tr = timeOf(r)
+		if (tr > t || (tr === t && compareSeq(r.commitSeq, item.commitSeq) >= 0))
+			break
+		n++
+	}
+	return n === 0
+		? NOTHING_KNOWN
+		: identityFrom(item, stack.byTime.slice(0, n).reverse())
 }
 
 /** The list a fold belongs to (an ActivityFeed): its identity owns the keys, its capacity bounds them. */
