@@ -1,5 +1,6 @@
 import type { DecoderBandRequirements } from "../band-resolver.js"
 import type { PlannerVfo, WantedPlacement } from "./contract.js"
+import { VFO_SETTLE_MS } from "./contract.js"
 
 /**
  * How far the tuned frequency may sit from a decoder's target and still be
@@ -11,21 +12,48 @@ import type { PlannerVfo, WantedPlacement } from "./contract.js"
  */
 export const TUNED_TARGET_TOLERANCE_HZ = 200_000
 
+/**
+ * How long a placement's band must keep holding the tuned frequency before
+ * tuning into it releases its holds or restarts a stopped decoder: one VFO
+ * settle (VFO_SETTLE_MS = 1000 ms), the dwell the VFO tracker already asks of
+ * a VFO move. A settled VFO has held its value for that long when it is
+ * reported, so it counts at once; a capture-centre fallback or a VFO read
+ * before the first settle waits it out in the manager. A pass across a band on
+ * the way elsewhere is not a tune into it.
+ */
+export const TUNED_SETTLE_MS = VFO_SETTLE_MS
+
+/**
+ * A VFO settle on a source the scanner released less than this long ago is the
+ * scanner's restore, not the user's tune: the restore retune is written while
+ * the source is still held (the job runner orders "restore" before
+ * "release-decoders"), so its VFO settles VFO_SETTLE_MS after that retune, at
+ * most VFO_SETTLE_MS after the release; the second VFO_SETTLE_MS is slack for
+ * a late caps report or a busy event loop. 2 × 1000 ms = 2000 ms.
+ */
+export const SCANNER_RESTORE_SETTLE_MS = 2 * VFO_SETTLE_MS
+
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 
 /**
- * The frequency the operator tuned on a source: the settled VFO when it is on
- * that source, else the capture centre. Null when neither is a valid frequency.
+ * The frequency the operator tuned on a source. The VFO is the live
+ * demodulator's frequency on one source (its own, else the default source), so
+ * it is the tuned frequency of that source alone: another source, such as a
+ * fixed second dongle, is not tuned by its own capture centre while the VFO
+ * is elsewhere. Only without a valid VFO does the capture centre of the source
+ * a VFO would sit on (`fallbackSourceId`, the default source) stand in for it.
+ * Null when nothing was tuned on the source.
  */
 export function tunedFrequencyHz(
 	sourceId: string,
 	centreHz: number | null | undefined,
 	vfo: PlannerVfo | null | undefined,
+	fallbackSourceId: string | undefined,
 ): number | null {
-	if (vfo && vfo.sourceId === sourceId && positive(vfo.frequencyHz))
-		return vfo.frequencyHz
-	return positive(centreHz) ? centreHz : null
+	if (vfo && positive(vfo.frequencyHz))
+		return vfo.sourceId === sourceId ? vfo.frequencyHz : null
+	return sourceId === fallbackSourceId && positive(centreHz) ? centreHz : null
 }
 
 /**

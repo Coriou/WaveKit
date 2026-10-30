@@ -49,6 +49,8 @@ import {
 } from "./enablement/contract.js"
 import type { PlannerCentreSlot } from "./enablement/contract.js"
 import {
+	SCANNER_RESTORE_SETTLE_MS,
+	TUNED_SETTLE_MS,
 	bandContainsTuned,
 	prioritiseTuned,
 	tunedFrequencyHz,
@@ -207,6 +209,27 @@ interface TunedView {
 	sources: readonly { id: string; centreHz: number | null }[]
 	vfo: PlannerVfo | null
 }
+
+/** One stay of a placement in the tuned band, kept while it stays tuned. */
+interface TunedEpisode {
+	/** Monotonic ms since which the band has held the tuned frequency. */
+	sinceMs: number
+	/** Its holds were released (or it had none) once it had settled. */
+	released: boolean
+}
+
+/** A scanner hold of a source, kept until the first VFO settle after its release. */
+interface ScanHold {
+	/** The settled VFO when the first holder took the source. */
+	preHoldVfo: PlannerVfo | null | undefined
+	/** A VFO settled on the source while it was held (a hop). */
+	settled: boolean
+	/** Monotonic ms of the last holder's release; undefined while held. */
+	releasedAtMs?: number
+}
+
+const sameVfo = (a: PlannerVfo | null | undefined, b: PlannerVfo | null) =>
+	a?.sourceId === b?.sourceId && a?.frequencyHz === b?.frequencyHz
 
 interface DecoderState {
 	/** WG6: option problems found at creation; undefined = type has no schema */
@@ -607,12 +630,19 @@ export class DecoderManager extends EventEmitter {
 	private readonly config: DecoderManagerConfig
 	private readonly decoders: Map<string, DecoderState> = new Map()
 	private settledVfo: PlannerVfo | null | undefined
+	/** Monotonic ms of the last VFO settle report. */
+	private vfoSettledAtMs = -Infinity
 	/**
-	 * Placement keys the last placement reconciliation saw as tuned-band, so
-	 * `releaseTunedHolds` sees a rising edge relative to that pass even after a
-	 * probation pass in between refreshed the placements' own flags.
+	 * Per placement key, its current stay in the tuned band as the placement
+	 * reconciliations saw it, so `releaseTunedHolds` acts once per stay and
+	 * only after TUNED_SETTLE_MS, even after a probation pass in between
+	 * refreshed the placements' own flags.
 	 */
-	private reconciledTuned = new Set<string>()
+	private tunedEpisodes = new Map<string, TunedEpisode>()
+	/** Re-runs the reconciliation when a tuned stay reaches TUNED_SETTLE_MS. */
+	private tunedSettleTimer: ReturnType<typeof setTimeout> | null = null
+	/** Scanner holds per source, so a hop or the restore is never a user tune. */
+	private readonly scanHolds = new Map<string, ScanHold>()
 	private reconcilingPlacements = false
 	/** A reconciliation was asked for while one ran: run another after it. */
 	private reconcileDirty = false
@@ -741,9 +771,93 @@ export class DecoderManager extends EventEmitter {
 		if (state.parentIntent === request) this.emitStatusChanged(state)
 	}
 
+	/**
+	 * The VFO tracker reports a VFO that held its value for VFO_SETTLE_MS. A
+	 * settled move made by the user into the band of an operator-stopped
+	 * `auto` decoder restarts it (see `userTuned`, `restartStoppedOnTune`).
+	 */
 	notifyVfoSettled(vfo: PlannerVfo | null): void {
-		this.settledVfo = vfo ? { ...vfo } : null
+		const previous = this.settledVfo
+		const next = vfo ? { ...vfo } : null
+		this.settledVfo = next
+		this.vfoSettledAtMs = performance.now()
+		if (next && this.userTuned(previous, next))
+			this.restartStoppedOnTune(previous!, next)
 		this.notifyBandplansChanged()
+	}
+
+	/**
+	 * Whether a settled VFO move is the user's tune. Not the first settle
+	 * (startup) or one from no VFO (a source back after a disconnect); not a
+	 * settle on a source a scanner sweep holds (its hops); not the scanner's
+	 * restore, the first settle after the release when it comes within
+	 * SCANNER_RESTORE_SETTLE_MS or returns a hopped VFO to where it was before
+	 * the sweep. A tune made during a sweep pre-empts it and counts as the
+	 * scanner's too: the safe answer leaves a stopped decoder stopped.
+	 */
+	private userTuned(
+		previous: PlannerVfo | null | undefined,
+		next: PlannerVfo,
+	): boolean {
+		const scan = this.scanHolds.get(next.sourceId)
+		if (this.isSourceHeld(next.sourceId)) {
+			if (scan) scan.settled = true
+			return false
+		}
+		if (scan?.releasedAtMs !== undefined) {
+			this.scanHolds.delete(next.sourceId)
+			if (
+				performance.now() - scan.releasedAtMs <= SCANNER_RESTORE_SETTLE_MS ||
+				(scan.settled && sameVfo(scan.preHoldVfo, next))
+			)
+				return false
+		}
+		return previous != null && !sameVfo(previous, next)
+	}
+
+	/**
+	 * An `auto` decoder the operator stopped restarts when the user tunes into
+	 * its band: from outside it (or from another source) to inside it, on its
+	 * configured source or, without one, on any. It restarts through the
+	 * parent intent with start mode "auto", so it is not pinned and the gate
+	 * may still shed it; mode `off` or `always`, YAML `enabled: false` (mode
+	 * off), a running decoder or one never stopped by the operator is left as
+	 * it is.
+	 */
+	private restartStoppedOnTune(previous: PlannerVfo, next: PlannerVfo): void {
+		if (!this.config.enablement || this.destroying) return
+		for (const state of [...this.decoders.values()]) {
+			if (
+				state.owner !== "config" ||
+				state.parentId !== undefined ||
+				state.desiredRunning ||
+				!state.intentionallyStopped ||
+				this.modeFor(state).mode !== "auto" ||
+				(state.config.sourceId !== undefined &&
+					state.config.sourceId !== next.sourceId)
+			)
+				continue
+			const band = this.resolveBand(state).requirements
+			if (
+				!bandContainsTuned(band, next.frequencyHz) ||
+				(previous.sourceId === next.sourceId &&
+					bandContainsTuned(band, previous.frequencyHz))
+			)
+				continue
+			const id = state.config.id
+			this.log.info(
+				{ decoderId: id, sourceId: next.sourceId },
+				"Tuned into the band of a stopped decoder; restarting it",
+			)
+			void this.startDecoder(id, { startMode: "auto" }).catch(
+				(error: unknown) => {
+					this.log.warn(
+						{ err: safeErrorFields(error), decoderId: id },
+						"Restart on tune failed",
+					)
+				},
+			)
+		}
 	}
 
 	/** Recheck capacity after a live budget change without clearing loss backoff. */
@@ -822,43 +936,86 @@ export class DecoderManager extends EventEmitter {
 		input: TunedView,
 	): boolean {
 		const parent = this.decoders.get(placement.decoderId)
-		if (!parent) return false
+		// A scanner sweep's hops on a held source are not the user's tuning.
+		if (!parent || this.isSourceHeld(placement.sourceId)) return false
 		const source = input.sources.find(item => item.id === placement.sourceId)
 		return bandContainsTuned(
 			this.resolveBand(parent).requirements,
-			tunedFrequencyHz(placement.sourceId, source?.centreHz, input.vfo),
+			tunedFrequencyHz(
+				placement.sourceId,
+				source?.centreHz,
+				input.vfo,
+				this.sourceRouting?.getDefaultSourceId(),
+			),
 		)
 	}
 
 	/**
-	 * A placement that just became tuned-band (the operator tuned into its
-	 * band) drops any capacity hold it was waiting out, so it starts as soon
-	 * as the source is usable rather than when an old budget retry expires.
-	 * A loss backoff (drops, CPU, late drops) of a stopped placement is
-	 * forgotten too: the operator asked for this band. An operator stop or
-	 * mode off is never overridden. The edge is read against the keys the last
-	 * reconciliation saw as tuned, not the placements' flags, which every
-	 * probation pass refreshes through `retuneFlags`.
+	 * A placement that became tuned-band (the operator tuned into its band)
+	 * and stayed so for TUNED_SETTLE_MS drops any capacity hold it was
+	 * waiting out, so it starts as soon as the source is usable rather than
+	 * when an old budget retry expires. A loss backoff (drops, CPU, late
+	 * drops) of a stopped placement is forgotten too: the operator asked for
+	 * this band. An operator stop or mode off is never overridden here. Each
+	 * stay in the band acts once, read against the stays the reconciliations
+	 * saw, not the placements' flags, which every probation pass refreshes
+	 * through `retuneFlags`. A stay tuned by the settled VFO began
+	 * TUNED_SETTLE_MS before its settle report; any other stay is timed here
+	 * and a timer re-runs the reconciliation when it has lasted long enough.
 	 */
 	private releaseTunedHolds(wanted: readonly WantedPlacement[]): void {
 		const gate = this.config.enablement?.gate
+		const now = performance.now()
+		const episodes = new Map<string, TunedEpisode>()
+		let waitMs = Infinity
 		for (const placement of wanted) {
 			if (placement.tunedBand !== true) continue
+			const episode = this.tunedEpisodes.get(placement.key) ?? {
+				sinceMs:
+					this.settledVfo?.sourceId === placement.sourceId
+						? Math.min(now, this.vfoSettledAtMs - TUNED_SETTLE_MS)
+						: now,
+				released: false,
+			}
+			episodes.set(placement.key, episode)
+			if (episode.released) continue
 			const state = [...this.decoders.values()].find(
 				item => item.placement?.key === placement.key,
 			)
+			// Without a hold to release now there is nothing to wait for: a
+			// refusal later in the same stay is not released.
 			if (
 				!state ||
-				this.reconciledTuned.has(placement.key) ||
 				state.decoder.getStatus().running ||
 				state.admission?.admit !== false
-			)
+			) {
+				episode.released = true
 				continue
+			}
+			const leftMs = episode.sinceMs + TUNED_SETTLE_MS - now
+			if (leftMs > 0) {
+				waitMs = Math.min(waitMs, leftMs)
+				continue
+			}
+			episode.released = true
 			gate?.forget(placement.key)
 			delete state.efficiencyBackoffMs
 			delete state.efficiencyLateShed
 			delete state.admission
 		}
+		this.tunedEpisodes = episodes
+		this.scheduleTunedSettle(waitMs)
+	}
+
+	private scheduleTunedSettle(waitMs: number): void {
+		if (this.tunedSettleTimer) clearTimeout(this.tunedSettleTimer)
+		this.tunedSettleTimer = null
+		if (!Number.isFinite(waitMs) || this.destroying) return
+		this.tunedSettleTimer = setTimeout(() => {
+			this.tunedSettleTimer = null
+			this.notifyBandplansChanged()
+		}, Math.ceil(waitMs))
+		this.tunedSettleTimer.unref()
 	}
 
 	/**
@@ -1584,11 +1741,6 @@ export class DecoderManager extends EventEmitter {
 				placement => this.placementTuned(placement, input),
 			)
 			this.releaseTunedHolds(wanted)
-			this.reconciledTuned = new Set(
-				wanted
-					.filter(placement => placement.tunedBand === true)
-					.map(placement => placement.key),
-			)
 			this.refreshTunedFlags(wanted)
 			if (plan.activity) {
 				for (const move of plan.activity.moves)
@@ -2648,6 +2800,15 @@ export class DecoderManager extends EventEmitter {
 		holderId: string,
 	): Promise<void> {
 		const holders = this.heldSources.get(sourceId) ?? new Set<string>()
+		if (holders.size === 0) {
+			// A sweep taking the source before the last one's restore settled
+			// keeps that sweep's pre-hold VFO.
+			const earlier = this.scanHolds.get(sourceId)
+			this.scanHolds.set(sourceId, {
+				preHoldVfo: earlier ? earlier.preHoldVfo : this.settledVfo,
+				settled: earlier?.settled ?? false,
+			})
+		}
 		holders.add(holderId)
 		this.heldSources.set(sourceId, holders)
 		this.log.info(
@@ -2672,6 +2833,8 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 		this.heldSources.delete(sourceId)
+		const scan = this.scanHolds.get(sourceId)
+		if (scan) scan.releasedAtMs = performance.now()
 		this.log.info({ sourceId, holderId }, "Source released by the scanner")
 		await this.evaluateSourceNow(sourceId)
 	}
@@ -3744,6 +3907,8 @@ export class DecoderManager extends EventEmitter {
 		this.destroying = true
 		if (this.efficiencyTimer) clearTimeout(this.efficiencyTimer)
 		this.efficiencyTimer = null
+		if (this.tunedSettleTimer) clearTimeout(this.tunedSettleTimer)
+		this.tunedSettleTimer = null
 		if (this.activityTimer) clearTimeout(this.activityTimer)
 		this.activityTimer = null
 		if (this.activityPassTimer) clearTimeout(this.activityPassTimer)

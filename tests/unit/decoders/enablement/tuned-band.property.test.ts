@@ -310,15 +310,21 @@ it("tuned means within 200 kHz of a target, inside a target cluster or a range",
 	).toBe(false)
 })
 
-it("the tuned frequency is the VFO on its source, else the capture centre", () => {
-	expect(tunedFrequencyHz("a", 100, { sourceId: "a", frequencyHz: 120 })).toBe(
-		120,
-	)
-	expect(tunedFrequencyHz("a", 100, { sourceId: "b", frequencyHz: 120 })).toBe(
-		100,
-	)
-	expect(tunedFrequencyHz("a", null, null)).toBeNull()
-	expect(tunedFrequencyHz("a", NaN, null)).toBeNull()
+it("the tuned frequency is the VFO on its source; the default source's centre only without a VFO", () => {
+	const vfo = { sourceId: "a", frequencyHz: 120 }
+	expect(tunedFrequencyHz("a", 100, vfo, "a")).toBe(120)
+	// A second dongle is not tuned by its own centre while the VFO is elsewhere.
+	expect(tunedFrequencyHz("b", 100, vfo, "a")).toBeNull()
+	expect(tunedFrequencyHz("b", 100, vfo, "b")).toBeNull()
+	// Without a VFO the centre of the source a VFO would sit on stands in.
+	expect(tunedFrequencyHz("a", 100, null, "a")).toBe(100)
+	expect(
+		tunedFrequencyHz("a", 100, { sourceId: "a", frequencyHz: NaN }, "a"),
+	).toBe(100)
+	expect(tunedFrequencyHz("b", 100, null, "a")).toBeNull()
+	expect(tunedFrequencyHz("a", 100, null, undefined)).toBeNull()
+	expect(tunedFrequencyHz("a", null, null, "a")).toBeNull()
+	expect(tunedFrequencyHz("a", NaN, null, "a")).toBeNull()
 })
 
 it("tuned placements move to the front, otherwise in planner order", () => {

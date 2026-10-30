@@ -673,7 +673,13 @@ and it starts. When you tune, the core decides for each decoder in this order:
 
 1. **Mode.** A decoder set to `off` in Settings (or `enabled: false` in YAML) never starts,
    whatever you tune. `always` runs everywhere; `auto` runs where its band is. Pressing
-   **Stop** on a decoder also keeps it stopped until you start it or change its mode.
+   **Stop** on an `auto` decoder keeps it stopped until you start it, change its mode or
+   tune into its band again: once your VFO has settled (stayed put for 1 second) inside its
+   band after being outside it, the core starts it again as one it started on its own, so
+   the CPU budget can still pause it. Moving within its band, a scanner sweep's hops, the
+   sweep's restore of your frequency afterwards, a reconnect and WaveKit starting up are not
+   tunes: they leave a stopped decoder stopped. A stopped `always` decoder stays stopped
+   until you start it.
 2. **Source ready.** A sample-rate change reconnects the source; until the new rate is known
    decoders wait as `source-rate-unknown`.
 3. **Band.** The decoder's band (ADS-B 1090 MHz, APRS 144.800 MHz, ISM 433/868 MHz, ACARS and
@@ -685,9 +691,12 @@ and it starts. When you tune, the core decides for each decoder in this order:
 5. **Placement.** Channel decoders need a channel that fits the capture (`capture-too-narrow`,
    `no-channel-selected`) and the channelizer (`channelizer-unavailable`).
 6. **CPU budget.** Decoders the core started on its own share a CPU budget
-   (`efficiency-budget`). The decoder whose band holds the frequency you tuned (the VFO, or the
-   capture centre without one, within 200 kHz of its targets or the span between them, or inside
-   its band) goes first:
+   (`efficiency-budget`). The decoder whose band holds the frequency you tuned (the VFO on its
+   source, within 200 kHz of its targets or the span between them, or inside its band) goes
+   first. The VFO tunes only the source it is on: a second dongle is not "tuned" by its own
+   capture centre while the VFO is elsewhere, and only with no VFO at all does the default
+   source's capture centre stand in for it. A source a scanner sweep holds is never tuned.
+   For the tuned decoder:
    - it is admitted before the others, and when the budget is full the other automatic
      decoders stop to make room (newest first);
    - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds
@@ -697,8 +706,10 @@ and it starts. When you tune, the core decides for each decoder in this order:
      first, at most one per source every 60 seconds; the tuned one stops only when nothing else
      is left, and says so. Drops on its own input are its own: it stops, not a bystander.
 
-   Tuning into a band also clears any earlier budget or loss wait of its decoder. YAML
-   decoders, `always` decoders and decoders you started yourself are never stopped for it.
+   Tuning into a band also clears any earlier budget or loss wait of its decoder, once the
+   tuned frequency has stayed in that band for 1 second (passing through a band on the way
+   elsewhere clears nothing). YAML decoders, `always` decoders and decoders you started
+   yourself are never stopped for it.
 
 7. **Start.** The process then starts; ADS-B shows aircraft once readsb has heard them.
 
