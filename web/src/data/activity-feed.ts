@@ -33,6 +33,12 @@ export type ActivityResetReason =
 
 export interface ActivityFeedState {
 	query: ActivityQuery | null
+	/**
+	 * What the list is a search for: the same key keeps the cached rows across reloads. By default the
+	 * query's parameters; a caller with a rolling range passes the range by name ("Last hour"), since its
+	 * resolved `from` moves every minute while the rows it found stay valid.
+	 */
+	searchKey: string | null
 	status: "idle" | "loading" | "live" | "error"
 	/** Newest first, deduplicated by eventId, at most `maxItems` (MAX_ITEMS by default). */
 	items: readonly ActivitySummary[]
@@ -56,6 +62,7 @@ const PAGE = 100
 
 const INITIAL: ActivityFeedState = {
 	query: null,
+	searchKey: null,
 	status: "idle",
 	items: [],
 	pending: [],
@@ -181,6 +188,48 @@ export function reopenMerge(
 	return mergeNewest(fresh, older, max)
 }
 
+/**
+ * Where paging continues after a reopen whose snapshot `joins` the cache (both newest first; the list
+ * becomes the snapshot's rows plus the cached rows older than them): the snapshot's own token when no
+ * cached row lies below the snapshot (or the snapshot is complete); past the cache's oldest row with the
+ * cache's token when that row is still stored, so the rows already cached are never fetched again; nothing
+ * more when the store pruned it (`lowBarrier` at or above it: everything older is pruned too). `fallback`
+ * is the snapshot's token, for a cache token the core no longer accepts (it expired).
+ */
+export function reopenPaging(
+	cachedOldest: ActivitySummary | undefined,
+	cacheToken: string | null,
+	fresh: readonly ActivitySummary[],
+	snapshotToken: string | null,
+	lowBarrier: string,
+): { token: string | null; fallback: string | null } {
+	const freshOldest = fresh.at(-1)
+	if (
+		snapshotToken === null ||
+		cachedOldest === undefined ||
+		freshOldest === undefined ||
+		compareSeq(cachedOldest.commitSeq, freshOldest.commitSeq) >= 0
+	)
+		return { token: snapshotToken, fallback: null }
+	if (compareSeq(cachedOldest.commitSeq, lowBarrier) <= 0)
+		return { token: null, fallback: null }
+	return {
+		token: cacheToken,
+		fallback: cacheToken === null ? null : snapshotToken,
+	}
+}
+
+/** Rows heard at or after `fromIso` (a moved rolling range's start); all of them when it is unset. */
+export function since(
+	rows: readonly ActivitySummary[],
+	fromIso: string | undefined,
+): readonly ActivitySummary[] {
+	if (fromIso === undefined) return rows
+	const from = Date.parse(fromIso)
+	if (!Number.isFinite(from)) return rows
+	return rows.filter(r => Date.parse(r.producedAt) >= from)
+}
+
 /** The REST query string for a query (the core's flat parameter names). */
 export function queryParams(q: ActivityQuery): Record<string, QueryValue> {
 	const p: Record<string, QueryValue> = {}
@@ -223,6 +272,8 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private generation = 0
 	private subId = ""
+	/** The snapshot's page token, kept while paging continues from the cache's own (see reopenPaging). */
+	private fallbackToken: string | null = null
 
 	constructor(
 		api: ApiClient,
@@ -264,18 +315,33 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	}
 
 	/**
-	 * Shows `query` (null clears the list): loads the snapshot, then follows it live. The same query as
-	 * the one shown keeps the list (and the query object) while it reloads: the cache across close/open.
+	 * Shows `query` (null clears the list): loads the snapshot, then follows it live. The same search as
+	 * the one shown (`key`, else the query's parameters) keeps the list while it reloads: the cache across
+	 * close/open. The same parameters keep the query object too; a rolling range that moved takes the new
+	 * query and drops the cached rows before its start.
 	 */
-	setQuery(query: ActivityQuery | null): Promise<void> {
+	setQuery(query: ActivityQuery | null, key?: string): Promise<void> {
 		const s = this.get()
-		if (query !== null && s.query !== null && sameQuery(s.query, query)) {
-			this.set({ ...s, error: null, reset: null })
+		const searchKey =
+			query === null ? null : (key ?? JSON.stringify(queryParams(query)))
+		if (query !== null && s.query !== null && s.searchKey === searchKey) {
+			const same = sameQuery(s.query, query)
+			const from = query.producedAt?.from
+			this.set({
+				...s,
+				query: same ? s.query : query,
+				items: same ? s.items : since(s.items, from),
+				pending: same ? s.pending : since(s.pending, from),
+				error: null,
+				reset: null,
+			})
 			return this.reload()
 		}
+		this.fallbackToken = null
 		this.set({
 			...INITIAL,
 			query,
+			searchKey,
 			paused: s.paused,
 			holding: s.holding,
 		})
@@ -299,20 +365,25 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 				const cached = [...s.pending, ...s.items]
 				const fresh = [...page.items].sort(newestFirst)
 				const keep = joins(fresh, cached, page.nextPageToken === null)
+				const items = keep
+					? reopenMerge(cached, fresh, page.snapshot.lowBarrier, this.maxItems)
+					: fresh.slice(0, this.maxItems)
+				const paging = keep
+					? reopenPaging(
+							cached.at(-1),
+							s.nextPageToken,
+							fresh,
+							page.nextPageToken,
+							page.snapshot.lowBarrier,
+						)
+					: { token: page.nextPageToken, fallback: null }
+				this.fallbackToken = paging.fallback
 				return {
 					...s,
 					status: "live",
-					items: keep
-						? reopenMerge(
-								cached,
-								fresh,
-								page.snapshot.lowBarrier,
-								this.maxItems,
-							)
-						: fresh.slice(0, this.maxItems),
+					items,
 					pending: [],
-					// past the cache's oldest row the next page continues from the snapshot's token
-					nextPageToken: page.nextPageToken,
+					nextPageToken: paging.token,
 					available: true,
 				}
 			})
@@ -341,7 +412,24 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		const generation = this.generation
 		this.update(v => ({ ...v, loadingMore: true }))
 		try {
-			const page = await this.fetchPage(s.query, s.nextPageToken)
+			const page = await this.fetchPage(s.query, s.nextPageToken).catch(
+				(error: unknown) => {
+					// the cache's token expired: page on from the snapshot's (rows already held are deduplicated)
+					const fallback = this.fallbackToken
+					const status = (error as { status?: number }).status
+					if (
+						fallback === null ||
+						generation !== this.generation ||
+						status === undefined ||
+						status < 400 ||
+						status >= 500 ||
+						status === 429
+					)
+						throw error
+					return this.fetchPage(s.query as ActivityQuery, fallback)
+				},
+			)
+			this.fallbackToken = null
 			if (generation !== this.generation) return
 			this.update(v => ({
 				...v,

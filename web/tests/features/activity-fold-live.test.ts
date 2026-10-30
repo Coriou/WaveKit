@@ -6,7 +6,7 @@ import { ActivityFeed, joins } from "../../src/data/activity-feed.ts"
 import { EventsClient } from "../../src/data/events-client.ts"
 import type { DataLayer } from "../../src/data/index.ts"
 import { ActivityController } from "../../src/features/activity/controller.ts"
-import { foldedOf } from "../../src/features/activity/fold.ts"
+import { foldedOf, knownFor } from "../../src/features/activity/fold.ts"
 import { fakeSockets } from "../data/fake-socket.ts"
 
 const T0 = Date.parse("2026-10-17T08:00:00.000Z")
@@ -131,7 +131,7 @@ describe("activity live folding", () => {
 		expect(after[0]?.key).toBe(key)
 		expect(after[0]?.members).toHaveLength(21)
 		expect(after[0]?.latest.eventId).toBe("evt_40")
-		// the latest state keeps the callsign an older row carried
+		// the row shows the callsign an older row carried (identity only)
 		expect(after[0]?.view.title).toBe("WKT101")
 	})
 
@@ -242,7 +242,8 @@ describe("activity cache across close and open", () => {
 		const seqs = feed.get().items.map(i => Number(i.commitSeq))
 		expect(seqs.every(n => n > 150)).toBe(true)
 		expect(seqs).toEqual(range(151, 349).map(i => Number(i.commitSeq)))
-		expect(feed.get().nextPageToken).toBe("p:2")
+		// everything below the barrier is pruned and 151-249 are held: no page left to fetch
+		expect(feed.get().nextPageToken).toBeNull()
 	})
 
 	it("drops a cached row the reopened snapshot's range no longer holds", async () => {
@@ -264,7 +265,7 @@ describe("activity cache across close and open", () => {
 		expect(items.find(i => i.commitSeq === "270")?.title).toBe("WKT270")
 	})
 
-	it("opens a stack's newest event with the stack's latest state", async () => {
+	it("opens an event exactly as stored, with what earlier rows knew kept apart", async () => {
 		const core = setup()
 		core.serve(page(range(1, 12), null))
 		const c = new ActivityController({
@@ -277,14 +278,101 @@ describe("activity cache across close and open", () => {
 		expect(newest?.title).toBe("ABC123")
 		c.noteOpenFeed(c.feed)
 		c.open(newest ?? null)
-		expect(c.get().openItem?.title).toBe("WKT101")
-		expect(c.get().openItem?.eventId).toBe(newest?.eventId)
-		expect(c.stackFor(newest?.eventId ?? "")?.members).toHaveLength(12)
-		// an older member opens as stored
+		expect(c.get().openItem).toBe(newest)
+		const stack = c.stackFor(newest?.eventId ?? "")
+		expect(stack?.members).toHaveLength(12)
+		// the detail's "Latest known" block: the callsign title from evt_10
+		const known = stack && newest ? knownFor(stack, newest) : null
+		expect(known?.title?.value).toBe("WKT101")
+		expect(known?.title?.from.eventId).toBe("evt_10")
 		const older = c.feed.get().items[5]
 		c.open(older ?? null)
 		expect(c.get().openItem).toBe(older)
 		detach()
+		c.dispose()
+	})
+
+	it("pages on after a reopen from the cache's own token, never re-fetching cached rows", async () => {
+		const core = setup()
+		// first open: 201-300, more behind "p:cache"
+		core.serve(page(range(201, 300), "p:cache"))
+		const feed = new ActivityFeed(core.api, core.events, { id: "token" })
+		await feed.setQuery({})
+		feed.stop()
+		// reopen: the snapshot 290-320 joins the cache; its own next page would start at 289
+		core.serve(page(range(290, 320), "p:snapshot"))
+		await feed.setQuery({})
+		expect(feed.get().items).toHaveLength(120)
+		expect(feed.get().nextPageToken).toBe("p:cache")
+		core.serve(page(range(101, 200), null))
+		await feed.loadMore()
+		expect(core.urls.at(-1)).toContain("pageToken=p%3Acache")
+		expect(feed.get().items).toHaveLength(220)
+		expect(feed.get().nextPageToken).toBeNull()
+	})
+
+	it("falls back to the snapshot's token when the core no longer takes the cache's", async () => {
+		let reject = false
+		const seen: string[] = []
+		const answer = { current: page(range(201, 300), "p:cache") }
+		const api = new ApiClient({
+			fetch: async url => {
+				seen.push(url)
+				if (reject && url.includes("pageToken=p%3Acache"))
+					return new Response(JSON.stringify({ error: "expired" }), {
+						status: 400,
+					})
+				return new Response(JSON.stringify(answer.current), { status: 200 })
+			},
+		})
+		const core = setup()
+		const feed = new ActivityFeed(api, core.events, { id: "expired" })
+		await feed.setQuery({})
+		feed.stop()
+		answer.current = page(range(290, 320), "p:snapshot")
+		await feed.setQuery({})
+		reject = true
+		answer.current = page(range(190, 289), null)
+		await feed.loadMore()
+		expect(seen.at(-2)).toContain("pageToken=p%3Acache")
+		expect(seen.at(-1)).toContain("pageToken=p%3Asnapshot")
+		expect(feed.get().error).toBeNull()
+		expect(feed.get().items).toHaveLength(131)
+	})
+
+	it("keeps a rolling range's cache across reopen a few minutes later, dropping rows before its start", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] })
+		vi.setSystemTime(T0 + 3_600_000)
+		const core = setup()
+		// heard T0 + 250 s to T0 + 400 s
+		core.serve(page(range(250, 400), "p:2"))
+		const c = new ActivityController({
+			api: core.api,
+			events: core.events,
+		} as unknown as DataLayer)
+		c.setRange({ kind: "1h" })
+		const detach = c.attach()
+		await vi.waitFor(() => expect(c.feed.get().status).toBe("live"))
+		const firstFrom = c.feed.get().query?.producedAt?.from
+		detach()
+		// 5 min later "Last hour" starts 5 min later: the same search, a moved start
+		vi.setSystemTime(T0 + 3_600_000 + 5 * 60_000)
+		const release = core.hold()
+		core.serve(page(range(380, 420), "p:3"))
+		const again = c.attach()
+		expect(c.feed.get().query?.producedAt?.from).not.toBe(firstFrom)
+		// the cache shows at once (loading with items), without the rows now before the range's start
+		// (T0 + 300 s): 300-400 stay, 250-299 go
+		expect(c.feed.get().status).toBe("loading")
+		expect(c.feed.get().items).toHaveLength(101)
+		const from = Date.parse(c.feed.get().query?.producedAt?.from ?? "")
+		expect(
+			c.feed.get().items.every(i => Date.parse(i.producedAt) >= from),
+		).toBe(true)
+		release()
+		await vi.waitFor(() => expect(c.feed.get().status).toBe("live"))
+		expect(c.feed.get().items).toHaveLength(121)
+		again()
 		c.dispose()
 	})
 })

@@ -132,8 +132,9 @@ export interface MockServerOptions {
 	activity429?: Activity429Mode
 	/**
 	 * Activity floods (./activity-floods.ts): an aircraft at 2.5 decodes/s, a pager tone-only beacon every
-	 * ~45 s and a 25-burst DMR call every 3 min, in the seeded history and live. On for `pnpm mock`
-	 * (WAVEKIT_MOCK_ACTIVITY_FLOODS=0 turns them off), off by default in buildMockServer().
+	 * ~45 s and a 24-row DMR call (12 call_start / call_end overs) every 3 min, in the seeded history and
+	 * live. On for `pnpm mock` (WAVEKIT_MOCK_ACTIVITY_FLOODS=0 turns them off), off by default in
+	 * buildMockServer().
 	 */
 	activityFloods?: boolean
 }
@@ -160,7 +161,7 @@ export interface MockServer {
 
 /**
  * Seeded flood history: 30 min of beacons and calls (30 min / 45 s = 40 beacons, 30 min / 3 min = 10 calls of
- * 25 bursts), 3 min of aircraft (180 s × 2.5/s, about 450 rows): enough for every kind of stack on the first page.
+ * 24 rows), 3 min of aircraft (180 s × 2.5/s, about 450 rows): enough for every kind of stack on the first page.
  */
 const FLOOD_HISTORY_MS = 30 * 60_000
 const FLOOD_AIRCRAFT_HISTORY_MS = 3 * 60_000

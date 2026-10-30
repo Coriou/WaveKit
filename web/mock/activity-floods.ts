@@ -5,7 +5,9 @@
 //   core stores them;
 // - a POCSAG tone-only beacon (capcode 0042001, no content) every 45 s ± 3 s, as paging networks send
 //   idle beacons every 30-60 s;
-// - a DMR call (TG 99 from radio 4242) of 25 bursts 2.4 s apart (60 s), once every 3 min.
+// - a DMR call on TG 99 once every 3 min: 12 overs from radio 4242, each a call_start then a call_end 2.4 s
+//   later, as dsd-fme sends them: the start carries no duration (the call has not ended) and the first one
+//   no radio yet (it is not decoded before the start is sent); the end carries the over's duration.
 // Type stripping only: no enums, parameter properties or namespaces.
 import type { ActivitySummary, JsonValue } from "@wavekit/api-types"
 
@@ -16,9 +18,12 @@ export const FLOOD_AIRCRAFT_INTERVAL_MS = 400
 /** A paging idle beacon every 45 s (networks: 30-60 s), jittered ±3 s. */
 export const FLOOD_BEACON_INTERVAL_MS = 45_000
 const BEACON_JITTER_MS = 3_000
-/** One DMR call every 3 min: 25 bursts 2.4 s apart (60 s on air), then 120 s of silence. */
+/**
+ * One DMR call every 3 min: 24 rows 2.4 s apart (12 overs of a call_start and a call_end; 57.6 s on air),
+ * then 122.4 s of silence.
+ */
 export const FLOOD_CALL_PERIOD_MS = 180_000
-export const FLOOD_CALL_BURSTS = 25
+export const FLOOD_CALL_BURSTS = 24
 export const FLOOD_BURST_INTERVAL_MS = 2_400
 
 export type FloodSummary = Omit<
@@ -86,7 +91,10 @@ const BEACON: FloodEvent["summary"] = {
 	],
 }
 
-function burst(k: number): FloodEvent["summary"] {
+/** Row k of a call: even rows are call_start (no duration; the first with no radio), odd rows call_end. */
+export function callRow(k: number): FloodEvent["summary"] {
+	const start = k % 2 === 0
+	const radio = k > 0
 	return {
 		kind: "decoder-reception",
 		decoderId: "dsd-fme",
@@ -95,18 +103,33 @@ function burst(k: number): FloodEvent["summary"] {
 		category: "voice",
 		frequencyHz: DMR_HZ,
 		entityKey: "talkgroup:99",
-		title: "DMR TG 99 from 4242",
+		title: radio ? "DMR TG 99 from 4242" : "DMR TG 99",
 		fields: [
 			{ key: "talkgroup", label: "Talkgroup", value: 99 },
-			{ key: "source", label: "Radio", value: 4242 },
+			...(radio ? [{ key: "source", label: "Radio", value: 4242 }] : []),
 			{ key: "slot", label: "Slot", value: 1 },
-			{
-				key: "duration",
-				label: "Duration",
-				value: (k + 1) * FLOOD_BURST_INTERVAL_MS,
-				unit: "ms",
-			},
+			...(start
+				? []
+				: [
+						{
+							key: "duration",
+							label: "Duration",
+							value: FLOOD_BURST_INTERVAL_MS,
+							unit: "ms",
+						},
+					]),
 		],
+	}
+}
+
+function callData(k: number): { readonly [key: string]: JsonValue } {
+	return {
+		protocol: "DMR",
+		event: k % 2 === 0 ? "call_start" : "call_end",
+		talkgroup: 99,
+		...(k > 0 ? { source: 4242 } : {}),
+		slot: 1,
+		...(k % 2 === 0 ? {} : { duration: FLOOD_BURST_INTERVAL_MS }),
 	}
 }
 
@@ -163,8 +186,8 @@ export function floodEvents(
 			if (at >= from && at < to)
 				out.push({
 					at,
-					summary: burst(k),
-					data: { protocol: "DMR", talkgroup: 99, source: 4242, slot: 1 },
+					summary: callRow(k),
+					data: callData(k),
 				})
 		}
 	return out.sort((a, b) => a.at - b.at)

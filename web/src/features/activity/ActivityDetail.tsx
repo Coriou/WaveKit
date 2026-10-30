@@ -1,7 +1,8 @@
-// One Activity event, pushed in over the list with Back: the decoded message card (every field, position, the stored
-// JSON), what it probably is (a hypothesis from its stack: "Likely a paging-network idle beacon …"), where, when and
-// how strong it was heard, links to tune it and to its Scanner discovery, and the rows folded with it (or, opened by
-// a link, earlier events from the same sender).
+// One Activity event, pushed in over the list with Back: the decoded message card exactly as stored (every field,
+// position, the stored JSON), what it probably is (a hypothesis from its stack: "Likely a paging-network idle
+// beacon …"), who earlier rows of its stack said it is when this decode does not (a separate "Latest known" block,
+// identity only), where, when and how strong it was heard, links to tune it and to its Scanner discovery, and the
+// rows folded with it (or, opened by a link, earlier events from the same sender).
 import type {
 	ActivityRecord,
 	ActivitySummary,
@@ -21,13 +22,13 @@ import { summaryOfRecord } from "../messages/card.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { ActivityRow, FoldedRow } from "./ActivityList.tsx"
-import type { ActivityStack } from "./fold.ts"
+import type { ActivityStack, KnownIdentity } from "./fold.ts"
 import {
 	explainStack,
 	foldActivity,
-	foldedOf,
+	knownFor,
 	spanText,
-	stackOf,
+	stackIn,
 } from "./fold.ts"
 import { fieldText, rowView } from "./rows.ts"
 import { pagerDetailItem } from "./pager-detail.ts"
@@ -163,7 +164,7 @@ export function ActivityDetail({
 	const loadedFrom = activity.stackFeed()
 	const loaded = useStore(loadedFrom, v => v.items)
 	const folded = useMemo(
-		() => stackOf(foldedOf(loaded, loadedFrom), eventId),
+		() => stackIn(loaded, loadedFrom, eventId),
 		[loaded, loadedFrom, eventId],
 	)
 	const stack: ActivityStack | null = useMemo(
@@ -247,6 +248,7 @@ export function ActivityDetail({
 					<h3 className="wka-detail-title">Event</h3>
 				)}
 				{stack && <WhatItIs stack={stack} />}
+				{stack && item && <LatestKnown known={knownFor(stack, item)} />}
 				{((entityKey !== null && v) || discovery !== null) && (
 					<div className="wka-detail-actions">
 						{entityKey !== null && v && (
@@ -307,11 +309,18 @@ export function ActivityDetail({
 							</dd>
 						</div>
 					)}
-					{hz !== null && (
+					{stack && stack.channelsHz.length > 1 ? (
 						<div className="wka-field">
-							<dt>Frequency</dt>
-							<dd>{formatMHz(hz)} MHz</dd>
+							<dt>Channels (simulcast)</dt>
+							<dd>{stack.channelsHz.map(c => formatMHz(c)).join(" · ")} MHz</dd>
 						</div>
+					) : (
+						hz !== null && (
+							<div className="wka-field">
+								<dt>Frequency</dt>
+								<dd>{formatMHz(hz)} MHz</dd>
+							</div>
+						)
 					)}
 					{item?.decoderId && (
 						<div className="wka-field">
@@ -398,6 +407,48 @@ export function ActivityDetail({
 }
 
 const noop = () => undefined
+
+/**
+ * Who earlier rows of the stack said it is, when this decode does not (an aircraft's callsign on a
+ * position-only decode): identity only, each with the time of the row that said it, apart from the event.
+ */
+function LatestKnown({ known }: { known: KnownIdentity }) {
+	if (known.title === null && known.fields.length === 0) return null
+	const at = (s: ActivitySummary) => (
+		<time className="wka-known-at" dateTime={s.producedAt}>
+			{" "}
+			· {clockText(s.producedAt, { seconds: true })}
+		</time>
+	)
+	return (
+		<div className="wka-known">
+			<Label>Latest known (from earlier rows)</Label>
+			<dl className="wka-fields">
+				{known.title && (
+					<div className="wka-field">
+						<dt>Name</dt>
+						<dd>
+							{known.title.value}
+							{at(known.title.from)}
+						</dd>
+					</div>
+				)}
+				{known.fields.map(k => (
+					<div key={k.field.key} className="wka-field">
+						<dt>{k.field.label}</dt>
+						<dd>
+							{fieldText(k.field)}
+							{at(k.from)}
+						</dd>
+					</div>
+				))}
+			</dl>
+			<p className="wka-what-note">
+				Not in this decode: an earlier row of the same stack said it.
+			</p>
+		</div>
+	)
+}
 
 /** What it probably is: a hypothesis from the stack's rows, labelled as one. */
 function WhatItIs({ stack }: { stack: ActivityStack }) {

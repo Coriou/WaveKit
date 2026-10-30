@@ -1,29 +1,37 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import fc from "fast-check"
 import type { ActivitySummary } from "@wavekit/api-types"
 
 import {
 	FAMILY_RULES,
+	SIMULCAST_MS,
 	contentClass,
+	diffRows,
 	explainStack,
 	familyOf,
 	foldActivity,
 	foldKey,
+	foldWork,
 	foldedOf,
-	latestState,
+	heldStacks,
+	identityFrom,
+	knownFor,
 	regularIntervalMs,
 	releaseFolds,
 	rememberedFor,
 	spanText,
-	StackKeys,
+	stackIn,
 	stackOf,
 	timeOf,
 } from "../../src/features/activity/fold.ts"
 import type { FoldFamily } from "../../src/features/activity/fold.ts"
 import {
 	AUTO_FILL_PAGES,
+	channelsText,
 	foldedText,
+	heldText,
 	shouldAutoFill,
+	stackAction,
 	stackBadge,
 } from "../../src/features/activity/ActivityList.tsx"
 import {
@@ -407,21 +415,122 @@ describe("activity fold keys", () => {
 		const a = row(0, { ...ENTITY.vessel, frequencyHz: 161_975_000 })
 		const b = row(1, { ...ENTITY.vessel, frequencyHz: 162_025_000 })
 		expect(foldKey(a)).toBe(foldKey(b))
+		// a capcode is per channel: on another channel (not a simulcast copy) it is another stack
 		const p = row(0, ENTITY.pager)
-		const q = row(1, { ...ENTITY.pager, frequencyHz: 466_075_000 })
-		expect(foldKey(p)).not.toBe(foldKey(q))
+		const q = row(SIMULCAST_MS + 1, {
+			...ENTITY.pager,
+			frequencyHz: 466_075_000,
+		})
+		expect(foldActivity([p, q])).toHaveLength(2)
 		// the same channel to 1 kHz
-		expect(foldKey(row(0, { ...ENTITY.pager, frequencyHz: 160_450_400 }))).toBe(
-			foldKey(p),
-		)
+		const r = row(60_000, { ...ENTITY.pager, frequencyHz: 160_450_400 })
+		expect(foldActivity([p, r])).toHaveLength(1)
+		// a talkgroup is per site: the channel is in its key
+		const c = row(0, ENTITY.call)
+		expect(
+			foldKey(row(1, { ...ENTITY.call, frequencyHz: 161_175_000 })),
+		).not.toBe(foldKey(c))
 	})
 
 	it("splits a talkgroup by radio: each speaker's call is its own stack", () => {
-		const other = row(0, {
+		const radio = (at: number, source: number) =>
+			row(at, {
+				...ENTITY.call,
+				fields: [{ key: "source", label: "Radio", value: source }],
+			})
+		// 4242 and 7 talk in turn within the 10 s gap: one stack each, on one fold key
+		const items = [radio(0, 4242), radio(2000, 7), radio(4000, 4242)]
+		const stacks = foldActivity(items)
+		expect(stacks).toHaveLength(2)
+		expect(new Set(stacks.map(s => s.foldKey)).size).toBe(1)
+		expect(
+			stacks.map(s => s.members.map(m => m.eventId).sort()).sort(),
+		).toEqual(
+			[
+				[items[0]?.eventId, items[2]?.eventId].sort(),
+				[items[1]?.eventId],
+			].sort(),
+		)
+	})
+
+	it("folds a call start sent before its radio is known into the call that follows", () => {
+		// dsd-fme: call_start with no radio (and no duration), then the call_end with both
+		const start = row(0, {
+			...ENTITY.call,
+			fields: [{ key: "talkgroup", label: "Talkgroup", value: 99 }],
+		})
+		const end = row(2400, {
+			...ENTITY.call,
+			fields: [
+				{ key: "source", label: "Radio", value: 12 },
+				{ key: "duration", label: "Duration", value: 2400, unit: "ms" },
+			],
+		})
+		expect(foldActivity([start, end])).toHaveLength(1)
+		// on another channel it is another site's talkgroup: no join
+		const elsewhere = {
+			...start,
+			eventId: "elsewhere",
+			frequencyHz: 161_175_000,
+		}
+		expect(foldActivity([elsewhere, end])).toHaveLength(2)
+		// with no radio following within the gap, it joins the call before it (10 s gap: at, past)
+		const before = row(20_000, {
+			...ENTITY.call,
+			fields: [{ key: "source", label: "Radio", value: 12 }],
+		})
+		const tail = (at: number) =>
+			row(at, {
+				...ENTITY.call,
+				fields: [{ key: "talkgroup", label: "Talkgroup", value: 99 }],
+			})
+		expect(foldActivity([before, tail(30_000)])).toHaveLength(1)
+		expect(foldActivity([before, tail(30_001)])).toHaveLength(2)
+		// the radio after it is past the gap: the unknown row stays with the call before
+		const late = row(41_000, {
 			...ENTITY.call,
 			fields: [{ key: "source", label: "Radio", value: 7 }],
 		})
-		expect(foldKey(other)).not.toBe(foldKey(row(0, ENTITY.call)))
+		const t = tail(30_000)
+		const split = foldActivity([before, t, late])
+		expect(split).toHaveLength(2)
+		expect(stackOf(split, t.eventId)?.members).toContain(before)
+	})
+
+	it("folds one page simulcast on several channels within 2 s into one stack listing them", () => {
+		const page = (at: number, hz: number, text = "Synthetic call 12") =>
+			row(at, {
+				...ENTITY.pager,
+				frequencyHz: hz,
+				fields: [{ key: "message", label: "Message", value: text }],
+			})
+		expect(SIMULCAST_MS).toBe(2000)
+		const a = page(0, 160_450_000)
+		const at = foldActivity([a, page(SIMULCAST_MS, 466_075_000)])
+		expect(at).toHaveLength(1)
+		expect(at[0]?.channelsHz).toEqual([160_450_000, 466_075_000])
+		expect(at[0] && channelsText(at[0])).toBe("On 160.450 · 466.075 MHz")
+		// one ms past the window: the other channel is its own stack again
+		const past = foldActivity([a, page(SIMULCAST_MS + 1, 466_075_000)])
+		expect(past).toHaveLength(2)
+		expect(past.every(s => s.channelsHz.length === 1)).toBe(true)
+		expect(past[0] && channelsText(past[0])).toBeNull()
+		// another text or another class never folds across channels
+		expect(
+			foldActivity([a, page(500, 466_075_000, "Other call")]),
+		).toHaveLength(2)
+		const tone = row(500, { ...ENTITY.pager, frequencyHz: 466_075_000 })
+		expect(foldActivity([a, tone])).toHaveLength(2)
+		// two beacons on two channels, never within 2 s of each other: two stacks, as before
+		const beacons = [0, 20_000, 45_000, 65_000, 90_000, 110_000].map((t, i) =>
+			row(t, {
+				...ENTITY.pager,
+				frequencyHz: i % 2 === 0 ? 160_450_000 : 466_075_000,
+			}),
+		)
+		const two = foldActivity(beacons)
+		expect(two).toHaveLength(2)
+		expect(two.map(s => s.members.length)).toEqual([3, 3])
 	})
 
 	it("separates pages by content: tone only, numeric, alpha, and different texts", () => {
@@ -469,10 +578,13 @@ describe("activity fold gaps", () => {
 })
 
 describe("activity stacks", () => {
-	it("shows the latest state: the newest row, filled in from older ones", () => {
+	it("fills in only who it is from older rows, never their measurements", () => {
 		const named = row(0, {
 			title: "WKT101",
-			fields: [{ key: "callsign", label: "Callsign", value: "WKT101" }],
+			fields: [
+				{ key: "callsign", label: "Callsign", value: "WKT101" },
+				{ key: "altitude", label: "Altitude", value: 36_000, unit: "ft" },
+			],
 			position: { lat: 1, lon: 2 },
 		})
 		const bare = row(1000)
@@ -480,9 +592,48 @@ describe("activity stacks", () => {
 		expect(stack?.latest).toBe(bare)
 		expect(stack?.view.title).toBe("WKT101")
 		expect(stack?.view.eventId).toBe(bare.eventId)
+		// the callsign is identity; the altitude and the position were the older decode's own
 		expect(stack?.view.fields.map(f => f.key)).toEqual(["callsign"])
-		expect(stack?.view.position).toEqual({ lat: 1, lon: 2 })
-		expect(latestState([bare])).toBe(bare)
+		expect(stack?.view.position).toBeUndefined()
+		expect(stack?.known.title?.from).toBe(named)
+		expect(stack?.known.fields.map(k => [k.field.key, k.from])).toEqual([
+			["callsign", named],
+		])
+		// a lone row, or one that names itself, takes nothing
+		expect(foldActivity([bare])[0]?.view).toBe(bare)
+		expect(identityFrom(named, [bare, named])).toEqual({
+			title: null,
+			fields: [],
+		})
+	})
+
+	it("never shows an earlier over's duration on a call start that has none", () => {
+		const end = row(0, {
+			...ENTITY.call,
+			fields: [
+				{ key: "source", label: "Radio", value: 4242 },
+				{ key: "duration", label: "Duration", value: 7000, unit: "ms" },
+			],
+		})
+		const start = row(3000, {
+			...ENTITY.call,
+			title: "DMR TG 99 from 4242",
+			fields: [{ key: "source", label: "Radio", value: 4242 }],
+		})
+		const [stack] = foldActivity([start, end])
+		expect(stack?.latest).toBe(start)
+		expect(stack?.view.fields.some(f => f.key === "duration")).toBe(false)
+		expect(stack && knownFor(stack, start)).toEqual({ title: null, fields: [] })
+		// the older row opened from the stack: what it lacks, from the others
+		const named = row(4000, {
+			...ENTITY.aircraft,
+			title: "WKT101",
+			fields: [{ key: "callsign", label: "Callsign", value: "WKT101" }],
+		})
+		const older = row(1000, ENTITY.aircraft)
+		const [plane] = foldActivity([named, older])
+		expect(plane && knownFor(plane, older).title?.value).toBe("WKT101")
+		expect(plane && knownFor(plane, named)).toEqual({ title: null, fields: [] })
 	})
 
 	it("finds the stack of an event and memoises per list", () => {
@@ -492,6 +643,54 @@ describe("activity stacks", () => {
 			stackOf(foldedOf(items, LIST), items[1]?.eventId ?? "")?.members,
 		).toHaveLength(2)
 		expect(stackOf(foldedOf(items, LIST), "nope")).toBeNull()
+		// the owner's index finds the same stack
+		expect(stackIn(items, LIST, items[1]?.eventId ?? "")).toBe(
+			stackOf(foldedOf(items, LIST), items[1]?.eventId ?? ""),
+		)
+		expect(stackIn(items, LIST, "nope")).toBeNull()
+	})
+
+	it("counts held arrivals as the stacks they fold into", () => {
+		const owner = { capacity: 100 }
+		const beacon = [0, 45_000, 90_000].map(t => row(t, ENTITY.pager))
+		const plane = row(1000, { entityKey: "icao:0HE1D0" })
+		expect(heldStacks([], owner)).toBe(0)
+		expect(heldStacks([...beacon, plane].reverse(), owner)).toBe(2)
+		expect(heldText(2, 4)).toBe("2 rows from 4 new decodes.")
+		expect(heldText(1, 1)).toBe("1 row from 1 new decode.")
+	})
+
+	it("expands with → and collapses with ← on the stack under the cursor", () => {
+		const items = [row(2000), row(1000), row(0)]
+		const [stack] = foldActivity(items)
+		const key = stack?.key ?? ""
+		const closed = stackEntries(foldActivity(items), T0 + 3000, new Set())
+		const open = stackEntries(foldActivity(items), T0 + 3000, new Set([key]))
+		expect(stackAction(closed[1], 1)).toEqual({
+			stackKey: key,
+			open: true,
+			cursor: null,
+		})
+		expect(stackAction(closed[1], -1)).toBeNull()
+		expect(stackAction(open[1], -1)).toEqual({
+			stackKey: key,
+			open: false,
+			cursor: null,
+		})
+		expect(stackAction(open[1], 1)).toBeNull()
+		// on a folded row, ← collapses its stack and moves the cursor back onto it
+		expect(stackAction(open[2], -1)).toEqual({
+			stackKey: key,
+			open: false,
+			cursor: key,
+		})
+		expect(stackAction(open[2], 1)).toBeNull()
+		// a group header or a lone row: the arrows move between columns instead
+		expect(stackAction(open[0], 1)).toBeNull()
+		const lone = stackEntries(foldActivity([row(0)]), T0 + 1000, new Set())
+		expect(stackAction(lone[1], 1)).toBeNull()
+		// the first folded row carries the toggle's aria-controls target
+		expect(open.filter(e => e.type === "member" && e.first)).toHaveLength(1)
 	})
 
 	it("lists an expanded stack's earlier rows after it, keyed by event", () => {
@@ -655,27 +854,28 @@ describe("activity stack keys per list", () => {
 	})
 
 	it("keeps a key through a full list sliding one decode at a time (at the bound)", () => {
-		const keys = new StackKeys(4)
+		const owner = { capacity: 4 }
 		let list = run("icao:0B0B00", 4)
-		const key = keys.reconcile(foldActivity(list))[0]?.key
+		const key = foldedOf(list, owner)[0]?.key
 		for (let i = 4; i < 20; i++) {
 			list = mergeNewest(list, [row(i * 1000, { entityKey: "icao:0B0B00" })], 4)
-			const [stack] = keys.reconcile(foldActivity(list))
+			const [stack] = foldedOf(list, owner)
 			expect(stack?.members).toHaveLength(4)
 			expect(stack?.key).toBe(key)
-			expect(keys.size).toBe(4)
+			// it remembers the list's rows only: at most its capacity
+			expect(rememberedFor(owner)).toBe(4)
 		}
 	})
 
-	it("forgets ids past the bound: a full list of other events in the same list drops them", () => {
-		const keys = new StackKeys(4)
+	it("forgets rows that left the list: a full list of other events drops them", () => {
+		const owner = { capacity: 4 }
 		const x = run("icao:0F0F0F", 4)
-		const kx = keys.reconcile(foldActivity(x))[0]?.key
-		keys.reconcile(foldActivity(run("icao:0E0E0E", 4)))
-		expect(keys.size).toBe(4)
-		// X comes back with its three newest rows and a new one: its ids were trimmed, so a fresh key
+		const kx = foldedOf(x, owner)[0]?.key
+		foldedOf(run("icao:0E0E0E", 4), owner)
+		expect(rememberedFor(owner)).toBe(4)
+		// X comes back with its three newest rows and a new one: its rows were forgotten, so a fresh key
 		const back = [row(10_000, { entityKey: "icao:0F0F0F" }), ...x.slice(0, 3)]
-		const [stack] = keys.reconcile(foldActivity(back))
+		const [stack] = foldedOf(back, owner)
 		expect(stack?.key).not.toBe(kx)
 		expect(stack?.key).toBe(foldActivity(back)[0]?.key)
 	})
@@ -702,5 +902,148 @@ describe("activity stack keys per list", () => {
 		// a fold after release starts fresh (not the memoised array)
 		expect(foldedOf(list, owner)).not.toBe(folded)
 		expect(rememberedFor(owner)).toBe(3)
+	})
+})
+
+describe("activity incremental folding", () => {
+	afterEach(() => {
+		vi.restoreAllMocks()
+	})
+
+	/** What a fold says, without the keys: each stack's members (newest first) in list order. */
+	const shape = (stacks: readonly { members: readonly ActivitySummary[] }[]) =>
+		stacks.map(s => s.members.map(m => m.eventId))
+
+	/** One change a feed makes to its list: live rows on top, an older page below, eviction, a replaced row. */
+	const opArb = fc.oneof(
+		fc.record({
+			op: fc.constant("live" as const),
+			family: fc.constantFrom(...FAMILIES),
+			n: fc.integer({ min: 1, max: 4 }),
+			deltaMs: fc.integer({ min: 0, max: 400_000 }),
+		}),
+		fc.record({
+			op: fc.constant("older" as const),
+			family: fc.constantFrom(...FAMILIES),
+			n: fc.integer({ min: 1, max: 4 }),
+			deltaMs: fc.integer({ min: 0, max: 400_000 }),
+		}),
+		fc.record({
+			op: fc.constant("evict" as const),
+			n: fc.integer({ min: 1, max: 5 }),
+		}),
+		fc.record({
+			op: fc.constant("replace" as const),
+			at: fc.nat(),
+		}),
+	)
+
+	// Feature: activity-folding, Property 8: an incremental fold equals a full fold
+	// Validates: Requirements R1, R3, MAJOR 1
+	it("folds a changing list incrementally to exactly the stacks a full fold gives", () => {
+		fc.assert(
+			fc.property(fc.array(opArb, { minLength: 1, maxLength: 30 }), ops => {
+				const owner = { capacity: 40 }
+				let list: ActivitySummary[] = []
+				let newest = 0
+				let oldest = 0
+				let low = 1_000_000
+				for (const o of ops) {
+					if (o.op === "live") {
+						const add = Array.from({ length: o.n }, () =>
+							row((newest += o.deltaMs), ENTITY[o.family]),
+						)
+						list = mergeNewest(list, add, owner.capacity)
+					} else if (o.op === "older") {
+						// an older page: lower commit sequences, earlier times
+						const add = Array.from({ length: o.n }, () => {
+							const r = row((oldest -= o.deltaMs), ENTITY[o.family])
+							low -= 1
+							return { ...r, commitSeq: String(low) }
+						})
+						list = mergeNewest(list, add, owner.capacity)
+					} else if (o.op === "evict") {
+						list = list.slice(0, Math.max(0, list.length - o.n))
+					} else if (list.length > 0) {
+						// the reopened snapshot has a row as it is now: a new object, same event
+						const i = o.at % list.length
+						list = list.map((r, j) => (j === i ? { ...r, title: "WKT999" } : r))
+					}
+					const inc = foldedOf(list, owner)
+					expect(shape(inc)).toEqual(shape(foldActivity(list)))
+					expect(new Set(inc.map(s => s.key)).size).toBe(inc.length)
+					expect(rememberedFor(owner)).toBe(list.length)
+					for (const r of list)
+						expect(stackIn(list, owner, r.eventId)?.members).toContain(r)
+				}
+			}),
+			{ numRuns: 150 },
+		)
+	})
+
+	// Feature: activity-folding, Property 9: diffRows finds exactly the rows that came and went
+	// Validates: MAJOR 1
+	it("diffs two lists by identity, by the fast path or by sets", () => {
+		fc.assert(
+			fc.property(
+				fc.array(fc.boolean(), { minLength: 0, maxLength: 30 }),
+				fc.integer({ min: 0, max: 5 }),
+				fc.integer({ min: 0, max: 5 }),
+				(keep, top, bottom) => {
+					const pool = Array.from({ length: keep.length }, (_, i) => row(i))
+					const prev = pool
+					const next = [
+						...Array.from({ length: top }, (_, i) => row(100 + i)),
+						...pool.filter((_, i) => keep[i]),
+						...Array.from({ length: bottom }, (_, i) => row(200 + i)),
+					]
+					const { added, removed } = diffRows(prev, next)
+					const had = new Set(prev)
+					const has = new Set(next)
+					expect(new Set(added)).toEqual(new Set(next.filter(r => !had.has(r))))
+					expect(new Set(removed)).toEqual(
+						new Set(prev.filter(r => !has.has(r))),
+					)
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("parses and keys only the rows an update brought, never the whole list again", () => {
+		const owner = { capacity: MAX_ITEMS }
+		// 5 000 rows of a busy mix: one aircraft, a beacon, a call, and many one-off aircraft
+		let t = 0
+		let list = Array.from({ length: MAX_ITEMS }, (_, i) =>
+			row(
+				(t += 400),
+				i % 4 === 0
+					? { entityKey: `icao:${(i % 700).toString(16)}` }
+					: ENTITY[FAMILIES[i % 3] as Exclude<FoldFamily, "notice">],
+			),
+		).reverse()
+		foldedOf(list, owner)
+		const parse = vi.spyOn(Date, "parse")
+		for (let u = 0; u < 50; u++) {
+			const keys = foldWork.keys
+			const times = foldWork.times
+			parse.mockClear()
+			const batch = [
+				row((t += 40)),
+				row((t += 40), ENTITY.pager),
+				row((t += 40), ENTITY.call),
+			]
+			list = mergeNewest(list, batch)
+			foldedOf(list, owner)
+			// 3 new rows: 3 keys and 3 times, whatever the list's length (evicted rows are already known)
+			expect(foldWork.keys - keys).toBe(3)
+			expect(foldWork.times - times).toBe(3)
+			expect(parse.mock.calls.length).toBeLessThanOrEqual(3)
+		}
+		// an untouched stack is the same object after an update (only stacks that got rows change)
+		const before = foldedOf(list, owner)
+		const after = foldedOf(mergeNewest(list, [row((t += 40))]), owner)
+		const untouched = before.filter(s => s.foldKey !== foldKey(row(0)))
+		for (const s of untouched) expect(after).toContain(s)
 	})
 })

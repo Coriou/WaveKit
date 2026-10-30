@@ -1,18 +1,20 @@
 // The Activity list: windowed rows (only what is on screen is mounted, heights measured once), grouped
-// by minute, arrows to move, Enter to open. Repeats fold into stacks (fold.ts): one row per thing going on,
-// its latest state, a count and a span, expanded in place to the folded earlier rows. A stack's React key is
-// its fold key and the first row it was seen with, kept while it shares a row with the stack before
-// (fold.ts StackKeys), so a live decode, an evicted old row or a loaded older page leaves it mounted. Stacks are ordered by
-// their latest decode: at the top of the list a stack that hears again moves to the top; while the list is
-// scrolled away from the top (or paused) arrivals are held and announced by the "N new" pill, so nothing
-// moves under the pointer. In the Cards layout each stack is its decoded message card (Messages board, feed
-// variant), windowed the same way.
+// by minute, arrows to move, Enter to open, → / ← to expand and collapse the stack under the cursor.
+// Repeats fold into stacks (fold.ts): one row per thing going on, its newest decode (only who it is filled
+// in from older rows), a count and a span, expanded in place to the folded earlier rows. A stack's React key
+// is its fold key and the first row it was seen with, kept while it shares a row with the stack before
+// (fold.ts foldedOf), so a live decode, an evicted old row or a loaded older page leaves it mounted. Stacks
+// are ordered by their latest decode: at the top of the list a stack that hears again moves to the top;
+// while the list is scrolled away from the top (or paused) arrivals are held and announced by the "N new"
+// pill (counted in stacks), so nothing moves under the pointer. In the Cards layout each stack is its
+// decoded message card (Messages board, feed variant), windowed the same way.
 import type { ActivitySummary } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
 import {
 	memo,
 	useCallback,
 	useEffect,
+	useId,
 	useLayoutEffect,
 	useMemo,
 	useRef,
@@ -28,7 +30,7 @@ import { clockText, useDisplay } from "../display.ts"
 import { useNow } from "../hooks.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import type { ActivityStack } from "./fold.ts"
-import { foldedOf, spanText } from "./fold.ts"
+import { foldedOf, heldStacks, spanText } from "./fold.ts"
 import { activityLayout } from "./layout.ts"
 import {
 	entryEventId,
@@ -39,7 +41,9 @@ import {
 	stackEntries,
 	timeText,
 } from "./rows.ts"
+import type { ListEntry } from "./rows.ts"
 import { prefixOffsets, virtualWindow } from "./virtual.ts"
+import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
 
 const HOLD_PX = 8
@@ -76,7 +80,7 @@ export function ActivityList({
 }: ActivityListProps) {
 	const { activity } = useServices()
 	const items = useStore(feed, s => s.items)
-	const pending = useStore(feed, s => s.pending.length)
+	const pendingItems = useStore(feed, s => s.pending)
 	const status = useStore(feed, s => s.status)
 	const more = useStore(feed, s => s.nextPageToken !== null)
 	const loadingMore = useStore(feed, s => s.loadingMore)
@@ -92,6 +96,7 @@ export function ActivityList({
 	const seen = useRef<string | null>(null)
 	const autoPages = useRef(0)
 	const cards = useStore(activityLayout, s => s.layout === "cards")
+	const listId = useId()
 	const readOnly = useReadOnly()
 	const estimate = cards ? estimateCardHeight : estimateHeight
 
@@ -108,6 +113,11 @@ export function ActivityList({
 
 	const display = useDisplay()
 	const stacks = useMemo(() => foldedOf(items, feed), [items, feed])
+	// held arrivals, counted as the stacks they fold into (a beacon heard five times is 1 new)
+	const pending = useMemo(
+		() => heldStacks(pendingItems, feed),
+		[pendingItems, feed],
+	)
 	const entries = useMemo(
 		() => stackEntries(stacks, now, expanded),
 		[stacks, now, display, expanded], // group labels follow the time setting
@@ -178,15 +188,15 @@ export function ActivityList({
 		return () => ro.disconnect()
 	}, [])
 
-	// A new search starts at the top, folded.
-	const query = useStore(feed, s => s.query)
+	// A new search starts at the top, folded (a rolling range moving on is the same search).
+	const search = useStore(feed, s => s.searchKey)
 	useEffect(() => {
 		if (scroller.current) scroller.current.scrollTop = 0
 		setScrollTop(0)
 		setExpanded(new Set())
 		autoPages.current = 0
 		feed.setHolding(false)
-	}, [query, feed])
+	}, [search, feed])
 
 	// Folded stacks shorter than the viewport: ask for older pages until it fills (bounded above).
 	useEffect(() => {
@@ -231,14 +241,21 @@ export function ActivityList({
 		[activity, feed, onOpen],
 	)
 
-	const toggle = useCallback((key: string) => {
+	const setOpen = useCallback((key: string, open: boolean | null) => {
 		setExpanded(prev => {
+			const want = open ?? !prev.has(key)
+			if (want === prev.has(key)) return prev
 			const next = new Set(prev)
-			if (next.has(key)) next.delete(key)
-			else next.add(key)
+			if (want) next.add(key)
+			else next.delete(key)
 			return next
 		})
 	}, [])
+	const toggle = useCallback((key: string) => setOpen(key, null), [setOpen])
+	const foldsId = useCallback(
+		(stackKey: string) => `${listId}-folded-${encodeURIComponent(stackKey)}`,
+		[listId],
+	)
 
 	const rowIndex = useMemo(() => {
 		const m = new Map<string, number>()
@@ -264,9 +281,20 @@ export function ActivityList({
 	const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
 		if (
 			(e.key === "ArrowLeft" || e.key === "ArrowRight") &&
-			column !== undefined &&
 			e.target === e.currentTarget
 		) {
+			// → expands the stack under the cursor, ← collapses it (from a folded row too, back onto its
+			// stack); with nothing to expand or collapse they move between the columns
+			const at = cursor === null ? undefined : rowIndex.get(cursor)
+			const entry = at === undefined ? undefined : entries[at]
+			const act = stackAction(entry, e.key === "ArrowRight" ? 1 : -1)
+			if (act !== null) {
+				e.preventDefault()
+				setOpen(act.stackKey, act.open)
+				if (act.cursor !== null) setCursor(act.cursor)
+				return
+			}
+			if (column === undefined) return
 			e.preventDefault()
 			focusSideways(e.currentTarget, e.key === "ArrowRight" ? 1 : -1)
 			return
@@ -317,7 +345,12 @@ export function ActivityList({
 	return (
 		<div className={className ? `wka-listwrap ${className}` : "wka-listwrap"}>
 			{pending > 0 && (
-				<button type="button" className="wka-newpill" onClick={toTop}>
+				<button
+					type="button"
+					className="wka-newpill"
+					title={`${heldText(pending, pendingItems.length)} Show them at the top.`}
+					onClick={toTop}
+				>
 					↑ {pending} new
 				</button>
 			)}
@@ -358,6 +391,7 @@ export function ActivityList({
 								<FoldedRow
 									key={e.key}
 									entryKey={e.key}
+									id={e.first ? foldsId(e.stackKey) : undefined}
 									item={e.item}
 									measure={measure}
 									cursor={cursor === e.key}
@@ -382,6 +416,7 @@ export function ActivityList({
 									stack={e.stack}
 									expanded={e.expanded}
 									onToggle={toggle}
+									foldsId={foldsId(e.key)}
 									measure={measure}
 									cursor={cursor === e.key}
 									current={openId === e.stack.latest.eventId}
@@ -397,6 +432,7 @@ export function ActivityList({
 									stack={e.stack}
 									expanded={e.expanded}
 									onToggle={toggle}
+									foldsId={foldsId(e.key)}
 									measure={measure}
 									cursor={cursor === e.key}
 									current={openId === e.stack.latest.eventId}
@@ -448,6 +484,38 @@ export function foldedText(events: number, rows: number): string {
 		: `${ev} in ${rows} row${rows === 1 ? "" : "s"}, loaded so far.`
 }
 
+/** The "N new" pill's title: held stacks and the decodes in them ("2 rows from 7 new decodes."). */
+export function heldText(stacks: number, decodes: number): string {
+	const rows = `${stacks} row${stacks === 1 ? "" : "s"}`
+	return `${rows} from ${decodes} new decode${decodes === 1 ? "" : "s"}.`
+}
+
+/**
+ * What → (by 1) or ← (by -1) does on a list entry: expand a collapsed stack, collapse an expanded one,
+ * or, on a folded row, collapse its stack and put the cursor back on it. Null when neither applies.
+ */
+export function stackAction(
+	entry: ListEntry | undefined,
+	by: -1 | 1,
+): { stackKey: string; open: boolean; cursor: string | null } | null {
+	if (entry?.type === "member")
+		return by < 0
+			? { stackKey: entry.stackKey, open: false, cursor: entry.stackKey }
+			: null
+	if (entry?.type !== "stack" || entry.stack.members.length < 2) return null
+	if (by > 0 && !entry.expanded)
+		return { stackKey: entry.key, open: true, cursor: null }
+	if (by < 0 && entry.expanded)
+		return { stackKey: entry.key, open: false, cursor: null }
+	return null
+}
+
+/** "160.450 · 466.075 MHz": the channels a simulcast stack was heard on; null for one channel. */
+export function channelsText(stack: ActivityStack | undefined): string | null {
+	if (!stack || stack.channelsHz.length < 2) return null
+	return `On ${stack.channelsHz.map(hz => formatMHz(hz)).join(" · ")} MHz`
+}
+
 /** "25 · 3 min": a stack's count and span in the loaded list. */
 export function stackBadge(stack: ActivityStack): string {
 	const span = stack.lastMs - stack.firstMs
@@ -489,22 +557,27 @@ interface RowProps {
 	stack?: ActivityStack
 	expanded?: boolean
 	onToggle?: (key: string) => void
+	/** The id of the stack's first folded row (aria-controls of its toggle). */
+	foldsId?: string
 }
 
 function StackToggle({
 	stack,
 	expanded,
 	onToggle,
+	foldsId,
 }: {
 	stack: ActivityStack
 	expanded: boolean
 	onToggle: ((key: string) => void) | undefined
+	foldsId: string | undefined
 }) {
 	return (
 		<button
 			type="button"
 			className="wka-stack"
 			aria-expanded={expanded}
+			aria-controls={foldsId}
 			aria-label={stackLabel(stack, expanded)}
 			title={stackLabel(stack, expanded)}
 			onClick={() => onToggle?.(stack.key)}
@@ -526,10 +599,12 @@ export const ActivityRow = memo(function ActivityRow({
 	stack,
 	expanded = false,
 	onToggle,
+	foldsId,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
 	const v = rowView(item)
 	const stacked = stack !== undefined && stack.members.length > 1
+	const channels = channelsText(stack)
 	return (
 		<div
 			role="listitem"
@@ -570,10 +645,16 @@ export const ActivityRow = memo(function ActivityRow({
 					{v.readings !== null && (
 						<span className="wka-read">{v.readings}</span>
 					)}
+					{channels !== null && <span className="wka-read">{channels}</span>}
 				</span>
 			</button>
 			{stacked && (
-				<StackToggle stack={stack} expanded={expanded} onToggle={onToggle} />
+				<StackToggle
+					stack={stack}
+					expanded={expanded}
+					onToggle={onToggle}
+					foldsId={foldsId}
+				/>
 			)}
 		</div>
 	)
@@ -582,6 +663,7 @@ export const ActivityRow = memo(function ActivityRow({
 /** A folded earlier row under an expanded stack: its time and what it said, one line; opens its detail. */
 export const FoldedRow = memo(function FoldedRow({
 	entryKey,
+	id,
 	item,
 	measure,
 	cursor,
@@ -589,6 +671,8 @@ export const FoldedRow = memo(function FoldedRow({
 	onOpen,
 }: {
 	entryKey: string
+	/** Set on a stack's first folded row: its toggle's aria-controls points here. */
+	id?: string | undefined
 	item: ActivitySummary
 	measure: (el: HTMLElement | null) => void
 	cursor: boolean
@@ -599,6 +683,7 @@ export const FoldedRow = memo(function FoldedRow({
 	return (
 		<div
 			role="listitem"
+			id={id}
 			data-key={entryKey}
 			ref={measure}
 			className="wka-item wka-folded"
@@ -631,8 +716,10 @@ export const ActivityCard = memo(function ActivityCard({
 	stack,
 	expanded = false,
 	onToggle,
+	foldsId,
 }: RowProps & { readOnly: boolean }) {
 	const stacked = stack !== undefined && stack.members.length > 1
+	const channels = channelsText(stack)
 	return (
 		<div
 			role="listitem"
@@ -648,9 +735,17 @@ export const ActivityCard = memo(function ActivityCard({
 				readOnly={readOnly}
 				onOpen={() => onOpen(stack?.latest.eventId ?? item.eventId)}
 			/>
-			{stacked && (
+			{(stacked || channels !== null) && (
 				<div className="wka-cardstack">
-					<StackToggle stack={stack} expanded={expanded} onToggle={onToggle} />
+					{channels !== null && <span className="wka-read">{channels}</span>}
+					{stacked && (
+						<StackToggle
+							stack={stack}
+							expanded={expanded}
+							onToggle={onToggle}
+							foldsId={foldsId}
+						/>
+					)}
 				</div>
 			)}
 		</div>

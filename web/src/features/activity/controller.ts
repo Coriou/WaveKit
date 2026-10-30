@@ -9,12 +9,13 @@ import {
 	ActivityFeed,
 	compareSeq,
 	fetchCategoryCounts,
+	queryParams,
 } from "../../data/activity-feed.ts"
 import { Store } from "../../data/store.ts"
 import { shellStore } from "../../shell/store.ts"
 import type { ActivityColumn } from "./columns.ts"
 import type { ActivityStack } from "./fold.ts"
-import { foldedOf, releaseFolds, stackOf } from "./fold.ts"
+import { releaseFolds, stackIn } from "./fold.ts"
 import {
 	MAX_COLUMNS,
 	columnQuery,
@@ -23,7 +24,7 @@ import {
 	sameColumnSearch,
 } from "./columns.ts"
 import { setActivityPaneOpen } from "./pane.ts"
-import type { TimeRange } from "./scope.ts"
+import type { ActivityScope, TimeRange } from "./scope.ts"
 import { ANY_TIME, sameRange, scopeTitle, scopedQuery } from "./scope.ts"
 import type { CategoryChipId, SearchToken } from "./search.ts"
 import {
@@ -125,6 +126,21 @@ function save(key: string, value: string): void {
 	} catch {
 		// Private windows and full storage: kept for this page only.
 	}
+}
+
+/**
+ * What a list is a search for, with its time range by name: "Last hour" stays the same search (and keeps
+ * its cached rows) while its resolved start moves on every minute.
+ */
+export function searchKey(
+	q: ActivityQuery | null,
+	scope: ActivityScope,
+): string | null {
+	const timeless = scopedQuery(q, { ...scope, range: ANY_TIME }, 0)
+	if (timeless === null) return null
+	const r = scope.range
+	const range = r.kind === "custom" ? `custom:${r.from}:${r.to ?? ""}` : r.kind
+	return JSON.stringify({ q: queryParams(timeless), range })
 }
 
 let columnSeq = 0
@@ -282,14 +298,11 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	/**
-	 * Opens an event's detail (null goes back to the list). The newest event of a stack opens with the
-	 * stack's latest state (what older rows knew, such as an aircraft's callsign).
+	 * Opens an event's detail (null goes back to the list), exactly as stored: what older rows of its stack
+	 * knew is the detail's separate "Latest known" block, never mixed into the event.
 	 */
 	open(item: ActivitySummary | null): void {
-		const stack = item ? this.stackFor(item.eventId) : null
-		const shown =
-			item && stack && stack.latest.eventId === item.eventId ? stack.view : item
-		this.update(s => ({ ...s, openId: item?.eventId ?? null, openItem: shown }))
+		this.update(s => ({ ...s, openId: item?.eventId ?? null, openItem: item }))
 	}
 
 	/** The list the next open() comes from (a column's or the drawer's); the detail folds that list. */
@@ -305,7 +318,7 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** The stack holding an event in the list it came from, or null (opened by a link, or since dropped). */
 	stackFor(eventId: string): ActivityStack | null {
 		const feed = this.stackFeed()
-		return stackOf(foldedOf(feed.get().items, feed), eventId)
+		return stackIn(feed.get().items, feed, eventId)
 	}
 
 	/** Narrows the list to one entity (the detail's "Only this"). */
@@ -536,25 +549,27 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (this.attached === 0) continue
 			// while a column's search is being edited, that column previews the drawer's search and the others
 			// show their own (the edit is not a filter on them)
-			const q = scopedQuery(
+			const base =
 				s.editing === null
 					? columnQuery(col, s)
 					: s.editing === col.id
 						? buildQuery(s.tokens, s.chip)
-						: columnQuery(col, { tokens: [], chip: null }),
-				s,
-				now,
-			)
+						: columnQuery(col, { tokens: [], chip: null })
+			const q = scopedQuery(base, s, now)
 			const key = JSON.stringify(q)
 			if (!force && this.columnQueries.get(col.id) === key) continue
 			this.columnQueries.set(col.id, key)
-			void f.setQuery(q)
+			void f.setQuery(q, searchKey(base, s) ?? undefined)
 		}
 	}
 
 	private refresh(counts = true): void {
 		if (this.attached === 0) return
-		void this.feed.setQuery(this.query())
+		const s = this.get()
+		void this.feed.setQuery(
+			this.query(),
+			searchKey(buildQuery(s.tokens, s.chip), s) ?? undefined,
+		)
 		this.syncColumns()
 		if (counts) this.scheduleCounts(0)
 	}
