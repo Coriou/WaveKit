@@ -20,7 +20,12 @@ export const ABSORBER_REINCLUSION_COOLDOWN_MS = 5_000
 export interface OverflowGates {
 	/**
 	 * Overflow bytes lost while each branch (fanout id) held the absorber,
-	 * totals since creation; a removed branch's total is forgotten.
+	 * totals since creation; a removed branch's total is forgotten, so a
+	 * re-added id starts again at zero (the source router keys each total by
+	 * branch instance). Overflow is charged to the branches holding the
+	 * absorber at that moment; with none still holding, to the laggards
+	 * excluded during this hold (one whose deadline expires at that very
+	 * instant included): their hold filled the queue.
 	 */
 	overflowGatedBy(): Readonly<Record<string, number>>
 }
@@ -55,6 +60,8 @@ export function createBurstAbsorber(
 	const recovering = new Map<string, number>()
 	const reincluded = new Map<string, number>()
 	const gatedOverflow = new Map<string, number>()
+	// Branches excluded as laggards while the current hold lasted.
+	const laggards = new Set<string>()
 	let releaseStarted = false
 	const branchStates = [since, recovering, reincluded]
 	let deadline: ReturnType<typeof setTimeout> | null = null
@@ -91,6 +98,7 @@ export function createBurstAbsorber(
 		if (holdingSince !== null) {
 			durations[index()] = Math.max(durations[index()]!, now - holdingSince)
 			holdingSince = null
+			laggards.clear()
 			if (deadline !== null) clearTimeout(deadline)
 			deadline = null
 		}
@@ -166,6 +174,7 @@ export function createBurstAbsorber(
 			) {
 				if (!excluded.has(id)) {
 					excluded.add(id)
+					if (holdingSince !== null) laggards.add(id)
 					excludes[index()] = Math.max(excludes[index()]!, now - start)
 				}
 			}
@@ -260,6 +269,7 @@ export function createBurstAbsorber(
 		recovering.delete(id)
 		reincluded.delete(id)
 		gatedOverflow.delete(id)
+		laggards.delete(id)
 		wake()
 	}
 	fanout.on("backpressure", backpressure)
@@ -330,10 +340,17 @@ export function createBurstAbsorber(
 			const lost = chunk.length - accepted
 			if (lost > 0) {
 				// Overflow path only: refresh the hold and charge the branches
-				// holding it (congested, active and not excluded).
+				// holding it (congested, active and not excluded), else the
+				// laggards this hold excluded, which this refresh may just have.
 				gated(now)
+				let held = false
 				for (const id of congested)
-					if (active.has(id) && !excluded.has(id))
+					if (active.has(id) && !excluded.has(id)) {
+						held = true
+						gatedOverflow.set(id, (gatedOverflow.get(id) ?? 0) + lost)
+					}
+				if (!held)
+					for (const id of laggards)
 						gatedOverflow.set(id, (gatedOverflow.get(id) ?? 0) + lost)
 				overflow += lost
 				overflowChunks++

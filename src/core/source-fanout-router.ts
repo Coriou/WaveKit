@@ -291,7 +291,10 @@ export class SourceFanoutRouter extends EventEmitter {
 			droppedBytesTotal: number
 			droppedChunksTotal: number
 			active: boolean
-			/** The absorber's: overflow lost while each branch held it. */
+			/**
+			 * The absorber's: overflow lost while each branch held it, keyed
+			 * `<branch id>#<instance>` like the branch counters.
+			 */
 			overflowGatedBy?: Readonly<Record<string, number>>
 		}
 	> | null {
@@ -327,7 +330,15 @@ export class SourceFanoutRouter extends EventEmitter {
 				droppedChunksTotal: overflow.overflowChunksTotal,
 				active: true,
 				...(hasOverflowGates(absorber)
-					? { overflowGatedBy: absorber.overflowGatedBy() }
+					? {
+							// Keyed like the branch counters: a removed and re-added
+							// id is a new branch, its gate total a new key from zero.
+							overflowGatedBy: Object.fromEntries(
+								Object.entries(absorber.overflowGatedBy()).map(
+									([id, total]) => [`${id}#${instances?.get(id) ?? 0}`, total],
+								),
+							),
+						}
 					: {}),
 			})
 		}

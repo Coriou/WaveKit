@@ -46,3 +46,30 @@ it("charges no branch for loss without a hold and forgets a removed branch", () 
 	fanout.emit("branch-removed", "a")
 	expect(absorber.overflowGatedBy()).toEqual({})
 })
+
+// The laggard deadline (500 ms) expires at the very ingest that overflows,
+// before its timer ran: that ingest excludes the branch, yet its hold filled
+// the queue, so the loss is still its own.
+it("charges overflow to a laggard whose deadline expires at that instant", () => {
+	const fanout = new FakeFanout()
+	let now = 0
+	const absorber = createBurstAbsorber({
+		fanout,
+		frameBytes: 2,
+		monoNow: () => now,
+		log: createLogger({ level: "fatal" }),
+		recorder: null,
+	})
+	absorber.configure(128)
+	try {
+		fanout.congest("a")
+		absorber.ingest(Buffer.alloc(128))
+		expect(absorber.counters().heldBytes).toBe(128)
+		now = 500
+		absorber.ingest(Buffer.alloc(4))
+		expect(absorber.counters().overflowBytesTotal).toBe(4)
+		expect(absorber.overflowGatedBy()).toEqual({ a: 4 })
+	} finally {
+		absorber.dispose()
+	}
+})

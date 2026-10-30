@@ -32,8 +32,10 @@ type Counters = {
 	droppedChunksTotal: number
 	active?: boolean
 	/**
-	 * Absorber only: overflow bytes lost while each branch (id without the
-	 * instance suffix) held the absorber, totals since it was created.
+	 * Absorber only: overflow bytes lost while each branch held the
+	 * absorber, totals since it was created. Keys are `<branch id>#<instance>`
+	 * like the branch counters (a bare id is read as one instance), so a
+	 * removed and re-added branch is a new key from zero.
 	 */
 	overflowGatedBy?: Readonly<Record<string, number>>
 }
@@ -505,14 +507,15 @@ export function createEfficiencyMonitor(deps: {
 					if (value.active === false && loss > 0) complete = false
 					if (key.startsWith("@")) {
 						absorberOverflow = (absorberOverflow ?? 0) + loss
-						// A gate total that grew (or restarted lower, a new branch
-						// of that id) held the absorber during this interval.
-						for (const [branch, total] of Object.entries(
+						// A gate total that grew since the last read (a new branch
+						// instance from zero, or one that restarted lower) held the
+						// absorber during this interval.
+						for (const [gate, total] of Object.entries(
 							value.overflowGatedBy ?? {},
 						)) {
-							const before = previous?.overflowGatedBy?.[branch] ?? 0
+							const before = previous?.overflowGatedBy?.[gate] ?? 0
 							if (total > before || (total > 0 && total < before))
-								overflowGates.add(branch)
+								overflowGates.add(counterBranchId(gate) ?? gate)
 						}
 					} else if (value.active !== false) s.branchDrops.set(key, loss)
 					bytes += value.droppedBytesTotal - base.droppedBytesTotal
@@ -600,7 +603,11 @@ export function createEfficiencyMonitor(deps: {
 			// is charged to the branches that held the absorber while it
 			// overflowed (a congested sibling holds input for every branch);
 			// overflow with no holding branch known, or loss with no branch to
-			// charge, falls on the source as a whole.
+			// charge, falls on the source as a whole. Gate deltas are not summed
+			// against the overflow delta (two holders are each charged the whole
+			// loss): an interval's overflow is charged to every branch that held
+			// in it, any remainder included, and only to the source when no
+			// branch held at all in that interval.
 			const droppedBranches: string[] = []
 			for (const [key, loss] of s.branchDrops) {
 				const branch = counterBranchId(key)
