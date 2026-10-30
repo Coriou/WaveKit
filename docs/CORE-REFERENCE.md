@@ -138,7 +138,57 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 # Reclaim control
 curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
   -H "Content-Type: application/json" -d '{"mode":"internal"}'
+
+# Manual gain in tenths of a dB (the same name and unit GET reports)
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/gain \
+  -H "Content-Type: application/json" -d '{"gain":372}'
 ```
+
+#### Per-band gain
+
+A gain that suits one band can overload the dongle in another. At 868 MHz a manual 49.6 dB
+let busy moments raise the whole window by about 25 dB, while 29.7 dB did not; the same
+49.6 dB was fine in a quieter UHF band. The `tuner.bandGain` table sets a gain per frequency range for
+scanner hops and jobs, which put your exact gain mode and gain back when they hand the tuner
+back, also when your own write or a relay client takes it from them. While your gain or gain
+mode is unknown (right after a restart, before any gain write) they write no band gain. Manual
+tuning (the API, the web app, a dwell you drive through the API) keeps your gain unless
+`applyToMyTuning` is true; then tuning into a listed range applies its gain and tuning out puts
+yours back, from `<stateDir>/tuner-band-gain-saved.json` after a restart (the band gain goes
+on only once that file is written; a failed write keeps your gain).
+
+```yaml
+tuner:
+  bandGain:
+    applyToMyTuning: false # your own retunes never change gain
+    entries: # inclusive Hz ranges, at most 32, no overlaps
+      - { minHz: 144000000, maxHz: 148000000, gain: keep, label: "2 m" }
+      - { minHz: 420000000, maxHz: 450000000, gain: keep, label: "70 cm" }
+      - { minHz: 863000000, maxHz: 870000000, gain: 372, label: "868 MHz ISM" }
+      - { minHz: 902000000, maxHz: 928000000, gain: 372, label: "915 MHz ISM" }
+      - { minHz: 1085000000, maxHz: 1095000000, gain: keep, label: "ADS-B" }
+```
+
+Why these defaults:
+
+- **868 and 915 MHz ISM at 37.2 dB (`372`).** Both bands sit next to strong cellular downlinks
+  (LTE 800, GSM/LTE 900). 37.2 dB is an R820T gain step about 12 dB below the gain that
+  overloaded, and keeps most of the sensitivity weak LoRa needs. Lower it (for example to `297`)
+  if the whole window still jumps when the band is busy.
+- **ADS-B (1085-1095 MHz): keep.** readsb wants your usual high gain; less gain costs range.
+- **2 m and 70 cm: keep.** These are the bands you usually tune with a gain picked for them.
+- Anything without an entry keeps your gain too.
+
+`gain` is tenths of a dB (0-500) or `keep`, snapped to the tuner's nearest gain step when the
+receiver advertises its tuner. Before the receiver's capabilities are known (just after
+startup) the configured value is written as is, and `rtl_tcp` sets the nearest step itself.
+
+Only a tuner gain choice makes a gain yours and replaces the saved one: a gain, a gain mode, or
+a tuner gain index (`rtl_tcp` command 0x0d sets the same tuner stage from its gain table). The
+RTL2832 digital AGC (`agcMode`), IF gain and tuner IF gain are separate stages: they keep the
+saved gain and the band gain. Change the table at runtime with `PUT /api/tuner-band-gain`
+([API.md](API.md#per-band-gain-get-and-put-apituner-band-gain)); a saved PUT replaces this
+whole section until `<stateDir>/tuner-band-gain.json` is deleted.
 
 ### RTL-TCP relay
 

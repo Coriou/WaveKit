@@ -13,6 +13,7 @@ import {
 	toneSchema,
 } from "@wavekit/api-types"
 import { CTCSS_HZ } from "./core/audio-tones/ctcss.js"
+import { BandGainConfigSchema } from "./core/band-gain-schema.js"
 import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
@@ -283,6 +284,12 @@ export const TunerConfigSchema = z.object({
 	 * baseline (use when another operator may own the receiver after an outage).
 	 */
 	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
+	/**
+	 * Per-band gain table (src/core/band-gain-schema.ts states the defaults and their
+	 * reasons). Scanner hops, dwells and jobs apply it; an operator retune applies it only
+	 * with `applyToMyTuning`. The runtime route PUT /api/tuner-band-gain overrides it.
+	 */
+	bandGain: BandGainConfigSchema.default({}),
 })
 
 const LIVE_AUDIO_AGC_MODES_TUPLE = ["off", "slow", "fast"] as const

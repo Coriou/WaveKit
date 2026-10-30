@@ -1,9 +1,10 @@
 // The Receiver island (docs/web/canvas/Receiver.dc.html): the source, then its tuner settings as
 // controls: sample rate (confirmed inline, the core restarts the stream), gain on the tuner's own gain
-// table or auto, RTL AGC, bias-T, offset tuning, frequency correction and, under Advanced, direct
-// sampling. Values are the core's (TunerState); a control shows its target only while its write is in
-// flight. When the tuner cannot be changed (read-only access, an external client has it, offline) the
-// panel says why and disables the controls instead of failing on click.
+// table or auto (with the core-confirmed band gain and the scanner's overload hint under it), RTL AGC,
+// bias-T, offset tuning, frequency correction and, under Advanced, direct sampling. Values are the
+// core's (TunerState); a control shows its target only while its write is in flight. When the tuner
+// cannot be changed (read-only access, an external client has it, offline) the panel says why and
+// disables the controls instead of failing on click.
 import { useEffect, useId, useState, type CSSProperties } from "react"
 import type { TunerState } from "@wavekit/api-types"
 
@@ -37,11 +38,13 @@ import {
 	type ReceiverControlId,
 } from "./controls.ts"
 import {
+	bandGainText,
 	gainAt,
 	gainDb,
 	gainHint,
 	gainSteps,
 	nearestGainIndex,
+	overloadHintText,
 } from "./gain.ts"
 import { receiverSummary, sourceTitle } from "./summary.ts"
 import { ratePolicyNote } from "./notices.ts"
@@ -247,6 +250,10 @@ function Gain({ tuner, caps, locked, status, dismiss }: SectionProps) {
 	const major = steps.source === "table" ? 7 : 10
 	const setGain = (tenthsDb: number) =>
 		void data.receiver.setManualGain(tuner.sourceId, tenthsDb)
+	const engines = useStore(data.scanner, s => s.status?.engines)
+	// Only the core's confirmed band gain (it is absent whenever the tuner may not have it).
+	const inBand = auto ? undefined : tuner.bandGain
+	const overload = auto ? null : overloadHintText(engines ?? [], tuner.sourceId)
 	return (
 		<div className="wkf-field">
 			<div className="wkf-rx-row">
@@ -311,6 +318,16 @@ function Gain({ tuner, caps, locked, status, dismiss }: SectionProps) {
 			<span className="wkf-quiet wkf-small">
 				{avail.enabled ? gainHint(steps) : avail.reason}
 			</span>
+			{inBand && (
+				<span className="wkf-quiet wkf-small" data-band-gain="">
+					{bandGainText(inBand)}
+				</span>
+			)}
+			{overload && (
+				<span className="wkf-quiet wkf-small" data-overload="" role="status">
+					{overload}
+				</span>
+			)}
 			<ControlError
 				status={mode?.error ? mode : gain}
 				onDismiss={() => {

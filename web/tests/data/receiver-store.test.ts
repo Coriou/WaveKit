@@ -85,7 +85,7 @@ describe("settingRequest", () => {
 	it("maps each setting to the core's route and body", () => {
 		expect(settingRequest({ key: "gain", value: 297 })).toEqual({
 			route: "gain",
-			body: { tenthsDb: 297 },
+			body: { gain: 297 },
 		})
 		expect(settingRequest({ key: "gainMode", value: "agc" })).toEqual({
 			route: "gain-mode",

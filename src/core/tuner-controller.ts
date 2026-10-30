@@ -17,7 +17,11 @@ import type {
 } from "./source-manager.js"
 import type { SourceTunerConfig } from "../config.js"
 import { configuredTuningFrames } from "./tuner-config-gain.js"
+import { nearestGainStep } from "./band-gain-schema.js"
+import type { BandGainSettingsService, SavedOperatorGain } from "./band-gain.js"
 import type {
+	TunerBandGain,
+	TunerBandGainOwner,
 	TunerState,
 	TunerStateField,
 	TunerGainMode,
@@ -377,9 +381,15 @@ export class TunerControlModeError extends TunerControllerError {
 }
 
 export class TunerValidationError extends TunerControllerError {
-	constructor(message: string) {
+	/**
+	 * The field that failed, by its schema name (e.g. "sampleRate", "tunerIfGain.stage"):
+	 * always a constant from this module, never the submitted value.
+	 */
+	readonly field: string | undefined
+	constructor(message: string, field?: string) {
 		super(message, "TUNER_VALIDATION_ERROR", 400)
 		this.name = "TunerValidationError"
+		this.field = field
 	}
 }
 
@@ -433,6 +443,322 @@ export class TunerController extends EventEmitter {
 
 	emitRatePolicy(event: TunerRatePolicyEventData): void {
 		this.emit("rate-policy", event)
+	}
+
+	// === Per-band gain ===
+
+	private bandGain: BandGainSettingsService | null = null
+	private gainSteps: ((sourceId: string) => readonly number[] | null) | null =
+		null
+	/**
+	 * The operator's gain mode and gain from before "apply to my tuning" first changed them
+	 * (null when they were unknown then; an AGC gain may be unknown, null). Restored, and
+	 * cleared, when an operator retune leaves the bands with a gain; an operator gain or gain
+	 * mode or gain index choice clears it (RTL AGC and IF gain writes do not). Persisted through
+	 * the band gain settings, so a restart inside a band still restores it on leaving; kept
+	 * across a source's teardown and reconnect for the same reason.
+	 */
+	private operatorGainBeforeBand: Map<string, SavedOperatorGain | null> =
+		new Map()
+	/** Sources whose band gain write is in flight (its own gain writes keep the saved gain). */
+	private applyingBandGain: Set<string> = new Set()
+	/** The saveOperatorGain call that wrote each saved gain (a drop or newer save replaces it). */
+	private savedRecords: Map<string, { value: SavedOperatorGain | null }> =
+		new Map()
+	/**
+	 * The band gain on the tuner per source (TunerState.bandGain). Set only after the band's
+	 * writes succeed; any later gain, gain mode or frequency write drops it, and cloneState
+	 * drops it once the known state no longer shows exactly this manual gain.
+	 */
+	private appliedBandGain: Map<string, TunerBandGain> = new Map()
+	/**
+	 * Operator gain and gain mode choices per source (REST or relay), counted when issued.
+	 * The scanner drops a pending gain restore of a lost lease once this count moves.
+	 */
+	private gainChoices: Map<string, number> = new Map()
+	/** The scanner's gain restore of a lost lease per source; an operator band gain waits for it. */
+	private gainRestoreHolds: Map<string, Promise<void>> = new Map()
+	/** The last queued REST retune per source while "apply to my tuning" is on (never rejects). */
+	private restRetunes: Map<string, Promise<void>> = new Map()
+
+	setBandGain(settings: BandGainSettingsService | null): void {
+		this.bandGain = settings
+		this.operatorGainBeforeBand = new Map(settings?.savedOperatorGains() ?? [])
+	}
+
+	bandGainSettings(): BandGainSettingsService | null {
+		return this.bandGain
+	}
+
+	/** The tuner's supported gain steps (tenths), or null when unknown. */
+	setGainStepsResolver(
+		resolver: ((sourceId: string) => readonly number[] | null) | null,
+	): void {
+		this.gainSteps = resolver
+	}
+
+	/**
+	 * The band gain to write at `hz` (tenths, snapped to the tuner's nearest supported step
+	 * when its table is known), or null to leave gain alone: a "keep" entry, no entry, no
+	 * table configured, or any failure (the safe answer).
+	 */
+	bandGainFor(sourceId: string, hz: number): number | null {
+		try {
+			const gain = this.bandGain?.gainAt(hz) ?? "keep"
+			if (gain === "keep") return null
+			const steps = this.gainSteps?.(sourceId) ?? null
+			const snapped = nearestGainStep(gain, steps)
+			return this.isWithinRange(snapped, VALIDATION.gain) ? snapped : null
+		} catch (err) {
+			this.log.warn(
+				{ sourceId, err: safeErrorFields(err) },
+				"Band gain lookup failed; gain left unchanged",
+			)
+			return null
+		}
+	}
+
+	/** Operator gain and gain mode choices issued on `sourceId` so far (REST and relay). */
+	gainChoiceCount(sourceId: string): number {
+		return this.gainChoices.get(sourceId) ?? 0
+	}
+
+	/**
+	 * The scanner is putting the operator's gain back after a lost lease: an operator band
+	 * gain on `sourceId` waits for `restore` to settle, so the gain it saves is the
+	 * operator's and not the scanner's band gain.
+	 */
+	holdBandGainFor(sourceId: string, restore: Promise<unknown>): void {
+		const hold = restore.then(
+			() => undefined,
+			() => undefined,
+		)
+		this.gainRestoreHolds.set(sourceId, hold)
+		void hold.then(() => {
+			if (this.gainRestoreHolds.get(sourceId) === hold)
+				this.gainRestoreHolds.delete(sourceId)
+		})
+	}
+
+	/** Counted when issued (before the write), so a queued scanner restore sees it. */
+	private noteGainChoice(sourceId: string, opts: TunerWriteOptions): void {
+		if (
+			opts.origin === "scanner" ||
+			opts.origin === "replay" ||
+			opts.origin === "config"
+		)
+			return
+		this.gainChoices.set(sourceId, this.gainChoiceCount(sourceId) + 1)
+	}
+
+	/**
+	 * With "apply to my tuning", REST retunes of one source run one at a time: one retune's
+	 * band gain or restore writes never land after the next one's frequency.
+	 */
+	private serialRestRetune(
+		sourceId: string,
+		retune: () => Promise<void>,
+	): Promise<void> {
+		const previous = this.restRetunes.get(sourceId) ?? Promise.resolve()
+		const run = previous.then(retune)
+		const tail = run.catch(() => undefined)
+		this.restRetunes.set(sourceId, tail)
+		void tail.then(() => {
+			if (this.restRetunes.get(sourceId) === tail)
+				this.restRetunes.delete(sourceId)
+		})
+		return run
+	}
+
+	/**
+	 * Saves the operator's gain before a band gain: "saved" once it is durable, "failed"
+	 * when persisting it failed (the record is taken back), "superseded" when an operator
+	 * gain choice came meanwhile (the record is dropped: that choice is the newest gain).
+	 */
+	private async saveOperatorGain(
+		sourceId: string,
+		saved: SavedOperatorGain | null,
+	): Promise<"saved" | "failed" | "superseded"> {
+		const record = { value: saved }
+		const choices = this.gainChoiceCount(sourceId)
+		this.operatorGainBeforeBand.set(sourceId, saved)
+		this.savedRecords.set(sourceId, record)
+		const durable =
+			(await this.bandGain?.saveOperatorGains(
+				this.operatorGainBeforeBand,
+				sourceId,
+			)) ?? true
+		const current = this.savedRecords.get(sourceId) === record
+		if (current && this.gainChoiceCount(sourceId) !== choices) {
+			this.dropOperatorGain(sourceId)
+			return "superseded"
+		}
+		if (!durable && current) {
+			this.savedRecords.delete(sourceId)
+			this.operatorGainBeforeBand.delete(sourceId)
+		}
+		if (!current) return "superseded"
+		return durable ? "saved" : "failed"
+	}
+
+	private dropOperatorGain(sourceId: string): void {
+		this.savedRecords.delete(sourceId)
+		if (!this.operatorGainBeforeBand.delete(sourceId)) return
+		void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
+	}
+
+	/**
+	 * An operator retune applies the band gain only with "apply to my tuning". A failed
+	 * gain write is logged: the retune itself already succeeded.
+	 */
+	private async applyOperatorBandGain(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions,
+	): Promise<void> {
+		if (opts.origin !== "rest" || this.bandGain?.applyToMyTuning() !== true)
+			return
+		// This retune may have taken a scanner lease: its gain restore runs first.
+		const hold = this.gainRestoreHolds.get(sourceId)
+		if (hold !== undefined) await hold
+		const state = this.tunerStates.get(sourceId)
+		if (!state || state.controlMode !== "internal") return
+		const target = this.bandGainFor(sourceId, hz)
+		const saved = this.operatorGainBeforeBand.get(sourceId)
+		if (target === null && saved === undefined) return
+		this.applyingBandGain.add(sourceId)
+		try {
+			if (target !== null) {
+				const unknown = this.fieldProof(sourceId).unknownFields
+				const gain = unknown.includes("gain") ? null : state.gain
+				// The band gain goes on only once the gain it replaces is durable, so a restart
+				// in the band still restores it. Unsaved, or chosen meanwhile: the gain stays.
+				if (saved === undefined) {
+					const outcome = await this.saveOperatorGain(
+						sourceId,
+						unknown.includes("gainMode") ||
+							(state.gainMode === "manual" && gain === null)
+							? null
+							: { gainMode: state.gainMode, gain },
+					)
+					if (outcome === "failed")
+						this.log.warn(
+							{ sourceId },
+							"Saving the gain from before the band failed; band gain not applied",
+						)
+					if (outcome !== "saved") return
+				}
+				const now = this.tunerStates.get(sourceId) ?? state
+				const proof = this.fieldProof(sourceId).unknownFields
+				if (now.gainMode !== "manual" || proof.includes("gainMode"))
+					await this.setGainMode(sourceId, "manual", opts)
+				if (now.gain !== target || proof.includes("gain"))
+					await this.setGain(sourceId, target, opts)
+				this.noteBandGainApplied(sourceId, target, "user", hz)
+				return
+			}
+			if (saved === null || saved === undefined) {
+				this.dropOperatorGain(sourceId)
+				return
+			}
+			// The saved gain is dropped only after the restore succeeds: a failed write keeps
+			// it, so the next out-of-band retune retries the restore.
+			// rtl_tcp SET_GAIN switches the tuner to manual: an AGC restore writes the gain
+			// first and the mode last, so the tuner ends in AGC with the exact saved gain.
+			if (saved.gainMode === "agc") {
+				if (saved.gain !== null) await this.setGain(sourceId, saved.gain, opts)
+				await this.setGainMode(sourceId, "agc", opts)
+			} else if (saved.gain !== null) {
+				if (state.gainMode !== "manual")
+					await this.setGainMode(sourceId, "manual", opts)
+				await this.setGain(sourceId, saved.gain, opts)
+			}
+			this.dropOperatorGain(sourceId)
+		} catch (err) {
+			this.log.warn(
+				{ sourceId, err: safeErrorFields(err) },
+				"Applying the band gain after a retune failed",
+			)
+		} finally {
+			this.applyingBandGain.delete(sourceId)
+		}
+	}
+
+	/**
+	 * Records that the band gain `tenthsDb` for `hz` is on the tuner after its writes
+	 * succeeded (or were not needed). Ignored unless the known state shows exactly this
+	 * manual gain at `hz`, so the reported band gain is always the tuner's confirmed one.
+	 */
+	noteBandGainApplied(
+		sourceId: string,
+		tenthsDb: number,
+		owner: TunerBandGainOwner,
+		hz: number,
+	): void {
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return
+		this.appliedBandGain.delete(sourceId)
+		if (state.frequency === hz) {
+			let label: string | undefined
+			try {
+				label = this.bandGain?.labelAt(hz)
+			} catch {
+				label = undefined
+			}
+			this.appliedBandGain.set(sourceId, {
+				tenthsDb,
+				owner,
+				...(label !== undefined ? { label } : {}),
+			})
+		}
+		this.emitStateChanged(sourceId)
+	}
+
+	/** The confirmed band gain of `state`, dropping a record the tuner has left. */
+	private confirmedBandGain(
+		state: TunerState,
+		unknownFields: readonly TunerStateField[],
+	): TunerBandGain | undefined {
+		const applied = this.appliedBandGain.get(state.sourceId)
+		if (!applied) return undefined
+		if (
+			state.controlMode !== "internal" ||
+			state.gainMode !== "manual" ||
+			state.gain !== applied.tenthsDb ||
+			unknownFields.includes("gain") ||
+			unknownFields.includes("gainMode")
+		) {
+			// Once the tuner leaves the band gain it is never reported again until rewritten.
+			this.appliedBandGain.delete(state.sourceId)
+			return undefined
+		}
+		return { ...applied }
+	}
+
+	/**
+	 * A bulk update's gain or gain mode field equal to the tuner's: no write, but still
+	 * the operator's choice (as POST /gain): counted, and it supersedes the saved gain. An
+	 * explicit gain also replaces a confirmed band gain (the gain is now the operator's);
+	 * an unchanged mode keeps it.
+	 */
+	private noteUnchangedGainChoice(
+		sourceId: string,
+		opts: TunerWriteOptions,
+		gain = false,
+	): void {
+		this.noteGainChoice(sourceId, opts)
+		this.noteOperatorGainWrite(sourceId, opts)
+		if (gain && this.appliedBandGain.delete(sourceId))
+			this.emitStateChanged(sourceId)
+	}
+
+	/** An explicit operator gain write supersedes the gain saved before a band. */
+	private noteOperatorGainWrite(
+		sourceId: string,
+		opts: TunerWriteOptions,
+	): void {
+		if (opts.origin === "rest" && !this.applyingBandGain.has(sourceId))
+			this.dropOperatorGain(sourceId)
 	}
 
 	private readonly log: Logger
@@ -556,6 +882,8 @@ export class TunerController extends EventEmitter {
 	}
 
 	removeSource(sourceId: string): void {
+		// The saved pre-band gain stays (as on disk): a reconnect still restores it on leaving a band.
+		this.appliedBandGain.delete(sourceId)
 		// WG11: configured tuning belongs to the removed source's config; a source
 		// re-added under the same id brings its own (resolved on `connected`).
 		this.configuredTuning.delete(sourceId)
@@ -654,6 +982,8 @@ export class TunerController extends EventEmitter {
 		}
 
 		state.controlMode = mode
+		// Either hand-over may change the tuning: a band gain is reported again only once rewritten.
+		this.appliedBandGain.delete(sourceId)
 		if (mode === "internal" && this.onRelayRetune) {
 			try {
 				this.withoutCommand(() =>
@@ -710,6 +1040,20 @@ export class TunerController extends EventEmitter {
 
 		if (state.controlMode === "internal") {
 			this.setControlMode(sourceId, "external", "relay")
+		}
+		// A relay client's tuning write supersedes the band gain.
+		this.appliedBandGain.delete(sourceId)
+		// A relay gain or gain mode choice is the operator's newest gain: never restore the older
+		// one over it. Gain index sets the same tuner stage, so it counts; RTL2832 digital AGC and IF gain writes
+		// set other stages and keep it.
+		if (
+			command === RTL_TCP_COMMANDS.SET_GAIN ||
+			command === RTL_TCP_COMMANDS.SET_GAIN_MODE ||
+			command === RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX
+		) {
+			this.dropOperatorGain(sourceId)
+			// Also cancels a scanner restore owed from a lost lease.
+			this.noteGainChoice(sourceId, {})
 		}
 
 		const cmdName = COMMAND_NAMES[command] ?? `cmd-0x${command.toString(16)}`
@@ -943,6 +1287,18 @@ export class TunerController extends EventEmitter {
 		hz: number,
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
+		if (opts.origin === "rest" && this.bandGain?.applyToMyTuning() === true)
+			return this.serialRestRetune(sourceId, () =>
+				this.setFrequencyNow(sourceId, hz, opts),
+			)
+		return this.setFrequencyNow(sourceId, hz, opts)
+	}
+
+	private async setFrequencyNow(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions,
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("frequency", hz, VALIDATION.frequency)
 		if (opts.origin === "rest" && this.beforeOperatorRetune) {
@@ -951,6 +1307,7 @@ export class TunerController extends EventEmitter {
 			await this.proveSampleRateForFrequency(sourceId, opts, hz)
 		}
 		await this.writeFrequency(sourceId, hz, opts, state)
+		await this.applyOperatorBandGain(sourceId, hz, opts)
 	}
 
 	private async writeFrequency(
@@ -959,6 +1316,8 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions,
 		state: TunerState,
 	): Promise<void> {
+		// Before the write: a failed write may still have moved the tuner off the band.
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.frequency = hz
@@ -1045,6 +1404,7 @@ export class TunerController extends EventEmitter {
 		if (!isValidRtlSampleRate(hz)) {
 			throw new TunerValidationError(
 				`sampleRate ${hz} is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
+				"sampleRate",
 			)
 		}
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, opts)
@@ -1067,6 +1427,8 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "manual" ? 1 : 0
+		this.noteGainChoice(sourceId, opts)
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_GAIN_MODE,
@@ -1075,6 +1437,7 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.gainMode = mode
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1085,9 +1448,12 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("gain", tenthsDb, VALIDATION.gain)
+		this.noteGainChoice(sourceId, opts)
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.gain = tenthsDb
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1120,6 +1486,7 @@ export class TunerController extends EventEmitter {
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_IF_GAIN, gain, opts)
 		this.sourceManager.assertTunerCommandActive()
 		state.ifGain = gain
+		// Another gain stage: the band gain and the saved pre-band gain stay.
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1151,6 +1518,8 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
+		// The RTL2832 digital AGC is a separate stage from the tuner gain mode and gain: it is no
+		// gain choice, keeps the saved pre-band gain and the band gain on the tuner.
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_AGC_MODE,
@@ -1230,6 +1599,9 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("tunerGainIndex", index)
+		// rtl_tcp 0x0d sets the same tuner gain stage by table index: a gain choice, as setGain.
+		this.noteGainChoice(sourceId, opts)
+		this.appliedBandGain.delete(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
@@ -1238,6 +1610,7 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.tunerGainIndex = index
+		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1276,6 +1649,7 @@ export class TunerController extends EventEmitter {
 		)
 		this.sourceManager.assertTunerCommandActive()
 		state.tunerIfGain = { stage, gain }
+		// Another gain stage: the band gain and the saved pre-band gain stay.
 		this.emitStateChanged(sourceId)
 	}
 
@@ -1324,9 +1698,16 @@ export class TunerController extends EventEmitter {
 			updates.frequency !== undefined &&
 			(updates.frequency !== state.frequency || unproven.has("frequency"))
 		) {
-			if (policyBulk)
-				await this.writeFrequency(sourceId, updates.frequency, opts, state)
-			else await this.setFrequency(sourceId, updates.frequency, opts)
+			if (policyBulk) {
+				const hz = updates.frequency
+				const retune = async () => {
+					await this.writeFrequency(sourceId, hz, opts, state)
+					await this.applyOperatorBandGain(sourceId, hz, opts)
+				}
+				await (this.bandGain?.applyToMyTuning() === true
+					? this.serialRestRetune(sourceId, retune)
+					: retune())
+			} else await this.setFrequency(sourceId, updates.frequency, opts)
 		}
 		if (
 			updates.sampleRate !== undefined &&
@@ -1344,10 +1725,12 @@ export class TunerController extends EventEmitter {
 		}
 		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {
 			await this.setGainMode(sourceId, updates.gainMode, opts)
-		}
+		} else if (updates.gainMode !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts)
 		if (updates.gain !== undefined && updates.gain !== state.gain) {
 			await this.setGain(sourceId, updates.gain, opts)
-		}
+		} else if (updates.gain !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts, true)
 		if (updates.ppm !== undefined && updates.ppm !== state.ppm) {
 			await this.setPpm(sourceId, updates.ppm, opts)
 		}
@@ -1389,7 +1772,8 @@ export class TunerController extends EventEmitter {
 			updates.tunerGainIndex !== state.tunerGainIndex
 		) {
 			await this.setTunerGainIndex(sourceId, updates.tunerGainIndex, opts)
-		}
+		} else if (updates.tunerGainIndex !== undefined)
+			this.noteUnchangedGainChoice(sourceId, opts, true)
 		if (
 			updates.tunerIfGain !== undefined &&
 			!this.isSameTunerIfGain(updates.tunerIfGain, state.tunerIfGain)
@@ -1839,6 +2223,7 @@ export class TunerController extends EventEmitter {
 			if (!isValidRtlSampleRate(updates.sampleRate))
 				throw new TunerValidationError(
 					`sampleRate ${updates.sampleRate} is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
+					"sampleRate",
 				)
 		}
 		if (updates.gain !== undefined)
@@ -1868,6 +2253,7 @@ export class TunerController extends EventEmitter {
 		if (value < range.min || value > range.max) {
 			throw new TunerValidationError(
 				`${name} out of range: ${value} (expected ${range.min}-${range.max})`,
+				name,
 			)
 		}
 	}
@@ -1886,7 +2272,7 @@ export class TunerController extends EventEmitter {
 
 	private validateInteger(name: string, value: number): void {
 		if (!Number.isFinite(value) || !Number.isInteger(value)) {
-			throw new TunerValidationError(`${name} must be an integer`)
+			throw new TunerValidationError(`${name} must be an integer`, name)
 		}
 	}
 
@@ -1900,7 +2286,7 @@ export class TunerController extends EventEmitter {
 
 	private encodeSignedInt32(value: number): number {
 		if (!Number.isFinite(value)) {
-			throw new TunerValidationError("ppm must be a finite number")
+			throw new TunerValidationError("ppm must be a finite number", "ppm")
 		}
 		return value < 0 ? 0xffffffff + value + 1 : value
 	}
@@ -2154,6 +2540,7 @@ export class TunerController extends EventEmitter {
 			state.sourceId,
 		)
 		const ratePolicy = this.ratePolicyRecordFor?.(state.sourceId)
+		const bandGain = this.confirmedBandGain(state, unknownFields)
 		return {
 			...fields,
 			...(ratePolicy ? { ratePolicy } : {}),
@@ -2162,6 +2549,7 @@ export class TunerController extends EventEmitter {
 				: state.tunerIfGain,
 			...(unknownFields.length > 0 ? { unknownFields } : {}),
 			...(declaredOnlyFields.length > 0 ? { declaredOnlyFields } : {}),
+			...(bandGain ? { bandGain } : {}),
 		}
 	}
 

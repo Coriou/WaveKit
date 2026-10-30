@@ -79,6 +79,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 	row("rx.rate", "Receiver", "Sample rate", "span bandwidth sdr", SETTINGS),
 	row("rx.gain", "Receiver", "Gain", "rf gain lna auto", SETTINGS),
 	row(
+		"rx.bandGain",
+		"Receiver",
+		"Per-band gain",
+		"band gain table overload ism 868 915 scanner",
+		SETTINGS,
+	),
+	row(
 		"rx.ppm",
 		"Receiver",
 		"Frequency correction",

@@ -40,6 +40,15 @@ export const tunerStateSchema = z.object({
 	// Field names stay open strings: a newer core may list a field this build does not know.
 	unknownFields: z.array(z.string()).optional(),
 	declaredOnlyFields: z.array(z.string()).optional(),
+	// A malformed band gain only hides the indicator; the rest of the state still counts.
+	bandGain: z
+		.object({
+			tenthsDb: int,
+			label: z.string().optional(),
+			owner: z.enum(["scanner", "user"]),
+		})
+		.optional()
+		.catch(undefined),
 })
 
 const rangeSchema = z.object({ min: int, max: int })
@@ -160,7 +169,7 @@ export function settingRequest(setting: ReceiverSetting): {
 } {
 	switch (setting.key) {
 		case "gain":
-			return { route: "gain", body: { tenthsDb: setting.value } }
+			return { route: "gain", body: { gain: setting.value } }
 		case "gainMode":
 			return { route: "gain-mode", body: { mode: setting.value } }
 		case "agcMode":

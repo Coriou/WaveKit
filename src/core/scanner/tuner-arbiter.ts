@@ -50,6 +50,11 @@ export interface Lease {
 	changedFields: Set<keyof TunerFieldValues>
 	/** Set only after a retune that finished writing. Absent on leases built outside the arbiter. */
 	verified?: VerifiedTune | null
+	/**
+	 * A band gain (not the snapshot's) may be on the tuner: a later hop with no job gain and
+	 * no band gain puts the snapshot's gain mode and gain back first.
+	 */
+	bandGain?: boolean
 }
 
 /**
@@ -86,7 +91,17 @@ export type ArbiterTuner = Pick<
 	| "off"
 > &
 	// WG9 req 3.1/3.2: present on the real controller; a double without it skips the check.
-	Partial<Pick<TunerController, "tuningWrittenOnConnection">>
+	// Per-band gain: a double without bandGainFor never changes gain for a band.
+	Partial<
+		Pick<
+			TunerController,
+			| "tuningWrittenOnConnection"
+			| "bandGainFor"
+			| "noteBandGainApplied"
+			| "gainChoiceCount"
+			| "holdBandGainFor"
+		>
+	>
 
 /**
  * WG9 req 3.1: a hop's epoch trust by the shared fail-closed rule. The hop itself commands the
@@ -147,6 +162,44 @@ const FIELDS: readonly (keyof TunerFieldValues)[] = [
 	"gain",
 	"agcMode",
 ]
+/**
+ * Restore order for an AGC snapshot: rtl_tcp SET_GAIN switches the tuner to manual, so the
+ * gain goes first and the AGC mode last; the tuner ends in AGC with the exact snapshot gain.
+ */
+const FIELDS_AGC_SNAPSHOT: readonly (keyof TunerFieldValues)[] = [
+	"sampleRate",
+	"frequency",
+	"gain",
+	"gainMode",
+	"agcMode",
+]
+
+/** A hop's gain after the band table: the target to write, or an AGC snapshot to put back. */
+interface HopGain {
+	gainTenthsDb: number | null
+	/** Set when the snapshot's AGC mode (with this gain) goes back on the tuner. */
+	agcRestoreGain: number | null
+	/** The lease's bandGain flag once the hop has written. */
+	bandGainAfter: boolean | undefined
+}
+
+/**
+ * The operator's gain mode and gain to put back after a lease that applied a band gain was
+ * lost to a write that was not a gain or gain mode choice. `choices`: the controller's
+ * operator gain choice count when the lease was lost (null without the counter).
+ */
+interface GainRecovery {
+	snapshot: Pick<TunerFieldValues, "gainMode" | "gain">
+	fields: ("gainMode" | "gain")[]
+	choices: number | null
+}
+
+/** Operator commands that choose the gain themselves: a lost lease puts no gain back over them. */
+const GAIN_CHOICE_COMMANDS: ReadonlySet<string> = new Set([
+	"set-gain",
+	"set-gain-mode",
+	"set-tuner-gain-index",
+])
 
 function toError(err: unknown): Error {
 	return err instanceof Error
@@ -171,6 +224,13 @@ export class TunerArbiter extends EventEmitter {
 	/** Sources whose released lease is still sending TEST_MODE 0 and the restore. */
 	private readonly releasing = new Set<string>()
 	private readonly lastOperatorAt = new Map<string, number>()
+	/**
+	 * Gain restores owed after a lost band-gain lease, per source. A REST write runs it at
+	 * once; after a relay takeover it waits for control to come back. Dropped once an
+	 * operator or relay gain choice happens; a new lease on the source takes it over.
+	 */
+	private readonly gainRecovery = new Map<string, GainRecovery>()
+	private readonly gainRecoveryRunning = new Set<string>()
 	/** Sources with TEST_MODE 1 sent and no successful TEST_MODE 0 since. */
 	private readonly markerOpen = new Set<string>()
 	/**
@@ -376,6 +436,7 @@ export class TunerArbiter extends EventEmitter {
 				snapshot: { ...current.snapshot },
 				changedFields: new Set(current.changedFields),
 				verified: null,
+				...(current.bandGain === true ? { bandGain: true } : {}),
 			}
 			if (this.adopted.has(current)) this.adopted.add(lease)
 			this.lost.add(current)
@@ -404,6 +465,7 @@ export class TunerArbiter extends EventEmitter {
 			snapshot: this.snapshotOf(state),
 			changedFields: new Set(),
 		}
+		this.takeGainRecovery(lease)
 		this.leases.set(sourceId, lease)
 		this.priorities.set(sourceId, priority)
 		void this.persist(lease)
@@ -416,13 +478,17 @@ export class TunerArbiter extends EventEmitter {
 
 	async retune(
 		lease: Lease,
-		target: {
+		jobTarget: {
 			centreHz: number
 			gainTenthsDb: number | null
 			sampleRateHz: number | null
 		},
 		allowed?: () => boolean,
 	): Promise<PendingEpoch & { skipped?: true }> {
+		// A job gain wins; else the band gain of the centre; else the snapshot's gain after a band.
+		const hopGain = this.hopGain(lease, jobTarget)
+		const target = { ...jobTarget, gainTenthsDb: hopGain.gainTenthsDb }
+		const agcRestore = hopGain.agcRestoreGain
 		// Once a command starts, finish the retune; activity cannot leave a partial tuning.
 		let writesStarted = false
 		const guard = () => {
@@ -503,6 +569,9 @@ export class TunerArbiter extends EventEmitter {
 					? (["gainMode", "gain"] as const)
 					: (["gain"] as const)),
 			)
+		if (agcRestore !== null) changing.push("gain", "gainMode")
+		// Set before the first write: a failed hop may already have changed the gain.
+		if (hopGain.bandGainAfter === true) lease.bandGain = true
 		await this.markChanged(lease, changing)
 		this.assertHeld(lease)
 		guard()
@@ -526,7 +595,9 @@ export class TunerArbiter extends EventEmitter {
 			gainKey:
 				target.gainTenthsDb !== null
 					? `m:${target.gainTenthsDb}`
-					: gainKeyOf(state),
+					: agcRestore !== null
+						? "agc"
+						: gainKeyOf(state),
 			tuningTrust: hopTrust(state),
 			centreChanged: target.centreHz !== clock.currentEpoch().centreHz,
 		}
@@ -557,6 +628,15 @@ export class TunerArbiter extends EventEmitter {
 				guard()
 				await this.deps.tuner.setGain(sourceId, target.gainTenthsDb, opts)
 			}
+			if (agcRestore !== null) {
+				// Gain first, AGC mode last (FIELDS_AGC_SNAPSHOT).
+				this.assertHeld(lease)
+				guard()
+				await this.deps.tuner.setGain(sourceId, agcRestore, opts)
+				this.assertHeld(lease)
+				guard()
+				await this.deps.tuner.setGainMode(sourceId, "agc", opts)
+			}
 		} catch (err) {
 			failure = err
 		} finally {
@@ -576,6 +656,15 @@ export class TunerArbiter extends EventEmitter {
 				toError(failure),
 			)
 		}
+		if (hopGain.bandGainAfter === false) delete lease.bandGain
+		if (hopGain.bandGainAfter === true && target.gainTenthsDb !== null)
+			// The writes succeeded (or the gain was already there): report the band gain.
+			this.deps.tuner.noteBandGainApplied?.(
+				sourceId,
+				target.gainTenthsDb,
+				"scanner",
+				target.centreHz,
+			)
 		const written = this.requireState(sourceId)
 		lease.verified = {
 			centreHz: target.centreHz,
@@ -836,6 +925,43 @@ export class TunerArbiter extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Per-band gain of one hop. A job gain is written as today. Without one, a band gain for
+	 * the centre is written; with none ("keep" or no entry) after a band gain in this lease,
+	 * the snapshot's gain mode and gain go back; else gain is left alone. A failing lookup
+	 * counts as "keep" (the controller already answers null on failure).
+	 */
+	private hopGain(
+		lease: Lease,
+		target: { centreHz: number; gainTenthsDb: number | null },
+	): HopGain {
+		const keep: HopGain = {
+			gainTenthsDb: target.gainTenthsDb,
+			agcRestoreGain: null,
+			bandGainAfter: undefined,
+		}
+		if (target.gainTenthsDb !== null) return keep
+		const lookup = this.deps.tuner.bandGainFor
+		let band: number | null = null
+		if (lookup !== undefined) {
+			try {
+				band = lookup.call(this.deps.tuner, lease.sourceId, target.centreHz)
+			} catch {
+				band = null
+			}
+		}
+		const { gainMode, gain } = lease.snapshot
+		// An unknown snapshot gain or mode (e.g. after a core restart) cannot be put back, so
+		// no band gain goes on either; release reports the fields as unrestorable.
+		if (gain === undefined || gainMode === undefined) return keep
+		if (band !== null)
+			return { gainTenthsDb: band, agcRestoreGain: null, bandGainAfter: true }
+		if (lease.bandGain !== true) return keep
+		return gainMode === "manual"
+			? { gainTenthsDb: gain, agcRestoreGain: null, bandGainAfter: false }
+			: { gainTenthsDb: null, agcRestoreGain: gain, bandGainAfter: false }
+	}
+
 	private clearVerified(leaseOrSource: Lease | string): void {
 		const lease =
 			typeof leaseOrSource === "string"
@@ -935,7 +1061,8 @@ export class TunerArbiter extends EventEmitter {
 		const failed: string[] = []
 		const opts: TunerWriteOptions = { origin: "scanner" }
 		const tuner = this.deps.tuner
-		for (const field of FIELDS) {
+		const order = snapshot.gainMode === "agc" ? FIELDS_AGC_SNAPSHOT : FIELDS
+		for (const field of order) {
 			if (!changed.includes(field)) continue
 			const value = snapshot[field]
 			if (value === undefined) {
@@ -977,7 +1104,7 @@ export class TunerArbiter extends EventEmitter {
 		return { restored, unknown, failed }
 	}
 
-	private lose(lease: Lease, reason: LeaseLostReason): void {
+	private lose(lease: Lease, reason: LeaseLostReason, command?: string): void {
 		if (this.leases.get(lease.sourceId) !== lease) return
 		this.clearVerified(lease)
 		this.leases.delete(lease.sourceId)
@@ -989,16 +1116,136 @@ export class TunerArbiter extends EventEmitter {
 				"Clearing the persisted lease failed",
 			)
 		})
+		const gainRestore = this.queueGainRecovery(lease, reason, command)
 		this.log.warn(
-			{ sourceId: lease.sourceId, jobId: lease.jobId, reason },
-			"Tuner lease lost; no restore",
+			{ sourceId: lease.sourceId, jobId: lease.jobId, reason, gainRestore },
+			gainRestore
+				? "Tuner lease lost; only the operator's gain goes back"
+				: "Tuner lease lost; no restore",
 		)
 		this.emit("lease-lost", lease, reason)
+		if (gainRestore && reason === "preempted-operator")
+			this.runGainRecovery(lease.sourceId)
+	}
+
+	/**
+	 * B1: a lease that put a band gain on the tuner and is lost to a write that is not a gain
+	 * or gain mode choice owes the operator their gain mode and gain. True when queued.
+	 */
+	private queueGainRecovery(
+		lease: Lease,
+		reason: LeaseLostReason,
+		command: string | undefined,
+	): boolean {
+		if (lease.bandGain !== true) return false
+		if (command !== undefined && GAIN_CHOICE_COMMANDS.has(command)) return false
+		const { gainMode, gain } = lease.snapshot
+		if (gainMode === undefined || gain === undefined) return false
+		const fields = (["gainMode", "gain"] as const).filter(f =>
+			lease.changedFields.has(f),
+		)
+		if (fields.length === 0) return false
+		const count = this.deps.tuner.gainChoiceCount
+		// A relay's own gain choices are visible only through the counter: none, no record.
+		if (count === undefined && reason === "preempted-relay") return false
+		this.gainRecovery.set(lease.sourceId, {
+			snapshot: { gainMode, gain },
+			fields,
+			choices:
+				count === undefined
+					? null
+					: count.call(this.deps.tuner, lease.sourceId),
+		})
+		return true
+	}
+
+	/** An operator or relay gain choice since the record was made: theirs stands. */
+	private gainChosenSince(sourceId: string, record: GainRecovery): boolean {
+		const count = this.deps.tuner.gainChoiceCount
+		return (
+			record.choices !== null &&
+			count !== undefined &&
+			count.call(this.deps.tuner, sourceId) !== record.choices
+		)
+	}
+
+	/**
+	 * A new lease on a source that still owes a gain restore snapshots the operator's gain,
+	 * not the band gain left on the tuner, and puts it back on release.
+	 */
+	private takeGainRecovery(lease: Lease): void {
+		const record = this.gainRecovery.get(lease.sourceId)
+		if (record === undefined) return
+		this.gainRecovery.delete(lease.sourceId)
+		if (this.gainChosenSince(lease.sourceId, record)) return
+		lease.snapshot.gainMode = record.snapshot.gainMode
+		lease.snapshot.gain = record.snapshot.gain
+		for (const field of record.fields) lease.changedFields.add(field)
+		lease.bandGain = true
+	}
+
+	/**
+	 * Runs the source's owed gain restore (origin "scanner", deferred out of the listener that
+	 * queued it). A failed write keeps the record for the next return of control or
+	 * connection; an operator gain choice or a new lease drops it.
+	 */
+	private runGainRecovery(sourceId: string): void {
+		const record = this.gainRecovery.get(sourceId)
+		if (record === undefined || this.gainRecoveryRunning.has(sourceId)) return
+		if (this.leases.has(sourceId) || this.releasing.has(sourceId)) return
+		if (this.gainChosenSince(sourceId, record)) {
+			this.gainRecovery.delete(sourceId)
+			this.log.info(
+				{ sourceId },
+				"An operator gain choice replaced the gain restore owed after a lost lease",
+			)
+			return
+		}
+		const superseded = () =>
+			this.gainRecovery.get(sourceId) !== record ||
+			this.leases.has(sourceId) ||
+			this.gainChosenSince(sourceId, record)
+		this.gainRecoveryRunning.add(sourceId)
+		// A new lease waits ("releasing") so it never snapshots a half-restored gain.
+		this.releasing.add(sourceId)
+		const run = Promise.resolve().then(() =>
+			this.restoreFields(sourceId, record.snapshot, record.fields, superseded),
+		)
+		this.deps.tuner.holdBandGainFor?.call(this.deps.tuner, sourceId, run)
+		void run
+			.then(
+				r => {
+					if (superseded()) {
+						if (this.gainRecovery.get(sourceId) === record)
+							this.gainRecovery.delete(sourceId)
+						return
+					}
+					if (r.failed.length > 0) {
+						this.log.warn(
+							{ sourceId, failed: r.failed },
+							"Putting the operator's gain back failed; retried when control or the connection returns",
+						)
+						return
+					}
+					this.gainRecovery.delete(sourceId)
+					this.log.info(
+						{ sourceId, restored: r.restored },
+						"Put the operator's gain back after a lost lease",
+					)
+				},
+				(err: unknown) => {
+					this.log.error({ err, sourceId }, "Gain restore failed")
+				},
+			)
+			.finally(() => {
+				this.gainRecoveryRunning.delete(sourceId)
+				this.releasing.delete(sourceId)
+			})
 	}
 
 	private readonly onCommandSent = (
 		sourceId: string,
-		_command: string,
+		command: string,
 		_value: number,
 		origin?: TunerCommandOrigin,
 	): void => {
@@ -1013,7 +1260,7 @@ export class TunerArbiter extends EventEmitter {
 		}
 		this.lastOperatorAt.set(sourceId, this.now())
 		const lease = this.leases.get(sourceId)
-		if (lease) this.lose(lease, "preempted-operator")
+		if (lease) this.lose(lease, "preempted-operator", command)
 	}
 
 	private readonly onControlMode = (
@@ -1034,6 +1281,7 @@ export class TunerArbiter extends EventEmitter {
 			if (!this.startRecovery(sourceId) && this.markerOpen.has(sourceId)) {
 				void this.testModeOff(sourceId)
 			}
+			this.runGainRecovery(sourceId)
 			return
 		}
 		const lease = this.leases.get(sourceId)
@@ -1065,6 +1313,8 @@ export class TunerArbiter extends EventEmitter {
 			// A connection dropped mid-bracket can leave the dongle in test mode; replay never clears it.
 			void this.testModeOff(sourceId)
 		}
+		if (this.deps.tuner.getState(sourceId)?.controlMode === "internal")
+			this.runGainRecovery(sourceId)
 		this.emit("source-up", sourceId)
 	}
 
@@ -1101,7 +1351,14 @@ export class TunerArbiter extends EventEmitter {
 			snapshot: { ...persisted.snapshot },
 			// Frequency always, as in recover(): the stale last hop is the H4 hazard.
 			changedFields: new Set([...persisted.changedFields, "frequency"]),
+			// The crashed sweep's gain may still be on the tuner: with a band table, a later
+			// hop without a gain of its own puts the snapshot's gain back.
+			...(this.deps.tuner.bandGainFor !== undefined &&
+			persisted.changedFields.includes("gain")
+				? { bandGain: true }
+				: {}),
 		}
+		this.takeGainRecovery(lease)
 		this.adopted.add(lease)
 		this.leases.set(sourceId, lease)
 		this.priorities.set(sourceId, priority)

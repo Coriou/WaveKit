@@ -5,6 +5,8 @@
 // (older core, header not seen yet, unlisted tuner) it falls back to 1 dB steps over the range the
 // core's gain command admits. The core does not snap: rtl_tcp picks the nearest table value itself,
 // so the slider sends table values to keep what it shows and what the dongle uses the same.
+import type { ScannerEngineStatus, TunerBandGain } from "@wavekit/api-types"
+
 import type { ReceiverCaps } from "../../data/index.ts"
 
 /** The core's gain command range (TUNER_REST_COMMAND_POLICY gain: 0..500 tenths of dB). */
@@ -117,4 +119,29 @@ export function gainHint(steps: GainSteps): string {
 	if (steps.source === "table")
 		return `Steps follow the ${steps.tuner ?? "tuner"}'s own gain table.`
 	return `${steps.reason ?? "No gain table"}: 1 dB steps, the dongle picks its nearest gain.`
+}
+
+// ---- per-band gain (TunerState.bandGain) and the scanner's overload hint
+
+/**
+ * "Band gain 37.2 dB · 868 MHz ISM · while the scanner tunes", from the core's confirmed
+ * TunerState.bandGain only: the core reports it while the band gain it wrote (snapped to the
+ * tuner's step) is the gain on the tuner, and drops it on any later gain, mode or frequency change.
+ */
+export function bandGainText(bandGain: TunerBandGain): string {
+	const by =
+		bandGain.owner === "scanner" ? "while the scanner tunes" : "for your tuning"
+	return [`Band gain ${gainDb(bandGain.tenthsDb)}`, bandGain.label, by]
+		.filter(Boolean)
+		.join(" · ")
+}
+
+/** The scanner engine's overload hint for `sourceId`, in words, or null. */
+export function overloadHintText(
+	engines: readonly Pick<ScannerEngineStatus, "sourceId" | "overloadHint">[],
+	sourceId: string,
+): string | null {
+	const hint = engines.find(e => e.sourceId === sourceId)?.overloadHint
+	if (!hint) return null
+	return `Front end may be overloaded at this gain (${gainDb(hint.gain)}, ${hint.blankedPercent.toFixed(1)} % of frames blanked)`
 }

@@ -80,6 +80,12 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `tuner:command-sent` then `tuner:state-changed`; a new sample rate bumps the spectrum epoch (the
   synthetic frames keep their 2.4 MS/s span). `WAVEKIT_MOCK_RELAY_CLIENT=1` starts with an SDR++
   client holding the tuner (`TUNER_CONTROL_EXTERNAL` until the panel takes control back).
+  `POST /api/tuner/:id/gain` takes `{ "gain" }` (tenths of a dB) or the deprecated `{ "tenthsDb" }`,
+  and two different values answer 400 as on the core. `GET`/`PUT /api/tuner-band-gain` serve the
+  core's default per-band gain table in memory with its PUT rules and 400 body (`BAND_GAIN_INVALID`).
+- Overload hint: `WAVEKIT_MOCK_OVERLOAD_HINT=1` (`overloadHint` in `buildMockServer()`, or
+  `server.scanner.overloadHint(percent | null)`) adds the scanner engine's `overloadHint` at the
+  tuner's manual gain (absent in AGC, as on the core).
 - Activity records: `GET /api/activity/:eventId` returns the message's full decoded JSON as
   `decodedData` (`MockMessage.data`), so the message card can humanise what the core's fields leave
   out (rtl_433 extras, APRS weather, an unknown `Generic-Remote` model). Entity keys follow the

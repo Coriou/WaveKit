@@ -590,6 +590,142 @@ function linkOf(cfg: SourceConfig): "local" | "network" {
 		: "network"
 }
 
+/**
+ * R3 overload hint: broadband impulse blanking that keeps rising while the gain is manual
+ * suggests the front end is overloaded at that gain (a gain A/B confirms it). It reuses the
+ * blanker's cumulative `blankedFrames` and the pipeline's `observedSamples` from the 5 s stats
+ * snapshot, read at the status cadence (1 s): no per-sample or per-frame work.
+ *
+ * Threshold: over a window of at least OVERLOAD_HINT_MIN_WINDOW_S of stream samples (trimmed to
+ * about OVERLOAD_HINT_WINDOW_S), frames offered = Δsamples / hop (hop = fftSize × (1 − overlap)).
+ * The hint shows when Δblanked ≥ OVERLOAD_HINT_BLANKED_FRACTION × frames and
+ * Δblanked ≥ OVERLOAD_HINT_MIN_BLANKED. Example: 2.4 Msps, fftSize 2048, no overlap → 1172
+ * frames/s, 35,156 frames in 30 s; 5 % is 1,758 blanked frames (about 59/s). Sporadic impulses
+ * (ignition, switching) blank a few frames a minute, far below that.
+ *
+ * Fails closed (no hint): missing stats or engine config, AGC or unknown gain mode, unknown
+ * gain, or a tuner read that throws. A gain or frame-size change, or a counter that goes
+ * backwards (a restarted pipeline), starts a new window.
+ */
+export const OVERLOAD_HINT_BLANKED_FRACTION = 0.05
+export const OVERLOAD_HINT_MIN_BLANKED = 50
+export const OVERLOAD_HINT_WINDOW_S = 30
+export const OVERLOAD_HINT_MIN_WINDOW_S = 10
+export const OVERLOAD_HINT_REASON = "front end may be overloaded at this gain"
+/** Snapshots kept per source: 30 s of 5 s stats needs 7; the cap only bounds odd cadences. */
+const OVERLOAD_HINT_MAX_SNAPSHOTS = 16
+
+export interface OverloadHintInput {
+	stats: { observedSamples: number; blankedFrames: number } | null
+	sampleRateHz: number | null
+	hopSamples: number | null
+	/** null when the gain mode is unknown. */
+	gainMode: "manual" | "agc" | null
+	/** Tenths of a dB; null when unknown. */
+	gain: number | null
+}
+
+interface OverloadHintWindow {
+	gain: number
+	sampleRateHz: number
+	hopSamples: number
+	/** After a gain/config change the cached snapshot may predate it; skip reads up to it. */
+	staleSamples: number
+	snapshots: { observedSamples: number; blankedFrames: number }[]
+}
+
+export class OverloadHintTracker {
+	private readonly windows = new Map<string, OverloadHintWindow>()
+
+	/** The hint for this status read, or null. */
+	update(
+		sourceId: string,
+		input: OverloadHintInput,
+	): NonNullable<ScannerEngineStatus["overloadHint"]> | null {
+		const { stats, sampleRateHz: fs, hopSamples: hop, gain } = input
+		if (
+			stats === null ||
+			input.gainMode !== "manual" ||
+			gain === null ||
+			fs === null ||
+			hop === null ||
+			!(fs > 0) ||
+			!(hop > 0) ||
+			!Number.isFinite(stats.observedSamples) ||
+			!Number.isFinite(stats.blankedFrames)
+		) {
+			// Keep a closed marker so the next manual window skips the cached snapshot too.
+			if (stats === null) this.windows.delete(sourceId)
+			else
+				this.windows.set(sourceId, {
+					gain: Number.NaN,
+					sampleRateHz: Number.NaN,
+					hopSamples: Number.NaN,
+					staleSamples: -1,
+					snapshots: [],
+				})
+			return null
+		}
+		let w = this.windows.get(sourceId)
+		if (
+			!w ||
+			w.gain !== gain ||
+			w.sampleRateHz !== fs ||
+			w.hopSamples !== hop
+		) {
+			w = {
+				gain,
+				sampleRateHz: fs,
+				hopSamples: hop,
+				// A first window has no earlier setting to leak in; its first read is a fine baseline.
+				staleSamples: w ? stats.observedSamples : -1,
+				snapshots: [],
+			}
+			this.windows.set(sourceId, w)
+		}
+		// A counter reset reopens the stats epoch; that snapshot is fresh.
+		if (stats.observedSamples < w.staleSamples) w.staleSamples = -1
+		if (stats.observedSamples <= w.staleSamples) return null
+		const last = w.snapshots.at(-1)
+		if (
+			last &&
+			(stats.observedSamples < last.observedSamples ||
+				stats.blankedFrames < last.blankedFrames)
+		)
+			w.snapshots = []
+		const newest = w.snapshots.at(-1)
+		if (!newest || stats.observedSamples > newest.observedSamples)
+			w.snapshots.push({
+				observedSamples: stats.observedSamples,
+				blankedFrames: stats.blankedFrames,
+			})
+		const end = w.snapshots.at(-1)!
+		// Drop the oldest while the rest still spans the full window.
+		while (
+			w.snapshots.length > OVERLOAD_HINT_MAX_SNAPSHOTS ||
+			(w.snapshots.length > 2 &&
+				end.observedSamples - w.snapshots[1]!.observedSamples >=
+					OVERLOAD_HINT_WINDOW_S * fs)
+		)
+			w.snapshots.shift()
+		const start = w.snapshots[0]!
+		const span = end.observedSamples - start.observedSamples
+		if (span < OVERLOAD_HINT_MIN_WINDOW_S * fs) return null
+		const frames = span / hop
+		const blanked = end.blankedFrames - start.blankedFrames
+		if (
+			blanked < OVERLOAD_HINT_MIN_BLANKED ||
+			blanked < OVERLOAD_HINT_BLANKED_FRACTION * frames
+		)
+			return null
+		return {
+			reason: OVERLOAD_HINT_REASON,
+			gain,
+			blankedPercent: Math.round((1000 * blanked) / frames) / 10,
+		}
+	}
+}
+
 export class ScannerService extends EventEmitter {
 	private readonly consumerLifecycle: ScannerLifecycleOwner
 	private readonly channelTaps: ChannelTaps | undefined
@@ -994,6 +1130,8 @@ export class ScannerService extends EventEmitter {
 		string,
 		{ hz: number; ppm: number; n: number }
 	>()
+	/** R3: front-end overload hint windows, read at the status cadence. */
+	private readonly overloadHints = new OverloadHintTracker()
 	/** Latest block summary per source (identify measurements when no track resolved, § 10.8). */
 	private readonly lastSummaries = new Map<string, BlockSummary>()
 	/** Per source: track events of streams below this one are late (the stream ended, R2). */
@@ -7230,6 +7368,12 @@ export class ScannerService extends EventEmitter {
 		const frequencyError = this.frequencyErrors.get(cfg.id)
 		const disabledReason = this.passiveDisabled.get(cfg.id)
 		const error = spectrumStatus?.lastError
+		const overloadHint = this.overloadHints.update(cfg.id, {
+			stats,
+			sampleRateHz: pc?.sampleRateHz ?? null,
+			hopSamples: pc ? pc.fftSize * (1 - (pc.overlap ?? 0)) : null,
+			...this.knownGain(cfg.id),
+		})
 		return {
 			sourceId: cfg.id,
 			state: engine
@@ -7271,6 +7415,25 @@ export class ScannerService extends EventEmitter {
 					}
 				: null,
 			...(error ? { lastError: error } : {}),
+			...(overloadHint ? { overloadHint } : {}),
+		}
+	}
+
+	/** R3: the tuner's gain mode and gain, null where unknown or the read throws. */
+	private knownGain(sourceId: string): {
+		gainMode: "manual" | "agc" | null
+		gain: number | null
+	} {
+		try {
+			const state = this.deps.tuner.getState(sourceId)
+			if (!state) return { gainMode: null, gain: null }
+			const unknown = state.unknownFields ?? []
+			return {
+				gainMode: unknown.includes("gainMode") ? null : state.gainMode,
+				gain: unknown.includes("gain") ? null : state.gain,
+			}
+		} catch {
+			return { gainMode: null, gain: null }
 		}
 	}
 

@@ -24,7 +24,7 @@ describe("mock receiver controls", () => {
 		server.receiver.relayClient(false)
 	})
 	const inject = (
-		method: "GET" | "POST" | "PATCH",
+		method: "GET" | "POST" | "PATCH" | "PUT",
 		url: string,
 		payload?: unknown,
 	) =>
@@ -112,7 +112,9 @@ describe("mock receiver controls", () => {
 		expect((await post("gain-mode", { mode: "manual" })).gainMode).toBe(
 			"manual",
 		)
-		expect((await post("gain", { tenthsDb: 254 })).gain).toBe(254)
+		expect((await post("gain", { gain: 254 })).gain).toBe(254)
+		// the deprecated alias still works
+		expect((await post("gain", { tenthsDb: 297 })).gain).toBe(297)
 		expect((await post("agc", { enabled: true })).agcMode).toBe(true)
 		expect((await post("agc", { enabled: false })).agcMode).toBe(false)
 		expect((await post("ppm", { ppm: -12 })).ppm).toBe(-12)
@@ -174,6 +176,133 @@ describe("mock receiver controls", () => {
 		})
 		expect(unknown.statusCode).toBe(404)
 		expect(unknown.json<{ code: string }>().code).toBe("TUNER_SOURCE_NOT_FOUND")
+	})
+
+	it("takes gain or its deprecated alias, never two different values", async () => {
+		const both = await inject("POST", "/api/tuner/rtl-0/gain", {
+			gain: 300,
+			tenthsDb: 310,
+		})
+		expect(both.statusCode).toBe(400)
+		expect(both.json<{ message: string }>().message).toMatch(
+			/^Invalid request body; expected \{"gain": integer/,
+		)
+	})
+
+	it("serves the per-band gain table and replaces it on PUT, with the core's rules", async () => {
+		const first = await inject("GET", "/api/tuner-band-gain")
+		expect(first.json()).toMatchObject({
+			provenance: "config",
+			settings: { applyToMyTuning: false },
+			limits: { maxEntries: 32, maxGainTenthsDb: 500, labelMaxLength: 48 },
+		})
+		expect(
+			first.json<{ settings: { entries: unknown[] } }>().settings.entries,
+		).toContainEqual({
+			minHz: 863_000_000,
+			maxHz: 870_000_000,
+			gain: 372,
+			label: "868 MHz ISM",
+		})
+		const body = {
+			applyToMyTuning: true,
+			entries: [{ minHz: 863_000_000, maxHz: 870_000_000, gain: 297 }],
+		}
+		const put = await inject("PUT", "/api/tuner-band-gain", body)
+		expect(put.statusCode).toBe(200)
+		expect(put.json()).toMatchObject({ provenance: "runtime", settings: body })
+		const overlap = await inject("PUT", "/api/tuner-band-gain", {
+			applyToMyTuning: false,
+			entries: [
+				{ minHz: 863_000_000, maxHz: 870_000_000, gain: 297 },
+				{ minHz: 870_000_000, maxHz: 880_000_000, gain: "keep" },
+			],
+		})
+		expect(overlap.statusCode).toBe(400)
+		expect(overlap.json()).toMatchObject({
+			error: "BandGainSettingsError",
+			code: "BAND_GAIN_INVALID",
+		})
+		for (const entry of [
+			{ minHz: 863_000_000, maxHz: 863_000_000, gain: 297 },
+			{ minHz: 863_000_000, maxHz: 870_000_000, gain: 501 },
+			{ minHz: 20_000_000, maxHz: 30_000_000, gain: 297 },
+			{ minHz: 863_000_000, maxHz: 870_000_000, gain: 297, label: "" },
+		]) {
+			const res = await inject("PUT", "/api/tuner-band-gain", {
+				applyToMyTuning: false,
+				entries: [entry],
+			})
+			expect(res.statusCode, JSON.stringify(entry)).toBe(400)
+		}
+		const kept = await inject("GET", "/api/tuner-band-gain")
+		expect(kept.json()).toMatchObject({ settings: body })
+	})
+
+	it("applies the band gain on an operator retune with the switch on, as the core does", async () => {
+		const own = await buildMockServer({ port: 0 })
+		await own.app.ready()
+		try {
+			const call = (
+				method: "GET" | "POST" | "PATCH" | "PUT",
+				url: string,
+				payload?: unknown,
+			) =>
+				own.app.inject(
+					payload === undefined
+						? { method, url }
+						: { method, url, payload: payload as Record<string, unknown> },
+				)
+			const state = async () =>
+				(await call("GET", "/api/tuner/rtl-0")).json<TunerState>()
+			await call("POST", "/api/tuner/rtl-0/gain-mode", { mode: "manual" })
+			await call("POST", "/api/tuner/rtl-0/gain", { gain: 496 })
+			// switch off (the default): a retune into 868 MHz leaves the gain
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 868_300_000 })
+			expect(await state()).toMatchObject({ gain: 496 })
+			expect(await state()).not.toHaveProperty("bandGain")
+			const table = {
+				applyToMyTuning: true,
+				entries: [
+					{
+						minHz: 863_000_000,
+						maxHz: 870_000_000,
+						gain: 400,
+						label: "868 MHz ISM",
+					},
+					{ minHz: 902_000_000, maxHz: 928_000_000, gain: 372 },
+				],
+			}
+			await call("PUT", "/api/tuner-band-gain", table)
+			// switched on, not retuned yet: nothing applied, nothing reported
+			expect(await state()).not.toHaveProperty("bandGain")
+			const res = await call("POST", "/api/tuner/rtl-0/frequency", {
+				hz: 868_400_000,
+			})
+			// 40.0 dB snaps to the R820T's 40.2 dB; the frequency answer carries it
+			expect(res.json<TunerState>()).toMatchObject({
+				gainMode: "manual",
+				gain: 402,
+				bandGain: { tenthsDb: 402, label: "868 MHz ISM", owner: "user" },
+			})
+			await call("PATCH", "/api/tuner/rtl-0/config", { frequency: 915_000_000 })
+			expect((await state()).bandGain).toEqual({ tenthsDb: 372, owner: "user" })
+			// out of the bands: the operator's own gain comes back, no band gain reported
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 455_500_000 })
+			expect(await state()).toMatchObject({ gain: 496 })
+			expect(await state()).not.toHaveProperty("bandGain")
+			// back in, then the operator's own gain write or AGC drops it
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 868_400_000 })
+			expect((await state()).bandGain?.tenthsDb).toBe(402)
+			await call("POST", "/api/tuner/rtl-0/gain", { gain: 402 })
+			expect(await state()).not.toHaveProperty("bandGain")
+			await call("POST", "/api/tuner/rtl-0/frequency", { hz: 915_000_000 })
+			expect((await state()).bandGain?.tenthsDb).toBe(372)
+			await call("POST", "/api/tuner/rtl-0/gain-mode", { mode: "agc" })
+			expect(await state()).not.toHaveProperty("bandGain")
+		} finally {
+			await own.close()
+		}
 	})
 
 	it("refuses commands with 409 while a relay client has the tuner, until control is reclaimed", async () => {

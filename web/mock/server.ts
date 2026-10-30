@@ -137,6 +137,8 @@ export interface MockServerOptions {
 	 * buildMockServer().
 	 */
 	activityFloods?: boolean
+	/** The scanner engine starts with its front-end overload hint (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
+	overloadHint?: boolean
 }
 
 export interface MockServer {
@@ -1539,6 +1541,8 @@ export async function buildMockServer(
 			epoch += 1
 			epochStartedAt = Date.now()
 		}
+		// the core drops a reported band gain before every frequency write
+		delete tuner.bandGain
 		tuner.frequency = hz
 		tuner.commandCount += 1
 		tuner.lastCommandAt = new Date().toISOString()
@@ -1572,6 +1576,7 @@ export async function buildMockServer(
 		liveStatus,
 		...(options.bandFixtures ? { bandFixtures: true } : {}),
 		...(options.retuneSweep ? { retuneSweep: true } : {}),
+		...(options.overloadHint ? { overloadHint: true } : {}),
 		liveListen: offsetHz => {
 			live.config = { ...live.config, offsetHz, sourceId: MOCK_SOURCE_ID }
 			broadcast("live-audio", "live-audio:config", liveStatus().config)
@@ -1625,6 +1630,7 @@ export async function buildMockServer(
 			const delay = options.retuneMs ?? 0
 			if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
 			applyFrequency(hz, "rest")
+			receiver.operatorRetuned(hz)
 			// an operator write: a running sweep pauses (preempted-operator)
 			scanner.operatorWrite()
 			return tuner
@@ -2426,6 +2432,9 @@ async function main(): Promise<void> {
 			? { bandFixtures: true }
 			: {}),
 		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
+		...(env["WAVEKIT_MOCK_OVERLOAD_HINT"] === "1"
+			? { overloadHint: true }
+			: {}),
 		...(isActivity429Mode(activity429Env)
 			? { activity429: activity429Env }
 			: {}),

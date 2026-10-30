@@ -100,6 +100,7 @@ import { applyConfiguredTuning } from "./core/tuner-config-gain.js"
 import { createRegionalRegistry } from "./core/regional/registry.js"
 import { createRegionalRegistration } from "./core/regional/data.js"
 import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/provider.js"
+import { BandGainSettingsService } from "./core/band-gain.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { liveDemodOperatorActivity } from "./core/live-demod-activity.js"
@@ -1310,6 +1311,20 @@ async function main(): Promise<void> {
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
 		})
+		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
+		const bandGain = new BandGainSettingsService({
+			stateDir: config.stateDir,
+			config: config.tuner.bandGain,
+			logger,
+		})
+		await bandGain.load()
+		tunerController.setBandGain(bandGain)
+		// Band gains snap to the tuner's advertised gain steps when its table is known. Wired
+		// before the scanner exists; the capabilities provider is attached once it is built
+		// below (until then, and without a known table, the configured value is written unsnapped;
+		// rtl_tcp then sets the tuner's nearest gain step itself).
+		let gainStepsOf: ((id: string) => readonly number[] | null) | null = null
+		tunerController.setGainStepsResolver(id => gainStepsOf?.(id) ?? null)
 		const { config: liveDemodConfig, publicOrigin: legacyAudioOrigin } =
 			splitLiveDemodConfig(LiveDemodConfigSchema.parse(config.liveDemod ?? {}))
 		const liveDemodOrigin = liveDemodAdvertisedOrigin(
@@ -2348,6 +2363,12 @@ async function main(): Promise<void> {
 					: null
 			},
 		)
+		gainStepsOf = id => {
+			const caps = receiverCapabilitiesProvider.get(id)
+			return caps.ok && caps.value.gainTable?.state === "suggested"
+				? caps.value.gainTable.valuesTenthsDb
+				: null
+		}
 		let receiverDisposed = false
 		disposeReceiver = () => {
 			if (receiverDisposed) return

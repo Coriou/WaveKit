@@ -1359,6 +1359,17 @@ counts as observed (it is not replayed on reconnect). The field values keep
 their types for older clients. A reset
 reconnect makes them unknown again; the field is absent when everything is known.
 
+**`bandGain`** (`{ tenthsDb, label?, owner }`) is present only while a
+[band gain](#per-band-gain-get-and-put-apituner-band-gain) is confirmed on the tuner: the core
+wrote it for the current frequency (or found it already there) and the tuner's known gain mode
+is manual with exactly that gain. `tenthsDb` is the value written, snapped to the tuner's gain
+step (a 40.0 dB entry reads `402` on an R820T); `label` is the entry's; `owner` is `scanner` (a
+scanner job's hop) or `user` (your retune with `applyToMyTuning` on). Any later gain, gain mode
+or frequency write, a tuner gain index write, a relay client, a control hand-over or the gain
+becoming unknown removes it. RTL AGC (`agcMode`), IF gain and tuner IF gain writes set other
+gain stages and keep it. Turning `applyToMyTuning` on
+adds nothing until your next retune.
+
 ```bash
 curl http://localhost:9000/api/tuner
 ```
@@ -1432,7 +1443,9 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 
 #### Additional tuner endpoints
 
-- `POST /api/tuner/:sourceId/gain` — Set manual gain (`{ "tenthsDb": 400 }`)
+- `POST /api/tuner/:sourceId/gain` — Set manual gain: `{ "gain": 400 }` in tenths of a dB,
+  the same name and unit as `gain` in `GET /api/tuner`. `{ "tenthsDb": 400 }` is a deprecated
+  alias with the same unit. Send exactly one; both with different values is a 400.
 - `POST /api/tuner/:sourceId/gain-mode` — `manual` or `agc`
 - `POST /api/tuner/:sourceId/sample-rate` — Set sample rate
 - `POST /api/tuner/:sourceId/ppm` — Set PPM correction
@@ -1447,6 +1460,59 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 - `POST /api/tuner/:sourceId/tuner-xtal` — Tuner XTAL frequency
 - `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
 - `PATCH /api/tuner/:sourceId/config` — Bulk update
+
+Every 400 from these routes names the field that failed, by its schema name, and the fields it
+expects, their types and units, for example `Invalid request body at gain; expected {"gain":
+integer, gain in tenths of a dB (0-500, e.g. 372 = 37.2 dB)}; ...`. A value the tuner refuses
+answers `Invalid tuner value at <field>; expected ...` (for `PATCH …/config`, the `TunerState`
+name such as `sampleRate` or `tunerIfGain.stage`), and a body that is not valid JSON answers
+`Invalid request body; expected ...`. The message never repeats the value you sent.
+
+#### Per-band gain: GET and PUT /api/tuner-band-gain
+
+A manual gain that suits one band can overload the RTL-SDR front end in another: strong
+cellular and ISM emitters next to 868 and 915 MHz raise the whole window at once. The band
+gain table gives a gain per frequency range. Scanner hops (every scanner job: discover,
+monitor and identify, including each hop's dwell) that tune into a listed range write its gain,
+and give your exact gain mode and gain back when they return the tuner: on release, on a later
+hop outside the bands, after a core crash through the lease's crash record, and when your own
+write or a relay client takes the tuner from the job. Your write puts only the gain back, at
+once (unless it set the gain or gain mode itself); after a relay client, the gain goes back
+when control returns, unless the relay client set a gain or gain mode meanwhile. While the
+tuner's gain or gain mode is unknown (for example right after a core restart, before any gain
+write), hops write no band gain, since yours could not be put back. A job's own
+`tuner.gainTenthsDb` wins over the table.
+
+Manual tuning (`POST …/frequency`, `PATCH …/config`, the web app, and a dwell you drive
+through these routes) does **not** change gain unless `applyToMyTuning` is on. With it on,
+tuning into a listed range applies its gain, and tuning out of the bands puts back the gain
+mode and gain you had before (kept in `<stateDir>/tuner-band-gain-saved.json`, so a restart
+inside a band still restores it). The band gain goes on only after that file is written; if
+writing it fails, your gain stays and the failure is logged. Setting a gain, gain mode or tuner gain index
+yourself inside a band makes that your gain, also in a `PATCH …/config` whose value equals the
+tuner's, while RTL AGC (`agcMode`), IF gain and tuner IF gain writes set other stages and do not. Overlapping retunes of one
+source then run one at a time. Relay clients (SDR++) are never touched.
+
+```bash
+curl http://localhost:9000/api/tuner-band-gain
+curl -X PUT http://localhost:9000/api/tuner-band-gain \
+  -H "Content-Type: application/json" \
+  -d '{"applyToMyTuning":false,"entries":[{"minHz":863000000,"maxHz":870000000,"gain":297,"label":"868 MHz ISM"}]}'
+```
+
+`GET` answers `{ settings: { applyToMyTuning, entries }, provenance, limits }`; `provenance` is
+`config` (the YAML `tuner.bandGain` section) or `runtime` (a saved PUT). `PUT` replaces the
+whole table and saves it in `<stateDir>/tuner-band-gain.json`; that file then wins over the
+YAML until it is deleted (the core logs one line at start when it does). A failed save answers
+500 and changes nothing. Rules (400 otherwise):
+at most 32 entries; `minHz` < `maxHz`, both whole Hz from 24 000 000 to 1 900 000 000;
+ranges are inclusive and must not overlap (so the one containing a frequency is the only
+match); `gain` is a whole number of tenths of a dB, 0 to 500, or `"keep"`; `label` is at most 48
+printable characters. A gain is snapped to the tuner's nearest gain step when the receiver
+advertises its tuner type (see `GET /api/receiver-capabilities`). `"keep"` and frequencies
+without an entry leave gain alone. Writes follow the same access rules as every other write
+route. Defaults and their reasons are in
+[CORE-REFERENCE.md, Per-band gain](CORE-REFERENCE.md#per-band-gain).
 
 ### Tuner Relay
 
@@ -2780,6 +2846,11 @@ curl http://localhost:9000/api/scanner
 
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
+`overloadHint` is present only while the gain mode is manual and at least 5 % of frames
+(and at least 50) were blanked over the last ~30 s at the current gain:
+`{ "reason": "front end may be overloaded at this gain", "gain": 496, "blankedPercent": 7.5 }`
+(`gain` in tenths of a dB). It is a hint, not a measurement; absent in AGC, when the gain
+is unknown, and from older cores.
 `passive.disabledReason` explains a passive job switched off by the cost rule
 (for example `engine-cpu 31 % of a core`).
 

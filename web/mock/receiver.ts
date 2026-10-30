@@ -6,15 +6,25 @@
  * codes, statuses and messages) and emit what the core emits: `tuner:command-sent` (origin `rest`),
  * then `tuner:state-changed`; a control-mode change sends `tuner:control-mode-changed` first.
  * A sample-rate change restarts the stream (server.ts bumps the spectrum epoch).
+ * GET/PUT /api/tuner-band-gain serve the per-band gain table (the core's defaults, kept in memory).
  * Type stripping only: no enums, parameter properties or namespaces.
  */
 import { randomBytes } from "node:crypto"
 import type { FastifyInstance, FastifyReply } from "fastify"
 import {
+	BAND_GAIN_LABEL_MAX_LENGTH,
+	BAND_GAIN_MAX_ENTRIES,
+	BAND_GAIN_MAX_HZ,
+	BAND_GAIN_MAX_TENTHS_DB,
+	BAND_GAIN_MIN_HZ,
+	BAND_GAIN_MIN_TENTHS_DB,
 	RECEIVER_SAMPLE_RATE_PRESETS_HZ,
 	RTL_TUNER_GAIN_TABLES,
 } from "@wavekit/api-types"
 import type {
+	BandGainEntry,
+	BandGainSettings,
+	BandGainSettingsView,
 	ReceiverCapabilities,
 	ReceiverControlEvidence,
 	TunerControlMode,
@@ -44,6 +54,13 @@ export interface ReceiverMockControls {
 	relayClient(active: boolean, remote?: string): void
 	/** The current capabilities snapshot (tests). */
 	capabilities(): ReceiverCapabilities
+	/**
+	 * After an operator frequency write (POST frequency, PATCH config): with "apply to my tuning"
+	 * on, writes the band gain at `hz` (snapped to the R820T table) and reports it as
+	 * TunerState.bandGain, or puts the operator's own gain back on leaving the bands, as
+	 * TunerController.applyOperatorBandGain does. Scanner hops in the mock never apply band gains.
+	 */
+	operatorRetuned(hz: number): void
 }
 
 /** R820T on rtl_tcp: tuner type 5 in the header, 29 gains (RTL_TUNER_GAIN_TABLES[5]). */
@@ -189,6 +206,7 @@ export function registerReceiverMock(
 		controlOrigin = origin
 		if (tuner.controlMode === mode) return
 		tuner.controlMode = mode
+		delete tuner.bandGain
 		ctx.broadcast("tuner", "tuner:control-mode-changed", { sourceId, mode })
 		stateChanged()
 	}
@@ -226,11 +244,24 @@ export function registerReceiverMock(
 		else delete tuner.unknownFields
 	}
 
+	/** The operator's gain from before a band changed it; null when it was unknown. */
+	let gainBeforeBand:
+		| { gainMode: TunerGainMode; gain: number }
+		| null
+		| undefined
+	let applyingBand = false
+	/** Any gain write drops the reported band gain; an operator's own also the saved gain. */
+	const gainWritten = () => {
+		delete tuner.bandGain
+		if (!applyingBand) gainBeforeBand = undefined
+	}
+
 	const writers = {
 		gain(tenthsDb: number) {
 			forControl()
 			checkRange("gain", tenthsDb, RANGES.gain)
 			sent("set-gain", tenthsDb, () => {
+				gainWritten()
 				tuner.gain = tenthsDb
 				known("gain")
 			})
@@ -238,6 +269,7 @@ export function registerReceiverMock(
 		gainMode(mode: TunerGainMode) {
 			forControl()
 			sent("set-gain-mode", mode === "manual" ? 1 : 0, () => {
+				gainWritten()
 				tuner.gainMode = mode
 				known("gainMode")
 			})
@@ -354,8 +386,26 @@ export function registerReceiverMock(
 		throw error
 	}
 
-	route<{ tenthsDb: number }>("gain", intBody("tenthsDb"), b =>
-		writers.gain(b.tenthsDb),
+	// `gain` (tenths of a dB); `tenthsDb` is the core's deprecated alias, both different is a 400
+	route<{ gain?: number; tenthsDb?: number }>(
+		"gain",
+		{
+			type: "object",
+			properties: { gain: { type: "integer" }, tenthsDb: { type: "integer" } },
+			minProperties: 1,
+			additionalProperties: false,
+		},
+		b => {
+			if (
+				b.gain !== undefined &&
+				b.tenthsDb !== undefined &&
+				b.gain !== b.tenthsDb
+			)
+				throw validation(
+					'Invalid request body; expected {"gain": integer, gain in tenths of a dB (0-500, e.g. 372 = 37.2 dB)}',
+				)
+			writers.gain(b.gain ?? b.tenthsDb ?? 0)
+		},
 	)
 	route<{ mode: TunerGainMode }>("gain-mode", enumBody(["manual", "agc"]), b =>
 		writers.gainMode(b.mode),
@@ -446,6 +496,7 @@ export function registerReceiverMock(
 				if (u.controlMode === "internal") setControlMode("internal", "user")
 				if (u.frequency !== undefined && u.frequency !== tuner.frequency) {
 					checkRange("frequency", u.frequency, RANGES.frequency)
+					// the frequency route applies the band gain (operatorRetuned)
 					await ctx.retune(u.frequency)
 				}
 				if (u.sampleRate !== undefined && u.sampleRate !== tuner.sampleRate)
@@ -587,6 +638,87 @@ export function registerReceiverMock(
 		},
 	)
 
+	// --- per-band gain: the core's defaults (src/core/band-gain-schema.ts), replaced by each PUT ---
+
+	let bandGain: BandGainSettings = defaultBandGain()
+	let bandGainProvenance: BandGainSettingsView["provenance"] = "config"
+	const bandGainView = (): BandGainSettingsView => ({
+		settings: structuredClone(bandGain),
+		provenance: bandGainProvenance,
+		limits: {
+			maxEntries: BAND_GAIN_MAX_ENTRIES,
+			minHz: BAND_GAIN_MIN_HZ,
+			maxHz: BAND_GAIN_MAX_HZ,
+			minGainTenthsDb: BAND_GAIN_MIN_TENTHS_DB,
+			maxGainTenthsDb: BAND_GAIN_MAX_TENTHS_DB,
+			labelMaxLength: BAND_GAIN_LABEL_MAX_LENGTH,
+		},
+	})
+	app.get("/api/tuner-band-gain", async () => bandGainView())
+	app.put<{ Body: unknown }>(
+		"/api/tuner-band-gain",
+		{ schema: { body: { type: "object" } } },
+		async (request, reply) => {
+			const parsed = parseBandGain(request.body)
+			if (typeof parsed === "string")
+				return reply.code(400).send({
+					error: "BandGainSettingsError",
+					code: "BAND_GAIN_INVALID",
+					message: parsed,
+				})
+			bandGain = parsed
+			bandGainProvenance = "runtime"
+			return bandGainView()
+		},
+	)
+
+	// --- per-band gain on operator retunes (TunerController.applyOperatorBandGain) ---
+
+	const operatorRetuned = (hz: number) => {
+		if (!bandGain.applyToMyTuning || tuner.controlMode !== "internal") return
+		applyingBand = true
+		try {
+			applyBandGain(hz)
+		} finally {
+			applyingBand = false
+		}
+	}
+	const applyBandGain = (hz: number) => {
+		const entry = bandGain.entries.find(e => hz >= e.minHz && hz <= e.maxHz)
+		const target =
+			entry && entry.gain !== "keep"
+				? nearestStep(entry.gain, R820T?.valuesTenthsDb ?? null)
+				: null
+		if (target !== null) {
+			const unknown = tuner.unknownFields ?? []
+			gainBeforeBand ??=
+				unknown.includes("gain") || unknown.includes("gainMode")
+					? null
+					: { gainMode: tuner.gainMode, gain: tuner.gain }
+			if (tuner.gainMode !== "manual" || unknown.includes("gainMode"))
+				writers.gainMode("manual")
+			if (tuner.gain !== target || unknown.includes("gain"))
+				writers.gain(target)
+			tuner.bandGain = {
+				tenthsDb: target,
+				owner: "user",
+				...(entry?.label !== undefined ? { label: entry.label } : {}),
+			}
+			stateChanged()
+			return
+		}
+		const saved = gainBeforeBand
+		gainBeforeBand = undefined
+		if (!saved) return
+		if (saved.gainMode === "agc") {
+			writers.gain(saved.gain)
+			writers.gainMode("agc")
+		} else {
+			if (tuner.gainMode !== "manual") writers.gainMode("manual")
+			writers.gain(saved.gain)
+		}
+	}
+
 	// --- tuner relay: listening on 1234, exclusive control, nobody connected unless simulated ---
 
 	app.get("/api/tuner-relay", async (): Promise<TunerRelayStatus> => {
@@ -618,6 +750,7 @@ export function registerReceiverMock(
 	})
 
 	return {
+		operatorRetuned,
 		relayClient(active, remote = "192.168.1.23:51544") {
 			if (active) {
 				relay.clients = 1
@@ -633,4 +766,115 @@ export function registerReceiverMock(
 		},
 		capabilities,
 	}
+}
+
+/** The core's default table (DEFAULT_BAND_GAIN_ENTRIES): 868 and 915 MHz ISM at 37.2 dB, the rest keep. */
+export function defaultBandGain(): BandGainSettings {
+	return {
+		applyToMyTuning: false,
+		entries: [
+			{ minHz: 144_000_000, maxHz: 148_000_000, gain: "keep", label: "2 m" },
+			{ minHz: 420_000_000, maxHz: 450_000_000, gain: "keep", label: "70 cm" },
+			{
+				minHz: 863_000_000,
+				maxHz: 870_000_000,
+				gain: 372,
+				label: "868 MHz ISM",
+			},
+			{
+				minHz: 902_000_000,
+				maxHz: 928_000_000,
+				gain: 372,
+				label: "915 MHz ISM",
+			},
+			{
+				minHz: 1_085_000_000,
+				maxHz: 1_095_000_000,
+				gain: "keep",
+				label: "ADS-B",
+			},
+		],
+	}
+}
+
+/** The supported step nearest `tenthsDb` (the lower on a tie), as the core's nearestGainStep. */
+function nearestStep(
+	tenthsDb: number,
+	steps: readonly number[] | null,
+): number {
+	if (!steps || steps.length === 0) return tenthsDb
+	let best = steps[0] ?? tenthsDb
+	for (const step of steps)
+		if (
+			Math.abs(step - tenthsDb) < Math.abs(best - tenthsDb) ||
+			(Math.abs(step - tenthsDb) === Math.abs(best - tenthsDb) && step < best)
+		)
+			best = step
+	return best
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+	typeof v === "object" && v !== null && !Array.isArray(v)
+
+const isHz = (v: unknown): v is number =>
+	Number.isInteger(v) &&
+	(v as number) >= BAND_GAIN_MIN_HZ &&
+	(v as number) <= BAND_GAIN_MAX_HZ
+
+/** PUT /api/tuner-band-gain's rules (BandGainSettingsSchema); the core's 400 message on a refusal. */
+function parseBandGain(body: unknown): BandGainSettings | string {
+	const bad = (where: string) =>
+		`Invalid band gain settings at ${where}; expected {"applyToMyTuning": boolean, "entries": [{"minHz": integer Hz, "maxHz": integer Hz, "gain": tenths of a dB or "keep", "label"?: string}]}. ` +
+		`Ranges are inclusive (${BAND_GAIN_MIN_HZ}-${BAND_GAIN_MAX_HZ} Hz), minHz < maxHz, no overlaps, at most ${BAND_GAIN_MAX_ENTRIES} entries, gain ` +
+		`${BAND_GAIN_MIN_TENTHS_DB}-${BAND_GAIN_MAX_TENTHS_DB} tenths, label at most ${BAND_GAIN_LABEL_MAX_LENGTH} printable characters`
+	if (
+		!isObject(body) ||
+		Object.keys(body).some(k => k !== "applyToMyTuning" && k !== "entries")
+	)
+		return bad("body")
+	if (typeof body["applyToMyTuning"] !== "boolean")
+		return bad("applyToMyTuning")
+	const raw = body["entries"]
+	if (!Array.isArray(raw) || raw.length > BAND_GAIN_MAX_ENTRIES)
+		return bad("entries")
+	const entries: BandGainEntry[] = []
+	for (const [i, e] of raw.entries()) {
+		if (
+			!isObject(e) ||
+			Object.keys(e).some(k => !["minHz", "maxHz", "gain", "label"].includes(k))
+		)
+			return bad(`entries.${i}`)
+		const { minHz, maxHz, gain, label } = e
+		if (!isHz(minHz)) return bad(`entries.${i}.minHz`)
+		if (!isHz(maxHz) || minHz >= maxHz) return bad(`entries.${i}.maxHz`)
+		if (
+			gain !== "keep" &&
+			!(
+				Number.isInteger(gain) &&
+				(gain as number) >= BAND_GAIN_MIN_TENTHS_DB &&
+				(gain as number) <= BAND_GAIN_MAX_TENTHS_DB
+			)
+		)
+			return bad(`entries.${i}.gain`)
+		if (
+			label !== undefined &&
+			(typeof label !== "string" ||
+				label.length < 1 ||
+				label.length > BAND_GAIN_LABEL_MAX_LENGTH ||
+				!/^[\x20-\x7e]+$/.test(label))
+		)
+			return bad(`entries.${i}.label`)
+		for (const [j, other] of entries.entries())
+			if (minHz <= other.maxHz && other.minHz <= maxHz)
+				return bad(
+					`${i}: entries ${j} and ${i} overlap (ranges are inclusive and must not overlap)`,
+				)
+		entries.push({
+			minHz,
+			maxHz,
+			gain: gain as BandGainEntry["gain"],
+			...(label === undefined ? {} : { label: label as string }),
+		})
+	}
+	return { applyToMyTuning: body["applyToMyTuning"], entries }
 }
