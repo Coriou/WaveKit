@@ -37,6 +37,36 @@ const baseConfig = {
 	},
 	tuner: {
 		reconnectPolicy: "restore",
+		bandGain: {
+			applyToMyTuning: false,
+			entries: [
+				{ minHz: 144_000_000, maxHz: 148_000_000, gain: "keep", label: "2 m" },
+				{
+					minHz: 420_000_000,
+					maxHz: 450_000_000,
+					gain: "keep",
+					label: "70 cm",
+				},
+				{
+					minHz: 863_000_000,
+					maxHz: 870_000_000,
+					gain: 372,
+					label: "868 MHz ISM",
+				},
+				{
+					minHz: 902_000_000,
+					maxHz: 928_000_000,
+					gain: 372,
+					label: "915 MHz ISM",
+				},
+				{
+					minHz: 1_085_000_000,
+					maxHz: 1_095_000_000,
+					gain: "keep",
+					label: "ADS-B",
+				},
+			],
+		},
 	},
 	liveDemod: {
 		enabled: false,
