@@ -2,13 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { DecoderInfo } from "@wavekit/api-types"
 
 import { ApiError } from "../../src/data/api-client.ts"
+import { CpuBudgetSchema } from "../../../src/decoders/enablement/cpu-budget.ts"
 import {
 	actionFor,
 	bandDecoders,
+	BUDGET_MAX_CORES,
 	onBand,
 	parseVerdict,
 	primaryAction,
 	raisedBudget,
+	scanHoldingDecoders,
 	verdictsById,
 	type BandVerdict,
 } from "../../src/features/tuned/band-decoders.ts"
@@ -61,7 +64,8 @@ const verdict = (over: Partial<BandVerdict> = {}): BandVerdict => ({
 	actions: [],
 	...over,
 })
-const NO_SCAN = { scanJobId: null }
+const NO_SCAN = { scanJobId: null, budget: null }
+const SCAN = { scanJobId: "job-1", budget: null }
 
 describe("decoders on the tuned band", () => {
 	it("takes targets within 200 kHz and band ranges, never scanner probes", () => {
@@ -140,9 +144,11 @@ describe("verdict line and action", () => {
 		})
 		expect(actionFor("tune-to-band", PAGER, NO_SCAN)).toBeNull()
 		expect(actionFor("pause-scanner", ADSB, NO_SCAN)).toBeNull()
-		expect(
-			actionFor("pause-scanner", ADSB, { scanJobId: "job-1" }),
-		).toMatchObject({ kind: "pause-scan", jobId: "job-1" })
+		expect(actionFor("pause-scanner", ADSB, SCAN)).toMatchObject({
+			kind: "stop-scan",
+			jobId: "job-1",
+			label: "Stop the scan",
+		})
 		for (const a of ["install-decoder", "enable-channelizer"] as const)
 			expect(actionFor(a, ADSB, NO_SCAN)).toMatchObject({
 				kind: "settings",
@@ -167,9 +173,94 @@ describe("verdict line and action", () => {
 			kind: "settings",
 			label: "Decoders in Settings",
 		})
-		expect(primaryAction(v, ADSB, { scanJobId: "job-1" })?.kind).toBe(
-			"pause-scan",
+		expect(primaryAction(v, ADSB, SCAN)?.kind).toBe("stop-scan")
+	})
+
+	it("offers stopping the scan in every state where the sweep holds the decoders", () => {
+		const job = (state: string, reason?: string) =>
+			({ id: "job-1", state, ...(reason ? { reason } : {}) }) as Parameters<
+				typeof scanHoldingDecoders
+			>[0]
+		for (const held of [
+			job("starting"),
+			job("running"),
+			job("holding"),
+			job("paused", "operator"),
+			job("paused", "source-down"),
+		])
+			expect(scanHoldingDecoders(held)).toBe("job-1")
+		for (const free of [
+			null,
+			job("pending"),
+			job("paused", "preempted-operator"),
+			job("paused", "preempted-relay"),
+			job("paused", "preempted-job"),
+			job("paused", "resume-blocked"),
+			job("paused", "core-restart"),
+			job("completed"),
+			job("cancelled"),
+			job("failed", "tuner-unavailable"),
+		])
+			expect(scanHoldingDecoders(free)).toBeNull()
+		const busy = verdict({
+			code: "scanner-busy",
+			text: "ADS-B paused: the scanner holds the tuner",
+			actions: ["pause-scanner"],
+		})
+		const scanId = scanHoldingDecoders(job("holding"))
+		expect(
+			primaryAction(busy, ADSB, { scanJobId: scanId, budget: null }),
+		).toMatchObject({ kind: "stop-scan", jobId: "job-1" })
+	})
+
+	it("skips the budget raise at the API's maximum and offers the next action", () => {
+		const full = verdict({
+			code: "efficiency-budget",
+			text: "ADS-B paused: CPU budget full",
+			actions: ["raise-budget", "turn-off-others", "pause-scanner"],
+		})
+		const at = (cores: number) => ({
+			scanJobId: null,
+			budget: { mode: "configured" as const, cores },
+		})
+		expect(primaryAction(full, ADSB, at(4))?.kind).toBe("raise-budget")
+		expect(primaryAction(full, ADSB, NO_SCAN)?.kind).toBe("raise-budget")
+		expect(primaryAction(full, ADSB, at(BUDGET_MAX_CORES))).toMatchObject({
+			kind: "settings",
+			label: "Decoders in Settings",
+		})
+		expect(
+			primaryAction(full, ADSB, {
+				scanJobId: null,
+				budget: { mode: "auto", cpus: 4, cores: 4 },
+			})?.kind,
+		).toBe("settings")
+	})
+
+	it("offers only Turn on in Settings for a decoder now off, whatever its older verdict", () => {
+		const stale = parseVerdict({
+			code: "failed",
+			text: "ADS-B failed to run",
+			actions: ["restart"],
+		})
+		const [row] = bandDecoders(
+			[{ ...ADSB, running: false, mode: "off" }],
+			new Map([["readsb", stale!]]),
+			1_090_000_000,
+			SCAN,
 		)
+		expect(row).toMatchObject({
+			listening: false,
+			text: "ADS-B off in Settings",
+			action: { kind: "settings", label: "Turn on in Settings" },
+		})
+		const [bare] = bandDecoders(
+			[{ ...ADSB, running: false, mode: "off" }],
+			null,
+			1_090_000_000,
+			NO_SCAN,
+		)
+		expect(bare?.action).toMatchObject({ label: "Turn on in Settings" })
 	})
 
 	it("shows a decoder off in Settings as off, with a link to Settings, not a start button", () => {
@@ -241,11 +332,24 @@ describe("unknown verdicts", () => {
 })
 
 describe("raise the CPU budget by one core", () => {
-	it("adds a core up to the host's CPUs or 64", () => {
+	it("adds exactly one core, up to the host's CPUs (auto) and the API's maximum", () => {
 		expect(raisedBudget({ mode: "auto", cpus: 8, cores: 4 })).toBe(5)
 		expect(raisedBudget({ mode: "auto", cpus: 4, cores: 4 })).toBeNull()
-		expect(raisedBudget({ mode: "configured", cores: 1.5 })).toBe(2)
+		expect(raisedBudget({ mode: "configured", cores: 1.5 })).toBe(2.5)
+		expect(raisedBudget({ mode: "configured", cores: 1.1 })).toBe(2.1)
+		expect(raisedBudget({ mode: "configured", cores: 0.75 })).toBe(1.75)
+		expect(raisedBudget({ mode: "configured", cores: 63 })).toBe(64)
+		expect(raisedBudget({ mode: "configured", cores: 63.5 })).toBe(64)
 		expect(raisedBudget({ mode: "configured", cores: 64 })).toBeNull()
+		expect(raisedBudget({ mode: "configured", cores: 70 })).toBeNull()
+		expect(raisedBudget({ mode: "auto", cpus: 128, cores: 64 })).toBeNull()
+	})
+
+	it("caps at the bound the core's budget PUT accepts", () => {
+		expect(CpuBudgetSchema.safeParse(BUDGET_MAX_CORES).success).toBe(true)
+		expect(CpuBudgetSchema.safeParse(BUDGET_MAX_CORES + 0.01).success).toBe(
+			false,
+		)
 	})
 })
 

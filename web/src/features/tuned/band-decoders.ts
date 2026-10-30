@@ -10,6 +10,8 @@ import type {
 	DecoderInfo,
 	DecoderVerdictAction,
 	DecoderVerdictCode,
+	EfficiencyBudgetResolution,
+	ScanJob,
 } from "@wavekit/api-types"
 
 import { formatMHz } from "../format.ts"
@@ -104,13 +106,42 @@ export type BandAction =
 	| { kind: "decoder"; op: "start" | "restart"; label: string; title: string }
 	| { kind: "tune"; hz: number; label: string; title: string }
 	| { kind: "raise-budget"; label: string; title: string }
-	| { kind: "pause-scan"; jobId: string; label: string; title: string }
+	| { kind: "stop-scan"; jobId: string; label: string; title: string }
 	| SettingsLink
 	| { kind: "receiver"; label: string; title: string }
 
 export interface ActionContext {
-	/** The running scan job, else null. */
+	/** The sweep that holds the decoders (scanHoldingDecoders), else null. */
 	scanJobId: string | null
+	/** The CPU budget as last read, else null (unknown: the raise is offered and checked on click). */
+	budget: BudgetResolution | null
+}
+
+type BudgetResolution = Pick<EfficiencyBudgetResolution, "mode" | "cores"> & {
+	cpus?: number
+}
+
+/**
+ * The sweep's id while it holds the tuner lease and so the decoders: starting, running, holding on a
+ * hit, or paused by the operator or a source drop (src/core/scanner/job-state.ts holdsLease). A pause
+ * keeps both; only cancelling the job releases them. Null for any other state.
+ */
+export function scanHoldingDecoders(
+	job: Pick<ScanJob, "id" | "state" | "reason"> | null,
+): string | null {
+	if (!job) return null
+	switch (job.state) {
+		case "starting":
+		case "running":
+		case "holding":
+			return job.id
+		case "paused":
+			return job.reason === "operator" || job.reason === "source-down"
+				? job.id
+				: null
+		default:
+			return null
+	}
 }
 
 /** The control for one action; links (Settings, Receiver) for actions with no safe one-click call. */
@@ -147,6 +178,7 @@ export function actionFor(
 			}
 		}
 		case "raise-budget":
+			if (ctx.budget !== null && raisedBudget(ctx.budget) === null) return null
 			return {
 				kind: "raise-budget",
 				label: "Raise CPU budget",
@@ -156,10 +188,11 @@ export function actionFor(
 		case "pause-scanner":
 			if (ctx.scanJobId === null) return null
 			return {
-				kind: "pause-scan",
+				kind: "stop-scan",
 				jobId: ctx.scanJobId,
-				label: "Pause the scan",
-				title: "Pause the scan so the decoders have the tuner",
+				label: "Stop the scan",
+				title:
+					"End the scan: it gives the tuner and the decoders back (a paused scan keeps them)",
 			}
 		case "turn-on":
 			return {
@@ -239,7 +272,8 @@ const LISTENING: ReadonlySet<DecoderVerdictCode> = new Set([
 
 /**
  * The decoders on the tuned band: listening ones first, then the rest, nearest band first. A decoder
- * without a verdict (an older core) reads from its status and offers no action.
+ * without a verdict (an older core) reads from its status and offers no action. A decoder off in
+ * Settings now only ever offers turning it on there, whatever its (possibly older) verdict says.
  */
 export function bandDecoders(
 	decoders: readonly DecoderInfo[],
@@ -252,6 +286,20 @@ export function bandDecoders(
 		.map(d => {
 			const name = decoderLabel(d.type)
 			const verdict = verdicts?.get(d.id) ?? null
+			if (d.mode === "off")
+				return {
+					row: {
+						id: d.id,
+						name,
+						listening: false,
+						text:
+							verdict?.code === "off"
+								? verdict.text
+								: `${name} off in Settings`,
+						action: actionFor("turn-on", d, ctx),
+					},
+					dist: bandDistance(d, hz),
+				}
 			if (!verdict) {
 				const runs = d.running && !d.suspended
 				return {
@@ -284,13 +332,22 @@ export function bandDecoders(
 	return rows.map(r => r.row)
 }
 
-/** The budget one click asks for: one more core than today, at most the host's CPUs (auto) or 64. */
-export function raisedBudget(resolved: {
-	mode: "auto" | "configured"
-	cores: number
-	cpus?: number
-}): number | null {
-	const ceiling = resolved.mode === "auto" && resolved.cpus ? resolved.cpus : 64
-	const next = Math.min(ceiling, Math.floor(resolved.cores) + 1)
+/**
+ * The largest budget PUT /api/decoders/efficiency/budget accepts: CpuBudgetSchema's bound in
+ * src/decoders/enablement/cpu-budget.ts (no shared constant; a test holds the two equal).
+ */
+export const BUDGET_MAX_CORES = 64
+
+/**
+ * The budget one click asks for: exactly one more core than today, capped at the host's CPUs (auto)
+ * and at BUDGET_MAX_CORES; null when already at the cap.
+ */
+export function raisedBudget(resolved: BudgetResolution): number | null {
+	const ceiling =
+		resolved.mode === "auto" && resolved.cpus
+			? Math.min(resolved.cpus, BUDGET_MAX_CORES)
+			: BUDGET_MAX_CORES
+	// two decimals keep 1.1 + 1 at 2.1, not 2.1000000000000005
+	const next = Math.min(ceiling, Math.round((resolved.cores + 1) * 100) / 100)
 	return next > resolved.cores ? next : null
 }

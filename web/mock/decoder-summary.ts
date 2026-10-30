@@ -27,12 +27,11 @@ const NAMES: Readonly<Record<string, string>> = {
 	"lora-meshtastic": "LoRa",
 }
 
+/** Each code's sentence (after the decoder name) and suggested actions, as the core's VERDICTS. */
 const VERDICTS: Readonly<
-	Partial<
-		Record<
-			DecoderVerdictCode,
-			{ text: string; actions: readonly DecoderVerdictAction[] }
-		>
+	Record<
+		DecoderVerdictCode,
+		{ text: string; actions: readonly DecoderVerdictAction[] }
 	>
 > = {
 	decoding: { text: "decoding", actions: [] },
@@ -48,6 +47,22 @@ const VERDICTS: Readonly<
 		text: "waiting: the tuned frequency is outside its band",
 		actions: ["tune-to-band"],
 	},
+	"no-channel": {
+		text: "waiting: no channel in view",
+		actions: ["tune-to-band"],
+	},
+	"capture-too-narrow": {
+		text: "waiting: the capture is too narrow for its band",
+		actions: ["raise-sample-rate"],
+	},
+	"source-unavailable": {
+		text: "waiting for the source",
+		actions: ["check-source"],
+	},
+	"unsupported-rate": {
+		text: "paused: the sample rate does not suit it",
+		actions: ["change-sample-rate"],
+	},
 	"scanner-busy": {
 		text: "paused: the scanner holds the tuner",
 		actions: ["pause-scanner"],
@@ -56,11 +71,98 @@ const VERDICTS: Readonly<
 		text: "paused: CPU budget full",
 		actions: ["raise-budget", "turn-off-others", "pause-scanner"],
 	},
+	"efficiency-cpu": {
+		text: "paused: the CPU is busy",
+		actions: ["turn-off-others", "pause-scanner"],
+	},
+	"efficiency-drops": {
+		text: "paused: the source was dropping samples",
+		actions: ["lower-sample-rate", "turn-off-others"],
+	},
+	"efficiency-late-drops": {
+		text: "paused: samples were dropped while it ran",
+		actions: ["turn-off-others", "lower-sample-rate"],
+	},
+	"efficiency-waiting": {
+		text: "waiting for the source to settle",
+		actions: [],
+	},
+	"decoder-unavailable": {
+		text: "unavailable: its program is not installed",
+		actions: ["install-decoder"],
+	},
+	"channelizer-unavailable": {
+		text: "paused: needs the channelizer",
+		actions: ["enable-channelizer"],
+	},
 	unknown: { text: "status unknown", actions: [] },
 }
 
-function verdictCode(
-	d: DecoderInfo,
+const RATE_REASONS: ReadonlySet<string> = new Set([
+	"insufficient-sample-rate",
+	"unsupported-sample-rate",
+	"unsupported-input-kind",
+	"unsupported-input-format",
+	"unsupported-frontend-rate",
+	"unsupported-decoder-input-rate",
+	"unknown-requirements",
+])
+
+/** The decoder fields the verdict reads (the core's DecoderStatus has the same names). */
+export type VerdictInput = Pick<
+	DecoderInfo,
+	| "mode"
+	| "desiredRunning"
+	| "running"
+	| "suspension"
+	| "efficiency"
+	| "placements"
+>
+
+function efficiencyCode(d: VerdictInput): DecoderVerdictCode {
+	const detail: string | undefined =
+		d.efficiency?.detail ??
+		d.placements?.find(p => p.efficiencyDetail !== undefined)?.efficiencyDetail
+	switch (detail) {
+		case "budget":
+		case undefined:
+			return "efficiency-budget"
+		case "cpu":
+			return "efficiency-cpu"
+		case "drops":
+			return "efficiency-drops"
+		case "late-drops":
+			return "efficiency-late-drops"
+		case "unknown":
+			return "efficiency-waiting"
+		default:
+			// a detail this build does not know: no cause claimed, no action
+			return "unknown"
+	}
+}
+
+function suspensionCode(reason: string | undefined): DecoderVerdictCode {
+	if (reason === undefined) return "unknown"
+	if (reason === "efficiency-budget") return "efficiency-budget"
+	if (reason === "frequency-out-of-band") return "out-of-band"
+	if (reason === "no-channel-selected") return "no-channel"
+	if (reason === "capture-too-narrow") return "capture-too-narrow"
+	if (reason === "tuner-scanning") return "scanner-busy"
+	if (reason === "decoder-unavailable") return "decoder-unavailable"
+	if (reason === "channelizer-unavailable") return "channelizer-unavailable"
+	if (
+		reason === "source-rate-unknown" ||
+		reason === "adaptation-unknown" ||
+		reason === "external-input"
+	)
+		return "source-unavailable"
+	if (RATE_REASONS.has(reason)) return "unsupported-rate"
+	return "unknown"
+}
+
+/** The core's precedence: failure, mode off, operator stop, suspension (efficiency first), output, a wanted start. */
+export function mockVerdictCode(
+	d: VerdictInput,
 	health: DecoderSummary["health"],
 ): DecoderVerdictCode {
 	if (health === "failed") return "failed"
@@ -68,10 +170,9 @@ function verdictCode(
 	if (d.desiredRunning === false && !d.running) return "stopped"
 	if (health === "suspended") {
 		const reason = d.suspension?.reasonCode
-		if (reason === "efficiency-budget") return "efficiency-budget"
-		if (reason === "frequency-out-of-band") return "out-of-band"
-		if (reason === "tuner-scanning") return "scanner-busy"
-		return "unknown"
+		return reason === "efficiency-budget" || d.efficiency !== undefined
+			? efficiencyCode(d)
+			: suspensionCode(reason)
 	}
 	if (health === "decoding") return "decoding"
 	if (d.running) return "listening"
@@ -83,8 +184,8 @@ export function mockVerdict(
 	d: DecoderInfo,
 	health: DecoderSummary["health"],
 ): DecoderVerdict {
-	const code = verdictCode(d, health)
-	const entry = VERDICTS[code] ?? VERDICTS.unknown!
+	const code = mockVerdictCode(d, health)
+	const entry = VERDICTS[code]
 	const name = NAMES[d.type] ?? "Decoder"
 	return { code, text: `${name} ${entry.text}`, actions: [...entry.actions] }
 }

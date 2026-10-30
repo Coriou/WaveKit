@@ -14,10 +14,12 @@ import { EfficiencyBudgetStore } from "../settings/efficiency-budget.ts"
 import { focusSetting } from "../settings/registry.ts"
 import {
 	bandDecoders,
-	raisedBudget,
+	onBand,
+	scanHoldingDecoders,
 	type BandAction,
 	type BandDecoderRow,
 } from "./band-decoders.ts"
+import { raiseBudget } from "./budget-raise.ts"
 import { DecoderVerdictsFeed } from "./verdicts.ts"
 import "./band-decoders.css"
 
@@ -38,32 +40,25 @@ export function BandDecoders({
 	useEffect(() => feed.attach(), [feed])
 	const verdicts = useStore(feed, s => s.verdicts)
 	const sweep = useStore(data.scanner, s => s.sweep)
-	const scanJobId = sweep?.state === "running" ? sweep.id : null
+	const scanJobId = scanHoldingDecoders(sweep)
+	const budgetStore = useMemo(
+		() => new EfficiencyBudgetStore(data.api),
+		[data.api],
+	)
+	const budget = useStore(budgetStore, s => s.settings?.resolved ?? null)
+	// the budget is read only when a verdict here suggests raising it, so a raise at the cap is not offered
+	const wantsBudget = decoders.some(
+		d =>
+			verdicts?.get(d.id)?.actions.includes("raise-budget") === true &&
+			onBand(d, hz),
+	)
+	useEffect(() => {
+		if (wantsBudget) void budgetStore.load()
+	}, [wantsBudget, budgetStore])
 	const [busy, setBusy] = useState<string | null>(null)
 
-	const rows = bandDecoders(decoders, verdicts, hz, { scanJobId })
+	const rows = bandDecoders(decoders, verdicts, hz, { scanJobId, budget })
 	if (rows.length === 0) return null
-
-	const raiseBudget = async (): Promise<string | null> => {
-		const store = new EfficiencyBudgetStore(data.api)
-		await store.load()
-		const s = store.get()
-		if (s.unavailable) return "This WaveKit has no CPU budget setting"
-		if (!s.settings) return s.error ?? "The CPU budget could not be read"
-		const before = s.settings.cpuBudgetCores
-		const next = raisedBudget(s.settings.resolved)
-		if (next === null) return "The CPU budget is already at its maximum"
-		const result = await store.save(next)
-		if (!result.ok) return result.message
-		showAppToast(`CPU budget raised to ${next} cores`, {
-			undo: () =>
-				void store.save(before).then(
-					() => feed.soon(),
-					() => undefined,
-				),
-		})
-		return null
-	}
 
 	const run = async (row: BandDecoderRow, action: BandAction) => {
 		switch (action.kind) {
@@ -82,9 +77,10 @@ export function BandDecoders({
 				const result = await data.decoderSettings.action(row.id, action.op)
 				if (!result.ok) failed = result.message
 			} else if (action.kind === "tune") await tuning.tune(action.hz)
-			else if (action.kind === "pause-scan")
-				await data.scanner.pauseJob(action.jobId)
-			else failed = await raiseBudget()
+			else if (action.kind === "stop-scan")
+				await data.scanner.cancelJob(action.jobId)
+			else
+				failed = await raiseBudget(budgetStore, showAppToast, () => feed.soon())
 		} catch (error) {
 			failed = error instanceof Error ? error.message : String(error)
 		} finally {
