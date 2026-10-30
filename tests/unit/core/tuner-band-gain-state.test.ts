@@ -182,6 +182,22 @@ describe("TunerState.bandGain", () => {
 		expect(controller.getState("rtl")?.gain).toBe(300)
 	})
 
+	it.each([
+		["SET_IF_GAIN", 0x06, 30],
+		["SET_TUNER_IF_GAIN", 0x0f, (1 << 16) | 30],
+	])(
+		"a relay %s supersedes a saved AGC mode",
+		async (_name, command, value) => {
+			const { controller } = setup(true)
+			await controller.setGainMode("rtl", "agc", REST)
+			await controller.setFrequency("rtl", ISM, REST)
+			controller.applyExternalCommand("rtl", command, value)
+			controller.setControlMode("rtl", "internal")
+			await controller.setFrequency("rtl", UHF, REST)
+			expect(controller.getState("rtl")?.gainMode).toBe("manual")
+		},
+	)
+
 	it("noteBandGainApplied (scanner) is ignored unless the tuner shows that manual gain at that frequency", async () => {
 		const { controller } = setup(false)
 		await manual(controller, 496)

@@ -909,7 +909,10 @@ export class TunerController extends EventEmitter {
 			command === RTL_TCP_COMMANDS.SET_GAIN ||
 			command === RTL_TCP_COMMANDS.SET_GAIN_MODE ||
 			command === RTL_TCP_COMMANDS.SET_AGC_MODE ||
-			command === RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX
+			command === RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX ||
+			// IF gain writes also switch the gain mode to manual.
+			command === RTL_TCP_COMMANDS.SET_IF_GAIN ||
+			command === RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN
 		)
 			this.operatorGainBeforeBand.delete(sourceId)
 
