@@ -10,6 +10,8 @@ import type { CategoryName } from "@wavekit/brand/react"
 import { clockText, convertMeasure, dateText, sameDay } from "../display.ts"
 import { formatMHz } from "../format.ts"
 import { formatDuration } from "../recordings/model.ts"
+import type { ActivityStack } from "./fold.ts"
+import { MESSAGE_KEYS } from "./fold.ts"
 
 export interface RowView {
 	icon: CategoryName | null
@@ -23,14 +25,6 @@ export interface RowView {
 	notice: boolean
 }
 
-const MESSAGE_KEYS = new Set([
-	"message",
-	"text",
-	"msg",
-	"transcript",
-	"body",
-	"comment",
-])
 const WORD = /[\p{L}\p{N}]+/gu
 const TONE_KEYS = new Set(["ctcss", "ctcssHz", "dcs"])
 /** Fields the subtitle names (who), in preference order. */
@@ -266,9 +260,30 @@ export function groupLabel(iso: string, now: number): string {
 	return `${dateText(t)} ${timeText(iso)}`
 }
 
+/** A folded earlier row shown under its expanded stack. */
+export interface MemberEntry {
+	type: "member"
+	key: string
+	item: ActivitySummary
+	/** The stack it is folded into. */
+	stackKey: string
+	/** The stack's first folded row (its toggle controls it). */
+	first: boolean
+}
+
 export type ListEntry =
 	| { type: "group"; key: string; label: string }
 	| { type: "row"; key: string; item: ActivitySummary }
+	| { type: "stack"; key: string; stack: ActivityStack; expanded: boolean }
+	| MemberEntry
+
+/** The event a row-like entry opens, or null for a group header. */
+export function entryEventId(entry: ListEntry): string | null {
+	if (entry.type === "group") return null
+	return entry.type === "stack"
+		? entry.stack.latest.eventId
+		: entry.item.eventId
+}
 
 /** Flattens a newest-first list into group headers and rows. */
 export function listEntries(
@@ -288,11 +303,89 @@ export function listEntries(
 	return out
 }
 
+/** groupLabel's bucket for a time: one per minute, "Just now" for the last one, one for no time. */
+function groupBucket(t: number, now: number): string {
+	if (!Number.isFinite(t)) return ""
+	return now - t < 60_000 ? "now" : String(Math.floor(t / 60_000))
+}
+
+/**
+ * Stacks under group headers by their latest decode, newest first; an expanded stack is followed by its
+ * folded earlier rows (newest first), each keyed by its event so expanding never remounts the stack. A
+ * group's label is worked out once per group (by its minute), not once per stack.
+ */
+export function stackEntries(
+	stacks: readonly ActivityStack[],
+	now: number,
+	expanded: ReadonlySet<string>,
+): ListEntry[] {
+	const out: ListEntry[] = []
+	let lastBucket: string | null = null
+	let last = ""
+	for (const stack of stacks) {
+		const bucket = groupBucket(producedMs(stack.latest), now)
+		if (bucket !== lastBucket) {
+			lastBucket = bucket
+			const label = groupLabel(stack.latest.producedAt, now)
+			if (label !== last) {
+				out.push({ type: "group", key: `g:${stack.key}`, label })
+				last = label
+			}
+		}
+		const open = expanded.has(stack.key) && stack.members.length > 1
+		out.push({ type: "stack", key: stack.key, stack, expanded: open })
+		if (open)
+			stack.members.forEach((m, i) => {
+				if (i > 0)
+					out.push({
+						type: "member",
+						key: `m:${m.eventId}`,
+						item: m,
+						stackKey: stack.key,
+						first: i === 1,
+					})
+			})
+	}
+	return out
+}
+
+const produced = new WeakMap<ActivitySummary, number>()
+
+/** producedAt in epoch ms (NaN when unparseable), once per summary. */
+function producedMs(s: ActivitySummary): number {
+	let t = produced.get(s)
+	if (t === undefined) produced.set(s, (t = Date.parse(s.producedAt)))
+	return t
+}
+
+/** The one line a folded earlier row shows: what changed (message, readings), else its subtitle. */
+export function memberLine(s: ActivitySummary): string {
+	const v = rowView(s)
+	return v.message ?? v.readings ?? (v.subtitle || v.title)
+}
+
+// A stack's height guess, once per stack object (an unchanged stack is the same object across folds).
+const rowGuess = new WeakMap<ActivityStack, number>()
+const cardGuess = new WeakMap<ActivityStack, number>()
+
 /** A first height guess per entry, refined by measurement. */
 export function estimateHeight(entry: ListEntry): number {
 	if (entry.type === "group") return 28
-	const v = rowView(entry.item)
-	let h = 62
+	if (entry.type === "member") return 30
+	if (entry.type === "row") return rowHeight(entry.item, false)
+	let h = rowGuess.get(entry.stack)
+	if (h === undefined)
+		rowGuess.set(
+			entry.stack,
+			(h = rowHeight(entry.stack.view, entry.stack.channelsHz.length > 1)),
+		)
+	return h
+}
+
+function rowHeight(item: ActivitySummary, channels: boolean): number {
+	const v = rowView(item)
+	// a simulcast stack adds its channels line (one 19 px line, as readings)
+	let h = channels ? 62 + 19 : 62
 	if (v.message !== null)
 		h += Math.min(3, Math.ceil(v.message.length / 44)) * 19
 	if (v.readings !== null) h += 19
@@ -302,10 +395,18 @@ export function estimateHeight(entry: ListEntry): number {
 /** A first height guess for an event shown as its message card (Cards layout), refined by measurement. */
 export function estimateCardHeight(entry: ListEntry): number {
 	if (entry.type === "group") return 28
-	const v = rowView(entry.item)
+	if (entry.type === "member") return 30
+	if (entry.type === "row") return cardHeight(entry.item)
+	let h = cardGuess.get(entry.stack)
+	if (h === undefined)
+		cardGuess.set(entry.stack, (h = cardHeight(entry.stack.view)))
+	return h
+}
+
+function cardHeight(item: ActivitySummary): number {
+	const v = rowView(item)
 	let h = 150
 	if (v.message !== null) h += Math.ceil(v.message.length / 40) * 22
-	if (entry.item.fields.length > 0)
-		h += Math.ceil(entry.item.fields.length / 3) * 44
+	if (item.fields.length > 0) h += Math.ceil(item.fields.length / 3) * 44
 	return h + 8
 }

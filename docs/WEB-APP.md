@@ -72,6 +72,7 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
   when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying
   stops, Activity shows `rate limited, retry in N s` (or `rate limited, retry later`).
+  Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
 - **Recordings:** recordings kept by the core, to play, search and keep.
@@ -89,6 +90,87 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   budget and a note to set `decoderPolicy.efficiency.cpuBudgetCores` in YAML config.
   A saved override adds “Saved setting overrides config”. On cores without the budget service,
   the row is disabled and says “Not available”.
+
+### Activity folding
+
+Activity folds repeats into stacks, so one aircraft, one beacon or one call is one row. A stack
+shows its newest decode as it was stored, with only who it is filled in from rows heard before it
+(an aircraft's callsign when the newest decode is position only; by time, the latest value wins,
+never a row heard after it even when stored earlier); a measurement such as a call's
+duration, an altitude, a position or a signal level is always the newest decode's own, so a call
+that has just started never shows the previous over's duration. The row also shows the count and
+the span (`24 · 1 min`) and expands in place to the earlier rows. Counts are for the loaded list,
+never totals: the list footer says `312 events in 41 rows, loaded so far.`, and the header counts
+rows (its tooltip says `41 rows in the 312 loaded events`). Folding runs in the browser over the
+rows already loaded (at most 5 000), and each live update folds again only the stacks its decodes
+touched; with a short folded list, Activity loads up to 10 older pages of 100 by itself to fill the
+view.
+
+Each row gets a fold key from its own data: protocol and event kind, the core's entity
+(`icao:`, `mmsi:`, `capcode:`, `talkgroup:`, `sensor:`, `callsign:`, `node:`; the title when there
+is none), the channel to 1 kHz where an entity is only unique per channel, and, when the row
+carries a message, its kind (tone only, numeric, alpha) and its exact text, so two different pages
+never fold. Ingestion gaps never fold. Rows of one key are taken in the order they were heard, and
+a silence longer than the family's gap between two of them ends a stack (a row stored late never
+bridges one):
+
+| Family                        | Gap    | Why                                                                                                                           |
+| ----------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Aircraft (ICAO, registration) | 2 min  | readsb sends 1-30 messages/s; the core stores a position update at most once a minute. Twice that tolerates one missed minute |
+| Vessel (MMSI)                 | 10 min | AIS reports every 2 s to 3 min (at anchor); 3 missed anchor reports                                                           |
+| Pager (capcode)               | 3 min  | Idle beacons repeat every 30-60 s; 3 × 60 s tolerates two missed beacons                                                      |
+| Call (talkgroup and radio)    | 10 s   | Bursts are under 3 s apart; 2 × a 5 s hang time ends the call                                                                 |
+| Sensor                        | 5 min  | 433/868 MHz sensors send every 16-60 s; 5 × 60 s                                                                              |
+| APRS station (callsign)       | 15 min | Fixed stations beacon every 10 min; plus 50 % jitter                                                                          |
+| Mesh node                     | 30 min | Meshtastic sends position every 15 min by default; twice that                                                                 |
+| Anything else                 | 2 min  | One exchange on one channel (analog overs are seconds apart)                                                                  |
+
+A talkgroup's calls are one stack per radio. A DMR `call_start` that arrives before its radio is
+decoded joins the call that follows it on the same talkgroup and channel (or, with none within the
+gap, the call before it) instead of becoming a stack of its own. A capcode is one stack per channel,
+except that the same page (same capcode, kind and text) heard within 2 s of one of the stack's
+decodes on another channel is a simulcast copy and joins the stack: the row lists the channels it
+was heard on (`On 160.450 · 466.075 MHz`), and the detail shows the decode's own Frequency with the
+stack's other channels under Also heard on (simulcast). The copies may arrive in either order: a
+repeat whose first copy lands on the other channel joins the stack that already heard both channels,
+so a beacon repeated on two channels stays one stack however its copies interleave. A channel stays
+with the stack only while its copies keep arriving within 2 s of the others: a repeat heard later on
+that channel alone is a stack of that channel again. The 2 s is one POCSAG batch at the slowest
+rate (544 bits at 512 baud, 1.06 s), the most two decoders' timestamps of one page differ, plus the
+network's launch skew between transmitters (under 1 s).
+
+Stacks are ordered by their latest decode. At the top of the list, a stack that hears again moves
+to the top and keeps its place in React and stays expanded (its key is kept while it shares a row
+with the stack before, so older rows leaving the list or an older page loading do not reset it); while you are
+scrolled down or Paused, new decodes wait behind the `N new` pill and nothing moves. The pill counts
+rows (stacks), not decodes: one beacon heard five times while you were away is `1 new`, and its
+tooltip says how many decodes are waiting. In the list, ↑ / ↓ move the cursor, → expands the stack
+under it and ← collapses it (on an earlier row, ← collapses its stack and returns to it); where there
+is nothing to expand or collapse, ← / → move between the columns. Reopening the drawer shows the
+last list at once (with `Updating…`) while it reloads, also for a rolling range such as **Last hour**
+whose start has moved on (rows now before its start are dropped); the fresh rows join the kept ones
+when they overlap, else they replace them. Kept rows the store has since pruned, or that the fresh
+rows' range no longer holds, are dropped, and loading older rows continues after the oldest kept
+row rather than fetching the kept ones again (after a rolling range moved on, with the range it was
+loaded for, keeping only rows inside the current one). If the core no longer takes that position
+(it expired), loading starts again from the fresh rows and skips the pages of kept rows, at most one
+page per 100 kept rows.
+
+Before the first rows arrive, the list shows its shape in placeholder rows (`Loading what was
+heard…` after a second). An empty list says which case it is: **Nothing heard yet** with **Find
+signals** (opens the Scanner) when nothing narrows it, **Nothing matches yet** with **Clear
+filters** and, for a time range, **Any time** when a search or range does, and **Nothing was heard
+in this range** for a range that has ended.
+
+An event's detail shows the event exactly as it was stored. Who rows of its stack heard before it
+said it is (never a later row; the same rule as the list row), when this decode does not say it (a title, callsign, flight, registration or name), is a
+separate **Latest known (from earlier rows)** block, each value with the time of the row that said
+it. The detail says **What it is** as a guess from its stack, labelled as one: a tone-only
+capcode repeating on a schedule reads `Likely a paging-network idle beacon (no content, repeats
+about every 45 s)`; bursts of one talkgroup and radio read `Likely one call: 24 bursts over 55 s`.
+A schedule needs at least 3 rows with every interval within 35 % of the median. The detail also
+shows how often it was seen, the strength when the decoder sends it, **Open in Scanner** when a
+discovery sits within 12.5 kHz, and up to 50 folded rows.
 
 ## Map and Messages
 

@@ -176,6 +176,50 @@
 	.wka-note[data-tone="warn"] {
 		color: var(--wk-amber);
 	}
+	/* first load: the list's shape, quiet; it fades in late, so a fast load never flashes it */
+	.wka-firstload {
+		flex: none;
+		margin: 8px 18px 0;
+	}
+	/* an empty list: what it means and what to do, centred in the well (as Recordings) */
+	.wka-empty {
+		flex: none;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 10px;
+		padding: 40px 32px 0;
+		text-align: center;
+	}
+	.wka-empty-icon {
+		width: 48px;
+		height: 48px;
+		border-radius: var(--wk-r-5);
+		background: var(--wk-fill);
+		display: grid;
+		place-items: center;
+		color: var(--wk-text-3);
+	}
+	.wka-empty-title {
+		margin: 0;
+		font-weight: 700;
+		font-size: var(--wk-fs-xl);
+		color: var(--wk-text-soft);
+	}
+	.wka-empty-text {
+		margin: 0;
+		max-width: 300px;
+		font-size: var(--wk-fs-md);
+		line-height: 1.55;
+		color: var(--wk-text-3);
+		text-wrap: pretty;
+	}
+	.wka-empty-actions {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 8px;
+	}
 
 	/* the list: a well under the controls, scrolled by itself, windowed */
 	.wka-listwrap {
@@ -315,6 +359,88 @@
 		color: var(--wk-text-3);
 		text-align: center;
 	}
+	/* a stack: the row, then its count and span; the toggle expands the folded earlier rows in place */
+	.wka-item[data-stacked] {
+		display: flex;
+		align-items: flex-start;
+		gap: 2px;
+	}
+	.wka-item[data-stacked] > .wka-row {
+		flex: 1;
+		min-width: 0;
+	}
+	.wka-stack {
+		flex: none;
+		height: var(--wk-h-sm);
+		margin: 8px 4px 0 0;
+		padding: 0 6px 0 8px;
+		border: 0;
+		border-radius: var(--wk-r-pill);
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		background: var(--wk-chip);
+		color: var(--wk-text-2);
+		font: inherit;
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.wka-stack:hover {
+		color: var(--wk-text);
+	}
+	.wka-stack[aria-expanded="true"] {
+		background: var(--wk-sel);
+		color: var(--wk-accent);
+	}
+	.wka-stack:focus-visible {
+		outline: 1.5px solid var(--wk-focus);
+		outline-offset: 1px;
+	}
+	.wka-cardstack {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-top: -4px;
+	}
+	.wka-cardstack > .wka-read {
+		margin-right: auto;
+		padding-left: 8px;
+	}
+	/* folded earlier rows: indented under their stack, one quiet line each */
+	.wka-folded {
+		padding: 0 0 0 46px;
+	}
+	.wka-folded-row {
+		min-height: 0;
+		padding-top: 4px;
+		padding-bottom: 4px;
+		align-items: baseline;
+		gap: 10px;
+	}
+	.wka-folded-text {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-2);
+		text-align: left;
+	}
+	/* the cached list is shown while it reloads: one quiet line, never a skeleton over rows */
+	.wka-refresh {
+		position: absolute;
+		z-index: 1;
+		top: 8px;
+		right: 12px;
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		pointer-events: none;
+	}
 	.wka-newpill {
 		position: absolute;
 		z-index: 2;
@@ -400,6 +526,33 @@
 		border-radius: var(--wk-r-4);
 		background: var(--wk-well-glass);
 		padding: 4px;
+	}
+	/* what it is: a hypothesis from the stack, labelled as one */
+	.wka-what {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wka-what-text {
+		margin: 0;
+		font-size: var(--wk-fs-md);
+		line-height: 1.45;
+		color: var(--wk-text-soft);
+	}
+	.wka-what-note {
+		margin: 0;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+	}
+	/* latest known: who earlier rows said it is, kept apart from the event as stored */
+	.wka-known {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.wka-known-at {
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-xs);
 	}
 	.wka-raw summary {
 		cursor: pointer;

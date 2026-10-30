@@ -12,6 +12,7 @@ import type {
 import { ActivityDetail } from "../../features/activity/ActivityDetail.tsx"
 import { ActivityList } from "../../features/activity/ActivityList.tsx"
 import { MAX_COLUMNS } from "../../features/activity/columns.ts"
+import { foldedOf } from "../../features/activity/fold.ts"
 import {
 	activitySearchFocus,
 	takeActivitySearchFocus,
@@ -27,13 +28,14 @@ import {
 import type { CategoryChipId } from "../../features/activity/search.ts"
 import { CATEGORY_CHIPS, suggest } from "../../features/activity/search.ts"
 import { ScopeChips } from "../../features/activity/ScopeChips.tsx"
-import { rangeEnded } from "../../features/activity/scope.ts"
+import { rangeEnded, rangeLabel } from "../../features/activity/scope.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { Seg } from "../../ui/Seg.tsx"
 import { Skeleton } from "../../ui/Skeleton.tsx"
+import { shellStore } from "../store.ts"
 import { showAppToast } from "../toast.ts"
 import type { DrawerContentProps } from "./types.ts"
 
@@ -383,7 +385,9 @@ function SwitcherChip({
 
 function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	const { activity } = useServices()
-	const count = useStore(feed, s => s.items.length)
+	// rows (stacks), as the list shows them: the list's own fold of the same array, memoised
+	const rows = useStore(feed, s => foldedOf(s.items, feed).length)
+	const events = useStore(feed, s => s.items.length)
 	const more = useStore(feed, s => s.nextPageToken !== null)
 	const searching = useStore(
 		activity,
@@ -412,13 +416,24 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	return (
 		<div className="wka-listhead">
 			<span className="wka-listtitle">{title}</span>
-			<span className="wka-listcount">
-				{count}
+			<span className="wka-listcount" title={countTitle(rows, events, more)}>
+				{rows}
 				{more ? "+" : ""}
 			</span>
 			<LayoutSwitch />
 		</div>
 	)
+}
+
+/** The header count's title: rows, in the loaded events only ("41 rows in the 312 loaded events"). */
+export function countTitle(
+	rows: number,
+	events: number,
+	more: boolean,
+): string {
+	const r = `${rows} row${rows === 1 ? "" : "s"}`
+	const e = `${events} loaded event${events === 1 ? "" : "s"}`
+	return `${r} in the ${e}${more ? "; older events are not loaded yet" : ""}`
 }
 
 // Rows or message cards, for the drawer and every column alike.
@@ -446,12 +461,17 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 	const available = useStore(feed, s => s.available)
 	const empty = useStore(feed, s => s.items.length === 0)
 	const query = useStore(feed, s => s.query)
-	const narrowed = useStore(
+	const filtered = useStore(
 		activity,
 		s => s.tokens.length > 0 || s.chip !== null || s.audio,
 	)
 	const range = useStore(activity, s => s.range)
 	const ended = rangeEnded(range, Date.now())
+	const timed = range.kind !== "any"
+	const clearFilters = () => {
+		activity.clear()
+		activity.setAudio(false)
+	}
 	if (!available)
 		return (
 			<p className="wka-note">
@@ -472,6 +492,15 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 				</button>
 			</p>
 		)
+	if (status === "idle" && query === null && filtered)
+		return (
+			<EmptyState
+				icon="search"
+				title="These filters cannot match together"
+				text="Nothing can be both: remove a filter, or turn off With audio."
+				actions={[{ label: "Clear filters", run: clearFilters }]}
+			/>
+		)
 	return (
 		<>
 			{reset && status === "live" && (
@@ -489,8 +518,15 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 					</button>
 				</p>
 			)}
-			{status === "loading" && empty && <Skeleton label="Activity" />}
-			{status === "live" && ended && (
+			{status === "loading" && empty && (
+				<div className="wka-firstload">
+					<Skeleton
+						label={filtered || timed ? "matching events" : "what was heard"}
+						rows={6}
+					/>
+				</div>
+			)}
+			{status === "live" && ended && !empty && (
 				<p className="wka-note">
 					This range has ended, so nothing new appears.{" "}
 					<button
@@ -502,18 +538,80 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 					</button>
 				</p>
 			)}
-			{status === "live" && empty && !ended && (
-				<p className="wka-note">
-					{narrowed || range.kind !== "any"
-						? "Nothing matches this search yet. New matches appear here as they are heard."
-						: "Nothing heard yet. Decoded messages and calls appear here as they arrive."}
-				</p>
-			)}
-			{status === "idle" && query === null && narrowed && (
-				<p className="wka-note">
-					These filters cannot match together. Remove one.
-				</p>
-			)}
+			{status === "live" &&
+				empty &&
+				(filtered || timed ? (
+					<EmptyState
+						icon="search"
+						title={
+							ended ? "Nothing was heard in this range" : "Nothing matches yet"
+						}
+						text={
+							ended
+								? `Nothing ${filtered ? "matching this search " : ""}was kept for ${rangeLabel(range, Date.now())}, and the range has ended.`
+								: filtered
+									? `Nothing kept${timed ? ` for ${rangeLabel(range, Date.now())}` : ""} matches this search. New matches appear here as they are heard.`
+									: `Nothing was kept for ${rangeLabel(range, Date.now())}. New events appear here as they are heard.`
+						}
+						actions={[
+							...(filtered
+								? [{ label: "Clear filters", run: clearFilters }]
+								: []),
+							...(timed
+								? [
+										{
+											label: "Any time",
+											run: () => activity.setRange({ kind: "any" }),
+										},
+									]
+								: []),
+						]}
+					/>
+				) : (
+					<EmptyState
+						icon="activity"
+						title="Nothing heard yet"
+						text="Decoded messages, calls, aircraft and vessels appear here as this receiver hears them."
+						actions={[
+							{
+								label: "Find signals",
+								run: () => shellStore.openDrawer("scanner"),
+							},
+						]}
+					/>
+				))}
 		</>
+	)
+}
+
+/** An empty list: what it means, in one title and one line, and what to do about it. */
+function EmptyState({
+	icon,
+	title,
+	text,
+	actions,
+}: {
+	icon: "activity" | "search"
+	title: string
+	text: string
+	actions: readonly { label: string; run: () => void }[]
+}) {
+	return (
+		<div className="wka-empty" role="status">
+			<span className="wka-empty-icon" aria-hidden="true">
+				<Icon name={icon} size={22} />
+			</span>
+			<p className="wka-empty-title">{title}</p>
+			<p className="wka-empty-text">{text}</p>
+			{actions.length > 0 && (
+				<div className="wka-empty-actions">
+					{actions.map(a => (
+						<Button key={a.label} variant="outline" onClick={a.run}>
+							{a.label}
+						</Button>
+					))}
+				</div>
+			)}
+		</div>
 	)
 }
