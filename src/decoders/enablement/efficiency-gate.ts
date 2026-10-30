@@ -152,6 +152,12 @@ export function createEfficiencyGate(
 	 * shed for; with the source-wide part, the loss episode it spent.
 	 */
 	const scapegoatSpent = new Map<string, ReadonlySet<string>>()
+	/**
+	 * Until when host loss on every source is spent on a CPU scapegoat: the
+	 * clear window since the latest scapegoat on any source, once a CPU
+	 * scapegoat was shed in it (CPU is host-wide).
+	 */
+	let cpuSpentUntil = -Infinity
 	/** Per tuned-band probationer: host loss before this time was already judged. */
 	const hostJudged = new Map<string, number>()
 	const cooldownUntil = new Map<string, number>()
@@ -569,6 +575,41 @@ export function createEfficiencyGate(
 					condemning: w.condemning && charged.length > 0,
 					linkOrUnknownDrops: w.linkOrUnknownDrops,
 					condemnedBranches: charged,
+				}
+			})
+		}
+		// While a CPU scapegoat's clear window is open, host loss on any source
+		// was that scapegoat's loss: only consumer loss charged to a branch
+		// condemns it. Without per-sample charges no loss is known to be
+		// consumer loss, so none condemns until the window closes.
+		if (
+			mono < cpuSpentUntil &&
+			mono >= cpuSpentUntil - EFFICIENCY_CLEAR_MS &&
+			windows.length > 0
+		) {
+			const charged = chargedDrops(sourceId, windows[0]!.startMono, mono)
+			windows = windows.map((w, i) => {
+				const until = windows[i + 1]?.startMono ?? mono
+				const consumer = new Set<string>()
+				for (const d of charged ?? [])
+					if (
+						d.code === "consumer" &&
+						d.branches !== "source" &&
+						d.atMono > w.startMono &&
+						d.atMono <= until
+					)
+						for (const b of d.branches) consumer.add(b)
+				const kept = (
+					w.condemnedBranches === "source"
+						? (w.explicitBranches ?? [])
+						: (w.condemnedBranches ?? [])
+				).filter(b => consumer.has(b))
+				return {
+					startMono: w.startMono,
+					endMono: w.endMono,
+					condemning: w.condemning && kept.length > 0,
+					linkOrUnknownDrops: w.linkOrUnknownDrops,
+					condemnedBranches: kept,
 				}
 			})
 		}
@@ -1012,6 +1053,8 @@ export function createEfficiencyGate(
 						failures.add(scapegoat.key)
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
 						scapegoatAt.set(scapegoat.sourceId, mono)
+						if (detail === "cpu" || mono < cpuSpentUntil)
+							cpuSpentUntil = mono + EFFICIENCY_CLEAR_MS
 						scapegoatSpent.set(
 							scapegoat.sourceId,
 							new Set(detail === null ? hostCharged : []),

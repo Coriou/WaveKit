@@ -394,3 +394,78 @@ it("late windows keep explicit branch charges beside source-wide overflow", () =
 		explicitBranches: ["decoder-readsb"],
 	})
 })
+
+it("host loss during a CPU scapegoat's clear window sheds nobody else on any source", () => {
+	// readsb's CPU loss on s sheds c on t at +2 s; the CPU stays at 95 % and
+	// b's own branch on t drops every sample for 30 s. Those drops are host
+	// loss (the monitor charges them to the host), the same episode c was
+	// shed for: b was late-dropped at +26 s before the fix.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) <= 30_000) h.dropOn("t", "b")
+	}, EFFICIENCY_CLEAR_MS)
+	expect(verdicts).toEqual([{ key: "c", detail: "cpu", at: 2_000 }])
+	expect(
+		h.monitor
+			.chargedDropsBetweenMono("t", 0, Infinity)
+			.filter(d => d.branches !== "source" && d.branches.includes("decoder-b"))
+			.every(d => d.code === "host"),
+	).toBe(true)
+})
+
+it("host loss past a CPU scapegoat's clear window sheds again at its edge", () => {
+	// As above, with b's host drops sustained: nothing more goes inside c's
+	// clear window, and the next shed comes only at or after its edge.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "b", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => h.dropOn("t", "b"), 120_000)
+	expect(verdicts[0]).toEqual({ key: "c", detail: "cpu", at: 2_000 })
+	expect(verdicts.length).toBeGreaterThan(1)
+	expect(verdicts[1]!.at).toBeGreaterThanOrEqual(2_000 + EFFICIENCY_CLEAR_MS)
+})
+
+it("consumer loss on another source's own branch still sheds it inside a CPU scapegoat's clear window", () => {
+	// readsb's CPU loss sheds c on t at +2 s and the CPU recovers at once;
+	// then x's own branch on t drops (consumer loss): x is still late-dropped
+	// inside c's clear window.
+	const h = harness(
+		[
+			{ key: "a", source: "s" },
+			{ key: "x", source: "t" },
+			{ key: "c", source: "t" },
+			{ key: "readsb", source: "s", tuned: true },
+		],
+		90,
+	)
+	h.cpu.normalisedPercent = 95
+	let t = 0
+	const verdicts = h.run(() => {
+		if ((t += 2_000) > 2_000) {
+			h.cpu.normalisedPercent = 10
+			h.dropOn("t", "x")
+		}
+	}, 2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts[0]).toEqual({ key: "c", detail: "cpu", at: 2_000 })
+	const x = verdicts.find(v => v.key === "x")
+	expect(x?.detail).toBe("late-drops")
+	expect(x!.at).toBeLessThan(2_000 + EFFICIENCY_CLEAR_MS)
+	expect(verdicts.filter(v => v.key !== "x" && v.key !== "c")).toEqual([])
+})

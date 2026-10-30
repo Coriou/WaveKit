@@ -767,8 +767,10 @@ another decoder's branch stops the newest other automatic decoder instead, at mo
 60-second clear window on each source (one host-wide for CPU). Under sustained CPU load the
 tuned decoder is stopped only once that window has closed with nothing else left to stop,
 and loss already spent on such a stop does not stop a second decoder through late drops
-on that source until the window has closed. Fresh drops on another decoder's own branch
-within that window are new loss and still stop it. A decoder's own branch drops count as
+on that source until the window has closed. After a stop for CPU, host-attributed drops on
+any source are that same load and stop nobody else until the window has closed. Other
+fresh drops on another decoder's own branch within that window are new loss and still
+stop it. A decoder's own branch drops count as
 its own even when overflow with no holder known falls in the same sample.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
