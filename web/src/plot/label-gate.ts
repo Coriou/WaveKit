@@ -175,6 +175,9 @@ export function stepLabelGate(
 	const seen = new Set<Followed>()
 	const byKey = new Map<string, Followed>()
 	for (const f of followed) if (f.key !== null) byKey.set(f.key, f)
+	const frameKeys = new Set<string>()
+	for (const t of frame.tracks)
+		if (t.trackId !== undefined) frameKeys.add(`${frame.sourceId}/${t.trackId}`)
 	// strongest tracks first, so a split emission keeps its strongest part
 	const tracks = [...frame.tracks]
 		.filter(
@@ -189,10 +192,18 @@ export function stepLabelGate(
 		const same = key === null ? undefined : byKey.get(key)
 		if (same && !seen.has(same)) best = same
 		else {
-			// by position; an emission the core already names differently is another emission
+			// by position; an emission the core already names differently is another emission, except a
+			// held proven chip whose track is gone: the core gives each burst a new track id, and the next
+			// burst at its place is the same signal (it adopts the new id instead of a second chip)
 			let bestD = Infinity
 			for (const f of followed) {
-				if (seen.has(f) || (key !== null && f.key !== null && f.key !== key))
+				if (seen.has(f)) continue
+				if (
+					key !== null &&
+					f.key !== null &&
+					f.key !== key &&
+					!(f.proven && !frameKeys.has(f.key))
+				)
 					continue
 				const d = near(f, t, tol)
 				if (d !== null && d < bestD) {

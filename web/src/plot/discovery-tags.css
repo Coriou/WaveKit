@@ -195,12 +195,16 @@
 	.wk-plot-disc-member-what > .wk-plot-disc-likely {
 		color: var(--wk-text-4);
 	}
-	/* one discovery's detail: what it is, how we know, when, and what to do */
+	/* one discovery's detail: what it is, how we know, when, and what to do; it scrolls inside the
+	   popover's 280px cap like a group's list */
 	.wk-plot-disc-detail {
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+		min-height: 0;
 		padding: 4px 10px 6px;
+		overflow-y: auto;
+		overscroll-behavior: contain;
 	}
 	.wk-plot-disc-detail-head {
 		display: flex;

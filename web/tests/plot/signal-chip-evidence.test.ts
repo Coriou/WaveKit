@@ -4,6 +4,9 @@ import type { Discovery, ScannerProof } from "@wavekit/api-types"
 
 import {
 	PROVEN_LIVE_HOLD_MS,
+	identifiedAt,
+	identifiesChip,
+	tagState,
 	unidentifiedLabel,
 } from "../../src/plot/discovery-tags.ts"
 import {
@@ -18,7 +21,11 @@ import {
 	type LabelGateState,
 } from "../../src/plot/label-gate.ts"
 import type { Track } from "../../src/plot/maths.ts"
-import { provenLiveAt, weakDiscoveryAt } from "../../src/plot/signal-chips.ts"
+import {
+	clusterSignals,
+	provenLiveAt,
+	weakDiscoveryAt,
+} from "../../src/plot/signal-chips.ts"
 
 // ── The gate: a chip on a proven, live discovery holds between bursts ──────────────────────────────
 
@@ -79,6 +86,87 @@ function afterBurst(c: LabelGateContext): LabelGateState {
 	expect(shown(s)).toBe(1)
 	return s
 }
+
+/** A burst the core tracks as `trackId` (each burst of a control channel gets a new one). */
+function idTrack(n: number, snrDb = 20, offHz = 0): Track {
+	const t = track(snrDb)
+	return {
+		...t,
+		startHz: t.startHz + offHz,
+		endHz: t.endHz + offHz,
+		trackId: `t${n}`,
+	}
+}
+
+describe("signal chips: a proven chip across bursts with new track ids", () => {
+	it("keeps exactly one chip over many bursts, each with its own track id", () => {
+		const c = ctx(() => true)
+		let s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
+		const id = gatedSignals(s)[0]?.id
+		expect(id).toBeDefined()
+		for (let n = 2; n <= 40; n++) {
+			const t = (n - 1) * 14_000
+			// the burst is gone, then the next one comes 14 s later under a new id, jittering a little
+			s = step(s, [], t - 13_000, c)
+			s = step(s, [idTrack(n, 20, (n % 3) * 400)], t, c)
+			expect(gatedSignals(s).map(g => [g.id, g.leaving])).toEqual([[id, false]])
+		}
+		// what the chip row draws: one chip, no "+1"
+		const g = gatedSignals(s)[0]!
+		const info = {
+			hz: g.hz,
+			widthHz: g.widthHz,
+			label: "DMR · CC 7",
+			sub: "",
+			known: true,
+			peakDb: g.peakDb,
+			burst: true,
+		}
+		const out = clusterSignals(
+			gatedSignals(s).map(x => ({ ...info, hz: x.hz })),
+			{ startHz: HZ - 1e6, endHz: HZ + 1e6 },
+			1000,
+		)
+		expect(out.map(x => x.label)).toEqual(["DMR · CC 7"])
+	})
+
+	it("adopts the new track id: the old one never claims the chip again", () => {
+		const c = ctx(() => true)
+		let s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
+		s = step(s, [idTrack(2)], 14_000, c)
+		// the old id at the same place is now another emission beside the chip
+		s = step(s, [idTrack(2), idTrack(1)], 14_100, c)
+		expect(s.followed.map(f => f.key)).toEqual(
+			expect.arrayContaining(["rtl/t2", "rtl/t1"]),
+		)
+		expect(s.followed.filter(f => f.key === "rtl/t2")).toHaveLength(1)
+	})
+
+	it("keeps two emissions apart when both track ids are in the same frame", () => {
+		const c = ctx(() => true)
+		let s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
+		s = step(s, [idTrack(1), idTrack(2, 18)], 100, c)
+		expect(s.followed).toHaveLength(2)
+	})
+
+	it("re-attaches only within the position tolerance: a burst past it is another signal", () => {
+		const c = ctx(() => true)
+		let s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
+		// tolerance max(2 bins, 1 kHz) = 1 kHz beyond the 10 kHz-wide chip's edges
+		s = step(s, [idTrack(2, 20, 11_000)], 14_000, c)
+		expect(s.followed).toHaveLength(1)
+		s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
+		s = step(s, [idTrack(2, 20, 11_001)], 14_000, c)
+		expect(s.followed).toHaveLength(2)
+	})
+
+	it("never re-attaches a chip that is not proven", () => {
+		const c = ctx(() => false)
+		let s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
+		s = step(s, [idTrack(2)], 1000, c)
+		expect(s.followed.map(f => f.key).sort()).toEqual(["rtl/t1", "rtl/t2"])
+	})
+})
 
 describe("signal chips: proven hold", () => {
 	it("shares the tag's hold, not a copy of the number", () => {
@@ -351,5 +439,51 @@ describe("signal chips: weakDiscoveryAt", () => {
 		const b = heard({ id: "b", frequencyHz: HZ + 1000 })
 		expect(weakDiscoveryAt([a, b], HZ, 10_000)?.id).toBe("b")
 		expect(weakDiscoveryAt([b, a], HZ, 10_000)?.id).toBe("b")
+	})
+})
+
+describe("signal chips: which discovery a chip states (Plot.tsx)", () => {
+	const tone = (over: Over = {}) =>
+		disc("tone", {
+			protocol: "analog-fm",
+			family: "analog",
+			class: "analog-fm",
+			identity: undefined,
+			proof: proof({ kind: "analog-tone", protocol: "analog-fm" }),
+			evidenceLevel: "proven",
+			...over,
+		})
+
+	it("names the chip with a proven analog proof whose confidence is classified or candidate", () => {
+		for (const confidence of ["classified", "candidate"] as const) {
+			const d = tone({ confidence })
+			expect(tagState(d)).toBe("proven")
+			expect(identifiesChip(d)).toBe(true)
+			expect(identifiedAt([d], HZ, 10_000)?.id).toBe("tone")
+			// the chip states it proven, and the weak lookup (the unidentified style) never takes it
+			expect(weakDiscoveryAt([d], HZ, 10_000)).toBeNull()
+		}
+	})
+
+	it("keeps a decoded discovery naming its chip, proven only when its tag is", () => {
+		const weak = disc("w", { evidenceLevel: "weak" })
+		expect(identifiesChip(weak)).toBe(true)
+		expect(tagState(weak)).not.toBe("proven")
+	})
+
+	it("never names the chip for weak, non-proving, malformed or ignored evidence", () => {
+		const items = [
+			tone({ confidence: "classified", evidenceLevel: "weak" }),
+			tone({ confidence: "candidate", proof: proof({ kind: "carrier-only" }) }),
+			tone({ confidence: "classified", evidenceLevel: undefined }),
+			tone({
+				confidence: "classified",
+				evidenceLevel: "certain" as unknown as "proven",
+			}),
+			disc("ig", { operator: { lockout: true } } as Over),
+			heard(),
+		]
+		for (const d of items) expect(identifiesChip(d)).toBe(false)
+		expect(identifiedAt(items, HZ, 10_000)).toBeNull()
 	})
 })

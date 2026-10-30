@@ -87,6 +87,7 @@ import {
 	discoveryTagFilter,
 	howWeKnow,
 	identifiedAt,
+	identifiesChip,
 	identifiedLabel,
 	tagState,
 	unidentifiedLabel,
@@ -821,7 +822,7 @@ function SignalLabels({
 					? linked
 					: undefined
 			const d =
-				own && own.confidence === "decoded" && !own.operator?.lockout
+				own && identifiesChip(own)
 					? own
 					: identifiedAt(discoveries.values(), s.hz, s.widthHz)
 			const label = d

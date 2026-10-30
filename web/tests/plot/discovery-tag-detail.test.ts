@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import type { Discovery, ScannerProof } from "@wavekit/api-types"
@@ -144,6 +146,69 @@ describe("tag state", () => {
 				}),
 			),
 		).toBe("likely")
+	})
+})
+
+describe("tag state: a core without evidence levels", () => {
+	it("is proven by `decoded` only when there is no proof field at all", () => {
+		const legacy = { evidenceLevel: undefined, proof: undefined } as const
+		expect(tagState(disc("l", legacy))).toBe("proven")
+		// a proof without an evidence level is a non-proving or malformed one, never legacy proven
+		for (const kind of [
+			"digital-undecoded",
+			"carrier-only",
+			"decoded",
+			"analog-tone",
+		] as const)
+			expect(
+				tagState(
+					disc(kind, { evidenceLevel: undefined, proof: proof({ kind }) }),
+				),
+			).not.toBe("proven")
+		for (const odd of [null, {}, "decoded", { kind: "nonsense" }, 7])
+			expect(
+				tagState(
+					disc("m", {
+						evidenceLevel: undefined,
+						proof: odd as unknown as ScannerProof,
+					}),
+				),
+			).not.toBe("proven")
+	})
+
+	it("never promotes a discovery carrying any proof without an evidence level (property)", () => {
+		// Feature: wg18-tg discovery tags, Property 3: legacy proven needs no proof field at all
+		// Validates: review finding 2 (unknown → not proven)
+		fc.assert(
+			fc.property(
+				fc.oneof(
+					fc.constant(null),
+					fc.anything(),
+					fc.record({ kind: fc.string() }),
+					fc
+						.constantFrom<
+							ScannerProof["kind"]
+						>("decoded", "analog-tone", "analog-voice", "digital-undecoded", "carrier-only")
+						.map(kind => proof({ kind })),
+				),
+				fc.constantFrom<Discovery["confidence"]>(
+					"decoded",
+					"classified",
+					"candidate",
+					"activity",
+				),
+				(p, confidence) =>
+					p === undefined ||
+					tagState(
+						disc("x", {
+							evidenceLevel: undefined,
+							proof: p as ScannerProof,
+							confidence,
+						}),
+					) !== "proven",
+			),
+			{ numRuns: 200 },
+		)
 	})
 })
 
@@ -401,5 +466,27 @@ describe("tag detail", () => {
 				}),
 			),
 		).toBe("Only a carrier: nothing to decode yet")
+	})
+})
+
+describe("tag popover layout", () => {
+	const css = readFileSync(
+		new URL("../../src/plot/discovery-tags.css", import.meta.url),
+		"utf8",
+	)
+	const rule = (sel: string) => {
+		const m = new RegExp(
+			`\\n\\s*${sel.replace(/\./g, "\\.")} \\{([^}]*)\\}`,
+		).exec(css)
+		expect(m, sel).not.toBeNull()
+		return m?.[1] ?? ""
+	}
+
+	it("scrolls a single discovery's detail inside the popover's height cap, like a group's list", () => {
+		expect(rule(".wk-plot-disc-pop")).toMatch(/max-height:\s*280px/)
+		const detail = rule(".wk-plot-disc-detail")
+		expect(detail).toMatch(/overflow-y:\s*auto/)
+		expect(detail).toMatch(/min-height:\s*0/)
+		expect(rule(".wk-plot-disc-pop-list")).toMatch(/overflow-y:\s*auto/)
 	})
 })

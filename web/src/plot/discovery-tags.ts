@@ -118,8 +118,9 @@ const UNNAMED: ReadonlySet<string> = new Set([
 
 /**
  * The tag's state. Proven: the core says `evidenceLevel: "proven"` with a decoded or analog proof (a carrier-only
- * or sync-only proof names nothing), or a core without proofs says `decoded`. An explicit `weak`, a missing or
- * malformed field is never proven. Heard: activity, or a protocol nobody named; likely: the rest.
+ * or sync-only proof names nothing), or a core without proofs (no evidence level, no proof field) says
+ * `decoded`. An explicit `weak`, a missing or malformed field, or a proof without an evidence level is never
+ * proven. Heard: activity, or a protocol nobody named; likely: the rest.
  */
 export function tagState(
 	d: Pick<Discovery, "confidence" | "protocol" | "evidenceLevel" | "proof">,
@@ -129,7 +130,11 @@ export function tagState(
 	const provenProof =
 		d.evidenceLevel === "proven" &&
 		(kind === "decoded" || kind === "analog-tone" || kind === "analog-voice")
-	const legacy = d.evidenceLevel === undefined && d.confidence === "decoded"
+	// a core before proofs: a proof present (with no evidence level) is malformed or not proving, never legacy
+	const legacy =
+		d.evidenceLevel === undefined &&
+		d.proof === undefined &&
+		d.confidence === "decoded"
 	if (named && (provenProof || legacy)) return "proven"
 	if (d.confidence === "activity" || !named) return "heard"
 	return "likely"
@@ -779,9 +784,18 @@ export function hasTaggable(
 }
 
 /**
- * The decoded discovery on a spectrum signal, or null: Signal labels name the signal by what was identified there
- * ("DMR · CC 1") before a saved frequency or the band plan does. The closest within max(3 kHz, half the signal's
- * width); an Ignored (locked-out) one never names it.
+ * A discovery names its signal's chip: the core decoded it, or its tag is proven (tagState: a proven analog proof
+ * whose confidence stays classified or candidate). An Ignored (locked-out) one never does.
+ */
+export function identifiesChip(d: Discovery): boolean {
+	if (d.operator?.lockout) return false
+	return d.confidence === "decoded" || tagState(d) === "proven"
+}
+
+/**
+ * The identified discovery on a spectrum signal (identifiesChip), or null: Signal labels name the signal by what
+ * was identified there ("DMR · CC 1") before a saved frequency or the band plan does. The closest within
+ * max(3 kHz, half the signal's width).
  */
 export function identifiedAt(
 	items: Iterable<Discovery>,
@@ -791,7 +805,7 @@ export function identifiedAt(
 	const tol = Math.max(3000, widthHz / 2)
 	let best: Discovery | null = null
 	for (const d of items) {
-		if (d.confidence !== "decoded" || d.operator?.lockout) continue
+		if (!identifiesChip(d)) continue
 		const off = Math.abs(d.frequencyHz - hz)
 		if (off <= tol && (!best || off < Math.abs(best.frequencyHz - hz))) best = d
 	}
