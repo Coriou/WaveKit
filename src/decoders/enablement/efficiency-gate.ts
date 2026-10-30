@@ -898,6 +898,8 @@ export function createEfficiencyGate(
 				// probationer's own branch stayed clean, is its load on the host.
 				// Drops on a branch no placement reads (live audio) never count.
 				let hostElsewhere = false
+				// Sibling branches the host loss was charged to (holder attribution).
+				const hostCharged = new Set<string>()
 				if (tuned && detail === null && valid(mono)) {
 					const read = new Set(
 						running
@@ -910,24 +912,31 @@ export function createEfficiencyGate(
 							)
 							.map(p => p.inputBranch),
 					)
-					hostElsewhere = (
-						chargedDrops(
-							placement.sourceId,
-							Math.max(admitted, hostJudged.get(placement.key) ?? admitted),
-							mono,
-						) ?? []
-					).some(
-						d =>
-							d.code === "host" &&
-							(d.branches === "source" || d.branches.some(b => read.has(b))),
-					)
+					for (const d of chargedDrops(
+						placement.sourceId,
+						Math.max(admitted, hostJudged.get(placement.key) ?? admitted),
+						mono,
+					) ?? []) {
+						if (d.code !== "host") continue
+						if (d.branches === "source") hostElsewhere = true
+						else
+							for (const b of d.branches)
+								if (read.has(b)) {
+									hostElsewhere = true
+									hostCharged.add(b)
+								}
+					}
 					hostJudged.set(placement.key, justAfter(mono))
 				}
 				if (detail === null && !hostElsewhere) continue
 				// Tuned band: a tuned-band probationer's CPU loss, or host loss on a
 				// sibling's branch, sheds the newest sheddable untuned placement
 				// instead (on its source for drops, anywhere for CPU); the tuned one
-				// restarts its probation. Loss on its own branch is its own.
+				// restarts its probation. Host loss charged to sibling branches sheds
+				// a placement reading one of them first (newest among those), so the
+				// holder goes rather than a clean bystander and then the holder too;
+				// unattributed (source-wide) host loss and CPU loss shed the newest.
+				// Loss on its own branch is its own.
 				if (tuned && detail !== "drops" && valid(mono)) {
 					const candidates = running.filter(
 						p =>
@@ -942,18 +951,32 @@ export function createEfficiencyGate(
 					// samples. Host drops are relieved per source; CPU is host-wide,
 					// so a CPU scapegoat waits for the window since the latest
 					// scapegoat on any source.
-					const scapegoat = candidates
-						.filter(
-							p =>
-								mono - (scapegoatAt.get(p.sourceId) ?? -Infinity) >=
-									EFFICIENCY_CLEAR_MS &&
-								(detail !== "cpu" ||
-									mono - Math.max(-Infinity, ...scapegoatAt.values()) >=
-										EFFICIENCY_CLEAR_MS),
-						)
-						.reduce<
-							RunningPlacement | undefined
-						>((best, p) => (!best || (admittedMono.get(p.key) ?? 0) > (admittedMono.get(best.key) ?? 0) ? p : best), undefined)
+					const eligible = candidates.filter(
+						p =>
+							mono - (scapegoatAt.get(p.sourceId) ?? -Infinity) >=
+								EFFICIENCY_CLEAR_MS &&
+							(detail !== "cpu" ||
+								mono - Math.max(-Infinity, ...scapegoatAt.values()) >=
+									EFFICIENCY_CLEAR_MS),
+					)
+					const charged =
+						detail === null
+							? eligible.filter(
+									p =>
+										p.inputBranch !== undefined &&
+										hostCharged.has(p.inputBranch),
+								)
+							: []
+					const scapegoat = (charged.length > 0 ? charged : eligible).reduce<
+						RunningPlacement | undefined
+					>(
+						(best, p) =>
+							!best ||
+							(admittedMono.get(p.key) ?? 0) > (admittedMono.get(best.key) ?? 0)
+								? p
+								: best,
+						undefined,
+					)
 					if (scapegoat) {
 						failures.add(scapegoat.key)
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })

@@ -1250,6 +1250,29 @@ describe("live demod rust fallback and retune", () => {
 		expect(channelCount).toBe(1)
 	})
 
+	it("labels a reconfigure write as the user's and a rejected-retune rollback as other", async () => {
+		await boot({ squelch: 0 })
+		const origins: Array<[number, unknown]> = []
+		demod?.on("config-changed", (...args: unknown[]) => {
+			const config = args[0]
+			if (
+				typeof config !== "object" ||
+				config === null ||
+				!("offsetHz" in config) ||
+				typeof config.offsetHz !== "number"
+			)
+				return
+			origins.push([config.offsetHz, args[1]])
+		})
+		await demod?.reconfigure({ offsetHz: 1000 })
+		rejectRetune()
+		expect(demod?.getStatus().config.offsetHz).toBe(0)
+		expect(origins).toEqual([
+			[1000, "user"],
+			[0, "other"],
+		])
+	})
+
 	it("repairs only the squelch mode when a partial rollback would be invalid", async () => {
 		await boot({ squelch: 0, modulation: "am" })
 		await demod?.reconfigure({ modulation: "nfm" })

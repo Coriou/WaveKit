@@ -679,9 +679,11 @@ and it starts. When you tune, the core decides for each decoder in this order:
    the CPU budget can still pause it. Your tunes are the tuner frequency you set in the web
    app or the API, a live audio setting, and a retune from SDR++ through the relay. Moving
    within its band, a scanner sweep's hops, the sweep's restore of your frequency afterwards
-   (even when it lands only after a reconnect), a reconnect (including one that returns the
-   tuner to its configured frequency) and WaveKit starting up are not tunes: they leave a
-   stopped decoder stopped. A stopped `always` decoder stays stopped until you start it.
+   (even when it lands only after a reconnect), a live audio change the demodulator rejected
+   and put back on its own, a reconnect (including one that returns the tuner to its
+   configured frequency) and WaveKit starting up are not tunes: they leave a stopped decoder
+   stopped. A tune you make right as a sweep ends is yours, not the sweep's restore. A
+   stopped `always` decoder stays stopped until you start it.
 2. **Source ready.** A sample-rate change reconnects the source; until the new rate is known
    decoders wait as `source-rate-unknown`.
 3. **Band.** The decoder's band (ADS-B 1090 MHz, APRS 144.800 MHz, ISM 433/868 MHz, ACARS and
@@ -709,7 +711,9 @@ and it starts. When you tune, the core decides for each decoder in this order:
      with no one decoder to blame, forces the core to stop something while the tuned decoder is
      new, it stops the other automatic decoders first: for CPU load at most one every 60
      seconds across all sources (CPU is shared), for host overload at most one per source every
-     60 seconds. The tuned one stops only when nothing else is left, and says so. Drops on its
+     60 seconds. For host overload charged to particular decoders' inputs it stops the newest
+     of those first, before any decoder whose input stayed clean; otherwise the newest goes.
+     The tuned one stops only when nothing else is left, and says so. Drops on its
      own input are its own: it stops, not a bystander.
 
    Tuning into a band also clears any earlier budget or loss wait of its decoder, once the
@@ -717,8 +721,8 @@ and it starts. When you tune, the core decides for each decoder in this order:
    elsewhere clears nothing). Only your own tune does this: after a scanner sweep has held
    the source, neither its hops, its restore of your frequency nor the time you had already
    spent in the band clear a wait; your next settled tune on that source does, even one
-   within the same band. YAML decoders, `always` decoders and decoders you started
-   yourself are never stopped for it.
+   within the same band or one made the moment the sweep ends. YAML decoders, `always`
+   decoders and decoders you started yourself are never stopped for it.
 
 7. **Start.** The process then starts; ADS-B shows aircraft once readsb has heard them.
 

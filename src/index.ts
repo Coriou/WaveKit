@@ -103,6 +103,10 @@ import { createRegionalRegistration } from "./core/regional/data.js"
 import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/provider.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
+import type {
+	LiveDemodConfig,
+	LiveDemodConfigOrigin,
+} from "./core/live-demodulator.js"
 import { liveDemodOperatorActivity } from "./core/live-demod-activity.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
 import type { ChannelizerManagerDeps } from "./core/channelizer/channelizer-manager.js"
@@ -1529,13 +1533,17 @@ async function main(): Promise<void> {
 				}),
 				origin,
 			)
-		// Live audio settings are the user's; a centre change is the user's only
-		// when the tuner controller says so (REST write, relay retune).
-		const updateVfoByUser = () => updateVfo("user")
+		// A live audio write is the user's, a rejected-retune rollback is not; a
+		// centre change is the user's only when the tuner controller says so
+		// (REST write, relay retune).
+		const updateVfoOnLiveConfig = (
+			_config: LiveDemodConfig,
+			origin: LiveDemodConfigOrigin,
+		) => updateVfo(origin)
 		const updateVfoOnCaps = (sourceId: string) =>
 			updateVfo(tunerController.centreChangeOrigin(sourceId) ?? "other")
 		const updateVfoOnConnect = () => updateVfo("other")
-		liveDemod.on("config-changed", updateVfoByUser)
+		liveDemod.on("config-changed", updateVfoOnLiveConfig)
 		sourceManager.on("caps-changed", updateVfoOnCaps)
 		sourceManager.on("connected", updateVfoOnConnect)
 		const bumpCoverage = () => {
@@ -1545,7 +1553,7 @@ async function main(): Promise<void> {
 		sourceManager.on("caps-changed", bumpCoverage)
 		const closeVfo = () => {
 			vfo.dispose()
-			liveDemod.off("config-changed", updateVfoByUser)
+			liveDemod.off("config-changed", updateVfoOnLiveConfig)
 			sourceManager.off("caps-changed", updateVfoOnCaps)
 			sourceManager.off("connected", updateVfoOnConnect)
 			liveDemod.off("config-changed", bumpCoverage)

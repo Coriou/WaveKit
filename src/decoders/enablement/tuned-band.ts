@@ -23,16 +23,6 @@ export const TUNED_TARGET_TOLERANCE_HZ = 200_000
  */
 export const TUNED_SETTLE_MS = VFO_SETTLE_MS
 
-/**
- * A VFO settle on a source the scanner released less than this long ago is the
- * scanner's restore, not the user's tune: the restore retune is written while
- * the source is still held (the job runner orders "restore" before
- * "release-decoders"), so its VFO settles VFO_SETTLE_MS after that retune, at
- * most VFO_SETTLE_MS after the release; the second VFO_SETTLE_MS is slack for
- * a late caps report or a busy event loop. 2 × 1000 ms = 2000 ms.
- */
-export const SCANNER_RESTORE_SETTLE_MS = 2 * VFO_SETTLE_MS
-
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 

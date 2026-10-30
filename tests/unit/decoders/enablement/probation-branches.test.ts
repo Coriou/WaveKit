@@ -32,6 +32,8 @@ const COUNTERS = [
 function harness(gateGuardPercent = 90) {
 	let mono = 0
 	const totals = new Map(COUNTERS.map(c => [c, 0]))
+	/** Absorber overflow per branch that gated it (the holder attribution). */
+	const gatedBy: Record<string, number> = {}
 	const cpu = { normalisedPercent: 10 as number | null }
 	const monitor = createEfficiencyMonitor({
 		sources: () => ["s"],
@@ -39,7 +41,13 @@ function harness(gateGuardPercent = 90) {
 			new Map(
 				[...totals].map(([key, n]) => [
 					key,
-					{ droppedBytesTotal: n, droppedChunksTotal: n },
+					{
+						droppedBytesTotal: n,
+						droppedChunksTotal: n,
+						...(key === "@absorber#0"
+							? { overflowGatedBy: { ...gatedBy } }
+							: {}),
+					},
 				]),
 			),
 		topology: () => "fixed",
@@ -100,10 +108,18 @@ function harness(gateGuardPercent = 90) {
 	 * Drops `step` returns on its counters every sample for `ms`; the verdicts
 	 * with their times. A shed placement stops, as the manager stops it.
 	 */
+	const overflow = (holder: string) => {
+		totals.set("@absorber#0", totals.get("@absorber#0")! + 1)
+		gatedBy[holder] = (gatedBy[holder] ?? 0) + 1
+	}
 	const dropFor = (step: (sample: number) => readonly string[], ms: number) => {
 		const verdicts: { key: string; detail: string; at: number }[] = []
 		for (let t = 0, i = 0; t < ms; t += 2_000, i++) {
-			for (const key of step(i)) totals.set(key, totals.get(key)! + 1)
+			for (const key of step(i))
+				if (key.startsWith("@absorber#0 by "))
+					// Absorber overflow gated by the branch named after "by ".
+					overflow(key.slice("@absorber#0 by ".length))
+				else totals.set(key, totals.get(key)! + 1)
 			tick()
 			for (const verdict of gate.probation(running, mono)) {
 				verdicts.push({ ...verdict, at: mono - admittedAt })
@@ -146,23 +162,59 @@ it("consumer drops on sibling branches do not judge the tuned probationer", () =
 	expect(verdicts).toEqual([])
 })
 
-it("host loss on a read sibling branch sheds the newest untuned placement, one per clear window", () => {
+it("host loss on read sibling branches sheds the newest placement reading one of them, one per clear window", () => {
 	const h = harness(99)
 	h.cpu.normalisedPercent = 95
 	// Host loss on a and b every sample; readsb's own branch stays clean.
-	// Within one clear window (60 000 ms) only one scapegoat goes, the
-	// newest untuned placement, although the loss goes on (readsb still on
+	// Within one clear window (60 000 ms) only one scapegoat goes: the
+	// newest untuned placement whose branch the loss was charged to (b), not
+	// the clean newer c, although the loss goes on (readsb still on
 	// probation: 28 s < 30 s).
 	expect(
 		h
 			.dropFor(() => ["decoder-a#0", "decoder-b#0"], 28_000)
 			.map(({ key, detail }) => ({ key, detail })),
-	).toEqual([{ key: "c", detail: "drops" }])
-	// Once readsb graduates, late drops judge a and b by their own branch.
+	).toEqual([{ key: "b", detail: "drops" }])
+	// Once readsb graduates, late drops judge a by its own branch.
 	const later = h.dropFor(() => ["decoder-a#0", "decoder-b#0"], 60_000)
 	expect(later.every(v => v.detail === "late-drops")).toBe(true)
 	expect(h.running.map(p => p.key)).toContain("readsb")
+	expect(h.running.map(p => p.key)).toContain("c")
 })
+
+it("host absorber overflow gated by one branch sheds that holder alone, not a clean bystander first", () => {
+	const h = harness(99)
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.dropFor(() => ["@absorber#0 by decoder-a#0"], 60_000)
+	expect(verdicts.map(({ key, detail }) => ({ key, detail }))).toEqual([
+		{ key: "a", detail: "drops" },
+	])
+	expect(h.running.map(p => p.key)).toEqual(["b", "c", "readsb"])
+})
+
+// Feature: decoder-autostart, Property 8: host loss with holder attribution sheds a charged placement first
+// Validates: Requirements R2, R7
+it("the scapegoat for attributed host loss is the newest charged placement, and the only one per clear window", () => {
+	fc.assert(
+		fc.property(
+			fc.subarray(UNTUNED, { minLength: 1 }),
+			fc.boolean(),
+			(charged, viaAbsorber) => {
+				const h = harness(99)
+				h.cpu.normalisedPercent = 95
+				const drops = charged.map(k =>
+					viaAbsorber ? `@absorber#0 by decoder-${k}#0` : `decoder-${k}#0`,
+				)
+				const verdicts = h
+					.dropFor(() => drops, 28_000)
+					.filter(v => v.detail !== "late-drops")
+				// UNTUNED is in admission order: the last charged one is the newest.
+				expect(verdicts.map(v => v.key)).toEqual([charged.at(-1)])
+			},
+		),
+		{ numRuns: 100 },
+	)
+}, 30_000)
 
 // Feature: decoder-autostart, Property 7: probation drops are charged to the branch that dropped
 // Validates: Requirements R2, R7

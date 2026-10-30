@@ -743,4 +743,15 @@ describe("decoder enablement composition", () => {
 		])
 			expect(source.includes(seam), seam).toBe(true)
 	})
+	it("passes the live demodulator's change origin to the VFO tracker", async () => {
+		const source = await entry()
+		// A rejected-retune rollback emits "other"; only a reconfigure() write is the user's.
+		expect(source).toMatch(
+			/const updateVfoOnLiveConfig = \(\s*_config: LiveDemodConfig,\s*origin: LiveDemodConfigOrigin,\s*\) => updateVfo\(origin\)/,
+		)
+		expect(source).toContain(
+			'liveDemod.on("config-changed", updateVfoOnLiveConfig)',
+		)
+		expect(source).not.toContain('updateVfo("user")')
+	})
 })

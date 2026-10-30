@@ -23,10 +23,7 @@ import {
 } from "../../../../src/decoders/enablement/contract.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
 import { createVfoTracker } from "../../../../src/decoders/enablement/channel-sources.js"
-import {
-	SCANNER_RESTORE_SETTLE_MS,
-	TUNED_SETTLE_MS,
-} from "../../../../src/decoders/enablement/tuned-band.js"
+import { TUNED_SETTLE_MS } from "../../../../src/decoders/enablement/tuned-band.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
 
 // Synthetic band centres; two raw-reach catalogue decoders, one per band.
@@ -235,10 +232,10 @@ it("scanner hops into its band and the restore leave an operator-stopped decoder
 	for (const hz of [FAR_HZ, NEAR_HZ, FAR_HZ]) await f.tune(hz)
 	expect(f.running("near")).toBe(false)
 	// The restore retune is written while held, then the hold is released;
-	// its VFO settles after the window, back where it was before the sweep.
+	// its VFO settles later, back where it was before the sweep.
 	f.sources.setCenter("rtl", NEAR_HZ)
 	await f.m.releaseSource("rtl", "job-1")
-	await vi.advanceTimersByTimeAsync(SCANNER_RESTORE_SETTLE_MS + 1_000)
+	await vi.advanceTimersByTimeAsync(2 * VFO_SETTLE_MS + 1_000)
 	f.settle(NEAR_HZ, "rtl", "other")
 	await vi.advanceTimersByTimeAsync(1_000)
 	expect(f.running("near")).toBe(false)
@@ -249,27 +246,21 @@ it("scanner hops into its band and the restore leave an operator-stopped decoder
 	expect(f.running("near")).toBe(true)
 })
 
-for (const [label, afterMs, restarts] of [
-	["at", SCANNER_RESTORE_SETTLE_MS, false],
-	["past", SCANNER_RESTORE_SETTLE_MS + 1, true],
-] as const)
-	it(`a settle ${label} SCANNER_RESTORE_SETTLE_MS after a sweep's release is ${restarts ? "the user's" : "the restore's"}`, async () => {
-		// 2 × VFO_SETTLE_MS (1000 ms) = 2000 ms.
-		expect(SCANNER_RESTORE_SETTLE_MS).toBe(2 * VFO_SETTLE_MS)
+for (const origin of ["user", "other"] as const)
+	it(`a ${origin} settle the moment a sweep is released is ${origin === "user" ? "the user's tune" : "not a tune"}`, async () => {
 		const f = await setup()
+		const scan = scanState(f.m)
 		f.settle(FAR_HZ)
 		await stoppedThenAway(f)
-		// No hop settled during this sweep, so only the window applies.
 		await f.m.holdSource("rtl", "tuner-scanning", "job-1")
-		const releasing = f.m.releaseSource("rtl", "job-1")
-		const releasedAt = performance.now()
-		await releasing
+		await f.m.releaseSource("rtl", "job-1")
+		// No time passes: the settle lands right as the sweep ends.
 		f.sources.setCenter("rtl", NEAR_HZ)
-		await vi.advanceTimersByTimeAsync(releasedAt + afterMs - performance.now())
-		expect(performance.now() - releasedAt).toBe(afterMs)
-		f.settle(NEAR_HZ)
+		f.settle(NEAR_HZ, "rtl", origin)
 		await vi.advanceTimersByTimeAsync(1_000)
-		expect(f.running("near")).toBe(restarts)
+		expect(f.running("near")).toBe(origin === "user")
+		expect(scan.recorded("rtl")).toBe(origin !== "user")
+		expect(scan.tainted("rtl")).toBe(origin !== "user")
 	})
 
 it("the first settle at startup and a settle after no VFO are not user tunes", async () => {
@@ -719,9 +710,9 @@ it("hops never settled while held: the scan mark persists through settles that a
 	await stoppedThenAway(f)
 	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
 	await f.m.releaseSource("rtl", "job-1")
-	// No hop settled; past the restore window a settle no user made (a
-	// reconnect's baseline reset into the near band) arrives.
-	await vi.advanceTimersByTimeAsync(SCANNER_RESTORE_SETTLE_MS + 1)
+	// No hop settled; a settle no user made (a reconnect's baseline reset
+	// into the near band) arrives.
+	await vi.advanceTimersByTimeAsync(2 * VFO_SETTLE_MS + 1)
 	f.sources.setCenter("rtl", NEAR_HZ)
 	f.settle(NEAR_HZ, "rtl", "other")
 	await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
@@ -752,9 +743,9 @@ it("a restore applied on a later connection is not a user tune, and the mark sta
 	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
 	await f.tune(FAR_HZ)
 	await f.m.releaseSource("rtl", "job-1")
-	// The connection drops before the restore lands: past the window, the
-	// reconnect settles elsewhere, then the restore reaches the VFO.
-	await vi.advanceTimersByTimeAsync(SCANNER_RESTORE_SETTLE_MS + 1)
+	// The connection drops before the restore lands: the reconnect settles
+	// elsewhere, then the restore reaches the VFO.
+	await vi.advanceTimersByTimeAsync(2 * VFO_SETTLE_MS + 1)
 	f.sources.setCenter("rtl", OTHER_HZ)
 	f.settle(OTHER_HZ, "rtl", "other")
 	await vi.advanceTimersByTimeAsync(1_000)

@@ -50,7 +50,6 @@ import {
 } from "./enablement/contract.js"
 import type { PlannerCentreSlot } from "./enablement/contract.js"
 import {
-	SCANNER_RESTORE_SETTLE_MS,
 	TUNED_SETTLE_MS,
 	bandContainsTuned,
 	prioritiseTuned,
@@ -836,8 +835,9 @@ export class DecoderManager extends EventEmitter {
 	 * (startup) or one from no VFO (a source back after a disconnect); not a
 	 * settle whose latest change had no user origin; not a settle on a source
 	 * a scanner sweep holds (a "hop"); not the scanner's "restore", a settle
-	 * within SCANNER_RESTORE_SETTLE_MS of the release or, without a user
-	 * origin, back at the VFO from before the sweep. A tune made during a
+	 * without a user origin back at the VFO from before the sweep (the restore
+	 * retune is written with no user origin). A user-origin settle after the
+	 * release is the user's tune however soon it comes. A tune made during a
 	 * sweep pre-empts it and counts as the scanner's too: the safe answer
 	 * leaves a stopped decoder stopped. The sweep's record is kept until the
 	 * restore is observed or the user settles, so a restore reaching the VFO
@@ -853,16 +853,12 @@ export class DecoderManager extends EventEmitter {
 			return "hop"
 		}
 		if (scan?.releasedAtMs !== undefined) {
-			const restored = sameVfo(scan.preHoldVfo, next)
-			if (performance.now() - scan.releasedAtMs <= SCANNER_RESTORE_SETTLE_MS) {
-				if (restored) this.scanHolds.delete(next.sourceId)
-				return "restore"
-			}
+			// The user's settle after the release is a tune, however soon it comes.
 			if (origin === "user") {
 				this.scanHolds.delete(next.sourceId)
 				return "user"
 			}
-			if (restored) {
+			if (sameVfo(scan.preHoldVfo, next)) {
 				this.scanHolds.delete(next.sourceId)
 				return "restore"
 			}
