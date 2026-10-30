@@ -629,6 +629,8 @@ interface OverloadHintWindow {
 	gain: number
 	sampleRateHz: number
 	hopSamples: number
+	/** After a gain/config change the cached snapshot may predate it; skip reads up to it. */
+	staleSamples: number
 	snapshots: { observedSamples: number; blankedFrames: number }[]
 }
 
@@ -652,7 +654,16 @@ export class OverloadHintTracker {
 			!Number.isFinite(stats.observedSamples) ||
 			!Number.isFinite(stats.blankedFrames)
 		) {
-			this.windows.delete(sourceId)
+			// Keep a closed marker so the next manual window skips the cached snapshot too.
+			if (stats === null) this.windows.delete(sourceId)
+			else
+				this.windows.set(sourceId, {
+					gain: Number.NaN,
+					sampleRateHz: Number.NaN,
+					hopSamples: Number.NaN,
+					staleSamples: -1,
+					snapshots: [],
+				})
 			return null
 		}
 		let w = this.windows.get(sourceId)
@@ -662,9 +673,19 @@ export class OverloadHintTracker {
 			w.sampleRateHz !== fs ||
 			w.hopSamples !== hop
 		) {
-			w = { gain, sampleRateHz: fs, hopSamples: hop, snapshots: [] }
+			w = {
+				gain,
+				sampleRateHz: fs,
+				hopSamples: hop,
+				// A first window has no earlier setting to leak in; its first read is a fine baseline.
+				staleSamples: w ? stats.observedSamples : -1,
+				snapshots: [],
+			}
 			this.windows.set(sourceId, w)
 		}
+		// A counter reset reopens the stats epoch; that snapshot is fresh.
+		if (stats.observedSamples < w.staleSamples) w.staleSamples = -1
+		if (stats.observedSamples <= w.staleSamples) return null
 		const last = w.snapshots.at(-1)
 		if (
 			last &&

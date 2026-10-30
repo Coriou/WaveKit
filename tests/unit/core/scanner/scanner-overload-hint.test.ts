@@ -107,6 +107,29 @@ describe("OverloadHintTracker", () => {
 		expect(t.update("rtl", input(35, 7_000, { gain: 297 }))).toBeNull()
 	})
 
+	it("the cached snapshot from before a gain change never seeds the new window", () => {
+		const t = new OverloadHintTracker()
+		feed(t, 30, 6_000)
+		// Gain lowered before 35 s; status still reads the 30 s snapshot at the new gain.
+		expect(t.update("rtl", input(30, 6_000, { gain: 297 }))).toBeNull()
+		// Blanking between 30 and 35 s happened at the old gain; none after.
+		expect(t.update("rtl", input(35, 7_000, { gain: 297 }))).toBeNull()
+		expect(t.update("rtl", input(40, 7_000, { gain: 297 }))).toBeNull()
+		expect(t.update("rtl", input(50, 7_000, { gain: 297 }))).toBeNull()
+	})
+
+	it("the cached snapshot from an AGC interval never seeds the manual window", () => {
+		const t = new OverloadHintTracker()
+		feed(t, 30, 0)
+		expect(t.update("rtl", input(30, 0, { gainMode: "agc" }))).toBeNull()
+		expect(t.update("rtl", input(35, 6_000, { gainMode: "agc" }))).toBeNull()
+		// Back to manual while status still reads the AGC-era 35 s snapshot.
+		expect(t.update("rtl", input(35, 6_000))).toBeNull()
+		// The 35-40 s blanking happened under AGC, before the switch; none after.
+		expect(t.update("rtl", input(40, 7_000))).toBeNull()
+		expect(t.update("rtl", input(50, 7_000))).toBeNull()
+	})
+
 	it("an AGC interval starts a new window", () => {
 		const t = new OverloadHintTracker()
 		feed(t, 30, 6_000)
