@@ -4,12 +4,16 @@
 //! and moved back. A job runs every block in order and on one thread at a time, so its output is
 //! the same bytes as the serial loop's (same instructions, same order; nothing is shared between
 //! channels). The calling thread works through the queue too, so a helper that is slow to wake on
-//! a loaded host costs at most the serial time, never more.
+//! a loaded host usually costs little; a helper descheduled while it holds a claimed job still
+//! delays the block until it runs again.
+//!
+//! The job queue, the result list and the result slots keep their capacity between blocks, so a
+//! steady stream of same-sized blocks does not allocate in the pool.
 
 use std::any::Any;
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 /// Helper threads at most. With the calling thread that is 4 DSP threads: one per channel of a
@@ -43,6 +47,9 @@ struct Shared<J> {
     queue: Mutex<Queue<J>>,
     ready: Condvar,
     block: Mutex<Option<Block>>,
+    /// Helpers' results for the current block; cleared, not freed, by `run`.
+    results: Mutex<Vec<Done<J>>>,
+    reported: Condvar,
 }
 
 enum Done<J> {
@@ -53,16 +60,15 @@ enum Done<J> {
 pub struct DspPool<J: Job> {
     helpers: usize,
     shared: Arc<Shared<J>>,
-    done_tx: mpsc::Sender<Done<J>>,
-    done_rx: mpsc::Receiver<Done<J>>,
     threads: Vec<thread::JoinHandle<()>>,
     block: Block,
+    /// Each job's place in the caller's order while the block runs.
+    slots: Vec<Option<J>>,
 }
 
 impl<J: Job> DspPool<J> {
     /// `helpers` threads are started on the first `run` that has more than one job.
     pub fn new(helpers: usize) -> Self {
-        let (done_tx, done_rx) = mpsc::channel();
         DspPool {
             helpers,
             shared: Arc::new(Shared {
@@ -72,11 +78,12 @@ impl<J: Job> DspPool<J> {
                 }),
                 ready: Condvar::new(),
                 block: Mutex::new(None),
+                results: Mutex::new(Vec::new()),
+                reported: Condvar::new(),
             }),
-            done_tx,
-            done_rx,
             threads: Vec::new(),
             block: Arc::new((Vec::new(), Vec::new())),
+            slots: Vec::new(),
         }
     }
 
@@ -90,14 +97,26 @@ impl<J: Job> DspPool<J> {
         self.threads.len()
     }
 
+    /// Capacities of every buffer the pool keeps between blocks: they stop growing once the pool
+    /// has seen its largest block and job count.
+    #[cfg(test)]
+    pub fn capacities(&self) -> [usize; 5] {
+        [
+            self.slots.capacity(),
+            self.shared.queue.lock().unwrap().tasks.capacity(),
+            self.shared.results.lock().unwrap().capacity(),
+            self.block.0.capacity(),
+            self.block.1.capacity(),
+        ]
+    }
+
     fn start(&mut self) {
         while self.threads.len() < self.helpers {
             let shared = self.shared.clone();
-            let done = self.done_tx.clone();
             let name = format!("wavekit-chan-dsp-{}", self.threads.len() + 1);
             let spawned = thread::Builder::new()
                 .name(name)
-                .spawn(move || helper(&shared, &done));
+                .spawn(move || helper(&shared));
             match spawned {
                 Ok(h) => self.threads.push(h),
                 Err(e) => {
@@ -110,16 +129,15 @@ impl<J: Job> DspPool<J> {
         }
     }
 
-    /// Runs every job over the block and returns them in their original order. A job that
-    /// panicked on a helper re-raises its panic here, as it would have on the serial loop.
-    pub fn run(&mut self, jobs: Vec<J>, i: &[f32], q: &[f32]) -> Vec<J> {
+    /// Runs every job over the block and leaves them in `jobs` in their original order. A job
+    /// that panicked on a helper re-raises its panic here, as it would have on the serial loop.
+    pub fn run(&mut self, jobs: &mut Vec<J>, i: &[f32], q: &[f32]) {
         let n = jobs.len();
         if self.helpers == 0 || n < 2 {
-            let mut jobs = jobs;
-            for j in &mut jobs {
+            for j in jobs.iter_mut() {
                 j.run(i, q);
             }
-            return jobs;
+            return;
         }
         self.start();
         {
@@ -131,41 +149,61 @@ impl<J: Job> DspPool<J> {
             bq.extend_from_slice(q);
         }
         *self.shared.block.lock().unwrap() = Some(self.block.clone());
+        self.slots.clear();
+        self.slots.resize_with(n, || None);
+        // Room for every helper result, so a helper never grows the list while the caller waits.
+        self.shared.results.lock().unwrap().reserve(n);
         {
             let mut queue = self.shared.queue.lock().unwrap();
-            queue.tasks.extend(jobs.into_iter().enumerate());
+            queue.tasks.extend(jobs.drain(..).enumerate());
         }
         self.shared.ready.notify_all();
-        let mut slots: Vec<Option<J>> = (0..n).map(|_| None).collect();
         let mut finished = 0usize;
         // The calling thread takes jobs until the queue is empty.
         loop {
             let task = self.shared.queue.lock().unwrap().tasks.pop_front();
             let Some((k, mut job)) = task else { break };
             job.run(i, q);
-            slots[k] = Some(job);
+            self.slots[k] = Some(job);
             finished += 1;
         }
         *self.shared.block.lock().unwrap() = None;
-        while finished < n {
-            match self.done_rx.recv() {
-                Ok(Done::Finished(k, job)) => {
-                    slots[k] = Some(job);
-                    finished += 1;
+        let mut panicked = None;
+        {
+            let mut results = self.shared.results.lock().unwrap();
+            loop {
+                for done in results.drain(..) {
+                    match done {
+                        Done::Finished(k, job) => {
+                            self.slots[k] = Some(job);
+                            finished += 1;
+                        }
+                        Done::Panicked(payload) => {
+                            finished += 1;
+                            panicked.get_or_insert(payload);
+                        }
+                    }
                 }
-                Ok(Done::Panicked(payload)) => resume_unwind(payload),
-                // The pool holds a sender itself, so the channel cannot close.
-                Err(_) => unreachable!("DSP result channel closed"),
+                if finished == n {
+                    break;
+                }
+                results = self.shared.reported.wait(results).unwrap();
             }
         }
-        slots
-            .into_iter()
-            .map(|j| j.expect("every DSP job reports once"))
-            .collect()
+        // Raised after every job reported and with no lock held, so the pool stays usable.
+        if let Some(payload) = panicked {
+            self.slots.clear();
+            resume_unwind(payload);
+        }
+        jobs.extend(
+            self.slots
+                .drain(..)
+                .map(|j| j.expect("every DSP job reports once")),
+        );
     }
 }
 
-fn helper<J: Job>(shared: &Shared<J>, done: &mpsc::Sender<Done<J>>) {
+fn helper<J: Job>(shared: &Shared<J>) {
     loop {
         let (k, mut job, block) = {
             let mut queue = shared.queue.lock().unwrap();
@@ -188,9 +226,8 @@ fn helper<J: Job>(shared: &Shared<J>, done: &mpsc::Sender<Done<J>>) {
             Ok(()) => Done::Finished(k, job),
             Err(payload) => Done::Panicked(payload),
         };
-        if done.send(msg).is_err() {
-            return;
-        }
+        shared.results.lock().unwrap().push(msg);
+        shared.reported.notify_one();
     }
 }
 
@@ -221,8 +258,10 @@ mod tests {
         assert_eq!(dsp_helpers(256), MAX_DSP_HELPERS);
     }
 
-    /// A running sum: its output depends on every earlier block, in order.
+    /// A running sum: its output depends on every earlier block, in order, and on its identity,
+    /// so two jobs never produce the same output and a job returned in the wrong place shows.
     struct Acc {
+        id: usize,
         state: f32,
         out: Vec<f32>,
         thread: Option<thread::ThreadId>,
@@ -236,15 +275,16 @@ mod tests {
             }
             self.thread = Some(thread::current().id());
             for (x, y) in i.iter().zip(q) {
-                self.state = self.state * 0.5 + x * y;
+                self.state = self.state * 0.5 + x * y + self.id as f32;
                 self.out.push(self.state);
             }
         }
     }
 
-    fn acc(meet: Option<Arc<Barrier>>) -> Acc {
+    fn acc(id: usize, meet: Option<Arc<Barrier>>) -> Acc {
         Acc {
-            state: 0.0,
+            id,
+            state: id as f32 * 3.0 - 1.0,
             out: Vec::new(),
             thread: None,
             meet,
@@ -258,8 +298,8 @@ mod tests {
         let mut pool = DspPool::new(MAX_DSP_HELPERS);
         let n = MAX_DSP_HELPERS + 1;
         let meet = Arc::new(Barrier::new(n));
-        let jobs = (0..n).map(|_| acc(Some(meet.clone()))).collect();
-        let done = pool.run(jobs, &[1.0; 8], &[2.0; 8]);
+        let mut done: Vec<Acc> = (0..n).map(|k| acc(k, Some(meet.clone()))).collect();
+        pool.run(&mut done, &[1.0; 8], &[2.0; 8]);
         assert_eq!(pool.started(), MAX_DSP_HELPERS);
         let mut threads: Vec<_> = done.iter().map(|j| j.thread.unwrap()).collect();
         threads.sort_by_key(|t| format!("{t:?}"));
@@ -270,10 +310,12 @@ mod tests {
     #[test]
     fn no_helper_starts_for_a_single_job_or_a_zero_helper_pool() {
         let mut pool = DspPool::new(2);
-        let done = pool.run(vec![acc(None)], &[1.0], &[1.0]);
+        let mut done = vec![acc(0, None)];
+        pool.run(&mut done, &[1.0], &[1.0]);
         assert_eq!((done.len(), pool.started()), (1, 0));
         let mut serial = DspPool::new(0);
-        let done = serial.run(vec![acc(None), acc(None)], &[1.0], &[1.0]);
+        let mut done = vec![acc(0, None), acc(1, None)];
+        serial.run(&mut done, &[1.0], &[1.0]);
         assert_eq!((done.len(), serial.started()), (2, 0));
     }
 
@@ -297,12 +339,29 @@ mod tests {
         // panic payload must reach the caller.
         let meet = Arc::new(Barrier::new(2));
         let mut pool = DspPool::new(1);
-        let jobs = vec![Boom(meet.clone()), Boom(meet)];
-        let r = catch_unwind(AssertUnwindSafe(|| pool.run(jobs, &[0.0], &[0.0])));
+        let mut jobs = vec![Boom(meet.clone()), Boom(meet)];
+        let r = catch_unwind(AssertUnwindSafe(|| pool.run(&mut jobs, &[0.0], &[0.0])));
         assert_eq!(
             r.err().and_then(|p| p.downcast::<&str>().ok()).as_deref(),
             Some(&"boom")
         );
+    }
+
+    #[test]
+    fn retained_buffers_stop_growing_after_the_first_block() {
+        let mut pool = DspPool::new(MAX_DSP_HELPERS);
+        let mut jobs: Vec<Acc> = (0..MAX_DSP_HELPERS + 2).map(|k| acc(k, None)).collect();
+        let (i, q) = (vec![0.5f32; 4096], vec![0.25f32; 4096]);
+        pool.run(&mut jobs, &i, &q);
+        let (warm, jobs_cap) = (pool.capacities(), jobs.capacity());
+        assert!(warm.iter().all(|&c| c > 0), "{warm:?}");
+        for _ in 0..200 {
+            for j in &mut jobs {
+                j.out.clear();
+            }
+            pool.run(&mut jobs, &i, &q);
+            assert_eq!((pool.capacities(), jobs.capacity()), (warm, jobs_cap));
+        }
     }
 
     proptest! {
@@ -316,16 +375,19 @@ mod tests {
             blocks in proptest::collection::vec(proptest::collection::vec(-1.0f32..1.0, 0..200), 1..8),
         ) {
             let mut pool = DspPool::new(helpers);
-            let mut par: Vec<Acc> = (0..jobs).map(|_| acc(None)).collect();
-            let mut ser: Vec<Acc> = (0..jobs).map(|_| acc(None)).collect();
+            let mut par: Vec<Acc> = (0..jobs).map(|k| acc(k, None)).collect();
+            let mut ser: Vec<Acc> = (0..jobs).map(|k| acc(k, None)).collect();
             for (n, b) in blocks.iter().enumerate() {
-                // Each job sees a distinct q so a reordering would show.
+                // Each block sees a distinct q so a reordering of blocks would show.
                 let q: Vec<f32> = b.iter().map(|x| x * 0.75 + n as f32 * 0.01).collect();
-                par = pool.run(par, b, &q);
+                pool.run(&mut par, b, &q);
+                // Each job is back in its own place, whatever thread ran it.
+                prop_assert_eq!(par.iter().map(|j| j.id).collect::<Vec<_>>(), (0..jobs).collect::<Vec<_>>());
                 for j in &mut ser {
                     j.run(b, &q);
                 }
             }
+            prop_assert_eq!(par.len(), jobs);
             for (k, (a, b)) in par.iter().zip(&ser).enumerate() {
                 prop_assert_eq!(a.out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     b.out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "job {}", k);

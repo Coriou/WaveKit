@@ -162,16 +162,23 @@ them in parallel:
 - A block of at least 2 048 input samples (`PARALLEL_MIN_SAMPLES`) with two or
   more channels open is split: each channel's engine moves to whichever thread
   takes it, runs the whole block and moves back. The main thread takes jobs too,
-  so a helper that is slow to wake costs at most the serial time. Handing a job
-  to a helper and back costs about 12 µs, against about 60 µs of DSP for 2 048
-  samples on one narrowband channel. Smaller blocks stay on the main thread.
+  so a helper that is slow to wake is expected to cost little, and in the runs
+  below every pooled run had more headroom than every serial run at the same
+  hog count. That is measured, not guaranteed: a helper descheduled while it
+  holds a claimed job delays the block until the host runs it again. Handing a
+  job to a helper and back costs about 12 µs, against about 60 µs of DSP for
+  2 048 samples on one narrowband channel. Smaller blocks stay on the main
+  thread. The job list, result slots and each job's output and event buffers
+  are kept between blocks, so a steady stream of pooled blocks does not
+  allocate them again (`pooled_blocks_reuse_their_buffers_after_warm_up`).
 - Output is byte-identical to the serial loop. A channel runs every block in
   order on one thread at a time, and queueing and events then follow the serial
   channel order. The equivalence property
   `dsp_pool_output_and_events_match_the_serial_loop` compares queue bytes,
   counters and events of a pooled and a serial runtime over random IQ and demod
-  channel sets and random block splits. The pinned Intel macOS output hashes in
-  `channel.rs` still match.
+  channel sets, random block splits and random queue drains between blocks,
+  including the drop runs that shutdown closes. The pinned Intel macOS output
+  hashes in `channel.rs` still match.
 - The cu8 input conversion uses a 256-entry table built at compile time from the
   same expression, so it is bit-identical (tested for every byte).
 

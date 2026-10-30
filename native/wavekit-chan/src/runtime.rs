@@ -206,8 +206,10 @@ pub struct Runtime {
     reap_cursor: usize,
     /// Helper threads start on the first block worth splitting.
     pool: DspPool<ChannelJob>,
-    /// Output buffers for pool jobs, kept between blocks.
-    scratch: Vec<Vec<u8>>,
+    /// The pool's job list and each job's output and event buffers, kept between blocks so a
+    /// pooled block does not allocate them again.
+    jobs: Vec<ChannelJob>,
+    scratch: Vec<(Vec<u8>, Vec<Value>)>,
 }
 
 /// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
@@ -256,6 +258,7 @@ impl Runtime {
             retired: std::array::from_fn(|_| None),
             reap_cursor: 0,
             pool: DspPool::new(helpers),
+            jobs: Vec::new(),
             scratch: Vec::new(),
         }
     }
@@ -945,36 +948,35 @@ impl Runtime {
     /// output is queued; queueing and events then follow the serial loop's channel order, so the
     /// bytes, counters and event order are the same as `feed`'s.
     fn feed_parallel(&mut self, i: &[f32], q: &[f32]) {
-        let jobs: Vec<ChannelJob> = self
-            .channels
-            .values_mut()
-            .map(|ch| ChannelJob {
+        for ch in self.channels.values_mut() {
+            let (out, events) = self.scratch.pop().unwrap_or_default();
+            self.jobs.push(ChannelJob {
                 engine: std::mem::replace(&mut ch.dsp, Engine::Lent),
-                out: self.scratch.pop().unwrap_or_default(),
-                events: Vec::new(),
+                out,
+                events,
                 outcome: ProcessOutcome {
                     samples: 0,
                     saturated: 0,
                 },
-            })
-            .collect();
-        let done = self.pool.run(jobs, i, q);
+            });
+        }
+        self.pool.run(&mut self.jobs, i, q);
         let mut events = Vec::new();
-        for ((id, ch), job) in self.channels.iter_mut().zip(done) {
+        for ((id, ch), job) in self.channels.iter_mut().zip(self.jobs.drain(..)) {
             let ChannelJob {
                 engine,
                 mut out,
-                events: produced,
+                events: mut produced,
                 outcome: r,
             } = job;
             ch.dsp = engine;
-            events.extend(produced);
+            events.append(&mut produced);
             ch.saturated += r.saturated;
             let first = ch.out_samples;
             ch.out_samples += r.samples;
             push_output(id, ch, &out, first, &mut events);
             out.clear();
-            self.scratch.push(out);
+            self.scratch.push((out, produced));
         }
         for e in events {
             self.emit(e);
@@ -2892,6 +2894,7 @@ mod tests {
                 (0usize..5, -24i32..24, 0usize..3, any::<bool>()), 1..6),
             input in proptest::collection::vec(any::<u8>(), 1..60_000),
             mut cuts in proptest::collection::vec(0usize..60_000, 0..12),
+            drains in proptest::collection::vec(any::<bool>(), 13),
         ) {
             const RATES: [u64; 5] = [24_000, 48_000, 250_000, 384_000, 1_000_000];
             let (pd, sd) = (TempDir::new(), TempDir::new());
@@ -2916,7 +2919,8 @@ mod tests {
             cuts.sort_unstable();
             let mut last = 0;
             let mut split = false;
-            for c in cuts.into_iter().map(|c| c.min(input.len())).chain(std::iter::once(input.len())) {
+            let ends = cuts.into_iter().map(|c| c.min(input.len())).chain(std::iter::once(input.len()));
+            for (c, drain) in ends.zip(drains) {
                 if c < last {
                     continue;
                 }
@@ -2925,6 +2929,12 @@ mod tests {
                 par.on_input(&input[last..c]);
                 ser.on_input(&input[last..c]);
                 last = c;
+                // A drained queue accepts output again, which closes an open drop run.
+                if drain {
+                    for id in &ids {
+                        prop_assert_eq!(take_queue(&par, id), take_queue(&ser, id), "channel {}", id);
+                    }
+                }
             }
             prop_assert_eq!(par.pool.started() > 0, split);
             for id in &ids {
@@ -2933,11 +2943,90 @@ mod tests {
                 prop_assert_eq!(par.channels[id].saturated, ser.channels[id].saturated);
                 prop_assert_eq!(take_queue(&par, id), take_queue(&ser, id), "channel {}", id);
             }
+            // Shutdown reports every still-open drop run before `closed`.
+            par.shutdown();
+            ser.shutdown();
             let pe = pev.lock().unwrap()[p0..].to_vec();
             let se = sev.lock().unwrap()[s0..].to_vec();
             prop_assert_eq!(pe, se);
-            par.shutdown();
-            ser.shutdown();
         }
+    }
+
+    #[test]
+    fn dsp_pool_overflow_runs_recover_and_close_like_the_serial_loop() {
+        let (pd, sd) = (TempDir::new(), TempDir::new());
+        let (mut par, pev) = rt_with_helpers(&pd.0, crate::dsp_pool::MAX_DSP_HELPERS);
+        let (mut ser, sev) = rt_with_helpers(&sd.0, 0);
+        let ids = ["a", "b"];
+        for (n, id) in ids.iter().enumerate() {
+            let req = || iq_open_as(id, n as f64 * 100_000.0, 1_000_000, "cf32", 512);
+            par.request_and_wait(req());
+            ser.request_and_wait(req());
+        }
+        let (p0, s0) = (pev.lock().unwrap().len(), sev.lock().unwrap().len());
+        // Two 4 096-sample blocks, each far more output than a 512-byte queue holds.
+        let block = iq_bytes(2 * 4096);
+        for _ in 0..2 {
+            par.on_input(&block);
+            ser.on_input(&block);
+            for id in ids {
+                let (p, s) = (take_queue(&par, id), take_queue(&ser, id));
+                assert!(!p.is_empty());
+                assert_eq!(p, s, "channel {id}");
+                assert!(par.channels[id].dropped > 0);
+                assert_eq!(par.channels[id].dropped, ser.channels[id].dropped);
+            }
+        }
+        assert!(par.pool.started() > 0);
+        par.shutdown();
+        ser.shutdown();
+        let pe = pev.lock().unwrap()[p0..].to_vec();
+        let se = sev.lock().unwrap()[s0..].to_vec();
+        assert_eq!(pe, se);
+        // Per channel: the first run ends when the drained queue accepts the second block, and
+        // the second run is closed by shutdown.
+        let runs: Vec<&Value> = pe
+            .iter()
+            .filter(|e| e["cause"] == "queue-overflow")
+            .collect();
+        for id in ids {
+            assert_eq!(runs.iter().filter(|e| e["id"] == id).count(), 2, "{pe:?}");
+        }
+    }
+
+    #[test]
+    fn pooled_blocks_reuse_their_buffers_after_warm_up() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt_with_helpers(&dir.0, crate::dsp_pool::MAX_DSP_HELPERS);
+        for (n, id) in ["a", "b", "c"].iter().enumerate() {
+            r.request_and_wait(iq_open_as(
+                id,
+                n as f64 * 100_000.0,
+                250_000,
+                "cf32",
+                1 << 20,
+            ));
+        }
+        let block = iq_bytes(2 * 4096);
+        let caps = |r: &Runtime| {
+            let mut c = r.pool.capacities().to_vec();
+            c.push(r.jobs.capacity());
+            c.push(r.scratch.len());
+            c.extend(r.scratch.iter().map(|(o, e)| o.capacity() + e.capacity()));
+            c
+        };
+        for _ in 0..3 {
+            r.on_input(&block);
+        }
+        let warm = caps(&r);
+        for _ in 0..50 {
+            for id in ["a", "b", "c"] {
+                r.drain_queue_for_test(id);
+            }
+            r.on_input(&block);
+            assert_eq!(caps(&r), warm);
+        }
+        assert!(r.pool.started() > 0);
+        r.shutdown();
     }
 }
