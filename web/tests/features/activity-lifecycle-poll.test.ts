@@ -1,12 +1,25 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import type { ActivitySearchPage } from "@wavekit/api-types"
 
+import { ActivityFeed } from "../../src/data/activity-feed.ts"
 import { ApiClient } from "../../src/data/api-client.ts"
+import { EventsClient } from "../../src/data/events-client.ts"
+import { fakeSockets } from "../data/fake-socket.ts"
 import type { ActivityAvailability } from "../../src/features/activity/lifecycle.ts"
 import {
 	ACTIVITY_LIFECYCLE_POLL_MS,
+	activityFeedNeedsReload,
 	lifecycleNotice,
 	pollActivityAvailability,
 } from "../../src/features/activity/lifecycle.ts"
+
+const emptyPage = {
+	items: [],
+	nextPageToken: null,
+	replayCursor: "c:0",
+	snapshot: { lowBarrier: "0", highWater: "0", expiresAt: "x" },
+	searchCoverage: "bounded-projection",
+} as unknown as ActivitySearchPage
 
 type Answer = { status: number; body: unknown } | "network"
 
@@ -48,6 +61,7 @@ function poller(answers: Answer[]) {
 		() => {
 			reloads += 1
 		},
+		() => true,
 		{
 			setTimeout: (run, ms) => {
 				pending.push({ run, ms })
@@ -121,7 +135,107 @@ describe("Activity availability polling", () => {
 		expect(failed.calls()).toBe(1)
 	})
 
+	it("never starts a reload while its own reload is pending", async () => {
+		const api = new ApiClient({
+			fetch: async () =>
+				new Response(JSON.stringify(lifecycle("available").body), {
+					status: 200,
+				}),
+		})
+		let started = 0
+		let finish = () => {}
+		const pending: (() => void)[] = []
+		const stop = pollActivityAvailability(
+			api,
+			() => {},
+			() => {
+				started += 1
+				return new Promise<void>(resolve => {
+					finish = resolve
+				})
+			},
+			// The feed check alone would allow a reload each poll.
+			() => true,
+			{
+				setTimeout: run => {
+					pending.push(run)
+					return pending.length
+				},
+				clearTimeout: () => {
+					pending.length = 0
+				},
+			},
+		)
+		const settle = async () => {
+			for (let i = 0; i < 20; i++) await Promise.resolve()
+			await new Promise(resolve => setTimeout(resolve, 0))
+		}
+		await settle()
+		expect(started).toBe(1)
+		for (let i = 0; i < 3; i++) {
+			pending.shift()!()
+			await settle()
+		}
+		expect(started).toBe(1)
+		finish()
+		await settle()
+		pending.shift()!()
+		await settle()
+		expect(started).toBe(2)
+		stop()
+	})
+
 	it("shows nothing before the first answer", () => {
 		expect(lifecycleNotice({ kind: "checking" })).toBeNull()
+	})
+})
+
+describe("Activity recovery with a slow list", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("recovers when the store is available at once but each list read takes 4 s (longer than a poll)", async () => {
+		vi.useFakeTimers()
+		const LIST_MS = 4_000
+		let listCalls = 0
+		const api = new ApiClient({
+			fetch: async url => {
+				if (url.includes("/api/activity/status"))
+					return new Response(JSON.stringify(lifecycle("available").body), {
+						status: 200,
+					})
+				listCalls += 1
+				if (listCalls === 1)
+					return new Response(
+						JSON.stringify({ code: "ACTIVITY_UNAVAILABLE" }),
+						{ status: 503 },
+					)
+				await new Promise(resolve => setTimeout(resolve, LIST_MS))
+				return new Response(JSON.stringify(emptyPage), { status: 200 })
+			},
+		})
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		const feed = new ActivityFeed(api, events, { flushMs: 20, id: "slow" })
+		await feed.setQuery({})
+		expect(feed.get()).toMatchObject({ available: false, status: "error" })
+		const stop = pollActivityAvailability(
+			api,
+			() => {},
+			() => feed.reload(),
+			() => activityFeedNeedsReload(feed.get()),
+		)
+		// Five poll intervals: room for several polls while one slow read is pending.
+		for (let t = 0; t < 5; t++)
+			await vi.advanceTimersByTimeAsync(ACTIVITY_LIFECYCLE_POLL_MS)
+		stop()
+		expect(feed.get()).toMatchObject({ available: true, status: "live" })
+		// One 503, then one slow read that was never superseded.
+		expect(listCalls).toBe(2)
+		feed.dispose()
+		events.disconnect()
 	})
 })

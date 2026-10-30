@@ -14,6 +14,7 @@ import { ActivityList } from "../../features/activity/ActivityList.tsx"
 import { MAX_COLUMNS } from "../../features/activity/columns.ts"
 import { foldedOf } from "../../features/activity/fold.ts"
 import {
+	activityFeedNeedsReload,
 	lifecycleNotice,
 	useActivityAvailability,
 } from "../../features/activity/lifecycle.ts"
@@ -588,9 +589,13 @@ function Notices({ feed }: { feed: ActivityFeed }) {
  */
 function Unavailable({ feed }: { feed: ActivityFeed }) {
 	const { data } = useServices()
-	const reload = useCallback(() => void feed.reload(), [feed])
+	const reload = useCallback(() => feed.reload(), [feed])
+	const needsReload = useCallback(
+		() => activityFeedNeedsReload(feed.get()),
+		[feed],
+	)
 	const notice = lifecycleNotice(
-		useActivityAvailability(data.api, true, reload),
+		useActivityAvailability(data.api, true, reload, needsReload),
 	)
 	if (notice === null) return null
 	return (

@@ -1,6 +1,7 @@
 import type { ActivityLifecycleStatus } from "@wavekit/api-types"
 import { useEffect, useState } from "react"
 
+import type { ActivityFeedState } from "../../data/activity-feed.ts"
 import type { ApiClient } from "../../data/api-client.ts"
 
 /**
@@ -89,6 +90,13 @@ export function lifecycleNotice(
 	}
 }
 
+/** A feed needs a reload only while still unavailable and not already loading (any reload). */
+export function activityFeedNeedsReload(
+	state: Pick<ActivityFeedState, "available" | "status">,
+): boolean {
+	return !state.available && state.status !== "loading"
+}
+
 export interface AvailabilityTimers {
 	setTimeout(run: () => void, ms: number): unknown
 	clearTimeout(handle: unknown): void
@@ -101,26 +109,40 @@ const browserTimers: AvailabilityTimers = {
 
 /**
  * Polls the lifecycle every ACTIVITY_LIFECYCLE_POLL_MS, reporting each answer to `onChange`.
- * Each `available` answer calls `onAvailable` (the feed reloads) and polling goes on: the
- * caller stops it once its list loaded, so a reload that still met a 503 is retried on the
- * next poll. Polling ends on "off" and "unavailable" (unchanged until a core restart); a
+ * An `available` answer starts a reload (`reload`) only when `needsReload()` says the feed is
+ * still unavailable and no reload started here is pending: a reload slower than the poll
+ * interval is never superseded by the next one (each reload discards the reply of the one
+ * before it). Polling goes on after a reload, so one that still met a 503 is retried on a
+ * later poll. Polling ends on "off" and "unavailable" (unchanged until a core restart); a
  * network failure keeps polling. Returns the stop function.
  */
 export function pollActivityAvailability(
 	api: ApiClient,
 	onChange: (availability: ActivityAvailability) => void,
-	onAvailable: () => void,
+	reload: () => Promise<void> | void,
+	needsReload: () => boolean = () => true,
 	timers: AvailabilityTimers = browserTimers,
 ): () => void {
 	const controller = new AbortController()
 	let timer: unknown = null
+	let reloading = false
+	const startReload = () => {
+		if (reloading || !needsReload()) return
+		reloading = true
+		void Promise.resolve()
+			.then(reload)
+			.catch(() => undefined)
+			.finally(() => {
+				reloading = false
+			})
+	}
 	const poll = async () => {
 		timer = null
 		const next = await fetchActivityAvailability(api, controller.signal)
 		if (controller.signal.aborted) return
 		onChange(next)
 		if (next.kind === "lifecycle" && next.lifecycle.state === "available")
-			onAvailable()
+			startReload()
 		if (controller.signal.aborted) return
 		if (
 			next.kind === "off" ||
@@ -138,21 +160,22 @@ export function pollActivityAvailability(
 }
 
 /**
- * Polls the lifecycle while `active` (the feed answered 404/503) and reloads through
- * `onAvailable` whenever the store reports `available`, until the caller unmounts or turns
- * `active` off; the list then loads without a page reload.
+ * Polls the lifecycle while `active` (the feed answered 404/503) and reloads the feed when the
+ * store reports `available` and the feed still needs it (see pollActivityAvailability); the
+ * list then loads without a page reload.
  */
 export function useActivityAvailability(
 	api: ApiClient,
 	active: boolean,
-	onAvailable: () => void,
+	reload: () => Promise<void> | void,
+	needsReload: () => boolean,
 ): ActivityAvailability {
 	const [availability, setAvailability] = useState<ActivityAvailability>({
 		kind: "checking",
 	})
 	useEffect(() => {
 		if (!active) return
-		return pollActivityAvailability(api, setAvailability, onAvailable)
-	}, [api, active, onAvailable])
+		return pollActivityAvailability(api, setAvailability, reload, needsReload)
+	}, [api, active, reload, needsReload])
 	return availability
 }
