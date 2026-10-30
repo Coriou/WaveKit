@@ -460,8 +460,8 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 					)
 				},
 			)
-			this.fallbackToken = null
 			if (generation !== this.generation) return
+			this.fallbackToken = null
 			this.pageQuery = pagedWith
 			// a wider query's page (the range before it moved on): only the rows inside the current range
 			if (pagedWith !== query)

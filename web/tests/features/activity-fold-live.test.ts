@@ -346,6 +346,46 @@ describe("activity cache across close and open", () => {
 		expect(feed.get().items).toHaveLength(131)
 	})
 
+	it("a stale older page answering after a reopen keeps the reopened fallback token", async () => {
+		let reject = false
+		let release: (() => void) | null = null
+		const seen: string[] = []
+		const answer = { current: page(range(201, 300), "p:cache") }
+		const api = new ApiClient({
+			fetch: async url => {
+				seen.push(url)
+				if (url.includes("pageToken") && release === null) {
+					// the first older-page request answers only after the reopen
+					await new Promise<void>(r => {
+						release = r
+					})
+					return new Response(JSON.stringify(page(range(101, 200), null)))
+				}
+				if (reject && url.includes("pageToken=p%3Acache"))
+					return new Response(JSON.stringify({ error: "expired" }), {
+						status: 400,
+					})
+				return new Response(JSON.stringify(answer.current), { status: 200 })
+			},
+		})
+		const core = setup()
+		const feed = new ActivityFeed(api, core.events, { id: "stale" })
+		await feed.setQuery({})
+		const stale = feed.loadMore()
+		feed.stop()
+		answer.current = page(range(290, 320), "p:snapshot")
+		await feed.setQuery({})
+		;(release as (() => void) | null)?.()
+		await stale
+		reject = true
+		answer.current = page(range(190, 289), null)
+		await feed.loadMore()
+		expect(seen.at(-2)).toContain("pageToken=p%3Acache")
+		expect(seen.at(-1)).toContain("pageToken=p%3Asnapshot")
+		expect(feed.get().error).toBeNull()
+		expect(feed.get().items).toHaveLength(131)
+	})
+
 	it("pages on after a rolling range moved with the cache token's own query, never re-fetching cached rows", async () => {
 		const firstFrom = new Date(T0).toISOString()
 		const movedFrom = new Date(T0 + 150_000).toISOString()
