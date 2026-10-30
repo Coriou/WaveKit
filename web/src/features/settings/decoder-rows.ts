@@ -78,11 +78,27 @@ export function decoderTone(d: DecoderInfo): "run" | "idle" | "fault" | "off" {
 	return d.health === "restarting" ? "fault" : "run"
 }
 
+/** An efficiency pause in words, from the gate's detail as the summary words it: only a budget refusal is "over the budget". */
+function efficiencyPauseText(d: DecoderInfo): string {
+	switch (d.efficiency?.detail) {
+		case "budget":
+			return "over the efficiency budget"
+		case "cpu":
+			return "the CPU is busy"
+		case "drops":
+			return "the source was dropping samples"
+		case "late-drops":
+			return "samples were dropped while it ran"
+		default:
+			return "waiting for the source to settle"
+	}
+}
+
 /** Why a decoder is paused, in words; the core's band and rate reasons read "outside the capture". */
 function suspensionText(d: DecoderInfo): string {
 	switch (d.suspension?.reasonCode) {
 		case "efficiency-budget":
-			return "over the efficiency budget"
+			return efficiencyPauseText(d)
 		case "decoder-unavailable":
 			return "not installed"
 		case "channelizer-unavailable":

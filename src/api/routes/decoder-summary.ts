@@ -158,7 +158,6 @@ function efficiencyCode(status: DecoderStatus): DecoderVerdictCode {
 
 function suspensionCode(reason: string | undefined): DecoderVerdictCode {
 	if (reason === undefined) return "unknown"
-	if (reason === "efficiency-budget") return "efficiency-budget"
 	if (reason === "frequency-out-of-band") return "out-of-band"
 	if (reason === "no-channel-selected") return "no-channel"
 	if (reason === "capture-too-narrow") return "capture-too-narrow"

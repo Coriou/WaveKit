@@ -140,8 +140,23 @@ describe("decoder enablement in Settings", () => {
 			...base,
 			suspended: true,
 			suspension: { reasonCode: "efficiency-budget" },
+			efficiency: { detail: "budget" },
 		} as unknown as DecoderInfo
 		expect(decoderStatusText(d)).toBe("Paused · over the efficiency budget")
+		const gate = (detail?: string) =>
+			decoderStatusText({
+				...base,
+				suspended: true,
+				suspension: { reasonCode: "efficiency-budget" },
+				...(detail ? { efficiency: { detail } } : {}),
+			} as unknown as DecoderInfo)
+		expect(gate()).toBe("Paused · waiting for the source to settle")
+		expect(gate("unknown")).toBe("Paused · waiting for the source to settle")
+		expect(gate("cpu")).toBe("Paused · the CPU is busy")
+		expect(gate("drops")).toBe("Paused · the source was dropping samples")
+		expect(gate("late-drops")).toBe(
+			"Paused · samples were dropped while it ran",
+		)
 		const paused = (reasonCode: string) =>
 			decoderStatusText({
 				...base,

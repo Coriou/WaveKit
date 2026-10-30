@@ -125,7 +125,6 @@ function efficiencyCode(d: VerdictInput): DecoderVerdictCode {
 		d.placements?.find(p => p.efficiencyDetail !== undefined)?.efficiencyDetail
 	switch (detail) {
 		case "budget":
-		case undefined:
 			return "efficiency-budget"
 		case "cpu":
 			return "efficiency-cpu"
@@ -134,6 +133,8 @@ function efficiencyCode(d: VerdictInput): DecoderVerdictCode {
 		case "late-drops":
 			return "efficiency-late-drops"
 		case "unknown":
+		case undefined:
+			// no refusal from the gate: only the wait, never a full budget
 			return "efficiency-waiting"
 		default:
 			// a detail this build does not know: no cause claimed, no action
@@ -143,7 +144,6 @@ function efficiencyCode(d: VerdictInput): DecoderVerdictCode {
 
 function suspensionCode(reason: string | undefined): DecoderVerdictCode {
 	if (reason === undefined) return "unknown"
-	if (reason === "efficiency-budget") return "efficiency-budget"
 	if (reason === "frequency-out-of-band") return "out-of-band"
 	if (reason === "no-channel-selected") return "no-channel"
 	if (reason === "capture-too-narrow") return "capture-too-narrow"
