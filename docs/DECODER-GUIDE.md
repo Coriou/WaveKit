@@ -695,9 +695,9 @@ and it starts. When you tune, the core decides for each decoder in this order:
    source, within 200 kHz of its targets or the span between them, or inside its band) goes
    first. The VFO tunes only the source it is on: a second dongle is not "tuned" by its own
    capture centre while the VFO is elsewhere, and only with no VFO at all does the default
-   source's capture centre stand in for it. A source a scanner sweep holds is never tuned,
-   nor is a VFO a sweep's hop left settled, until the restore or your own tune settles it
-   again.
+   source's capture centre stand in for it. A source a scanner sweep holds is never tuned;
+   once the sweep releases it, priority follows wherever its VFO now is, whether a hop, the
+   sweep's restore or you put it there.
    For the tuned decoder:
    - it is admitted before the others, and when the budget is full the other automatic
      decoders stop to make room (newest first);
@@ -710,7 +710,10 @@ and it starts. When you tune, the core decides for each decoder in this order:
 
    Tuning into a band also clears any earlier budget or loss wait of its decoder, once the
    tuned frequency has stayed in that band for 1 second (passing through a band on the way
-   elsewhere clears nothing). YAML decoders, `always` decoders and decoders you started
+   elsewhere clears nothing). Only your own tune does this: after a scanner sweep has held
+   the source, neither its hops, its restore of your frequency nor the time you had already
+   spent in the band clear a wait; your next settled tune on that source does, even one
+   within the same band. YAML decoders, `always` decoders and decoders you started
    yourself are never stopped for it.
 
 7. **Start.** The process then starts; ADS-B shows aircraft once readsb has heard them.
@@ -746,7 +749,8 @@ Late drops are charged to the fanout branch that dropped them: a raw decoder (su
 ADS-B) is stopped only for drops on its own branch, channelizer drops stop only decoders on
 channelizer channels, and drops on live audio stop no decoder. Burst absorber overflow is
 charged to the branches that held the absorber when it overflowed (a congested branch holds
-input for every branch): a congested live audio branch stops no decoder. Overflow with no
+input for every branch): a congested live audio branch stops no decoder, even when it
+closes before the next sample (its share is kept for two samples). Overflow with no
 holding branch known is charged to the source as a whole, even when live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
 decoders of the tuned band last; `always` and operator-started decoders are never stopped.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.

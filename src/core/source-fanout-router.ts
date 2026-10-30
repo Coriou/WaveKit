@@ -15,6 +15,24 @@ import {
 	type LinkBurstHandles,
 } from "./link-burst/contract.js"
 
+/**
+ * Reads of `branchDropCounters` that still report a removed branch's absorber
+ * gate total. The efficiency monitor reads once per EFFICIENCY_SAMPLE_MS
+ * (2000 ms): the first read after the removal sees the total grow and charges
+ * the overflow to that branch; the second covers a read whose sample was
+ * discarded (no clock). 2 reads ≈ 4000 ms, then the total is dropped.
+ */
+export const RETIRED_GATE_READS = 2
+
+/**
+ * Removed holders kept per absorber at once; the oldest goes first. Only a
+ * branch that held the absorber while it overflowed has a total to keep, a
+ * handful of live-audio listeners between two samples, so 64 bounds UUID
+ * branch churn without dropping real ones; a total dropped past it leaves
+ * its overflow on the source, as before it was kept.
+ */
+export const RETIRED_GATES_MAX = 64
+
 /** Telemetry shared by a single fanout and the collection of source fanouts. */
 export type FanoutTelemetryProvider = Pick<
 	FanoutManager,
@@ -51,6 +69,11 @@ export class SourceFanoutRouter extends EventEmitter {
 			frame: number
 			rate: number
 			instance: number
+			/**
+			 * Gate totals of removed branches, keyed `<branch id>#<instance>`,
+			 * reported for RETIRED_GATE_READS reads (at most RETIRED_GATES_MAX).
+			 */
+			retired: Map<string, { total: number; reads: number }>
 			stream: Readable | null
 			listener: (chunk: Buffer) => void
 		}
@@ -201,6 +224,7 @@ export class SourceFanoutRouter extends EventEmitter {
 				frame,
 				rate: caps.sampleRate,
 				instance: 0,
+				retired: new Map(),
 				stream: null,
 				listener: chunk =>
 					recorder.observeChunk(chunk.length, factories.monoNow()),
@@ -210,6 +234,7 @@ export class SourceFanoutRouter extends EventEmitter {
 		if (state.frame !== frame || seconds === 0) {
 			state.handles.absorber?.dispose()
 			state.handles.absorber = null
+			state.retired.clear()
 		}
 		state.frame = frame
 		state.rate = caps.sampleRate
@@ -228,6 +253,7 @@ export class SourceFanoutRouter extends EventEmitter {
 					log: this.logger,
 				})
 				state.instance = ++this.branchInstance
+				state.retired.clear()
 			}
 			state.handles.absorber.configure(seconds * caps.sampleRate * frame)
 			fanout.attachIngest(stream, state.handles.absorber.ingest)
@@ -325,6 +351,11 @@ export class SourceFanoutRouter extends EventEmitter {
 		if (burst?.handles.absorber) {
 			const absorber = burst.handles.absorber
 			const overflow = absorber.counters()
+			const retired: [string, number][] = []
+			for (const [key, gate] of burst.retired) {
+				retired.push([key, gate.total])
+				if (++gate.reads >= RETIRED_GATE_READS) burst.retired.delete(key)
+			}
 			counters.set(`${ABSORBER_COUNTER_PREFIX}#${burst.instance}`, {
 				droppedBytesTotal: overflow.overflowBytesTotal,
 				droppedChunksTotal: overflow.overflowChunksTotal,
@@ -333,11 +364,14 @@ export class SourceFanoutRouter extends EventEmitter {
 					? {
 							// Keyed like the branch counters: a removed and re-added
 							// id is a new branch, its gate total a new key from zero.
-							overflowGatedBy: Object.fromEntries(
-								Object.entries(absorber.overflowGatedBy()).map(
+							// A branch removed since keeps its last total under its old
+							// key, so overflow it held is still charged to it.
+							overflowGatedBy: Object.fromEntries([
+								...retired,
+								...Object.entries(absorber.overflowGatedBy()).map(
 									([id, total]) => [`${id}#${instances?.get(id) ?? 0}`, total],
 								),
-							),
+							]),
 						}
 					: {}),
 			})
@@ -454,6 +488,37 @@ export class SourceFanoutRouter extends EventEmitter {
 		this.topology.delete(fanout)
 	}
 
+	/**
+	 * Keeps a removed branch's absorber gate total until the monitor read it.
+	 * This listener was added when the fanout was created, before any absorber
+	 * on it, so it runs before the absorber forgets the branch's total.
+	 */
+	private retireGate(
+		fanout: FanoutManager,
+		id: string,
+		instance: number,
+	): void {
+		for (const [sourceId, burst] of this.bursts) {
+			const absorber = burst.handles.absorber
+			if (
+				!absorber ||
+				!hasOverflowGates(absorber) ||
+				(sourceId === this.primarySourceId
+					? this.primary
+					: this.fanouts.get(sourceId)) !== fanout
+			)
+				continue
+			const total = absorber.overflowGatedBy()[id]
+			if (!total) return
+			burst.retired.set(`${id}#${instance}`, { total, reads: 0 })
+			for (const key of burst.retired.keys()) {
+				if (burst.retired.size <= RETIRED_GATES_MAX) break
+				burst.retired.delete(key)
+			}
+			return
+		}
+	}
+
 	private forwardEvents(fanout: FanoutManager): void {
 		const generation = ++this.topologyGeneration
 		const state = {
@@ -475,6 +540,7 @@ export class SourceFanoutRouter extends EventEmitter {
 				state.changed = true
 				state.generation = ++this.topologyGeneration
 				state.removals = state.generation
+				this.retireGate(fanout, id, state.instances.get(id) ?? 0)
 				state.instances.delete(id)
 			},
 		}

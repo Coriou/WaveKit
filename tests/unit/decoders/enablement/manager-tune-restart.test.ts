@@ -412,37 +412,160 @@ it("a second dongle is not tuned by its own centre while the VFO is on another s
 	expect(probed.find(p => p.key === raw("far").key)?.tunedBand).toBeUndefined()
 })
 
-it("a hop VFO left when the scanner releases is not tuned until a later settle", async () => {
+/** A placement's tuned-band priority as the manager holds it, running or not. */
+const tunedFlag = (m: DecoderManager, id: string) =>
+	(
+		m as unknown as {
+			decoders: Map<string, { placement?: { tunedBand?: true } }>
+		}
+	).decoders.get(id)?.placement?.tunedBand === true
+
+/** A gate that records forgotten keys and sheds one key with late drops on demand. */
+function shedding() {
 	const forgotten: string[] = []
+	const shed: { key?: string } = {}
+	const wrapGate = (gate: EfficiencyGate): EfficiencyGate => ({
+		...gate,
+		forget: key => {
+			forgotten.push(key)
+			gate.forget(key)
+		},
+		probation: (list, now) => {
+			const key = shed.key
+			if (key === undefined || !list.some(p => p.key === key))
+				return gate.probation(list, now)
+			delete shed.key
+			return [{ key, detail: "late-drops" }]
+		},
+	})
+	return { forgotten, shed, wrapGate }
+}
+
+for (const hopSettles of [true, false])
+	it(`a sweep ${hopSettles ? "whose hops settle" : "with no hop settle"} releases no loss hold through its restore; the user's next settle does`, async () => {
+		const g = shedding()
+		const f = await setup({ wrapGate: g.wrapGate })
+		f.settle(FAR_HZ)
+		await f.tune(NEAR_HZ)
+		expect(f.running("near")).toBe(true)
+		g.shed.key = raw("near").key
+		await vi.advanceTimersByTimeAsync(EFFICIENCY_SAMPLE_MS + 500)
+		expect(f.running("near")).toBe(false)
+		expect(f.m.getStatus("near")?.efficiency?.detail).toBe("late-drops")
+		g.forgotten.length = 0
+		await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+		if (hopSettles) {
+			await f.tune(FAR_HZ)
+			// The restore retune, written while held; it settles after release.
+			f.sources.setCenter("rtl", NEAR_HZ)
+		}
+		await f.m.releaseSource("rtl", "job-1")
+		if (hopSettles) f.settle(NEAR_HZ)
+		// Far longer than a fresh dwell (TUNED_SETTLE_MS = 1000 ms).
+		await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
+		expect(g.forgotten).not.toContain(raw("near").key)
+		expect(f.running("near")).toBe(false)
+		expect(f.m.getStatus("near")?.efficiency?.detail).toBe("late-drops")
+		// Priority still follows the VFO: the near band is the tuned one.
+		expect(tunedFlag(f.m, "near")).toBe(true)
+		// One user settle in the band starts a stay that releases the hold.
+		await f.tune(NEAR_HZ + 100_000)
+		await vi.advanceTimersByTimeAsync(TUNED_SETTLE_MS + DEBOUNCE_MS)
+		expect(g.forgotten).toContain(raw("near").key)
+		expect(f.running("near")).toBe(true)
+	})
+
+it("a restore that settles while held gives the restored band priority after the release, but releases none of its holds", async () => {
+	const forgotten: string[] = []
+	let probed: readonly RunningPlacement[] = []
 	const f = await setup({
-		budgetCores: 0.5,
 		wrapGate: gate => ({
 			...gate,
 			forget: key => {
 				forgotten.push(key)
 				gate.forget(key)
 			},
+			probation: (list, now) => {
+				probed = list
+				return gate.probation(list, now)
+			},
 		}),
 	})
-	f.settle(FAR_HZ)
-	await vi.advanceTimersByTimeAsync(1_000)
-	expect(f.m.getStatus("near")?.efficiency?.detail).toBe("budget")
-	await f.m.holdSource("rtl", "tuner-scanning", "job-1")
-	// A hop settles the VFO in the near band.
-	await f.tune(NEAR_HZ)
-	// The restore moves the centre back, and the source is released before
-	// the restored VFO settles: the settled VFO is still the hop's.
-	f.sources.setCenter("rtl", FAR_HZ)
-	await f.m.releaseSource("rtl", "job-1")
-	await vi.advanceTimersByTimeAsync(5_000)
-	expect(forgotten).not.toContain(raw("near").key)
-	expect(f.running("near")).toBe(false)
-	expect(f.m.getStatus("near")?.efficiency?.detail).toBe("budget")
-	// The restore settles back at the far band, then the user tunes near.
-	f.settle(FAR_HZ)
-	await vi.advanceTimersByTimeAsync(5_000)
-	expect(forgotten).not.toContain(raw("near").key)
-	await f.tune(NEAR_HZ)
-	await vi.advanceTimersByTimeAsync(TUNED_SETTLE_MS + DEBOUNCE_MS)
-	expect(forgotten).toContain(raw("near").key)
+	const tracker = createVfoTracker({
+		now: () => performance.now(),
+		setTimer: (fn, ms) => {
+			const timer = setTimeout(fn, ms)
+			return { cancel: () => clearTimeout(timer) }
+		},
+		onSettled: vfo => f.m.notifyVfoSettled(vfo),
+	})
+	const move = async (hz: number) => {
+		f.sources.setCenter("rtl", hz)
+		tracker.update({ sourceId: "rtl", frequencyHz: hz })
+		await vi.advanceTimersByTimeAsync(VFO_SETTLE_MS + DEBOUNCE_MS)
+	}
+	try {
+		await move(FAR_HZ)
+		await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+		await move(NEAR_HZ)
+		// The restore settles at the far band while the source is still held.
+		await move(FAR_HZ)
+		forgotten.length = 0
+		await f.m.releaseSource("rtl", "job-1")
+		// The tracker reports nothing more: the far VFO is unchanged.
+		await vi.advanceTimersByTimeAsync(EFFICIENCY_SAMPLE_MS + 500)
+		expect(f.running("far")).toBe(true)
+		expect(probed.find(p => p.key === raw("far").key)?.tunedBand).toBe(true)
+		expect(probed.find(p => p.key === raw("near").key)?.tunedBand).toBe(
+			undefined,
+		)
+		expect(forgotten).toEqual([])
+	} finally {
+		tracker.dispose()
+	}
 })
+
+for (const hold of ["late-drops", "stop"] as const)
+	it(`after a sweep the restored band has priority but its ${hold} hold waits for the user's settle`, async () => {
+		const g = shedding()
+		const f = await setup({ wrapGate: g.wrapGate })
+		f.settle(NEAR_HZ)
+		await f.tune(FAR_HZ)
+		expect(f.running("far")).toBe(true)
+		if (hold === "stop") await f.m.stopDecoder("far")
+		else {
+			g.shed.key = raw("far").key
+			await vi.advanceTimersByTimeAsync(EFFICIENCY_SAMPLE_MS + 500)
+			expect(f.m.getStatus("far")?.efficiency?.detail).toBe("late-drops")
+		}
+		expect(f.running("far")).toBe(false)
+		g.forgotten.length = 0
+		await f.m.holdSource("rtl", "tuner-scanning", "job-1")
+		// A hop settles in the near band; the restore moves the centre back
+		// while held and settles the VFO at the far band after the release.
+		await f.tune(NEAR_HZ)
+		f.sources.setCenter("rtl", FAR_HZ)
+		await f.m.releaseSource("rtl", "job-1")
+		f.settle(FAR_HZ)
+		await vi.advanceTimersByTimeAsync(5 * TUNED_SETTLE_MS)
+		// The restored band is the tuned one again...
+		expect(tunedFlag(f.m, "near")).toBe(false)
+		if (hold === "late-drops") expect(tunedFlag(f.m, "far")).toBe(true)
+		// ...but neither its loss hold is released nor its Stop undone.
+		expect(g.forgotten).not.toContain(raw("far").key)
+		expect(f.running("far")).toBe(false)
+		if (hold === "stop")
+			expect(f.m.getStatus("far")?.desiredRunning).toBe(false)
+		else expect(f.m.getStatus("far")?.efficiency?.detail).toBe("late-drops")
+		if (hold === "late-drops") {
+			// One user settle in the band releases it.
+			await f.tune(FAR_HZ + 100_000)
+			await vi.advanceTimersByTimeAsync(TUNED_SETTLE_MS + DEBOUNCE_MS)
+			expect(g.forgotten).toContain(raw("far").key)
+		} else {
+			// A Stop is undone only by the user's tune into the band.
+			await f.tune(NEAR_HZ)
+			await f.tune(FAR_HZ)
+		}
+		expect(f.running("far")).toBe(true)
+	})

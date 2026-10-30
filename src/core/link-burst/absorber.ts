@@ -22,7 +22,8 @@ export interface OverflowGates {
 	 * Overflow bytes lost while each branch (fanout id) held the absorber,
 	 * totals since creation; a removed branch's total is forgotten, so a
 	 * re-added id starts again at zero (the source router keys each total by
-	 * branch instance). Overflow is charged to the branches holding the
+	 * branch instance, and keeps a removed one's last total until the monitor
+	 * read it). Overflow is charged to the branches holding the
 	 * absorber at that moment; with none still holding, to the laggards
 	 * excluded during this hold (one whose deadline expires at that very
 	 * instant included): their hold filled the queue.

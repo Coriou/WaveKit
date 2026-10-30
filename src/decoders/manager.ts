@@ -640,9 +640,8 @@ export class DecoderManager extends EventEmitter {
 	/** Monotonic ms of the last VFO settle report. */
 	private vfoSettledAtMs = -Infinity
 	/**
-	 * Provenance of the settled VFO, kept until the next settle report: a hop
-	 * VFO stays the scanner's after the release, until the restore (or the
-	 * user) settles it again.
+	 * Provenance of the settled VFO, kept until the next settle report: only
+	 * an "other" settle earns a tuned stay dwell credit from its settle time.
 	 */
 	private vfoSettleKind: VfoSettleKind = "other"
 	/**
@@ -656,6 +655,13 @@ export class DecoderManager extends EventEmitter {
 	private tunedSettleTimer: ReturnType<typeof setTimeout> | null = null
 	/** Scanner holds per source, so a hop or the restore is never a user tune. */
 	private readonly scanHolds = new Map<string, ScanHold>()
+	/**
+	 * Sources a scanner hold took since the user last settled the VFO on
+	 * them: their tuned stays still have priority once released, but earn no
+	 * hold release until the user's next settle there ("other", after the
+	 * release) starts a fresh stay.
+	 */
+	private readonly scanTainted = new Set<string>()
 	private reconcilingPlacements = false
 	/** A reconciliation was asked for while one ran: run another after it. */
 	private reconcileDirty = false
@@ -795,6 +801,11 @@ export class DecoderManager extends EventEmitter {
 		this.settledVfo = next
 		this.vfoSettledAtMs = performance.now()
 		this.vfoSettleKind = next ? this.scannerSettle(next) : "other"
+		if (next && this.vfoSettleKind === "other") {
+			// The user's settle starts the source's stays afresh: earlier ones,
+			// tuned before or by a sweep, were dropped while it was tainted.
+			this.scanTainted.delete(next.sourceId)
+		}
 		if (
 			next &&
 			this.vfoSettleKind === "other" &&
@@ -953,17 +964,11 @@ export class DecoderManager extends EventEmitter {
 		input: TunedView,
 	): boolean {
 		const parent = this.decoders.get(placement.decoderId)
-		// A scanner sweep's hops on a held source are not the user's tuning,
-		// nor is a hop VFO the release left settled until it settles again.
-		if (
-			!parent ||
-			this.isSourceHeld(placement.sourceId) ||
-			(this.vfoSettleKind === "hop" &&
-				input.vfo != null &&
-				sameVfo(this.settledVfo, input.vfo) &&
-				input.vfo.sourceId === placement.sourceId)
-		)
-			return false
+		// A scanner sweep's hops on a held source are not the user's tuning.
+		// Once released, priority follows the current VFO whatever settled it
+		// (a hop, the restore or the user); only releasing holds and undoing
+		// a Stop wait for the user's settle (`releaseTunedHolds`).
+		if (!parent || this.isSourceHeld(placement.sourceId)) return false
 		const source = input.sources.find(item => item.id === placement.sourceId)
 		return bandContainsTuned(
 			this.resolveBand(parent).requirements,
@@ -986,9 +991,12 @@ export class DecoderManager extends EventEmitter {
 	 * stay in the band acts once, read against the stays the reconciliations
 	 * saw, not the placements' flags, which every probation pass refreshes
 	 * through `retuneFlags`. A stay tuned by the settled VFO began
-	 * TUNED_SETTLE_MS before its settle report, unless the scanner's restore
-	 * settled it; any other stay is timed here and a timer re-runs the
-	 * reconciliation when it has lasted long enough.
+	 * TUNED_SETTLE_MS before its settle report, unless the scanner settled it;
+	 * any other stay is timed here and a timer re-runs the reconciliation when
+	 * it has lasted long enough. On a source a scanner hold took since the
+	 * user's last settle there (`scanTainted`) no stay is kept, so neither a
+	 * hop, the restore nor dwell credit from before the sweep releases a
+	 * hold: only a stay the user's next settle starts does.
 	 */
 	private releaseTunedHolds(wanted: readonly WantedPlacement[]): void {
 		const gate = this.config.enablement?.gate
@@ -996,7 +1004,11 @@ export class DecoderManager extends EventEmitter {
 		const episodes = new Map<string, TunedEpisode>()
 		let waitMs = Infinity
 		for (const placement of wanted) {
-			if (placement.tunedBand !== true) continue
+			if (
+				placement.tunedBand !== true ||
+				this.scanTainted.has(placement.sourceId)
+			)
+				continue
 			const episode = this.tunedEpisodes.get(placement.key) ?? {
 				sinceMs:
 					this.settledVfo?.sourceId === placement.sourceId &&
@@ -2828,6 +2840,8 @@ export class DecoderManager extends EventEmitter {
 		holderId: string,
 	): Promise<void> {
 		const holders = this.heldSources.get(sourceId) ?? new Set<string>()
+		// Any hold resets the source's dwell credit and provenance.
+		this.scanTainted.add(sourceId)
 		if (holders.size === 0) {
 			// A sweep taking the source before the last one's restore settled
 			// keeps that sweep's pre-hold VFO.

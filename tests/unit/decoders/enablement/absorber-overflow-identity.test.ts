@@ -202,3 +202,22 @@ it("a re-created live-audio branch overflowing the same total is still charged t
 		h.close()
 	}
 })
+
+it("overflow held only by a live-audio branch removed before the sample is still charged to it: nobody is shed", () => {
+	const h = harness()
+	try {
+		h.congested.add("live-demod-s")
+		// 200 bytes into 128: 72 lost while live audio alone holds.
+		h.absorber.ingest(Buffer.alloc(200))
+		expect(h.absorber.counters().overflowBytesTotal).toBe(72)
+		// The listener leaves before the monitor samples.
+		h.congested.clear()
+		h.primary.removeBranch("live-demod-s")
+		expect(h.sample()).toEqual([])
+		expect(h.monitor.chargedDropsBetweenMono("s", 0, Infinity)).toEqual([
+			expect.objectContaining({ branches: ["live-demod-s"] }),
+		])
+	} finally {
+		h.close()
+	}
+})
