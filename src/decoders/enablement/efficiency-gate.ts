@@ -34,6 +34,17 @@ const DropStateSchema = z.object({
 const valid = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0
 
+/**
+ * The smallest double above a valid time: a mark set here admits as evidence
+ * only what happened strictly after `value` (the readers count `>= since`).
+ */
+const justAfter = (value: number): number => {
+	if (value === 0) return Number.MIN_VALUE
+	const bits = new BigInt64Array(new Float64Array([value]).buffer)
+	bits[0] = bits[0]! + 1n
+	return new Float64Array(bits.buffer)[0]!
+}
+
 /** Stateful decision core; all time and observations are supplied by the caller. */
 export interface DropReader {
 	sourceEpoch?(id: string): number
@@ -311,19 +322,23 @@ export function createEfficiencyGate(
 		}
 	}
 	const onProbation = (p: RunningPlacement, mono: number) => !graduates(p, mono)
+	/** An `always` decoder's or an operator-started placement: never stopped for another. */
+	const pinned = (p: RunningPlacement | WantedPlacement) =>
+		("mode" in p && p.mode === "always") ||
+		("startMode" in p && p.startMode === "operator")
 	/**
 	 * A gate-admitted placement the gate may stop for another: never a YAML
 	 * placement (never admitted here), an `always` decoder or an operator start.
 	 */
 	const sheddable = (p: RunningPlacement | WantedPlacement) =>
-		gated.has(p.key) &&
-		(!("mode" in p) || p.mode !== "always") &&
-		(!("startMode" in p) || p.startMode !== "operator")
+		gated.has(p.key) && !pinned(p)
 	/**
 	 * Whether `p` holds no budget against `newcomer`. 3.21: gated secondaries
 	 * yield to an ungated newcomer, except a tuned-band secondary to an
-	 * untuned one. Tuned band: every sheddable untuned placement yields to a
-	 * tuned-band newcomer, so the decoders of the tuned band are refused last.
+	 * untuned one, and never a pinned one (`always` or operator start, which
+	 * holds its budget like a primary). Tuned band: every sheddable untuned
+	 * placement yields to a tuned-band newcomer, so the decoders of the tuned
+	 * band are refused last.
 	 */
 	const yieldsTo = (
 		newcomer: WantedPlacement,
@@ -334,6 +349,7 @@ export function createEfficiencyGate(
 		if (
 			newcomer.gated !== true &&
 			p.gated === true &&
+			!pinned(p) &&
 			(tuned || p.tunedBand !== true)
 		)
 			return true
@@ -434,6 +450,11 @@ export function createEfficiencyGate(
 							w.endMono <= mono &&
 							typeof w.condemning === "boolean" &&
 							typeof w.linkOrUnknownDrops === "boolean" &&
+							(w.condemnedBranches === undefined ||
+								(Array.isArray(w.condemnedBranches) &&
+									w.condemnedBranches.every(
+										(b: unknown) => typeof b === "string",
+									))) &&
 							(i === 0 || value[i - 1].endMono <= w.startMono),
 					)
 				)
@@ -449,10 +470,25 @@ export function createEfficiencyGate(
 		} catch {
 			/* Unreadable windows never condemn or credit. */
 		}
-		const condemningWindows = windows.filter(w => w.condemning).length
+		// A window condemns the placements reading a branch that dropped in it;
+		// an unscoped window (no branch list) condemns the whole source.
+		const condemns = (w: LateDropWindow, p: RunningPlacement) =>
+			w.condemning &&
+			(w.condemnedBranches === undefined ||
+				(p.inputBranch !== undefined &&
+					w.condemnedBranches.includes(p.inputBranch)))
+		// Windows that condemn some placement on the source: drops only on a
+		// branch no decoder reads (live audio) condemn nothing.
+		const condemningWindows = windows.filter(w =>
+			placements.some(p => condemns(w, p)),
+		).length
+		// Each placement is judged by its own branch's windows.
+		const condemned = eligible.filter(
+			p => windows.filter(w => condemns(w, p)).length >= LATE_SHED_HITS,
+		)
 		let held: "nothing-sheddable" | "link-or-unknown" | null = null
 		if (!probation) {
-			if (condemningWindows >= LATE_SHED_HITS && eligible.length === 0)
+			if (condemningWindows >= LATE_SHED_HITS && condemned.length === 0)
 				held = "nothing-sheddable"
 			else if (
 				condemningWindows < LATE_SHED_HITS &&
@@ -464,6 +500,7 @@ export function createEfficiencyGate(
 
 		return {
 			eligible,
+			condemned,
 			condemningWindows,
 			windows: windows.length,
 			held,
@@ -811,7 +848,10 @@ export function createEfficiencyGate(
 					if (scapegoat && valid(mono)) {
 						failures.add(scapegoat.key)
 						verdicts.push({ key: scapegoat.key, detail })
-						mark(placement.key, mono)
+						// The loss is spent on the scapegoat: the restarted probation
+						// counts only drops and CPU strictly after this evaluation,
+						// so the same drop never condemns a second placement.
+						mark(placement.key, justAfter(mono))
 						continue
 					}
 					failures.add(placement.key)
@@ -846,13 +886,14 @@ export function createEfficiencyGate(
 					}
 					if (
 						mono < (cooldownUntil.get(sourceId) ?? 0) ||
-						state.condemningWindows < LATE_SHED_HITS
+						state.condemned.length === 0
 					)
 						continue
-					// Tuned band: untuned placements are shed before tuned ones.
-					const untuned = state.eligible.filter(p => p.tunedBand !== true)
+					// Only placements whose own branch dropped are shed; among them,
+					// tuned band: untuned placements before tuned ones.
+					const untuned = state.condemned.filter(p => p.tunedBand !== true)
 					const newestEligible = (
-						untuned.length ? untuned : state.eligible
+						untuned.length ? untuned : state.condemned
 					).reduce<RunningPlacement | undefined>(
 						(best, p) =>
 							!best || admittedMono.get(p.key)! > admittedMono.get(best.key)!

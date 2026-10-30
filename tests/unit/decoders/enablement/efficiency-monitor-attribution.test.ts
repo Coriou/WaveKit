@@ -148,6 +148,10 @@ it.each(["link", "unknown", "consumer", "host"] as const)(
 				endMono: 20000,
 				condemning: code === "consumer" || code === "host",
 				linkOrUnknownDrops: code === "link" || code === "unknown",
+				// Only the branches whose drops condemn: one slow consumer, or
+				// every branch the starved host dropped on.
+				condemnedBranches:
+					code === "consumer" ? ["a"] : code === "host" ? ["a", "b"] : [],
 			},
 		])
 	},

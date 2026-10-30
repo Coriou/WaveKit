@@ -660,8 +660,13 @@ it.each([false, true])(
 		f.yamlDecoder("yaml")
 		f.create("yaml")
 		f.plan([f.place("auto", 162_000_000), f.place("yaml", 162_025_000)])
-		// Two real fanout branches supply independent counters; no socket is opened.
-		const slow = f.fanout.addBranch({ id: "slow", highWaterMark: 16 })
+		// Two real fanout branches supply independent counters; no socket is
+		// opened. The slow one is the channelizer's, which the channel
+		// placements read: late drops are charged to the branch that dropped.
+		const slow = f.fanout.addBranch({
+			id: "channelizer-rtl",
+			highWaterMark: 16,
+		})
 		const sibling = f.fanout.addBranch({ id: "sibling", highWaterMark: 16 })
 		const chunk = Buffer.alloc(64)
 		const tick = async (drop: "none" | "link" | "consumer") => {

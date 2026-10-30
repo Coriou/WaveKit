@@ -17,6 +17,7 @@ import {
 	LATE_SHED_WINDOWS,
 	EFFICIENCY_SAMPLE_MS,
 	EFFICIENCY_STALE_MS,
+	counterBranchId,
 } from "./contract.js"
 import type {
 	EfficiencySample,
@@ -52,13 +53,20 @@ const recoverySchema = z.object({
 const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
 type DeferredLoss = {
 	at: number
+	/** The fanout branches that dropped in this interval. */
+	branches: string[]
 	bytes: number
 	chunks: number
 	gap: number
 	loop: number
 	cpu: number
 }
-type WindowEvidence = LateDropWindow & { complete: boolean; closedAt?: number }
+type WindowEvidence = LateDropWindow & {
+	complete: boolean
+	closedAt?: number
+	/** Branches whose condemning (consumer or host) drops fell in the window. */
+	branches: Set<string>
+}
 type SourceState = {
 	pending: {
 		sequence: number
@@ -557,6 +565,13 @@ export function createEfficiencyMonitor(deps: {
 			if (!applies) evidenceValid = true
 			const intervalBytes = bytes
 			const positiveNow = bytes > 0 || chunks > 0
+			// Late drops are charged to the branches that dropped, never to the
+			// source as a whole.
+			const droppedBranches: string[] = []
+			for (const [key, loss] of s.branchDrops) {
+				const branch = counterBranchId(key)
+				if (loss > 0 && branch !== null) droppedBranches.push(branch)
+			}
 			let currentCode: DropAttribution = !applies
 				? positiveNow
 					? "unknown"
@@ -576,6 +591,7 @@ export function createEfficiencyMonitor(deps: {
 			type Resolved = {
 				deferred: boolean
 				at: number
+				branches: string[]
 				bytes: number
 				chunks: number
 				code: DropAttribution
@@ -639,6 +655,7 @@ export function createEfficiencyMonitor(deps: {
 			if (positiveNow && currentCode !== "consumer" && gapLoss) {
 				const loss: DeferredLoss = {
 					at,
+					branches: droppedBranches,
 					bytes,
 					chunks,
 					gap: maxGapMs!,
@@ -674,6 +691,7 @@ export function createEfficiencyMonitor(deps: {
 				resolved.push({
 					deferred: false,
 					at,
+					branches: droppedBranches,
 					bytes,
 					chunks,
 					code: currentCode,
@@ -743,6 +761,7 @@ export function createEfficiencyMonitor(deps: {
 						condemning: false,
 						linkOrUnknownDrops: false,
 						complete: comparable && evidenceValid,
+						branches: new Set(),
 					}
 				}
 				s.openWindow ??= {
@@ -751,6 +770,7 @@ export function createEfficiencyMonitor(deps: {
 					condemning: false,
 					linkOrUnknownDrops: false,
 					complete: true,
+					branches: new Set(),
 				}
 				if (at > s.openWindow.startMono)
 					s.openWindow.complete &&= comparable && evidenceValid
@@ -759,8 +779,10 @@ export function createEfficiencyMonitor(deps: {
 						w => r.at > w.startMono && r.at <= (w.closedAt ?? w.endMono),
 					)
 					if (w) {
-						if (r.code === "consumer" || r.code === "host") w.condemning = true
-						else w.linkOrUnknownDrops = true
+						if (r.code === "consumer" || r.code === "host") {
+							w.condemning = true
+							for (const branch of r.branches) w.branches.add(branch)
+						} else w.linkOrUnknownDrops = true
 					}
 				}
 				if (at === s.openWindow.endMono) {
@@ -771,6 +793,7 @@ export function createEfficiencyMonitor(deps: {
 						condemning: false,
 						linkOrUnknownDrops: false,
 						complete: comparable && evidenceValid,
+						branches: new Set(),
 					}
 				}
 				if (!waiting) {
@@ -781,6 +804,7 @@ export function createEfficiencyMonitor(deps: {
 								endMono: w.endMono,
 								condemning: w.condemning,
 								linkOrUnknownDrops: !w.condemning && w.linkOrUnknownDrops,
+								condemnedBranches: [...w.branches].sort(),
 							})
 							if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
 						}
@@ -986,7 +1010,12 @@ export function createEfficiencyMonitor(deps: {
 				.filter(
 					w => w.endMono > at - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
 				)
-				.map(w => ({ ...w }))
+				.map(w => ({
+					...w,
+					...(w.condemnedBranches
+						? { condemnedBranches: [...w.condemnedBranches] }
+						: {}),
+				}))
 		},
 		linkDropsSince(id, since) {
 			const at = clock()

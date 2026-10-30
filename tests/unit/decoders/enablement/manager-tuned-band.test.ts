@@ -13,6 +13,7 @@ import {
 	placementKey,
 } from "../../../../src/decoders/enablement/contract.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
+import type { EfficiencyGate } from "../../../../src/decoders/enablement/contract.js"
 import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
 
@@ -45,7 +46,13 @@ async function setup(
 	centreHz: number,
 	mode: "auto" | "off" = "auto",
 	extra: WantedPlacement[] = [],
+	opts: {
+		plan?: (centreHz: number | undefined) => WantedPlacement[]
+		farMode?: "auto" | "always"
+		wrapGate?: (gate: EfficiencyGate) => EfficiencyGate
+	} = {},
 ) {
+	const { plan, farMode = "auto", wrapGate = g => g } = opts
 	vi.useFakeTimers()
 	const sources = new FakeSources()
 	sources.caps.set("rtl", { ...iqCaps(RATE), centerFreq: centreHz })
@@ -68,21 +75,25 @@ async function setup(
 	// The planner lists the untuned-by-default decoder first: the order the
 	// tuned band must override.
 	const planner = vi.fn<PlacementPlanner>(() => ({
-		wanted: [raw("far"), raw("near"), ...extra],
+		wanted: plan
+			? plan(sources.caps.get("rtl")?.centerFreq)
+			: [raw("far"), raw("near"), ...extra],
 		unplaced: new Map(),
 	}))
 	const logger = pino({ level: "silent" })
-	const gate = createEfficiencyGate(
-		{ budgetCores: 0.5, cpuGuardPercent: 90 },
-		{
-			drops: {
-				dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
-				monoNow: () => performance.now(),
-				sources: () => ["rtl"],
-				droppedSinceMono: () => false,
-				droppedWithinMs: () => false,
+	const gate = wrapGate(
+		createEfficiencyGate(
+			{ budgetCores: 0.5, cpuGuardPercent: 90 },
+			{
+				drops: {
+					dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+					monoNow: () => performance.now(),
+					sources: () => ["rtl"],
+					droppedSinceMono: () => false,
+					droppedWithinMs: () => false,
+				},
 			},
-		},
+		),
 	)
 	manager = new DecoderManager(registry, new FanoutManager(logger), logger, {
 		validateVersions: false,
@@ -92,7 +103,7 @@ async function setup(
 			resolveMode: id =>
 				id === "near"
 					? { mode, source: mode === "off" ? "settings" : "default" }
-					: { mode: "auto", source: "default" },
+					: { mode: farMode, source: "default" },
 			isCatalogue: () => true,
 			unavailable: () => false,
 			recheckAvailable: async () => true,
@@ -150,6 +161,60 @@ it("tuning into a band starts its decoder without waiting out a budget backoff",
 	expect(running(f, "far")).toBe(false)
 	expect(f.m.getStatus("far")?.efficiency?.detail).toBe("budget")
 	expect(3_000).toBeLessThan(EFFICIENCY_RETRY_MS)
+})
+
+it("a new tuned worker sees the old tuned worker as untuned and starts at once", async () => {
+	// Primaries cost nothing here; each decoder's 0.3-core secondary worker
+	// holds the budget. The near worker is wanted only once its band is tuned.
+	const free = (id: string): WantedPlacement => ({ ...raw(id), costCores: 0 })
+	const worker = (id: string, hz: number): WantedPlacement => ({
+		...raw(id),
+		key: placementKey(id, "rtl", "channel", hz + 25_000),
+		channelHz: hz + 25_000,
+		primary: false,
+	})
+	const farWorker = worker("far", FAR_HZ)
+	const nearWorker = worker("near", NEAR_HZ)
+	const f = await setup(FAR_HZ, "auto", [], {
+		plan: centre => [
+			free("far"),
+			free("near"),
+			farWorker,
+			...(centre === NEAR_HZ ? [nearWorker] : []),
+		],
+	})
+	expect(f.instances.get(farWorker.key)?.running).toBe(true)
+	f.sources.setCenter("rtl", NEAR_HZ)
+	// Caps debounce (300 ms) plus one efficiency sample (2000 ms) at most;
+	// before the fix it waited out a 60 s budget retry.
+	await vi.advanceTimersByTimeAsync(3_000)
+	expect(f.instances.get(nearWorker.key)?.running).toBe(true)
+	expect(f.instances.get(farWorker.key)?.running).toBe(false)
+})
+
+it("the manager never displaces an always decoder's placement, whatever the gate lists", async () => {
+	// A gate that lists the running far placement for displacement.
+	const f = await setup(FAR_HZ, "auto", [], {
+		farMode: "always",
+		wrapGate: gate => ({
+			...gate,
+			admit: (newcomer, running, now) =>
+				newcomer.decoderId === "near"
+					? {
+							admit: true,
+							displace: running
+								.filter(p => p.key === raw("far").key)
+								.map(p => p.key),
+						}
+					: gate.admit(newcomer, running, now),
+		}),
+	})
+	expect(running(f, "far")).toBe(true)
+	f.sources.setCenter("rtl", NEAR_HZ)
+	await vi.advanceTimersByTimeAsync(3_000)
+	expect(running(f, "far")).toBe(true)
+	// Its capacity was not released: the newcomer waits.
+	expect(running(f, "near")).toBe(false)
 })
 
 it("a decoder turned off in Settings stays off when its band is tuned", async () => {

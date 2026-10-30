@@ -45,6 +45,7 @@ import {
 	DECODER_BRANCH_STARTUP_MS,
 	DECODER_PROTOCOLS,
 	placementOptionsKey,
+	channelizerBranchId,
 } from "./enablement/contract.js"
 import type { PlannerCentreSlot } from "./enablement/contract.js"
 import {
@@ -788,6 +789,15 @@ export class DecoderManager extends EventEmitter {
 		)
 	}
 
+	/** An `always` decoder's or an operator-started placement: never displaced. */
+	private placementPinned(state: DecoderState): boolean {
+		const owner = state.parentId ? this.decoders.get(state.parentId) : state
+		return (
+			owner !== undefined &&
+			(this.modeFor(owner).mode === "always" || owner.startMode === "operator")
+		)
+	}
+
 	private gateExemptKey(key: string): boolean {
 		for (const state of this.decoders.values())
 			if (state.placement?.key === key) return this.gateExempt(state)
@@ -837,6 +847,49 @@ export class DecoderManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Every existing placement takes its tuned-band flag from this plan before
+	 * any admission: a newly tuned worker is admitted while the loop below
+	 * still holds the old placements, and a stale flag would keep the
+	 * previously tuned one from yielding its budget. Runs after
+	 * `releaseTunedHolds`, which reads the previous flags.
+	 */
+	private refreshTunedFlags(wanted: readonly WantedPlacement[]): void {
+		const tuned = new Map(
+			wanted.map(placement => [placement.key, placement.tunedBand === true]),
+		)
+		for (const state of this.decoders.values()) {
+			const placement = state.placement
+			if (!placement) continue
+			const flag = tuned.get(placement.key)
+			if (flag === undefined || (placement.tunedBand === true) === flag)
+				continue
+			if (flag) state.placement = { ...placement, tunedBand: true }
+			else {
+				// eslint-disable-next-line @typescript-eslint/no-unused-vars
+				const { tunedBand, ...plain } = placement
+				state.placement = plain
+			}
+		}
+	}
+
+	/**
+	 * The fanout branch a placement reads, so late drops are charged to the
+	 * placements whose own branch dropped: the channelizer's branch for a
+	 * channel, else the decoder's raw branch (none when it is not wired).
+	 */
+	private placementInputBranch(
+		state: DecoderState,
+		sourceId: string,
+	): Pick<RunningPlacement, "inputBranch"> {
+		// A raw branch has its fanout; a channel's id is not a fanout branch.
+		if (state.branchId && state.branchFanout)
+			return { inputBranch: state.branchId }
+		return state.channel || state.branchId
+			? { inputBranch: channelizerBranchId(sourceId) }
+			: {}
+	}
+
 	private runningPlacements(): RunningPlacement[] {
 		return [...this.decoders.values()].flatMap(state => {
 			const owner = state.parentId ? this.decoders.get(state.parentId) : state
@@ -858,6 +911,7 @@ export class DecoderManager extends EventEmitter {
 							...(state.placement.tunedBand
 								? { tunedBand: true as const }
 								: {}),
+							...this.placementInputBranch(state, state.placement.sourceId),
 							admittedAtMs: state.stopping
 								? performance.now() - EFFICIENCY_PROBATION_MS
 								: (state.admittedAtMs ?? performance.now()),
@@ -1475,6 +1529,7 @@ export class DecoderManager extends EventEmitter {
 				placement => this.placementTuned(placement, input),
 			)
 			this.releaseTunedHolds(wanted)
+			this.refreshTunedFlags(wanted)
 			if (plan.activity) {
 				for (const move of plan.activity.moves)
 					this.activityMoves.push({
@@ -5779,8 +5834,14 @@ export class DecoderManager extends EventEmitter {
 				item => item.placement?.key === key,
 			)
 			// Gated secondaries (3.21) and, for a tuned-band newcomer, any
-			// gate-admitted untuned placement; never a YAML one.
-			if (!state?.placement || this.gateExempt(state) || this.destroying)
+			// gate-admitted untuned placement; never a YAML one, an `always`
+			// decoder's or an operator start's.
+			if (
+				!state?.placement ||
+				this.gateExempt(state) ||
+				this.placementPinned(state) ||
+				this.destroying
+			)
 				continue
 			if (state.stopping) {
 				// An earlier stop did not complete: ask again; the capacity counts

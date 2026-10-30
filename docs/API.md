@@ -2372,7 +2372,9 @@ one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, 
 Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
 `decoderVerdictSchema` in `@wavekit/api-types`); a client treats an unknown code as
 `unknown` and ignores an unknown action. Precedence: failed, off, stopped,
-suspended (efficiency detail first), decoding, listening, starting.
+suspended (efficiency detail first), decoding, listening, starting. A budget
+suspension with no efficiency detail reads `efficiency-budget`; one with a detail the
+core does not recognise reads `unknown` with no action.
 
 #### GET /api/decoders/:id
 

@@ -379,6 +379,13 @@ export interface RunningPlacement {
 	gated?: true
 	/** Its decoder's band contains the tuned frequency: shed last (see WantedPlacement). */
 	tunedBand?: true
+	/**
+	 * The source fanout branch it reads: its own raw branch, or the
+	 * channelizer's branch for a channel placement (`channelizerBranchId`).
+	 * Late drops condemn it only when this branch dropped; absent, it reads
+	 * no fanout branch and no scoped late-drop window condemns it.
+	 */
+	inputBranch?: string
 }
 /** 3.21: an admission may list running gated secondaries to suspend for budget. */
 export interface Admitted {
@@ -438,4 +445,26 @@ export interface LateDropWindow {
 	condemning: boolean
 	/** Positive drops occurred in the window, but only in samples attributed `link` or `unknown`. */
 	linkOrUnknownDrops: boolean
+	/**
+	 * The fanout branches (ids without the instance suffix) whose drops made
+	 * the window condemning. A condemning window condemns only the placements
+	 * reading one of them, so a branch no decoder reads (live audio) condemns
+	 * none; upstream loss (absorber overflow) names no branch. Absent: the
+	 * window is not scoped and condemns every placement on its source.
+	 */
+	condemnedBranches?: readonly string[]
+}
+
+/** The source fanout branch the channelizer reads (named by ChannelizerManager). */
+export const channelizerBranchId = (sourceId: string) =>
+	`channelizer-${sourceId}`
+
+/**
+ * A branch counter key (`<branch id>#<instance>`, as the source router
+ * reports it) without its instance suffix; the absorber's key is not a branch.
+ */
+export function counterBranchId(key: string): string | null {
+	if (key.startsWith("@")) return null
+	const separator = key.lastIndexOf("#")
+	return separator > 0 ? key.slice(0, separator) : key
 }

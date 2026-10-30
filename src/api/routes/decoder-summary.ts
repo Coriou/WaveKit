@@ -145,9 +145,13 @@ function efficiencyCode(status: DecoderStatus): DecoderVerdictCode {
 			return "efficiency-late-drops"
 		case "unknown":
 			return "efficiency-waiting"
-		default:
+		case undefined:
 			// No detail: the gate's capacity verdict, the common case.
 			return "efficiency-budget"
+		default:
+			// A detail this build does not know (a newer core): claim no cause
+			// and suggest no budget action; the generic verdict is the safe one.
+			return "unknown"
 	}
 }
 

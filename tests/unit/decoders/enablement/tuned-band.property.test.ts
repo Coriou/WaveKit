@@ -124,7 +124,88 @@ it("a tuned-band newcomer is refused only when untuned placements could not make
 	)
 })
 
-// Feature: decoder-autostart, Property 2: a tuned-band probationer's loss sheds untuned first
+it("a protected secondary is never displaced for a tuned primary", () => {
+	for (const protect of ["always", "operator"] as const) {
+		const { gate, setBudget } = gateWithBudget(100)
+		const secondary: WantedPlacement = {
+			...raw("protected-secondary", "a", 0.3, false),
+			primary: false,
+			gated: true,
+		}
+		expect(gate.admit(secondary, [], 0)).toEqual({ admit: true })
+		const running: RunningPlacement[] = [
+			{
+				key: secondary.key,
+				sourceId: "a",
+				reach: "raw",
+				costCores: 0.3,
+				sampleRateHz: secondary.sampleRateHz,
+				admittedAtMs: 0,
+				gated: true,
+				mode: protect === "always" ? "always" : "auto",
+				startMode: protect === "operator" ? "operator" : "auto",
+			},
+		]
+		setBudget(0.5)
+		const decision = gate.admit(raw("tuned", "b", 0.3, true), running, 0)
+		expect(decision).toMatchObject({ admit: false, detail: "budget" })
+		expect(gate.yieldTo?.(raw("yaml", "b", 0.3, false), running)).toEqual([])
+	}
+})
+
+// Feature: decoder-autostart, Property 3: pinned placements are never displaced
+// Validates: Requirements R2
+it("no newcomer displaces an always or operator-started placement, primary or secondary", () => {
+	fc.assert(
+		fc.property(
+			fc.array(fc.record({ d: decoderArb, secondary: fc.boolean() }), {
+				minLength: 0,
+				maxLength: 7,
+			}),
+			fc.integer({ min: 10, max: 300 }).map(n => n / 100),
+			fc.integer({ min: 5, max: 60 }).map(n => n / 100),
+			fc.boolean(),
+			(decoders, budgetCores, newcomerCost, newcomerTuned) => {
+				const { gate, setBudget } = gateWithBudget(100)
+				const running: RunningPlacement[] = []
+				decoders.forEach(({ d, secondary }, i) => {
+					const p: WantedPlacement = {
+						...raw(`d${i}`, `s${i}`, d.cost, d.tuned),
+						...(secondary ? { primary: false, gated: true as const } : {}),
+					}
+					expect(gate.admit(p, running, 0).admit).toBe(true)
+					running.push({
+						key: p.key,
+						sourceId: p.sourceId,
+						reach: p.reach,
+						costCores: p.costCores,
+						sampleRateHz: p.sampleRateHz,
+						admittedAtMs: 0,
+						mode: d.protect === "always" ? "always" : "auto",
+						startMode: d.protect === "operator" ? "operator" : "auto",
+						...(secondary ? { gated: true as const } : {}),
+						...(d.tuned ? { tunedBand: true as const } : {}),
+					})
+				})
+				setBudget(budgetCores)
+				const newcomer = raw("new", "t", newcomerCost, newcomerTuned)
+				const pinned = new Set(
+					running
+						.filter(p => p.mode === "always" || p.startMode === "operator")
+						.map(p => p.key),
+				)
+				const decision = gate.admit(newcomer, running, 0)
+				for (const key of decision.admit ? (decision.displace ?? []) : [])
+					expect(pinned.has(key)).toBe(false)
+				for (const key of gate.yieldTo?.(newcomer, running) ?? [])
+					expect(pinned.has(key)).toBe(false)
+			},
+		),
+		{ numRuns: 300 },
+	)
+})
+
+// Feature: decoder-autostart, Property 2: a tuned-band probationer's loss sheds untuned first, one placement per drop
 // Validates: Requirements R2
 it("drops during a tuned-band probation shed the newest untuned placement on its source", () => {
 	fc.assert(
@@ -176,17 +257,29 @@ it("drops during a tuned-band probation shed the newest untuned placement on its
 					startMode: "auto",
 					tunedBand: true,
 				})
-				mono += 2_000
-				dropAt = mono
-				const verdicts = gate.probation(running, mono)
 				const untuned = others
 					.map((t, i) => (t ? null : `o${i}`))
 					.filter((k): k is string => k !== null)
-				if (untuned.length)
-					expect(verdicts).toEqual([
-						{ key: untuned[untuned.length - 1]!, detail: "drops" },
+				// Each drop (at the evaluation's own time, the boundary case) sheds
+				// exactly one placement: the newest untuned one, else the tuned
+				// one. The evaluations after it, with no new drop, shed nothing.
+				for (;;) {
+					mono += 2_000
+					dropAt = mono
+					const expected = untuned.pop() ?? "tuned"
+					expect(gate.probation(running, mono)).toEqual([
+						{ key: expected, detail: "drops" },
 					])
-				else expect(verdicts).toEqual([{ key: "tuned", detail: "drops" }])
+					running.splice(
+						running.findIndex(p => p.key === expected),
+						1,
+					)
+					for (let quiet = 0; quiet < 3; quiet++) {
+						mono += 2_000
+						expect(gate.probation(running, mono)).toEqual([])
+					}
+					if (expected === "tuned") break
+				}
 			},
 		),
 		{ numRuns: 100 },

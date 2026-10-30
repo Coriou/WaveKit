@@ -152,6 +152,15 @@ it.each([
 	[
 		{
 			running: false,
+			suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
+			efficiency: { detail: "future-new-detail" },
+		},
+		"unknown",
+		[],
+	],
+	[
+		{
+			running: false,
 			suspension: {
 				reasonCode: "frequency-out-of-band",
 				since: new Date(now),
@@ -211,6 +220,14 @@ it("names a paused ADS-B decoder plainly", () => {
 	).toBe("ADS-B paused: CPU budget full")
 })
 
+const KNOWN_DETAILS: readonly string[] = [
+	"budget",
+	"cpu",
+	"drops",
+	"late-drops",
+	"unknown",
+]
+
 // Feature: decoder-autostart, Property 5: one valid verdict for any status
 // Validates: Requirements R4
 it("always yields a verdict from the closed sets, generic for unknown input", () => {
@@ -222,11 +239,24 @@ it("always yields a verdict from the closed sets, generic for unknown input", ()
 				desiredRunning: fc.option(fc.boolean(), { nil: undefined }),
 				mode: fc.option(fc.string(), { nil: undefined }),
 				health: fc.constantFrom("running", "idle", "restarting", "faulted"),
-				reason: fc.option(fc.string(), { nil: undefined }),
-				detail: fc.option(fc.string(), { nil: undefined }),
+				reason: fc.option(
+					fc.oneof(
+						fc.constantFrom("efficiency-budget", "frequency-out-of-band"),
+						fc.string().map(s => `future-${s}`),
+						fc.string(),
+					),
+					{ nil: undefined },
+				),
+				detail: fc.option(
+					fc.oneof(
+						fc.constantFrom(...KNOWN_DETAILS),
+						fc.string().map(s => `future-${s}`),
+					),
+					{ nil: undefined },
+				),
 			}),
 			input => {
-				const verdict = decoderSummary(
+				const summary = decoderSummary(
 					status({
 						type: input.type,
 						running: input.running,
@@ -248,11 +278,33 @@ it("always yields a verdict from the closed sets, generic for unknown input", ()
 							: {}),
 					}),
 					now,
-				).verdict
+				)
+				const verdict = summary.verdict
 				expect(DECODER_VERDICT_CODES).toContain(verdict.code)
 				for (const action of verdict.actions)
 					expect(DECODER_VERDICT_ACTIONS).toContain(action)
 				expect(decoderVerdictSchema.safeParse(verdict).success).toBe(true)
+				// The suspension branch decides: unrecognised input reads the
+				// generic verdict, never a cause or an action it cannot back.
+				const judged =
+					summary.health === "suspended" &&
+					input.mode !== "off" &&
+					!(input.desiredRunning === false && summary.state !== "running")
+				if (!judged) return
+				const unknownDetail =
+					input.detail !== undefined && !KNOWN_DETAILS.includes(input.detail)
+				const unknownReason =
+					input.detail === undefined &&
+					input.reason?.startsWith("future-") === true
+				if (unknownDetail || unknownReason) {
+					expect(verdict).toEqual({
+						code: "unknown",
+						text: expect.stringMatching(/ status unknown$/),
+						actions: [],
+					})
+				}
+				if (input.detail === undefined && input.reason === "efficiency-budget")
+					expect(verdict.code).toBe("efficiency-budget")
 			},
 		),
 		{ numRuns: 200 },
