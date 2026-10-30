@@ -1,7 +1,8 @@
 // The tuned card (docs/web/canvas/Tuned.dc.html, TunedGallery, Identify; DESIGN.md "Tuned card reworked"):
 // header (type tile that drags the card, protocol + band, state, frequency, signal bars, minimise) → the "now" block
 // (what was last heard on the channel, by kind: call, transmission, count, message, audio; or band and channel when
-// nothing was, or Identify while it runs) → up to two earlier rows → actions (Map, Activity, Save, ⋯ with Identify,
+// nothing was, or Identify while it runs) → up to two earlier rows → the decoders on this band with the core's verdict and
+// one action for one that does not run (BandDecoders.tsx) → actions (Map, Activity, Save, ⋯ with Identify,
 // Decode as…, Pin, Copy). A message opens in full as the decoded message card (Decode board) inside the card, in a
 // scrolling well; Decode as… is Identify cut to one protocol. Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
 // row says where it is); on a hit it is that signal's card, "Held by the scan". A pinned card keeps its frequency.
@@ -41,6 +42,7 @@ import { modeSpec, modulationOf } from "../tuner/modes.ts"
 import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
+import { BandDecoders } from "./BandDecoders.tsx"
 import { decodersAt } from "./decoders.ts"
 import {
 	DECODE_AS,
@@ -929,6 +931,10 @@ export function TunedCard() {
 								</button>
 							))}
 						</section>
+					)}
+
+					{!idHere && !full && (
+						<BandDecoders hz={hz} decoders={decoders} readOnly={readOnly} />
 					)}
 
 					<div className="wkf-actions">

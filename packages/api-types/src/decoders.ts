@@ -1,4 +1,9 @@
-import type { EfficiencyBudgetResolution } from "./efficiency-budget.js"
+import { z } from "zod"
+import type {
+	EfficiencyBudgetResolution,
+	EfficiencyBudgetSettings,
+	EfficiencyBudgetValue,
+} from "./efficiency-budget.js"
 import type { DropAttribution } from "./resources.js"
 
 export interface DecoderStats {
@@ -460,6 +465,18 @@ export interface DecoderEfficiencyView {
 	sources: DecoderEfficiencySourceView[]
 }
 
+/** PUT /api/decoders/efficiency/budget body. */
+export interface EfficiencyBudgetUpdateRequest {
+	cpuBudgetCores: EfficiencyBudgetValue
+	/** Save only while the stored `cpuBudgetCores` still equals this; otherwise 409 and no change. */
+	expected?: EfficiencyBudgetValue
+}
+/** The 409 body of a PUT whose `expected` no longer matched. */
+export interface EfficiencyBudgetConflict {
+	code: "EFFICIENCY_BUDGET_CONFLICT"
+	current: EfficiencyBudgetSettings
+}
+
 export interface DecoderLateDropsView {
 	condemningWindows: number
 	windows: number
@@ -480,4 +497,73 @@ export interface DecoderSummary {
 	lastOutputAt: string | null
 	suspensionReason: DecoderSuspensionReasonCode | null
 	health: "decoding" | "idle" | "suspended" | "failed"
+	/** One verdict per decoder: why it does or does not decode now, and what helps. */
+	verdict: DecoderVerdict
 }
+
+/**
+ * Closed set of decoder verdict codes (GET /api/decoders/summary). A client
+ * meeting a code it does not know treats it as "unknown".
+ */
+export const DECODER_VERDICT_CODES = [
+	"decoding",
+	"listening",
+	"starting",
+	"off",
+	"stopped",
+	"failed",
+	"out-of-band",
+	"no-channel",
+	"capture-too-narrow",
+	"source-unavailable",
+	"unsupported-rate",
+	"scanner-busy",
+	"efficiency-budget",
+	"efficiency-cpu",
+	"efficiency-drops",
+	"efficiency-late-drops",
+	"efficiency-waiting",
+	"decoder-unavailable",
+	"channelizer-unavailable",
+	"unknown",
+] as const
+export type DecoderVerdictCode = (typeof DECODER_VERDICT_CODES)[number]
+
+/** Closed set of actions a verdict may suggest; clients ignore ones they do not know. */
+export const DECODER_VERDICT_ACTIONS = [
+	"turn-on",
+	"start",
+	"restart",
+	"tune-to-band",
+	"raise-sample-rate",
+	"lower-sample-rate",
+	"change-sample-rate",
+	"check-source",
+	"pause-scanner",
+	"raise-budget",
+	"turn-off-others",
+	"install-decoder",
+	"enable-channelizer",
+] as const
+export type DecoderVerdictAction = (typeof DECODER_VERDICT_ACTIONS)[number]
+
+/** Upper bound on `DecoderVerdict.text`, in UTF-16 code units. */
+export const DECODER_VERDICT_TEXT_MAX_LENGTH = 160
+
+export interface DecoderVerdict {
+	code: DecoderVerdictCode
+	/** One short human sentence, e.g. "ADS-B paused: CPU budget full". */
+	text: string
+	/** Suggested actions, most helpful first; empty when none applies. */
+	actions: DecoderVerdictAction[]
+}
+
+export const decoderVerdictSchema = z
+	.object({
+		code: z.enum(DECODER_VERDICT_CODES),
+		text: z.string().min(1).max(DECODER_VERDICT_TEXT_MAX_LENGTH),
+		actions: z
+			.array(z.enum(DECODER_VERDICT_ACTIONS))
+			.max(DECODER_VERDICT_ACTIONS.length),
+	})
+	.strict()

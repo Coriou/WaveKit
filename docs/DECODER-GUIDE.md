@@ -666,6 +666,69 @@ Validation so far uses synthetic fixtures; live meter decodes have not been obse
 2. Verify input format matches decoder expectations
 3. Consider adding rate limiting
 
+### Decoders start when you tune
+
+In `auto` mode (the default) you never need Settings to start a decoder: tune into its band
+and it starts. When you tune, the core decides for each decoder in this order:
+
+1. **Mode.** A decoder set to `off` in Settings (or `enabled: false` in YAML) never starts,
+   whatever you tune. `always` runs everywhere; `auto` runs where its band is. Pressing
+   **Stop** on an `auto` decoder keeps it stopped until you start it, change its mode or
+   tune into its band again: once your VFO has settled (stayed put for 1 second) inside its
+   band after being outside it, the core starts it again as one it started on its own, so
+   the CPU budget can still pause it. Your tunes are the tuner frequency you set in the web
+   app or the API, a live audio setting, and a retune from SDR++ through the relay. Moving
+   within its band, a scanner sweep's hops, the sweep's restore of your frequency afterwards
+   (even when it lands only after a reconnect), a live audio change the demodulator rejected
+   and put back on its own, a reconnect (including one that returns the tuner to its
+   configured frequency) and WaveKit starting up are not tunes: they leave a stopped decoder
+   stopped. A tune you make right as a sweep ends is yours, not the sweep's restore. A
+   stopped `always` decoder stays stopped until you start it.
+2. **Source ready.** A sample-rate change reconnects the source; until the new rate is known
+   decoders wait as `source-rate-unknown`.
+3. **Band.** The decoder's band (ADS-B 1090 MHz, APRS 144.800 MHz, ISM 433/868 MHz, ACARS and
+   VDL2 near 131 and 136 MHz, LoRa near 869.5 MHz, the paging and digital-voice bands of your
+   region, or your band override) must be in the capture, else `frequency-out-of-band`.
+4. **Rate.** The capture must suit the decoder (ADS-B needs 2.4 Msps; unless ADS-B is `off`,
+   WaveKit raises the rate when you tune within 200 kHz of 1090 MHz in WaveKit; a retune made
+   in SDR++ through the relay only gets advice), else a rate reason such as `insufficient-sample-rate`.
+5. **Placement.** Channel decoders need a channel that fits the capture (`capture-too-narrow`,
+   `no-channel-selected`) and the channelizer (`channelizer-unavailable`).
+6. **CPU budget.** Decoders the core started on its own share a CPU budget
+   (`efficiency-budget`). The decoder whose band holds the frequency you tuned (the VFO on its
+   source, within 200 kHz of its targets or the span between them, or inside its band) goes
+   first. The VFO tunes only the source it is on: a second dongle is not "tuned" by its own
+   capture centre while the VFO is elsewhere, and only with no VFO at all does the default
+   source's capture centre stand in for it. A source a scanner sweep holds is never tuned;
+   once the sweep releases it, priority follows wherever its VFO now is, whether a hop, the
+   sweep's restore or you put it there.
+   For the tuned decoder:
+   - it is admitted before the others, and when the budget is full the other automatic
+     decoders stop to make room (newest first);
+   - after a reconnect it starts as soon as the source delivers a clean run (about 6 seconds
+     after the rate change), instead of waiting the 60-second clear window others wait;
+   - when CPU load, or host overload dropping data on another decoder's input or on the source
+     with no one decoder to blame, forces the core to stop something while the tuned decoder is
+     new, it stops the other automatic decoders first: for CPU load at most one every 60
+     seconds across all sources (CPU is shared), for host overload at most one per source every
+     60 seconds. For host overload charged to particular decoders' inputs it stops the newest
+     of those first, before any decoder whose input stayed clean; otherwise the newest goes.
+     The tuned one stops only when nothing else is left, and says so. Drops on its
+     own input are its own: it stops, not a bystander.
+
+   Tuning into a band also clears any earlier budget or loss wait of its decoder, once the
+   tuned frequency has stayed in that band for 1 second (passing through a band on the way
+   elsewhere clears nothing). Only your own tune does this: after a scanner sweep has held
+   the source, neither its hops, its restore of your frequency nor the time you had already
+   spent in the band clear a wait; your next settled tune on that source does, even one
+   within the same band or one made the moment the sweep ends. YAML decoders, `always`
+   decoders and decoders you started yourself are never stopped for it.
+
+7. **Start.** The process then starts; ADS-B shows aircraft once readsb has heard them.
+
+Each decoder's verdict in `GET /api/decoders/summary` sums this up in one sentence with a
+suggested action, for example "ADS-B paused: CPU budget full" with `raise-budget`.
+
 ### Efficiency recovery
 
 Automatic decoder admission uses a recent 10-second positive-drop window and a separate
@@ -685,8 +748,19 @@ from bounded history; only a fresh clean run can release that protected probatio
 Drop evidence resets on reconnect, so previous-epoch loss does not condemn a resumed
 placement. Continued loss or CPU spikes keep newcomers waiting. Graduation remains
 earned when a later CPU spike occurs, including while link recovery delays reconciliation.
+Drops are charged to the fanout branch that dropped them, during probation as after it: a
+new decoder is judged only by drops on its own input (its raw branch or the channelizer's),
+never by drops on live audio or on another decoder's branch.
 Late-drop shedding uses only completed windows ending within the last 30 seconds
 (3 × 10 seconds); incomplete later windows cannot keep old loss eligible for shedding.
+Late drops are charged to the fanout branch that dropped them: a raw decoder (such as
+ADS-B) is stopped only for drops on its own branch, channelizer drops stop only decoders on
+channelizer channels, and drops on live audio stop no decoder. Burst absorber overflow is
+charged to the branches that held the absorber when it overflowed (a congested branch holds
+input for every branch): a congested live audio branch stops no decoder, even when it
+closes before the next sample (its share is kept for two samples). Overflow with no
+holding branch known is charged to the source as a whole, even when live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
+decoders of the tuned band last; `always` and operator-started decoders are never stopped.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).

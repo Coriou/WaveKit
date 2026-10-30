@@ -177,3 +177,37 @@ it.each([
 		expect(service.view()).toMatchObject({ source, cpuBudgetCores: "auto" })
 	},
 )
+it("updateIf compares after pending writes and never writes on a mismatch", async () => {
+	let release = () => {}
+	const write = vi
+		.fn()
+		.mockImplementationOnce(
+			() => new Promise<void>(done => (release = () => done())),
+		)
+		.mockResolvedValue(undefined)
+	const service = await openEfficiencyBudget({
+		stateDir: "unused",
+		resolve,
+		read: async () => undefined,
+		write,
+	})
+	// an unconditional write is still persisting when the conditional one arrives
+	const pending = service.update(8)
+	const stale = service.updateIf("auto", 3)
+	await vi.waitFor(() => expect(write).toHaveBeenCalledOnce())
+	release()
+	await pending
+	await expect(stale).resolves.toMatchObject({
+		ok: false,
+		current: { cpuBudgetCores: 8 },
+	})
+	expect(write).toHaveBeenCalledOnce()
+	await expect(service.updateIf(8, 3)).resolves.toMatchObject({
+		ok: true,
+		settings: { source: "saved", cpuBudgetCores: 3 },
+	})
+	expect(service.view().cpuBudgetCores).toBe(3)
+	await expect(service.updateIf(3, 0)).rejects.toMatchObject({
+		code: "EFFICIENCY_BUDGET_INVALID",
+	})
+})

@@ -17,8 +17,10 @@ import {
 	LATE_SHED_WINDOWS,
 	EFFICIENCY_SAMPLE_MS,
 	EFFICIENCY_STALE_MS,
+	counterBranchId,
 } from "./contract.js"
 import type {
+	ChargedDrop,
 	EfficiencySample,
 	SourceDropSample,
 	LateDropWindow,
@@ -29,12 +31,22 @@ type Counters = {
 	droppedBytesTotal: number
 	droppedChunksTotal: number
 	active?: boolean
+	/**
+	 * Absorber only: overflow bytes lost while each branch held the
+	 * absorber, totals since it was created. Keys are `<branch id>#<instance>`
+	 * like the branch counters (a bare id is read as one instance), so a
+	 * removed and re-added branch is a new key from zero.
+	 */
+	overflowGatedBy?: Readonly<Record<string, number>>
 }
 const nonNegative = z.number().finite().nonnegative()
 const counterSchema = z.object({
 	droppedBytesTotal: z.number().int().nonnegative().safe(),
 	droppedChunksTotal: z.number().int().nonnegative().safe(),
 	active: z.boolean().optional(),
+	overflowGatedBy: z
+		.record(z.string(), z.number().int().nonnegative().safe())
+		.optional(),
 })
 const ingestSchema = z.object({
 	maxGapMs: nonNegative,
@@ -52,13 +64,24 @@ const recoverySchema = z.object({
 const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
 type DeferredLoss = {
 	at: number
+	/** The fanout branches that dropped in this interval. */
+	branches: string[]
+	/** Some of the loss has no branch to charge (absorber overflow). */
+	sourceWide: boolean
 	bytes: number
 	chunks: number
 	gap: number
 	loop: number
 	cpu: number
 }
-type WindowEvidence = LateDropWindow & { complete: boolean; closedAt?: number }
+type WindowEvidence = LateDropWindow & {
+	complete: boolean
+	closedAt?: number
+	/** Branches whose condemning (consumer or host) drops fell in the window. */
+	branches: Set<string>
+	/** A condemning drop in the window had no branch to charge. */
+	sourceWide: boolean
+}
 type SourceState = {
 	pending: {
 		sequence: number
@@ -93,8 +116,8 @@ type SourceState = {
 	rate: number | null
 	/** Merged intervals with complete per-branch evidence, oldest first. */
 	covered: { from: number; to: number }[]
-	/** Times of samples that observed a positive drop delta, oldest first. */
-	drops: number[]
+	/** Samples that observed a positive drop delta, oldest first. */
+	drops: ChargedDrop[]
 }
 /** Maximum supported capacity, gap allowance and one sample period. */
 const MAX_PENDING_WAIT_MS =
@@ -151,6 +174,7 @@ export function createEfficiencyMonitor(deps: {
 			| "coveredSinceMono"
 			| "coverageCompleteAtMono"
 			| "droppedBetweenMono"
+			| "chargedDropsBetweenMono"
 		>
 	> & {
 		latestAttribution(id: string): DropAttribution | null
@@ -402,6 +426,9 @@ export function createEfficiencyMonitor(deps: {
 										...(parsed.data.active === undefined
 											? {}
 											: { active: parsed.data.active }),
+										...(parsed.data.overflowGatedBy === undefined
+											? {}
+											: { overflowGatedBy: parsed.data.overflowGatedBy }),
 									}
 								: { droppedBytesTotal: NaN, droppedChunksTotal: NaN },
 						)
@@ -419,6 +446,8 @@ export function createEfficiencyMonitor(deps: {
 			// branch added since the last valid read started at zero, so its first
 			// total is its delta. A decrease or removal loses that branch only.
 			let absorberOverflow: number | null = null
+			// The branches that held the absorber while it overflowed.
+			const overflowGates = new Set<string>()
 			let bytes = 0
 			let chunks = 0
 			let complete = counters !== null && signature !== null
@@ -450,6 +479,9 @@ export function createEfficiencyMonitor(deps: {
 						droppedBytesTotal: value.droppedBytesTotal,
 						droppedChunksTotal: value.droppedChunksTotal,
 						...(value.active === undefined ? {} : { active: value.active }),
+						...(value.overflowGatedBy === undefined
+							? {}
+							: { overflowGatedBy: value.overflowGatedBy }),
 					})
 					if (first || s.unbaselined.delete(key)) {
 						complete = false
@@ -473,9 +505,19 @@ export function createEfficiencyMonitor(deps: {
 					// Chunk-only loss is still positive drop evidence.
 					const loss = Math.max(delta, chunkDelta)
 					if (value.active === false && loss > 0) complete = false
-					if (key.startsWith("@"))
+					if (key.startsWith("@")) {
 						absorberOverflow = (absorberOverflow ?? 0) + loss
-					else if (value.active !== false) s.branchDrops.set(key, loss)
+						// A gate total that grew since the last read (a new branch
+						// instance from zero, or one that restarted lower) held the
+						// absorber during this interval.
+						for (const [gate, total] of Object.entries(
+							value.overflowGatedBy ?? {},
+						)) {
+							const before = previous?.overflowGatedBy?.[gate] ?? 0
+							if (total > before || (total > 0 && total < before))
+								overflowGates.add(counterBranchId(gate) ?? gate)
+						}
+					} else if (value.active !== false) s.branchDrops.set(key, loss)
 					bytes += value.droppedBytesTotal - base.droppedBytesTotal
 					chunks += value.droppedChunksTotal - base.droppedChunksTotal
 				}
@@ -557,6 +599,27 @@ export function createEfficiencyMonitor(deps: {
 			if (!applies) evidenceValid = true
 			const intervalBytes = bytes
 			const positiveNow = bytes > 0 || chunks > 0
+			// Drops are charged to the branches that dropped. Absorber overflow
+			// is charged to the branches that held the absorber while it
+			// overflowed (a congested sibling holds input for every branch);
+			// overflow with no holding branch known, or loss with no branch to
+			// charge, falls on the source as a whole. Gate deltas are not summed
+			// against the overflow delta (two holders are each charged the whole
+			// loss): an interval's overflow is charged to every branch that held
+			// in it, any remainder included, and only to the source when no
+			// branch held at all in that interval.
+			const droppedBranches: string[] = []
+			for (const [key, loss] of s.branchDrops) {
+				const branch = counterBranchId(key)
+				if (loss > 0 && branch !== null) droppedBranches.push(branch)
+			}
+			const overflowed = (absorberOverflow ?? 0) > 0
+			if (overflowed)
+				for (const branch of overflowGates)
+					if (!droppedBranches.includes(branch)) droppedBranches.push(branch)
+			const sourceWide = overflowed
+				? overflowGates.size === 0
+				: droppedBranches.length === 0
 			let currentCode: DropAttribution = !applies
 				? positiveNow
 					? "unknown"
@@ -576,6 +639,8 @@ export function createEfficiencyMonitor(deps: {
 			type Resolved = {
 				deferred: boolean
 				at: number
+				branches: string[]
+				sourceWide: boolean
 				bytes: number
 				chunks: number
 				code: DropAttribution
@@ -639,6 +704,8 @@ export function createEfficiencyMonitor(deps: {
 			if (positiveNow && currentCode !== "consumer" && gapLoss) {
 				const loss: DeferredLoss = {
 					at,
+					branches: droppedBranches,
+					sourceWide,
 					bytes,
 					chunks,
 					gap: maxGapMs!,
@@ -674,6 +741,8 @@ export function createEfficiencyMonitor(deps: {
 				resolved.push({
 					deferred: false,
 					at,
+					branches: droppedBranches,
+					sourceWide,
 					bytes,
 					chunks,
 					code: currentCode,
@@ -689,7 +758,11 @@ export function createEfficiencyMonitor(deps: {
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
 				} else {
 					s.lastDropMono = Math.max(s.lastDropMono ?? -Infinity, r.at)
-					s.drops.push(r.at)
+					s.drops.push({
+						atMono: r.at,
+						code: r.code,
+						branches: r.sourceWide ? "source" : [...r.branches].sort(),
+					})
 					if (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
 					fault(s, at)
 				}
@@ -743,6 +816,8 @@ export function createEfficiencyMonitor(deps: {
 						condemning: false,
 						linkOrUnknownDrops: false,
 						complete: comparable && evidenceValid,
+						branches: new Set(),
+						sourceWide: false,
 					}
 				}
 				s.openWindow ??= {
@@ -751,6 +826,8 @@ export function createEfficiencyMonitor(deps: {
 					condemning: false,
 					linkOrUnknownDrops: false,
 					complete: true,
+					branches: new Set(),
+					sourceWide: false,
 				}
 				if (at > s.openWindow.startMono)
 					s.openWindow.complete &&= comparable && evidenceValid
@@ -759,8 +836,11 @@ export function createEfficiencyMonitor(deps: {
 						w => r.at > w.startMono && r.at <= (w.closedAt ?? w.endMono),
 					)
 					if (w) {
-						if (r.code === "consumer" || r.code === "host") w.condemning = true
-						else w.linkOrUnknownDrops = true
+						if (r.code === "consumer" || r.code === "host") {
+							w.condemning = true
+							for (const branch of r.branches) w.branches.add(branch)
+							w.sourceWide ||= r.sourceWide
+						} else w.linkOrUnknownDrops = true
 					}
 				}
 				if (at === s.openWindow.endMono) {
@@ -771,6 +851,8 @@ export function createEfficiencyMonitor(deps: {
 						condemning: false,
 						linkOrUnknownDrops: false,
 						complete: comparable && evidenceValid,
+						branches: new Set(),
+						sourceWide: false,
 					}
 				}
 				if (!waiting) {
@@ -781,6 +863,9 @@ export function createEfficiencyMonitor(deps: {
 								endMono: w.endMono,
 								condemning: w.condemning,
 								linkOrUnknownDrops: !w.condemning && w.linkOrUnknownDrops,
+								condemnedBranches: w.sourceWide
+									? "source"
+									: [...w.branches].sort(),
 							})
 							if (s.windows.length > LATE_SHED_WINDOWS) s.windows.shift()
 						}
@@ -935,7 +1020,23 @@ export function createEfficiencyMonitor(deps: {
 	const droppedBetweenMono = (id: string, from: number, to: number) => {
 		const s = states.get(id)
 		if (!s || !Number.isFinite(from)) return false
-		return s.drops.some(t => t >= from && t <= to)
+		return s.drops.some(d => d.atMono >= from && d.atMono <= to)
+	}
+	// Probation evidence by branch: the drop samples in [from, to] with the
+	// branches charged with each (see LateDropWindow.condemnedBranches).
+	const chargedDropsBetweenMono = (
+		id: string,
+		from: number,
+		to: number,
+	): ChargedDrop[] => {
+		const s = states.get(id)
+		if (!s || !Number.isFinite(from)) return []
+		return s.drops
+			.filter(d => d.atMono >= from && d.atMono <= to)
+			.map(d => ({
+				...d,
+				branches: d.branches === "source" ? "source" : [...d.branches],
+			}))
 	}
 	// The sample that completes `amount` of coverage since `since`; drops seen
 	// up to and including it are judged before graduation.
@@ -986,7 +1087,12 @@ export function createEfficiencyMonitor(deps: {
 				.filter(
 					w => w.endMono > at - LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
 				)
-				.map(w => ({ ...w }))
+				.map(w => ({
+					...w,
+					...(Array.isArray(w.condemnedBranches)
+						? { condemnedBranches: [...w.condemnedBranches] }
+						: {}),
+				}))
 		},
 		linkDropsSince(id, since) {
 			const at = clock()
@@ -1017,6 +1123,7 @@ export function createEfficiencyMonitor(deps: {
 		monoNow: clock,
 		lastSampleMono: () => lastMono,
 		droppedBetweenMono,
+		chargedDropsBetweenMono,
 		coverageCompleteAtMono,
 		sources: () => [...states.keys()],
 		droppedSinceMono,

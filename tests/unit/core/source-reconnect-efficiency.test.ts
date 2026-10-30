@@ -52,6 +52,8 @@ const placement: WantedPlacement = {
 }
 const running: RunningPlacement = {
 	...placement,
+	// Its raw branch: late drops are charged to the branch that dropped.
+	inputBranch: "decoder-decoder",
 	admittedAtMs: 0,
 	mode: "auto",
 	startMode: "auto",
@@ -71,7 +73,12 @@ async function scenario(graduated: boolean, outage: number, phase: number) {
 		sources: () => sources.getAllStatus().map(s => s.id),
 		branchCounters: () =>
 			new Map([
-				[branch, { droppedBytesTotal: dropped, droppedChunksTotal: dropped }],
+				// The router's key format: `<branch id>#<instance>`; a reconnect
+				// recreates the branch under a new instance.
+				[
+					`decoder-decoder#${branch}`,
+					{ droppedBytesTotal: dropped, droppedChunksTotal: dropped },
+				],
 				["sibling", { droppedBytesTotal: 0, droppedChunksTotal: 0 }],
 			]),
 		topology: () => branch,

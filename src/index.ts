@@ -63,6 +63,7 @@ import type {
 	EfficiencyGate,
 	EfficiencyInputs,
 	ResolvedMode,
+	VfoChangeOrigin,
 } from "./decoders/enablement/contract.js"
 import type { LinkAdvisor, RatePolicy } from "./core/rate-policy-contract.js"
 import { PassThrough } from "node:stream"
@@ -103,6 +104,10 @@ import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/pr
 import { BandGainSettingsService } from "./core/band-gain.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
+import type {
+	LiveDemodConfig,
+	LiveDemodConfigOrigin,
+} from "./core/live-demodulator.js"
 import { liveDemodOperatorActivity } from "./core/live-demod-activity.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
 import type { ChannelizerManagerDeps } from "./core/channelizer/channelizer-manager.js"
@@ -1526,12 +1531,12 @@ async function main(): Promise<void> {
 		const vfo = createVfoTracker({
 			now: () => performance.now(),
 			setTimer: decoderPolicyTimer,
-			onSettled: value => {
-				decoderManager.notifyVfoSettled(value)
+			onSettled: (value, origin) => {
+				decoderManager.notifyVfoSettled(value, origin)
 				coverageGeneration++
 			},
 		})
-		const updateVfo = () =>
+		const updateVfo = (origin: VfoChangeOrigin = "other") =>
 			vfo.update(
 				vfoFromLiveDemod({
 					sourceId: () =>
@@ -1541,10 +1546,21 @@ async function main(): Promise<void> {
 					offsetHz: () => liveDemod.getStatus().config.offsetHz,
 					centreHz: id => sourceManager.getCaps(id)?.centerFreq ?? null,
 				}),
+				origin,
 			)
-		liveDemod.on("config-changed", updateVfo)
-		sourceManager.on("caps-changed", updateVfo)
-		sourceManager.on("connected", updateVfo)
+		// A live audio write is the user's, a rejected-retune rollback is not; a
+		// centre change is the user's only when the tuner controller says so
+		// (REST write, relay retune).
+		const updateVfoOnLiveConfig = (
+			_config: LiveDemodConfig,
+			origin: LiveDemodConfigOrigin,
+		) => updateVfo(origin)
+		const updateVfoOnCaps = (sourceId: string) =>
+			updateVfo(tunerController.centreChangeOrigin(sourceId) ?? "other")
+		const updateVfoOnConnect = () => updateVfo("other")
+		liveDemod.on("config-changed", updateVfoOnLiveConfig)
+		sourceManager.on("caps-changed", updateVfoOnCaps)
+		sourceManager.on("connected", updateVfoOnConnect)
 		const bumpCoverage = () => {
 			coverageGeneration++
 		}
@@ -1552,9 +1568,9 @@ async function main(): Promise<void> {
 		sourceManager.on("caps-changed", bumpCoverage)
 		const closeVfo = () => {
 			vfo.dispose()
-			liveDemod.off("config-changed", updateVfo)
-			sourceManager.off("caps-changed", updateVfo)
-			sourceManager.off("connected", updateVfo)
+			liveDemod.off("config-changed", updateVfoOnLiveConfig)
+			sourceManager.off("caps-changed", updateVfoOnCaps)
+			sourceManager.off("connected", updateVfoOnConnect)
 			liveDemod.off("config-changed", bumpCoverage)
 			sourceManager.off("caps-changed", bumpCoverage)
 		}

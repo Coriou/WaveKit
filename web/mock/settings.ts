@@ -23,6 +23,7 @@ import {
 } from "@wavekit/api-types"
 import type {
 	DecoderInfo,
+	EfficiencyBudgetConflict,
 	EfficiencyBudgetSettings,
 	EfficiencyBudgetValue,
 	DecoderMode,
@@ -61,6 +62,8 @@ export interface SettingsMock {
 	station(): StationIdentity
 	/** Decoder settings view (tests). */
 	decoderView(id: string): DecoderSettingsView | undefined
+	/** True once the CPU budget was saved away from its default "auto". */
+	budgetRaised(): boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -588,17 +591,24 @@ export function registerSettingsMock(
 	)
 	app.put("/api/decoders/efficiency/budget", async (request, reply) => {
 		const body = request.body
+		const isBudget = (v: unknown): v is EfficiencyBudgetValue =>
+			v === "auto" ||
+			(typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 64)
 		const value = isRecord(body) ? body["cpuBudgetCores"] : undefined
+		const expected = isRecord(body) ? body["expected"] : undefined
 		if (
 			!isRecord(body) ||
-			Object.keys(body).length !== 1 ||
-			(value !== "auto" &&
-				(typeof value !== "number" ||
-					!Number.isFinite(value) ||
-					value <= 0 ||
-					value > 64))
+			Object.keys(body).some(k => k !== "cpuBudgetCores" && k !== "expected") ||
+			!isBudget(value) ||
+			("expected" in body && !isBudget(expected))
 		)
 			return sendJson(reply, 400, { code: "EFFICIENCY_BUDGET_INVALID" })
+		// like the core: with `expected`, save only while the stored value still equals it
+		if (expected !== undefined && expected !== cpuBudgetCores)
+			return sendJson(reply, 409, {
+				code: "EFFICIENCY_BUDGET_CONFLICT",
+				current: budgetView(),
+			} satisfies EfficiencyBudgetConflict)
 		cpuBudgetCores = value
 		budgetSource = "saved"
 		return sendJson(reply, 200, budgetView())
@@ -1167,5 +1177,9 @@ export function registerSettingsMock(
 			),
 	)
 
-	return { station, decoderView: view }
+	return {
+		station,
+		decoderView: view,
+		budgetRaised: () => cpuBudgetCores !== "auto",
+	}
 }

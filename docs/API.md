@@ -2318,6 +2318,14 @@ strictly greater than zero and at most 64. Unknown fields and invalid values ret
 The route is absent without the settings write authorizer; GET follows normal API read
 access. A successful response returns the same shape as GET with `Cache-Control: no-store`.
 
+An optional `expected` field (`"auto"` or a number, validated like `cpuBudgetCores`) makes the
+write conditional: the budget is saved only while the stored `cpuBudgetCores` still equals
+`expected`. Otherwise the response is 409
+`{ "code": "EFFICIENCY_BUDGET_CONFLICT", "current": <GET shape> }` and nothing changes. The
+comparison runs in the same serialized update queue as the write, so no other update lands
+between them. Without `expected` the write applies unconditionally. Older cores reject the
+field with 400.
+
 Updates are serialized and saved to `<stateDir>/decoder-efficiency.json` with the shared
 atomic temporary-file, fsync and rename writer before applying to admission and activity
 allocation. The saved override survives restart and takes precedence over startup config.
@@ -2426,6 +2434,28 @@ at most 60 seconds old (60 × 1,000 = 60,000 ms, inclusive); **idle** otherwise.
 A future output timestamp is idle. Historical `lastError` alone does not mark
 a recovered decoder failed. This is recent output evidence, not a signal-quality
 verdict. Read access is the same as other decoder GET routes.
+
+A decoder whose placement workers run (instance ids `<decoder>#<channel>@<source>`)
+counts as running, and its `lastOutputAt` is the newest output of the decoder and
+its workers.
+
+Each entry also carries `verdict`: `{ code, text, actions }`. `text` is one short
+sentence of at most 160 characters, such as "ADS-B paused: CPU budget full". `code` is
+one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, `off`
+(mode off), `stopped` (stopped by the operator), `failed`, `out-of-band`,
+`no-channel`, `capture-too-narrow`, `source-unavailable`, `unsupported-rate`,
+`scanner-busy`, `efficiency-budget`, `efficiency-cpu`, `efficiency-drops`,
+`efficiency-late-drops`, `efficiency-waiting`, `decoder-unavailable`,
+`channelizer-unavailable` or `unknown`. `actions` lists suggestions from `turn-on`,
+`start`, `restart`, `tune-to-band`, `raise-sample-rate`, `lower-sample-rate`,
+`change-sample-rate`, `check-source`, `pause-scanner`, `raise-budget`,
+`turn-off-others`, `install-decoder` and `enable-channelizer`, most helpful first.
+Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
+`decoderVerdictSchema` in `@wavekit/api-types`); a client treats an unknown code as
+`unknown` and ignores an unknown action. Precedence: failed, off, stopped,
+suspended (efficiency detail first), decoding, listening, starting. A budget
+suspension with no efficiency detail reads `efficiency-budget`; one with a detail the
+core does not recognise reads `unknown` with no action.
 
 #### GET /api/decoders/:id
 

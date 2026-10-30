@@ -235,3 +235,72 @@ it("returns the committed live budget when the change notification throws", asyn
 		await h.app.close()
 	}
 })
+
+it("saves a budget with `expected` only while the stored value still matches", async () => {
+	const h = await setup(true)
+	const headers = { host: "example.test", authorization: `Bearer ${h.token}` }
+	const url = "/api/decoders/efficiency/budget"
+	const put = (payload: unknown) =>
+		h.app.inject({ method: "PUT", url, headers, payload: payload as object })
+	try {
+		const matched = await put({ cpuBudgetCores: 3, expected: 0.1 })
+		expect(matched.statusCode).toBe(200)
+		expect(matched.json()).toMatchObject({ source: "saved", cpuBudgetCores: 3 })
+		expect(h.write).toHaveBeenCalledOnce()
+
+		const stale = await put({ cpuBudgetCores: 0.1, expected: 4 })
+		expect(stale.statusCode).toBe(409)
+		expect(stale.json()).toEqual({
+			code: "EFFICIENCY_BUDGET_CONFLICT",
+			current: {
+				source: "saved",
+				cpuBudgetCores: 3,
+				resolved: { mode: "configured", cores: 3, label: "configured" },
+			},
+		})
+		expect(h.write).toHaveBeenCalledOnce()
+		expect(h.budget.view().cpuBudgetCores).toBe(3)
+		expect(
+			(await put({ cpuBudgetCores: "auto", expected: "auto" })).statusCode,
+		).toBe(409)
+
+		for (const expected of [0, -1, 65, "3", null, "unknown"])
+			expect((await put({ cpuBudgetCores: 2, expected })).statusCode).toBe(400)
+		expect(h.write).toHaveBeenCalledOnce()
+
+		// without `expected` the write applies whatever is stored
+		const plain = await put({ cpuBudgetCores: "auto" })
+		expect(plain.statusCode).toBe(200)
+		expect(h.budget.view().cpuBudgetCores).toBe("auto")
+		expect(
+			(await put({ cpuBudgetCores: 2, expected: "auto" })).statusCode,
+		).toBe(200)
+		expect(h.write).toHaveBeenCalledTimes(3)
+	} finally {
+		await h.app.close()
+	}
+})
+
+it("compares `expected` after earlier queued writes, so only one of two racing conditional writes lands", async () => {
+	const h = await setup(true)
+	const headers = { host: "example.test", authorization: `Bearer ${h.token}` }
+	const url = "/api/decoders/efficiency/budget"
+	try {
+		const [first, second] = await Promise.all(
+			[8, 0.5].map(cpuBudgetCores =>
+				h.app.inject({
+					method: "PUT",
+					url,
+					headers,
+					payload: { cpuBudgetCores, expected: 0.1 },
+				}),
+			),
+		)
+		expect([first?.statusCode, second?.statusCode].sort()).toEqual([200, 409])
+		expect(h.write).toHaveBeenCalledOnce()
+		const winner = first?.statusCode === 200 ? 8 : 0.5
+		expect(h.budget.view().cpuBudgetCores).toBe(winner)
+	} finally {
+		await h.app.close()
+	}
+})

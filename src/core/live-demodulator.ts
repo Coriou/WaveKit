@@ -205,6 +205,9 @@ export interface LiveDemodStatus {
 	autoRoute?: LiveAudioAutoRoute
 }
 
+/** Who changed the live config: a reconfigure() call, or an automatic path. */
+export type LiveDemodConfigOrigin = "user" | "other"
+
 /** reconfigure() input; `agc: null` deletes the key (modulation default). */
 export type LiveDemodReconfigureUpdates = Omit<
 	Partial<LiveDemodConfig>,
@@ -217,7 +220,14 @@ export interface LiveDemodEvents {
 	started: () => void
 	stopped: () => void
 	error: (error: Error) => void
-	"config-changed": (config: LiveDemodConfig) => void
+	/**
+	 * `origin` is "user" for a reconfigure() write (REST, scanner listen) and
+	 * "other" for an automatic change (a rejected Rust retune rolling back).
+	 */
+	"config-changed": (
+		config: LiveDemodConfig,
+		origin: LiveDemodConfigOrigin,
+	) => void
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
 	/** Auto listen route: once per change of the active source or digital decoder. */
@@ -599,7 +609,7 @@ export class LiveDemodulator extends EventEmitter {
 					this.syncEvidence(this.run)
 				}
 				this.publishSquelchChange()
-				this.emit("config-changed", this.config)
+				this.emit("config-changed", this.config, "other")
 			},
 			adoptRun: run => this.adoptRustRun(run),
 			markStartError: reason => {
@@ -852,7 +862,7 @@ export class LiveDemodulator extends EventEmitter {
 				await this.restartHttpServer()
 			}
 
-			this.emit("config-changed", this.config)
+			this.emit("config-changed", this.config, "user")
 		} finally {
 			this.closeOverride = null
 		}

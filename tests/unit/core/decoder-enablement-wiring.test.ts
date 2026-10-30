@@ -731,7 +731,8 @@ describe("decoder enablement composition", () => {
 		for (const seam of [
 			"bandplanRangeContains",
 			"getResolved: () => bandPlanService?.resolved()",
-			"decoderManager.notifyVfoSettled(value)",
+			"decoderManager.notifyVfoSettled(value, origin)",
+			"tunerController.centreChangeOrigin(sourceId)",
 			"sourceRouting.branchDropCounters(id)",
 			"sourceRouting.branchTopology(id)",
 			"composeDecoderEfficiencyGate(",
@@ -741,5 +742,16 @@ describe("decoder enablement composition", () => {
 			"monitor.stop()",
 		])
 			expect(source.includes(seam), seam).toBe(true)
+	})
+	it("passes the live demodulator's change origin to the VFO tracker", async () => {
+		const source = await entry()
+		// A rejected-retune rollback emits "other"; only a reconfigure() write is the user's.
+		expect(source).toMatch(
+			/const updateVfoOnLiveConfig = \(\s*_config: LiveDemodConfig,\s*origin: LiveDemodConfigOrigin,\s*\) => updateVfo\(origin\)/,
+		)
+		expect(source).toContain(
+			'liveDemod.on("config-changed", updateVfoOnLiveConfig)',
+		)
+		expect(source).not.toContain('updateVfo("user")')
 	})
 })

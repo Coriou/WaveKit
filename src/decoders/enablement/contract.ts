@@ -266,6 +266,14 @@ export interface PlannerVfo {
 	sourceId: string
 	frequencyHz: number
 }
+/**
+ * Who made a change that moved the VFO: "user" for the user's own tuning
+ * (REST tuner writes, live audio settings, relay retunes from SDR++);
+ * "other" for everything else (a reconnect's baseline reset or replay, a
+ * caps reconcile, inferred-tuning resets, the scanner) and for an unknown
+ * origin.
+ */
+export type VfoChangeOrigin = "user" | "other"
 export type BandplanChannelLookup = (
 	window: { sourceId: string; minHz: number; maxHz: number },
 	protocols: readonly string[],
@@ -319,6 +327,12 @@ export interface WantedPlacement {
 	movedFrom?: string
 	/** Why an activity decoder's channel runs (ranking, state and score). */
 	activity?: PlacementActivity
+	/**
+	 * The decoder's band contains the frequency the operator tuned on this
+	 * source (see tuned-band.ts). The efficiency gate refuses and sheds these
+	 * last: other gate-admitted placements yield to them first.
+	 */
+	tunedBand?: true
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(
@@ -371,6 +385,15 @@ export interface RunningPlacement {
 	admittedAtMs: number
 	/** 3.18/3.20: a generated secondary channel; it yields to primaries (3.21). */
 	gated?: true
+	/** Its decoder's band contains the tuned frequency: shed last (see WantedPlacement). */
+	tunedBand?: true
+	/**
+	 * The source fanout branch it reads: its own raw branch, or the
+	 * channelizer's branch for a channel placement (`channelizerBranchId`).
+	 * Late drops condemn it only when this branch dropped; absent, it reads
+	 * no fanout branch and no scoped late-drop window condemns it.
+	 */
+	inputBranch?: string
 }
 /** 3.21: an admission may list running gated secondaries to suspend for budget. */
 export interface Admitted {
@@ -430,4 +453,55 @@ export interface LateDropWindow {
 	condemning: boolean
 	/** Positive drops occurred in the window, but only in samples attributed `link` or `unknown`. */
 	linkOrUnknownDrops: boolean
+	/**
+	 * The fanout branches (ids without the instance suffix) whose drops made
+	 * the window condemning. A condemning window condemns only the placements
+	 * reading one of them, so a branch no decoder reads (live audio) condemns
+	 * none. Absorber overflow is charged to the branches that held the
+	 * absorber when it overflowed (see `overflowGatedBy`). `"source"`: some
+	 * condemning loss had no branch to charge (absorber overflow with no
+	 * holding branch known), so the window condemns the source as a whole,
+	 * whatever branches also dropped. An empty list is not that: only
+	 * branches no placement reads dropped, and it condemns nobody. Absent: the
+	 * window is not scoped and condemns every placement on its source.
+	 */
+	condemnedBranches?: readonly string[] | "source"
+}
+
+/**
+ * A drop sample as probation judges it: its evidence time, its attribution
+ * and the branches charged with it (`condemnedBranches` semantics, never
+ * absent: `"source"` charges every placement on the source).
+ */
+export interface ChargedDrop {
+	atMono: number
+	code: DropAttribution
+	branches: readonly string[] | "source"
+}
+
+/**
+ * Whether drops charged to `branches` judge a placement reading `inputBranch`:
+ * source-wide loss judges every placement, branch loss only the placements
+ * reading a branch that dropped (none for a placement reading no branch).
+ */
+export const chargesBranch = (
+	branches: readonly string[] | "source" | undefined,
+	inputBranch: string | undefined,
+): boolean =>
+	branches === undefined ||
+	branches === "source" ||
+	(inputBranch !== undefined && branches.includes(inputBranch))
+
+/** The source fanout branch the channelizer reads (named by ChannelizerManager). */
+export const channelizerBranchId = (sourceId: string) =>
+	`channelizer-${sourceId}`
+
+/**
+ * A branch counter key (`<branch id>#<instance>`, as the source router
+ * reports it) without its instance suffix; the absorber's key is not a branch.
+ */
+export function counterBranchId(key: string): string | null {
+	if (key.startsWith("@")) return null
+	const separator = key.lastIndexOf("#")
+	return separator > 0 ? key.slice(0, separator) : key
 }

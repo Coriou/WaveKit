@@ -78,12 +78,47 @@ describe("channel sources", () => {
 		time.advance(999)
 		expect(onSettled).not.toHaveBeenCalled()
 		time.advance(1)
-		expect(onSettled).toHaveBeenCalledExactlyOnceWith({
-			sourceId: "s",
-			frequencyHz: 119,
-		})
+		expect(onSettled).toHaveBeenCalledExactlyOnceWith(
+			{
+				sourceId: "s",
+				frequencyHz: 119,
+			},
+			"other",
+		)
 		time.advance(1)
 		expect(onSettled).toHaveBeenCalledTimes(1)
+	})
+	it("a settle carries the origin of the latest change that moved the VFO", () => {
+		const time = clock()
+		const onSettled = vi.fn()
+		const tracker = createVfoTracker({ ...time, onSettled })
+		// A user tune, then a reconnect's baseline reset elsewhere: not the user's.
+		tracker.update({ sourceId: "s", frequencyHz: 100 }, "user")
+		time.advance(500)
+		tracker.update({ sourceId: "s", frequencyHz: 150 }, "other")
+		time.advance(1_000)
+		expect(onSettled).toHaveBeenLastCalledWith(
+			{ sourceId: "s", frequencyHz: 150 },
+			"other",
+		)
+		// A reset, then the user's tune: the user's. A repeat of the pending
+		// value with another origin changes nothing.
+		tracker.update({ sourceId: "s", frequencyHz: 160 }, "other")
+		tracker.update({ sourceId: "s", frequencyHz: 170 }, "user")
+		tracker.update({ sourceId: "s", frequencyHz: 170 }, "other")
+		time.advance(1_000)
+		expect(onSettled).toHaveBeenLastCalledWith(
+			{ sourceId: "s", frequencyHz: 170 },
+			"user",
+		)
+		// No origin given is not the user's.
+		tracker.update({ sourceId: "s", frequencyHz: 180 })
+		time.advance(1_000)
+		expect(onSettled).toHaveBeenLastCalledWith(
+			{ sourceId: "s", frequencyHz: 180 },
+			"other",
+		)
+		expect(onSettled).toHaveBeenCalledTimes(3)
 	})
 	it("identical updates do not postpone settlement; snapshots cannot mutate state", () => {
 		const time = clock()

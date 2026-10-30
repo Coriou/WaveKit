@@ -26,6 +26,7 @@ import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
 	DecoderEfficiencyView,
+	EfficiencyBudgetConflict,
 	DecoderInfo as ApiDecoderInfo,
 	DecoderRatePreviewItem,
 	DecoderTypeInfo,
@@ -368,17 +369,25 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				},
 				handler: async (request, reply) => {
 					const parsed = z
-						.object({ cpuBudgetCores: CpuBudgetSchema })
+						.object({
+							cpuBudgetCores: CpuBudgetSchema,
+							expected: CpuBudgetSchema.optional(),
+						})
 						.strict()
 						.safeParse(request.body)
 					if (!parsed.success)
 						return sendJson(reply, 400, { code: "EFFICIENCY_BUDGET_INVALID" })
+					const { cpuBudgetCores, expected } = parsed.data
 					try {
-						return sendJson(
-							reply,
-							200,
-							await budget.update(parsed.data.cpuBudgetCores),
-						)
+						if (expected === undefined)
+							return sendJson(reply, 200, await budget.update(cpuBudgetCores))
+						const result = await budget.updateIf(expected, cpuBudgetCores)
+						if (result.ok) return sendJson(reply, 200, result.settings)
+						const conflict: EfficiencyBudgetConflict = {
+							code: "EFFICIENCY_BUDGET_CONFLICT",
+							current: result.current,
+						}
+						return sendJson(reply, 409, conflict)
 					} catch {
 						return sendJson(reply, 503, {
 							code: "EFFICIENCY_BUDGET_STORE_UNAVAILABLE",

@@ -79,6 +79,42 @@ describe("mock settings routes", () => {
 		})
 	})
 
+	it("saves a CPU budget with `expected` only while it still matches, like the core", async () => {
+		const route = "/api/decoders/efficiency/budget"
+		expect(
+			(await inject("PUT", route, { cpuBudgetCores: 3, expected: "auto" }))
+				.statusCode,
+		).toBe(200)
+		const stale = await inject("PUT", route, {
+			cpuBudgetCores: "auto",
+			expected: 4,
+		})
+		expect(stale.statusCode).toBe(409)
+		expect(stale.json()).toEqual({
+			code: "EFFICIENCY_BUDGET_CONFLICT",
+			current: {
+				source: "saved",
+				cpuBudgetCores: 3,
+				resolved: { mode: "configured", cores: 3, label: "configured" },
+			},
+		})
+		for (const expected of [0, 65, "3", null])
+			expect(
+				(await inject("PUT", route, { cpuBudgetCores: 2, expected }))
+					.statusCode,
+			).toBe(400)
+		expect((await inject("GET", route)).json()).toMatchObject({
+			cpuBudgetCores: 3,
+		})
+		expect(
+			(await inject("PUT", route, { cpuBudgetCores: "auto", expected: 3 }))
+				.statusCode,
+		).toBe(200)
+		expect((await inject("GET", route)).json()).toMatchObject({
+			cpuBudgetCores: "auto",
+		})
+	})
+
 	it("serves version and uptime on /api/status", async () => {
 		const status = (await inject("GET", "/api/status")).json<{
 			version: string

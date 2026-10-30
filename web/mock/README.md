@@ -107,3 +107,8 @@ Its `source` starts as `default` and becomes `saved` after a successful `PUT`, s
 row shows its saved-override note.
 `GET /api/decoders/efficiency` includes the resolved `budget` and illustrative per-source
 core usage (0.25 cores per running, unpaused decoder).
+
+`GET /api/decoders/summary` gives each decoder the core's verdict (`decoder-summary.ts`, the same
+codes, wording and actions as the core). Tuned within 200 kHz of 1090 MHz while the budget is
+still the default Auto, ADS-B pauses as `efficiency-budget` ("ADS-B paused: CPU budget full",
+first action `raise-budget`); saving any budget, or starting ADS-B yourself, lets it run again.
