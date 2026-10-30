@@ -129,10 +129,13 @@ A talkgroup's calls are one stack per radio. A DMR `call_start` that arrives bef
 decoded joins the call that follows it on the same talkgroup and channel (or, with none within the
 gap, the call before it) instead of becoming a stack of its own. A capcode is one stack per channel,
 except that the same page (same capcode, kind and text) heard within 2 s of one of the stack's
-decodes on another channel is a simulcast copy and joins the stack: the row and the detail list the
-channels it was heard on (`On 160.450 · 466.075 MHz`). A channel stays with the stack only while its
-copies keep arriving within 2 s of the others: a repeat heard later on that channel alone is a
-stack of that channel again. The 2 s is one POCSAG batch at the slowest
+decodes on another channel is a simulcast copy and joins the stack: the row lists the channels it
+was heard on (`On 160.450 · 466.075 MHz`), and the detail shows the decode's own Frequency with the
+stack's other channels under Also heard on (simulcast). The copies may arrive in either order: a
+repeat whose first copy lands on the other channel joins the stack that already heard both channels,
+so a beacon repeated on two channels stays one stack however its copies interleave. A channel stays
+with the stack only while its copies keep arriving within 2 s of the others: a repeat heard later on
+that channel alone is a stack of that channel again. The 2 s is one POCSAG batch at the slowest
 rate (544 bits at 512 baud, 1.06 s), the most two decoders' timestamps of one page differ, plus the
 network's launch skew between transmitters (under 1 s).
 

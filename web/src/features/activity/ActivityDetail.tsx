@@ -52,6 +52,15 @@ export function foldedShown<T>(members: readonly T[]): {
 	}
 }
 
+/** The stack's channels other than this decode's own (`hz`), matched to the kHz. */
+export function otherChannels(
+	channelsHz: readonly number[],
+	hz: number | null,
+): number[] {
+	const own = hz === null ? null : Math.round(hz / 1000)
+	return channelsHz.filter(c => Math.round(c / 1000) !== own)
+}
+
 /** A discovery is this event's when it sits within DISCOVERY_TOLERANCE_HZ of its frequency. */
 export function isNearDiscovery(
 	d: Pick<Discovery, "frequencyHz"> | undefined,
@@ -212,6 +221,7 @@ export function ActivityDetail({
 
 	const v = item ? rowView(item) : null
 	const hz = item?.frequencyHz ?? null
+	const alsoHeard = stack ? otherChannels(stack.channelsHz, hz) : []
 	const provenance =
 		record?.kind === "decoder-reception" ? record.payload.provenance : null
 
@@ -309,18 +319,17 @@ export function ActivityDetail({
 							</dd>
 						</div>
 					)}
-					{stack && stack.channelsHz.length > 1 ? (
+					{hz !== null && (
 						<div className="wka-field">
-							<dt>Channels (simulcast)</dt>
-							<dd>{stack.channelsHz.map(c => formatMHz(c)).join(" · ")} MHz</dd>
+							<dt>Frequency</dt>
+							<dd>{formatMHz(hz)} MHz</dd>
 						</div>
-					) : (
-						hz !== null && (
-							<div className="wka-field">
-								<dt>Frequency</dt>
-								<dd>{formatMHz(hz)} MHz</dd>
-							</div>
-						)
+					)}
+					{alsoHeard.length > 0 && (
+						<div className="wka-field">
+							<dt>Also heard on (simulcast)</dt>
+							<dd>{alsoHeard.map(c => formatMHz(c)).join(" · ")} MHz</dd>
+						</div>
 					)}
 					{item?.decoderId && (
 						<div className="wka-field">

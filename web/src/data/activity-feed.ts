@@ -461,14 +461,22 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 				},
 			)
 			if (generation !== this.generation) return
+			const fallback = this.fallbackToken
 			this.fallbackToken = null
 			this.pageQuery = pagedWith
 			// a wider query's page (the range before it moved on): only the rows inside the current range
-			if (pagedWith !== query)
+			if (pagedWith !== query) {
+				const inside = since(page.items, query.producedAt?.from)
+				// every row before the range's start (today, past midnight): older pages are older still, so
+				// page on from the snapshot's token with this query, or stop
+				const stale = page.items.length > 0 && inside.length === 0
+				if (stale) this.pageQuery = query
 				page = {
 					...page,
-					items: [...since(page.items, query.producedAt?.from)],
+					items: [...inside],
+					nextPageToken: stale ? fallback : page.nextPageToken,
 				}
+			}
 			this.update(v => ({
 				...v,
 				loadingMore: false,

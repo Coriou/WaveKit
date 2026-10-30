@@ -33,10 +33,12 @@ import {
 	shouldAutoFill,
 	stackAction,
 	stackBadge,
+	toggleControls,
 } from "../../src/features/activity/ActivityList.tsx"
 import {
 	foldedShown,
 	isNearDiscovery,
+	otherChannels,
 	withoutUnknownType,
 } from "../../src/features/activity/ActivityDetail.tsx"
 import { stackEntries } from "../../src/features/activity/rows.ts"
@@ -533,6 +535,25 @@ describe("activity fold keys", () => {
 		expect(two.map(s => s.members.length)).toEqual([3, 3])
 	})
 
+	it("names a decode's own channel and lists the stack's other channels apart", () => {
+		const channels = [160_450_000, 466_075_000, 169_650_000]
+		expect(otherChannels(channels, 466_075_000)).toEqual([
+			160_450_000, 169_650_000,
+		])
+		// matched to the kHz, as the stack keys its channels
+		expect(otherChannels(channels, 466_075_200)).toEqual([
+			160_450_000, 169_650_000,
+		])
+		expect(otherChannels([160_450_000], 160_450_000)).toEqual([])
+		expect(otherChannels(channels, null)).toEqual(channels)
+	})
+
+	it("points a stack toggle at its folded rows only while they are shown", () => {
+		expect(toggleControls(true, "folds-1")).toBe("folds-1")
+		expect(toggleControls(false, "folds-1")).toBeUndefined()
+		expect(toggleControls(true, undefined)).toBeUndefined()
+	})
+
 	it("lets a simulcast association expire: a later copy on one channel alone is that channel's again", () => {
 		const A = 160_450_000
 		const B = 466_075_000
@@ -568,15 +589,33 @@ describe("activity fold keys", () => {
 		const one = foldActivity(both)
 		expect(one).toHaveLength(1)
 		expect(one[0]?.channelsHz).toEqual([A, B])
-		// copies whose order flips (B first) still join while within 2 s of each other
-		const flipped = foldActivity([
-			page(0, A),
-			page(500, B),
-			page(59_500, B),
-			page(60_000, A),
+		// a beacon on both channels every 60 s whose copies arrive A,B / B,A / B,A / A,B: one stack
+		const alternating = [
+			[A, B],
+			[B, A],
+			[B, A],
+			[A, B],
+		].flatMap(([first, second], k) => [
+			page(k * 60_000, first as number),
+			page(k * 60_000 + 700, second as number),
 		])
-		expect(flipped.every(s => s.members.length === 2)).toBe(true)
-		expect(flipped.every(s => s.channelsHz.length === 2)).toBe(true)
+		const beacon = foldActivity(alternating)
+		expect(beacon).toHaveLength(1)
+		expect(beacon[0]?.members).toHaveLength(8)
+		expect(beacon[0]?.channelsHz).toEqual([A, B])
+		// the same, arriving live one row at a time: the incremental fold agrees
+		const owner = { capacity: MAX_ITEMS }
+		let live: ActivitySummary[] = []
+		for (const r of alternating) {
+			live = mergeNewest(live, [r], owner.capacity)
+			foldedOf(live, owner)
+		}
+		expect(foldedOf(live, owner)).toHaveLength(1)
+		releaseFolds(owner)
+		// a repeat heard on B alone (no copy following) is B's own, even in a stack that heard both
+		const alone = page(240_000, B)
+		const withAlone = foldActivity([...alternating, alone])
+		expect(stackOf(withAlone, alone.eventId)?.members).toEqual([alone])
 	})
 
 	it("separates pages by content: tone only, numeric, alpha, and different texts", () => {
@@ -1089,6 +1128,13 @@ describe("activity incremental folding", () => {
 			copyMs: fc.integer({ min: 0, max: 3_000 }),
 		}),
 		fc.record({
+			op: fc.constant("beacon" as const),
+			// per repeat, whether the second channel's copy arrives first
+			swapped: fc.array(fc.boolean(), { minLength: 1, maxLength: 5 }),
+			periodMs: fc.integer({ min: 3_000, max: 200_000 }),
+			copyMs: fc.integer({ min: 0, max: 2_500 }),
+		}),
+		fc.record({
 			op: fc.constant("evict" as const),
 			n: fc.integer({ min: 1, max: 5 }),
 		}),
@@ -1101,7 +1147,7 @@ describe("activity incremental folding", () => {
 	const PAGER_CHANNELS = [160_450_000, 466_075_000, 169_650_000] as const
 
 	// Feature: activity-folding, Property 8: an incremental fold equals a full fold
-	// Validates: Requirements R1, R3, MAJOR 1 (multi-channel pages too)
+	// Validates: Requirements R1, R3, MAJOR 1 (multi-channel pages too, copies in alternating order)
 	it("folds a changing list incrementally to exactly the stacks a full fold gives", () => {
 		fc.assert(
 			fc.property(fc.array(opArb, { minLength: 1, maxLength: 30 }), ops => {
@@ -1137,6 +1183,23 @@ describe("activity incremental folding", () => {
 							return { ...r, commitSeq: String(low) }
 						})
 						list = mergeNewest(list, add, owner.capacity)
+					} else if (o.op === "beacon") {
+						// one page repeated on two channels, the copies' arrival order alternating, arriving live
+						for (const swap of o.swapped) {
+							const base = (newest += o.periodMs)
+							const [first, second] = swap
+								? [PAGER_CHANNELS[1], PAGER_CHANNELS[0]]
+								: [PAGER_CHANNELS[0], PAGER_CHANNELS[1]]
+							for (const [i, hz] of [first, second].entries()) {
+								const r = row(base + i * o.copyMs, {
+									...ENTITY.pager,
+									frequencyHz: hz,
+								})
+								list = mergeNewest(list, [r], owner.capacity)
+								const inc = foldedOf(list, owner)
+								expect(shape(inc)).toEqual(shape(foldActivity(list)))
+							}
+						}
 					} else if (o.op === "evict") {
 						list = list.slice(0, Math.max(0, list.length - o.n))
 					} else if (list.length > 0) {

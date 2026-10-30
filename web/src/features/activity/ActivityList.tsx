@@ -510,6 +510,14 @@ export function stackAction(
 	return null
 }
 
+/** A stack toggle's aria-controls: the folded rows' id only while they are shown (the element exists). */
+export function toggleControls(
+	expanded: boolean,
+	foldsId: string | undefined,
+): string | undefined {
+	return expanded ? foldsId : undefined
+}
+
 /** "160.450 · 466.075 MHz": the channels a simulcast stack was heard on; null for one channel. */
 export function channelsText(stack: ActivityStack | undefined): string | null {
 	if (!stack || stack.channelsHz.length < 2) return null
@@ -577,7 +585,7 @@ function StackToggle({
 			type="button"
 			className="wka-stack"
 			aria-expanded={expanded}
-			aria-controls={foldsId}
+			aria-controls={toggleControls(expanded, foldsId)}
 			aria-label={stackLabel(stack, expanded)}
 			title={stackLabel(stack, expanded)}
 			onClick={() => onToggle?.(stack.key)}

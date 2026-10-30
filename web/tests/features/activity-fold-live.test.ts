@@ -430,6 +430,62 @@ describe("activity cache across close and open", () => {
 		expect(feed.get().nextPageToken).toBeNull()
 	})
 
+	it("stops paging a moved range's stale days: to the snapshot's token with the current query, else the end", async () => {
+		const firstFrom = new Date(T0).toISOString()
+		const seen: URLSearchParams[] = []
+		const answer = { current: page(range(201, 300), "p:cache") }
+		const api = new ApiClient({
+			fetch: async url => {
+				seen.push(new URL(String(url), "http://core").searchParams)
+				return new Response(JSON.stringify(answer.current), { status: 200 })
+			},
+		})
+		const core = setup()
+		// "Today" past midnight: the new day starts at 250 s, after the old query's next page
+		const feed = new ActivityFeed(api, core.events, { id: "midnight" })
+		await feed.setQuery({ producedAt: { from: firstFrom } }, "Today")
+		feed.stop()
+		const newDay = new Date(T0 + 250_000).toISOString()
+		answer.current = page(range(290, 320), "p:snapshot")
+		await feed.setQuery({ producedAt: { from: newDay } }, "Today")
+		const held = feed.get().items.length
+		// the old query's next page lies wholly in the old day: the snapshot's token takes over
+		answer.current = page(range(101, 200), "p:older")
+		await feed.loadMore()
+		expect(seen.at(-1)?.get("pageToken")).toBe("p:cache")
+		expect(feed.get().items).toHaveLength(held)
+		expect(feed.get().nextPageToken).toBe("p:snapshot")
+		answer.current = page(range(250, 289), null)
+		await feed.loadMore()
+		expect(seen.at(-1)?.get("pageToken")).toBe("p:snapshot")
+		expect(seen.at(-1)?.get("producedFrom")).toBe(newDay)
+		expect(feed.get().error).toBeNull()
+		expect(feed.get().nextPageToken).toBeNull()
+
+		// no snapshot token left (already paged once with the cache's): paging ends
+		answer.current = page(range(251, 300), "p:cache")
+		const later = new ActivityFeed(api, core.events, { id: "midnight-2" })
+		await later.setQuery({ producedAt: { from: firstFrom } }, "Today")
+		later.stop()
+		const day2 = new Date(T0 + 230_000).toISOString()
+		answer.current = page(range(290, 320), "p:snapshot")
+		await later.setQuery({ producedAt: { from: day2 } }, "Today")
+		answer.current = page(range(201, 250), "p:cache2")
+		await later.loadMore()
+		expect(later.get().nextPageToken).toBe("p:cache2")
+		answer.current = page(range(151, 200), "p:cache3")
+		const asked = seen.length
+		await later.loadMore()
+		expect(seen.at(-1)?.get("pageToken")).toBe("p:cache2")
+		expect(later.get().nextPageToken).toBeNull()
+		await later.loadMore()
+		expect(seen).toHaveLength(asked + 1)
+		const from = Date.parse(day2)
+		expect(later.get().items.every(i => Date.parse(i.producedAt) >= from)).toBe(
+			true,
+		)
+	})
+
 	it("skips the snapshot's pages of cached rows when the cache's token expired, within a bound", async () => {
 		const seen: string[] = []
 		const pages: Record<string, ActivitySearchPage> = {

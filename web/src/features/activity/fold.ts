@@ -340,9 +340,11 @@ function simulcastCopy(
  * within the family's gap) and otherwise starts one. Calls keep one stack per radio; a row whose radio is
  * not known yet (a DMR call start) joins the stack of the next row with a radio, or, when none follows
  * within the gap, the stack before it. A page joins a stack it is a simulcast copy of (heard within
- * `simulcastMs` of one of the stack's rows on another channel), else the stack that started on its channel:
- * a channel stays with another channel's stack only while its copies keep arriving with that stack's, so a
- * repeat heard on it alone later is its own channel's again.
+ * `simulcastMs` of one of the stack's rows on another channel), else a stack that already heard both its
+ * channel and the channel of a copy following it within `simulcastMs` (the copies' arrival order may swap
+ * from one repeat to the next), else the stack that started on its channel: a channel stays with another
+ * channel's stack only while its copies keep arriving with that stack's, so a repeat heard on it alone
+ * later is its own channel's again.
  */
 function splitRuns(
 	family: FoldFamily,
@@ -386,6 +388,34 @@ function splitRuns(
 		} else start(floating, floatLast, khzOf(floating[0] as ActivitySummary))
 		floating = []
 	}
+	/**
+	 * An open stack that heard `khz` and a channel whose copy follows row `i` within `within` ms, both within
+	 * the gap: the network repeating its page on both channels, this time with that channel first.
+	 */
+	const pairedAhead = (
+		i: number,
+		khz: number | null,
+		t: number,
+		within: number,
+	) => {
+		for (
+			let j = i + 1;
+			j < rows.length && (times[j] as number) - t <= within;
+			j++
+		) {
+			const other = khzOf(rows[j] as ActivitySummary)
+			if (other === khz) continue
+			const run = newest(r => {
+				const a = r.heard.get(khz)
+				const b = r.heard.get(other)
+				return (
+					a !== undefined && b !== undefined && t - a <= gap && t - b <= gap
+				)
+			})
+			if (run) return run
+		}
+		return null
+	}
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i] as ActivitySummary
 		const t = times[i] as number
@@ -416,6 +446,7 @@ function splitRuns(
 			within === undefined
 				? newest(() => true)
 				: (newest(r => simulcastCopy(r, khz, t, within)) ??
+					pairedAhead(i, khz, t, within) ??
 					newest(r => r.primary === khz))
 		if (run) {
 			run.rows.push(row)
