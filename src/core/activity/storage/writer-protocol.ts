@@ -14,12 +14,26 @@ interface OpenActivityWorkerRequest {
 	failNextWrites: number
 	throwNextWrites: number
 	writeDelayMs: number
+	/** Test seam: the worker waits this long after taking the lock, before opening. */
+	openDelayMs?: number
+	/** Test seam: the deferred seed task throws before it scans. */
+	seedThrows?: boolean
 }
 
 interface ReadyActivityWorkerResponse {
 	id: number
 	type: "ready"
 	created: boolean
+	snapshot: ActivityWorkerSnapshot
+}
+
+/**
+ * Unsolicited, after the deferred retention seed (id 0, never a request id): the snapshot with
+ * the seeded shares, or with `effective: "oldest-first"` when the seed failed.
+ */
+interface SeededActivityWorkerMessage {
+	id: 0
+	type: "seeded"
 	snapshot: ActivityWorkerSnapshot
 }
 
@@ -43,6 +57,7 @@ export type ActivityWorkerResponse =
 	| { id: number; type: "wrote"; result: WriterWorkResult }
 	| { id: number; type: "checkpointed"; snapshot: ActivityWorkerSnapshot }
 	| { id: number; type: "closed" }
+	| SeededActivityWorkerMessage
 	| ErrorActivityWorkerResponse
 
 const REQUEST_TYPES = new Set(["open", "write", "checkpoint", "close"])
@@ -62,7 +77,11 @@ export function isActivityWorkerRequest(
 			isRecord(value["limits"]) &&
 			typeof value["failNextWrites"] === "number" &&
 			typeof value["throwNextWrites"] === "number" &&
-			typeof value["writeDelayMs"] === "number"
+			typeof value["writeDelayMs"] === "number" &&
+			(value["openDelayMs"] === undefined ||
+				typeof value["openDelayMs"] === "number") &&
+			(value["seedThrows"] === undefined ||
+				typeof value["seedThrows"] === "boolean")
 		)
 	}
 	if (type === "write")
@@ -83,6 +102,7 @@ export function isActivityWorkerResponse(
 		type === "wrote" ||
 		type === "checkpointed" ||
 		type === "closed" ||
+		type === "seeded" ||
 		type === "error"
 	)
 }

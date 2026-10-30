@@ -245,6 +245,7 @@ import {
 	type PersistedLease,
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
+import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./store/slices.js"
 import { PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
@@ -1651,7 +1652,9 @@ export class ScannerService extends EventEmitter {
 			...(loaded.aliases ? { aliases: loaded.aliases } : {}),
 		}
 		try {
-			this.store.restore({
+			// In slices with event-loop turns between them (SCANNER_LOAD_SLICE_ITEMS): a large
+			// store must not hold the main thread while other services start beside it.
+			await this.store.restoreInSlices({
 				...publicSnapshot,
 				...(loaded.recordingOperations
 					? { recordingOperations: loaded.recordingOperations }
@@ -1666,7 +1669,11 @@ export class ScannerService extends EventEmitter {
 			// Preserve S1's public fallback; it is never evidence of Task42 authority.
 			this.store.restore(publicSnapshot)
 		}
+		let replayed = 0
 		for (const entry of loaded.entries) {
+			if (replayed > 0 && replayed % SCANNER_LOAD_SLICE_ITEMS === 0)
+				await yieldToEventLoop()
+			replayed += 1
 			try {
 				this.store.replay(entry)
 			} catch (err: unknown) {

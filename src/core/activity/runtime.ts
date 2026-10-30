@@ -19,12 +19,18 @@ export type ActivityFailureCode =
 	| "ACTIVITY_UNAVAILABLE"
 	| "ACTIVITY_STORE_LOCKED"
 	| "ACTIVITY_SCHEMA_MISMATCH"
+	| "ACTIVITY_OPEN_TIMEOUT"
 
 export interface ActivityUnavailableState {
 	reason: ActivityFailureCode
 	message: string
 	/** When false, routes replace `message` and still return `reason`. */
 	discloseErrors?: boolean
+	/**
+	 * False when another attempt cannot help: no node:sqlite or FTS5 (the probe), or a
+	 * foreign schema. Timeouts, a held lock and other open failures are retryable.
+	 */
+	retryable?: boolean
 }
 
 export interface ActivityRetentionOverrides {
@@ -98,6 +104,12 @@ export interface StartActivityRuntimeOptions {
 	probe?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 	/** When false, failure logs carry the code only. */
 	discloseErrors?: boolean
+	/** False: a failed open logs nothing (the retrying lifecycle logs its own warn). */
+	logFailure?: boolean
+	/** Writer open budget; the store's ACTIVITY_OPEN_TIMEOUT_MS when omitted. */
+	openTimeoutMs?: number
+	/** Test seam: the writer waits this long after taking the lock. */
+	openDelayMs?: number
 	/**
 	 * WG3 (web-gaps-3 req 5.2): decoder binding lookup for reception provenance, passed to
 	 * the ingress unchanged. Null or omitted keeps null provenance (pre-WG3 behaviour).
@@ -139,11 +151,13 @@ function failureState(
 	options: StartActivityRuntimeOptions,
 	reason: ActivityFailureCode,
 	message: string,
+	retryable: boolean,
 ): ActivityUnavailableState {
 	return {
 		reason,
 		message,
 		discloseErrors: options.discloseErrors !== false,
+		retryable,
 	}
 }
 
@@ -254,16 +268,17 @@ function unavailableRuntime(
 ): ActivityRuntime {
 	const log = createComponentLogger(options.logger, "Activity")
 	const disclose = options.discloseErrors !== false
-	try {
-		log.error(
-			disclose
-				? { code: unavailable.reason, err: unavailable.message }
-				: { code: unavailable.reason },
-			"Activity is unavailable; WaveKit continues without it",
-		)
-	} catch {
-		// A failing logger must not take the process down.
-	}
+	if (options.logFailure !== false)
+		try {
+			log.error(
+				disclose
+					? { code: unavailable.reason, err: unavailable.message }
+					: { code: unavailable.reason },
+				"Activity is unavailable; WaveKit continues without it",
+			)
+		} catch {
+			// A failing logger must not take the process down.
+		}
 	return assemble(options, {
 		status: "unavailable",
 		service: inertActivityService(),
@@ -298,7 +313,7 @@ export async function startActivityRuntime(
 		if (!probed.ok) {
 			return unavailableRuntime(
 				options,
-				failureState(options, "ACTIVITY_UNAVAILABLE", probed.reason),
+				failureState(options, "ACTIVITY_UNAVAILABLE", probed.reason, false),
 			)
 		}
 		const mapped = mapLimits(options.retention, options.admission)
@@ -311,6 +326,12 @@ export async function startActivityRuntime(
 			...(options.execution ? { execution: options.execution } : {}),
 			...(options.workerUrl ? { workerUrl: options.workerUrl } : {}),
 			...(options.probe ? { probe: options.probe } : {}),
+			...(options.openTimeoutMs !== undefined
+				? { openTimeoutMs: options.openTimeoutMs }
+				: {}),
+			...(options.openDelayMs !== undefined
+				? { openDelayMs: options.openDelayMs }
+				: {}),
 		})
 		let service: ActivityQueryService
 		try {
@@ -384,14 +405,19 @@ export async function startActivityRuntime(
 	} catch (error) {
 		let reason: ActivityFailureCode = "ACTIVITY_UNAVAILABLE"
 		let message = error instanceof Error ? error.message : String(error)
+		let retryable = true
 		try {
 			const storage = await import("./storage/index.js")
-			if (error instanceof storage.ActivityStoreLockedError) {
+			if (error instanceof storage.ActivityOpenTimeoutError) {
+				reason = "ACTIVITY_OPEN_TIMEOUT"
+				message = error.message
+			} else if (error instanceof storage.ActivityStoreLockedError) {
 				reason = "ACTIVITY_STORE_LOCKED"
 				message = error.message
 			} else if (error instanceof storage.ActivitySchemaMismatchError) {
 				reason = "ACTIVITY_SCHEMA_MISMATCH"
 				message = error.message
+				retryable = false
 			} else if (error instanceof storage.ActivityUnavailableError) {
 				reason = "ACTIVITY_UNAVAILABLE"
 				message = error.message
@@ -399,6 +425,9 @@ export async function startActivityRuntime(
 		} catch {
 			// Classification is best-effort; the process still stays up.
 		}
-		return unavailableRuntime(options, failureState(options, reason, message))
+		return unavailableRuntime(
+			options,
+			failureState(options, reason, message, retryable),
+		)
 	}
 }

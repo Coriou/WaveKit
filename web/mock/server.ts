@@ -18,6 +18,7 @@ import {
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 } from "@wavekit/api-types"
 import type {
+	ActivityLifecycleStatus,
 	ActivityQuery,
 	ActivityRecord,
 	ActivitySearchPage,
@@ -140,6 +141,13 @@ export interface MockServerOptions {
 	activityFloods?: boolean
 	/** The scanner engine starts with its front-end overload hint (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
 	overloadHint?: boolean
+	/**
+	 * The Activity store is not open yet: Activity reads answer the core's 503 and
+	 * `GET /api/activity/status` reports `opening` (WAVEKIT_MOCK_ACTIVITY_STORE=opening) or
+	 * `retrying` with a next attempt every 5 s (=retrying). It opens `openAfterMs` after start
+	 * (WAVEKIT_MOCK_ACTIVITY_OPEN_MS); without it, never.
+	 */
+	activityStore?: { state: "opening" | "retrying"; openAfterMs?: number }
 }
 
 export interface MockServer {
@@ -2007,6 +2015,87 @@ export async function buildMockServer(
 				)
 		},
 	)
+	// The Activity store lifecycle (GET /api/activity/status, the core's 503 while not open)
+	const activityStore = options.activityStore
+	const activityOpenAt =
+		activityStore === undefined
+			? startedAt
+			: startedAt + (activityStore.openAfterMs ?? Number.POSITIVE_INFINITY)
+	const activityLifecycle = (): ActivityLifecycleStatus => {
+		const now = Date.now()
+		if (activityStore === undefined || now >= activityOpenAt)
+			return {
+				state: "available",
+				reason: null,
+				attempts: activityStore?.state === "retrying" ? 2 : 1,
+				nextAttemptAt: null,
+				droppedWhileClosed: 0,
+			}
+		if (activityStore.state === "opening")
+			return {
+				state: "opening",
+				reason: null,
+				attempts: 1,
+				nextAttemptAt: null,
+				droppedWhileClosed: 0,
+			}
+		const elapsed = now - startedAt
+		return {
+			state: "retrying",
+			reason: "ACTIVITY_OPEN_TIMEOUT",
+			attempts: 1 + Math.floor(elapsed / 5_000),
+			nextAttemptAt: new Date(
+				startedAt + (Math.floor(elapsed / 5_000) + 1) * 5_000,
+			).toISOString(),
+			droppedWhileClosed: Math.floor(elapsed / 1_000),
+		}
+	}
+	if (activityStore !== undefined)
+		app.addHook("onRequest", async (request, reply) => {
+			const path = request.url.split("?")[0] ?? ""
+			if (path !== "/api/activity" && !path.startsWith("/api/activity/")) return
+			if (path === "/api/activity/status") return
+			const lifecycle = activityLifecycle()
+			if (lifecycle.state === "available") return
+			return reply.code(503).send({
+				error: "ActivityQueryError",
+				code: "ACTIVITY_UNAVAILABLE",
+				message: "Activity store is not open",
+				...(lifecycle.reason !== null ? { reason: lifecycle.reason } : {}),
+			})
+		})
+	app.get("/api/activity/status", async () => {
+		const lifecycle = activityLifecycle()
+		const open = lifecycle.state === "available"
+		return {
+			enabled: true,
+			stats: {
+				admitted: open ? activity.length : 0,
+				committed: open ? activity.length : 0,
+				duplicates: 0,
+				dropped: {
+					"rate-limited": 0,
+					"queue-full": 0,
+					"store-paused": 0,
+					"write-failed": 0,
+					closed: 0,
+				},
+				excludedTelemetry: 0,
+				coalescedPositions: 0,
+				queueDepth: 0,
+				queueBytes: 0,
+				dbBytes: open ? activity.length * 1_024 : 0,
+				walBytes: 0,
+				rows: open ? activity.length : 0,
+				oldestReceivedAt: open ? (activity[0]?.receivedAt ?? null) : null,
+				pruneWatermark: activityPruned,
+				paused: false,
+				writer: open ? "running" : "stopped",
+				lifecycle,
+			},
+		}
+	})
+
 	// Band inspection UX req 2.1: rate-limited Activity reads (every other one answers 429)
 	let activityReads = 0
 	const activity429 = options.activity429
@@ -2430,6 +2519,8 @@ async function main(): Promise<void> {
 	const spectrumBinsEnv = env["WAVEKIT_MOCK_SPECTRUM_BINS"]
 	const retuneEnv = env["WAVEKIT_MOCK_RETUNE_MS"]
 	const activity429Env = env["WAVEKIT_MOCK_ACTIVITY_429"]
+	const activityStoreEnv = env["WAVEKIT_MOCK_ACTIVITY_STORE"]
+	const activityOpenEnv = env["WAVEKIT_MOCK_ACTIVITY_OPEN_MS"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2452,6 +2543,16 @@ async function main(): Promise<void> {
 			? { activity429: activity429Env }
 			: {}),
 		activityFloods: env["WAVEKIT_MOCK_ACTIVITY_FLOODS"] !== "0",
+		...(activityStoreEnv === "opening" || activityStoreEnv === "retrying"
+			? {
+					activityStore: {
+						state: activityStoreEnv,
+						...(activityOpenEnv !== undefined
+							? { openAfterMs: Number(activityOpenEnv) }
+							: {}),
+					},
+				}
+			: {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)

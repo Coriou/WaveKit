@@ -160,6 +160,8 @@ import {
 	planRetirement,
 } from "./fragment-retirement.js"
 import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
+import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./slices.js"
+import type { YieldTurn } from "./slices.js"
 
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
@@ -953,6 +955,9 @@ export class DiscoveryStore
 	private revisionSeq = 1
 	private readonly published = new Map<string, number>()
 	private epoch = newStoreEpoch()
+	/** Set while restoreInSlices runs (between its turns the store is half built). */
+	private restoring = false
+	private ingestsDuringRestore = 0
 	/**
 	 * WG11 req 3.1-3.4 (lane SC). `revisions`: bumped by the mutating helpers only when a value the
 	 * record's JSON holds changes, so "no change" needs no before/after stringify. `members` mirrors
@@ -1050,6 +1055,12 @@ export class DiscoveryStore
 	 * says, so evidence that follows still finds its discovery.
 	 */
 	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
+		// A sliced restore is between turns: the store is half built, so an observation is not
+		// admitted (transient, as below the gate; the next block observes it again).
+		if (this.restoring) {
+			this.ingestsDuringRestore += 1
+			return TRANSIENT
+		}
 		this.sweepPendingIfDue()
 		const flagged = this.rememberStickyFlags(input) // may be raised late (P3, § 4.9)
 		// DQ 1.4: a flagged observation's pending evidence stops counting.
@@ -2731,6 +2742,64 @@ export class DiscoveryStore
 	}
 
 	restore(s: StoreSnapshot): void {
+		this.assertNotRestoring()
+		const steps = this.restoreSteps(s, Number.POSITIVE_INFINITY)
+		while (!steps.next().done);
+	}
+
+	/** True while restoreInSlices runs: ingest is refused until it completes. */
+	isRestoring(): boolean {
+		return this.restoring
+	}
+
+	/** Observations refused because a sliced restore was running (they were not admitted). */
+	ingestsRefusedDuringRestore(): number {
+		return this.ingestsDuringRestore
+	}
+
+	private assertNotRestoring(): void {
+		if (this.restoring)
+			throw new WaveKitError(
+				"Scanner store restore already running",
+				"SCANNER_STORE_RESTORING",
+			)
+	}
+
+	/**
+	 * `restore(s)` with an awaited `yieldTurn` after every `sliceItems` discoveries or
+	 * observations (SCANNER_LOAD_SLICE_ITEMS by default), so a large store does not hold the
+	 * event loop for the whole restore. The same steps in the same order. Until it completes
+	 * `ingest` admits nothing and another restore throws, whatever the startup order.
+	 */
+	async restoreInSlices(
+		s: StoreSnapshot,
+		yieldTurn: YieldTurn = yieldToEventLoop,
+		sliceItems: number = SCANNER_LOAD_SLICE_ITEMS,
+	): Promise<void> {
+		this.assertNotRestoring()
+		const steps = this.restoreSteps(s, sliceItems)
+		this.restoring = true
+		try {
+			while (!steps.next().done) await yieldTurn()
+		} finally {
+			this.restoring = false
+			// A throwing yieldTurn still runs the restore's finally (proof bookkeeping).
+			steps.return()
+		}
+	}
+
+	/** Yields after every `sliceItems` items; restore() runs it without pausing. */
+	private *restoreSteps(
+		s: StoreSnapshot,
+		sliceItems: number,
+	): Generator<void, void, void> {
+		let items = 0
+		const tick = (): boolean => {
+			items += 1
+			if (items < sliceItems) return false
+			items = 0
+			return true
+		}
 		for (const timer of this.anchorExpiry.values()) clearTimeout(timer)
 		this.anchorExpiry.clear()
 		// band inspection UX req 3.3: restored records are a new store; revisions restart with it
@@ -2785,14 +2854,21 @@ export class DiscoveryStore
 		this.proofQuiet++
 		try {
 			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
-			for (const d of s.discoveries) this.insertDiscovery(clone(d))
+			for (const d of s.discoveries) {
+				this.insertDiscovery(clone(d))
+				if (tick()) yield
+			}
 			for (const o of [...s.observations].sort(compareObs)) {
 				if (!this.discoveries.has(o.discoveryId)) continue
 				const observation = clone(o)
 				this.downgradeLegacyObservation(observation)
 				this.putObservation(observation)
+				if (tick()) yield
 			}
-			for (const d of this.discoveries.values()) this.normalizeCheckedContent(d)
+			for (const d of this.discoveries.values()) {
+				this.normalizeCheckedContent(d)
+				if (tick()) yield
+			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }

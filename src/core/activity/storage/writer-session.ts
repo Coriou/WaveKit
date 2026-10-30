@@ -48,6 +48,8 @@ export interface ActivityWorkerSnapshot {
 	paused: boolean
 	/** WG3 (req 2.1): mapped by the store into `stats().retention`. */
 	retention: ActivityRetentionStats
+	/** Retention seed scans this session has run (the open's and any reseed). Not in stats. */
+	seedScans: number
 }
 
 /** Shares listed in the retention block (req 2.2). */
@@ -70,6 +72,11 @@ export interface ActivitySession {
 	/** Wall time of the last retention seed scan, in ms. */
 	readonly seedMs: number
 	snapshot(): ActivityWorkerSnapshot
+	/**
+	 * Runs the retention seed scan when it was deferred at open. Idempotent; write()
+	 * calls it first, so a write never runs against unseeded counters.
+	 */
+	seedCounters(): void
 	write(rows: readonly BuiltActivityRow[], nowMs: number): WriterWorkResult
 	checkpoint(reason: "threshold" | "close"): ActivityWorkerSnapshot
 	close(): void
@@ -88,6 +95,7 @@ export function createActivitySession(
 	failNextWrites = 0,
 	throwNextWrites = 0,
 	clock: () => number = Date.now,
+	options: { deferSeed?: boolean } = {},
 ): ActivitySession {
 	const opened = openActivityDatabase(db)
 	let failures = failNextWrites
@@ -105,8 +113,10 @@ export function createActivitySession(
 	let stepNote: string | undefined
 	/** Wall time of the last seed scan (design F seed budget). */
 	let seedMs = 0
+	let seedScans = 0
 	const seed = (): boolean => {
 		const started = performance.now()
+		seedScans += 1
 		try {
 			counters.seed()
 			return true
@@ -121,7 +131,17 @@ export function createActivitySession(
 			seedMs = performance.now() - started
 		}
 	}
-	seed()
+	// The seed is one sequential pass over the whole table (every record blob): about 2.8 s
+	// for a 272 MB store on a cold page cache, 0.3 s warm. The worker defers it past the
+	// open reply so the open costs only the indexed reads above; it then runs as the first
+	// task on the worker's serial chain, before any write.
+	let seeded = false
+	const seedOnce = (): void => {
+		if (seeded) return
+		seeded = true
+		seed()
+	}
+	if (options.deferSeed !== true) seedOnce()
 	if (state.walBytes >= limits.walPassiveBytes || paused) {
 		const wal = syncActivityWal(db, dbPath, limits)
 		paused = wal.paused
@@ -143,6 +163,7 @@ export function createActivitySession(
 			...counters.listed(),
 			prefixFallbackSteps,
 		},
+		seedScans,
 	})
 
 	/** A prefix step (age, oldest-first or fallback) with the counters kept in step. */
@@ -375,7 +396,9 @@ export function createActivitySession(
 			return seedMs
 		},
 		snapshot,
+		seedCounters: seedOnce,
 		write(rows, nowMs) {
+			seedOnce()
 			if (throws > 0) {
 				throws -= 1
 				throw new ActivityUnavailableError("injected write throw")

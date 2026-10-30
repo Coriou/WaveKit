@@ -401,6 +401,20 @@ export function alignIqChunk(
 	}
 }
 
+/**
+ * Listener cap per event on SourceManager (Node warns past it; 10 by default). Its busiest
+ * event, `caps-changed`, has one listener per subsystem, not per connection:
+ * - 8 fixed: the fanout router (rate and caps), the entry point's fan-out (VFO, coverage,
+ *   the sources WebSocket), DecoderManager, ChannelizerManager, ScannerService, the source
+ *   status publisher and LiveDemodulator;
+ * - 2 per source: its SpectrumEngine and, for up to 1 s after a lease restore, the scanner's
+ *   restore waiter;
+ * - 1 per IQ snapshot request in flight.
+ * Two sources and four concurrent snapshots: 8 + 2 x 2 + 4 = 16. A count past that is a leak
+ * worth the warning. A reconnect adds none (source-caps-listeners test).
+ */
+export const SOURCE_MANAGER_MAX_LISTENERS = 16
+
 export class SourceManager extends EventEmitter {
 	private sources: Map<string, SourceState> = new Map()
 	private evidenceCounter: bigint = 1n
@@ -411,6 +425,7 @@ export class SourceManager extends EventEmitter {
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
+		this.setMaxListeners(SOURCE_MANAGER_MAX_LISTENERS)
 		this.logger = logger.child({ component: "SourceManager" })
 		this.options = options
 	}

@@ -11,6 +11,7 @@ import type {
 	StoreIdentity,
 } from "./contract.js"
 import {
+	ActivityOpenTimeoutError,
 	ActivitySchemaMismatchError,
 	ActivityStoreLockedError,
 	ActivityUnavailableError,
@@ -53,6 +54,11 @@ export interface OpenActivityStoreOptions {
 	throwNextWrites?: number
 	/** Test seam: the worker waits this long before applying a write. */
 	writeDelayMs?: number
+	/** Test seam: the worker waits this long after taking the lock, before opening. */
+	openDelayMs?: number
+	/** Test seam: the worker's deferred seed task throws. */
+	seedThrows?: boolean
+	/** Open budget; ACTIVITY_OPEN_TIMEOUT_MS by default. */
 	openTimeoutMs?: number
 	/** Acknowledgement budget for a write. Distinct from openTimeoutMs. */
 	writeTimeoutMs?: number
@@ -66,6 +72,8 @@ interface OpenWorkerRequest {
 	failNextWrites: number
 	throwNextWrites: number
 	writeDelayMs: number
+	openDelayMs?: number
+	seedThrows?: boolean
 }
 
 type WorkerRequestBody =
@@ -83,6 +91,16 @@ export function defaultActivityWorkerUrl(): URL {
 	return new URL("./activity-writer-worker.js", import.meta.url)
 }
 
+/**
+ * Open budget of the writer: worker boot, lock, SQLite open, schema check and the
+ * indexed state reads (COUNT(*) on the smallest index, MIN/MAX on indexed columns).
+ * The full-table retention seed runs after the reply, so the open no longer scales with
+ * the store's size. Measured on a 272 MB, 120,000-row store at load average 6 to 10:
+ * worker online in 50 to 330 ms, indexed reads about 10 ms warm and 200 ms cold. 5 s
+ * keeps more than 10x headroom over that; a slower open is a fault the runtime retries.
+ */
+export const ACTIVITY_OPEN_TIMEOUT_MS = 5_000
+
 export async function openActivityStore(
 	options: OpenActivityStoreOptions,
 ): Promise<ActivityStoreHandle> {
@@ -90,7 +108,8 @@ export async function openActivityStore(
 	const failNextWrites = options.failNextWrites ?? 0
 	const throwNextWrites = options.throwNextWrites ?? 0
 	const writeDelayMs = options.writeDelayMs ?? 0
-	const openTimeoutMs = options.openTimeoutMs ?? 5_000
+	const openDelayMs = options.openDelayMs ?? 0
+	const openTimeoutMs = options.openTimeoutMs ?? ACTIVITY_OPEN_TIMEOUT_MS
 	const writeTimeoutMs = options.writeTimeoutMs ?? 30_000
 	const execution = options.execution ?? "thread"
 	if (
@@ -100,6 +119,8 @@ export async function openActivityStore(
 		throwNextWrites < 0 ||
 		!Number.isSafeInteger(writeDelayMs) ||
 		writeDelayMs < 0 ||
+		!Number.isSafeInteger(openDelayMs) ||
+		openDelayMs < 0 ||
 		!Number.isSafeInteger(openTimeoutMs) ||
 		openTimeoutMs < 1 ||
 		!Number.isSafeInteger(writeTimeoutMs) ||
@@ -164,6 +185,8 @@ export async function openActivityStore(
 		failNextWrites,
 		throwNextWrites,
 		writeDelayMs,
+		openDelayMs,
+		options.seedThrows === true,
 		openTimeoutMs,
 		writeTimeoutMs,
 		options.logger,
@@ -182,12 +205,15 @@ export async function openActivityStore(
 	return store
 }
 
-class ActivityWriterClient {
+/** Exported for tests; production code reaches it only through openActivityStore. */
+export class ActivityWriterClient {
 	private readySnapshot: ActivityWorkerSnapshot | undefined
 	private nextId = 1
 	private exited = false
 	private closing = false
 	private gone: (() => void) | undefined
+	private seeded: ((snapshot: ActivityWorkerSnapshot) => void) | undefined
+	private lastSeeded: ActivityWorkerSnapshot | undefined
 	private readonly pending = new Map<
 		number,
 		{
@@ -229,6 +255,8 @@ class ActivityWriterClient {
 		failNextWrites: number,
 		throwNextWrites: number,
 		writeDelayMs: number,
+		openDelayMs: number,
+		seedThrows: boolean,
 		timeoutMs: number,
 		writeTimeoutMs: number,
 		logger: Logger,
@@ -250,8 +278,11 @@ class ActivityWriterClient {
 					failNextWrites,
 					throwNextWrites,
 					writeDelayMs,
+					...(openDelayMs > 0 ? { openDelayMs } : {}),
+					...(seedThrows ? { seedThrows } : {}),
 				},
 				timeoutMs,
+				() => new ActivityOpenTimeoutError(),
 			)
 			if (response.type !== "ready")
 				throw new ActivityUnavailableError(
@@ -334,16 +365,41 @@ class ActivityWriterClient {
 		this.nextId += 1
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
-				this.pending.delete(id)
-				reject(timeoutError())
+				// Timers run before the poll phase that delivers worker messages: after a long
+				// main-thread block the reply may already be queued. One setImmediate turn lets
+				// it settle the request first; only a request still pending times out.
+				setImmediate(() => {
+					if (this.pending.get(id)?.timer !== timer) return
+					this.pending.delete(id)
+					reject(timeoutError())
+				})
 			}, timeoutMs)
 			this.pending.set(id, { resolve, reject, timer })
 			this.worker.postMessage({ ...body, id })
 		})
 	}
 
+	/**
+	 * Called with each unsolicited post-seed snapshot. A snapshot that arrived before the
+	 * listener is replayed to it at once, so a late listener never misses the seed.
+	 */
+	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void {
+		this.seeded = listener
+		if (this.lastSeeded !== undefined) listener(this.lastSeeded)
+	}
+
+	/** The last post-seed snapshot, if one arrived. */
+	seededSnapshot(): ActivityWorkerSnapshot | undefined {
+		return this.lastSeeded
+	}
+
 	private onMessage(raw: unknown): void {
 		if (!isActivityWorkerResponse(raw)) return
+		if (raw.type === "seeded") {
+			this.lastSeeded = raw.snapshot
+			this.seeded?.(raw.snapshot)
+			return
+		}
 		const waiter = this.pending.get(raw.id)
 		if (!waiter) return
 		clearTimeout(waiter.timer)
@@ -411,6 +467,10 @@ class ActivityStore implements ActivityStoreHandle {
 		this.ingress.paused = snapshot.paused
 		this.threaded?.onGone(() => {
 			this.onWriterGone()
+		})
+		// The deferred seed changes only the retention counters (and `effective` on failure).
+		this.threaded?.onSeeded(seeded => {
+			this.retention = retentionOf(seeded) ?? this.retention
 		})
 	}
 

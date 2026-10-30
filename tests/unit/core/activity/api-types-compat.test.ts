@@ -67,6 +67,8 @@ type NextStats = {
 	// WG3: optional on both sides; the writer and the flood filter fill them.
 	retention?: Contract.ActivityRetentionStats
 	floodCopies?: number
+	// Optional on both sides; the runtime's API view fills it.
+	lifecycle?: Contract.ActivityLifecycleStatus
 }
 type ApiStats = {
 	[K in keyof (Omit<NextStats, "coalescedPositions"> & {
@@ -174,6 +176,7 @@ const sameShapes: [
 	Same<Api.ActivityRetentionPolicy, Contract.ActivityRetentionPolicy>,
 	Same<Api.ActivityRetentionShare, Contract.ActivityRetentionShare>,
 	Same<Api.ActivityRetentionStats, Contract.ActivityRetentionStats>,
+	Same<Api.ActivityLifecycleStatus, Contract.ActivityLifecycleStatus>,
 	Same<
 		typeof Api.ACTIVITY_RECORD_VERSION,
 		typeof Contract.ACTIVITY_RECORD_VERSION
@@ -182,6 +185,7 @@ const sameShapes: [
 	Same<Api.ActivityUnsubscribeMessage, ExpectedUnsubscribe>,
 	Same<Api.ActivityServerMessage, ExpectedServer>,
 ] = [
+	true,
 	true,
 	true,
 	true,

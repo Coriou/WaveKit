@@ -16,6 +16,18 @@ export class ActivityUnavailableError extends WaveKitError {
 	}
 }
 
+/**
+ * The writer did not answer the open request inside the open budget. The worker is
+ * terminated (its SQLite handles, the lock included, close with the thread); a later
+ * attempt may succeed.
+ */
+export class ActivityOpenTimeoutError extends ActivityUnavailableError {
+	constructor() {
+		super("activity writer timed out")
+		this.name = "ActivityOpenTimeoutError"
+	}
+}
+
 /** Another live process, or another opener in this process, holds the store. */
 export class ActivityStoreLockedError extends WaveKitError {
 	constructor(public readonly lockPath: string) {

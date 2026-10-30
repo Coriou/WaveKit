@@ -55,6 +55,8 @@ import { atomicWrite } from "./atomic-write.js"
 import { snapshotHeadOf } from "./snapshot-mirror.js"
 import type { MirrorCounts, SnapshotParts } from "./snapshot-mirror.js"
 import { SnapshotWriter } from "./snapshot-writer.js"
+import { parseInSlices, yieldToEventLoop } from "./slices.js"
+import type { YieldTurn } from "./slices.js"
 import type {
 	SnapshotWorkerFactory,
 	SnapshotWorkerStatus,
@@ -378,6 +380,15 @@ const SnapshotFileSchema = z
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
 	})
 	.strict()
+/**
+ * The snapshot file without its two large arrays: `readSnapshot` checks this shell at once,
+ * then validates `discoveries` and `observations` item by item in slices (parseInSlices), so
+ * the result equals SnapshotFileSchema's without one long synchronous parse.
+ */
+const SnapshotShellSchema = SnapshotFileSchema.extend({
+	discoveries: z.array(z.unknown()),
+	observations: z.array(z.unknown()),
+})
 const JobsFileSchema = z.object({
 	version: z.literal(FILE_VERSION),
 	jobs: z.array(PersistedJobSchema),
@@ -545,6 +556,7 @@ export class ScannerPersistence {
 	private readonly log: Logger
 	private readonly now: () => number
 	private readonly appendFile: (path: string, data: string) => Promise<void>
+	private readonly yieldTurn: YieldTurn
 	private readonly fileMaxSeq = new Map<string, number>()
 	private readonly fileBytes = new Map<string, number>()
 	private chain: Promise<unknown> = Promise.resolve()
@@ -591,7 +603,10 @@ export class ScannerPersistence {
 		appendFile?: (path: string, data: string) => Promise<void>
 		maxJournalBacklogBytes?: number
 		snapshotWorker?: SnapshotWorkerOptions
+		/** Awaited between validation slices of the snapshot; a setImmediate turn by default. */
+		yieldTurn?: YieldTurn
 	}) {
+		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
 		this.snapshotWorkerOptions = opts.snapshotWorker ?? {}
 		this.maxJournalBacklogBytes =
 			opts.maxJournalBacklogBytes ?? DEFAULT_MAX_JOURNAL_BACKLOG_BYTES
@@ -1248,7 +1263,7 @@ export class ScannerPersistence {
 		const read = await readJson(file)
 		if (read.kind === "missing") return empty
 		const parsed =
-			read.kind === "ok" ? SnapshotFileSchema.safeParse(read.value) : null
+			read.kind === "ok" ? await this.parseSnapshot(read.value) : null
 		if (parsed === null || !parsed.success) {
 			this.authorityHealth = "degraded"
 			const aside = await this.moveAside(file)
@@ -1256,20 +1271,51 @@ export class ScannerPersistence {
 				{
 					file,
 					movedTo: aside,
-					issues: parsed?.success === false ? parsed.error.issues : undefined,
+					issues: parsed?.success === false ? parsed.issues : undefined,
 					err: read.kind === "invalid" ? read.reason : undefined,
 				},
 				"Scanner snapshot is invalid; starting from the journal alone",
 			)
 			return empty
 		}
+		return parsed.data
+	}
+
+	/** SnapshotFileSchema's parse, with the two large arrays validated in slices. */
+	private async parseSnapshot(
+		value: unknown,
+	): Promise<
+		| { success: true; data: StoreSnapshot & { lastSeq: number } }
+		| { success: false; issues: z.ZodIssue[] }
+	> {
+		const shell = SnapshotShellSchema.safeParse(value)
+		if (!shell.success) return { success: false, issues: shell.error.issues }
+		const discoveries = await parseInSlices(
+			shell.data.discoveries,
+			DiscoverySchema,
+			"discoveries",
+			this.yieldTurn,
+		)
+		if (!discoveries.success) return discoveries
+		await this.yieldTurn()
+		const observations = await parseInSlices(
+			shell.data.observations,
+			ObservationSchema,
+			"observations",
+			this.yieldTurn,
+		)
+		if (!observations.success) return observations
+		const data = shell.data
 		return {
-			discoveries: parsed.data.discoveries as Discovery[],
-			observations: parsed.data.observations as Observation[],
-			corrections: parsed.data.corrections,
-			recordingOperations: parsed.data.recordingOperations ?? [],
-			...(parsed.data.aliases ? { aliases: parsed.data.aliases } : {}),
-			lastSeq: parsed.data.lastSeq,
+			success: true,
+			data: {
+				discoveries: discoveries.data as Discovery[],
+				observations: observations.data as Observation[],
+				corrections: data.corrections,
+				recordingOperations: data.recordingOperations ?? [],
+				...(data.aliases ? { aliases: data.aliases } : {}),
+				lastSeq: data.lastSeq,
+			},
 		}
 	}
 
