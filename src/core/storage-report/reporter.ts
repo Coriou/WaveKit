@@ -142,7 +142,12 @@ export function createStorageReporter(
 		const scanOptions: Parameters<typeof scanStorageAreas>[1] = {
 			limits: {
 				...limits,
-				maxWallMs: Math.max(0, limits.maxWallMs - (Date.now() - wallStart)),
+				// A statfs timeout spent the whole budget; recomputing the remainder from the
+				// clock could leave a millisecond of timer/clock rounding and start a scan.
+				maxWallMs:
+					fsResult === timedOut
+						? 0
+						: Math.max(0, limits.maxWallMs - (Date.now() - wallStart)),
 				// A stalled statfs still holds one fs slot.
 				concurrency:
 					fsResult === timedOut
