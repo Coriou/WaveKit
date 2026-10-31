@@ -209,6 +209,61 @@ describe("Live Audio Routes", () => {
 		expect(body.config.offsetHz).toBe(0)
 	})
 
+	it("GET /api/live-audio/status carries suspendedReason while the source is paused, and omits it otherwise", async () => {
+		const read = async () =>
+			JSON.parse(
+				(await app.inject({ method: "GET", url: "/api/live-audio/status" }))
+					.body,
+			) as LiveDemodStatus
+		expect(Object.hasOwn(await read(), "suspendedReason")).toBe(false)
+		mockLiveDemod.getStatus.mockReturnValue({
+			...mockLiveDemod.getStatus(),
+			sourceConnected: false,
+			suspendedReason: "source-paused",
+		})
+		const paused = await read()
+		expect(paused.suspendedReason).toBe("source-paused")
+		expect(paused.pipelineHealth).toBe("running")
+	})
+
+	it("live-audio:status carries suspendedReason as the REST status does", () => {
+		const status: LiveDemodStatus = {
+			...mockLiveDemod.getStatus(),
+			sourceConnected: false,
+			suspendedReason: "source-paused",
+		}
+		const broadcaster = new WebSocketEventBroadcaster(
+			createLogger({ level: "fatal" }),
+		)
+		const messages: string[] = []
+		const clients = (
+			broadcaster as unknown as {
+				clients: Map<
+					string,
+					{ socket: WebSocket; subscriptions: Set<string>; id: string }
+				>
+			}
+		).clients
+		clients.set("client-1", {
+			socket: {
+				readyState: 1,
+				send: (data: string) => {
+					messages.push(data)
+				},
+				close: () => undefined,
+				on: () => undefined,
+				bufferedAmount: 0,
+			} as unknown as WebSocket,
+			subscriptions: new Set(["live-audio"]),
+			id: "client-1",
+		})
+		broadcaster.broadcastLiveAudioStatus(status)
+		const parsed = JSON.parse(messages[0] ?? "") as {
+			data: { suspendedReason?: string }
+		}
+		expect(parsed.data.suspendedReason).toBe("source-paused")
+	})
+
 	it("PATCH /api/live-audio/config forwards offsetHz", async () => {
 		const response = await app.inject({
 			method: "PATCH",

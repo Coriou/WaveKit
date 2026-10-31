@@ -1,7 +1,8 @@
 // Pause / resume of the receiver feed (POST /api/sources/:id/pause and /resume): the core closes the receiver
 // link without reconnecting, decoders wait ("source-paused") and the waterfall stops on its last rows. The feed
-// state is the newest of what GET /api/sources said and what the last pause or resume answered here (a
-// `source:status` without `feed` keeps the one known), and a connected source is never shown paused.
+// state is the newest of what the source rows said (GET /api/sources, `source:status`) and what the last pause
+// or resume answered here. The controller remembers every feed a row carries, so a `source:status` without
+// `feed` (an older core's socket) keeps the one known, and a connected source is never shown paused.
 import type {
 	DecoderInfo,
 	ExtendedSourceStatus,
@@ -16,7 +17,7 @@ import { errorMessage, isApiError, Store } from "../../data/index.ts"
 export type FeedOp = "pause" | "resume"
 
 export interface FeedEntry {
-	/** The last feed a pause or resume answered, or one seen on the source. */
+	/** The newest feed a pause or resume answered or a source row carried. */
 	readonly feed: SourceFeed | null
 	/** A pause or resume in flight. */
 	readonly pending: FeedOp | null
@@ -124,13 +125,35 @@ export function feedLabel(feed: SourceFeed | null): string | null {
 	}
 }
 
+type FeedData = Pick<DataLayer, "api"> & Partial<Pick<DataLayer, "sources">>
+
 /** Pause and resume for every source, with their in-flight state and last failure. */
 export class FeedController extends Store<FeedState> {
-	private readonly data: Pick<DataLayer, "api">
+	private readonly data: FeedData
 
-	constructor(data: Pick<DataLayer, "api">) {
+	/** With `data.sources`, every feed a source row carries is remembered (see `remember`). */
+	constructor(data: FeedData) {
 		super({ bySource: {} })
 		this.data = data
+		const sources = data.sources
+		if (sources) {
+			this.remember(sources.get().sources)
+			sources.subscribe(next => this.remember(next.sources))
+		}
+	}
+
+	/**
+	 * Keeps the newest feed each row carries, so a later row without `feed` (an older core's
+	 * `source:status`) does not lose it. Such a row never changes the cache: a connected one already
+	 * reads live in `feedOf`, and one sent before a pause may arrive after its answer.
+	 */
+	remember(rows: readonly Pick<ExtendedSourceStatus, "id" | "feed">[]): void {
+		for (const row of rows) {
+			if (!row.feed) continue
+			const known = this.entry(row.id).feed
+			const next = newer(known, row.feed)
+			if (next !== known) this.patch(row.id, { feed: next })
+		}
 	}
 
 	entry(sourceId: string): FeedEntry {
@@ -225,9 +248,7 @@ function failureText(error: unknown, op: FeedOp): string {
 const controllers = new WeakMap<object, FeedController>()
 
 /** The app's one feed controller (per data layer, so tests never share one). */
-export function feedControllerFor(
-	data: Pick<DataLayer, "api">,
-): FeedController {
+export function feedControllerFor(data: FeedData): FeedController {
 	let c = controllers.get(data)
 	if (!c) {
 		c = new FeedController(data)

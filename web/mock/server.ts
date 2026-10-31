@@ -148,6 +148,11 @@ export interface MockServerOptions {
 	/** The next this many receiver resumes fail with 503 (WAVEKIT_MOCK_RESUME_FAILURES). Default 0. */
 	resumeFailures?: number
 	/**
+	 * `source:status` on the socket leaves `feed` out, as a core older than the pause feature's socket
+	 * field (WAVEKIT_MOCK_SOCKET_OMITS_FEED=1); `GET /api/sources` still carries it.
+	 */
+	socketOmitsFeed?: boolean
+	/**
 	 * The Activity store is not open yet: Activity reads answer the core's 503 and
 	 * `GET /api/activity/status` reports `opening` (WAVEKIT_MOCK_ACTIVITY_STORE=opening) or
 	 * `retrying` with a next attempt every 5 s (=retrying). It opens `openAfterMs` after start
@@ -804,6 +809,14 @@ export async function buildMockServer(
 		return status
 	}
 
+	/** What `source:status` pushes: the REST row, without `feed` under `socketOmitsFeed`. */
+	const sourceStatusEvent = (): ExtendedSourceStatus => {
+		const status = sourceStatus()
+		if (options.socketOmitsFeed !== true) return status
+		const { feed: _feed, ...rest } = status
+		void _feed
+		return rest
+	}
 	const sourceStatus = (): ExtendedSourceStatus => {
 		const now = Date.now()
 		const bytes = Math.round(((now - startedAt) / 1000) * SAMPLE_RATE_HZ * 2)
@@ -1087,7 +1100,8 @@ export async function buildMockServer(
 				pushActivity(summaryFromFlood(f, f.at))
 			lastFloodAt = to
 		}
-		if (tick % 20 === 0) broadcast("sources", "source:status", sourceStatus())
+		if (tick % 20 === 0)
+			broadcast("sources", "source:status", sourceStatusEvent())
 	}
 	const startTicker = () => {
 		if (ticker) return
@@ -1614,7 +1628,7 @@ export async function buildMockServer(
 				decoders().find(x => x.id === d.id),
 			)
 		}
-		broadcast("sources", "source:status", sourceStatus())
+		broadcast("sources", "source:status", sourceStatusEvent())
 	}
 
 	// --- Scanner (./scanner.ts): status, settings, bandplans, plans, jobs, discoveries. ---
@@ -1696,7 +1710,7 @@ export async function buildMockServer(
 			? { resumeFailures: options.resumeFailures }
 			: {}),
 		onChange: () => {
-			broadcast("sources", "source:status", sourceStatus())
+			broadcast("sources", "source:status", sourceStatusEvent())
 			for (const d of decoders())
 				if (d.sourceId === MOCK_SOURCE_ID)
 					broadcast("decoders", "decoder:status", d)
@@ -1714,7 +1728,7 @@ export async function buildMockServer(
 			// the core restarts the IQ stream: spectrum history never crosses the new epoch
 			epoch += 1
 			epochStartedAt = Date.now()
-			broadcast("sources", "source:status", sourceStatus())
+			broadcast("sources", "source:status", sourceStatusEvent())
 		},
 		retune: async hz => {
 			await app.inject({
@@ -2593,6 +2607,9 @@ async function main(): Promise<void> {
 		activityFloods: env["WAVEKIT_MOCK_ACTIVITY_FLOODS"] !== "0",
 		...(resumeFailuresEnv !== undefined
 			? { resumeFailures: Number(resumeFailuresEnv) }
+			: {}),
+		...(env["WAVEKIT_MOCK_SOCKET_OMITS_FEED"] === "1"
+			? { socketOmitsFeed: true }
 			: {}),
 		...(activityStoreEnv === "opening" || activityStoreEnv === "retrying"
 			? {

@@ -33,6 +33,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   on it is suspended with reason `source-paused`. A resume reads `resuming` for `resumeMs`
   (default 400 ms); `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
   resumes answer the core's 503 `SOURCE_RESUME_FAILED` with the feed in `error`, to try Retry.
+  `WAVEKIT_MOCK_SOCKET_OMITS_FEED=1` (`socketOmitsFeed`) leaves `feed` out of `source:status`, as
+  an older core's socket did, while `GET /api/sources` keeps it.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

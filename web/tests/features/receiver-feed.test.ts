@@ -1,14 +1,17 @@
 import fc from "fast-check"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import WebSocket from "ws"
 import {
 	SOURCE_RESUME_FAILED_MESSAGE,
+	type ExtendedSourceStatus,
 	type SourceFeed,
 	type SourceFeedState,
 } from "@wavekit/api-types"
 import { ServicesContext } from "../../src/app/context.ts"
 import { createServices } from "../../src/app/services.ts"
+import type { SocketLike } from "../../src/data/events-client.ts"
 import type { AppServices } from "../../src/app/services.ts"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
@@ -59,14 +62,22 @@ const badge = (services: AppServices) =>
 		}),
 	)
 
-async function loaded(): Promise<{
+async function loaded(
+	options: { socketOmitsFeed?: boolean; socket?: boolean } = {},
+): Promise<{
 	services: AppServices
 	server: MockServer
 	refresh: () => Promise<void>
 	close: () => Promise<void>
 }> {
-	const server = await buildMockServer({ port: 0, resumeMs: 0 })
+	const server = await buildMockServer({
+		port: 0,
+		resumeMs: 0,
+		...(options.socketOmitsFeed === true ? { socketOmitsFeed: true } : {}),
+	})
 	await server.app.ready()
+	// a real socket to the in-process mock (ephemeral port) when the test reads `source:status`
+	const port = options.socket === true ? (await server.listen()).port : null
 	const services = createServices({
 		fetch: async (input, init) => {
 			const res = await server.app.inject({
@@ -78,15 +89,19 @@ async function loaded(): Promise<{
 				headers: { "content-type": "application/json" },
 			})
 		},
-		createSocket: () => ({
-			readyState: 0,
-			onopen: null,
-			onclose: null,
-			onerror: null,
-			onmessage: null,
-			send: () => undefined,
-			close: () => undefined,
-		}),
+		createSocket: (): SocketLike =>
+			port !== null
+				? // the `ws` client has the browser socket's handlers (its event types are wider)
+					(new WebSocket(`ws://127.0.0.1:${port}/ws`) as unknown as SocketLike)
+				: {
+						readyState: 0,
+						onopen: null,
+						onclose: null,
+						onerror: null,
+						onmessage: null,
+						send: () => undefined,
+						close: () => undefined,
+					},
 	})
 	const { data } = services
 	// no socket in tests: what `source:status` / `decoder:status` would push, read again
@@ -122,7 +137,7 @@ const arbFeed = fc.record({
 
 describe("receiver feed: what is shown", () => {
 	it("shows the newest known feed, and a connected source without a feed is never paused", () => {
-		// Validates: a source:status without `feed` (the core's socket) keeps the feed known here
+		// Validates: a source:status without `feed` (an older core's socket) keeps the feed known here
 		fc.assert(
 			fc.property(
 				fc.option(arbFeed, { nil: undefined }),
@@ -336,6 +351,79 @@ describe("receiver feed: the island", () => {
 		expect(html).toMatch(/>Retry<\/button>/)
 		expect(badge(services)).toContain("Resume failed")
 		await close()
+	})
+
+	it("keeps a pause known only from GET /api/sources when the socket's source:status lacks feed", async () => {
+		// Validates: an already paused receiver (paused elsewhere, then this page loads) keeps Resume
+		const { services, server, close } = await loaded({
+			socket: true,
+			socketOmitsFeed: true,
+		})
+		const { data } = services
+		// the shell's island and palette create the controller on their first render
+		const feeds = feedControllerFor(data)
+		// paused by another client before this page loaded: no call went through its controller
+		await server.app.inject({ method: "POST", url: "/api/sources/rtl-0/pause" })
+		await data.sources.load()
+		expect(data.sources.byId("rtl-0")?.feed?.state).toBe("paused")
+		const subscribed = new Promise<void>(resolve => {
+			const off = data.events.onAny(e => {
+				if (e.type !== "subscribed") return
+				off()
+				resolve()
+			})
+		})
+		data.events.connect()
+		await subscribed
+		const events: ExtendedSourceStatus[] = []
+		const off = data.events.on("source:status", s => events.push(s))
+		// another client's resume fails: the core pushes rows without feed, the source stays down
+		server.feed.failNextResumes(1)
+		await server.app.inject({
+			method: "POST",
+			url: "/api/sources/rtl-0/resume",
+		})
+		await vi.waitFor(
+			() => {
+				expect(events.length).toBeGreaterThan(0)
+				expect(data.sources.byId("rtl-0")).toBe(events.at(-1))
+			},
+			{ timeout: 5000 },
+		)
+		off()
+		const row = data.sources.byId("rtl-0")
+		expect(row?.connected).toBe(false)
+		expect(row).not.toHaveProperty("feed")
+		expect(feeds.entry("rtl-0").feed?.state).toBe("paused")
+		expect(feedTarget(data)).toMatchObject({
+			sourceId: "rtl-0",
+			feed: { state: "paused" },
+		})
+		const html = panel(services)
+		expect(html).toContain("Receiver paused")
+		expect(html).toMatch(/>Resume<\/button>/)
+		expect(toggleFeed(data)?.op).toBe("resume")
+		await close()
+	})
+
+	it("learns the feed from source rows: the newest wins and a row without feed changes nothing", () => {
+		// Validates: FeedController.remember keeps the newest feed any row carried
+		fc.assert(
+			fc.property(
+				fc.array(fc.option(arbFeed, { nil: undefined }), { maxLength: 8 }),
+				rows => {
+					const feeds = feedControllerFor({ api: {} as never })
+					for (const feed of rows)
+						feeds.remember([feed ? { id: "s", feed } : { id: "s" }])
+					const seen = rows.filter((f): f is SourceFeed => f !== undefined)
+					const known = feeds.entry("s").feed
+					if (seen.length === 0) return known === null
+					const newest = Math.max(...seen.map(f => Date.parse(f.since)))
+					return known !== null && Date.parse(known.since) === newest
+				},
+			),
+			{ numRuns: 200 },
+		)
 	})
 
 	it("keeps the pause it was told about when a status arrives without a feed", async () => {

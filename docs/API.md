@@ -6290,11 +6290,12 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`, rate-truth or signal-flat flag raised/cleared) when the state
-  actually changed (a drifting `rateMismatch.measuredSampleRateHz`,
-  `signalFlat.levelDbfs` or `signalLevelDbfs` alone does not emit);
+  `caps-changed`, rate-truth or signal-flat flag raised/cleared, a `feed` pause,
+  resume or failed resume) when the state actually changed (a drifting
+  `rateMismatch.measuredSampleRateHz`, `signalFlat.levelDbfs` or
+  `signalLevelDbfs` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
-  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
+  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments, `feed`) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;
 - a heartbeat every 10 s (0.1 msg/s per source) refreshing counters;
 - nothing while no client subscribes to `sources`; whenever the subscriber
