@@ -13,6 +13,7 @@ import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
 import { Dumpvdl2Decoder } from "../../../src/decoders/builtin/dumpvdl2.js"
 import {
+	DEFAULT_OVERSAMPLING,
 	LoraMeshtasticDecoder,
 	PRESET_TABLE,
 	type LoraPreset,
@@ -235,7 +236,7 @@ describe("IQ adapters", () => {
 				logger,
 			)
 			const bw = PRESET_TABLE[preset].bw
-			const target = bw * 8
+			const target = bw * DEFAULT_OVERSAMPLING
 			expect(assess(decoder, bw - 1)).toMatchObject({
 				verdict: "unusable",
 				reasonCode: "insufficient-sample-rate",

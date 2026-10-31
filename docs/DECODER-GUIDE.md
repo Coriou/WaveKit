@@ -673,11 +673,100 @@ step is dropped. Drops are counted by reason (`crc_bad`, `short_frame`, `data_pa
 line, with a `frame_drop_summary` line at exit. Single frames are never logged.
 `rx_rssi` and `rx_snr` are 0, because gr-lora_sdr does not measure them.
 
-The decoder demodulates only the capture centre (`reach: centre`). Tune the centre to the
-channel, for example 869.525 MHz for EU_868 LongFast. A frame 200 kHz off centre does
-not decode. The DC spike at the centre does not stop decoding: a synthetic frame
-decoded at +10 and −5 dB SNR with or without one. The fixtures and tests are described
-in `fixtures/lora/README.md`.
+The decoder demodulates the capture centre (`reach: centre`). A channel up to bw/5 off
+the centre still decodes: 50 kHz for the 250 kHz presets, 25 kHz for 125 kHz and 12.5 kHz
+for 62.5 kHz. The planner places a LoRa slot only that close to the centre, so its
+passband is bw + 2 × bw/5 (350 kHz for LongFast). A frame 200 kHz off centre does not
+decode. The DC spike at the centre does not stop decoding: a synthetic frame decoded at
++10 and −5 dB SNR with or without one. The fixtures and tests are described in
+`fixtures/lora/README.md`.
+
+A frame arrives off its nominal frequency for two reasons:
+
+- The transmitter's crystal is off by some parts per million (10 ppm is 8.7 kHz at
+  869 MHz). The same error makes its symbol clock run fast or slow.
+- The channel sits off the capture centre. This is a pure frequency shift with no clock
+  error.
+
+gr-lora_sdr measures any offset up to ±bw/4, but it always corrects the clock error that a
+crystal offset would bring. On a pure shift that correction is wrong. At 5 kHz it moves the
+symbol timing by half a chip within a short frame. Meshtastic's coding rate 4/5 corrects no
+symbol error, so the frame is lost. The wrapper therefore runs gr-lora_sdr twice:
+
+- The direct path decodes the stream as received. It handles crystal offsets and expects
+  the 16 preamble upchirps Meshtastic sends.
+- The recentred path first measures each preamble's offset from its upchirps and
+  downchirps, to within one bin (122 Hz for LongFast). It shifts the stream by that offset
+  and decodes the result, so it handles pure shifts. It runs 32 symbols behind the direct
+  path (262 ms for LongFast), so the shift starts before the preamble.
+
+A frame that both paths decode is emitted once. Each copy is placed by the input sample
+where gr-lora_sdr locked on it (the recentred path's less its 32-symbol delay), and two
+identical copies from different paths pair when those positions agree within 4 symbols
+(33 ms for LongFast). Thread timing does not matter, and identical frames that one path
+decodes are separate receptions, all emitted. The drop lines carry a `path` field
+(`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. A
+`position_evicted` or `position_unaligned` count is a frame emitted without a position, so
+it is never paired: a lost pairing gives a duplicate packet, never a missing one. At exit,
+a `cfo_search_summary` line gives the number of preambles found and the last offset
+measured. `--cfo-search-hz 0` runs the direct path alone.
+
+Each path corrects only one kind of offset, so the two kinds have different ranges:
+
+- A shift decodes up to the search range, bw/5 (50 kHz for LongFast).
+- A crystal offset decodes reliably up to ±20 kHz (23 ppm at 869.525 MHz). Only the direct
+  path decodes a large one. The recentred path removes the offset but not its clock
+  error, and that error moves the symbol timing by 2048 × offset / 869.525 MHz chips per
+  symbol. Past 5.3 kHz this exceeds half a chip within the 40 symbols after sync.
+
+A frame with both a large shift and a large crystal error can still be lost.
+
+The core image has no pnpm or development dependencies, so the acceptance check for offset
+handling is the bench, run inside the core image from the repository root and never
+against a live receiver:
+
+```bash
+python3 scripts/fixtures/bench_lora_cfo.py
+python3 scripts/fixtures/bench_lora_cfo.py --variant old --variant new --repeat 1
+```
+
+It moves each committed capture 0 to ±50 kHz off its channel, either as a pure shift or
+as a crystal error with its clock error, with 8 or 16 preamble upchirps, and pipes each
+case through sox and the wrapper with the decoder's own arguments. It prints the decodes
+of each path, the measured offset and the CPU of each stage per second of signal.
+`--variant old` adds the wrapper without the search for comparison. It exits with status 1
+when a shift within `--target-hz` (default bw/5) or a crystal offset within
+`--crystal-target-hz` (default 20 kHz) decodes other than one packet per copy.
+
+Measured in the core image on 2 CPUs of a loaded host, with 3 copies per run at +10 and
+−5 dB SNR, with the default offsets then 0 to ±30 kHz. These decode and CPU figures predate
+the position-based pairing above; re-measure them with the bench before relying on them.
+
+| Case | Decodes |
+| --- | --- |
+| shift8 | 3/3 at every offset at both SNRs |
+| crystal16 | 3/3 except at −25 kHz: 2/3 at both SNRs (direct path 2, recentred 0) |
+| shift16 | 30 of 30 runs 3/3 |
+
+58 of the 60 default runs (shift8 and crystal16) decoded 3/3. Wrapper (Python) CPU per
+second of signal:
+
+- the two-path wrapper: mean 0.54 s over the default cases, 0.34 s for shift16
+- crystal cases: 0.4–0.97 s, against 0.25–0.47 s for `old`, 1.5 to 2.5 times the
+  single-path wrapper
+- sox: 0.06–0.12 s
+
+gr-lora_sdr needs a sample rate that is a whole multiple of the LoRa bandwidth
+(`samp_rate = bw × os_factor`). The decoder runs it at `bw × 2` by default, 500 kS/s for
+the 250 kHz presets; the `oversampling` option changes the factor. A capture at exactly
+that rate goes straight to the wrapper. Any other rate passes once through sox
+(`rate -m -b 74`): a 1.024 Msps capture becomes 500 kS/s, because 1.024 Msps is 4.096 ×
+250 kHz. Earlier versions resampled to `bw × 8` (2.0 Msps) at `rate -h`: four times the samples
+for gr-lora_sdr. In the core image on one CPU, both committed captures decoded 10/10 at
+`bw × 2`, `× 4` and `× 8`, and `bw × 2` cost the least CPU. The wrapper exits with an `invalid_sample_rate` line if
+`--samp-rate` is not a whole multiple of `--bw`. To compare oversampling factors and sox
+settings on the committed captures, run `python3 scripts/fixtures/bench_lora_chain.py` in
+the core image; it prints decodes and the CPU of each stage per second of signal.
 
 ### APRS (direwolf) KISS and AGW ports
 

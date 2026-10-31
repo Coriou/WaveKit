@@ -580,8 +580,8 @@ export function startupBuffer(
 /**
  * LoRa decodes the capture centre (requirement 3.2, `centre` reach): its
  * region slot is the configured channel (frequency ± bw/2, the centre itself
- * with followCenter) and its passband the decimated span bw × oversampling,
- * bounded by the source's usable window. Unparseable options yield no reach.
+ * with followCenter) and its passband the slot plus the decoder's carrier-offset
+ * search range per side (cfoSearchHz), bounded by the source's usable window. Unparseable options yield no reach.
  */
 function loraCentreReach(
 	options: Record<string, unknown>,
@@ -606,7 +606,10 @@ function loraCentreReach(
 			minHz: frequency - parsed.bw / 2,
 			maxHz: frequency + parsed.bw / 2,
 		},
-		passbandHz: Math.min(parsed.effectiveTargetRate, usable),
+		// Centre-only demodulation: the slot plus the carrier-offset search range
+		// on each side, bw + 2 × bw/5 = 1.4 × bw (350 kHz for 250 kHz), so a slot
+		// sits at most bw/5 (50 kHz) off centre.
+		passbandHz: Math.min(parsed.bw + 2 * parsed.cfoSearchHz, usable),
 	}
 }
 

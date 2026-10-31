@@ -72,7 +72,7 @@ describe("passive shared IQ pipelines", () => {
 			inputCenterFreq: 869525000,
 		})
 		expect(pipeline(decoder)).toContain("-r 1024000")
-		expect(pipeline(decoder)).toContain("--samp-rate 2000000")
+		expect(pipeline(decoder)).toContain("--samp-rate 500000")
 		expect(pipeline(decoder)).toContain("--frequency 869525000")
 	})
 })

@@ -1,7 +1,10 @@
 /**
  * LoRa/Meshtastic full chain: the synthetic LongFast captures in fixtures/lora through the
- * exact pipeline LoraMeshtasticDecoder.getArgs() builds (sox resample to 2 Msps, then the
- * gr-lora_sdr wrapper), parsed by the adapter's own parseOutput.
+ * exact pipeline LoraMeshtasticDecoder.getArgs() builds (sox resample to 500 kS/s, os_factor 2,
+ * then the gr-lora_sdr wrapper with its carrier-offset search), parsed by the adapter's own
+ * parseOutput. Each capture also runs shifted off its channel by up to the 25 kHz the
+ * decoder must absorb (a pure shift, as a channel off the capture centre gives); the
+ * wrapper's two paths must yield exactly one packet per frame.
  *
  * Opt-in: needs sox, gnuradio, gr-lora_sdr, python3-cryptography/protobuf and the wrapper at
  * /usr/local/bin, i.e. the core image. Run it there with
@@ -14,7 +17,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { createReadStream, existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { createInterface } from "node:readline"
 import pino from "pino"
@@ -26,6 +29,26 @@ import {
 import type { DecoderOutput } from "../../src/decoders/types.js"
 
 const CAPTURES = ["lora_longfast_dc_snr10.cu8", "lora_longfast_dc_snrm5.cu8"]
+const CAPTURE_RATE_HZ = 1_024_000
+/** Carrier offsets within the 50 kHz (bw/5) search, past the 2 kHz the old wrapper reached. */
+const OFFSETS_HZ = [-25_000, -15_000, -5_000, 5_000, 15_000, 25_000]
+
+/** The cu8 capture moved by offsetHz (complex rotation, then re-quantised to cu8). */
+function shiftCu8(data: Buffer, offsetHz: number): Buffer {
+	const out = Buffer.alloc(data.length)
+	const step = (2 * Math.PI * offsetHz) / CAPTURE_RATE_HZ
+	const quantise = (v: number): number =>
+		Math.min(255, Math.max(0, Math.round(v * 127.5 + 127.5)))
+	for (let n = 0; 2 * n + 1 < data.length; n++) {
+		const i = ((data[2 * n] ?? 0) - 127.5) / 127.5
+		const q = ((data[2 * n + 1] ?? 0) - 127.5) / 127.5
+		const c = Math.cos(step * n)
+		const s = Math.sin(step * n)
+		out[2 * n] = quantise(i * c - q * s)
+		out[2 * n + 1] = quantise(i * s + q * c)
+	}
+	return out
+}
 const runChain =
 	process.env["WAVEKIT_LORA_CHAIN"] === "1" && existsSync(WRAPPER_SCRIPT_PATH)
 
@@ -38,7 +61,7 @@ class ChainDecoder extends LoraMeshtasticDecoder {
 	}
 }
 
-async function decodeCapture(file: string): Promise<DecoderOutput[]> {
+async function decodeCapture(capture: Buffer): Promise<DecoderOutput[]> {
 	const decoder = new ChainDecoder(
 		{
 			id: "chain-lora",
@@ -82,7 +105,7 @@ async function decodeCapture(file: string): Promise<DecoderOutput[]> {
 		if (out) outputs.push(out)
 	})
 	try {
-		createReadStream(resolve("fixtures/lora", file)).pipe(child.stdin)
+		child.stdin.end(capture)
 		await new Promise<void>((done, fail) => {
 			child.once("error", fail)
 			child.once("close", () => done())
@@ -93,10 +116,20 @@ async function decodeCapture(file: string): Promise<DecoderOutput[]> {
 	}
 }
 
+const readCapture = (file: string): Buffer =>
+	readFileSync(resolve("fixtures/lora", file))
+
 describe.skipIf(!runChain)("lora-meshtastic full chain (opt-in)", () => {
-	for (const file of CAPTURES) {
-		it(`decodes the synthetic frame in ${file}`, async () => {
-			const outputs = await decodeCapture(file)
+	const cases = CAPTURES.flatMap(file => [
+		{ file, offsetHz: 0 },
+		...OFFSETS_HZ.map(offsetHz => ({ file, offsetHz })),
+	])
+	for (const { file, offsetHz } of cases) {
+		it(`decodes the synthetic frame in ${file} shifted ${offsetHz} Hz`, async () => {
+			const capture = readCapture(file)
+			const outputs = await decodeCapture(
+				offsetHz === 0 ? capture : shiftCu8(capture, offsetHz),
+			)
 			expect(outputs).toHaveLength(1)
 			expect(outputs[0]?.type).toBe("meshtastic")
 			expect(outputs[0]?.data).toMatchObject({
