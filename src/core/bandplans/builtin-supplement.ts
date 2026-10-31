@@ -50,9 +50,25 @@ const PAGER_FR: Bandplan = {
 }
 
 /**
- * 1090 MHz Mode S / ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive,
- * the replay plan's ADS-B window). No scan protocol: readsb decodes it; the band is projected
- * with a skip (builtin-packs.ts) so sweeps that honour band-plan skips leave it to readsb.
+ * The ADS-B window: 1090 MHz Mode S / ADS-B, the channel ±1 MHz (1 089 000 000 to
+ * 1 091 000 000 Hz inclusive). The ADSB plan below, the replay plan's ADS-B window and the
+ * identify job's readsb-only rule all read these.
+ */
+export const ADSB_WINDOW_LOW_HZ = 1_089_000_000
+export const ADSB_WINDOW_HIGH_HZ = 1_091_000_000
+
+/** True when `hz` lies in the ADS-B window (inclusive); false for a non-finite value. */
+export function inAdsbWindow(hz: number): boolean {
+	return (
+		Number.isFinite(hz) && hz >= ADSB_WINDOW_LOW_HZ && hz <= ADSB_WINDOW_HIGH_HZ
+	)
+}
+
+/**
+ * 1090 MHz Mode S / ADS-B: the ADS-B window. No scan protocol: readsb decodes it; the band is
+ * projected with a skip (builtin-packs.ts) so sweeps that honour band-plan skips leave it to
+ * readsb, and inside it the scanner plans and runs readsb trials only (replay-plan.ts,
+ * identify.ts).
  */
 const ADSB: Bandplan = {
 	id: "adsb",
@@ -60,8 +76,8 @@ const ADSB: Bandplan = {
 	name: "ADS-B (1090 MHz)",
 	ranges: [
 		{
-			startHz: 1_089_000_000,
-			endHz: 1_091_000_000,
+			startHz: ADSB_WINDOW_LOW_HZ,
+			endHz: ADSB_WINDOW_HIGH_HZ,
 			obwHz: [],
 			protocols: [],
 			bandplanId: "adsb",

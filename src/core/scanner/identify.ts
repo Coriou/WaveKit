@@ -1,5 +1,6 @@
 import { SCANNER_PROBE_DECODER_TYPES } from "@wavekit/api-types"
 import { captureRateFor } from "../iq-capture/rates.js"
+import { inAdsbWindow } from "../bandplans/builtin-supplement.js"
 /**
  * Identify mode (spec § 10.8, the primary use case): "what is this signal?" for one waterfall
  * target or every surfaced emission in the window. Never retunes. A target on an artefact mask
@@ -1789,6 +1790,10 @@ export class IdentifyRunner implements JobDriver {
 		})
 		t.known = this.knownOf(view)
 		if (t.known) scores = knownFirst(scores, t.known.protocol, priors, bounds)
+		// Inside the ADS-B window only readsb is eligible: no probe or analog trial, and of the
+		// ambient trials readsb's alone (the others are left out, not reported).
+		const adsbOnly = inAdsbWindow(t.targetHz)
+		if (adsbOnly) scores = []
 		const plan = planIdentifyTrials(scores, {
 			format: this.deps.format(this.sourceId),
 			channelizer: this.deps.channelizer(),
@@ -1809,9 +1814,12 @@ export class IdentifyRunner implements JobDriver {
 					this.ambientErrorLogged = true
 					this.log.warn("Ambient coverage unavailable; no ambient trials")
 				},
-			),
+			).filter(p => !adsbOnly || p.protocol === "adsb"),
 		)
-		if (this.deps.analogEvidence || this.deps.analogTrial?.runLive)
+		if (
+			!adsbOnly &&
+			(this.deps.analogEvidence || this.deps.analogTrial?.runLive)
+		)
 			plan.trials = planAnalogTrials(plan.trials, bounds)
 		t.memoSkip = this.applyMemo(plan)
 		t.plan = plan

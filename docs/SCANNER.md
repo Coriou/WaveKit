@@ -176,6 +176,15 @@ mode `raw` and the skip `Decoded elsewhere · readsb`: a sweep with `skipBandPla
 1089 to 1091 MHz to readsb. It names no scan protocol, so it adds no identify priors or analog
 trial there, and [decode-anchored ADS-B](#decode-anchored-ads-b) works as before.
 
+Inside that window (1 089 000 000 to 1 091 000 000 Hz, both ends included) only readsb is
+eligible. An IQ capture there plans no replay trial for a known protocol, a protocol its track
+shape suggests (a narrow FSK-looking signal included) or an analog trial: these are left out the
+way a protocol with a prior of 0 is, not listed. readsb is still named and, as anywhere, listed
+in the skipped trials (`no-probe-mode`) because it has no replay input. An Identify there with no
+decode anchor runs no probe or analog trial; its only trial is readsb's ambient one when a
+running readsb covers the target. Outside the window, from 1 088 999 999 Hz down and
+1 091 000 001 Hz up, the plans are unchanged.
+
 The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
 selects which built-in plans the scanner uses: each enabled built-in pack, in
 stack order, contributes its region's plans above, minus bands hidden with a
