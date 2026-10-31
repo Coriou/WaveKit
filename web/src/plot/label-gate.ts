@@ -152,7 +152,10 @@ export function adoptable(
 ): boolean {
 	const hz = (t.startHz + t.endHz) / 2
 	const widthHz = t.endHz - t.startHz
-	if (Math.abs(hz - f.hz) > Math.max(tolHz, f.widthHz / 4)) return false
+	// within a quarter of the chip's width (at least the frame tolerance), never past half of it: a coarse
+	// bin's tolerance must not reach the neighbouring channel
+	const bound = Math.min(Math.max(tolHz, f.widthHz / 4), f.widthHz / 2)
+	if (Math.abs(hz - f.hz) > bound) return false
 	const lo = Math.min(widthHz, f.widthHz)
 	const hi = Math.max(widthHz, f.widthHz)
 	return lo > 0 && hi <= ADOPT_WIDTH_RATIO * lo

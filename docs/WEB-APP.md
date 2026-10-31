@@ -107,7 +107,9 @@ channel only`. **Last call** shows only when the core names the discovery's last
 - **Tune** and **Listen** go to the discovery's measured frequency, as the Scanner drawer does.
   **Listen** is the drawer's Listen: it tunes there, then starts live audio once the tune has
   landed. If the tune fails, nothing plays and a `Could not tune: …` warning says why. If the
-  receiver is tuned elsewhere meanwhile, live audio that Listen started is stopped again.
+  receiver is tuned elsewhere meanwhile, nothing plays here. The core's live audio is left
+  running, because other browsers may be listening to it. Turning Listen off stops the core's
+  live audio only when a fresh status shows no other listener on either stream.
   **Open in Scanner** opens the discovery in the Scanner drawer.
 
 ### The tuned card

@@ -94,16 +94,9 @@ export async function listenTo(
 	services: Pick<AppServices, "data" | "tuning" | "listen">,
 	d: Discovery,
 ): Promise<void> {
-	// before the unlock: whether Listen was on here and the core's live audio ran before this click
-	const status = services.data.liveAudio.get().status
-	const before = {
-		listening: services.listen.get().wanted,
-		known: status != null,
-		running: status?.running === true,
-	}
 	const listening = await listenAfterTune(
 		Math.round(discoveryTuneHz(d)),
-		() => retarget(services, d, before),
+		() => retarget(services, d),
 		services.listen,
 	)
 	if (listening) showToast(`Listening to ${f3(d.frequencyHz)}`)
@@ -111,13 +104,11 @@ export async function listenTo(
 
 /**
  * Points live audio at the discovery, tuning the receiver there when it is out of the window. True once it landed.
- * When the receiver moves away during the retarget, the core's live audio this click started is stopped again
- * (nobody here listens and it did not run before), so the core does not demodulate for nobody.
+ * When the receiver moves away during the retarget it is false and the core's live audio is left running.
  */
 async function retarget(
-	services: Pick<AppServices, "data" | "tuning" | "listen">,
+	services: Pick<AppServices, "data" | "tuning">,
 	d: Discovery,
-	before: { listening: boolean; known: boolean; running: boolean },
 ): Promise<boolean> {
 	const { data, tuning } = services
 	try {
@@ -148,18 +139,8 @@ async function retarget(
 		off()
 	}
 	if (moved) {
-		// the retarget started the core's live audio for this click: nobody hears it, so it stops again
-		// The stop is shared by every client: only when the core's live status is known (it reported before
-		// the click and now) and no client is connected; any doubt leaves it running.
-		const now = data.liveAudio.get().status
-		if (
-			!before.listening &&
-			before.known &&
-			!before.running &&
-			now?.clientCount === 0 &&
-			!services.listen.get().wanted
-		)
-			void data.liveAudio.stop().catch(() => undefined)
+		// The core's live audio is left as it is: its stop is shared by every client (/stream and /auto), and
+		// this one cannot know nobody else listens; a demodulator running for nobody is the lesser harm.
 		showToast(tuneFailedText(null), { tone: "warn" })
 		return false
 	}

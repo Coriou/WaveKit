@@ -159,8 +159,8 @@ describe("scanner drawer Listen", () => {
 		release()
 		await done
 		expect(calls).not.toContain("start")
-		// the retarget started the core's live audio for nobody: it stops again
-		expect(calls.slice(4)).toEqual(["core stop", "suspend"])
+		// the core's live audio is shared by every client: this path never stops it, only suspends the player here
+		expect(calls.slice(4)).toEqual(["suspend"])
 		expect(appToast.get()?.text).toBe(
 			"Not listening: the receiver was tuned elsewhere first",
 		)

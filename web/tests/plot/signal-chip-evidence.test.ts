@@ -207,7 +207,7 @@ describe("signal chips: a proven chip across bursts with new track ids", () => {
 
 	it("adoptable follows the centre and width rule exactly (property)", () => {
 		// Feature: spectrum tag evidence, signal chips, Property 3: held proven chip adoption bound
-		// Validates: label-gate adoption by centre within max(tol, width / 4) and width ratio at most 1.5
+		// Validates: label-gate adoption by centre within min(max(tol, width / 4), width / 2) and width ratio at most 1.5
 		fc.assert(
 			fc.property(
 				fc.integer({ min: 1000, max: 30_000 }),
@@ -221,13 +221,21 @@ describe("signal chips: a proven chip across bursts with new track ids", () => {
 						endHz: 1e8 + off + trackW / 2,
 					}
 					const want =
-						Math.abs(off) <= Math.max(tol, chipW / 4) &&
+						Math.abs(off) <= Math.min(Math.max(tol, chipW / 4), chipW / 2) &&
 						Math.max(chipW, trackW) <= 1.5 * Math.min(chipW, trackW)
 					expect(adoptable(f, t, tol)).toBe(want)
 				},
 			),
 			{ numRuns: 300 },
 		)
+		// a coarse bin: tolerance 5 kHz on a 6 kHz chip is capped at half its width (3 kHz)
+		const coarse = { hz: 1e8, widthHz: 6000 }
+		const at = (off: number) => ({
+			startHz: 1e8 + off - 3000,
+			endHz: 1e8 + off + 3000,
+		})
+		expect(adoptable(coarse, at(3000), 5000)).toBe(true)
+		expect(adoptable(coarse, at(3001), 5000)).toBe(false)
 		// no width (a malformed track) never adopts
 		expect(
 			adoptable({ hz: 1e8, widthHz: 9000 }, { startHz: 1e8, endHz: 1e8 }, 1000),
