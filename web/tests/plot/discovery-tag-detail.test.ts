@@ -178,7 +178,7 @@ describe("tag state: a core without evidence levels", () => {
 	})
 
 	it("never promotes a discovery carrying any proof without an evidence level (property)", () => {
-		// Feature: wg18-tg discovery tags, Property 3: legacy proven needs no proof field at all
+		// Feature: spectrum tag evidence, discovery tags, Property 3: legacy proven needs no proof field at all
 		// Validates: review finding 2 (unknown → not proven)
 		fc.assert(
 			fc.property(

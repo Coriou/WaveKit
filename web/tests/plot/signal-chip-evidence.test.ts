@@ -374,7 +374,7 @@ describe("signal chips: provenLiveAt", () => {
 	})
 
 	it("never answers proven for a discovery that is not proven (property)", () => {
-		// Feature: wg18-tg signal chips, Property 1: unknown input is never proven
+		// Feature: spectrum tag evidence, signal chips, Property 1: unknown input is never proven
 		// Validates: brief item 1 (non-proven chips keep the current behaviour)
 		fc.assert(
 			fc.property(
@@ -522,7 +522,7 @@ describe("signal chips: which discovery a chip states (Plot.tsx)", () => {
 	})
 
 	it("names the chip exactly when tagState is proven and not Ignored (property)", () => {
-		// Feature: wg18-tg signal chips, Property 2: chip naming follows tagState
+		// Feature: spectrum tag evidence, signal chips, Property 2: chip naming follows tagState
 		// Validates: chip naming consistent with tagState (identifiesChip, identifiedAt, weakDiscoveryAt)
 		fc.assert(
 			fc.property(
