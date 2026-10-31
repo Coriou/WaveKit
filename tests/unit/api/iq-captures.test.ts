@@ -1,6 +1,7 @@
 import { EventEmitter, once } from "node:events"
 import { createWriteStream, writeFileSync } from "node:fs"
 import {
+	chmod,
 	mkdir,
 	mkdtemp,
 	readdir,
@@ -663,6 +664,36 @@ it("keeps malformed metadata with its data: unlisted, name taken, bytes counted"
 		expect.arrayContaining(["broken.json", "broken.cu8"]),
 	)
 })
+
+// Root reads any file, so the permission case only holds for an unprivileged user.
+it.skipIf(process.getuid?.() === 0)(
+	"treats unreadable metadata as unlisted: listed, bytes counted, name taken, no 503",
+	async () => {
+		await app.inject({ method: "GET", url })
+		await plant("fine", 3000)
+		await plant("locked", 1000)
+		await chmod(join(dir, "locked.json"), 0o000)
+		try {
+			const res = await app.inject({ method: "GET", url })
+			expect(res.statusCode).toBe(200)
+			const listed = res.json<{ captures: IqCapture[]; usedBytes: number }>()
+			expect(listed.captures.map(c => c.name)).toEqual(["fine"])
+			// 3000 listed + 1000 unlisted data beside the unreadable metadata.
+			expect(listed.usedBytes).toBe(4000)
+			const download = await app.inject({ method: "GET", url: `${url}/locked` })
+			expect(download.statusCode).toBe(404)
+			const taken = await app.inject({
+				method: "POST",
+				url,
+				payload: { name: "locked", seconds: 1 },
+			})
+			expect(taken.statusCode).toBe(409)
+			expect(taken.json()).toMatchObject({ code: "IQ_CAPTURE_EXISTS" })
+		} finally {
+			await chmod(join(dir, "locked.json"), 0o600)
+		}
+	},
+)
 
 it("counts unlisted data past any number of foreign entries and refuses past the name bound", async () => {
 	await app.inject({ method: "GET", url })

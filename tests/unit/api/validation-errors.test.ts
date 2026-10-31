@@ -1,8 +1,9 @@
 /**
  * Every HTTP 400 validation answer names the failing field(s) and what each accepts, in
  * static text: the full API server is built with in-process fakes, every registered
- * POST/PUT/PATCH route (and every GET route with a query schema) gets invalid input
- * carrying a sentinel, and each 400 must name a field and never repeat the sentinel.
+ * POST/PUT/PATCH route and every GET route that reads a query (by schema or in its
+ * handler) gets invalid input carrying a sentinel. Each 400 must name a field, every write
+ * route must refuse with a 400, and no answer of any status may repeat the sentinel.
  */
 
 import { EventEmitter } from "node:events"
@@ -139,12 +140,19 @@ async function sweep(
 						Object.fromEntries(props.map(p => [p, SENTINEL])),
 					),
 				})
-		} else if (route.method === "GET" && route.schema?.["querystring"]) {
+		} else if (route.method === "GET") {
+			// Routes with a declared query, and routes that parse their query in the
+			// handler (no schema, or one that admits any parameter): both get the
+			// sentinel, as an unknown parameter and under each name a handler reads.
+			const declared = queryProperties(route.schema)
+			if (!route.schema?.["querystring"] && route.url.includes("/:")) continue
 			await send(route, "unknown parameter", {
 				method: "GET",
 				url: `${url}?${SENTINEL}=${SENTINEL}`,
 			})
-			for (const prop of queryProperties(route.schema))
+			const names =
+				declared.length > 0 ? declared : [...HANDLER_QUERY_PARAMETERS]
+			for (const prop of names)
 				await send(route, `${prop}=sentinel`, {
 					method: "GET",
 					url: `${url}?${prop}=${SENTINEL}`,
@@ -153,6 +161,35 @@ async function sweep(
 	}
 	return answers
 }
+
+/**
+ * Query parameter names the handler-parsed GET routes read (Activity search, trails,
+ * bandmap and timeline; coverage). Sent to every GET route without declared parameters.
+ */
+const HANDLER_QUERY_PARAMETERS = [
+	"protocol",
+	"protocols",
+	"categories",
+	"entityKey",
+	"bucketMs",
+	"frequencyMin",
+	"producedFrom",
+	"text",
+	"refs",
+	"order",
+	"limit",
+	"pageToken",
+] as const
+
+/** Routes that parse their query in the handler; each must refuse the sentinel with a 400. */
+const HANDLER_PARSED_ROUTES = [
+	"GET /api/coverage",
+	"GET /api/activity",
+	"GET /api/activity/trails",
+	"GET /api/activity/bandmap",
+	"GET /api/activity/timeline",
+	"GET /api/recordings",
+]
 
 function pathFor(url: string): string {
 	return url.replace(/:(\w+)/g, (_m, name: string) =>
@@ -700,11 +737,35 @@ describe("HTTP 400 validation answers", () => {
 		expect(failures).toEqual([])
 	})
 
-	it("no 400 repeats the submitted input", () => {
+	it("no answer of any status repeats the submitted input", () => {
 		const echoes = [...answers, ...protectedAnswers]
-			.filter(a => a.status === 400 && a.body.includes(SENTINEL))
-			.map(a => `${a.route} (${a.request}): ${a.body}`)
+			.filter(a => a.body.includes(SENTINEL))
+			.map(a => `${a.route} (${a.request}) ${a.status}: ${a.body}`)
 		expect(echoes).toEqual([])
+	})
+
+	it("every swept write route refuses at least one invalid body with a 400", () => {
+		const swept = new Map<string, boolean>()
+		for (const answer of [...answers, ...protectedAnswers]) {
+			if (!/^(POST|PUT|PATCH) /.test(answer.route)) continue
+			swept.set(
+				answer.route,
+				(swept.get(answer.route) ?? false) || answer.status === 400,
+			)
+		}
+		expect(swept.size).toBeGreaterThan(20)
+		const never = [...swept].filter(([, refused]) => !refused).map(([r]) => r)
+		expect(never).toEqual([])
+	})
+
+	it("routes that parse their query in the handler refuse the sentinel with a 400", () => {
+		const refused = new Set(
+			[...answers, ...protectedAnswers]
+				.filter(a => a.status === 400)
+				.map(a => a.route),
+		)
+		for (const route of HANDLER_PARSED_ROUTES)
+			expect(refused, route).toContain(route)
 	})
 
 	it("refuses every schema-valid but semantically invalid body with a static 400", () => {

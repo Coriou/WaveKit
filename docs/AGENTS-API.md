@@ -39,8 +39,10 @@ AUTH="Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")"
 ```
 
 There is no HTTP route that issues a token. Rotating the credential
-(`rotate-credential`, core stopped) revokes every copy; run `machine-token --replace`
-afterwards. Keep the file private and never put the token in a URL or a log. Details:
+(`rotate-credential`, core stopped) revokes every copy; on the host run `machine-token --replace`
+afterwards. In Docker the file belongs to the container user, so `--replace` refuses it: delete
+the old file and run the one-off command again, as in
+[Docker setup](DOCKER-SETUP.md#protected-runtime-deployment). Keep the file private and never put the token in a URL or a log. Details:
 [API: automation and agents](API.md#automation-and-agents) and [Security](SECURITY.md).
 
 ## Read the receiver state
@@ -56,6 +58,8 @@ Check `tuners[].owner` before tuning: `wavekit` means WaveKit commands the tuner
 means another client (for example SDR++ through the relay) controls it and WaveKit sends no
 commands, `scanner` means a scanner job holds the tuner. `truncated: true` means a list or an
 id was cut; read the fuller route named in the [field table](API.md#get-apiagentstatus).
+Decoders with a problem verdict are listed first; `hiddenProblems` above 0 means more problem
+decoders than fit, so read `GET /api/decoders/summary`.
 
 ## Tune
 

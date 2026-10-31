@@ -104,7 +104,9 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
-- **Recordings:** recordings kept by the core, to play, search and keep.
+- **Recordings:** recordings kept by the core, to play, search and keep. The footer line sums
+  the disk they use: what you kept, digital-voice calls, scanner evidence and named IQ captures
+  (each with its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
   plans, spectrum and waterfall, map, units and time, theme, density and motion. A paused decoder
   says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.

@@ -39,6 +39,13 @@ export interface AgentStatusRoutesOptions {
 	}
 }
 
+/** Verdicts that need nothing from the operator; every other code is a problem row. */
+const QUIET_VERDICTS: ReadonlySet<string> = new Set([
+	"decoding",
+	"listening",
+	"off",
+])
+
 /** A job that has not ended (it may still resume and take a tuner). */
 const LIVE_JOB_STATES: ReadonlySet<ScanJob["state"]> = new Set([
 	"pending",
@@ -230,7 +237,18 @@ export async function buildAgentStatus(
 	const scannerStatus = scanner
 		? scannerRow(jobs, scanner.status().enabled, bounds)
 		: null
-	const decoders = bounds.list(summaries, L.decodersMax).map(summary => ({
+	// Problem rows first (stable otherwise), so the cut drops healthy decoders before
+	// a failed or suspended one; `hiddenProblems` counts the problem rows still cut.
+	const isProblem = (code: string) => !QUIET_VERDICTS.has(code)
+	const ordered = [
+		...summaries.filter(summary => isProblem(summary.verdict.code)),
+		...summaries.filter(summary => !isProblem(summary.verdict.code)),
+	]
+	const problems = ordered.filter(summary =>
+		isProblem(summary.verdict.code),
+	).length
+	const hiddenProblems = Math.max(0, problems - L.decodersMax)
+	const decoders = bounds.list(ordered, L.decodersMax).map(summary => ({
 		id: bounds.id(summary.id),
 		protocol: bounds.id(summary.protocol, L.protocolMaxBytes),
 		verdict: {
@@ -251,6 +269,7 @@ export async function buildAgentStatus(
 		liveAudio,
 		scanner: scannerStatus,
 		decoders,
+		hiddenProblems,
 		activity,
 		lastDecode: lastDecodeRows,
 	}

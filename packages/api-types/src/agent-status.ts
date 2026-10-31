@@ -16,14 +16,15 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 * the route can build is fixed. Worst case in JSON bytes, every number at the
 	 * longest a double serialises to (24 bytes signed, 23 unsigned), every string at
 	 * its byte cap, every enum at its longest member, ISO times at 27:
-	 *   envelope: keys and braces 103, `at` 29, `truncated` 5, activity 54 =   191
+	 *   envelope: keys and braces 121, `at` 29, `truncated` 5, activity 54,
+	 *             `hiddenProblems` 23                                      =   232
 	 *   tuners:     2 × 224 (sourceId 40, four numbers, owner) + 3          =   451
 	 *   sources:    2 × 171 (id 40, longest state, age, both warnings) + 3  =   345
 	 *   liveAudio:  sourceId 40, modulation 16, two numbers                 =   213
 	 *   scanner:    job id 40, name 32, reason 24, sourceId 40, one number  =   280
 	 *   decoders:   9 × 206 (id 40, protocol 24, code 23, 3 actions) + 10   = 1,864
 	 *   lastDecode: 9 × 74 (protocol 24, ISO time 27) + 10                  =   676
-	 * Total 4,020 < 4,096. The worst-case test builds exactly this body, checks the
+	 * Total 4,061 < 4,096. The worst-case test builds exactly this body, checks the
 	 * schema admits it and nothing one row or one byte larger, and measures it.
 	 */
 	targetBytes: 4096,
@@ -39,7 +40,10 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	modulationMaxBytes: 16,
 	/** Sources and their tuners (one tuner per source): the first two. */
 	sourcesMax: 2,
-	/** Decoder rows: one per built-in decoder type (9); `lastDecode` is one per protocol, as many. */
+	/**
+	 * Decoder rows, problem verdicts first: as many rows as built-in decoder types (9),
+	 * though two instances of one type take two rows. `lastDecode` is one per protocol, as many.
+	 */
 	decodersMax: 9,
 	/** A verdict's first actions, most helpful first; no verdict suggests more than 3. */
 	actionsMax: 3,
@@ -204,7 +208,13 @@ export const agentStatusSchema = z
 		sources: z.array(agentSourceSchema).max(L.sourcesMax),
 		liveAudio: agentLiveAudioSchema.nullable(),
 		scanner: agentScannerSchema.nullable(),
+		/**
+		 * Problem verdicts (anything but `decoding`, `listening` or `off`) first, then
+		 * the rest, each in configuration order.
+		 */
 		decoders: z.array(agentDecoderSchema).max(L.decodersMax),
+		/** Problem decoders cut from `decoders` by its cap; read the summary route for them. */
+		hiddenProblems: z.number().int().nonnegative(),
 		activity: agentActivitySchema,
 		/** Newest output per decoder protocol, newest first; protocols with none are absent. */
 		lastDecode: z
@@ -310,6 +320,7 @@ export const agentStatusResponseSchema = strictObject({
 			}),
 		}),
 	},
+	hiddenProblems: { type: "integer", minimum: 0 },
 	activity: strictObject({
 		state: { type: "string", enum: [...AGENT_ACTIVITY_STATES] },
 		rows: nullable("integer"),

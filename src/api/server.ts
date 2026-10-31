@@ -45,6 +45,7 @@ import {
 } from "../utils/logger.js"
 import type { SourceManager } from "../core/source-manager.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
+import { IQ_CAPTURES_DIR } from "../core/storage-report/areas-from-config.js"
 import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
@@ -1475,7 +1476,7 @@ export class ApiServer {
 			IQ_CAPTURES_REQUIRES_ACCESS
 		)
 			await this.app.register(iqCaptureRoutes, {
-				dir: resolve(this.getConfig().stateDir, "iq-captures"),
+				dir: resolve(this.getConfig().stateDir, IQ_CAPTURES_DIR),
 				sourceManager: this.sourceManager,
 				fanoutFor: this.iqSnapshotFanoutFor,
 				tunerState: id => this.tunerController?.getState(id),

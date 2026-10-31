@@ -161,8 +161,8 @@ disconnect, lease revocation or shutdown also stop it: the partial file is remov
 answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. At the first use after a
 restart WaveKit removes only what a crash of its own leaves: `<name>.cu8.partial`,
 `<name>.json.partial`, and `<name>.cu8` with no `<name>.json` beside it. Other files in the
-capture directory are never touched. A `<name>.json` that is not valid capture metadata is
-not listed, but its name stays taken (409 `IQ_CAPTURE_EXISTS`) and the size of its
+capture directory are never touched. A `<name>.json` that is not valid capture metadata, or
+that WaveKit cannot read (for example its permissions), is not listed, but its name stays taken (409 `IQ_CAPTURE_EXISTS`) and the size of its
 `<name>.cu8` counts in `usedBytes` and toward the quota until you delete that name.
 
 `GET /api/iq/captures` lists whole captures newest first:
@@ -537,21 +537,26 @@ and scripts. It uses the same read admission as the other API reads and never
 includes free-text errors; each field summarizes a fuller route.
 
 The size is a hard bound. Lists keep their first rows: two sources and two tuners,
-nine decoders (one per built-in decoder type) and nine `lastDecode` rows. Ids are cut
-to 40 bytes of JSON, decoder protocols to 24, job names to 32 and reasons to 24.
-`truncated` is `true` when a list or an id was cut; read the fuller route then.
+nine decoder rows and nine `lastDecode` rows. Nine is the number of built-in decoder
+types, but rows are decoder instances, so two instances of one type take two rows.
+Decoders with a problem verdict (anything but `decoding`, `listening` or `off`) come
+first, so the cut drops healthy decoders before a failed or suspended one;
+`hiddenProblems` counts the problem decoders still cut. Ids are cut to 40 bytes of
+JSON, decoder protocols to 24, job names to 32 and reasons to 24. `truncated` is
+`true` when a list or an id was cut; read the fuller route then.
 
-| Field        | Summary of                   | Content                                                                                                                                                                                                                                                                                                            |
-| ------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `at`         |                              | ISO time of the answer                                                                                                                                                                                                                                                                                             |
-| `truncated`  |                              | `true` when a list was cut at its cap or an id was shortened (a shortened job name alone does not set it)                                                                                                                                                                                                          |
-| `tuners`     | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null |
-| `sources`    | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`)                                                                                                                                                                                                 |
-| `liveAudio`  | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                  |
-| `scanner`    | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `job` (the most recently updated of them: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                          |
-| `decoders`   | `GET /api/decoders/summary`  | `id`, `protocol` and the same `verdict` `code` and `actions` (at most three, most helpful first); the verdict sentence is on the summary route                                                                                                                                                                     |
-| `activity`   | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                         |
-| `lastDecode` | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                     |
+| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                             |
+| `truncated`      |                              | `true` when a list was cut at its cap or an id was shortened (a shortened job name alone does not set it)                                                                                                                                                                                                          |
+| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null |
+| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`)                                                                                                                                                                                                 |
+| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                  |
+| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `job` (the most recently updated of them: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                          |
+| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first); the verdict sentence is on the summary route                                                                  |
+| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                              |
+| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                         |
+| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                     |
 
 A scanner job owns a tuner only while it holds the tuner lease: passive jobs never
 take one, and a sweep the operator paused keeps it until it is released.
@@ -4782,6 +4787,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | ------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `activity`          | `automatic` | The Activity store (`<stateDir>/activity`)                                                                        | Resolved `activity.retention.maxDbBytes` |
 | `scanner-evidence`  | `automatic` | Scanner evidence (`scanner.storage.dir`, default `<stateDir>/scanner`), minus any dsd-fme WAV directory inside it | `scanner.storage.maxRecordingsMb`        |
+| `iq-captures`       | `automatic` | [Named IQ captures](#named-iq-captures) (`<stateDir>/iq-captures`)                                                | The capture quota (`quotaBytes`)         |
 | `digital-voice-wav` | `other`     | Per-call WAV directories of the dsd-fme decoders that record                                                      | null                                     |
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
 | `operator-data`     | `state`     | Operator data and the recording keep store (`recording-keeps.json`)                                               | null                                     |

@@ -133,13 +133,24 @@ const metaSchema = z
 	})
 	.strict()
 
-function missing(err: unknown): boolean {
-	return (
-		typeof err === "object" &&
-		err !== null &&
-		(err as { code?: unknown }).code === "ENOENT"
-	)
+function errorCode(err: unknown): unknown {
+	return typeof err === "object" && err !== null
+		? (err as { code?: unknown }).code
+		: undefined
 }
+
+function missing(err: unknown): boolean {
+	return errorCode(err) === "ENOENT"
+}
+
+/** Errors that make one metadata file unreadable without saying the store is broken. */
+const UNREADABLE_META: ReadonlySet<unknown> = new Set([
+	"EACCES",
+	"EPERM",
+	"EISDIR",
+	"ELOOP",
+	"EIO",
+])
 
 /** The capture name of `entry` when it is exactly `<name><suffix>` with a valid name. */
 function captureName(entry: string, suffix: string): string | null {
@@ -237,14 +248,23 @@ export class IqCaptureStore {
 		return false
 	}
 
-	/** Metadata of a whole capture: both files regular, the data exactly `bytes` long. */
+	/**
+	 * Metadata of a whole capture: both files regular, the data exactly `bytes` long. Metadata
+	 * that cannot be read (permissions, I/O) is treated like malformed metadata: unlisted, its
+	 * name taken and its data bytes counted, so one bad file does not fail every request.
+	 */
 	async read(name: string): Promise<IqCapture | null> {
+		let raw: string
 		try {
 			const metaStat = await lstat(this.meta(name))
 			if (!metaStat.isFile() || metaStat.size > META_MAX_BYTES) return null
-			const parsed = metaSchema.safeParse(
-				JSON.parse(await readFile(this.meta(name), "utf8")),
-			)
+			raw = await readFile(this.meta(name), "utf8")
+		} catch (err) {
+			if (missing(err) || UNREADABLE_META.has(errorCode(err))) return null
+			throw err
+		}
+		try {
+			const parsed = metaSchema.safeParse(JSON.parse(raw))
 			if (!parsed.success || parsed.data.name !== name) return null
 			const dataStat = await lstat(this.data(name))
 			if (!dataStat.isFile() || dataStat.size !== parsed.data.bytes) return null

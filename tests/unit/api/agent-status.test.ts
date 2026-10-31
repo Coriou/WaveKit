@@ -147,8 +147,9 @@ describe("agent status", () => {
 			options({ decoderManager: { getAllStatus: () => statuses } }),
 			now,
 		)
+		// The suspended decoder is a problem row, so it leads; the rest keep their order.
 		expect(status.decoders).toEqual(
-			statuses.map(s => ({
+			[statuses[2]!, statuses[0]!, statuses[1]!].map(s => ({
 				id: s.id,
 				protocol: s.type,
 				verdict: {
@@ -474,6 +475,7 @@ describe("agent status", () => {
 					actions,
 				},
 			})),
+			hiddenProblems: count,
 			activity: {
 				state: longest(
 					AGENT_ACTIVITY_STATES,
@@ -609,9 +611,11 @@ describe("agent status", () => {
 			"liveAudio",
 			"scanner",
 			"decoders",
+			"hiddenProblems",
 			"activity",
 			"lastDecode",
 		])
+		expect(body.hiddenProblems).toBe(0)
 	})
 
 	it("cuts lists and ids past their caps and says so", async () => {
@@ -647,6 +651,70 @@ describe("agent status", () => {
 		)
 	})
 
+	it("keeps a problem decoder listed when healthy rows pass the cap", async () => {
+		// Twelve decoders in config order; only the last is failed.
+		const statuses = Array.from({ length: 12 }, (_, index) =>
+			decoder({ id: `decoder-${index}` }),
+		)
+		statuses[11] = decoder({
+			id: "decoder-11",
+			running: false,
+			health: "faulted",
+		})
+		const status = await buildAgentStatus(
+			options({ decoderManager: { getAllStatus: () => statuses } }),
+			now,
+		)
+		const failedCode = decoderSummary(statuses[11]!, now).verdict.code
+		expect(["decoding", "listening", "off"]).not.toContain(failedCode)
+		expect(status.decoders).toHaveLength(AGENT_STATUS_LIMITS.decodersMax)
+		expect(status.decoders[0]?.id).toBe("decoder-11")
+		// Healthy rows follow in config order; the last three are cut.
+		expect(status.decoders.slice(1).map(d => d.id)).toEqual(
+			Array.from({ length: 8 }, (_, index) => `decoder-${index}`),
+		)
+		expect(status.truncated).toBe(true)
+		expect(status.hiddenProblems).toBe(0)
+	})
+
+	it("counts the problem decoders the cap still cuts", async () => {
+		const max = AGENT_STATUS_LIMITS.decodersMax
+		const suspended = (index: number) =>
+			decoder({
+				id: `problem-${index}`,
+				suspension: { reasonCode: "tuner-scanning", since: new Date(now) },
+			})
+		// At the cap: every problem shows, none hidden.
+		const atCap = await buildAgentStatus(
+			options({
+				decoderManager: {
+					getAllStatus: () => [
+						decoder({ id: "healthy" }),
+						...Array.from({ length: max }, (_, i) => suspended(i)),
+					],
+				},
+			}),
+			now,
+		)
+		expect(atCap.decoders.map(d => d.id)).toEqual(
+			Array.from({ length: max }, (_, i) => `problem-${i}`),
+		)
+		expect(atCap.hiddenProblems).toBe(0)
+		// Past the cap: the extra problem rows are counted.
+		const past = await buildAgentStatus(
+			options({
+				decoderManager: {
+					getAllStatus: () =>
+						Array.from({ length: max + 2 }, (_, i) => suspended(i)),
+				},
+			}),
+			now,
+		)
+		expect(past.decoders).toHaveLength(max)
+		expect(past.hiddenProblems).toBe(2)
+		expect(past.truncated).toBe(true)
+	})
+
 	it("cuts at a code point without exceeding the byte cap", () => {
 		expect(clipJson("abc", 3)).toBe("abc")
 		expect(clipJson("abcd", 3)).toBe("abc")
@@ -676,6 +744,7 @@ describe("agent status", () => {
 				liveAudio: null,
 				scanner: null,
 				decoders: [],
+				hiddenProblems: 0,
 				activity: { state: "disabled", rows: null },
 				lastDecode: [],
 			})
