@@ -328,38 +328,170 @@ class CfoArgsTest(unittest.TestCase):
                + wrapper.CFO_LEAD_SYMBOLS)
         self.assertEqual(lag, 24)
         self.assertEqual(wrapper.CFO_DELAY_SYMBOLS, 32)
-        # LongFast: the dedupe window stays below the bench's 0.91 s copy spacing.
-        window = wrapper.CFO_DELAY_SYMBOLS * 2048 / 250_000 + wrapper.DEDUPE_SLACK_S
-        self.assertAlmostEqual(window, 0.512, places=3)
-        self.assertLess(window, 0.91)
+
+
+# LongFast at os 2: 4096 input samples per symbol, 2048 bins.
+SPS = 4096
+TOLERANCE = wrapper.DEDUPE_TOLERANCE_SYMBOLS * SPS
 
 
 class FrameDeduperTest(unittest.TestCase):
     def test_pairs_one_copy_per_path(self):
-        dedupe = wrapper.FrameDeduper(0.5)
-        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
-        self.assertFalse(dedupe.admit("recentred", FRAME, 1.3))
-        # The pair is used up: the next copy is a new frame.
-        self.assertTrue(dedupe.admit("recentred", FRAME, 1.4))
+        dedupe = wrapper.FrameDeduper(TOLERANCE)
+        self.assertTrue(dedupe.admit("direct", FRAME, 1_000_000))
+        self.assertFalse(dedupe.admit("recentred", FRAME, 1_000_000 + 2 * SPS))
+        # The pair is used up: the next copy is a new reception.
+        self.assertTrue(dedupe.admit("recentred", FRAME, 1_000_000 + 2 * SPS))
 
     def test_same_path_never_pairs(self):
-        dedupe = wrapper.FrameDeduper(0.5)
-        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
-        self.assertTrue(dedupe.admit("direct", FRAME, 1.1))
+        dedupe = wrapper.FrameDeduper(TOLERANCE)
+        self.assertTrue(dedupe.admit("direct", FRAME, 1_000_000))
+        self.assertTrue(dedupe.admit("direct", FRAME, 1_000_000))
 
-    def test_window_bound(self):
-        dedupe = wrapper.FrameDeduper(0.5)
-        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
-        self.assertFalse(dedupe.admit("recentred", FRAME, 1.5))
-        self.assertTrue(dedupe.admit("direct", FRAME, 2.0))
-        self.assertTrue(dedupe.admit("recentred", FRAME, 2.5001))
+    def test_tolerance_bound(self):
+        dedupe = wrapper.FrameDeduper(TOLERANCE)
+        self.assertTrue(dedupe.admit("direct", FRAME, 1_000_000))
+        self.assertFalse(dedupe.admit("recentred", FRAME, 1_000_000 - TOLERANCE))
+        self.assertTrue(dedupe.admit("direct", FRAME, 2_000_000))
+        self.assertTrue(dedupe.admit("recentred", FRAME, 2_000_000 + TOLERANCE + 1))
+
+    def test_tolerance_arithmetic(self):
+        # Worst position gap between the paths' copies of one frame, in symbols:
+        # read race 1 + late sync word 1 + integer CFO 0.25 + 2 chips + 8 samples.
+        worst = 1 + 1 + 0.25 + 2 / 2048 + 8 / SPS
+        self.assertLess(worst, 2.5)
+        self.assertLess(2.5, wrapper.DEDUPE_TOLERANCE_SYMBOLS)
+        # Closest a second reception can start: 8 preamble + 4.25 + 8 header symbols.
+        self.assertLess(wrapper.DEDUPE_TOLERANCE_SYMBOLS, 8 + 4.25 + 8)
 
     def test_relayed_copy_is_not_paired(self):
-        dedupe = wrapper.FrameDeduper(0.5)
+        dedupe = wrapper.FrameDeduper(TOLERANCE)
         relayed = bytearray(FRAME)
         relayed[12] = (relayed[12] & ~wrapper.FLAG_HOP_LIMIT_MASK) | 2
-        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
-        self.assertTrue(dedupe.admit("recentred", bytes(relayed), 1.1))
+        self.assertTrue(dedupe.admit("direct", FRAME, 1_000_000))
+        self.assertTrue(dedupe.admit("recentred", bytes(relayed), 1_000_000))
+
+    def test_unknown_position_is_let_through(self):
+        dedupe = wrapper.FrameDeduper(TOLERANCE)
+        self.assertTrue(dedupe.admit("direct", FRAME, None))
+        self.assertTrue(dedupe.admit("recentred", FRAME, None))
+        self.assertTrue(dedupe.admit("recentred", FRAME, 5))
+
+    def test_held_receptions_are_bounded(self):
+        dedupe = wrapper.FrameDeduper(TOLERANCE, keep=8)
+        for i in range(10_000):
+            dedupe.admit("direct", FRAME, i * 100 * SPS)
+        self.assertEqual(len(dedupe._seen), 8)
+
+    def test_arrival_order_and_time_do_not_matter(self):
+        # Two resends of identical bytes 0.4 s (49 symbols) apart, each decoded by
+        # one path or by both, reach the deduper in every order: one packet per
+        # reception, whatever the gap between callbacks (the old clock paired by
+        # callback time, so a late recentred copy got through and a resend 0.4 s
+        # later decoded by the other path was swallowed).
+        rng = random.Random(42)
+        resend = int(0.4 * 500_000)
+        for decoded_by in (("direct", "recentred"), ("both", "both"), ("direct", "both"),
+                           ("recentred", "direct"), ("both", "recentred")):
+            for _ in range(50):
+                copies = []
+                for k, who in enumerate(decoded_by):
+                    at = 3_000_000 + k * resend
+                    paths = ("direct", "recentred") if who == "both" else (who,)
+                    for path in paths:
+                        jitter = rng.randint(-2 * SPS, 2 * SPS) if path == "recentred" else 0
+                        copies.append((path, at + jitter))
+                rng.shuffle(copies)
+                dedupe = wrapper.FrameDeduper(TOLERANCE)
+                emitted = sum(dedupe.admit(path, FRAME, at) for path, at in copies)
+                self.assertEqual(emitted, len(decoded_by), (decoded_by, copies))
+
+
+class FakeFrameSync:
+    """frame_sync's counters across a lock: the lock call, then 8 header symbols
+    (consume one symbol, +-1 sample, before publishing its output), then a stall
+    until the header decoder answers. Each read lets 0..2 half-steps run first."""
+
+    def __init__(self, rng, consumed_at_lock, written_at_lock, lock_consumes, bins, sps):
+        self.rng = rng
+        self.steps = [(consumed_at_lock + lock_consumes, written_at_lock)]
+        consumed, written = self.steps[0]
+        for _ in range(8):
+            consumed += sps + rng.choice((-1, 0, 1))
+            self.steps.append((consumed, written))  # consumed, output not yet published
+            written += bins
+            self.steps.append((consumed, written))
+        # The probe holds the tagged item, so the first header symbol is published.
+        self.i = 2
+
+    def advance(self):
+        self.i = min(len(self.steps) - 1, self.i + self.rng.randint(0, 2))
+
+    def written(self):
+        self.advance()
+        return self.steps[self.i][1]
+
+    def consumed(self):
+        self.advance()
+        return self.steps[self.i][0]
+
+
+class LockPositionTest(unittest.TestCase):
+    def test_bounded_whatever_the_probe_timing(self):
+        rng = random.Random(7)
+        bins = 2048
+        for _ in range(2000):
+            lock_consumes = rng.randint(-8, SPS // 2)
+            fake = FakeFrameSync(rng, 9_000_000, 77 * bins, lock_consumes, bins, SPS)
+            position = wrapper.lock_position(77 * bins, fake.written, fake.consumed, bins, SPS)
+            truth = 9_000_000 + lock_consumes
+            # Up to one symbol consumed before its output is published, plus drift.
+            self.assertGreaterEqual(position, truth - 8)
+            self.assertLessEqual(position, truth + SPS + 8)
+
+    def test_exact_when_quiet(self):
+        position = wrapper.lock_position(
+            10 * 2048, lambda: 13 * 2048, lambda: 5_000_000, 2048, SPS)
+        self.assertEqual(position, 5_000_000 - 3 * SPS)
+
+
+class FramePositionsTest(unittest.TestCase):
+    def test_sink_takes_confirmed_locks_in_order(self):
+        positions = wrapper.FramePositions()
+        positions.locked(100)
+        positions.confirmed(33)
+        positions.locked(200)  # invalid header: never confirmed
+        positions.locked(300)
+        positions.confirmed(40)
+        self.assertEqual(positions.take(33), 100)
+        self.assertEqual(positions.take(40), 300)
+        self.assertIsNone(positions.take(40))
+
+    def test_unmatched_entries_are_skipped_and_misses_keep_the_queue(self):
+        positions = wrapper.FramePositions()
+        for at, pay_len in ((100, 10), (200, 20), (300, 30)):
+            positions.locked(at)
+            positions.confirmed(pay_len)
+        self.assertIsNone(positions.take(99))
+        self.assertEqual(positions.take(20), 200)  # drops the stale 10
+        self.assertEqual(positions.take(30), 300)
+        self.assertIsNone(positions.take(10))
+
+    def test_confirm_without_lock_is_ignored_and_queue_bounded(self):
+        positions = wrapper.FramePositions(keep=4)
+        positions.confirmed(33)
+        self.assertIsNone(positions.take(33))
+        for i in range(100):
+            positions.locked(i)
+            positions.confirmed(33)
+        self.assertEqual(len(positions._confirmed), 4)
+        self.assertEqual(positions.take(33), 96)
+
+    def test_assembler_carries_the_position(self):
+        asm = wrapper.FrameAssembler(Recorder())
+        frames = asm.feed(FRAME[:20], [(0, 33, True, 4242)])
+        frames += asm.feed(FRAME[20:], [])
+        self.assertEqual(frames, [wrapper.AssembledFrame(FRAME, True, 4242)])
 
 
 try:
@@ -455,6 +587,56 @@ class CfoSearchTest(unittest.TestCase):
         self.assertEqual(len(search_all(x, sf, os_factor, self.BW, 30_000 + self.BIN_HZ)), 1)
         self.assertEqual(search_all(x, sf, os_factor, self.BW, 30_000 - 2 * self.BIN_HZ), [])
 
+    def test_offsets_at_the_limit_are_found(self):
+        # The estimate lands on half bins, so a true offset of exactly the limit
+        # (50 kHz = 409.6 bins) reads 409.5 or 410 bins; 410 bins = 50 048.8 Hz is
+        # above the limit and was rejected. The limit admits one more bin.
+        sf, os_factor, limit = 11, 2, 50_000
+        for seed in range(12):
+            for sign in (1, -1):
+                with self.subTest(seed=seed, sign=sign):
+                    x = capture(sf, os_factor, self.BW, sign * limit, 40_000 + 137 * seed,
+                                preamble=16, snr_db=10, seed=seed)
+                    found = search_all(x, sf, os_factor, self.BW, limit)
+                    self.assertEqual(len(found), 1)
+                    self.assertLessEqual(abs(found[0][1] - sign * limit), self.BIN_HZ / 2)
+        # The reviewed case: 50 048.83 Hz at a 50 kHz limit.
+        x = capture(11, 2, self.BW, 50_000, 40_000, preamble=16, snr_db=10, seed=0)
+        self.assertEqual(len(search_all(x, sf, os_factor, self.BW, limit)), 1)
+
+    def test_offsets_past_the_limit_are_rejected(self):
+        # 2.5 bins past the limit reads at least 2 bins past it (half-bin error),
+        # beyond the one bin of slack.
+        sf, os_factor, limit = 11, 2, 50_000
+        for seed in range(10):
+            for sign in (1, -1):
+                with self.subTest(seed=seed, sign=sign):
+                    cfo_hz = sign * (limit + 2.5 * self.BIN_HZ)
+                    x = capture(sf, os_factor, self.BW, cfo_hz, 40_000 + 211 * seed,
+                                preamble=16, snr_db=10, seed=seed)
+                    self.assertEqual(search_all(x, sf, os_factor, self.BW, limit), [])
+                    # The same capture is found once the limit covers it.
+                    self.assertEqual(len(search_all(x, sf, os_factor, self.BW, limit + 3 * self.BIN_HZ)), 1)
+
+    def test_slack_never_reaches_the_ambiguous_quarter(self):
+        # -N/4 bins is also +N/4 (2c = N/2 mod N): rejected even when the limit
+        # plus one bin passes bw/4.
+        search = wrapper.CfoSearch(11, self.BW, 2, 62_499)
+        search._sfd_u, search._sfd_best = 0, (100.0, 1024)  # (u + v) / 2 = 512 bins
+        self.assertIsNone(search._finish())
+        search._sfd_u, search._sfd_best = 0, (100.0, 1022)  # 511 bins = 62 377 Hz
+        self.assertEqual(search._finish()[1], 511 * self.BIN_HZ)
+
+    def test_run_history_is_bounded(self):
+        # An unmodulated carrier keeps one bin forever: the run must not grow with it.
+        search = wrapper.CfoSearch(11, self.BW, 2, 50_000)
+        for _ in range(100_000):
+            search._step(5, 100.0, 7, 1.0)
+        self.assertLessEqual(len(search._run), wrapper.CFO_RUN_HISTORY)
+        self.assertGreaterEqual(len(search._run), wrapper.CFO_MIN_RUN)
+        # 24 upchirps (the longest preamble the delay line corrects) + 1 straddling window.
+        self.assertGreaterEqual(wrapper.CFO_RUN_HISTORY, 25)
+
     def test_other_spreading_factors_and_os(self):
         # Each at its SF's sensitivity floor (SX127x datasheet: -7.5 dB at SF7,
         # 2.5 dB lower per SF step).
@@ -524,6 +706,24 @@ class DelayedRotatorTest(unittest.TestCase):
         np.testing.assert_allclose(step[100:299], -2 * np.pi * 5_000.0 / fs, atol=1e-5)
         np.testing.assert_allclose(step[300:], 2 * np.pi * 7_000.0 / fs, atol=1e-5)
         np.testing.assert_allclose(np.abs(y), 1, atol=1e-6)
+
+    def test_zero_frequency_keeps_the_phase(self):
+        # 5 kHz for 123 samples turns the phase by -2pi x 5000 x 123 / 500 kHz;
+        # switching to 0 Hz holds it there instead of snapping back to 1.
+        fs = 500_000.0
+        rot = wrapper.DelayedRotator(fs, 0)
+        rot.schedule(0, 5_000.0)
+        rot.schedule(123, 0.0)
+        y = np.concatenate([rot.process(np.ones(100, dtype=np.complex64)),
+                            rot.process(np.ones(200, dtype=np.complex64))])
+        held = np.exp(-2j * np.pi * 5_000.0 * 123 / fs)
+        self.assertAlmostEqual(held.real, 0.125333, places=5)
+        self.assertAlmostEqual(held.imag, -0.992115, places=5)
+        np.testing.assert_allclose(y[123:], held, atol=1e-5)
+        # And a later switch continues from it.
+        rot.schedule(300, 5_000.0)
+        z = rot.process(np.ones(2, dtype=np.complex64))
+        np.testing.assert_allclose(z, held * np.exp(-2j * np.pi * 5_000.0 * np.arange(2) / fs), atol=1e-5)
 
     def test_late_switch_applies_at_the_next_sample(self):
         rot = wrapper.DelayedRotator(500_000.0, 0)

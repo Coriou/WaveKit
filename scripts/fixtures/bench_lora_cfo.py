@@ -23,8 +23,21 @@ image from the repository root, never against a live receiver:
     python3 scripts/fixtures/bench_lora_cfo.py
     python3 scripts/fixtures/bench_lora_cfo.py --variant old --variant new --repeat 1
 
-Exit status 1 when a `new`-variant run with |offset| <= --target-hz decodes other
-than --repeat frames (fewer, or a duplicate the two paths both let through).
+This is the in-image acceptance for the decoder's offset handling (the image has
+no pnpm or dev dependencies). Exit status 1 when a gating `new`-variant run decodes
+other than --repeat frames (fewer, or a duplicate the two paths both let through).
+A run gates when its offset is within the range that model must decode:
+
+- shift: --target-hz, default the search range bw/5 (50 kHz for 250 kHz), the
+  largest offset the planner places a slot off the capture centre. The recentred
+  path removes it.
+- crystal: --crystal-target-hz, default 20 kHz (23 ppm at 869.525 MHz). Only the
+  direct path (gr-lora_sdr's own clock model) decodes a large crystal offset: the
+  recentred path removes the offset but not its clock error, which drifts the
+  symbol timing by N x offset / 869.525 MHz chips per symbol, past half a chip
+  within the ~40 symbols after sync once |offset| > 0.5 x 869.525 MHz / (40 x
+  2048) = 5.3 kHz. In-image runs decoded every crystal16 copy up to +-20 kHz and
+  missed one of three at -25 kHz.
 """
 from __future__ import annotations
 
@@ -52,12 +65,15 @@ from bench_lora_chain import (  # noqa: E402
 
 CHANNEL_HZ = 869_525_000
 DEFAULT_OFFSETS_HZ = [0, 2_000, -2_000, 5_000, -5_000, 10_000, -10_000, 15_000, -15_000,
-                      20_000, -20_000, 25_000, -25_000, 30_000, -30_000]
+                      20_000, -20_000, 25_000, -25_000, 30_000, -30_000, 40_000, -40_000,
+                      50_000, -50_000]
 DEFAULT_CASES = ["shift8", "crystal16"]
 VARIANTS = {"new": [], "old": ["--cfo-search-hz", "0", "--preamble-len", "8"]}
 # scripts/fixtures/gen_lora.py: 0.25 s of 1.024 Msps noise precede the frame.
 FRAME_START = 256_000
 INSERTED_UPCHIRPS = 8
+# Largest crystal offset a run must decode (module docstring).
+CRYSTAL_TARGET_HZ = 20_000
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +86,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", action="append", choices=sorted(VARIANTS),
                         help="repeatable; default new")
     parser.add_argument("--target-hz", type=int, default=None,
-                        help="exit 1 on a failed new run within +-this; default bw/5")
+                        help="exit 1 on a failed new shift run within +-this; default bw/5")
+    parser.add_argument("--crystal-target-hz", type=int, default=CRYSTAL_TARGET_HZ,
+                        help="exit 1 on a failed new crystal run within +-this; "
+                        f"default {CRYSTAL_TARGET_HZ}")
     parser.add_argument("--repeat", type=int, default=3,
                         help="copies of each 0.91 s capture per run (default 3)")
     parser.add_argument("--cpu", type=int, default=0,
@@ -233,7 +252,8 @@ def main() -> int:
     failed = False
     if not args.json:
         print(f"repeat={args.repeat} cpu={args.cpu} bw={args.bw} sf={args.sf} "
-              f"os={args.os_factor} target=+-{args.target_hz} Hz")
+              f"os={args.os_factor} target shift +-{args.target_hz} Hz, "
+              f"crystal +-{args.crystal_target_hz} Hz")
         print(f"{'capture':27} {'case':9} {'var':4} {'offset':>7} {'dec':>5} {'direct':>6} "
               f"{'recent':>6} {'cfo est':>8} {'sox/s':>6} {'py/s':>6} {'wall s':>6}")
     with tempfile.TemporaryDirectory(prefix="lora-cfo-bench-") as tmp:
@@ -250,7 +270,9 @@ def main() -> int:
                         r = run_chain(args, path, VARIANTS[variant], preexec)
                         ok = (r["decodes"] == args.repeat and r["py_exit"] == 0
                               and r["sox_exit"] == 0)
-                        gating = variant == "new" and abs(offset) <= args.target_hz
+                        target = (args.crystal_target_hz if case.startswith("crystal")
+                                  else args.target_hz)
+                        gating = variant == "new" and abs(offset) <= target
                         failed = failed or (gating and not ok)
                         row = {"capture": name, "case": case, "variant": variant,
                                "offset_hz": offset, "expected": args.repeat, "ok": ok,

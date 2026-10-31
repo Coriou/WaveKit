@@ -699,17 +699,59 @@ symbol error, so the frame is lost. The wrapper therefore runs gr-lora_sdr twice
   and decodes the result, so it handles pure shifts. It runs 32 symbols behind the direct
   path (262 ms for LongFast), so the shift starts before the preamble.
 
-A frame that both paths decode is emitted once. The drop lines carry a `path` field
+A frame that both paths decode is emitted once. Each copy is placed by the input sample
+where gr-lora_sdr locked on it (the recentred path's less its 32-symbol delay), and two
+identical copies from different paths pair when those positions agree within 4 symbols
+(33 ms for LongFast). Thread timing does not matter, and identical frames that one path
+decodes are separate receptions, all emitted. The drop lines carry a `path` field
 (`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. At exit,
 a `cfo_search_summary` line gives the number of preambles found and the last offset
-measured. A frame with both a large shift and a large crystal error can still be lost,
-because each path corrects only one kind. `--cfo-search-hz 0` runs the direct path alone.
+measured. `--cfo-search-hz 0` runs the direct path alone.
 
-To measure decoding against offsets, run `python3 scripts/fixtures/bench_lora_cfo.py` in
-the core image. It moves each committed capture 0 to ±30 kHz off its channel, either as a
-pure shift or as a crystal error with its clock error, with 8 or 16 preamble upchirps. It
-prints the decodes of each path, the measured offset and the CPU of each stage per second
-of signal. `--variant old` adds the wrapper without the search for comparison.
+Each path corrects only one kind of offset, so the two kinds have different ranges:
+
+- A shift decodes up to the search range, bw/5 (50 kHz for LongFast).
+- A crystal offset decodes reliably up to ±20 kHz (23 ppm at 869.525 MHz). Only the direct
+  path decodes a large one. The recentred path removes the offset but not its clock
+  error, and that error moves the symbol timing by 2048 × offset / 869.525 MHz chips per
+  symbol. Past 5.3 kHz this exceeds half a chip within the 40 symbols after sync.
+
+A frame with both a large shift and a large crystal error can still be lost.
+
+The core image has no pnpm or development dependencies, so the acceptance check for offset
+handling is the bench, run inside the core image from the repository root and never
+against a live receiver:
+
+```bash
+python3 scripts/fixtures/bench_lora_cfo.py
+python3 scripts/fixtures/bench_lora_cfo.py --variant old --variant new --repeat 1
+```
+
+It moves each committed capture 0 to ±50 kHz off its channel, either as a pure shift or
+as a crystal error with its clock error, with 8 or 16 preamble upchirps, and pipes each
+case through sox and the wrapper with the decoder's own arguments. It prints the decodes
+of each path, the measured offset and the CPU of each stage per second of signal.
+`--variant old` adds the wrapper without the search for comparison. It exits with status 1
+when a shift within `--target-hz` (default bw/5) or a crystal offset within
+`--crystal-target-hz` (default 20 kHz) decodes other than one packet per copy.
+
+Measured in the core image on 2 CPUs of a loaded host, with 3 copies per run at +10 and
+−5 dB SNR, before the position-based pairing above and with the default offsets then
+0 to ±30 kHz:
+
+| Case | Decodes |
+| --- | --- |
+| shift8 | 3/3 at every offset at both SNRs |
+| crystal16 | 3/3 except at −25 kHz: 2/3 at both SNRs (direct path 2, recentred 0) |
+| shift16 | 30 of 30 runs 3/3 |
+
+58 of the 60 default runs (shift8 and crystal16) decoded 3/3. Wrapper (Python) CPU per
+second of signal:
+
+- the two-path wrapper: mean 0.54 s over the default cases, 0.34 s for shift16
+- crystal cases: 0.4–0.97 s, against 0.25–0.47 s for `old`, 1.5 to 2.5 times the
+  single-path wrapper
+- sox: 0.06–0.12 s
 
 gr-lora_sdr needs a sample rate that is a whole multiple of the LoRa bandwidth
 (`samp_rate = bw × os_factor`). The decoder runs it at `bw × 2` by default, 500 kS/s for

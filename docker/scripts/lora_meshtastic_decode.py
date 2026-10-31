@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -118,11 +118,32 @@ CFO_LEAD_SYMBOLS = 2
 # + CFO_LEAD_SYMBOLS = 16 + 1 + 5 + 2 = 24 symbols after the correction must start
 # (Meshtastic). 32 leaves 8 symbols for longer preambles.
 CFO_DELAY_SYMBOLS = 32
-# The recentred copy of a frame decodes CFO_DELAY_SYMBOLS of signal time after the
-# direct copy; this much more absorbs block scheduling. LongFast: 32 x 2048 /
-# 250 kHz = 0.262 s + 0.25 s = 0.51 s, below the 0.91 s between the bench's
-# back-to-back copies of a fixture frame.
-DEDUPE_SLACK_S = 0.25
+# Run windows kept for the run's most common bin. The delay line corrects a
+# preamble of at most 32 - (1 + 5 + 2) = 24 upchirps from its start, which fills
+# at most 24 + 1 straddling window = 25 windows; 32 keeps all of them, and a
+# longer run (an unmodulated carrier) keeps only its last 32.
+CFO_RUN_HISTORY = CFO_DELAY_SYMBOLS
+# Each frame is placed by the input sample where frame_sync locked on it
+# (lock_position), the recentred path's less its delay line, and the two paths'
+# copies of one frame pair when these agree within this many symbols. The
+# positions differ by at most: 1 symbol of read race (frame_sync consumes a
+# symbol before it publishes the output for it), 1 symbol when frame_sync finds
+# the sync word one symbol late (one_symbol_off: the lock call outputs a symbol
+# itself), 0.25 symbol of integer CFO the lock call consumes (up to N/4 bins on
+# the direct path, ~0 recentred), 2 chips of sync-word offset and one sample of
+# drift per header symbol: under 2.5 symbols, so 4. A second reception on the
+# channel starts after the first ends: 8 preamble + 4.25 sync + 8 header symbols
+# = 20.25 symbols later at the least (LongFast 4 symbols = 33 ms; a resend
+# 0.4 s later is 49 symbols away).
+DEDUPE_TOLERANCE_SYMBOLS = 4
+# Receptions the deduper holds for a pair. One path's copy of a frame reaches
+# the deduper at most the delay line (32 symbols) plus a few block buffers
+# after the other's, and frames are at least 20 symbols apart, so a handful
+# wait at once; older entries fall off.
+DEDUPE_KEEP = 64
+# Locks a path has confirmed (valid header) that its sink has not reached yet;
+# the same bound.
+LOCKS_KEEP = 64
 
 
 class FrameError(ValueError):
@@ -382,6 +403,9 @@ class AssembledFrame:
     payload: bytes
     # crc_verif's verdict from the frame_info tag; None when the tag lacked it.
     crc_valid: bool | None
+    # Input sample where frame_sync locked on the frame (FramePositions); None
+    # when unknown.
+    position: int | None = None
 
 
 class FrameAssembler:
@@ -398,27 +422,30 @@ class FrameAssembler:
         self._buffer = bytearray()
         self._expected = 0
         self._crc_valid: bool | None = None
+        self._position: int | None = None
         self._active = False
 
     def feed(
         self,
         data: bytes,
-        tags: list[tuple[int, int | None, bool | None]],
+        tags: list[tuple[Any, ...]],
     ) -> list[AssembledFrame]:
-        """`tags` holds (relative offset, pay_len, crc_valid), offsets in 0..len(data)."""
+        """`tags` holds (relative offset, pay_len, crc_valid[, position]), offsets in 0..len(data)."""
         frames: list[AssembledFrame] = []
         cursor = 0
-        for offset, pay_len, crc_valid in sorted(tags, key=lambda t: t[0]):
+        for offset, pay_len, crc_valid, *rest in sorted(tags, key=lambda t: t[0]):
             offset = max(cursor, min(offset, len(data)))
             self._take(data[cursor:offset], frames)
             cursor = offset
             if self._active:
                 self._on_drop("truncated")
-            self._start(pay_len, crc_valid)
+            self._start(pay_len, crc_valid, rest[0] if rest else None)
         self._take(data[cursor:], frames)
         return frames
 
-    def _start(self, pay_len: int | None, crc_valid: bool | None) -> None:
+    def _start(
+        self, pay_len: int | None, crc_valid: bool | None, position: int | None
+    ) -> None:
         self._buffer.clear()
         if pay_len is None or not 1 <= pay_len <= MAX_LORA_PAYLOAD_LEN:
             self._active = False
@@ -426,6 +453,7 @@ class FrameAssembler:
             return
         self._expected = pay_len
         self._crc_valid = crc_valid
+        self._position = position
         self._active = True
 
     def _take(self, chunk: bytes, frames: list[AssembledFrame]) -> None:
@@ -436,7 +464,9 @@ class FrameAssembler:
         need = self._expected - len(self._buffer)
         self._buffer.extend(chunk[:need])
         if len(self._buffer) == self._expected:
-            frames.append(AssembledFrame(bytes(self._buffer), self._crc_valid))
+            frames.append(
+                AssembledFrame(bytes(self._buffer), self._crc_valid, self._position)
+            )
             self._buffer.clear()
             self._active = False
 
@@ -523,6 +553,84 @@ def frame_info_fields(pmt: Any, value: Any) -> tuple[int | None, bool | None]:
     return pay_len, crc_valid
 
 
+def lock_fields(pmt: Any, value: Any) -> tuple[bool | None, int | None]:
+    """Reads is_header and pay_len from a frame_sync frame_info pmt dict."""
+    if not pmt.is_dict(value):
+        return None, None
+    header_pmt = pmt.dict_ref(value, pmt.intern("is_header"), pmt.PMT_NIL)
+    pay_len_pmt = pmt.dict_ref(value, pmt.intern("pay_len"), pmt.PMT_NIL)
+    is_header = bool(pmt.to_bool(header_pmt)) if pmt.is_bool(header_pmt) else None
+    pay_len = int(pmt.to_long(pay_len_pmt)) if pmt.is_integer(pay_len_pmt) else None
+    return is_header, pay_len
+
+
+def lock_position(
+    tag_offset: int,
+    written: Callable[[], int],
+    consumed: Callable[[], int],
+    bins: int,
+    samples_per_symbol: int,
+) -> int:
+    """Input sample where frame_sync locked on the frame whose header tag sits at `tag_offset`.
+
+    `written` and `consumed` read frame_sync's output and input item counts. Read
+    while the tagged item is still before the probe, they are bounded: after a lock
+    frame_sync outputs the 8 header symbols, then consumes nothing until the
+    header decoder answers (frame_sync_impl.cc SFO_COMPENSATION, m_received_head),
+    and the decoder cannot see the header before the probe passes it on. Each
+    symbol output since the tag consumed one oversampled symbol (+-1 sample of
+    drift correction), so the lock sat that many symbols before the consumed count,
+    whenever the probe thread runs. The output count is read before and after the
+    input count so both come from the same frame_sync call, up to the one symbol a
+    call consumes before it publishes its output.
+    """
+    for _ in range(8):
+        before = written()
+        read = consumed()
+        if written() == before:
+            break
+    return read - (before - tag_offset) // bins * samples_per_symbol
+
+
+class FramePositions:
+    """One path's lock positions, handed to its sink in frame order.
+
+    The lock probe records each frame_sync lock (header tag) and confirms it when
+    frame_sync tags the decoded header (is_header false), which it does only for
+    a valid header. header_decoder tags the same valid headers in the same order
+    and crc_verif copies those tags to the sink, so the sink's n-th frame_info tag
+    is the n-th confirmed lock; pay_len, in both tags, checks the pairing.
+    """
+
+    def __init__(self, keep: int = LOCKS_KEEP) -> None:
+        self._lock = threading.Lock()
+        self._pending: int | None = None
+        self._confirmed: deque[tuple[int | None, int]] = deque(maxlen=keep)
+
+    def locked(self, position: int) -> None:
+        with self._lock:
+            self._pending = position
+
+    def confirmed(self, pay_len: int | None) -> None:
+        with self._lock:
+            if self._pending is not None:
+                self._confirmed.append((pay_len, self._pending))
+                self._pending = None
+
+    def take(self, pay_len: int | None) -> int | None:
+        """The oldest confirmed lock with this pay_len, dropping older unmatched ones.
+
+        None, leaving the queue as it is, when no lock matches.
+        """
+        with self._lock:
+            for i, (length, position) in enumerate(self._confirmed):
+                if length == pay_len:
+                    for _ in range(i + 1):
+                        self._confirmed.popleft()
+                    return position
+            return None
+
+
 def base_upchirp(n: int) -> Any:
     """gr-lora_sdr build_upchirp(id 0) at one sample per chip: phase 2pi(k^2/2N - k/2)."""
     import numpy as np
@@ -563,7 +671,7 @@ class CfoSearch:
         self._pending = np.zeros(0, dtype=np.complex64)
         self._pending_samples = np.zeros(0, dtype=np.complex64)
         self._window = 0
-        self._run: list[int] = []
+        self._run: deque[int] = deque(maxlen=CFO_RUN_HISTORY)
         self._run_start = 0
         # A window that left the run's bin (one is forgiven):
         # (window, u, u_ratio, v_ratio, v).
@@ -627,7 +735,7 @@ class CfoSearch:
             self._sfd_run_start = self._run_start
             self._sfd_best = max(stray[3:], (v_ratio, v))
             self._sfd_left = CFO_SFD_WINDOWS - 2
-            self._run = []
+            self._run.clear()
             return None
         if (
             stray is not None
@@ -636,10 +744,13 @@ class CfoSearch:
             and near_bin(u, stray[1], self.n)
         ):
             # A short run gave way to a preamble that started at the stray window.
-            self._run = [stray[1], u]
+            self._run.clear()
+            self._run.extend((stray[1], u))
             self._run_start = stray[0]
             return None
-        self._run = [u] if u_ratio >= CFO_PEAK_RATIO else []
+        self._run.clear()
+        if u_ratio >= CFO_PEAK_RATIO:
+            self._run.append(u)
         self._run_start = self._window
         return None
 
@@ -651,7 +762,13 @@ class CfoSearch:
         if bins >= self.n / 4:
             bins -= self.n / 2
         cfo_hz = bins * self.bw / self.n
-        if abs(cfo_hz) > self.max_cfo_hz:
+        # u and v are whole bins, each within half a bin of c + d and c - d on a
+        # clean peak, so (u + v) / 2 is within (0.5 + 0.5) / 2 = 0.5 bin of c: a
+        # true offset of exactly the limit (50 kHz = 409.6 bins) reads 409.5 or
+        # 410 bins (50 048.8 Hz). The limit therefore admits one more bin, bw / N
+        # (122 Hz LongFast). -N/4 bins is also +N/4 (2c = N/2 modulo N), so the
+        # slack never admits the ambiguous quarter, whatever the limit.
+        if abs(cfo_hz) > self.max_cfo_hz + self.bw / self.n or 4 * abs(bins) >= self.n:
             return None
         start_window = max(0, self._sfd_run_start - CFO_LEAD_SYMBOLS)
         self.detections += 1
@@ -704,7 +821,9 @@ class DelayedRotator:
             if self._switches:
                 end = min(end, self._switches[0][0] - self._out_pos)
             if self._freq == 0.0:
-                out[pos:end] = block[pos:end]
+                # The phase holds at its last value: 0 Hz after a shift keeps
+                # the accumulated turn instead of snapping back to 1.
+                out[pos:end] = block[pos:end] * np.complex64(np.exp(1j * self._phase))
             else:
                 step = -2.0 * np.pi * self._freq / self._samp_rate
                 if len(self._ramp) < end - pos:
@@ -720,23 +839,31 @@ class FrameDeduper:
     """Lets one copy of a frame through when both paths decode it.
 
     A frame decoded by one path pairs with the first identical frame from the
-    other path within `window_s` of signal time; the pair yields one packet. A
-    relayed copy differs in its hop bytes, so it is never paired.
+    other path whose input position (FramePositions) is within `tolerance`
+    samples; the pair yields one packet. Arrival order and time do not matter,
+    so block scheduling cannot split or merge pairs. Identical frames from one
+    path are separate receptions and never pair. A relayed copy differs in its
+    hop bytes, so it is never paired. A frame without a position is let through.
     """
 
-    def __init__(self, window_s: float) -> None:
-        self._window_s = window_s
-        self._seen: list[tuple[float, str, bytes]] = []
+    def __init__(self, tolerance: int, keep: int = DEDUPE_KEEP) -> None:
+        self._tolerance = tolerance
+        self._seen: deque[tuple[str, bytes, int]] = deque(maxlen=keep)
         self._lock = threading.Lock()
 
-    def admit(self, path: str, payload: bytes, now_s: float) -> bool:
+    def admit(self, path: str, payload: bytes, position: int | None) -> bool:
+        if position is None:
+            return True
         with self._lock:
-            self._seen = [s for s in self._seen if now_s - s[0] <= self._window_s]
-            for i, (_, other, seen) in enumerate(self._seen):
-                if other != path and seen == payload:
+            for i, (other, seen, at) in enumerate(self._seen):
+                if (
+                    other != path
+                    and seen == payload
+                    and abs(at - position) <= self._tolerance
+                ):
                     del self._seen[i]
                     return False
-            self._seen.append((now_s, path, payload))
+            self._seen.append((path, payload, position))
             return True
 
 
@@ -789,9 +916,8 @@ def build_flowgraph(
         if recentre
         else None
     )
-    deduper = FrameDeduper(
-        CFO_DELAY_SYMBOLS * samples_per_symbol / float(args.samp_rate) + DEDUPE_SLACK_S
-    )
+    deduper = FrameDeduper(DEDUPE_TOLERANCE_SYMBOLS * samples_per_symbol)
+    positions = {path: FramePositions() for path in drops}
 
     class Cu8StdinSource(gr.sync_block):
         """cu8 stdin as complex samples on output 0; output 1, when recentring, carries
@@ -808,8 +934,6 @@ def build_flowgraph(
             self.chunk_bytes = chunk_bytes
             # Leftover < 2 bytes from a partial IQ pair held across work() calls.
             self.pending = b""
-            # Signal clock for the deduper: complex samples read so far.
-            self.samples_read = 0
             # After EOF the delayed output still holds this many samples.
             self.flush_left = CFO_DELAY_SYMBOLS * samples_per_symbol if recentre else 0
             self.eof = False
@@ -849,7 +973,6 @@ def build_flowgraph(
                     rotator.schedule(at_sample, cfo_hz)
                 output_items[1][:sample_count] = rotator.process(samples)
             self.pending = data[used:] if used < len(data) else b""
-            self.samples_read += sample_count
             return sample_count
 
         def flush(self, output_items: list[Any]) -> int:
@@ -861,7 +984,45 @@ def build_flowgraph(
             output_items[0][:count] = zeros
             output_items[1][:count] = rotator.process(zeros)
             self.flush_left -= count
-            self.samples_read += count
+            return count
+
+    class FrameLockProbe(gr.sync_block):
+        """Passes frame_sync's output on unchanged (tags too) and records where in
+        the input each lock sat (lock_position), less the path's delay line."""
+
+        def __init__(self, path: str, frame_sync: Any, delay: int) -> None:
+            gr.sync_block.__init__(
+                self,
+                name=f"frame_lock_probe_{path}",
+                in_sig=[numpy.complex64],
+                out_sig=[numpy.complex64],
+            )
+            self.frame_sync = frame_sync
+            self.delay = delay
+            self.positions = positions[path]
+            self.frame_info = pmt.intern("frame_info")
+
+        def work(self, input_items: list[Any], output_items: list[Any]) -> int:
+            count = len(input_items[0])
+            output_items[0][:count] = input_items[0]
+            tags = [
+                tag
+                for tag in self.get_tags_in_window(0, 0, count)
+                if pmt.eq(tag.key, self.frame_info)
+            ]
+            for tag in sorted(tags, key=lambda t: t.offset):
+                is_header, pay_len = lock_fields(pmt, tag.value)
+                if is_header:
+                    position = lock_position(
+                        int(tag.offset),
+                        lambda: int(self.frame_sync.nitems_written(0)),
+                        lambda: int(self.frame_sync.nitems_read(0)),
+                        1 << int(args.sf),
+                        samples_per_symbol,
+                    )
+                    self.positions.locked(position - self.delay)
+                elif is_header is False:
+                    self.positions.confirmed(pay_len)
             return count
 
     class MeshtasticFrameSink(gr.sync_block):
@@ -876,6 +1037,7 @@ def build_flowgraph(
             )
             self.path = path
             self.drops = drops[path]
+            self.positions = positions[path]
             self.assembler = FrameAssembler(self.drops.drop)
             self.frame_info = pmt.intern("frame_info")
 
@@ -889,15 +1051,15 @@ def build_flowgraph(
                 if not pmt.eq(tag.key, self.frame_info):
                     continue
                 pay_len, crc_valid = frame_info_fields(pmt, tag.value)
-                tags.append((int(tag.offset - base), pay_len, crc_valid))
+                position = self.positions.take(pay_len)
+                tags.append((int(tag.offset - base), pay_len, crc_valid, position))
             for frame in self.assembler.feed(data.tobytes(), tags):
                 event = process_frame(
                     frame, channel_key, mesh_pb2.Data, self.drops, event_fields
                 )
                 if event is None:
                     continue
-                now_s = source.samples_read / float(args.samp_rate)
-                if deduper.admit(self.path, frame.payload, now_s):
+                if deduper.admit(self.path, frame.payload, frame.position):
                     write_event(event)
                 else:
                     self.drops.drop("duplicate")
@@ -920,7 +1082,9 @@ def build_flowgraph(
     source.set_min_output_buffer(os_factor * ((1 << int(args.sf)) + 2))
     gr_cr = max(1, min(4, int(args.cr) - 4))
 
-    def demod_chain(port: int, path: str, preamble_len: int) -> tuple[Any, ...]:
+    def demod_chain(
+        port: int, path: str, preamble_len: int, delay: int
+    ) -> tuple[Any, ...]:
         frame_sync = lora_sdr.frame_sync(
             int(args.frequency),
             int(args.bw),
@@ -947,11 +1111,13 @@ def build_flowgraph(
         # with crc_valid; the bool output (output_crc_check) is not needed and the
         # `msg` port is left unconnected (its str payload is not binary-safe).
         crc_verif = lora_sdr.crc_verif(print_payload, False)
+        lock_probe = FrameLockProbe(path, frame_sync, delay)
         frame_sink = MeshtasticFrameSink(path)
 
         top.msg_connect((header_decoder, "frame_info"), (frame_sync, "frame_info"))
         top.connect((source, port), (frame_sync, 0))
-        top.connect((frame_sync, 0), (fft_demod, 0))
+        top.connect((frame_sync, 0), (lock_probe, 0))
+        top.connect((lock_probe, 0), (fft_demod, 0))
         top.connect((fft_demod, 0), (gray_mapping, 0))
         top.connect((gray_mapping, 0), (deinterleaver, 0))
         top.connect((deinterleaver, 0), (hamming_dec, 0))
@@ -959,12 +1125,14 @@ def build_flowgraph(
         top.connect((header_decoder, 0), (dewhitening, 0))
         top.connect((dewhitening, 0), (crc_verif, 0))
         top.connect((crc_verif, 0), (frame_sink, 0))
-        return (frame_sync, fft_demod, gray_mapping, deinterleaver, hamming_dec,
-                header_decoder, dewhitening, crc_verif, frame_sink)
+        return (frame_sync, lock_probe, fft_demod, gray_mapping, deinterleaver,
+                hamming_dec, header_decoder, dewhitening, crc_verif, frame_sink)
 
-    blocks = demod_chain(0, "direct", int(args.preamble_len))
+    blocks = demod_chain(0, "direct", int(args.preamble_len), 0)
     if recentre:
-        blocks += demod_chain(1, "recentred", RECENTRED_PREAMBLE_LEN)
+        blocks += demod_chain(
+            1, "recentred", RECENTRED_PREAMBLE_LEN, CFO_DELAY_SYMBOLS * samples_per_symbol
+        )
 
     log_stderr(
         "flowgraph_start",
