@@ -96,15 +96,12 @@ import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
 import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import { multimonHasPaging } from "./builtin/multimon-ng.js"
 import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
-import {
-	normalizeBandOverride,
-	resolveBandRequirements,
-	type ResolvedBand,
-} from "./band-defaults.js"
+import { normalizeBandOverride, type ResolvedBand } from "./band-defaults.js"
 import { BandOverrideStore } from "./band-override-store.js"
 import {
 	decoderBandTable,
 	pagingRasterRanges,
+	resolveDecoderBand,
 } from "./enablement/paging-plan.js"
 import {
 	createDecoderExitError,
@@ -117,6 +114,7 @@ import { VFO_CHANNEL_TYPES, activityQueries } from "./enablement/placement.js"
 import {
 	ACTIVITY_MOVE_WINDOW_MS,
 	isActivityDecoder,
+	readySnapshot,
 } from "./enablement/activity-plan.js"
 import type {
 	ActivityIncumbent,
@@ -125,6 +123,8 @@ import type {
 } from "./enablement/activity-plan.js"
 import {
 	DsdActivityDemotions,
+	DsdChallengeEvidence,
+	dsdChallengeKey,
 	dsdSyncProtectionUntil,
 	isDsdActivitySync,
 } from "./enablement/dsd-activity.js"
@@ -309,6 +309,8 @@ interface DecoderState {
 	originalConfig?: DecoderConfig
 	effectiveConfig?: DecoderConfig
 	loggedSuspension?: string | null
+	/** R5: the input rate last warned about as suboptimal, so each rate warns once. */
+	suboptimalRateWarned?: number
 	parentId?: string
 	placement?: WantedPlacement
 	unplaced?: DecoderSuspensionReasonCode
@@ -699,6 +701,8 @@ export class DecoderManager extends EventEmitter {
 	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
 	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
 	private readonly dsdActivityDemotions = new DsdActivityDemotions()
+	/** R2: repeat-and-span evidence of dsd-fme challengers (bounded, same clock). */
+	private readonly dsdChallengeEvidence = new DsdChallengeEvidence()
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
 	/** Per placement key: when it was first planned and when it was first seen running. */
 	private readonly activitySince = new Map<
@@ -2482,7 +2486,26 @@ export class DecoderManager extends EventEmitter {
 					"Channel activity snapshot failed",
 				)
 			}
-		return { ...input, activity: { ...plannerActivity, snapshots } }
+		// R2: each pass records the energy timestamps of its dsd-fme answers;
+		// only channels past the hysteresis may displace a running slot.
+		for (const query of queries) {
+			if (query.decoderType !== "dsd-fme") continue
+			const ready = readySnapshot(query, snapshots)
+			for (const channel of ready?.channels ?? [])
+				this.dsdChallengeEvidence.note(
+					dsdChallengeKey(query.decoderId, query.epoch.sourceId, channel.hz),
+					channel.lastEnergyMonoMs,
+					now,
+				)
+		}
+		return {
+			...input,
+			activity: {
+				...plannerActivity,
+				snapshots,
+				confirmedChallengers: this.dsdChallengeEvidence.snapshot(now),
+			},
+		}
 	}
 
 	/** Stage 1: one timer for the earliest activity deadline (decay, dwell, move window). */
@@ -5500,6 +5523,10 @@ export class DecoderManager extends EventEmitter {
 			if (this.selectedSourceId(state) !== sourceId) continue
 			// The probe pool stops and re-creates probes on every epoch (H5).
 			if (state.owner === "scanner") continue
+			// R5: a rate change re-arms the suboptimal-rate warning even while
+			// the decoder is not adapted (suspended), so a returning rate warns.
+			if (caps && state.suboptimalRateWarned !== caps.sampleRate)
+				delete state.suboptimalRateWarned
 			const adapting = await this.evaluateRate(state, caps)
 			// A decoder whose channel was invalidated is re-wired on any evaluation.
 			if (adapting && caps && (adapt || state.channelStale))
@@ -5617,7 +5644,10 @@ export class DecoderManager extends EventEmitter {
 			if (decoderCaps?.preferredSampleRates?.length) {
 				const preferred = decoderCaps.preferredSampleRates
 				const current = caps.sampleRate
-				if (!preferred.includes(current)) {
+				// R5: once per decoder and rate; a preferred rate re-arms it.
+				if (preferred.includes(current)) delete state.suboptimalRateWarned
+				else if (state.suboptimalRateWarned !== current) {
+					state.suboptimalRateWarned = current
 					this.log.warn(
 						{
 							decoderId,
@@ -5686,6 +5716,8 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 	): Promise<boolean> {
 		const before = this.rateKey(state)
+		const refusedDetail =
+			state.admission?.admit === false ? state.admission.detail : undefined
 		this.clearExpiredAdmission(state)
 		const eligibility = this.assessEligibility(state, caps)
 		const plan = eligibility.rate
@@ -5717,6 +5749,20 @@ export class DecoderManager extends EventEmitter {
 				// Review Focus 5: identical caps get the same admission answer.
 				state.ratePlan = plan
 				this.publishIfRateChanged(state, before)
+			} else if (
+				eligibility.blockedBy === null &&
+				this.efficiencyStillRefused(state)
+			) {
+				// R4: a due refusal the gate repeats is not a resume; the
+				// suspension and its since stand, published only when the
+				// refusal's detail changes.
+				state.ratePlan = plan
+				if (
+					state.admission?.admit === false &&
+					state.admission.detail !== refusedDetail
+				)
+					this.emitStatusChanged(state)
+				else this.publishIfRateChanged(state, before)
 			} else if (eligibility.blockedBy === null) {
 				await this.resume(state, plan)
 			} else if (state.transition === "suspending") {
@@ -5743,6 +5789,35 @@ export class DecoderManager extends EventEmitter {
 		state.ratePlan = plan
 		this.publishIfRateChanged(state, before)
 		return running
+	}
+
+	/**
+	 * R4: re-asks the gate for a decoder suspended for efficiency whose
+	 * refusal fell due, before resuming it. A refusal is kept as the new
+	 * admission (the suspension stays). An admission only lets the resume
+	 * proceed: it is not counted as running, so startPlacementNow asks the
+	 * gate afresh (two resumes admitted here against the same headroom must
+	 * not both start).
+	 */
+	private efficiencyStillRefused(state: DecoderState): boolean {
+		const gate = this.config.enablement?.gate
+		if (
+			!gate ||
+			!state.placement ||
+			state.suspension?.reasonCode !== "efficiency-budget" ||
+			!this.awaitsEfficiency(state) ||
+			this.gateExempt(state)
+		)
+			return false
+		const decision = gate.admit(
+			state.placement,
+			this.runningPlacements(),
+			performance.now(),
+		)
+		if (decision.admit) return false
+		state.admission = decision
+		this.scheduleEfficiencyEvaluation()
+		return true
 	}
 
 	/**
@@ -5867,6 +5942,9 @@ export class DecoderManager extends EventEmitter {
 		const prior = state.suspension
 		const channelRetry =
 			prior !== null && isChannelAdmissionReason(prior.reasonCode)
+		// R4: the gate admitted an efficiency hold; its resume is published
+		// once, when the start settles (every exit below publishes).
+		const quiet = prior?.reasonCode === "efficiency-budget"
 		state.suspension = null
 		state.transition = "resuming"
 		this.clearChannelRetry(this.selectedSourceId(state), true)
@@ -5880,7 +5958,7 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: id },
 				"Resuming decoder: source rate and band are usable",
 			)
-		this.emitStatusChanged(state)
+		if (!quiet) this.emitStatusChanged(state)
 
 		const abandon = async (startedProcess: boolean) => {
 			if (state.transition === "resuming") state.transition = null
@@ -6427,6 +6505,8 @@ export class DecoderManager extends EventEmitter {
 		if (gate && state.placement) {
 			delete state.admission
 			delete state.admittedAtMs
+			// Always a fresh decision: an R4 re-check's admission was not counted
+			// as running, so another resume may have taken its headroom since.
 			state.admission = exempt
 				? { admit: true }
 				: gate.admit(
@@ -6619,7 +6699,7 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private resolveBand(state: DecoderState): ResolvedBand {
 		const slots = this.catalogueLoraSlotsOf(state)
-		return resolveBandRequirements({
+		return resolveDecoderBand({
 			type: state.config.type,
 			// 3.17: the catalogue LoRa decoder declares every regional slot.
 			declaration: slots
@@ -6633,9 +6713,23 @@ export class DecoderManager extends EventEmitter {
 			configOverride: state.config.band,
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
-			// 3.18: a paging-only multimon-ng adds its paging band to the table.
-			table: decoderBandTable(state.config.type, state.config.options),
+			// 3.18: a paging-only multimon-ng adds its paging band to the table;
+			// R3: other mode lists their services' bands, out of band where
+			// none has one (resolveDecoderBand). Read the configured
+			// options (the parent's for a placement), never placement-applied ones.
+			table: decoderBandTable(
+				state.config.type,
+				this.configuredOptionsOf(state),
+			),
 		})
+	}
+
+	/** The options the operator configured: a placement's channel options are the planner's. */
+	private configuredOptionsOf(state: DecoderState): Record<string, unknown> {
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		const config =
+			parent?.effectiveConfig ?? parent?.originalConfig ?? parent?.config
+		return (config ?? state.config).options
 	}
 
 	/** Regional slots of a catalogue LoRa decoder (or its placement); undefined otherwise. */

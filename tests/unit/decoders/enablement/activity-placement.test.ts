@@ -34,6 +34,7 @@ import {
 	planPlacements,
 } from "../../../../src/decoders/enablement/placement.js"
 import { pagingRasterRanges } from "../../../../src/decoders/enablement/paging-plan.js"
+import { dsdChallengeKey } from "../../../../src/decoders/enablement/dsd-activity.js"
 
 const RATE = 1_024_000
 // Off-raster, inside the EU UHF paging band (6.25 kHz raster).
@@ -73,6 +74,7 @@ const dsd = (over: Partial<PlannerDecoder> = {}): PlannerDecoder =>
 		channelBandwidthHz: 12_500,
 		channelPlacements: true,
 		pagingRaster: [],
+		bandRegion: "EU",
 		...over,
 	})
 const source = (over: Partial<PlannerSource> = {}): PlannerSource => ({
@@ -313,6 +315,118 @@ describe("activity ranking: slots and order", () => {
 		})
 	})
 
+	// R2: energy centres in ISM/SRD or LoRa ranges, or outside every
+	// digital-voice band plan, never become dsd-fme activity slots.
+	it.each([
+		[868_950_000, [868_900_000, 869_525_000, 868_100_000], "EU"],
+		[433_920_000, [433_875_000, 434_000_000], "EU"],
+		[915_000_000, [914_900_000, 915_125_000], "US"],
+		[466_100_000, [466_050_000], undefined],
+	] as const)(
+		"drops observed centres around %d Hz outside digital-voice band plans",
+		(centre, observedHz, bandRegion) => {
+			const input = base(
+				[
+					bandRegion
+						? dsd({ bandRegion })
+						: (Object.fromEntries(
+								Object.entries(dsd()).filter(([k]) => k !== "bandRegion"),
+							) as PlannerDecoder),
+				],
+				[source({ centreHz: centre, sampleRateHz: 2_400_000 })],
+				{ vfo: { sourceId: "s", frequencyHz: centre } },
+			)
+			const act = {
+				...activity(),
+				observed: [{ epoch: EPOCH, channelsHz: [...observedHz] }],
+			}
+			const hot = new Map(
+				observedHz.map(hz => [
+					hz,
+					{ state: "hot" as const, score: 102, live: true },
+				]),
+			)
+			const out = planWith(input, act, hot)
+			for (const hz of observedHz)
+				expect(channels(out, "dsd")).not.toContain(hz)
+			expect(out.wanted.some(p => p.origin === "activity")).toBe(false)
+		},
+	)
+
+	it("keeps observed centres inside a digital-voice range next to an ISM one", () => {
+		// 433.025 MHz is 70 cm amateur (DMR, D-STAR), 433.100 MHz is 433 MHz ISM.
+		const input = base(
+			[dsd()],
+			[source({ centreHz: 433_050_000, sampleRateHz: 1_024_000 })],
+			{ vfo: { sourceId: "s", frequencyHz: 433_000_000 } },
+		)
+		const act = {
+			...activity(),
+			observed: [{ epoch: EPOCH, channelsHz: [433_025_000, 433_100_000] }],
+		}
+		const out = channels(planWith(input, act), "dsd")
+		expect(out).toContain(433_025_000)
+		expect(out).not.toContain(433_100_000)
+	})
+
+	// US/CA 700/800/900 MHz land mobile is a digital-voice range: a P25
+	// candidate next to the VFO keeps its slot.
+	it.each([
+		[851_100_000, 851_150_000, "US"],
+		[851_100_000, 851_150_000, "CA"],
+		[770_000_000, 770_012_500, "US"],
+		[936_000_000, 936_012_500, "CA"],
+	] as const)(
+		"keeps an observed centre near VFO %d Hz at %d Hz in %s land mobile",
+		(vfoHz, candidateHz, bandRegion) => {
+			const input = base(
+				[dsd({ bandRegion, protocols: ["p25p1"] })],
+				[source({ centreHz: vfoHz, sampleRateHz: 2_400_000 })],
+				{ vfo: { sourceId: "s", frequencyHz: vfoHz } },
+			)
+			const act = {
+				...activity(),
+				observed: [{ epoch: EPOCH, channelsHz: [candidateHz] }],
+			}
+			const hot = new Map([
+				[candidateHz, { state: "hot" as const, score: 102, live: true }],
+			])
+			const out = planWith(input, act, hot)
+			expect(channels(out, "dsd")).toEqual([vfoHz, candidateHz])
+			expect(
+				out.wanted.some(
+					p => p.origin === "activity" && p.channelHz === candidateHz,
+				),
+			).toBe(true)
+		},
+	)
+
+	it("land mobile 800 MHz edges: 869 MHz is in, one 6.25 kHz step past it and the EU are out", () => {
+		const centreHz = 869_000_000
+		const plan = (bandRegion: "US" | "EU", candidateHz: number) =>
+			channels(
+				planWith(
+					base(
+						[dsd({ bandRegion, protocols: ["p25p1"] })],
+						[source({ centreHz, sampleRateHz: 2_400_000 })],
+						{ vfo: { sourceId: "s", frequencyHz: 868_987_500 } },
+					),
+					{
+						...activity(),
+						observed: [{ epoch: EPOCH, channelsHz: [candidateHz] }],
+					},
+					new Map([
+						[candidateHz, { state: "hot" as const, score: 102, live: true }],
+					]),
+				),
+				"dsd",
+			)
+		expect(plan("US", 869_000_000)).toContain(869_000_000)
+		expect(plan("US", 869_006_250)).not.toContain(869_006_250)
+		// The EU has no 851-869 MHz land mobile range (and 863-870 MHz is ISM).
+		expect(plan("EU", 869_000_000)).not.toContain(869_000_000)
+	})
+
 	it("filters observed centres by epoch, band, reach, explicit channels and budget", () => {
 		const far = 466_037_500
 		const input = base(
@@ -547,6 +661,7 @@ function simulate(
 		status?: ActivitySnapshot["status"]
 	}[],
 	observed?: PlannerActivity["observed"],
+	extra: Partial<PlannerActivity> = {},
 ) {
 	let incumbents: ActivityIncumbent[] = []
 	const since = new Map<string, number>()
@@ -557,6 +672,7 @@ function simulate(
 		const plan = planWith(
 			input,
 			activity({
+				...extra,
 				nowMonoMs: step.atMs,
 				...(observed ? { observed } : {}),
 				incumbents,
@@ -602,17 +718,22 @@ describe("activity ranking: bounded moves", () => {
 		const hot = new Map([
 			[far, { state: "hot" as const, score: 102, live: true }],
 		])
-		const { plans, moves } = simulate(
-			input,
-			[
-				{ atMs: 123.7, heat: new Map() },
-				{ atMs: 20_122.7, heat: hot },
-				{ atMs: 20_123.7, heat: hot },
-				{ atMs: 20_124.7, heat: hot },
-				{ atMs: 60_317.3, heat: hot, status: "stale" },
-			],
-			[{ epoch: EPOCH, channelsHz: [a, b, far] }],
-		)
+		const steps = [
+			{ atMs: 123.7, heat: new Map() },
+			{ atMs: 20_122.7, heat: hot },
+			{ atMs: 20_123.7, heat: hot },
+			{ atMs: 20_124.7, heat: hot },
+			{ atMs: 60_317.3, heat: hot, status: "stale" as const },
+		]
+		const observedAll = [{ epoch: EPOCH, channelsHz: [a, b, far] }]
+		// R2: without passing the challenge hysteresis the hot channel never moves a slot.
+		const unconfirmed = simulate(input, steps, observedAll)
+		expect(unconfirmed.moves).toEqual([])
+		for (const step of unconfirmed.plans)
+			expect(channels(step.plan, "dsd")).toEqual([CENTRE, a, b])
+		const { plans, moves } = simulate(input, steps, observedAll, {
+			confirmedChallengers: [dsdChallengeKey("dsd", "s", far)],
+		})
 		expect(channels(plans[0]!.plan, "dsd")).toEqual([CENTRE, a, b])
 		expect(channels(plans[1]!.plan, "dsd")).not.toContain(far)
 		expect(channels(plans[2]!.plan, "dsd")).toContain(far)
@@ -667,6 +788,7 @@ describe("activity ranking: bounded moves", () => {
 					dwellSinceMonoMs: 0,
 				})),
 				observed: [{ epoch: EPOCH, channelsHz: [a, b, far] }],
+				confirmedChallengers: [dsdChallengeKey("dsd", "s", far)],
 				recentMoves: Array.from({ length: 6 }, (_, i) => ({
 					sourceId: "s",
 					atMonoMs: 80_000 + i,

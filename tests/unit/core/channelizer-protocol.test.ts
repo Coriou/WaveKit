@@ -179,6 +179,13 @@ describe("channelizer protocol v1", () => {
 				inputSamples: fc.nat(),
 				discardedBytes: fc.constantFrom(0, 1),
 			}),
+			fc.record({
+				v: fc.constant(1),
+				type: fc.constant("progress"),
+				generation: gen,
+				inputSamples: fc.nat(),
+				inputBytes: fc.nat(),
+			}),
 		)
 		fc.assert(
 			fc.property(event, e => {
@@ -213,6 +220,10 @@ describe("channelizer protocol v1", () => {
 			'{"generation":7,"id":"a","reason":"requested","type":"closed","v":1}',
 			'{"generation":7,"id":"a","reason":"client-gone","type":"closed","v":1}',
 			'{"discardedBytes":1,"generation":7,"inputSamples":2048000,"type":"input-eof","v":1}',
+			// Main-loop liveness after work, at most every 100 ms (`maybe_progress`).
+			'{"generation":7,"inputBytes":8192,"inputSamples":4096,"type":"progress","v":1}',
+			'{"generation":7,"inputBytes":3,"inputSamples":1,"type":"progress","v":1}',
+			'{"generation":7,"inputBytes":0,"inputSamples":0,"type":"progress","v":1}',
 		]
 		for (const line of lines)
 			expect(parseEventLine(line), line).toMatchObject({ ok: true })
@@ -237,6 +248,12 @@ describe("channelizer protocol v1", () => {
 			'{"v":1,"type":"discontinuity","id":"a","generation":1,"sampleIndex":0,"droppedSamples":0,"cause":"other"}',
 			'{"v":1,"type":"closed","id":"bad id","generation":1,"reason":"requested"}',
 			'{"v":1,"type":"input-eof","generation":1,"inputSamples":1.5,"discardedBytes":0}',
+			'{"v":1,"type":"progress","generation":1}',
+			'{"v":1,"type":"progress","generation":1,"inputSamples":-1,"inputBytes":0}',
+			'{"v":1,"type":"progress","generation":1,"inputSamples":0}',
+			'{"v":1,"type":"progress","generation":1,"inputSamples":0,"inputBytes":-1}',
+			'{"v":1,"type":"progress","generation":1,"inputSamples":0,"inputBytes":1.5}',
+			'{"v":1,"type":"progress","generation":1,"inputSamples":0,"inputBytes":0,"channels":[]}',
 		]
 		for (const line of bad) expect(parseEventLine(line).ok, line).toBe(false)
 	})

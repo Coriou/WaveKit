@@ -45,6 +45,7 @@ import type {
 	ActivityMove,
 	PlacementActivity,
 } from "./activity-plan.js"
+import { dsdActivitySlotAllowed, dsdChallengeKey } from "./dsd-activity.js"
 
 /** Single-channel audio adapters; AIS/VDL2 and rtl433 retain their protocol windows. */
 export const VFO_CHANNEL_TYPES: readonly string[] = [
@@ -171,9 +172,10 @@ const bandFree = (d: PlannerDecoder): boolean =>
 	d.startMode === "operator" ||
 	d.bandSuspension === false
 
-/** The band has at least one target or range (otherwise unknown). */
+/** The band has at least one target or range, or is known to be nowhere (otherwise unknown). */
 function bandKnown(d: PlannerDecoder): boolean {
 	return (
+		d.band?.nowhere === true ||
 		(Array.isArray(d.band?.targetsHz) && d.band.targetsHz.length > 0) ||
 		(Array.isArray(d.band?.rangesHz) && d.band.rangesHz.length > 0)
 	)
@@ -850,7 +852,9 @@ export const planPlacements: PlacementPlanner = input => {
 						!Number.isInteger(actualHz) ||
 						!positive(actualHz) ||
 						!Number.isInteger(hz) ||
-						!positive(hz)
+						!positive(hz) ||
+						// R2: energy centres become slots only in digital-voice band plans.
+						!dsdActivitySlotAllowed(d.bandRegion, hz)
 					)
 						return
 					// A centre within bandwidth / 2 is already covered. Prefer existing
@@ -982,12 +986,25 @@ export const planPlacements: PlacementPlanner = input => {
 				})
 			}
 		}
-		const sorted = [...chosen.values()].sort(
-			(a, b) =>
-				originOrder[a.origin] - originOrder[b.origin] ||
-				(a.origin === "band" ? (a.hz ?? 0) - (b.hz ?? 0) : a.index - b.index) ||
-				a.source.order - b.source.order,
-		)
+		const rankable = (c: Candidate) =>
+			c.origin === "bandplan" && c.reach === "channel" && c.hz !== null
+		// R2: a dsd-fme activity slot sits only in a digital-voice band plan
+		// range, never in ISM/SRD or LoRa ranges, whatever listed the channel.
+		const slotDropped = (c: Candidate) =>
+			act !== undefined &&
+			d.type === "dsd-fme" &&
+			rankable(c) &&
+			!dsdActivitySlotAllowed(d.bandRegion, c.hz!)
+		const sorted = [...chosen.values()]
+			.filter(c => !slotDropped(c))
+			.sort(
+				(a, b) =>
+					originOrder[a.origin] - originOrder[b.origin] ||
+					(a.origin === "band"
+						? (a.hz ?? 0) - (b.hz ?? 0)
+						: a.index - b.index) ||
+					a.source.order - b.source.order,
+			)
 		const emit = (
 			c: Candidate,
 			i: number,
@@ -1018,14 +1035,9 @@ export const planPlacements: PlacementPlanner = input => {
 		// are one ranked set per source; the configured, band and VFO channels
 		// stay mandatory (3.18 VFO rules are applied above, before this).
 		const ranked =
-			act && isActivityDecoder(d.type)
-				? sorted.filter(
-						c =>
-							c.origin === "bandplan" && c.reach === "channel" && c.hz !== null,
-					)
-				: []
+			act && isActivityDecoder(d.type) ? sorted.filter(rankable) : []
 		if (act && ranked.length) {
-			const firm = sorted.filter(c => !ranked.includes(c))
+			const firm = sorted.filter(c => !rankable(c))
 			const local: ActivityGroup[] = []
 			for (const c of ranked) {
 				if (local.some(g => g.source === c.source)) continue
@@ -1231,6 +1243,9 @@ export const planPlacements: PlacementPlanner = input => {
 			next = next === null ? at : Math.min(next, at)
 	}
 	const demotions = new Map(act.demotions?.map(d => [d.key, d.untilMonoMs]))
+	const confirmed = new Set(
+		Array.isArray(act.confirmedChallengers) ? act.confirmedChallengers : [],
+	)
 	groups.forEach((g, i) => {
 		const times = (windowMoves.get(g.source.id) ?? []).sort((a, b) => a - b)
 		if (g.d.type === "dsd-fme")
@@ -1278,6 +1293,14 @@ export const planPlacements: PlacementPlanner = input => {
 		const selection = selectChannels({
 			order: activityOrder(g.order, effectiveSnapshot),
 			demotedHz,
+			// R2 hysteresis (dsd-activity.ts): a dsd-fme challenger moves a slot
+			// only once its energy passed the repeat and span bounds.
+			...(g.d.type === "dsd-fme"
+				? {
+						canChallenge: (hz: number) =>
+							confirmed.has(dsdChallengeKey(g.d.id, g.source.id, hz)),
+					}
+				: {}),
 			ranked: g.snapshot !== null,
 			activity: effectiveSnapshot
 				? new Map(effectiveSnapshot.channels.map(c => [c.hz, c]))

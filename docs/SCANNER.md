@@ -156,22 +156,30 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 
 Stored band plans use a writer lock in the state directory. After an unclean stop it is reclaimed automatically ([After a crash or power cut](DOCKER-SETUP.md#after-a-crash-or-power-cut)); a lock held by another live core is never taken.
 
-`GET /api/scanner/bandplans` lists the effective plans. Under the default band-plan stack these are the built-in plans for the effective region (`region` config; EU, or US/CA → US):
+`GET /api/scanner/bandplans` lists the effective plans. Under the default band-plan stack these are the built-in plans for the effective region (`region` config; EU, or US/CA → US; other regions get the `all` plans plus their own APRS channel):
 
-| Id                | Region | Range (MHz)       | Rasters               | OBW classes (kHz) | Protocols                             |
-| ----------------- | ------ | ----------------- | --------------------- | ----------------- | ------------------------------------- |
-| `pmr446`          | EU     | 446.0–446.2       | 12.5 kHz              | 9, 11             | analog-fm, dmr, dpmr                  |
-| `dpmr446`         | EU     | 446.1–446.2       | 6.25 kHz              | 4.5               | dpmr, nxdn48                          |
-| `uhf-land-mobile` | all    | 400–470           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | dmr, analog-fm, p25p1, nxdn48, nxdn96 |
-| `vhf-land-mobile` | all    | 136–174           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | as UHF, plus pocsag                   |
-| `amateur-2m`      | EU/US  | 144–146 / 144–148 | 12.5 / 15 and 20 kHz  | 11, 16            | analog-fm, aprs, dstar, dmr, ysf      |
-| `amateur-70cm`    | EU/US  | 430–440 / 420–450 | 12.5 and 25 kHz       | 9, 11, 16         | analog-fm, dstar, dmr, ysf, p25p1     |
-| `aprs`            | EU/US  | 144.800 / 144.390 | one channel           | 16                | aprs                                  |
-| `ism-433`         | EU     | 433.05–434.79     | none                  | none              | ism                                   |
-| `ism-868`         | EU     | 863–870           | none                  | none              | ism                                   |
-| `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
-| `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
-| `adsb`            | all    | 1089–1091         | none                  | none              | none (readsb decodes it)              |
+| Id                       | Region | Range (MHz)       | Rasters               | OBW classes (kHz) | Protocols                             |
+| ------------------------ | ------ | ----------------- | --------------------- | ----------------- | ------------------------------------- |
+| `pmr446`                 | EU     | 446.0–446.2       | 12.5 kHz              | 9, 11             | analog-fm, dmr, dpmr                  |
+| `dpmr446`                | EU     | 446.1–446.2       | 6.25 kHz              | 4.5               | dpmr, nxdn48                          |
+| `uhf-land-mobile`        | all    | 400–470           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | dmr, analog-fm, p25p1, nxdn48, nxdn96 |
+| `vhf-land-mobile`        | all    | 136–174           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | as UHF, plus pocsag                   |
+| `amateur-2m`             | EU/US  | 144–146 / 144–148 | 12.5 / 15 and 20 kHz  | 11, 16            | analog-fm, aprs, dstar, dmr, ysf      |
+| `amateur-70cm`           | EU/US  | 430–440 / 420–450 | 12.5 and 25 kHz       | 9, 11, 16         | analog-fm, dstar, dmr, ysf, p25p1     |
+| `aprs`                   | EU/US  | 144.800 / 144.390 | one channel           | 16                | aprs                                  |
+| `aprs`                   | AU/NZ  | 145.175 / 144.575 | one channel           | 16                | aprs                                  |
+| `aprs`                   | JP/CN  | 144.660 / 144.640 | one channel           | 16                | aprs                                  |
+| `land-mobile-700-base`   | US/CA  | 769–775           | 6.25 and 12.5 kHz     | 9, 11, 4.5        | dmr, p25p1, p25p2, nxdn48, nxdn96     |
+| `land-mobile-700-mobile` | US/CA  | 799–805           | 6.25 and 12.5 kHz     | 9, 11, 4.5        | as 700 MHz base                       |
+| `land-mobile-800-mobile` | US/CA  | 806–824           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | as 700 MHz, plus analog-fm            |
+| `land-mobile-800-base`   | US/CA  | 851–869           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | as 800 MHz mobile                     |
+| `land-mobile-900-mobile` | US/CA  | 896–901           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | as 800 MHz mobile                     |
+| `land-mobile-900-base`   | US/CA  | 935–940           | 12.5 and 6.25 kHz     | 9, 11, 4.5        | as 800 MHz mobile                     |
+| `ism-433`                | EU     | 433.05–434.79     | none                  | none              | ism                                   |
+| `ism-868`                | EU     | 863–870           | none                  | none              | ism                                   |
+| `pager-vhf`              | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
+| `marine-vhf`             | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
+| `adsb`                   | all    | 1089–1091         | none                  | none              | none (readsb decodes it)              |
 
 The `adsb` band (1090 MHz ADS-B, every region) shows in the band view as an air band with
 mode `raw` and the skip `Decoded elsewhere · readsb`: a sweep with `skipBandPlanSkips` leaves

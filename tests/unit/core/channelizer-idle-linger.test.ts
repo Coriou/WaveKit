@@ -256,7 +256,7 @@ it("a pending open cancels the linger until acquisition settles", async () => {
 	expect(connected).toBeDefined()
 	connected?.(new PassThrough())
 	expect((await pending).ok).toBe(true)
-	expect(vi.getTimerCount()).toBe(0)
+	expect(vi.getTimerCount()).toBe(1) // the running generation's watchdog; no linger timer
 })
 
 it("a last channel dying starts the linger", async () => {
@@ -297,7 +297,7 @@ it("a reopen waiting for close acknowledgement preserves the engine past idle ex
 	expect((await pending).ok).toBe(true)
 	await released
 	expect(createProcess).toHaveBeenCalledTimes(1)
-	expect(vi.getTimerCount()).toBe(0)
+	expect(vi.getTimerCount()).toBe(1) // the running generation's watchdog; no linger timer
 })
 
 it("a cancelled close waiter restores the idle linger", async () => {

@@ -7,7 +7,10 @@ import {
 	ChannelizerConfigSchema,
 	type SourceCaps,
 } from "../../../src/config.js"
-import { ChannelizerManager } from "../../../src/core/channelizer/channelizer-manager.js"
+import {
+	ChannelizerManager,
+	WEDGE_MS,
+} from "../../../src/core/channelizer/channelizer-manager.js"
 import type {
 	ChannelizerProcessLike,
 	ChannelizerProcessOptions,
@@ -69,8 +72,23 @@ class Process extends EventEmitter implements ChannelizerProcessLike {
 		this.sent.push(r)
 		this.sendHook(this, r)
 	}
+	private heartbeat: ReturnType<typeof setTimeout> | undefined
+	/** Reports `progress` every 100 ms until stopped, like a runtime whose main loop keeps working (planner polls). */
+	live() {
+		this.heartbeat = setTimeout(() => {
+			this.event({
+				v: 1,
+				type: "progress",
+				generation: this.generation,
+				inputSamples: 0,
+				inputBytes: 0,
+			})
+			this.live()
+		}, 100)
+	}
 	stop(): Promise<void> {
 		this.stops++
+		clearTimeout(this.heartbeat)
 		this.input.destroy()
 		this.emit("exit", 0, null)
 		return Promise.resolve()
@@ -159,6 +177,12 @@ function harness() {
 	}
 }
 const tick = () => vi.advanceTimersByTimeAsync(0)
+/** Advances fake time, then lets the watchdog's setImmediate verdict (real) run. */
+const settle = async (ms: number) => {
+	await vi.advanceTimersByTimeAsync(ms)
+	await new Promise(done => setImmediate(done))
+	await tick()
+}
 beforeEach(() =>
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] }),
 )
@@ -231,6 +255,7 @@ describe("channelizer acquisition ownership", () => {
 			if (r.type === "open" && p.generation === 1 && p.opens.length === 2)
 				p.rejected(r)
 		}
+		processes[0]!.live() // still preparing the unanswered open: the watchdog keeps it
 		const result = acquire()
 		await vi.advanceTimersByTimeAsync(4000)
 		sources.current = caps(2_400_000)
@@ -325,15 +350,18 @@ describe("channelizer acquisition ownership", () => {
 		await tick()
 		expect(connect).not.toHaveBeenCalled()
 		expect(alive.stream.destroyed).toBe(false)
-		await vi.advanceTimersByTimeAsync(250)
+		await settle(250)
 		expect(await result).toMatchObject({
 			ok: false,
 			detail: "channel request cancelled",
 		})
+		// The unconfirmed close alone retires nothing; the silent process is retired once it owed it for WEDGE_MS.
+		expect(alive.stream.destroyed).toBe(false)
+		await settle(WEDGE_MS - 250 - 1)
+		expect(invalidations).toEqual([])
+		await settle(1)
 		expect(alive.stream.destroyed).toBe(true)
-		expect(invalidations).toEqual([
-			["rtl", 1, ["alive-g1"], "cancel-close-unconfirmed"],
-		])
+		expect(invalidations).toEqual([["rtl", 1, ["alive-g1"], "unresponsive"]])
 		expect(p.stops).toBe(1)
 		expect(p.opens).toHaveLength(2) // canceled target never replayed
 	})
@@ -454,37 +482,33 @@ describe("channelizer acquisition ownership", () => {
 		})
 		expect(alive.stream.destroyed).toBe(false)
 	})
-	it("timeout retires every existing grant once and ignores retired-generation late events on reconnect", async () => {
-		const { h, m, sources, processes, connect, acquire } = harness()
+	it("a silent process owing an open reply retires every grant once after WEDGE_MS and its late events are ignored", async () => {
+		const { h, m, processes, connect, acquire } = harness()
 		const alive = await acquire("alive")
 		if (!alive.ok) throw new Error("expected grant")
 		const events: unknown[] = []
 		m.on("channel-invalidated", (...args) => events.push(args))
-		h.onSend = () => {}
-		const result = acquire()
-		await vi.advanceTimersByTimeAsync(5000)
-		expect(await result).toMatchObject({
-			ok: false,
-			reasonCode: "channelizer-unavailable",
-		})
-		expect(events).toEqual([["rtl", 1, ["alive-g1"], "open-timeout"]])
-		expect(alive.stream.destroyed).toBe(true)
-		expect(processes).toHaveLength(1) // retirement itself never respawns
+		// Generation 1 answers nothing more; its successor answers.
 		h.onSend = (p, r) => {
-			if (r.type === "close") p.closed(r.id)
+			if (p.generation === 2 && r.type === "open") p.opened(r)
 		}
-		sources.emit("disconnected", "rtl")
-		const replacement = acquire()
-		await tick()
+		const result = acquire()
+		await settle(WEDGE_MS - 1)
+		expect(events).toEqual([])
+		await settle(1)
+		expect(events).toEqual([["rtl", 1, ["alive-g1"], "unresponsive"]])
+		expect(alive.stream.destroyed).toBe(true)
+		expect(processes[0]!.stops).toBe(1)
+		// The superseded acquisition retries once against the next generation.
+		expect(await result).toMatchObject({ ok: true, generation: 2 })
 		const old = processes[0]!
 		old.opened(old.opens[1]!)
 		old.rejected(old.opens[1]!)
 		old.closed(old.opens[1]!.id)
 		await tick()
-		expect(connect).toHaveBeenCalledTimes(1) // only original alive channel
-		const fresh = processes[1]!
-		fresh.opened(fresh.opens[0]!)
-		expect(await replacement).toMatchObject({ ok: true, generation: 2 })
+		expect(connect).toHaveBeenCalledTimes(2) // alive and the generation-2 grant only
+		expect(processes).toHaveLength(2)
+		expect(events).toHaveLength(1)
 	})
 	it("destroy wakes busy backoff, invalidates active grants once, and never replays", async () => {
 		const { h, m, processes, acquire } = harness()
@@ -531,7 +555,7 @@ describe("channelizer acquisition ownership", () => {
 		expect(processes[0]!.stops).toBe(1)
 		expect(m.currentGeneration("rtl")).toBe(1)
 	})
-	it("retires an unconfirmed release once, unblocks reuse, and reports collateral cause", async () => {
+	it("retires a silent process owing a release once after WEDGE_MS, unblocks reuse, and reports the cause", async () => {
 		const { h, m, processes, acquire } = harness()
 		const alive = await acquire("alive")
 		const old = await acquire()
@@ -545,10 +569,13 @@ describe("channelizer acquisition ownership", () => {
 		const replacement = acquire()
 		await tick()
 		expect(processes).toHaveLength(1)
-		await vi.advanceTimersByTimeAsync(250)
-		await release
+		await settle(250)
+		await release // the caller's wait stays bounded; the id stays fenced
+		expect(events).toEqual([])
+		expect(alive.stream.destroyed).toBe(false)
+		await settle(WEDGE_MS - 250)
 		expect(await replacement).toMatchObject({ ok: true, generation: 2 })
-		expect(events).toEqual([["rtl", 1, ["alive-g1"], "close-unconfirmed"]])
+		expect(events).toEqual([["rtl", 1, ["alive-g1"], "unresponsive"]])
 		expect(alive.stream.destroyed).toBe(true)
 		expect(processes[0]!.stops).toBe(1)
 	})

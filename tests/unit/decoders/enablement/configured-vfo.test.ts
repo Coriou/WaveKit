@@ -20,6 +20,7 @@ import {
 } from "../../../../src/decoders/enablement/placement.js"
 import { createVfoTracker } from "../../../../src/decoders/enablement/channel-sources.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
+import type { BandRegion } from "@wavekit/api-types"
 
 let manager: DecoderManager | undefined
 afterEach(async () => {
@@ -34,12 +35,14 @@ function setup({
 	vfo = 446_056_000,
 	options = {},
 	useChannelizer = false,
+	bandRegion,
 }: {
 	type?: string
 	channelizer?: boolean
 	vfo?: number | null
 	options?: Record<string, unknown>
 	useChannelizer?: boolean
+	bandRegion?: BandRegion
 } = {}) {
 	vi.useFakeTimers()
 	const logger = pino({ level: "silent" })
@@ -96,6 +99,9 @@ function setup({
 		vfo === null ? null : { sourceId: "rtl", frequencyHz: vfo }
 	manager = new DecoderManager(registry, new FanoutManager(logger), logger, {
 		validateVersions: false,
+		...(bandRegion
+			? { bandRegion: { code: bandRegion, source: "configured" as const } }
+			: {}),
 		enablement: {
 			planner: planPlacements,
 			gate,
@@ -391,11 +397,13 @@ async function multimonAt(
 	hz: number,
 	modes: readonly string[] | undefined,
 	rate = 2_400_000,
+	bandRegion?: BandRegion,
 ) {
 	const f = setup({
 		type: "multimon-ng",
 		vfo: hz,
 		...(modes ? { options: { modes: [...modes] } } : {}),
+		...(bandRegion ? { bandRegion } : {}),
 	})
 	f.sources.caps.set("rtl", { ...iqCaps(rate), centerFreq: hz })
 	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: hz })
@@ -403,7 +411,7 @@ async function multimonAt(
 	return { f, status: f.manager.getStatus("configured") }
 }
 
-// The paging band applies only when every mode is a paging mode.
+// Paging modes plus AFSK1200 and DTMF: the union of their band-plan services.
 const MIXED = [
 	"POCSAG512",
 	"POCSAG1200",
@@ -429,24 +437,143 @@ it.each([
 	},
 )
 
+// R3: EAS is heard on the US/Canadian weather radio band and FSK9600 on the
+// amateur 2 m / 70 cm plans (ITU-wide ranges where the catalogue has none).
 it.each([
-	[["AFSK1200"], 432_500_000],
-	[["FSK9600"], 432_500_000],
-	[["EAS"], 1_090_000_000],
-	[["DTMF"], 432_500_000],
+	[["EAS"], 1_090_000_000, "US"],
+	[["EAS"], 162_475_000, "EU"],
+	[["EAS"], 1_090_000_000, "JP"],
+	[["FSK9600"], 1_090_000_000, "EU"],
+	[["FSK9600"], 162_475_000, "JP"],
+	[["EAS", "DTMF"], 868_950_000, "EU"],
+	[["AFSK1200", "EAS"], 1_090_000_000, "US"],
+] as const)(
+	"multimon-ng with modes %j is suspended out of band at %d Hz in %s",
+	async (modes, hz, region) => {
+		const { f, status } = await multimonAt(hz, modes, 2_400_000, region)
+		expect(status?.running).toBe(false)
+		expect(status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
+
+it.each([
+	[["EAS"], 162_475_000, "US"],
+	[["EAS"], 162_550_000, "CA"],
+	[["FSK9600"], 432_500_000, "EU"],
+	[["FSK9600"], 145_050_000, "US"],
+	[["FSK9600"], 144_660_000, "JP"],
+	[["AFSK1200"], 145_825_000, "AU"],
+	[["AFSK1200"], 437_800_000, "EU"],
+	[["POCSAG1200", "AFSK1200"], 931_000_000, "US"],
+	[["AFSK1200", "EAS"], 162_400_000, "US"],
+] as const)(
+	"multimon-ng with modes %j is admitted in band at %d Hz in %s",
+	async (modes, hz, region) => {
+		const { status } = await multimonAt(hz, modes, 2_400_000, region)
+		expect(status?.running).toBe(true)
+		expect(status?.bandAssessment?.verdict).toBe("in-band")
+		expect(status?.suspension).toBeUndefined()
+	},
+)
+
+// R3: AFSK1200 is heard on APRS, amateur and satellite packet ranges, DTMF on analog FM voice ranges and
+// POCSAG/FLEX on paging ranges; elsewhere the decoder is out of band.
+it.each([
+	[["AFSK1200"], 1_090_000_000],
+	[["AFSK1200"], 868_950_000],
+	[["AFSK1200"], 162_475_000],
 	[["DTMF"], 1_090_000_000],
-	[["DTMF"], 868_000_000],
+	[["DTMF"], 868_950_000],
+	[["AFSK1200", "DTMF"], 868_950_000],
 	[MIXED, 1_090_000_000],
+	[MIXED, 868_950_000],
+] as const)(
+	"multimon-ng with modes %j is suspended out of band at %d Hz",
+	async (modes, hz) => {
+		const { f, status } = await multimonAt(hz, modes)
+		expect(status?.running).toBe(false)
+		expect(status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
+
+it.each([
+	[["AFSK1200"], 144_800_000],
+	[["AFSK1200", "POCSAG1200"], 144_800_000],
+	[["DTMF"], 432_500_000],
+	[["DTMF"], 156_800_000],
 	[MIXED, 432_500_000],
 ] as const)(
-	"multimon-ng with modes %j keeps an unknown band and follows the VFO at %d Hz",
+	"multimon-ng with modes %j is admitted in band at %d Hz",
 	async (modes, hz) => {
 		const { status } = await multimonAt(hz, modes)
 		expect(status?.running).toBe(true)
-		expect(status?.bandAssessment?.verdict).toBe("unknown")
+		expect(status?.bandAssessment?.verdict).toBe("in-band")
+		expect(status?.suspension).toBeUndefined()
+	},
+)
+
+// R3: every region publishes a 2 m APRS channel, so AFSK1200 is in band there
+// and suspended at 1090 MHz everywhere (never an unknown band).
+it.each([
+	["EU", 144_800_000],
+	["US", 144_390_000],
+	["CA", 144_390_000],
+	["AU", 145_175_000],
+	["NZ", 144_575_000],
+	["JP", 144_660_000],
+	["CN", 144_640_000],
+] as const)(
+	"multimon-ng AFSK1200 in %s: in band at %d Hz, out of band at 1090 MHz",
+	async (region, aprsHz) => {
+		const away = await multimonAt(
+			1_090_000_000,
+			["AFSK1200"],
+			2_400_000,
+			region,
+		)
+		expect(away.status?.running).toBe(false)
+		expect(away.status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(away.status?.bandAssessment?.region?.code).toBe(region)
+		expect(away.status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		await manager?.destroy()
+		manager = undefined
+		const home = await multimonAt(aprsHz, ["AFSK1200"], 2_400_000, region)
+		expect(home.status?.running).toBe(true)
+		expect(home.status?.bandAssessment?.verdict).toBe("in-band")
+	},
+)
+
+it.each([
+	[["AFSK1200", "DTMF"], false],
+	[["AFSK1200", "DTMF"], true],
+	[["POCSAG1200"], false],
+	[["POCSAG1200"], true],
+	[undefined, false],
+] as const)(
+	"an explicit channel pin overrides the mode band check of %j at 868.95 MHz (configured band: %s)",
+	async (modes, withBand) => {
+		const hz = 868_950_000
+		const f = setup({
+			type: "multimon-ng",
+			vfo: hz,
+			options: { ...(modes ? { modes: [...modes] } : {}), channelHz: hz },
+		})
+		if (withBand) f.decoder().band = { targetsHz: [hz], basis: "configured" }
+		f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: hz })
+		f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: hz })
+		await f.manager.startAll()
+		const status = f.manager.getStatus("configured")
+		expect(status?.bandAssessment?.verdict).toBe(
+			withBand ? "in-band" : "unknown",
+		)
+		expect(status?.running).toBe(true)
 		expect(status?.suspension).toBeUndefined()
 		expect(status?.placements).toEqual([
-			expect.objectContaining({ origin: "vfo", channelHz: hz }),
+			expect.objectContaining({ origin: "configured", primary: true }),
 		])
 	},
 )
@@ -454,7 +581,7 @@ it.each([
 it("a mixed mode set covers the paging raster where a paging band is in view", async () => {
 	const { f, status } = await multimonAt(466_103_300, MIXED, 1_024_000)
 	expect(status?.running).toBe(true)
-	expect(status?.bandAssessment?.verdict).toBe("unknown")
+	expect(status?.bandAssessment?.verdict).toBe("in-band")
 	const channels = (status?.placements ?? []).map(p => p.channelHz)
 	expect(channels).toHaveLength(33)
 	expect(status?.placements?.every(p => p.origin === "bandplan")).toBe(true)

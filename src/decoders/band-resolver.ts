@@ -42,6 +42,12 @@ export interface DecoderBandRequirements {
 	 * Applies to targetsHz only.
 	 */
 	followCenter?: true
+	/**
+	 * The band is known but holds no frequency in the region (every service
+	 * the decoder needs is absent from the region's band plan): out of band
+	 * at every centre. Only meaningful without targets or ranges.
+	 */
+	nowhere?: true
 	/** Set when a region-dependent default produced the band. */
 	region?: DecoderBandRegion
 	/** Set when basis is "override". */
@@ -97,6 +103,17 @@ export function assessDecoderBand(
 ): DecoderBandAssessment {
 	const targets = Targets.safeParse(requirements?.targetsHz)
 	const ranges = Ranges.safeParse(requirements?.rangesHz)
+	if (requirements?.nowhere === true && !targets.success && !ranges.success) {
+		// A known band with no frequency here: out of band wherever it is tuned.
+		const center = Hz.safeParse(context.centerHz)
+		return {
+			verdict: "out-of-band",
+			reasonCode: "frequency-out-of-band",
+			basis: requirements.basis,
+			...(requirements.region ? { region: { ...requirements.region } } : {}),
+			...(center.success ? { captureCenterHz: center.data } : {}),
+		}
+	}
 	if (!requirements || (!targets.success && !ranges.success))
 		return { verdict: "unknown", reasonCode: "no-target-frequency" }
 	const declared = {

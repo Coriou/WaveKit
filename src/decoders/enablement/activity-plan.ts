@@ -96,6 +96,12 @@ export interface PlannerActivity {
 	nowMonoMs: number
 	/** Bounded no-sync cooldowns, carried by the manager on the same clock. */
 	demotions?: readonly { key: string; untilMonoMs: number }[]
+	/**
+	 * dsd-fme challengers whose energy passed the challenge hysteresis
+	 * (dsdChallengeKey keys, dsd-activity.ts). Absent: none did, so no dsd-fme
+	 * slot moves; free slots still fill.
+	 */
+	confirmedChallengers?: readonly string[]
 	policy: ActivityPolicy
 	/** The current spectrum epoch of each source; a source without one is unranked. */
 	epochs: readonly ActivityEpoch[]
@@ -429,9 +435,9 @@ export interface SelectionResult {
  *    shrank (budget or eligibility, not a move).
  * 2. Free slots take the best-ranked channels not chosen (a new slot, not a
  *    move).
- * 3. Ranked only: a hot or warm channel outranking an incumbent replaces the
- *    lowest-ranked incumbent that is not live and whose dwell has passed,
- *    while the source has moves left. Each replacement is one move and
+ * 3. Ranked only: a hot or warm channel outranking an incumbent (and passing
+ *    `canChallenge`, when given) replaces the lowest-ranked incumbent that is
+ *    not live and whose dwell has passed, while the source has moves left. Each replacement is one move and
  *    carries the victim it replaces. The nearest-order fallback never
  *    displaces an incumbent, so a ranking outage reshuffles nothing.
  */
@@ -439,6 +445,8 @@ export function selectChannels(args: {
 	order: readonly number[]
 	/** Demoted channels cannot fill a free slot or challenge; incumbents still spend moves. */
 	demotedHz?: ReadonlySet<number>
+	/** Absent: every hot or warm channel may challenge; false: it may not (hysteresis). */
+	canChallenge?: (hz: number) => boolean
 	ranked: boolean
 	activity: ReadonlyMap<number, ChannelActivity> | null
 	count: number
@@ -481,6 +489,7 @@ export function selectChannels(args: {
 			if (has(hz) || args.demotedHz?.has(hz)) continue
 			const a = args.activity.get(hz)
 			if (!a || a.state === "cold") continue
+			if (args.canChallenge && args.canChallenge(hz) !== true) continue
 			const victims = chosen
 				.filter(
 					e =>

@@ -169,11 +169,20 @@ impl<J: Job> DspPool<J> {
 
     /// Runs every job over the block and leaves them in `jobs` in their original order. A job
     /// that panicked on a helper re-raises its panic here, as it would have on the serial loop.
+    #[cfg(test)]
     pub fn run(&mut self, jobs: &mut Vec<J>, i: &[f32], q: &[f32]) {
+        self.run_ticking(jobs, i, q, &mut || {})
+    }
+
+    /// [`run`](Self::run), calling `tick` on the calling thread once per job that finished: after
+    /// each job it ran itself and for each helper result it took. A block therefore reports
+    /// liveness between jobs, never while a job is still running.
+    pub fn run_ticking(&mut self, jobs: &mut Vec<J>, i: &[f32], q: &[f32], tick: &mut dyn FnMut()) {
         let n = jobs.len();
         if self.helpers == 0 || n < 2 {
             for j in jobs.iter_mut() {
                 j.run(i, q);
+                tick();
             }
             return;
         }
@@ -204,12 +213,14 @@ impl<J: Job> DspPool<J> {
             job.run(i, q);
             self.slots[k] = Some(job);
             finished += 1;
+            tick();
         }
         *self.shared.block.lock().unwrap() = None;
         let mut panicked = None;
         {
             let mut results = self.shared.results.lock().unwrap();
             loop {
+                let took = results.len();
                 for done in results.drain(..) {
                     match done {
                         Done::Finished(k, job) => {
@@ -222,8 +233,19 @@ impl<J: Job> DspPool<J> {
                         }
                     }
                 }
+                if took > 0 {
+                    // Ticked without the lock held: a helper never waits on the caller's `tick`.
+                    drop(results);
+                    for _ in 0..took {
+                        tick();
+                    }
+                    results = self.shared.results.lock().unwrap();
+                }
                 if finished == n {
                     break;
+                }
+                if !results.is_empty() {
+                    continue;
                 }
                 results = self.shared.reported.wait(results).unwrap();
             }
@@ -283,6 +305,7 @@ impl<J: Job> Drop for DspPool<J> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
 
     #[test]
@@ -437,6 +460,42 @@ mod tests {
             }
             pool.run(&mut jobs, &i, &q);
             assert_eq!((pool.capacities(), jobs.capacity()), (warm, jobs_cap));
+        }
+    }
+
+    /// Counts itself finished, so a tick can check it never runs ahead of the jobs.
+    struct Counted(Arc<AtomicUsize>, Option<Arc<Barrier>>);
+    impl Job for Counted {
+        fn run(&mut self, _: &[f32], _: &[f32]) {
+            if let Some(b) = &self.1 {
+                b.wait();
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn run_ticking_ticks_once_per_finished_job_on_the_caller() {
+        for helpers in [0, MAX_DSP_HELPERS] {
+            let n = MAX_DSP_HELPERS + 1;
+            // With helpers the jobs meet, so every helper runs one and their results are ticked too.
+            let meet = (helpers > 0).then(|| Arc::new(Barrier::new(n)));
+            let done = Arc::new(AtomicUsize::new(0));
+            let mut jobs: Vec<Counted> = (0..n)
+                .map(|_| Counted(done.clone(), meet.clone()))
+                .collect();
+            let mut pool = DspPool::new(helpers);
+            let caller = thread::current().id();
+            let mut ticks = 0;
+            pool.run_ticking(&mut jobs, &[0.0], &[0.0], &mut || {
+                ticks += 1;
+                assert_eq!(thread::current().id(), caller);
+                assert!(
+                    done.load(Ordering::SeqCst) >= ticks,
+                    "a tick ran before its job finished"
+                );
+            });
+            assert_eq!((ticks, jobs.len()), (n, n), "helpers {helpers}");
         }
     }
 

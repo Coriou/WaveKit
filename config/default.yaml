@@ -582,9 +582,11 @@ csdr:
 # Band suspension works out of the box: decoders without a configured
 # frequency get a built-in band (acarsdec, dsd-fme, direwolf and rtl433 per
 # region, followCenter LoRa from its Meshtastic `region` option, multimon-ng
-# with only paging modes (POCSAG, FLEX) the region's paging bands; with EAS,
-# AFSK1200, FSK9600 or DTMF among its modes it stays unknown and follows the
-# VFO); ADS-B, AIS and VDL2 keep their protocol/decoder defaults. With a
+# the union of its modes' bands: POCSAG/FLEX the region's paging bands,
+# AFSK1200 APRS, amateur 2 m/70 cm and satellite packet, FSK9600 amateur
+# 2 m/70 cm, DTMF analog FM voice, EAS US/CA weather radio; a mode with no
+# band data in the region, or a channel option, leaves it unknown so it
+# follows the VFO); ADS-B, AIS and VDL2 keep their protocol/decoder defaults. With a
 # channelizer, multimon-ng covers the paging raster channels in view, the
 # busiest first while the scanner ranks channel activity. A decoder
 # started by hand (POST /api/decoders/:id/start) is never band-suspended. See docs/API.md "Band check and band suspension".

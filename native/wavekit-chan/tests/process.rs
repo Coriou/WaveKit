@@ -95,7 +95,8 @@ impl Proc {
         c.flush().unwrap();
     }
 
-    /// The next non-`stats` event (a loaded host may cross the 5 s stats tick mid-test).
+    /// The next event that is not telemetry: `stats` (a loaded host may cross the 5 s stats tick mid-test) or
+    /// `progress` (main-loop liveness after work, at most every 100 ms).
     fn next(&self, generation: u64) -> Value {
         loop {
             let e = self
@@ -108,7 +109,7 @@ impl Proc {
                 (Some(1), Some(generation)),
                 "{e}"
             );
-            if e["type"] != "stats" {
+            if e["type"] != "stats" && e["type"] != "progress" {
                 return e;
             }
         }
@@ -340,4 +341,81 @@ fn shutdown_during_cold_work_exits_without_late_open_or_socket() {
     fresh.send(r#"{"v":1,"type":"shutdown"}"#);
     assert_eq!(fresh.next(32)["type"], "closed");
     assert_eq!(fresh.wait_exit(), Some(0));
+}
+
+// Control is applied between input blocks even while stdin never runs dry: a busy band's channel
+// churn (open/close every few seconds) must not wait behind the input for whole seconds. The
+// latencies are printed for the report; the assertion is on order and completeness, not time.
+#[test]
+fn control_round_trips_while_input_floods() {
+    let mut p = Proc::spawn(41);
+    assert_eq!(p.next(41)["type"], "ready");
+    // Three served channels make every block cost real DSP time.
+    let mut readers = Vec::new();
+    for k in 0..3 {
+        p.send(
+            &OPEN
+                .replace("\"ch1\"", &format!("\"busy{k}\""))
+                .replace("162010000", &(162_010_000 + k * 100_000).to_string()),
+        );
+        let e = p.next(41);
+        assert_eq!(e["type"], "opened", "{e}");
+        let mut c = UnixStream::connect(e["socket"].as_str().unwrap()).unwrap();
+        readers.push(thread::spawn(move || {
+            let mut b = vec![0u8; 1 << 16];
+            while matches!(c.read(&mut b), Ok(n) if n > 0) {}
+        }));
+    }
+    let mut stdin = p.stdin.take().unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flooding = stop.clone();
+    let flood = thread::spawn(move || {
+        let block: Vec<u8> = (0..1u32 << 16).map(|k| (k * 7 % 256) as u8).collect();
+        while !flooding.load(Ordering::Relaxed) {
+            if stdin.write_all(&block).is_err() {
+                return;
+            }
+        }
+    });
+    let mut worst = Duration::ZERO;
+    let mut total = Duration::ZERO;
+    const CYCLES: u32 = 20;
+    for k in 0..CYCLES {
+        let id = format!("churn{k}");
+        let started = Instant::now();
+        p.send(&OPEN.replace("\"ch1\"", &format!("\"{id}\"")));
+        let e = p.next(41);
+        assert_eq!(
+            (e["type"].as_str(), e["id"].as_str()),
+            (Some("opened"), Some(id.as_str())),
+            "{e}"
+        );
+        p.send(&format!(r#"{{"v":1,"type":"close","id":"{id}"}}"#));
+        let e = loop {
+            let e = p.next(41);
+            if e["type"] != "discontinuity" {
+                break e;
+            }
+        };
+        assert_eq!(
+            (e["type"].as_str(), e["id"].as_str()),
+            (Some("closed"), Some(id.as_str())),
+            "{e}"
+        );
+        let took = started.elapsed();
+        worst = worst.max(took);
+        total += took;
+    }
+    eprintln!(
+        "control under input flood: {CYCLES} open+close round trips, mean {:?}, worst {:?}",
+        total / CYCLES,
+        worst
+    );
+    stop.store(true, Ordering::Relaxed);
+    p.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(p.wait_exit(), Some(0));
+    flood.join().unwrap();
+    for r in readers {
+        r.join().unwrap();
+    }
 }

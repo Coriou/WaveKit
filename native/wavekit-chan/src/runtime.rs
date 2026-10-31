@@ -38,6 +38,22 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const STATS_EVERY: Duration = Duration::from_secs(5);
+/// The main loop writes `progress` at most this often, and only after it completed more work (an input block, one
+/// channel's step of a block, a control line, a planner poll while an open is being prepared, a reaped channel
+/// writer): the parent's generation watchdog (`WEDGE_MS` = 2000 in channelizer-manager.ts) retires a process only when
+/// it owes work and wrote no line for that long, so 2000 / 100 = 20 chances per window. A busy process writes at most
+/// 10 lines/s (≈ 90 B each, ≈ 900 B/s); an idle one writes none.
+///
+/// A block that has run this long also reports between its channel steps (serial loop and DSP pool alike), so the
+/// silent unit is one channel's step, not the whole block: 16 wideband channels can take ≈ 2.9 s for one 32 768-sample
+/// block, ≈ 180 ms each. A single step longer than `WEDGE_MS` is treated as unresponsive by design: it is one
+/// channel's DSP over one block, and at the default 16 384 samples (8 ms at 2.048 Msps) that is > 2000 / 8 = 250×
+/// slower than real time; even the largest block (2^20 samples, 512 ms at 2.048 Msps) would be > 3.9× slower than
+/// real time, a process that can never keep up with its input. Blocks shorter than this write nothing mid-block.
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+/// A closed channel's writer is joined from the main loop once it has returned, never waited for; one that has not
+/// returned this long after its close is detached (close shut its stream down and set `closing`, so it only has the
+/// accept poll or a failing write left). The list therefore holds at most the writers of closes from the last 500 ms.
 const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 const WRITE_CHUNK: usize = 1 << 16;
@@ -186,9 +202,81 @@ struct Retired {
     writer: WriterPublisher,
 }
 
+type Sink = Box<dyn FnMut(Value) + Send>;
+
+/// The event writer and the main loop's liveness, apart from [`Runtime`] so a block can write `progress` between
+/// channel steps while it holds the channels (or the DSP pool).
+struct Reporter {
+    sink: Sink,
+    generation: u64,
+    /// Units of main-loop work completed (see [`PROGRESS_EVERY`]); only grows.
+    work: u64,
+    /// `work` at the last `progress` line: one is sent only after more work.
+    progress_work: u64,
+    last_progress: Option<Instant>,
+    /// Stdin bytes whose block the main loop has finished, a held odd byte included: `progress`'s `inputBytes`. The
+    /// parent owes nothing once it equals the bytes it wrote; a block still being processed is not counted yet.
+    input_done_bytes: u64,
+    /// When the block being processed started; `None` between blocks.
+    block_started: Option<Instant>,
+    /// Test clock for mid-block steps; none: steps never write mid-block, so other tests' event lists do not depend on
+    /// how fast the host runs a block.
+    #[cfg(test)]
+    clock: Option<Box<dyn FnMut() -> Instant + Send>>,
+}
+
+impl Reporter {
+    /// Every event carries `v: 1` and this process's generation (Property 9).
+    fn emit(&mut self, mut v: Value) {
+        v["v"] = json!(1);
+        v["generation"] = json!(self.generation);
+        (self.sink)(v)
+    }
+
+    /// `progress` after more work, at most every [`PROGRESS_EVERY`]. Nothing when the loop did no work since the last
+    /// line (an idle process is silent; a wedged one cannot write).
+    fn maybe_progress(&mut self, now: Instant, input_samples: u64) {
+        if self.work == self.progress_work
+            || self
+                .last_progress
+                .is_some_and(|t| now.saturating_duration_since(t) < PROGRESS_EVERY)
+        {
+            return;
+        }
+        self.last_progress = Some(now);
+        self.progress_work = self.work;
+        let bytes = self.input_done_bytes;
+        self.emit(json!({"type": "progress", "inputSamples": input_samples, "inputBytes": bytes}));
+    }
+
+    /// The clock for mid-block steps.
+    #[cfg(not(test))]
+    fn step_now(&mut self) -> Option<Instant> {
+        Some(Instant::now())
+    }
+    #[cfg(test)]
+    fn step_now(&mut self) -> Option<Instant> {
+        self.clock.as_mut().map(|c| c())
+    }
+
+    /// One channel's step of the current block finished: work, and once the block has run [`PROGRESS_EVERY`] a
+    /// throttled `progress` between steps. One `Instant::now()` per step, against ≥ 60 µs of DSP per channel step.
+    fn step(&mut self, input_samples: u64) {
+        self.work += 1;
+        let Some(started) = self.block_started else {
+            return;
+        };
+        if let Some(now) = self.step_now() {
+            if now.saturating_duration_since(started) >= PROGRESS_EVERY {
+                self.maybe_progress(now, input_samples);
+            }
+        }
+    }
+}
+
 pub struct Runtime {
     args: Args,
-    sink: Box<dyn FnMut(Value) + Send>,
+    out: Reporter,
     asm: InputAssembler,
     channels: BTreeMap<String, Open>,
     next_serial: u64,
@@ -198,6 +286,8 @@ pub struct Runtime {
     /// Marked gaps not yet reached by the input, in arrival order: (atInputByte, droppedInputBytes).
     pending_gaps: VecDeque<(u64, u64)>,
     last_stats: Instant,
+    /// Writers of closed channels, with the instant after which an unreturned one is detached ([`CLOSE_JOIN_BUDGET`]).
+    closed_writers: Vec<(thread::JoinHandle<()>, Instant)>,
     /// Writers → main, unbounded: a writer never blocks reporting its client gone.
     gone_tx: mpsc::Sender<(String, u64)>,
     gone_rx: mpsc::Receiver<(String, u64)>,
@@ -215,17 +305,6 @@ pub struct Runtime {
     input_q: Vec<f32>,
 }
 
-/// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
-fn join_bounded(w: thread::JoinHandle<()>, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    while !w.is_finished() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    if w.is_finished() {
-        let _ = w.join();
-    }
-}
-
 /// An echoed request id cut to the schema's 64 (PF7). Cutting at ≤ 64 UTF-8 bytes on a char
 /// boundary also keeps it within 64 UTF-16 units, which is what Node's `max(64)` counts.
 fn schema_id(id: &str) -> &str {
@@ -237,7 +316,7 @@ fn schema_id(id: &str) -> &str {
 }
 
 impl Runtime {
-    pub fn new(args: Args, sink: Box<dyn FnMut(Value) + Send>) -> Self {
+    pub fn new(args: Args, sink: Sink) -> Self {
         let parallelism = thread::available_parallelism().map_or(1, |n| n.get());
         let env = std::env::var(DSP_HELPERS_ENV).ok();
         let (helpers, warning) = resolve_dsp_helpers(args.dsp_helpers, env.as_deref(), parallelism);
@@ -247,11 +326,22 @@ impl Runtime {
         Self::with_dsp_helpers(args, sink, helpers)
     }
 
-    fn with_dsp_helpers(args: Args, sink: Box<dyn FnMut(Value) + Send>, helpers: usize) -> Self {
+    fn with_dsp_helpers(args: Args, sink: Sink, helpers: usize) -> Self {
         let (gone_tx, gone_rx) = mpsc::channel();
+        let generation = args.generation;
         Runtime {
             args,
-            sink,
+            out: Reporter {
+                sink,
+                generation,
+                work: 0,
+                progress_work: 0,
+                last_progress: None,
+                input_done_bytes: 0,
+                block_started: None,
+                #[cfg(test)]
+                clock: None,
+            },
             asm: InputAssembler::default(),
             channels: BTreeMap::new(),
             next_serial: 0,
@@ -260,6 +350,7 @@ impl Runtime {
             terminated: false,
             pending_gaps: VecDeque::new(),
             last_stats: Instant::now(),
+            closed_writers: Vec::new(),
             gone_tx,
             gone_rx,
             disposal: None,
@@ -274,11 +365,7 @@ impl Runtime {
     }
 
     /// Internal native integration seam; production uses the authenticated blocking bootstrap.
-    pub fn with_settlement(
-        args: Args,
-        sink: Box<dyn FnMut(Value) + Send>,
-        stream: UnixStream,
-    ) -> std::io::Result<Self> {
+    pub fn with_settlement(args: Args, sink: Sink, stream: UnixStream) -> std::io::Result<Self> {
         stream.set_nonblocking(true)?;
         let mut runtime = Self::new(args, sink);
         runtime.disposal = Some(Disposal::new(stream));
@@ -286,13 +373,12 @@ impl Runtime {
     }
 
     /// Every event carries `v: 1` and this process's generation (Property 9).
-    fn emit(&mut self, mut v: Value) {
-        v["v"] = json!(1);
-        v["generation"] = json!(self.args.generation);
-        (self.sink)(v)
+    fn emit(&mut self, v: Value) {
+        self.out.emit(v)
     }
 
     fn reject(&mut self, id: &str, code: &str, detail: String) {
+        self.out.work += 1;
         let id = schema_id(id).to_string();
         self.emit(json!({"type": "rejected", "id": id, "reasonCode": code, "detail": detail}))
     }
@@ -357,6 +443,7 @@ impl Runtime {
     }
 
     pub fn on_observed_request(&mut self, req: ObservedRequest) -> Option<i32> {
+        self.out.work += 1;
         match req {
             ObservedRequest::Ordinary(r) => self.on_request(r),
             ObservedRequest::InvalidOpen { token, id, detail } => {
@@ -810,10 +897,40 @@ impl Runtime {
                 });
             }
         } else {
+            // Reaped by `reap_writers` on a later turn: waiting here would silence the main loop while the parent
+            // waits for this very `closed`. `closing` (set above, under the connection lock) still revokes the old
+            // writer, so it can never unlink a same-id replacement's socket.
             if let Some(w) = ch.writer.take() {
-                join_bounded(w, CLOSE_JOIN_BUDGET);
+                self.closed_writers
+                    .push((w, Instant::now() + CLOSE_JOIN_BUDGET));
             }
             self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+        }
+    }
+
+    /// Joins every closed channel's writer that has returned and detaches any past its [`CLOSE_JOIN_BUDGET`]; never
+    /// waits. A join is a unit of work for `progress`.
+    pub fn reap_writers(&mut self, now: Instant) {
+        let mut k = 0;
+        while k < self.closed_writers.len() {
+            let (w, deadline) = &self.closed_writers[k];
+            if w.is_finished() {
+                let (w, _) = self.closed_writers.swap_remove(k);
+                let _ = w.join();
+                self.out.work += 1;
+            } else if now >= *deadline {
+                drop(self.closed_writers.swap_remove(k));
+            } else {
+                k += 1;
+            }
+        }
+    }
+
+    /// One main-loop turn polled the planner while an open waits for its preparation: the loop is alive while the
+    /// parent waits for that open's reply, even with no input flowing.
+    fn poll_planner_work(&mut self) {
+        if !self.pending.is_empty() {
+            self.out.work += 1;
         }
     }
 
@@ -873,6 +990,7 @@ impl Runtime {
     }
 
     pub fn on_input(&mut self, bytes: &[u8]) {
+        self.out.block_started = self.out.step_now();
         let (mut i, mut q) = (
             std::mem::take(&mut self.input_i),
             std::mem::take(&mut self.input_q),
@@ -882,6 +1000,11 @@ impl Runtime {
         self.convert_and_feed(bytes, &mut i, &mut q);
         self.input_i = i;
         self.input_q = q;
+        // Acknowledged only now that every channel has its output: `progress` written mid-block still reports the
+        // bytes before this block, so a process that stops inside a block keeps owing it.
+        self.out.block_started = None;
+        self.out.input_done_bytes += bytes.len() as u64;
+        self.out.work += 1;
     }
 
     fn convert_and_feed(&mut self, bytes: &[u8], i: &mut Vec<f32>, q: &mut Vec<f32>) {
@@ -952,6 +1075,7 @@ impl Runtime {
         }
         let mut events = Vec::new();
         let mut out = Vec::new();
+        let input_samples = self.asm.consumed_bytes / 2;
         for (id, ch) in self.channels.iter_mut() {
             out.clear();
             let r = ch.dsp.process(i, q, &mut out, &mut events);
@@ -959,6 +1083,7 @@ impl Runtime {
             let first = ch.out_samples;
             ch.out_samples += r.samples;
             push_output(id, ch, &out, first, &mut events);
+            self.out.step(input_samples);
         }
         for e in events {
             self.emit(e);
@@ -981,7 +1106,10 @@ impl Runtime {
                 },
             });
         }
-        self.pool.run(&mut self.jobs, i, q);
+        let input_samples = self.asm.consumed_bytes / 2;
+        let reporter = &mut self.out;
+        self.pool
+            .run_ticking(&mut self.jobs, i, q, &mut || reporter.step(input_samples));
         let mut events = Vec::new();
         for ((id, ch), job) in self.channels.iter_mut().zip(self.jobs.drain(..)) {
             let ChannelJob {
@@ -1024,6 +1152,13 @@ impl Runtime {
             .collect();
         let input = self.asm.consumed_bytes / 2;
         self.emit(json!({"type": "stats", "inputSamples": input, "channels": channels}));
+    }
+
+    /// `progress` after more work, at most every [`PROGRESS_EVERY`]: the main loop is alive (see
+    /// [`Reporter::maybe_progress`]).
+    pub fn maybe_progress(&mut self, now: Instant) {
+        let input = self.asm.consumed_bytes / 2;
+        self.out.maybe_progress(now, input);
     }
 
     /// EOF (A7): drain every queue to its client, report open drop runs, emit `input-eof`, exit 0.
@@ -1517,9 +1652,12 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        rt.poll_planner_work();
         rt.poll_prepared();
         rt.poll_client_gone(); // ≤ 250 ms after the failed write
+        rt.reap_writers(Instant::now());
         rt.maybe_stats(Instant::now());
+        rt.maybe_progress(Instant::now());
         rt.poll_disposal();
     }
 }
@@ -2559,6 +2697,253 @@ mod tests {
         );
         r.maybe_stats(t0 + Duration::from_secs(7));
         assert_eq!(ev.lock().unwrap().len(), n + 1);
+        r.on_eof_no_exit_for_test();
+    }
+
+    #[test]
+    fn progress_after_work_at_most_every_progress_every() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let n = ev.lock().unwrap().len();
+        let t0 = Instant::now();
+        let count = || ev.lock().unwrap().len();
+        // No work yet: silent, however long (an idle process writes nothing).
+        r.maybe_progress(t0);
+        r.maybe_progress(t0 + Duration::from_secs(9));
+        assert_eq!(count(), n);
+        // The first unit of work reports at once, with no control line waiting.
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.maybe_progress(t0);
+        let e = last(&ev);
+        assert_eq!(
+            (
+                e["type"].as_str(),
+                e["inputSamples"].as_u64(),
+                e["inputBytes"].as_u64(),
+                e["generation"].as_u64(),
+                e["v"].as_u64()
+            ),
+            (Some("progress"), Some(4096), Some(8192), Some(7), Some(1))
+        );
+        assert_eq!(count(), n + 1);
+        // No work since: silent (a wedged loop reports nothing).
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3);
+        assert_eq!(count(), n + 1);
+        // More input: throttled to one line per PROGRESS_EVERY, then due at it.
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3);
+        assert_eq!(
+            (count(), last(&ev)["inputSamples"].as_u64()),
+            (n + 2, Some(8192))
+        );
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 4 - Duration::from_millis(1));
+        assert_eq!(count(), n + 2);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 4);
+        assert_eq!(
+            (count(), last(&ev)["inputSamples"].as_u64()),
+            (n + 3, Some(12_288))
+        );
+        // A control line handled (here a malformed one) is work too, with no input read.
+        r.reject("x", "channel-request-invalid", "bad".into());
+        r.maybe_progress(t0 + PROGRESS_EVERY * 5);
+        assert_eq!(
+            (count(), last(&ev)["type"].as_str()),
+            (n + 5, Some("progress"))
+        );
+        // A planner poll while an open waits for its preparation is work; one with nothing pending is not.
+        r.poll_planner_work();
+        r.maybe_progress(t0 + PROGRESS_EVERY * 6);
+        assert_eq!(count(), n + 5);
+        r.on_request(open("prep", 162e6, 4096));
+        assert!(!r.pending.is_empty());
+        let after_open = count();
+        r.poll_planner_work();
+        r.maybe_progress(t0 + PROGRESS_EVERY * 7);
+        assert_eq!(count(), after_open + 1);
+        assert_eq!(last(&ev)["type"], "progress");
+        r.on_eof_no_exit_for_test();
+    }
+
+    // `inputBytes` is every stdin byte the loop finished, a held odd byte included: the parent compares it with the
+    // bytes it wrote, so a count of whole samples alone would leave one byte owed forever.
+    #[test]
+    fn progress_input_bytes_count_a_held_odd_byte() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let t0 = Instant::now();
+        r.on_input(&[128u8; 3]);
+        r.maybe_progress(t0);
+        let e = last(&ev);
+        assert_eq!(
+            (e["inputSamples"].as_u64(), e["inputBytes"].as_u64()),
+            (Some(1), Some(3))
+        );
+        r.on_input(&[128u8; 1]);
+        r.maybe_progress(t0 + PROGRESS_EVERY);
+        let e = last(&ev);
+        assert_eq!(
+            (e["inputSamples"].as_u64(), e["inputBytes"].as_u64()),
+            (Some(2), Some(4))
+        );
+        r.on_eof_no_exit_for_test();
+    }
+
+    /// A runtime whose mid-block steps read a test clock that advances `step` per read, with every event stamped
+    /// with that clock's time when written.
+    fn rt_stepping(
+        dir: &Path,
+        helpers: usize,
+        step: Duration,
+    ) -> (Runtime, Arc<Mutex<Vec<(Instant, Value)>>>, Instant) {
+        let t0 = Instant::now();
+        let clock = Arc::new(Mutex::new(t0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let (e, c) = (events.clone(), clock.clone());
+            Box::new(move |v| e.lock().unwrap().push((*c.lock().unwrap(), v)))
+        };
+        let mut r = Runtime::with_dsp_helpers(test_args(dir), sink, helpers);
+        r.out.clock = Some(Box::new(move || {
+            let mut t = clock.lock().unwrap();
+            let now = *t;
+            *t += step;
+            now
+        }));
+        (r, events, t0)
+    }
+
+    // A block that spans more than WEDGE_MS (2 s) of 150 ms channel steps writes `progress` between steps, serial and
+    // pooled alike, so the parent never sees it silent for a window; the lines it writes mid-block still report only
+    // the bytes before the block, and the block's own bytes after it.
+    #[test]
+    fn a_block_longer_than_the_wedge_window_reports_between_channel_steps() {
+        const WEDGE: Duration = Duration::from_millis(2000);
+        const STEP: Duration = Duration::from_millis(150);
+        for helpers in [0, crate::dsp_pool::MAX_DSP_HELPERS] {
+            let dir = TempDir::new();
+            let (mut r, ev, t0) = rt_stepping(&dir.0, helpers, STEP);
+            const CHANNELS: usize = 16;
+            for k in 0..CHANNELS {
+                r.request_and_wait(open(&format!("c{k}"), 162e6 + k as f64 * 50e3, 1 << 20));
+            }
+            assert_eq!(r.channels.len(), CHANNELS);
+            let block = vec![128u8; 2 * 4096]; // ≥ PARALLEL_MIN_SAMPLES: the pool runs it when helpers > 0
+            r.on_input(&block);
+            let before = ev.lock().unwrap().len();
+            r.on_input(&block);
+            // One clock read at each block start and one per step: CHANNELS × 150 ms = 2.4 s > WEDGE_MS. A line is
+            // stamped with the clock after the read that wrote it.
+            let end = t0 + STEP * (2 * (CHANNELS as u32 + 1));
+            let lines: Vec<(Instant, Value)> = ev.lock().unwrap()[before..]
+                .iter()
+                .filter(|(_, v)| v["type"] == "progress")
+                .cloned()
+                .collect();
+            let start = t0 + STEP * (CHANNELS as u32 + 1);
+            assert!(end - start > WEDGE, "helpers {helpers}");
+            assert!(
+                lines.len() >= 10,
+                "helpers {helpers}: {} lines",
+                lines.len()
+            );
+            let mut at = start;
+            for (t, v) in &lines {
+                assert!(
+                    *t - at <= 2 * STEP,
+                    "helpers {helpers}: a {:?} gap",
+                    *t - at
+                );
+                assert_eq!(
+                    v["inputBytes"].as_u64(),
+                    Some(block.len() as u64),
+                    "helpers {helpers}"
+                );
+                at = *t;
+            }
+            assert!(end - at <= 2 * STEP, "helpers {helpers}");
+            r.maybe_progress(end + PROGRESS_EVERY);
+            let after = ev.lock().unwrap().last().unwrap().1.clone();
+            assert_eq!(
+                (after["type"].as_str(), after["inputBytes"].as_u64()),
+                (Some("progress"), Some(2 * block.len() as u64))
+            );
+            r.on_eof_no_exit_for_test();
+        }
+    }
+
+    // A close never waits for its writer: the main loop answers `closed` at once and keeps working while the old
+    // writer is still returning, and joining it later is a unit of work. Before, close joined the writer for up to
+    // CLOSE_JOIN_BUDGET, silencing the main loop while the parent waited for that very `closed`.
+    #[test]
+    fn close_answers_before_its_writer_returns_and_reaps_it_later() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("other", 162e6, 1 << 20));
+        r.request_and_wait(open("held", 162e6, 1 << 20));
+        let (release, gate) = mpsc::channel::<()>();
+        let (returned_tx, returned) = mpsc::channel();
+        {
+            let ch = r.channels.get_mut("held").unwrap();
+            // Retire the real accept writer; replace it with one whose return is held by the test.
+            ch.conn.lock().unwrap().closing = true;
+            ch.writer.take().unwrap().join().unwrap();
+            ch.conn.lock().unwrap().closing = false;
+            ch.writer = Some(thread::spawn(move || {
+                gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                returned_tx.send(()).unwrap();
+            }));
+        }
+        r.on_request(Request::Close { id: "held".into() });
+        // Answered while the writer is still held: close did not wait for it.
+        assert_eq!(
+            (last(&ev)["type"].as_str(), last(&ev)["id"].as_str()),
+            (Some("closed"), Some("held"))
+        );
+        assert!(returned.try_recv().is_err());
+        assert_eq!(r.closed_writers.len(), 1);
+        // The loop keeps working for the other channel; an unreturned writer is not reaped.
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.reap_writers(Instant::now());
+        assert_eq!(r.closed_writers.len(), 1);
+        assert!(r.channels.contains_key("other"));
+        let work = r.out.work;
+        release.send(()).unwrap();
+        returned.recv_timeout(Duration::from_secs(10)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.closed_writers.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the returned writer was never reaped"
+            );
+            r.reap_writers(Instant::now());
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(r.out.work, work + 1);
+        r.on_eof_no_exit_for_test();
+    }
+
+    // A writer that has not returned by its CLOSE_JOIN_BUDGET is detached (not joined, not work), so the list stays
+    // bounded by the closes of the last 500 ms.
+    #[test]
+    fn an_unreturned_closed_writer_is_detached_past_its_budget() {
+        let dir = TempDir::new();
+        let (mut r, _) = rt(&dir.0);
+        let (release, gate) = mpsc::channel::<()>();
+        let t0 = Instant::now();
+        r.closed_writers.push((
+            thread::spawn(move || {
+                let _ = gate.recv_timeout(Duration::from_secs(10));
+            }),
+            t0 + CLOSE_JOIN_BUDGET,
+        ));
+        r.reap_writers(t0 + CLOSE_JOIN_BUDGET - Duration::from_millis(1));
+        assert_eq!(r.closed_writers.len(), 1);
+        let work = r.out.work;
+        r.reap_writers(t0 + CLOSE_JOIN_BUDGET);
+        assert!(r.closed_writers.is_empty());
+        assert_eq!(r.out.work, work);
+        release.send(()).unwrap();
         r.on_eof_no_exit_for_test();
     }
 
