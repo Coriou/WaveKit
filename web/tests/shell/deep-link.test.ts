@@ -67,6 +67,7 @@ describe("deep links", () => {
 						"ctcss",
 						"dcs",
 						"entity",
+						"decoder",
 						"text",
 					),
 					fc

@@ -43,6 +43,7 @@ const TOKEN_KINDS = new Set<TokenKind>([
 	"ctcss",
 	"dcs",
 	"entity",
+	"decoder",
 	"text",
 ])
 

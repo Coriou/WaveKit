@@ -15,7 +15,7 @@ import type { Bandplan } from "../scanner/bandplan/index.js"
 interface SupplementPlan {
 	/** Regions whose catalogue carries the plan. */
 	regions: readonly BandRegion[]
-	/** The plan goes right before this plan id when the region has it; else last. */
+	/** The plan goes right before this plan id when the region has it; else last ("": last). */
 	before: string
 	plan: Bandplan
 }
@@ -49,8 +49,39 @@ const PAGER_FR: Bandplan = {
 	],
 }
 
+/**
+ * 1090 MHz Mode S / ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive,
+ * the replay plan's ADS-B window). No scan protocol: readsb decodes it; the band is projected
+ * with a skip (builtin-packs.ts) so sweeps that honour band-plan skips leave it to readsb.
+ */
+const ADSB: Bandplan = {
+	id: "adsb",
+	region: "all",
+	name: "ADS-B (1090 MHz)",
+	ranges: [
+		{
+			startHz: 1_089_000_000,
+			endHz: 1_091_000_000,
+			obwHz: [],
+			protocols: [],
+			bandplanId: "adsb",
+		},
+	],
+}
+
+const ALL_REGIONS = [
+	"EU",
+	"US",
+	"CA",
+	"AU",
+	"NZ",
+	"JP",
+	"CN",
+] as const satisfies readonly BandRegion[]
+
 export const BUILTIN_SUPPLEMENT: readonly SupplementPlan[] = Object.freeze([
 	{ regions: ["EU"], before: "pmr446", plan: PAGER_FR },
+	{ regions: ALL_REGIONS, before: "", plan: ADSB },
 ])
 
 const cache = new Map<BandRegion, readonly Bandplan[]>()

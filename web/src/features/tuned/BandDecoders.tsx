@@ -126,11 +126,9 @@ export function BandDecoders({
 			showAppToast(`${action.label}: ${failed}`, { tone: "warn" })
 		feed.soon()
 	}
-	const openActivity = (row: BandTableRow) => {
-		if (row.activityChip === null) return
-		activity.setSearch([], row.activityChip)
-		shellStore.openDrawer("activity")
-	}
+	// exactly this decoder's rows (Activity's decoder filter, the core's `decoderIds`)
+	const openActivity = (row: BandTableRow) =>
+		activity.showDecoder(row.id, row.name)
 	const openSettings = () => {
 		focusSetting(settingsTarget(rows))
 		shellStore.openDrawer("settings")
@@ -229,7 +227,7 @@ export function BandDecoders({
 									headers={`${rowId} ${col.last}`}
 									className="wkf-bt-last"
 								>
-									{row.activityChip !== null && row.lastDecodeIso !== null ? (
+									{row.lastDecodeIso !== null ? (
 										<button
 											type="button"
 											className="wkf-bt-link"
@@ -239,15 +237,7 @@ export function BandDecoders({
 											<time dateTime={row.lastDecodeIso}>{row.lastDecode}</time>
 										</button>
 									) : (
-										<span className="wkf-quiet">
-											{row.lastDecodeIso !== null ? (
-												<time dateTime={row.lastDecodeIso}>
-													{row.lastDecode}
-												</time>
-											) : (
-												row.lastDecode
-											)}
-										</span>
+										<span className="wkf-quiet">{row.lastDecode}</span>
 									)}
 								</td>
 							</tr>

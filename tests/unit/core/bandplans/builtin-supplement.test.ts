@@ -1,4 +1,4 @@
-// The built-in catalogue: the legacy scanner plans plus the band-plan supplement (pager-fr),
+// The built-in catalogue: the legacy scanner plans plus the band-plan supplement (pager-fr, adsb),
 // with the legacy table untouched.
 import { describe, expect, it } from "vitest"
 import type { BandRegion } from "@wavekit/api-types"
@@ -26,19 +26,22 @@ const REGIONS = [
 ] as const satisfies readonly BandRegion[]
 
 describe("built-in catalogue (legacy plans plus the supplement)", () => {
-	it("keeps every legacy plan object in order and adds pager-fr in the EU only, before pmr446", () => {
+	it("keeps every legacy plan object in order, adds pager-fr in the EU only, before pmr446, and adsb last everywhere", () => {
 		for (const region of REGIONS) {
 			const legacy = bandplansFor(region)
 			const catalogue = builtinBandplansFor(region)
-			const kept = catalogue.filter(p => p.id !== "pager-fr")
+			const kept = catalogue.filter(p => p.id !== "pager-fr" && p.id !== "adsb")
 			expect(kept).toHaveLength(legacy.length)
 			kept.forEach((plan, i) => expect(plan).toBe(legacy[i]))
 			const ids = catalogue.map(p => p.id)
+			expect(ids.filter(id => id === "adsb")).toHaveLength(1)
+			expect(ids.at(-1)).toBe("adsb")
 			if (region === "EU") {
 				expect(ids.filter(id => id === "pager-fr")).toHaveLength(1)
 				expect(ids.indexOf("pager-fr")).toBe(ids.indexOf("pmr446") - 1)
-			} else expect(catalogue).toEqual(legacy)
+			} else expect(catalogue.slice(0, -1)).toEqual(legacy)
 		}
+		expect(resolveBandplan("adsb", "EU")).toBeUndefined()
 		// the legacy table itself does not know the band
 		expect(resolveBandplan("pager-fr", "EU")).toBeUndefined()
 		expect(resolveBuiltinBandplan("pager-fr", "EU")?.id).toBe("pager-fr")
@@ -66,7 +69,49 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 				bandplanId: "pager-fr",
 			},
 		])
-		expect(BUILTIN_SUPPLEMENT.map(s => s.plan.id)).toEqual(["pager-fr"])
+		expect(BUILTIN_SUPPLEMENT.map(s => s.plan.id)).toEqual(["pager-fr", "adsb"])
+	})
+
+	it("adsb: 1089-1091 MHz in every region, with no scan protocol, OBW or raster", () => {
+		for (const region of REGIONS) {
+			const plan = resolveBuiltinBandplan("adsb", region)
+			expect(plan?.region).toBe("all")
+			expect(plan?.ranges).toEqual([
+				{
+					startHz: 1_089_000_000,
+					endHz: 1_091_000_000,
+					obwHz: [],
+					protocols: [],
+					bandplanId: "adsb",
+				},
+			])
+		}
+		// no paging raster, so the pager decoders never reach it
+		expect(
+			REGIONS.some(region =>
+				pagingRasterRanges(region).some(r => r.maxHz >= 1_089_000_000),
+			),
+		).toBe(false)
+	})
+
+	it("the band view projects adsb as an air band, raw and skipped (decoded elsewhere by readsb)", () => {
+		for (const pack of projectBuiltinPacks()) {
+			const band = pack.bands.find(b => b.id === "adsb")
+			expect(band).toMatchObject({
+				group: "air",
+				mode: "raw",
+				skip: { reason: "Decoded elsewhere · readsb" },
+				startHz: 1_089_000_000,
+				endHz: 1_091_000_000,
+				bandwidthHz: null,
+				stepHz: null,
+			})
+			// every other built-in band stays as before: no mode, no skip
+			for (const other of pack.bands.filter(b => b.id !== "adsb")) {
+				expect(other.mode).toBeNull()
+				expect(other.skip).toBeNull()
+			}
+		}
 	})
 
 	it("the band view and the scanner both see it", () => {

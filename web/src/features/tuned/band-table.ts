@@ -4,7 +4,6 @@
 // action. Pure: the card renders the rows and carries the action out.
 import type { DecoderInfo, ScanRange } from "@wavekit/api-types"
 
-import type { CategoryChipId } from "../activity/search.ts"
 import {
 	actionFor,
 	onBand,
@@ -220,28 +219,6 @@ export function rowAction(
 	return null
 }
 
-/**
- * The Activity chip a program's messages fall under (Activity's category chips); null when none fits. "Last
- * decode" opens Activity on this chip: Activity's search has no decoder token yet (the core's query takes
- * `decoderIds`, the drawer's tokens do not), so the chip is the closest filter it offers.
- */
-const CHIP: Readonly<Record<string, CategoryChipId>> = {
-	readsb: "aircraft",
-	dump1090: "aircraft",
-	acarsdec: "aircraft",
-	dumpvdl2: "aircraft",
-	"ais-catcher": "marine",
-	"multimon-ng": "paging",
-	"dsd-fme": "voice",
-	direwolf: "aprs",
-	rtl433: "sensors",
-	"lora-meshtastic": "mesh",
-}
-
-export function activityChipFor(protocol: string): CategoryChipId | null {
-	return Object.hasOwn(CHIP, protocol) ? CHIP[protocol]! : null
-}
-
 export interface BandTableRow {
 	id: string
 	name: string
@@ -250,10 +227,8 @@ export interface BandTableRow {
 	stateWord: string
 	/** "38 s ago", "3 min ago", "at 13:52"; "Never" when it has not decoded. */
 	lastDecode: string
-	/** ISO time of the last decode, for a <time> element; null when never. */
+	/** ISO time of the last decode, for a <time> element; null when never. "Last decode" then opens Activity on this decoder. */
 	lastDecodeIso: string | null
-	/** The Activity chip "Last decode" opens; null when it decoded nothing or no chip fits. */
-	activityChip: CategoryChipId | null
 	detail: string
 	action: BandAction | null
 }
@@ -370,7 +345,6 @@ export function bandTable(
 			stateWord: STATE_WORD[state],
 			lastDecode: iso === null ? "Never" : agoText(iso, now) || "Never",
 			lastDecodeIso: iso,
-			activityChip: iso === null ? null : activityChipFor(item.protocol),
 			detail: detailOf(verdict.text, item.name, state, item.eventsOut),
 			action: rowAction(verdict, decoder, ctx),
 		})

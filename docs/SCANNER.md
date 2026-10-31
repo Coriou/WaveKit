@@ -169,6 +169,12 @@ Stored band plans use a writer lock in the state directory. After an unclean sto
 | `ism-868`         | EU     | 863–870           | none                  | none              | ism                                   |
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
+| `adsb`            | all    | 1089–1091         | none                  | none              | none (readsb decodes it)              |
+
+The `adsb` band (1090 MHz ADS-B, every region) shows in the band view as an air band with
+mode `raw` and the skip `Decoded elsewhere · readsb`: a sweep with `skipBandPlanSkips` leaves
+1089 to 1091 MHz to readsb. It names no scan protocol, so it adds no identify priors or analog
+trial there, and [decode-anchored ADS-B](#decode-anchored-ads-b) works as before.
 
 The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
 selects which built-in plans the scanner uses: each enabled built-in pack, in

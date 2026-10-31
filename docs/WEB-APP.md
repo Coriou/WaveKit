@@ -145,7 +145,7 @@ says so at once, before the core's next answer arrives. Each decoder takes two l
 | ----------- | -------------------------------------------------------------------------------------------------------------- |
 | Decoder     | Its name and program, for example ADS-B over `readsb`                                                          |
 | State       | A dot and one word: Decoding, Listening, Starting, Waiting, Paused, Failed or Off (filled dot while it runs)   |
-| Last decode | How long ago it last decoded; opens Activity filtered to that kind of traffic. "Never" when it has not         |
+| Last decode | How long ago it last decoded; opens Activity on that decoder's events only. "Never" when it has not            |
 | Detail      | The second line: the reason from the core's verdict ("CPU budget full"), or how much it decoded, full width    |
 | Action      | At most one button, at the right of the detail line, only when the verdict suggests one the card can carry out |
 
@@ -191,6 +191,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
+  **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
+  search lists only that decoder's events; remove the chip with its `×` like any other filter.
   If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
   for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
   when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying

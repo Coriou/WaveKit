@@ -4,7 +4,6 @@ import type { DecoderInfo } from "@wavekit/api-types"
 import { DECODER_VERDICT_CODES } from "@wavekit/api-types"
 
 import {
-	activityChipFor,
 	bandStateLine,
 	bandTable,
 	cardIdentity,
@@ -78,7 +77,7 @@ describe("tuned card cases", () => {
 			action: { kind: "raise-budget", label: "Raise CPU budget" },
 		})
 		expect(row?.lastDecode.startsWith("at ")).toBe(true)
-		expect(row?.activityChip).toBe("aircraft")
+		expect(row?.lastDecodeIso).not.toBeNull()
 	})
 
 	it("says how much a decoding decoder decoded, and links its last decode to Activity", () => {
@@ -87,7 +86,6 @@ describe("tuned card cases", () => {
 			state: "decoding",
 			detail: "1,204 messages so far",
 			lastDecode: "2 s ago",
-			activityChip: "aircraft",
 			action: null,
 		})
 	})
@@ -99,7 +97,7 @@ describe("tuned card cases", () => {
 			detail: "Restarting on its own",
 			action: null,
 			lastDecode: "Never",
-			activityChip: null,
+			lastDecodeIso: null,
 		})
 	})
 
@@ -381,12 +379,6 @@ describe("row wording", () => {
 		)
 		expect(detailOf("ADS-B stopped", "ADS-B", "off", 0)).toBe("Stopped")
 		expect(detailOf("ADS-B paused", "ADS-B", "unknown", 0)).toBe("Paused")
-	})
-
-	it("maps programs to Activity's category chips", () => {
-		expect(activityChipFor("readsb")).toBe("aircraft")
-		expect(activityChipFor("multimon-ng")).toBe("paging")
-		expect(activityChipFor("not-a-program")).toBeNull()
 	})
 
 	it("sends the foot's link to a decoder that is off, else the first row", () => {

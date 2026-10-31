@@ -1,7 +1,8 @@
 // The Activity drawer's state outside React: the search (tokens + category chip), the open event, the
 // columns (pinned searches, per browser until the core keeps them: CORE-GAPS "Activity columns and
 // pinned searches"), and the feeds they drive: the drawer's list and one per column, each column's
-// search narrowed by the drawer's. The tuned card opens it on a frequency through showFrequency().
+// search narrowed by the drawer's. The tuned card opens it on a frequency through showFrequency() and on
+// one decoder through showDecoder().
 import type { ActivityQuery, ActivitySummary } from "@wavekit/api-types"
 
 import type { DataLayer } from "../../data/index.ts"
@@ -30,6 +31,7 @@ import type { CategoryChipId, SearchToken } from "./search.ts"
 import {
 	CATEGORY_CHIPS,
 	buildQuery,
+	decoderToken,
 	frequencyToken,
 	searchTitle,
 	token,
@@ -324,6 +326,13 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** Narrows the list to one entity (the detail's "Only this"). */
 	showEntity(entityKey: string, label: string): void {
 		this.setSearch([token("entity", entityKey, { label })], null)
+	}
+
+	/** The tuned card's "Last decode": everything one decoder produced, whatever its frequency. */
+	showDecoder(decoderId: string, name?: string): void {
+		this.update(s => ({ ...s, editing: null, view: "all" }))
+		this.setSearch([decoderToken(decoderId, name)], null)
+		shellStore.openDrawer("activity")
 	}
 
 	/** The tuned card's Activity button: what was heard on this channel. */
