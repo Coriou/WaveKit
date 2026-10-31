@@ -188,6 +188,8 @@ const HANDLER_PARSED_ROUTES = [
 	"GET /api/activity/trails",
 	"GET /api/activity/bandmap",
 	"GET /api/activity/timeline",
+	// The recordings query is parsed in core (tests/unit/core/recordings/inventory.test.ts); the
+	// fake inventory always refuses, so this entry checks only the route's static 400 mapping.
 	"GET /api/recordings",
 ]
 
