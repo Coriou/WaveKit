@@ -486,9 +486,21 @@ export interface DecoderLateDropsView {
 	held: "nothing-sheddable" | "link-or-unknown" | null
 }
 
-/** GET /api/decoders/summary: compact output and placement diagnostics. */
+/**
+ * Largest `hz` GET /api/decoders/summary accepts: 100 GHz, above any receiver
+ * (the same bound as the discoveries `nearHz`).
+ */
+export const DECODER_SUMMARY_MAX_HZ = 100_000_000_000
+
+/**
+ * GET /api/decoders/summary: compact output and placement diagnostics.
+ * `?hz=<Hz>` (a positive finite number up to DECODER_SUMMARY_MAX_HZ) adds
+ * `coversHz` to every item; without it the field is absent.
+ */
 export interface DecoderSummary {
 	id: string
+	/** Plain name of the decoder type ("ADS-B", "Pager"); absent from older cores. */
+	name?: string
 	/** Decoder protocol family / adapter type. */
 	protocol: string
 	state: "running" | "stopped"
@@ -499,6 +511,16 @@ export interface DecoderSummary {
 	health: "decoding" | "idle" | "suspended" | "failed"
 	/** One verdict per decoder: why it does or does not decode now, and what helps. */
 	verdict: DecoderVerdict
+	/**
+	 * Only with `?hz=`: true when the decoder's own band holds that frequency
+	 * (the tuned-band rule: within 200 kHz of a target, between its lowest and
+	 * highest target, or inside a range widened by 200 kHz); for a decoder with
+	 * no known band, true when a built-in band plan range at that frequency
+	 * lists one of its protocols. Where a decoder's placement happens to sit
+	 * (a channel that follows the tuner) never counts, and scanner probes never
+	 * cover. Unknown or malformed bands read false.
+	 */
+	coversHz?: boolean
 }
 
 /**

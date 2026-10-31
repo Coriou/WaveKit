@@ -8,7 +8,11 @@ import type {
 } from "@wavekit/api-types"
 import { decoderVerdictSchema } from "@wavekit/api-types"
 
-import { mockVerdict } from "../../mock/decoder-summary.ts"
+import {
+	mockCoversHz,
+	mockDecoderName,
+	mockVerdict,
+} from "../../mock/decoder-summary.ts"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
 
@@ -31,6 +35,11 @@ const coreVerdict = async (): Promise<CoreVerdict> =>
 			decoderVerdict: CoreVerdict
 		}
 	).decoderVerdict
+const coreSummary = async () =>
+	(await import(/* @vite-ignore */ CORE_SUMMARY)) as {
+		decoderCoversHz: (status: unknown, hz: number) => boolean
+		decoderName: (type: string) => string
+	}
 
 /** Every suspension reason the core knows, plus one it does not. */
 const REASONS: readonly (string | undefined)[] = [
@@ -152,6 +161,91 @@ describe("mock verdicts match the core's", () => {
 	})
 })
 
+describe("mock failures, names and coverage match the core's", () => {
+	it("drops the restart while the decoder restarts on its own, as the core does", async () => {
+		const decoderVerdict = await coreVerdict()
+		const retry = [
+			{ health: "restarting" as const, running: false },
+			{ health: "faulted" as const, running: true },
+			{
+				health: "faulted" as const,
+				running: false,
+				nextRestartAt: "2026-10-31T10:00:05Z",
+			},
+			{ health: "faulted" as const, running: false },
+		]
+		for (const r of retry) {
+			const f = { ...fields({ health: "failed", running: r.running }), ...r }
+			const core = decoderVerdict(
+				{
+					...f,
+					...(r.nextRestartAt
+						? { nextRestartAt: new Date(r.nextRestartAt) }
+						: {}),
+				},
+				"failed",
+				r.running,
+			)
+			expect({ r, verdict: mockVerdict(f as DecoderInfo, "failed") }).toEqual({
+				r,
+				verdict: core,
+			})
+		}
+	})
+
+	it("names every decoder type as the core does", async () => {
+		const { decoderName } = await coreSummary()
+		for (const type of [
+			"readsb",
+			"ais-catcher",
+			"acarsdec",
+			"dumpvdl2",
+			"rtl433",
+			"direwolf",
+			"multimon-ng",
+			"dsd-fme",
+			"lora-meshtastic",
+			"something-new",
+		])
+			expect(mockDecoderName(type)).toBe(decoderName(type))
+	})
+
+	it("covers a frequency exactly where the core's band rule does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		const bands = [
+			{ targetsHz: [1_090_000_000] },
+			{ targetsHz: [466_000_000, 466_025_000] },
+			{ rangesHz: [{ minHz: 460_000_000, maxHz: 470_000_000 }] },
+			{ targetsHz: [1_090_000_000], owner: "scanner" as const },
+		]
+		const probes = [
+			1_090_000_000,
+			1_090_200_000,
+			1_090_200_001,
+			465_800_000,
+			465_799_999,
+			466_012_500,
+			470_200_000,
+			470_200_001,
+			0,
+			-1,
+			Number.NaN,
+		]
+		for (const b of bands)
+			for (const hz of probes) {
+				const d = {
+					...(b.owner ? { owner: b.owner } : {}),
+					bandAssessment: { verdict: "in-band" as const, ...b },
+				}
+				expect({ b, hz, covers: mockCoversHz(d, hz) }).toEqual({
+					b,
+					hz,
+					covers: decoderCoversHz({ type: "readsb", ...d }, hz),
+				})
+			}
+	})
+})
+
 describe("mock GET /api/decoders/summary", () => {
 	let server: MockServer
 	beforeAll(async () => {
@@ -169,6 +263,28 @@ describe("mock GET /api/decoders/summary", () => {
 			await server.app.inject({ method: "GET", url: "/api/decoders/summary" })
 		).json<DecoderSummary[]>()
 	const byId = async (id: string) => (await summary()).find(s => s.id === id)
+
+	it("adds coversHz for ?hz= and refuses a bad one, as the core does", async () => {
+		const at = await server.app.inject({
+			method: "GET",
+			url: "/api/decoders/summary?hz=1090062000",
+		})
+		expect(at.statusCode).toBe(200)
+		const items = at.json<DecoderSummary[]>()
+		expect(items.find(i => i.id === "readsb")?.coversHz).toBe(true)
+		expect(items.find(i => i.id === "multimon-ng")?.coversHz).toBe(false)
+		expect(items.every(i => typeof i.name === "string")).toBe(true)
+		for (const bad of ["0", "abc", "Infinity", "100000000001"]) {
+			const res = await server.app.inject({
+				method: "GET",
+				url: `/api/decoders/summary?hz=${bad}`,
+			})
+			expect(res.statusCode, bad).toBe(400)
+		}
+		expect((await summary()).every(i => !Object.hasOwn(i, "coversHz"))).toBe(
+			true,
+		)
+	})
 
 	it("gives every decoder a valid verdict", async () => {
 		const items = await summary()

@@ -5,18 +5,18 @@ import { ApiError } from "../../src/data/api-client.ts"
 import { CpuBudgetSchema } from "../../../src/decoders/enablement/cpu-budget.ts"
 import {
 	actionFor,
-	bandDecoders,
 	BUDGET_MAX_CORES,
 	onBand,
 	parseVerdict,
-	primaryAction,
 	raisedBudget,
 	scanHoldingDecoders,
 	verdictsById,
 	type BandVerdict,
 } from "../../src/features/tuned/band-decoders.ts"
+import { rowAction } from "../../src/features/tuned/band-table.ts"
 import {
 	DecoderVerdictsFeed,
+	itemsFor,
 	VERDICTS_SETTLE_MS,
 } from "../../src/features/tuned/verdicts.ts"
 
@@ -77,53 +77,22 @@ describe("decoders on the tuned band", () => {
 		expect(onBand(PROBE, 1_090_000_000)).toBe(false)
 	})
 
-	it("lists only the tuned band's decoders, listening ones first", () => {
-		const other = decoder({
-			id: "readsb-2",
-			type: "readsb",
-			targetFrequenciesHz: [1_090_100_000],
+	it("reads the band assessment, not targets a channel following the tuner adds", () => {
+		const vfo = decoder({
+			id: "pager-vfo",
+			type: "multimon-ng",
+			targetFrequenciesHz: [1_090_062_000],
+			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
 		})
-		const verdicts = new Map([
-			[
-				"readsb",
-				verdict({
-					code: "efficiency-budget",
-					text: "ADS-B paused: CPU budget full",
-					actions: ["raise-budget", "turn-off-others"],
-				}),
-			],
-			["readsb-2", verdict({ code: "listening", text: "ADS-B listening" })],
-		])
-		const rows = bandDecoders(
-			[ACARS, ADSB, other, PAGER, PROBE],
-			verdicts,
-			1_090_000_000,
-			NO_SCAN,
-		)
-		expect(rows.map(r => r.id)).toEqual(["readsb-2", "readsb"])
-		expect(rows[0]).toMatchObject({
-			listening: true,
-			text: "ADS-B listening",
-			action: null,
+		expect(onBand(vfo, 1_090_062_000)).toBe(false)
+		const configured = decoder({
+			id: "pager-cfg",
+			type: "multimon-ng",
+			targetFrequenciesHz: [1_090_062_000],
+			bandAssessment: { verdict: "in-band", targetsHz: [466_000_000] },
 		})
-		expect(rows[1]).toMatchObject({
-			listening: false,
-			text: "ADS-B paused: CPU budget full",
-			action: { kind: "raise-budget", label: "Raise CPU budget" },
-		})
-	})
-
-	it("reads statuses without verdicts (an older core) and offers no action", () => {
-		const rows = bandDecoders([PAGER], null, 431_100_000, NO_SCAN)
-		expect(rows).toEqual([
-			{
-				id: "pager",
-				name: "Pager",
-				listening: false,
-				text: "Pager paused",
-				action: null,
-			},
-		])
+		expect(onBand(configured, 466_100_000)).toBe(true)
+		expect(onBand(configured, 1_090_062_000)).toBe(false)
 	})
 })
 
@@ -163,17 +132,14 @@ describe("verdict line and action", () => {
 			expect(actionFor(a, ADSB, NO_SCAN)?.kind).toBe("receiver")
 	})
 
-	it("takes the first action it can carry out", () => {
+	it("takes the first action it can carry out, never a Settings link in a row", () => {
 		const v = verdict({
 			code: "efficiency-cpu",
 			text: "ADS-B paused: the CPU is busy",
 			actions: ["pause-scanner", "turn-off-others"],
 		})
-		expect(primaryAction(v, ADSB, NO_SCAN)).toMatchObject({
-			kind: "settings",
-			label: "Decoders in Settings",
-		})
-		expect(primaryAction(v, ADSB, SCAN)?.kind).toBe("stop-scan")
+		expect(rowAction(v, ADSB, NO_SCAN)).toBeNull()
+		expect(rowAction(v, ADSB, SCAN)?.kind).toBe("stop-scan")
 	})
 
 	it("offers stopping the scan in every state where the sweep holds the decoders", () => {
@@ -209,7 +175,7 @@ describe("verdict line and action", () => {
 		})
 		const scanId = scanHoldingDecoders(job("holding"))
 		expect(
-			primaryAction(busy, ADSB, { scanJobId: scanId, budget: null }),
+			rowAction(busy, ADSB, { scanJobId: scanId, budget: null }),
 		).toMatchObject({ kind: "stop-scan", jobId: "job-1" })
 	})
 
@@ -223,68 +189,74 @@ describe("verdict line and action", () => {
 			scanJobId: null,
 			budget: { mode: "configured" as const, cores },
 		})
-		expect(primaryAction(full, ADSB, at(4))?.kind).toBe("raise-budget")
-		expect(primaryAction(full, ADSB, NO_SCAN)?.kind).toBe("raise-budget")
-		expect(primaryAction(full, ADSB, at(BUDGET_MAX_CORES))).toMatchObject({
-			kind: "settings",
-			label: "Decoders in Settings",
-		})
+		expect(rowAction(full, ADSB, at(4))?.kind).toBe("raise-budget")
+		expect(rowAction(full, ADSB, NO_SCAN)?.kind).toBe("raise-budget")
+		// at the cap: "turn off others" is a Settings link (the foot's), then the scan when one holds the tuner
+		expect(rowAction(full, ADSB, at(BUDGET_MAX_CORES))).toBeNull()
 		expect(
-			primaryAction(full, ADSB, {
+			rowAction(full, ADSB, { ...at(BUDGET_MAX_CORES), scanJobId: "job-1" })
+				?.kind,
+		).toBe("stop-scan")
+		expect(
+			rowAction(full, ADSB, {
 				scanJobId: null,
 				budget: { mode: "auto", cpus: 4, cores: 4 },
-			})?.kind,
-		).toBe("settings")
+			}),
+		).toBeNull()
 	})
 
-	it("offers only Turn on in Settings for a decoder now off, whatever its older verdict", () => {
+	it("offers no row action for a decoder off in Settings, whatever its older verdict", () => {
+		const off = { ...ADSB, running: false, mode: "off" as const }
 		const stale = parseVerdict({
 			code: "failed",
 			text: "ADS-B failed to run",
 			actions: ["restart"],
 		})
-		const [row] = bandDecoders(
-			[{ ...ADSB, running: false, mode: "off" }],
-			new Map([["readsb", stale!]]),
-			1_090_000_000,
-			SCAN,
-		)
-		expect(row).toMatchObject({
-			listening: false,
-			text: "ADS-B off in Settings",
-			action: { kind: "settings", label: "Turn on in Settings" },
-		})
-		const [bare] = bandDecoders(
-			[{ ...ADSB, running: false, mode: "off" }],
-			null,
-			1_090_000_000,
-			NO_SCAN,
-		)
-		expect(bare?.action).toMatchObject({ label: "Turn on in Settings" })
-	})
-
-	it("shows a decoder off in Settings as off, with a link to Settings, not a start button", () => {
+		expect(rowAction(stale!, off, SCAN)).toBeNull()
 		const v = parseVerdict({
 			code: "off",
 			text: "ADS-B off in Settings",
 			actions: ["turn-on"],
 		})
-		expect(v).not.toBeNull()
-		const [row] = bandDecoders(
-			[{ ...ADSB, running: false, mode: "off" }],
-			new Map([["readsb", v!]]),
-			1_090_000_000,
-			NO_SCAN,
-		)
-		expect(row).toMatchObject({
-			listening: false,
-			text: "ADS-B off in Settings",
-			action: {
-				kind: "settings",
-				settingId: "dec.readsb",
-				label: "Turn on in Settings",
-			},
-		})
+		expect(rowAction(v!, off, NO_SCAN)).toBeNull()
+	})
+
+	it("never offers Restart or Start to a decoder that is starting, waiting or failing over", () => {
+		for (const code of [
+			"starting",
+			"efficiency-waiting",
+			"out-of-band",
+			"listening",
+		] as const)
+			for (const a of ["restart", "start"] as const)
+				expect(
+					rowAction(verdict({ code, actions: [a] }), ADSB, NO_SCAN),
+				).toBeNull()
+		// the core drops the restart while it restarts the decoder on its own
+		expect(
+			rowAction(
+				verdict({
+					code: "failed",
+					text: "ADS-B failed: restarting on its own",
+				}),
+				ADSB,
+				NO_SCAN,
+			),
+		).toBeNull()
+		expect(
+			rowAction(
+				verdict({ code: "failed", actions: ["restart"] }),
+				ADSB,
+				NO_SCAN,
+			),
+		).toMatchObject({ kind: "decoder", op: "restart" })
+		expect(
+			rowAction(
+				verdict({ code: "stopped", actions: ["start"] }),
+				ADSB,
+				NO_SCAN,
+			),
+		).toMatchObject({ kind: "decoder", op: "start" })
 	})
 })
 
@@ -300,7 +272,7 @@ describe("unknown verdicts", () => {
 			text: "ADS-B waits for something new",
 			actions: [],
 		})
-		expect(primaryAction(v!, ADSB, NO_SCAN)).toBeNull()
+		expect(rowAction(v!, ADSB, NO_SCAN)).toBeNull()
 	})
 
 	it("drops unknown actions and falls back to plain text when none is left", () => {
@@ -315,7 +287,8 @@ describe("unknown verdicts", () => {
 			text: "ADS-B stopped",
 			actions: ["reticulate"],
 		})
-		expect(primaryAction(only!, ADSB, NO_SCAN)).toBeNull()
+		expect(rowAction(v!, ADSB, NO_SCAN)).toMatchObject({ op: "start" })
+		expect(rowAction(only!, ADSB, NO_SCAN)).toBeNull()
 	})
 
 	it("ignores items without a usable verdict", () => {
@@ -393,6 +366,37 @@ describe("verdicts feed", () => {
 		expect(handlers.size).toBe(0)
 	})
 
+	it("asks for the followed frequency and never shows another frequency's answer", async () => {
+		const paths: string[] = []
+		const get = vi.fn(async (path: string) => {
+			paths.push(path)
+			return [
+				{
+					id: "readsb",
+					protocol: "readsb",
+					verdict: { code: "decoding", text: "ADS-B decoding", actions: [] },
+					coversHz: path.endsWith("=1090062000"),
+				},
+			]
+		})
+		const { data } = fakeData(get)
+		const feed = new DecoderVerdictsFeed(data)
+		feed.follow(1_090_062_000)
+		const detach = feed.attach()
+		await vi.waitFor(() => expect(feed.get().hz).toBe(1_090_062_000))
+		expect(paths[0]).toBe("/api/decoders/summary?hz=1090062000")
+		expect(itemsFor(feed.get(), 1_090_062_000)?.[0]?.coversHz).toBe(true)
+		// a new frequency: nothing listed until its own answer arrives
+		expect(itemsFor(feed.get(), 466_000_000)).toEqual([])
+		feed.follow(466_000_000)
+		await vi.waitFor(() => expect(feed.get().hz).toBe(466_000_000))
+		expect(itemsFor(feed.get(), 466_000_000)?.[0]?.coversHz).toBe(false)
+		// malformed frequencies ask without one
+		feed.follow(Number.NaN)
+		await vi.waitFor(() => expect(paths.at(-1)).toBe("/api/decoders/summary"))
+		detach()
+	})
+
 	it("stops asking a core without the summary route", async () => {
 		const get = vi.fn(async () => {
 			throw new ApiError({
@@ -411,6 +415,8 @@ describe("verdicts feed", () => {
 		await feed.load()
 		expect(get).toHaveBeenCalledTimes(1)
 		expect(feed.get().verdicts).toBeNull()
+		// statuses only from now on
+		expect(itemsFor(feed.get(), 1_090_000_000)).toBeNull()
 		detach()
 	})
 })

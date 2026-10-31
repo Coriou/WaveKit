@@ -1,8 +1,9 @@
 // The tuned card (docs/web/canvas/Tuned.dc.html, TunedGallery, Identify; DESIGN.md "Tuned card reworked"):
-// header (type tile that drags the card, protocol + band, state, frequency, signal bars, minimise) → the "now" block
+// header (type tile that drags the card, what it is: the protocol heard, else the decoder whose band holds the frequency
+// (GET /api/decoders/summary?hz=), what Identify named, the band; state, the frequency once, signal bars, minimise) → the "now" block
 // (what was last heard on the channel, by kind: call, transmission, count, message, audio; or band and channel when
-// nothing was, or Identify while it runs) → up to two earlier rows → the decoders on this band with the core's verdict and
-// one action for one that does not run (BandDecoders.tsx) → actions (Map, Activity, Save, ⋯ with Identify,
+// nothing was, or Identify while it runs) → up to two earlier rows → the table of decoders whose band holds the
+// frequency, with the core's verdict and at most one action each (BandDecoders.tsx) → actions (Map, Activity, Save, ⋯ with Identify,
 // Decode as…, Pin, Copy). A message opens in full as the decoded message card (Decode board) inside the card, in a
 // scrolling well; Decode as… is Identify cut to one protocol. Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
 // row says where it is); on a hit it is that signal's card, "Held by the scan". A pinned card keeps its frequency.
@@ -10,7 +11,7 @@
 // name (this session's answer, else what any browser identified there: WG12 nearHz); a transmission on a frequency nothing decodes is identified on its own (auto-identify.ts).
 import { WaveKitIcon } from "@wavekit/brand/react"
 import type { ScannerProtocol } from "@wavekit/api-types"
-import { lazy, Suspense, useEffect, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import {
@@ -43,7 +44,14 @@ import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { BandDecoders } from "./BandDecoders.tsx"
-import { decodersAt } from "./decoders.ts"
+import {
+	bandStateLine,
+	bandTable,
+	cardIdentity,
+	DATA_BAND_LINE,
+	LIVE_STATES,
+} from "./band-table.ts"
+import { decodersHere } from "./decoders.ts"
 import {
 	DECODE_AS,
 	discoveryCard,
@@ -57,7 +65,11 @@ import { openDiscovery } from "../scanner/ui-store.ts"
 import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
 import { tunedCardStore } from "./place.ts"
-import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
+import { signalBars, signalPresent } from "./signal.ts"
+import { DecoderVerdictsFeed, itemsFor } from "./verdicts.ts"
+
+/** The header reads states only: no action context. */
+const NO_ACTIONS = { scanJobId: null, budget: null } as const
 
 // the card's own chunk stays small: the full card (and its JSON viewer) loads when a message is first opened
 const MessageCard = lazy(() =>
@@ -324,7 +336,21 @@ export function TunedCard() {
 
 	const bw = status?.config.bandwidth || 12_500
 	const tolerance = Math.max(bw / 2, 3000)
-	const here = hz === null ? [] : decodersAt(decoders, hz, tolerance)
+	// the core's verdicts for this frequency: which decoders' bands hold it (header and "On this band")
+	const verdictFeed = useMemo(() => new DecoderVerdictsFeed(data), [data])
+	useEffect(() => verdictFeed.attach(), [verdictFeed])
+	useEffect(() => verdictFeed.follow(hz), [verdictFeed, hz])
+	const verdictState = useStore(verdictFeed)
+	const summaryItems = hz === null ? [] : itemsFor(verdictState, hz)
+	// the read for a new frequency is on its way: nothing is claimed about its decoders yet
+	const pending = hz !== null && !verdictState.legacy && verdictState.hz !== hz
+	const bandRows =
+		hz === null ? [] : bandTable(summaryItems, decoders, hz, NO_ACTIONS, clock)
+	// the decoders whose band holds the frequency (never one whose channel only follows the tuner)
+	const here =
+		hz === null
+			? []
+			: decodersHere(decoders, new Set(bandRows.map(r => r.id)), hz)
 	const types = here.map(d => d.type)
 	const fleet = fleetHere(types)
 
@@ -430,7 +456,8 @@ export function TunedCard() {
 			onIt,
 			heldByScan,
 			transmitting: squelchOpen,
-			decodersHere: here.length,
+			// while the core's answer for this frequency is on its way, it may yet name a decoder
+			decodersHere: pending ? Math.max(1, here.length) : here.length,
 			identifyShown: id.targetHz !== null,
 			known: known !== null,
 			triedHz: autoTried.current,
@@ -488,37 +515,39 @@ export function TunedCard() {
 
 	const mode = status ? modeSpec(status.config.modulation) : null
 	const bandMode = modulationOf(band?.band.mode)
+	// a data band (the plan's mode is RAW: decoders only) or a RAW receiver has no audio to be quiet or loud
+	const noAudio =
+		bandMode === "raw" || (onIt && status?.config.modulation === "raw")
 	const bandSays =
 		bandMode !== null && mode !== null && bandMode !== status?.config.modulation
 	const notLive =
-		here.length === 0
+		here.length === 0 && !pending
 			? "No decoder runs on this frequency, so nothing here is decoded live."
 			: ""
-	const plainLine = active.length
-		? `Decoded here by ${active.map(d => d.type).join(", ")}. Nothing heard yet.`
-		: here.length
-			? `${here.map(d => d.type).join(", ")} listens here but is not running`
-			: named && known
-				? `Identified as ${named.proto} at ${clockText(known.at)}. ${notLive}`
-				: heardBefore
-					? `Heard before: ${heardBefore}. ${notLive}`
-					: bandSays
-						? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
-						: "Nothing decodes this frequency. Identify finds out what it is."
-	const proto =
-		now.protocol ??
-		(active[0]
-			? decoderLabel(active[0].type)
-			: here[0]
-				? decoderLabel(here[0].type)
-				: named
-					? named.proto
-					: mode
-						? mode.label
-						: "Unknown")
-	const protoSub = [band?.band.name, channel?.name, named?.sub]
-		.filter(Boolean)
-		.join(" · ")
+	const liveRows = bandRows.filter(r => LIVE_STATES.has(r.state))
+	const names = (rows: readonly { name: string }[]) =>
+		[...new Set(rows.map(r => r.name))].join(", ")
+	const plainLine = liveRows.length
+		? `Decoded here by ${names(liveRows)}. Nothing heard yet.`
+		: bandRows.length
+			? `${names(bandRows)} ${bandRows.length === 1 ? "covers" : "cover"} this frequency but ${bandRows.length === 1 ? "is" : "are"} not decoding now.`
+			: pending
+				? "Checking which decoders cover this frequency…"
+				: named && known
+					? `Identified as ${named.proto} at ${clockText(known.at)}. ${notLive}`
+					: heardBefore
+						? `Heard before: ${heardBefore}. ${notLive}`
+						: bandSays && !noAudio
+							? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
+							: "Nothing decodes this frequency. Identify finds out what it is."
+	const { proto, sub: protoSub } = cardIdentity({
+		heard: now.protocol,
+		named: named ? { proto: named.proto, sub: named.sub } : null,
+		rows: bandRows,
+		band: band?.band.name ?? null,
+		channel: channel?.name ?? null,
+		modeLabel: mode?.label ?? null,
+	})
 	const snr =
 		live && level.channelPowerDbfs !== null && level.noiseFloorDbfs !== null
 			? level.channelPowerDbfs - level.noiseFloorDbfs
@@ -547,17 +576,16 @@ export function TunedCard() {
 						: "Transmitting"
 					: now.quiet && !(squelchOpen && now.kind === "plain")
 						? now.quiet
-						: active.length
-							? `Decoding · ${active.map(d => d.type).join(", ")}`
-							: here.length
-								? `${here[0]?.type ?? "Decoder"} paused${here[0]?.suspended ? " · off band" : ""}`
+						: (bandStateLine(bandRows) ??
+							(noAudio
+								? DATA_BAND_LINE
 								: squelchOpen
 									? "Signal present"
 									: live
 										? present === null
 											? "Squelch off"
 											: "Quiet"
-										: "Not decoded here"
+										: "Not decoded here"))
 	const liveState = idRunning || heldByScan || (onIt && squelchOpen)
 	const stateTone = liveState
 		? "accent"
@@ -886,20 +914,27 @@ export function TunedCard() {
 								<Label>
 									{band
 										? `${groupName(band.band.group)} · ${band.band.name}`
-										: "No band plan entry"}
+										: bandRows[0]
+											? `${bandRows[0].name} band`
+											: "No band plan entry"}
 								</Label>
-								<div className="wkf-big-row">
-									<span className="wkf-big">
-										{channel ? channel.name : formatMHz(hz)}
-									</span>
-									{!channel && <span className="wkf-big-unit">MHz</span>}
-								</div>
+								{channel && (
+									<div className="wkf-big-row">
+										<span className="wkf-big">{channel.name}</span>
+									</div>
+								)}
 								<span className="wkf-line">{plainLine}</span>
-								{status && (
+								{noAudio ? (
 									<span className="wkf-line wkf-quiet wkf-small">
-										{mode?.label ?? status.config.modulation} ·{" "}
-										{formatWidth(status.config.bandwidth)} channel
+										{DATA_BAND_LINE}
 									</span>
+								) : (
+									status && (
+										<span className="wkf-line wkf-quiet wkf-small">
+											{mode?.label ?? status.config.modulation} ·{" "}
+											{formatWidth(status.config.bandwidth)} channel
+										</span>
+									)
 								)}
 							</>
 						)}
@@ -934,7 +969,14 @@ export function TunedCard() {
 					)}
 
 					{!idHere && !full && (
-						<BandDecoders hz={hz} decoders={decoders} readOnly={readOnly} />
+						<BandDecoders
+							hz={hz}
+							decoders={decoders}
+							items={summaryItems}
+							feed={verdictFeed}
+							now={clock}
+							readOnly={readOnly}
+						/>
 					)}
 
 					<div className="wkf-actions">

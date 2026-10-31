@@ -1,51 +1,167 @@
 /* Tuned card: "On this band" (BandDecoders.tsx). Layout only: materials, colours and states come from the
-   ui.css recipes, the card's .wkf-state and .wkf-dot, and tokens. A decoder that does not run has a hollow dot
-   and says why in words. */
+   ui.css recipes, the card's .wkf-state and .wkf-dot, and tokens. One tbody per decoder: a row of facts
+   (decoder, state, last decode) over a full-width detail line with the action at its right. A decoder that
+   does not run has a hollow dot and says why in words. Below 280 px the table stacks. */
 @layer wk-app {
-	.wkf-band {
+	.wkf-onband {
+		container: wkf-onband / inline-size;
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: var(--wk-sp-3);
 	}
-	.wkf-band > h3 {
-		margin: 0 0 2px;
-	}
-	.wkf-band-list {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
+	.wkf-onband > h3 {
 		margin: 0;
+	}
+	.wkf-bt {
+		width: 100%;
+		border-collapse: collapse;
+		table-layout: auto;
+		font-size: var(--wk-fs-md);
+		line-height: 1.4;
+		color: var(--wk-text-2);
+	}
+	.wkf-bt th,
+	.wkf-bt td {
 		padding: 0;
-		list-style: none;
+		text-align: left;
+		vertical-align: baseline;
+		font-weight: 400;
 	}
-	.wkf-band-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-height: 28px;
+	.wkf-bt thead th {
+		padding: 0 var(--wk-sp-4) var(--wk-sp-2) 0;
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		white-space: nowrap;
 	}
-	.wkf-band-state {
-		flex: 1;
+	.wkf-bt .wkf-bt-last {
+		padding-right: 0;
+		text-align: right;
+	}
+	.wkf-bt-dec {
+		border-top: 1px solid var(--wk-line-08);
+	}
+	.wkf-bt-main > * {
+		padding: var(--wk-sp-4) var(--wk-sp-4) 0 0;
+	}
+	.wkf-bt-main > .wkf-bt-last {
+		padding-right: 0;
+		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+	}
+	.wkf-bt-dec:not(:has(.wkf-bt-sub)) > .wkf-bt-main > * {
+		padding-bottom: var(--wk-sp-4);
+	}
+	.wkf-bt-name {
 		min-width: 0;
+	}
+	.wkf-bt-title {
+		display: block;
+		font-weight: 700;
+		color: var(--wk-text);
+	}
+	.wkf-bt-prog {
+		display: block;
+		font-family: var(--wk-font-mono);
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+	}
+	.wkf-bt-state > .wkf-state {
 		font-size: var(--wk-fs-md);
 		color: var(--wk-text-2);
-		white-space: normal;
 	}
-	.wkf-band-state[data-tone="accent"] {
-		color: var(--wk-text-2);
+	.wkf-bt-state > .wkf-state[data-tone="accent"] {
+		color: var(--wk-text);
 	}
-	.wkf-band-state[data-tone="accent"] > .wkf-dot {
+	.wkf-bt-state > .wkf-state[data-tone="accent"] > .wkf-dot {
 		color: var(--wk-accent);
 	}
-	.wkf-band-state > .wkf-dot[data-off] {
+	.wkf-bt .wkf-dot[data-off] {
 		background: transparent;
 		box-shadow: inset 0 0 0 1.5px var(--wk-text-3);
 	}
-	.wkf-band-text {
-		min-width: 0;
+	.wkf-bt-dec[data-state="failed"] .wkf-dot[data-off] {
+		box-shadow: inset 0 0 0 1.5px var(--wk-danger);
+	}
+	.wkf-bt-sub > td {
+		padding: var(--wk-sp-2) 0 var(--wk-sp-4);
+		vertical-align: middle;
+	}
+	.wkf-bt-detail {
+		color: var(--wk-text-3);
 		overflow-wrap: anywhere;
 	}
-	.wkf-band-act {
-		flex: none;
+	.wkf-bt-sub > .wkf-bt-act {
+		padding-left: var(--wk-sp-4);
+		text-align: right;
+		white-space: nowrap;
+	}
+	.wkf-bt-link {
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--wk-accent);
+		font: inherit;
+		cursor: pointer;
+		text-decoration: underline;
+		text-decoration-color: rgba(var(--wk-accent-rgb), 0.4);
+		text-underline-offset: 2px;
+	}
+	.wkf-bt-link:hover {
+		text-decoration-color: currentColor;
+	}
+	.wkf-bt-foot {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	/* drawer and phone widths: one decoder reads as a short stack */
+	@container wkf-onband (max-width: 279px) {
+		.wkf-bt,
+		.wkf-bt tbody,
+		.wkf-bt tr,
+		.wkf-bt th,
+		.wkf-bt td {
+			display: block;
+		}
+		.wkf-bt thead {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+		}
+		.wkf-bt-main {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: baseline;
+			column-gap: var(--wk-sp-4);
+			padding-top: var(--wk-sp-4);
+		}
+		.wkf-bt-main > * {
+			padding: 0;
+		}
+		.wkf-bt-main > .wkf-bt-name {
+			flex: 1 0 100%;
+		}
+		.wkf-bt-main > .wkf-bt-last {
+			margin-left: auto;
+		}
+		.wkf-bt-sub {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: var(--wk-sp-2) var(--wk-sp-4);
+			padding: var(--wk-sp-2) 0 var(--wk-sp-4);
+		}
+		.wkf-bt-sub > td {
+			padding: 0;
+		}
+		.wkf-bt-sub > .wkf-bt-detail {
+			flex: 1 1 100%;
+		}
+		.wkf-bt-sub > .wkf-bt-act {
+			margin-left: auto;
+			padding-left: 0;
+		}
 	}
 }

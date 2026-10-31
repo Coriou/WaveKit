@@ -16,6 +16,26 @@ export function decodersAt(
 		.sort((a, b) => dist(a) - dist(b))
 }
 
+/**
+ * The decoders whose band holds the tuned frequency (`ids`, the core's `coversHz`: band-table.ts coveringIds),
+ * nearest target first. A decoder whose channel only follows the tuner is not among them.
+ */
+export function decodersHere(
+	decoders: readonly DecoderInfo[],
+	ids: ReadonlySet<string>,
+	hz: number,
+): DecoderInfo[] {
+	const dist = (d: DecoderInfo) =>
+		Math.min(
+			...(d.bandAssessment?.targetsHz ?? d.targetFrequenciesHz ?? []).map(f =>
+				Math.abs(f - hz),
+			),
+		)
+	return decoders
+		.filter(d => ids.has(d.id))
+		.sort((a, b) => dist(a) - dist(b) || a.id.localeCompare(b.id, "en"))
+}
+
 export interface DecodersState {
 	decoders: readonly DecoderInfo[]
 	loaded: boolean

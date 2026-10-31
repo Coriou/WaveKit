@@ -14,6 +14,7 @@ import Fastify from "fastify"
 import type { FastifyError, FastifyInstance, FastifyReply } from "fastify"
 import type { WebSocket } from "ws"
 import {
+	DECODER_SUMMARY_MAX_HZ,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 } from "@wavekit/api-types"
@@ -42,7 +43,11 @@ import type {
 import type { FloodEvent } from "./activity-floods.ts"
 import { floodEvents } from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
-import { buildDecoderSummaries, withAdsbBudget } from "./decoder-summary.ts"
+import {
+	buildDecoderSummaries,
+	summaryHzQuery,
+	withAdsbBudget,
+} from "./decoder-summary.ts"
 import { registerReceiverMock } from "./receiver.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
@@ -1537,8 +1542,19 @@ export async function buildMockServer(
 
 	app.get("/api/decoders", async () => decoders())
 	// The core's one verdict per decoder (./decoder-summary.ts); ADS-B near 1090 MHz waits for CPU budget.
-	app.get("/api/decoders/summary", async () =>
-		buildDecoderSummaries(decoders(), Date.now()),
+	// `?hz=` adds `coversHz` (whose band holds that frequency), as the core does.
+	app.get<{ Querystring: { hz?: string } }>(
+		"/api/decoders/summary",
+		async (request, reply) => {
+			const hz = summaryHzQuery(request.query.hz)
+			if (hz === "invalid")
+				return reply.code(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid query parameter: hz must be a positive finite number up to ${DECODER_SUMMARY_MAX_HZ} Hz`,
+				})
+			return buildDecoderSummaries(decoders(), Date.now(), hz)
+		},
 	)
 	app.get<{ Params: { id: string } }>(
 		"/api/decoders/:id",

@@ -1,5 +1,6 @@
 // GET /api/decoders/summary for the mock: the core's per-decoder verdict (src/api/routes/decoder-summary.ts),
 // derived from the mock's GET /api/decoders statuses with the same precedence and wording.
+import { DECODER_SUMMARY_MAX_HZ } from "@wavekit/api-types"
 import type {
 	DecoderInfo,
 	DecoderSummary,
@@ -117,7 +118,18 @@ export type VerdictInput = Pick<
 	| "suspension"
 	| "efficiency"
 	| "placements"
+	| "health"
+	| "nextRestartAt"
 >
+
+/** The core's "failed: restarting on its own": a restart is scheduled or a crash-loop retry runs on probation. */
+function retrying(d: VerdictInput): boolean {
+	return (
+		d.nextRestartAt !== undefined ||
+		d.health === "restarting" ||
+		(d.health === "faulted" && d.running)
+	)
+}
 
 function efficiencyCode(d: VerdictInput): DecoderVerdictCode {
 	const detail: string | undefined =
@@ -185,9 +197,68 @@ export function mockVerdict(
 	health: DecoderSummary["health"],
 ): DecoderVerdict {
 	const code = mockVerdictCode(d, health)
-	const entry = VERDICTS[code]
-	const name = NAMES[d.type] ?? "Decoder"
-	return { code, text: `${name} ${entry.text}`, actions: [...entry.actions] }
+	const entry =
+		code === "failed" && retrying(d)
+			? { text: "failed: restarting on its own", actions: [] }
+			: VERDICTS[code]
+	return {
+		code,
+		text: `${mockDecoderName(d.type)} ${entry.text}`,
+		actions: [...entry.actions],
+	}
+}
+
+/** The core's decoderName: the plain name of a type, "Decoder" for any other. */
+export function mockDecoderName(type: string): string {
+	return Object.hasOwn(NAMES, type) ? NAMES[type]! : "Decoder"
+}
+
+/** The core's tuned-band reach (TUNED_TARGET_TOLERANCE_HZ): 200 kHz, the offset readsb accepts from 1090 MHz. */
+export const MOCK_TUNED_REACH_HZ = 200_000
+
+const positive = (n: unknown): n is number =>
+	typeof n === "number" && Number.isFinite(n) && n > 0
+
+/**
+ * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
+ * lowest and highest target, or inside a range widened by the reach. Every mock decoder has a band, so the
+ * core's band-plan fallback for decoders without one is not needed here: no band reads false. Scanner probes
+ * never cover; malformed values never match.
+ */
+export function mockCoversHz(
+	d: Pick<DecoderInfo, "owner" | "bandAssessment">,
+	hz: number,
+): boolean {
+	if (!positive(hz) || d.owner === "scanner") return false
+	const reach = MOCK_TUNED_REACH_HZ
+	const targets = (d.bandAssessment?.targetsHz ?? []).filter(positive)
+	if (targets.some(t => Math.abs(t - hz) <= reach)) return true
+	if (
+		targets.length > 1 &&
+		hz >= Math.min(...targets) - reach &&
+		hz <= Math.max(...targets) + reach
+	)
+		return true
+	return (d.bandAssessment?.rangesHz ?? []).some(
+		r =>
+			positive(r.minHz) &&
+			positive(r.maxHz) &&
+			r.minHz <= r.maxHz &&
+			hz >= r.minHz - reach &&
+			hz <= r.maxHz + reach,
+	)
+}
+
+/**
+ * The core's `?hz=` reading: a positive finite number up to DECODER_SUMMARY_MAX_HZ, absent when not given,
+ * "invalid" otherwise (the core answers 400).
+ */
+export function summaryHzQuery(raw: unknown): number | undefined | "invalid" {
+	if (raw === undefined) return undefined
+	const hz = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN
+	return Number.isFinite(hz) && hz > 0 && hz <= DECODER_SUMMARY_MAX_HZ
+		? hz
+		: "invalid"
 }
 
 function healthOf(d: DecoderInfo, now: number): DecoderSummary["health"] {
@@ -203,11 +274,13 @@ function healthOf(d: DecoderInfo, now: number): DecoderSummary["health"] {
 export function buildDecoderSummaries(
 	decoders: readonly DecoderInfo[],
 	now: number,
+	hz?: number,
 ): DecoderSummary[] {
 	return decoders.map(d => {
 		const health = healthOf(d, now)
 		return {
 			id: d.id,
+			name: mockDecoderName(d.type),
 			protocol: d.type,
 			state: d.running ? "running" : "stopped",
 			placements: d.running
@@ -226,6 +299,7 @@ export function buildDecoderSummaries(
 			suspensionReason: d.suspension?.reasonCode ?? null,
 			health,
 			verdict: mockVerdict(d, health),
+			...(hz === undefined ? {} : { coversHz: mockCoversHz(d, hz) }),
 		}
 	})
 }
