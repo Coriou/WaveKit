@@ -9,7 +9,6 @@
  * Pure data and pure helpers. General public band-plan knowledge; no regulatory citation.
  */
 import type { BandRegion } from "@wavekit/api-types"
-import { BAND_REGIONS } from "../../decoders/band-region.js"
 import { bandplansFor } from "../scanner/bandplan/index.js"
 import type { Bandplan } from "../scanner/bandplan/index.js"
 
@@ -92,9 +91,24 @@ const ADSB: Bandplan = {
  */
 export const SKIP_ONLY_PLAN_IDS: ReadonlySet<string> = new Set([ADSB.id])
 
+// Every region (this module may import only the scanner band plan modules and api-types, so it cannot share
+// src/decoders/band-region.ts BAND_REGIONS); the check below fails the build when BandRegion grows.
+const ADSB_REGIONS = [
+	"EU",
+	"US",
+	"CA",
+	"AU",
+	"NZ",
+	"JP",
+	"CN",
+] as const satisfies readonly BandRegion[]
+type MissingAdsbRegion = Exclude<BandRegion, (typeof ADSB_REGIONS)[number]>
+const adsbRegionsComplete: MissingAdsbRegion extends never ? true : never = true
+void adsbRegionsComplete
+
 export const BUILTIN_SUPPLEMENT: readonly SupplementPlan[] = Object.freeze([
 	{ regions: ["EU"], before: "pmr446", plan: PAGER_FR },
-	{ regions: BAND_REGIONS, before: "", plan: ADSB },
+	{ regions: ADSB_REGIONS, before: "", plan: ADSB },
 ])
 
 const cache = new Map<BandRegion, readonly Bandplan[]>()
