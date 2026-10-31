@@ -86,12 +86,19 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 
 	// After a plain resume the rate is unverified: a sustained rate-truth mismatch is what the
 	// receiver delivers, so a measured common rate is adopted (adoptObservedSampleRate).
-	sourceManager.on("rate-truth-changed", sourceId => {
+	// A flagged mismatch keeps updating its measurement without another transition (a first
+	// estimate between two common rates settles later), so adoption is retried on each metrics
+	// interval (METRICS_INTERVAL_MS, 5 s per source, after the rate-truth check) while the rate is in doubt;
+	// otherwise the listener stops at one Set lookup.
+	const adoptMeasuredRate = (sourceId: string) => {
+		if (!tunerController.isSampleRateUnverified(sourceId)) return
 		const measured =
 			sourceManager.getStatus?.(sourceId)?.rateMismatch?.measuredSampleRateHz
 		if (measured !== undefined)
 			tunerController.adoptObservedSampleRate(sourceId, measured)
-	})
+	}
+	sourceManager.on("rate-truth-changed", adoptMeasuredRate)
+	sourceManager.on("metrics", adoptMeasuredRate)
 
 	if (!relayEnabled) return
 

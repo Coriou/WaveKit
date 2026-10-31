@@ -586,6 +586,43 @@ describe("SourceManager feed pause / resume", () => {
 		expect(upstream.dongle.centre).toBe(162_000_000)
 	})
 
+	it("plain resume: a configured manual gain is not written on later dropout reconnects either", async () => {
+		const { upstream, manager } = await started()
+		const tuner = wiredTuner(manager)
+		await manager.connect({
+			...config(upstream.port),
+			tuner: { gainMode: "manual", gainDb: 30 },
+		})
+		const first = await settledSession(manager, upstream, 0, 2)
+		expect(first.frames).toEqual([
+			[0x03, 1],
+			[0x04, 300],
+		])
+		await manager.pause("rtl")
+		await waitFor(() => first.closed)
+		retuneDuringPause(upstream.dongle)
+
+		await manager.resume("rtl")
+		const second = await settledSession(manager, upstream, 1)
+		expect(second.frames).toEqual([])
+		second.socket.destroy()
+		const third = await settledSession(manager, upstream, 2)
+		expect(third.frames).toEqual([])
+		expect(upstream.dongle).toMatchObject({ gainMode: 1, gain: 400 })
+		expect(tuner.getState("rtl")!.unknownFields).toEqual(
+			expect.arrayContaining(["gainMode", "gain"]),
+		)
+	}, 15_000)
+
+	it("a repeated pause keeps the pause mark: relay commands since the first are still written", async () => {
+		const { upstream, manager, tuner } = await tunedThenPaused()
+		tuner.applyExternalCommand("rtl", 0x01, 162_000_000)
+		expect((await manager.pause("rtl")).changed).toBe(false)
+		await manager.resume("rtl")
+		const second = await settledSession(manager, upstream, 1, 1)
+		expect(second.frames).toEqual([[0x01, 162_000_000]])
+	})
+
 	it("the resume kind lasts until the resumed session announced its first payload", async () => {
 		const { upstream, manager } = await tunedThenPaused()
 		await manager.resume("rtl")

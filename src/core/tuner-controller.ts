@@ -929,6 +929,13 @@ export class TunerController extends EventEmitter {
 	 * (relay commands during the pause) are written by a plain resume. Consumed by the next sync.
 	 */
 	private pausedAtSeq: Map<string, number> = new Map()
+	/**
+	 * Sources whose last resume was plain: until a restore resume (or the source's removal) no
+	 * configured frame is owed on any later connection of the source, so a dropout reconnect
+	 * writes no configured gain mode, gain or AGC the user did not set ("never fight SDR++").
+	 * Fields the user sets afterwards (API or relay) are accepted and replayed as usual.
+	 */
+	private plainResumeHold: Set<string> = new Set()
 	private acceptanceSeq = 0
 	/**
 	 * WG9 req 3.2: frequency/sampleRate written on the current connection, by this core
@@ -1050,6 +1057,7 @@ export class TunerController extends EventEmitter {
 		this.ignoredRelayFields.delete(sourceId)
 		this.unverifiedFields.delete(sourceId)
 		this.pausedAtSeq.delete(sourceId)
+		this.plainResumeHold.delete(sourceId)
 		this.connectionTuningWrites.delete(sourceId)
 		this.rateProvedOnConnection.delete(sourceId)
 		this.rateProofInFlight.delete(sourceId)
@@ -2006,6 +2014,8 @@ export class TunerController extends EventEmitter {
 
 		if (options.resume === "plain")
 			return this.synchronizeOnPlainResume(sourceId, state, pausedAt)
+		// A restore resume writes the configured frames again (and every later connection).
+		if (options.resume === "restore") this.plainResumeHold.delete(sourceId)
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
@@ -2163,6 +2173,8 @@ export class TunerController extends EventEmitter {
 		else this.desiredFields.delete(sourceId)
 		// A pre-pause inferred value is no more proven than an accepted one.
 		this.inferredFields.delete(sourceId)
+		// Nothing configured is owed on this or any later connection (plainResumeHold).
+		this.plainResumeHold.add(sourceId)
 
 		const doubt = new Set<TunerStateField>(PLAIN_RESUME_UNVERIFIED)
 		for (const field of dropped) {
@@ -2228,13 +2240,14 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * Marks the source's feed paused (wired to SourceManager "feed-changed"): fields accepted from
-	 * now on (tuner relay commands while the source is down) are written by a plain resume. A
-	 * repeated mark keeps the first; the next synchronizeOnConnect consumes it.
+	 * Marks the source's feed paused (wired to SourceManager "feed-changed", which a repeated
+	 * pause of an already paused feed does not emit): fields accepted from now on (tuner relay
+	 * commands while the source is down) are written by a plain resume. Each new pause moves the
+	 * mark, so a relay command from an earlier pause whose resume never reached a payload is not
+	 * written later. The next synchronizeOnConnect consumes it.
 	 */
 	noteFeedPaused(sourceId: string): void {
-		if (!this.tunerStates.has(sourceId) || this.pausedAtSeq.has(sourceId))
-			return
+		if (!this.tunerStates.has(sourceId)) return
 		this.pausedAtSeq.set(sourceId, this.acceptanceSeq)
 	}
 
@@ -2262,18 +2275,25 @@ export class TunerController extends EventEmitter {
 	 * later external rate change is adopted the same way; setting a rate ends it. True when adopted.
 	 * Anything else keeps the old rate and the mismatch flag.
 	 */
+	/** True while a plain resume left the source's sample rate unverified (adoption may apply). */
+	isSampleRateUnverified(sourceId: string): boolean {
+		return this.unverifiedFields.get(sourceId)?.has("sampleRate") === true
+	}
+
 	adoptObservedSampleRate(sourceId: string, measuredHz: number): boolean {
 		const state = this.tunerStates.get(sourceId)
-		if (
-			!state ||
-			this.unverifiedFields.get(sourceId)?.has("sampleRate") !== true
-		)
-			return false
+		if (!state || !this.isSampleRateUnverified(sourceId)) return false
 		const matches = COMMON_RTL_SAMPLE_RATES.filter(
 			rate => Math.abs(measuredHz / rate - 1) <= RESUME_RATE_MATCH,
 		)
 		const rate = matches.length === 1 ? matches[0] : undefined
 		if (rate === undefined || !isValidRtlSampleRate(rate)) return false
+		// Retried on every measurement update (tuner-wiring): an adopted rate is no news.
+		if (
+			state.sampleRate === rate &&
+			this.sourceManager.getCaps(sourceId)?.sampleRate === rate
+		)
+			return false
 		state.sampleRate = rate
 		try {
 			this.sourceManager.updateSourceCaps(sourceId, { sampleRate: rate })
@@ -2356,7 +2376,11 @@ export class TunerController extends EventEmitter {
 		state: TunerState,
 	): { attempted: boolean; commands: string[]; error?: string } {
 		const configured = this.configuredTuning.get(sourceId)
-		if (!configured || state.controlMode !== "internal")
+		if (
+			!configured ||
+			state.controlMode !== "internal" ||
+			this.plainResumeHold.has(sourceId)
+		)
 			return { attempted: false, commands: [] }
 		const held = (field: TunerStateField) =>
 			this.isOperatorHeld(sourceId, field)

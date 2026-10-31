@@ -826,10 +826,14 @@ What a resume writes to the receiver depends on the body:
   of pulling the receiver back. The tuner state keeps the last known values, but
   `frequency`, `sampleRate`, `gainMode` and `gain` are listed in `unknownFields` until they
   are set again (through the API, the relay or a restore). The values accepted before the
-  pause are no longer restored on a later dropout either. When the rate-truth check then
-  measures a sustained rate within 1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536,
-  1.792, 1.92, 2.048, 2.16, 2.4, 2.56, 2.88 or 3.2 Msps), that rate is adopted into the
-  tuner state and the caps (it stays in `unknownFields`: measured, not commanded). Scanner side: a lease recovery queued for the source (a job
+  pause are no longer restored on a later dropout either, and no later dropout reconnect
+  writes the configured gain until a restore resume (a value set through the API or the
+  relay afterwards is restored as usual). Relay commands are written only when they arrived
+  after the latest pause. When the rate-truth check then measures a sustained rate within
+  1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536, 1.792, 1.92, 2.048, 2.16, 2.4, 2.56,
+  2.88 or 3.2 Msps), that rate is adopted into the tuner state and the caps (it stays in
+  `unknownFields`: measured, not commanded); the match is retried as the measurement
+  settles, so a first estimate between two rates is adopted once it converges. Scanner side: a lease recovery queued for the source (a job
   that ended while the feed was paused, or a crashed sweep) is settled without writing its
   pre-pause snapshot, a gain restore owed after a lost band-gain lease is dropped, and no
   band gain is applied; a sweep that held the source keeps its lease and continues with
@@ -1454,7 +1458,8 @@ next connection). A `config` write is not operator activity: it never preempts a
 scanner lease. Without `tuner` every connect writes exactly what it wrote before
 the 2026-10-18 core. Through a shared rtlmux every core (re)connect rewrites the configured gain,
 overwriting a gain another client (SDR++) set there; a gain set through this API
-still wins.
+still wins. After a plain resume of a paused feed no connection writes it until a
+restore resume (see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)).
 
 ```yaml
 sources:

@@ -234,11 +234,98 @@ describe("TunerController reconnect synchronization", () => {
 			await tuneAndPause()
 			resume("plain")
 			transport.frames.length = 0
+			// A new connection, as SourceManager "connected" announces it in production.
+			controller.noteSourceConnected("rtl-1")
 			expect(controller.synchronizeOnConnect("rtl-1").commands).toEqual([])
 			expect(transport.frames).toEqual([])
 			// Still unverified, still on the last known values.
 			expect(controller.getState("rtl-1")!.unknownFields).toContain("frequency")
 			expect(transport.caps.centerFreq).toBe(145_000_000)
+		})
+
+		it.each(["restore", "reset"] as const)(
+			"plain: no configured gain on any later dropout reconnect until set (reconnectPolicy %s)",
+			async reconnectPolicy => {
+				controller = new TunerController(
+					testLogger,
+					transport as unknown as SourceManager,
+					{ reconnectPolicy },
+				)
+				controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
+				controller.setConfiguredTuning("rtl-1", {
+					gainMode: "manual",
+					gainDb: 30,
+					agcMode: false,
+				})
+				// The first connection writes the configured gain.
+				controller.noteSourceConnected("rtl-1")
+				controller.synchronizeOnConnect("rtl-1")
+				expect(transport.frames).toEqual([
+					[0x03, 1],
+					[0x04, 300],
+					[0x08, 0],
+				])
+				controller.noteFeedPaused("rtl-1")
+				controller.noteSourceConnected("rtl-1")
+				resume("plain")
+				expect(transport.frames).toEqual([])
+				for (let dropout = 0; dropout < 2; dropout++) {
+					controller.noteSourceConnected("rtl-1")
+					expect(controller.synchronizeOnConnect("rtl-1").commands).toEqual([])
+				}
+				expect(transport.frames).toEqual([])
+
+				// A gain the user sets is replayed, still without the configured AGC.
+				await controller.setGain("rtl-1", 400)
+				transport.frames.length = 0
+				controller.noteSourceConnected("rtl-1")
+				controller.synchronizeOnConnect("rtl-1")
+				expect(transport.frames).toEqual(
+					reconnectPolicy === "restore" ? [[0x04, 400]] : [],
+				)
+
+				// A restore resume ends the hold: configured frames are owed again.
+				controller.noteFeedPaused("rtl-1")
+				controller.noteSourceConnected("rtl-1")
+				resume("restore")
+				controller.noteSourceConnected("rtl-1")
+				transport.frames.length = 0
+				controller.synchronizeOnConnect("rtl-1")
+				expect(transport.frames).toEqual(
+					reconnectPolicy === "restore"
+						? [
+								[0x08, 0],
+								[0x04, 400],
+							]
+						: [
+								[0x03, 1],
+								[0x04, 300],
+								[0x08, 0],
+							],
+				)
+			},
+		)
+
+		it("plain: a new pause before the previous resume's first payload drops that pause's relay commands", async () => {
+			await tuneAndPause()
+			controller.applyExternalCommand("rtl-1", 0x01, 162_000_000)
+			// The resume connects but is paused again before its first payload (no sync);
+			// meanwhile SDR++ retunes the shared dongle unseen.
+			controller.noteSourceConnected("rtl-1")
+			controller.noteFeedPaused("rtl-1")
+			controller.noteSourceConnected("rtl-1")
+			resume("plain")
+			expect(transport.frames).toEqual([])
+			expect(controller.getState("rtl-1")!.unknownFields).toContain("frequency")
+		})
+
+		it("plain: relay commands after the latest pause are still written", async () => {
+			await tuneAndPause()
+			controller.applyExternalCommand("rtl-1", 0x01, 162_000_000)
+			controller.noteFeedPaused("rtl-1")
+			controller.applyExternalCommand("rtl-1", 0x01, 163_000_000)
+			resume("plain")
+			expect(transport.frames).toEqual([[0x01, 163_000_000]])
 		})
 
 		it("plain: writes the relay commands accepted during the pause", async () => {
