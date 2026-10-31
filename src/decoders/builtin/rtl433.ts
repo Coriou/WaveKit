@@ -10,6 +10,7 @@
  * IQ data (e.g., 2.048 Msps) down to rtl_433's preferred rate (250 kHz or 1 MHz).
  */
 
+import { z } from "zod"
 import {
 	IqDecimateDecoder,
 	iqDecimationRates,
@@ -36,6 +37,53 @@ import {
 	RTL433_TARGET_SAMPLE_RATE_MAX_HZ,
 	RTL433_TARGET_SAMPLE_RATE_MIN_HZ,
 } from "../options/rtl433.js"
+
+/**
+ * rtl_433 `-M stats:<level>:<interval>`: level 1 (frame counts, plus per-protocol
+ * counts only for protocols that decoded), every 10 s. rtl_433 counts frames
+ * either way; the report is one JSON line per interval on stdout, which it
+ * resets after each line (the counts are deltas).
+ */
+export const RTL433_STATS_ARG = "stats:1:10"
+
+/** True when `extraArgs` already sets a `-M stats` report; the operator's then stands. */
+export function rtl433StatsConfigured(
+	extraArgs: readonly string[] | undefined,
+): boolean {
+	if (!extraArgs) return false
+	return extraArgs.some((arg, i) => {
+		if (arg === "-M") return (extraArgs[i + 1] ?? "").startsWith("stats")
+		return arg.startsWith("-Mstats")
+	})
+}
+
+const Count = z.number().finite()
+
+/**
+ * An rtl_433 stats report (`-M stats`): `frames.count` pulse packages detected
+ * (heard), `frames.events` events decoded. Event lines carry `model`, a report
+ * never does.
+ */
+const Rtl433StatsSchema = z.object({
+	since: z.string(),
+	frames: z.object({ count: Count, events: Count }).passthrough(),
+})
+
+/**
+ * The counter deltas of an rtl_433 stats report, or null when the object is not
+ * one. Never throws.
+ */
+export function parseRtl433Stats(
+	json: unknown,
+): { detections: number; framesOk: number } | null {
+	if (json === null || typeof json !== "object" || "model" in json) return null
+	const parsed = Rtl433StatsSchema.safeParse(json)
+	if (!parsed.success) return null
+	return {
+		detections: parsed.data.frames.count,
+		framesOk: parsed.data.frames.events,
+	}
+}
 
 /** Output format options for rtl_433 */
 export type Rtl433OutputFormat = "json" | "csv"
@@ -340,6 +388,12 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 			args.push("-f", String(Math.round(centreHz)))
 		}
 		args.push("-M", "level")
+		// Frame counts for GET /api/decoders/summary `counters` (heard vs decoded).
+		if (
+			this.options.outputFormat === "json" &&
+			!rtl433StatsConfigured(this.options.extraArgs)
+		)
+			args.push("-M", RTL433_STATS_ARG)
 
 		// Enable analyze mode for unknown signals (Requirement 8.3)
 		if (this.options.analyze) {
@@ -395,6 +449,21 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 		if (trimmedLine.startsWith("{")) {
 			try {
 				const parsed: unknown = JSON.parse(trimmedLine)
+				// A stats report is counters, never a signal.
+				if (
+					parsed !== null &&
+					typeof parsed === "object" &&
+					"frames" in parsed &&
+					!("model" in parsed)
+				) {
+					const stats = parseRtl433Stats(parsed)
+					if (!stats || !this.counters.delta(stats))
+						this.logger.debug(
+							{ length: trimmedLine.length },
+							"Ignored malformed rtl_433 stats report",
+						)
+					return null
+				}
 
 				return {
 					timestamp: new Date(),

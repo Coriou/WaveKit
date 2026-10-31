@@ -8,11 +8,13 @@ import base64
 import contextlib
 import importlib.util
 import io
+import json
 import math
 from pathlib import Path
 import random
 import subprocess
 import sys
+import time
 import unittest
 
 try:
@@ -167,6 +169,71 @@ class DropCounterTest(unittest.TestCase):
         drops.final_summary()
         self.assertEqual(lines[-1][0], "frame_drop_summary")
         self.assertEqual(lines[-1][1]["drops"], {"crc_bad": 500, "data_parse": 1})
+
+
+class StatsTest(unittest.TestCase):
+    def test_snapshot_counts_heard_decoded_and_failed(self):
+        stats = wrapper.WrapperStats(["direct", "recentred"])
+        stats.input_samples = 4096
+        stats.locks["direct"] = 3
+        stats.locks["recentred"] = 5
+        stats.headers["direct"] = 2
+        stats.frame_ok()
+        drops = {
+            "direct": wrapper.DropCounter(log=lambda *a, **k: None),
+            "recentred": wrapper.DropCounter(log=lambda *a, **k: None),
+        }
+        drops["direct"].drop("crc_bad")
+        drops["recentred"].drop("crc_bad")
+        drops["direct"].drop("data_parse")
+        drops["recentred"].drop("duplicate")
+        self.assertEqual(
+            stats.snapshot(drops),
+            {
+                "inputSamples": 4096,
+                "preambles": 5,
+                "headersOk": 2,
+                "framesOk": 1,
+                "crcBad": 2,
+                "parseDrops": 1,
+            },
+        )
+
+    def test_line_format(self):
+        line = wrapper.format_stats_line({"framesOk": 2, "crcBad": -1})
+        self.assertTrue(line.startswith(wrapper.STATS_PREFIX))
+        self.assertEqual(
+            json.loads(line[len(wrapper.STATS_PREFIX):]),
+            {"v": 1, "framesOk": 2, "crcBad": 0},
+        )
+
+    def test_reporter_writes_periodically_and_at_stop(self):
+        lines = []
+        calls = [0]
+
+        def snapshot():
+            calls[0] += 1
+            return {"framesOk": calls[0]}
+
+        reporter = wrapper.StatsReporter(snapshot, write=lines.append, interval_s=0.01)
+        reporter.start()
+        deadline = time.monotonic() + 5.0
+        while len(lines) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        reporter.stop()
+        self.assertGreaterEqual(len(lines), 3)
+        final = json.loads(lines[-1][len(wrapper.STATS_PREFIX):])
+        self.assertEqual(final["framesOk"], calls[0])
+
+    def test_reporter_skips_a_failed_snapshot(self):
+        lines = []
+
+        def broken():
+            raise RuntimeError("dictionary changed size during iteration")
+
+        reporter = wrapper.StatsReporter(broken, write=lines.append)
+        reporter.emit()
+        self.assertEqual(lines, [])
 
 
 class ChannelKeyTest(unittest.TestCase):

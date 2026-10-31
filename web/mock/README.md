@@ -152,6 +152,8 @@ Each item carries the core's `name`; `?hz=<Hz>` adds `coversHz` (whether the dec
 that frequency, the core's 200 kHz rule; a decoder with no known band covers it where a built-in
 EU band plan range lists one of its protocols, as the core does) and a bad `hz` answers the core's 400. A failed decoder
 with a restart pending reads "failed: restarting on its own" without the `restart` action.
+The LoRa and ISM decoders carry synthetic `counters` (`MOCK_COUNTERS`); while listening, both read
+`reception: "heard-undecoded"` with the core's "listening: heard signals but decoded none" sentence.
 `tuned-cases.ts` holds the tuned card's cases for tests (1090 MHz ADS-B paused, decoding and waiting at a paused receiver, with
 the pager's VFO channel there, a synthetic 466 MHz pager and DMR, a pager restarting on its own,
 an unknown frequency, a proven discovery), each built through the same summary.

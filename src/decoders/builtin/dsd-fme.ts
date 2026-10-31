@@ -1311,6 +1311,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
 		const link = this.parseLinkLine(cleanLine, nowMs)
+
+		// STEP 3c: Frame counters from what this line already shows (heard vs decoded)
+		this.countLine(cleanLine, link?.verified === true)
 		if (
 			link?.protocol === "dmr" &&
 			link.verified &&
@@ -1363,6 +1366,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	// =========================================================================
 	// HELPER METHODS FOR parseOutput
 	// =========================================================================
+
+	/**
+	 * Frame counters: a `Sync:` line is a frame sync heard (`detections`), a
+	 * link-control line that passed its checks one decoded (`framesOk`), and
+	 * each `CRC ERR` / `FEC ERR` a frame heard but rejected. Sent every 10 s
+	 * (COUNTER_FLUSH_MS), never per line.
+	 */
+	private countLine(line: string, verifiedLink: boolean): void {
+		if (SYNC_PATTERN.test(line)) this.counters.count("detections")
+		if (verifiedLink) this.counters.count("framesOk")
+		if (CRC_ERR.test(line)) this.counters.count("crcBad")
+		const fec = line.match(FEC_ERR_ALL)?.length ?? 0
+		if (fec > 0) this.counters.count("fecBad", fec)
+	}
 
 	/**
 	 * Checks if the current call has timed out (no metadata for CALL_TIMEOUT_MS).

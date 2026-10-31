@@ -66,6 +66,14 @@ MAX_PORTNUM = 511
 # a final summary is written at exit.
 DROP_SUMMARY_INTERVAL_S = 60.0
 
+# Machine-readable counters for the adapter: one `WAVEKIT_STATS {json}` line on
+# stderr every 10 s and one at exit, each cumulative since start (the adapter
+# turns them into deltas, so a restart's zeros never lower its totals).
+STATS_PREFIX = "WAVEKIT_STATS "
+STATS_INTERVAL_S = 10.0
+# Drop reasons that are no failure to decode (the other path's copy of a frame).
+STATS_NOT_FAILED = frozenset({"duplicate"})
+
 # Carrier offset (CFO). gr-lora_sdr frame_sync estimates any CFO within +-bw/4,
 # but then assumes the offset comes from the transmitter's crystal and corrects a
 # matching sample-clock drift of cfo / centre_freq (frame_sync_impl.cc,
@@ -569,6 +577,97 @@ class DropCounter:
         )
 
 
+class WrapperStats:
+    """Counters since start for the stats line; plain ints, each written by one thread.
+
+    preambles and headersOk are the largest count of any demod path (frame_sync
+    locks, valid headers): both paths may lock the same frame, so this is a lower
+    bound on what was heard. framesOk counts packets written after the dedupe.
+    """
+
+    def __init__(self, paths: list[str]) -> None:
+        self.input_samples = 0
+        self.locks = {path: 0 for path in paths}
+        self.headers = {path: 0 for path in paths}
+        self._frames_ok = 0
+        self._lock = threading.Lock()
+
+    def frame_ok(self) -> None:
+        # Both paths' sink threads write packets.
+        with self._lock:
+            self._frames_ok += 1
+
+    def snapshot(self, drops: dict[str, DropCounter]) -> dict[str, int]:
+        totals: Counter[str] = Counter()
+        for counter in drops.values():
+            # dict() copies in one C call, safe against a sink thread adding a reason.
+            totals.update(dict(counter.total))
+        crc_bad = totals.get("crc_bad", 0)
+        return {
+            "inputSamples": self.input_samples,
+            "preambles": max(self.locks.values(), default=0),
+            "headersOk": max(self.headers.values(), default=0),
+            "framesOk": self._frames_ok,
+            "crcBad": crc_bad,
+            "parseDrops": sum(
+                count
+                for reason, count in totals.items()
+                if reason != "crc_bad" and reason not in STATS_NOT_FAILED
+            ),
+        }
+
+
+def format_stats_line(counters: dict[str, int]) -> str:
+    """`WAVEKIT_STATS {"v":1,...}`: non-negative integers only, keys sorted."""
+    body = {name: max(0, int(value)) for name, value in counters.items()}
+    return STATS_PREFIX + json.dumps({"v": 1, **body}, separators=(",", ":"), sort_keys=True)
+
+
+def write_stats_line(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+class StatsReporter:
+    """Writes the stats line every `interval_s` from a daemon thread, and once at stop()."""
+
+    def __init__(
+        self,
+        snapshot: Callable[[], dict[str, int]],
+        write: Callable[[str], None] = write_stats_line,
+        interval_s: float = STATS_INTERVAL_S,
+    ) -> None:
+        self._snapshot = snapshot
+        self._write = write
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def emit(self) -> None:
+        try:
+            line = format_stats_line(self._snapshot())
+        except (RuntimeError, TypeError, ValueError):
+            # A counter changed shape mid-read: skip this tick, the next one reads again.
+            return
+        try:
+            self._write(line)
+        except (OSError, ValueError):
+            pass
+
+    def start(self) -> None:
+        def run() -> None:
+            while not self._stop.wait(self._interval_s):
+                self.emit()
+
+        self._thread = threading.Thread(target=run, name="wavekit_stats", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self.emit()
+
+
 def process_frame(
     frame: AssembledFrame,
     channel_key: bytes,
@@ -1015,6 +1114,7 @@ def build_flowgraph(
     args: argparse.Namespace,
     channel_key: bytes,
     drops: dict[str, DropCounter],
+    stats: WrapperStats | None = None,
 ) -> tuple[Any, CfoSearch | None]:
     """The top block and, when the recentred path runs, its CfoSearch.
 
@@ -1051,6 +1151,7 @@ def build_flowgraph(
         if recentre
         else None
     )
+    counts = stats if stats is not None else WrapperStats(sorted(drops))
     deduper = FrameDeduper(DEDUPE_TOLERANCE_SYMBOLS * samples_per_symbol)
     positions = {
         path: FramePositions(on_unmatched=drops[path].drop) for path in drops
@@ -1095,6 +1196,7 @@ def build_flowgraph(
                 return 0
 
             used = sample_count * 2
+            counts.input_samples += sample_count
             # Single allocation; in-place arithmetic; reinterpret IQIQ float
             # pairs as complex64 to skip the i + 1j*q construction.
             pairs = numpy.frombuffer(data, dtype=numpy.uint8, count=used)
@@ -1136,6 +1238,7 @@ def build_flowgraph(
             )
             self.frame_sync = frame_sync
             self.delay = delay
+            self.path = path
             self.positions = positions[path]
             self.frame_info = pmt.intern("frame_info")
 
@@ -1150,6 +1253,7 @@ def build_flowgraph(
             for tag in sorted(tags, key=lambda t: t.offset):
                 is_header, pay_len = lock_fields(pmt, tag.value)
                 if is_header:
+                    counts.locks[self.path] += 1
                     position = lock_position(
                         int(tag.offset),
                         lambda: int(self.frame_sync.nitems_written(0)),
@@ -1159,6 +1263,7 @@ def build_flowgraph(
                     )
                     self.positions.locked(position - self.delay)
                 elif is_header is False:
+                    counts.headers[self.path] += 1
                     self.positions.confirmed(pay_len)
             return count
 
@@ -1198,6 +1303,7 @@ def build_flowgraph(
                     continue
                 if deduper.admit(self.path, frame.payload, frame.position):
                     write_event(event)
+                    counts.frame_ok()
                 else:
                     self.drops.drop("duplicate")
             self.drops.maybe_log()
@@ -1341,11 +1447,13 @@ def main(argv: list[str] | None = None) -> int:
         for path in demod_paths(args.cfo_search_hz)
     }
     isolate_stdout()
+    stats = WrapperStats(sorted(drops))
     try:
-        top, search = build_flowgraph(args, channel_key, drops)
+        top, search = build_flowgraph(args, channel_key, drops, stats)
     except Exception as exc:
         log_stderr("startup_error", error=str(exc), error_type=type(exc).__name__)
         return 1
+    reporter = StatsReporter(lambda: stats.snapshot(drops))
 
     stopping = False
 
@@ -1361,6 +1469,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, stop)
 
     try:
+        reporter.start()
         top.start()
         top.wait()
     except KeyboardInterrupt:
@@ -1372,6 +1481,7 @@ def main(argv: list[str] | None = None) -> int:
             top.wait()
         for counter in drops.values():
             counter.final_summary()
+        reporter.stop()
         if search is not None:
             log_stderr(
                 "cfo_search_summary",

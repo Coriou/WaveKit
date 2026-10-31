@@ -852,3 +852,101 @@ describe("agent status", () => {
 		}
 	})
 })
+
+describe("agent status reception hint", () => {
+	const heard = {
+		preambles: { total: 12, perMin: 0, latest: 12 },
+		framesOk: { total: 0, perMin: 0, latest: 0 },
+	}
+	const listening = (patch: Partial<DecoderStatus> = {}) =>
+		decoder({
+			type: "lora-meshtastic",
+			lastOutputAt: undefined,
+			counters: heard,
+			...patch,
+		})
+
+	it("carries the summary's hint on a listening row only", async () => {
+		const statuses = [
+			listening(),
+			listening({ id: "decoding", lastOutputAt: new Date(now - 1_000) }),
+			listening({ id: "plain", counters: undefined }),
+		]
+		const status = await buildAgentStatus(
+			options({ decoderManager: { getAllStatus: () => statuses } }),
+			now,
+		)
+		expect(status.decoders.map(d => [d.id, d.reception])).toEqual([
+			["decoder-a", "heard-undecoded"],
+			["decoding", undefined],
+			["plain", undefined],
+		])
+		expect(agentStatusSchema.parse(status)).toEqual(status)
+	})
+
+	it("serves the hint through the response schema", async () => {
+		const app = Fastify()
+		await app.register(
+			agentStatusRoutes,
+			options({
+				decoderManager: { getAllStatus: () => [listening()] },
+			}),
+		)
+		try {
+			const response = await app.inject("/api/agent/status")
+			expect(response.statusCode).toBe(200)
+			const body = agentStatusSchema.parse(response.json())
+			expect(body.decoders[0]?.reception).toBe("heard-undecoded")
+		} finally {
+			await app.close()
+		}
+	})
+
+	it("refuses a hint on any verdict but a listening one without actions", () => {
+		const row = {
+			id: "d",
+			protocol: "lora-meshtastic",
+			verdict: { code: "listening" as const, actions: [] },
+			reception: "heard-undecoded" as const,
+		}
+		const parse = (decoders: unknown[]) =>
+			agentStatusSchema.shape.decoders.safeParse(decoders).success
+		expect(parse([row])).toBe(true)
+		expect(parse([{ ...row, reception: "maybe" }])).toBe(false)
+		expect(
+			parse([{ ...row, verdict: { code: "decoding", actions: [] } }]),
+		).toBe(false)
+		expect(
+			parse([{ ...row, verdict: { code: "listening", actions: ["restart"] } }]),
+		).toBe(false)
+	})
+
+	it("keeps every row carrying the hint under the body target (the limit arithmetic)", () => {
+		const rows = Array.from(
+			{ length: AGENT_STATUS_LIMITS.decodersMax },
+			() => ({
+				id: "d".repeat(AGENT_STATUS_LIMITS.idMaxBytes),
+				protocol: "p".repeat(AGENT_STATUS_LIMITS.protocolMaxBytes),
+				verdict: { code: "listening" as const, actions: [] },
+				reception: "heard-undecoded" as const,
+			}),
+		)
+		const worstRow = {
+			id: "d".repeat(AGENT_STATUS_LIMITS.idMaxBytes),
+			protocol: "p".repeat(AGENT_STATUS_LIMITS.protocolMaxBytes),
+			verdict: {
+				code: "channelizer-unavailable",
+				actions: [
+					"enable-channelizer",
+					"change-sample-rate",
+					"raise-sample-rate",
+				],
+			},
+		}
+		// A hinted row is 45 bytes under the worst-case row (AGENT_STATUS_LIMITS).
+		expect(
+			Buffer.byteLength(JSON.stringify(worstRow)) -
+				Buffer.byteLength(JSON.stringify(rows[0])),
+		).toBe(45)
+	})
+})

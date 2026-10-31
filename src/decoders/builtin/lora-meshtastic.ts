@@ -459,6 +459,44 @@ export function parseMeshtasticPacket(json: unknown): MeshtasticPacket | null {
 	return result.success ? result.data : null
 }
 
+/**
+ * Prefix of the wrapper's stats line on stderr (every 10 s and at exit):
+ * `WAVEKIT_STATS {"v":1,"inputSamples":N,...}`, cumulative since it started.
+ */
+export const LORA_STATS_PREFIX = "WAVEKIT_STATS "
+
+/**
+ * Longest stats line parsed. The wrapper writes `{"v":1}` plus six counters, each
+ * at most `"parseDrops":` 13 bytes + 16 digits (a safe integer) + a comma = 30, so
+ * 9 + 6 x 30 = 189 bytes after the prefix; 1,024 leaves room for added counters
+ * while a garbage line is refused before JSON.parse.
+ */
+export const LORA_STATS_MAX_LENGTH = 1_024
+
+const LoraStatsWireSchema = z.object({ v: z.literal(1) }).passthrough()
+
+/**
+ * The counters of one wrapper stats line, or null when it is not one or is
+ * malformed (never throws). The counter names are checked by the caller's
+ * counter allowlist.
+ */
+export function parseLoraStatsLine(
+	line: string,
+): Record<string, unknown> | null {
+	if (!line.startsWith(LORA_STATS_PREFIX)) return null
+	if (line.length > LORA_STATS_MAX_LENGTH) return null
+	let json: unknown
+	try {
+		json = JSON.parse(line.slice(LORA_STATS_PREFIX.length))
+	} catch {
+		return null
+	}
+	const parsed = LoraStatsWireSchema.safeParse(json)
+	if (!parsed.success) return null
+	const { v: _version, ...counters } = parsed.data
+	return counters
+}
+
 /** Capabilities for the LoRa/Meshtastic decoder. */
 export const LORA_MESHTASTIC_CAPS: DecoderCaps = {
 	input: "iq",
@@ -629,6 +667,16 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 
 	protected override parseOutput(line: string): DecoderOutput | null {
 		const trimmed = line.trim()
+		if (trimmed.startsWith(LORA_STATS_PREFIX)) {
+			const stats = parseLoraStatsLine(trimmed)
+			// Counts only: a stats line is never logged verbatim.
+			if (!stats || !this.counters.cumulative(stats))
+				this.logger.debug(
+					{ length: trimmed.length },
+					"Ignored malformed wrapper stats line",
+				)
+			return null
+		}
 		if (!trimmed || !trimmed.startsWith("{")) return null
 
 		let parsed: unknown

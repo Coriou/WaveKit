@@ -639,3 +639,81 @@ describe("which decoders cover a frequency", () => {
 		}
 	})
 })
+
+describe("decoder counters in the summary", () => {
+	const counters = {
+		preambles: { total: 12, perMin: 2, latest: 12 },
+		framesOk: { total: 0, perMin: 0, latest: 0 },
+	}
+	const lora = (patch: Partial<DecoderStatus> = {}) =>
+		status({ type: "lora-meshtastic", lastOutputAt: undefined, ...patch })
+
+	it("lists counters compactly and hints heard-undecoded on a listening verdict", () => {
+		const summary = decoderSummary(lora({ counters }), now)
+		expect(summary.counters).toEqual({
+			preambles: { total: 12, perMin: 2 },
+			framesOk: { total: 0, perMin: 0 },
+		})
+		expect(summary.verdict.code).toBe("listening")
+		expect(summary.reception).toBe("heard-undecoded")
+		expect(summary.verdict.text).toBe(
+			"LoRa listening: heard signals but decoded none",
+		)
+		expect(decoderVerdictSchema.parse(summary.verdict)).toEqual(summary.verdict)
+	})
+
+	it("says nothing heard when the counters stay at zero", () => {
+		const quiet = {
+			preambles: { total: 0, perMin: 0, latest: 0 },
+			framesOk: { total: 0, perMin: 0, latest: 0 },
+		}
+		const summary = decoderSummary(lora({ counters: quiet }), now)
+		expect(summary.reception).toBe("nothing-heard")
+		expect(summary.verdict.text).toBe(
+			"LoRa listening: heard nothing it recognises",
+		)
+	})
+
+	it("gives no hint while decoding, without counters, or with input counts only", () => {
+		const decoding = decoderSummary(
+			lora({ counters, lastOutputAt: new Date(now) }),
+			now,
+		)
+		expect(decoding.verdict.code).toBe("decoding")
+		expect(decoding).not.toHaveProperty("reception")
+		expect(decoding.counters?.preambles?.total).toBe(12)
+		const none = decoderSummary(lora(), now)
+		expect(none).not.toHaveProperty("counters")
+		expect(none).not.toHaveProperty("reception")
+		expect(none.verdict.text).toBe(
+			"LoRa listening: nothing decoded in the last minute",
+		)
+		const input = decoderSummary(
+			lora({ counters: { inputSamples: { total: 9, perMin: 9, latest: 9 } } }),
+			now,
+		)
+		expect(input).not.toHaveProperty("reception")
+		expect(decoderSummary(lora({ counters: {} }), now)).not.toHaveProperty(
+			"counters",
+		)
+	})
+
+	it("serves counters and reception on the route", async () => {
+		const app = Fastify()
+		await app.register(decoderSummaryRoutes, {
+			decoderManager: { getAllStatus: () => [lora({ counters })] },
+		})
+		try {
+			const response = await app.inject("/api/decoders/summary")
+			expect(response.statusCode).toBe(200)
+			const [item] = response.json() as Array<Record<string, unknown>>
+			expect(item?.["counters"]).toEqual({
+				preambles: { total: 12, perMin: 2 },
+				framesOk: { total: 0, perMin: 0 },
+			})
+			expect(item?.["reception"]).toBe("heard-undecoded")
+		} finally {
+			await app.close()
+		}
+	})
+})

@@ -160,6 +160,10 @@ import {
 	type VersionValidationResult,
 } from "../utils/version.js"
 import { safeErrorFields } from "./safe-error-fields.js"
+import {
+	DecoderCounterStore,
+	type DecoderCounterEvent,
+} from "./decoder-counters.js"
 
 /**
  * Optional activity publication. Runs after the legacy `decoder:output`
@@ -665,6 +669,11 @@ export class DecoderManager extends EventEmitter {
 	private readonly fanout: FanoutManager
 	private readonly config: DecoderManagerConfig
 	private readonly decoders: Map<string, DecoderState> = new Map()
+	/**
+	 * Frame counters per decoder id; a placement worker's fold into its
+	 * parent's, so they survive worker churn and adapter rebuilds.
+	 */
+	private readonly counterStore = new DecoderCounterStore()
 	private settledVfo: PlannerVfo | null | undefined
 	/** Monotonic ms of the last VFO settle report. */
 	private vfoSettledAtMs = -Infinity
@@ -3951,7 +3960,15 @@ export class DecoderManager extends EventEmitter {
 			}),
 			...this.placementTargetFields(state),
 			...this.placementLastOutput(state),
+			...this.counterFields(state),
 		}
+	}
+
+	/** The root decoder's frame counters, when its adapter or its workers report any. */
+	private counterFields(state: DecoderState): Pick<DecoderStatus, "counters"> {
+		if (state.owner === "placement") return {}
+		const counters = this.counterStore.view(state.config.id)
+		return counters ? { counters } : {}
 	}
 
 	/**
@@ -4151,7 +4168,10 @@ export class DecoderManager extends EventEmitter {
 		// Remove from map
 		if (this.decoders.get(id) === state) {
 			this.decoders.delete(id)
-			if (state.owner !== "placement") this.emit("decoder:removed", id)
+			if (state.owner !== "placement") {
+				this.counterStore.forget(id)
+				this.emit("decoder:removed", id)
+			}
 		}
 	}
 
@@ -4297,6 +4317,18 @@ export class DecoderManager extends EventEmitter {
 				this.log.error(
 					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Error forwarding placed link line, continuing operation",
+				)
+			}
+		})
+
+		// Frame counters (decoder-counters.ts), kept under the root decoder's id.
+		decoder.on("counters", (event: DecoderCounterEvent) => {
+			try {
+				this.counterStore.record(state.parentId ?? decoder.id, event)
+			} catch (err) {
+				this.log.error(
+					{ err: safeErrorFields(err), decoderId: decoder.id },
+					"Error recording decoder counters, continuing operation",
 				)
 			}
 		})

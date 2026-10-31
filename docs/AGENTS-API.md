@@ -102,6 +102,13 @@ One entry per decoder: `state`, `placements`, `eventsOut`, `lastOutputAt`,
 `suspensionReason`, `health` and a `verdict` whose `actions` say what to try first
 ([GET /api/decoders/summary](API.md#get-apidecoderssummary)).
 
+After a dwell with no output, tell "nothing on air" from "heard but undecodable" with
+`reception` (also on the `listening` rows of `GET /api/agent/status`): `heard-undecoded`
+means the decoder heard its protocol (preambles, syncs, bursts) but decoded none of it,
+`nothing-heard` means it heard nothing it recognises. The LoRa, ISM (rtl_433) and digital
+voice (dsd-fme) decoders report it, with the underlying `counters` (`total` since the core
+started, `perMin` over the last minute) on the summary route.
+
 ## Read activity
 
 ```sh
