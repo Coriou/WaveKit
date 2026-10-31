@@ -1,7 +1,11 @@
 // Tuned card cases for the mock and tests: GET /api/decoders statuses at one frequency and the core's summary for
 // it (GET /api/decoders/summary?hz=, built by ./decoder-summary.ts as the mock serves it). Synthetic frequencies
 // only, apart from the public 1090 MHz ADS-B band. Each case says what the card should show (web/tests reads them).
-import type { DecoderInfo, DecoderSummary } from "@wavekit/api-types"
+import type {
+	ActivitySummary,
+	DecoderInfo,
+	DecoderSummary,
+} from "@wavekit/api-types"
 
 import { buildDecoderSummaries } from "./decoder-summary.ts"
 
@@ -88,11 +92,15 @@ export interface TunedCase {
 	named: { proto: string; sub: string } | null
 	decoders: DecoderInfo[]
 	summary: DecoderSummary[]
+	/** The channel's Activity, newest first; absent when nothing was heard. */
+	activity?: readonly ActivitySummary[]
 	expect: {
 		/** The header's name for the signal. */
 		proto: string
 		/** The table's rows: decoder id and state word, in order. */
 		rows: readonly (readonly [string, string])[]
+		/** With `activity`: the event the card shows as the latest, else null. */
+		latest?: string | null
 	}
 }
 
@@ -105,6 +113,64 @@ function tunedCase(c: Omit<TunedCase, "summary">): TunedCase {
 
 const ADSB_HZ = 1_090_062_000
 const ADSB_BAND = { name: "ADS-B (1090 MHz)", mode: "raw" }
+
+let seq = 0
+/** A decode on the channel (synthetic content). */
+function heard(
+	over: Partial<ActivitySummary> &
+		Pick<ActivitySummary, "decoderId" | "protocol" | "category">,
+	ms: number,
+): ActivitySummary {
+	seq += 1
+	return {
+		eventId: `tuned-${seq}`,
+		commitSeq: String(seq),
+		kind: "decoder-reception",
+		producedAt: ago(ms),
+		receivedAt: ago(ms),
+		sourceId: "rtl-0",
+		frequencyHz: ADSB_HZ,
+		entityKey: null,
+		title: null,
+		fields: [],
+		...over,
+	}
+}
+
+/** A false pager decode stored at the 1090 MHz frequency (the pager's VFO channel sat there), newer than ADS-B's. */
+const STRAY_PAGE = heard(
+	{
+		decoderId: "multimon-ng",
+		protocol: "pocsag",
+		category: "paging",
+		title: "Capcode 0000001",
+	},
+	5_000,
+)
+const AIRCRAFT = [
+	heard(
+		{
+			decoderId: "readsb",
+			protocol: "adsb",
+			category: "aircraft",
+			frequencyHz: 1_090_000_000,
+			entityKey: "aircraft:000001",
+			title: "TEST01",
+		},
+		20_000,
+	),
+	heard(
+		{
+			decoderId: "readsb",
+			protocol: "adsb",
+			category: "aircraft",
+			frequencyHz: 1_090_000_000,
+			entityKey: "aircraft:000002",
+			title: "TEST02",
+		},
+		40_000,
+	),
+]
 
 export const TUNED_CASES: readonly TunedCase[] = [
 	tunedCase({
@@ -141,6 +207,27 @@ export const TUNED_CASES: readonly TunedCase[] = [
 			pager(ADSB_HZ),
 		],
 		expect: { proto: "ADS-B", rows: [["readsb", "Decoding"]] },
+	}),
+	tunedCase({
+		id: "adsb-stray-page",
+		title:
+			"1090 MHz: ADS-B decoding; a false pager decode stored here never names the card or its latest",
+		hz: ADSB_HZ,
+		band: ADSB_BAND,
+		named: null,
+		decoders: [
+			adsb({
+				lastOutputAt: ago(20_000),
+				stats: { bytesIn: 1, eventsOut: 1204, errors: 0 },
+			}),
+			pager(ADSB_HZ, { lastOutputAt: ago(5_000) }),
+		],
+		activity: [STRAY_PAGE, ...AIRCRAFT],
+		expect: {
+			proto: "ADS-B",
+			rows: [["readsb", "Decoding"]],
+			latest: AIRCRAFT[0]!.eventId,
+		},
 	}),
 	tunedCase({
 		id: "adsb-source-paused",

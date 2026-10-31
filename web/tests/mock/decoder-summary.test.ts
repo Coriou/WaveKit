@@ -9,8 +9,10 @@ import type {
 import { decoderVerdictSchema } from "@wavekit/api-types"
 
 import {
+	MOCK_COUNTERS,
 	mockCoversHz,
 	mockDecoderName,
+	mockReception,
 	mockVerdict,
 } from "../../mock/decoder-summary.ts"
 import { buildMockServer } from "../../mock/server.ts"
@@ -39,6 +41,11 @@ const coreSummary = async () =>
 	(await import(/* @vite-ignore */ CORE_SUMMARY)) as {
 		decoderCoversHz: (status: unknown, hz: number) => boolean
 		decoderName: (type: string) => string
+		decoderSummary: (
+			status: unknown,
+			now: number,
+			hz?: number,
+		) => DecoderSummary
 	}
 
 /** Every suspension reason the core knows, plus one it does not. */
@@ -160,6 +167,34 @@ describe("mock verdicts match the core's", () => {
 			expect({ c, verdict: mock }).toEqual({ c, verdict: core })
 		}
 	})
+})
+
+describe("mock decoder counters match the core's", () => {
+	it.each(Object.entries(MOCK_COUNTERS))(
+		"%s: the core's verdict, reception hint and counters",
+		async (type, counters) => {
+			const { decoderSummary } = await coreSummary()
+			// the core's status reading: each counter with the child's latest reading (here its total)
+			const status = Object.fromEntries(
+				Object.entries(counters).map(([name, c]) => [
+					name,
+					{ total: c.total, perMin: c.perMin, latest: c.total },
+				]),
+			)
+			const d = {
+				...fields({ health: "idle", running: true }),
+				type,
+				desiredRunning: true,
+				mode: "auto" as const,
+			}
+			const core = decoderSummary({ ...d, counters: status }, Date.now())
+			const mock = mockVerdict(d as unknown as DecoderInfo, "idle", counters)
+			expect(core.health).toBe("idle")
+			expect(mock).toEqual(core.verdict)
+			expect(mockReception(counters, mock.code)).toEqual(core.reception)
+			expect(counters).toEqual(core.counters)
+		},
+	)
 })
 
 describe("mock failures, names and coverage match the core's", () => {

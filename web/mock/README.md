@@ -155,5 +155,6 @@ with a restart pending reads "failed: restarting on its own" without the `restar
 The LoRa and ISM decoders carry synthetic `counters` (`MOCK_COUNTERS`); while listening, both read
 `reception: "heard-undecoded"` with the core's "listening: heard signals but decoded none" sentence.
 `tuned-cases.ts` holds the tuned card's cases for tests (1090 MHz ADS-B paused, decoding and waiting at a paused receiver, with
-the pager's VFO channel there, a synthetic 466 MHz pager and DMR, a pager restarting on its own,
+the pager's VFO channel there, ADS-B decoding with a stray pager decode stored at 1090.062 MHz in the channel's
+`activity` (`expect.latest`: an ADS-B decode, never the page), a synthetic 466 MHz pager and DMR, a pager restarting on its own,
 an unknown frequency, a proven discovery), each built through the same summary.
