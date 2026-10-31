@@ -25,6 +25,22 @@ function addrOf(raw: unknown): string | undefined {
 	return undefined
 }
 
+/**
+ * dumpvdl2 prints only AVLC frames whose FCS (CRC-16) passed, so a printed frame's addresses are
+ * checked content. An embedded ACARS message that failed its own CRC (`crcOk: false`) or that
+ * dumpvdl2 flagged as an error (`error` not 0), or an embedded value that is not a plain
+ * object, makes the frame unclean: a message that failed a CRC never proves.
+ */
+export function vdl2FrameClean(data: Record<string, unknown>): boolean {
+	const acars = data["acars"]
+	if (acars === undefined) return true
+	const embedded = asRecord(acars)
+	if (embedded === undefined) return false
+	if (embedded["crcOk"] !== undefined) return false
+	const error = embedded["error"]
+	return error === undefined || error === 0
+}
+
 /** Pure parse step: no acceptance memory is touched (null: no evidence). */
 export function parseVdl2(
 	out: DecoderOutputLike,
@@ -37,12 +53,11 @@ export function parseVdl2(
 	const hz = placedFrequency(data["frequency"], ctx)
 	if (typeof hz !== "number" || !Number.isFinite(hz) || hz <= 0) return null
 	if (!nearTarget(hz, ctx.targetsHz)) return null
-	// dumpvdl2 emits only frames that passed the FCS
 	return {
 		hz,
 		timestamp: out.timestamp,
 		protocol: "vdl2",
-		crcClean: true,
+		crcClean: vdl2FrameClean(data),
 		identity: {
 			key: "vdl2:addr",
 			kind: "vdl2-addr",

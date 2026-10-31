@@ -36,6 +36,34 @@ describe("interpretVdl2", () => {
 			value: "4CA1B2",
 		})
 	})
+	it("a frame whose embedded ACARS failed its CRC or was flagged never proves", () => {
+		for (const acars of [
+			{ crcOk: false, error: 0 },
+			{ error: 1 },
+			{ error: "0" },
+			{ crcOk: true },
+			null,
+			"text",
+			[],
+		]) {
+			const s = st()
+			for (let i = 0; i < 3; i++) {
+				const r = interpretVdl2(ok({ acars }), s, ctx)
+				expect(r).toHaveLength(1)
+				expect(r[0]?.crcClean).toBe(false)
+				expect(r[0]?.identity).toBeUndefined()
+			}
+		}
+	})
+	it("a frame with a clean embedded ACARS block is clean", () => {
+		const s = st()
+		interpretVdl2(ok({ acars: { error: 0, tail: "TEST01" } }), s, ctx)
+		const r = interpretVdl2(ok({ acars: { error: 0, tail: "TEST01" } }), s, ctx)
+		expect(r[0]).toMatchObject({
+			crcClean: true,
+			identity: { kind: "vdl2-addr", value: "4CA1B2" },
+		})
+	})
 	it("falls back to icao, accepts integer addresses", () => {
 		const s = st()
 		interpretVdl2(ok({ fromaddr: undefined, icao: 0xabc }), s, ctx)

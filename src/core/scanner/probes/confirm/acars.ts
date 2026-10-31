@@ -1,4 +1,8 @@
-/** acarsdec ambient interpreter (WG7 req 1.3): frequency in Hz, `error === 0`, tail identity. */
+/**
+ * acarsdec ambient interpreter (WG7 req 1.3): frequency in Hz, tail identity. A block is
+ * CRC-clean only when acarsdec printed `error` itself and it is 0 (framing, parity and CRC-16
+ * valid, no bit corrected); a missing error count is an unknown CRC status and never clean.
+ */
 import type { DecodeEvidence } from "../../types.js"
 import type { DecoderOutputLike, InterpreterState } from "./double-match.js"
 import {
@@ -44,7 +48,9 @@ export function parseAcars(
 	} else return null
 	if (!nearTarget(hz, ctx.targetsHz)) return null
 	const error = data["error"]
-	const crcClean = typeof error === "number" && error === 0
+	// The adapter defaults a missing error count to 0; only a printed one is a checked CRC.
+	const crcClean =
+		data["errorKnown"] === true && typeof error === "number" && error === 0
 	return {
 		hz,
 		timestamp: out.timestamp,

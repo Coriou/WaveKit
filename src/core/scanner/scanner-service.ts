@@ -1,4 +1,9 @@
-import { DECODE_ANCHOR_PROTOCOLS } from "./store/decode-anchor.js"
+import {
+	anchorHzOf,
+	CHANNEL_ANCHOR_PROTOCOLS,
+	DECODE_ANCHOR_PROTOCOLS,
+	decodeAnchorKey,
+} from "./store/decode-anchor.js"
 import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
@@ -4437,8 +4442,26 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
+	 * The pairing scope of a channel-anchored decode (ACARS, VDL2): its source, protocol and
+	 * channel, the same key its anchor discovery has. Null for any other protocol or a channel
+	 * that may not anchor (anchorHzOf).
+	 */
+	private channelAnchorScope(ctx: AmbientPairContext): string | null {
+		const protocol = ctx.protocol
+		if (protocol === undefined || !CHANNEL_ANCHOR_PROTOCOLS.includes(protocol))
+			return null
+		const hz = anchorHzOf(protocol, ctx.hz)
+		return hz === undefined
+			? null
+			: `a:${decodeAnchorKey(ctx.sourceId, protocol, hz)}`
+	}
+
+	/**
 	 * trial choice 3a: an ambient decode shares acceptance with the discovery it would be placed on
-	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone.
+	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone. A
+	 * channel-anchored decode (ACARS, VDL2) without a single placed discovery pairs on its channel
+	 * instead: each short burst is its own observation, so an observation scope never pairs two
+	 * blocks minutes apart, and most bursts open no track at all.
 	 */
 	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
 		const placed = this.placeAmbient(
@@ -4455,9 +4478,63 @@ export class ScannerService extends EventEmitter {
 		const scopes = new Set(
 			placed.map(o => this.scopeOfObservation(o, o.observationId)),
 		)
-		if (scopes.size !== 1) return null
+		const channel = this.channelAnchorScope(ctx)
 		const [scope] = scopes
-		return scope ?? null
+		if (scopes.size === 1 && scope !== undefined)
+			if (channel === null || scope.startsWith("d:")) return scope
+		return channel
+	}
+
+	/**
+	 * A confirmed ACARS block or VDL2 frame that no observation places: it anchors at its own
+	 * channel (store.anchorDecode), trust re-read at the placement the decode was trusted at.
+	 * Identity-less, unclean or untrusted evidence never anchors (canAnchor).
+	 */
+	private anchorChannelDecode(e: AmbientEvidenceEvent): void {
+		if (!e.ev.identity || !e.ev.crcClean) return
+		const placement = e.placement
+		const anchored = this.store.anchorDecode(
+			e.sourceId,
+			e.hz,
+			e.ev,
+			this.deps.ambientTrust?.(
+				e.decoderId,
+				placement?.channelHz ?? e.hz,
+				e.sourceId,
+				placement
+					? { sourceId: placement.sourceId, channelHz: placement.channelHz }
+					: undefined,
+			),
+		)
+		if (!anchored.discoveryId) {
+			const key = `channel\u0000${e.decoderId}`
+			if (!this.refusedAnchors.has(key)) {
+				this.refusedAnchors.add(key)
+				this.log.warn(
+					{ protocol: e.ev.protocol },
+					"Channel anchor evidence refused",
+				)
+			}
+			return
+		}
+		const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
+		if (
+			decoderType &&
+			!this.trialMemory
+				.view(anchored.discoveryId)
+				.some(
+					entry =>
+						entry.protocol === e.ev.protocol &&
+						entry.decoder === decoderType &&
+						entry.lastOutcome === "decoded",
+				)
+		)
+			this.trialMemory.record(
+				anchored.discoveryId,
+				e.ev.protocol,
+				decoderType,
+				"decoded",
+			)
 	}
 
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
@@ -4533,6 +4610,13 @@ export class ScannerService extends EventEmitter {
 			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
 			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
 		})
+		if (
+			candidates.length === 0 &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(e.ev.protocol)
+		) {
+			this.anchorChannelDecode(e)
+			return
+		}
 
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient

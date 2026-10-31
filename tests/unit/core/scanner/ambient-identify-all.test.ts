@@ -130,12 +130,14 @@ describe("ambient identify all regressions", () => {
 				frequency: HZ + 500,
 				tail: "TEST01",
 				error: 0,
+				errorKnown: true,
 				msgno: "M01A",
 			})
 			r.emit("acars", {
 				frequency: HZ + 500,
 				tail: "TEST01",
 				error: 0,
+				errorKnown: true,
 				msgno: "M02A",
 			})
 			expect(seen).toEqual(
@@ -440,7 +442,7 @@ it("logs ambiguous placement once per decode, with silent shared-scope lookups",
 			sourceId: string
 			hz: number
 			at: number
-			protocol: "acars"
+			protocol: "acars" | "ais"
 		}): string | null
 	}
 	internal.now = () => 100_000
@@ -461,8 +463,14 @@ it("logs ambiguous placement once per decode, with silent shared-scope lookups",
 			protocol: "acars" as const,
 			decodeToken: {},
 		}
-		for (let i = 0; i < 5; i++)
-			expect(internal.ambientConfirmScope(e)).toBeNull()
+		// An ambiguous spectrum placement leaves a point decode to its decoder; a channel-anchored
+		// ACARS block pairs on its own channel instead.
+		for (let i = 0; i < 5; i++) {
+			expect(internal.ambientConfirmScope({ ...e, protocol: "ais" })).toBeNull()
+			expect(internal.ambientConfirmScope(e)).toBe(
+				`a:${JSON.stringify(["fake", "acars", HZ])}`,
+			)
+		}
 		expect(debug).not.toHaveBeenCalled()
 		for (let i = 0; i < 5; i++) expect(internal.placeAmbient(e)).toEqual([])
 		expect(debug).toHaveBeenCalledTimes(1)

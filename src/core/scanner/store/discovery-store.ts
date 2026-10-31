@@ -14,6 +14,8 @@
 import {
 	ANCHOR_AIRCRAFT_WINDOW_MS,
 	ANCHOR_AIRCRAFT_MAX,
+	anchorHzOf,
+	anchorRowKey,
 	canAnchor,
 	decodeAnchorKey,
 	newDecodeAnchor,
@@ -56,6 +58,7 @@ import type {
 import {
 	evidenceLevelOf,
 	proofFromFacts,
+	proofSummary,
 	strongestKnownProof,
 } from "../proof.js"
 import type {
@@ -895,6 +898,12 @@ export class DiscoveryStore
 		ReturnType<typeof setTimeout>
 	>()
 	private readonly anchorWindows = new Map<string, Map<string, number>>()
+	/**
+	 * A channel anchor's latest checked identity (ACARS registration, VDL2 address), which its
+	 * proof cites. One entry per anchor discovery; in memory only, so a restored anchor's proof
+	 * names no identity until its next confirmed decode.
+	 */
+	private readonly anchorIdentity = new Map<string, Identity>()
 	/** Latest confirmations stay private until publishAnchor commits a revision. */
 	private readonly anchorPending = new Map<
 		string,
@@ -1245,8 +1254,10 @@ export class DiscoveryStore
 		trust: Discovery["tuningTrust"] | undefined,
 	): Ingested {
 		if (!canAnchor(ev, hz, trust) || !ev.identity) return TRANSIENT
+		const anchorHz = anchorHzOf(ev.protocol, hz)
+		if (anchorHz === undefined) return TRANSIENT
 		const existingId = this.decodeAnchors.get(
-			decodeAnchorKey(sourceId, ev.protocol, ADSB_HZ),
+			decodeAnchorKey(sourceId, ev.protocol, anchorHz),
 		)
 		let d =
 			existingId === undefined ? undefined : this.discoveries.get(existingId)
@@ -1260,7 +1271,7 @@ export class DiscoveryStore
 			const fresh = newDecodeAnchor(
 				`d_${this.newId()}`,
 				sourceId,
-				ADSB_HZ,
+				anchorHz,
 				ev,
 				trust,
 			)
@@ -1270,8 +1281,14 @@ export class DiscoveryStore
 		}
 		const rows = this.anchorWindows.get(d.id) ?? new Map<string, number>()
 		this.anchorWindows.set(d.id, rows)
-		rows.delete(ev.identity.value.toLowerCase())
-		rows.set(ev.identity.value.toLowerCase(), ev.at)
+		const row = anchorRowKey(ev.protocol, ev.identity.value)
+		rows.delete(row)
+		rows.set(row, ev.at)
+		if (ev.protocol !== "adsb")
+			this.anchorIdentity.set(d.id, {
+				kind: ev.identity.kind,
+				value: ev.identity.value,
+			})
 		if (rows.size > ANCHOR_AIRCRAFT_MAX) {
 			const first = rows.keys().next()
 			if (!first.done) rows.delete(first.value)
@@ -2830,6 +2847,7 @@ export class DiscoveryStore
 		this.discoveries.clear()
 		this.decodeAnchors.clear()
 		this.anchorWindows.clear()
+		this.anchorIdentity.clear()
 		this.anchorPending.clear()
 		this.anchorPublished.clear()
 		this.observationIndex.clear()
@@ -5152,7 +5170,37 @@ export class DiscoveryStore
 		this.proofBearing.delete(discoveryId)
 	}
 
+	/**
+	 * A channel anchor (ACARS, VDL2) is decoded by construction: only a confirmed CRC-clean
+	 * identity creates or refreshes it. Its proof cites the latest checked identity.
+	 */
+	private channelAnchorView(d: Discovery): DiscoveryProofView {
+		const identity = this.anchorIdentity.get(d.id)
+		const bare = {
+			kind: "decoded" as const,
+			protocol: d.protocol,
+			transport: "ambient" as const,
+			at: d.lastSeenAt,
+			observationId: `decode:${d.id}`,
+			tried: [],
+			unavailable: [],
+			encrypted: false,
+			...(identity ? { identity: { ...identity } } : {}),
+		}
+		return {
+			label: {
+				protocol: d.protocol,
+				family: familyOf(d.protocol),
+				confidence: "decoded",
+			},
+			evidence: "proven",
+			proof: { ...bare, summary: proofSummary(bare) },
+		}
+	}
+
 	private discoveryView(d: Discovery): DiscoveryProofView {
+		if (d.anchor === "decode" && d.protocol !== "adsb")
+			return this.channelAnchorView(d)
 		if (d.anchor === "decode")
 			return {
 				label: { protocol: "adsb", family: "packet", confidence: "decoded" },
@@ -5361,6 +5409,7 @@ export class DiscoveryStore
 		if (d === undefined) return
 		// The outer delete/merge journals removal; publishing here would nest a commit.
 		this.anchorWindows.delete(id)
+		this.anchorIdentity.delete(id)
 		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
 		this.discoveries.delete(id)
