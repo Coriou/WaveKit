@@ -1384,8 +1384,11 @@ export class IdentifyRunner implements JobDriver {
 			target.frequencyHz === anchor.frequencyHz &&
 			target.bandwidthHz === 0 &&
 			anchor.bandwidthHz === 0 &&
-			(!channelAnchor ||
-				(anchor.proof?.kind === "decoded" &&
+			// Only an explicit ADS-B anchor answers as ADS-B: a restored channel anchor publishes
+			// protocol unknown and must run its own trials.
+			(anchor.protocol === "adsb" ||
+				(channelAnchor &&
+					anchor.proof?.kind === "decoded" &&
 					anchor.proof.protocol === anchor.protocol)) &&
 			((anchor.aircraftCount ?? 0) > 0 ||
 				this.deps.now() - Date.parse(anchor.lastSeenAt) <=

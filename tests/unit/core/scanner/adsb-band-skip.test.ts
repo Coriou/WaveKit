@@ -519,6 +519,7 @@ describe("built-in ADS-B band skip", () => {
 			const anchor = {
 				id: "d_adsb",
 				anchor: "decode",
+				protocol: "adsb",
 				frequencyHz: ADSB_HZ,
 				bandwidthHz: 0,
 				aircraftCount: 3,
@@ -568,6 +569,13 @@ describe("built-in ADS-B band skip", () => {
 				>
 				const restored = await identifyAt(hz, withheld as unknown as Discovery)
 				expect(restored.last?.result?.alreadyDecoded).toBeUndefined()
+				// The store's restored view publishes protocol unknown: never an ADS-B answer.
+				const unknown = await identifyAt(hz, {
+					...withheld,
+					protocol: "unknown",
+				} as unknown as Discovery)
+				expect(unknown.last?.result?.alreadyDecoded).toBeUndefined()
+				expect(unknown.last?.result?.protocol).not.toBe("adsb")
 			},
 		)
 
