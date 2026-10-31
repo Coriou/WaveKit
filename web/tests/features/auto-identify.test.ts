@@ -5,7 +5,7 @@ import {
 	type AutoIdentifyInput,
 } from "../../src/features/tuned/auto-identify.ts"
 
-const HZ = 446_926_000
+const HZ = 431_926_000
 
 const base: AutoIdentifyInput = {
 	enabled: true,

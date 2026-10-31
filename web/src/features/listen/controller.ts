@@ -188,6 +188,20 @@ export class ListenController extends Store<ListenState> {
 		}
 	}
 
+	/**
+	 * User gesture, no playback: creates or resumes the audio context so a start() after an awaited tune may
+	 * sound. Call it synchronously in the click. A player that cannot start is reported by start() later.
+	 */
+	unlock(): void {
+		try {
+			this.player?.unlock(
+				this.liveAudio.get().status?.effectiveSampleRate ?? null,
+			)
+		} catch {
+			// start() unlocks again and shows the failure
+		}
+	}
+
 	/** Stops playing here; stops the core's live audio when no other client listens. */
 	async stop(): Promise<void> {
 		this.endRecording()

@@ -228,9 +228,10 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 	}),
 	sig(446.03125, 11e3, -71, "voice", { on: 4, per: 27, ph: 9 }),
 	sig(446.09375, 11e3, -77, "voice", { on: 2, per: 33, ph: 15 }),
-	// DMR on a frequency no decoder follows (Ben's 446.926, 2026-10-18): Identify names it, on its own while listening
-	sig(446.925, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
-	sig(466.025, 12.5e3, -62, "burst", { on: 1.2, per: 10, ph: 3 }),
+	// DMR on a frequency no decoder follows (a synthetic channel): Identify names it, on its own while listening
+	sig(431.925, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
+	// a synthetic pager channel (the mock's `pager-431` block)
+	sig(431.025, 12.5e3, -62, "burst", { on: 1.2, per: 10, ph: 3 }),
 	// SRD 868
 	sig(868.1, 125e3, -80, "burst", { on: 0.2, per: 8, ph: 5 }),
 	sig(868.3, 50e3, -70, "burst", {
@@ -456,7 +457,7 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 		identity: { kind: "ism-model", value: "Wireless-MBus" },
 		metadata: { ismModels: ["Wireless-MBus"] },
 	},
-	466025000: {
+	431025000: {
 		state: "candidate",
 		class: "fsk2-wide",
 		protocol: "flex",
@@ -605,7 +606,7 @@ export const DECODER_SEEDS: readonly DecoderSeed[] = [
 	{
 		id: "multimon-ng",
 		type: "multimon-ng",
-		targetsHz: [160450000, 466025000],
+		targetsHz: [160450000, 431025000],
 		input: "audio_pcm",
 		output: "text",
 		pattern: "pure_consumer",
@@ -1030,12 +1031,12 @@ export const BAND_SEEDS: readonly BandSeed[] = [
 		channels: pmrChannels,
 	},
 	{
-		id: "pg466",
-		name: "Pagers 466 (e*Message)",
+		id: "pg431",
+		name: "Pagers 431 (synthetic)",
 		group: "pagers",
 		parent: "lmu",
-		a: 466.025,
-		b: 466.23,
+		a: 431.025,
+		b: 431.23,
 		mode: "nfm",
 		step: 12500,
 		bw: 12500,
@@ -1844,8 +1845,8 @@ const LAND_MOBILE: ScannerProtocol[] = [
 
 /**
  * The core's built-in bandplans for region EU (src/core/scanner/bandplan/builtin.ts through
- * bandplansFor("EU"), same order and values), plus `pager-466`: the French 466 MHz paging block
- * of the canvas band plan (`pg466`), which the core has no built-in for.
+ * bandplansFor("EU"), same order and values), plus `pager-431`: a synthetic paging block
+ * of the canvas band plan (`pg431`), which the core has no built-in for.
  */
 export const SCANNER_BANDPLANS: readonly Bandplan[] = [
 	{
@@ -2094,17 +2095,17 @@ export const SCANNER_BANDPLANS: readonly Bandplan[] = [
 		],
 	},
 	{
-		id: "pager-466",
+		id: "pager-431",
 		region: "EU",
-		name: "Pagers 466 MHz (e*Message)",
+		name: "Pagers 431 MHz (synthetic)",
 		ranges: [
 			{
-				startHz: MHZ(466.025),
-				endHz: MHZ(466.23),
-				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(466.025) }],
+				startHz: MHZ(431.025),
+				endHz: MHZ(431.23),
+				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(431.025) }],
 				obwHz: [12_000],
 				protocols: ["pocsag", "flex"],
-				bandplanId: "pager-466",
+				bandplanId: "pager-431",
 			},
 		],
 	},
@@ -2132,10 +2133,14 @@ export interface DiscoverySeed {
 	observations: number
 	/** Also heard by the seeded marine sweep (MOCK_SWEEP_JOB_ID). */
 	swept?: boolean
+	/** A fixed id (a seed moved to another frequency keeps the id it had); default from its index and frequency. */
+	id?: string
 }
 
 /** The id of seeded discovery `index` (the scanner mock and the recordings mock share it). */
 export function seedDiscoveryId(index: number, hz: number): string {
+	const fixed = DISCOVERY_SEEDS[index]?.id
+	if (fixed !== undefined) return fixed
 	return `d_01JBRZSEED${String(index).padStart(2, "0")}${hz.toString(36).toUpperCase()}`
 }
 
@@ -2175,7 +2180,9 @@ export const DISCOVERY_SEEDS: readonly DiscoverySeed[] = [
 		observations: 960,
 	},
 	{
-		mhz: 466.025,
+		// moved to a synthetic channel: it keeps the id it was seeded with
+		id: "d_01JBRZSEED037PGJ6W",
+		mhz: 431.025,
 		protocol: "flex",
 		confidence: "candidate",
 		class: "fsk2-wide",

@@ -18,8 +18,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
 - Retune sweep: `WAVEKIT_MOCK_RETUNE_SWEEP=1` (`retuneSweep` in `buildMockServer()`, `retune-sweep.ts`)
   retunes, from the first spectrum subscription, through 1090, 131, 136, 119.7, 144.6, 98, 438.9,
-  446.1, 466.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 466.078 MHz at 1.024 MS/s. Each window
-  has its own steady signals and discoveries, a saved frequency sits at 434.502 MHz, and frames follow
+  446.1, 431.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 431.078 MHz at 1.024 MS/s. Each window
+  has its own steady signals and discoveries, a saved frequency sits at 399.502 MHz, and frames follow
   the tuner's sample rate. Parked, only four signals may be labelled in the plot.
 - Activity store lifecycle: `GET /api/activity/status` reports `stats.lifecycle`. With
   `WAVEKIT_MOCK_ACTIVITY_STORE=opening` (or `retrying`, next attempt every 5 s; `activityStore` in
@@ -63,7 +63,7 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   current epoch, oldest first, `backfill: true`, counted in the ack's `backfillFrames`.
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
-  bandplans (plus a `pager-466` plan), plan previews from a port of the core's planner (hops,
+  bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,
   sweep period, poi, estimates, impact naming the running mock decoders, lockouts, issues), jobs
   (create with takeover consent, pause / resume / cancel / delete, live PATCH with `range-locked`,
   hits) and discoveries (seeded from `DISCOVERY_SEEDS`, the core's filters, sort, cursor, operator

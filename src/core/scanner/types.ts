@@ -333,6 +333,11 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
+	/**
+	 * The latest Activity event attributed to this discovery (api-types `Discovery.lastActivity`).
+	 * Not set by this core yet: the Activity event id is allocated outside the scanner.
+	 */
+	lastActivity?: { eventId: string; producedAt: string }
 	/** Band inspection UX req 1.4: projected at read time by the routes, never stored. */
 	coverage?: DiscoveryCoverage[]
 	/** Detail reads only: the remembered replay trials, projected by the routes (never stored). */

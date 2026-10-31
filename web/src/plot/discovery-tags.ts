@@ -613,6 +613,8 @@ export interface TagDetail {
 	calls: boolean
 	/** "No calls heard yet — control channel only" (proven digital voice), "No calls heard yet"; null otherwise. */
 	noCalls: string | null
+	/** The core's latest Activity event for this discovery (lastActivity), when well formed: "Last call" opens it. */
+	lastEventId: string | null
 	/** Live (tagTier active): heard now or within its hold. */
 	live: boolean
 }
@@ -656,7 +658,25 @@ export function tagDetail(
 					? "No calls heard yet — control channel only"
 					: "No calls heard yet",
 		live: tagTier(d, activeNow, now) === "active",
+		lastEventId: lastActivityEventId(d),
 	}
+}
+
+/** Longest Activity event id taken from a discovery (the core's are UUIDs, 36 characters). */
+export const LAST_ACTIVITY_ID_MAX = 128
+
+/**
+ * The discovery's last Activity event id (`lastActivity.eventId`), or null when absent or malformed: a
+ * non-string, empty, longer than LAST_ACTIVITY_ID_MAX, or with control characters. Older cores never send it.
+ */
+export function lastActivityEventId(
+	d: Pick<Discovery, "lastActivity">,
+): string | null {
+	const id: unknown = (d.lastActivity as { eventId?: unknown } | undefined)
+		?.eventId
+	if (typeof id !== "string") return null
+	if (id.length === 0 || id.length > LAST_ACTIVITY_ID_MAX) return null
+	return /[\u0000-\u001f\u007f]/.test(id) ? null : id
 }
 
 /** Where focus goes back when a popover closes from the keyboard or Cancel: the control that opened it. */
@@ -791,20 +811,6 @@ export function hasTaggable(
 export function identifiesChip(d: Discovery): boolean {
 	if (d.operator?.lockout) return false
 	return tagState(d) === "proven"
-}
-
-/**
- * The tag popover's Listen: tunes first and starts live audio only once the tune landed, so a slow or failed
- * tune never plays the previous frequency. Audio already on follows the tune by itself. True when it listens.
- */
-export async function listenAfterTune(
-	hz: number,
-	tune: (hz: number) => Promise<boolean>,
-	listen: { get(): { wanted: boolean }; start(): Promise<void> },
-): Promise<boolean> {
-	if (!(await tune(hz))) return false
-	if (!listen.get().wanted) await listen.start()
-	return true
 }
 
 /**

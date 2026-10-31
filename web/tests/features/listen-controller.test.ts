@@ -75,6 +75,24 @@ describe("ListenController (Web Audio path)", () => {
 		expect(c.get().phase).toBe("connecting")
 	})
 
+	it("unlock() only unlocks: no playback, no core start, state unchanged", () => {
+		const { c, calls } = setup(status({ running: false }))
+		const before = c.get()
+		c.unlock()
+		expect(calls).toEqual(["unlock 16000"])
+		expect(c.get()).toBe(before)
+	})
+
+	it("unlock() swallows a player that cannot start (start() reports it)", () => {
+		const { c } = setup(status())
+		const failing = c as unknown as { player: ListenPlayer }
+		failing.player.unlock = () => {
+			throw new Error("no audio")
+		}
+		expect(() => c.unlock()).not.toThrow()
+		expect(c.get().phase).toBe("off")
+	})
+
 	it("shows an error instead of connecting forever when the player cannot start", async () => {
 		const { c } = setup(status())
 		const failing = c as unknown as { player: ListenPlayer }

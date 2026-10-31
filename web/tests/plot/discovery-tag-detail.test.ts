@@ -10,7 +10,8 @@ import {
 	FLICKER_HOLD_MS,
 	FUTURE_SLACK_MS,
 	howWeKnow,
-	listenAfterTune,
+	LAST_ACTIVITY_ID_MAX,
+	lastActivityEventId,
 	placeDiscoveryTags,
 	PROVEN_LIVE_HOLD_MS,
 	RECENT_MS,
@@ -21,6 +22,7 @@ import {
 	TAG_CLOCK_MS,
 	unidentifiedLabel,
 } from "../../src/plot/discovery-tags.ts"
+import { listenAfterTune } from "../../src/features/listen/after-tune.ts"
 
 /** Discovery fields to override; `undefined` removes an optional one. */
 type Over = { [K in keyof Discovery]?: Discovery[K] | undefined }
@@ -498,6 +500,9 @@ describe("tag popover Listen", () => {
 		const listen = {
 			wanted,
 			get: () => ({ wanted: listen.wanted }),
+			unlock: () => {
+				calls.push("unlock")
+			},
 			start: () => {
 				calls.push("start")
 				listen.wanted = true
@@ -517,13 +522,15 @@ describe("tag popover Listen", () => {
 			})
 		}
 		const done = listenAfterTune(161_312_500, tune, listen)
+		// unlocked synchronously, still inside the click, before the tune is awaited
+		expect(calls).toEqual(["unlock", "tune 161312500"])
 		await Promise.resolve()
 		await Promise.resolve()
 		// a slow tune: nothing plays yet (it would be the previous frequency)
-		expect(calls).toEqual(["tune 161312500"])
+		expect(calls).toEqual(["unlock", "tune 161312500"])
 		land(true)
 		expect(await done).toBe(true)
-		expect(calls).toEqual(["tune 161312500", "start"])
+		expect(calls).toEqual(["unlock", "tune 161312500", "start"])
 	})
 
 	it("never plays when the tune fails or is superseded", async () => {
@@ -531,7 +538,8 @@ describe("tag popover Listen", () => {
 		expect(
 			await listenAfterTune(1e8, () => Promise.resolve(false), listen),
 		).toBe(false)
-		expect(calls).toEqual([])
+		// unlocking plays nothing
+		expect(calls).toEqual(["unlock"])
 	})
 
 	it("leaves audio already on alone: it follows the tune", async () => {
@@ -549,5 +557,45 @@ describe("tag popover Listen", () => {
 		)
 		expect(src).toContain("listenAfterTune(hz,")
 		expect(src).not.toMatch(/void services\.listen\.start\(\)/)
+	})
+})
+
+describe("tag popover Last call", () => {
+	const at = { eventId: "evt_1a", producedAt: "2026-10-30T07:59:00.000Z" }
+
+	it("names the core's last Activity event when it sends one", () => {
+		expect(
+			tagDetail(disc("c", { lastActivity: at }), new Set(), NOW),
+		).toMatchObject({ lastEventId: "evt_1a" })
+		expect(lastActivityEventId({ lastActivity: at })).toBe("evt_1a")
+	})
+
+	it("falls back (null) on older cores and on a malformed id", () => {
+		expect(tagDetail(disc("c"), new Set(), NOW).lastEventId).toBeNull()
+		const bad = (eventId: unknown) =>
+			lastActivityEventId({
+				lastActivity: { eventId, producedAt: at.producedAt } as never,
+			})
+		expect(bad("")).toBeNull()
+		expect(bad(42)).toBeNull()
+		expect(bad(null)).toBeNull()
+		expect(bad("evt\n1")).toBeNull()
+		// the bound: LAST_ACTIVITY_ID_MAX characters pass, one more does not
+		expect(bad("e".repeat(LAST_ACTIVITY_ID_MAX))).toBe(
+			"e".repeat(LAST_ACTIVITY_ID_MAX),
+		)
+		expect(bad("e".repeat(LAST_ACTIVITY_ID_MAX + 1))).toBeNull()
+		expect(lastActivityEventId({ lastActivity: "x" as never })).toBeNull()
+	})
+
+	it("opens that event, else Activity on the discovery's frequency", () => {
+		const src = readFileSync(
+			new URL("../../src/plot/DiscoveryTags.tsx", import.meta.url),
+			"utf8",
+		)
+		expect(src).toMatch(
+			/const id = lastActivityEventId\(d\)\s*if \(id\) services\.activity\.showEvent\(id\)\s*else services\.activity\.showFrequency\(d\.frequencyHz, d\.bandwidthHz\)/,
+		)
+		expect(src).toContain("Last call")
 	})
 })

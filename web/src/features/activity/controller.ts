@@ -337,6 +337,21 @@ export class ActivityController extends Store<ActivityViewState> {
 		shellStore.openDrawer("activity")
 	}
 
+	/**
+	 * Opens one event by id (a discovery's "Last call") in the drawer's list view; the detail fetches the stored
+	 * record (GET /api/activity/:eventId) and says so when it expired.
+	 */
+	showEvent(eventId: string): void {
+		this.update(s => ({
+			...s,
+			editing: null,
+			view: "all",
+			openId: eventId,
+			openItem: null,
+		}))
+		shellStore.openDrawer("activity")
+	}
+
 	// ---- columns
 
 	/** A column's own feed (its search under the drawer's), or null for an unknown id. */

@@ -347,6 +347,13 @@ export interface Discovery {
 	/** Weak discoveries only: a display hint of the likely kind, never a label or filter. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
 	/**
+	 * The latest Activity event attributed to this discovery: `eventId` names it for
+	 * `GET /api/activity/:eventId`, `producedAt` is its ISO time. Optional and additive: absent when
+	 * none is attributed, and on cores that do not attribute Activity events to discoveries yet
+	 * (clients then filter Activity by the discovery's frequency). The event may have expired.
+	 */
+	lastActivity?: { eventId: string; producedAt: string }
+	/**
 	 * Band inspection UX req 1.4: decoders whose placements cover `frequencyHz` on one of
 	 * `sourceIds`, projected at read time (never stored). Absent: unknown (no claim). `[]`:
 	 * verified no placement covers it. At most DISCOVERY_COVERAGE_MAX, running first.

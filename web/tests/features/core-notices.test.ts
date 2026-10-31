@@ -124,6 +124,24 @@ describe("link-capacity alert", () => {
 		).toBeNull()
 	})
 
+	it("follows lossReason when the core sends it: source loss only", () => {
+		for (const sev of ["critical", "warning"] as const) {
+			expect(linkAlertToast({ ...alert(sev), lossReason: "source" })).toBe(
+				LINK_LOSS_TEXT,
+			)
+			expect(
+				linkAlertToast({ ...alert(sev), lossReason: "branch-congestion" }),
+			).toBeNull()
+		}
+		expect(
+			linkAlertToast({
+				...alert("critical"),
+				type: "upstream-drops",
+				lossReason: "source",
+			}),
+		).toBeNull()
+	})
+
 	it("stays quiet right after a raise that already spoke of the link", () => {
 		const handlers = new Map<string, (d: unknown) => void>()
 		const events = {

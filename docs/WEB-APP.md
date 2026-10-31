@@ -92,7 +92,8 @@ Click a single tag for its detail:
 - **Calls**: Activity lists calls (a talkgroup or a source) and messages, not bare control
   traffic. A proven digital voice channel with no call in it says `No calls heard yet — control
 channel only`, which is why it has no Activity rows. Once calls are heard, **Last calls** opens
-  Activity on that frequency.
+  Activity on that frequency; when the core names the discovery's last Activity event, **Last
+  call** opens that event instead.
 - **Tune**, **Listen** (tunes there, then starts live audio once the tune has landed; if the tune
   fails nothing plays) and **Open in Scanner**.
 
@@ -231,7 +232,7 @@ decoded joins the call that follows it on the same talkgroup and channel (or, wi
 gap, the call before it) instead of becoming a stack of its own. A capcode is one stack per channel,
 except that the same page (same capcode, kind and text) heard within 2 s of one of the stack's
 decodes on another channel is a simulcast copy and joins the stack: the row lists the channels it
-was heard on (`On 160.450 · 466.075 MHz`), and the detail shows the decode's own Frequency with the
+was heard on (`On 160.450 · 431.075 MHz`), and the detail shows the decode's own Frequency with the
 stack's other channels under Also heard on (simulcast). The copies may arrive in either order: a
 repeat whose first copy lands on the other channel joins the stack that already heard both channels,
 so a beacon repeated on two channels stays one stack however its copies interleave. A channel stays

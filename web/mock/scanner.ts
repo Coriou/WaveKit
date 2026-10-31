@@ -2109,6 +2109,8 @@ export interface ScannerMockContext {
 	retuneSweep?: boolean
 	/** Starts with the engine's front-end overload hint shown (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
 	overloadHint?: boolean
+	/** The newest Activity event heard at `hz` (seeded discoveries with calls name it as `lastActivity`). */
+	lastActivity?: (hz: number) => { eventId: string; producedAt: string } | null
 }
 
 export interface ScannerMock {
@@ -2461,6 +2463,11 @@ export function registerScannerMock(
 			}
 			if (s.identity) d.identity = { ...s.identity }
 			if (s.operator) d.operator = { ...s.operator }
+			// a discovery with calls names its last one in Activity (a tag's "Last call")
+			if (d.metadata.talkgroups.length > 0 || d.metadata.sources.length > 0) {
+				const lastActivity = ctx.lastActivity?.(hz)
+				if (lastActivity) d.lastActivity = lastActivity
+			}
 			if (s.confidence === "candidate" && PROTOCOL_DECODER[s.protocol] !== null)
 				d.undecodedReason = "no-sync"
 			const observations: Observation[] = []

@@ -213,6 +213,12 @@ export interface ResourceAlert {
 	sourceId?: string
 	message: string
 	timestamp: string
+	/**
+	 * `link-capacity` only: the advisory's `LinkAdvisory.lossReason` (why samples were lost); absent when
+	 * none were, and on cores older than this field. `source`: bytes never reached the core (the receiver
+	 * link's fault). `branch-congestion`: every byte arrived and a core fanout branch dropped them.
+	 */
+	lossReason?: "source" | "branch-congestion"
 }
 
 export type DropAttribution = "none" | "link" | "host" | "consumer" | "unknown"

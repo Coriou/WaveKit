@@ -76,13 +76,16 @@ export function ratePolicyToast(
 }
 
 /**
- * The `link-capacity` resource alert as a toast; other alerts are not this module's. The core raises it
- * `critical` only for a `dropping` link (source loss) and `warning` for an `unproven` one, which has lost
- * nothing: that one stays quiet.
+ * The `link-capacity` resource alert as a toast; other alerts are not this module's. Its `lossReason` decides:
+ * only `source` loss is the link's fault (`branch-congestion` is the core's own). A core without `lossReason`
+ * raises it `critical` only for a `dropping` link (source loss) and `warning` for an `unproven` one, which has
+ * lost nothing: that one stays quiet.
  */
 export function linkAlertToast(a: ResourceAlert): string | null {
-	if (a.type !== "link-capacity" || a.severity !== "critical") return null
-	return LINK_LOSS_TEXT
+	if (a.type !== "link-capacity") return null
+	if (a.lossReason !== undefined)
+		return a.lossReason === "source" ? LINK_LOSS_TEXT : null
+	return a.severity === "critical" ? LINK_LOSS_TEXT : null
 }
 
 /** A raise toast that already spoke of the link covers the alert sent with it. */

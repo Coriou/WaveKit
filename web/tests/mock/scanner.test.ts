@@ -160,7 +160,7 @@ describe("mock scanner REST", () => {
 				"pmr446",
 				"uhf-land-mobile",
 				"vhf-land-mobile",
-				"pager-466",
+				"pager-431",
 				"ism-433",
 				"ism-868",
 			]),
@@ -459,6 +459,32 @@ describe("mock scanner discoveries", () => {
 		// last seen first
 		const seen = page.items.map(d => d.lastSeenAt)
 		expect(seen).toEqual([...seen].sort().reverse())
+	})
+
+	it("names the last Activity event of a discovery with calls, and the event resolves", async () => {
+		server = await buildMockServer({ port: 0 })
+		await server.app.ready()
+		const page = await list()
+		const withCalls = page.items.filter(
+			d => d.metadata.talkgroups.length > 0 || d.metadata.sources.length > 0,
+		)
+		const named = withCalls.filter(d => d.lastActivity)
+		expect(named.length).toBeGreaterThan(0)
+		// never on a discovery without calls (the 161.3125 MHz control channel)
+		expect(
+			page.items.find(d => d.frequencyHz === 161_312_500)?.lastActivity,
+		).toBeUndefined()
+		for (const d of named) {
+			const at = d.lastActivity
+			if (!at) continue
+			const record = await server.app.inject({
+				method: "GET",
+				url: `/api/activity/${encodeURIComponent(at.eventId)}`,
+			})
+			expect(record.statusCode).toBe(200)
+			expect(record.json<{ eventId: string }>().eventId).toBe(at.eventId)
+			expect(Number.isFinite(Date.parse(at.producedAt))).toBe(true)
+		}
 	})
 
 	it("filters, sorts and pages like the core's store", async () => {

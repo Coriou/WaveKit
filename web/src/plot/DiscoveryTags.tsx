@@ -22,6 +22,7 @@ import { useStore } from "../data/index.ts"
 import type { ScannerStore } from "../data/scanner-store.ts"
 import { whatIsThis } from "../data/scanner-format.ts"
 import { useNow } from "../features/hooks.ts"
+import { listenAfterTune } from "../features/listen/after-tune.ts"
 import { openDiscovery } from "../features/scanner/ui-store.ts"
 import { shellStore } from "../shell/store.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
@@ -30,7 +31,7 @@ import {
 	type DiscoveryTagFilter,
 	discoveryRowLayout,
 	hasTaggable,
-	listenAfterTune,
+	lastActivityEventId,
 	tagDetail,
 	tagPopoverRows,
 	tagState,
@@ -215,6 +216,7 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 		tune,
 		listen: hz => {
 			close(false)
+			// synchronous in the click: listenAfterTune unlocks audio before it awaits the tune
 			void listenAfterTune(hz, h => controller.tuneTo(h), services.listen)
 		},
 		scanner: id => {
@@ -222,9 +224,12 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 			openDiscovery(id)
 			shellStore.openDrawer("scanner")
 		},
-		activity: (hz, bw) => {
+		activity: d => {
 			close(false)
-			services.activity.showFrequency(hz, bw)
+			// the core's last event for it opens directly; older cores: what was heard on its frequency
+			const id = lastActivityEventId(d)
+			if (id) services.activity.showEvent(id)
+			else services.activity.showFrequency(d.frequencyHz, d.bandwidthHz)
 		},
 	}
 	const shown =
@@ -340,7 +345,8 @@ interface DetailActions {
 	tune: (hz: number) => void
 	listen: (hz: number) => void
 	scanner: (id: string) => void
-	activity: (hz: number, bandwidthHz: number) => void
+	/** Last call (the core's last Activity event for it), else Activity filtered to its frequency. */
+	activity: (d: Discovery) => void
 }
 
 /**
@@ -503,16 +509,28 @@ function TagDetailView({
 				>
 					Open in Scanner
 				</button>
-				{(v.calls || (v.noCalls === null && v.state === "proven")) && (
+				{v.lastEventId !== null ? (
 					<button
 						type="button"
 						className="wk-btn"
 						data-size="sm"
-						title="What was heard on this frequency, in Activity"
-						onClick={() => actions.activity(d.frequencyHz, d.bandwidthHz)}
+						title="The last call heard here, in Activity"
+						onClick={() => actions.activity(d)}
 					>
-						{v.calls ? "Last calls" : "In Activity"}
+						Last call
 					</button>
+				) : (
+					(v.calls || (v.noCalls === null && v.state === "proven")) && (
+						<button
+							type="button"
+							className="wk-btn"
+							data-size="sm"
+							title="What was heard on this frequency, in Activity"
+							onClick={() => actions.activity(d)}
+						>
+							{v.calls ? "Last calls" : "In Activity"}
+						</button>
+					)
 				)}
 			</div>
 		</div>
