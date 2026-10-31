@@ -1790,6 +1790,30 @@ export async function buildMockServer(
 				if (d.sourceId === MOCK_SOURCE_ID)
 					broadcast("decoders", "decoder:status", d)
 		},
+		tuning: sourceId => {
+			const t = sourceId === MOCK_SOURCE_ID ? tuner : secondTuner
+			return t
+				? {
+						centerFreq: t.frequency,
+						sampleRate: t.sampleRate,
+						gainMode: t.gainMode,
+						gain: t.gain,
+					}
+				: null
+		},
+		// a restore resume writes the pre-pause tuning back (a plain resume writes none)
+		restore: (sourceId, t) => {
+			const target = sourceId === MOCK_SOURCE_ID ? tuner : secondTuner
+			if (!target) return
+			if (t.sampleRate !== undefined) target.sampleRate = t.sampleRate
+			if (t.gainMode !== undefined) target.gainMode = t.gainMode
+			if (t.gain !== undefined) target.gain = t.gain
+			if (sourceId === MOCK_SOURCE_ID) applyFrequency(t.centerFreq, "rest")
+			else {
+				target.frequency = t.centerFreq
+				broadcast("tuner", "tuner:state-changed", { sourceId, state: target })
+			}
+		},
 	})
 	feedMock = feed
 

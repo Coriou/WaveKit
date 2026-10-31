@@ -12,6 +12,7 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import { z } from "zod"
 import {
 	SOURCE_RESUME_FAILED_MESSAGE,
 	sourceActivitySchema,
@@ -235,6 +236,15 @@ const sourceFeedResponseSchema = {
 	required: ["id", "feed", "changed"],
 } as const
 
+/**
+ * Optional POST /resume body: `restoreTuning` true writes the pre-pause tuning back (feed
+ * `restoreTuning`); absent or false is a plain resume that writes no tuning.
+ */
+const ResumeBodySchema = z
+	.object({ restoreTuning: z.boolean().optional() })
+	.strict()
+	.nullish()
+
 const sourceResumeFailedSchema = {
 	type: "object",
 	properties: {
@@ -414,7 +424,10 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 	/**
 	 * POST /api/sources/:id/pause and /resume - Pause or resume the receiver feed.
 	 * Pause closes the connection with no reconnect and persists; resume makes one
-	 * attempt and restores tuning as on any reconnect. Both are idempotent.
+	 * attempt. A plain resume writes no tuning (another client may have retuned the
+	 * receiver during the pause); `{ restoreTuning: true }` writes the pre-pause tuning
+	 * back. Tuner relay commands made during the pause are written either way. Both are
+	 * idempotent.
 	 */
 	for (const action of ["pause", "resume"] as const) {
 		fastify.post<{
@@ -435,7 +448,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 					description:
 						action === "pause"
 							? "Closes the receiver connection without reconnecting; decoders, scanner jobs and the channelizer wait (reason source-paused). Survives a core restart. Idempotent."
-							: "Reconnects a paused feed with one attempt and restores its tuning. 503 when the receiver is unreachable (feed state error; call again to retry). Idempotent.",
+							: "Reconnects a paused feed with one attempt. A plain resume writes no centre, rate, gain mode or gain (another client may have retuned the shared receiver during the pause); body { restoreTuning: true } writes the pre-pause tuning (feed.restoreTuning) back. Tuner relay commands made during the pause are written either way. 400 on an invalid body; 503 when the receiver is unreachable (feed state error; call again to retry). Idempotent.",
 					params: {
 						type: "object",
 						properties: {
@@ -447,12 +460,27 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 						200: sourceFeedResponseSchema,
 						404: errorResponseSchema,
 						409: errorResponseSchema,
-						...(action === "resume" ? { 503: sourceResumeFailedSchema } : {}),
+						...(action === "resume"
+							? { 400: errorResponseSchema, 503: sourceResumeFailedSchema }
+							: {}),
 					},
 				},
 			},
 			async (request, reply) => {
 				const { id } = request.params
+				const body =
+					action === "resume" ? ResumeBodySchema.safeParse(request.body) : null
+				if (body && !body.success)
+					return reply.status(400).send({
+						error: "BadRequest",
+						code: "INVALID_RESUME_REQUEST",
+						message: body.error.issues
+							.map(
+								issue => `${issue.path.join(".") || "body"}: ${issue.message}`,
+							)
+							.join("; "),
+					})
+				const restoreTuning = body?.data?.restoreTuning === true
 				const notFound = {
 					error: "NotFound",
 					code: "SOURCE_NOT_FOUND",
@@ -464,7 +492,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 					const result =
 						action === "pause"
 							? await sourceManager.pause(id)
-							: await sourceManager.resume(id)
+							: await sourceManager.resume(id, { restoreTuning })
 					if (result.feed.state === "error")
 						return reply.status(503).send({
 							error: "ServiceUnavailable",

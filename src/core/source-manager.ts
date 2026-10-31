@@ -33,6 +33,7 @@ import type {
 	SourceActivity,
 	SourceEndpoint,
 	SourceFeed,
+	SourceFeedRestoreTuning,
 	SourceFeedState,
 } from "@wavekit/api-types"
 import type { Logger } from "../utils/logger.js"
@@ -170,6 +171,13 @@ export interface SourceStatus {
 	/** Pause / resume state; network sources only (recordings omit it). */
 	feed?: SourceFeed | undefined
 }
+
+/**
+ * How a resume treats the receiver's tuning. "plain" writes no centre, rate, gain mode or gain:
+ * while the feed was paused another client (SDR++ through rtlmux) may have retuned the shared
+ * dongle unseen, so the core adopts what it finds. "restore" writes the pre-pause tuning back.
+ */
+export type SourceResumeKind = "plain" | "restore"
 
 /** What pause() and resume() answer. */
 export interface SourceFeedResult {
@@ -309,8 +317,6 @@ interface SourceAttempt {
 	headerBuffer: Buffer | null
 	headerAt: number | null
 	watchdog: ReturnType<typeof setInterval> | null
-	/** Opened by resume() of a paused feed (isResumedSession). */
-	resumed?: boolean
 }
 
 interface SourceState {
@@ -366,6 +372,11 @@ interface SourceState {
 	rtlTcpHeaderBuffer: Buffer | null
 	/** Pause / resume state (network sources; a recording stays "live"). */
 	feed: { state: SourceFeedState; since: number }
+	/**
+	 * The kind of the latest resume until its session's first payload was announced
+	 * (resumeKind); a session that drops before its first payload hands it to the next one.
+	 */
+	pendingResume: SourceResumeKind | null
 	// Recording source specific state
 	recordingState?: RecordingState | undefined
 }
@@ -494,6 +505,10 @@ export class SourceManager extends EventEmitter {
 	private feedsUnsaved = false
 	/** Generation of the latest write; only its outcome sets `feedsUnsaved`. */
 	private feedSaveGeneration = 0
+	/** What a restore resume writes back, per source (setPausedTuningSource). */
+	private pausedTuningSource:
+		| ((id: string) => SourceFeedRestoreTuning | undefined)
+		| null = null
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
@@ -899,6 +914,7 @@ export class SourceManager extends EventEmitter {
 						: "live",
 				since: Date.now(),
 			},
+			pendingResume: null,
 		}
 
 		this.sources.set(config.id, state)
@@ -1011,7 +1027,11 @@ export class SourceManager extends EventEmitter {
 		}
 		this.emit("data", id, chunk)
 		if (!current()) return false
-		if (firstPayload) this.emit("payload-started", id)
+		if (firstPayload) {
+			this.emit("payload-started", id)
+			// Its listeners (tuner sync, scanner recovery) have read the resume kind.
+			if (current()) state.pendingResume = null
+		}
 		return canWrite
 	}
 
@@ -1551,10 +1571,8 @@ export class SourceManager extends EventEmitter {
 					state.reconnectAttempts = 0
 					state.lastError = undefined
 					// A resume's connection: the feed is live before "connected" fires.
-					if (state.feed.state === "resuming") {
+					if (state.feed.state === "resuming")
 						state.feed = { state: "live", since: Date.now() }
-						attempt.resumed = true
-					}
 					// Connected settlement precedes reentrant lifecycle notifications.
 					safeResolve()
 					this.resetRateTruth(id, state)
@@ -2448,13 +2466,29 @@ export class SourceManager extends EventEmitter {
 	}
 
 	private feedOf(state: SourceState): SourceFeed {
+		const restoreTuning =
+			state.feed.state === "live"
+				? undefined
+				: this.pausedTuningSource?.(state.config.id)
 		return {
 			state: state.feed.state,
 			since: new Date(state.feed.since).toISOString(),
 			...(state.feed.state === "error"
 				? { error: SOURCE_RESUME_FAILED_MESSAGE }
 				: {}),
+			...(restoreTuning ? { restoreTuning: { ...restoreTuning } } : {}),
 		}
+	}
+
+	/**
+	 * Supplies a held feed's `restoreTuning`: what a restore resume would write back (the tuner
+	 * controller's accepted centre, rate and gain; wired in core/tuner-wiring.ts). Read on every
+	 * feed answer, so it follows relay commands made during the pause.
+	 */
+	setPausedTuningSource(
+		source: ((id: string) => SourceFeedRestoreTuning | undefined) | null,
+	): void {
+		this.pausedTuningSource = source
 	}
 
 	/** The source's feed; undefined for unknown ids and recordings. */
@@ -2465,20 +2499,18 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
-	 * True while the source's current connection was opened by resume() of a paused feed (until
-	 * it closes). Tuning is restored on it whatever `tuner.reconnectPolicy` says: a pause is the
-	 * operator's, not a dropout that may have reset the receiver on purpose.
+	 * The kind of resume whose session has not announced its first payload yet (read by the
+	 * "payload-started" listeners: tuner sync, scanner lease recovery), else null. A plain resume
+	 * writes no tuning; a restore resume writes the pre-pause tuning whatever
+	 * `tuner.reconnectPolicy` says. Cleared once that first payload was announced, or by a pause.
 	 */
+	resumeKind(id: string): SourceResumeKind | null {
+		return this.sources.get(id)?.pendingResume ?? null
+	}
+
+	/** True while resumeKind(id) is set. */
 	isResumedSession(id: string): boolean {
-		const state = this.sources.get(id)
-		const attempt = state?.attempt
-		return (
-			state !== undefined &&
-			attempt !== null &&
-			attempt !== undefined &&
-			attempt.resumed === true &&
-			this.isActiveAttempt(state, attempt)
-		)
+		return this.resumeKind(id) !== null
 	}
 
 	/**
@@ -2530,7 +2562,7 @@ export class SourceManager extends EventEmitter {
 	 * Pauses the source's receiver feed: the connection is closed cleanly (FIN, then destroy
 	 * after SOURCE_PAUSE_CLOSE_TIMEOUT_MS) and never retried, any backoff timer is cancelled,
 	 * and the pause is persisted. The registration, stream, caps and decoder assignments stay,
-	 * so a resume restores the same tuning through the normal reconnect path. Idempotent:
+	 * so a resume reconnects through the normal reconnect path (see resume() for tuning). Idempotent:
 	 * resolves once the connection is closed; `changed` is false when it was already paused.
 	 */
 	pause(id: string): Promise<SourceFeedResult> {
@@ -2540,6 +2572,7 @@ export class SourceManager extends EventEmitter {
 			// A repeated pause also retries a write that failed.
 			const persist = !this.pausedIds.has(id) || this.feedsUnsaved
 			this.pausedIds.add(id)
+			state.pendingResume = null
 			if (changed) {
 				this.logger.info({ sourceId: id }, "Pausing source feed")
 				this.setFeed(id, state, "paused")
@@ -2593,13 +2626,21 @@ export class SourceManager extends EventEmitter {
 
 	/**
 	 * Resumes a paused feed with one connection attempt (no backoff). On success the feed is
-	 * live before "connected" fires, the pause is dropped from the state file, and tuning is
-	 * restored by the usual reconnect path (tuner restore, scanner recovery and gain restore
-	 * on the first payload). On failure the feed reads "error" with a fixed safe message and
+	 * live before "connected" fires, the pause is dropped from the state file, and the first
+	 * payload runs the usual reconnect path (tuner sync, scanner recovery). On failure the feed reads "error" with a fixed safe message and
 	 * stays paused (also across a restart); resume again to retry. Idempotent: a live feed
 	 * answers `changed: false`.
+	 *
+	 * `restoreTuning` false (default, a plain resume): nothing writes centre, rate, gain mode or
+	 * gain on the new session (tuner sync and scanner recovery read resumeKind), because another
+	 * client may have retuned the receiver during the pause. True writes the pre-pause tuning.
 	 */
-	resume(id: string): Promise<SourceFeedResult> {
+	resume(
+		id: string,
+		opts: { restoreTuning?: boolean } = {},
+	): Promise<SourceFeedResult> {
+		const kind: SourceResumeKind =
+			opts.restoreTuning === true ? "restore" : "plain"
 		return this.serialFeed(id, async () => {
 			const state = this.feedSource(id)
 			if (state.feed.state === "live") {
@@ -2608,7 +2649,8 @@ export class SourceManager extends EventEmitter {
 				const persisted = persist ? await this.persistFeeds() : true
 				return { feed: this.feedOf(state), changed: false, persisted }
 			}
-			this.logger.info({ sourceId: id }, "Resuming source feed")
+			this.logger.info({ sourceId: id, kind }, "Resuming source feed")
+			state.pendingResume = kind
 			this.setFeed(id, state, "resuming")
 			state.reconnectAttempts = 0
 			try {
@@ -2633,6 +2675,7 @@ export class SourceManager extends EventEmitter {
 				{ sourceId: id },
 				"Resuming the source feed failed; the feed stays paused",
 			)
+			state.pendingResume = null
 			this.setFeed(id, state, "error")
 			// The pause stays recorded; a write it still owes is retried here too.
 			const persisted = this.feedsUnsaved ? await this.persistFeeds() : true

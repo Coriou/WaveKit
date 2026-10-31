@@ -664,6 +664,41 @@ describe("palette: receiver feed", () => {
 		)
 	})
 
+	it("offers Resume receiver at <MHz> (restore) beside the plain resume while the centre is known", () => {
+		const restoreRow = (over: Partial<PaletteContext>) =>
+			flatten(new PaletteModel(ctx(over)).build(null, "resume")).filter(
+				x => x.id === "tog:feed-restore",
+			)
+		const paused = { ...live, state: "paused", restoreHz: 145_000_000 } as const
+		expect(restoreRow({ feed: paused })[0]).toMatchObject({
+			title: "Resume receiver at 145.000 MHz",
+			action: {
+				kind: "feed",
+				op: "resume",
+				sourceId: "rtl-0",
+				restoreTuning: true,
+			},
+			done: "Receiver resumed",
+		})
+		// the plain one stays as it was: no restoreTuning, and it keeps P
+		expect(feedRow({ feed: paused })[0]).toMatchObject({
+			title: "Resume receiver",
+			kbd: ["P"],
+			action: { kind: "feed", op: "resume", sourceId: "rtl-0" },
+		})
+		expect(feedRow({ feed: paused })[0]?.action).not.toHaveProperty(
+			"restoreTuning",
+		)
+		expect(restoreRow({ feed: { ...paused, restoreHz: null } })).toHaveLength(0)
+		expect(
+			restoreRow({ feed: { ...live, restoreHz: 145_000_000 } }),
+		).toHaveLength(0)
+		expect(restoreRow({ feed: paused, readOnly: true })[0]?.info).toBe(true)
+		expect(
+			restoreRow({ feed: { ...paused, busy: true } })[0]?.action,
+		).toBeUndefined()
+	})
+
 	it("finds them by what people call it", () => {
 		const find = (q: string, over: Partial<PaletteContext>) =>
 			flatten(new PaletteModel(ctx(over)).build(null, q)).some(

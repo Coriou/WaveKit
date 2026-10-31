@@ -170,6 +170,67 @@ describe("source feed routes", () => {
 		expect(manager.pause).not.toHaveBeenCalledWith("nope")
 	})
 
+	it("resume takes an optional { restoreTuning } body: absent or false is a plain resume", async () => {
+		const { manager } = fakeSources()
+		await build(manager)
+		const cases: Array<[unknown, boolean]> = [
+			[undefined, false],
+			[{}, false],
+			[{ restoreTuning: false }, false],
+			[{ restoreTuning: true }, true],
+		]
+		for (const [body, restoreTuning] of cases) {
+			manager.resume.mockClear()
+			await app.inject({ method: "POST", url: "/api/sources/rtl/pause" })
+			const res = await app.inject({
+				method: "POST",
+				url: "/api/sources/rtl/resume",
+				...(body === undefined ? {} : { payload: body as object }),
+			})
+			expect(res.statusCode).toBe(200)
+			expect(manager.resume).toHaveBeenCalledWith("rtl", { restoreTuning })
+		}
+	})
+
+	it("rejects an invalid resume body with 400 and never resumes", async () => {
+		const { manager } = fakeSources()
+		await build(manager)
+		await app.inject({ method: "POST", url: "/api/sources/rtl/pause" })
+		for (const payload of [
+			{ restoreTuning: "yes" },
+			{ restoreTuning: 1 },
+			{ restoreTuning: true, centre: 1 },
+			{ restore: true },
+		]) {
+			const res = await app.inject({
+				method: "POST",
+				url: "/api/sources/rtl/resume",
+				payload,
+			})
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toMatchObject({
+				error: "BadRequest",
+				code: "INVALID_RESUME_REQUEST",
+			})
+		}
+		expect(manager.resume).not.toHaveBeenCalled()
+	})
+
+	it("a held feed answers its restoreTuning in the pause answer", async () => {
+		const sources = fakeSources()
+		const restoreTuning = { centerFreq: 145_000_000, sampleRate: 2_400_000 }
+		sources.manager.pause.mockImplementationOnce(async () => ({
+			feed: { state: "paused" as const, since: SINCE, restoreTuning },
+			changed: true,
+		}))
+		await build(sources.manager)
+		const res = await app.inject({
+			method: "POST",
+			url: "/api/sources/rtl/pause",
+		})
+		expect(res.json()).toMatchObject({ feed: { restoreTuning } })
+	})
+
 	it("a failed resume answers 503 with the safe message and the error feed; a retry succeeds", async () => {
 		const sources = fakeSources()
 		await build(sources.manager)

@@ -238,26 +238,13 @@ describe("TunerState.unknownFields", () => {
 			expect(state.declaredOnlyFields).toEqual(["frequency", "sampleRate"])
 		})
 
-		it("a resumed paused feed keeps an inferred centre and rate and writes them back", async () => {
-			// Written but not accepted (a scanner hop, for one): known, never replayed on a dropout.
+		it("a restore resume drops an inferred centre and rate as a dropout does (WG5 R2)", async () => {
+			// Written but not accepted (only test mode is, in production): never replayed.
 			await controller.setFrequency("rtl", 162_000_000, { accept: false })
 			await controller.setSampleRate("rtl", 2_400_000, { accept: false })
-			const result = controller.synchronizeOnConnect("rtl", {
-				policy: "restore",
-				resumed: true,
-			})
-			expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
-			const state = controller.getState("rtl")!
-			expect(state.frequency).toBe(162_000_000)
-			expect(state.sampleRate).toBe(2_400_000)
-			expect(state.declaredOnlyFields ?? []).toEqual([])
-			// Caps describe what was written back, not the startup baseline.
-			expect(current).toMatchObject({
-				centerFreq: 162_000_000,
-				sampleRate: 2_400_000,
-			})
-			// A later dropout is no resume: the inferred values fall back as before (WG5 R2).
-			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([])
+			expect(
+				controller.synchronizeOnConnect("rtl", { resume: "restore" }).commands,
+			).toEqual([])
 			expect(controller.getState("rtl")!.frequency).toBe(1_090_000_000)
 			expect(current).toMatchObject({
 				centerFreq: 1_090_000_000,
@@ -265,15 +252,12 @@ describe("TunerState.unknownFields", () => {
 			})
 		})
 
-		it("a resumed paused feed restores a relay client's centre and rate", () => {
+		it("a restore resume restores a relay client's centre and rate", () => {
 			// SDR++ through the relay: its writes are accepted and replayed on any restore.
 			controller.applyExternalCommand("rtl", 0x01, 162_000_000)
 			controller.applyExternalCommand("rtl", 0x02, 2_400_000)
 			expect(
-				controller.synchronizeOnConnect("rtl", {
-					policy: "restore",
-					resumed: true,
-				}).commands,
+				controller.synchronizeOnConnect("rtl", { resume: "restore" }).commands,
 			).toEqual(["set-sample-rate", "set-frequency"])
 			expect(controller.getState("rtl")!.frequency).toBe(162_000_000)
 			expect(current).toMatchObject({
@@ -282,17 +266,19 @@ describe("TunerState.unknownFields", () => {
 			})
 		})
 
-		it("a resumed paused feed replays an accepted centre once, not again as inferred", async () => {
+		it("a plain resume reports centre, rate and gain unknown, not declared-only", async () => {
 			await controller.setFrequency("rtl", 162_000_000)
-			await controller.setFrequency("rtl", 162_025_000, { accept: false })
-			expect(
-				controller.synchronizeOnConnect("rtl", {
-					policy: "restore",
-					resumed: true,
-				}).commands,
-			).toEqual(["set-frequency"])
-			expect(controller.getState("rtl")!.frequency).toBe(162_025_000)
-			expect(current.centerFreq).toBe(162_025_000)
+			controller.noteFeedPaused("rtl")
+			controller.synchronizeOnConnect("rtl", { resume: "plain" })
+			const state = controller.getState("rtl")!
+			expect(state.frequency).toBe(162_000_000)
+			expect(state.unknownFields).toEqual(
+				expect.arrayContaining(["frequency", "sampleRate", "gainMode", "gain"]),
+			)
+			expect(state.declaredOnlyFields ?? []).toEqual([])
+			// A dropout reconnect writes nothing from before the pause, so the doubt stays.
+			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([])
+			expect(controller.getState("rtl")!.unknownFields).toContain("frequency")
 		})
 
 		it("a restore reconnect replays an accepted centre and keeps it proven", async () => {

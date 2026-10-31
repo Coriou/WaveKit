@@ -6,6 +6,9 @@
 // with the same `since` (resuming then live within one millisecond) are told apart by arrival: socket and REST
 // deliveries arrive in order, so the later one wins. A 200 answer with `persisted: false` changed the feed but
 // did not save it; the entry keeps that until a repeated call (which retries the write) saves it.
+// Two resumes: a plain one (no body) writes no tuning, because SDR++ may have retuned the shared dongle
+// through rtlmux while WaveKit was paused; `{ restoreTuning: true }` writes the pre-pause tuning back
+// (the held feed's `restoreTuning`, offered as "Resume at <MHz>"). A retry repeats the same kind.
 import type {
 	DecoderInfo,
 	ExtendedSourceStatus,
@@ -17,8 +20,12 @@ import { SOURCE_RESUME_FAILED_MESSAGE } from "@wavekit/api-types"
 import type { DataLayer } from "../../data/index.ts"
 import { errorMessage, isApiError, Store } from "../../data/index.ts"
 import { plotSourceId } from "../../plot/plot-source.ts"
+import { formatMHz } from "../format.ts"
 
 export type FeedOp = "pause" | "resume"
+
+/** "plain": reconnect without writing tuning; "restore": write the pre-pause tuning back. */
+export type ResumeKind = "plain" | "restore"
 
 export interface FeedEntry {
 	/** The newest feed a pause or resume answered or a source row carried. */
@@ -29,6 +36,8 @@ export interface FeedEntry {
 	readonly error: string | null
 	/** The call whose change the core could not save (`persisted: false`): repeating it retries the write. */
 	readonly unsaved: FeedOp | null
+	/** The kind of the latest resume asked here (a retry repeats it); null before any. */
+	readonly resumeKind: ResumeKind | null
 }
 
 export interface FeedState {
@@ -54,6 +63,7 @@ const EMPTY: FeedEntry = {
 	pending: null,
 	error: null,
 	unsaved: null,
+	resumeKind: null,
 }
 
 /** What an unsaved pause or resume says: it holds now, a core restart undoes it. */
@@ -102,6 +112,21 @@ export function feedOf(
 	if (feed.state !== "live" && source?.connected === true && !source.feed)
 		return { state: "live", since: feed.since }
 	return feed
+}
+
+/**
+ * The centre a restore resume writes back (Hz), from a held feed's `restoreTuning`; null when the feed is
+ * live or the core knows no centre to restore (then only the plain resume is offered).
+ */
+export function restoreCentreHz(feed: SourceFeed | null): number | null {
+	if (feed === null || feed.state === "live") return null
+	const hz: unknown = feed.restoreTuning?.centerFreq
+	return typeof hz === "number" && Number.isFinite(hz) && hz > 0 ? hz : null
+}
+
+/** "Resume at 145.000 MHz": the restore resume's label. */
+export function restoreLabel(hz: number): string {
+	return `Resume at ${formatMHz(hz)} MHz`
 }
 
 /** Whether the feed holds the source back (anything but live). */
@@ -200,9 +225,26 @@ export class FeedController extends Store<FeedState> {
 		return this.run(sourceId, "pause")
 	}
 
-	/** Never rejects. A failed resume reads feed "error" with the core's fixed message. */
-	resume(sourceId: string): Promise<FeedResult> {
-		return this.run(sourceId, "resume")
+	/**
+	 * Never rejects. A failed resume reads feed "error" with the core's fixed message. Plain by default: the
+	 * core writes no tuning; `restoreTuning` writes the pre-pause tuning back.
+	 */
+	resume(
+		sourceId: string,
+		opts: { readonly restoreTuning?: boolean } = {},
+	): Promise<FeedResult> {
+		return this.run(
+			sourceId,
+			"resume",
+			opts.restoreTuning === true ? "restore" : "plain",
+		)
+	}
+
+	/** Repeats the latest resume asked here with the same kind (plain when none was). */
+	retryResume(sourceId: string): Promise<FeedResult> {
+		return this.resume(sourceId, {
+			restoreTuning: this.entry(sourceId).resumeKind === "restore",
+		})
 	}
 
 	/** Forgets a failure note (the feed's own error stays until a resume succeeds). */
@@ -219,7 +261,11 @@ export class FeedController extends Store<FeedState> {
 		}))
 	}
 
-	private async run(sourceId: string, op: FeedOp): Promise<FeedResult> {
+	private async run(
+		sourceId: string,
+		op: FeedOp,
+		kind: ResumeKind = "plain",
+	): Promise<FeedResult> {
 		const busy = this.entry(sourceId).pending
 		if (busy !== null)
 			return {
@@ -229,11 +275,20 @@ export class FeedController extends Store<FeedState> {
 				persisted: true,
 				error: busy === "pause" ? "Already pausing" : "Already resuming",
 			}
-		this.patch(sourceId, { pending: op, error: null })
+		this.patch(sourceId, {
+			pending: op,
+			error: null,
+			...(op === "resume" ? { resumeKind: kind } : {}),
+		})
 		try {
-			const answer = await this.data.api.post<SourceFeedResponse>(
-				`/api/sources/${encodeURIComponent(sourceId)}/${op}`,
-			)
+			const url = `/api/sources/${encodeURIComponent(sourceId)}/${op}`
+			// a plain resume sends no body, as every core before restoreTuning reads it
+			const answer =
+				op === "resume" && kind === "restore"
+					? await this.data.api.post<SourceFeedResponse>(url, {
+							restoreTuning: true,
+						})
+					: await this.data.api.post<SourceFeedResponse>(url)
 			const feed = isFeed(answer?.feed) ? answer.feed : null
 			// an older core leaves `persisted` out: only an explicit false is unsaved
 			const persisted = answer?.persisted !== false

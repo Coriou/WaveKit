@@ -191,75 +191,157 @@ describe("TunerController reconnect synchronization", () => {
 		])
 	})
 
-	describe("a resumed paused feed (inferred centre and rate replayed)", () => {
-		const resume = () => {
+	describe("the first session after a paused feed's resume", () => {
+		const resume = (kind: "plain" | "restore") => {
 			transport.frames.length = 0
 			transport.capsChanges.length = 0
-			return controller.synchronizeOnConnect("rtl-1", {
-				policy: "restore",
-				resumed: true,
-			})
+			return controller.synchronizeOnConnect("rtl-1", { resume: kind })
 		}
 
-		it("keeps caps on the replayed inferred tuning instead of the baseline", async () => {
-			controller.initializeSource(
-				"rtl-1",
-				{ ...transport.caps, centerFreq: 1_090_000_000 },
-				"rtl_tcp",
-			)
-			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
-			await controller.setSampleRate("rtl-1", 2_400_000, { accept: false })
-			const result = resume()
-			expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
-			expect(transport.frames).toEqual([
-				[0x02, 2_400_000],
-				[0x01, 162_000_000],
-			])
-			expect(controller.getState("rtl-1")).toMatchObject({
-				frequency: 162_000_000,
-				sampleRate: 2_400_000,
-			})
-			expect(transport.caps).toMatchObject({
-				centerFreq: 162_000_000,
-				sampleRate: 2_400_000,
-			})
-			expect(transport.capsChanges).toEqual([])
-		})
-
-		it("reconciles stale caps to the replayed inferred tuning", async () => {
-			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
-			await controller.setSampleRate("rtl-1", 2_400_000, { accept: false })
-			transport.caps.sampleRate = 2_048_000
-			transport.caps.centerFreq = 100_000_000
-			resume()
-			expect(transport.capsChanges).toEqual([
-				{ sampleRate: 2_400_000, centerFreq: 162_000_000 },
-			])
-		})
-
-		it("keeps caps on the inferred tuning the state still shows when a configured write fails", async () => {
+		async function tuneAndPause() {
 			controller.setConfiguredTuning("rtl-1", {
 				gainMode: "manual",
 				gainDb: 30,
 			})
-			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
+			await controller.setSampleRate("rtl-1", 2_400_000)
+			await controller.setFrequency("rtl-1", 145_000_000)
+			await controller.setGainMode("rtl-1", "manual")
+			await controller.setGain("rtl-1", 297)
+			controller.noteFeedPaused("rtl-1")
 			controller.noteSourceConnected("rtl-1")
-			controller.on("error", () => {})
-			transport.failAfterWrites(0)
-			const result = resume()
-			expect(result.error).toBeDefined()
-			expect(controller.getState("rtl-1")!.frequency).toBe(162_000_000)
-			expect(transport.caps.centerFreq).toBe(162_000_000)
+		}
+
+		it("plain: writes nothing (no replay, no configured gain) and keeps caps", async () => {
+			await tuneAndPause()
+			const result = resume("plain")
+			expect(result).toMatchObject({ commands: [], resume: "plain" })
+			expect(transport.frames).toEqual([])
 			expect(transport.capsChanges).toEqual([])
+			expect(transport.caps).toMatchObject({
+				centerFreq: 145_000_000,
+				sampleRate: 2_400_000,
+			})
+			const state = controller.getState("rtl-1")!
+			expect(state.unknownFields).toEqual(
+				expect.arrayContaining(["frequency", "sampleRate", "gainMode", "gain"]),
+			)
+			expect(state.declaredOnlyFields ?? []).toEqual([])
+			// Nothing from before the pause is a restore target any more.
+			expect(controller.restorableTuning("rtl-1")).toBeUndefined()
 		})
 
-		it("a normal dropout still returns caps to the baseline", async () => {
-			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
-			expect(transport.caps.centerFreq).toBe(162_000_000)
-			expect(reconnect().commands).toEqual([])
-			expect(transport.capsChanges).toEqual([
-				{ sampleRate: 2_048_000, centerFreq: 100_000_000 },
+		it("plain: a later dropout reconnect replays nothing from before the pause", async () => {
+			await tuneAndPause()
+			resume("plain")
+			transport.frames.length = 0
+			expect(controller.synchronizeOnConnect("rtl-1").commands).toEqual([])
+			expect(transport.frames).toEqual([])
+			// Still unverified, still on the last known values.
+			expect(controller.getState("rtl-1")!.unknownFields).toContain("frequency")
+			expect(transport.caps.centerFreq).toBe(145_000_000)
+		})
+
+		it("plain: writes the relay commands accepted during the pause", async () => {
+			await tuneAndPause()
+			controller.applyExternalCommand("rtl-1", 0x01, 162_000_000)
+			controller.applyExternalCommand("rtl-1", 0x04, 400)
+			expect(controller.restorableTuning("rtl-1")).toMatchObject({
+				centerFreq: 162_000_000,
+				gain: 400,
+			})
+			resume("plain")
+			expect(transport.frames).toEqual([
+				[0x01, 162_000_000],
+				[0x04, 400],
 			])
+			const state = controller.getState("rtl-1")!
+			expect(state.unknownFields ?? []).not.toContain("frequency")
+			expect(state.unknownFields ?? []).not.toContain("gain")
+			expect(state.unknownFields).toContain("sampleRate")
+		})
+
+		it("plain without a pause marker (paused since boot): every accepted field is from the pause", () => {
+			controller.applyExternalCommand("rtl-1", 0x01, 162_000_000)
+			resume("plain")
+			expect(transport.frames).toEqual([[0x01, 162_000_000]])
+		})
+
+		it("restore: writes the configured gain and the pre-pause centre, rate, gain mode and gain", async () => {
+			await tuneAndPause()
+			expect(controller.restorableTuning("rtl-1")).toEqual({
+				centerFreq: 145_000_000,
+				sampleRate: 2_400_000,
+				gainMode: "manual",
+				gain: 297,
+			})
+			const result = resume("restore")
+			expect(result).toMatchObject({ policy: "restore", resume: "restore" })
+			expect(transport.frames.slice(-4)).toEqual([
+				[0x02, 2_400_000],
+				[0x01, 145_000_000],
+				[0x03, 1],
+				[0x04, 297],
+			])
+		})
+
+		it("restore after a plain resume cannot restore what the plain resume left unverified", async () => {
+			await tuneAndPause()
+			resume("plain")
+			controller.noteFeedPaused("rtl-1")
+			expect(resume("restore").commands).toEqual([])
+			expect(controller.getState("rtl-1")!.unknownFields).toContain("frequency")
+		})
+
+		it("restore under the reset policy still restores", async () => {
+			controller = new TunerController(
+				testLogger,
+				transport as unknown as SourceManager,
+				{ reconnectPolicy: "reset" },
+			)
+			controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
+			await controller.setFrequency("rtl-1", 145_000_000)
+			controller.noteFeedPaused("rtl-1")
+			expect(resume("restore").commands).toEqual(["set-frequency"])
+		})
+	})
+
+	describe("adopting the measured rate after a plain resume", () => {
+		beforeEach(async () => {
+			await controller.setSampleRate("rtl-1", 2_048_000)
+			await controller.setFrequency("rtl-1", 145_000_000)
+			controller.noteFeedPaused("rtl-1")
+			controller.synchronizeOnConnect("rtl-1", { resume: "plain" })
+		})
+
+		it("adopts the common rate within 1.5 % of the measurement (bound at and past)", () => {
+			// 2.16 Msps × 1.015 = 2_192_400 (at the bound) adopts; 2_192_500 is past it.
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_192_500)).toBe(false)
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_192_400)).toBe(true)
+			expect(controller.getState("rtl-1")!.sampleRate).toBe(2_160_000)
+			expect(transport.caps.sampleRate).toBe(2_160_000)
+			// A measurement, not a command: still unverified, never replayed, caps hold it.
+			expect(controller.getState("rtl-1")!.unknownFields).toContain(
+				"sampleRate",
+			)
+			transport.frames.length = 0
+			expect(controller.synchronizeOnConnect("rtl-1").commands).toEqual([])
+			expect(transport.caps.sampleRate).toBe(2_160_000)
+			// A later external rate change is followed the same way.
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_048_000)).toBe(true)
+			expect(transport.caps.sampleRate).toBe(2_048_000)
+		})
+
+		it("keeps the rate unverified when no common rate matches", () => {
+			expect(controller.adoptObservedSampleRate("rtl-1", 1_000_000)).toBe(false)
+			expect(controller.getState("rtl-1")!.unknownFields).toContain(
+				"sampleRate",
+			)
+		})
+
+		it("never adopts a rate that is not in doubt", async () => {
+			await controller.setSampleRate("rtl-1", 2_400_000)
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_160_000)).toBe(false)
+			expect(controller.getState("rtl-1")!.sampleRate).toBe(2_400_000)
 		})
 	})
 

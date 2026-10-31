@@ -32,7 +32,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   no spectrum frames or decoder messages are sent (the waterfall freezes) and every wanted decoder
   on it is suspended with reason `source-paused`, which `GET /api/decoders/summary` (`decoder-summary.ts`)
   reports as the `source-paused` verdict with a `resume-source` action. A resume reads `resuming` for `resumeMs`
-  (default 400 ms); `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
+  (default 400 ms). The held feed carries the tuning at pause time as `restoreTuning`; a plain resume
+  changes no tuning, `{ "restoreTuning": true }` writes it back to the mock tuner, and any other body
+  answers 400 `INVALID_RESUME_REQUEST`. `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
   resumes answer the core's 503 `SOURCE_RESUME_FAILED` with the feed in `error`, to try Retry.
   `WAVEKIT_MOCK_PERSIST_FAILURES=<n>` (`persistFailures`) makes the next `n` pauses or resumes
   answer 200 with `persisted: false` (the change holds but was not saved), to try the unsaved

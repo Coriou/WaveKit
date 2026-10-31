@@ -1,7 +1,9 @@
 /**
  * Receiver feed pause / resume (SourceManager.pause / resume): a pause closes the rtl_tcp
  * connection cleanly with no reconnect, survives a restart through the state dir, and a
- * resume reconnects the same registration with its accepted tuning restored. A resume that
+ * resume reconnects the same registration. A plain resume writes no tuning (another client may
+ * have retuned the shared dongle during the pause); `restoreTuning` writes the accepted
+ * pre-pause tuning back; relay commands made during the pause are written either way. A resume that
  * cannot reach the receiver reads "error" (fixed safe message) and a later resume retries.
  * In-process fakes only: a fake rtl_tcp server on an ephemeral loopback port.
  */
@@ -36,16 +38,37 @@ interface FakeConnection {
 	closed: boolean
 }
 
+/** What the shared dongle is tuned to; frames from any connection change it. */
+interface FakeDongle {
+	centre: number
+	rate: number
+	gainMode: number
+	gain: number
+}
+
 interface FakeRtlTcp {
 	server: net.Server
 	port: number
 	connections: FakeConnection[]
+	dongle: FakeDongle
 	close(): Promise<void>
 }
 
 /** rtl_tcp-like: header on accept, then IQ every 20 ms; parses 5-byte commands. */
 async function startFakeRtlTcp(port = 0): Promise<FakeRtlTcp> {
 	const connections: FakeConnection[] = []
+	const dongle: FakeDongle = {
+		centre: 100_000_000,
+		rate: 2_048_000,
+		gainMode: 0,
+		gain: 0,
+	}
+	const apply = (cmd: number, value: number) => {
+		if (cmd === 0x01) dongle.centre = value
+		else if (cmd === 0x02) dongle.rate = value
+		else if (cmd === 0x03) dongle.gainMode = value
+		else if (cmd === 0x04) dongle.gain = value
+	}
 	const server = net.createServer(socket => {
 		const conn: FakeConnection = {
 			socket,
@@ -58,7 +81,12 @@ async function startFakeRtlTcp(port = 0): Promise<FakeRtlTcp> {
 		socket.on("data", data => {
 			pending = Buffer.concat([pending, Buffer.from(data)])
 			while (pending.length >= 5) {
-				conn.frames.push([pending.readUInt8(0), pending.readUInt32BE(1)])
+				const frame: [number, number] = [
+					pending.readUInt8(0),
+					pending.readUInt32BE(1),
+				]
+				conn.frames.push(frame)
+				apply(...frame)
 				pending = pending.subarray(5)
 			}
 		})
@@ -87,6 +115,7 @@ async function startFakeRtlTcp(port = 0): Promise<FakeRtlTcp> {
 		server,
 		port: (server.address() as net.AddressInfo).port,
 		connections,
+		dongle,
 		close: async () => {
 			for (const c of connections) c.socket.destroy()
 			await new Promise<void>(resolve => server.close(() => resolve()))
@@ -275,111 +304,14 @@ describe("SourceManager feed pause / resume", () => {
 		expect(manager.getStatus("rtl")?.feed?.state).toBe("paused")
 	})
 
-	it.each(["restore", "reset"] as const)(
-		"resume reconnects the same registration and stream and restores accepted tuning (reconnectPolicy %s)",
-		async reconnectPolicy => {
-			const { upstream, manager, feedEvents } = await started()
-			const tuner = new TunerController(pino({ level: "silent" }), manager, {
-				reconnectPolicy,
-			})
-			wireTunerControl({
-				log: pino({ level: "silent" }),
-				sourceManager: manager,
-				tunerController: tuner,
-				tunerRelay: new TunerRelay(
-					pino({ level: "silent" }),
-					manager,
-					new FanoutManager(pino({ level: "silent" })),
-					{
-						enabled: false,
-						host: "127.0.0.1",
-						port: 0,
-						sourceId: "rtl",
-						controlPolicy: "exclusive",
-					},
-				),
-				relayEnabled: false,
-			})
-			const stream = await manager.connect(config(upstream.port))
-			let bytes = 0
-			stream.on("data", (chunk: Buffer) => {
-				bytes += chunk.length
-			})
-			await waitFor(
-				() => manager.getStatus("rtl")?.activity.state === "streaming",
-			)
-			await tuner.setSampleRate("rtl", 2_400_000)
-			await tuner.setFrequency("rtl", 145_000_000)
-			await tuner.setGainMode("rtl", "manual")
-			await tuner.setGain("rtl", 297)
-			await waitFor(() => upstream.connections[0]!.frames.length === 4)
-
-			await manager.pause("rtl")
-			await waitFor(() => upstream.connections[0]!.closed)
-			const before = bytes
-
-			const resumed = await manager.resume("rtl")
-			expect(resumed).toMatchObject({ changed: true, feed: { state: "live" } })
-			expect(manager.isPaused("rtl")).toBe(false)
-			await waitFor(() => upstream.connections.length === 2)
-			const second = upstream.connections[1]!
-			// The usual reconnect replay on the session's first payload: rate, centre, gain.
-			await waitFor(() => second.frames.length >= 4)
-			expect(second.frames).toEqual(
-				expect.arrayContaining([
-					[0x02, 2_400_000],
-					[0x01, 145_000_000],
-					[0x03, 1],
-					[0x04, 297],
-				]),
-			)
-			// Same stream object keeps flowing after the resume.
-			await waitFor(() => bytes > before)
-			expect(manager.getStatus("rtl")?.connected).toBe(true)
-
-			expect(manager.isResumedSession("rtl")).toBe(true)
-			expect(tuner.getState("rtl")).toMatchObject({
-				sampleRate: 2_400_000,
-				frequency: 145_000_000,
-			})
-
-			const again = await manager.resume("rtl")
-			expect(again).toMatchObject({ changed: false, feed: { state: "live" } })
-			expect(upstream.connections).toHaveLength(2)
-			expect(feedEvents).toEqual([
-				["rtl", "paused"],
-				["rtl", "resuming"],
-				["rtl", "live"],
-			])
-
-			// A dropout after the resume follows the configured policy again: the override is
-			// scoped to the resume's own connection.
-			second.socket.destroy()
-			await waitFor(() => upstream.connections.length === 3, 10_000)
-			const third = upstream.connections[2]!
-			await waitFor(
-				() => manager.getStatus("rtl")?.activity.state === "streaming",
-			)
-			expect(manager.isResumedSession("rtl")).toBe(false)
-			if (reconnectPolicy === "restore") {
-				await waitFor(() => third.frames.length >= 4)
-				expect(third.frames).toEqual(
-					expect.arrayContaining([[0x01, 145_000_000]]),
-				)
-			} else {
-				// Give a replay time to arrive (it is written on the first payload, which came).
-				await new Promise(resolve => setTimeout(resolve, 100))
-				expect(third.frames).not.toEqual(
-					expect.arrayContaining([[0x01, 145_000_000]]),
-				)
-			}
-		},
-		15_000,
-	)
-
-	it("resume writes back an inferred (not accepted) centre and rate", async () => {
-		const { upstream, manager } = await started()
-		const tuner = new TunerController(pino({ level: "silent" }), manager, {})
+	/** A TunerController wired to the manager as in src/index.ts (relay disabled). */
+	function wiredTuner(
+		manager: SourceManager,
+		reconnectPolicy: "restore" | "reset" = "restore",
+	) {
+		const tuner = new TunerController(pino({ level: "silent" }), manager, {
+			reconnectPolicy,
+		})
 		wireTunerControl({
 			log: pino({ level: "silent" }),
 			sourceManager: manager,
@@ -398,30 +330,269 @@ describe("SourceManager feed pause / resume", () => {
 			),
 			relayEnabled: false,
 		})
+		return tuner
+	}
+
+	/** Connects, tunes rate, centre, manual gain mode and gain, and pauses. */
+	async function tunedThenPaused(
+		reconnectPolicy: "restore" | "reset" = "restore",
+	) {
+		const ctx = await started()
+		const { upstream, manager } = ctx
+		const tuner = wiredTuner(manager, reconnectPolicy)
+		const stream = await manager.connect(config(upstream.port))
+		let bytes = 0
+		stream.on("data", (chunk: Buffer) => {
+			bytes += chunk.length
+		})
+		await waitFor(
+			() => manager.getStatus("rtl")?.activity.state === "streaming",
+		)
+		await tuner.setSampleRate("rtl", 2_400_000)
+		await tuner.setFrequency("rtl", 145_000_000)
+		await tuner.setGainMode("rtl", "manual")
+		await tuner.setGain("rtl", 297)
+		await waitFor(() => upstream.connections[0]!.frames.length === 4)
+		await manager.pause("rtl")
+		await waitFor(() => upstream.connections[0]!.closed)
+		return { ...ctx, tuner, bytes: () => bytes }
+	}
+
+	/** SDR++ through rtlmux while WaveKit is paused: the dongle moves, WaveKit cannot see it. */
+	function retuneDuringPause(dongle: FakeDongle) {
+		dongle.centre = 433_920_000
+		dongle.rate = 2_160_000
+		dongle.gainMode = 1
+		dongle.gain = 400
+	}
+
+	/**
+	 * Waits past the session's first payload, when a sync writes (synchronously), then for the
+	 * written frames to cross the loopback: `frames` frames, or a short grace when none are due.
+	 */
+	async function settledSession(
+		manager: SourceManager,
+		upstream: FakeRtlTcp,
+		index: number,
+		frames = 0,
+	) {
+		await waitFor(() => upstream.connections.length === index + 1)
+		await waitFor(
+			() => manager.getStatus("rtl")?.activity.state === "streaming",
+		)
+		await waitFor(() => manager.resumeKind("rtl") === null)
+		const conn = upstream.connections[index]!
+		if (frames > 0) await waitFor(() => conn.frames.length >= frames)
+		else await new Promise(resolve => setTimeout(resolve, 100))
+		return conn
+	}
+
+	it("a paused feed shows the tuning a restore resume writes back", async () => {
+		const { manager } = await tunedThenPaused()
+		expect(manager.getFeed("rtl")).toMatchObject({
+			state: "paused",
+			restoreTuning: {
+				centerFreq: 145_000_000,
+				sampleRate: 2_400_000,
+				gainMode: "manual",
+				gain: 297,
+			},
+		})
+		expect(manager.getStatus("rtl")?.feed?.restoreTuning?.centerFreq).toBe(
+			145_000_000,
+		)
+	})
+
+	it.each(["restore", "reset"] as const)(
+		"plain resume writes no tuning after an external retune during the pause (reconnectPolicy %s)",
+		async reconnectPolicy => {
+			const { upstream, manager, tuner, feedEvents, bytes } =
+				await tunedThenPaused(reconnectPolicy)
+			retuneDuringPause(upstream.dongle)
+			const before = bytes()
+
+			const resumed = await manager.resume("rtl")
+			expect(resumed).toMatchObject({ changed: true, feed: { state: "live" } })
+			expect(resumed.feed.restoreTuning).toBeUndefined()
+			const second = await settledSession(manager, upstream, 1)
+			// Same stream object keeps flowing after the resume.
+			await waitFor(() => bytes() > before)
+			// Nothing written: SDR++'s centre, rate and gain stay on the dongle.
+			expect(second.frames).toEqual([])
+			expect(upstream.dongle).toEqual({
+				centre: 433_920_000,
+				rate: 2_160_000,
+				gainMode: 1,
+				gain: 400,
+			})
+			// The last known values stay, marked unknown until read or set; caps keep them.
+			const state = tuner.getState("rtl")!
+			expect(state).toMatchObject({
+				frequency: 145_000_000,
+				sampleRate: 2_400_000,
+			})
+			expect(state.unknownFields).toEqual(
+				expect.arrayContaining(["frequency", "sampleRate", "gainMode", "gain"]),
+			)
+			expect(manager.getCaps("rtl")).toMatchObject({
+				centerFreq: 145_000_000,
+				sampleRate: 2_400_000,
+			})
+			expect(feedEvents).toEqual([
+				["rtl", "paused"],
+				["rtl", "resuming"],
+				["rtl", "live"],
+			])
+
+			// A later dropout replays nothing from before the pause either.
+			second.socket.destroy()
+			const third = await settledSession(manager, upstream, 2)
+			expect(third.frames).not.toEqual(
+				expect.arrayContaining([[0x01, 145_000_000]]),
+			)
+			expect(upstream.dongle.centre).toBe(433_920_000)
+
+			// Setting the centre proves it again.
+			await tuner.setFrequency("rtl", 162_000_000)
+			expect(tuner.getState("rtl")!.unknownFields ?? []).not.toContain(
+				"frequency",
+			)
+		},
+		15_000,
+	)
+
+	it.each(["restore", "reset"] as const)(
+		"restore resume writes exactly the pre-pause centre, rate, gain mode and gain (reconnectPolicy %s)",
+		async reconnectPolicy => {
+			const { upstream, manager, tuner } =
+				await tunedThenPaused(reconnectPolicy)
+			retuneDuringPause(upstream.dongle)
+
+			const resumed = await manager.resume("rtl", { restoreTuning: true })
+			expect(resumed).toMatchObject({ changed: true, feed: { state: "live" } })
+			const second = await settledSession(manager, upstream, 1, 4)
+			expect(second.frames).toEqual([
+				[0x02, 2_400_000],
+				[0x01, 145_000_000],
+				[0x03, 1],
+				[0x04, 297],
+			])
+			expect(upstream.dongle).toEqual({
+				centre: 145_000_000,
+				rate: 2_400_000,
+				gainMode: 1,
+				gain: 297,
+			})
+			expect(tuner.getState("rtl")!.unknownFields ?? []).not.toEqual(
+				expect.arrayContaining(["frequency"]),
+			)
+
+			// The override is scoped to the resume's own session: a dropout follows the policy.
+			second.socket.destroy()
+			const third = await settledSession(
+				manager,
+				upstream,
+				2,
+				reconnectPolicy === "restore" ? 4 : 0,
+			)
+			if (reconnectPolicy === "restore") {
+				expect(third.frames).toEqual(
+					expect.arrayContaining([[0x01, 145_000_000]]),
+				)
+			} else {
+				expect(third.frames).not.toEqual(
+					expect.arrayContaining([[0x01, 145_000_000]]),
+				)
+			}
+		},
+		15_000,
+	)
+
+	it("plain resume writes the tuner relay commands made during the pause, and only those", async () => {
+		const { upstream, manager, tuner } = await tunedThenPaused()
+		// What wireTunerControl does with a relay client's command while the source is down.
+		tuner.applyExternalCommand("rtl", 0x01, 162_000_000)
+		expect(manager.getFeed("rtl")?.restoreTuning?.centerFreq).toBe(162_000_000)
+
+		await manager.resume("rtl")
+		const second = await settledSession(manager, upstream, 1, 1)
+		expect(second.frames).toEqual([[0x01, 162_000_000]])
+		const state = tuner.getState("rtl")!
+		expect(state.frequency).toBe(162_000_000)
+		expect(state.unknownFields ?? []).not.toContain("frequency")
+		expect(state.unknownFields).toEqual(
+			expect.arrayContaining(["sampleRate", "gainMode", "gain"]),
+		)
+		expect(manager.getCaps("rtl")?.centerFreq).toBe(162_000_000)
+	})
+
+	it("with the tuner relay enabled, a relay client's retune during the pause is written on a plain resume", async () => {
+		const { upstream, manager } = await started()
+		const tuner = new TunerController(pino({ level: "silent" }), manager, {})
+		const relay = new TunerRelay(
+			pino({ level: "silent" }),
+			manager,
+			new FanoutManager(pino({ level: "silent" })),
+			{
+				enabled: true,
+				host: "127.0.0.1",
+				port: 0,
+				sourceId: "rtl",
+				controlPolicy: "shared",
+			},
+		)
+		wireTunerControl({
+			log: pino({ level: "silent" }),
+			sourceManager: manager,
+			tunerController: tuner,
+			tunerRelay: relay,
+			relayEnabled: true,
+		})
+		await relay.start()
+		cleanups.push(() => relay.stop())
+		const relayPort = (
+			(
+				relay as unknown as { server: net.Server }
+			).server.address() as net.AddressInfo
+		).port
 		await manager.connect(config(upstream.port))
 		await waitFor(
 			() => manager.getStatus("rtl")?.activity.state === "streaming",
 		)
-		await tuner.setSampleRate("rtl", 2_400_000, { accept: false })
-		await tuner.setFrequency("rtl", 145_000_000, { accept: false })
-		await waitFor(() => upstream.connections[0]!.frames.length === 2)
-
+		await tuner.setFrequency("rtl", 145_000_000)
 		await manager.pause("rtl")
 		await waitFor(() => upstream.connections[0]!.closed)
-		await manager.resume("rtl")
-		await waitFor(() => upstream.connections.length === 2)
-		const second = upstream.connections[1]!
-		await waitFor(() => second.frames.length >= 2)
-		expect(second.frames).toEqual(
-			expect.arrayContaining([
-				[0x02, 2_400_000],
-				[0x01, 145_000_000],
-			]),
-		)
-		expect(tuner.getState("rtl")).toMatchObject({
-			sampleRate: 2_400_000,
-			frequency: 145_000_000,
+
+		// SDR++ connected to the relay retunes while WaveKit is paused: the core sees it.
+		const client = net.connect(relayPort, "127.0.0.1")
+		client.on("error", () => undefined)
+		cleanups.push(() => {
+			client.destroy()
 		})
+		await new Promise<void>(resolve => client.once("connect", resolve))
+		const frame = Buffer.alloc(5)
+		frame.writeUInt8(0x01, 0)
+		frame.writeUInt32BE(162_000_000, 1)
+		client.write(frame)
+		await waitFor(() => tuner.getState("rtl")?.frequency === 162_000_000)
+		expect(manager.getFeed("rtl")?.restoreTuning?.centerFreq).toBe(162_000_000)
+
+		await manager.resume("rtl")
+		const second = await settledSession(manager, upstream, 1, 1)
+		expect(second.frames).toEqual(expect.arrayContaining([[0x01, 162_000_000]]))
+		expect(second.frames).not.toEqual(
+			expect.arrayContaining([[0x01, 145_000_000]]),
+		)
+		expect(upstream.dongle.centre).toBe(162_000_000)
+	})
+
+	it("the resume kind lasts until the resumed session announced its first payload", async () => {
+		const { upstream, manager } = await tunedThenPaused()
+		await manager.resume("rtl")
+		expect(manager.resumeKind("rtl")).not.toBeNull()
+		await settledSession(manager, upstream, 1)
+		expect(upstream.connections[1]!.frames).toEqual([])
+		expect(manager.isResumedSession("rtl")).toBe(false)
 	})
 
 	it("retries a failed state-file write on a repeated pause or resume and reports it", async () => {

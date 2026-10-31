@@ -218,6 +218,14 @@
 	.wkf-rx-paused .wkf-strong {
 		color: var(--wk-amber);
 	}
+	/* Resume, then the restore resume under it */
+	.wkf-rx-resume {
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 6px;
+		flex-shrink: 0;
+	}
 	.wkf-rx-paused[data-state="error"] {
 		background: rgba(var(--wk-danger-rgb), 0.12);
 		border-color: rgba(var(--wk-danger-rgb), 0.3);

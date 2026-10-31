@@ -48,12 +48,14 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
 		// The receiver may have come back at its own defaults: restore or reset
 		// accepted tuner state per tuner.reconnectPolicy and reconcile caps.
-		// A resume of a paused feed is the operator's, not a dropout: it always restores.
+		// The first session after a paused feed's resume follows the resume instead: a plain
+		// resume writes no tuning (SDR++ may have retuned the dongle through rtlmux, unseen),
+		// a restore resume (`restoreTuning: true`) restores whatever the policy says.
 		// Optional call: test doubles of the source manager predate pause / resume.
-		const resumed = sourceManager.isResumedSession?.(sourceId) === true
+		const resume = sourceManager.resumeKind?.(sourceId) ?? null
 		const result = tunerController.synchronizeOnConnect(
 			sourceId,
-			resumed ? { policy: "restore", resumed: true } : {},
+			resume ? { resume } : {},
 		)
 		if (result.error) {
 			log.warn(
@@ -70,6 +72,25 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 
 	sourceManager.on("removed", sourceId => {
 		tunerController.removeSource(sourceId)
+	})
+
+	// A pause marks where the relay commands a plain resume still writes begin; a held feed
+	// shows what a restore resume would write (SourceFeed.restoreTuning).
+	// Optional calls: test doubles of the source manager predate pause / resume.
+	sourceManager.on("feed-changed", (sourceId, feed) => {
+		if (feed.state === "paused") tunerController.noteFeedPaused(sourceId)
+	})
+	sourceManager.setPausedTuningSource?.(sourceId =>
+		tunerController.restorableTuning(sourceId),
+	)
+
+	// After a plain resume the rate is unverified: a sustained rate-truth mismatch is what the
+	// receiver delivers, so a measured common rate is adopted (adoptObservedSampleRate).
+	sourceManager.on("rate-truth-changed", sourceId => {
+		const measured =
+			sourceManager.getStatus?.(sourceId)?.rateMismatch?.measuredSampleRateHz
+		if (measured !== undefined)
+			tunerController.adoptObservedSampleRate(sourceId, measured)
 	})
 
 	if (!relayEnabled) return

@@ -138,11 +138,18 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
 waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
   pause survives a core restart; if the core could not save it, the island warns `Paused, but not
-  saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once and restores the tuning; if the
-  receiver cannot be reached, the island says `Resume failed` with the reason and a **Retry**
-  button, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live) or
-  **Resume receiver** (while paused) does the same, and the `P` key toggles it from anywhere; a
-  pause from the palette or the key offers Undo. Read-only browsers cannot pause. While paused,
+  saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once
+  without changing the receiver's tuning: while WaveKit was paused, SDR++ may have retuned the
+  shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds (centre, rate
+  and gain read unknown in the island until you set them). **Resume at 161.500 MHz** (shown when
+  the core knows the centre from before the pause) reconnects and writes the centre, rate and gain
+  from before the pause back. SDR++ connected through WaveKit's tuner relay is seen: its retunes
+  during the pause are written on either resume. If the receiver cannot be reached, the island
+  says `Resume failed` with the reason and a **Retry** button, which repeats the same kind of
+  resume, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live),
+  **Resume receiver** (while paused) and **Resume receiver at 161.500 MHz** do the same, and the
+  `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
+  offers Undo. Read-only browsers cannot pause. While paused,
   the tuned card's decoders read "waiting: Receiver paused — Resume" with a **Resume** button and
   Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
   pause ends with what it found so far and reads `Stopped · receiver paused`. With more than one

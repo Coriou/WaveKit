@@ -785,11 +785,14 @@ A source with the same `id` answers `409 SOURCE_EXISTS`; a failed connection ans
 
 Stop or restart pulling the receiver's IQ without removing the source. Both are writes,
 so in protected mode they need the same admission as every other write (`401` without
-it). Neither takes a body.
+it). Pause takes no body; resume takes an optional JSON body `{ "restoreTuning": true }`
+(a boolean, default `false`; any other key or type answers `400 INVALID_RESUME_REQUEST`).
 
 ```bash
 curl -X POST http://localhost:9000/api/sources/rtl-pi/pause
 curl -X POST http://localhost:9000/api/sources/rtl-pi/resume
+curl -X POST http://localhost:9000/api/sources/rtl-pi/resume \
+  -H 'content-type: application/json' -d '{"restoreTuning":true}'
 ```
 
 **Pause** closes the receiver connection cleanly (the core ends the stream and waits up to
@@ -807,16 +810,44 @@ New scanner jobs, identify requests and job resumes on a paused source answer
 `503 SOURCE_PAUSED` (`message`: "The receiver feed is paused; resume it first"). The pause is saved in `<stateDir>/source-feed.json`, so after a
 core restart the source registers without connecting and its log says it is paused.
 
-**Resume** makes one connection attempt. On success the feed is live again and the accepted
-tuning (frequency, sample rate, gain mode and gain) is restored on the first payload,
-whatever `tuner.reconnectPolicy` says: the pause was the operator's, so even `reset` does
-not drop it (a later dropout follows the policy again). Scanner leases and band gains are
-recovered as on any reconnect. Suspended decoders, waiting scanner jobs and live audio
-(with the same frequency, mode and squelch) then continue. A centre and rate the core
-knew without having accepted them (a written-but-not-accepted value, such as a scanner hop)
-are written back too, so the receiver returns to where it was when paused. If the
-receiver cannot be reached the answer is `503 SOURCE_RESUME_FAILED`, the feed reads
-`error` and the source stays paused (also across a restart); call resume again to retry.
+**Resume** makes one connection attempt. On success the feed is live again; suspended
+decoders, waiting scanner jobs and live audio (with the same frequency, mode and squelch)
+then continue. If the receiver cannot be reached the answer is
+`503 SOURCE_RESUME_FAILED`, the feed reads `error` and the source stays paused (also
+across a restart); call resume again to retry.
+
+What a resume writes to the receiver depends on the body:
+
+- **Plain resume** (no body, or `restoreTuning: false`) writes no centre frequency, sample
+  rate, gain mode or gain, and no configured `sources[].tuner` gain, whatever
+  `tuner.reconnectPolicy` says. Pausing is how you hand a shared dongle to another client:
+  SDR++ connected through rtlmux (or straight to the receiver) can retune it while WaveKit
+  is paused, and rtl_tcp cannot report its tuning, so WaveKit adopts what it finds instead
+  of pulling the receiver back. The tuner state keeps the last known values, but
+  `frequency`, `sampleRate`, `gainMode` and `gain` are listed in `unknownFields` until they
+  are set again (through the API, the relay or a restore). The values accepted before the
+  pause are no longer restored on a later dropout either. When the rate-truth check then
+  measures a sustained rate within 1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536,
+  1.792, 1.92, 2.048, 2.16, 2.4, 2.56, 2.88 or 3.2 Msps), that rate is adopted into the
+  tuner state and the caps (it stays in `unknownFields`: measured, not commanded). Scanner side: a lease recovery queued for the source (a job
+  that ended while the feed was paused, or a crashed sweep) is settled without writing its
+  pre-pause snapshot, a gain restore owed after a lost band-gain lease is dropped, and no
+  band gain is applied; a sweep that held the source keeps its lease and continues with
+  its own next hop, but its release no longer puts back the pre-pause tuning. TEST_MODE 0
+  (the scanner's own marker) is still sent when a marker may be open.
+- **Restore resume** (`restoreTuning: true`) writes the accepted pre-pause tuning back on
+  the first payload, whatever `tuner.reconnectPolicy` says (even `reset`; a later dropout
+  follows the policy again): the configured gain, then every accepted field (frequency,
+  sample rate, gain mode, gain and the others), the scanner's queued lease recovery and
+  owed gain restore, and a band gain the receiver had before the pause. The held feed's
+  `restoreTuning` shows what it writes.
+
+**SDR++ through the tuner relay or through rtlmux.** With the
+[tuner relay](#tuner-relay) enabled, SDR++ connected to the relay is seen: its commands
+become the operator's tuning even while the source is paused, and every resume, plain or
+restore, writes the commands made during the pause (the relay forwards nothing while the
+source is down). SDR++ connected through rtlmux talks to the dongle directly: WaveKit sees
+none of its commands, which is why a plain resume writes nothing.
 
 When saving `source-feed.json` fails, the answer carries `persisted: false` (the change
 holds until the core restarts, and the core logs a warning); a repeated pause or resume
@@ -853,10 +884,15 @@ answers `404 SOURCE_NOT_FOUND`; a recording source answers `409 SOURCE_FEED_UNSU
 ```
 
 **The `feed` field.** Every network source in [`GET /api/sources`](#get-apisources) (and the
-`source` of `POST /api/sources`) carries `feed: { state, since, error? }`; recordings omit it.
-`state` is `live` (connects and reconnects as usual), `paused`, `resuming` (a resume is
-dialling) or `error` (the last resume failed; `error` holds the fixed message above). Any
-state other than `live` holds consumers back. `since` is when the state began.
+`source` of `POST /api/sources`) carries `feed: { state, since, error?, restoreTuning? }`;
+recordings omit it. `state` is `live` (connects and reconnects as usual), `paused`,
+`resuming` (a resume is dialling) or `error` (the last resume failed; `error` holds the
+fixed message above). Any state other than `live` holds consumers back. `since` is when the
+state began. `restoreTuning` (`{ centerFreq, sampleRate?, gainMode?, gain? }`, Hz and tenths
+of a dB) appears while the feed is not `live` and the core knows an accepted centre: it is
+what a restore resume writes back (including relay commands made during the pause). It is
+absent after a restart (the pause is saved, the tuning is not) and after a plain resume left
+the tuning unverified; then only the plain resume is meaningful.
 
 #### DELETE /api/sources/:id
 

@@ -72,6 +72,8 @@ export interface FeedContext {
 	readonly state: "live" | "paused" | "resuming" | "error"
 	/** A pause or resume is in flight. */
 	readonly busy: boolean
+	/** The centre a restore resume writes back (held feed's restoreTuning); null when none is known. */
+	readonly restoreHz?: number | null
 }
 
 /** What the palette reads from the app, once per render. */
@@ -245,6 +247,8 @@ export interface FeedAction {
 	readonly kind: "feed"
 	readonly op: "pause" | "resume"
 	readonly sourceId: string
+	/** Resume only: write the pre-pause tuning back (a plain resume writes none). */
+	readonly restoreTuning?: boolean
 }
 
 export type PaletteAction =
@@ -1325,7 +1329,7 @@ export class PaletteModel {
 					? { sub: "The last resume failed · resume again to retry" }
 					: {}),
 				action: { kind: "feed", op: "resume", sourceId: f.sourceId },
-				does: "Reconnects to the receiver and restores its tuning · decoders continue",
+				does: "Reconnects without changing the receiver's tuning · decoders continue",
 				done: "Receiver resumed",
 			}
 		return {
@@ -1333,6 +1337,39 @@ export class PaletteModel {
 			action: { kind: "feed", op: "pause", sourceId: f.sourceId },
 			does: "Stops the IQ stream · the waterfall freezes and decoders wait until you resume",
 			done: "Receiver paused",
+		}
+	}
+
+	/** "Resume receiver at <MHz>": the restore resume, while paused with a known pre-pause centre. */
+	restoreFeedItem(): PaletteItem | null {
+		const c = this.#c
+		const f = c.feed
+		const hz = f?.restoreHz ?? null
+		if (!f || f.state === "live" || hz === null) return null
+		const base = {
+			id: "tog:feed-restore",
+			title: `Resume receiver at ${formatMHz(hz)} MHz`,
+			glyph: "play",
+			keys: ["resume restore tuning", "resume previous frequency"],
+		} as const
+		if (c.readOnly)
+			return {
+				...base,
+				info: true,
+				sub: "Read-only: sign in to this core to pause or resume the receiver.",
+			}
+		if (f.busy || f.state === "resuming")
+			return { ...base, info: true, sub: "Resuming the receiver…" }
+		return {
+			...base,
+			action: {
+				kind: "feed",
+				op: "resume",
+				sourceId: f.sourceId,
+				restoreTuning: true,
+			},
+			does: "Reconnects and writes back the centre, rate and gain from before the pause",
+			done: "Receiver resumed",
 		}
 	}
 
@@ -1491,6 +1528,7 @@ export class PaletteModel {
 					}
 				: null,
 			this.feedItem(),
+			this.restoreFeedItem(),
 			rx
 				? {
 						id: "tog:biasT",

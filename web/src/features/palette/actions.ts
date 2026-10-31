@@ -324,7 +324,9 @@ export async function runAction(
 				const r =
 					action.op === "pause"
 						? await feeds.pause(action.sourceId)
-						: await feeds.resume(action.sourceId)
+						: await feeds.resume(action.sourceId, {
+								restoreTuning: action.restoreTuning === true,
+							})
 				if (!r.ok) return { text: r.error ?? "Not done", tone: "warn" }
 				if (!r.changed)
 					return {

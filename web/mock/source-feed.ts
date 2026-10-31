@@ -6,6 +6,9 @@
  * no-op, pause from `error` changes to `paused`, resume reads `resuming` while it dials, then `live`
  * or `error`. server.ts reads `feed()` into every source status, suspends the source's decoders with
  * reason `source-paused` and sends no spectrum frames while it is not live.
+ * The tuning at pause time rides on the held feed as `restoreTuning`. A plain resume changes no tuning;
+ * the body `{ restoreTuning: true }` hands it to `restore` (the core writes it back); any other body is
+ * 400 `INVALID_RESUME_REQUEST`, as the core's strict Zod schema.
  * Type stripping only: no enums, parameter properties or namespaces.
  */
 import type { FastifyInstance } from "fastify"
@@ -14,6 +17,7 @@ import type {
 	DecoderInfo,
 	SourceFeed,
 	SourceFeedResponse,
+	SourceFeedRestoreTuning,
 	SourceFeedState,
 } from "@wavekit/api-types"
 
@@ -32,6 +36,23 @@ export interface SourceFeedMockOptions {
 	persistFailures?: number
 	/** After every feed change: re-send the source and decoder statuses. */
 	onChange: (sourceId: string) => void
+	/** The source's tuning now, read at pause time (the held feed's `restoreTuning`). */
+	tuning?: (sourceId: string) => SourceFeedRestoreTuning | null
+	/** A restore resume connected: write the pre-pause tuning back. */
+	restore?: (sourceId: string, tuning: SourceFeedRestoreTuning) => void
+}
+
+/** The resume body as the core's strict schema reads it; null when invalid. */
+export function resumeBodyOf(body: unknown): { restoreTuning: boolean } | null {
+	if (body === undefined || body === null || body === "")
+		return { restoreTuning: false }
+	if (typeof body !== "object" || Array.isArray(body)) return null
+	const entries = Object.entries(body as Record<string, unknown>)
+	for (const [key, value] of entries)
+		if (key !== "restoreTuning" || typeof value !== "boolean") return null
+	return {
+		restoreTuning: (body as { restoreTuning?: boolean }).restoreTuning === true,
+	}
 }
 
 export interface SourceFeedMock {
@@ -55,19 +76,27 @@ export function registerSourceFeedMock(
 	interface Machine {
 		feed: SourceFeed
 		busy: Promise<unknown>
+		/** The tuning when the feed paused; null when unknown. */
+		before: SourceFeedRestoreTuning | null
 	}
 	const machines = new Map<string, Machine>()
 	for (const id of [options.sourceId, ...(options.extraSourceIds ?? [])])
 		machines.set(id, {
 			feed: { state: "live", since: new Date().toISOString() },
 			busy: Promise.resolve(),
+			before: null,
 		})
 
 	const set = (id: string, m: Machine, state: SourceFeedState) => {
+		if (state === "paused" && m.feed.state === "live")
+			m.before = options.tuning?.(id) ?? null
 		m.feed = {
 			state,
 			since: new Date().toISOString(),
 			...(state === "error" ? { error: SOURCE_RESUME_FAILED_MESSAGE } : {}),
+			...(state !== "live" && m.before
+				? { restoreTuning: { ...m.before } }
+				: {}),
 		}
 		options.onChange(id)
 	}
@@ -92,6 +121,7 @@ export function registerSourceFeedMock(
 	const resume = (
 		id: string,
 		m: Machine,
+		restoreTuning: boolean,
 	): Promise<{ feed: SourceFeed; changed: boolean }> =>
 		serial(m, async () => {
 			if (m.feed.state === "live") return { feed: m.feed, changed: false }
@@ -100,7 +130,12 @@ export function registerSourceFeedMock(
 			if (failures > 0) {
 				failures -= 1
 				set(id, m, "error")
-			} else set(id, m, "live")
+			} else {
+				const before = m.before
+				m.before = null
+				if (restoreTuning && before) options.restore?.(id, before)
+				set(id, m, "live")
+			}
 			return { feed: m.feed, changed: true }
 		})
 
@@ -109,6 +144,13 @@ export function registerSourceFeedMock(
 			`/api/sources/:id/${action}`,
 			async (request, reply) => {
 				const { id } = request.params
+				const asked = action === "resume" ? resumeBodyOf(request.body) : null
+				if (action === "resume" && asked === null)
+					return reply.code(400).send({
+						error: "BadRequest",
+						code: "INVALID_RESUME_REQUEST",
+						message: "body: only { restoreTuning: boolean } is accepted",
+					})
 				const m = machines.get(id)
 				if (!m)
 					return reply.code(404).send({
@@ -117,7 +159,9 @@ export function registerSourceFeedMock(
 						message: `Source with id '${id}' not found`,
 					})
 				const result =
-					action === "pause" ? await pause(id, m) : await resume(id, m)
+					action === "pause"
+						? await pause(id, m)
+						: await resume(id, m, asked?.restoreTuning === true)
 				if (result.feed.state === "error")
 					return reply.code(503).send({
 						error: "ServiceUnavailable",

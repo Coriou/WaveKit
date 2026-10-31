@@ -1,8 +1,11 @@
 /**
  * A receiver feed paused during a scanner hop (SourceManager.pause): the arbiter sees the
- * source go down like any dropout, a release while paused cannot write and re-queues its
- * restore, and the resume's first payload puts the operator's exact gain back. A job paused
- * by the feed waits in paused(source-down) and runs again on source-up; it never fails.
+ * source go down like any dropout, and a release while paused cannot write and re-queues its
+ * restore. A restore resume's first payload puts the operator's exact gain back; a plain
+ * resume writes no tuning (another client may have retuned the receiver during the pause): the
+ * queued recovery settles without writing, so the source is free for the next job, and a held
+ * lease forgets its pre-pause snapshot. A job paused by the feed waits in paused(source-down) and
+ * runs again on source-up; it never fails.
  * Real SourceManager on a fake rtl_tcp server (ephemeral loopback port); fake tuner.
  */
 import * as net from "node:net"
@@ -68,86 +71,167 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
+async function pausedMidHop() {
+	const upstream = await fakeRtlTcp()
+	cleanups.push(() => upstream.close())
+	const sources = new SourceManager(logger)
+	cleanups.push(() => sources.disconnectAll())
+
+	const tuner = new ArbiterFakeTuner()
+	tuner.addSource("rtl")
+	const state = tuner.states.get("rtl")!
+	state.gainMode = "manual"
+	state.gain = 496
+	Object.assign(tuner, {
+		bandGainFor: (_id: string, hz: number) => {
+			const g = bandGainAt(TABLE, hz)
+			return g === "keep" ? null : g
+		},
+	})
+	const clock = new FakeClock()
+	const persisted: Array<string | null> = []
+	const deps: ArbiterDeps = {
+		tuner: tuner as never,
+		sources: sources as never,
+		epochs: id => (id === "rtl" ? clock : undefined),
+		settings: () => testSettings(),
+		link: () => "network",
+		persistLease: (_id, lease) => {
+			persisted.push(lease ? lease.jobId : null)
+			return Promise.resolve()
+		},
+		impactSources: {
+			liveDemod: null,
+			digitalVoice: null,
+			decoders: { getAllStatus: () => [] },
+		},
+		scannerJobsOn: () => [],
+		canHandOver: () => true,
+		logger,
+	}
+	const arbiter = new TunerArbiter(deps)
+	const events: string[] = []
+	arbiter.on("source-down", () => events.push("down"))
+	arbiter.on("source-up", () => events.push("up"))
+	const recovered: unknown[] = []
+	arbiter.on("recovered", (_id, result) => recovered.push(result))
+
+	await sources.connect({
+		id: "rtl",
+		type: "rtl_tcp",
+		host: "127.0.0.1",
+		port: upstream.port,
+		loop: false,
+		playbackSpeed: 1,
+		caps: {
+			kind: "iq",
+			format: "U8_IQ",
+			sampleRate: 2_048_000,
+			centerFreq: 446_100_000,
+			exclusive: false,
+		},
+	})
+	await waitFor(() => events.includes("up"))
+
+	const r = arbiter.acquire("job", "rtl", 50)
+	if (!r.ok) throw new Error("acquire failed")
+	await arbiter.retune(r.lease, {
+		centreHz: ISM,
+		gainTenthsDb: null,
+		sampleRateHz: null,
+	})
+	// The band gain of the hop is on the tuner.
+	expect(state.gain).toBe(297)
+
+	// Mid-hop pause: the arbiter sees the source go down, as on a dropout.
+	await sources.pause("rtl")
+	await waitFor(() => events.includes("down"))
+	return {
+		sources,
+		tuner,
+		state,
+		arbiter,
+		events,
+		recovered,
+		persisted,
+		lease: r.lease,
+	}
+}
+
+/** The tuning writes (not TEST_MODE markers) sent from index `from` on. */
+const tuningWrites = (tuner: ArbiterFakeTuner, from: number) =>
+	tuner.sent.slice(from).filter(c => c.name !== "set-test-mode")
+
 describe("feed paused during a scanner hop", () => {
-	it("restores the operator's gain on resume after a release that could not write while paused", async () => {
-		const upstream = await fakeRtlTcp()
-		cleanups.push(() => upstream.close())
-		const sources = new SourceManager(logger)
-		cleanups.push(() => sources.disconnectAll())
-
-		const tuner = new ArbiterFakeTuner()
-		tuner.addSource("rtl")
-		const state = tuner.states.get("rtl")!
-		state.gainMode = "manual"
-		state.gain = 496
-		Object.assign(tuner, {
-			bandGainFor: (_id: string, hz: number) => {
-				const g = bandGainAt(TABLE, hz)
-				return g === "keep" ? null : g
-			},
-		})
-		const clock = new FakeClock()
-		const deps: ArbiterDeps = {
-			tuner: tuner as never,
-			sources: sources as never,
-			epochs: id => (id === "rtl" ? clock : undefined),
-			settings: () => testSettings(),
-			link: () => "network",
-			persistLease: () => Promise.resolve(),
-			impactSources: {
-				liveDemod: null,
-				digitalVoice: null,
-				decoders: { getAllStatus: () => [] },
-			},
-			scannerJobsOn: () => [],
-			canHandOver: () => true,
-			logger,
-		}
-		const arbiter = new TunerArbiter(deps)
-		const events: string[] = []
-		arbiter.on("source-down", () => events.push("down"))
-		arbiter.on("source-up", () => events.push("up"))
-
-		await sources.connect({
-			id: "rtl",
-			type: "rtl_tcp",
-			host: "127.0.0.1",
-			port: upstream.port,
-			loop: false,
-			playbackSpeed: 1,
-			caps: {
-				kind: "iq",
-				format: "U8_IQ",
-				sampleRate: 2_048_000,
-				centerFreq: 446_100_000,
-				exclusive: false,
-			},
-		})
-		await waitFor(() => events.includes("up"))
-
-		const r = arbiter.acquire("job", "rtl", 50)
-		if (!r.ok) throw new Error("acquire failed")
-		await arbiter.retune(r.lease, {
-			centreHz: ISM,
-			gainTenthsDb: null,
-			sampleRateHz: null,
-		})
-		expect(state.gain).toBe(297)
-
-		// Mid-hop pause: the arbiter sees the source go down, as on a dropout.
-		await sources.pause("rtl")
-		await waitFor(() => events.includes("down"))
+	it("a restore resume puts the operator's gain back after a release that could not write while paused", async () => {
+		const { sources, tuner, state, arbiter, events, lease } =
+			await pausedMidHop()
 
 		// The job ends while paused: the tuner is unreachable, so the restore is re-queued.
 		tuner.failAll = new Error("Source not connected")
-		await arbiter.release(r.lease, { restore: true })
+		await arbiter.release(lease, { restore: true })
 		expect(state.gain).toBe(297)
 
 		tuner.failAll = null
-		await sources.resume("rtl")
+		await sources.resume("rtl", { restoreTuning: true })
 		await waitFor(() => events.filter(e => e === "up").length === 2)
 		await waitFor(() => state.gain === 496)
 		expect(state).toMatchObject({ gainMode: "manual", gain: 496 })
+	})
+
+	it("a plain resume settles the queued recovery without writing, and the source is free for the next job", async () => {
+		const {
+			sources,
+			tuner,
+			state,
+			arbiter,
+			events,
+			recovered,
+			persisted,
+			lease,
+		} = await pausedMidHop()
+		tuner.failAll = new Error("Source not connected")
+		await arbiter.release(lease, { restore: true })
+		tuner.failAll = null
+		const sent = tuner.sent.length
+
+		await sources.resume("rtl")
+		await waitFor(() => events.filter(e => e === "up").length === 2)
+		await waitFor(() => recovered.length === 1)
+		// Nothing tuned: neither the snapshot (centre, gain) nor the operator's gain went back.
+		expect(tuningWrites(tuner, sent)).toEqual([])
+		expect(state.gain).toBe(297)
+		expect(recovered[0]).toMatchObject({ restored: [] })
+		expect((recovered[0] as { unrestorable: string[] }).unrestorable).toContain(
+			"frequency",
+		)
+		// The record is cleared, so the next job acquires instead of waiting on "recovery-pending".
+		expect(persisted.at(-1)).toBeNull()
+		const next = arbiter.acquire("job-2", "rtl", 50)
+		expect(next.ok).toBe(true)
+	})
+
+	it("a plain resume keeps the holding job's lease (it continues) but forgets its pre-pause snapshot", async () => {
+		const { sources, tuner, state, arbiter, events, lease } =
+			await pausedMidHop()
+		const sent = tuner.sent.length
+
+		await sources.resume("rtl")
+		await waitFor(() => events.filter(e => e === "up").length === 2)
+		expect(tuningWrites(tuner, sent)).toEqual([])
+		expect(arbiter.holder("rtl")).toBeDefined()
+		expect(lease.snapshot).toEqual({})
+
+		// The job's own next hop writes as usual; its release cannot put back a tuning it no
+		// longer knows, so the band gain is not followed by the pre-pause operator gain.
+		await arbiter.retune(lease, {
+			centreHz: ISM + 200_000,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		})
+		const released = await arbiter.release(lease, { restore: true })
+		expect(released.restored).toEqual([])
+		expect(state.gain).toBe(297)
 	})
 
 	it("a job paused by the feed waits in paused(source-down) and runs again on source-up", () => {

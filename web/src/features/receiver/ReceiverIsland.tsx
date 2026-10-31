@@ -5,7 +5,9 @@
 // core's (TunerState); a control shows its target only while its write is in flight. When the tuner
 // cannot be changed (read-only access, an external client has it, offline) the panel says why and
 // disables the controls instead of failing on click. Pause stops the receiver feed (feed.ts): the panel then says
-// "Receiver paused" with Resume, a failed resume reads as an alert with Retry, and the tuner controls wait.
+// "Receiver paused" with Resume (no tuning written: SDR++ may have retuned the dongle meanwhile) and, when the
+// core knows the pre-pause centre, "Resume at <MHz>" (writes the pre-pause tuning back); a failed resume reads
+// as an alert with Retry (the same kind of resume), and the tuner controls wait.
 import { useEffect, useId, useState, type CSSProperties } from "react"
 import type { TunerState } from "@wavekit/api-types"
 
@@ -55,6 +57,8 @@ import {
 	feedOf,
 	isPaused,
 	pausedDecoders,
+	restoreCentreHz,
+	restoreLabel,
 	sinceText,
 	unsavedOp,
 } from "./feed.ts"
@@ -218,6 +222,12 @@ function FeedControl() {
 			</>
 		)
 	const failed = feed.state === "error"
+	const kind = feedEntry?.resumeKind ?? null
+	const restoreHz = restoreCentreHz(feed)
+	// Retry already repeats a failed restore resume: no second button for the same call
+	const offerRestore = restoreHz !== null && !(failed && kind === "restore")
+	const resumingKind =
+		pending === "resume" || feed.state === "resuming" ? (kind ?? "plain") : null
 	const detail = [
 		since ? `since ${since}` : null,
 		"waterfall frozen",
@@ -248,16 +258,42 @@ function FeedControl() {
 							: detail}
 					</span>
 				</span>
-				<Button
-					size="sm"
-					variant={failed ? "amber" : "primary"}
-					disabled={readOnly || busy}
-					aria-keyshortcuts="P"
-					onClick={() => void feeds.resume(id)}
-				>
-					<Icon name="play" size={14} />
-					{busy ? "Resuming…" : failed ? "Retry" : "Resume"}
-				</Button>
+				<span className="wkf-rx-resume">
+					<Button
+						size="sm"
+						variant={failed ? "amber" : "primary"}
+						disabled={readOnly || busy}
+						aria-keyshortcuts={failed && kind === "restore" ? undefined : "P"}
+						title={
+							failed
+								? undefined
+								: "Reconnect without changing the receiver's tuning"
+						}
+						onClick={() =>
+							void (failed ? feeds.retryResume(id) : feeds.resume(id))
+						}
+					>
+						<Icon name="play" size={14} />
+						{busy && (resumingKind !== "restore" || !offerRestore)
+							? "Resuming…"
+							: failed
+								? "Retry"
+								: "Resume"}
+					</Button>
+					{offerRestore && (
+						<Button
+							size="sm"
+							variant="outline"
+							disabled={readOnly || busy}
+							title="Reconnect and write back the centre, rate and gain from before the pause"
+							onClick={() => void feeds.resume(id, { restoreTuning: true })}
+						>
+							{busy && resumingKind === "restore"
+								? "Resuming…"
+								: restoreLabel(restoreHz)}
+						</Button>
+					)}
+				</span>
 			</div>
 			{note}
 		</>

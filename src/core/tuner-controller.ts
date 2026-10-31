@@ -20,6 +20,7 @@ import { configuredTuningFrames } from "./tuner-config-gain.js"
 import { nearestGainStep } from "./band-gain-schema.js"
 import type { BandGainSettingsService, SavedOperatorGain } from "./band-gain.js"
 import type {
+	SourceFeedRestoreTuning,
 	TunerBandGain,
 	TunerBandGainOwner,
 	TunerState,
@@ -61,6 +62,27 @@ export function isValidRtlSampleRate(hz: number): boolean {
 		RTL_SAMPLE_RATE_RANGES.some(range => hz >= range.min && hz <= range.max)
 	)
 }
+
+/**
+ * Rates rtl_tcp clients commonly set (SDR++, rtl_sdr tools). adoptObservedSampleRate snaps a
+ * measured rate to one of them. The closest neighbours are 2.048 and 2.16 Msps (5.5 % apart),
+ * so two ±RESUME_RATE_MATCH windows (3 % together) never overlap.
+ */
+export const COMMON_RTL_SAMPLE_RATES = [
+	250_000, 1_024_000, 1_536_000, 1_792_000, 1_920_000, 2_048_000, 2_160_000,
+	2_400_000, 2_560_000, 2_880_000, 3_200_000,
+] as const
+
+/** Relative distance within which a measured rate counts as a common rate (1.5 %). */
+export const RESUME_RATE_MATCH = 0.015
+
+/** Fields a plain resume never writes and reports unknown until set (synchronizeOnPlainResume). */
+const PLAIN_RESUME_UNVERIFIED: readonly TunerStateField[] = [
+	"frequency",
+	"sampleRate",
+	"gainMode",
+	"gain",
+]
 
 // Validation constants
 const VALIDATION = {
@@ -328,6 +350,12 @@ const REPLAY_PHASES: ReadonlyArray<{
  */
 export type TunerReconnectPolicy = "restore" | "reset"
 
+/**
+ * How the first session after a paused feed's resume is synchronised (SourceManager.resumeKind):
+ * "plain" writes no tuning, "restore" restores the accepted state whatever the policy says.
+ */
+export type TunerResumeKind = "plain" | "restore"
+
 /** Outcome of synchronizing a source after it (re)connects. */
 export interface TunerConnectSyncResult {
 	policy: TunerReconnectPolicy
@@ -337,6 +365,8 @@ export interface TunerConnectSyncResult {
 	reset: boolean
 	/** Write failure that stopped the replay; the next connection replays again. */
 	error?: string
+	/** Set for the session of a resumed paused feed (see synchronizeOnConnect). */
+	resume?: TunerResumeKind
 }
 
 export interface TunerControllerEvents {
@@ -888,6 +918,17 @@ export class TunerController extends EventEmitter {
 	 * there). Unknown until the next accepted or written value.
 	 */
 	private ignoredRelayFields: Map<string, Set<TunerStateField>> = new Map()
+	/**
+	 * Fields a plain resume of a paused feed left unwritten: during the pause another client
+	 * (SDR++ through rtlmux) may have changed them unseen, so the state keeps the last known value
+	 * and reports the field unknown until a value is written, accepted or inferred.
+	 */
+	private unverifiedFields: Map<string, Set<TunerStateField>> = new Map()
+	/**
+	 * acceptanceSeq when the source's feed was paused (noteFeedPaused): fields accepted after it
+	 * (relay commands during the pause) are written by a plain resume. Consumed by the next sync.
+	 */
+	private pausedAtSeq: Map<string, number> = new Map()
 	private acceptanceSeq = 0
 	/**
 	 * WG9 req 3.2: frequency/sampleRate written on the current connection, by this core
@@ -1007,6 +1048,8 @@ export class TunerController extends EventEmitter {
 		this.desiredFields.delete(sourceId)
 		this.inferredFields.delete(sourceId)
 		this.ignoredRelayFields.delete(sourceId)
+		this.unverifiedFields.delete(sourceId)
+		this.pausedAtSeq.delete(sourceId)
 		this.connectionTuningWrites.delete(sourceId)
 		this.rateProvedOnConnection.delete(sourceId)
 		this.rateProofInFlight.delete(sourceId)
@@ -1930,18 +1973,24 @@ export class TunerController extends EventEmitter {
 	 * Either way source caps are then reconciled with what the tuner state can
 	 * back, so stale metadata is never kept silently. Success means "written",
 	 * never "applied": rtl_tcp has no acknowledgement or readback.
-	 * `options.policy` overrides the configured policy for this connection (a resume of a
-	 * paused feed always restores). `options.resumed` marks the session of a resumed paused
-	 * feed: a centre and rate inferred from relay commands (SDR++ driving the dongle) are kept
-	 * and written back with the restore, so the resume returns the receiver to where it was.
+	 *
+	 * `options.resume` marks the first session after a paused feed's resume (whatever the policy):
+	 * - "restore" (POST /api/sources/:id/resume with `restoreTuning: true`): the "restore" policy.
+	 * - "plain" (the default resume): see synchronizeOnPlainResume; no tuning is written.
 	 */
 	synchronizeOnConnect(
 		sourceId: string,
-		options: { policy?: TunerReconnectPolicy; resumed?: boolean } = {},
+		options: { resume?: TunerResumeKind } = {},
 	): TunerConnectSyncResult {
-		const policy = options.policy ?? this.config.reconnectPolicy ?? "restore"
+		const policy =
+			options.resume === "restore"
+				? "restore"
+				: (this.config.reconnectPolicy ?? "restore")
 		const state = this.tunerStates.get(sourceId)
 		if (!state) return { policy, commands: [], reset: false }
+		// The pause is over either way. Unverified fields stay so until written (or a reset).
+		const pausedAt = this.pausedAtSeq.get(sourceId)
+		this.pausedAtSeq.delete(sourceId)
 		const desired = this.desiredFields.get(sourceId)
 		// A new connection: nothing is written on it yet (WG9 req 3.2).
 		this.connectionTuningWrites.delete(sourceId)
@@ -1955,6 +2004,9 @@ export class TunerController extends EventEmitter {
 		const configDue = this.configWriteDue.delete(sourceId)
 		if (configDue) this.configProvenFields.delete(sourceId)
 
+		if (options.resume === "plain")
+			return this.synchronizeOnPlainResume(sourceId, state, pausedAt)
+
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
 			// Inferred or ignored-relay fields alone are no reset, but their proof is gone too.
@@ -1964,6 +2016,7 @@ export class TunerController extends EventEmitter {
 			this.desiredFields.delete(sourceId)
 			this.inferredFields.delete(sourceId)
 			this.ignoredRelayFields.delete(sourceId)
+			this.unverifiedFields.delete(sourceId)
 			// With nothing accepted every non-baseline value came from an inferred write or
 			// relay command, so a forget also returns the values to the baseline (WG5 R2).
 			if (reset || forgot)
@@ -1989,17 +2042,9 @@ export class TunerController extends EventEmitter {
 
 		// An inferred (written, not accepted) centre or rate is never replayed, so after a
 		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
-		// value is replayed below, return it to the baseline (WG5 R2). A resumed paused feed
-		// is no dropout: the operator's pause interrupted what was tuned, so the inferred
-		// centre and rate stay known and are replayed with the accepted fields.
-		const forgotTuning = options.resumed
-			? false
-			: this.forgetInferredTuning(sourceId, state, desired)
-		// The fields this session restores; caps are reconciled against the same set, so a
-		// resumed inferred centre or rate is described to DSP and decoders as it is sent.
-		const replay = options.resumed
-			? this.withInferredTuning(sourceId, desired)
-			: desired
+		// value is replayed below, return it to the baseline (WG5 R2). A restore resume does
+		// the same: in production only test mode is written unaccepted (setTestMode).
+		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
 
 		// WG11 req 4.2, 4.3: configured fields not held by the operator, before the
 		// restore; a failed configured write stops the restore too (today's failure).
@@ -2007,7 +2052,7 @@ export class TunerController extends EventEmitter {
 			? this.writeConfiguredTuning(sourceId, state)
 			: undefined
 		if (configured?.error !== undefined) {
-			const capsChanged = this.reconcileCaps(sourceId, state, replay)
+			const capsChanged = this.reconcileCaps(sourceId, state)
 			if (configured.attempted || capsChanged || forgotTuning)
 				this.emitStateChanged(sourceId)
 			return {
@@ -2020,7 +2065,7 @@ export class TunerController extends EventEmitter {
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
-		const plan = replay ? this.buildReplayPlan(state, replay) : []
+		const plan = desired ? this.buildReplayPlan(state, desired) : []
 		for (const [cmd, value] of plan) {
 			try {
 				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
@@ -2048,7 +2093,7 @@ export class TunerController extends EventEmitter {
 			delete state.lastError
 		}
 
-		const capsChanged = this.reconcileCaps(sourceId, state, replay)
+		const capsChanged = this.reconcileCaps(sourceId, state)
 
 		const replayed = written.map(entry => entry.name)
 		const commands = [...(configured?.commands ?? []), ...replayed]
@@ -2076,39 +2121,198 @@ export class TunerController extends EventEmitter {
 		)
 			this.emitStateChanged(sourceId)
 
+		const resume =
+			options.resume === "restore" ? { resume: "restore" as const } : {}
 		return failure
 			? {
 					policy,
 					commands,
 					reset: false,
 					error: state.lastError ?? failure.message,
+					...resume,
 				}
-			: { policy, commands, reset: false }
+			: { policy, commands, reset: false, ...resume }
+	}
+
+	/**
+	 * Plain resume of a paused feed ("never fight SDR++"): while the core was disconnected another
+	 * client may have retuned the shared receiver (SDR++ through rtlmux), and rtl_tcp cannot report
+	 * its centre, rate or gain. So nothing accepted before the pause and no configured frame is
+	 * written. Those fields leave the accepted set (a later dropout reconnect does not replay them
+	 * either) and centre, rate, gain mode and gain read unknown (`unknownFields`) with their last
+	 * known values until they are written, accepted or observed (adoptObservedSampleRate).
+	 * Fields accepted during the pause (tuner relay commands while the source was down; without
+	 * a pause marker, every accepted field: the feed was paused at boot) are the operator's newest
+	 * state and are written, as on a restore. Caps keep their values; replayed fields follow.
+	 */
+	private synchronizeOnPlainResume(
+		sourceId: string,
+		state: TunerState,
+		pausedAt: number | undefined,
+	): TunerConnectSyncResult {
+		const policy = this.config.reconnectPolicy ?? "restore"
+		const desired = this.desiredFields.get(sourceId)
+		const since = pausedAt ?? 0
+		const kept = new Map<DesiredField, number>()
+		const dropped: DesiredField[] = []
+		for (const [field, seq] of desired ?? []) {
+			if (seq > since) kept.set(field, seq)
+			else dropped.push(field)
+		}
+		if (kept.size > 0) this.desiredFields.set(sourceId, kept)
+		else this.desiredFields.delete(sourceId)
+		// A pre-pause inferred value is no more proven than an accepted one.
+		this.inferredFields.delete(sourceId)
+
+		const doubt = new Set<TunerStateField>(PLAIN_RESUME_UNVERIFIED)
+		for (const field of dropped) {
+			const stateField = STATE_FIELDS.find(f => f === field)
+			if (stateField !== undefined) doubt.add(stateField)
+		}
+		const commanded: ReadonlyMap<string, number> = kept
+		const unverified = new Set<TunerStateField>()
+		for (const field of doubt) if (!commanded.has(field)) unverified.add(field)
+		this.unverifiedFields.set(sourceId, unverified)
+
+		const written: Array<{ value: number; name: string }> = []
+		let failure: Error | undefined
+		for (const [cmd, value] of this.buildReplayPlan(state, kept)) {
+			try {
+				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+			} catch (err) {
+				failure =
+					err instanceof Error
+						? err
+						: new WaveKitError(String(err), "TUNER_RESTORE_FAILED")
+				break
+			}
+			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
+			written.push({ value, name })
+			this.markConnectionWrite(sourceId, cmd)
+		}
+		if (written.length > 0) {
+			state.commandCount += written.length
+			state.lastCommandAt = new Date().toISOString()
+		}
+		if (failure)
+			state.lastError = `Tuner state restore failed: ${failure.message}`
+		else if (written.length > 0) delete state.lastError
+
+		// Caps keep the last known centre and rate (reconcileCaps holds unverified fields); a
+		// field the relay commanded during the pause follows its written value.
+		this.reconcileCaps(sourceId, state)
+
+		const commands = written.map(entry => entry.name)
+		this.log.info(
+			{ sourceId, commands, unverified: [...unverified] },
+			"Resumed the paused feed without restoring its tuning; centre, rate and gain unverified until set",
+		)
+		if (failure)
+			this.log.warn(
+				{ sourceId, commands, err: failure.message },
+				"Writing relay commands from the pause interrupted; will retry on next connection",
+			)
+		for (const { name, value } of written)
+			this.emit("command-sent", sourceId, name, value, "replay")
+		if (failure) this.emit("error", sourceId, failure)
+		this.emitStateChanged(sourceId)
+		return failure
+			? {
+					policy,
+					commands,
+					reset: false,
+					error: state.lastError ?? failure.message,
+					resume: "plain",
+				}
+			: { policy, commands, reset: false, resume: "plain" }
+	}
+
+	/**
+	 * Marks the source's feed paused (wired to SourceManager "feed-changed"): fields accepted from
+	 * now on (tuner relay commands while the source is down) are written by a plain resume. A
+	 * repeated mark keeps the first; the next synchronizeOnConnect consumes it.
+	 */
+	noteFeedPaused(sourceId: string): void {
+		if (!this.tunerStates.has(sourceId) || this.pausedAtSeq.has(sourceId))
+			return
+		this.pausedAtSeq.set(sourceId, this.acceptanceSeq)
+	}
+
+	/**
+	 * What a restore resume would write back for centre, rate and gain (the accepted fields);
+	 * undefined without an accepted centre. Shown on the paused feed (SourceFeed.restoreTuning).
+	 */
+	restorableTuning(sourceId: string): SourceFeedRestoreTuning | undefined {
+		const state = this.tunerStates.get(sourceId)
+		const desired = this.desiredFields.get(sourceId)
+		if (!state || desired?.has("frequency") !== true) return undefined
+		return {
+			centerFreq: state.frequency,
+			...(desired.has("sampleRate") ? { sampleRate: state.sampleRate } : {}),
+			...(desired.has("gainMode") ? { gainMode: state.gainMode } : {}),
+			...(desired.has("gain") ? { gain: state.gain } : {}),
+		}
+	}
+
+	/**
+	 * A plain resume left the sample rate unverified and the source's measured rate disagrees
+	 * with it (rate truth, sustained): when the measurement is within RESUME_RATE_MATCH of exactly
+	 * one common rtl_tcp rate, adopt that rate (state and caps; never accepted or replayed). The
+	 * rate stays unverified (a measurement, not a command), so caps hold it through a dropout and a
+	 * later external rate change is adopted the same way; setting a rate ends it. True when adopted.
+	 * Anything else keeps the old rate and the mismatch flag.
+	 */
+	adoptObservedSampleRate(sourceId: string, measuredHz: number): boolean {
+		const state = this.tunerStates.get(sourceId)
+		if (
+			!state ||
+			this.unverifiedFields.get(sourceId)?.has("sampleRate") !== true
+		)
+			return false
+		const matches = COMMON_RTL_SAMPLE_RATES.filter(
+			rate => Math.abs(measuredHz / rate - 1) <= RESUME_RATE_MATCH,
+		)
+		const rate = matches.length === 1 ? matches[0] : undefined
+		if (rate === undefined || !isValidRtlSampleRate(rate)) return false
+		state.sampleRate = rate
+		try {
+			this.sourceManager.updateSourceCaps(sourceId, { sampleRate: rate })
+		} catch (err) {
+			this.log.warn(
+				{ sourceId, err: safeErrorFields(err) },
+				"Adopting the measured sample rate failed",
+			)
+		}
+		this.log.info(
+			{ sourceId, sampleRate: rate },
+			"Adopted the measured sample rate after a plain resume",
+		)
+		this.emitStateChanged(sourceId)
+		return true
 	}
 
 	/**
 	 * Align source caps with what the tuner state backs: accepted values for
 	 * commanded fields, otherwise the configured baseline. One caps-changed at
 	 * most, and none when metadata already matches (no decoder restart storm).
-	 * `backed` overrides the accepted set with the fields a restore replays (a resumed
-	 * paused feed adds its inferred centre and rate), so caps follow what was sent.
+	 * An unverified centre or rate (plain resume) keeps its last known value: the receiver may
+	 * be anywhere, and the baseline is no better a guess than where it was.
 	 */
-	private reconcileCaps(
-		sourceId: string,
-		state: TunerState,
-		backed:
-			| ReadonlyMap<DesiredField, number>
-			| undefined = this.desiredFields.get(sourceId),
-	): boolean {
-		const desired = backed
+	private reconcileCaps(sourceId: string, state: TunerState): boolean {
+		const accepted = this.desiredFields.get(sourceId)
+		const unverified = this.unverifiedFields.get(sourceId)
+		const desired = {
+			has: (field: "frequency" | "sampleRate") =>
+				accepted?.has(field) === true || unverified?.has(field) === true,
+		}
 		const baseline = this.baselineCaps.get(sourceId)
 		const current = this.sourceManager.getCaps(sourceId)
 		if (!current) return false
 
-		const sampleRate = desired?.has("sampleRate")
+		const sampleRate = desired.has("sampleRate")
 			? state.sampleRate
 			: (baseline?.sampleRate ?? current.sampleRate)
-		const centerFreq = desired?.has("frequency")
+		const centerFreq = desired.has("frequency")
 			? state.frequency
 			: baseline
 				? baseline.centerFreq
@@ -2218,6 +2422,7 @@ export class TunerController extends EventEmitter {
 				}
 			}
 			this.configProvenFields.set(sourceId, proven)
+			for (const field of proven) this.clearIgnoredRelayField(sourceId, field)
 			delete state.lastError
 			this.log.info(
 				{ sourceId, commands },
@@ -2436,24 +2641,6 @@ export class TunerController extends EventEmitter {
 		return value > 0x7fffffff ? value - 0x100000000 : value
 	}
 
-	/**
-	 * The replay set of a resumed paused feed: the accepted fields plus an inferred centre and
-	 * rate (no acceptance order is needed: their replay phase is not ordered by acceptance).
-	 */
-	private withInferredTuning(
-		sourceId: string,
-		desired: ReadonlyMap<DesiredField, number> | undefined,
-	): ReadonlyMap<DesiredField, number> | undefined {
-		const inferred = this.inferredFields.get(sourceId)
-		const extra = (["frequency", "sampleRate"] as const).filter(
-			field => inferred?.has(field) === true && desired?.has(field) !== true,
-		)
-		if (extra.length === 0) return desired
-		const replay = new Map(desired ?? [])
-		for (const field of extra) replay.set(field, 0)
-		return replay
-	}
-
 	/** Drops inferred frequency/sampleRate proof; true when one was dropped. */
 	private forgetInferredTuning(
 		sourceId: string,
@@ -2515,11 +2702,13 @@ export class TunerController extends EventEmitter {
 		ignored.add(field)
 	}
 
+	/** A value was written, accepted or inferred: the field is no longer in doubt. */
 	private clearIgnoredRelayField(
 		sourceId: string,
 		field: TunerStateField,
 	): void {
 		this.ignoredRelayFields.get(sourceId)?.delete(field)
+		this.unverifiedFields.get(sourceId)?.delete(field)
 	}
 
 	private markInferred(sourceId: string, field: TunerStateField): void {
@@ -2729,6 +2918,7 @@ export class TunerController extends EventEmitter {
 			this.desiredFields.get(sourceId)
 		const inferred = this.inferredFields.get(sourceId)
 		const ignored = this.ignoredRelayFields.get(sourceId)
+		const unverified = this.unverifiedFields.get(sourceId)
 		const baseline = this.baselineCaps.get(sourceId)
 		const declared = new Set<TunerStateField>()
 		if (
@@ -2750,11 +2940,15 @@ export class TunerController extends EventEmitter {
 			unknownFields: STATE_FIELDS.filter(
 				field =>
 					ignored?.has(field) === true ||
+					unverified?.has(field) === true ||
 					(!declared.has(field) && !proven(field)),
 			),
 			declaredOnlyFields: STATE_FIELDS.filter(
 				field =>
-					declared.has(field) && !proven(field) && ignored?.has(field) !== true,
+					declared.has(field) &&
+					!proven(field) &&
+					ignored?.has(field) !== true &&
+					unverified?.has(field) !== true,
 			),
 		}
 	}

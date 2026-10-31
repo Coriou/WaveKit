@@ -8,7 +8,7 @@ import { useShell, useTheme } from "../../shell/hooks.ts"
 import { browserStorage } from "../../shell/theme.ts"
 import { useReceiverSourceId, useTunedHz } from "../hooks.ts"
 import { receiverLock, sampleRateOptions } from "../receiver/controls.ts"
-import { feedControllerFor, feedOf } from "../receiver/feed.ts"
+import { feedControllerFor, feedOf, restoreCentreHz } from "../receiver/feed.ts"
 import { gainSteps } from "../receiver/gain.ts"
 import { presetsFrom } from "../scanner/planner/plan.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
@@ -67,6 +67,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			sourceId: source.id,
 			state: f.state,
 			busy: (feedEntry?.pending ?? null) !== null,
+			restoreHz: restoreCentreHz(f),
 		}
 	}, [source, feedEntry])
 

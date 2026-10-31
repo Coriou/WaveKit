@@ -7,6 +7,8 @@ import {
 } from "@wavekit/api-types"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
+import { DEFAULT_CENTER_HZ } from "../../mock/data.ts"
+import { resumeBodyOf } from "../../mock/source-feed.ts"
 
 describe("mock receiver feed", () => {
 	let server: MockServer
@@ -114,5 +116,72 @@ describe("mock receiver feed", () => {
 			expect(res.statusCode).toBe(404)
 			expect(res.json()).toMatchObject({ code: "SOURCE_NOT_FOUND" })
 		}
+	})
+
+	it("the held feed carries the pre-pause tuning; a plain resume keeps a retune, a restore resume undoes it", async () => {
+		const tuner = async () =>
+			(await server.app.inject({ method: "GET", url: "/api/tuner" })).json<
+				Array<{ sourceId: string; frequency: number }>
+			>()[0]?.frequency
+		const paused = await post("/api/sources/rtl-0/pause")
+		expect(paused.json<SourceFeedResponse>().feed.restoreTuning).toMatchObject({
+			centerFreq: DEFAULT_CENTER_HZ,
+		})
+		expect((await source())?.feed?.restoreTuning?.centerFreq).toBe(
+			DEFAULT_CENTER_HZ,
+		)
+		const retune = () =>
+			server.app.inject({
+				method: "POST",
+				url: "/api/tuner/rtl-0/frequency",
+				payload: { hz: 433_920_000 },
+			})
+		await retune()
+		const plain = await post("/api/sources/rtl-0/resume")
+		expect(plain.json<SourceFeedResponse>().feed.restoreTuning).toBeUndefined()
+		expect(await tuner()).toBe(433_920_000)
+
+		// paused again at 433.92 MHz: that is now the pre-pause centre
+		await post("/api/sources/rtl-0/pause")
+		await server.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl-0/frequency",
+			payload: { hz: DEFAULT_CENTER_HZ },
+		})
+		const restore = await server.app.inject({
+			method: "POST",
+			url: "/api/sources/rtl-0/resume",
+			payload: { restoreTuning: true },
+		})
+		expect(restore.statusCode).toBe(200)
+		expect(await tuner()).toBe(433_920_000)
+		// back where the earlier tests expect it
+		await server.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl-0/frequency",
+			payload: { hz: DEFAULT_CENTER_HZ },
+		})
+	})
+
+	it("rejects a resume body other than { restoreTuning: boolean } with 400, as the core", async () => {
+		expect(resumeBodyOf(undefined)).toEqual({ restoreTuning: false })
+		expect(resumeBodyOf({})).toEqual({ restoreTuning: false })
+		expect(resumeBodyOf({ restoreTuning: true })).toEqual({
+			restoreTuning: true,
+		})
+		for (const payload of [
+			{ restoreTuning: "yes" },
+			{ restoreTuning: true, extra: 1 },
+			{ restore: true },
+		]) {
+			const res = await server.app.inject({
+				method: "POST",
+				url: "/api/sources/rtl-0/resume",
+				payload,
+			})
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toMatchObject({ code: "INVALID_RESUME_REQUEST" })
+		}
+		expect(resumeBodyOf([true])).toBeNull()
 	})
 })

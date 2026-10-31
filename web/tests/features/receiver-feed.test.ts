@@ -14,6 +14,7 @@ import { createServices } from "../../src/app/services.ts"
 import type { SocketLike } from "../../src/data/events-client.ts"
 import type { AppServices } from "../../src/app/services.ts"
 import { buildMockServer } from "../../mock/server.ts"
+import { DEFAULT_CENTER_HZ } from "../../mock/data.ts"
 import type { MockServer } from "../../mock/server.ts"
 import { runAction } from "../../src/features/palette/actions.ts"
 import {
@@ -27,6 +28,8 @@ import {
 	feedTarget,
 	pausedDecoders,
 	receiverSourceId,
+	restoreCentreHz,
+	restoreLabel,
 	shownSourceFor,
 	toggleFeed,
 	type FeedEntry,
@@ -80,6 +83,8 @@ async function loaded(
 	close: () => Promise<void>
 	/** Every request the app sent ("METHOD url"). */
 	requests: string[]
+	/** The JSON body of every request that had one ("METHOD url" → body text). */
+	bodies: Array<[string, string]>
 }> {
 	const server = await buildMockServer({
 		port: 0,
@@ -90,14 +95,21 @@ async function loaded(
 	await server.app.ready()
 	await options.before?.(server)
 	const requests: string[] = []
+	const bodies: Array<[string, string]> = []
 	// a real socket to the in-process mock (ephemeral port) when the test reads `source:status`
 	const port = options.socket === true ? (await server.listen()).port : null
 	const services = createServices({
 		fetch: async (input, init) => {
-			requests.push(`${init?.method ?? "GET"} ${String(input)}`)
+			const request = `${init?.method ?? "GET"} ${String(input)}`
+			requests.push(request)
+			const body = typeof init?.body === "string" ? init.body : null
+			if (body !== null) bodies.push([request, body])
 			const res = await server.app.inject({
 				method: (init?.method ?? "GET") as "GET" | "POST",
 				url: input,
+				...(body !== null
+					? { payload: body, headers: { "content-type": "application/json" } }
+					: {}),
 			})
 			return new Response(res.body, {
 				status: res.statusCode,
@@ -131,6 +143,7 @@ async function loaded(
 		server,
 		refresh,
 		requests,
+		bodies,
 		close: async () => {
 			services.dispose()
 			await server.close()
@@ -165,6 +178,7 @@ describe("receiver feed: what is shown", () => {
 						pending: null,
 						error: null,
 						unsaved: null,
+						resumeKind: null,
 					}
 					const source = own ? { connected, feed: own } : { connected }
 					const shown = feedOf(source, entry)
@@ -466,6 +480,108 @@ describe("receiver feed: pause and resume", () => {
 	})
 })
 
+describe("receiver feed: plain and restore resume", () => {
+	const OTHER_HZ = 433_920_000
+	/** Another client retunes the receiver while WaveKit is paused (the mock takes the write). */
+	const retuneWhilePaused = (server: MockServer) =>
+		server.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl-0/frequency",
+			payload: { hz: OTHER_HZ },
+		})
+
+	it("a held feed carries the pre-pause centre; a live one offers no restore", async () => {
+		const { services, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		const live = feeds.entry("rtl-0").feed
+		expect(restoreCentreHz(live)).toBeNull()
+		const p = await feeds.pause("rtl-0")
+		expect(restoreCentreHz(p.feed)).toBe(DEFAULT_CENTER_HZ)
+		expect(restoreCentreHz({ state: "paused", since: "x" })).toBeNull()
+		expect(
+			restoreCentreHz({
+				state: "paused",
+				since: "x",
+				restoreTuning: { centerFreq: Number.NaN },
+			}),
+		).toBeNull()
+		expect(restoreLabel(145_000_000)).toBe("Resume at 145.000 MHz")
+		await close()
+	})
+
+	it("a plain resume sends no body and leaves the tuning where it is", async () => {
+		const { services, server, bodies, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		await feeds.pause("rtl-0")
+		await retuneWhilePaused(server)
+		const r = await feeds.resume("rtl-0")
+		expect(r).toMatchObject({ ok: true, feed: { state: "live" } })
+		expect(bodies.filter(([req]) => req.endsWith("/resume"))).toEqual([])
+		await services.data.tuner.load()
+		expect(services.data.tuner.state("rtl-0")?.frequency).toBe(OTHER_HZ)
+		expect(feeds.entry("rtl-0").resumeKind).toBe("plain")
+		await close()
+	})
+
+	it("a restore resume sends { restoreTuning: true } and the pre-pause centre comes back", async () => {
+		const { services, server, bodies, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		await feeds.pause("rtl-0")
+		await retuneWhilePaused(server)
+		const r = await feeds.resume("rtl-0", { restoreTuning: true })
+		expect(r).toMatchObject({ ok: true, feed: { state: "live" } })
+		expect(bodies).toContainEqual([
+			"POST /api/sources/rtl-0/resume",
+			JSON.stringify({ restoreTuning: true }),
+		])
+		await services.data.tuner.load()
+		expect(services.data.tuner.state("rtl-0")?.frequency).toBe(
+			DEFAULT_CENTER_HZ,
+		)
+		await close()
+	})
+
+	it("Retry repeats the kind of the resume that failed", async () => {
+		const { services, server, bodies, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		await feeds.pause("rtl-0")
+		server.feed.failNextResumes(2)
+		await feeds.resume("rtl-0", { restoreTuning: true })
+		await feeds.retryResume("rtl-0")
+		const restores = bodies.filter(([req]) => req.endsWith("/resume"))
+		expect(restores).toHaveLength(2)
+		await feeds.resume("rtl-0")
+		expect(feeds.entry("rtl-0").resumeKind).toBe("plain")
+		server.feed.failNextResumes(0)
+		await feeds.pause("rtl-0")
+		await feeds.retryResume("rtl-0")
+		expect(bodies.filter(([req]) => req.endsWith("/resume"))).toHaveLength(2)
+		await close()
+	})
+
+	it("the palette offers the restore resume beside the plain one and runs it", async () => {
+		const { services, server, bodies, close } = await loaded()
+		await feedControllerFor(services.data).pause("rtl-0")
+		await retuneWhilePaused(server)
+		const r = await runAction(
+			services,
+			{
+				kind: "feed",
+				op: "resume",
+				sourceId: "rtl-0",
+				restoreTuning: true,
+			},
+			"Receiver resumed",
+		)
+		expect(r).toMatchObject({ text: "Receiver resumed" })
+		expect(bodies).toContainEqual([
+			"POST /api/sources/rtl-0/resume",
+			JSON.stringify({ restoreTuning: true }),
+		])
+		await close()
+	})
+})
+
 describe("receiver feed: the island", () => {
 	it("offers Pause while live and no paused label on the plot", async () => {
 		const { services, close } = await loaded()
@@ -492,6 +608,9 @@ describe("receiver feed: the island", () => {
 			`waterfall frozen · ${waiting} decoder${waiting === 1 ? "" : "s"} waiting`,
 		)
 		expect(html).toMatch(/>Resume<\/button>/)
+		expect(html).toContain(
+			`>Resume at ${(DEFAULT_CENTER_HZ / 1e6).toFixed(3)} MHz</button>`,
+		)
 		expect(html).toContain('role="status" data-state="paused"')
 		expect(html).toContain("Receiver paused: resume it to change the tuner.")
 		expect(html).toMatch(/<input type="range"[^>]*disabled=""/)
@@ -516,6 +635,32 @@ describe("receiver feed: the island", () => {
 		expect(html).toContain(SOURCE_RESUME_FAILED_MESSAGE)
 		expect(html).toMatch(/>Retry<\/button>/)
 		expect(badge(services)).toContain("Resume failed")
+		await close()
+	})
+
+	it("hides Resume at <MHz> when the pre-pause centre is unknown, and after a failed restore (Retry is it)", async () => {
+		const { services, server, refresh, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		await feeds.pause("rtl-0")
+		await refresh()
+		expect(panel(services)).toContain(">Resume at ")
+		// a newer feed without restoreTuning (an older core): only the plain resume
+		feeds.remember([
+			{
+				id: "rtl-0",
+				feed: {
+					state: "paused",
+					since: new Date(Date.now() + 60_000).toISOString(),
+				},
+			},
+		])
+		expect(panel(services)).not.toContain(">Resume at ")
+		server.feed.failNextResumes(1)
+		await feeds.resume("rtl-0", { restoreTuning: true })
+		await refresh()
+		const html = panel(services)
+		expect(html).toMatch(/>Retry<\/button>/)
+		expect(html).not.toContain(">Resume at ")
 		await close()
 	})
 
