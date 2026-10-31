@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
-import { PassThrough, type Readable, type Writable } from "node:stream"
+import { PassThrough, type Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { ChannelizerConfig, SourceCaps } from "../../config.js"
 import { branchHighWaterMark, type FanoutManager } from "../fanout-manager.js"
@@ -112,7 +112,8 @@ interface OpenAttempt {
 }
 interface Closing {
 	pendingOpen: boolean
-	promise: Promise<void>
+	/** Woken once by `finish`; a waiter that gives up first removes itself, so repeated waits never accumulate. */
+	waiters: Set<() => void>
 	finish: () => void
 }
 interface SourceChannelizer {
@@ -136,12 +137,8 @@ interface SourceChannelizer {
 	droppedAtGap: number
 	invalidated: boolean
 	sawInputEof: boolean
-	/** The process's stdin, the branch's pipeline destination. */
-	input: Writable
-	/** Bytes the branch handed to `input`; only grows. */
-	inputHanded: number
-	/** Highest `inputHanded - input.writableLength` seen: the wedge check's progress mark, never moves back. */
-	inputTaken: number
+	/** `progress` lines this process has written; only grows. The wedge check's mark. */
+	progressed: number
 	detachFanout: () => void
 	settlement?: ProcessClaim
 }
@@ -592,8 +589,13 @@ export class ChannelizerManager
 			}
 			try {
 				const settled = await this.wait(s, ctx, done => {
-					void closing.promise.then(() => done("closed"))
-					return () => {}
+					const wake = () => {
+						done("closed")
+					}
+					closing.waiters.add(wake)
+					return () => {
+						closing.waiters.delete(wake)
+					}
 				})
 				if (settled === "cancelled")
 					return unavailable(this.cancellationDetail())
@@ -715,8 +717,8 @@ export class ChannelizerManager
 		this.clearIdleTimer(s)
 		s.pending++
 		let ownedAttempt: OpenAttempt | undefined
-		// Input the process had consumed when the last open went out: an unconfirmed close is a wedge only without progress since.
-		let sentMark = this.consumedInput(s)
+		// Progress lines when the last open went out: an unconfirmed close is a wedge only if the process wrote none since.
+		let sentMark = s.progressed
 		try {
 			let event: OpenedEvent
 			for (;;) {
@@ -754,7 +756,7 @@ export class ChannelizerManager
 					attempt.reply = done
 					s.waiters.set(channelId, attempt)
 					ctx.sends++
-					sentMark = this.consumedInput(s)
+					sentMark = s.progressed
 					if (attempt.settlement)
 						s.process.sendObserved?.(open, attempt.settlement)
 					else s.process.send(open)
@@ -1069,23 +1071,15 @@ export class ChannelizerManager
 	}
 
 	/**
-	 * Input bytes the process has taken from stdin: handed by the branch minus still queued in the stdin writable.
-	 * It advances while the process's main loop runs (it reads input between control lines), so it tells a slow
-	 * process from a wedged one. Both terms come from the pipe itself, not branch telemetry, whose buffered count
-	 * can hold a backpressured chunk on both sides of the PassThrough; the running maximum keeps it monotonic.
-	 */
-	private consumedInput(s: SourceChannelizer): number {
-		const taken = s.inputHanded - s.input.writableLength
-		if (taken > s.inputTaken) s.inputTaken = taken
-		return s.inputTaken
-	}
-
-	/**
 	 * A closed line is a FIFO terminal barrier. The caller waits at most `budget` (≤ CLOSE_TIMEOUT_MS). A close
-	 * still unconfirmed then retires the generation only when the process is wedged, i.e. consumed no input since
-	 * `since` (default: the send). A process that is consuming input applies the queued close after its current
-	 * block, so the id stays fenced (`s.closing`, same-id reuse waits for the terminal) and the check repeats every
-	 * CLOSE_TIMEOUT_MS: one slow close no longer tears down every other channel, the branch and the process.
+	 * still unconfirmed then retires the generation only when the process is wedged, i.e. wrote no `progress` line
+	 * since `since` (`s.progressed` at the send). Liveness comes from the process itself, never from Node's stdin
+	 * buffers (a pending write holds bytes the process already read): while a control line waits behind other work,
+	 * the process's main loop writes `progress` every 50 ms that it did more work (PROGRESS_EVERY in
+	 * native/wavekit-chan/src/runtime.rs), so a busy process speaks in every CLOSE_TIMEOUT_MS window and a wedged
+	 * one does not. A live process applies the queued close after its current block, so the id stays fenced
+	 * (`s.closing`, same-id reuse waits for the terminal) and the check repeats every CLOSE_TIMEOUT_MS: one slow
+	 * close no longer tears down every other channel, the branch and the process.
 	 */
 	private closeOwned(
 		s: SourceChannelizer,
@@ -1093,7 +1087,7 @@ export class ChannelizerManager
 		pendingOpen: boolean,
 		budget = CLOSE_TIMEOUT_MS,
 		cause = "close-unconfirmed",
-		since = this.consumedInput(s),
+		since = s.progressed,
 	): Promise<void> {
 		if (s.invalidated) return Promise.resolve()
 		const held = s.closing.get(id)
@@ -1101,17 +1095,20 @@ export class ChannelizerManager
 			// A second waiter gets the same bound; the fence and its wedge check stay with the first close.
 			if (budget <= 0) return Promise.resolve()
 			return new Promise(done => {
-				const t = setTimeout(done, Math.min(CLOSE_TIMEOUT_MS, budget))
-				void held.promise.then(() => {
+				const wake = () => {
 					clearTimeout(t)
 					done()
-				})
+				}
+				const t = setTimeout(
+					() => {
+						held.waiters.delete(wake)
+						done()
+					},
+					Math.min(CLOSE_TIMEOUT_MS, budget),
+				)
+				held.waiters.add(wake)
 			})
 		}
-		let resolve = () => {}
-		const promise = new Promise<void>(done => {
-			resolve = done
-		})
 		let release = () => {}
 		const waited = new Promise<void>(done => {
 			release = done
@@ -1120,13 +1117,15 @@ export class ChannelizerManager
 		let verdict: ReturnType<typeof setImmediate> | undefined
 		const closing: Closing = {
 			pendingOpen,
-			promise,
+			waiters: new Set(),
 			finish: () => {
 				if (s.closing.get(id) !== closing) return
 				s.closing.delete(id)
 				if (timer !== undefined) clearTimeout(timer)
 				if (verdict !== undefined) clearImmediate(verdict)
-				resolve()
+				const waiters = [...closing.waiters]
+				closing.waiters.clear()
+				for (const wake of waiters) wake()
 				release()
 			},
 		}
@@ -1138,9 +1137,8 @@ export class ChannelizerManager
 				timer = verdict = undefined
 				if (s.closing.get(id) !== closing) return
 				release()
-				const consumed = this.consumedInput(s)
-				if (consumed > mark && this.active.get(s.sourceId) === s) {
-					mark = consumed
+				if (s.progressed > mark && this.active.get(s.sourceId) === s) {
+					mark = s.progressed
 					timer = setTimeout(defer, CLOSE_TIMEOUT_MS)
 					return
 				}
@@ -1329,9 +1327,7 @@ export class ChannelizerManager
 			droppedAtGap: 0,
 			invalidated: false,
 			sawInputEof: false,
-			input: proc.input,
-			inputHanded: 0,
-			inputTaken: 0,
+			progressed: 0,
 			detachFanout: () => {
 				fanout.off("backpressure", onBackpressure)
 				fanout.off("drain", onDrain)
@@ -1346,17 +1342,12 @@ export class ChannelizerManager
 				caps.sampleRate,
 			),
 		})
-		void pipeline(branch, s.input).catch((err: unknown) =>
+		void pipeline(branch, proc.input).catch((err: unknown) =>
 			this.log.debug(
 				{ err, sourceId, generation },
 				"Channelizer input pipeline ended",
 			),
 		)
-		// After the pipe's own listener: each chunk is counted as it is written to stdin. A listener added while the
-		// pipe has paused the branch does not resume it.
-		branch.on("data", (chunk: Buffer) => {
-			s.inputHanded += chunk.length
-		})
 		fanout.on("backpressure", onBackpressure)
 		fanout.on("drain", onDrain)
 		proc.on("event", (e: ChannelizerEvent) => this.onEvent(s, e))
@@ -1480,6 +1471,9 @@ export class ChannelizerManager
 					{ sourceId: s.sourceId, discardedBytes: e.discardedBytes },
 					"Channelizer input EOF",
 				)
+				break
+			case "progress":
+				s.progressed++ // closeOwned's wedge check
 				break
 			case "ready":
 				break

@@ -95,7 +95,8 @@ impl Proc {
         c.flush().unwrap();
     }
 
-    /// The next non-`stats` event (a loaded host may cross the 5 s stats tick mid-test).
+    /// The next event that is not telemetry: `stats` (a loaded host may cross the 5 s stats tick mid-test) or
+    /// `progress` (a control line that waited behind input on a loaded host).
     fn next(&self, generation: u64) -> Value {
         loop {
             let e = self
@@ -108,7 +109,7 @@ impl Proc {
                 (Some(1), Some(generation)),
                 "{e}"
             );
-            if e["type"] != "stats" {
+            if e["type"] != "stats" && e["type"] != "progress" {
                 return e;
             }
         }

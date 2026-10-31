@@ -162,6 +162,15 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 			),
 		})
 		.strict(),
+	// Main-loop liveness while a control line waits behind input (runtime.rs `maybe_progress`).
+	z
+		.object({
+			v,
+			type: z.literal("progress"),
+			generation,
+			inputSamples: count,
+		})
+		.strict(),
 	z
 		.object({
 			v,

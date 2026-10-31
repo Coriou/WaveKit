@@ -32,12 +32,19 @@ use std::net::Shutdown;
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const STATS_EVERY: Duration = Duration::from_secs(5);
+/// While a control line has waited behind other work this long, the main loop reports `progress` at most this often
+/// (and only after more work: an input block or a control line), so the parent tells a busy process, whose reply is
+/// queued behind work it is still doing, from a wedged one. The parent judges an unanswered close after 250 ms
+/// (`CLOSE_TIMEOUT_MS` in channelizer-manager.ts): 50 ms leaves 250 / 50 = 5 chances per window, so a process whose
+/// units of work each take under 200 ms always reports inside it. A control line answered within 50 ms (the common
+/// case) adds no line.
+const PROGRESS_EVERY: Duration = Duration::from_millis(50);
 const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 const WRITE_CHUNK: usize = 1 << 16;
@@ -198,6 +205,13 @@ pub struct Runtime {
     /// Marked gaps not yet reached by the input, in arrival order: (atInputByte, droppedInputBytes).
     pending_gaps: VecDeque<(u64, u64)>,
     last_stats: Instant,
+    /// When the main loop first saw a control line waiting; `None` while none waits.
+    control_waiting_since: Option<Instant>,
+    last_progress: Option<Instant>,
+    /// Input blocks and control lines handled; only grows.
+    work: u64,
+    /// `work` at the last `progress` line: one is sent only after more work.
+    progress_work: u64,
     /// Writers → main, unbounded: a writer never blocks reporting its client gone.
     gone_tx: mpsc::Sender<(String, u64)>,
     gone_rx: mpsc::Receiver<(String, u64)>,
@@ -260,6 +274,10 @@ impl Runtime {
             terminated: false,
             pending_gaps: VecDeque::new(),
             last_stats: Instant::now(),
+            control_waiting_since: None,
+            last_progress: None,
+            work: 0,
+            progress_work: 0,
             gone_tx,
             gone_rx,
             disposal: None,
@@ -293,6 +311,7 @@ impl Runtime {
     }
 
     fn reject(&mut self, id: &str, code: &str, detail: String) {
+        self.work += 1;
         let id = schema_id(id).to_string();
         self.emit(json!({"type": "rejected", "id": id, "reasonCode": code, "detail": detail}))
     }
@@ -357,6 +376,7 @@ impl Runtime {
     }
 
     pub fn on_observed_request(&mut self, req: ObservedRequest) -> Option<i32> {
+        self.work += 1;
         match req {
             ObservedRequest::Ordinary(r) => self.on_request(r),
             ObservedRequest::InvalidOpen { token, id, detail } => {
@@ -873,6 +893,7 @@ impl Runtime {
     }
 
     pub fn on_input(&mut self, bytes: &[u8]) {
+        self.work += 1;
         let (mut i, mut q) = (
             std::mem::take(&mut self.input_i),
             std::mem::take(&mut self.input_q),
@@ -1024,6 +1045,27 @@ impl Runtime {
             .collect();
         let input = self.asm.consumed_bytes / 2;
         self.emit(json!({"type": "stats", "inputSamples": input, "channels": channels}));
+    }
+
+    /// `progress` while a control line waits behind other work (see [`PROGRESS_EVERY`]): the main loop is alive.
+    /// Nothing while no control line waits, or when the loop did no work since the last line.
+    pub fn maybe_progress(&mut self, now: Instant, control_waiting: bool) {
+        if !control_waiting {
+            self.control_waiting_since = None;
+            return;
+        }
+        let since = *self.control_waiting_since.get_or_insert(now);
+        let due = |t: Instant| now.saturating_duration_since(t) >= PROGRESS_EVERY;
+        if !due(since)
+            || self.last_progress.is_some_and(|t| !due(t))
+            || self.work == self.progress_work
+        {
+            return;
+        }
+        self.last_progress = Some(now);
+        self.progress_work = self.work;
+        let input = self.asm.consumed_bytes / 2;
+        self.emit(json!({"type": "progress", "inputSamples": input}));
     }
 
     /// EOF (A7): drain every queue to its client, report open drop runs, emit `input-eof`, exit 0.
@@ -1468,12 +1510,16 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         let block = args.block_samples * 2;
         thread::spawn(move || read_input(std::io::stdin().lock(), block, &tx, &free_rx));
     }
+    // Control lines read but not yet taken by the main loop (counted before the blocking send).
+    let control_waiting = Arc::new(AtomicUsize::new(0));
     {
         let fd = args.control_fd;
+        let waiting = Arc::clone(&control_waiting);
         thread::spawn(move || {
             // SAFETY: the parent passes an open pipe at this fd (A1); this thread owns it from here on.
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
             if let Err(e) = read_control_mode(BufReader::new(file), observed, |r| {
+                waiting.fetch_add(1, Ordering::SeqCst);
                 tx.send(Msg::Control(r)).is_ok()
             }) {
                 eprintln!("wavekit-chan: control fd {fd}: {e}");
@@ -1499,7 +1545,11 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         } else {
             Duration::from_millis(5)
         };
-        match rx.recv_timeout(wait) {
+        let msg = rx.recv_timeout(wait);
+        if matches!(msg, Ok(Msg::Control(_))) {
+            control_waiting.fetch_sub(1, Ordering::SeqCst);
+        }
+        match msg {
             Ok(Msg::Input(b)) => {
                 rt.on_input(&b);
                 let _ = free_tx.try_send(b); // full or reader gone: the buffer is freed
@@ -1520,6 +1570,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         rt.poll_prepared();
         rt.poll_client_gone(); // ≤ 250 ms after the failed write
         rt.maybe_stats(Instant::now());
+        rt.maybe_progress(Instant::now(), control_waiting.load(Ordering::SeqCst) > 0);
         rt.poll_disposal();
     }
 }
@@ -2559,6 +2610,66 @@ mod tests {
         );
         r.maybe_stats(t0 + Duration::from_secs(7));
         assert_eq!(ev.lock().unwrap().len(), n + 1);
+        r.on_eof_no_exit_for_test();
+    }
+
+    #[test]
+    fn progress_only_while_a_control_line_waits_behind_work() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let n = ev.lock().unwrap().len();
+        let t0 = Instant::now();
+        let count = || ev.lock().unwrap().len();
+        r.on_input(&vec![128u8; 2 * 4096]);
+        // No control line waits: never, however long.
+        r.maybe_progress(t0, false);
+        r.maybe_progress(t0 + Duration::from_secs(9), false);
+        assert_eq!(count(), n);
+        // One starts waiting: nothing before PROGRESS_EVERY, one line at it.
+        r.maybe_progress(t0, true);
+        r.maybe_progress(t0 + PROGRESS_EVERY - Duration::from_millis(1), true);
+        assert_eq!(count(), n);
+        r.maybe_progress(t0 + PROGRESS_EVERY, true);
+        let e = last(&ev);
+        assert_eq!(
+            (
+                e["type"].as_str(),
+                e["inputSamples"].as_u64(),
+                e["generation"].as_u64(),
+                e["v"].as_u64()
+            ),
+            (Some("progress"), Some(4096), Some(7), Some(1))
+        );
+        assert_eq!(count(), n + 1);
+        // No work since: silent (a wedged loop reports nothing).
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3, true);
+        assert_eq!(count(), n + 1);
+        // More input: due again, but throttled to PROGRESS_EVERY after the last line.
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3, true);
+        assert_eq!(
+            (count(), last(&ev)["inputSamples"].as_u64()),
+            (n + 2, Some(8192))
+        );
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3 + Duration::from_millis(49), true);
+        assert_eq!(count(), n + 2);
+        // The wait ends; a new one restarts the PROGRESS_EVERY grace.
+        r.maybe_progress(t0 + PROGRESS_EVERY * 5, false);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 6, true);
+        assert_eq!(count(), n + 2);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 7, true);
+        assert_eq!(
+            (count(), last(&ev)["inputSamples"].as_u64()),
+            (n + 3, Some(12_288))
+        );
+        // A control line handled (here a malformed one) is work too, with no input read.
+        r.reject("x", "channel-request-invalid", "bad".into());
+        r.maybe_progress(t0 + PROGRESS_EVERY * 8, true);
+        assert_eq!(
+            (count(), last(&ev)["type"].as_str()),
+            (n + 5, Some("progress"))
+        );
         r.on_eof_no_exit_for_test();
     }
 
