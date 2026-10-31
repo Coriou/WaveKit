@@ -14,6 +14,7 @@ import type {
 	AprsStationNotFoundResponse,
 	AprsTrackerStats,
 } from "@wavekit/api-types"
+import { validationFieldsSchema } from "../validation-errors.js"
 
 export interface AprsRoutesOptions extends FastifyPluginOptions {
 	tracker: AprsTracker
@@ -26,6 +27,10 @@ const nullableNumber = { type: ["number", "null"] } as const
  * `callsign:<CALL[-SSID]>`, `aprs-object:<name>` or `aprs-item:<name>`.
  * Names are 1–9 characters and may not contain `:` or C0 controls.
  */
+/** The station key grammar as a 400 states it (static). */
+const APRS_KEY_EXPECTED =
+	'"callsign:<CALL[-SSID]>", "aprs-object:<name>" or "aprs-item:<name>"; names 1 to 9 characters without ":" or control characters'
+
 const APRS_KEY =
 	/^(callsign:[A-Z0-9]{1,6}(-[0-9]{1,2})?|aprs-(object|item):[^:\u0000-\u001f]{1,9})$/
 
@@ -184,6 +189,8 @@ const validationErrorSchema = {
 	properties: {
 		error: { type: "string" },
 		code: { type: "string", const: "VALIDATION_ERROR" },
+		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code"],
 } as const
@@ -263,6 +270,8 @@ export async function aprsRoutes(
 				return {
 					error: "APRS station key is outside the allowed grammar",
 					code: "VALIDATION_ERROR" as const,
+					message: `Invalid path parameter: key: ${APRS_KEY_EXPECTED}`,
+					fields: [{ field: "key", expected: APRS_KEY_EXPECTED }],
 				}
 			}
 			const station = tracker.get(key)

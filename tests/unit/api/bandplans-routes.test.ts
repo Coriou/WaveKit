@@ -624,6 +624,17 @@ describe("band-plan routes", () => {
 				error: "BandPlansError",
 				code,
 				message: BANDPLANS_ERROR_DEFINITIONS[code][1],
+				// A service-side refusal names the body; route parses name their field.
+				...(code === "BANDPLANS_INVALID"
+					? {
+							fields: [
+								{
+									field: "body",
+									expected: "a band-plan request as documented in docs/API.md",
+								},
+							],
+						}
+					: {}),
 			})
 			expect(response.json()).not.toHaveProperty("global")
 		}

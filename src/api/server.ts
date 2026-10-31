@@ -87,6 +87,7 @@ import { aircraftRoutes } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
 import { coverageRoutes } from "./routes/coverage.js"
+import { fastifyValidationBody, isBodyParseError } from "./validation-errors.js"
 import type { CoverageManager } from "../core/coverage/coverage-manager.js"
 import type { StationEstimateProvider } from "../core/station-estimate/contract.js"
 import type { StationService } from "../core/station/contract.js"
@@ -1240,13 +1241,12 @@ export class ApiServer {
 				})
 			}
 
-			// Handle validation errors (from Fastify schema validation)
-			if (error.validation) {
+			// Schema validation and body parse failures name the expected fields from the
+			// route schema (static text, safe with access configured). Ajv's raw errors and the
+			// parser's message are not sent: they can carry a client key or quote the body.
+			if (error.validation || isBodyParseError(error)) {
 				return reply.status(400).send({
-					error: "ValidationError",
-					code: "VALIDATION_ERROR",
-					message: this.access ? "Request failed" : error.message,
-					...(this.access ? {} : { details: error.validation }),
+					...fastifyValidationBody(error, request),
 					correlationId,
 				})
 			}

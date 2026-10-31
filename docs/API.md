@@ -2977,13 +2977,15 @@ curl -X PATCH http://localhost:9000/api/scanner/settings \
   -d '{"passive": {"rtl-dedicated": false}, "cpuBudgetCores": 0.5}'
 ```
 
-**400** for an unknown key or a value out of bounds:
+**400** for an unknown key or a value out of bounds, naming the field and
+what it accepts ([validation errors](#validation-errors)):
 
 ```json
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "Configuration validation failed:\n  - cpuBudgetCores: Value is too small (minimum: 0.1)"
+	"message": "Invalid request body: cpuBudgetCores: number (0.1 to 64)",
+	"fields": [{ "field": "cpuBudgetCores", "expected": "number (0.1 to 64)" }]
 }
 ```
 
@@ -3895,8 +3897,13 @@ given, or a bound is broken:
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "body/target must match exactly one schema in oneOf",
-	"details": [{ "instancePath": "/target", "keyword": "oneOf" }]
+	"message": "Invalid request body: target: object with fields frequencyHz, bandwidthHz, all; exactly one of frequencyHz or all",
+	"fields": [
+		{
+			"field": "target",
+			"expected": "object with fields frequencyHz, bandwidthHz, all; exactly one of frequencyHz or all"
+		}
+	]
 }
 ```
 
@@ -7108,6 +7115,45 @@ the status code.
 }
 ```
 
+### Validation errors
+
+Every 400 for a malformed request names the failing field(s) and what each
+accepts, in `fields`, and repeats them in `message`. The text comes from the
+route's own schema: a 400 never repeats a submitted value, an unknown key you
+sent, or a parser message (so it reads the same with access configured).
+Routes with their own error code (`INVALID_START_REQUEST`,
+`INVALID_BAND_OVERRIDE`, `EFFICIENCY_BUDGET_INVALID`, `RECORDINGS_QUERY_INVALID`,
+`BANDPLANS_INVALID`, `ACTIVITY_QUERY_INVALID`, `DECODER_OPTIONS_INVALID`, …) keep
+it and add `fields`.
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "Invalid request body: type: one of \"sdrpp-network\" | \"rtl_tcp\" | \"recording\"",
+	"fields": [
+		{
+			"field": "type",
+			"expected": "one of \"sdrpp-network\" | \"rtl_tcp\" | \"recording\""
+		}
+	]
+}
+```
+
+- `field` is a schema path (`entries.0.gain`; `*` stands for a key you
+  chose), or the request part (`body`, `query`) when the whole part is wrong:
+  not an object, malformed JSON, or an unknown key (`expected` then lists the
+  accepted fields).
+- At most 8 fields are named.
+- Tuner routes keep their message wording (`Invalid request body at gain;
+expected {...}`); their `fields` carry the unit, for example `gain`:
+  `integer, gain in tenths of a dB (0-500, ...)`, naming the deprecated alias
+  `tenthsDb`.
+- `PATCH /api/station` keeps `fields` as the list of station field names its
+  form marks; its `message` states what each accepts.
+- The regional registry and receiver-capabilities routes keep their fixed
+  bodies, and access routes answer `{ "code" }` only.
+
 ### Error Codes
 
 | Code                       | HTTP Status | Description                                                                      |
@@ -7133,7 +7179,7 @@ Scanner and spectrum routes answer with the flat body
 | `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `fields` names each failing field                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_NOT_FOUND`             | 404  | Route level: the job, discovery, recording, evidence or capture in the path does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |

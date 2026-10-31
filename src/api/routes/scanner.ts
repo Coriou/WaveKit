@@ -3,8 +3,9 @@
  * `{ error, code, message, details? }` body.
  *
  * Error codes (a ScannerApiError answers with its own status):
- * - 400 `VALIDATION_ERROR` (schema or settings PATCH), `SCANNER_PLAN_INVALID` `{issues}`,
- *   `SCANNER_MONITOR_UNAVAILABLE`, `SCANNER_SETTINGS_INVALID` `{issues}`, `SCANNER_IDENTIFY_VIA_JOBS`
+ * - 400 `VALIDATION_ERROR` (schema or settings PATCH; `fields` names each failing field),
+ *   `SCANNER_PLAN_INVALID` `{issues}`, `SCANNER_MONITOR_UNAVAILABLE`, `SCANNER_SETTINGS_INVALID`
+ *   (`fields`), `SCANNER_IDENTIFY_VIA_JOBS`
  * - 404 `SCANNER_NOT_FOUND`, `SCANNER_JOB_NOT_FOUND`, `SCANNER_DISCOVERY_NOT_FOUND`
  * - 409 `SCANNER_TAKEOVER_REQUIRED` `{impact}`, `SCANNER_SOURCE_BUSY` (the message carries the
  *   arbiter's detail: "holder is starting", "releasing", "recovery pending", …),
@@ -33,7 +34,14 @@ import type {
 	FastifyReply,
 	FastifyRequest,
 } from "fastify"
-import { ZodError, ZodIssueCode } from "zod"
+import { z, ZodError, ZodIssueCode, type ZodIssue, type ZodTypeAny } from "zod"
+import {
+	validationErrorBody,
+	zodValidationBody,
+	zodValidationFields,
+	type ValidationErrorBody,
+	type ValidationField,
+} from "../validation-errors.js"
 import { ScannerApiError } from "../../core/scanner/errors.js"
 import type { ScannerService } from "../../core/scanner/scanner-service.js"
 import { ScannerSettingsPatchSchema } from "../../core/scanner/settings.js"
@@ -51,7 +59,6 @@ import type {
 import { RECORDING_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
 import { JOB_HITS_LIMIT_DEFAULT } from "../../core/scanner/job-hits.js"
-import { ConfigValidationError } from "../../utils/errors.js"
 import { withCoverage } from "../../core/scanner/discovery-coverage.js"
 import type { CoverageIndex } from "../../core/scanner/discovery-coverage.js"
 import {
@@ -144,8 +151,37 @@ interface DiscoveryQuery {
 	toleranceHz?: number
 }
 
-function sendError(reply: FastifyReply, err: unknown): FastifyReply {
+/** The schema a ZodError without its own (the discovery identity query) is named against. */
+const IDENTITY_QUERY_FIELDS = z.object({
+	identity: z
+		.string()
+		.describe(
+			'"kind:value": a known identity kind, a colon, then a non-empty value',
+		),
+})
+
+function sendError(
+	reply: FastifyReply,
+	err: unknown,
+	schema: ZodTypeAny = IDENTITY_QUERY_FIELDS,
+): FastifyReply {
 	if (err instanceof ScannerApiError) {
+		// A settings patch refusal carries Zod issues, which can quote the value or an
+		// unknown key: answer the named fields instead.
+		if (
+			err.code === "SCANNER_SETTINGS_INVALID" &&
+			Array.isArray(err.details?.["issues"])
+		)
+			return reply.code(err.statusCode).send({
+				error: err.name,
+				code: err.code,
+				message: err.message,
+				fields: zodValidationFields(
+					new ZodError(err.details["issues"] as ZodIssue[]),
+					ScannerSettingsPatchSchema,
+					{ input: reply.request.body },
+				),
+			})
 		return reply.code(err.statusCode).send({
 			error: err.name,
 			code: err.code,
@@ -154,11 +190,13 @@ function sendError(reply: FastifyReply, err: unknown): FastifyReply {
 		})
 	}
 	if (err instanceof ZodError) {
-		return reply.code(400).send({
-			error: "ValidationError",
-			code: "VALIDATION_ERROR",
-			message: ConfigValidationError.formatZodError(err),
-		})
+		const part = schema === IDENTITY_QUERY_FIELDS ? "query" : "body"
+		return reply.code(400).send(
+			zodValidationBody(err, schema, {
+				part,
+				input: part === "query" ? reply.request.query : reply.request.body,
+			}),
+		)
 	}
 	throw err
 }
@@ -296,16 +334,30 @@ function identityFromQuery(raw: string): Identity {
  * the 400 message for the query parameters, naming each one and never its
  * value, or null when the query is fine.
  */
-function nonFiniteDiscoveryQuery(q: DiscoveryQuery): string | null {
+function nonFiniteDiscoveryQuery(
+	q: DiscoveryQuery,
+): ValidationErrorBody | null {
 	const problems: string[] = []
-	if (q.nearHz !== undefined && !Number.isFinite(q.nearHz))
+	const fields: ValidationField[] = []
+	if (q.nearHz !== undefined && !Number.isFinite(q.nearHz)) {
 		problems.push("nearHz must be a finite number")
-	if (q.toleranceHz !== undefined && !Number.isFinite(q.toleranceHz))
+		fields.push({ field: "nearHz", expected: "finite number, Hz" })
+	}
+	if (q.toleranceHz !== undefined && !Number.isFinite(q.toleranceHz)) {
 		problems.push("toleranceHz must be a finite number")
-	if (q.toleranceHz !== undefined && q.nearHz === undefined)
+		fields.push({ field: "toleranceHz", expected: "finite number, Hz" })
+	}
+	if (q.toleranceHz !== undefined && q.nearHz === undefined) {
 		problems.push("toleranceHz requires nearHz")
+		fields.push({
+			field: "nearHz",
+			expected: "required with toleranceHz; finite number, Hz",
+		})
+	}
 	if (problems.length === 0) return null
-	return `Invalid query parameter: ${problems.join("; ")}`
+	return validationErrorBody("query", fields, {
+		message: `Invalid query parameter: ${problems.join("; ")}`,
+	})
 }
 
 function toFilter(q: DiscoveryQuery): DiscoveryFilter {
@@ -529,7 +581,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				const patch = ScannerSettingsPatchSchema.parse(request.body)
 				return await scanner.patchSettings(patch)
 			} catch (err) {
-				return sendError(reply, err)
+				return sendError(reply, err, ScannerSettingsPatchSchema)
 			}
 		},
 	)
@@ -714,12 +766,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			const invalid = nonFiniteDiscoveryQuery(request.query)
-			if (invalid !== null)
-				return reply.code(400).send({
-					error: "ValidationError",
-					code: "VALIDATION_ERROR",
-					message: invalid,
-				})
+			if (invalid !== null) return reply.code(400).send(invalid)
 			try {
 				const page = scanner.listDiscoveries(toFilter(request.query))
 				const index = coverageIndexOf(scanner)

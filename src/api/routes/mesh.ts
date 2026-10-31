@@ -14,6 +14,7 @@ import type {
 	MeshTrackerStats,
 } from "@wavekit/api-types"
 import { canonicalNodeId, type MeshTracker } from "../../core/mesh-tracker.js"
+import { validationFieldsSchema } from "../validation-errors.js"
 
 export interface MeshRoutesOptions extends FastifyPluginOptions {
 	tracker: MeshTracker
@@ -200,6 +201,8 @@ const validationErrorSchema = {
 	properties: {
 		error: { type: "string" },
 		code: { type: "string", const: "VALIDATION_ERROR" },
+		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code"],
 } as const
@@ -277,6 +280,14 @@ export async function meshRoutes(
 				return {
 					error: "Node id must be ! and 8 hex digits",
 					code: "VALIDATION_ERROR" as const,
+					message:
+						"Invalid path parameter: nodeId: ! followed by 8 hex digits (case-insensitive)",
+					fields: [
+						{
+							field: "nodeId",
+							expected: "! followed by 8 hex digits (case-insensitive)",
+						},
+					],
 				}
 			}
 			const node = tracker.get(nodeId)

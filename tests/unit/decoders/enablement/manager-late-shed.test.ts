@@ -303,12 +303,56 @@ it("late-drops verdict suspends with efficiency-budget and detail late-drops", a
 			{
 				reasonCode: "efficiency-budget",
 				detail: "late-drops",
+				efficiencyDetail: "late-drops",
 				sourceId: "rtl",
 				decoderId: "dec",
 			},
 			"Late drops shed a decoder",
 		],
 	])
+})
+
+it.each(["late-drops", "drops", "cpu"] as const)(
+	"the suspension log carries the efficiency detail %s",
+	async detail => {
+		const gate = fakeGate()
+		const f = setup("rate-test", gate)
+		f.create("dec")
+		const placement = f.place("dec", 162_000_000)
+		f.plan([placement])
+		await f.manager.startAll()
+		gate.probation = vi.fn(() => [{ key: placement.key, detail }])
+		await vi.advanceTimersByTimeAsync(2500)
+		expect(
+			f.info.mock.calls.filter(
+				call => call[1] === "Decoder suspension changed",
+			),
+		).toContainEqual([
+			{
+				decoderId: "dec",
+				reasonCode: "efficiency-budget",
+				efficiencyDetail: detail,
+			},
+			"Decoder suspension changed",
+		])
+	},
+)
+
+it("a suspension the efficiency gate did not cause logs no efficiency detail", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000)])
+	await f.manager.startAll()
+	f.plan([])
+	await f.settle()
+	await vi.advanceTimersByTimeAsync(2500)
+	const changes = f.info.mock.calls.filter(
+		call => call[1] === "Decoder suspension changed",
+	)
+	expect(changes.length).toBeGreaterThan(0)
+	for (const [fields] of changes)
+		expect(fields).not.toHaveProperty("efficiencyDetail")
 })
 
 it.each(

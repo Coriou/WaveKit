@@ -3,6 +3,12 @@ import { COVERAGE_PROTOCOLS } from "@wavekit/api-types"
 import type { FastifyInstance } from "fastify"
 import type { CoverageResponse } from "@wavekit/api-types"
 import type { CoverageManager } from "../../core/coverage/coverage-manager.js"
+import {
+	validationFieldsSchema,
+	zodValidationFields,
+	validationMessage,
+	type ValidationField,
+} from "../validation-errors.js"
 
 export interface CoverageRoutesOptions {
 	coverage: Pick<CoverageManager, "query">
@@ -86,9 +92,18 @@ const errorSchema = {
 	properties: {
 		error: { type: "string" },
 		code: { type: "string", const: "VALIDATION_ERROR" },
+		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code"],
 } as const
+
+interface CoverageValidationError {
+	error: string
+	code: "VALIDATION_ERROR"
+	message: string
+	fields: ValidationField[]
+}
 
 export async function coverageRoutes(
 	app: FastifyInstance,
@@ -96,7 +111,7 @@ export async function coverageRoutes(
 ): Promise<void> {
 	const { coverage } = options
 	app.get<{
-		Reply: CoverageResponse | { error: string; code: "VALIDATION_ERROR" }
+		Reply: CoverageResponse | CoverageValidationError
 	}>(
 		"/api/coverage",
 		{
@@ -111,9 +126,15 @@ export async function coverageRoutes(
 			const parsed = QuerySchema.safeParse(request.query)
 			if (!parsed.success) {
 				reply.status(400)
+				const fields = zodValidationFields(parsed.error, QuerySchema, {
+					part: "query",
+					input: request.query,
+				})
 				return {
 					error: `protocol must be one of: ${COVERAGE_PROTOCOLS.join(", ")}`,
 					code: "VALIDATION_ERROR" as const,
+					message: validationMessage("query", fields),
+					fields,
 				}
 			}
 			reply.header("Cache-Control", "no-store")

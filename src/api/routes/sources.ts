@@ -18,6 +18,11 @@ import {
 	sourceEndpointSchema,
 } from "@wavekit/api-types"
 import { SourceConfigSchema } from "../../config.js"
+import {
+	validationFieldsSchema,
+	zodValidationBody,
+	type ValidationField,
+} from "../validation-errors.js"
 import type {
 	SourceManager,
 	SourceConfig,
@@ -185,6 +190,7 @@ const errorResponseSchema = {
 		error: { type: "string" },
 		code: { type: "string" },
 		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code", "message"],
 } as const
@@ -290,6 +296,8 @@ export interface ErrorResponse {
 	error: string
 	code: string
 	message: string
+	/** Validation 400s: the failing fields and what each accepts. */
+	fields?: ValidationField[]
 }
 
 /**
@@ -404,13 +412,12 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			// (e.g. stallTimeoutMs is 0 or >= 1000) and does not apply defaults.
 			const parsed = SourceConfigSchema.safeParse(request.body)
 			if (!parsed.success) {
-				return reply.status(400).send({
-					error: "BadRequest",
-					code: "VALIDATION_ERROR",
-					message: parsed.error.issues
-						.map(issue => `${issue.path.join(".") || "body"}: ${issue.message}`)
-						.join("; "),
-				})
+				return reply.status(400).send(
+					zodValidationBody(parsed.error, SourceConfigSchema, {
+						error: "BadRequest",
+						input: request.body,
+					}),
+				)
 			}
 			const config = parsed.data
 

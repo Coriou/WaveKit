@@ -57,6 +57,12 @@ import {
 } from "../../decoders/settings/contract.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { DECODER_SETTINGS_BODY_MAX_BYTES } from "@wavekit/api-types"
+import {
+	validationErrorBody,
+	validationFieldsSchema,
+	zodValidationBody,
+	type ValidationField,
+} from "../validation-errors.js"
 
 /**
  * Decoder capabilities schema for response (Requirement 17.1)
@@ -132,6 +138,7 @@ const errorResponseSchema = {
 		error: { type: "string" },
 		code: { type: "string" },
 		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code", "message"],
 } as const
@@ -152,6 +159,91 @@ const decoderActionResponseSchema = {
  * Optional POST /start body (band defaults spec §1.1). `pin` defaults to
  * true: an operator start is never band-suspended.
  */
+/** PUT /api/decoders/efficiency/budget body. */
+const BudgetBodySchema = z
+	.object({
+		cpuBudgetCores: CpuBudgetSchema.describe(
+			'"auto" or a number of CPU cores (> 0, <= 64)',
+		),
+		expected: CpuBudgetSchema.describe(
+			'"auto" or a number of CPU cores (> 0, <= 64): the budget the client last read',
+		).optional(),
+	})
+	.strict()
+
+/** What the settings PATCH body accepts (static text for its 400s). */
+const SETTINGS_BODY_EXPECTED =
+	"a JSON object with only enabled (boolean or null), options (object) and mode (string or null)"
+
+/**
+ * The settings PATCH keys whose value has the wrong type (schema names only). Empty when
+ * the body is not an object or has an unknown key: the whole body is named then.
+ */
+function settingsShapeFields(body: unknown): ValidationField[] {
+	if (typeof body !== "object" || body === null || Array.isArray(body))
+		return []
+	if (Object.keys(body).some(key => !PATCH_BODY_KEYS.has(key))) return []
+	const fields: ValidationField[] = []
+	const enabled: unknown = Reflect.get(body, "enabled")
+	if (
+		Object.hasOwn(body, "enabled") &&
+		enabled !== null &&
+		typeof enabled !== "boolean"
+	)
+		fields.push({ field: "enabled", expected: "boolean or null" })
+	const opts: unknown = Reflect.get(body, "options")
+	if (
+		Object.hasOwn(body, "options") &&
+		(typeof opts !== "object" || opts === null || Array.isArray(opts))
+	)
+		fields.push({ field: "options", expected: "object of option values" })
+	const mode: unknown = Reflect.get(body, "mode")
+	if (Object.hasOwn(body, "mode") && mode !== null && typeof mode !== "string")
+		fields.push({
+			field: "mode",
+			expected: 'one of "auto" | "always" | "off" or null',
+		})
+	return fields
+}
+
+/** `fields` for a settings 400: option issues by documented path, else the body. */
+function settingsFields(error: DecoderSettingsError): ValidationField[] {
+	const fields = new Map<string, string>()
+	for (const issue of error.issues ?? []) {
+		// An unknown key's path is the client's key: name the options object instead.
+		if (issue.code === "unknown-key")
+			fields.set(
+				"options",
+				"only this decoder's documented option keys (GET /api/decoders/:id/settings lists them)",
+			)
+		// Body shape issues (path "" or the top-level "mode") come from the patch policy's
+		// fixed texts; option issues sit below `options`.
+		else if (issue.path === "") fields.set("body", SETTINGS_BODY_EXPECTED)
+		else if (issue.path === "mode")
+			fields.set("mode", 'one of "auto" | "always" | "off" or null')
+		else
+			fields.set(
+				`options.${issue.path}`,
+				"a value of the documented option type and bounds (GET /api/decoders/:id/settings)",
+			)
+	}
+	if (fields.size === 0 && error.code === "DECODER_OPTION_NOT_PATCHABLE")
+		fields.set(
+			"options",
+			"only options this decoder can change at runtime (GET /api/decoders/:id/settings marks them)",
+		)
+	if (fields.size === 0) fields.set("body", SETTINGS_BODY_EXPECTED)
+	return [...fields].map(([field, expected]) => ({ field, expected }))
+}
+
+/** A settings error body; a 400 also names its fields. */
+function settingsErrorBody(error: DecoderSettingsError): object {
+	const body = error.toBody()
+	return error.statusCode === 400
+		? { ...body, fields: settingsFields(error) }
+		: body
+}
+
 const StartBodySchema = z
 	.object({ pin: z.boolean().optional() })
 	.strict()
@@ -304,6 +396,8 @@ export interface ErrorResponse {
 	error: string
 	code: string
 	message: string
+	/** Validation 400s: the failing fields and what each accepts. */
+	fields?: ValidationField[]
 }
 
 /** 409 body for mutating routes on a scanner probe (spec § 6.5); null otherwise. */
@@ -368,15 +462,17 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					done()
 				},
 				handler: async (request, reply) => {
-					const parsed = z
-						.object({
-							cpuBudgetCores: CpuBudgetSchema,
-							expected: CpuBudgetSchema.optional(),
-						})
-						.strict()
-						.safeParse(request.body)
+					const parsed = BudgetBodySchema.safeParse(request.body)
 					if (!parsed.success)
-						return sendJson(reply, 400, { code: "EFFICIENCY_BUDGET_INVALID" })
+						return sendJson(
+							reply,
+							400,
+							zodValidationBody(parsed.error, BudgetBodySchema, {
+								error: "BadRequest",
+								input: request.body,
+								code: "EFFICIENCY_BUDGET_INVALID",
+							}),
+						)
 					const { cpuBudgetCores, expected } = parsed.data
 					try {
 						if (expected === undefined)
@@ -621,11 +717,15 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					code: "SOURCE_NOT_FOUND",
 					message: `Source with id '${sourceId}' not found`,
 				})
-			return reply.status(400).send({
-				error: "BadRequest",
-				code: "VALIDATION_ERROR",
-				message: `Sample rate ${sampleRateHz} Hz is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
-			})
+			return reply.status(400).send(
+				validationErrorBody("query", [
+					{
+						field: "sampleRateHz",
+						expected:
+							"integer, sample rate in Hz an RTL-SDR supports (225001-300000 or 900001-3200000)",
+					},
+				]),
+			)
 		},
 	)
 
@@ -723,13 +823,13 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 			const body = StartBodySchema.safeParse(request.body)
 			if (!body.success) {
-				return reply.status(400).send({
-					error: "BadRequest",
-					code: "INVALID_START_REQUEST",
-					message: body.error.issues
-						.map(issue => `${issue.path.join(".") || "body"}: ${issue.message}`)
-						.join("; "),
-				})
+				return reply.status(400).send(
+					zodValidationBody(body.error, StartBodySchema, {
+						error: "BadRequest",
+						input: request.body,
+						code: "INVALID_START_REQUEST",
+					}),
+				)
 			}
 			const startMode = (body.data?.pin ?? true) ? "operator" : "auto"
 
@@ -1036,7 +1136,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						"DECODER_SETTINGS_LIMIT",
 						"Body is too large",
 					)
-					void sendJson(reply, err.statusCode, err.toBody())
+					void sendJson(reply, err.statusCode, settingsErrorBody(err))
 					return
 				}
 				// Params validation (empty id): a fixed 400, no echo.
@@ -1045,7 +1145,12 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						"DECODER_OPTIONS_INVALID",
 						"Decoder id is required",
 					)
-					void sendJson(reply, err.statusCode, err.toBody())
+					void sendJson(reply, err.statusCode, {
+						...err.toBody(),
+						fields: [
+							{ field: "id", expected: "a decoder id, at least 1 character" },
+						],
+					})
 					return
 				}
 				// Fastify's own parser answers (415, invalid JSON) are kept as on other routes.
@@ -1075,15 +1180,31 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						"DECODER_OPTIONS_INVALID",
 						"If-Match must be a revision",
 					)
-					return sendJson(reply, err.statusCode, err.toBody())
+					return sendJson(reply, err.statusCode, {
+						...err.toBody(),
+						fields: [
+							{
+								field: "If-Match",
+								expected:
+									'a settings revision, a non-negative integer (quoted "7" or bare 7)',
+							},
+						],
+					})
 				}
 				const body: unknown = request.body
 				if (!isSettingsPatchShape(body)) {
 					const err = settingsError(
 						"DECODER_OPTIONS_INVALID",
-						"Body must be a JSON object with only enabled (boolean or null), options (object) and mode (string or null)",
+						`Body must be ${SETTINGS_BODY_EXPECTED}`,
 					)
-					return sendJson(reply, err.statusCode, err.toBody())
+					const fields = settingsShapeFields(body)
+					return sendJson(
+						reply,
+						err.statusCode,
+						fields.length > 0
+							? { ...err.toBody(), fields }
+							: settingsErrorBody(err),
+					)
 				}
 				try {
 					const result = await settings.update(
@@ -1094,7 +1215,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					return sendJson(reply, 200, result)
 				} catch (error) {
 					if (error instanceof DecoderSettingsError)
-						return sendJson(reply, error.statusCode, error.toBody())
+						return sendJson(reply, error.statusCode, settingsErrorBody(error))
 					request.log.error(
 						{ err: safeErrorFields(error) },
 						"decoder settings update failed",
@@ -1154,6 +1275,16 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						error: "BadRequest",
 						code: "NO_UPDATE_FIELDS",
 						message: "At least one field (enabled or options) must be provided",
+						fields: [
+							{
+								field: "enabled",
+								expected: "boolean (send enabled or options)",
+							},
+							{
+								field: "options",
+								expected: "object (send enabled or options)",
+							},
+						],
 					})
 				}
 

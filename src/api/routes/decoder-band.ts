@@ -9,6 +9,10 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import type { DecoderBandSettings } from "@wavekit/api-types"
 import type { DecoderManager } from "../../decoders/manager.js"
 import { DecoderBandOverrideSchema } from "../../config.js"
+import {
+	validationFieldsSchema,
+	zodValidationBody,
+} from "../validation-errors.js"
 import { normalizeBandOverride } from "../../decoders/band-defaults.js"
 import {
 	bandRegionCodes,
@@ -34,6 +38,7 @@ const errorResponseSchema = {
 		error: { type: "string" },
 		code: { type: "string" },
 		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code", "message"],
 } as const
@@ -177,13 +182,13 @@ export const decoderBandRoutes: FastifyPluginAsync<
 			if (owned) return reply.status(409).send(owned)
 			const parsed = DecoderBandOverrideSchema.safeParse(request.body)
 			if (!parsed.success)
-				return reply.status(400).send({
-					error: "BadRequest",
-					code: "INVALID_BAND_OVERRIDE",
-					message: parsed.error.issues
-						.map(issue => `${issue.path.join(".") || "body"}: ${issue.message}`)
-						.join("; "),
-				})
+				return reply.status(400).send(
+					zodValidationBody(parsed.error, DecoderBandOverrideSchema, {
+						error: "BadRequest",
+						input: request.body,
+						code: "INVALID_BAND_OVERRIDE",
+					}),
+				)
 			const settings = await decoderManager.setBandOverride(
 				id,
 				normalizeBandOverride(parsed.data),

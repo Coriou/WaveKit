@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { EventEmitter } from "node:events"
 import type { FastifyPluginAsync } from "fastify"
 import { z } from "zod"
+import { zodValidationBody } from "../validation-errors.js"
 import type { SourceManager } from "../../core/source-manager.js"
 import type { FanoutManager } from "../../core/fanout-manager.js"
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
@@ -15,7 +16,12 @@ export const IQ_SNAPSHOT_DRAIN_TIMEOUT_MS = 1000
 // Capture windows are 1/10 second through 10 seconds, inclusive.
 const bodySchema = z
 	.object({
-		seconds: z.number().finite().min(0.1).max(10),
+		seconds: z
+			.number()
+			.finite()
+			.min(0.1)
+			.max(10)
+			.describe("number of seconds (0.1 to 10)"),
 		centerHz: z.number().int().nonnegative().optional(),
 		format: z.literal("cu8"),
 	})
@@ -56,7 +62,11 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 			}
 			const parsed = bodySchema.safeParse(request.body)
 			if (!parsed.success)
-				return reply.code(400).send({ code: "VALIDATION_ERROR" })
+				return reply.code(400).send(
+					zodValidationBody(parsed.error, bodySchema, {
+						input: request.body,
+					}),
+				)
 			const { sourceId } = request.params
 			const source = options.sourceManager.getStatus(sourceId)
 			if (!source) return reply.code(404).send({ code: "SOURCE_NOT_FOUND" })

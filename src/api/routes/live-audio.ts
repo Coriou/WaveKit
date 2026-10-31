@@ -4,7 +4,13 @@
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import { ZodError } from "zod"
-import { ConfigValidationError, WaveKitError } from "../../utils/errors.js"
+import { WaveKitError } from "../../utils/errors.js"
+import {
+	validationErrorBody,
+	zodValidationBody,
+	type ValidationErrorBody,
+} from "../validation-errors.js"
+import { LiveDemodRuntimeConfigSchema } from "../../core/live-demodulator.js"
 import type {
 	LiveDemodulator,
 	LiveDemodReconfigureUpdates as ReconfigureUpdates,
@@ -282,9 +288,16 @@ const presetsResponseSchema = {
 	},
 } as const
 
+/** What a channel offset must satisfy (validateChannelOffset), stated without the value. */
+const OFFSET_EXPECTED =
+	"number, Hz from the tuned centre; the channel must stay inside the capture (|offsetHz| <= sample rate / 2 - bandwidth / 2)"
+
 export interface LiveAudioRoutesOptions {
 	liveDemod: LiveDemodulator
-	/** Access is configured: PATCH 400 messages use the global handler's redacted text. */
+	/**
+	 * Access is configured. PATCH 400s are static schema text (never the submitted value),
+	 * so they read the same either way.
+	 */
 	redactErrors?: boolean
 	/**
 	 * Legacy mode only (WG9 5.5): rewrite the localhost fallback stream URLs of
@@ -495,7 +508,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 		Body: Omit<Partial<LiveDemodConfig>, "agc"> & {
 			agc?: LiveDemodConfig["agc"] | null
 		}
-		Reply: LiveDemodStatus | { error: string; code: string; message: string }
+		Reply: LiveDemodStatus | ValidationErrorBody
 	}>(
 		"/api/live-audio/config",
 		{
@@ -562,15 +575,19 @@ export const liveAudioRoutes: FastifyPluginAsync<
 					(err instanceof WaveKitError &&
 						err.code === "CHANNEL_OFFSET_OUT_OF_RANGE")
 				) {
-					return reply.code(400).send({
-						error: "Bad Request",
-						code: err instanceof ZodError ? "VALIDATION_ERROR" : err.code,
-						message: options.redactErrors
-							? "Request failed"
-							: err instanceof ZodError
-								? ConfigValidationError.formatZodError(err)
-								: err.message,
-					})
+					// Static text from the schema: Zod and offset messages can quote the value.
+					return reply.code(400).send(
+						err instanceof ZodError
+							? zodValidationBody(err, LiveDemodRuntimeConfigSchema, {
+									error: "Bad Request",
+									input: request.body,
+								})
+							: validationErrorBody(
+									"body",
+									[{ field: "offsetHz", expected: OFFSET_EXPECTED }],
+									{ error: "Bad Request", code: err.code },
+								),
+					)
 				}
 				throw err
 			}
