@@ -22,8 +22,10 @@ Every VDL2 frame carries two addresses, and dumpvdl2 says what each one names: `
   uplink.
 - A ground station's address is never reported as an aircraft. A frame between two ground
   addresses, or broadcast to all stations, names no aircraft.
-- `direction` is `downlink` when the aircraft sent the frame and `uplink` when a ground station
-  did. dumpvdl2's own address types decide it.
+- `direction` comes from dumpvdl2's address types at both ends: `downlink` from an aircraft to a
+  ground station, `uplink` from a ground station to an aircraft or broadcast to all stations (the
+  station announcing itself). When either end is missing, `reserved` or of another kind, the frame
+  has no direction.
 
 For ACARS heard directly on VHF there are no addresses. The block id decides the direction instead:
 a digit means the aircraft sent the block, a letter means the ground did. This is how acarsdec and
@@ -193,12 +195,16 @@ in memory and learnt again after a restart.
 - **Only an ICAO address or a registration names an aircraft.** A callsign or flight number names
   a flight; it is shown beside the aircraft and never used to join two aircraft. `ZZZ123` in ADS-B
   and `ZZ0123` in ACARS are not linked, however alike.
-- **Evidence.** `observed` means one frame carried both identifiers. `database` is reserved for an
-  aircraft database (an ICAO address to registration table) and loses to an observed link. `hint`
-  marks a resemblance and never resolves anything.
-- **Conflicts.** A registration linked to two ICAO addresses at once resolves to neither.
+- **Evidence.** `observed` means one frame carried both identifiers. `database` means an aircraft
+  database gave the ICAO address that registration: the local tar1090-db table or, while online
+  lookups are on, an online airframe lookup ([ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)).
+  It is recorded each time the aircraft is identified, kept 30 days like an observed one, and loses
+  to an observed link. `hint` marks a resemblance and never resolves anything. A callsign or flight
+  number is never linked from a database.
+- **Conflicts.** A registration linked to two ICAO addresses at once resolves to neither, and is left
+  out of both aircraft's `entityKeys`, so neither aircraft lists the other's messages.
 - ACARS heard on VHF has no ICAO address. Its registration joins the aircraft once a VDL2 frame
-  (or, later, a database) has linked that registration to an address.
+  or the aircraft database has linked that registration to an address.
 
 The route is `GET /api/aircraft-identity/:kind/:value`, described in [API](API.md#aircraft-identity).
 
@@ -208,8 +214,13 @@ The route is `GET /api/aircraft-identity/:kind/:value`, described in [API](API.m
   `Ground station` kinds) into one **Link traffic** row per protocol and channel
   ([WEB-APP.md](WEB-APP.md#activity-folding)).
 - **Map** draws positions reported over datalink on their own **ACARS** layer, apart from ADS-B
-  tracks, and lists a selected aircraft's datalink messages under **Datalink**
-  ([WEB-APP.md](WEB-APP.md#map-and-messages)).
+  tracks: a new report appears as it arrives, its age counts up each minute, and it leaves after an
+  hour. A selected aircraft lists its datalink messages under **Datalink**
+  ([WEB-APP.md](WEB-APP.md#map-and-messages)); its links are asked again each minute and soon after
+  a new message, so a registration linked later adds its messages and one that expires or turns out
+  to be a conflict drops them. Both share one live Activity subscription.
+- Activity rows of a tracked aircraft keep the live fleet's callsign or registration in the title
+  and who flies what (airline, type) in the subtitle.
 - **Comm-B**: when readsb decodes an aircraft's Comm-B replies, the aircraft row adds what the
   crew selected and what the aircraft measured (selected altitude, IAS, Mach, magnetic heading,
   QNH) in the fields its position report leaves free, at most six in all.

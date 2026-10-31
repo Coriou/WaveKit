@@ -232,19 +232,25 @@ The type code (shown in magenta) is the ICAO aircraft type designator:
 ## Aircraft Enrichment
 
 WaveKit fills in who an aircraft is from **free sources that need no API key**,
-in three layers:
+in three layers. **Online lookups are off by default**: until you turn them on
+(`aircraftInfo.online: true` or **Settings › Map › Online aircraft lookups**),
+nothing about the aircraft you receive leaves the station and the database
+download below does not run either.
 
 1. **Local, instant, offline.** The country comes from the ICAO address block.
    The [tar1090-db](https://github.com/wiedehopf/tar1090-db) aircraft table
    (built from the [Mictronics database](https://www.mictronics.de/aircraft-database/),
-   about 8 MB, downloaded by the core 20 s after start and refreshed every
-   7 days) gives the registration, type, year and military/interesting/PIA/LADD
+   about 8 MB, downloaded by the core 20 s after start, or 20 s after online
+   lookups are turned on, and refreshed every 7 days while they stay on; turning
+   them off cancels a download in progress) gives the registration, type, year and military/interesting/PIA/LADD
    flags. A bundled airline table from [OpenFlights](https://openflights.org/data)
    (Open Database License) maps a callsign prefix to an airline
    (`AFR1234` to Air France).
 2. **On-disk cache.** Every online answer, including "not found", is kept in
    `<stateDir>/aircraft-info.sqlite`, so a restart or an offline core keeps
-   what it learned. Airframes are kept 30 days (7 days when unknown), photos
+   what it learned. Expired answers are pruned every hour and the cache holds
+   at most 100,000 answers (about 50 MB); past that, the answers closest to
+   expiry go first. Airframes are kept 30 days (7 days when unknown), photos
    30 days, callsign routes 12 hours. Airlines learned online are kept 90 days
    and used offline.
 3. **Online, in the background.** [adsbdb.com](https://www.adsbdb.com) for the
@@ -254,13 +260,18 @@ in three layers:
    photo. Lookups are queued at 1 request per second. After 3 failures in a
    row a source pauses for 5 minutes, then 10, up to an hour, and the other
    sources keep working. An aircraft whose lookup failed is retried 10 minutes
-   later if it is still in range.
+   later if it is still in range. The switch is checked again right before
+   every request, so turning lookups off stops a lookup already under way
+   before its next request (hexdb, Planespotters).
 
 Results reach clients as an `aircraft:update` event as soon as they arrive.
 The local database also maps a registration back to its ICAO address
 (`hexForRegistration`), for decoders such as ACARS that name aircraft by
 registration, with or without the dash (`.ZZWKB` finds `ZZ-WKB`). No decoder
-calls it yet.
+calls it yet. Every registration the local database or an online source gives an
+ICAO address also becomes a `database` link in the
+[aircraft identity registry](AIRCRAFT-DATALINK.md), weaker than a pairing seen on
+the air.
 
 ### Enriched Fields
 
@@ -286,7 +297,11 @@ All fields live under `identification` and are optional.
 
 The **route** belongs to the callsign, not the airframe, and comes from a
 crowd-sourced database: it can be old or wrong. Present it as the planned
-route. It is dropped as soon as the aircraft changes callsign.
+route. It is dropped as soon as the aircraft changes callsign. The core keeps
+`route.plausible` current as the aircraft moves: `false` when it flies more
+than 100° away from the bearing to the destination while more than 80 km from
+the origin and 30 km from the destination; `true` otherwise, also without a
+position or track. Hide the route when it is `false`; older cores omit it.
 
 A **photo** must be shown with its photographer and a link to `photo.link`
 (Planespotters' terms). The browser loads it straight from the Planespotters
@@ -300,14 +315,14 @@ When available, a clickable 📷 icon appears at the end of the aircraft row. Cl
 
 ```yaml
 aircraftInfo:
-  online: true # adsbdb, hexdb and Planespotters lookups; false keeps WaveKit fully local
+  online: false # default; true allows adsbdb, hexdb and Planespotters lookups and the tar1090-db download
   localDb:
-    enabled: true # download and use tar1090-db
+    enabled: true # use tar1090-db (downloaded only while online lookups are on)
     url: https://github.com/wiedehopf/tar1090-db/raw/refs/heads/csv/aircraft.csv.gz
     refreshDays: 7
 ```
 
-Environment overrides: `WAVEKIT_AIRCRAFT_INFO__ONLINE=false`,
+Environment overrides: `WAVEKIT_AIRCRAFT_INFO__ONLINE=true`,
 `WAVEKIT_AIRCRAFT_INFO__LOCAL_DB=false`. Without `node:sqlite` the cache stays
 in memory and the local database is off. To refresh the airline table, run
 `node scripts/aircraft-data/build-airlines.mjs`.
@@ -474,9 +489,11 @@ The CLI dashboard shows signal quality indicators when available:
 
 ### Enrichment Not Working
 
-1. **Offline is fine**: registration and type still come from the local
-   database once it has been downloaded once (look for "Local aircraft
-   database updated" in the log)
+1. **Online lookups are off by default**: turn them on in **Settings › Map ›
+   Online aircraft lookups** or with `aircraftInfo.online: true`. Offline is
+   fine after that: registration and type still come from the local database
+   once it has been downloaded once (look for "Local aircraft database
+   updated" in the log)
 2. **Check network**: api.adsbdb.com, hexdb.io and api.planespotters.net must
    be reachable for airline, route and photo; a source that keeps failing
    pauses for up to an hour

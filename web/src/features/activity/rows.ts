@@ -169,7 +169,7 @@ export function rowView(
 		}
 	}
 	if (s.kind === "analog-transmission") return analogView(s)
-	if (s.category === "aviation-data") return aviationView(s)
+	if (s.category === "aviation-data") return aviationView(s, aircraft)
 	const message = s.fields.find(
 		f =>
 			MESSAGE_KEYS.has(f.key) &&
@@ -239,11 +239,34 @@ const AVIATION_NAMED = new Set(["label", "frame"])
 const AVIATION_SKIP = new Set(["meaning", "direction"])
 
 /**
- * ACARS and VDL2 (core presentation acars-vdl2.ts): the title already says who and what in plain words.
- * The subtitle says how it travelled (protocol, direction, channel); the readings keep the raw label or
- * frame beside its kind and how sure the explanation is; the message is the text when there is one.
+ * A datalink title that opens with the bare ICAO address ("0A0B01 · Link supervision") takes the fleet's
+ * callsign or registration in its place, like aircraftTitle does for a title that is only the address.
  */
-function aviationView(s: ActivitySummary): RowView {
+function aviationTitle(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null,
+): string | null {
+	const whole = aircraftTitle(s, aircraft)
+	if (whole !== null || !aircraft || !s.entityKey || s.title === null)
+		return whole
+	const hex = s.entityKey.slice(s.entityKey.indexOf(":") + 1).toUpperCase()
+	const lead = `${hex} · `
+	if (aircraft.name.toUpperCase() === hex) return null
+	return s.title.toUpperCase().startsWith(lead)
+		? `${aircraft.name} · ${s.title.slice(lead.length)}`
+		: null
+}
+
+/**
+ * ACARS and VDL2 (core presentation acars-vdl2.ts): the title already says who and what in plain words.
+ * The subtitle says how it travelled (protocol, who flies what from the live fleet, direction, channel); the
+ * readings keep the raw label or frame beside its kind and how sure the explanation is; the message is the text
+ * when there is one.
+ */
+function aviationView(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null,
+): RowView {
 	const field = (key: string) => s.fields.find(f => f.key === key)
 	const direction = field("direction")?.value
 	const message = field("text")?.value
@@ -260,9 +283,15 @@ function aviationView(s: ActivitySummary): RowView {
 		.slice(0, 4)
 	return {
 		icon: CATEGORY_ICON[s.category],
-		title: s.title ?? s.entityKey ?? protocolText(s) ?? "Datalink",
+		title:
+			aviationTitle(s, aircraft) ??
+			s.title ??
+			s.entityKey ??
+			protocolText(s) ??
+			"Datalink",
 		subtitle: [
 			protocolText(s),
+			aircraft?.about || null,
 			typeof direction === "string" ? direction : null,
 			s.frequencyHz !== null ? `${formatMHz(s.frequencyHz)} MHz` : null,
 		]

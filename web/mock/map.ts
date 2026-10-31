@@ -15,8 +15,13 @@
  *   and a balloon. Aids to navigation are vessel class `aton` with their type 21 fields.
  */
 import type { FastifyInstance } from "fastify"
+import { z } from "zod"
 import type {
 	AircraftIdentification,
+	AircraftIdentifier,
+	AircraftIdentifierKind,
+	AircraftIdentityLink,
+	AircraftIdentityResponse,
 	AircraftState,
 	AircraftTrackerStats,
 	AprsStation,
@@ -32,6 +37,162 @@ import type {
 	VesselState,
 	VesselTrackerStats,
 } from "@wavekit/api-types"
+
+/** PUT /api/aircraft/info body, as strict as the core's. */
+const infoUpdateBody = z.object({ online: z.boolean() }).strict()
+
+// ---- aircraft identity (GET /api/aircraft-identity/:kind/:value, as the core's registry)
+
+const HOUR_MS = 3_600_000
+/** As the core's LINK_LIFETIME_MS: an address and its registration for weeks, a callsign for one flight. */
+const MOCK_LINK_LIFETIME_MS: Readonly<Record<string, number>> = {
+	"icao|reg": 30 * 24 * HOUR_MS,
+	"callsign|icao": 2 * HOUR_MS,
+	"flight|icao": 6 * HOUR_MS,
+	"flight|reg": 6 * HOUR_MS,
+}
+
+interface MockLink {
+	readonly a: AircraftIdentifier
+	readonly b: AircraftIdentifier
+	readonly evidence: AircraftIdentityLink["evidence"]
+	readonly source: AircraftIdentityLink["source"]
+	/** How long before the request it was last seen. */
+	readonly agoMs: number
+}
+
+/** The query in the core's canonical form, or null when the value cannot be one of that kind. */
+export function mockIdentifier(
+	kind: string,
+	value: string,
+): AircraftIdentifier | null {
+	if (value.length < 1 || value.length > 16) return null
+	const v = value.trim().toUpperCase()
+	if (kind === "icao")
+		return /^[0-9A-F]{6}$/.test(v) ? { kind, value: v } : null
+	if (kind === "reg") {
+		const reg = v.replace(/\./g, "")
+		return /^[A-Z0-9-]{2,10}$/.test(reg) ? { kind, value: reg } : null
+	}
+	if (kind === "callsign" || kind === "flight")
+		return /^[A-Z0-9]{2,8}$/.test(v) ? { kind, value: v } : null
+	return null
+}
+
+/**
+ * The mock's links: each mock aircraft's registration from the database and its callsign heard on ADS-B,
+ * plus a fictional registration heard with two addresses (a conflict).
+ */
+export function mockIdentityLinks(list: readonly MockAircraft[]): MockLink[] {
+	const links: MockLink[] = []
+	for (const a of list) {
+		const icao = { kind: "icao", value: a.icao } as const
+		if (a.registration)
+			links.push({
+				a: icao,
+				b: { kind: "reg", value: a.registration },
+				evidence: "database",
+				source: "database",
+				agoMs: 60_000,
+			})
+		links.push({
+			a: { kind: "callsign", value: a.callsign },
+			b: icao,
+			evidence: "observed",
+			source: "adsb",
+			agoMs: 5_000,
+		})
+	}
+	for (const value of ["0A0B01", "0A0B02"])
+		links.push({
+			a: { kind: "icao", value },
+			b: { kind: "reg", value: "N0WK01" },
+			evidence: "observed",
+			source: "vdl2",
+			agoMs: 120_000,
+		})
+	return links
+}
+
+const idKey = (id: AircraftIdentifier) => `${id.kind}:${id.value}`
+const pairKey = (a: AircraftIdentifierKind, b: AircraftIdentifierKind) =>
+	a <= b ? `${a}|${b}` : `${b}|${a}`
+
+/** What the core's registry answers for `query` over `links` (observed beats database; conflicts resolve to nothing). */
+export function mockIdentity(
+	links: readonly MockLink[],
+	query: AircraftIdentifier,
+	at: number,
+): AircraftIdentityResponse {
+	const touching = (key: string) =>
+		links.filter(l => idKey(l.a) === key || idKey(l.b) === key)
+	const other = (l: MockLink, key: string) => (idKey(l.a) === key ? l.b : l.a)
+	const owner = (reg: string) => {
+		for (const level of ["observed", "database"] as const) {
+			const found = new Set(
+				touching(reg)
+					.filter(l => l.evidence === level)
+					.map(l => other(l, reg))
+					.filter(id => id.kind === "icao")
+					.map(id => id.value),
+			)
+			if (found.size > 1)
+				return { icao: null, resolvedBy: null, conflict: true } as const
+			const icao = [...found][0]
+			if (icao !== undefined)
+				return { icao, resolvedBy: level, conflict: false } as const
+		}
+		return { icao: null, resolvedBy: null, conflict: false } as const
+	}
+	const resolved =
+		query.kind === "icao"
+			? ({ icao: query.value, resolvedBy: "self", conflict: false } as const)
+			: query.kind === "reg"
+				? owner(idKey(query))
+				: ({ icao: null, resolvedBy: null, conflict: false } as const)
+	const around = new Set<MockLink>(touching(idKey(query)))
+	if (resolved.icao !== null)
+		for (const l of touching(`icao:${resolved.icao}`)) around.add(l)
+	const entityKeys = new Set<string>()
+	if (resolved.icao !== null) entityKeys.add(`icao:${resolved.icao}`)
+	if (query.kind === "reg") entityKeys.add(idKey(query))
+	if (resolved.icao !== null)
+		for (const l of touching(`icao:${resolved.icao}`)) {
+			const id = other(l, `icao:${resolved.icao}`)
+			if (
+				l.evidence !== "hint" &&
+				id.kind === "reg" &&
+				owner(idKey(id)).icao === resolved.icao
+			)
+				entityKeys.add(idKey(id))
+		}
+	const iso = (ms: number) => new Date(ms).toISOString()
+	return {
+		query,
+		...resolved,
+		links: [...around]
+			.sort((x, y) => x.agoMs - y.agoMs)
+			.map(l => {
+				const last = at - l.agoMs
+				return {
+					a: l.a,
+					b: l.b,
+					evidence: l.evidence,
+					source: l.source,
+					firstSeen: iso(last - 600_000),
+					lastSeen: iso(last),
+					expiresAt: iso(
+						last +
+							(MOCK_LINK_LIFETIME_MS[pairKey(l.a.kind, l.b.kind)] ??
+								2 * HOUR_MS),
+					),
+					count: 3,
+				}
+			}),
+		entityKeys: [...entityKeys],
+		timestamp: at,
+	}
+}
 
 // ---- geodesy (as the board)
 
@@ -182,6 +343,7 @@ export function makeAircraft(): MockAircraft[] {
 						lon: -73.7789,
 					},
 					source: "adsbdb",
+					plausible: true,
 				},
 				photo: {
 					thumbnailUrl: mockPhoto("#5d7ea6", "#6f7a68"),
@@ -232,6 +394,7 @@ export function makeAircraft(): MockAircraft[] {
 						2.3794,
 					),
 					source: "adsbdb",
+					plausible: true,
 				},
 			},
 		},
@@ -1170,11 +1333,12 @@ export function registerMapMock(
 		return { aircraft: list, stats: aircraftStats(list), timestamp: now() }
 	})
 	app.get("/api/aircraft/stats", async () => aircraftStats(allAircraft()))
-	// Settings › Map › Online aircraft lookups (the switch only; the mock never goes online)
+	// Settings › Map › Online aircraft lookups (the switch only; the mock never goes online).
+	// Off by default like the core.
 	let infoOnline: boolean | null = null
 	const aircraftInfo = () => ({
 		enabled: true,
-		online: infoOnline ?? true,
+		online: infoOnline ?? false,
 		onlineFrom: infoOnline === null ? "config" : "ui",
 		persistent: true,
 		localDb: {
@@ -1184,16 +1348,28 @@ export function registerMapMock(
 		},
 	})
 	app.get("/api/aircraft/info", async () => aircraftInfo())
-	app.put<{ Body: { online?: unknown } }>(
-		"/api/aircraft/info",
+	app.put("/api/aircraft/info", async (request, reply) => {
+		// strict like the core: { online: boolean } and nothing else
+		const body = infoUpdateBody.safeParse(request.body)
+		if (!body.success)
+			return reply.code(400).send({
+				error: "Bad Request",
+				message: "Expected { online: boolean }",
+			})
+		infoOnline = body.data.online
+		reply.header("Cache-Control", "no-store")
+		return aircraftInfo()
+	})
+	const identityLinks = mockIdentityLinks(aircraft)
+	app.get<{ Params: { kind: string; value: string } }>(
+		"/api/aircraft-identity/:kind/:value",
 		async (request, reply) => {
-			if (typeof request.body?.online !== "boolean")
-				return reply.code(400).send({
-					error: "Bad Request",
-					message: "Expected { online: boolean }",
-				})
-			infoOnline = request.body.online
-			return aircraftInfo()
+			const query = mockIdentifier(request.params.kind, request.params.value)
+			if (query === null)
+				return reply
+					.code(400)
+					.send({ error: "Not a valid identifier of that kind" })
+			return mockIdentity(identityLinks, query, now())
 		},
 	)
 	app.get<{ Params: { icao: string } }>(

@@ -403,7 +403,7 @@ tunerRelay:
 # Aircraft details (registration, type, airline, route, photo): a local database plus
 # free keyless lookups, cached in <stateDir>/aircraft-info.sqlite. See ADSB.md.
 aircraftInfo:
-  online: true # false: no request leaves the core (Settings › Map can override it)
+  online: false # default: no request leaves the core; true allows lookups (Settings › Map can override it)
   localDb:
     enabled: true
     refreshDays: 7

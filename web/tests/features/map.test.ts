@@ -56,7 +56,6 @@ import {
 	predict,
 	pushInterval,
 	selectionInfo,
-	routeFits,
 	aircraftDetails,
 	stationOf,
 	wantsLabel,
@@ -416,20 +415,28 @@ describe("items from the mock's fleets", () => {
 		expect(navy && selectionInfo(navy, STATION, NOW).aircraft?.photo).toBeNull()
 	})
 
-	it("hides a planned route the track disagrees with, or that belongs to another callsign", () => {
-		const route = {
-			origin: { lat: 49.0128, lon: 2.55 }, // CDG
-			destination: { lat: 40.6398, lon: -73.7789 }, // JFK
-		}
-		const brittany = { lat: 48.81, lon: -3.87 }
-		expect(routeFits(route, brittany, 284)).toBe(true)
-		expect(routeFits(route, brittany, 100)).toBe(false)
-		expect(routeFits(route, brittany, null)).toBe(true)
-		// just after take-off any heading is fine
-		expect(routeFits(route, { lat: 49.1, lon: 2.4 }, 100)).toBe(true)
+	it("hides a planned route the core marks implausible, or that belongs to another callsign", () => {
 		const afr = aircraft.find(a => a.callsign === "AFR1234")!
+		const route = afr.identification!.route!
+		expect(aircraftDetails(afr).route).not.toBeNull()
+		// older cores send no verdict: shown
+		const unjudged = { ...route }
+		delete unjudged.plausible
+		const old = {
+			...afr,
+			identification: { ...afr.identification, route: unjudged },
+		}
+		expect(aircraftDetails(old).route).not.toBeNull()
+		const stale = {
+			...afr,
+			identification: {
+				...afr.identification,
+				route: { ...route, plausible: false },
+			},
+		}
+		expect(aircraftDetails(stale).route).toBeNull()
 		const renamed = { ...afr, callsign: "ZZ0999" }
-		expect(aircraftDetails(renamed, brittany, 284).route).toBeNull()
+		expect(aircraftDetails(renamed).route).toBeNull()
 	})
 
 	it("names an aircraft by callsign, else registration, else ICAO address", () => {

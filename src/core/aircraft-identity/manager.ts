@@ -8,7 +8,7 @@ import type {
 } from "@wavekit/api-types"
 import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger } from "../../utils/logger.js"
-import { observationsFrom } from "./observe.js"
+import { icaoId, observationsFrom, regId } from "./observe.js"
 import { AircraftIdentityRegistry } from "./registry.js"
 
 /** How often expired links are dropped. */
@@ -64,6 +64,25 @@ export class AircraftIdentityManager {
 		if (this.timer !== null) clearInterval(this.timer)
 		this.timer = null
 		this.source.off("decoder:output", this.onOutput)
+	}
+
+	/**
+	 * Records that an aircraft database (the local tar1090-db or an online airframe lookup)
+	 * gives this ICAO address this registration. A database link resolves a registration only
+	 * when no link seen on the air does; values that are not a valid ICAO address or
+	 * registration are ignored.
+	 */
+	observeDatabase(icao: string, registration: string, at = new Date()): void {
+		const a = icaoId(icao)
+		const b = regId(registration)
+		if (a === null || b === null) return
+		this.registry.observe({
+			a,
+			b,
+			evidence: "database",
+			source: "database",
+			at,
+		})
 	}
 
 	resolve(query: AircraftIdentifier): AircraftIdentityResponse {

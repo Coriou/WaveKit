@@ -125,6 +125,8 @@ export const aircraftSchema = z.object({
 					callsign: z.string(),
 					origin: airportSchema,
 					destination: airportSchema,
+					// the core's verdict on the track (false: hide); absent from older cores
+					plausible: z.boolean().optional().catch(undefined),
 				})
 				.optional()
 				.catch(undefined),

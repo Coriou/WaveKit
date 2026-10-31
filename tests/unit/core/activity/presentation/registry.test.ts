@@ -476,9 +476,7 @@ describe("activity presentation registry", () => {
 			protocol: "vdl2",
 			title: "N1 BA1 · Link test",
 		})
-		expect(vdl2?.fields?.find(field => field.key === "label")?.value).toBe(
-			"Q0",
-		)
+		expect(vdl2?.fields?.find(field => field.key === "label")?.value).toBe("Q0")
 		expect(
 			present("vdl2", { msgType: "UI", acars: { tail: "g-abcd" } })?.entityKey,
 		).toBe("reg:G-ABCD")

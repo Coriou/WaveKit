@@ -76,6 +76,7 @@ export class TrailHistoryStore implements ReadableStore<TrailHistoryState> {
 	private attached = 0
 	private offReconnect: (() => void) | null = null
 	private inflight: Promise<void> | null = null
+	private offsetMs = 0
 
 	constructor(
 		api: ApiClient,
@@ -97,6 +98,14 @@ export class TrailHistoryStore implements ReadableStore<TrailHistoryState> {
 
 	subscribe = (listener: Listener<TrailHistoryState>): (() => void) =>
 		this.state.subscribe(listener)
+
+	/**
+	 * This browser's clock minus the core's, ms, from the last answer (0 before one): what turns a
+	 * core time into this browser's clock, as the trails' points are.
+	 */
+	clockOffsetMs(): number {
+		return this.offsetMs
+	}
 
 	/** Loads now and after each reconnect while attached (reference counted). */
 	attach(): () => void {
@@ -133,6 +142,7 @@ export class TrailHistoryStore implements ReadableStore<TrailHistoryState> {
 			const receivedAt = this.clock()
 			const coreNow = Date.parse(answer.generatedAt)
 			const offset = Number.isFinite(coreNow) ? receivedAt - coreNow : 0
+			this.offsetMs = offset
 			const trails = new Map<string, TrailPoint[]>()
 			for (const t of answer.trails)
 				trails.set(

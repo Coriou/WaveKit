@@ -849,15 +849,17 @@ export const ActivityAdmissionConfigSchema = z
 
 /**
  * Aircraft identity enrichment. Every source is free and needs no API key.
- * `online: false` keeps WaveKit fully local (no request leaves the core).
+ * Off by default: `online: false` keeps WaveKit fully local (no request leaves the
+ * core, the tar1090-db download included) until the config or Settings › Map turns
+ * online lookups on.
  */
 export const AircraftInfoConfigSchema = z
 	.object({
-		/** Look aircraft up on adsbdb.com, hexdb.io and planespotters.net. */
-		online: z.boolean().default(true),
+		/** Look aircraft up on adsbdb.com, hexdb.io and planespotters.net (default off). */
+		online: z.boolean().default(false),
 		localDb: z
 			.object({
-				/** Download and use the tar1090-db aircraft database (about 8 MB). */
+				/** Download (while online lookups are on) and use the tar1090-db aircraft database (about 8 MB). */
 				enabled: z.boolean().default(true),
 				/** Gzipped tar1090-db CSV (hex;reg;type;flags;desc;year;owner). */
 				url: z

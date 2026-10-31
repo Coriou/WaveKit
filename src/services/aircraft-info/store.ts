@@ -2,7 +2,9 @@
  * On-disk state of the aircraft-info service, one SQLite file under stateDir:
  *
  * - `lookup_cache`: answers of online sources (and "not found"), with an expiry,
- *   so a restart or an offline core keeps what it learned.
+ *   so a restart or an offline core keeps what it learned. Expired rows are pruned
+ *   (the service does it hourly) and the table never holds more than
+ *   MAX_CACHE_ROWS rows: past it the rows closest to expiry go first.
  * - `aircraft_db`: the tar1090-db aircraft table (hex, registration, type, flags,
  *   description, year, owner), refreshed from the network every few days.
  * - `meta`: refresh bookkeeping.
@@ -58,7 +60,21 @@ CREATE TABLE IF NOT EXISTS aircraft_db (
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS aircraft_db_reg ON aircraft_db (reg);
+CREATE INDEX IF NOT EXISTS lookup_cache_expires ON lookup_cache (expires_at);
 `
+
+/**
+ * Most lookup_cache rows kept. A busy station sees about 1,500 different aircraft a day;
+ * each has an airframe and a photo row kept up to 30 days: 1,500 x 2 x 30 = 90,000, plus
+ * callsign rows (12 h) and airline prefixes (a few hundred). Rows are a few hundred bytes
+ * of JSON, so 100,000 rows x ~500 B is about 50 MB on disk at most.
+ */
+export const MAX_CACHE_ROWS = 100_000
+/**
+ * Past the cap, this many extra rows go in one delete (1% of the cap), so a full cache
+ * is trimmed once per thousand writes rather than on every write.
+ */
+export const CACHE_TRIM_SLACK = 1_000
 
 const str = (v: SqliteValue | undefined): string | undefined =>
 	typeof v === "string" && v.length > 0 ? v : undefined
@@ -71,10 +87,16 @@ export class AircraftInfoStore {
 	private readonly putMeta: SqliteStatement
 	private readonly countAircraft: SqliteStatement
 	private readonly getHexByReg: SqliteStatement
+	private readonly countCache: SqliteStatement
+	private readonly trimCache: SqliteStatement
+	/** Rows written since the last count, added to it: an upper bound of the table size. */
+	private rowsAtMost: number
 
 	constructor(
 		private readonly db: SqliteDatabase,
 		private readonly now: () => number = Date.now,
+		private readonly maxCacheRows: number = MAX_CACHE_ROWS,
+		private readonly trimSlack: number = CACHE_TRIM_SLACK,
 	) {
 		db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
 		db.exec(SCHEMA)
@@ -95,6 +117,12 @@ export class AircraftInfoStore {
 		this.getHexByReg = db.prepare(
 			"SELECT hex FROM aircraft_db WHERE reg = ? ORDER BY hex LIMIT 2",
 		)
+		this.countCache = db.prepare("SELECT count(*) AS n FROM lookup_cache")
+		this.trimCache = db.prepare(
+			"DELETE FROM lookup_cache WHERE (kind, key) IN (SELECT kind, key FROM lookup_cache ORDER BY expires_at LIMIT ?)",
+		)
+		this.rowsAtMost = this.cacheSize()
+		this.enforceCap()
 	}
 
 	/** A fresh cached answer, or undefined when absent or expired. */
@@ -122,18 +150,32 @@ export class AircraftInfoStore {
 			value === null ? null : JSON.stringify(value),
 			this.now() + ttlMs,
 		)
+		this.rowsAtMost++
+		if (this.rowsAtMost > this.maxCacheRows) this.enforceCap()
 	}
 
-	/** Drops expired cache rows. */
+	/** Drops expired cache rows, then holds the row cap. */
 	prune(): void {
 		this.db
 			.prepare("DELETE FROM lookup_cache WHERE expires_at <= ?")
 			.run(this.now())
+		this.rowsAtMost = this.cacheSize()
+		this.enforceCap()
+	}
+
+	/** Past the cap, deletes the rows closest to expiry down to cap minus the slack. */
+	private enforceCap(): void {
+		if (this.rowsAtMost <= this.maxCacheRows) return
+		const rows = this.cacheSize()
+		if (rows > this.maxCacheRows) {
+			const target = Math.max(0, this.maxCacheRows - this.trimSlack)
+			this.trimCache.run(rows - target)
+			this.rowsAtMost = target
+		} else this.rowsAtMost = rows
 	}
 
 	cacheSize(): number {
-		const row = this.db.prepare("SELECT count(*) AS n FROM lookup_cache").get()
-		return Number(row?.["n"] ?? 0)
+		return Number(this.countCache.get()?.["n"] ?? 0)
 	}
 
 	localAircraft(hex: string): LocalAircraftRow | undefined {

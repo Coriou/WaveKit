@@ -102,6 +102,32 @@ describe("aviation rows", () => {
 		})
 	})
 
+	it("an aircraft row keeps the live fleet's name and who flies what", () => {
+		const aircraft = { name: "ZZZ101", about: "WaveKit Air · A320 214" }
+		const v = rowView(linkFrame(0, "0A0B01"), aircraft)
+		expect(v.title).toBe("ZZZ101 · Link supervision")
+		expect(v.subtitle).toBe(
+			"VDL2 · WaveKit Air · A320 214 · Air to ground · 136.975 MHz",
+		)
+		// a bare address title takes the name whole
+		const bare = rowView(
+			row(0, { entityKey: "icao:0A0B01", title: "0A0B01" }),
+			aircraft,
+		)
+		expect(bare.title).toBe("ZZZ101")
+		// a title naming something else, or a fleet name that is the address, stays as it was
+		const reg = rowView(acarsMessage(0), aircraft)
+		expect(reg.title).toBe(
+			"N0WK01 ZZ0101 · Message to or from an onboard system",
+		)
+		const unnamed = rowView(linkFrame(0, "0A0B01"), {
+			name: "0A0B01",
+			about: "",
+		})
+		expect(unnamed.title).toBe("0A0B01 · Link supervision")
+		expect(unnamed.subtitle).toBe("VDL2 · Air to ground · 136.975 MHz")
+	})
+
 	it("a VDL2 link frame names its frame type and says it is link upkeep", () => {
 		const v = rowView(linkFrame(0, "0A0B01"))
 		expect(v.subtitle).toBe("VDL2 · Air to ground · 136.975 MHz")
@@ -251,6 +277,12 @@ describe("an aircraft's datalink story", () => {
 		)
 		expect(linkedByText(identity({ icao: null, conflict: true }))).toBeNull()
 		expect(linkedByText(null)).toBeNull()
+	})
+
+	it("never names a registration another address also claims", () => {
+		expect(
+			linkedByText(identity({ entityKeys: ["icao:0A0B01"], conflict: true })),
+		).toBeNull()
 	})
 
 	it("lists messages newest first and counts link upkeep apart", () => {

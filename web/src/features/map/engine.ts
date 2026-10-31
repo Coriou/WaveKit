@@ -13,7 +13,8 @@ import type {
 	StationStore,
 	TrailHistoryStore,
 } from "../../data/index.ts"
-import { Store } from "../../data/store.ts"
+import { Store, type ReadableStore } from "../../data/store.ts"
+import type { TrailHistoryState } from "../../data/trail-history-store.ts"
 import {
 	approxArea,
 	collection,
@@ -100,8 +101,8 @@ export interface EngineDeps {
 	readonly fleets: Fleets
 	readonly coverage: CoverageStore
 	readonly trailHistory: TrailHistoryStore
-	/** Trails of the aviation-data category only: positions reported over ACARS and VDL2. */
-	readonly reported: TrailHistoryStore
+	/** Trails of the aviation-data category only: positions reported over ACARS and VDL2, followed live. */
+	readonly reported: ReadableStore<TrailHistoryState>
 	readonly station: StationStore
 	readonly ui: MapUi
 	/** The element whose computed style holds the theme tokens. */

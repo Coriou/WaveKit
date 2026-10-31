@@ -20,7 +20,6 @@ import {
 	temperatureText,
 } from "../display.ts"
 import {
-	bearing,
 	destination,
 	distanceKm,
 	flText,
@@ -576,33 +575,15 @@ const httpsOnly = (url: string | undefined): string | null =>
 const imageUrl = (url: string | undefined): string | null =>
 	httpsOnly(url) ?? (url && /^data:image\//.test(url) ? url : null)
 
-/**
- * The route belongs to the callsign and comes from a crowd-sourced database: it is hidden when the aircraft
- * flies away from the destination while already well clear of the origin (a stale or wrong route).
- */
-export function routeFits(
-	route: { origin: LatLon; destination: LatLon },
-	at: LatLon,
-	course: number | null,
-): boolean {
-	if (course === null) return true
-	if (distanceKm(at, route.origin) < 80) return true
-	if (distanceKm(at, route.destination) < 30) return true
-	const off = Math.abs(
-		((bearing(at, route.destination) - course + 540) % 360) - 180,
-	)
-	return off <= 100
-}
-
 function airportCode(a: { iata?: string | undefined; icao: string }): string {
 	return a.iata ?? a.icao
 }
 
-export function aircraftDetails(
-	a: Aircraft,
-	at: LatLon,
-	course: number | null,
-): AircraftDetails {
+/**
+ * The route belongs to the callsign and comes from a crowd-sourced database: the core marks it
+ * `plausible: false` when the track disagrees (a stale or wrong route) and it is hidden then.
+ */
+export function aircraftDetails(a: Aircraft): AircraftDetails {
 	const id = a.identification
 	const photoSrc =
 		imageUrl(id?.photo?.largeUrl) ?? imageUrl(id?.photo?.thumbnailUrl)
@@ -626,7 +607,7 @@ export function aircraftDetails(
 	const route =
 		r &&
 		r.callsign.toUpperCase() === (a.callsign ?? "").trim().toUpperCase() &&
-		routeFits({ origin: r.origin, destination: r.destination }, at, course)
+		r.plausible !== false
 			? {
 					from: airportCode(r.origin),
 					fromName: r.origin.city ?? r.origin.name,
@@ -674,7 +655,7 @@ export function selectionInfo(
 			const a = s.value
 			const vs = a.altitude?.baroRate ?? a.altitude?.geomRate
 			const id = a.identification
-			const details = aircraftDetails(a, p, it.course)
+			const details = aircraftDetails(a)
 			return {
 				title: it.name,
 				sub:

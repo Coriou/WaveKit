@@ -11,8 +11,12 @@
  *    route and airline), hexdb.io (airframe fallback) and planespotters.net (photo).
  *    Each source has a circuit breaker; an unavailable source never blocks the rest.
  *
- * `online: false` skips layer 3 entirely. Without node:sqlite or a stateDir the
- * cache lives in memory and the local database is off.
+ * Online lookups are off by default (`online: false`): nothing leaves the core until
+ * the config or Settings › Map turns them on, and the tar1090-db download (layer 1) is
+ * an online request too, so it waits for the same switch. The switch is read again
+ * right before every request, so turning it off stops a lookup already under way.
+ * Without node:sqlite or a stateDir the cache lives in memory and the local database
+ * is off.
  *
  * This is an ADS-B-specific addon that does NOT affect other decoders.
  *
@@ -59,6 +63,7 @@ import {
 	type CacheKind,
 	type LocalAircraftRow,
 } from "./aircraft-info/store.js"
+import { routePlausible } from "./aircraft-info/route-fit.js"
 import { openSqliteFile } from "../core/activity/storage/probe.js"
 import type { SqliteDatabase } from "../core/activity/storage/sqlite.js"
 
@@ -69,7 +74,7 @@ import type { SqliteDatabase } from "../core/activity/storage/sqlite.js"
 export interface AircraftEnrichmentConfig {
 	/** Enrichment on at all (default: true) */
 	enabled?: boolean
-	/** Query free online sources (default: true) */
+	/** Query free online sources and download tar1090-db (default: false) */
 	online?: boolean
 	/** Directory for aircraft-info.sqlite; absent keeps the cache in memory */
 	stateDir?: string
@@ -110,6 +115,10 @@ export const CACHE_TTL = {
 const RETRY_AFTER_MS = 10 * 60_000
 /** A lookup that found the queue full is tried again this much later. */
 const QUEUE_FULL_RETRY_MS = 60_000
+/** First local database check after start or after online lookups are turned on. */
+export const LOCAL_DB_FIRST_CHECK_MS = 20_000
+/** Expired cache rows are dropped this often (hourly: the shortest TTL is 12 h). */
+export const CACHE_PRUNE_INTERVAL_MS = 60 * 60_000
 
 const DEFAULT_DB_URL =
 	"https://github.com/wiedehopf/tar1090-db/raw/refs/heads/csv/aircraft.csv.gz"
@@ -123,6 +132,15 @@ export interface AircraftEnrichmentEvents {
 	"enrichment:failed": [icao: string, error: Error]
 	"enrichment:cached": [icao: string]
 	"localdb:updated": [rows: number]
+	/**
+	 * The local database or an online source gave this ICAO address a registration. Feeds
+	 * the aircraft identity registry as a database link (weaker than one seen on the air).
+	 */
+	"identity:registration": [
+		icao: string,
+		registration: string,
+		from: "local" | "online",
+	]
 }
 
 /** A three-letter ICAO airline prefix followed by a flight number (WKS45UL, ZZA6116). */
@@ -201,8 +219,17 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 	private cacheMisses = 0
 	private tracker: AircraftTracker | null = null
 	private started = false
+	/** start() in progress: settings are not known yet, so nothing is looked up. */
+	private starting: Promise<void> | null = null
+	/** The generation `starting` opens: a start() after a stop() begins a new one. */
+	private startingGeneration = -1
+	/** Bumped by stop(), so a start() that finishes after it does not come alive. */
+	private generation = 0
 	private refreshTimer: NodeJS.Timeout | undefined
+	private pruneTimer: NodeJS.Timeout | undefined
 	private refreshing: Promise<void> | null = null
+	/** Aborts the tar1090-db download when online lookups are turned off. */
+	private download: AbortController | null = null
 
 	constructor(
 		config: AircraftEnrichmentConfig,
@@ -212,8 +239,9 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		super()
 		this.log = createComponentLogger(logger, "AircraftEnrichment")
 		this.enabled = config.enabled ?? true
-		this.configOnline = config.online ?? true
-		this.online = this.configOnline
+		this.configOnline = config.online ?? false
+		// Off until start() has read the saved preference: no lookup before settings settle.
+		this.online = false
 		this.fetchImages = config.fetchImages ?? true
 		this.rateLimitMs = config.rateLimitMs ?? 1000
 		this.maxQueue = config.maxQueue ?? 300
@@ -255,6 +283,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		tracker.on("aircraft:update", (aircraft: AircraftState) => {
 			if (!this.enabled || !this.started) return
 			this.observeCallsign(aircraft)
+			this.judgeRoute(aircraft)
 			if (!this.online) return
 			const now = this.now()
 			const retry = this.retryAt.get(aircraft.icao)
@@ -277,10 +306,31 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		})
 	}
 
-	/** Opens the on-disk cache and schedules the local database refresh. */
+	/**
+	 * Opens the on-disk cache, restores the saved online preference, then admits work:
+	 * aircraft already tracked are identified and the local database refresh is scheduled.
+	 */
 	async start(): Promise<void> {
 		if (this.started) return
-		this.started = true
+		const generation = this.generation
+		if (this.starting && this.startingGeneration === generation)
+			return this.starting
+		// A start cancelled by stop() may still be opening the cache: let it settle (it closes
+		// what it opened) before this generation opens its own.
+		const previous = this.starting
+		const opening = (
+			previous
+				? previous.catch(() => undefined).then(() => this.open(generation))
+				: this.open(generation)
+		).finally(() => {
+			if (this.starting === opening) this.starting = null
+		})
+		this.starting = opening
+		this.startingGeneration = generation
+		return opening
+	}
+
+	private async open(generation: number): Promise<void> {
 		if (this.ownsStore && this.stateDir && this.enabled) {
 			let db: SqliteDatabase | undefined
 			try {
@@ -303,16 +353,35 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 				)
 			}
 		}
-		const saved = this.readOnlineOverride()
-		if (saved !== null) {
-			this.onlineOverride = saved
-			this.online = saved
+		if (generation !== this.generation) {
+			// stop() ran while the cache was opening
+			if (this.ownsStore && this.store) {
+				this.store.close()
+				this.store = null
+			}
+			return
 		}
-		if (this.enabled && this.localDb.enabled && this.store) {
-			// First refresh shortly after start (not during boot), then daily checks.
-			this.refreshTimer = setTimeout(() => this.scheduleRefresh(), 20_000)
-			this.refreshTimer.unref()
+		if (this.onlineOverride === null) {
+			const saved = this.readOnlineOverride()
+			if (saved !== null) this.onlineOverride = saved
+		} else this.saveOnline(this.onlineOverride) // switched while opening
+		this.online = this.onlineOverride ?? this.configOnline
+		this.started = true
+		if (this.store) {
+			this.pruneTimer = setInterval(() => {
+				try {
+					this.store?.prune()
+				} catch (err) {
+					this.log.debug(
+						{ err: err instanceof Error ? err.message : String(err) },
+						"Aircraft info cache prune failed",
+					)
+				}
+			}, CACHE_PRUNE_INTERVAL_MS)
+			this.pruneTimer.unref()
 		}
+		this.scheduleFirstRefresh()
+		this.identifyTracked()
 		this.log.info(
 			{
 				enabled: this.enabled,
@@ -324,13 +393,41 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		)
 	}
 
+	/** Identifies what is on the map now: aircraft heard while starting, or before lookups came on. */
+	private identifyTracked(): void {
+		if (!this.started || !this.enabled || !this.tracker) return
+		for (const aircraft of this.tracker.getAll()) {
+			this.identify(aircraft.icao)
+			const callsign = this.callsignOf.get(aircraft.icao)
+			if (callsign) this.resolveCallsign(aircraft.icao, callsign)
+			else this.observeCallsign(aircraft)
+		}
+	}
+
+	/** The local database is downloaded only while online lookups are on. */
+	private scheduleFirstRefresh(): void {
+		if (this.refreshTimer || this.refreshing) return
+		if (!this.started || !this.online) return
+		if (!this.enabled || !this.localDb.enabled || !this.store) return
+		// Shortly after start (not during boot) or after the switch, then daily checks.
+		this.refreshTimer = setTimeout(
+			() => this.scheduleRefresh(),
+			LOCAL_DB_FIRST_CHECK_MS,
+		)
+		this.refreshTimer.unref()
+	}
+
 	stop(): void {
+		this.generation++
 		if (!this.started) return
 		this.started = false
 		this.queue.length = 0
 		this.queued.clear()
 		if (this.refreshTimer) clearTimeout(this.refreshTimer)
 		this.refreshTimer = undefined
+		if (this.pruneTimer) clearInterval(this.pruneTimer)
+		this.pruneTimer = undefined
+		this.download?.abort()
 		if (this.ownsStore && this.store && !this.refreshing) {
 			this.store.close()
 			this.store = null
@@ -387,24 +484,33 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 
 	/**
 	 * Turns online lookups on or off at runtime (Settings › Map). Kept across restarts in
-	 * the store; without one it lasts until the core restarts. Off drops the queued lookups.
+	 * the store; without one it lasts until the core restarts. Off drops the queued lookups,
+	 * stops the ones under way before their next request and aborts a database download.
+	 * On looks up what is on the map now and schedules the local database check.
 	 */
 	setOnline(on: boolean): AircraftInfoSettings {
-		this.online = on
 		this.onlineOverride = on
+		// While start() is still reading settings, it applies this choice when it finishes.
+		if (this.started) this.online = on
 		if (!on) {
+			this.online = false
 			this.queue.length = 0
 			this.queued.clear()
 			this.retryAt.clear()
 			this.callsignRetryAt.clear()
-		} else if (this.started && this.enabled && this.tracker) {
-			// what is on the map now gets looked up too, not only aircraft heard from now on
-			for (const aircraft of this.tracker.getAll()) {
-				this.identify(aircraft.icao)
-				const callsign = this.callsignOf.get(aircraft.icao)
-				if (callsign) this.resolveCallsign(aircraft.icao, callsign)
-			}
+			if (this.refreshTimer) clearTimeout(this.refreshTimer)
+			this.refreshTimer = undefined
+			this.download?.abort()
+		} else {
+			this.identifyTracked()
+			this.scheduleFirstRefresh()
 		}
+		if (this.started) this.saveOnline(on)
+		this.log.info({ online: on }, "Aircraft online lookups changed")
+		return this.settings()
+	}
+
+	private saveOnline(on: boolean): void {
 		try {
 			this.store?.setMeta("online", on ? "1" : "0")
 		} catch (err) {
@@ -413,8 +519,6 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 				"Could not save the online lookups setting",
 			)
 		}
-		this.log.info({ online: on }, "Aircraft online lookups changed")
-		return this.settings()
 	}
 
 	private readOnlineOverride(): boolean | null {
@@ -449,6 +553,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		)
 		if (Object.keys(merged).length > 0)
 			this.tracker?.applyIdentification(hex, merged)
+		this.noteRegistration(hex, local, merged)
 		const needsAirframe = airframe === undefined
 		const needsPhoto = this.fetchImages && photo === undefined
 		if (airframe && (!this.fetchImages || photo)) {
@@ -482,7 +587,18 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			airframe?.value ?? null,
 			photo?.value ?? null,
 		)
+		this.noteRegistration(hex, local, merged)
 		return Object.keys(merged).length > 0 ? merged : null
+	}
+
+	private noteRegistration(
+		hex: string,
+		local: LocalAircraftRow | undefined,
+		merged: AircraftIdentification,
+	): void {
+		if (!merged.registration) return
+		const from = local?.registration ? "local" : "online"
+		this.emit("identity:registration", hex, merged.registration, from)
 	}
 
 	private localIdentity(hex: string): LocalAircraftRow | undefined {
@@ -574,9 +690,28 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 				? (this.cached<AircraftAirline>("airline", prefix)?.value ??
 					bundledAirline(prefix))
 				: null)
+		const route = info?.route?.callsign === callsign ? info.route : undefined
+		const state = this.tracker?.get(icao)
 		this.tracker?.applyIdentification(icao, {
 			airline: airline ?? undefined,
-			route: info?.route?.callsign === callsign ? info.route : undefined,
+			route:
+				route && state
+					? { ...route, plausible: routePlausible(route, state) }
+					: route,
+		})
+	}
+
+	/**
+	 * Keeps `route.plausible` current as the aircraft moves. Applying a change emits another
+	 * update, which finds the verdict unchanged and stops there.
+	 */
+	private judgeRoute(aircraft: AircraftState): void {
+		const route = aircraft.identification?.route
+		if (!route) return
+		const plausible = routePlausible(route, aircraft)
+		if (route.plausible === plausible) return
+		this.tracker?.applyIdentification(aircraft.icao, {
+			route: { ...route, plausible },
 		})
 	}
 
@@ -643,6 +778,20 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		return turn
 	}
 
+	/**
+	 * Waits for this request's turn, then says whether it may still go out: the switch is
+	 * read after the wait, so a lookup turned off while it queued sends nothing more.
+	 */
+	private async turn(): Promise<boolean> {
+		if (!this.mayRequest()) return false
+		await this.pace()
+		return this.mayRequest()
+	}
+
+	private mayRequest(): boolean {
+		return this.started && this.enabled && this.online
+	}
+
 	private async runAirframe(hex: string): Promise<void> {
 		const local = this.localIdentity(hex)
 		const { airframe, photo, failed } = await this.fetchAirframe(
@@ -660,6 +809,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		)
 		if (Object.keys(merged).length === 0) return
 		this.tracker?.applyIdentification(hex, merged)
+		this.noteRegistration(hex, local, merged)
 		this.emit("enrichment:success", hex, merged)
 	}
 
@@ -685,7 +835,8 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			] as const) {
 				if (!client.available()) continue
 				try {
-					await this.pace()
+					if (!(await this.turn()))
+						return { airframe, photo: undefined, failed }
 					found = await fn(client, hex)
 					if (found) break
 				} catch (err) {
@@ -712,7 +863,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		) {
 			const registration = knownRegistration ?? airframe?.value?.registration
 			try {
-				await this.pace()
+				if (!(await this.turn())) return { airframe, photo, failed }
 				const found = await planespottersPhoto(
 					this.planespotters,
 					registration ? { registration, hex } : { hex },
@@ -742,7 +893,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			}
 			if (!this.adsbdb.available()) return later()
 			try {
-				await this.pace()
+				if (!(await this.turn())) return
 				info = await adsbdbCallsign(this.adsbdb, callsign)
 			} catch (err) {
 				if (err instanceof SourceUnavailableError) return later()
@@ -817,15 +968,19 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 				),
 			)
 			.finally(() => {
-				if (!this.started) return
+				if (!this.started || !this.online) return
 				this.refreshTimer = setTimeout(() => this.scheduleRefresh(), DAY)
 				this.refreshTimer.unref()
 			})
 	}
 
-	/** Downloads tar1090-db when missing or older than refreshDays. */
+	/**
+	 * Downloads tar1090-db when missing or older than refreshDays. Only while online lookups
+	 * are on: the download is an online request like any other.
+	 */
 	async refreshLocalDb(force = false): Promise<void> {
 		if (this.refreshing) return this.refreshing
+		if (!this.mayRequest()) return
 		const store = this.store
 		if (!store || !this.stateDir) return
 		let current: { last: number; rows: number }
@@ -844,12 +999,17 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		const due = this.now() - current.last >= this.localDb.refreshDays * DAY
 		if (!force && current.rows > 0 && !due) return
 		const stateDir = this.stateDir
+		const download = new AbortController()
+		this.download = download
 		this.refreshing = (async () => {
 			const tmp = join(stateDir, "aircraft-db.csv.gz.part")
 			try {
 				const response = await this.fetchImpl(this.localDb.url, {
 					headers: { "User-Agent": USER_AGENT },
-					signal: AbortSignal.timeout(120_000),
+					signal: AbortSignal.any([
+						download.signal,
+						AbortSignal.timeout(120_000),
+					]),
 				})
 				if (!response.ok || !response.body)
 					throw new SourceUnavailableError(
@@ -879,6 +1039,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 				)
 			} finally {
 				this.refreshing = null
+				if (this.download === download) this.download = null
 				if (!this.started && this.ownsStore && this.store) {
 					this.store.close()
 					this.store = null

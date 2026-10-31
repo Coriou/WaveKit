@@ -171,23 +171,10 @@ export class AircraftIdentityRegistry {
 			icao = query.value
 			resolvedBy = "self"
 		} else if (query.kind === "reg") {
-			for (const level of ["observed", "database"] as const) {
-				const found = new Set(
-					this.live(idKey(query), now)
-						.filter(l => l.evidence === level)
-						.map(l => other(l, idKey(query)))
-						.filter(id => id.kind === "icao")
-						.map(id => id.value),
-				)
-				if (found.size === 0) continue
-				if (found.size > 1) {
-					conflict = true
-					break
-				}
-				icao = [...found][0] ?? null
-				resolvedBy = level
-				break
-			}
+			const found = this.registrationOwner(idKey(query), now)
+			icao = found.icao
+			resolvedBy = found.resolvedBy
+			conflict = found.conflict
 		}
 
 		const around = new Map<string, StoredLink>()
@@ -207,7 +194,13 @@ export class AircraftIdentityRegistry {
 			for (const link of this.live(`icao:${icao}`, now)) {
 				if (link.evidence === "hint") continue
 				const id = other(link, `icao:${icao}`)
-				if (id.kind === "reg") entityKeys.add(`reg:${id.value}`)
+				// A registration counts as this aircraft's only when it resolves back to it: one
+				// claimed by two ICAO addresses (a conflict) belongs to neither.
+				if (
+					id.kind === "reg" &&
+					this.registrationOwner(idKey(id), now).icao === icao
+				)
+					entityKeys.add(`reg:${id.value}`)
 			}
 		return {
 			query,
@@ -217,6 +210,35 @@ export class AircraftIdentityRegistry {
 			links,
 			entityKeys: [...entityKeys],
 		}
+	}
+
+	/**
+	 * The ICAO address a registration resolves to: through an observed link first, a database
+	 * link second. Two live links to different addresses at the deciding level: a conflict.
+	 */
+	private registrationOwner(
+		reg: string,
+		now: number,
+	): {
+		icao: string | null
+		resolvedBy: "observed" | "database" | null
+		conflict: boolean
+	} {
+		const links = this.live(reg, now)
+		for (const level of ["observed", "database"] as const) {
+			const found = new Set(
+				links
+					.filter(l => l.evidence === level)
+					.map(l => other(l, reg))
+					.filter(id => id.kind === "icao")
+					.map(id => id.value),
+			)
+			if (found.size === 0) continue
+			if (found.size > 1)
+				return { icao: null, resolvedBy: null, conflict: true }
+			return { icao: [...found][0] ?? null, resolvedBy: level, conflict: false }
+		}
+		return { icao: null, resolvedBy: null, conflict: false }
 	}
 
 	private live(id: string, now: number): StoredLink[] {

@@ -2351,6 +2351,13 @@ async function main(): Promise<void> {
 
 		// Aircraft identity links between ADS-B, VDL2 and ACARS identifiers
 		const aircraftIdentity = new AircraftIdentityManager(decoderManager, logger)
+		// A registration from the local database or an online lookup is a database link:
+		// weaker than one seen on the air, and never made from a callsign or flight number.
+		aircraftEnrichmentService.on(
+			"identity:registration",
+			(icao, registration) =>
+				aircraftIdentity.observeDatabase(icao, registration),
+		)
 		own(20, () => {
 			aircraftIdentity.stop()
 		})

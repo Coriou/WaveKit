@@ -112,6 +112,55 @@ describe("VDL2 address types and direction", () => {
 		expect(msg?.fromaddr).toBe(AIRCRAFT)
 	})
 
+	it("a direction needs both ends known: every pair of address types", () => {
+		const types = [
+			"Aircraft",
+			"Ground station",
+			"All stations",
+			"reserved",
+			"Satellite",
+			undefined,
+		] as const
+		const expected = (src: string | undefined, dst: string | undefined) => {
+			if (src === "Aircraft" && dst === "Ground station") return "downlink"
+			if (src !== "Ground station") return undefined
+			return dst === "Aircraft" || dst === "All stations" ? "uplink" : undefined
+		}
+		for (const src of types)
+			for (const dst of types) {
+				const msg = parseDumpvdl2Json(
+					frame({
+						src: { addr: AIRCRAFT, ...(src ? { type: src } : {}) },
+						dst: { addr: GROUND, ...(dst ? { type: dst } : {}) },
+						frame_type: "S",
+					}) as never,
+				)
+				expect({ src, dst, direction: msg?.direction }).toEqual({
+					src,
+					dst,
+					direction: expected(src, dst),
+				})
+			}
+	})
+
+	it("an aircraft frame to a reserved or missing other end has no direction", () => {
+		for (const dst of [{ type: "reserved" }, {}, { type: "All stations" }]) {
+			const msg = parseDumpvdl2Json(
+				frame({
+					src: { addr: AIRCRAFT, type: "Aircraft" },
+					dst: { addr: GROUND, ...dst },
+					frame_type: "I",
+				}) as never,
+			)
+			expect(msg?.icao).toBe(AIRCRAFT)
+			expect(msg?.direction).toBeUndefined()
+		}
+		const noDst = parseDumpvdl2Json(
+			frame({ src: { addr: GROUND, type: "Ground station" } }) as never,
+		)
+		expect(noDst?.direction).toBeUndefined()
+	})
+
 	it("embedded ACARS takes the frame's direction over its block id", () => {
 		const msg = parseDumpvdl2Json(
 			frame({

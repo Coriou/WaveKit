@@ -19,7 +19,6 @@ import {
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/store.ts"
-import { TrailHistoryStore } from "../../data/trail-history-store.ts"
 import { useDevicePrefs } from "../../shell/hooks.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore } from "../../shell/theme.ts"
@@ -45,7 +44,7 @@ import { altStep, type MapPalette } from "./palette.ts"
 import type { Rect } from "./placement.ts"
 import { rowView, timeText } from "../activity/rows.ts"
 import { useDatalinkStory, type DatalinkStory } from "./datalink.ts"
-import { latestReports } from "./reported.ts"
+import { latestReports, ReportedPositionsStore } from "./reported.ts"
 import { BASEMAP } from "./style.ts"
 import {
 	MapUi,
@@ -222,10 +221,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 	const [ui] = useState(() => new MapUi())
 	// positions reported over ACARS and VDL2, kept apart from the ADS-B tracks (reported.ts)
 	const reported = useMemo(
-		() =>
-			new TrailHistoryStore(data.api, data.events, {
-				categories: ["aviation-data"],
-			}),
+		() => new ReportedPositionsStore(data.api, data.events),
 		[data],
 	)
 	const [engine, setEngine] = useState<MapEngine | null>(null)
@@ -418,10 +414,11 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 	useEffect(() => () => cancelAnimationFrame(hoverRaf.current), [])
 
 	const s = useStore(ui)
-	const reportedTrails = useStore(reported).trails
+	// follows live reports, and ticks each minute so reports older than an hour leave the count
+	const { trails: reportedTrails, now: reportedNow } = useStore(reported)
 	const reportedCount = useMemo(
-		() => latestReports(reportedTrails, Date.now()).length,
-		[reportedTrails],
+		() => latestReports(reportedTrails, reportedNow).length,
+		[reportedTrails, reportedNow],
 	)
 	const wide = width >= RAIL_WIDE_MIN
 	const railW = wide ? RAIL_W.wide : RAIL_W.narrow

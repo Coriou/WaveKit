@@ -526,6 +526,30 @@ Empty function-zero pages carry a `tone only` label; they remain stored events,
 with compact notice presentation in the web app. Message presentation budgets
 still apply to list fields and titles.
 
+### Aircraft identity and enrichment
+
+Two services name aircraft; `src/index.ts` wires them together.
+
+- `AircraftEnrichmentService` (`src/services/aircraft-enrichment-service.ts`) listens to the
+  `AircraftTracker` and fills `identification`: the ICAO address block, the local tar1090-db table,
+  a cache in `<stateDir>/aircraft-info.sqlite` (expired rows pruned hourly, at most 100,000 rows)
+  and, only while online lookups are on, adsbdb, hexdb and Planespotters. Online lookups are off by
+  default; `start()` restores the saved Settings › Map choice before any lookup is admitted, and the
+  switch is read again before every request, the tar1090-db download included. It also keeps
+  `route.plausible` current from the aircraft's position and track, so REST and WebSocket clients
+  share one verdict on a crowd-sourced route.
+- `AircraftIdentityManager` (`src/core/aircraft-identity/`) keeps an in-memory registry of links
+  between ICAO addresses, registrations, callsigns and flight numbers. Decoder output gives
+  `observed` links (one frame carried both); every registration the enrichment service resolves
+  (`identity:registration`) becomes a weaker `database` link. Only an ICAO address or a
+  registration resolves to an aircraft; a registration linked to two addresses is a conflict and
+  belongs to neither, in `icao` and in `entityKeys`. Links expire unless seen again.
+  `GET /api/aircraft-identity/:kind/:value` serves it.
+
+Activity rows of an aircraft (`src/core/activity/presentation/aircraft.ts`) are keyed by its ICAO
+address; the web app joins datalink rows keyed by registration through the registry's
+`entityKeys`.
+
 ## Decoder Integration Patterns
 
 WaveKit supports three decoder integration patterns:

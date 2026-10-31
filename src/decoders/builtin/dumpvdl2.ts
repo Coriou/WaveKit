@@ -765,9 +765,15 @@ export function parseDumpvdl2Json(
 			: dstType === "aircraft"
 				? dstAddr
 				: undefined
+	// Both ends must be known: aircraft to ground station is a downlink; ground station to
+	// aircraft, or a ground station's broadcast to all stations (its GSIF), is an uplink.
 	let direction: AcarsDirection | undefined
-	if (srcType === "aircraft" && dstType !== "aircraft") direction = "downlink"
-	else if (srcType === "ground" && dstType !== "ground") direction = "uplink"
+	if (srcType === "aircraft" && dstType === "ground") direction = "downlink"
+	else if (
+		srcType === "ground" &&
+		(dstType === "aircraft" || dstType === "all")
+	)
+		direction = "uplink"
 	const groundAddress =
 		srcType === "ground" ? srcAddr : dstType === "ground" ? dstAddr : undefined
 	const status = srcType === "aircraft" ? avlc?.src?.status : undefined

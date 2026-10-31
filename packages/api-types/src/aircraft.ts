@@ -168,8 +168,8 @@ export interface AircraftAirport {
 
 /**
  * Scheduled route for a callsign. Crowd-sourced (adsbdb), so it can be stale or
- * wrong: clients present it as the planned route and may hide it when the track
- * disagrees.
+ * wrong: clients present it as the planned route and hide it when `plausible` is
+ * false.
  */
 export interface AircraftRoute {
 	/** Callsign the route was looked up for */
@@ -177,6 +177,13 @@ export interface AircraftRoute {
 	origin: AircraftAirport
 	destination: AircraftAirport
 	source: EnrichmentSource
+	/**
+	 * The core's verdict, kept current as the aircraft moves: false when the track
+	 * disagrees (flying away from the destination while more than 80 km from the
+	 * origin and 30 km from the destination). True without a position or course.
+	 * Absent from older cores: treat as true.
+	 */
+	plausible?: boolean
 }
 
 /** One photo of the airframe. Clients must show the photographer and link back. */

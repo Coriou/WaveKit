@@ -323,7 +323,8 @@ Select an aircraft to see what the core knows about it (see
 its photographer with a link to the photo's page, the airline and type, a **Military** tag, the
 planned route of its callsign, and an **Aircraft** section with registration, type, operator,
 country, ICAO address and year built. The planned route comes from a crowd-sourced database, so
-it is hidden when the aircraft is clearly flying away from the destination. On the map, an
+it is hidden when the core marks it implausible (the aircraft is clearly flying away from the
+destination). On the map, an
 aircraft is named by its callsign, else its registration, else its ICAO address. Photos load
 from the photo site, so they need internet access; everything else also works offline.
 
@@ -331,9 +332,10 @@ While the receiver tracks an aircraft, its Activity rows say who flies it and wh
 (`ADSB · WaveKit Air · A320 214`), and a row titled only by the ICAO address takes the callsign or
 registration instead. Rows of aircraft no longer tracked stay as they were stored. In ⌘K, type
 a callsign, registration, ICAO address or airline to find a tracked aircraft and open the Map
-on it. **Settings › Map › Online aircraft lookups** turns off the core's free online sources
-(photos, routes, airline names): only the local database is used, and nothing about the
-aircraft you receive leaves the station.
+on it. **Settings › Map › Online aircraft lookups** turns the core's free online sources
+(photos, routes, airline names, the local database download) on or off. While they are off
+(the default) only the local database is used, and nothing about the aircraft you receive
+leaves the station. Turning them off stops lookups already under way.
 
 ## Keyboard
 

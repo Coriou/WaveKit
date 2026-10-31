@@ -20,7 +20,8 @@ export interface AircraftIdentifier {
  * - observed: one decoded frame carried both identifiers (a VDL2 frame from or to the aircraft
  *   with its registration, an ADS-B message with its callsign, an ACARS downlink with its
  *   registration and flight);
- * - database: an aircraft database says so (reserved; nothing produces it yet);
+ * - database: an aircraft database says so: the local tar1090-db or an online airframe lookup
+ *   gave the ICAO address this registration. Resolves only when no observed link does;
  * - hint: a resemblance only. Shown, never used to resolve.
  */
 export type AircraftIdentityEvidence = "observed" | "database" | "hint"

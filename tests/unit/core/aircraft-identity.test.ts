@@ -144,6 +144,26 @@ describe("identity registry", () => {
 		expect(reg.resolve(REG).entityKeys).toEqual(["reg:N0WK01"])
 	})
 
+	it("a conflicted registration is in neither aircraft's entity keys", () => {
+		const reg = new AircraftIdentityRegistry(() => T0.getTime())
+		reg.observe(seen(ICAO, REG))
+		expect(reg.resolve(ICAO).entityKeys).toEqual(["icao:0A0B01", "reg:N0WK01"])
+		reg.observe(seen(ICAO2, REG))
+		expect(reg.resolve(ICAO).entityKeys).toEqual(["icao:0A0B01"])
+		expect(reg.resolve(ICAO2).entityKeys).toEqual(["icao:0A0B02"])
+		// the links are still shown, only not used to read the aircraft's messages
+		expect(reg.resolve(ICAO).links).toHaveLength(1)
+	})
+
+	it("a registration resolved elsewhere by an observed link leaves a database aircraft", () => {
+		const reg = new AircraftIdentityRegistry(() => T0.getTime())
+		reg.observe(seen(ICAO2, REG, T0, "database"))
+		expect(reg.resolve(ICAO2).entityKeys).toContain("reg:N0WK01")
+		reg.observe(seen(ICAO, REG))
+		expect(reg.resolve(ICAO2).entityKeys).toEqual(["icao:0A0B02"])
+		expect(reg.resolve(ICAO).entityKeys).toEqual(["icao:0A0B01", "reg:N0WK01"])
+	})
+
 	it("an observed link wins over a database link, and hints never resolve", () => {
 		const reg = new AircraftIdentityRegistry(() => T0.getTime())
 		reg.observe(seen(ICAO2, REG, T0, "database"))
@@ -241,6 +261,28 @@ describe("identity manager and route", () => {
 	const open: Array<{ close(): Promise<void> }> = []
 	afterEach(async () => {
 		await Promise.all(open.splice(0).map(app => app.close()))
+	})
+
+	it("records database links from enrichment, weaker than observed ones", () => {
+		const manager = new AircraftIdentityManager(
+			new EventEmitter() as never,
+			createLogger({ level: "error" }),
+			new AircraftIdentityRegistry(() => T0.getTime()),
+		)
+		manager.observeDatabase("0a0b02", "n0wk01", T0)
+		manager.observeDatabase("not-hex", "N0WK01", T0)
+		manager.observeDatabase("0A0B02", "", T0)
+		const db = manager.resolve(REG)
+		expect(db).toMatchObject({ icao: "0A0B02", resolvedBy: "database" })
+		expect(db.links).toHaveLength(1)
+		expect(db.links[0]).toMatchObject({
+			evidence: "database",
+			source: "database",
+		})
+		manager.observeDatabase("0A0B01", "N0WK01", T0)
+		// two databases disagree: a conflict, no aircraft
+		expect(manager.resolve(REG)).toMatchObject({ icao: null, conflict: true })
+		manager.stop()
 	})
 
 	it("learns from decoder output and serves the result", async () => {
