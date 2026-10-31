@@ -16,8 +16,10 @@ import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
 import {
 	COUNTER_FLUSH_MS,
 	DecoderCounterStore,
+	receptionHint,
 	type DecoderCounterEvent,
 } from "../../../src/decoders/decoder-counters.js"
+import type { DsdFmeLinkLine } from "../../../src/decoders/builtin/dsd-fme-link.js"
 import type {
 	DecoderConfig,
 	DecoderOutput,
@@ -136,20 +138,53 @@ describe("dsd-fme line counters", () => {
 		vi.advanceTimersByTime(COUNTER_FLUSH_MS)
 		expect(store.view("dv")).toEqual({
 			detections: { total: 2, perMin: 2, latest: 2 },
+			framesOk: { total: 0, perMin: 0, latest: 0 },
 			crcBad: { total: 1, perMin: 1, latest: 1 },
 			fecBad: { total: 2, perMin: 2, latest: 2 },
 		})
 	})
 
-	it("counts a link line that passed its checks as decoded", () => {
+	it("reports syncs with only CRC failures as heard but undecoded", () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+		const { store, internals } = collect(dsd())
+		for (let i = 0; i < 3; i++) {
+			internals.handleOutputLine(
+				"Sync: +DMR  [slot1]  slot2  | Color Code=05 | VLC (CRC ERR) ",
+			)
+			internals.handleOutputLine(" SLCO CRC ERR")
+		}
+		vi.advanceTimersByTime(COUNTER_FLUSH_MS)
+		const view = store.view("dv")
+		expect(view?.framesOk).toEqual({ total: 0, perMin: 0, latest: 0 })
+		expect(view?.detections?.total).toBe(3)
+		expect(receptionHint(view)).toBe("heard-undecoded")
+	})
+
+	it("counts a DMR link as decoded only once the next sync attests it", () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
 		const decoder = dsd()
-		const { store } = collect(decoder)
-		const internals = decoder as unknown as {
-			countLine(line: string, verified: boolean): void
-		}
-		internals.countLine(" SLOT 1 TGT=1 SRC=2 Group Call ", true)
+		const { store, internals } = collect(decoder)
+		const links: DsdFmeLinkLine[] = []
+		decoder.on("link", (link: DsdFmeLinkLine) => links.push(link))
+		const sync = (burst: string) =>
+			internals.handleOutputLine(
+				`Sync: +DMR  [slot1]  slot2  | Color Code=05 | ${burst}`,
+			)
+
+		// A later CRC failure rejects the pending link: nothing decoded.
+		sync("VLC")
+		internals.handleOutputLine(" SLCO CRC ERR")
+		sync("IDLE")
 		vi.advanceTimersByTime(COUNTER_FLUSH_MS)
+		expect(links.some(l => l.verified)).toBe(false)
+		expect(store.view("dv")?.framesOk?.total).toBe(0)
+		expect(receptionHint(store.view("dv"))).toBe("heard-undecoded")
+
+		// A clean burst closed by the next DMR sync counts once.
+		sync("VLC")
+		sync("IDLE")
+		vi.advanceTimersByTime(COUNTER_FLUSH_MS)
+		expect(links.filter(l => l.verified)).toHaveLength(1)
 		expect(store.view("dv")?.framesOk?.total).toBe(1)
 	})
 })

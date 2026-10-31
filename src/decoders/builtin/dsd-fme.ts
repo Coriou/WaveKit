@@ -53,6 +53,7 @@ import type {
 	DecoderOutput,
 	DemodulationConfig,
 } from "../types.js"
+import type { DecoderCounterName } from "@wavekit/api-types"
 import type { Logger } from "../../utils/logger.js"
 import type { DsdFmeLinkLine } from "./dsd-fme-link.js"
 
@@ -77,6 +78,14 @@ const ERROR_PATTERN = /\b(FEC ERR|CRC ERR|SYNC LOST|no sync)\b/i
 /** A line whose link control failed its CRC: never identity, never encryption. */
 const CRC_ERR = /\bCRC(?:16|32)?\s+ERR\b/i
 const FEC_ERR_ALL = /\bFEC\s+ERR\b/gi
+
+/** The frame counters dsd-fme output supports (countLine, emitLink). */
+const DSD_FME_COUNTERS = [
+	"detections",
+	"framesOk",
+	"crcBad",
+	"fecBad",
+] as const satisfies readonly DecoderCounterName[]
 
 // --- DMR Patterns ---
 /** DMR color code: "Color Code=05" */
@@ -1312,8 +1321,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
 		const link = this.parseLinkLine(cleanLine, nowMs)
 
-		// STEP 3c: Frame counters from what this line already shows (heard vs decoded)
-		this.countLine(cleanLine, link?.verified === true)
+		// STEP 3c: Frame counters from what this line already shows (heard vs
+		// rejected); decoded frames count when their link is published verified.
+		this.countLine(cleanLine)
 		if (
 			link?.protocol === "dmr" &&
 			link.verified &&
@@ -1326,7 +1336,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				if (this.pendingDmrVoiceLinks.length > MAX_PENDING_DMR_VOICE_LINKS)
 					this.pendingDmrVoiceLinks.shift()
 			} else this.pendingDmrLink = link
-		} else if (link) this.emit("link", link)
+		} else if (link) this.emitLink(link)
 
 		// STEP 4: Check for sync (protocol detection)
 		const syncResult = this.handleSync(cleanLine, now)
@@ -1368,17 +1378,42 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	// =========================================================================
 
 	/**
-	 * Frame counters: a `Sync:` line is a frame sync heard (`detections`), a
-	 * link-control line that passed its checks one decoded (`framesOk`), and
+	 * Frame counters: a `Sync:` line is a frame sync heard (`detections`) and
 	 * each `CRC ERR` / `FEC ERR` a frame heard but rejected. Sent every 10 s
 	 * (COUNTER_FLUSH_MS), never per line.
 	 */
-	private countLine(line: string, verifiedLink: boolean): void {
-		if (SYNC_PATTERN.test(line)) this.counters.count("detections")
-		if (verifiedLink) this.counters.count("framesOk")
-		if (CRC_ERR.test(line)) this.counters.count("crcBad")
+	private countLine(line: string): void {
+		const sync = SYNC_PATTERN.test(line)
+		const crc = CRC_ERR.test(line)
 		const fec = line.match(FEC_ERR_ALL)?.length ?? 0
+		if (!sync && !crc && fec === 0) return
+		this.primeCounters()
+		if (sync) this.counters.count("detections")
+		if (crc) this.counters.count("crcBad")
 		if (fec > 0) this.counters.count("fecBad", fec)
+	}
+
+	/**
+	 * Every counter dsd-fme supports is reported, at 0 until it grows, so a
+	 * dwell of syncs and CRC failures alone still shows `framesOk: 0` (the
+	 * reception hint needs a decoded counter). Adding 0 is idempotent, and the
+	 * reporter clears its counts when a new child starts.
+	 */
+	private primeCounters(): void {
+		for (const name of DSD_FME_COUNTERS) this.counters.count(name, 0)
+	}
+
+	/**
+	 * Publishes a link line; one published verified is a frame decoded
+	 * (`framesOk`). A DMR link waits for the next sync to attest it
+	 * (flushPendingDmrLink), so it only counts once that check accepts it.
+	 */
+	private emitLink(link: DsdFmeLinkLine): void {
+		if (link.verified) {
+			this.primeCounters()
+			this.counters.count("framesOk")
+		}
+		this.emit("link", link)
 	}
 
 	/**
@@ -1557,14 +1592,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	): void {
 		const pending = this.pendingDmrLink
 		this.pendingDmrLink = undefined
-		if (pending) this.emit("link", { ...pending, verified: headerVerified })
+		if (pending) this.emitLink({ ...pending, verified: headerVerified })
 		const voices = this.pendingDmrVoiceLinks
 		this.pendingDmrVoiceLinks = []
 		for (const voice of voices) {
-			if (verified) this.emit("link", voice)
+			if (verified) this.emitLink(voice)
 			else {
 				const { tg: _tg, src: _src, voiceLc: _voiceLc, ...unverified } = voice
-				this.emit("link", { ...unverified, verified: false })
+				this.emitLink({ ...unverified, verified: false })
 			}
 		}
 	}
