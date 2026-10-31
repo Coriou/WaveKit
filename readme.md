@@ -152,8 +152,10 @@ that keeps this documentation in step with the code.
 ## Status
 
 WaveKit is young and moves fast. It is used every day with a Raspberry Pi receiver, but
-configuration keys and the API can still change from one commit to the next. Issues and feedback
-are welcome.
+configuration keys and the API can still change from one commit to the next. There is no tagged
+release yet, so there are no published Docker images: `make app-up` builds the image locally. Once
+the first release is out, starting WaveKit will be a single `docker run`. Issues and feedback are
+welcome.
 
 ## Credits
 
