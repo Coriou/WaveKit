@@ -91,11 +91,17 @@ def sox_argv(sox: str, input_rate: int, out_rate: int, rate_opts: list[str]) -> 
             *fmt, "-r", str(out_rate), "-", "rate", *rate_opts, str(out_rate)]
 
 
+def cfo_search_hz(bw: int) -> int:
+    # loraCfoSearchHz() in src/decoders/builtin/lora-meshtastic.ts: bw / 5, whole Hz.
+    return bw // 5
+
+
 def wrapper_argv(args: argparse.Namespace, out_rate: int) -> list[str]:
     # Same argv as buildDecoderArgs() in src/decoders/builtin/lora-meshtastic.ts.
     return ["python3", args.wrapper, "--bw", str(args.bw), "--sf", str(args.sf),
             "--cr", str(args.cr), "--samp-rate", str(out_rate), "--frequency", "869525000",
-            "--channel-key", "AQ==", "--region", "EU_868"]
+            "--channel-key", "AQ==", "--region", "EU_868",
+            "--cfo-search-hz", str(cfo_search_hz(args.bw))]
 
 
 def reap(proc: subprocess.Popen[Any]) -> tuple[int, float]:

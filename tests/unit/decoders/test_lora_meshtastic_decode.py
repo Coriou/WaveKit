@@ -291,5 +291,273 @@ class OsFactorTest(unittest.TestCase):
         self.assertIn("invalid_sample_rate", err.getvalue())
 
 
+class CfoArgsTest(unittest.TestCase):
+    ARGV = ["--bw", "250000", "--sf", "11", "--cr", "5", "--samp-rate", "500000",
+            "--frequency", "869525000", "--channel-key", "AQ==", "--region", "EU_868"]
+
+    def test_search_range_is_below_bw_over_4(self):
+        # 2 x offset is read modulo bw: 250 kHz / 4 = 62.5 kHz is ambiguous.
+        wrapper.check_cfo_args(0, 250_000, 16)
+        wrapper.check_cfo_args(62_499, 250_000, 16)
+        for bad in (62_500, -1):
+            with self.assertRaises(ValueError):
+                wrapper.check_cfo_args(bad, 250_000, 16)
+
+    def test_preamble_len_floor_is_the_recentred_length(self):
+        self.assertEqual(wrapper.RECENTRED_PREAMBLE_LEN, 8)
+        wrapper.check_cfo_args(50_000, 250_000, 8)
+        with self.assertRaises(ValueError):
+            wrapper.check_cfo_args(50_000, 250_000, 7)
+
+    def test_defaults(self):
+        args = wrapper.parse_args(self.ARGV)
+        self.assertEqual(args.cfo_search_hz, 0)
+        self.assertEqual(args.preamble_len, wrapper.MESHTASTIC_PREAMBLE_LEN)
+        self.assertEqual(wrapper.MESHTASTIC_PREAMBLE_LEN, 16)
+
+    def test_main_exits_2_on_ambiguous_range(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(wrapper.main(self.ARGV + ["--cfo-search-hz", "62500"]), 2)
+        self.assertIn("invalid_cfo_search", err.getvalue())
+
+    def test_delay_budget(self):
+        # The search knows a Meshtastic offset 16 + 1 + 5 + 2 = 24 symbols after the
+        # correction must start; the delay line holds 32.
+        lag = (wrapper.MESHTASTIC_PREAMBLE_LEN + 1 + wrapper.CFO_SFD_WINDOWS
+               + wrapper.CFO_LEAD_SYMBOLS)
+        self.assertEqual(lag, 24)
+        self.assertEqual(wrapper.CFO_DELAY_SYMBOLS, 32)
+        # LongFast: the dedupe window stays below the bench's 0.91 s copy spacing.
+        window = wrapper.CFO_DELAY_SYMBOLS * 2048 / 250_000 + wrapper.DEDUPE_SLACK_S
+        self.assertAlmostEqual(window, 0.512, places=3)
+        self.assertLess(window, 0.91)
+
+
+class FrameDeduperTest(unittest.TestCase):
+    def test_pairs_one_copy_per_path(self):
+        dedupe = wrapper.FrameDeduper(0.5)
+        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
+        self.assertFalse(dedupe.admit("recentred", FRAME, 1.3))
+        # The pair is used up: the next copy is a new frame.
+        self.assertTrue(dedupe.admit("recentred", FRAME, 1.4))
+
+    def test_same_path_never_pairs(self):
+        dedupe = wrapper.FrameDeduper(0.5)
+        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
+        self.assertTrue(dedupe.admit("direct", FRAME, 1.1))
+
+    def test_window_bound(self):
+        dedupe = wrapper.FrameDeduper(0.5)
+        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
+        self.assertFalse(dedupe.admit("recentred", FRAME, 1.5))
+        self.assertTrue(dedupe.admit("direct", FRAME, 2.0))
+        self.assertTrue(dedupe.admit("recentred", FRAME, 2.5001))
+
+    def test_relayed_copy_is_not_paired(self):
+        dedupe = wrapper.FrameDeduper(0.5)
+        relayed = bytearray(FRAME)
+        relayed[12] = (relayed[12] & ~wrapper.FLAG_HOP_LIMIT_MASK) | 2
+        self.assertTrue(dedupe.admit("direct", FRAME, 1.0))
+        self.assertTrue(dedupe.admit("recentred", bytes(relayed), 1.1))
+
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - CI installs numpy
+    np = None
+
+SYNC_WORD_SYMBOLS = (16, 88)  # 0x2B: (0x2 << 3, 0xB << 3), as frame_sync maps it
+
+
+def chirp(n, os_factor, symbol=0, down=False):
+    """gr-lora_sdr build_upchirp(symbol, sf, os_factor), or the base downchirp."""
+    k = np.arange(n * os_factor, dtype=np.float64)
+    fold = n * os_factor - symbol * os_factor
+    offset = np.where(k < fold, symbol / n - 0.5, symbol / n - 1.5)
+    x = np.exp(2j * np.pi * (k * k / (2 * n) / os_factor ** 2 + offset * k / os_factor))
+    return np.conj(x) if down else x
+
+
+def lora_frame(sf, os_factor, preamble, rng, payload=24):
+    n = 1 << sf
+    parts = [chirp(n, os_factor)] * preamble
+    parts += [chirp(n, os_factor, s) for s in SYNC_WORD_SYMBOLS]
+    down = chirp(n, os_factor, down=True)
+    parts += [down, down, down[: n * os_factor // 4]]
+    parts += [chirp(n, os_factor, int(s)) for s in rng.integers(0, n, payload)]
+    return np.concatenate(parts)
+
+
+def capture(sf, os_factor, bw, cfo_hz, lead, preamble=8, snr_db=-10.0, seed=7):
+    """Noise, then one frame starting at sample `lead` with a carrier offset of cfo_hz.
+
+    snr_db is in the LoRa bandwidth: noise spreads over os_factor x bw.
+    """
+    rng = np.random.default_rng(seed)
+    frame = lora_frame(sf, os_factor, preamble, rng)
+    x = np.concatenate([np.zeros(lead), frame, np.zeros(4 * (os_factor << sf))])
+    x = x * np.exp(2j * np.pi * cfo_hz * np.arange(len(x)) / (os_factor * bw))
+    sigma = np.sqrt(os_factor / 10 ** (snr_db / 10) / 2)
+    x = x + sigma * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))
+    return x.astype(np.complex64)
+
+
+def search_all(x, sf, os_factor, bw, max_hz, chunk=32768):
+    search = wrapper.CfoSearch(sf, bw, os_factor, max_hz)
+    found = []
+    for i in range(0, len(x), chunk):
+        found += search.feed(x[i:i + chunk])
+    return found
+
+
+@unittest.skipIf(np is None, "numpy missing")
+class CfoSearchTest(unittest.TestCase):
+    """// Feature: lora-cfo, coarse CFO search on synthetic preambles."""
+
+    BW = 250_000
+    BIN_HZ = BW / 2048
+
+    def test_offsets_within_one_bin(self):
+        # LongFast at os 2; +-bw/5 = +-50 kHz is the range the adapter asks for.
+        sf, os_factor = 11, 2
+        for preamble in (8, 16):
+            for cfo_hz in (0, 2_000, -5_000, 10_000, -15_000, 20_000, -25_000, 30_000, -45_000, 50_000):
+                with self.subTest(preamble=preamble, cfo_hz=cfo_hz):
+                    lead = 40_000 + 777  # off the window grid by a fraction of a chip
+                    found = search_all(capture(sf, os_factor, self.BW, cfo_hz, lead, preamble),
+                                       sf, os_factor, self.BW, 50_000)
+                    self.assertEqual(len(found), 1)
+                    start, est = found[0]
+                    self.assertLessEqual(abs(est - cfo_hz), 1.0 * self.BIN_HZ)
+                    # The correction starts 1 to 3 symbols before the preamble, or 2 more
+                    # when a noise window happens to land on the preamble's bin and the
+                    # next one is forgiven as a stray.
+                    symbol = os_factor << sf
+                    self.assertGreaterEqual(start, lead - 5 * symbol)
+                    self.assertLessEqual(start, lead - symbol)
+
+    def test_unambiguous_to_bw_over_4(self):
+        # 2c is read modulo N bins, so c resolves within [-N/4, N/4): +-62.5 kHz here.
+        sf, os_factor = 11, 2
+        for cfo_hz in (62_000, -62_000):
+            found = search_all(capture(sf, os_factor, self.BW, cfo_hz, 30_000),
+                               sf, os_factor, self.BW, 62_499)
+            self.assertLessEqual(abs(found[0][1] - cfo_hz), self.BIN_HZ)
+        # Just past bw/4 the estimate wraps by bw/2 to the other side.
+        found = search_all(capture(sf, os_factor, self.BW, 63_000, 30_000),
+                           sf, os_factor, self.BW, 62_499)
+        self.assertLessEqual(abs(found[0][1] - (63_000 - self.BW / 2)), self.BIN_HZ)
+
+    def test_max_cfo_bound(self):
+        sf, os_factor = 11, 2
+        x = capture(sf, os_factor, self.BW, 30_000, 30_000)
+        self.assertEqual(len(search_all(x, sf, os_factor, self.BW, 30_000 + self.BIN_HZ)), 1)
+        self.assertEqual(search_all(x, sf, os_factor, self.BW, 30_000 - 2 * self.BIN_HZ), [])
+
+    def test_other_spreading_factors_and_os(self):
+        # Each at its SF's sensitivity floor (SX127x datasheet: -7.5 dB at SF7,
+        # 2.5 dB lower per SF step).
+        for sf, os_factor, bw, cfo_hz in ((7, 2, 250_000, -40_000), (9, 4, 125_000, 20_000),
+                                          (12, 2, 62_500, 10_000)):
+            with self.subTest(sf=sf, os_factor=os_factor):
+                snr_db = -7.5 - 2.5 * (sf - 7)
+                x = capture(sf, os_factor, bw, cfo_hz, 5 * (os_factor << sf) + 3, snr_db=snr_db)
+                found = search_all(x, sf, os_factor, bw, bw // 5)
+                self.assertEqual(len(found), 1)
+                self.assertLessEqual(abs(found[0][1] - cfo_hz), bw / (1 << sf))
+
+    def test_chunking_does_not_matter(self):
+        sf, os_factor = 11, 2
+        x = capture(sf, os_factor, self.BW, -12_345, 50_001)
+        whole = search_all(x, sf, os_factor, self.BW, 50_000, chunk=len(x))
+        for chunk in (1, 777, 4096, 65_537):
+            if chunk == 1:
+                x_short = x[:200_000]
+                self.assertEqual(search_all(x_short, sf, os_factor, self.BW, 50_000, chunk=997),
+                                 search_all(x_short, sf, os_factor, self.BW, 50_000, chunk=len(x_short)))
+                continue
+            self.assertEqual(search_all(x, sf, os_factor, self.BW, 50_000, chunk=chunk), whole)
+
+    def test_noise_alone_finds_nothing(self):
+        rng = np.random.default_rng(3)
+        x = (rng.standard_normal(2_000_000) + 1j * rng.standard_normal(2_000_000)).astype(np.complex64)
+        self.assertEqual(search_all(x, 11, 2, self.BW, 50_000), [])
+        self.assertEqual(search_all(x, 7, 2, self.BW, 50_000), [])
+
+    def test_peak_ratio_floor(self):
+        # A symbol at the SF11 floor (-17.5 dB) reaches 1 + 2048 x 10^-1.75 = 37, at
+        # the SF7 floor (-7.5 dB) 1 + 128 x 10^-0.75 = 24; a chance SF11 run of 4
+        # windows on one bin +-1 has probability p (3p / N)^3, p = N e^-8.
+        self.assertEqual(wrapper.CFO_PEAK_RATIO, 8.0)
+        self.assertGreater(1 + 2048 * 10 ** -1.75, 4.6 * wrapper.CFO_PEAK_RATIO)
+        self.assertGreater(1 + 128 * 10 ** -0.75, 2.9 * wrapper.CFO_PEAK_RATIO)
+        p = 2048 * np.exp(-8.0)
+        self.assertLess(p * (3 * p / 2048) ** 3, 1e-9)
+        # At the SF11 sensitivity floor the search still finds the preamble.
+        found = search_all(capture(11, 2, self.BW, 17_000, 30_000, snr_db=-17.5),
+                           11, 2, self.BW, 50_000)
+        self.assertEqual(len(found), 1)
+        self.assertLessEqual(abs(found[0][1] - 17_000), self.BIN_HZ)
+
+
+@unittest.skipIf(np is None, "numpy missing")
+class DelayedRotatorTest(unittest.TestCase):
+    def test_delay_then_scheduled_shift(self):
+        fs, delay = 500_000.0, 1000
+        rot = wrapper.DelayedRotator(fs, delay)
+        rot.schedule(1500, 10_000.0)
+        x = np.ones(5000, dtype=np.complex64)
+        y = np.concatenate([rot.process(x[:1234]), rot.process(x[1234:])])
+        np.testing.assert_array_equal(y[:delay], 0)
+        np.testing.assert_allclose(y[delay:delay + 1500], 1, atol=1e-6)
+        n = np.arange(len(y) - delay - 1500)
+        np.testing.assert_allclose(y[delay + 1500:], np.exp(-2j * np.pi * 10_000.0 * n / fs), atol=1e-4)
+
+    def test_phase_is_continuous_across_switches(self):
+        fs = 500_000.0
+        rot = wrapper.DelayedRotator(fs, 0)
+        rot.schedule(100, 5_000.0)
+        rot.schedule(300, -7_000.0)
+        y = rot.process(np.ones(600, dtype=np.complex64))
+        step = np.angle(y[1:] * np.conj(y[:-1]))
+        np.testing.assert_allclose(step[100:299], -2 * np.pi * 5_000.0 / fs, atol=1e-5)
+        np.testing.assert_allclose(step[300:], 2 * np.pi * 7_000.0 / fs, atol=1e-5)
+        np.testing.assert_allclose(np.abs(y), 1, atol=1e-6)
+
+    def test_late_switch_applies_at_the_next_sample(self):
+        rot = wrapper.DelayedRotator(500_000.0, 0)
+        rot.process(np.ones(100, dtype=np.complex64))
+        rot.schedule(10, 125_000.0)  # already emitted: quarter-turn steps from sample 100
+        y = rot.process(np.ones(3, dtype=np.complex64))
+        np.testing.assert_allclose(y, [1, -1j, -1], atol=1e-6)
+
+    def test_correction_meets_the_preamble_within_the_delay_budget(self):
+        # The search knows a P-upchirp preamble's offset at most P + 8 symbols after
+        # the correction must start (CfoSearchTest constants), so the 32-symbol delay
+        # line takes it in time up to P = 24 (Meshtastic sends 16) and late past it.
+        # One-symbol blocks: the source block holding the detection starts at most
+        # one symbol before it.
+        sf, os_factor, bw = 11, 2, 250_000
+        symbol = os_factor << sf
+        delay = wrapper.CFO_DELAY_SYMBOLS * symbol
+        for preamble, in_time in ((16, True), (24, True), (28, False)):
+            with self.subTest(preamble=preamble):
+                x = capture(sf, os_factor, bw, 20_000, 20 * symbol + 333, preamble)
+                search = wrapper.CfoSearch(sf, bw, os_factor, 50_000)
+                rot = wrapper.DelayedRotator(float(os_factor * bw), delay)
+                lags = []
+                for i in range(0, len(x), symbol):
+                    block = x[i:i + symbol]
+                    for at, cfo_hz in search.feed(block):
+                        # The rotator's next output sample is input sample i - delay.
+                        lags.append(i - at)
+                        rot.schedule(at, cfo_hz)
+                    rot.process(block)
+                self.assertEqual(len(lags), 1)
+                self.assertLessEqual(lags[0], (preamble + 8) * symbol)
+                self.assertEqual(lags[0] <= delay, in_time)
+
+
 if __name__ == "__main__":
     unittest.main()

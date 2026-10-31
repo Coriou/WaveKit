@@ -672,11 +672,44 @@ step is dropped. Drops are counted by reason (`crc_bad`, `short_frame`, `data_pa
 line, with a `frame_drop_summary` line at exit. Single frames are never logged.
 `rx_rssi` and `rx_snr` are 0, because gr-lora_sdr does not measure them.
 
-The decoder demodulates only the capture centre (`reach: centre`). Tune the centre to the
-channel, for example 869.525 MHz for EU_868 LongFast. A frame 200 kHz off centre does
-not decode. The DC spike at the centre does not stop decoding: a synthetic frame
-decoded at +10 and −5 dB SNR with or without one. The fixtures and tests are described
-in `fixtures/lora/README.md`.
+The decoder demodulates the capture centre (`reach: centre`). A channel up to bw/5 off
+the centre still decodes: 50 kHz for the 250 kHz presets, 25 kHz for 125 kHz and 12.5 kHz
+for 62.5 kHz. The planner places a LoRa slot only that close to the centre, so its
+passband is bw + 2 × bw/5 (350 kHz for LongFast). A frame 200 kHz off centre does not
+decode. The DC spike at the centre does not stop decoding: a synthetic frame decoded at
++10 and −5 dB SNR with or without one. The fixtures and tests are described in
+`fixtures/lora/README.md`.
+
+A frame arrives off its nominal frequency for two reasons:
+
+- The transmitter's crystal is off by some parts per million (10 ppm is 8.7 kHz at
+  869 MHz). The same error makes its symbol clock run fast or slow.
+- The channel sits off the capture centre. This is a pure frequency shift with no clock
+  error.
+
+gr-lora_sdr measures any offset up to ±bw/4, but it always corrects the clock error that a
+crystal offset would bring. On a pure shift that correction is wrong. At 5 kHz it moves the
+symbol timing by half a chip within a short frame. Meshtastic's coding rate 4/5 corrects no
+symbol error, so the frame is lost. The wrapper therefore runs gr-lora_sdr twice:
+
+- The direct path decodes the stream as received. It handles crystal offsets and expects
+  the 16 preamble upchirps Meshtastic sends.
+- The recentred path first measures each preamble's offset from its upchirps and
+  downchirps, to within one bin (122 Hz for LongFast). It shifts the stream by that offset
+  and decodes the result, so it handles pure shifts. It runs 32 symbols behind the direct
+  path (262 ms for LongFast), so the shift starts before the preamble.
+
+A frame that both paths decode is emitted once. The drop lines carry a `path` field
+(`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. At exit,
+a `cfo_search_summary` line gives the number of preambles found and the last offset
+measured. A frame with both a large shift and a large crystal error can still be lost,
+because each path corrects only one kind. `--cfo-search-hz 0` runs the direct path alone.
+
+To measure decoding against offsets, run `python3 scripts/fixtures/bench_lora_cfo.py` in
+the core image. It moves each committed capture 0 to ±30 kHz off its channel, either as a
+pure shift or as a crystal error with its clock error, with 8 or 16 preamble upchirps. It
+prints the decodes of each path, the measured offset and the CPU of each stage per second
+of signal. `--variant old` adds the wrapper without the search for comparison.
 
 gr-lora_sdr needs a sample rate that is a whole multiple of the LoRa bandwidth
 (`samp_rate = bw × os_factor`). The decoder runs it at `bw × 2` by default, 500 kS/s for

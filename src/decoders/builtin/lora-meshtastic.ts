@@ -104,8 +104,8 @@ const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
  * is about 6 dB x 8 = 48 dB, so the extra rejection is never seen. `-b 74`
  * (sox's narrowest passband, 74 % of the output Nyquist) still passes
  * 0.74 x 250 kHz = 185 kHz at 500 kS/s, above the 125 kHz half-width of a
- * 250 kHz channel plus most of the bw/4 = 62.5 kHz carrier offset the planner
- * admits, and it attenuates 185-250 kHz energy that frame_sync (which
+ * 250 kHz channel plus the bw/5 = 50 kHz carrier offset the decoder corrects
+ * ({@link LORA_CFO_SEARCH_DIVISOR}), and it attenuates 185-250 kHz energy that frame_sync (which
  * decimates without filtering) would fold into the channel. sox
  * CPU-s per signal second on the committed captures (+10 / -5 dB SNR, one loaded host): 1.024 -> 2.0 Msps
  * `-h` 0.22-0.24 / 0.56-0.60; 1.024 -> 1.0 Msps `-h` 0.14-0.18 / 0.32-0.33;
@@ -151,6 +151,22 @@ export function loraResampleCommand(
 	])
 }
 
+/**
+ * Carrier offset the decoder corrects, as a share of bw: the channel off the
+ * capture centre (centre placement) plus the transmitter's crystal error. The
+ * wrapper's recentred path finds each preamble's offset from its upchirps and
+ * downchirps, which read 2 x offset modulo bw, so only +-bw/4 is unambiguous.
+ * bw/5 keeps bw/4 - bw/5 = bw/20 (12.5 kHz at 250 kHz) inside that bound, and
+ * the slot's far edge, bw/2 + bw/5 = 0.7 x bw, inside the 0.74 x bw sox passband
+ * at os 2 ({@link LORA_SOX_RATE_OPTIONS}). LongFast: 250 kHz / 5 = 50 kHz.
+ */
+export const LORA_CFO_SEARCH_DIVISOR = 5
+
+/** {@link LORA_CFO_SEARCH_DIVISOR} applied to bw, in whole Hz (the wrapper takes an integer). */
+export function loraCfoSearchHz(bw: number): number {
+	return Math.floor(bw / LORA_CFO_SEARCH_DIVISOR)
+}
+
 /** Canonical install path of the Python wrapper inside the Docker image. */
 export const WRAPPER_SCRIPT_PATH = "/usr/local/bin/lora_meshtastic_decode.py"
 
@@ -182,6 +198,8 @@ export interface LoraMeshtasticOptions {
 	oversampling: number
 	/** Exact resampled IQ rate in Hz. */
 	effectiveTargetRate: number
+	/** Largest carrier offset the wrapper corrects, in Hz ({@link loraCfoSearchHz}). */
+	cfoSearchHz: number
 }
 
 export const RawOptionsSchema = z
@@ -245,6 +263,7 @@ export const RawOptionsSchema = z
 			inputSampleRate,
 			oversampling,
 			effectiveTargetRate,
+			cfoSearchHz: loraCfoSearchHz(bw),
 		}
 	})
 
@@ -395,6 +414,8 @@ export function buildDecoderArgs(options: LoraMeshtasticOptions): string[] {
 		options.channelKey,
 		"--region",
 		options.region,
+		"--cfo-search-hz",
+		String(options.cfoSearchHz),
 	]
 }
 

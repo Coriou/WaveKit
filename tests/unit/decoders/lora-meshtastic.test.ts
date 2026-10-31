@@ -14,11 +14,13 @@ import type {
 import {
 	LoraMeshtasticDecoder,
 	DEFAULT_OVERSAMPLING,
+	LORA_CFO_SEARCH_DIVISOR,
 	LORA_MESHTASTIC_CAPS,
 	LORA_PRESETS,
 	LORA_REGIONS,
 	PRESET_TABLE,
 	buildDecoderArgs,
+	loraCfoSearchHz,
 	parseLoraMeshtasticOptions,
 	parseMeshtasticPacket,
 	type LoraPreset,
@@ -452,7 +454,8 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 	describe("resample chain arguments", () => {
 		const WRAPPER =
 			"python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5"
-		const TAIL = "--frequency 869525000 --channel-key AQ== --region EU_868"
+		const TAIL =
+			"--frequency 869525000 --channel-key AQ== --region EU_868 --cfo-search-hz 50000"
 		const chain = (overrides: Record<string, unknown>): string[] =>
 			new TestLoraMeshtasticDecoder(
 				makeConfig(validOptions(overrides)),
@@ -488,6 +491,25 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 					`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
 			])
 		})
+
+		// The wrapper estimates 2 x offset modulo bw, so it rejects a range of bw/4 or more.
+		it.each([
+			[250_000, 50_000],
+			[125_000, 25_000],
+			[62_500, 12_500],
+			// A bandwidth override not divisible by 5 rounds down to whole Hz.
+			[100_003, 20_000],
+		])(
+			"searches bw/5 of carrier offset: bw %i Hz -> %i Hz, below bw/4",
+			(bandwidth, searchHz) => {
+				expect(LORA_CFO_SEARCH_DIVISOR).toBe(5)
+				expect(loraCfoSearchHz(bandwidth)).toBe(searchHz)
+				expect(4 * searchHz).toBeLessThan(bandwidth)
+				const opts = parseLoraMeshtasticOptions(validOptions({ bandwidth }))
+				const args = buildDecoderArgs(opts)
+				expect(args.slice(-2)).toEqual(["--cfo-search-hz", String(searchHz)])
+			},
+		)
 
 		it("passes the wrapper a samp-rate that is an integer multiple of bw for every preset", () => {
 			for (const preset of LORA_PRESETS) {
