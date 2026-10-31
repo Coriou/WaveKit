@@ -2,6 +2,9 @@ import { EventEmitter } from "node:events"
 import { rmSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
+import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
+import { makeObs } from "../../../mocks/scanner/observations.js"
+import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
 
@@ -129,6 +132,18 @@ async function rig(c: Case) {
 	const internal = h.service as unknown as {
 		now: () => number
 		store: DiscoveryStore
+		live: Map<string, LiveObservation>
+		ambientObservations: {
+			upsert(o: LiveObservation): void
+			remove(id: string): void
+		}
+		classify(t: unknown, s: string): LiveObservation["classification"]
+		ambientConfirmScope(ctx: {
+			sourceId: string
+			hz: number
+			at: number
+			protocol: "acars" | "vdl2"
+		}): string | null
 	}
 	internal.now = () => clock.at
 	await h.service.start()
@@ -147,11 +162,72 @@ async function rig(c: Case) {
 		clock.at += 2_000
 	}
 	const discoveries = () => internal.store.snapshot().discoveries
+	/**
+	 * A live observation at the channel the ambient index places decodes on: discovery-backed
+	 * (a stored spectrum discovery, its observation `id`) or observation-only (no discovery).
+	 */
+	const place = (id: string, backed: boolean): string | null => {
+		let discoveryId: string | null = null
+		if (backed) {
+			discoveryId = internal.store.ingest(
+				makeObs({
+					id,
+					centreHz: c.channelHz,
+					startedAt: clock.at - 1_000,
+					blocks: 2,
+					sourceId: "rtl",
+				}),
+			).discoveryId
+			if (discoveryId === null) throw new Error("spectrum did not surface")
+		}
+		const track = trackOf({
+			trackId: id,
+			centreHz: c.channelHz,
+			obwHz: 9_000,
+			epoch: 1,
+		})
+		const live = {
+			observationId: id,
+			sourceId: "rtl",
+			trackId: id,
+			epoch: 1,
+			jobIds: [],
+			discoveryId,
+			startedAt: clock.at - 1_000,
+			classification: internal.classify(track, "rtl"),
+			probeIds: new Set(),
+			lastActivityAt: clock.at,
+			lastIngestAt: clock.at,
+			lastTrack: backed ? track : undefined,
+			decoded: false,
+			encrypted: false,
+		} as unknown as LiveObservation
+		internal.live.set(id, live)
+		internal.ambientObservations.upsert(
+			backed ? live : ({ ...live, lastTrack: track } as LiveObservation),
+		)
+		return discoveryId
+	}
+	const unplace = (id: string) => {
+		internal.live.delete(id)
+		internal.ambientObservations.remove(id)
+	}
 	const stop = async () => {
 		await h.service.stop()
 		rmSync(h.dir, { recursive: true, force: true })
 	}
-	return { h, clock, trust, trustCalls, internal, send, discoveries, stop }
+	return {
+		h,
+		clock,
+		trust,
+		trustCalls,
+		internal,
+		send,
+		discoveries,
+		place,
+		unplace,
+		stop,
+	}
 }
 
 describe.each(CASES)("$decoder envelope to a decoded discovery", c => {
@@ -234,6 +310,111 @@ describe.each(CASES)("$decoder envelope to a decoded discovery", c => {
 			r.send(c.data(1))
 			r.send(c.data(1))
 			expect(r.discoveries()).toHaveLength(0)
+		} finally {
+			await r.stop()
+		}
+	})
+})
+
+describe.each(CASES)("$decoder pairing scope across placements", c => {
+	it("keeps one channel scope whether a decode is unplaced, observation-only or discovery-backed", async () => {
+		const r = await rig(c)
+		try {
+			const scope = () =>
+				r.internal.ambientConfirmScope({
+					sourceId: "rtl",
+					hz: c.channelHz,
+					at: r.clock.at,
+					protocol: c.protocol,
+				})
+			const channel = `a:${JSON.stringify(["rtl", c.protocol, c.channelHz])}`
+			expect(scope()).toBe(channel)
+			r.place("o_only", false)
+			expect(scope()).toBe(channel)
+			r.unplace("o_only")
+			r.place("o_backed", true)
+			expect(scope()).toBe(channel)
+			r.unplace("o_backed")
+			expect(scope()).toBe(channel)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("unplaced then discovery-backed: the pair confirms on the placed discovery, no anchor", async () => {
+		const r = await rig(c)
+		try {
+			r.send(c.data(1))
+			const id = r.place("o_backed", true)!
+			r.send(c.data(2))
+			const all = r.discoveries()
+			expect(all.map(d => d.id)).toEqual([id])
+			expect(r.internal.store.get(id)).toMatchObject({
+				protocol: c.protocol,
+				confidence: "decoded",
+				identity: c.identity,
+				proof: { kind: "decoded", protocol: c.protocol },
+			})
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("discovery-backed then unplaced: the pair proves the stored discovery at the channel, no anchor", async () => {
+		const r = await rig(c)
+		try {
+			const id = r.place("o_backed", true)!
+			r.send(c.data(1))
+			expect(r.internal.store.get(id)!.confidence).not.toBe("decoded")
+			// Its observation has since closed: no live placement names the discovery.
+			r.unplace("o_backed")
+			r.send(c.data(2))
+			expect(r.discoveries().map(d => d.id)).toEqual([id])
+			expect(r.internal.store.get(id)).toMatchObject({
+				protocol: c.protocol,
+				confidence: "decoded",
+				identity: c.identity,
+			})
+			expect(r.h.service.trialMemoryOf(id)).toEqual([
+				expect.objectContaining({ protocol: c.protocol, decoder: c.decoder }),
+			])
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("unplaced then observation-only and back: the pair anchors at the channel", async () => {
+		const r = await rig(c)
+		try {
+			r.send(c.data(1))
+			r.place("o_only", false)
+			r.send(c.data(2))
+			const all = r.discoveries()
+			expect(all).toHaveLength(1)
+			expect(all[0]).toMatchObject({
+				anchor: "decode",
+				frequencyHz: c.channelHz,
+				protocol: c.protocol,
+			})
+			r.unplace("o_only")
+			r.send(c.data(3))
+			expect(r.discoveries().map(d => d.id)).toEqual([all[0]!.id])
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("observation-only then unplaced: the pair anchors at the channel", async () => {
+		const r = await rig(c)
+		try {
+			r.place("o_only", false)
+			r.send(c.data(1))
+			expect(r.discoveries()).toHaveLength(0)
+			r.unplace("o_only")
+			r.send(c.data(2))
+			expect(r.discoveries()).toEqual([
+				expect.objectContaining({ anchor: "decode", protocol: c.protocol }),
+			])
 		} finally {
 			await r.stop()
 		}

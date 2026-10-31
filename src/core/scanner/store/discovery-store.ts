@@ -17,10 +17,13 @@ import {
 	anchorHzOf,
 	anchorRowKey,
 	canAnchor,
+	CHANNEL_ANCHOR_PROTOCOLS,
 	decodeAnchorKey,
 	newDecodeAnchor,
 } from "./decode-anchor.js"
 import { ADSB_HZ } from "../probes/confirm/readsb.js"
+import { ambientReachHz } from "../probes/ambient-placement.js"
+import { isTrusted } from "../probes/ambient-trust.js"
 import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
@@ -332,6 +335,13 @@ const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
 const DAY_MS = 86_400_000
 const TRANSIENT: Ingested = { discoveryId: null, change: "transient" }
+
+/** Comparable text of a staged anchor identity ("" for none). */
+function anchorIdentityText(identity: Identity | undefined): string {
+	return identity === undefined
+		? ""
+		: JSON.stringify([identity.kind, identity.value])
+}
 const CHANGE_RANK: Record<StoreChange, number> = {
 	transient: 0,
 	updated: 1,
@@ -899,9 +909,10 @@ export class DiscoveryStore
 	>()
 	private readonly anchorWindows = new Map<string, Map<string, number>>()
 	/**
-	 * A channel anchor's latest checked identity (ACARS registration, VDL2 address), which its
-	 * proof cites. One entry per anchor discovery; in memory only, so a restored anchor's proof
-	 * names no identity until its next confirmed decode.
+	 * A channel anchor's latest published checked identity (ACARS registration, VDL2 address),
+	 * which its proof cites. One entry per anchor discovery, set only by publishAnchor's commit.
+	 * In memory only: a restored anchor has none, so it is not proven (channelAnchorView) until
+	 * its next confirmed decode is published.
 	 */
 	private readonly anchorIdentity = new Map<string, Identity>()
 	/** Latest confirmations stay private until publishAnchor commits a revision. */
@@ -912,6 +923,8 @@ export class DiscoveryStore
 			seen: string
 			observations: number
 			trust: "commanded" | "relay"
+			/** A channel anchor's latest checked identity, staged with the confirmation. */
+			identity?: Identity
 		}
 	>()
 	private readonly anchorPublished = new Map<
@@ -922,6 +935,8 @@ export class DiscoveryStore
 			bucket: number
 			seen: string
 			observations: number
+			/** identityText of the published identity ("" for none, as ADS-B). */
+			identity: string
 		}
 	>()
 	private readonly decodeAnchors = new Map<string, string>()
@@ -1159,10 +1174,12 @@ export class DiscoveryStore
 		const previous = this.anchorPublished.get(id)
 		const count = pending.count
 		const bucket = Math.floor(Date.parse(pending.seen) / 10_000)
+		const identity = anchorIdentityText(pending.identity)
 		if (
 			previous &&
 			previous.count === count &&
 			previous.bucket === bucket &&
+			previous.identity === identity &&
 			(!force ||
 				(previous.seen === pending.seen &&
 					previous.observations === pending.observations))
@@ -1177,12 +1194,14 @@ export class DiscoveryStore
 			bucket,
 			seen: pending.seen,
 			observations: pending.observations,
+			identity,
 		})
 		this.commit("observation", op => {
 			d.aircraftCount = pending.count
 			d.lastSeenAt = pending.seen
 			d.observationCount = pending.observations
 			d.tuningTrust = pending.trust
+			if (pending.identity) this.anchorIdentity.set(id, { ...pending.identity })
 			const observation = this.observationIndex.get(`decode:${id}`)
 			if (observation) observation.endedAt = pending.seen
 			this.invalidateLabel(id)
@@ -1219,7 +1238,8 @@ export class DiscoveryStore
 		if (
 			published &&
 			(published.count !== pending.count ||
-				published.bucket !== Math.floor(Date.parse(pending.seen) / 10_000))
+				published.bucket !== Math.floor(Date.parse(pending.seen) / 10_000) ||
+				published.identity !== anchorIdentityText(pending.identity))
 		)
 			next = Math.min(next, published.at + 5_000)
 		if (!Number.isFinite(next)) return
@@ -1234,16 +1254,75 @@ export class DiscoveryStore
 		this.anchorExpiry.set(id, timer)
 	}
 
+	/**
+	 * The decode anchor a point target at `hz` names: the ADS-B anchor within the 1 kHz target
+	 * tolerance of 1090 MHz, else the one channel anchor (ACARS or VDL2) keyed at `hz`'s channel
+	 * (anchorHzOf). Both protocols anchored on one channel name neither.
+	 */
 	decodeAnchorFor(sourceId: string, hz: number): Discovery | undefined {
-		if (
-			!Number.isFinite(hz) ||
-			Math.abs(hz - ADSB_HZ) > SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
+		if (!Number.isFinite(hz)) return undefined
+		if (Math.abs(hz - ADSB_HZ) <= SCANNER_AMBIENT_TARGET_TOLERANCE_HZ) {
+			const id = this.decodeAnchors.get(
+				decodeAnchorKey(sourceId, "adsb", ADSB_HZ),
+			)
+			return id === undefined ? undefined : this.get(id)
+		}
+		const ids: string[] = []
+		for (const protocol of CHANNEL_ANCHOR_PROTOCOLS) {
+			const channel = anchorHzOf(protocol, hz)
+			const id =
+				channel === undefined
+					? undefined
+					: this.decodeAnchors.get(decodeAnchorKey(sourceId, protocol, channel))
+			if (id !== undefined) ids.push(id)
+		}
+		return ids.length === 1 ? this.get(ids[0]!) : undefined
+	}
+
+	/**
+	 * A confirmed channel decode (ACARS, VDL2) whose channel already holds one stored spectrum
+	 * discovery of the source (its observation since closed, so no live placement named it):
+	 * that discovery takes the decode through its decoded-proof path, the observation's evidence
+	 * then the record (appendObservationEvidence, applyEvidenceResult, as a stored replay
+	 * does), and no anchor opens beside it.
+	 *
+	 * Reach is point placement's reach for a zero-width track, ambientReachHz(protocol, 0) =
+	 * max(AMBIENT_VFO_MIN_REACH_HZ 1 500, 0) + AMBIENT_PLACEMENT_TOLERANCE_HZ 2 500 = 4 000 Hz,
+	 * exclusive as point placement is (3 999 Hz reaches, 4 000 Hz does not). It stays below half
+	 * the tightest 8.33 kHz aeronautical channel spacing (8 333 / 2 = 4 166.5 Hz), so a
+	 * neighbouring channel's discovery never takes the decode.
+	 *
+	 * Fails closed to the anchor (null): no discovery in reach; two or more (ambiguous, none is
+	 * proven); one whose tuning trust is not trusted or that is decoded as another protocol; or
+	 * no observation of the decode's epoch that accepts the evidence. The caller has already
+	 * checked the decode (canAnchor: confirmed, CRC-clean, trust re-read at its placement).
+	 */
+	private proveChannelDiscovery(
+		sourceId: string,
+		anchorHz: number,
+		ev: DecodeEvidence,
+	): Ingested | null {
+		const reach = ambientReachHz(ev.protocol, 0)
+		const hits = this.discoveriesNear(anchorHz, reach, sourceId).filter(
+			d => d.anchor !== "decode" && Math.abs(d.frequencyHz - anchorHz) < reach,
 		)
-			return undefined
-		const id = this.decodeAnchors.get(
-			decodeAnchorKey(sourceId, "adsb", ADSB_HZ),
-		)
-		return id === undefined ? undefined : this.get(id)
+		if (hits.length !== 1) return null
+		const d = hits[0]!
+		if (!isTrusted(d.tuningTrust)) return null
+		if (d.confidence === "decoded" && d.protocol !== ev.protocol) return null
+		const list = this.byDiscovery.get(d.id) ?? []
+		let observationId: string | undefined
+		for (let i = list.length - 1; i >= 0; i--) {
+			const o = list[i]!
+			if (o.sampleRange.epoch !== ev.epoch) continue
+			if (this.appendObservationEvidence(o.id, ev)) observationId = o.id
+			break
+		}
+		if (observationId === undefined) return null
+		const applied = this.applyEvidenceResult(d.id, ev, {})
+		// The decode may have merged the discovery (identity key): follow the survivor.
+		const survivor = this.discoveryIdOf(observationId) ?? d.id
+		return { discoveryId: survivor, change: applied.change ?? "updated" }
 	}
 
 	/** Canonical destination for confirmed, trusted decode-anchored protocols. */
@@ -1256,6 +1335,10 @@ export class DiscoveryStore
 		if (!canAnchor(ev, hz, trust) || !ev.identity) return TRANSIENT
 		const anchorHz = anchorHzOf(ev.protocol, hz)
 		if (anchorHz === undefined) return TRANSIENT
+		if (CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol)) {
+			const proved = this.proveChannelDiscovery(sourceId, anchorHz, ev)
+			if (proved) return proved
+		}
 		const existingId = this.decodeAnchors.get(
 			decodeAnchorKey(sourceId, ev.protocol, anchorHz),
 		)
@@ -1284,15 +1367,11 @@ export class DiscoveryStore
 		const row = anchorRowKey(ev.protocol, ev.identity.value)
 		rows.delete(row)
 		rows.set(row, ev.at)
-		if (ev.protocol !== "adsb")
-			this.anchorIdentity.set(d.id, {
-				kind: ev.identity.kind,
-				value: ev.identity.value,
-			})
 		if (rows.size > ANCHOR_AIRCRAFT_MAX) {
 			const first = rows.keys().next()
 			if (!first.done) rows.delete(first.value)
 		}
+		// The identity is staged with the confirmation; publishAnchor's commit makes it visible.
 		this.anchorPending.set(d.id, {
 			count: rows.size,
 			seen: iso(ev.at),
@@ -1300,6 +1379,11 @@ export class DiscoveryStore
 				(this.anchorPending.get(d.id)?.observations ?? d.observationCount) +
 				(existingId === undefined ? 0 : 1),
 			trust,
+			...(ev.protocol !== "adsb"
+				? {
+						identity: { kind: ev.identity.kind, value: ev.identity.value },
+					}
+				: {}),
 		})
 		this.scheduleAnchorExpiry(d.id, existingId === undefined)
 		return {
@@ -5172,10 +5256,22 @@ export class DiscoveryStore
 
 	/**
 	 * A channel anchor (ACARS, VDL2) is decoded by construction: only a confirmed CRC-clean
-	 * identity creates or refreshes it. Its proof cites the latest checked identity.
+	 * identity creates or refreshes it. Its proof cites the latest published checked identity.
+	 * A restored anchor (snapshot or journal) has none in memory: it is not proven, and shows
+	 * as an unproven record, until a fresh confirmed decode is published.
 	 */
 	private channelAnchorView(d: Discovery): DiscoveryProofView {
 		const identity = this.anchorIdentity.get(d.id)
+		if (identity === undefined)
+			return {
+				proof: null,
+				evidence: "weak",
+				label: {
+					protocol: d.protocol,
+					family: d.family,
+					confidence: d.confidence,
+				},
+			}
 		const bare = {
 			kind: "decoded" as const,
 			protocol: d.protocol,
@@ -5185,7 +5281,7 @@ export class DiscoveryStore
 			tried: [],
 			unavailable: [],
 			encrypted: false,
-			...(identity ? { identity: { ...identity } } : {}),
+			identity: { ...identity },
 		}
 		return {
 			label: {

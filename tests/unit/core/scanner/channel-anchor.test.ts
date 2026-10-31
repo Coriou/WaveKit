@@ -1,5 +1,5 @@
 import fc from "fast-check"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	AERO_VHF_MAX_HZ,
 	AERO_VHF_MIN_HZ,
@@ -9,6 +9,7 @@ import {
 } from "../../../../src/core/scanner/store/decode-anchor.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { evidenceLevelOf } from "../../../../src/core/scanner/proof.js"
+import { makeObs } from "../../../mocks/scanner/observations.js"
 import type {
 	DecodeEvidence,
 	ScannerProtocol,
@@ -38,13 +39,29 @@ const vdl2 = (value = "ABC001", at = T0): DecodeEvidence => ({
 	metadata: {},
 })
 
-function store() {
+function store(now: () => number = () => T0) {
 	let n = 0
 	return new DiscoveryStore({
 		maxDiscoveries: 10,
-		now: () => T0,
+		now,
 		newId: () => `anchor${n++}`,
 	})
+}
+
+/** A closed spectrum observation's discovery centred `offsetHz` from CH_A (epoch 1, trusted). */
+function spectrum(s: DiscoveryStore, id: string, offsetHz: number): string {
+	const created = s.ingest(
+		makeObs({
+			id,
+			centreHz: CH_A + offsetHz,
+			startedAt: T0 - 10_000,
+			blocks: 2,
+			obwHz: 9_000,
+			sourceId: "rtl",
+		}),
+	)
+	if (created.discoveryId === null) throw new Error("spectrum did not surface")
+	return created.discoveryId
 }
 
 describe("channel anchors (ACARS, VDL2)", () => {
@@ -83,6 +100,8 @@ describe("channel anchors (ACARS, VDL2)", () => {
 				expect(s.anchorDecode("rtl", CH_A, next, "commanded").discoveryId).toBe(
 					d.id,
 				)
+				// Staged until published (the stop flush here).
+				s.stopAnchorExpiry()
 				expect(s.get(d.id)!.proof!.identity).toEqual(next.identity)
 			} finally {
 				s.stopAnchorExpiry()
@@ -214,5 +233,218 @@ describe("channel anchors (ACARS, VDL2)", () => {
 			),
 			{ numRuns: 200 },
 		)
+	})
+})
+
+describe("channel decode at a stored spectrum discovery", () => {
+	const anchors = (s: DiscoveryStore) =>
+		s.snapshot().discoveries.filter(d => d.anchor === "decode")
+
+	// Reach ambientReachHz(protocol, 0) = 1 500 + 2 500 = 4 000 Hz, exclusive as point placement.
+	it.each([0, 3_999, -3_999])(
+		"proves the one discovery %i Hz from the channel instead of opening an anchor",
+		offset => {
+			for (const ev of [acars(), vdl2()]) {
+				const s = store()
+				try {
+					const id = spectrum(s, "o1", offset)
+					const res = s.anchorDecode("rtl", CH_A, ev, "commanded")
+					expect(res.discoveryId).toBe(id)
+					expect(anchors(s)).toHaveLength(0)
+					expect(s.snapshot().discoveries).toHaveLength(1)
+					const d = s.get(id)!
+					expect(d).toMatchObject({
+						protocol: ev.protocol,
+						confidence: "decoded",
+						identity: ev.identity,
+						proof: { kind: "decoded", protocol: ev.protocol },
+					})
+					expect(evidenceLevelOf(d)).toBe("proven")
+					// The observation carries the checked decode the proof cites.
+					expect(s.snapshot().observations[0]!.decode).toEqual([ev])
+				} finally {
+					s.stopAnchorExpiry()
+				}
+			}
+		},
+	)
+
+	it.each([4_000, -4_000, 4_001])(
+		"anchors beside a discovery %i Hz away (outside the reach)",
+		offset => {
+			const s = store()
+			try {
+				const id = spectrum(s, "o1", offset)
+				const res = s.anchorDecode("rtl", CH_A, acars(), "commanded")
+				expect(res.change).toBe("created")
+				expect(res.discoveryId).not.toBe(id)
+				expect(anchors(s)).toHaveLength(1)
+				expect(s.get(id)!.confidence).not.toBe("decoded")
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		},
+	)
+
+	it("fails closed to the anchor when two discoveries are in reach: neither is proven", () => {
+		const s = store()
+		try {
+			const a = spectrum(s, "o1", -2_000)
+			const b = spectrum(s, "o2", 2_000)
+			expect(a).not.toBe(b)
+			const res = s.anchorDecode("rtl", CH_A, acars(), "commanded")
+			expect(res.change).toBe("created")
+			expect(anchors(s).map(d => d.id)).toEqual([res.discoveryId])
+			for (const id of [a, b]) {
+				expect(s.get(id)!.confidence).not.toBe("decoded")
+				expect(s.get(id)!.proof).toBeUndefined()
+			}
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	it("never proves through untrusted, unclean or another epoch's evidence", () => {
+		for (const [ev, trust, anchored] of [
+			[acars(), "unverified", false],
+			[{ ...acars(), crcClean: false }, "commanded", false],
+			// Another epoch: the observation refuses the evidence, the anchor takes it.
+			[{ ...acars(), epoch: 2 }, "commanded", true],
+		] as const) {
+			const s = store()
+			try {
+				const id = spectrum(s, "o1", 0)
+				s.anchorDecode("rtl", CH_A, ev, trust)
+				expect(s.get(id)!.confidence).not.toBe("decoded")
+				expect(
+					s.snapshot().observations.find(o => o.id === "o1")!.decode ?? [],
+				).toEqual([])
+				expect(anchors(s)).toHaveLength(anchored ? 1 : 0)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("another source's discovery or a discovery decoded as another protocol never takes the decode", () => {
+		const s = store()
+		try {
+			const other = s.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: CH_A,
+					startedAt: T0 - 10_000,
+					blocks: 2,
+					sourceId: "other",
+				}),
+			).discoveryId!
+			s.anchorDecode("rtl", CH_A, acars(), "commanded")
+			expect(s.get(other)!.confidence).not.toBe("decoded")
+			expect(anchors(s)).toHaveLength(1)
+			const t = store()
+			try {
+				const id = spectrum(t, "o2", 0)
+				t.anchorDecode("rtl", CH_A, vdl2(), "commanded")
+				expect(t.get(id)!.protocol).toBe("vdl2")
+				const res = t.anchorDecode("rtl", CH_A, acars(), "commanded")
+				expect(res.discoveryId).not.toBe(id)
+				expect(t.get(id)!.protocol).toBe("vdl2")
+				expect(anchors(t)).toHaveLength(1)
+			} finally {
+				t.stopAnchorExpiry()
+			}
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+})
+
+describe("channel anchor publication and restore", () => {
+	it("stages a new identity and publishes it with a revision and change event", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(T0)
+		const s = store(() => Date.now())
+		const events: ReturnType<DiscoveryStore["get"]>[] = []
+		s.on("change", (id: string) => events.push(s.get(id)))
+		try {
+			const id = s.anchorDecode("rtl", CH_A, acars(), "commanded").discoveryId!
+			const created = s.get(id)!
+			expect(created.proof!.identity).toEqual(acars().identity)
+			expect(events).toHaveLength(1)
+			vi.advanceTimersByTime(1000)
+			s.anchorDecode("rtl", CH_A, acars("TEST02", Date.now()), "commanded")
+			// Not visible before publication: same identity, same revision, no event.
+			expect(s.get(id)).toEqual(created)
+			expect(events).toHaveLength(1)
+			vi.advanceTimersByTime(3999)
+			expect(s.get(id)).toEqual(created)
+			vi.advanceTimersByTime(1)
+			expect(events).toHaveLength(2)
+			const published = s.get(id)!
+			expect(published).toEqual(events.at(-1))
+			expect(published.proof!.identity).toEqual({
+				kind: "acars-reg",
+				value: "TEST02",
+			})
+			expect(published.revision).toBeGreaterThan(created.revision ?? 0)
+			// An identity change alone (same count, same 10 s bucket) still publishes.
+			vi.advanceTimersByTime(1000)
+			s.anchorDecode("rtl", CH_A, acars("TEST01", Date.now()), "commanded")
+			expect(s.get(id)!.proof!.identity!.value).toBe("TEST02")
+			vi.advanceTimersByTime(5000)
+			expect(events).toHaveLength(3)
+			expect(s.get(id)!.proof!.identity!.value).toBe("TEST01")
+			expect(s.get(id)!.aircraftCount).toBe(2)
+		} finally {
+			s.stopAnchorExpiry()
+			vi.useRealTimers()
+		}
+	})
+
+	it("withholds decoded/proven from a restored anchor until a fresh confirmed decode", () => {
+		for (const ev of [acars(), vdl2()]) {
+			const original = store()
+			const restored = store()
+			try {
+				const id = original.anchorDecode(
+					"rtl",
+					CH_A,
+					ev,
+					"commanded",
+				).discoveryId!
+				expect(evidenceLevelOf(original.get(id)!)).toBe("proven")
+				restored.restore(original.snapshot())
+				const d = restored.get(id)!
+				expect(d.anchor).toBe("decode")
+				expect(d.proof).toBeUndefined()
+				expect(evidenceLevelOf(d)).toBe("weak")
+				expect(restored.decodeAnchorFor("rtl", CH_A)?.proof).toBeUndefined()
+				const next = { ...ev, at: T0 + 1 }
+				expect(
+					restored.anchorDecode("rtl", CH_A, next, "commanded").discoveryId,
+				).toBe(id)
+				restored.stopAnchorExpiry()
+				expect(restored.get(id)!.proof!.identity).toEqual(ev.identity)
+				expect(evidenceLevelOf(restored.get(id)!)).toBe("proven")
+			} finally {
+				original.stopAnchorExpiry()
+				restored.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("names the one channel anchor at a point target, and none for both protocols at once", () => {
+		const s = store()
+		try {
+			const a = s.anchorDecode("rtl", CH_A, acars(), "commanded").discoveryId
+			expect(s.decodeAnchorFor("rtl", CH_A)?.id).toBe(a)
+			expect(s.decodeAnchorFor("rtl", CH_A + 0.4)?.id).toBe(a)
+			expect(s.decodeAnchorFor("rtl", CH_B)).toBeUndefined()
+			expect(s.decodeAnchorFor("other", CH_A)).toBeUndefined()
+			s.anchorDecode("rtl", CH_A, vdl2(), "commanded")
+			expect(s.decodeAnchorFor("rtl", CH_A)).toBeUndefined()
+		} finally {
+			s.stopAnchorExpiry()
+		}
 	})
 })

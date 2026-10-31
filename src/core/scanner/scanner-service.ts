@@ -4459,11 +4459,15 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * trial choice 3a: an ambient decode shares acceptance with the discovery it would be placed on
 	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone. A
-	 * channel-anchored decode (ACARS, VDL2) without a single placed discovery pairs on its channel
-	 * instead: each short burst is its own observation, so an observation scope never pairs two
-	 * blocks minutes apart, and most bursts open no track at all.
+	 * channel-anchored decode (ACARS, VDL2) always pairs on its channel, whatever placement it
+	 * finds: each short burst is its own observation and most open no track at all, so a scope
+	 * that followed placement would flip between the channel, an observation and a discovery
+	 * from one message to the next, and two valid messages would never pair. Where the confirmed
+	 * decode lands (a placed discovery, else the channel) is onAmbientEvidence's choice.
 	 */
 	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
+		const channel = this.channelAnchorScope(ctx)
+		if (channel !== null) return channel
 		const placed = this.placeAmbient(
 			{
 				sourceId: ctx.sourceId,
@@ -4478,17 +4482,16 @@ export class ScannerService extends EventEmitter {
 		const scopes = new Set(
 			placed.map(o => this.scopeOfObservation(o, o.observationId)),
 		)
-		const channel = this.channelAnchorScope(ctx)
+		if (scopes.size !== 1) return null
 		const [scope] = scopes
-		if (scopes.size === 1 && scope !== undefined)
-			if (channel === null || scope.startsWith("d:")) return scope
-		return channel
+		return scope ?? null
 	}
 
 	/**
-	 * A confirmed ACARS block or VDL2 frame that no observation places: it anchors at its own
-	 * channel (store.anchorDecode), trust re-read at the placement the decode was trusted at.
-	 * Identity-less, unclean or untrusted evidence never anchors (canAnchor).
+	 * A confirmed ACARS block or VDL2 frame that no placed discovery took: it proves the one
+	 * stored spectrum discovery at its channel, else anchors there (store.anchorDecode), trust
+	 * re-read at the placement the decode was trusted at. Identity-less, unclean or untrusted
+	 * evidence never anchors nor proves (canAnchor).
 	 */
 	private anchorChannelDecode(e: AmbientEvidenceEvent): void {
 		if (!e.ev.identity || !e.ev.crcClean) return
@@ -4518,6 +4521,24 @@ export class ScannerService extends EventEmitter {
 			return
 		}
 		const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
+		const proved = this.store.get(anchored.discoveryId)
+		if (proved && proved.anchor !== "decode") {
+			// An existing spectrum discovery took the decode (its decoded-proof path).
+			this.dirty = true
+			if (proved.confidence !== "decoded" || proved.protocol !== e.ev.protocol)
+				return
+			this.knownProtocols.recordDecode(proved.id)
+			this.noteDecoded(proved.id, e.sourceId, e.ev.protocol)
+			this.lastConfirm.set(proved.id, this.now())
+			if (decoderType)
+				this.trialMemory.record(
+					proved.id,
+					e.ev.protocol,
+					decoderType,
+					"decoded",
+				)
+			return
+		}
 		if (
 			decoderType &&
 			!this.trialMemory
@@ -4610,13 +4631,12 @@ export class ScannerService extends EventEmitter {
 			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
 			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
 		})
-		if (
-			candidates.length === 0 &&
-			CHANNEL_ANCHOR_PROTOCOLS.includes(e.ev.protocol)
-		) {
+		const channelAnchored = CHANNEL_ANCHOR_PROTOCOLS.includes(e.ev.protocol)
+		if (candidates.length === 0 && channelAnchored) {
 			this.anchorChannelDecode(e)
 			return
 		}
+		let placedOnDiscovery = false
 
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
@@ -4626,6 +4646,7 @@ export class ScannerService extends EventEmitter {
 			const before = live.acceptedIdentity
 			const accepted = this.applyEvidence(live, e.ev)
 			const discoveryId = live.discoveryId
+			if (discoveryId && this.store.get(discoveryId)) placedOnDiscovery = true
 			if (
 				accepted &&
 				e.ev.identity &&
@@ -4648,6 +4669,9 @@ export class ScannerService extends EventEmitter {
 			for (const jobId of live.jobIds)
 				this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)
 		}
+		// An observation-only placement (its track never became a discovery) holds no proof: the
+		// confirmed decode proves the stored discovery at its channel, else anchors there.
+		if (channelAnchored && !placedOnDiscovery) this.anchorChannelDecode(e)
 	}
 
 	/** Returns whether the observation accepted the evidence (§ 7.1; replay results count only then). */
