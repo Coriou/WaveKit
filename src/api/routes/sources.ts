@@ -492,15 +492,12 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 				const body =
 					action === "resume" ? ResumeBodySchema.safeParse(request.body) : null
 				if (body && !body.success)
-					return reply.status(400).send({
-						error: "BadRequest",
-						code: "INVALID_RESUME_REQUEST",
-						message: body.error.issues
-							.map(
-								issue => `${issue.path.join(".") || "body"}: ${issue.message}`,
-							)
-							.join("; "),
-					})
+					return reply.status(400).send(
+						zodValidationBody(body.error, ResumeBodySchema, {
+							error: "BadRequest",
+							code: "INVALID_RESUME_REQUEST",
+						}),
+					)
 				const restoreTuning = body?.data?.restoreTuning === true
 				const notFound = {
 					error: "NotFound",
