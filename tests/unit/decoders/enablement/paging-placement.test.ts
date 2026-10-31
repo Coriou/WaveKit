@@ -161,14 +161,14 @@ describe("paging raster placement (3.18)", () => {
 			["bogus"],
 		])
 			expect(table(modes)).toBe(DECODER_BAND_TABLE)
-		// A mode without a band-plan service keeps the band unknown.
+		// Every known mode has a service, so a mode list is never left unknown.
 		for (const modes of [
 			["FSK9600"],
 			["EAS"],
 			["POCSAG1200", "EAS"],
 			["AFSK1200", "FSK9600"],
 		])
-			expect(table(modes)).toBe(BAND_DEFAULTS)
+			expect(table(modes)).not.toBe(BAND_DEFAULTS)
 		// An explicit channel pin keeps the band unknown, paging-only lists included.
 		for (const key of [
 			"channelHz",
@@ -247,6 +247,111 @@ describe("paging raster placement (3.18)", () => {
 				sampleRateHz: 2_400_000,
 			}).verdict,
 		).toBe("in-band")
+	})
+
+	it("R3: EAS and FSK9600 are out of band at 1090 MHz in every region, never unknown", () => {
+		const resolve = (modes: string[], code: (typeof BAND_REGIONS)[number]) =>
+			resolveDecoderBand({
+				type: "multimon-ng",
+				declaration: {},
+				region: { code, source: "configured" },
+				table: decoderBandTable("multimon-ng", { modes }),
+			}).requirements
+		const verdict = (
+			modes: string[],
+			code: (typeof BAND_REGIONS)[number],
+			centerHz: number,
+		) =>
+			assessDecoderBand(resolve(modes, code), {
+				centerHz,
+				sampleRateHz: 2_400_000,
+			})
+		for (const code of BAND_REGIONS)
+			for (const modes of [
+				["EAS"],
+				["FSK9600"],
+				["EAS", "FSK9600"],
+				["AFSK1200", "EAS"],
+				["POCSAG1200", "EAS"],
+				["DTMF", "FSK9600"],
+			])
+				expect(verdict(modes, code, 1_090_000_000)).toMatchObject({
+					verdict: "out-of-band",
+					reasonCode: "frequency-out-of-band",
+				})
+		// EAS: NOAA Weather Radio / Weatheradio Canada, 162.400-162.550 MHz.
+		const weather = { minHz: 162_400_000, maxHz: 162_550_000 }
+		for (const code of ["US", "CA"] as const) {
+			expect(resolve(["EAS"], code)?.rangesHz).toEqual([weather])
+			expect(verdict(["EAS"], code, 162_475_000).verdict).toBe("in-band")
+			expect(verdict(["EAS"], code, 144_390_000).verdict).toBe("out-of-band")
+		}
+		// No weather radio band elsewhere: EAS alone is nowhere.
+		for (const code of ["EU", "AU", "NZ", "JP", "CN"] as const) {
+			expect(resolve(["EAS"], code)).toMatchObject({ nowhere: true })
+			expect(verdict(["EAS"], code, 162_475_000).verdict).toBe("out-of-band")
+		}
+		// FSK9600: the region's amateur 2 m and 70 cm plans.
+		expect(resolve(["FSK9600"], "EU")?.rangesHz).toEqual([
+			{ minHz: 144_000_000, maxHz: 146_000_000 },
+			{ minHz: 430_000_000, maxHz: 440_000_000 },
+		])
+		for (const code of ["US", "CA"] as const)
+			expect(resolve(["FSK9600"], code)?.rangesHz).toEqual([
+				{ minHz: 144_000_000, maxHz: 148_000_000 },
+				{ minHz: 420_000_000, maxHz: 450_000_000 },
+			])
+		expect(verdict(["FSK9600"], "EU", 144_800_000).verdict).toBe("in-band")
+		expect(verdict(["FSK9600"], "EU", 435_000_000).verdict).toBe("in-band")
+		expect(verdict(["FSK9600"], "EU", 162_475_000).verdict).toBe("out-of-band")
+		expect(verdict(["FSK9600"], "US", 146_520_000).verdict).toBe("in-band")
+		// The catalogue has no amateur plan there: FSK9600 alone is nowhere.
+		for (const code of ["AU", "NZ", "JP", "CN"] as const)
+			expect(resolve(["FSK9600"], code)).toMatchObject({ nowhere: true })
+	})
+
+	it("R3: a mixed list's band is the union of its modes' ranges", () => {
+		const verdict = (
+			modes: string[],
+			code: (typeof BAND_REGIONS)[number],
+			centerHz: number,
+		) =>
+			assessDecoderBand(
+				resolveDecoderBand({
+					type: "multimon-ng",
+					declaration: {},
+					region: { code, source: "configured" },
+					table: decoderBandTable("multimon-ng", { modes }),
+				}).requirements,
+				{ centerHz, sampleRateHz: 1_024_000 },
+			).verdict
+		// AFSK1200 + EAS: APRS channel and weather radio, nothing else.
+		expect(verdict(["AFSK1200", "EAS"], "US", 144_390_000)).toBe("in-band")
+		expect(verdict(["AFSK1200", "EAS"], "US", 162_475_000)).toBe("in-band")
+		expect(verdict(["AFSK1200", "EAS"], "US", 433_920_000)).toBe("out-of-band")
+		expect(verdict(["AFSK1200", "EAS"], "US", 868_950_000)).toBe("out-of-band")
+		// In the EU EAS adds nothing: AFSK1200's channel alone.
+		expect(verdict(["AFSK1200", "EAS"], "EU", 144_800_000)).toBe("in-band")
+		expect(verdict(["AFSK1200", "EAS"], "EU", 435_000_000)).toBe("out-of-band")
+		// POCSAG + EAS: paging plus weather radio; FSK9600 adds 70 cm.
+		expect(verdict(["POCSAG1200", "EAS"], "EU", 466_100_000)).toBe("in-band")
+		expect(verdict(["POCSAG1200", "EAS"], "EU", 435_000_000)).toBe(
+			"out-of-band",
+		)
+		expect(verdict(["POCSAG1200", "FSK9600"], "EU", 435_000_000)).toBe(
+			"in-band",
+		)
+		expect(verdict(["POCSAG1200", "FSK9600"], "EU", 868_950_000)).toBe(
+			"out-of-band",
+		)
+		// The same service set shares one table, whatever the order.
+		expect(
+			decoderBandTable("multimon-ng", { modes: ["EAS", "AFSK1200"] }),
+		).toBe(decoderBandTable("multimon-ng", { modes: ["AFSK1200", "EAS"] }))
+		// A pin still keeps the band unknown.
+		expect(
+			decoderBandTable("multimon-ng", { modes: ["EAS"], channelHz: 1 }),
+		).toBe(BAND_DEFAULTS)
 	})
 
 	it("R3: a pinned paging-only list is not suspended off the paging band (868.95 MHz)", () => {

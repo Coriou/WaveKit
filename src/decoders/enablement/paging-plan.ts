@@ -9,7 +9,6 @@
  */
 import type { BandRegion, DecoderBandRange } from "@wavekit/api-types"
 import { builtinBandplansFor } from "../../core/bandplans/builtin-supplement.js"
-import type { ScannerProtocol } from "../../core/scanner/types.js"
 import {
 	BAND_DEFAULTS,
 	resolveBandRequirements,
@@ -20,7 +19,6 @@ import {
 } from "../band-defaults.js"
 import { BAND_REGIONS } from "../band-region.js"
 import {
-	MULTIMON_PAGING_MODES,
 	effectiveMultimonModes,
 	multimonPagingOnly,
 } from "../builtin/multimon-ng.js"
@@ -130,27 +128,64 @@ export const DECODER_BAND_TABLE: Readonly<
 	Partial<Record<string, BandDefaultEntry>>
 > = { ...BAND_DEFAULTS, "multimon-ng": PAGER_BAND_DEFAULT }
 
-/**
- * The band-plan services each non-paging multimon-ng mode needs (frequency
- * band check of VFO-following mode lists): AFSK1200 is APRS / 1200 Bd packet,
- * DTMF is in-band signalling on analog FM voice channels. A mode missing here
- * (EAS, FSK9600) has no service in the band plan, so its band stays unknown.
- */
-const MODE_PROTOCOLS: Readonly<Partial<Record<MultimonMode, ScannerProtocol>>> =
-	{
-		AFSK1200: "aprs",
-		DTMF: "analog-fm",
-	}
+/** A non-paging band service of a multimon-ng mode (MODE_SERVICES). */
+export type ModeService = "aprs" | "analog-fm" | "amateur" | "weather-radio"
 
-/** Catalogue ranges of a region listing `protocol` (the plan data, not a copy). */
+/**
+ * The band service each multimon-ng mode is heard on (frequency band check of
+ * VFO-following mode lists). Every mode has one, so no known mode list is
+ * left with an unknown band:
+ * - POCSAG and FLEX: the region's paging ranges (3.18).
+ * - AFSK1200: APRS / 1200 Bd packet, the catalogue ranges listing "aprs".
+ * - DTMF: in-band signalling on analog FM voice channels ("analog-fm").
+ * - FSK9600: 9600 Bd packet, an amateur mode: the catalogue's amateur 2 m and
+ *   70 cm plans of the region (none where the catalogue has none).
+ * - EAS: SAME alerts on NOAA Weather Radio / Weatheradio Canada
+ *   (WEATHER_RADIO_RANGES; no range elsewhere).
+ */
+const MODE_SERVICES: Readonly<Record<MultimonMode, "paging" | ModeService>> = {
+	POCSAG512: "paging",
+	POCSAG1200: "paging",
+	POCSAG2400: "paging",
+	FLEX: "paging",
+	AFSK1200: "aprs",
+	DTMF: "analog-fm",
+	FSK9600: "amateur",
+	EAS: "weather-radio",
+}
+
+/** The catalogue plans of the amateur service (FSK9600). */
+const AMATEUR_PLAN_IDS: readonly string[] = ["amateur-2m", "amateur-70cm"]
+
+/**
+ * The weather radio band EAS / SAME alerts are broadcast on, which the band
+ * catalogue does not list: the seven NOAA Weather Radio channels,
+ * 162.400-162.550 MHz on a 25 kHz raster ((162.550 - 162.400) / 0.025 + 1
+ * = 7 channels), used by the US and by Weatheradio Canada. No other region
+ * broadcasts SAME, so EAS adds no range there.
+ */
+const WEATHER_RADIO_RANGES: Readonly<
+	Partial<Record<BandRegion, readonly DecoderBandRange[]>>
+> = {
+	US: [{ minHz: 162_400_000, maxHz: 162_550_000 }],
+	CA: [{ minHz: 162_400_000, maxHz: 162_550_000 }],
+}
+
+/** A service's ranges in a region (catalogue data, or the weather radio supplement). */
 function serviceRanges(
 	region: BandRegion,
-	protocol: ScannerProtocol,
+	service: ModeService,
 ): DecoderBandRange[] {
+	if (service === "weather-radio")
+		return (WEATHER_RADIO_RANGES[region] ?? []).map(r => ({ ...r }))
 	const out: DecoderBandRange[] = []
 	for (const plan of builtinBandplansFor(region))
 		for (const range of plan.ranges)
-			if (range.protocols?.includes(protocol))
+			if (
+				service === "amateur"
+					? AMATEUR_PLAN_IDS.includes(plan.id)
+					: range.protocols?.includes(service)
+			)
 				out.push({ minHz: range.startHz, maxHz: range.endHz })
 	return out
 }
@@ -165,8 +200,8 @@ const MULTIMON_PIN_OPTIONS: readonly string[] = [
 ]
 
 /**
- * One table per service set: paging, "aprs" and "analog-fm" give
- * 2^3 = 8 sets at most, so the cache is bounded by the mode list itself.
+ * One table per service set: paging plus the four ModeService values give
+ * 2^5 = 32 sets at most, so the cache is bounded by the mode list itself.
  */
 const modeTables = new Map<
 	string,
@@ -175,7 +210,7 @@ const modeTables = new Map<
 
 /**
  * One region's band for a mode list: the union of the paging ranges (when a
- * paging mode is listed) and each service's band-plan ranges. A mode whose
+ * paging mode is listed) and each service's ranges (serviceRanges). A mode whose
  * service has no range in the region adds nothing; when no mode has one the
  * band is `nowhere` (out of band at every centre), never unknown: the
  * restrictive answer, so a known mode list is suspended at 1090 MHz in every
@@ -184,10 +219,10 @@ const modeTables = new Map<
 export function multimonServiceBand(
 	region: BandRegion,
 	paging: boolean,
-	services: readonly ScannerProtocol[],
+	services: readonly ModeService[],
 	rangesOf: (
 		region: BandRegion,
-		protocol: ScannerProtocol,
+		service: ModeService,
 	) => DecoderBandRange[] = serviceRanges,
 ): ModeBandDefault {
 	const rangesHz = [
@@ -240,15 +275,17 @@ export function resolveDecoderBand(input: ResolveBandInput): ResolvedBand {
  * The built-in band table one decoder resolves with. An explicit channel
  * option pins multimon-ng: its band stays unknown whatever its modes
  * (paging-only lists included), so it is never suspended for being off a
- * mode band. Otherwise its band is the union of the band-plan ranges where
- * each of its modes' services exists in the region (multimonServiceBand):
- * paging modes (POCSAG, FLEX) their paging ranges (3.18), AFSK1200 the APRS
- * ranges, DTMF the analog FM voice ranges. So a mode list follows the VFO
+ * mode band. Otherwise its band is the union of the ranges of its modes'
+ * services in the region (MODE_SERVICES, multimonServiceBand): paging modes
+ * (POCSAG, FLEX) their paging ranges (3.18), AFSK1200 the APRS ranges, DTMF
+ * the analog FM voice ranges, FSK9600 the amateur 2 m and 70 cm plans, EAS
+ * the US and Canadian weather radio band. A mode with no range in the region
+ * adds none, and an empty union is `nowhere`: so a mode list follows the VFO
  * only where one of its services can be heard, and is
- * `frequency-out-of-band` at 1090 MHz or in the 868 MHz ISM band. Any mode
- * without a service in the plan (EAS, FSK9600) keeps the band unknown: it
- * follows the VFO on every band, as before. Configured frequencies and band
- * overrides win over this table (resolveBandRequirements).
+ * `frequency-out-of-band` at 1090 MHz or in the 868 MHz ISM band. Unknown
+ * mode strings are dropped as the adapter drops them
+ * (effectiveMultimonModes). Configured frequencies and band overrides win
+ * over this table (resolveBandRequirements).
  */
 export function decoderBandTable(
 	type: string,
@@ -259,14 +296,12 @@ export function decoderBandTable(
 	if (MULTIMON_PIN_OPTIONS.some(key => Object.hasOwn(options, key)))
 		return BAND_DEFAULTS
 	if (multimonPagingOnly(options["modes"])) return DECODER_BAND_TABLE
-	const modes = effectiveMultimonModes(options["modes"])
-	const paging = modes.some(m => MULTIMON_PAGING_MODES.includes(m))
-	const services = new Set<ScannerProtocol>()
-	for (const mode of modes) {
-		if (MULTIMON_PAGING_MODES.includes(mode)) continue
-		const protocol = MODE_PROTOCOLS[mode]
-		if (protocol === undefined) return BAND_DEFAULTS
-		services.add(protocol)
+	let paging = false
+	const services = new Set<ModeService>()
+	for (const mode of effectiveMultimonModes(options["modes"])) {
+		const service = MODE_SERVICES[mode]
+		if (service === "paging") paging = true
+		else services.add(service)
 	}
 	const sorted = [...services].sort()
 	const key = `${paging ? "paging," : ""}${sorted.join(",")}`

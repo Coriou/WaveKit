@@ -437,21 +437,40 @@ it.each([
 	},
 )
 
-// R3: a mode without a band-plan service (EAS, FSK9600) keeps the band unknown.
+// R3: EAS is heard on the US/Canadian weather radio band and FSK9600 on the
+// amateur 2 m / 70 cm plans; a known mode is never left with an unknown band.
 it.each([
-	[["FSK9600"], 432_500_000],
-	[["EAS"], 1_090_000_000],
-	[["EAS", "DTMF"], 868_950_000],
+	[["EAS"], 1_090_000_000, "US"],
+	[["EAS"], 162_475_000, "EU"],
+	[["EAS"], 1_090_000_000, "JP"],
+	[["FSK9600"], 1_090_000_000, "EU"],
+	[["FSK9600"], 144_660_000, "JP"],
+	[["EAS", "DTMF"], 868_950_000, "EU"],
+	[["AFSK1200", "EAS"], 1_090_000_000, "US"],
 ] as const)(
-	"multimon-ng with modes %j keeps an unknown band and follows the VFO at %d Hz",
-	async (modes, hz) => {
-		const { status } = await multimonAt(hz, modes)
+	"multimon-ng with modes %j is suspended out of band at %d Hz in %s",
+	async (modes, hz, region) => {
+		const { f, status } = await multimonAt(hz, modes, 2_400_000, region)
+		expect(status?.running).toBe(false)
+		expect(status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
+
+it.each([
+	[["EAS"], 162_475_000, "US"],
+	[["EAS"], 162_550_000, "CA"],
+	[["FSK9600"], 432_500_000, "EU"],
+	[["FSK9600"], 145_050_000, "US"],
+	[["AFSK1200", "EAS"], 162_400_000, "US"],
+] as const)(
+	"multimon-ng with modes %j is admitted in band at %d Hz in %s",
+	async (modes, hz, region) => {
+		const { status } = await multimonAt(hz, modes, 2_400_000, region)
 		expect(status?.running).toBe(true)
-		expect(status?.bandAssessment?.verdict).toBe("unknown")
+		expect(status?.bandAssessment?.verdict).toBe("in-band")
 		expect(status?.suspension).toBeUndefined()
-		expect(status?.placements).toEqual([
-			expect.objectContaining({ origin: "vfo", channelHz: hz }),
-		])
 	},
 )
 

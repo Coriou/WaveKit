@@ -567,14 +567,17 @@ describe("HfdlDecoder", () => {
 5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
    when `modes` is unset) runs only where a paging band of your region is in the capture (the
    band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),
-   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With AFSK1200 or DTMF among its
-   modes its band is the union of the band-plan ranges where each mode's service exists in
+   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With EAS, AFSK1200, FSK9600 or DTMF
+   among its modes its band is the union of the band-plan ranges where each mode's service exists in
    your region: paging ranges for POCSAG and FLEX, APRS ranges for AFSK1200 (the national
    2 m APRS channel: 144.800 MHz in the EU, 144.390 MHz in the US and Canada, 145.175 MHz in
    Australia, 144.575 MHz in New Zealand, 144.660 MHz in Japan (144.640 MHz there is the
    9600-baud channel), 144.640 MHz in China, plus the 2 m band
-   where the region's plan lists APRS on it) and analog FM voice ranges for DTMF (PMR446,
-   land mobile, marine, amateur 2 m / 70 cm, CB). A mode whose service has no range in your
+   where the region's plan lists APRS on it), analog FM voice ranges for DTMF (PMR446,
+   land mobile, marine, amateur 2 m / 70 cm, CB), the amateur 2 m and 70 cm bands for
+   FSK9600 (EU 144–146 and 430–440 MHz, US and Canada 144–148 and 420–450 MHz; none in
+   other regions) and the NOAA Weather Radio / Weatheradio Canada band for EAS
+   (162.400–162.550 MHz in the US and Canada; none elsewhere). A mode whose service has no range in your
    region adds nothing; when none of its modes has one the decoder is out of band everywhere,
    never left with an unknown band. Elsewhere it is suspended with `frequency-out-of-band`
    ("waiting: the tuned frequency is outside its band"): at 1090 MHz in every region, and
@@ -582,9 +585,8 @@ describe("HfdlDecoder", () => {
    mobile, so with DTMF among its modes it runs at 868.95 MHz there. Any of `channelHz`, `channelsHz`, `offsetHz`,
    `frequency` or `frequencies` pins it to your channels: whatever its modes (paging-only
    included) it is then never suspended for being off its mode band. Top-level `frequencies`
-   and a band override (`band` in YAML or the API) still win too. With EAS or FSK9600 among
-   its modes (no band-plan service) it has no built-in band and follows the VFO on every
-   band. With at least one paging mode, a paging band in view and no
+   and a band override (`band` in YAML or the API) still win too. Unknown mode names are
+   dropped, as the decoder drops them. With at least one paging mode, a paging band in view and no
    `channelHz`, `channelsHz`, `offsetHz` or `frequency` it listens on every paging raster
    channel inside the usable window (80 % of the sample rate), nearest the centre first and
    at most 33, each through its own 12 kHz channel filter; a VFO exactly on one of those
