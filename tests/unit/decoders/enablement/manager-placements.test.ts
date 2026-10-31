@@ -1081,6 +1081,34 @@ it.each(["stop", "restart", "normal", "superseded"])(
 	},
 )
 
+it("a crash retry cancelled when its timer fires drops its deadline and offers Restart", async () => {
+	const f = setup("rate-test", crashGate(), { faultAfterFailures: 1 })
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const decoder = f.instances.get(worker.key)!
+	const internal = f.manager as unknown as {
+		decoders: Map<string, { lifecycle: { runDecoderGeneration: number } }>
+	}
+	decoder.crash()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(f.manager.getStatus(worker.key)?.nextRestartAt).toBeDefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	// The run is superseded while its retry waits: the timer fires as a no-op.
+	internal.decoders.get(worker.key)!.lifecycle.runDecoderGeneration--
+	await vi.advanceTimersByTimeAsync(6000)
+	expect(decoder.starts).toBe(1)
+	const failed = f.manager.getStatus(worker.key)!
+	expect(failed).toMatchObject({ health: "faulted", running: false })
+	expect(failed.nextRestartAt).toBeUndefined()
+	expect(failed.restartInFlight).toBeUndefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+	expect(decoderSummary(failed, Date.now()).verdict.actions).toEqual([
+		"restart",
+	])
+})
+
 it("a queued crash retry does not start a worker a newer restart holds", async () => {
 	const f = setup("rate-test", crashGate())
 	f.create("dec")

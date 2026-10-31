@@ -254,6 +254,8 @@ interface DecoderState {
 	nextRestartAt: Date | null
 	/** An automatic restart fired and its respawn has not finished yet. */
 	restartRunning?: boolean
+	/** Manual non-placement restarts under way (stop then start). */
+	manualRestarts?: number
 	/** Unstable runs (or failed restarts) since the last stable run or explicit start */
 	consecutiveFailures: number
 	intentionallyStopped: boolean
@@ -3495,20 +3497,25 @@ export class DecoderManager extends EventEmitter {
 
 		// Stop clears the start mode; a restart keeps it.
 		const startMode = state.startMode
-		// Stop first (this marks intentionallyStopped = true)
-		const stopping = this.stopDecoder(id)
-		const revision = state.stopRevision
-		await stopping
-		if (
-			this.destroying ||
-			this.decoders.get(id) !== state ||
-			state.stopRevision !== revision
-		)
-			return
+		state.manualRestarts = (state.manualRestarts ?? 0) + 1
+		try {
+			// Stop first (this marks intentionallyStopped = true)
+			const stopping = this.stopDecoder(id)
+			const revision = state.stopRevision
+			await stopping
+			if (
+				this.destroying ||
+				this.decoders.get(id) !== state ||
+				state.stopRevision !== revision
+			)
+				return
 
-		// Reset the flag and start
-		state.intentionallyStopped = false
-		await this.startDecoder(id, { startMode })
+			// Reset the flag and start
+			state.intentionallyStopped = false
+			await this.startDecoder(id, { startMode })
+		} finally {
+			state.manualRestarts = (state.manualRestarts ?? 1) - 1
+		}
 	}
 
 	/**
@@ -3995,6 +4002,7 @@ export class DecoderManager extends EventEmitter {
 			if (
 				state.restartTimer !== null ||
 				state.restartRunning === true ||
+				(state.manualRestarts ?? 0) > 0 ||
 				(state.lifecycle?.pending === true &&
 					state.lifecycle.actual === "starting")
 			)
@@ -4514,8 +4522,15 @@ export class DecoderManager extends EventEmitter {
 					parent.parentIntent?.generation === parentGeneration &&
 					actor.generation === placementGeneration &&
 					actor.runDecoderGeneration === parentGeneration))
-		state.restartTimer = setTimeout(() => {
-			if (!retryCurrent()) return
+		const timer = setTimeout(() => {
+			if (!retryCurrent()) {
+				// A cancelled retry must not keep its deadline (it hides Restart).
+				if (state.restartTimer === timer) {
+					state.restartTimer = null
+					state.nextRestartAt = null
+				}
+				return
+			}
 			state.restartTimer = null
 			state.nextRestartAt = null
 			state.restartRunning = true
@@ -4642,6 +4657,7 @@ export class DecoderManager extends EventEmitter {
 				void tracked()
 			}
 		}, delay)
+		state.restartTimer = timer
 
 		// Calculate next delay with exponential backoff (Requirement 4.2)
 		// Formula: min(2^N * baseDelay, maxDelay)

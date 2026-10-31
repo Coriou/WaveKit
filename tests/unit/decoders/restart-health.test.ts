@@ -312,6 +312,40 @@ describe("health on unexpected exit", () => {
 		])
 	})
 
+	it("flags a manual restart in flight until its start settles, even when it throws", async () => {
+		setup({ maxRestarts: 1, faultAfterFailures: 1 })
+		await manager.startDecoder("acars")
+		decoder.failStart = true
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(10) // the one retry fails: budget spent
+		expect(manager.getStatus("acars")?.restartInFlight).toBeUndefined()
+		decoder.failStart = false
+		let release!: () => void
+		decoder.startGate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const restarting = manager.restartDecoder("acars")
+		await vi.advanceTimersByTimeAsync(0)
+		const pending = manager.getStatus("acars")!
+		expect(pending).toMatchObject({ health: "faulted", running: false })
+		expect(pending.nextRestartAt).toBeUndefined()
+		expect(pending.restartInFlight).toBe(true)
+		expect(decoderSummary(pending, Date.now()).verdict.actions).toEqual([])
+		decoder.startGate = null
+		release()
+		await restarting
+		expect(manager.getStatus("acars")?.running).toBe(true)
+		expect(manager.getStatus("acars")?.restartInFlight).toBeUndefined()
+
+		decoder.failStart = true
+		const failing = manager.restartDecoder("acars")
+		expect(manager.getStatus("acars")?.restartInFlight).toBe(true)
+		await expect(failing).rejects.toThrow()
+		const failed = manager.getStatus("acars")!
+		expect(failed.running).toBe(false)
+		expect(failed.restartInFlight).toBeUndefined()
+	})
+
 	it("explicit stop cancels the retry and clears restarting; explicit start resets a fault", async () => {
 		setup({ faultAfterFailures: 1 })
 		await manager.startDecoder("acars")
