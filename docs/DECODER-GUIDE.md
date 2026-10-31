@@ -386,6 +386,9 @@ WaveKit defines standard output types for decoded data:
 | `error`      | Decoder error          | all             |
 | `stats`      | Statistics             | all             |
 
+The `acars` and `vdl2` payloads (address types, direction, XID parameters, libacars results) are
+described in [Aircraft data link](AIRCRAFT-DATALINK.md).
+
 ### Dynamic Sample Rate Handling
 
 WaveKit automatically restarts decoders when the source sample rate changes (from the web app,

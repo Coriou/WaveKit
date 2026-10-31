@@ -78,6 +78,7 @@ import {
 	themedPaint,
 } from "./style.ts"
 import type { MapUi, MapUiState } from "./ui-store.ts"
+import { latestReports, reportedFeatures } from "./reported.ts"
 import { devicePrefsStore, type MapTiles } from "../../shell/device-prefs.ts"
 
 /** "blank": Map › Blank asked for no tiles. */
@@ -99,6 +100,8 @@ export interface EngineDeps {
 	readonly fleets: Fleets
 	readonly coverage: CoverageStore
 	readonly trailHistory: TrailHistoryStore
+	/** Trails of the aviation-data category only: positions reported over ACARS and VDL2. */
+	readonly reported: TrailHistoryStore
 	readonly station: StationStore
 	readonly ui: MapUi
 	/** The element whose computed style holds the theme tokens. */
@@ -234,6 +237,10 @@ export class MapEngine {
 			deps.trailHistory.subscribe(() => {
 				this.trailsDirty = true
 				dirtyItems()
+			}),
+			deps.reported.subscribe(() => {
+				this.staticDirty = true
+				this.kick()
 			}),
 			deps.ui.subscribe((next, prev) => this.onUi(next, prev)),
 			// units: rings, labels and the hover line are drawn in them
@@ -451,9 +458,12 @@ export class MapEngine {
 		vis(LAYER.links, o.links && s.layers.mesh)
 		vis(LAYER.trails, o.trails)
 		vis(LAYER.trailHeads, o.trails)
+		vis(LAYER.reported, s.reported)
 	}
 
 	private onUi(next: MapUiState, prev: MapUiState): void {
+		if (next.reported !== prev.reported && this.loaded)
+			this.applyVisibility(next)
 		if (next.layers !== prev.layers || next.overlays !== prev.overlays) {
 			if (this.loaded) this.applyVisibility(next)
 			this.itemsDirty = true
@@ -619,6 +629,14 @@ export class MapEngine {
 		this.setData(
 			SRC.coverage,
 			st.kind === "set" ? coverageShapes(cov) : collection([]),
+		)
+		const now = Date.now()
+		this.setData(
+			SRC.reported,
+			reportedFeatures(
+				latestReports(this.deps.reported.get().trails, now),
+				now,
+			),
 		)
 	}
 

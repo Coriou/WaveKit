@@ -22,6 +22,7 @@ export type FoldFamily =
 	| "station"
 	| "node"
 	| "notice"
+	| "link"
 	| "other"
 
 export interface FamilyRule {
@@ -76,6 +77,12 @@ export const FAMILY_RULES: Readonly<Record<FoldFamily, FamilyRule>> = {
 	station: { gapMs: 900_000, perChannel: false },
 	// Meshtastic nodes send position and telemetry every 15 min by default. 1 800 s = 2 × 15 min.
 	node: { gapMs: 1_800_000, perChannel: false },
+	// Aircraft datalink rows that only keep the radio link up (VDL2 link frames, ACARS link tests and
+	// ground-station squitters; the core's Kind field says "Link" or "Ground station"): one stack per
+	// protocol and channel, whatever aircraft sent them, so the messages that say something stay in view.
+	// While aircraft are in range these frames run continuously on a channel, seconds to minutes apart;
+	// 300 s ends the stack only when the channel has gone quiet for five minutes.
+	link: { gapMs: 300_000, perChannel: true },
 	// Never folds (each ingestion gap is its own notice); the gap is unused.
 	notice: { gapMs: 0, perChannel: false },
 	// Anything else (analog transmissions, scanner results, unknown entities): 120 s groups one exchange on
@@ -105,8 +112,22 @@ export const MESSAGE_KEYS = new Set([
 	"comment",
 ])
 
+/** The core's Kind values (acars-labels.ts FAMILY_TEXT) for rows that only keep the link up. */
+export const LINK_KINDS: ReadonlySet<string> = new Set([
+	"Link",
+	"Ground station",
+])
+
+/** An aviation datalink row that carries no message for anyone to read: link upkeep. */
+export function isLinkTraffic(s: ActivitySummary): boolean {
+	if (s.category !== "aviation-data") return false
+	const kind = s.fields.find(f => f.key === "kind")?.value
+	return typeof kind === "string" && LINK_KINDS.has(kind)
+}
+
 export function familyOf(s: ActivitySummary): FoldFamily {
 	if (s.kind === "ingestion-gap") return "notice"
+	if (isLinkTraffic(s)) return "link"
 	const kind = entityKind(s.entityKey)
 	return (kind !== null ? ENTITY_FAMILY[kind] : undefined) ?? "other"
 }
@@ -190,6 +211,9 @@ function computeKey(s: ActivitySummary): string {
 	const family = familyOf(s)
 	if (family === "notice") return `notice|${s.eventId}`
 	const rule = FAMILY_RULES[family]
+	// link upkeep folds per protocol and channel, never per aircraft or per text
+	if (family === "link")
+		return `link|${s.protocol ?? ""}|khz:${s.frequencyHz === null ? "" : Math.round(s.frequencyHz / 1000)}`
 	const identity = s.entityKey ?? `t:${s.title ?? ""}|d:${s.decoderId ?? ""}`
 	const channel =
 		rule.perChannel && rule.simulcastMs === undefined && s.frequencyHz !== null
@@ -505,8 +529,9 @@ function makeStack(
 			const k = khzOf(m)
 			if (k !== null && !khz.has(k)) khz.set(k, m.frequencyHz as number)
 		}
+	// a link stack mixes aircraft: nothing of one row names the others
 	const known =
-		members.length === 1
+		members.length === 1 || family === "link"
 			? NOTHING_KNOWN
 			: knownBefore(byTime, byTime.indexOf(latest))
 	return {
@@ -516,7 +541,10 @@ function makeStack(
 		members,
 		byTime,
 		latest,
-		view: withIdentity(latest, known),
+		view:
+			family === "link" && members.length > 1
+				? { ...latest, title: LINK_STACK_TITLE, entityKey: null }
+				: withIdentity(latest, known),
 		known,
 		firstMs: timeOf(oldest),
 		lastMs: timeOf(byTime[byTime.length - 1] as ActivitySummary),
@@ -525,6 +553,9 @@ function makeStack(
 }
 
 const NOTHING_KNOWN: KnownIdentity = { title: null, fields: [] }
+
+/** What a folded stack of link upkeep is called in the list (its rows keep their own titles). */
+export const LINK_STACK_TITLE = "Link traffic"
 
 /**
  * The identity `row` lacks that `newestFirst` (the rows heard before it, the latest first) says: a title
@@ -1055,6 +1086,14 @@ export function explainStack(stack: ActivityStack): StackExplanation {
 				: { headline: `Heard ${times}${over}`, tone: "seen" }
 		case "notice":
 			return { headline: "A note from Activity storage", tone: "seen" }
+		case "link":
+			return {
+				headline:
+					n > 1
+						? `Link upkeep: ${n} frames that carry no message, over ${spanText(span)}`
+						: "Link upkeep: a frame that carries no message",
+				tone: "seen",
+			}
 		case "other":
 			return every !== null
 				? { headline: `Likely a repeating signal${repeats}`, tone: "likely" }

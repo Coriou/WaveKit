@@ -460,7 +460,7 @@ describe("activity presentation registry", () => {
 			category: "aviation-data",
 			protocol: "acars",
 			entityKey: "reg:N123AB",
-			title: "n.123ab H1",
+			title: "n.123ab UA100 · Message to or from an onboard system",
 		})
 		expect(acars?.position).toBeUndefined()
 		expect(acars?.fields?.find(field => field.key === "text")?.value).toBe(
@@ -474,10 +474,10 @@ describe("activity presentation registry", () => {
 		expect(vdl2).toMatchObject({
 			entityKey: "icao:ABCDEF",
 			protocol: "vdl2",
-			title: "ABCDEF I",
+			title: "N1 BA1 · Link test",
 		})
-		expect(vdl2?.fields?.find(field => field.key === "flight")?.value).toBe(
-			"BA1",
+		expect(vdl2?.fields?.find(field => field.key === "label")?.value).toBe(
+			"Q0",
 		)
 		expect(
 			present("vdl2", { msgType: "UI", acars: { tail: "g-abcd" } })?.entityKey,

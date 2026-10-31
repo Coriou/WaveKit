@@ -56,6 +56,13 @@
 		},
 		{
 			"code": [
+				"src/core/activity/presentation/acars-",
+				"src/core/aircraft-identity/"
+			],
+			"docs": ["docs/AIRCRAFT-DATALINK.md"]
+		},
+		{
+			"code": [
 				"src/core/",
 				"src/utils/",
 				"src/index.ts",

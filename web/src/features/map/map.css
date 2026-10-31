@@ -484,6 +484,30 @@
 		padding-top: 12px;
 		border-top: 1px solid var(--wk-line-solid);
 	}
+	/* Datalink: what the aircraft said over ACARS and VDL2 (board: Map, Datalink) */
+	.wkm-story {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		font-size: 12px;
+	}
+	.wkm-story ol {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.wkm-story li {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr);
+		gap: 2px 10px;
+		font-size: 13px;
+	}
+	.wkm-story li b {
+		font-weight: 700;
+	}
 	.wkm-actions {
 		display: flex;
 		gap: 6px;

@@ -104,6 +104,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   out (rtl_433 extras, APRS weather, an unknown `Generic-Remote` model). Entity keys follow the
   core's formats (`talkgroup:`, `capcode:`, `callsign:`, `sensor:<model>-<id>`, `reg:`, `node:`,
   `icao:`, `mmsi:`), and AFR1234 and F4ABC-9 sit where the Map's fleets put them.
+- Stored trails: `GET /api/activity/trails` keeps `categories` (comma-separated) like the core.
+  Besides the fleets' tracks, the first aircraft reports a position over VDL2 every 10 minutes of
+  its lap, rounded to 0.1° (`aviation-data`), for the Map's ACARS layer.
 - Activity floods (`activity-floods.ts`, `activityFloods` in `buildMockServer()`, on for `pnpm mock`,
   off with `WAVEKIT_MOCK_ACTIVITY_FLOODS=0`, off by default in tests): the repeats a live receiver
   makes, so Activity's folding can be seen. A synthetic aircraft (ICAO `ABC123`, callsign `WKT101`

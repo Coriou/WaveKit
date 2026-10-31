@@ -240,7 +240,18 @@ bridges one):
 | Sensor                        | 5 min  | 433/868 MHz sensors send every 16-60 s; 5 × 60 s                                                                              |
 | APRS station (callsign)       | 15 min | Fixed stations beacon every 10 min; plus 50 % jitter                                                                          |
 | Mesh node                     | 30 min | Meshtastic sends position every 15 min by default; twice that                                                                 |
+| Aircraft link upkeep          | 5 min  | Link frames run seconds to minutes apart on a channel while aircraft are in range; five quiet minutes end the stack           |
 | Anything else                 | 2 min  | One exchange on one channel (analog overs are seconds apart)                                                                  |
+
+Aircraft datalink rows that only keep the radio link up (VDL2 link frames, ACARS link tests `_d`
+and ground-station squitters `SQ`: the core's **Kind** says `Link` or `Ground station`) fold per
+protocol and channel, whatever aircraft sent them, into one **Link traffic** row, so the messages
+that say something stay in view. The folded rows keep their own titles, and nothing of one aircraft
+is filled into another's. An ACARS or VDL2 row reads as the core explains it: the title says who and
+what in plain words (`N0WK01 ZZ0101 · Message to or from an onboard system`), the subtitle how it
+travelled (`ACARS · Air to ground · 131.550 MHz`), and the readings keep the raw label beside its
+kind and how sure the explanation is (`Label H1 · Onboard systems · Public label list`); see
+[AIRCRAFT-DATALINK.md](AIRCRAFT-DATALINK.md#reading-a-message).
 
 A talkgroup's calls are one stack per radio. A DMR `call_start` that arrives before its radio is
 decoded joins the call that follows it on the same talkgroup and channel (or, with none within the
@@ -294,7 +305,17 @@ discovery sits within 12.5 kHz, and up to 50 folded rows.
 ![Map: aircraft, vessels and APRS stations around the station, with their trails and the receiver's coverage](assets/screenshots/map.png)
 
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
-trails and the station's coverage. **Messages** shows decoded messages as cards; open one to see its
+trails and the station's coverage.
+
+The **ACARS** layer shows where aircraft said they were over datalink: an ADS-C report decoded by
+libacars, or the rough position a VDL2 link frame carries (to 0.1°, about 10 km). Each aircraft's
+latest report of the last hour is a hollow amber ring, never a plane glyph, and it never joins the
+aircraft's ADS-B trail: trails ask `GET /api/activity/trails` for every category but
+`aviation-data`, and the layer asks for `aviation-data` alone. A selected aircraft shows a
+**Datalink** section: its last five ACARS and VDL2 messages, newest first, how many link frames
+were folded, and how its registration was tied to its address (`Registration N0WK01 heard with this
+address on VDL2`). The aircraft is found by its ICAO address and the registrations
+`GET /api/aircraft-identity` links to it, never by callsign or flight number. **Messages** shows decoded messages as cards; open one to see its
 full content or its position on the map.
 
 Select an aircraft to see what the core knows about it (see

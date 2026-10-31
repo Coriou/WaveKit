@@ -16,6 +16,7 @@ the top.
 | [Native development](LOCAL-SETUP.md)                                                    | Run the core without Docker                                                |
 | [CLI dashboard](CLI.md)                                                                 | The terminal dashboard                                                     |
 | [ADS-B](ADSB.md), [digital voice](DIGITAL-VOICE.md), [scanner](SCANNER.md)              | Feature guides                                                             |
+| [Aircraft data link](AIRCRAFT-DATALINK.md)                                              | ACARS and VDL2: who sent a message, labels, linking aircraft               |
 | [Security](SECURITY.md)                                                                 | Access, pairing, version pinning                                           |
 
 ## Reference

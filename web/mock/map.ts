@@ -1296,66 +1296,103 @@ export function registerMapMock(
 
 	// GET /api/activity/trails (WG4): the stored positions of the last hour, one per entity per 60 s
 	// (the core's position coalescing), oldest first; an aircraft's trail starts on its current lap.
-	app.get("/api/activity/trails", async () => {
-		const at = now()
-		const from = at - 3_600_000
-		const trails: ActivityTrail[] = []
-		const add = (
-			entityKey: string,
-			category: ActivityTrail["category"],
-			protocol: string,
-			pos: (ms: number) => { lat: number; lon: number } | null,
-		) => {
-			const points: ActivityTrailPoint[] = []
-			for (let ms = at - ((at - from) % 60_000); ms >= from; ms -= 60_000) {
-				const p = pos(ms)
-				if (!p) break
-				points.push([
-					ms,
-					Math.round(p.lat * 1e5) / 1e5,
-					Math.round(p.lon * 1e5) / 1e5,
-					null,
-				])
+	app.get<{ Querystring: { categories?: string } }>(
+		"/api/activity/trails",
+		async request => {
+			const wanted = request.query.categories
+				?.split(",")
+				.map(c => c.trim())
+				.filter(c => c.length > 0)
+			const at = now()
+			const from = at - 3_600_000
+			const trails: ActivityTrail[] = []
+			const add = (
+				entityKey: string,
+				category: ActivityTrail["category"],
+				protocol: string,
+				pos: (ms: number) => { lat: number; lon: number } | null,
+			) => {
+				const points: ActivityTrailPoint[] = []
+				for (let ms = at - ((at - from) % 60_000); ms >= from; ms -= 60_000) {
+					const p = pos(ms)
+					if (!p) break
+					points.push([
+						ms,
+						Math.round(p.lat * 1e5) / 1e5,
+						Math.round(p.lon * 1e5) / 1e5,
+						null,
+					])
+				}
+				if (points.length > 0)
+					trails.push({
+						entityKey,
+						category,
+						protocol,
+						points: points.reverse(),
+						truncated: false,
+					})
 			}
-			if (points.length > 0)
-				trails.push({
-					entityKey,
-					category,
-					protocol,
-					points: points.reverse(),
-					truncated: false,
+			const ts = (ms: number) => (ms - startedAt) / 1000
+			for (const a of aircraft) {
+				const lap = aircraftAt(a, ts(at)).lap
+				add(`icao:${a.icao}`, "aircraft", "adsb", ms => {
+					const p = aircraftAt(a, ts(ms))
+					return p.lap === lap ? p : null
 				})
-		}
-		const ts = (ms: number) => (ms - startedAt) / 1000
-		for (const a of aircraft) {
-			const lap = aircraftAt(a, ts(at)).lap
-			add(`icao:${a.icao}`, "aircraft", "adsb", ms => {
-				const p = aircraftAt(a, ts(ms))
-				return p.lap === lap ? p : null
-			})
-		}
-		for (const v of vessels)
-			if (v.vesselClass !== "aton")
-				add(`mmsi:${v.mmsi}`, "marine", "ais", ms => vesselAt(v, ts(ms)))
-		for (const s of aprs)
-			add(`callsign:${s.callsign}`, "aprs", "aprs", ms => aprsAt(s, ts(ms)))
-		for (const m of mesh)
-			add(`node:${m.nodeId}`, "mesh", "meshtastic", ms => meshAt(m, ts(ms)))
-		const pointCount = trails.reduce((n, t) => n + t.points.length, 0)
-		const answer: ActivityTrails = {
-			producedFrom: HHMM(from),
-			producedTo: HHMM(at),
-			trails,
-			pointCount,
-			scannedRows: pointCount,
-			skippedRows: 0,
-			truncated: false,
-			truncation: [],
-			retentionFloor: HHMM(startedAt - 3 * 86_400_000),
-			generatedAt: HHMM(at),
-		}
-		return answer
-	})
+			}
+			for (const v of vessels)
+				if (v.vesselClass !== "aton")
+					add(`mmsi:${v.mmsi}`, "marine", "ais", ms => vesselAt(v, ts(ms)))
+			for (const s of aprs)
+				add(`callsign:${s.callsign}`, "aprs", "aprs", ms => aprsAt(s, ts(ms)))
+			for (const m of mesh)
+				add(`node:${m.nodeId}`, "mesh", "meshtastic", ms => meshAt(m, ts(ms)))
+			// positions the first aircraft reported over VDL2 (link frames, to 0.1°): one every 10 min of its lap
+			const first = aircraft[0]
+			if (first) {
+				const lap = aircraftAt(first, ts(at)).lap
+				const points: ActivityTrailPoint[] = []
+				for (let ms = at - ((at - from) % 600_000); ms >= from; ms -= 600_000) {
+					const p = aircraftAt(first, ts(ms))
+					if (p.lap !== lap) break
+					points.push([
+						ms,
+						Math.round(p.lat * 10) / 10,
+						Math.round(p.lon * 10) / 10,
+						null,
+					])
+				}
+				if (points.length > 0)
+					trails.push({
+						entityKey: `icao:${first.icao}`,
+						category: "aviation-data",
+						protocol: "vdl2",
+						points: points.reverse(),
+						truncated: false,
+					})
+			}
+			const kept =
+				wanted && wanted.length > 0
+					? trails.filter(t => wanted.includes(t.category))
+					: [...trails]
+			trails.length = 0
+			trails.push(...kept)
+			const pointCount = trails.reduce((n, t) => n + t.points.length, 0)
+			const answer: ActivityTrails = {
+				producedFrom: HHMM(from),
+				producedTo: HHMM(at),
+				trails,
+				pointCount,
+				scannedRows: pointCount,
+				skippedRows: 0,
+				truncated: false,
+				truncation: [],
+				retentionFloor: HHMM(startedAt - 3 * 86_400_000),
+				generatedAt: HHMM(at),
+			}
+			return answer
+		},
+	)
 
 	app.get<{ Querystring: { protocol?: string } }>(
 		"/api/coverage",

@@ -4419,6 +4419,42 @@ after the aircraft first appears and arrives as an `aircraft:update`. Field mean
 The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
 and `aircraft:stats`.
 
+### Aircraft identity
+
+`GET /api/aircraft-identity/:kind/:value` says which identifiers name the same aircraft. `kind` is
+`icao`, `reg`, `callsign` or `flight`; a value that cannot be one of that kind answers 400. DTOs in
+`packages/api-types/src/aircraft-identity.ts`; the rules are in
+[Aircraft data link](AIRCRAFT-DATALINK.md#linking-aircraft).
+
+```json
+{
+	"query": { "kind": "reg", "value": "N0WK01" },
+	"icao": "0A0B01",
+	"resolvedBy": "observed",
+	"conflict": false,
+	"links": [
+		{
+			"a": { "kind": "icao", "value": "0A0B01" },
+			"b": { "kind": "reg", "value": "N0WK01" },
+			"evidence": "observed",
+			"source": "vdl2",
+			"firstSeen": "2026-01-01T00:00:00.000Z",
+			"lastSeen": "2026-01-01T00:20:00.000Z",
+			"expiresAt": "2026-01-31T00:20:00.000Z",
+			"count": 12
+		}
+	],
+	"entityKeys": ["icao:0A0B01", "reg:N0WK01"],
+	"timestamp": 1767226800000
+}
+```
+
+- `icao` is set only for an ICAO address (`resolvedBy: "self"`) or a registration with one live
+  link to an ICAO address. A callsign or a flight number always answers `icao: null` with its links.
+- `conflict` is true when a registration has live links to two ICAO addresses; `icao` is then null.
+- `entityKeys` are the Activity entity keys of the aircraft (`GET /api/activity?entityKey=…`).
+- In memory only: links are learnt again after a restart.
+
 ### Vessels
 
 AIS vessel current state. In memory only: no position history, cleared

@@ -100,6 +100,17 @@ export function loadJsonSample(): Dumpvdl2JsonOutput[] {
 /**
  * Loads the JSON sample data as raw JSONL text.
  */
+/**
+ * Link-level samples in the decoder's exact JSON shape (address types, XID parameters,
+ * libacars trees, labels). Every identifier, position and text is fictional; see README.md.
+ */
+export function loadLinkSample(): Dumpvdl2JsonOutput[] {
+	return readFileSync(join(__dirname, "link-sample.jsonl"), "utf-8")
+		.split("\n")
+		.filter(line => line.trim())
+		.map(line => JSON.parse(line) as Dumpvdl2JsonOutput)
+}
+
 export function loadJsonSampleRaw(): string {
 	return readFileSync(join(__dirname, "json-sample.jsonl"), "utf-8")
 }

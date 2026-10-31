@@ -213,6 +213,7 @@ import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
+import { AircraftIdentityManager } from "./core/aircraft-identity/manager.js"
 import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
@@ -2348,6 +2349,12 @@ async function main(): Promise<void> {
 			vesselTrackingManager.stop()
 		})
 
+		// Aircraft identity links between ADS-B, VDL2 and ACARS identifiers
+		const aircraftIdentity = new AircraftIdentityManager(decoderManager, logger)
+		own(20, () => {
+			aircraftIdentity.stop()
+		})
+
 		// Step 8d': ADS-B and AIS coverage per bearing from the station (WG3 req 7);
 		// without a station location the route answers available: false.
 		const coverageManager = new CoverageManager({
@@ -2535,6 +2542,7 @@ async function main(): Promise<void> {
 				aircraftTracker: aircraftTrackingManager.getTracker(),
 				aircraftInfo: aircraftEnrichmentService,
 				vesselTracker: vesselTrackingManager.getTracker(),
+				aircraftIdentity,
 				coverage: coverageManager,
 				meshTracker: meshTrackingManager.getTracker(),
 				aprsTracker: aprsTrackingManager.getTracker(),
@@ -2984,6 +2992,7 @@ async function main(): Promise<void> {
 			)
 		})
 		vesselTrackingManager.start()
+		aircraftIdentity.start()
 		coverageManager.start()
 		meshTrackingManager.start()
 		aprsTrackingManager.start()

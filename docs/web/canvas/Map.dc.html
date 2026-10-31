@@ -172,6 +172,22 @@ body:has([data-wk-theme="light"]){background:#d9e3e6}
 					</dl>
 				</section>
 			</sc-if>
+			<sc-if value="{{sel.hasStory}}" hint-placeholder-val="{{false}}">
+				<section aria-label="Datalink" style="display: flex; flex-direction: column; gap: 8px">
+					<h3 class="wk-label" style="margin: 0">Datalink</h3>
+					<ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px">
+						<sc-for list="{{sel.story}}" as="m" hint-placeholder-count="4">
+							<li style="display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; font-size: 13px">
+								<span style="color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{m.t}}</span>
+								<span style="font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{m.title}}</span>
+								<span></span>
+								<span style="font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{m.sub}}</span>
+							</li>
+						</sc-for>
+					</ol>
+					<span style="font-size: 12px; color: var(--wk-text-3)">{{sel.linkedBy}}</span>
+				</section>
+			</sc-if>
 			<span style="font-size: 12px; color: var(--wk-text-3)">{{sel.seen}}</span>
 			<div style="display: flex; gap: 6px">
 				<button class="wk-chip" onClick="{{toggleFollow}}" aria-pressed="{{following}}" style="flex: 1; justify-content: center; height: 36px; font-size: 13px">{{followText}}</button>
@@ -407,7 +423,7 @@ function makeTraffic() {
 	const PFX = ['AFR', 'EZY', 'BAW', 'RYR', 'KLM', 'DLH', 'TOM', 'IBE', 'VLG', 'EXS', 'TAP', 'SWR', 'AEA', 'HOP'];
 	const TYPES = ['A320', 'A319', 'A321', 'B738', 'B38M', 'A20N', 'E190', 'A333', 'B789', 'AT76', 'CRJ9', 'A359'];
 	const AIRWAYS = [32, 212, 8, 188, 62, 242, 300, 120, 350, 170];
-	out.push({ id: 'a-afr1234', kind: 'aircraft', name: 'AFR1234', type: 'A320', icao: '3944EF', lat: 48.81, lon: -3.87, trk: 284, kn: 452, ft: 36000, vs: 0, sq: '4721', rssi: -12.4, msgs: 1834, id2: { reg: 'F-HBNA', typeName: 'Airbus A320 214', operator: 'Air France', country: 'France', year: 2010, airline: 'Air France', photoBy: 'Mock photographer', route: ['LFPG', 'CDG', 'Paris Charles de Gaulle', 'KJFK', 'JFK', 'New York JFK'] } });
+	out.push({ id: 'a-afr1234', kind: 'aircraft', name: 'AFR1234', type: 'A320', icao: '3944EF', lat: 48.81, lon: -3.87, trk: 284, kn: 452, ft: 36000, vs: 0, sq: '4721', rssi: -12.4, msgs: 1834, id2: { reg: 'F-HBNA', typeName: 'Airbus A320 214', operator: 'Air France', country: 'France', year: 2010, airline: 'Air France', photoBy: 'Mock photographer', story: [['14:02', 'Message to or from an onboard system', 'ACARS H1 · Air to ground · Public label list'], ['14:01', 'Position report (ADS-C)', 'VDL2 B6 · Air to ground · Standard, decoded'], ['13:58', 'Link test', 'ACARS _d · Air to ground · Standard format'], ['13:58', '9 link frames', 'VDL2 link supervision · folded']], linkedBy: 'Registration and ICAO address seen together on VDL2 · observed 4 min ago', route: ['LFPG', 'CDG', 'Paris Charles de Gaulle', 'KJFK', 'JFK', 'New York JFK'] } });
 	out.push({ id: 'a-hop', kind: 'aircraft', name: 'HOP47MJ', type: 'E145', icao: '3949F2', lat: 48.52, lon: -3.81, trk: 52, kn: 286, ft: 11250, vs: 1800, sq: '6215', rssi: -9.8, msgs: 612, note: 'Departed Brest-Bretagne', id2: { reg: 'F-GRGJ', typeName: 'Embraer ERJ-145EU', operator: 'Air France Hop', country: 'France', year: 2000, airline: 'Air France Hop', photoBy: '', route: ['LFRB', 'BES', 'Brest Bretagne', 'LFPO', 'ORY', 'Paris Orly'] } });
 	out.push({ id: 'a-fny', kind: 'aircraft', name: 'FNY03', type: 'Rafale M', icao: '3B7FA2', lat: 48.56, lon: -4.15, trk: 75, kn: 330, ft: 3500, vs: 0, sq: '7000', rssi: -7.1, msgs: 220, note: 'Landivisiau', id2: { reg: '', typeName: 'Dassault Rafale M', operator: 'French Navy', country: 'France', year: 0, airline: '', photoBy: '', military: true, route: null } });
 	for (let i = 0; i < 31; i++) {
@@ -460,8 +476,8 @@ function makeTraffic() {
 		['Kayak', '!0fe12a', 48.79, -3.95, 300, 2.5, 'Paddling to Batz, back by 18:00']
 	];
 	M.forEach((m, i) => out.push({ id: 'm' + i, kind: 'mesh', name: m[0], node: m[1], lat: m[2], lon: m[3], trk: m[4], kn: m[5], note: m[6] }));
-	out.push({ id: 'c1', kind: 'acars', name: 'XK4521', tail: 'ZZ-WKC', lat: 48.778, lon: -3.458, trk: 250, kn: 0, ft: 34000, note: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2', via: 'ACARS · label H1 · 131.725', age: 15 });
-	out.push({ id: 'c2', kind: 'acars', name: 'XK8801', tail: 'F-GZTB', lat: 48.60, lon: -2.90, trk: 230, kn: 0, ft: 36000, note: 'ADS-C periodic report · FL360 · cleared FL360', via: 'VDL2 · ADS-C · 136.975', age: 4 });
+	out.push({ id: 'c1', kind: 'acars', name: 'N0WK01', tail: '', lat: 48.80, lon: -3.50, trk: 250, kn: 0, ft: 34000, via: 'VDL2 · link frame (XID) · 136.975', age: 2, acc: '±0.1°, about 10 km', src: 'Sent by the aircraft when it changes ground station' });
+	out.push({ id: 'c2', kind: 'acars', name: 'ZZ0202', tail: 'N0WK02', lat: 48.60, lon: -2.90, trk: 230, kn: 0, ft: 36000, via: 'VDL2 · ADS-C basic report · label B6 · 136.975', age: 4, acc: 'As reported', src: 'ADS-C report decoded by libacars' });
 	return out;
 }
 const TRAFFIC = makeTraffic();
@@ -965,14 +981,14 @@ class Component extends DCLogic {
 		}
 		if (o.kind === 'aprs') return { icon: ICONS.aprs, color: COL.aprs, title: o.name, sub: o.type + ' · via ' + o.path, note: o.note, fields: [['Speed', o.kn ? Math.round(o.kn * 1.852) + ' km/h' : 'Fixed'], ['Course', o.kn ? Math.round(o.trk) + '°' : '—'], ['From station', rel], ['Frequency', '144.800 MHz']], seen: 'APRS · Direwolf · last packet 1 min ago · ' + ll, token: o.name };
 		if (o.kind === 'mesh') return { icon: ICONS.mesh, color: COL.mesh, title: o.name, sub: 'Meshtastic node ' + o.node + ' · LongFast', note: o.note, fields: [['From station', rel], ['Links', String(LINKS.filter(l => l[0] === o.id || l[1] === o.id).length)], ['Best SNR', Math.max.apply(null, LINKS.filter(l => l[0] === o.id || l[1] === o.id).map(l => l[2])).toFixed(1) + ' dB'], ['Battery', '81 %']], seen: 'Meshtastic · 869.525 MHz · last heard 3 min ago · ' + ll, token: o.name };
-		return { icon: ICONS.acars, color: COL.acars, title: o.name + ' · ' + o.tail, sub: o.via, note: o.note, mono: true, fields: [['Reported', o.age + ' min ago'], ['Level', 'FL' + Math.round(o.ft / 100)], ['From station', rel], ['Accuracy', 'Position in message']], seen: 'Position parsed from the message text · ' + ll, token: o.name };
+		return { icon: ICONS.acars, color: COL.acars, title: o.tail ? o.name + ' · ' + o.tail : o.name, sub: o.via, note: 'Reported by the aircraft over datalink. Drawn apart from its ADS-B track, never joined to it.', fields: [['Reported', o.age + ' min ago'], ['Level', 'FL' + Math.round(o.ft / 100)], ['From station', rel], ['Accuracy', o.acc]], seen: o.src + ' · ' + ll, token: o.name };
 	}
 	// Aircraft details (core aircraftInfo): photo with credit, planned route, identity rows.
 	airInfo(o) {
 		const a = o.id2;
 		if (!a) return null;
 		const rows = [['Registration', a.reg], ['Type', o.type + (a.typeName ? ' · ' + a.typeName : '')], ['Operator', a.operator], ['Country', a.country], ['ICAO address', o.icao], ['Built', a.year ? String(a.year) : '']].filter(r => r[1]);
-		return { photoBy: a.photoBy, military: !!a.military, route: a.route ? { from: a.route[1], fromName: a.route[2], to: a.route[4], toName: a.route[5] } : null, rows };
+		return { story: (a.story || []).map(r => ({ t: r[0], title: r[1], sub: r[2] })), linkedBy: a.linkedBy || '', photoBy: a.photoBy, military: !!a.military, route: a.route ? { from: a.route[1], fromName: a.route[2], to: a.route[4], toName: a.route[5] } : null, rows };
 	}
 	parseLoc(q) {
 		const s = q.trim().replace(/−/g, '-');
@@ -1041,7 +1057,7 @@ class Component extends DCLogic {
 			picking: s.picking,
 			cancelPick: () => this.setState({ picking: false, locOpen: true }),
 			hasSel: !!sel && !s.locOpen && !s.overlaysOpen,
-			sel: sel ? Object.assign({}, sel, { hasNote: !!sel.note, noteFont: sel.mono ? 'var(--wk-font-mono)' : 'inherit', fields: sel.fields.map(f => ({ k: f[0], v: f[1] })), hasPhoto: !!(sel.air && sel.air.photoBy), photoBy: sel.air ? sel.air.photoBy : '', military: !!(sel.air && sel.air.military), hasRoute: !!(sel.air && sel.air.route), route: sel.air && sel.air.route ? sel.air.route : { from: '', fromName: '', to: '', toName: '' }, hasIdent: !!(sel.air && sel.air.rows.length), ident: sel.air ? sel.air.rows.map(r => ({ k: r[0], v: r[1] })) : [] }) : { icon: [], fields: [], title: '', sub: '', seen: '', color: 'var(--wk-accent)', note: '', hasNote: false, noteFont: 'inherit', hasPhoto: false, photoBy: '', military: false, hasRoute: false, route: { from: '', fromName: '', to: '', toName: '' }, hasIdent: false, ident: [] },
+			sel: sel ? Object.assign({}, sel, { hasNote: !!sel.note, noteFont: sel.mono ? 'var(--wk-font-mono)' : 'inherit', fields: sel.fields.map(f => ({ k: f[0], v: f[1] })), hasPhoto: !!(sel.air && sel.air.photoBy), photoBy: sel.air ? sel.air.photoBy : '', military: !!(sel.air && sel.air.military), hasRoute: !!(sel.air && sel.air.route), route: sel.air && sel.air.route ? sel.air.route : { from: '', fromName: '', to: '', toName: '' }, hasIdent: !!(sel.air && sel.air.rows.length), hasStory: !!(sel.air && sel.air.story.length), story: sel.air ? sel.air.story : [], linkedBy: sel.air ? sel.air.linkedBy : '', ident: sel.air ? sel.air.rows.map(r => ({ k: r[0], v: r[1] })) : [] }) : { icon: [], fields: [], title: '', sub: '', seen: '', color: 'var(--wk-accent)', note: '', hasNote: false, noteFont: 'inherit', hasPhoto: false, photoBy: '', military: false, hasRoute: false, route: { from: '', fromName: '', to: '', toName: '' }, hasIdent: false, ident: [], hasStory: false, story: [], linkedBy: '' },
 			closeSel: () => this.setState({ sel: null, follow: false }),
 			noop: e => { if (e && e.preventDefault) e.preventDefault(); },
 			following: s.follow ? 'true' : 'false',

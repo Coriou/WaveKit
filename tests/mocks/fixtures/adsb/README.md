@@ -22,6 +22,13 @@ This directory contains sample ADS-B data files for testing the Readsb decoder.
 - Format: One JSON object per line
 - Used by: readsb in JSON mode
 
+### Comm-B values (`comm-b-sample.jsonl`)
+
+Two readsb JSON lines whose aircraft answered Comm-B interrogations: indicated airspeed, Mach,
+magnetic heading, the altitude selected on the autopilot panel (`nav_altitude_mcp`) and QNH. The
+second line has no position report, only Comm-B values. Both aircraft are fictional (`0a0b01`,
+`0a0b02`, callsign `ZZZ101`). Load with `loadCommBSample()`.
+
 ## Recording Source Files
 
 ### IQ Recordings

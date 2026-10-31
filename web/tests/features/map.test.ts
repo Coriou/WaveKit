@@ -5,7 +5,11 @@ import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import type { FleetEntry, FleetState } from "../../src/data/fleet-store.ts"
-import { trailsSchema } from "../../src/data/trail-history-store.ts"
+import {
+	TRACK_CATEGORIES,
+	trailsPath,
+	trailsSchema,
+} from "../../src/data/trail-history-store.ts"
 import {
 	aircraftSchema,
 	aprsSchema,
@@ -289,9 +293,11 @@ describe("items from the mock's fleets", () => {
 	it("finds every moving item's stored trail by its Activity entity key and puts it in front", async () => {
 		const res = await server.app.inject({
 			method: "GET",
-			url: "/api/activity/trails",
+			url: trailsPath(TRACK_CATEGORIES),
 		})
-		const body = trailsSchema.parse(res.json())
+		const raw = res.json() as { trails: { category: string }[] }
+		expect(raw.trails.some(t => t.category === "aviation-data")).toBe(false)
+		const body = trailsSchema.parse(raw)
 		const history = new Map(
 			body.trails.map(t => [
 				t.entityKey,
@@ -328,6 +334,20 @@ describe("items from the mock's fleets", () => {
 		expect(afr?.trail.length).toBeGreaterThan(1)
 		const times = afr?.trail.map(p => p.at) ?? []
 		expect([...times].sort((x, y) => x - y)).toEqual(times)
+	})
+
+	it("serves positions reported over datalink only to the ACARS layer, to 0.1°", async () => {
+		const res = await server.app.inject({
+			method: "GET",
+			url: trailsPath(["aviation-data"]),
+		})
+		const body = trailsSchema.parse(res.json())
+		expect(body.trails.length).toBeGreaterThan(0)
+		for (const t of body.trails)
+			for (const [, lat, lon] of t.points) {
+				expect(Math.round(lat * 10) / 10).toBe(lat)
+				expect(Math.round(lon * 10) / 10).toBe(lon)
+			}
 	})
 
 	it("chooses the board's glyphs", () => {

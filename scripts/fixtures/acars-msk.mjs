@@ -23,8 +23,12 @@
  * comes back inverted there; the 32-byte pre-key lets acarsdec flip its
  * polarity and still sync).
  *
+ * Presets (`--message`, all identifiers fictional): `h1` (the default block), `link-test` (label
+ * `_` DEL, which acarsdec prints as `_d`: a downlink with no text, the commonest block on the air)
+ * and `uplink` (a letter block id: ground to air, no message number or flight id).
+ *
  * Usage:
- *   node scripts/fixtures/acars-msk.mjs <out.s16|out.cf32> [--offset 2000]
+ *   node scripts/fixtures/acars-msk.mjs <out.s16|out.cf32> [--offset 2000] [--message link-test]
  */
 import { writeFileSync } from "node:fs"
 
@@ -53,6 +57,25 @@ export function acarsCrc(bytes) {
 		for (let i = 0; i < 8; i++) crc = crc & 1 ? (crc >>> 1) ^ 0x8408 : crc >>> 1
 	}
 	return crc
+}
+
+/** Fictional blocks for the presets (`--message`). */
+export const ACARS_PRESETS = {
+	h1: {},
+	"link-test": {
+		address: ".N0WK01",
+		label: "_\x7f",
+		blockId: "2",
+		msgno: "M02A",
+		flight: "ZZ0101",
+		text: "",
+	},
+	uplink: {
+		address: ".N0WK01",
+		label: "RA",
+		blockId: "B",
+		text: "WAVEKIT UPLINK TEST",
+	},
 }
 
 /** The block's bytes, from the pre-key to DEL. */
@@ -145,15 +168,22 @@ function main(argv) {
 	const [outPath, ...rest] = argv
 	if (!outPath || !/\.(s16|cf32)$/.test(outPath)) {
 		process.stderr.write(
-			"usage: acars-msk.mjs <out.s16|out.cf32> [--offset hz]\n",
+			"usage: acars-msk.mjs <out.s16|out.cf32> [--offset hz] [--message h1|link-test|uplink]\n",
 		)
 		process.exit(2)
 	}
 	const i = rest.indexOf("--offset")
 	const offset = i >= 0 ? Number(rest[i + 1]) : 2_000
+	const m = rest.indexOf("--message")
+	const name = m >= 0 ? rest[m + 1] : "h1"
+	const preset = ACARS_PRESETS[name]
+	if (!preset) {
+		process.stderr.write(`unknown message ${name}\n`)
+		process.exit(2)
+	}
 	writeFileSync(
 		outPath,
-		outPath.endsWith(".s16") ? acarsS16() : acarsCf32({}, offset),
+		outPath.endsWith(".s16") ? acarsS16(preset) : acarsCf32(preset, offset),
 	)
 }
 

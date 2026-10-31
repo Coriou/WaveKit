@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+	ACARS_PRESETS,
+	type AcarsBlock,
 	acarsAudio,
 	acarsBytes,
 	acarsCrc,
@@ -27,6 +29,27 @@ describe("synthetic ACARS fixture", () => {
 		expect(block.at(-1)).toBe(0x83) // ETX with parity
 		expect(acarsCrc(bytes.slice(soh + 1, del))).toBe(0)
 		expect(oddParity(0x2b)).toBe(0xab)
+	})
+
+	it("presets: a link test is label _ DEL with no text; an uplink has no message number or flight id", () => {
+		const blockOf = (o: AcarsBlock) => {
+			const bytes = acarsBytes(o)
+			const soh = bytes.indexOf(0x01)
+			return bytes
+				.slice(soh + 1, bytes.lastIndexOf(0x7f) - 2)
+				.map(b => b & 0x7f)
+		}
+		const link = blockOf(ACARS_PRESETS["link-test"])
+		expect(link.slice(9, 11)).toEqual([0x5f, 0x7f])
+		expect(String.fromCharCode(...link.slice(13, -1))).toBe("M02AZZ0101")
+		const up = blockOf(ACARS_PRESETS.uplink)
+		expect(String.fromCharCode(up[11] as number)).toBe("B")
+		expect(String.fromCharCode(...up.slice(13, -1))).toBe("WAVEKIT UPLINK TEST")
+		for (const preset of Object.values(ACARS_PRESETS)) {
+			const bytes = acarsBytes(preset)
+			const soh = bytes.indexOf(0x01)
+			expect(acarsCrc(bytes.slice(soh + 1, bytes.length - 1))).toBe(0)
+		}
 	})
 
 	it("downlink layout: mode, address, ack, label, block id, STX, message number, flight id, text, ETX", () => {

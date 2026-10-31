@@ -33,6 +33,7 @@ import {
 } from "../option-values.js"
 import { ACARSDEC_BOUNDS } from "../options/acarsdec.js"
 import { safeErrorFields } from "../safe-error-fields.js"
+import { z } from "zod"
 
 /**
  * Configuration options for the ACARS decoder.
@@ -89,6 +90,116 @@ export interface ACARSMessage {
 	msgno?: string | undefined
 	/** Message text content */
 	text?: string | undefined
+	/**
+	 * Who sent the block, from the block id (ARINC 618 as implemented by acarsdec and libacars:
+	 * a digit is a downlink from the aircraft, a letter an uplink from the ground). VDL2 sets it
+	 * from the AVLC address types instead. Absent when the block id is missing or unusual.
+	 */
+	direction?: AcarsDirection | undefined
+	/** H1 sublabel (`M1`, `DF`, …) that routes the text to an onboard system, when present. */
+	sublabel?: string | undefined
+	/** Message function identifier after the sublabel, when present. */
+	mfi?: string | undefined
+	/**
+	 * What libacars decoded from the text (ARINC 622 ADS-C/CPDLC, MIAM, media advisory, OHMA),
+	 * keyed by libacars' own protocol key. Only plain JSON objects within
+	 * `LIBACARS_PAYLOAD_MAX_BYTES` are kept; `libacarsDropped` says one was refused.
+	 */
+	libacars?: LibacarsPayload | undefined
+	/** The decoder printed a libacars result that was not kept (malformed or too large). */
+	libacarsDropped?: boolean | undefined
+}
+
+export type AcarsDirection = "downlink" | "uplink"
+
+/** libacars output: protocol key (`arinc622`, `miam`, `media-adv`, `ohma`) to its JSON tree. */
+export type LibacarsPayload = Record<string, LibacarsJson>
+export type LibacarsJson =
+	| string
+	| number
+	| boolean
+	| null
+	| LibacarsJson[]
+	| { [key: string]: LibacarsJson }
+
+/** Protocol keys libacars writes below an ACARS message (libacars 2.x `json_key`). */
+export const LIBACARS_PROTOCOL_KEYS = [
+	"arinc622",
+	"miam",
+	"media-adv",
+	"ohma",
+] as const
+
+/** Largest serialized libacars tree kept per message; an ADS-C report is well under 2 KiB. */
+export const LIBACARS_PAYLOAD_MAX_BYTES = 16 * 1024
+
+const libacarsJsonSchema: z.ZodType<LibacarsJson> = z.lazy(() =>
+	z.union([
+		z.string(),
+		z.number().finite(),
+		z.boolean(),
+		z.null(),
+		z.array(libacarsJsonSchema),
+		z.record(z.string(), libacarsJsonSchema),
+	]),
+)
+const libacarsObjectSchema = z.record(z.string(), libacarsJsonSchema)
+
+/**
+ * Keeps the libacars protocol trees found in `source` under `keys`, or reports that what was
+ * there could not be kept. Returns undefined `payload` when nothing was present.
+ */
+export function readLibacarsPayload(
+	source: Record<string, unknown>,
+	keys: readonly string[] = LIBACARS_PROTOCOL_KEYS,
+): { payload?: LibacarsPayload; dropped: boolean } {
+	const payload: LibacarsPayload = {}
+	let present = false
+	let dropped = false
+	for (const key of keys) {
+		if (!Object.hasOwn(source, key)) continue
+		present = true
+		const parsed = libacarsObjectSchema.safeParse(source[key])
+		if (!parsed.success) {
+			dropped = true
+			continue
+		}
+		payload[key] = parsed.data
+	}
+	if (!present) return { dropped: false }
+	if (Object.keys(payload).length === 0) return { dropped: true }
+	if (
+		Buffer.byteLength(JSON.stringify(payload), "utf8") >
+		LIBACARS_PAYLOAD_MAX_BYTES
+	)
+		return { dropped: true }
+	return { payload, dropped }
+}
+
+/** acarsdec prints the whole libacars tree as one object whose keys are protocol keys. */
+export function readLibacarsTree(value: unknown): {
+	payload?: LibacarsPayload
+	dropped: boolean
+} {
+	const parsed = libacarsObjectSchema.safeParse(value)
+	if (!parsed.success || Object.keys(parsed.data).length === 0)
+		return { dropped: true }
+	if (
+		Buffer.byteLength(JSON.stringify(parsed.data), "utf8") >
+		LIBACARS_PAYLOAD_MAX_BYTES
+	)
+		return { dropped: true }
+	return { payload: parsed.data, dropped: false }
+}
+
+/** Downlink for a digit block id, uplink for a letter; anything else is unknown. */
+export function acarsDirectionFromBlockId(
+	blockId: string | undefined,
+): AcarsDirection | undefined {
+	if (blockId === undefined || blockId.length !== 1) return undefined
+	if (/^[0-9]$/.test(blockId)) return "downlink"
+	if (/^[A-Za-z]$/.test(blockId)) return "uplink"
+	return undefined
 }
 
 /**
@@ -112,6 +223,10 @@ interface AcarsdecJsonOutput {
 	frequency?: number
 	reg?: string
 	message?: string
+	sublabel?: string
+	mfi?: string
+	/** libacars tree, printed when acarsdec is built with libacars (`{"arinc622": {...}}`). */
+	libacars?: unknown
 }
 
 /**
@@ -412,6 +527,15 @@ export function parseAcarsdecJson(
 		ack = undefined
 	}
 
+	const blockId = typeof json.block_id === "string" ? json.block_id : undefined
+	const direction = acarsDirectionFromBlockId(blockId)
+	const lib: { payload?: LibacarsPayload; dropped: boolean } =
+		json.libacars === undefined
+			? { dropped: false }
+			: readLibacarsTree(json.libacars)
+	const libacarsTree = lib.payload
+	const libacarsDropped = lib.dropped
+
 	return {
 		timestamp,
 		...(frequencyMhz === undefined
@@ -426,12 +550,21 @@ export function parseAcarsdecJson(
 		),
 		mode: json.mode ?? "",
 		label: json.label ?? "",
-		blockId: json.block_id,
+		blockId,
 		ack,
 		tail: json.tail ?? json.reg,
 		flight: json.flight,
 		msgno: json.msgno,
 		text: json.text ?? json.message,
+		...(direction === undefined ? {} : { direction }),
+		...(typeof json.sublabel === "string" && json.sublabel !== ""
+			? { sublabel: json.sublabel }
+			: {}),
+		...(typeof json.mfi === "string" && json.mfi !== ""
+			? { mfi: json.mfi }
+			: {}),
+		...(libacarsTree === undefined ? {} : { libacars: libacarsTree }),
+		...(libacarsDropped ? { libacarsDropped: true } : {}),
 	}
 }
 

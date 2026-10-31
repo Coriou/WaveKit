@@ -61,3 +61,14 @@ The sample data represents realistic ACARS messages with:
 - Different message labels (H1, Q0, SA, etc.)
 - Mix of operational and position reports
 - Various signal levels and error counts
+
+## Link samples
+
+`link-sample.jsonl` follows the exact JSON of acarsdec (`output.c`: `block_id`, `ack`, `sublabel`, `mfi`, `libacars`) and libacars 2.2 (`arinc.c`, `adsc.c`) at the revisions pinned in the Dockerfile. It
+covers link acknowledgements, ground station traffic, ADS-C reports decoded by libacars and, for
+VDL2, uplinks, supervisory frames and XID parameters. Load it with `loadLinkSample()`.
+
+Everything in it is fictional: registrations `N0WK01`-`N0WK04`, flights `ZZ0101`-`ZZ0404`, ICAO
+addresses `0A0B01`/`0A0B02`, ground address `10A0B0`, airport `ZZZZ`, open-ocean positions and
+`SYNTHETIC` text. Never add real registrations, flights, addresses, stations, positions or message
+text to these fixtures.

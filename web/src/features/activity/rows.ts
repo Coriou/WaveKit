@@ -169,6 +169,7 @@ export function rowView(
 		}
 	}
 	if (s.kind === "analog-transmission") return analogView(s)
+	if (s.category === "aviation-data") return aviationView(s)
 	const message = s.fields.find(
 		f =>
 			MESSAGE_KEYS.has(f.key) &&
@@ -230,6 +231,47 @@ function aircraftTitle(
 	return bare && aircraft.name.toUpperCase() !== hex.toUpperCase()
 		? aircraft.name
 		: null
+}
+
+/** Aviation datalink fields the row reads as "Label H1", "Frame S" (an identifier, not a measurement). */
+const AVIATION_NAMED = new Set(["label", "frame"])
+/** In the title already ("N0WK01 ZZ0101 · Link test") or in the subtitle. */
+const AVIATION_SKIP = new Set(["meaning", "direction"])
+
+/**
+ * ACARS and VDL2 (core presentation acars-vdl2.ts): the title already says who and what in plain words.
+ * The subtitle says how it travelled (protocol, direction, channel); the readings keep the raw label or
+ * frame beside its kind and how sure the explanation is; the message is the text when there is one.
+ */
+function aviationView(s: ActivitySummary): RowView {
+	const field = (key: string) => s.fields.find(f => f.key === key)
+	const direction = field("direction")?.value
+	const message = field("text")?.value
+	const readings = s.fields
+		.filter(
+			f =>
+				!AVIATION_SKIP.has(f.key) &&
+				!MESSAGE_KEYS.has(f.key) &&
+				f.value !== null,
+		)
+		.map(f =>
+			AVIATION_NAMED.has(f.key) ? `${f.label} ${fieldText(f)}` : fieldText(f),
+		)
+		.slice(0, 4)
+	return {
+		icon: CATEGORY_ICON[s.category],
+		title: s.title ?? s.entityKey ?? protocolText(s) ?? "Datalink",
+		subtitle: [
+			protocolText(s),
+			typeof direction === "string" ? direction : null,
+			s.frequencyHz !== null ? `${formatMHz(s.frequencyHz)} MHz` : null,
+		]
+			.filter((p): p is string => p !== null && p.length > 0)
+			.join(" · "),
+		message: typeof message === "string" && message !== "" ? message : null,
+		readings: readings.length > 0 ? readings.join(" · ") : null,
+		notice: false,
+	}
 }
 
 /** "9 s", "1 min 12 s". */
