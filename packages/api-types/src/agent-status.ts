@@ -98,8 +98,11 @@ const capped = (maxBytes: number, minLength = 1) =>
 		.refine(value => jsonStringBytes(value) <= maxBytes)
 const id = capped(L.idMaxBytes)
 const protocol = capped(L.protocolMaxBytes)
-/** `Date#toISOString`: 24 characters, 27 for years past 9999. */
-const iso = z.string().min(1).max(27)
+/** `Date#toISOString`: 24 characters, 27 for years past 9999; ASCII only, so bytes = characters. */
+const iso = z
+	.string()
+	.max(27)
+	.regex(/^[+-]?\d{4,6}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
 const hz = z.number().finite().nonnegative()
 
 /** GET /api/tuner: one row per tuner. */
