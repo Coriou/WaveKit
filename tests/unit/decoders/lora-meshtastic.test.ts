@@ -13,6 +13,7 @@ import type {
 } from "../../../src/decoders/types.js"
 import {
 	LoraMeshtasticDecoder,
+	DEFAULT_OVERSAMPLING,
 	LORA_MESHTASTIC_CAPS,
 	LORA_PRESETS,
 	LORA_REGIONS,
@@ -31,6 +32,9 @@ const testLogger = pino({ level: "silent" })
 class TestLoraMeshtasticDecoder extends LoraMeshtasticDecoder {
 	public testParseOutput(line: string): DecoderOutput | null {
 		return this.parseOutput(line)
+	}
+	public testArgs(): string[] {
+		return this.getArgs()
 	}
 }
 
@@ -442,6 +446,57 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 			expect(() =>
 				parseLoraMeshtasticOptions(validOptions({ channelKey: "" })),
 			).toThrow(ConfigValidationError)
+		})
+	})
+
+	describe("resample chain arguments", () => {
+		const WRAPPER =
+			"python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5"
+		const TAIL = "--frequency 869525000 --channel-key AQ== --region EU_868"
+		const chain = (overrides: Record<string, unknown>): string[] =>
+			new TestLoraMeshtasticDecoder(
+				makeConfig(validOptions(overrides)),
+				testLogger,
+			).testArgs()
+
+		it("defaults to os_factor 4: 250 kHz x 4 = 1.0 Msps", () => {
+			expect(DEFAULT_OVERSAMPLING).toBe(4)
+			expect(
+				parseLoraMeshtasticOptions(validOptions()).effectiveTargetRate,
+			).toBe(1_000_000)
+		})
+
+		it("resamples a 1.024 Msps capture once to 1.0 Msps with sox rate -m -b 74", () => {
+			expect(chain({ inputSampleRate: 1_024_000 })).toEqual([
+				"-c",
+				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1000000 - rate -m -b 74 1000000 | " +
+					`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
+			])
+		})
+
+		it("skips sox when the capture already runs at bw x os_factor", () => {
+			expect(chain({ inputSampleRate: 1_000_000 })).toEqual([
+				"-c",
+				`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
+			])
+		})
+
+		it("follows an oversampling override: 250 kHz x 2 = 500 kHz", () => {
+			expect(chain({ inputSampleRate: 1_024_000, oversampling: 2 })).toEqual([
+				"-c",
+				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 500000 - rate -m -b 74 500000 | " +
+					`${WRAPPER} --samp-rate 500000 ${TAIL}`,
+			])
+		})
+
+		it("passes the wrapper a samp-rate that is an integer multiple of bw for every preset", () => {
+			for (const preset of LORA_PRESETS) {
+				const opts = parseLoraMeshtasticOptions(validOptions({ preset }))
+				const args = buildDecoderArgs(opts)
+				const sampRate = Number(args[args.indexOf("--samp-rate") + 1])
+				expect(sampRate).toBe(PRESET_TABLE[preset].bw * DEFAULT_OVERSAMPLING)
+				expect(Number.isInteger(sampRate / opts.bw)).toBe(true)
+			}
 		})
 	})
 })

@@ -2,15 +2,17 @@ import type { DecoderReach } from "../enablement/contract.js"
 /**
  * LoRa/Meshtastic Decoder.
  *
- * Pure-consumer decoder that extends IqDecimateDecoder. Decimates cu8 IQ to a
- * LoRa-appropriate rate via csdr, then pipes into a Python wrapper around
- * gr-lora_sdr. The wrapper demodulates, decrypts, protobuf-parses, and emits
- * one JSON object per Meshtastic packet on stdout.
+ * Pure-consumer decoder that extends IqDecimateDecoder. Resamples cu8 IQ to
+ * bw x oversampling with sox (skipped when the capture already runs at that
+ * rate), then pipes into a Python wrapper around gr-lora_sdr. The wrapper
+ * demodulates, decrypts, protobuf-parses, and emits one JSON object per
+ * Meshtastic packet on stdout.
  */
 
 import { z } from "zod"
 import {
 	IqDecimateDecoder,
+	iqDecimationRates,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
@@ -20,6 +22,7 @@ import type {
 	DecoderOutput,
 	DecoderRateRequirements,
 } from "../types.js"
+import { shellCommand } from "../process-tools.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import { LORA_REGION_RANGES_HZ } from "../band-defaults.js"
 import type { Logger } from "../../utils/logger.js"
@@ -79,10 +82,71 @@ export const PRESET_TABLE: Readonly<
 })
 
 const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
-const DEFAULT_OVERSAMPLING = 8
+/**
+ * gr-lora_sdr frame_sync takes an integer os_factor and expects
+ * samp_rate = bw x os_factor. 4 is the cheapest default that keeps margin:
+ * 250 kHz x 4 = 1.0 Msps, one sox step from a 1.024 Msps capture
+ * (1.024 / 0.25 = 4.096 is not an integer, so the capture rate cannot be used
+ * directly), and half the samples of the former 250 kHz x 8 = 2.0 Msps path.
+ * frame_sync picks one sample per os_factor without filtering, so 4 still
+ * gives 4 sample phases per chip for its fractional STO estimate.
+ */
+export const DEFAULT_OVERSAMPLING = 4
 const MIN_SPS = 2
 const MAX_SPS = 32
 const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
+
+/**
+ * sox `rate` options for the LoRa resample. `-m` (100 dB stopband) instead of
+ * the shared `-h` (125 dB): the output is 8-bit cu8, whose quantisation floor
+ * is about 6 dB x 8 = 48 dB, so the extra rejection is never seen. `-b 74`
+ * (sox's narrowest passband, 74 % of the output Nyquist) still passes
+ * 0.74 x 500 kHz = 370 kHz at 1.0 Msps, far above the 125 kHz half-width of a
+ * 250 kHz channel, and it attenuates 370-500 kHz energy that frame_sync
+ * (which decimates without filtering) would fold into the channel. sox
+ * CPU-s per signal second on the committed captures (+10 / -5 dB SNR, one loaded host): 1.024 -> 2.0 Msps
+ * `-h` 0.22-0.24 / 0.56-0.60; 1.024 -> 1.0 Msps `-h` 0.14-0.18 / 0.32-0.33;
+ * 1.024 -> 1.0 Msps `-m -b 74` 0.12-0.14 / 0.25.
+ */
+export const LORA_SOX_RATE_OPTIONS: readonly string[] = ["-m", "-b", "74"]
+
+/** sox resample of cu8 IQ for the LoRa modem; argv pinned by tests. */
+export function loraResampleCommand(
+	inputRate: number,
+	outputRate: number,
+): string {
+	return shellCommand("sox", [
+		"-q",
+		"-D",
+		// stdin is an unbounded stream: never trust its stat size as a length.
+		"--ignore-length",
+		"-t",
+		"raw",
+		"-e",
+		"unsigned-integer",
+		"-b",
+		"8",
+		"-c",
+		"2",
+		"-r",
+		String(inputRate),
+		"-",
+		"-t",
+		"raw",
+		"-e",
+		"unsigned-integer",
+		"-b",
+		"8",
+		"-c",
+		"2",
+		"-r",
+		String(outputRate),
+		"-",
+		"rate",
+		...LORA_SOX_RATE_OPTIONS,
+		String(outputRate),
+	])
+}
 
 /** Canonical install path of the Python wrapper inside the Docker image. */
 export const WRAPPER_SCRIPT_PATH = "/usr/local/bin/lora_meshtastic_decode.py"
@@ -419,6 +483,20 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 			targetSampleRate: this.options.bw * this.options.oversampling,
 			filterTransition: 0.05,
 		}
+	}
+
+	/** sox at {@link LORA_SOX_RATE_OPTIONS} when the capture rate differs, then the wrapper. */
+	protected override buildPipelineCommand(): string {
+		const { inputSampleRate, outputRate } = iqDecimationRates(
+			this.boundedIqDecimationConfig(),
+		)
+		const decoder = shellCommand(
+			this.getDecoderCommand(),
+			this.getDecoderArgs(),
+		)
+		return inputSampleRate === outputRate
+			? decoder
+			: `${loraResampleCommand(inputSampleRate, outputRate)} | ${decoder}`
 	}
 
 	protected override getDecoderCommand(): string {

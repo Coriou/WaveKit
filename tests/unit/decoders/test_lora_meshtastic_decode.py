@@ -5,7 +5,9 @@ cases need the `cryptography` and `protobuf` modules (the image installs
 python3-cryptography and python3-protobuf) and skip without them.
 """
 import base64
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import random
 import sys
@@ -265,6 +267,28 @@ class DecryptTest(unittest.TestCase):
                 self.assertEqual(sum(drops.total.values()), 1)
             else:
                 self.assertTrue(1 <= event["portnum"] <= wrapper.MAX_PORTNUM)
+
+
+class OsFactorTest(unittest.TestCase):
+    def test_integer_multiples(self):
+        self.assertEqual(wrapper.os_factor_for(1_000_000.0, 250_000), 4)
+        self.assertEqual(wrapper.os_factor_for(2_000_000.0, 250_000), 8)
+        self.assertEqual(wrapper.os_factor_for(500_000.0, 250_000), 2)
+        self.assertEqual(wrapper.os_factor_for(250_000.0, 62_500), 4)
+
+    def test_non_integer_ratio_is_rejected(self):
+        # A 1.024 Msps capture fed directly: 1.024e6 / 250e3 = 4.096.
+        for samp_rate, bw in [(1_024_000.0, 250_000), (100_000.0, 250_000), (0.0, 250_000)]:
+            with self.assertRaises(ValueError):
+                wrapper.os_factor_for(samp_rate, bw)
+
+    def test_main_exits_2_on_non_integer_ratio(self):
+        argv = ["--bw", "250000", "--sf", "11", "--cr", "5", "--samp-rate", "1024000",
+                "--frequency", "869525000", "--channel-key", "AQ==", "--region", "EU_868"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(wrapper.main(argv), 2)
+        self.assertIn("invalid_sample_rate", err.getvalue())
 
 
 if __name__ == "__main__":

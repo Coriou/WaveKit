@@ -99,7 +99,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--samp-rate",
         type=float,
         required=True,
-        help="Effective complex sample rate in Hz",
+        help="Effective complex sample rate in Hz; an integer multiple of --bw",
     )
     parser.add_argument(
         "--frequency",
@@ -114,6 +114,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--region", required=True, help="Meshtastic region label")
     return parser.parse_args(argv)
+
+
+def os_factor_for(samp_rate: float, bw: int) -> int:
+    """Integer oversampling factor gr-lora_sdr frame_sync needs (samp_rate = bw * os_factor).
+
+    frame_sync takes one sample per os_factor without resampling, so a rate that is not an
+    integer multiple of bw (1.024 Msps / 250 kHz = 4.096) mistimes every chip. Reject it
+    rather than round. A 1e-6 relative tolerance absorbs float parsing of an exact rate.
+    """
+    if bw <= 0 or samp_rate <= 0:
+        raise ValueError("samp_rate and bw must be positive")
+    ratio = float(samp_rate) / float(bw)
+    factor = int(round(ratio))
+    if factor < 1 or abs(ratio - factor) > 1e-6 * ratio:
+        raise ValueError(
+            f"samp_rate {samp_rate:g} is not an integer multiple of bw {bw}"
+        )
+    return factor
 
 
 def decode_channel_key(value: str) -> bytes:
@@ -521,7 +539,7 @@ def build_flowgraph(
     max_log_approx = True
     preamble_len = 8
     sync_word = [0x2B]
-    os_factor = max(1, int(round(float(args.samp_rate) / float(args.bw))))
+    os_factor = os_factor_for(args.samp_rate, int(args.bw))
     # frame_sync forecasts one oversampled symbol plus two samples of lookahead.
     source.set_min_output_buffer(os_factor * ((1 << int(args.sf)) + 2))
     gr_cr = max(1, min(4, int(args.cr) - 4))
@@ -587,6 +605,12 @@ def main(argv: list[str] | None = None) -> int:
         channel_key = decode_channel_key(args.channel_key)
     except ValueError as exc:
         log_stderr("invalid_channel_key", error=str(exc))
+        return 2
+
+    try:
+        os_factor_for(args.samp_rate, args.bw)
+    except ValueError as exc:
+        log_stderr("invalid_sample_rate", error=str(exc))
         return 2
 
     if Cipher is None:

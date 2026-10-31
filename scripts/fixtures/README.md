@@ -11,6 +11,10 @@ noise uses fixed seeds, so a rerun reproduces the files.
 | `gen_aprs.py OUTDIR`              | `aprs_msg.txt`, `aprs_afsk1200_48k.wav`, four `aprs_144800_*.cu8` | direwolf's `gen_packets`, numpy, scipy                                                                         |
 | `chan_emul.py FILE.cu8 OFFSET_HZ` | cf32 48 kHz channel IQ on stdout                                  | numpy, scipy                                                                                                   |
 
+`bench_lora_chain.py` is not a generator: it runs both committed LoRa captures through
+the decoder's sox and wrapper stages for several oversampling factors and sox settings,
+and prints decodes and per-stage CPU per second of signal. It needs the core image too.
+
 Run them inside the core image with an output directory mounted, never against a live
 receiver. Only part of the output is committed; the rest is small to regenerate:
 

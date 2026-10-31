@@ -1,7 +1,7 @@
 /**
  * LoRa/Meshtastic full chain: the synthetic LongFast captures in fixtures/lora through the
- * exact pipeline LoraMeshtasticDecoder.getArgs() builds (sox resample to 2 Msps, then the
- * gr-lora_sdr wrapper), parsed by the adapter's own parseOutput.
+ * exact pipeline LoraMeshtasticDecoder.getArgs() builds (sox resample to 1.0 Msps, os_factor 4,
+ * then the gr-lora_sdr wrapper), parsed by the adapter's own parseOutput.
  *
  * Opt-in: needs sox, gnuradio, gr-lora_sdr, python3-cryptography/protobuf and the wrapper at
  * /usr/local/bin, i.e. the core image. Run it there with
